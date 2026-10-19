@@ -1,0 +1,487 @@
+{
+  "at": "2026-10-28T23:16:55.907Z",
+  "server": "127.0.0.1:19144",
+  "repeat": 2,
+  "results": [
+    {
+      "engine": "own",
+      "course": "flat-100",
+      "rep": 1,
+      "ticks": 485,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthEnd": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "own",
+      "course": "flat-100",
+      "rep": 2,
+      "ticks": 485,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthEnd": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "flat-100",
+      "rep": 1,
+      "ticks": 485,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthEnd": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "flat-100",
+      "rep": 2,
+      "ticks": 485,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthEnd": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "own",
+      "course": "stairs-10",
+      "rep": 1,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthEnd": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "own",
+      "course": "stairs-10",
+      "rep": 2,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthEnd": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "stairs-10",
+      "rep": 1,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthEnd": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "stairs-10",
+      "rep": 2,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthEnd": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "own",
+      "course": "drop-3",
+      "rep": 1,
+      "ticks": 67,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthEnd": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "own",
+      "course": "drop-3",
+      "rep": 2,
+      "ticks": 67,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthEnd": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "drop-3",
+      "rep": 1,
+      "ticks": 67,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthEnd": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "drop-3",
+      "rep": 2,
+      "ticks": 67,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthEnd": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "own",
+      "course": "sprint-jump-diag",
+      "rep": 1,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": -43.401,
+        "y": -60,
+        "z": 2.1911
+      },
+      "truthEnd": {
+        "x": -43.401,
+        "y": -60,
+        "z": 2.1911
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "own",
+      "course": "sprint-jump-diag",
+      "rep": 2,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": -43.401,
+        "y": -60,
+        "z": 2.1911
+      },
+      "truthEnd": {
+        "x": -43.401,
+        "y": -60,
+        "z": 2.1911
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "sprint-jump-diag",
+      "rep": 1,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": -43.401,
+        "y": -60,
+        "z": 2.1911
+      },
+      "truthEnd": {
+        "x": -43.401,
+        "y": -60,
+        "z": 2.1911
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "sprint-jump-diag",
+      "rep": 2,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": -43.401,
+        "y": -60,
+        "z": 2.1911
+      },
+      "truthEnd": {
+        "x": -43.401,
+        "y": -60,
+        "z": 2.1911
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "own",
+      "course": "stairs-diag",
+      "rep": 1,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": -71.1856,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthEnd": {
+        "x": -71.1856,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "own",
+      "course": "stairs-diag",
+      "rep": 2,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": -71.1856,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthEnd": {
+        "x": -71.1856,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "stairs-diag",
+      "rep": 1,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": -71.1856,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthEnd": {
+        "x": -71.1856,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "stairs-diag",
+      "rep": 2,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": -71.1856,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthEnd": {
+        "x": -71.1856,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "own",
+      "course": "sneak-edge",
+      "rep": 1,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": 91.5,
+        "y": -60,
+        "z": 35.5715
+      },
+      "truthEnd": {
+        "x": 91.5,
+        "y": -60,
+        "z": 35.5715
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "own",
+      "course": "sneak-edge",
+      "rep": 2,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": 91.5,
+        "y": -60,
+        "z": 35.5715
+      },
+      "truthEnd": {
+        "x": 91.5,
+        "y": -60,
+        "z": 35.5715
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "sneak-edge",
+      "rep": 1,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": 91.5,
+        "y": -57,
+        "z": 33.2715
+      },
+      "truthEnd": {
+        "x": 91.5,
+        "y": -57,
+        "z": 33.2715
+      },
+      "truthDiff": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "sneak-edge",
+      "rep": 2,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 0,
+      "details": [],
+      "end": {
+        "x": 91.5,
+        "y": -57,
+        "z": 33.2715
+      },
+      "truthEnd": {
+        "x": 91.5,
+        "y": -57,
+        "z": 33.2715
+      },
+      "truthDiff": 0
+    }
+  ]
+}

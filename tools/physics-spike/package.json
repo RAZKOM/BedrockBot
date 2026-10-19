@@ -1,0 +1,18 @@
+{
+  "name": "@bedrockbot/physics-spike",
+  "version": "0.0.0",
+  "private": true,
+  "description": "PLAN.md task 3.2: the bot's own movement model vs LiteLDev/bedboo's Bedrock physics on bds-phys courses. Throwaway spike; see docs/decisions/0003-physics.md.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "fetch": "node fetch.mjs",
+    "offline": "node run.ts --offline",
+    "spike": "node run.ts"
+  },
+  "dependencies": {
+    "vec3": "0.1.10"
+  }
+}

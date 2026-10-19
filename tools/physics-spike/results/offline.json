@@ -1,0 +1,147 @@
+{
+  "at": "2026-10-28T23:06:57.494Z",
+  "engines": [
+    "own",
+    "bedboo"
+  ],
+  "courses": [
+    {
+      "course": "flat-100",
+      "own": {
+        "ticks": 485,
+        "finished": true,
+        "end": {
+          "x": -29.5,
+          "y": -60,
+          "z": 49.8743
+        }
+      },
+      "bedboo": {
+        "ticks": 485,
+        "finished": true,
+        "end": {
+          "x": -29.5,
+          "y": -60,
+          "z": 49.8743
+        }
+      },
+      "maxDivergence": 0,
+      "firstDivergenceTick": -1
+    },
+    {
+      "course": "stairs-10",
+      "own": {
+        "ticks": 144,
+        "finished": true,
+        "end": {
+          "x": 31.5,
+          "y": -50,
+          "z": 42.6987
+        }
+      },
+      "bedboo": {
+        "ticks": 144,
+        "finished": true,
+        "end": {
+          "x": 31.5,
+          "y": -50,
+          "z": 42.6987
+        }
+      },
+      "maxDivergence": 0,
+      "firstDivergenceTick": -1
+    },
+    {
+      "course": "drop-3",
+      "own": {
+        "ticks": 67,
+        "finished": true,
+        "end": {
+          "x": 61.5,
+          "y": -60,
+          "z": 40.2817
+        }
+      },
+      "bedboo": {
+        "ticks": 67,
+        "finished": true,
+        "end": {
+          "x": 61.5,
+          "y": -60,
+          "z": 40.2817
+        }
+      },
+      "maxDivergence": 0,
+      "firstDivergenceTick": -1
+    },
+    {
+      "course": "sprint-jump-diag",
+      "own": {
+        "ticks": 100,
+        "finished": true,
+        "end": {
+          "x": -43.401,
+          "y": -60,
+          "z": 2.1911
+        }
+      },
+      "bedboo": {
+        "ticks": 100,
+        "finished": true,
+        "end": {
+          "x": -43.401,
+          "y": -60,
+          "z": 2.1911
+        }
+      },
+      "maxDivergence": 0,
+      "firstDivergenceTick": -1
+    },
+    {
+      "course": "stairs-diag",
+      "own": {
+        "ticks": 144,
+        "finished": true,
+        "end": {
+          "x": -71.1856,
+          "y": -50,
+          "z": 53.5915
+        }
+      },
+      "bedboo": {
+        "ticks": 144,
+        "finished": true,
+        "end": {
+          "x": -71.1856,
+          "y": -50,
+          "z": 53.5915
+        }
+      },
+      "maxDivergence": 0,
+      "firstDivergenceTick": -1
+    },
+    {
+      "course": "sneak-edge",
+      "own": {
+        "ticks": 100,
+        "finished": true,
+        "end": {
+          "x": 91.5,
+          "y": -60,
+          "z": 35.5715
+        }
+      },
+      "bedboo": {
+        "ticks": 100,
+        "finished": true,
+        "end": {
+          "x": 91.5,
+          "y": -57,
+          "z": 33.2715
+        }
+      },
+      "maxDivergence": 3.780251,
+      "firstDivergenceTick": 44
+    }
+  ]
+}

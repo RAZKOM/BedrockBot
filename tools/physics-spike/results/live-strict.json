@@ -1,0 +1,882 @@
+{
+  "at": "2026-10-28T23:11:40.279Z",
+  "server": "127.0.0.1:19144",
+  "repeat": 2,
+  "results": [
+    {
+      "engine": "own",
+      "course": "flat-100",
+      "rep": 1,
+      "ticks": 485,
+      "finished": true,
+      "corrections": 83,
+      "details": [],
+      "end": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthEnd": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthDiff": 0,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "own",
+      "course": "flat-100",
+      "rep": 2,
+      "ticks": 485,
+      "finished": true,
+      "corrections": 83,
+      "details": [],
+      "end": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthEnd": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthDiff": 0,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "flat-100",
+      "rep": 1,
+      "ticks": 485,
+      "finished": true,
+      "corrections": 82,
+      "details": [],
+      "end": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthEnd": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthDiff": 0,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "flat-100",
+      "rep": 2,
+      "ticks": 485,
+      "finished": true,
+      "corrections": 83,
+      "details": [],
+      "end": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthEnd": {
+        "x": -29.5,
+        "y": -60,
+        "z": 49.8743
+      },
+      "truthDiff": 0,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "own",
+      "course": "stairs-10",
+      "rep": 1,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 22,
+      "details": [],
+      "end": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthEnd": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthDiff": 0,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "own",
+      "course": "stairs-10",
+      "rep": 2,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 22,
+      "details": [],
+      "end": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthEnd": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthDiff": 0,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "stairs-10",
+      "rep": 1,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 22,
+      "details": [],
+      "end": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthEnd": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthDiff": 0,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "stairs-10",
+      "rep": 2,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 22,
+      "details": [],
+      "end": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthEnd": {
+        "x": 31.5,
+        "y": -50,
+        "z": 42.6987
+      },
+      "truthDiff": 0,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "own",
+      "course": "drop-3",
+      "rep": 1,
+      "ticks": 67,
+      "finished": true,
+      "corrections": 13,
+      "details": [],
+      "end": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthEnd": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthDiff": 0,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "own",
+      "course": "drop-3",
+      "rep": 2,
+      "ticks": 67,
+      "finished": true,
+      "corrections": 13,
+      "details": [],
+      "end": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthEnd": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthDiff": 0,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "drop-3",
+      "rep": 1,
+      "ticks": 67,
+      "finished": true,
+      "corrections": 13,
+      "details": [],
+      "end": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthEnd": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthDiff": 0,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "drop-3",
+      "rep": 2,
+      "ticks": 67,
+      "finished": true,
+      "corrections": 13,
+      "details": [],
+      "end": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthEnd": {
+        "x": 61.5,
+        "y": -60,
+        "z": 40.2817
+      },
+      "truthDiff": 0.00001,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "own",
+      "course": "sprint-jump-diag",
+      "rep": 1,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 18,
+      "details": [],
+      "end": {
+        "x": -43.4014,
+        "y": -60,
+        "z": 2.1909
+      },
+      "truthEnd": {
+        "x": -43.4014,
+        "y": -60,
+        "z": 2.1909
+      },
+      "truthDiff": 0,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "own",
+      "course": "sprint-jump-diag",
+      "rep": 2,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 18,
+      "details": [],
+      "end": {
+        "x": -43.4014,
+        "y": -60,
+        "z": 2.1909
+      },
+      "truthEnd": {
+        "x": -43.4014,
+        "y": -60,
+        "z": 2.1909
+      },
+      "truthDiff": 0,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "sprint-jump-diag",
+      "rep": 1,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 18,
+      "details": [],
+      "end": {
+        "x": -43.4014,
+        "y": -60,
+        "z": 2.1909
+      },
+      "truthEnd": {
+        "x": -43.4014,
+        "y": -60,
+        "z": 2.1909
+      },
+      "truthDiff": 0,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "sprint-jump-diag",
+      "rep": 2,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 18,
+      "details": [],
+      "end": {
+        "x": -43.4014,
+        "y": -60,
+        "z": 2.1909
+      },
+      "truthEnd": {
+        "x": -43.4014,
+        "y": -60,
+        "z": 2.1909
+      },
+      "truthDiff": 0,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "own",
+      "course": "stairs-diag",
+      "rep": 1,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 24,
+      "details": [
+        {
+          "tick": "4095",
+          "local": {
+            "x": -77.6244,
+            "y": -58.7478,
+            "z": 39.9293
+          },
+          "server": {
+            "x": -77.6287,
+            "y": -58.7478,
+            "z": 39.9293
+          },
+          "error": 0.0043,
+          "onGround": false,
+          "at": {
+            "x": -77.6287,
+            "y": -58.7478,
+            "z": 39.9293
+          }
+        }
+      ],
+      "end": {
+        "x": -71.1941,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthEnd": {
+        "x": -71.1941,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthDiff": 0,
+      "maxError": 0.0043,
+      "errorsAbove1mm": 1
+    },
+    {
+      "engine": "own",
+      "course": "stairs-diag",
+      "rep": 2,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 23,
+      "details": [
+        {
+          "tick": "4276",
+          "local": {
+            "x": -77.6244,
+            "y": -58.7478,
+            "z": 39.9293
+          },
+          "server": {
+            "x": -77.6287,
+            "y": -58.7478,
+            "z": 39.9293
+          },
+          "error": 0.0043,
+          "onGround": false,
+          "at": {
+            "x": -77.6287,
+            "y": -58.7478,
+            "z": 39.9293
+          }
+        }
+      ],
+      "end": {
+        "x": -71.1941,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthEnd": {
+        "x": -71.1941,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthDiff": 0,
+      "maxError": 0.0043,
+      "errorsAbove1mm": 1
+    },
+    {
+      "engine": "bedboo",
+      "course": "stairs-diag",
+      "rep": 1,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 24,
+      "details": [
+        {
+          "tick": "4456",
+          "local": {
+            "x": -77.6244,
+            "y": -58.7478,
+            "z": 39.9293
+          },
+          "server": {
+            "x": -77.6287,
+            "y": -58.7478,
+            "z": 39.9293
+          },
+          "error": 0.0043,
+          "onGround": false,
+          "at": {
+            "x": -77.6287,
+            "y": -58.7478,
+            "z": 39.9293
+          }
+        }
+      ],
+      "end": {
+        "x": -71.1941,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthEnd": {
+        "x": -71.1941,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthDiff": 0,
+      "maxError": 0.0043,
+      "errorsAbove1mm": 1
+    },
+    {
+      "engine": "bedboo",
+      "course": "stairs-diag",
+      "rep": 2,
+      "ticks": 144,
+      "finished": true,
+      "corrections": 23,
+      "details": [
+        {
+          "tick": "4639",
+          "local": {
+            "x": -77.6244,
+            "y": -58.7478,
+            "z": 39.9293
+          },
+          "server": {
+            "x": -77.6287,
+            "y": -58.7478,
+            "z": 39.9293
+          },
+          "error": 0.0043,
+          "onGround": false,
+          "at": {
+            "x": -77.6287,
+            "y": -58.7478,
+            "z": 39.9293
+          }
+        }
+      ],
+      "end": {
+        "x": -71.1941,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthEnd": {
+        "x": -71.1941,
+        "y": -50,
+        "z": 53.5915
+      },
+      "truthDiff": 0,
+      "maxError": 0.0043,
+      "errorsAbove1mm": 1
+    },
+    {
+      "engine": "own",
+      "course": "sneak-edge",
+      "rep": 1,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 18,
+      "details": [
+        {
+          "tick": "4889",
+          "local": {
+            "x": 91.5,
+            "y": -57.7685,
+            "z": 33.531
+          },
+          "server": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          },
+          "error": 0.8111,
+          "onGround": true,
+          "at": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          }
+        },
+        {
+          "tick": "4895",
+          "local": {
+            "x": 91.5,
+            "y": -58.1451,
+            "z": 33.4867
+          },
+          "server": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          },
+          "error": 1.1652,
+          "onGround": true,
+          "at": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          }
+        },
+        {
+          "tick": "4901",
+          "local": {
+            "x": 91.5,
+            "y": -58.1451,
+            "z": 33.4867
+          },
+          "server": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          },
+          "error": 1.1652,
+          "onGround": true,
+          "at": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          }
+        },
+        {
+          "tick": "4907",
+          "local": {
+            "x": 91.5,
+            "y": -58.1451,
+            "z": 33.4867
+          },
+          "server": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          },
+          "error": 1.1652,
+          "onGround": true,
+          "at": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          }
+        },
+        {
+          "tick": "4913",
+          "local": {
+            "x": 91.5,
+            "y": -58.1451,
+            "z": 33.4867
+          },
+          "server": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          },
+          "error": 1.1652,
+          "onGround": true,
+          "at": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          }
+        },
+        {
+          "tick": "4919",
+          "local": {
+            "x": 91.5,
+            "y": -58.1451,
+            "z": 33.4867
+          },
+          "server": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          },
+          "error": 1.1652,
+          "onGround": true,
+          "at": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          }
+        },
+        {
+          "tick": "4925",
+          "local": {
+            "x": 91.5,
+            "y": -58.1451,
+            "z": 33.3475
+          },
+          "server": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          },
+          "error": 1.1476,
+          "onGround": true,
+          "at": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          }
+        }
+      ],
+      "end": {
+        "x": 91.5,
+        "y": -57,
+        "z": 33.2715
+      },
+      "truthEnd": {
+        "x": 91.5,
+        "y": -57,
+        "z": 33.2715
+      },
+      "truthDiff": 0,
+      "maxError": 1.1652,
+      "errorsAbove1mm": 7
+    },
+    {
+      "engine": "own",
+      "course": "sneak-edge",
+      "rep": 2,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 18,
+      "details": [
+        {
+          "tick": "5027",
+          "local": {
+            "x": 91.5,
+            "y": -58.1451,
+            "z": 33.5782
+          },
+          "server": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          },
+          "error": 1.1855,
+          "onGround": true,
+          "at": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          }
+        },
+        {
+          "tick": "5033",
+          "local": {
+            "x": 91.5,
+            "y": -58.1451,
+            "z": 33.4867
+          },
+          "server": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          },
+          "error": 1.1652,
+          "onGround": true,
+          "at": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          }
+        },
+        {
+          "tick": "5039",
+          "local": {
+            "x": 91.5,
+            "y": -58.1451,
+            "z": 33.4867
+          },
+          "server": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          },
+          "error": 1.1652,
+          "onGround": true,
+          "at": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          }
+        },
+        {
+          "tick": "5045",
+          "local": {
+            "x": 91.5,
+            "y": -58.1451,
+            "z": 33.4867
+          },
+          "server": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          },
+          "error": 1.1652,
+          "onGround": true,
+          "at": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          }
+        },
+        {
+          "tick": "5051",
+          "local": {
+            "x": 91.5,
+            "y": -58.1451,
+            "z": 33.4867
+          },
+          "server": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          },
+          "error": 1.1652,
+          "onGround": true,
+          "at": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          }
+        },
+        {
+          "tick": "5057",
+          "local": {
+            "x": 91.5,
+            "y": -58.1451,
+            "z": 33.4867
+          },
+          "server": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          },
+          "error": 1.1652,
+          "onGround": true,
+          "at": {
+            "x": 91.5,
+            "y": -57,
+            "z": 33.2715
+          }
+        }
+      ],
+      "end": {
+        "x": 91.5,
+        "y": -57,
+        "z": 33.2715
+      },
+      "truthEnd": {
+        "x": 91.5,
+        "y": -57,
+        "z": 33.2715
+      },
+      "truthDiff": 0,
+      "maxError": 1.1855,
+      "errorsAbove1mm": 6
+    },
+    {
+      "engine": "bedboo",
+      "course": "sneak-edge",
+      "rep": 1,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 19,
+      "details": [],
+      "end": {
+        "x": 91.5,
+        "y": -57,
+        "z": 33.2715
+      },
+      "truthEnd": {
+        "x": 91.5,
+        "y": -57,
+        "z": 33.2715
+      },
+      "truthDiff": 0.00001,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    },
+    {
+      "engine": "bedboo",
+      "course": "sneak-edge",
+      "rep": 2,
+      "ticks": 100,
+      "finished": true,
+      "corrections": 19,
+      "details": [],
+      "end": {
+        "x": 91.5,
+        "y": -57,
+        "z": 33.2715
+      },
+      "truthEnd": {
+        "x": 91.5,
+        "y": -57,
+        "z": 33.2715
+      },
+      "truthDiff": 0.00001,
+      "maxError": 0,
+      "errorsAbove1mm": 0
+    }
+  ],
+  "note": "strict server (server-authoritative-movement-strict=true, player-position-acceptance-threshold=0.001); details trimmed to corrections with error > 0.001"
+}
