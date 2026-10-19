@@ -1,0 +1,24 @@
+{
+  "name": "bump-version",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bedrock version-bump playbook tooling: patch minecraft-data ahead of releases, run a pinned BDS, verify login/chunk/movement.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "bump": "node bump.mjs",
+    "verify": "node verify.mjs",
+    "bds": "node run-bds.mjs",
+    "make-patch": "node make-patch.mjs",
+    "test-patch": "node test-patch.mjs",
+    "schema-diff": "node schema-diff.mjs"
+  },
+  "dependencies": {
+    "bedrock-protocol": "3.60.1",
+    "minecraft-data": "3.117.0",
+    "prismarine-chunk": "1.41.0",
+    "prismarine-registry": "1.12.0"
+  }
+}

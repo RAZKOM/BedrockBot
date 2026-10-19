@@ -1,0 +1,4 @@
+# Patch files are byte-exact: an editor must not trim whitespace or add newlines in them.
+[*.patch]
+trim_trailing_whitespace = false
+insert_final_newline = false

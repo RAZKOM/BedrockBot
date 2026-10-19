@@ -1,0 +1,27 @@
+{
+  "name": "@bedrockbot/truth-pack",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ground-truth behavior pack for BDS (stable @minecraft/server 2.10.0 only): /scriptevent truth:* commands answered with '@truth {json}' chat messages.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:e2e": "node --test --test-concurrency=1 test/e2e.test.mjs",
+    "pack:deploy": "node scripts/deploy.mjs",
+    "make:probe": "node scripts/make-probe-structure.mjs",
+    "pack:deploy:truth-bds": "node scripts/deploy.mjs --restart bds-truth"
+  },
+  "devDependencies": {
+    "@minecraft/server": "2.10.0",
+    "bedrock-protocol": "3.60.1",
+    "esbuild": "0.28.2",
+    "prismarine-nbt": "2.8.0",
+    "typescript": "6.0.3",
+    "vitest": "5.0.5"
+  }
+}
