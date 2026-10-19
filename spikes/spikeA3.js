@@ -1,0 +1,12 @@
+const bedrock = require('bedrock-protocol')
+const client = bedrock.createClient({ host: '127.0.0.1', port: 19132, username: 'SpikeBot', offline: true, version: '1.26.51' })
+const t0 = Date.now(); let rid, chunks = 0, subs = 0, shown = 0
+client.on('start_game', p => { rid = p.runtime_entity_id; console.log('[start_game] pos', JSON.stringify(p.player_position), 'dim', p.dimension, 'hashes', p.block_network_ids_are_hashes, 'itemstacknet', p.enable_item_stack_net_manager, 'moveSettings', JSON.stringify(p.movement_settings || p.player_movement_settings)) })
+client.on('level_chunk', p => { chunks++; if (shown++ < 2) console.log('[level_chunk]', JSON.stringify({ x: p.x, z: p.z, dim: p.dimension, sub_chunk_count: p.sub_chunk_count, highest: p.highest_subchunk_count, cache: p.cache_enabled, payloadLen: p.payload?.length, keys: Object.keys(p) })) })
+client.on('subchunk', p => { subs++; if (subs <= 2) console.log('[subchunk]', JSON.stringify({ keys: Object.keys(p), cache: p.cache_enabled, dim: p.dimension, origin: p.origin, entries: Array.isArray(p.entries) ? p.entries.length : p.entries })) })
+client.on('move_player', p => { if (String(p.runtime_id) === String(rid)) console.log('[move_player self]', Date.now() - t0, 'ms mode', p.mode, JSON.stringify(p.position), 'onground', p.on_ground) })
+client.on('correct_player_move_prediction', p => console.log('[correct]', JSON.stringify(p)))
+client.on('text', p => console.log('[text]', p.type, p.message))
+client.on('close', () => { console.log('[close]', Date.now() - t0, 'ms'); process.exit(0) })
+client.on('spawn', () => console.log('[spawn]', Date.now() - t0, 'ms'))
+setTimeout(() => { console.log('[done] chunks', chunks, 'subchunk pkts', subs); client.disconnect(); setTimeout(() => process.exit(0), 300) }, 15000)

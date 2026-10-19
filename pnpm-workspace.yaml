@@ -1,0 +1,24 @@
+packages:
+  - bot
+  - packs/*
+  - tools/*
+
+# Keep the whole protocol stack on one minecraft-data version (PLAN.md section 7).
+overrides:
+  minecraft-data: 3.117.0
+
+# Install (build) scripts are blocked by default. None are needed:
+# - raknet-native ships prebuilt binaries (prebuilds/win32-10-x64, linux-5-x64, darwin-21-x64); its
+#   install script only falls back to a cmake build when the prebuild fails to load.
+# - raknet-node is an optional backend of bedrock-protocol that we never select.
+# Denying them explicitly keeps `pnpm install` quiet and deterministic.
+allowBuilds:
+  raknet-native: false
+  raknet-node: false
+  # esbuild (packs/truth bundler) loads its platform binary from the @esbuild/* optional
+  # dependency; its postinstall is only a check.
+  esbuild: false
+
+# bedrock-protocol 3.60.1 depends on prismarine-xbox-services through a pinned git commit
+# (PrismarineJS/prismarine-xbox-services#052a967...). pnpm blocks git subdependencies by default.
+blockExoticSubdeps: false

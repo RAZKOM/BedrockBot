@@ -1,0 +1,8 @@
+const bedrock = require('bedrock-protocol')
+const client = bedrock.createClient({ host: '127.0.0.1', port: 19132, username: 'SpikeBot', offline: true, version: '1.26.51' })
+const t0 = Date.now()
+for (const n of ['respawn', 'play_status', 'set_entity_motion', 'update_attributes', 'set_entity_data', 'network_chunk_publisher_update', 'player_list', 'add_player', 'tick_sync', 'network_stack_latency', 'client_cache_status', 'server_post_move', 'update_player_game_type', 'set_local_player_as_initialized', 'sync_world_clocks'])
+  client.on(n, p => { const s = JSON.stringify(p, (k, v) => typeof v === "bigint" ? String(v) : v); if (!['set_entity_data', 'update_attributes'].includes(n) || s.includes(`"runtime_entity_id":1`) || true) console.log(`[${Date.now() - t0}ms] ${n}`, s.slice(0, 260)) })
+client.on('start_game', p => console.log('start_game rid', p.runtime_entity_id, 'entity_id', p.entity_id, 'pos', JSON.stringify(p.player_position), 'keys with "move"/"auth"/"rewind":', Object.keys(p).filter(k => /move|auth|rewind|tick|chunk|item_stack|player_/.test(k)).join(','), JSON.stringify(Object.fromEntries(Object.entries(p).filter(([k]) => /movement|rewind|item_stack|client_side_generation|server_authoritative/.test(k))))))
+client.on('spawn', () => console.log(`[${Date.now() - t0}ms] spawn`))
+setTimeout(() => process.exit(0), 6000)

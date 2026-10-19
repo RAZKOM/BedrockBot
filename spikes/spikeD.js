@@ -1,0 +1,16 @@
+// Spike D: SimulatedPlayer on BDS via Script API (Beta APIs enabled by editing level.dat). Throwaway.
+const bedrock = require('bedrock-protocol'); const { exec } = require('child_process')
+const cmd = (s) => exec(`docker exec bds-spike send-command ${s}`, () => {})
+const client = bedrock.createClient({ host: '127.0.0.1', port: 19132, username: 'SpikeBot', offline: true, version: '1.26.51' })
+client.on('respawn', p => { if (p.state === 1) client.queue('respawn', { position: p.position, state: 2, runtime_entity_id: client.entityId }) })
+client.on('play_status', p => { if (p.status === 'player_spawn') { client.queue('serverbound_loading_screen', { type: 1 }); client.queue('serverbound_loading_screen', { type: 2 }) } })
+client.on('text', p => { if (p.type === 'json') { try { console.log('[truth]', JSON.parse(p.message).rawtext.map(r => r.text).join('').replace('[truth] ', '')) } catch {} } })
+client.on('add_player', p => console.log('[add_player]', p.username, 'rid', String(p.runtime_id), JSON.stringify(p.position)))
+client.on('spawn', () => {
+  setTimeout(() => cmd('scriptevent spike:sim 5 -60 5'), 1500)
+  setTimeout(() => cmd('scriptevent spike:simnav 15 -60 15'), 3000)
+  setTimeout(() => cmd('scriptevent spike:pos'), 7000)
+  setTimeout(() => cmd('scriptevent spike:simbreak 15 -61 16'), 7500)
+  setTimeout(() => cmd('scriptevent spike:block 15 -61 16'), 12000)
+})
+setTimeout(() => process.exit(0), 14000)

@@ -1,0 +1,10 @@
+export { Connection, VersionGateError, EYE_HEIGHT, TICK_MS } from './connection.ts';
+export type { ConnectionOptions, ProtocolClient, ClientFactory, PingFn, ServerInfo, ReconnectPolicy } from './connection.ts';
+export { PacketRecorder, parseRecording, serializeRecord, toJsonSafe, jsonSafeReplacer } from './recorder.ts';
+export type { RecordLine, RecordDir, RecorderOptions } from './recorder.ts';
+export { backoffDelay, defaultBackoff } from './backoff.ts';
+export type { BackoffPolicy } from './backoff.ts';
+export { checkVersion } from './versionGate.ts';
+export type { VersionCheck } from './versionGate.ts';
+export { supportedVersions, currentVersion, createDeserializer, createSerializer } from './protocol.ts';
+export type * from './types.ts';

@@ -1,0 +1,6 @@
+const bedrock = require('bedrock-protocol')
+const client = bedrock.createClient({ host: '127.0.0.1', port: 19134, username: 'SpikeBot', offline: true, version: '1.26.51' })
+client.on('join', () => console.log('[join]')); client.on('spawn', () => console.log('[spawn]'))
+client.on('play_status', p => console.log('[play_status]', p.status)); client.on('disconnect', p => console.log('[disconnect]', JSON.stringify(p))); client.on('kick', p => console.log('[kick]', JSON.stringify(p)))
+client.on('error', e => console.log('[error]', e.message)); client.on('close', () => { console.log('[close]'); process.exit(0) })
+setTimeout(() => { console.log('[timeout]'); process.exit(0) }, 15000)

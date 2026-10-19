@@ -1,0 +1,11 @@
+const bedrock = require('bedrock-protocol')
+const backend = process.argv[2] || 'raknet-native'
+const client = bedrock.createClient({ host: '127.0.0.1', port: 19132, username: 'SpikeBot', offline: true, version: '1.26.51', raknetBackend: backend })
+const log = []; const t0 = Date.now()
+client.on('packet', p => { log.push([Date.now() - t0, p.data?.name]); })
+client.on('spawn', () => console.log('[spawn]', Date.now() - t0, 'ms'))
+client.on('kick', p => console.log('[kick]', JSON.stringify(p)))
+client.on('disconnect', p => console.log('[disconnect]', JSON.stringify(p)))
+client.on('error', e => console.log('[error]', e.stack?.split('\n').slice(0,3).join(' | ')))
+client.on('close', () => { console.log('[close]', Date.now() - t0, 'ms; last packets:', JSON.stringify(log.slice(-12))); process.exit(0) })
+setTimeout(() => { console.log('[alive after 25s] packets', log.length); client.disconnect(); setTimeout(() => process.exit(0), 500) }, 25000)

@@ -1,0 +1,21 @@
+{
+  "name": "spikes",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "bedrock-protocol": "^3.60.1",
+    "minecraft-data": "^3.117.0",
+    "prismarine-block": "^1.23.0",
+    "prismarine-chunk": "^1.41.0",
+    "prismarine-nbt": "^2.8.0",
+    "prismarine-registry": "^1.12.0"
+  }
+}

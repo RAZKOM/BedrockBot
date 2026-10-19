@@ -1,0 +1,32 @@
+# Local dev BDS over RakNet (PLAN.md task 0.2). Offline, flat world, no allow-list.
+# Use via the root scripts: pnpm bds:up | pnpm bds:down | pnpm bds:cmd say hi
+name: bedrockbot-dev
+
+services:
+  bds-dev:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-dev
+    environment:
+      EULA: "TRUE"
+      # Must equal the newest version bedrock-protocol supports (3.60.1 -> 1.26.51); full 4-part build.
+      VERSION: "1.26.51.1"
+      # The image defaults to NetherNet since 2026.10.0; RakNet clients time out without this.
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      # allow-list=true together with online-mode=false makes BDS exit at startup.
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: dev
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-dev
+      SERVER_PORT: "19132"
+    ports:
+      - "19132:19132/udp"
+    volumes:
+      # Server files, worlds and logs (git-ignored). The truth pack is deployed into this folder by
+      # `pnpm pack:deploy` (packs/truth, task 0.4).
+      - ./data/dev:/data
+    stdin_open: true
+    tty: true

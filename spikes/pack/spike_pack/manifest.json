@@ -1,0 +1,41 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "SpikePack",
+    "description": "Ground-truth probe (throwaway)",
+    "uuid": "6f1b2a3c-4d5e-4f60-8a7b-9c0d1e2f3a4b",
+    "version": [
+      0,
+      0,
+      1
+    ],
+    "min_engine_version": [
+      1,
+      26,
+      0
+    ]
+  },
+  "modules": [
+    {
+      "type": "script",
+      "language": "javascript",
+      "uuid": "7a2c3b4d-5e6f-4071-9b8c-0d1e2f3a4b5c",
+      "version": [
+        0,
+        0,
+        1
+      ],
+      "entry": "scripts/main.js"
+    }
+  ],
+  "dependencies": [
+    {
+      "module_name": "@minecraft/server",
+      "version": "2.10.0"
+    },
+    {
+      "module_name": "@minecraft/server-gametest",
+      "version": "1.0.0-beta"
+    }
+  ]
+}
