@@ -335,6 +335,7 @@ export { ChunkStore, Column } from './chunks.ts';
 export { BlockUpdates } from './updates.ts';
 export { EntityTracker } from './entities.ts';
 export { Inventory, windowId, WINDOW_ARMOR, WINDOW_INVENTORY, WINDOW_OFFHAND } from './inventory.ts';
+export { Hotbar, type HotbarOptions } from './hotbar.ts';
 export { BlockFinder, classify } from './find.ts';
 export { boxChecksum, typeIdOf } from './checksum.ts';
 export { decodeSubChunk, Layer, Section, localIndex } from './subchunk.ts';

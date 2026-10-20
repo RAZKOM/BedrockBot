@@ -1,0 +1,30 @@
+# BDS for the digging e2e tests (PLAN.md Phase 4 tasks 4.1 and 4.2, Track G). Same settings as
+# compose.dev.yml, own project name, container bds-dig on udp/19148, data in docker/data/dig.
+#   docker compose -f docker/compose.dig.yml up -d
+#   pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/dig --restart bds-dig
+name: bedrockbot-dig
+
+services:
+  bds-dig:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-dig
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.51.1"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: peaceful
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: dig
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-dig
+      SERVER_PORT: "19148"
+    ports:
+      - "19148:19148/udp"
+    volumes:
+      - ./data/dig:/data
+    stdin_open: true
+    tty: true
