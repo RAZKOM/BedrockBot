@@ -38,8 +38,8 @@ function waitFor<T>(subscribe: (done: (v: T) => void) => () => void, timeoutMs: 
 
 describe.skipIf(!E2E)('@bds echo task against bds-dev', () => {
   let conn: Connection | undefined;
-  afterEach(() => {
-    conn?.disconnect('test done');
+  afterEach(async () => {
+    await conn?.disconnectAndFlush('test done');
     conn = undefined;
   });
 

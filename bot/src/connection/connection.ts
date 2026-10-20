@@ -10,6 +10,7 @@ import { checkVersion } from './versionGate.ts';
 import type {
   AnyPacket,
   CloseInfo,
+  CloseKind,
   ConnectionState,
   ConnectTarget,
   InboundPackets,
@@ -34,6 +35,8 @@ export interface ProtocolClient {
   disconnect(reason?: string): void;
   close(): void;
   serializer?: PacketSerializer;
+  /** Read by bedrock-protocol when it sends request_chunk_radius (500 ms after resource_packs_info). */
+  viewDistance?: number;
 }
 
 export interface ServerInfo {
@@ -65,6 +68,11 @@ export interface ConnectionOptions {
   /** Close and retry when spawn has not happened within this many ms. Default 30 000. */
   spawnTimeoutMs?: number;
   pingTimeoutMs?: number;
+  /**
+   * Chunk radius requested from the server (request_chunk_radius). Default 10. A bds target's
+   * `viewDistance` overrides it. Applied to the client object directly, because bedrock-protocol
+   * 3.60.1 reads `client.viewDistance` and ignores the createClient option.
+   */
   viewDistance?: number;
   /** Test seams. */
   createClient?: ClientFactory;
@@ -73,6 +81,38 @@ export interface ConnectionOptions {
 
 export class VersionGateError extends Error {
   override name = 'VersionGateError';
+}
+
+/**
+ * Server disconnect reasons (DisconnectFailReason names) that a retry cannot fix: the server and the
+ * client speak different game versions. The connection stops instead of reconnecting.
+ */
+export const TERMINAL_KICK_REASONS: ReadonlySet<string> = new Set([
+  'outdated_client',
+  'outdated_server',
+  'version_mismatch',
+  'edition_version_mismatch',
+  'conn_protocol_version',
+]);
+
+/** play_status values that mean the same (BDS answers an older client with `failed_client`). */
+export const TERMINAL_PLAY_STATUS: ReadonlySet<string> = new Set([
+  'failed_client', // outdated client
+  'failed_spawn', // outdated server
+  'failed_invalid_tenant',
+  'failed_vanilla_edu',
+  'failed_edu_vanilla',
+  'failed_editor_vanilla_mismatch',
+  'failed_vanilla_editor_mismatch',
+]);
+
+/** Best known cause of a session's end. */
+interface EndReason {
+  reason: string;
+  kind: CloseKind;
+  kick?: { reason: string; message?: string };
+  /** Version mismatch reported by the server: do not reconnect. */
+  terminal?: boolean;
 }
 
 type Handler = (p: AnyPacket) => void;
@@ -124,7 +164,9 @@ export class Connection {
   private pending: [string, object][] = [];
   private firstSpawn: { resolve: () => void; reject: (e: Error) => void } | undefined;
   /** Best known reason why each session ended (kick message, error, timeout). */
-  private readonly lastReason = new Map<number, string>();
+  private readonly lastReason = new Map<number, EndReason>();
+  /** performance.now() of the current session's spawn. */
+  private spawnedAt: number | undefined;
   /** Packet names with a dispatcher on the current client. */
   private attachedNames = new Set<string>();
   /** Session whose end has already been handled. */
@@ -203,7 +245,7 @@ export class Connection {
     this.reconnectTimer = undefined;
     const client = this.client;
     if (client) {
-      this.lastReason.set(this.session, `client: ${reason}`);
+      this.lastReason.set(this.session, { reason: `client: ${reason}`, kind: 'client' });
       try {
         client.disconnect(reason);
       } catch (e) {
@@ -211,13 +253,24 @@ export class Connection {
         client.close();
       }
       // bedrock-protocol emits 'close' synchronously; make sure we end up closed either way.
-      if (this.client === client) this.endSession(this.session, `client: ${reason}`);
+      if (this.client === client) this.endSession(this.session, { reason: `client: ${reason}`, kind: 'client' });
     } else if (this._state !== 'closed') {
       this.setState('closed');
       this.firstSpawn?.reject(new Error(`disconnected before spawn: ${reason}`));
       this.firstSpawn = undefined;
-      this.emitClose({ reason: 'client', willReconnect: false });
+      this.emitClose({ reason: 'client', kind: 'client', willReconnect: false });
     }
+  }
+
+  /**
+   * disconnect() and wait until the disconnect packet has left: bedrock-protocol writes it right
+   * away but closes the RakNet socket 40 ms later on a timer, so a process that exits immediately
+   * leaves the session open (the next login with the same name then gets `server_id_conflict`).
+   */
+  async disconnectAndFlush(reason = 'client leaving', flushMs = 250): Promise<void> {
+    const hadClient = this.client !== undefined;
+    this.disconnect(reason);
+    if (hadClient) await new Promise((r) => setTimeout(r, flushMs));
   }
 
   /** Subscribe to an inbound packet by name. Returns an unsubscribe function. */
@@ -295,7 +348,7 @@ export class Connection {
     try {
       info = await this.pingServer(target, this.pingTimeoutMs);
     } catch (e) {
-      this.endSession(session, `ping failed: ${errorMessage(e)}`);
+      this.endSession(session, { reason: `ping failed: ${errorMessage(e)}`, kind: 'ping' });
       return;
     }
     if (session !== this.session || this.userClosed) return;
@@ -305,7 +358,7 @@ export class Connection {
     );
     const gate = checkVersion(this.version, info.protocol);
     if (!gate.ok) {
-      this.fail(new VersionGateError(gate.message));
+      this.fail(new VersionGateError(gate.message), { reason: gate.message, kind: 'version' });
       return;
     }
     if (info.version) this._gameVersion = info.version;
@@ -319,7 +372,7 @@ export class Connection {
       transport: target.transport,
       raknetBackend: 'raknet-native',
       skipPing: true,
-      viewDistance: this.viewDistance,
+      viewDistance: target.viewDistance ?? this.viewDistance,
       conLog: (...args: unknown[]) => {
         this.log.debug(args.map(String).join(' '));
       },
@@ -330,17 +383,19 @@ export class Connection {
     try {
       client = this.makeClient(opts);
     } catch (e) {
-      this.endSession(session, `createClient failed: ${errorMessage(e)}`);
+      this.endSession(session, { reason: `createClient failed: ${errorMessage(e)}`, kind: 'error' });
       return;
     }
+    // bedrock-protocol 3.60.1 ignores options.viewDistance and requests client.viewDistance || 10.
+    client.viewDistance = target.viewDistance ?? this.viewDistance;
     this.client = client;
     this.attach(client, session);
     this.spawnTimer = setTimeout(() => {
       if (session === this.session && this._state !== 'spawned') {
-        const reason = `no spawn within ${this.spawnTimeoutMs} ms`;
-        this.lastReason.set(session, reason);
+        const end: EndReason = { reason: `no spawn within ${this.spawnTimeoutMs} ms`, kind: 'timeout' };
+        this.lastReason.set(session, end);
         client.close();
-        this.endSession(session, reason);
+        this.endSession(session, end);
       }
     }, this.spawnTimeoutMs);
   }
@@ -393,7 +448,7 @@ export class Connection {
         client.queue('serverbound_loading_screen', { type: 1 });
         client.queue('serverbound_loading_screen', { type: 2 });
       } else if (p.status !== 'login_success') {
-        this.lastReason.set(session, `play_status ${p.status}`);
+        this.lastReason.set(session, { reason: `play_status ${p.status}`, kind: 'kick', terminal: TERMINAL_PLAY_STATUS.has(p.status) });
       }
     });
     client.on('spawn', () => {
@@ -403,16 +458,19 @@ export class Connection {
     // Disconnect reasons.
     client.on('kick', (p: InboundPackets['disconnect']) => {
       const reason = `kicked: ${p.reason}${p.message ? ` "${p.message}"` : ''}`;
-      this.lastReason.set(session, reason);
+      const prev = this.lastReason.get(session);
+      const kick = p.message ? { reason: String(p.reason), message: p.message } : { reason: String(p.reason) };
+      const terminal = TERMINAL_KICK_REASONS.has(String(p.reason)) || prev?.terminal === true;
+      this.lastReason.set(session, { reason, kind: 'kick', kick, terminal });
       this.log.warn(reason);
     });
     client.on('error', (e: Error) => {
       const reason = `error: ${errorMessage(e)}`;
-      if (!this.lastReason.has(session)) this.lastReason.set(session, reason);
+      if (!this.lastReason.has(session)) this.lastReason.set(session, { reason, kind: 'error' });
       this.log.warn(reason);
     });
     client.on('close', () => {
-      this.endSession(session, this.lastReason.get(session) ?? 'connection closed');
+      this.endSession(session, this.lastReason.get(session) ?? { reason: 'connection closed', kind: 'closed' });
     });
 
     // User packet handlers.
@@ -439,6 +497,7 @@ export class Connection {
     clearTimeout(this.spawnTimer);
     this.attempt = 0;
     this.setState('spawned');
+    this.spawnedAt = performance.now();
     this.log.info(`spawned as ${this.username} (runtime id ${this._runtimeId})`);
     this.startTicker();
     this.firstSpawn?.resolve();
@@ -453,15 +512,16 @@ export class Connection {
   }
 
   /** Session `session` is over (closed, kicked, failed to ping or to spawn). Idempotent. */
-  private endSession(session: number, reason: string): void {
+  private endSession(session: number, end: EndReason): void {
     if (session !== this.session || this._state === 'closed' || this.ending === session) return;
     this.ending = session;
+    const { reason } = end;
     clearTimeout(this.spawnTimer);
     this.stopTicker();
     this.pending = [];
     this.client = undefined;
     this.lastReason.delete(session);
-    this.recorder?.record('meta', 'close', { reason }, this._tick);
+    this.recorder?.record('meta', 'close', { reason, kind: end.kind }, this._tick);
 
     const policy = this.reconnectPolicy;
     if (this.userClosed) {
@@ -469,18 +529,23 @@ export class Connection {
       this.log.info(`disconnected (${reason})`);
       this.firstSpawn?.reject(new Error(`disconnected before spawn: ${reason}`));
       this.firstSpawn = undefined;
-      this.emitClose({ reason, willReconnect: false });
+      this.emitClose(this.closeInfo(end, false));
+      return;
+    }
+    if (end.terminal) {
+      // The server says our game version is wrong: retrying cannot help (PLAN.md 4.1 version gate).
+      this.fail(new VersionGateError(`server refused game version ${this.version}: ${reason}`), end);
       return;
     }
     if (!policy.enabled || this.attempt >= policy.maxAttempts) {
-      this.fail(new Error(`connection lost: ${reason}`), reason);
+      this.fail(new Error(`connection lost: ${reason}`), end);
       return;
     }
     const delay = backoffDelay(this.attempt, policy);
     this.attempt++;
     this.setState('connecting');
     this.log.warn(`connection lost (${reason}); reconnect attempt ${this.attempt} in ${delay} ms`);
-    this.emitClose({ reason, willReconnect: true, retryInMs: delay });
+    this.emitClose(this.closeInfo(end, true, delay));
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       void this.attemptOnce();
@@ -488,7 +553,7 @@ export class Connection {
   }
 
   /** Terminal failure: no reconnect. */
-  private fail(err: Error, reason = err.message): void {
+  private fail(err: Error, end: EndReason = { reason: err.message, kind: 'error' }): void {
     clearTimeout(this.spawnTimer);
     clearTimeout(this.reconnectTimer);
     this.stopTicker();
@@ -500,7 +565,17 @@ export class Connection {
     this.log.error(err.message);
     this.firstSpawn?.reject(err);
     this.firstSpawn = undefined;
-    this.emitClose({ reason, willReconnect: false });
+    this.emitClose(this.closeInfo(end, false));
+  }
+
+  private closeInfo(end: EndReason, willReconnect: boolean, retryInMs?: number): CloseInfo {
+    const spawnedMs = this.spawnedAt === undefined ? 0 : Math.round(performance.now() - this.spawnedAt);
+    this.spawnedAt = undefined;
+    const info: CloseInfo = { reason: end.reason, kind: end.kind, willReconnect, spawnedMs };
+    if (end.kick) info.kick = end.kick;
+    if (end.terminal || end.kind === 'version') info.versionMismatch = true;
+    if (retryInMs !== undefined) info.retryInMs = retryInMs;
+    return info;
   }
 
   private emitClose(info: CloseInfo): void {

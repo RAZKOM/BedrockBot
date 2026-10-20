@@ -15,8 +15,13 @@ services:
       ONLINE_MODE: "false"
       # allow-list=true together with online-mode=false makes BDS exit at startup.
       ALLOW_LIST: "false"
-      PLAYER_IDLE_TIMEOUT: "0"
+      # Minutes before an idle player is kicked; 0 = never. Overridable for the keepalive soak:
+      #   BDS_IDLE_TIMEOUT=1 pnpm bds:up   (then plain `pnpm bds:up` again to restore 0)
+      PLAYER_IDLE_TIMEOUT: "${BDS_IDLE_TIMEOUT:-0}"
       ALLOW_CHEATS: "true"
+      # Peaceful: hostile mobs killed the standing AFK bot at night on easy, which turns keepalive
+      # tests into respawn tests. Override with BDS_DIFFICULTY=easy|normal|hard.
+      DIFFICULTY: "${BDS_DIFFICULTY:-peaceful}"
       LEVEL_TYPE: FLAT
       LEVEL_NAME: dev
       DEFAULT_PLAYER_PERMISSION_LEVEL: operator

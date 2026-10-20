@@ -11,3 +11,4 @@ recordings/
 .env
 .env.*
 *_packetReadError.txt
+bot/logs/

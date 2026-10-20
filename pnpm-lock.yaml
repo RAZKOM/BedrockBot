@@ -248,6 +248,12 @@ importers:
         specifier: 1.12.0
         version: 1.12.0
 
+  tools/physics-spike:
+    dependencies:
+      vec3:
+        specifier: 0.1.10
+        version: 0.1.10
+
 packages:
 
   '@azure/msal-common@14.16.1':

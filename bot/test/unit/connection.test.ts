@@ -1,69 +1,8 @@
-import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Connection, VersionGateError, type ConnectionOptions, type ProtocolClient, type ServerInfo } from '../../src/connection/connection.ts';
+import { VersionGateError } from '../../src/connection/connection.ts';
 import { PacketRecorder, parseRecording } from '../../src/connection/recorder.ts';
-import type { CloseInfo, ConnectTarget } from '../../src/connection/types.ts';
-import { silentLogger } from '../../src/log.ts';
-
-class FakeClient extends EventEmitter implements ProtocolClient {
-  sent: { via: 'queue' | 'write'; name: string; params: Record<string, unknown> }[] = [];
-  closed = false;
-  queue(name: string, params: object): void {
-    this.sent.push({ via: 'queue', name, params: params as Record<string, unknown> });
-  }
-  write(name: string, params: object): void {
-    this.sent.push({ via: 'write', name, params: params as Record<string, unknown> });
-  }
-  disconnect(reason = 'Client leaving'): void {
-    this.write('disconnect', { hide_disconnect_screen: false, message: reason, filtered_message: '' });
-    this.close();
-  }
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.emit('close');
-    this.removeAllListeners();
-  }
-  /** Server -> client packet, the way bedrock-protocol emits it. */
-  receive(name: string, params: Record<string, unknown>): void {
-    this.emit('packet', { data: { name, params } });
-    this.emit(name, params);
-  }
-  /** Drive a full spawn like BDS 1.26.51 does. */
-  spawn(runtimeId = 7n): void {
-    this.receive('start_game', { runtime_entity_id: runtimeId, player_position: { x: 0, y: 32769, z: 0 } });
-    this.receive('respawn', { position: { x: 0.5, y: -58.38, z: 0.5 }, state: 1, runtime_entity_id: 0n });
-    this.receive('play_status', { status: 'player_spawn' });
-    this.emit('spawn');
-  }
-  names(): string[] {
-    return this.sent.map((s) => s.name);
-  }
-}
-
-const TARGET: ConnectTarget = { kind: 'bds', host: '127.0.0.1', port: 19132, transport: 'raknet', offline: true };
-const INFO: ServerInfo = { transport: 'raknet', protocol: 2193, version: '1.26.51', motd: 'bds-dev', levelName: 'dev' };
-
-function setup(opts: Partial<ConnectionOptions> = {}, info: ServerInfo = INFO) {
-  const clients: FakeClient[] = [];
-  const ping = vi.fn(() => Promise.resolve(info));
-  const conn = new Connection({
-    version: '1.26.51',
-    username: 'UnitBot',
-    logger: silentLogger,
-    createClient: () => {
-      const c = new FakeClient();
-      clients.push(c);
-      return c;
-    },
-    ping,
-    ...opts,
-  });
-  return { conn, clients, ping };
-}
-
-/** Let pending promise callbacks run (ping resolution, connect continuation). */
-const flush = () => vi.advanceTimersByTimeAsync(0);
+import type { CloseInfo } from '../../src/connection/types.ts';
+import { flush, INFO, setup, TARGET } from './connection-fakes.ts';
 
 describe('Connection', () => {
   beforeEach(() => {
@@ -172,7 +111,14 @@ describe('Connection', () => {
     clients[0]!.emit('kick', { reason: 'kicked', hide_disconnect_reason: false, message: 'bye' });
     clients[0]!.close();
     expect(conn.state).toBe('connecting');
-    expect(closes.at(-1)).toEqual({ reason: 'kicked: kicked "bye"', willReconnect: true, retryInMs: 1000 });
+    expect(closes.at(-1)).toEqual({
+      reason: 'kicked: kicked "bye"',
+      kind: 'kick',
+      kick: { reason: 'kicked', message: 'bye' },
+      willReconnect: true,
+      retryInMs: 1000,
+      spawnedMs: 0,
+    });
 
     await vi.advanceTimersByTimeAsync(999);
     expect(ping).toHaveBeenCalledTimes(1);
@@ -224,7 +170,7 @@ describe('Connection', () => {
     conn.disconnect('bye');
     expect(conn.state).toBe('closed');
     expect(clients[0]!.names()).toContain('disconnect');
-    expect(closes).toEqual([{ reason: 'client: bye', willReconnect: false }]);
+    expect(closes).toEqual([{ reason: 'client: bye', kind: 'client', willReconnect: false, spawnedMs: 0 }]);
     await vi.advanceTimersByTimeAsync(120_000);
     expect(clients).toHaveLength(1);
   });

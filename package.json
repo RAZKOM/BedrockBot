@@ -9,10 +9,13 @@
   "scripts": {
     "bds:up": "node scripts/bds.mjs up",
     "bds:down": "node scripts/bds.mjs down",
+    "bds:restart": "node scripts/bds.mjs restart",
+    "bds:idle": "node scripts/bds.mjs idle",
     "bds:cmd": "node scripts/bds.mjs cmd",
     "bds:logs": "node scripts/bds.mjs logs",
     "pack:deploy": "pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/dev --restart bds-dev && node scripts/bds.mjs up",
     "test": "pnpm -r --if-present test",
-    "lint": "pnpm -r --if-present lint"
+    "lint": "pnpm -r --if-present lint",
+    "bot:afk": "pnpm --filter bot start -- --task afk"
   }
 }

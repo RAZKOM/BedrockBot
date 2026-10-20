@@ -5,7 +5,15 @@
 export type Transport = 'raknet' | 'nethernet';
 
 export type ConnectTarget =
-  | { kind: 'bds'; host: string; port: number; transport: Transport; offline: true }
+  | {
+      kind: 'bds';
+      host: string;
+      port: number;
+      transport: Transport;
+      offline: true;
+      /** Chunk radius to request; overrides ConnectionOptions.viewDistance. */
+      viewDistance?: number;
+    }
   // Sign-in is done by the human through the device-code flow, never by code (Phase 1.6).
   | { kind: 'realm'; realmInvite?: string; realmId?: string; profilesFolder: string };
 
@@ -30,6 +38,8 @@ export interface TextPacket {
   parameters?: string[];
   xuid?: string;
   platform_chat_id?: string;
+  /** Outbound: false (or omit) unless filtered_message is set. */
+  has_filtered_message?: boolean;
   filtered_message?: string;
 }
 
@@ -187,10 +197,24 @@ export interface OutboundPackets {
   move_player: MovePlayerPacket;
 }
 
+/**
+ * What ended a session: a server `disconnect` packet (kick), a transport error, no spawn in time,
+ * a failed ping, the version gate, our own disconnect(), or a plain close without any packet.
+ */
+export type CloseKind = 'kick' | 'error' | 'timeout' | 'ping' | 'version' | 'client' | 'closed';
+
 /** Why a session ended, as far as the client can tell. */
 export interface CloseInfo {
   /** Disconnect packet reason / message, transport error, or 'client' when we closed it. */
   reason: string;
+  /** Category of `reason`. */
+  kind: CloseKind;
+  /** The server's disconnect packet, when it sent one: `reason` is the DisconnectFailReason name. */
+  kick?: { reason: string; message?: string };
+  /** The server or the version gate refused our game version; never retried. */
+  versionMismatch?: boolean;
+  /** How long the session had been spawned (ms); 0 when it never spawned. */
+  spawnedMs?: number;
   /** True when the reconnect policy will try again. */
   willReconnect: boolean;
   /** Delay before the next attempt (ms), when willReconnect. */

@@ -2,6 +2,9 @@
 // Dev BDS helper (PLAN.md task 0.2). Only ever touches the container `bds-dev`.
 //   node scripts/bds.mjs up      start docker/compose.dev.yml and wait for "Server started."
 //   node scripts/bds.mjs down    stop and remove bds-dev (data in docker/data/dev is kept)
+//   node scripts/bds.mjs restart `docker restart bds-dev` and wait for "Server started."
+//   node scripts/bds.mjs idle    print the effective player-idle-timeout (minutes)
+// Env: BDS_IDLE_TIMEOUT=<minutes> for `up` recreates bds-dev with that idle kick (default 0 = off).
 //   node scripts/bds.mjs cmd ... run a console command, e.g. `cmd say hi`
 //   node scripts/bds.mjs logs    follow the server log
 import { spawnSync } from 'node:child_process'
@@ -47,7 +50,21 @@ try {
       const r = run(['compose', '-f', COMPOSE, 'up', '-d'])
       if (r.status !== 0) process.exit(r.status ?? 1)
       await waitStarted(Number(process.env.BDS_UP_TIMEOUT_MS ?? 180_000))
-      console.log(`${CONTAINER}: Server started (${((Date.now() - t0) / 1000).toFixed(1)} s) on udp/19132`)
+      console.log(`${CONTAINER}: Server started (${((Date.now() - t0) / 1000).toFixed(1)} s) on udp/19132, player-idle-timeout=${process.env.BDS_IDLE_TIMEOUT ?? 0}`)
+      break
+    }
+    case 'restart': {
+      const t0 = Date.now()
+      const r = run(['restart', CONTAINER])
+      if (r.status !== 0) process.exit(r.status ?? 1)
+      await waitStarted(Number(process.env.BDS_UP_TIMEOUT_MS ?? 180_000))
+      console.log(`${CONTAINER}: restarted (${((Date.now() - t0) / 1000).toFixed(1)} s)`)
+      break
+    }
+    case 'idle': {
+      const r = run(['exec', CONTAINER, 'sh', '-c', 'grep -E "^player-idle-timeout=" /data/server.properties'], { capture: true })
+      if (r.status !== 0) throw new Error(r.stderr || `${CONTAINER} not running`)
+      console.log(r.stdout.trim())
       break
     }
     case 'down':
@@ -62,7 +79,7 @@ try {
       process.exit(run(['logs', '-f', '--tail', String(process.env.BDS_LOG_TAIL ?? 100), CONTAINER]).status ?? 1)
       break
     default:
-      console.error('usage: node scripts/bds.mjs up|down|cmd <command...>|logs')
+      console.error('usage: node scripts/bds.mjs up|down|restart|idle|cmd <command...>|logs')
       process.exit(2)
   }
 } catch (err) {
