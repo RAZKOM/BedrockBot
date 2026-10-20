@@ -3,7 +3,7 @@
 import { EventEmitter } from 'node:events';
 import { vi } from 'vitest';
 import { Connection, type ConnectionOptions, type ProtocolClient, type ServerInfo } from '../../src/connection/connection.ts';
-import type { ConnectTarget } from '../../src/connection/types.ts';
+import type { BdsTarget } from '../../src/connection/types.ts';
 import { silentLogger } from '../../src/log.ts';
 
 export class FakeClient extends EventEmitter implements ProtocolClient {
@@ -54,7 +54,7 @@ export class FakeClient extends EventEmitter implements ProtocolClient {
   }
 }
 
-export const TARGET: ConnectTarget = { kind: 'bds', host: '127.0.0.1', port: 19132, transport: 'raknet', offline: true };
+export const TARGET: BdsTarget = { kind: 'bds', host: '127.0.0.1', port: 19132, transport: 'raknet', offline: true };
 export const INFO: ServerInfo = { transport: 'raknet', protocol: 2193, version: '1.26.51', motd: 'bds-dev', levelName: 'dev' };
 
 export function setup(opts: Partial<ConnectionOptions> = {}, info: ServerInfo = INFO) {

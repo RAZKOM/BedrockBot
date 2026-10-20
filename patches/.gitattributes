@@ -1,0 +1,2 @@
+# pnpm checks patch files by hash: keep them byte-exact (no EOL normalisation).
+*.patch -text

@@ -1,34 +1,48 @@
-# Local dev BDS over NetherNet (WebRTC), the BDS default since 26.50 and the only Realm transport.
-# Weekly test profile (PLAN.md task 1.4). Mutually exclusive with compose.dev.yml: both use the
-# container name bds-dev so `pnpm bds:cmd` works with either, and docker refuses to run both at once.
-#   docker compose -f docker/compose.dev-nethernet.yml up -d
-# Clients: createClient({ transport: 'nethernet', nethernet: { signalling: 'lan' }, port: 19140 })
+# Local dev BDS over NetherNet (WebRTC): the BDS default since 26.50 and the only Realm transport
+# (PLAN.md task 1.4). Runs beside bds-dev as its own container `bds-nn`.
+#   node scripts/bds.mjs up --profile nn             (or: docker compose -f docker/compose.dev-nethernet.yml up -d)
+#   node scripts/bds.mjs pack --profile nn           (deploy the truth pack and restart)
+#   pnpm e2e:nn                                      (e2e suite with BDS_TRANSPORT=nethernet against bds-nn)
+# Bot: node src/index.ts --transport nethernet --port 19140   (signalling 'lan': discovery on UDP 7551)
+#
+# NetherNet LAN discovery always uses UDP 7551 on the host, so only one NetherNet BDS per host can be
+# reachable this way. Signalling uses SERVER_PORT (TCP+UDP); the game traffic itself is WebRTC
+# (ICE/DTLS/SCTP) on the UDP ports in SERVER_UDP_PORTS, one port per connected client.
+#
+# Measured 2026-10-28 (BDS 1.26.51.1, image 2026.10.2): with a single UDP port (SERVER_UDP_PORTS=19140,
+# the old draft) a second concurrent client gets an SDP answer without any ICE candidate and fails with
+# connecterror:9 (InactivityTimeout), and from then on every new client fails the same way until the
+# server restarts (the half-open session apparently keeps the port). Hence a range, published 1:1.
 name: bedrockbot-dev-nethernet
 
 services:
-  bds-dev:
+  bds-nn:
     image: itzg/minecraft-bedrock-server:2026.10.2
-    container_name: bds-dev
+    container_name: bds-nn
     environment:
       EULA: "TRUE"
-      VERSION: "1.26.51.1"
+      VERSION: "${BDS_NN_VERSION:-1.26.51.1}"
       TRANSPORT: nethernet
       ONLINE_MODE: "false"
       ALLOW_LIST: "false"
-      PLAYER_IDLE_TIMEOUT: "0"
+      PLAYER_IDLE_TIMEOUT: "${BDS_IDLE_TIMEOUT:-0}"
       ALLOW_CHEATS: "true"
+      DIFFICULTY: "${BDS_DIFFICULTY:-peaceful}"
       LEVEL_TYPE: FLAT
       LEVEL_NAME: dev
       DEFAULT_PLAYER_PERMISSION_LEVEL: operator
-      SERVER_NAME: bds-dev
+      SERVER_NAME: bds-nn
       SERVER_PORT: "19140"
-      SERVER_UDP_PORTS: "19140"
+      SERVER_PORT_V6: "19141"
+      # WebRTC ports, one per concurrent client (the e2e chat test runs 4 clients at once).
+      SERVER_UDP_PORTS: "19160-19167"
     ports:
       - "19140:19140/tcp"
       - "19140:19140/udp"
+      - "19160-19167:19160-19167/udp"
       # NetherNet LAN discovery
       - "7551:7551/udp"
     volumes:
-      - ./data/dev-nethernet:/data
+      - ./data/nn:/data
     stdin_open: true
     tty: true

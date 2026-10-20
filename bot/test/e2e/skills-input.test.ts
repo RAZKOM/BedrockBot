@@ -1,19 +1,21 @@
-// e2e (tag @bds) for the input loop (PLAN.md task 3.1) against the physics BDS: container bds-phys on
-// udp/19144 (flat world, truth pack deployed, see docs/movement.md). Runs only with BDS_E2E=1:
+// e2e (tag @bds) for the input loop (PLAN.md task 3.1) against the movement BDS: container bds-move on
+// udp/19146 (flat world, truth pack deployed, docker/compose.move.yml; see docs/movement.md). The
+// physics spike's bds-phys (udp/19144) works too. Runs only with BDS_E2E=1:
 //   BDS_E2E=1 pnpm --filter bot test:e2e
-// Override the target with PHYS_BDS_HOST / PHYS_BDS_PORT / PHYS_BDS_CONTAINER.
+// Override the target with PHYS_BDS_HOST / PHYS_BDS_PORT / PHYS_BDS_CONTAINER (or MOVE_BDS_*).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Connection } from '../../src/connection/connection.ts';
 import type { ConnectTarget, Vec3 } from '../../src/connection/types.ts';
 import { createLogger, silentLogger } from '../../src/log.ts';
 import { InputLoop, flatWorld, type CorrectionEvent } from '../../src/skills/input/index.ts';
 import { Truth, consoleCommand } from './skills-truth.ts';
+import { bdsTarget, E2E_VERSION } from './env.ts';
 
 const E2E = process.env.BDS_E2E === '1';
-const HOST = process.env.PHYS_BDS_HOST ?? '127.0.0.1';
-const PORT = Number(process.env.PHYS_BDS_PORT ?? 19144);
-const CONTAINER = process.env.PHYS_BDS_CONTAINER ?? 'bds-phys';
-const TARGET: ConnectTarget = { kind: 'bds', host: HOST, port: PORT, transport: 'raknet', offline: true };
+const HOST = process.env.PHYS_BDS_HOST ?? process.env.MOVE_BDS_HOST ?? '127.0.0.1';
+const PORT = Number(process.env.PHYS_BDS_PORT ?? process.env.MOVE_BDS_PORT ?? 19146);
+const CONTAINER = process.env.PHYS_BDS_CONTAINER ?? process.env.MOVE_BDS_CONTAINER ?? 'bds-move';
+const TARGET: ConnectTarget = bdsTarget(HOST, PORT);
 const NAME = 'InputE2E';
 /** Flat world: grass top at y = -61, feet at -60. */
 const FEET_Y = -60;
@@ -21,7 +23,7 @@ const FEET_Y = -60;
 const dist = (a: Vec3, b: Vec3): number => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const fmt = (v: Vec3): string => `(${v.x.toFixed(3)}, ${v.y.toFixed(3)}, ${v.z.toFixed(3)})`;
 
-describe.skipIf(!E2E)('@bds input loop against bds-phys', () => {
+describe.skipIf(!E2E)(`@bds input loop against ${CONTAINER}`, () => {
   let conn: Connection;
   let loop: InputLoop;
   let truth: Truth;
@@ -71,7 +73,7 @@ describe.skipIf(!E2E)('@bds input loop against bds-phys', () => {
       await consoleCommand(CONTAINER, ...c);
     }
     // Reconnect only covers a quick rerun (server_id_conflict while the previous session still lingers).
-    conn = new Connection({ version: '1.26.51', username: NAME, logger: silentLogger, reconnect: { enabled: true, maxAttempts: 4, baseMs: 2_000 } });
+    conn = new Connection({ version: E2E_VERSION, username: NAME, logger: silentLogger, reconnect: { enabled: true, maxAttempts: 4, baseMs: 2_000 } });
     loop = new InputLoop(conn, { world: flatWorld(), logger: process.env.PHYS_VERBOSE ? createLogger('info', 'input') : silentLogger });
     loop.onEvent((e) => {
       if (e.kind === 'correction') corrections.push(e);
@@ -84,8 +86,8 @@ describe.skipIf(!E2E)('@bds input loop against bds-phys', () => {
     await teleport({ x: 0.5, y: FEET_Y, z: 0.5 });
   });
 
-  afterAll(() => {
-    conn?.disconnect('test done');
+  afterAll(async () => {
+    await conn?.disconnectAndFlush('test done');
     // The numbers for docs/decisions/0003-physics.md.
     console.log(`[skills-input e2e]\n  ${summary.join('\n  ')}`);
   });

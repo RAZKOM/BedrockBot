@@ -92,6 +92,11 @@ into `.work/sandbox/` (git-ignored, about 12 s) and edits that copy. For pnpm pr
 
 ## Persisting the bump in a pnpm project (the bot)
 
+**Status (2026-10-28): done for the bot workspace.** The 1.26.60 patch is at the repo root
+(`patches/minecraft-data@3.117.0.patch`, byte-identical to `patches/` here) and listed in
+`pnpm-workspace.yaml` `patchedDependencies`; `pnpm -r test` replays 1.26.60 fixtures and the e2e
+suite passes against BDS 1.26.60.6 (`pnpm e2e:60`, docs/versions.md). Regenerate both copies together.
+
 `patches/minecraft-data@3.117.0.patch` is a git-format diff with package-relative paths (`a/data.js`,
 `a/minecraft-data/data/...`). That is the format `pnpm patch-commit` writes and `patchedDependencies`
 reads. To consume it from the repo root:

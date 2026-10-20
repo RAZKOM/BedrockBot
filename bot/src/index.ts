@@ -1,5 +1,7 @@
 // CLI: bot --task echo|afk --host 127.0.0.1 --port 19132 --version 1.26.51 [options]
-// Local BDS only for now (offline mode). Realm targets arrive with PLAN.md task 1.6.
+// Targets: a local BDS in offline mode (default), or a Realm (PLAN.md task 1.6; the human signs in
+// through the device-code flow on the first run, see docs/runbook.md "Realm join").
+import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -8,22 +10,35 @@ import { registerBuiltinCommands } from './chat/commands.ts';
 import { Connection, VersionGateError } from './connection/connection.ts';
 import { DisconnectLog } from './connection/disconnectLog.ts';
 import { Metrics } from './connection/metrics.ts';
+import { defaultProfilesFolder, realmLabel, RealmGuardError, validateRealmTarget } from './connection/realm.ts';
 import { PacketRecorder } from './connection/recorder.ts';
-import type { Transport, Vec3 } from './connection/types.ts';
+import type { ConnectTarget, NethernetSignalling, RealmTarget, Transport, Vec3 } from './connection/types.ts';
 import { createLogger, type LogLevel } from './log.ts';
 import { AfkTask } from './tasks/afk.ts';
 import { EchoTask } from './tasks/echo.ts';
 
 const BOT_DIR = fileURLToPath(new URL('..', import.meta.url));
 
+const DEFAULT_VERSION = '1.26.51';
+
 const USAGE = `usage: bot --task echo|afk [options]
   --task <name>            task to run: echo (print chat and position) | afk (stay online)
+  --version <ver>          game version to speak (default ${DEFAULT_VERSION}, or env BOT_VERSION)
+  --target <t>             bds (local BDS, offline; default) | realm
+ bds target (offline mode, local servers only):
   --host <host>            BDS host (default 127.0.0.1)
-  --port <port>            BDS port (default 19132)
-  --version <ver>          game version to speak (default 1.26.51)
+  --port <port>            BDS port (default 19132; NetherNet LAN discovery ignores it)
   --transport <t>          raknet | nethernet (default raknet)
+  --signalling <s>         NetherNet signalling: lan (the only choice for a bds target)
   --username <name>        offline username (default EchoBot / AfkBot)
-  --record <file>          write a jsonl packet capture
+ realm target (NetherNet, services signalling, Microsoft sign-in by YOU via device code):
+  --realm-name <name>      Realm to join by name (or --realm-invite <code> / --realm-id <id>)
+  --account <label>        token cache key, e.g. bot (required; not the gamertag)
+  --profiles-folder <dir>  token cache directory, must be outside the repo
+                           (default ${defaultProfilesFolder()})
+  --no-record              do not write the packet capture (on by default for realm)
+ recording:
+  --record <file>          write a jsonl packet capture (.gz = gzip); login is always redacted
   --record-raw             also store raw packet bytes in the capture (fixtures)
   --duration <s>           disconnect and exit 0 after this many seconds
   --exit-on-chat <s>       disconnect and exit 0 once a chat line containing <s> arrives
@@ -49,10 +64,18 @@ async function main(argv: string[]): Promise<number> {
     args,
     options: {
       task: { type: 'string', default: 'echo' },
-      host: { type: 'string', default: '127.0.0.1' },
-      port: { type: 'string', default: '19132' },
-      version: { type: 'string', default: '1.26.51' },
-      transport: { type: 'string', default: 'raknet' },
+      target: { type: 'string', default: 'bds' },
+      host: { type: 'string' },
+      port: { type: 'string' },
+      version: { type: 'string', default: process.env.BOT_VERSION ?? DEFAULT_VERSION },
+      transport: { type: 'string' },
+      signalling: { type: 'string' },
+      'realm-name': { type: 'string' },
+      'realm-invite': { type: 'string' },
+      'realm-id': { type: 'string' },
+      account: { type: 'string' },
+      'profiles-folder': { type: 'string' },
+      'no-record': { type: 'boolean', default: false },
       username: { type: 'string' },
       record: { type: 'string' },
       'record-raw': { type: 'boolean', default: false },
@@ -81,15 +104,68 @@ async function main(argv: string[]): Promise<number> {
     console.error(`unknown task "${taskName}"\n${USAGE}`);
     return 2;
   }
-  const transport = values.transport as Transport;
+  const targetKind = values.target;
+  if (targetKind !== 'bds' && targetKind !== 'realm') {
+    console.error(`unknown target "${targetKind}" (bds | realm)`);
+    return 2;
+  }
+  const transport = (values.transport ?? (targetKind === 'realm' ? 'nethernet' : 'raknet')) as Transport;
   if (transport !== 'raknet' && transport !== 'nethernet') {
     console.error(`unknown transport "${values.transport}"`);
     return 2;
   }
-  const port = Number(values.port);
+  const signalling = (values.signalling ?? (targetKind === 'realm' ? 'services' : 'lan')) as NethernetSignalling;
+  if (signalling !== 'lan' && signalling !== 'services') {
+    console.error(`unknown signalling "${values.signalling}" (lan | services)`);
+    return 2;
+  }
+  const port = Number(values.port ?? 19132);
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
     console.error(`bad port "${values.port}"`);
     return 2;
+  }
+  const host = values.host ?? '127.0.0.1';
+  let target: ConnectTarget;
+  if (targetKind === 'realm') {
+    // Guard rails (PLAN.md section 2 checklist): a Realm is joined online through services
+    // signalling only; refuse the offline/LAN options of a bds target instead of ignoring them.
+    const bad = [
+      values.host !== undefined && '--host',
+      values.port !== undefined && '--port',
+      transport !== 'nethernet' && `--transport ${transport}`,
+      signalling !== 'services' && `--signalling ${signalling}`,
+      values.username !== undefined && '--username (the in-game name is the gamertag of the signed-in account)',
+    ].filter((x): x is string => typeof x === 'string');
+    if (bad.length > 0) {
+      console.error(`--target realm does not take ${bad.join(', ')}: Realms are online-only (NetherNet, services signalling)`);
+      return 2;
+    }
+    if (!values.account) {
+      console.error('--target realm needs --account <label> (token cache key, e.g. bot)');
+      return 2;
+    }
+    const realm: RealmTarget = { kind: 'realm', accountName: values.account, profilesFolder: values['profiles-folder'] ?? defaultProfilesFolder() };
+    if (values['realm-name'] !== undefined) realm.realmName = values['realm-name'];
+    if (values['realm-invite'] !== undefined) realm.realmInvite = values['realm-invite'];
+    if (values['realm-id'] !== undefined) realm.realmId = values['realm-id'];
+    try {
+      realm.profilesFolder = validateRealmTarget(realm);
+    } catch (e) {
+      console.error(e instanceof RealmGuardError ? e.message : String(e));
+      return 2;
+    }
+    target = realm;
+  } else {
+    if (signalling !== 'lan') {
+      console.error('--signalling services needs a signed-in account: use --target realm');
+      return 2;
+    }
+    const realmOnly = (['realm-name', 'realm-invite', 'realm-id', 'account', 'profiles-folder'] as const).filter((k) => values[k] !== undefined);
+    if (realmOnly.length > 0) {
+      console.error(`${realmOnly.map((k) => `--${k}`).join(', ')} only valid with --target realm`);
+      return 2;
+    }
+    target = { kind: 'bds', host, port, transport, offline: true };
   }
   const nudgeS = Number(values['nudge-interval']);
   const metricsS = Number(values['metrics-interval']);
@@ -102,10 +178,18 @@ async function main(argv: string[]): Promise<number> {
   const logDir = resolve(values['log-dir'] ?? join(BOT_DIR, 'logs'));
   const disconnectPath = resolve(values['disconnect-log'] ?? join(logDir, 'disconnects.jsonl'));
   const metricsPath = resolve(values['metrics-file'] ?? join(logDir, 'metrics.json'));
-  const username = values.username ?? (taskName === 'afk' ? 'AfkBot' : 'EchoBot');
-  const server = `${values.host}:${port} (${transport})`;
+  const username = target.kind === 'realm' ? target.accountName : (values.username ?? (taskName === 'afk' ? 'AfkBot' : 'EchoBot'));
+  const server = target.kind === 'realm' ? realmLabel(target) : `${host}:${port} (${transport})`;
 
-  const recorder = values.record ? new PacketRecorder(values.record, { includeRaw: values['record-raw'] }) : undefined;
+  // Realm sessions are always recorded unless --no-record (PLAN.md task 1.6: "packet recorder on").
+  const recordPath =
+    values.record ?? (target.kind === 'realm' && !values['no-record'] ? join(logDir, `realm-${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl.gz`) : undefined);
+  const recorder = recordPath ? new PacketRecorder(recordPath, { includeRaw: values['record-raw'] }) : undefined;
+  if (target.kind === 'realm') {
+    mkdirSync(target.profilesFolder, { recursive: true });
+    log.info(`realm target: ${server}, account "${target.accountName}", token cache ${target.profilesFolder}, game version ${values.version}`);
+    log.info(recordPath ? `recording packets to ${recordPath} (login redacted)` : 'packet recording off (--no-record)');
+  }
   const conn = new Connection({
     version: values.version,
     username,
@@ -155,7 +239,7 @@ async function main(argv: string[]): Promise<number> {
     if (conn.state !== 'closed') await conn.disconnectAndFlush(why);
     metrics.stopWriter();
     await recorder?.close();
-    if (recorder) log.info(`recorded ${recorder.count} packets to ${values.record}`);
+    if (recorder) log.info(`recorded ${recorder.count} packets to ${recordPath}`);
     process.exit(code);
   };
 
@@ -192,7 +276,7 @@ async function main(argv: string[]): Promise<number> {
   log.info(`logs: ${disconnectPath}, ${metricsPath} (every ${metricsS} s)`);
   metrics.startWriter(metricsPath, metricsS * 1000);
   try {
-    await conn.connect({ kind: 'bds', host: values.host, port, transport, offline: true });
+    await conn.connect(target);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     log.error(`connect failed: ${msg}`);

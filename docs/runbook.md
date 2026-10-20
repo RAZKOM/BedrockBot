@@ -20,6 +20,25 @@ pnpm pack:deploy                    # (re)deploy the truth pack, e.g. after wipi
 `docker/compose.dev.yml` reads `PLAYER_IDLE_TIMEOUT` from `${BDS_IDLE_TIMEOUT:-0}`; changing it makes
 `docker compose up -d` recreate the container, the world in `docker/data/dev` is kept.
 
+Two more profiles run beside bds-dev (same settings: offline, flat world `dev`, peaceful, no idle
+kick; `scripts/bds.mjs` takes `--profile <name>` before or after the command):
+
+| Profile | Container | Compose file | BDS | Transport | Ports | Data |
+|---|---|---|---|---|---|---|
+| `dev` (default) | `bds-dev` | `docker/compose.dev.yml` | 1.26.51.1 | RakNet | udp/19132 | `docker/data/dev` |
+| `dev60` | `bds60` | `docker/compose.dev60.yml` | 1.26.60.6 | RakNet | udp/19134 | `docker/data/dev60` |
+| `nn` | `bds-nn` | `docker/compose.dev-nethernet.yml` | 1.26.51.1 | NetherNet (LAN) | tcp+udp/19140, udp/19160-19167 (WebRTC), udp/7551 (discovery) | `docker/data/nn` |
+
+```sh
+pnpm bds60:up                               # = node scripts/bds.mjs --profile dev60 up
+pnpm bdsnn:up                               # = node scripts/bds.mjs --profile nn up
+node scripts/bds.mjs --profile dev60 pack   # deploy the truth pack into docker/data/dev60 and restart
+node scripts/bds.mjs --profile nn cmd say hi
+```
+
+`BDS_CONTAINER=<container>` selects the profile too (the e2e suite sets it, so its
+`bds.mjs restart` restarts the container under test, not bds-dev).
+
 ### Bot
 
 ```sh
@@ -39,6 +58,12 @@ pnpm --filter bot start -- --help
 | `--log-dir <dir>` | `bot/logs` | `disconnects.jsonl` and `metrics.json` (git-ignored) |
 | `--metrics-interval <s>` | 60 | how often `metrics.json` is rewritten |
 | `--no-reconnect` | | exit (code 1) instead of reconnecting |
+| `--version <ver>` | `1.26.51` (env `BOT_VERSION`) | game version; `1.26.60` works through `patches/minecraft-data@3.117.0.patch` |
+| `--transport nethernet` | `raknet` | NetherNet with LAN signalling (local BDS); `--port` is then ignored |
+| `--target realm` | `bds` | see "Realm join (you do this)" below |
+
+Examples: `node src/index.ts --task echo --port 19134 --version 1.26.60` (bds60),
+`node src/index.ts --task echo --transport nethernet` (bds-nn), both run from `bot/`.
 
 Exit codes: 0 on `!quit`, SIGINT/SIGTERM or `--duration`; 1 when the connection is lost for good
 (or with `--no-reconnect`); 3 when the server and the bot speak different game versions (never
@@ -76,7 +101,17 @@ pnpm -r test                                   # unit tests
 pnpm lint
 BDS_E2E=1 pnpm --filter bot test:e2e           # e2e incl. reconnect (docker restart bds-dev), chat, AFK nudge
 BDS_E2E=1 BDS_SOAK=1 pnpm --filter bot exec vitest run --project e2e test/e2e/keepalive.test.ts --silent=false
+pnpm e2e:60                                    # whole e2e suite against bds60 (BDS 1.26.60.6, game version 1.26.60)
+pnpm e2e:nn                                    # whole e2e suite against bds-nn (NetherNet)
+cd bot && node scripts/e2e-profile.ts nn test/e2e/echo test/e2e/chat   # a subset
 ```
+
+`scripts/e2e-profile.ts` points every suite (BDS_*, BDS_WORLD_*, PHYS_BDS_*) at one container and
+sets `BOT_VERSION` / `BDS_TRANSPORT` (read by `bot/test/e2e/env.ts`). Without it the suite targets
+bds-dev, bds-world and bds-phys at 1.26.51 over RakNet, as before. The profile containers need
+the truth pack (`node scripts/bds.mjs --profile <name> pack`). Fixtures for another version:
+`cd bot && node scripts/record-fixture.ts --version 1.26.60 --port 19134 --bds 1.26.60.6` and
+`WORLD_RECORD=1 node scripts/e2e-profile.ts dev60 test/e2e/world-record.test.ts`.
 
 The soak recreates bds-dev with `PLAYER_IDLE_TIMEOUT=1`, runs the AFK CLI with a 30 s nudge for
 3 minutes (no kick, no correction), runs it again with nudges off (a kick, if any, must be
@@ -123,3 +158,119 @@ The reconnect e2e restarts bds-dev, so do not run it while someone else uses bds
   `client.viewDistance` itself (BDS answered a request of 4 with radius 5).
 - Two clients that start their RakNet handshake at the same moment from one host: one of them
   sometimes times out ("Connect timed out"). Connect test clients one after another.
+- NetherNet (bds-nn) and BDS 1.26.60.6 (bds60): results, timings and quirks are in
+  docs/versions.md. In short: everything above holds on both; NetherNet spawns about 1 s later;
+  BDS needs one WebRTC UDP port per concurrent NetherNet client (`SERVER_UDP_PORTS` range), or a
+  second client fails with `connecterror:9` and blocks all later joins until a restart.
+
+## Realm join (you do this)
+
+PLAN.md tasks 1.6 and 1.7. Agents never run this: it signs in to a Microsoft account and connects
+to a public service. The code path exists and is unit-tested with fakes only; **no Realm join has
+been tried yet**, so everything below that is not marked "verified" is expected behaviour from
+reading bedrock-protocol's source, not a measurement.
+
+### Prerequisites (PLAN.md section 2 checklist)
+
+1. **bedrock-protocol at or after PR #839**: done. `bot/package.json` pins the #839 merge commit
+   `c9e1fbf21dc6abde8d89920996575791b79e66cf` (docs/decisions/0004-protocol-pin.md). Check with
+   `pnpm --filter bot exec node -e "console.log(require('fs').readFileSync(require.resolve('bedrock-protocol/src/client/auth.js'),'utf8').includes('dns.promises.lookup'))"` (prints `true`).
+2. **Game version equal to the Realm's**: a Realm runs the current release (26.60 = `1.26.60` on
+   2026-10-28). Pass `--version 1.26.60` (works today through `patches/minecraft-data@3.117.0.patch`,
+   verified against BDS 1.26.60.6) or flip the default first (docs/versions.md). There is no ping
+   for a Realm, so the version gate cannot compare protocols before joining; a mismatch should show
+   up as a kick (`outdated_client` / `outdated_server`, never retried, exit code 3) or as a Realms
+   API error (*unverified which*). After a game update, run the playbook
+   (`tools/bump-version/playbook.md`) before rejoining.
+3. **A separate Microsoft account that owns Minecraft Bedrock**, invited to your Realm and with the
+   invite accepted (or use `--realm-invite <code>`). You sign in once through the device-code flow.
+   The token cache lives outside the repo; the bot never sees a password.
+4. **Keepalive**: the AFK task nudges every 240 s (`--nudge-interval`). The Realm idle kick is
+   unknown (community figure 10 to 15 min, PLAN.md fact 8b); measure it once (below).
+5. **Reconnect**: on by default (backoff 1 s doubling to 60 s, 20 % jitter). Each attempt signs in
+   from the cache and asks the Realms API for the join address again. *Unverified across Realm
+   restarts and game updates.*
+6. **Tell everyone who plays on the Realm** that a bot account is there.
+
+### Commands
+
+From the repo root, after `pnpm install`:
+
+```sh
+cd bot
+node src/index.ts --task afk --target realm --realm-name "Your Realm" --account bot --version 1.26.60 --owner YourGamertag
+```
+
+| Option | Meaning |
+|---|---|
+| `--realm-name <name>` | Realm as listed for the bot account (exact, else unique case-insensitive match). Or `--realm-invite <code or link>`, or `--realm-id <id>` (exactly one) |
+| `--account <label>` | cache key for the token files (any short label, e.g. `bot`); **not** the gamertag. The in-game name is the bot account's gamertag |
+| `--profiles-folder <dir>` | token cache; default `%LOCALAPPDATA%\bedrockbot\profiles` (`~/.bedrockbot/profiles` off Windows). Refused if it resolves inside the repo |
+| `--owner <gamertag>` | who may use `!status`, `!pos`, `!quit` in Realm chat (a Realm has no server console) |
+| `--no-record` | turn the packet capture off (on by default for a Realm) |
+
+Guard rails (exit code 2 before anything touches the network): `--host`, `--port`, `--username`,
+`--transport raknet` and `--signalling lan` are refused with `--target realm`; so is a
+`--profiles-folder` inside the repository, and a target without exactly one Realm selector.
+Realm options are built in `bot/src/connection/realm.ts`: `offline: false`, `realms.pickRealm`
+(or `realmInvite` / `realmId`), `authTitle` = Nintendo Switch title, `deviceType: 'Nintendo'`,
+`flow: 'live'` (bedrock-protocol's own defaults), `profilesFolder`, `transport: 'nethernet'`,
+`nethernet: { signalling: 'services' }`.
+
+**First run**: the bot logs `Microsoft sign-in needed: ... https://www.microsoft.com/link ...
+<code>`. Open the page, enter the code and sign in **with the bot's account** within 15 minutes
+(device codes expire; the attempt is abandoned after 15 min with `no Realm sign-in/join within
+900000 ms` and retried). Token files then appear in the profiles folder and later runs do not
+prompt (*refresh lifetime unverified*). To sign the bot out, stop it and delete that folder.
+
+Stop with Ctrl+C or `!quit` from an owner (clean disconnect, exit 0).
+
+### What to look for
+
+- Log lines, in order: `realm target: realm "Your Realm" (nethernet/services), account "bot",
+  token cache ...`, `recording packets to bot/logs/realm-<time>.jsonl.gz (login redacted)`,
+  `joining realm ...`, then `spawned as <gamertag>`.
+- `bot/logs/disconnects.jsonl`: one line per session end with `reason`, `kind`, the server's
+  `kick` (`{reason, message}`) and `spawnedMs`. `bot/logs/metrics.json`: uptime, reconnects, kicks
+  by reason.
+- `bot/logs/realm-*.jsonl.gz`: every packet; the `login` packet (identity chain and tokens) is
+  replaced by `[redacted]` and stores no bytes (unit-tested). It still contains gamertags, XUIDs and
+  chat of everyone on the Realm: keep it private (bot/logs is git-ignored) and delete it when done.
+- Expected failure messages and their first suspects:
+
+  | Message | Suspect |
+  |---|---|
+  | `no Realm called "..." for this account (Realms: ...)` | name typo, or the invite is not accepted |
+  | `Couldn't find a Realm to connect to` | the account is not owner or member |
+  | `getaddrinfo ENOTFOUND signal-...` | the #839 fix is missing (wrong bedrock-protocol) |
+  | `Signalling connection timed out` | services signalling WebSocket blocked, or token problem |
+  | `connecterror:<n>` | NetherNet/WebRTC negotiation failed (codes in `nethernet/src/signalling.js`; 9 = InactivityTimeout, 37 = identity not allowed) |
+  | `kicked: outdated_client` / `outdated_server` | game version mismatch (prerequisite 2) |
+  | `no Realm sign-in/join within ...` | device code not entered in time, or the Realms API hung |
+
+  Run with `--log-level debug` for bedrock-protocol's connection log, and `DEBUG=minecraft-protocol,nethernet`
+  for signalling and WebRTC details (prints no tokens as far as read; still keep it private).
+
+### Measuring the Realm idle kick (task 1.7)
+
+1. Join with nudges off: `--task afk --nudge-interval 0` (the AFK task still sends one standing
+   input right after spawn, like a real client). Do not move the bot from your own client.
+2. Wait. When the kick comes, `disconnects.jsonl` records `kick.reason` (on BDS it was
+   `kicked_for_idle` with an empty message), and `spawnedMs` is the idle time plus about one
+   second. With `--no-reconnect` the bot exits 1 instead of rejoining.
+3. If nothing happens within 30 minutes, record "no kick within 30 min".
+4. Then run with the default 240 s nudge (or half the measured kick time, whichever is shorter)
+   for at least twice the measured time: `metrics.json` must show `kicks.total` 0.
+
+Write the result into PLAN.md fact 8b and this runbook.
+
+### Known unknowns
+
+- Whether the Realms API or the server rejects a wrong game version first, and with what message.
+- The services-signalling path (JSON-RPC WebSocket, TURN credentials, werift through your NAT) has
+  never run in this project; only LAN signalling against BDS is verified.
+- The #839 DNS fallback is verified with stubbed DNS only.
+- Realm idle-kick time and reason; whether the client-side "press any button" AFK screen has a
+  server-side counterpart.
+- Reconnect across a Realm restart, a game update, and your own client joining or leaving.
+- How long the cached tokens stay valid before a new device code is needed.

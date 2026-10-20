@@ -18,6 +18,7 @@ import type { Vec3 } from '../../src/connection/types.ts';
 import { silentLogger } from '../../src/log.ts';
 import { AfkTask } from '../../src/tasks/afk.ts';
 import { BOT_DIR, bdsScript, connectObserver, E2E, HOST, PORT, SOAK, sleep, TARGET, truthQuery, VERSION, waitFor, type Observer } from './chat-helpers.ts';
+import { CLI_TARGET_ARGS } from './env.ts';
 
 interface TruthPos {
   location: Vec3;
@@ -66,7 +67,7 @@ interface CliRun {
 /** Run `node src/index.ts --task afk ...` until it exits (or is killed after maxMs). */
 function runAfkCli(args: string[], maxMs: number): Promise<CliRun> {
   const t0 = Date.now();
-  const child = spawn(process.execPath, ['src/index.ts', '--task', 'afk', '--host', HOST, '--port', String(PORT), ...args], {
+  const child = spawn(process.execPath, ['src/index.ts', '--task', 'afk', '--host', HOST, '--port', String(PORT), ...CLI_TARGET_ARGS, ...args], {
     cwd: BOT_DIR,
     stdio: ['ignore', 'ignore', 'pipe'],
   });

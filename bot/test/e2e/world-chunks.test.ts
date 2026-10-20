@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Connection } from '../../src/connection/connection.ts';
 import { silentLogger } from '../../src/log.ts';
 import { World } from '../../src/world/index.ts';
+import { E2E_VERSION } from './env.ts';
 import { typeIdOf } from '../../src/world/checksum.ts';
 import { E2E, Truth, WORLD_TARGET, boxPos, decodeBlocks, leave, rng, uniqueName } from './world-truth.ts';
 
@@ -16,8 +17,8 @@ describe.skipIf(!E2E)('@bds world chunks vs truth pack (bds-world)', () => {
   let truth: Truth;
 
   beforeAll(async () => {
-    conn = new Connection({ version: '1.26.51', username: uniqueName('WChunks'), logger: silentLogger, reconnect: false });
-    world = new World(conn, { logger: silentLogger });
+    conn = new Connection({ version: E2E_VERSION, username: uniqueName('WChunks'), logger: silentLogger, reconnect: false });
+    world = new World(conn, { version: E2E_VERSION, logger: silentLogger });
     truth = new Truth(conn);
     await conn.connect(WORLD_TARGET);
     // 48 blocks = 3 chunks around the spawn chunk; wait for 4 to be safe.

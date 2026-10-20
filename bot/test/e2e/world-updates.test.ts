@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Connection } from '../../src/connection/connection.ts';
 import { silentLogger } from '../../src/log.ts';
 import { World } from '../../src/world/index.ts';
+import { E2E_VERSION } from './env.ts';
 import type { Vec3 } from '../../src/world/types.ts';
 import { E2E, Truth, WORLD_TARGET, leave, pollUntil, rng, uniqueName } from './world-truth.ts';
 
@@ -22,8 +23,8 @@ describe.skipIf(!E2E)('@bds world block updates vs truth pack (bds-world)', () =
   const k = (p: Vec3) => `${p.x},${p.y},${p.z}`;
 
   beforeAll(async () => {
-    conn = new Connection({ version: '1.26.51', username: uniqueName('WUpdates'), logger: silentLogger, reconnect: false });
-    world = new World(conn, { logger: silentLogger });
+    conn = new Connection({ version: E2E_VERSION, username: uniqueName('WUpdates'), logger: silentLogger, reconnect: false });
+    world = new World(conn, { version: E2E_VERSION, logger: silentLogger });
     truth = new Truth(conn);
     await conn.connect(WORLD_TARGET);
     await world.waitForChunks(3, { timeoutMs: 30_000 });

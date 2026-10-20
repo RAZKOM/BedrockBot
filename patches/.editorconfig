@@ -1,0 +1,4 @@
+# Patch files are byte-exact (pnpm hashes them): never trim whitespace or add newlines.
+[*.patch]
+trim_trailing_whitespace = false
+insert_final_newline = false

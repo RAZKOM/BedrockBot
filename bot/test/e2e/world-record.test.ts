@@ -1,4 +1,4 @@
-// Records fixtures/1.26.51/world-chunks.jsonl.gz (login, chunk load, a block-update burst, an item
+// Records fixtures/<BOT_VERSION, default 1.26.51>/world-chunks.jsonl.gz (login, chunk load, a block-update burst, an item
 // drop and a give) against bds-world, with the truth pack's answers inside the capture as `@truth`
 // text packets, so test/unit/world/world-replay.test.ts can check the world model offline.
 // Opt-in only (it rewrites a committed fixture):
@@ -10,30 +10,33 @@ import { Connection } from '../../src/connection/connection.ts';
 import { PacketRecorder } from '../../src/connection/recorder.ts';
 import { silentLogger } from '../../src/log.ts';
 import { World } from '../../src/world/index.ts';
+import { E2E_TRANSPORT, E2E_VERSION } from './env.ts';
 import type { Vec3 } from '../../src/world/types.ts';
 import { E2E, Truth, WORLD_CONTAINER, WORLD_TARGET, consoleCommand, pollUntil, rng, sleep } from './world-truth.ts';
 
 const RECORD = process.env.WORLD_RECORD === '1';
-const OUT = fileURLToPath(new URL('../../../fixtures/1.26.51/world-chunks.jsonl.gz', import.meta.url));
+const OUT = fileURLToPath(new URL(`../../../fixtures/${E2E_VERSION}/world-chunks.jsonl.gz`, import.meta.url));
+/** BDS build and image, for the fixture header (env BDS_BUILD, default the 1.26.51 dev server). */
+const BDS_BUILD = process.env.BDS_BUILD ?? '1.26.51.1';
 const require = createRequire(import.meta.url);
 const USERNAME = 'WorldFixture';
 
-describe.skipIf(!E2E || !RECORD)('@bds record fixtures/1.26.51/world-chunks.jsonl.gz', () => {
+describe.skipIf(!E2E || !RECORD)(`@bds record fixtures/${E2E_VERSION}/world-chunks.jsonl.gz`, () => {
   it('records login, chunk load, update burst, item drop and give', async () => {
     const recorder = new PacketRecorder(OUT, { includeRaw: true });
     const pkg = (n: string) => (require(`${n}/package.json`) as { version: string }).version;
     recorder.record('meta', 'fixture', {
       kind: 'world-chunks',
-      gameVersion: '1.26.51',
+      gameVersion: E2E_VERSION,
       chunkRadius: 10, // bedrock-protocol 3.60.1 always requests 10 (ConnectionOptions.viewDistance is not applied)
-      bds: '1.26.51.1 (itzg/minecraft-bedrock-server:2026.10.2, flat world "world", offline, truth pack 0.1.0)',
+      bds: `${BDS_BUILD} (itzg/minecraft-bedrock-server:2026.10.2, flat world, ${E2E_TRANSPORT}, offline, truth pack 0.1.0)`,
       bedrockProtocol: pkg('bedrock-protocol'),
       minecraftData: pkg('minecraft-data'),
       recordedAt: new Date().toISOString(),
       note: 'truth replies are recorded as text packets; the unit replay compares the model at each reply',
     });
-    const conn = new Connection({ version: '1.26.51', username: USERNAME, logger: silentLogger, reconnect: false, recorder });
-    const world = new World(conn, { logger: silentLogger });
+    const conn = new Connection({ version: E2E_VERSION, username: USERNAME, logger: silentLogger, reconnect: false, recorder });
+    const world = new World(conn, { version: E2E_VERSION, logger: silentLogger });
     const truth = new Truth(conn);
     // Clean area first (not part of the interesting burst, but recorded).
     await consoleCommand(WORLD_CONTAINER, 'kill', '@e[type=item]');

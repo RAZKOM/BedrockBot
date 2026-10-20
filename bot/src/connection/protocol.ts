@@ -49,3 +49,11 @@ export function createDeserializer(version: string): PacketParser {
 export function createSerializer(version: string): PacketSerializer {
   return serializer.createSerializer(version);
 }
+
+// prismarine-auth is bedrock-protocol's dependency (not ours): resolve it from bedrock-protocol so
+// the title ids always match the auth code that uses them.
+const bedrockRequire = createRequire(require.resolve('bedrock-protocol'));
+const prismarineAuth = bedrockRequire('prismarine-auth') as { Titles: Record<string, string> };
+
+/** Xbox Live title ids known to prismarine-auth (`authTitle` option). */
+export const authTitles: Readonly<Record<string, string>> = prismarineAuth.Titles;

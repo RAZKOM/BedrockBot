@@ -3,13 +3,15 @@
 // as text packets) by request id. Targets the bds-world container on udp/19142 by default.
 import { execFile } from 'node:child_process';
 import { ReplyParser, rleDecode, textOf, type Reply } from '../../../packs/truth/src/protocol.ts';
-import type { ConnectTarget } from '../../src/connection/types.ts';
+import type { BdsTarget } from '../../src/connection/types.ts';
+import { bdsTarget } from './env.ts';
 
 export const E2E = process.env.BDS_E2E === '1';
 export const WORLD_CONTAINER = process.env.BDS_WORLD_CONTAINER ?? 'bds-world';
 export const WORLD_HOST = process.env.BDS_WORLD_HOST ?? '127.0.0.1';
 export const WORLD_PORT = Number(process.env.BDS_WORLD_PORT ?? 19142);
-export const WORLD_TARGET: ConnectTarget = { kind: 'bds', host: WORLD_HOST, port: WORLD_PORT, transport: 'raknet', offline: true };
+/** Transport from env BDS_TRANSPORT (env.ts). */
+export const WORLD_TARGET: BdsTarget = bdsTarget(WORLD_HOST, WORLD_PORT);
 
 export interface TextSource {
   on(name: 'text', fn: (p: { type?: string; message?: string }) => void): () => void;

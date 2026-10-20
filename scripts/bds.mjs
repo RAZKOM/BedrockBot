@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Dev BDS helper (PLAN.md task 0.2). Only ever touches the container `bds-dev`.
+// Dev BDS helper (PLAN.md task 0.2). Touches only the container of the selected profile; the
+// default profile is `bds-dev` (docker/compose.dev.yml, udp/19132).
 //   node scripts/bds.mjs up      start docker/compose.dev.yml and wait for "Server started."
 //   node scripts/bds.mjs down    stop and remove bds-dev (data in docker/data/dev is kept)
 //   node scripts/bds.mjs restart `docker restart bds-dev` and wait for "Server started."
@@ -7,14 +8,43 @@
 // Env: BDS_IDLE_TIMEOUT=<minutes> for `up` recreates bds-dev with that idle kick (default 0 = off).
 //   node scripts/bds.mjs cmd ... run a console command, e.g. `cmd say hi`
 //   node scripts/bds.mjs logs    follow the server log
+//   node scripts/bds.mjs pack    deploy the truth pack (packs/truth) into the profile's data dir and restart
+// Profiles (PLAN.md tasks 1.4 and 1.5), chosen with `--profile <name>` anywhere on the command line
+// or with env BDS_CONTAINER=<container> (the e2e suite sets it):
+//   dev    bds-dev  docker/compose.dev.yml            BDS 1.26.51.1, RakNet    udp/19132 (default)
+//   dev60  bds60    docker/compose.dev60.yml          BDS 1.26.60.6, RakNet    udp/19134
+//   nn     bds-nn   docker/compose.dev-nethernet.yml  BDS 1.26.51.1, NetherNet tcp+udp/19140, udp/19160-19167, udp/7551
+// Any other BDS_CONTAINER value works for restart/idle/cmd/logs only.
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const COMPOSE = join(ROOT, 'docker', 'compose.dev.yml')
-const CONTAINER = 'bds-dev'
+const PROFILES = {
+  dev: { container: 'bds-dev', compose: 'compose.dev.yml', data: 'dev', port: 'udp/19132' },
+  dev60: { container: 'bds60', compose: 'compose.dev60.yml', data: 'dev60', port: 'udp/19134' },
+  nn: { container: 'bds-nn', compose: 'compose.dev-nethernet.yml', data: 'nn', port: 'tcp+udp/19140, WebRTC udp/19160-19167, discovery udp/7551 (NetherNet)' },
+}
+const argv = process.argv.slice(2)
+const profileFlag = argv.indexOf('--profile')
+const profileName = profileFlag >= 0 ? argv.splice(profileFlag, 2)[1] : undefined
+if (profileName !== undefined && !PROFILES[profileName]) {
+  console.error(`unknown profile "${profileName}" (${Object.keys(PROFILES).join(', ')})`)
+  process.exit(2)
+}
+const PROFILE = profileName
+  ? PROFILES[profileName]
+  : process.env.BDS_CONTAINER
+    ? (Object.values(PROFILES).find((p) => p.container === process.env.BDS_CONTAINER) ?? { container: process.env.BDS_CONTAINER })
+    : PROFILES.dev
+const COMPOSE = PROFILE.compose ? join(ROOT, 'docker', PROFILE.compose) : undefined
+const CONTAINER = PROFILE.container
 const STARTED = 'Server started.'
+
+function needCompose () {
+  if (!COMPOSE) throw new Error(`no compose file for container ${CONTAINER}; use --profile ${Object.keys(PROFILES).join('|')}`)
+  return COMPOSE
+}
 
 function run (args, opts = {}) {
   const r = spawnSync('docker', args, { stdio: opts.capture ? ['ignore', 'pipe', 'pipe'] : 'inherit', encoding: 'utf8' })
@@ -42,15 +72,15 @@ async function waitStarted (timeoutMs) {
   throw new Error(`${CONTAINER} did not log "${STARTED}" within ${timeoutMs / 1000} s (first run downloads BDS, ~100 MB)`)
 }
 
-const [cmd, ...rest] = process.argv.slice(2)
+const [cmd, ...rest] = argv
 try {
   switch (cmd) {
     case 'up': {
       const t0 = Date.now()
-      const r = run(['compose', '-f', COMPOSE, 'up', '-d'])
+      const r = run(['compose', '-f', needCompose(), 'up', '-d'])
       if (r.status !== 0) process.exit(r.status ?? 1)
       await waitStarted(Number(process.env.BDS_UP_TIMEOUT_MS ?? 180_000))
-      console.log(`${CONTAINER}: Server started (${((Date.now() - t0) / 1000).toFixed(1)} s) on udp/19132, player-idle-timeout=${process.env.BDS_IDLE_TIMEOUT ?? 0}`)
+      console.log(`${CONTAINER}: Server started (${((Date.now() - t0) / 1000).toFixed(1)} s) on ${PROFILE.port ?? '?'}, player-idle-timeout=${process.env.BDS_IDLE_TIMEOUT ?? 0}`)
       break
     }
     case 'restart': {
@@ -68,18 +98,28 @@ try {
       break
     }
     case 'down':
-      process.exit(run(['compose', '-f', COMPOSE, 'down']).status ?? 1)
+      process.exit(run(['compose', '-f', needCompose(), 'down']).status ?? 1)
       break
     case 'cmd': {
       if (rest.length === 0) throw new Error('usage: bds:cmd <console command...>')
       process.exit(run(['exec', CONTAINER, 'send-command', ...rest]).status ?? 1)
       break
     }
+    case 'pack': {
+      if (!PROFILE.data) throw new Error(`no data dir known for container ${CONTAINER}; use --profile ${Object.keys(PROFILES).join('|')}`)
+      const t0 = Date.now()
+      const deploy = join(ROOT, 'packs', 'truth', 'scripts', 'deploy.mjs')
+      const r = spawnSync(process.execPath, [deploy, '--data', join(ROOT, 'docker', 'data', PROFILE.data), '--restart', CONTAINER], { stdio: 'inherit' })
+      if (r.status !== 0) process.exit(r.status ?? 1)
+      await waitStarted(Number(process.env.BDS_UP_TIMEOUT_MS ?? 180_000))
+      console.log(`${CONTAINER}: truth pack deployed, restarted (${((Date.now() - t0) / 1000).toFixed(1)} s)`)
+      break
+    }
     case 'logs':
       process.exit(run(['logs', '-f', '--tail', String(process.env.BDS_LOG_TAIL ?? 100), CONTAINER]).status ?? 1)
       break
     default:
-      console.error('usage: node scripts/bds.mjs up|down|restart|idle|cmd <command...>|logs')
+      console.error('usage: node scripts/bds.mjs [--profile dev|dev60|nn] up|down|restart|idle|cmd <command...>|logs|pack')
       process.exit(2)
   }
 } catch (err) {

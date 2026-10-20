@@ -16,6 +16,10 @@
     "pack:deploy": "pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/dev --restart bds-dev && node scripts/bds.mjs up",
     "test": "pnpm -r --if-present test",
     "lint": "pnpm -r --if-present lint",
-    "bot:afk": "pnpm --filter bot start -- --task afk"
+    "bot:afk": "pnpm --filter bot start -- --task afk",
+    "bds60:up": "node scripts/bds.mjs --profile dev60 up",
+    "bdsnn:up": "node scripts/bds.mjs --profile nn up",
+    "e2e:60": "pnpm --filter bot exec node scripts/e2e-profile.ts dev60",
+    "e2e:nn": "pnpm --filter bot exec node scripts/e2e-profile.ts nn"
   }
 }

@@ -2,6 +2,7 @@
 // VersionShim and list it in SHIMS (newest first). See docs/world-model.md.
 import type { ItemRegistry, ItemStateEntry, StartGame } from '../packets.ts';
 import { shim_1_26_51 } from './1.26.51.ts';
+import { shim_1_26_60 } from './1.26.60.ts';
 
 export interface DimensionInfo {
   /** Lowest block y. */
@@ -28,7 +29,9 @@ export interface VersionShim {
   maxSubChunkVersion: number;
 }
 
-export const SHIMS: readonly VersionShim[] = [shim_1_26_51];
+// SHIMS[0] is also the fallback for unknown versions. 1.26.51 stays first until the default game
+// version flips to 1.26.60 (docs/versions.md); then move shim_1_26_60 to the front.
+export const SHIMS: readonly VersionShim[] = [shim_1_26_51, shim_1_26_60];
 
 /** The shim for `version`, or undefined when no shim lists it. */
 export function shimFor(version: string): VersionShim | undefined {

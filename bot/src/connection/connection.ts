@@ -6,9 +6,11 @@ import type { ClientOptions } from 'bedrock-protocol';
 import { backoffDelay, defaultBackoff, type BackoffPolicy } from './backoff.ts';
 import type { PacketRecorder } from './recorder.ts';
 import type { PacketSerializer } from './protocol.ts';
+import { buildRealmClientOptions, realmLabel, validateRealmTarget, type DeviceCodePrompt } from './realm.ts';
 import { checkVersion } from './versionGate.ts';
 import type {
   AnyPacket,
+  BdsTarget,
   CloseInfo,
   CloseKind,
   ConnectionState,
@@ -45,10 +47,12 @@ export interface ServerInfo {
   version: string | undefined;
   motd: string | undefined;
   levelName: string | undefined;
+  /** NetherNet only: the server's network id from LAN discovery (needed to connect). */
+  networkId?: bigint;
 }
 
 export type ClientFactory = (opts: ClientOptions) => ProtocolClient;
-export type PingFn = (target: Extract<ConnectTarget, { kind: 'bds' }>, timeoutMs: number) => Promise<ServerInfo>;
+export type PingFn = (target: BdsTarget, timeoutMs: number) => Promise<ServerInfo>;
 
 export interface ReconnectPolicy extends BackoffPolicy {
   enabled: boolean;
@@ -68,12 +72,19 @@ export interface ConnectionOptions {
   /** Close and retry when spawn has not happened within this many ms. Default 30 000. */
   spawnTimeoutMs?: number;
   pingTimeoutMs?: number;
+  /** Realm targets: how long sign-in plus the Realms join call may take before the attempt is abandoned. Default 15 min (device codes expire after 15 min). */
+  authTimeoutMs?: number;
   /**
    * Chunk radius requested from the server (request_chunk_radius). Default 10. A bds target's
    * `viewDistance` overrides it. Applied to the client object directly, because bedrock-protocol
    * 3.60.1 reads `client.viewDistance` and ignores the createClient option.
    */
   viewDistance?: number;
+  /**
+   * Realm targets: shows the Microsoft device-code prompt when the token cache in profilesFolder
+   * has no valid token (the human signs in; see docs/runbook.md). Default: log.warn(prompt.message).
+   */
+  onDeviceCode?: (prompt: DeviceCodePrompt) => void;
   /** Test seams. */
   createClient?: ClientFactory;
   ping?: PingFn;
@@ -127,7 +138,9 @@ const defaultPing: PingFn = async (target, timeoutMs) => {
   if (ad.transport === 'raknet') {
     return { transport: 'raknet', protocol: Number(ad.protocol), version: ad.version, motd: ad.motd, levelName: ad.levelName };
   }
-  return { transport: 'nethernet', protocol: ad.protocol ? Number(ad.protocol) : undefined, version: ad.gameVersion, motd: ad.motd, levelName: ad.levelName };
+  const info: ServerInfo = { transport: 'nethernet', protocol: ad.protocol ? Number(ad.protocol) : undefined, version: ad.gameVersion, motd: ad.motd, levelName: ad.levelName };
+  if (ad.networkId !== undefined && ad.networkId !== null) info.networkId = BigInt(ad.networkId);
+  return info;
 };
 
 function errorMessage(e: unknown): string {
@@ -142,9 +155,11 @@ export class Connection {
   private readonly reconnectPolicy: ReconnectPolicy;
   private readonly spawnTimeoutMs: number;
   private readonly pingTimeoutMs: number;
+  private readonly authTimeoutMs: number;
   private readonly viewDistance: number;
   private readonly makeClient: ClientFactory;
   private readonly pingServer: PingFn;
+  private readonly onDeviceCode: (prompt: DeviceCodePrompt) => void;
 
   private _state: ConnectionState = 'idle';
   private _gameVersion: string;
@@ -153,7 +168,7 @@ export class Connection {
   private _spawnPosition: Vec3 | undefined;
   private _serverInfo: ServerInfo | undefined;
 
-  private target: Extract<ConnectTarget, { kind: 'bds' }> | undefined;
+  private target: ConnectTarget | undefined;
   private client: ProtocolClient | undefined;
   private session = 0;
   private attempt = 0;
@@ -187,9 +202,15 @@ export class Connection {
     this.reconnectPolicy = { ...defaultBackoff, enabled: true, maxAttempts: Infinity, ...r };
     this.spawnTimeoutMs = opts.spawnTimeoutMs ?? 30_000;
     this.pingTimeoutMs = opts.pingTimeoutMs ?? 3_000;
+    this.authTimeoutMs = opts.authTimeoutMs ?? 15 * 60_000;
     this.viewDistance = opts.viewDistance ?? 10;
     this.makeClient = opts.createClient ?? defaultCreateClient;
     this.pingServer = opts.ping ?? defaultPing;
+    this.onDeviceCode =
+      opts.onDeviceCode ??
+      ((p) => {
+        this.log.warn(`Microsoft sign-in needed: ${p.message ?? `open ${p.verification_uri ?? 'https://www.microsoft.com/link'} and enter code ${p.user_code ?? '?'}`}`);
+      });
   }
 
   get state(): ConnectionState {
@@ -219,7 +240,11 @@ export class Connection {
   /** Resolves on the first spawn. Rejects on a version-gate refusal or when retries are exhausted. */
   connect(target: ConnectTarget): Promise<void> {
     if (target.kind === 'realm') {
-      return Promise.reject(new Error('Realm targets are not implemented yet (PLAN.md task 1.6)'));
+      try {
+        validateRealmTarget(target);
+      } catch (e) {
+        return Promise.reject(e instanceof Error ? e : new Error(String(e)));
+      }
     }
     if (this._state === 'connecting' || this._state === 'spawned') {
       return Promise.reject(new Error(`connect() called while ${this._state}`));
@@ -342,6 +367,28 @@ export class Connection {
     if (!target || this.userClosed) return;
     const session = ++this.session;
     this.setState('connecting');
+    if (target.kind === 'realm') {
+      this.recorder?.record('meta', 'connect', { target: realmLabel(target), transport: 'nethernet', signalling: 'services', version: this.version, attempt: this.attempt });
+      let realmOpts: ClientOptions;
+      try {
+        realmOpts = buildRealmClientOptions(target, {
+          version: this.version,
+          viewDistance: this.viewDistance,
+          conLog: (...args: unknown[]) => {
+            this.log.debug(args.map(String).join(' '));
+          },
+          onMsaCode: (p) => {
+            this.onDeviceCode(p);
+          },
+        });
+      } catch (e) {
+        this.fail(e instanceof Error ? e : new Error(String(e)));
+        return;
+      }
+      this.log.info(`joining ${realmLabel(target)} as account "${target.accountName}" (token cache ${String(realmOpts.profilesFolder)})`);
+      this.startClient(session, realmOpts, target.viewDistance ?? this.viewDistance);
+      return;
+    }
     this.recorder?.record('meta', 'connect', { host: target.host, port: target.port, transport: target.transport, version: this.version, attempt: this.attempt });
 
     let info: ServerInfo;
@@ -377,8 +424,16 @@ export class Connection {
         this.log.debug(args.map(String).join(' '));
       },
     };
-    if (target.transport === 'nethernet') opts.nethernet = { signalling: 'lan' };
+    if (target.transport === 'nethernet') {
+      // LAN signalling: the network id comes from our discovery ping. Without it, let
+      // bedrock-protocol run its own discovery (it refuses to connect with no network id).
+      opts.nethernet = info.networkId !== undefined ? { signalling: 'lan', networkId: info.networkId } : { signalling: 'lan' };
+      if (info.networkId === undefined) opts.skipPing = false;
+    }
+    this.startClient(session, opts, target.viewDistance ?? this.viewDistance);
+  }
 
+  private startClient(session: number, opts: ClientOptions, viewDistance: number): void {
     let client: ProtocolClient;
     try {
       client = this.makeClient(opts);
@@ -387,17 +442,30 @@ export class Connection {
       return;
     }
     // bedrock-protocol 3.60.1 ignores options.viewDistance and requests client.viewDistance || 10.
-    client.viewDistance = target.viewDistance ?? this.viewDistance;
+    client.viewDistance = viewDistance;
     this.client = client;
     this.attach(client, session);
-    this.spawnTimer = setTimeout(() => {
-      if (session === this.session && this._state !== 'spawned') {
-        const end: EndReason = { reason: `no spawn within ${this.spawnTimeoutMs} ms`, kind: 'timeout' };
-        this.lastReason.set(session, end);
-        client.close();
-        this.endSession(session, end);
-      }
-    }, this.spawnTimeoutMs);
+    const timeout = (ms: number, what: string) =>
+      setTimeout(() => {
+        if (session === this.session && this._state !== 'spawned') {
+          const end: EndReason = { reason: `${what} within ${ms} ms`, kind: 'timeout' };
+          this.lastReason.set(session, end);
+          client.close();
+          this.endSession(session, end);
+        }
+      }, ms);
+    if (opts.realms) {
+      // Realm: sign-in (possibly a device code the human has to enter) and the Realms API call happen
+      // before bedrock-protocol emits connect_allowed; only then does the normal spawn timeout start.
+      this.spawnTimer = timeout(this.authTimeoutMs, 'no Realm sign-in/join');
+      client.on('connect_allowed', () => {
+        if (session !== this.session) return;
+        clearTimeout(this.spawnTimer);
+        this.spawnTimer = timeout(this.spawnTimeoutMs, 'no spawn');
+      });
+    } else {
+      this.spawnTimer = timeout(this.spawnTimeoutMs, 'no spawn');
+    }
   }
 
   private attach(client: ProtocolClient, session: number): void {

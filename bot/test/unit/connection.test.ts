@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { VersionGateError } from '../../src/connection/connection.ts';
 import { PacketRecorder, parseRecording } from '../../src/connection/recorder.ts';
 import type { CloseInfo } from '../../src/connection/types.ts';
-import { flush, INFO, setup, TARGET } from './connection-fakes.ts';
+import type { ClientOptions } from 'bedrock-protocol';
+import { FakeClient, flush, INFO, setup, TARGET } from './connection-fakes.ts';
 
 describe('Connection', () => {
   beforeEach(() => {
@@ -29,9 +30,11 @@ describe('Connection', () => {
     expect(closes).toEqual([expect.objectContaining({ willReconnect: false })]);
   });
 
-  it('rejects realm targets (not implemented yet)', async () => {
-    const { conn } = setup();
-    await expect(conn.connect({ kind: 'realm', profilesFolder: '/tmp/x' })).rejects.toThrow(/not implemented/);
+  it('refuses a Realm target whose token cache would live inside the repository', async () => {
+    const { conn, clients, ping } = setup();
+    await expect(conn.connect({ kind: 'realm', realmName: 'R', accountName: 'bot', profilesFolder: '.' })).rejects.toThrow(/inside the repository/);
+    expect(ping).not.toHaveBeenCalled();
+    expect(clients).toHaveLength(0);
   });
 
   it('performs the spawn handshake and resolves on spawn', async () => {
@@ -203,5 +206,32 @@ describe('Connection', () => {
     ]);
     expect(recs.find((r) => r.name === 'start_game')?.params).toMatchObject({ runtime_entity_id: '5' });
     expect(recs.find((r) => r.name === 'text')?.tick).toBe(2);
+  });
+
+  it('NetherNet (LAN signalling) passes the network id from discovery to createClient', async () => {
+    const opts: ClientOptions[] = [];
+    const { conn, clients } = setup(
+      { createClient: (o) => { opts.push(o); const c = new FakeClient(); clients.push(c); return c; } },
+      { transport: 'nethernet', protocol: undefined, version: '1.26.51', motd: 'bds-nn', levelName: 'dev', networkId: 1234567890123n },
+    );
+    const p = conn.connect({ ...TARGET, port: 19140, transport: 'nethernet' });
+    await flush();
+    expect(opts[0]).toMatchObject({ transport: 'nethernet', nethernet: { signalling: 'lan', networkId: 1234567890123n }, skipPing: true, offline: true });
+    clients[0]!.spawn();
+    await p;
+    conn.disconnect();
+  });
+
+  it('NetherNet without a network id lets bedrock-protocol run its own discovery', async () => {
+    const opts: ClientOptions[] = [];
+    const { conn, clients } = setup(
+      { createClient: (o) => { opts.push(o); const c = new FakeClient(); clients.push(c); return c; } },
+      { transport: 'nethernet', protocol: undefined, version: undefined, motd: undefined, levelName: undefined },
+    );
+    void conn.connect({ ...TARGET, port: 19140, transport: 'nethernet' }).catch(() => {});
+    await flush();
+    expect(opts[0]).toMatchObject({ transport: 'nethernet', nethernet: { signalling: 'lan' }, skipPing: false });
+    expect(opts[0]!.nethernet).not.toHaveProperty('networkId');
+    conn.disconnect();
   });
 });

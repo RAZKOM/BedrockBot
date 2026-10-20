@@ -11,7 +11,8 @@ import { supportedVersions } from '../../src/connection/protocol.ts';
 import { PacketRecorder, parseRecording } from '../../src/connection/recorder.ts';
 import type { CloseInfo } from '../../src/connection/types.ts';
 import { silentLogger } from '../../src/log.ts';
-import { bdsCmd, bdsScript, E2E, PORT, sleep, TARGET, VERSION, waitFor } from './chat-helpers.ts';
+import { bdsCmd, bdsScript, E2E, HOST, PORT, sleep, TARGET, VERSION, waitFor } from './chat-helpers.ts';
+import { E2E_TRANSPORT } from './env.ts';
 
 describe.skipIf(!E2E)('@bds reconnect against bds-dev', () => {
   let dir: string;
@@ -40,7 +41,7 @@ describe.skipIf(!E2E)('@bds reconnect against bds-dev', () => {
       pingTimeoutMs: 2_000,
     });
     const log = new DisconnectLog(logFile);
-    log.attach(c, `127.0.0.1:${PORT} (raknet)`);
+    log.attach(c, `${HOST}:${PORT} (${E2E_TRANSPORT})`);
     const closes: CloseInfo[] = [];
     c.onClose((i) => closes.push(i));
     let spawns = 0;

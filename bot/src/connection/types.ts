@@ -4,18 +4,46 @@
 
 export type Transport = 'raknet' | 'nethernet';
 
-export type ConnectTarget =
-  | {
-      kind: 'bds';
-      host: string;
-      port: number;
-      transport: Transport;
-      offline: true;
-      /** Chunk radius to request; overrides ConnectionOptions.viewDistance. */
-      viewDistance?: number;
-    }
-  // Sign-in is done by the human through the device-code flow, never by code (Phase 1.6).
-  | { kind: 'realm'; realmInvite?: string; realmId?: string; profilesFolder: string };
+/**
+ * How a NetherNet client finds the server and exchanges WebRTC offers: 'lan' = LAN discovery on
+ * UDP 7551 (local BDS, offline), 'services' = the Minecraft services signalling WebSocket (Realms;
+ * needs a signed-in account).
+ */
+export type NethernetSignalling = 'lan' | 'services';
+
+/** A local BDS in offline mode (online-mode=false). */
+export interface BdsTarget {
+  kind: 'bds';
+  host: string;
+  /** RakNet port. NetherNet with LAN signalling ignores it (discovery is on UDP 7551). */
+  port: number;
+  transport: Transport;
+  offline: true;
+  /** Chunk radius to request; overrides ConnectionOptions.viewDistance. */
+  viewDistance?: number;
+}
+
+/**
+ * A Realm (PLAN.md task 1.6). Realms are NetherNet-only with services signalling. Sign-in is done by
+ * the human through the device-code flow, never by code; the token cache lives in profilesFolder,
+ * which must be outside the repository. Exactly one of realmName, realmInvite, realmId.
+ */
+export interface RealmTarget {
+  kind: 'realm';
+  /** Realm name as shown in the Realms list (exact match, else a unique case-insensitive match). */
+  realmName?: string;
+  /** Invite code or link. */
+  realmInvite?: string;
+  realmId?: string;
+  /** Token cache key for prismarine-auth (a local label, e.g. 'bot'); the in-game name is the account's gamertag. */
+  accountName: string;
+  /** Token cache directory (absolute, outside the repo). */
+  profilesFolder: string;
+  /** Chunk radius to request; overrides ConnectionOptions.viewDistance. */
+  viewDistance?: number;
+}
+
+export type ConnectTarget = BdsTarget | RealmTarget;
 
 export type ConnectionState = 'idle' | 'connecting' | 'spawned' | 'closed';
 

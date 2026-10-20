@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Connection } from '../../src/connection/connection.ts';
 import { silentLogger } from '../../src/log.ts';
 import { World } from '../../src/world/index.ts';
+import { E2E_VERSION } from './env.ts';
 import type { EntityInfo, Vec3 } from '../../src/world/types.ts';
 import { E2E, Truth, WORLD_CONTAINER, WORLD_TARGET, consoleCommand, leave, pollUntil, sleep, uniqueName } from './world-truth.ts';
 
@@ -29,8 +30,8 @@ describe.skipIf(!E2E)('@bds world entities and inventory vs truth pack (bds-worl
   const firstSeen = new Map<bigint, Vec3>();
 
   beforeAll(async () => {
-    conn = new Connection({ version: '1.26.51', username: name, logger: silentLogger, reconnect: false });
-    world = new World(conn, { logger: silentLogger });
+    conn = new Connection({ version: E2E_VERSION, username: name, logger: silentLogger, reconnect: false });
+    world = new World(conn, { version: E2E_VERSION, logger: silentLogger });
     truth = new Truth(conn);
     world.entityTracker.onAdd((e: EntityInfo) => firstSeen.set(e.uniqueId, { ...e.pos }));
     await conn.connect(WORLD_TARGET);

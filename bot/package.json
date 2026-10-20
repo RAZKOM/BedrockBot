@@ -16,7 +16,7 @@
     "record:fixture": "node scripts/record-fixture.ts"
   },
   "dependencies": {
-    "bedrock-protocol": "3.60.1",
+    "bedrock-protocol": "github:PrismarineJS/bedrock-protocol#c9e1fbf21dc6abde8d89920996575791b79e66cf",
     "minecraft-data": "3.117.0",
     "prismarine-chunk": "1.41.0",
     "prismarine-nbt": "2.8.0",

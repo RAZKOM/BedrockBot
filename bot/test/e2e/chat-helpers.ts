@@ -4,15 +4,17 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { parseTruthReply, rawTextToPlain, stripFormatting, type TruthReply } from '../../src/chat/text.ts';
 import type { Connection } from '../../src/connection/connection.ts';
-import type { ConnectTarget, TextPacket } from '../../src/connection/types.ts';
+import type { BdsTarget, TextPacket } from '../../src/connection/types.ts';
+import { bdsTarget, E2E_VERSION, rawClientTransport } from './env.ts';
 
 export const E2E = process.env.BDS_E2E === '1';
 export const SOAK = process.env.BDS_SOAK === '1';
 export const CONTAINER = process.env.BDS_CONTAINER ?? 'bds-dev';
 export const HOST = process.env.BDS_HOST ?? '127.0.0.1';
 export const PORT = Number(process.env.BDS_PORT ?? 19132);
-export const VERSION = '1.26.51';
-export const TARGET: ConnectTarget = { kind: 'bds', host: HOST, port: PORT, transport: 'raknet', offline: true };
+/** Game version (env BOT_VERSION, default 1.26.51) and transport (BDS_TRANSPORT) live in env.ts. */
+export const VERSION = E2E_VERSION;
+export const TARGET: BdsTarget = bdsTarget(HOST, PORT);
 export const BOT_DIR = fileURLToPath(new URL('../..', import.meta.url));
 export const REPO_DIR = fileURLToPath(new URL('../../..', import.meta.url));
 export const BDS_SCRIPT = fileURLToPath(new URL('../../../scripts/bds.mjs', import.meta.url));
@@ -22,7 +24,7 @@ export function bdsCmd(...args: string[]): void {
   execFileSync('docker', ['exec', CONTAINER, 'send-command', ...args], { stdio: 'ignore' });
 }
 
-/** `node scripts/bds.mjs <args>` (only ever touches bds-dev). Resolves with its stdout. */
+/** `node scripts/bds.mjs <args>` (touches only BDS_CONTAINER, default bds-dev). Resolves with its stdout. */
 export function bdsScript(args: string[], env: Record<string, string | undefined> = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(process.execPath, [BDS_SCRIPT, ...args], { cwd: REPO_DIR, env: { ...process.env, ...env }, timeout: 240_000 }, (err, stdout, stderr) => {
@@ -93,14 +95,14 @@ export interface Observer {
 }
 
 /**
- * A throwaway second player: plain bedrock-protocol createClient (offline, 1.26.51) with the
+ * A throwaway second player: plain bedrock-protocol createClient (offline, VERSION, same transport) with the
  * spawn handshake copied from src/connection, independent of the code under test.
  */
 export function connectObserver(username: string, timeoutMs = 20_000): Promise<Observer> {
   const require = createRequire(import.meta.url);
   const bedrock = require('bedrock-protocol') as { createClient(o: object): RawClient };
   return new Promise((resolve, reject) => {
-    const client = bedrock.createClient({ host: HOST, port: PORT, username, offline: true, version: VERSION, raknetBackend: 'raknet-native' });
+    const client = bedrock.createClient({ host: HOST, port: PORT, username, offline: true, version: VERSION, ...rawClientTransport() });
     const texts: TextPacket[] = [];
     const state: { kick: Observer['kick']; closed: boolean } = { kick: undefined, closed: false };
     const waiters = new Set<(p: TextPacket) => void>();

@@ -9,6 +9,14 @@ describe('checkVersion', () => {
     expect(checkVersion('1.26.51', 2193)).toEqual({ ok: true, version: '1.26.51', protocol: 2193 });
   });
 
+  it('accepts 1.26.60 (protocol 2225) through patches/minecraft-data@3.117.0.patch', () => {
+    expect(supportedVersions['1.26.60']).toBe(2225);
+    expect(checkVersion('1.26.60', 2225)).toEqual({ ok: true, version: '1.26.60', protocol: 2225 });
+    const r = checkVersion('1.26.60', 2193);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toContain('(1.26.51)');
+  });
+
   it('refuses a version bedrock-protocol does not know', () => {
     const r = checkVersion('1.99.0');
     expect(r.ok).toBe(false);

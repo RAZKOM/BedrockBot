@@ -14,6 +14,7 @@ import type { TextPacket } from '../../src/connection/types.ts';
 import { silentLogger } from '../../src/log.ts';
 import { EchoTask } from '../../src/tasks/echo.ts';
 import { BOT_DIR, bdsCmd, connectObserver, E2E, HOST, isChatFrom, PORT, sleep, TARGET, VERSION, type Observer } from './chat-helpers.ts';
+import { CLI_TARGET_ARGS } from './env.ts';
 
 const BOT = 'E2EChatBot';
 const OWNER = 'E2EOwner';
@@ -58,7 +59,8 @@ describe.skipIf(!E2E)('@bds chat commands against bds-dev', () => {
     bdsCmd('say', '!status');
     const reply = await watcher.waitText(fromBot(/^status: /), 5_000, 'status reply');
     console.log(`[chat] reply after ${Date.now() - t0} ms: ${JSON.stringify(reply)}`);
-    expect(reply.message).toMatch(/^status: up \d+s, session \d+s, reconnects 0, kicks 0, pos -?\d+\.\d\d -60\.00 -?\d+\.\d\d, version 1\.26\.51, tick \d+$/);
+    const version = VERSION.replaceAll('.', '\\.'); // env BOT_VERSION, default 1.26.51
+    expect(reply.message).toMatch(new RegExp(`^status: up \\d+s, session \\d+s, reconnects 0, kicks 0, pos -?\\d+\\.\\d\\d -60\\.00 -?\\d+\\.\\d\\d, version ${version}, tick \\d+$`));
     expect(reply).toMatchObject({ type: 'chat', category: 'authored', needs_translation: false });
   });
 
@@ -96,7 +98,7 @@ describe.skipIf(!E2E)('@bds chat commands against bds-dev', () => {
     try {
       const child = spawn(
         process.execPath,
-        ['src/index.ts', '--task', 'afk', '--host', HOST, '--port', String(PORT), '--username', 'E2EQuit', '--nudge-interval', '0', '--log-dir', dir],
+        ['src/index.ts', '--task', 'afk', '--host', HOST, '--port', String(PORT), ...CLI_TARGET_ARGS, '--username', 'E2EQuit', '--nudge-interval', '0', '--log-dir', dir],
         { cwd: BOT_DIR, stdio: ['ignore', 'pipe', 'pipe'] },
       );
       let err = '';
