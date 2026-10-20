@@ -131,3 +131,34 @@ export function applyTeleport(
   replay(inFlight, 1, engine, world);
   return { state: cloneBody(inFlight[inFlight.length - 1]!.state), history: inFlight, skipNext: false, inFlight: inFlight.length };
 }
+
+export interface MotionOutcome {
+  state: BodyState;
+  history: HistoryEntry[];
+  replayed: number;
+}
+
+/**
+ * Applies `set_entity_motion` for the own player: the velocity replaces the body's velocity after the
+ * input with `tick` (the server applies it between that input and the next), and every later input is
+ * re-simulated. Without a matching entry (tick 0, or older than the history) it replaces the current
+ * velocity. The body's ground state is kept (the push's first tick uses the old friction).
+ */
+export function applyMotion(
+  history: readonly HistoryEntry[],
+  current: BodyState,
+  tick: bigint,
+  velocity: Vec3,
+  engine: PhysicsEngine,
+  world: BlockQuery,
+): MotionOutcome {
+  // The ground state stays: the next tick still uses the previous tick's ground friction (measured on
+  // BDS 1.26.51 with a TNT push: the second tick moved 0.546 x the push, not 0.91 x).
+  const set = (b: BodyState): BodyState => ({ ...cloneBody(b), vel: { ...velocity } });
+  const index = tick > 0n ? history.findIndex((e) => e.tick === tick) : -1;
+  if (index < 0) return { state: set(current), history: history.map((e) => ({ ...e, state: cloneBody(e.state) })), replayed: 0 };
+  const entries = history.map((e) => ({ ...e, state: cloneBody(e.state) }));
+  entries[index]!.state = set(entries[index]!.state);
+  replay(entries, index + 1, engine, world);
+  return { state: cloneBody(entries[entries.length - 1]!.state), history: entries, replayed: entries.length - 1 - index };
+}

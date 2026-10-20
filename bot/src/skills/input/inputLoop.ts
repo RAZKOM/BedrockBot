@@ -12,14 +12,30 @@ import { silentLogger, type Logger } from '../../log.ts';
 import { buildAuthInput, buildInputFlags } from './flags.ts';
 import {
   applyCorrection,
+  applyMotion,
   applyTeleport,
   serverStateFromCorrection,
   serverStateFromMovePlayer,
   type HistoryEntry,
 } from './history.ts';
 import { PHYSICS, ownEngine } from './physics.ts';
+import { newSprintTracker, stepSprint } from './sprint.ts';
 import type { BlockQuery, BodyState, MoveCommand, PhysicsEngine, Vec3 } from './types.ts';
 import { IDLE_COMMAND, cloneBody, initialBody } from './types.ts';
+
+/**
+ * `set_entity_motion` (minecraft-data 1.26.51): velocity in blocks per tick, `tick` = the input tick
+ * the server applied it after (0 when not tied to an input). Not in connection/types.ts yet.
+ */
+export interface SetEntityMotionPacket {
+  runtime_entity_id: bigint | number;
+  velocity: Vec3;
+  tick?: bigint | number;
+}
+
+interface UntypedOn {
+  on(name: string, fn: (p: unknown) => void): () => void;
+}
 
 /** The part of `Connection` the loop uses (a seam for unit tests). `Connection` satisfies it. */
 export interface InputConnection {
@@ -40,6 +56,8 @@ export interface InputLoopOptions {
   logger?: Logger;
   /** Inputs kept for rewinds. Default 200 (10 s). */
   historySize?: number;
+  /** Whether sprinting is possible (survival: food above 6). Default always. */
+  canSprint?: () => boolean;
 }
 
 export interface CorrectionEvent {
@@ -75,7 +93,20 @@ export interface ReadyEvent {
   feet: Vec3;
 }
 
-export type InputLoopEvent = CorrectionEvent | TeleportEvent | ReadyEvent;
+/** `set_entity_motion` for the own player (knockback, explosions, /damage pushes). */
+export interface MotionEvent {
+  kind: 'motion';
+  /** Tick the server tied it to (0 = none). */
+  tick: bigint;
+  velocity: Vec3;
+  /** Later inputs re-simulated from the new velocity. */
+  replayed: number;
+}
+
+export type InputLoopEvent = CorrectionEvent | TeleportEvent | ReadyEvent | MotionEvent;
+
+/** See `InputLoop.setTickExtras`. */
+export type TickExtrasProvider = (tick: bigint) => Partial<PlayerAuthInputPacket> | undefined;
 
 export interface InputLoopState {
   /** Feet position. */
@@ -87,6 +118,13 @@ export interface InputLoopState {
   collidedVertically: boolean;
   /** Corrections received since construction. */
   corrections: number;
+  /** `set_entity_motion` packets applied since construction. */
+  motions: number;
+  /** The body sprinted on the last tick (sprint key, sticky sprint or a double-tapped forward). */
+  sprinting: boolean;
+  /** The body touched water / lava on the last tick. */
+  inWater: boolean;
+  inLava: boolean;
   teleports: number;
   /** Tick of the last input sent. */
   tick: bigint;
@@ -101,6 +139,8 @@ export class InputLoop {
   private readonly conn: InputConnection;
   private readonly log: Logger;
   private readonly historySize: number;
+  private readonly canSprint: () => boolean;
+  private sprint = newSprintTracker();
   private cmd: MoveCommand = { ...IDLE_COMMAND };
   private prevCmd: MoveCommand | undefined;
   private body: BodyState = initialBody({ x: 0, y: 0, z: 0 });
@@ -109,11 +149,14 @@ export class InputLoop {
   private skipNext = false;
   private handledTeleport = false;
   private corrections = 0;
+  private motions = 0;
   private teleports = 0;
   private lastTick = 0n;
   private unsubscribers: (() => void)[] = [];
   private readonly listeners = new Set<(e: InputLoopEvent) => void>();
   private readonly tickWaiters = new Set<{ until: bigint; resolve: () => void }>();
+  private readonly beforeStep = new Set<(tick: bigint, state: InputLoopState) => void>();
+  private tickExtras: TickExtrasProvider | undefined;
 
   constructor(conn: InputConnection, opts: InputLoopOptions) {
     this.conn = conn;
@@ -121,6 +164,7 @@ export class InputLoop {
     this.engine = opts.engine ?? ownEngine;
     this.log = opts.logger ?? silentLogger;
     this.historySize = opts.historySize ?? 200;
+    this.canSprint = opts.canSprint ?? (() => true);
   }
 
   /** Subscribe to the connection. Call before `connect()` so the spawn is seen. */
@@ -139,6 +183,10 @@ export class InputLoop {
       }),
       this.conn.on('correct_player_move_prediction', (p) => {
         this.onCorrection(p);
+      }),
+      // Not in the typed overloads (kept stable for other fakes): Connection's untyped `on` serves it.
+      (this.conn as unknown as UntypedOn).on('set_entity_motion', (p) => {
+        this.onMotion(p as SetEntityMotionPacket);
       }),
       this.conn.onTick((tick) => {
         this.onTick(tick);
@@ -163,6 +211,10 @@ export class InputLoop {
       collidedHorizontally: b.collidedHorizontally,
       collidedVertically: b.collidedVertically,
       corrections: this.corrections,
+      motions: this.motions,
+      sprinting: b.sprinting,
+      inWater: b.inWater ?? false,
+      inLava: b.inLava ?? false,
       teleports: this.teleports,
       tick: this.lastTick,
       ready: this.ready,
@@ -181,6 +233,17 @@ export class InputLoop {
   /** Release all movement keys (keeps yaw and pitch). */
   release(): void {
     this.setCommand({ forward: 0, strafe: 0, jump: false, sneak: false, sprint: false });
+  }
+
+  /**
+   * Run `fn` at the start of every tick, before the body is stepped, so a controller (path
+   * following, lookAt) can set the command the same tick sees. Returns an unsubscribe function.
+   */
+  onBeforeStep(fn: (tick: bigint, state: InputLoopState) => void): () => void {
+    this.beforeStep.add(fn);
+    return () => {
+      this.beforeStep.delete(fn);
+    };
   }
 
   onEvent(fn: (e: InputLoopEvent) => void): () => void {
@@ -205,6 +268,15 @@ export class InputLoop {
     this.body = { ...cloneBody(this.body), pos: { x: this.body.pos.x + d.x, y: this.body.pos.y + d.y, z: this.body.pos.z + d.z } };
   }
 
+  /**
+   * Per-tick extras (Track G, digging): `fn(tick)` is called once per sent input; its fields are
+   * merged into that `player_auth_input` and its `input_data` flags are appended to the loop's own.
+   * One provider at a time; `undefined` removes it.
+   */
+  setTickExtras(fn: TickExtrasProvider | undefined): void {
+    this.tickExtras = fn;
+  }
+
   // ---- internals ------------------------------------------------------------------------------
 
   private emit(e: InputLoopEvent): void {
@@ -219,6 +291,7 @@ export class InputLoop {
 
   private reset(feet: Vec3): void {
     this.body = initialBody(feet);
+    this.sprint = newSprintTracker();
     this.history = [];
     this.prevCmd = undefined;
     this.skipNext = false;
@@ -230,23 +303,36 @@ export class InputLoop {
 
   private onTick(tick: bigint): void {
     if (!this.ready) return;
+    if (this.beforeStep.size) {
+      const st = this.state;
+      for (const fn of [...this.beforeStep]) {
+        try {
+          fn(tick, st);
+        } catch (err) {
+          this.log.error(`input loop controller threw: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
     const cmd = { ...this.cmd };
     const prev = this.body;
     let state: BodyState;
     let jumped = false;
     let simulated = false;
     let moving = true;
+    // BDS's own sprint rules (sticky sprint, double-tapped forward): the body sprints when the server will
+    const simCmd = { ...cmd, sprint: stepSprint(this.sprint, cmd, prev, this.canSprint()) };
     if (this.skipNext) {
       // first input after a teleport: the server takes the teleport state without simulating it
       this.skipNext = false;
       state = cloneBody(prev);
     } else {
-      const r = this.engine.step(prev, cmd, this.world);
+      const r = this.engine.step(prev, simCmd, this.world);
       state = r.state;
       jumped = r.jumped;
       simulated = r.simulated;
       moving = r.simulated;
     }
+    if (!moving) this.sprint = newSprintTracker(); // no keys reach the server this tick
     const sentCmd = moving ? cmd : { ...IDLE_COMMAND, yaw: cmd.yaw, pitch: cmd.pitch };
     const flags = buildInputFlags({
       cmd: sentCmd,
@@ -257,9 +343,17 @@ export class InputLoop {
       handledTeleport: this.handledTeleport,
     });
     this.handledTeleport = false;
-    this.conn.queue('player_auth_input', buildAuthInput({ tick, cmd: sentCmd, state, flags, moving }));
+    const packet = buildAuthInput({ tick, cmd: sentCmd, state, flags, moving });
+    const extras = this.tickExtras?.(tick);
+    if (extras) {
+      const { input_data: extraFlags, ...fields } = extras;
+      Object.assign(packet, fields);
+      if (extraFlags) packet.input_data = [...packet.input_data, ...extraFlags.filter((f) => !packet.input_data.includes(f))];
+    }
+    this.conn.queue('player_auth_input', packet);
 
-    this.history.push({ tick, cmd: sentCmd, state: cloneBody(state), simulated });
+    // the history keeps what was simulated (the effective sprint), so replays reproduce it
+    this.history.push({ tick, cmd: moving ? simCmd : sentCmd, state: cloneBody(state), simulated });
     if (this.history.length > this.historySize) this.history.splice(0, this.history.length - this.historySize);
     this.prevCmd = sentCmd;
     this.body = state;
@@ -298,6 +392,18 @@ export class InputLoop {
     });
   }
 
+  private onMotion(p: SetEntityMotionPacket): void {
+    if (!this.ready || BigInt(p.runtime_entity_id) !== this.conn.runtimeId) return;
+    const velocity = { x: p.velocity.x, y: p.velocity.y, z: p.velocity.z };
+    const tick = BigInt(p.tick ?? 0);
+    const out = applyMotion(this.history, this.body, tick, velocity, this.engine, this.world);
+    this.body = out.state;
+    this.history = out.history;
+    this.motions++;
+    this.log.info(`motion ${fmt(velocity)} at tick ${tick} (now ${this.lastTick}); replayed ${out.replayed}`);
+    this.emit({ kind: 'motion', tick, velocity, replayed: out.replayed });
+  }
+
   private onMovePlayer(p: MovePlayerPacket): void {
     if (BigInt(p.runtime_id) !== this.conn.runtimeId) return;
     this.cmd = { ...this.cmd, yaw: p.yaw, pitch: p.pitch };
@@ -307,6 +413,7 @@ export class InputLoop {
     this.body = out.state;
     this.history = out.history;
     this.skipNext = out.skipNext;
+    this.sprint = newSprintTracker();
     if (p.mode === 'teleport' || p.mode === 'reset') this.handledTeleport = true;
     this.teleports++;
     if (!this.ready) {

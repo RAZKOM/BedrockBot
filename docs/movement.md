@@ -16,7 +16,11 @@ await loop.waitTicks(40);
 loop.release();                                // all keys up, keeps yaw/pitch
 loop.state;                                    // { pos (feet), vel, onGround, corrections, teleports, tick, ready, ... }
 loop.onEvent((e) => { if (e.kind === 'correction') replan(); });
+loop.onBeforeStep((tick, state) => loop.setCommand(controller(state)));  // same-tick control (goto, lookAt)
 ```
+
+Path planning and following on top of the loop (`goto`, `lookAt`) are in [pathfinding.md](pathfinding.md);
+`BotSkills` points `loop.world` at the world model's real block shapes (`skills/terrain`).
 
 ## Files
 
@@ -25,7 +29,8 @@ loop.onEvent((e) => { if (e.kind === 'correction') replan(); });
 | `types.ts` | `BlockQuery`, `MoveCommand`, `BodyState`, `PhysicsEngine`, `StepResult` |
 | `physics.ts` | the own movement model: `stepBody` (one tick), `moveBody` (collide + auto-step), `PHYSICS` constants, `ownEngine` |
 | `flags.ts` | `buildInputFlags` (the `input_data` flag set), `buildAuthInput` (the whole packet), `viewDirection` |
-| `history.ts` | `applyCorrection` (rewind + replay), `applyTeleport`, packet to server-state conversion |
+| `history.ts` | `applyCorrection` (rewind + replay), `applyTeleport`, `applyMotion` (knockback), packet to server-state conversion |
+| `sprint.ts` | BDS's own sprint rules: sticky sprint and the forward double tap (`stepSprint`) |
 | `inputLoop.ts` | `InputLoop`: the per-tick driver on top of `Connection.onTick` |
 | `world.ts` | `flatWorld()` and `withBoxes()`: BlockQueries for terrain known by construction (tests, spike courses) |
 
@@ -41,10 +46,27 @@ loop.onEvent((e) => { if (e.kind === 'correction') replan(); });
   the `camera_orientation` unit vector.
 - `jump`, `sneak`, `sprint`: keys held. The body jumps when it is on the ground and the 10-tick
   cooldown of a held key has run out; sprinting needs `forward > 0` and no sneak.
+- **BDS sprint rules** (`sprint.ts`, measured by bedboo on BDS 1.26.51.1, confirmed by the nav e2e):
+  a sprint is sticky: once sprinting (sprint key with forward), BDS keeps the sprint speed while
+  forward is held, also after the key is released and `stop_sprinting` is sent; it ends when forward
+  is released, on sneak, when the body hit a wall on the previous tick, or when sprinting is not
+  possible (`InputLoopOptions.canSprint`, e.g. food <= 6). A forward re-press within 6 ticks of the
+  previous press (press to press) starts a sprint by itself. The loop simulates the effective sprint
+  (and stores it in the history), while the flags report the raw keys plus `sprinting`. Without
+  this, a bot that "stops sprinting" with forward still held is corrected (server faster).
 
 `BlockQuery.solidAt(x, y, z)` answers "is this block a full solid cube?" (`undefined` = unknown).
-The model only knows full cubes so far. When any block around the body is unknown the loop does not
-simulate: it sends an idle input (no move vector, no movement flags) at the current position.
+Optional, all three provided by `skills/terrain`'s `blockQueryOf()`:
+
+- `boxesAt(x, y, z)`: the block's collision boxes (block-local; fences and walls reach 1.5), from
+  minecraft-data's `blockCollisionShapes`. When present it replaces `solidAt` for collisions, and the
+  layer below the swept region is included for blocks taller than 1.
+- `frictionAt(x, y, z)`: slipperiness of the block at `floor(feet.y - 0.5)` (air or unknown: 0.6),
+  used for ground inertia `friction x 0.91` and acceleration `speed x 0.16277136 / inertia^3`.
+- `liquidAt(x, y, z)`: `{ liquid, height }` (source 8/9, falling 1) or `null`.
+
+When any block around the body is unknown the loop does not simulate: it sends an idle input (no
+move vector, no movement flags) at the current position.
 
 ## Packet (`player_auth_input`, minecraft-data 1.26.51)
 
@@ -91,10 +113,16 @@ One tick, in this order (vanilla order; bedboo's recorded BDS traces confirm it 
 
 Jump in place: apex 1.2522 blocks, back on the ground after 12 ticks.
 
-Not modelled yet (see the decision record for the order): non-cube block shapes and per-block
-friction, liquids, sneak edge avoidance, climbables, cobweb / powder snow / soul sand / honey /
-slime, effects and the movement-speed attribute, knockback (`set_entity_motion`), flight, swimming,
-gliding, riding.
+**Liquids** (body box shrunk by 0.001 touches a liquid below its surface height): water acceleration
+0.02, then after the move velocity x 0.8 on all axes and gravity 0.005 (terminal sink 0.025 per
+tick), jump key +0.04 per tick, +0.3 upwards when pushing against a wall with free space 0.6 above
+the moved box; lava drag 0.5 and gravity 0.02; no flow push. Measured: a body that fell 3 blocks into
+2-deep still water floats 60 ticks with 0 corrections (strict mode: error 0); swimming out with jump
++ forward costs 2 to 3 corrections. `state.inWater` / `inLava` report it.
+
+Not modelled yet: sneak edge avoidance, climbables, cobweb / powder snow / soul sand / honey speed
+factors, slime bounce, fence and wall connections (post-only shapes), effects and the movement-speed
+attribute, flow push, swimming (sprint in water), flight, gliding, riding.
 
 ## Corrections and teleports
 
@@ -113,15 +141,24 @@ gliding, riding.
 - Observed: an input that was in flight when a teleport happened (it still carries the old position)
   gets one correction with error 0 at the teleport target. Tests count corrections only after a
   teleport has settled.
+- **`set_entity_motion`** for the own runtime id (knockback, explosions): the velocity replaces the
+  body's velocity after the input with the packet's `tick`, and every later input is re-simulated
+  (`applyMotion`); without a matching history entry it replaces the current velocity. The ground
+  state is kept: BDS's first tick after the push still uses the previous ground friction (a TNT push
+  moved 0.546 x on the second tick). Emits a `motion` event, counted in `state.motions`. Measured:
+  TNT next to the bot, 0 corrections (strict mode: error 0).
 
 ## Testing
 
 - Unit (`bot/test/unit/skills/`): physics (walk curve against the verify.mjs model, turning, sprint,
   sneak, jump apex and landing, falling, ledge, walls, auto-step), flag builder, packet fields,
   correction replay and teleport handling, and the loop against a fake connection.
-- e2e (`bot/test/e2e/skills-input.test.ts`): needs `bds-phys` and `BDS_E2E=1`
-  (`BDS_E2E=1 pnpm --filter bot test:e2e`). Target overrides: `PHYS_BDS_HOST`, `PHYS_BDS_PORT`
-  (19144), `PHYS_BDS_CONTAINER` (`bds-phys`); `PHYS_VERBOSE=1` logs every correction and teleport.
+- Unit: also `physics-terrain.test.ts` (shapes, ice, water, sprint rules, knockback).
+- e2e (`bot/test/e2e/skills-input.test.ts`): runs on `bds-move` (udp/19146, see pathfinding.md) by
+  default since Phase 3.3; `BDS_E2E=1` (`BDS_E2E=1 pnpm --filter bot test:e2e`). Target overrides:
+  `PHYS_BDS_HOST`, `PHYS_BDS_PORT`, `PHYS_BDS_CONTAINER` (e.g. 19144 / `bds-phys`) or `MOVE_BDS_*`;
+  `PHYS_VERBOSE=1` logs every correction and teleport. The nav e2e tests (`nav-*.test.ts`) are
+  described in pathfinding.md.
   The test sets the world peaceful at noon first: mobs hit and push the player, and the server-side
   knockback shows up as corrections.
 

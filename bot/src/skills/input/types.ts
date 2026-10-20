@@ -10,6 +10,22 @@ export type { Vec3 };
  */
 export interface BlockQuery {
   solidAt(x: number, y: number, z: number): boolean | undefined;
+  /**
+   * Optional: the block's collision boxes in block-local coordinates ([minX, minY, minZ, maxX, maxY,
+   * maxZ], y may reach 1.5 for fences and walls); `undefined` = unknown. When present it replaces
+   * `solidAt` for collisions (slabs, stairs, carpets, snow layers ...). See skills/terrain.
+   */
+  boxesAt?(x: number, y: number, z: number): readonly (readonly number[])[] | undefined;
+  /** Optional: ground slipperiness of the block (default 0.6; ice 0.98, slime 0.8). */
+  frictionAt?(x: number, y: number, z: number): number | undefined;
+  /** Optional: the liquid in the block (`null` = none, `undefined` = unknown) and its surface height. */
+  liquidAt?(x: number, y: number, z: number): LiquidCell | null | undefined;
+}
+
+export interface LiquidCell {
+  liquid: 'water' | 'lava';
+  /** Surface height inside the block: 8/9 for a source, 1 for falling liquid. */
+  height: number;
 }
 
 /**
@@ -53,6 +69,9 @@ export interface BodyState {
   jumpTicks: number;
   sprinting: boolean;
   sneaking: boolean;
+  /** The body touched water (lava) at the start of the last tick. Optional for older callers. */
+  inWater?: boolean;
+  inLava?: boolean;
 }
 
 export interface StepResult {

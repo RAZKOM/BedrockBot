@@ -80,12 +80,63 @@ export function solidBoxes(world: BlockQuery, region: Box): Box[] | undefined {
   const x1 = Math.floor(region[3]);
   const y1 = Math.floor(region[4]);
   const z1 = Math.floor(region[5]);
+  if (world.boxesAt) {
+    // Real shapes; one layer lower for blocks taller than 1 (fences, walls: 1.5).
+    for (let y = y0 - 1; y <= y1; y++) {
+      for (let z = z0; z <= z1; z++) {
+        for (let x = x0; x <= x1; x++) {
+          const bs = world.boxesAt(x, y, z);
+          if (bs === undefined) {
+            if (y < y0) continue; // the extra layer may be outside the loaded world
+            return undefined;
+          }
+          for (const b of bs) {
+            if (y < y0 && b[4]! <= 1) continue;
+            out.push([x + b[0]!, y + b[1]!, z + b[2]!, x + b[3]!, y + b[4]!, z + b[5]!]);
+          }
+        }
+      }
+    }
+    return out;
+  }
   for (let y = y0; y <= y1; y++) {
     for (let z = z0; z <= z1; z++) {
       for (let x = x0; x <= x1; x++) {
         const s = world.solidAt(x, y, z);
         if (s === undefined) return undefined;
         if (s) out.push([x, y, z, x + 1, y + 1, z + 1]);
+      }
+    }
+  }
+  return out;
+}
+
+/** Ground slipperiness under feet `p`: the block at floor(y - 0.5) (bedboo-measured rule), air / unknown = 0.6. */
+export function groundFriction(world: BlockQuery, p: Vec3): number {
+  if (!world.frictionAt) return PHYSICS.groundFriction;
+  return world.frictionAt(Math.floor(p.x), Math.floor(p.y - 0.5), Math.floor(p.z)) ?? PHYSICS.groundFriction;
+}
+
+/** Which liquids the body box at feet `p` touches (box shrunk by 0.001, liquid surface heights respected). */
+export function liquidContact(world: BlockQuery, p: Vec3, height: number = PHYSICS.height): { water: boolean; lava: boolean } {
+  const out = { water: false, lava: false };
+  if (!world.liquidAt) return out;
+  const b = playerBox(p, height);
+  const d = 0.001;
+  const x0 = Math.floor(b[0] + d);
+  const x1 = Math.floor(b[3] - d);
+  const y0 = Math.floor(b[1] + d);
+  const y1 = Math.floor(b[4] - d);
+  const z0 = Math.floor(b[2] + d);
+  const z1 = Math.floor(b[5] - d);
+  for (let y = y0; y <= y1; y++) {
+    for (let z = z0; z <= z1; z++) {
+      for (let x = x0; x <= x1; x++) {
+        const l = world.liquidAt(x, y, z);
+        if (!l) continue;
+        if (y + l.height <= b[1] + d) continue;
+        if (l.liquid === 'water') out.water = true;
+        else out.lava = true;
       }
     }
   }
@@ -241,10 +292,16 @@ export function stepBody(prev: BodyState, cmd: MoveCommand, world: BlockQuery): 
   s.sneaking = cmd.sneak;
   s.sprinting = cmd.sprint && cmd.forward > 0 && !cmd.sneak;
 
+  const height = s.sneaking ? PHYSICS.sneakHeight : PHYSICS.height;
+  const wet = liquidContact(world, s.pos, height);
+  s.inWater = wet.water;
+  s.inLava = wet.lava && !wet.water;
+  if (wet.water || wet.lava) return stepInLiquid(s, cmd, world, height, wet.water ? LIQUID.water : LIQUID.lava, prev);
+
   let accel: number;
   let inertia: number;
   if (s.onGround) {
-    inertia = f32(PHYSICS.groundFriction * PHYSICS.airInertia);
+    inertia = f32(groundFriction(world, s.pos) * PHYSICS.airInertia);
     const speed = f32(PHYSICS.walkSpeed * (s.sprinting ? PHYSICS.sprintMultiplier : 1));
     accel = f32(speed * f32(PHYSICS.groundAccelFactor / f32(inertia * inertia * inertia)));
   } else {
@@ -266,7 +323,6 @@ export function stepBody(prev: BodyState, cmd: MoveCommand, world: BlockQuery): 
     jumped = true;
   }
 
-  const height = s.sneaking ? PHYSICS.sneakHeight : PHYSICS.height;
   const m = moveBody(world, s.pos, v, s.onGround, height);
   if (!m) return { state: cloneBody(prev), jumped: false, simulated: false };
   s.pos = { x: f32(s.pos.x + m.dx), y: f32(s.pos.y + m.dy), z: f32(s.pos.z + m.dz) };
@@ -281,6 +337,59 @@ export function stepBody(prev: BodyState, cmd: MoveCommand, world: BlockQuery): 
   v.x = f32(v.x * inertia);
   v.z = f32(v.z * inertia);
   return { state: s, jumped, simulated: true };
+}
+
+/**
+ * Liquid movement (vanilla rules; constants as bedboo lists them for Bedrock: LiteLDev/bedboo,
+ * LGPL-3.0, packages/mineflayer-bedrock/lib/physics/engine.js; no code copied). Water: acceleration
+ * 0.02, drag 0.8 on all axes, gravity 0.005, jump key +0.04 per tick, +0.3 upwards when pushing
+ * against a wall that can be climbed out of. Lava: drag 0.5, gravity 0.02. Flow push is not modelled
+ * (the pathfinder never enters liquids; this only has to keep a body that fell in from being
+ * corrected every tick).
+ */
+export const LIQUID = Object.freeze({
+  water: { accel: 0.02, drag: 0.8, gravity: 0.005, jump: 0.04 },
+  lava: { accel: 0.02, drag: 0.5, gravity: 0.02, jump: 0.04 },
+  climbOut: 0.3,
+});
+
+function stepInLiquid(
+  s: BodyState,
+  cmd: MoveCommand,
+  world: BlockQuery,
+  height: number,
+  k: { accel: number; drag: number; gravity: number; jump: number },
+  prev: BodyState,
+): StepResult {
+  const v = s.vel;
+  if (cmd.jump) v.y = f32(v.y + k.jump);
+  const mv = moveVectorOf(cmd);
+  applyImpulse(v, f32(mv.x * PHYSICS.impulseScale), f32(mv.z * PHYSICS.impulseScale), k.accel, cmd.yaw);
+  const m = moveBody(world, s.pos, v, s.onGround, height);
+  if (!m) return { state: cloneBody(prev), jumped: false, simulated: false };
+  s.pos = { x: f32(s.pos.x + m.dx), y: f32(s.pos.y + m.dy), z: f32(s.pos.z + m.dz) };
+  s.collidedHorizontally = m.collidedHorizontally;
+  s.collidedVertically = m.collidedVertically;
+  s.onGround = m.onGround;
+  if (m.dx !== v.x) v.x = 0;
+  if (m.dz !== v.z) v.z = 0;
+  if (m.dy !== v.y) v.y = 0;
+  v.x = f32(v.x * k.drag);
+  v.y = f32(f32(v.y * k.drag) - k.gravity);
+  v.z = f32(v.z * k.drag);
+  if (s.collidedHorizontally) {
+    // vanilla isFree(vx, vy + 0.6 - dy, vz): the box moved there would not collide with anything
+    const off = { x: v.x, y: v.y + 0.6 - m.dy, z: v.z };
+    const region = sweepBox(playerBox(s.pos, height), off.x, off.y, off.z);
+    const boxes = solidBoxes(world, region);
+    const moved = offsetBox(playerBox(s.pos, height), off.x, off.y, off.z);
+    if (boxes && !boxes.some((o) => overlaps(o, moved))) v.y = f32(LIQUID.climbOut);
+  }
+  return { state: s, jumped: false, simulated: true };
+}
+
+function overlaps(a: Box, b: Box): boolean {
+  return a[0] < b[3] - E && a[3] > b[0] + E && a[1] < b[4] - E && a[4] > b[1] + E && a[2] < b[5] - E && a[5] > b[2] + E;
 }
 
 /** The own engine as a PhysicsEngine. */
