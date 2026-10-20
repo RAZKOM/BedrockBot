@@ -17,6 +17,23 @@ pnpm bds:cmd say !status            # console command
 pnpm pack:deploy                    # (re)deploy the truth pack, e.g. after wiping docker/data/dev
 ```
 
+Each track's e2e suite has its own server so runs never share terrain or restarts. All use the
+bds-dev settings (BDS 1.26.51.1 unless noted, RakNet, offline, flat, peaceful, operator):
+
+| Container | Port | Compose file | Used by |
+|---|---|---|---|
+| bds-dev | 19132 | docker/compose.dev.yml | echo, chat, reconnect, keepalive, AFK CLI |
+| bds-world | 19142 | (docker run, see docs/world-model.md) | world-* (BDS_WORLD_*) |
+| bds-move | 19146 | docker/compose.move.yml (TICK_DISTANCE 10) | nav-*, skills-input (MOVE_BDS_* / PHYS_BDS_*) |
+| bds-dig | 19148 | docker/compose.dig.yml | dig (DIG_BDS_*) |
+| bds60 | 19134 | docker/compose.dev60.yml (BDS 1.26.60.6) | `pnpm e2e:60` |
+| bds-nn | 19140 | docker/compose.dev-nethernet.yml (NetherNet) | `pnpm e2e:nn` |
+
+Start one with `docker compose -f docker/compose.<name>.yml up -d`, then deploy the truth pack:
+`pnpm --filter @bedrockbot/truth-pack pack:deploy --data docker/data/<name> --world <level> --restart <container>`.
+The full `BDS_E2E=1` e2e run needs bds-dev, bds-world, bds-move and bds-dig up; a stopped one shows
+as "Ping timed out" in its suite.
+
 `docker/compose.dev.yml` reads `PLAYER_IDLE_TIMEOUT` from `${BDS_IDLE_TIMEOUT:-0}`; changing it makes
 `docker compose up -d` recreate the container, the world in `docker/data/dev` is kept.
 

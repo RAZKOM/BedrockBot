@@ -202,8 +202,37 @@ export interface ServerboundLoadingScreenPacket {
   loading_screen_id?: number;
 }
 
+/** Knockback, explosions, /damage pushes. `tick` = the input tick the server applied it after (0 when not tied to an input). */
+export interface SetEntityMotionPacket {
+  runtime_entity_id: bigint | number;
+  velocity: Vec3;
+  tick?: bigint | number;
+}
+
+export interface SetHealthPacket {
+  health: number;
+}
+
+export interface UpdateAttributesPacket {
+  runtime_entity_id: bigint | number;
+  attributes: {
+    min: number;
+    max: number;
+    current: number;
+    default_min: number;
+    default_max: number;
+    default: number;
+    name: string;
+    modifiers: unknown[];
+  }[];
+  tick?: bigint | number;
+}
+
 export interface InboundPackets {
   text: TextPacket;
+  set_entity_motion: SetEntityMotionPacket;
+  set_health: SetHealthPacket;
+  update_attributes: UpdateAttributesPacket;
   start_game: StartGamePacket;
   respawn: RespawnPacket;
   play_status: PlayStatusPacket;
