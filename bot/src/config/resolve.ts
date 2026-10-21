@@ -211,7 +211,8 @@ export function resolveSettings(cli: CliValues, cfg: BotConfig, env: ResolveEnv)
       heartbeat: cli.heartbeat ?? cfg.heartbeat ?? false,
       home: vec(cli.home, '--home') ?? fromTuple(cfg.home),
       shelter: vec(cli.shelter, '--shelter') ?? fromTuple(cfg.shelter),
-      walk: cli.walk ?? cfg.walk ?? false,
+      // A Realm bot always carries the movement stack so !home set / !home go / !goto work without a flag.
+      walk: cli.walk ?? cfg.walk ?? target.kind === 'realm',
       respawnDelayMs,
     },
     updateCheckHours: seconds(cli['update-check-hours'], '--update-check-hours', true) ?? cfg.updateCheckHours ?? (target.kind === 'realm' ? 24 : 0),

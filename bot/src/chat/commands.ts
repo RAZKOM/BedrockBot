@@ -110,9 +110,21 @@ export interface HardeningDeps {
   home?: {
     get(): Vec3 | undefined;
     set(p: Vec3 | undefined): void;
+    /** Walk home now (`!home go`). */
+    go?(): Promise<{ ok: boolean; reason?: string }>;
   };
+  /** Walk to a feet block now (`!goto x y z`); undefined when the task cannot walk. */
+  goto?: (p: Vec3) => Promise<{ ok: boolean; reason?: string }>;
   /** Current feet position (for `set`). */
   position: () => Vec3 | undefined;
+}
+
+/** Parse `x y z` into a feet block, or undefined. */
+function parseBlock(args: string[]): Vec3 | undefined {
+  if (args.length !== 3) return undefined;
+  const n = args.map(Number);
+  if (!n.every((v) => Number.isFinite(v))) return undefined;
+  return { x: Math.floor(n[0]!), y: Math.floor(n[1]!), z: Math.floor(n[2]!) };
 }
 
 function blockOf(p: Vec3): Vec3 {
@@ -136,6 +148,22 @@ function pointCommand(name: string, target: NonNullable<HardeningDeps['home']>, 
       reply(`${name} cleared`);
       return;
     }
+    if (sub === 'go') {
+      const p = target.get();
+      if (!p) {
+        reply(`${name} is not set`);
+        return;
+      }
+      if (!target.go) {
+        reply(`${name} go is not available`);
+        return;
+      }
+      reply(`walking to ${name} ${fmtBlock(p)}`);
+      void target.go().then((r) => {
+        reply(r.ok ? `arrived at ${name}` : `${name}: ${r.reason ?? 'failed'}`);
+      });
+      return;
+    }
     if (sub === 'set') {
       let p: Vec3 | undefined;
       if (rest.length === 3) {
@@ -153,7 +181,7 @@ function pointCommand(name: string, target: NonNullable<HardeningDeps['home']>, 
       reply(`${name} set to ${fmtBlock(p)}`);
       return;
     }
-    reply(`usage: !${name} [show] | set [x y z] | clear`);
+    reply(`usage: !${name} [show] | set [x y z] | go | clear`);
   };
 }
 
@@ -181,17 +209,37 @@ export function registerHardeningCommands(chat: Chat, deps: HardeningDeps): void
     run: shelter
       ? pointCommand('shelter', shelter, deps.position, () => `state ${shelter.state()}`)
       : ({ reply }) => {
-          reply('shelter needs a task that can walk (afk with the movement stack)');
+          reply('shelter needs a task that can walk (start with --walk, --shelter or --target realm)');
+        },
+  });
+  const gotoFn = deps.goto;
+  chat.register({
+    name: 'goto',
+    help: 'x y z (walk to a feet block now)',
+    run: gotoFn
+      ? ({ reply, args }) => {
+          const p = parseBlock(args);
+          if (!p) {
+            reply('usage: !goto x y z');
+            return;
+          }
+          reply(`walking to ${fmtBlock(p)}`);
+          void gotoFn(p).then((r) => {
+            reply(r.ok ? `arrived at ${fmtBlock(p)}` : `goto: ${r.reason ?? 'failed'}`);
+          });
+        }
+      : ({ reply }) => {
+          reply('goto needs a task that can walk (start with --walk, --home or --target realm)');
         },
   });
   const home = deps.home;
   chat.register({
     name: 'home',
-    help: '[show] | set [x y z] | clear (return point after respawn and at dawn)',
+    help: '[show] | set [x y z] | go | clear (return point after respawn and at dawn)',
     run: home
       ? pointCommand('home', home, deps.position)
       : ({ reply }) => {
-          reply('home needs a task that can walk (afk with the movement stack)');
+          reply('home needs a task that can walk (start with --walk, --home or --target realm)');
         },
   });
 }

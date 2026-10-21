@@ -6,7 +6,8 @@ import { formatChatLine } from '../chat/text.ts';
 import { AfkTask } from './afk.ts';
 import type { RunningTask, TaskContext, TaskDefinition } from './base.ts';
 import { EchoTask } from './echo.ts';
-import { homeHook } from './mobility.ts';
+import { blockGoal, homeHook } from './mobility.ts';
+import type { SkillResult } from '../skills/types.ts';
 import { NightSafety } from './night.ts';
 import type { Vec3 } from '../connection/types.ts';
 
@@ -33,11 +34,15 @@ export function allTasks(): TaskDefinition[] {
 export interface PointAccess {
   get(): Vec3 | undefined;
   set(p: Vec3 | undefined): void;
+  /** Walk there now (!home go). */
+  go?(): Promise<SkillResult>;
 }
 
 export interface WalkingTask extends RunningTask {
   home?: PointAccess;
   shelter?: PointAccess & { state(): string };
+  /** Walk to a feet block now (!goto x y z). */
+  goto?(p: Vec3): Promise<SkillResult>;
 }
 
 // ---- built-in tasks ---------------------------------------------------------------------------
@@ -150,7 +155,9 @@ export const afkTask: TaskDefinition = {
           home = p;
           log.info(p ? `home set to ${fmt(p)}` : 'home cleared');
         },
+        go: () => (home ? mob.skills.goto(blockGoal(home), { timeoutTicks: 6000 }) : Promise.resolve({ ok: false, reason: 'no_home' })),
       };
+      task.goto = (p) => mob.skills.goto(blockGoal(p), { timeoutTicks: 6000 });
       task.shelter = {
         get: () => n.shelter,
         set: (p) => {

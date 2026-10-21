@@ -29,6 +29,7 @@ describe.skipIf(!E2E)('hard: death and respawn (task 5.1)', () => {
     const b = bot!;
     for (let n = 1; n <= 2; n++) {
       const t0 = Date.now();
+      const prevReport = b.built.mobility?.skills.nav.lastReport;
       const killed = await b.truth.ok<{ killed: boolean }>('kill', [b.name]);
       expect(killed.killed).toBe(true);
       const death = await until(() => events.find((e) => e.kind === 'death' && e.death.n === n), 5_000, `death ${n}`);
@@ -56,9 +57,13 @@ describe.skipIf(!E2E)('hard: death and respawn (task 5.1)', () => {
           `home after ${homeMs} ms, truth ${fmt(truth.location)}`,
       );
       expect(homeMs).toBeLessThan(60_000);
-      const walked = b.built.mobility?.skills.nav.lastReport;
-      expect(walked?.result).toEqual({ ok: true });
-      if (away) expect(walked!.distance).toBeGreaterThan(hdist(respawnAt, centre(HOME)) - 1.5);
+      // Truth can see the bot at home a few ticks before goto resolves and writes its report.
+      const walked = await until(() => {
+        const r = b.built.mobility?.skills.nav.lastReport;
+        return r && r !== prevReport ? r : undefined;
+      }, 10_000, `goto report after death ${n}`);
+      expect(walked.result).toEqual({ ok: true });
+      if (away) expect(walked.distance).toBeGreaterThan(hdist(respawnAt, centre(HOME)) - 1.5);
       await sleep(500);
     }
     const snap = b.metrics.snapshot();

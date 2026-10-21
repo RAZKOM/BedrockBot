@@ -93,7 +93,7 @@ describe('task registry', () => {
       'shelter 5 -60 -3, state day',
       'home set to 7 -60 8',
       'home cleared',
-      'usage: !shelter [show] | set [x y z] | clear',
+      'usage: !shelter [show] | set [x y z] | go | clear',
       'health: health 20, food 20, deaths 0, alive, healthy',
     ]);
     t.stop();

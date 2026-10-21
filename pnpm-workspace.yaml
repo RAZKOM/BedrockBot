@@ -30,3 +30,8 @@ blockExoticSubdeps: false
 # pnpm refuses unused patch entries.
 patchedDependencies:
   minecraft-data@3.117.0: patches/minecraft-data@3.117.0.patch
+  # Realms: a regional NetherNet signalling host can exist in DNS and still answer 404 on the
+  # websocket path (signal-southcentralus, 2026-10-29); upstream #839 only checks DNS. The patch
+  # falls back to the default host once and reports the HTTP status. Applies to the git pin in bot
+  # and to npm 3.60.1 in packs/tools (same file). Drop when upstream ships the fallback.
+  bedrock-protocol: patches/bedrock-protocol.patch

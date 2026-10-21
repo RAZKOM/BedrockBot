@@ -1,0 +1,39 @@
+diff --git a/src/nethernet/signalling.js b/src/nethernet/signalling.js
+index fd0edaa..6e648b2 100644
+--- a/src/nethernet/signalling.js
++++ b/src/nethernet/signalling.js
+@@ -186,6 +186,7 @@ class NethernetSignal extends EventEmitter {
+   onError (err) {
+     // ws follows errors with a close event, where fallback/retry is handled.
+     debug('Signal Error', err.message)
++    this._lastError = err.message
+   }
+ 
+   onClose (code, reason) {
+@@ -200,6 +201,17 @@ class NethernetSignal extends EventEmitter {
+       return
+     }
+ 
++    if (!this.credentials && this.host && !this._triedDefaultHost) {
++      // A regional host can exist in DNS and still answer 404 on the signalling path
++      // (seen with signal-southcentralus, 2026-10-29). The default host routes via Traffic Manager.
++      debug('regional signalling host failed, falling back to the default host', this.host, this._lastError)
++      this._triedDefaultHost = true
++      this.host = null
++      this.retryCount = 0
++      this.restart()
++      return
++    }
++
+     if (code === 1006) {
+       debug('Signal Connection Closed Unexpectedly')
+ 
+@@ -207,7 +219,7 @@ class NethernetSignal extends EventEmitter {
+         this.retryCount++
+         this.restart()
+       } else {
+-        this.fail(new Error('Signal connection closed unexpectedly'))
++        this.fail(new Error(`Signal connection closed unexpectedly${this._lastError ? ` (${this._lastError})` : ''}`))
+       }
+     } else {
+       this.fail(new Error(`Signal connection closed (${code}): ${reason}`))

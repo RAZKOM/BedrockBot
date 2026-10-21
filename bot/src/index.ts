@@ -280,6 +280,7 @@ async function main(argv: string[]): Promise<number> {
     }),
     shelter: walking.shelter,
     home: walking.home,
+    goto: walking.goto ? (p) => walking.goto!(p) : undefined,
     position: () => runningTask.position(),
   });
   chat.start();

@@ -166,6 +166,7 @@ overrides:
   minecraft-data: 3.117.0
 
 patchedDependencies:
+  bedrock-protocol: 312465660051d9d02f229b78038e057237cd70b6d4ba0f29630a9f4341d2e0d7
   minecraft-data@3.117.0: fb525936e506c279a49dc41bea3d1ecdbb0370d3d0082e47ee3b0c1a9d8e5f45
 
 importers:
@@ -176,7 +177,7 @@ importers:
     dependencies:
       bedrock-protocol:
         specifier: github:PrismarineJS/bedrock-protocol#c9e1fbf21dc6abde8d89920996575791b79e66cf
-        version: https://codeload.github.com/PrismarineJS/bedrock-protocol/tar.gz/c9e1fbf21dc6abde8d89920996575791b79e66cf
+        version: https://codeload.github.com/PrismarineJS/bedrock-protocol/tar.gz/c9e1fbf21dc6abde8d89920996575791b79e66cf(patch_hash=312465660051d9d02f229b78038e057237cd70b6d4ba0f29630a9f4341d2e0d7)
       minecraft-data:
         specifier: 3.117.0
         version: 3.117.0(patch_hash=fb525936e506c279a49dc41bea3d1ecdbb0370d3d0082e47ee3b0c1a9d8e5f45)
@@ -222,7 +223,7 @@ importers:
         version: 2.10.0(@minecraft/common@1.3.0)(@minecraft/vanilla-data@1.26.60)
       bedrock-protocol:
         specifier: 3.60.1
-        version: 3.60.1
+        version: 3.60.1(patch_hash=312465660051d9d02f229b78038e057237cd70b6d4ba0f29630a9f4341d2e0d7)
       esbuild:
         specifier: 0.28.2
         version: 0.28.2
@@ -240,7 +241,7 @@ importers:
     dependencies:
       bedrock-protocol:
         specifier: 3.60.1
-        version: 3.60.1
+        version: 3.60.1(patch_hash=312465660051d9d02f229b78038e057237cd70b6d4ba0f29630a9f4341d2e0d7)
       minecraft-data:
         specifier: 3.117.0
         version: 3.117.0(patch_hash=fb525936e506c279a49dc41bea3d1ecdbb0370d3d0082e47ee3b0c1a9d8e5f45)
@@ -2851,7 +2852,7 @@ snapshots:
 
   base64-js@1.5.1: {}
 
-  bedrock-protocol@3.60.1:
+  bedrock-protocol@3.60.1(patch_hash=312465660051d9d02f229b78038e057237cd70b6d4ba0f29630a9f4341d2e0d7):
     dependencies:
       debug: 4.4.3
       json-bigint: 1.0.0
@@ -2877,7 +2878,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  bedrock-protocol@https://codeload.github.com/PrismarineJS/bedrock-protocol/tar.gz/c9e1fbf21dc6abde8d89920996575791b79e66cf:
+  bedrock-protocol@https://codeload.github.com/PrismarineJS/bedrock-protocol/tar.gz/c9e1fbf21dc6abde8d89920996575791b79e66cf(patch_hash=312465660051d9d02f229b78038e057237cd70b6d4ba0f29630a9f4341d2e0d7):
     dependencies:
       debug: 4.4.3
       json-bigint: 1.0.0
