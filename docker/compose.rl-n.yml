@@ -1,0 +1,33 @@
+# Extra BDS instances for multi-env RL throughput (PLAN.md task 6.3 "compose rl-N profile", Track J).
+# Same settings as compose.rl.yml; one project per instance, selected with RL_N (1..8):
+#   RL_N=1 docker compose -f docker/compose.rl-n.yml up -d     -> bds-rl-1 on udp/19171, data docker/data/rl-1
+#   RL_N=1 docker compose -f docker/compose.rl-n.yml down
+# Port 19170 + RL_N (19160-19167 belong to bds-nn's WebRTC range). rl/scripts/throughput.py
+# creates, uses and removes them (seeding each data dir from docker/data/rl so BDS is not downloaded again).
+name: bedrockbot-rl-${RL_N:?set RL_N}
+
+services:
+  bds:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-rl-${RL_N}
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: peaceful
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: rl
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-rl-${RL_N}
+      SERVER_PORT: "${RL_PORT:?set RL_PORT}"
+      TICK_DISTANCE: "10"
+    ports:
+      - "${RL_PORT}:${RL_PORT}/udp"
+    volumes:
+      - ./data/rl-${RL_N}:/data
+    stdin_open: true
+    tty: true

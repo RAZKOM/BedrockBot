@@ -1,0 +1,111 @@
+{
+  "date": "2026-10-29T00:33:12",
+  "host": {
+    "platform": "Windows-11-10.0.26300-SP0",
+    "python": "3.13.9"
+  },
+  "setup": "1 env: BedrockWoodEnv-v0 -> bot (node, --task rl) -> bds-rl (BDS 1.26.60.6, RakNet, Docker Desktop/WSL2); random policy, forest_small",
+  "check_env": "passed",
+  "episodes": [
+    {
+      "episode": 0,
+      "scenario_seed": 8,
+      "steps": 200,
+      "return": -0.0,
+      "logs": 2,
+      "ticks": 1369,
+      "corrections": 0,
+      "end": "steps"
+    },
+    {
+      "episode": 1,
+      "scenario_seed": 4,
+      "steps": 200,
+      "return": 2.0,
+      "logs": 4,
+      "ticks": 1306,
+      "corrections": 0,
+      "end": "steps"
+    },
+    {
+      "episode": 2,
+      "scenario_seed": 8,
+      "steps": 200,
+      "return": 3.0,
+      "logs": 5,
+      "ticks": 1459,
+      "corrections": 0,
+      "end": "steps"
+    }
+  ],
+  "total_steps": 600,
+  "wall_s": 207.7,
+  "steps_per_s": 2.903,
+  "steps_per_s_incl_resets": 2.889,
+  "mean_reset_s": 0.327,
+  "ticks_per_s_game": 20,
+  "bds": {
+    "container": "bds-rl",
+    "idle_before": {
+      "cpu_pct": 6.56,
+      "mem_mib": 356.6
+    },
+    "during_run": {
+      "samples": 63,
+      "cpu_pct_mean": 4.7,
+      "cpu_pct_max": 6.7,
+      "mem_mib_mean": 356.6,
+      "mem_mib_max": 357.0
+    }
+  },
+  "multi_env": {
+    "envs": 4,
+    "steps_per_env": 200,
+    "total_steps": 800,
+    "wall_s": 143.9,
+    "initial_reset_s": 0.35,
+    "steps_per_s_total": 5.56,
+    "steps_per_s_per_env": 1.39,
+    "episodes_ended": 4,
+    "logs_per_env": [
+      3,
+      1,
+      6,
+      3
+    ],
+    "corrections": 2,
+    "bds_per_instance": {
+      "bds-rl": {
+        "samples": 29,
+        "cpu_pct_mean": 4.9,
+        "cpu_pct_max": 8.7,
+        "mem_mib_mean": 356.8,
+        "mem_mib_max": 357.0
+      },
+      "bds-rl-1": {
+        "samples": 29,
+        "cpu_pct_mean": 4.6,
+        "cpu_pct_max": 8.0,
+        "mem_mib_mean": 328.8,
+        "mem_mib_max": 329.0
+      },
+      "bds-rl-2": {
+        "samples": 29,
+        "cpu_pct_mean": 4.7,
+        "cpu_pct_max": 7.5,
+        "mem_mib_mean": 328.6,
+        "mem_mib_max": 328.9
+      },
+      "bds-rl-3": {
+        "samples": 30,
+        "cpu_pct_mean": 4.5,
+        "cpu_pct_max": 6.0,
+        "mem_mib_mean": 326.2,
+        "mem_mib_max": 326.7
+      }
+    },
+    "bds_cpu_pct_mean_per_instance": 4.7,
+    "bds_mem_mib_mean_per_instance": 335.1,
+    "note": "SubprocVecEnv steps all envs in lockstep, so each vector step waits for the slowest action"
+  }
+}

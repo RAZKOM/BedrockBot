@@ -1,0 +1,7 @@
+{
+  "env_id": "BedrockWoodEnv-v0",
+  "gymnasium": "1.4.0",
+  "passed": true,
+  "warnings": [],
+  "seconds": 5.6
+}

@@ -1,0 +1,32 @@
+# BDS for the RL environment (PLAN.md Phase 6 tasks 6.1 to 6.3, Track J). Same settings as
+# compose.dig.yml (BDS 1.26.60.6, RakNet, offline, flat, peaceful, operator) plus TICK_DISTANCE 10;
+# own project name, container bds-rl on udp/19156, data in docker/data/rl.
+#   node scripts/bds.mjs --profile rl up
+#   pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/rl --world rl --restart bds-rl
+name: bedrockbot-rl
+
+services:
+  bds-rl:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-rl
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: peaceful
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: rl
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-rl
+      SERVER_PORT: "19156"
+      TICK_DISTANCE: "10"
+    ports:
+      - "19156:19156/udp"
+    volumes:
+      - ./data/rl:/data
+    stdin_open: true
+    tty: true

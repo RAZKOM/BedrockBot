@@ -1,0 +1,76 @@
+{
+  "steps": 100,
+  "schema_errors": 0,
+  "wall_s": 42.16,
+  "steps_per_s": 2.39,
+  "steps_per_s_incl_resets": 2.372,
+  "mean_ticks_per_action": 8.37,
+  "median_ticks_per_action": 10.0,
+  "max_ticks_per_action": 45,
+  "ticks_per_action_by_kind": {
+    "collect_drops": {
+      "n": 15,
+      "mean": 0,
+      "max": 0
+    },
+    "dig_facing_block": {
+      "n": 7,
+      "mean": 5.6,
+      "max": 17
+    },
+    "goto_nearest_log": {
+      "n": 8,
+      "mean": 11,
+      "max": 22
+    },
+    "jump_forward": {
+      "n": 17,
+      "mean": 14.9,
+      "max": 20
+    },
+    "noop": {
+      "n": 16,
+      "mean": 10,
+      "max": 10
+    },
+    "step_forward": {
+      "n": 17,
+      "mean": 15.1,
+      "max": 45
+    },
+    "turn_left": {
+      "n": 8,
+      "mean": 2,
+      "max": 2
+    },
+    "turn_right": {
+      "n": 12,
+      "mean": 2,
+      "max": 2
+    }
+  },
+  "corrections": 0,
+  "deaths": 0,
+  "episodes_done": 0,
+  "logs_delta_histogram": {
+    "0": 98,
+    "1": 2
+  },
+  "reward": {
+    "sum": 1.0,
+    "mean": 0.01,
+    "min": -0.01,
+    "max": 0.99
+  },
+  "skill_failures": {
+    "dig_facing_block:no_block": 5
+  },
+  "resets": [
+    {
+      "seed": 1,
+      "wall_ms": 320,
+      "bot_ms": 316,
+      "checksum": "9515ea6c"
+    }
+  ]
+}

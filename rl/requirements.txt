@@ -1,0 +1,8 @@
+# python -m venv .venv && .venv/Scripts/python -m pip install -r requirements.txt   (Windows; bin/ elsewhere)
+gymnasium==1.4.0
+stable-baselines3==2.9.2
+numpy==2.5.4
+websocket-client==1.9.2
+websockets==17.3
+psutil==7.2.2
+pytest==9.2.0

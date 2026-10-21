@@ -1,0 +1,13 @@
+[project]
+name = "bedrockbot-env"
+version = "0.1.0"
+description = "Gymnasium env (BedrockWoodEnv-v0) over the BedrockBot RL bridge"
+requires-python = ">=3.11"
+dependencies = ["gymnasium>=1.0", "numpy", "websocket-client"]
+
+[tool.setuptools]
+packages = ["bedrockbot_env"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
