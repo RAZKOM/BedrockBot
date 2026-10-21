@@ -136,11 +136,14 @@ describe('AfkTask', () => {
     expect(inputs(client)).toHaveLength(1); // no input while dead
     await vi.advanceTimersByTimeAsync(150);
     expect(client.sentOf('respawn').at(-1)).toEqual({ position: { x: 0, y: 0, z: 0 }, state: 2, runtime_entity_id: 9n });
-    expect(client.sentOf('player_action')).toEqual([{ runtime_entity_id: 9n, action: 'respawn', position: { x: 0, y: 0, z: 0 }, result_position: { x: 0, y: 0, z: 0 }, face: -1 }]);
+    // player_action respawn only after the server's state 1 (BDS 1.26.60 ignores it before)
+    expect(client.sentOf('player_action')).toEqual([]);
     client.receive('respawn', { position: { x: 4.5, y: -58.38, z: 4.5 }, state: 1, runtime_entity_id: 0n });
+    await vi.advanceTimersByTimeAsync(60);
+    expect(client.sentOf('player_action')).toEqual([{ runtime_entity_id: 9n, action: 'respawn', position: { x: 0, y: 0, z: 0 }, result_position: { x: 0, y: 0, z: 0 }, face: -1 }]);
     expect(afk.dead).toBe(false);
     expect(afk.feet?.x).toBe(4.5);
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(40);
     expect(inputs(client).at(-1)?.position.x).toBe(4.5); // settle at the new spot
     expect(events).toEqual(['death', 'position', 'respawn']);
     expect(metrics.counters.deaths).toBe(1);
@@ -153,5 +156,73 @@ describe('AfkTask', () => {
     client.sent = [];
     await vi.advanceTimersByTimeAsync(5_000);
     expect(inputs(client)).toHaveLength(0);
+  });
+});
+
+describe('AfkTask in loop mode (walking: the InputLoop sends the inputs)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  class FakeLoop {
+    state = { pos: { x: 3.5, y: -60, z: 3.5 }, ready: true };
+    command = { yaw: 90, sneak: false };
+    history: { yaw: number; sneak: boolean }[] = [];
+    private fns = new Set<(tick: bigint) => void>();
+    setCommand(c: { yaw?: number; sneak?: boolean }): void {
+      this.command = { ...this.command, ...c };
+    }
+    onBeforeStep(fn: (tick: bigint) => void): () => void {
+      this.fns.add(fn);
+      return () => this.fns.delete(fn);
+    }
+    step(tick: bigint): void {
+      for (const fn of [...this.fns]) fn(tick);
+      this.history.push({ ...this.command });
+    }
+  }
+
+  it('nudges through the MoveCommand, sends no own inputs, pauses while busy or dead', async () => {
+    const { conn, clients } = setup({ reconnect: false });
+    const loop = new FakeLoop();
+    let busy = false;
+    const afk = new AfkTask(conn, { log: silentLogger, nudgeIntervalMs: 10_000, loop, busy: () => busy, respawnDelayMs: -1 });
+    afk.start();
+    const client = await connectAndSpawn(conn, clients, 9n);
+    let t = 0n;
+    const steps = (n: number) => {
+      for (let i = 0; i < n; i++) loop.step(++t);
+    };
+    steps(5);
+    expect(afk.feet).toEqual({ x: 3.5, y: -60, z: 3.5 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    steps(4);
+    expect(loop.history.slice(-4)).toEqual([
+      { yaw: 120, sneak: false },
+      { yaw: 120, sneak: true },
+      { yaw: 120, sneak: false },
+      { yaw: 90, sneak: false },
+    ]);
+    expect(afk.nudges).toBe(1);
+    expect(inputs(client)).toHaveLength(0);
+    // busy (walking): the nudge waits
+    await vi.advanceTimersByTimeAsync(10_000);
+    busy = true;
+    steps(10);
+    expect(afk.nudges).toBe(1);
+    busy = false;
+    steps(4);
+    expect(afk.nudges).toBe(2);
+    expect(loop.history.at(-4)!.yaw).toBe(60); // the other direction
+    // dead: no nudges
+    await vi.advanceTimersByTimeAsync(10_000);
+    client.receive('respawn', { position: { x: 0.5, y: -58.38, z: 0.5 }, state: 0, runtime_entity_id: 0n });
+    steps(10);
+    expect(afk.nudges).toBe(2);
+    expect(afk.status()).toMatchObject({ mode: 'loop', deaths: 1, dead: true });
+    afk.stop();
   });
 });

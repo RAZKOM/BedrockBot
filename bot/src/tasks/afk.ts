@@ -13,13 +13,26 @@ import type { Metrics } from '../connection/metrics.ts';
 import type { PlayerAuthInputPacket, Vec3 } from '../connection/types.ts';
 import { createLogger, type Logger } from '../log.ts';
 import { eyeToFeet } from './echo.ts';
+import { RespawnController } from './respawn.ts';
+
+/**
+ * Loop mode: when the bot also walks (home point, shelter), the skills' InputLoop owns
+ * player_auth_input (one per tick) and the AFK task nudges through its MoveCommand instead of sending
+ * its own packets. `InputLoop` satisfies this.
+ */
+export interface AfkLoop {
+  readonly state: { pos: Vec3; ready: boolean };
+  readonly command: Readonly<{ yaw: number; sneak: boolean }>;
+  setCommand(c: { yaw?: number; sneak?: boolean }): void;
+  onBeforeStep(fn: (tick: bigint) => void): () => void;
+}
 
 export interface AfkOptions {
   /** Time between nudges (ms). 0 disables nudging. Default 4 minutes. */
   nudgeIntervalMs?: number;
   /**
    * Also send an idle `player_auth_input` on every tick between nudges, as a vanilla client does.
-   * Default false: only the nudge ticks are sent (see docs/runbook.md "Phase 1 on BDS" for why).
+   * Default false: only the nudge ticks are sent (see docs/runbook.md "Bot", "Behaviour measured on BDS").
    */
   heartbeat?: boolean;
   /** Look-around angle in degrees (alternates left/right). Default 30. */
@@ -35,6 +48,12 @@ export interface AfkOptions {
   respawnDelayMs?: number;
   metrics?: Metrics;
   log?: Logger;
+  /** Shared death/respawn handling (tasks/respawn.ts); default: one of its own. */
+  respawn?: RespawnController;
+  /** Nudge through this input loop instead of sending own inputs (see AfkLoop). */
+  loop?: AfkLoop;
+  /** Loop mode: skip nudges while this returns true (e.g. the navigator is walking). */
+  busy?: () => boolean;
   /** Clock (ms), for tests. */
   now?: () => number;
 }
@@ -73,9 +92,12 @@ export class AfkTask {
   readonly heartbeat: boolean;
   readonly settle: boolean;
   readonly respawnDelayMs: number;
-  deaths = 0;
-  /** On the death screen (between respawn state 0 and state 1). */
-  dead = false;
+  readonly respawn: RespawnController;
+  private readonly ownRespawn: boolean;
+  private readonly loop: AfkLoop | undefined;
+  private readonly busy: () => boolean;
+  /** Loop mode: yaw before the current nudge. */
+  private baseYaw = 0;
   private readonly yawDelta: number;
   private readonly sneak: boolean;
   private readonly conn: Connection;
@@ -89,7 +111,6 @@ export class AfkTask {
   private step = -1;
   /** A settle input is due on the next tick. */
   private settlePending = false;
-  private respawnTimer: NodeJS.Timeout | undefined;
   private direction = 1;
   private pendingTeleport = false;
   private lastTick = -1n;
@@ -105,6 +126,20 @@ export class AfkTask {
     this.metrics = opts.metrics;
     this.log = opts.log ?? createLogger('info', 'afk');
     this.now = opts.now ?? (() => Date.now());
+    this.loop = opts.loop;
+    this.busy = opts.busy ?? (() => false);
+    this.ownRespawn = opts.respawn === undefined;
+    this.respawn =
+      opts.respawn ?? new RespawnController(conn, { respawnDelayMs: this.respawnDelayMs, metrics: this.metrics, log: this.log, position: () => this.feet });
+  }
+
+  get deaths(): number {
+    return this.respawn.deaths;
+  }
+
+  /** On the death screen (between the death and respawn state 1). */
+  get dead(): boolean {
+    return this.respawn.dead;
   }
 
   onEvent(fn: (e: AfkEvent) => void): () => void {
@@ -118,20 +153,17 @@ export class AfkTask {
     const conn = this.conn;
     this.unsubs.push(
       conn.on('respawn', (p) => {
-        if (p.state === 0 && conn.state === 'spawned') {
-          this.onDeath();
-          return;
-        }
-        if (p.state !== 1) return;
-        const feet = eyeToFeet(p.position);
-        this.setFeet(feet, 'respawn');
-        if (this.dead) {
+        if (p.state === 1) this.setFeet(eyeToFeet(p.position), 'respawn');
+      }),
+      this.respawn.onEvent((e) => {
+        if (e.kind === 'death') {
+          this.step = -1;
+          this.emit({ kind: 'death' });
+        } else if (e.kind === 'respawn') {
           // Back from the death screen (the Connection answers state 1 with state 2).
-          this.dead = false;
           this.settlePending = this.settle;
           this.scheduleNext();
-          this.log.info(`respawned at ${feet.x.toFixed(2)} ${feet.y.toFixed(2)} ${feet.z.toFixed(2)}`);
-          this.emit({ kind: 'respawn', feet });
+          this.emit({ kind: 'respawn', feet: e.feet });
         }
       }),
       conn.on('move_player', (p) => {
@@ -160,13 +192,16 @@ export class AfkTask {
       conn.onClose(() => {
         this.step = -1;
         this.nextNudgeAt = Infinity;
-        this.dead = false;
-        clearTimeout(this.respawnTimer);
       }),
-      conn.onTick((tick) => {
-        this.onTick(tick);
-      }),
+      this.loop
+        ? this.loop.onBeforeStep((tick) => {
+            this.onLoopStep(tick);
+          })
+        : conn.onTick((tick) => {
+            this.onTick(tick);
+          }),
     );
+    if (this.ownRespawn) this.respawn.start();
     if (conn.state === 'spawned') {
       this.settlePending = this.settle;
       this.feet ??= conn.spawnPosition ? eyeToFeet(conn.spawnPosition) : undefined;
@@ -176,7 +211,7 @@ export class AfkTask {
 
   stop(): void {
     for (const u of this.unsubs.splice(0)) u();
-    clearTimeout(this.respawnTimer);
+    if (this.ownRespawn) this.respawn.stop();
     this.step = -1;
     this.nextNudgeAt = Infinity;
   }
@@ -194,32 +229,11 @@ export class AfkTask {
       corrections: this.corrections,
       deaths: this.deaths,
       dead: this.dead,
+      mode: this.loop ? 'loop' : 'own-inputs',
       nudgeIntervalMs: this.nudgeIntervalMs,
       heartbeat: this.heartbeat,
       nextNudgeInMs: Number.isFinite(this.nextNudgeAt) ? Math.max(0, this.nextNudgeAt - this.now()) : null,
     };
-  }
-
-  /** Server `respawn` state 0 while spawned: we died. Press respawn after a short delay. */
-  private onDeath(): void {
-    if (this.dead) return;
-    this.dead = true;
-    this.step = -1;
-    this.deaths++;
-    this.metrics?.inc('deaths');
-    this.log.warn(`died (death ${this.deaths})${this.respawnDelayMs >= 0 ? `; respawning in ${this.respawnDelayMs} ms` : ''}`);
-    this.emit({ kind: 'death' });
-    if (this.respawnDelayMs < 0) return;
-    clearTimeout(this.respawnTimer);
-    this.respawnTimer = setTimeout(() => {
-      this.respawnTimer = undefined;
-      if (!this.dead || this.conn.state !== 'spawned') return;
-      const rid = this.conn.runtimeId;
-      const zero = { x: 0, y: 0, z: 0 };
-      // What the vanilla client sends on the "Respawn" button: client ready + player_action respawn.
-      this.conn.queue('respawn', { position: zero, state: 2, runtime_entity_id: rid });
-      this.conn.queue('player_action', { runtime_entity_id: rid, action: 'respawn', position: zero, result_position: zero, face: -1 });
-    }, this.respawnDelayMs);
   }
 
   private scheduleNext(): void {
@@ -249,15 +263,51 @@ export class AfkTask {
         break;
     }
     this.step++;
-    if (this.step >= NUDGE_TICKS) {
+    if (this.step >= NUDGE_TICKS) this.finishNudge(tick);
+  }
+
+  /**
+   * Loop mode: the same nudge (look, one-tick sneak, look back) through the loop's MoveCommand; the
+   * loop sends the packets. No nudges while dead or while `busy()` (walking is activity anyway).
+   */
+  private onLoopStep(tick: bigint): void {
+    const loop = this.loop;
+    if (!loop) return;
+    if (loop.state.ready) this.feet = loop.state.pos;
+    if (this.dead || this.busy()) {
+      if (this.step >= 0) loop.setCommand({ yaw: this.baseYaw, sneak: false });
       this.step = -1;
-      this.direction = -this.direction;
-      this.nudges++;
-      this.metrics?.inc('nudges');
-      this.log.info(`nudge ${this.nudges} at tick ${tick}`);
-      this.emit({ kind: 'nudge', n: this.nudges, tick });
-      this.scheduleNext();
+      return;
     }
+    if (this.step < 0 && this.now() >= this.nextNudgeAt) this.step = 0;
+    if (this.step < 0) return;
+    switch (this.step) {
+      case 0:
+        this.baseYaw = loop.command.yaw;
+        loop.setCommand({ yaw: this.baseYaw + this.direction * this.yawDelta });
+        break;
+      case 1:
+        if (this.sneak) loop.setCommand({ sneak: true });
+        break;
+      case 2:
+        loop.setCommand({ sneak: false });
+        break;
+      default:
+        loop.setCommand({ yaw: this.baseYaw });
+        break;
+    }
+    this.step++;
+    if (this.step >= NUDGE_TICKS) this.finishNudge(tick);
+  }
+
+  private finishNudge(tick: bigint): void {
+    this.step = -1;
+    this.direction = -this.direction;
+    this.nudges++;
+    this.metrics?.inc('nudges');
+    this.log.info(`nudge ${this.nudges} at tick ${tick}`);
+    this.emit({ kind: 'nudge', n: this.nudges, tick });
+    this.scheduleNext();
   }
 
   /** Build the input for one tick. Feet never move: the bot stands still on the ground. */

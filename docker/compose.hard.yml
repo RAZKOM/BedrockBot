@@ -1,0 +1,34 @@
+# BDS for the Phase 5 hardening e2e tests (PLAN.md tasks 5.1 death/respawn and 5.2 night safety,
+# Track I). Same settings as compose.dig.yml plus TICK_DISTANCE 10; own project name, container
+# bds-hard on udp/19154, data in docker/data/hard.
+#   node scripts/bds.mjs --profile hard up
+#   node scripts/bds.mjs --profile hard pack          # truth pack (needed by the hard-* e2e tests)
+#   BDS_HARD_DIFFICULTY=easy node scripts/bds.mjs --profile hard up   # hostile mobs (night test)
+name: bedrockbot-hard
+
+services:
+  bds-hard:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-hard
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      # peaceful by default; easy brings hostile mobs at night (night-safety check).
+      DIFFICULTY: "${BDS_HARD_DIFFICULTY:-peaceful}"
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: hard
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-hard
+      SERVER_PORT: "19154"
+      TICK_DISTANCE: "10"
+    ports:
+      - "19154:19154/udp"
+    volumes:
+      - ./data/hard:/data
+    stdin_open: true
+    tty: true

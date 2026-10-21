@@ -1,0 +1,32 @@
+# BDS for the 8 h AFK soak (PLAN.md task 5.4, Track I). Nothing but the soak bot ever connects to
+# it, so reconnect tests (which restart bds-dev) cannot disturb the soak. Same settings as
+# compose.dig.yml plus TICK_DISTANCE 10; container bds-soak on udp/19152, data in docker/data/soak.
+#   node scripts/bds.mjs --profile soak up
+#   node scripts/bds.mjs --profile soak pack
+name: bedrockbot-soak
+
+services:
+  bds-soak:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-soak
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: peaceful
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: soak
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-soak
+      SERVER_PORT: "19152"
+      TICK_DISTANCE: "10"
+    ports:
+      - "19152:19152/udp"
+    volumes:
+      - ./data/soak:/data
+    stdin_open: true
+    tty: true

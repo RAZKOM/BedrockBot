@@ -25,8 +25,26 @@ export interface MetricsSnapshot {
   kicks: { total: number; byReason: Record<string, number> };
   lastDisconnect: { ts: string; reason: string; kind: string } | null;
   counters: Record<string, number>;
+  /** Event rates from the counters' recent history (PLAN.md task 5.4). */
+  rates: MetricsRates;
   [extra: string]: unknown;
 }
+
+export interface MetricsRates {
+  /** `corrections` per minute over the last 10 minutes (or since start when shorter). */
+  correctionsPerMin: number;
+  /** `corrections` in the last minute. */
+  correctionsLastMin: number;
+  /** `deaths` per hour over the last hour (or since start). */
+  deathsPerHour: number;
+  /** Successful reconnects (spawns after the first) per hour over the last hour (or since start). */
+  reconnectsPerHour: number;
+}
+
+/** Counters whose increments are timestamped for rates (bounded: last hour, at most 20 000 each). */
+const RATE_COUNTERS = new Set(['corrections', 'deaths', 'reconnects']);
+const RATE_KEEP_MS = 3_600_000;
+const RATE_MAX = 20_000;
 
 /** Key for `kicks.byReason`: the DisconnectFailReason name plus the message the player sees. */
 export function kickKey(info: CloseInfo): string {
@@ -52,6 +70,7 @@ export class Metrics {
   private readonly providers: (() => Record<string, unknown>)[] = [];
   private writer: NodeJS.Timeout | undefined;
   private writerPath: string | undefined;
+  private readonly events = new Map<string, number[]>();
 
   constructor(opts: { now?: () => Date } = {}) {
     this.now = opts.now ?? (() => new Date());
@@ -71,6 +90,7 @@ export class Metrics {
     this.conn = conn;
     const offSpawn = conn.onSpawn(() => {
       this.spawns++;
+      if (this.spawns > 1) this.stamp('reconnects');
       this.sessionStart = this.now();
     });
     const offClose = conn.onClose((info) => {
@@ -95,6 +115,41 @@ export class Metrics {
 
   inc(name: string, by = 1): void {
     this.counters[name] = (this.counters[name] ?? 0) + by;
+    if (RATE_COUNTERS.has(name)) for (let i = 0; i < by; i++) this.stamp(name);
+  }
+
+  private stamp(name: string): void {
+    const now = this.now().getTime();
+    let list = this.events.get(name);
+    if (!list) {
+      list = [];
+      this.events.set(name, list);
+    }
+    list.push(now);
+    while (list.length > RATE_MAX || (list.length > 0 && now - list[0]! > RATE_KEEP_MS)) list.shift();
+  }
+
+  /** Events of `name` per `unitMs` over the last `windowMs` (shortened to the bot's uptime). */
+  rate(name: string, windowMs: number, unitMs: number): number {
+    const now = this.now().getTime();
+    const span = Math.max(1, Math.min(windowMs, now - this.startedAt.getTime()));
+    const n = (this.events.get(name) ?? []).filter((t) => now - t <= windowMs).length;
+    return Math.round((n / span) * unitMs * 1000) / 1000;
+  }
+
+  /** Events of `name` within the last `windowMs`. */
+  countSince(name: string, windowMs: number): number {
+    const now = this.now().getTime();
+    return (this.events.get(name) ?? []).filter((t) => now - t <= windowMs).length;
+  }
+
+  rates(): MetricsRates {
+    return {
+      correctionsPerMin: this.rate('corrections', 600_000, 60_000),
+      correctionsLastMin: this.countSince('corrections', 60_000),
+      deathsPerHour: this.rate('deaths', 3_600_000, 3_600_000),
+      reconnectsPerHour: this.rate('reconnects', 3_600_000, 3_600_000),
+    };
   }
 
   /** Extra fields merged into every snapshot (position, task status, ...). */
@@ -121,6 +176,7 @@ export class Metrics {
       kicks: { total: this.kicks, byReason: { ...this.kicksByReason } },
       lastDisconnect: this.lastDisconnect,
       counters: { ...this.counters },
+      rates: this.rates(),
     };
     for (const fn of this.providers) {
       try {

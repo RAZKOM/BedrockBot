@@ -20,6 +20,9 @@
     "bds51:up": "node scripts/bds.mjs --profile dev51 up",
     "bdsnn:up": "node scripts/bds.mjs --profile nn up",
     "e2e:51": "pnpm --filter bot exec node scripts/e2e-profile.ts dev51",
-    "e2e:nn": "pnpm --filter bot exec node scripts/e2e-profile.ts nn"
+    "e2e:nn": "pnpm --filter bot exec node scripts/e2e-profile.ts nn",
+    "bot:realm": "pnpm --filter bot start -- --task afk --target realm",
+    "config:init": "pnpm --filter bot exec node src/config/init.ts",
+    "update:check": "pnpm --filter bot exec node src/update/cli.ts"
   }
 }
