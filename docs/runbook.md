@@ -100,6 +100,7 @@ container under test).
 | `soak` | bds-soak | udp/19152 | docker/compose.soak.yml (TICK_DISTANCE 10) | 1.26.60.6 | the 8 h AFK soak only (task 5.4); nothing else connects |
 | `hard` | bds-hard | udp/19154 | docker/compose.hard.yml (TICK_DISTANCE 10; `BDS_HARD_DIFFICULTY`, default peaceful) | 1.26.60.6 | hard-* e2e: death/respawn, night safety (HARD_BDS_*) |
 | `rl` | bds-rl | udp/19156 | docker/compose.rl.yml | 1.26.60.6 | RL bridge (Track J) |
+| `rl-N` | bds-rl-N | udp/19170+N | docker/compose.rl-n.yml (`N=1 docker compose -p bedrockbot-rl-1 -f docker/compose.rl-n.yml up -d`) | 1.26.60.6 | extra RL envs for SubprocVecEnv (rl/scripts/throughput.py); remove after use |
 | `nn` | bds-nn | tcp+udp/19140, udp/19160-19167 (WebRTC), udp/7551 (discovery) | docker/compose.dev-nethernet.yml (NetherNet, TICK_DISTANCE 10) | 1.26.60.6 | `pnpm e2e:nn` |
 | `dev51` | bds-dev51 | udp/19134 | docker/compose.dev51.yml (TICK_DISTANCE 10) | 1.26.51.1 | `pnpm e2e:51` (rollback to the previous version) |
 
