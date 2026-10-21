@@ -60,7 +60,8 @@ describe.skipIf(!E2E)('hard: death and respawn (task 5.1)', () => {
       // Truth can see the bot at home a few ticks before goto resolves and writes its report.
       const walked = await until(() => {
         const r = b.built.mobility?.skills.nav.lastReport;
-        return r && r !== prevReport ? r : undefined;
+        // The report exists from the start of the walk; `result` is filled when it ends.
+        return r && r !== prevReport && r.result !== undefined ? r : undefined;
       }, 10_000, `goto report after death ${n}`);
       expect(walked.result).toEqual({ ok: true });
       if (away) expect(walked.distance).toBeGreaterThan(hdist(respawnAt, centre(HOME)) - 1.5);
