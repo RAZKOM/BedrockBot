@@ -1,0 +1,33 @@
+# BDS for the wood-gathering e2e tests (PLAN.md Phase 4 tasks 4.3 to 4.6, Track H). Same settings as
+# compose.dig.yml (offline, RakNet, flat, peaceful, operator) plus TICK_DISTANCE 10 (the forest and the
+# chest room are edited by the truth pack while the bot walks around), own name, port and data dir.
+#   node scripts/bds.mjs --profile wood up
+#   node scripts/bds.mjs --profile wood pack
+#   (= pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/wood --world wood --restart bds-wood)
+name: bedrockbot-wood
+
+services:
+  bds-wood:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-wood
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: peaceful
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: wood
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-wood
+      SERVER_PORT: "19150"
+      TICK_DISTANCE: "10"
+    ports:
+      - "19150:19150/udp"
+    volumes:
+      - ./data/wood:/data
+    stdin_open: true
+    tty: true

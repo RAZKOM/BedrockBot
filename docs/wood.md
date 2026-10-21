@@ -1,0 +1,275 @@
+# Wood gathering: trees, collect, chests, GatherWood (`bot/src/skills/{tree,collect,container}`, `bot/src/tasks/gatherWood.ts`)
+
+PLAN.md Phase 4 tasks 4.3 to 4.6 (Track H). Everything below was measured on **BDS 1.26.60.6**
+(container `bds-wood`, udp/19150, RakNet, offline, flat world, peaceful, survival,
+`server-authoritative-block-breaking` on, pick-range scalar 1.5, TICK_DISTANCE 10) with
+bedrock-protocol `c9e1fbf2` / minecraft-data 3.117.0 + the 1.26.60 patch on 2026-10-29. Digging
+itself (break times, reach, `abort_break`) is in [digging.md](digging.md); movement in
+[movement.md](movement.md) and [pathfinding.md](pathfinding.md).
+
+```ts
+const world = new World(conn);
+const loop = new InputLoop(conn, { world: flatWorld() });
+const hotbar = new Hotbar(conn, { inventory: world.inventory, runtimeId: () => world.self.runtimeId });
+const containers = new Containers(conn, world.inventory);
+const skills = new BotSkills({ loop, world, hotbar, containers, source: conn });
+loop.start();
+await conn.connect(target);
+
+const tree = skills.treeAt({ x: 10, y: -58, z: 4 });           // from any log
+const r = await skills.fellTree(tree!);                           // bottom up, re-paths when out of reach
+const c = await skills.collect(8, 400, { origin: tree!.base });  // walk over the drops
+const trees = skills.findTrees(48);                               // closest first
+const o = await skills.open({ x: 0, y: -60, z: 0 });              // chest next to the bot
+if (o.ok) {
+  await skills.deposit(o.view, (i) => i.name.endsWith('_log'));
+  await skills.closeContainer(o.view);
+}
+```
+
+CLI (unattended):
+
+```sh
+cd bot
+node src/index.ts --task gather --port 19150 --target-logs 64 --chest 0,-60,0 --exit-when-done
+node src/index.ts --task gather --port 19150 --chest 0,-60,0      # then in chat: !gather 64, !gather stop, !status
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--target-logs <n>` | none (wait for `!gather N`) | start at once: n logs into the chest |
+| `--chest <x,y,z>` | none | chest block; `!gather N x y z` overrides it. Without a chest the task stops once it carries n logs |
+| `--search-radius <n>` | 48 | tree search radius around the chest (else around the start position) |
+| `--exit-when-done` | off | disconnect and exit 0 when the target is reached, 1 when the task fails |
+| `--allow-dig <names>` | none | blocks besides logs the feller may dig (comma list, e.g. `oak_leaves`) |
+
+Config file: `tasks.gather.{targetLogs, chest ([x,y,z] or "x,y,z"), searchRadius, exitWhenDone, allowDig}`.
+Common options (`--respawn-delay`, `--owner`, ...) as in docs/runbook.md. Default username `WoodBot`.
+
+Chat: `!gather <n> [x y z]` starts (or restarts) gathering; `!gather stop`; `!gather` prints the
+gather status; `!status` carries `task gather, state <s>, logs <deposited>/<target>, carried <n>,
+trees <n>, corrections <n>, deaths <n>`.
+
+## Files
+
+| File | What |
+|---|---|
+| `bot/src/skills/tree/tree.ts` | `detectTree`, `treesFrom`, `remainingLogs`, `logKind`, `isLog`, `isLeaves` (pure, over a block lookup) |
+| `bot/src/skills/tree/feller.ts` | `fellTree` (bottom-up felling with re-pathing), `standSpots` |
+| `bot/src/skills/collect/collect.ts` | `collectItems` (walk over item entities, inventory-full detection) |
+| `bot/src/skills/container/chest.ts` | `ChestSkill` (open / deposit / close), `clickBlockTransaction`, `maxStackOf` |
+| `bot/src/world/containers.ts` | `Containers`: container_open / container_close, item_stack_request with prediction, item_stack_response |
+| `bot/src/world/inventory.ts` | raw wire `ItemV4` per slot (`rawItem`), `setItem`, `removeWindow`, `freeSlots`, `room` (additions) |
+| `bot/src/skills/index.ts` | `BotSkills`: the skills above behind one facade, serialised (see below); `attach()` for Hotbar / Containers |
+| `bot/src/tasks/gatherWood.ts` | `GatherWoodTask` (state machine) and `gatherTask` (CLI TaskDefinition) |
+| `bot/src/chat/commands.ts` | `registerGatherCommands` (`!gather`) |
+| `packs/truth/src/wood.ts`, `woodShapes.ts` | `truth:container`, `truth:tree`, `truth:find`; `treeShape` |
+
+## Skill serialisation
+
+Every public `BotSkills` call (`goto`, `dig`, `lookAt`, `collect`, `fellTree`, `open`, `deposit`,
+`closeContainer`) first cancels the running one, synchronously (the navigator, the digger and the
+look controller all finish their promise inside `cancel`), and then starts. So goto and dig never
+steer yaw/pitch at the same time. `collect` and `fellTree` are compound: they call the navigator and
+the digger directly, one at a time, and check a cancel epoch between steps; `cancel()` or any new
+public call ends them with `interrupted`. `status().running` names the skill that runs. `dig()`
+returns the full `DigResult` (`DigOptions` / `DigResult` are exported from `skills/index.ts` and
+`skills/types.ts`, as Track G asked).
+
+## Tree model (4.3)
+
+- **Detection** from any log: flood fill over logs of the **same kind** (`oak_log` -> oak; stripped
+  logs never count), 26-connected (branches touching only by an edge or corner belong to the tree),
+  at most 96 logs and 8 blocks horizontally from the start log. It is a tree when at least 3 leaves
+  are within 2 blocks of its logs and its lowest logs stand on soil (dirt, grass, podzol, mud ...);
+  a log column on planks or without leaves is refused (`minLeaves: 0`, `requireSoil: false` relax
+  that). Two trunks side by side are one tree; canopies that touch do not join trees.
+- **Felling order**: by y, then by distance from the trunk axis (mean x/z of the lowest layer).
+- **Reach**: the feller digs a log when it is within `DEFAULT_REACH` (5, eye to the closest point of
+  the block) and the server's corner limit (digging.md). Standing next to a trunk, the eye is at
+  feet + 1.62 and the highest log within reach is the one at feet + 6 (distance 4.40); feet + 7
+  (5.40) is out. So trees up to 7 logs are felled from the ground.
+- **Re-path** when the next log is out of reach: every standable cell (NavGrid.stand) within 4
+  blocks horizontally and 6 below / 1 above the log from which it is in reach (reach - 0.25 margin)
+  is scored by `-3 x (remaining logs in reach) + distance to the trunk + 0.3 x distance to the bot
+  + 0.5 x height difference`; the bot walks to the best (up to 4 tries). A log no cell reaches is
+  skipped and reported in `left` (`{ ok: false, reason: 'logs_left' }`).
+- **Pillar-up is not implemented** (it needs block placement under the feet while jumping). Trees
+  taller than 7 logs on flat ground therefore leave their top logs (unit test: a 9-high trunk ends
+  with 7 broken, 2 left). None of the test trees (4..6) needs it.
+- **Only logs are dug.** `fellTree` refuses any other block unless `allowDig(name)` says yes
+  (`--allow-dig`); leaves are never broken by default.
+
+Test trees (`packs/truth/src/woodShapes.ts`, placed by `truth:tree`): a log column 4..6 high, leaves
+radius 2 without corners at top - 1 and top, a plus shape at top + 1 and top + 2. The lowest leaves
+are at y + h - 2, so the cells next to the trunk are free up to y + 1 and the drops are reachable.
+
+## Collect (4.4)
+
+`collect(radius, timeoutTicks, { origin, filter, near, attemptsPerItem })`: repeatedly picks the
+nearest item entity (EntityTracker, `minecraft:item`) within `radius` of the origin that fits into
+the inventory (`Inventory.room(name, maxStack)`), walks to it with `goto({ type: 'near', p, r: 0.8 })`
+and waits up to 10 ticks for the server's `take_item_entity`. Items it could not reach or that were
+not picked up after 2 approaches are skipped (an unreachable one is retried once after 10 ticks:
+drops on top of leaves fall when the leaves decay). Two timing rules came from failed e2e runs:
+
+- **Grace period** (`graceTicks`, 10): the drop of the block broken last arrives as
+  `add_item_entity` a moment after the `update_block` that ends `dig()`. A `collect` started right
+  after felling saw no item and returned at once; the bot walked off and one log stayed at the
+  trunk (2 of the first 2 full-suite runs: 23 of 24 logs). `collect` now reports "nothing to
+  collect" only after 10 ticks.
+- **Falling drops** (`settleMs` 250, `maxSettleTicks` 60): an item whose position changed within
+  the last 250 ms is still falling (from a log higher up); planning a path to its mid-air position
+  fails as unreachable, so collect waits for it to land. Result: `{ ok, reason?, gained (inventory delta by
+name), pickedUp, skipped, ticks, corrections }`; `reason` is `inventory_full` when only items that
+do not fit are left, `timeout`, or `interrupted`.
+
+Measured: logs broken next to the bot are picked up without walking (the server hands a drop to a
+player within about 1.3 blocks, about 10 ticks after `add_item_entity`); logs from higher up fall
+down the empty trunk column and are picked up the same way, so `collect` after a tree usually walks
+only for drops that bounced away (0 to 92 ticks per tree in the fell test) and for saplings from leaf
+decay. Picked-up items arrive as `inventory_slot` / `inventory_content` / clientbound
+`inventory_transaction` for window 0; `truth:inv` agreed with the model in every run.
+
+## Chest (4.5): packet shapes that work on BDS 1.26.60.6
+
+Open (client -> server), `inventory_transaction`:
+
+```js
+{ transaction: { legacy: { legacy_request_id: 0 }, transaction_type: 'item_use', actions: [],
+  transaction_data: { action_type: 'click_block', trigger_type: 'player_input',
+    block_position: { x, y, z }, face,                       // the face seen from the eye (faceToward)
+    hotbar_slot: selected, hand: 'main_hand',
+    held_item: <the held slot's ItemV4 exactly as the server sent it, or the empty item>,
+    player_pos: <eye position, feet + 1.62>,
+    click_pos: <centre of that face, block-relative, e.g. {x:0, y:0.5, z:0.5} for west>,
+    block_runtime_id: <the chest's network runtime id from the chunk store>,
+    client_prediction: 'success', client_cooldown_state: 'off' } } }
+```
+
+The bot looks at the chest first (2 ticks) and must be within about 4.5 blocks (eye to the closest
+point; the server rejects far clicks silently). bedrock-protocol writes one extra byte after
+`legacy_request_id` for the optional `legacy_transactions`; the server's own clientbound
+`inventory_transaction` carries that byte too (fixtures), so the shape is symmetric and correct.
+
+Server answers (about 200 ms after the click, including the 2 look ticks):
+
+```js
+container_open   { window_id: 2, window_type: 'container', coordinates: { x, y, z }, runtime_entity_id: -1n }
+inventory_content { window_id: 2, input: [27 x ItemV4], container: {...}, storage_item: {...} }   // sent twice
+```
+
+Move a stack (client -> server), `item_stack_request`, one request per move, awaited one by one:
+
+```js
+{ requests: [{ request_id: -1,                // negative odd, counting down: -1, -3, -5 ...
+  actions: [{ type_id: 'place', legacy_type_id: 1, count: 10,
+    source:      { slot_type: { container_id: 'hotbar' }, slot: 0, stack_id: 1 },      // 'inventory' for slots 9..35
+    destination: { slot_type: { container_id: 'container' }, slot: 0, stack_id: 0 } }],  // 0 = empty slot, else its stack id
+  custom_names: [], cause: 'chat_public' }] }
+```
+
+`legacy_type_id` must be set (the serializer writes an `undefined` u8 otherwise and BDS drops the
+request: no response, the first probe timed out). Stack ids are the server's stack network ids
+(`stack_id` of the ItemV4 in inventory_content / inventory_slot / inventory_transaction).
+
+Answer, `item_stack_response`:
+
+```js
+{ responses: [{ status: 'ok', request_id: -1, containers: [
+  { slot_type: { container_id: 'hotbar' },    slots: [{ slot: 0, hotbar_slot: 0, count: 0, custom_name: '', filtered_custom_name: '', durability_correction: 0 }] },
+  { slot_type: { container_id: 'container' }, slots: [{ slot: 0, hotbar_slot: 0, count: 10, item_stack_id: 6, ... }] } ] }] }
+```
+
+followed by an `inventory_slot` for the chest window. The model applies the move at once
+(prediction), then takes counts and new stack ids from the response; on `status: 'error'` or no
+answer within 3 s it rolls the prediction back. Partial stacks of the same item are filled first
+(stack size from minecraft-data), then empty slots; `container_full` when neither is left.
+
+Close: client `container_close { window_id: 2, window_type: 'container', server: false }`; the
+server answers `container_close { window_id: 2, window_type: 'none', server: false }`.
+
+## GatherWood (4.6)
+
+State machine (`GatherWoodTask.state`): `find` -> `fell` -> `collect` -> (`to_chest` -> `deposit`)
+-> `find` ... -> `done` | `failed` | `stopped`; `waiting` while the bot cannot act (not spawned,
+loop not ready, dead) and `dead` while paused by a death.
+
+- **find**: `findTrees(searchRadius, origin = chest)` (World.find over the `log` class index, then
+  `detectTree` per candidate), nearest to the bot first; a tree that failed twice is skipped.
+  5 rounds without any tree (100 ticks apart) -> `failed`.
+- **fell** (walks to the tree itself), then **collect** (radius 8 around the base, 300 ticks).
+- **deposit** when the logs carried reach what is still missing, or when fewer than 2 inventory
+  slots are free: goto `near` the chest (r 2), open, deposit every `*_log` stack, close. Logs of
+  any kind count; saplings, apples and sticks are picked up but never counted or deposited.
+- **death**: tasks/respawn.ts (Track I) presses respawn; on its `death` event the task pauses
+  (skills cancelled), its after-respawn hook waits for the chunks and resumes from `find`. Items
+  dropped at the death are not fetched back explicitly (collect may pick them up later if they lie
+  near a tree). The respawn point must be near the forest (`/spawnpoint`), otherwise there are no
+  trees within the search radius and the task fails after 5 rounds.
+
+## Measured
+
+bds-wood, BDS 1.26.60.6, 2026-10-29. Bare hands throughout (no axe: 60 ticks per oak log), so the
+times are an upper bound; an axe would cut the digging time by 2x (wooden) to 7.5x (diamond).
+
+**4.6, `wood-gather` (CLI, `--target-logs 64`, 24 trees / 115..126 logs, chest in the middle):**
+
+| Run | Time to 64 logs in the chest | logs/h (to 64) | Deposited at the end | Trees | Trips | Corrections | Deaths | Failures |
+|---|---|---|---|---|---|---|---|---|
+| first full run | 304.6 s | 756 | 67 | 14 | 1 | 1 | 0 | 0 |
+| suite run A1 | 288.7 s | 798 | 67 | 13 | 1 | 1 | 0 | 0 |
+| suite run A2 | 267.9 s | 860 | 65 | 13 | 1 | 0 | 0 | 0 |
+| final run 1 | 268.3 s | 859 | 67 | 14 | 1 | 0 | 0 | 0 |
+| final run 2 | 336.4 s | 685 | 68 | 14 | 1 | 1 | 0 | 0 |
+
+All well under the 15 min limit (worst 5.6 min); the CLI exited 0 every time. Logs/h as the task
+reports it over its whole run: 738 to 915. One trip each time: the bot carries all the logs (64 fit
+in one slot) and deposits once. A short run (`WOOD_GATHER_TARGET=16`): 65.9 s. The truth check after
+each run found no tree that lost its base log but kept logs above it.
+
+**4.3 / 4.4, `wood-fell` (5 oak trees, 24 logs):** 24/24 logs broken in 89 to 120 s every run, 0
+corrections while felling (1 correction per test, at the teleport into the area), 0 dig
+failures, one re-path per tree (walking to it; a tree next to the previous one needed none), no log
+left from base to base + 5 (truth:find). The first two full-suite runs failed the 4.4 count by one
+(23 of 24 logs in the inventory; see "Grace period" above); after the fix 5 of 5 runs had
+inventory = truth:inv = logs broken = 24.
+
+**4.5, `wood-chest`:** open in 200 to 231 ms (two of them are the look ticks), one
+`item_stack_request` per stack, 0 errors, 10/10 logs in the chest per truth:container, from the
+hotbar and from main-inventory slots (onto the existing stack), every run.
+
+**Death (`wood-death`, target 15):** killed while carrying 3 to 6 logs, respawned 2.1 s later next
+to the chest, resumed 0.5 s after that, done in 76 to 92 s with 15 to 17 logs deposited; in two of
+four runs the logs dropped at the death were picked up again by a later collect.
+
+## Tests
+
+| Test | What |
+|---|---|
+| `bot/test/unit/skills/tree.test.ts` | detection from every log, branches, touching trees, kinds, refusals (bare column, not on soil, too big), order, `treesFrom` |
+| `bot/test/unit/skills/tree-feller.test.ts` | closed loop (FakeConnection + InputLoop + BotSkills + a stand-in server that breaks a block 3 ticks after start_break): bottom-up order, re-path, 9-high trunk leaves 2, cancel, a new skill cancels the running one, `standSpots` |
+| `bot/test/unit/skills/collect.test.ts` | nearest first, inventory full, partial stacks, unreachable, never picked up, filter, cancel, timeout |
+| `bot/test/unit/skills/container.test.ts` | window tracking, the exact request shape, prediction / reconciliation / rollback / timeout, serialisation round trip with the 1.26.60 protocol, `ChestSkill` open / deposit / close / container_full / refusals |
+| `bot/test/unit/skills/gather.test.ts` | state machine with fake skills: one trip, inventory full, failing trees, no chest, death pause/resume, stop/waiting; `!gather` parsing |
+| `packs/truth/test/unit/wood-shapes.test.ts` | `treeShape` |
+| `bot/test/e2e/wood-fell.test.ts` | 4.3 + 4.4 on `fell-forest` (5 oak trees) |
+| `bot/test/e2e/wood-chest.test.ts` | 4.5 on `chest-room` |
+| `bot/test/e2e/wood-gather.test.ts` | 4.6 from the CLI on `gather-forest` (24 trees, about 120 logs) |
+| `bot/test/e2e/wood-death.test.ts` | the CLI bot is killed while carrying logs and still delivers 15 logs |
+
+Server and pack:
+
+```sh
+node scripts/bds.mjs --profile wood up      # docker compose -f docker/compose.wood.yml up -d, wait for "Server started."
+node scripts/bds.mjs --profile wood pack    # deploy the truth pack into docker/data/wood, restart
+cd bot
+BDS_E2E=1 pnpm exec vitest run --project e2e wood          # all wood-* e2e files (about 10 min)
+BDS_E2E=1 WOOD_GATHER_TARGET=16 pnpm exec vitest run --project e2e wood-gather   # a short gather run
+```
+
+Env: `WOOD_BDS_HOST`, `WOOD_BDS_PORT` (19150), `WOOD_BDS_CONTAINER` (`bds-wood`), `WOOD_VERBOSE=1`
+(skill logs and the CLI's log), `WOOD_GATHER_TARGET` (default 64); version and transport from
+`bot/test/e2e/env.ts`. Every run builds its layouts in its own random 128-block cell from
+x, z = 2048 (`WoodArea`) and uses run-unique truth ids (`DigTruth`), so concurrent runs do not
+collide.

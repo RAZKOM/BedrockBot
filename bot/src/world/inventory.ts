@@ -1,5 +1,9 @@
 // Inventory model (PLAN.md task 2.5): `inventory_content`, `inventory_slot`, clientbound
 // `inventory_transaction` (how BDS announces /give), `player_hotbar` and our own `mob_equipment`.
+// Every slot also keeps the raw wire ItemV4 as the server sent it (`rawItem`): packets such as
+// mob_equipment and inventory_transaction must echo items exactly. Item stack requests (Phase 4.5,
+// world/containers.ts) change slots through `setItem` (client prediction, then the server's
+// item_stack_response).
 import type { InventoryContent, InventorySlot, InventoryTransaction, ItemV4, MobEquipment, PlayerHotbar, WindowIdField } from './packets.ts';
 import { toBigInt } from './packets.ts';
 import type { ContainerView, ItemStack } from './types.ts';
@@ -34,6 +38,8 @@ export function windowId(w: WindowIdField): number {
 
 export class Inventory {
   private readonly windows = new Map<number, (ItemStack | null)[]>();
+  /** Raw wire items per window and slot (undefined = never reported or changed by a prediction). */
+  private readonly raws = new Map<number, (ItemV4 | undefined)[]>();
   private readonly toItem: (i: ItemV4) => ItemStack | null;
   private readonly selfRuntimeId: () => bigint;
   private _selected = 0;
@@ -65,6 +71,62 @@ export class Inventory {
     return slots ? { id, slots } : undefined;
   }
 
+  /** The wire item last reported for a slot (undefined: never reported, or changed locally since). */
+  rawItem(window: number, slot: number): ItemV4 | undefined {
+    return this.raws.get(window)?.[slot];
+  }
+
+  /** Window ids currently held (0 is always there). */
+  windowIds(): number[] {
+    return [...this.windows.keys()];
+  }
+
+  /**
+   * Set a slot from the client side (item stack request prediction or response). Clears the raw
+   * wire item unless one is given. Creates the window if needed.
+   */
+  setItem(window: number, slot: number, item: ItemStack | null, raw?: ItemV4): void {
+    let slots = this.windows.get(window);
+    if (!slots) {
+      slots = [];
+      this.windows.set(window, slots);
+    }
+    while (slots.length <= slot) slots.push(null);
+    slots[slot] = item;
+    this.rawsOf(window)[slot] = raw;
+    this.emit(window, slot);
+  }
+
+  /** Forget a container window (container_close). The player inventory (0) is never removed. */
+  removeWindow(window: number): void {
+    if (window === WINDOW_INVENTORY) return;
+    this.windows.delete(window);
+    this.raws.delete(window);
+    this.emit(window, undefined);
+  }
+
+  /** Player inventory slots (0..35) that are empty. */
+  freeSlots(): number[] {
+    const out: number[] = [];
+    for (let i = 0; i < INVENTORY_SIZE; i++) if (!this.slots[i]) out.push(i);
+    return out;
+  }
+
+  /**
+   * How many of `name` still fit into the player inventory (empty slots and partial stacks of the
+   * same item, `maxStack` per slot).
+   */
+  room(name: string, maxStack = 64): number {
+    const short = name.startsWith('minecraft:') ? name.slice(10) : name;
+    let n = 0;
+    for (let i = 0; i < INVENTORY_SIZE; i++) {
+      const s = this.slots[i];
+      if (!s) n += maxStack;
+      else if (s.name === short) n += Math.max(0, maxStack - s.count);
+    }
+    return n;
+  }
+
   /** Total count of an item (name without namespace) in the player inventory. */
   count(name: string): number {
     const short = name.startsWith('minecraft:') ? name.slice(10) : name;
@@ -80,7 +142,17 @@ export class Inventory {
 
   clear(): void {
     this.windows.clear();
+    this.raws.clear();
     this.windows.set(WINDOW_INVENTORY, new Array<ItemStack | null>(INVENTORY_SIZE).fill(null));
+  }
+
+  private rawsOf(window: number): (ItemV4 | undefined)[] {
+    let r = this.raws.get(window);
+    if (!r) {
+      r = [];
+      this.raws.set(window, r);
+    }
+    return r;
   }
 
   handleInventoryContent(p: InventoryContent): void {
@@ -89,6 +161,7 @@ export class Inventory {
       id,
       p.input.map((i) => this.toItem(i)),
     );
+    this.raws.set(id, [...p.input]);
     this.emit(id, undefined);
   }
 
@@ -104,6 +177,7 @@ export class Inventory {
     }
     while (slots.length <= slot) slots.push(null);
     slots[slot] = this.toItem(item);
+    this.rawsOf(id)[slot] = item;
     this.emit(id, slot);
   }
 

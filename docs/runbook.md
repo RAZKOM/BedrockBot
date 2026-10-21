@@ -101,6 +101,8 @@ container under test).
 | `hard` | bds-hard | udp/19154 | docker/compose.hard.yml (TICK_DISTANCE 10; `BDS_HARD_DIFFICULTY`, default peaceful) | 1.26.60.6 | hard-* e2e: death/respawn, night safety (HARD_BDS_*) |
 | `rl` | bds-rl | udp/19156 | docker/compose.rl.yml | 1.26.60.6 | RL bridge (Track J) |
 | `rl-N` | bds-rl-N | udp/19170+N | docker/compose.rl-n.yml (`N=1 docker compose -p bedrockbot-rl-1 -f docker/compose.rl-n.yml up -d`) | 1.26.60.6 | extra RL envs for SubprocVecEnv (rl/scripts/throughput.py); remove after use |
+
+Per-track details: docs/world-model.md, docs/movement.md, docs/pathfinding.md, docs/digging.md, docs/wood.md (`--task gather`), docs/rl.md, docs/versions.md.
 | `nn` | bds-nn | tcp+udp/19140, udp/19160-19167 (WebRTC), udp/7551 (discovery) | docker/compose.dev-nethernet.yml (NetherNet, TICK_DISTANCE 10) | 1.26.60.6 | `pnpm e2e:nn` |
 | `dev51` | bds-dev51 | udp/19134 | docker/compose.dev51.yml (TICK_DISTANCE 10) | 1.26.51.1 | `pnpm e2e:51` (rollback to the previous version) |
 

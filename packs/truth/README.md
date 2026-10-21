@@ -13,6 +13,7 @@ Replies are chat messages (`world.sendMessage`) that start with `@truth ` follow
 |---|---|
 | `manifest.json` | pack manifest (header uuid `4b99f76a-7d3a-4a0c-a2bf-4e85ffb907bd`, depends on `@minecraft/server` 2.10.0) |
 | `src/main.ts` | the pack: command handlers, events |
+| `src/wood.ts`, `src/woodShapes.ts` | wood commands (`container`, `tree`, `find`) and the pure tree shape shared with the bot's tests |
 | `src/protocol.ts` | pure helpers: tokenizer, canonical order, RLE, FNV-1a, reply encoding, `ReplyParser`, `textOf` (reusable by the bot) |
 | `structures/truth/probe.mcstructure` | 3 x 2 x 3 test structure, id `truth:probe` (made by `scripts/make-probe-structure.mjs`) |
 | `scripts/build.mjs` | esbuild bundle to `dist/scripts/main.js`, copies manifest and structures to `dist/` |
@@ -137,6 +138,14 @@ online, else `player_ambiguous`.
 | `place` | `structureName x y z [0|90|180|270] [none|x|z|xz]` | `{structure, from, to, size}` (entities not placed) |
 | `save` | `structureName x1 y1 z1 x2 y2 z2 [world|memory]` | `{structure, from, to, size, saveMode}` |
 | `structures` | | `{pack:[ids], world:[ids]}` |
+
+### Wood commands (src/wood.ts, PLAN.md Phase 4)
+
+| Command | Args | `data` on success |
+|---|---|---|
+| `container` | `x y z [clear]` | `{x, y, z, typeId, size, total, slots:[{slot, typeId, amount} or null], counts:{typeId: n}}`; with `clear` the inventory is emptied after reading (`cleared`). `no_container` if the block has no inventory |
+| `tree` | `x y z height [kind=oak] [persistent=0]` | `{kind, base, height, logs:[[x,y,z]...], leaves, persistent}`: a log column from (x, y, z) up and a leaf canopy (`src/woodShapes.ts` `treeShape`: radius 2 without corners at top - 1 and top, a plus shape at top + 1 and top + 2). Leaves only replace air. Kinds: oak, birch, spruce, jungle, acacia, dark_oak, cherry, mangrove, pale_oak |
+| `find` | `x1 y1 z1 x2 y2 z2 pattern [max=4096]` (max volume 1 048 576, a job) | `{from, to, pattern, count, byType, positions:[[x,y,z]...], truncated}`: blocks whose typeId contains `pattern` (e.g. `_log`) |
 
 ### Canonical block order, RLE and checksum
 

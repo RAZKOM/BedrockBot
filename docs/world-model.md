@@ -119,9 +119,9 @@ registry still comes from prismarine.
   absolute floats, rotations as bytes x 360 / 256) and the older `flags` bitfield shape.
 - **Inventory.** BDS announces server-side changes such as `/give` as a clientbound
   `inventory_transaction` (type `normal`, `container` actions with `window_id` 0 and the new item),
-  not as `inventory_slot`; both are handled. `item_stack_response` (results of the bot's own
-  requests) is not handled yet; Phase 4.5 will need it. Open-container windows only appear once
-  the server sends `inventory_content` for them; `container_open` / `container_close` are not tracked.
+  not as `inventory_slot`; both are handled. `container_open` / `container_close`,
+  `item_stack_response` and the per-window contents are handled by `bot/src/world/containers.ts`
+  (Phase 4.5, constructed separately like `Hotbar` and attached to the skills; see docs/wood.md).
 - **Self state** is what the server reports (start_game, respawn, own move_player, corrections,
   set_entity_motion, health and hunger attributes). The input loop (Track C) owns prediction; it can
   overwrite `world.self.pos` / `vel` directly.

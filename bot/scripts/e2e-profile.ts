@@ -1,6 +1,6 @@
 // Run the whole e2e suite against ONE container profile, by setting every suite's env vars
 // (chat-helpers BDS_*, world-truth BDS_WORLD_*, skills-input PHYS_BDS_*, move-truth MOVE_BDS_*,
-// dig-truth DIG_BDS_*, env.ts BOT_VERSION / BDS_TRANSPORT). The default suite (no profile) targets
+// dig-truth DIG_BDS_*, wood-truth WOOD_BDS_*, hard-truth HARD_BDS_*, rl-truth RL_BDS_*, env.ts BOT_VERSION / BDS_TRANSPORT). The default suite (no profile) targets
 // bds-dev, bds-world, bds-move and bds-dig at 1.26.60 over RakNet (docs/runbook.md, "Tests").
 //   node scripts/e2e-profile.ts dev51 [vitest args...]   BDS 1.26.51.1 (bds-dev51, udp/19134), game version 1.26.51, RakNet:
 //                                                        the previous version, kept as the rollback path
@@ -46,6 +46,12 @@ const env: NodeJS.ProcessEnv = {
   MOVE_BDS_PORT: port,
   DIG_BDS_CONTAINER: p.container,
   DIG_BDS_PORT: port,
+  WOOD_BDS_CONTAINER: p.container,
+  WOOD_BDS_PORT: port,
+  HARD_BDS_CONTAINER: p.container,
+  HARD_BDS_PORT: port,
+  RL_BDS_CONTAINER: p.container,
+  RL_BDS_PORT: port,
 };
 console.error(`[e2e-profile] ${name}: ${p.container} (BDS ${p.build}) port ${port}, version ${p.version}, transport ${p.transport}`);
 const botDir = fileURLToPath(new URL('..', import.meta.url));

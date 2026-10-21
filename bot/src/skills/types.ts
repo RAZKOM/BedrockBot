@@ -1,8 +1,9 @@
 // Skills interface (PLAN.md section 4.3).
 import type { ContainerView, ItemStack, Vec3 } from '../world/types.ts';
+import type { DigOptions, DigResult } from './dig/digger.ts';
 import type { Goal } from './nav/goals.ts';
 
-export type { Goal };
+export type { Goal, DigOptions, DigResult };
 
 export type SkillResult =
   | { ok: true }
@@ -20,7 +21,7 @@ export interface GotoOptions {
 export interface Skills {
   lookAt(p: Vec3): Promise<void>;
   goto(goal: Goal, opts?: GotoOptions): Promise<SkillResult>; // A* + physics-driven input
-  dig(p: Vec3, opts?: { tool?: 'best' | number }): Promise<SkillResult>; // start/continue/predict/stop inside player_auth_input
+  dig(p: Vec3, opts?: DigOptions): Promise<DigResult>; // start/continue/predict/stop inside player_auth_input
   collect(radius: number, timeoutTicks: number): Promise<SkillResult>; // walk over item entities
   openContainer(p: Vec3): Promise<ContainerView>;
   deposit(view: ContainerView, filter: (i: ItemStack) => boolean): Promise<SkillResult>; // item_stack_request moves

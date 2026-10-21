@@ -1,28 +1,69 @@
-// Skills facade (PLAN.md section 4.3): lookAt / goto / cancel on top of the InputLoop and the
-// world model. dig / collect / openContainer / deposit are TODO stubs for Phase 4 (other tracks).
+// Skills facade (PLAN.md section 4.3): lookAt / goto / dig / collect / openContainer / deposit /
+// fellTree / cancel on top of the InputLoop and the world model.
 //
 //   const world = new World(conn);
 //   const loop = new InputLoop(conn, { world: flatWorld() });   // the skills swap in real terrain
 //   loop.start();
-//   const skills = new BotSkills({ loop, world });
+//   const hotbar = new Hotbar(conn, { inventory: world.inventory, runtimeId: () => world.self.runtimeId });
+//   const containers = new Containers(conn, world.inventory);
+//   const skills = new BotSkills({ loop, world, hotbar, containers, source: conn });
 //   await conn.connect(target);
 //   await skills.goto({ type: 'xz', x: 30, z: -12 });
+//
+// Skills are serialised: every public skill call first cancels the one that is running (goto, dig,
+// lookAt, collect, fellTree, container use), so two of them never steer yaw/pitch at the same time.
+// Compound skills (collect, fellTree) check a cancel epoch between their steps and use the
+// navigator and the digger directly, one at a time.
 import { silentLogger, type Logger } from '../log.ts';
+import type { Containers } from '../world/containers.ts';
+import type { Hotbar } from '../world/hotbar.ts';
 import type { World } from '../world/index.ts';
-import type { ContainerView, ItemStack, Vec3 } from '../world/types.ts';
+import type { Inventory } from '../world/inventory.ts';
+import type { ContainerView, EntityInfo, ItemStack, PacketSource, Vec3 } from '../world/types.ts';
+import { collectItems, type CollectOptions, type CollectResult } from './collect/collect.ts';
+import { ChestSkill, type DepositResult, type OpenOptions, type OpenResult } from './container/chest.ts';
+import { Digger, type DigOptions, type DigResult } from './dig/digger.ts';
 import type { InputLoop } from './input/inputLoop.ts';
 import { PHYSICS } from './input/physics.ts';
 import { Navigator, type GotoReport, type NavigatorOptions } from './nav/navigator.ts';
 import { angleDiff, turnTowards, yawTowards } from './nav/follower.ts';
 import { blockQueryOf, worldSource, type BlockStore } from './terrain/query.ts';
+import { fellTree, type FellOptions, type FellResult } from './tree/feller.ts';
+import { detectTree, treesFrom, type Tree, type TreeOptions } from './tree/tree.ts';
 import type { Goal, GotoOptions, SkillResult, Skills } from './types.ts';
 
-export type { Goal, GotoOptions, SkillResult, Skills } from './types.ts';
+export type { Goal, GotoOptions, SkillResult, Skills, DigOptions, DigResult } from './types.ts';
+export type { CollectOptions, CollectResult } from './collect/collect.ts';
+export type { DepositResult, OpenResult, OpenOptions } from './container/chest.ts';
+export type { FellOptions, FellResult } from './tree/feller.ts';
+export type { Tree, TreeOptions } from './tree/tree.ts';
 
-export interface BotSkillsOptions extends NavigatorOptions {
+/**
+ * The world model as the skills read it (`World` satisfies it). The optional parts enable dig
+ * (blockAt, inventory), collect (entities, inventory), the chest skill (blockAt, inventory) and the
+ * tree finder (find).
+ */
+export type SkillsWorld = BlockStore &
+  Pick<World, 'onBlockUpdate'> & { self: Pick<World['self'], 'health' | 'food'> } & {
+    blockAt?: World['blockAt'];
+    inventory?: Inventory;
+    entities?: ReadonlyMap<bigint, EntityInfo>;
+    find?: World['find'];
+  };
+
+/** What dig / openContainer / deposit need besides the world (also settable later with `attach`). */
+export interface SkillsInventoryParts {
+  /** Hotbar slot switching (world/hotbar.ts): dig's tool choice and the held item of a click. */
+  hotbar?: Hotbar;
+  /** Container windows and item stack requests (world/containers.ts). */
+  containers?: Containers;
+  /** Where the click transaction is queued (the Connection). */
+  source?: Pick<PacketSource, 'queue'>;
+}
+
+export interface BotSkillsOptions extends NavigatorOptions, SkillsInventoryParts {
   loop: InputLoop;
-  /** The world model (`World` satisfies it). */
-  world: BlockStore & Pick<World, 'onBlockUpdate'> & { self: Pick<World['self'], 'health' | 'food'> };
+  world: SkillsWorld;
   logger?: Logger;
   /** Point the InputLoop's physics at the world model's real block shapes (default true). */
   usePhysicsWorld?: boolean;
@@ -49,6 +90,8 @@ export interface SkillsStatus {
   inWater: boolean;
   inLava: boolean;
   busy: boolean;
+  /** The public skill running now (goto, dig, lookAt, collect, fell, container), if any. */
+  running: string | undefined;
   lastGoto: GotoReport | undefined;
 }
 
@@ -58,7 +101,7 @@ const LOOK_TURN = 30;
 export class BotSkills implements Skills {
   readonly nav: Navigator;
   private readonly loop: InputLoop;
-  private readonly world: BotSkillsOptions['world'];
+  private readonly world: SkillsWorld;
   private readonly log: Logger;
   private readonly damage: DamageEvent[] = [];
   private lastHealth: number | undefined;
@@ -66,11 +109,19 @@ export class BotSkills implements Skills {
   private landing: { tick: bigint; fall: number } | undefined;
   private look: { yaw: number; pitch: number; ticks: number; resolve: () => void } | undefined;
   private readonly unsubs: (() => void)[] = [];
+  private parts: SkillsInventoryParts = {};
+  private _digger: Digger | undefined;
+  private _chest: ChestSkill | undefined;
+  /** Bumped by every public skill call and by cancel(); compound skills stop when it changes. */
+  private epoch = 0;
+  private runningName: string | undefined;
+  private runningEpoch = -1;
 
   constructor(opts: BotSkillsOptions) {
     this.loop = opts.loop;
     this.world = opts.world;
     this.log = opts.logger ?? silentLogger;
+    this.attach(opts);
     const source = worldSource(opts.world);
     if (opts.usePhysicsWorld ?? true) this.loop.world = blockQueryOf(source);
     this.nav = new Navigator(this.loop, { source, onBlockUpdate: (fn) => opts.world.onBlockUpdate(fn) }, { ...opts, logger: this.log });
@@ -83,13 +134,94 @@ export class BotSkills implements Skills {
     );
   }
 
+  /**
+   * Enable dig / openContainer / deposit. Parts may come after construction (e.g. a task that got
+   * the movement stack from tasks/mobility.ts adds its Hotbar and Containers).
+   */
+  attach(parts: SkillsInventoryParts): void {
+    const next: SkillsInventoryParts = { ...this.parts };
+    if (parts.hotbar) next.hotbar = parts.hotbar;
+    if (parts.containers) next.containers = parts.containers;
+    if (parts.source) next.source = parts.source;
+    if (next.hotbar !== this.parts.hotbar && !this._digger?.busy) this._digger = undefined;
+    if (next.containers !== this.parts.containers || next.source !== this.parts.source) this._chest = undefined;
+    this.parts = next;
+  }
+
+  /** The digger (needs world.blockAt and world.inventory; the hotbar enables tool switching). */
+  get digger(): Digger | undefined {
+    const w = this.world;
+    if (!this._digger && w.blockAt && w.inventory) {
+      const blockAt = w.blockAt.bind(w);
+      const inventory = w.inventory;
+      this._digger = new Digger({
+        loop: this.loop,
+        world: { blockAt, onBlockUpdate: (fn) => w.onBlockUpdate(fn), inventory },
+        hotbar: this.parts.hotbar,
+        logger: this.log,
+      });
+    }
+    return this._digger;
+  }
+
+  /** The chest skill (needs world.blockAt, world.inventory, containers and a packet source). */
+  get chest(): ChestSkill | undefined {
+    const w = this.world;
+    const { containers, source, hotbar } = this.parts;
+    if (!this._chest && w.blockAt && w.inventory && containers && source) {
+      this._chest = new ChestSkill({
+        source,
+        loop: this.loop,
+        world: { blockAt: w.blockAt.bind(w), chunks: w.chunks, inventory: w.inventory },
+        containers,
+        rawHotbarItem: (slot) => hotbar?.rawItem(slot),
+        logger: this.log,
+      });
+    }
+    return this._chest;
+  }
+
   dispose(): void {
     this.cancel();
     this.nav.dispose();
     for (const u of this.unsubs.splice(0)) u();
   }
 
+  // ---- serialisation ---------------------------------------------------------------------------
+
+  /** Cancel whatever runs and mark `name` as running. Returns the token for `isCurrent` / `end`. */
+  private begin(name: string): number {
+    this.stopAll();
+    const token = ++this.epoch;
+    this.runningName = name;
+    this.runningEpoch = token;
+    return token;
+  }
+
+  private end(token: number): void {
+    if (this.runningEpoch === token) this.runningName = undefined;
+  }
+
+  private stopAll(): void {
+    this.nav.cancel();
+    this._digger?.cancel();
+    this.look?.resolve();
+    this.look = undefined;
+  }
+
+  private async run<T>(name: string, fn: (cancelled: () => boolean) => Promise<T>): Promise<T> {
+    const token = this.begin(name);
+    try {
+      return await fn(() => this.epoch !== token);
+    } finally {
+      this.end(token);
+    }
+  }
+
+  // ---- skills ----------------------------------------------------------------------------------
+
   lookAt(p: Vec3): Promise<void> {
+    const token = this.begin('lookAt');
     const s = this.loop.state;
     const eye = { x: s.pos.x, y: s.pos.y + PHYSICS.eyeHeight, z: s.pos.z };
     const dx = p.x - eye.x;
@@ -97,40 +229,143 @@ export class BotSkills implements Skills {
     const dz = p.z - eye.z;
     const yaw = Math.hypot(dx, dz) > 1e-6 ? yawTowards(dx, dz) : this.loop.command.yaw;
     const pitch = (-Math.atan2(dy, Math.hypot(dx, dz)) * 180) / Math.PI;
-    this.look?.resolve();
     return new Promise((resolve) => {
-      this.look = { yaw, pitch, ticks: 0, resolve };
+      this.look = {
+        yaw,
+        pitch,
+        ticks: 0,
+        resolve: () => {
+          this.end(token);
+          resolve();
+        },
+      };
     });
   }
 
   goto(goal: Goal, opts?: GotoOptions): Promise<SkillResult> {
-    return this.nav.goto(goal, opts);
+    // Synchronous start (callers check nav.busy right after the call).
+    const token = this.begin('goto');
+    const p = this.nav.goto(goal, opts);
+    void p.finally(() => {
+      this.end(token);
+    });
+    return p;
   }
 
-  // TODO(Phase 4, task 4.1): block breaking inside player_auth_input (another track).
-  dig(_p: Vec3, _opts?: { tool?: 'best' | number }): Promise<SkillResult> {
-    return Promise.resolve({ ok: false, reason: 'not_implemented' });
+  /** Break one block (docs/digging.md). Needs world.blockAt + world.inventory; the hotbar for tool switching. */
+  dig(p: Vec3, opts?: DigOptions): Promise<DigResult> {
+    const d = this.digger;
+    if (!d) return Promise.resolve({ ok: false, reason: 'no_digger' });
+    const token = this.begin('dig');
+    const r = d.dig(p, opts);
+    void r.finally(() => {
+      this.end(token);
+    });
+    return r;
   }
 
-  // TODO(Phase 4, task 4.4): walk over item entities.
-  collect(_radius: number, _timeoutTicks: number): Promise<SkillResult> {
-    return Promise.resolve({ ok: false, reason: 'not_implemented' });
+  /**
+   * Walk over item entities within `radius` of the bot until none is left that fits, or
+   * `timeoutTicks` pass. `{ ok: false, reason: 'inventory_full' }` when only items that do not fit
+   * are left (skills/collect/collect.ts).
+   */
+  collect(radius: number, timeoutTicks: number, opts: CollectOptions = {}): Promise<CollectResult> {
+    const { entities, inventory } = this.world;
+    if (!entities || !inventory) {
+      return Promise.resolve({ ok: false, reason: 'no_entities', gained: {}, pickedUp: 0, skipped: 0, ticks: 0, corrections: 0 });
+    }
+    return this.run('collect', (cancelled) =>
+      collectItems(
+        radius,
+        timeoutTicks,
+        {
+          entities: () => entities,
+          state: () => this.loop.state,
+          goto: (g, o) => this.nav.goto(g, o),
+          waitTicks: (n) => this.loop.waitTicks(n),
+          inventory,
+          cancelled,
+          logger: this.log,
+        },
+        opts,
+      ),
+    );
   }
 
-  // TODO(Phase 4, task 4.5).
-  openContainer(_p: Vec3): Promise<ContainerView> {
-    return Promise.reject(new Error('openContainer: not implemented'));
+  /** Open a chest or barrel next to the bot; rejects with the reason when it does not open. */
+  async openContainer(p: Vec3, opts?: OpenOptions): Promise<ContainerView> {
+    const r = await this.open(p, opts);
+    if (!r.ok) throw new Error(`openContainer ${p.x} ${p.y} ${p.z}: ${r.reason}`);
+    return r.view;
   }
 
-  // TODO(Phase 4, task 4.5).
-  deposit(_view: ContainerView, _filter: (i: ItemStack) => boolean): Promise<SkillResult> {
-    return Promise.resolve({ ok: false, reason: 'not_implemented' });
+  /** Like openContainer, but resolves with `{ ok: false, reason }` instead of rejecting. */
+  open(p: Vec3, opts?: OpenOptions): Promise<OpenResult> {
+    const chest = this.chest;
+    if (!chest) return Promise.resolve({ ok: false, reason: 'no_containers' });
+    return this.run('container', () => chest.open(p, opts));
+  }
+
+  /** Move every inventory stack that passes `filter` into the open window. */
+  deposit(view: ContainerView, filter: (i: ItemStack) => boolean): Promise<DepositResult> {
+    const chest = this.chest;
+    if (!chest) return Promise.resolve({ ok: false, reason: 'no_containers', moved: {}, total: 0, requests: 0, errors: 0 });
+    return this.run('container', () => chest.deposit(view, filter));
+  }
+
+  /** Close a container window (waits for the server's container_close). */
+  closeContainer(view: ContainerView | number): Promise<boolean> {
+    const chest = this.chest;
+    if (!chest) return Promise.resolve(false);
+    const id = typeof view === 'number' ? view : view.id;
+    return this.run('container', () => chest.close(id));
+  }
+
+  /** The tree containing the log at `p` (skills/tree/tree.ts), or undefined. */
+  treeAt(p: Vec3, opts?: TreeOptions): Tree | undefined {
+    const w = this.world;
+    if (!w.blockAt) return undefined;
+    return detectTree(w.blockAt.bind(w), p, opts);
+  }
+
+  /** Trees with a log within `radius` of `origin` (default the bot), closest base first. */
+  findTrees(radius: number, opts: TreeOptions & { origin?: Vec3; maxLogs?: number } = {}): Tree[] {
+    const w = this.world;
+    if (!w.blockAt || !w.find) return [];
+    const origin = opts.origin ?? this.loop.state.pos;
+    const logs = w.find((b) => b.name.endsWith('_log') && !b.name.startsWith('stripped_'), { origin, radius, max: 4096, class: 'log' });
+    return treesFrom(w.blockAt.bind(w), logs, origin, opts);
+  }
+
+  /** Fell a tree from the bottom up, re-pathing when the next log is out of reach (skills/tree/feller.ts). */
+  fellTree(tree: Tree, opts: FellOptions = {}): Promise<FellResult> {
+    const w = this.world;
+    const d = this.digger;
+    if (!w.blockAt || !d) {
+      return Promise.resolve({ ok: false, reason: 'no_digger', broken: [], left: tree.logs, repaths: 0, digFailures: 0, corrections: 0, ticksDigging: 0 });
+    }
+    const blockAt = w.blockAt.bind(w);
+    return this.run('fell', (cancelled) =>
+      fellTree(
+        tree,
+        {
+          blockAt,
+          state: () => this.loop.state,
+          dig: (p, o) => d.dig(p, o),
+          goto: (g, o) => this.nav.goto(g, o),
+          stand: (x, y, z) => this.nav.grid.stand(x, y, z),
+          cancelled,
+          logger: this.log,
+        },
+        opts,
+      ),
+    );
   }
 
   cancel(): void {
-    this.nav.cancel();
-    this.look?.resolve();
-    this.look = undefined;
+    this.epoch++;
+    this.runningName = undefined;
+    this.stopAll();
   }
 
   status(): SkillsStatus {
@@ -144,7 +379,8 @@ export class BotSkills implements Skills {
       teleports: s.teleports,
       inWater: s.inWater,
       inLava: s.inLava,
-      busy: this.nav.busy,
+      busy: this.nav.busy || this.runningName !== undefined,
+      running: this.runningName,
       lastGoto: this.nav.lastReport,
     };
   }
@@ -193,3 +429,7 @@ export class BotSkills implements Skills {
 
 export { Navigator } from './nav/navigator.ts';
 export type { GotoReport, NavWorld, NavigatorOptions } from './nav/navigator.ts';
+export { ChestSkill, maxStackOf } from './container/chest.ts';
+export { detectTree, treesFrom, remainingLogs, logKind, isLog, isLeaves } from './tree/tree.ts';
+export { fellTree, standSpots } from './tree/feller.ts';
+export { collectItems } from './collect/collect.ts';
