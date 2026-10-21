@@ -16,8 +16,8 @@ import { E2E, Truth, WORLD_CONTAINER, WORLD_TARGET, consoleCommand, pollUntil, r
 
 const RECORD = process.env.WORLD_RECORD === '1';
 const OUT = fileURLToPath(new URL(`../../../fixtures/${E2E_VERSION}/world-chunks.jsonl.gz`, import.meta.url));
-/** BDS build and image, for the fixture header (env BDS_BUILD, default the 1.26.51 dev server). */
-const BDS_BUILD = process.env.BDS_BUILD ?? '1.26.51.1';
+/** BDS build and image, for the fixture header (env BDS_BUILD, default the 1.26.60 dev servers). */
+const BDS_BUILD = process.env.BDS_BUILD ?? '1.26.60.6';
 const require = createRequire(import.meta.url);
 const USERNAME = 'WorldFixture';
 

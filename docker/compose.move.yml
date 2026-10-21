@@ -2,7 +2,7 @@
 # bds-phys (offline, RakNet, flat, peaceful, operator), own name, port and data dir so the nav e2e
 # tests never share a server with other tracks.
 #   docker compose -f docker/compose.move.yml up -d
-#   pnpm --filter @bedrockbot/truth-pack pack:deploy --data docker/data/move --world move --restart bds-move
+#   pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/move --world move --restart bds-move
 name: bedrockbot-move
 
 services:
@@ -11,7 +11,7 @@ services:
     container_name: bds-move
     environment:
       EULA: "TRUE"
-      VERSION: "1.26.51.1"
+      VERSION: "1.26.60.6"
       TRANSPORT: raknet
       ONLINE_MODE: "false"
       ALLOW_LIST: "false"

@@ -1,12 +1,13 @@
-// Replays fixtures/1.26.51/world-chunks.jsonl.gz (recorded by test/e2e/world-record.test.ts against
-// bds-world) into the World and checks it against the truth-pack replies inside the capture, offline.
+// Replays fixtures/<FIXTURE_VERSION>/world-chunks.jsonl.gz (default 1.26.60; recorded by
+// test/e2e/world-record.test.ts against bds-world or bds60) into the World and checks it against the
+// truth-pack replies inside the capture, offline.
 import { describe, expect, it } from 'vitest';
 import { ReplyParser, rleDecode, textOf, type Reply } from '../../../../packs/truth/src/protocol.ts';
 import { silentLogger } from '../../../src/log.ts';
 import { typeIdOf } from '../../../src/world/checksum.ts';
 import { World } from '../../../src/world/index.ts';
 import type { Vec3 } from '../../../src/world/types.ts';
-import { decodedInbound, loadFixture, ReplaySource } from './helpers.ts';
+import { decodedInbound, FIXTURE_VERSION, loadFixture, ReplaySource } from './helpers.ts';
 
 const FIXTURE = 'world-chunks.jsonl.gz';
 
@@ -17,9 +18,9 @@ interface BlocksData {
   runs: [number, number][];
 }
 
-describe('fixture 1.26.51/world-chunks replayed into the world model', () => {
+describe(`fixture ${FIXTURE_VERSION}/world-chunks replayed into the world model`, () => {
   const src = new ReplaySource();
-  const world = new World(src, { logger: silentLogger, defer: (fn) => fn() });
+  const world = new World(src, { version: FIXTURE_VERSION, logger: silentLogger, defer: (fn) => fn() });
   const firstSeen = new Map<bigint, Vec3>();
   world.entityTracker.onAdd((e) => firstSeen.set(e.uniqueId, { ...e.pos }));
   const updates: string[] = [];

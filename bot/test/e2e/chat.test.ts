@@ -59,7 +59,7 @@ describe.skipIf(!E2E)('@bds chat commands against bds-dev', () => {
     bdsCmd('say', '!status');
     const reply = await watcher.waitText(fromBot(/^status: /), 5_000, 'status reply');
     console.log(`[chat] reply after ${Date.now() - t0} ms: ${JSON.stringify(reply)}`);
-    const version = VERSION.replaceAll('.', '\\.'); // env BOT_VERSION, default 1.26.51
+    const version = VERSION.replaceAll('.', '\\.'); // env BOT_VERSION, default 1.26.60
     expect(reply.message).toMatch(new RegExp(`^status: up \\d+s, session \\d+s, reconnects 0, kicks 0, pos -?\\d+\\.\\d\\d -60\\.00 -?\\d+\\.\\d\\d, version ${version}, tick \\d+$`));
     expect(reply).toMatchObject({ type: 'chat', category: 'authored', needs_translation: false });
   });

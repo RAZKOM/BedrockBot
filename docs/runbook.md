@@ -2,8 +2,10 @@
 
 ## Phase 1 on BDS
 
-Local BDS only (container `bds-dev`, RakNet on udp/19132, offline mode, flat world, truth pack
-deployed). Commands run from the repo root unless noted.
+Local BDS only (container `bds-dev`, BDS 1.26.60.6, RakNet on udp/19132, offline mode, flat world,
+truth pack deployed). The default game version is 1.26.60 since 2026-10-28 (docs/versions.md); 1.26.51
+stays runnable as the rollback (`bds-dev51`, `BOT_VERSION=1.26.51`). Commands run from the repo root
+unless noted.
 
 ### Server
 
@@ -18,21 +20,23 @@ pnpm pack:deploy                    # (re)deploy the truth pack, e.g. after wipi
 ```
 
 Each track's e2e suite has its own server so runs never share terrain or restarts. All use the
-bds-dev settings (BDS 1.26.51.1 unless noted, RakNet, offline, flat, peaceful, operator):
+bds-dev settings (BDS 1.26.60.6 unless noted, RakNet, offline, flat, peaceful, operator), and each is a
+`scripts/bds.mjs` profile:
 
-| Container | Port | Compose file | Used by |
-|---|---|---|---|
-| bds-dev | 19132 | docker/compose.dev.yml | echo, chat, reconnect, keepalive, AFK CLI |
-| bds-world | 19142 | (docker run, see docs/world-model.md) | world-* (BDS_WORLD_*) |
-| bds-move | 19146 | docker/compose.move.yml (TICK_DISTANCE 10) | nav-*, skills-input (MOVE_BDS_* / PHYS_BDS_*) |
-| bds-dig | 19148 | docker/compose.dig.yml | dig (DIG_BDS_*) |
-| bds60 | 19134 | docker/compose.dev60.yml (BDS 1.26.60.6) | `pnpm e2e:60` |
-| bds-nn | 19140 | docker/compose.dev-nethernet.yml (NetherNet) | `pnpm e2e:nn` |
+| Container | Port | Compose file (profile) | BDS | Used by |
+|---|---|---|---|---|
+| bds-dev | 19132 | docker/compose.dev.yml (`dev`) | 1.26.60.6 | echo, chat, reconnect, keepalive, AFK CLI |
+| bds-world | 19142 | docker/compose.world.yml (`world`; difficulty: image default) | 1.26.60.6 | world-* (BDS_WORLD_*) |
+| bds-move | 19146 | docker/compose.move.yml (`move`; TICK_DISTANCE 10) | 1.26.60.6 | nav-*, skills-input (MOVE_BDS_* / PHYS_BDS_*) |
+| bds-dig | 19148 | docker/compose.dig.yml (`dig`) | 1.26.60.6 | dig (DIG_BDS_*) |
+| bds-nn | 19140 | docker/compose.dev-nethernet.yml (`nn`; NetherNet, TICK_DISTANCE 10) | 1.26.60.6 | `pnpm e2e:nn` |
+| bds-dev51 | 19134 | docker/compose.dev51.yml (`dev51`; TICK_DISTANCE 10) | 1.26.51.1 | `pnpm e2e:51` (rollback to the previous version) |
 
-Start one with `docker compose -f docker/compose.<name>.yml up -d`, then deploy the truth pack:
-`pnpm --filter @bedrockbot/truth-pack pack:deploy --data docker/data/<name> --world <level> --restart <container>`.
-The full `BDS_E2E=1` e2e run needs bds-dev, bds-world, bds-move and bds-dig up; a stopped one shows
-as "Ping timed out" in its suite.
+Start one with `node scripts/bds.mjs --profile <profile> up` (or `docker compose -f docker/compose.<name>.yml up -d`),
+then deploy the truth pack with `node scripts/bds.mjs --profile <profile> pack`, or by hand:
+`pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/<name> --world <level> --restart <container>`
+(the path is relative to packs/truth). The full `BDS_E2E=1` e2e run needs bds-dev, bds-world, bds-move
+and bds-dig up; a stopped one shows as "Ping timed out" in its suite.
 
 `docker/compose.dev.yml` reads `PLAYER_IDLE_TIMEOUT` from `${BDS_IDLE_TIMEOUT:-0}`; changing it makes
 `docker compose up -d` recreate the container, the world in `docker/data/dev` is kept.
@@ -42,14 +46,17 @@ kick; `scripts/bds.mjs` takes `--profile <name>` before or after the command):
 
 | Profile | Container | Compose file | BDS | Transport | Ports | Data |
 |---|---|---|---|---|---|---|
-| `dev` (default) | `bds-dev` | `docker/compose.dev.yml` | 1.26.51.1 | RakNet | udp/19132 | `docker/data/dev` |
-| `dev60` | `bds60` | `docker/compose.dev60.yml` | 1.26.60.6 | RakNet | udp/19134 | `docker/data/dev60` |
-| `nn` | `bds-nn` | `docker/compose.dev-nethernet.yml` | 1.26.51.1 | NetherNet (LAN) | tcp+udp/19140, udp/19160-19167 (WebRTC), udp/7551 (discovery) | `docker/data/nn` |
+| `dev` (default) | `bds-dev` | `docker/compose.dev.yml` | 1.26.60.6 | RakNet | udp/19132 | `docker/data/dev` |
+| `dev51` | `bds-dev51` | `docker/compose.dev51.yml` | 1.26.51.1 | RakNet | udp/19134 | `docker/data/dev51` |
+| `nn` | `bds-nn` | `docker/compose.dev-nethernet.yml` | 1.26.60.6 | NetherNet (LAN) | tcp+udp/19140, udp/19160-19167 (WebRTC), udp/7551 (discovery) | `docker/data/nn` |
+
+`bds-dev51` replaced `bds60` (the 1.26.60 trial server) on 2026-10-28; it is not called `bds51`
+because tools/bump-version/run-bds.mjs uses that name on udp/19138.
 
 ```sh
-pnpm bds60:up                               # = node scripts/bds.mjs --profile dev60 up
+pnpm bds51:up                               # = node scripts/bds.mjs --profile dev51 up
 pnpm bdsnn:up                               # = node scripts/bds.mjs --profile nn up
-node scripts/bds.mjs --profile dev60 pack   # deploy the truth pack into docker/data/dev60 and restart
+node scripts/bds.mjs --profile dev51 pack   # deploy the truth pack into docker/data/dev51 and restart
 node scripts/bds.mjs --profile nn cmd say hi
 ```
 
@@ -75,11 +82,11 @@ pnpm --filter bot start -- --help
 | `--log-dir <dir>` | `bot/logs` | `disconnects.jsonl` and `metrics.json` (git-ignored) |
 | `--metrics-interval <s>` | 60 | how often `metrics.json` is rewritten |
 | `--no-reconnect` | | exit (code 1) instead of reconnecting |
-| `--version <ver>` | `1.26.51` (env `BOT_VERSION`) | game version; `1.26.60` works through `patches/minecraft-data@3.117.0.patch` |
+| `--version <ver>` | `1.26.60` (env `BOT_VERSION`) | game version (through `patches/minecraft-data@3.117.0.patch`); `1.26.51` for the rollback server |
 | `--transport nethernet` | `raknet` | NetherNet with LAN signalling (local BDS); `--port` is then ignored |
 | `--target realm` | `bds` | see "Realm join (you do this)" below |
 
-Examples: `node src/index.ts --task echo --port 19134 --version 1.26.60` (bds60),
+Examples: `node src/index.ts --task echo --port 19134 --version 1.26.51` (bds-dev51, rollback),
 `node src/index.ts --task echo --transport nethernet` (bds-nn), both run from `bot/`.
 
 Exit codes: 0 on `!quit`, SIGINT/SIGTERM or `--duration`; 1 when the connection is lost for good
@@ -93,7 +100,7 @@ Replies are player chat from the bot.
 
 | Command | Reply |
 |---|---|
-| `!status` | `status: up 1h02m, session 12m03s, reconnects 0, kicks 0, pos 0.50 -60.00 0.50, version 1.26.51, tick 14460, task afk, nudges 15, corrections 0` |
+| `!status` | `status: up 1h02m, session 12m03s, reconnects 0, kicks 0, pos 0.50 -60.00 0.50, version 1.26.60, tick 14460, task afk, nudges 15, corrections 0` |
 | `!pos` | `pos 0.50 -60.00 0.50` (feet) |
 | `!quit` | `bye (quit by console)`, then a clean disconnect and exit 0 |
 | `!help` | `commands: !status !pos !quit !help` |
@@ -118,17 +125,20 @@ pnpm -r test                                   # unit tests
 pnpm lint
 BDS_E2E=1 pnpm --filter bot test:e2e           # e2e incl. reconnect (docker restart bds-dev), chat, AFK nudge
 BDS_E2E=1 BDS_SOAK=1 pnpm --filter bot exec vitest run --project e2e test/e2e/keepalive.test.ts --silent=false
-pnpm e2e:60                                    # whole e2e suite against bds60 (BDS 1.26.60.6, game version 1.26.60)
-pnpm e2e:nn                                    # whole e2e suite against bds-nn (NetherNet)
+pnpm e2e:51                                    # whole e2e suite against bds-dev51 (BDS 1.26.51.1, game version 1.26.51: rollback)
+pnpm e2e:nn                                    # whole e2e suite against bds-nn (NetherNet, 1.26.60)
+FIXTURE_VERSION=1.26.51 pnpm --filter bot test # world unit tests on the 1.26.51 recordings (default 1.26.60)
 cd bot && node scripts/e2e-profile.ts nn test/e2e/echo test/e2e/chat   # a subset
 ```
 
-`scripts/e2e-profile.ts` points every suite (BDS_*, BDS_WORLD_*, PHYS_BDS_*) at one container and
-sets `BOT_VERSION` / `BDS_TRANSPORT` (read by `bot/test/e2e/env.ts`). Without it the suite targets
-bds-dev, bds-world and bds-phys at 1.26.51 over RakNet, as before. The profile containers need
-the truth pack (`node scripts/bds.mjs --profile <name> pack`). Fixtures for another version:
-`cd bot && node scripts/record-fixture.ts --version 1.26.60 --port 19134 --bds 1.26.60.6` and
-`WORLD_RECORD=1 node scripts/e2e-profile.ts dev60 test/e2e/world-record.test.ts`.
+`scripts/e2e-profile.ts` points every suite (BDS_*, BDS_WORLD_*, PHYS_BDS_*, MOVE_BDS_*, DIG_BDS_*) at
+one container and sets `BOT_VERSION` / `BDS_TRANSPORT` (read by `bot/test/e2e/env.ts`). Without it
+the suite targets bds-dev, bds-world, bds-move and bds-dig at 1.26.60 over RakNet. The profile
+containers need the truth pack (`node scripts/bds.mjs --profile <name> pack`). Fixtures:
+`cd bot && pnpm record:fixture` and `BDS_E2E=1 WORLD_RECORD=1 pnpm exec vitest run --project e2e test/e2e/world-record.test.ts`
+(1.26.60 on bds-dev / bds-world); for the old version
+`node scripts/record-fixture.ts --version 1.26.51 --port 19134 --bds 1.26.51.1` and
+`WORLD_RECORD=1 node scripts/e2e-profile.ts dev51 test/e2e/world-record.test.ts`.
 
 The soak recreates bds-dev with `PLAYER_IDLE_TIMEOUT=1`, runs the AFK CLI with a 30 s nudge for
 3 minutes (no kick, no correction), runs it again with nudges off (a kick, if any, must be
@@ -175,8 +185,8 @@ The reconnect e2e restarts bds-dev, so do not run it while someone else uses bds
   `client.viewDistance` itself (BDS answered a request of 4 with radius 5).
 - Two clients that start their RakNet handshake at the same moment from one host: one of them
   sometimes times out ("Connect timed out"). Connect test clients one after another.
-- NetherNet (bds-nn) and BDS 1.26.60.6 (bds60): results, timings and quirks are in
-  docs/versions.md. In short: everything above holds on both; NetherNet spawns about 1 s later;
+- NetherNet (bds-nn) and BDS 1.26.60.6 (now bds-dev and the other track servers): results, timings
+  and quirks are in docs/versions.md. In short: everything above holds on both; NetherNet spawns about 1 s later;
   BDS needs one WebRTC UDP port per concurrent NetherNet client (`SERVER_UDP_PORTS` range), or a
   second client fails with `connecterror:9` and blocks all later joins until a restart.
 
@@ -193,8 +203,9 @@ reading bedrock-protocol's source, not a measurement.
    `c9e1fbf21dc6abde8d89920996575791b79e66cf` (docs/decisions/0004-protocol-pin.md). Check with
    `pnpm --filter bot exec node -e "console.log(require('fs').readFileSync(require.resolve('bedrock-protocol/src/client/auth.js'),'utf8').includes('dns.promises.lookup'))"` (prints `true`).
 2. **Game version equal to the Realm's**: a Realm runs the current release (26.60 = `1.26.60` on
-   2026-10-28). Pass `--version 1.26.60` (works today through `patches/minecraft-data@3.117.0.patch`,
-   verified against BDS 1.26.60.6) or flip the default first (docs/versions.md). There is no ping
+   2026-10-28). `1.26.60` is the bot's default since 2026-10-28 (through
+   `patches/minecraft-data@3.117.0.patch`, verified against BDS 1.26.60.6 on RakNet and NetherNet,
+   docs/versions.md); `--version 1.26.60` below just makes it explicit. There is no ping
    for a Realm, so the version gate cannot compare protocols before joining; a mismatch should show
    up as a kick (`outdated_client` / `outdated_server`, never retried, exit code 3) or as a Realms
    API error (*unverified which*). After a game update, run the playbook

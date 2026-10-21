@@ -8,6 +8,8 @@ All commands run in `tools/bump-version/`. Example values: old version 1.26.51 (
 `bds51`, UDP 19138), new version 1.26.60 (BDS 1.26.60.6, container `bds60`, UDP 19134). Use only
 container names and ports assigned to you; never stop or remove containers you did not create. Local BDS
 only, `online-mode=false`, no credentials, no Realm or public servers. A human does the Realm step at the end.
+Since 1.26.60 became the default (2026-10-28), udp/19134 belongs to the rollback server `bds-dev51`
+(docker/compose.dev51.yml) and `bds60` no longer exists: for the next bump pick a free port (e.g. 19136).
 
 ## 0. Is there an update?
 
@@ -114,6 +116,8 @@ Then, on a branch in the main repo:
 3. Pin the new BDS build in `docker/compose.dev.yml` (and the NetherNet profile). Pass the new version to the
    bot's Connection explicitly, or rely on ping discovery: bedrock-protocol maps the server's protocol number
    to a version through minecraft-data, so no bedrock-protocol patch is needed for a data-only update.
+   Flip the default as one change set: docs/versions.md lists every file (done for 1.26.60 on 2026-10-28;
+   the previous version keeps a rollback server, `pnpm e2e:51`).
 4. Run `@minecraft/server` against the new BDS. The truth pack's module version may need to change
    (PLAN.md section 7).
 5. Re-record fixtures, run unit and e2e tests on both transports, then a 30-minute soak (PLAN.md section 7). Only

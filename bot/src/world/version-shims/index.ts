@@ -29,9 +29,9 @@ export interface VersionShim {
   maxSubChunkVersion: number;
 }
 
-// SHIMS[0] is also the fallback for unknown versions. 1.26.51 stays first until the default game
-// version flips to 1.26.60 (docs/versions.md); then move shim_1_26_60 to the front.
-export const SHIMS: readonly VersionShim[] = [shim_1_26_51, shim_1_26_60];
+// SHIMS[0] is also the fallback for unknown versions: the default game version (1.26.60 since
+// 2026-10-28, docs/versions.md). 1.26.51 stays for the rollback path (BOT_VERSION=1.26.51).
+export const SHIMS: readonly VersionShim[] = [shim_1_26_60, shim_1_26_51];
 
 /** The shim for `version`, or undefined when no shim lists it. */
 export function shimFor(version: string): VersionShim | undefined {

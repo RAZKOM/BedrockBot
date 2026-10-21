@@ -1,10 +1,12 @@
 // Run the whole e2e suite against ONE container profile, by setting every suite's env vars
-// (chat-helpers BDS_*, world-truth BDS_WORLD_*, skills-input PHYS_BDS_*, env.ts BOT_VERSION /
-// BDS_TRANSPORT). The default suite (no profile) still targets bds-dev, bds-world and bds-phys.
-//   node scripts/e2e-profile.ts dev60 [vitest args...]   BDS 1.26.60.6 (bds60, udp/19134), game version 1.26.60, RakNet
-//   node scripts/e2e-profile.ts nn [vitest args...]      BDS 1.26.51.1 (bds-nn, 19140), NetherNet LAN signalling
+// (chat-helpers BDS_*, world-truth BDS_WORLD_*, skills-input PHYS_BDS_*, move-truth MOVE_BDS_*,
+// dig-truth DIG_BDS_*, env.ts BOT_VERSION / BDS_TRANSPORT). The default suite (no profile) targets
+// bds-dev, bds-world, bds-move and bds-dig at 1.26.60 over RakNet (docs/runbook.md, "Tests").
+//   node scripts/e2e-profile.ts dev51 [vitest args...]   BDS 1.26.51.1 (bds-dev51, udp/19134), game version 1.26.51, RakNet:
+//                                                        the previous version, kept as the rollback path
+//   node scripts/e2e-profile.ts nn [vitest args...]      BDS 1.26.60.6 (bds-nn, 19140), NetherNet LAN signalling
 // The container needs the truth pack: `node scripts/bds.mjs pack --profile <name>` from the repo root.
-// Root shortcuts: pnpm e2e:60 | pnpm e2e:nn
+// Root shortcuts: pnpm e2e:51 | pnpm e2e:nn
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -17,8 +19,8 @@ interface Profile {
 }
 
 const PROFILES: Record<string, Profile> = {
-  dev60: { container: 'bds60', port: 19134, version: '1.26.60', transport: 'raknet', build: '1.26.60.6' },
-  nn: { container: 'bds-nn', port: 19140, version: '1.26.51', transport: 'nethernet', build: '1.26.51.1' },
+  dev51: { container: 'bds-dev51', port: 19134, version: '1.26.51', transport: 'raknet', build: '1.26.51.1' },
+  nn: { container: 'bds-nn', port: 19140, version: '1.26.60', transport: 'nethernet', build: '1.26.60.6' },
 };
 
 const [name, ...rest] = process.argv.slice(2).filter((a, i) => !(a === '--' && i === 0));
@@ -40,6 +42,10 @@ const env: NodeJS.ProcessEnv = {
   BDS_WORLD_PORT: port,
   PHYS_BDS_CONTAINER: p.container,
   PHYS_BDS_PORT: port,
+  MOVE_BDS_CONTAINER: p.container,
+  MOVE_BDS_PORT: port,
+  DIG_BDS_CONTAINER: p.container,
+  DIG_BDS_PORT: port,
 };
 console.error(`[e2e-profile] ${name}: ${p.container} (BDS ${p.build}) port ${port}, version ${p.version}, transport ${p.transport}`);
 const botDir = fileURLToPath(new URL('..', import.meta.url));

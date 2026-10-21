@@ -10,8 +10,15 @@ import type { ItemRegistry, StartGame } from '../../../src/world/packets.ts';
 import { BlockRegistry } from '../../../src/world/registry.ts';
 import type { PacketSource } from '../../../src/world/types.ts';
 
+/**
+ * Game version of the fixtures under test: fixtures/<FIXTURE_VERSION>/. Defaults to the project's default
+ * game version (1.26.60 since 2026-10-28); `FIXTURE_VERSION=1.26.51 pnpm --filter bot test` replays the
+ * previous version's recordings (the rollback path).
+ */
+export const FIXTURE_VERSION = process.env.FIXTURE_VERSION ?? '1.26.60';
+
 export function fixturePath(name: string): string {
-  return fileURLToPath(new URL(`../../../../fixtures/1.26.51/${name}`, import.meta.url));
+  return fileURLToPath(new URL(`../../../../fixtures/${FIXTURE_VERSION}/${name}`, import.meta.url));
 }
 
 const cache = new Map<string, RecordLine[]>();
@@ -27,7 +34,7 @@ export function loadFixture(name: string): RecordLine[] {
 
 /** Inbound packets of a fixture, decoded from the recorded raw bytes (Buffers and bigints as live). */
 export function decodedInbound(name: string): { name: string; params: Record<string, unknown>; line: RecordLine }[] {
-  const des = createDeserializer('1.26.51');
+  const des = createDeserializer(FIXTURE_VERSION);
   const out: { name: string; params: Record<string, unknown>; line: RecordLine }[] = [];
   for (const line of loadFixture(name)) {
     if (line.dir !== 'in' || !line.raw) continue;
@@ -98,7 +105,7 @@ let shared: BlockRegistry | undefined;
 export function readyRegistry(): BlockRegistry {
   if (!shared) {
     const { startGame, itemRegistry } = recordedLogin();
-    shared = new BlockRegistry({ logger: silentLogger });
+    shared = new BlockRegistry({ version: FIXTURE_VERSION, logger: silentLogger });
     shared.handleStartGame(startGame);
     shared.handleItemRegistry(itemRegistry);
   }

@@ -1,14 +1,15 @@
 // PLAN.md task 2.1: registry shim. Hash values below were read from the recorded capture
 // fixtures/1.26.51/world-chunks.jsonl.gz (subchunk palettes and update_block runtime ids); the test
-// also checks that they really occur there.
+// also checks that they really occur in the capture under test (fixtures/<FIXTURE_VERSION>/, default
+// 1.26.60: identical hashes, the block data is 1.26.30 for both).
 import { describe, expect, it } from 'vitest';
 import { silentLogger } from '../../../src/log.ts';
 import { BlockRegistry, blockHash } from '../../../src/world/registry.ts';
 import { decodeSubChunk } from '../../../src/world/subchunk.ts';
 import { shimFor } from '../../../src/world/version-shims/index.ts';
-import { decodedInbound, readyRegistry, recordedLogin } from './helpers.ts';
+import { decodedInbound, FIXTURE_VERSION, readyRegistry, recordedLogin } from './helpers.ts';
 
-/** Wire runtime ids (FNV-1a hashes) seen on BDS 1.26.51.1. */
+/** Wire runtime ids (FNV-1a hashes) seen on BDS 1.26.51.1 and 1.26.60.6. */
 const KNOWN: Record<string, { rid: number; states: Record<string, unknown> }> = {
   air: { rid: -604749536, states: {} },
   bedrock: { rid: -173245189, states: { infiniburn_bit: 0 } },
@@ -18,14 +19,18 @@ const KNOWN: Record<string, { rid: number; states: Record<string, unknown> }> = 
   stone: { rid: -2144268767, states: {} },
 };
 
-describe('world registry shim (1.26.51)', () => {
-  it('has a version shim for 1.26.51 that reads item states from item_registry', () => {
-    const shim = shimFor('1.26.51');
-    expect(shim?.registryVersion).toBe('bedrock_1.26.51');
+/** item_registry sizes of the recorded logins. */
+const ITEM_STATES: Record<string, number> = { '1.26.51': 2076, '1.26.60': 2080 };
+
+describe(`world registry shim (${FIXTURE_VERSION})`, () => {
+  it(`has a version shim for ${FIXTURE_VERSION} that reads item states from item_registry`, () => {
+    const shim = shimFor(FIXTURE_VERSION);
+    expect(shim?.registryVersion).toBe(`bedrock_${FIXTURE_VERSION}`);
     expect(shim?.blockDataVersion).toBe('1.26.30');
     const { startGame, itemRegistry } = recordedLogin();
     expect(shim?.itemStates(startGame, undefined)).toBeUndefined();
-    expect(shim?.itemStates(startGame, itemRegistry)).toHaveLength(2076);
+    // 1.26.60 added disc_press, frostbite_spawn_egg, icicle and ice_crystal to item_registry.
+    expect(shim?.itemStates(startGame, itemRegistry)).toHaveLength(ITEM_STATES[FIXTURE_VERSION]!);
   });
 
   it('the known hashes occur in the recorded capture', () => {
@@ -139,10 +144,10 @@ describe('world registry shim (1.26.51)', () => {
     expect(info).toMatchObject({ name: 'unknown', stateId: -1, solid: true, states: { runtime_id: 123456789 } });
   });
 
-  it('falls back to the newest shim for an unknown version, with a warning', () => {
+  it('falls back to the default (newest) shim for an unknown version, with a warning', () => {
     const warnings: string[] = [];
     const reg = new BlockRegistry({ version: '9.9.9', logger: { ...silentLogger, warn: (m: string) => warnings.push(m) } });
-    expect(reg.shim.gameVersions).toContain('1.26.51');
+    expect(reg.shim.gameVersions).toContain('1.26.60');
     expect(warnings[0]).toContain('no world version shim for 9.9.9');
   });
 });

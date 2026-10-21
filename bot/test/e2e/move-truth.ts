@@ -3,7 +3,8 @@
 // file connects one bot with a unique name and drives it through the real stack:
 // Connection -> World (chunks, block updates) -> InputLoop (physics on real block shapes) -> BotSkills.
 //
-// Env: MOVE_BDS_HOST (127.0.0.1), MOVE_BDS_PORT (19146), MOVE_BDS_CONTAINER (bds-move),
+// Env: MOVE_BDS_HOST (127.0.0.1), MOVE_BDS_PORT (19146), MOVE_BDS_CONTAINER (bds-move); game version
+// and transport from env.ts (BOT_VERSION, BDS_TRANSPORT);
 // MOVE_VERBOSE=1 logs corrections, teleports and navigator decisions.
 import { Connection } from '../../src/connection/connection.ts';
 import type { ConnectTarget } from '../../src/connection/types.ts';
@@ -12,6 +13,7 @@ import { BotSkills } from '../../src/skills/index.ts';
 import { InputLoop, flatWorld, type CorrectionEvent, type InputLoopEvent } from '../../src/skills/input/index.ts';
 import { World } from '../../src/world/index.ts';
 import type { Vec3 } from '../../src/world/types.ts';
+import { bdsTarget, E2E_VERSION } from './env.ts';
 import type { Layout } from './nav-worlds.ts';
 import { Truth, consoleCommand } from './skills-truth.ts';
 
@@ -19,7 +21,7 @@ export const E2E = process.env.BDS_E2E === '1';
 export const MOVE_HOST = process.env.MOVE_BDS_HOST ?? '127.0.0.1';
 export const MOVE_PORT = Number(process.env.MOVE_BDS_PORT ?? 19146);
 export const MOVE_CONTAINER = process.env.MOVE_BDS_CONTAINER ?? 'bds-move';
-export const MOVE_TARGET: ConnectTarget = { kind: 'bds', host: MOVE_HOST, port: MOVE_PORT, transport: 'raknet', offline: true };
+export const MOVE_TARGET: ConnectTarget = bdsTarget(MOVE_HOST, MOVE_PORT);
 export const VERBOSE = process.env.MOVE_VERBOSE === '1';
 /** Flat world: grass top at y = -61, feet at -60. */
 export const FEET_Y = -60;
@@ -65,8 +67,8 @@ export async function prepareServer(container = MOVE_CONTAINER): Promise<void> {
 export async function connectBot(prefix: string): Promise<MoveBot> {
   await prepareServer();
   const name = uniqueName(prefix);
-  const conn = new Connection({ version: '1.26.51', username: name, logger: silentLogger, reconnect: false });
-  const world = new World(conn, { logger: silentLogger });
+  const conn = new Connection({ version: E2E_VERSION, username: name, logger: silentLogger, reconnect: false });
+  const world = new World(conn, { version: E2E_VERSION, logger: silentLogger });
   const loop = new InputLoop(conn, { world: flatWorld(), logger: VERBOSE ? createLogger('info', 'input') : silentLogger });
   const skills = new BotSkills({ loop, world, logger: VERBOSE ? createLogger('debug', 'nav') : silentLogger });
   const truth = new Truth(conn, MOVE_CONTAINER);

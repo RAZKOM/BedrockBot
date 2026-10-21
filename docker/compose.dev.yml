@@ -8,9 +8,11 @@ services:
     container_name: bds-dev
     environment:
       EULA: "TRUE"
-      # Must equal the newest version bedrock-protocol supports (3.60.1 -> 1.26.51); full 4-part build.
-      VERSION: "1.26.51.1"
+      # Must equal the bot's default game version (1.26.60 since 2026-10-28, through the minecraft-data
+      # patch -> 1.26.60; docs/versions.md); full 4-part build. Rollback: docker/compose.dev51.yml.
+      VERSION: "1.26.60.6"
       # The image defaults to NetherNet since 2026.10.0; RakNet clients time out without this.
+      # 26.60 prints a "TRANSPORT TYPE ERROR" banner for raknet but still accepts RakNet clients.
       TRANSPORT: raknet
       ONLINE_MODE: "false"
       # allow-list=true together with online-mode=false makes BDS exit at startup.

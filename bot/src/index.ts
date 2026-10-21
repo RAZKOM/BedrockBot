@@ -1,4 +1,4 @@
-// CLI: bot --task echo|afk --host 127.0.0.1 --port 19132 --version 1.26.51 [options]
+// CLI: bot --task echo|afk --host 127.0.0.1 --port 19132 --version 1.26.60 [options]
 // Targets: a local BDS in offline mode (default), or a Realm (PLAN.md task 1.6; the human signs in
 // through the device-code flow on the first run, see docs/runbook.md "Realm join").
 import { mkdirSync } from 'node:fs';
@@ -19,7 +19,7 @@ import { EchoTask } from './tasks/echo.ts';
 
 const BOT_DIR = fileURLToPath(new URL('..', import.meta.url));
 
-const DEFAULT_VERSION = '1.26.51';
+const DEFAULT_VERSION = '1.26.60';
 
 const USAGE = `usage: bot --task echo|afk [options]
   --task <name>            task to run: echo (print chat and position) | afk (stay online)

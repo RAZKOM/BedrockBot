@@ -1,6 +1,7 @@
 // Shared setup for the digging e2e tests (PLAN.md 4.1 / 4.2): a bot with World, InputLoop, Hotbar
 // and Digger on the bds-dig container (udp/19148, flat world, truth pack; docker/compose.dig.yml).
-// Override with DIG_BDS_HOST / DIG_BDS_PORT / DIG_BDS_CONTAINER.
+// Override with DIG_BDS_HOST / DIG_BDS_PORT / DIG_BDS_CONTAINER; game version and transport follow
+// env.ts (BOT_VERSION, BDS_TRANSPORT).
 //
 // Isolation (several dig suites may run on bds-dig at once: every track's e2e gate runs the whole
 // e2e project; and a killed run leaves its player online for a while):
@@ -19,13 +20,14 @@ import { Digger } from '../../src/skills/dig/index.ts';
 import { InputLoop } from '../../src/skills/input/index.ts';
 import { Hotbar, World } from '../../src/world/index.ts';
 import type { EntityInfo } from '../../src/world/types.ts';
+import { bdsTarget, E2E_VERSION } from './env.ts';
 import { consoleCommand, sleep, uniqueName } from './world-truth.ts';
 
 export const E2E = process.env.BDS_E2E === '1';
 export const DIG_HOST = process.env.DIG_BDS_HOST ?? '127.0.0.1';
 export const DIG_PORT = Number(process.env.DIG_BDS_PORT ?? 19148);
 export const DIG_CONTAINER = process.env.DIG_BDS_CONTAINER ?? 'bds-dig';
-export const DIG_TARGET: ConnectTarget = { kind: 'bds', host: DIG_HOST, port: DIG_PORT, transport: 'raknet', offline: true };
+export const DIG_TARGET: ConnectTarget = bdsTarget(DIG_HOST, DIG_PORT);
 /** Flat world: grass top at y = -61, feet at -60. */
 export const FEET_Y = -60;
 
@@ -163,8 +165,8 @@ export interface DigBot {
 export async function connectDigBot(prefix = 'Dig'): Promise<DigBot> {
   const name = uniqueName(prefix);
   const verbose = process.env.DIG_VERBOSE ? createLogger('debug', 'dig') : silentLogger;
-  const conn = new Connection({ version: '1.26.51', username: name, logger: silentLogger, reconnect: false });
-  const world = new World(conn, { logger: silentLogger });
+  const conn = new Connection({ version: E2E_VERSION, username: name, logger: silentLogger, reconnect: false });
+  const world = new World(conn, { version: E2E_VERSION, logger: silentLogger });
   const loop = new InputLoop(conn, { world: { solidAt: (x, y, z) => world.blockAt({ x, y, z })?.solid }, logger: silentLogger });
   const hotbar = new Hotbar(conn, { inventory: world.inventory, runtimeId: () => world.self.runtimeId });
   const digger = new Digger({ loop, world, hotbar, logger: verbose });

@@ -1,10 +1,10 @@
 // Network subchunk decoder: synthetic round trips for every storage width, plus a cross-check against
-// prismarine-chunk's 1.18 decoder on the recorded 1.26.51 payloads.
+// prismarine-chunk's 1.18 decoder on the recorded payloads (fixtures/<FIXTURE_VERSION>, default 1.26.60).
 import { createRequire } from 'node:module';
 import nbt from 'prismarine-nbt';
 import { describe, expect, it } from 'vitest';
 import { decodeSubChunk, Layer, localIndex } from '../../../src/world/subchunk.ts';
-import { decodedInbound, encodeSubChunk, fillSection, readyRegistry } from './helpers.ts';
+import { decodedInbound, encodeSubChunk, FIXTURE_VERSION, fillSection, readyRegistry } from './helpers.ts';
 
 const require = createRequire(import.meta.url);
 const ident = (rid: number) => rid;
@@ -94,11 +94,11 @@ describe('decodeSubChunk', () => {
     expect(l.stateAt(4000)).toBe(0);
   });
 
-  it('agrees with prismarine-chunk 1.18 on every recorded 1.26.51 subchunk', async () => {
+  it(`agrees with prismarine-chunk 1.18 on every recorded ${FIXTURE_VERSION} subchunk`, async () => {
     const reg = readyRegistry();
     // The same registry data, prepared the prismarine way, for the reference decoder.
     const loadRegistry = require('prismarine-registry') as (v: string) => { handleStartGame(p: unknown): void };
-    const pReg = loadRegistry('bedrock_1.26.51');
+    const pReg = loadRegistry(`bedrock_${FIXTURE_VERSION}`);
     const lines = decodedInbound('world-chunks.jsonl.gz');
     const sg = lines.find((l) => l.name === 'start_game')!.params;
     const ir = lines.find((l) => l.name === 'item_registry')!.params;

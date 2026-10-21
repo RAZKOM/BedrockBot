@@ -12,7 +12,7 @@ export const SOAK = process.env.BDS_SOAK === '1';
 export const CONTAINER = process.env.BDS_CONTAINER ?? 'bds-dev';
 export const HOST = process.env.BDS_HOST ?? '127.0.0.1';
 export const PORT = Number(process.env.BDS_PORT ?? 19132);
-/** Game version (env BOT_VERSION, default 1.26.51) and transport (BDS_TRANSPORT) live in env.ts. */
+/** Game version (env BOT_VERSION, default 1.26.60) and transport (BDS_TRANSPORT) live in env.ts. */
 export const VERSION = E2E_VERSION;
 export const TARGET: BdsTarget = bdsTarget(HOST, PORT);
 export const BOT_DIR = fileURLToPath(new URL('../..', import.meta.url));

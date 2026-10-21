@@ -83,7 +83,7 @@ function plainStates(states: TypedStates): Record<string, unknown> {
 }
 
 export interface BlockRegistryOptions {
-  /** Game version (bedrock-protocol version string). Default '1.26.51'. */
+  /** Game version (bedrock-protocol version string). Default '1.26.60'. */
   version?: string;
   logger?: Logger;
 }
@@ -114,7 +114,7 @@ export class BlockRegistry {
   readonly airStateId: number;
 
   constructor(opts: BlockRegistryOptions = {}) {
-    this.version = opts.version ?? '1.26.51';
+    this.version = opts.version ?? '1.26.60';
     this.log = opts.logger ?? createLogger('info', 'world');
     const shim = shimFor(this.version);
     if (!shim) {

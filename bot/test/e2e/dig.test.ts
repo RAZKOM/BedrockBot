@@ -13,6 +13,7 @@ import type { Vec3 } from '../../src/connection/types.ts';
 import { blockMining, toolOf } from '../../src/data/mining.ts';
 import { estimateBreak, serverReachDistance, type DigResult } from '../../src/skills/dig/index.ts';
 import { E2E, FEET_Y, RunArea, connectDigBot, killItemsNear, pollUntil, prepareServer, type DigBot } from './dig-truth.ts';
+import { E2E_VERSION } from './env.ts';
 
 const DROPS: Record<string, string> = { grass_block: 'dirt', dirt: 'dirt', oak_log: 'oak_log' };
 
@@ -132,7 +133,7 @@ describe.skipIf(!E2E)('@bds dig against bds-dig', () => {
       ...rows.map((r) => `${pad(r.label, 34)}${pad(r.block, 12)}${pad(r.item, 15)}${pad(r.expected, 7)}${pad(r.ticks ?? '-', 7)}${pad(r.ms?.toFixed(0) ?? '-', 8)}${r.restores ?? '-'}${r.ok ? '' : `  FAILED ${r.reason ?? ''}`}`),
     ];
     // process.stdout, not console.log: vitest hides console output of passing tests.
-    process.stdout.write(`[dig e2e] break times on BDS 1.26.51 (ticks = bot ticks from start_break to update_block)\n  ${table.join('\n  ')}\n  ${notes.join('\n  ')}\n`);
+    process.stdout.write(`[dig e2e] break times on BDS ${E2E_VERSION} (ticks = bot ticks from start_break to update_block)\n  ${table.join('\n  ')}\n  ${notes.join('\n  ')}\n`);
     await bot?.close();
   });
 

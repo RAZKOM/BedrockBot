@@ -1,0 +1,29 @@
+# BDS for the world-model e2e tests (PLAN.md Phase 2, world-*.test.ts): container bds-world on
+# udp/19142, flat world `world`, data in docker/data/world. Same settings as the `docker run` it
+# replaced on 2026-10-28 (docs/world-model.md); no DIFFICULTY, so the image default (easy) applies.
+#   docker compose -f docker/compose.world.yml up -d
+#   pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/world --world world --restart bds-world
+name: bedrockbot-world
+
+services:
+  bds-world:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-world
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: world
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_PORT: "19142"
+    ports:
+      - "19142:19142/udp"
+    volumes:
+      - ./data/world:/data
+    stdin_open: true
+    tty: true

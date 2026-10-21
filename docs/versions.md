@@ -1,8 +1,9 @@
 # Game versions and transports
 
-State on 2026-10-28 (PLAN.md tasks 1.4 and 1.5). The default everywhere is still **1.26.51 over
-RakNet** (bds-dev); 1.26.60 and NetherNet are selectable and verified, and the default flips as one
-set (below).
+State on 2026-10-28 (PLAN.md tasks 1.4 and 1.5). **The default everywhere is 1.26.60 (BDS
+1.26.60.6) over RakNet** since the flip on 2026-10-28 (section "Default flipped to 1.26.60" below);
+NetherNet is selectable and verified. 1.26.51 stays runnable as the rollback (`BOT_VERSION=1.26.51`,
+server `bds-dev51`, `pnpm e2e:51`, `FIXTURE_VERSION=1.26.51` for the world unit tests).
 
 ## Stack
 
@@ -11,20 +12,32 @@ set (below).
 | bedrock-protocol | git `PrismarineJS/bedrock-protocol#c9e1fbf2` (= 3.60.1 + #834 + #839) | docs/decisions/0004-protocol-pin.md |
 | minecraft-data | 3.117.0 + `patches/minecraft-data@3.117.0.patch` | the patch adds bedrock 1.26.60 (protocol 2225); made by `tools/bump-version/make-patch.mjs 1.26.60` |
 | World version shims | `bot/src/world/version-shims/1.26.51.ts`, `1.26.60.ts` | 1.26.60 = 1.26.51 (schema-diff: only trailing fields in level_chunk, start_game, add_player, add_entity; block/item data still 1.26.30 upstream) |
-| Fixtures | `fixtures/1.26.51/`, `fixtures/1.26.60/` (`login-idle`, `world-chunks`) | `bot/test/unit/fixture-replay.test.ts` replays both versions |
+| Fixtures | `fixtures/1.26.51/`, `fixtures/1.26.60/` (`login-idle`, `world-chunks`) | `bot/test/unit/fixture-replay.test.ts` replays both versions; the world unit tests (`test/unit/world/helpers.ts`) use `fixtures/1.26.60` unless `FIXTURE_VERSION=1.26.51` |
 | Truth pack | `@minecraft/server` 2.10.0 | loads on BDS 1.26.51.1 and 1.26.60.6 (log: `[truth] pack 0.1.0 loaded`) |
 
 ## Servers
 
-| Container | BDS | Transport | Port | Game version for the bot |
-|---|---|---|---|---|
-| `bds-dev` | 1.26.51.1 | RakNet | udp/19132 | 1.26.51 (default) |
-| `bds60` | 1.26.60.6 | RakNet (26.60 prints a "TRANSPORT TYPE ERROR" banner but accepts RakNet) | udp/19134 | 1.26.60 |
-| `bds-nn` | 1.26.51.1 | NetherNet, LAN signalling | tcp+udp/19140, udp/19160-19167, udp/7551 | 1.26.51 |
+Since 2026-10-28 (all compose files, all with the truth pack; fresh worlds except bds-dev, which took
+over bds60's 1.26.60.6 world):
+
+| Container | BDS | Transport | Port | Compose file | Game version for the bot |
+|---|---|---|---|---|---|
+| `bds-dev` | 1.26.60.6 | RakNet | udp/19132 | docker/compose.dev.yml | 1.26.60 (default) |
+| `bds-world` | 1.26.60.6 | RakNet | udp/19142 | docker/compose.world.yml (was a `docker run`) | 1.26.60 |
+| `bds-move` | 1.26.60.6 | RakNet | udp/19146 | docker/compose.move.yml | 1.26.60 |
+| `bds-dig` | 1.26.60.6 | RakNet | udp/19148 | docker/compose.dig.yml | 1.26.60 |
+| `bds-nn` | 1.26.60.6 | NetherNet, LAN signalling | tcp+udp/19140, udp/19160-19167, udp/7551 | docker/compose.dev-nethernet.yml | 1.26.60 |
+| `bds-dev51` | 1.26.51.1 | RakNet | udp/19134 | docker/compose.dev51.yml | 1.26.51 (rollback) |
+
+Both builds print a "TRANSPORT TYPE ERROR" banner for `TRANSPORT=raknet` and still accept RakNet.
+`bds60` (docker/compose.dev60.yml) is gone: its port went to `bds-dev51` and its data folder to
+`bds-dev`; the old bds-dev 1.26.51 data moved to `docker/data/dev51` (its world was then replaced by a
+fresh one, see below). `bds-phys` (udp/19144, `docker run`, 1.26.51.1) is stopped and no longer a
+default e2e target (skills-input defaults to bds-move).
 
 How to start them and run the suites: docs/runbook.md ("Server", "Tests").
 
-## e2e results (2026-10-28, bedrock-protocol pinned to c9e1fbf2)
+## e2e results before the flip (2026-10-28, bedrock-protocol pinned to c9e1fbf2)
 
 Durations in ms from vitest's verbose reporter. bds-dev ran with the defaults
 (`BDS_E2E=1 vitest run --project e2e test/e2e/{echo,chat,reconnect,keepalive}`); bds60 and bds-nn
@@ -86,9 +99,37 @@ movement and chat numbers match RakNet). Reconnect across `docker restart` works
   works on NetherNet too.
 - Discovery uses UDP 7551 on the host; only one NetherNet BDS per host is reachable that way.
 
-## Flipping the default to 1.26.60 (one change set, after this wave)
+## Default flipped to 1.26.60 (2026-10-28)
 
-Exact edits (all currently `1.26.51` / `1.26.51.1`):
+Applied as one change set from the list below (kept as the template for the next bump). Gates, in
+order, all green:
+
+| Gate | Result |
+|---|---|
+| `pnpm -r test` | bot 30 files / 266 tests passed, truth pack 9 passed (also green with `FIXTURE_VERSION=1.26.51`) |
+| `pnpm lint` | clean (eslint + tsc) |
+| `BDS_E2E=1 pnpm --filter bot test:e2e` (bds-dev, bds-world, bds-move, bds-dig at 1.26.60.6) | 14 files passed, 1 skipped (world-record); 49 passed, 3 skipped, 459 s; same counts as the 1.26.51 baseline |
+| `pnpm e2e:nn` (bds-nn 1.26.60.6, NetherNet; now also nav-* and dig on bds-nn) | 14 files passed, 1 skipped; 49 passed, 3 skipped, 476 s |
+| rollback: `node scripts/e2e-profile.ts dev51 test/e2e/echo test/e2e/chat test/e2e/world-chunks` | 10 passed (after a fresh world, see below) |
+| 30 min AFK soak on bds-dev (`--task afk --duration 1800`) | green: spawned once as AfkBot at 02:15:05Z, 7 nudges, 0 corrections, 0 kicks, 0 reconnects, 0 warnings; exit 0 after 1800 s (disconnects.jsonl: spawnedMs 1800007, kind client) |
+
+Differences seen on 1.26.60 compared with 1.26.51:
+
+- `item_registry` has 2080 entries instead of 2076: new `disc_press`, `frostbite_spawn_egg`, `icicle`,
+  `ice_crystal`. Block data is still 1.26.30 (minecraft-data), so new blocks such as icicles would show
+  up as unknown runtime ids (solid "unknown" in the world model) if they ever appear; none occur in the
+  flat test worlds (0 unknown runtime ids in fixtures/1.26.60/world-chunks).
+- Nothing else seen: dig break ticks are within 1 tick of the 1.26.51 table in docs/digging.md (same
+  formula values; server reach still accepted at 9.85 and ignored at 10.24), skills-input has 0
+  corrections, nav, chat, reconnect (test 28.2 s incl. the restart) and the world checks pass with the
+  same assertions as on 1.26.51.
+
+Rollback check note: the first dev51 run failed `world-chunks` "flat-world layers" at (-35, -61, 4):
+the reused 1.26.51 world (the old bds-dev world) really has dirt there (`testforblock` on the server
+says so; the 200-position truth comparison in the same run passed 100 %). World state left by earlier
+runs, not a version effect; with a fresh `docker/data/dev51/worlds/dev` all 10 tests passed.
+
+The list below was written before the flip ("currently" means 1.26.51 at that time):
 
 1. `docker/compose.dev.yml`: `VERSION: "1.26.51.1"` -> `VERSION: "1.26.60.6"` (and its comment
    "3.60.1 -> 1.26.51" -> "the minecraft-data patch -> 1.26.60"). Optionally the same in

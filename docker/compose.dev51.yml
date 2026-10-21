@@ -1,0 +1,38 @@
+# Rollback BDS 1.26.51.1 over RakNet: the previous game version, run beside bds-dev (1.26.60.6 since
+# 2026-10-28; docs/versions.md). It replaced bds60 (docker/compose.dev60.yml, the 1.26.60 trial server)
+# on the same port once 1.26.60 became the default. Same settings as compose.dev.yml except container
+# name, port, version and data dir, so the e2e suite can run against it with BOT_VERSION=1.26.51:
+#   node scripts/bds.mjs up --profile dev51          (or: docker compose -f docker/compose.dev51.yml up -d)
+#   node scripts/bds.mjs pack --profile dev51        (deploy the truth pack and restart)
+#   pnpm e2e:51                                      (e2e suite with BOT_VERSION=1.26.51 against bds-dev51)
+# Not named bds51: tools/bump-version/run-bds.mjs uses `bds51` on udp/19138 for its own checks.
+name: bedrockbot-dev51
+
+services:
+  bds-dev51:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-dev51
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.51.1"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "${BDS_IDLE_TIMEOUT:-0}"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: "${BDS_DIFFICULTY:-peaceful}"
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: dev
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-dev51
+      SERVER_PORT: "19134"
+      # BDS also binds an IPv6 port (default 19133); keep it away from other containers' ports.
+      SERVER_PORT_V6: "19135"
+      # As bds-move: e2e-profile.ts dev51 runs the nav suites here too (truth:fill needs the ticking area).
+      TICK_DISTANCE: "10"
+    ports:
+      - "19134:19134/udp"
+    volumes:
+      - ./data/dev51:/data
+    stdin_open: true
+    tty: true

@@ -4,7 +4,10 @@
 //
 // minecraft-data 3.117.0 serves bedrock blocks/items from `bedrock/1.26.30` for every version up to
 // 1.26.51 (its dataPaths.json); the blocks the bot cares about (logs, planks, leaves, dirt, grass,
-// stone, ores) are unchanged since then.
+// stone, ores) are unchanged since then. The default game version is 1.26.60 since 2026-10-28, but
+// this file keeps the `bedrock_1.26.51` key on purpose: bedrock_1.26.60 (from
+// patches/minecraft-data@3.117.0.patch) points at the same `bedrock/1.26.30` block and item data
+// (docs/versions.md), and the 1.26.51 key needs no patch.
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);

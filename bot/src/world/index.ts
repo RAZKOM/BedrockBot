@@ -26,7 +26,7 @@ import { BlockUpdates } from './updates.ts';
 export const EYE_HEIGHT = 1.62;
 
 export interface WorldOptions extends ChunkStoreOptions {
-  /** Game version the connection speaks (selects the version shim). Default '1.26.51'. */
+  /** Game version the connection speaks (selects the version shim). Default '1.26.60'. */
   version?: string;
   logger?: Logger;
 }

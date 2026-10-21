@@ -164,21 +164,19 @@ The world model uses only `Connection.on(name: string, ...)` (the untyped overlo
 | `test/unit/world/chunks.test.ts` | request batching and cap, results, retry, unload, registry deferral, dimension change, legacy payloads, updates, block entities, checksum |
 | `test/unit/world/entities-inventory.test.ts` | entity add/move/remove (both move_entity_delta shapes), self state, corrections, inventory packets |
 | `test/unit/world/find.test.ts` | class index vs full scan, index maintenance, perf (102 400-block scan median about 1 ms, budget 5 ms) |
-| `test/unit/world/world-replay.test.ts` | replays `fixtures/1.26.51/world-chunks.jsonl.gz` offline and compares the model with every truth reply recorded inside it |
+| `test/unit/world/world-replay.test.ts` | replays `fixtures/<FIXTURE_VERSION>/world-chunks.jsonl.gz` (default 1.26.60; `FIXTURE_VERSION=1.26.51` for the old one) offline and compares the model with every truth reply recorded inside it |
 | `test/e2e/world-chunks.test.ts` | flat layers in every column within 48 blocks; 200 random positions (and all 20 000 blocks of 5 random 20 x 10 x 20 boxes) vs `truth:blocks`, 100 % |
 | `test/e2e/world-updates.test.ts` | 20 `truth:set` blocks seen within 2 ticks, chest block entities, 5 x 5 x 5 `truth:fill`, model checksum = `truth:checksum` |
 | `test/e2e/world-entities.test.ts` | `truth:spawnitem` drop within 0.5 blocks of truth, then resting and removal; `truth:give` matches `truth:inv` slot for slot |
 | `test/e2e/world-record.test.ts` | opt-in (`WORLD_RECORD=1`): re-records the fixture |
 
 The e2e tests target the `bds-world` container on udp/19142 (override with `BDS_WORLD_CONTAINER`,
-`BDS_WORLD_HOST`, `BDS_WORLD_PORT`; `WORLD_SEED` changes the random positions):
+`BDS_WORLD_HOST`, `BDS_WORLD_PORT`; `WORLD_SEED` changes the random positions). Since 2026-10-28 it is
+`docker/compose.world.yml` (BDS 1.26.60.6; same settings as the earlier `docker run` at 1.26.51.1):
 
 ```sh
-docker run -d --name bds-world -e EULA=TRUE -e VERSION=1.26.51.1 -e TRANSPORT=raknet -e ONLINE_MODE=false \
-  -e ALLOW_LIST=false -e PLAYER_IDLE_TIMEOUT=0 -e ALLOW_CHEATS=true -e LEVEL_TYPE=FLAT -e LEVEL_NAME=world \
-  -e SERVER_PORT=19142 -e DEFAULT_PLAYER_PERMISSION_LEVEL=operator -p 19142:19142/udp \
-  -v "<repo>/docker/data/world:/data" itzg/minecraft-bedrock-server:2026.10.2
-pnpm --filter @bedrockbot/truth-pack pack:deploy --data <repo>/docker/data/world --world world --restart bds-world
+node scripts/bds.mjs --profile world up     # = docker compose -f docker/compose.world.yml up -d, then wait
+node scripts/bds.mjs --profile world pack   # deploy the truth pack into docker/data/world and restart
 BDS_E2E=1 pnpm --filter bot test:e2e
 BDS_E2E=1 WORLD_RECORD=1 pnpm --filter bot test:e2e -- world-record     # re-record the fixture
 ```

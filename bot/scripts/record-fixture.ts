@@ -1,6 +1,6 @@
 // Record a packet fixture (PLAN.md task 0.5): login + N seconds idle against a local BDS.
-//   pnpm --filter bot record:fixture [--idle 10 --out ../fixtures/1.26.51/login-idle.jsonl.gz]
-//   node scripts/record-fixture.ts --version 1.26.60 --port 19134 --bds 1.26.60.6   (bds60)
+//   pnpm --filter bot record:fixture [--idle 10 --out ../fixtures/1.26.60/login-idle.jsonl.gz]   (bds-dev, 1.26.60.6)
+//   node scripts/record-fixture.ts --version 1.26.51 --port 19134 --bds 1.26.51.1   (rollback server bds-dev51)
 // --out defaults to ../fixtures/<version>/login-idle.jsonl.gz.
 // Offline mode only; the `login` packet (identity chain) is redacted by the recorder.
 import { parseArgs } from 'node:util';
@@ -16,10 +16,10 @@ const { values } = parseArgs({
   options: {
     host: { type: 'string', default: '127.0.0.1' },
     port: { type: 'string', default: '19132' },
-    version: { type: 'string', default: '1.26.51' },
+    version: { type: 'string', default: '1.26.60' },
     transport: { type: 'string', default: 'raknet' },
     /** BDS build for the fixture header. */
-    bds: { type: 'string', default: '1.26.51.1' },
+    bds: { type: 'string', default: '1.26.60.6' },
     idle: { type: 'string', default: '10' },
     out: { type: 'string' },
     username: { type: 'string', default: 'FixtureBot' },

@@ -95,7 +95,8 @@ into `.work/sandbox/` (git-ignored, about 12 s) and edits that copy. For pnpm pr
 **Status (2026-10-28): done for the bot workspace.** The 1.26.60 patch is at the repo root
 (`patches/minecraft-data@3.117.0.patch`, byte-identical to `patches/` here) and listed in
 `pnpm-workspace.yaml` `patchedDependencies`; `pnpm -r test` replays 1.26.60 fixtures and the e2e
-suite passes against BDS 1.26.60.6 (`pnpm e2e:60`, docs/versions.md). Regenerate both copies together.
+suite passes against BDS 1.26.60.6 (docs/versions.md; 1.26.60 is the default game version since
+2026-10-28). Regenerate both copies together.
 
 `patches/minecraft-data@3.117.0.patch` is a git-format diff with package-relative paths (`a/data.js`,
 `a/minecraft-data/data/...`). That is the format `pnpm patch-commit` writes and `patchedDependencies`

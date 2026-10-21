@@ -9,6 +9,8 @@
 # reachable this way. Signalling uses SERVER_PORT (TCP+UDP); the game traffic itself is WebRTC
 # (ICE/DTLS/SCTP) on the UDP ports in SERVER_UDP_PORTS, one port per connected client.
 #
+# BDS 1.26.60.6 since 2026-10-28 (the default game version; BDS_NN_VERSION=1.26.51.1 for the old one).
+#
 # Measured 2026-10-28 (BDS 1.26.51.1, image 2026.10.2): with a single UDP port (SERVER_UDP_PORTS=19140,
 # the old draft) a second concurrent client gets an SDP answer without any ICE candidate and fails with
 # connecterror:9 (InactivityTimeout), and from then on every new client fails the same way until the
@@ -21,7 +23,7 @@ services:
     container_name: bds-nn
     environment:
       EULA: "TRUE"
-      VERSION: "${BDS_NN_VERSION:-1.26.51.1}"
+      VERSION: "${BDS_NN_VERSION:-1.26.60.6}"
       TRANSPORT: nethernet
       ONLINE_MODE: "false"
       ALLOW_LIST: "false"
@@ -36,6 +38,9 @@ services:
       SERVER_PORT_V6: "19141"
       # WebRTC ports, one per concurrent client (the e2e chat test runs 4 clients at once).
       SERVER_UDP_PORTS: "19160-19167"
+      # As bds-move: e2e-profile.ts nn runs the nav suites here too, and truth:fill builds their
+      # 100-block courses only inside the ticking area (default 4 chunks).
+      TICK_DISTANCE: "10"
     ports:
       - "19140:19140/tcp"
       - "19140:19140/udp"

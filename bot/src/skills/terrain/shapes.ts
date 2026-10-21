@@ -28,7 +28,11 @@ interface MinecraftData {
   blockCollisionShapes?: { blocks: Record<string, number | number[]>; shapes: Record<string, number[][]> };
 }
 
-/** minecraft-data version key whose block tables match the world registry (shim 1.26.51 -> data 1.26.30). */
+/**
+ * minecraft-data version key whose block tables match the world registry (shims 1.26.51 and 1.26.60 ->
+ * data 1.26.30). Stays `bedrock_1.26.51` after the default moved to 1.26.60 (2026-10-28): both keys
+ * point at the same 1.26.30 blocks and collision shapes (docs/versions.md), and this one needs no patch.
+ */
 export const SHAPES_DATA_VERSION = 'bedrock_1.26.51';
 
 const FULL: Box = Object.freeze([0, 0, 0, 1, 1, 1] as const);

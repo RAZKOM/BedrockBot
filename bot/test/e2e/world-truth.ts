@@ -1,7 +1,11 @@
 // Shared helpers for the world e2e tests: a typed truth-pack client that sends `/scriptevent truth:*`
 // through `docker exec <container> send-command` and matches '@truth' replies (received by the bot
 // as text packets) by request id. Targets the bds-world container on udp/19142 by default.
+// Request ids carry a random per-instance tag (`#w<tag>x<n>`, as in dig-truth.ts): truth replies are
+// broadcast to every player on the server, so plain sequence ids (`w1`, `w2`, ...) of two suites or
+// runs on one server would answer each other's requests.
 import { execFile } from 'node:child_process';
+import { randomInt } from 'node:crypto';
 import { ReplyParser, rleDecode, textOf, type Reply } from '../../../packs/truth/src/protocol.ts';
 import type { BdsTarget } from '../../src/connection/types.ts';
 import { bdsTarget } from './env.ts';
@@ -37,6 +41,8 @@ export interface BlocksData {
 export class Truth {
   readonly container: string;
   private readonly parser = new ReplyParser();
+  /** Random per-instance prefix of the request ids, so concurrent clients never cross replies. */
+  readonly tag = `w${randomInt(36 ** 5).toString(36)}`;
   private readonly pending = new Map<string, (r: Reply) => void>();
   private seq = 0;
   private readonly unsub: () => void;
@@ -64,7 +70,7 @@ export class Truth {
   }
 
   cmd(name: string, args: (string | number)[] = [], timeoutMs = 15_000): Promise<Reply> {
-    const id = `w${++this.seq}`;
+    const id = `${this.tag}x${++this.seq}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);

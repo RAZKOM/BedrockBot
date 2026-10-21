@@ -10,10 +10,14 @@
 //   node scripts/bds.mjs logs    follow the server log
 //   node scripts/bds.mjs pack    deploy the truth pack (packs/truth) into the profile's data dir and restart
 // Profiles (PLAN.md tasks 1.4 and 1.5), chosen with `--profile <name>` anywhere on the command line
-// or with env BDS_CONTAINER=<container> (the e2e suite sets it):
-//   dev    bds-dev  docker/compose.dev.yml            BDS 1.26.51.1, RakNet    udp/19132 (default)
-//   dev60  bds60    docker/compose.dev60.yml          BDS 1.26.60.6, RakNet    udp/19134
-//   nn     bds-nn   docker/compose.dev-nethernet.yml  BDS 1.26.51.1, NetherNet tcp+udp/19140, udp/19160-19167, udp/7551
+// or with env BDS_CONTAINER=<container> (the e2e suite sets it). Default game version 1.26.60 since
+// 2026-10-28 (docs/versions.md):
+//   dev    bds-dev    docker/compose.dev.yml            BDS 1.26.60.6, RakNet    udp/19132 (default)
+//   dev51  bds-dev51  docker/compose.dev51.yml          BDS 1.26.51.1, RakNet    udp/19134 (rollback)
+//   nn     bds-nn     docker/compose.dev-nethernet.yml  BDS 1.26.60.6, NetherNet tcp+udp/19140, udp/19160-19167, udp/7551
+//   world  bds-world  docker/compose.world.yml          BDS 1.26.60.6, RakNet    udp/19142 (world-* e2e)
+//   move   bds-move   docker/compose.move.yml           BDS 1.26.60.6, RakNet    udp/19146 (nav-*, skills-input e2e)
+//   dig    bds-dig    docker/compose.dig.yml            BDS 1.26.60.6, RakNet    udp/19148 (dig e2e)
 // Any other BDS_CONTAINER value works for restart/idle/cmd/logs only.
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -22,8 +26,11 @@ import { dirname, join } from 'node:path'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PROFILES = {
   dev: { container: 'bds-dev', compose: 'compose.dev.yml', data: 'dev', port: 'udp/19132' },
-  dev60: { container: 'bds60', compose: 'compose.dev60.yml', data: 'dev60', port: 'udp/19134' },
+  dev51: { container: 'bds-dev51', compose: 'compose.dev51.yml', data: 'dev51', port: 'udp/19134' },
   nn: { container: 'bds-nn', compose: 'compose.dev-nethernet.yml', data: 'nn', port: 'tcp+udp/19140, WebRTC udp/19160-19167, discovery udp/7551 (NetherNet)' },
+  world: { container: 'bds-world', compose: 'compose.world.yml', data: 'world', port: 'udp/19142' },
+  move: { container: 'bds-move', compose: 'compose.move.yml', data: 'move', port: 'udp/19146' },
+  dig: { container: 'bds-dig', compose: 'compose.dig.yml', data: 'dig', port: 'udp/19148' },
 }
 const argv = process.argv.slice(2)
 const profileFlag = argv.indexOf('--profile')
@@ -119,7 +126,7 @@ try {
       process.exit(run(['logs', '-f', '--tail', String(process.env.BDS_LOG_TAIL ?? 100), CONTAINER]).status ?? 1)
       break
     default:
-      console.error('usage: node scripts/bds.mjs [--profile dev|dev60|nn] up|down|restart|idle|cmd <command...>|logs|pack')
+      console.error(`usage: node scripts/bds.mjs [--profile ${Object.keys(PROFILES).join('|')}] up|down|restart|idle|cmd <command...>|logs|pack`)
       process.exit(2)
   }
 } catch (err) {
