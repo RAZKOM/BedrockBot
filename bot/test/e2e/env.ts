@@ -26,7 +26,8 @@ export function bdsTarget(host: string, port: number): BdsTarget {
 }
 
 /** CLI flags that make `node src/index.ts` speak the same version and transport. */
-export const CLI_TARGET_ARGS: readonly string[] = ['--version', E2E_VERSION, '--transport', E2E_TRANSPORT];
+// --no-config: a user's %LOCALAPPDATA%/bedrockbot/config.json must never redirect an e2e CLI run.
+export const CLI_TARGET_ARGS: readonly string[] = ['--no-config', '--version', E2E_VERSION, '--transport', E2E_TRANSPORT];
 
 /** Options for a raw bedrock-protocol createClient (test observers) on the same transport. */
 export function rawClientTransport(): Record<string, unknown> {

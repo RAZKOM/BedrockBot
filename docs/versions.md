@@ -160,3 +160,16 @@ The list below was written before the flip ("currently" means 1.26.51 at that ti
 
 Unit tests that use `'1.26.51'` as sample data (connection fakes, chat, metrics, versionGate,
 realm) do not need to change.
+
+## Behaviour differences found after the flip (2026-10-29, Phase 5 on BDS 1.26.60.6)
+
+- **Respawn order.** Sending `player_action respawn` together with the first client `respawn` state 2
+  (before the server's state 1) leaves the player dead on 1.26.60.6: a correction pulls the bot back
+  to the death point and a later `kill` produces no death. Working order: client `respawn` state 2 →
+  server `respawn` state 1 → client `respawn` state 2 + `player_action respawn`
+  (`bot/src/tasks/respawn.ts`). The old order worked on 1.26.51.1.
+- **World time.** 1.26.60 sends no `set_time` packets. Time arrives through `sync_world_clocks`
+  (`initialize_registry` at login, then `sync_state` every 12.8 s and right after `/time set`);
+  `WorldClock` in `bot/src/tasks/night.ts` handles both.
+- **Whispers.** `command_request` `/tell` works only with `version: 'latest'`; with `'52'` it is
+  silently dropped.

@@ -285,6 +285,8 @@ Each task is sized for one agent session of 2 to 3 hours with a human review at 
 
 ### Phase 5: Hardening (prerequisite: Phase 4)
 
+*2026-10-29: 5.1 to 5.5 done on BDS 1.26.60.6 (commit c1ed9d8): respawn + home return 4.7 to 7 s after a kill; shelter reached in under 4.2 s (an open doorway is not mob-safe); update notifier live-checked; health endpoint; config file outside the repo; quick start from a fresh copy in 2 min. 8 h soak pending. Realm-side behaviour still unverified.*
+
 | # | Task | Done when |
 |---|---|---|
 | 5.1 | Death and respawn (`respawn` states, `set_health`), return to the chest | e2e: `truth:kill`; bot respawns and resumes |
