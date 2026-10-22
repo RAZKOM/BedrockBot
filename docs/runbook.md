@@ -373,6 +373,9 @@ to a public service. **Verified on a real Realm on 2026-10-29** (game 1.26.60, c
 `patches/bedrock-protocol.patch`; numbers under "Measured on the Realm" below). Statements still
 marked *unverified* come from reading bedrock-protocol's source, not from a measurement.
 
+To keep the bot running on a Mac server as a launchd agent, see `deploy/mac/README.md` (set up on
+`chat` on 2026-10-29; sign-in and loading the agent stay with you).
+
 ### Prerequisites (PLAN.md section 2 checklist)
 
 1. **bedrock-protocol at or after PR #839**: done. `bot/package.json` pins the #839 merge commit

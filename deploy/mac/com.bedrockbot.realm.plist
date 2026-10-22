@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd user agent that keeps the Realm AFK bot running on a Mac (deploy/mac/README.md).
+  Replace /Users/USER with the account's home directory before loading. Everything about the
+  Realm (name, owner gamertag, home, health port) comes from ~/.bedrockbot/config.json; only
+  "--target realm" lives here, because the config file may not select a Realm by design.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.bedrockbot.realm</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/USER/.local/node/bin/node</string>
+    <string>src/index.ts</string>
+    <string>--task</string>
+    <string>afk</string>
+    <string>--target</string>
+    <string>realm</string>
+    <string>--no-record</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/USER/BedrockBot/bot</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/USER/.local/node/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/USER</string>
+    <key>NODE_ENV</key>
+    <string>production</string>
+  </dict>
+
+  <!-- Start at login and restart whenever the process exits (the bot exits 1 when reconnecting
+       gives up, 2 on a config error, 3 on a game-version mismatch; launchd waits ThrottleInterval
+       seconds and starts it again, so a game update keeps retrying until the bot is bumped). -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/USER/.bedrockbot/logs/realm-console.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/USER/.bedrockbot/logs/realm-console.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
