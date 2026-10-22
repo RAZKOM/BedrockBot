@@ -299,6 +299,8 @@ Each task is sized for one agent session of 2 to 3 hours with a human review at 
 
 ### Phase 6: RL environment (prerequisites: Phase 4 and task 5.3)
 
+*2026-10-29: 6.1 to 6.3 (single env) done, commit c798571. **Frozen here by decision** (section 10, question 10): a trained policy would be brittle to terrain and give none of the behaviours that make the bot useful on the Realm. The env stays as an optional lab; 6.3 multi-env, 6.4, 6.5 and 6.6 are not planned. Phase 7 replaces them.*
+
 | # | Task | Done when |
 |---|---|---|
 | 6.1 | `rl:reset` in the truth pack: place a `.mcstructure`, clear inventory, teleport, set time and weather, return the seed | e2e: 20 consecutive resets each under 2 s with identical block checksums |
@@ -307,6 +309,20 @@ Each task is sized for one agent session of 2 to 3 hours with a human review at 
 | 6.4 | Scripted baseline evaluator: run `GatherWoodTask` on the same scenarios; record logs per 2 400 ticks and ticks to 16 logs | `rl/results/baseline.json` |
 | 6.5 | PPO on "break the nearest log" (high-level actions), 8 envs, 1 M steps; then "gather 8 logs" | learning curve beats a random policy by more than 3 × on logs per episode; report versus baseline |
 | 6.6 | Optional: SimulatedPlayer backend for the same env for fast reward and observation iteration | the contract test passes with the alternate backend |
+
+### Phase 7: Usability, Baritone-style (prerequisite: Phase 5; replaces 6.4 to 6.6)
+
+*Decision 2026-10-29: hand-written skills instead of RL. Model: Baritone (A* where every move costs ticks, breaking and placing are part of the moves, nothing is a one-way trap, segments planned ahead, per-move stuck timeouts, goals composed around entities). **No PvP, ever.** PvE yes, so the Realm can run on normal difficulty with the bot alive. Root cause of "walks into caves": drops of up to 3 blocks cost 1 per block while climbing more than 1.25 blocks is impossible and there is no surface preference, so downhill holes are the cheapest route and have no way back.*
+
+| # | Task | Done when |
+|---|---|---|
+| 7.1 | Navigation v2: tick-based move costs from the physics (walk, sprint, jump, fall), a sky-access / underground penalty and an irreversible-drop penalty so routes stay on the surface, segment planning with plan-ahead (no 250 ms stall; unloaded chunks end a segment instead of failing), per-move stuck timeouts from the move's own cost estimate, retreat to the last safe node after a failed segment | e2e on bds-move: hill with a cave mouth on the straight line (path never below the surface), 3-deep pit on the line (never entered), 200-block cross-country goto with 0 corrections and no stall over 100 ms per tick; nav-sim unit tests for each rule |
+| 7.2 | Dig-through and pillar-up moves: `digCost` from block hardness and the held tool, Baritone's safety rules (never break a block next to lava or water, under gravel or sand, or the block under the feet except on purpose), pillar-up by placing a throwaway block under the feet while jumping; both behind injected actions (`dig`, `place`) and off by default (`allowBreak`, `allowPlace`, `throwawayItems`) | e2e: 1-block wall crossed by digging when allowed and walked around when not; 4-block cliff climbed by pillaring with cobblestone in the hotbar; a goto that ends in a 3-deep pit gets out by pillaring |
+| 7.3 | Interaction skills: `place(pos, face, item)` through `inventory_transaction` item_use (truth-verified), `useBlock(pos)` for doors, fence gates, trapdoors, buttons and levers; the planner treats closed doors and gates as passable with an open action and closes them behind when `closeDoors` is set; neighbour-aware fence and wall collision shapes | e2e: 16 blocks placed where asked, a 3-high pillar built under the feet, a door and a gate walked through (opened, closed behind), a fence line never collided with |
+| 7.4 | PvE: hostile classification from `entity_type`, target selection (nearest hostile within `guardRadius`, prefer whoever hit us after a `set_health` drop), approach with a `near` goal, attack through `inventory_transaction` item_use_on_entity on a 10-tick cadence while facing the target, best weapon from the hotbar, retreat home or to the shelter under `fleeHealth`; guard mode (kill hostiles within N blocks of home, then resume what was interrupted); pick up the drops afterwards | e2e on a normal-difficulty server: 3 summoned zombies killed without dying; a skeleton killed; a full night at home survived with guard on; flee triggers at low health |
+| 7.5 | Follow and come: `near` goal on a tracked player or entity, recomputed when the target moves more than 2 blocks, sprint to catch up, stop within 3 blocks, survives the target leaving view (last known position, then wait) | e2e: follows a summoned mob for 100 blocks staying within 4 blocks; `!come` reaches the caller within 60 s |
+| 7.6 | One bot, every command on the hardened AFK task: `!follow <name>`, `!come`, `!stop`, `!guard on\|off\|<radius>`, `!kill <type> [n]`, `!gather N [x y z]` folded in with `--chest`, `!mine <block> N`; `!status` names the active behaviour; guard and night shelter cooperate | e2e: each command from chat on bds-hard; Realm checklist run by you on normal difficulty |
+| 7.7 | Later, per item: swimming, ladders and vines, parkour gaps, sneaking at edges, eating, tool repair, `!explore`, `!build` from a structure file | per item |
 
 ---
 
@@ -381,6 +397,8 @@ Detecting a breaking update: (1) a daily job logs `npm view bedrock-protocol ver
 7. **Raise the WSL2 memory cap?** Recommended: set `memory=48GB` in `%UserProfile%\.wslconfig` before Phase 6, leaving 14 GB for Windows.
 8. **Replant saplings and repair tools?** Recommended: replant (cheap, keeps the forest), skip repair for now.
 9. **When to buy the second account?** Recommended: when task 1.5 is done and the Realm's game version is supported, so the first sign-in goes straight into a join attempt. That is likely within the first two weeks.
+
+10. **RL or hand-written skills for the useful behaviours?** Answered 2026-10-29: hand-written, Baritone-style (Phase 7). RL is frozen at 6.3 single env. PvE is in scope (the Realm goes back to normal difficulty); PvP stays out for good.
 
 ---
 
