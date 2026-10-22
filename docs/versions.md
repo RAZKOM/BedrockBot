@@ -112,6 +112,8 @@ order, all green:
 | `pnpm e2e:nn` (bds-nn 1.26.60.6, NetherNet; now also nav-* and dig on bds-nn) | 14 files passed, 1 skipped; 49 passed, 3 skipped, 476 s |
 | rollback: `node scripts/e2e-profile.ts dev51 test/e2e/echo test/e2e/chat test/e2e/world-chunks` | 10 passed (after a fresh world, see below) |
 | 30 min AFK soak on bds-dev (`--task afk --duration 1800`) | green: spawned once as AfkBot at 02:15:05Z, 7 nudges, 0 corrections, 0 kicks, 0 reconnects, 0 warnings; exit 0 after 1800 s (disconnects.jsonl: spawnedMs 1800007, kind client) |
+| 8 h AFK soak on bds-soak (`--task afk --duration 28800 --health-port 9464`, 2026-10-29 05:10 to 13:10Z) | green: 119 nudges, 0 corrections, 0 kicks, 0 reconnects, 0 deaths; exit 0, `bot/logs/soak/metrics.json` complete |
+| Realm (1.26.60, 2026-10-29) | joined and stayed; see docs/runbook.md "Measured on the Realm" |
 
 Differences seen on 1.26.60 compared with 1.26.51:
 

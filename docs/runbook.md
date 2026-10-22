@@ -369,9 +369,9 @@ sources, `bot/test/unit/fixtures/update/`), `tasks-respawn`, `tasks-night`, `tas
 ## Realm join (you do this)
 
 PLAN.md tasks 1.6 and 1.7. Agents never run this: it signs in to a Microsoft account and connects
-to a public service. The code path exists and is unit-tested with fakes only; **no Realm join has
-been tried yet**, so everything below that is not marked "verified" is expected behaviour from
-reading bedrock-protocol's source, not a measurement.
+to a public service. **Verified on a real Realm on 2026-10-29** (game 1.26.60, commit 5a7aa68 plus
+`patches/bedrock-protocol.patch`; numbers under "Measured on the Realm" below). Statements still
+marked *unverified* come from reading bedrock-protocol's source, not from a measurement.
 
 ### Prerequisites (PLAN.md section 2 checklist)
 
@@ -389,11 +389,13 @@ reading bedrock-protocol's source, not a measurement.
 3. **A separate Microsoft account that owns Minecraft Bedrock**, invited to your Realm and with the
    invite accepted (or use `--realm-invite <code>`). You sign in once through the device-code flow.
    The token cache lives outside the repo; the bot never sees a password.
-4. **Keepalive**: the AFK task nudges every 240 s (`--nudge-interval`). The Realm idle kick is
-   unknown (community figure 10 to 15 min, PLAN.md fact 8b); measure it once (below).
+4. **Keepalive**: the AFK task nudges every 240 s (`--nudge-interval`). Verified: 6 h 14 min on the
+   Realm without a kick. The raw idle threshold (nudges off) is still unmeasured (community figure
+   10 to 15 min, PLAN.md fact 8b); measuring it is optional (below).
 5. **Reconnect**: on by default (backoff 1 s doubling to 60 s, 20 % jitter). Each attempt signs in
-   from the cache and asks the Realms API for the join address again. *Unverified across Realm
-   restarts and game updates.*
+   from the cache and asks the Realms API for the join address again. Verified after a signalling
+   service shutdown (back in 1 s) and after a kick (back in 9 s). *Unverified across a Realm restart
+   and a game update.*
 6. **Tell everyone who plays on the Realm** that a bot account is there.
 
 ### Commands
@@ -464,11 +466,43 @@ Stop with Ctrl+C or `!quit` from an owner (clean disconnect, exit 0).
   | `kicked: outdated_client` / `outdated_server` | game version mismatch (prerequisite 2) |
   | `no Realm sign-in/join within ...` | device code not entered in time, or the Realms API hung |
   | `only "bds" is allowed in the config file` | put `--target realm` on the command line (`pnpm bot:realm`) |
+  | `health endpoint on 127.0.0.1:<port> failed: listen EADDRINUSE` (exit 2 before joining) | another bot (e.g. a local soak) holds that `--health-port`; pick a free one |
+  | `Signal connection closed unexpectedly (Unexpected server response: 404)` | the regional signalling host answers 404; the pnpm patch falls back to the default host by itself (below) |
 
   Run with `--log-level debug` for bedrock-protocol's connection log, and `DEBUG=minecraft-protocol,nethernet`
   for signalling and WebRTC details (prints no tokens as far as read; still keep it private).
 
-### Measuring the Realm idle kick (task 1.7)
+### Measured on the Realm (2026-10-29, game 1.26.60)
+
+Bot account BotAccount, Realm region SouthCentralUs, difficulty normal, owner commands from the
+Realm chat. Run from a separate worktree (`git worktree add ../BedrockBot-realm <commit>`) so work
+in the main tree cannot break a running stay.
+
+- **Join**: `realms.pickRealm` found the Realm by name; the join record names the regional
+  signalling host `signal-southcentralus.franchise.minecraft-services.net`, which resolves in DNS
+  but answers HTTP 404 on `/ws/v1.0/messaging/connect`, so bedrock-protocol gave `Signal connection
+  closed unexpectedly` five times and gave up. `patches/bedrock-protocol.patch` (pnpm
+  `patchedDependencies`) retries once on the default host `signal.franchise.minecraft-services.net`
+  and appends the WebSocket error to the message; with it the bot spawned about 10 s after sign-in.
+  Token cache: device code entered once; every later run (including reconnects 8 h later) signed in
+  from the cache without a prompt.
+- **Survival**: the bot was killed by a zombie 7 s after its first spawn (world spawn is unlit).
+  Respawn works with the 1.26.60 order (docs/versions.md); `--home` plus walking (on by default for
+  Realm targets) brought it back over 170 blocks of real terrain, 0 corrections.
+- **24 h stay** (`--task afk --home 100,64,-50 --health-port 9465 --duration 86400`, started
+  06:41:55Z): at 14:15Z two sessions of 1 h 13 min and 6 h 14 min, 112 nudges, 0 corrections,
+  0 deaths, 0 idle kicks. Session 1 ended with `Signal connection closed (1001): Signaling server
+  instance is shutting down` (kind `error`): a signalling-service restart also ends the game
+  session in bedrock-protocol; reconnect spawned again 1 s later. Session 2 ended with the owner
+  kicking the bot on purpose (`kicked: kicked`); back in 9 s.
+- **Capture size**: the Realm packet capture grows about 45 MB/h gzipped (chunks and entity moves),
+  about 1 GB a day. Use `--no-record` for multi-day stays unless you need the packets.
+- **Chat**: the client's profanity filter can mask digit runs as `####` in replies (`!pos`,
+  `!home`); the server-side text is intact. Turn the filter off in the client settings if it matters.
+- **Health port**: a bind failure is fatal (exit 2) so two bots never share one `/metrics`; the
+  local soak used 9464, the Realm run 9465.
+
+### Measuring the Realm idle kick (task 1.7, optional)
 
 1. Join with nudges off: `pnpm bot:realm -- --nudge-interval 0` (the AFK task still sends one
    standing input right after spawn, like a real client). Do not move the bot from your own client.
@@ -484,15 +518,14 @@ Write the result into PLAN.md fact 8b and this runbook.
 ### Known unknowns
 
 - Whether the Realms API or the server rejects a wrong game version first, and with what message.
-- The services-signalling path (JSON-RPC WebSocket, TURN credentials, werift through your NAT) has
-  never run in this project; only LAN signalling against BDS is verified.
-- The #839 DNS fallback is verified with stubbed DNS only.
-- Realm idle-kick time and reason; whether the client-side "press any button" AFK screen has a
-  server-side counterpart.
-- Reconnect across a Realm restart, a game update, and your own client joining or leaving.
-- How long the cached tokens stay valid before a new device code is needed.
+- Raw Realm idle-kick time and reason with nudges off; whether the client-side "press any button"
+  AFK screen has a server-side counterpart. (With the 240 s nudge: no kick in 6 h 14 min.)
+- Reconnect across a Realm restart and a game update, and your own client joining or leaving
+  (a signalling-service restart and a kick are verified).
+- How long the cached tokens stay valid before a new device code is needed (8 h verified).
 - Whether `/tell` (update whispers) works for a non-operator on a Realm; the notifier also logs.
-- Walking (`--home`, `--shelter`) on Realm terrain.
+- Whether an established NetherNet session could survive a signalling-service restart (today
+  bedrock-protocol ends it; reconnect covers it in about 1 s).
 
 ## Operations
 
