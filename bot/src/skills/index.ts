@@ -28,6 +28,8 @@ import { PHYSICS } from './input/physics.ts';
 import { Navigator, type GotoReport, type NavigatorOptions } from './nav/navigator.ts';
 import { angleDiff, turnTowards, yawTowards } from './nav/follower.ts';
 import { blockQueryOf, worldSource, type BlockStore } from './terrain/query.ts';
+import { UseSkill, type UseOptions, type UseResult } from './interact/use.ts';
+import { PlaceSkill, type PlaceOptions, type PlaceResult } from './place/place.ts';
 import { fellTree, type FellOptions, type FellResult } from './tree/feller.ts';
 import { detectTree, treesFrom, type Tree, type TreeOptions } from './tree/tree.ts';
 import type { Goal, GotoOptions, SkillResult, Skills } from './types.ts';
@@ -37,6 +39,9 @@ export type { CollectOptions, CollectResult } from './collect/collect.ts';
 export type { DepositResult, OpenResult, OpenOptions } from './container/chest.ts';
 export type { FellOptions, FellResult } from './tree/feller.ts';
 export type { Tree, TreeOptions } from './tree/tree.ts';
+export type { PlaceOptions, PlaceResult, PlaceReason } from './place/place.ts';
+export type { BlockFace } from './place/face.ts';
+export type { UseOptions, UseResult, UseReason, UsableKind } from './interact/use.ts';
 
 /**
  * The world model as the skills read it (`World` satisfies it). The optional parts enable dig
@@ -112,6 +117,8 @@ export class BotSkills implements Skills {
   private parts: SkillsInventoryParts = {};
   private _digger: Digger | undefined;
   private _chest: ChestSkill | undefined;
+  private _placer: PlaceSkill | undefined;
+  private _user: UseSkill | undefined;
   /** Bumped by every public skill call and by cancel(); compound skills stop when it changes. */
   private epoch = 0;
   private runningName: string | undefined;
@@ -145,6 +152,10 @@ export class BotSkills implements Skills {
     if (parts.source) next.source = parts.source;
     if (next.hotbar !== this.parts.hotbar && !this._digger?.busy) this._digger = undefined;
     if (next.containers !== this.parts.containers || next.source !== this.parts.source) this._chest = undefined;
+    if (next.hotbar !== this.parts.hotbar || next.containers !== this.parts.containers || next.source !== this.parts.source) {
+      if (!this._placer?.busy) this._placer = undefined;
+      if (!this._user?.busy) this._user = undefined;
+    }
     this.parts = next;
   }
 
@@ -181,6 +192,44 @@ export class BotSkills implements Skills {
     return this._chest;
   }
 
+  /**
+   * The block placer (skills/place; needs world.blockAt, world.inventory and a packet source; the
+   * hotbar for slot switching, containers to fetch items from the main inventory). Navigators call it
+   * directly (not through `place`, which would cancel the goto that is running).
+   */
+  get placer(): PlaceSkill | undefined {
+    const w = this.world;
+    const { source, hotbar, containers } = this.parts;
+    if (!this._placer && w.blockAt && w.inventory && source) {
+      this._placer = new PlaceSkill({
+        source,
+        loop: this.loop,
+        world: { blockAt: w.blockAt.bind(w), onBlockUpdate: (fn) => w.onBlockUpdate(fn), chunks: w.chunks, inventory: w.inventory },
+        ...(hotbar ? { hotbar } : {}),
+        ...(containers ? { containers } : {}),
+        runtimeId: () => (w.self as { runtimeId?: bigint }).runtimeId ?? 0n,
+        logger: this.log,
+      });
+    }
+    return this._placer;
+  }
+
+  /** Doors, gates, trapdoors, buttons, levers (skills/interact; same needs as the placer). */
+  get user(): UseSkill | undefined {
+    const w = this.world;
+    const { source, hotbar } = this.parts;
+    if (!this._user && w.blockAt && w.inventory && source) {
+      this._user = new UseSkill({
+        source,
+        loop: this.loop,
+        world: { blockAt: w.blockAt.bind(w), onBlockUpdate: (fn) => w.onBlockUpdate(fn), chunks: w.chunks, inventory: w.inventory },
+        rawHotbarItem: (slot) => hotbar?.rawItem(slot),
+        logger: this.log,
+      });
+    }
+    return this._user;
+  }
+
   dispose(): void {
     this.cancel();
     this.nav.dispose();
@@ -205,6 +254,8 @@ export class BotSkills implements Skills {
   private stopAll(): void {
     this.nav.cancel();
     this._digger?.cancel();
+    this._placer?.cancel();
+    this._user?.cancel();
     this.look?.resolve();
     this.look = undefined;
   }
@@ -321,6 +372,29 @@ export class BotSkills implements Skills {
     return this.run('container', () => chest.close(id));
   }
 
+  /**
+   * Put a block into cell `p` (docs/interaction.md): by clicking `opts.face` of the neighbour (default:
+   * the best one in reach), with `opts.item` (default: the held block item). `p` = the cell the feet
+   * stand in builds a pillar (jump, place below, land).
+   */
+  place(p: Vec3, opts?: PlaceOptions): Promise<PlaceResult> {
+    const placer = this.placer;
+    if (!placer) return Promise.resolve({ ok: false, reason: 'no_placer' });
+    return this.run('place', () => placer.place(p, opts));
+  }
+
+  /** Open / close a door, gate or trapdoor, press a button, flip a lever (docs/interaction.md). */
+  useBlock(p: Vec3, opts?: UseOptions): Promise<UseResult> {
+    const user = this.user;
+    if (!user) return Promise.resolve({ ok: false, reason: 'no_user' });
+    return this.run('use', () => user.useBlock(p, opts));
+  }
+
+  /** Door / gate / trapdoor open, lever on, button pressed, per the world model; undefined for other blocks. */
+  isOpen(p: Vec3): boolean | undefined {
+    return this.user?.isOpen(p);
+  }
+
   /** The tree containing the log at `p` (skills/tree/tree.ts), or undefined. */
   treeAt(p: Vec3, opts?: TreeOptions): Tree | undefined {
     const w = this.world;
@@ -433,3 +507,6 @@ export { ChestSkill, maxStackOf } from './container/chest.ts';
 export { detectTree, treesFrom, remainingLogs, logKind, isLog, isLeaves } from './tree/tree.ts';
 export { fellTree, standSpots } from './tree/feller.ts';
 export { collectItems } from './collect/collect.ts';
+export { PlaceSkill, SERVER_CLICK_REACH, DEFAULT_CLICK_REACH } from './place/place.ts';
+export { UseSkill, usableKind, openState } from './interact/use.ts';
+export { faceIndex, faceOf, faceOffset, neighbour, supportOf, oppositeFace, BLOCK_FACES } from './place/face.ts';

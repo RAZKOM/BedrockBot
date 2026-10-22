@@ -14,6 +14,7 @@ Replies are chat messages (`world.sendMessage`) that start with `@truth ` follow
 | `manifest.json` | pack manifest (header uuid `4b99f76a-7d3a-4a0c-a2bf-4e85ffb907bd`, depends on `@minecraft/server` 2.10.0) |
 | `src/main.ts` | the pack: command handlers, events |
 | `src/wood.ts`, `src/woodShapes.ts` | wood commands (`container`, `tree`, `find`) and the pure tree shape shared with the bot's tests |
+| `src/act.ts` | interaction commands (`setblock`, `door`) and the `playerPlaceBlock` / `playerInteractWithBlock` events |
 | `src/protocol.ts` | pure helpers: tokenizer, canonical order, RLE, FNV-1a, reply encoding, `ReplyParser`, `textOf` (reusable by the bot) |
 | `structures/truth/probe.mcstructure` | 3 x 2 x 3 test structure, id `truth:probe` (made by `scripts/make-probe-structure.mjs`) |
 | `scripts/build.mjs` | esbuild bundle to `dist/scripts/main.js`, copies manifest and structures to `dist/` |
@@ -147,6 +148,13 @@ online, else `player_ambiguous`.
 | `tree` | `x y z height [kind=oak] [persistent=0]` | `{kind, base, height, logs:[[x,y,z]...], leaves, persistent}`: a log column from (x, y, z) up and a leaf canopy (`src/woodShapes.ts` `treeShape`: radius 2 without corners at top - 1 and top, a plus shape at top + 1 and top + 2). Leaves only replace air. Kinds: oak, birch, spruce, jungle, acacia, dark_oak, cherry, mangrove, pale_oak |
 | `find` | `x1 y1 z1 x2 y2 z2 pattern [max=4096]` (max volume 1 048 576, a job) | `{from, to, pattern, count, byType, positions:[[x,y,z]...], truncated}`: blocks whose typeId contains `pattern` (e.g. `_log`) |
 
+### Interaction commands (src/act.ts, PLAN.md task 7.3)
+
+| Command | Args | `data` on success |
+|---|---|---|
+| `setblock` | `x y z typeId [state=value ...]` | `{x, y, z, typeId, states}`: one block with block states (`BlockPermutation.resolve`); values `true`/`false` are booleans, integers numbers, the rest strings, e.g. `setblock 5 -60 5 fence_gate minecraft:cardinal_direction=north`. `bad_states` if the states do not resolve |
+| `door` | `x y z typeId direction [hinge 0/1] [open 0/1]` | `{lower:{x, y, z, typeId, states}, upper:{...}}`: both halves of a door (upper first); `direction` = `minecraft:cardinal_direction` |
+
 ### Canonical block order, RLE and checksum
 
 `blocks` and `checksum` visit a box in **y, z, x order** (x varies fastest): the block at `(x,y,z)`
@@ -171,6 +179,8 @@ Sent without a request, with `cmd:"event"`, `id:null`, `ok:true`, and `data.type
 | `playerSpawn` | `player, initialSpawn, location` |
 | `playerBreakBlock` | `player, x, y, z, typeId` (the broken block), `tool` (item typeId or null) |
 | `playerDie` | `player, entityId, location, cause, damager` (typeId or null) |
+| `playerPlaceBlock` | `player, x, y, z, typeId, states` (the placed block) |
+| `playerInteractWithBlock` | `player, x, y, z, typeId, states` (after the interaction), `face`, `item` (held typeId or null), `first` |
 
 ## Structures
 

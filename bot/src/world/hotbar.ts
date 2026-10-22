@@ -71,6 +71,15 @@ export class Hotbar {
   }
 
   /**
+   * Record the wire item of a slot the client changed itself (an item stack request moved a stack in:
+   * the server confirms with item_stack_response, not with inventory_slot), so `select` and click
+   * transactions echo the new item (skills/place).
+   */
+  noteRaw(slot: number, item: ItemV4 | undefined): void {
+    if (Number.isInteger(slot) && slot >= 0 && slot < HOTBAR_SLOTS) this.raw[slot] = item;
+  }
+
+  /**
    * Select a hotbar slot: queues `mob_equipment` (sent with the next tick's batch, before that tick's
    * `player_auth_input`) and updates the inventory model. Returns false for a slot outside 0..8.
    */
