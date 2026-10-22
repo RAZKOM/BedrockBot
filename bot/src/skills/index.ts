@@ -124,7 +124,22 @@ export class BotSkills implements Skills {
     this.attach(opts);
     const source = worldSource(opts.world);
     if (opts.usePhysicsWorld ?? true) this.loop.world = blockQueryOf(source);
-    this.nav = new Navigator(this.loop, { source, onBlockUpdate: (fn) => opts.world.onBlockUpdate(fn) }, { ...opts, logger: this.log });
+    const inventory = opts.world.inventory;
+    this.nav = new Navigator(
+      this.loop,
+      { source, onBlockUpdate: (fn) => opts.world.onBlockUpdate(fn) },
+      {
+        ...opts,
+        logger: this.log,
+        // the navigator's dig-through move breaks blocks with the Digger directly (not this.dig(), which would cancel the goto)
+        actions: {
+          dig: (p) => this.digger?.dig(p) ?? Promise.resolve({ ok: false, reason: 'no_digger' }),
+          // place / useBlock: wired by Track O's PlaceSkill / UseSkill
+          ...opts.actions,
+        },
+        inventory: opts.inventory ?? (inventory ? () => inventory : undefined),
+      },
+    );
     this.unsubs.push(
       this.loop.onBeforeStep((tick, s) => {
         this.trackFall(tick, s.onGround, s.pos.y, s.inWater);

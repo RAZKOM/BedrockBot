@@ -16,6 +16,12 @@ export interface GotoOptions {
   replanOnCorrection?: boolean;
   /** Sprint on long straight runs. Default true. */
   sprint?: boolean;
+  /** Plan dig-through moves (needs the navigator's `dig` action). Default false. */
+  allowBreak?: boolean;
+  /** Plan pillar-up moves (needs the `place` action and throwaway blocks). Default false. */
+  allowPlace?: boolean;
+  /** Close doors and gates the goto opened, once through. Default false. */
+  closeDoors?: boolean;
 }
 
 export interface Skills {

@@ -59,6 +59,8 @@ export function fakeWorld(gen: GenWorld) {
     chunks: {
       stateIdAt: (x: number, y: number, z: number) => gen.blockAt(x, y, z)?.stateId,
       runtimeIdAt: () => 0,
+      maxY: gen.maxY,
+      minY: gen.minY,
     },
     registry: {
       blockInfo: (stateId: number) => infoByState(gen, stateId),

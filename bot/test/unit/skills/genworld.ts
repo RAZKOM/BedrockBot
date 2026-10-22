@@ -47,6 +47,15 @@ export class GenWorld implements TerrainSource {
     return (ly * this.sz + lz) * this.sx + lx;
   }
 
+  /** Highest / lowest y of the box (the planner's sky scan range). */
+  get maxY(): number {
+    return this.y0 + this.sy - 1;
+  }
+
+  get minY(): number {
+    return this.y0;
+  }
+
   blockAt(x: number, y: number, z: number): BlockInfo | undefined {
     const i = this.index(x, y, z);
     if (i < 0) return undefined;

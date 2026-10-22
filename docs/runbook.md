@@ -94,7 +94,7 @@ container under test).
 |---|---|---|---|---|---|
 | `dev` (default) | bds-dev | udp/19132 | docker/compose.dev.yml | 1.26.60.6 | echo, chat, reconnect, keepalive e2e; the AFK CLI; quick start |
 | `world` | bds-world | udp/19142 | docker/compose.world.yml (difficulty: image default) | 1.26.60.6 | world-* (BDS_WORLD_*) |
-| `move` | bds-move | udp/19146 | docker/compose.move.yml (TICK_DISTANCE 10) | 1.26.60.6 | nav-*, skills-input (MOVE_BDS_* / PHYS_BDS_*) |
+| `move` | bds-move | udp/19146 | docker/compose.move.yml (TICK_DISTANCE 10) | 1.26.60.6 | nav-*, skills-input (MOVE_BDS_* / PHYS_BDS_*); the nav v2 suites build in a random area per run (`MOVE_AREA=x,z` pins it, `MOVE_SEED` the course) |
 | `dig` | bds-dig | udp/19148 | docker/compose.dig.yml | 1.26.60.6 | dig (DIG_BDS_*) |
 | `wood` | bds-wood | udp/19150 | docker/compose.wood.yml | 1.26.60.6 | wood-* (gather-wood, Track H) |
 | `soak` | bds-soak | udp/19152 | docker/compose.soak.yml (TICK_DISTANCE 10) | 1.26.60.6 | the 8 h AFK soak only (task 5.4); nothing else connects |
@@ -339,6 +339,7 @@ BDS_E2E=1 pnpm --filter bot test:e2e           # every e2e suite (each against i
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e keepalive reconnect chat echo   # Phase 1 suites on bds-dev
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e hard                          # task 5.1/5.2 suites on bds-hard
 BDS_E2E=1 HARD_EASY=1 pnpm --filter bot exec vitest run --project e2e hard-night        # + the easy/zombie run
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nav-                          # every nav suite on bds-move (v1 + v2, ~7 min; docs/pathfinding.md "Tests")
 BDS_E2E=1 BDS_SOAK=1 pnpm --filter bot exec vitest run --project e2e test/e2e/keepalive.test.ts --silent=false
 pnpm e2e:51                                    # whole e2e suite against bds-dev51 (BDS 1.26.51.1, game version 1.26.51: rollback)
 pnpm e2e:nn                                    # whole e2e suite against bds-nn (NetherNet, 1.26.60)

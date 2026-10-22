@@ -122,3 +122,204 @@ export const WALL = {
 };
 
 export const WALL_LAYOUT: Layout = { name: 'wall', anchor: { x: 0.5, y: -60, z: -82.5 }, fills: clear(-20, -106, 20, -58) };
+
+// ---- Navigation v2 (tasks 7.1 / 7.2): every run builds in its own random area ----------------------
+//
+// `privateOrigin()` picks a chunk-aligned origin far from the fixed layouts above (x 2000..10000, z
+// -8000..8000) so two runs on one server never share terrain. MOVE_AREA="x,z" pins it (reproduce a run).
+
+export interface Origin {
+  x: number;
+  z: number;
+}
+
+export function privateOrigin(): Origin {
+  const pinned = process.env.MOVE_AREA?.split(',').map(Number);
+  if (pinned?.length === 2 && pinned.every(Number.isFinite)) return { x: pinned[0]!, z: pinned[1]! };
+  return { x: 2048 + 16 * Math.floor(Math.random() * 500), z: -8000 + 16 * Math.floor(Math.random() * 1000) };
+}
+
+/** Deterministic PRNG (mulberry32) for the course layouts (MOVE_SEED). */
+export function rng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** A stepped hill across +z (`layers` 1-block terraces) with a 1-wide, 2-high tunnel through it at x = cx. */
+function caveHill(cx: number, z0: number, halfWidth: number, length: number, layers: number): Fill[] {
+  const out: Fill[] = [];
+  for (let k = 0; k < layers; k++) out.push(f(cx - halfWidth + k, -60 + k, z0 + k, cx + halfWidth - k, -60 + k, z0 + length - k, 'stone'));
+  out.push(f(cx, -60, z0, cx, -59, z0 + length, 'air'));
+  return out;
+}
+
+/** Surface suite: a cave hill on the straight line, and a 3-deep pit on the line (separate rows). */
+export function surfaceLayout(o: Origin) {
+  const cave = {
+    start: { x: o.x + 0.5, y: -60, z: o.z - 14.5 },
+    goal: { x: o.x, y: -60, z: o.z + 36 },
+    /** The tunnel cells (x, z range) at feet -60. */
+    tunnel: { x: o.x, z0: o.z, z1: o.z + 20 },
+  };
+  const px = o.x + 40;
+  const pit = {
+    start: { x: px + 0.5, y: -60, z: o.z + 0.5 },
+    goal: { x: px, y: -60, z: o.z + 20 },
+    /** The 3 x 3 pit, 3 deep (feet -63 at the bottom). */
+    from: { x: px - 1, z: o.z + 8 },
+    to: { x: px + 1, z: o.z + 10 },
+  };
+  const fills: Fill[] = [...clear(o.x - 32, o.z - 24, o.x + 64, o.z + 44, -50)];
+  fills.push(...caveHill(o.x, o.z, 26, 20, 4)); // wide: over the top is cheaper than around
+  fills.push(f(pit.from.x, -63, pit.from.z, pit.to.x, -61, pit.to.z, 'air'));
+  const layout: Layout = { name: 'surface', anchor: { x: o.x + 20.5, y: -60, z: o.z + 10.5 }, fills };
+  return { layout, cave, pit };
+}
+
+/** Dig-through suite: a 41-wide, 3-high dirt wall across the line (going around is a long detour). */
+export function digLayout(o: Origin) {
+  const wall = f(o.x - 20, -60, o.z + 10, o.x + 20, -58, o.z + 10, 'dirt');
+  const layout: Layout = { name: 'dig', anchor: { x: o.x + 0.5, y: -60, z: o.z + 4.5 }, fills: [...clear(o.x - 30, o.z - 6, o.x + 30, o.z + 30, -50), wall] };
+  return { layout, wall, start: { x: o.x + 0.5, y: -60, z: o.z + 2.5 }, goal: { x: o.x, y: -60, z: o.z + 18 } };
+}
+
+/** Fence suite: a connected oak fence line along +z at x + 1 with a gap, and an L corner at its end. */
+export function fenceLayout(o: Origin) {
+  const fills: Fill[] = [...clear(o.x - 12, o.z - 6, o.x + 12, o.z + 40, -50)];
+  fills.push(f(o.x + 1, -60, o.z, o.x + 1, -60, o.z + 30, 'oak_fence'));
+  fills.push(f(o.x - 6, -60, o.z + 31, o.x + 1, -60, o.z + 31, 'oak_fence')); // the corner
+  // the gap last: buildLayout waits for the last fill's block, and fences are unknown runtime ids on
+  // 1.26.60 (the world model shows them as 'unknown')
+  fills.push(f(o.x + 1, -60, o.z + 15, o.x + 1, -60, o.z + 15, 'air'));
+  const layout: Layout = { name: 'fence', anchor: { x: o.x + 0.5, y: -60, z: o.z + 15.5 }, fills };
+  return {
+    layout,
+    start: { x: o.x + 0.5, y: -60, z: o.z + 0.5 },
+    /** Along the fence (row x), to just before the corner. */
+    along: { x: o.x, y: -60, z: o.z + 30 },
+    /** Back, through the gap, to the other side. */
+    across: { x: o.x + 3, y: -60, z: o.z + 5 },
+  };
+}
+
+/**
+ * The 200-block cross-country course along +x (z band -12..12 around o.z): seeded stepped mounds,
+ * a 3-high wall with a gap, a water ditch with a 1-wide bridge, trees, a cave hill with its tunnel on
+ * the line, a 3-deep pit on the line, a slab ramp up a 2-high plateau with a 2-block drop off it.
+ */
+export function crossLayout(o: Origin, seed: number) {
+  const r = rng(seed);
+  const x0 = o.x - 100;
+  const z = o.z;
+  const fills: Fill[] = [...clear(x0 - 6, z - 14, o.x + 106, z + 14, -45)];
+  const at = (k: number) => x0 + k; // course position -> x
+  // slab ramp up a 2-high plateau, 2-block drop off it (k 12..24)
+  fills.push(f(at(12), -60, z - 12, at(12), -60, z + 12, 'smooth_stone_slab'));
+  fills.push(f(at(13), -60, z - 12, at(24), -60, z + 12, 'stone'));
+  fills.push(f(at(14), -59, z - 12, at(14), -59, z + 12, 'smooth_stone_slab'));
+  fills.push(f(at(15), -59, z - 12, at(24), -59, z + 12, 'stone'));
+  // seeded stepped mounds (k 30..60)
+  for (let i = 0; i < 3; i++) {
+    const k = 30 + i * 11 + Math.floor(r() * 3);
+    const zc = z - 6 + Math.floor(r() * 12);
+    const layers = 2 + Math.floor(r() * 3);
+    for (let l = 0; l < layers; l++) fills.push(f(at(k + l), -60 + l, zc - 5 + l, at(k + 8 - l), -60 + l, zc + 5 - l, 'stone'));
+  }
+  // 3-high wall across with a gap (k 66)
+  const gap = z - 8 + Math.floor(r() * 16);
+  fills.push(f(at(66), -60, z - 12, at(66), -58, z + 12, 'stone'));
+  fills.push(f(at(66), -60, gap, at(66), -58, gap + 1, 'air'));
+  // water ditch 2 wide, 2 deep (k 76..77) with a 1-wide bridge
+  const bridge = z - 8 + Math.floor(r() * 16);
+  fills.push(f(at(76), -62, z - 12, at(77), -61, z + 12, 'water'));
+  fills.push(f(at(76), -62, bridge, at(77), -61, bridge, 'stone'));
+  // cave hill across the line (k 90..110), tunnel at z
+  for (let k = 0; k < 4; k++) fills.push(f(at(90) + k, -60 + k, z - 10 + k, at(110) - k, -60 + k, z + 10 - k, 'stone'));
+  fills.push(f(at(90), -60, z, at(110), -59, z, 'air'));
+  // 3-deep pit on the line (k 125..127)
+  fills.push(f(at(125), -63, z - 1, at(127), -61, z + 1, 'air'));
+  // trees (k 140..175)
+  for (let i = 0; i < 4; i++) {
+    const tx = at(140 + i * 9 + Math.floor(r() * 4));
+    const tz = z - 9 + Math.floor(r() * 18);
+    fills.push(f(tx - 2, -57, tz - 2, tx + 2, -55, tz + 2, 'oak_leaves'));
+    fills.push(f(tx, -60, tz, tx, -55, tz, 'oak_log'));
+  }
+  // a last 1-block step and a short slab staircase (k 185..192)
+  fills.push(f(at(185), -60, z - 12, at(192), -60, z + 12, 'stone'));
+  fills.push(f(at(188), -59, z - 12, at(188), -59, z + 12, 'smooth_stone_slab'));
+  fills.push(f(at(189), -59, z - 12, at(192), -59, z + 12, 'stone'));
+  const layout: Layout = { name: 'cross', anchor: { x: o.x + 0.5, y: -60, z: z + 0.5 }, fills };
+  return { layout, start: { x: x0 + 0.5, y: -60, z: z + 0.5 }, goal: { x: x0 + 200, y: -60, z }, pit: { x0: at(125), x1: at(127), z0: z - 1, z1: z + 1 } };
+}
+
+/** Per-tick body statistics while a goto runs (the nav v2 suites). */
+export interface BodyTrack {
+  ticks: number;
+  minFeet: number;
+  /** Ticks on the ground with a roof block above the head (the world model's sky columns). */
+  underground: number;
+  /** Ticks with a horizontal collision. */
+  collided: number;
+  wet: number;
+  /** Positions, one per tick. */
+  path: Vec3[];
+  stop(): void;
+}
+
+/** Starts tracking the body of `bot` (a MoveBot from move-truth.ts) until `stop()`. */
+export function trackBody(bot: {
+  loop: { onBeforeStep(fn: (t: bigint, s: { pos: Vec3; onGround: boolean; collidedHorizontally: boolean; inWater: boolean; inLava: boolean }) => void): () => void };
+  skills: { nav: { grid: { underground(x: number, z: number, feet: number): boolean } } };
+}): BodyTrack {
+  const tr: BodyTrack = {
+    ticks: 0,
+    minFeet: Infinity,
+    underground: 0,
+    collided: 0,
+    wet: 0,
+    path: [],
+    stop: () => off(),
+  };
+  const off = bot.loop.onBeforeStep((_t, s) => {
+    tr.ticks++;
+    tr.minFeet = Math.min(tr.minFeet, s.pos.y);
+    if (s.onGround && bot.skills.nav.grid.underground(Math.floor(s.pos.x), Math.floor(s.pos.z), s.pos.y)) tr.underground++;
+    if (s.collidedHorizontally) tr.collided++;
+    if (s.inWater || s.inLava) tr.wet++;
+    tr.path.push({ ...s.pos });
+  });
+  return tr;
+}
+
+/** Pillar / door suite (skipped until Track O's place / use skills are wired). */
+export function placeLayout(o: Origin) {
+  const fills: Fill[] = [...clear(o.x - 12, o.z - 6, o.x + 12, o.z + 30, -45)];
+  // a 4-high plateau (x -2..2, z 8..12)
+  fills.push(f(o.x - 2, -60, o.z + 8, o.x + 2, -57, o.z + 12, 'stone'));
+  // a 3-deep pit (x 8..10, z 0..2)
+  fills.push(f(o.x + 8, -63, o.z, o.x + 10, -61, o.z + 2, 'air'));
+  // a closed room x -10..-4, z 16..24 (3-high walls) with the door / gate cell at (x -7, z 24)
+  fills.push(f(o.x - 10, -60, o.z + 16, o.x - 4, -58, o.z + 16, 'stone'));
+  fills.push(f(o.x - 10, -60, o.z + 24, o.x - 4, -58, o.z + 24, 'stone'));
+  fills.push(f(o.x - 10, -60, o.z + 16, o.x - 10, -58, o.z + 24, 'stone'));
+  fills.push(f(o.x - 4, -60, o.z + 16, o.x - 4, -58, o.z + 24, 'stone'));
+  fills.push(f(o.x - 7, -60, o.z + 24, o.x - 7, -59, o.z + 24, 'air'));
+  const layout: Layout = { name: 'place', anchor: { x: o.x + 0.5, y: -60, z: o.z + 10.5 }, fills };
+  return {
+    layout,
+    cliffStart: { x: o.x + 0.5, y: -60, z: o.z + 2.5 },
+    cliffTop: { x: o.x, y: -56, z: o.z + 10 },
+    pitBottom: { x: o.x + 9.5, y: -63, z: o.z + 1.5 },
+    pitOut: { x: o.x + 9, y: -60, z: o.z + 6 },
+    roomInside: { x: o.x - 6.5, y: -60, z: o.z + 20.5 },
+    roomOutside: { x: o.x - 7, y: -60, z: o.z + 28 },
+    door: { x: o.x - 7, y: -60, z: o.z + 24 },
+  };
+}
