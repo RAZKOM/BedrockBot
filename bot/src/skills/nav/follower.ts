@@ -144,6 +144,11 @@ export class PathFollower {
     return this.path.slice(this.passed);
   }
 
+  /** Index of the last node the body was inside. */
+  get passedIndex(): number {
+    return this.passed;
+  }
+
   step(s: FollowerInput, currentYaw: number): FollowStep {
     const out = this.decide(s, currentYaw);
     return { ...out, cmd: this.pressGuard.apply(out.cmd) };
@@ -235,7 +240,7 @@ export class PathFollower {
   private inNode(p: Vec3, node: PathNode, onGround: boolean): boolean {
     if (Math.floor(p.x) !== node.x || Math.floor(p.z) !== node.z) return false;
     if (Math.abs(p.y - node.feet) >= 0.6) return false;
-    if ((node.move === 'jump' || node.move === 'drop') && !onGround) return false;
+    if ((node.move === 'jump' || node.move === 'drop' || node.move === 'pillar') && !onGround) return false;
     return true;
   }
 

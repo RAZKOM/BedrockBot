@@ -139,9 +139,11 @@ describe('goto on built terrain (closed loop)', () => {
     lava.put(7, -61, 7, 'stone');
     const behind = await runGoto(lava, { x: 0.5, y: -60, z: 0.5 }, { type: 'block', p: { x: 7, y: -60, z: 7 } });
     // the search also touches the edge of the (finite) generated world, so it cannot prove "no path":
-    // it walks to the closest node, then gives up after 3 failed re-plans
+    // it walks to the closest node, waits for the "unloaded" world (200 ticks, not a failure), then
+    // gives up after 3 failed re-plans
     expect(behind.result).toEqual({ ok: false, reason: 'unreachable' });
-    expect(behind.ticks).toBeLessThan(150);
+    expect(behind.ticks).toBeLessThan(400);
+    expect(behind.skills.status().lastGoto!.unloadedWait).toBeGreaterThan(0);
     expect(behind.inWaterTicks).toBe(0);
     // a fully known world proves it at once
     const closed = flatGen({ x: -16, y: -64, z: -16 }, { x: 32, y: 24, z: 32 });
@@ -194,8 +196,10 @@ describe('goto on built terrain (closed loop)', () => {
     expect(await p).toEqual({ ok: false, reason: 'unreachable' });
     const rep = skills.status().lastGoto!;
     expect(rep.stuck).toBe(3);
-    expect(rep.plans.filter((x) => x.reason === 'stuck')).toHaveLength(2);
-    expect(t).toBeLessThan(400);
+    // per-move timeouts (2 x the estimate of the straight line being walked + 10 ticks) or the
+    // 40-tick no-progress fallback, whichever comes first
+    expect(rep.plans.filter((x) => x.reason === 'timeout' || x.reason === 'stuck')).toHaveLength(2);
+    expect(t).toBeLessThan(250);
   });
 
   it('times out and can be cancelled', async () => {

@@ -1,16 +1,30 @@
-// goto (PLAN.md tasks 3.5 / 3.6): plans with A*, drives the InputLoop with a PathFollower, and
-// re-plans when the server corrects us, when a block on the remaining path changes, when a partial
-// path ends, or when the body makes no progress for `stuckTicks` ticks. After `maxFailures` stuck
-// or failed plans it gives up with 'unreachable'. See docs/pathfinding.md.
+// goto (PLAN.md tasks 3.5, 3.6, 7.1, 7.2): plans with A* in segments, drives the InputLoop with a
+// PathFollower, and runs the world-changing moves (dig-through, pillar-up, doors) through injected
+// actions. See docs/pathfinding.md.
+//
+//   segments    A search stops at a node / time budget and returns the best partial path; while the
+//               body walks it, the next segment is planned from its end (plan-ahead) and spliced on.
+//               Searches run in slices of `sliceMs` per tick, so a tick never waits long for the planner.
+//               A segment that ends at unloaded world waits for the chunks (not a failure).
+//   legs        The path is walked in legs that end before a node with an action: the body stops,
+//               the action runs (dig the cells, toggle the door, jump and place), then the next leg.
+//   re-plans    on corrections, knockback, teleports, block updates near the remaining path, the end
+//               of a partial path, a per-move timeout (2 x the move's estimate + 10 ticks), no progress
+//               for `stuckTicks`, a failed action. After `maxFailures` stuck / failed plans:
+//               'unreachable'. A failure while not standing safely first retreats to the last safe node.
 import { silentLogger, type Logger } from '../../log.ts';
 import type { BlockInfo, Vec3 } from '../../world/types.ts';
+import { chooseTool } from '../dig/tools.ts';
 import type { InputLoop, InputLoopState } from '../input/inputLoop.ts';
+import { classify, type TerrainClass } from '../terrain/classify.ts';
 import type { TerrainSource } from '../terrain/query.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
-import { findPath, locateNode, type PathOptions, type PathResult } from './astar.ts';
-import { PathFollower, PressGuard } from './follower.ts';
+import { DEFAULT_THROWAWAY, type NavActions } from './actions.ts';
+import { PathSearch, findPath, handBreakTicks, locateNode, type LocatedNode, type PathNode, type PathOptions, type PathResult } from './astar.ts';
+import { TICKS } from './costs.ts';
+import { PathFollower, PressGuard, yawTowards } from './follower.ts';
 import type { Goal } from './goals.ts';
-import { NavGrid } from './grid.ts';
+import { CROSS_CLEAR, NavGrid, cellKey } from './grid.ts';
 
 /** What the navigator needs from the world model. `World` + `worldSource()` provide it. */
 export interface NavWorld {
@@ -18,18 +32,55 @@ export interface NavWorld {
   onBlockUpdate(fn: (p: Vec3, before: BlockInfo | undefined, after: BlockInfo) => void): () => void;
 }
 
+/** The inventory as the navigator reads it (break times with the best tool, throwaway blocks). */
+export interface NavInventory {
+  readonly slots: readonly ({ name: string; count: number } | null | undefined)[];
+  readonly selected: number;
+}
+
 export interface NavigatorOptions {
   logger?: Logger;
-  /** Ticks without progress before a re-plan. Default 40. */
+  /** Ticks without progress before a re-plan (the fallback behind per-move timeouts). Default 40. */
   stuckTicks?: number;
-  /** Stuck events / failed plans before giving up. Default 3. */
+  /** Stuck events / failed plans / failed actions before giving up. Default 3. */
   maxFailures?: number;
+  /** Planner options (costs, limits); per-goto flags come from GotoOptions. */
   path?: PathOptions;
   /** Max yaw change per tick while walking. Default 30. */
   maxTurnDeg?: number;
+  /** World-changing actions for dig-through, pillar-up and door moves (all optional). */
+  actions?: NavActions;
+  /** The inventory, for break times with the best hotbar tool and for throwaway blocks. */
+  inventory?: () => NavInventory | undefined;
+  /** Search time per tick, ms. Default 8. */
+  sliceMs?: number;
+  /** Node budget of one segment (unless `path.maxNodes`). Default 20 000. */
+  segmentNodes?: number;
+  /** Search-time budget of one segment in ms (unless `path.maxMs`). Default 100. */
+  segmentMs?: number;
+  /** Search-time budget of a main plan in ms (the body waits for it; the plan-ahead extends it). Default 40. */
+  mainMs?: number;
+  /** Plan the next segment once fewer than this many nodes of the current one are left. Default 64. */
+  aheadNodes?: number;
+  /** Ticks to wait for unloaded chunks at the end of a segment before it counts as a failure. Default 200. */
+  unloadedWaitTicks?: number;
+  /** Per-move timeout: `factor` x the move's estimated ticks + `margin`. Default 2 and 10. */
+  moveTimeout?: { factor: number; margin: number };
 }
 
-export type ReplanReason = 'start' | 'correction' | 'block' | 'partial' | 'stuck' | 'retry';
+export type ReplanReason = 'start' | 'correction' | 'block' | 'partial' | 'stuck' | 'timeout' | 'action' | 'retry' | 'ahead';
+
+export interface PlanRecord {
+  reason: ReplanReason;
+  tick: number;
+  status: PathResult['status'];
+  nodes: number;
+  expanded: number;
+  /** Search time, ms. */
+  ms: number;
+  /** Ticks the search was sliced over. */
+  slices: number;
+}
 
 /** What happened during one goto (for tests, metrics and logs). */
 export interface GotoReport {
@@ -40,21 +91,88 @@ export interface GotoReport {
   distance: number;
   corrections: number;
   motions: number;
-  plans: { reason: ReplanReason; tick: number; status: PathResult['status']; nodes: number; expanded: number; ms: number }[];
+  plans: PlanRecord[];
+  /** Segments walked (main plans + spliced plan-aheads). */
+  segments: number;
   stuck: number;
+  /** Per-move timeouts (part of `stuck`). */
+  moveTimeouts: number;
   failures: number;
   /** Ticks spent sprinting. */
   sprintTicks: number;
+  /** Longest time one tick spent in the navigator (planning slices included), ms. */
+  maxTickMs: number;
+  /** Total search time, ms. */
+  planMs: number;
+  /** Actions run (and failed). */
+  actions: { dig: number; use: number; place: number; close: number; failed: number };
+  /** Retreats to the last safe node. */
+  retreats: number;
+  /** Ticks spent waiting for unloaded chunks. */
+  unloadedWait: number;
+}
+
+interface Search {
+  s: PathSearch;
+  kind: 'main' | 'ahead';
+  reason: ReplanReason;
+  tick: number;
+  slices: number;
+}
+
+interface ActionRun {
+  kind: 'dig' | 'use' | 'place' | 'close';
+  /** Path index of the node the action is for (close: the node the body stopped on). */
+  node: number;
+  queue: Vec3[];
+  axis: 0 | 2;
+  /** The running action call, if any. */
+  pending: boolean;
+  result: SkillResult | undefined;
+  /** Waiting for the door state after a use. */
+  waitClear: { p: Vec3; want: boolean; since: number } | undefined;
+  placed: boolean;
+  started: number;
+  timeout: number;
+}
+
+interface DoorToClose {
+  p: Vec3;
+  axis: 0 | 2;
+  /** Path index of the first node out of the door cell. */
+  closeAt: number;
 }
 
 interface Active {
   goal: Goal;
   opts: Required<GotoOptions>;
+  pathOpts: PathOptions;
+  path: PathNode[];
+  status: PathResult['status'] | undefined;
+  legFrom: number;
+  legTo: number;
   follower: PathFollower | undefined;
   guard: PressGuard;
   replan: ReplanReason | undefined;
   waitUntil: number;
   t: number;
+  search: Search | undefined;
+  /** No plan-ahead until the next main plan (the last one made no progress). */
+  aheadBlocked: boolean;
+  action: ActionRun | undefined;
+  passedAbs: number;
+  passTick: number;
+  /** Path index of the node the follower aims at (pure pursuit), for the per-move timeout. */
+  aimAbs: number;
+  lastSafe: LocatedNode | undefined;
+  retreat: { until: number } | undefined;
+  noBreak: Set<number>;
+  /** Cells our own actions change: their block updates do not trigger re-plans. */
+  ownCells: Set<number>;
+  doors: DoorToClose[];
+  /** Path index up to which the nodes' actions have run (their moves are plain walks now). */
+  actedUpTo: number;
+  unloadedTicks: number;
   bestProgress: number;
   lastProgressTick: number;
   lastPos: Vec3 | undefined;
@@ -62,14 +180,28 @@ interface Active {
   finish: (r: SkillResult) => void;
 }
 
+const DIG_TIMEOUT = 600;
+const ACTION_TIMEOUT = 100;
+const DOOR_WAIT = 40;
+
 export class Navigator {
   readonly grid: NavGrid;
+  /** The world-changing actions this navigator can run (tests check e.g. `nav.actions.place`). */
+  readonly actions: NavActions;
   private readonly loop: InputLoop;
   private readonly log: Logger;
   private readonly stuckTicks: number;
   private readonly maxFailures: number;
   private readonly pathOpts: PathOptions;
   private readonly maxTurn: number;
+  private readonly inventory: (() => NavInventory | undefined) | undefined;
+  private readonly sliceMs: number;
+  private readonly segmentNodes: number;
+  private readonly segmentMs: number;
+  private readonly mainMs: number;
+  private readonly aheadNodes: number;
+  private readonly unloadedWaitTicks: number;
+  private readonly moveTimeout: { factor: number; margin: number };
   private active: Active | undefined;
   private readonly unsubs: (() => void)[] = [];
   /** Report of the last goto (also while it runs). */
@@ -83,9 +215,18 @@ export class Navigator {
     this.maxFailures = opts.maxFailures ?? 3;
     this.pathOpts = opts.path ?? {};
     this.maxTurn = opts.maxTurnDeg ?? 30;
+    this.actions = opts.actions ?? {};
+    this.inventory = opts.inventory;
+    this.sliceMs = opts.sliceMs ?? 8;
+    this.segmentNodes = opts.segmentNodes ?? 20_000;
+    this.segmentMs = opts.segmentMs ?? 100;
+    this.mainMs = opts.mainMs ?? 40;
+    this.aheadNodes = opts.aheadNodes ?? 64;
+    this.unloadedWaitTicks = opts.unloadedWaitTicks ?? 200;
+    this.moveTimeout = opts.moveTimeout ?? { factor: 2, margin: 10 };
     this.unsubs.push(
-      world.onBlockUpdate((p) => {
-        this.onBlock(p);
+      world.onBlockUpdate((p, before, after) => {
+        this.onBlock(p, before, after);
       }),
       loop.onEvent((e) => {
         const a = this.active;
@@ -101,7 +242,11 @@ export class Navigator {
         }
       }),
       loop.onBeforeStep((_tick, state) => {
+        const rep = this.active?.report;
+        const t0 = performance.now();
         this.onTick(state);
+        const ms = performance.now() - t0;
+        if (rep && ms > rep.maxTickMs) rep.maxTickMs = +ms.toFixed(2);
       }),
     );
   }
@@ -115,10 +260,38 @@ export class Navigator {
     for (const u of this.unsubs.splice(0)) u();
   }
 
-  /** Plan only (no movement): from the body's current node to the goal. */
-  plan(goal: Goal, from?: Vec3): PathResult | undefined {
+  /** Planner options for a goto with these options (defaults: sprint on, no break / place). */
+  planOptions(options: GotoOptions = {}, noBreak?: ReadonlySet<number>): PathOptions {
+    const sprint = options.sprint ?? true;
+    const inv = this.inventory;
+    const throwaway = this.actions.throwawayItems ?? DEFAULT_THROWAWAY;
+    const haveThrowaway = (): boolean => {
+      const slots = inv?.()?.slots;
+      if (!slots) return false;
+      return slots.some((s) => s && s.count > 0 && throwaway.includes(s.name));
+    };
+    return {
+      ...this.pathOpts,
+      costs: { walk: sprint ? TICKS.sprint : TICKS.walk, ...this.pathOpts.costs },
+      allowBreak: (options.allowBreak ?? false) && this.actions.dig !== undefined,
+      allowPlace: (options.allowPlace ?? false) && this.actions.place !== undefined && haveThrowaway(),
+      allowOpen: this.actions.useBlock !== undefined,
+      breakTicks:
+        this.pathOpts.breakTicks ??
+        (inv
+          ? (c) => {
+              const v = inv();
+              return v ? (chooseTool(c.name, v.slots, v.selected)?.ticks ?? Infinity) : handBreakTicks(c);
+            }
+          : handBreakTicks),
+      ...(noBreak ? { noBreak } : {}),
+    };
+  }
+
+  /** Plan only (no movement, one search to the end): from the body's current node to the goal. */
+  plan(goal: Goal, from?: Vec3, options?: GotoOptions): PathResult | undefined {
     const start = locateNode(this.grid, from ?? this.loop.state.pos);
-    return start && findPath(this.grid, start, goal, this.pathOpts);
+    return start && findPath(this.grid, start, goal, this.planOptions(options));
   }
 
   goto(goal: Goal, options: GotoOptions = {}): Promise<SkillResult> {
@@ -127,18 +300,58 @@ export class Navigator {
       timeoutTicks: options.timeoutTicks ?? 6000,
       replanOnCorrection: options.replanOnCorrection ?? true,
       sprint: options.sprint ?? true,
+      allowBreak: options.allowBreak ?? false,
+      allowPlace: options.allowPlace ?? false,
+      closeDoors: options.closeDoors ?? false,
     };
     return new Promise((resolve) => {
-      const report: GotoReport = { goal, result: undefined, ticks: 0, distance: 0, corrections: 0, motions: 0, plans: [], stuck: 0, failures: 0, sprintTicks: 0 };
+      const report: GotoReport = {
+        goal,
+        result: undefined,
+        ticks: 0,
+        distance: 0,
+        corrections: 0,
+        motions: 0,
+        plans: [],
+        segments: 0,
+        stuck: 0,
+        moveTimeouts: 0,
+        failures: 0,
+        sprintTicks: 0,
+        maxTickMs: 0,
+        planMs: 0,
+        actions: { dig: 0, use: 0, place: 0, close: 0, failed: 0 },
+        retreats: 0,
+        unloadedWait: 0,
+      };
       this.lastReport = report;
+      const noBreak = new Set<number>();
       const a: Active = {
         goal,
         opts,
+        pathOpts: this.planOptions(opts, noBreak),
+        path: [],
+        status: undefined,
+        legFrom: 0,
+        legTo: 0,
         follower: undefined,
         guard: new PressGuard(),
         replan: 'start',
         waitUntil: 0,
         t: 0,
+        search: undefined,
+        aheadBlocked: false,
+        action: undefined,
+        passedAbs: 0,
+        passTick: 0,
+        aimAbs: 0,
+        lastSafe: undefined,
+        retreat: undefined,
+        noBreak,
+        ownCells: new Set(),
+        doors: [],
+        actedUpTo: -1,
+        unloadedTicks: 0,
         bestProgress: -Infinity,
         lastProgressTick: 0,
         lastPos: undefined,
@@ -150,7 +363,7 @@ export class Navigator {
           this.loop.release();
           this.log.info(
             `goto ${JSON.stringify(goal)}: ${r.ok ? 'ok' : r.reason} after ${report.ticks} ticks, ${report.distance.toFixed(1)} blocks, ` +
-              `${report.plans.length} plan(s), ${report.corrections} correction(s), ${report.stuck} stuck`,
+              `${report.plans.length} plan(s), ${report.segments} segment(s), ${report.corrections} correction(s), ${report.stuck} stuck, max tick ${report.maxTickMs} ms`,
           );
           resolve(r);
         },
@@ -165,11 +378,17 @@ export class Navigator {
 
   // ---- internals ---------------------------------------------------------------------------------
 
-  private onBlock(p: Vec3): void {
+  private onBlock(p: Vec3, before: BlockInfo | undefined, after: BlockInfo): void {
     this.grid.invalidate(p.x, p.y, p.z);
     const a = this.active;
-    if (!a?.follower) return;
-    for (const n of a.follower.remaining()) {
+    if (!a) return;
+    // dirt -> grass, leaves decaying states, crops growing ...: nothing the planner sees changed
+    if (before && movementSignature(classify(before)) === movementSignature(classify(after))) return;
+    if (a.search?.kind === 'ahead') a.search = undefined; // restarted on the next tick, on the new blocks
+    if (a.ownCells.has(cellKey(p.x, p.y, p.z))) return;
+    if (!a.path.length || a.status === undefined) return;
+    for (let i = Math.max(0, a.passedAbs); i < a.path.length; i++) {
+      const n = a.path[i]!;
       if (Math.abs(p.x - n.x) <= 1 && Math.abs(p.z - n.z) <= 1 && p.y >= n.y - 1 && p.y <= n.y + 2) {
         a.replan ??= 'block';
         return;
@@ -187,6 +406,26 @@ export class Navigator {
     return false;
   }
 
+  /** Standing on a standable node, on the ground, out of liquids. */
+  private safeHere(s: InputLoopState): LocatedNode | undefined {
+    if (!s.onGround || s.inWater || s.inLava) return undefined;
+    return locateNode(this.grid, s.pos);
+  }
+
+  /** A failure that re-plans; retreats to the last safe node first when the body is not safe. Returns true when the goto finished. */
+  private failAndReplan(a: Active, s: InputLoopState, reason: ReplanReason, why: string): boolean {
+    if (this.fail(a, why)) return true;
+    a.replan = reason;
+    a.action = undefined;
+    if (!this.safeHere(s) && a.lastSafe) {
+      a.retreat = { until: a.t + 60 };
+      a.report.retreats++;
+      a.follower = undefined;
+      this.log.info(`goto: retreating to the last safe node ${fmt(a.lastSafe)}`);
+    }
+    return false;
+  }
+
   private onTick(s: InputLoopState): void {
     const a = this.active;
     if (!a || !s.ready) return;
@@ -199,16 +438,54 @@ export class Navigator {
       a.finish({ ok: false, reason: 'timeout' });
       return;
     }
+    if (s.onGround && !s.inWater && !s.inLava && !a.action) {
+      const here = locateNode(this.grid, s.pos);
+      if (here) a.lastSafe = here;
+    }
 
-    if (a.replan && a.t >= a.waitUntil) {
+    if (a.retreat) {
+      this.stepRetreat(a, s);
+      return;
+    }
+
+    // a re-plan replaces the current plan and any search
+    if (a.replan && a.t >= a.waitUntil && !a.action) {
       // plan from solid ground (an airborne body has no node yet), but do not wait forever
       if (s.onGround || a.t - a.lastProgressTick > 20 || !a.follower) {
-        if (!this.replan(a, s)) {
+        if (!this.startMain(a, s)) {
           a.guard.idle();
           return;
         }
       }
     }
+
+    if (a.search) {
+      const search = a.search;
+      const res = search.s.step(this.sliceMs);
+      search.slices++;
+      if (res) {
+        a.search = undefined;
+        a.report.planMs += res.ms;
+        if (search.kind === 'main') {
+          if (!this.onMainResult(a, res, search)) {
+            a.guard.idle();
+            return;
+          }
+        } else {
+          this.onAheadResult(a, res, search);
+        }
+      } else if (search.kind === 'main') {
+        this.loop.release();
+        a.guard.idle();
+        return;
+      }
+    }
+
+    if (a.action) {
+      this.stepAction(a, s);
+      return;
+    }
+
     const f = a.follower;
     if (!f) {
       this.loop.release();
@@ -219,12 +496,32 @@ export class Navigator {
     const step = f.step(s, this.loop.command.yaw);
     this.loop.setCommand(step.cmd);
     if (step.done) {
-      if (f.stopAtEnd) {
-        a.finish({ ok: true });
-      } else {
-        a.replan ??= 'partial';
-      }
+      this.onLegDone(a);
       return;
+    }
+
+    // per-move timeout: the move under way is the straight line from the last node passed to the
+    // node the follower aims at (pure pursuit may skip cells); its estimate is the sum of their costs
+    const passed = a.legFrom + f.passedIndex;
+    const aim = Math.min(Math.max(a.legFrom + f.index, passed + 1), a.legTo);
+    if (passed !== a.passedAbs || aim !== a.aimAbs) {
+      a.passedAbs = passed;
+      a.aimAbs = aim;
+      a.passTick = a.t;
+    }
+    if (passed + 1 <= a.legTo) {
+      let est = 0;
+      for (let i = passed + 1; i <= aim; i++) est += a.path[i]!.cost;
+      if (a.t - a.passTick > this.moveTimeout.factor * est + this.moveTimeout.margin) {
+        a.report.stuck++;
+        a.report.moveTimeouts++;
+        const n = a.path[passed + 1]!;
+        this.log.info(`goto: move to ${fmt(n)} (${n.move}, est ${est.toFixed(1)} ticks) timed out after ${a.t - a.passTick} ticks at ${fmt(s.pos)}`);
+        a.passTick = a.t;
+        a.lastProgressTick = a.t;
+        this.failAndReplan(a, s, 'timeout', 'move timeout');
+        return;
+      }
     }
 
     const prog = f.progress(s.pos);
@@ -234,57 +531,369 @@ export class Navigator {
     } else if (a.t - a.lastProgressTick >= this.stuckTicks) {
       a.report.stuck++;
       this.log.info(`goto: no progress for ${this.stuckTicks} ticks at ${fmt(s.pos)} (node ${f.index}/${f.path.length - 1})`);
-      if (this.fail(a, 'stuck')) return;
-      a.replan = 'stuck';
       a.lastProgressTick = a.t;
+      if (this.failAndReplan(a, s, 'stuck', 'stuck')) return;
+    }
+
+    // plan-ahead: the next segment, from the end of this one
+    if (!a.search && a.status === 'partial' && !a.aheadBlocked && !a.replan && a.path.length - 1 - a.passedAbs < this.aheadNodes) {
+      const end = a.path.at(-1)!;
+      a.search = { s: new PathSearch(this.grid, end, a.goal, this.segmentOptions(a, false)), kind: 'ahead', reason: 'ahead', tick: a.t, slices: 0 };
     }
   }
 
-  /** Returns false when the goto finished or must wait. */
-  private replan(a: Active, s: InputLoopState): boolean {
+  /** Budgets of a segment search: a main plan (the body waits for it) gets `mainMs`, a plan-ahead `segmentMs`. */
+  private segmentOptions(a: Active, main: boolean): PathOptions {
+    return { ...a.pathOpts, maxNodes: this.pathOpts.maxNodes ?? this.segmentNodes, maxMs: this.pathOpts.maxMs ?? (main ? this.mainMs : this.segmentMs) };
+  }
+
+  /** Starts a main search from the body's node. Returns false when the goto finished or must wait. */
+  private startMain(a: Active, s: InputLoopState): boolean {
     const reason = a.replan ?? 'retry';
     a.replan = undefined;
+    a.search = undefined;
+    a.follower = undefined;
     const start = locateNode(this.grid, s.pos);
     if (!start) {
-      a.follower = undefined;
       this.loop.release();
       if (this.fail(a, `no standable node at ${fmt(s.pos)}`)) return false;
       a.replan = 'retry';
       a.waitUntil = a.t + 20;
+      if (a.lastSafe && (s.inWater || s.inLava || !s.onGround)) {
+        a.retreat = { until: a.t + 60 };
+        a.report.retreats++;
+      }
       return false;
     }
     if (a.goal.type === 'block') {
       // a block goal nobody can stand in (water, a wall, mid-air) is unreachable, whatever the search says
       const g = a.goal.p;
-      if (Number.isNaN(this.grid.stand(Math.floor(g.x), Math.floor(g.y), Math.floor(g.z)))) {
+      const gx = Math.floor(g.x);
+      const gy = Math.floor(g.y);
+      const gz = Math.floor(g.z);
+      if (Number.isNaN(this.grid.stand(gx, gy, gz)) && Number.isNaN(this.grid.standThrough(gx, gy, gz)) && !(a.pathOpts.allowBreak || a.pathOpts.allowPlace)) {
         a.finish({ ok: false, reason: 'unreachable' });
         return false;
       }
     }
-    const res = findPath(this.grid, start, a.goal, this.pathOpts);
-    a.report.plans.push({ reason, tick: a.t, status: res.status, nodes: res.path.length, expanded: res.expanded, ms: +res.ms.toFixed(2) });
-    this.log.debug(`goto: plan (${reason}) ${res.status}, ${res.path.length} nodes, ${res.expanded} expanded, ${res.ms.toFixed(1)} ms`);
+    a.pathOpts = this.planOptions(a.opts, a.noBreak);
+    a.search = { s: new PathSearch(this.grid, start, a.goal, this.segmentOptions(a, true)), kind: 'main', reason, tick: a.t, slices: 0 };
+    this.loop.release();
+    return true;
+  }
+
+  private record(a: Active, res: PathResult, search: Search): void {
+    a.report.plans.push({ reason: search.reason, tick: search.tick, status: res.status, nodes: res.path.length, expanded: res.expanded, ms: +res.ms.toFixed(2), slices: search.slices });
+    this.log.debug(`goto: plan (${search.reason}) ${res.status}, ${res.path.length} nodes, ${res.expanded} expanded, ${res.ms.toFixed(1)} ms over ${search.slices} tick(s)`);
+  }
+
+  /** Returns false when the goto finished or must wait. */
+  private onMainResult(a: Active, res: PathResult, search: Search): boolean {
+    this.record(a, res, search);
     if (res.status === 'none') {
       a.finish({ ok: false, reason: 'unreachable' });
       return false;
     }
-    const atGoal = res.status === 'found';
-    if (res.path.length === 1 && !atGoal) {
-      // the closest reachable node is where we stand: nothing to do but wait for the world to change
-      a.follower = undefined;
+    if (res.path.length === 1 && res.status !== 'found') {
       this.loop.release();
+      if (res.unknown && !res.limited && a.unloadedTicks < this.unloadedWaitTicks) {
+        // the segment ends at unloaded world: wait for the chunks
+        a.unloadedTicks += 10;
+        a.report.unloadedWait += 10;
+        a.replan = 'retry';
+        a.waitUntil = a.t + 10;
+        return false;
+      }
+      // the closest reachable node is where we stand: nothing to do but wait for the world to change
       if (this.fail(a, 'no progress possible')) return false;
       a.replan = 'retry';
       a.waitUntil = a.t + 20;
       return false;
     }
-    a.follower = new PathFollower(res.path, this.grid, { sprint: a.opts.sprint, stopAtEnd: atGoal, maxTurnDeg: this.maxTurn, guard: a.guard });
+    if (res.path.length > 1) a.unloadedTicks = 0;
+    a.path = res.path;
+    a.status = res.status;
+    a.aheadBlocked = false;
+    a.doors = [];
+    a.actedUpTo = -1;
+    a.report.segments++;
+    this.startLeg(a, 0);
+    return true;
+  }
+
+  private onAheadResult(a: Active, res: PathResult, search: Search): void {
+    this.record(a, res, search);
+    const end = a.path.at(-1);
+    const first = res.path[0];
+    const sameStart = !!end && first?.x === end.x && first.y === end.y && first.z === end.z;
+    if (res.status === 'none' || res.path.length <= 1 || !sameStart) {
+      a.aheadBlocked = true;
+      return;
+    }
+    const oldLast = a.path.length - 1;
+    a.path = a.path.concat(res.path.slice(1));
+    a.status = res.status;
+    a.report.segments++;
+    // the leg that ran to the old end now runs on into the new segment
+    if (a.legTo === oldLast && !a.action) {
+      const from = a.follower ? a.legFrom + a.follower.passedIndex : oldLast;
+      this.startLeg(a, from);
+    }
+  }
+
+  /** The leg from `from`: up to the node before the next action, a door to close, or the end. */
+  private startLeg(a: Active, from: number): void {
+    const last = a.path.length - 1;
+    let to = last;
+    for (let i = from + 1; i <= last; i++) {
+      if (i > a.actedUpTo && a.path[i]!.act) {
+        to = i - 1;
+        break;
+      }
+      if (a.doors.some((d) => d.closeAt === i)) {
+        to = i;
+        break;
+      }
+    }
+    if (to < from) to = from;
+    a.legFrom = from;
+    a.legTo = to;
+    const stopAtEnd = to < last || a.status === 'found';
+    a.follower = new PathFollower(a.path.slice(from, to + 1), this.grid, { sprint: a.opts.sprint, stopAtEnd, maxTurnDeg: this.maxTurn, guard: a.guard });
+    a.passedAbs = from;
+    a.aimAbs = from;
+    a.passTick = a.t;
     a.bestProgress = -Infinity;
     a.lastProgressTick = a.t;
-    return true;
+  }
+
+  private onLegDone(a: Active): void {
+    const last = a.path.length - 1;
+    a.passedAbs = a.legTo;
+    if (a.legTo < last || a.doors.some((d) => d.closeAt === a.legTo)) {
+      const door = a.doors.find((d) => d.closeAt === a.legTo);
+      if (door) {
+        a.doors = a.doors.filter((d) => d !== door);
+        this.beginAction(a, { kind: 'close', node: a.legTo, queue: [door.p], axis: door.axis });
+        return;
+      }
+      const k = a.legTo + 1;
+      const act = k > a.actedUpTo ? a.path[k]?.act : undefined;
+      if (!act) {
+        this.startLeg(a, a.legTo);
+        return;
+      }
+      const prev = a.path[k - 1]!;
+      const node = a.path[k]!;
+      const axis: 0 | 2 = node.x !== prev.x ? 0 : 2;
+      if (act.dig) this.beginAction(a, { kind: 'dig', node: k, queue: [...act.dig], axis });
+      else if (act.use) this.beginAction(a, { kind: 'use', node: k, queue: [...act.use], axis });
+      else if (act.place) this.beginAction(a, { kind: 'place', node: k, queue: [act.place.p], axis });
+      else this.startLeg(a, k - 1);
+      return;
+    }
+    if (a.status === 'found') {
+      a.finish({ ok: true });
+      return;
+    }
+    // the end of a partial segment: wait for the plan-ahead, else re-plan from here
+    if (a.search?.kind === 'ahead') {
+      this.loop.release();
+      return;
+    }
+    a.replan ??= 'partial';
+  }
+
+  private beginAction(a: Active, run: Pick<ActionRun, 'kind' | 'node' | 'queue' | 'axis'>): void {
+    a.follower = undefined;
+    a.search = a.search?.kind === 'ahead' ? a.search : undefined;
+    this.loop.release();
+    a.action = {
+      ...run,
+      pending: false,
+      result: undefined,
+      waitClear: undefined,
+      placed: false,
+      started: a.t,
+      timeout: run.kind === 'dig' ? DIG_TIMEOUT * Math.max(1, run.queue.length) : ACTION_TIMEOUT,
+    };
+    for (const p of run.queue) {
+      a.ownCells.add(cellKey(p.x, p.y, p.z));
+      if (run.kind === 'use' || run.kind === 'close') a.ownCells.add(cellKey(p.x, p.y + 1, p.z));
+    }
+    this.log.debug(`goto: ${run.kind} ${run.queue.map(fmt).join(' ')} before node ${run.node}`);
+  }
+
+  /** Runs `fn` as the action's pending call; its result lands in `run.result`. */
+  private call(run: ActionRun, fn: (() => Promise<SkillResult>) | undefined): void {
+    run.pending = true;
+    run.result = undefined;
+    if (!fn) {
+      run.pending = false;
+      run.result = { ok: false, reason: 'no_action' };
+      return;
+    }
+    fn().then(
+      (r) => {
+        run.pending = false;
+        run.result = r;
+      },
+      (e: unknown) => {
+        run.pending = false;
+        run.result = { ok: false, reason: e instanceof Error ? e.message : String(e) };
+      },
+    );
+  }
+
+  private actionFailed(a: Active, s: InputLoopState, run: ActionRun, why: string): void {
+    a.report.actions.failed++;
+    this.log.info(`goto: ${run.kind} failed (${why})`);
+    a.action = undefined;
+    this.loop.setCommand({ jump: false, pitch: 0 });
+    a.lastProgressTick = a.t;
+    this.failAndReplan(a, s, 'action', `${run.kind} failed: ${why}`);
+  }
+
+  private actionDone(a: Active, run: ActionRun): void {
+    a.action = undefined;
+    this.loop.setCommand({ jump: false, pitch: 0 });
+    if (run.kind !== 'close') a.actedUpTo = Math.max(a.actedUpTo, run.node);
+    // the leg that contains the move into the action's node (pillar: the leg from the new node)
+    this.startLeg(a, run.kind === 'place' || run.kind === 'close' ? run.node : run.node - 1);
+  }
+
+  private stepAction(a: Active, s: InputLoopState): void {
+    const run = a.action!;
+    a.guard.idle();
+    // a running place action (Track O's PlaceSkill) drives the jump itself
+    if (!(run.kind === 'place' && run.pending)) this.loop.setCommand({ forward: 0, strafe: 0, sprint: false, sneak: false, jump: false });
+    if (a.t - run.started > run.timeout) {
+      this.actionFailed(a, s, run, 'timeout');
+      return;
+    }
+    if (run.pending) return;
+    const res = run.result;
+    if (res && !res.ok) {
+      if (run.kind === 'dig') {
+        const p = run.queue[0];
+        if (p) a.noBreak.add(cellKey(p.x, p.y, p.z));
+      }
+      this.actionFailed(a, s, run, String(res.reason));
+      return;
+    }
+    switch (run.kind) {
+      case 'dig': {
+        if (res) run.queue.shift();
+        run.result = undefined;
+        while (run.queue.length && this.grid.free(run.queue[0]!.x, run.queue[0]!.y, run.queue[0]!.z) === true) run.queue.shift();
+        const p = run.queue[0];
+        if (!p) {
+          this.actionDone(a, run);
+          return;
+        }
+        a.report.actions.dig++;
+        this.call(run, this.actions.dig && (() => this.actions.dig!(p)));
+        return;
+      }
+      case 'use':
+      case 'close': {
+        const p = run.queue[0];
+        if (!p) {
+          this.actionDone(a, run);
+          return;
+        }
+        // use: wait until the door / gate lets the body pass; close: until it is in the way again
+        const want = run.kind === 'use';
+        const clear = this.grid.crossing(p.x, p.y, p.z, run.axis) === CROSS_CLEAR;
+        if (run.waitClear) {
+          if (clear === want) {
+            run.waitClear = undefined;
+            run.queue.shift();
+          } else if (a.t - run.waitClear.since > DOOR_WAIT) {
+            this.actionFailed(a, s, run, 'door state did not change');
+          }
+          return;
+        }
+        if (res) {
+          run.result = undefined;
+          run.waitClear = { p, want, since: a.t };
+          return;
+        }
+        if (clear === want) {
+          run.queue.shift();
+          return;
+        }
+        if (want && a.opts.closeDoors) this.scheduleClose(a, p, run.axis, run.node);
+        if (want) a.report.actions.use++;
+        else a.report.actions.close++;
+        this.call(run, this.actions.useBlock && (() => this.actions.useBlock!(p)));
+        return;
+      }
+      case 'place': {
+        const p = run.queue[0]!;
+        if (!run.placed) {
+          // the place action jumps and clicks the top of the block below once the feet are above the
+          // cell (Track O's PlaceSkill: jump tick 4, feet +1.17), so it starts from standing
+          if (!s.onGround) return;
+          run.placed = true;
+          a.report.actions.place++;
+          const face = a.path[run.node]?.act?.place?.face ?? 'down';
+          this.call(run, this.actions.place && (() => this.actions.place!(p, face)));
+          return;
+        }
+        if (!res) return;
+        if (s.onGround && s.pos.y >= p.y + 1 - 0.01) {
+          this.actionDone(a, run);
+          return;
+        }
+        if (s.onGround && s.pos.y < p.y + 0.5) {
+          // landed back where we started: the block is not there
+          this.actionFailed(a, s, run, 'landed without the block');
+        }
+        return;
+      }
+    }
+  }
+
+  /** Close the door at `p` once the body has left its cells (the first node after `node` outside them). */
+  private scheduleClose(a: Active, p: Vec3, axis: 0 | 2, node: number): void {
+    let j = node;
+    while (j < a.path.length && a.path[j]!.x === p.x && a.path[j]!.z === p.z) j++;
+    if (j >= a.path.length) return;
+    a.doors.push({ p, axis, closeAt: j });
+  }
+
+  private stepRetreat(a: Active, s: InputLoopState): void {
+    const r = a.retreat!;
+    const target = a.lastSafe;
+    const here = this.safeHere(s);
+    if (!target || here || a.t > r.until) {
+      a.retreat = undefined;
+      this.loop.release();
+      a.guard.idle();
+      a.replan ??= 'retry';
+      return;
+    }
+    const dx = target.x + 0.5 - s.pos.x;
+    const dz = target.z + 0.5 - s.pos.z;
+    const yaw = Math.hypot(dx, dz) > 0.05 ? yawTowards(dx, dz) : this.loop.command.yaw;
+    const cmd = a.guard.apply({ forward: 1, strafe: 0, yaw, jump: s.inWater || s.inLava || s.collidedHorizontally, sprint: false, sneak: false });
+    this.loop.setCommand(cmd);
   }
 }
 
-function fmt(v: Vec3): string {
+const signatures = new WeakMap<TerrainClass, string>();
+
+/** What the planner and the physics read from a block class (two blocks with the same one are interchangeable). */
+function movementSignature(c: TerrainClass): string {
+  let s = signatures.get(c);
+  if (s === undefined) {
+    s = JSON.stringify([c.boxes, c.floor, c.liquid, c.liquidHeight, c.danger, c.costFactor, c.friction, c.roof, c.openable, c.open, c.connect, c.fullCube, c.gravity, c.protect, c.climbable]);
+    signatures.set(c, s);
+  }
+  return s;
+}
+
+function fmt(v: { x: number; y: number; z: number }): string {
   return `(${v.x.toFixed(2)}, ${v.y.toFixed(2)}, ${v.z.toFixed(2)})`;
 }

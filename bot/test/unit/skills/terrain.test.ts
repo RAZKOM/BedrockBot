@@ -15,10 +15,11 @@ describe('block shapes (minecraft-data blockCollisionShapes)', () => {
     expect(boxesOf(blockInfoOf('short_grass'))).toEqual([]);
   });
 
-  it('treats unknown blocks (newer than the block data) as full cubes', () => {
+  it('treats unknown blocks (newer than the block data) as full cubes; the planner and physics as 1.5-high obstacles', () => {
     const unknown = { name: 'unknown', stateId: -1, states: {}, hardness: -1, solid: true, boxes: [[0, 0, 0, 1, 1, 1] as const] };
     expect(boxesOf(unknown)).toEqual([[0, 0, 0, 1, 1, 1]]);
-    expect(classify(unknown)).toMatchObject({ floor: true, top: 1, unknown: true });
+    // fences, panes and bars are unknown runtime ids on BDS 1.26.60 (1.26.30 block data): never a floor
+    expect(classify(unknown)).toMatchObject({ floor: false, top: 1.5, boxes: [[0, 0, 0, 1, 1.5, 1]], unknown: true });
   });
 });
 

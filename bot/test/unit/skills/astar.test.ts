@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { findPath, locateNode, NavGrid, type PathNode } from '../../../src/skills/nav/index.ts';
+import { DEFAULT_COSTS, dropCost, findPath, locateNode, NavGrid, type PathNode } from '../../../src/skills/nav/index.ts';
 import { flatGen, hillyGen, rng, surfaceFeet, type GenWorld } from './genworld.ts';
 
+const W = DEFAULT_COSTS.walk;
 const moves = (p: PathNode[]) => p.map((n) => n.move);
 const plan = (w: GenWorld, from: [number, number, number], to: [number, number, number]) =>
   findPath(new NavGrid(w), { x: from[0], y: from[1], z: from[2] }, { type: 'block', p: { x: to[0], y: to[1], z: to[2] } });
@@ -50,21 +51,21 @@ describe('findPath moves', () => {
     const r = plan(flatGen(), [0, -60, 0], [5, -60, 5]);
     expect(r.status).toBe('found');
     expect(moves(r.path).filter((m) => m === 'diag')).toHaveLength(5);
-    expect(r.cost).toBeCloseTo(5 * Math.SQRT2, 6);
+    expect(r.cost).toBeCloseTo(5 * Math.SQRT2 * W, 6);
   });
 
-  it('jumps up one block (cost 2) and drops up to 3 (cost = blocks)', () => {
+  it('jumps up one block and drops up to 3 (tick costs, a 3-block drop is irreversible)', () => {
     const w = flatGen();
     w.fill({ x: -1, y: -60, z: 2 }, { x: 1, y: -60, z: 2 }, 'stone');
     const up = plan(w, [0, -60, 0], [0, -59, 2]);
     expect(moves(up.path)).toEqual(['start', 'walk', 'jump']);
-    expect(up.cost).toBeCloseTo(3, 6);
+    expect(up.cost).toBeCloseTo(W + DEFAULT_COSTS.jump, 6);
     const w2 = flatGen();
     w2.fill({ x: -1, y: -60, z: -1 }, { x: 1, y: -58, z: 1 }, 'stone');
     const down = plan(w2, [0, -57, 0], [0, -60, 3]);
     expect(down.status).toBe('found');
     expect(moves(down.path)).toEqual(['start', 'walk', 'drop', 'walk']);
-    expect(down.cost).toBeCloseTo(1 + 3 + 1, 6);
+    expect(down.cost).toBeCloseTo(W + dropCost(DEFAULT_COSTS, 3) + DEFAULT_COSTS.irreversibleDrop + W, 6);
   });
 
   it('does not jump 2 blocks or drop 4', () => {
@@ -114,7 +115,7 @@ describe('findPath moves', () => {
     w2.fill({ x: -1, y: -61, z: 2 }, { x: 1, y: -61, z: 2 }, 'oak_leaves');
     const r2 = plan(w2, [0, -60, 0], [0, -60, 4]);
     expect(r2.path.some((n) => n.z === 2 && Math.abs(n.x) <= 1)).toBe(false);
-    expect(r2.cost).toBeLessThan(4 + 4);
+    expect(r2.cost).toBeLessThan(4 * W * 5); // a detour costs less than walking on the leaves (x 5)
   });
 
   it('returns a partial path towards an unloaded goal', () => {
