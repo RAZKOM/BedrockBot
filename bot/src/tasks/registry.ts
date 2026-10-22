@@ -10,6 +10,8 @@ import { blockGoal, homeHook } from './mobility.ts';
 import type { SkillResult } from '../skills/types.ts';
 import { NightSafety } from './night.ts';
 import type { Vec3 } from '../connection/types.ts';
+import { registerPveCommands } from '../chat/commands-pve.ts';
+import { PveController, pveOptionsFrom, refusedKillType } from './pve.ts';
 
 const TASKS = new Map<string, TaskDefinition>();
 
@@ -43,6 +45,8 @@ export interface WalkingTask extends RunningTask {
   shelter?: PointAccess & { state(): string };
   /** Walk to a feet block now (!goto x y z). */
   goto?(p: Vec3): Promise<SkillResult>;
+  /** PvE behaviours: guard, flee, follow, come, kill (tasks/pve.ts); with the movement stack only. */
+  pve?: PveController;
 }
 
 // ---- built-in tasks ---------------------------------------------------------------------------
@@ -71,6 +75,8 @@ export const afkTask: TaskDefinition = {
   name: 'afk',
   summary: 'stay online: keepalive nudges, auto-respawn, optional home point and night shelter',
   defaultUsername: 'AfkBot',
+  cliOptions: { guard: { type: 'string' }, 'flee-health': { type: 'string' } },
+  usage: '  --guard <radius>         start with guard mode on (PvE: fight hostiles within radius of home; docs/pve.md)\n  --flee-health <h>        run to the shelter/home below this health (default 8)',
   create(ctx: TaskContext): WalkingTask {
     const o = ctx.options;
     const log = ctx.log;
@@ -79,6 +85,7 @@ export const afkTask: TaskDefinition = {
     const walking = o.walk || o.home !== undefined || o.shelter !== undefined;
     const mob = walking ? ctx.mobility() : undefined;
     let home = o.home;
+    let pve: PveController | undefined; // PvE behaviours (tasks/pve.ts), built with the movement stack
     const afk = new AfkTask(ctx.conn, {
       nudgeIntervalMs: o.nudgeIntervalS * 1000,
       heartbeat: o.heartbeat,
@@ -86,7 +93,7 @@ export const afkTask: TaskDefinition = {
       log,
       respawn,
       loop: mob?.loop,
-      busy: () => mob?.skills.nav.busy ?? false,
+      busy: () => (mob?.skills.nav.busy ?? false) || (pve?.ownsMovement() ?? false),
     });
     let night: NightSafety | undefined;
     if (mob) {
@@ -94,15 +101,31 @@ export const afkTask: TaskDefinition = {
         clock,
         mover: mob.skills,
         position: () => mob.position(),
-        inactive: () => respawn.dead || ctx.conn.state !== 'spawned',
+        inactive: () => respawn.dead || ctx.conn.state !== 'spawned' || (pve?.ownsMovement() ?? false),
         shelter: o.shelter,
         home: () => home,
         log: ctx.logger('night'),
         metrics: ctx.metrics,
       });
       night = n;
+      pve = new PveController({
+        source: ctx.conn,
+        world: mob.world,
+        loop: mob.loop,
+        skills: mob.skills,
+        home: () => home,
+        shelter: () => n.shelter,
+        night: n,
+        inactive: () => respawn.dead || ctx.conn.state !== 'spawned',
+        log: ctx.logger('pve'),
+        metrics: ctx.metrics,
+        options: pveOptionsFrom(ctx.values, ctx.taskConfig),
+      });
       respawn.onEvent((e) => {
-        if (e.kind === 'death') mob.skills.cancel();
+        if (e.kind === 'death') {
+          pve?.onDeath();
+          mob.skills.cancel();
+        }
       });
       respawn.afterRespawn(
         homeHook({
@@ -132,6 +155,7 @@ export const afkTask: TaskDefinition = {
       },
       stop: () => {
         night?.stop();
+        pve?.dispose();
         afk.stop();
         mob?.dispose();
       },
@@ -142,9 +166,10 @@ export const afkTask: TaskDefinition = {
         night: night?.status() ?? null,
         home: home ?? null,
         lastGoto: mob?.skills.nav.lastReport?.result ?? null,
+        pve: pve?.status() ?? null,
       }),
       position: () => mob?.position() ?? afk.feet,
-      statusLine: () => ({ task: 'afk', nudges: afk.nudges, corrections: afk.corrections, deaths: respawn.deaths }),
+      statusLine: () => ({ task: 'afk', ...(pve ? { behaviour: pve.behaviour() } : {}), nudges: afk.nudges, corrections: afk.corrections, deaths: respawn.deaths }),
       alive: () => !respawn.dead,
     };
     if (mob && night) {
@@ -155,9 +180,10 @@ export const afkTask: TaskDefinition = {
           home = p;
           log.info(p ? `home set to ${fmt(p)}` : 'home cleared');
         },
-        go: () => (home ? mob.skills.goto(blockGoal(home), { timeoutTicks: 6000 }) : Promise.resolve({ ok: false, reason: 'no_home' })),
+        go: () => (home && pve ? pve.walk(blockGoal(home), { timeoutTicks: 6000 }, 'walking home') : Promise.resolve({ ok: false, reason: 'no_home' })),
       };
-      task.goto = (p) => mob.skills.goto(blockGoal(p), { timeoutTicks: 6000 });
+      // through the PvE layer so a guard fight interrupts and then resumes the walk
+      task.goto = (p) => (pve ? pve.walk(blockGoal(p), { timeoutTicks: 6000 }) : mob.skills.goto(blockGoal(p), { timeoutTicks: 6000 }));
       task.shelter = {
         get: () => n.shelter,
         set: (p) => {
@@ -166,6 +192,24 @@ export const afkTask: TaskDefinition = {
         state: () => String(n.status().state),
       };
     }
+    const p = pve;
+    if (p) task.pve = p;
+    registerPveCommands(
+      ctx.chat,
+      p && mob
+        ? {
+            follow: (name) => p.follow({ playerName: name }),
+            come: (name) => p.come(name),
+            stop: () => p.stop(),
+            guard: () => p.guard,
+            setGuard: (g) => p.setGuard(g),
+            kill: (type, k) => p.kill(type, k),
+            refused: (type) => refusedKillType(type, mob.world.entities),
+            behaviour: () => p.behaviour(),
+            selfName: () => ctx.conn.username,
+          }
+        : undefined,
+    );
     return task;
   },
 };

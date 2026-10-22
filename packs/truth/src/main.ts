@@ -41,6 +41,7 @@ import {
 } from './protocol.js';
 import './rl.js'; // rl:* commands (RL resets, PLAN.md 6.1), own scriptevent namespace
 import { woodHandlers } from './wood.js'; // truth:container, truth:tree, truth:find (Phase 4, Track H)
+import { pveHandlers } from './pve.js'; // truth:summon, mobs, entity, sethealth, hurtlog, ... (Phase 7, PvE)
 
 declare const __PACK_VERSION__: string;
 /** QuickJS console (prints to the BDS content log). */
@@ -529,6 +530,8 @@ const handlers: Record<string, Handler> = {
 
 // Wood-gathering commands (wood.ts): container, tree, find.
 Object.assign(handlers, woodHandlers({ reply, replyError, getBlock, assertLoaded, overworld }));
+// PvE / follow commands (pve.ts): summon, mobs, near, entity, killmobs, clearmobs, sethealth, movemob, effect, hurtlog.
+Object.assign(handlers, pveHandlers({ overworld }));
 
 function blockVolume(a: Vec3, b: Vec3): BlockVolume {
   return new BlockVolume(a, b);

@@ -147,6 +147,24 @@ online, else `player_ambiguous`.
 | `tree` | `x y z height [kind=oak] [persistent=0]` | `{kind, base, height, logs:[[x,y,z]...], leaves, persistent}`: a log column from (x, y, z) up and a leaf canopy (`src/woodShapes.ts` `treeShape`: radius 2 without corners at top - 1 and top, a plus shape at top + 1 and top + 2). Leaves only replace air. Kinds: oak, birch, spruce, jungle, acacia, dark_oak, cherry, mangrove, pale_oak |
 | `find` | `x1 y1 z1 x2 y2 z2 pattern [max=4096]` (max volume 1 048 576, a job) | `{from, to, pattern, count, byType, positions:[[x,y,z]...], truncated}`: blocks whose typeId contains `pattern` (e.g. `_log`) |
 
+### PvE commands (src/pve.ts, PLAN.md tasks 7.4 and 7.5)
+
+Entity ids are the Script API `Entity.id`, which equals the `unique_id` of `add_entity` / `add_player`
+(BDS 1.26.60.6). A mob is `{entityId, typeId, name, location, health, tags}`.
+
+| Command | Args | `data` on success |
+|---|---|---|
+| `summon` | `typeId x y z [tag]` | the mob; tagged `truth_pve` and `tag` |
+| `mobs` | `tag\|* [typeId]` | `{mobs:[mob]}`: summoned mobs with that tag (`*` = all summoned) |
+| `near` | `x y z r [typeId]` | `{mobs:[mob]}`: every non-player entity within r (natural spawns too) |
+| `entity` | `entityId\|playerName` | the mob plus `valid: true`, or `{entityId, valid:false}` when it is gone |
+| `killmobs` | `tag\|*` | `{removed}`: removes summoned mobs (no drops) |
+| `clearmobs` | `x y z r` | `{removed}`: removes every non-player entity within r (mobs, drops, arrows) |
+| `sethealth` | `entityId\|playerName value` | `{entityId, name, health}` |
+| `movemob` | `entityId x y z` | `{entityId, location}` (teleport, fractions kept) |
+| `effect` | `entityId\|playerName effect seconds [amplifier]` | `{entityId, effect, seconds, amplifier}` (no particles) |
+| `hurtlog` | `[sinceTick] [entityId\|name\|*]` | `{now, events:[{tick, victimId, victimType, victimName, damage, cause, damagerId, damagerType, damagerName, healthAfter}]}`: every `entityHurt` since `sinceTick` (last 1000 kept), filtered by victim or damager; the server-side proof that an attack landed |
+
 ### Canonical block order, RLE and checksum
 
 `blocks` and `checksum` visit a box in **y, z, x order** (x varies fastest): the block at `(x,y,z)`
