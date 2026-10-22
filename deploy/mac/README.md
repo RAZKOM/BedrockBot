@@ -88,12 +88,15 @@ bumped build is pushed; the update notifier whispers the owners meanwhile.
 
 ## Updating the code
 
-On the dev machine: `git push chat:bedrockbot.git main`. On the Mac:
+From the dev machine, after every merge that passed the gate:
 
 ```sh
-cd ~/BedrockBot && git pull -q && pnpm install --frozen-lockfile && pnpm --filter bot test \
-  && launchctl kickstart -k gui/$(id -u)/com.bedrockbot.realm
+pnpm deploy:mac        # = git push chat:bedrockbot.git main && ssh chat bash ~/BedrockBot/deploy/mac/update.sh
 ```
+
+`update.sh` pulls, installs, rebuilds raknet-native if needed, runs the unit tests and restarts the
+launch agent (the bot is off the Realm for about 10 s). Features that are off by default are turned on
+in `~/.bedrockbot/config.json`, e.g. `"tasks": { "afk": { "guard": 16, "fleeHealth": 8 } }`.
 
 Keep the Realm on a commit that passed the full BDS gate (docs/versions.md); the dev machine's
 worktree habit applies here too: push only what is green.
