@@ -101,6 +101,7 @@ container under test).
 | `hard` | bds-hard | udp/19154 | docker/compose.hard.yml (TICK_DISTANCE 10; `BDS_HARD_DIFFICULTY`, default peaceful) | 1.26.60.6 | hard-* e2e: death/respawn, night safety (HARD_BDS_*) |
 | `rl` | bds-rl | udp/19156 | docker/compose.rl.yml | 1.26.60.6 | RL bridge (Track J) |
 | (no bds.mjs profile) | bds-act | udp/19158 | docker/compose.act.yml (TICK_DISTANCE 10): `docker compose -f docker/compose.act.yml up -d`, then `pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/act --world act --restart bds-act` | 1.26.60.6 | act-* e2e: placing and using blocks, task 7.3 (ACT_BDS_*, docs/interaction.md) |
+| `pve` | bds-pve | udp/19144 | docker/compose.pve.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_PVE_DIFFICULTY` overrides) | 1.26.60.6 | pve-* e2e: combat, guard, flee, follow, night (PVE_BDS_*; docs/pve.md) |
 | `rl-N` | bds-rl-N | udp/19170+N | docker/compose.rl-n.yml (`N=1 docker compose -p bedrockbot-rl-1 -f docker/compose.rl-n.yml up -d`) | 1.26.60.6 | extra RL envs for SubprocVecEnv (rl/scripts/throughput.py); remove after use |
 
 Per-track details: docs/world-model.md, docs/movement.md, docs/pathfinding.md, docs/digging.md, docs/wood.md (`--task gather`), docs/rl.md, docs/interaction.md (placing, doors), docs/versions.md.
@@ -164,6 +165,8 @@ recording flags can also be set in the config file (next section); the flag wins
 | `--home <x,y,z>` | none | feet block to walk back to after each respawn and at dawn (turns on walking) |
 | `--shelter <x,y,z>` | none | night shelter: walk in at dusk (time of day 12000), leave at dawn (23000) (turns on walking) |
 | `--walk` | off | walking without home/shelter, so `!home set` and `!shelter set` work |
+| `--guard <radius>` | off | afk task: start with guard mode on (fight hostiles within the radius of home; `on` = radius 16); config `tasks.afk.guard` (docs/pve.md) |
+| `--flee-health <h>` | 8 | afk task: below this health, with a hostile near, run to the shelter (else home); config `tasks.afk.fleeHealth` |
 | `--respawn-delay <s>` | 2 | press respawn this long after dying; negative = stay on the death screen |
 | `--owner <name or xuid:N>` | none | allowed to run chat commands (repeatable; env `BOT_OWNERS`; config `owners`) |
 | `--no-console-owner` | | refuse commands typed into the server console |
@@ -237,6 +240,14 @@ Replies are player chat from the bot.
 | `!shelter [show]` / `!shelter set [x y z]` / `!shelter clear` | the night shelter and its state (`day`, `going`, `sheltered`, `unreachable`, `gave_up`, `returning`); needs walking |
 | `!quit` | `bye (quit by console)`, then a clean disconnect and exit 0 |
 | `!help` | the list of commands |
+| `!follow [name]` | `following Steve`: follows the player (default: the sender; the console must name one) until `!stop`; needs walking |
+| `!come [name]` | `coming to Steve`, then `here (Steve)`: one walk to within 2 blocks of the player |
+| `!stop` | `stopped (was following Steve); guarding r=16`: cancels follow / come / kill / a fight / a goto |
+| `!guard [status]` / `on` / `off` / `<radius>` | `guard on, radius 16`: fight hostiles within the radius of home (of the bot without a home), pick up the drops, walk back home |
+| `!kill <type> [n]` | `killing 3 zombie`, then `kill zombie: 3/3 done`: up to n mobs of that type within 32 blocks, nearest first. `!kill player` or any player's name: `refused: I never attack players (PvE only)` |
+
+`!status` names the active behaviour with walking: `behaviour idle`, `guarding r=16`, `following Steve`,
+`fighting zombie`, `fleeing`, `walking to 10 -60 3`, `returning home`. PvE details: docs/pve.md.
 
 Everyone else is ignored (logged as "not an owner"). Truth-pack lines (`@truth ...`), json/system
 messages and the bot's own echo are never parsed as commands.
@@ -342,6 +353,8 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e hard                  
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e act                           # task 7.3 suites on bds-act (ACT_BDS_HOST/PORT/CONTAINER, ACT_VERBOSE=1)
 BDS_E2E=1 HARD_EASY=1 pnpm --filter bot exec vitest run --project e2e hard-night        # + the easy/zombie run
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nav-                          # every nav suite on bds-move (v1 + v2, ~7 min; docs/pathfinding.md "Tests")
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e pve                           # tasks 7.4-7.6 on bds-pve (normal; ~9 min with the night run)
+BDS_E2E=1 BDS_PVE_NIGHT=0 pnpm --filter bot exec vitest run --project e2e pve           # without the 5-minute night run
 BDS_E2E=1 BDS_SOAK=1 pnpm --filter bot exec vitest run --project e2e test/e2e/keepalive.test.ts --silent=false
 pnpm e2e:51                                    # whole e2e suite against bds-dev51 (BDS 1.26.51.1, game version 1.26.51: rollback)
 pnpm e2e:nn                                    # whole e2e suite against bds-nn (NetherNet, 1.26.60)
@@ -353,7 +366,9 @@ cd bot && node scripts/e2e-profile.ts nn test/e2e/echo test/e2e/chat   # a subse
 one container and sets `BOT_VERSION` / `BDS_TRANSPORT` (read by `bot/test/e2e/env.ts`). Without it
 each suite targets its own server at 1.26.60 over RakNet. The hard-* suites read `HARD_BDS_HOST`,
 `HARD_BDS_PORT`, `HARD_BDS_CONTAINER` (default 127.0.0.1, 19154, bds-hard) and `HARD_VERBOSE=1`
-prints the bot's log. The profile containers need the truth pack (`node scripts/bds.mjs --profile <name> pack`). Fixtures:
+prints the bot's log. The pve-* suites read `PVE_BDS_HOST`, `PVE_BDS_PORT`, `PVE_BDS_CONTAINER`
+(default 127.0.0.1, 19144, bds-pve), `PVE_VERBOSE=1`, and for the night run `BDS_PVE_NIGHT=0` (skip),
+`BDS_PVE_NIGHT_TICKS` (6000), `BDS_PVE_NIGHT_START` (16000). The profile containers need the truth pack (`node scripts/bds.mjs --profile <name> pack`). Fixtures:
 `cd bot && pnpm record:fixture` and `BDS_E2E=1 WORLD_RECORD=1 pnpm exec vitest run --project e2e test/e2e/world-record.test.ts`
 (1.26.60 on bds-dev / bds-world); for the old version
 `node scripts/record-fixture.ts --version 1.26.51 --port 19134 --bds 1.26.51.1` and

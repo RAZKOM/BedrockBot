@@ -16,6 +16,9 @@ import type { EntityInfo, ItemStack } from './types.ts';
 /** Bedrock sends entity rotations in move_entity_delta as one byte: degrees = byte * 360 / 256. */
 export const byteToDegrees = (b: number): number => (b * 360) / 256;
 
+/** Eye height of a standing player: tracked player positions are eye positions (feet + 1.62). */
+export const PLAYER_EYE_HEIGHT = 1.62;
+
 // Pre-1.26.40 move_entity_delta flag bits (DeltaMoveFlags); newer versions use independent optionals.
 const FLAG_HAS_X = 0x01;
 const FLAG_HAS_Y = 0x02;
@@ -99,7 +102,9 @@ export class EntityTracker {
       uniqueId: toBigInt(p.unique_id),
       type: 'minecraft:player',
       username: p.username,
-      pos: { ...p.position },
+      // add_player carries the FEET position (BDS 1.26.60.6, measured for docs/pve.md), move_player
+      // the eye position; keep the documented eye convention for players from the start.
+      pos: { x: p.position.x, y: p.position.y + PLAYER_EYE_HEIGHT, z: p.position.z },
       vel: { ...p.velocity },
       yaw: p.yaw,
       pitch: p.pitch,

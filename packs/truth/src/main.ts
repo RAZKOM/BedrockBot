@@ -42,6 +42,7 @@ import {
 import './rl.js'; // rl:* commands (RL resets, PLAN.md 6.1), own scriptevent namespace
 import { woodHandlers } from './wood.js'; // truth:container, truth:tree, truth:find (Phase 4, Track H)
 import { actEvents, actHandlers } from './act.js'; // truth:setblock, truth:door + place/interact events (7.3, Track O)
+import { pveHandlers } from './pve.js'; // truth:summon, mobs, entity, sethealth, hurtlog, ... (Phase 7, PvE)
 
 declare const __PACK_VERSION__: string;
 /** QuickJS console (prints to the BDS content log). */
@@ -532,6 +533,8 @@ const handlers: Record<string, Handler> = {
 Object.assign(handlers, woodHandlers({ reply, replyError, getBlock, assertLoaded, overworld }));
 // Interaction commands (act.ts): setblock, door.
 Object.assign(handlers, actHandlers({ getBlock, assertLoaded, overworld }));
+// PvE / follow commands (pve.ts): summon, mobs, near, entity, killmobs, clearmobs, sethealth, movemob, effect, hurtlog.
+Object.assign(handlers, pveHandlers({ overworld }));
 
 function blockVolume(a: Vec3, b: Vec3): BlockVolume {
   return new BlockVolume(a, b);

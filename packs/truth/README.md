@@ -154,6 +154,23 @@ online, else `player_ambiguous`.
 |---|---|---|
 | `setblock` | `x y z typeId [state=value ...]` | `{x, y, z, typeId, states}`: one block with block states (`BlockPermutation.resolve`); values `true`/`false` are booleans, integers numbers, the rest strings, e.g. `setblock 5 -60 5 fence_gate minecraft:cardinal_direction=north`. `bad_states` if the states do not resolve |
 | `door` | `x y z typeId direction [hinge 0/1] [open 0/1]` | `{lower:{x, y, z, typeId, states}, upper:{...}}`: both halves of a door (upper first); `direction` = `minecraft:cardinal_direction` |
+### PvE commands (src/pve.ts, PLAN.md tasks 7.4 and 7.5)
+
+Entity ids are the Script API `Entity.id`, which equals the `unique_id` of `add_entity` / `add_player`
+(BDS 1.26.60.6). A mob is `{entityId, typeId, name, location, health, tags}`.
+
+| Command | Args | `data` on success |
+|---|---|---|
+| `summon` | `typeId x y z [tag]` | the mob; tagged `truth_pve` and `tag` |
+| `mobs` | `tag\|* [typeId]` | `{mobs:[mob]}`: summoned mobs with that tag (`*` = all summoned) |
+| `near` | `x y z r [typeId]` | `{mobs:[mob]}`: every non-player entity within r (natural spawns too) |
+| `entity` | `entityId\|playerName` | the mob plus `valid: true`, or `{entityId, valid:false}` when it is gone |
+| `killmobs` | `tag\|*` | `{removed}`: removes summoned mobs (no drops) |
+| `clearmobs` | `x y z r` | `{removed}`: removes every non-player entity within r (mobs, drops, arrows) |
+| `sethealth` | `entityId\|playerName value` | `{entityId, name, health}` |
+| `movemob` | `entityId x y z` | `{entityId, location}` (teleport, fractions kept) |
+| `effect` | `entityId\|playerName effect seconds [amplifier]` | `{entityId, effect, seconds, amplifier}` (no particles) |
+| `hurtlog` | `[sinceTick] [entityId\|name\|*]` | `{now, events:[{tick, victimId, victimType, victimName, damage, cause, damagerId, damagerType, damagerName, healthAfter}]}`: every `entityHurt` since `sinceTick` (last 1000 kept), filtered by victim or damager; the server-side proof that an attack landed |
 
 ### Canonical block order, RLE and checksum
 
