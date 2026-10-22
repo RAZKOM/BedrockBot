@@ -5,6 +5,8 @@ import { formatDuration, type Metrics } from '../connection/metrics.ts';
 import type { Vec3 } from '../connection/types.ts';
 import type { Chat, Sender } from './chat.ts';
 import { senderLabel } from './chat.ts';
+import { describeSetting, formatSettingValue, SETTING_KEYS, SettingError, settingKey } from '../config/settings.ts'; // Track Q
+import type { CommandDeps } from '../tasks/process/deps.ts'; // Track Q
 
 export interface BuiltinDeps {
   conn: Connection;
@@ -15,6 +17,8 @@ export interface BuiltinDeps {
   quit: (by: Sender) => void;
   /** Extra `key value` parts for !status (e.g. task name, nudges). */
   extraStatus?: () => Record<string, string | number>;
+  /** Extra reply lines after the !status line (Track Q: the process stack). */
+  extraLines?: () => string[];
   /** Delay between the !quit reply and quit(), so the reply is flushed (> 1 tick). Default 300 ms. */
   quitDelayMs?: number;
 }
@@ -68,6 +72,7 @@ export function registerBuiltinCommands(chat: Chat, deps: BuiltinDeps): void {
           extra: deps.extraStatus?.(),
         }),
       );
+      for (const line of deps.extraLines?.() ?? []) reply(line); // Track Q: process stack
     },
   });
   chat.register({
@@ -308,6 +313,97 @@ export function registerGatherCommands(chat: Chat, deps: GatherCommandDeps): voi
         chest = { x: Math.floor(c[0]!), y: Math.floor(c[1]!), z: Math.floor(c[2]!) };
       }
       reply(deps.start(n, chest));
+    },
+  });
+}
+
+// ---- process manager and runtime settings (PLAN.md 7.8 / 7.9, Track Q; docs/processes.md) --------
+//   !pause      hold the owner's commands (goto, follow, come, kill, gather); guard, flee and night keep running
+//   !resume     release them (the newest continues where it was)
+//   !set                       list every setting with its value
+//   !set <key>                 one setting: value, bounds, default, description
+//   !set <key> <value|default> validate, apply live, persist to settings.json
+// (!stop is registered with the PvE commands, commands-pve.ts; it stops every command and what it
+// pre-empted. The process stack is printed by !status as a second line.)
+
+/** Split `parts` into reply lines of at most `max` characters (chat replies are cut at 256). */
+export function chunkLine(prefix: string, parts: readonly string[], max = 240): string[] {
+  const lines: string[] = [];
+  let cur = prefix;
+  for (const p of parts) {
+    const add = cur === prefix ? p : `, ${p}`;
+    if (cur.length + add.length > max && cur !== prefix) {
+      lines.push(cur);
+      cur = `${prefix}${p}`;
+    } else {
+      cur += add;
+    }
+  }
+  if (cur !== prefix || lines.length === 0) lines.push(cur);
+  return lines;
+}
+
+export function registerProcessCommands(deps: CommandDeps): void {
+  const pm = deps.processes;
+  if (!pm) {
+    for (const name of ['pause', 'resume']) {
+      deps.chat.register({
+        name,
+        help: '(needs walking)',
+        run: ({ reply }) => {
+          reply(deps.needsWalking(name));
+        },
+      });
+    }
+    return;
+  }
+  deps.chat.register({
+    name: 'pause',
+    help: '(hold the running command; guard and night keep running)',
+    run: ({ reply }) => {
+      const lines = pm.userProcesses().map((p) => p.behaviour?.() ?? p.name);
+      pm.hold();
+      reply(lines.length ? `paused: ${lines.join(', ')} (!resume to continue)` : 'nothing to pause (commands given now wait for !resume)');
+    },
+  });
+  deps.chat.register({
+    name: 'resume',
+    help: '(continue after !pause)',
+    run: ({ reply }) => {
+      const was = pm.unhold();
+      const a = pm.active;
+      reply(was ? `resumed${a ? `: ${a.behaviour?.() ?? a.name}` : ''}` : 'nothing paused');
+    },
+  });
+}
+
+export function registerSettingsCommands(deps: CommandDeps): void {
+  const s = deps.settings;
+  deps.chat.register({
+    name: 'set',
+    help: '[<key> [<value>|default]] (runtime settings; no args = list)',
+    run: ({ reply, args }) => {
+      const [name, ...rest] = args;
+      if (name === undefined) {
+        for (const line of chunkLine('settings: ', SETTING_KEYS.map((k) => `${k} ${formatSettingValue(k, s.get(k))}`))) reply(line);
+        return;
+      }
+      const key = settingKey(name);
+      if (!key) {
+        reply(`unknown setting ${name}; !set lists them`);
+        return;
+      }
+      if (rest.length === 0) {
+        reply(describeSetting(key, s.get(key)));
+        return;
+      }
+      const old = s.get(key);
+      try {
+        const v = rest.length === 1 && rest[0]!.toLowerCase() === 'default' ? s.reset(key) : s.set(key, rest.join(' '));
+        reply(`${key} = ${formatSettingValue(key, v)} (was ${formatSettingValue(key, old)})${s.file ? '' : ', not saved (no settings file)'}`);
+      } catch (e) {
+        reply(e instanceof SettingError ? e.message : `!set failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
     },
   });
 }

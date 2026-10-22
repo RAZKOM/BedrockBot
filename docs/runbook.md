@@ -102,6 +102,7 @@ container under test).
 | `rl` | bds-rl | udp/19156 | docker/compose.rl.yml | 1.26.60.6 | RL bridge (Track J) |
 | (no bds.mjs profile) | bds-act | udp/19158 | docker/compose.act.yml (TICK_DISTANCE 10): `docker compose -f docker/compose.act.yml up -d`, then `pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/act --world act --restart bds-act` | 1.26.60.6 | act-* e2e: placing and using blocks, task 7.3 (ACT_BDS_*, docs/interaction.md) |
 | `pve` | bds-pve | udp/19144 | docker/compose.pve.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_PVE_DIFFICULTY` overrides) | 1.26.60.6 | pve-* e2e: combat, guard, flee, follow, night (PVE_BDS_*; docs/pve.md) |
+| `core` | bds-core | udp/19180 | docker/compose.core.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_CORE_DIFFICULTY` overrides) | 1.26.60.6 | core-* e2e: process manager, runtime settings (CORE_BDS_*; docs/processes.md); also runs hard-* / pve-* as a regression check |
 | `rl-N` | bds-rl-N | udp/19170+N | docker/compose.rl-n.yml (`N=1 docker compose -p bedrockbot-rl-1 -f docker/compose.rl-n.yml up -d`) | 1.26.60.6 | extra RL envs for SubprocVecEnv (rl/scripts/throughput.py); remove after use |
 
 Per-track details: docs/world-model.md, docs/movement.md, docs/pathfinding.md, docs/digging.md, docs/wood.md (`--task gather`), docs/rl.md, docs/interaction.md (placing, doors), docs/versions.md.
@@ -167,6 +168,9 @@ recording flags can also be set in the config file (next section); the flag wins
 | `--walk` | off | walking without home/shelter, so `!home set` and `!shelter set` work |
 | `--guard <radius>` | off | afk task: start with guard mode on (fight hostiles within the radius of home; `on` = radius 16); config `tasks.afk.guard` (docs/pve.md) |
 | `--flee-health <h>` | 8 | afk task: below this health, with a hostile near, run to the shelter (else home); config `tasks.afk.fleeHealth` |
+| `--chest <x,y,z>` | none | afk task: default chest for `!gather N` (walking only); config `tasks.afk.chest` |
+| `--settings <file>` | `<config dir>/settings.json` | runtime settings file (`!set` writes it; env `BEDROCKBOT_SETTINGS`); with `--no-config` and no `--settings`: in memory only; refused inside the repository (docs/processes.md) |
+| `--set <key=value>` | | a runtime setting at start-up, repeatable (`--set allowBreak=on`); wins over settings.json and config `settings` |
 | `--respawn-delay <s>` | 2 | press respawn this long after dying; negative = stay on the death screen |
 | `--owner <name or xuid:N>` | none | allowed to run chat commands (repeatable; env `BOT_OWNERS`; config `owners`) |
 | `--no-console-owner` | | refuse commands typed into the server console |
@@ -186,7 +190,8 @@ Examples: `node src/index.ts --task echo --port 19134 --version 1.26.51` (bds-de
 
 Exit codes: 0 on `!quit`, SIGINT/SIGTERM or `--duration`; 1 when the connection is lost for good
 (or with `--no-reconnect`); 3 when the server and the bot speak different game versions (never
-retried); 2 for bad arguments or a bad config file.
+retried); 2 for bad arguments, a bad config or settings file, or a task option the task refuses
+(one line, e.g. `error: guard radius must be 2..64, got 1` for `--guard 1`).
 
 **Walking.** Without `--home`, `--shelter` or `--walk`, the AFK task sends its own inputs only for
 nudges (as since Phase 1). With any of them it builds the movement stack (World, InputLoop, BotSkills,
@@ -242,12 +247,18 @@ Replies are player chat from the bot.
 | `!help` | the list of commands |
 | `!follow [name]` | `following Steve`: follows the player (default: the sender; the console must name one) until `!stop`; needs walking |
 | `!come [name]` | `coming to Steve`, then `here (Steve)`: one walk to within 2 blocks of the player |
-| `!stop` | `stopped (was following Steve); guarding r=16`: cancels follow / come / kill / a fight / a goto |
+| `!stop` | `stopped (was following Steve); guarding r=16`: stops every command (goto, follow, come, kill, gather) and what it pre-empted, plus a pending home return; guard and night keep running |
+| `!pause` / `!resume` | `paused: walking to 10 -60 3 (!resume to continue)` / `resumed: walking to 10 -60 3`: hold the owner's commands where they are (guard, flee, night keep running), then continue |
+| `!set` / `!set <key>` / `!set <key> <value\|default>` | runtime settings (allowBreak, allowPlace, closeDoors, sprint, guardRadius, fleeHealth, nudgeInterval, followDistance, ...): list, show one with bounds and description, change it live and save it to settings.json (`guardRadius = 8 (was 16)`); docs/processes.md |
+| `!gather <n> [x y z]` / `!gather stop` / `!gather` | on the afk task with walking: gather n logs into the chest (else `--chest`, else keep them) as a command; a guard fight pauses and resumes it |
 | `!guard [status]` / `on` / `off` / `<radius>` | `guard on, radius 16`: fight hostiles within the radius of home (of the bot without a home), pick up the drops, walk back home |
 | `!kill <type> [n]` | `killing 3 zombie`, then `kill zombie: 3/3 done`: up to n mobs of that type within 32 blocks, nearest first. `!kill player` or any player's name: `refused: I never attack players (PvE only)` |
 
 `!status` names the active behaviour with walking: `behaviour idle`, `guarding r=16`, `following Steve`,
-`fighting zombie`, `fleeing`, `walking to 10 -60 3`, `returning home`. PvE details: docs/pve.md.
+`fighting zombie`, `fleeing`, `walking to 10 -60 3`, `returning home`, `going to the shelter`,
+`sheltered`, `gathering 3/8 logs`, `paused (...)`; with walking a second line shows the process stack
+with ETAs: `processes: [active] walking to 10 -60 3, 31 blocks left, eta 6 s; [paused] gather 3/8 logs
+(paused, 1 trees)`. PvE details: docs/pve.md; processes, priorities and settings: docs/processes.md.
 
 Everyone else is ignored (logged as "not an owner"). Truth-pack lines (`@truth ...`), json/system
 messages and the bot's own echo are never parsed as commands.
@@ -355,6 +366,7 @@ BDS_E2E=1 HARD_EASY=1 pnpm --filter bot exec vitest run --project e2e hard-night
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nav-                          # every nav suite on bds-move (v1 + v2, ~7 min; docs/pathfinding.md "Tests")
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e pve                           # tasks 7.4-7.6 on bds-pve (normal; ~9 min with the night run)
 BDS_E2E=1 BDS_PVE_NIGHT=1 pnpm --filter bot exec vitest run --project e2e pve           # with the 5-minute night run (opt-in: flaky under load until 7.11 adds armour and food)
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e core --silent=false           # tasks 7.8/7.9 on bds-core: process manager, settings (~2 min; docs/processes.md)
 BDS_E2E=1 BDS_SOAK=1 pnpm --filter bot exec vitest run --project e2e test/e2e/keepalive.test.ts --silent=false
 pnpm e2e:51                                    # whole e2e suite against bds-dev51 (BDS 1.26.51.1, game version 1.26.51: rollback)
 pnpm e2e:nn                                    # whole e2e suite against bds-nn (NetherNet, 1.26.60)
@@ -368,7 +380,10 @@ each suite targets its own server at 1.26.60 over RakNet. The hard-* suites read
 `HARD_BDS_PORT`, `HARD_BDS_CONTAINER` (default 127.0.0.1, 19154, bds-hard) and `HARD_VERBOSE=1`
 prints the bot's log. The pve-* suites read `PVE_BDS_HOST`, `PVE_BDS_PORT`, `PVE_BDS_CONTAINER`
 (default 127.0.0.1, 19144, bds-pve), `PVE_VERBOSE=1`, and for the night run `BDS_PVE_NIGHT=1` (opt-in),
-`BDS_PVE_NIGHT_TICKS` (6000), `BDS_PVE_NIGHT_START` (16000). The profile containers need the truth pack (`node scripts/bds.mjs --profile <name> pack`). Fixtures:
+`BDS_PVE_NIGHT_TICKS` (6000), `BDS_PVE_NIGHT_START` (16000). The core-* suites read `CORE_BDS_HOST`,
+`CORE_BDS_PORT`, `CORE_BDS_CONTAINER` (default 127.0.0.1, 19180, bds-core) and `CORE_VERBOSE=1`; the
+hard-* and pve-* suites run there too with `HARD_BDS_PORT=19180 HARD_BDS_CONTAINER=bds-core` /
+`PVE_BDS_PORT=19180 PVE_BDS_CONTAINER=bds-core` (they set the difficulty they need). The profile containers need the truth pack (`node scripts/bds.mjs --profile <name> pack`). Fixtures:
 `cd bot && pnpm record:fixture` and `BDS_E2E=1 WORLD_RECORD=1 pnpm exec vitest run --project e2e test/e2e/world-record.test.ts`
 (1.26.60 on bds-dev / bds-world); for the old version
 `node scripts/record-fixture.ts --version 1.26.51 --port 19134 --bds 1.26.51.1` and
