@@ -22,6 +22,14 @@ git init --bare ~/bedrockbot.git          # on the dev machine: git push chat:be
 git clone ~/bedrockbot.git ~/BedrockBot
 cd ~/BedrockBot && pnpm install --frozen-lockfile && pnpm --filter bot test
 grep -c _triedDefaultHost bot/node_modules/bedrock-protocol/src/nethernet/signalling.js   # 2 = patched
+
+# raknet-native ships prebuilds for darwin-x64 only, so on Apple silicon build it once from source
+# (about 2 min). The Realm path is NetherNet-only and never loads it; local BDS targets (and
+# their ping) do. Repeat after any pnpm install that recreates node_modules.
+pip3 install --user cmake && export PATH=~/Library/Python/3.9/bin:$PATH
+cd ~/BedrockBot/node_modules/.pnpm/raknet-native@1.2.3/node_modules/raknet-native
+node ../../../cmake-js@6.3.2/node_modules/cmake-js/bin/cmake-js compile   # -> build/Release/node-raknet.node
+cd ~/BedrockBot
 ```
 
 Config lives outside the repo in `~/.bedrockbot/config.json` (names only, never tokens):
