@@ -165,7 +165,7 @@ describe.skipIf(!E2E)('@bds act: using doors, gates, trapdoors, buttons, levers 
   // box, which is the same for every door state, so a door cell is never free and goto answers
   // 'unreachable' at once. Flips to a pass when the navigation track reads skills/interact/shapes.ts
   // doorBoxes(); then turn it into a plain `it`.
-  it.fails('goto through the open door (needs door shapes in the nav grid)', async () => {
+  it('goto through the open door', async () => {
     await bot.teleport(south);
     const o = await bot.skills.useBlock(door, { want: 'open' });
     expect(o).toMatchObject({ ok: true, open: true });

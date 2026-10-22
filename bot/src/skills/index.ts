@@ -26,6 +26,8 @@ import { Digger, type DigOptions, type DigResult } from './dig/digger.ts';
 import type { InputLoop } from './input/inputLoop.ts';
 import { PHYSICS } from './input/physics.ts';
 import { Navigator, type GotoReport, type NavigatorOptions } from './nav/navigator.ts';
+import { DEFAULT_THROWAWAY } from './nav/actions.ts';
+import { oppositeFace } from './place/face.ts';
 import { angleDiff, turnTowards, yawTowards } from './nav/follower.ts';
 import { blockQueryOf, worldSource, type BlockStore } from './terrain/query.ts';
 import { UseSkill, type UseOptions, type UseResult } from './interact/use.ts';
@@ -141,7 +143,12 @@ export class BotSkills implements Skills {
         // the navigator's dig-through move breaks blocks with the Digger directly (not this.dig(), which would cancel the goto)
         actions: {
           dig: (p) => this.digger?.dig(p) ?? Promise.resolve({ ok: false, reason: 'no_digger' }),
-          // place / useBlock: wired by Track O's PlaceSkill / UseSkill
+          // pillar-up and door moves use the PlaceSkill / UseSkill objects directly for the same reason; the navigator names
+          // the neighbour it clicks across `face` (pillar: 'down'), the PlaceSkill the support face it clicks (pillar: 'up')
+          place: (p, face) =>
+            this.placer?.place(p, { face: oppositeFace(face), item: [...(opts.actions?.throwawayItems ?? DEFAULT_THROWAWAY)], look: false }) ??
+            Promise.resolve({ ok: false as const, reason: 'no_placer' }),
+          useBlock: (p) => this.user?.useBlock(p, { want: 'toggle' }) ?? Promise.resolve({ ok: false as const, reason: 'no_user' }),
           ...opts.actions,
         },
         inventory: opts.inventory ?? (inventory ? () => inventory : undefined),
