@@ -91,7 +91,7 @@ bumped build is pushed; the update notifier whispers the owners meanwhile.
 From the dev machine, after every merge that passed the gate:
 
 ```sh
-pnpm deploy:mac        # = git push chat:bedrockbot.git main && ssh chat bash ~/BedrockBot/deploy/mac/update.sh
+pnpm deploy:mac        # = git push chat:bedrockbot.git main && ssh chat "cd ~/BedrockBot && git pull -q && bash deploy/mac/update.sh"
 ```
 
 `update.sh` pulls, installs, rebuilds raknet-native if needed, runs the unit tests and restarts the
