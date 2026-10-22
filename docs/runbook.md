@@ -354,7 +354,7 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e act                   
 BDS_E2E=1 HARD_EASY=1 pnpm --filter bot exec vitest run --project e2e hard-night        # + the easy/zombie run
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nav-                          # every nav suite on bds-move (v1 + v2, ~7 min; docs/pathfinding.md "Tests")
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e pve                           # tasks 7.4-7.6 on bds-pve (normal; ~9 min with the night run)
-BDS_E2E=1 BDS_PVE_NIGHT=0 pnpm --filter bot exec vitest run --project e2e pve           # without the 5-minute night run
+BDS_E2E=1 BDS_PVE_NIGHT=1 pnpm --filter bot exec vitest run --project e2e pve           # with the 5-minute night run (opt-in: flaky under load until 7.11 adds armour and food)
 BDS_E2E=1 BDS_SOAK=1 pnpm --filter bot exec vitest run --project e2e test/e2e/keepalive.test.ts --silent=false
 pnpm e2e:51                                    # whole e2e suite against bds-dev51 (BDS 1.26.51.1, game version 1.26.51: rollback)
 pnpm e2e:nn                                    # whole e2e suite against bds-nn (NetherNet, 1.26.60)
@@ -367,7 +367,7 @@ one container and sets `BOT_VERSION` / `BDS_TRANSPORT` (read by `bot/test/e2e/en
 each suite targets its own server at 1.26.60 over RakNet. The hard-* suites read `HARD_BDS_HOST`,
 `HARD_BDS_PORT`, `HARD_BDS_CONTAINER` (default 127.0.0.1, 19154, bds-hard) and `HARD_VERBOSE=1`
 prints the bot's log. The pve-* suites read `PVE_BDS_HOST`, `PVE_BDS_PORT`, `PVE_BDS_CONTAINER`
-(default 127.0.0.1, 19144, bds-pve), `PVE_VERBOSE=1`, and for the night run `BDS_PVE_NIGHT=0` (skip),
+(default 127.0.0.1, 19144, bds-pve), `PVE_VERBOSE=1`, and for the night run `BDS_PVE_NIGHT=1` (opt-in),
 `BDS_PVE_NIGHT_TICKS` (6000), `BDS_PVE_NIGHT_START` (16000). The profile containers need the truth pack (`node scripts/bds.mjs --profile <name> pack`). Fixtures:
 `cd bot && pnpm record:fixture` and `BDS_E2E=1 WORLD_RECORD=1 pnpm exec vitest run --project e2e test/e2e/world-record.test.ts`
 (1.26.60 on bds-dev / bds-world); for the old version

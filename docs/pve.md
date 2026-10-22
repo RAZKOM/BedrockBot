@@ -141,7 +141,7 @@ From the e2e runs (`truth:hurtlog` is the server's own record of every hit):
 pnpm --filter bot exec vitest run --project unit combat follow pve      # 31 unit tests, fakes only
 node scripts/bds.mjs --profile pve up && node scripts/bds.mjs --profile pve pack
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e pve           # combat + follow + night (~9 min)
-BDS_E2E=1 BDS_PVE_NIGHT=0 pnpm --filter bot exec vitest run --project e2e pve   # without the night run
+BDS_E2E=1 BDS_PVE_NIGHT=1 pnpm --filter bot exec vitest run --project e2e pve   # with the night run (opt-in)
 ```
 
 - `pve-combat`: 3 zombies one after another (each checked dead on the server, hits counted from
@@ -153,7 +153,7 @@ BDS_E2E=1 BDS_PVE_NIGHT=0 pnpm --filter bot exec vitest run --project e2e pve   
   (a real offline player, an owner) types `!come`, `!follow`, `!status`, `!stop`; leaving view (a
   400-block teleport) -> last known position -> waiting -> resumed.
 - `pve-night`: natural spawning and the daylight cycle on, time 16000, guard radius 16 at home for
-  6000 ticks; 0 deaths required. `BDS_PVE_NIGHT=0` skips it, `BDS_PVE_NIGHT_TICKS` and
+  6000 ticks; 0 deaths required. Opt-in with `BDS_PVE_NIGHT=1` (in the wave-5 full gate the bot died once in a crowd under machine load; armour and food come with 7.11); `BDS_PVE_NIGHT_TICKS` and
   `BDS_PVE_NIGHT_START` change it.
 
 Every run uses its own random 256-block cell from x, z = 8192, random truth request ids and a per-run

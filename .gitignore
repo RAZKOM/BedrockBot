@@ -12,3 +12,6 @@ recordings/
 .env.*
 *_packetReadError.txt
 bot/logs/
+
+# agent worktrees (Claude Code isolation)
+.claude/worktrees/
