@@ -66,6 +66,8 @@ export interface NavigatorOptions {
   unloadedWaitTicks?: number;
   /** Per-move timeout: `factor` x the move's estimated ticks + `margin`. Default 2 and 10. */
   moveTimeout?: { factor: number; margin: number };
+  /** Track S: extra cost per feet cell, built afresh for every plan (mob / spawner avoidance, nav/avoidance.ts). */
+  cellCost?: () => PathOptions['cellCost'];
 }
 
 export type ReplanReason = 'start' | 'correction' | 'block' | 'partial' | 'stuck' | 'timeout' | 'action' | 'retry' | 'ahead';
@@ -206,8 +208,11 @@ export class Navigator {
   private readonly unsubs: (() => void)[] = [];
   /** Report of the last goto (also while it runs). */
   lastReport: GotoReport | undefined;
+  /** Track S: the `cellCost` option, settable after construction (the survival kit installs avoidance). */
+  cellCost: NavigatorOptions['cellCost'];
 
   constructor(loop: InputLoop, world: NavWorld, opts: NavigatorOptions = {}) {
+    this.cellCost = opts.cellCost; // Track S
     this.loop = loop;
     this.grid = new NavGrid(world.source);
     this.log = opts.logger ?? silentLogger;
@@ -285,6 +290,7 @@ export class Navigator {
             }
           : handBreakTicks),
       ...(noBreak ? { noBreak } : {}),
+      cellCost: this.cellCost?.() ?? this.pathOpts.cellCost, // Track S: avoidance, read live each plan
     };
   }
 
@@ -659,7 +665,7 @@ export class Navigator {
     a.legFrom = from;
     a.legTo = to;
     const stopAtEnd = to < last || a.status === 'found';
-    a.follower = new PathFollower(a.path.slice(from, to + 1), this.grid, { sprint: a.opts.sprint, stopAtEnd, maxTurnDeg: this.maxTurn, guard: a.guard });
+    a.follower = new PathFollower(a.path.slice(from, to + 1), this.grid, { sprint: a.opts.sprint, stopAtEnd, maxTurnDeg: this.maxTurn, guard: a.guard, cellCost: a.pathOpts.cellCost }); // Track S: cellCost
     a.passedAbs = from;
     a.aimAbs = from;
     a.passTick = a.t;

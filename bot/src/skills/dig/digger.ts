@@ -123,8 +123,11 @@ export class Digger {
   private lastBreakTick: bigint | undefined;
   /** Closing actions (stop_break / abort_break) for a finished job, sent with the next input. */
   private pending: BlockAction[] = [];
+  /** Track S: tool choice skips slots whose item fails this (worn tools, skills/survival/tools.ts); default all ok. */
+  toolOk: (item: ItemStack) => boolean;
 
-  constructor(opts: { loop: DigLoop; world: DigWorld; hotbar?: SlotSelector; logger?: Logger }) {
+  constructor(opts: { loop: DigLoop; world: DigWorld; hotbar?: SlotSelector; logger?: Logger; toolOk?: (item: ItemStack) => boolean }) {
+    this.toolOk = opts.toolOk ?? (() => true); // Track S
     this.loop = opts.loop;
     this.world = opts.world;
     this.hotbar = opts.hotbar;
@@ -178,7 +181,7 @@ export class Digger {
     const inv = this.world.inventory;
     let slot = inv.selected;
     if (opts.tool === undefined || opts.tool === 'best') {
-      slot = chooseTool(mining, inv.slots, inv.selected, opts.conditions)?.slot ?? inv.selected;
+      slot = chooseTool(mining, inv.slots.map((s) => (s && !this.toolOk(s) ? null : s)), inv.selected, opts.conditions)?.slot ?? inv.selected; // Track S: worn tools count as an empty hand
     } else if (typeof opts.tool === 'number') {
       if (!Number.isInteger(opts.tool) || opts.tool < 0 || opts.tool >= HOTBAR_SIZE) return Promise.resolve({ ok: false, reason: 'bad_slot' });
       slot = opts.tool;

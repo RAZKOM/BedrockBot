@@ -141,12 +141,12 @@ export function weaponScore(name: string | undefined): number {
 }
 
 /** The hotbar slot (0..8) with the best weapon; the selected slot wins ties. undefined = empty hotbar. */
-export function bestWeaponSlot(slots: readonly (ItemStack | null)[], selected: number): number | undefined {
+export function bestWeaponSlot(slots: readonly (ItemStack | null)[], selected: number, toolOk: (item: ItemStack) => boolean = () => true): number | undefined {
   let best: number | undefined;
   let bestScore = 0;
   for (let i = 0; i < 9; i++) {
     const it = slots[i];
-    if (!it || it.count <= 0) continue;
+    if (!it || it.count <= 0 || !toolOk(it)) continue; // Track S: worn weapons skipped
     const s = weaponScore(it.name) + (i === selected ? 0.5 : 0);
     if (s > bestScore) {
       bestScore = s;
@@ -227,8 +227,11 @@ export class CombatController {
   private readonly unsubs: (() => void)[] = [];
   /** Totals over all fights (metrics). */
   readonly totals = { fights: 0, kills: 0, attacks: 0, landed: 0 };
+  /** Track S: weapon choice skips items failing this (worn weapons, skills/survival/tools.ts); default all ok. */
+  toolOk: (item: ItemStack) => boolean = () => true;
 
-  constructor(deps: CombatDeps) {
+  constructor(deps: CombatDeps & { toolOk?: (item: ItemStack) => boolean }) {
+    if (deps.toolOk) this.toolOk = deps.toolOk; // Track S
     this.d = deps;
     this.log = deps.logger ?? silentLogger;
     this.unsubs.push(
@@ -262,7 +265,7 @@ export class CombatController {
   /** Select the best weapon in the hotbar (sword > axe > anything). Returns its name, or null. */
   selectWeapon(): string | null {
     const inv = this.d.inventory;
-    const slot = bestWeaponSlot(inv.slots, inv.selected);
+    const slot = bestWeaponSlot(inv.slots, inv.selected, this.toolOk); // Track S
     if (slot === undefined) return null;
     if (slot !== inv.selected) this.d.hotbar?.select(slot);
     return inv.slots[slot]?.name ?? null;
