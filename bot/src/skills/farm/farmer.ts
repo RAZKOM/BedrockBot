@@ -5,8 +5,18 @@
 //             crops (when `useBoneMeal()` and bone meal is carried)
 //   stand     pick the standing cell that reaches the most work (dig and click reach), preferring
 //             cells that are not farmland; refuse a route with a drop onto farmland (trampling)
-//   act       at the cell: harvest (dig, 1 tick) and replant each mature crop in reach, bone meal
-//             growing ones until mature then harvest and replant, collect the drops, plant the rest
+//   act       at the cell: harvest (dig, 1 tick) each mature crop in reach, bone meal growing ones
+//             until mature then harvest them, let the drops next to the body be picked up, plant the
+//             empty cells in reach, collect the drops, plant the rest
+//   pause     pause() (the process manager pre-empts `!farm`) cancels the running skill and holds the
+//             loop; resume() goes on with a fresh scan (Track Z)
+//
+// Planting never races a pickup (Track Z, measured on BDS 1.26.60.6, docs/farming.md): the click
+// carries the held stack (count, stack id); when the server merges a picked-up seed into that stack
+// after the client built the click but before it processes it, it refuses the click (`rejected`:
+// update_block with the old block, then a full inventory resync). Harvest drops are picked up about
+// 10 ticks after they spawn, so the farmer harvests everything in reach first and waits (at most
+// SETTLE_TICKS) while a drop of the seed lies within pickup range before each planting.
 //   deposit   inventory full -> walk to the chest, deposit crops and surplus seeds, come back
 //   wait      nothing to do -> re-scan every `waitTicks` (1200) until stop()
 //
@@ -28,7 +38,7 @@ import type { GotoOptions, SkillResult } from '../types.ts';
 import type { ClickResult } from './click.ts';
 import { BONE_MEAL, FARMLAND, FARM_ITEMS, SEEDS, fieldCell, posKey, scanField, type CropDef, type FieldCell, type FieldScan } from './crops.ts';
 
-export type FarmState = 'idle' | 'scan' | 'walk' | 'harvest' | 'bonemeal' | 'plant' | 'collect' | 'to_chest' | 'deposit' | 'waiting' | 'full' | 'stopped' | 'failed';
+export type FarmState = 'idle' | 'scan' | 'walk' | 'harvest' | 'bonemeal' | 'plant' | 'collect' | 'to_chest' | 'deposit' | 'waiting' | 'full' | 'paused' | 'stopped' | 'failed';
 
 export interface FarmOptions {
   /** Centre of the field (feet position or block). */
@@ -76,6 +86,12 @@ export interface FarmStats {
   plantTicks: number[];
   /** Plantings retried once after a `rejected` answer. */
   plantRetries: number;
+  /** Track Z: `rejected` answers to plantings (first tries and retries). */
+  plantRejected: number;
+  /** Track Z: ticks waited for drops next to the body to be picked up before a planting. */
+  settleTicks: number;
+  /** Track Z: times the loop was paused (pre-empted) and resumed. */
+  pauses: number;
 }
 
 /** The skills the farmer uses (BotSkills satisfies it). */
@@ -174,6 +190,13 @@ export function bodyNear(p: Vec3, feet: Vec3, pad: number): boolean {
   return feet.x + w > p.x && feet.x - w < p.x + 1 && feet.z + w > p.z && feet.z - w < p.z + 1 && feet.y < p.y + 1 && feet.y + 1.8 > p.y;
 }
 
+/** Track Z: a drop this close to the feet (horizontally, blocks) is about to be picked up: plantings wait for it. */
+export const PICKUP_RANGE = 2;
+/** Track Z: a drop older than this (ms since first seen) that is still lying there is not being picked up. */
+export const PICKUP_FRESH_MS = 1000;
+/** Track Z: at most this many ticks of waiting for such a pickup before a planting (drops are picked up about 10 ticks after they spawn). */
+export const SETTLE_TICKS = 16;
+
 /** Falls up to this height onto farmland never trampled it (measured: 0/16 up to 0.75, 3/12 at 0.9 to 1.1). */
 export const SAFE_FALL = 0.75;
 
@@ -206,6 +229,8 @@ export class FarmTask {
   private readonly standFails = new Map<string, number>();
   private readonly doneFns = new Set<(s: FarmState) => void>();
   private chest: Vec3 | undefined;
+  private paused = false;
+  private beforePause: FarmState = 'scan';
 
   constructor(deps: FarmDeps) {
     this.d = deps;
@@ -241,9 +266,35 @@ export class FarmTask {
   stop(): void {
     if (!this.running) return;
     this.gen++;
+    this.paused = false;
     this.d.skills.cancel();
     this.d.cancelClick?.();
     this.end(this.gen, 'stopped');
+  }
+
+  /** Pre-empted (process manager): cancel the running skill at once and hold the loop until resume(). */
+  pause(): void {
+    if (!this.running || this.paused) return;
+    this.paused = true;
+    this.stats.pauses++;
+    this.beforePause = this.state;
+    this.state = 'paused';
+    this.d.skills.cancel();
+    this.d.cancelClick?.();
+    this.log.info('farm: paused');
+  }
+
+  /** Go on after pause() with a fresh scan. */
+  resume(): void {
+    if (!this.paused) return;
+    this.paused = false;
+    // a short pause may end before the loop noticed it (e.g. inside a wait): show what it does again
+    if (this.state === 'paused') this.state = this.beforePause;
+    this.log.info('farm: resumed');
+  }
+
+  get isPaused(): boolean {
+    return this.paused;
   }
 
   onDone(fn: (s: FarmState) => void): () => void {
@@ -279,11 +330,16 @@ export class FarmTask {
     return gen === this.gen;
   }
 
+  /** Alive and not paused: the work steps go on. */
+  private go(gen: number): boolean {
+    return gen === this.gen && !this.paused;
+  }
+
   private end(gen: number, state: FarmState): FarmState {
     if (gen !== this.gen && state !== 'stopped') return this.state;
     this.state = state;
     this.stats.finishedAt = this.now();
-    this.log.info(`${this.summary()}${this.lastError ? ` (${this.lastError})` : ''}`);
+    this.log.info(`${this.summary()}; ${this.stats.plantRejected} plantings rejected, ${this.stats.settleTicks} ticks waited for pickups${this.lastError ? ` (${this.lastError})` : ''}`);
     for (const fn of [...this.doneFns]) fn(state);
     return state;
   }
@@ -295,6 +351,11 @@ export class FarmTask {
     let depositFails = 0;
     while (this.alive(gen)) {
       if (o.maxRounds !== undefined && this.stats.rounds >= o.maxRounds) return this.end(gen, 'idle');
+      if (this.paused) {
+        this.state = 'paused';
+        await this.d.waitTicks(5);
+        continue;
+      }
       if (!this.d.ready()) {
         this.state = 'waiting';
         await this.d.waitTicks(20);
@@ -312,6 +373,7 @@ export class FarmTask {
         }
         const ok = await this.depositTrip(gen, chest);
         if (!this.alive(gen)) break;
+        if (this.paused) continue; // pre-empted on the way: not a failed trip
         if (!ok) {
           if (++depositFails >= 3) {
             this.lastError = 'deposit failed 3 times in a row';
@@ -331,7 +393,9 @@ export class FarmTask {
         if (this.dropsNear(o.center, radius + 2) && inv.freeSlots().length > 0) {
           this.state = 'collect';
           this.stats.collectRounds++;
-          const c = await this.d.skills.collect(radius + 2, 300, { origin: o.center, filter: (i) => FARM_ITEMS.has(i.name) });
+          // dropsNear looks in a square; the collect radius is a circle: cover the square's corners (Track Z: a
+          // drop in a corner of a 9 x 9 field was 6.4 blocks from the centre and stayed there)
+          const c = await this.d.skills.collect(Math.ceil((radius + 2) * Math.SQRT2), 300, { origin: o.center, filter: (i) => FARM_ITEMS.has(i.name) });
           this.addCollected(c);
           if (!this.alive(gen)) break;
           if (c.pickedUp > 0) continue;
@@ -374,7 +438,7 @@ export class FarmTask {
   }
 
   private async sleep(gen: number, ticks: number): Promise<void> {
-    for (let t = 0; t < ticks && this.alive(gen); t += 20) await this.d.waitTicks(Math.min(20, ticks - t));
+    for (let t = 0; t < ticks && this.go(gen); t += 20) await this.d.waitTicks(Math.min(20, ticks - t));
   }
 
   private scan(center: Vec3, radius: number): FieldScan {
@@ -478,22 +542,29 @@ export class FarmTask {
       const eye = this.eyeNow();
       return eye ? [...cells].sort((a, b) => closestDistance(eye, a.crop) - closestDistance(eye, b.crop)) : cells;
     };
-    // 1. harvest + replant
+    const plantAll = async (cells: FieldCell[]): Promise<boolean> => {
+      for (const c0 of byDistance(cells)) {
+        if (!this.go(gen)) return false;
+        const c = fresh(c0);
+        if (c.state !== 'empty' || !this.canPlant(c) || !this.inReachNow('plant', c)) continue;
+        await this.plant(gen, c);
+      }
+      return this.go(gen);
+    };
+    // 1. harvest everything mature in reach (planting waits: the drops are picked up meanwhile)
     for (const c0 of byDistance(scan.mature)) {
-      if (!this.alive(gen)) return;
+      if (!this.go(gen)) return;
       const c = fresh(c0);
       if (c.state !== 'mature' || !this.inReachNow('harvest', c)) continue;
-      if (!(await this.harvest(c))) continue;
-      if (!this.alive(gen)) return;
-      if (this.canPlant(c) && this.inReachNow('plant', c)) await this.plant(c);
+      await this.harvest(c);
     }
-    // 2. bone meal growing crops in reach, then harvest + replant
+    // 2. bone meal growing crops in reach, then harvest them
     if (this.boneMealOn()) {
       for (const c0 of byDistance([...scan.growing, ...scan.empty])) {
-        if (!this.alive(gen) || !this.boneMealOn()) break;
+        if (!this.go(gen) || !this.boneMealOn()) break;
         let c = fresh(c0);
         if (c.state !== 'growing' || !this.inReachNow('bonemeal', c)) continue;
-        for (let i = 0; i < (this.opts?.maxBoneMealPerCrop ?? 8) && c.state === 'growing' && this.boneMealOn() && this.alive(gen); i++) {
+        for (let i = 0; i < (this.opts?.maxBoneMealPerCrop ?? 8) && c.state === 'growing' && this.boneMealOn() && this.go(gen); i++) {
           this.state = 'bonemeal';
           const r = await this.d.click(c.crop, BONE_MEAL);
           if (!r.ok) {
@@ -504,31 +575,64 @@ export class FarmTask {
           this.stats.boneMealUsed++;
           c = fresh(c);
         }
-        if (!this.alive(gen)) return;
+        if (!this.go(gen)) return;
         if (c.state === 'mature') {
           this.stats.boneMealGrown++;
-          if (await this.harvest(c)) {
-            if (this.canPlant(c) && this.inReachNow('plant', c)) await this.plant(c);
-          }
+          await this.harvest(c);
         }
       }
     }
-    if (!this.alive(gen)) return;
-    // 3. collect the drops around here
+    // 3. replant the harvested cells (and any empty one) in reach
+    if (!(await plantAll([...scan.mature, ...scan.empty, ...scan.growing]))) return;
+    // 4. collect the drops around here
     const here = this.d.position();
     if (here && this.dropsNear(here, 6)) {
       this.state = 'collect';
       this.stats.collectRounds++;
       const r = await this.d.skills.collect(6, 200, { origin: here, filter: (i) => FARM_ITEMS.has(i.name) });
       this.addCollected(r);
-      if (!this.alive(gen)) return;
+      if (!this.go(gen)) return;
     }
-    // 4. plant what is still empty in reach (seeds may have come with the drops)
-    for (const c0 of byDistance([...scan.empty, ...scan.mature])) {
-      if (!this.alive(gen)) return;
-      const c = fresh(c0);
-      if (c.state !== 'empty' || !this.canPlant(c) || !this.inReachNow('plant', c)) continue;
-      await this.plant(c);
+    // 5. plant what is still empty in reach (seeds may have come with the drops)
+    await plantAll([...scan.empty, ...scan.mature, ...scan.growing]);
+  }
+
+  /** First time each item drop was seen (ms): only fresh drops are still waiting for their pickup delay. */
+  private readonly dropSeen = new Map<bigint, number>();
+
+  /** Note the drops in the world now (called after each harvest, so a drop's first sighting is about its spawn). */
+  private noteDrops(): void {
+    const ents = this.d.world.entities;
+    if (!ents) return;
+    const now = this.now();
+    for (const [id, e] of ents) if (e.type === 'minecraft:item' && !this.dropSeen.has(id)) this.dropSeen.set(id, now);
+    if (this.dropSeen.size > 512) for (const id of [...this.dropSeen.keys()]) if (!ents.has(id)) this.dropSeen.delete(id);
+  }
+
+  /**
+   * A fresh drop of `item` (seen less than PICKUP_FRESH_MS ago) lies within pickup range of the body:
+   * the server is about to merge it into the held stack. An older drop that is still there is out of
+   * the server's pickup range (it would have been picked up) and does not count.
+   */
+  private pickupPending(item: string): boolean {
+    const ents = this.d.world.entities;
+    const p = this.d.position();
+    if (!ents || !p) return false;
+    this.noteDrops();
+    const now = this.now();
+    for (const [id, e] of ents) {
+      if (e.type !== 'minecraft:item' || e.item?.name !== item) continue;
+      if (now - (this.dropSeen.get(id) ?? now) > PICKUP_FRESH_MS) continue;
+      if (Math.abs(e.pos.x - p.x) <= PICKUP_RANGE && Math.abs(e.pos.z - p.z) <= PICKUP_RANGE && e.pos.y > p.y - 1.5 && e.pos.y < p.y + 2.8) return true;
+    }
+    return false;
+  }
+
+  /** Wait (at most SETTLE_TICKS) until no drop of `item` is about to be picked up. */
+  private async settle(gen: number, item: string): Promise<void> {
+    for (let i = 0; i < SETTLE_TICKS && this.go(gen) && this.pickupPending(item); i++) {
+      this.stats.settleTicks++;
+      await this.d.waitTicks(1);
     }
   }
 
@@ -541,6 +645,7 @@ export class FarmTask {
       return false;
     }
     this.stats.harvested++;
+    this.noteDrops();
     const k = c.kind?.block ?? r.block ?? '?';
     this.stats.harvestedByCrop[k] = (this.stats.harvestedByCrop[k] ?? 0) + 1;
     if (r.ticks !== undefined) this.stats.harvestTicks.push(r.ticks);
@@ -548,17 +653,23 @@ export class FarmTask {
     return true;
   }
 
-  private async plant(c: FieldCell): Promise<boolean> {
+  private async plant(gen: number, c: FieldCell): Promise<boolean> {
     const kind = c.kind;
     if (!kind) return false;
     this.state = 'plant';
+    await this.settle(gen, kind.seed);
+    if (!this.go(gen)) return false;
     let r = await this.d.skills.place(c.crop, { face: 'up', item: kind.seed });
     if (!r.ok && r.reason === 'rejected') {
-      // Seen right after harvests while drops were being picked up: the seed stack (and its stack id)
-      // changed under the click. One retry with the current item after the inventory settled.
+      // A pickup merged into the seed stack between the click and the server reading it (the held
+      // stack no longer matched). Should not happen after settle(); kept as a safety net: one retry
+      // with the current item after the server's inventory resync.
+      this.stats.plantRejected++;
       this.stats.plantRetries++;
       await this.d.waitTicks(3);
+      await this.settle(gen, kind.seed);
       r = await this.d.skills.place(c.crop, { face: 'up', item: kind.seed });
+      if (!r.ok && r.reason === 'rejected') this.stats.plantRejected++;
     }
     if (!r.ok) {
       if (r.reason !== 'interrupted') this.failCell(c);
@@ -660,6 +771,9 @@ function newStats(): FarmStats {
     harvestTicks: [],
     plantTicks: [],
     plantRetries: 0,
+    plantRejected: 0,
+    settleTicks: 0,
+    pauses: 0,
   };
 }
 

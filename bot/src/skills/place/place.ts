@@ -454,7 +454,21 @@ export class PlaceSkill {
     }
     if (cellInBody(p, loop.state.pos)) return { ...result, ok: false, reason: 'in_body' };
 
-    const verdict = await this.clickAndWait(p, here.name, cand, slot, opts.timeoutTicks ?? 20);
+    // Track Z: the latest inventory state right before the click. The stack may have moved, been
+    // used up or the selection changed during the look ticks (another skill, a server resync): select
+    // again; the held item itself is built from the slot's current contents in clickAndWait.
+    let clickSlot = slot;
+    const inv = world.inventory;
+    if (inv.slots[slot]?.name !== item || (inv.slots[slot]?.count ?? 0) <= 0 || inv.selected !== slot) {
+      const again = await this.selectItem(opts.item);
+      if (!again.ok) return { ...result, ok: false, reason: again.reason };
+      clickSlot = again.slot;
+      result.slot = clickSlot;
+      await loop.waitTicks(1);
+      if (this.cancelled) return { ...result, ok: false, reason: 'interrupted' };
+    }
+
+    const verdict = await this.clickAndWait(p, here.name, cand, clickSlot, opts.timeoutTicks ?? 20);
     const out: PlaceResult = verdict.ok
       ? { ...result, ok: true, block: verdict.block, ticks: Number(verdict.at - t0), clickTicks: verdict.clickTicks, ms: verdict.ms - ms0 }
       : { ...result, ok: false, reason: verdict.reason, block: here.name, ticks: Number(loop.state.tick - t0) };
@@ -563,6 +577,10 @@ export class PlaceSkill {
       if (after.name === original) verdict = { ok: false, reason: 'rejected' };
       else verdict = { ok: true, block: after.name, at: loop.state.tick, ms: performance.now() };
     });
+    // Track Z: built at the last moment from the slot's current stack (count and stack id as the server
+    // last reported them). A pickup that the server merges into this stack after this point still makes
+    // it refuse the click ('rejected'; docs/farming.md "Rejected plantings"): callers that place right
+    // after a harvest wait for nearby drops first (skills/farm/farmer.ts settle()).
     const held = wireItemOf(inv.slots[slot], inv.rawItem(0, slot) ?? this.d.hotbar?.rawItem(slot));
     const tick0 = loop.state.tick;
     source.queue(

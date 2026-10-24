@@ -374,3 +374,56 @@ describe('world cache: misc', () => {
     expect(packed).toBeLessThan(raw / 4);
   });
 });
+
+describe('world cache: seen marks (Track Z, ore memory)', () => {
+  const IRON_AT = { x: 5, y: -49, z: 5 };
+  const COAL_AT = { x: 3, y: -50, z: 3 };
+
+  it('flags a mark seen, keeps it through same-block updates, drops it with the block', () => {
+    const { src, cache } = setup();
+    expect(cache.markSeen(IRON_AT, 'iron_ore')).toBe(true);
+    expect(cache.markSeen(IRON_AT, 'coal_ore')).toBe(false); // another name: no such mark
+    expect(cache.markSeen({ x: 6, y: -49, z: 6 }, 'iron_ore')).toBe(false);
+    expect(cache.seenMarks({ x: 0, y: -49, z: 0 }, 32)).toEqual([{ ...IRON_AT, name: 'iron_ore', exposed: true, seen: true }]);
+    expect(cache.loadedMarks({ x: 0, y: -49, z: 0 }, 32).some((m) => m.name === 'coal_ore')).toBe(true);
+    src.emit('update_block', { position: IRON_AT, block_runtime_id: IRON, flags: {}, layer: 0 });
+    expect(cache.seenMarks({ x: 0, y: -49, z: 0 }, 32)).toHaveLength(1);
+    src.emit('update_block', { position: IRON_AT, block_runtime_id: STONE, flags: {}, layer: 0 });
+    expect(cache.seenMarks({ x: 0, y: -49, z: 0 }, 32)).toHaveLength(0);
+  });
+
+  it('survives a restart: on disk (bit 1 of the flags), carried onto the column when it loads again, and from unloaded columns', () => {
+    const dir = tmp();
+    const a = setup(dir);
+    a.cache.markSeen(IRON_AT, 'iron_ore');
+    expect(a.cache.markSeen(COAL_AT, 'coal_ore')).toBe(true); // buried, but the memory decides that
+    a.cache.close();
+    // unloaded: a fresh reader sees the flags
+    const fresh = new WorldCache({ dir, readOnly: true, logger: silentLogger });
+    const marks = fresh.cachedSummary(0, 0)!.markList().filter((m) => m.seen);
+    expect(marks.map((m) => m.name).sort()).toEqual(['coal_ore', 'iron_ore']);
+    expect(fresh.seenMarks({ x: 0, y: -49, z: 0 }, 32)).toHaveLength(2);
+    // a new process: the column loads again and keeps the flags (decodeSeenMarks from the record)
+    const b = setup(dir);
+    expect(b.cache.liveSummary(0, 0)!.markList().filter((m) => m.seen)).toHaveLength(2);
+    expect(b.cache.stats.seenCarried).toBe(2);
+    expect(b.cache.seenMarks({ x: 0, y: -49, z: 0 }, 32)).toHaveLength(2);
+    // the record still decodes for readers that only know bit 0
+    const s = decodeSummary(encodeSummary(b.cache.liveSummary(0, 0)!));
+    expect(s.markList().find((m) => m.name === 'iron_ore')).toMatchObject({ exposed: true, seen: true });
+  });
+});
+
+describe('log clusters (Track Z, find.ts)', () => {
+  it('groups logs within 6 blocks, nearest cluster first, skips blacklisted logs', async () => {
+    const { logClusters, findLogClusters } = await import('../../../src/world/find.ts');
+    const at = (x: number, y: number, z: number, cached?: true) => ({ x, y, z, ...(cached ? { cached } : {}) });
+    const logs = [at(0, 0, 0), at(0, 1, 0), at(4, 0, 3), at(100, 64, 0, true), at(103, 64, 2, true), at(40, 0, 40)];
+    const c = logClusters(logs, { x: 90, y: 64, z: 0 });
+    expect(c.map((k) => k.logs.length)).toEqual([2, 1, 3]);
+    expect(c[0]!.cached).toBe(2);
+    expect(c[0]!.distance).toBeCloseTo(Math.hypot(10.5, 0.5, 0.5), 5);
+    const world = { find: () => logs };
+    expect(findLogClusters(world, { x: 0, y: 0, z: 0 }, 200, { skip: (p) => p.x >= 100 }).map((k) => k.logs.length)).toEqual([3, 1]);
+  });
+});

@@ -9,10 +9,16 @@
 // answers "<cmd> needs a task that can walk (...)". Farming and mining exclude each other, and both
 // stop the PvE foreground behaviour (follow, come, kill) first.
 import type { Logger } from '../log.ts';
-import { createFarmer, createMiner } from '../skills/farm/index.ts';
+import { createFarmer } from '../skills/farm/index.ts';
 import type { FarmTask } from '../skills/farm/farmer.ts';
-import type { MineTask } from '../skills/mine/miner.ts';
+import { resolveTargets, type MineTask } from '../skills/mine/miner.ts';
+import type { OreMemory } from '../skills/mine/seen.ts';
+import { createMinerFor } from '../skills/mine/wire.ts';
+import { useCachedForests, type GatherWoodTask } from '../tasks/gatherWood.ts';
 import type { Mobility } from '../tasks/mobility.ts';
+import { FarmProcess } from '../tasks/process/farm.ts';
+import type { ProcessManager } from '../tasks/process/manager.ts';
+import { MineProcess } from '../tasks/process/mine.ts';
 import { Containers } from '../world/containers.ts';
 import { Hotbar } from '../world/hotbar.ts';
 import type { PacketSource } from '../world/types.ts';
@@ -112,23 +118,56 @@ export interface FarmCommandDeps {
   /** Settings (Track Q's registry can drive them): bone meal on/off, mining tunnel cap. */
   useBoneMeal?: () => boolean;
   mineTunnelLen?: () => number;
+  /** Track Z: setting `mineSeenOnly` (default false: any known ore). */
+  mineSeenOnly?: () => boolean;
+  /**
+   * Track Z: the afk task's process manager. With it `!farm` and `!mine` are user processes
+   * (pre-empted by guard / flee / night and resumed, held by `!pause`, ended by `!stop`, shown by
+   * `!status`); `stopOthers` is not used then (commands stack). Without it they run directly (tests).
+   */
+  processes?: ProcessManager;
+  /** Track Z: the task's own Hotbar and Containers (already attached to the skills); one set per bot. */
+  hotbar?: Hotbar;
+  containers?: Containers;
+  /** Track Z: passive ore scan over the world cache's marks every this many ticks (0 = off). Default 100. */
+  oreScanTicks?: number;
+  /** Track Z: the afk task's gather task (`!gather`): given the remembered forests (tasks/gatherWood.ts useCachedForests). */
+  gather?: GatherWoodTask;
+}
+
+/** Track Z: passive ore scan radius (blocks around the bot). */
+export const ORE_SCAN_RADIUS = 24;
+
+export interface FarmCommandsResult {
+  farm?: FarmTask;
+  mine?: MineTask;
+  memory?: OreMemory;
+  /** The running processes (process mode). */
+  farmProcess?(): FarmProcess | undefined;
+  mineProcess?(): MineProcess | undefined;
 }
 
 /**
- * Register !farm and !mine on the afk task's movement stack. Creates a Hotbar and Containers for the
- * skills (tool choice, seeds, bone meal, the chest) once, at registration (before connecting, so they
- * see the first inventory packets).
+ * Register !farm and !mine on the afk task's movement stack. Uses the task's Hotbar and Containers
+ * when given (Track Z: one Containers per bot, two would each log the other's item stack responses
+ * as `unknown slot`); otherwise creates its own once, at registration (before connecting, so they see
+ * the first inventory packets).
  */
-export function registerFarmCommands(deps: FarmCommandDeps): { farm?: FarmTask; mine?: MineTask } {
+export function registerFarmCommands(deps: FarmCommandDeps): FarmCommandsResult {
   const { mob, conn } = deps;
   if (!mob) {
     registerFarmChat(deps.chat, undefined);
     return {};
   }
   const log = deps.logger?.('farm');
-  const hotbar = new Hotbar(conn, { inventory: mob.world.inventory, runtimeId: () => mob.world.self.runtimeId });
-  const containers = new Containers(conn, mob.world.inventory, log ? { logger: log } : {});
-  mob.skills.attach({ hotbar, containers, source: conn });
+  useCachedForests(deps.gather, mob.world, mob.skills.nav.blacklist); // Track Z: !gather walks to remembered forests
+  let hotbar = deps.hotbar;
+  let containers = deps.containers;
+  if (!hotbar || !containers) {
+    hotbar ??= new Hotbar(conn, { inventory: mob.world.inventory, runtimeId: () => mob.world.self.runtimeId });
+    containers ??= new Containers(conn, mob.world.inventory, log ? { logger: log } : {});
+    mob.skills.attach({ hotbar, containers, source: conn });
+  }
   const parts = {
     skills: mob.skills,
     world: mob.world,
@@ -140,11 +179,66 @@ export function registerFarmCommands(deps: FarmCommandDeps): { farm?: FarmTask; 
     ...(log ? { log } : {}),
   };
   const { farm } = createFarmer(parts, deps.useBoneMeal ? { useBoneMeal: deps.useBoneMeal } : {});
-  const { mine } = createMiner(parts, deps.mineTunnelLen ? { tunnelLen: deps.mineTunnelLen } : {});
+  const { mine, memory } = createMinerFor(parts, {
+    ...(deps.mineTunnelLen ? { tunnelLen: deps.mineTunnelLen } : {}),
+    ...(deps.mineSeenOnly ? { seenOnly: deps.mineSeenOnly } : {}),
+  });
   const here = () => {
     const p = mob.position();
     return p ? { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) } : undefined;
   };
+  // Track Z: passive ore memory (only with a world cache: its marks make the scan cheap)
+  const every = deps.oreScanTicks ?? 100;
+  if (every > 0) {
+    let n = 0;
+    mob.loop.onBeforeStep(() => {
+      if (++n % every !== 0 || !mob.world.cache || !parts.ready()) return;
+      const p = mob.position();
+      if (p) memory.scanMarks(p, ORE_SCAN_RADIUS);
+    });
+  }
+  const pm = deps.processes;
+  if (pm) {
+    let fp: FarmProcess | undefined;
+    let mp: MineProcess | undefined;
+    const live = <P extends { done: boolean }>(p: P | undefined) => (p && !p.done ? p : undefined);
+    registerFarmChat(deps.chat, {
+      farm: (radius) => {
+        const at = here();
+        if (!at) return 'farm: not ready yet';
+        const m = live(mp);
+        if (m) pm.stop(m, 'stopped'); // farming and mining exclude each other
+        fp = pm.add(new FarmProcess(farm, { center: { x: at.x + 0.5, y: at.y, z: at.z + 0.5 }, radius }));
+        return `farming r=${radius} around ${at.x} ${at.y} ${at.z}${pm.paused ? ' (held: !resume)' : ''}`;
+      },
+      farmStop: () => {
+        const p = live(fp);
+        if (!p) return 'not farming';
+        pm.stop(p, 'stopped');
+        return `stopped; ${farm.summary()}`;
+      },
+      farmStatus: () => `${farm.summary()}${live(fp) ? '' : ' (no farm process)'}`,
+      mine: (block, n, onEnd) => {
+        if (!here()) return 'mine: not ready yet';
+        const f = live(fp);
+        if (f) pm.stop(f, 'stopped');
+        const p = new MineProcess(mine, { block, count: n });
+        mp = pm.add(p);
+        void p.result.then((s) => {
+          if (s !== 'stopped') onEnd(mineEndLine(mine));
+        });
+        return `mining ${n} ${[...resolveTargets(block)].join('/')}${pm.paused ? ' (held: !resume)' : ''}`;
+      },
+      mineStop: () => {
+        const p = live(mp);
+        if (!p) return 'not mining';
+        pm.stop(p, 'stopped');
+        return mineEndLine(mine);
+      },
+      mineStatus: () => `${mine.summary()}, ${memory.size} seen (${memory.recalled} remembered)`,
+    });
+    return { farm, mine, memory, farmProcess: () => live(fp), mineProcess: () => live(mp) };
+  }
   registerFarmChat(deps.chat, {
     farm: (radius) => {
       const at = here();
@@ -178,5 +272,5 @@ export function registerFarmCommands(deps: FarmCommandDeps): { farm?: FarmTask; 
     },
     mineStatus: () => `${mine.summary()}, ${mine.status().seen as number} seen`,
   });
-  return { farm, mine };
+  return { farm, mine, memory };
 }

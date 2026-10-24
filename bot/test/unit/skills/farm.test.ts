@@ -308,6 +308,98 @@ describe('FarmTask', () => {
     expect(await run).toBe('stopped');
     expect(h.calls).toContain('cancel');
   });
+
+  // ---- Track Z ----
+
+  it('harvests everything in reach first and waits for a fresh seed drop next to the body before planting', async () => {
+    const h = harness();
+    field(h.w, 0, 0, 3, 1, 'wheat', 7);
+    h.inv.add('wheat_seeds', 4);
+    const ents = new Map<bigint, { type: string; pos: Vec3; item?: ItemStack }>();
+    (h.deps.world as { entities?: typeof ents }).entities = ents;
+    const dig0 = h.deps.skills.dig.bind(h.deps.skills);
+    let n = 0n;
+    h.deps.skills.dig = async (p, o) => {
+      const r = await dig0(p, o);
+      // the drop lands on the body: picked up after a few ticks
+      const id = ++n;
+      ents.set(id, { type: 'minecraft:item', pos: { ...h.pos }, item: { name: 'wheat_seeds', networkId: 1, count: 1, metadata: 0 } });
+      setTimeout(() => ents.delete(id), 15);
+      return r;
+    };
+    const f = new FarmTask(h.deps);
+    expect(await f.start({ center: { x: 1.5, y: FEET, z: 0.5 }, radius: 1, maxRounds: 2, waitTicks: 20 })).toBe('idle');
+    expect(f.stats.planted).toBe(3);
+    expect(f.stats.settleTicks).toBeGreaterThan(0);
+    const order = h.calls.filter((c) => c.startsWith('dig') || c.startsWith('place')).map((c) => c.split(' ')[0]);
+    expect(order.indexOf('place')).toBeGreaterThan(order.lastIndexOf('dig'));
+  });
+
+  it('pause() cancels the running skill and holds the loop; resume() goes on', async () => {
+    const h = harness();
+    field(h.w, 0, 0, 3, 3, 'wheat', 7);
+    h.inv.add('wheat_seeds', 2);
+    const f = new FarmTask(h.deps);
+    const run = f.start({ center: { x: 1.5, y: FEET, z: 1.5 }, radius: 1, maxRounds: 3, waitTicks: 20 });
+    f.pause();
+    expect(f.state).toBe('paused');
+    expect(h.calls).toContain('cancel');
+    await new Promise((r) => setTimeout(r, 20));
+    const harvested = f.stats.harvested;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(f.stats.harvested).toBe(harvested);
+    expect(f.state).toBe('paused');
+    f.resume();
+    expect(await run).toBe('idle');
+    expect(f.stats.harvested).toBe(9);
+    expect(f.stats.planted).toBe(9);
+    expect(f.stats.pauses).toBe(1);
+  });
+});
+
+describe('!farm as a process (Track Z)', () => {
+  it('is pre-empted by a higher process, resumed afterwards, and !stop-able', async () => {
+    const { ProcessManager, BaseProcess, PRIORITY } = await import('../../../src/tasks/process/manager.ts');
+    const { FarmProcess } = await import('../../../src/tasks/process/farm.ts');
+    class Guard extends BaseProcess {
+      readonly name = 'guard';
+      readonly kind = 'auto' as const;
+      on = false;
+      get priority(): number {
+        return PRIORITY.guard;
+      }
+      override wants(): boolean {
+        return this.on;
+      }
+      protected run(): void {}
+      protected halt(): void {}
+      status() {
+        return { line: 'guard' };
+      }
+    }
+    const pm = new ProcessManager();
+    const g = pm.add(new Guard());
+    const h = harness();
+    field(h.w, 0, 0, 3, 3, 'wheat', 7);
+    h.inv.add('wheat_seeds', 2);
+    const f = new FarmTask(h.deps);
+    const p = pm.add(new FarmProcess(f, { center: { x: 1.5, y: FEET, z: 1.5 }, radius: 1, waitTicks: 20 }));
+    expect(pm.stack().map((e) => `${e.name}:${e.state}`)).toEqual(['farm:active']);
+    g.on = true;
+    pm.tick();
+    expect(pm.stack().map((e) => `${e.name}:${e.state}`)).toEqual(['guard:active', 'farm:paused']);
+    expect(f.state).toBe('paused');
+    g.on = false;
+    pm.tick();
+    expect(pm.stack()[0]).toMatchObject({ name: 'farm', state: 'active' });
+    for (let i = 0; i < 200 && f.stats.planted < 9; i++) await new Promise((r) => setTimeout(r, 2));
+    expect(f.stats.harvested).toBe(9);
+    expect(f.stats.planted).toBe(9);
+    expect(p.status().line).toMatch(/^farm r=1 at 1 -60 1: 9 harvested, 9 planted/);
+    expect(pm.stopUser()).toHaveLength(1);
+    expect(await p.result).toBe('stopped');
+    expect(f.state).toBe('stopped');
+  });
 });
 
 describe('!farm and !mine', () => {

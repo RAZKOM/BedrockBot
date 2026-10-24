@@ -11,6 +11,13 @@
 // Death (PLAN.md 5.1, minimum here): tasks/respawn.ts presses respawn; on its death event the task
 // pauses (skills cancelled), after the respawn it resumes from find-tree. Items lost at the death
 // are not fetched back.
+//
+// Remembered forests (Track Z, docs/world-cache.md "Remembered forests"): when find-tree finds no tree
+// within the search radius, the task asks its ForestFinder (`useForests`; loaded logs farther away
+// and logs the world cache remembers from earlier visits, also before a restart) for the nearest log
+// cluster, walks there with an `any` goal (near the cluster's nearest logs) and searches again from
+// there. A cluster that yields no tree after the walk, or that cannot be reached, is put on Track R's
+// blacklist (its logs), so the next search skips it.
 import type { ParseArgsOptionsConfig } from 'node:util';
 import { registerGatherCommands } from '../chat/commands.ts';
 import type { Vec3 } from '../connection/types.ts';
@@ -18,6 +25,7 @@ import { silentLogger, type Logger } from '../log.ts';
 import type { BotSkills, Tree } from '../skills/index.ts';
 import { isLog } from '../skills/tree/tree.ts';
 import { Containers } from '../world/containers.ts';
+import { findLogClusters, type LogCluster } from '../world/find.ts'; // Track Z
 import { Hotbar } from '../world/hotbar.ts';
 import type { ItemStack } from '../world/types.ts';
 import type { RunningTask, TaskContext, TaskDefinition } from './base.ts';
@@ -56,6 +64,18 @@ export interface GatherOptions {
   treeAttempts?: number;
   /** Rounds without any tree before giving up (100 ticks apart). Default 5. */
   noTreeRounds?: number;
+  /** Track Z: search radius for remembered / far log clusters when none is near. Default 256. */
+  forestRadius?: number;
+  /** Track Z: walks to log clusters per run at most. Default 8. */
+  maxForestWalks?: number;
+}
+
+/** Track Z: where the gather task looks for trees beyond its search radius (`cachedForests`). */
+export interface ForestFinder {
+  /** Log clusters (loaded and remembered) within `radius` of `origin`, nearest first, blacklisted logs left out. */
+  clusters(origin: Vec3, radius: number): LogCluster[];
+  /** Put a log on the blacklist at once (Track R's NavBlacklist: skipped by the tree finder and by `clusters`). */
+  blacklist?(p: Vec3, why: string): void;
 }
 
 export interface GatherStats {
@@ -74,6 +94,9 @@ export interface GatherStats {
   digFailures: number;
   deaths: number;
   saplings: number;
+  /** Track Z: walks to a log cluster beyond the search radius, clusters blacklisted (nothing there / unreachable). */
+  forestWalks: number;
+  forestsBlacklisted: number;
 }
 
 export interface GatherDeps {
@@ -116,11 +139,19 @@ export class GatherWoodTask {
   private readonly doneFns = new Set<(s: GatherState) => void>();
   private c0 = 0;
   private origin: Vec3 | undefined;
+  /** Track Z: remembered / far forests, and the cluster the last forest walk went to (until a tree is felled there). */
+  private forests: ForestFinder | undefined;
+  private forest: LogCluster | undefined;
 
   constructor(deps: GatherDeps) {
     this.d = deps;
     this.log = deps.log ?? silentLogger;
     this.now = deps.now ?? (() => Date.now());
+  }
+
+  /** Track Z: walk to remembered or far forests when no tree is within the search radius (undefined: off). */
+  useForests(f: ForestFinder | undefined): void {
+    this.forests = f;
   }
 
   get running(): boolean {
@@ -138,6 +169,7 @@ export class GatherWoodTask {
     this.c0 = this.d.corrections();
     this.treeFails.clear();
     this.lastError = undefined;
+    this.forest = undefined;
     this.origin = opts.origin ?? opts.chest;
     this.state = 'find';
     this.log.info(`gather: target ${opts.target} logs, chest ${opts.chest ? key(opts.chest) : 'none'}, search radius ${opts.searchRadius ?? 48}`);
@@ -292,6 +324,10 @@ export class GatherWoodTask {
         .findTrees(o.searchRadius ?? 48, { origin: this.origin ?? pos })
         .filter((t) => (this.treeFails.get(key(t.base)) ?? 0) < (o.treeAttempts ?? 2));
       if (trees.length === 0) {
+        // Track Z: a remembered (or just far) forest
+        const walk = await this.walkToForest(gen, pos, o);
+        if (!this.alive(gen)) break;
+        if (walk === 'walked' || walk === 'interrupted' || walk === 'failed') continue;
         noTree++;
         if (carried > 0 && o.chest) {
           await this.depositTrip(gen, o.chest);
@@ -316,6 +352,7 @@ export class GatherWoodTask {
       this.stats.logsBroken += f.broken.length;
       this.stats.repaths += f.repaths;
       this.stats.digFailures += f.digFailures;
+      if (f.broken.length > 0) this.forest = undefined; // Track Z: the forest yielded logs
       if (f.ok) this.stats.treesFelled++;
       else if (f.reason !== 'interrupted') {
         this.stats.treesFailed++;
@@ -342,6 +379,48 @@ export class GatherWoodTask {
     let n = 0;
     for (const s of this.d.inventory.slots) if (s?.name.endsWith('_sapling')) n += s.count;
     return n;
+  }
+
+  /**
+   * Track Z: no tree within the search radius. The cluster the last walk went to yielded nothing:
+   * blacklist it. Then walk to the nearest log cluster (loaded farther away, or remembered by the
+   * world cache) with an `any` goal near its nearest logs; the search continues from there.
+   */
+  private async walkToForest(gen: number, pos: Vec3, o: GatherOptions): Promise<'walked' | 'none' | 'failed' | 'interrupted'> {
+    const f = this.forests;
+    if (!f) return 'none';
+    if (this.forest) {
+      this.blacklistForest(this.forest, 'no tree found there');
+      this.forest = undefined;
+    }
+    if (this.stats.forestWalks >= (o.maxForestWalks ?? 8)) return 'none';
+    const cluster = f.clusters(pos, o.forestRadius ?? 256)[0];
+    if (!cluster) return 'none';
+    const members = cluster.logs.slice(0, 8).map((p) => ({ type: 'near' as const, p: { x: p.x + 0.5, y: p.y, z: p.z + 0.5 }, r: 4 }));
+    const c = cluster.center;
+    this.log.info(
+      `gather: no tree within ${o.searchRadius ?? 48} blocks; walking to a forest of ${cluster.logs.length} logs (${cluster.cached} remembered) ` +
+        `at ${Math.round(c.x)} ${Math.round(c.y)} ${Math.round(c.z)}, ${cluster.distance.toFixed(0)} blocks away`,
+    );
+    this.state = 'find';
+    const g = await this.d.skills.goto({ type: 'any', goals: members }, { timeoutTicks: 1200 + Math.round(cluster.distance * 20) });
+    if (!this.alive(gen)) return 'interrupted';
+    if (!g.ok && (g.reason === 'interrupted' || this.paused)) return 'interrupted';
+    this.stats.forestWalks++;
+    if (!g.ok) {
+      this.blacklistForest(cluster, `walk: ${g.reason}`);
+      return 'failed';
+    }
+    this.forest = cluster;
+    this.origin = { x: Math.floor(c.x), y: Math.floor(c.y), z: Math.floor(c.z) };
+    return 'walked';
+  }
+
+  private blacklistForest(cluster: LogCluster, why: string): void {
+    this.stats.forestsBlacklisted++;
+    for (const p of cluster.logs) this.forests?.blacklist?.(p, why);
+    const c = cluster.center;
+    this.log.warn(`gather: forest at ${Math.round(c.x)} ${Math.round(c.y)} ${Math.round(c.z)} (${cluster.logs.length} logs) blacklisted: ${why}`);
   }
 
   /** goto chest -> open -> deposit logs -> close. */
@@ -397,7 +476,39 @@ function newStats(): GatherStats {
     digFailures: 0,
     deaths: 0,
     saplings: 0,
+    forestWalks: 0,
+    forestsBlacklisted: 0,
   };
+}
+
+/** Track Z: forests are searched in this vertical window around the bot (logs deep underground, e.g. an ancient city, are no forest). */
+export const FOREST_MAX_BELOW = 24;
+export const FOREST_MAX_ABOVE = 48;
+
+/**
+ * Track Z: the ForestFinder over a World (loaded logs and, with a world cache attached, remembered
+ * ones; the cache is read at call time) and Track R's navigator blacklist (a blacklisted log is
+ * skipped by the clusters and by BotSkills.findTrees).
+ */
+export function cachedForests(
+  world: Parameters<typeof findLogClusters>[0],
+  blacklist?: { blocked(p: Vec3): boolean; failBlock(p: Vec3, why?: string): boolean; has(key: string): boolean; failures: number },
+): ForestFinder {
+  return {
+    clusters: (origin, radius) =>
+      findLogClusters(world, origin, radius, { maxBelow: FOREST_MAX_BELOW, maxAbove: FOREST_MAX_ABOVE, ...(blacklist ? { skip: (p: Vec3) => blacklist.blocked(p) } : {}) }),
+    blacklist: blacklist
+      ? (p, why) => {
+          // NavBlacklist skips a key after `failures` failures: count them all now (nothing to retry there)
+          for (let i = 0; i < blacklist.failures && !blacklist.blocked(p); i++) blacklist.failBlock(p, why);
+        }
+      : undefined,
+  };
+}
+
+/** Track Z: give the gather task of the afk task (`!gather`) the remembered forests (one call from tasks/registry.ts). */
+export function useCachedForests(task: GatherWoodTask | undefined, world: Parameters<typeof findLogClusters>[0] | undefined, blacklist?: Parameters<typeof cachedForests>[1]): void {
+  if (task && world) task.useForests(cachedForests(world, blacklist));
 }
 
 /** `x,y,z` or `x y z` -> block position. */
@@ -459,6 +570,7 @@ export const gatherTask: TaskDefinition = {
       corrections: () => mob.loop.state.corrections,
       log,
     });
+    gather.useForests(cachedForests(mob.world, mob.skills.nav.blacklist)); // Track Z: remembered forests
     respawn.onEvent((e) => {
       if (e.kind === 'death') gather.pause('dead');
     });

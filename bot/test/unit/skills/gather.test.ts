@@ -184,6 +184,73 @@ describe('GatherWoodTask', () => {
   });
 });
 
+describe('remembered forests (Track Z)', () => {
+  const log = (x: number, y: number, z: number, cached?: true) => ({ x, y, z, ...(cached ? { cached } : {}) });
+
+  it('no tree near: walks to the nearest log cluster with an any goal, then searches there and finishes', async () => {
+    const w = world([]);
+    const deps = fakeDeps(w);
+    const forest = [tree(100, 5), tree(104, 6)];
+    const goals: unknown[] = [];
+    (deps.skills as { goto: unknown }).goto = (g: { type: string; goals?: unknown[] }) => {
+      w.calls.push(`goto ${g.type}`);
+      goals.push(g);
+      if (g.type === 'any') w.trees = forest; // arrived: the forest is loaded
+      return Promise.resolve({ ok: true });
+    };
+    const g = new GatherWoodTask(deps);
+    const { cachedForests } = await import('../../../src/tasks/gatherWood.ts');
+    const remembered = [log(100, -60, 0, true), log(100, -59, 0, true), log(104, -60, 0, true), log(30, -60, 30)];
+    g.useForests(cachedForests({ find: () => remembered }));
+    expect(await g.start({ target: 8 })).toBe('done');
+    expect(w.calls.slice(0, 3)).toEqual(['find', 'goto any', 'find']);
+    expect(g.stats.forestWalks).toBe(1);
+    const first = goals[0] as { goals: { type: string; p: Vec3; r: number }[] };
+    // the nearest cluster (the lone loaded log at 30, 30, 42 blocks; the remembered forest is 100 away) is walked to first
+    expect(first.goals[0]!.p).toEqual({ x: 30.5, y: -60, z: 30.5 });
+  });
+
+  it('a cluster that yields no tree is blacklisted and the next one is tried; no clusters: the old failure', async () => {
+    const w = world([]);
+    const deps = fakeDeps(w);
+    const walked: number[] = [];
+    (deps.skills as { goto: unknown }).goto = (g: { type: string; goals: { p: Vec3 }[] }) => {
+      walked.push(Math.floor(g.goals[0]!.p.x));
+      if (Math.floor(g.goals[0]!.p.x) === 100) w.trees = [tree(100, 9)];
+      return Promise.resolve({ ok: true });
+    };
+    const black = new Set<string>();
+    const bl = { blocked: (p: Vec3) => black.has(`${p.x},${p.y},${p.z}`), failBlock: (p: Vec3) => (black.add(`${p.x},${p.y},${p.z}`), true), has: () => false, failures: 3 };
+    const logs = [log(30, -60, 0, true), log(100, -60, 0, true)];
+    const { cachedForests } = await import('../../../src/tasks/gatherWood.ts');
+    const g = new GatherWoodTask(deps);
+    g.useForests(cachedForests({ find: () => logs }, bl));
+    expect(await g.start({ target: 8 })).toBe('done');
+    expect(walked).toEqual([30, 100]);
+    expect(black.has('30,-60,0')).toBe(true);
+    expect(g.stats.forestsBlacklisted).toBe(1);
+    // nothing anywhere: fails like before after the no-tree rounds
+    const w2 = world([]);
+    const g2 = new GatherWoodTask(fakeDeps(w2));
+    g2.useForests(cachedForests({ find: () => [] }));
+    expect(await g2.start({ target: 2, noTreeRounds: 2 })).toBe('failed');
+  });
+
+  it('an unreachable cluster is blacklisted at once', async () => {
+    const w = world([]);
+    const deps = fakeDeps(w);
+    (deps.skills as { goto: unknown }).goto = () => Promise.resolve({ ok: false, reason: 'unreachable' });
+    const black = new Set<string>();
+    const bl = { blocked: (p: Vec3) => black.has(`${p.x},${p.y},${p.z}`), failBlock: (p: Vec3) => (black.add(`${p.x},${p.y},${p.z}`), true), has: () => false, failures: 3 };
+    const { cachedForests } = await import('../../../src/tasks/gatherWood.ts');
+    const g = new GatherWoodTask(deps);
+    g.useForests(cachedForests({ find: () => [log(50, -60, 0, true)].filter((p) => !black.has(`${p.x},${p.y},${p.z}`)) }, bl));
+    expect(await g.start({ target: 2, noTreeRounds: 1 })).toBe('failed');
+    expect(g.stats.forestsBlacklisted).toBe(1);
+    expect(g.stats.forestWalks).toBe(1);
+  });
+});
+
 describe('parseBlockPos and !gather', () => {
   it('parses x,y,z', () => {
     expect(parseBlockPos('10,-60,-3')).toEqual({ x: 10, y: -60, z: -3 });

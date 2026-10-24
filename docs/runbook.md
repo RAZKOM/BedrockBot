@@ -264,8 +264,8 @@ Replies are player chat from the bot.
 | `!equip` | `equip: wearing chest iron_chestplate`: the best armour from the inventory (`equip: nothing better (...)`) |
 | `!inv` | `inv 12/36, held 0 iron_sword x1; armour head iron_helmet, ...; food 18 (best bread); throwaway 64 in hotbar; tools ...; items ...` |
 | `!drop <item> [n]` | `dropped 10 stone`: n (default all) of an item. The bot also eats, wears armour and drops junk by itself (docs/survival.md) |
-| `!farm [radius]` / `!farm stop` / `!farm status` | `farming r=8 around 10 -60 3`: harvest mature crops, replant, bone meal, deposit into the nearest chest, re-check every minute until `!farm stop` (docs/farming.md); needs walking |
-| `!mine <block> [n]` / `!mine stop` / `!mine status` | `mining 8 coal_ore/deepslate_coal_ore`, then `mine coal_ore: 8/8 done` (or `no seen coal_ore left`): only blocks with a face the bot could have seen, never next to lava or water (docs/mining.md); needs walking |
+| `!farm [radius]` / `!farm stop` / `!farm status` | `farming r=8 around 10 -60 3`: harvest mature crops, replant, bone meal, deposit into the nearest chest, re-check every minute until `!farm stop` or `!stop`; a user process (guard / flee / night pre-empt it, `!pause` holds it, `!status` lists it; Track Z) (docs/farming.md); needs walking |
+| `!mine <block> [n]` / `!mine stop` / `!mine status` | `mining 8 coal_ore/deepslate_coal_ore`, then `mine coal_ore: 8/8 done` (or `no seen coal_ore left`): any ore the bot knows (loaded chunks and the world cache), tunnelling to it; with `!set mineSeenOnly on` only ore it has seen a face of (remembered across restarts); never next to lava or water; an unreachable ore is skipped after one plan; a user process like `!farm` (Track Z) (docs/mining.md); needs walking |
 
 `!status` names the active behaviour with walking: `behaviour idle`, `guarding r=16`, `following Steve`,
 `fighting zombie`, `fleeing`, `walking to 10 -60 3`, `returning home`, `going to the shelter`,

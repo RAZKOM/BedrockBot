@@ -17,8 +17,27 @@ farm.stats;   // harvested, planted, boneMealUsed, boneMealGrown, trips, deposit
 
 Chat (afk task with walking, owners only): `!farm [radius]` (1..32, default 8) farms the farmland
 within the radius of where the bot stands (`farming r=8 around 10 -60 3`); `!farm stop`
-(`stopped; farm: stopped, 81 harvested, 81 planted, ...`); `!farm status`. `!farm` stops `!mine` and
-the PvE foreground behaviour (follow / come / kill) first.
+(`stopped; farm: stopped, 81 harvested, 81 planted, ...`); `!farm status`. `!farm` stops a running
+`!mine` (they exclude each other); since Track Z it is a user process of the afk task (next section).
+
+## As a process (Track Z, decision 0021)
+
+`!farm` adds a `FarmProcess` (`bot/src/tasks/process/farm.ts`, user priority 40) to the afk task's
+ProcessManager ([processes.md](processes.md)):
+
+| Event | Effect |
+|---|---|
+| guard / flee / night / a newer command wants control | `FarmTask.pause()`: the running dig / place / goto / click is cancelled at once, the loop holds (state `paused`), counters stay |
+| control back | `FarmTask.resume()`: the loop scans the field again and goes on |
+| `!pause` / `!resume` | the same pause / resume (`paused: farming (12 harvested) (!resume to continue)`) |
+| `!stop`, `!farm stop`, `!mine` | the process is stopped (`FarmTask.stop()`) |
+| `!status` | `processes: [active] farm r=3 at 10 -61 3: 25 harvested, 25 planted, 0 bone meal, 0 trips (waiting)` |
+| death | the farm survives it (paused while dead, resumed after the respawn) |
+| nothing to do | it keeps control (a later command stacks on top) but reports `idle()`, so the keepalive nudge runs |
+
+The afk task's Hotbar (the PvE one) and Containers are passed in by the registration line; the farm
+no longer creates its own (two Containers on one connection each logged the other's
+`item_stack_response` as `unknown slot`). `useBoneMeal` comes from the runtime settings.
 
 ## Files
 
@@ -107,9 +126,11 @@ Each round: inventory check -> scan -> work -> stand -> act:
 - **Work**: harvest mature crops; plant empty cells whose seed is carried; bone meal growing crops when
   `useBoneMeal()` (default true, read every round) and bone meal is carried. A cell that failed 3
   times is left alone until the next wait.
-- **Act** at the chosen cell, everything in reach from where the body actually stopped: harvest and
-  at once replant each mature crop; bone meal each growing crop until mature (at most 8 uses), then
-  harvest and replant it; collect drops within 6 blocks; plant what is still empty.
+- **Act** at the chosen cell, everything in reach from where the body actually stopped: harvest each
+  mature crop; bone meal each growing crop until mature (at most 8 uses), then harvest it; plant the
+  empty cells (each planting waits while a fresh seed drop lies within pickup range, below); collect
+  drops within 6 blocks; plant what is still empty. (Wave 6 replanted each crop at once after its
+  harvest; Track Z harvests first, see "Rejected plantings".)
 - **Nothing to do**: collect drops still lying in the field, else state `waiting` and re-scan after
   `waitTicks` (1200) until `stop()`. With bone meal on, replanted crops are bone-mealed in the next
   rounds until the bone meal is gone.
@@ -141,6 +162,63 @@ About 0.9 s per crop for a full harvest-and-replant cycle of a 9 x 9 field, walk
 included. The bot works the middle of the field standing on the farmland (one stand reaches about 60
 cells) and the edges from the rim.
 
+## Rejected plantings (Track Z: the cause, measured 2026-10-29)
+
+Wave 6 saw 4 to 8 `rejected` plantings per cycle right after harvests (the farmer retried). A packet
+trace of the real farmer on a 9 x 9 field (temporary probe in `farm-process.test.ts`, every
+`update_block`, inventory packet and click with ticks) showed the same pattern for **10 of 10**
+rejections:
+
+```
+129 -> click 6816,6431 slot 0 held 16#923 model 16#923      (seed stack: count 16, stack id 923)
+129 <- inventory_transaction slot 0: 16 -> 17 #925          (a seed drop picked up into that stack)
+131 <- update_block 6816,6431 air  (x2)                     (the click refused: the old block)
+131 <- inventory_content (inventory, armor, ui, offhand)    (full resync)
+```
+
+The click carries the held stack (count, stack id) and the server compares it with the slot when it
+processes the click. Harvest drops are picked up about 10 ticks after they spawn; when such a pickup
+merges into the held seed stack in the server tick before the click is read, the stacks differ and
+the click is refused. The client model was current when the click was built (the server decides the
+pickup 1 to 2 ticks later), so refreshing the held item cannot fix it alone. Fix:
+
+1. the farmer harvests everything in reach first and plants afterwards (the nearby drops are picked
+   up meanwhile), and before each planting waits (at most `SETTLE_TICKS` 16) while a **fresh** drop
+   (seen less than 1 s ago) of that seed lies within 2 blocks of the body (`stats.settleTicks`);
+2. PlaceSkill re-checks the slot and the selection right before the click and selects again when
+   the stack moved (stale-model cases); the held item is built from the slot at that moment;
+3. the single retry after a `rejected` stays as a safety net (`stats.plantRejected` counts them).
+
+| Measure (`farm-field`, bds-farm) | Before (wave 6 code, this machine) | Track Z |
+|---|---|---|
+| `rejected` plantings over cycles 1 + 2 (162 plantings) | 22 log lines (`place ... rejected`), 8 retries in cycle 1 | **0** in each of 3 runs (no `rejected` log line, `plantRejected` 0, `plant retries 0`) |
+| cycle 1 / cycle 2 | 74.5 s / 65.6 s | 71.6 / 75.6 s, gate run A 72.3 / 75.9 s, gate run B 75.9 / 77.2 s |
+| ticks waited for pickups | - | 0 (the harvest-first order already lets them settle) |
+
+One run with this order left a wheat and a seed drop in a corner of the field: the final collect
+looked for drops in a square (`dropsNear`) but collected in a circle of the same radius (6 around the
+centre; a 9 x 9 field's corner drop lies up to 6.4 away). The final collect now uses the square's
+circumradius (`ceil((radius + 2) x sqrt 2)`, 9 for radius 4).
+
+A first version that waited for any drop within 2.5 blocks (old ones that lie out of the server's
+pickup range included) also gave 0 rejections but cost 113.9 s / 135.4 s per cycle; only fresh drops
+count now.
+
+## Measured as a process (`farm-process`, bds-core, normal difficulty)
+
+5 x 5 mature wheat, the bot in the middle, guard on, `!farm 3`, a zombie summoned 7 blocks away
+after 4 harvests:
+
+| Measure | Result |
+|---|---|
+| guard pre-empts the farm | `fighting zombie` 61 to 109 ms after the summon; stack `guard:active farm:paused`, `FarmTask.state` `paused` |
+| zombie dead / farm resumed | 3.4 to 4.4 s / 6.7 to 7.3 s after the summon (the fight's drop pickup first) |
+| field done | 28 to 35 s after `!farm`: 25 farmland, 25 wheat (truth); 0 rejected plantings |
+| `!pause` / `!resume` / `!stop` | `paused: farming (25 harvested) ...`, the farmer `paused`; `resumed: farming ...`; `stopped (was farm ...)`, stack empty |
+
+A crop being dug at the moment of the pre-emption may still break on the server (one run: 24
+harvested, 25 planted, the field complete).
+
 ## Truth commands (`packs/truth/src/farm.ts`)
 
 | Command | Args | `data` on success |
@@ -154,6 +232,8 @@ cells) and the edges from the rim.
 |---|---|
 | `bot/test/unit/skills/farm.test.ts` | crops and growth, field scan and crop memory, reaches (the 9-wide field's middle), floors, `routeTramples`; the loop with a fake world and skills: 3 x 3 harvest + replant from off-field cells, bone meal on / off, deposit when full keeping one seed stack, a trampling route refused, stop; `!farm` / `!mine` parsing |
 | `bot/test/e2e/farm-field.test.ts` | the 9 x 9 wheat field, two cycles, chest deposit when full, bone meal (see Measured) |
+| `bot/test/unit/skills/farm.test.ts` (Track Z) | harvest-first order and the pickup wait, pause / resume, `FarmProcess` pre-empted by a fake guard and resumed, `!stop` |
+| `bot/test/e2e/farm-process.test.ts` (Track Z, bds-core) | `!farm` as a process: guard pre-emption and resume, `!status`, `!pause` / `!resume` / `!stop` (env `CORE_BDS_*`, `CORE_VERBOSE=1`) |
 
 ```sh
 node scripts/bds.mjs --profile farm up      # bds-farm, udp/19186
@@ -171,6 +251,6 @@ back to 1 at the end) and clears the area at the end.
 
 - Sweet berries: click implemented (`ItemClicker`), not in the loop.
 - No till (hoe on dirt / grass) and no water management: the farmer works existing farmland.
-- `!stop` (PvE) does not stop `!farm`; the process manager (7.8) will. Guard / night safety may
-  interrupt a skill call; the loop then simply re-scans.
+- While it waits for crops the farm keeps the user-process slot (a later command stacks on top and the
+  farm resumes after it); a "farm in the background" mode would need a lower priority.
 - The trampling rule is a route check, not a planner rule (see the decision record).

@@ -22,6 +22,7 @@ import { StateTable } from './classes.ts';
 import { readRegion, regionFileName, regionMtime, regionOf, slotOf, writeRegion, writeRegionSync, RegionFormatError } from './region.ts';
 import type { ChunkSummary } from './summary.ts';
 import { cellKey, decodeSummary, encodeRaw, encodeSummary, summarizeColumn, type CellDiff } from './summary.ts';
+import { decodeSeenMarks } from './summary.ts'; // Track Z: ore memory (seen marks)
 import { Y_NONE, type CachedMark, type CachedTerrain } from './types.ts';
 
 export interface WorldCacheOptions {
@@ -96,6 +97,9 @@ export interface WorldCacheStats {
   evictedRegions: number;
   flushes: number;
   errors: number;
+  /** Track Z: seen flags carried onto loading columns, and the time it took (ms). */
+  seenCarried: number;
+  seenCarryMs: number;
 }
 
 const OFF = 2 ** 21;
@@ -131,6 +135,8 @@ export class WorldCache implements CachedTerrain {
     evictedRegions: 0,
     flushes: 0,
     errors: 0,
+    seenCarried: 0, // Track Z
+    seenCarryMs: 0,
   };
   private readonly log: Logger;
   private readonly flushIntervalMs: number;
@@ -267,6 +273,7 @@ export class WorldCache implements CachedTerrain {
     const { summary, diffs } = summarizeColumn(col, table, old);
     this.stats.summarized++;
     this.stats.summarizeMs += performance.now() - t0;
+    this.carrySeen(dim, cx, cz, k, summary, oldSummary); // Track Z: remembered seen ores stay seen
     this.live.set(k, summary);
     this.dirtyLive.add(k);
     this.decodedLru.delete(k);
@@ -283,9 +290,12 @@ export class WorldCache implements CachedTerrain {
     const table = this.table;
     if (!h || !table) return;
     const k = ckey(h.chunks.dimension, col.cx, col.cz);
-    if (!this.live.has(k)) return;
+    const prev = this.live.get(k);
+    if (!prev) return;
     const t0 = performance.now();
-    this.live.set(k, summarizeColumn(col, table).summary);
+    const next = summarizeColumn(col, table).summary;
+    next.applySeen(prev.seenMarks()); // Track Z
+    this.live.set(k, next);
     this.stats.summarized++;
     this.stats.summarizeMs += performance.now() - t0;
     this.dirtyLive.add(k);
@@ -625,6 +635,77 @@ export class WorldCache implements CachedTerrain {
     const k = ckey(dim, cx, cz);
     if (this.live.has(k) || this.decodedLru.has(k)) return true;
     return this.region(dim, regionOf(cx), regionOf(cz)).chunks.has(slotOf(cx, cz));
+  }
+
+  // ---- Track Z: ore memory (seen marks, docs/world-cache.md "Seen marks") ----------------------------
+
+  /** A loading column takes the seen flags of what the cache remembered for it (decoded summary, else only the record's marks). */
+  private carrySeen(dim: number, cx: number, cz: number, k: number, s: ChunkSummary, old: ChunkSummary | undefined): void {
+    const t0 = performance.now();
+    const prev = old ?? this.decodedLru.get(k);
+    let seen: Map<number, string> | undefined;
+    if (prev) seen = prev.seenMarks();
+    else {
+      const data = this.region(dim, regionOf(cx), regionOf(cz)).chunks.get(slotOf(cx, cz));
+      if (data) {
+        try {
+          seen = decodeSeenMarks(data);
+        } catch {
+          // an unreadable record: nothing to carry (cachedSummary reports it when read)
+        }
+      }
+    }
+    if (seen?.size) this.stats.seenCarried += s.applySeen(seen);
+    this.stats.seenCarryMs += performance.now() - t0;
+  }
+
+  /** Flag the mark at `p` (a loaded or cached column) as seen when it is a `name` mark; written with the next flush. */
+  markSeen(p: Vec3, name: string): boolean {
+    if (this.readOnly) return false;
+    const x = Math.floor(p.x);
+    const y = Math.floor(p.y);
+    const z = Math.floor(p.z);
+    const dim = this.dimension;
+    const k = ckey(dim, x >> 4, z >> 4);
+    const live = this.live.get(k);
+    if (live) {
+      const r = live.markSeen(x & 15, y, z & 15, name);
+      if (r === 1) this.dirtyLive.add(k);
+      return r >= 0;
+    }
+    const s = this.cachedSummary(x >> 4, z >> 4);
+    if (!s) return false;
+    const r = s.markSeen(x & 15, y, z & 15, name);
+    if (r === 1) this.store(dim, s);
+    return r >= 0;
+  }
+
+  /** Seen marks within `radius` of `origin` (loaded columns first-hand, others from the cache). */
+  seenMarks(origin: Vec3, radius: number): CachedMark[] {
+    return this.marksNear(origin, radius, true, true);
+  }
+
+  /** Marks of the loaded columns within `radius` of `origin`. */
+  loadedMarks(origin: Vec3, radius: number): CachedMark[] {
+    return this.marksNear(origin, radius, false, false);
+  }
+
+  private marksNear(origin: Vec3, radius: number, seenOnly: boolean, cached: boolean): CachedMark[] {
+    const out: CachedMark[] = [];
+    const dim = this.dimension;
+    const r2 = radius * radius;
+    for (let cx = Math.floor((origin.x - radius) / 16); cx <= Math.floor((origin.x + radius) / 16); cx++) {
+      for (let cz = Math.floor((origin.z - radius) / 16); cz <= Math.floor((origin.z + radius) / 16); cz++) {
+        const s = this.live.get(ckey(dim, cx, cz)) ?? (cached && this.known(cx, cz) ? this.cachedSummary(cx, cz) : undefined);
+        if (!s) continue;
+        for (const m of s.markList()) {
+          if (seenOnly && !m.seen) continue;
+          const d = (m.x + 0.5 - origin.x) ** 2 + (m.y + 0.5 - origin.y) ** 2 + (m.z + 0.5 - origin.z) ** 2;
+          if (d <= r2) out.push(m);
+        }
+      }
+    }
+    return out;
   }
 
   // ---- debug map -----------------------------------------------------------------------------------

@@ -30,6 +30,8 @@ const markKey = (x: number, yRel: number, z: number): number => (yRel << 8) | (z
 export interface MarkEntry {
   name: string;
   exposed: boolean;
+  /** Track Z: the bot saw an open face of it (OreMemory, skills/mine/seen.ts); flags bit 1, kept while the block stays. */
+  seen?: boolean;
 }
 
 /** A cell the cache believed one thing about and the loaded chunk says another (see `summarizeColumn`). */
@@ -126,7 +128,39 @@ export class ChunkSummary {
   setMark(x: number, y: number, z: number, name: string | undefined): void {
     const k = markKey(x, y - this.y0, z);
     if (name === undefined) this.marks.delete(k);
-    else this.marks.set(k, { name, exposed: this.exposedAt(x, y, z) });
+    else {
+      const keep = this.marks.get(k);
+      const seen = keep?.name === name && keep.seen === true; // Track Z: the same block keeps its seen flag
+      this.marks.set(k, { name, exposed: this.exposedAt(x, y, z), ...(seen ? { seen } : {}) });
+    }
+  }
+
+  /** Track Z: flag the mark at (x, y, z) (local x, z; absolute y) as seen when it names `name`. 1 = flagged now, 0 = already, -1 = no such mark. */
+  markSeen(x: number, y: number, z: number, name: string): -1 | 0 | 1 {
+    const m = this.marks.get(markKey(x, y - this.y0, z));
+    if (m?.name !== name) return -1;
+    if (m.seen) return 0;
+    m.seen = true;
+    return 1;
+  }
+
+  /** Track Z: copy seen flags (markKey -> name) onto the marks with the same key and name. Returns how many. */
+  applySeen(seen: ReadonlyMap<number, string>): number {
+    let n = 0;
+    for (const [k, name] of seen) {
+      const m = this.marks.get(k);
+      if (m?.name !== name) continue;
+      m.seen = true;
+      n++;
+    }
+    return n;
+  }
+
+  /** Track Z: the seen marks (markKey -> name). */
+  seenMarks(): Map<number, string> {
+    const out = new Map<number, string>();
+    for (const [k, m] of this.marks) if (m.seen) out.set(k, m.name);
+    return out;
   }
 
   /** Marks with absolute positions. */
@@ -134,7 +168,7 @@ export class ChunkSummary {
     const bx = this.cx * 16;
     const bz = this.cz * 16;
     const out: CachedMark[] = [];
-    for (const [k, m] of this.marks) out.push({ x: bx + (k & 15), y: this.y0 + (k >> 8), z: bz + ((k >> 4) & 15), name: m.name, exposed: m.exposed });
+    for (const [k, m] of this.marks) out.push({ x: bx + (k & 15), y: this.y0 + (k >> 8), z: bz + ((k >> 4) & 15), name: m.name, exposed: m.exposed, ...(m.seen ? { seen: true } : {}) });
     return out;
   }
 
@@ -296,7 +330,7 @@ export function summarizeColumn(col: Column, table: StateTable, old?: ReadCells,
  * Record layout (little endian), before deflate:
  *   u8 version, i32 cx, i32 cz, f64 updatedAt, i16 y0, u16 rows, i16 top[256], i16 roof[256],
  *   u8 cells[rows * 64], u16 nameCount, (u8 len, utf8 name) x nameCount,
- *   u32 markCount, (u32 key, u8 nameIndex, u8 flags[bit0 exposed]) x markCount (keys ascending).
+ *   u32 markCount, (u32 key, u8 nameIndex, u8 flags[bit0 exposed, bit1 seen (Track Z)]) x markCount (keys ascending).
  * `withHeader` false drops version, position and timestamp (the checksum input).
  */
 function encodeBody(s: ChunkSummary, withHeader: boolean): Uint8Array {
@@ -338,7 +372,7 @@ function encodeBody(s: ChunkSummary, withHeader: boolean): Uint8Array {
     const m = s.marks.get(k)!;
     o = buf.writeUInt32LE(k, o);
     o = buf.writeUInt8(nameIdx.get(m.name)!, o);
-    o = buf.writeUInt8(m.exposed ? 1 : 0, o);
+    o = buf.writeUInt8((m.exposed ? 1 : 0) | (m.seen ? 2 : 0), o); // Track Z: bit 1 = seen
   }
   return buf;
 }
@@ -397,9 +431,45 @@ export function decodeSummary(data: Uint8Array): ChunkSummary {
     for (let i = 0; i < markCount; i++, o += 6) {
       const name = names[buf.readUInt8(o + 4)];
       if (name === undefined) throw new SummaryFormatError('bad name index');
-      s.marks.set(buf.readUInt32LE(o), { name, exposed: (buf.readUInt8(o + 5) & 1) === 1 });
+      const flags = buf.readUInt8(o + 5);
+      s.marks.set(buf.readUInt32LE(o), { name, exposed: (flags & 1) === 1, ...((flags & 2) === 2 ? { seen: true } : {}) }); // Track Z: bit 1 = seen
     }
     return s;
+  } catch (e) {
+    if (e instanceof SummaryFormatError) throw e;
+    throw new SummaryFormatError(`bad record: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * Track Z: only the seen marks (markKey -> name) of a deflated record, without building the summary
+ * (inflate, then skip the column arrays and cells). A column that loads takes the seen flags of its
+ * remembered record this way (WorldCache.onLoaded). Throws SummaryFormatError on a bad record.
+ */
+export function decodeSeenMarks(data: Uint8Array): Map<number, string> {
+  const out = new Map<number, string>();
+  try {
+    const buf = inflateRawSync(data);
+    const version = buf.readUInt8(0);
+    if (version !== SUMMARY_VERSION) throw new SummaryFormatError(`summary version ${version}, expected ${SUMMARY_VERSION}`);
+    const rows = buf.readUInt16LE(19);
+    let o = 21 + 1024 + rows * 64;
+    const nameCount = buf.readUInt16LE(o);
+    o += 2;
+    const names: string[] = [];
+    for (let i = 0; i < nameCount; i++) {
+      const len = buf.readUInt8(o);
+      names.push(buf.toString('utf8', o + 1, o + 1 + len));
+      o += 1 + len;
+    }
+    const markCount = buf.readUInt32LE(o);
+    o += 4;
+    for (let i = 0; i < markCount; i++, o += 6) {
+      if ((buf.readUInt8(o + 5) & 2) === 0) continue;
+      const name = names[buf.readUInt8(o + 4)];
+      if (name !== undefined) out.set(buf.readUInt32LE(o), name);
+    }
+    return out;
   } catch (e) {
     if (e instanceof SummaryFormatError) throw e;
     throw new SummaryFormatError(`bad record: ${e instanceof Error ? e.message : String(e)}`);
