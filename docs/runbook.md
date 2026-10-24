@@ -218,7 +218,8 @@ keys are errors, messages name the field). Relative paths in the file are relati
   "owners": ["YourGamertag"],
   "nudgeInterval": 240, "home": [14, -60, -9], "shelter": [-30, -60, 28],
   "healthPort": 9464, "metricsInterval": 60, "updateCheckHours": 24,
-  "tasks": { "gather": { } }   // free-form per-task options, read by that task
+  "tasks": { "gather": { } },  // free-form per-task options, read by that task
+  "settings": { "allowBreak": false, "guardRadius": 16 }   // runtime settings at start-up (!set lists the keys; docs/processes.md)
 }
 ```
 
