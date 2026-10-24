@@ -139,7 +139,7 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
       if (item === 'all' || item === 'items') {
         // worn armour is not in the 36 inventory slots and stays on either way
         const names = new Set<string>();
-        for (const st of mob.world.inventory.slots.slice(0, 36)) {
+        for (const st of deps.mob?.world.inventory.slots.slice(0, 36) ?? []) {
           if (!st || st.count <= 0) continue;
           if (item === 'items' && keepOnDropItems(st.name)) continue;
           names.add(st.name);
