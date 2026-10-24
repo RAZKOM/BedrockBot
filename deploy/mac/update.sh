@@ -14,6 +14,7 @@ RN=node_modules/.pnpm/raknet-native@1.2.3/node_modules/raknet-native
 if [ -d "$RN" ] && [ ! -f "$RN/build/Release/node-raknet.node" ]; then
   (cd "$RN" && node ../../../cmake-js@6.3.2/node_modules/cmake-js/bin/cmake-js compile >/dev/null)
 fi
+pnpm --filter bot lint >/dev/null   # eslint + tsc; set -e stops the update on a failure
 pnpm --filter bot test --reporter=dot 2>&1 | grep -E "Tests|failed" | tail -n 2
 label="gui/$(id -u)/com.bedrockbot.realm"
 if launchctl print "$label" >/dev/null 2>&1; then
