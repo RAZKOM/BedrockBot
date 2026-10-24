@@ -13,6 +13,7 @@ import { registerBuiltinCommands, registerHardeningCommands, whisperOwners } fro
 import { ConfigError, defaultConfigPath, loadConfig, locateConfig, type LoadedConfig } from './config/config.ts';
 import { DEFAULT_VERSION } from './config/defaults.ts';
 import { resolveSettings, SettingsError, type CliValues, type Settings } from './config/resolve.ts';
+import { applyStartupSettings, resolveSettingsFile, RuntimeSettings, SettingError, SETTINGS_VALUE_KEY } from './config/settings.ts'; // Track Q
 import { Connection, VersionGateError } from './connection/connection.ts';
 import { DisconnectLog } from './connection/disconnectLog.ts';
 import { HealthServer } from './connection/health.ts';
@@ -76,6 +77,8 @@ const COMMON_OPTIONS = {
   'metrics-interval': { type: 'string' },
   'health-port': { type: 'string' },
   'update-check-hours': { type: 'string' },
+  settings: { type: 'string' }, // Track Q: runtime settings file (default <config dir>/settings.json)
+  set: { type: 'string', multiple: true }, // Track Q: --set key=value (runtime setting at start-up)
   help: { type: 'boolean', short: 'h' },
 } as const satisfies ParseArgsOptionsConfig;
 
@@ -114,7 +117,7 @@ ${tasks}
   --exit-on-chat <s>       disconnect and exit 0 once a chat line containing <s> arrives
   --no-reconnect           exit instead of reconnecting when the connection drops
   --log-level <lvl>        debug | info | warn | error (default info)
- chat commands (!status !pos !health !shelter !home !quit !help):
+ chat commands (!status !pos !health !shelter !home !set !pause !resume !stop !quit !help):
   --owner <who>            allowed player name or xuid:<xuid>; repeatable, comma lists ok
                            (also env BOT_OWNERS, config owners). The server console is always
   --no-console-owner       allowed unless this is given.
@@ -125,6 +128,10 @@ ${tasks}
   --shelter <x,y,z>        walk into this feet block at dusk (time 12000), leave at dawn (23000)
   --walk                   enable walking (!home set / !shelter set) without --home/--shelter
   --respawn-delay <s>      press respawn this long after dying (default 2; negative = never)
+ runtime settings (!set; docs/processes.md):
+  --settings <file>        settings file (default <config dir>/settings.json, env BEDROCKBOT_SETTINGS;
+                           with --no-config and neither: in memory only)
+  --set <key=value>        a runtime setting at start-up (repeatable; wins over the file and the config)
  operations:
   --health-port <port>     serve GET /healthz and /metrics on 127.0.0.1:<port> (default off)
   --update-check-hours <h> check for new game/BDS/library versions every h hours (default 24 on a
@@ -169,6 +176,8 @@ async function main(argv: string[]): Promise<number> {
   const cwd = process.env.INIT_CWD ?? process.cwd();
   let loaded: LoadedConfig | undefined;
   let settings: Settings;
+  let runtime: RuntimeSettings; // Track Q: !set values (config/settings.ts)
+  let runtimeWarning: string | undefined;
   try {
     if (!values['no-config']) loaded = loadConfig(locateConfig(values.config, process.env, cwd));
     settings = resolveSettings(values, loaded?.config ?? {}, {
@@ -177,8 +186,24 @@ async function main(argv: string[]): Promise<number> {
       cwd,
       defaultLogDir: join(BOT_DIR, 'logs'),
     });
+    // Track Q: default < settings.json < config.json < CLI at start-up; !set wins afterwards
+    const where = resolveSettingsFile({
+      flag: values.settings as string | undefined,
+      env: process.env.BEDROCKBOT_SETTINGS,
+      configPath: loaded?.location.path,
+      cwd,
+    });
+    runtimeWarning = where.warning;
+    runtime = RuntimeSettings.open(where.file, { log: createLogger(settings.logLevel, 'settings') });
+    applyStartupSettings(runtime, {
+      config: loaded?.config.settings,
+      configNudge: loaded?.config.nudgeInterval,
+      cliSet: values.set as string[] | undefined,
+      cliNudge: values['nudge-interval'],
+    });
+    values[SETTINGS_VALUE_KEY] = runtime;
   } catch (e) {
-    if (e instanceof ConfigError || e instanceof SettingsError) {
+    if (e instanceof ConfigError || e instanceof SettingsError || e instanceof SettingError) {
       console.error(e.message);
       return 2;
     }
@@ -191,6 +216,7 @@ async function main(argv: string[]): Promise<number> {
   }
 
   const log = createLogger(settings.logLevel, 'bot');
+  if (runtimeWarning) log.warn(runtimeWarning);
   if (loaded?.path) {
     log.info(`config: ${loaded.path}`);
     if (isInside(loaded.path, REPO_ROOT) && loaded.config.realm) log.warn(`config file ${loaded.path} is inside the repository; keep Realm details outside it (default ${defaultConfigPath()})`);
@@ -236,7 +262,15 @@ async function main(argv: string[]): Promise<number> {
     logLevel: settings.logLevel,
     position: () => taskRef.current?.position(),
   });
-  const runningTask: RunningTask = def.create(built.ctx);
+  // Track Q: a bad task option (e.g. `--guard 1`) is one line and exit code 2, not a stack trace
+  let runningTask: RunningTask;
+  try {
+    runningTask = def.create(built.ctx);
+  } catch (e) {
+    console.error(`error: ${e instanceof Error ? e.message : String(e)}`);
+    built.stop();
+    return 2;
+  }
   taskRef.current = runningTask;
   metrics.provide(() => ({ task: def.name, position: runningTask.position() ?? null, server, taskStatus: runningTask.status() }));
   const healthLog: Logger = createLogger(settings.logLevel, 'health');
@@ -261,14 +295,15 @@ async function main(argv: string[]): Promise<number> {
     process.exit(code);
   };
 
+  const walking = runningTask as WalkingTask;
   registerBuiltinCommands(chat, {
     conn,
     metrics,
     position: () => runningTask.position(),
     extraStatus: () => runningTask.statusLine?.() ?? { task: def.name },
+    extraLines: () => walking.processLines?.() ?? [], // Track Q: process stack and ETAs
     quit: (by) => void finish(0, `!quit from ${senderLabel(by)}`),
   });
-  const walking = runningTask as WalkingTask;
   registerHardeningCommands(chat, {
     health: () => ({
       health: built.respawn?.health ?? built.mobility?.world.self.health ?? null,

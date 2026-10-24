@@ -32,6 +32,8 @@ export interface SurvivalCommandDeps {
   /** Dead or not spawned. */
   inactive?: () => boolean;
   settings?: () => Partial<SurvivalSettings>;
+  /** Share the task's Containers (one item-stack request counter per connection); else the kit makes its own. */
+  containers?: Containers | undefined;
   logger?: Logger;
 }
 
@@ -47,7 +49,8 @@ export function createSurvivalKit(deps: SurvivalCommandDeps): SurvivalKit | unde
   const { mob, pve, source } = deps;
   if (!mob || !pve) return undefined;
   const log = deps.logger ?? silentLogger;
-  const containers = new Containers(source, mob.world.inventory, { logger: log });
+  const ownContainers = !deps.containers;
+  const containers = deps.containers ?? new Containers(source, mob.world.inventory, { logger: log });
   mob.skills.attach({ hotbar: pve.hotbar, containers, source });
   const kit = new SurvivalKit({
     skills: mob.skills,
@@ -67,7 +70,7 @@ export function createSurvivalKit(deps: SurvivalCommandDeps): SurvivalKit | unde
     const stop = task.stop.bind(task);
     task.stop = () => {
       kit.dispose();
-      containers.dispose();
+      if (ownContainers) containers.dispose();
       stop();
     };
     const status = task.status.bind(task);

@@ -169,7 +169,9 @@ export interface Mover {
   cancel(): void;
 }
 
-export type NightState = 'off' | 'day' | 'going' | 'sheltered' | 'unreachable' | 'gave_up' | 'returning';
+// 'waiting' (Track Q): night, out of the shelter, and the process manager has not given night safety
+// control yet (a flight or a fight in place runs first).
+export type NightState = 'off' | 'day' | 'going' | 'waiting' | 'sheltered' | 'unreachable' | 'gave_up' | 'returning';
 
 export interface NightSafetyOptions {
   clock: Pick<WorldClock, 'time' | 'known'>;
@@ -178,6 +180,14 @@ export interface NightSafetyOptions {
   position: () => Vec3 | undefined;
   /** The bot is dead or not spawned: do nothing. */
   inactive?: () => boolean;
+  /**
+   * Process-manager mode (Track Q, tasks/process/night.ts): retreats start only while this returns
+   * true (the night process has control); otherwise a due retreat leaves the state at `waiting`.
+   * Without it NightSafety walks whenever a retreat is due (the standalone behaviour).
+   */
+  canMove?: () => boolean;
+  /** Walk home at dawn with this instead of `mover.goto` (Track Q: the home-return process). */
+  walkHome?: (home: Vec3) => Promise<SkillResult>;
   shelter?: Vec3 | undefined;
   /** Where to go at dawn (optional). */
   home?: () => Vec3 | undefined;
@@ -215,7 +225,10 @@ export class NightSafety {
   attempts = 0;
   retreats = 0;
   lastResult: SkillResult | undefined;
-  private readonly o: Required<Omit<NightSafetyOptions, 'shelter' | 'home' | 'metrics' | 'inactive'>> & Pick<NightSafetyOptions, 'home' | 'metrics' | 'inactive'>;
+  private readonly o: Required<Omit<NightSafetyOptions, 'shelter' | 'home' | 'metrics' | 'inactive' | 'canMove' | 'walkHome'>> &
+    Pick<NightSafetyOptions, 'home' | 'metrics' | 'inactive' | 'canMove' | 'walkHome'>;
+  /** Bumped by suspend() and at dawn so a cancelled retreat's result is ignored (Track Q). */
+  private runId = 0;
   private nextAttemptAt = 0;
   private wasNight: boolean | undefined;
   private going: Promise<void> | undefined;
@@ -230,6 +243,8 @@ export class NightSafety {
       mover: opts.mover,
       position: opts.position,
       inactive: opts.inactive,
+      canMove: opts.canMove,
+      walkHome: opts.walkHome,
       home: opts.home,
       log: opts.log ?? silentLogger,
       metrics: opts.metrics,
@@ -285,6 +300,37 @@ export class NightSafety {
     return Math.hypot(pos.x - (Math.floor(s.x) + 0.5), pos.z - (Math.floor(s.z) + 0.5)) <= this.o.tolerance && Math.abs(pos.y - Math.floor(s.y)) < 1.5;
   }
 
+  /** Night, a shelter set, outside it, attempts left and the retry delay over (Track Q). */
+  retreatDue(): boolean {
+    if (!this.wantsShelter() || this.going || this.inside()) return false;
+    return this.attempts < this.o.maxAttempts && this.o.now() >= this.nextAttemptAt;
+  }
+
+  /**
+   * The night process wants control (Track Q): walking to the shelter, a retreat due, or sheltered
+   * (it holds the bot inside until dawn). Not while unreachable / given up: the bot may do other things.
+   */
+  wantsControl(): boolean {
+    if (!this.wantsShelter() || this.o.inactive?.()) return false;
+    if (this.going) return true;
+    if (this.inside()) return true;
+    return this.retreatDue();
+  }
+
+  /** Pre-empted (Track Q): cancel a running retreat without counting it as a failed attempt. */
+  suspend(): void {
+    if (!this.going) return;
+    this.runId++;
+    this.going = undefined;
+    this.o.mover.cancel();
+    if (this.state === 'going') this.state = 'waiting';
+  }
+
+  /** While walking to the shelter (Track Q, for the ETA). */
+  get walking(): boolean {
+    return this.going !== undefined;
+  }
+
   status(): Record<string, unknown> {
     const t = this.o.clock.time;
     return {
@@ -326,6 +372,10 @@ export class NightSafety {
       return;
     }
     if (now < this.nextAttemptAt) return;
+    if (this.o.canMove && !this.o.canMove()) {
+      this.state = 'waiting';
+      return;
+    }
     this.retreat(now);
   }
 
@@ -337,6 +387,7 @@ export class NightSafety {
     this.o.log.info(`night: retreating to the shelter at ${fmt(to)} (time of day ${this.o.clock.time === undefined ? '?' : timeOfDay(this.o.clock.time)})`);
     this.o.metrics?.inc('night.retreats');
     this.emit({ kind: 'retreat', to });
+    const id = ++this.runId;
     this.going = this.o.mover
       .goto({ type: 'block', p: to }, { timeoutTicks: this.o.gotoTimeoutTicks })
       .then(
@@ -344,6 +395,7 @@ export class NightSafety {
         (e: unknown): SkillResult => ({ ok: false, reason: e instanceof Error ? e.message : String(e) }),
       )
       .then((r) => {
+        if (id !== this.runId) return; // suspended or dawn (Track Q)
         this.going = undefined;
         this.lastResult = r;
         if (this.state !== 'going') return; // dawn or a new shelter in the meantime
@@ -373,14 +425,19 @@ export class NightSafety {
   }
 
   private onDawn(): void {
-    if (this.going) this.o.mover.cancel();
+    if (this.going) {
+      this.runId++;
+      this.going = undefined;
+      this.o.mover.cancel();
+    }
     this.attempts = 0;
     const home = this.o.home?.();
     this.o.log.info(`dawn: leaving the shelter${home ? `, back to ${fmt(home)}` : ''}`);
     this.emit({ kind: 'dawn', home });
     if (!home) return;
     this.state = 'returning';
-    void this.o.mover.goto({ type: 'block', p: home }, { timeoutTicks: this.o.gotoTimeoutTicks * 5 }).then((r) => {
+    const walk = this.o.walkHome ? this.o.walkHome(home) : this.o.mover.goto({ type: 'block', p: home }, { timeoutTicks: this.o.gotoTimeoutTicks * 5 });
+    void walk.then((r) => {
       if (this.state === 'returning') this.state = 'day';
       if (!r.ok) this.o.log.warn(`dawn: could not walk home (${r.reason})`);
     });

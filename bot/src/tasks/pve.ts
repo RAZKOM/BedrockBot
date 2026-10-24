@@ -2,25 +2,30 @@
 // kill, and a resumable goto. PvE ONLY: nothing here ever targets a player (the combat skill refuses
 // players itself, and every target list below skips them).
 //
-// Two layers:
-// - the foreground behaviour, chosen by the owner: idle | follow <target> | come <player> |
-//   walk <goal> (!goto, !home go, the return home after a guard fight) | kill <type> [n];
-// - an episode that interrupts it: a guard fight (fight, then pick up the drops within 8 blocks) or a
-//   flight. When the episode ends and no other threat is in range, the foreground is resumed (follow
-//   again, re-issue the goto); an idle bot with a home walks back home.
+// Since wave 6 (PLAN.md 7.8, Track Q) every behaviour is a process of the ProcessManager
+// (tasks/process/manager.ts, docs/processes.md), which gives control to one of them at a time:
+//   flee (100) > guard fighting in place (85) > night shelter (80) > guard fight (60)
+//   > the owner's command: goto / follow / come / kill / gather (40, newest on top) > home return (20)
+// A pre-empted process is paused and resumed when the higher one ends (follow starts again, the goto
+// is planned again, a kill job looks for its next target). The settings (guardRadius, fleeHealth,
+// followDistance, sprint, allowBreak, ...) are read live from RuntimeSettings (config/settings.ts).
 //
-// Rules, evaluated every 5 ticks:
+// Rules (evaluated every tick by the manager through the processes' wants()):
 // - flee: health below `fleeHealth` (default 8) with a hostile alive within 16 blocks -> run to the
 //   shelter if one is set, else home; if neither is set or the bot is already there, run 12 blocks
 //   straight away from the nearest hostile. While the health stays low the bot only defends in place.
+//   Not while night safety is already walking to the shelter (same place; interrupting would count
+//   as a failed retreat). A kill job does not survive a flight.
 // - guard (when on): the hostile closest to the bot (or the one that hit it in the last 10 s, or one
-//   that targets it) within `radius` of the home point (of the bot when no home is set or while
-//   following someone) is fought. Neutral mobs only when they hit or target the bot. Players never.
-// - night shelter cooperation: while night safety wants the shelter, the shelter wins. Inside it the
-//   bot only defends in place (hostiles within reach, no walking); on the way there guard does not
-//   interrupt. While a behaviour here owns the movement, night safety pauses (tasks/registry.ts
-//   passes `ownsMovement()` to its `inactive` option), so the two never fight over the navigator.
+//   that targets it) within `guardRadius` of the home point (of the bot when no home is set or while
+//   a command runs) is fought. Neutral mobs only when they hit or target the bot. Players never. Not
+//   while a kill job is the active process (it is fighting already).
+// - night: while night safety wants the shelter, inside it the bot only defends in place (85, above
+//   the night process); on the way there guard does not interrupt (60 < 80).
+// - after a guard fight (not in place) the drops within 8 blocks are picked up; with no command
+//   running and a home set, the bot walks home (the home-return process, dropped by any new command).
 import type { Metrics } from '../connection/metrics.ts';
+import { RuntimeSettings } from '../config/settings.ts';
 import { silentLogger, type Logger } from '../log.ts';
 import { CombatController, EYE_HEIGHT, type CombatLoop, type CombatMover, type FightOptions, type FightResult } from '../skills/combat/combat.ts';
 import { bareType, classify, entityFeet, isPlayerEntity, MobTracker, reachDistance, typeMatches } from '../skills/combat/hostiles.ts';
@@ -30,6 +35,8 @@ import type { GotoOptions, SkillResult } from '../skills/types.ts';
 import { Hotbar } from '../world/hotbar.ts';
 import type { Inventory } from '../world/inventory.ts';
 import type { EntityInfo, PacketSource, Vec3 } from '../world/types.ts';
+import { etaFor, GotoProcess, navRemaining, settingsMover, type ProcessMover } from './process/goto.ts';
+import { BaseProcess, PRIORITY, ProcessManager, type ProcessStatus, type StopReason } from './process/manager.ts';
 
 export interface GuardSettings {
   on: boolean;
@@ -78,16 +85,11 @@ export interface PveDeps {
   log?: Logger;
   metrics?: Metrics;
   options?: PveOptions;
+  /** The task's process manager (Track Q). Default: an own one driven by the loop. */
+  processes?: ProcessManager;
+  /** Live settings (Track Q). Default: in memory, with `options` applied as start-up values. */
+  settings?: RuntimeSettings;
 }
-
-type Foreground =
-  | { kind: 'idle' }
-  | { kind: 'follow'; target: FollowTarget; label: string }
-  | { kind: 'come'; name: string; done: (r: SkillResult) => void }
-  | { kind: 'walk'; goal: Goal; opts: GotoOptions; label: string; done: (r: SkillResult) => void }
-  | { kind: 'kill'; type: string; want: number; killed: number; done: (r: KillResult) => void };
-
-type Episode = { kind: 'guard'; type: string; phase: 'fight' | 'collect'; inPlace: boolean } | { kind: 'flee'; to: Vec3; from: string };
 
 export interface KillResult {
   ok: boolean;
@@ -100,29 +102,27 @@ export interface KillResult {
 
 export const DEFAULT_GUARD_RADIUS = 16;
 const CHASE_EXTRA = 16;
-const STEP_TICKS = 5;
 const KILL_SEARCH = 32;
+const FLEE_SCAN = 16;
 
 export class PveController {
   readonly mobs: MobTracker;
   readonly combat: CombatController;
   readonly follower: FollowController;
   readonly hotbar: Hotbar;
-  guard: GuardSettings;
-  fleeHealth: number;
-  private readonly collectRadius: number;
-  private readonly d: PveDeps;
-  private readonly log: Logger;
-  private fg: Foreground = { kind: 'idle' };
-  private episode: Episode | undefined;
-  /** Bumped whenever the foreground's running goto/fight must not report back (suspended, replaced). */
-  private fgToken = 0;
-  private epToken = 0;
-  private resumePending = false;
-  private returnHome = false;
-  private fleeCooldownUntil = 0;
-  private readonly ignore = new Map<bigint, number>();
-  private n = 0;
+  readonly processes: ProcessManager;
+  readonly settings: RuntimeSettings;
+  /** The skills with the live settings applied to every walk. */
+  readonly mover: PveSkills & ProcessMover;
+  private guardOn: boolean;
+  readonly collectRadius: number;
+  readonly d: PveDeps;
+  readonly log: Logger;
+  private readonly ownManager: boolean;
+  readonly guardProcess: GuardProcess;
+  readonly fleeProcess: FleeProcess;
+  /** Mobs not to pick again until the time (performance.now()). */
+  readonly ignore = new Map<bigint, number>();
   private readonly unsubs: (() => void)[] = [];
   readonly stats = { fights: 0, kills: 0, flees: 0, guardTriggers: 0 };
 
@@ -130,11 +130,16 @@ export class PveController {
     this.d = deps;
     this.log = deps.log ?? silentLogger;
     const o = deps.options ?? {};
-    this.guard = { on: o.guard?.on ?? false, radius: o.guard?.radius ?? DEFAULT_GUARD_RADIUS };
-    this.fleeHealth = o.fleeHealth ?? 8;
+    this.settings = deps.settings ?? new RuntimeSettings();
+    if (!deps.settings) {
+      if (o.guard?.radius !== undefined) this.settings.applyStartup('guardRadius', o.guard.radius);
+      if (o.fleeHealth !== undefined) this.settings.applyStartup('fleeHealth', o.fleeHealth);
+    }
+    this.guardOn = o.guard?.on ?? false;
     this.collectRadius = o.collectRadius ?? 8;
-    this.log.info(`pve: guard ${this.guard.on ? `on, radius ${this.guard.radius}` : 'off'}, flee below health ${this.fleeHealth}`);
-    const { world, loop, skills, source } = deps;
+    this.log.info(`pve: guard ${this.guardOn ? `on, radius ${this.guardRadius}` : 'off'}, flee below health ${this.fleeHealth}`);
+    const { world, loop, source } = deps;
+    this.mover = settingsMover(deps.skills as PveSkills & ProcessMover, this.settings);
     this.mobs = new MobTracker(source, {
       entities: () => world.entities,
       selfRuntimeId: () => world.self.runtimeId,
@@ -143,7 +148,7 @@ export class PveController {
     this.hotbar = new Hotbar(source, { inventory: world.inventory, runtimeId: () => world.self.runtimeId });
     this.combat = new CombatController({
       loop,
-      mover: skills,
+      mover: this.mover,
       entities: () => world.entities,
       mobs: this.mobs,
       inventory: world.inventory,
@@ -152,11 +157,19 @@ export class PveController {
       selfRuntimeId: () => world.self.runtimeId,
       logger: this.log,
     });
-    this.follower = new FollowController({ loop, mover: skills, entities: () => world.entities, logger: this.log });
+    this.follower = new FollowController({ loop, mover: this.mover, entities: () => world.entities, logger: this.log });
+    this.ownManager = deps.processes === undefined;
+    this.processes =
+      deps.processes ??
+      new ProcessManager({
+        inactive: () => deps.inactive() || !loop.state.ready,
+        onTick: (fn) => loop.onBeforeStep(() => fn()),
+        log: this.log,
+        metrics: deps.metrics,
+      });
+    this.fleeProcess = this.processes.add(new FleeProcess(this));
+    this.guardProcess = this.processes.add(new GuardProcess(this));
     this.unsubs.push(
-      loop.onBeforeStep(() => {
-        if (++this.n % STEP_TICKS === 0) this.step();
-      }),
       this.mobs.onHit((g, damage) => {
         this.log.info(`pve: took ${damage.toFixed(1)} damage${g ? ` (probably ${bareType(g.type)} #${g.runtimeId}, ${g.why})` : ''}, health ${this.health()}`);
       }),
@@ -165,6 +178,9 @@ export class PveController {
 
   dispose(): void {
     this.stop();
+    this.processes.stop(this.fleeProcess);
+    this.processes.stop(this.guardProcess);
+    if (this.ownManager) this.processes.dispose();
     for (const u of this.unsubs.splice(0)) u();
     this.combat.dispose();
     this.follower.dispose();
@@ -174,37 +190,36 @@ export class PveController {
 
   // ---- state -----------------------------------------------------------------------------------
 
-  /** A behaviour here moves the bot (night safety pauses meanwhile; AFK nudges skip). */
+  get guard(): GuardSettings {
+    return { on: this.guardOn, radius: this.guardRadius };
+  }
+
+  get guardRadius(): number {
+    return this.settings.get('guardRadius');
+  }
+
+  get fleeHealth(): number {
+    return this.settings.get('fleeHealth');
+  }
+
+  /** A process moves the bot (kept for tests; the AFK nudge uses the manager's busy()). */
   ownsMovement(): boolean {
-    return this.episode !== undefined || this.fg.kind !== 'idle';
+    return this.processes.busy();
   }
 
   /** One line for !status: idle / guarding r=16 / following Steve / fighting zombie / fleeing / ... */
   behaviour(): string {
-    const ep = this.episode;
-    if (ep?.kind === 'flee') return 'fleeing';
-    if (ep?.kind === 'guard') return ep.phase === 'collect' ? 'collecting drops' : `fighting ${bareType(ep.type)}${ep.inPlace ? ' (in place)' : ''}`;
-    const fg = this.fg;
-    switch (fg.kind) {
-      case 'follow':
-        return `following ${fg.label}`;
-      case 'come':
-        return `coming to ${fg.name}`;
-      case 'walk':
-        return fg.label;
-      case 'kill': {
-        const t = this.combat.target;
-        return `${t ? `fighting ${bareType(t.type)}` : 'looking for'} (kill ${fg.type} ${fg.killed}/${fg.want})`;
-      }
-      case 'idle':
-        return this.guard.on ? `guarding r=${this.guard.radius}` : 'idle';
-    }
+    const a = this.processes.active;
+    if (a) return a.behaviour?.() ?? a.status().line;
+    const users = this.processes.userProcesses();
+    if (this.processes.paused && users.length > 0) return `paused (${users.map((p) => p.behaviour?.() ?? p.name).join(', ')})`;
+    return this.guardOn ? `guarding r=${this.guardRadius}` : 'idle';
   }
 
   status(): Record<string, unknown> {
     return {
       behaviour: this.behaviour(),
-      guard: { ...this.guard },
+      guard: this.guard,
       fleeHealth: this.fleeHealth,
       health: this.health(),
       target: this.combat.target ? { runtimeId: String(this.combat.target.runtimeId), type: this.combat.target.type } : null,
@@ -218,52 +233,92 @@ export class PveController {
     return this.mobs.selfHealth ?? this.d.world.self.health;
   }
 
-  // ---- commands --------------------------------------------------------------------------------
-
-  setGuard(g: Partial<GuardSettings>): GuardSettings {
-    this.guard = { on: g.on ?? this.guard.on, radius: g.radius ?? this.guard.radius };
-    this.log.info(`guard ${this.guard.on ? `on, radius ${this.guard.radius}` : 'off'}`);
-    return { ...this.guard };
+  position(): Vec3 {
+    return this.d.loop.state.pos;
   }
 
-  /** Cancel everything (follow, come, walk, kill, a fight, a flight) and go idle. Returns what was running. */
+  // ---- commands --------------------------------------------------------------------------------
+
+  /** `!guard`: on/off stays in memory; a radius is the `guardRadius` setting (persisted like !set). */
+  setGuard(g: Partial<GuardSettings>): GuardSettings {
+    if (g.on !== undefined) this.guardOn = g.on;
+    if (g.radius !== undefined && g.radius !== this.guardRadius) this.settings.set('guardRadius', g.radius);
+    this.log.info(`guard ${this.guardOn ? `on, radius ${this.guardRadius}` : 'off'}`);
+    if (!this.guardOn) this.guardProcess.cancelEpisode();
+    return this.guard;
+  }
+
+  /**
+   * Cancel everything: every command (follow, come, walk, kill, gather), a pending home return, a
+   * guard fight and a flight. Returns what was running. (`!stop` keeps guard and flee running: it
+   * uses `stopCommands()`.)
+   */
   stop(): string {
     const was = this.behaviour();
-    this.endEpisode();
-    this.resumePending = false;
-    this.returnHome = false;
-    this.replaceForeground({ kind: 'idle' });
-    if (this.d.skills.nav.busy) this.d.skills.cancel();
+    this.processes.stopUser(['home']);
+    this.guardProcess.cancelEpisode();
+    this.fleeProcess.cancelEpisode();
     return was;
   }
 
-  /** On death: drop the episode and the foreground (guard settings stay). */
-  onDeath(): void {
-    this.stop();
+  /** `!stop`: every command and what it pre-empted, plus a pending home return; guard, flee and night keep running. */
+  stopCommands(): string {
+    const lines = this.processes.stopUser(['home']);
+    return lines.length ? lines.join(', ') : this.behaviour();
   }
 
-  /** Follow a player (by name) or an entity (by runtime id) until stopped. Refuses nothing but itself. */
+  /** On death: drop the commands that do not survive it (gather does), the episodes and a home return (guard settings stay). */
+  onDeath(): void {
+    this.processes.onDeath(['home']);
+    this.guardProcess.cancelEpisode();
+    this.fleeProcess.cancelEpisode();
+  }
+
+  /** Follow a player (by name) or an entity (by runtime id) until stopped. */
   follow(target: FollowTarget): string {
     const label = 'playerName' in target ? target.playerName : `${bareType(this.d.world.entities.get(target.runtimeId)?.type ?? 'entity')} #${target.runtimeId}`;
-    this.replaceForeground({ kind: 'follow', target, label });
-    if (!this.episode) void this.follower.follow(target);
+    this.processes.add(new FollowProcess(this, target, label));
     return label;
   }
 
   /** Walk to within 2 blocks of the player's current position. */
   come(name: string): Promise<SkillResult> {
-    return new Promise((resolve) => {
-      this.replaceForeground({ kind: 'come', name, done: resolve });
-      if (!this.episode) this.runForeground();
-    });
+    return this.processes.add(new ComeProcess(this, name)).result;
   }
 
-  /** goto that survives guard interruptions (resumed afterwards). */
+  /** goto as a user process: survives pre-emption (planned again afterwards). */
   walk(goal: Goal, opts: GotoOptions = {}, label?: string): Promise<SkillResult> {
-    return new Promise((resolve) => {
-      this.replaceForeground({ kind: 'walk', goal, opts, label: label ?? `walking to ${goalText(goal)}`, done: resolve });
-      if (!this.episode) this.runForeground();
+    return this.processes.add(this.gotoProcess(goal, opts, label)).result;
+  }
+
+  /** A goto process (not added) with this controller's mover and position. */
+  gotoProcess(goal: Goal, opts: GotoOptions = {}, label?: string): GotoProcess {
+    return new GotoProcess({ goal, opts, ...(label ? { label } : {}), mover: this.mover, position: () => this.position(), sprint: () => this.settings.get('sprint') });
+  }
+
+  /**
+   * Walk home as the low-priority home-return process (after a guard fight, at dawn, after a
+   * respawn). `ifIdle`: only when no command is queued. Resolves `no_home` without a home point.
+   */
+  returnHome(why: string, opts: { timeoutTicks?: number; ifIdle?: boolean } = {}): Promise<SkillResult> {
+    const home = this.d.home();
+    if (!home) return Promise.resolve({ ok: false, reason: 'no_home' });
+    if (opts.ifIdle && this.processes.userProcesses().length > 0) return Promise.resolve({ ok: false, reason: 'busy' });
+    for (const p of this.processes.find('home')) this.processes.stop(p, 'replaced');
+    this.log.info(`${why}: returning home to ${home.x} ${home.y} ${home.z}`);
+    const p = new GotoProcess({
+      goal: { type: 'block', p: home },
+      opts: { timeoutTicks: opts.timeoutTicks ?? 6000 },
+      label: 'returning home',
+      name: 'home',
+      kind: 'auto',
+      priority: PRIORITY.home,
+      mover: this.mover,
+      position: () => this.position(),
+      sprint: () => this.settings.get('sprint'),
+      skipWithin: 1.0,
     });
+    return this.processes.add(p).result;
   }
 
   /** Kill up to `n` mobs of `type` within 32 blocks, nearest first. Refuses players. */
@@ -271,170 +326,20 @@ export class PveController {
     if (refusedKillType(type, this.d.world.entities)) {
       return Promise.resolve({ ok: false, type, killed: 0, want: n, reason: 'refused_player', fights: [] });
     }
-    return new Promise((resolve) => {
-      this.replaceForeground({ kind: 'kill', type, want: n, killed: 0, done: resolve });
-      if (this.episode?.kind === 'flee') return; // resumed after the flight
-      this.endEpisode(); // an explicit kill replaces a guard fight
-      this.runForeground();
-    });
+    const p = this.processes.add(new KillProcess(this, type, n));
+    this.guardProcess.cancelEpisode(); // an explicit kill replaces a guard fight (guard waits while a kill job exists)
+    return p.result;
   }
 
-  // ---- foreground ------------------------------------------------------------------------------
+  // ---- rules -----------------------------------------------------------------------------------
 
-  private replaceForeground(next: Foreground): void {
-    const old = this.fg;
-    this.fgToken++;
-    this.fg = next;
-    if (old.kind === 'follow') this.follower.stop();
-    if (old.kind === 'kill') {
-      if (this.combat.busy && !this.episode) this.combat.cancel();
-      old.done({ ok: false, type: old.type, killed: old.killed, want: old.want, reason: 'interrupted', fights: [] });
-    }
-    if (old.kind === 'come' || old.kind === 'walk') {
-      if (this.d.skills.nav.busy && !this.episode) this.d.skills.cancel();
-      old.done({ ok: false, reason: 'interrupted' });
-    }
+  /** Low health: below fleeHealth (and alive). */
+  low(): boolean {
+    const h = this.health();
+    return h > 0 && h < this.fleeHealth;
   }
 
-  /** Start (or resume) the foreground behaviour. */
-  private runForeground(): void {
-    const fg = this.fg;
-    const token = ++this.fgToken;
-    switch (fg.kind) {
-      case 'idle':
-        return;
-      case 'follow':
-        void this.follower.follow(fg.target);
-        return;
-      case 'come':
-        void this.follower.come(fg.name).then((r) => {
-          if (token !== this.fgToken) return;
-          this.fg = { kind: 'idle' };
-          fg.done(r);
-        });
-        return;
-      case 'walk':
-        void this.d.skills.goto(fg.goal, fg.opts).then((r) => {
-          if (token !== this.fgToken) return;
-          this.fg = { kind: 'idle' };
-          fg.done(r);
-        });
-        return;
-      case 'kill':
-        void this.runKill(fg, token);
-        return;
-    }
-  }
-
-  private suspendForeground(): void {
-    this.fgToken++;
-    const fg = this.fg;
-    if (fg.kind === 'follow') this.follower.stop();
-    if (fg.kind === 'kill' && this.combat.busy) this.combat.cancel();
-    if ((fg.kind === 'come' || fg.kind === 'walk') && this.d.skills.nav.busy) this.d.skills.cancel();
-  }
-
-  private async runKill(job: Extract<Foreground, { kind: 'kill' }>, token: number): Promise<void> {
-    const fights: FightResult[] = [];
-    let reason: KillResult['reason'] = 'done';
-    while (job.killed < job.want) {
-      if (token !== this.fgToken) return;
-      const target = this.nearestOfType(job.type);
-      if (!target) {
-        reason = 'none_left';
-        break;
-      }
-      const r = await this.combat.fight(target.runtimeId);
-      if (token !== this.fgToken) return;
-      fights.push(r);
-      this.countFight(r);
-      if (r.ok) {
-        job.killed++;
-        await this.d.skills.collect(this.collectRadius, 200);
-        if (token !== this.fgToken) return;
-      } else if (r.reason === 'interrupted') {
-        return;
-      } else {
-        this.ignore.set(target.runtimeId, performance.now() + 30_000);
-      }
-    }
-    this.fg = { kind: 'idle' };
-    job.done({ ok: job.killed >= job.want, type: job.type, killed: job.killed, want: job.want, reason, fights });
-  }
-
-  private nearestOfType(type: string): EntityInfo | undefined {
-    const me = this.d.loop.state.pos;
-    let best: EntityInfo | undefined;
-    let bd = Infinity;
-    const now = performance.now();
-    for (const e of this.d.world.entities.values()) {
-      if (isPlayerEntity(e) || classify(e.type) === 'item' || !typeMatches(e.type, type)) continue;
-      if ((this.ignore.get(e.runtimeId) ?? 0) > now || this.mobs.get(e.runtimeId)?.dead) continue;
-      const d = dist(entityFeet(e), me);
-      if (d <= KILL_SEARCH && d < bd) {
-        bd = d;
-        best = e;
-      }
-    }
-    return best;
-  }
-
-  // ---- episodes --------------------------------------------------------------------------------
-
-  private endEpisode(): void {
-    if (!this.episode) return;
-    this.epToken++;
-    this.episode = undefined;
-    if (this.combat.busy) this.combat.cancel();
-    if (this.d.skills.nav.busy) this.d.skills.cancel();
-  }
-
-  private step(): void {
-    if (this.d.inactive() || !this.d.loop.state.ready) return;
-    const me = this.d.loop.state.pos;
-    const now = performance.now();
-    const health = this.health();
-    const low = health > 0 && health < this.fleeHealth;
-
-    // flee (not while night safety is already walking to the shelter: same place, and interrupting
-    // its goto would count as a failed retreat)
-    if (low && this.episode?.kind !== 'flee' && now >= this.fleeCooldownUntil && this.d.night?.state !== 'going') {
-      const threat = this.nearestHostile(me, 16);
-      if (threat) {
-        const plan = this.fleeTarget(me, threat);
-        if (plan) {
-          this.startFlee(plan.to, threat, plan.kind);
-          return;
-        }
-      }
-    }
-    if (this.episode) return;
-
-    // guard (only defends in place while the health is low)
-    if (this.guard.on && this.fg.kind !== 'kill') {
-      const pick = this.pickThreat(me, low);
-      if (pick) {
-        this.startGuardFight(pick.e, pick.inPlace);
-        return;
-      }
-    }
-    if (this.resumePending) {
-      this.resumePending = false;
-      const goHome = this.returnHome;
-      this.returnHome = false;
-      if (this.fg.kind !== 'idle') {
-        this.runForeground();
-      } else if (goHome) {
-        const home = this.d.home();
-        if (home && dist(me, { x: home.x + 0.5, y: home.y, z: home.z + 0.5 }) > 1.5 && !this.d.night?.wantsShelter()) {
-          this.log.info(`guard: returning home to ${home.x} ${home.y} ${home.z}`);
-          void this.walk({ type: 'block', p: home }, { timeoutTicks: 2400 }, 'returning home');
-        }
-      }
-    }
-  }
-
-  private nearestHostile(me: Vec3, r: number): EntityInfo | undefined {
+  nearestHostile(me: Vec3, r: number): EntityInfo | undefined {
     let best: EntityInfo | undefined;
     let bd = Infinity;
     for (const e of this.d.world.entities.values()) {
@@ -449,7 +354,7 @@ export class PveController {
   }
 
   /** Hostiles, plus neutral mobs that hit or target the bot. Never players, items or passive mobs. */
-  private isThreat(e: EntityInfo): boolean {
+  isThreat(e: EntityInfo): boolean {
     if (isPlayerEntity(e)) return false;
     const st = this.mobs.get(e.runtimeId);
     if (st?.dead) return false;
@@ -460,7 +365,8 @@ export class PveController {
     return this.mobs.targetsUs(e.runtimeId) || (hit?.runtimeId === e.runtimeId && performance.now() - hit.at < 10_000);
   }
 
-  private pickThreat(me: Vec3, low: boolean): { e: EntityInfo; inPlace: boolean } | undefined {
+  /** The guard target, if any: in place (within reach only) at low health or inside the night shelter. */
+  pickThreat(me: Vec3, low: boolean): { e: EntityInfo; inPlace: boolean } | undefined {
     const night = this.d.night;
     let inPlace = low;
     if (night?.wantsShelter()) {
@@ -468,10 +374,12 @@ export class PveController {
       else if (night.state === 'going') return undefined;
     }
     const home = this.d.home();
-    const center = this.fg.kind === 'idle' && home && !inPlace ? { x: home.x + 0.5, y: home.y, z: home.z + 0.5 } : me;
+    const commanded = this.processes.userProcesses().length > 0;
+    const center = !commanded && home && !inPlace ? { x: home.x + 0.5, y: home.y, z: home.z + 0.5 } : me;
     const eye = { x: me.x, y: me.y + EYE_HEIGHT, z: me.z };
     const now = performance.now();
     const hit = this.mobs.lastHitBy;
+    const radius = this.guardRadius;
     let best: { e: EntityInfo; score: number } | undefined;
     for (const e of this.d.world.entities.values()) {
       if (!this.isThreat(e)) continue;
@@ -480,7 +388,7 @@ export class PveController {
       if (inPlace) {
         if (reachDistance(eye, e) > 3.2) continue;
       } else {
-        if (dist(f, center) > this.guard.radius || dist(f, me) > this.guard.radius + CHASE_EXTRA) continue;
+        if (dist(f, center) > radius || dist(f, me) > radius + CHASE_EXTRA) continue;
         if (Math.abs(f.y - me.y) > 6) continue;
       }
       let score = dist(f, me);
@@ -491,31 +399,7 @@ export class PveController {
     return best ? { e: best.e, inPlace } : undefined;
   }
 
-  private startGuardFight(e: EntityInfo, inPlace: boolean): void {
-    this.suspendForeground();
-    const ep: Episode = { kind: 'guard', type: e.type, phase: 'fight', inPlace };
-    this.episode = ep;
-    const token = ++this.epToken;
-    this.stats.guardTriggers++;
-    this.d.metrics?.inc('pve.guard');
-    this.log.info(`guard: ${bareType(e.type)} #${e.runtimeId} ${inPlace ? 'within reach (defending in place)' : `within ${this.guard.radius} blocks`}, fighting`);
-    const opts: FightOptions = inPlace ? { approach: false, maxRange: 5, outOfRangeTicks: 20, timeoutTicks: 600 } : { maxRange: this.guard.radius + CHASE_EXTRA };
-    void this.combat.fight(e.runtimeId, opts).then(async (r) => {
-      if (token !== this.epToken) return;
-      this.countFight(r);
-      if (!r.ok) this.ignore.set(e.runtimeId, performance.now() + (r.reason === 'out_of_range' ? 10_000 : 30_000));
-      if (r.ok && !inPlace) {
-        ep.phase = 'collect';
-        await this.d.skills.collect(this.collectRadius, 200);
-        if (token !== this.epToken) return;
-      }
-      this.episode = undefined;
-      this.resumePending = true;
-      this.returnHome = !inPlace;
-    });
-  }
-
-  private fleeTarget(me: Vec3, threat: EntityInfo): { to: Vec3; kind: string } | undefined {
+  fleeTarget(me: Vec3, threat: EntityInfo): { to: Vec3; kind: string } | undefined {
     const shelter = this.d.shelter();
     const home = this.d.home();
     const dest = shelter ?? home;
@@ -534,29 +418,24 @@ export class PveController {
     return { to: { x: Math.floor(me.x + ux * 12), y: Math.floor(me.y), z: Math.floor(me.z + uz * 12) }, kind: 'away' };
   }
 
-  private startFlee(to: Vec3, threat: EntityInfo, kind: string): void {
-    this.endEpisode();
-    this.suspendForeground();
-    // a kill job does not survive a flight
-    if (this.fg.kind === 'kill') this.replaceForeground({ kind: 'idle' });
-    const ep: Episode = { kind: 'flee', to, from: threat.type };
-    this.episode = ep;
-    const token = ++this.epToken;
-    this.stats.flees++;
-    this.d.metrics?.inc('pve.flees');
-    this.log.warn(`flee: health ${this.health()} < ${this.fleeHealth} with ${bareType(threat.type)} near; running to ${kind} ${to.x} ${to.y} ${to.z}`);
-    const goal: Goal = kind === 'away' ? { type: 'near', p: { x: to.x + 0.5, y: to.y, z: to.z + 0.5 }, r: 2 } : { type: 'block', p: to };
-    void this.d.skills.goto(goal, { timeoutTicks: 1200, sprint: true }).then((r) => {
-      if (token !== this.epToken) return;
-      this.log.info(`flee: ${r.ok ? 'arrived' : r.reason}`);
-      this.episode = undefined;
-      this.fleeCooldownUntil = performance.now() + 10_000;
-      this.resumePending = true;
-      this.returnHome = false;
-    });
+  nearestOfType(type: string): EntityInfo | undefined {
+    const me = this.d.loop.state.pos;
+    let best: EntityInfo | undefined;
+    let bd = Infinity;
+    const now = performance.now();
+    for (const e of this.d.world.entities.values()) {
+      if (isPlayerEntity(e) || classify(e.type) === 'item' || !typeMatches(e.type, type)) continue;
+      if ((this.ignore.get(e.runtimeId) ?? 0) > now || this.mobs.get(e.runtimeId)?.dead) continue;
+      const d = dist(entityFeet(e), me);
+      if (d <= KILL_SEARCH && d < bd) {
+        bd = d;
+        best = e;
+      }
+    }
+    return best;
   }
 
-  private countFight(r: FightResult): void {
+  countFight(r: FightResult): void {
     this.stats.fights++;
     this.d.metrics?.inc('pve.fights');
     this.d.metrics?.inc(`pve.fight.${r.reason}`);
@@ -564,6 +443,357 @@ export class PveController {
       this.stats.kills++;
       this.d.metrics?.inc('pve.kills');
     }
+  }
+}
+
+// ---- processes ------------------------------------------------------------------------------------
+
+/** Flee (priority 100): run to the shelter / home / away while the health is low with a hostile near. */
+class FleeProcess extends BaseProcess {
+  readonly name = 'flee';
+  readonly kind = 'auto' as const;
+  protected override persistent = true;
+  private ep: { to: Vec3; kind: string; from: string } | undefined;
+  private plan: { to: Vec3; kind: string; threat: EntityInfo } | undefined;
+  private cooldownUntil = 0;
+  private readonly c: PveController;
+
+  constructor(c: PveController) {
+    super();
+    this.c = c;
+  }
+
+  get priority(): number {
+    return PRIORITY.flee;
+  }
+
+  override wants(): boolean {
+    if (this.ep) return true;
+    this.plan = undefined;
+    const c = this.c;
+    if (!c.low() || performance.now() < this.cooldownUntil || c.d.night?.state === 'going') return false;
+    const me = c.position();
+    const threat = c.nearestHostile(me, FLEE_SCAN);
+    if (!threat) return false;
+    const plan = c.fleeTarget(me, threat);
+    if (!plan) return false;
+    this.plan = { ...plan, threat };
+    return true;
+  }
+
+  protected run(t: number, resumed: boolean): void {
+    const c = this.c;
+    if (!this.ep) {
+      const plan = this.plan;
+      if (!plan) return;
+      this.ep = { to: plan.to, kind: plan.kind, from: plan.threat.type };
+      c.stats.flees++;
+      c.d.metrics?.inc('pve.flees');
+      c.log.warn(`flee: health ${c.health()} < ${c.fleeHealth} with ${bareType(plan.threat.type)} near; running to ${plan.kind} ${plan.to.x} ${plan.to.y} ${plan.to.z}`);
+      // a kill job does not survive a flight; a guard fight ends
+      for (const k of c.processes.find('kill')) c.processes.stop(k, 'stopped');
+      c.guardProcess.cancelEpisode();
+    } else if (resumed) {
+      c.log.info(`flee: resuming to ${this.ep.kind}`);
+    }
+    const ep = this.ep;
+    const goal: Goal = ep.kind === 'away' ? { type: 'near', p: { x: ep.to.x + 0.5, y: ep.to.y, z: ep.to.z + 0.5 }, r: 2 } : { type: 'block', p: ep.to };
+    void c.mover.goto(goal, { timeoutTicks: 1200, sprint: true }).then((r) => {
+      if (t !== this.token) return;
+      c.log.info(`flee: ${r.ok ? 'arrived' : r.reason}`);
+      this.ep = undefined;
+      this.cooldownUntil = performance.now() + 10_000;
+    });
+  }
+
+  protected halt(): void {
+    if (this.c.mover.nav.busy) this.c.mover.cancel();
+  }
+
+  cancelEpisode(): void {
+    if (!this.ep) return;
+    this.token++;
+    if (this.controlled && this.c.mover.nav.busy) this.c.mover.cancel();
+    this.ep = undefined;
+    this.yieldControl();
+  }
+
+  protected override reset(): void {
+    this.ep = undefined;
+  }
+
+  behaviour(): string {
+    return 'fleeing';
+  }
+
+  status(): ProcessStatus {
+    const ep = this.ep;
+    if (!ep) return { line: 'flee: watching' };
+    const left = this.controlled ? navRemaining(this.c.mover.nav, this.c.position()) : undefined;
+    return { line: `fleeing to ${ep.kind} ${ep.to.x} ${ep.to.y} ${ep.to.z}${left !== undefined ? `, ${Math.round(left)} blocks left` : ''}`, etaS: etaFor(left, this.c.mover.nav.lastReport, true) };
+  }
+}
+
+/** Guard fight (60, or 85 when defending in place): fight, pick up the drops, then maybe walk home. */
+class GuardProcess extends BaseProcess {
+  readonly name = 'guard';
+  readonly kind = 'auto' as const;
+  protected override persistent = true;
+  private ep: { e: EntityInfo; type: string; inPlace: boolean; phase: 'fight' | 'collect' } | undefined;
+  private pick: { e: EntityInfo; inPlace: boolean } | undefined;
+  private readonly c: PveController;
+
+  constructor(c: PveController) {
+    super();
+    this.c = c;
+  }
+
+  get priority(): number {
+    return (this.ep?.inPlace ?? this.pick?.inPlace) ? PRIORITY.defend : PRIORITY.guard;
+  }
+
+  override wants(): boolean {
+    if (this.ep) return true;
+    this.pick = undefined;
+    const c = this.c;
+    // a kill job fights already (unless !pause holds it)
+    if (!c.guard.on || (!c.processes.paused && c.processes.find('kill').length > 0)) return false;
+    this.pick = c.pickThreat(c.position(), c.low());
+    return this.pick !== undefined;
+  }
+
+  protected run(t: number): void {
+    const c = this.c;
+    const pick = this.pick;
+    if (!pick) return;
+    const { e, inPlace } = pick;
+    const ep = { e, type: e.type, inPlace, phase: 'fight' as 'fight' | 'collect' };
+    this.ep = ep;
+    c.stats.guardTriggers++;
+    c.d.metrics?.inc('pve.guard');
+    c.log.info(`guard: ${bareType(e.type)} #${e.runtimeId} ${inPlace ? 'within reach (defending in place)' : `within ${c.guardRadius} blocks`}, fighting`);
+    const opts: FightOptions = inPlace ? { approach: false, maxRange: 5, outOfRangeTicks: 20, timeoutTicks: 600 } : { maxRange: c.guardRadius + CHASE_EXTRA };
+    void c.combat.fight(e.runtimeId, opts).then(async (r) => {
+      if (t !== this.token) return;
+      c.countFight(r);
+      if (!r.ok) c.ignore.set(e.runtimeId, performance.now() + (r.reason === 'out_of_range' ? 10_000 : 30_000));
+      if (r.ok && !inPlace) {
+        ep.phase = 'collect';
+        await c.mover.collect(c.collectRadius, 200);
+        if (t !== this.token) return;
+      }
+      this.ep = undefined;
+      // back home when nothing else is queued (and no night shelter wanted); another threat goes first (60 > 20)
+      if (!inPlace && !c.d.night?.wantsShelter()) {
+        const home = c.d.home();
+        const me = c.position();
+        if (home && dist(me, { x: home.x + 0.5, y: home.y, z: home.z + 0.5 }) > 1.5) void c.returnHome('guard', { timeoutTicks: 2400, ifIdle: true });
+      }
+    });
+  }
+
+  protected halt(): void {
+    const c = this.c;
+    if (c.combat.busy) c.combat.cancel();
+    if (c.mover.nav.busy) c.mover.cancel();
+    this.ep = undefined;
+  }
+
+  /** Drop the current fight (stop, guard off, an explicit kill, a flight, a death). */
+  cancelEpisode(): void {
+    if (!this.ep) return;
+    this.token++;
+    if (this.controlled) this.halt();
+    this.ep = undefined;
+    this.yieldControl();
+  }
+
+  protected override reset(): void {
+    this.ep = undefined;
+  }
+
+  behaviour(): string {
+    const ep = this.ep;
+    if (!ep) return `guarding r=${this.c.guardRadius}`;
+    return ep.phase === 'collect' ? 'collecting drops' : `fighting ${bareType(ep.type)}${ep.inPlace ? ' (in place)' : ''}`;
+  }
+
+  status(): ProcessStatus {
+    return { line: this.ep ? `guard: ${this.behaviour()}` : `guard ${this.c.guard.on ? `on r=${this.c.guardRadius}` : 'off'}` };
+  }
+}
+
+/** !follow: until stopped; pre-empted = the follower stops, resumed = it starts again. */
+class FollowProcess extends BaseProcess {
+  readonly name = 'follow';
+  readonly kind = 'user' as const;
+  private readonly c: PveController;
+  private readonly target: FollowTarget;
+  readonly label: string;
+  private readonly off: () => void;
+
+  constructor(c: PveController, target: FollowTarget, label: string) {
+    super();
+    this.c = c;
+    this.target = target;
+    this.label = label;
+    // followDistance / sprint changed: start following again with the new values
+    this.off = c.settings.onChange((key) => {
+      if ((key === 'followDistance' || key === 'sprint') && this.controlled) this.run();
+    });
+  }
+
+  get priority(): number {
+    return PRIORITY.user;
+  }
+
+  protected run(): void {
+    const s = this.c.settings;
+    void this.c.follower.follow(this.target, { stopDistance: s.get('followDistance'), sprintDistance: s.get('sprint') ? 8 : Infinity });
+  }
+
+  protected halt(): void {
+    this.c.follower.stop();
+  }
+
+  protected override onStopped(): void {
+    this.off();
+  }
+
+  behaviour(): string {
+    return `following ${this.label}`;
+  }
+
+  status(): ProcessStatus {
+    const st = this.c.follower.status();
+    return { line: `following ${this.label}${this.controlled && st.distance !== null ? `, ${st.distance.toFixed(1)} blocks away (${st.state})` : ''}` };
+  }
+}
+
+/** !come: one walk to within 2 blocks of the player's position when it (re)starts. */
+class ComeProcess extends BaseProcess {
+  readonly name = 'come';
+  readonly kind = 'user' as const;
+  readonly result: Promise<SkillResult>;
+  private resolve!: (r: SkillResult) => void;
+  private readonly c: PveController;
+  private readonly who: string;
+
+  constructor(c: PveController, who: string) {
+    super();
+    this.c = c;
+    this.who = who;
+    this.result = new Promise((r) => {
+      this.resolve = r;
+    });
+  }
+
+  get priority(): number {
+    return PRIORITY.user;
+  }
+
+  protected run(t: number): void {
+    void this.c.follower.come(this.who).then((r) => {
+      if (t !== this.token) return;
+      this.finish();
+      this.resolve(r);
+    });
+  }
+
+  protected halt(): void {
+    this.c.follower.stop();
+    if (this.c.mover.nav.busy) this.c.mover.cancel();
+  }
+
+  protected override onStopped(_reason: StopReason): void {
+    this.resolve({ ok: false, reason: 'interrupted' });
+  }
+
+  behaviour(): string {
+    return `coming to ${this.who}`;
+  }
+
+  status(): ProcessStatus {
+    const left = this.controlled ? navRemaining(this.c.mover.nav, this.c.position()) : undefined;
+    return { line: `coming to ${this.who}${left !== undefined ? `, ${Math.round(left)} blocks left` : ''}`, etaS: etaFor(left, this.c.mover.nav.lastReport, this.c.settings.get('sprint')) };
+  }
+}
+
+/** !kill <type> [n]: nearest first, picking up drops after each; pre-empted = the fight is cancelled, resumed = next target. */
+class KillProcess extends BaseProcess {
+  readonly name = 'kill';
+  readonly kind = 'user' as const;
+  readonly result: Promise<KillResult>;
+  private resolve!: (r: KillResult) => void;
+  private readonly c: PveController;
+  readonly type: string;
+  readonly want: number;
+  killed = 0;
+  private readonly fights: FightResult[] = [];
+
+  constructor(c: PveController, type: string, want: number) {
+    super();
+    this.c = c;
+    this.type = type;
+    this.want = want;
+    this.result = new Promise((r) => {
+      this.resolve = r;
+    });
+  }
+
+  get priority(): number {
+    return PRIORITY.user;
+  }
+
+  protected run(t: number): void {
+    void this.loop(t);
+  }
+
+  private async loop(t: number): Promise<void> {
+    const c = this.c;
+    let reason: KillResult['reason'] = 'done';
+    while (this.killed < this.want) {
+      if (t !== this.token) return;
+      const target = c.nearestOfType(this.type);
+      if (!target) {
+        reason = 'none_left';
+        break;
+      }
+      const r = await c.combat.fight(target.runtimeId);
+      if (t !== this.token) return;
+      this.fights.push(r);
+      c.countFight(r);
+      if (r.ok) {
+        this.killed++;
+        await c.mover.collect(c.collectRadius, 200);
+        if (t !== this.token) return;
+      } else if (r.reason === 'interrupted') {
+        return;
+      } else {
+        c.ignore.set(target.runtimeId, performance.now() + 30_000);
+      }
+    }
+    this.finish();
+    this.resolve({ ok: this.killed >= this.want, type: this.type, killed: this.killed, want: this.want, reason, fights: [...this.fights] });
+  }
+
+  protected halt(): void {
+    const c = this.c;
+    if (c.combat.busy) c.combat.cancel();
+    if (c.mover.nav.busy) c.mover.cancel();
+  }
+
+  protected override onStopped(): void {
+    this.resolve({ ok: false, type: this.type, killed: this.killed, want: this.want, reason: 'interrupted', fights: [...this.fights] });
+  }
+
+  behaviour(): string {
+    const tg = this.c.combat.target;
+    return `${tg && this.controlled ? `fighting ${bareType(tg.type)}` : 'looking for'} (kill ${this.type} ${this.killed}/${this.want})`;
+  }
+
+  status(): ProcessStatus {
+    return { line: `kill ${this.type} ${this.killed}/${this.want}` };
   }
 }
 
@@ -623,15 +853,4 @@ export function refusedKillType(type: string, entities: ReadonlyMap<bigint, Enti
 
 function dist(a: Vec3, b: Vec3): number {
   return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-}
-
-function goalText(g: Goal): string {
-  switch (g.type) {
-    case 'block':
-      return `${g.p.x} ${g.p.y} ${g.p.z}`;
-    case 'near':
-      return `${g.p.x.toFixed(1)} ${g.p.y.toFixed(1)} ${g.p.z.toFixed(1)}`;
-    case 'xz':
-      return `${g.x} ${g.z}`;
-  }
 }

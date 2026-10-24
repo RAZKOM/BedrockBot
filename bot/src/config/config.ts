@@ -73,6 +73,12 @@ export const ConfigSchema = z
     updateCheckHours: z.number().min(0).optional(),
     /** Free-form per-task options, e.g. { "gather": { ... } }. */
     tasks: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+    /**
+     * Runtime settings at start-up (Track Q, config/settings.ts; `!set` lists the keys), e.g.
+     * { "allowBreak": true, "guardRadius": 24 }. They win over settings.json at start-up; keys and
+     * bounds are checked when the bot starts.
+     */
+    settings: z.record(z.string(), z.union([z.boolean(), z.number(), z.string()])).optional(),
   })
   .strict();
 
