@@ -105,9 +105,10 @@ container under test).
 | `surv` | bds-surv | udp/19182 | docker/compose.surv.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_SURV_DIFFICULTY` overrides) | 1.26.60.6 | surv-* e2e: eating, armour, tool wear, keeper, avoidance, task 7.11 (SURV_BDS_*; docs/survival.md) |
 | `core` | bds-core | udp/19180 | docker/compose.core.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_CORE_DIFFICULTY` overrides) | 1.26.60.6 | core-* e2e: process manager, runtime settings (CORE_BDS_*; docs/processes.md); also runs hard-* / pve-* as a regression check |
 | `cache` | bds-cache | udp/19184 | docker/compose.cache.yml (TICK_DISTANCE 10; **generated DEFAULT world, `LEVEL_SEED` 7**, peaceful) | 1.26.60.6 | cache-* e2e: world cache and debug map, tasks 7.12 / 7.15 (CACHE_BDS_*; docs/world-cache.md). The suites set `gamerule falldamage false` and work in a random area 1 500 to 9 500 blocks out (`CACHE_AREA=x,z` pins it) |
+| `farm` | bds-farm | udp/19186 | docker/compose.farm.yml (TICK_DISTANCE 10) | 1.26.60.6 | farm-*, mine-* e2e: farming and legit mining, tasks 7.13 / 7.14 (FARM_BDS_*; docs/farming.md, docs/mining.md) |
 | `rl-N` | bds-rl-N | udp/19170+N | docker/compose.rl-n.yml (`N=1 docker compose -p bedrockbot-rl-1 -f docker/compose.rl-n.yml up -d`) | 1.26.60.6 | extra RL envs for SubprocVecEnv (rl/scripts/throughput.py); remove after use |
 
-Per-track details: docs/world-model.md, docs/movement.md, docs/pathfinding.md, docs/digging.md, docs/wood.md (`--task gather`), docs/rl.md, docs/interaction.md (placing, doors), docs/waypoints.md (`!wp`, `!goto <name>`, `!top`), docs/pve.md, docs/survival.md (eating, armour, keeper, avoidance), docs/versions.md.
+Per-track details: docs/world-model.md, docs/movement.md, docs/pathfinding.md, docs/digging.md, docs/wood.md (`--task gather`), docs/rl.md, docs/interaction.md (placing, doors), docs/waypoints.md (`!wp`, `!goto <name>`, `!top`), docs/farming.md and docs/mining.md (`!farm`, `!mine`), docs/pve.md, docs/survival.md (eating, armour, keeper, avoidance), docs/versions.md.
 | `nn` | bds-nn | tcp+udp/19140, udp/19160-19167 (WebRTC), udp/7551 (discovery) | docker/compose.dev-nethernet.yml (NetherNet, TICK_DISTANCE 10) | 1.26.60.6 | `pnpm e2e:nn` |
 | `dev51` | bds-dev51 | udp/19134 | docker/compose.dev51.yml (TICK_DISTANCE 10) | 1.26.51.1 | `pnpm e2e:51` (rollback to the previous version) |
 
@@ -263,6 +264,8 @@ Replies are player chat from the bot.
 | `!equip` | `equip: wearing chest iron_chestplate`: the best armour from the inventory (`equip: nothing better (...)`) |
 | `!inv` | `inv 12/36, held 0 iron_sword x1; armour head iron_helmet, ...; food 18 (best bread); throwaway 64 in hotbar; tools ...; items ...` |
 | `!drop <item> [n]` | `dropped 10 stone`: n (default all) of an item. The bot also eats, wears armour and drops junk by itself (docs/survival.md) |
+| `!farm [radius]` / `!farm stop` / `!farm status` | `farming r=8 around 10 -60 3`: harvest mature crops, replant, bone meal, deposit into the nearest chest, re-check every minute until `!farm stop` (docs/farming.md); needs walking |
+| `!mine <block> [n]` / `!mine stop` / `!mine status` | `mining 8 coal_ore/deepslate_coal_ore`, then `mine coal_ore: 8/8 done` (or `no seen coal_ore left`): only blocks with a face the bot could have seen, never next to lava or water (docs/mining.md); needs walking |
 
 `!status` names the active behaviour with walking: `behaviour idle`, `guarding r=16`, `following Steve`,
 `fighting zombie`, `fleeing`, `walking to 10 -60 3`, `returning home`, `going to the shelter`,
@@ -381,6 +384,7 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nav-                  
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nav-goals nav-waypoints       # task 7.10: goal types, blacklist, waypoints / !top through the CLI (~2 min)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e pve                           # tasks 7.4-7.6 on bds-pve (normal; ~9 min with the night run)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e cache-                        # tasks 7.12 / 7.15 on bds-cache (world cache, debug map; ~5 min)
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e farm- mine-                   # tasks 7.13 / 7.14 on bds-farm (FARM_BDS_HOST/PORT/CONTAINER, FARM_VERBOSE=1; docs/farming.md, docs/mining.md)
 BDS_E2E=1 BDS_PVE_NIGHT=1 pnpm --filter bot exec vitest run --project e2e pve           # with the 5-minute night run (opt-in: flaky under load until 7.11 adds armour and food)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e surv-                         # task 7.11 on bds-surv (normal; ~2 min; docs/survival.md "Tests")
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e core --silent=false           # tasks 7.8/7.9 on bds-core: process manager, settings (~2 min; docs/processes.md)

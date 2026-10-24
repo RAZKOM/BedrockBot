@@ -44,6 +44,7 @@ import { woodHandlers } from './wood.js'; // truth:container, truth:tree, truth:
 import { actEvents, actHandlers } from './act.js'; // truth:setblock, truth:door + place/interact events (7.3, Track O)
 import { pveHandlers } from './pve.js'; // truth:summon, mobs, entity, sethealth, hurtlog, ... (Phase 7, PvE)
 import { survHandlers } from './surv.js'; // Track S: truth:food, setfood, givedamaged, durability, unequip, items, uselog (7.11)
+import { farmHandlers } from './farm.js'; // Track U: truth:field, truth:crops (7.13 farming)
 
 declare const __PACK_VERSION__: string;
 /** QuickJS console (prints to the BDS content log). */
@@ -537,6 +538,7 @@ Object.assign(handlers, actHandlers({ getBlock, assertLoaded, overworld }));
 // PvE / follow commands (pve.ts): summon, mobs, near, entity, killmobs, clearmobs, sethealth, movemob, effect, hurtlog.
 Object.assign(handlers, pveHandlers({ overworld }));
 Object.assign(handlers, survHandlers({ overworld })); // Track S
+Object.assign(handlers, farmHandlers({ getBlock, assertLoaded, overworld })); // Track U: field, crops
 
 function blockVolume(a: Vec3, b: Vec3): BlockVolume {
   return new BlockVolume(a, b);
