@@ -11,6 +11,7 @@ import type { SkillResult } from '../skills/types.ts';
 import { NightSafety } from './night.ts';
 import type { Vec3 } from '../connection/types.ts';
 import { registerPveCommands } from '../chat/commands-pve.ts';
+import { registerNavCommands } from '../chat/commands-nav.ts'; // Track R
 import { PveController, pveOptionsFrom, refusedKillType } from './pve.ts';
 
 const TASKS = new Map<string, TaskDefinition>();
@@ -210,6 +211,7 @@ export const afkTask: TaskDefinition = {
           }
         : undefined,
     );
+    registerNavCommands({ ctx, task, mob, pve: p, respawn }); // Track R: !wp, !goto <waypoint>, !top, blacklist in !status
     return task;
   },
 };

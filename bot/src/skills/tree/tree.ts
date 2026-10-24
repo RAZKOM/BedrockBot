@@ -49,6 +49,11 @@ export interface TreeOptions {
   minLeaves?: number;
   /** The base must stand on soil (dirt, grass ...). Default true. */
   requireSoil?: boolean;
+  /**
+   * Logs to leave alone (the navigator's failure blacklist: logs nobody could get to). `treesFrom`
+   * starts no tree from them and drops a tree whose every log is skipped.
+   */
+  skip?: (p: Vec3) => boolean;
 }
 
 const key = (p: Vec3) => `${p.x},${p.y},${p.z}`;
@@ -135,12 +140,15 @@ export function remainingLogs(blockAt: BlockLookup, tree: Pick<Tree, 'logs' | 'k
 export function treesFrom(blockAt: BlockLookup, logs: readonly Vec3[], origin: Vec3, opts: TreeOptions = {}): Tree[] {
   const claimed = new Set<string>();
   const out: Tree[] = [];
+  const skip = opts.skip;
   for (const l of logs) {
     if (claimed.has(key(l))) continue;
+    if (skip?.(l)) continue;
     const t = detectTree(blockAt, l, opts);
     claimed.add(key(l));
     if (!t) continue;
     for (const p of t.logs) claimed.add(key(p));
+    if (skip && t.logs.every((p) => skip(p))) continue;
     out.push(t);
   }
   const d = (t: Tree) => Math.hypot(t.base.x + 0.5 - origin.x, t.base.y - origin.y, t.base.z + 0.5 - origin.z);

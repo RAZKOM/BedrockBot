@@ -21,13 +21,21 @@ await skills.goto({ type: 'xz', x: 100, z: 40 }, { timeoutTicks: 2400, sprint: f
 await skills.goto(goal, { allowBreak: true });              // may dig through blocks (Digger)
 await skills.goto(goal, { allowPlace: true });              // may pillar up (needs the place action)
 await skills.goto(goal, { closeDoors: true });              // closes doors / gates it opened
+await skills.goto({ type: 'any', goals: logs.map((p) => ({ type: 'getToBlock', p })) });   // nearest of several
+skills.status().lastGoto.reached;                           // { index, goal }: the member reached
+await skills.goto({ type: 'getToBlock', p: chest });         // next to it, in reach, a visible face
+await skills.goto({ type: 'yLevel', y: 12 });                // any cell with the feet at y 12
+await skills.goto({ type: 'runAway', from: () => zombie.pos, r: 16 });   // flee (a point, points or a function)
+await skills.goto({ type: 'surface' }, { allowPlace: true });           // out of a cave or a pit (!top)
+skills.nav.blacklist.size;                                  // failed goals / logs / action cells skipped for now
 skills.cancel();                                           // the running goto resolves 'interrupted'
 skills.status();   // health, food, damage, corrections, motions, inWater, lastGoto report
 ```
 
 `goto` resolves `{ ok: true }` or `{ ok: false, reason }` with `reason` one of `unreachable` (no path,
 a goal nobody can stand in, or 3 failures: stuck, move timeouts, failed plans, failed actions),
-`timeout` (default 6000 ticks), `interrupted` (cancel or a new goto).
+`timeout` (default 6000 ticks), `interrupted` (cancel or a new goto), `blacklisted` (the goal, or
+every member of an `any`, is on the blacklist).
 
 ## Layers
 
@@ -40,7 +48,8 @@ a goal nobody can stand in, or 3 failures: stuck, move timeouts, failed plans, f
 | `nav/actions.ts` | `NavActions` (dig / place / useBlock / throwawayItems), `NavBlockFace`, `breakBlocker` (the breaking safety rules). |
 | `nav/grid.ts` | `NavGrid`: cached classes, `stand`, `standThrough` (doorways), `free`, `freeColumn`, `crossing` (door / gate passage along x or z), `skyTop` / `underground` (per-chunk sky column cache), `factor`, `invalidate`. |
 | `nav/astar.ts` | `PathSearch` (resumable A*: `step(sliceMs)`), `findPath` (one go), `locateNode`. |
-| `nav/goals.ts` | Goal predicates and the octile heuristic (blocks; the search multiplies by `costs.walk`). |
+| `nav/goals.ts` | Goal predicates and heuristics (blocks; the search multiplies by `costs.walk`): block, near, xz, any, getToBlock, yLevel, runAway, surface (see Goals). |
+| `nav/blacklist.ts` | `NavBlacklist`: goals, `any` members and action cells that failed 3 times, skipped for 6000 ticks (see Blacklist). |
 | `nav/follower.ts` | `PathFollower`: a path leg to per-tick MoveCommands; `PressGuard` (no accidental double taps). |
 | `nav/navigator.ts` | `Navigator`: segments, plan-ahead, legs and actions, re-planning, per-move timeouts, retreat, the report. |
 | `index.ts` | `BotSkills` facade: wires `actions.dig` to the Digger (not `this.dig()`, which would cancel the goto) and the world inventory (best tool, throwaway blocks); `place` / `useBlock` are wired by Track O's PlaceSkill / UseSkill. |
@@ -149,6 +158,62 @@ slices), segments, corrections, motions, stuck and move timeouts, failures, dist
 `maxTickMs` (longest tick in the navigator, planning included), `planMs`, action counts, retreats and
 ticks waited for unloaded chunks.
 
+## Goals
+
+`Goal` (PLAN.md 4.3: block, near, xz) is what older callers switch over; `NavGoal` adds the task 7.10
+goals, and `Navigator.goto` / `BotSkills.goto` / `plan` take any of them. A goal is a predicate on a
+node (feet cell + feet height) and an estimate in blocks (`GoalTest.done` / `h`, nav/goals.ts).
+
+| Goal | Done when | Heuristic |
+|---|---|---|
+| `block {p}` | the feet cell is p | octile to p's column |
+| `near {p, r}` | feet within r of p (3D) | octile - r |
+| `xz {x, z}` | any cell of the column | octile |
+| `any {goals}` | some member is done; `member()` says which (the first) | min over the members |
+| `getToBlock {p, reach = 4.5, face = true}` | the feet cell is in one of the 8 columns around p with p at the feet or the head (feet cell y or y - 1), or right on top of p, or 2 below it; p within `reach` (eye to the closest point, plus the server's corner limit: `checkReach`, docs/digging.md); and when p has an exposed face at all (a neighbour that is not a full cube), one such face turned to the eye. From the 4 sides, on top or below, that face borders the cell the bot stands in; from a diagonal the eye sees two side faces, which walls or glass may cover | octile - sqrt 2 |
+| `yLevel {y}` | the feet cell's y is y | difference in y |
+| `runAway {from, r}` | at least r (horizontally, from the cell centre) from every threat; `from` is a point, points, or a function read at every plan | r - distance to the nearest threat |
+| `surface` | sky above the head (`NavGrid.skyTop`, the sky-column cache) and the feet no more than a step (0.5625) below the local ground: the 25th percentile of the column tops in the 7 x 7 columns around, + 1. A 1 x 1 to 3 x 3 pit or a ravine floor is below it, the foot of a cliff or a tree is not | the rise to the local ground |
+
+`goto` with an `any` goal reports the member reached in `report.reached` (`{ index, goal }`, the index
+into `goal.goals`). A `runAway` whose `from` is a function is checked again when the path ends: if the
+threat has followed, the navigator plans on (until `timeoutTicks`). PvE flee (tasks/pve.ts, not
+changed here) can use it instead of its "12 blocks away" point:
+
+```ts
+skills.goto({ type: 'runAway', from: () => (threat.alive ? entityFeet(threat) : undefined), r: 16 }, { timeoutTicks: 400, sprint: true });
+```
+
+`!top` (chat/commands-nav.ts) runs `{ type: 'surface' }` with `allowPlace` (pillars up with
+throwaway blocks). Measured on bds-move (task 7.10 e2e, 2 runs each): `any` over 10 log columns
+reached the nearest (member 0) in 38 ticks (one plan, 17 nodes expanded, 1.4 to 1.7 ms); getToBlock
+next to a block with glass on its north, west and top: the north-east diagonal (sees east) in 34
+ticks, reach 0.99; yLevel -57 up a staircase: the first step at -57, 77 ticks; runAway r 12: 0 ->
+12.02 in 56 ticks (threat on the spot), 2 -> 11.96 in 50 ticks straight east (threat 2 west);
+surface from a 4-deep 1 x 1 shaft: 3 blocks placed and a jump onto the rim, 60 to 72 ticks.
+
+## Blacklist
+
+`Navigator.blacklist` (nav/blacklist.ts, Baritone's blacklist): a key that failed `blacklistFailures`
+(3) times is skipped for `blacklistTicks` (6000, 5 min of the navigator's ticks), then forgotten;
+failures more than 6000 ticks apart never add up, and a success clears the count.
+
+| Key | Counted when | Effect |
+|---|---|---|
+| `b:x,y,z` (block / near / getToBlock target), `xz:x,z`, `y:Y` | a goto with that goal ends `unreachable` or `timeout`; for an `any`: all its members when the last main search was exhaustive (`none`), else the member the body was heading for (lowest estimate) | the goal is refused at once (`blacklisted`), an `any` drops the member (listed in `report.skipped`) |
+| `dig:x,y,z`, `place:x,y,z`, `use:x,y,z` | a dig / pillar place / door use at that cell fails or times out (every goto) | the planner never digs that cell (`noBreak`), pillars there or opens that door (`PathOptions.noAction`) |
+
+Goals are counted and consulted only for `any` and `getToBlock` goals by default (targets of work:
+logs, chests, ores), or with `{ blacklist: true }` in the goto options (`NavGotoOptions`); plain
+block / near / xz gotos (home, shelter, `!goto`) never are, so a blocked home is never skipped.
+`report.blacklisted` lists the keys a goto put on the list. The tree finder (`findTrees`:
+`TreeOptions.skip`) starts no tree from a blacklisted log and drops a tree whose every log is
+blacklisted; the feller skips blacklisted logs and counts one failure for a log no stand cell could
+be reached for (or whose dig failed 3 times), so after 3 failed fells a gather stops walking back to
+it. `!status` shows `blacklist <n>` (the afk task; its status JSON lists the entries). Measured on
+bds-move: a log in a glass shell failed 3 gotos (63 to 70 ticks, 3.1 to 3.5 s each), was blacklisted
+on the third, and the next `any` over it and a free log skipped it and reached the free one (52 ticks).
+
 ## Status, health and falls
 
 `BotSkills.status()`: health and food, the last 20 health drops (`falling: true` with `fallDistance`
@@ -206,6 +271,9 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/e2e/nav-dig.test.ts` | dirt wall: walked around without `allowBreak`, dug with it |
 | `test/e2e/nav-fence.test.ts` | fence line: never collided with |
 | `test/e2e/nav-place.test.ts` | pillar-up (cliff, pit) and door / gate; skipped with a message until the navigator has `place` / `useBlock` actions |
+| `test/unit/skills/nav-goals.test.ts` | task 7.10 goal predicates and heuristics; closed loop: any over 10 logs, getToBlock (visible face), yLevel, runAway (also from a moving threat), surface (shaft with pillaring, cave); the blacklist (counting, expiry, keys, a walled log skipped by the next any, blame of an any member, dig cells) |
+| `test/unit/skills/tree-blacklist.test.ts` | the tree finder and the feller skip blacklisted logs; 3 failed fells blacklist an unreachable log |
+| `test/e2e/nav-goals.test.ts` | any over 10 logs, getToBlock, yLevel, runAway, surface from a 4-deep shaft, a log walled in glass blacklisted after 3 failures and skipped by the next any |
 
 The e2e tests use `bds-move` (udp/19146). The v1 layouts (`nav-worlds.ts`: `flat`, `hill`, `long`, `wall`)
 have fixed areas; every v2 suite builds in its own random chunk-aligned area (`privateOrigin()`, x 2048

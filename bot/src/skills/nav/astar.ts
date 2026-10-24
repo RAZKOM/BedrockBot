@@ -19,7 +19,7 @@ import { PHYSICS } from '../input/physics.ts';
 import type { TerrainClass } from '../terrain/classify.ts';
 import { breakBlocker, type BreakRules, type NavBlockFace } from './actions.ts';
 import { DEFAULT_COSTS, dropCost, type PathCosts } from './costs.ts';
-import { goalTest, type Goal, type GoalTest } from './goals.ts';
+import { goalTest, type NavGoal, type GoalTest } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
 import { CROSS_BLOCKED, CROSS_TOGGLE, cellKey, type NavGrid } from './grid.ts';
 
 export type { PathCosts } from './costs.ts';
@@ -68,6 +68,8 @@ export interface PathOptions {
   protectedBlocks?: BreakRules['protectedBlocks'];
   /** Cells (cellKey) not to break (a dig there failed). */
   noBreak?: ReadonlySet<number>;
+  /** Track R: cells (cellKey) not to pillar in / doors (lower half) not to open (blacklisted place / use failures). */
+  noAction?: ReadonlySet<number>;
 }
 
 export interface PathResult {
@@ -229,7 +231,7 @@ export function handBreakTicks(c: TerrainClass): number {
 /** A resumable A* search (run it with `step` until it returns a result). */
 export class PathSearch {
   readonly grid: NavGrid;
-  readonly goal: Goal;
+  readonly goal: NavGoal;
   private readonly costs: PathCosts;
   private readonly opts: PathOptions;
   private readonly test: GoalTest;
@@ -248,12 +250,12 @@ export class PathSearch {
   private ms = 0;
   private done: PathResult | undefined;
 
-  constructor(grid: NavGrid, start: { x: number; y: number; z: number }, goal: Goal, opts: PathOptions = {}) {
+  constructor(grid: NavGrid, start: { x: number; y: number; z: number }, goal: NavGoal, opts: PathOptions = {}) {
     this.grid = grid;
     this.goal = goal;
     this.opts = opts;
     this.costs = { ...DEFAULT_COSTS, ...opts.costs };
-    this.test = goalTest(goal);
+    this.test = goalTest(goal, grid); // Track R: getToBlock / surface read the grid
     this.maxNodes = opts.maxNodes ?? 40_000;
     this.maxMs = opts.maxMs ?? 250;
     this.breakTicksOf = opts.breakTicks ?? handBreakTicks;
@@ -492,7 +494,7 @@ export class PathSearch {
     }
 
     // Pillar-up: jump and place a block in the feet cell (full-block floors only).
-    if (opts.allowPlace && Math.abs(f0 - cy) < FLAT) {
+    if (opts.allowPlace && Math.abs(f0 - cy) < FLAT && !opts.noAction?.has(cellKey(cx, cy, cz))) {
       const room = grid.freeColumn(cx, headCell + 1, headCell + 1, cz);
       if (room === true) {
         this.relax(cur, cx, cy + 1, cz, cy + 1, costs.jump, M_PILLAR, costs.place, 0, { place: { p: { x: cx, y: cy, z: cz }, face: 'down' } });
@@ -535,6 +537,7 @@ export class PathSearch {
       if (c === CROSS_TOGGLE) {
         if (!this.opts.allowOpen) return true;
         const base = grid.passageBase(x, y, z);
+        if (this.opts.noAction?.has(cellKey(base.x, base.y, base.z))) return true; // Track R: blacklisted door
         if (!use.some((u) => u.x === base.x && u.y === base.y && u.z === base.z)) use.push(base);
       }
     }
@@ -581,7 +584,7 @@ export class PathSearch {
  * Finds a path from the start node to the goal in one go. The start must be a standable node (see
  * `locateNode`); otherwise the result is `none` with an empty path.
  */
-export function findPath(grid: NavGrid, start: { x: number; y: number; z: number }, goal: Goal, opts: PathOptions = {}): PathResult {
+export function findPath(grid: NavGrid, start: { x: number; y: number; z: number }, goal: NavGoal, opts: PathOptions = {}): PathResult {
   return new PathSearch(grid, start, goal, opts).step()!;
 }
 

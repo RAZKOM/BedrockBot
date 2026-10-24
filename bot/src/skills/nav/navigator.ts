@@ -23,8 +23,12 @@ import { DEFAULT_THROWAWAY, type NavActions } from './actions.ts';
 import { PathSearch, findPath, handBreakTicks, locateNode, type LocatedNode, type PathNode, type PathOptions, type PathResult } from './astar.ts';
 import { TICKS } from './costs.ts';
 import { PathFollower, PressGuard, yawTowards } from './follower.ts';
-import type { Goal } from './goals.ts';
+import { goalTest, type NavGoal } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
 import { CROSS_CLEAR, NavGrid, cellKey } from './grid.ts';
+import { NavBlacklist, actionKey, goalKey } from './blacklist.ts'; // Track R
+
+/** Track R: goto options of the navigator. `blacklist`: consult and feed the failure blacklist (default: `any` and `getToBlock` goals). */
+export type NavGotoOptions = GotoOptions & { blacklist?: boolean };
 
 /** What the navigator needs from the world model. `World` + `worldSource()` provide it. */
 export interface NavWorld {
@@ -66,6 +70,10 @@ export interface NavigatorOptions {
   unloadedWaitTicks?: number;
   /** Per-move timeout: `factor` x the move's estimated ticks + `margin`. Default 2 and 10. */
   moveTimeout?: { factor: number; margin: number };
+  /** Track R: the failure blacklist (default: a new one on this navigator's tick clock, 3 failures, 6000 ticks). */
+  blacklist?: NavBlacklist;
+  blacklistFailures?: number;
+  blacklistTicks?: number;
 }
 
 export type ReplanReason = 'start' | 'correction' | 'block' | 'partial' | 'stuck' | 'timeout' | 'action' | 'retry' | 'ahead';
@@ -84,8 +92,14 @@ export interface PlanRecord {
 
 /** What happened during one goto (for tests, metrics and logs). */
 export interface GotoReport {
-  goal: Goal;
+  goal: NavGoal;
   result: SkillResult | undefined;
+  /** Track R: `any` goal: the member reached (index into `goal.goals`). */
+  reached?: { index: number; goal: NavGoal };
+  /** Track R: blacklist keys skipped when planning (the goal or `any` members). */
+  skipped?: string[];
+  /** Track R: keys this goto's failure put on the blacklist. */
+  blacklisted?: string[];
   ticks: number;
   /** Distance the body moved (sum of per-tick displacements), blocks. */
   distance: number;
@@ -144,7 +158,12 @@ interface DoorToClose {
 }
 
 interface Active {
-  goal: Goal;
+  goal: NavGoal;
+  /** Track R: the goal the searches use (an `any` without its blacklisted members) and its members' indices in `goal.goals`. */
+  planGoal: NavGoal;
+  members: number[] | undefined;
+  useBlacklist: boolean;
+  lastMain: PathResult['status'] | undefined;
   opts: Required<GotoOptions>;
   pathOpts: PathOptions;
   path: PathNode[];
@@ -206,9 +225,14 @@ export class Navigator {
   private readonly unsubs: (() => void)[] = [];
   /** Report of the last goto (also while it runs). */
   lastReport: GotoReport | undefined;
+  /** Track R: failed goals / `any` members / action cells, skipped for a while (nav/blacklist.ts). */
+  readonly blacklist: NavBlacklist;
+  /** Track R: ticks seen by this navigator (the blacklist's clock). */
+  private clock = 0;
 
   constructor(loop: InputLoop, world: NavWorld, opts: NavigatorOptions = {}) {
     this.loop = loop;
+    this.blacklist = opts.blacklist ?? new NavBlacklist({ failures: opts.blacklistFailures, ticks: opts.blacklistTicks, now: () => this.clock }); // Track R
     this.grid = new NavGrid(world.source);
     this.log = opts.logger ?? silentLogger;
     this.stuckTicks = opts.stuckTicks ?? 40;
@@ -242,6 +266,7 @@ export class Navigator {
         }
       }),
       loop.onBeforeStep((_tick, state) => {
+        this.clock++; // Track R
         const rep = this.active?.report;
         const t0 = performance.now();
         this.onTick(state);
@@ -289,13 +314,35 @@ export class Navigator {
   }
 
   /** Plan only (no movement, one search to the end): from the body's current node to the goal. */
-  plan(goal: Goal, from?: Vec3, options?: GotoOptions): PathResult | undefined {
+  plan(goal: NavGoal, from?: Vec3, options?: GotoOptions): PathResult | undefined {
     const start = locateNode(this.grid, from ?? this.loop.state.pos);
     return start && findPath(this.grid, start, goal, this.planOptions(options));
   }
 
-  goto(goal: Goal, options: GotoOptions = {}): Promise<SkillResult> {
+  goto(goal: NavGoal, options: NavGotoOptions = {}): Promise<SkillResult> {
     this.cancel();
+    // Track R: the blacklist drops failed goals / `any` members before planning
+    const useBlacklist = options.blacklist ?? (goal.type === 'any' || goal.type === 'getToBlock');
+    const skipped: string[] = [];
+    let planGoal: NavGoal = goal;
+    let members: number[] | undefined;
+    if (goal.type === 'any') {
+      members = [];
+      const kept: NavGoal[] = [];
+      goal.goals.forEach((g, i) => {
+        const k = useBlacklist ? goalKey(g) : undefined;
+        if (k !== undefined && this.blacklist.has(k)) skipped.push(k);
+        else {
+          kept.push(g);
+          members!.push(i);
+        }
+      });
+      planGoal = { type: 'any', goals: kept };
+    } else if (useBlacklist) {
+      const k = goalKey(goal);
+      if (k !== undefined && this.blacklist.has(k)) skipped.push(k);
+    }
+    const nothingLeft = members ? members.length === 0 : skipped.length > 0;
     const opts: Required<GotoOptions> = {
       timeoutTicks: options.timeoutTicks ?? 6000,
       replanOnCorrection: options.replanOnCorrection ?? true,
@@ -323,11 +370,17 @@ export class Navigator {
         actions: { dig: 0, use: 0, place: 0, close: 0, failed: 0 },
         retreats: 0,
         unloadedWait: 0,
+        skipped,
+        blacklisted: [],
       };
       this.lastReport = report;
       const noBreak = new Set<number>();
       const a: Active = {
         goal,
+        planGoal,
+        members,
+        useBlacklist,
+        lastMain: undefined,
         opts,
         pathOpts: this.planOptions(opts, noBreak),
         path: [],
@@ -361,15 +414,59 @@ export class Navigator {
           this.active = undefined;
           report.result = r;
           this.loop.release();
+          this.settleBlacklist(a, r); // Track R
           this.log.info(
             `goto ${JSON.stringify(goal)}: ${r.ok ? 'ok' : r.reason} after ${report.ticks} ticks, ${report.distance.toFixed(1)} blocks, ` +
-              `${report.plans.length} plan(s), ${report.segments} segment(s), ${report.corrections} correction(s), ${report.stuck} stuck, max tick ${report.maxTickMs} ms`,
+              `${report.plans.length} plan(s), ${report.segments} segment(s), ${report.corrections} correction(s), ${report.stuck} stuck, max tick ${report.maxTickMs} ms` +
+              `${report.reached ? `, reached member ${report.reached.index}` : ''}${skipped.length ? `, skipped ${skipped.join(' ')}` : ''}${report.blacklisted?.length ? `, blacklisted ${report.blacklisted.join(' ')}` : ''}`,
           );
           resolve(r);
         },
       };
       this.active = a;
+      if (nothingLeft) a.finish({ ok: false, reason: members && skipped.length === 0 ? 'unreachable' : 'blacklisted' }); // Track R
     });
+  }
+
+  /** Track R: blacklist bookkeeping when a goto ends: the reached `any` member, success clears, unreachable / timeout counts. */
+  private settleBlacklist(a: Active, r: SkillResult): void {
+    const rep = a.report;
+    const node = a.path.at(-1);
+    if (r.ok && a.planGoal.type === 'any' && node) {
+      const i = goalTest(a.planGoal, this.grid).member?.(node.x, node.y, node.z, node.feet) ?? -1;
+      const index = i >= 0 ? (a.members?.[i] ?? i) : -1;
+      const g = a.goal.type === 'any' ? a.goal.goals[index] : undefined;
+      if (g) rep.reached = { index, goal: g };
+    }
+    if (!a.useBlacklist || (rep.skipped?.length && !r.ok && r.reason === 'blacklisted')) return;
+    if (r.ok) {
+      const k = goalKey(rep.reached?.goal ?? a.goal);
+      if (k !== undefined) this.blacklist.succeed(k);
+      return;
+    }
+    if (r.reason !== 'unreachable' && r.reason !== 'timeout') return;
+    let blame: NavGoal[];
+    if (a.planGoal.type !== 'any') blame = [a.planGoal];
+    else if (a.lastMain === 'none') blame = [...a.planGoal.goals]; // exhaustive: none of them is reachable
+    else {
+      // the member the body was heading for (lowest estimate from where it stands)
+      const p = this.loop.state.pos;
+      const [x, y, z] = [Math.floor(p.x), Math.floor(p.y + 1e-3), Math.floor(p.z)];
+      let best: NavGoal | undefined;
+      let bestH = Infinity;
+      for (const g of a.planGoal.goals) {
+        const h = goalTest(g, this.grid).h(x, y, z);
+        if (h < bestH) {
+          bestH = h;
+          best = g;
+        }
+      }
+      blame = best ? [best] : [];
+    }
+    for (const g of blame) {
+      const k = goalKey(g);
+      if (k !== undefined && this.blacklist.fail(k, r.reason)) rep.blacklisted?.push(k);
+    }
   }
 
   cancel(): void {
@@ -538,7 +635,7 @@ export class Navigator {
     // plan-ahead: the next segment, from the end of this one
     if (!a.search && a.status === 'partial' && !a.aheadBlocked && !a.replan && a.path.length - 1 - a.passedAbs < this.aheadNodes) {
       const end = a.path.at(-1)!;
-      a.search = { s: new PathSearch(this.grid, end, a.goal, this.segmentOptions(a, false)), kind: 'ahead', reason: 'ahead', tick: a.t, slices: 0 };
+      a.search = { s: new PathSearch(this.grid, end, a.planGoal, this.segmentOptions(a, false)), kind: 'ahead', reason: 'ahead', tick: a.t, slices: 0 };
     }
   }
 
@@ -576,8 +673,11 @@ export class Navigator {
         return false;
       }
     }
+    for (const k of this.blacklist.cells('dig')) a.noBreak.add(k); // Track R: blacklisted action cells
     a.pathOpts = this.planOptions(a.opts, a.noBreak);
-    a.search = { s: new PathSearch(this.grid, start, a.goal, this.segmentOptions(a, true)), kind: 'main', reason, tick: a.t, slices: 0 };
+    const noAction = new Set([...this.blacklist.cells('place'), ...this.blacklist.cells('use')]);
+    if (noAction.size) a.pathOpts.noAction = noAction;
+    a.search = { s: new PathSearch(this.grid, start, a.planGoal, this.segmentOptions(a, true)), kind: 'main', reason, tick: a.t, slices: 0 };
     this.loop.release();
     return true;
   }
@@ -590,6 +690,7 @@ export class Navigator {
   /** Returns false when the goto finished or must wait. */
   private onMainResult(a: Active, res: PathResult, search: Search): boolean {
     this.record(a, res, search);
+    a.lastMain = res.status; // Track R
     if (res.status === 'none') {
       a.finish({ ok: false, reason: 'unreachable' });
       return false;
@@ -693,6 +794,13 @@ export class Navigator {
       return;
     }
     if (a.status === 'found') {
+      // Track R: a runAway from a moving threat (a function) is checked again where the threat is now
+      const g = a.planGoal;
+      const end = a.path.at(-1);
+      if (g.type === 'runAway' && typeof g.from === 'function' && end && !goalTest(g, this.grid).done(end.x, end.y, end.z, end.feet)) {
+        a.replan ??= 'partial';
+        return;
+      }
       a.finish({ ok: true });
       return;
     }
@@ -748,6 +856,8 @@ export class Navigator {
   private actionFailed(a: Active, s: InputLoopState, run: ActionRun, why: string): void {
     a.report.actions.failed++;
     this.log.info(`goto: ${run.kind} failed (${why})`);
+    const cellP = run.queue[0]; // Track R: count the failure against the action cell
+    if (cellP && run.kind !== 'close' && this.blacklist.fail(actionKey(run.kind, cellP), why)) a.report.blacklisted?.push(actionKey(run.kind, cellP));
     a.action = undefined;
     this.loop.setCommand({ jump: false, pitch: 0 });
     a.lastProgressTick = a.t;

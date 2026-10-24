@@ -104,7 +104,7 @@ container under test).
 | `pve` | bds-pve | udp/19144 | docker/compose.pve.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_PVE_DIFFICULTY` overrides) | 1.26.60.6 | pve-* e2e: combat, guard, flee, follow, night (PVE_BDS_*; docs/pve.md) |
 | `rl-N` | bds-rl-N | udp/19170+N | docker/compose.rl-n.yml (`N=1 docker compose -p bedrockbot-rl-1 -f docker/compose.rl-n.yml up -d`) | 1.26.60.6 | extra RL envs for SubprocVecEnv (rl/scripts/throughput.py); remove after use |
 
-Per-track details: docs/world-model.md, docs/movement.md, docs/pathfinding.md, docs/digging.md, docs/wood.md (`--task gather`), docs/rl.md, docs/interaction.md (placing, doors), docs/versions.md.
+Per-track details: docs/world-model.md, docs/movement.md, docs/pathfinding.md, docs/digging.md, docs/wood.md (`--task gather`), docs/rl.md, docs/interaction.md (placing, doors), docs/waypoints.md (`!wp`, `!goto <waypoint>`, `!top`), docs/versions.md.
 | `nn` | bds-nn | tcp+udp/19140, udp/19160-19167 (WebRTC), udp/7551 (discovery) | docker/compose.dev-nethernet.yml (NetherNet, TICK_DISTANCE 10) | 1.26.60.6 | `pnpm e2e:nn` |
 | `dev51` | bds-dev51 | udp/19134 | docker/compose.dev51.yml (TICK_DISTANCE 10) | 1.26.51.1 | `pnpm e2e:51` (rollback to the previous version) |
 
@@ -245,9 +245,14 @@ Replies are player chat from the bot.
 | `!stop` | `stopped (was following Steve); guarding r=16`: cancels follow / come / kill / a fight / a goto |
 | `!guard [status]` / `on` / `off` / `<radius>` | `guard on, radius 16`: fight hostiles within the radius of home (of the bot without a home), pick up the drops, walk back home |
 | `!kill <type> [n]` | `killing 3 zombie`, then `kill zombie: 3/3 done`: up to n mobs of that type within 32 blocks, nearest first. `!kill player` or any player's name: `refused: I never attack players (PvE only)` |
+| `!goto <waypoint>` / `!goto x y z` | `walking to base (10 -60 20)`, then `arrived at base (10 -60 20)` or `goto: unreachable`: a waypoint name first, else a feet block; needs walking (docs/waypoints.md) |
+| `!wp [list]` / `!wp set <name> [x y z]` / `!wp del <name>` / `!wp <name>` | `waypoints (3): base 10 -60 20, death* 3 -60 -5, spawn* 0 ? 0`: this server's waypoints (`*` = automatic: `death`, `home`, `spawn`; `?` = no height known); `set` without coordinates = the bot's feet; `!wp set home` / `del home` also set / clear the home point |
+| `!top` | `going up to the surface`, then `on the surface at 3.5 -59.0 7.5` or `top: unreachable`: out of a cave or a pit (the `surface` goal; pillars up with throwaway blocks such as cobblestone); needs walking |
 
 `!status` names the active behaviour with walking: `behaviour idle`, `guarding r=16`, `following Steve`,
-`fighting zombie`, `fleeing`, `walking to 10 -60 3`, `returning home`. PvE details: docs/pve.md.
+`fighting zombie`, `fleeing`, `walking to 10 -60 3`, `returning home`. PvE details: docs/pve.md. The
+afk task adds `blacklist <n>` (goals / logs / action cells the navigator skips for now,
+docs/pathfinding.md "Blacklist") and `waypoints <n>`.
 
 Everyone else is ignored (logged as "not an owner"). Truth-pack lines (`@truth ...`), json/system
 messages and the bot's own echo are never parsed as commands.
@@ -282,6 +287,9 @@ yet).
   `client`), `kick` (`{reason, message}` from the server's disconnect packet), `willReconnect`,
   `retryInMs`, `spawnedMs`.
 - `bot/logs/metrics.json`: rewritten every `--metrics-interval` and on exit (Operations).
+- `<config dir>/waypoints/<server id>.json` (afk task): the waypoints of one server, e.g.
+  `%LOCALAPPDATA%\bedrockbot\waypoints\127.0.0.1_19132.json` or `realm-<name>.json`; in memory
+  only with `--no-config` (docs/waypoints.md).
 
 ### Behaviour measured on BDS
 
@@ -353,6 +361,7 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e hard                  
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e act                           # task 7.3 suites on bds-act (ACT_BDS_HOST/PORT/CONTAINER, ACT_VERBOSE=1)
 BDS_E2E=1 HARD_EASY=1 pnpm --filter bot exec vitest run --project e2e hard-night        # + the easy/zombie run
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nav-                          # every nav suite on bds-move (v1 + v2, ~7 min; docs/pathfinding.md "Tests")
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nav-goals nav-waypoints       # task 7.10: goal types, blacklist, waypoints / !top through the CLI (~2 min)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e pve                           # tasks 7.4-7.6 on bds-pve (normal; ~9 min with the night run)
 BDS_E2E=1 BDS_PVE_NIGHT=1 pnpm --filter bot exec vitest run --project e2e pve           # with the 5-minute night run (opt-in: flaky under load until 7.11 adds armour and food)
 BDS_E2E=1 BDS_SOAK=1 pnpm --filter bot exec vitest run --project e2e test/e2e/keepalive.test.ts --silent=false

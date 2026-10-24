@@ -3,6 +3,10 @@
 // logs in reach, close to the tree, close to the bot). Pillar-up (placing blocks under the feet) is
 // not implemented: trees up to 7 logs are fully reachable from the ground next to the trunk
 // (docs/wood.md "Reach").
+//
+// Blacklist (task 7.10): a log no stand cell could be reached for, or that failed to dig 3 times,
+// counts one failure on the navigator's blacklist (nav/blacklist.ts); a blacklisted log is skipped
+// at once, so after 3 failed attempts a gather stops walking back to it (the tree finder skips it too).
 import { silentLogger, type Logger } from '../../log.ts';
 import type { Vec3 } from '../../world/types.ts';
 import { checkReach, DEFAULT_REACH, EYE_HEIGHT } from '../dig/look.ts';
@@ -22,6 +26,8 @@ export interface FellDeps {
   /** True once the operation was cancelled (BotSkills.cancel or a newer skill). */
   cancelled: () => boolean;
   logger?: Logger;
+  /** The navigator's failure blacklist (logs the bot could not get to are skipped). */
+  blacklist?: { blocked(p: Vec3): boolean; failBlock(p: Vec3, why?: string): boolean };
 }
 
 export interface FellOptions {
@@ -103,6 +109,12 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
   for (let iter = 0; iter < 8 * tree.logs.length + 16; iter++) {
     if (deps.cancelled()) return finish(false, 'interrupted');
     const remaining = remainingLogs(deps.blockAt, tree).filter((p) => !skipped.has(key(p)));
+    const listed = remaining.find((p) => deps.blacklist?.blocked(p));
+    if (listed) {
+      log.info(`fell: ${key(listed)} is blacklisted; skipping it`);
+      skipped.add(key(listed));
+      continue;
+    }
     const target = remaining[0];
     if (!target) break;
     const name = deps.blockAt(target)?.name;
@@ -125,7 +137,10 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
         const n = (failsAt.get(key(target)) ?? 0) + 1;
         failsAt.set(key(target), n);
         log.info(`fell: dig ${key(target)} failed (${r.reason}), attempt ${n}`);
-        if (n >= 3) skipped.add(key(target));
+        if (n >= 3) {
+          skipped.add(key(target));
+          deps.blacklist?.failBlock(target, `dig failed: ${r.reason}`);
+        }
         continue;
       }
     }
@@ -145,6 +160,7 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
     if (!moved) {
       log.info(`fell: no stand cell reaches ${key(target)} (${spots.length} candidates); skipping it`);
       skipped.add(key(target));
+      if (deps.blacklist?.failBlock(target, 'no stand cell reached')) log.info(`fell: ${key(target)} is blacklisted now`);
     }
   }
   const left = remainingLogs(deps.blockAt, tree);

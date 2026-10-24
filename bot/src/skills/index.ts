@@ -25,7 +25,8 @@ import { ChestSkill, type DepositResult, type OpenOptions, type OpenResult } fro
 import { Digger, type DigOptions, type DigResult } from './dig/digger.ts';
 import type { InputLoop } from './input/inputLoop.ts';
 import { PHYSICS } from './input/physics.ts';
-import { Navigator, type GotoReport, type NavigatorOptions } from './nav/navigator.ts';
+import { Navigator, type GotoReport, type NavGotoOptions, type NavigatorOptions } from './nav/navigator.ts';
+import type { NavGoal } from './nav/goals.ts'; // Track R
 import { DEFAULT_THROWAWAY } from './nav/actions.ts';
 import { oppositeFace } from './place/face.ts';
 import { angleDiff, turnTowards, yawTowards } from './nav/follower.ts';
@@ -34,7 +35,7 @@ import { UseSkill, type UseOptions, type UseResult } from './interact/use.ts';
 import { PlaceSkill, type PlaceOptions, type PlaceResult } from './place/place.ts';
 import { fellTree, type FellOptions, type FellResult } from './tree/feller.ts';
 import { detectTree, treesFrom, type Tree, type TreeOptions } from './tree/tree.ts';
-import type { Goal, GotoOptions, SkillResult, Skills } from './types.ts';
+import type { SkillResult, Skills } from './types.ts'; // Track R: goto takes NavGoal / NavGotoOptions now
 
 export type { Goal, GotoOptions, SkillResult, Skills, DigOptions, DigResult } from './types.ts';
 export type { CollectOptions, CollectResult } from './collect/collect.ts';
@@ -315,7 +316,7 @@ export class BotSkills implements Skills {
     });
   }
 
-  goto(goal: Goal, opts?: GotoOptions): Promise<SkillResult> {
+  goto(goal: NavGoal, opts?: NavGotoOptions): Promise<SkillResult> { // Track R: every task 7.10 goal type
     // Synchronous start (callers check nav.busy right after the call).
     const token = this.begin('goto');
     const p = this.nav.goto(goal, opts);
@@ -430,7 +431,7 @@ export class BotSkills implements Skills {
     if (!w.blockAt || !w.find) return [];
     const origin = opts.origin ?? this.loop.state.pos;
     const logs = w.find((b) => b.name.endsWith('_log') && !b.name.startsWith('stripped_'), { origin, radius, max: 4096, class: 'log' });
-    return treesFrom(w.blockAt.bind(w), logs, origin, opts);
+    return treesFrom(w.blockAt.bind(w), logs, origin, { skip: (p) => this.nav.blacklist.blocked(p), ...opts }); // Track R: skip blacklisted logs
   }
 
   /** Fell a tree from the bottom up, re-pathing when the next log is out of reach (skills/tree/feller.ts). */
@@ -452,6 +453,7 @@ export class BotSkills implements Skills {
           stand: (x, y, z) => this.nav.grid.stand(x, y, z),
           cancelled,
           logger: this.log,
+          blacklist: this.nav.blacklist, // Track R
         },
         opts,
       ),
