@@ -181,7 +181,8 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
 }
 
 /** `!drop items` keeps these: anything with durability (tools, weapons, armour, elytra, shields), armour, real food (not rotten flesh and the like), totems, shulker boxes, ender chests. */
+const isRealFood = (n: string): boolean => { const f = foodInfo(n); return f !== undefined && !f.bad; };
 export function keepOnDropItems(name: string): boolean {
   const n = name.startsWith('minecraft:') ? name.slice(10) : name;
-  return maxDurability(n) !== undefined || armourSlotOf(n) !== undefined || (foodInfo(n)?.bad === false) || n === 'totem_of_undying' || n.endsWith('shulker_box') || n === 'ender_chest';
+  return maxDurability(n) !== undefined || armourSlotOf(n) !== undefined || isRealFood(n) || n === 'totem_of_undying' || n.endsWith('shulker_box') || n === 'ender_chest';
 }
