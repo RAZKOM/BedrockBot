@@ -215,7 +215,8 @@ export class PathFollower {
       if (dTarget < 1 && err > 30) forward = 0;
     }
 
-    if (target.move === 'jump' && s.onGround && err < 25) {
+    // (not once the body is up at the target's height: landed off-centre on the step, it walks on)
+    if (target.move === 'jump' && s.onGround && err < 25 && p.y < target.feet - 1e-3) {
       if (dTarget <= 1.4 || s.collidedHorizontally) jump = true;
     }
 

@@ -61,6 +61,8 @@ export interface PathCosts {
   walk: number;
   /** Ticks for a cardinal one-block climb (jump). */
   jump: number;
+  /** Extra ticks for walking a stairs block up or down (two 0.5 steps) on top of `walk`. */
+  stairs: number;
   /** fall[n]: ticks to fall n blocks. */
   fall: readonly number[];
   /** Extra ticks per drop: creeping to the edge, landing. */
@@ -83,6 +85,7 @@ export interface PathCosts {
 export const DEFAULT_COSTS: Readonly<PathCosts> = Object.freeze({
   walk: TICKS.sprint,
   jump: TICKS.jumpAir,
+  stairs: 1,
   fall: TICKS.fall,
   landing: 2,
   maxDrop: 3,

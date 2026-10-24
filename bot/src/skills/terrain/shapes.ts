@@ -4,6 +4,7 @@
 // boundingBox is "block" (slabs, stairs, fences, carpets ...). Movement and pathfinding read the real
 // shapes from here instead. See docs/pathfinding.md.
 import { createRequire } from 'node:module';
+import { blockHash } from '../../world/registry.ts';
 import type { BlockInfo, Box } from '../../world/types.ts';
 
 const require = createRequire(import.meta.url);
@@ -14,6 +15,7 @@ interface MdBlock {
   maxStateId: number;
   defaultState: number;
   boundingBox: string;
+  hardness?: number | null;
 }
 
 interface MdBlockState {
@@ -174,6 +176,10 @@ export function connectedBoxes(kind: ConnectKind, mask: number): readonly Box[] 
 /** Collision boxes of a world BlockInfo: real shapes for known states, a full cube for unknown blocks. */
 export function boxesOf(info: BlockInfo): readonly Box[] {
   if (info.stateId < 0) return info.solid ? [FULL] : NONE;
+  if (isStairsName(info.name)) {
+    const corner = info.states[STAIRS_CORNER];
+    if (typeof corner === 'string' && corner !== 'none') return stairBoxes(info.states);
+  }
   return boxesOfState(info.stateId) ?? info.boxes;
 }
 
@@ -217,4 +223,124 @@ export function blockInfoOf(name: string, states: Record<string, unknown> = {}):
   });
   infoCache.set(key, info);
   return info;
+}
+
+// ---- stairs: corner shapes and the 1.26.60 `minecraft:corner` state --------------------------------
+
+/** Bedrock 1.26.60 stairs state (none, inner_left, inner_right, outer_left, outer_right); the 1.26.30 data has no such state. */
+export const STAIRS_CORNER = 'minecraft:corner';
+export const STAIRS_CORNERS = ['none', 'inner_left', 'inner_right', 'outer_left', 'outer_right'] as const;
+
+export function isStairsName(name: string): boolean {
+  return name.endsWith('_stairs');
+}
+
+/**
+ * The direction (dx, dz) a body walks to climb a stairs block (towards its high half), by
+ * `weirdo_direction` 0..3: high half east, west, south, north (measured on BDS 1.26.60.6; the same as
+ * minecraft-data's shapes).
+ */
+export const STAIRS_UP: readonly (readonly [number, number])[] = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+];
+
+/**
+ * Java StairBlock's top quarters (bits: 1 north-west, 2 north-east, 4 south-west, 8 south-east) by
+ * shape * 4 + Java facing (south 0, west 1, north 2, east 3); shapes in STAIRS_CORNERS order.
+ */
+const QUARTERS_BY_SHAPE = [12, 5, 3, 10, 14, 13, 7, 11, 13, 7, 11, 14, 8, 4, 1, 2, 4, 1, 2, 8];
+/** weirdo_direction -> Java facing value. */
+const JAVA_FACING = [3, 1, 0, 2];
+const stairCache = new Map<string, readonly Box[]>();
+
+/**
+ * Collision boxes of a stairs state with its `minecraft:corner` shape: a half-height slab (the upper
+ * half when `upside_down_bit`) plus the step's quarters (Java's StairBlock shapes; Bedrock names the
+ * corners like Java: outer when the block behind the high half is a stairs block facing sideways,
+ * inner when the block in front of the low half is, left = counter-clockwise; measured on BDS
+ * 1.26.60.6). Straight stairs give minecraft-data's two boxes.
+ */
+export function stairBoxes(states: Readonly<Record<string, unknown>>): readonly Box[] {
+  const dir = Number(states.weirdo_direction ?? 0) & 3;
+  const down = states.upside_down_bit === true || Number(states.upside_down_bit ?? 0) === 1;
+  const cornerName = states[STAIRS_CORNER];
+  const shape = Math.max(0, STAIRS_CORNERS.indexOf((typeof cornerName === 'string' ? cornerName : 'none') as (typeof STAIRS_CORNERS)[number]));
+  const key = `${dir}|${down}|${shape}`;
+  const hit = stairCache.get(key);
+  if (hit) return hit;
+  const bits = QUARTERS_BY_SHAPE[shape * 4 + JAVA_FACING[dir]!]!;
+  const [s0, s1] = down ? [0.5, 1] : [0, 0.5];
+  const [q0, q1] = down ? [0, 0.5] : [0.5, 1];
+  const out: Box[] = [Object.freeze([0, s0, 0, 1, s1, 1] as const)];
+  const part = (x0: number, z0: number, x1: number, z1: number): Box => Object.freeze([x0, q0, z0, x1, q1, z1] as const);
+  // pairs of quarters as halves (the straight shapes), the rest as quarters
+  let rest = bits;
+  for (const [mask, box] of [
+    [3, part(0, 0, 1, 0.5)],
+    [12, part(0, 0.5, 1, 1)],
+    [5, part(0, 0, 0.5, 1)],
+    [10, part(0.5, 0, 1, 1)],
+    [1, part(0, 0, 0.5, 0.5)],
+    [2, part(0.5, 0, 1, 0.5)],
+    [4, part(0, 0.5, 0.5, 1)],
+    [8, part(0.5, 0.5, 1, 1)],
+  ] as const) {
+    if ((rest & mask) === mask) {
+      out.push(box);
+      rest &= ~mask;
+    }
+  }
+  const boxes = Object.freeze(out);
+  stairCache.set(key, boxes);
+  return boxes;
+}
+
+// ---- block states newer than the block data ----------------------------------------------------
+
+let newerStates: Map<number, BlockInfo> | undefined;
+
+/**
+ * Hashed runtime ids of states the 1.26.30 block data does not have, for blocks whose shape the
+ * terrain layer knows: every stairs block with the 1.26.60 `minecraft:corner` state. BDS 1.26.60
+ * sends stairs as {minecraft:corner, upside_down_bit, weirdo_direction} (verified: the hash of
+ * oak_stairs {corner none, upside_down_bit 0, weirdo_direction 0} is the runtime id the server sends,
+ * -122484237); the world registry, built from the 1.26.30 states, reports them as `unknown`. Built
+ * once, on the first unknown block.
+ */
+function newerStateTable(): Map<number, BlockInfo> {
+  if (newerStates) return newerStates;
+  const table = new Map<number, BlockInfo>();
+  const d = data();
+  for (const block of Object.values(d.blocksByName)) {
+    if (!block || !isStairsName(block.name)) continue;
+    for (let s = block.minStateId; s <= block.maxStateId; s++) {
+      const typed = d.blockStates[s]?.states;
+      if (!typed || STAIRS_CORNER in typed) continue;
+      const plain: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(typed)) plain[k] = v.value;
+      for (const corner of STAIRS_CORNERS) {
+        const rid = blockHash(block.name, { ...typed, [STAIRS_CORNER]: { type: 'string', value: corner } });
+        const states = Object.freeze({ ...plain, [STAIRS_CORNER]: corner });
+        table.set(rid, Object.freeze({ name: block.name, stateId: s, states, hardness: block.hardness ?? -1, solid: true, boxes: stairBoxes(states) }));
+      }
+    }
+  }
+  newerStates = table;
+  return table;
+}
+
+/**
+ * The block behind an `unknown` BlockInfo (a runtime id the world registry could not resolve) when
+ * the terrain layer knows the newer state (stairs with `minecraft:corner`), else undefined. The
+ * result carries the 1.26.30 state id without the new state (names, break times) and the shape of
+ * the full state.
+ */
+export function resolveNewerState(info: BlockInfo): BlockInfo | undefined {
+  if (info.stateId >= 0) return undefined;
+  const rid = info.states.runtime_id;
+  if (typeof rid !== 'number') return undefined;
+  return newerStateTable().get(rid | 0);
 }
