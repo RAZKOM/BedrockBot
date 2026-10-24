@@ -157,8 +157,9 @@ describe.skipIf(!E2E)('core: process manager (task 7.8)', () => {
     n = b.said.length;
     await b.command('!stop');
     expect(await b.reply((s) => s.startsWith('stopped'), n)).toMatch(new RegExp(`^stopped \\(was walking to ${g2.x} ${g2.y} ${g2.z}, \\d+ blocks left\\); idle$`));
-    expect(await b.reply((s) => s.startsWith('goto:'), n)).toBe('goto: interrupted');
+    // the stopped walk stays quiet (commands-nav.ts: `interrupted` is not reported; the !stop line named it)
     await sleep(700);
+    expect(b.said.slice(n).filter((s) => s.startsWith('goto:'))).toEqual([]);
     const p4 = (await b.truth.pos(b.name)).location;
     await sleep(2000);
     const p5 = (await b.truth.pos(b.name)).location;

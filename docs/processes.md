@@ -175,7 +175,7 @@ the CLI runs use a temporary log dir and settings file (deleted afterwards).
   the first log: the stack is `guard:active gather:paused`, then the gather resumes and finishes with
   8 logs (truth:inv); a 40-block `!goto` with `!status` (stack line and ETA, compared with the real
   arrival); a second `!goto` with `!pause` (still for 2 s), `!status` (`[held]`), `!resume` (moving
-  again), `!stop` (`goto: interrupted`, still); flee: a guard fight against an immune, slowed,
+  again), `!stop` (the `!stop` reply names the walk; the walk itself stays quiet); flee: a guard fight against an immune, slowed,
   weakened zombie, health set to 5: `fleeing` and home, health 20: the fight resumes and kills it once
   its resistance ends.
 - `core-settings`: `--guard 1` exits 2 with one stderr line; `!set guardRadius 8` leaves a zombie 12
@@ -191,7 +191,7 @@ From the two gate runs (`core` suites, 6/6 green each, 108 s per run) plus the e
 |---|---|
 | Guard pre-empts a gather (zombie 7 blocks from the bot after 4 of 8 logs) | `fighting zombie` 61 to 122 ms after the summon; stack `guard:active gather:paused`; zombie dead after 3.2 to 4.0 s; gather resumed 3.3 to 12.2 s after the summon (the fight's drop pickup runs up to 10 s first); done with 8 logs (truth:inv) after 13.7 to 23.4 s in total, 0 corrections |
 | `!goto` 40 blocks, `!status` 1.7 to 1.8 s after the command | `[active] walking to ..., 31-32 blocks left, eta 6 s`; arrived 6.5 s after the `!status` (chat round trip included) |
-| `!pause` / `!resume` / `!stop` during a goto | 0.00 blocks moved in 2 s while held (`[held]` in the stack); 12.0 to 12.3 blocks in the 2 s after `!resume`; 0.00 blocks in 2 s after `!stop`, 34 blocks short of the goal, reply `goto: interrupted` |
+| `!pause` / `!resume` / `!stop` during a goto | 0.00 blocks moved in 2 s while held (`[held]` in the stack); 12.0 to 12.3 blocks in the 2 s after `!resume`; 0.00 blocks in 2 s after `!stop`, 34 blocks short of the goal; only the `stopped (was walking to ...)` reply, no `goto:` line (an interrupted walk stays quiet, like `!come`) |
 | Flee pre-empts a guard fight (health set to 5 mid-fight) | `fleeing` 229 to 247 ms later, stack `flee:active guard:paused`; home 12 blocks away after 2.9 to 3.0 s; with health 20 again the fight restarted after 124 to 184 ms; 0 damage taken |
 | `!set guardRadius 8` live | a zombie 12 blocks from home left alone for 5 s; `!set guardRadius 16` -> fighting 230 to 276 ms after the console command |
 | Restart of the bot process | `!set` answered in 230 to 354 ms and written to settings.json; the second process read 8, ignored a zombie at 12 blocks for 5 s and fought one at 5 blocks 506 to 537 ms after the summon |
