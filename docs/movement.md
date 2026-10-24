@@ -113,6 +113,15 @@ One tick, in this order (vanilla order; bedboo's recorded BDS traces confirm it 
 
 Jump in place: apex 1.2522 blocks, back on the ground after 12 ticks.
 
+**Stairs and partial blocks** (measured on BDS 1.26.60.6, 2026-10-29, docs/pathfinding.md "Stairs and
+partial blocks"): the step height 0.5625 is unchanged; a stairs block is climbed from its low side by
+two auto-steps of 0.5 (4.6 ticks per step on a 6-step staircase, against 9.0 for a jump onto full
+blocks), with 0 corrections. Server feet heights: slab 0.5, carpet 0.0625, farmland and dirt path
+0.9375, snow layers `height` n: n / 8 (one layer, height 0: no collision), stairs 0.5 on the low half
+and 1 on the high half, upside-down stairs 1. On 1.26.60 stairs arrive as runtime ids the registry
+does not know (the new `minecraft:corner` state); before terrain/shapes.ts resolved them the physics
+saw a 1.5-high box there and the local body disagreed with the server by up to 0.77 blocks.
+
 **Liquids** (body box shrunk by 0.001 touches a liquid below its surface height): water acceleration
 0.02, then after the move velocity x 0.8 on all axes and gravity 0.005 (terminal sink 0.025 per
 tick), jump key +0.04 per tick, +0.3 upwards when pushing against a wall with free space 0.6 above

@@ -16,7 +16,7 @@
 import type { Vec3 } from '../../world/types.ts';
 import { breakTicks as tableBreakTicks } from '../dig/breakTime.ts';
 import { PHYSICS } from '../input/physics.ts';
-import type { TerrainClass } from '../terrain/classify.ts';
+import { halfTop, type TerrainClass } from '../terrain/classify.ts';
 import { breakBlocker, type BreakRules, type NavBlockFace } from './actions.ts';
 import { DEFAULT_COSTS, dropCost, type PathCosts } from './costs.ts';
 import { goalTest, type NavGoal, type GoalTest } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
@@ -440,11 +440,15 @@ export class PathSearch {
           took = true;
         } else if (rise <= MAX_JUMP_RISE + 1e-6) {
           if (!inPassage) {
-            // head room above the start: the body must rise to the target's feet height
+            // head room above the start: the body must rise to the target's feet height (a stairs
+            // walk: the body is at the low half's height, at most 0.5625 lower, while it still
+            // overlaps the start column)
             const apexHead = Math.floor(f1 + PHYSICS.height - 1e-6);
             const room = grid.freeColumn(cx, headCell + 1, apexHead, cz);
-            if (room === true) this.relax(cur, nx, ny, nz, f1, costs.jump, M_JUMP);
-            else if (room === undefined) this.sawUnknown = true;
+            if (room === true) {
+              if (this.stepsUp(f0, nx, ny, nz, f1, dx, dz)) this.relax(cur, nx, ny, nz, f1, costs.walk + costs.stairs, M_WALK);
+              else this.relax(cur, nx, ny, nz, f1, costs.jump, M_JUMP);
+            } else if (room === undefined) this.sawUnknown = true;
           }
           took = true;
         } else {
@@ -468,7 +472,13 @@ export class PathSearch {
         }
         if (!Number.isNaN(f1)) {
           const fall = f0 - f1;
-          if (fall <= costs.maxDrop + 1e-6) {
+          if (fall <= STEP) {
+            // a step down into a lower cell (onto farmland, a dirt path, soul sand): a walk
+            this.relax(cur, nx, ny, nz, f1, costs.walk, M_WALK);
+          } else if (fall <= MAX_JUMP_RISE + 1e-6 && this.stepsDown(cx, cy, cz, f0, f1, dx, dz)) {
+            // down a stairs block's low half: two steps of 0.5, a walk
+            this.relax(cur, nx, ny, nz, f1, costs.walk + costs.stairs, M_WALK);
+          } else if (fall <= costs.maxDrop + 1e-6) {
             const trap = fall > MAX_JUMP_RISE + 1e-6 ? costs.irreversibleDrop : 0;
             this.relax(cur, nx, ny, nz, f1, dropCost(costs, fall), M_DROP, 0, trap);
           }
@@ -505,6 +515,33 @@ export class PathSearch {
         this.sawUnknown = true;
       }
     }
+  }
+
+  /**
+   * A rise from feet f0 into node (nx, ny, nz) standing at f1, moving along (dx, dz), the body climbs
+   * by auto-steps alone: the floor block's half facing the mover (a stairs block's low half) is within
+   * a step of f0, and the floor's top within a step of that half. False for full blocks, slabs on
+   * blocks, upside-down stairs and stairs met from their high side or from the side.
+   */
+  private stepsUp(f0: number, nx: number, ny: number, nz: number, f1: number, dx: number, dz: number): boolean {
+    const floorY = f1 > ny + FLAT ? ny : ny - 1;
+    const c = this.grid.cls(nx, floorY, nz);
+    if (!c?.floor) return false;
+    const low = floorY + halfTop(c, -dx, -dz);
+    return low - f0 <= STEP && f1 - low <= STEP;
+  }
+
+  /**
+   * A fall from feet f0 in node (cx, cy, cz) to feet f1, moving along (dx, dz), that the body takes as
+   * steps down: the start's floor half towards the move (a stairs block's low half) is within a step
+   * of both feet heights.
+   */
+  private stepsDown(cx: number, cy: number, cz: number, f0: number, f1: number, dx: number, dz: number): boolean {
+    const floorY = f0 > cy + FLAT ? cy : cy - 1;
+    const c = this.grid.cls(cx, floorY, cz);
+    if (!c?.floor) return false;
+    const low = floorY + halfTop(c, dx, dz);
+    return f0 - low <= STEP && low - f1 <= STEP;
   }
 
   /** Leaving a doorway node along `axis`: its door / gate cells must let the body pass (or be toggled). */

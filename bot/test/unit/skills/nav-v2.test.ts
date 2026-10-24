@@ -380,6 +380,81 @@ describe('pillar-up (allowPlace + a place action + throwaway blocks)', () => {
     expect(run.pos.y).toBeCloseTo(-56, 3);
     expect(log.filter((l) => l.startsWith('place')).length).toBeGreaterThanOrEqual(3);
   });
+
+  it('Realm shape: 3 stairs up to a platform, allowPlace on or off: walked up, nothing placed', async () => {
+    const build = () => {
+      const gen = flatGen();
+      gen.fill({ x: -3, y: -60, z: 6 }, { x: 3, y: -58, z: 10 }, 'stone'); // platform, feet -57
+      for (let i = 0; i < 3; i++) {
+        if (i > 0) gen.fill({ x: -1, y: -60, z: 3 + i }, { x: 1, y: -61 + i, z: 3 + i }, 'stone');
+        gen.fill({ x: -1, y: -60 + i, z: 3 + i }, { x: 1, y: -60 + i, z: 3 + i }, 'oak_stairs', { weirdo_direction: 2 });
+      }
+      return gen;
+    };
+    for (const allowPlace of [false, true]) {
+      const gen = build();
+      const log: string[] = [];
+      const run = await drive(gen, { x: 0.5, y: -60, z: 0.5 }, { type: 'block', p: { x: 0, y: -57, z: 8 } }, { goto: { allowPlace }, actions: (loop) => fakeActions(gen, log, loop), nav: { inventory: cobble } });
+      expect(run.result, `allowPlace ${allowPlace}: ${log.join(' ')}`).toEqual({ ok: true });
+      expect(run.pos.y).toBeCloseTo(-57, 3);
+      expect(log).toEqual([]);
+      expect(run.skills.status().lastGoto!.actions.place).toBe(0);
+    }
+  });
+
+  it('Realm home return: around a wall, up 2 levels over 4 cells (stairs, landing, stairs), through a door: nothing placed', async () => {
+    // the owner's house: staircase along +x at z 20 from x 6, platform (feet -58) x 9..15, z 20..25,
+    // a room on it (2-high walls) with the door in its west wall at (10, -58, 22); a wall at x 17
+    const build = () => {
+      const gen = flatGen();
+      gen.put(6, -60, 20, 'oak_stairs', { weirdo_direction: 0 });
+      gen.put(7, -60, 20, 'stone');
+      gen.put(8, -60, 20, 'stone');
+      gen.put(8, -59, 20, 'oak_stairs', { weirdo_direction: 0 });
+      gen.fill({ x: 9, y: -60, z: 20 }, { x: 15, y: -59, z: 25 }, 'stone');
+      gen.fill({ x: 10, y: -58, z: 20 }, { x: 15, y: -57, z: 20 }, 'stone');
+      gen.fill({ x: 10, y: -58, z: 25 }, { x: 15, y: -57, z: 25 }, 'stone');
+      gen.fill({ x: 10, y: -58, z: 20 }, { x: 10, y: -57, z: 25 }, 'stone');
+      gen.fill({ x: 15, y: -58, z: 20 }, { x: 15, y: -57, z: 25 }, 'stone');
+      gen.put(10, -58, 22, 'wooden_door', { 'minecraft:cardinal_direction': 'south', upper_block_bit: 0, open_bit: 0 });
+      gen.put(10, -57, 22, 'wooden_door', { 'minecraft:cardinal_direction': 'south', upper_block_bit: 1, open_bit: 0 });
+      gen.fill({ x: 17, y: -60, z: 17 }, { x: 17, y: -59, z: 28 }, 'stone');
+      return gen;
+    };
+    for (const allowPlace of [false, true]) {
+      const gen = build();
+      const log: string[] = [];
+      const run = await drive(gen, { x: 20.5, y: -60, z: 22.5 }, { type: 'block', p: { x: 14, y: -58, z: 22 } }, { goto: { allowPlace }, actions: (loop) => fakeActions(gen, log, loop), nav: { inventory: cobble } });
+      expect(run.result, `allowPlace ${allowPlace}: ${log.join(' ')}`).toEqual({ ok: true });
+      expect(run.pos.y).toBeCloseTo(-58, 3);
+      expect(log.filter((l) => l.startsWith('place')), `allowPlace ${allowPlace}`).toEqual([]);
+      expect(log.some((l) => l.startsWith('use 10,-58,22'))).toBe(true);
+    }
+  });
+
+  it('a failed pillar cell is not planned again in the same goto; after 2 failed places the goto walks round by the stairs', async () => {
+    const gen = flatGen();
+    gen.fill({ x: -2, y: -60, z: 6 }, { x: 10, y: -57, z: 10 }, 'stone'); // plateau, feet -56
+    for (let i = 0; i < 4; i++) {
+      gen.fill({ x: 10, y: -60, z: 2 + i }, { x: 10, y: -61 + i, z: 2 + i }, 'stone');
+      gen.put(10, -60 + i, 2 + i, 'oak_stairs', { weirdo_direction: 2 });
+    }
+    const log: string[] = [];
+    const actions = (loop: InputLoop): NavActions => ({
+      ...fakeActions(gen, log, loop),
+      place: (p, face) => {
+        log.push(`place ${p.x},${p.y},${p.z} ${face}`);
+        return Promise.resolve({ ok: false, reason: 'refused' });
+      },
+    });
+    const run = await drive(gen, { x: 0.5, y: -60, z: 0.5 }, { type: 'block', p: { x: 0, y: -56, z: 8 } }, { goto: { allowPlace: true }, actions, nav: { inventory: cobble } });
+    const places = log.filter((l) => l.startsWith('place'));
+    expect(places.length).toBeGreaterThanOrEqual(1); // the pillar is the cheapest plan
+    expect(places.length).toBeLessThanOrEqual(2);
+    expect(new Set(places).size).toBe(places.length); // never the same cell twice
+    expect(run.result, log.join(' ')).toEqual({ ok: true });
+    expect(run.pos.y).toBeCloseTo(-56, 3);
+  });
 });
 
 describe('doors and gates (a useBlock action)', () => {

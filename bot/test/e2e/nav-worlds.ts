@@ -323,3 +323,103 @@ export function placeLayout(o: Origin) {
     door: { x: o.x - 7, y: -60, z: o.z + 24 },
   };
 }
+
+/** A fill with Bedrock block states for the console `fill` (`["weirdo_direction"=2]`). */
+export interface StateFill extends Fill {
+  states?: string;
+}
+
+/**
+ * Stairs suite (docs/pathfinding.md "Stairs and partial blocks"), lanes along +z:
+ *   x + 1..3   6 oak stairs up (weirdo_direction 2: low half north, the walker comes from -z), landing feet -54
+ *   x + 7..9   the same, facing away (weirdo_direction 3: the walker meets the high half first)
+ *   x + 13..15 6 full-block steps (the jump comparison)
+ *   x + 20     a 1-wide lane between 2-high walls: carpet, farmland, dirt path, 3 snow layers, slab, 2 snow layers, slab
+ * Stairs and snow layers go through the console (`stateFills`, after `layout`).
+ */
+export function stairsLayout(o: Origin) {
+  const fills: Fill[] = [...clear(o.x - 4, o.z - 4, o.x + 30, o.z + 30, -45)];
+  const stateFills: StateFill[] = [];
+  const sf = (x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, block: string, states?: string): StateFill => ({ ...f(x1, y1, z1, x2, y2, z2, block), ...(states ? { states } : {}) });
+  for (const [x0, dir] of [
+    [o.x + 1, 2],
+    [o.x + 7, 3],
+  ] as const) {
+    for (let i = 0; i < 6; i++) {
+      if (i > 0) fills.push(f(x0, -60, o.z + 4 + i, x0 + 2, -61 + i, o.z + 4 + i, 'stone'));
+      stateFills.push(sf(x0, -60 + i, o.z + 4 + i, x0 + 2, -60 + i, o.z + 4 + i, 'oak_stairs', `["weirdo_direction"=${dir}]`));
+    }
+    fills.push(f(x0, -60, o.z + 10, x0 + 2, -55, o.z + 13, 'stone'));
+  }
+  for (let i = 0; i < 6; i++) fills.push(f(o.x + 13, -60, o.z + 4 + i, o.x + 15, -60 + i, o.z + 4 + i, 'stone'));
+  fills.push(f(o.x + 13, -60, o.z + 10, o.x + 15, -55, o.z + 13, 'stone'));
+  // partial blocks lane at x + 20, walls at x + 19 and x + 21 (z + 2 .. z + 12)
+  const lx = o.x + 20;
+  fills.push(f(lx - 1, -60, o.z + 2, lx - 1, -59, o.z + 12, 'stone'));
+  fills.push(f(lx + 1, -60, o.z + 2, lx + 1, -59, o.z + 12, 'stone'));
+  fills.push(f(lx, -60, o.z + 3, lx, -60, o.z + 3, 'white_carpet'));
+  fills.push(f(lx, -61, o.z + 4, lx, -61, o.z + 4, 'farmland'));
+  fills.push(f(lx, -61, o.z + 5, lx, -61, o.z + 5, 'grass_path'));
+  fills.push(f(lx, -60, o.z + 7, lx, -60, o.z + 7, 'smooth_stone_slab'));
+  fills.push(f(lx, -60, o.z + 9, lx, -60, o.z + 9, 'smooth_stone_slab'));
+  stateFills.push(sf(lx, -60, o.z + 6, lx, -60, o.z + 6, 'snow_layer', '["height"=3]'));
+  stateFills.push(sf(lx, -60, o.z + 8, lx, -60, o.z + 8, 'snow_layer', '["height"=1]'));
+  // Realm shape (2026-10-29 home return): 3 oak stairs up to a 3-high platform (x + 24..28), feet -57
+  fills.push(f(o.x + 24, -60, o.z + 7, o.x + 28, -58, o.z + 12, 'stone'));
+  for (let i = 0; i < 3; i++) {
+    if (i > 0) fills.push(f(o.x + 25, -60, o.z + 4 + i, o.x + 27, -61 + i, o.z + 4 + i, 'stone'));
+    stateFills.unshift(sf(o.x + 25, -60 + i, o.z + 4 + i, o.x + 27, -60 + i, o.z + 4 + i, 'oak_stairs', '["weirdo_direction"=2]'));
+  }
+  // The owner's house (Realm home return, 2026-10-29): a staircase along +x at z + 20 rising 2 levels
+  // over 4 cells (stairs, 1-high landing, stairs on a block, the platform), a room on the platform
+  // (2-high walls) with a wooden door in its west wall around the corner from the top of the stairs,
+  // the goal 4 cells past the door, the start east of a 2-high wall (the way is around it).
+  const hx = o.x + 6;
+  const hz = o.z + 20;
+  fills.push(f(hx + 1, -60, hz, hx + 2, -60, hz, 'stone')); // landing (feet -59) and the block under the second stairs
+  fills.push(f(hx + 3, -60, hz, hx + 9, -59, hz + 5, 'stone')); // platform, feet -58
+  fills.push(f(hx + 4, -58, hz, hx + 9, -57, hz, 'stone'));
+  fills.push(f(hx + 4, -58, hz + 5, hx + 9, -57, hz + 5, 'stone'));
+  fills.push(f(hx + 4, -58, hz, hx + 4, -57, hz + 5, 'stone'));
+  fills.push(f(hx + 9, -58, hz, hx + 9, -57, hz + 5, 'stone'));
+  fills.push(f(hx + 4, -58, hz + 2, hx + 4, -57, hz + 2, 'air')); // the doorway
+  fills.push(f(hx + 11, -60, hz - 3, hx + 11, -59, hz + 8, 'stone')); // the wall east of the house
+  stateFills.unshift(
+    sf(hx, -60, hz, hx, -60, hz, 'oak_stairs', '["weirdo_direction"=0]'),
+    sf(hx + 2, -59, hz, hx + 2, -59, hz, 'oak_stairs', '["weirdo_direction"=0]'),
+    sf(hx + 4, -58, hz + 2, hx + 4, -58, hz + 2, 'wooden_door', '["minecraft:cardinal_direction"="south","upper_block_bit"=false,"open_bit"=false]'),
+    sf(hx + 4, -57, hz + 2, hx + 4, -57, hz + 2, 'wooden_door', '["minecraft:cardinal_direction"="south","upper_block_bit"=true]'),
+  );
+  const layout: Layout = { name: 'stairs', anchor: { x: o.x + 12.5, y: -60, z: o.z + 8.5 }, fills };
+  const lane = (x: number) => ({ bottom: { x: x + 0.5, y: -60, z: o.z + 0.5 }, top: { x, y: -54, z: o.z + 11 } });
+  return {
+    layout,
+    stateFills,
+    /** Restores the flat world (grass at -61, air above). */
+    cleanup: clear(o.x - 4, o.z - 4, o.x + 30, o.z + 30, -45),
+    stairs: { ...lane(o.x + 2), topStart: { x: o.x + 2.5, y: -54, z: o.z + 11.5 }, bottomGoal: { x: o.x + 2, y: -60, z: o.z + 1 } },
+    away: lane(o.x + 8),
+    blocks: lane(o.x + 14),
+    /** 3 stairs to a platform: start on the low side, goal on the platform (feet -57). */
+    realm: { start: { x: o.x + 26.5, y: -60, z: o.z + 0.5 }, goal: { x: o.x + 26, y: -57, z: o.z + 10 } },
+    /** The owner's house: start east of the wall, goal inside the room 4 cells past the door. */
+    house: { start: { x: hx + 14.5, y: -60, z: hz + 2.5 }, goal: { x: hx + 8, y: -58, z: hz + 2 }, door: { x: hx + 4, y: -58, z: hz + 2 } },
+    partial: { start: { x: lx + 0.5, y: -60, z: o.z + 0.5 }, goal: { x: lx, y: -60, z: o.z + 13 } },
+    starts: {
+      /** On the low half of the third stairs block (cell y -58, low half top -57.5 at z + 6.0 .. 6.5). */
+      stairLow: { x: o.x + 2.5, y: -57.5, z: o.z + 6.25 },
+      stairGoal: { x: o.x + 5, y: -60, z: o.z },
+      slab: { x: lx + 0.5, y: -59.5, z: o.z + 7.5 },
+      slabGoal: { x: o.x + 26, y: -60, z: o.z + 20 },
+    },
+    probe: {
+      stairs: { x: o.x + 2, y: -58, z: o.z + 6 },
+      stairsAway: { x: o.x + 8, y: -58, z: o.z + 6 },
+      farmland: { x: lx, y: -61, z: o.z + 4 },
+      dirtPath: { x: lx, y: -61, z: o.z + 5 },
+      snow3: { x: lx, y: -60, z: o.z + 6 },
+      slab: { x: lx, y: -60, z: o.z + 7 },
+      snow2: { x: lx, y: -60, z: o.z + 8 },
+    },
+  };
+}

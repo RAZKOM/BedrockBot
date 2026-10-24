@@ -3,7 +3,7 @@
 // trapdoors (open or closed), fence-like blocks that connect to their neighbours, and what the
 // planner may break (gravity blocks, protected blocks). Cached per state id. See docs/pathfinding.md.
 import type { BlockInfo, Box } from '../../world/types.ts';
-import { boxesOf, connectKindOf, isDoorName, type ConnectKind } from './shapes.ts';
+import { boxesOf, connectKindOf, isDoorName, resolveNewerState, type ConnectKind } from './shapes.ts';
 
 export type Liquid = 'water' | 'lava';
 /** Blocks with an open / closed state the body interacts with. */
@@ -171,15 +171,46 @@ function make(info: BlockInfo): TerrainClass {
   };
 }
 
+/**
+ * Highest box top within the half of the block towards (dx, dz) (one of the 4 cardinal directions):
+ * dx 1 = the east half (x 0.5..1), dz -1 = the north half. Stairs: 0.5 on the low half, 1 on the
+ * high half; a full block, slab or upside-down stairs: the same on both halves.
+ */
+export function halfTop(c: TerrainClass, dx: number, dz: number): number {
+  const EPS = 1e-6;
+  let top = 0;
+  for (const b of c.boxes) {
+    const lo = dx !== 0 ? b[0] : b[2];
+    const hi = dx !== 0 ? b[3] : b[5];
+    const inHalf = dx + dz > 0 ? hi > 0.5 + EPS : lo < 0.5 - EPS;
+    if (inHalf && b[4] > top) top = b[4];
+  }
+  return top;
+}
+
 const byState: (TerrainClass | undefined)[] = [];
 const byName = new Map<string, TerrainClass>();
 
-/** The (cached) classification of a block. */
+const byRuntimeId = new Map<number, TerrainClass>();
+
+/**
+ * The (cached) classification of a block. Unknown runtime ids whose state the terrain layer knows
+ * (1.26.60 stairs with `minecraft:corner`: shapes.ts `resolveNewerState`) are classified as that block.
+ */
 export function classify(info: BlockInfo): TerrainClass {
   if (info.stateId >= 0) {
     let c = byState[info.stateId];
     if (!c) byState[info.stateId] = c = make(info);
     return c;
+  }
+  const rid = info.states.runtime_id;
+  if (typeof rid === 'number') {
+    let c = byRuntimeId.get(rid);
+    if (!c) {
+      const known = resolveNewerState(info);
+      if (known) byRuntimeId.set(rid, (c = make(known)));
+    }
+    if (c) return c;
   }
   let c = byName.get(info.name);
   if (!c) byName.set(info.name, (c = make(info)));

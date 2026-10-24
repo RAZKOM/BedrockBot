@@ -188,6 +188,10 @@ interface Active {
   lastSafe: LocatedNode | undefined;
   retreat: { until: number } | undefined;
   noBreak: Set<number>;
+  /** Pillar / door cells (cellKey) whose action failed during this goto: not planned again. */
+  noAction: Set<number>;
+  /** Failed pillar places during this goto (2: no more pillaring in this goto). */
+  placeFailures: number;
   /** Cells our own actions change: their block updates do not trigger re-plans. */
   ownCells: Set<number>;
   doors: DoorToClose[];
@@ -197,6 +201,8 @@ interface Active {
   bestProgress: number;
   lastProgressTick: number;
   lastPos: Vec3 | undefined;
+  /** Why the last plan / failure went wrong (for the "unreachable without a segment" WARN line). */
+  why: string | undefined;
   report: GotoReport;
   finish: (r: SkillResult) => void;
 }
@@ -407,6 +413,8 @@ export class Navigator {
         lastSafe: undefined,
         retreat: undefined,
         noBreak,
+        noAction: new Set(),
+        placeFailures: 0,
         ownCells: new Set(),
         doors: [],
         actedUpTo: -1,
@@ -414,12 +422,14 @@ export class Navigator {
         bestProgress: -Infinity,
         lastProgressTick: 0,
         lastPos: undefined,
+        why: undefined,
         report,
         finish: (r) => {
           if (this.active !== a) return;
           this.active = undefined;
           report.result = r;
           this.loop.release();
+          if (!r.ok && r.reason === 'unreachable' && report.segments === 0) this.log.warn(this.noSegmentLine(a));
           this.settleBlacklist(a, r); // Track R
           this.log.info(
             `goto ${JSON.stringify(goal)}: ${r.ok ? 'ok' : r.reason} after ${report.ticks} ticks, ${report.distance.toFixed(1)} blocks, ` +
@@ -499,7 +509,34 @@ export class Navigator {
     }
   }
 
+  /**
+   * One line for a goto that ended `unreachable` before walking a single segment: where the body
+   * stands (feet, the block it is in and the one under it), the node the planner starts from, the
+   * goal, the last reason and the plans.
+   */
+  private noSegmentLine(a: Active): string {
+    const s = this.loop.state;
+    const p = s.pos;
+    const [x, y, z] = [Math.floor(p.x), Math.floor(p.y + 1e-3), Math.floor(p.z)];
+    const block = (by: number): string => {
+      const b = this.grid.source.blockAt(x, by, z);
+      if (!b) return 'unloaded';
+      const st = Object.entries(b.states)
+        .map(([k, v]) => `${k.replace('minecraft:', '')}=${String(v)}`)
+        .join(',');
+      return st ? `${b.name}[${st}]` : b.name;
+    };
+    const start = locateNode(this.grid, p);
+    const plans = a.report.plans.map((r) => `${r.reason}:${r.status}/${r.nodes}n/${r.expanded}e/${r.ms}ms`).join(' ');
+    return (
+      `goto unreachable without a segment: feet ${fmt(p)}${s.onGround ? '' : ' airborne'}, in ${block(y)}, on ${block(y - 1)}, ` +
+      `start node ${start ? `${start.x},${start.y},${start.z} feet ${start.feet}` : 'none'}, goal ${JSON.stringify(a.planGoal)}, ` +
+      `why ${a.why ?? '?'}, plans ${plans || 'none'}`
+    );
+  }
+
   private fail(a: Active, why: string): boolean {
+    a.why = why;
     a.report.failures++;
     this.log.info(`goto: failure ${a.report.failures}/${this.maxFailures} (${why})`);
     if (a.report.failures >= this.maxFailures) {
@@ -674,14 +711,23 @@ export class Navigator {
       const gx = Math.floor(g.x);
       const gy = Math.floor(g.y);
       const gz = Math.floor(g.z);
-      if (Number.isNaN(this.grid.stand(gx, gy, gz)) && Number.isNaN(this.grid.standThrough(gx, gy, gz)) && !(a.pathOpts.allowBreak || a.pathOpts.allowPlace)) {
-        a.finish({ ok: false, reason: 'unreachable' });
-        return false;
+      if (Number.isNaN(this.grid.stand(gx, gy, gz)) && Number.isNaN(this.grid.standThrough(gx, gy, gz))) {
+        // feet on a stairs block's low half (y + 0.5) floor to the stairs cell: the node is the one above
+        const c = this.grid.cls(gx, gy, gz);
+        if (c?.floor && c.top === 1 && !c.fullCube && this.grid.stand(gx, gy + 1, gz) === gy + 1) {
+          a.planGoal = { type: 'block', p: { x: gx, y: gy + 1, z: gz } };
+        } else if (!(a.pathOpts.allowBreak || a.pathOpts.allowPlace)) {
+          a.why = `goal cell ${gx},${gy},${gz} (${c?.name ?? 'unloaded'}) is not standable`;
+          a.finish({ ok: false, reason: 'unreachable' });
+          return false;
+        }
       }
     }
     for (const k of this.blacklist.cells('dig')) a.noBreak.add(k); // Track R: blacklisted action cells
     a.pathOpts = this.planOptions(a.opts, a.noBreak);
-    const noAction = new Set([...this.blacklist.cells('place'), ...this.blacklist.cells('use')]);
+    // two failed pillar places in one goto: something systematic (reach, the server refusing); plan without pillaring
+    if (a.placeFailures >= 2) a.pathOpts.allowPlace = false;
+    const noAction = new Set([...this.blacklist.cells('place'), ...this.blacklist.cells('use'), ...a.noAction]);
     if (noAction.size) a.pathOpts.noAction = noAction;
     a.search = { s: new PathSearch(this.grid, start, a.planGoal, this.segmentOptions(a, true)), kind: 'main', reason, tick: a.t, slices: 0 };
     this.loop.release();
@@ -698,6 +744,7 @@ export class Navigator {
     this.record(a, res, search);
     a.lastMain = res.status; // Track R
     if (res.status === 'none') {
+      a.why = res.path.length ? `no path (exhaustive search, ${res.expanded} nodes expanded)` : 'the start node is not standable';
       a.finish({ ok: false, reason: 'unreachable' });
       return false;
     }
@@ -712,7 +759,8 @@ export class Navigator {
         return false;
       }
       // the closest reachable node is where we stand: nothing to do but wait for the world to change
-      if (this.fail(a, 'no progress possible')) return false;
+      const lim = `${res.limited ? ', search limit hit' : ''}${res.unknown ? ', touched unloaded world' : ''}`;
+      if (this.fail(a, `no progress possible (no node closer to the goal than the start; ${res.expanded} expanded${lim})`)) return false;
       a.replan = 'retry';
       a.waitUntil = a.t + 20;
       return false;
@@ -864,6 +912,10 @@ export class Navigator {
     this.log.info(`goto: ${run.kind} failed (${why})`);
     const cellP = run.queue[0]; // Track R: count the failure against the action cell
     if (cellP && run.kind !== 'close' && this.blacklist.fail(actionKey(run.kind, cellP), why)) a.report.blacklisted?.push(actionKey(run.kind, cellP));
+    // a pillar / door cell that failed is not planned again during this goto (like a failed dig cell):
+    // the re-plan looks for another way instead of spending the whole failure budget on one cell
+    if (cellP && (run.kind === 'place' || run.kind === 'use')) a.noAction.add(cellKey(cellP.x, cellP.y, cellP.z));
+    if (run.kind === 'place') a.placeFailures++;
     a.action = undefined;
     this.loop.setCommand({ jump: false, pitch: 0 });
     a.lastProgressTick = a.t;

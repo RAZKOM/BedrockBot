@@ -41,8 +41,8 @@ every member of an `any`, is on the blacklist).
 
 | File | What |
 |---|---|
-| `terrain/shapes.ts` | Collision boxes per block state from minecraft-data's bedrock `blockCollisionShapes` (1.26.30 data). Doors: the panel from the state (`doorBoxes`; the data has one box for every door state). Fences, panes, bars: `connectedBoxes(kind, mask)` (post plus arms). `blockInfoOf(name, states)` builds a BlockInfo without a connection (tests). |
-| `terrain/classify.ts` | `TerrainClass` per state (cached): boxes, top, floor, liquid, danger, leaves, climbable, friction, `penalty` / `costFactor` (leaves, soul sand, honey, slime, mud, ice: 1 + 4), `openable` (door / trapdoor / gate) and `open`, `doorUpper`, `connect` (fence / pane), `fullCube`, `gravity` (sand, gravel, concrete powder, anvils ...), `protect` (containers, beds, spawners ...), `roof` (blocks the sky: any box but leaves, liquids). Unknown runtime ids are 1.5-high obstacles. |
+| `terrain/shapes.ts` | Collision boxes per block state from minecraft-data's bedrock `blockCollisionShapes` (1.26.30 data). Doors: the panel from the state (`doorBoxes`; the data has one box for every door state). Fences, panes, bars: `connectedBoxes(kind, mask)` (post plus arms). Stairs: `stairBoxes(states)` (corners), `STAIRS_UP`, `resolveNewerState` (1.26.60 stairs runtime ids, see "Stairs and partial blocks"). `blockInfoOf(name, states)` builds a BlockInfo without a connection (tests). |
+| `terrain/classify.ts` | `TerrainClass` per state (cached): boxes, top, floor, liquid, danger, leaves, climbable, friction, `penalty` / `costFactor` (leaves, soul sand, honey, slime, mud, ice: 1 + 4), `openable` (door / trapdoor / gate) and `open`, `doorUpper`, `connect` (fence / pane), `fullCube`, `gravity` (sand, gravel, concrete powder, anvils ...), `protect` (containers, beds, spawners ...), `roof` (blocks the sky: any box but leaves, liquids). `halfTop(c, dx, dz)`: the highest box top in one half of the block. Unknown runtime ids are 1.5-high obstacles, except the ones `resolveNewerState` knows (1.26.60 stairs). |
 | `terrain/query.ts` | `worldSource(world)` (chunk store state ids; `columnTop` from the highest non-empty subchunk; `minY` / `maxY`), `boxesAtCell` (neighbour-aware boxes: fence arms, the upper door half from the lower one), `blockQueryOf(source)`: the physics' `BlockQuery`. |
 | `nav/costs.ts` | `TICKS` (walk, sprint, jump air time, fall table) derived from `input/physics.ts`; `PathCosts`, `DEFAULT_COSTS`, `dropCost`. |
 | `nav/actions.ts` | `NavActions` (dig / place / useBlock / throwawayItems), `NavBlockFace`, `breakBlocker` (the breaking safety rules). |
@@ -64,7 +64,8 @@ blocks (1.5 high) are obstacles, never floors. Costs are ticks (`DEFAULT_COSTS`)
 
 | Move | Where | Condition | Cost (ticks) |
 |---|---|---|---|
-| walk | 4 cardinal | feet rise <= 0.5625 (auto-step), or a step down within 0.5625 | `walk`: 3.564 (sprint allowed) or 4.633 |
+| walk | 4 cardinal | feet rise <= 0.5625 (auto-step), or a step down within 0.5625 (also into the cell below: farmland, dirt paths) | `walk`: 3.564 (sprint allowed) or 4.633 |
+| stairs walk (`walk`) | 4 cardinal | a rise or fall of up to 1.25 the body takes as two auto-steps: a stairs block's low half faces the mover (see "Stairs and partial blocks") | `walk` + `stairs` 1 |
 | diag | 4 diagonal | same feet height exactly; both side cells standable at it | `walk` x sqrt 2 |
 | jump | 4 cardinal | rise in (0.5625, 1.25]; the start column free up to the target's head | `jump` 9 |
 | drop | 4 cardinal | target column free from the feet to the head, fall through free cells, at most 3 blocks | `walk` + fall(n) (5 / 7 / 9) + `landing` 2; + `irreversibleDrop` 30 when higher than 1.25 |
@@ -104,6 +105,53 @@ Search limits: a main plan 20 000 nodes / 40 ms of search time, a plan-ahead 20 
 most `sliceMs` (8) per tick. `status`: `found`, `partial` (limit hit, or the search touched unloaded
 world; `unknown` / `limited` say which), `none` (exhaustive and fully known: unreachable).
 
+## Stairs and partial blocks
+
+Measured on bds-move (BDS 1.26.60.6, 2026-10-29; `test/e2e/nav-stairs.test.ts`, block states placed
+with the console `setblock` / `fill`, feet heights from `truth:pos`):
+
+| Block (1.26.60 states) | Feet on it | Planner |
+|---|---|---|
+| stairs `{minecraft:corner, upside_down_bit, weirdo_direction}` | low half +0.5, high half +1 (the body at the centre overlaps the high half: +1) | node = the cell above (feet +1); low half facing the mover: `walk` up and down; high half or side first: jump up, drop down |
+| upside-down stairs | +1 everywhere | a full-height floor (jump), the 0.5 overhang below |
+| bottom slab `smooth_stone_slab` | +0.5 | walk on and off |
+| carpet | +0.0625 | walk |
+| farmland, dirt path (`grass_path`) | +0.9375 (block below the feet cell) | walk on and off (a step down into the cell below is a walk, not a drop) |
+| snow layer `height` 0 (1 layer) | +0 (no collision) | free cell |
+| snow layer `height` n >= 1 (n + 1 layers) | +n / 8 (1: 0.125, 3: 0.375) | floor; walk |
+
+- **`weirdo_direction`**: 0 = high half east (+x), 1 = west, 2 = south (+z), 3 = north; a body walks
+  towards the high half to climb (`STAIRS_UP`). Same as minecraft-data's shapes.
+- **1.26.60 runtime ids.** BDS 1.26.60 sends every stairs block with the new state `minecraft:corner`
+  (none, inner_left, inner_right, outer_left, outer_right). The hashed runtime id includes it, so the
+  world registry (1.26.30 data) reports `unknown` for all stairs, which the planner treated as
+  1.5-high obstacles and the physics as a 1.5-high box (that was the "does not walk up stairs" report).
+  `resolveNewerState` hashes every 1.26.30 stairs state with each corner value and `classify` maps a
+  matching unknown runtime id to the stairs block (oak_stairs `weirdo_direction` 0..3, corner none:
+  -122484237, -61009414, 465409, 61940232). Other code reading `world.blockAt` still sees `unknown`.
+- **Corners** are set by the server from the neighbours (a `setblock` with a corner value is replaced
+  at once; removing the neighbour resets it to none). Names as in Java: outer when the block behind
+  the high half is a stairs block facing sideways, inner when the block in front of the low half is;
+  left = counter-clockwise of the facing (weirdo 0 with a north-facing stairs block east of it:
+  outer_left). Shapes: Java StairBlock's quarters (outer: one high quarter, inner: three).
+- **Rule** (`PathSearch.stepsUp` / `stepsDown`, from the boxes, `halfTop`): a rise of more than a
+  step into a node is a walk when the floor block's half facing the mover is within 0.5625 of the
+  feet and the floor's top within 0.5625 of that half; a fall is a walk when the start's floor half
+  towards the move is within 0.5625 of both feet heights. So straight stairs from the low side,
+  outer corners from a low edge; never full blocks, slabs on blocks, upside-down stairs, inner
+  corners, or stairs met from the high half / the side. Head room: as a jump (the start column must be
+  free up to the target's head, the body at the low half's height still overlaps it).
+- **Feet on a stairs cell.** A body on the low half (feet +0.5) is in the stairs block's own cell;
+  `locateNode` returns the node above (feet +1, within its 0.6 tolerance), the follower's "in node"
+  and "arrived" tests use the same 0.6. A `block` goal in a stairs cell (a position saved on the low
+  half) is planned as the node above it.
+- **Diagnostics.** A goto that ends `unreachable` without walking a segment logs one WARN line:
+  `goto unreachable without a segment: feet (x, y, z)[ airborne], in <block[states]>, on <block>,
+  start node x,y,z feet f | none, goal {...}, why <reason>, plans <reason:status/nodes/expanded/ms ...>`.
+  Reasons: `no path (exhaustive search, n nodes expanded)`, `the start node is not standable`,
+  `no progress possible (no node closer to the goal than the start; n expanded[, search limit hit][,
+  touched unloaded world])`, `no standable node at (...)`, `goal cell x,y,z (<block>) is not standable`.
+
 ## Following a path
 
 Per tick, from `InputLoop.onBeforeStep` (the command applies to the same tick):
@@ -115,7 +163,8 @@ Per tick, from `InputLoop.onBeforeStep` (the command applies to the same tick):
   height). Doorway cells are not standable for this check, so doors are approached head on.
 - **Turn** towards the aim at most 30 degrees per tick; `forward` while the aim is within 50 degrees.
 - **Jump** when on the ground, facing the step within 25 degrees and within 1.4 blocks of the next
-  node (or pushing against it).
+  node (or pushing against it), and still below its feet height (a body that landed off-centre on the
+  step walks on instead of jumping again).
 - **Drops**: approach the edge at <= 0.12 blocks/tick, release forward in the air when the drift would
   carry past the landing centre.
 - **Sprint** on straight walkable runs longer than 5 blocks, never within 3 blocks of a jump, a drop or
@@ -147,7 +196,7 @@ Block updates at cells the running goto's actions change never trigger re-plans.
 | `World.onBlockUpdate` within 1 block (x / z) and y - 1 .. y + 2 of a node not yet passed, whose movement signature (boxes, floor, liquid, danger, cost factor, roof, open ...) changed | invalidate, re-plan (`block`); updates that change nothing the planner reads (grass to dirt) only invalidate the cache |
 | the move under way (straight line from the last node passed to the aim) takes more than 2 x its estimate + 10 ticks | re-plan (`timeout`), failure + 1 |
 | no progress (remaining path not 0.05 shorter) for 40 ticks | re-plan (`stuck`), failure + 1 |
-| an action fails or times out (dig 600 ticks per block, use / place 100) | re-plan (`action`), failure + 1 |
+| an action fails or times out (dig 600 ticks per block, use / place 100) | re-plan (`action`), failure + 1; the cell is not dug / pillared in / opened again during this goto; after 2 failed places the goto plans without pillaring |
 | a failure while the body is not on a safe node (in water / lava, airborne, no standable node) | retreat first: steer to the last safe node (forward, jump in water or against a wall) for up to 60 ticks |
 | no standable node under the body, or the best node is the start | wait 20 ticks, failure + 1 |
 | 3 failures | `unreachable` |
@@ -228,6 +277,7 @@ motions, teleports, inWater / inLava, the last goto.
 |---|---|
 | ticks per block, 50-block straight run, steady part (blocks 10 to 40) | walking 4.633 (table 4.633), sprinting 3.562 to 3.565 (table 3.564); whole runs incl. start and stop 4.72 and 3.84 |
 | 6-step staircase | 9.0 ticks per step, landing to landing (table `jump` 9) |
+| 6-step oak stairs (1.26.60 states) | up: 53 ticks, 4.60 ticks per step, 0 jumps, 0 corrections; down: 59 ticks, 0 jumps, 0 drops, 0 corrections (full blocks, same climb: 81 ticks, 9.00 per step, 6 jumps, 2 corrections); 3 stairs to a platform with allowPlace on or off: 49 ticks, nothing placed; the owner's house (around a 2-high wall, 2 levels over 4 cells of stairs / landing / stairs, a closed door around the corner, goal 4 past it), allowPlace on or off: 147 / 148 ticks, 1 door use, 0 places, 0 corrections (175 ticks and a move timeout before the follower's re-jump fix) |
 | drops, from 0.5 blocks before the edge to the landing | 3 blocks: 12 ticks (fall 9); 1 block: 8 ticks (fall 5); table (whole block + landing) 15.6 and 11.6 |
 | hill with a cave mouth on the line (4 terraces, 53 wide, 1-wide tunnel) | over the top (feet -55.75), 0 underground ticks, 0 ticks in the tunnel, 292 to 295 ticks; 0 corrections in 2 of 4 runs, 1 in the other 2 (error 0.418 along the motion, the client ahead, about 1.5 blocks after the last jump onto the top: see Known gaps) |
 | 3-deep pit on the line | never entered (lowest feet -60.000), 86 ticks, 0 corrections |
@@ -266,6 +316,8 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/unit/skills/nav-v2.test.ts` | closed loop, v2: tick costs, the cave hill and the pit (also with 12-node segments), irreversible drops, 290 blocks in many spliced segments without stopping, sliced searches, unloaded world, irrelevant block updates, move timeouts, retreat after a knock into a pool, dig-through (and its safety rules), pillar-up out of a pit and onto a plateau, doors and gates (opened, closed behind) with fake actions |
 | `test/e2e/nav-flat`, `nav-hill`, `nav-long`, `nav-wall`, `nav-knockback` | v1 suites (tasks 3.3 to 3.6), still green on v2 |
 | `test/e2e/nav-costs.test.ts` | ticks per block / step / drop vs the cost table |
+| `test/unit/skills/stairs.test.ts` | stairs per direction, upside down, corners, the 1.26.60 runtime ids; slabs, carpets, farmland, dirt paths, snow layers; stairs walks and jumps in the planner; `locateNode` on fractional feet; closed-loop staircase up / down with 0 jumps; starts on a stairs low half / a slab; block goal in a stairs cell; the no-segment WARN line |
+| `test/e2e/nav-stairs.test.ts` | 1.26.60 stairs resolved; 6-step oak staircase up and down with 0 jumps (vs full-block steps); 3 stairs to a platform with allowPlace off / on (nothing placed); stairs facing away; carpet / farmland / dirt path / snow / slab lane; starts on a stairs low half and on a slab |
 | `test/e2e/nav-surface.test.ts` | cave hill (surface only), pit on the line (never entered) |
 | `test/e2e/nav-cross.test.ts` | 200-block cross-country: 0 corrections, no tick over 100 ms |
 | `test/e2e/nav-dig.test.ts` | dirt wall: walked around without `allowBreak`, dug with it |
@@ -293,7 +345,11 @@ the cross-country layout; default 7), `MOVE_AREA=x,z` (pin a v2 suite's area to 
 ## Known gaps
 
 - Fences, panes and bars are unknown runtime ids on 1.26.60 (world model registry): obstacles of 1.5,
-  no arms in the physics. Walls carry their connections in the state and are fine.
+  no arms in the physics. Walls carry their connections in the state and are fine. Stairs are
+  resolved in the terrain layer only; the registry still reports them `unknown` to other readers.
+- The partial-blocks lane (snow, slab, then grass) gave 1 correction of 0.417 in 3 of 3 runs after
+  stepping off the last slab (the server one tick of falling behind); a plain slab, two slabs and
+  snow + slab walked off 3 times each gave 0. Not investigated further.
 - No bridging (placing a block to cross a gap), no dig-down, no digging head room for a jump, no
   descending by digging; pillar-up needs a full-block floor.
 - No swimming, ladders, vines, scaffolding, parkour or sneaking along edges.
