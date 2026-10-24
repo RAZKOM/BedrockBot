@@ -125,6 +125,7 @@ export class Digger {
   private pending: BlockAction[] = [];
   /** Track S: tool choice skips slots whose item fails this (worn tools, skills/survival/tools.ts); default all ok. */
   toolOk: (item: ItemStack) => boolean;
+  pullTool?: (block: string) => Promise<unknown> | undefined; // Track V: pulls a better pickaxe / axe / shovel from the main inventory (skills/container/hotbar-moves.ts HotbarPuller.digHook); undefined = nothing to pull
 
   constructor(opts: { loop: DigLoop; world: DigWorld; hotbar?: SlotSelector; logger?: Logger; toolOk?: (item: ItemStack) => boolean }) {
     this.toolOk = opts.toolOk ?? (() => true); // Track S
@@ -178,6 +179,7 @@ export class Digger {
     }
 
     // Tool.
+    const pulling = opts.tool === undefined || opts.tool === 'best' ? this.pullTool?.(block.name) : undefined; if (pulling) return pulling.then(() => this.dig(pos, opts), () => this.dig(pos, opts)); // Track V
     const inv = this.world.inventory;
     let slot = inv.selected;
     if (opts.tool === undefined || opts.tool === 'best') {

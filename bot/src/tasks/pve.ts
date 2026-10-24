@@ -27,8 +27,9 @@
 import type { Metrics } from '../connection/metrics.ts';
 import { RuntimeSettings } from '../config/settings.ts';
 import { silentLogger, type Logger } from '../log.ts';
-import { CombatController, EYE_HEIGHT, type CombatLoop, type CombatMover, type FightOptions, type FightResult } from '../skills/combat/combat.ts';
-import { bareType, classify, entityFeet, isPlayerEntity, MobTracker, reachDistance, typeMatches } from '../skills/combat/hostiles.ts';
+import { CombatController, type CombatLoop, type CombatMover, type FightOptions, type FightResult } from '../skills/combat/combat.ts';
+import { bareType, classify, entityFeet, isPlayerEntity, MobTracker, typeMatches } from '../skills/combat/hostiles.ts';
+import * as targeting from '../skills/combat/targeting.ts'; // Track V: reachability-aware targeting, creeper rank
 import { FollowController, type FollowLoop, type FollowTarget } from '../skills/follow/follow.ts';
 import type { Goal } from '../skills/nav/goals.ts';
 import type { GotoOptions, SkillResult } from '../skills/types.ts';
@@ -101,8 +102,6 @@ export interface KillResult {
 }
 
 export const DEFAULT_GUARD_RADIUS = 16;
-/** Hotfix 2026-10-29 (Track V replaces it): mobs that fly or hover are never chased, only hit while in reach. */
-const FLYING_TYPES: ReadonlySet<string> = new Set(['phantom', 'ghast', 'vex', 'blaze', 'breeze', 'bee', 'allay', 'parrot', 'bat', 'ender_dragon', 'wither']);
 const CHASE_EXTRA = 16;
 const KILL_SEARCH = 32;
 const FLEE_SCAN = 16;
@@ -341,69 +340,16 @@ export class PveController {
     return h > 0 && h < this.fleeHealth;
   }
 
-  nearestHostile(me: Vec3, r: number): EntityInfo | undefined {
-    let best: EntityInfo | undefined;
-    let bd = Infinity;
-    for (const e of this.d.world.entities.values()) {
-      if (!this.isThreat(e)) continue;
-      const d = dist(entityFeet(e), me);
-      if (d <= r && d < bd) {
-        bd = d;
-        best = e;
-      }
-    }
-    return best;
-  }
+  nearestHostile(me: Vec3, r: number): EntityInfo | undefined { return targeting.nearestHostile(this, me, r); } // Track V: skills/combat/targeting.ts
 
   /** Hostiles, plus neutral mobs that hit or target the bot. Never players, items or passive mobs. */
-  isThreat(e: EntityInfo): boolean {
-    if (isPlayerEntity(e)) return false;
-    const st = this.mobs.get(e.runtimeId);
-    if (st?.dead) return false;
-    const cls = classify(e.type);
-    if (cls === 'hostile') return true;
-    if (cls !== 'neutral' && cls !== 'other') return false;
-    const hit = this.mobs.lastHitBy;
-    return this.mobs.targetsUs(e.runtimeId) || (hit?.runtimeId === e.runtimeId && performance.now() - hit.at < 10_000);
-  }
+  isThreat(e: EntityInfo): boolean { return targeting.isThreat(this, e); } // Track V
 
-  /** The guard target, if any: in place (within reach only) at low health or inside the night shelter. */
-  pickThreat(me: Vec3, low: boolean): { e: EntityInfo; inPlace: boolean } | undefined {
-    const night = this.d.night;
-    let inPlace = low;
-    if (night?.wantsShelter()) {
-      if (night.inside()) inPlace = true;
-      else if (night.state === 'going') return undefined;
-    }
-    const home = this.d.home();
-    const commanded = this.processes.userProcesses().length > 0;
-    const center = !commanded && home && !inPlace ? { x: home.x + 0.5, y: home.y, z: home.z + 0.5 } : me;
-    const eye = { x: me.x, y: me.y + EYE_HEIGHT, z: me.z };
-    const now = performance.now();
-    const hit = this.mobs.lastHitBy;
-    const radius = this.guardRadius;
-    let best: { e: EntityInfo; score: number } | undefined;
-    for (const e of this.d.world.entities.values()) {
-      if (!this.isThreat(e)) continue;
-      if ((this.ignore.get(e.runtimeId) ?? 0) > now) continue;
-      const f = entityFeet(e);
-      const flying = FLYING_TYPES.has(bareType(e.type));
-      if (inPlace || flying) {
-        // low health, inside the shelter, or a flying mob (a phantom that swooped is out of reach again a second later)
-        if (reachDistance(eye, e) > 3.2) continue;
-      } else {
-        if (dist(f, center) > radius || dist(f, me) > radius + CHASE_EXTRA) continue;
-        if (Math.abs(f.y - me.y) > 6) continue;
-      }
-      let score = dist(f, me);
-      if (flying) score += 50; // a phantom in reach still loses to a creeper or zombie walking up
-      else if (hit?.runtimeId === e.runtimeId && now - hit.at < 10_000) score -= 100;
-      else if (this.mobs.targetsUs(e.runtimeId)) score -= 50;
-      if (!best || score < best.score) best = { e, score };
-    }
-    // a flying target is fought in place (no chase: the fight would follow a phantom across the sky)
-    return best ? { e: best.e, inPlace: inPlace || FLYING_TYPES.has(bareType(best.e.type)) } : undefined;
-  }
+  /** The guard target, if any: reachability-aware, creepers first (skills/combat/targeting.ts). */
+  pickThreat(me: Vec3, low: boolean): { e: EntityInfo; inPlace: boolean } | undefined { return targeting.pickThreat(this, me, low); } // Track V
+
+  /** Track W hook: a creeper within 8 blocks below health 10 wants a flight (the bot does not engage it). */
+  wantsFlee(threat: EntityInfo): boolean { return targeting.wantsFlee(this, threat); } // Track V
 
   fleeTarget(me: Vec3, threat: EntityInfo): { to: Vec3; kind: string } | undefined {
     const shelter = this.d.shelter();
@@ -582,7 +528,7 @@ class GuardProcess extends BaseProcess {
     void c.combat.fight(e.runtimeId, opts).then(async (r) => {
       if (t !== this.token) return;
       c.countFight(r);
-      if (!r.ok) c.ignore.set(e.runtimeId, performance.now() + (r.reason === 'out_of_range' ? 10_000 : 30_000));
+      targeting.afterFight(c, e, r); // Track V: 10 s for out_of_range / unreachable, none for creeper_avoided / interrupted
       if (r.ok && !inPlace) {
         ep.phase = 'collect';
         await c.mover.collect(c.collectRadius, 200);
