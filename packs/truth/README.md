@@ -263,3 +263,12 @@ World layer should instead send `/scriptevent` as an operator command and reuse 
   runs it last.
 - `pos.isOnGround` is `false` for a client that has not sent `player_auth_input` yet.
 - `place` checks that the target box is loaded (otherwise the engine would queue the placement).
+
+### Farming commands (src/farm.ts, PLAN.md task 7.13)
+
+| Command | Args | `data` on success |
+|---|---|---|
+| `field` | `x y z w d crop growth [moist]` | `{from, to, cells, crop, growth, moist}`: farmland (`moisturized_amount` = moist, default 7) on x..x+w-1, z..z+d-1 at y, `crop` (`none` = air) with `growth` at y + 1; at most 1024 cells |
+| `crops` | `x y z w d` | `{w, d, soil[], crop[], growth[], soilCounts, cropCounts}`: per cell (x fastest, then z) the block at y and the crop at y + 1 (`null` / -1 when air) |
+
+Details and exact arguments: docs/farming.md.

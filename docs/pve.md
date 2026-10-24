@@ -1,5 +1,7 @@
 # PvE, guard, follow (PLAN.md tasks 7.4, 7.5 and the commands of 7.6)
 
+> Since wave 6 (task 7.8) guard, flee, follow, come and kill run as processes on the process manager (docs/processes.md: priorities, pre-emption, `!pause` / `!resume` / `!stop`). Where this page describes the wave-5 cooperation (`ownsMovement`, night safety's `inactive`, follow keeping the bot outside at night), docs/processes.md is the current rule: night now outranks user commands once a shelter is set.
+
 **PvE only. The bot never attacks a player, under any command**: the combat skill itself refuses any
 entity of type `minecraft:player` or with a username, every target list skips players, and
 `!kill player` / `!kill <a player's name>` is refused with a reply. Decision record:
