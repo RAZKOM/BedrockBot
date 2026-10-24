@@ -101,6 +101,8 @@ export interface KillResult {
 }
 
 export const DEFAULT_GUARD_RADIUS = 16;
+/** Hotfix 2026-10-29 (Track V replaces it): mobs that fly or hover are never chased, only hit while in reach. */
+const FLYING_TYPES: ReadonlySet<string> = new Set(['phantom', 'ghast', 'vex', 'blaze', 'breeze', 'bee', 'allay', 'parrot', 'bat', 'ender_dragon', 'wither']);
 const CHASE_EXTRA = 16;
 const KILL_SEARCH = 32;
 const FLEE_SCAN = 16;
@@ -385,14 +387,17 @@ export class PveController {
       if (!this.isThreat(e)) continue;
       if ((this.ignore.get(e.runtimeId) ?? 0) > now) continue;
       const f = entityFeet(e);
-      if (inPlace) {
+      const flying = FLYING_TYPES.has(bareType(e.type));
+      if (inPlace || flying) {
+        // low health, inside the shelter, or a flying mob (a phantom that swooped is out of reach again a second later)
         if (reachDistance(eye, e) > 3.2) continue;
       } else {
         if (dist(f, center) > radius || dist(f, me) > radius + CHASE_EXTRA) continue;
         if (Math.abs(f.y - me.y) > 6) continue;
       }
       let score = dist(f, me);
-      if (hit?.runtimeId === e.runtimeId && now - hit.at < 10_000) score -= 100;
+      if (flying) score += 50; // a phantom in reach still loses to a creeper or zombie walking up
+      else if (hit?.runtimeId === e.runtimeId && now - hit.at < 10_000) score -= 100;
       else if (this.mobs.targetsUs(e.runtimeId)) score -= 50;
       if (!best || score < best.score) best = { e, score };
     }

@@ -88,7 +88,7 @@ The bot answers in chat. Full reply texts and edge cases: docs/runbook.md "Chat 
 | `!gather <n> [x y z]` / `!gather stop` | Fells trees for n logs within 48 blocks (of the given point), puts them in the configured chest or keeps them. Says `no trees within 48 blocks` when none are loaded nearby: give it a point near a forest. |
 | `!mine <block> [n]` / `!mine stop` / `!mine status` | Mines ore it has actually seen the face of (no x-ray), digging its way there, e.g. `!mine coal_ore 8`. Ore next to water or lava is skipped. |
 | `!farm [radius]` / `!farm stop` / `!farm status` | Harvests mature crops around it, replants, uses bone meal, deposits into the nearest chest. |
-| `!inv` / `!drop <item> [n]` | Inventory summary; drop items. |
+| `!inv` / `!drop <item> [n]` / `!drop all` / `!drop items` | Inventory summary; drop one item, everything, or everything except food, armour, elytra, tools and weapons. |
 
 **Controlling what runs**
 

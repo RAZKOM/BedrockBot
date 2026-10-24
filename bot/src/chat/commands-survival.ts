@@ -9,7 +9,10 @@
 // tools and the PlaceSkill can fetch blocks), the hooks (tool wear, avoidance), and wraps the task's
 // stop() / status(). Without walking every command answers "<cmd> needs a task that can walk".
 import { silentLogger, type Logger } from '../log.ts';
+import { armourSlotOf } from '../skills/survival/armour.ts';
+import { foodInfo } from '../skills/survival/eat.ts';
 import { SurvivalKit, type SurvivalSettings } from '../skills/survival/index.ts';
+import { maxDurability } from '../skills/survival/tools.ts';
 import type { Mobility } from '../tasks/mobility.ts';
 import type { PveController } from '../tasks/pve.ts';
 import { Containers } from '../world/containers.ts';
@@ -126,11 +129,40 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
   });
   chat.register({
     name: 'drop',
-    help: '<item> [n] (drop items; default all of them)',
+    help: '<item> [n] | all | items (drop an item, everything, or everything except food, armour, elytra, tools and weapons)',
     run: ({ reply, args }) => {
       const [item, count] = args;
       if (!item) {
-        reply('usage: !drop <item> [n]');
+        reply('usage: !drop <item> [n] | all | items');
+        return;
+      }
+      if (item === 'all' || item === 'items') {
+        // worn armour is not in the 36 inventory slots and stays on either way
+        const names = new Set<string>();
+        for (const st of mob.world.inventory.slots.slice(0, 36)) {
+          if (!st || st.count <= 0) continue;
+          if (item === 'items' && keepOnDropItems(st.name)) continue;
+          names.add(st.name);
+        }
+        if (names.size === 0) {
+          reply(item === 'all' ? 'drop: inventory empty' : 'drop: nothing but food, armour, elytra, tools and weapons');
+          return;
+        }
+        void (async () => {
+          let dropped = 0;
+          let kinds = 0;
+          let failed: string | undefined;
+          for (const name of names) {
+            const r = await kit.drop(name);
+            dropped += r.dropped;
+            if (r.ok) kinds++;
+            else if (r.reason !== 'none') {
+              failed = `${name}: ${r.reason ?? 'failed'}`;
+              break;
+            }
+          }
+          reply(`dropped ${dropped} items of ${kinds} kinds${failed ? ` (stopped at ${failed})` : ''}`);
+        })();
         return;
       }
       const n = count === undefined ? undefined : Number(count);
@@ -146,4 +178,10 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
     },
   });
   return kit;
+}
+
+/** `!drop items` keeps these: anything with durability (tools, weapons, armour, elytra, shields), armour, food, totems, shulker boxes, ender chests. */
+export function keepOnDropItems(name: string): boolean {
+  const n = name.startsWith('minecraft:') ? name.slice(10) : name;
+  return maxDurability(n) !== undefined || armourSlotOf(n) !== undefined || foodInfo(n) !== undefined || n === 'totem_of_undying' || n.endsWith('shulker_box') || n === 'ender_chest';
 }
