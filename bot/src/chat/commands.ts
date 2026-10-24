@@ -165,7 +165,9 @@ function pointCommand(name: string, target: NonNullable<HardeningDeps['home']>, 
       }
       reply(`walking to ${name} ${fmtBlock(p)}`);
       void target.go().then((r) => {
-        reply(r.ok ? `arrived at ${name}` : `${name}: ${r.reason ?? 'failed'}`);
+        // interrupted (a newer command, !stop, a death) stays quiet: the newer command's reply or the death line says so
+        if (r.ok) reply(`arrived at ${name}`);
+        else if (r.reason !== 'interrupted') reply(`${name}: ${r.reason ?? 'failed'}`);
       });
       return;
     }

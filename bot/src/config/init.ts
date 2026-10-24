@@ -38,6 +38,7 @@ export const EXAMPLE_CONFIG = `{
   // ---- chat commands (!status !pos !health !shelter !home !quit !help) ----
   "owners": ["YourGamertag"],       // names or "xuid:<xuid>"
   "consoleOwner": true,             // the BDS console may run commands too
+  // "nl": { "provider": "ollama", "url": "http://127.0.0.1:11434", "model": "qwen2.5:7b" },  // !do <text> through a local Ollama (docs/natural-language.md)
 
   // ---- AFK ----
   "nudgeInterval": 240,             // seconds between keepalive nudges; 0 = never
