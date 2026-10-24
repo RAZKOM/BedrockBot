@@ -118,6 +118,38 @@ export const ITEM_TYPES: ReadonlySet<string> = new Set([
 /** Mobs that attack from a distance (the bot is hurt while they are far away). */
 export const RANGED_TYPES: ReadonlySet<string> = new Set(['skeleton', 'stray', 'bogged', 'parched', 'pillager', 'witch', 'blaze', 'ghast', 'breeze', 'drowned', 'shulker']);
 
+/**
+ * Wave 7 (Track V, docs/pve.md "Targeting"): mobs that fly. They are fought only while within reach
+ * and never chased (the Realm bot locked onto an unreachable phantom while a creeper walked up).
+ */
+export const FLYING_TYPES: ReadonlySet<string> = new Set(['phantom', 'ghast', 'vex', 'blaze', 'breeze', 'bee', 'allay', 'parrot', 'bat', 'happy_ghast']);
+
+/**
+ * Archers (docs/pve.md "Ranged mobs"): sprint straight in when fighting one; break line of sight
+ * below health 10. A drowned counts only while it holds an item (a trident; see `isArcher`).
+ */
+export const ARCHER_TYPES: ReadonlySet<string> = new Set(['skeleton', 'stray', 'bogged', 'parched', 'pillager']);
+
+export function isFlying(type: string): boolean {
+  return FLYING_TYPES.has(bareType(type));
+}
+
+export function isCreeper(type: string): boolean {
+  return bareType(type) === 'creeper';
+}
+
+/**
+ * An archer: skeleton, stray, bogged, parched, pillager, or a drowned that holds something (BDS sends
+ * `mob_equipment` for a drowned's trident; the tracker keeps the network id, not the name, so any
+ * held item counts: a drowned with a nautilus shell is treated as an archer too, which only means the
+ * bot sprints in).
+ */
+export function isArcher(e: Pick<EntityInfo, 'type' | 'runtimeId'>, mobs?: { get(rid: bigint): { heldNetworkId?: number | undefined } | undefined }): boolean {
+  const t = bareType(e.type);
+  if (ARCHER_TYPES.has(t)) return true;
+  return t === 'drowned' && (mobs?.get(e.runtimeId)?.heldNetworkId ?? 0) !== 0;
+}
+
 /** Common names people type for Bedrock ids (`!kill zombified_piglin`). */
 const ALIASES: Readonly<Record<string, string>> = {
   zombified_piglin: 'zombie_pigman',
@@ -298,6 +330,8 @@ export interface MobState {
   hurts: number;
   /** death_animation seen, or health 0. */
   dead: boolean;
+  /** Track V: network id of the item in the mob's main hand (`mob_equipment`), 0 = empty / unknown. */
+  heldNetworkId?: number;
 }
 
 export interface HitGuess {
@@ -402,6 +436,12 @@ export class MobTracker {
         } else if (p.event_id === 'death_animation') {
           st.dead = true;
         }
+      }),
+      source.on('mob_equipment', (p) => {
+        // a drowned's trident (isArcher); the main hand only (not the offhand window)
+        const rid = toBig(p.runtime_entity_id);
+        if (rid === this.o.selfRuntimeId() || p.window_id === 'offhand' || p.window_id === 119) return;
+        this.state(rid).heldNetworkId = (p.item as { network_id?: number } | undefined)?.network_id ?? 0;
       }),
       source.on('remove_entity', () => {
         this.prune();
