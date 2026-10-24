@@ -102,9 +102,10 @@ container under test).
 | `rl` | bds-rl | udp/19156 | docker/compose.rl.yml | 1.26.60.6 | RL bridge (Track J) |
 | (no bds.mjs profile) | bds-act | udp/19158 | docker/compose.act.yml (TICK_DISTANCE 10): `docker compose -f docker/compose.act.yml up -d`, then `pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/act --world act --restart bds-act` | 1.26.60.6 | act-* e2e: placing and using blocks, task 7.3 (ACT_BDS_*, docs/interaction.md) |
 | `pve` | bds-pve | udp/19144 | docker/compose.pve.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_PVE_DIFFICULTY` overrides) | 1.26.60.6 | pve-* e2e: combat, guard, flee, follow, night (PVE_BDS_*; docs/pve.md) |
+| `farm` | bds-farm | udp/19186 | docker/compose.farm.yml (TICK_DISTANCE 10) | 1.26.60.6 | farm-*, mine-* e2e: farming and legit mining, tasks 7.13 / 7.14 (FARM_BDS_*; docs/farming.md, docs/mining.md) |
 | `rl-N` | bds-rl-N | udp/19170+N | docker/compose.rl-n.yml (`N=1 docker compose -p bedrockbot-rl-1 -f docker/compose.rl-n.yml up -d`) | 1.26.60.6 | extra RL envs for SubprocVecEnv (rl/scripts/throughput.py); remove after use |
 
-Per-track details: docs/world-model.md, docs/movement.md, docs/pathfinding.md, docs/digging.md, docs/wood.md (`--task gather`), docs/rl.md, docs/interaction.md (placing, doors), docs/versions.md.
+Per-track details: docs/world-model.md, docs/movement.md, docs/pathfinding.md, docs/digging.md, docs/wood.md (`--task gather`), docs/rl.md, docs/interaction.md (placing, doors), docs/farming.md and docs/mining.md (`!farm`, `!mine`, bds-farm), docs/versions.md.
 | `nn` | bds-nn | tcp+udp/19140, udp/19160-19167 (WebRTC), udp/7551 (discovery) | docker/compose.dev-nethernet.yml (NetherNet, TICK_DISTANCE 10) | 1.26.60.6 | `pnpm e2e:nn` |
 | `dev51` | bds-dev51 | udp/19134 | docker/compose.dev51.yml (TICK_DISTANCE 10) | 1.26.51.1 | `pnpm e2e:51` (rollback to the previous version) |
 
@@ -245,6 +246,8 @@ Replies are player chat from the bot.
 | `!stop` | `stopped (was following Steve); guarding r=16`: cancels follow / come / kill / a fight / a goto |
 | `!guard [status]` / `on` / `off` / `<radius>` | `guard on, radius 16`: fight hostiles within the radius of home (of the bot without a home), pick up the drops, walk back home |
 | `!kill <type> [n]` | `killing 3 zombie`, then `kill zombie: 3/3 done`: up to n mobs of that type within 32 blocks, nearest first. `!kill player` or any player's name: `refused: I never attack players (PvE only)` |
+| `!farm [radius]` / `!farm stop` / `!farm status` | `farming r=8 around 10 -60 3`: harvest mature crops, replant, bone meal, deposit into the nearest chest, re-check every minute until `!farm stop` (docs/farming.md); needs walking |
+| `!mine <block> [n]` / `!mine stop` / `!mine status` | `mining 8 coal_ore/deepslate_coal_ore`, then `mine coal_ore: 8/8 done` (or `no seen coal_ore left`): only blocks with a face the bot could have seen, never next to lava or water (docs/mining.md); needs walking |
 
 `!status` names the active behaviour with walking: `behaviour idle`, `guarding r=16`, `following Steve`,
 `fighting zombie`, `fleeing`, `walking to 10 -60 3`, `returning home`. PvE details: docs/pve.md.
@@ -354,6 +357,7 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e act                   
 BDS_E2E=1 HARD_EASY=1 pnpm --filter bot exec vitest run --project e2e hard-night        # + the easy/zombie run
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nav-                          # every nav suite on bds-move (v1 + v2, ~7 min; docs/pathfinding.md "Tests")
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e pve                           # tasks 7.4-7.6 on bds-pve (normal; ~9 min with the night run)
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e farm- mine-                   # tasks 7.13 / 7.14 on bds-farm (FARM_BDS_HOST/PORT/CONTAINER, FARM_VERBOSE=1; docs/farming.md, docs/mining.md)
 BDS_E2E=1 BDS_PVE_NIGHT=1 pnpm --filter bot exec vitest run --project e2e pve           # with the 5-minute night run (opt-in: flaky under load until 7.11 adds armour and food)
 BDS_E2E=1 BDS_SOAK=1 pnpm --filter bot exec vitest run --project e2e test/e2e/keepalive.test.ts --silent=false
 pnpm e2e:51                                    # whole e2e suite against bds-dev51 (BDS 1.26.51.1, game version 1.26.51: rollback)

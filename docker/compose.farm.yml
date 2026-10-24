@@ -1,0 +1,32 @@
+# BDS for the farming and mining e2e tests (PLAN.md Phase 7 tasks 7.13 and 7.14, Track U). Same
+# settings as compose.act.yml (offline, RakNet, flat, peaceful, operator, TICK_DISTANCE 10), own
+# name, port and data dir:
+#   node scripts/bds.mjs --profile farm up
+#   node scripts/bds.mjs --profile farm pack
+name: bedrockbot-farm
+
+services:
+  bds-farm:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-farm
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: peaceful
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: farm
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-farm
+      SERVER_PORT: "19186"
+      TICK_DISTANCE: "10"
+    ports:
+      - "19186:19186/udp"
+    volumes:
+      - ./data/farm:/data
+    stdin_open: true
+    tty: true

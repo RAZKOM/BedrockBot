@@ -23,6 +23,7 @@
 //   soak   bds-soak   docker/compose.soak.yml           BDS 1.26.60.6, RakNet    udp/19152 (8 h AFK soak only)
 //   rl     bds-rl     docker/compose.rl.yml             BDS 1.26.60.6, RakNet    udp/19156 (RL env: rl-* e2e, rl/ contract test)
 //   pve    bds-pve    docker/compose.pve.yml            BDS 1.26.60.6, RakNet    udp/19144 (pve-* e2e: combat, guard, follow; difficulty normal)
+//   farm   bds-farm   docker/compose.farm.yml           BDS 1.26.60.6, RakNet    udp/19186 (farm-*, mine-* e2e; Track U)
 // Any other BDS_CONTAINER value works for restart/idle/cmd/logs only.
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -41,6 +42,7 @@ const PROFILES = {
   soak: { container: 'bds-soak', compose: 'compose.soak.yml', data: 'soak', port: 'udp/19152' },
   rl: { container: 'bds-rl', compose: 'compose.rl.yml', data: 'rl', port: 'udp/19156' },
   pve: { container: 'bds-pve', compose: 'compose.pve.yml', data: 'pve', port: 'udp/19144' },
+  farm: { container: 'bds-farm', compose: 'compose.farm.yml', data: 'farm', port: 'udp/19186' }, // Track U
 }
 const argv = process.argv.slice(2)
 const profileFlag = argv.indexOf('--profile')

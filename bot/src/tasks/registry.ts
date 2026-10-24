@@ -11,6 +11,7 @@ import type { SkillResult } from '../skills/types.ts';
 import { NightSafety } from './night.ts';
 import type { Vec3 } from '../connection/types.ts';
 import { registerPveCommands } from '../chat/commands-pve.ts';
+import { registerFarmCommands } from '../chat/commands-farm.ts'; // Track U
 import { PveController, pveOptionsFrom, refusedKillType } from './pve.ts';
 
 const TASKS = new Map<string, TaskDefinition>();
@@ -210,6 +211,7 @@ export const afkTask: TaskDefinition = {
           }
         : undefined,
     );
+    registerFarmCommands({ chat: ctx.chat, conn: ctx.conn, mob, stopOthers: () => void p?.stop(), alive: () => !respawn.dead, logger: (s) => ctx.logger(s) }); // Track U
     return task;
   },
 };
