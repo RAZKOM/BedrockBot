@@ -104,6 +104,7 @@ container under test).
 | `pve` | bds-pve | udp/19144 | docker/compose.pve.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_PVE_DIFFICULTY` overrides) | 1.26.60.6 | pve-* e2e: combat, guard, flee, follow, night (PVE_BDS_*; docs/pve.md) |
 | `surv` | bds-surv | udp/19182 | docker/compose.surv.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_SURV_DIFFICULTY` overrides) | 1.26.60.6 | surv-* e2e: eating, armour, tool wear, keeper, avoidance, task 7.11 (SURV_BDS_*; docs/survival.md) |
 | `core` | bds-core | udp/19180 | docker/compose.core.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_CORE_DIFFICULTY` overrides) | 1.26.60.6 | core-* e2e: process manager, runtime settings (CORE_BDS_*; docs/processes.md); also runs hard-* / pve-* as a regression check |
+| `cache` | bds-cache | udp/19184 | docker/compose.cache.yml (TICK_DISTANCE 10; **generated DEFAULT world, `LEVEL_SEED` 7**, peaceful) | 1.26.60.6 | cache-* e2e: world cache and debug map, tasks 7.12 / 7.15 (CACHE_BDS_*; docs/world-cache.md). The suites set `gamerule falldamage false` and work in a random area 1 500 to 9 500 blocks out (`CACHE_AREA=x,z` pins it) |
 | `rl-N` | bds-rl-N | udp/19170+N | docker/compose.rl-n.yml (`N=1 docker compose -p bedrockbot-rl-1 -f docker/compose.rl-n.yml up -d`) | 1.26.60.6 | extra RL envs for SubprocVecEnv (rl/scripts/throughput.py); remove after use |
 
 Per-track details: docs/world-model.md, docs/movement.md, docs/pathfinding.md, docs/digging.md, docs/wood.md (`--task gather`), docs/rl.md, docs/interaction.md (placing, doors), docs/waypoints.md (`!wp`, `!goto <name>`, `!top`), docs/pve.md, docs/survival.md (eating, armour, keeper, avoidance), docs/versions.md.
@@ -379,6 +380,7 @@ BDS_E2E=1 HARD_EASY=1 pnpm --filter bot exec vitest run --project e2e hard-night
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nav-                          # every nav suite on bds-move (v1 + v2, ~7 min; docs/pathfinding.md "Tests")
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nav-goals nav-waypoints       # task 7.10: goal types, blacklist, waypoints / !top through the CLI (~2 min)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e pve                           # tasks 7.4-7.6 on bds-pve (normal; ~9 min with the night run)
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e cache-                        # tasks 7.12 / 7.15 on bds-cache (world cache, debug map; ~5 min)
 BDS_E2E=1 BDS_PVE_NIGHT=1 pnpm --filter bot exec vitest run --project e2e pve           # with the 5-minute night run (opt-in: flaky under load until 7.11 adds armour and food)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e surv-                         # task 7.11 on bds-surv (normal; ~2 min; docs/survival.md "Tests")
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e core --silent=false           # tasks 7.8/7.9 on bds-core: process manager, settings (~2 min; docs/processes.md)
@@ -602,6 +604,30 @@ Write the result into PLAN.md fact 8b and this runbook.
 ```sh
 curl -s http://127.0.0.1:9464/healthz
 curl -s http://127.0.0.1:9464/metrics
+```
+
+### Debug map and world cache (tasks 7.12, 7.15)
+
+With `--health-port`, a walking task (`--walk`, `--home`, `--shelter`, gather) also serves:
+
+- `GET /map`: a page (no dependencies) that draws the remembered chunks top-down (colour by surface
+  class, shade by height; chunks that are only remembered are dimmed, loaded ones outlined), the
+  bot and its trail, the last goto's goal (and its path once the navigator report exposes one),
+  entities (players, hostiles, passive mobs, items), home, shelter and waypoints when the task's
+  status has them. Refreshes every second; drag to pan, wheel to zoom, "follow" re-centres.
+- `GET /map.json?r=<chunks>&cx=&cz=&since=<rev>&win=<cx0,cz0,cx1,cz1>`: the data (schema in
+  `bot/src/health/map/schema.ts`); with `since` / `win` only tiles that changed are sent.
+
+The world cache lives in `<config dir>/cache/<server id>/` (default
+`%LOCALAPPDATA%\bedrockbot\cache\` or `~/.bedrockbot/cache/`; env `BEDROCKBOT_CACHE_DIR` overrides the
+root, `BEDROCKBOT_CACHE=0` turns it off). It is written every 30 s and on exit; deleting a server's
+directory is always safe (the bot only forgets terrain). Inspect it with
+`cd bot && node src/world/cache/cli.ts info|checksum <dir>` or `... chunk <dir> <cx> <cz>`.
+Details: docs/world-cache.md.
+
+```sh
+curl -s "http://127.0.0.1:9464/map.json?r=4" | head -c 600
+start http://127.0.0.1:9464/map            # Windows; open the URL in any browser
 ```
 
 ### Soak (task 5.4)

@@ -25,6 +25,7 @@
 //   pve    bds-pve    docker/compose.pve.yml            BDS 1.26.60.6, RakNet    udp/19144 (pve-* e2e: combat, guard, follow; difficulty normal)
 //   surv   bds-surv   docker/compose.surv.yml           BDS 1.26.60.6, RakNet    udp/19182 (surv-* e2e: eating, armour, keeper, avoidance; difficulty normal)
 //   core   bds-core   docker/compose.core.yml           BDS 1.26.60.6, RakNet    udp/19180 (core-* e2e: process manager, settings; difficulty normal)
+//   cache  bds-cache  docker/compose.cache.yml          BDS 1.26.60.6, RakNet    udp/19184 (cache-* e2e: world cache, debug map; DEFAULT world, seed 7)
 // Any other BDS_CONTAINER value works for restart/idle/cmd/logs only.
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -45,6 +46,7 @@ const PROFILES = {
   pve: { container: 'bds-pve', compose: 'compose.pve.yml', data: 'pve', port: 'udp/19144' },
   surv: { container: 'bds-surv', compose: 'compose.surv.yml', data: 'surv', port: 'udp/19182' },
   core: { container: 'bds-core', compose: 'compose.core.yml', data: 'core', port: 'udp/19180' }, // Track Q: process manager, settings (difficulty normal)
+  cache: { container: 'bds-cache', compose: 'compose.cache.yml', data: 'cache', port: 'udp/19184' },
 }
 const argv = process.argv.slice(2)
 const profileFlag = argv.indexOf('--profile')

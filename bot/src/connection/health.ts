@@ -36,6 +36,8 @@ export interface HealthServerOptions {
   /** Extra health condition (e.g. not on the death screen). Default: always true. */
   alive?: () => boolean;
   log?: Logger;
+  /** Track T: extra GET routes (the debug map: health/map/routes.ts); true = answered. */
+  routes?: (path: string, req: IncomingMessage, res: ServerResponse) => boolean;
 }
 
 function num(v: unknown): number | null {
@@ -109,6 +111,7 @@ export class HealthServer {
       this.send(res, 405, { error: 'method not allowed' });
       return;
     }
+    if (this.o.routes?.(path ?? '/', req, res)) return; // Track T: /map, /map.json
     let snap: MetricsSnapshot;
     try {
       snap = this.o.metrics.snapshot();

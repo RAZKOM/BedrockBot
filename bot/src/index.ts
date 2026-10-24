@@ -26,6 +26,8 @@ import { buildTaskContext } from './tasks/context.ts';
 import { allTasks, getTask, onChatContaining, taskNames, type WalkingTask } from './tasks/registry.ts';
 import { currentPins, runUpdateCheck } from './update/check.ts';
 import { UpdateNotifier } from './update/notifier.ts';
+import { defaultCacheRoot, openWorldCache } from './world/cache/index.ts'; // Track T
+import { mapRoutes } from './health/map/routes.ts'; // Track T
 import { gatherTask } from './tasks/gatherWood.ts';
 import { rlTaskDefinition } from './tasks/rlAgent.ts';
 import { registerTask } from './tasks/registry.ts';
@@ -274,6 +276,9 @@ async function main(argv: string[]): Promise<number> {
   taskRef.current = runningTask;
   metrics.provide(() => ({ task: def.name, position: runningTask.position() ?? null, server, taskStatus: runningTask.status() }));
   const healthLog: Logger = createLogger(settings.logLevel, 'health');
+  // Track T: persistent world cache for walking tasks (docs/world-cache.md); env BEDROCKBOT_CACHE=0 off, BEDROCKBOT_CACHE_DIR root
+  const cacheRoot = process.env.BEDROCKBOT_CACHE_DIR ?? defaultCacheRoot(loaded?.path ?? defaultConfigPath());
+  const worldCache = built.mobility && process.env.BEDROCKBOT_CACHE !== '0' ? openWorldCache(built.mobility.world, { root: cacheRoot, server: target.kind === 'bds' ? `${target.host}:${target.port}` : server, logger: log }) : undefined;
 
   let health: HealthServer | undefined;
   let notifier: UpdateNotifier | undefined;
@@ -284,6 +289,7 @@ async function main(argv: string[]): Promise<number> {
     log.info(`exiting (${why})`);
     runningTask.stop();
     built.stop();
+    worldCache?.close(); // Track T: write the remembered chunks
     notifier?.stop();
     chat.stop();
     // Waits until RakNet has sent the disconnect packet, so the server ends the session now.
@@ -324,7 +330,10 @@ async function main(argv: string[]): Promise<number> {
   });
 
   if (settings.healthPort !== undefined) {
-    health = new HealthServer({ port: settings.healthPort, metrics, alive: () => runningTask.alive?.() ?? true, log: healthLog });
+    // Track T: GET /map and /map.json (health/map)
+    const mob = built.mobility;
+    const routes = mapRoutes({ world: mob?.world, cache: worldCache, position: () => runningTask.position(), skillsStatus: () => mob?.skills.status(), taskStatus: () => runningTask.status(), server });
+    health = new HealthServer({ port: settings.healthPort, metrics, alive: () => runningTask.alive?.() ?? true, log: healthLog, routes });
     try {
       await health.start();
     } catch (e) {
