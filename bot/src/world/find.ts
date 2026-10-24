@@ -5,6 +5,7 @@ import type { ChunkStore, Column } from './chunks.ts';
 import type { BlockRegistry } from './registry.ts';
 import type { Section } from './subchunk.ts';
 import type { BlockClass, BlockInfo, FindOptions, Vec3 } from './types.ts';
+import type { CachedTerrain, FoundPos } from './cache/types.ts'; // Track T
 
 export const BLOCK_CLASSES: readonly BlockClass[] = ['log', 'leaves', 'chest'];
 
@@ -27,6 +28,8 @@ export class BlockFinder {
   private readonly index = new Map<string, Map<number, SectionIndex>>();
   /** state id -> class (null = none); -1 (unknown) is never classified. */
   private readonly classCache = new Map<number, BlockClass | null>();
+  /** Track T: the world cache (set by WorldCache.attach); find() adds its marks for unloaded columns. */
+  cache: (CachedTerrain & { markInfo?(name: string): BlockInfo | undefined }) | undefined;
 
   constructor(store: ChunkStore, registry: BlockRegistry) {
     this.store = store;
@@ -113,9 +116,10 @@ export class BlockFinder {
    * at most `max`. Air is never matched. With `opts.class` only that class's indexed positions are
    * visited; otherwise every non-air block of the loaded sections in range is.
    */
-  find(pred: (b: BlockInfo, p: Vec3) => boolean, opts: FindOptions): Vec3[] {
+  find(pred: (b: BlockInfo, p: Vec3) => boolean, opts: FindOptions & { cached?: boolean }): FoundPos[] {
     const { origin, radius, max } = opts;
     if (max <= 0 || radius < 0) return [];
+    const cache = opts.cached === false ? undefined : this.cache; // Track T
     const r2 = radius * radius;
     const ox = origin.x;
     const oy = origin.y;
@@ -142,7 +146,19 @@ export class BlockFinder {
     for (let cx = minCX; cx <= maxCX; cx++) {
       for (let cz = minCZ; cz <= maxCZ; cz++) {
         const col = this.store.column(cx, cz);
-        if (!col?.loaded) continue;
+        if (!col?.loaded) {
+          // Track T: remembered marks of unloaded columns (world/cache), flagged `cached`
+          if (cache) {
+            for (const m of cache.marks(cx, cz)) {
+              if (m.y < oy - radius - 1 || m.y > oy + radius + 1 || (opts.class && classify(m.name) !== opts.class)) continue;
+              const info = cache.markInfo?.(m.name);
+              const n = found.length;
+              if (info) consider(m.x, m.y, m.z, info);
+              if (found.length > n) (found[n]!.p as FoundPos).cached = true;
+            }
+          }
+          continue;
+        }
         const bx = cx << 4;
         const bz = cz << 4;
         const lo = Math.max(minSY - col.minCY, 0);

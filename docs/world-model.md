@@ -33,6 +33,7 @@ world.checksum(a, b);                                       // same rule as trut
 | `inventory.ts` | `Inventory`: windows, hotbar selection |
 | `find.ts` | `BlockFinder`: `find()` with a per-section index for `log`, `leaves`, `chest` |
 | `checksum.ts` | FNV-1a box checksum over typeIds (truth-pack compatible) |
+| `cache/` | persistent world cache (task 7.12): summaries, region files, stand-ins, cached marks ([world-cache.md](world-cache.md)) |
 
 ## Packet flow (BDS 1.26.51.1)
 
@@ -180,6 +181,26 @@ node scripts/bds.mjs --profile world pack   # deploy the truth pack into docker/
 BDS_E2E=1 pnpm --filter bot test:e2e
 BDS_E2E=1 WORLD_RECORD=1 pnpm --filter bot test:e2e -- world-record     # re-record the fixture
 ```
+
+## Persistent world cache (`world/cache`, task 7.12)
+
+`openWorldCache(world, { server })` (the CLI does it for walking tasks) attaches a `WorldCache`:
+`World.cache` is set and the model gains memory beyond the loaded area. Hooks, all on existing
+`ChunkStore` events (no change to the packet path): `onColumnLoaded` summarizes the column (2-bit class
+per cell, column tops and roofs, marks such as logs, chests, ores), `onBlockSet` keeps the summary
+current, `onSection` re-summarizes a re-sent section, `onColumnUnloaded` encodes it into its region
+file. Readers:
+
+- `World.find(pred, opts)` also returns marks of unloaded columns in range, flagged `cached: true`
+  (`opts.cached: false` skips them); `findCachedTrees(world, cache, origin, radius)` groups cached logs.
+- `worldSource(world)` (skills/terrain/query.ts) answers `blockAt` / `columnTop` for unloaded columns
+  with stand-ins (air, stone, water, lava, leaves) so the planner plans through remembered terrain;
+  `liveBlockAt` (what the physics uses) never does.
+- When a column the planner read from the cache loads, the read cells whose stand-in differs from the
+  real block are announced through `onBlockUpdate` (`BlockUpdates.emit`) with the stand-in as `before`.
+
+`World.blockAt` is unchanged: `undefined` still means "not loaded". Format, sizes, bounds and
+measurements: [world-cache.md](world-cache.md).
 
 ## Adding a version shim
 

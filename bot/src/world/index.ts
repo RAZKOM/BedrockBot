@@ -22,6 +22,7 @@ import type {
   WorldView,
 } from './types.ts';
 import { BlockUpdates } from './updates.ts';
+import type { CachedTerrain, FoundPos } from './cache/types.ts'; // Track T
 
 export const EYE_HEIGHT = 1.62;
 
@@ -48,6 +49,8 @@ export class World implements WorldView {
   readonly entityTracker: EntityTracker;
   readonly inventory: Inventory;
   readonly finder: BlockFinder;
+  /** Track T: the persistent world cache when one is attached (world/cache: `openWorldCache(world, ...)`). */
+  cache: CachedTerrain | undefined;
   readonly self: SelfState = {
     pos: { x: 0, y: 0, z: 0 },
     vel: { x: 0, y: 0, z: 0 },
@@ -100,7 +103,8 @@ export class World implements WorldView {
     return this.chunks.isLoaded(cx, cz);
   }
 
-  find(pred: (b: BlockInfo, p: Vec3) => boolean, opts: FindOptions): Vec3[] {
+  // Track T: positions from the world cache (unloaded columns) come back flagged `cached: true`; `cached: false` skips them.
+  find(pred: (b: BlockInfo, p: Vec3) => boolean, opts: FindOptions & { cached?: boolean }): FoundPos[] {
     return this.finder.find(pred, opts);
   }
 

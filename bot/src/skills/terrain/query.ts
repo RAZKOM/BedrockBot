@@ -2,6 +2,7 @@
 // model's BlockQuery and the pathfinder's cell queries.
 import type { World } from '../../world/index.ts';
 import type { BlockInfo, Box } from '../../world/types.ts';
+import type { CachedTerrain } from '../../world/cache/types.ts'; // Track T
 import type { BlockQuery } from '../input/types.ts';
 import { classify, type TerrainClass } from './classify.ts';
 import { CONNECT_EAST, CONNECT_NORTH, CONNECT_SOUTH, CONNECT_WEST, connectedBoxes, doorBoxes } from './shapes.ts';
@@ -19,22 +20,38 @@ export interface TerrainSource {
   readonly maxY?: number;
   /** Optional: the lowest y of the world (the sky scan stops there). */
   readonly minY?: number;
+  /**
+   * Track T: optional, true when (x, z) is not loaded but `blockAt` answers from the persistent world
+   * cache (stand-ins: air, stone, water, lava, leaves). The planner plans through such cells.
+   */
+  cached?(x: number, z: number): boolean;
+  /** Track T: optional, blocks of loaded chunks only (no cache): what the physics may collide with. */
+  liveBlockAt?: (x: number, y: number, z: number) => BlockInfo | undefined;
 }
 
 /** The parts of the world model (`World`) a TerrainSource reads. */
 export interface BlockStore {
   chunks: Pick<World['chunks'], 'stateIdAt' | 'runtimeIdAt'> & Partial<Pick<World['chunks'], 'column' | 'maxY' | 'minY'>>;
   registry: Pick<World['registry'], 'blockInfo'>;
+  /** Track T: the persistent world cache (World.cache), read at call time for columns that are not loaded. */
+  readonly cache?: CachedTerrain | undefined;
 }
 
 /** The world model as a TerrainSource (layer 0, straight from the chunk store, no Vec3 allocation). */
 export function worldSource(world: BlockStore): TerrainSource {
   const { chunks, registry } = world;
+  const live = (x: number, y: number, z: number): BlockInfo | undefined => {
+    const s = chunks.stateIdAt(x, y, z);
+    if (s === undefined) return undefined;
+    return registry.blockInfo(s, s < 0 ? (chunks.runtimeIdAt(x, y, z) ?? 0) : 0);
+  };
   const src: TerrainSource = {
     blockAt(x, y, z) {
-      const s = chunks.stateIdAt(x, y, z);
-      if (s === undefined) return undefined;
-      return registry.blockInfo(s, s < 0 ? (chunks.runtimeIdAt(x, y, z) ?? 0) : 0);
+      return live(x, y, z) ?? world.cache?.blockAt(x, y, z); // Track T: cache fallback for unloaded columns
+    },
+    liveBlockAt: live,
+    cached(x, z) {
+      return world.cache !== undefined && !chunks.column?.(x >> 4, z >> 4)?.loaded && world.cache.has(x >> 4, z >> 4);
     },
     get maxY() {
       return chunks.maxY;
@@ -47,7 +64,7 @@ export function worldSource(world: BlockStore): TerrainSource {
   if (column) {
     src.columnTop = (x, z) => {
       const col = column(x >> 4, z >> 4);
-      if (!col?.loaded) return undefined;
+      if (!col?.loaded) return world.cache?.columnTop(x, z); // Track T
       // sections at or above `count` are air; null sections are air; undefined = not received yet
       for (let rel = Math.min(col.count, col.sections.length) - 1; rel >= 0; rel--) {
         const sec = col.sections[rel];
@@ -108,7 +125,9 @@ export function boxesAtCell(src: TerrainSource, x: number, y: number, z: number,
 }
 
 /** The movement model's view of a TerrainSource: real collision shapes, friction and liquids. */
-export function blockQueryOf(src: TerrainSource): BlockQuery {
+export function blockQueryOf(src0: TerrainSource): BlockQuery {
+  // Track T: the physics never collides with cached stand-ins, only with loaded blocks
+  const src: TerrainSource = src0.liveBlockAt ? { blockAt: src0.liveBlockAt } : src0;
   return {
     solidAt(x, y, z) {
       const c = classAt(src, x, y, z);

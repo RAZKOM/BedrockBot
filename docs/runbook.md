@@ -102,6 +102,7 @@ container under test).
 | `rl` | bds-rl | udp/19156 | docker/compose.rl.yml | 1.26.60.6 | RL bridge (Track J) |
 | (no bds.mjs profile) | bds-act | udp/19158 | docker/compose.act.yml (TICK_DISTANCE 10): `docker compose -f docker/compose.act.yml up -d`, then `pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/act --world act --restart bds-act` | 1.26.60.6 | act-* e2e: placing and using blocks, task 7.3 (ACT_BDS_*, docs/interaction.md) |
 | `pve` | bds-pve | udp/19144 | docker/compose.pve.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_PVE_DIFFICULTY` overrides) | 1.26.60.6 | pve-* e2e: combat, guard, flee, follow, night (PVE_BDS_*; docs/pve.md) |
+| `cache` | bds-cache | udp/19184 | docker/compose.cache.yml (TICK_DISTANCE 10; **generated DEFAULT world, `LEVEL_SEED` 7**, peaceful) | 1.26.60.6 | cache-* e2e: world cache and debug map, tasks 7.12 / 7.15 (CACHE_BDS_*; docs/world-cache.md). The suites set `gamerule falldamage false` and work in a random area 1 500 to 9 500 blocks out (`CACHE_AREA=x,z` pins it) |
 | `rl-N` | bds-rl-N | udp/19170+N | docker/compose.rl-n.yml (`N=1 docker compose -p bedrockbot-rl-1 -f docker/compose.rl-n.yml up -d`) | 1.26.60.6 | extra RL envs for SubprocVecEnv (rl/scripts/throughput.py); remove after use |
 
 Per-track details: docs/world-model.md, docs/movement.md, docs/pathfinding.md, docs/digging.md, docs/wood.md (`--task gather`), docs/rl.md, docs/interaction.md (placing, doors), docs/versions.md.
@@ -354,6 +355,7 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e act                   
 BDS_E2E=1 HARD_EASY=1 pnpm --filter bot exec vitest run --project e2e hard-night        # + the easy/zombie run
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nav-                          # every nav suite on bds-move (v1 + v2, ~7 min; docs/pathfinding.md "Tests")
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e pve                           # tasks 7.4-7.6 on bds-pve (normal; ~9 min with the night run)
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e cache-                        # tasks 7.12 / 7.15 on bds-cache (world cache, debug map; ~5 min)
 BDS_E2E=1 BDS_PVE_NIGHT=1 pnpm --filter bot exec vitest run --project e2e pve           # with the 5-minute night run (opt-in: flaky under load until 7.11 adds armour and food)
 BDS_E2E=1 BDS_SOAK=1 pnpm --filter bot exec vitest run --project e2e test/e2e/keepalive.test.ts --silent=false
 pnpm e2e:51                                    # whole e2e suite against bds-dev51 (BDS 1.26.51.1, game version 1.26.51: rollback)
@@ -571,6 +573,30 @@ Write the result into PLAN.md fact 8b and this runbook.
 ```sh
 curl -s http://127.0.0.1:9464/healthz
 curl -s http://127.0.0.1:9464/metrics
+```
+
+### Debug map and world cache (tasks 7.12, 7.15)
+
+With `--health-port`, a walking task (`--walk`, `--home`, `--shelter`, gather) also serves:
+
+- `GET /map`: a page (no dependencies) that draws the remembered chunks top-down (colour by surface
+  class, shade by height; chunks that are only remembered are dimmed, loaded ones outlined), the
+  bot and its trail, the last goto's goal (and its path once the navigator report exposes one),
+  entities (players, hostiles, passive mobs, items), home, shelter and waypoints when the task's
+  status has them. Refreshes every second; drag to pan, wheel to zoom, "follow" re-centres.
+- `GET /map.json?r=<chunks>&cx=&cz=&since=<rev>&win=<cx0,cz0,cx1,cz1>`: the data (schema in
+  `bot/src/health/map/schema.ts`); with `since` / `win` only tiles that changed are sent.
+
+The world cache lives in `<config dir>/cache/<server id>/` (default
+`%LOCALAPPDATA%\bedrockbot\cache\` or `~/.bedrockbot/cache/`; env `BEDROCKBOT_CACHE_DIR` overrides the
+root, `BEDROCKBOT_CACHE=0` turns it off). It is written every 30 s and on exit; deleting a server's
+directory is always safe (the bot only forgets terrain). Inspect it with
+`cd bot && node src/world/cache/cli.ts info|checksum <dir>` or `... chunk <dir> <cx> <cz>`.
+Details: docs/world-cache.md.
+
+```sh
+curl -s "http://127.0.0.1:9464/map.json?r=4" | head -c 600
+start http://127.0.0.1:9464/map            # Windows; open the URL in any browser
 ```
 
 ### Soak (task 5.4)

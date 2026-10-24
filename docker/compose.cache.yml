@@ -1,0 +1,35 @@
+# BDS for the persistent world cache and debug map e2e tests (PLAN.md tasks 7.12 and 7.15, Track T;
+# docs/world-cache.md). NOT flat: a generated DEFAULT world with a fixed seed (LEVEL_SEED 7), so the
+# cache sees natural terrain (hills, caves, ores, trees, water) and every server built from this file
+# has the same terrain. Peaceful, operator, own project name, container bds-cache on udp/19184, data in
+# docker/data/cache. TICK_DISTANCE 10 keeps the truth pack's script area as wide as the bot's view.
+#   node scripts/bds.mjs --profile cache up
+#   node scripts/bds.mjs --profile cache pack        # truth pack (needed by the cache-* e2e tests)
+name: bedrockbot-cache
+
+services:
+  bds-cache:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-cache
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: peaceful
+      LEVEL_TYPE: DEFAULT
+      LEVEL_SEED: "7"
+      LEVEL_NAME: cache
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-cache
+      SERVER_PORT: "19184"
+      TICK_DISTANCE: "10"
+    ports:
+      - "19184:19184/udp"
+    volumes:
+      - ./data/cache:/data
+    stdin_open: true
+    tty: true

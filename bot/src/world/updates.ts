@@ -21,6 +21,12 @@ export class BlockUpdates {
     return () => this.listeners.delete(fn);
   }
 
+  // Track T: the world cache announces cells of a freshly loaded column that differ from what it had
+  // served the planner (world/cache/cache.ts), so listeners (the navigator's grid) see them as updates.
+  emit(p: Vec3, before: BlockInfo | undefined, after: BlockInfo): void {
+    for (const fn of [...this.listeners]) fn(p, before, after);
+  }
+
   handleUpdateBlock(p: UpdateBlock): void {
     this.apply(p.position, p.block_runtime_id, p.layer ?? 0);
   }
