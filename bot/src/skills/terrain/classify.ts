@@ -137,7 +137,10 @@ function make(info: BlockInfo): TerrainClass {
     liquidHeight = depth >= 8 ? 1 : (8 - depth) / 9;
   }
   const leaves = name.endsWith('_leaves') || name === 'leaves' || name === 'leaves2';
-  const danger = DANGER_NAMES.has(name) || liquid === 'lava';
+  // Campfires only burn while lit: an extinguished one (`extinguished` 1, e.g. after a water bottle
+  // or shovel) is a harmless 7/16-high block the body walks over.
+  const extinguished = name.endsWith('campfire') && Number(info.states.extinguished ?? 0) === 1;
+  const danger = (DANGER_NAMES.has(name) && !extinguished) || liquid === 'lava';
   const openable: Openable | undefined = isDoorName(name) ? 'door' : name.endsWith('trapdoor') ? 'trapdoor' : name.endsWith('fence_gate') ? 'gate' : undefined;
   const penalty = leaves ? LEAVES_PENALTY : SLOW_NAMES.has(name) ? SLOW_PENALTY : 0;
   const b0 = boxes[0];

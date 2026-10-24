@@ -36,6 +36,10 @@ describe('classify', () => {
     expect(classify(blockInfoOf('magma'))).toMatchObject({ danger: true, floor: false });
     expect(classify(blockInfoOf('cactus'))).toMatchObject({ danger: true });
     expect(classify(blockInfoOf('web'))).toMatchObject({ danger: true });
+    // a lit campfire burns; an extinguished one is a low walkable block (user report, Realm 2026-10-29)
+    expect(classify(blockInfoOf('campfire'))).toMatchObject({ danger: true, floor: false });
+    expect(classify(blockInfoOf('campfire', { extinguished: 1 }))).toMatchObject({ danger: false, floor: true, top: 0.4375 });
+    expect(classify(blockInfoOf('soul_campfire', { extinguished: 1 }))).toMatchObject({ danger: false, floor: true });
     expect(classify(blockInfoOf('oak_leaves'))).toMatchObject({ leaves: true, floor: true });
     expect(classify(blockInfoOf('oak_leaves')).penalty).toBeGreaterThan(0);
     expect(classify(blockInfoOf('ice')).friction).toBe(0.98);
