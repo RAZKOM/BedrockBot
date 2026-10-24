@@ -34,6 +34,7 @@ control gets it).
 | 80 | `night` | auto | dusk to dawn with a shelter set: walking there, a retreat due, or inside (it holds the bot there) | the retreat is cancelled, not counted as a failed attempt (`waiting`) | the retreat is planned again |
 | 60 | `guard` fight | auto | guard on and a hostile within `guardRadius` of home (of the bot while a command runs); not while a kill job exists | fight cancelled (the episode ends) | a new target is picked |
 | 40 | `goto` `follow` `come` `kill` `gather` | user | until done or stopped | navigator / follower / fight cancelled, gather paused (`GatherWoodTask.pause`) | goto planned again, follow restarted, come re-aimed, kill looks for its next target, gather goes on from find-tree |
+| 30 | `food` chore (Track X, docs/food.md) | auto | by day, with no user process, while the food carried is below `foodMin` and a target is in range | the hunt or the cooking is cancelled, the job remembers its progress | continues the job; backs off 10 min after an empty attempt |
 | 20 | `home` | auto | requested (after a guard fight with nothing else queued, at dawn, after a respawn) and not yet home | navigator cancelled | planned again |
 | - | idle | | nothing wants control: the bot stands; the keepalive nudge runs | | |
 

@@ -28,6 +28,7 @@ export const PRIORITY = {
   night: 80,
   guard: 60,
   user: 40,
+  chore: 30, // Track X: automatic chores (food gathering) below user commands, above the home return
   home: 20,
 } as const;
 
