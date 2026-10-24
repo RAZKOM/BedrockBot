@@ -14,6 +14,7 @@ import { registerPveCommandsFor } from '../chat/commands-pve.ts';
 import { registerSurvivalCommands } from '../chat/commands-survival.ts'; // Track S
 import { registerNavCommands } from '../chat/commands-nav.ts'; // Track R
 import { registerFarmCommands } from '../chat/commands-farm.ts'; // Track U
+import { registerNlCommands } from '../chat/commands-nl.ts'; // Track Y
 import { formatChatLine } from '../chat/text.ts';
 import type { RuntimeSettings } from '../config/settings.ts';
 import { settingsFromValues } from '../config/settings.ts';
@@ -324,6 +325,7 @@ export const afkTask: TaskDefinition = {
       () => registerFarmCommands({ chat: ctx.chat, conn: ctx.conn, mob, stopOthers: () => void pve?.stop(), alive: () => !respawn.dead, logger: (s) => ctx.logger(s) }), // Track U
       () => registerNavCommands({ ctx, task, mob, pve, respawn }), // Track R
       (d) => registerSurvivalCommands({ chat: d.chat, source: d.conn, mob, pve, task, containers, inactive: () => respawn.dead || ctx.conn.state !== 'spawned', logger: ctx.logger('survival') }), // Track S
+      (d) => void registerNlCommands(d, ctx.values), // Track Y
     ];
     for (const register of registrations) register(deps);
     return task;

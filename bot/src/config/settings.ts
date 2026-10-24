@@ -55,6 +55,7 @@ export const SETTING_DEFS = {
   throwawayMin: { kind: 'number', default: 16, min: 0, max: 2304, integer: true, unit: 'blocks', description: 'keep at least this many throwaway blocks (placeholder, Track S)' },
   useBoneMeal: { kind: 'boolean', default: true, description: 'farming: use bone meal on crops (placeholder, Track U)' },
   mineTunnelLen: { kind: 'number', default: 32, min: 1, max: 256, integer: true, unit: 'blocks', description: 'mining: tunnel length per branch (placeholder)' },
+  nlConfirm: { kind: 'boolean', default: true, description: '!do and chat to the bot: show the plan and wait for !yes before running it' }, // Track Y
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;

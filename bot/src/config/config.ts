@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
+import { NlConfigSchema } from '../nl/provider.ts'; // Track Y
 
 const vec3 = z.tuple([z.number(), z.number(), z.number()]);
 const port = z.number().int().min(1).max(65535);
@@ -79,6 +80,7 @@ export const ConfigSchema = z
      * bounds are checked when the bot starts.
      */
     settings: z.record(z.string(), z.union([z.boolean(), z.number(), z.string()])).optional(),
+    nl: NlConfigSchema.optional(), // Track Y: { provider: 'ollama' | 'none', url, model, timeoutMs } (docs/natural-language.md)
   })
   .strict();
 

@@ -222,7 +222,8 @@ keys are errors, messages name the field). Relative paths in the file are relati
   "nudgeInterval": 240, "home": [14, -60, -9], "shelter": [-30, -60, 28],
   "healthPort": 9464, "metricsInterval": 60, "updateCheckHours": 24,
   "tasks": { "gather": { } },  // free-form per-task options, read by that task
-  "settings": { "allowBreak": false, "guardRadius": 16 }   // runtime settings at start-up (!set lists the keys; docs/processes.md)
+  "settings": { "allowBreak": false, "guardRadius": 16 },  // runtime settings at start-up (!set lists the keys; docs/processes.md)
+  "nl": { "provider": "ollama", "url": "http://127.0.0.1:11434", "model": "qwen2.5:7b", "timeoutMs": 60000 }  // !do (docs/natural-language.md); default provider "none"
 }
 ```
 
@@ -266,6 +267,8 @@ Replies are player chat from the bot.
 | `!drop <item> [n]` | `dropped 10 stone`: n (default all) of an item. The bot also eats, wears armour and drops junk by itself (docs/survival.md) |
 | `!farm [radius]` / `!farm stop` / `!farm status` | `farming r=8 around 10 -60 3`: harvest mature crops, replant, bone meal, deposit into the nearest chest, re-check every minute until `!farm stop` (docs/farming.md); needs walking |
 | `!mine <block> [n]` / `!mine stop` / `!mine status` | `mining 8 coal_ore/deepslate_coal_ore`, then `mine coal_ore: 8/8 done` (or `no seen coal_ore left`): only blocks with a face the bot could have seen, never next to lava or water (docs/mining.md); needs walking |
+| `!do <text>` / `<botname>, <text>` / `@<botname> <text>` | `plan: goto home, then guard on (!yes to run, !no to drop)`: plain words to a plan of the commands above, made by a local model (`nl` config block, off by default; docs/natural-language.md). Unclear requests get a question (`I know no waypoint "castle" (known: home, spawn). Which one, or which x y z?`); `natural language is off (...)` without a provider |
+| `!yes` / `!no` | run the waiting plan (within 60 s; steps one by one, each after the previous finished; `plan done (2 steps)`) / `plan dropped` (also drops the rest of a running plan). `!set nlConfirm off` runs plans without asking |
 
 `!status` names the active behaviour with walking: `behaviour idle`, `guarding r=16`, `following Steve`,
 `fighting zombie`, `fleeing`, `walking to 10 -60 3`, `returning home`, `going to the shelter`,
@@ -388,6 +391,7 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e farm- mine-           
 BDS_E2E=1 BDS_PVE_NIGHT=1 pnpm --filter bot exec vitest run --project e2e pve           # with the 5-minute night run (opt-in: flaky under load until 7.11 adds armour and food)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e surv-                         # task 7.11 on bds-surv (normal; ~2 min; docs/survival.md "Tests")
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e core --silent=false           # tasks 7.8/7.9 on bds-core: process manager, settings (~2 min; docs/processes.md)
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nl-core --silent=false        # task 7.18 on bds-core: !do / !yes / !no with a fake model (~25 s; docs/natural-language.md)
 BDS_E2E=1 BDS_SOAK=1 pnpm --filter bot exec vitest run --project e2e test/e2e/keepalive.test.ts --silent=false
 pnpm e2e:51                                    # whole e2e suite against bds-dev51 (BDS 1.26.51.1, game version 1.26.51: rollback)
 pnpm e2e:nn                                    # whole e2e suite against bds-nn (NetherNet, 1.26.60)

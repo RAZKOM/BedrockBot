@@ -8,6 +8,7 @@ import { defaultProfilesFolder, realmLabel, RealmGuardError, validateRealmTarget
 import type { ConnectTarget, NethernetSignalling, RealmTarget, Transport, Vec3 } from '../connection/types.ts';
 import type { BotConfig } from './config.ts';
 import { parseVec3 } from './config.ts';
+import { NL_VALUE_KEY, resolveNlConfig, type NlConfig } from '../nl/provider.ts'; // Track Y
 import { DEFAULT_HOST, DEFAULT_METRICS_INTERVAL_S, DEFAULT_NUDGE_INTERVAL_S, DEFAULT_PORT, DEFAULT_VERSION } from './defaults.ts';
 
 /** The CLI values `resolveSettings` reads (strings as parseArgs returns them; undefined = not given). */
@@ -77,6 +78,7 @@ export interface Settings {
   common: CommonTaskOptions;
   updateCheckHours: number;
   taskConfig: Record<string, unknown>;
+  nl: NlConfig; // Track Y: the `nl` block with defaults (natural-language front end)
 }
 
 export class SettingsError extends Error {
@@ -217,5 +219,6 @@ export function resolveSettings(cli: CliValues, cfg: BotConfig, env: ResolveEnv)
     },
     updateCheckHours: seconds(cli['update-check-hours'], '--update-check-hours', true) ?? cfg.updateCheckHours ?? (target.kind === 'realm' ? 24 : 0),
     taskConfig: cfg.tasks?.[task] ?? {},
+    nl: (cli[NL_VALUE_KEY] = resolveNlConfig(cfg.nl)), // Track Y: also handed to the task through its CLI values (ctx.values.$nl)
   };
 }
