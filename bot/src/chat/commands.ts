@@ -145,7 +145,7 @@ function pointCommand(name: string, target: NonNullable<HardeningDeps['home']>, 
   return ({ reply, args }: { reply: (m: string) => void; args: string[] }) => {
     const [sub, ...rest] = args;
     if (sub === undefined || sub === 'show') {
-      reply(`${name} ${fmtBlock(target.get())}${extra ? `, ${extra()}` : ''}`);
+      reply(`${name} ${fmtBlock(target.get())}${extra ? `, ${extra()}` : ''}${target.get() && target.go ? ` (!${name} go walks there)` : ''}`);
       return;
     }
     if (sub === 'clear') {

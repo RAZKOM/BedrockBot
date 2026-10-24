@@ -401,7 +401,8 @@ export class PveController {
       else if (this.mobs.targetsUs(e.runtimeId)) score -= 50;
       if (!best || score < best.score) best = { e, score };
     }
-    return best ? { e: best.e, inPlace } : undefined;
+    // a flying target is fought in place (no chase: the fight would follow a phantom across the sky)
+    return best ? { e: best.e, inPlace: inPlace || FLYING_TYPES.has(bareType(best.e.type)) } : undefined;
   }
 
   fleeTarget(me: Vec3, threat: EntityInfo): { to: Vec3; kind: string } | undefined {
