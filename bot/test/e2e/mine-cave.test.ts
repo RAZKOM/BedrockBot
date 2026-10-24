@@ -13,7 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Chat } from '../../src/chat/chat.ts';
 import { registerFarmCommands } from '../../src/chat/commands-farm.ts';
 import { silentLogger } from '../../src/log.ts';
-import { createMiner } from '../../src/skills/farm/index.ts';
+import { createMinerFor } from '../../src/skills/mine/wire.ts'; // Track Z: probe plans, Track R blacklist, mineSeenOnly
 import type { MineTask } from '../../src/skills/mine/miner.ts';
 import type { Mobility } from '../../src/tasks/mobility.ts';
 import type { Vec3 } from '../../src/world/types.ts';
@@ -85,7 +85,8 @@ describe.skipIf(!E2E)('@bds mine: legit mining in a cave (7.14)', () => {
     await buildCave();
     await bot.loadout([['stone_pickaxe', 1]]);
     expect(await pollUntil(() => bot.world.blockAt(buried[3]!)?.name === 'coal_ore' && bot.world.blockAt(lava)?.name === 'lava', 5_000)).toBeGreaterThanOrEqual(0);
-    ({ mine } = createMiner({ skills: bot.skills, world: bot.world, loop: bot.loop, source: bot.conn, hotbar: bot.hotbar, containers: bot.containers, log: bot.logger }));
+    // Track Z: the legit rule is the `mineSeenOnly` option now (default off); this case keeps it on
+    ({ mine } = createMinerFor({ skills: bot.skills, world: bot.world, loop: bot.loop, source: bot.conn, hotbar: bot.hotbar, containers: bot.containers, log: bot.logger }, { seenOnly: () => true }));
   }, 180_000);
 
   afterAll(async () => {
@@ -173,4 +174,76 @@ describe.skipIf(!E2E)('@bds mine: legit mining in a cave (7.14)', () => {
     expect(cmdMine.state).toBe('stopped');
     expect(still).toBe('coal_ore');
   }, 300_000);
+
+  // ---- Track Z (coordinator requests) ----
+
+  it('unreachable ores are skipped after ONE plan each (no 3 x 3 s retries); the reachable one is mined', async () => {
+    await clearArea(bot.truth, mx, mz, 18, 9);
+    await killItemsNear(mx, mz, 20);
+    const P = { x: mx - 6, y: F, z: mz };
+    await bot.teleport({ x: P.x + 0.5, y: F, z: P.z + 0.5 }, -90);
+    // two ores floating 7 blocks over the bot (no way up: allowPlace is off), one on the ground 10 blocks away
+    const floating = [
+      { x: P.x, y: F + 7, z: P.z },
+      { x: P.x + 1, y: F + 7, z: P.z + 1 },
+    ];
+    const ground = { x: P.x + 10, y: F, z: P.z };
+    for (const p of [...floating, ground]) await truthLoaded(bot.truth, 'set', [p.x, p.y, p.z, 'coal_ore']);
+    expect(await pollUntil(() => [...floating, ground].every((p) => bot.world.blockAt(p)?.name === 'coal_ore'), 5_000)).toBeGreaterThanOrEqual(0);
+    const { mine: m3 } = createMinerFor({ skills: bot.skills, world: bot.world, loop: bot.loop, source: bot.conn, hotbar: bot.hotbar, containers: bot.containers, log: bot.logger }, { seenOnly: () => true });
+    const t0 = performance.now();
+    let skippedAt: number | undefined;
+    const watch = setInterval(() => {
+      if (skippedAt === undefined && m3.stats.unreachable.length >= floating.length) skippedAt = performance.now() - t0;
+    }, 20);
+    const end = await m3.start({ block: 'coal_ore', count: 3 });
+    clearInterval(watch);
+    skippedAt ??= m3.stats.unreachableMs[floating.length - 1];
+    const s = (performance.now() - t0) / 1000;
+    const st = m3.stats;
+    notes.push(
+      `unreachable skip: ${end} after ${s.toFixed(1)} s; ${st.unreachable.length} skipped as unreachable (${JSON.stringify(st.unreachable)}) ${skippedAt === undefined ? 'never' : `${(skippedAt / 1000).toFixed(2)} s`} after the start; ` +
+        `ground ore mined at ${((st.minedMs[0] ?? 0) / 1000).toFixed(2)} s, skips at ${st.unreachableMs.map((x) => (x / 1000).toFixed(2)).join(', ')} s; ${st.probes} probe plans (${st.probeMs.toFixed(0)} ms total), ${st.failures} failures, mined ${JSON.stringify(st.minedAt)}`,
+    );
+    expect(st.minedAt).toEqual([ground]);
+    expect(new Set(st.unreachable.map(key))).toEqual(new Set(floating.map(key)));
+    expect(end).toBe('none_left');
+    expect(st.failures).toBeLessThanOrEqual(2); // at most one failed goto per floating ore, never three
+    expect(skippedAt).toBeDefined();
+    expect(skippedAt!).toBeLessThan(15_000);
+    for (const p of floating) expect(bot.skills.nav.blacklist.blocked(p)).toBe(true);
+    for (const p of floating) await truthLoaded(bot.truth, 'set', [p.x, p.y, p.z, 'air']);
+  }, 300_000);
+
+  it('mineSeenOnly: a buried ore 6 blocks into a wall is skipped when on, tunnelled to and mined when off', async () => {
+    await clearArea(bot.truth, mx, mz, 18, 9);
+    await killItemsNear(mx, mz, 20);
+    // a wall 10 thick (z mz-18 .. mz-9), the face at z = mz-9; the ore behind 6 blocks of stone (mz-9 .. mz-14)
+    await fill({ x: mx - 5, y: F - 1, z: mz - 18 }, { x: mx + 5, y: F + 5, z: mz - 9 }, 'stone');
+    const ore = { x: mx, y: F + 1, z: mz - 15 };
+    await truthLoaded(bot.truth, 'set', [ore.x, ore.y, ore.z, 'coal_ore']);
+    await bot.teleport({ x: mx + 0.5, y: F, z: mz - 6.5 }, 180);
+    expect(await waitName(ore, 'coal_ore')).toBe(true);
+    let seenOnly = true;
+    const { mine: m4 } = createMinerFor({ skills: bot.skills, world: bot.world, loop: bot.loop, source: bot.conn, hotbar: bot.hotbar, containers: bot.containers, log: bot.logger }, { seenOnly: () => seenOnly });
+    const off = await m4.start({ block: 'coal_ore', count: 1 });
+    notes.push(`mineSeenOnly on: ${off}, targeted ${JSON.stringify(m4.stats.targeted)}, ore ${await blockName(ore)}`);
+    expect(off).toBe('none_left');
+    expect(m4.stats.targeted).toEqual([]);
+    expect(await blockName(ore)).toBe('coal_ore');
+    seenOnly = false;
+    const t0 = performance.now();
+    const on = await m4.start({ block: 'coal_ore', count: 1 });
+    const s = (performance.now() - t0) / 1000;
+    const i = await bot.truth.ok<TruthInv>('inv', [bot.name]);
+    notes.push(`mineSeenOnly off: ${on} after ${s.toFixed(1)} s, mined ${JSON.stringify(m4.stats.minedAt)}, ${m4.stats.tunnelled} blocks tunnelled (${m4.stats.sightDigs} sight digs), ore now ${await blockName(ore)}, coal ${i.counts['minecraft:coal'] ?? 0}`);
+    expect(on).toBe('done');
+    expect(m4.stats.minedAt).toEqual([ore]);
+    expect(await blockName(ore)).not.toBe('coal_ore');
+    expect(m4.stats.tunnelled).toBeGreaterThanOrEqual(3);
+  }, 300_000);
+
+  async function waitName(p: Vec3, name: string): Promise<boolean> {
+    return (await pollUntil(() => bot.world.blockAt(p)?.name === name, 5_000)) >= 0;
+  }
 });

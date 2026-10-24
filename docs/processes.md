@@ -111,6 +111,7 @@ its plan yet; `navRemaining` reads its `active` record read-only (an open issue 
 | `throwawayMin` | 16 | 0..2304 blocks | placeholder (Track S) |
 | `useBoneMeal` | on | on/off | placeholder (Track U) |
 | `mineTunnelLen` | 32 | 1..256 blocks | placeholder (mining) |
+| `mineSeenOnly` | false | boolean | mining: only ore the bot has seen an open face of; off (the owner's choice for their own Realm) lets `!mine` tunnel to any known ore (docs/mining.md) |
 
 `!set` lists every value (`settings: allowBreak off, ...`, split into lines of at most 240
 characters), `!set <key>` shows one (`guardRadius 16 (2..64 blocks, default 16): guard: fight hostiles

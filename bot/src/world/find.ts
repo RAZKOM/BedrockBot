@@ -220,3 +220,93 @@ export class BlockFinder {
     }
   }
 }
+
+// ---- Track Z: log clusters (remembered or loaded forests) for the gather task ------------------------
+
+/** A group of logs no farther than `link` blocks from each other (a forest, a grove, a lone tree). */
+export interface LogCluster {
+  /** Mean position of the logs (block corner coordinates). */
+  center: Vec3;
+  /** The logs, nearest to the search origin first. */
+  logs: FoundPos[];
+  /** Logs remembered by the world cache (unloaded columns). */
+  cached: number;
+  /** Distance from the search origin to the nearest log. */
+  distance: number;
+}
+
+/**
+ * Group logs into clusters (single link: two logs within `link` blocks of each other on every axis
+ * are in the same cluster), nearest to `origin` first. Grid-hashed: about linear in the logs.
+ */
+export function logClusters(logs: readonly FoundPos[], origin: Vec3, link = 6): LogCluster[] {
+  const parent = logs.map((_, i) => i);
+  const root = (i: number): number => {
+    let r = i;
+    while (parent[r] !== r) r = parent[r]!;
+    while (parent[i] !== r) {
+      const next = parent[i]!;
+      parent[i] = r;
+      i = next;
+    }
+    return r;
+  };
+  const cell = (v: number) => Math.floor(v / link);
+  const grid = new Map<string, number[]>();
+  logs.forEach((p, i) => {
+    const k = `${cell(p.x)},${cell(p.y)},${cell(p.z)}`;
+    const list = grid.get(k);
+    if (list) list.push(i);
+    else grid.set(k, [i]);
+  });
+  logs.forEach((p, i) => {
+    for (let dx = -1; dx <= 1; dx++)
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dz = -1; dz <= 1; dz++) {
+          for (const j of grid.get(`${cell(p.x) + dx},${cell(p.y) + dy},${cell(p.z) + dz}`) ?? []) {
+            if (j <= i) continue;
+            const q = logs[j]!;
+            if (Math.abs(q.x - p.x) <= link && Math.abs(q.y - p.y) <= link && Math.abs(q.z - p.z) <= link) parent[root(j)] = root(i);
+          }
+        }
+  });
+  const groups = new Map<number, FoundPos[]>();
+  logs.forEach((p, i) => {
+    const r = root(i);
+    const g = groups.get(r);
+    if (g) g.push(p);
+    else groups.set(r, [p]);
+  });
+  const dist = (p: Vec3) => Math.hypot(p.x + 0.5 - origin.x, p.y + 0.5 - origin.y, p.z + 0.5 - origin.z);
+  const out: LogCluster[] = [];
+  for (const g of groups.values()) {
+    const n = g.length;
+    const center = { x: g.reduce((a, p) => a + p.x, 0) / n, y: g.reduce((a, p) => a + p.y, 0) / n, z: g.reduce((a, p) => a + p.z, 0) / n };
+    const sorted = [...g].sort((a, b) => dist(a) - dist(b));
+    out.push({ center, logs: sorted, cached: g.filter((p) => p.cached).length, distance: dist(sorted[0]!) });
+  }
+  return out.sort((a, b) => a.distance - b.distance);
+}
+
+/**
+ * Log clusters within `radius` of `origin` from World.find: loaded logs and, with a world cache,
+ * remembered logs of unloaded columns (flagged `cached`). Logs for which `skip` is true (Track R's
+ * blacklist) are left out.
+ */
+export function findLogClusters(
+  world: { find(pred: (b: BlockInfo, p: Vec3) => boolean, opts: FindOptions & { cached?: boolean }): FoundPos[] },
+  origin: Vec3,
+  radius: number,
+  opts: { skip?: (p: Vec3) => boolean; link?: number; maxLogs?: number; maxBelow?: number; maxAbove?: number } = {},
+): LogCluster[] {
+  const logs = world.find((b) => classify(b.name) === 'log', { origin, radius, max: opts.maxLogs ?? 4096, class: 'log' });
+  const skip = opts.skip;
+  // a vertical window: logs deep below (ancient cities, mineshafts: measured at y -10 under a y 64 start) are no forest
+  const lo = origin.y - (opts.maxBelow ?? Infinity);
+  const hi = origin.y + (opts.maxAbove ?? Infinity);
+  return logClusters(
+    logs.filter((p) => p.y >= lo && p.y <= hi && !skip?.(p)),
+    origin,
+    opts.link ?? 6,
+  );
+}

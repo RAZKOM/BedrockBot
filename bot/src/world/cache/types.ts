@@ -24,6 +24,8 @@ export interface CachedMark {
   name: string;
   /** Some face of it touches air or water inside the same chunk (an ore the bot could have seen). */
   exposed: boolean;
+  /** Track Z: the bot saw an open face of it (ore memory, skills/mine/seen.ts); persisted, survives a restart. */
+  seen?: boolean;
 }
 
 /**
@@ -42,6 +44,12 @@ export interface CachedTerrain {
   has(cx: number, cz: number): boolean;
   /** Remembered marks of a cached chunk column (absolute positions), empty when none. */
   marks(cx: number, cz: number): readonly CachedMark[];
+  /** Track Z (ore memory): flag the mark at p (loaded or cached column) as seen when it is a `name` mark. False when there is none. */
+  markSeen?(p: Vec3, name: string): boolean;
+  /** Track Z (ore memory): seen marks within `radius` of `origin`, loaded and cached columns of the current dimension. */
+  seenMarks?(origin: Vec3, radius: number): CachedMark[];
+  /** Track Z (ore memory): marks of the LOADED columns within `radius` of `origin` (a cheap ore scan without visiting every block). */
+  loadedMarks?(origin: Vec3, radius: number): CachedMark[];
 }
 
 /** A position World.find returned from the cache instead of a loaded chunk. */

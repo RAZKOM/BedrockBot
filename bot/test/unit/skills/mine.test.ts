@@ -186,7 +186,7 @@ describe('MineTask', () => {
     r.load({ x: 1, y: 0, z: -3 }, 'lava');
     r.load({ x: 0, y: 1, z: 4 }, 'coal_ore'); // buried
     const h = harness(r);
-    const t = new MineTask(h.deps);
+    const t = new MineTask({ ...h.deps, seenOnly: () => true }); // Track Z: the legit rule is the `mineSeenOnly` option
     const end = await t.start({ block: 'coal', count: 10 });
     expect(end).toBe('none_left');
     expect(t.stats.mined).toBe(3);
@@ -286,5 +286,150 @@ describe('MineTask', () => {
     release?.();
     expect(await run).toBe('stopped');
     expect(h.calls.filter((c) => c === 'cancel')).toHaveLength(2);
+  });
+
+  // ---- Track Z ----
+
+  it('mineSeenOnly off: a buried ore is a target too, dug to through the rock', async () => {
+    const r = cave();
+    r.load({ x: 0, y: 1, z: 4 }, 'coal_ore'); // buried two blocks behind the south wall
+    const h = harness(r);
+    h.pos = { x: 0.5, y: 0, z: 1.5 };
+    const t = new MineTask({ ...h.deps, seenOnly: () => false });
+    expect(await t.start({ block: 'coal_ore', count: 1 })).toBe('done');
+    expect(t.stats.minedAt).toEqual([{ x: 0, y: 1, z: 4 }]);
+    expect(t.stats.sightDigs).toBeGreaterThanOrEqual(1);
+    // on: never
+    r.load({ x: 2, y: 1, z: 4 }, 'coal_ore');
+    const t2 = new MineTask({ ...harness(r).deps, seenOnly: () => true });
+    expect(await t2.start({ block: 'coal_ore', count: 1 })).toBe('none_left');
+  });
+
+  it('an ore whose plan makes no progress is skipped after ONE plan and blacklisted for the session', async () => {
+    const r = cave();
+    r.load({ x: 5, y: 1, z: -2 }, 'coal_ore'); // nearest: "unreachable"
+    r.load({ x: -7, y: 1, z: -2 }, 'coal_ore');
+    const h = harness(r);
+    const plans: string[] = [];
+    const bl = new Set<string>();
+    const deps: MineDeps = {
+      ...h.deps,
+      plan: (g) => {
+        const near = g.type === 'near' && Math.floor(g.p.x) === 5;
+        plans.push(near ? 'bad' : 'good');
+        // the navigator's "no progress possible": a partial plan that never leaves the start node
+        return near ? { status: 'partial', path: [{}] } : { status: 'found', path: [{}, {}] };
+      },
+      blacklist: { failBlock: (p) => (bl.add(key(p)), true), blocked: (p) => bl.has(key(p)), failures: 1 },
+    };
+    const t = new MineTask(deps);
+    expect(await t.start({ block: 'coal_ore', count: 1 })).toBe('done');
+    expect(t.stats.minedAt).toEqual([{ x: -7, y: 1, z: -2 }]);
+    expect(plans.filter((p) => p === 'bad')).toHaveLength(1);
+    expect(t.stats.unreachable).toEqual([{ x: 5, y: 1, z: -2 }]);
+    expect(bl.has('5,1,-2')).toBe(true);
+    expect(h.calls.filter((c) => c.startsWith('goto 5'))).toHaveLength(0);
+    // the next run of the session skips it without planning
+    plans.length = 0;
+    r.load({ x: -6, y: 1, z: -2 }, 'coal_ore');
+    expect(await t.start({ block: 'coal_ore', count: 1 })).toBe('done');
+    expect(plans).not.toContain('bad');
+  });
+
+  it('a goto that never got a segment going marks the ore unreachable at once', async () => {
+    const r = cave();
+    r.load({ x: 5, y: 1, z: -2 }, 'coal_ore');
+    const h = harness(r);
+    let gotos = 0;
+    h.deps.skills.goto = () => {
+      gotos++;
+      return Promise.resolve({ ok: false, reason: 'unreachable' });
+    };
+    h.deps.skills.status = () => ({ lastGoto: { actions: { dig: 0 }, segments: 0 } });
+    const t = new MineTask(h.deps);
+    expect(await t.start({ block: 'coal_ore', count: 1 })).toBe('none_left');
+    expect(gotos).toBe(1);
+    expect(t.stats.unreachable).toEqual([{ x: 5, y: 1, z: -2 }]);
+  });
+
+  it('pause() cancels the dig without counting a failure; resume() goes on', async () => {
+    const r = cave();
+    r.load({ x: 3, y: 1, z: -2 }, 'coal_ore');
+    const h = harness(r);
+    let first = true;
+    const dig0 = h.deps.skills.dig.bind(h.deps.skills);
+    let release: (() => void) | undefined;
+    h.deps.skills.dig = (p, o) => {
+      if (!first) return dig0(p, o);
+      first = false;
+      return new Promise((res) => (release = () => res({ ok: false, reason: 'interrupted' })));
+    };
+    const ticks: (() => void)[] = [];
+    h.deps.waitTicks = () => new Promise((res) => ticks.push(res));
+    const t = new MineTask(h.deps);
+    const run = t.start({ block: 'coal_ore', count: 1 });
+    await new Promise((r2) => setTimeout(r2, 5));
+    expect(t.state).toBe('dig');
+    t.pause();
+    expect(t.state).toBe('paused');
+    release?.();
+    await new Promise((r2) => setTimeout(r2, 5));
+    expect(t.stats.failures).toBe(0);
+    t.resume();
+    for (let i = 0; i < 20 && ticks.length; i++) {
+      ticks.shift()!();
+      await new Promise((r2) => setTimeout(r2, 1));
+    }
+    h.deps.waitTicks = () => Promise.resolve();
+    for (const f of ticks.splice(0)) f();
+    expect(await run).toBe('done');
+    expect(t.stats.failures).toBe(0);
+  });
+});
+
+describe('ore memory persisted in the world cache (Track Z)', () => {
+  it('records flag the cache mark; recall() brings them back in a new memory without seeing them', () => {
+    const r = cave();
+    r.load({ x: 2, y: 1, z: -2 }, 'coal_ore');
+    const marks = new Map<string, { x: number; y: number; z: number; name: string; exposed: boolean; seen?: boolean }>();
+    marks.set('2,1,-2', { x: 2, y: 1, z: -2, name: 'coal_ore', exposed: true });
+    const cache = {
+      markSeen: (p: Vec3, name: string) => {
+        const m = marks.get(key(p));
+        if (m?.name !== name) return false;
+        m.seen = true;
+        return true;
+      },
+      seenMarks: () => [...marks.values()].filter((m) => m.seen),
+      loadedMarks: () => [...marks.values()],
+    };
+    const world = Object.assign(r, { cache });
+    const m1 = new OreMemory(world);
+    m1.scan({ x: 0, y: 1, z: 0 }, 32);
+    expect(m1.persisted).toBe(1);
+    expect(marks.get('2,1,-2')?.seen).toBe(true);
+    // "restart": a new memory, the ore now buried (the opening walled up) - it is still remembered
+    r.fill({ x: 2, y: 1, z: -1 }, { x: 2, y: 1, z: -1 }, 'stone');
+    const m2 = new OreMemory(world);
+    expect(m2.recall({ x: 0, y: 1, z: 0 }, 64)).toBe(1);
+    expect(m2.targets(new Set(['coal_ore']), { x: 0, y: 1, z: 0 }, { seenOnly: true }).map((o) => o.how)).toEqual(['cache']);
+  });
+
+  it('scanMarks records exposed marks of loaded columns only', () => {
+    const r = cave();
+    r.load({ x: 2, y: 1, z: -2 }, 'coal_ore');
+    r.load({ x: 2, y: 1, z: -5 }, 'coal_ore'); // buried
+    const cache = {
+      markSeen: () => true,
+      loadedMarks: () => [
+        { x: 2, y: 1, z: -2, name: 'coal_ore', exposed: true },
+        { x: 2, y: 1, z: -5, name: 'coal_ore', exposed: false },
+      ],
+    };
+    const m = new OreMemory(Object.assign(r, { cache }));
+    expect(m.scanMarks({ x: 0, y: 1, z: 0 }, 24)).toBe(1);
+    expect(m.has({ x: 2, y: 1, z: -2 })).toBe(true);
+    expect(m.has({ x: 2, y: 1, z: -5 })).toBe(false);
+    expect(new OreMemory(cave()).scanMarks({ x: 0, y: 1, z: 0 }, 24)).toBe(-1);
   });
 });

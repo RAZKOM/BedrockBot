@@ -323,7 +323,7 @@ export const afkTask: TaskDefinition = {
       registerSettingsCommands,
       registerAfkGather,
       // other tracks: one entry each below this line
-      () => registerFarmCommands({ chat: ctx.chat, conn: ctx.conn, mob, stopOthers: () => void pve?.stop(), alive: () => !respawn.dead, logger: (s) => ctx.logger(s) }), // Track U
+      (d) => registerFarmCommands({ chat: d.chat, conn: d.conn, mob, processes: d.processes, hotbar: pve?.hotbar, containers, gather: d.task.gather?.task, alive: () => !respawn.dead, logger: (s) => ctx.logger(s), useBoneMeal: () => d.settings.get('useBoneMeal'), mineTunnelLen: () => d.settings.get('mineTunnelLen'), mineSeenOnly: () => d.settings.get('mineSeenOnly') }), // Track Z (was Track U): processes, shared Hotbar/Containers, settings, cached forests for !gather
       () => registerNavCommands({ ctx, task, mob, pve, respawn }), // Track R
       (d) => registerSurvivalCommands({ chat: d.chat, source: d.conn, mob, pve, task, containers, inactive: () => respawn.dead || ctx.conn.state !== 'spawned', logger: ctx.logger('survival') }), // Track S
       (d) => void registerNlCommands(d, ctx.values), // Track Y

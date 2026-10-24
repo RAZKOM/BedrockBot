@@ -57,7 +57,30 @@ torches ...). Layer 0 only, as the planner reads it.
 
 **Record** (little endian, then raw deflate level 6): `u8 version, i32 cx, i32 cz, f64 updatedAt,
 i16 y0, u16 rows, i16 top[256], i16 roof[256], u8 cells[rows * 64], u16 nameCount, (u8 len, utf8)...,
-u32 markCount, (u32 key = yRel << 8 | z << 4 | x, u8 nameIndex, u8 flags)...` with keys ascending.
+u32 markCount, (u32 key = yRel << 8 | z << 4 | x, u8 nameIndex, u8 flags)...` with keys ascending;
+flags bit 0 = exposed, bit 1 = seen (Track Z, next section).
+
+### Seen marks (Track Z: ore memory, decision 0021)
+
+The miner's OreMemory ([mining.md](mining.md) "Ore memory across restarts") persists its records as
+a flag on the marks: **bit 1 of a mark's flags byte = seen** (the bot saw an open face of that block).
+Readers that only know bit 0 ignore it, so the record version stays 1 and old files load unchanged.
+
+| Call | What |
+|---|---|
+| `markSeen(p, name)` | flag the mark at p when it is a `name` mark (live summary: marked dirty, written with the next flush; cached summary: re-encoded into its region). False when there is no such mark |
+| `seenMarks(origin, r)` | seen marks within r, live columns first-hand, others from the cache (decoded) |
+| `loadedMarks(origin, r)` | every mark of the loaded columns within r (the passive ore scan: no block-by-block visit) |
+
+Life of a flag: a block update that keeps the block keeps it (`setMark` of the same name); another
+block there removes the mark and the flag with it (mined or replaced ore forgets itself); a section
+re-send keeps the flags of the previous live summary; a column that **loads** takes the flags of its
+remembered record: from the decoded summary when there is one, else `decodeSeenMarks(record)` (inflate
+and read only the name table and marks, no summary built). `stats.seenCarried` / `seenCarryMs`.
+
+Measured: `decodeSeenMarks` over the stored records of a natural-terrain run (bds-cache, cache-gather:
+2 013 chunks) costs 0.021 ms per chunk, so a login of 369 columns pays under 10 ms for the carry. The
+summaries' checksums include the flags byte (a flagged mark changes the chunk checksum).
 
 **Region file** `r.<rx>.<rz>.bin` (32 x 32 chunks, `rx = cx >> 5`): `"BBWC", u8 version 1, u8 0,
 u16 count, (u8 lx, u8 lz, u32 length, record)...`. Overworld files sit directly in
@@ -159,9 +182,44 @@ lookup that reads loaded blocks, then marks, then stand-ins; leaves and soil are
 cache, so it accepts bare log columns (`minLeaves` 0, `requireSoil` false) and every result is
 `partial: true, cached: true`: a candidate to walk to; the loaded chunk decides.
 `BotSkills.findTrees` (skills/index.ts, not this track's) still only returns trees it can verify on
-loaded blocks; to let the gather task walk to a remembered forest it would append
-`findCachedTrees(...)` when no loaded tree is in range (3 lines in `findTrees`, or a fallback in the
-gather task's search).
+loaded blocks; the gather task walks to remembered forests through its own fallback (next section).
+
+### Remembered forests (Track Z, decision 0021)
+
+`findLogClusters(world, origin, radius, { skip })` (world/find.ts) groups the logs `World.find`
+returns (loaded ones and the cache's marks of unloaded columns, flagged `cached`) into clusters:
+single link, two logs within 6 blocks on every axis, grid-hashed, nearest cluster first, with the
+logs for which `skip` is true (Track R's blacklist) left out and, for the gather task, only logs from
+24 below to 48 above the bot (`FOREST_MAX_BELOW` / `FOREST_MAX_ABOVE`: the first e2e run on seed 7
+walked to log clusters at y -10 to -14 under a y 64 start, an underground structure, and found them
+unreachable one after the other).
+
+`GatherWoodTask` (tasks/gatherWood.ts) gets a `ForestFinder` (`useForests(cachedForests(world,
+nav.blacklist))`; the afk task's `!gather` through the Track Z registration line, `--task gather`
+in its own factory). When find-tree finds no tree within the search radius (48):
+
+1. the cluster the last forest walk went to yielded nothing: its logs go on the blacklist;
+2. the nearest cluster within `forestRadius` (256) is walked to with an `any` goal (`near` r 4 on its
+   8 nearest logs; timeout 1 200 ticks + 20 per block): `gather: no tree within 48 blocks; walking
+   to a forest of 23 logs (0 remembered) at 120 64 -40, 72 blocks away`;
+3. arrived: the search origin moves to the cluster's centre and find-tree runs again; the cluster
+   counts as productive once a log is broken there. Unreachable: blacklisted at once. Interrupted
+   (pre-empted): not counted, walked again after the resume. At most `maxForestWalks` (8) per run;
+   no cluster at all: the old no-tree rounds and failure.
+
+`stats.forestWalks`, `stats.forestsBlacklisted`.
+
+Measured (`cache-gather`, bds-cache seed 7): seed 7 has trees almost everywhere (nearest natural log
+from 41 random starts: 3 to 71 blocks, median 7), so the suite plants its forest 100 blocks away or
+closer (at least 52, beyond the 48-block search) when natural logs are nearer, keeping it the nearest
+cluster. Run with the forest 68 blocks away: after the restart the CLI's `!gather 8` logged `no tree
+within 48 blocks; walking to a forest of 25 logs (0 remembered) at -1773 65 -1778, 65 blocks away`,
+arrived, felled 2 trees and was done with 10 logs 54.5 s after the command (truth:inv), 5.3 blocks
+from the forest. (At 52 to 100 blocks the forest is still in the loaded view distance of 10 chunks:
+`remembered` counts the cache's marks of unloaded columns and is 0 here; unit tests cover cached ones.)
+Two earlier runs found the planted trees on stone / sand ground: `findTrees` needs soil under a
+trunk, so the walk ended with `no tree found there` and the cluster was blacklisted (the suite now
+sets grass under each trunk).
 
 ## Debug map
 
@@ -211,6 +269,9 @@ terraces. The suite now tries up to 14 areas and skips plans that climb more tha
 | `test/unit/cache/map.test.ts` | `/map.json` against the schema with every field, incremental tiles, no world / no cache, bad shapes rejected, query and waypoint parsing, `/map` and `/map.json` through `HealthServer` |
 | `test/e2e/cache-world.test.ts` | a 200 x 200 loop of teleport hops: column unloads, region files, a fresh process (`cli.ts checksum`) reads identical checksums; trees planted, the bot leaves, a new bot with the same cache directory far away finds them (`World.find` flagged, `findCachedTrees`) |
 | `test/e2e/cache-nav.test.ts` | a goto 300 blocks into remembered, unloaded terrain: first plan > 250 nodes before any new column, arrival, 0 ticks in unloaded columns |
+| `test/unit/cache/world-cache.test.ts` (Track Z) | seen flags: set, kept through same-block updates, dropped with the block, on disk (bit 1), carried onto a reloaded column by a new process, read by a fresh reader; `logClusters` / `findLogClusters` |
+| `test/e2e/cache-gather.test.ts` (Track Z) | a forest planted and seen by run 1; after the restart a new CLI process at a treeless start (`!gather 8`) walks to it and gathers 8 logs; the cost of `decodeSeenMarks` per stored chunk |
+| `test/e2e/mine-memory.test.ts` (Track Z, bds-dig) | seen ore persisted by run 1 and mined from memory by a new CLI process ([mining.md](mining.md)) |
 | `test/e2e/cache-map.test.ts` | the CLI with `--health-port 953x`: `/map.json` validates, incremental polling, `/map` serves the page, region files written on a graceful exit |
 
 ```sh
