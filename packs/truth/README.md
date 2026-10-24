@@ -272,3 +272,21 @@ World layer should instead send `/scriptevent` as an operator command and reuse 
 | `crops` | `x y z w d` | `{w, d, soil[], crop[], growth[], soilCounts, cropCounts}`: per cell (x fastest, then z) the block at y and the crop at y + 1 (`null` / -1 when air) |
 
 Details and exact arguments: docs/farming.md.
+
+### Combat commands (src/combat.ts, wave 7 Track V)
+
+| Command | Args | `data` on success |
+|---|---|---|
+| `combatlog` | `[sinceTick] [player\|*]` | `{ now, events: [{ tick, kind: hit\|trigger\|explosion\|projectile, player, entityId, typeId, item, selectedSlot, eventId, distance, location, players }] }`: melee hits by players with the held item, creeper behaviour triggers with the nearest player's distance, explosions with the players within 16 blocks, projectiles hitting a player |
+| `held` | `player` | the player's selected slot and item |
+
+### Food commands (src/food.ts, PLAN.md task 7.16)
+
+| Command | Args | `data` on success |
+|---|---|---|
+| `furnace` | `x y z` | `{ x, y, z, typeId, lit, size, slots: [{slot, typeId, amount} \| null] }` (furnace, smoker, blast furnace) |
+| `setfurnace` | `x y z slot typeId\|air [n]` | the same after setting one slot |
+| `herd` | `x y z r [tag]` | `{ mobs: [{ entityId, typeId, baby, location, tags }] }`: food mobs within r |
+| `pen` | `x y z w d` | `{ from, to, gate }`: oak fence rim of the w x d box, air inside, a closed gate in the middle of the north side |
+
+Details: docs/pve.md ("Keeping the bot alive") and docs/food.md.
