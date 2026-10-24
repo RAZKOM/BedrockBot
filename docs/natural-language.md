@@ -121,8 +121,12 @@ inventory summary from `!inv`, settings with values) and six worked examples. Us
 
 ## Ollama request and response
 
-From the Ollama API documentation (`POST /api/chat`, "Structured outputs"); **unverified live** (no
-Ollama on the development machine; the unit tests check the parsing against these recorded shapes).
+From the Ollama API documentation (`POST /api/chat`, "Structured outputs"). **Verified live on 2026-10-29**
+against the Ollama app on the owner's Mac (Apple M4, 16 GB) with `huihui_ai/qwen3-abliterated:8b`: four phrasings
+through `scripts/nl-try.ts` gave the expected plans (`walk home then guard` -> goto home, guard on; `come here and
+then follow me` -> come, follow; `get me 32 logs` -> gather 32; `go to the thing` -> a question). Latency 5.7 to
+7.9 s per request once the model is loaded, 23 s for the first call that loads it. The unit tests check the
+parsing against the recorded shapes.
 
 ```jsonc
 // POST http://127.0.0.1:11434/api/chat
