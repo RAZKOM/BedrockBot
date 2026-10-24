@@ -1,0 +1,33 @@
+# BDS for the survival-kit e2e tests (PLAN.md task 7.11; docs/survival.md): eating, armour, tool wear,
+# inventory keeping, mob / spawner avoidance. Same settings as compose.pve.yml (difficulty NORMAL, the
+# Realm's: hunger and mob damage matter), own project name, container bds-surv on udp/19182, data in
+# docker/data/surv. The tests switch natural spawning off and summon mobs explicitly.
+#   node scripts/bds.mjs --profile surv up
+#   node scripts/bds.mjs --profile surv pack          # truth pack (needed by the surv-* e2e tests)
+name: bedrockbot-surv
+
+services:
+  bds-surv:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-surv
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: "${BDS_SURV_DIFFICULTY:-normal}"
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: surv
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-surv
+      SERVER_PORT: "19182"
+      TICK_DISTANCE: "10"
+    ports:
+      - "19182:19182/udp"
+    volumes:
+      - ./data/surv:/data
+    stdin_open: true
+    tty: true

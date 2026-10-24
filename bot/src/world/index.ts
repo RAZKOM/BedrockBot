@@ -176,6 +176,8 @@ export class World implements WorldView {
     };
     if (i.has_stack_id && i.stack_id !== undefined) stack.stackId = i.stack_id;
     if (i.block_runtime_id) stack.blockRuntimeId = i.block_runtime_id;
+    const damage = (i as { extra?: { nbt?: { nbt?: { value?: { Damage?: { value?: unknown } } } } } }).extra?.nbt?.nbt?.value?.Damage?.value; // Track S: tool / armour wear
+    if (typeof damage === 'number') stack.damage = damage;
     return stack;
   }
 

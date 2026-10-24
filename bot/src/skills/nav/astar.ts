@@ -68,6 +68,8 @@ export interface PathOptions {
   protectedBlocks?: BreakRules['protectedBlocks'];
   /** Cells (cellKey) not to break (a dig there failed). */
   noBreak?: ReadonlySet<number>;
+  /** Track S: extra ticks (>= 0) for a move that ends in feet cell (x, y, z): mob / spawner avoidance (nav/avoidance.ts). */
+  cellCost?: (x: number, y: number, z: number) => number;
 }
 
 export interface PathResult {
@@ -379,6 +381,7 @@ export class PathSearch {
     if (i !== undefined && nodes.closed[i]) return;
     let cost = base * grid.factor(x, y, z, feet) + extra + trap;
     if (this.costs.underground > 0 && grid.underground(x, z, feet)) cost += this.costs.underground;
+    if (this.opts.cellCost) cost += this.opts.cellCost(x, y, z); // Track S: avoidance
     const g = nodes.g[from]! + cost;
     if (i === undefined) {
       i = nodes.add(x, y, z, feet);

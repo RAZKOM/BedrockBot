@@ -54,6 +54,8 @@ export interface ItemStack {
   metadata: number;
   stackId?: number;
   blockRuntimeId?: number;
+  /** Track S: durability used up (the item NBT's `Damage`), when the item has one. */
+  damage?: number;
 }
 
 export interface ContainerView {

@@ -11,6 +11,7 @@ import type { SkillResult } from '../skills/types.ts';
 import { NightSafety } from './night.ts';
 import type { Vec3 } from '../connection/types.ts';
 import { registerPveCommands } from '../chat/commands-pve.ts';
+import { registerSurvivalCommands } from '../chat/commands-survival.ts'; // Track S
 import { PveController, pveOptionsFrom, refusedKillType } from './pve.ts';
 
 const TASKS = new Map<string, TaskDefinition>();
@@ -210,6 +211,7 @@ export const afkTask: TaskDefinition = {
           }
         : undefined,
     );
+    registerSurvivalCommands({ chat: ctx.chat, source: ctx.conn, mob, pve: p, task, inactive: () => respawn.dead || ctx.conn.state !== 'spawned', logger: ctx.logger('survival') }); // Track S
     return task;
   },
 };

@@ -28,6 +28,8 @@ export interface FollowerOptions {
   stopAtEnd?: boolean;
   /** Shared across the followers of one goto (re-plans), so no double tap slips through a re-plan. */
   guard?: PressGuard;
+  /** Track S: the plan's extra cost per cell (avoidance): straight-line shortcuts never cross cells costing more. */
+  cellCost?: ((x: number, y: number, z: number) => number) | undefined;
 }
 
 /**
@@ -114,6 +116,7 @@ export class PathFollower {
   private yaw: number | undefined;
   /** suffix[i]: path length from node i to the end. */
   private readonly suffix: number[];
+  private readonly cellCost: FollowerOptions['cellCost']; // Track S
 
   constructor(path: readonly PathNode[], grid: NavGrid, opts: FollowerOptions = {}) {
     if (path.length === 0) throw new Error('empty path');
@@ -124,6 +127,7 @@ export class PathFollower {
     this.arrive = opts.arriveRadius ?? 0.3;
     this.stopAtEnd = opts.stopAtEnd ?? true;
     this.pressGuard = opts.guard ?? new PressGuard();
+    this.cellCost = opts.cellCost; // Track S
     this.index = path.length > 1 ? 1 : 0;
     this.suffix = new Array<number>(path.length).fill(0);
     for (let i = path.length - 2; i >= 0; i--) {
@@ -269,8 +273,17 @@ export class PathFollower {
         const f = this.grid.stand(Math.floor(sx + ox), n.y, Math.floor(sz + oz));
         if (f === undefined || Number.isNaN(f) || Math.abs(f - feet) > 1e-6) return false;
       }
+      // Track S: no shortcut through cells the planner penalised more than the nodes it skips (avoidance)
+      if (this.cellCost && this.cellCost(Math.floor(sx), n.y, Math.floor(sz)) > this.skippedCost(j) + 1e-9) return false;
     }
     return true;
+  }
+
+  /** Track S: the highest extra cost among the path nodes from the current one to j. */
+  private skippedCost(j: number): number {
+    let m = 0;
+    for (let k = Math.max(0, this.index - 1); k <= j; k++) m = Math.max(m, this.cellCost!(this.path[k]!.x, this.path[k]!.y, this.path[k]!.z));
+    return m;
   }
 
   /** Straight-ish walkable distance ahead before a jump, a drop or the end of the path. */
