@@ -1,0 +1,32 @@
+# BDS for the food-gathering e2e tests (PLAN.md Phase 7 task 7.16, Track X; docs/food.md). Same
+# settings as compose.pve.yml (offline, RakNet, flat, operator, TICK_DISTANCE 10) but on difficulty
+# EASY (passive mobs behave normally, hostiles stay rare), own name, port and data dir:
+#   node scripts/bds.mjs --profile food up
+#   node scripts/bds.mjs --profile food pack          # truth pack (needed by the food-* e2e tests)
+name: bedrockbot-food
+
+services:
+  bds-food:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-food
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: easy
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: food
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-food
+      SERVER_PORT: "19190"
+      TICK_DISTANCE: "10"
+    ports:
+      - "19190:19190/udp"
+    volumes:
+      - ./data/food:/data
+    stdin_open: true
+    tty: true

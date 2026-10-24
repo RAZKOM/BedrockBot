@@ -27,6 +27,7 @@
 //   core   bds-core   docker/compose.core.yml           BDS 1.26.60.6, RakNet    udp/19180 (core-* e2e: process manager, settings; difficulty normal)
 //   cache  bds-cache  docker/compose.cache.yml          BDS 1.26.60.6, RakNet    udp/19184 (cache-* e2e: world cache, debug map; DEFAULT world, seed 7)
 //   farm   bds-farm   docker/compose.farm.yml           BDS 1.26.60.6, RakNet    udp/19186 (farm-*, mine-* e2e; Track U)
+//   food   bds-food   docker/compose.food.yml           BDS 1.26.60.6, RakNet    udp/19190 (food-* e2e; difficulty easy; Track X)
 // Any other BDS_CONTAINER value works for restart/idle/cmd/logs only.
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -49,6 +50,7 @@ const PROFILES = {
   core: { container: 'bds-core', compose: 'compose.core.yml', data: 'core', port: 'udp/19180' }, // Track Q: process manager, settings (difficulty normal)
   cache: { container: 'bds-cache', compose: 'compose.cache.yml', data: 'cache', port: 'udp/19184' },
   farm: { container: 'bds-farm', compose: 'compose.farm.yml', data: 'farm', port: 'udp/19186' }, // Track U
+  food: { container: 'bds-food', compose: 'compose.food.yml', data: 'food', port: 'udp/19190' }, // Track X
 }
 const argv = process.argv.slice(2)
 const profileFlag = argv.indexOf('--profile')
