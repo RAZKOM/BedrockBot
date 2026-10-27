@@ -128,22 +128,35 @@ describe('PveController guard', () => {
 });
 
 describe('PveController flee and night', () => {
-  it('runs to the shelter when the health is low and a hostile is near', () => {
+  it('runs away first, then to the shelter once 12 clear and the zombie is not between (flee v2)', () => {
     const s = setup({ home: { x: 0, y: -60, z: 0 }, shelter: { x: -12, y: -60, z: 0 } });
     s.ents.set(7n, mob(7n, 'minecraft:zombie', { x: 0, y: -60, z: 6 }));
     s.src.emit('set_health', { health: 5 });
     s.loop.step(5);
     expect(s.pve.behaviour()).toBe('fleeing');
+    const g = s.mover.gotos.at(-1)!;
+    expect(g).toMatchObject({ goal: { type: 'runAway', r: 16 }, sprint: true });
+    expect((g.goal as unknown as { from: () => Vec3[] }).from()).toEqual([{ x: 0, y: -60, z: 6 }]);
+    // 12 clear: the zombie is behind (+z), the shelter west: home leg
+    s.loop.pos = { x: -3, y: -60, z: -8 };
+    s.loop.step(5);
     expect(s.mover.gotos.at(-1)).toEqual({ goal: { type: 'block', p: { x: -12, y: -60, z: 0 } }, sprint: true });
   });
 
-  it('with no shelter or home it runs 12 blocks away from the hostile', () => {
+  it('with no shelter or home it runs away from the hostile, on up to 40 blocks', () => {
     const s = setup({ guard: false });
     s.ents.set(7n, mob(7n, 'minecraft:creeper', { x: 0, y: -60, z: 3 }));
     s.src.emit('set_health', { health: 4 });
     s.loop.step(5);
+    expect(s.loop.cmd).toMatchObject({ forward: 1, sprint: true }); // within 4: sprinting away by hand first (10 ticks)
+    s.loop.step(15);
     expect(s.pve.behaviour()).toBe('fleeing');
-    expect(s.mover.gotos.at(-1)!.goal).toMatchObject({ type: 'near', p: { x: 0.5, z: -11.5 }, r: 2 });
+    expect(s.mover.gotos.at(-1)!.goal).toMatchObject({ type: 'runAway', r: 16 }); // 12 clear first (a longer leg so it does not stop at 12)
+    s.loop.pos = { x: 0.5, y: -60, z: -10 };
+    s.loop.step(5);
+    const far = s.mover.gotos.at(-1)!.goal as unknown as { type: string; r: number };
+    expect(far.type).toBe('runAway');
+    expect(far.r).toBeCloseTo(19, 1); // nearest (13) + 6, up to 40
   });
 
   it('does not flee while night safety is already walking to the shelter', () => {
@@ -216,7 +229,7 @@ describe('chat commands', () => {
   it('without walking every command says so', () => {
     const c = fakeChat();
     registerPveCommands(c.chat, undefined);
-    expect([...c.defs.keys()].sort()).toEqual(['come', 'follow', 'guard', 'kill', 'stop']);
+    expect([...c.defs.keys()].sort()).toEqual(['come', 'follow', 'guard', 'kill', 'sleep', 'stop']);
     expect(c.run('follow', ['Steve'])[0]).toBe('follow needs a task that can walk (start with --walk, --home or --target realm)');
   });
 

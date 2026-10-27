@@ -1,0 +1,34 @@
+# BDS for the survival-policy e2e tests (wave 7, Track W: flee v2, trip readiness, sleeping;
+# docs/pve.md "Flee" / "Trip readiness", docs/survival.md "Sleep"). Same settings as compose.pve.yml
+# (flat, difficulty NORMAL, TICK_DISTANCE 10) with its own project name, container bds-gaunt on
+# udp/19188, data in docker/data/gaunt. The gaunt-* suites summon their mobs explicitly.
+#   node scripts/bds.mjs --profile gaunt up
+#   node scripts/bds.mjs --profile gaunt pack        # truth pack (needed by the gaunt-* e2e tests)
+#   node scripts/bds.mjs --profile gaunt cmd summon zombie 10 -60 10
+name: bedrockbot-gaunt
+
+services:
+  bds-gaunt:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-gaunt
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: "${BDS_GAUNT_DIFFICULTY:-normal}"
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: gaunt
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-gaunt
+      SERVER_PORT: "19188"
+      TICK_DISTANCE: "10"
+    ports:
+      - "19188:19188/udp"
+    volumes:
+      - ./data/gaunt:/data
+    stdin_open: true
+    tty: true

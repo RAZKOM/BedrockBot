@@ -186,8 +186,12 @@ describe('afk processes', () => {
     s.src.emit('set_health', { health: 5 });
     s.loop.step(1);
     expect(s.pve.behaviour()).toBe('fleeing');
-    expect(s.mover.gotos.at(-1)).toEqual({ goal: { type: 'block', p: { x: -12, y: -60, z: 0 } }, sprint: true });
+    // flee v2 (Track W): away from the zombie first, then the shelter once 12 clear and not behind it
+    expect(s.mover.gotos.at(-1)).toMatchObject({ goal: { type: 'runAway', r: 16 }, sprint: true });
     expect(s.pve.combat.busy).toBe(false);
+    s.loop.pos = { x: -2, y: -60, z: -6 };
+    s.loop.step(5);
+    expect(s.mover.gotos.at(-1)).toEqual({ goal: { type: 'block', p: { x: -12, y: -60, z: 0 } }, sprint: true });
     s.mover.finish({ ok: true });
     await tick();
     s.loop.pos = { x: -11.5, y: -60, z: 0.5 };

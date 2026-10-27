@@ -19,7 +19,13 @@ target); without walking every command answers `<cmd> needs a task that can walk
 | `bot/src/skills/combat/combat.ts` | `CombatController`: `fight(runtimeId, opts)`, `attack(runtimeId)`, `selectWeapon()`, the attack packet builders |
 | `bot/src/skills/follow/follow.ts` | `FollowController`: `follow({ runtimeId } \| { playerName })`, `come(playerName)`, `stop()` |
 | `bot/src/tasks/pve.ts` | `PveController`: guard, flee, follow, come, kill, a resumable goto, behaviour line, options |
-| `bot/src/chat/commands-pve.ts` | `!follow` `!come` `!stop` `!guard` `!kill` |
+| `bot/src/chat/commands-pve.ts` | `!follow` `!come` `!stop` `!guard` `!kill` (with `now`), `!sleep`; wires the survival kit, the sleep controller and the night yield (Track W) |
+| `bot/src/tasks/process/readiness.ts` | trip readiness (Track W): `needsPrep`, `longTrip`, `hasChestplate`, `checkTrip`, `splitNow`, `prepareTrip` |
+| `bot/src/tasks/process/locator.ts` | `PlayerLocator`: far players from `player_list` + `player_location` / `locator_bar` (Track W) |
+| `packs/truth/src/gaunt.ts` | truth commands `bed`, `sleeping` (Track W) |
+| `docker/compose.gaunt.yml` | `bds-gaunt`, udp/19188, flat, difficulty normal (Track W) |
+| `bot/test/unit/flee-readiness.test.ts`, `night-bed.test.ts`, `skills/sleep.test.ts` | unit tests (Track W) |
+| `bot/test/e2e/gaunt-{come,flee,trip,sleep}.test.ts`, `gaunt-truth.ts` | e2e on bds-gaunt (Track W) |
 | `bot/src/tasks/registry.ts` | the afk task builds a `PveController` with its movement stack (see "Shared files") |
 | `packs/truth/src/pve.ts` | truth commands `summon`, `mobs`, `near`, `entity`, `killmobs`, `clearmobs`, `sethealth`, `movemob`, `effect`, `hurtlog` (packs/truth/README.md) |
 | `docker/compose.pve.yml` | `bds-pve`, udp/19144, flat, difficulty normal |
@@ -39,8 +45,8 @@ Config file (`tasks.afk`): `"tasks": { "afk": { "guard": 16, "fleeHealth": 8 } }
 
 | Command (owner only) | Effect |
 |---|---|
-| `!follow [name]` | follow the player (default: the sender) until `!stop` |
-| `!come [name]` | one walk to within 2 blocks of the player's current position |
+| `!follow [name] [now]` | follow the player (default: the sender) until `!stop` (trip readiness at the start) |
+| `!come [name] [now]` | one walk to within 2 blocks of the player's current position (beyond the entity range: to the locator bar position first); trip readiness |
 | `!stop` | cancel follow / come / kill / a fight / a goto; guard stays as set |
 | `!guard [status]`, `on`, `off`, `<radius>` | guard mode (default radius 16) |
 | `!kill <type> [n]` | kill up to n (1..64, default 1) mobs of that type within 32 blocks, nearest first, picking up drops after each; players refused |
@@ -64,11 +70,11 @@ the bot when no home is set or while following) and at most radius + 16 from the
 blocks of height. Priority: the mob that hit us, then mobs targeting us, then the nearest. A target
 that ends `unreachable`, `timeout` or `out_of_range` is ignored for 30 s (10 s for out of range).
 
-**Flee** (`fleeHealth`, default 8): health below it with a hostile alive within 16 blocks: sprint to
-the shelter if one is set, else home; with neither, or already there, 12 blocks straight away from
-the nearest hostile. After arriving, 10 s before another flight. While the health stays low, guard
-only defends in place (hostiles within reach, no walking). The bot does not face the attacker while
-running (the navigator owns the yaw).
+**Flee** (v2 since wave 7, see "Flee v2" below): health below `fleeHealth` (default 8) with a hostile
+within 16, or a creeper within 6 with health below 10: run away first, home only when the threat is
+not between, eat when 8 clear, keep away until the health is back to fleeHealth + 6. While the health
+stays low, guard only defends in place (hostiles within reach, no walking). The bot does not face the
+attacker while running (the navigator owns the yaw).
 
 **Night shelter cooperation.** While night safety wants the shelter (dusk to dawn, a shelter set):
 inside it guard only defends in place; on the way there neither guard nor flee interrupts (that
@@ -96,7 +102,64 @@ teleport followed by leaving view within 2 s, to where it was before the jump) a
 resume when it is tracked again. Players are found by the `add_player` username (case-insensitive,
 `§` codes stripped).
 
+## Flee v2 (wave 7, Track W)
+
+Decision record: [decisions/0018-survival-policy.md](decisions/0018-survival-policy.md). Why: on the
+Realm the flight ran home through the mobs, and a bot at 8 health went straight back into the fight.
+
+| Rule | Value |
+|---|---|
+| Triggers | health below `fleeHealth` (8) with a hostile (`isThreat`) within 16; or a creeper within 6 with health below 10, whatever `fleeHealth` says; not while night safety walks to the shelter; at the shelter / home only for a threat within 6 |
+| Duel instead | one melee mob alone within 16 (no archer, no creeper) and health for 3 more of its hits (the last hit taken within a minute, else 3): no low-health or recovery flight; guard fights it (in place below `fleeHealth`). Not when guard is off, when guard ignores that mob (a failed fight), or when the bot lost 4 or more health in the last 6 s (losing: a run had a zombie hit it 10 times in 10 s while the duel rule waited). A zombie chases as fast as the bot runs: one gauntlet run fled 60 s over 260 blocks with a zombie on its heels the whole way and was hit 8 times on the way |
+| Start | a threat within 4: 10 ticks of sprinting straight away by hand before the first plan (a zombie hits once a second; a zombie with a sword, 5.2 through iron armour, killed the bot in 2 hits while the first plan started) |
+| Leg 1, `away` | `runAway` from every threat within 24 (`from` is a function: the navigator re-checks it at the path's end), goal radius 16, until the nearest threat is 12 away |
+| Leg 2, `home` | the shelter, else home, when every threat within 24 is more than 60 degrees off the home bearing or farther than home (`homeClear`); also when there is no farther place (the last `far` leg was unreachable: an enclosed area; the planner's mob avoidance takes the way around), when 40 blocks were run, or when the danger is over and no command waits |
+| Leg 2, `far` | home blocked or none: `runAway` to nearest + 6 (at least 16, at most 40) |
+| Re-planning | checked every 2 s; a running leg is kept unless the nearest threat gained on the bot (every new goto stops the body briefly) |
+| No plan | a leg that cannot start or finds no way (typically: knocked into the air, `no standable node`) with a threat within 8: 15 ticks of sprinting straight away by hand (yaw away from the threats, weighted by 1/d²), then plan again; without a threat near: 1 s standing |
+| Eating | (health below 10, or recovering with food below 18: natural regeneration needs 18, and a run showed the bot stuck at 12 health for minutes because every kit bite after a flight was cut off by the next guard fight) and every hostile 8 or more away: the kit's `eat()` (one bite at a time); the kit's own automatic eating is held for the flight and restored after |
+| Ends | arrived (10 s before another flight); 2 s out of danger when there is no home to go to or a command waits; cornered (the 4th no-plan in a row with a threat within 4: guard defends in place; 3 s); 60 s |
+| Hysteresis | after a flight, for up to 1 min, a melee hostile within 12 starts a flight again (not a fight) until the health is back to `fleeHealth` + 6 (14); no cooldown after a safe end while recovering. Ranged mobs (skeleton, stray, bogged, pillager, blaze, witch, ghast, drowned, evoker) never start a recovery flight: running from an archer in a line only gives it targets (the first gauntlet runs lost 20 health to two skeletons that way) |
+
+Status: `fleeing away (12)`, `fleeing away (up to 40)`, `fleeing to home 10 -60 3, 12 blocks left`;
+log lines `flee: health 7.5 < 8 with zombie at 1.9; running away, then to home ... when clear`,
+`flee: away -> far, nearest threat 12.2`, `flee: far -> home (home clear)`, `flee: recovering (health
+11.8 < 14) with zombie at 6.5`, `flee: arrived after 13.9 s (12 blocks)`.
+
+## Trip readiness (wave 7, Track W)
+
+A user process that will walk more than 16 blocks (horizontal distance to the target: the player for
+`!come` and the start of `!follow`, the goal of a walk through `pve.walk` (`!goto`, `!home go`), the
+nearest target of `!kill`) first prepares when food or health is below 14: the best armour from the
+inventory (`!equip`), then the best food until the food bar is full (at most 6 bites; the server
+refuses at 20). Status `preparing: eating` (the stack line `preparing: eating (then coming to Steve)`),
+the chat reply `coming to Steve (eating first)`, `following Steve (eating first)`, `killing 3 zombie
+(eating first)`. The check runs at every (re)start of the process, so a come interrupted by a fight
+eats again before going on. Goals without a place (`!top`) never prepare.
+
+**Night rule**: at night (time of day 12542 to 23459, the sleep window) without a chestplate (worn, or
+in the inventory to put on) `!come`, `!follow` and `!kill` beyond 16 blocks are refused:
+`come: it is night and I have no chestplate; add "now" to go anyway (!come now)`. With `now` at the
+end (`!come now`, `!follow Steve now`, `!kill zombie 3 now`) the command goes, and the night process
+(shelter, bed) yields to it. Walks are never refused: going home at night is the safe move.
+
+**Far players**: BDS sends a player as an entity only within about 75 blocks of the bot (measured: a
+second client tracked at 70, not at 80, with chunk radius 10 or 16). Beyond that the locator bar
+reports it (see Packets), so `!come` walks to the locator position and then to the tracked player.
+
 ## Packets (BDS 1.26.60.6, verified)
+
+- **Locator bar** (Track W, `tasks/process/locator.ts`): for every other player the server sends
+  `player_location { entity_unique_id, type: 'coordinates', position: <eye, feet + 1.62> }` and
+  `locator_bar { waypoints: [{ group_handle, waypoint: { update_flags, visible, world_position: {
+  position, dimension_id }, texture_path, icon_size, color, client_position_authority, actor_unique_id },
+  action: add | update | remove }] }` at the join and when the player moves (seen at 20, 120 and 300
+  blocks; the first one at a join has y 32769.6 and is ignored). `player_list` `add` records map the
+  username to `entity_unique_id`. The updates are coarse: after a teleport the reported position was once 16 blocks short of the
+  real one, small moves (1 block steps) sent nothing, and `type_hide` comes when the player enters the
+  entity range (the last position is kept). `!come` therefore walks to the last known position and
+  re-aims at the tracked player once it is in range (at most 4 legs); `I cannot see Steve` only when
+  nothing was ever reported.
 
 - **Attack**: `inventory_transaction` `{ transaction: { legacy: { legacy_request_id: 0 },
   transaction_type: 'item_use_on_entity', actions: [], transaction_data: { entity_runtime_id,
@@ -162,14 +225,54 @@ Every run uses its own random 256-block cell from x, z = 8192, random truth requ
 summon tag; summoned mobs are removed at the end (`truth:killmobs`), the night run also clears every
 non-player entity within 96 blocks of home.
 
+### Survival policy (wave 7, Track W) on bds-gaunt
+
+Measured 2026-10-29 (BDS 1.26.60.6, normal difficulty, bds-gaunt):
+
+| What | Result |
+|---|---|
+| Gauntlet: `!come` 80 blocks, 6 zombies + 2 skeletons summoned along the route, iron armour + sword, 8 bread, guard 16, midnight (final rules, two gate passes of 5 runs) | 10/10 alive at the end of every run, 0 deaths; 9 arrived after 85 to 155 s (mean 117 s), 1 never started the last stretch because the test harness could not get BDS to report the player (see the locator row; the harness now reconnects the player then); 3 to 8 fights (all kills), 4 to 11 flights per run; damage taken 23 to 41 (zombies 9 to 22, skeletons 1 to 32); lowest health 6.0 to 8.1, health at arrival 11 to 18 |
+| The same, earlier rule sets (for the record) | no hysteresis: died in 1 of 1 (fleeing at 7.9, fighting again at 8.1); hysteresis from every hostile within 16: 29 flights, stuck (running from archers); without the duel rule: 2 of 4 stuck for 240 s with a zombie on the heels of 60 s flights; duel rule without the losing / ignored checks: 3 deaths in 3 runs (a zombie the guard ignored hit the bot 10 times; an armed zombie, 5.2 per hit through iron, killed it during the first plan of a flight) |
+| Flee ring (home behind a slowed zombie, health 7, no food), 2 rings per run | distance to the zombie 4.0 -> 9.1 to 9.8 after 2 s, to home 12.0 -> 18.9 to 19.5 (away first); home after 13.9 to 15.0 s around the ring; 0 damage |
+| Trip readiness: food 6, `!come` from 30 blocks | reply `coming to ... (eating first)`, status `preparing: eating`; 3 bites (bread), food 6 -> 20 after 5.3 to 5.4 s, 0.00 blocks moved while preparing; next to the player after 11.2 s |
+| Night without a chestplate | `!come` refused (`come: it is night and I have no chestplate; add "now" to go anyway (!come now)`), 0 blocks moved; `!come now` arrived after 5.3 to 5.5 s |
+| Entity range of a second player | tracked at 70 blocks, not at 80 (chunk radius 10 and 16 alike); the locator bar reported it at 120 and 300. After teleports BDS sometimes sends no locator update at all (in 2 of 4 gauntlet passes it stopped after the first run; a fresh join is reported again) |
+
+```sh
+pnpm --filter bot exec vitest run --project unit flee-readiness night-bed sleep pve afk-processes
+node scripts/bds.mjs --profile gaunt up && node scripts/bds.mjs --profile gaunt pack
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e gaunt- --silent=false     # ~12 min (the gauntlet: 5 runs)
+```
+
+Env: `GAUNT_BDS_HOST` (127.0.0.1), `GAUNT_BDS_PORT` (19188), `GAUNT_BDS_CONTAINER` (bds-gaunt),
+`GAUNT_RUNS` (5), `GAUNT_VERBOSE=1`. Every run uses a random 256-block cell from x, z = 24576, random
+truth ids, a per-run summon tag, `--no-config` values (waypoints and settings in memory), and removes
+its mobs, drops and blocks at the end.
+
+- `gaunt-come` (a): the gauntlet. A second client (owner) 80 blocks away; iron armour, iron sword, 8
+  bread, guard 16, midnight; 6 zombies and 2 skeletons summoned 10 to 15 blocks ahead as the bot passes
+  marks 5, 20, 30, 45, 55; `!come`; per run: arrival time, damage (truth hurt log), fights, kills,
+  flees, lowest health. Required: 5 of 5 alive at arrival.
+- `gaunt-flee` (b): a ring corridor, home behind a slowed zombie, health 7, no food: the distance to
+  the zombie and to home grow first, home within 60 s (two rings).
+- `gaunt-trip` (c): food 6, `!come` from 30 blocks: `(eating first)`, `preparing: eating`, food 20
+  without moving, then the walk; at night without a chestplate `!come` refused, `!come now` goes.
+- `gaunt-sleep` (d): docs/survival.md "Sleep".
+
 Manual check left for the Realm (you): `!come` and `!follow` from your own client (the e2e uses a
 second offline client, which is a real player entity to the bot), and a night with `--guard 16`.
 
 ## Known limits
 
-- **No eating** (PLAN.md 7.7): health only regenerates while food is 18 or more; after a few fights
-  in a long night the bot runs on what is left. Flee covers the worst case.
-- **No armour, shield or bow**; no critical hits (no jump attacks); sprint-knockback is not used.
+- Eating and armour come from the survival kit (docs/survival.md); flee v2 eats when 8 clear, trip
+  readiness before long trips. Health regenerates slowly (food 18 or more); a recovering bot runs from
+  melee hostiles within 12 for up to a minute, so a guard bot at 8 to 14 health does not defend home.
+- **No shield or bow**; no critical hits (no jump attacks); sprint-knockback is not used.
+- (Track W, gauntlet e2e) A guard fight stays on its target while another zombie hits the bot (seen:
+  10 hits in 13 s from a second zombie); targeting is Track V's. A flight from a zombie at 1.6 blocks
+  takes 1 or 2 more hits before the sprint pulls away.
+- (Track W) `!follow` / `!come` beyond about 75 blocks use the locator bar; a player in another
+  dimension (or with the locator bar off: gamerule `locatorbar` false) stays `I cannot see Steve`.
 - Melee-range steering (the last 3.5 blocks) does not avoid holes or lava; the navigator handles
   everything farther. Flying mobs (phantoms) and mobs on another level are fought only if the
   navigator can reach a cell within reach; otherwise `unreachable` after 3 approaches, and the mob is
