@@ -408,6 +408,7 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e gaunt- --silent=false 
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e food- --silent=false        # task 7.16 + Track AF (herds, pens, breeding) on bds-food (easy; ~5 min; FOOD_BDS_HOST/PORT/CONTAINER, FOOD_VERBOSE=1; docs/food.md)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e food- --silent=false        # task 7.16 on bds-food (easy; ~2 min; FOOD_BDS_HOST/PORT/CONTAINER, FOOD_VERBOSE=1; docs/food.md)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e get- --silent=false         # wave 8 Track AD on bds-get: !get, the stash step (~2.5 min; GET_BDS_HOST/PORT/CONTAINER, GET_VERBOSE=1; docs/get.md)
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e pve-combat pve-crowd pve-creeper --silent=false # wave 9 Track AH on bds-pve: re-targeting, crowd rule, shield (~25 min; PVE_RETARGET_RUNS, PVE_CROWD_RUNS, PVE_SHIELD_RUNS; docs/pve.md "Tests")
 BDS_E2E=1 BDS_SOAK=1 pnpm --filter bot exec vitest run --project e2e test/e2e/keepalive.test.ts --silent=false
 pnpm e2e:51                                    # whole e2e suite against bds-dev51 (BDS 1.26.51.1, game version 1.26.51: rollback)
 pnpm e2e:nn                                    # whole e2e suite against bds-nn (NetherNet, 1.26.60)

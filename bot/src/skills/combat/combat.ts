@@ -36,6 +36,21 @@
 // - every own health drop while the nearest hostile is an archer counts as an arrow hit
 //   (`totals.arrowHits`, `FightResult.arrowHits`).
 //
+// Track AH (wave 9, combat v3, docs/pve.md "Targeting" and "Shield", decision 0029):
+// - re-targeting: on every strike cycle the fight re-picks its target among the threats within reach
+//   (targeting.pickInReach: the mob that hit us in the last 10 s, then a creeper, then the nearest; the
+//   current target keeps a 0.3-block bonus); a target that leaves reach while another threat is in
+//   reach is dropped at once. When the target dies another one within reach is fought next; when a
+//   switched-to target ends, the fight goes back to the requested one. `FightResult.retargets`.
+//   Never while the target is a creeper (hit and run) or during a creeper interlude.
+// - crowd rule: 3 or more melee threats within 4 blocks and health below 12 end the fight `crowded`
+//   (the PvE controller's flee trigger); not again in a fight started within 3 s of the last one
+//   (then no flight followed: the bot defends).
+// - shield (shield.ts): a shield in the inventory goes to the offhand when no fight runs; in a fight
+//   it is raised (sneak) while an archer's shot is due and the bot is not striking, and for 10 ticks
+//   after a creeper's fuse lights (backing off facing it); never on a strike tick or within reach of
+//   a melee target.
+//
 // Packet shape verified on BDS 1.26.60.6 (docs/pve.md "Packets"): transaction_type
 // 'item_use_on_entity', transaction_data { entity_runtime_id, action_type 'attack', hotbar_slot,
 // hand 'main_hand', held_item (the wire item as the server sent it), player_pos (eye), click_pos 0 }.
@@ -48,7 +63,8 @@ import { angleDiff, turnTowards, yawTowards } from '../nav/follower.ts';
 import type { Goal } from '../nav/goals.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { aimPoint, bareType, classify, entityFeet, isArcher, isCreeper, isFlying, isPlayerEntity, reachDistance, type MobTracker } from './hostiles.ts';
-import type { GridLike } from './targeting.ts';
+import { CREEPER_BLOCK_TICKS, ShieldController } from './shield.ts';
+import { crowdOf, CROWD_COUNT, CROWD_HEALTH, inReach, pickInReach, type GridLike } from './targeting.ts';
 
 export const EYE_HEIGHT = 1.62;
 
@@ -86,11 +102,17 @@ export interface CombatDeps {
   mover: CombatMover;
   entities: () => ReadonlyMap<bigint, EntityInfo>;
   mobs: MobTracker;
-  inventory: { readonly slots: readonly (ItemStack | null)[]; readonly selected: number };
+  inventory: {
+    readonly slots: readonly (ItemStack | null)[];
+    readonly selected: number;
+    /** Track AH: other windows (119 offhand) and model updates, for the shield. */
+    window?(id: number): { slots: readonly (ItemStack | null)[] } | undefined;
+    setItem?(window: number, slot: number, item: ItemStack | null): void;
+  };
   /** Weapon switching and the held item of the attack packet; without it the bot hits with whatever it holds. */
   hotbar?: CombatHotbar;
   /** Where the attack packets go (the Connection). */
-  source: { queue(name: string, params: Record<string, unknown>): void };
+  source: { queue(name: string, params: Record<string, unknown>): void; on?(name: string, fn: (p: Record<string, unknown>) => void): () => void };
   /** Own runtime id (animate packet). */
   selfRuntimeId: () => bigint;
   /**
@@ -124,6 +146,10 @@ export interface FightOptions {
   creeperAvoid?: number;
   /** Fight a creeper that comes within 6 blocks first (then go back to the target). Default true. */
   creeperFirst?: boolean;
+  /** Track AH: re-pick the target within reach on every strike cycle. Default: the controller's `retarget` (true). */
+  retarget?: boolean;
+  /** Track AH: the crowd rule ends the fight `crowded`. Default: the controller's `crowdRule` (true). */
+  crowd?: boolean;
 }
 
 export type FightOutcome =
@@ -137,7 +163,8 @@ export type FightOutcome =
   | 'refused_player'
   | 'no_target'
   | 'creeper_avoided'
-  | 'took_cover';
+  | 'took_cover'
+  | 'crowded';
 
 export interface FightResult {
   ok: boolean;
@@ -158,6 +185,12 @@ export interface FightResult {
   pulled?: boolean;
   /** Track V: creepers fought in between (type, outcome). */
   interludes?: { type: string; reason: FightOutcome }[];
+  /** Track AH: switches from a live target to another one within reach. */
+  retargets?: number;
+  /** Track AH: mobs killed in this fight (the target, others within reach, creepers in between). */
+  kills?: number;
+  /** Track AH: ticks the shield was up. */
+  shieldTicks?: number;
 }
 
 /** Bedrock melee damage of weapons (sword > axe > anything else). */
@@ -325,6 +358,11 @@ interface Target {
   avoiding: boolean;
   cover: Vec3 | undefined;
   coverFrom: Vec3 | undefined;
+  /** Track AH: tick the creeper's fuse last lit (shield up for 10 ticks after), and the fuse last tick. */
+  litAt: number;
+  lastIgnited: boolean;
+  /** Track AH: tick of our last strike on it (its knockback is not "leaving reach"). */
+  struckAt: number;
 }
 
 interface Fight {
@@ -345,6 +383,24 @@ interface Fight {
   /** Creepers not to fight in between again until the tick (an unreachable one would loop). */
   skip: Map<bigint, number>;
   resolve: (r: FightResult) => void;
+  /** Track AH: the target the caller asked for, and whether it died. */
+  req: { rid: bigint; type: string };
+  reqDead: boolean;
+  retargets: number;
+  kills: number;
+  /** Earlier targets with strikes still waiting for their hurt animation. */
+  retired: Target[];
+  /** The crowd rule is off for this fight (it started right after a `crowded` end: no flight came). */
+  crowdOff: boolean;
+  /** This tick: the bot strikes or is within reach of its melee target (no shield). */
+  striking: boolean;
+  /** This tick: runFrom wants the shield up (a creeper's fuse just lit). */
+  blockNow: boolean;
+  /** The shield is up (we set sneak). */
+  blocking: boolean;
+  /** The target just changed within reach: face it at once this tick. */
+  snap: boolean;
+  shieldTicks: number;
 }
 
 /** Max yaw change per tick while fighting (degrees). */
@@ -360,6 +416,8 @@ const CREEPER_FIRST = 6;
 const PULL_WAIT = 40;
 /** A flying target out of reach this long ends the fight `unreachable`. */
 const FLYING_OUT_OF_REACH = 20;
+/** Track AH: a fight starting this soon (ticks) after a `crowded` end does not apply the crowd rule. */
+const CROWD_REPEAT_TICKS = 60;
 
 export class CombatController {
   private readonly d: CombatDeps;
@@ -369,7 +427,14 @@ export class CombatController {
   private n = 0;
   private readonly waiters: { left: number; resolve: () => void }[] = [];
   /** Totals over all fights (metrics). */
-  readonly totals = { fights: 0, kills: 0, attacks: 0, landed: 0, arrowHits: 0, pulls: 0, creepersAvoided: 0, cover: 0 };
+  readonly totals = { fights: 0, kills: 0, attacks: 0, landed: 0, arrowHits: 0, pulls: 0, creepersAvoided: 0, cover: 0, retargets: 0, crowded: 0, shieldTicks: 0 };
+  /** Track AH: re-pick the target within reach on every strike cycle (FightOptions.retarget default). */
+  retarget = true;
+  /** Track AH: the crowd rule (FightOptions.crowd default; targeting.crowded reads it too, for the flight). */
+  crowdRule = true;
+  /** Track AH: offhand shield (equip, archer shot prediction). */
+  readonly shield: ShieldController;
+  private lastCrowdedN = -Infinity;
   /** Track S: weapon choice skips items failing this (worn weapons, skills/survival/tools.ts); default all ok. */
   toolOk: (item: ItemStack) => boolean = () => true;
   /** Track V: main inventory -> hotbar moves (weapons here, pickaxes / axes / shovels for the Digger). */
@@ -389,11 +454,23 @@ export class CombatController {
       waitTicks: (k) => this.waitTicks(k),
       logger: this.log,
     });
+    this.shield = new ShieldController({
+      inventory: deps.inventory,
+      source: deps.source,
+      containers: () => (deps.containers ? deps.containers() : containersOf(deps.mover)),
+      runtimeId: deps.selfRuntimeId,
+      entities: deps.entities,
+      mobs: deps.mobs,
+      waitTicks: (k) => this.waitTicks(k),
+      logger: this.log,
+    });
     this.unsubs.push(
       deps.loop.onBeforeStep((_tick, s) => {
         this.stepWaiters();
         if (++this.n % 20 === 0) this.installDiggerHook();
+        this.shield.tick(s.ready ? s.pos : undefined, !this.active);
         this.onTick(s);
+        this.applyShield(s);
       }),
       deps.mobs.onHit((_g, damage) => {
         const archer = this.nearestHostileIsArcher();
@@ -410,6 +487,11 @@ export class CombatController {
     return this.active !== undefined;
   }
 
+  /** Track AH: a fight ended `crowded` in the last 5 ticks (the flee trigger, targeting.crowded). */
+  get crowdedRecently(): boolean {
+    return this.n - this.lastCrowdedN <= 5;
+  }
+
   /** Runtime id and type of the current target (a creeper fought in between while that runs). */
   get target(): { runtimeId: bigint; type: string } | undefined {
     return this.active ? { runtimeId: this.active.tg.rid, type: this.active.tg.type } : undefined;
@@ -417,6 +499,7 @@ export class CombatController {
 
   dispose(): void {
     this.cancel();
+    this.shield.dispose();
     for (const u of this.unsubs.splice(0)) u();
     for (const w of this.waiters.splice(0)) w.resolve();
   }
@@ -488,6 +571,8 @@ export class CombatController {
           lowHealth: opts.lowHealth ?? 10,
           creeperAvoid: opts.creeperAvoid ?? 11,
           creeperFirst: opts.creeperFirst ?? true,
+          retarget: opts.retarget ?? this.retarget,
+          crowd: opts.crowd ?? this.crowdRule,
         },
         t: 0,
         lastStrike: -Infinity,
@@ -502,6 +587,17 @@ export class CombatController {
         interludes: [],
         skip: new Map(),
         resolve,
+        req: { rid, type: e.type },
+        reqDead: false,
+        retargets: 0,
+        kills: 0,
+        retired: [],
+        crowdOff: this.n - this.lastCrowdedN < CROWD_REPEAT_TICKS,
+        striking: false,
+        blockNow: false,
+        blocking: false,
+        snap: false,
+        shieldTicks: 0,
       };
       f.tg = f.main;
       this.active = f;
@@ -544,6 +640,9 @@ export class CombatController {
       avoiding: false,
       cover: undefined,
       coverFrom: undefined,
+      litAt: -Infinity,
+      lastIgnited: false,
+      struckAt: -Infinity,
     };
   }
 
@@ -626,12 +725,13 @@ export class CombatController {
     this.d.loop.release();
     // pending strikes that already show a hurt count as landed
     this.settle(f, f.tg, true);
-    if (reason === 'killed') this.totals.kills++;
+    for (const old of f.retired) this.settle(f, old, true);
+    this.totals.shieldTicks += f.shieldTicks;
     const r: FightResult = {
       ok: reason === 'killed',
       reason,
-      runtimeId: f.main.rid,
-      type: f.main.type,
+      runtimeId: f.req.rid,
+      type: f.req.type,
       ticks: f.t,
       attacks: f.attacks,
       landed: f.landed,
@@ -640,24 +740,35 @@ export class CombatController {
       arrowHits: f.arrowHits,
       pulled: f.pulled,
       interludes: f.interludes,
+      retargets: f.retargets,
+      kills: f.kills,
+      shieldTicks: f.shieldTicks,
     };
     this.log.info(
-      `combat: ${bareType(f.main.type)} ${reason} after ${f.t} ticks, ${f.attacks} attack(s), ${f.landed} landed, ${r.damageTaken} damage taken` +
-        `${f.arrowHits ? `, ${f.arrowHits} arrow hit(s)` : ''}${f.interludes.length ? `, in between: ${f.interludes.map((i) => `${bareType(i.type)} ${i.reason}`).join(', ')}` : ''}`,
+      `combat: ${bareType(f.req.type)} ${reason} after ${f.t} ticks, ${f.attacks} attack(s), ${f.landed} landed, ${r.damageTaken} damage taken` +
+        `${f.arrowHits ? `, ${f.arrowHits} arrow hit(s)` : ''}${f.interludes.length ? `, in between: ${f.interludes.map((i) => `${bareType(i.type)} ${i.reason}`).join(', ')}` : ''}` +
+        `, ${f.retargets} retarget(s), ${f.kills} kill(s)${f.shieldTicks ? `, shield up ${f.shieldTicks} ticks` : ''}`,
     );
     f.resolve(r);
   }
 
   /** The current target ended: back to the fight's target after an interlude, else the fight ends. */
   private endTarget(f: Fight, reason: FightOutcome): void {
-    if (reason === 'killed') this.settle(f, f.tg, true);
+    if (reason === 'killed') {
+      this.settle(f, f.tg, true);
+      this.totals.kills++;
+      f.kills++;
+    }
     if (reason === 'creeper_avoided') this.totals.creepersAvoided++;
     if (reason === 'took_cover') this.totals.cover++;
     if (f.tg === f.main) {
-      this.finish(f, reason);
+      // Track AH: another threat within reach next; else back to the requested target
+      if (f.main.rid === f.req.rid && reason === 'killed') f.reqDead = true;
+      const next = reason === 'killed' || reason === 'gone' || ((reason === 'out_of_range' || reason === 'unreachable') && f.main.rid !== f.req.rid);
+      if (f.o.retarget && next && this.nextTarget(f, reason)) return;
+      this.finish(f, f.reqDead && (reason === 'killed' || reason === 'gone') ? 'killed' : reason);
       return;
     }
-    if (reason === 'killed') this.totals.kills++;
     f.interludes.push({ type: f.tg.type, reason });
     if (reason === 'unreachable' || reason === 'out_of_range') f.skip.set(f.tg.rid, f.t + 200);
     this.log.info(`combat: ${bareType(f.tg.type)} (in between) ${reason}; back to ${bareType(f.main.type)}`);
@@ -705,6 +816,22 @@ export class CombatController {
     if (!f || !s.ready) return;
     f.t++;
     if (f.pulling !== undefined && ++f.pulling > PULL_WAIT) f.pulling = undefined;
+    f.striking = false;
+    f.blockNow = false;
+    for (const old of f.retired) this.settle(f, old);
+    if (f.retired.length) f.retired = f.retired.filter((x) => x.pending.length > 0);
+
+    // Track AH: the crowd rule (the PvE controller turns `crowded` into a flight)
+    if (f.o.crowd && !f.crowdOff && this.ownHealth() < CROWD_HEALTH) {
+      const crowd = crowdOf(this.d.entities().values(), this.d.mobs, s.pos);
+      if (crowd.length >= CROWD_COUNT) {
+        this.lastCrowdedN = this.n;
+        this.totals.crowded++;
+        this.log.warn(`combat: ${crowd.length} melee mobs within 4 blocks at health ${this.ownHealth()}: crowded`);
+        this.finish(f, 'crowded');
+        return;
+      }
+    }
 
     // a creeper coming close is fought first (the fight goes back to its target afterwards)
     if (f.tg === f.main && !f.main.creeper && f.o.approach && f.o.creeperFirst) {
@@ -717,6 +844,9 @@ export class CombatController {
       }
     }
 
+    // Track AH: re-pick the target within reach (strike cycle; at once when it left reach)
+    if (f.o.retarget && f.tg === f.main && !f.main.creeper) this.retargetInReach(f, s);
+
     const tg = f.tg;
     const e = this.d.entities().get(tg.rid);
     const ms = this.d.mobs.get(tg.rid);
@@ -724,6 +854,8 @@ export class CombatController {
       if (ms.health !== undefined) tg.lastHealth = ms.health;
       if (ms.dead) tg.dead = true;
       if (ms.ignited) tg.wasIgnited = f.t;
+      if (tg.creeper && ms.ignited && !tg.lastIgnited) tg.litAt = f.t; // Track AH: the shield's 10 ticks
+      tg.lastIgnited = ms.ignited;
     }
     this.settle(f, tg);
     if (!e) {
@@ -817,7 +949,7 @@ export class CombatController {
     if (tg.flying) {
       // never chased: face it, strike within reach, give up when it stays out of reach
       this.takeOver(f);
-      yaw = turnTowards(loop.command.yaw, wantYaw, TURN);
+      yaw = f.snap ? wantYaw : turnTowards(loop.command.yaw, wantYaw, TURN);
       loop.setCommand({ yaw, pitch: wantPitch, forward: 0, strafe: 0, sprint: false, sneak: false, jump: false });
       tg.outOfReach = reachNow > f.o.reach + 0.2 ? tg.outOfReach + 1 : 0;
       if (tg.outOfReach >= FLYING_OUT_OF_REACH) {
@@ -826,7 +958,8 @@ export class CombatController {
       }
     } else if ((hd <= MELEE_RANGE && Math.abs(dy) < 1.2) || !f.o.approach) {
       this.takeOver(f);
-      yaw = turnTowards(loop.command.yaw, wantYaw, TURN);
+      // Track AH: a new target within reach is faced at once (a 180-degree turn at 40 per tick cost 5 ticks per switch)
+      yaw = f.snap && reachNow <= f.o.reach ? wantYaw : turnTowards(loop.command.yaw, wantYaw, TURN);
       let forward = 0;
       let sprint = false;
       if (f.o.approach) {
@@ -854,10 +987,14 @@ export class CombatController {
       yaw = loop.command.yaw;
     }
 
+    f.snap = false;
+    if (!tg.creeper && reachNow <= f.o.reach + 0.3) f.striking = true; // Track AH: no shield within reach of a melee target
     if (f.pulling === undefined && f.t - f.lastStrike >= f.o.cadence && Math.abs(angleDiff(yaw, wantYaw)) <= 35 && reachNow <= f.o.reach) {
+      f.striking = true;
       f.lastStrike = f.t;
       f.attacks++;
       tg.pending.push({ t: f.t, hurts: ms?.hurts ?? 0 });
+      tg.struckAt = f.t;
       this.strike(tg.rid, eye);
       if (tg.creeper) tg.retreat = true;
     }
@@ -868,6 +1005,13 @@ export class CombatController {
    * (a crater, a ledge): the navigator walks to a point 10 blocks away instead, then steering resumes.
    */
   private runFrom(f: Fight, tg: Target, s: LoopState, away: number, mob: Vec3): void {
+    if (tg.creeper && f.t - tg.litAt < CREEPER_BLOCK_TICKS && this.shield.equipped()) {
+      // Track AH: the fuse just lit: back off facing it with the shield up, then run
+      this.takeOver(f);
+      f.blockNow = true;
+      this.d.loop.setCommand({ yaw: turnTowards(this.d.loop.command.yaw, away + 180, 90), pitch: 0, forward: -1, strafe: 0, sprint: false, jump: false });
+      return;
+    }
     tg.stuck = s.collidedHorizontally ? tg.stuck + 1 : 0;
     if (tg.stuck >= 6 || (f.ourGoto && this.d.mover.nav.busy)) {
       if (!this.d.mover.nav.busy && f.t - tg.gotoT >= 10) {
@@ -915,6 +1059,92 @@ export class CombatController {
       });
     }
     return true;
+  }
+
+  // ---- Track AH: re-targeting, the shield ---------------------------------------------------------
+
+  /** The threats within reach now (eye to box 3.2), creepers only when they may be engaged. */
+  private reachCandidates(f: Fight, s: LoopState): ReturnType<typeof inReach> {
+    const eye = { x: s.pos.x, y: s.pos.y + EYE_HEIGHT, z: s.pos.z };
+    const noCreepers = !f.o.approach || this.ownHealth() < f.o.lowHealth;
+    return inReach(this.d.entities().values(), this.d.mobs, eye, { noCreepers }).filter((c) => !isPlayerEntity(c.e) && !this.d.mobs.get(c.e.runtimeId)?.dead && (f.skip.get(c.e.runtimeId) ?? 0) <= f.t);
+  }
+
+  /** Make `e` the fight's target (the main one). */
+  private switchTo(f: Fight, e: EntityInfo, why: string, live: boolean): void {
+    const old = f.main;
+    if (old.pending.length) f.retired.push(old);
+    if (f.ourGoto && this.d.mover.nav.busy) this.d.mover.cancel();
+    f.ourGoto = false;
+    f.main = this.newTarget(e);
+    f.tg = f.main;
+    f.snap = true;
+    if (live) {
+      f.retargets++;
+      this.totals.retargets++;
+    }
+    this.log.info(`combat: ${live ? 'retarget' : 'next'} ${bareType(old.type)} #${old.rid} -> ${bareType(e.type)} #${e.runtimeId} (${why})`);
+  }
+
+  /**
+   * On every strike cycle, and at once when the target is out of reach (unless our own strike knocked it
+   * there less than a cycle ago): the best threat within reach (targeting.pickInReach) becomes the
+   * target. Nothing in reach: the existing rules go on.
+   */
+  private retargetInReach(f: Fight, s: LoopState): void {
+    const cur = f.main;
+    if (cur.dead || this.d.mobs.get(cur.rid)?.dead || !this.d.entities().has(cur.rid)) return; // ends as killed / gone first
+    const ready = f.pulling === undefined && f.t - f.lastStrike >= f.o.cadence;
+    const cands = this.reachCandidates(f, s);
+    if (cands.length === 0) return;
+    const curIn = cands.some((c) => c.e.runtimeId === cur.rid);
+    if (curIn && !ready) return;
+    // knocked out of reach by our own strike: it comes back; decide on the next strike cycle (switching at
+    // once made the bot alternate between two zombies on every knockback: 13 hits taken against 5, docs/pve.md)
+    if (!curIn && !ready && f.t - cur.struckAt < f.o.cadence) return;
+    const best = pickInReach(cands, cur.rid);
+    if (!best || best.e.runtimeId === cur.rid) return;
+    const why = curIn ? (best.hitUs ? `it hit us, strike cycle` : best.creeper ? 'creeper, strike cycle' : 'nearer, strike cycle') : `${bareType(cur.type)} out of reach`;
+    this.switchTo(f, best.e, why, true);
+  }
+
+  /** The fight's target ended (`reason`): fight a threat within reach next, else go back to the requested target. */
+  private nextTarget(f: Fight, reason: FightOutcome): boolean {
+    const s = this.d.loop.state;
+    const ended = f.main.rid;
+    const best = pickInReach(this.reachCandidates(f, s).filter((c) => c.e.runtimeId !== ended), undefined);
+    if (best) {
+      this.switchTo(f, best.e, `${bareType(f.main.type)} ${reason}, within reach`, false);
+      return true;
+    }
+    if (!f.reqDead && ended !== f.req.rid) {
+      const e = this.d.entities().get(f.req.rid);
+      if (e && !this.d.mobs.get(f.req.rid)?.dead) {
+        this.switchTo(f, e, `${bareType(f.main.type)} ${reason}, back to the target`, false);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * After every tick of a fight: the shield (sneak) is up while runFrom backs off a freshly lit creeper,
+   * or an archer's shot is due (shield.threat) and the bot is not striking. Only our own sneak is
+   * lowered again; finish() releases the loop anyway.
+   */
+  private applyShield(s: LoopState): void {
+    const f = this.active;
+    if (!f || !s.ready) return;
+    let want = false;
+    if (this.shield.equipped()) want = f.blockNow || (!f.striking && this.shield.threat(s.pos) !== undefined);
+    if (want) {
+      this.d.loop.setCommand({ sneak: true, sprint: false });
+      f.shieldTicks++;
+      this.shield.noteRaised();
+    } else if (f.blocking) {
+      this.d.loop.setCommand({ sneak: false });
+    }
+    f.blocking = want;
   }
 
   /** Stop our approach goto (or anybody's) so the controller steers. */
