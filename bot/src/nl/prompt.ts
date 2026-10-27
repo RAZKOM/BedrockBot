@@ -54,6 +54,7 @@ const STEP_DOCS: Record<StepKind, string> = {
   pause: '{"command":"pause"}: hold the running command',
   resume: '{"command":"resume"}: continue after pause',
   get: '{"command":"get","item":"oak_log","count":N?}: get N of an item (wood, ores, stone, dirt, sand, food, crops); the first choice for get / bring / collect: it picks gather, mine, food or farm itself', // Track AD
+  explore: '{"command":"explore","radius":R?}: walk around the unexplored land near home (radius 16..1024 blocks) so the bot remembers it: ores, forests, animals', // Track AI
   question: '{"command":"question","text":"..."}: ask the person one short question instead of guessing; last step',
 };
 
@@ -71,6 +72,7 @@ export const EXAMPLES: readonly Example[] = [
   { request: 'go to the castle', plan: { steps: [{ command: 'question', text: 'I know no waypoint "castle". Which waypoint, or which x y z?' }] } },
   { request: 'mine 10 iron then come back to me', plan: { steps: [{ command: 'mine', block: 'iron_ore', count: 10 }, { command: 'come' }] } },
   { request: 'get me 20 oak logs', plan: { steps: [{ command: 'get', item: 'oak_log', count: 20 }] } }, // Track AD
+  { request: 'look around the area within 200 blocks', plan: { steps: [{ command: 'explore', radius: 200 }] } }, // Track AI
 ];
 
 export function buildSystemPrompt(c: PromptContext): string {

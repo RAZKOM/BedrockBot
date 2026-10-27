@@ -1,0 +1,35 @@
+# BDS for the explore and branch-mining e2e tests (wave 9, Track AI; docs/explore.md). Like
+# compose.cache.yml: a generated DEFAULT world with a fixed seed (LEVEL_SEED 7, natural terrain with
+# hills, caves, ores, trees, water), peaceful, operator, own project name, container bds-explore on
+# udp/19198, data in docker/data/explore (seeded from docker/data/cache without its world, so the
+# server generated its own). TICK_DISTANCE 10 keeps the truth pack's script area as wide as the bot's view.
+#   node scripts/bds.mjs --profile explore up
+#   node scripts/bds.mjs --profile explore pack      # truth pack (needed by the explore-* e2e tests)
+name: bedrockbot-explore
+
+services:
+  bds-explore:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-explore
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: peaceful
+      LEVEL_TYPE: DEFAULT
+      LEVEL_SEED: "7"
+      LEVEL_NAME: explore
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-explore
+      SERVER_PORT: "19198"
+      TICK_DISTANCE: "10"
+    ports:
+      - "19198:19198/udp"
+    volumes:
+      - ./data/explore:/data
+    stdin_open: true
+    tty: true

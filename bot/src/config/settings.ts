@@ -84,6 +84,8 @@ export const SETTING_DEFS = {
   chorePen: { kind: 'text', default: 'none', values: 'x y z|none', parse: (raw: string) => parseBlockText(raw, 'chorePen'), description: 'the pen (fence-enclosed) whose animals the breeding chore and the food chore may use: a block inside it, or none' }, // Track AF (merge: AD's parseBlockText)
   stashChest: { kind: 'text', default: 'none', values: 'x y z|none', parse: (raw: string) => parseBlockText(raw, 'stashChest'), description: 'stash step: chest a full inventory is emptied into (none: the job chest, a carried shulker box, then dropping junk)' }, // Track AD
   stashShulker: { kind: 'boolean', default: true, description: 'stash step: place a carried shulker box, fill it, break it and pick it up when the inventory is full' }, // Track AD
+  mineBranchY: { kind: 'text', default: 'auto', values: 'auto|-64..320', parse: (raw: string) => { const s = raw.trim().toLowerCase(); if (s === 'auto' || s === '') return 'auto'; const n = Number(s); if (!Number.isInteger(n) || n < -64 || n > 320) throw new SettingError(`mineBranchY must be auto or a whole number -64..320, got "${raw}"`); return String(n); }, description: 'branch mining: the Y of the tunnels when !mine knows no ore (auto: the best Y of the ore, e.g. iron 16, diamond -58)' }, // Track AI
+  exploreRadius: { kind: 'number', default: 128, min: 16, max: 1024, integer: true, unit: 'blocks', description: '!explore: radius of the area walked (around home, else the bot)' }, // Track AI
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;
