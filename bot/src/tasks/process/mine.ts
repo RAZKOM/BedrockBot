@@ -98,6 +98,8 @@ export class MineProcess extends BaseProcess {
     const state = this.controlled ? this.task.state : this.started ? 'paused' : 'waiting';
     const elapsedS = s.startedAt !== undefined ? (Date.now() - s.startedAt) / 1000 : 0;
     const etaS = s.mined > 0 && elapsedS > 0 ? ((want - s.mined) * elapsedS) / s.mined : undefined;
-    return { line: `mine ${[...this.task.names][0] ?? this.opts.block} ${s.mined}/${want} (${state}, ${s.blacklisted.length} skipped)`, etaS };
+    const vein = this.task.vein ? `, vein ${this.task.vein.done}/${this.task.vein.size}` : ''; // Track AQ
+    const what = this.task.quotas.length > 1 ? `mine: ${this.task.quotaLine()}` : `mine ${[...this.task.names][0] ?? this.opts.block} ${s.mined}/${want}`; // Track AQ: several kinds
+    return { line: `${what} (${state}, ${s.blacklisted.length} skipped${vein})`, etaS };
   }
 }

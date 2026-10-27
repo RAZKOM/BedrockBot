@@ -149,7 +149,7 @@ export function killItemsNear(cx: number, cz: number, r: number, container = FAR
   return consoleCommand(container, 'kill', `@e[type=item,x=${cx - r},y=${FEET_Y - 4},z=${cz - r},dx=${2 * r},dy=24,dz=${2 * r}]`);
 }
 
-export async function connectFarmBot(prefix = 'Farm'): Promise<FarmBot> {
+export async function connectFarmBot(prefix = 'Farm', at: { target?: ConnectTarget; container?: string } = {}): Promise<FarmBot> { // Track AQ: `at` (mine-tunnel / mine-vein on bds-dig)
   const name = uniqueName(prefix);
   const logger = VERBOSE ? createLogger('debug', 'farm') : silentLogger;
   const conn = new Connection({ version: E2E_VERSION, username: name, logger: silentLogger, reconnect: false });
@@ -158,7 +158,7 @@ export async function connectFarmBot(prefix = 'Farm'): Promise<FarmBot> {
   const hotbar = new Hotbar(conn, { inventory: world.inventory, runtimeId: () => world.self.runtimeId });
   const containers = new Containers(conn, world.inventory, { logger });
   const skills = new BotSkills({ loop, world, hotbar, containers, source: conn, logger });
-  const truth = new DigTruth(FARM_CONTAINER);
+  const truth = new DigTruth(at.container ?? FARM_CONTAINER);
   const breaks: BlockEvent[] = [];
   const places: BlockEvent[] = [];
   const interacts: BlockEvent[] = [];
@@ -193,7 +193,7 @@ export async function connectFarmBot(prefix = 'Farm'): Promise<FarmBot> {
     queue(n, p);
   };
   loop.start();
-  await conn.connect(FARM_TARGET);
+  await conn.connect(at.target ?? FARM_TARGET);
   await world.waitForChunks(2, { timeoutMs: 30_000 });
   await loop.waitTicks(10);
 

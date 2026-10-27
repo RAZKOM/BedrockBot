@@ -27,8 +27,9 @@ import { isLog } from '../skills/tree/tree.ts';
 import { Containers } from '../world/containers.ts';
 import { findLogClusters, type LogCluster } from '../world/find.ts'; // Track Z
 import { Hotbar } from '../world/hotbar.ts';
-import type { ItemStack } from '../world/types.ts';
+import type { EntityInfo, ItemStack } from '../world/types.ts';
 import type { RunningTask, TaskContext, TaskDefinition } from './base.ts';
+import { isWoodDrop, sweepItems } from '../skills/collect/sweep.ts'; // Track AQ
 
 export type GatherState =
   | 'idle'
@@ -109,6 +110,8 @@ export interface GatherDeps {
   waitTicks: (n: number) => Promise<void>;
   /** Correction counter (InputLoop.state.corrections). */
   corrections: () => number;
+  /** Track AQ: the entities (the floor sweep: logs lying within 8 blocks are picked up before the next tree). */
+  entities?: () => ReadonlyMap<bigint, EntityInfo>;
   log?: Logger;
   now?: () => number;
 }
@@ -324,6 +327,10 @@ export class GatherWoodTask {
         this.lastError = 'inventory full and no chest';
         return this.end(gen, 'failed');
       }
+
+      // Track AQ (collect/sweep.ts): logs lying within 8 blocks first (own drops left, the owner's dropped wood)
+      if (this.d.entities && (await sweepItems((r, t, c) => this.d.skills.collect(r, t, c), isWoodDrop, { entities: this.d.entities, position: this.d.position }))?.pickedUp) continue;
+      if (!this.alive(gen)) break;
 
       // find-tree
       this.state = 'find';
@@ -576,6 +583,7 @@ export const gatherTask: TaskDefinition = {
       ready: () => ctx.conn.state === 'spawned' && mob.loop.state.ready && !respawn.dead,
       waitTicks: (n) => (ctx.conn.state === 'spawned' ? mob.loop.waitTicks(n) : new Promise((r) => setTimeout(r, n * 50))),
       corrections: () => mob.loop.state.corrections,
+      entities: () => mob.world.entities, // Track AQ: the floor sweep
       log,
     });
     gather.useForests(cachedForests(mob.world, mob.skills.nav.blacklist)); // Track Z: remembered forests

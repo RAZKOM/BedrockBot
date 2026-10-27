@@ -78,6 +78,8 @@ export const EXAMPLES: readonly Example[] = [
   { request: 'go to the castle', plan: { steps: [{ command: 'question', text: 'I know no waypoint "castle". Which waypoint, or which x y z?' }] } },
   { request: 'mine 10 iron then come back to me', plan: { steps: [{ command: 'mine', block: 'iron_ore', count: 10 }, { command: 'come' }] } },
   { request: 'get me 20 oak logs', plan: { steps: [{ command: 'get', item: 'oak_log', count: 20 }] } }, // Track AD
+  { request: 'get me 8 iron and a stack of coal', plan: { steps: [{ command: 'get', item: 'iron', count: 8, more: [{ item: 'coal', count: 64 }] }] } }, // Track AQ: several ores, one trip
+  { request: 'mine 4 diamonds and 10 redstone on one trip', plan: { steps: [{ command: 'mine', block: 'diamond_ore', count: 4, more: [{ block: 'redstone_ore', count: 10 }] }] } }, // Track AQ
   { request: 'breed two pairs of cows', plan: { steps: [{ command: 'breed', type: 'cow', pairs: 2 }] } }, // Track AK
   { request: 'empty your pockets but keep your gear', plan: { steps: [{ command: 'drop', what: 'items' }] } }, // Track AK
   { request: 'get food, the penned animals too', plan: { steps: [{ command: 'food', pen: true }] } }, // Track AK

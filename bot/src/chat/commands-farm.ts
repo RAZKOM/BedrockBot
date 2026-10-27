@@ -4,6 +4,7 @@
 //                           harvest, replant, bone meal, deposit into the nearest chest; until !farm stop
 //   !farm stop | status
 //   !mine <block> [n]       mine n (default 1, up to 256) seen blocks of that kind (`coal`, `iron_ore`, ...)
+//   !mine <block> n <block> n ...   Track AQ: several kinds in one trip, each with its quota; `ores n`: every ore kind
 //   !mine stop | status
 // Registered by the afk task (tasks/registry.ts) with the movement stack; without it every command
 // answers "<cmd> needs a task that can walk (...)". Farming and mining exclude each other, and both
@@ -11,7 +12,7 @@
 import type { Logger } from '../log.ts';
 import { createFarmer } from '../skills/farm/index.ts';
 import type { FarmTask } from '../skills/farm/farmer.ts';
-import { resolveTargets, type MineTask } from '../skills/mine/miner.ts';
+import { kindNames, resolveTargets, type MineTask } from '../skills/mine/miner.ts';
 import type { OreMemory } from '../skills/mine/seen.ts';
 import { createMinerFor } from '../skills/mine/wire.ts';
 import { useCachedForests, type GatherWoodTask } from '../tasks/gatherWood.ts';
@@ -30,8 +31,8 @@ export interface FarmController {
   farm(radius: number): string;
   farmStop(): string;
   farmStatus(): string;
-  /** Start mining; `onEnd` gets the final line. The immediate reply. */
-  mine(block: string, n: number, onEnd: (msg: string) => void): string;
+  /** Start mining; `onEnd` gets the final line. The immediate reply. Track AQ: `kinds` = several kinds with quotas (block / n: the first and the sum). */
+  mine(block: string, n: number, onEnd: (msg: string) => void, kinds?: MineKinds): string;
   mineStop(): string;
   mineStatus(): string;
 }
@@ -41,6 +42,34 @@ const NEEDS_WALK = 'needs a task that can walk (start with --walk, --home or --t
 export const DEFAULT_FARM_RADIUS = 8;
 export const MAX_FARM_RADIUS = 32;
 export const MAX_MINE = 256;
+
+/** Track AQ: kinds with quotas of one `!mine` (`iron_ore 8 coal_ore 16`). */
+export type MineKinds = { block: string; count: number }[];
+
+/**
+ * Track AQ: `!mine` arguments: `<block> [n]` (one kind) or `<block> n <block> n ...` (several kinds, one
+ * trip); `ores` names every ore kind. An error text for anything else.
+ */
+export function parseMineArgs(args: readonly string[]): { kinds: MineKinds } | { error: string } {
+  const name = /^[a-z0-9_:]+$/i;
+  if (args.length === 0 || !name.test(args[0]!)) return { error: 'usage: !mine <block> [n] | <block> n <block> n ... | stop | status' };
+  if (args.length <= 2) {
+    const n = args[1] === undefined ? 1 : Number(args[1]);
+    if (!Number.isInteger(n) || n < 1 || n > MAX_MINE) return { error: `usage: !mine <block> [n 1..${MAX_MINE}]` };
+    return { kinds: [{ block: args[0]!, count: n }] };
+  }
+  if (args.length % 2 !== 0) return { error: 'usage: !mine <block> n <block> n ... (a count after every block)' };
+  const kinds: MineKinds = [];
+  for (let i = 0; i < args.length; i += 2) {
+    const b = args[i]!;
+    const n = Number(args[i + 1]);
+    if (!name.test(b) || /^\d+$/.test(b)) return { error: `usage: !mine <block> n <block> n ... ("${b}" is no block)` };
+    if (!Number.isInteger(n) || n < 1 || n > MAX_MINE) return { error: `usage: !mine <block> n ... (n 1..${MAX_MINE}, got "${args[i + 1]}")` };
+    if (kinds.some((k) => [...kindNames(k.block)].some((x) => kindNames(b).has(x)))) return { error: `usage: !mine ... (${b} named twice)` };
+    kinds.push({ block: b, count: n });
+  }
+  return { kinds };
+}
 
 export function registerFarmChat(chat: Chat, c: FarmController | undefined): void {
   if (!c) {
@@ -70,31 +99,45 @@ export function registerFarmChat(chat: Chat, c: FarmController | undefined): voi
   });
   chat.register({
     name: 'mine',
-    help: '<block> [n] | stop | status (mine blocks the bot has seen; no x-ray)',
+    help: '<block> [n] | <block> n <block> n ... | ores n | stop | status (several kinds: one trip, nearest first)',
     group: 'work', example: '!mine coal_ore 8',
     run: ({ reply, args }) => {
-      const [block, count] = args;
-      const a = (block ?? '').toLowerCase();
-      if (a === 'stop') return reply(c.mineStop());
-      if (a === 'status') return reply(c.mineStatus());
-      if (!block || !/^[a-z0-9_:]+$/i.test(block)) return reply('usage: !mine <block> [n] | stop | status');
-      const n = count === undefined ? 1 : Number(count);
-      if (!Number.isInteger(n) || n < 1 || n > MAX_MINE) return reply(`usage: !mine <block> [n 1..${MAX_MINE}]`);
-      reply(c.mine(block, n, (m) => reply(m)));
+      const a = (args[0] ?? '').toLowerCase();
+      if (a === 'stop' && args.length === 1) return reply(c.mineStop());
+      if (a === 'status' && args.length === 1) return reply(c.mineStatus());
+      const p = parseMineArgs(args); // Track AQ: several kinds
+      if ('error' in p) return reply(p.error);
+      const first = p.kinds[0]!;
+      if (p.kinds.length === 1) return reply(c.mine(first.block, first.count, (m) => reply(m)));
+      reply(c.mine(first.block, p.kinds.reduce((x, k) => x + k.count, 0), (m) => reply(m), p.kinds));
     },
   });
+}
+
+/** `mining 8 coal_ore/deepslate_coal_ore`; Track AQ: `mining in one trip: 4 iron_ore, 6 coal_ore, 2 diamond_ore` */
+function startText(block: string, n: number, kinds: MineKinds | undefined): string {
+  if (kinds && kinds.length > 1) return `mining in one trip: ${kinds.map((k) => `${k.count} ${k.block}`).join(', ')}`;
+  return `mining ${n} ${[...(block.toLowerCase() === 'ores' ? ['ores (every kind)'] : resolveTargets(block))].join('/')}`;
 }
 
 /** One line for the end of a !mine run. */
 export function mineEndLine(m: MineTask): string {
   const s = m.stats;
-  const name = [...m.names][0] ?? m.opts?.block ?? '?';
+  if (m.quotas.length > 1) {
+    // Track AQ: `mine iron+coal+diamond: iron 4/4, coal 6/6, diamond 2/2 done`
+    const head = `mine ${m.quotas.map((q) => q.label).join('+')}: ${m.quotaLine()}`;
+    if (m.state === 'done') return `${head} done`;
+    if (m.state === 'none_left') return `${head}, nothing else known${s.unsafe.length + s.skipped.length ? ` (${s.unsafe.length + s.skipped.length} skipped)` : ''}`;
+    if (m.state === 'stopped') return `${head}, stopped`;
+    return `${head}, ${m.state}${m.lastError ? ` (${m.lastError})` : ''}`;
+  }
+  const name = m.quotas[0]?.label === 'ores' ? 'ores' : ([...m.names][0] ?? m.opts?.block ?? '?'); // Track AQ: `ores`
   const want = m.opts?.count ?? 0;
   switch (m.state) {
     case 'done':
       return `mine ${name}: ${s.mined}/${want} done`;
     case 'none_left':
-      return `mine ${name}: ${s.mined}/${want}, no seen ${name} left${s.unsafe.length ? ` (${s.unsafe.length} skipped as unsafe)` : ''}`;
+      return `mine ${name}: ${s.mined}/${want}, no seen ${name} left${s.unsafe.length ? ` (${s.unsafe.length} skipped as unsafe)` : ''}${s.skipped.length ? ` (${s.skipped.length} skipped: ${s.skipped[s.skipped.length - 1]!.why})` : ''}`; // Track AQ: the skip reason
     case 'low_health':
       return `mine ${name}: stopped at ${s.mined}/${want}, health low`;
     case 'no_pickaxe':
@@ -122,6 +165,8 @@ export interface FarmCommandDeps {
   mineTunnelLen?: () => number;
   /** Track Z: setting `mineSeenOnly` (default false: any known ore). */
   mineSeenOnly?: () => boolean;
+  /** Track AQ: setting `mineDirect` (default true: direct tunnels and shafts). */
+  mineDirect?: () => boolean;
   /**
    * Track Z: the afk task's process manager. With it `!farm` and `!mine` are user processes
    * (pre-empted by guard / flee / night and resumed, held by `!pause`, ended by `!stop`, shown by
@@ -184,6 +229,7 @@ export function registerFarmCommands(deps: FarmCommandDeps): FarmCommandsResult 
   const { mine, memory } = createMinerFor(parts, {
     ...(deps.mineTunnelLen ? { tunnelLen: deps.mineTunnelLen } : {}),
     ...(deps.mineSeenOnly ? { seenOnly: deps.mineSeenOnly } : {}),
+    ...(deps.mineDirect ? { direct: deps.mineDirect } : {}), // Track AQ
   });
   const here = () => {
     const p = mob.position();
@@ -220,16 +266,16 @@ export function registerFarmCommands(deps: FarmCommandDeps): FarmCommandsResult 
         return `stopped; ${farm.summary()}`;
       },
       farmStatus: () => `${farm.summary()}${live(fp) ? '' : ' (no farm process)'}`,
-      mine: (block, n, onEnd) => {
+      mine: (block, n, onEnd, kinds) => {
         if (!here()) return 'mine: not ready yet';
         const f = live(fp);
         if (f) pm.stop(f, 'stopped');
-        const p = new MineProcess(mine, { block, count: n });
+        const p = new MineProcess(mine, { block, count: n, ...(kinds ? { kinds } : {}) });
         mp = pm.add(p);
         void p.result.then((s) => {
           if (s !== 'stopped') onEnd(mineEndLine(mine));
         });
-        return `mining ${n} ${[...resolveTargets(block)].join('/')}${pm.paused ? ' (held: !resume)' : ''}`;
+        return `${startText(block, n, kinds)}${pm.paused ? ' (held: !resume)' : ''}`;
       },
       mineStop: () => {
         const p = live(mp);
@@ -256,16 +302,15 @@ export function registerFarmCommands(deps: FarmCommandDeps): FarmCommandsResult 
       return was ? `stopped; ${farm.summary()}` : 'not farming';
     },
     farmStatus: () => farm.summary(),
-    mine: (block, n, onEnd) => {
+    mine: (block, n, onEnd, kinds) => {
       if (!here()) return 'mine: not ready yet';
       farm.stop();
       deps.stopOthers?.();
-      const run = mine.start({ block, count: n });
-      const names = [...mine.names].join('/');
+      const run = mine.start({ block, count: n, ...(kinds ? { kinds } : {}) });
       void run.then(() => {
         if (mine.state !== 'stopped') onEnd(mineEndLine(mine));
       });
-      return `mining ${n} ${names}`;
+      return startText(block, n, kinds);
     },
     mineStop: () => {
       const was = mine.running;

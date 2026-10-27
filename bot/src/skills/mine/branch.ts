@@ -30,6 +30,9 @@ import type { Goal } from '../nav/goals.ts';
 import type { PlaceOptions, PlaceResult } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import type { MineState } from './miner.ts';
+import { clearStep, flatStep, stairStep, type Dir, type Step } from './tunnel.ts'; // Track AQ: one step primitive for the staircase and the direct tunnels
+
+export { flatStep, stairStep, type Dir, type Step } from './tunnel.ts';
 
 /** A pickaxe anywhere in the inventory (miner.ts hasPickaxe, repeated here so the two modules do not import each other's values). */
 export function carriesPickaxe(slots: readonly (ItemStack | null)[]): boolean {
@@ -64,7 +67,6 @@ export const TORCH_EVERY = 8;
 /** Failed digs / walks of one step before the step counts as blocked. */
 const STEP_ATTEMPTS = 3;
 
-export type Dir = readonly [number, number];
 export const DIRS: readonly Dir[] = [
   [1, 0],
   [0, 1],
@@ -104,30 +106,6 @@ export function branchTarget(names: Iterable<string>, setting: string, feetY: nu
   return { y: BRANCH_Y[ore]!, ore, why: `best y for ${ore}` };
 }
 
-/** One step of the layout: the cells to clear (top first), the floor the feet will stand on, the new feet cell. */
-export interface Step {
-  feet: Vec3;
-  dig: Vec3[];
-  floor: Vec3;
-}
-
-/** A staircase step from feet cell `tip` in `dir`, one block down (dy -1) or up (dy 1). */
-export function stairStep(tip: Vec3, dir: Dir, dy: -1 | 1): Step {
-  const feet = { x: tip.x + dir[0], y: tip.y + dy, z: tip.z + dir[1] };
-  if (dy < 0) {
-    // walking forward over the edge needs the next column clear at the old head height and above it
-    return { feet, dig: [up(feet, 2), up(feet, 1), feet], floor: up(feet, -1) };
-  }
-  // the jump needs the head room above the old head, the new column its two body cells
-  return { feet, dig: [up(tip, 2), up(feet, 1), feet], floor: up(feet, -1) };
-}
-
-/** A flat 2-high tunnel step from `tip` in `dir`. */
-export function flatStep(tip: Vec3, dir: Dir): Step {
-  const feet = { x: tip.x + dir[0], y: tip.y, z: tip.z + dir[1] };
-  return { feet, dig: [up(feet, 1), feet], floor: up(feet, -1) };
-}
-
 /** The feet cells of the planned staircase from `start` to `y` going `dir` (no turns; tests and the e2e pick their start with it). */
 export function stairCells(start: Vec3, dir: Dir, y: number): Step[] {
   const out: Step[] = [];
@@ -164,10 +142,6 @@ export function tunnelCells(tip: Vec3, dir: Dir, pairs: number): { main: Step[];
     }
   }
   return { main, branches };
-}
-
-function up(p: Vec3, dy: number): Vec3 {
-  return { x: p.x, y: p.y + dy, z: p.z };
 }
 
 const key = (p: Vec3) => `${p.x},${p.y},${p.z}`;
@@ -436,30 +410,32 @@ export class BranchRun {
       this.h.log?.info(`branch: step to ${fmt(st.feet)} blocked: ${why}`);
       return 'blocked';
     }
-    for (const c of st.dig) {
-      if (this.h.free(c) === true) continue;
-      const rule = this.h.breakRule(c);
-      if (rule === 'air') continue;
-      if (rule) return 'blocked';
-      // the ore itself in the way: the miner's loop mines it (counted, collected) on the next scan;
-      // the layout digs it only when it is still there the second time
-      const name = this.h.blockAt?.(c)?.name;
-      if (name && this.task.names.has(name) && !this.deferred.has(key(c))) {
-        this.deferred.add(key(c));
-        this.h.log?.info(`branch: ${name} in the way at ${fmt(c)}: left to the miner`);
-        return 'interrupted';
-      }
-      this.task.state = 'dig';
-      const r = await this.h.dig(c);
-      if (!this.alive()) return 'interrupted';
-      if (!r.ok) {
-        this.stats.digFailures++;
-        this.h.log?.info(`branch: dig ${fmt(c)} failed: ${r.reason}`);
-        return r.reason === 'interrupted' || r.reason === 'cancelled' ? 'interrupted' : 'failed';
-      }
-      this.stats.dug++;
-      this.stats.dugAt.push({ ...c });
-    }
+    // Track AQ: the same step primitive as the direct tunnels (tunnel.ts clearStep)
+    this.task.state = 'dig';
+    const r = await clearStep(
+      { dig: (p, o) => this.h.dig(p, o), breakRule: (p) => this.h.breakRule(p), free: (p) => this.h.free(p), alive: () => this.alive() },
+      st,
+      {
+        // the ore itself in the way: the miner's loop mines it (counted, collected) on the next scan;
+        // the layout digs it only when it is still there the second time
+        skip: (c) => {
+          const name = this.h.blockAt?.(c)?.name;
+          if (!name || !this.task.names.has(name) || this.deferred.has(key(c))) return undefined;
+          this.deferred.add(key(c));
+          this.h.log?.info(`branch: ${name} in the way at ${fmt(c)}: left to the miner`);
+          return 'defer';
+        },
+        onDug: (c) => {
+          this.stats.dug++;
+          this.stats.dugAt.push({ ...c });
+        },
+        onFail: (c, why) => {
+          this.stats.digFailures++;
+          this.h.log?.info(`branch: dig ${fmt(c)} failed: ${why}`);
+        },
+      },
+    );
+    if (r !== 'ok') return r;
     const w = await this.standOn(st.feet);
     return w;
   }

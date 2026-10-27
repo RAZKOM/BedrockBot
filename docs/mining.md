@@ -27,6 +27,12 @@ rule below); seen ore is remembered across restarts in the world cache; an unrea
 plan. Sections "As a process", "Candidates: `mineSeenOnly`", "Ore memory across restarts" and
 "Unreachable ores" below.
 
+**Track AQ changes (wave 10, decision 0038):** a cheap walk probe before every approach, then the walk
+or a direct tunnel / shaft straight to the ore (blocked: skipped with the reason at once); veins mined as
+one group with every drop collected; the job's kind of items within 8 blocks picked up before each
+target; several kinds with quotas in one trip (`!mine iron_ore 8 coal_ore 16`, `!get ores 32`); setting
+`mineDirect`. Section "Mining v3" below.
+
 ## Files
 
 | File | What |
@@ -37,6 +43,9 @@ plan. Sections "As a process", "Candidates: `mineSeenOnly`", "Ore memory across 
 | `bot/src/skills/farm/index.ts` | `createMiner(parts, { tunnelLen })`: the plain wave-6 wiring (no probe, no blacklist) |
 | `bot/src/tasks/process/mine.ts` | `MineProcess` (Track Z) |
 | `bot/src/chat/commands-farm.ts` | `!mine` (with `!farm`), `registerFarmCommands` (called from tasks/registry.ts), the passive ore scan |
+| `bot/src/skills/mine/tunnel.ts` | Track AQ: `planTunnel` (the direct tunnel / shaft plan on the world model), `shaftRule`, `chooseTunnel`, `clearStep` (the step primitive, also branch mining's), `runTunnel`, `stairStep` / `flatStep` / `shaftStep` |
+| `bot/src/skills/mine/vein.ts` | Track AQ: `veinFrom` (18-connected flood fill of one ore kind), `oreKind`, `veinCentre` / `veinRadius` |
+| `bot/src/skills/collect/sweep.ts` | Track AQ: `sweepItems` (the floor sweep: one entity scan when nothing is near), `isWoodDrop`, `isFoodDrop` |
 | `bot/src/skills/mine/branch.ts` | wave 9 Track AI: branch mining (`branchMore`, the miner's hook when no target is known; `BranchRun`, the Y table `BRANCH_Y`), wired per bot by `attachBranch` in chat/commands-explore.ts |
 
 ## As a process (Track Z)
@@ -161,6 +170,129 @@ for the *dig* instead (below).
 Nothing is placed and nothing is lit. `stop()` bumps the run's generation and cancels the running
 skill synchronously (the Digger sends `abort_break` on the next tick).
 
+## Mining v3 (wave 10, Track AQ)
+
+Decision record: [decisions/0038-mining-v3-tunnels-veins-batches.md](decisions/0038-mining-v3-tunnels-veins-batches.md).
+The owner on the Realm, 2026-10-30: "why is it struggling so bad to mine through stuff to reach ores?
+Shouldn't it just mine directly to the ores, break the group, pick them up, then proceed to the next
+nearest group?", "it can 100% dig straight down", "if I say get wood, and drop wood on the floor it
+should try to pick it up", and batching several ores into one trip. Files: `skills/mine/tunnel.ts`
+(plan, rules, step primitive, run), `skills/mine/vein.ts` (flood fill), `skills/collect/sweep.ts` (the
+floor sweep), the loop in `skills/mine/miner.ts`, the wiring in `skills/mine/wire.ts`.
+
+### The approach: a cheap probe, then walk or tunnel
+
+Before every approach (setting `mineDirect`, default on) the miner asks for a walk without digging: a
+bounded probe plan (home logistics' `probePath`: 4 000 nodes, 300 ms of search, sliced with yields, so
+physics never waits). A path that is at most 3 x the straight line + 8 blocks is walked (the approach
+of wave 9, dig-through allowed). No path, or a longer detour: the direct tunnel. An ore that cannot be
+reached costs one probe and one tunnel plan (the whole verdict in 0 to 20 ms in the e2e) instead of
+three full plans of 100 000 nodes and their gotos. `mineDirect off` is the wave-9 approach.
+
+### Direct tunnels (`tunnel.ts`)
+
+| Step | Cells dug (top first) | Note |
+|---|---|---|
+| flat | the head and feet cells of the next column | horizontal tunnels into walls: the default |
+| up | the head room over the old head, the next column's head and feet one higher | a staircase up, never a pillar |
+| down | the next column at the old head height, the feet height and one lower | a diagonal staircase the walk planner climbs back |
+| shaft | the block under the feet | the bot stands on what it digs and drops into it (owner, 2026-10-30) |
+
+- **Planned whole before the first dig**, on the world model: each step the one that brings the feet
+  closest to where the ore can be mined from (ore at feet or head height beside the feet), never back
+  the way it came; with more height than ground to cover it turns right / left every step (a 2 x 2
+  spiral), so an ore straight below is reached by stairs too. The plan ends when the eye is within 4.5
+  of the ore with a clear line of sight, or when the ore (or another block of the asked kinds) is the
+  next cell to dig: the miner's sight digs and dig take over.
+- **Rules for every cell**: the navigator's break rules (`nav.breakRules()`, `breakBlocker` without the
+  under-feet rule): the protected area around home (`protectRadius`), built blocks (`isBuiltBlock`) and
+  containers, liquid in or next to the cell, a gravity block over it, unknown blocks. A cell the way back
+  stands on is never dug; every new feet cell needs a solid dry floor (a step blocked only by the shape
+  of the ground may go one step round, e.g. walk to the hill's foot first). The first blocked cell ends
+  the plan and the ore is skipped with the reason (`tunnel blocked: protected at 70965 -59 70296`) before
+  anything is dug. Every cell is checked again on the live world right before its dig. A straight line
+  blocked by a liquid falls back to the dig-through walk (same rules; it may go around); a protected block
+  does not.
+- **Shafts**: extra rules before each block: the block below known and solid (never into a cave or an
+  unknown block), no liquid in the column or its 4 side neighbours 1 or 2 blocks below, no pointed
+  dripstone in the 3 x 3 below within 3 blocks, no gravity block over the shaft's top, never within 2
+  blocks of the world's floor. The staircase plan is taken unless the shaft plan digs 8 or more blocks
+  fewer (`SHAFT_SAVES`); the shaft goes horizontal to the ore's column first, then down. A shaft needs a
+  way back before it starts: throwaway blocks for a pillar (depth + 4) or a staircase up from its bottom
+  (planned too). When the shaft is the short way and finds a hazard under the ore (liquid, dripstone, a
+  cave), the ore is skipped with that reason instead of a long staircase down beside it.
+- `mineTunnelLen` caps the planned blocks of one tunnel (plan longer: skipped for the run).
+- **Back up**: a run that tunnelled below its first tunnel's start goes back there at its end (done or
+  nothing left): the walk (staircases are climbable), a pillar with throwaway blocks (the navigator's
+  pillar-up moves), or a staircase dug up (`planTunnel` with a feet goal).
+- **One primitive**: `clearStep` digs the direct tunnels and branch mining's staircase and tunnels
+  (`BranchRun.doStep`); `stairStep` / `flatStep` live in tunnel.ts (branch.ts re-exports them).
+
+### Veins (`vein.ts`)
+
+After the first block of a vein the group is the flood fill of the same kind through face and edge
+neighbours (18-connected; deepslate twins and lit redstone count as one kind; at most 64 blocks). The
+miner takes it from where it stands: the nearest block in reach (4.6) and in sight, a line-of-sight dig
+(same rules) when one is in reach but hidden, a step into the vein's own holes (no digging) when the
+next block is out of reach; no scan or re-plan between blocks; it stops when the kind's quota is met.
+Then one collect over the whole group and a walk into each hole whose drop is still there (the rock over
+a hole without head room is dug first when the rules allow). `!status`: `mine diamond_ore 3/7 (dig, 0
+skipped, vein 3/7)`; `stats.veins` has each group (size, mined, first and last block, collected).
+
+### Produce on the floor (`collect/sweep.ts`)
+
+Before it chooses its next target every work job picks up its own kind of items within 8 blocks (its
+own drops left behind, what the owner dropped): mine (ore drops), gather wood (logs, saplings, sticks,
+apples: `!get wood` with logs on the floor takes them before a tree), food (food items, leather,
+feathers, wool). Nothing of the kind near: one scan of the entities, no collect call, no grace wait (the
+miner's old per-target sweep waited 10 ticks every time). Before the job ends the miner also walks into
+the holes of its run whose drop is still there. Farm and build are not wired (not this track's files).
+
+### Several kinds in one trip
+
+`!mine iron_ore 8 coal_ore 16 diamond_ore 4` (and `!get iron 8 coal 16`, `!get ores 32`, docs/get.md):
+one job with a quota per kind. The candidates are the kinds still below their quota, nearest first across
+kinds from wherever the bot stands; a kind drops out when its quota is met; the job ends when every
+quota is met or nothing is left. `ores` is every ore kind with one quota. Status `mine: iron 5/8, coal
+16/16, diamond 0/4 (dig, 0 skipped)`, start `mining in one trip: 8 iron_ore, 16 coal_ore, 4 diamond_ore`,
+end `mine iron+coal+diamond: iron 8/8, coal 16/16, diamond 4/4 done`. The NL step `mine` takes
+`more: [{block, count}]`. One kind behaves as before.
+
+### Settings
+
+| Setting | Default | What |
+|---|---|---|
+| `mineDirect` | on | the walk probe and the direct tunnels / shafts; off: the wave-9 approach (dig-through walk only) |
+| `mineTunnelLen` | 32 | blocks of one direct tunnel at most (and branch mining's tunnel without a find) |
+| `digPenalty`, `protectRadius` | 60, 48 | (2026-10-30, navigator) every dug block of a walk costs 60 ticks; nothing is dug within 48 of home; built blocks never: the tunnels obey the same rules |
+
+### Measured (Track AQ, BDS 1.26.60.6)
+
+e2e `mine-tunnel`, `mine-vein` (bds-dig, flat, truth-built shapes) and `mine-rock` (bds-explore, seed 7) on
+2026-10-30. "Before" is the code before Track AQ (`MINE_BEFORE=1`: the same cases, no assertions); "after"
+two runs where both are given.
+
+| Case | Before (wave 9) | After (Track AQ) |
+|---|---|---|
+| ore 4 under the floor, 4 across | not reached: unreachable after 0.5 s | staircase of 12 blocks, mined at 10.6 / 10.6 s, back on the floor 2.7 s later (job 15.7 / 15.7 s) |
+| ore 8 into a wall at head height, iron pickaxe | mined at 9.3 s (7 blocks dug through + 3 sight digs, a walk around the wall's side; job 25.3 s) | straight tunnel 14 blocks in 11.3 / 11.3 s = 74 / 74 blocks per minute, mined at 12.2 / 12.2 s (job 14.5 / 14.5 s) |
+| the same, netherite pickaxe | mined at 8.1 s (job 24.1 s) | 14 blocks in 9.1 / 9.3 s = 92 / 90 blocks per minute, mined at 9.7 / 9.9 s (job 12.1 / 12.3 s) |
+| ore 6 up inside a hill, 4 in | not reached: unreachable after 7.45 s (1 failed goto) | staircase up of 11 blocks, mined at 10.8 / 11.0 s, no block placed |
+| ore 10 straight down (stone tower) | not reached: unreachable after 0.5 s | shaft 9 blocks in 7.4 / 7.5 s = 73 / 72 blocks per minute down, mined at 8.3 / 8.4 s; pillar back up 10 blocks in 6.1 / 6.1 s = 98 blocks per minute (cobblestone carried); the staircase back without throwaway blocks is unit-tested only |
+| the same, lava 2 under the ore | (unreachable after 0.5 s) | skipped in 0.00 / 0.01 s: `tunnel blocked: liquid_below at x -60 z`, nothing dug |
+| the same, dripstone cave under the ore | (unreachable after 0.5 s) | skipped in 0.00 s: `tunnel blocked: dripstone_below at x -61 z` |
+| stone bricks in the tunnel's line | the dig-through walk went around the brick (mined) | skipped in 0.02 s: `tunnel blocked: protected at ...`, nothing opened, brick and ore intact |
+| water over / lava under the line, 2 ores | both mined (43.5 s), no liquid next to an opened cell | straight line blocked (`next_to_liquid`), the walk mined one, a 6-block tunnel round the other side the second (28.9 / 29.0 s), no liquid next to any opened cell (truth:find) |
+| unreachable verdict (ore walled in by stone bricks under the floor) | 0.49 s (one bounded probe + one full plan in-thread; the flat test world is small) | 0.00 s (probe 1 ms + tunnel plan); the Realm log before: 10 minutes for 6 ores (3 failed gotos of 3 plans each) |
+| 7-block diamond vein in a wall, plain iron pickaxe | 17.8 s from the first to the last block, a re-scan between blocks, 6 of 7 diamonds picked up (job 32.5 s) | one group (`vein 7/7`), 9.0 / 9.1 s first to last, 7 of 7 diamonds (truth), job 12.0 / 12.0 s |
+| 4 logs spawned 5 blocks away, `gather 4`, no tree | failed after 5 s (`no trees within 16 blocks`), 0 logs | done in 1.2 / 1.1 s, 4 logs (truth) |
+| 4 iron + 6 coal + 2 diamond within 20 blocks | three single jobs: 154.3 blocks walked, 76.0 s | three single jobs (new code) 152.0 / 156.3 blocks walked in 63.1 / 64.4 s; one job `!mine iron_ore 4 coal_ore 6 diamond_ore 2`: 112.3 / 105.9 blocks in 57.2 / 53.1 s (28 % / 32 % less walking), nearest first across kinds (`iron diamond coal iron iron diamond coal coal iron coal coal coal`), 4 raw iron, 6 coal, 2 diamonds (truth) |
+| bds-explore: `!mine iron_ore 4` from a cave, iron 5 to 10 into the rock | (not run) | `4/4 done` in 89.7 / 23.7 s (run 1: a staircase of 9, a shaft of 17, a pillar of 13 back up; run 2: a staircase of 14 to a vein of 4, walked back up), 4 raw iron, no liquid next to the 33 / 21 opened cells; two earlier runs (44.8 and 52.4 s) left one drop in a hole without head room: fixed by digging the rock over the hole and the end-of-run hole walk |
+
+The walk probe costs 1 to 21 ms on the flat world (3 probes in 53 ms in the cave). The direct tunnel's
+pace (73 to 74 blocks per minute with iron, 90 with netherite on stone) includes the walk into each new
+cell; the Digger's break time alone is 8 / 5 ticks per stone block.
+
 ## Branch mining (wave 9, Track AI)
 
 Decision record: [decisions/0030-explore-and-branch-mining.md](decisions/0030-explore-and-branch-mining.md).
@@ -264,6 +396,15 @@ right behind it; 4 coal ores buried two blocks deep; the bot starts outside with
 | `bot/test/e2e/mine-memory.test.ts` (Track Z, bds-dig) | ore seen in run 1 mined by a new CLI process from memory (see "Ore memory across restarts"); env `DIG_BDS_HOST` / `DIG_BDS_PORT` / `DIG_BDS_CONTAINER`, `MINE_VERBOSE=1` (the CLI's output) |
 | `bot/test/unit/skills/branch.test.ts` (Track AI) | the Y table, layout geometry, BranchRun on a fake voxel world (staircase, tunnel, branches, turns at water / gaps / gravel, stop rules, the ore left to the miner, torches, the hole walk), `branchMore` (announce, end line, return) |
 | `bot/test/e2e/explore-mine.test.ts` (Track AI, bds-explore) | `!mine iron_ore 3` with no iron known: staircase to y 16, branches, 3 iron picked up, back on the surface within 10 min, no liquid next to any opened cell (truth); env `EXPLORE_BDS_*` (docs/explore.md) |
+| `bot/test/unit/skills/mine-tunnel.test.ts` (Track AQ) | fixture worlds: tunnel geometry (horizontal, staircase down / up, spiral, another ore in the line), every dig rule, every shaft rule (liquid / dripstone / cave / unknown below, gravity over the top, world floor), staircase vs shaft, the climb-back plan, runTunnel's re-check, clearStep's defer, the vein fill, the sweep |
+| `bot/test/unit/skills/mine-v3.test.ts` (Track AQ) | the MineTask loop: probe then walk / tunnel, a long detour tunnels, a blocked tunnel skips at once with the reason, `mineDirect` off, shaft + pillar back, shaft + staircase back, lava under the ore, veins as one group (status, one collect, quota), several kinds nearest first, `ores`, `!mine` / `!get` forms, the NL steps |
+| `bot/test/e2e/mine-tunnel.test.ts` (Track AQ, bds-dig) | ore 4 under the floor (staircase, back on the floor), 8 into a wall (iron and netherite pickaxe), 6 up in a hill, 10 straight down (shaft, pillar back), lava / dripstone under the ore, stone bricks in the line, water / lava by the line (no liquid next to an opened cell, truth), the cheap unreachable verdict; `MINE_BEFORE=1` runs it without assertions |
+| `bot/test/e2e/mine-vein.test.ts` (Track AQ, bds-dig) | a 7-block diamond vein (one group, 7 diamonds, truth), logs spawned 5 blocks away picked up by the gather job, `!mine iron_ore 4 coal_ore 6 diamond_ore 2` against three single jobs (walked distance) |
+| `bot/test/e2e/mine-rock.test.ts` (Track AQ, bds-explore) | `!mine iron_ore 4` from a cave with the iron 5 to 10 blocks into the rock (start chosen with truth:find): done within 5 min, 4 raw iron (truth), no liquid next to an opened cell |
+
+Track AQ's e2e run on bds-dig (`DIG_BDS_*`, `farm-truth.ts connectFarmBot(prefix, { target, container })`)
+and bds-explore (`EXPLORE_BDS_*`); `mine-cave` runs on bds-dig too with `FARM_BDS_PORT=19148
+FARM_BDS_CONTAINER=bds-dig`.
 
 ```sh
 node scripts/bds.mjs --profile farm up      # bds-farm, udp/19186
@@ -286,8 +427,13 @@ Env: `FARM_BDS_HOST` (127.0.0.1), `FARM_BDS_PORT` (19186), `FARM_BDS_CONTAINER` 
 - A floating / walled-off ore still costs one failed goto when the probe plan was cut short and the
   bot first walks under it.
 - Not tested in a natural cave (deepslate, gravel ceilings, water): the rules are the navigator's.
-- Wave 9 (Track AI): a seen ore deep below the bot in a cave the navigator cannot dig down to costs
-  3 failed gotos of 3 plans (100 000+ nodes each) per target before it is blacklisted; measured about
-  10 minutes for 6 such ores during a branch run. A cheap "is it below a solid floor I may not dig"
-  check, or marking it unreachable after the first full goto without progress, would fix it (miner /
-  navigator, not Track AI's files).
+- Wave 9 (Track AI): a seen ore deep below the bot in a cave the navigator cannot dig down to cost 3
+  failed gotos of 3 plans per target (about 10 minutes for 6 ores). Fixed by Track AQ: the walk probe and
+  the direct tunnel / shaft reach it, or skip it at once with the reason.
+- Track AQ: the tunnel is straight by design: a protected block in its line skips the ore even when a
+  detour through other rock exists (the owner wants the stop); a liquid in its line falls back to the
+  dig-through walk. A shaft without throwaway blocks digs its staircase back only at the end of the run.
+- Track AQ: the floor sweep is wired for mine, gather wood and the food hunt; farm and build clear do
+  not sweep their produce yet (not this track's files).
+- Track AQ: a natural cave can hold built blocks (mineshaft planks): they are never dug, so a vein
+  member behind one costs 3 failed sight digs before it is skipped.

@@ -35,7 +35,7 @@ export const STEP_SCHEMAS = {
   guard: z.strictObject({ command: z.literal('guard'), mode: z.enum(['on', 'off']), radius: z.number().int().min(2).max(64).optional() }),
   kill: z.strictObject({ command: z.literal('kill'), type: mobType, count: z.number().int().min(1).max(64) }),
   gather: z.strictObject({ command: z.literal('gather'), count: z.number().int().min(1).max(2304) }),
-  mine: z.strictObject({ command: z.literal('mine'), block: blockName, count: z.number().int().min(1).max(256) }),
+  mine: z.strictObject({ command: z.literal('mine'), block: blockName, count: z.number().int().min(1).max(256), more: z.array(z.strictObject({ block: blockName, count: z.number().int().min(1).max(256) })).max(8).optional() }), // Track AQ: more = further kinds, one trip
   farm: z.strictObject({ command: z.literal('farm'), radius: z.number().int().min(1).max(32).optional() }),
   food: z.strictObject({ command: z.literal('food'), pen: z.boolean().optional() }), // Track AK: pen
   eat: z.strictObject({ command: z.literal('eat') }),
@@ -46,7 +46,7 @@ export const STEP_SCHEMAS = {
   sleep: z.strictObject({ command: z.literal('sleep') }),
   pause: z.strictObject({ command: z.literal('pause') }),
   resume: z.strictObject({ command: z.literal('resume') }),
-  get: z.strictObject({ command: z.literal('get'), item: blockName, count: z.number().int().min(1).max(2304).optional() }), // Track AD: !get, the first choice for getting items
+  get: z.strictObject({ command: z.literal('get'), item: blockName, count: z.number().int().min(1).max(2304).optional(), more: z.array(z.strictObject({ item: blockName, count: z.number().int().min(1).max(256) })).max(8).optional() }), // Track AD: !get, the first choice for getting items; Track AQ: more = further ores, one trip
   breed: z.strictObject({ command: z.literal('breed'), type: z.enum(BREED_KINDS).optional(), pairs: z.number().int().min(1).max(8).optional() }), // Track AK
   panel: z.strictObject({ command: z.literal('panel') }), // Track AK
   drop: z.strictObject({ command: z.literal('drop'), what: z.enum(['all', 'items']) }), // Track AK: everything / everything but food, armour, tools
@@ -126,7 +126,7 @@ export const COMMAND_SPECS: Record<Exclude<StepKind, TalkKind>, CommandSpec> = {
   guard: { chat: 'guard', wait: 'none' },
   kill: { chat: 'kill', wait: 'process', done: /^kill \S+: / },
   gather: { chat: 'gather', wait: 'process' },
-  mine: { chat: 'mine', wait: 'reply', done: /^mine \S+: /, fail: /^mine: / },
+  mine: { chat: 'mine', wait: 'reply', done: /^mine \S+: /, fail: /^(mine: |usage: !mine)/ },
   farm: { chat: 'farm', wait: 'endless', fail: /^farm: / },
   food: { chat: 'food', wait: 'process' },
   eat: { chat: 'eat', wait: 'reply', done: /^(ate |eat: )/ },
@@ -227,7 +227,7 @@ export function stepCommand(s: Step): string {
     case 'gather':
       return `gather ${s.count}`;
     case 'mine':
-      return `mine ${s.block} ${s.count}`;
+      return [`mine ${s.block} ${s.count}`, ...(s.more ?? []).map((m) => `${m.block} ${m.count}`)].join(' '); // Track AQ
     case 'farm':
       return s.radius !== undefined ? `farm ${s.radius}` : 'farm';
     case 'wp_set':
@@ -239,6 +239,7 @@ export function stepCommand(s: Step): string {
     case 'explore': // Track AI
       return s.radius !== undefined ? `explore ${s.radius}` : 'explore';
     case 'get': // Track AD
+      if (s.more?.length) return [`get ${s.item} ${s.count ?? 8}`, ...s.more.map((m) => `${m.item} ${m.count}`)].join(' '); // Track AQ
       return s.count !== undefined ? `get ${s.item} ${s.count}` : `get ${s.item}`;
     case 'food': // Track AK
       return s.pen ? 'food pen' : 'food';

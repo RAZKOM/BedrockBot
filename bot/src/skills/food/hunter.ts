@@ -13,10 +13,12 @@ import type { Goal } from '../nav/goals.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { countHerd, foodItemCount, pickTarget, type FoodTarget, type HerdCount } from './finder.ts';
 import { inPenOrRim, insidePen, type Pen } from './pen.ts'; // Track AF
+import type { CollectOptions } from '../collect/collect.ts'; // Track AQ
+import { isFoodDrop, sweepItems } from '../collect/sweep.ts'; // Track AQ
 
 export interface HuntMover {
   goto(goal: Goal, opts?: GotoOptions): Promise<SkillResult>;
-  collect(radius: number, timeoutTicks: number): Promise<unknown>;
+  collect(radius: number, timeoutTicks: number, opts?: CollectOptions): Promise<unknown>; // Track AQ: opts (the floor sweep's filter)
 }
 
 export interface HuntCombat {
@@ -151,6 +153,11 @@ export class Hunter {
     const inv = this.d.inventory;
     while (res.gained < o.want) {
       if (cancelled()) return { ...res, reason: 'interrupted' };
+      // Track AQ (collect/sweep.ts): food lying within 8 blocks first (a drop left after a kill, the owner's)
+      const had = foodItemCount(inv.slots);
+      if (await sweepItems((r, t2, c) => this.d.mover.collect(r, t2, c), isFoodDrop, { entities: this.d.entities, position: this.d.position })) res.gained += Math.max(0, foodItemCount(inv.slots) - had);
+      if (cancelled()) return { ...res, reason: 'interrupted' };
+      if (res.gained >= o.want) break;
       const t = this.peek(o);
       if (!t) {
         res.reason = 'none_left';

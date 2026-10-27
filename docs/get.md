@@ -33,6 +33,8 @@ Decision record: [decisions/0025-get-front-door-and-stash.md](decisions/0025-get
 | `!get coal 4` | `getting 4 coal: mining coal_ore`, `mining 4 coal_ore/deepslate_coal_ore`, `mine coal_ore: 4/4 done` |
 | `!get wheat` | `getting wheat: farming wheat (one round of the field)`, `farming r=8 around ...`, then `get wheat: 81 wheat harvested (81 crops in all), the field is done` (the round check is unit-tested on fakes; no e2e yet) |
 | `!get bread` | `get: I do not know how to get bread; I can get: wood, ores (coal, iron, gold, copper, diamond, redstone, lapis, emerald), stone, dirt, sand, gravel, flint, clay, food (beef, pork, mutton, chicken), string, crops (wheat, carrots, potatoes, beetroot)` |
+| `!get iron 8 coal 16` / `!get 8 iron and 16 coal` (wave 10, Track AQ) | `getting 8 raw_iron, 16 coal: mining iron_ore, coal_ore in one trip`, `mining in one trip: 8 iron_ore, 16 coal_ore`, at the end `mine iron+coal: iron 8/8, coal 16/16 done` (see "Several ores in one trip") |
+| `!get ores 32` (Track AQ) | `getting 32 ores: mining every ore kind in one trip (n blocks of any ore)`, `mining 32 ores (every kind)`, `mine ores: 32/32 done` |
 | `!get stop` | `stopped mine coal_ore 2/4 (dig, 0 skipped)`: the job `!get` started (else any running gather / mine / food / farm); `get: nothing to stop` |
 | `!get status` | `get: 4 coal via !mine coal_ore 4: mine coal_ore 2/4 (dig, 0 skipped); stash: 1 attempts (1 ok, 0 full), last: shulker box at ...: moved 1728 cobblestone in 27 requests (28 on the shared Containers), picked up again, box full`; `get: idle` |
 
@@ -62,7 +64,22 @@ Counts above the command's own maximum are cut to it (2304 logs, 256 blocks, 64 
 | food, meat, beef, steak, pork(chop), mutton, chicken, rabbit | hunt | `!food n` | any food mob counts (`!food` has no kind filter) |
 | string, cobweb | hunt | `!kill spider n` | counting spiders killed |
 | wheat, seeds, wheat_seeds, carrot(s), potato(es), beetroot(s), beetroot_seeds | farm | `!farm` | one round of the field (until nothing is left to do), or until n of that crop were harvested |
+| ores, ore, all_ores, every_ore (Track AQ) | mine | `!mine ores n` | every ore kind, n blocks in all (no quota per kind) |
 | anything else | unknown | - | the reply lists the categories |
+
+## Several ores in one trip (wave 10, Track AQ)
+
+Owner, 2026-10-30: "what about doing !get ores, or multiple ores that are batched together and can be
+found efficiently vs doing !get iron, !get coal, etc. all individually and potentially retracing steps a
+lot". `!get <item> n <item> n ...` (count after or before each item, `and` and commas ignored) where every
+item is mined (ores and plain blocks of the catalog) becomes one `!mine <block> n <block> n ...`: one job,
+one trip. Its candidates are the kinds still below their quota, nearest first across kinds from wherever
+the bot stands (not kind by kind); a kind drops out when its quota is met; the job ends when every quota
+is met or nothing is left. `!status`: `mine: iron 5/8, coal 16/16, diamond 0/4 (dig, 0 skipped)`.
+`ores n` is every ore kind with one quota of n. A wood, food or crop item among several is refused
+(`usage: !get <item> n <item> n ... (several items in one !get are ores and mined blocks only (oak_log is
+gathering wood))`); one item keeps the single form. The NL plan step `get` takes `more: [{item, count}]`
+(example: "get me 8 iron and a stack of coal"). Measured in docs/mining.md "Mining v3".
 
 Defaults: 16 logs, 8 ore or blocks, 6 food, one round of a field. Plain blocks are mined like ores:
 with `mineSeenOnly` off (the default) the nearest one the bot knows, tunnelling to it under the
