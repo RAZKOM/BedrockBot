@@ -54,6 +54,7 @@ const STEP_DOCS: Record<StepKind, string> = {
   pause: '{"command":"pause"}: hold the running command',
   resume: '{"command":"resume"}: continue after pause',
   get: '{"command":"get","item":"oak_log","count":N?}: get N of an item (wood, ores, stone, dirt, sand, food, crops); the first choice for get / bring / collect: it picks gather, mine, food or farm itself', // Track AD
+  ...{ unload: '{"command":"unload","all":B?}: put the carried items away into the chests at home (keeps food, tools, armour); all: also empty full shulker boxes', stock: '{"command":"stock","item":"coal"?}: say how many of an item the chests at home hold (from memory), or the totals', chests: '{"command":"chests","scan":B?}: list the chests at home; scan: walk to them and look inside again' }, // Track AG
   question: '{"command":"question","text":"..."}: ask the person one short question instead of guessing; last step',
 };
 
@@ -71,6 +72,7 @@ export const EXAMPLES: readonly Example[] = [
   { request: 'go to the castle', plan: { steps: [{ command: 'question', text: 'I know no waypoint "castle". Which waypoint, or which x y z?' }] } },
   { request: 'mine 10 iron then come back to me', plan: { steps: [{ command: 'mine', block: 'iron_ore', count: 10 }, { command: 'come' }] } },
   { request: 'get me 20 oak logs', plan: { steps: [{ command: 'get', item: 'oak_log', count: 20 }] } }, // Track AD
+  ...[{ request: 'put your stuff away', plan: { steps: [{ command: 'unload' }] } }, { request: 'how much coal do we have', plan: { steps: [{ command: 'stock', item: 'coal' }] } }, { request: 'check what is in the chests', plan: { steps: [{ command: 'chests', scan: true }] } }] as Example[], // Track AG
 ];
 
 export function buildSystemPrompt(c: PromptContext): string {

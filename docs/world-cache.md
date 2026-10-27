@@ -46,7 +46,7 @@ It is closed (written) on every graceful exit.
 | cells | 2 bits x 256 x rows | class per cell from the dimension floor (y0, -64 in the overworld) up to the top of the highest non-empty subchunk (`rows`, a multiple of 16; cells above are air). Index `(y - y0) * 256 + z * 16 + x`, 4 cells per byte, low bits first |
 | top | int16 x 256 | highest solid y per column (`-32768` = none) |
 | roof | int16 x 256 | highest roof block per column (the planner's sky rule: any collision box except leaves, and liquids) |
-| marks | 6 bytes each + a name table | logs (natural, not stripped), chests, trapped / ender chests, barrels, crafting tables, furnaces / blast furnaces / smokers (lit too), beds, mob / trial spawners, every `*_ore` and ancient debris, farmland, doors; with position and an `exposed` bit (a face touches air or water inside the chunk: an ore the bot could have seen) |
+| marks | 6 bytes each + a name table | logs (natural, not stripped), chests, trapped / ender chests, barrels, shulker boxes (Track AG; the chest memory `chests.json` beside the regions is docs/home.md), crafting tables, furnaces / blast furnaces / smokers (lit too), beds, mob / trial spawners, every `*_ore` and ancient debris, farmland, doors; with position and an `exposed` bit (a face touches air or water inside the chunk: an ore the bot could have seen) |
 | updatedAt | float64 | wall-clock ms of the last change seen |
 
 Classes come from `skills/terrain/classify.ts`: danger (lava, fire, magma, cactus, campfires, sweet

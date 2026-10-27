@@ -44,6 +44,9 @@ export const STEP_SCHEMAS = {
   pause: z.strictObject({ command: z.literal('pause') }),
   resume: z.strictObject({ command: z.literal('resume') }),
   get: z.strictObject({ command: z.literal('get'), item: blockName, count: z.number().int().min(1).max(2304).optional() }), // Track AD: !get, the first choice for getting items
+  unload: z.strictObject({ command: z.literal('unload'), all: z.boolean().optional() }), // Track AG: !unload [all]
+  stock: z.strictObject({ command: z.literal('stock'), item: blockName.optional() }), // Track AG: !stock [item]
+  chests: z.strictObject({ command: z.literal('chests'), scan: z.boolean().optional() }), // Track AG: !chests [scan]
   question: z.strictObject({ command: z.literal('question'), text: z.string().min(1).max(200) }),
 } as const;
 
@@ -71,6 +74,7 @@ export const StepSchema = z.discriminatedUnion('command', [
   STEP_SCHEMAS.pause,
   STEP_SCHEMAS.resume,
   STEP_SCHEMAS.get, // Track AD
+  ...[STEP_SCHEMAS.unload, STEP_SCHEMAS.stock, STEP_SCHEMAS.chests], // Track AG
   STEP_SCHEMAS.question,
 ]);
 export type Step = z.infer<typeof StepSchema>;
@@ -115,6 +119,7 @@ export const COMMAND_SPECS: Record<Exclude<StepKind, 'question'>, CommandSpec> =
   pause: { chat: 'pause', wait: 'none' },
   resume: { chat: 'resume', wait: 'none' },
   get: { chat: 'get', wait: 'process', fail: /^get: / }, // Track AD
+  ...{ unload: { chat: 'unload', wait: 'process', fail: /^unload: (no home|I know no)/ }, stock: { chat: 'stock', wait: 'none' }, chests: { chat: 'chests', wait: 'process' } }, // Track AG
 };
 
 /** Replies that end any step and the plan. */
@@ -208,6 +213,10 @@ export function stepCommand(s: Step): string {
       return `set ${s.key} ${settingText(s.value)}`;
     case 'get': // Track AD
       return s.count !== undefined ? `get ${s.item} ${s.count}` : `get ${s.item}`;
+    case 'unload': // Track AG
+    case 'stock':
+    case 'chests':
+      return s.command === 'unload' ? (s.all ? 'unload all' : 'unload') : s.command === 'stock' ? (s.item ? `stock ${s.item}` : 'stock') : s.scan ? 'chests scan' : 'chests';
     case 'question':
       return s.text;
     default:
