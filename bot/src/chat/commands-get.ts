@@ -171,7 +171,7 @@ export function registerGetCommands(d: CommandDeps, extra: GetExtra = {}): GetCo
       position: () => mob.position(),
       settings: d.settings,
       ...(extra.containers ? { containers: extra.containers } : {}),
-      drop: (name) => survivalKitOf(d.task)?.drop(name) ?? Promise.resolve({ ok: false, dropped: 0, reason: 'no survival kit' }),
+      drop: (name, n) => survivalKitOf(d.task)?.drop(name, n) ?? Promise.resolve({ ok: false, dropped: 0, reason: 'no survival kit' }),
       log,
       say: (m) => d.chat.say(m),
     });

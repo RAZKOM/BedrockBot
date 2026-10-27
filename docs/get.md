@@ -85,8 +85,9 @@ Steps, in order, until 2 slots are free:
    `shulker`), close, break it (the Digger's best tool; a shulker box drops itself with its contents
    with any tool), pick it up (collect radius 4, then 6). A failed open or deposit still breaks and
    picks it up again.
-3. **Drop junk**: every kind `!drop items` would drop that the job is not getting (mining coal keeps
-   the coal), through the survival kit.
+3. **Drop junk**: junk only (`STASH_JUNK` in stash.ts: the survival keeper's junk such as rotten flesh and string, plus filler
+   blocks: cobblestone, dirt, gravel, sand, stone, deepslate, tuff, seeds, leaves, ...), never the job's produce, ore, ingots or gems;
+   throwaway blocks keep 16 for pillaring. Through the survival kit's `drop(name, n)`.
 4. **Give up**: still fewer than 2 free: `ifFull` answers false, the stash says `stash: inventory full
    (...)` and the job ends: `mine coal_ore: failed after 2/4 (inventory full)`, `gather failed: ...
    (inventory full)`, a food job with reason `inventory_full`.

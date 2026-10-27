@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseSettingValue, RuntimeSettings, describeSetting } from '../../../src/config/settings.ts';
 import { CONTAINER_BLOCKS } from '../../../src/skills/container/chest.ts';
-import { boxSpots, depositable, isShulkerBox, MIN_FREE_SLOTS, parseChest, Stash, stepLine, withSlotType, type StashSkills } from '../../../src/skills/container/stash.ts';
+import { boxSpots, depositable, isShulkerBox, MIN_FREE_SLOTS, parseChest, Stash, stepLine, withSlotType, type StashSkills, isStashJunk, junkDropCount } from '../../../src/skills/container/stash.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 
 const item = (name: string, count = 64): ItemStack => ({ name, count, networkId: 1, metadata: 0 });
@@ -240,6 +240,16 @@ describe('stash step', () => {
     const h = harness({ slots: full([item('stone_pickaxe', 1), item('undyed_shulker_box', 1)]), settings: { stashShulker: false } });
     expect(await h.stash.ifFull({ label: 'mine' })).toBe(true);
     expect(h.stash.attempts[0]!.steps.map((s) => s.kind)).toEqual(['drop']);
+  });
+});
+
+describe('stash junk rule', () => {
+  it('drops filler and keeper junk, never ore, ingots or the produce; throwaway blocks keep 16', () => {
+    for (const n of ['cobblestone', 'minecraft:dirt', 'gravel', 'rotten_flesh', 'wheat_seeds', 'tuff', 'deepslate']) expect(isStashJunk(n), n).toBe(true);
+    for (const n of ['coal', 'raw_iron', 'iron_ingot', 'diamond', 'redstone', 'lapis_lazuli', 'gold_ore', 'oak_log', 'bread', 'iron_pickaxe', 'torch']) expect(isStashJunk(n), n).toBe(false);
+    expect(junkDropCount('cobblestone', 70)).toBe(54);
+    expect(junkDropCount('cobblestone', 10)).toBe(0);
+    expect(junkDropCount('gravel', 10)).toBe(10);
   });
 });
 

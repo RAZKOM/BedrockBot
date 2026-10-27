@@ -21,6 +21,7 @@
 // as container_id `shulker` (ContainerSlotType 30); `container` and `shulker_box` are refused with
 // status 50. The picked-up item carries its contents as NBT `Items` in the inventory packets.
 import { keepOnDropItems } from '../../chat/commands-survival.ts';
+import { DEFAULT_JUNK, DEFAULT_THROWAWAY_MIN, THROWAWAY_BLOCKS } from '../../skills/survival/keeper.ts';
 import type { RuntimeSettings } from '../../config/settings.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { BlockInfo, ContainerView, ItemStack, Vec3 } from '../../world/types.ts';
@@ -44,6 +45,27 @@ for (const n of SHULKER_BOXES) CONTAINER_BLOCKS.add(n);
 
 export function isShulkerBox(name: string): boolean {
   return SHULKER_BOXES.has(name.startsWith('minecraft:') ? name.slice(10) : name);
+}
+
+/**
+ * The drop stage throws away junk only (never ore, ingots, gems or anything else of value): the survival
+ * keeper's junk (rotten flesh, poisonous potatoes, string, spider eyes) plus filler blocks. Throwaway
+ * blocks (cobblestone, dirt, ...) keep DEFAULT_THROWAWAY_MIN for pillaring; the job's produce is never junk.
+ */
+export const STASH_JUNK: ReadonlySet<string> = new Set([
+  ...DEFAULT_JUNK,
+  ...THROWAWAY_BLOCKS,
+  'gravel', 'sand', 'red_sand', 'tuff', 'andesite', 'diorite', 'granite', 'stone', 'deepslate', 'calcite', 'dripstone_block', 'basalt', 'blackstone',
+  'grass_block', 'coarse_dirt', 'podzol', 'mud', 'clay', 'moss_block', 'wheat_seeds', 'melon_seeds', 'pumpkin_seeds', 'beetroot_seeds', 'bone', 'arrow', 'feather',
+  'flint', 'snowball', 'ice', 'kelp', 'seagrass', 'vine', 'cactus', 'sugar_cane', 'bamboo', 'leaves', 'oak_leaves', 'birch_leaves', 'spruce_leaves', 'jungle_leaves', 'acacia_leaves', 'dark_oak_leaves',
+]);
+export function isStashJunk(name: string): boolean {
+  return STASH_JUNK.has(name.startsWith('minecraft:') ? name.slice(10) : name);
+}
+/** How many of a junk stack kind to drop: throwaway blocks keep DEFAULT_THROWAWAY_MIN, the rest go. */
+export function junkDropCount(name: string, have: number): number {
+  const n = name.startsWith('minecraft:') ? name.slice(10) : name;
+  return THROWAWAY_BLOCKS.includes(n) ? Math.max(0, have - DEFAULT_THROWAWAY_MIN) : have;
 }
 
 /** What the step deposits into a chest or shulker box: everything `!drop items` would drop. */
@@ -81,7 +103,7 @@ export interface StashDeps {
   /** The task's shared Containers (round trips counted on its stats; the shulker slot type is set on it). */
   containers?: { readonly stats: { requests: number } };
   /** Drop every item of a kind (SurvivalKit.drop); without it step (c) is skipped. */
-  drop?(name: string): Promise<{ ok: boolean; dropped: number; reason?: string }>;
+  drop?(name: string, n?: number): Promise<{ ok: boolean; dropped: number; reason?: string }>;
   log?: Logger;
   /** Tell the owner (an attempt that left the inventory full). */
   say?(msg: string): void;
@@ -416,14 +438,17 @@ export class Stash {
   private async dropJunk(job: StashJob, alive: () => boolean): Promise<StashStep> {
     const t0 = this.now();
     const step: StashStep = { kind: 'drop', ok: false, moved: {}, total: 0, requests: 0, shared: 0, ms: 0 };
-    const names = new Set<string>();
+    // junk only (STASH_JUNK): the job's produce and anything of value stay; throwaway blocks keep a reserve
+    const have = new Map<string, number>();
     for (const s of this.d.inventory.slots.slice(0, 36)) {
-      if (!s || s.count <= 0 || !depositable(s.name) || job.wanted?.(s.name)) continue;
-      names.add(s.name);
+      if (!s || s.count <= 0 || !isStashJunk(s.name) || job.wanted?.(s.name)) continue;
+      have.set(s.name, (have.get(s.name) ?? 0) + s.count);
     }
+    const names = new Map<string, number>();
+    for (const [n, c] of have) if (junkDropCount(n, c) > 0) names.set(n, junkDropCount(n, c));
     if (names.size === 0) step.reason = 'no junk';
-    for (const n of names) {
-      const r = await this.d.drop!(n);
+    for (const [n, count] of names) {
+      const r = await this.d.drop!(n, count);
       if (!alive()) break;
       step.requests++;
       if (r.dropped > 0) {
