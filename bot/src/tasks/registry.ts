@@ -328,6 +328,7 @@ export const afkTask: TaskDefinition = {
       (d) => registerSurvivalCommands({ chat: d.chat, source: d.conn, mob, pve, task, containers, inactive: () => respawn.dead || ctx.conn.state !== 'spawned', logger: ctx.logger('survival') }), // Track S
       (d) => void registerNlCommands(d, ctx.values), // Track Y
       (d) => void registerFoodCommands(d, { containers, clock }), // Track X: !food, !cook, the food chore
+      (d) => void (d.skills && d.world && d.skills.nav.attachPlanner(d.world, { threads: () => d.settings.get('plannerThreads') })), // Track AB: planner worker (plannerThreads)
     ];
     for (const register of registrations) register(deps);
     return task;
