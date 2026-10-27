@@ -2,7 +2,7 @@
 // detection, unreachable items, filter, cancel and timeout.
 import { describe, expect, it } from 'vitest';
 import { collectItems, type CollectDeps } from '../../../src/skills/collect/collect.ts';
-import type { Goal } from '../../../src/skills/nav/goals.ts';
+import type { Goal, NavGoal } from '../../../src/skills/nav/goals.ts';
 import { Inventory } from '../../../src/world/inventory.ts';
 import type { ItemV4 } from '../../../src/world/packets.ts';
 import type { EntityInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
@@ -19,7 +19,7 @@ function fake(opts: { unreachable?: Set<bigint>; pickup?: boolean } = {}) {
   const entities = new Map<bigint, EntityInfo>();
   const inv = new Inventory(toItem, () => 1n);
   const state = { pos: { x: 0.5, y: -60, z: 0.5 }, corrections: 0, tick: 0n };
-  const gotos: Goal[] = [];
+  const gotos: Goal[] = []; // the `near` member of each approach (the collector sends `any` of near + getToBlock since 2026-10-30)
   let cancelled = false;
   const deps: CollectDeps = {
     entities: () => entities,
@@ -28,10 +28,11 @@ function fake(opts: { unreachable?: Set<bigint>; pickup?: boolean } = {}) {
       state.tick += BigInt(n);
       return Promise.resolve();
     },
-    goto: (g) => {
+    goto: (g0: NavGoal) => {
+      const g = g0.type === 'any' ? g0.goals.find((x): x is Extract<Goal, { type: 'near' }> => x.type === 'near') : g0.type === 'near' ? g0 : undefined;
+      if (!g) return Promise.resolve({ ok: false, reason: 'bad' });
       gotos.push(g);
       state.tick += 20n;
-      if (g.type !== 'near') return Promise.resolve({ ok: false, reason: 'bad' });
       const e = [...entities.values()].find((x) => Math.hypot(x.pos.x - g.p.x, x.pos.z - g.p.z) < 0.01);
       if (e && opts.unreachable?.has(e.runtimeId)) return Promise.resolve({ ok: false, reason: 'unreachable' });
       state.pos = { x: g.p.x, y: -60, z: g.p.z };

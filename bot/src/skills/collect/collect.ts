@@ -8,13 +8,13 @@
 import { silentLogger, type Logger } from '../../log.ts';
 import type { EntityInfo, ItemStack, Vec3 } from '../../world/types.ts';
 import { maxStackOf } from '../container/chest.ts';
-import type { Goal } from '../nav/goals.ts';
+import type { NavGoal } from '../nav/goals.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 
 export interface CollectDeps {
   entities: () => ReadonlyMap<bigint, EntityInfo>;
   state: () => { pos: Vec3; corrections: number; tick: bigint };
-  goto: (goal: Goal, opts?: GotoOptions) => Promise<SkillResult>;
+  goto: (goal: NavGoal, opts?: GotoOptions) => Promise<SkillResult>;
   waitTicks: (n: number) => Promise<void>;
   /** Player inventory (for room and the gained counts). */
   inventory: { readonly slots: readonly (ItemStack | null)[]; room(name: string, maxStack?: number): number; count(name: string): number };
@@ -128,8 +128,13 @@ export async function collectItems(radius: number, timeoutTicks: number, deps: C
       log.info(`collect: giving up on ${e.item!.name} x${e.item!.count} at ${e.pos.x.toFixed(1)} ${e.pos.y.toFixed(1)} ${e.pos.z.toFixed(1)}`);
       continue;
     }
-    // Item actors rest about 0.125 above the floor they lie on.
-    const goal: Goal = { type: 'near', p: { x: e.pos.x, y: Math.floor(e.pos.y + 0.01), z: e.pos.z }, r: opts.near ?? 0.8 };
+    // Item actors rest about 0.125 above the floor they lie on. The server picks an item up when the player's box
+    // grown by 1 block sideways and 0.5 up and down touches it, so the bot does not need to stand in the item's cell:
+    // the cell itself when it can stand there, else one of the cells around it, below it (the drop in the hole an ore
+    // left in a wall or a ceiling) or on top of it. A 3D `near` goal sent the bot 16 blocks around a cave for a
+    // diamond 1 block away (Realm, 2026-10-30: 3 of 7 diamonds left in their holes).
+    const cell = { x: Math.floor(e.pos.x), y: Math.floor(e.pos.y + 0.01), z: Math.floor(e.pos.z) };
+    const goal: NavGoal = { type: 'any', goals: [{ type: 'near', p: { x: e.pos.x, y: cell.y, z: e.pos.z }, r: opts.near ?? 0.8 }, { type: 'getToBlock', p: cell, reach: 1.6, face: false, low: 2 }] };
     const g = await deps.goto(goal, { timeoutTicks: Math.max(20, Math.min(400, timeoutTicks - ticks)) });
     if (!g.ok && g.reason === 'interrupted') return result({ ok: false, reason: 'interrupted' });
     if (!g.ok && g.reason === 'unreachable') {

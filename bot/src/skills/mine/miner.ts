@@ -21,7 +21,7 @@ import type { BlockInfo, ItemStack, Vec3 } from '../../world/types.ts';
 import type { CollectOptions, CollectResult } from '../collect/collect.ts';
 import type { DigOptions, DigResult } from '../dig/digger.ts';
 import { EYE_HEIGHT } from '../dig/look.ts';
-import type { Goal } from '../nav/goals.ts';
+import type { Goal, NavGoal } from '../nav/goals.ts';
 import { closestDistance } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { lineOfSight, type OreMemory, type SeenOre } from './seen.ts';
@@ -94,7 +94,7 @@ export function noProgress(plan: MinePlan | undefined): boolean {
 export const PROBE_CANDIDATES = 3;
 
 export interface MineSkills {
-  goto(goal: Goal, opts?: GotoOptions): Promise<SkillResult>;
+  goto(goal: NavGoal, opts?: GotoOptions): Promise<SkillResult>;
   dig(p: Vec3, opts?: DigOptions): Promise<DigResult>;
   collect(radius: number, timeoutTicks: number, opts?: CollectOptions): Promise<CollectResult>;
   cancel(): void;
@@ -329,7 +329,14 @@ export class MineTask {
         await this.d.waitTicks(20);
         continue;
       }
-      if (this.stats.mined >= o.count!) return this.end(gen, 'done');
+      // own drops lying around (a diamond left in a hole, a drop that rolled): a short sweep before the next target
+      // (Realm 2026-10-30: the bot walked past one of its own diamonds on the way to the next ore)
+      await this.sweepDrops(gen, 6, 60);
+      if (!this.alive(gen)) return this.state;
+      if (this.stats.mined >= o.count!) {
+        await this.sweepDrops(gen, 12, 200); // the job ends with every nearby drop picked up
+        return this.end(gen, 'done');
+      }
       if (this.d.health() < (o.minHealth ?? 8)) {
         this.lastError = `health ${this.d.health()}`;
         return this.end(gen, 'low_health');
@@ -504,6 +511,12 @@ export class MineTask {
     this.addCollected(c2.gained);
   }
 
+  /** Pick up the job's kind of drops within `radius` (quick when none is there: one scan of the entities). */
+  private async sweepDrops(gen: number, radius: number, ticks: number): Promise<void> {
+    const c = await this.d.skills.collect(radius, ticks, { filter: (i) => isMineDrop(i.name) });
+    if (this.alive(gen)) this.addCollected(c.gained);
+  }
+
   private addCollected(gained: Record<string, number>): void {
     for (const [k, v] of Object.entries(gained)) if (v > 0) this.stats.collected[k] = (this.stats.collected[k] ?? 0) + v;
   }
@@ -558,4 +571,11 @@ function newStats(): MineStats {
 
 function fmt(p: Vec3): string {
   return `${p.x} ${p.y} ${p.z}`;
+}
+
+/** What a mining job picks up on sight: ore drops, raw metals, gems and the ore blocks themselves (silk touch). */
+const MINE_DROPS = new Set(['diamond', 'emerald', 'coal', 'charcoal', 'raw_iron', 'raw_copper', 'raw_gold', 'redstone', 'lapis_lazuli', 'quartz', 'ancient_debris', 'gold_nugget', 'amethyst_shard', 'flint']);
+export function isMineDrop(name: string): boolean {
+  const n = name.startsWith('minecraft:') ? name.slice(10) : name;
+  return MINE_DROPS.has(n) || n.endsWith('_ore');
 }
