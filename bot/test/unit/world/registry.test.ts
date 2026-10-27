@@ -19,6 +19,11 @@ const KNOWN: Record<string, { rid: number; states: Record<string, unknown> }> = 
   stone: { rid: -2144268767, states: {} },
 };
 
+/** Block state ids: minecraft-data 1.26.30's 16913, plus the 1.26.60 palette states it does not have (Track AC). */
+const STATE_COUNT: Record<string, number> = { '1.26.51': 16913, '1.26.60': 16913 + 7664 };
+/** Where block states come from (the warning for unknown ids names it). */
+const DATA_SOURCE: Record<string, string> = { '1.26.51': 'minecraft-data 1.26.30', '1.26.60': 'palette 1.26.60 (BDS 1.26.60.6)' };
+
 /** item_registry sizes of the recorded logins. */
 const ITEM_STATES: Record<string, number> = { '1.26.51': 2076, '1.26.60': 2080 };
 
@@ -54,7 +59,7 @@ describe(`world registry shim (${FIXTURE_VERSION})`, () => {
     const reg = readyRegistry();
     expect(reg.ready).toBe(true);
     expect(reg.hashed).toBe(true);
-    expect(reg.stateCount).toBe(16913);
+    expect(reg.stateCount).toBe(STATE_COUNT[FIXTURE_VERSION]);
     for (const [name, { rid, states }] of Object.entries(KNOWN)) {
       const s = reg.stateIdFromRuntimeId(rid);
       expect(s, name).toBeGreaterThanOrEqual(0);
@@ -138,7 +143,7 @@ describe(`world registry shim (${FIXTURE_VERSION})`, () => {
     expect(reg.unknownRuntimeIds.get(123456789)).toBe(2);
     expect(reg.unknownRuntimeIds.get(-42)).toBe(1);
     expect(warnings).toHaveLength(2); // logged once per id
-    expect(warnings[0]).toContain('1.26.30');
+    expect(warnings[0]).toContain(DATA_SOURCE['1.26.60']);
     expect(reg.unknownSummary()).toBe('2 unknown block runtime id(s): 123456789 x2, -42 x1');
     const info = reg.blockInfo(-1, 123456789);
     expect(info).toMatchObject({ name: 'unknown', stateId: -1, solid: true, states: { runtime_id: 123456789 } });

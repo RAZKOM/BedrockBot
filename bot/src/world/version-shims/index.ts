@@ -19,6 +19,11 @@ export interface VersionShim {
   /** Which minecraft-data release the block and item tables really come from (for logs and docs). */
   blockDataVersion: string;
   /**
+   * Version key of the dumped BDS block palette (`bot/data/block-palette/<key>.json`, palette.ts) the runtime-id
+   * table comes from; undefined = minecraft-data's block states only (Track AC, decision 0024).
+   */
+  blockPalette?: string;
+  /**
    * Item states for prismarine-registry's handleStartGame. Returns undefined while they are not known
    * yet (1.26.x: they come in `item_registry`, after `start_game`).
    */
