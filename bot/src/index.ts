@@ -28,6 +28,7 @@ import { currentPins, runUpdateCheck } from './update/check.ts';
 import { UpdateNotifier } from './update/notifier.ts';
 import { defaultCacheRoot, openWorldCache } from './world/cache/index.ts'; // Track T
 import { mapRoutes } from './health/map/routes.ts'; // Track T
+import { setupPanel } from './health/panel/index.ts'; // Track AE: LAN control panel (docs/panel.md)
 import { gatherTask } from './tasks/gatherWood.ts';
 import { rlTaskDefinition } from './tasks/rlAgent.ts';
 import { registerTask } from './tasks/registry.ts';
@@ -187,6 +188,7 @@ async function main(argv: string[]): Promise<number> {
       botOwners: process.env.BOT_OWNERS,
       cwd,
       defaultLogDir: join(BOT_DIR, 'logs'),
+      panelToken: process.env.BEDROCKBOT_PANEL_TOKEN, // Track AE
     });
     // Track Q: default < settings.json < config.json < CLI at start-up; !set wins afterwards
     const where = resolveSettingsFile({
@@ -329,11 +331,12 @@ async function main(argv: string[]): Promise<number> {
     metrics.inc(`chat.${e.kind}`);
   });
 
+  const panel = setupPanel({ settings, conn, metrics, chat, built, runningTask, runtime, worldCache, log: healthLog }); // Track AE
   if (settings.healthPort !== undefined) {
     // Track T: GET /map and /map.json (health/map)
     const mob = built.mobility;
     const routes = mapRoutes({ world: mob?.world, cache: worldCache, position: () => runningTask.position(), skillsStatus: () => mob?.skills.status(), taskStatus: () => runningTask.status(), server });
-    health = new HealthServer({ port: settings.healthPort, metrics, alive: () => runningTask.alive?.() ?? true, log: healthLog, routes });
+    health = new HealthServer({ port: settings.healthPort, metrics, alive: () => runningTask.alive?.() ?? true, log: healthLog, routes, ...panel.healthOptions }); // Track AE: host + token when shared
     try {
       await health.start();
     } catch (e) {
@@ -341,6 +344,7 @@ async function main(argv: string[]): Promise<number> {
       return 2;
     }
   }
+  if (!(await panel.start(health))) return 2; // Track AE
   if (settings.updateCheckHours > 0) {
     notifier = new UpdateNotifier({
       intervalHours: settings.updateCheckHours,

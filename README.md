@@ -100,6 +100,7 @@ The bot answers in chat. Full reply texts and edge cases: docs/runbook.md "Chat 
 | `!set` / `!set <key>` / `!set <key> <value>` | Runtime settings, saved next to the config file and kept across restarts: `allowBreak` and `allowPlace` (digging through and pillaring up on walks, off by default), `closeDoors`, `sprint`, `guardRadius`, `fleeHealth` (flee below this health, 8), `followDistance`, `avoidMobRadius`, `avoidSpawnerRadius`, `toolWearLimit`, `throwawayMin`, `useBoneMeal`, `mineTunnelLen`, `nudgeInterval`, `nlConfirm`. `!set <key> default` resets one. |
 | `!do <text>` then `!yes` / `!no` | Natural language: `!do walk home then guard` is turned into a plan of the commands above by a local model, shown as one line, and run on `!yes`. Needs `nl.provider` in the config and Ollama on the machine. Also answers chat addressed to it (`BotName, come here`). |
 | `!pos` / `!quit` / `!help` | Feet position; clean disconnect; the command list. |
+| `!panel` | The control panel's URL(s): a web page with status, log, map, settings and a command box, for your phone or another machine on your LAN (`panel` config block; docs/panel.md). No token in chat. |
 
 Priorities when things overlap: fleeing at low health beats everything; the night shelter beats your
 commands once one is set; a guard fight beats your command only while the mob is in reach; your command

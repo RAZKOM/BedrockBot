@@ -251,6 +251,7 @@ Replies are player chat from the bot.
 | `!shelter [show]` / `!shelter set [x y z]` / `!shelter clear` | the night shelter and its state (`day`, `going`, `sheltered`, `unreachable`, `gave_up`, `returning`); needs walking |
 | `!quit` | `bye (quit by console)`, then a clean disconnect and exit 0 |
 | `!help` | the list of commands |
+| `!panel` | `panel: http://192.168.1.20:9464/ http://127.0.0.1:9464/ (token required: config panel.token)` or `panel: http://127.0.0.1:9464/ (this machine only; ...)` or `panel is off: set healthPort (or panel.port) ...`: the control panel URLs, never the token (Track AE, docs/panel.md) |
 | `!follow [name]` | `following Steve`: follows the player (default: the sender; the console must name one) until `!stop`; needs walking |
 | `!come [name]` | `coming to Steve`, then `here (Steve)`: one walk to within 2 blocks of the player |
 | `!stop` | `stopped (was following Steve); guarding r=16`: stops every command (goto, follow, come, kill, gather) and what it pre-empted, plus a pending home return; guard and night keep running |
@@ -640,6 +641,24 @@ Details: docs/world-cache.md.
 ```sh
 curl -s "http://127.0.0.1:9464/map.json?r=4" | head -c 600
 start http://127.0.0.1:9464/map            # Windows; open the URL in any browser
+```
+
+### LAN control panel (Track AE)
+
+With `--health-port` (or `panel.port`) the same server also serves the control panel; details,
+what it exposes and the safety rules: docs/panel.md.
+
+| Item | Value |
+|---|---|
+| Page | `GET /`: status and process stack, health / food / position / dimension / time, the last 50 log lines, the bot's chat replies, quick buttons (`!status`, `!home go`, `!stop`, `!guard on/off`, `!eat`, `!equip`, `!inv`), a command box (any `!command`, run as the first owner), the `!set` table (editable), the map (`/map`) on demand |
+| API | `GET /api/state` (JSON, polled every 2 s); `POST /api/cmd` `{"text":"!wp set base"}` -> `{"ok":true,"replies":[...]}`, 5 per second (429 beyond) |
+| Config | `panel.host` (default `127.0.0.1`; `0.0.0.0` = the LAN, needs the token), `panel.port` (default `healthPort`; another port keeps `/metrics` token-free on 127.0.0.1), `panel.token` (`pnpm config:init` writes a random 24-character one and prints it once; env `BEDROCKBOT_PANEL_TOKEN` wins) |
+| Auth | with a token every path except `/healthz` needs it: `Authorization: Bearer <token>`, or `/?token=<token>` once in the browser (sets an HttpOnly cookie, redirects to `/`). Without a token: 127.0.0.1 only; a LAN host is refused with `panel: refusing to serve on 0.0.0.0 without panel.token; serving on 127.0.0.1 only ...` |
+| Never | port-forward it or expose it beyond the LAN; it can make the bot walk, fight and quit |
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9464/api/state | head -c 400
+curl -s -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" -d '{"text":"!status"}' http://127.0.0.1:9464/api/cmd
 ```
 
 ### Soak (task 5.4)

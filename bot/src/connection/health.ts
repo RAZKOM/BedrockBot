@@ -4,8 +4,8 @@
 //   GET /metrics  200 JSON: the metrics.json snapshot plus a `summary` block with the numbers an
 //                 operator looks at first (uptime, session uptime, corrections/min, reconnects,
 //                 kicks by reason, deaths, nudges, logs/hour, game version, server).
-// It never binds to another interface: there is nothing to protect behind it, but nothing should be
-// exposed either.
+// It binds 127.0.0.1 unless `host` says otherwise (Track AE: the LAN control panel, health/panel,
+// docs/panel.md, which only passes another interface together with a token check in `auth`).
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { silentLogger, type Logger } from '../log.ts';
@@ -38,6 +38,10 @@ export interface HealthServerOptions {
   log?: Logger;
   /** Track T: extra GET routes (the debug map: health/map/routes.ts); true = answered. */
   routes?: (path: string, req: IncomingMessage, res: ServerResponse) => boolean;
+  /** Track AE: interface to bind (default 127.0.0.1); health/panel passes another one only with a token. */
+  host?: string;
+  /** Track AE: token check for every path except /healthz; false = it already answered (401). */
+  auth?: (path: string, req: IncomingMessage, res: ServerResponse) => boolean;
 }
 
 function num(v: unknown): number | null {
@@ -68,13 +72,19 @@ export class HealthServer {
   private readonly o: HealthServerOptions;
   private readonly log: Logger;
   requests = 0;
+  private readonly extra: NonNullable<HealthServerOptions['routes']>[] = []; // Track AE: use()
 
   constructor(opts: HealthServerOptions) {
     this.o = opts;
     this.log = opts.log ?? silentLogger;
   }
 
-  /** Listen on 127.0.0.1:<port> (0 = any free port). Resolves with the bound port. */
+  /** Track AE: register a route for every method (POST too), asked before the built-in ones. */
+  use(route: NonNullable<HealthServerOptions['routes']>): void {
+    this.extra.push(route);
+  }
+
+  /** Listen on <host, default 127.0.0.1>:<port> (0 = any free port). Resolves with the bound port. */
   start(): Promise<number> {
     const server = createServer((req, res) => {
       this.handle(req, res);
@@ -82,11 +92,12 @@ export class HealthServer {
     this.server = server;
     return new Promise((resolve, reject) => {
       server.once('error', reject);
-      server.listen(this.o.port, HEALTH_HOST, () => {
+      const host = this.o.host ?? HEALTH_HOST; // Track AE
+      server.listen(this.o.port, host, () => {
         server.off('error', reject);
         server.unref();
         const port = (server.address() as AddressInfo).port;
-        this.log.info(`health endpoint on http://${HEALTH_HOST}:${port}/healthz and /metrics`);
+        this.log.info(`health endpoint on http://${host}:${port}/healthz and /metrics`);
         resolve(port);
       });
     });
@@ -107,6 +118,8 @@ export class HealthServer {
   handle(req: IncomingMessage, res: ServerResponse): void {
     this.requests++;
     const path = (req.url ?? '/').split('?')[0];
+    if (path !== '/healthz' && this.o.auth && !this.o.auth(path ?? '/', req, res)) return; // Track AE: token
+    for (const r of this.extra) if (r(path ?? '/', req, res)) return; // Track AE: panel routes
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       this.send(res, 405, { error: 'method not allowed' });
       return;
