@@ -13,6 +13,10 @@
 // - Final stop: release forward once the coasting distance (speed x 0.546 / (1 - 0.546)) covers the
 //   remaining distance; done when on the ground within `arriveRadius` of the last node's centre and
 //   (almost) stopped.
+// - Track AJ (docs/pathfinding.md "Movement variety"): swim / swimOut / climb / climbOut / parkour
+//   targets have their own controllers (`variety`); on walks the body sneaks while its centre is
+//   within 0.3 of an edge with a drop of more than 3 blocks (or lava) beyond (`edgeSneak`), and does
+//   not sprint for 10 ticks after a sneak.
 import type { MoveCommand, Vec3 } from '../input/types.ts';
 import type { PathNode } from './astar.ts';
 import type { NavGrid } from './grid.ts';
@@ -30,6 +34,8 @@ export interface FollowerOptions {
   guard?: PressGuard;
   /** Track S: the plan's extra cost per cell (avoidance): straight-line shortcuts never cross cells costing more. */
   cellCost?: ((x: number, y: number, z: number) => number) | undefined;
+  /** Track AJ: sneak while the body centre is within 0.3 of an edge with a drop of more than 3 blocks (or lava) beyond. Default true. */
+  edgeSneak?: boolean;
 }
 
 /**
@@ -40,9 +46,17 @@ export class PressGuard {
   private n = 0;
   private lastPress = -Infinity;
   private prevForward = false;
+  /** Track AJ: commands since the last one with sneak held (across the followers of one goto). */
+  sinceSneak = Infinity;
 
-  apply<T extends { forward: number; sprint: boolean }>(cmd: T): T {
+  apply<T extends { forward: number; sprint: boolean; sneak?: boolean }>(cmd: T): T {
     this.n++;
+    this.sinceSneak = cmd.sneak ? 0 : this.sinceSneak + 1;
+    if (cmd.forward < 0) {
+      // Track AJ: the back key (braking on a ladder) is no forward press
+      this.prevForward = false;
+      return cmd;
+    }
     let forward = cmd.forward > 0;
     if (forward && !this.prevForward) {
       if (this.n - this.lastPress <= DOUBLE_TAP_GUARD) forward = false;
@@ -66,6 +80,8 @@ export interface FollowerInput {
   collidedHorizontally: boolean;
   /** The body sprints (BDS keeps a sprint while forward is held). */
   sprinting?: boolean;
+  /** Track AJ: the body moves with water physics (InputLoopState.inWater). */
+  inWater?: boolean;
 }
 
 export interface FollowStep {
@@ -80,6 +96,23 @@ const AIR_COAST = 0.91 / (1 - 0.91);
 const HALF = 0.31;
 /** A forward re-press within this many steps of the previous press is delayed (BDS double tap: 6). */
 const DOUBLE_TAP_GUARD = 7;
+/** Track AJ: a climb node is reached with the feet within this of its height. */
+const CLIMB_TOLERANCE = 0.25;
+/** Track AJ: parkour: jump once the body centre is this far from the takeoff edge (walking / sprinting). */
+const PARKOUR_JUMP_WALK = 0.15;
+const PARKOUR_JUMP_SPRINT = 0.3;
+/** Track AJ: a 2-block parkour needs at least this speed towards the gap at the takeoff (walking is 0.216, sprinting 0.281; else it backs up for a run-up). */
+const PARKOUR_RUN_SPEED = 0.25;
+/** Track AJ: sneak while the body centre is this close to an unsafe edge. */
+const EDGE_SNEAK = 0.3;
+/** Track AJ: no sprint for this many ticks after a sneak (BDS keeps walking; measured on 1.26.60). */
+const SPRINT_AFTER_SNEAK = 10;
+const CORNERS: readonly (readonly [number, number])[] = [
+  [-HALF, -HALF],
+  [-HALF, HALF],
+  [HALF, -HALF],
+  [HALF, HALF],
+];
 
 /** Bedrock yaw (degrees) that faces from (0, 0) along (dx, dz): 0 = +z, 90 = -x. */
 export function yawTowards(dx: number, dz: number): number {
@@ -117,6 +150,12 @@ export class PathFollower {
   /** suffix[i]: path length from node i to the end. */
   private readonly suffix: number[];
   private readonly cellCost: FollowerOptions['cellCost']; // Track S
+  /** Track AJ: edge sneaking, its per-column verdicts (cellKey-like string -> unsafe), and the ticks sneaked. */
+  private readonly edgeSneak: boolean;
+  private readonly unsafeCols = new Map<string, boolean>();
+  sneakTicks = 0;
+  /** Track AJ: a 2-block parkour backing up for its run-up (undefined: not decided yet). */
+  private backing: boolean | undefined;
 
   constructor(path: readonly PathNode[], grid: NavGrid, opts: FollowerOptions = {}) {
     if (path.length === 0) throw new Error('empty path');
@@ -128,6 +167,7 @@ export class PathFollower {
     this.stopAtEnd = opts.stopAtEnd ?? true;
     this.pressGuard = opts.guard ?? new PressGuard();
     this.cellCost = opts.cellCost; // Track S
+    this.edgeSneak = opts.edgeSneak ?? true; // Track AJ
     this.index = path.length > 1 ? 1 : 0;
     this.suffix = new Array<number>(path.length).fill(0);
     for (let i = path.length - 2; i >= 0; i--) {
@@ -167,7 +207,18 @@ export class PathFollower {
     // Advance past nodes the body is in (and can leave towards the next one).
     while (this.index < last) {
       const node = path[this.index]!;
+      // Track AJ: a run of climb nodes in one column is reached at its end's height
+      if (node.move === 'climb') {
+        if (!this.climbReached(p, s.onGround, node)) break;
+        this.index++;
+        continue;
+      }
       if (!this.inNode(p, node, s.onGround)) break;
+      // Track AJ: swim nodes are passed without centring (the next one is aimed at in a straight line)
+      if (node.move === 'swim') {
+        this.index++;
+        continue;
+      }
       const centred = Math.hypot(node.x + 0.5 - p.x, node.z + 0.5 - p.z) < 0.35;
       if (!centred && !this.lineClear(p, this.index + 1)) break;
       this.index++;
@@ -185,6 +236,10 @@ export class PathFollower {
       if (there && (!this.stopAtEnd || speed < 0.03)) return { cmd: this.idle(), done: true };
       if (!this.stopAtEnd && this.inNode(p, target, s.onGround)) return { cmd: this.idle(), done: true };
     }
+
+    // Track AJ: swimming, climbing and parkour have their own controllers
+    const variety = this.variety(s, target, finalLeg);
+    if (variety) return { cmd: variety, done: false };
 
     // Aim: the farthest straight-line node on the same level.
     let aim = this.index;
@@ -229,11 +284,277 @@ export class PathFollower {
       }
     }
 
-    if (this.sprint && forward === 1 && s.onGround && err < 15 && this.runLength(p) > 5) sprint = true;
+    // Track AJ: edge sneaking: the body centre within 0.3 of an edge with a deep drop (or lava) beyond
+    const sneak = this.edgeSneak && s.onGround && !jump && (target.move === 'walk' || target.move === 'diag') && this.nearUnsafeEdge(p, target.y);
+    if (sneak) {
+      this.sneakTicks++;
+    }
+
+    // (BDS does not start a sprint right after a sneak: the server walks on while the client would sprint)
+    if (this.sprint && this.pressGuard.sinceSneak > SPRINT_AFTER_SNEAK && forward === 1 && s.onGround && err < 15 && this.runLength(p) > 5) sprint = true;
     // BDS keeps a sprint while forward is held: releasing forward for one tick is what ends it
     if (s.sprinting && !sprint && forward === 1 && s.onGround) forward = 0;
 
-    return { cmd: { forward, strafe: 0, yaw: this.yaw, jump, sprint, sneak: false }, done: false };
+    return { cmd: { forward, strafe: 0, yaw: this.yaw, jump, sprint, sneak }, done: false };
+  }
+
+  // ---- Track AJ: movement variety (docs/pathfinding.md "Movement variety") -------------------------
+
+  /** Index of the last node of the climb run starting at i (consecutive 'climb' nodes in one column). */
+  private climbRunEnd(i: number): number {
+    const path = this.path;
+    let j = i;
+    while (j + 1 < path.length && path[j + 1]!.move === 'climb' && path[j + 1]!.x === path[i]!.x && path[j + 1]!.z === path[i]!.z) j++;
+    return j;
+  }
+
+  /** The body is in node n's column at its height (a standing node at the foot: on the ground). */
+  private climbReached(p: Vec3, onGround: boolean, n: PathNode): boolean {
+    if (Math.floor(p.x) !== n.x || Math.floor(p.z) !== n.z) return false;
+    if (Number.isFinite(this.grid.stand(n.x, n.y, n.z))) return onGround && Math.abs(p.y - n.feet) < 0.2;
+    return Math.abs(p.y - n.feet) < CLIMB_TOLERANCE;
+  }
+
+  /**
+   * Commands for swim / swimOut / climb / climbOut / parkour targets, undefined for the others.
+   *
+   * - swim: forward towards the farthest swim node in a straight line over swim cells, jump held in
+   *   the water (the body bobs at the surface), never sprint (a sprint in water starts swimming).
+   * - swimOut: forward towards the bank, jump held: pushing against the bank lifts the body out.
+   * - climb: centre in the ladder's column (forward / back pulses), jump to climb (0.2 per tick),
+   *   nothing to slide down (0.2 per tick), sneak to hold at the run's end.
+   * - climbOut: climb (pushing towards the exit climbs as well) until the feet are at the exit's floor,
+   *   then forward onto it (sneak holds the height for an exit at the feet level).
+   * - parkour: forward (sprinting for a 2-block gap), jump once the body centre is `PARKOUR_JUMP` from
+   *   the takeoff edge.
+   */
+  private variety(s: FollowerInput, target: PathNode, finalLeg: boolean): FollowStep['cmd'] | undefined {
+    const p = s.pos;
+    const m = target.move;
+    if (m !== 'swim' && m !== 'swimOut' && m !== 'climb' && m !== 'climbOut' && m !== 'parkour') return undefined;
+    const wet = s.inWater === true || this.grid.cls(Math.floor(p.x), Math.floor(p.y + 0.01), Math.floor(p.z))?.liquid === 'water';
+    const cmd = { forward: 0, strafe: 0, yaw: this.yaw ?? 0, jump: false, sprint: false, sneak: false };
+    if (m === 'swim') {
+      const aim = this.swimAim(p);
+      this.index = aim;
+      const a = this.path[aim]!;
+      this.steer(cmd, a.x + 0.5 - p.x, a.z + 0.5 - p.z);
+      cmd.jump = wet || !s.onGround;
+      if (s.sprinting && s.onGround) cmd.forward = 0; // end a sticky sprint before the water
+      return cmd;
+    }
+    if (m === 'swimOut') {
+      this.steer(cmd, target.x + 0.5 - p.x, target.z + 0.5 - p.z);
+      cmd.jump = wet || (!s.onGround && p.y < target.feet);
+      if (s.onGround && !wet) this.brake(cmd, s, target, finalLeg);
+      return cmd;
+    }
+    if (m === 'climb') {
+      const j = this.climbRunEnd(this.index);
+      const end = this.path[j]!;
+      const inCol = Math.floor(p.x) === end.x && Math.floor(p.z) === end.z;
+      const dy = end.feet - p.y;
+      if (!inCol) {
+        // into the column: walk towards its centre, slowly near it
+        this.steer(cmd, end.x + 0.5 - p.x, end.z + 0.5 - p.z);
+        const d = Math.hypot(end.x + 0.5 - p.x, end.z + 0.5 - p.z);
+        if (d < 1 && Math.hypot(s.vel.x, s.vel.z) > 0.1) cmd.forward = 0;
+        if (s.sprinting && s.onGround) cmd.forward = 0;
+        return cmd;
+      }
+      // hold the column, clear of a ladder's box (touching it while sliding would climb)
+      const [tx, tz] = this.columnTarget(end.x, Math.floor(p.y + 1e-3), end.z);
+      if (s.onGround && dy < -0.5 && Math.hypot(tx - p.x, tz - p.z) > 0.05) {
+        // still standing on the ladder's top: walk on until the body drops into the column (clear of the box)
+        this.steer(cmd, tx - p.x, tz - p.z);
+        if (Math.hypot(s.vel.x, s.vel.z) > 0.06) cmd.forward = 0; // slowly: the air carries the body on
+        return cmd;
+      }
+      this.centre(cmd, s, tx, tz, true);
+      if (dy > 0.02) cmd.jump = true;
+      else if (dy > -CLIMB_TOLERANCE && !Number.isFinite(this.grid.stand(end.x, end.y, end.z))) cmd.sneak = true; // hold at the run's end
+      return cmd;
+    }
+    if (m === 'climbOut') {
+      const prev = this.path[Math.max(0, this.index - 1)]!;
+      const inCol = Math.floor(p.x) === prev.x && Math.floor(p.z) === prev.z;
+      const dy = target.feet - p.y;
+      if (inCol && dy > 0.3) {
+        // climb, pushing towards the exit (the push climbs as well)
+        this.steer(cmd, target.x + 0.5 - p.x, target.z + 0.5 - p.z);
+        cmd.jump = true;
+        return cmd;
+      }
+      if (inCol && !s.onGround) {
+        // fine: feet in [floor, floor + 0.15], then onto it
+        if (dy > 0) cmd.jump = true;
+        else if (dy > -0.15) cmd.sneak = true;
+        if (dy < 0.02) this.steer(cmd, target.x + 0.5 - p.x, target.z + 0.5 - p.z);
+        else this.centre(cmd, s, prev.x + 0.5, prev.z + 0.5);
+        return cmd;
+      }
+      this.steer(cmd, target.x + 0.5 - p.x, target.z + 0.5 - p.z);
+      if (s.onGround) this.brake(cmd, s, target, finalLeg);
+      return cmd;
+    }
+    // parkour
+    const g = target.gap;
+    if (!g) return undefined;
+    const dirX = Math.sign(target.x - g.x);
+    const dirZ = Math.sign(target.z - g.z);
+    // along the jump axis: the body centre's distance past the takeoff cell's centre (the edge is at 0.5)
+    const along = (p.x - (g.x + 0.5)) * dirX + (p.z - (g.z + 0.5)) * dirZ;
+    const lateral = Math.abs((p.x - (g.x + 0.5)) * dirZ) + Math.abs((p.z - (g.z + 0.5)) * dirX);
+    if (g.sprint && s.onGround && Math.floor(p.y + 1e-3) === g.y) {
+      // a 2-block gap needs the sprint run-up: without speed towards the gap, back up 2 blocks first
+      const speedAlong = s.vel.x * dirX + s.vel.z * dirZ;
+      if (this.backing === undefined && along > -1.2) this.backing = speedAlong < PARKOUR_RUN_SPEED; // decided once
+      if (this.backing) {
+        const rx = g.x + 0.5 - 2 * dirX;
+        const rz = g.z + 0.5 - 2 * dirZ;
+        if (Math.hypot(rx - p.x, rz - p.z) < 0.25) this.backing = false;
+        else {
+          this.steer(cmd, rx - p.x, rz - p.z);
+          if (Math.hypot(rx - p.x, rz - p.z) < 0.8 && Math.hypot(s.vel.x, s.vel.z) > 0.08) cmd.forward = 0;
+          return cmd;
+        }
+      }
+    }
+    this.steer(cmd, target.x + 0.5 - p.x, target.z + 0.5 - p.z, true);
+    if (s.onGround && along < 0.5 + 0.3 && Math.floor(p.y + 1e-3) === g.y) {
+      if (along >= 0.5 - (g.sprint ? PARKOUR_JUMP_SPRINT : PARKOUR_JUMP_WALK) && lateral < 0.25) cmd.jump = true;
+      cmd.sprint = g.sprint && this.sprint;
+    } else if (!s.onGround) {
+      cmd.sprint = g.sprint && this.sprint;
+    } else {
+      this.brake(cmd, s, target, finalLeg);
+    }
+    return cmd;
+  }
+
+  /** Turn towards (dx, dz) and hold forward while roughly facing it (`straight`: no turning limit relief). */
+  private steer(cmd: { forward: number; yaw: number }, dx: number, dz: number, straight = false): void {
+    const d = Math.hypot(dx, dz);
+    if (d > 0.05) this.yaw = turnTowards(this.yaw ?? cmd.yaw, yawTowards(dx, dz), this.maxTurn);
+    cmd.yaw = this.yaw ?? cmd.yaw;
+    const err = d > 0.05 ? Math.abs(angleDiff(cmd.yaw, yawTowards(dx, dz))) : 0;
+    cmd.forward = err < (straight ? 20 : 50) ? 1 : 0;
+  }
+
+  /** Stop on the final node (coast out), as the walking controller does. */
+  private brake(cmd: { forward: number }, s: FollowerInput, target: PathNode, finalLeg: boolean): void {
+    if (!finalLeg || !this.stopAtEnd) return;
+    const speed = Math.hypot(s.vel.x, s.vel.z);
+    const d = Math.hypot(target.x + 0.5 - s.pos.x, target.z + 0.5 - s.pos.z);
+    if (d - speed * GROUND_COAST < 0.12 || d <= this.arrive) cmd.forward = 0;
+  }
+
+  /**
+   * Hold the body over (cx, cz) in a ladder's column: face the centre, forward when the speed towards
+   * it is below a gentle target, back when above it (in the air the body accelerates by 0.02 per tick).
+   */
+  private centre(cmd: { forward: number; yaw: number }, s: FollowerInput, cx: number, cz: number, gentle = false): void {
+    const dx = cx - s.pos.x;
+    const dz = cz - s.pos.z;
+    const d = Math.hypot(dx, dz);
+    if (d < (gentle ? 0.06 : 0.08) && Math.hypot(s.vel.x, s.vel.z) < 0.03) {
+      cmd.forward = 0;
+      return;
+    }
+    if (d > 0.05) this.yaw = turnTowards(this.yaw ?? cmd.yaw, yawTowards(dx, dz), this.maxTurn);
+    cmd.yaw = this.yaw ?? cmd.yaw;
+    if (Math.abs(angleDiff(cmd.yaw, yawTowards(dx, dz))) > 45) {
+      cmd.forward = 0;
+      return;
+    }
+    const toward = d > 1e-6 ? (s.vel.x * dx + s.vel.z * dz) / d : 0;
+    const want = Math.min(0.08, d * 0.25);
+    cmd.forward = toward < want - 0.01 ? 1 : toward > want + 0.02 ? -1 : 0;
+  }
+
+  /** Where to hold the body in a climber column: the centre, moved 0.1 away from a ladder's box (the middle of the free 0.21 in a 1 x 1 shaft). */
+  private columnTarget(x: number, y: number, z: number): [number, number] {
+    let tx = x + 0.5;
+    let tz = z + 0.5;
+    for (const cy of [y - 1, y, y + 1]) {
+      const c = this.grid.cls(x, cy, z);
+      if (!c?.climbable) continue;
+      for (const b of c.boxes) {
+        if (b[3] - b[0] < 0.5) tx = x + (b[0] > 0.5 ? 0.4 : 0.6);
+        if (b[5] - b[2] < 0.5) tz = z + (b[2] > 0.5 ? 0.4 : 0.6);
+      }
+    }
+    return [tx, tz];
+  }
+
+  /** The farthest swim node (up to 6 ahead) whose straight line from the body keeps its footprint over swim cells. */
+  private swimAim(p: Vec3): number {
+    const path = this.path;
+    let aim = this.index;
+    for (let j = this.index + 1; j <= Math.min(this.index + 6, path.length - 1); j++) {
+      const n = path[j]!;
+      if (n.move !== 'swim' || n.y !== path[this.index]!.y) break;
+      if (!this.swimLineClear(p, n)) break;
+      aim = j;
+    }
+    return aim;
+  }
+
+  private swimLineClear(p: Vec3, n: PathNode): boolean {
+    const tx = n.x + 0.5;
+    const tz = n.z + 0.5;
+    const len = Math.hypot(tx - p.x, tz - p.z);
+    const steps = Math.max(1, Math.ceil(len / 0.25));
+    for (let i = 0; i <= steps; i++) {
+      const sx = p.x + ((tx - p.x) * i) / steps;
+      const sz = p.z + ((tz - p.z) * i) / steps;
+      for (const [ox, oz] of CORNERS) {
+        const w = this.grid.swim(Math.floor(sx + ox), n.y, Math.floor(sz + oz));
+        if (w === undefined || Number.isNaN(w)) return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * The body centre is within EDGE_SNEAK of a side of its cell beyond which the column has no floor
+   * within 3 blocks below the feet level (or holds lava / a hazard).
+   */
+  private nearUnsafeEdge(p: Vec3, y: number): boolean {
+    const bx = Math.floor(p.x);
+    const bz = Math.floor(p.z);
+    const fx = p.x - bx;
+    const fz = p.z - bz;
+    if (fx < EDGE_SNEAK && this.unsafeColumn(bx - 1, y, bz)) return true;
+    if (fx > 1 - EDGE_SNEAK && this.unsafeColumn(bx + 1, y, bz)) return true;
+    if (fz < EDGE_SNEAK && this.unsafeColumn(bx, y, bz - 1)) return true;
+    if (fz > 1 - EDGE_SNEAK && this.unsafeColumn(bx, y, bz + 1)) return true;
+    return false;
+  }
+
+  private unsafeColumn(x: number, y: number, z: number): boolean {
+    const key = `${x},${y},${z}`;
+    const hit = this.unsafeCols.get(key);
+    if (hit !== undefined) return hit;
+    let unsafe = false;
+    const f = this.grid.stand(x, y, z);
+    if (f === undefined || Number.isNaN(f)) {
+      unsafe = true;
+      for (let d = 0; d <= 3; d++) {
+        const c = this.grid.cls(x, y - 1 - d, z);
+        if (!c) break;
+        if (c.liquid === 'lava' || c.danger) break;
+        if (c.boxes.length || c.liquid === 'water') {
+          unsafe = false; // a floor (or water) at most 3 blocks below
+          break;
+        }
+      }
+      // a wall at the feet is no edge
+      const wall = this.grid.cls(x, y, z);
+      if (wall?.boxes.length && !wall.danger) unsafe = false;
+    }
+    this.unsafeCols.set(key, unsafe);
+    return unsafe;
   }
 
 
@@ -244,8 +565,10 @@ export class PathFollower {
 
   private inNode(p: Vec3, node: PathNode, onGround: boolean): boolean {
     if (Math.floor(p.x) !== node.x || Math.floor(p.z) !== node.z) return false;
+    // Track AJ: a swimming body bobs between 1 below and 0.6 above the surface cell
+    if (node.move === 'swim') return p.y > node.feet - 1 && p.y < node.feet + 1.2;
     if (Math.abs(p.y - node.feet) >= 0.6) return false;
-    if ((node.move === 'jump' || node.move === 'drop' || node.move === 'pillar') && !onGround) return false;
+    if ((node.move === 'jump' || node.move === 'drop' || node.move === 'pillar' || node.move === 'swimOut' || node.move === 'climbOut' || node.move === 'parkour') && !onGround) return false;
     return true;
   }
 

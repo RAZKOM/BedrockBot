@@ -124,6 +124,18 @@ export function boxesAtCell(src: TerrainSource, x: number, y: number, z: number,
   return c.boxes;
 }
 
+/**
+ * Track AJ: blocks the body climbs on BDS 1.26.60 (measured, docs/pathfinding.md "Movement variety"): a subset
+ * of TerrainClass.climbable (scaffolding stands and climbs by its own rules, not modelled).
+ */
+export const CLIMBERS: ReadonlySet<string> = new Set(['ladder', 'vine', 'twisting_vines', 'weeping_vines', 'cave_vines', 'cave_vines_body_with_berries', 'cave_vines_head_with_berries']);
+
+/** Track AJ: the block at (x, y, z) is one the body climbs (undefined = not loaded). */
+export function climbsAt(src: TerrainSource, x: number, y: number, z: number): boolean | undefined {
+  const c = classAt(src, x, y, z);
+  return c && c.climbable && CLIMBERS.has(c.name);
+}
+
 /** The movement model's view of a TerrainSource: real collision shapes, friction and liquids. */
 export function blockQueryOf(src0: TerrainSource): BlockQuery {
   // Track T: the physics never collides with cached stand-ins, only with loaded blocks
@@ -144,5 +156,6 @@ export function blockQueryOf(src0: TerrainSource): BlockQuery {
       if (!c) return undefined;
       return c.liquid ? { liquid: c.liquid, height: c.liquidHeight } : null;
     },
+    climbableAt: (x, y, z) => climbsAt(src, x, y, z), // Track AJ: ladders, vines (nav/grid.ts CLIMBERS)
   };
 }

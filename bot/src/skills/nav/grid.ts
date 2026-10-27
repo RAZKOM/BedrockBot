@@ -4,7 +4,7 @@
 // inside that cell (slab, carpet, snow layer, soul sand ...) or a block with a top of exactly 1 in the
 // cell below. See docs/pathfinding.md.
 import { classify, type TerrainClass } from '../terrain/classify.ts';
-import { boxesAtCell, type TerrainSource } from '../terrain/query.ts';
+import { CLIMBERS, boxesAtCell, type TerrainSource } from '../terrain/query.ts'; // Track AJ: CLIMBERS
 import { blockInfoOf, doorBoxes } from '../terrain/shapes.ts';
 import { PHYSICS } from '../input/physics.ts';
 import type { Box } from '../../world/types.ts';
@@ -48,6 +48,26 @@ function blocksCorridor(boxes: readonly Box[], axis: 0 | 2): boolean {
 /** A door or fence gate: a cell the body may stand in once it is open. */
 const isPassage = (c: TerrainClass): boolean => c.openable === 'door' || c.openable === 'gate';
 
+/** Track AJ: NavGrid.variety bits: water, a climber, a climber with a collision box (ladder) was classified. */
+export const VARIETY_WATER = 1;
+export const VARIETY_CLIMBER = 2;
+export const VARIETY_LADDER = 4;
+
+/** Track AJ: a block the body climbs on BDS 1.26.60 (terrain/query.ts CLIMBERS). */
+export const isClimber = (c: TerrainClass): boolean => c.climbable && CLIMBERS.has(c.name);
+/** Track AJ: scaffolding (stood on unless sneaking, climbed by jump / sneak: not modelled; an obstacle). */
+const isScaffold = (c: TerrainClass): boolean => c.name === 'scaffolding';
+/** Track AJ: the body may occupy the cell: no collision box (a climber's thin box aside), no liquid, no hazard. */
+const passable = (c: TerrainClass): boolean => (c.boxes.length === 0 || isClimber(c)) && !c.liquid && !c.danger && !isScaffold(c);
+/** Track AJ: water the body swims on: a source (or a waterlogged plant without depth), not a bubble column. */
+const stillWater = (c: TerrainClass): boolean => c.liquid === 'water' && c.name !== 'bubble_column' && Number(c.states.liquid_depth ?? 0) === 0;
+const SIDES: readonly (readonly [number, number])[] = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+];
+
 const closedGateBoxes = new Map<string, readonly Box[]>();
 
 /** Boxes of a gate with `open_bit` flipped. */
@@ -71,6 +91,8 @@ export class NavGrid {
   private readonly cells = new Map<number, TerrainClass>();
   /** stand() results (feet or NaN); unknown results are not cached. */
   private readonly stands = new Map<number, number>();
+  /** Track AJ: swim() results (feet or NaN), like `stands`. */
+  private readonly swims = new Map<number, number>();
   /** Highest roof block per column, 16 x 16 per chunk (SKY_UNSET = not computed). */
   private readonly sky = new Map<number, Int32Array>();
   private readonly minYOpt: number | undefined;
@@ -78,6 +100,8 @@ export class NavGrid {
   lookups = 0;
   /** Sky columns scanned (for perf reports). */
   skyScans = 0;
+  /** Track AJ: VARIETY_* bits of the cells classified so far (sticky). */
+  variety = 0;
 
   constructor(source: TerrainSource, opts: { minY?: number } = {}) {
     this.source = source;
@@ -94,6 +118,9 @@ export class NavGrid {
     if (!b) return undefined; // not cached: chunks arrive later
     const c = classify(b);
     this.cells.set(k, c);
+    // Track AJ: what kinds of movement-variety cells this grid has seen (the planner skips the checks until then)
+    if (c.liquid === 'water') this.variety |= VARIETY_WATER;
+    if (c.climbable && isClimber(c)) this.variety |= c.boxes.length ? VARIETY_CLIMBER | VARIETY_LADDER : VARIETY_CLIMBER;
     return c;
   }
 
@@ -104,19 +131,108 @@ export class NavGrid {
     for (let dy = -2; dy <= 1; dy++) this.stands.delete(cellKey(x, y + dy, z));
     const col = this.sky.get(chunkKey(x, z));
     if (col) col[(x & 15) * 16 + (z & 15)] = SKY_UNSET;
+    // Track AJ: swim(x, y', z) reads cells y' .. y' + 2 of its column and the 4 cells beside y'
+    if (this.swims.size) {
+      for (let dy = -2; dy <= 0; dy++) this.swims.delete(cellKey(x, y + dy, z));
+      for (const [dx, dz] of SIDES) this.swims.delete(cellKey(x + dx, y, z + dz));
+    }
   }
 
   clear(): void {
     this.cells.clear();
     this.stands.clear();
+    this.swims.clear(); // Track AJ
     this.sky.clear();
   }
 
-  /** The body may occupy this cell: no collision, no liquid, no hazard. undefined = unknown. */
+  /** The body may occupy this cell: no collision (a ladder's thin box aside), no liquid, no hazard. undefined = unknown. */
   free(x: number, y: number, z: number): boolean | undefined {
     const c = this.cls(x, y, z);
     if (!c) return undefined;
-    return c.boxes.length === 0 && !c.liquid && !c.danger;
+    return passable(c);
+  }
+
+  // ---- Track AJ: movement variety (docs/pathfinding.md "Movement variety") ----------------------
+
+  /** Track AJ: the cell holds a block the body climbs (ladder, vines; not scaffolding). undefined = unknown. */
+  climbable(x: number, y: number, z: number): boolean | undefined {
+    const c = this.cls(x, y, z);
+    return c && isClimber(c);
+  }
+
+  /**
+   * Track AJ: feet height (y) of a body climbing in cell (x, y, z): the cell holds a climber and the
+   * body's cells (y, y + 1) are passable. BLOCKED / UNKNOWN as for `stand`.
+   */
+  climb(x: number, y: number, z: number): number | undefined {
+    const c = this.cls(x, y, z);
+    if (!c) return UNKNOWN;
+    if (!isClimber(c) || c.liquid || c.danger) return BLOCKED;
+    const h = this.cls(x, y + 1, z);
+    if (!h) return UNKNOWN;
+    return passable(h) ? y : BLOCKED;
+  }
+
+  /**
+   * Track AJ: feet height (y) of a body swimming on the surface of cell (x, y, z): a still water cell
+   * (a source: no flow push, which the physics does not model, and no bubble column) with free air
+   * in the two cells above (the body bobs up to 0.6 out of the water), and no flowing water or lava
+   * next to it. Depth-1 water over a floor (wading) counts too. BLOCKED / UNKNOWN as for `stand`.
+   */
+  swim(x: number, y: number, z: number): number | undefined {
+    const k = cellKey(x, y, z);
+    const hit = this.swims.get(k);
+    if (hit !== undefined) return hit;
+    const f = this.computeSwim(x, y, z);
+    if (f !== undefined) this.swims.set(k, f);
+    return f;
+  }
+
+  private computeSwim(x: number, y: number, z: number): number | undefined {
+    const c = this.cls(x, y, z);
+    if (!c) return UNKNOWN;
+    if (!stillWater(c) || c.boxes.length) return BLOCKED;
+    for (let dy = 1; dy <= 2; dy++) {
+      const a = this.cls(x, y + dy, z);
+      if (!a) return UNKNOWN;
+      if (a.boxes.length || a.liquid || a.danger) return BLOCKED;
+    }
+    for (const [dx, dz] of SIDES) {
+      const n = this.cls(x + dx, y, z + dz);
+      if (!n) return UNKNOWN;
+      if (n.liquid === 'lava' || (n.liquid === 'water' && !stillWater(n)) || n.danger) return BLOCKED;
+    }
+    return y;
+  }
+
+  /**
+   * Track AJ: a cardinal walk along (dx, dz) that enters (`enter`) or leaves cell (x, y, z) through
+   * its centre is not stopped by a climber's thin box there (a ladder on the far side when entering is
+   * fine: the body stops in front of it; leaving towards it is not).
+   */
+  climberLets(x: number, y: number, z: number, dx: number, dz: number, enter: boolean): boolean {
+    const c = this.cls(x, y, z);
+    if (!c || !isClimber(c) || !c.boxes.length) return true;
+    const axis = dx !== 0 ? 0 : 2;
+    const dir = dx + dz;
+    for (const b of c.boxes) {
+      const lo = axis === 0 ? b[0] : b[2];
+      const hi = axis === 0 ? b[3] : b[5];
+      const plo = axis === 0 ? b[2] : b[0];
+      const phi = axis === 0 ? b[5] : b[3];
+      if (!(plo < CORRIDOR_HI - EPS && phi > CORRIDOR_LO + EPS)) continue; // beside the corridor
+      // the body sweeps [-inf, 0.8] entering along +axis, [0.2, +inf] leaving along +axis
+      const sweptLo = enter === dir > 0 ? -Infinity : CORRIDOR_LO;
+      const sweptHi = enter === dir > 0 ? CORRIDOR_HI : Infinity;
+      if (lo < sweptHi - EPS && hi > sweptLo + EPS) return false;
+    }
+    return true;
+  }
+
+  /** Track AJ: the cell holds a climber with a collision box (a ladder). */
+  thinClimber(x: number, y: number, z: number): boolean {
+    const c = this.cls(x, y, z);
+    return !!c && isClimber(c) && c.boxes.length > 0;
   }
 
   /** Cells y0..y1 (inclusive) of a column are all free. undefined = some unknown. */
@@ -164,7 +280,8 @@ export class NavGrid {
     const c = this.cls(x, y, z);
     if (!c) return UNKNOWN;
     let feet: number;
-    if (c.boxes.length && !(through && isPassage(c))) {
+    if (isScaffold(c)) return BLOCKED; // Track AJ: scaffolding's own rules are not modelled
+    if (c.boxes.length && !(through && isPassage(c)) && !isClimber(c)) {
       if (!c.floor || c.top >= 1) return BLOCKED;
       feet = y + c.top;
     } else {
@@ -179,7 +296,7 @@ export class NavGrid {
       const h = this.cls(x, cy, z);
       if (!h) return UNKNOWN;
       if (through && isPassage(h)) continue;
-      if (h.boxes.length || h.liquid || h.danger) return BLOCKED;
+      if (!passable(h)) return BLOCKED; // Track AJ: a ladder's thin box is no obstacle
     }
     return feet;
   }

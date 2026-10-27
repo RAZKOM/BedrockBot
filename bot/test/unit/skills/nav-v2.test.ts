@@ -261,7 +261,8 @@ describe('stuck handling', () => {
     expect(rep.plans.some((x) => x.reason === 'timeout')).toBe(true);
   });
 
-  it('knocked into a pool: retreats to the last safe node, then re-plans and arrives', async () => {
+  // Track AJ: in water the body now re-plans from its swim node (swims out) instead of retreating first
+  it('knocked into a pool: re-plans from the water (or retreats) and arrives', async () => {
     const gen = flatGen();
     gen.fill({ x: -3, y: -61, z: 4 }, { x: 3, y: -61, z: 8 }, 'water');
     let pushed = false;
@@ -275,7 +276,7 @@ describe('stuck handling', () => {
     });
     const rep = run.skills.status().lastGoto!;
     expect(pushed).toBe(true);
-    expect(rep.retreats).toBeGreaterThanOrEqual(1);
+    expect(rep.retreats + rep.plans.filter((x) => x.reason !== 'start').length).toBeGreaterThanOrEqual(1);
     expect(run.result).toEqual({ ok: true });
   });
 });

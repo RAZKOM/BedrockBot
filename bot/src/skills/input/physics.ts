@@ -117,11 +117,18 @@ export function groundFriction(world: BlockQuery, p: Vec3): number {
   return world.frictionAt(Math.floor(p.x), Math.floor(p.y - 0.5), Math.floor(p.z)) ?? PHYSICS.groundFriction;
 }
 
-/** Which liquids the body box at feet `p` touches (box shrunk by 0.001, liquid surface heights respected). */
-export function liquidContact(world: BlockQuery, p: Vec3, height: number = PHYSICS.height): { water: boolean; lava: boolean } {
+/**
+ * Which liquids the body box at feet `p` touches (box shrunk by 0.001, liquid surface heights
+ * respected). `inset` also shrinks the box vertically at both ends: the water movement test uses 0.4
+ * (Track AJ, measured on BDS 1.26.60: a body whose feet are less than 0.4 below the water surface
+ * moves with air physics: no water drag, no jump-in-water impulse).
+ */
+export function liquidContact(world: BlockQuery, p: Vec3, height: number = PHYSICS.height, inset = 0): { water: boolean; lava: boolean } {
   const out = { water: false, lava: false };
   if (!world.liquidAt) return out;
   const b = playerBox(p, height);
+  b[1] += inset;
+  b[4] -= inset;
   const d = 0.001;
   const x0 = Math.floor(b[0] + d);
   const x1 = Math.floor(b[3] - d);
@@ -134,7 +141,7 @@ export function liquidContact(world: BlockQuery, p: Vec3, height: number = PHYSI
       for (let x = x0; x <= x1; x++) {
         const l = world.liquidAt(x, y, z);
         if (!l) continue;
-        if (y + l.height <= b[1] + d) continue;
+        if (y + (inset > 0 ? 1 : l.height) <= b[1] + d) continue; // Track AJ: the inset test reads whole cells
         if (l.liquid === 'water') out.water = true;
         else out.lava = true;
       }
@@ -145,15 +152,31 @@ export function liquidContact(world: BlockQuery, p: Vec3, height: number = PHYSI
 
 const E = PHYSICS.contactEpsilon;
 
-/** Clip a move of `d` along `axis` (0 = x, 1 = y, 2 = z) of box `b` against `obstacle`. */
-export function clipAxis(obstacle: Box, b: Box, axis: Axis, d: number): number {
+/**
+ * Track AJ: horizontal contact tolerance at position p: 1e-4, or 2^-21 x the larger of |x| and |z| when
+ * that is more (about 10 float32 half-ulps; x 5000: 0.0024). Float32 positions far from the origin
+ * snap past a face they stopped at; with 1e-4 the next tick walked into the block.
+ */
+export function contactEpsilon(p: Vec3): number {
+  return Math.max(E, Math.max(Math.abs(p.x), Math.abs(p.z)) * 4.76837158203125e-7);
+}
+
+/**
+ * Clip a move of `d` along `axis` (0 = x, 1 = y, 2 = z) of box `b` against `obstacle`. `e`: the
+ * contact tolerance along a horizontal move axis (y, and the overlap test on the other axes, use E).
+ */
+export function clipAxis(obstacle: Box, b: Box, axis: Axis, d: number, e: number = E): number {
   const a1: Axis = axis === 0 ? 1 : 0;
   const a2: Axis = axis === 2 ? 1 : 2;
+  const e1 = E; // (the overlap on the other axes keeps E: a larger tolerance there let the body slip past corners)
+  const e2 = E;
+  const ea = axis === 1 ? E : e;
   // the boxes must overlap on the two other axes
-  if (!(hi(obstacle, a1) > lo(b, a1) + E && lo(obstacle, a1) < hi(b, a1) - E)) return d;
-  if (!(hi(obstacle, a2) > lo(b, a2) + E && lo(obstacle, a2) < hi(b, a2) - E)) return d;
-  if (d > 0 && lo(obstacle, axis) >= hi(b, axis) - E) return Math.min(d, lo(obstacle, axis) - hi(b, axis));
-  if (d < 0 && hi(obstacle, axis) <= lo(b, axis) + E) return Math.max(d, hi(obstacle, axis) - lo(b, axis));
+  if (!(hi(obstacle, a1) > lo(b, a1) + e1 && lo(obstacle, a1) < hi(b, a1) - e1)) return d;
+  if (!(hi(obstacle, a2) > lo(b, a2) + e2 && lo(obstacle, a2) < hi(b, a2) - e2)) return d;
+  // (Track AJ: a box within the tolerance stops the move but never pushes the body back by more than E)
+  if (d > 0 && lo(obstacle, axis) >= hi(b, axis) - ea) return Math.min(d, Math.max(lo(obstacle, axis) - hi(b, axis), -E));
+  if (d < 0 && hi(obstacle, axis) <= lo(b, axis) + ea) return Math.max(d, Math.min(hi(obstacle, axis) - lo(b, axis), E));
   return d;
 }
 
@@ -161,8 +184,8 @@ type Axis = 0 | 1 | 2;
 const lo = (b: Box, a: Axis): number => (a === 0 ? b[0] : a === 1 ? b[1] : b[2]);
 const hi = (b: Box, a: Axis): number => (a === 0 ? b[3] : a === 1 ? b[4] : b[5]);
 
-function clipAll(boxes: Box[], b: Box, axis: Axis, d: number): number {
-  for (const o of boxes) d = clipAxis(o, b, axis, d);
+function clipAll(boxes: Box[], b: Box, axis: Axis, d: number, e: number = E): number {
+  for (const o of boxes) d = clipAxis(o, b, axis, d, e);
   return d;
 }
 
@@ -196,24 +219,27 @@ export function moveBody(
   if (!boxes) return undefined;
 
   let b = start;
-  const dy = clipAll(boxes, b, 1, wanted.y);
+  // Track AJ: float32 positions far from the origin snap past a face they stopped at (ulp 0.0005 at 5000):
+  // the contact tolerance grows with the coordinates, or the next tick walks into the block
+  const e = contactEpsilon(pos);
+  const dy = clipAll(boxes, b, 1, wanted.y, e);
   b = offsetBox(b, 0, dy, 0);
-  const dx = clipAll(boxes, b, 0, wanted.x);
+  const dx = clipAll(boxes, b, 0, wanted.x, e);
   b = offsetBox(b, dx, 0, 0);
-  const dz = clipAll(boxes, b, 2, wanted.z);
+  const dz = clipAll(boxes, b, 2, wanted.z, e);
   let res = { dx, dy, dz };
 
   const blockedH = dx !== wanted.x || dz !== wanted.z;
   const landed = dy !== wanted.y && wanted.y < 0;
   if (blockedH && (wasOnGround || landed)) {
     let s = start;
-    const up = clipAll(boxes, s, 1, step);
+    const up = clipAll(boxes, s, 1, step, e);
     s = offsetBox(s, 0, up, 0);
-    const sx = clipAll(boxes, s, 0, wanted.x);
+    const sx = clipAll(boxes, s, 0, wanted.x, e);
     s = offsetBox(s, sx, 0, 0);
-    const sz = clipAll(boxes, s, 2, wanted.z);
+    const sz = clipAll(boxes, s, 2, wanted.z, e);
     s = offsetBox(s, 0, 0, sz);
-    const down = clipAll(boxes, s, 1, -up);
+    const down = clipAll(boxes, s, 1, -up, e);
     if (sx * sx + sz * sz > dx * dx + dz * dz) res = { dx: sx, dy: up + down, dz: sz };
   }
 
@@ -223,7 +249,7 @@ export function moveBody(
   // A body without vertical motion (e.g. right after a teleport) stays grounded while it rests on something.
   if (!onGround && wasOnGround && !collidedVertically && Math.abs(wanted.y) <= 1e-5) {
     const end = offsetBox(start, res.dx, res.dy, res.dz);
-    onGround = clipAll(boxes, end, 1, -1e-3) !== -1e-3;
+    onGround = clipAll(boxes, end, 1, -1e-3, e) !== -1e-3;
   }
   return { ...res, collidedHorizontally, collidedVertically, onGround };
 }
@@ -293,7 +319,9 @@ export function stepBody(prev: BodyState, cmd: MoveCommand, world: BlockQuery): 
   s.sprinting = cmd.sprint && cmd.forward > 0 && !cmd.sneak;
 
   const height = s.sneaking ? PHYSICS.sneakHeight : PHYSICS.height;
-  const wet = liquidContact(world, s.pos, height);
+  // Track AJ: water moves the body only when the box shrunk by 0.4 at both ends is in it (BDS 1.26.60)
+  const touch = liquidContact(world, s.pos, height);
+  const wet = touch.water ? { water: liquidContact(world, s.pos, height, LIQUID.waterInset).water, lava: touch.lava } : touch;
   s.inWater = wet.water;
   s.inLava = wet.lava && !wet.water;
   if (wet.water || wet.lava) return stepInLiquid(s, cmd, world, height, wet.water ? LIQUID.water : LIQUID.lava, prev);
@@ -308,7 +336,8 @@ export function stepBody(prev: BodyState, cmd: MoveCommand, world: BlockQuery): 
     inertia = PHYSICS.airInertia;
     accel = s.sprinting ? PHYSICS.airSprintAcceleration : PHYSICS.airAcceleration;
   }
-  const mv = moveVectorOf(cmd);
+  // Track AJ: BDS scales the move by the sneak factor also on the first tick after the sneak key is released
+  const mv = moveVectorOf(!cmd.sneak && prev.sneaking ? { ...cmd, sneak: true } : cmd);
   applyImpulse(v, f32(mv.x * PHYSICS.impulseScale), f32(mv.z * PHYSICS.impulseScale), accel, cmd.yaw);
 
   let jumped = false;
@@ -321,6 +350,25 @@ export function stepBody(prev: BodyState, cmd: MoveCommand, world: BlockQuery): 
     }
     s.jumpTicks = PHYSICS.jumpCooldown;
     jumped = true;
+  }
+
+  // Track AJ: on a climbable block (ladder, vine ...) the fall speed is clamped and a climb lifts the body
+  const climbing = onClimbable(world, s.pos);
+  if (climbing) {
+    const c = CLIMB.maxFall;
+    if (v.y < -c) v.y = f32(-c);
+    if (cmd.sneak && v.y < 0) v.y = 0;
+    // the jump key climbs at once: the rise is this tick's move, also replacing a faster rise (BDS 1.26.60)
+    if (cmd.jump) v.y = f32(CLIMB.up);
+  }
+
+  // Track AJ: a sneaking body on the ground does not walk off an edge (the move backs off in 0.05 steps)
+  if (s.sneaking && s.onGround && v.y <= 0) {
+    const b = backOffFromEdge(world, s.pos, v.x, v.z, height);
+    if (b) {
+      v.x = b.x;
+      v.z = b.z;
+    }
   }
 
   const m = moveBody(world, s.pos, v, s.onGround, height);
@@ -336,6 +384,8 @@ export function stepBody(prev: BodyState, cmd: MoveCommand, world: BlockQuery): 
   v.y = f32(f32(v.y - PHYSICS.gravity) * PHYSICS.drag);
   v.x = f32(v.x * inertia);
   v.z = f32(v.z * inertia);
+  // Track AJ: pushing against a wall sets the next tick's rise after gravity and drag (BDS 1.26.60)
+  if (climbing && m.collidedHorizontally) v.y = f32(CLIMB.up);
   return { state: s, jumped, simulated: true };
 }
 
@@ -343,14 +393,18 @@ export function stepBody(prev: BodyState, cmd: MoveCommand, world: BlockQuery): 
  * Liquid movement (vanilla rules; constants as bedboo lists them for Bedrock: LiteLDev/bedboo,
  * LGPL-3.0, packages/mineflayer-bedrock/lib/physics/engine.js; no code copied). Water: acceleration
  * 0.02, drag 0.8 on all axes, gravity 0.005, jump key +0.04 per tick, +0.3 upwards when pushing
- * against a wall that can be climbed out of. Lava: drag 0.5, gravity 0.02. Flow push is not modelled
- * (the pathfinder never enters liquids; this only has to keep a body that fell in from being
- * corrected every tick).
+ * against a wall that can be climbed out of (Track AJ: the moved box must hold no collision and no
+ * liquid cell). Lava: drag 0.5, gravity 0.02. Track AJ, measured on BDS 1.26.60: the water physics
+ * (and its jump impulse) apply only while the body box shrunk by 0.4 at the feet and at the head
+ * (`waterInset`) reaches into a water cell (whole cells); above that the body moves with air
+ * physics. Flow push is not modelled: the planner swims only on still water (nav/grid.ts `swim`).
  */
 export const LIQUID = Object.freeze({
   water: { accel: 0.02, drag: 0.8, gravity: 0.005, jump: 0.04 },
   lava: { accel: 0.02, drag: 0.5, gravity: 0.02, jump: 0.04 },
   climbOut: 0.3,
+  /** Track AJ: the water movement test shrinks the body box by this much at the feet and the head. */
+  waterInset: 0.4,
 });
 
 function stepInLiquid(
@@ -383,13 +437,71 @@ function stepInLiquid(
     const region = sweepBox(playerBox(s.pos, height), off.x, off.y, off.z);
     const boxes = solidBoxes(world, region);
     const moved = offsetBox(playerBox(s.pos, height), off.x, off.y, off.z);
-    if (boxes && !boxes.some((o) => overlaps(o, moved))) v.y = f32(LIQUID.climbOut);
+    // Track AJ: and holds no liquid (vanilla isLiquidPresentInAABB: free of collisions and of liquid cells)
+    if (boxes && !boxes.some((o) => overlaps(o, moved, contactEpsilon(s.pos))) && !anyLiquid(world, moved)) v.y = f32(LIQUID.climbOut);
   }
   return { state: s, jumped: false, simulated: true };
 }
 
-function overlaps(a: Box, b: Box): boolean {
-  return a[0] < b[3] - E && a[3] > b[0] + E && a[1] < b[4] - E && a[4] > b[1] + E && a[2] < b[5] - E && a[5] > b[2] + E;
+/** Track AJ: some cell the box overlaps holds a liquid (whole cells; unknown cells count as liquid). */
+function anyLiquid(world: BlockQuery, b: Box): boolean {
+  if (!world.liquidAt) return false;
+  for (let y = Math.floor(b[1]); y < Math.ceil(b[4]); y++)
+    for (let z = Math.floor(b[2]); z < Math.ceil(b[5]); z++)
+      for (let x = Math.floor(b[0]); x < Math.ceil(b[3]); x++) if (world.liquidAt(x, y, z) !== null) return true;
+  return false;
+}
+
+function overlaps(a: Box, b: Box, e: number = E): boolean {
+  return a[0] < b[3] - e && a[3] > b[0] + e && a[1] < b[4] - E && a[4] > b[1] + E && a[2] < b[5] - e && a[5] > b[2] + e;
+}
+
+/**
+ * Track AJ: climbing, measured on BDS 1.26.60 (docs/pathfinding.md "Movement variety"). On a climbable
+ * block (the block containing the feet: ladder, vines) the fall speed is clamped to `maxFall` before
+ * the move (a slide of 0.2 blocks per tick), sneaking holds the body (no slide), the jump key sets
+ * vy = `up` before the move (also replacing a faster rise), and a body that hit a wall during the move
+ * gets vy = `up` after gravity and drag (the rise of the next tick). No horizontal clamp.
+ */
+export const CLIMB = Object.freeze({ maxFall: 0.2, up: 0.2 });
+
+/** Track AJ: the edge test reads the box shrunk by this much on each horizontal side (fits the measured stops). */
+const EDGE_INSET = 0.025;
+
+/** Track AJ: the body with feet at `p` is on a climbable block (the block containing the feet). */
+export function onClimbable(world: BlockQuery, p: Vec3): boolean {
+  return world.climbableAt?.(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z)) === true;
+}
+
+/**
+ * Track AJ: sneak edge avoidance (vanilla maybeBackOffFromEdge, measured on BDS 1.26.60: a sneaking
+ * body stops with its box 0.03 to 0.05 over the edge block). The horizontal move (dx, dz) is reduced
+ * in 0.05 steps towards 0 while the box moved by it and `stepHeight` down meets no block: x first,
+ * then z, then both (the test box is shrunk by EDGE_INSET on each horizontal side). undefined when
+ * the world around is unknown.
+ */
+export function backOffFromEdge(world: BlockQuery, p: Vec3, dx: number, dz: number, height: number = PHYSICS.height): { x: number; z: number } | undefined {
+  const box = playerBox(p, height);
+  const down = -PHYSICS.stepHeight;
+  const region = sweepBox(sweepBox(box, dx, down, dz), 0, 0, 0);
+  const boxes = solidBoxes(world, region);
+  if (!boxes) return undefined;
+  const free = (ox: number, oz: number): boolean => {
+    const moved = offsetBox(box, ox, down, oz);
+    moved[0] += EDGE_INSET;
+    moved[2] += EDGE_INSET;
+    moved[3] -= EDGE_INSET;
+    moved[5] -= EDGE_INSET;
+    return !boxes.some((o) => overlaps(o, moved));
+  };
+  const towardsZero = (d: number): number => (d < 0.05 && d >= -0.05 ? 0 : d > 0 ? d - 0.05 : d + 0.05);
+  while (dx !== 0 && free(dx, 0)) dx = towardsZero(dx);
+  while (dz !== 0 && free(0, dz)) dz = towardsZero(dz);
+  while (dx !== 0 && dz !== 0 && free(dx, dz)) {
+    dx = towardsZero(dx);
+    dz = towardsZero(dz);
+  }
+  return { x: f32(dx), z: f32(dz) };
 }
 
 /** The own engine as a PhysicsEngine. */

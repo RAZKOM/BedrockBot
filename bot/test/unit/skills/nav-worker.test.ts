@@ -42,6 +42,7 @@ const FENCE = rid('oak_fence');
 const STAIRS = [0, 1, 2, 3].map((d) => rid('oak_stairs', { weirdo_direction: d }));
 const DOOR_LOW = rid('wooden_door', { upper_block_bit: 0, open_bit: 0 });
 const DOOR_UP = rid('wooden_door', { upper_block_bit: 1, open_bit: 0 });
+const LADDER = rid('ladder', { facing_direction: 3 }); // Track AJ: a ladder tower
 /** A runtime id the registry does not know (a block newer than the data): a 1.5-high obstacle. */
 const UNKNOWN_RID = 123456789;
 
@@ -64,6 +65,9 @@ function hills(x: number, y: number, z: number): number {
   const r = hash(x, z);
   if (x >= -10 && x <= -6 && z >= 4 && z <= 8) return y <= g - 1 ? STONE : y <= g ? WATER : AIR; // pond
   if (x === 12 && z >= -4 && z <= -2) return y < g ? STONE : y === g ? LAVA : AIR;
+  // Track AJ: an 8-high stone pillar with a ladder on its south face (the only way onto its top)
+  if (x === 21 && z === -31 && y > g && y <= g + 8) return STONE;
+  if (x === 21 && z === -30 && y > g && y <= g + 8) return LADDER;
   if (y < g - 2) return STONE;
   if (y < g) return DIRT;
   if (y === g) return GRASS;
@@ -308,6 +312,18 @@ describe('planner worker: a real worker thread', () => {
       expect(w.status, lines.at(-1)).toBe(t.status);
       expect(Math.abs(w.cost - t.cost), lines.at(-1)).toBeLessThanOrEqual(1);
       if (w.path.length === t.path.length) same++;
+    }
+    // Track AJ: up the ladder onto the pillar (climb moves in both planners)
+    {
+      const a = { x: 21, y: groundY(21, -28) + 1, z: -28 };
+      const b = { x: 21, y: groundY(21, -31) + 9, z: -31 };
+      const t = findPath(main(), a, { type: 'block', p: b }, { maxNodes: 300_000, maxMs: 20_000, allowOpen: true });
+      const w = await viaWorker(a, b);
+      lines.push(`ladder: thread ${t.status} ${t.cost.toFixed(2)} worker ${w.status} ${w.cost.toFixed(2)}`);
+      expect(t.status).toBe('found');
+      expect(t.path.some((n) => n.move === 'climb')).toBe(true);
+      expect(w.status).toBe(t.status);
+      expect(Math.abs(w.cost - t.cost)).toBeLessThanOrEqual(1);
     }
     // a wall across the middle, built after the snapshot: both see it
     for (let z = C0 * 16; z <= C1 * 16 + 15; z++) for (let dy = 1; dy <= 3; dy++) if (z !== 30) F.setBlock({ x: 6, y: groundY(6, z) + dy, z }, STONE);

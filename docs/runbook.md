@@ -406,6 +406,7 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e act                   
 BDS_E2E=1 HARD_EASY=1 pnpm --filter bot exec vitest run --project e2e hard-night        # + the easy/zombie run
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nav-                          # every nav suite on bds-move (v1 + v2, ~7 min; docs/pathfinding.md "Tests")
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nav-goals nav-waypoints       # task 7.10: goal types, blacklist, waypoints / !top through the CLI (~2 min)
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nav-swim nav-ladder nav-parkour  # Track AJ, task 7.7: swimming, ladders / vines, parkour 20x per gap, edge sneaking (~10 min; PARKOUR_RUNS, BRIDGE_RUNS, NAV_TRACE=1)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e pve                           # tasks 7.4-7.6 on bds-pve (normal; ~9 min with the night run)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e cache-                        # tasks 7.12 / 7.15 on bds-cache (world cache, debug map; ~5 min)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e farm- mine-                   # tasks 7.13 / 7.14 on bds-farm (FARM_BDS_HOST/PORT/CONTAINER, FARM_VERBOSE=1; docs/farming.md, docs/mining.md)

@@ -7,6 +7,14 @@
 //   jump   - cardinal, up by more than the step height and at most 1.25, head room above the start.
 //   drop   - cardinal, walk off an edge and fall up to `maxDrop` (3) blocks.
 //   pillar - straight up one block: jump and place a throwaway block under the feet (`allowPlace`).
+// Track AJ, movement variety (`moves`, docs/pathfinding.md "Movement variety"):
+//   swim     - into still water (walk in, or drop up to 3 onto the surface), between surface cells
+//              (8 neighbours), never under water.
+//   swimOut  - from the surface onto a bank at the water level up to 1 block higher.
+//   climb    - up / down a ladder or vine column, onto it from its foot, its side or its top.
+//   climbOut - off a climber column onto a floor beside it, from its level up to 1 higher.
+//   parkour  - over a 1-block gap (walking) or a 2-block gap (2-block sprinted run-up behind the
+//              takeoff), landing at the same height or 1 lower; water or a floor within 3 below, no lava.
 // Cost of a move into node B = base ticks x B's floor factor (leaves, soul sand, ice) + `underground`
 // when B has a roof above the head + `irreversibleDrop` for a drop higher than a jump + break / place
 // / door ticks. Heuristic: costs.walk x octile distance (admissible: no move is cheaper per block).
@@ -20,12 +28,12 @@ import { halfTop, type TerrainClass } from '../terrain/classify.ts';
 import { breakBlocker, type BreakRules, type NavBlockFace } from './actions.ts';
 import { DEFAULT_COSTS, dropCost, type PathCosts } from './costs.ts';
 import { goalTest, type NavGoal, type GoalTest } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
-import { CROSS_BLOCKED, CROSS_TOGGLE, cellKey, type NavGrid } from './grid.ts';
+import { CROSS_BLOCKED, CROSS_TOGGLE, VARIETY_CLIMBER, VARIETY_LADDER, VARIETY_WATER, cellKey, type NavGrid } from './grid.ts';
 
 export type { PathCosts } from './costs.ts';
 export { DEFAULT_COSTS } from './costs.ts';
 
-export type MoveKind = 'start' | 'walk' | 'diag' | 'jump' | 'drop' | 'pillar';
+export type MoveKind = 'start' | 'walk' | 'diag' | 'jump' | 'drop' | 'pillar' | 'swim' | 'swimOut' | 'climb' | 'climbOut' | 'parkour'; // Track AJ: swim .. parkour
 
 /** World changes a move needs before (dig, use) or while (place) it is walked. */
 export interface NodeActions {
@@ -48,9 +56,28 @@ export interface PathNode {
   /** Estimated ticks of the move into this node (0 for the start). */
   cost: number;
   act?: NodeActions;
+  /**
+   * Track AJ: a parkour move: the takeoff node (the last floor before the gap), the gap's length (1
+   * or 2 blocks) and whether the run-up is sprinted.
+   */
+  gap?: { x: number; y: number; z: number; length: number; sprint: boolean };
+}
+
+/** Track AJ: the movement-variety moves a search may use (all default true). */
+export interface MoveSet {
+  /** Swim on the surface of still water (enter, cross, climb out). */
+  swim?: boolean;
+  /** Climb ladders and vines up and down, mount and leave them. */
+  climb?: boolean;
+  /** Jump 1-block gaps at walking speed. */
+  parkour1?: boolean;
+  /** Jump 2-block gaps with a 2-block sprint run-up. */
+  parkour2?: boolean;
 }
 
 export interface PathOptions {
+  /** Track AJ: movement-variety moves (default: all on). */
+  moves?: MoveSet;
   costs?: Partial<PathCosts>;
   /** Give up after expanding this many nodes and return the best partial path. Default 40 000. */
   maxNodes?: number;
@@ -119,9 +146,17 @@ const M_DIAG = 2;
 const M_JUMP = 3;
 const M_DROP = 4;
 const M_PILLAR = 5;
-const MOVE_CODES: readonly MoveKind[] = ['start', 'walk', 'diag', 'jump', 'drop', 'pillar'];
+const M_SWIM = 6; // Track AJ: movement variety
+const M_SWIM_OUT = 7;
+const M_CLIMB = 8;
+const M_CLIMB_OUT = 9;
+const M_PARKOUR = 10;
+const MOVE_CODES: readonly MoveKind[] = ['start', 'walk', 'diag', 'jump', 'drop', 'pillar', 'swim', 'swimOut', 'climb', 'climbOut', 'parkour'];
 /** Node flag: the node stands in a doorway (only cardinal walks leave it). */
 const F_PASSAGE = 1;
+/** Track AJ: node flags: swimming on the surface; climbing (feet in a climber cell, no floor). */
+const F_SWIM = 2;
+const F_CLIMB = 4;
 
 /** Binary min-heap of node indices keyed by f. */
 class Heap {
@@ -195,6 +230,8 @@ class Nodes {
   closed = new Uint8Array(4096);
   /** Actions of the move into the node (sparse). */
   act: (NodeActions | undefined)[] = [];
+  /** Track AJ: parkour takeoff of the move into the node (sparse). */
+  gap: (PathNode['gap'] | undefined)[] = [];
 
   add(x: number, y: number, z: number, feet: number): number {
     if (this.n === this.x.length) {
@@ -253,6 +290,10 @@ export class PathSearch {
   private sawUnknown = false;
   private ms = 0;
   private done: PathResult | undefined;
+  /** Track AJ: the parkour takeoff the next relax() records (set around a parkour relax only). */
+  private pendingGap: PathNode['gap'] = undefined;
+  /** Track AJ: per cardinal direction of the node being expanded: a gap starts next to it. */
+  private readonly holes = new Uint8Array(4);
 
   constructor(grid: NavGrid, start: { x: number; y: number; z: number }, goal: NavGoal, opts: PathOptions = {}) {
     this.grid = grid;
@@ -271,6 +312,21 @@ export class PathSearch {
       if (isFeet(through)) {
         startFeet = through;
         flags = F_PASSAGE;
+      }
+    }
+    // Track AJ: a body on a ladder or swimming starts from a climb / swim node
+    if (!isFeet(startFeet) && this.moveOn('climb')) {
+      const c = grid.climb(start.x, start.y, start.z);
+      if (isFeet(c)) {
+        startFeet = c;
+        flags = F_CLIMB;
+      }
+    }
+    if (!isFeet(startFeet) && this.moveOn('swim')) {
+      const w = grid.swim(start.x, start.y, start.z);
+      if (isFeet(w)) {
+        startFeet = w;
+        flags = F_SWIM;
       }
     }
     if (!isFeet(startFeet)) {
@@ -304,6 +360,11 @@ export class PathSearch {
     return this.test.h(x, y, z) * this.costs.walk;
   }
 
+  /** Track AJ: the movement-variety move is enabled (PathOptions.moves, default on). */
+  private moveOn(m: keyof MoveSet): boolean {
+    return this.opts.moves?.[m] ?? true;
+  }
+
   /**
    * Run for at most `sliceMs` (checked every 64 expansions). Returns the result once the search is
    * over (goal found, exhausted, or a limit hit), else undefined.
@@ -332,7 +393,8 @@ export class PathSearch {
       const cy = nodes.y[cur]!;
       const cz = nodes.z[cur]!;
       const f0 = nodes.feet[cur]!;
-      if (this.test.done(cx, cy, cz, f0)) {
+      // Track AJ: a goal is never reached swimming or hanging on a ladder (the body stops standing)
+      if ((nodes.flags[cur]! & (F_SWIM | F_CLIMB)) === 0 && this.test.done(cx, cy, cz, f0)) {
         this.found = cur;
         break;
       }
@@ -379,12 +441,15 @@ export class PathSearch {
       const node: PathNode = { x: nodes.x[i]!, y: nodes.y[i]!, z: nodes.z[i]!, feet: nodes.feet[i]!, move: MOVE_CODES[nodes.move[i]!]!, cost: nodes.mc[i]! };
       const act = nodes.act[i];
       if (act) node.act = act;
+      const gap = nodes.gap[i]; // Track AJ
+      if (gap && node.move === 'parkour') node.gap = gap;
       path.push(node);
     }
     path.reverse();
     path[0]!.move = 'start';
     path[0]!.cost = 0;
     delete path[0]!.act;
+    delete path[0]!.gap;
     const status = this.found >= 0 ? 'found' : interim || this.limited || this.sawUnknown ? 'partial' : 'none';
     return { status, path, cost: nodes.g[end]!, expanded: this.expanded, ms: this.ms, unknown: this.sawUnknown, limited: interim || this.limited };
   }
@@ -412,6 +477,7 @@ export class PathSearch {
     nodes.move[i] = move;
     nodes.flags[i] = flags;
     nodes.act[i] = act;
+    if (this.pendingGap !== undefined || nodes.gap[i] !== undefined) nodes.gap[i] = this.pendingGap; // Track AJ
     this.open.push(i, g + this.h(x, y, z));
   }
 
@@ -419,11 +485,22 @@ export class PathSearch {
     const grid = this.grid;
     const costs = this.costs;
     const opts = this.opts;
-    const inPassage = (this.nodes.flags[cur]! & F_PASSAGE) !== 0;
+    const flags0 = this.nodes.flags[cur]!;
+    // Track AJ: swim and climb nodes have their own moves
+    if (flags0 & F_SWIM) return this.expandSwim(cur, cx, cy, cz);
+    if (flags0 & F_CLIMB) return this.expandClimb(cur, cx, cy, cz, f0);
+    const inPassage = (flags0 & F_PASSAGE) !== 0;
     const headCell = Math.floor(f0 + PHYSICS.height - 1e-6);
     const diag = costs.walk * Math.SQRT2;
+    // Track AJ: movement-variety checks only once the grid has classified water / climbers / ladders at
+    // all (NavGrid.variety, read after the cells in question have been looked at, so the answer does not
+    // depend on what an earlier search cached)
+    const flat = Math.abs(f0 - cy) < FLAT;
+    const holes = this.holes;
+    holes.fill(0);
 
-    for (const [dx, dz] of CARDINAL) {
+    for (let di = 0; di < 4; di++) {
+      const [dx, dz] = CARDINAL[di]!;
       const nx = cx + dx;
       const nz = cz + dz;
       const axis: 0 | 2 = dx !== 0 ? 0 : 2;
@@ -450,10 +527,10 @@ export class PathSearch {
             continue;
           }
           const down = rise < -STEP;
-          this.relax(cur, nx, ny, nz, f1, down ? dropCost(costs, -rise) : costs.walk, down ? M_DROP : M_WALK);
+          if (this.ladderPass(cx, cy, cz, nx, nz, dx, dz, rise > FLAT)) this.relax(cur, nx, ny, nz, f1, down ? dropCost(costs, -rise) : costs.walk, down ? M_DROP : M_WALK);
           took = true;
         } else if (rise <= MAX_JUMP_RISE + 1e-6) {
-          if (!inPassage) {
+          if (!inPassage && this.ladderPass(cx, cy, cz, nx, nz, dx, dz, true)) {
             // head room above the start: the body must rise to the target's feet height (a stairs
             // walk: the body is at the low half's height, at most 0.5625 lower, while it still
             // overlaps the start column)
@@ -471,12 +548,24 @@ export class PathSearch {
       }
       if (levelBlocked && opts.allowBreak) this.digThrough(cur, cx, cy, cz, f0, nx, nz);
       if (took || inPassage) continue;
+      // Track AJ: into water at the feet level, onto a ladder from its side
+      if (levelBlocked) {
+        if (this.varietyOn(VARIETY_CLIMBER, 'climb') && flat) {
+          const c = grid.climb(nx, cy, nz);
+          if (c === undefined) this.sawUnknown = true;
+          else if (isFeet(c) && this.ladderPass(cx, cy, cz, nx, nz, dx, dz, false)) this.relax(cur, nx, cy, nz, c, costs.walk, M_CLIMB, costs.climbEnter, 0, undefined, F_CLIMB);
+        }
+      }
       // Drop: the target column must be free from the current feet cell up to the head.
       const free0 = grid.freeColumn(nx, cy, Math.max(headCell, cy + 1), nz);
       if (free0 !== true) {
         if (free0 === undefined) this.sawUnknown = true;
+        // Track AJ: into water at the feet level (a water cell is not free)
+        else if (levelBlocked && this.varietyOn(VARIETY_WATER, 'swim') && this.ladderPass(cx, cy, cz, nx, nz, dx, dz, false)) this.swimEntry(cur, nx, cy, nz, cy, headCell, 0);
         continue;
       }
+      if (!this.ladderPass(cx, cy, cz, nx, nz, dx, dz, false)) continue;
+      let landing = false; // Track AJ: a floor or water within the drop scan (a gap worth a parkour check)
       for (let d = 1; d <= costs.maxDrop; d++) {
         const ny = cy - d;
         const f1 = grid.stand(nx, ny, nz);
@@ -484,7 +573,16 @@ export class PathSearch {
           this.sawUnknown = true;
           break;
         }
+        if (d === 1 && Number.isNaN(f1)) {
+          holes[di] = 1; // Track AJ: no floor at or one below the feet level: a gap to jump
+          // Track AJ: onto a ladder from its top (the slide stops on it)
+          if (this.varietyOn(VARIETY_CLIMBER, 'climb') && flat) {
+            const top = grid.climb(nx, ny, nz);
+            if (isFeet(top)) this.relax(cur, nx, ny, nz, top, costs.walk + costs.climbDown, M_CLIMB, costs.climbEnter, 0, undefined, F_CLIMB);
+          }
+        }
         if (!Number.isNaN(f1)) {
+          landing = true;
           const fall = f0 - f1;
           if (fall <= STEP) {
             // a step down into a lower cell (onto farmland, a dirt path, soul sand): a walk
@@ -498,8 +596,15 @@ export class PathSearch {
           }
           break;
         }
-        if (grid.free(nx, ny, nz) !== true) break; // only fall through free cells
+        if (grid.free(nx, ny, nz) !== true) {
+          if (grid.cls(nx, ny, nz)?.liquid === 'water') landing = true;
+          if (this.varietyOn(VARIETY_WATER, 'swim')) this.swimEntry(cur, nx, ny, nz, cy, headCell, d); // Track AJ: drop into water
+          break; // only fall through free cells
+        }
       }
+      // Track AJ: nothing to land on within 3 (mid-air, a deep pit) and no water right below that: no
+      // parkour (the scan above found the cells down to cy - 3 free when it ran to the end)
+      if (holes[di] && !landing) holes[di] = (grid.variety & VARIETY_WATER) !== 0 && grid.cls(nx, cy - costs.maxDrop - 1, nz)?.liquid === 'water' ? 1 : 0;
     }
 
     if (inPassage) return;
@@ -517,7 +622,24 @@ export class PathSearch {
       if (!isFeet(a) || Math.abs(a - f0) > FLAT) continue;
       const b = grid.stand(cx, cy, nz);
       if (!isFeet(b) || Math.abs(b - f0) > FLAT) continue;
+      // Track AJ: no diagonal across a ladder's thin box
+      if ((grid.variety & VARIETY_LADDER) !== 0 && (this.anyLadder(cx, cy, cz) || this.anyLadder(nx, cy, nz) || this.anyLadder(nx, cy, cz) || this.anyLadder(cx, cy, nz))) continue;
       this.relax(cur, nx, cy, nz, f1, diag, M_DIAG);
+    }
+
+    // Track AJ: climb up from the foot of a ladder (the feet cell is a climber, the floor below it)
+    if (this.varietyOn(VARIETY_CLIMBER, 'climb') && grid.climbable(cx, cy, cz)) {
+      const up = grid.climb(cx, cy + 1, cz);
+      if (up === undefined) this.sawUnknown = true;
+      else if (isFeet(up) && this.climbRoom(cx, cy + 1, cz)) this.relax(cur, cx, cy + 1, cz, up, costs.climbUp, M_CLIMB, 0, 0, undefined, F_CLIMB);
+    }
+    // Track AJ: parkour over the gaps found above
+    if (flat) {
+      for (let di = 0; di < 4; di++) {
+        if (!holes[di]) continue;
+        if (this.moveOn('parkour1')) this.parkour(cur, cx, cy, cz, f0, 1, di);
+        if (this.moveOn('parkour2')) this.parkour(cur, cx, cy, cz, f0, 2, di);
+      }
     }
 
     // Pillar-up: jump and place a block in the feet cell (full-block floors only).
@@ -529,6 +651,226 @@ export class PathSearch {
         this.sawUnknown = true;
       }
     }
+  }
+
+  // ---- Track AJ: movement variety (docs/pathfinding.md "Movement variety") -------------------------
+
+  /** The grid has classified a cell of kind `bit` (NavGrid.variety) and the move is enabled. */
+  private varietyOn(bit: number, move: keyof MoveSet): boolean {
+    return (this.grid.variety & bit) !== 0 && this.moveOn(move);
+  }
+
+  /**
+   * A cardinal walk from column (cx, cz) into (nx, nz) along (dx, dz) at cell level cy is not stopped
+   * by a ladder's thin box in either column. Asked right before a relax, once the cells involved have
+   * been classified (so NavGrid.variety is current); `high`: a rise, the body also passes cy + 2.
+   */
+  private ladderPass(cx: number, cy: number, cz: number, nx: number, nz: number, dx: number, dz: number, high: boolean): boolean {
+    if (high) this.grid.cls(cx, cy + 2, cz);
+    if ((this.grid.variety & VARIETY_LADDER) === 0) return true;
+    return this.ladderLets(cx, cy, cz, dx, dz, false, high) && this.ladderLets(nx, cy, nz, dx, dz, true, high);
+  }
+
+  /** The body cells y .. y + 1 (y + 2 with `high`: a rise) of column (x, z) let a cardinal walk along (dx, dz) enter / leave past any ladder box. */
+  private ladderLets(x: number, y: number, z: number, dx: number, dz: number, enter: boolean, high = true): boolean {
+    for (let cy = y; cy <= y + (high ? 2 : 1); cy++) if (!this.grid.climberLets(x, cy, z, dx, dz, enter)) return false;
+    return true;
+  }
+
+  /** A ladder (a climber with a box) in the body cells y, y + 1 of column (x, z). */
+  private anyLadder(x: number, y: number, z: number): boolean {
+    if ((this.grid.variety & VARIETY_LADDER) === 0) return false; // (the cells asked about have been classified)
+    return this.grid.thinClimber(x, y, z) || this.grid.thinClimber(x, y + 1, z);
+  }
+
+  /**
+   * Into water: from a standing node at cell level `cy` to the swim node (nx, ny, nz), `d` blocks
+   * below (0: at the feet level). The column above the water up to the head must be free.
+   */
+  private swimEntry(cur: number, nx: number, ny: number, nz: number, cy: number, headCell: number, d: number): void {
+    const grid = this.grid;
+    const w = grid.swim(nx, ny, nz);
+    if (w === undefined) {
+      this.sawUnknown = true;
+      return;
+    }
+    if (!isFeet(w)) return;
+    const room = grid.freeColumn(nx, ny + 1, Math.max(headCell, cy + 1), nz);
+    if (room === undefined) this.sawUnknown = true;
+    if (room !== true) return;
+    const costs = this.costs;
+    this.relax(cur, nx, ny, nz, w, costs.walk + (d > 0 ? (costs.fall[d] ?? 0) : 0), M_SWIM, costs.swimEnter, 0, undefined, F_SWIM);
+  }
+
+  /** A climb into node (x, y, z) has head room: the cell above the body (y + 2) is passable. */
+  private climbRoom(x: number, y: number, z: number): boolean {
+    const f = this.grid.free(x, y + 2, z);
+    if (f === undefined) this.sawUnknown = true;
+    return f === true;
+  }
+
+  /** Moves of a swim node: swim to the 8 neighbours on the same surface, climb out onto a bank up to 1 higher. */
+  private expandSwim(cur: number, cx: number, cy: number, cz: number): void {
+    const grid = this.grid;
+    const costs = this.costs;
+    const swimAt = (x: number, z: number): boolean => {
+      const w = grid.swim(x, cy, z);
+      if (w === undefined) this.sawUnknown = true;
+      return isFeet(w);
+    };
+    for (const [dx, dz] of CARDINAL) {
+      const nx = cx + dx;
+      const nz = cz + dz;
+      if (swimAt(nx, nz)) {
+        this.relax(cur, nx, cy, nz, cy, costs.swim, M_SWIM, 0, 0, undefined, F_SWIM);
+        continue;
+      }
+      // out: a bank from the water level up to 1 block higher
+      for (let ny = cy; ny <= cy + 1; ny++) {
+        const f1 = grid.stand(nx, ny, nz);
+        if (f1 === undefined) {
+          this.sawUnknown = true;
+          break;
+        }
+        if (isFeet(f1)) {
+          if (f1 >= cy - FLAT && f1 <= cy + 1 + FLAT) this.relax(cur, nx, ny, nz, f1, costs.swimOut, M_SWIM_OUT);
+          break;
+        }
+      }
+    }
+    for (const [dx, dz] of DIAGONAL) {
+      if (swimAt(cx + dx, cz + dz) && swimAt(cx + dx, cz) && swimAt(cx, cz + dz)) this.relax(cur, cx + dx, cy, cz + dz, cy, costs.swim * Math.SQRT2, M_SWIM, 0, 0, undefined, F_SWIM);
+    }
+  }
+
+  /** Moves of a climb node: up and down the column, off it onto a floor beside it from its level up to 1 higher. */
+  private expandClimb(cur: number, cx: number, cy: number, cz: number, f0: number): void {
+    const grid = this.grid;
+    const costs = this.costs;
+    // up (the feet cell is a climber: the body is lifted while its feet are in it)
+    const up = grid.climb(cx, cy + 1, cz);
+    if (up === undefined) this.sawUnknown = true;
+    else if (isFeet(up) && this.climbRoom(cx, cy + 1, cz)) this.relax(cur, cx, cy + 1, cz, up, costs.climbUp, M_CLIMB, 0, 0, undefined, F_CLIMB);
+    // down: onto the floor at the foot of the ladder, or the next climber cell
+    const foot = grid.stand(cx, cy - 1, cz);
+    if (foot === undefined) this.sawUnknown = true;
+    else if (isFeet(foot)) {
+      if (foot <= f0 - 1 + STEP) this.relax(cur, cx, cy - 1, cz, foot, costs.climbDown, M_CLIMB);
+    } else {
+      const down = grid.climb(cx, cy - 1, cz);
+      if (down === undefined) this.sawUnknown = true;
+      else if (isFeet(down)) this.relax(cur, cx, cy - 1, cz, down, costs.climbDown, M_CLIMB, 0, 0, undefined, F_CLIMB);
+    }
+    // off: a floor beside the column from the feet level up to 1 higher
+    for (const [dx, dz] of CARDINAL) {
+      const nx = cx + dx;
+      const nz = cz + dz;
+      for (let ny = cy; ny <= cy + 1; ny++) {
+        const f1 = grid.stand(nx, ny, nz);
+        if (f1 === undefined) {
+          this.sawUnknown = true;
+          break;
+        }
+        if (!isFeet(f1)) continue;
+        if (f1 < cy - FLAT || f1 > cy + 1 + FLAT) break;
+        const lvl = Math.floor(f1 + 1e-6);
+        if (!this.ladderLets(cx, lvl, cz, dx, dz, false) || !this.ladderLets(nx, lvl, nz, dx, dz, true)) break;
+        if (f1 > cy + STEP && !this.climbRoom(cx, cy, cz)) break;
+        this.relax(cur, nx, ny, nz, f1, costs.climbUp * Math.max(0, f1 - cy) + costs.walk, M_CLIMB_OUT, costs.climbExit);
+        break;
+      }
+    }
+  }
+
+  /**
+   * Parkour from the takeoff node (cx, cy, cz) along CARDINAL[di] over a gap of `g` blocks, landing on
+   * a full block at the same height or 1 lower. g = 1 is jumped at walking speed; g = 2 needs 2
+   * standable cells straight behind the takeoff (the follower backs up onto them for a sprinted
+   * run-up when it arrives without speed). The gap must be clear up to the jump's head height, with
+   * water or a floor at most 3 blocks below (no lava, no hazard, nothing reaching above the takeoff
+   * level); the cell after the landing must stop an overshoot (a floor or a wall).
+   */
+  private parkour(cur: number, cx: number, cy: number, cz: number, f0: number, g: 1 | 2, di: number): void {
+    const grid = this.grid;
+    const costs = this.costs;
+    const [dx, dz] = CARDINAL[di]!;
+    // cheap first: a floor to land on, g + 1 blocks out, at the takeoff level or 1 below
+    const lx0 = cx + (g + 1) * dx;
+    const lz0 = cz + (g + 1) * dz;
+    if (!isFeet(grid.stand(lx0, cy, lz0)) && !isFeet(grid.stand(lx0, cy - 1, lz0))) return;
+    if (this.anyLadder(cx, cy, cz)) return;
+    // the gap cells: no floor at the takeoff level (the first was found by the caller)
+    if (g === 2) {
+      const second = grid.stand(cx + 2 * dx, cy, cz + 2 * dz);
+      if (second === undefined) this.sawUnknown = true;
+      if (!(second !== undefined && Number.isNaN(second))) return;
+      // the run-up behind the takeoff
+      for (let k = 1; k <= 2; k++) {
+        const f = grid.stand(cx - k * dx, cy, cz - k * dz);
+        if (f === undefined) this.sawUnknown = true;
+        if (!isFeet(f) || Math.abs(f - f0) >= FLAT || this.anyLadder(cx - k * dx, cy, cz - k * dz)) return;
+      }
+    }
+    // head room over the takeoff
+    const room = grid.freeColumn(cx, cy + 2, cy + 3, cz);
+    if (room !== true) {
+      if (room === undefined) this.sawUnknown = true;
+      return;
+    }
+    for (let k = 1; k <= g; k++) {
+      const gx = cx + k * dx;
+      const gz = cz + k * dz;
+      const col = grid.freeColumn(gx, cy, cy + 3, gz);
+      if (col !== true) {
+        if (col === undefined) this.sawUnknown = true;
+        return;
+      }
+      const below = grid.cls(gx, cy - 1, gz);
+      if (!below || below.top > 1 || !this.safeBelow(gx, cy - 1, gz)) return;
+      if ((grid.variety & VARIETY_CLIMBER) !== 0 && (grid.climbable(gx, cy - 1, gz) || grid.climbable(gx, cy, gz) || grid.climbable(gx, cy + 1, gz))) return; // no ladder shaft under the flight
+    }
+    const lx = cx + (g + 1) * dx;
+    const lz = cz + (g + 1) * dz;
+    for (let ny = cy; ny >= cy - 1; ny--) {
+      const f1 = grid.stand(lx, ny, lz);
+      if (f1 === undefined) {
+        this.sawUnknown = true;
+        return;
+      }
+      if (!isFeet(f1)) continue;
+      if (Math.abs(f1 - ny) >= FLAT || this.anyLadder(lx, ny, lz)) return;
+      if (grid.freeColumn(lx, ny + 2, cy + 3, lz) !== true) return;
+      if (!this.stopsOvershoot(lx + dx, ny, lz + dz, f1)) return;
+      const air = ny === cy ? costs.parkourAir : costs.parkourAirDown;
+      this.pendingGap = { x: cx, y: cy, z: cz, length: g, sprint: g === 2 };
+      this.relax(cur, lx, ny, lz, f1, (g === 2 ? costs.parkourRunUp : 0) + g * costs.walk + air, M_PARKOUR, costs.parkourRisk);
+      this.pendingGap = undefined;
+      return;
+    }
+  }
+
+  /** Below a gap column from y down: water, or a floor at most 3 blocks under the takeoff feet; never lava or a hazard. */
+  private safeBelow(x: number, y: number, z: number): boolean {
+    for (let d = 0; d <= 4; d++) {
+      const c = this.grid.cls(x, y - d, z);
+      if (!c) {
+        this.sawUnknown = true;
+        return false;
+      }
+      if (c.liquid === 'lava' || c.danger) return false;
+      if (c.liquid === 'water') return true;
+      if (c.boxes.length) return d <= 3; // a floor d + 1 blocks under the takeoff level: a fall of d blocks
+    }
+    return false;
+  }
+
+  /** The cell after a parkour landing stops an overshoot: standable at the landing height, or a wall at body height. */
+  private stopsOvershoot(x: number, y: number, z: number, feet: number): boolean {
+    const f = this.grid.stand(x, y, z);
+    if (isFeet(f) && Math.abs(f - feet) < FLAT) return true;
+    const c = this.grid.cls(x, y, z);
+    const h = this.grid.cls(x, y + 1, z);
+    return !!c && !!h && c.boxes.length > 0 && h.boxes.length > 0 && !c.danger && !h.danger;
   }
 
   /**
@@ -652,12 +994,17 @@ export interface LocatedNode {
 /**
  * The node a body with feet `pos` stands in: its own cell if standable at about that height, else the
  * nearest standable cell under its footprint (the body hangs over an edge). Doorways count. undefined
- * when none.
+ * when none. Track AJ: `prefer` 'swim' / 'climb' (a body in water, hanging on a ladder) first looks for
+ * the swim / climb node of the body's column.
  */
-export function locateNode(grid: NavGrid, pos: { x: number; y: number; z: number }): LocatedNode | undefined {
+export function locateNode(grid: NavGrid, pos: { x: number; y: number; z: number }, prefer?: 'swim' | 'climb'): LocatedNode | undefined {
   const y0 = Math.floor(pos.y + 1e-3);
   const bx = Math.floor(pos.x);
   const bz = Math.floor(pos.z);
+  if (prefer === 'climb' && isFeet(grid.climb(bx, y0, bz))) return { x: bx, y: y0, z: bz, feet: y0 };
+  if (prefer === 'swim') {
+    for (const y of [y0, y0 - 1, y0 + 1]) if (isFeet(grid.swim(bx, y, bz))) return { x: bx, y, z: bz, feet: y };
+  }
   let bestNode: LocatedNode | undefined;
   let bestD = Infinity;
   for (let dx = -1; dx <= 1; dx++) {

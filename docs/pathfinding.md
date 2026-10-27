@@ -73,10 +73,16 @@ blocks (1.5 high) are obstacles, never floors. Costs are ticks (`DEFAULT_COSTS`)
 | dig-through | 4 cardinal, same level | `allowBreak` + `dig`; full-block floors; the 1 or 2 body cells are breakable (rules below) | `walk` + per block (break ticks + `dig` 12) |
 | (dig rules, 2026-10-30) | | every dug block costs `digPenalty` ticks (setting, 60) on top of its break time, so a route walks around anything it can; nothing is broken within `protectRadius` (48) of home (`BreakRules.protectedArea`, `protected_area`), and built blocks (`isBuiltBlock`: planks, bricks, stairs, slabs, glass, doors, wool, concrete, tables, ...) are `protect` like containers everywhere. The miner's approach and sight-line digs and the farmer follow the same rules (`nav.breakRules()`) |
 | pillar-up | straight up | `allowPlace` + `place` + a throwaway block in the inventory; full-block feet; head room above | `jump` + `place` 10 |
+| swim (into water) | 4 cardinal | a still-water surface cell (see "Movement variety") at the feet level or up to 3 below; the column above it free up to the head | `walk` + fall(n) + `swimEnter` 10 |
+| swim | 8 neighbours on the surface | both side cells swim cells for a diagonal | `swim` 8.6 (x sqrt 2) |
+| swimOut | 4 cardinal | a standable bank with feet from the water cell's level up to 1 above | `swimOut` 14 |
+| climb | up / down a column; onto it from its foot, its side (no floor) or its top | ladder / vine cells (`grid.climb`), the cell above the body passable | `climbUp` / `climbDown` 5 per block; from the side `walk` + `climbEnter` 8, from the top `walk` + `climbDown` + `climbEnter` |
+| climbOut | 4 cardinal off a climb node | a floor beside the column, feet from the node's level up to 1 above | `climbUp` x rise + `walk` + `climbExit` 8 |
+| parkour | 4 cardinal | 1- or 2-block gap at the feet level, clear up to the head (+3), a floor at most 3 below or water at most 4 below, no lava / hazard / ladder in it; full-block landing at the same height or 1 lower that stops an overshoot; 2-block gaps need 2 standable cells behind the takeoff | g x `walk` + `parkourAir` 12 (1 lower: `parkourAirDown` 14) + `parkourRisk` 10 (+ `parkourRunUp` 12 for g = 2) |
 
 Every move into node B also pays: B's floor `costFactor` (x 5 on leaves, soul sand, honey, slime, mud,
-ice) on the base cost, and `underground` (6) when a roof block is anywhere above B's head. Water, lava
-and hazards are never entered. Heuristic: `walk` x octile distance (no move is cheaper per block, so it
+ice) on the base cost, and `underground` (6) when a roof block is anywhere above B's head. Lava and
+hazards are never entered; water only by the swim moves, on its surface (Track AJ). Heuristic: `walk` x octile distance (no move is cheaper per block, so it
 is admissible). Path nodes carry `cost` (the move's ticks, for the per-move timeout) and `act`
 (`dig` cells, `use` doors, `place` block).
 
@@ -152,6 +158,108 @@ with the console `setblock` / `fill`, feet heights from `truth:pos`):
   Reasons: `no path (exhaustive search, n nodes expanded)`, `the start node is not standable`,
   `no progress possible (no node closer to the goal than the start; n expanded[, search limit hit][,
   touched unloaded world])`, `no standable node at (...)`, `goal cell x,y,z (<block>) is not standable`.
+
+## Movement variety (Track AJ, task 7.7)
+
+Decision record: [decisions/0032-movement-variety.md](decisions/0032-movement-variety.md). Swimming,
+ladders and vines, parkour gaps and edge sneaking, each a planner move with a tick cost measured on
+bds-move (BDS 1.26.60.6, 2026-10-30) and the follower inputs that execute it; the physics rules
+behind them were measured on a strict server (`server-authoritative-movement-strict=true`,
+`player-position-acceptance-threshold=0.001`, a private copy of bds-move: every tick the model got
+wrong comes back as a correction with the server's position) until scripted inputs gave 0 errors.
+To set one up again: copy `docker/data/move` without `worlds/` and `server.properties`, `docker run` the
+same image and environment as compose.move.yml on another port (the probes used `bds-movex`, udp 19147),
+append those two lines to the generated server.properties, deploy the truth pack with `--restart`, and
+point a suite at it with `MOVE_BDS_PORT` / `MOVE_BDS_CONTAINER` (`NAV_TRACE=1` prints the per-tick state
+of a goto that got corrections in nav-swim / nav-ladder). Expect corrections with error 0 there (strict
+mode also corrects other fields); only the error matters.
+All moves are on by default; `PathOptions.moves` (`swim`, `climb`, `parkour1`, `parkour2`) turns them
+off per search (forwarded to the planner worker).
+
+**Physics (`input/physics.ts`, measured).**
+
+- Water moves the body (acceleration 0.02, drag 0.8, gravity 0.005, jump key +0.04 per tick) only while
+  the body box **shrunk by 0.4 at the feet and at the head** reaches into a water cell (whole cells,
+  the liquid height ignored: `LIQUID.waterInset`). A body whose feet are less than 0.4 below the
+  top of the surface cell moves with air physics (gravity 0.08, no jump impulse). With jump held a
+  floating body bobs with its feet between y and y + 1.05 (surface cell y). The climb-out lift (+0.3
+  when pushing against a wall) needs the moved box free of collisions **and of liquid cells**.
+  `state.inWater` now reports the water physics (the shrunk box), not mere contact.
+- Climbing (the block containing the feet is a ladder, vine, twisting / weeping / cave vines):
+  the fall speed is clamped to 0.2 per tick before the move; sneak holds the body (vy >= 0); the
+  jump key sets vy = 0.2 before the move (replacing a faster rise, e.g. a jump that carried the body
+  into a vine); a horizontal collision during the move sets vy = 0.2 after gravity and drag. No
+  horizontal clamp (Java has one, BDS does not). Up and down: 0.2 blocks per tick = 5 ticks per block.
+  Verified on 1.26.60 with 0 errors: ladder, vine, twisting vines, weeping vines, cave vines.
+  **Scaffolding does not climb that way** (the body stands on it and the server's rules differ: 8
+  errors in one probe); the grid treats scaffolding as an obstacle (`grid.ts` `isScaffold`), its
+  collision shape from shapes.ts (none) is not trusted.
+- Sneak edge avoidance (vanilla maybeBackOffFromEdge, `backOffFromEdge`): on the ground the
+  horizontal move of a sneaking body is cut in 0.05 steps towards 0 while the box moved by it and
+  0.5625 down meets no block; the test box is shrunk by 0.025 per side (fits the measured stops: the
+  box ends 0.029 to 0.038 over the edge block). BDS applies the sneak speed factor also on the first
+  tick after the sneak key is released.
+- Contact tolerance: float32 positions far from the origin snap past a face they stopped at (ulp
+  0.0005 at x 5000), and the next tick walked into the block (local body inside the river bank while
+  the server lifted it out: 1 correction of 0.77 per exit in the first nav-swim runs). The
+  horizontal tolerance is now 1e-4 or 2^-21 x the larger of |x| and |z| (`contactEpsilon`); a box within it
+  stops a move but never pushes the body back by more than 1e-4 (a push-back of up to 0.003 cost a
+  correction of 0.006 in nav-compute).
+
+**Grid (`nav/grid.ts`).** `swim(x, y, z)`: a still water cell (liquid depth 0 or a waterlogged plant;
+not a bubble column; no boxes) with two free cells above (the bobbing feet rise to y + 1.05) and no
+flowing water, lava or hazard beside it (flow push is not modelled); depth-1 water over a floor
+(wading) counts too. `climb(x, y, z)`: a climber cell with a passable cell above. A climber's thin box
+(a ladder) does not block a cell any more (`free`, `stand`, the head room); `climberLets` keeps a walk
+from crossing a ladder's box (entering its cell towards the box is fine: the body stops in front of
+it). `variety` bits (water / climber / ladder seen) let the planner skip all of this on terrain
+without them (the 1000-path benchmark is unchanged).
+
+**Planner (`nav/astar.ts`).** Swim and climb nodes are flagged; a goal is never reached in them. Swim
+nodes are always surface cells: the planner never plans underwater travel (air is not modelled).
+Water is entered from a standing node at the feet level or by a drop of up to 3 onto the surface;
+left onto a bank up to 1 block above the water cell. A ladder is climbed from its foot (the feet cell
+is a climber, the floor below it), entered from its side at the feet level (a shaft without floor) or
+from its top (step off over the column: the slide stops on it); left onto a floor beside the column
+from its level up to 1 higher (the block behind a ladder at its top). Parkour is planned from a node
+next to a hole found by the drop scan (no floor at or 1 below the feet level).
+
+**Follower inputs (`nav/follower.ts` `variety`).**
+
+| Target | Inputs |
+|---|---|
+| swim | forward towards the farthest swim node (up to 6) whose straight line keeps the footprint over swim cells; jump held in the water (bobs at the surface); no sprint (a sprinting body in water starts swimming, not modelled; a sticky sprint is ended on the bank) |
+| swimOut | forward towards the bank, jump held while wet: the push against the bank lifts the body out (+0.3) |
+| climb | outside the column: walk to its centre (slowly within 1 block); in it: hold the centre 0.1 off a ladder's box (the middle of a 1 x 1 shaft's free space) with gentle forward / back pulses (touching the box or the opposite wall while sliding would climb); standing on the ladder's top, walk on slowly until the body drops into the column; jump while below the run's end, nothing to slide down, sneak to hold at the run's end |
+| climbOut | climb (jump) pushing towards the exit while more than 0.3 below its floor (the push climbs as well), then hold the feet in [floor, floor + 0.15] (jump / sneak) and walk onto it |
+| parkour | forward straight at the landing; jump when the body centre is 0.15 (walking) / 0.3 (sprinting) from the takeoff edge and within 0.25 of the lane; a 2-block gap is sprinted, and a body that arrives at the takeoff slower than 0.25 blocks per tick towards the gap (walking is 0.216) backs up 2 blocks first |
+| walk / diag (edge sneaking) | sneak while the body centre is within 0.3 of a cell side beyond which the column has no floor within 3 blocks below the feet (or lava / a hazard); no sprint for 10 ticks after a sneak (`edgeSneak`, default on; `Navigator.edgeSneak`) |
+
+**Measured (bds-move, BDS 1.26.60.6, 2026-10-30).**
+
+| What | Result |
+|---|---|
+| 6-wide, 3-deep river (walls at both ends) | crossed in 105 ticks (37 in the water), 0 corrections, health 20 throughout (server attribute updates every tick, truth:pos at the end) |
+| 18-block swimming lane | 8.55 ticks per block on the surface (steady part; 143 ticks in the water for 18 blocks); `swim` = 8.6 |
+| 1-deep ditch (wading) | 65 ticks, 0 corrections |
+| 10-block ladder in a 1 x 1 shaft, up and out onto the block behind | 96 ticks, 5.00 ticks per block, 0 corrections |
+| the same ladder down from the top edge and out of the shaft | 112 ticks, 5.00 ticks per block, 0 corrections (holding the column 0.1 off the ladder: 0.15 touched the opposite wall of the shaft and climbed, 2 to 3 corrections) |
+| 10-high vine wall, up onto the top | 96 ticks, 5.00 ticks per block, 0 corrections |
+| 1-block gap over a 4-deep pit with water at the bottom, 20 crossings | 20 of 20 landed, 0 falls, 0 corrections; goto 72 ticks for 13.5 blocks |
+| 2-block gap (sprinted run-up), 20 crossings | 20 of 20, 0 falls, 0 corrections; 108 ticks (the body arrives walking and backs up 2 blocks for the run-up) |
+| 2-block gap landing 1 lower, 20 crossings | 20 of 20, 0 falls, 0 corrections; 108 ticks |
+| 1-wide, 20-long bridge with a right-angle turn 7 above the ground, starting 0.22 from an edge, 5 walks each | edge sneaking off: 5 of 5, 0 falls, 0 corrections, 87 ticks; on: 5 of 5, 0 falls, 0 corrections, 72 sneak ticks per walk, 145 ticks |
+
+Both parkour moves landed 20 of 20 and stay enabled. Edge sneaking changed nothing measurable on the
+bridge (the follower already holds the lane: 0 falls and 0 corrections either way) and costs time
+(sneaking at 0.3 x speed while the centre is near an edge); it stays on as the safety net for a body
+pushed towards an edge (knockback, a landing off-centre). It cost 1 correction per walk until the
+model learned that BDS keeps the sneak speed for one tick after the release.
+
+Limits: no underwater travel (no air model), no swimming in flowing water (no flow push model), no
+sprint-swimming; no scaffolding; no ladder-to-ladder side steps, no jump off a ladder; parkour only
+cardinal, 1 or 2 blocks, the same height or 1 lower, and only over water or at most a 3-block drop;
+no jump up across a gap. Twisting / weeping / cave vines climb in the physics but have no e2e course.
 
 ## Following a path
 
@@ -396,7 +504,7 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/unit/skills/physics-terrain-v2.test.ts` | door panels (Track O's measured rule), door / gate / trapdoor classes, fence and pane arms, walking along a connected fence, `crossing`, the sky cache |
 | `test/unit/skills/astar.test.ts` | stand rules, every v1 move with tick costs, limits, corner rule, liquids, leaves, partial paths, `locateNode`, the 1000-path benchmark |
 | `test/unit/skills/nav-sim.test.ts` | closed loop without a server: flat goals, sprint, stairs, drops, slabs, pools, lava, a wall built mid-path, stuck -> unreachable, timeout, cancel, 20 goals on a hilly world |
-| `test/unit/skills/nav-v2.test.ts` | closed loop, v2: tick costs, the cave hill and the pit (also with 12-node segments), irreversible drops, 290 blocks in many spliced segments without stopping, sliced searches, unloaded world, irrelevant block updates, move timeouts, retreat after a knock into a pool, dig-through (and its safety rules), pillar-up out of a pit and onto a plateau, doors and gates (opened, closed behind) with fake actions |
+| `test/unit/skills/nav-v2.test.ts` | closed loop, v2: tick costs, the cave hill and the pit (also with 12-node segments), irreversible drops, 290 blocks in many spliced segments without stopping, sliced searches, unloaded world, irrelevant block updates, move timeouts, a knock into a pool (re-planned from the water since Track AJ), dig-through (and its safety rules), pillar-up out of a pit and onto a plateau, doors and gates (opened, closed behind) with fake actions |
 | `test/e2e/nav-flat`, `nav-hill`, `nav-long`, `nav-wall`, `nav-knockback` | v1 suites (tasks 3.3 to 3.6), still green on v2 |
 | `test/e2e/nav-costs.test.ts` | ticks per block / step / drop vs the cost table |
 | `test/unit/skills/stairs.test.ts` | stairs per direction, upside down, corners, the 1.26.60 runtime ids; slabs, carpets, farmland, dirt paths, snow layers; stairs walks and jumps in the planner; `locateNode` on fractional feet; closed-loop staircase up / down with 0 jumps; starts on a stairs low half / a slab; block goal in a stairs cell; the no-segment WARN line |
@@ -411,6 +519,10 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/unit/skills/nav-worker.test.ts` | Track AB: the worker's mirror vs the main grid on 200 random cells (loaded, after block updates and a re-sent column, cached after an unload); 20 random start / goal pairs in a real worker thread vs in-thread (same status, cost, expansions); the navigator walking an interim answer and splicing in the final one; a crash logged once, its search failed, the worker restarted |
 | `test/e2e/nav-compute.test.ts` | Track AB, worker vs in-thread on the same terrain: the house walk (1 segment, 0 corrections), 120 blocks of the cross-country course, 120 blocks through staggered walls (fewer plans, no partial segments with the worker), a sealed goal 100 blocks away with allowPlace (a 300 000+ node search, navigator tick under 20 ms) |
 | `test/e2e/nav-goals.test.ts` | any over 10 logs, getToBlock, yLevel, runAway, surface from a 4-deep shaft, a log walled in glass blacklisted after 3 failures and skipped by the next any |
+| `test/unit/skills/nav-variety.test.ts` | Track AJ: the measured water / climbing / sneak-edge physics; planner swims a river (never below the surface), swimming off, ladder up and down, vines, 1- and 2-block gaps (never over lava or a deep drop), ladder cells passable and scaffolding an obstacle; closed loops: river, ladder up and down, vine wall, both gaps, a 1-wide bridge (no fall) |
+| `test/e2e/nav-swim.test.ts` | Track AJ: a 6-wide river (0 corrections, health 20), an 18-block lane (swim ticks per block), a 1-deep ditch |
+| `test/e2e/nav-ladder.test.ts` | Track AJ: a 10-block ladder in a 1 x 1 shaft up and out, back down and out; a vine wall (climb ticks per block) |
+| `test/e2e/nav-parkour.test.ts` | Track AJ: 1-block, 2-block and 2-block-1-lower gaps over a 4-deep pit with water, 20 crossings each (`PARKOUR_RUNS`); a 1-wide bridge with a turn, edge sneaking off / on (`BRIDGE_RUNS`) |
 
 The e2e tests use `bds-move` (udp/19146). The v1 layouts (`nav-worlds.ts`: `flat`, `hill`, `long`, `wall`)
 have fixed areas; every v2 suite builds in its own random chunk-aligned area (`privateOrigin()`, x 2048
@@ -438,7 +550,8 @@ the cross-country layout; default 7), `MOVE_AREA=x,z` (pin a v2 suite's area to 
   snow + slab walked off 3 times each gave 0. Not investigated further.
 - No bridging (placing a block to cross a gap), no dig-down, no digging head room for a jump, no
   descending by digging; pillar-up needs a full-block floor.
-- No swimming, ladders, vines, scaffolding, parkour or sneaking along edges.
+- Swimming, ladders, vines, parkour and edge sneaking: see "Movement variety" (limits there); no
+  scaffolding, no underwater travel, no swimming in flowing water.
 - Trapdoors are classified (open / closed) but not toggled by the planner.
 - Climbing the cave hill's four 1-block terraces in a row (jumping while pushed against each step,
   then accelerating on top) gave one correction of 0.418 (client ahead) in 2 of 4 runs, right after
