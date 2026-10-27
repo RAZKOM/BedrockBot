@@ -1,9 +1,11 @@
 // PLAN.md task 7.16 on bds-food (difficulty easy; Track X, docs/food.md): food gathering on the real afk task.
-//   1. `!food 6` with 4 cows (and a baby cow) in a fenced pen 20 blocks from home, a closed gate:
-//      raw beef in the inventory (truth), 2 cows (foodLeave) and the baby left alive;
+//   1. `!food 6 pen` with 4 cows (and a baby cow) in a fenced pen 20 blocks from home, a closed gate:
+//      raw beef in the inventory (truth), 2 cows (a pen keeps 2 adults of a kind) and the baby left alive
+//      (Track AF: penned animals are hunted only with `pen` or in the chorePen pen);
 //   2. `!cook` with a furnace 3 blocks from home and coal: 4 raw beef -> 4 cooked beef (truth inventory);
 //   3. the auto trigger (autoFood on): it starts within 30 s after the inventory food is cleared while
 //      the bot idles at home, and does not start while a `!goto` runs (it starts after the arrival).
+//      Track AF: the pen is the `chorePen`, so the chore may hunt it down to 2 adults.
 // Needs BDS_E2E=1 and bds-food with the truth pack (`node scripts/bds.mjs --profile food up` and `... pack`).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { RuntimeSettings } from '../../src/config/settings.ts';
@@ -85,7 +87,7 @@ describe.skipIf(!E2E)('food: gather, cook, auto trigger (task 7.16)', () => {
     expect(babies.length, 'the baby cow carries the baby actor flag').toBe(1);
     const n0 = b.said.length;
     const t0 = Date.now();
-    await b.command('!food 6');
+    await b.command('!food 6 pen'); // Track AF: the cows are in a pen
     const start = await b.reply((s) => s.startsWith('gathering'), n0);
     const done = await b.reply((s) => s.startsWith('food:'), n0, 240_000);
     const ms = Date.now() - t0;
@@ -99,6 +101,9 @@ describe.skipIf(!E2E)('food: gather, cook, auto trigger (task 7.16)', () => {
     expect(done).toMatch(/^food: \d+\/6 items from 2 cow/);
     expect(adults.filter((m) => !m.baby).length).toBe(2);
     expect(adults.filter((m) => m.baby).length).toBe(1);
+    // Track AF: the bot walked out of the pen and closed the gate behind it
+    const gate = await b.truth.ok<{ states: Record<string, unknown> }>('block', [pen.gate.x, pen.gate.y, pen.gate.z]);
+    expect(gate.states.open_bit, 'the pen gate is closed after the hunt').toBe(false);
     // Bedrock's cow loot is 1-3 beef per kill (no looting): 2 kills give 2..6
     expect(counts.beef ?? 0).toBeGreaterThanOrEqual(2);
     if ((counts.beef ?? 0) < 4) note(`note: only ${counts.beef ?? 0} beef from 2 cows (loot 1-3 each)`);
@@ -149,6 +154,9 @@ describe.skipIf(!E2E)('food: gather, cook, auto trigger (task 7.16)', () => {
     await summonCows({ x: PEN.x + 3, z: PEN.z + 3 }, 2);
     await until(() => (seenAdults(PEN_MID) >= 4 ? true : undefined), 15_000, '4 adult cows at the pen');
     let n = b.said.length;
+    await b.command(`!set chorePen ${PEN.x + 3} ${PEN.y} ${PEN.z + 3}`); // Track AF: the chore's own pen
+    await b.reply((s) => s.startsWith('chorePen'), n);
+    n = b.said.length;
     await b.command('!set autoFood on');
     await b.reply((s) => s.startsWith('autoFood'), n);
     await sleep(3000);

@@ -1,5 +1,6 @@
 // Persistent world cache (PLAN.md task 7.12): the shapes other modules read. See docs/world-cache.md.
 import type { BlockInfo, Vec3 } from '../types.ts';
+import type { HerdMarkStore } from './herds.ts'; // Track AF
 
 /** 2-bit cell classes of the cache. */
 export const CLS_AIR = 0;
@@ -50,6 +51,8 @@ export interface CachedTerrain {
   seenMarks?(origin: Vec3, radius: number): CachedMark[];
   /** Track Z (ore memory): marks of the LOADED columns within `radius` of `origin` (a cheap ore scan without visiting every block). */
   loadedMarks?(origin: Vec3, radius: number): CachedMark[];
+  /** Track AF (food v2): herd marks of passive food mobs per 16-block cell, persisted beside the regions (herds.ts). */
+  readonly herds?: HerdMarkStore;
 }
 
 /** A position World.find returned from the cache instead of a loaded chunk. */

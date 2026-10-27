@@ -11,7 +11,8 @@ import type { FightResult } from '../combat/combat.ts';
 import { entityFeet } from '../combat/hostiles.ts';
 import type { Goal } from '../nav/goals.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
-import { countHerd, foodItemCount, pickTarget, type FoodTarget } from './finder.ts';
+import { countHerd, foodItemCount, pickTarget, type FoodTarget, type HerdCount } from './finder.ts';
+import { inPenOrRim, insidePen, type Pen } from './pen.ts'; // Track AF
 
 export interface HuntMover {
   goto(goal: Goal, opts?: GotoOptions): Promise<SkillResult>;
@@ -31,6 +32,16 @@ export interface HunterDeps {
   inventory: { readonly slots: readonly (ItemStack | null)[] };
   isBaby(rid: bigint): boolean;
   isDead?(rid: bigint): boolean;
+  /** Track AF: the pen a mob stands in (pen.ts PenDetector); without it every mob is wild. */
+  penOf?(e: EntityInfo): Pen | undefined;
+  /** Track AF: never hunted (fed for breeding within the last 5 minutes). */
+  spare?(rid: bigint): boolean;
+  /** Track AF: the pen around a feet position; after hunting in a pen the bot walks out and closes the gate. */
+  penAt?(feet: Vec3): Pen | undefined;
+  /** Track AF: walk out of a pen and close its gates (pen.ts leavePen). */
+  leavePen?(pen: Pen, cancelled: () => boolean): Promise<{ ok: boolean; closed: number; reason?: string | undefined }>;
+  /** Track AF: close the open gates of a pen within reach (pen.ts closePenGates); after walking into a pen. */
+  closeGates?(pen: Pen, cancelled: () => boolean): Promise<number>;
   log?: Logger;
   now?: () => number;
 }
@@ -48,6 +59,8 @@ export interface HuntOptions {
   collectRadius?: number;
   /** Called after every kill with the running totals. */
   onKill?: (r: { kind: string; gained: number; killed: number }) => void;
+  /** Track AF: may penned animals of `kind` in `pen` be taken (down to PEN_KEEP adults)? Default never. */
+  penAllowed?: (pen: Pen, kind: string) => boolean;
 }
 
 export type HuntReason = 'done' | 'none_left' | 'interrupted';
@@ -76,6 +89,8 @@ export class Hunter {
   readonly ignore = new Map<bigint, number>();
   /** The mob being hunted right now. */
   current: FoodTarget | undefined;
+  /** Track AF: the pen of the last penned target. */
+  private lastPen: Pen | undefined;
 
   constructor(deps: HunterDeps) {
     this.d = deps;
@@ -87,16 +102,31 @@ export class Hunter {
     return this.d.isBaby(rid);
   }
 
-  /** `cow 4+1 babies, pig 2` within `radius` of `center` (dead mobs left out). */
+  /** `cow 4+1 babies, pig 2` within `radius` of `center` (dead mobs left out); Track AF: `; in pens cow 2` for penned ones. */
   herdLine(center: Vec3, radius = 48): string {
-    const herd = countHerd(this.d.entities().values(), { center, radius, isBaby: (rid) => this.d.isBaby(rid), isDead: (rid) => this.d.isDead?.(rid) ?? false });
-    const parts = [...herd.entries()].map(([k, c]) => `${k} ${c.adults}${c.babies ? `+${c.babies} ${c.babies === 1 ? 'baby' : 'babies'}` : ''}`);
-    return parts.length ? parts.join(', ') : 'no food mobs';
+    const pens = new Map<string, Map<string, HerdCount>>();
+    const penOf = this.d.penOf?.bind(this.d);
+    const herd = countHerd(this.d.entities().values(), { center, radius, isBaby: (rid) => this.d.isBaby(rid), isDead: (rid) => this.d.isDead?.(rid) ?? false, ...(penOf ? { penOf } : {}) }, pens);
+    const line = (m: Map<string, HerdCount>): string[] => [...m.entries()].map(([k, c]) => `${k} ${c.adults}${c.babies ? `+${c.babies} ${c.babies === 1 ? 'baby' : 'babies'}` : ''}`);
+    const parts = line(herd);
+    const penned = new Map<string, HerdCount>();
+    for (const m of pens.values()) {
+      for (const [k, c] of m) {
+        const t = penned.get(k) ?? { adults: 0, babies: 0 };
+        t.adults += c.adults;
+        t.babies += c.babies;
+        penned.set(k, t);
+      }
+    }
+    const p = line(penned);
+    if (!parts.length && !p.length) return 'no food mobs';
+    return `${parts.length ? parts.join(', ') : 'no wild food mobs'}${p.length ? `; in pens ${p.join(', ')}` : ''}`;
   }
 
   /** The target the next pick would choose (no side effects). */
-  peek(o: Pick<HuntOptions, 'center' | 'radius' | 'leave'>): FoodTarget | undefined {
+  peek(o: Pick<HuntOptions, 'center' | 'radius' | 'leave' | 'penAllowed'>): FoodTarget | undefined {
     const now = this.now();
+    const penOf = this.d.penOf?.bind(this.d);
     return pickTarget(this.d.entities().values(), {
       center: o.center,
       radius: o.radius ?? 48,
@@ -104,12 +134,20 @@ export class Hunter {
       me: this.d.position(),
       isBaby: (rid) => this.d.isBaby(rid),
       isDead: (rid) => this.d.isDead?.(rid) ?? false,
-      ignored: (rid) => (this.ignore.get(rid) ?? 0) > now,
+      ignored: (rid) => (this.ignore.get(rid) ?? 0) > now || (this.d.spare?.(rid) ?? false),
+      ...(penOf ? { penOf } : {}),
+      ...(o.penAllowed ? { penAllowed: o.penAllowed } : {}),
     });
+  }
+
+  /** Track AF: walk towards a remembered herd (the normal walk; a fight or flight pre-empts the process). */
+  walkTo(p: Vec3, r: number, timeoutTicks: number): Promise<SkillResult> {
+    return this.d.mover.goto({ type: 'near', p: { x: p.x, y: Math.floor(p.y), z: p.z }, r }, { timeoutTicks });
   }
 
   async hunt(o: HuntOptions, cancelled: () => boolean): Promise<HuntResult> {
     const res: HuntResult = { ok: false, reason: 'done', gained: 0, killed: 0, kinds: {}, fights: [] };
+    let penHunt = false; // Track AF: a penned target was hunted: leave the pen at the end
     const inv = this.d.inventory;
     while (res.gained < o.want) {
       if (cancelled()) return { ...res, reason: 'interrupted' };
@@ -119,11 +157,18 @@ export class Hunter {
         break;
       }
       this.current = t;
+      if (t.pen) {
+        penHunt = true;
+        this.lastPen = t.pen;
+      }
       const before = foodItemCount(inv.slots);
       const rid = t.entity.runtimeId;
       if (t.distance > APPROACH_FROM) {
         const f = entityFeet(t.entity);
-        const r = await this.d.mover.goto({ type: 'near', p: { x: f.x, y: Math.floor(f.y), z: f.z }, r: 2.5 }, { timeoutTicks: 400 });
+        const r = await this.d.mover.goto({ type: 'near', p: { x: f.x, y: Math.floor(f.y), z: f.z }, r: t.pen ? 1.5 : 2.5 }, { timeoutTicks: 400, ...(t.pen ? { closeDoors: true } : {}) }); // Track AF: into a pen: close the gate behind
+        if (cancelled()) return { ...res, reason: 'interrupted' };
+        // Track AF: walked into a pen: close the gate behind (a walk that ends just inside leaves it open)
+        if (t.pen && this.d.closeGates && insidePen(t.pen, this.d.position())) await this.d.closeGates(t.pen, cancelled);
         if (cancelled()) return { ...res, reason: 'interrupted' };
         // a near goal on a wandering mob may time out or end beside it; only a failed plan skips it
         if (!r.ok && r.reason === 'unreachable') {
@@ -155,6 +200,18 @@ export class Hunter {
     this.current = undefined;
     res.ok = res.gained >= o.want;
     if (res.ok) res.reason = 'done';
+    if (penHunt) await this.leavePen(cancelled);
     return res;
+  }
+
+  /** Track AF: inside a pen (or in its gate): walk out of it and close its gate, so the animals stay in. */
+  async leavePen(cancelled: () => boolean): Promise<boolean> {
+    const me = this.d.position();
+    const pen = this.d.penAt?.(me) ?? this.lastPen;
+    this.lastPen = undefined;
+    if (!pen || !inPenOrRim(pen, me) || cancelled() || !this.d.leavePen) return false;
+    const r = await this.d.leavePen(pen, cancelled);
+    this.log.info(`food: left the pen (${r.ok ? 'ok' : (r.reason ?? 'failed')}, ${r.closed} gate(s) closed)`);
+    return r.ok;
   }
 }

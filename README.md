@@ -88,6 +88,8 @@ The bot answers in chat. Full reply texts and edge cases: docs/runbook.md "Chat 
 | `!gather <n> [x y z]` / `!gather stop` | Fells trees for n logs within 48 blocks (of the given point), puts them in the configured chest or keeps them. Says `no trees within 48 blocks` when none are loaded nearby: give it a point near a forest. |
 | `!mine <block> [n]` / `!mine stop` / `!mine status` | Mines ore it has actually seen the face of (no x-ray), digging its way there, e.g. `!mine coal_ore 8`. Ore next to water or lava is skipped. |
 | `!farm [radius]` / `!farm stop` / `!farm status` | Harvests mature crops around it, replants, uses bone meal, deposits into the nearest chest. |
+| `!food [n] [pen]` / `!food status` / `!food herds` | Hunts cows, pigs, sheep, chickens and rabbits for n food items within 48 blocks, then walks to herds it remembers up to 200 blocks away; never below `foodLeave` wild adults of a kind; animals inside a fenced pen only with `pen` (or in the `chorePen` pen), never below 2 adults. <!-- Track AF --> |
+| `!breed [type] [n]` | Feeds n pairs (default 1) of adult animals within 16 blocks: cows, sheep, mooshrooms wheat; pigs carrot, potato or beetroot; chickens seeds; rabbits dandelion or carrot. With `!set autoBreed on` it breeds the `chorePen` pen every 10 minutes up to 8 adults. <!-- Track AF --> |
 | `!inv` / `!drop <item> [n]` / `!drop all` / `!drop items` | Inventory summary; drop one item, everything, or everything except food, armour, elytra, tools and weapons. |
 
 **Controlling what runs**

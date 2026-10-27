@@ -18,6 +18,7 @@ export { StateTable, isInteresting, cellClassOf } from './classes.ts';
 export { parseRegion, serializeRegion, readRegion, regionFileName, regionOf, slotOf, REGION_SIZE } from './region.ts';
 export { findCachedTrees, cachedLookup, type CachedTree } from './trees.ts';
 export * from './types.ts';
+export { HerdMarks, HERD_FILE, type HerdMark, type HerdMarkStore, type HerdCounts } from './herds.ts'; // Track AF
 
 /**
  * A directory-safe id for a connection target, so caches of different servers never mix: a readable
