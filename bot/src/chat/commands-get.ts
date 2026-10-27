@@ -64,6 +64,8 @@ export interface GetHost {
 export class GetController {
   private readonly h: GetHost;
   job: GetJob | undefined;
+  /** Track AS: `getting 16 iron: the chests hold 128 (!bring iron 16 fetches it)` when the chests already hold enough (set by commands-bring.ts; `!get` still makes new ones). */
+  stockHint: ((f: Found, typed: string) => string | undefined) | undefined;
 
   constructor(h: GetHost) {
     this.h = h;
@@ -80,7 +82,8 @@ export class GetController {
     const f = lookup(p.name, p.count);
     if (f.strategy === 'unknown') return reply(unknownReply(f.name));
     this.clearJob();
-    reply(startLine(f));
+    const hint = this.stockHint?.(f, p.name); // Track AS
+    reply(hint ? `${hint}; ${f.doing} anyway` : startLine(f));
     const kind = f.command.split(' ')[0]!;
     const before = new Set(this.h.processes.userProcesses());
     this.h.dispatch(line, f.command);

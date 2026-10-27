@@ -14,6 +14,10 @@
 //            take the box, place it next to the bot, fill it, break it, pick it up and store the full box
 //            in the box chest. With `all`, full shulker boxes carried are emptied first (placed, opened,
 //            emptied into the inventory, broken, picked up) and their items unloaded like the rest.
+//   withdraw Track AS (`!bring`, bring.ts): plan from the memory and the inventory, walk to the nearest
+//            chest of the plan (the scan's stand cell), open it, take the item's stacks (or, when the
+//            loose stacks are not enough, whole shulker boxes holding it), refresh its memory, close;
+//            plan again; repeat until carried or no chest is left.
 //
 // Every chest trip refreshes that chest's record. All container traffic goes through the task's one
 // Containers (`shared` counts its item_stack_requests while a job ran; `requests` the job's own).
@@ -22,7 +26,7 @@ import { silentLogger, type Logger } from '../../log.ts';
 import { chestKey, type ChestMemoryStore, type ChestRecord } from '../../world/cache/chests.ts';
 import type { ContainerView, Vec3 } from '../../world/types.ts';
 import type { CollectOptions, CollectResult } from '../collect/collect.ts';
-import { isShulkerBox, shulkerSlotsUsed, type ContainerSnapshot, type DepositResult, type OpenResult } from '../container/chest.ts';
+import { isShulkerBox, shulkerContents, shulkerSlotsUsed, type ContainerSnapshot, type DepositResult, type OpenResult } from '../container/chest.ts';
 import { boxSpots } from '../container/stash.ts';
 import type { DigOptions, DigResult } from '../dig/digger.ts';
 import type { PathResult } from '../nav/astar.ts';
@@ -32,6 +36,7 @@ import type { GotoOptions, SkillResult } from '../types.ts';
 import { chestNeighbours, findContainers, isHomeContainer, visitOrder, visitOrderBanded, type DiscoveryWorld } from './discovery.ts';
 import { chestName, fmtPos, partnerKeys, planChests, recordFrom, unreadRecord } from './memory.ts';
 import { chestGoal, standOf, verdict } from './reach.ts';
+import { bringMatches, countOf, planBring, type BringItem } from './bring.ts'; // Track AS
 import { planUnload, unloadableStacks, type UnloadPlan, type UnloadSlot } from './unloader.ts';
 
 /** A container read within this many ms is not read again by a scan. */
@@ -147,6 +152,24 @@ export interface UnloadReport {
   requests: number;
   /** item_stack_requests on the shared Containers while the job ran. */
   shared: number;
+  ms: number;
+}
+
+/** Track AS: what one `!bring` withdrawal did. */
+export interface WithdrawReport {
+  ok: boolean;
+  reason?: string;
+  /** Items taken by name (loose stacks; boxes count under their own name). */
+  taken: Record<string, number>;
+  /** Containers that gave something, by name (`chest 3 -60 -2`). */
+  from: string[];
+  /** Full shulker boxes taken out and the matching items inside each. */
+  boxes: { name: string; items: number; from: string }[];
+  /** Matching items carried after the job (top-level inventory). */
+  carried: number;
+  /** Chest trips. */
+  chests: number;
+  requests: number;
   ms: number;
 }
 
@@ -295,8 +318,15 @@ export class HomeLogistics {
       }
     }
     const r = recordFrom(p, kind, snap, mem.get(p), this.now(), partner);
-    mem.set(r);
-    return r;
+    // Track AS: what the full shulker boxes hold (the `!bring` plan and the `!get` hint read it)
+    const inBoxes: Record<string, number> = {};
+    view.slots.forEach((s, i) => {
+      if (!s || !isShulkerBox(s.name)) return;
+      for (const [k, v] of Object.entries(shulkerContents(this.d.inventory.rawItem?.(view.id, i)))) inBoxes[k] = (inBoxes[k] ?? 0) + v;
+    });
+    const rec: ChestRecord = Object.keys(inBoxes).length ? { ...r, inBoxes } : r;
+    mem.set(rec);
+    return rec;
   }
 
   // ---- scan --------------------------------------------------------------------------------------
@@ -312,6 +342,116 @@ export class HomeLogistics {
   /** Unload at home (see the file comment). */
   unload(cancelled: () => boolean, opts: { all?: boolean } = {}): Promise<UnloadReport> {
     return this.serial(() => this.doUnload(cancelled, opts));
+  }
+
+  /** Track AS: take `want` of the item out of the chests at home (see the file comment); what is carried counts first. */
+  withdraw(cancelled: () => boolean, req: { item: BringItem; want: number }): Promise<WithdrawReport> {
+    return this.serial(() => this.doWithdraw(cancelled, req));
+  }
+
+  /** Track AS: matching items in the inventory (slots 0..35). */
+  carried(item: BringItem): number {
+    let n = 0;
+    this.d.inventory.slots.slice(0, 36).forEach((s) => {
+      if (s && s.count > 0 && bringMatches(item, s.name)) n += s.count;
+    });
+    return n;
+  }
+
+  private async doWithdraw(cancelled: () => boolean, req: { item: BringItem; want: number }): Promise<WithdrawReport> {
+    const t0 = this.now();
+    const rep: WithdrawReport = { ok: false, taken: {}, from: [], boxes: [], carried: 0, chests: 0, requests: 0, ms: 0 };
+    const finish = (reason?: string): WithdrawReport => {
+      rep.ok = reason === undefined;
+      if (reason) rep.reason = reason;
+      rep.carried = this.carried(req.item);
+      rep.ms = this.now() - t0;
+      const took = Object.entries(rep.taken).map(([k, v]) => `${v} ${k}`).join(', ') || 'nothing';
+      this.log.info(`bring: withdraw ${rep.ok ? 'done' : `ended (${reason})`}: took ${took}${rep.boxes.length ? ` (${rep.boxes.length} full shulker boxes)` : ''} from ${rep.from.length} containers in ${rep.chests} trips; carrying ${rep.carried} (${(rep.ms / 1000).toFixed(1)} s)`);
+      return rep;
+    };
+    if (!this.d.home()) return finish('no_home');
+    const failed = new Set<string>();
+    let boxItems = 0;
+    for (let round = 0; round < 24; round++) {
+      if (cancelled()) return finish('interrupted');
+      const plan = planBring(this.records(), req.item, req.want, this.carried(req.item) + boxItems, this.d.position());
+      if (plan.need <= 0) break;
+      const next = plan.sources.find((x) => !failed.has(`${x.key}:${x.box ? 'box' : 'loose'}`));
+      if (!next) break;
+      const tag = `${next.key}:${next.box ? 'box' : 'loose'}`;
+      const v = await this.visit(next.pos, next.kind, cancelled);
+      if (!v.ok) {
+        if (v.reason === 'interrupted') return finish('interrupted');
+        this.log.info(`bring: ${next.kind} at ${fmtPos(next.pos)}: ${v.reason}`);
+        failed.add(tag);
+        continue;
+      }
+      rep.chests++;
+      let got = 0;
+      let full = false;
+      try {
+        let left = plan.need;
+        const used = (i: number): number => shulkerSlotsUsed(this.d.inventory.rawItem?.(v.view.id, i));
+        if (!next.box) {
+          // loose stacks: the preferred name first; shulker boxes asked for: the empty ones first
+          const rank = (name: string): number => {
+            const k = req.item.names.indexOf(name);
+            return k < 0 ? req.item.names.length : k;
+          };
+          const slots = v.view.slots
+            .map((st, i) => ({ st, i }))
+            .filter((x) => !!x.st && x.st.count > 0 && bringMatches(req.item, x.st.name))
+            .sort((a, b) => rank(a.st!.name) - rank(b.st!.name) || (req.item.boxes ? used(a.i) - used(b.i) : 0) || a.i - b.i);
+          for (const { st, i } of slots) {
+            if (left <= 0 || cancelled()) break;
+            const itemName = st!.name;
+            const t = await this.d.skills.take(v.view, i, Math.min(left, st!.count));
+            if (t.moved > 0) {
+              rep.requests++;
+              rep.taken[itemName] = (rep.taken[itemName] ?? 0) + t.moved;
+              left -= t.moved;
+              got += t.moved;
+            }
+            if (!t.ok || t.reason === 'inventory_full') {
+              full = t.reason === 'inventory_full';
+              break;
+            }
+          }
+        } else {
+          // whole boxes holding the item (the loose stacks were not enough)
+          for (let i = 0; i < v.view.slots.length && left > 0 && !cancelled(); i++) {
+            const st = v.view.slots[i];
+            if (!st || !isShulkerBox(st.name)) continue;
+            const inside = countOf(req.item, shulkerContents(this.d.inventory.rawItem?.(v.view.id, i)));
+            if (inside <= 0) continue;
+            const boxName = st.name;
+            const t = await this.d.skills.take(v.view, i, 1);
+            if (t.moved > 0) {
+              rep.requests++;
+              rep.taken[boxName] = (rep.taken[boxName] ?? 0) + 1;
+              rep.boxes.push({ name: boxName, items: inside, from: chestName(v.record) });
+              boxItems += inside;
+              left -= inside;
+              got += inside;
+            }
+            if (!t.ok) {
+              full = t.reason === 'inventory_full';
+              break;
+            }
+          }
+        }
+        // the memory follows at once (counts down; a box taken out leaves the box counts)
+        const after = this.remember(next.pos, v.record.kind, v.view);
+        if (got > 0 && !rep.from.includes(chestName(after))) rep.from.push(chestName(after));
+      } finally {
+        await this.d.skills.closeContainer(v.view);
+      }
+      if (cancelled()) return finish('interrupted');
+      if (full) return finish('inventory_full');
+      if (got === 0) failed.add(tag); // it held less than remembered: the refreshed memory sends the next round elsewhere
+    }
+    return finish();
   }
 
   /** Track AN: remember that the bot cannot get to the container at p (kept until a read or `!chests clear`). */

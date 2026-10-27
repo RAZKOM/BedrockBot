@@ -4,9 +4,9 @@
 gathered (trees), mined (ores and plain blocks), hunted (food mobs, spiders) or farmed (crops), and
 runs the matching process. When the inventory fills during mining, gathering or hunting, the
 **stash step** makes room (a chest, a carried shulker box, dropping junk) and the job goes on.
-`!get` makes new things; bringing stored things is a later command: it never takes items out of a
-chest or any other container (the stash step only deposits; Track AM, docs/ux.md, unit test
-`test/unit/chat/ux.test.ts` "!get never takes from chests").
+`!get` makes new things; bringing stored things is `!bring` (wave 10, Track AS, "`!get` or `!bring`"
+below): `!get` never takes items out of a chest or any other container (the stash step only deposits;
+Track AM, docs/ux.md, unit test `test/unit/chat/ux.test.ts` "!get never takes from chests").
 Decision record: [decisions/0025-get-front-door-and-stash.md](decisions/0025-get-front-door-and-stash.md).
 
 ## Files
@@ -30,7 +30,7 @@ Decision record: [decisions/0025-get-front-door-and-stash.md](decisions/0025-get
 | Command | Reply |
 |---|---|
 | `!get <item> [n]` / `!get [n] <item>` | `getting 20 oak_log: gathering wood`, then the replies of the command it runs (`gathering 20 logs (no chest: keeping them)`, `gather done: 24/20 logs`) |
-| `!get coal 4` | `getting 4 coal: mining coal_ore`, `mining 4 coal_ore/deepslate_coal_ore`, `mine coal_ore: 4/4 done` |
+| `!get coal 4` | `getting 4 coal: mining coal_ore`, `mining 4 coal_ore/deepslate_coal_ore`, `mine coal_ore: 4/4 done`; Track AS: with at least 4 coal in the chests at home (memory, box contents too) the first line is `getting 4 coal: the chests hold 64 (!bring coal 4 fetches it); mining coal_ore anyway` (setting `getSuggestsBring`, on) and it still mines |
 | `!get wheat` | `getting wheat: farming wheat (one round of the field)`, `farming r=8 around ...`, then `get wheat: 81 wheat harvested (81 crops in all), the field is done` (the round check is unit-tested on fakes; no e2e yet) |
 | `!get bread` | `get: I do not know how to get bread; I can get: wood, ores (coal, iron, gold, copper, diamond, redstone, lapis, emerald), stone, dirt, sand, gravel, flint, clay, food (beef, pork, mutton, chicken), string, crops (wheat, carrots, potatoes, beetroot)` |
 | `!get stop` | `stopped mine coal_ore 2/4 (dig, 0 skipped)`: the job `!get` started (else any running gather / mine / food / farm); `get: nothing to stop` |
@@ -172,6 +172,20 @@ box names, the NBT reader and the `shulker` slot type moved to the chest skill
 (`skills/container/chest.ts`), which now sets the slot type per window on the shared Containers
 (`shulker` for shulker boxes, `barrel` for barrels, verified; `container` for chests), so the stash
 no longer switches the Containers' private option.
+
+## `!get` or `!bring` (wave 10, Track AS)
+
+| | `!get <item> [n]` | `!bring <item> [n] [to <player>\|home]` |
+|---|---|---|
+| makes or moves | makes new items (gathers, mines, hunts, farms) | moves items already stored in the chests at home |
+| takes from chests | never | only from chests (loose stacks first, a full shulker box as the last source) |
+| ends | where the job ends; at home `!unload` / the `autoUnload` chore put it away | within 2 blocks of the player; `home`, the console or a player not online: at home |
+| stock known | the reply names `!bring` when the chests already hold n | the reply says what is short |
+
+The same item words work for both (`iron`, `wood`, `coal`, `diamonds`); `!bring` also knows any item
+the chest memory knows (`!bring torches`, `!bring shulker`). The planning rules, the delivery and the
+measurements are in docs/home.md "Bring"; decision [0040](decisions/0040-bring.md). NL: "get me coal"
+is `get`, "bring me 64 torches" / "fetch some coal from home" is `bring`.
 
 ## Open points
 

@@ -8,6 +8,8 @@ stack it carries goes, and fills spare shulker boxes when the chests are full.
 Decision record: [decisions/0028-home-logistics.md](decisions/0028-home-logistics.md).
 Track AN (the follow-up, [decisions/0035-home-walking-distance.md](decisions/0035-home-walking-distance.md)):
 containers by walking distance, an unreachable memory, a read cap per scan ("Walking distance" below).
+Track AS (wave 10, [decisions/0040-bring.md](decisions/0040-bring.md)): `!bring` takes stored items out
+of the chests and carries them to the owner ("Bring" below).
 
 ## Files
 
@@ -17,18 +19,22 @@ containers by walking distance, an unreachable memory, a read cap per scan ("Wal
 | `bot/src/skills/home/unloader.ts` | `planUnload`: the decision table, pure; `unloadableStacks` (the chore's trigger) |
 | `bot/src/skills/home/categories.ts` | item categories and label matching (`ores`, `wood`, `food`, `blocks`, `junk`, `tools`) |
 | `bot/src/skills/home/memory.ts` | snapshot -> record, records -> unloader targets, the `!chests` / `!stock` lines |
-| `bot/src/skills/home/logistics.ts` | `HomeLogistics`: the scan and unload jobs (walk, open, snapshot, deposit, spare boxes), serialised |
+| `bot/src/skills/home/logistics.ts` | `HomeLogistics`: the scan and unload jobs (walk, open, snapshot, deposit, spare boxes), serialised; Track AS: `withdraw` (walk, open, take, refresh) |
 | `bot/src/skills/home/reach.ts` | Track AN: `chestGoal` (the walk to a container), `probePath` (a bounded, sliced probe plan), `verdict` (path length against `homeChestWalk`), `pathBlocks` |
-| `bot/src/world/cache/chests.ts` | `ChestMemory`: the per-server chest memory, a sidecar of the world cache (`chests.json`) |
+| `bot/src/world/cache/chests.ts` | `ChestMemory`: the per-server chest memory, a sidecar of the world cache (`chests.json`); Track AS: `inBoxes` (what the full shulker boxes hold) |
+| `bot/src/skills/home/bring.ts` | Track AS: `resolveBringItem` (the word -> item names), `planBring` (carried first, nearest chest, boxes last), `stockOf`, `parseBringArgs`, `itemsText` |
+| `bot/src/tasks/process/bring.ts` | Track AS: `BringProcess` (user: the withdrawal, then the delivery) |
+| `bot/src/chat/commands-bring.ts` | Track AS: `!bring`, `BringController`, the delivery walk (come's logic), the `!get` stock hint |
 | `bot/src/tasks/process/unload.ts` | `HomeJobProcess` (user: `!unload`, `!chests scan`), `HomeChore` (auto, PRIORITY.chore) |
 | `bot/src/chat/commands-home.ts` | `!unload`, `!stock`, `!chests`; wiring of the chore, the block-update trigger, the `!get` hook |
 | `bot/src/skills/container/chest.ts` | slot type per block kind, `snapshot` / `snapshotOf`, `depositSlots`, `take`, the shulker box names and NBT readers (moved here from stash.ts) |
 | `bot/src/world/containers.ts` | `setSlotType` / `slotTypeOf`: the item_stack_request slot type per open window; a whole stack moved into an empty slot keeps its wire item (NBT) |
-| `bot/src/config/settings.ts` | `homeChestRadius` (number, 16, 2..48), `homeChestWalk` (Track AN: path blocks, 32, 0..256; 0 = radius only), `autoUnload` (boolean, on) |
+| `bot/src/config/settings.ts` | `homeChestRadius` (number, 16, 2..48), `homeChestWalk` (Track AN: path blocks, 32, 0..256; 0 = radius only), `autoUnload` (boolean, on), `getSuggestsBring` (Track AS: boolean, on) |
 | `bot/src/skills/nav/goals.ts` | Track AN: `getToBlock` option `low` (a side cell's feet up to `low` blocks below the block; default 1) |
 | `packs/truth/src/home.ts` | `truth:chestput` (fill a container block); reading one is `truth:container` |
 | `bot/test/unit/skills/home-*.test.ts`, `bot/test/unit/cache/chests.test.ts`, `bot/test/unit/chat/home-commands.test.ts` | unit tests on fakes |
-| `bot/test/e2e/home-chests.test.ts`, `home-shulker.test.ts`, `home-reach.test.ts` (Track AN), `home-truth.ts` | e2e on bds-home |
+| `bot/test/unit/skills/home-bring.test.ts`, `bot/test/unit/chat/bring-commands.test.ts` | Track AS: unit tests on fakes |
+| `bot/test/e2e/home-chests.test.ts`, `home-shulker.test.ts`, `home-reach.test.ts` (Track AN), `home-bring.test.ts` (Track AS), `home-truth.ts` | e2e on bds-home |
 | `docker/compose.home.yml` | `bds-home`, udp/19196, flat, peaceful |
 
 ## Commands (owner only, afk task with walking)
@@ -42,6 +48,7 @@ containers by walking distance, an unreachable memory, a read cap per scan ("Wal
 | `!chests unreachable` | Track AN: `chests: 3 unreachable: chest -6 -60 5: no path within 4000 nodes (0 min ago) \| chest 12 -60 0: path 38 blocks (0 min ago) \| ...`, nearest first, at most 3 messages (the last ends `... and 12 more (!chests clear forgets them, !chests scan tries again)`); `chests: none unreachable` |
 | `!chests clear` | `chests: forgot 181 containers (41 unreachable); I read them again the next time I stand near home (or !chests scan)` |
 | `!chests label x y z <text>` / `none` | `chests: chest 3 -60 2 (wood) labelled`; up to 32 characters |
+| `!bring <item> [n] [to <player>\|home]` | Track AS: `bringing 64 torches to Steve (from 2 chests)`, then `brought 64 torches (from 2 chests)` ("Bring" below) |
 
 `!unload` and `!chests scan` are user processes (priority 40): `!stop` ends them, flee / guard /
 night pre-empt them and the job runs again from a fresh plan when it resumes. `all` empties the full
@@ -184,6 +191,86 @@ side do (both `minecraft:cardinal_direction` east, 54 slots), so the e2e places 
 the bot. A barrel opened right after it was closed missed one click in a probe (`container_open`
 timeout); the visit clicks once more after a timeout.
 
+## Bring (wave 10, Track AS)
+
+The owner: "maybe like a retrieve command for bringing items to the player instead of unloading at
+home. or some way to differentiate between getting already gotten items or getting new resources and
+either taking them to the player or home." Decision record:
+[decisions/0040-bring.md](decisions/0040-bring.md).
+
+| | `!get <item> [n]` | `!bring <item> [n] [to <player>\|home]` |
+|---|---|---|
+| what | makes new items: gathers, mines, hunts, farms | takes items already stored in the chests at home |
+| source | the world | the chest memory (`!stock`), loose stacks first, full shulker boxes as the last source |
+| ends | where the job ends; at home `!unload` (or the `autoUnload` chore) puts it away | at the player (within 2 blocks), or home with `home`, from the console, or when the player is not online |
+| chests | never takes from a chest (the stash step only deposits) | only takes |
+| hint | `getting 16 iron: the chests hold 128 (!bring iron 16 fetches it); mining iron_ore anyway` when the chests hold n (`getSuggestsBring`, on) | `bring: no torch in the 5 containers I know (!stock torch; !get torch makes new ones)` |
+
+### Planning (`skills/home/bring.ts`, pure)
+
+1. **The word**: the item names the chest memory or the inventory knows that match it first
+   (`torches` -> torch, `shulker` / `box` -> any shulker box), then the `!get` catalog's
+   (`iron` -> iron_ingot, then raw_iron; `wood` -> every log the memory knows; `diamonds` -> diamond).
+   Loose stacks of the first name are taken first. n defaults to one stack (16 ender pearls, 1 box).
+2. **Carried first**: what the bot carries of those names counts; only the rest comes from chests.
+3. **Nearest chest first, by the memory's counts** (read, reachable containers within
+   `homeChestRadius`; never the other half of a double chest), straight-line distance from the bot.
+4. **Shulker boxes only when the loose stacks are not enough**: a full box holding the item is taken
+   whole (the memory knows what full boxes hold: `inBoxes` on the chest record, from the boxes' NBT
+   `Items` at every read); both replies say `the only source: a full shulker box out of chest ...`.
+   `!bring shulker` takes empty boxes before full ones.
+5. **Short**: what the chests do not hold is said at the start (`only 8 known: 12 short`) and at the
+   end (`12 short: the chests hold no more`); the bot brings what there is.
+
+### The withdrawal (`HomeLogistics.withdraw`)
+
+Plan, walk to the plan's first chest (the scan's stand cell, `face: false`, the same reach rules as a
+scan), open it, take the item's stacks with `chest.take` (or whole boxes), refresh that chest's record
+from the window, close, plan again. A chest that held less than remembered gives what it has and the
+refreshed memory sends the next round to the next chest; a chest that gives nothing is not tried again
+in this job. The memory follows every take at once: counts go down, an emptied chest loses the item, a
+box taken out leaves the box counts and `inBoxes`; `!stock` shows it right away and the next scan
+refreshes it anyway.
+
+### The delivery
+
+`!come`'s walk: the tracked player (the follower's `come`, within 2 blocks), else the locator bar's
+position (up to 4 legs, then the tracked player), trip readiness first (a long trip with food or
+health below 14 eats and puts armour on). `home` (or the console, or a player who is not online):
+a walk to within 2 blocks of the home point, and the reply says why (`Steve is not online, so I took
+them home`). The items stay in the bot's inventory (`!drop torch 64` hands them over).
+
+`BringProcess` (tasks/process/bring.ts) is a user process (priority 40) with two phases; a
+pre-emption (flee, guard, night, a newer command, `!pause`) cancels the running step and the phase
+runs again on resume: the withdrawal takes only what is still missing (carried counts), the walk
+starts again from where the bot stands. `!bring stop` / `!stop` end it.
+
+### Replies
+
+| Command | Reply |
+|---|---|
+| `!bring torch 64 to Steve` | `bringing 64 torches to Steve (from 2 chests)`, then `brought 64 torches (from 2 chests)` |
+| `!bring iron 20` (8 in stock) | `bringing 20 iron to Steve (from 1 chest, only 8 known: 12 short)`, `brought 8 iron_ingots (from 1 chest; 12 short: the chests hold no more)` |
+| `!bring diamond 2` (only in a box) | `bringing 2 diamonds to Steve (from 1 chest, a full shulker box comes along: the only source)`, `brought 1 shulker box holding 2 diamonds (from 1 chest; the only source: a full shulker box out of chest 0 -60 -4)` |
+| `!bring coal home` | `bringing 64 coal to home (from 1 chest)`, `brought 64 coal home (from 1 chest)` |
+| `!bring torch` (none) | `bring: no torch in the 5 containers I know (!stock torch; !get torch makes new ones)`; no chest read: `bring: I know no chest near home yet (!chests scan)` |
+| `!bring status` / `stop` | `bring: bring 64 torch to Steve: walking to Steve, 12 blocks left (running)`, `bring: idle (last: brought ...)`; `stopped bring ...`, `bring: nothing to stop` |
+| failures | `bring: carrying 64 torches but could not get to Steve: not_found`; `bring: found no torch: the chests held less than remembered (!chests scan reads them again; ...)` |
+
+NL (`!do`): the `bring` step (`{"command":"bring","item":"torch","count":64,"to":"home"?}`): "bring me
+64 torches", "fetch some coal from home", "bring the diamonds to me" map to it; "get me coal" stays
+`get`. The prompt's step lines say the difference, so the answer step can explain it.
+
+### Measured (e2e on bds-home, 2026-10-30, two runs, 6/6 green each, 89 s per run)
+
+| What | Result |
+|---|---|
+| 64 torches: 40 + 30 in two chests 10 blocks apart, to a player 30 blocks away | 13.6 / 13.7 s from the command; 1.92 blocks from the player; truth: 64 torches carried, 6 left (memory and truth) |
+| 3 stacks of cobblestone (2 + 1) from the same two chests to the same player | 13.6 / 13.7 s; 1.92 blocks from the player; truth 192 cobblestone |
+| iron 20 with 8 iron ingots in one chest | 7.4 / 7.5 s; 8 brought, 12 short said twice |
+| diamond 2, only in a shulker box | 7.5 s; the box (NBT 2 diamonds) carried, the chest's record without boxes |
+| coal home, the bot 20 blocks east | 5.5 / 5.6 s; 1.95 blocks from home, 64 coal |
+
 ## Measured (e2e on bds-home, 2026-10-29)
 
 Final code: two gate runs of `home-chests` + `home-shulker` (5/5 green each, 75.4 s per run with
@@ -228,6 +315,13 @@ the end.
 - `home-shulker`: the same home, every container filled with stone (truth:chestput), 30 stacks of
   cobblestone: 2 boxes filled and stored, 16 cobblestone kept, no box left in the world, the box
   chest's boxes hold 1728 and 176 cobblestone and one stays empty.
+- `home-bring` (Track AS): 4 chests by truth (A: 40 torches + 2 stacks of cobblestone, B 10 blocks from
+  A: 30 torches + 1 stack, C: 8 iron ingots + 64 coal, D: a shulker box holding 2 diamonds, filled by
+  truth as a block, broken and stored by the bot), a second connection 30 blocks east, `!chests scan`
+  first: `!bring torch 64 to <player>` (64 carried, within 2 blocks of the player, 6 left in memory and
+  truth, `!stock torch`), 3 stacks of cobblestone (measured), `!bring iron 20` (12 short, 8 brought),
+  `!bring diamond 2` (the box comes along; D's record without boxes), `!get coal 4` (the hint line, then
+  `!get stop`), `!bring coal home` from 20 blocks away (within 2 blocks of home).
 
 ### Truth commands (`packs/truth/src/home.ts`)
 
