@@ -22,11 +22,26 @@
 //   flap. A target that leaves reach while another threat is in reach is dropped at once.
 // - crowd rule (`crowdOf`, `crowded`): 3 or more melee threats within 4 blocks and health below 12:
 //   the fight ends `crowded` and `wantsFlee` is true for them (the flee trigger, like a creeper).
+//
+// Track AO (wave 9, docs/pve.md "Path-reachable targets", decision 0036): "it gets stuck trying to
+// fight mobs behind walls when on its way to places".
+// - within reach now also needs a line of sight (eye to the mob's upper body or head, no solid cell
+//   between: a zombie pressed against a glass wall is in reach but cannot be hit nor hit back);
+// - a candidate not within reach gets a bounded probe plan (pathReach.ts) to a cell next to it; no path,
+//   or a path longer than `guardReach` (24 path blocks; 0 = the old terrain rule only), ignores it for
+//   30 s (`ignoreWhy` keeps the reason) and the next candidate is looked at in the same evaluation.
+//   While a better-ranked candidate's probe runs, only mobs within reach are picked.
+// - while a user process walks (`guardWhileWalking`, default 'near'): only a mob within reach, or a
+//   melee threat / creeper / archer that targets the bot within 6 path blocks ('near'); 'reach' =
+//   within reach only; 'all' = as without a walk (the probe rule still applies).
+// - `unreachable` after a fight ignores the mob for 30 s (was 10); a mob that hit the bot after it was
+//   ignored is a target again (not a flying one).
 import type { Logger } from '../../log.ts';
 import type { EntityInfo, Vec3 } from '../../world/types.ts';
 import type { TerrainClass } from '../terrain/classify.ts';
 import { EYE_HEIGHT, type FightResult } from './combat.ts';
-import { bareType, classify, entityFeet, isArcher, isCreeper, isFlying, isPlayerEntity, RANGED_TYPES, reachDistance, type MobTracker } from './hostiles.ts';
+import { aimPoint, bareType, classify, entityFeet, entitySize, isArcher, isCreeper, isFlying, isPlayerEntity, RANGED_TYPES, reachDistance, type MobTracker } from './hostiles.ts';
+import { PROBE_GOAL_R, type PathVerdict } from './pathReach.ts'; // Track AO
 
 /** Eye-to-box distance that counts as "within reach now". */
 export const REACH_NOW = 3.2;
@@ -70,7 +85,15 @@ export interface TargetingHost {
     home(): Vec3 | undefined;
     readonly night?: { wantsShelter(): boolean; inside(): boolean; readonly state: string } | undefined;
   };
-  readonly processes: { userProcesses(): readonly unknown[] };
+  readonly processes: { userProcesses(): readonly { readonly name: string }[]; readonly paused?: boolean }; // Track AO: names, !pause
+  /** Track AO: max path length (blocks) to a guard target not within reach; 0 = the terrain rule only. Default 0 (no probes). */
+  readonly guardReach?: number;
+  /** Track AO: who guard may engage while a user process walks. Default 'all' (as without a walk). */
+  readonly guardWhileWalking?: WalkRule;
+  /** Track AO: the probe plans (cached verdicts). Without it no path rule applies. */
+  readonly pathReach?: { lookup(e: EntityInfo, me: Vec3): PathVerdict | 'pending' | 'none' };
+  /** Track AO: why and since when a mob is ignored (status, the hit rule). */
+  readonly ignoreWhy?: Map<bigint, IgnoreNote>;
   readonly guardRadius: number;
   readonly mover: { readonly nav: { readonly busy: boolean } };
   readonly log: Logger;
@@ -169,38 +192,184 @@ export function pickThreat(h: TargetingHost, me: Vec3, low: boolean): ThreatPick
   const radius = h.guardRadius;
   const creeperShy = h.health() < CREEPER_MIN_HEALTH;
   const grid = gridOf(h.mover);
-  let best: { e: EntityInfo; score: number } | undefined;
+  const cands: Candidate[] = [];
   for (const e of h.d.world.entities.values()) {
     if (!isThreat(h, e)) continue;
-    if ((h.ignore.get(e.runtimeId) ?? 0) > now) continue;
+    const hitUs = hit?.runtimeId === e.runtimeId && now - hit.at < 10_000;
+    if ((h.ignore.get(e.runtimeId) ?? 0) > now) {
+      // Track AO: a mob that hit the bot after it was ignored is reachable after all (not a flying one)
+      const note = h.ignoreWhy?.get(e.runtimeId);
+      if (!hitUs || !note || hit.at <= note.at || isFlying(e.type)) continue;
+      h.ignore.delete(e.runtimeId);
+      h.ignoreWhy?.delete(e.runtimeId);
+      h.log.info(`guard: ${bareType(e.type)} #${e.runtimeId} hit us: no longer ignored (was: ${note.reason})`);
+    }
     const f = entityFeet(e);
     const d = dist(f, me);
     const creeper = isCreeper(e.type);
-    const hitUs = hit?.runtimeId === e.runtimeId && now - hit.at < 10_000;
     let score = d;
+    let kind: Candidate['kind'] = 'chase';
     if (creeper && creeperShy) {
       // below health 10: never engaged; a near one is picked first so the combat skill keeps away from it
       if (inPlace || d > CREEPER_AVOID_RANGE) continue;
       score -= 2000;
+      kind = 'avoid';
     } else if (inPlace) {
       if (reachDistance(eye, e) > REACH_NOW) continue;
+      kind = 'inPlace';
     } else {
       if (dist(f, center) > radius || d > radius + CHASE_EXTRA) continue;
       if (Math.abs(f.y - me.y) > MAX_DY) continue;
-      if (!reachability(grid, me, e)) {
+      const r = reachability(grid, me, e);
+      if (!r) {
         if (hitUs && isFlying(e.type)) {
           h.ignore.set(e.runtimeId, now + 10_000);
+          h.ignoreWhy?.set(e.runtimeId, { reason: 'hit us out of reach (flying)', at: now, type: e.type });
           h.log.info(`guard: ${bareType(e.type)} #${e.runtimeId} hit us out of reach (flying): ignored for 10 s`);
         }
         continue;
       }
+      if (r === 'now' && (!grid || lineOfSight(grid, eye, e))) kind = 'now'; // Track AO: in reach and nothing solid between
     }
     if (creeper && d <= CREEPER_RANK_RANGE) score -= 1000;
     if (hitUs) score -= 100;
     else if (h.mobs.targetsUs(e.runtimeId)) score -= 50;
-    if (!best || score < best.score) best = { e, score };
+    cands.push({ e, score, d, kind });
   }
-  return best ? { e: best.e, inPlace } : undefined;
+  if (cands.length === 0) return undefined;
+  cands.sort((a, b) => a.score - b.score);
+  // Track AO: the path rule, best-ranked first; a candidate that fails it is skipped in the same evaluation
+  const walking = userWalking(h);
+  let waiting = false;
+  for (const c of cands) {
+    if (c.kind !== 'chase') return { e: c.e, inPlace };
+    if (waiting) continue; // a better candidate's probe runs: only mobs within reach meanwhile
+    const g = pathGate(h, c, me, walking);
+    if (g === 'yes') return { e: c.e, inPlace };
+    if (g === 'pending') waiting = true;
+  }
+  return undefined;
+}
+
+/** A guard candidate (Track AO): 'now' = within reach with a line of sight; 'chase' = needs the path rule. */
+interface Candidate {
+  e: EntityInfo;
+  score: number;
+  d: number;
+  kind: 'now' | 'chase' | 'inPlace' | 'avoid';
+}
+
+// ---- Track AO: path-reachable targets, restraint while walking ----------------------------------
+
+/** Ignore after a failed probe (no path, too long) or an `unreachable` fight (ms). */
+export const PATH_IGNORE_MS = 30_000;
+/** guardWhileWalking 'near': at most this many path blocks from the bot. */
+export const WALK_NEAR = 6;
+/** Default of the `guardReach` setting (path blocks). */
+export const GUARD_REACH = 24;
+
+/** Who guard engages while a user process walks: within reach only, also near melee threats, or anyone. */
+export type WalkRule = 'reach' | 'near' | 'all';
+export const WALK_RULES: readonly WalkRule[] = ['reach', 'near', 'all'];
+
+/** `guardWhileWalking` text -> rule (throws on anything else). */
+export function parseWalkRule(raw: string): WalkRule {
+  const v = raw.trim().toLowerCase();
+  if ((WALK_RULES as readonly string[]).includes(v)) return v as WalkRule;
+  throw new Error(`guardWhileWalking must be reach, near or all, got "${raw}"`);
+}
+
+/** Why and since when (performance.now()) a mob is ignored. */
+export interface IgnoreNote {
+  reason: string;
+  at: number;
+  type?: string;
+}
+
+/** Ignore `e` for `ms` with a reason (kept in `ignoreWhy` when the host has it). */
+export function ignoreMob(h: Pick<TargetingHost, 'ignore' | 'ignoreWhy' | 'log'>, e: Pick<EntityInfo, 'runtimeId' | 'type'>, ms: number, reason: string): void {
+  const now = performance.now();
+  h.ignore.set(e.runtimeId, now + ms);
+  h.ignoreWhy?.set(e.runtimeId, { reason, at: now, type: e.type });
+  h.log.info(`guard: ${bareType(e.type)} #${e.runtimeId} ignored for ${Math.round(ms / 1000)} s (${reason})`);
+}
+
+/** A user process (not a kill job, not held by !pause) runs: the bot is on its way somewhere. */
+export function userWalking(h: Pick<TargetingHost, 'processes'>): boolean {
+  if (h.processes.paused) return false;
+  return h.processes.userProcesses().some((p) => p.name !== 'kill');
+}
+
+/** Melee threat, creeper, or an archer that targets the bot: what guard engages near a walk. */
+export function walkThreat(e: EntityInfo, mobs: MobTracker): boolean {
+  if (isCreeper(e.type) || isMelee(e, mobs)) return true;
+  return isArcher(e, mobs) && mobs.targetsUs(e.runtimeId);
+}
+
+/**
+ * Nothing solid between the eye and the mob's upper body, head or lower body (a cell whose collision
+ * box reaches its top, not leaves; the end cells excluded; combat.ts `blocked` does the same for cover).
+ * Glass blocks it; a 1-block window, a fence below the line, a slab do not.
+ */
+export function lineOfSight(grid: GridLike, eye: Vec3, e: EntityInfo): boolean {
+  const f = entityFeet(e);
+  const h = entitySize(e.type).h;
+  const a = aimPoint(e);
+  for (const p of [a, { x: f.x, y: f.y + h * 0.9, z: f.z }, { x: f.x, y: f.y + h * 0.3, z: f.z }]) {
+    if (!blockedLine(grid, eye, p)) return true;
+  }
+  return false;
+}
+
+/** The segment a -> b passes through a solid cell (sampled every 0.2 blocks, the end cells excluded). */
+function blockedLine(grid: GridLike, a: Vec3, b: Vec3): boolean {
+  const d = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+  const n = Math.max(2, Math.ceil(d / 0.2));
+  const ka = `${Math.floor(a.x)},${Math.floor(a.y)},${Math.floor(a.z)}`;
+  const kb = `${Math.floor(b.x)},${Math.floor(b.y)},${Math.floor(b.z)}`;
+  for (let i = 1; i < n; i++) {
+    const t = i / n;
+    const x = Math.floor(a.x + (b.x - a.x) * t);
+    const y = Math.floor(a.y + (b.y - a.y) * t);
+    const z = Math.floor(a.z + (b.z - a.z) * t);
+    const k = `${x},${y},${z}`;
+    if (k === ka || k === kb) continue;
+    const c = grid.cls(x, y, z);
+    if (c && c.boxes.length > 0 && c.top >= 1 && !c.leaves) return true;
+  }
+  return false;
+}
+
+/**
+ * The path rule for a candidate not within reach: 'yes' = engage, 'no' = skip it (ignored for 30 s
+ * when the probe found no path or one too long), 'pending' = its probe runs.
+ */
+function pathGate(h: TargetingHost, c: Candidate, me: Vec3, walking: boolean): 'yes' | 'no' | 'pending' {
+  const pr = h.pathReach;
+  const rule = h.guardWhileWalking ?? 'all';
+  const restrained = walking && rule !== 'all';
+  let limit: number;
+  if (restrained) {
+    if (rule === 'reach' || !walkThreat(c.e, h.mobs)) return 'no';
+    limit = WALK_NEAR;
+  } else {
+    limit = h.guardReach ?? 0;
+    if (limit <= 0) return 'yes'; // the old terrain rule only
+  }
+  // a path ends within PROBE_GOAL_R of the mob and starts within about a block of the bot
+  if (c.d > limit + PROBE_GOAL_R + 1) return 'no';
+  if (!pr) return 'yes';
+  const v = pr.lookup(c.e, me);
+  if (v === 'pending') return 'pending';
+  if (v === 'none') return 'yes';
+  if (!v.ok) {
+    ignoreMob(h, c.e, PATH_IGNORE_MS, v.reason);
+    return 'no';
+  }
+  if (v.blocks <= limit) return 'yes';
+  if (restrained) return 'no'; // reachable, just not near the walk: left alone, not ignored
+  ignoreMob(h, c.e, PATH_IGNORE_MS, `path ${Math.round(v.blocks)} blocks > guardReach ${limit}`);
+  return 'no';
 }
 
 /**
@@ -313,8 +482,9 @@ export function ignoreMsAfter(reason: FightResult['reason']): number {
     case 'crowded': // Track AH: a flight follows; the mob is still a target afterwards
       return 0;
     case 'out_of_range':
-    case 'unreachable':
       return 10_000;
+    case 'unreachable':
+      return PATH_IGNORE_MS; // Track AO: was 10 s (behind a wall the next guard tick picked it again)
     case 'took_cover':
       return 3_000;
     default:
@@ -322,8 +492,11 @@ export function ignoreMsAfter(reason: FightResult['reason']): number {
   }
 }
 
-/** Apply the ignore rule for a finished guard fight. */
-export function afterFight(h: Pick<TargetingHost, 'ignore'>, e: EntityInfo, r: Pick<FightResult, 'reason'>): void {
+/** Apply the ignore rule for a finished guard fight (with the reason, Track AO). */
+export function afterFight(h: Pick<TargetingHost, 'ignore'> & Partial<Pick<TargetingHost, 'ignoreWhy'>>, e: EntityInfo, r: Pick<FightResult, 'reason'>): void {
   const ms = ignoreMsAfter(r.reason);
-  if (ms > 0) h.ignore.set(e.runtimeId, performance.now() + ms);
+  if (ms <= 0) return;
+  const now = performance.now();
+  h.ignore.set(e.runtimeId, now + ms);
+  h.ignoreWhy?.set(e.runtimeId, { reason: `fight ${r.reason}`, at: now, type: e.type });
 }

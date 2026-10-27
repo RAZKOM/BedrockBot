@@ -94,7 +94,7 @@ describe('pickThreat', () => {
 
   it('ignore rules after a fight', () => {
     expect(ignoreMsAfter('out_of_range')).toBe(10_000);
-    expect(ignoreMsAfter('unreachable')).toBe(10_000);
+    expect(ignoreMsAfter('unreachable')).toBe(30_000); // Track AO: was 10 s
     expect(ignoreMsAfter('creeper_avoided')).toBe(0);
     expect(ignoreMsAfter('interrupted')).toBe(0);
     expect(ignoreMsAfter('killed')).toBe(0);
