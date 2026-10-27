@@ -142,6 +142,8 @@ export class GatherWoodTask {
   /** Track Z: remembered / far forests, and the cluster the last forest walk went to (until a tree is felled there). */
   private forests: ForestFinder | undefined;
   private forest: LogCluster | undefined;
+  /** Track AD: the stash step when the inventory fills (skills/container/stash.ts, docs/get.md); set by commands-get. */
+  stash: { ifFull(job: { label?: string; chest?: Vec3 | undefined; wanted?: (name: string) => boolean }): Promise<boolean> } | undefined;
 
   constructor(deps: GatherDeps) {
     this.d = deps;
@@ -296,6 +298,12 @@ export class GatherWoodTask {
       if (o.chest && need <= 0) return this.end(gen, 'done');
       const full = this.d.inventory.freeSlots().length < minFree;
       if (full) this.stats.inventoryFull++;
+      if (full && this.stash && !(o.chest && carried > 0)) {
+        // Track AD: the stash step (chest, shulker box, drop junk); still full: the job ends
+        if (await this.stash.ifFull({ label: 'gather', chest: o.chest, wanted: isLog })) continue;
+        this.lastError = 'inventory full';
+        return this.end(gen, 'failed');
+      }
       if (o.chest && carried > 0 && (carried >= need || full)) {
         const ok = await this.depositTrip(gen, o.chest);
         if (!this.alive(gen)) break;

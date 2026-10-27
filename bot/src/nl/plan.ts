@@ -43,6 +43,7 @@ export const STEP_SCHEMAS = {
   sleep: z.strictObject({ command: z.literal('sleep') }),
   pause: z.strictObject({ command: z.literal('pause') }),
   resume: z.strictObject({ command: z.literal('resume') }),
+  get: z.strictObject({ command: z.literal('get'), item: blockName, count: z.number().int().min(1).max(2304).optional() }), // Track AD: !get, the first choice for getting items
   question: z.strictObject({ command: z.literal('question'), text: z.string().min(1).max(200) }),
 } as const;
 
@@ -69,6 +70,7 @@ export const StepSchema = z.discriminatedUnion('command', [
   STEP_SCHEMAS.sleep,
   STEP_SCHEMAS.pause,
   STEP_SCHEMAS.resume,
+  STEP_SCHEMAS.get, // Track AD
   STEP_SCHEMAS.question,
 ]);
 export type Step = z.infer<typeof StepSchema>;
@@ -112,6 +114,7 @@ export const COMMAND_SPECS: Record<Exclude<StepKind, 'question'>, CommandSpec> =
   sleep: { chat: 'sleep', wait: 'process' },
   pause: { chat: 'pause', wait: 'none' },
   resume: { chat: 'resume', wait: 'none' },
+  get: { chat: 'get', wait: 'process', fail: /^get: / }, // Track AD
 };
 
 /** Replies that end any step and the plan. */
@@ -203,6 +206,8 @@ export function stepCommand(s: Step): string {
       return `wp del ${s.name}`;
     case 'set':
       return `set ${s.key} ${settingText(s.value)}`;
+    case 'get': // Track AD
+      return s.count !== undefined ? `get ${s.item} ${s.count}` : `get ${s.item}`;
     case 'question':
       return s.text;
     default:

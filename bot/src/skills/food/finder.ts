@@ -10,6 +10,7 @@
 import type { BlockInfo, EntityInfo, ItemStack, Vec3 } from '../../world/types.ts';
 import { bareType, entityFeet, isPlayerEntity } from '../combat/hostiles.ts';
 import { foodInfo } from '../survival/eat.ts';
+import { PEN_KEEP, type Pen } from './pen.ts'; // Track AF
 
 export interface FoodAnimal {
   /** Raw food items it drops. */
@@ -141,16 +142,36 @@ export function babyFlag(metadata: readonly MetaLike[] | undefined): boolean | u
   return undefined;
 }
 
-/** Runtime ids of baby mobs, from add_entity / set_entity_data metadata (`flags.baby`). */
+/** Track AF: the `inlove` actor flag (love mode after feeding): true / false, or undefined without flags. */
+export function loveFlag(metadata: readonly MetaLike[] | undefined): boolean | undefined {
+  for (const m of metadata ?? []) {
+    if (m.key === 'flags' && m.value && typeof m.value === 'object') return (m.value as { inlove?: boolean }).inlove === true;
+  }
+  return undefined;
+}
+
+/** Runtime ids of baby mobs, from add_entity / set_entity_data metadata (`flags.baby`); Track AF: and of mobs in love mode (`flags.inlove`). */
 export class BabyTracker {
   readonly babies = new Set<bigint>();
+  /** Track AF: mobs in love mode now (fed, looking for a partner). */
+  readonly inLove = new Set<bigint>();
+  /** Track AF: runtime id -> performance.now() when it was first seen as a baby (breeding counts new calves). */
+  readonly bornSeen = new Map<bigint, number>();
   private readonly unsubs: (() => void)[] = [];
 
   constructor(source: BabySource) {
     const apply = (rid: bigint, meta: unknown) => {
       const b = babyFlag(meta as MetaLike[] | undefined);
-      if (b === true) this.babies.add(rid);
-      else if (b === false) this.babies.delete(rid);
+      if (b === true) {
+        if (!this.babies.has(rid)) this.bornSeen.set(rid, performance.now());
+        this.babies.add(rid);
+      } else if (b === false) {
+        this.babies.delete(rid);
+        this.bornSeen.delete(rid);
+      }
+      const l = loveFlag(meta as MetaLike[] | undefined);
+      if (l === true) this.inLove.add(rid);
+      else if (l === false) this.inLove.delete(rid);
     };
     this.unsubs.push(
       source.on('add_entity', (p) => {
@@ -164,12 +185,19 @@ export class BabyTracker {
       }),
       source.on('start_game', () => {
         this.babies.clear();
+        this.inLove.clear();
+        this.bornSeen.clear();
       }),
     );
   }
 
   isBaby(rid: bigint): boolean {
     return this.babies.has(rid);
+  }
+
+  /** Track AF: in love mode (the `inlove` flag). */
+  isInLove(rid: bigint): boolean {
+    return this.inLove.has(rid);
   }
 
   dispose(): void {
@@ -197,12 +225,18 @@ export interface TargetQuery {
   ignored?(rid: bigint): boolean;
   /** Only these kinds (default all). */
   kinds?: readonly string[];
+  /** Track AF: the pen a mob stands in (undefined = wild). Without it every mob counts as wild. */
+  penOf?(e: EntityInfo): Pen | undefined;
+  /** Track AF: may this pen's animals of `kind` be hunted (down to PEN_KEEP adults)? Default never. */
+  penAllowed?(pen: Pen, kind: string): boolean;
 }
 
 export interface FoodTarget {
   entity: EntityInfo;
   kind: string;
   distance: number;
+  /** Track AF: the pen it stands in, if any. */
+  pen?: Pen | undefined;
 }
 
 export interface HerdCount {
@@ -210,8 +244,15 @@ export interface HerdCount {
   babies: number;
 }
 
-/** Adults and babies of every food kind within the query's radius (dead ones left out). */
-export function countHerd(entities: Iterable<EntityInfo>, q: Pick<TargetQuery, 'center' | 'radius' | 'height' | 'isBaby' | 'isDead'>): Map<string, HerdCount> {
+/**
+ * Adults and babies of every food kind within the query's radius (dead ones left out). With `penOf`
+ * (Track AF) only the wild ones (outside pens); `pens` then receives the penned ones by pen id.
+ */
+export function countHerd(
+  entities: Iterable<EntityInfo>,
+  q: Pick<TargetQuery, 'center' | 'radius' | 'height' | 'isBaby' | 'isDead' | 'penOf'>,
+  pens?: Map<string, Map<string, HerdCount>>,
+): Map<string, HerdCount> {
   const out = new Map<string, HerdCount>();
   const r = q.radius ?? 48;
   const h = q.height ?? 16;
@@ -221,10 +262,17 @@ export function countHerd(entities: Iterable<EntityInfo>, q: Pick<TargetQuery, '
     if (!kind || q.isDead?.(e.runtimeId)) continue;
     const f = entityFeet(e);
     if (Math.hypot(f.x - q.center.x, f.z - q.center.z) > r || Math.abs(f.y - q.center.y) > h) continue;
-    const c = out.get(kind) ?? { adults: 0, babies: 0 };
+    const pen = q.penOf?.(e);
+    let into = out;
+    if (pen) {
+      if (!pens) continue;
+      into = pens.get(pen.id) ?? new Map<string, HerdCount>();
+      pens.set(pen.id, into);
+    }
+    const c = into.get(kind) ?? { adults: 0, babies: 0 };
     if (q.isBaby(e.runtimeId)) c.babies++;
     else c.adults++;
-    out.set(kind, c);
+    into.set(kind, c);
   }
   return out;
 }
@@ -232,10 +280,23 @@ export function countHerd(entities: Iterable<EntityInfo>, q: Pick<TargetQuery, '
 /**
  * The next mob to hunt: adults of a food kind within the radius, of a kind with more than `leave`
  * adults within the radius, not ignored; nearest first, worth-weighted (2 blocks per expected item).
+ * Track AF, with `penOf`: the leave rule counts wild mobs only, and a mob inside a pen is taken only
+ * when `penAllowed(pen, kind)` and its pen holds more than PEN_KEEP (2) adults of the kind.
  */
 export function pickTarget(entities: Iterable<EntityInfo>, q: TargetQuery): FoodTarget | undefined {
   const list = [...entities];
-  const herd = countHerd(list, q);
+  // one fill per mob at most (PenDetector memoizes, this keeps the pass consistent)
+  const pens = new Map<bigint, Pen | undefined>();
+  const penOf = q.penOf
+    ? (e: EntityInfo): Pen | undefined => {
+        if (pens.has(e.runtimeId)) return pens.get(e.runtimeId);
+        const p = q.penOf!(e);
+        pens.set(e.runtimeId, p);
+        return p;
+      }
+    : undefined;
+  const penned = new Map<string, Map<string, HerdCount>>();
+  const herd = countHerd(list, { ...q, ...(penOf ? { penOf } : {}) }, penned);
   const r = q.radius ?? 48;
   const h = q.height ?? 16;
   let best: (FoodTarget & { score: number }) | undefined;
@@ -244,15 +305,19 @@ export function pickTarget(entities: Iterable<EntityInfo>, q: TargetQuery): Food
     const kind = foodKindOf(e.type);
     if (!kind || (q.kinds && !q.kinds.includes(kind))) continue;
     if (q.isBaby(e.runtimeId) || q.isDead?.(e.runtimeId) || q.ignored?.(e.runtimeId)) continue;
-    if ((herd.get(kind)?.adults ?? 0) <= q.leave) continue;
     const f = entityFeet(e);
     if (Math.hypot(f.x - q.center.x, f.z - q.center.z) > r || Math.abs(f.y - q.center.y) > h) continue;
+    const pen = penOf?.(e);
+    if (pen) {
+      if (!q.penAllowed?.(pen, kind)) continue;
+      if ((penned.get(pen.id)?.get(kind)?.adults ?? 0) <= PEN_KEEP) continue;
+    } else if ((herd.get(kind)?.adults ?? 0) <= q.leave) continue;
     const distance = Math.hypot(f.x - q.me.x, f.y - q.me.y, f.z - q.me.z);
     const score = distance - 2 * FOOD_ANIMALS[kind]!.expected;
-    if (!best || score < best.score) best = { entity: e, kind, distance, score };
+    if (!best || score < best.score) best = { entity: e, kind, distance, score, pen };
   }
   if (!best) return undefined;
-  return { entity: best.entity, kind: best.kind, distance: best.distance };
+  return { entity: best.entity, kind: best.kind, distance: best.distance, ...(best.pen ? { pen: best.pen } : {}) };
 }
 
 // ---- furnaces --------------------------------------------------------------------------------------

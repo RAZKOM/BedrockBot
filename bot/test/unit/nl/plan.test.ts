@@ -33,6 +33,7 @@ describe('plan schema', () => {
       { command: 'sleep' },
       { command: 'pause' },
       { command: 'resume' },
+      { command: 'get', item: 'oak_log', count: 20 }, // Track AD
       { command: 'question', text: 'Which one?' },
     ];
     for (const s of valid) expect(ok(one(s)), JSON.stringify(s)).toBe(true);
@@ -120,7 +121,7 @@ describe('prompt', () => {
     expect(p).toContain('settings: guardRadius 16');
     expect(p).toContain('[chat: !goto <waypoint> | x y z (walk)]');
     expect(p).toContain('!sleep (not available on this bot)');
-    expect(EXAMPLES).toHaveLength(6);
+    expect(EXAMPLES).toHaveLength(7); // Track AD: + get
     for (const e of EXAMPLES) {
       expect(PlanSchema.safeParse(e.plan).success).toBe(true);
       expect(p).toContain(JSON.stringify(e.plan));

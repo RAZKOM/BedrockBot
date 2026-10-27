@@ -33,7 +33,26 @@ interface NumberDef {
   description: string;
 }
 
-export type SettingDef = BoolDef | NumberDef;
+/** Track AD: free text checked by `parse` (returns the normalised value, throws SettingError). */
+interface TextDef {
+  kind: 'text';
+  default: string;
+  /** What the value may be, shown by `!set <key>` (`x y z|none`). */
+  values: string;
+  parse(raw: string): string;
+  description: string;
+}
+
+export type SettingDef = BoolDef | NumberDef | TextDef; // Track AD: TextDef
+
+/** Track AD: `x y z` / `x,y,z` (whole numbers) or `none` -> `x y z` / `none`. */
+export function parseBlockText(raw: string, key: string): string {
+  const s = raw.trim().toLowerCase();
+  if (s === 'none' || s === '') return 'none';
+  const n = s.split(/[\s,]+/).map((v) => Math.floor(Number(v))); // a block position: decimals floor (merge of Tracks AD and AF)
+  if (n.length !== 3 || !n.every((v) => Number.isFinite(v))) throw new SettingError(`${key} must be x y z or none, got "${raw}"`);
+  return n.join(' ');
+}
 
 /**
  * Every runtime setting. Placeholders (read by later tracks) are marked; adding one is one entry here
@@ -60,10 +79,15 @@ export const SETTING_DEFS = {
   foodMin: { kind: 'number', default: 10, min: 0, max: 200, integer: true, unit: 'hunger points', description: 'auto food: hunt when the food carried totals fewer hunger points' }, // Track X
   foodLeave: { kind: 'number', default: 2, min: 0, max: 16, integer: true, unit: 'mobs', description: '!food never leaves fewer of a kind than this within the radius' }, // Track X
   mineSeenOnly: { kind: 'boolean', default: false, description: 'mining: only ore the bot has seen an open face of (off: any known ore, tunnelling to it)' }, // Track Z
+  plannerThreads: { kind: 'number', default: 1, min: 0, max: 1, integer: true, unit: 'threads', description: 'plan paths in a worker thread (bigger budgets, no tick waits for the planner); 0 = on the main thread' }, // Track AB
+  autoBreed: { kind: 'boolean', default: false, description: 'breed the animals of chorePen as a chore (every 10 min while it holds fewer than 8 adults of a kind)' }, // Track AF
+  chorePen: { kind: 'text', default: 'none', values: 'x y z|none', parse: (raw: string) => parseBlockText(raw, 'chorePen'), description: 'the pen (fence-enclosed) whose animals the breeding chore and the food chore may use: a block inside it, or none' }, // Track AF (merge: AD's parseBlockText)
+  stashChest: { kind: 'text', default: 'none', values: 'x y z|none', parse: (raw: string) => parseBlockText(raw, 'stashChest'), description: 'stash step: chest a full inventory is emptied into (none: the job chest, a carried shulker box, then dropping junk)' }, // Track AD
+  stashShulker: { kind: 'boolean', default: true, description: 'stash step: place a carried shulker box, fill it, break it and pick it up when the inventory is full' }, // Track AD
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;
-export type SettingValue<K extends SettingKey> = (typeof SETTING_DEFS)[K] extends { kind: 'boolean' } ? boolean : number;
+export type SettingValue<K extends SettingKey> = (typeof SETTING_DEFS)[K] extends { kind: 'boolean' } ? boolean : (typeof SETTING_DEFS)[K] extends { kind: 'text' } ? string : number; // Track AF: text
 export type SettingValues = { [K in SettingKey]: SettingValue<K> };
 
 export const SETTING_KEYS = Object.keys(SETTING_DEFS) as SettingKey[];
@@ -91,6 +115,7 @@ export function parseSettingValue<K extends SettingKey>(key: K, raw: unknown): S
     if (FALSE.has(s)) return false as SettingValue<K>;
     throw new SettingError(`${key} must be on or off, got ${show(raw)}`);
   }
+  if (def.kind === 'text') return def.parse(typeof raw === 'string' ? raw : String(raw)) as SettingValue<K>; // Track AD
   const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw.trim()) : NaN;
   if (!Number.isFinite(n) || n < def.min || n > def.max || (def.integer === true && !Number.isInteger(n))) {
     throw new SettingError(`${key} must be ${def.integer ? 'a whole number ' : ''}${def.min}..${def.max}, got ${show(raw)}`);
@@ -98,16 +123,16 @@ export function parseSettingValue<K extends SettingKey>(key: K, raw: unknown): S
   return n as SettingValue<K>;
 }
 
-export function formatSettingValue(key: SettingKey, v: boolean | number): string {
+export function formatSettingValue(key: SettingKey, v: boolean | number | string): string {
   const def: SettingDef = SETTING_DEFS[key];
   if (def.kind === 'boolean') return v ? 'on' : 'off';
   return String(v);
 }
 
 /** `guardRadius 16 (2..64 blocks, default 16): guard: fight hostiles ...` */
-export function describeSetting(key: SettingKey, value: boolean | number): string {
+export function describeSetting(key: SettingKey, value: boolean | number | string): string {
   const def: SettingDef = SETTING_DEFS[key];
-  const range = def.kind === 'boolean' ? 'on|off' : `${def.min}..${def.max}${def.unit ? ` ${def.unit}` : ''}`;
+  const range = def.kind === 'boolean' ? 'on|off' : def.kind === 'text' ? def.values : `${def.min}..${def.max}${def.unit ? ` ${def.unit}` : ''}`;
   return `${key} ${formatSettingValue(key, value)} (${range}, default ${formatSettingValue(key, def.default)}): ${def.description}`;
 }
 
@@ -125,7 +150,7 @@ export class RuntimeSettings {
   private readonly sources = new Map<SettingKey, SettingSource>();
   /** What settings.json holds (only values set with !set); unknown keys from the file are kept as they were. */
   private persisted: Record<string, unknown> = {};
-  private readonly listeners = new Set<(key: SettingKey, value: boolean | number, old: boolean | number) => void>();
+  private readonly listeners = new Set<(key: SettingKey, value: boolean | number | string, old: boolean | number | string) => void>();
   private readonly log: Logger;
 
   constructor(opts: RuntimeSettingsOptions = {}) {
@@ -197,7 +222,7 @@ export class RuntimeSettings {
   }
 
   /** `!set key default`: back to the built-in default and removed from the file. */
-  reset(key: SettingKey): boolean | number {
+  reset(key: SettingKey): boolean | number | string {
     const def = SETTING_DEFS[key].default;
     this.assign(key, def, 'default');
     delete this.persisted[key];
@@ -205,16 +230,16 @@ export class RuntimeSettings {
     return def;
   }
 
-  onChange(fn: (key: SettingKey, value: boolean | number, old: boolean | number) => void): () => void {
+  onChange(fn: (key: SettingKey, value: boolean | number | string, old: boolean | number | string) => void): () => void {
     this.listeners.add(fn);
     return () => {
       this.listeners.delete(fn);
     };
   }
 
-  private assign(key: SettingKey, v: boolean | number, source: SettingSource): void {
+  private assign(key: SettingKey, v: boolean | number | string, source: SettingSource): void {
     const old = this.values[key];
-    (this.values as Record<SettingKey, boolean | number>)[key] = v;
+    (this.values as Record<SettingKey, boolean | number | string>)[key] = v;
     this.sources.set(key, source);
     if (old !== v) {
       for (const fn of [...this.listeners]) {

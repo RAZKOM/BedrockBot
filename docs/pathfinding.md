@@ -207,6 +207,88 @@ slices), segments, corrections, motions, stuck and move timeouts, failures, dist
 `maxTickMs` (longest tick in the navigator, planning included), `planMs`, action counts, retreats and
 ticks waited for unloaded chunks.
 
+## Compute
+
+Wave 8 Track AB, [decisions/0023](decisions/0023-planner-worker.md). The question was whether the bot
+uses the Mac's compute or is "rated to the Realm tick speed". Before: A* on the main thread, sliced
+at 8 ms per 50 ms tick, a main plan (the body stands and waits) 40 ms / 20 000 nodes, a plan-ahead
+100 ms / 20 000 nodes. Now the navigator plans in a `worker_threads` Worker with much bigger
+budgets, and the main thread only forwards the world to it.
+
+```
+main thread                                         planner worker (nav/worker.ts, same file)
+ ChunkStore events ── column loaded ──┐              MirrorWorld (worker-grid.ts)
+                   ── section re-sent ┤  MirrorOps     loaded sections (layer 0 copies)
+                   ── block set ──────┼─ batched ──▶   BlockInfo per state id (each once)
+                   ── column unloaded ┤  per turn      cached column summaries (corridor)
+ WorldCache ───── summaries (corridor)┘              NavGrid ─▶ PathSearch (same code)
+ Navigator ── plan(start, goal, options, generation) ──▶ 25 ms slices, messages between slices
+          ◀── interim (best partial after mainMs) ────── peek()
+          ◀── result (PathResult) ────────────────────── step()
+```
+
+| Piece | What |
+|---|---|
+| `nav/worker-grid.ts` | `MirrorWorld`: applies `MirrorOp`s (world bounds, BlockInfos, columns, sections, unloads, block changes, cached summaries) and exposes a `TerrainSource` that answers like `worldSource(world)`: loaded columns from the section copies (same `Layer` class), unknown runtime ids as `unknown` solid blocks, unloaded columns from the cache stand-ins, `columnTop` the same way. |
+| `nav/worker.ts` | `PlannerClient` (main thread): subscribes to the chunk store, copies layer 0 of each section of a column that finishes loading (palette, runtime ids, index array: copied, the main thread keeps its own), sends the BlockInfo of each state id the first time a palette or block change references it, batches ops per event-loop turn (`setImmediate`), sends the initial snapshot of the loaded columns 5 ms per 5 ms timer, and the world cache's summaries of the unloaded columns within 1 chunk of the lines from the start to the goal's points (radius 4 chunks for goals without a place) before a request (6 ms per tick, at most 10 ticks of waiting). `WorkerSearch`: the navigator's handle (`step()` like `PathSearch.step`, `takeInterim()`, `cancel()`). The worker side (`runPlannerWorker`): one search at a time in 25 ms slices, the interim answer once `interimMs` of search has passed. |
+| `nav/navigator.ts` | `attachPlanner(world, { threads })`, `plannerThreads()` read every tick (the worker starts and stops with it), `newSearch` (worker when ready and the options cross threads, else `PathSearch` in-thread), `stepSearch` (interim, upgrade, stale check, fallback), `onUpgradeResult` (splice). |
+
+**Budgets** (`workerBudgets`, `NavigatorOptions`): main plan 500 000 nodes / 2 000 ms, plan-ahead
+60 000 nodes / 300 ms; `path.maxNodes` / `path.maxMs` override both kinds, as in-thread. The
+in-thread fallback keeps the old budgets (`mainMs` 40, `segmentMs` 100, `segmentNodes` 20 000).
+
+**The body never waits longer than before.** A main plan that is not done after `mainMs` (40 ms of
+search) sends `PathSearch.peek()`, the best partial path so far; the navigator walks it (plan record
+`interim`) while the search goes on. The final answer (`upgrade`) is spliced in at the first node of
+the remaining interim path (from the last node passed, or the node of a running action) that it also
+visits; without one, a `found` answer re-plans from where the body is (reason `upgrade`), a partial
+one leaves the interim path (its end plans ahead as before). Plan-aheads have no interim: the body
+keeps walking the current segment. Searches that finish within 40 ms have no interim answer at all.
+
+**Stale answers.** Every block change whose movement signature differs gets a generation number
+(`noteChange`); a worker answer requested before a change within the re-plan distance of its path
+(1 block sideways, y - 1 .. y + 2) is dropped: a main plan re-plans (`block`), a plan-ahead restarts.
+
+**Fallbacks.** In-thread planning while the worker is not ready (start-up: about 180 ms to the first
+`ready` on bds-move; the initial snapshot; 1 s after a crash), for options the worker cannot rebuild
+(a custom `path.breakTicks`; a `cellCost` that is not the survival kit's avoidance, whose function now
+carries its sources and costs), for `navigator.plan()` and the other one-off planners (mining probe,
+tests), and when the worker has not answered within the budget + 2 s. A crash is logged once (WARN),
+the worker restarts after 1 s, at most 5 times. Break times: the hotbar is sent with each request and
+`chooseTool` runs in the worker. The world cache records which cells the planner read from cached
+columns (a column that loads later announces the cells that changed as block updates, so a running
+goto re-plans): the client reads the cells around each worker path on the main thread for that.
+
+**Setting**: `plannerThreads` (0..1, default 1; `!set plannerThreads 0` plans in-thread exactly as
+before). Wired in `tasks/registry.ts` for the afk task; tests call `nav.attachPlanner(world)`. One
+thread: the navigator runs one search at a time.
+
+### Measured (bds-move, BDS 1.26.60.6, 2026-10-29)
+
+Before (main's code, `test/e2e/nav-compute.test.ts` on the old navigator) and after
+(`plannerThreads` 1 vs 0 on the same terrain, same run). "Max tick" is the goto report's `maxTickMs`
+(the longest time one tick spent in the navigator, planning included); the gap between two physics
+ticks stayed 62 to 76 ms in every run (Windows timer jitter at 50 ms).
+
+| Walk | Before (main) | Worker (`plannerThreads` 1) | In-thread (`plannerThreads` 0) |
+|---|---|---|---|
+| house (nav-stairs layout: around a wall, 2 levels of stairs, a door) | ok, 1 plan, 620 nodes, 2.3 to 19.6 ms, 1 segment, 0 corrections, max tick 3.1 to 17.5 ms | ok, 1 plan (620 nodes, 23.6 ms in the worker over 2 ticks), 1 segment, 0 corrections, max tick 12.8 ms | ok, 1 plan, 6.6 ms, 1 segment, max tick 7.7 ms |
+| 120 blocks of the cross-country course | ok, 1 plan, 2 138 nodes, 6.4 to 15 ms, max tick 7.7 to 8.9 ms | ok, 1 plan (13.2 ms), max tick 0.9 ms | ok, 1 plan (15.4 ms), max tick 9.0 ms |
+| goal 120 blocks away behind a cup of walls (about 250 blocks around) | (not in main's run) | **ok** in 47.9 s, 262.5 blocks: 1 plan (interim after 40 ms: 60 nodes / 8 562 expanded, final: found, 245 nodes, 28 650 expanded, 116 ms), spliced in once, 0 partial segments, max tick 1.2 ms | **unreachable** after 13.7 s and 58.9 blocks: 5 plans, every one at its budget (40 ms / 8 463, then 20 000 nodes), max tick 8.9 ms |
+| sealed cell 100 blocks away, allowPlace (pillar moves) | unreachable, 5 plans, 7 551 to 20 000 nodes, each at its budget, planner 228 to 260 ms in all, max tick 9.1 ms | unreachable, 5 plans of 345 584 / 60 000 / 430 623 / 240 467 / 286 327 nodes (2 000 ms each for the main plans), planner 8.2 s in all, **max tick 1.2 ms** | unreachable, 5 plans of 6 615 to 20 000 nodes, max tick 9.2 ms |
+
+Before the change, the cache-gather forest walk (CLI, bds-cache, natural terrain, 97 blocks to a
+remembered forest, an `any` goal over 25 logs): ok after 419 ticks, 98.3 blocks, 2 plans, 2
+segments, 1 correction, max tick 13.7 ms.
+
+Forwarding (the client's stats over a whole e2e run on the flat world, 4 worker starts): 4 761
+columns, 5 847 block changes, 73 BlockInfos, 19.7 MB copied, 53.8 ms of main-thread time in all,
+1.6 ms the longest single flush; worker ready 180 to 190 ms after start. Unit test (`nav-worker`):
+20 random start / goal pairs on a generated hilly world gave the same status, cost and expanded
+count in the worker thread as in-thread (20 / 20); 200 random cells per stage (loaded, after block
+updates and a re-sent column, cached) had identical blocks, classes, `stand`, `standThrough`,
+`crossing`, `skyTop` and `columnTop`.
+
 ## Goals
 
 `Goal` (PLAN.md 4.3: block, near, xz) is what older callers switch over; `NavGoal` adds the task 7.10
@@ -325,6 +407,8 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/e2e/nav-place.test.ts` | pillar-up (cliff, pit) and door / gate; skipped with a message until the navigator has `place` / `useBlock` actions |
 | `test/unit/skills/nav-goals.test.ts` | task 7.10 goal predicates and heuristics; closed loop: any over 10 logs, getToBlock (visible face), yLevel, runAway (also from a moving threat), surface (shaft with pillaring, cave); the blacklist (counting, expiry, keys, a walled log skipped by the next any, blame of an any member, dig cells) |
 | `test/unit/skills/tree-blacklist.test.ts` | the tree finder and the feller skip blacklisted logs; 3 failed fells blacklist an unreachable log |
+| `test/unit/skills/nav-worker.test.ts` | Track AB: the worker's mirror vs the main grid on 200 random cells (loaded, after block updates and a re-sent column, cached after an unload); 20 random start / goal pairs in a real worker thread vs in-thread (same status, cost, expansions); the navigator walking an interim answer and splicing in the final one; a crash logged once, its search failed, the worker restarted |
+| `test/e2e/nav-compute.test.ts` | Track AB, worker vs in-thread on the same terrain: the house walk (1 segment, 0 corrections), 120 blocks of the cross-country course, 120 blocks through staggered walls (fewer plans, no partial segments with the worker), a sealed goal 100 blocks away with allowPlace (a 300 000+ node search, navigator tick under 20 ms) |
 | `test/e2e/nav-goals.test.ts` | any over 10 logs, getToBlock, yLevel, runAway, surface from a 4-deep shaft, a log walled in glass blacklisted after 3 failures and skipped by the next any |
 
 The e2e tests use `bds-move` (udp/19146). The v1 layouts (`nav-worlds.ts`: `flat`, `hill`, `long`, `wall`)
