@@ -8,12 +8,14 @@ export const PANEL_STATE_VERSION = 1;
 
 export interface PanelSetting {
   key: string;
-  kind: 'boolean' | 'number';
+  kind: 'boolean' | 'number' | 'text'; // text: Tracks AD / AF (stashChest, chorePen)
   value: string;
   default: string;
   min?: number;
   max?: number;
   unit?: string;
+  /** text settings: what the value may be (`x y z|none`). */
+  values?: string;
   source: SettingSource;
   description: string;
 }
@@ -101,6 +103,8 @@ function settingRow(key: SettingKey, s: NonNullable<PanelStateSource['settings']
     row.min = def.min;
     row.max = def.max;
     if (def.unit) row.unit = def.unit;
+  } else if (def.kind === 'text') {
+    row.values = def.values;
   }
   return row;
 }

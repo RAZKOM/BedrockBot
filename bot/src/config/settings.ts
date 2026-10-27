@@ -49,8 +49,8 @@ export type SettingDef = BoolDef | NumberDef | TextDef; // Track AD: TextDef
 export function parseBlockText(raw: string, key: string): string {
   const s = raw.trim().toLowerCase();
   if (s === 'none' || s === '') return 'none';
-  const n = s.split(/[\s,]+/).map(Number);
-  if (n.length !== 3 || !n.every((v) => Number.isInteger(v))) throw new SettingError(`${key} must be x y z (whole numbers) or none, got "${raw}"`);
+  const n = s.split(/[\s,]+/).map((v) => Math.floor(Number(v))); // a block position: decimals floor (merge of Tracks AD and AF)
+  if (n.length !== 3 || !n.every((v) => Number.isFinite(v))) throw new SettingError(`${key} must be x y z or none, got "${raw}"`);
   return n.join(' ');
 }
 

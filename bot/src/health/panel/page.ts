@@ -27,8 +27,10 @@ function settingsHtml(s: PanelState): string {
       const input =
         r.kind === 'boolean'
           ? `<select data-key="${esc(r.key)}"><option${r.value === 'on' ? ' selected' : ''}>on</option><option${r.value === 'off' ? ' selected' : ''}>off</option></select>`
-          : `<input data-key="${esc(r.key)}" type="number" inputmode="decimal" value="${esc(r.value)}" min="${r.min ?? ''}" max="${r.max ?? ''}" step="any">`;
-      const range = r.kind === 'boolean' ? 'on|off' : `${r.min}..${r.max}${r.unit ? ` ${r.unit}` : ''}`;
+          : r.kind === 'text'
+            ? `<input data-key="${esc(r.key)}" type="text" value="${esc(r.value)}" placeholder="${esc(r.values ?? '')}">`
+            : `<input data-key="${esc(r.key)}" type="number" inputmode="decimal" value="${esc(r.value)}" min="${r.min ?? ''}" max="${r.max ?? ''}" step="any">`;
+      const range = r.kind === 'boolean' ? 'on|off' : r.kind === 'text' ? (r.values ?? 'text') : `${r.min}..${r.max}${r.unit ? ` ${r.unit}` : ''}`;
       return `<tr><td><b>${esc(r.key)}</b><div class="muted small">${esc(r.description)}</div></td><td class="nowrap">${input} <button class="setbtn" data-key="${esc(r.key)}">set</button></td><td class="muted small nowrap">${esc(range)}<br>default ${esc(r.default)}<br><span data-src="${esc(r.key)}">${esc(r.source)}</span></td></tr>`;
     })
     .join('');

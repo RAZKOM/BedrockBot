@@ -289,8 +289,8 @@ describe('stash helpers', () => {
     expect(parseSettingValue('stashChest', '10 -60 3')).toBe('10 -60 3');
     expect(parseSettingValue('stashChest', ' 10,-60,3 ')).toBe('10 -60 3');
     expect(parseSettingValue('stashChest', 'NONE')).toBe('none');
-    expect(() => parseSettingValue('stashChest', '10 -60')).toThrow('stashChest must be x y z (whole numbers) or none, got "10 -60"');
-    expect(() => parseSettingValue('stashChest', '1.5 2 3')).toThrow(/whole numbers/);
+    expect(() => parseSettingValue('stashChest', '10 -60')).toThrow('stashChest must be x y z or none, got "10 -60"');
+    expect(parseSettingValue('stashChest', '1.5 2 3')).toBe('1 2 3'); // a block position: decimals floor (merge with Track AF's chorePen)
     expect(parseChest('10 -60 3')).toEqual({ x: 10, y: -60, z: 3 });
     expect(parseChest('none')).toBeUndefined();
     const s = new RuntimeSettings();
