@@ -924,15 +924,23 @@ export class MineTask {
     const sk = this.d.skills;
     let g = await sk.goto({ type: 'block', p: this.besideHole(p) ?? p }, { allowBreak: true, timeoutTicks: 400 });
     if (g.ok || !this.alive(gen)) return g;
-    const over = { x: p.x, y: p.y + 1, z: p.z };
-    const b = this.d.blockAt(over);
-    if (b && b.boxes.length > 0 && !this.d.breakRule(over) && this.near(over)) {
+    // Head room for the hole: the body needs the two cells above the hole floor open, and a 1-high pocket under a
+    // roof cannot be entered from the side either (get-front on main, 2026-10-30: a 2 x 2 coal vein under a 1-thick
+    // stone layer under grass left 4 drops in 1-high pockets; the planner searched 250 000 nodes for a cell 1 block
+    // away). Dig what is over the hole, 1 and 2 above, when the rules allow and it is in reach, then walk in.
+    let dug = false;
+    for (const dy of [1, 2]) {
+      const over = { x: p.x, y: p.y + dy, z: p.z };
+      const b = this.d.blockAt(over);
+      if (!b || b.boxes.length === 0 || this.d.breakRule(over) || !this.near(over)) continue;
       const r = await sk.dig(over);
-      if (!this.alive(gen) || !r.ok) return g;
+      if (!this.alive(gen)) return g;
+      if (!r.ok) break;
+      dug = true;
       this.stats.tunnelled++;
       this.d.memory.noteDug(over);
-      g = await sk.goto({ type: 'block', p }, { allowBreak: true, timeoutTicks: 400 });
     }
+    if (dug) g = await sk.goto({ type: 'block', p }, { allowBreak: true, timeoutTicks: 400 });
     return g;
   }
 

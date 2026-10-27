@@ -216,7 +216,7 @@ export function lookup(name: string, count?: number): Lookup {
 
 /** The categories for the unknown reply. */
 export function categories(): string {
-  return 'wood, ores (coal, iron, gold, copper, diamond, redstone, lapis, emerald; `ores` = every kind, several with a count each in one trip), stone, dirt, sand, gravel, flint, clay, food (beef, pork, mutton, chicken), string, crops (wheat, carrots, potatoes, beetroot)';
+  return 'wood, ores (coal, iron, gold, copper, diamond, redstone, lapis, emerald, `ores`), stone, dirt, sand, gravel, clay, flint, food (beef, pork, mutton), string, crops (wheat, carrots, potatoes, beetroot)'; // fits a 256-character chat reply with the unknown prefix (248)
 }
 
 export function unknownReply(name: string): string {
