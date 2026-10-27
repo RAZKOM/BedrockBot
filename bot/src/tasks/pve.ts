@@ -130,6 +130,8 @@ export const FLEE_EAT_CLEAR = 8;
 /** A creeper this close with health below FLEE_CREEPER_HEALTH: flee whatever fleeHealth says. */
 export const FLEE_CREEPER_RANGE = 8; // merge: same radius as targeting.wantsFlee (Track V, CREEPER_AVOID_RANGE)
 export const FLEE_CREEPER_HEALTH = 10;
+/** A hard trigger with the threat this close ignores the cooldown after a flight (immediate danger). */
+export const FLEE_URGENT = 6;
 /** After a flight, keep away from hostiles until the health is back to fleeHealth + this (for up to FLEE_RECOVER_MS). */
 export const FLEE_RECOVER = 6;
 const FLEE_RECOVER_MS = 60_000;
@@ -594,6 +596,8 @@ class FleeProcess extends BaseProcess {
   private ep: { why: 'low' | 'creeper'; from: string; start: Vec3; startAt: number; phase: 'away' | 'home' | 'far'; dest: { to: Vec3; kind: string } | undefined; safeSince: number | undefined; planAt: number; goalKey: string; bites: number; stallUntil: number; cornered: boolean; planNearest: number; panics: number } | undefined;
   private plan: { why: 'low' | 'creeper'; threat: EntityInfo } | undefined;
   private cooldownUntil = 0;
+  /** The last flight ended cornered (no way away): the cooldown then holds even for a hard trigger. */
+  private cornered = false;
   private n = 0;
   private gotoId = 0;
   private walking = false;
@@ -618,9 +622,16 @@ class FleeProcess extends BaseProcess {
     if (this.ep) return true;
     this.plan = undefined;
     const c = this.c;
-    if (performance.now() < this.cooldownUntil || c.d.night?.state === 'going') return false;
+    if (c.d.night?.state === 'going') return false;
     const me = c.position();
+    // A hard trigger (health below fleeHealth, a creeper near at low health) with the threat within 6 blocks,
+    // away from home / the shelter, ignores the cooldown after a flight: a zombie that catches up with the bot
+    // at 7 health must not get 10 s of "defending in place" in the open (gaunt-flee ring 2). At the destination,
+    // with the threat farther off, and after a cornered end, the cooldown holds and guard defends in place;
+    // recovery flights always wait it out.
     let r = c.fleeReason(me);
+    const urgent = r !== undefined && !this.cornered && !c.atFleeDest(me) && dist(entityFeet(r.threat), me) <= FLEE_URGENT;
+    if (performance.now() < this.cooldownUntil && !urgent) return false;
     if (!r && this.recovering()) {
       // recovering: run from what chases (melee mobs within 12); archers are better closed in on
       const t = c.nearestHostile(me, FLEE_RECOVER_SCAN);
@@ -656,6 +667,7 @@ class FleeProcess extends BaseProcess {
       this.ep = { why: plan.why, from: plan.threat.type, start: { ...me }, startAt: performance.now(), phase: 'away', dest: c.fleeTarget(me), safeSince: undefined, planAt: 0, goalKey: '', bites: 0, stallUntil: 0, cornered: false, planNearest: Infinity, panics: 0 };
       c.stats.flees++;
       c.d.metrics?.inc('pve.flees');
+      this.cornered = false;
       this.recoverTo = Math.min(20, c.fleeHealth + FLEE_RECOVER);
       this.recoverUntil = performance.now() + FLEE_RECOVER_MS;
       c.log.warn(
@@ -798,6 +810,7 @@ class FleeProcess extends BaseProcess {
         if (e.phase === 'far' && r.reason === 'unreachable') e.cornered = true; // no farther place: home around the threat next
         if (e.phase !== 'home' && c.threatsNear(c.position(), 8).length > 0) {
           if (++e.panics > 3 && c.threatsNear(c.position(), 4).length > 0) {
+            this.cornered = true;
             this.end('cornered (no way away, a threat within 4): defending', 3000);
             return;
           }
