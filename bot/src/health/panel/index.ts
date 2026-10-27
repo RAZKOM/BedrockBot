@@ -31,6 +31,7 @@ import { LogRing } from './logRing.ts';
 import { panelRoutes, type CommandResult } from './routes.ts';
 import { buildPanelHelp, buildPanelState, type PanelChatLine, type PanelState } from './state.ts'; // Track AM: buildPanelHelp
 import { buildMemory, chestRows, MEMORY_TTL_MS, type PanelMemory } from './memory.ts'; // Track AP
+import { mapMarks } from './marks.ts'; // Track AR
 
 export interface PanelPlan {
   mode: 'off' | 'shared' | 'separate';
@@ -210,6 +211,7 @@ export function setupPanel(d: PanelDeps): Panel {
         return [line, ...(walking.processLines?.() ?? [])];
       },
       stack: () => walking.processes?.stack(),
+      paused: () => walking.processes?.paused, // Track AR: the Pause / Resume buttons
       vitals: () => ({
         health: built.respawn?.health ?? built.mobility?.world.self.health ?? null,
         food: built.mobility ? built.mobility.world.self.food : null,
@@ -318,6 +320,7 @@ export function setupPanel(d: PanelDeps): Panel {
     limiter: new RateLimiter(5, 1000),
     help: () => buildPanelHelp({ commands: () => chat.commandInfo(), settings: d.runtime }), // Track AM: Help tab
     chests: () => chestRows(cache()?.chests.all() ?? [], runningTask.position()), // Track AP: the memory block's list
+    marks: () => mapMarks(cache(), runningTask.position()), // Track AR: chests and herds on the panel's map
   });
   const healthOptions = plan.mode === 'shared' ? { host: plan.host, auth } : {};
 

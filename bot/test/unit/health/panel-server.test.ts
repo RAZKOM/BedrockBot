@@ -77,7 +77,7 @@ describe('panel state JSON', () => {
   it('has the documented shape', () => {
     const { panel } = makePanel({ healthPort: 9999 });
     const s: PanelState = panel.state();
-    expect(Object.keys(s).sort()).toEqual(['bot', 'chat', 'commands', 'logs', 'quick', 'self', 'settings', 'stack', 'status', 'ts', 'v', 'inventory', 'job', 'combat', 'memory', 'planner', 'conn'].sort()); // Track AP: the last six
+    expect(Object.keys(s).sort()).toEqual(['bot', 'chat', 'commands', 'logs', 'quick', 'self', 'settings', 'stack', 'status', 'ts', 'v', 'inventory', 'job', 'combat', 'memory', 'planner', 'conn', 'paused'].sort()); // Track AP: inventory .. conn; Track AR: paused
     expect(s.v).toBe(1);
     expect(s.bot).toEqual({ name: 'UnitBot', server: '127.0.0.1:19180 (raknet)', task: 'afk', state: 'idle', healthy: false, gameVersion: '1.26.51' });
     expect(s.status[0]).toMatch(/^status: up .*pos 1\.00 -60\.00 2\.00, version 1\.26\.51, tick 0, task afk, nudges 0$/);
@@ -142,7 +142,7 @@ describe('panel over HTTP', () => {
     const page = await fetch(`${base}/`, { headers: { cookie: cookie.split(';')[0]! } });
     expect(page.status).toBe(200);
     const html = await page.text();
-    for (const marker of ['<title>BedrockBot panel</title>', 'data-panel="v1"', 'id="panel-status"', 'id="cmdform"', 'id="panel-settings"', 'data-key="guardRadius"', 'data-cmd="!home go"', 'src = \'/map\'', '/api/state', '/api/cmd']) {
+    for (const marker of ['<title>BedrockBot panel</title>', 'data-panel="v1"', 'id="panel-status"', 'id="cmdform"', 'id="panel-settings"', 'data-key="guardRadius"', 'data-cmd="!home go"', "fetch('/map.json?'", '/api/marks', 'id="menu"', '/api/state', '/api/cmd']) {
       expect(html).toContain(marker);
     }
     expect(html).not.toContain(TOKEN);
@@ -200,6 +200,16 @@ describe('panel over HTTP', () => {
     expect((await fetch(`${base}/metrics`, { headers: { authorization: `Bearer ${TOKEN}` } })).status).toBe(200);
     expect((await fetch(`${base}/api/state`, { headers: { authorization: `Bearer ${TOKEN}` } })).status).toBe(200);
     expect((await fetch(`${base}/healthz`)).status).toBe(503);
+    // Track AR: the map's markers behind the same token (no world cache here: empty lists)
+    expect((await fetch(`${base}/api/marks`)).status).toBe(401);
+    expect(await fetch(`${base}/api/marks`, { headers: { authorization: `Bearer ${TOKEN}` } }).then((r) => r.json())).toEqual({ chests: [], herds: [] });
+  });
+
+  it('Track AR: the state carries paused from the process manager (null without one)', () => {
+    const { panel } = makePanel({ healthPort: 9999 });
+    expect(panel.state().paused).toBeNull();
+    const s = buildPanelState({ name: () => 'x', server: 's', task: 't', connState: () => 'spawned', healthy: () => true, gameVersion: () => 'v', statusLines: () => [], vitals: () => ({ health: 20, food: 20 }), position: () => undefined, dimension: () => 0, timeOfDay: () => 0, logs: () => [], chat: () => [], commands: () => [], paused: () => true });
+    expect(s.paused).toBe(true);
   });
 
   it('off: !panel says how to turn it on', () => {

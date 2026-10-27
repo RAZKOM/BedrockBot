@@ -3,6 +3,7 @@
 //   GET  /api/state   PanelState JSON (panel/state.ts); the page polls ?lite=1 every 2 s (no static parts, Track AP)
 //   GET  /api/help    PanelHelp JSON (panel/state.ts buildPanelHelp), fetched once by the Help tab (Track AM)
 //   GET  /api/chests  the remembered containers (panel/memory.ts chestRows), the memory block's list (Track AP)
+//   GET  /api/marks  chests and herds near the bot (panel/marks.ts), the panel map's markers (Track AR)
 //   POST /api/cmd    {"text":"!wp set panel"} -> {"ok":true,"replies":[...]}; 5 per second (429 beyond)
 // The token check runs before these (HealthServerOptions.auth, panel/auth.ts).
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -26,6 +27,8 @@ export interface PanelRouteDeps {
   help?: () => unknown;
   /** Track AP: GET /api/chests (the remembered containers, panel/memory.ts chestRows). */
   chests?: () => unknown;
+  /** Track AR: GET /api/marks (panel/marks.ts mapMarks: chests and herds for the map). */
+  marks?: () => unknown;
 }
 
 /** Longest command line accepted (game chat is 512). */
@@ -110,6 +113,14 @@ export function panelRoutes(deps: PanelRouteDeps): HealthRoute {
     if (path === '/api/chests' && deps.chests && read) { // Track AP: the remembered containers (the memory block's link)
       try {
         send(res, 200, deps.chests(), method === 'HEAD');
+      } catch (e) {
+        send(res, 500, { error: e instanceof Error ? e.message : String(e) });
+      }
+      return true;
+    }
+    if (path === '/api/marks' && deps.marks && read) { // Track AR: chests and herds for the panel's map
+      try {
+        send(res, 200, deps.marks(), method === 'HEAD');
       } catch (e) {
         send(res, 500, { error: e instanceof Error ? e.message : String(e) });
       }

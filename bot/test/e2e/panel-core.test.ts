@@ -232,7 +232,7 @@ describe.skipIf(!E2E)('core: LAN control panel (Track AE)', () => {
     for (const id of STATUS_BLOCKS) expect(html).toContain(`id="${id}"`);
     for (const m of ['id="theme"', 'id="stale"', 'id="clock"', 'id="helpbox"', '<symbol id="g-sword"']) expect(html).toContain(m);
     expect(html).not.toMatch(/https?:\/\/(?!127\.0\.0\.1[:/])/); // only the bot's own URL (the log line `control panel: http://127.0.0.1:<port>/`)
-    expect(html.length).toBeLessThan(120_000);
+    expect(html.length).toBeLessThan(160_000); // Track AR: 160 KB with the menus, palette and map
     // !set from the panel shows in the settings block
     const set = await cmd('!set guardRadius 20');
     expect(set.status).toBe(200);
