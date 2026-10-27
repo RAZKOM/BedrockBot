@@ -204,7 +204,7 @@ export class HomeLogistics {
 
   /** Walk to a container, open it, remember what it holds, keep it open (the caller closes it). */
   private async visit(p: Vec3, kind: string, cancelled: () => boolean): Promise<{ ok: true; view: ContainerView; record: ChestRecord } | { ok: false; reason: string }> {
-    const g = await this.d.skills.goto({ type: 'getToBlock', p, reach: 4 }, { timeoutTicks: 2400 }); // within reach from any height (stacked chests, shelves); `near` failed for chests above floor level on the Realm
+    const g = await this.d.skills.goto({ type: 'getToBlock', p, reach: 4, face: false }, { timeoutTicks: 2400 }); // face: false: a chest in a stack or a wall of chests has no exposed face yet opens fine (Realm: 25 failed plans per stacked chest) // within reach from any height (stacked chests, shelves); `near` failed for chests above floor level on the Realm
     if (cancelled()) return { ok: false, reason: 'interrupted' };
     if (!g.ok) return { ok: false, reason: `goto: ${g.reason ?? 'failed'}` };
     let o = await this.d.skills.open(p);

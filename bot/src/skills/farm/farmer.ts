@@ -723,7 +723,7 @@ export class FarmTask {
   private async depositTrip(gen: number, chest: Vec3): Promise<boolean> {
     this.state = 'to_chest';
     this.stats.trips++;
-    const g = await this.d.skills.goto({ type: 'getToBlock', p: chest, reach: 4 }, { timeoutTicks: 4000 }); // within reach from any height
+    const g = await this.d.skills.goto({ type: 'getToBlock', p: chest, reach: 4, face: false }, { timeoutTicks: 4000 }); // within reach from any height
     if (!this.alive(gen)) return false;
     if (!g.ok) {
       this.lastError = `goto chest: ${g.reason}`;

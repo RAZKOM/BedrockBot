@@ -363,7 +363,7 @@ export class Stash {
   private async toChest(chest: Vec3, alive: () => boolean): Promise<StashStep> {
     const t0 = this.now();
     const step: StashStep = { kind: 'chest', where: chest, ok: false, moved: {}, total: 0, requests: 0, shared: 0, ms: 0 };
-    const g = this.seen(await this.d.skills.goto({ type: 'getToBlock', p: chest, reach: 4 }, { timeoutTicks: 4000 })); // within reach from any height
+    const g = this.seen(await this.d.skills.goto({ type: 'getToBlock', p: chest, reach: 4, face: false }, { timeoutTicks: 4000 })); // within reach from any height
     if (alive()) {
       if (!g.ok) step.reason = `goto: ${g.reason ?? 'failed'}`;
       else await this.fill(chest, undefined, step, alive);
