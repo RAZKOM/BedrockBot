@@ -39,6 +39,8 @@ export interface PanelState {
   /** The `!status` reply: status line, then the process line(s). */
   status: string[];
   stack: { name: string; kind: string; priority: number; state: string; line: string; etaS: number | null }[];
+  /** Track AR: `!pause` holds the commands (the Pause / Resume buttons); null without a process manager. */
+  paused: boolean | null;
   self: {
     health: number | null;
     food: number | null;
@@ -144,6 +146,8 @@ export interface PanelStateSource {
   memory?: () => PanelMemory | undefined;
   planner?: () => PanelPlanner | undefined;
   conn?: () => PanelConn | undefined;
+  /** Track AR: ProcessManager.paused. */
+  paused?: () => boolean | undefined;
 }
 
 const DIMENSIONS: Record<number, string> = { 0: 'overworld', 1: 'nether', 2: 'the_end' };
@@ -216,6 +220,7 @@ export function buildPanelState(src: PanelStateSource, now = Date.now()): PanelS
     },
     status: safe(src.statusLines, []),
     stack,
+    paused: opt(src.paused), // Track AR
     self: {
       health: v.health ?? null,
       food: v.food ?? null,

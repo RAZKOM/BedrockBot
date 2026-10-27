@@ -1,8 +1,10 @@
 # LAN control panel (`bot/src/health/panel`)
 
 Phase 7, wave 8 Track AE; the graphical inventory, the status blocks and the responsive layout are
-wave 9 Track AP. Decision records: [decisions/0026-lan-control-panel.md](decisions/0026-lan-control-panel.md),
-[decisions/0037-panel-inventory-and-statuses.md](decisions/0037-panel-inventory-and-statuses.md).
+wave 9 Track AP; the interaction (context menus, map actions, grouped settings, command palette) is
+wave 10 Track AR. Decision records: [decisions/0026-lan-control-panel.md](decisions/0026-lan-control-panel.md),
+[decisions/0037-panel-inventory-and-statuses.md](decisions/0037-panel-inventory-and-statuses.md),
+[decisions/0039-panel-interactions.md](decisions/0039-panel-interactions.md).
 It extends the health endpoint ([runbook.md](runbook.md) "Operations") and embeds the debug map
 ([world-cache.md](world-cache.md)).
 
@@ -85,8 +87,8 @@ else a colour from an FNV-1a hash of the name, so the same item has the same col
 box), the count when above 1, and a **durability bar** (green above 50 %, yellow above 20 %, red
 below) on tools, weapons and armour (NBT `Damage` against the durability tables of
 `skills/survival/tools.ts`). Hovering shows the full name, count, durability and box contents;
-**tapping a cell** shows them in the line under the grid (tap again to close). Empty armour slots
-show a diagonal stroke.
+**tapping a cell** shows them in the line under the grid and opens the cell's action menu (Track AR,
+"Interaction" below; tap again to close). Empty armour slots show a diagonal stroke.
 
 ### Status blocks
 
@@ -116,18 +118,19 @@ show a diagonal stroke.
   crashes and starts;
 - **Connection**: server, game version, state, uptime and session, reconnects and disconnects, kicks,
   the last disconnect;
-- **Commands**: quick buttons `!status`, `!home go`, `!stop`, `!guard on`, `!guard off`, `!eat`,
-  `!equip`, `!inv` (no `!come`: it needs a player in the game), a command box (any `!command`; the
-  `!` is added when missing; the command names complete from `!help`'s list), the replies said while
-  the command ran, and **Bot chat**: the last 30 lines the bot said (also replies that arrive later,
-  such as `arrived at ...`; `(not sent to the game)` when the chat layer dropped one: not spawned or
-  its 8 per 10 s limit);
-- **Log**: the last 50 log lines (all loggers);
-- **Settings**: the `!set` table (value, range, default, where the value came from: default / file /
-  startup / chat), editable: "set" sends `!set <key> <value>` through the command box path;
+- **Commands**: quick buttons, by default `!status`, `!home go`, `!stop`, `!guard on`, `!guard off`,
+  `!eat`, `!equip`, `!inv` (no `!come`: it needs a player in the game; **edit buttons** changes them,
+  Track AR), a command box with the **command palette** (any `!command`; the `!` is added when
+  missing), the replies said while the command ran, and **Bot chat**: the last 30 lines the bot said
+  (also replies that arrive later, such as `arrived at ...`; `(not sent to the game)` when the chat
+  layer dropped one: not spawned or its 8 per 10 s limit);
+- **Log**: the last 50 log lines (all loggers), filterable by level, module and text (Track AR);
+- **Settings**: the `!set` table by group with switches, Reset, the mode selector and filters (Track
+  AR, "Interaction" below; every row shows the default and where the value came from: default / file
+  / startup / chat);
 - **Help**: the command registry, the modes and the settings (Track AM), fetched when opened;
-- **Map**: the debug map (`/map`) in a frame, loaded only while the section is open (it polls every
-  second), plus a link to the full page.
+- **Map**: the panel's own map (Track AR; it was the `/map` page in a frame), drawn only while the
+  section is open, plus a link to the full debug page.
 
 ### Live updates
 
@@ -140,6 +143,121 @@ while the tab is visible and every 10 s while it is hidden (`document.hidden`); 
 once. Every 30th render logs its time in the browser's console (`panel: render 0.42 ms, state 9524
 bytes`, level debug / verbose).
 
+## Interaction (Track AR)
+
+**Everything is a chat command.** Every menu entry, switch, Reset, Stop, Pause / Resume, mode button
+and quick button sends one `!command` to `POST /api/cmd`, exactly like the command box: the chat
+handler parses it, checks the owner, logs `panel: !drop cobblestone 64 (as Steve)`, counts it and
+replies. The panel has no other way to change anything, so what it can do is what the owner can type
+in the game, and the log is the one audit trail. The reply of a menu action pops up at the bottom of
+the screen for 5 s (wherever the page is scrolled) and also shows under the command box.
+
+**Confirmations.** A destructive entry (red) only arms on the first tap: its label becomes `tap
+again: Drop the stack (64)`, and a second tap within 4 s sends it; otherwise it disarms. Destructive
+are: dropping a whole stack or all of an item, Set home here, Set shelter here, and a mode (whose
+first tap shows what it would change). Drop 1, Select, Eat, Equip, the offhand, Walk here, the
+waypoint, Reset, the switches, Stop and Pause send at once. The menu closes on Escape or a tap
+elsewhere.
+
+### Inventory menu
+
+Tap (or right-click) a cell; the menu's title is the slot and the item with its durability or box
+contents. What the menu model (`health/panel/menu.ts` `cellActions`) offers:
+
+| Cell | Entries (command) |
+|---|---|
+| a hotbar slot that is not held, empty or not | **Select (hold slot n)** (`!select <0..8>`) |
+| armour in the inventory | **Equip (best armour)** (`!equip`: the best pieces carried, not necessarily this one) |
+| shield, totem of undying, arrows, fireworks, nautilus shell, maps | **To the offhand** (`!offhand <item>`) |
+| food | **Eat (best food)** (`!eat`: the eater picks the food) |
+| a shulker box | **Show contents** (local: the line under the grid) |
+| any item | **Drop 1** (`!drop <item> 1`, stacks only), **Drop the stack (n)** / **Drop** (`!drop <item> <n>`, confirmed), **Drop all n item** when more than this stack is carried (`!drop <item>`, confirmed), **Unload now** (`!unload`) |
+| the offhand | **Back into the inventory** (`!offhand clear`) |
+| worn armour | nothing (no command takes one piece off; `!drop all` sheds everything) |
+
+`!drop <item> <n>` drops that many of the item, smallest stacks and the main inventory first (the
+survival kit's rule), so "the stack" is the cell's count, not necessarily that cell.
+
+### Map
+
+The **Map** section draws its own canvas (it no longer frames `/map`): `/map.json` every 2 s while
+the section is open (the tiles as before, the bot as an arrow by its yaw, the trail, the current path
+and goal), and every 10 s `GET /api/marks` for the remembered chests and herds. A legend names the
+colours: bot, path / goal, home (square), shelter (square), waypoints (diamonds), chests, herds,
+hostiles, players. **Follow bot** (on by default) keeps the bot centred; dragging turns it off; `+` /
+`-` or the wheel zoom; the radius select sets the window (4 to 16 chunks). Hovering (or tapping) shows
+what is under the pointer: the nearest marker within 10 px with its name (`waypoint base`, `chest
+"ores"`, `herd: 5 cow (penned)`), else the column (`18310 17280: solid at y -61 (remembered)`).
+
+**Right-click or long-press** (550 ms) a column for its menu (`mapActions`):
+
+| Entry | Command |
+|---|---|
+| Walk here | `!goto x y z`, y = the column's surface + 1 from the tile (`Walk here (height unknown)` uses the bot's y for a column the cache never saw) |
+| Set home here | `!home set x y z` (confirmed) |
+| Set shelter here | `!shelter set x y z` (confirmed) |
+| Set waypoint here... | asks for a name in the menu (1..32 of a-z 0-9 _ -), then `!wp set <name> x y z` |
+
+Mine here and build markers are not offered: `!get <ore> n` is not positional and there is no
+marker command. The map's waypoints and shelter now really show: the map routes lift the afk task's
+`nav.waypoints` and `night.shelter` into `/map.json`'s `waypoints` / `shelter` (`map/routes.ts`
+`liftTaskStatus`; before, the JSON had none for the afk task).
+
+### Settings
+
+The `!set` table is grouped like `!help settings` (safety, walking, work, food, other), one row per
+setting: the name, where its value came from, the description; the control (a **switch** for on / off,
+sent when flipped; a number box with the setting's min and max and a **set** button or Enter; a
+**select** for word choices such as `guardWhileWalking` reach / near / all; a text box with the
+allowed form, `x y z|none`, for the rest); the range, the default and **Reset** (`!set <key>
+default`), shown only when the value differs (the row then has an accent bar). **Changed only** hides
+the rows at their default; the search box matches the name, the description and the group. On top,
+the **mode** (`careful`, `normal`, `bold` or `custom`, computed from the values like `!mode status`)
+and a button per mode: the first tap shows what it would change (`careful changes fleeHealth 8 -> 12,
+guardRadius 16 -> 8, ...; tap careful again to apply`), the second sends `!mode careful`.
+
+### Commands and status
+
+- **Command palette**: focusing the command box loads the command registry once (`GET /api/help`);
+  typing filters it (name prefix first, then the name or the help containing the text), grouped front
+  door / more, at most 12; a tap fills the box with `!name ` to add the arguments. Once a space is
+  typed the list gets out of the way. Enter sends as before.
+- **Quick buttons**: **edit buttons** opens a box with one command per line; **save** keeps the list
+  in this browser (`localStorage` `bbpanel-quick`, at most 24 buttons; a blocked storage just means
+  the defaults), **defaults** goes back to the server's list.
+- **Status**: each user process in the stack has a **Stop** button (`!stop`, which ends every user
+  command: there is no per-process stop; guard and night keep running); **Pause** (`!pause`) and
+  **Resume** (`!resume`) are enabled by the state's `paused`, and `commands held (!pause)` shows while
+  held.
+- **Log**: a level filter (all, info and up, warnings and errors, errors), a module filter (every
+  `[module]` seen so far) and a text filter, applied to the last 50 lines on every poll.
+
+### The new commands
+
+Two inventory actions had no command; they are ordinary owner commands (`chat/commands-panel.ts`,
+`!help select`), usable in the game too:
+
+| Command | What |
+|---|---|
+| `!select <0..8>` | hold the item in that hotbar slot (`mob_equipment` through the PvE controller's `Hotbar`), reply `selected hotbar slot 2: iron_sword x1` |
+| `!offhand <item>` | move the first stack of that item (hotbar first) into the offhand: with the inventory screen open, `item_stack_request` `place` from `hotbar` / `inventory` slot n to `{ container_id: 'offhand' }` slot 1, the shield controller's verified request; an occupied offhand is emptied into a free slot first; reply `offhand: totem_of_undying` |
+| `!offhand clear` | the offhand back into the first free slot (main inventory first): `place` from the offhand slot 1; reply `offhand: shield moved back into the inventory` |
+| `!offhand` | what the offhand holds |
+
+Both go through the survival kit's `StackRequests` (one inventory screen at a time with the kit's own
+drops and armour moves; `busy` while the kit works). A shield moved out goes back by itself while the
+bot is idle (the shield controller, [pve.md](pve.md) "Shield"); a totem stays.
+
+### Not from the panel, and why
+
+- **Crafting**: needs the recipe list (`crafting_data`), for 3 x 3 recipes a crafting table opened
+  like a chest (`container_open` `workbench`), and an `item_stack_request` with `craft_recipe`,
+  `results_deprecated`, a `consume` per ingredient and a `place` from `created_output`; the bot has no
+  crafting skill yet. It belongs to a skills track as `!craft <item> [n]`; the panel would then offer
+  Craft... on an item. Decision 0039 has the details.
+- Taking off one worn armour piece, mining a clicked spot, build markers: no command does it.
+- Moving stacks around (hotbar drag): no `!move` command; not needed for any action above.
+
 ## API
 
 | Request | Answer |
@@ -147,6 +265,7 @@ bytes`, level debug / verbose).
 | `GET /api/state` | `PanelState` JSON (below) |
 | `GET /api/state?lite=1` | the same without what does not change while the bot runs: `commands` and `quick` left out, `settings` rows only `key`, `value`, `source`; `"lite": true` (what the page polls; Track AP) |
 | `GET /api/chests` | the remembered containers, nearest first: `[{"x":10,"y":-60,"z":4,"kind":"chest","label":"ores","stacks":12,"size":27,"top":[["coal",320],["iron_ore",40]],"unreachable":null,"readAt":1761753600000}]` (`[]` without a world cache; Track AP) |
+| `GET /api/marks` | Track AR: what the panel's map draws beyond `/map.json`, within 256 blocks of the bot, nearest first, at most 200 each: `{"chests":[{"x":10,"y":-60,"z":4,"kind":"chest","label":"ores","unreachable":false}],"herds":[{"x":5.5,"y":-60,"z":5.5,"n":5,"kind":"cow","penned":true}]}` (empty lists without a world cache) |
 | `POST /api/cmd` `{"text":"!wp set base"}` | 200 `{"command":"!wp set base","ok":true,"replies":["waypoint base set to 10 -60 20"]}`; 409 `ok:false` + `error` when there is no owner to run as; 400 bad body; 413 body over 4 KiB; 429 over 5 commands per second; 405 other methods |
 | `GET /healthz`, `/metrics`, `/map`, `/map.json` | as before (runbook "Operations") |
 
@@ -158,6 +277,7 @@ bytes`, level debug / verbose).
   "bot": { "name": "AfkBot", "server": "127.0.0.1:19180 (raknet)", "task": "afk", "state": "spawned", "healthy": true, "gameVersion": "1.26.60" },
   "status": ["status: up 2m, session 2m, ..., task afk, behaviour idle, ...", "processes: idle"],
   "stack": [{ "name": "goto", "kind": "user", "priority": 40, "state": "active", "line": "walking to 18311 -60 17027", "etaS": null }],
+  "paused": false,                      // Track AR: !pause holds the commands; null without the process manager
   "self": { "health": 20, "food": 20, "pos": { "x": 0.5, "y": -60, "z": 0.5 }, "dimension": "overworld", "timeOfDay": 6000, "phase": "day",
             "saturation": 5, "weather": "clear", "day": 12, "deaths": 1,
             "lastDeath": { "cause": "death.attack.mob", "ts": "2026-10-29T18:00:00.000Z", "messages": ["%entity.zombie.name"] } },
@@ -255,13 +375,17 @@ codes become `***`). The bot account's sign-in tokens (prismarine-auth cache) ar
 |---|---|
 | `health/panel/index.ts` | `setupPanel` (wiring, `!panel`), `planPanel` (where it serves), `panelLine` (the owner a command runs as), `panelUrls`, `ChatTap` (the bot's replies) |
 | `health/panel/auth.ts` | `checkRequest` (token, cookie, loopback Host, POST rules), `panelAuth` (the health server hook), `RateLimiter` |
-| `health/panel/routes.ts` | `/`, `/api/state` (and `?lite=1`), `/api/help`, `/api/chests`, `/api/cmd` |
+| `health/panel/routes.ts` | `/`, `/api/state` (and `?lite=1`), `/api/help`, `/api/chests`, `/api/marks` (Track AR), `/api/cmd` |
 | `health/panel/state.ts` | `PanelState`, `buildPanelState`, `liteState`, quick commands, `buildPanelHelp` |
 | `health/panel/inventory.ts` | Track AP: the `inventory` block: `buildInventory`, `iconClassOf`, `itemColour`, `itemAbbr`, `durabilityOf`, `boxContents` |
 | `health/panel/memory.ts` | Track AP: the `memory` counts (`buildMemory`) and the chest list (`chestRows`) |
 | `health/panel/glyphs.ts` | Track AP: the hand-drawn item glyphs (inline SVG symbols) |
-| `health/panel/client.ts` | Track AP: the page script (render into existing nodes, stale marker, hidden-tab back-off, theme, commands, Help, chest list) |
-| `health/panel/page.ts` | the page (`renderPanelPage`): structure, CSS (themes, responsive grid), the 41 inventory cells, the status blocks |
+| `health/panel/client.ts` | Track AP: the page script (render into existing nodes, stale marker, hidden-tab back-off, theme, commands, Help, chest list); Track AR: the menus and confirmations, the settings controls and mode selector, the palette, the quick-button editor, Stop / Pause / Resume, the log filter, the map canvas |
+| `health/panel/page.ts` | the page (`renderPanelPage`): structure, CSS (themes, responsive grid), the 41 inventory cells, the status blocks; Track AR: the grouped settings rows, the mode bar, the menu, toast, palette and map markup |
+| `health/panel/menu.ts` | Track AR: the menu model as plain JavaScript (`MENU_JS`: `cellActions`, `mapActions`, `settingActions`, `setCommand`, `settingVisible`, `modeOf`, `modeChanges`, `stackActions`, `paletteMatch`, `logVisible`), embedded in the page and evaluated for the server and the tests |
+| `health/panel/marks.ts` | Track AR: `GET /api/marks` (`mapMarks`: chests and herds near the bot) |
+| `health/map/routes.ts` | Track AR: `liftTaskStatus` (the afk task's waypoints and shelter into `/map.json`) |
+| `chat/commands-panel.ts` | Track AR: `!select`, `!offhand` (one line in `tasks/registry.ts`) |
 | `health/panel/logRing.ts` | `LogRing`: the last log lines (wraps `console.error`, which every logger writes with), redaction |
 | `connection/health.ts` | `host` option, `auth` hook (every path but `/healthz`), `use()` for routes of any method |
 | `config/config.ts`, `resolve.ts`, `init.ts` | the `panel` block, `BEDROCKBOT_PANEL_TOKEN`, the generated token |
@@ -271,7 +395,37 @@ codes become `***`). The bot account's sign-in tokens (prismarine-auth cache) ar
 ```sh
 pnpm --filter bot exec vitest run --project unit test/unit/health                       # token, cookie, rate limit, state shape, HTTP, config; Track AP: inventory, statuses, memory, payload, page markup, the script on a fake DOM
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-core --silent=false     # bds-core (~15 s)
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-actions --silent=false  # Track AR, bds-core (~20 s)
 ```
+
+Track AR unit tests: `panel-menu.test.ts` (the menu model for every kind of cell, the map column,
+settings, modes, processes, the palette and the log filter; `/api/marks`; `liftTaskStatus`; the
+grouped settings markup; `!select` and `!offhand` against fakes: the request shapes, the model
+before and after, a refusal), `panel-page.test.ts` (the script on the fake DOM: a tap opens the
+menu, an action posts its command and toasts the reply, a drop needs a second tap and disarms after
+4 s, the box shows its contents locally, Stop per user process and Pause / Resume by `paused`, Reset
+and the switch and the two-tap mode, the changed-only and search filters, quick buttons kept in
+storage with save and defaults, the log filters, the palette from `/api/help`, the map's poll, its
+right-click menu, Walk here on the surface and the waypoint name prompt), `panel-server.test.ts`
+(`paused`, `/api/marks` behind the token).
+
+`panel-actions` (bds-core; `PANEL_ACTIONS_E2E_PORT`, default a random port in 9650..9659): the CLI with
+`--walk --health-port <port>` and a token; every action is computed with the menu model from the live
+`/api/state` or `/map.json` and posted as the page does: a cell's **Select** (the state's `selected`
+and `!inv`'s `held`), **Drop the stack** (truth inventory 128 -> 64 and a 64 item entity), **To the
+offhand** with a totem then **Back into the inventory**, then a shield (the state's `offhand`), the
+map's **Walk here** 6 blocks east on the column's surface from the tile (truth position), **Set
+waypoint here** (`!wp <name>` and the waypoint in `/map.json`), a setting's **Reset**, and the
+**Stop** button of a running 30-block `!goto` (the stack empties, the bot stands short of the goal);
+plus the page markers, the page under 160 KB and the poll under 24 KB.
+
+Track AR, measured on bds-core (2026-10-30, two runs each green): the page 104.9 KB (panel-core's
+loaded inventory: 109.6 KB; the unit test's worst case 116.6 KB, script 45.7 KB, glyphs 2.9 KB;
+limit 160 KB), the poll (`?lite=1`) 5.1 KB fresh and 9.8 KB with panel-core's inventory (worst case
+16.8 KB; limit 24 KB); `/api/marks` 24 bytes on a fresh cache. Select: `POST` 2.8 to 3.5 ms, the
+state shows the new slot after about 230 ms; Drop the stack: the truth inventory 128 -> 64 after 0.8
+s, the item entity 64; a totem into the offhand after 0.43 s; Walk here 5.1 to 6.0 blocks in 1.4 to
+1.7 s; Stop: the stack empty 4 ms after the reply, the bot 4.2 of 30 blocks along.
 
 `panel-core` (bds-core, udp 19180; `PANEL_E2E_PORT`, default a random port in 9640..9649): the CLI
 with `--walk --health-port <port>` and `BEDROCKBOT_PANEL_TOKEN`; `/api/state` 401 without the token,
