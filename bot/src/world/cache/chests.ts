@@ -39,6 +39,10 @@ export interface ChestRecord {
   partner?: Vec3;
   /** Wall-clock ms of the last read (Date.now()); 0 = found but never opened. */
   readAt: number;
+  /** Track AN: why the last scan could not get to it (`no path`, `path 40 blocks`, `goto: unreachable`); scans skip it for an hour (or until `!chests scan`). */
+  unreachable?: string;
+  /** Track AN: wall-clock ms when it was found unreachable. */
+  unreachableAt?: number;
 }
 
 /** What the home skills use (WorldCache.chests, or an in-memory ChestMemory). */
@@ -245,5 +249,6 @@ function parseRecord(v: unknown): ChestRecord | undefined {
     double: o.double === true,
     ...(partner ? { partner } : {}),
     readAt: n[6]!,
+    ...(typeof o.unreachable === 'string' && o.unreachable ? { unreachable: o.unreachable, unreachableAt: Number(o.unreachableAt) || 0 } : {}), // Track AN
   };
 }

@@ -44,7 +44,7 @@ export function partnerKeys(records: readonly ChestRecord[]): Set<string> {
 export function planChests(records: readonly ChestRecord[]): PlanChest[] {
   const partners = partnerKeys(records);
   return records
-    .filter((r) => r.readAt > 0 && r.size > 0 && !partners.has(chestKey(r)))
+    .filter((r) => r.readAt > 0 && r.size > 0 && !r.unreachable && !partners.has(chestKey(r))) // Track AN: not the unreachable ones
     .map((r) => ({ key: chestKey(r), pos: { x: r.x, y: r.y, z: r.z }, kind: r.kind, label: r.label, free: r.free, contents: r.contents, room: r.room, boxes: r.boxes }));
 }
 
@@ -70,19 +70,76 @@ const top = (contents: Record<string, number>, n: number): string =>
     .map(([k, v]) => `${v} ${k}`)
     .join(', ');
 
-/** `!chests`: one part per container, nearest first. */
+const plural = (word: string, n: number): string => (n === 1 ? word : word.endsWith('x') ? `${word}es` : `${word}s`);
+
+/** Track AN: `3 chests (ores, wood), 1 double chest, 1 barrel`: the containers by kind, most first, with their labels. */
+export function kindsLine(records: readonly ChestRecord[]): string {
+  const groups = new Map<string, { n: number; labels: Set<string> }>();
+  for (const r of records) {
+    const k = kindWord(r);
+    const g = groups.get(k) ?? { n: 0, labels: new Set<string>() };
+    g.n++;
+    if (r.label) g.labels.add(r.label);
+    groups.set(k, g);
+  }
+  return [...groups]
+    .sort((a, b) => b[1].n - a[1].n || a[0].localeCompare(b[0]))
+    .map(([k, g]) => `${g.n} ${plural(k, g.n)}${g.labels.size ? ` (${[...g.labels].sort().join(', ')})` : ''}`)
+    .join(', ');
+}
+
+/**
+ * `!chests`: the counts (reachable, unreachable), the containers by kind with their labels, then one
+ * part per reachable container, nearest first (chat cuts the line at 256 characters).
+ */
 export function chestsLine(records: readonly ChestRecord[], now: number, origin?: Vec3): string {
   if (records.length === 0) return 'chests: none remembered (try !chests scan near home)';
   const partners = partnerKeys(records);
   const list = records.filter((r) => !partners.has(chestKey(r)));
-  const sorted = origin ? [...list].sort((a, b) => Math.hypot(a.x - origin.x, a.y - origin.y, a.z - origin.z) - Math.hypot(b.x - origin.x, b.y - origin.y, b.z - origin.z)) : list;
+  const bad = list.filter((r) => r.unreachable).length;
+  const head = `chests: ${list.length} remembered (${list.length - bad} reachable${bad ? `, ${bad} unreachable: !chests unreachable` : ''}): ${kindsLine(list)}`;
+  const ok = list.filter((r) => !r.unreachable);
+  const sorted = origin ? [...ok].sort((a, b) => Math.hypot(a.x - origin.x, a.y - origin.y, a.z - origin.z) - Math.hypot(b.x - origin.x, b.y - origin.y, b.z - origin.z)) : ok;
   const parts = sorted.map((r) => {
     if (r.readAt <= 0) return `${chestName(r)}: not read yet`;
     const age = Math.max(0, Math.round((now - r.readAt) / 60_000));
     const what = top(r.contents, 3);
     return `${chestName(r)}: ${r.free}/${r.size} free${what ? `, ${what}` : ', empty'}${r.boxes.empty ? `, ${r.boxes.empty} empty shulker box${r.boxes.empty === 1 ? '' : 'es'}` : ''} (${age} min ago)`;
   });
-  return `chests: ${list.length} remembered: ${parts.join(' | ')}`;
+  return parts.length ? `${head} | ${parts.join(' | ')}` : head;
+}
+
+/**
+ * Track AN: `!chests unreachable`: the containers the bot could not get to, with the reasons and the
+ * age, nearest first, packed into at most `maxLines` chat lines of `maxLength` characters.
+ */
+export function unreachableLines(records: readonly ChestRecord[], now: number, origin?: Vec3, maxLines = 3, maxLength = 256): string[] {
+  const list = records.filter((r) => r.unreachable);
+  if (list.length === 0) return ['chests: none unreachable'];
+  const sorted = origin ? [...list].sort((a, b) => Math.hypot(a.x - origin.x, a.y - origin.y, a.z - origin.z) - Math.hypot(b.x - origin.x, b.y - origin.y, b.z - origin.z)) : list;
+  const parts = sorted.map((r) => `${chestName(r)}: ${r.unreachable} (${Math.max(0, Math.round((now - (r.unreachableAt ?? now)) / 60_000))} min ago)`);
+  const lines: string[] = [];
+  let cur = `chests: ${list.length} unreachable: `;
+  let first = true;
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]!;
+    const more = ` ... and ${parts.length - i} more (!chests clear forgets them, !chests scan tries again)`;
+    const sep = first ? '' : ' | ';
+    if (cur.length + sep.length + part.length <= maxLength && (lines.length < maxLines - 1 || cur.length + sep.length + part.length + more.length <= maxLength || i === parts.length - 1)) {
+      cur += sep + part;
+      first = false;
+      continue;
+    }
+    if (lines.length === maxLines - 1) {
+      lines.push(`${cur}${more}`.slice(0, maxLength));
+      return lines;
+    }
+    lines.push(cur);
+    cur = part;
+    first = false;
+  }
+  lines.push(cur);
+  return lines;
 }
 
 /** Normalised item query: `minecraft:Coal` -> `coal`; `shulker` / `shulkers` / `box` -> any shulker box. */

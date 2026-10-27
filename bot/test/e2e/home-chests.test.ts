@@ -49,12 +49,12 @@ describe.skipIf(!E2E)('@bds home: chest memory, !stock, !unload (Track AG)', () 
     const t0 = Date.now();
     await b.command('!chests scan');
     expect(await b.reply((s) => s.startsWith('chests: reading '), from)).toMatch(/^chests: reading the containers within 16 blocks of home/);
-    const end = await b.reply((s) => s.startsWith('chests: read '), from, 120_000);
+    const end = await b.reply((s) => /^chests: \d+ within /.test(s), from, 120_000);
     notes.push(`scan: ${end} (${((Date.now() - t0) / 1000).toFixed(1)} s from the command)`);
     // the session scan of the chore may have read some of them first: read + fresh = 5
-    const m = /^chests: read (\d+) of (\d+) containers/.exec(end);
+    const m = /^chests: (\d+) within 16 blocks, (\d+) reachable within 32 path blocks, read (\d+)/.exec(end); // Track AN: the scan line
     expect(m).not.toBeNull();
-    expect(Number(m![2])).toBe(6); // 6 blocks (the double chest has two)
+    expect(Number(m![1])).toBe(6); // 6 blocks (the double chest has two)
     const mem = b.home.memory();
     for (const [what, p] of Object.entries({ coal: l.coal, wood: l.wood, boxes: l.boxes, barrel: l.barrel })) {
       const rec = mem.get(p);
@@ -84,7 +84,7 @@ describe.skipIf(!E2E)('@bds home: chest memory, !stock, !unload (Track AG)', () 
     await b.command('!chests');
     const list = await b.reply((s) => s.startsWith('chests: '), f3);
     notes.push(`!chests: ${list}`);
-    expect(list).toMatch(/^chests: 5 remembered: /);
+    expect(list).toMatch(/^chests: 5 remembered \(5 reachable\): /); // Track AN: the counts by kind first
   }, 180_000);
 
   it('!stock coal answers from memory', async () => {

@@ -36,6 +36,8 @@ export interface GetToBlockGoal {
   reach?: number;
   /** Require a visible face when the block has one. Default true. */
   face?: boolean;
+  /** Track AN: a side cell's feet may be up to this many blocks below p (a chest on a shelf or a pillar above the head; reach still decides). Default 1: p at the feet or the head. */
+  low?: number;
 }
 
 /** Any cell with the feet cell at `y`, nearest first. */
@@ -170,6 +172,7 @@ export function goalTest(goal: NavGoal, grid?: GoalGrid): GoalTest {
 function getToBlockTest(goal: GetToBlockGoal, grid: GoalGrid | undefined): GoalTest {
   const t = cell(goal.p);
   const reach = goal.reach ?? DEFAULT_GET_TO_REACH;
+  const low = Math.max(1, goal.low ?? 1); // Track AN
   /** The face across which (dx, dy, dz) points is exposed: the neighbour is not a full cube. undefined = not loaded. */
   const open = (dx: number, dy: number, dz: number): boolean | undefined => {
     const c = grid?.cls(t.x + dx, t.y + dy, t.z + dz);
@@ -192,7 +195,7 @@ function getToBlockTest(goal: GetToBlockGoal, grid: GoalGrid | undefined): GoalT
       if (Math.abs(dx) > 1 || Math.abs(dz) > 1) return false;
       if (dx === 0 && dz === 0) {
         if (dy !== 1 && dy !== -2) return false; // on top of it, or under it with the block above the head
-      } else if (dy !== 0 && dy !== -1) {
+      } else if (dy > 0 || dy < -low) {
         return false; // a side cell: the block at the feet or at the head
       }
       const eye = { x: x + 0.5, y: feet + EYE_HEIGHT, z: z + 0.5 };
