@@ -206,6 +206,72 @@ mobs and drops at the end.
 | `items x y z r [typeId]` | item entities within r with their item type and amount |
 | `uselog [sinceTick] [player\|*]` | `{ now, events: [{ tick, kind: start\|complete\|stop\|release, player, typeId, useDuration }] }` |
 
+## Sleep (wave 7, Track W)
+
+Decision record: [decisions/0018-survival-policy.md](decisions/0018-survival-policy.md). Why: the
+Realm bot met phantoms every night because it never slept.
+
+| File | What |
+|---|---|
+| `bot/src/skills/survival/sleep.ts` | `SleepController` (click a bed, the sleeping state from `player_flags`, the refusal texts, the held position, `wake()`), `findBeds`, `bedHead`, `inSleepWindow`, `SLEEP_FROM` / `SLEEP_UNTIL`, `BED_TEXTS` |
+| `bot/src/tasks/process/night.ts` | `NightProcess.attachBed`, `requestSleep`, `autoSleep`, `yieldWhile`, the bed routine (`bedLoop`), `sleepStatus` |
+| `bot/src/chat/commands-pve.ts` | `!sleep [on \| off \| status]`; wires the sleep controller into the night process (`registerPveCommandsFor`) |
+| `packs/truth/src/gaunt.ts` | truth `bed x y z direction` (both halves), `sleeping player` (`Player.isSleeping`, time of day) |
+| `bot/test/unit/skills/sleep.test.ts`, `bot/test/unit/night-bed.test.ts` | unit tests (fakes) |
+| `bot/test/e2e/gaunt-sleep.test.ts` | e2e on bds-gaunt |
+
+**Rules.** In the sleep window (time of day 12542 to 23459) the night process wants control when a bed
+is known: within 8 blocks of the shelter or of home, or within 2 of the `bed` waypoint (`!wp set bed`).
+With both a bed and a shelter it prefers the bed (between dusk, 12000, and 12542 it still walks to the
+shelter). It walks to within 1.8 blocks of the bed's head, clicks the bed and stays asleep until the
+server wakes the bot; then the process ends normally (the dawn home return of night safety follows
+when a shelter is set). A refusal because of monsters (`tile.bed.notSafe`) is not counted: the bot
+stays next to the bed, fights what comes within reach without walking (guard in place) and tries again
+every 20 s; `tile.bed.noSleep` (not night yet) likewise. Any other failure (obstructed, occupied, the
+walk failed, no bed any more) counts; after 3 the beds are given up until the next night and the shelter
+rule takes over. Woken in the night (hit, the bed broken): back to bed 2 s later. Pre-empted while
+asleep (a flight, a fight in place): it gets up (`stop_sleeping`). An urgent command (`!come now`,
+`!follow ... now`, `!kill ... now`) makes the night process yield; otherwise the night holds the
+owner's commands until the morning, as with the shelter. The keepalive nudge never runs in bed.
+
+| Command | Reply |
+|---|---|
+| `!sleep` | `going to bed at 24965 -60 26496`, then `sleeping (bed 24965 -60 26496)` and `good morning (slept 5 s)`; refusals: `sleep: refused (monsters near; guarding in place, again in 20 s)`, `sleep: giving up for tonight (obstructed)`; before: `sleep: not night (time of day 6000; beds work from 12542 to 23459)`, `sleep: no bed within 8 blocks of the shelter, home or me (or set the bed waypoint: !wp set bed)`. Works with auto-sleep off and also finds a bed within 8 of the bot |
+| `!sleep off` / `!sleep on` | auto-sleep (default on; in memory) |
+| `!sleep status` | `sleep: auto on, phase idle, bed 24965 -60 26496; slept 2, refused 1` |
+
+**Phantoms and the night skip.** Sleeping resets the phantom insomnia counter (phantoms spawn only
+around players who have not slept for 3 in-game days), so a bot that sleeps every night meets none.
+The night is skipped when every player in the overworld sleeps (BDS `playerssleepingpercentage`, 100 by
+default): with the owner asleep too (or the bot alone on the server) the server skips to the morning
+about 100 ticks (5 s) after the last player lay down and wakes everyone. With the owner awake the bot
+sleeps on until the morning; any urgent command wakes it.
+
+**Packets (BDS 1.26.60.6, verified with truth:bed / truth:sleeping)**:
+
+| when | packet |
+|---|---|
+| click | `inventory_transaction { item_use, click_block, block_position: <either half>, face, hotbar_slot, held_item, player_pos: <eye>, click_pos: <face centre>, block_runtime_id }` (the door / chest click, docs/interaction.md) |
+| any click | `set_spawn_position { spawn_type: 'player', player_position, world_position: <the head> }` and the text `tile.bed.respawnSet`: the respawn point moves to the bed even when sleeping is refused |
+| asleep | `level_event_generic` 19602 `{ ableToSleep 1, overworldPlayerCount, sleepingPlayerCount }`; own `set_entity_data { player_flags: 2, player_bed_position: <head block>, flags_extended ... }`; `update_block` of the head (`occupied_bit`); the server holds the body at the head's centre, feet 0.70625 above the block (truth `isSleeping` true) |
+| refused | a json text `{"rawtext":[{"text":"§7"},{"translate":"tile.bed.<key>"}]}`: `noSleep` (time of day before 12542 or from 23459 on: 12400 and 23500 refused, 12550 and 23400 slept), `notSafe` (a zombie 4.5 blocks away, also one boxed in glass 5 blocks from the bed), `obstructed` (the bed walled in on every side; a block on top of it is fine), `tooFar` (4 blocks from the foot; 1.5 works) |
+| wake | the server: `animate wake_up`, `level_event_generic` (sleepingPlayerCount 0), `set_entity_data { player_flags: 0, boundingbox ... }`, the head's `occupied_bit` cleared, a correction to the cell next to the bed. At the night skip (every player asleep 100 ticks; with `doDaylightCycle` false the time stays, the players are still woken) or when the time is set to the morning |
+| get up | client `player_action { action: 'stop_sleeping' }` -> the same wake answer within 2 ticks |
+
+While asleep the movement model does not know the sleeping pose: the input loop kept reporting its own
+body and the server corrected it once every 16 ticks (37 corrections in 30 s). The controller now
+reports the server's position (`InputLoop.setTickExtras`: `position` = head centre + 0.90625, no
+movement): 0 corrections while asleep, 1 on entering and 1 on leaving the bed.
+
+**Measured (gaunt-sleep e2e, bds-gaunt, every run)**: home = shelter, bed 4 blocks east, time set to
+18000 with the daylight cycle on, a zombie boxed in glass 5 blocks from the bed: refused (monsters)
+1.7 to 1.8 s after the time change, the bot waiting 0.4 blocks from the bed head (`waiting to sleep
+(monsters near)`); zombie removed: asleep 22.3 to 22.4 s after the time change (the 20 s retry; truth
+`isSleeping`, at the head, feet -59.294 on a -60 floor); the night skipped (the bot alone) and the bot
+up 5 s later at time of day 2 to 8, next to the bed; 2 corrections in all (into and out of the bed);
+the night process ended. `!sleep off` then night: still awake after 3 s; `!sleep`: `going to bed` ->
+`sleeping (bed ...)` after 1.9 s -> `good morning (slept 5 s)` after 6.9 s.
+
 ## Open points
 
 - Eating while walking is avoided, not fixed: the input loop could apply the item-use slowdown so a

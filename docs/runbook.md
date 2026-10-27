@@ -108,6 +108,7 @@ container under test).
 | `farm` | bds-farm | udp/19186 | docker/compose.farm.yml (TICK_DISTANCE 10) | 1.26.60.6 | farm-*, mine-* e2e: farming and legit mining, tasks 7.13 / 7.14 (FARM_BDS_*; docs/farming.md, docs/mining.md) |
 | `food` | bds-food | udp/19190 | docker/compose.food.yml (TICK_DISTANCE 10; **difficulty easy**) | 1.26.60.6 | food-* e2e: hunting, cooking, the food chore, task 7.16 (FOOD_BDS_*; docs/food.md) |
 | `reg` | bds-reg | udp/19192 | docker/compose.reg.yml (peaceful) | 1.26.60.6 | world-registry e2e and the block palette dump (`node tools/bump-version/dump-palette.mjs --profile reg`), wave 8 Track AC (REG_BDS_*; docs/versions.md "Block states") |
+| `gaunt` | bds-gaunt | udp/19188 | docker/compose.gaunt.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_GAUNT_DIFFICULTY` overrides) | 1.26.60.6 | gaunt-* e2e: flee v2, trip readiness, sleeping, the `!come` gauntlet; wave 7 Track W (GAUNT_BDS_*; docs/pve.md, docs/survival.md "Sleep") |
 | `rl-N` | bds-rl-N | udp/19170+N | docker/compose.rl-n.yml (`N=1 docker compose -p bedrockbot-rl-1 -f docker/compose.rl-n.yml up -d`) | 1.26.60.6 | extra RL envs for SubprocVecEnv (rl/scripts/throughput.py); remove after use |
 
 Per-track details: docs/world-model.md, docs/movement.md, docs/pathfinding.md, docs/digging.md, docs/wood.md (`--task gather`), docs/rl.md, docs/interaction.md (placing, doors), docs/waypoints.md (`!wp`, `!goto <name>`, `!top`), docs/farming.md and docs/mining.md (`!farm`, `!mine`), docs/pve.md, docs/survival.md (eating, armour, keeper, avoidance), docs/food.md (`!food`, `!cook`, the food chore), docs/versions.md.
@@ -254,7 +255,8 @@ Replies are player chat from the bot.
 | `!help` | the list of commands |
 | `!panel` | `panel: http://192.168.1.20:9464/ http://127.0.0.1:9464/ (token required: config panel.token)` or `panel: http://127.0.0.1:9464/ (this machine only; ...)` or `panel is off: set healthPort (or panel.port) ...`: the control panel URLs, never the token (Track AE, docs/panel.md) |
 | `!follow [name]` | `following Steve`: follows the player (default: the sender; the console must name one) until `!stop`; needs walking |
-| `!come [name]` | `coming to Steve`, then `here (Steve)`: one walk to within 2 blocks of the player |
+| `!come [name] [now]` | `coming to Steve`, then `here (Steve)`: one walk to within 2 blocks of the player (also beyond the entity range, through the locator bar). Food or health below 14 and more than 16 blocks: `coming to Steve (eating first)`; at night without a chestplate refused unless `now` (docs/pve.md "Trip readiness"; `!follow` and `!kill` likewise) |
+| `!sleep [on \| off \| status]` | `going to bed at x y z`, `sleeping (bed x y z)`, `good morning (slept 5 s)`: to bed now (night only; a bed within 8 of the shelter, home or the bot, or the `bed` waypoint); the bot also sleeps by itself at night (`!sleep off`); docs/survival.md "Sleep" |
 | `!stop` | `stopped (was following Steve); guarding r=16`: stops every command (goto, follow, come, kill, gather) and what it pre-empted, plus a pending home return; guard and night keep running |
 | `!pause` / `!resume` | `paused: walking to 10 -60 3 (!resume to continue)` / `resumed: walking to 10 -60 3`: hold the owner's commands where they are (guard, flee, night keep running), then continue |
 | `!set` / `!set <key>` / `!set <key> <value\|default>` | runtime settings (allowBreak, allowPlace, closeDoors, sprint, guardRadius, fleeHealth, nudgeInterval, followDistance, ...): list, show one with bounds and description, change it live and save it to settings.json (`guardRadius = 8 (was 16)`); docs/processes.md |
@@ -399,6 +401,7 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e core --silent=false   
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nl-core --silent=false        # task 7.18 on bds-core: !do / !yes / !no with a fake model (~25 s; docs/natural-language.md)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e food- --silent=false        # task 7.16 on bds-food (easy; ~2 min; FOOD_BDS_HOST/PORT/CONTAINER, FOOD_VERBOSE=1; docs/food.md)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e world-registry --silent=false # wave 8 Track AC on bds-reg: 1.26.60 block states vs truth (~40 s; REG_BDS_HOST/PORT/CONTAINER; docs/versions.md)
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e gaunt- --silent=false         # wave 7 Track W on bds-gaunt: flee v2, readiness, sleep, the gauntlet (GAUNT_BDS_*, GAUNT_RUNS=5, GAUNT_VERBOSE=1; docs/pve.md "Tests")
 BDS_E2E=1 BDS_SOAK=1 pnpm --filter bot exec vitest run --project e2e test/e2e/keepalive.test.ts --silent=false
 pnpm e2e:51                                    # whole e2e suite against bds-dev51 (BDS 1.26.51.1, game version 1.26.51: rollback)
 pnpm e2e:nn                                    # whole e2e suite against bds-nn (NetherNet, 1.26.60)
