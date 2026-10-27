@@ -54,6 +54,7 @@ const STEP_DOCS: Record<StepKind, string> = {
   pause: '{"command":"pause"}: hold the running command',
   resume: '{"command":"resume"}: continue after pause',
   get: '{"command":"get","item":"oak_log","count":N?}: get N of an item (wood, ores, stone, dirt, sand, food, crops); the first choice for get / bring / collect: it picks gather, mine, food or farm itself', // Track AD
+  build: '{"command":"build","shape":"fill"|"clear"|"wall"|"floor"|"pillar"|"file","x":X?,"y":Y?,"z":Z?,"x2":X?,"y2":Y?,"z2":Z?,"height":H?,"block":"cobblestone"?,"name":"<file>"?}: build from the inventory: fill / clear the box x y z to x2 y2 z2, a wall from x y z to x2 z2 H high, a floor x y z to x2 z2, a pillar H high at x y z, file = a saved structure by name (at x y z, else at the bot); no x y z = at the bot', // Track AL
   question: '{"command":"question","text":"..."}: ask the person one short question instead of guessing; last step',
 };
 
@@ -71,6 +72,7 @@ export const EXAMPLES: readonly Example[] = [
   { request: 'go to the castle', plan: { steps: [{ command: 'question', text: 'I know no waypoint "castle". Which waypoint, or which x y z?' }] } },
   { request: 'mine 10 iron then come back to me', plan: { steps: [{ command: 'mine', block: 'iron_ore', count: 10 }, { command: 'come' }] } },
   { request: 'get me 20 oak logs', plan: { steps: [{ command: 'get', item: 'oak_log', count: 20 }] } }, // Track AD
+  { request: 'build a cobblestone wall from 0 -60 0 to 9 0, 4 high', plan: { steps: [{ command: 'build', shape: 'wall', x: 0, y: -60, z: 0, x2: 9, z2: 0, height: 4, block: 'cobblestone' }] } }, // Track AL
 ];
 
 export function buildSystemPrompt(c: PromptContext): string {

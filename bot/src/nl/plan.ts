@@ -9,6 +9,7 @@
 // is not obvious. docs/natural-language.md "Adding a command".
 import { z } from 'zod';
 import { parseSettingValue, SETTING_KEYS, SettingError, type SettingKey } from '../config/settings.ts';
+import { buildStepText } from '../skills/build/spec.ts'; // Track AL
 
 const XZ = 30_000_000;
 const coordXZ = z.number().int().min(-XZ).max(XZ);
@@ -44,6 +45,7 @@ export const STEP_SCHEMAS = {
   pause: z.strictObject({ command: z.literal('pause') }),
   resume: z.strictObject({ command: z.literal('resume') }),
   get: z.strictObject({ command: z.literal('get'), item: blockName, count: z.number().int().min(1).max(2304).optional() }), // Track AD: !get, the first choice for getting items
+  build: z.strictObject({ command: z.literal('build'), shape: z.enum(['fill', 'clear', 'wall', 'floor', 'pillar', 'file']), x: coordXZ.optional(), y: coordY.optional(), z: coordXZ.optional(), x2: coordXZ.optional(), y2: coordY.optional(), z2: coordXZ.optional(), height: z.number().int().min(1).max(64).optional(), block: blockName.optional(), name: z.string().regex(/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/).optional() }), // Track AL: !build
   question: z.strictObject({ command: z.literal('question'), text: z.string().min(1).max(200) }),
 } as const;
 
@@ -71,6 +73,7 @@ export const StepSchema = z.discriminatedUnion('command', [
   STEP_SCHEMAS.pause,
   STEP_SCHEMAS.resume,
   STEP_SCHEMAS.get, // Track AD
+  STEP_SCHEMAS.build, // Track AL
   STEP_SCHEMAS.question,
 ]);
 export type Step = z.infer<typeof StepSchema>;
@@ -115,6 +118,7 @@ export const COMMAND_SPECS: Record<Exclude<StepKind, 'question'>, CommandSpec> =
   pause: { chat: 'pause', wait: 'none' },
   resume: { chat: 'resume', wait: 'none' },
   get: { chat: 'get', wait: 'process', fail: /^get: / }, // Track AD
+  build: { chat: 'build', wait: 'process', fail: /^build: / }, // Track AL
 };
 
 /** Replies that end any step and the plan. */
@@ -208,6 +212,8 @@ export function stepCommand(s: Step): string {
       return `set ${s.key} ${settingText(s.value)}`;
     case 'get': // Track AD
       return s.count !== undefined ? `get ${s.item} ${s.count}` : `get ${s.item}`;
+    case 'build': // Track AL
+      return buildStepText(s);
     case 'question':
       return s.text;
     default:

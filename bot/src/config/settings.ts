@@ -84,6 +84,7 @@ export const SETTING_DEFS = {
   chorePen: { kind: 'text', default: 'none', values: 'x y z|none', parse: (raw: string) => parseBlockText(raw, 'chorePen'), description: 'the pen (fence-enclosed) whose animals the breeding chore and the food chore may use: a block inside it, or none' }, // Track AF (merge: AD's parseBlockText)
   stashChest: { kind: 'text', default: 'none', values: 'x y z|none', parse: (raw: string) => parseBlockText(raw, 'stashChest'), description: 'stash step: chest a full inventory is emptied into (none: the job chest, a carried shulker box, then dropping junk)' }, // Track AD
   stashShulker: { kind: 'boolean', default: true, description: 'stash step: place a carried shulker box, fill it, break it and pick it up when the inventory is full' }, // Track AD
+  buildScaffold: { kind: 'boolean', default: true, description: '!build: place temporary scaffold blocks (support, pillar columns) for cells it cannot reach or click otherwise, removed afterwards' }, // Track AL
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;
