@@ -4,6 +4,9 @@
 gathered (trees), mined (ores and plain blocks), hunted (food mobs, spiders) or farmed (crops), and
 runs the matching process. When the inventory fills during mining, gathering or hunting, the
 **stash step** makes room (a chest, a carried shulker box, dropping junk) and the job goes on.
+`!get` makes new things; bringing stored things is a later command: it never takes items out of a
+chest or any other container (the stash step only deposits; Track AM, docs/ux.md, unit test
+`test/unit/chat/ux.test.ts` "!get never takes from chests").
 Decision record: [decisions/0025-get-front-door-and-stash.md](decisions/0025-get-front-door-and-stash.md).
 
 ## Files

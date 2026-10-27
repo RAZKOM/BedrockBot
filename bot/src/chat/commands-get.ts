@@ -196,7 +196,8 @@ export function registerGetCommands(d: CommandDeps, extra: GetExtra = {}): GetCo
   };
   d.chat.register({
     name: 'get',
-    help: '<item> [n] | stop | status (wood, ores, stone, dirt, sand, food, crops ...: picks gather / mine / food / farm)',
+    help: '<item> [n] | stop | status (makes wood, ores, stone, food, crops; never takes from chests)',
+    tier: 'front', group: 'work', example: '!get wood 16', auto: 'the stash step: a full inventory during a job goes into stashChest, the job chest or a carried shulker box, then junk is dropped', // Track AM
     run: ({ line, args, reply }) => {
       c.run(line, args, reply);
     },

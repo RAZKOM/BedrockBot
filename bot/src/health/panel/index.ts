@@ -29,7 +29,7 @@ import { mapRoutes, type HealthRoute } from '../map/routes.ts';
 import { isLoopbackInterface, panelAuth, RateLimiter } from './auth.ts';
 import { LogRing } from './logRing.ts';
 import { panelRoutes, type CommandResult } from './routes.ts';
-import { buildPanelState, type PanelChatLine, type PanelState } from './state.ts';
+import { buildPanelHelp, buildPanelState, type PanelChatLine, type PanelState } from './state.ts'; // Track AM: buildPanelHelp
 
 export interface PanelPlan {
   mode: 'off' | 'shared' | 'separate';
@@ -197,6 +197,7 @@ export function setupPanel(d: PanelDeps): Panel {
   chat.register({
     name: 'panel',
     help: '(control panel URLs on this machine and the LAN)',
+    group: 'info', example: '!panel', // Track AM
     run: ({ reply, sender }) => {
       if (plan.mode === 'off') {
         reply('panel is off: set healthPort (or panel.port) in the config; see docs/panel.md');
@@ -213,7 +214,7 @@ export function setupPanel(d: PanelDeps): Panel {
     },
   });
 
-  const routes = panelRoutes({ state, run, limiter: new RateLimiter(5, 1000) });
+  const routes = panelRoutes({ state, run, limiter: new RateLimiter(5, 1000), help: () => buildPanelHelp({ commands: () => chat.commandInfo(), settings: d.runtime }) }); // Track AM: Help tab
   const healthOptions = plan.mode === 'shared' ? { host: plan.host, auth } : {};
 
   return {

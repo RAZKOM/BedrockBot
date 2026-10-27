@@ -100,6 +100,7 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
   chat.register({
     name: 'eat',
     help: '(eat the best food now)',
+    group: 'home', example: '!eat', auto: 'it eats when food drops below 18 or health is low', // Track AM
     run: ({ reply }) => {
       void kit.eat().then((r) => {
         if (r.ok) reply(`ate ${r.item}: food ${r.foodBefore} -> ${r.foodAfter}`);
@@ -112,6 +113,7 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
   chat.register({
     name: 'equip',
     help: '(wear the best armour from the inventory)',
+    group: 'home', example: '!equip', auto: 'it puts on better armour as soon as it carries some',
     run: ({ reply }) => {
       void kit.equip().then((r) => {
         if (r.reason) reply(`equip: ${r.reason}`);
@@ -123,6 +125,7 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
   chat.register({
     name: 'inv',
     help: '(inventory summary)',
+    group: 'info', example: '!inv',
     run: ({ reply }) => {
       reply(kit.summary());
     },
@@ -130,6 +133,7 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
   chat.register({
     name: 'drop',
     help: '<item> [n] | all | items (drop an item, everything, or everything except food, armour, elytra, tools and weapons)',
+    group: 'home', example: '!drop items', auto: 'junk (rotten flesh, string, ...) is dropped when the inventory is full',
     run: ({ reply, args }) => {
       const [item, count] = args;
       if (!item) {

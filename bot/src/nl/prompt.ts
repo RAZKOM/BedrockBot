@@ -58,6 +58,7 @@ const STEP_DOCS: Record<StepKind, string> = {
   panel: '{"command":"panel"}: tell the control panel (web page) address', // Track AK
   drop: '{"command":"drop","what":"all"|"items"}: drop everything carried (all), or everything except food, armour, tools and weapons (items)', // Track AK
   question: '{"command":"question","text":"..."}: ask the person one short question instead of guessing; last step',
+  answer: '{"command":"answer","text":"..."}: answer a question about the bot (what it can do, whether it can cook, what it is doing) in up to 200 characters; nothing runs; always the only step', // Track AM
 };
 
 export interface Example {
@@ -77,11 +78,13 @@ export const EXAMPLES: readonly Example[] = [
   { request: 'breed two pairs of cows', plan: { steps: [{ command: 'breed', type: 'cow', pairs: 2 }] } }, // Track AK
   { request: 'empty your pockets but keep your gear', plan: { steps: [{ command: 'drop', what: 'items' }] } }, // Track AK
   { request: 'get food, the penned animals too', plan: { steps: [{ command: 'food', pen: true }] } }, // Track AK
+  { request: 'what can you do', plan: { steps: [{ command: 'answer', text: 'I come, follow, guard, go home and get things (!get wood, !get iron, !get food); !help lists the commands. Or just tell me what to do.' }] } }, // Track AM
+  { request: 'can you cook?', plan: { steps: [{ command: 'answer', text: 'Yes: after a hunt I cook raw food at a furnace or smoker within 16 blocks of home when I carry fuel; !cook does it now.' }] } }, // Track AM
 ];
 
 export function buildSystemPrompt(c: PromptContext): string {
   const ref = STEP_KINDS.map((k) => {
-    const chat = k === 'question' ? undefined : COMMAND_SPECS[k].chat;
+    const chat = k === 'question' || k === 'answer' ? undefined : COMMAND_SPECS[k].chat;
     const help = chat === undefined ? '' : (c.help.get(chat) ?? `!${chat} (not available on this bot)`);
     return `- ${STEP_DOCS[k]}${help ? ` [chat: ${help}]` : ''}`;
   });
@@ -95,9 +98,15 @@ export function buildSystemPrompt(c: PromptContext): string {
     '- "me", "here", "to me" mean the person asking: come / follow without a player.',
     '- When the request is unclear, unsafe, about attacking players, or not about these commands, answer one question step.',
     '- follow and farm run until stopped: only as the last step. A question is always the last step.',
+    // Track AM: answers
+    '- When the person asks about the bot (what it can do, can you cook, what are you doing) and asks for no action, answer one answer step, from the command reference and the bot state below only. Never invent abilities: what is not listed, the bot cannot do.',
+    '- When the person asks for an action, answer a plan, not an answer step. An answer is always the only step.',
     '',
     'Commands:',
     ...ref,
+    '',
+    'Every chat command of this bot (for answers; "also on its own" happens without a command):',
+    ...[...c.help.values()].map((h) => `- ${h}`),
     '',
     'Bot state:',
     `status: ${c.status}`,

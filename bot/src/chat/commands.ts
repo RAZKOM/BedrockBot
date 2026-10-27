@@ -57,7 +57,8 @@ export function registerBuiltinCommands(chat: Chat, deps: BuiltinDeps): void {
   const { conn, metrics } = deps;
   chat.register({
     name: 'status',
-    help: '(uptime, reconnects, position, version, tick)',
+    help: '(what it is doing: uptime, position, the process stack)',
+    tier: 'front', group: 'info', example: '!status', // Track AM
     run: ({ reply }) => {
       const snap = metrics.snapshot();
       reply(
@@ -78,6 +79,7 @@ export function registerBuiltinCommands(chat: Chat, deps: BuiltinDeps): void {
   chat.register({
     name: 'pos',
     help: '(feet position)',
+    group: 'info', example: '!pos',
     run: ({ reply }) => {
       reply(`pos ${formatPos(deps.position())}`);
     },
@@ -85,6 +87,7 @@ export function registerBuiltinCommands(chat: Chat, deps: BuiltinDeps): void {
   chat.register({
     name: 'quit',
     help: '(disconnect and exit)',
+    group: 'control', example: '!quit',
     run: ({ reply, sender }) => {
       reply(`bye (quit by ${senderLabel(sender)})`);
       setTimeout(() => { deps.quit(sender); }, deps.quitDelayMs ?? 300);
@@ -92,9 +95,10 @@ export function registerBuiltinCommands(chat: Chat, deps: BuiltinDeps): void {
   });
   chat.register({
     name: 'help',
-    help: '(this list)',
-    run: ({ reply }) => {
-      reply(`commands: ${chat.commandNames().map((n) => `${chat.prefix}${n}`).join(' ')}`);
+    help: '[all | settings | <command>] (this list; all: every command)',
+    tier: 'front', group: 'info', example: '!help get',
+    run: ({ reply, args }) => {
+      for (const line of chat.helpReplies(args)) reply(line); // Track AM: help.ts
     },
   });
 }
@@ -196,6 +200,7 @@ export function registerHardeningCommands(chat: Chat, deps: HardeningDeps): void
   chat.register({
     name: 'health',
     help: '(health, food, deaths, last death cause)',
+    group: 'info', example: '!health',
     run: ({ reply }) => {
       const h = deps.health();
       const parts = [
@@ -213,6 +218,7 @@ export function registerHardeningCommands(chat: Chat, deps: HardeningDeps): void
   chat.register({
     name: 'shelter',
     help: '[show] | set [x y z] | clear (night shelter)',
+    group: 'home', example: '!shelter set', auto: 'with a shelter set it walks there at dusk and waits out the night inside',
     run: shelter
       ? pointCommand('shelter', shelter, deps.position, () => `state ${shelter.state()}`)
       : ({ reply }) => {
@@ -223,6 +229,7 @@ export function registerHardeningCommands(chat: Chat, deps: HardeningDeps): void
   chat.register({
     name: 'goto',
     help: 'x y z (walk to a feet block now)',
+    group: 'go', example: '!goto 10 -60 20',
     run: gotoFn
       ? ({ reply, args }) => {
           const p = parseBlock(args);
@@ -242,7 +249,8 @@ export function registerHardeningCommands(chat: Chat, deps: HardeningDeps): void
   const home = deps.home;
   chat.register({
     name: 'home',
-    help: '[show] | set [x y z] | go | clear (return point after respawn and at dawn)',
+    help: '[show] | set [x y z] | go | clear (home point; go walks there)',
+    tier: 'front', group: 'home', example: '!home set', auto: 'it walks home after a respawn, at dawn and after a guard fight',
     run: home
       ? pointCommand('home', home, deps.position)
       : ({ reply }) => {
@@ -290,6 +298,7 @@ export function registerGatherCommands(chat: Chat, deps: GatherCommandDeps): voi
   chat.register({
     name: 'gather',
     help: '<n> [x y z] | stop (gather n logs into the chest)',
+    group: 'work', example: '!gather 16', // Track AM (!get wood runs it)
     run: ({ args, reply }) => {
       const [first, ...rest] = args;
       if (first === undefined || first === 'status') {
@@ -362,6 +371,7 @@ export function registerProcessCommands(deps: CommandDeps): void {
   deps.chat.register({
     name: 'pause',
     help: '(hold the running command; guard and night keep running)',
+    group: 'control', example: '!pause',
     run: ({ reply }) => {
       const lines = pm.userProcesses().map((p) => p.behaviour?.() ?? p.name);
       pm.hold();
@@ -371,6 +381,7 @@ export function registerProcessCommands(deps: CommandDeps): void {
   deps.chat.register({
     name: 'resume',
     help: '(continue after !pause)',
+    group: 'control', example: '!resume',
     run: ({ reply }) => {
       const was = pm.unhold();
       const a = pm.active;
@@ -384,6 +395,7 @@ export function registerSettingsCommands(deps: CommandDeps): void {
   deps.chat.register({
     name: 'set',
     help: '[<key> [<value>|default]] (runtime settings; no args = list)',
+    group: 'control', example: '!set fleeHealth 10',
     run: ({ reply, args }) => {
       const [name, ...rest] = args;
       if (name === undefined) {

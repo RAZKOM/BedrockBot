@@ -193,6 +193,7 @@ export function registerFoodCommands(d: CommandDeps, extra: FoodCommandExtra = {
   d.chat.register({
     name: 'food',
     help: `[n] [pen] | status | herds (hunt cows, pigs, sheep, chickens, rabbits within ${FOOD_RADIUS} blocks, then remembered herds within ${HERD_RANGE}, for n food items, default ${DEFAULT_FOOD_ITEMS}; pen: animals in pens too; then cook them at the furnace near home)`,
+    group: 'work', example: '!food 8', auto: 'with autoFood on it hunts by day when the food carried is below foodMin (the food chore)', // Track AM
     run: ({ reply, args }) => {
       // Track AF: `pen` anywhere in the arguments lets the hunt take penned animals
       const words = args.map((w) => w.toLowerCase());
@@ -242,6 +243,7 @@ export function registerFoodCommands(d: CommandDeps, extra: FoodCommandExtra = {
   d.chat.register({
     name: 'cook',
     help: '(cook the raw food carried in the furnace or smoker within 16 blocks of home)',
+    group: 'work', example: '!cook', auto: 'after every hunt (!food, !get beef, the food chore) when it carries raw food and fuel and a furnace or smoker is within 16 blocks of home',
     run: ({ reply }) => {
       const raw = rawFoodCounts(world.inventory.slots);
       if (raw.size === 0) {
@@ -259,6 +261,7 @@ export function registerFoodCommands(d: CommandDeps, extra: FoodCommandExtra = {
   d.chat.register({
     name: 'breed',
     help: `[type] [n] (feed n pairs, default 1, of adult animals within ${BREED_RADIUS} blocks: cow / sheep / mooshroom wheat, pig carrot / potato / beetroot, chicken seeds, rabbit dandelion / carrot)`,
+    group: 'work', example: '!breed cow 2', auto: 'with autoBreed on and chorePen set it breeds that pen by day every 10 minutes while a kind has fewer than 8 adults',
     run: ({ reply, args }) => {
       let kind: string | undefined;
       let n = 1;

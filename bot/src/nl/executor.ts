@@ -10,7 +10,7 @@
 import type { CommandEvent } from '../chat/chat.ts';
 import type { ChatLine } from '../chat/text.ts';
 import { silentLogger, type Logger } from '../log.ts';
-import { COMMAND_SPECS, COMMON_FAIL, parsePlan, planJsonSchema, planLine, stepChatName, stepCommand, type Plan, type Step } from './plan.ts';
+import { COMMAND_SPECS, COMMON_FAIL, isTalk, parsePlan, planJsonSchema, planLine, stepChatName, stepCommand, type Plan, type Step, type TalkKind } from './plan.ts'; // Track AM: isTalk, TalkKind (answer steps)
 import { buildSystemPrompt, buildUserMessage, type PromptContext } from './prompt.ts';
 import type { NlProvider } from './provider.ts';
 
@@ -72,7 +72,7 @@ export function checkPlan(plan: Plan, c: { text: string; sender: string; waypoin
   const known = c.waypoints.map((w) => w.toLowerCase());
   const steps: Step[] = [];
   for (const s of plan.steps) {
-    if (s.command === 'question') {
+    if (isTalk(s)) {
       steps.push(s);
       break;
     }
@@ -96,7 +96,7 @@ export function checkPlan(plan: Plan, c: { text: string; sender: string; waypoin
     steps.push(s);
   }
   const only = steps[0];
-  if (steps.length === 1 && only?.command === 'question') return { kind: 'question', text: only.text };
+  if (steps.length === 1 && only && isTalk(only)) return { kind: 'question', text: only.text }; // Track AM: an answer is said verbatim like a question, nothing runs
   return { kind: 'plan', plan: { steps } };
 }
 
@@ -284,7 +284,7 @@ export class NlFrontEnd {
       for (const [i, s] of plan.steps.entries()) {
         if (r.aborted) return { done: i, ok: false, reason: 'dropped' };
         r.step = i + 1;
-        if (s.command === 'question') {
+        if (isTalk(s)) {
           this.say(s.text);
           return { done: i, ok: true };
         }
@@ -307,7 +307,7 @@ export class NlFrontEnd {
     }
   }
 
-  private async runStep(s: Exclude<Step, { command: 'question' }>, origin: NlOrigin, r: Running): Promise<StepResult> {
+  private async runStep(s: Exclude<Step, { command: TalkKind }>, origin: NlOrigin, r: Running): Promise<StepResult> {
     const spec = COMMAND_SPECS[s.command];
     const text = `${this.o.chat.prefix}${stepCommand(s)}`;
     const seen: string[] = [];
