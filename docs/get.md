@@ -79,7 +79,7 @@ Steps, in order, until 2 slots are free:
 
 1. **Chest**: the `stashChest` setting (`!set stashChest 10 -60 3`), else the job's own chest (a
    gather `!gather N x y z`): walk there (`near`, 2 blocks), open, deposit, close.
-2. **Shulker box** (`stashShulker` on, a box carried): place it on a free cell next to the bot
+2. **Shulker box** (`stashShulker` on, a box carried; with several, the one with the most free slots by its NBT `Items`, a box with all 27 used is skipped): place it on a free cell next to the bot
    (empty, empty above for the lid, a full solid top below that is not a container, not reaching
    into the body; nearest of 12 cells first, up to 3 tries), open, deposit (slots addressed as
    `shulker`), close, break it (the Digger's best tool; a shulker box drops itself with its contents

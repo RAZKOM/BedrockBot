@@ -43,6 +43,12 @@ export const SHULKER_BOXES: ReadonlySet<string> = new Set(['undyed_shulker_box',
 // of editing chest.ts; the deposit addresses their slots as `shulker` (withSlotType below).
 for (const n of SHULKER_BOXES) CONTAINER_BLOCKS.add(n);
 
+/** Slots used inside a shulker box item (the raw wire item's NBT `Items`); 0 when unknown or empty. */
+export function shulkerSlotsUsed(raw: unknown): number {
+  const list = (raw as { extra?: { nbt?: { nbt?: { value?: { Items?: { value?: { value?: unknown[] } } } } } } } | undefined)?.extra?.nbt?.nbt?.value?.Items?.value?.value;
+  return Array.isArray(list) ? list.length : 0;
+}
+
 export function isShulkerBox(name: string): boolean {
   return SHULKER_BOXES.has(name.startsWith('minecraft:') ? name.slice(10) : name);
 }
@@ -94,7 +100,7 @@ export interface StashSkills {
 
 export interface StashDeps {
   skills: StashSkills;
-  inventory: { readonly slots: readonly (ItemStack | null)[]; freeSlots(): number[] };
+  inventory: { readonly slots: readonly (ItemStack | null)[]; freeSlots(): number[]; rawItem?(window: number, slot: number): unknown };
   blockAt(p: Vec3): BlockInfo | undefined;
   /** Feet. */
   position(): Vec3 | undefined;
@@ -332,8 +338,19 @@ export class Stash {
     return this.d.inventory.slots.slice(0, 36).some((s) => !!s && s.count > 0 && depositable(s.name));
   }
 
+  /** The carried shulker box with the most free slots (its NBT `Items`); -1 when none has a free slot. */
   private shulkerSlot(): number {
-    return this.d.inventory.slots.slice(0, 36).findIndex((s) => !!s && s.count > 0 && isShulkerBox(s.name));
+    let best = -1;
+    let bestUsed = 27;
+    this.d.inventory.slots.slice(0, 36).forEach((s, i) => {
+      if (!s || s.count <= 0 || !isShulkerBox(s.name)) return;
+      const used = shulkerSlotsUsed(this.d.inventory.rawItem?.(0, i));
+      if (used < bestUsed) {
+        best = i;
+        bestUsed = used;
+      }
+    });
+    return best;
   }
 
   private requests(): number {

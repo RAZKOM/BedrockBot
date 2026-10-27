@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseSettingValue, RuntimeSettings, describeSetting } from '../../../src/config/settings.ts';
 import { CONTAINER_BLOCKS } from '../../../src/skills/container/chest.ts';
-import { boxSpots, depositable, isShulkerBox, MIN_FREE_SLOTS, parseChest, Stash, stepLine, withSlotType, type StashSkills, isStashJunk, junkDropCount } from '../../../src/skills/container/stash.ts';
+import { boxSpots, depositable, isShulkerBox, MIN_FREE_SLOTS, parseChest, Stash, stepLine, withSlotType, type StashSkills, isStashJunk, junkDropCount, shulkerSlotsUsed } from '../../../src/skills/container/stash.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 
 const item = (name: string, count = 64): ItemStack => ({ name, count, networkId: 1, metadata: 0 });
@@ -250,6 +250,13 @@ describe('stash junk rule', () => {
     expect(junkDropCount('cobblestone', 70)).toBe(54);
     expect(junkDropCount('cobblestone', 10)).toBe(0);
     expect(junkDropCount('gravel', 10)).toBe(10);
+  });
+});
+
+describe('stash box choice', () => {
+  it('shulkerSlotsUsed reads the box NBT; unknown or empty is 0', () => {
+    expect(shulkerSlotsUsed(undefined)).toBe(0);
+    expect(shulkerSlotsUsed({ extra: { nbt: { nbt: { value: { Items: { value: { value: [{}, {}, {}] } } } } } } })).toBe(3);
   });
 });
 
