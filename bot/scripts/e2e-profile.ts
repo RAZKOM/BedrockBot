@@ -72,6 +72,7 @@ const env: NodeJS.ProcessEnv = {
   GET_BDS_CONTAINER: p.container, // Track AD: get-* (get-truth.ts)
   GET_BDS_PORT: port,
   ...{ BUILD_BDS_CONTAINER: p.container, BUILD_BDS_PORT: port }, // Track AL: build-* (build-truth.ts)
+  ...{ HOME_BDS_CONTAINER: p.container, HOME_BDS_PORT: port }, // Track AG: home-* (home-truth.ts)
 };
 console.error(`[e2e-profile] ${name}: ${p.container} (BDS ${p.build}) port ${port}, version ${p.version}, transport ${p.transport}`);
 const botDir = fileURLToPath(new URL('..', import.meta.url));

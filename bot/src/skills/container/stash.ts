@@ -30,28 +30,11 @@ import type { DigOptions, DigResult } from '../dig/digger.ts';
 import type { Goal } from '../nav/goals.ts';
 import { isInteractive, REPLACEABLE, type PlaceOptions, type PlaceResult } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
-import { CONTAINER_BLOCKS, type DepositResult, type OpenResult } from './chest.ts';
+import { isShulkerBox, shulkerSlotsUsed, type DepositResult, type OpenResult } from './chest.ts'; // Track AG: shulker names, NBT reader and slot type live in chest.ts now
+export { isShulkerBox, SHULKER_BOXES, SHULKER_SLOT_TYPE, shulkerSlotsUsed } from './chest.ts'; // Track AG: re-exported for Track AD's callers
 
 /** Fewer free inventory slots than this: stash. */
 export const MIN_FREE_SLOTS = 2;
-/** item_stack_request slot type of a shulker box window (verified; `container` is refused). */
-export const SHULKER_SLOT_TYPE = 'shulker';
-const COLOURS = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'];
-/** Shulker box block / item names (Bedrock: the plain one is `undyed_shulker_box`). */
-export const SHULKER_BOXES: ReadonlySet<string> = new Set(['undyed_shulker_box', 'shulker_box', ...COLOURS.map((c) => `${c}_shulker_box`)]);
-// The chest skill opens these too (same click, same window): Track AD adds them at load time instead
-// of editing chest.ts; the deposit addresses their slots as `shulker` (withSlotType below).
-for (const n of SHULKER_BOXES) CONTAINER_BLOCKS.add(n);
-
-/** Slots used inside a shulker box item (the raw wire item's NBT `Items`); 0 when unknown or empty. */
-export function shulkerSlotsUsed(raw: unknown): number {
-  const list = (raw as { extra?: { nbt?: { nbt?: { value?: { Items?: { value?: { value?: unknown[] } } } } } } } | undefined)?.extra?.nbt?.nbt?.value?.Items?.value?.value;
-  return Array.isArray(list) ? list.length : 0;
-}
-
-export function isShulkerBox(name: string): boolean {
-  return SHULKER_BOXES.has(name.startsWith('minecraft:') ? name.slice(10) : name);
-}
 
 /**
  * The drop stage throws away junk only (never ore, ingots, gems or anything else of value): the survival
@@ -418,7 +401,7 @@ export class Stash {
     }
     step.where = at;
     step.reason = undefined;
-    await this.fill(at, SHULKER_SLOT_TYPE, step, alive);
+    await this.fill(at, undefined, step, alive); // Track AG: the chest skill sets the `shulker` slot type per window now
     // break it and pick it up again, also after a failed open or deposit (never leave it behind);
     // a pre-emption in between leaves it standing: the next attempt finds the cell taken and the bot
     // picks it up on the way if it walks over it

@@ -65,7 +65,7 @@ export function registerNlCommands(d: CommandDeps, values: Readonly<Record<strin
   const doRe = new RegExp(`^\\s*${chat.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*do\\b`, 'i');
   chat.register({
     name: 'do',
-    help: '<text> (say it in plain words: a plan, !yes runs it; or ask me something)',
+    help: '<text> (plain words: a plan, !yes runs it; or a question)',
     tier: 'front', group: 'control', example: '!do walk home then guard', // Track AM
     run: ({ line, sender }) => {
       void fe.request(line.body.replace(doRe, '').trim(), { line, sender: senderLabel(sender) });

@@ -57,7 +57,7 @@ export function registerBuiltinCommands(chat: Chat, deps: BuiltinDeps): void {
   const { conn, metrics } = deps;
   chat.register({
     name: 'status',
-    help: '(what it is doing: uptime, position, the process stack)',
+    help: '(what it is doing now)',
     tier: 'front', group: 'info', example: '!status', // Track AM
     run: ({ reply }) => {
       const snap = metrics.snapshot();

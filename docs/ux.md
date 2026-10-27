@@ -69,7 +69,7 @@ command registered without a tier is `more` (so `!unload`, `!stock`, `!chests`, 
 needs `!wp set` first (itself `more`); `!do go to the mine` reaches the same `!goto` in plain words.
 Coordinates are rarely what an owner in the game wants to type.
 
-**Deletion candidates** (rule: a `more` command without an automatic trigger): `!gather`, `!mine`
+**Deletion candidates** (rule: a `more` command without an automatic trigger): `!stock`, `!gather`, `!mine`
 (both behind `!get wood` / `!get iron`), `!farm`, `!kill`, `!goto`, `!top`, `!pause`, `!resume`,
 `!set`, `!pos`, `!quit`, `!health`, `!inv`, `!panel`, `!yes`, `!no`, `!mode`, `!commands`. Most are
 still the plumbing of `!get` and `!do` (they dispatch `!gather` / `!mine` / `!farm` / `!kill`), the

@@ -148,7 +148,7 @@ describe('Chat with built-in commands', () => {
     client.receive('text', consoleSay('!help'));
     // Track AM: the front door (help.ts), then the way to the rest
     expect(await replies()).toEqual([
-      'front door: info: !status (what it is doing: uptime, position, the process stack), !help (this list; all: every command)',
+      'front door: info: !status (what it is doing now), !help (this list; all: every command)',
       'more: !help settings, !help all, !help <command>',
     ]);
     expect(events.map((e) => `${e.kind}:${e.name}`)).toEqual(['run:status', 'run:pos', 'run:help']);

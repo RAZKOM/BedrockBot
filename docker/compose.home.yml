@@ -1,0 +1,34 @@
+# BDS for the home logistics e2e tests (wave 9, Track AG; docs/home.md): chest discovery, chest memory,
+# `!unload`, `!stock`, spare shulker boxes. Made from compose.get.yml (offline, RakNet, operator,
+# TICK_DISTANCE 10, own project name, FLAT world: grass top at y -61, feet at -60). Peaceful,
+# container bds-home on udp/19196, data in docker/data/home (seeded from an existing data folder
+# without its worlds/ and server.properties: never a download).
+#   node scripts/bds.mjs --profile home up
+#   node scripts/bds.mjs --profile home pack         # truth pack (needed by the home-* e2e tests)
+name: bedrockbot-home
+
+services:
+  bds-home:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-home
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: peaceful
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: home
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-home
+      SERVER_PORT: "19196"
+      TICK_DISTANCE: "10"
+    ports:
+      - "19196:19196/udp"
+    volumes:
+      - ./data/home:/data
+    stdin_open: true
+    tty: true

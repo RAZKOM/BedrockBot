@@ -155,8 +155,8 @@ describe('stash step', () => {
     expect(h.stash.needed()).toBe(true);
     expect(await h.stash.ifFull({ label: 'mine' })).toBe(true);
     expect(h.calls).toEqual(['place 1,0,0 up undyed_shulker_box', 'open 1,0,0', 'deposit', 'close', 'dig 1,0,0', 'collect']);
-    expect(h.slotTypes).toEqual(['shulker']);
-    expect(h.containers.opts.chestSlotType).toBe('container'); // restored
+    expect(h.slotTypes).toEqual(['container']); // Track AG: no switch any more; the chest skill sets `shulker` per window (container.test.ts)
+    expect(h.containers.opts.chestSlotType).toBe('container');
     const a = h.stash.attempts[0]!;
     expect(a).toMatchObject({ job: 'mine', freeBefore: 0, freeAfter: 27, ok: true, interrupted: false });
     expect(a.steps[0]).toMatchObject({ kind: 'shulker', ok: true, moved: { cobblestone: 27 * 64 }, requests: 27, shared: 27, pickedUp: true, where: { x: 1, y: 0, z: 0 } });

@@ -14,9 +14,15 @@
 //   item_stack_response { responses: [{ status: 'ok' | 'error', request_id,
 //                        containers?: [{ slot_type, slots: [{ slot, hotbar_slot, count, item_stack_id, ... }] }] }] }
 // Request ids are negative and odd, counting down (-1, -3, -5 ...), as the vanilla client does.
+//
+// Track AG (wave 9, docs/home.md "Slot types"): the container_id of a window's slots depends on the
+// block behind it, not on the window type (every one of them opens as window_type `container`):
+// chests `container` (level entity, 7), shulker boxes `shulker` (30), barrels `barrel` (58), verified
+// on BDS 1.26.60.6. The chest skill sets it per window (`setSlotType`) when it opens one; windows
+// without an entry use the `chestSlotType` option.
 import { silentLogger, type Logger } from '../log.ts';
 import { WINDOW_INVENTORY, windowId, type Inventory } from './inventory.ts';
-import type { WindowIdField } from './packets.ts';
+import type { ItemV4, WindowIdField } from './packets.ts';
 import type { ItemStack, PacketSource, Vec3 } from './types.ts';
 
 export interface ContainerOpenPacket {
@@ -90,7 +96,11 @@ export class Containers {
   private readonly opts: Required<Omit<ContainersOptions, 'logger'>>;
   private _open: OpenContainer | undefined;
   private nextRequestId = -1;
+  /** Track AG: the slot type of each open window's slots (set by the opener, dropped on close). */
+  private readonly windowSlotTypes = new Map<number, string>();
   private readonly pending = new Map<number, (r: StackResponse) => void>();
+  /** Track AG: what each pending request predicted per slot (an ok response refills a slot another request's rollback emptied). */
+  private readonly predicted = new Map<number, { window: number; slot: number; item: ItemStack }[]>();
   private readonly openFns = new Set<(c: OpenContainer) => void>();
   private readonly closeFns = new Set<(id: number, byServer: boolean) => void>();
   private readonly unsubs: (() => void)[] = [];
@@ -119,6 +129,8 @@ export class Containers {
       source.on('start_game', () => {
         this._open = undefined;
         this.pending.clear();
+        this.windowSlotTypes.clear(); // Track AG
+        this.predicted.clear(); // Track AG
       }),
     );
   }
@@ -141,6 +153,17 @@ export class Containers {
   dispose(): void {
     for (const u of this.unsubs.splice(0)) u();
     this.pending.clear();
+    this.predicted.clear(); // Track AG
+  }
+
+  /** Track AG: address the slots of window `id` as `slotType` in item stack requests (until it closes). */
+  setSlotType(id: number, slotType: string): void {
+    this.windowSlotTypes.set(id, slotType);
+  }
+
+  /** Track AG: the slot type requests use for window `id` (its own, else the `chestSlotType` option). */
+  slotTypeOf(id: number): string {
+    return this.windowSlotTypes.get(id) ?? this.opts.chestSlotType;
   }
 
   /** Ask the server to close a window (it answers with its own container_close). */
@@ -152,7 +175,7 @@ export class Containers {
   slotInfo(ref: SlotRef, stackId: number): Record<string, unknown> {
     let containerId: string;
     if (ref.window === WINDOW_INVENTORY) containerId = ref.slot < 9 ? this.opts.hotbarSlotType : this.opts.inventorySlotType;
-    else containerId = this.opts.chestSlotType;
+    else containerId = this.slotTypeOf(ref.window); // Track AG: per window
     return { slot_type: { container_id: containerId }, slot: ref.slot, stack_id: stackId };
   }
 
@@ -182,21 +205,34 @@ export class Containers {
     // Prediction (rolled back on error).
     const before = { src: item, dst: target, srcRaw: this.inventory.rawItem(src.window, src.slot), dstRaw: this.inventory.rawItem(dst.window, dst.slot) };
     const left = item.count - count;
-    this.inventory.setItem(src.window, src.slot, left > 0 ? { ...item, count: left } : null);
+    const srcNow = left > 0 ? { ...item, count: left } : null;
+    this.inventory.setItem(src.window, src.slot, srcNow);
     const moved: ItemStack = target ? { ...target, count: target.count + count } : { ...item, count };
     if (!target) delete moved.stackId;
-    this.inventory.setItem(dst.window, dst.slot, moved);
+    // Track AG: a whole stack moved into an empty slot keeps its wire item (the NBT: a shulker box's
+    // contents); users of the raw item check that it still matches the model (wireItemOf)
+    const dstRaw = !target && left === 0 ? before.srcRaw : undefined;
+    this.inventory.setItem(dst.window, dst.slot, moved, dstRaw);
 
+    this.predicted.set(requestId, [
+      { window: src.window, slot: src.slot, item },
+      { window: dst.window, slot: dst.slot, item: moved },
+    ]);
     this.stats.requests++;
     this.source.queue('item_stack_request', { requests: [{ request_id: requestId, actions: [action], custom_names: [], cause: 'chat_public' }] });
     this.log.debug(`item_stack_request ${requestId}: place ${count} ${item.name} ${fmtRef(src)} -> ${fmtRef(dst)}`);
     return new Promise((resolve) => {
+      // Track AG: a slot the server rewrote meanwhile (inventory_slot: an item picked up into the slot
+      // the request aimed at) keeps the server's state; only the prediction itself is undone
+      const unchanged = (ref: SlotRef, item: ItemStack | null, raw: ItemV4 | undefined) =>
+        (this.slotsOf(ref.window)?.[ref.slot] ?? null) === item && this.inventory.rawItem(ref.window, ref.slot) === raw;
       const rollback = () => {
-        this.inventory.setItem(src.window, src.slot, before.src, before.srcRaw);
-        this.inventory.setItem(dst.window, dst.slot, before.dst, before.dstRaw);
+        if (unchanged(src, srcNow, undefined)) this.inventory.setItem(src.window, src.slot, before.src, before.srcRaw);
+        if (unchanged(dst, moved, dstRaw)) this.inventory.setItem(dst.window, dst.slot, before.dst, before.dstRaw);
       };
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
+        this.predicted.delete(requestId); // Track AG
         rollback();
         resolve({ ok: false, reason: 'timeout', requestId });
       }, timeoutMs);
@@ -231,6 +267,7 @@ export class Containers {
     const id = windowId(p.window_id);
     this.stats.closes++;
     if (this._open?.id === id) this._open = undefined;
+    this.windowSlotTypes.delete(id); // Track AG
     this.inventory.removeWindow(id);
     this.log.debug(`container_close window ${id} (server ${p.server})`);
     for (const fn of [...this.closeFns]) fn(id, p.server);
@@ -243,6 +280,7 @@ export class Containers {
       else this.stats.error++;
       if (ok) this.apply(r);
       else this.log.warn(`item_stack_response ${r.request_id}: ${String(r.status)}`);
+      this.predicted.delete(r.request_id); // Track AG
       const fn = this.pending.get(r.request_id);
       if (fn) {
         this.pending.delete(r.request_id);
@@ -263,6 +301,12 @@ export class Containers {
           this.inventory.setItem(window, s.slot, null);
         } else if (cur) {
           const next: ItemStack = { ...cur, count: s.count };
+          if (s.item_stack_id !== undefined) next.stackId = s.item_stack_id;
+          this.inventory.setItem(window, s.slot, next, this.inventory.rawItem(window, s.slot)); // Track AG: keep the wire item (NBT)
+        } else if (this.predicted.get(r.request_id)?.find((x) => x.window === window && x.slot === s.slot)) {
+          // Track AG: the slot this request filled was emptied meanwhile (another request's rollback): the server says it holds the item
+          const was = this.predicted.get(r.request_id)!.find((x) => x.window === window && x.slot === s.slot)!.item;
+          const next: ItemStack = { ...was, count: s.count };
           if (s.item_stack_id !== undefined) next.stackId = s.item_stack_id;
           this.inventory.setItem(window, s.slot, next);
         } else {

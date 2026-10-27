@@ -24,6 +24,7 @@ import type { ChunkSummary } from './summary.ts';
 import { cellKey, decodeSummary, encodeRaw, encodeSummary, summarizeColumn, type CellDiff } from './summary.ts';
 import { decodeSeenMarks } from './summary.ts'; // Track Z: ore memory (seen marks)
 import { HerdMarks } from './herds.ts'; // Track AF: herd marks (food v2), a sidecar of the cache dir
+import { ChestMemory } from './chests.ts'; // Track AG: chest memory (home logistics), a sidecar of the cache dir
 import { Y_NONE, type CachedMark, type CachedTerrain } from './types.ts';
 
 export interface WorldCacheOptions {
@@ -166,10 +167,13 @@ export class WorldCache implements CachedTerrain {
   private dimOverride: number | undefined;
   /** Track AF: herd marks (passive food mobs per 16-block cell), written with every flush. */
   readonly herds: HerdMarks;
+  /** Track AG: the containers at home (chests.ts), written with every flush. */
+  readonly chests: ChestMemory;
 
   constructor(opts: WorldCacheOptions) {
     this.dir = opts.dir;
     this.herds = new HerdMarks({ dir: opts.dir, dimension: () => this.dimension, readOnly: opts.readOnly ?? false }); // Track AF
+    this.chests = new ChestMemory({ dir: opts.dir, dimension: () => this.dimension, readOnly: opts.readOnly ?? false }); // Track AG
     this.log = opts.logger ?? silentLogger;
     this.flushIntervalMs = opts.flushIntervalMs ?? 30_000;
     this.maxChunks = opts.maxChunks ?? 1024;
@@ -521,6 +525,7 @@ export class WorldCache implements CachedTerrain {
       this.encodeDirty();
       for (const r of [...this.regions.values()]) if (r.changed.size > 0) await this.writeAsync(r);
       await this.herds.flush(); // Track AF
+      await this.chests.flush(); // Track AG
       this.stats.flushes++;
     })().finally(() => {
       this.flushing = undefined;
@@ -535,6 +540,7 @@ export class WorldCache implements CachedTerrain {
     this.encodeDirty();
     for (const r of this.regions.values()) this.writeSync(r);
     this.herds.flushSync(); // Track AF
+    this.chests.flushSync(); // Track AG
     this.stats.flushes++;
   }
 

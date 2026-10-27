@@ -51,6 +51,9 @@ export const STEP_SCHEMAS = {
   panel: z.strictObject({ command: z.literal('panel') }), // Track AK
   drop: z.strictObject({ command: z.literal('drop'), what: z.enum(['all', 'items']) }), // Track AK: everything / everything but food, armour, tools
   build: z.strictObject({ command: z.literal('build'), shape: z.enum(['fill', 'clear', 'wall', 'floor', 'pillar', 'file']), x: coordXZ.optional(), y: coordY.optional(), z: coordXZ.optional(), x2: coordXZ.optional(), y2: coordY.optional(), z2: coordXZ.optional(), height: z.number().int().min(1).max(64).optional(), block: blockName.optional(), name: z.string().regex(/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/).optional() }), // Track AL: !build
+  unload: z.strictObject({ command: z.literal('unload'), all: z.boolean().optional() }), // Track AG: !unload [all]
+  stock: z.strictObject({ command: z.literal('stock'), item: blockName.optional() }), // Track AG: !stock [item]
+  chests: z.strictObject({ command: z.literal('chests'), scan: z.boolean().optional() }), // Track AG: !chests [scan]
   question: z.strictObject({ command: z.literal('question'), text: z.string().min(1).max(200) }),
   answer: z.strictObject({ command: z.literal('answer'), text: z.string().min(1).max(200) }), // Track AM: a reply, nothing runs; the only step
 } as const;
@@ -87,6 +90,7 @@ export const StepSchema = z.discriminatedUnion('command', [
   STEP_SCHEMAS.panel, // Track AK
   STEP_SCHEMAS.drop, // Track AK
   STEP_SCHEMAS.build, // Track AL
+  ...[STEP_SCHEMAS.unload, STEP_SCHEMAS.stock, STEP_SCHEMAS.chests], // Track AG
   STEP_SCHEMAS.question,
   STEP_SCHEMAS.answer, // Track AM
 ]);
@@ -136,6 +140,7 @@ export const COMMAND_SPECS: Record<Exclude<StepKind, TalkKind>, CommandSpec> = {
   panel: { chat: 'panel', wait: 'none' }, // Track AK
   drop: { chat: 'drop', wait: 'reply', done: /^(dropped \d+ items of |drop: (inventory empty|nothing but))/, fail: /\(stopped at / }, // Track AK
   build: { chat: 'build', wait: 'process', fail: /^build: / }, // Track AL
+  ...{ unload: { chat: 'unload', wait: 'process', fail: /^unload: (no home|I know no)/ }, stock: { chat: 'stock', wait: 'none' }, chests: { chat: 'chests', wait: 'process' } }, // Track AG
 };
 
 /** Replies that end any step and the plan. */
@@ -238,6 +243,10 @@ export function stepCommand(s: Step): string {
       return `drop ${s.what}`;
     case 'build': // Track AL
       return buildStepText(s);
+    case 'unload': // Track AG
+    case 'stock':
+    case 'chests':
+      return s.command === 'unload' ? (s.all ? 'unload all' : 'unload') : s.command === 'stock' ? (s.item ? `stock ${s.item}` : 'stock') : s.scan ? 'chests scan' : 'chests';
     case 'question':
     case 'answer': // Track AM
       return s.text;

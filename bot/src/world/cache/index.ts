@@ -19,6 +19,7 @@ export { parseRegion, serializeRegion, readRegion, regionFileName, regionOf, slo
 export { findCachedTrees, cachedLookup, type CachedTree } from './trees.ts';
 export * from './types.ts';
 export { HerdMarks, HERD_FILE, type HerdMark, type HerdMarkStore, type HerdCounts } from './herds.ts'; // Track AF
+export { ChestMemory, CHEST_FILE, chestKey, type ChestRecord, type ChestMemoryStore } from './chests.ts'; // Track AG
 
 /**
  * A directory-safe id for a connection target, so caches of different servers never mix: a readable

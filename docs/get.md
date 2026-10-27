@@ -160,11 +160,24 @@ random truth request ids; the area is cleared and drops removed at the end.
 | `getinv playerName` | like `inv`, plus the contents of items that carry an inventory component (bundles; not shulker boxes in 2.10.0) |
 | `boxitems x y z r` | item entities within r, with nested contents when readable |
 
+## Home logistics (wave 9, Track AG)
+
+What a job brings back now has a place to go: the bot remembers the containers within
+`homeChestRadius` of home and what they hold, and `!unload` (or the `autoUnload` chore) puts each
+stack with the same item, in a chest labelled for it, or in the emptiest chest, filling a spare
+shulker box from the box chest when every chest is full (docs/home.md). A `!get` job that ends
+within 8 blocks of home is followed by such an unload, and its line `unloaded: 64 coal -> chest
+100 63 -48, ...` comes after the job's own reply. The stash step itself is unchanged; its shulker
+box names, the NBT reader and the `shulker` slot type moved to the chest skill
+(`skills/container/chest.ts`), which now sets the slot type per window on the shared Containers
+(`shulker` for shulker boxes, `barrel` for barrels, verified; `container` for chests), so the stash
+no longer switches the Containers' private option.
+
 ## Open points
 
-- `world/containers.ts` should know the slot type per window (`shulker` for shulker boxes, probably
-  `barrel` for barrels) instead of the stash switching its private `chestSlotType`; the chest skill
-  should list shulker boxes in `CONTAINER_BLOCKS` itself (stash.ts adds them at load time).
+- ~~`world/containers.ts` should know the slot type per window~~ done in wave 9 (Track AG):
+  `Containers.setSlotType`, set by the chest skill when it opens a container; shulker boxes are in
+  `CONTAINER_BLOCKS` from the start.
 - No ender chest step yet (same click and window; the slot type is unverified).
 - The food job checks for room only before a hunt; a long hunt that fills the inventory picks
   nothing more up until the next job. Farming keeps its own chest trips (no stash call).

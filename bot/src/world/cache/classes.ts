@@ -34,7 +34,7 @@ const KEEP_NAMES = new Set([
 export function isInteresting(name: string): boolean {
   if (KEEP_NAMES.has(name)) return true;
   if (name.endsWith('_log')) return !name.startsWith('stripped_');
-  return name.endsWith('_ore') || name.endsWith('_bed') || name.endsWith('_door');
+  return name.endsWith('_ore') || name.endsWith('_bed') || name.endsWith('_door') || name.endsWith('shulker_box'); // Track AG: shulker boxes are container marks like chests and barrels
 }
 
 /** The cache class of a block as the planner sees it (layer 0). */

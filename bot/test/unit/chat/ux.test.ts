@@ -79,7 +79,7 @@ describe('tiers and !help on the afk registry', () => {
     for (const n of ['cook', 'eat', 'equip', 'sleep', 'food', 'get', 'drop', 'home', 'shelter', 'breed', 'wp']) expect(byName.get(n)?.auto, n).toBeTruthy();
     // the deletion candidates of docs/ux.md: `more` without an automatic trigger
     const candidates = infos.filter((c) => c.tier === 'more' && !c.auto).map((c) => c.name).sort();
-    expect(candidates).toEqual(['commands', 'farm', 'gather', 'goto', 'health', 'inv', 'kill', 'mine', 'mode', 'no', 'pause', 'pos', 'quit', 'resume', 'set', 'top', 'yes']);
+    expect(candidates).toEqual(['commands', 'farm', 'gather', 'goto', 'health', 'inv', 'kill', 'mine', 'mode', 'no', 'pause', 'pos', 'quit', 'resume', 'set', 'stock', 'top', 'yes']); // merge: + stock (Track AG; unload and chests have auto lines)
   });
 
   it('!help: at most 3 messages of 256, the front door only, ending with !help all and !help <command>', () => {
@@ -375,8 +375,9 @@ describe('!get never takes from chests', () => {
   it('no code path of !get or the stash step takes items out of a container', () => {
     // the chest skill has open / deposit / close only; the stash deposits; the catalog and !get never open one
     const src = (p: string) => readFileSync(new URL(`../../../src/${p}`, import.meta.url), 'utf8');
-    expect(src('skills/container/chest.ts')).not.toMatch(/\b(withdraw|takeOut|take)\s*\(/);
+    // chest.ts has a generic `take` since Track AG (home logistics: !unload, spare boxes); the stash and !get never import or call it
     expect(src('skills/container/stash.ts')).not.toMatch(/\b(withdraw|takeOut|take)\s*\(/);
+    expect(src('skills/container/stash.ts')).not.toMatch(/import \{[^}]*\btake\b[^}]*\} from '\.\/chest\.ts'/);
     expect(src('skills/items/catalog.ts')).not.toMatch(/container|chest\.|\.open\(/i);
     expect(src('chat/commands-get.ts')).not.toMatch(/\.open\(|withdraw/);
   });
