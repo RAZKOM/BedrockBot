@@ -33,7 +33,17 @@ interface NumberDef {
   description: string;
 }
 
-export type SettingDef = BoolDef | NumberDef;
+/** Track AF: a short text value (`chorePen`: `x y z` or `none`); `parse` normalizes it or throws SettingError. */
+interface TextDef {
+  kind: 'text';
+  default: string;
+  /** Shown as the range in `!set <key>`. */
+  format: string;
+  parse(raw: string): string;
+  description: string;
+}
+
+export type SettingDef = BoolDef | NumberDef | TextDef; // Track AF: + TextDef
 
 /**
  * Every runtime setting. Placeholders (read by later tracks) are marked; adding one is one entry here
@@ -61,10 +71,12 @@ export const SETTING_DEFS = {
   foodLeave: { kind: 'number', default: 2, min: 0, max: 16, integer: true, unit: 'mobs', description: '!food never leaves fewer of a kind than this within the radius' }, // Track X
   mineSeenOnly: { kind: 'boolean', default: false, description: 'mining: only ore the bot has seen an open face of (off: any known ore, tunnelling to it)' }, // Track Z
   plannerThreads: { kind: 'number', default: 1, min: 0, max: 1, integer: true, unit: 'threads', description: 'plan paths in a worker thread (bigger budgets, no tick waits for the planner); 0 = on the main thread' }, // Track AB
+  autoBreed: { kind: 'boolean', default: false, description: 'breed the animals of chorePen as a chore (every 10 min while it holds fewer than 8 adults of a kind)' }, // Track AF
+  chorePen: { kind: 'text', default: 'none', format: 'x y z|none', parse: (raw: string): string => { const t = raw.trim().toLowerCase(); if (t === '' || t === 'none') return 'none'; const n = t.split(/[\s,]+/).map(Number); if (n.length !== 3 || !n.every((v) => Number.isFinite(v))) throw new SettingError(`chorePen must be x y z (a block inside the pen) or none, got "${raw}"`); return n.map((v) => Math.floor(v)).join(' '); }, description: "the owner's pen for the chores: its animals may be hunted down to 2 adults of each kind and autoBreed breeds them" }, // Track AF
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;
-export type SettingValue<K extends SettingKey> = (typeof SETTING_DEFS)[K] extends { kind: 'boolean' } ? boolean : number;
+export type SettingValue<K extends SettingKey> = (typeof SETTING_DEFS)[K] extends { kind: 'boolean' } ? boolean : (typeof SETTING_DEFS)[K] extends { kind: 'text' } ? string : number; // Track AF: text
 export type SettingValues = { [K in SettingKey]: SettingValue<K> };
 
 export const SETTING_KEYS = Object.keys(SETTING_DEFS) as SettingKey[];
@@ -92,6 +104,7 @@ export function parseSettingValue<K extends SettingKey>(key: K, raw: unknown): S
     if (FALSE.has(s)) return false as SettingValue<K>;
     throw new SettingError(`${key} must be on or off, got ${show(raw)}`);
   }
+  if (def.kind === 'text') return def.parse(String(raw)) as SettingValue<K>; // Track AF
   const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw.trim()) : NaN;
   if (!Number.isFinite(n) || n < def.min || n > def.max || (def.integer === true && !Number.isInteger(n))) {
     throw new SettingError(`${key} must be ${def.integer ? 'a whole number ' : ''}${def.min}..${def.max}, got ${show(raw)}`);
@@ -99,16 +112,16 @@ export function parseSettingValue<K extends SettingKey>(key: K, raw: unknown): S
   return n as SettingValue<K>;
 }
 
-export function formatSettingValue(key: SettingKey, v: boolean | number): string {
+export function formatSettingValue(key: SettingKey, v: boolean | number | string): string {
   const def: SettingDef = SETTING_DEFS[key];
   if (def.kind === 'boolean') return v ? 'on' : 'off';
   return String(v);
 }
 
 /** `guardRadius 16 (2..64 blocks, default 16): guard: fight hostiles ...` */
-export function describeSetting(key: SettingKey, value: boolean | number): string {
+export function describeSetting(key: SettingKey, value: boolean | number | string): string {
   const def: SettingDef = SETTING_DEFS[key];
-  const range = def.kind === 'boolean' ? 'on|off' : `${def.min}..${def.max}${def.unit ? ` ${def.unit}` : ''}`;
+  const range = def.kind === 'boolean' ? 'on|off' : def.kind === 'text' ? def.format : `${def.min}..${def.max}${def.unit ? ` ${def.unit}` : ''}`; // Track AF: text
   return `${key} ${formatSettingValue(key, value)} (${range}, default ${formatSettingValue(key, def.default)}): ${def.description}`;
 }
 
@@ -126,7 +139,7 @@ export class RuntimeSettings {
   private readonly sources = new Map<SettingKey, SettingSource>();
   /** What settings.json holds (only values set with !set); unknown keys from the file are kept as they were. */
   private persisted: Record<string, unknown> = {};
-  private readonly listeners = new Set<(key: SettingKey, value: boolean | number, old: boolean | number) => void>();
+  private readonly listeners = new Set<(key: SettingKey, value: boolean | number | string, old: boolean | number | string) => void>();
   private readonly log: Logger;
 
   constructor(opts: RuntimeSettingsOptions = {}) {
@@ -198,7 +211,7 @@ export class RuntimeSettings {
   }
 
   /** `!set key default`: back to the built-in default and removed from the file. */
-  reset(key: SettingKey): boolean | number {
+  reset(key: SettingKey): boolean | number | string {
     const def = SETTING_DEFS[key].default;
     this.assign(key, def, 'default');
     delete this.persisted[key];
@@ -206,16 +219,16 @@ export class RuntimeSettings {
     return def;
   }
 
-  onChange(fn: (key: SettingKey, value: boolean | number, old: boolean | number) => void): () => void {
+  onChange(fn: (key: SettingKey, value: boolean | number | string, old: boolean | number | string) => void): () => void {
     this.listeners.add(fn);
     return () => {
       this.listeners.delete(fn);
     };
   }
 
-  private assign(key: SettingKey, v: boolean | number, source: SettingSource): void {
+  private assign(key: SettingKey, v: boolean | number | string, source: SettingSource): void {
     const old = this.values[key];
-    (this.values as Record<SettingKey, boolean | number>)[key] = v;
+    (this.values as Record<SettingKey, boolean | number | string>)[key] = v;
     this.sources.set(key, source);
     if (old !== v) {
       for (const fn of [...this.listeners]) {
