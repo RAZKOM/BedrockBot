@@ -4,6 +4,8 @@
 // MineTask.resume() (a fresh scan picks the nearest target again). It ends by itself (n mined, no
 // seen ore left, low health, no pickaxe) or with `!mine stop` / `!stop` / a `!farm`. A death drops it.
 import type { MineOptions, MineState, MineTask } from '../../skills/mine/miner.ts';
+import { stashFor, type Stash } from '../../skills/container/stash.ts'; // Track AD
+import { minedItem } from '../../skills/items/catalog.ts'; // Track AD
 import { BaseProcess, PRIORITY, type ProcessStatus, type StopReason } from './manager.ts';
 
 export class MineProcess extends BaseProcess {
@@ -39,6 +41,42 @@ export class MineProcess extends BaseProcess {
       return;
     }
     this.task.resume();
+  }
+
+  /** Track AD: the stash step runs (the task is paused meanwhile). */
+  private stashing = false;
+
+  /**
+   * Track AD (docs/get.md "Stash"): every tick in control, when fewer than 2 inventory slots are free
+   * (also right at the start), pause the task, run the stash step (chest, shulker box, drop junk) and
+   * resume; still full: the job ends 'inventory full'. A pre-emption cancels the step (the manager's
+   * control change, commands-get) and the next tick in control checks again.
+   */
+  tick(): void {
+    const s = stashFor(this.manager);
+    if (!s || this.stashing || !this.started || !this.controlled || !this.task.running || this.task.state === 'collect' || !s.needed()) return;
+    void this.stashStep(s, this.token);
+  }
+
+  private async stashStep(s: Stash, t: number): Promise<void> {
+    this.stashing = true;
+    this.task.pause();
+    try {
+      const names = [...this.task.names];
+      const ok = await s.ifFull({ label: 'mine', wanted: (n) => names.some((b) => minedItem(b) === n) });
+      if (t !== this.token || this.done) return;
+      if (ok) {
+        this.task.resume();
+        return;
+      }
+      this.task.stop();
+      this.task.state = 'failed';
+      this.task.lastError = 'inventory full';
+      this.finish();
+      this.resolve('failed');
+    } finally {
+      this.stashing = false;
+    }
   }
 
   protected halt(why: 'pause' | 'stop'): void {

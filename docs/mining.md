@@ -48,6 +48,8 @@ skipped), eta 40 s`). It ends by itself (n mined, none left, low health, no pick
 a death. The afk task's Hotbar and Containers are shared (no second Containers); `mineTunnelLen` and
 `mineSeenOnly` come from the runtime settings.
 
+A full inventory (fewer than 2 free slots, also at the start) pauses the task for the stash step (stash chest, a carried shulker box, junk dropped; `!get coal 4` is the front door for mining) and resumes it; still full ends the job `mine coal_ore: failed after 2/4 (inventory full)` (wave 8 Track AD, docs/get.md "Stash"). An ore within reach whose approach plan leads nowhere (buried under the floor) is no longer skipped as unreachable: its line of sight is dug instead (Track AD, one line in `mineOne`).
+
 ## Candidates: `mineSeenOnly` (owner decision 2026-10-29)
 
 | `mineSeenOnly` | Targets of `!mine <block> n` |

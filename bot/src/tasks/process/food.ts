@@ -32,6 +32,7 @@ import { cellKey, HERD_RANGE, type HerdMemory } from '../../skills/food/herds.ts
 import type { Pen } from '../../skills/food/pen.ts'; // Track AF
 import type { HerdMark } from '../../world/cache/herds.ts'; // Track AF
 import type { EntityInfo, ItemStack } from '../../world/types.ts';
+import { stashFor } from '../../skills/container/stash.ts'; // Track AD
 import { BaseProcess, PRIORITY, type ProcessManager, type ProcessStatus, type StopReason } from './manager.ts';
 
 /** Hunt radius around where the job started. */
@@ -135,6 +136,13 @@ export class FoodJob {
     if (!opts.hunt) this.phase = 'cook';
   }
 
+  /** Track AD: the inventory stayed full after the stash step: the job is over. */
+  private full(): boolean {
+    this.huntReason = 'inventory_full';
+    this.phase = 'done';
+    return true;
+  }
+
   /** Run (or go on) until done or cancelled. Returns true when the job is over. */
   async run(d: FoodDeps, cancelled: () => boolean): Promise<boolean> {
     if (this.phase === 'hunt') {
@@ -142,6 +150,8 @@ export class FoodJob {
       const anyPen = this.opts.pens === true;
       for (;;) {
         if (!this.trip) {
+          // Track AD: the stash step (skills/container/stash.ts, docs/get.md); still full: the job ends
+          if (!((await stashFor(d.processes)?.ifFull({ label: 'food' })) ?? true) && !cancelled()) return this.full();
           const r: HuntResult = await d.hunter.hunt(
             {
               want: this.want - this.gained,

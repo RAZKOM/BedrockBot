@@ -54,6 +54,8 @@ docs/runbook.md (server row, two command rows, test line, per-track pointer).
 
 Without walking both answer `<cmd> needs a task that can walk (...)`.
 
+`!get beef` / `!get food 6` start the same hunt (docs/get.md). Before a hunt starts or resumes, a full inventory (fewer than 2 free slots) runs the stash step (stash chest, a carried shulker box, junk dropped; food itself is always kept); still full ends the job with reason `inventory_full` (wave 8 Track AD, docs/get.md "Stash").
+
 ## Settings
 
 | Key | Default | Bounds | Meaning |

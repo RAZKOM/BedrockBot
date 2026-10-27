@@ -419,7 +419,7 @@ export class MineTask {
           const plan = this.d.plan(goal, opts);
           if (!plan || noProgress(plan)) {
             // Track Z: one plan that leads nowhere is enough (the navigator would retry it for seconds)
-            if (r === APPROACH_EYE_RANGE) return this.markUnreachable(t, plan?.status === 'none' ? 'no route' : 'no progress possible');
+            if (r === APPROACH_EYE_RANGE && !near()) return this.markUnreachable(t, plan?.status === 'none' ? 'no route' : 'no progress possible'); // Track AD: in reach already (ore under the floor): dig the sight line instead
             break; // the closer approach is not possible: dig from where the first one ended
           }
           const digs = plan.path.reduce((a, n) => a + (n.act?.dig?.length ?? 0), 0);

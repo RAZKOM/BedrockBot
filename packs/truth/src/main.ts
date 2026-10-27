@@ -49,6 +49,7 @@ import { foodHandlers } from './food.js'; // Track X: truth:furnace, setfurnace,
 import { combatHandlers } from './combat.js'; // Track V: truth:combatlog, truth:held (wave 7 combat)
 import { paletteHandlers } from './palette.js'; // Track AC: truth:palette (block states dump, wave 8)
 import { gauntHandlers } from './gaunt.js'; // Track W: truth:bed, truth:sleeping (survival policy, sleeping)
+import { getHandlers } from './get.js'; // Track AD: truth:stuff, getinv, boxitems (!get, stash)
 
 declare const __PACK_VERSION__: string;
 /** QuickJS console (prints to the BDS content log). */
@@ -547,6 +548,7 @@ Object.assign(handlers, foodHandlers({ getBlock, assertLoaded, overworld })); //
 Object.assign(handlers, combatHandlers({ overworld })); // Track V: combatlog, held
 Object.assign(handlers, paletteHandlers({ getBlock, assertLoaded, overworld })); // Track AC: palette, palettestrip, palettestates
 Object.assign(handlers, gauntHandlers({ getBlock, assertLoaded, overworld })); // Track W: bed, sleeping
+Object.assign(handlers, getHandlers({ overworld })); // Track AD: stuff, getinv, boxitems
 
 function blockVolume(a: Vec3, b: Vec3): BlockVolume {
   return new BlockVolume(a, b);

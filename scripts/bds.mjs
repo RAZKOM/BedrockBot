@@ -30,6 +30,7 @@
 //   food   bds-food   docker/compose.food.yml           BDS 1.26.60.6, RakNet    udp/19190 (food-* e2e; difficulty easy; Track X)
 //   reg    bds-reg    docker/compose.reg.yml            BDS 1.26.60.6, RakNet    udp/19192 (world-registry e2e, block palette dump; Track AC)
 //   gaunt  bds-gaunt  docker/compose.gaunt.yml          BDS 1.26.60.6, RakNet    udp/19188 (gaunt-* e2e: flee, readiness, sleep; Track W)
+//   get    bds-get    docker/compose.get.yml            BDS 1.26.60.6, RakNet    udp/19194 (get-* e2e; Track AD)
 // Any other BDS_CONTAINER value works for restart/idle/cmd/logs only.
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -55,6 +56,7 @@ const PROFILES = {
   food: { container: 'bds-food', compose: 'compose.food.yml', data: 'food', port: 'udp/19190' }, // Track X
   reg: { container: 'bds-reg', compose: 'compose.reg.yml', data: 'reg', port: 'udp/19192' }, // Track AC: world-registry e2e, palette dump
   gaunt: { container: 'bds-gaunt', compose: 'compose.gaunt.yml', data: 'gaunt', port: 'udp/19188' }, // Track W: flee, readiness, sleep (difficulty normal)
+  get: { container: 'bds-get', compose: 'compose.get.yml', data: 'get', port: 'udp/19194' }, // Track AD
 }
 const argv = process.argv.slice(2)
 const profileFlag = argv.indexOf('--profile')

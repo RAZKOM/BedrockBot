@@ -1,0 +1,33 @@
+# BDS for the `!get` and stash e2e tests (wave 8, Track AD; docs/get.md). Made from compose.cache.yml
+# (offline, RakNet, operator, TICK_DISTANCE 10, own project name) but on a FLAT world so every test
+# builds its own oak stand, buried coal and chest on a known floor (grass top at y -61, feet at -60).
+# Peaceful, container bds-get on udp/19194, data in docker/data/get.
+#   node scripts/bds.mjs --profile get up
+#   node scripts/bds.mjs --profile get pack          # truth pack (needed by the get-* e2e tests)
+name: bedrockbot-get
+
+services:
+  bds-get:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-get
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: peaceful
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: get
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-get
+      SERVER_PORT: "19194"
+      TICK_DISTANCE: "10"
+    ports:
+      - "19194:19194/udp"
+    volumes:
+      - ./data/get:/data
+    stdin_open: true
+    tty: true
