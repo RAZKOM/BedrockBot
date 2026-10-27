@@ -16,6 +16,7 @@ import { registerNavCommands } from '../chat/commands-nav.ts'; // Track R
 import { registerFarmCommands } from '../chat/commands-farm.ts'; // Track U
 import { registerNlCommands } from '../chat/commands-nl.ts'; // Track Y
 import { registerFoodCommands } from '../chat/commands-food.ts'; // Track X
+import { registerGetCommands } from '../chat/commands-get.ts'; // Track AD
 import { formatChatLine } from '../chat/text.ts';
 import type { RuntimeSettings } from '../config/settings.ts';
 import { settingsFromValues } from '../config/settings.ts';
@@ -328,6 +329,7 @@ export const afkTask: TaskDefinition = {
       (d) => registerSurvivalCommands({ chat: d.chat, source: d.conn, mob, pve, task, containers, inactive: () => respawn.dead || ctx.conn.state !== 'spawned', logger: ctx.logger('survival') }), // Track S
       (d) => void registerNlCommands(d, ctx.values), // Track Y
       (d) => void registerFoodCommands(d, { containers, clock }), // Track X: !food, !cook, the food chore
+      (d) => void registerGetCommands(d, { containers, logger: ctx.logger('stash') }), // Track AD: !get, the stash step (after gather / farm / survival / food)
     ];
     for (const register of registrations) register(deps);
     return task;
