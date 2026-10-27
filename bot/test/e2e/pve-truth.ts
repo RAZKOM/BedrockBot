@@ -172,7 +172,7 @@ export async function startPveBot(prefix: string, options: Partial<CommonTaskOpt
     chat,
     version: E2E_VERSION,
     options: common,
-    values: extra.values ?? {},
+    values: { 'no-config': true, ...(extra.values ?? {}) }, // waypoints and settings in memory only (never the user's config dir)
     logger: VERBOSE ? (scope) => createLogger('info', `${name}:${scope}`) : () => silentLogger,
     position: () => ref.task?.position(),
   });

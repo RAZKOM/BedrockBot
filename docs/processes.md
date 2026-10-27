@@ -29,7 +29,7 @@ control gets it).
 
 | Priority | Process | Kind | Wants control while | Pre-empted (pause) | Resumed |
 |---|---|---|---|---|---|
-| 100 | `flee` | auto | health < `fleeHealth` with a hostile within 16 (not while night safety walks to the shelter, 10 s after the last flight), until it arrives | (only a death) | walks again to the same place |
+| 100 | `flee` | auto | health < `fleeHealth` with a hostile within 16, or a creeper within 8 with health < 10 (not while night safety walks to the shelter; a lone melee mob the bot can still take 3 hits from is duelled instead); runs away to 16 blocks first, then home or the shelter when the threat is not in the way, eating once 8 blocks clear; recovery until `fleeHealth` + 6 for up to 60 s (docs/pve.md "Flee v2") | (only a death) | walks again to the same place |
 | 85 | `guard` defending in place | auto | a hostile within reach while inside the night shelter or while the health is low | fight cancelled | a new target is picked |
 | 80 | `night` | auto | dusk to dawn with a shelter set: walking there, a retreat due, or inside (it holds the bot there) | the retreat is cancelled, not counted as a failed attempt (`waiting`) | the retreat is planned again |
 | 60 | `guard` fight | auto | guard on and a hostile within `guardRadius` of home (of the bot while a command runs); not while a kill job exists | fight cancelled (the episode ends) | a new target is picked |

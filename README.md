@@ -50,9 +50,12 @@ The Realm: docs/runbook.md "Realm join (you do this)".
 | Natural language | `!do <text>` turns a sentence into a checked plan of the commands below (local Ollama; off until configured) | `bot/src/nl/`, docs/natural-language.md |
 | RL | Phase 6 bridge and Gymnasium env, frozen; hand-written behaviours replaced the trained-policy plan | `bot/src/bridge/`, `rl/`, docs/rl.md |
 
-In progress (wave 7): reachability-aware targeting and a creeper protocol, flee that runs away before
-running home, eating and armour before long trips, sleeping in a bed, food gathering and cooking, stairs
-and slabs in the planner, farm and mine on the process manager.
+Wave 7 (survival first) landed 2026-10-29/30: reachability-aware targeting and a creeper protocol, flee
+that runs away before running home, eating and armour before long trips, sleeping in a bed, food
+gathering and cooking, stairs and slabs in the planner, farm and mine on the process manager. Wave 8
+in progress: planner in a worker thread, `!get` as the one front door with a stash step, food v2
+(herds, pens, breeding). Landed from wave 8: the LAN control panel and a block registry that knows
+every 1.26.60 block state.
 
 ## Chat commands
 
@@ -63,7 +66,7 @@ The bot answers in chat. Full reply texts and edge cases: docs/runbook.md "Chat 
 
 | Command | What it does |
 |---|---|
-| `!come [name]` | Walks to you (or the named player) and stays there. Fights or flees on the way if it must. |
+| `!come [name] [now]` | Walks to you (or the named player) and stays there, also beyond the entity range through the locator bar. Fights or flees on the way if it must. Eats first when food or health is below 14 (`coming (eating first)`); at night without a chestplate it refuses unless you add `now`. |
 | `!follow [name]` | Follows you until `!stop`, sprinting to catch up, stopping 3 blocks away. |
 | `!goto x y z` / `!goto <waypoint>` | Walks to a feet block or a saved waypoint. Doors are opened; digging through and pillaring up need `allowBreak` / `allowPlace` (see settings). |
 | `!top` | Climbs out of a cave or pit to the nearest spot under the sky. |
@@ -78,8 +81,10 @@ The bot answers in chat. Full reply texts and edge cases: docs/runbook.md "Chat 
 | `!guard on` / `off` / `<radius>` / `!guard` | Fights hostile mobs within the radius of home (of itself without a home), picks up drops, walks back. |
 | `!kill <type> [n]` | Kills up to n mobs of that type within 32 blocks, nearest first. Never players. |
 | `!eat` | Eats the best food now. It also eats on its own when food drops below 18 or health is low. |
+| `!sleep` / `!sleep on` / `off` / `status` | Goes to bed now (night only; a bed within 8 blocks of the shelter, home or itself, or the `bed` waypoint) and stays until morning. It also sleeps by itself at night when a bed is known; `!sleep off` stops that. Sleeping resets the phantom timer. |
 | `!equip` | Puts on the best armour from its inventory. Also automatic. |
 | `!health` | Health, food, deaths and the last death cause. |
+| `!panel` | The control panel URLs (status, log, map, a command box) on the health port. |
 
 **Work**
 
