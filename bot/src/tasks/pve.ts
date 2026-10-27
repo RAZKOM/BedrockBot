@@ -24,7 +24,9 @@
 // - guard (when on): the hostile closest to the bot (or the one that hit it in the last 10 s, or one
 //   that targets it) within `guardRadius` of the home point (of the bot when no home is set or while
 //   a command runs) is fought. Neutral mobs only when they hit or target the bot. Players never. Not
-//   while a kill job is the active process (it is fighting already).
+//   while a kill job is the active process (it is fighting already). Track AO: a mob not within reach
+//   needs a probe path of at most `guardReach` blocks (else ignored 30 s); during a user walk only mobs
+//   within reach or melee threats within 6 path blocks (`guardWhileWalking`; docs/pve.md).
 // - night: while night safety wants the shelter, inside it the bot only defends in place (85, above
 //   the night process); on the way there guard does not interrupt (60 < 80).
 // - after a guard fight (not in place) the drops within 8 blocks are picked up; with no command
@@ -35,6 +37,7 @@ import { silentLogger, type Logger } from '../log.ts';
 import { CombatController, type CombatLoop, type CombatMover, type FightOptions, type FightResult } from '../skills/combat/combat.ts';
 import { bareType, classify, entityFeet, isPlayerEntity, MobTracker, typeMatches } from '../skills/combat/hostiles.ts';
 import * as targeting from '../skills/combat/targeting.ts'; // Track V: reachability-aware targeting, creeper rank
+import { PathReach, probeNavOf } from '../skills/combat/pathReach.ts'; // Track AO: path-reachable guard targets
 import { FollowController, type FollowLoop, type FollowTarget } from '../skills/follow/follow.ts';
 import type { Goal, NavGoal } from '../skills/nav/goals.ts';
 import type { GotoOptions, SkillResult } from '../skills/types.ts';
@@ -161,6 +164,10 @@ export class PveController {
   readonly fleeProcess: FleeProcess;
   /** Mobs not to pick again until the time (performance.now()). */
   readonly ignore = new Map<bigint, number>();
+  /** Track AO: why and since when each ignored mob is ignored (status, the hit rule). */
+  readonly ignoreWhy = new Map<bigint, targeting.IgnoreNote>();
+  /** Track AO: bounded probe plans to guard candidates (cached per mob for 5 s). */
+  readonly pathReach: PathReach;
   private readonly unsubs: (() => void)[] = [];
   readonly stats = { fights: 0, kills: 0, flees: 0, guardTriggers: 0 };
   /** The survival kit (eat, equip) for flee eating and trip readiness; wired by chat/commands-pve.ts (Track W). */
@@ -203,6 +210,7 @@ export class PveController {
       logger: this.log,
     });
     this.follower = new FollowController({ loop, mover: this.mover, entities: () => world.entities, logger: this.log });
+    this.pathReach = new PathReach({ nav: () => probeNavOf(this.mover), log: this.log }); // Track AO
     this.locator = new PlayerLocator(source); // Track W
     this.ownManager = deps.processes === undefined;
     this.processes =
@@ -255,6 +263,33 @@ export class PveController {
     return this.settings.get('fleeHealth');
   }
 
+  /** Track AO: max path blocks to a guard target not within reach (0 = terrain rule only). */
+  get guardReach(): number {
+    return this.settings.get('guardReach');
+  }
+
+  /** Track AO: who guard engages while a user process walks. */
+  get guardWhileWalking(): targeting.WalkRule {
+    const v = this.settings.get('guardWhileWalking');
+    return v === 'reach' || v === 'all' ? v : 'near';
+  }
+
+  /** Track AO: the mobs ignored now, with the reason and the seconds left (status, tests). */
+  ignored(): { runtimeId: string; type: string; reason: string; leftS: number }[] {
+    const now = performance.now();
+    const out: { runtimeId: string; type: string; reason: string; leftS: number }[] = [];
+    for (const [rid, until] of this.ignore) {
+      if (until <= now) {
+        this.ignore.delete(rid);
+        this.ignoreWhy.delete(rid);
+        continue;
+      }
+      const n = this.ignoreWhy.get(rid);
+      out.push({ runtimeId: String(rid), type: bareType(n?.type ?? this.d.world.entities.get(rid)?.type ?? '?'), reason: n?.reason ?? '?', leftS: Math.round((until - now) / 100) / 10 });
+    }
+    return out;
+  }
+
   /** A process moves the bot (kept for tests; the AFK nudge uses the manager's busy()). */
   ownsMovement(): boolean {
     return this.processes.busy();
@@ -279,6 +314,8 @@ export class PveController {
       follow: this.follower.status(),
       lastHitBy: this.mobs.lastHitBy ? { type: this.mobs.lastHitBy.type, why: this.mobs.lastHitBy.why, runtimeId: String(this.mobs.lastHitBy.runtimeId) } : null,
       stats: { ...this.stats, ...this.combat.totals },
+      ignored: this.ignored(), // Track AO
+      probes: { ...this.pathReach.stats }, // Track AO
     };
   }
 
@@ -940,6 +977,7 @@ class GuardProcess extends BaseProcess {
     const c = this.c;
     // a kill job fights already (unless !pause holds it)
     if (!c.guard.on || (!c.processes.paused && c.processes.find('kill').length > 0)) return false;
+    c.pathReach.prune(); // Track AO: drop stale probe verdicts
     this.pick = c.pickThreat(c.position(), c.low());
     return this.pick !== undefined;
   }
@@ -958,7 +996,8 @@ class GuardProcess extends BaseProcess {
     void c.combat.fight(e.runtimeId, opts).then(async (r) => {
       if (t !== this.token) return;
       c.countFight(r);
-      targeting.afterFight(c, e, r); // Track V: 10 s for out_of_range / unreachable, none for creeper_avoided / interrupted
+      targeting.afterFight(c, e, r); // Track V: 10 s for out_of_range, none for creeper_avoided / interrupted; Track AO: 30 s for unreachable, with the reason
+      if (r.reason === 'unreachable') c.pathReach.forget(e.runtimeId); // Track AO: probe it afresh after the ignore
       if (r.ok && !inPlace) {
         ep.phase = 'collect';
         await c.mover.collect(c.collectRadius, 200);

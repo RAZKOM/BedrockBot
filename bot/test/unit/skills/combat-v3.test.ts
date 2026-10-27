@@ -391,7 +391,7 @@ describe('shield', () => {
     ]);
     const s = setup(ents, { offhand: shieldItem });
     s.src.emit('set_entity_data', { runtime_entity_id: 8n, metadata: [{ key: 'target_eid', value: -42n }] });
-    const fight = s.combat.fight(7n);
+    const fight = s.combat.fight(7n, { stallTicks: 0 }); // the fake body never gets closer (Track AO's stall watchdog off)
     const sneaks: boolean[] = [];
     for (let i = 0; i < 75; i++) {
       s.loop.step(1);

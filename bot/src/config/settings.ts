@@ -89,6 +89,8 @@ export const SETTING_DEFS = {
   homeChestRadius: { kind: 'number', default: 16, min: 2, max: 48, integer: true, unit: 'blocks', description: 'home logistics: chests, barrels and shulker boxes within this radius of home are found, read and unloaded into' }, // Track AG
   homeChestWalk: { kind: 'number', default: 64, min: 0, max: 256, integer: true, unit: 'path blocks', description: 'home logistics: containers whose walk from home is longer than this (the planner\'s path) are skipped and remembered as unreachable; 0 = no path check (homeChestRadius only)' }, // Track AN
   autoUnload: { kind: 'boolean', default: true, description: 'unload into the chests at home as a chore when idle there with more than 8 stacks of unloadable items or a full shulker box' }, // Track AG
+  guardReach: { kind: 'number', default: 24, min: 0, max: 64, integer: true, unit: 'path blocks', description: 'guard: a hostile not within reach is fought only when the planner finds a walk to it of at most this length (else ignored for 30 s); 0 = no path check' }, // Track AO
+  guardWhileWalking: { kind: 'text', default: 'near', values: 'reach|near|all', parse: (raw: string) => { const v = raw.trim().toLowerCase(); if (v !== 'reach' && v !== 'near' && v !== 'all') throw new SettingError(`guardWhileWalking must be reach, near or all, got "${raw}"`); return v; }, description: 'guard during a walk (come, follow, goto, get, unload, build, ...): reach = only mobs within reach; near = also melee mobs, creepers and archers aiming at me within 6 path blocks; all = as when idle' }, // Track AO
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;

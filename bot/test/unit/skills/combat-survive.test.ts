@@ -117,14 +117,13 @@ describe('creepers', () => {
   it('an unreachable creeper is not fought in between again for 200 ticks', async () => {
     const ents = new Map<bigint, EntityInfo>([[7n, mob(7n, 'minecraft:zombie', { x: 0, y: -60, z: 20 })]]);
     const s = setup(ents);
-    const fight = s.combat.fight(7n);
+    const fight = s.combat.fight(7n, { stallTicks: 0 });
     ents.set(8n, mob(8n, 'minecraft:creeper', { x: 4.5, y: -60, z: 0 })); // e.g. behind a wall
-    for (let i = 0; i < 3; i++) {
-      s.loop.step(10);
-      expect(s.combat.target?.runtimeId).toBe(8n);
-      s.mover.finish({ ok: false, reason: 'unreachable' });
-      await flush();
-    }
+    // Track AO: one failed approach ends it (was 3)
+    s.loop.step(10);
+    expect(s.combat.target?.runtimeId).toBe(8n);
+    s.mover.finish({ ok: false, reason: 'unreachable' });
+    await flush();
     s.loop.step(1);
     expect(s.combat.target?.runtimeId).toBe(7n);
     s.loop.step(50);

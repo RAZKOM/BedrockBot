@@ -223,7 +223,7 @@ describe('CombatController', () => {
   it('ends when the target stays out of range for 100 ticks', async () => {
     const ents = new Map<bigint, EntityInfo>([[7n, mob(7n, 'minecraft:skeleton', { x: 0, y: -60, z: 40 })]]);
     const s = setup(ents);
-    const fight = s.combat.fight(7n, { maxRange: 32 });
+    const fight = s.combat.fight(7n, { maxRange: 32, stallTicks: 0 }); // Track AO: without the stall watchdog (it ends a target that does not come closer first)
     s.loop.step(100);
     expect((await fight).reason).toBe('out_of_range');
   });

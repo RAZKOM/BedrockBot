@@ -51,6 +51,13 @@
 //   after a creeper's fuse lights (backing off facing it); never on a strike tick or within reach of
 //   a melee target.
 //
+// Track AO (wave 9, docs/pve.md "Path-reachable targets", decision 0036): fast failure. An approach goto
+// that ends `unreachable` ends the target at once (`approachTries`, default 1; was 3 gotos, each with the
+// navigator's own 3 failed plans), and a target the bot neither gets 0.5 blocks closer to nor lands a hit
+// on for `stallTicks` (60) while out of reach (or after 5 strikes in reach without a hit: a window or
+// glass between) ends `unreachable` too (a partial plan that walks into a wall, a near goal reached on
+// the wrong side of a fence). Creepers (hit and run) and flying mobs (their own rule) are left out.
+//
 // Packet shape verified on BDS 1.26.60.6 (docs/pve.md "Packets"): transaction_type
 // 'item_use_on_entity', transaction_data { entity_runtime_id, action_type 'attack', hotbar_slot,
 // hand 'main_hand', held_item (the wire item as the server sent it), player_pos (eye), click_pos 0 }.
@@ -150,6 +157,10 @@ export interface FightOptions {
   retarget?: boolean;
   /** Track AH: the crowd rule ends the fight `crowded`. Default: the controller's `crowdRule` (true). */
   crowd?: boolean;
+  /** Track AO: approach gotos ending `unreachable` before the target ends `unreachable`. Default 1 (was 3). */
+  approachTries?: number;
+  /** Track AO: ticks without getting 0.5 blocks closer or landing a hit before the target ends `unreachable`. Default 60; 0 = off. */
+  stallTicks?: number;
 }
 
 export type FightOutcome =
@@ -363,6 +374,12 @@ interface Target {
   lastIgnited: boolean;
   /** Track AH: tick of our last strike on it (its knockback is not "leaving reach"). */
   struckAt: number;
+  /** Track AO: the stall watchdog: tick of the last progress (-1 = not started), closest reach since, hits landed (seen), strikes since. */
+  progressT: number;
+  best: number;
+  landedN: number;
+  landedSeen: number;
+  strikesSince: number;
 }
 
 interface Fight {
@@ -418,6 +435,12 @@ const PULL_WAIT = 40;
 const FLYING_OUT_OF_REACH = 20;
 /** Track AH: a fight starting this soon (ticks) after a `crowded` end does not apply the crowd rule. */
 const CROWD_REPEAT_TICKS = 60;
+/** Track AO: no progress this long (ticks) ends the target `unreachable` (FightOptions.stallTicks default). */
+export const STALL_TICKS = 60;
+/** Track AO: getting this much closer (eye to box) counts as progress. */
+const STALL_GAIN = 0.5;
+/** Track AO: in reach, this many strikes without a hit landing count as no progress. */
+const STALL_STRIKES = 5;
 
 export class CombatController {
   private readonly d: CombatDeps;
@@ -573,6 +596,8 @@ export class CombatController {
           creeperFirst: opts.creeperFirst ?? true,
           retarget: opts.retarget ?? this.retarget,
           crowd: opts.crowd ?? this.crowdRule,
+          approachTries: opts.approachTries ?? 1, // Track AO
+          stallTicks: opts.stallTicks ?? STALL_TICKS,
         },
         t: 0,
         lastStrike: -Infinity,
@@ -643,6 +668,11 @@ export class CombatController {
       litAt: -Infinity,
       lastIgnited: false,
       struckAt: -Infinity,
+      progressT: -1, // Track AO
+      best: Infinity,
+      landedN: 0,
+      landedSeen: 0,
+      strikesSince: 0,
     };
   }
 
@@ -786,12 +816,14 @@ export class CombatController {
     tg.pending = tg.pending.filter((p) => {
       if (hurts > p.hurts && ms?.lastHurtData === 2) {
         f.landed++;
+        tg.landedN++; // Track AO
         this.totals.landed++;
         return false;
       }
       if (tg.dead && (hurts > p.hurts || f.t - p.t <= 8)) {
         // the killing blow shows as death_animation, not as a hurt animation
         f.landed++;
+        tg.landedN++;
         this.totals.landed++;
         return false;
       }
@@ -945,6 +977,20 @@ export class CombatController {
       if (this.takeCover(f, tg, s.pos, e)) return;
     }
 
+    // Track AO: the stall watchdog (no 0.5 blocks closer, no hit landed): a wall, glass or a fence between
+    if (f.o.approach && f.o.stallTicks > 0 && !tg.flying && !tg.creeper) {
+      if (tg.progressT < 0 || tg.landedN > tg.landedSeen || reachNow < tg.best - STALL_GAIN) {
+        tg.progressT = f.t;
+        tg.best = reachNow;
+        tg.landedSeen = tg.landedN;
+        tg.strikesSince = 0;
+      } else if (f.t - tg.progressT >= f.o.stallTicks && (reachNow > f.o.reach + 0.3 || tg.strikesSince >= STALL_STRIKES)) {
+        this.log.info(`combat: no progress on ${bareType(tg.type)} #${tg.rid} for ${f.t - tg.progressT} ticks (closest ${tg.best.toFixed(1)}, now ${reachNow.toFixed(1)}, ${tg.strikesSince} strike(s) without a hit): unreachable`);
+        this.endTarget(f, 'unreachable');
+        return;
+      }
+    }
+
     let yaw: number;
     if (tg.flying) {
       // never chased: face it, strike within reach, give up when it stays out of reach
@@ -995,6 +1041,7 @@ export class CombatController {
       f.attacks++;
       tg.pending.push({ t: f.t, hurts: ms?.hurts ?? 0 });
       tg.struckAt = f.t;
+      tg.strikesSince++; // Track AO
       this.strike(tg.rid, eye);
       if (tg.creeper) tg.retreat = true;
     }
@@ -1162,7 +1209,7 @@ export class CombatController {
       if (this.active !== f || f.tg !== tg) return;
       if (!r.ok && r.reason === 'unreachable') {
         tg.gotoFails++;
-        if (tg.gotoFails >= 3) this.endTarget(f, 'unreachable');
+        if (tg.gotoFails >= f.o.approachTries) this.endTarget(f, 'unreachable'); // Track AO: at once by default (was 3)
       } else if (r.ok) {
         tg.gotoFails = 0;
       }

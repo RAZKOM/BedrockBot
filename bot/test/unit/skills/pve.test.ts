@@ -93,9 +93,14 @@ describe('PveController guard', () => {
     const s = setup({ home: { x: 0, y: -60, z: 0 } });
     const walk = s.pve.walk({ type: 'block', p: { x: 40, y: -60, z: 0 } });
     expect(s.pve.behaviour()).toBe('walking to 40 -60 0');
+    // Track AO: during a walk guard engages melee mobs near the bot (guardWhileWalking 'near'); a zombie 7 blocks off
     s.ents.set(7n, mob(7n, 'minecraft:skeleton', { x: 5, y: -60, z: 5 }));
     s.loop.step(5);
-    expect(s.pve.behaviour()).toBe('fighting skeleton');
+    expect(s.pve.behaviour()).toBe('walking to 40 -60 0'); // a skeleton that does not aim at the bot: left alone
+    s.ents.delete(7n);
+    s.ents.set(7n, mob(7n, 'minecraft:zombie', { x: 5, y: -60, z: 5 }));
+    s.loop.step(5);
+    expect(s.pve.behaviour()).toBe('fighting zombie');
     s.src.emit('entity_event', { runtime_entity_id: 7n, event_id: 'death_animation', data: 0 });
     s.loop.step(1);
     await tick();

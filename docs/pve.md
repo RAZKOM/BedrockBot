@@ -18,6 +18,8 @@ target); without walking every command answers `<cmd> needs a task that can walk
 | `bot/src/skills/combat/hostiles.ts` | `classify(type)` (hostile / neutral / passive / player / item / other), type-name matching (`zombified_piglin` = `zombie_pigman`, `villager` = `villager_v2`), entity feet / box / reach, `MobTracker`: per-mob health, creeper fuse, `target_eid`, hurt and death animations, own health drops and the `lastHitBy` guess |
 | `bot/src/skills/combat/combat.ts` | `CombatController`: `fight(runtimeId, opts)`, `attack(runtimeId)`, `selectWeapon()`, `pullWeapon()`, the attack packet builders, `coverCell` |
 | `bot/src/skills/combat/targeting.ts` | Track V: `isThreat`, `nearestHostile`, `pickThreat` (reachability-aware, creepers first), `reachability`, `wantsFlee(threat)`, `afterFight` / `ignoreMsAfter`; Track AH: `inReach` / `pickInReach` (re-targeting), `crowdOf` / `crowded` / `crowdThreat` (crowd rule) |
+| `bot/src/skills/combat/pathReach.ts` | Track AO: `PathReach` (bounded probe plans from the bot to a mob, verdicts cached per mob, `stats`), `mobGoal`, `pathVerdict`, `probeNavOf`; targeting.ts adds `lineOfSight`, `ignoreMob`, `userWalking`, `walkThreat`, `parseWalkRule` |
+| `bot/test/unit/skills/targeting-walls.test.ts`, `bot/test/e2e/pve-walls.test.ts` | Track AO unit tests (fakes and a generated flat world) and e2e on bds-pve (a glass pen, a window, the open, all during a `!goto`) |
 | `bot/src/skills/combat/shield.ts` | Track AH: `ShieldController`: shield into the offhand, archer shot prediction (`threat`, `shotDue`), the offhand item stack request |
 | `packs/truth/src/shield.ts` | Track AH: truth commands `stance` (isSneaking, offhand item and durability) and `blocklog` (mob melee swings and projectiles reaching a player, with the stance and the shield's durability) |
 | `bot/test/unit/skills/combat-v3.test.ts`, `bot/test/e2e/pve-crowd.test.ts` | Track AH unit tests on fakes; e2e (crowd rule, shield) on bds-pve; the re-targeting e2e is in `pve-combat.test.ts` |
@@ -59,8 +61,12 @@ Config file (`tasks.afk`): `"tasks": { "afk": { "guard": 16, "fleeHealth": 8 } }
 | `!kill <type> [n]` | kill up to n (1..64, default 1) mobs of that type within 32 blocks, nearest first, picking up drops after each; players refused |
 | `!status` | adds `behaviour ...`: `idle`, `guarding r=16`, `following Steve`, `coming to Steve`, `fighting zombie`, `fighting zombie (in place)`, `collecting drops`, `fleeing`, `walking to x y z`, `returning home`, `fighting zombie (kill zombie 1/3)` |
 
+Settings (`!set`, Track AO): `guardReach` (0..64 path blocks, default 24; 0 = no path check) and
+`guardWhileWalking` (`reach` | `near` | `all`, default `near`); see "Path-reachable targets".
+
 `task.status()` (metrics `taskStatus.pve`) has `behaviour`, `guard`, `fleeHealth`, `health`, `target`,
-`follow` (state, distance, last known position), `lastHitBy` and counters; metrics counters
+`follow` (state, distance, last known position), `lastHitBy`, counters, and (Track AO) `ignored` and
+`probes`; metrics counters
 `pve.guard`, `pve.fights`, `pve.kills`, `pve.flees`, `pve.fight.<outcome>`.
 
 ## Behaviour
@@ -139,8 +145,8 @@ beef because the sword was in the main inventory. Decision record:
   the fight on it only runs until it is 11 blocks away (`creeper_avoided`); in place (health below
   `fleeHealth`, inside the shelter) creepers are never picked. `PveController.wantsFlee(threat)` is
   true for a creeper within 8 blocks below health 10 (the hook for Track W's FleeProcess).
-- **After a fight** (`afterFight`, also the guard process): `out_of_range` and `unreachable` 10 s,
-  `took_cover` 3 s, `killed` / `creeper_avoided` / `interrupted` / `crowded` (Track AH) not ignored,
+- **After a fight** (`afterFight`, also the guard process): `out_of_range` 10 s, `unreachable` 30 s
+  (Track AO; was 10 s), `took_cover` 3 s, `killed` / `creeper_avoided` / `interrupted` / `crowded` (Track AH) not ignored,
   anything else 30 s. The ignore list never blocks another mob: the next one is picked on the next
   evaluation.
 
@@ -220,6 +226,80 @@ zombies do little (a zombie hit is 1.4 through iron), the bot at 11 health also 
 (the run with 12.4 damage). No death either way. The rule is kept as the brief's trigger for the
 unarmoured case and larger crowds; its numbers (3, 4, 12) are constants in targeting.ts
 (`CROWD_COUNT`, `CROWD_RANGE`, `CROWD_HEALTH`) and `combat.crowdRule = false` turns it off.
+
+#### Path-reachable targets (wave 9, Track AO, decision 0036)
+
+The owner on the Realm: "It also gets stuck trying to fight mobs behind walls when on its way to
+places." The terrain rule above says nothing about a path: on a `!come`, `!goto`, `!get` or `!unload`
+walk guard picked a hostile standing on a standable cell behind a wall, a fence or a window, the fight
+pre-empted the walk, the approach failed `unreachable` up to 3 times (each a full plan), the mob was
+ignored for 10 s and the next guard tick picked it again or its neighbour. Now
+(`targeting.pickThreat`, `skills/combat/pathReach.ts`, `CombatController`):
+
+- **Within reach means in sight.** "Within reach now" also needs a line of sight: no cell with a
+  collision box up to its top (not leaves) between the eye and the mob's upper body, head or lower
+  body (`lineOfSight`). Glass blocks it; a 1-block window, a fence below the line, a slab do not.
+  (Measured: BDS accepts melee hits through a glass wall. With the old rule the bot walked into the
+  glass and killed a penned zombie through it in 58 to 96 ticks; the zombie cannot hit back, so it
+  is no threat and not worth the detour.)
+- **A probe plan before committing.** A candidate not within reach (in sight) gets a bounded probe
+  plan (Track AN's pattern, `skills/home/reach.ts`: 4 000 nodes, 300 ms, sliced on the main thread
+  with a yield between 8 ms slices, never digging or placing, no mob-avoidance cost) from the bot's
+  feet to a cell centre within 1.5 blocks (3D) of the mob's feet: its own cell or a neighbour, never
+  the far side of a 1-thick wall (1.8 at the least). The path length in blocks must be at most
+  **`guardReach`** (setting, default 24 path blocks; 0 = the terrain rule only, no probes).
+- **No path or too long: ignored for 30 s** with the reason (`no path`, `no path within 4000 nodes`,
+  `path 31 blocks > guardReach 24`), and the next candidate is looked at in the same evaluation.
+  While the best-ranked candidate's probe runs, only mobs within reach are picked (no worse pick
+  meanwhile). A candidate whose straight distance is beyond the limit + 2.5 is skipped without a probe.
+- **Cache**: one probe at a time; a verdict is kept per mob for 5 s and probed again when the mob, or
+  the bot, moved more than 3 blocks; a start that is not standable (in the air) gives no verdict and
+  is tried again after 0.5 s. A crowd of 10 costs one probe per tick at most, usually far fewer.
+- **Restraint while a user walk runs** (**`guardWhileWalking`**, `reach` | `near` | `all`, default
+  `near`): while any user process other than a kill job runs and is not held by `!pause` (come,
+  follow, goto, get, unload, build, explore, gather, farm, mine, food ...), guard engages only a mob
+  within reach (in sight), or (`near`) a melee threat, a creeper or an archer that targets the bot
+  within **6 path blocks** of the bot's cell (probed as above, a candidate farther than 8.5 blocks in
+  a straight line is not probed). Everything else is left alone until the walk ends (the walk's own
+  mob avoidance keeps the distance); a mob that is reachable but more than 6 path blocks off is not
+  ignored, only left. `reach`: within reach only. `all`: as without a walk (the `guardReach` rule).
+  Creepers count as melee threats here (a creeper walking up during a walk is worse than a zombie).
+- **Fast failure in the fight**: an approach goto that ends `unreachable` ends the fight at once
+  (`FightOptions.approachTries`, default 1; was 3 gotos, each with the navigator's own 3 failed
+  plans), and a stall watchdog (`FightOptions.stallTicks`, default 60, 0 = off) ends the target
+  `unreachable` when the bot neither got 0.5 blocks closer (eye to box) nor landed a hit for 60 ticks
+  while out of reach, or struck 5 times in reach without a hit landing (a partial plan that walks into
+  a wall, a near goal reached on the wrong side of a fence). Not for creepers (hit and run) or flying
+  mobs (their own rule). `unreachable` now ignores the mob for 30 s (was 10 s).
+- **A hit clears the ignore**: a mob that hit the bot after it was ignored is a target again at once
+  (it is reachable after all, or the bot must flee); not a flying one (its own 10 s rule).
+- **Status**: `PveController.status()` has `ignored` (`[{ runtimeId, type, reason, leftS }]`,
+  also `PveController.ignored()`) and `probes` (`PathReach.stats`: probes, found, failed, cached
+  answers, total and largest ms, nodes). Log lines: `guard: zombie #580 ignored for 30 s (no path
+  within 4000 nodes)`, `guard: zombie #580 hit us: no longer ignored (was: no path)`, `combat: no
+  progress on zombie #12 for 60 ticks (closest 2.9, now 3.4, 0 strike(s) without a hit): unreachable`.
+
+Probe cost (measured): on bds-pve a probe to a zombie in a closed glass pen in the flat world runs to
+its node budget: 4 000 nodes in 15 to 24 ms of search time (4 runs, spread over 8 ms slices); a probe that finds its
+mob in the open takes 0.1 to 0.2 ms. Unit (generated flat world): a 45-block detour round a 41-long
+glass wall is found in well under 300 ms. Per walk of 30 blocks past one penned zombie: 1 probe,
+about 24 ms in all.
+
+Measured on bds-pve (`pve-walls` e2e, iron armour, iron sword, guard radius 16, midnight; `!goto` 30
+blocks along a straight route):
+
+| Case | New rules | Old rule (`guardReach 0`, `guardWhileWalking all`; fast failure kept) |
+|---|---|---|
+| (a) zombie 4 blocks away in a closed 3-high glass pen, wall 2 blocks from the bot | arrived in 6.3 to 6.4 s (3 runs), 0 fights, zombie ignored (`no path within 4000 nodes`) | 1 fight: walked into the glass and killed the zombie through it, arrived in 8.1 s |
+| (b) the pen beside the route with a 1-block window towards it | arrived in 6.3 to 6.4 s, 0 fights (the zombie never came within reach at the window), zombie ignored | 1 fight from 10 blocks away (killed through the glass), arrived in 10.7 s |
+| (c) a zombie in the open 5 blocks off the route | 1 fight when it came within 6 path blocks (reach 3.8 to 3.9 at the start), killed, arrived in 8.2 to 8.8 s | 1 fight from 12 blocks, killed, arrived in 8.2 s |
+
+Gauntlet with the new rules (`gaunt-come` on bds-gaunt, `!come` 80 blocks, 6 zombies and 2 skeletons,
+iron armour, guard 16, one pass of 5 runs): **5 of 5 arrived alive** after 126.0, 62.9, 56.8, 77.7 and
+79.3 s (mean 80.5 s; Track W's table: 85 to 155 s, mean 117 s), 5 to 7 fights (all kills), 2 to 6
+flights, damage 14.3 to 23.5 (Track W: 23 to 41), lowest health 6.8 to 12.7. No mob was ignored for a
+missing path (an open flat world): the gain is the walking rule (skeletons that do not aim at the bot
+and zombies farther than 6 path blocks are left to the walk's avoidance).
 
 ### Shield (wave 9, Track AH, `skills/combat/shield.ts`)
 
@@ -482,6 +562,12 @@ BDS_E2E=1 BDS_PVE_NIGHT=1 pnpm --filter bot exec vitest run --project e2e pve   
   skeleton duels with / without the shield (`PVE_SHIELD_RUNS`, default 5;
   `PVE_SHIELD_SKELETON_RESISTANCE`, default 2); creeper duels with the shield
   (`PVE_SHIELD_CREEPER_RUNS`, default 3; 0 explosion damage). About 12 min.
+- `pve-walls` (Track AO): during a `!goto` 30 blocks along a route, guard on, iron armour: (a) a
+  zombie 4 blocks away in a closed 3-high glass pen (arrives within 40 s, 0 fights, the zombie on the
+  ignore list with a reason), (b) the pen beside the route with a 1-block window (arrives within 40 s,
+  every fight starts with the zombie within reach), (c) a zombie in the open walking up (fought and
+  killed, then arrives). Prints the probe costs. `PVE_WALLS_OLD=1` runs it with `guardReach 0` and
+  `guardWhileWalking all` for comparison (measurements only). About 45 s.
 - `pve-follow`: a pig with slowness 255 teleported 3 blocks every 2 s for 102 blocks; a second client
   (a real offline player, an owner) types `!come`, `!follow`, `!status`, `!stop`; leaving view (a
   400-block teleport) -> last known position -> waiting -> resumed.
@@ -547,9 +633,11 @@ second offline client, which is a real player entity to the bot), and a night wi
 - (Track W) `!follow` / `!come` beyond about 75 blocks use the locator bar; a player in another
   dimension (or with the locator bar off: gamerule `locatorbar` false) stays `I cannot see Steve`.
 - Melee-range steering (the last 3.5 blocks) does not avoid holes or lava; the navigator handles
-  everything farther. Flying mobs are fought only within reach (wave 7); a ground mob is a target only
-  when it stands on or just above a standable cell (terrain query, not a path search): one behind a
-  wall still costs up to 3 approaches before `unreachable` (then 10 s ignored).
+  everything farther. Flying mobs are fought only within reach (wave 7). (Track AO) A ground mob not
+  within reach needs a probe path of at most `guardReach` blocks; the probe never digs or pillars, so a
+  mob reachable only that way is left alone, and one in a cave below the probe's 4 000 nodes counts as
+  unreachable. During walks guard leaves mobs farther than 6 path blocks alone (`guardWhileWalking`).
+  The stall watchdog also ends a fight on a mob that keeps its distance for 3 s.
 - Creeper hit and run walks the bot 8 blocks back and forth (about 100 ticks per creeper); in a crowd
   the retreat can meet other mobs. Cover from archers ignores leaves and glass panes as cover and
   walks the navigator's path to it (possibly through the line of fire).
