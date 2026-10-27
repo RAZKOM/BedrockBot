@@ -56,8 +56,8 @@ describe('home commands', () => {
     expect(s.set('homeChestRadius', '24')).toBe(24);
     expect(() => s.set('homeChestRadius', '100')).toThrow();
     expect(s.set('autoUnload', 'off')).toBe(false);
-    // Track AN: homeChestWalk (0..256 path blocks, default 32; 0 = radius only)
-    expect(s.get('homeChestWalk')).toBe(32);
+    // Track AN: homeChestWalk (0..256 path blocks, default 64 since the multi-floor fix; 0 = radius only)
+    expect(s.get('homeChestWalk')).toBe(64);
     expect(s.set('homeChestWalk', '0')).toBe(0);
     expect(() => s.set('homeChestWalk', '-1')).toThrow();
   });
