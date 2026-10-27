@@ -24,9 +24,28 @@ describe('home commands', () => {
   });
 
   it('scanLine', () => {
-    expect(scanLine({ ok: true, found: 6, read: [{} as never, {} as never], fresh: 3, forgotten: 1, failed: [{ p: { x: 1, y: 2, z: 3 }, reason: 'open: timeout' }], requests: 0, ms: 5900 })).toBe(
-      'chests: read 2 of 6 containers within the radius, 3 read less than 10 min ago, 1 forgotten, could not open 1 2 3 (open: timeout) in 5.9 s',
+    expect(scanLine({ ok: true, found: 6, read: [{} as never, {} as never], fresh: 3, forgotten: 1, failed: [{ p: { x: 1, y: 2, z: 3 }, reason: 'open: timeout' }], requests: 0, ms: 5900, radius: 16 })).toBe(
+      'chests: 6 within 16 blocks, read 2, 3 read less than 10 min ago, 1 forgotten, could not open 1 2 3 (open: timeout), in 5.9 s',
     );
+    // Track AN: the owner's Realm case
+    const p = { x: 0, y: 0, z: 0 };
+    expect(
+      scanLine({
+        ok: true,
+        found: 181,
+        read: Array.from({ length: 64 }, () => ({}) as never),
+        fresh: 0,
+        forgotten: 0,
+        failed: [],
+        requests: 0,
+        ms: 95_200,
+        radius: 16,
+        walk: 32,
+        reachable: 140,
+        unreachable: Array.from({ length: 41 }, () => ({ p, kind: 'chest', reason: 'no path' })),
+        pending: Array.from({ length: 76 }, () => p),
+      }),
+    ).toBe('chests: 181 within 16 blocks, 140 reachable within 32 path blocks, read 64 (76 pending), 41 unreachable, in 95 s');
     expect(scanLine({ ok: false, reason: 'no_home', found: 0, read: [], fresh: 0, forgotten: 0, failed: [], requests: 0, ms: 0 })).toBe('chests: no home set (!home set)');
   });
 
@@ -37,6 +56,10 @@ describe('home commands', () => {
     expect(s.set('homeChestRadius', '24')).toBe(24);
     expect(() => s.set('homeChestRadius', '100')).toThrow();
     expect(s.set('autoUnload', 'off')).toBe(false);
+    // Track AN: homeChestWalk (0..256 path blocks, default 32; 0 = radius only)
+    expect(s.get('homeChestWalk')).toBe(32);
+    expect(s.set('homeChestWalk', '0')).toBe(0);
+    expect(() => s.set('homeChestWalk', '-1')).toThrow();
   });
 
   it('natural language: unload / stock / chests steps', () => {

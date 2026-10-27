@@ -4,9 +4,13 @@
 //                                      `unloading 12 stacks into 5 known containers`, then
 //                                      `unloaded: 64 coal -> chest 100 63 -48, 27 cobblestone -> barrel ...; kept ...`
 //   !stock [item]                      from memory: `coal: 128 in chest 100 63 -48 (ores), 64 in barrel ...`
-//   !chests                            the remembered containers around home
+//   !chests                            the remembered containers around home (counts by kind, labels, then each)
 //   !chests scan                       walk to every container within homeChestRadius of home that was not
-//                                      read in the last 10 minutes and look inside (a user process)
+//                                      read in the last 10 minutes and look inside (a user process); Track AN:
+//                                      only those within homeChestWalk path blocks (probe plans first), at
+//                                      most 64 per scan, and the unreachable ones are probed again
+//   !chests unreachable                Track AN: the containers the bot could not get to, with the reasons
+//   !chests clear                      forget every container (read and unreachable)
 //   !chests label x y z <text>|none    give a container a label (`ores`, `wood`, `food`, `blocks`, `junk`, `tools`)
 //
 // The automatic part (tasks/process/unload.ts HomeChore, PRIORITY.chore): the first scan of a session
@@ -21,7 +25,8 @@ import { ChestMemory, type ChestMemoryStore } from '../world/cache/chests.ts';
 import type { Containers } from '../world/containers.ts';
 import { HomeLogistics, type ScanReport, unloadLine, type UnloadReport } from '../skills/home/logistics.ts';
 import { isHomeContainer } from '../skills/home/discovery.ts';
-import { chestKey, chestName, chestsLine, fmtPos, stockLine, unreadRecord } from '../skills/home/memory.ts';
+import { chestKey, chestName, chestsLine, fmtPos, stockLine, unreachableLines, unreadRecord } from '../skills/home/memory.ts';
+import { probePath } from '../skills/home/reach.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { HomeChore, HomeJobProcess, type HomeJob, type HomeRunner } from '../tasks/process/unload.ts';
@@ -50,15 +55,20 @@ export function homeControlOf(task: object): HomeControl | undefined {
   return controls.get(task);
 }
 
-/** `chests: read 5 containers (2 read less than 10 min ago, 1 forgotten) in 12.3 s` */
+/** Track AN: `chests: 181 within 16 blocks, 140 reachable within 32 path blocks, read 64 (76 pending), 41 unreachable, in 95 s` */
 export function scanLine(r: ScanReport): string {
   if (r.reason === 'no_home') return 'chests: no home set (!home set)';
-  const parts = [`chests: read ${r.read.length} of ${r.found} container${r.found === 1 ? '' : 's'} within the radius`];
+  const parts = [`chests: ${r.found} within ${r.radius ?? '?'} blocks`];
+  if (r.walk !== undefined) parts.push(`${r.reachable ?? 0} reachable within ${r.walk} path blocks`);
+  parts.push(`read ${r.read.length}${r.pending?.length ? ` (${r.pending.length} pending)` : ''}`);
+  if (r.unreachable?.length) parts.push(`${r.unreachable.length} unreachable`);
   if (r.fresh) parts.push(`${r.fresh} read less than 10 min ago`);
   if (r.forgotten) parts.push(`${r.forgotten} forgotten`);
   if (r.failed.length) parts.push(`could not open ${r.failed.map((f) => `${fmtPos(f.p)} (${f.reason})`).join(', ')}`);
   if (r.reason) parts.push(r.reason === 'interrupted' ? 'interrupted' : r.reason);
-  return `${parts.join(', ')} in ${(r.ms / 1000).toFixed(1)} s`;
+  const s = r.ms / 1000;
+  parts.push(`in ${s >= 10 ? Math.round(s) : s.toFixed(1)} s`);
+  return parts.join(', ');
 }
 
 export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): HomeControl | undefined {
@@ -95,6 +105,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     settings: d.settings,
     ...(containers ? { containers } : {}),
     ...(d.pve ? { selectHotbar: (slot: number) => void d.pve!.hotbar.select(slot) } : {}),
+    probe: (goal, from) => probePath(mob.skills.nav, goal, from), // Track AN: walking distance
     log,
   });
   const runner: HomeRunner = {
@@ -179,7 +190,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
   d.chat.register({
     name: 'chests',
     tier: 'more', group: 'home', example: '!chests scan', auto: 'the first time each session the bot stands near home it reads every container within homeChestRadius', // Track AM tiers (merge)
-    help: '[scan | clear | label x y z <text>|none] (the containers at home; scan: look inside again; clear: forget them all)',
+    help: '[scan | unreachable | clear | label x y z <text>|none] (the containers at home; scan: look inside again; unreachable: the ones I cannot walk to; clear: forget them all)',
     run: ({ args, reply }) => {
       const a = (args[0] ?? '').toLowerCase();
       const h = home();
@@ -191,16 +202,29 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
       if (a === 'scan') {
         if (args.length > 1) return reply('usage: !chests scan');
         if (!h) return reply('chests: no home set (!home set)');
-        reply(`chests: reading the containers within ${d.settings.get('homeChestRadius')} blocks of home${processes.paused ? ' (held: !resume)' : ''}`);
-        const p = start({ kind: 'scan' });
-        void p.result.then((r) => reply(r?.kind === 'scan' ? scanLine(r.report) : 'chests: scan stopped'));
+        const walk = d.settings.get('homeChestWalk');
+        reply(`chests: reading the containers within ${d.settings.get('homeChestRadius')} blocks of home${walk > 0 ? ` (walks of up to ${walk} blocks)` : ''}${processes.paused ? ' (held: !resume)' : ''}`);
+        const p = start({ kind: 'scan', retry: true }); // Track AN: the unreachable ones are probed again
+        void p.result.then((r) => {
+          if (r?.kind !== 'scan') return reply('chests: scan stopped');
+          for (const q of r.report.pending ?? []) chore.appeared(q); // Track AN: read by the chore at the next idle moment
+          reply(scanLine(r.report));
+        });
+        return;
+      }
+      if (a === 'unreachable') {
+        // Track AN: the containers the bot could not get to (at most 3 lines)
+        const at = h ? { x: h.x + 0.5, y: h.y, z: h.z + 0.5 } : mob.position();
+        for (const line of unreachableLines(at ? memory().near(at, d.settings.get('homeChestRadius') + 1) : memory().all(), Date.now(), at)) reply(line);
         return;
       }
       if (a === 'clear') {
         const all = memory().all();
+        const bad = all.filter((r) => r.unreachable).length;
         for (const r of all) memory().delete(r);
+        chore.pending.clear();
         chore.newSession(); // the first scan of the session is due again
-        return reply(`chests: forgot ${all.length} containers; I read them again the next time I stand near home (or !chests scan)`);
+        return reply(`chests: forgot ${all.length} containers (${bad} unreachable); I read them again the next time I stand near home (or !chests scan)`);
       }
       if (a === 'label') {
         const pos = d.parseBlock(args.slice(1, 4));
@@ -220,7 +244,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
         reply(next.label ? `chests: ${chestName(next)} labelled` : `chests: label of ${chestName(next)} removed`);
         return;
       }
-      reply('usage: !chests [scan | clear | label x y z <text>|none]');
+      reply('usage: !chests [scan | unreachable | clear | label x y z <text>|none]');
     },
   });
   log.info(`home: !unload, !stock, !chests ready (memory ${world.cache?.chests ? 'in the world cache' : 'in the world cache once it opens, else in memory'}, ${memory().size} remembered: ${memory().all().slice(0, 3).map((r) => chestKey(r)).join(' ')})`);

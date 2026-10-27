@@ -2,7 +2,7 @@
 // labels (categories.ts) and the memory lines of !stock / !chests (memory.ts). Pure, no fakes needed.
 import { describe, expect, it } from 'vitest';
 import { categoryOf, labelCategory, labelMatches } from '../../../src/skills/home/categories.ts';
-import { chestsLine, itemMatches, itemQuery, kindWord, planChests, recordFrom, stockLine, unreadRecord } from '../../../src/skills/home/memory.ts';
+import { chestsLine, itemMatches, itemQuery, kindsLine, kindWord, planChests, recordFrom, stockLine, unreachableLines, unreadRecord } from '../../../src/skills/home/memory.ts';
 import { planUnload, reserveByKind, unloadableStacks, type PlanChest, type UnloadSlot } from '../../../src/skills/home/unloader.ts';
 import { snapshotOf } from '../../../src/skills/container/chest.ts';
 import { ChestMemory } from '../../../src/world/cache/chests.ts';
@@ -165,11 +165,36 @@ describe('chest memory lines', () => {
     expect(stockLine(new ChestMemory(), 'coal')).toBe('stock: no chest read yet (try !chests scan near home)');
   });
 
-  it('!chests: every container with free slots, top contents and the age', () => {
+  it('!chests: counts by kind with the labels, then every container with free slots, top contents and the age', () => {
     const line = chestsLine(memory().all(), now, { x: 100, y: 63, z: -48 });
     expect(line).toBe(
-      'chests: 3 remembered: chest 100 63 -48 (ores): 24/27 free, 128 iron_ingot, 30 coal (2 min ago) | trapped chest 95 63 -44: not read yet | barrel 90 63 -48: 25/27 free, 64 iron_ingot, 1 undyed_shulker_box, 1 empty shulker box (0 min ago)',
+      'chests: 3 remembered (3 reachable): 1 barrel, 1 chest (ores), 1 trapped chest | chest 100 63 -48 (ores): 24/27 free, 128 iron_ingot, 30 coal (2 min ago) | trapped chest 95 63 -44: not read yet | barrel 90 63 -48: 25/27 free, 64 iron_ingot, 1 undyed_shulker_box, 1 empty shulker box (0 min ago)',
     );
+  });
+
+  it('Track AN: unreachable containers: counted apart, listed by !chests unreachable, never unload targets', () => {
+    const m = memory();
+    m.set({ ...unreadRecord({ x: 110, y: 63, z: -48 }, 'chest'), unreachable: 'no path', unreachableAt: now - 3 * 60_000 });
+    m.set({ ...m.get({ x: 90, y: 63, z: -48 })!, unreachable: 'path 40 blocks', unreachableAt: now });
+    m.set({ ...unreadRecord({ x: 111, y: 63, z: -48 }, 'chest'), label: 'wood' });
+    const line = chestsLine(m.all(), now, { x: 100, y: 63, z: -48 });
+    expect(line).toBe(
+      'chests: 5 remembered (3 reachable, 2 unreachable: !chests unreachable): 3 chests (ores, wood), 1 barrel, 1 trapped chest | chest 100 63 -48 (ores): 24/27 free, 128 iron_ingot, 30 coal (2 min ago) | trapped chest 95 63 -44: not read yet | chest 111 63 -48 (wood): not read yet',
+    );
+    expect(unreachableLines(m.all(), now, { x: 100, y: 63, z: -48 })).toEqual(['chests: 2 unreachable: chest 110 63 -48: no path (3 min ago) | barrel 90 63 -48: path 40 blocks (0 min ago)']);
+    expect(unreachableLines(new ChestMemory().all(), now)).toEqual(['chests: none unreachable']);
+    expect(planChests(m.all()).map((c) => c.key)).toEqual(['100,63,-48']); // the barrel was read but is unreachable now
+    // many: at most 3 lines of at most 256 characters, the last says how many more
+    const many = Array.from({ length: 40 }, (_, i) => ({ ...unreadRecord({ x: i, y: 70, z: 0 }, 'barrel'), unreachable: 'no path within 4000 nodes', unreachableAt: now }));
+    const lines = unreachableLines(many, now);
+    expect(lines).toHaveLength(3);
+    for (const l of lines) expect(l.length).toBeLessThanOrEqual(256);
+    expect(lines[0]).toMatch(/^chests: 40 unreachable: barrel 0 70 0: no path within 4000 nodes \(0 min ago\) \| /);
+    expect(lines[2]).toMatch(/ \.\.\. and \d+ more \(!chests clear forgets them, !chests scan tries again\)$/);
+    const listed = lines.join(' | ').split(' | ').filter((s) => s.includes(': no path')).length;
+    expect(Number(/and (\d+) more/.exec(lines[2]!)![1]) + listed).toBe(40);
+    // kinds
+    expect(kindsLine([{ ...unreadRecord({ x: 0, y: 0, z: 0 }, 'undyed_shulker_box') }, { ...unreadRecord({ x: 1, y: 0, z: 0 }, 'blue_shulker_box'), label: 'boxes' }])).toBe('2 shulker boxes (boxes)');
   });
 
   it('a re-read keeps the label; partners and unread records are no unload targets', () => {

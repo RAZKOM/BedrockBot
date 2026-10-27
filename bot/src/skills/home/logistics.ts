@@ -3,7 +3,11 @@
 //
 //   scan     find every container within `homeChestRadius` of home (discovery.ts), walk to each one not
 //            read in the last 10 minutes, open it, snapshot it into the chest memory, close it;
-//            remembered containers whose block is gone are forgotten
+//            remembered containers whose block is gone are forgotten. Track AN: with `homeChestWalk` > 0
+//            every candidate first gets a bounded probe plan (reach.ts, no walking); those without a
+//            path, or with a path longer than homeChestWalk, are remembered as unreachable (skipped for
+//            an hour, or until `!chests scan`); the nearest MAX_READS_PER_SCAN by path length are read,
+//            nearest-neighbour; the rest is reported as pending (the chore reads them next)
 //   unload   plan (unloader.ts) from the inventory and the memory, walk to the nearest chest with moves,
 //            open it, refresh its memory, plan again for that chest with what it really holds, deposit,
 //            close; repeat. Then, while unloadable items are left and a chest holds an empty shulker box:
@@ -21,11 +25,13 @@ import type { CollectOptions, CollectResult } from '../collect/collect.ts';
 import { isShulkerBox, shulkerSlotsUsed, type ContainerSnapshot, type DepositResult, type OpenResult } from '../container/chest.ts';
 import { boxSpots } from '../container/stash.ts';
 import type { DigOptions, DigResult } from '../dig/digger.ts';
+import type { PathResult } from '../nav/astar.ts';
 import type { NavGoal } from '../nav/goals.ts';
 import type { PlaceOptions, PlaceResult } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { chestNeighbours, findContainers, isHomeContainer, visitOrder, type DiscoveryWorld } from './discovery.ts';
 import { chestName, fmtPos, partnerKeys, planChests, recordFrom, unreadRecord } from './memory.ts';
+import { chestGoal, verdict } from './reach.ts';
 import { planUnload, unloadableStacks, type UnloadPlan, type UnloadSlot } from './unloader.ts';
 
 /** A container read within this many ms is not read again by a scan. */
@@ -34,6 +40,10 @@ export const READ_FRESH_MS = 10 * 60_000;
 export const AT_HOME = 8;
 /** Shulker boxes filled per unload run at most. */
 export const MAX_BOXES_PER_RUN = 3;
+/** Track AN: a container found unreachable is not probed again for this long (ms), unless `!chests scan`. */
+export const UNREACHABLE_RETRY_MS = 60 * 60_000;
+/** Track AN: containers opened per scan at most (the rest stays pending for the next idle moment). */
+export const MAX_READS_PER_SCAN = 64;
 
 export interface HomeSkills {
   goto(goal: NavGoal, opts?: GotoOptions): Promise<SkillResult>;
@@ -63,6 +73,8 @@ export interface HomeDeps {
   };
   /** Select a hotbar slot (Hotbar.select), so a placed shulker box is the one wanted. */
   selectHotbar?(slot: number): void;
+  /** Track AN: a bounded probe plan (reach.ts probePath) from `from` to `goal`; undefined: `from` is no standable node. Without it scans use the radius only. */
+  probe?(goal: NavGoal, from: Vec3): Promise<PathResult | undefined>;
   log?: Logger;
   now?: () => number;
 }
@@ -78,6 +90,36 @@ export interface ScanReport {
   failed: { p: Vec3; reason: string }[];
   requests: number;
   ms: number;
+  /** Track AN: homeChestRadius of this scan. */
+  radius?: number;
+  /** Track AN: homeChestWalk of this scan (0 = radius only); undefined when nothing was probed. */
+  walk?: number;
+  /** Track AN: probe plans made and their time (ms, wall clock: the slices and the waits between them). */
+  probes?: number;
+  probeMs?: number;
+  /** Track AN: candidates whose probe found a path within `walk` (read, pending, or partners). */
+  reachable?: number;
+  /** Track AN: containers the bot could not get to (this scan's probes and walks, and those remembered from the last hour). */
+  unreachable?: { p: Vec3; kind: string; reason: string }[];
+  /** Track AN: reachable containers left for the next scan (MAX_READS_PER_SCAN). */
+  pending?: Vec3[];
+}
+
+export interface ScanOptions {
+  /** Read containers read less than 10 minutes ago too. */
+  force?: boolean;
+  /** Track AN: probe the containers remembered as unreachable again (`!chests scan`). */
+  retry?: boolean;
+  /** Only these blocks (containers that appeared, pending ones). */
+  only?: Vec3[];
+}
+
+/** Track AN: a record without its unreachable mark. */
+export function reachableAgain(r: ChestRecord): ChestRecord {
+  const out = { ...r };
+  delete out.unreachable;
+  delete out.unreachableAt;
+  return out;
 }
 
 export interface UnloadedLine {
@@ -151,6 +193,11 @@ export class HomeLogistics {
     return Number(this.d.settings.get('homeChestRadius'));
   }
 
+  /** Track AN: the walking distance limit (path blocks; 0 = no path check). */
+  walkLimit(): number {
+    return Number(this.d.settings.get('homeChestWalk'));
+  }
+
   /** Within AT_HOME blocks of home (horizontal, 4 vertical). */
   atHome(): boolean {
     const h = this.d.home();
@@ -204,7 +251,7 @@ export class HomeLogistics {
 
   /** Walk to a container, open it, remember what it holds, keep it open (the caller closes it). */
   private async visit(p: Vec3, kind: string, cancelled: () => boolean): Promise<{ ok: true; view: ContainerView; record: ChestRecord } | { ok: false; reason: string }> {
-    const g = await this.d.skills.goto({ type: 'getToBlock', p, reach: 4 }, { timeoutTicks: 2400 }); // within reach from any height (stacked chests, shelves); `near` failed for chests above floor level on the Realm
+    const g = await this.d.skills.goto(chestGoal(p), { timeoutTicks: 2400 }); // within reach from any height (stacked chests, shelves, Track AN: up to 3 blocks above the feet); `near` failed for chests above floor level on the Realm
     if (cancelled()) return { ok: false, reason: 'interrupted' };
     if (!g.ok) return { ok: false, reason: `goto: ${g.reason ?? 'failed'}` };
     let o = await this.d.skills.open(p);
@@ -243,8 +290,11 @@ export class HomeLogistics {
 
   // ---- scan --------------------------------------------------------------------------------------
 
-  /** Find and read the containers around home (see the file comment). `force` reads fresh ones too. */
-  scan(cancelled: () => boolean, opts: { force?: boolean; only?: Vec3[] } = {}): Promise<ScanReport> {
+  /**
+   * Find and read the containers around home (see the file comment). `force` reads fresh ones too;
+   * `retry` (Track AN) probes the ones remembered as unreachable again; `only` limits the scan to these blocks.
+   */
+  scan(cancelled: () => boolean, opts: ScanOptions = {}): Promise<ScanReport> {
     return this.serial(() => this.doScan(cancelled, opts));
   }
 
@@ -253,67 +303,124 @@ export class HomeLogistics {
     return this.serial(() => this.doUnload(cancelled, opts));
   }
 
-  private async doScan(cancelled: () => boolean, opts: { force?: boolean; only?: Vec3[] }): Promise<ScanReport> {
+  /** Track AN: remember that the bot cannot get to the container at p (kept until a read or `!chests clear`). */
+  private markUnreachable(p: Vec3, kind: string, reason: string, rep: ScanReport): void {
+    const mem = this.d.memory();
+    const rec = mem.get(p) ?? unreadRecord(p, kind);
+    mem.set({ ...rec, unreachable: reason, unreachableAt: this.now() });
+    rep.unreachable!.push({ p: { x: p.x, y: p.y, z: p.z }, kind: rec.kind, reason });
+  }
+
+  private async doScan(cancelled: () => boolean, opts: ScanOptions): Promise<ScanReport> {
     const t0 = this.now();
     const r0 = this.requests();
-    const rep: ScanReport = { ok: false, found: 0, read: [], fresh: 0, forgotten: 0, failed: [], requests: 0, ms: 0 };
+    const rep: ScanReport = { ok: false, found: 0, read: [], fresh: 0, forgotten: 0, failed: [], requests: 0, ms: 0, radius: this.radius(), unreachable: [], pending: [] };
     const finish = (reason?: string): ScanReport => {
       rep.ok = reason === undefined;
       if (reason) rep.reason = reason;
       rep.requests = this.requests() - r0;
       rep.ms = this.now() - t0;
       this.lastScan = rep;
-      this.log.info(`chests: scan ${rep.ok ? 'done' : `ended (${reason})`}: ${rep.found} found, ${rep.read.length} read, ${rep.fresh} fresh, ${rep.forgotten} forgotten, ${rep.failed.length} failed in ${(rep.ms / 1000).toFixed(1)} s`);
+      const probed = rep.walk !== undefined ? `, ${rep.reachable} reachable within ${rep.walk} path blocks (${rep.probes} probes in ${((rep.probeMs ?? 0) / 1000).toFixed(1)} s)` : '';
+      this.log.info(
+        `chests: scan ${rep.ok ? 'done' : `ended (${reason})`}: ${rep.found} found${probed}, ${rep.read.length} read, ${rep.pending!.length} pending, ${rep.unreachable!.length} unreachable, ${rep.fresh} fresh, ${rep.forgotten} forgotten, ${rep.failed.length} failed in ${(rep.ms / 1000).toFixed(1)} s`,
+      );
       return rep;
     };
     const home = this.d.home();
     if (!home) return finish('no_home');
     if (cancelled()) return finish('interrupted');
-    {
-      const radius = this.radius();
-      const mem = this.d.memory();
-      const found = findContainers(this.d.world, home, radius);
-      rep.found = found.length;
-      const at = new Set(found.map((f) => chestKey(f.p)));
-      // forget remembered containers whose (loaded) block is no container any more
-      for (const r of mem.near(centre(home), radius + 1)) {
-        if (at.has(chestKey(r))) continue;
-        const b = this.d.world.blockAt(r);
-        if (b && b.name !== 'unknown' && !isHomeContainer(b.name)) {
-          mem.delete(r);
-          rep.forgotten++;
-        }
+    const radius = rep.radius!;
+    const mem = this.d.memory();
+    const found = findContainers(this.d.world, home, radius);
+    rep.found = found.length;
+    const at = new Set(found.map((f) => chestKey(f.p)));
+    // forget remembered containers whose (loaded) block is no container any more
+    for (const r of mem.near(centre(home), radius + 1)) {
+      if (at.has(chestKey(r))) continue;
+      const b = this.d.world.blockAt(r);
+      if (b && b.name !== 'unknown' && !isHomeContainer(b.name)) {
+        mem.delete(r);
+        rep.forgotten++;
       }
-      const partners = partnerKeys(mem.all());
-      for (const f of found) if (!mem.get(f.p) && !partners.has(chestKey(f.p))) mem.set(unreadRecord(f.p, f.kind));
-      const now = this.now();
-      const wanted = opts.only ? new Set(opts.only.map(chestKey)) : undefined;
-      const todo = found.filter((f) => {
-        if (wanted && !wanted.has(chestKey(f.p))) return false;
-        const rec = mem.get(f.p);
-        if (!opts.force && rec && rec.readAt > 0 && now - rec.readAt < READ_FRESH_MS) {
-          rep.fresh++;
-          return false;
-        }
-        return true;
-      });
-      const start = this.d.position() ?? centre(home);
-      for (const f of visitOrder(todo, start)) {
+    }
+    let partners = partnerKeys(mem.all());
+    for (const f of found) if (!mem.get(f.p) && !partners.has(chestKey(f.p))) mem.set(unreadRecord(f.p, f.kind));
+    const now = this.now();
+    const wanted = opts.only ? new Set(opts.only.map(chestKey)) : undefined;
+    const todo = found.filter((f) => {
+      if (wanted && !wanted.has(chestKey(f.p))) return false;
+      if (partners.has(chestKey(f.p))) return false; // the other half of a remembered double chest
+      const rec = mem.get(f.p);
+      if (!opts.force && rec && rec.readAt > 0 && now - rec.readAt < READ_FRESH_MS && !rec.unreachable) {
+        rep.fresh++;
+        return false;
+      }
+      if (!opts.retry && rec?.unreachable && now - (rec.unreachableAt ?? 0) < UNREACHABLE_RETRY_MS) {
+        rep.unreachable!.push({ p: f.p, kind: rec.kind, reason: rec.unreachable });
+        return false;
+      }
+      return true;
+    });
+    // Track AN: walking distance. Probe every candidate first (plans only), then read the nearest ones.
+    const walk = this.walkLimit();
+    let reach: { f: (typeof todo)[number]; blocks: number }[] = todo.map((f) => ({ f, blocks: 0 }));
+    if (walk > 0 && this.d.probe && todo.length > 0) {
+      const pos = this.d.position();
+      const from = pos && this.atHome() ? pos : { x: Math.floor(home.x) + 0.5, y: home.y, z: Math.floor(home.z) + 0.5 };
+      const p0 = this.now();
+      const out: typeof reach = [];
+      let probes = 0;
+      let blind = false;
+      for (const f of todo) {
         if (cancelled()) return finish('interrupted');
-        // the other half of a double chest read in this scan
-        if (partnerKeys(mem.all()).has(chestKey(f.p))) continue;
-        const v = await this.visit(f.p, f.kind, cancelled);
+        const r = await this.d.probe(chestGoal(f.p), from);
+        if (!r) {
+          blind = true; // no standable start: nothing to say about any container
+          break;
+        }
+        probes++;
+        const v = verdict(r, walk);
         if (!v.ok) {
-          if (v.reason === 'interrupted') return finish('interrupted');
-          rep.failed.push({ p: f.p, reason: v.reason });
-          this.log.info(`chests: ${f.kind} at ${fmtPos(f.p)}: ${v.reason}`);
+          this.markUnreachable(f.p, f.kind, v.reason, rep);
           continue;
         }
-        await this.d.skills.closeContainer(v.view);
-        rep.read.push(v.record);
+        const rec = mem.get(f.p);
+        if (rec?.unreachable) mem.set(reachableAgain(rec));
+        out.push({ f, blocks: v.blocks });
       }
-      return finish();
+      rep.probes = probes;
+      rep.probeMs = this.now() - p0;
+      if (blind) {
+        this.log.info(`chests: no standable start at ${fmtPos({ x: Math.floor(from.x), y: Math.floor(from.y), z: Math.floor(from.z) })} for the probes: radius only`);
+      } else {
+        rep.walk = walk;
+        rep.reachable = out.length;
+        reach = out.sort((a, b) => a.blocks - b.blocks);
+        this.log.info(`chests: probed ${probes} containers in ${((rep.probeMs ?? 0) / 1000).toFixed(1)} s (${probes ? ((rep.probeMs ?? 0) / probes).toFixed(1) : 0} ms each): ${out.length} within ${walk} path blocks, ${rep.unreachable!.length} unreachable`);
+      }
     }
+    // the nearest MAX_READS_PER_SCAN by path length (straight line without probes), visited nearest-neighbour
+    const take = reach.slice(0, MAX_READS_PER_SCAN).map((x) => x.f);
+    rep.pending = reach.slice(MAX_READS_PER_SCAN).map((x) => ({ ...x.f.p }));
+    const start = this.d.position() ?? centre(home);
+    for (const f of visitOrder(take, start)) {
+      if (cancelled()) return finish('interrupted');
+      // the other half of a double chest read in this scan
+      partners = partnerKeys(mem.all());
+      if (partners.has(chestKey(f.p))) continue;
+      const v = await this.visit(f.p, f.kind, cancelled);
+      if (!v.ok) {
+        if (v.reason === 'interrupted') return finish('interrupted');
+        this.log.info(`chests: ${f.kind} at ${fmtPos(f.p)}: ${v.reason}`);
+        if (v.reason.startsWith('goto:')) this.markUnreachable(f.p, f.kind, v.reason, rep);
+        else rep.failed.push({ p: f.p, reason: v.reason });
+        continue;
+      }
+      await this.d.skills.closeContainer(v.view);
+      rep.read.push(v.record);
+    }
+    return finish();
   }
 
   // ---- unload ------------------------------------------------------------------------------------

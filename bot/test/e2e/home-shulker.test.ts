@@ -29,7 +29,7 @@ describe.skipIf(!E2E)('@bds home: spare shulker boxes when the chests are full (
     b.task.home!.set(L.home);
     const from = b.said.length;
     await b.command('!chests scan');
-    await b.reply((s) => s.startsWith('chests: read '), from, 120_000);
+    await b.reply((s) => /^chests: \d+ within /.test(s), from, 120_000); // Track AN: the scan line
   }, 240_000);
 
   afterAll(async () => {

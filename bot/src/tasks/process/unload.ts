@@ -23,20 +23,20 @@ export const SCAN_BACKOFF_MS = 2 * 60_000;
 /** The chore looks at its triggers at most this often (ms). */
 const CHECK_MS = 1000;
 
-export type HomeJob = { kind: 'unload'; all?: boolean } | { kind: 'scan'; force?: boolean; only?: { x: number; y: number; z: number }[] };
+export type HomeJob = { kind: 'unload'; all?: boolean } | { kind: 'scan'; force?: boolean; retry?: boolean; only?: { x: number; y: number; z: number }[] }; // Track AN: retry
 export type HomeJobResult = { kind: 'unload'; report: UnloadReport } | { kind: 'scan'; report: ScanReport };
 
 /** What the processes drive (HomeLogistics satisfies it; unit tests fake it). */
 export interface HomeRunner {
   unload(cancelled: () => boolean, opts?: { all?: boolean }): Promise<UnloadReport>;
-  scan(cancelled: () => boolean, opts?: { force?: boolean; only?: { x: number; y: number; z: number }[] }): Promise<ScanReport>;
+  scan(cancelled: () => boolean, opts?: { force?: boolean; retry?: boolean; only?: { x: number; y: number; z: number }[] }): Promise<ScanReport>;
   /** Cancel the running skill (goto, dig, ...). */
   cancel(): void;
 }
 
 function runJob(r: HomeRunner, job: HomeJob, cancelled: () => boolean): Promise<HomeJobResult> {
   if (job.kind === 'unload') return r.unload(cancelled, { all: job.all ?? false }).then((report) => ({ kind: 'unload', report }));
-  return r.scan(cancelled, { ...(job.force ? { force: true } : {}), ...(job.only ? { only: job.only } : {}) }).then((report) => ({ kind: 'scan', report }));
+  return r.scan(cancelled, { ...(job.force ? { force: true } : {}), ...(job.retry ? { retry: true } : {}), ...(job.only ? { only: job.only } : {}) }).then((report) => ({ kind: 'scan', report }));
 }
 
 /** `!unload [all]`, `!chests scan` (user). */
@@ -219,12 +219,12 @@ export class HomeChore extends BaseProcess {
         this.sessionScan = false;
         for (const p of job.only ?? []) this.pending.delete(`${p.x},${p.y},${p.z}`);
         if (!job.only) this.pending.clear();
+        // a container that could not be opened is not retried at once (it stays for the next session);
+        // Track AN: one the bot cannot walk to is remembered as unreachable by the scan itself, and the
+        // reachable ones beyond the scan's read cap are read at the next idle moment
+        for (const p of r.report.pending ?? []) this.appeared(p);
       }
       if (failed > 0 || !r?.report.ok) this.scanAfter = t + SCAN_BACKOFF_MS;
-      if (failed > 0 && r?.report.ok) {
-        // a container that could not be opened is not retried at once (it stays for the next session)
-        this.pending.clear();
-      }
     } else {
       this.stats.unloads++;
       if (forGet) {

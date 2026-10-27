@@ -6,9 +6,10 @@
 import { describe, expect, it } from 'vitest';
 import { RuntimeSettings } from '../../../src/config/settings.ts';
 import { isShulkerBox, shulkerContents, snapshotOf } from '../../../src/skills/container/chest.ts';
-import { HomeLogistics, unloadLine, type HomeSkills, type ScanReport, type UnloadReport } from '../../../src/skills/home/logistics.ts';
+import { HomeLogistics, MAX_READS_PER_SCAN, UNREACHABLE_RETRY_MS, unloadLine, type HomeDeps, type HomeSkills, type ScanReport, type UnloadReport } from '../../../src/skills/home/logistics.ts';
 import { ChestMemory, chestKey } from '../../../src/world/cache/chests.ts';
 import type { BlockInfo, ContainerView, ItemStack, Vec3 } from '../../../src/world/types.ts';
+import type { PathResult } from '../../../src/skills/nav/astar.ts';
 import { ProcessManager } from '../../../src/tasks/process/manager.ts';
 import { AUTO_UNLOAD_STACKS, HomeChore, HomeJobProcess, type HomeChoreDeps, type HomeRunner } from '../../../src/tasks/process/unload.ts';
 
@@ -25,7 +26,7 @@ interface Box {
 }
 
 /** A fake home: containers by position, an inventory, skills that act on them. */
-function fakeHome(o: { containers: Record<string, { kind: string; items?: (ItemStack | null)[]; raws?: unknown[]; size?: number }>; inv: (ItemStack | null)[]; invRaws?: unknown[]; home?: Vec3 }) {
+function fakeHome(o: { containers: Record<string, { kind: string; items?: (ItemStack | null)[]; raws?: unknown[]; size?: number }>; inv: (ItemStack | null)[]; invRaws?: unknown[]; home?: Vec3; probe?: HomeDeps['probe']; now?: () => number; gotoFail?: Set<string> }) {
   const boxes = new Map<string, Box>();
   for (const [k, c] of Object.entries(o.containers)) {
     const size = c.size ?? 27;
@@ -56,6 +57,7 @@ function fakeHome(o: { containers: Record<string, { kind: string; items?: (ItemS
         return { ok: false, reason: 'interrupted' };
       }
       const p = (g as { p: Vec3 }).p;
+      if (o.gotoFail?.has(chestKey(p))) return { ok: false, reason: 'unreachable' };
       pos = { x: p.x + 1, y: 0, z: p.z };
       return { ok: true };
     },
@@ -164,7 +166,8 @@ function fakeHome(o: { containers: Record<string, { kind: string; items?: (ItemS
     home: () => home,
     memory: () => memory,
     settings,
-    now: () => 1_000_000,
+    now: o.now ?? (() => 1_000_000),
+    ...(o.probe ? { probe: o.probe } : {}),
   });
   return {
     logistics,
@@ -213,6 +216,100 @@ describe('home logistics: scan', () => {
     expect(again).toMatchObject({ found: 3, fresh: 2, forgotten: 1 }); // 3 blocks: the double chest's partner is neither read nor fresh
     expect(again.read).toHaveLength(0);
     expect(h.memory.get({ x: 3, y: 0, z: 0 })).toBeUndefined();
+  });
+});
+
+describe('home logistics: walking distance (Track AN)', () => {
+  /** A probe answer: a straight path of `blocks` blocks, or no path. */
+  const found = (blocks: number): PathResult => ({ status: 'found', path: Array.from({ length: blocks + 1 }, (_, i) => ({ x: i, y: 0, z: 0, feet: 0, move: 'walk' as const, cost: 1 })), cost: blocks, expanded: blocks, ms: 1, unknown: false, limited: false });
+  const none: PathResult = { status: 'none', path: [{ x: 0, y: 0, z: 0, feet: 0, move: 'start', cost: 0 }], cost: 0, expanded: 50, ms: 1, unknown: false, limited: false };
+
+  it('probes first, reads the reachable ones, remembers the unreachable ones for an hour; !chests scan (retry) probes them again; homeChestWalk 0 = radius only', async () => {
+    let now = 1_000_000;
+    const probed: string[] = [];
+    const answers: Record<string, PathResult> = { '3,0,0': found(3), '-3,0,0': found(4), '0,0,6': none, '10,0,0': found(40) };
+    const h = fakeHome({
+      containers: { '3,0,0': { kind: 'chest' }, '-3,0,0': { kind: 'barrel' }, '0,0,6': { kind: 'chest' }, '10,0,0': { kind: 'chest' } },
+      inv: [],
+      now: () => now,
+      probe: async (g) => {
+        const k = chestKey((g as { p: Vec3 }).p);
+        probed.push(k);
+        expect(g).toMatchObject({ type: 'getToBlock', reach: 4, face: false, low: 3 });
+        return answers[k];
+      },
+    });
+    const r = await h.logistics.scan(never);
+    expect(r).toMatchObject({ ok: true, found: 4, radius: 16, walk: 32, reachable: 2, probes: 4, pending: [] });
+    expect(r.read.map((x) => chestKey(x)).sort()).toEqual(['-3,0,0', '3,0,0']);
+    expect(r.unreachable!.map((u) => `${chestKey(u.p)} ${u.reason}`).sort()).toEqual(['0,0,6 no path', '10,0,0 path 40 blocks']);
+    expect(h.calls.filter((c) => c.startsWith('goto'))).toEqual(['goto 3,0,0', 'goto -3,0,0']); // nearest-neighbour from the bot (0.5, 0, 0.5)
+    expect(h.memory.get({ x: 10, y: 0, z: 0 })).toMatchObject({ unreachable: 'path 40 blocks', unreachableAt: 1_000_000, readAt: 0 });
+    // the unload never targets an unreachable container
+    expect(h.logistics.plan().moves).toEqual([]);
+    // 30 min later: the read ones are fresh... no: older than 10 min, read again; the unreachable ones are not probed
+    now += 30 * 60_000;
+    probed.length = 0;
+    const again = await h.logistics.scan(never);
+    expect(probed.sort()).toEqual(['-3,0,0', '3,0,0']);
+    expect(again.unreachable).toHaveLength(2);
+    expect(again.read).toHaveLength(2);
+    // !chests scan: retry probes them again (the far one now has a shorter way)
+    answers['10,0,0'] = found(20);
+    probed.length = 0;
+    const retry = await h.logistics.scan(never, { retry: true });
+    expect(probed.sort()).toEqual(['0,0,6', '10,0,0']); // the other two are fresh
+    expect(retry).toMatchObject({ fresh: 2, reachable: 1 });
+    expect(retry.read.map((x) => chestKey(x))).toEqual(['10,0,0']);
+    expect(h.memory.get({ x: 10, y: 0, z: 0 })!.unreachable).toBeUndefined();
+    expect(h.memory.get({ x: 0, y: 0, z: 6 })!.unreachable).toBe('no path');
+    // after an hour the scan probes it again by itself
+    now += UNREACHABLE_RETRY_MS + 1;
+    probed.length = 0;
+    await h.logistics.scan(never);
+    expect(probed).toContain('0,0,6');
+    // homeChestWalk 0: no probes, every container within the radius is visited (the fake walks anywhere)
+    h.settings.set('homeChestWalk', '0');
+    probed.length = 0;
+    const flat = await h.logistics.scan(never, { force: true, retry: true });
+    expect(probed).toEqual([]);
+    expect(flat.walk).toBeUndefined();
+    expect(flat.read).toHaveLength(4);
+    expect(h.memory.get({ x: 0, y: 0, z: 6 })!.unreachable).toBeUndefined(); // read: reachable after all
+  });
+
+  it(`reads at most ${MAX_READS_PER_SCAN} per scan, nearest path first, the rest pending; a walk that fails marks the container unreachable`, async () => {
+    const containers: Record<string, { kind: string }> = {};
+    const answers: Record<string, PathResult> = {};
+    for (let i = 0; i < 70; i++) {
+      const k = `${(i % 10) - 5},${Math.floor(i / 10)},${(i % 7) - 3}`;
+      containers[k] = { kind: 'chest' };
+      answers[k] = found(i + 1);
+    }
+    const first = Object.keys(containers)[0]!;
+    const h = fakeHome({ containers, inv: [], probe: async (g) => answers[chestKey((g as { p: Vec3 }).p)], gotoFail: new Set([first]) });
+    h.settings.set('homeChestWalk', '100');
+    const r = await h.logistics.scan(never);
+    expect(r).toMatchObject({ found: 70, reachable: 70 });
+    expect(r.read).toHaveLength(MAX_READS_PER_SCAN - 1); // the first one's walk failed
+    expect(r.pending).toHaveLength(70 - MAX_READS_PER_SCAN);
+    // the pending ones are the longest paths
+    const longest = Object.keys(answers).slice(MAX_READS_PER_SCAN);
+    expect(r.pending!.map(chestKey).sort()).toEqual(longest.sort());
+    const [fx, fy, fz] = first.split(',').map(Number);
+    expect(r.unreachable).toEqual([{ p: { x: fx, y: fy, z: fz }, kind: 'chest', reason: 'goto: unreachable' }]);
+    expect(h.memory.get(r.unreachable![0]!.p)!.unreachable).toBe('goto: unreachable');
+    // the next scan of the pending ones reads them
+    const next = await h.logistics.scan(never, { force: true, only: r.pending! });
+    expect(next.read).toHaveLength(70 - MAX_READS_PER_SCAN);
+    expect(next.pending).toEqual([]);
+  });
+
+  it('no standable start for the probes: radius only', async () => {
+    const h = fakeHome({ containers: { '3,0,0': { kind: 'chest' } }, inv: [], probe: async () => undefined });
+    const r = await h.logistics.scan(never);
+    expect(r.walk).toBeUndefined();
+    expect(r.read).toHaveLength(1);
   });
 });
 
@@ -296,10 +393,11 @@ describe('home logistics: unload', () => {
 function fakeRunner() {
   const calls: string[] = [];
   let release: (() => void) | undefined;
-  const scanRep = (): ScanReport => ({ ok: true, found: 1, read: [], fresh: 0, forgotten: 0, failed: [], requests: 0, ms: 1 });
+  const scanRep = (): ScanReport => ({ ok: true, found: 1, read: [], fresh: 0, forgotten: 0, failed: [], requests: 0, ms: 1, pending: runner.nextPending.splice(0) });
   const unloadRep = (moved = 1): UnloadReport => ({ ok: true, moved: moved ? [{ name: 'coal', count: 64, to: 'chest 1 2 3' }] : [], kept: [], left: [], boxes: 0, emptied: 0, chests: 1, requests: 1, shared: 1, ms: 1 });
-  const runner: HomeRunner & { calls: string[]; finish(): void } = {
+  const runner: HomeRunner & { calls: string[]; finish(): void; nextPending: Vec3[] } = {
     calls,
+    nextPending: [],
     unload: (c, o) => {
       calls.push(`unload${o?.all ? ' all' : ''}`);
       return new Promise((r) => {
@@ -430,5 +528,25 @@ describe('home processes', () => {
     h.advance(2000);
     pm.tick();
     expect(h.runner.calls).toEqual(['scan only 1', 'unload']);
+  });
+
+  it('HomeChore (Track AN): the containers a scan left pending (read cap) are read at the next idle moment', async () => {
+    const h = chore();
+    const pm = new ProcessManager();
+    pm.add(h.c);
+    h.advance(2000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['scan']);
+    h.runner.nextPending.push({ x: 1, y: 2, z: 3 }, { x: 4, y: 5, z: 6 });
+    h.runner.finish();
+    await tick();
+    expect(h.c.sessionScan).toBe(false);
+    expect(h.c.pending.size).toBe(2);
+    h.advance(2000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['scan', 'scan only 2']);
+    h.runner.finish();
+    await tick();
+    expect(h.c.pending.size).toBe(0);
   });
 });

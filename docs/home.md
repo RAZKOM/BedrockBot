@@ -6,6 +6,8 @@ finds a chest of like empty shulkers it can also use those in case a chest fills
 stacks". The bot now finds the containers around home, remembers what they hold, decides where each
 stack it carries goes, and fills spare shulker boxes when the chests are full.
 Decision record: [decisions/0028-home-logistics.md](decisions/0028-home-logistics.md).
+Track AN (the follow-up, [decisions/0035-home-walking-distance.md](decisions/0035-home-walking-distance.md)):
+containers by walking distance, an unreachable memory, a read cap per scan ("Walking distance" below).
 
 ## Files
 
@@ -16,15 +18,17 @@ Decision record: [decisions/0028-home-logistics.md](decisions/0028-home-logistic
 | `bot/src/skills/home/categories.ts` | item categories and label matching (`ores`, `wood`, `food`, `blocks`, `junk`, `tools`) |
 | `bot/src/skills/home/memory.ts` | snapshot -> record, records -> unloader targets, the `!chests` / `!stock` lines |
 | `bot/src/skills/home/logistics.ts` | `HomeLogistics`: the scan and unload jobs (walk, open, snapshot, deposit, spare boxes), serialised |
+| `bot/src/skills/home/reach.ts` | Track AN: `chestGoal` (the walk to a container), `probePath` (a bounded, sliced probe plan), `verdict` (path length against `homeChestWalk`), `pathBlocks` |
 | `bot/src/world/cache/chests.ts` | `ChestMemory`: the per-server chest memory, a sidecar of the world cache (`chests.json`) |
 | `bot/src/tasks/process/unload.ts` | `HomeJobProcess` (user: `!unload`, `!chests scan`), `HomeChore` (auto, PRIORITY.chore) |
 | `bot/src/chat/commands-home.ts` | `!unload`, `!stock`, `!chests`; wiring of the chore, the block-update trigger, the `!get` hook |
 | `bot/src/skills/container/chest.ts` | slot type per block kind, `snapshot` / `snapshotOf`, `depositSlots`, `take`, the shulker box names and NBT readers (moved here from stash.ts) |
 | `bot/src/world/containers.ts` | `setSlotType` / `slotTypeOf`: the item_stack_request slot type per open window; a whole stack moved into an empty slot keeps its wire item (NBT) |
-| `bot/src/config/settings.ts` | `homeChestRadius` (number, 16, 2..48), `autoUnload` (boolean, on) |
+| `bot/src/config/settings.ts` | `homeChestRadius` (number, 16, 2..48), `homeChestWalk` (Track AN: path blocks, 32, 0..256; 0 = radius only), `autoUnload` (boolean, on) |
+| `bot/src/skills/nav/goals.ts` | Track AN: `getToBlock` option `low` (a side cell's feet up to `low` blocks below the block; default 1) |
 | `packs/truth/src/home.ts` | `truth:chestput` (fill a container block); reading one is `truth:container` |
 | `bot/test/unit/skills/home-*.test.ts`, `bot/test/unit/cache/chests.test.ts`, `bot/test/unit/chat/home-commands.test.ts` | unit tests on fakes |
-| `bot/test/e2e/home-chests.test.ts`, `home-shulker.test.ts`, `home-truth.ts` | e2e on bds-home |
+| `bot/test/e2e/home-chests.test.ts`, `home-shulker.test.ts`, `home-reach.test.ts` (Track AN), `home-truth.ts` | e2e on bds-home |
 | `docker/compose.home.yml` | `bds-home`, udp/19196, flat, peaceful |
 
 ## Commands (owner only, afk task with walking)
@@ -33,8 +37,10 @@ Decision record: [decisions/0028-home-logistics.md](decisions/0028-home-logistic
 |---|---|
 | `!unload [all]` | `unloading 8 stacks into 5 known containers`, then `unloaded: 176 cobblestone -> double chest -3 -60 -1, 32 dirt -> barrel 0 -60 -4, 128 coal -> chest 3 -60 -2, 128 oak_log -> chest 3 -60 2 (wood); kept 16 cobblestone, 1 iron_pickaxe, 5 bread`; with full chests `unloaded: 1904 cobblestone -> shulker box (into chest -3 -60 3); 2 shulker boxes filled and stored; kept ...`; `unload: no home set (!home set)`, `unload: I know no chest near home yet (!chests scan)`; `left 5 dirt (no room)` when nothing had room |
 | `!stock [item]` | `iron_ingot: 128 in chest 100 63 -48 (ores), 64 in barrel 90 63 -48 (192 in all)`; `!stock shulker`: `shulker_box: 3 in chest 1 2 3 (3 empty)`; no item: the totals; `stock: no diamond in the 5 containers I know` |
-| `!chests` | `chests: 5 remembered: chest 3 -60 2 (wood): 26/27 free, 32 oak_log (0 min ago) \| double chest -3 -60 -1: 54/54 free, empty (0 min ago) \| ...` |
-| `!chests scan` | `chests: reading the containers within 16 blocks of home`, then `chests: read 5 of 6 containers within the radius in 6.0 s` (blocks found: a double chest is two; `2 read less than 10 min ago`, `1 forgotten`, `could not open 1 2 3 (open: timeout)` when so) |
+| `!chests` | `chests: 6 remembered (3 reachable, 3 unreachable: !chests unreachable): 6 chests \| chest 3 -60 2: 26/27 free, 5 coal (0 min ago) \| ...`; the counts by kind with their labels (`3 chests (ores, wood), 1 barrel, 1 double chest`), then each reachable container, nearest first (chat cuts at 256 characters) |
+| `!chests scan` | `chests: reading the containers within 16 blocks of home (walks of up to 32 blocks)`, then `chests: 181 within 16 blocks, 140 reachable within 32 path blocks, read 64 (76 pending), 41 unreachable, in 95 s` (blocks found: a double chest is two; `2 read less than 10 min ago`, `1 forgotten`, `could not open 1 2 3 (open: timeout)` when so; with `homeChestWalk 0` no `reachable` part). Probes the unreachable ones again |
+| `!chests unreachable` | Track AN: `chests: 3 unreachable: chest -6 -60 5: no path within 4000 nodes (0 min ago) \| chest 12 -60 0: path 38 blocks (0 min ago) \| ...`, nearest first, at most 3 messages (the last ends `... and 12 more (!chests clear forgets them, !chests scan tries again)`); `chests: none unreachable` |
+| `!chests clear` | `chests: forgot 181 containers (41 unreachable); I read them again the next time I stand near home (or !chests scan)` |
 | `!chests label x y z <text>` / `none` | `chests: chest 3 -60 2 (wood) labelled`; up to 32 characters |
 
 `!unload` and `!chests scan` are user processes (priority 40): `!stop` ends them, flee / guard /
@@ -53,9 +59,43 @@ unloads their items like the rest.
   blocks of home with no user process; and when a container block appears within the radius (a
   block update: read that one) or disappears (forgotten at once, no walk). The bot's own box placing
   and breaking during a job is ignored.
-- What: every container not read in the last 10 minutes is visited in nearest-neighbour order: walk
-  (`near`, 2 blocks), open, snapshot, close. A container that does not open is reported and not
+- What: every container not read in the last 10 minutes (and not remembered as unreachable) is probed
+  (Track AN, below); the reachable ones are visited in nearest-neighbour order, at most 64 per scan:
+  walk (`chestGoal`), open, snapshot, close. A container that does not open is reported and not
   retried for 2 minutes by the chore; one whose block is no container any more is forgotten.
+
+## Walking distance (Track AN)
+
+The owner's Realm: 181 containers within `homeChestRadius` 16 of home, and every one above floor
+level ended `goto: unreachable` after 3 plans; the owner asked "instead of radius can it be like
+walking distance? like pathfind distance to said chests? or a toggleable thing?". Now:
+
+- **Candidates**: the radius stays the cheap filter (`homeChestRadius`, 16, up to 48).
+- **Probe plans first** (no walking): every candidate gets a bounded plan (reach.ts `probePath`:
+  4 000 nodes / 300 ms of search, in 8 ms slices with a yield to the event loop between them, on the
+  main thread like the miner's probes, never digging or pillaring) from home, or from the bot when it
+  stands within 8 blocks of home. The path's length (sum of the steps, blocks) is the container's
+  walking distance. A container is **unreachable** when the probe finds no path (`no path`, `no path
+  within 4000 nodes`, `no path in the loaded world`) or a path longer than `homeChestWalk` (`path 38
+  blocks`; default 32, `0` = no probes: radius only, as before Track AN).
+- **Unreachable memory**: the record keeps `unreachable` (the reason) and `unreachableAt` in
+  `chests.json`; scans skip it for an hour, `!chests scan` probes it again at once, a read clears it,
+  `!chests clear` forgets it with the rest. A walk that fails during a scan (`goto: ...`) marks it too.
+  Unreachable containers are never unload targets; `!stock` still counts what they held when read.
+- **Read cap**: the reachable ones are sorted by path length; the nearest 64 are read
+  (nearest-neighbour between them), the rest is `pending`: the chore reads them at the next idle
+  moment at home (64 at a time), also after a `!chests scan`.
+- **The goal** (`chestGoal`): `getToBlock` with reach 4, `face: false` (main's rule for container
+  goals: a chest inside a stack or a wall of chests has no face turned to a stand cell) and `low: 3`
+  (new option: from a side column the feet may be up to 3 blocks below the container, so a chest on a
+  3-high stack or a pillar is read from the floor; reach still decides). The probe uses the same goal
+  as the walk, so "reachable" means the walk's goal can be reached.
+
+Probe cost, measured on bds-home (home-reach e2e, flat world, final code): 6 candidates in 46 to 58
+ms of wall clock, **7.7 to 9.7 ms per candidate** (4 runs, 2 on the final code) (the 2 walled-in ones run to the 4 000-node budget, the
+4 others finish in a few hundred nodes); unit test on a generated world: the same layout gives the
+same verdicts. The owner's 181 candidates therefore cost about 2 s of probing (at most 181 x 300 ms
+if every one hit the time budget), instead of 181 walks.
 - Double chests: the window has 54 slots (`inventory_content`). The open half becomes the record
   (`double: true`, size 54), its single same-kind horizontal neighbour the `partner`, which is never a
   container of its own (not read, not a target, left out of `!chests` and `!stock`).
@@ -177,6 +217,14 @@ the end.
   and an iron pickaxe (coal to the coal, logs to the wood chest, cobblestone to the double chest,
   dirt to the barrel through `barrel` slots, bread / pickaxe / 16 cobblestone kept, 12 requests);
   `autoUnload`: 10 stacks, `!goto` home, the chore unloads them.
+- `home-reach` (Track AN): 2 floor chests (one with 5 coal), a chest on a 3-high stone pillar, 2 chests
+  walled in (3 x 3 x 3 stone), 1 chest 12 blocks away in a walled room whose door is on the far side;
+  `!chests scan`: `chests: 6 within 16 blocks, 3 reachable within 32 path blocks, read 3, 3 unreachable,
+  in 4.9 to 5.1 s` (walled: `no path within 4000 nodes`, far: `path 38 blocks`), `!chests unreachable`
+  lists the 3, `!chests` counts them apart; `!set homeChestWalk 0` + `!chests scan`: the far chest is read,
+  the walled ones fail their walks (`goto: unreachable`): `read 1, 2 unreachable, 3 read less than 10 min
+  ago, in 48 to 52 s`. Final code: 2 runs of all three files in parallel, 8/8 green each (141 to 147 s); 2 earlier
+  runs (before `face: false`) green too.
 - `home-shulker`: the same home, every container filled with stone (truth:chestput), 30 stacks of
   cobblestone: 2 boxes filled and stored, 16 cobblestone kept, no box left in the world, the box
   chest's boxes hold 1728 and 176 cobblestone and one stays empty.

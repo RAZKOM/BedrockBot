@@ -87,6 +87,7 @@ export const SETTING_DEFS = {
   lastWelcomed: { kind: 'text', default: 'none', values: 'version|none', parse: (raw: string) => { const v = raw.trim(); if (!/^[\w.+-]{1,64}$/.test(v)) throw new SettingError(`lastWelcomed must be a version string or none, got "${raw}"`); return v; }, description: 'the bot version whose welcome whisper the owners got (none: whisper at the next sighting; docs/ux.md)' }, // Track AM
   buildScaffold: { kind: 'boolean', default: true, description: '!build: place temporary scaffold blocks (support, pillar columns) for cells it cannot reach or click otherwise, removed afterwards' }, // Track AL
   homeChestRadius: { kind: 'number', default: 16, min: 2, max: 48, integer: true, unit: 'blocks', description: 'home logistics: chests, barrels and shulker boxes within this radius of home are found, read and unloaded into' }, // Track AG
+  homeChestWalk: { kind: 'number', default: 32, min: 0, max: 256, integer: true, unit: 'path blocks', description: 'home logistics: containers whose walk from home is longer than this (the planner\'s path) are skipped and remembered as unreachable; 0 = no path check (homeChestRadius only)' }, // Track AN
   autoUnload: { kind: 'boolean', default: true, description: 'unload into the chests at home as a chore when idle there with more than 8 stacks of unloadable items or a full shulker box' }, // Track AG
 } as const satisfies Record<string, SettingDef>;
 
