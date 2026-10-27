@@ -43,6 +43,13 @@ export type ProbeVerdict =
   | { ok: false; reason: string; blocks?: number };
 
 /** What a probe result means for a walk limit (`walk` path blocks; 0 = no limit). */
+/** The feet cell the probe's path ends in: the stand cell to walk to (the goal's own choice may be far: a cell on the other side of a wall). */
+export function standOf(r: PathResult | undefined): Vec3 | undefined {
+  if (r?.status !== 'found' || r.path.length === 0) return undefined;
+  const n = r.path[r.path.length - 1]!;
+  return { x: n.x, y: n.y, z: n.z };
+}
+
 export function verdict(r: PathResult, walk: number, nodes = PROBE_NODES): ProbeVerdict {
   if (r.status === 'found') {
     const blocks = pathBlocks(r.path);

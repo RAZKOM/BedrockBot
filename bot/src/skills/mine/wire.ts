@@ -30,7 +30,7 @@ export function createMinerFor(p: FarmParts, settings: { tunnelLen?: () => numbe
       return start ? findPath(nav.grid, start, goal, { ...nav.planOptions(opts), maxNodes: PROBE_NODES, maxMs: PROBE_MS }) : undefined;
     },
     blacklist: nav.blacklist,
-    breakRule: (q) => breakBlocker(nav.grid, q.x, q.y, q.z, {}, feetFloor()),
+    breakRule: (q) => breakBlocker(nav.grid, q.x, q.y, q.z, nav.breakRules(), feetFloor()),
     stand: (x, y, z) => nav.grid.stand(x, y, z),
     blockAt: (q) => world.blockAt(q),
     inventory: world.inventory,

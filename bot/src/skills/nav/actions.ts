@@ -35,6 +35,8 @@ export const FACE_OFFSET: Readonly<Record<NavBlockFace, Readonly<Vec3>>> = Objec
 export interface BreakRules {
   /** Block names never broken (on top of containers, beds and the like, which never are). */
   protectedBlocks?: ReadonlySet<string> | readonly string[];
+  /** Nothing is broken within `r` blocks (3D, block centres) of this point: the base around home (`protectRadius`). */
+  protectedArea?: { x: number; y: number; z: number; r: number };
 }
 
 /**
@@ -54,6 +56,8 @@ export function breakBlocker(grid: NavGrid, x: number, y: number, z: number, rul
   if (c.openable) return 'openable';
   const prot = rules.protectedBlocks;
   if (prot && (Array.isArray(prot) ? (prot as readonly string[]).includes(c.name) : (prot as ReadonlySet<string>).has(c.name))) return 'protected';
+  const area = rules.protectedArea;
+  if (area && Math.hypot(x + 0.5 - area.x, y + 0.5 - area.y, z + 0.5 - area.z) <= area.r) return 'protected_area';
   for (const f of feetFloors) if (f.x === x && f.y === y && f.z === z) return 'under_feet';
   for (const [dx, dy, dz] of NEIGHBOURS) {
     const n = grid.cls(x + dx, y + dy, z + dz);

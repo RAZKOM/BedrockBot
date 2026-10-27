@@ -19,7 +19,7 @@ import type { InputLoop, InputLoopState } from '../input/inputLoop.ts';
 import { classify, type TerrainClass } from '../terrain/classify.ts';
 import type { TerrainSource } from '../terrain/query.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
-import { DEFAULT_THROWAWAY, type NavActions } from './actions.ts';
+import { DEFAULT_THROWAWAY, type BreakRules, type NavActions } from './actions.ts';
 import { PathSearch, findPath, handBreakTicks, locateNode, type LocatedNode, type PathNode, type PathOptions, type PathResult } from './astar.ts';
 import { TICKS } from './costs.ts';
 import { PathFollower, PressGuard, yawTowards } from './follower.ts';
@@ -74,6 +74,10 @@ export interface NavigatorOptions {
   moveTimeout?: { factor: number; margin: number };
   /** Track S: extra cost per feet cell, built afresh for every plan (mob / spawner avoidance, nav/avoidance.ts). */
   cellCost?: () => PathOptions['cellCost'];
+  /** The base around home: nothing is broken inside (read live each plan; setProtect replaces it). */
+  protect?: () => BreakRules['protectedArea'] | undefined;
+  /** Ticks added per dug block on top of the break time (read live each plan; setDigPenalty replaces it). */
+  digPenalty?: () => number | undefined;
   /** Track R: the failure blacklist (default: a new one on this navigator's tick clock, 3 failures, 6000 ticks). */
   blacklist?: NavBlacklist;
   blacklistFailures?: number;
@@ -252,6 +256,8 @@ export class Navigator {
   lastReport: GotoReport | undefined;
   /** Track S: the `cellCost` option, settable after construction (the survival kit installs avoidance). */
   cellCost: NavigatorOptions['cellCost'];
+  private protect: NavigatorOptions['protect'];
+  private digPenalty: NavigatorOptions['digPenalty'];
   /** Track R: failed goals / `any` members / action cells, skipped for a while (nav/blacklist.ts). */
   readonly blacklist: NavBlacklist;
   /** Track R: ticks seen by this navigator (the blacklist's clock). */
@@ -266,6 +272,8 @@ export class Navigator {
 
   constructor(loop: InputLoop, world: NavWorld, opts: NavigatorOptions = {}) {
     this.cellCost = opts.cellCost; // Track S
+    this.protect = opts.protect;
+    this.digPenalty = opts.digPenalty;
     this.loop = loop;
     this.blacklist = opts.blacklist ?? new NavBlacklist({ failures: opts.blacklistFailures, ticks: opts.blacklistTicks, now: () => this.clock }); // Track R
     this.grid = new NavGrid(world.source);
@@ -353,7 +361,8 @@ export class Navigator {
     };
     return {
       ...this.pathOpts,
-      costs: { walk: sprint ? TICKS.sprint : TICKS.walk, ...this.pathOpts.costs },
+      costs: { walk: sprint ? TICKS.sprint : TICKS.walk, ...(this.digPenalty?.() !== undefined ? { dig: this.digPenalty()! } : {}), ...this.pathOpts.costs },
+      ...(this.protect?.() ? { protectedArea: this.protect()! } : {}),
       allowBreak: (options.allowBreak ?? false) && this.actions.dig !== undefined,
       allowPlace: (options.allowPlace ?? false) && this.actions.place !== undefined && haveThrowaway(),
       allowOpen: this.actions.useBlock !== undefined,
@@ -368,6 +377,22 @@ export class Navigator {
       ...(noBreak ? { noBreak } : {}),
       cellCost: this.cellCost?.() ?? this.pathOpts.cellCost, // Track S: avoidance, read live each plan
     };
+  }
+
+  /** Replace the protected-area getter (the base around home; registry wiring). */
+  setProtect(fn: NavigatorOptions['protect']): void {
+    this.protect = fn;
+  }
+
+  /** Replace the dig-penalty getter (ticks per dug block; registry wiring). */
+  setDigPenalty(fn: NavigatorOptions['digPenalty']): void {
+    this.digPenalty = fn;
+  }
+
+  /** The break rules every direct dig must respect too (the miner's sight line, the farmer): the protected area. */
+  breakRules(): BreakRules {
+    const area = this.protect?.();
+    return area ? { protectedArea: area } : {};
   }
 
   /** Plan only (no movement, one search to the end): from the body's current node to the goal. */
@@ -817,6 +842,7 @@ export class Navigator {
       allowPlace: o.allowPlace ?? false,
       allowOpen: o.allowOpen ?? false,
       ...(prot ? { protectedBlocks: [...prot] } : {}),
+      ...(o.protectedArea ? { protectedArea: { ...o.protectedArea } } : {}),
       ...(o.noBreak?.size ? { noBreak: [...o.noBreak] } : {}),
       ...(o.noAction?.size ? { noAction: [...o.noAction] } : {}),
       ...(inv ? { inventory: { slots: inv.slots.map((s) => (s ? { name: s.name, count: s.count } : null)), selected: inv.selected } } : {}),

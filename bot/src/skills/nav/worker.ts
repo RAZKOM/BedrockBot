@@ -46,6 +46,7 @@ export interface WorkerPlanOptions {
   allowPlace: boolean;
   allowOpen: boolean;
   protectedBlocks?: string[];
+  protectedArea?: { x: number; y: number; z: number; r: number };
   noBreak?: number[];
   noAction?: number[];
   /** Break times with the best hotbar tool (chooseTool), else the empty hand. */
@@ -718,6 +719,7 @@ function workerOptions(o: WorkerPlanOptions): PathOptions {
     allowPlace: o.allowPlace,
     allowOpen: o.allowOpen,
     ...(o.protectedBlocks ? { protectedBlocks: o.protectedBlocks } : {}),
+    ...(o.protectedArea ? { protectedArea: o.protectedArea } : {}),
     ...(o.noBreak ? { noBreak: new Set(o.noBreak) } : {}),
     ...(o.noAction ? { noAction: new Set(o.noAction) } : {}),
     breakTicks: inv ? (c) => chooseTool(c.name, inv.slots, inv.selected)?.ticks ?? Infinity : handBreakTicks,

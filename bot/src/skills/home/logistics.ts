@@ -31,7 +31,7 @@ import type { PlaceOptions, PlaceResult } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { chestNeighbours, findContainers, isHomeContainer, visitOrder, visitOrderBanded, type DiscoveryWorld } from './discovery.ts';
 import { chestName, fmtPos, partnerKeys, planChests, recordFrom, unreadRecord } from './memory.ts';
-import { chestGoal, verdict } from './reach.ts';
+import { chestGoal, standOf, verdict } from './reach.ts';
 import { planUnload, unloadableStacks, type UnloadPlan, type UnloadSlot } from './unloader.ts';
 
 /** A container read within this many ms is not read again by a scan. */
@@ -252,8 +252,17 @@ export class HomeLogistics {
   // ---- reading one container ------------------------------------------------------------------
 
   /** Walk to a container, open it, remember what it holds, keep it open (the caller closes it). */
+  /** The stand cells the probes found, by container key: the walk goes there, not to whatever cell the goal picks (Realm 2026-10-30: a chest 5 blocks from home sent the bot 180 blocks around the house to a cell behind the wall). */
+  private readonly stands = new Map<string, Vec3>();
+
   private async visit(p: Vec3, kind: string, cancelled: () => boolean): Promise<{ ok: true; view: ContainerView; record: ChestRecord } | { ok: false; reason: string }> {
-    const g = await this.d.skills.goto(chestGoal(p), { timeoutTicks: 800 }); // 40 s: the probe already said it is reachable; a stuck walk must not eat the scan // within reach from any height (stacked chests, shelves, Track AN: up to 3 blocks above the feet); `near` failed for chests above floor level on the Realm
+    let stand = this.stands.get(chestKey(p));
+    if (!stand && this.d.probe && this.walkLimit() > 0) {
+      const here = this.d.position();
+      if (here) stand = standOf(await this.d.probe(chestGoal(p), here));
+    }
+    let g = stand ? await this.d.skills.goto({ type: 'block', p: stand }, { timeoutTicks: 800 }) : { ok: false as const, reason: 'no stand' };
+    if (!g.ok && !cancelled() && g.reason !== 'interrupted') g = await this.d.skills.goto(chestGoal(p), { timeoutTicks: 800 }); // 40 s: a stuck walk must not eat the scan // 40 s: the probe already said it is reachable; a stuck walk must not eat the scan // within reach from any height (stacked chests, shelves, Track AN: up to 3 blocks above the feet); `near` failed for chests above floor level on the Realm
     if (cancelled()) return { ok: false, reason: 'interrupted' };
     if (!g.ok) return { ok: false, reason: `goto: ${g.reason ?? 'failed'}` };
     let o = await this.d.skills.open(p);
@@ -377,6 +386,8 @@ export class HomeLogistics {
       for (const f of todo) {
         if (cancelled()) return finish('interrupted');
         const r = await this.d.probe(chestGoal(f.p), from);
+        const st0 = standOf(r);
+        if (st0) this.stands.set(chestKey(f.p), st0);
         if (!r) {
           blind = true; // no standable start: nothing to say about any container
           break;
@@ -423,6 +434,8 @@ export class HomeLogistics {
         let best = Infinity;
         for (const c of ranked.slice(0, NEXT_PROBES)) {
           const r = await this.d.probe(chestGoal(c.p), here);
+          const st1 = standOf(r);
+          if (st1) this.stands.set(chestKey(c.p), st1);
           const pv = r ? verdict(r, 0) : undefined;
           if (pv?.ok && pv.blocks < best) {
             best = pv.blocks;

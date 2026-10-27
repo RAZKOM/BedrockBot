@@ -66,6 +66,8 @@ export interface PathOptions {
   breakTicks?: (c: TerrainClass) => number;
   /** Extra blocks never to break (containers, beds and the like never are). */
   protectedBlocks?: BreakRules['protectedBlocks'];
+  /** The base around home: nothing is broken inside (BreakRules.protectedArea). */
+  protectedArea?: BreakRules['protectedArea'];
   /** Cells (cellKey) not to break (a dig there failed). */
   noBreak?: ReadonlySet<number>;
   /** Track S: extra ticks (>= 0) for a move that ends in feet cell (x, y, z): mob / spawner avoidance (nav/avoidance.ts). */
@@ -621,7 +623,7 @@ export class PathSearch {
       }
       if (c.boxes.length === 0 && !c.liquid && !c.danger) continue;
       if (this.opts.noBreak?.has(cellKey(nx, y, nz))) return;
-      if (breakBlocker(grid, nx, y, nz, { protectedBlocks: this.opts.protectedBlocks }, floors) !== undefined) return;
+      if (breakBlocker(grid, nx, y, nz, { protectedBlocks: this.opts.protectedBlocks, protectedArea: this.opts.protectedArea }, floors) !== undefined) return;
       const t = this.breakTicksOf(c);
       if (!Number.isFinite(t)) return;
       ticks += t + this.costs.dig;

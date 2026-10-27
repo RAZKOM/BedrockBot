@@ -162,6 +162,15 @@ export const afkTask: TaskDefinition = {
     let pve: PveController | undefined;
     let gather: AfkGather | undefined;
     let containers: Containers | undefined;
+    if (mob) {
+      // the base around home is never dug (protectRadius), built blocks never are, and every dug block costs digPenalty ticks
+      mob.skills.nav.setProtect(() => {
+        const h = home;
+        const r = settings.get('protectRadius');
+        return h && r > 0 ? { x: h.x + 0.5, y: h.y, z: h.z + 0.5, r } : undefined;
+      });
+      mob.skills.nav.setDigPenalty(() => settings.get('digPenalty'));
+    }
     if (mob && processes) {
       const nightRef: { p?: NightProcess } = {};
       const n = new NightSafety({

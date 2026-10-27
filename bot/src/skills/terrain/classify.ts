@@ -125,8 +125,25 @@ const UNKNOWN_BOXES: readonly Box[] = Object.freeze([Object.freeze([0, 0, 0, 1, 
 export const LEAVES_PENALTY = 4;
 export const SLOW_PENALTY = 4;
 
+/**
+ * Blocks a player built rather than the world generator (2026-10-30: `!mine` dug through the owner's bookshelves,
+ * stone bricks and brick stairs to reach an ore): crafted building blocks by name. Natural blocks that only
+ * occur in generated structures (stone bricks in strongholds, nether bricks in fortresses) count as built too:
+ * digging through a structure is never what the owner meant. Cobblestone, sandstone, terracotta without a
+ * colour, logs, planks' raw logs and all ores / stone / dirt / sand / gravel stay natural.
+ */
+const BUILT_SUFFIXES = ['_planks', '_bricks', '_tiles', '_stairs', '_slab', '_double_slab', '_wall', '_fence', '_fence_gate', '_door', '_trapdoor', '_glass', '_glass_pane', '_wool', '_carpet', '_concrete', '_concrete_powder', '_glazed_terracotta', '_stained_hardened_clay', '_pressure_plate', '_button', '_sign', '_hanging_sign', '_banner', '_lantern', '_candle', '_candle_cake', '_shelf', '_table', '_copper', '_copper_grate', '_copper_bulb', '_pillar'];
+const BUILT_PREFIXES = ['polished_', 'smooth_', 'cut_', 'chiseled_', 'cracked_', 'waxed_', 'quartz_', 'purpur_', 'prismarine_', 'nether_brick', 'red_nether_brick', 'end_brick', 'mud_brick', 'brick_', 'stonebrick', 'stone_brick', 'deepslate_brick', 'deepslate_tile', 'tube_coral_block', 'copper_'];
+const BUILT_NAMES = new Set(['planks', 'wool', 'concrete', 'glass', 'glass_pane', 'tinted_glass', 'stained_glass', 'stained_glass_pane', 'bookshelf', 'crafting_table', 'lantern', 'soul_lantern', 'sea_lantern', 'glowstone', 'iron_bars', 'chain', 'bell', 'anvil', 'chipped_anvil', 'damaged_anvil', 'grindstone', 'stonecutter_block', 'loom', 'cartography_table', 'smithing_table', 'fletching_table', 'composter', 'tnt', 'jack_o_lantern', 'carved_pumpkin', 'hay_block', 'bone_block', 'ladder', 'scaffolding', 'lever', 'redstone_wire', 'redstone_block', 'unpowered_repeater', 'powered_repeater', 'unpowered_comparator', 'powered_comparator', 'observer', 'piston', 'sticky_piston', 'rail', 'golden_rail', 'detector_rail', 'activator_rail', 'noteblock', 'target', 'lightning_rod', 'frame', 'glow_frame', 'flower_pot', 'cake', 'end_rod', 'conduit', 'lodestone', 'quartz_block', 'brick_block', 'stone_bricks', 'mossy_stone_bricks', 'cracked_stone_bricks', 'chiseled_stone_bricks', 'nether_brick', 'red_nether_brick', 'end_bricks', 'purpur_block', 'prismarine', 'dark_prismarine', 'cobblestone_wall', 'mossy_cobblestone', 'sponge', 'wet_sponge', 'slime', 'honey_block', 'honeycomb_block', 'dried_kelp_block', 'iron_block', 'gold_block', 'diamond_block', 'emerald_block', 'netherite_block', 'lapis_block', 'coal_block', 'copper_block', 'raw_iron_block', 'raw_gold_block', 'raw_copper_block', 'amethyst_block', 'glowstone', 'shroomlight', 'crimson_planks', 'warped_planks', 'torch', 'soul_torch', 'redstone_torch', 'campfire', 'soul_campfire', 'cauldron', 'hopper', 'enchanting_table', 'bed', 'white_wool']);
+export function isBuiltBlock(name: string): boolean {
+  if (BUILT_NAMES.has(name)) return true;
+  for (const sfx of BUILT_SUFFIXES) if (name.endsWith(sfx)) return true;
+  for (const pfx of BUILT_PREFIXES) if (name.startsWith(pfx)) return true;
+  return false;
+}
+
 function isProtected(name: string): boolean {
-  return PROTECT_NAMES.has(name) || name.endsWith('_bed') || name.endsWith('shulker_box') || name.endsWith('_chest');
+  return PROTECT_NAMES.has(name) || name.endsWith('_bed') || name.endsWith('shulker_box') || name.endsWith('_chest') || isBuiltBlock(name);
 }
 
 function make(info: BlockInfo): TerrainClass {

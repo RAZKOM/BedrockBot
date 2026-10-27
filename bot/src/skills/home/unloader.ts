@@ -125,10 +125,17 @@ function put(s: SimChest, name: string, n: number, max: number): void {
 const dist = (c: PlanChest, o: Vec3 | undefined): number => (o ? Math.hypot(c.pos.x + 0.5 - o.x, c.pos.y + 0.5 - o.y, c.pos.z + 0.5 - o.z) : 0);
 
 /** Pick the target for `name` by the rules; undefined when no chest has room. */
-function pick(sims: readonly SimChest[], name: string, max: number, origin: Vec3 | undefined): { s: SimChest; rule: Rule } | undefined {
+function pick(sims: readonly SimChest[], name: string, max: number, origin: Vec3 | undefined, boxUsed?: number): { s: SimChest; rule: Rule } | undefined {
   const box = isShulkerBox(name);
   const open = sims.filter((s) => capacity(s, name, max) > 0 && !(box && isShulkerBox(s.c.kind)));
   const near = (a: SimChest, b: SimChest) => dist(a.c, origin) - dist(b.c, origin);
+  if (box) {
+    // a box goes with boxes of the same state: empty boxes to the chest holding empty boxes, full ones to the chest holding
+    // full ones (the owner: a chest of empty shulkers is not a chest of sand-filled shulkers, even when the box colours match)
+    const full = (boxUsed ?? 0) > 0;
+    const alike = open.filter((s) => (full ? s.c.boxes.full : s.c.boxes.empty) > 0).sort((a, b) => (full ? b.c.boxes.full - a.c.boxes.full : b.c.boxes.empty - a.c.boxes.empty) || near(a, b));
+    if (alike[0]) return { s: alike[0], rule: 'boxes' };
+  }
   const same = open.filter((s) => (s.contents[name] ?? 0) > 0).sort((a, b) => (b.contents[name] ?? 0) - (a.contents[name] ?? 0) || near(a, b));
   if (same[0]) return { s: same[0], rule: 'same' };
   const label = open.filter((s) => labelMatches(s.c.label, name)).sort((a, b) => b.free - a.free || near(a, b));
@@ -207,7 +214,7 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
     let left = movable.get(s.slot) ?? s.count;
     const max = maxOf(s.name);
     while (left > 0) {
-      const t = pick(sims, s.name, max, opts.origin);
+      const t = pick(sims, s.name, max, opts.origin, s.boxUsed);
       if (!t) {
         plan.overflow.push({ slot: s.slot, name: s.name, count: left });
         break;

@@ -70,7 +70,7 @@ export function createMiner(p: FarmParts, settings: { tunnelLen?: () => number }
     skills,
     memory,
     plan: (goal, opts) => skills.nav.plan(goal, undefined, opts),
-    breakRule: (q) => breakBlocker(skills.nav.grid, q.x, q.y, q.z, {}, feetFloor()),
+    breakRule: (q) => breakBlocker(skills.nav.grid, q.x, q.y, q.z, skills.nav.breakRules(), feetFloor()),
     stand: (x, y, z) => skills.nav.grid.stand(x, y, z),
     blockAt: (q) => world.blockAt(q),
     inventory: world.inventory,

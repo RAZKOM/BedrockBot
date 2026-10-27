@@ -43,6 +43,9 @@ describe('classify', () => {
     // item frames (labels hung on chest fronts) are walked through: no box, nothing to stand on (Realm 2026-10-30: the bot stood "in frame" and the planner saw a wall)
     expect(classify(blockInfoOf('frame'))).toMatchObject({ floor: false, top: 0, danger: false });
     expect(boxesOf(blockInfoOf('frame'))).toEqual([]);
+    // built blocks are never dug by a route (2026-10-30: !mine went through the owner's bookshelves and stone bricks)
+    for (const n of ['bookshelf', 'stone_bricks', 'deepslate_brick_stairs', 'oak_planks', 'glass', 'spruce_door', 'cobblestone_wall', 'white_concrete', 'crafting_table']) expect(classify(blockInfoOf(n)).protect, n).toBe(true);
+    for (const n of ['stone', 'dirt', 'cobblestone', 'sand', 'gravel', 'oak_log', 'coal_ore', 'deepslate', 'sandstone', 'grass_block']) expect(classify(blockInfoOf(n)).protect, n).toBe(false);
     expect(classify(blockInfoOf('oak_leaves'))).toMatchObject({ leaves: true, floor: true });
     expect(classify(blockInfoOf('oak_leaves')).penalty).toBeGreaterThan(0);
     expect(classify(blockInfoOf('ice')).friction).toBe(0.98);

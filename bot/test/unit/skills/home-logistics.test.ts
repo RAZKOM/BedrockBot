@@ -221,13 +221,13 @@ describe('home logistics: scan', () => {
 
 describe('home logistics: walking distance (Track AN)', () => {
   /** A probe answer: a straight path of `blocks` blocks, or no path. */
-  const found = (blocks: number): PathResult => ({ status: 'found', path: Array.from({ length: blocks + 1 }, (_, i) => ({ x: i, y: 0, z: 0, feet: 0, move: 'walk' as const, cost: 1 })), cost: blocks, expanded: blocks, ms: 1, unknown: false, limited: false });
+  const found = (blocks: number, at: Vec3 = { x: blocks, y: 0, z: 0 }): PathResult => ({ status: 'found', path: Array.from({ length: blocks + 1 }, (_, i) => ({ x: at.x - (blocks - i), y: at.y, z: at.z, feet: at.y, move: 'walk' as const, cost: 1 })), cost: blocks, expanded: blocks, ms: 1, unknown: false, limited: false });
   const none: PathResult = { status: 'none', path: [{ x: 0, y: 0, z: 0, feet: 0, move: 'start', cost: 0 }], cost: 0, expanded: 50, ms: 1, unknown: false, limited: false };
 
   it('probes first, reads the reachable ones, remembers the unreachable ones for an hour; !chests scan (retry) probes them again; homeChestWalk 0 = radius only', async () => {
     let now = 1_000_000;
     const probed: string[] = [];
-    const answers: Record<string, PathResult> = { '3,0,0': found(3), '-3,0,0': found(4), '0,0,6': none, '10,0,0': found(40) };
+    const answers: Record<string, PathResult> = { '3,0,0': found(3, { x: 3, y: 0, z: 0 }), '-3,0,0': found(4, { x: -3, y: 0, z: 0 }), '0,0,6': none, '10,0,0': found(40, { x: 10, y: 0, z: 0 }) };
     const h = fakeHome({
       containers: { '3,0,0': { kind: 'chest' }, '-3,0,0': { kind: 'barrel' }, '0,0,6': { kind: 'chest' }, '10,0,0': { kind: 'chest' } },
       inv: [],
@@ -285,7 +285,7 @@ describe('home logistics: walking distance (Track AN)', () => {
     for (let i = 0; i < 70; i++) {
       const k = `${(i % 10) - 5},${Math.floor(i / 10)},${(i % 7) - 3}`;
       containers[k] = { kind: 'chest' };
-      answers[k] = found(i + 1);
+      answers[k] = found(i + 1, { x: (i % 10) - 5, y: Math.floor(i / 10), z: (i % 7) - 3 }); // the fake stands in the chest cell itself
     }
     const first = Object.keys(containers)[0]!;
     const h = fakeHome({ containers, inv: [], probe: async (g) => answers[chestKey((g as { p: Vec3 }).p)], gotoFail: new Set([first]) });
