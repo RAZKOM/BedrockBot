@@ -173,14 +173,58 @@ export function connectedBoxes(kind: ConnectKind, mask: number): readonly Box[] 
   return boxes;
 }
 
-/** Collision boxes of a world BlockInfo: real shapes for known states, a full cube for unknown blocks. */
+/**
+ * Collision boxes of a world BlockInfo: real shapes for known states, a full cube for unknown blocks.
+ * States minecraft-data does not have (the BDS palette's own state ids, e.g. 1.26.60's poplar and
+ * wool / concrete sets) take the state-dependent shape by name suffix (`partialBoxes`), else the
+ * registry's borrowed boxes.
+ */
 export function boxesOf(info: BlockInfo): readonly Box[] {
   if (info.stateId < 0) return info.solid ? [FULL] : NONE;
   if (isStairsName(info.name)) {
     const corner = info.states[STAIRS_CORNER];
     if (typeof corner === 'string' && corner !== 'none') return stairBoxes(info.states);
   }
-  return boxesOfState(info.stateId) ?? info.boxes;
+  // Track AK: only a minecraft-data state of the same block has its shape in the data
+  if (data().blocksByStateId[info.stateId]?.name === info.name) return boxesOfState(info.stateId) ?? info.boxes;
+  return partialBoxes(info.name, info.states) ?? info.boxes;
+}
+
+// ---- Track AK: state-dependent shapes by name suffix (blocks newer than the block data) ----------
+
+/** minecraft-data blocks whose per-state shapes stand in for every block with the suffix (longest suffix first). */
+const SUFFIX_SHAPES: readonly (readonly [suffix: string, donor: string])[] = [
+  ['_double_slab', 'oak_double_slab'],
+  ['_slab', 'oak_slab'],
+  ['_trapdoor', 'trapdoor'],
+  ['_fence_gate', 'fence_gate'],
+];
+const partialCache = new Map<string, readonly Box[] | undefined>();
+const plainValue = (v: unknown): unknown => (v === true ? 1 : v === false ? 0 : v);
+
+/**
+ * The state-dependent collision shape of a door, trapdoor, fence gate, stairs or slab by its name
+ * suffix and states, for states minecraft-data does not have: doors the panel (`doorBoxes`), stairs
+ * the steps with corners (`stairBoxes`), trapdoors / gates / slabs the shape of the donor state with
+ * the same state values (`trapdoor`, `fence_gate`, `oak_slab`). Undefined for other blocks, or when
+ * no donor state matches.
+ */
+export function partialBoxes(name: string, states: Readonly<Record<string, unknown>>): readonly Box[] | undefined {
+  if (isDoorName(name)) return doorBoxes(states);
+  if (isStairsName(name)) return stairBoxes(states);
+  const donor = SUFFIX_SHAPES.find(([suffix]) => name.endsWith(suffix))?.[1];
+  if (!donor) return undefined;
+  const key = `${donor}|${JSON.stringify(states)}`;
+  if (partialCache.has(key)) return partialCache.get(key);
+  const d = data();
+  const block = d.blocksByName[donor];
+  let boxes: readonly Box[] | undefined;
+  for (let s = block?.minStateId ?? 0; block && s <= block.maxStateId && boxes === undefined; s++) {
+    const have = d.blockStates[s]?.states ?? {};
+    if (Object.entries(have).every(([k, v]) => !(k in states) || plainValue(states[k]) === plainValue(v.value))) boxes = boxesOfState(s);
+  }
+  partialCache.set(key, boxes);
+  return boxes;
 }
 
 const infoCache = new Map<string, BlockInfo>();

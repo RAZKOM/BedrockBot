@@ -1,6 +1,6 @@
 // The prompt for the model (PLAN.md 7.18, Track Y; docs/natural-language.md "The prompt"): rules, the
 // command reference (each step kind with the chat's own help text), the bot's state (status line,
-// process stack, waypoint names, inventory, settings) and seven worked examples. The user message is
+// process stack, waypoint names, inventory, settings) and the worked examples. The user message is
 // `request from <sender>: <text>`.
 import { MAX_STEPS, STEP_KINDS, COMMAND_SPECS, type Plan, type StepKind } from './plan.ts';
 
@@ -44,7 +44,7 @@ const STEP_DOCS: Record<StepKind, string> = {
   gather: '{"command":"gather","count":N}: gather N logs (wood); ask when no number is given',
   mine: '{"command":"mine","block":"iron_ore","count":N}: mine N seen blocks of one ore or block id (iron -> iron_ore, coal -> coal_ore, diamonds -> diamond_ore)',
   farm: '{"command":"farm","radius":R?}: farm the crops around the bot (harvest, replant) until stopped; last step only',
-  food: '{"command":"food"}: go and get food',
+  food: '{"command":"food","pen":true?}: go and get food; pen true only when the request allows animals in pens', // Track AK
   eat: '{"command":"eat"}: eat now',
   equip: '{"command":"equip"}: put on the best armour',
   wp_set: '{"command":"wp_set","name":"<name>"}: save a waypoint where the bot stands; x y z only when the request states them',
@@ -54,6 +54,9 @@ const STEP_DOCS: Record<StepKind, string> = {
   pause: '{"command":"pause"}: hold the running command',
   resume: '{"command":"resume"}: continue after pause',
   get: '{"command":"get","item":"oak_log","count":N?}: get N of an item (wood, ores, stone, dirt, sand, food, crops); the first choice for get / bring / collect: it picks gather, mine, food or farm itself', // Track AD
+  breed: '{"command":"breed","type":"cow"?,"pairs":N?}: feed pairs of adult animals so they breed (cow, mooshroom, sheep, pig, chicken, rabbit); pairs 1..8, only when said', // Track AK
+  panel: '{"command":"panel"}: tell the control panel (web page) address', // Track AK
+  drop: '{"command":"drop","what":"all"|"items"}: drop everything carried (all), or everything except food, armour, tools and weapons (items)', // Track AK
   question: '{"command":"question","text":"..."}: ask the person one short question instead of guessing; last step',
 };
 
@@ -62,7 +65,7 @@ export interface Example {
   plan: Plan;
 }
 
-/** Seven worked examples (they also serve as FakeProvider answers in the tests; Track AD added get). */
+/** Worked examples (they also serve as FakeProvider answers in the tests; Track AD added get, Track AK breed, drop, food pen). */
 export const EXAMPLES: readonly Example[] = [
   { request: 'walk home and then guard', plan: { steps: [{ command: 'goto', waypoint: 'home' }, { command: 'guard', mode: 'on' }] } },
   { request: 'come here please', plan: { steps: [{ command: 'come' }] } },
@@ -71,6 +74,9 @@ export const EXAMPLES: readonly Example[] = [
   { request: 'go to the castle', plan: { steps: [{ command: 'question', text: 'I know no waypoint "castle". Which waypoint, or which x y z?' }] } },
   { request: 'mine 10 iron then come back to me', plan: { steps: [{ command: 'mine', block: 'iron_ore', count: 10 }, { command: 'come' }] } },
   { request: 'get me 20 oak logs', plan: { steps: [{ command: 'get', item: 'oak_log', count: 20 }] } }, // Track AD
+  { request: 'breed two pairs of cows', plan: { steps: [{ command: 'breed', type: 'cow', pairs: 2 }] } }, // Track AK
+  { request: 'empty your pockets but keep your gear', plan: { steps: [{ command: 'drop', what: 'items' }] } }, // Track AK
+  { request: 'get food, the penned animals too', plan: { steps: [{ command: 'food', pen: true }] } }, // Track AK
 ];
 
 export function buildSystemPrompt(c: PromptContext): string {

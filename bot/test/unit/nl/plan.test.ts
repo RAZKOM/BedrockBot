@@ -1,6 +1,6 @@
 // PLAN.md 7.18 (Track Y): the plan schema accepts the existing commands only, with bounded arguments.
 import { describe, expect, it } from 'vitest';
-import { parsePlan, planJsonSchema, planLine, PlanSchema, STEP_KINDS, stepCommand, type Plan } from '../../../src/nl/plan.ts';
+import { COMMAND_SPECS, parsePlan, planJsonSchema, planLine, PlanSchema, STEP_KINDS, stepCommand, type Plan } from '../../../src/nl/plan.ts';
 import { buildSystemPrompt, buildUserMessage, EXAMPLES, helpByCommand } from '../../../src/nl/prompt.ts';
 import { context } from './helpers.ts';
 
@@ -34,6 +34,12 @@ describe('plan schema', () => {
       { command: 'pause' },
       { command: 'resume' },
       { command: 'get', item: 'oak_log', count: 20 }, // Track AD
+      { command: 'food', pen: true }, // Track AK
+      { command: 'breed' }, // Track AK
+      { command: 'breed', type: 'chicken', pairs: 8 },
+      { command: 'panel' },
+      { command: 'drop', what: 'all' },
+      { command: 'drop', what: 'items' },
       { command: 'question', text: 'Which one?' },
     ];
     for (const s of valid) expect(ok(one(s)), JSON.stringify(s)).toBe(true);
@@ -78,6 +84,13 @@ describe('plan schema', () => {
       { command: 'set', key: 'nlConfirm', value: false },
       { command: 'set', key: 'noSuchKey', value: 1 },
       { command: 'question', text: '' },
+      { command: 'breed', type: 'zombie' }, // Track AK
+      { command: 'breed', type: 'cow', pairs: 9 },
+      { command: 'breed', pairs: 0 },
+      { command: 'drop', what: 'diamond' },
+      { command: 'drop' },
+      { command: 'panel', open: true },
+      { command: 'food', pen: 'yes' },
     ];
     for (const s of bad) expect(ok(one(s)), JSON.stringify(s)).toBe(false);
   });
@@ -103,6 +116,28 @@ describe('plan schema', () => {
     expect(planLine(plan)).toBe('plan: goto home, then guard on, then set allowBreak off, then wp set x 1 -60 2, then ask "Then what?"');
   });
 
+  it('Track AK: breed, panel, drop, food pen format as their chat commands', () => {
+    const plan: Plan = {
+      steps: [
+        { command: 'food', pen: true },
+        { command: 'food', pen: false },
+        { command: 'breed' },
+        { command: 'breed', type: 'pig' },
+        { command: 'breed', type: 'cow', pairs: 3 },
+        { command: 'breed', pairs: 2 },
+        { command: 'drop', what: 'items' },
+        { command: 'panel' },
+      ],
+    };
+    expect(plan.steps.map(stepCommand)).toEqual(['food pen', 'food', 'breed', 'breed pig', 'breed cow 3', 'breed 2', 'drop items', 'panel']);
+    expect(COMMAND_SPECS.breed.done!.test('breed: fed 1/1 cow pair, 1 baby so far')).toBe(true);
+    expect(COMMAND_SPECS.breed.fail!.test('breed: fed 1/1 cow pair, 1 baby so far')).toBe(false);
+    expect(COMMAND_SPECS.breed.fail!.test('breed: no two cows ready within 16 blocks')).toBe(true);
+    expect(COMMAND_SPECS.drop.done!.test('dropped 12 items of 3 kinds')).toBe(true);
+    expect(COMMAND_SPECS.drop.done!.test('drop: inventory empty')).toBe(true);
+    expect(COMMAND_SPECS.drop.fail!.test('dropped 3 items of 1 kinds (stopped at dirt: timeout)')).toBe(true);
+  });
+
   it('the JSON schema for the model is closed', () => {
     const s = planJsonSchema() as { properties: { steps: { items: { oneOf: { properties: { command: { const: string } }; additionalProperties: boolean }[] } } }; additionalProperties: boolean };
     expect(s.additionalProperties).toBe(false);
@@ -121,7 +156,7 @@ describe('prompt', () => {
     expect(p).toContain('settings: guardRadius 16');
     expect(p).toContain('[chat: !goto <waypoint> | x y z (walk)]');
     expect(p).toContain('!sleep (not available on this bot)');
-    expect(EXAMPLES).toHaveLength(7); // Track AD: + get
+    expect(EXAMPLES).toHaveLength(10); // Track AD: + get; Track AK: + breed, drop, food pen
     for (const e of EXAMPLES) {
       expect(PlanSchema.safeParse(e.plan).success).toBe(true);
       expect(p).toContain(JSON.stringify(e.plan));

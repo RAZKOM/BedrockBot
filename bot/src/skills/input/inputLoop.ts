@@ -157,6 +157,8 @@ export class InputLoop {
   private readonly tickWaiters = new Set<{ until: bigint; resolve: () => void }>();
   private readonly beforeStep = new Set<(tick: bigint, state: InputLoopState) => void>();
   private tickExtras: TickExtrasProvider | undefined;
+  /** Track AK: the body-pose slot (sleeping), separate from the tick-extras slot digging uses. */
+  private pose: TickExtrasProvider | undefined;
 
   constructor(conn: InputConnection, opts: InputLoopOptions) {
     this.conn = conn;
@@ -277,6 +279,15 @@ export class InputLoop {
     this.tickExtras = fn;
   }
 
+  /**
+   * Track AK: a pose provider (the sleeping body held at the bed), a second slot beside
+   * `setTickExtras` so a dig or a hotbar move neither replaces it nor is replaced by it. Merged like
+   * the tick extras, after them: its fields win. One provider at a time; `undefined` removes it.
+   */
+  setPose(fn: TickExtrasProvider | undefined): void {
+    this.pose = fn;
+  }
+
   // ---- internals ------------------------------------------------------------------------------
 
   private emit(e: InputLoopEvent): void {
@@ -344,8 +355,8 @@ export class InputLoop {
     });
     this.handledTeleport = false;
     const packet = buildAuthInput({ tick, cmd: sentCmd, state, flags, moving });
-    const extras = this.tickExtras?.(tick);
-    if (extras) {
+    for (const extras of [this.tickExtras?.(tick), this.pose?.(tick)]) {
+      if (!extras) continue;
       const { input_data: extraFlags, ...fields } = extras;
       Object.assign(packet, fields);
       if (extraFlags) packet.input_data = [...packet.input_data, ...extraFlags.filter((f) => !packet.input_data.includes(f))];

@@ -428,9 +428,10 @@ the cross-country layout; default 7), `MOVE_AREA=x,z` (pin a v2 suite's area to 
 
 ## Known gaps
 
-- Fences, panes and bars are unknown runtime ids on 1.26.60 (world model registry): obstacles of 1.5,
-  no arms in the physics. Walls carry their connections in the state and are fine. Stairs are
-  resolved in the terrain layer only; the registry still reports them `unknown` to other readers.
+- Fences, panes and bars: known since the BDS palette registry (decision 0024); on 1.26.60 their arms
+  come from the `minecraft:connection_*` states (Track AK, decision 0031; `TerrainClass.arms`), on
+  minecraft-data states from the neighbours. Palette-only doors, trapdoors, gates, stairs and slabs
+  take the state-dependent shape by name suffix (`shapes.ts` `partialBoxes`).
 - The partial-blocks lane (snow, slab, then grass) gave 1 correction of 0.417 in 3 of 3 runs after
   stepping off the last slab (the server one tick of falling behind); a plain slab, two slabs and
   snow + slab walked off 3 times each gave 0. Not investigated further.

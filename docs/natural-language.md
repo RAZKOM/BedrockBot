@@ -88,7 +88,10 @@ Only owners: non-owner chat is ignored like every command. While a plan runs, an
 | `gather` | `count`: 1..2304 logs | `!gather <n>` |
 | `mine` | `block`: block id; `count`: 1..256 | `!mine <block> <n>` |
 | `farm` | `radius?`: 1..32 | `!farm [radius]` |
-| `food` / `eat` / `equip` | | `!food` / `!eat` / `!equip` |
+| `food` / `eat` / `equip` | `food`: `pen?` true (Track AK) | `!food [pen]` / `!eat` / `!equip` |
+| `breed` (Track AK) | `type?`: cow / mooshroom / sheep / pig / chicken / rabbit; `pairs?`: 1..8 | `!breed [type] [n]` |
+| `panel` (Track AK) | | `!panel` |
+| `drop` (Track AK) | `what`: all / items (everything but food, armour, tools and weapons) | `!drop all` / `!drop items` |
 | `wp_set` | `name`; `x y z?` (all or none) | `!wp set <name> [x y z]` |
 | `wp_del` | `name` | `!wp del <name>` |
 | `set` | `key`: a runtime setting except `nlConfirm`; `value`: within its bounds | `!set <key> <value>` |

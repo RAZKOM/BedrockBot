@@ -109,7 +109,7 @@ function connectsTo(c: TerrainClass, n: TerrainClass | undefined, alongX: boolea
  */
 export function boxesAtCell(src: TerrainSource, x: number, y: number, z: number, c: TerrainClass | undefined = classAt(src, x, y, z)): readonly Box[] | undefined {
   if (!c) return undefined;
-  if (c.connect) {
+  if (c.connect && c.arms === undefined) { // Track AK: arms from the connection states are in c.boxes
     let mask = 0;
     if (connectsTo(c, classAt(src, x, y, z - 1), false)) mask |= CONNECT_NORTH;
     if (connectsTo(c, classAt(src, x, y, z + 1), false)) mask |= CONNECT_SOUTH;

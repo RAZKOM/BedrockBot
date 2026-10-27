@@ -29,7 +29,7 @@ control gets it).
 
 | Priority | Process | Kind | Wants control while | Pre-empted (pause) | Resumed |
 |---|---|---|---|---|---|
-| 100 | `flee` | auto | health < `fleeHealth` with a hostile within 16, or a creeper within 8 with health < 10 (not while night safety walks to the shelter; a lone melee mob the bot can still take 3 hits from is duelled instead); runs away to 16 blocks first, then home or the shelter when the threat is not in the way, eating once 8 blocks clear; recovery until `fleeHealth` + 6 for up to 60 s (docs/pve.md "Flee v2") | (only a death) | walks again to the same place |
+| 100 | `flee` | auto | health < `fleeHealth` with a hostile within 16, or a creeper within 8 with health < 10 (not while night safety walks to the shelter; a lone melee mob the bot can still take 3 hits from is duelled instead); runs away to 16 blocks first, then home or the shelter when the threat is not in the way, eating once 8 blocks clear; recovery until `fleeHealth` + 6 for up to 60 s (docs/pve.md "Flee v2"); after a flight a cooldown keeps it from starting again at once, except an urgent one: a hard trigger with the threat within 6 blocks (`FLEE_URGENT`), away from home / the shelter and not after a cornered end, bypasses the cooldown | (only a death) | walks again to the same place |
 | 85 | `guard` defending in place | auto | a hostile within reach while inside the night shelter or while the health is low | fight cancelled | a new target is picked |
 | 80 | `night` | auto | dusk to dawn with a shelter set: walking there, a retreat due, or inside (it holds the bot there) | the retreat is cancelled, not counted as a failed attempt (`waiting`) | the retreat is planned again |
 | 60 | `guard` fight | auto | guard on and a hostile within `guardRadius` of home (of the bot while a command runs); not while a kill job exists | fight cancelled (the episode ends) | a new target is picked |
@@ -112,6 +112,11 @@ its plan yet; `navRemaining` reads its `active` record read-only (an open issue 
 | `useBoneMeal` | on | on/off | placeholder (Track U) |
 | `mineTunnelLen` | 32 | 1..256 blocks | placeholder (mining) |
 | `mineSeenOnly` | false | boolean | mining: only ore the bot has seen an open face of; off (the owner's choice for their own Realm) lets `!mine` tunnel to any known ore (docs/mining.md) |
+| `plannerThreads` | 1 | 0..1 threads | every walk: 1 plans paths in a worker thread (bigger budgets, the tick never waits for the planner), 0 on the main thread (docs/pathfinding.md "Compute", decision 0023) |
+| `stashChest` | none | `x y z` / none | the stash step of `!get` and the jobs: the chest a full inventory is emptied into; none = the job chest, a carried shulker box, then dropping junk (docs/get.md) |
+| `stashShulker` | on | on/off | the stash step: place a carried shulker box, fill it, break it and pick it up when the inventory is full (docs/get.md) |
+| `autoBreed` | off | on/off | the breeding chore: breed the animals of `chorePen` every 10 min while it holds fewer than 8 adults of a kind (docs/food.md) |
+| `chorePen` | none | `x y z` / none | the breeding chore and the food chore: a block inside the fenced pen whose animals they may use; none = no pen (docs/food.md) |
 
 `!set` lists every value (`settings: allowBreak off, ...`, split into lines of at most 240
 characters), `!set <key>` shows one (`guardRadius 16 (2..64 blocks, default 16): guard: fight hostiles

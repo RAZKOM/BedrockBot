@@ -3,7 +3,8 @@
 //   !wp set <name> [x y z]     set a waypoint (default: the bot's feet block); `home` also sets the home point
 //   !wp del <name>             delete one (`home` also clears the home point)
 //   !wp <name>                 show one
-//   !goto <waypoint> | x y z   walk to a waypoint (names first) or to a feet block
+//   !goto <waypoint> | x y z [now]  walk to a waypoint (names first) or to a feet block; `now` (Track AK):
+//                              urgent like `!come now`, the night process yields to the walk
 //   !top                       walk up to the surface (the `surface` goal; pillars with throwaway blocks)
 // and `blacklist <n>` / `waypoints <n>` in !status. Registered by the afk task (tasks/registry.ts).
 //
@@ -32,8 +33,8 @@ export interface NavChatDeps {
   store: WaypointStore;
   /** Feet position, when known. */
   position(): Vec3 | undefined;
-  /** Walk to a goal (through the PvE layer when there is one); undefined when the task cannot walk. */
-  walk?: (goal: NavGoal, opts: NavGotoOptions, label: string) => Promise<SkillResult>;
+  /** Walk to a goal (through the PvE layer when there is one); undefined when the task cannot walk. `urgent`: `!goto ... now`. */
+  walk?: (goal: NavGoal, opts: NavGotoOptions, label: string, o?: { urgent?: boolean }) => Promise<SkillResult>;
   /** The home point: `!wp set home` / `!wp del home` change it too. */
   home?: { set(p: Vec3 | undefined): void };
 }
@@ -116,12 +117,15 @@ export function registerNavChat(chat: Chat, d: NavChatDeps): void {
   const walk = d.walk;
   const gotoDef: CommandDef = {
     name: 'goto',
-    help: '<waypoint> | x y z (walk to a waypoint or a feet block)',
-    run: ({ reply, args }) => {
+    help: '<waypoint> | x y z [now] (walk to a waypoint or a feet block; now: before the night shelter)',
+    run: ({ reply, args: raw }) => {
       if (!walk) {
         reply(`goto ${NEEDS_WALK}`);
         return;
       }
+      // Track AK: a trailing `now` (not a lone `!goto now`: that is a waypoint name) marks the walk urgent
+      const now = raw.length > 1 && raw[raw.length - 1]!.toLowerCase() === 'now';
+      const args = now ? raw.slice(0, -1) : raw;
       let goal: NavGoal;
       let what: string;
       if (args.length === 1) {
@@ -141,8 +145,8 @@ export function registerNavChat(chat: Chat, d: NavChatDeps): void {
         goal = { type: 'block', p };
         what = `${p.x} ${p.y} ${p.z}`;
       }
-      reply(`walking to ${what}`);
-      void walk(goal, { timeoutTicks: GOTO_TICKS }, `walking to ${what}`).then((r) => {
+      reply(`walking to ${what}${now ? ' now' : ''}`);
+      void walk(goal, { timeoutTicks: GOTO_TICKS }, `walking to ${what}`, now ? { urgent: true } : {}).then((r) => {
         if (r.ok) reply(`arrived at ${what}`);
         else if (r.reason !== 'interrupted') reply(`goto: ${r.reason}`);
       });
@@ -170,6 +174,16 @@ export function registerNavChat(chat: Chat, d: NavChatDeps): void {
       });
     },
   });
+}
+
+/**
+ * Track AK: `!goto ... now` marks the goto process urgent, the flag the night process yields to
+ * (commands-pve.ts `yieldWhile`: a user process with `urgent` true), like `!come now`.
+ */
+export function markUrgent(p: object | undefined): boolean {
+  if (!p) return false;
+  (p as { urgent?: boolean }).urgent = true;
+  return true;
 }
 
 export interface NavCommandDeps {
@@ -221,10 +235,14 @@ export function registerNavCommands(d: NavCommandDeps): WaypointStore {
   }
 
   const walk = mob
-    ? (goal: NavGoal, opts: NavGotoOptions, label: string): Promise<SkillResult> =>
+    ? (goal: NavGoal, opts: NavGotoOptions, label: string, o: { urgent?: boolean } = {}): Promise<SkillResult> => {
         // through the PvE layer so a guard fight interrupts and then resumes the walk (pve.walk is typed
         // for the basic goals; it hands the goal to skills.goto unchanged)
-        pve ? pve.walk(goal as Goal, opts, label) : mob.skills.goto(goal, opts)
+        if (!pve) return mob.skills.goto(goal, opts);
+        const r = pve.walk(goal as Goal, opts, label);
+        if (o.urgent) markUrgent(pve.processes.userProcesses().find((p) => p.name === 'goto' && !p.done));
+        return r;
+      }
     : undefined;
   registerNavChat(ctx.chat, {
     store: st,

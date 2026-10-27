@@ -20,8 +20,8 @@
 //
 // While asleep the movement model does not know the sleeping pose: the input loop would report its
 // own body (1 correction per 16 ticks, measured: 37 in 30 s). The controller therefore holds the
-// reported position at the server's (InputLoop.setTickExtras, one provider at a time: nothing digs in
-// bed): 0 corrections while asleep.
+// reported position at the server's (InputLoop.setPose, Track AK: its own slot, so a dig or hotbar
+// move that takes or clears the single setTickExtras slot leaves the pose alone): 0 corrections while asleep.
 import { silentLogger, type Logger } from '../../log.ts';
 import type { ItemV4 } from '../../world/packets.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../world/types.ts';
@@ -122,6 +122,8 @@ export interface SleepLoop {
   setCommand(c: { yaw?: number; pitch?: number }): void;
   waitTicks(n: number): Promise<void>;
   setTickExtras?(fn: ((tick: bigint) => Record<string, unknown> | undefined) | undefined): void;
+  /** Track AK: the pose slot (InputLoop.setPose); loops without it fall back to setTickExtras. */
+  setPose?(fn: ((tick: bigint) => Record<string, unknown> | undefined) | undefined): void;
 }
 
 export interface SleepWorld extends BedWorld {
@@ -329,17 +331,25 @@ export class SleepController {
   /** Report the server's sleeping position every tick (no movement) while asleep. */
   private install(): void {
     const b = this.bedPos;
-    if (!b || !this.d.loop.setTickExtras) return;
+    const slot = this.poseSlot();
+    if (!b || !slot) return;
     this.hold = { x: b.x + 0.5, y: b.y + SLEEP_EYE_ABOVE, z: b.z + 0.5 };
     this.holding = true;
     const zero = { x: 0, y: 0, z: 0 };
-    this.d.loop.setTickExtras(() => (this.hold ? { position: this.hold, delta: zero, move_vector: { x: 0, z: 0 }, raw_move_vector: { x: 0, z: 0 } } : undefined));
+    slot(() => (this.hold ? { position: this.hold, delta: zero, move_vector: { x: 0, z: 0 }, raw_move_vector: { x: 0, z: 0 } } : undefined));
   }
 
   private release(): void {
     this.hold = undefined;
-    if (this.holding) this.d.loop.setTickExtras?.(undefined);
+    if (this.holding) this.poseSlot()?.(undefined);
     this.holding = false;
+  }
+
+  /** Track AK: the loop's pose slot, else (fakes, older loops) the tick-extras slot. */
+  private poseSlot(): ((fn: ((tick: bigint) => Record<string, unknown> | undefined) | undefined) => void) | undefined {
+    const l = this.d.loop;
+    if (l.setPose) return l.setPose.bind(l);
+    return l.setTickExtras?.bind(l);
   }
 
   private emit(e: SleepEvent): void {

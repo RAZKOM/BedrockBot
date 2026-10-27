@@ -136,7 +136,8 @@ ${tasks}
                            with --no-config and neither: in memory only)
   --set <key=value>        a runtime setting at start-up (repeatable; wins over the file and the config)
  operations:
-  --health-port <port>     serve GET /healthz and /metrics on 127.0.0.1:<port> (default off)
+  --health-port <port>     serve GET /healthz and /metrics on 127.0.0.1:<port> (default off), and the
+                           control panel there (config panel.host / panel.token for the LAN; !panel; docs/panel.md)
   --update-check-hours <h> check for new game/BDS/library versions every h hours (default 24 on a
                            realm target, else 0 = off); whispers the owners when one appears
  files (default directory bot/logs, git-ignored):

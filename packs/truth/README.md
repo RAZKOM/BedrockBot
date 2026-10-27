@@ -15,6 +15,8 @@ Replies are chat messages (`world.sendMessage`) that start with `@truth ` follow
 | `src/main.ts` | the pack: command handlers, events |
 | `src/wood.ts`, `src/woodShapes.ts` | wood commands (`container`, `tree`, `find`) and the pure tree shape shared with the bot's tests |
 | `src/act.ts` | interaction commands (`setblock`, `door`) and the `playerPlaceBlock` / `playerInteractWithBlock` events |
+| `src/pve.ts`, `src/combat.ts`, `src/surv.ts`, `src/farm.ts`, `src/food.ts` | PvE, combat, survival, farming and food commands (sections below) |
+| `src/palette.ts`, `src/gaunt.ts`, `src/get.ts` | block palette dump (`palette`, `palettestrip`, `palettestates`), beds and sleeping (`bed`, `sleeping`), `!get` / stash (`stuff`, `getinv`, `boxitems`) |
 | `src/protocol.ts` | pure helpers: tokenizer, canonical order, RLE, FNV-1a, reply encoding, `ReplyParser`, `textOf` (reusable by the bot) |
 | `structures/truth/probe.mcstructure` | 3 x 2 x 3 test structure, id `truth:probe` (made by `scripts/make-probe-structure.mjs`) |
 | `scripts/build.mjs` | esbuild bundle to `dist/scripts/main.js`, copies manifest and structures to `dist/` |
@@ -290,3 +292,26 @@ Details and exact arguments: docs/farming.md.
 | `pen` | `x y z w d` | `{ from, to, gate }`: oak fence rim of the w x d box, air inside, a closed gate in the middle of the north side |
 
 Details: docs/pve.md ("Keeping the bot alive") and docs/food.md.
+
+### Block palette commands (src/palette.ts, wave 8 Track AC; docs/versions.md "Block states")
+
+| Command | Args | `data` on success |
+|---|---|---|
+| `palette` | `[from=0] [count=50] [maxPerms=1500]` | `{ total, from, next, types, permutations: [{ name, states: [{ name, type: byte\|int\|string, value }], default? }], skipped }`: every permutation of the block types from..from+count-1 (`BlockTypes.getAll()` sorted by id), stopping early once maxPerms are collected (at least one type per page); `next` is null after the last type. `tools/bump-version/dump-palette.mjs` pages through it to write `bot/data/block-palette/<version>.json` |
+| `palettestrip` | `x y z from count cols [stride=1]` (count max 4096) | `{ total, placed: [{ x, y, z, typeId }] }`: the default permutation of each type from..from+count-1 in a grid at height y, x fastest, `cols` per row, `stride` blocks apart |
+| `palettestates` | `x1 y1 z1 x2 y2 z2` (max 4096 blocks) | `{ from, to, blocks: [{ x, y, z, typeId, states: [{ name, type, value }] }] }`: the typed states of every block in the box (the world-registry e2e compares them with the bot's model) |
+
+### Survival-policy commands (src/gaunt.ts, wave 7 Track W; docs/survival.md "Sleep")
+
+| Command | Args | `data` on success |
+|---|---|---|
+| `bed` | `x y z direction` | `{ foot, head, footStates, headStates, typeId }`: both halves of a bed, the foot at (x, y, z), the head one block towards `direction` (0 south +z, 1 west -x, 2 north -z, 3 east +x) |
+| `sleeping` | `playerName` | `{ name, sleeping, location, timeOfDay, day }` (`Player.isSleeping`) |
+
+### `!get` and stash commands (src/get.ts, wave 8 Track AD; docs/get.md "Truth commands")
+
+| Command | Args | `data` on success |
+|---|---|---|
+| `stuff` | `playerName typeId stacks` | `{ name, typeId, stacks, slots }`: `stacks` full stacks into the first free slots; `inventory_full` (with `slots`) when they do not fit |
+| `getinv` | `playerName` | `{ name, size, slots: [{ slot, typeId, amount, contents? } \| null], counts, boxes: [{ slot, typeId, total, counts, stacks }] }`: like `inv`, plus the contents of every item that carries an inventory (shulker boxes, bundles) |
+| `boxitems` | `x y z r` | `{ items: [{ entityId, typeId, amount, location, contents? }] }`: item entities within r with their nested contents (the drop of a broken shulker box) |
