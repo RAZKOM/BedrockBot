@@ -44,6 +44,8 @@ export const MAX_BOXES_PER_RUN = 3;
 export const UNREACHABLE_RETRY_MS = 60 * 60_000;
 /** Track AN: containers opened per scan at most (the rest stays pending for the next idle moment). */
 export const MAX_READS_PER_SCAN = 64;
+/** Candidates probed from the bot's position to pick the next container of a scan (the real path, not the straight line). */
+export const NEXT_PROBES = 8;
 
 export interface HomeSkills {
   goto(goal: NavGoal, opts?: GotoOptions): Promise<SkillResult>;
@@ -404,15 +406,33 @@ export class HomeLogistics {
     const take = reach.slice(0, MAX_READS_PER_SCAN).map((x) => x.f);
     const blocksOf = new Map(reach.map((x) => [chestKey(x.f.p), x.blocks]));
     rep.pending = reach.slice(MAX_READS_PER_SCAN).map((x) => ({ ...x.f.p }));
-    const start = this.d.position() ?? centre(home);
-    // visit order: nearest neighbour on a walking-aware cost (a floor change or a jump in path length from home
-    // means another room: finish the wall of chests here before walking across the room or out of the door)
-    for (const f of visitOrderBanded(take, start, (f) => blocksOf.get(chestKey(f.p)) ?? 0)) {
+    // Visit order: at every step the walking-aware cost (height, path-length band from home: another room)
+    // shortlists the NEXT_PROBES nearest remaining containers, a probe plan from where the bot stands measures
+    // each one's real path, and the shortest path wins (a wall or a floor between two "close" chests no longer
+    // fools the order). Without a probe, the cheap cost alone decides.
+    const remaining = [...take];
+    let here = this.d.position() ?? centre(home);
+    while (remaining.length > 0) {
       if (cancelled()) return finish('interrupted');
       // the other half of a double chest read in this scan
       partners = partnerKeys(mem.all());
-      if (partners.has(chestKey(f.p))) continue;
+      const ranked = visitOrderBanded(remaining.filter((f) => !partners.has(chestKey(f.p))), here, (f) => blocksOf.get(chestKey(f.p)) ?? 0);
+      if (ranked.length === 0) break;
+      let f = ranked[0]!;
+      if (this.d.probe && walk > 0 && ranked.length > 1) { // homeChestWalk 0: radius only, no probes at all
+        let best = Infinity;
+        for (const c of ranked.slice(0, NEXT_PROBES)) {
+          const r = await this.d.probe(chestGoal(c.p), here);
+          const pv = r ? verdict(r, 0) : undefined;
+          if (pv?.ok && pv.blocks < best) {
+            best = pv.blocks;
+            f = c;
+          }
+        }
+      }
+      remaining.splice(remaining.indexOf(f), 1);
       const v = await this.visit(f.p, f.kind, cancelled);
+      here = this.d.position() ?? centre(f.p);
       if (!v.ok) {
         if (v.reason === 'interrupted') return finish('interrupted');
         this.log.info(`chests: ${f.kind} at ${fmtPos(f.p)}: ${v.reason}`);
