@@ -6,6 +6,8 @@ import type { StackEntry } from '../../tasks/process/manager.ts';
 import { GROUP_ORDER, settingGroups, type CommandInfo } from '../../chat/help.ts'; // Track AM: Help tab
 import { MODE_KEYS, MODE_NAMES, modeLine, modeValues } from '../../chat/modes.ts'; // Track AM
 import type { SettingValue } from '../../config/settings.ts'; // Track AM
+import { buildInventory, type InventorySource, type PanelInventory } from './inventory.ts'; // Track AP
+import type { PanelMemory } from './memory.ts'; // Track AP
 
 export const PANEL_STATE_VERSION = 1;
 
@@ -44,12 +46,72 @@ export interface PanelState {
     dimension: string | null;
     timeOfDay: number | null;
     phase: 'day' | 'dusk' | 'night' | 'dawn' | null;
+    /** Track AP: player.saturation (update_attributes), null until the server sent it. */
+    saturation: number | null;
+    /** Track AP: from level_event start / stop rain / thunder; null until one arrived. */
+    weather: 'clear' | 'rain' | 'thunder' | null;
+    /** Track AP: the world's day number (absolute time / 24000). */
+    day: number | null;
+    /** Track AP: deaths this run and the last one (RespawnController). */
+    deaths: number | null;
+    lastDeath: { cause: string; ts: string; messages: string[] } | null;
   };
+  /** Track AP: the graphical inventory (inventory.ts); null without the world model. */
+  inventory: PanelInventory | null;
+  /** Track AP: the current job: the active user process (else the first user process) of the stack. */
+  job: { name: string; state: string; line: string; etaS: number | null } | null;
+  /** Track AP: PvE totals (PveController.stats + CombatController.totals) and the damage taken while the panel ran. */
+  combat: PanelCombat | null;
+  /** Track AP: what the bot remembers (memory.ts), counts only; null without a world cache. */
+  memory: PanelMemory | null;
+  /** Track AP: the planner worker (skills/nav/worker.ts PlannerStats); null without one. */
+  planner: PanelPlanner | null;
+  /** Track AP: the connection (metrics). */
+  conn: PanelConn | null;
   settings: PanelSetting[];
   logs: string[];
   chat: PanelChatLine[];
   commands: string[];
   quick: string[];
+}
+
+export interface PanelCombat {
+  fights: number;
+  kills: number;
+  retargets: number;
+  flees: number;
+  guardTriggers: number;
+  /** Hits taken and the health they cost since the bot started (pve MobTracker.onHit). */
+  hits: number;
+  damageTaken: number;
+  lastHit: { damage: number; agoS: number } | null;
+}
+
+export interface PanelPlanner {
+  /** plannerThreads (0 = planning in the main thread). */
+  threads: number | null;
+  running: boolean;
+  plans: number;
+  interims: number;
+  results: number;
+  failed: number;
+  /** Main-thread ms forwarding world changes to the worker: total and the longest flush. */
+  forwardMs: number;
+  maxForwardMs: number;
+  starts: number;
+  crashes: number;
+}
+
+export interface PanelConn {
+  server: string;
+  version: string;
+  state: string;
+  uptimeS: number;
+  sessionS: number | null;
+  reconnects: number;
+  disconnects: number;
+  kicks: number;
+  lastDisconnect: string | null;
 }
 
 /** Quick buttons (`!come` needs a player in the game, so it is not here). */
@@ -72,6 +134,16 @@ export interface PanelStateSource {
   logs: () => string[];
   chat: () => PanelChatLine[];
   commands: () => string[];
+  // ---- Track AP (all optional; a missing or throwing one gives null) ----
+  inventory?: () => InventorySource | undefined;
+  saturation?: () => number | undefined;
+  weather?: () => 'clear' | 'rain' | 'thunder' | undefined;
+  day?: () => number | undefined;
+  deaths?: () => { deaths: number; lastDeath?: { cause: string; ts: string; messages: string[] } | undefined } | undefined;
+  combat?: () => PanelCombat | undefined;
+  memory?: () => PanelMemory | undefined;
+  planner?: () => PanelPlanner | undefined;
+  conn?: () => PanelConn | undefined;
 }
 
 const DIMENSIONS: Record<number, string> = { 0: 'overworld', 1: 'nether', 2: 'the_end' };
@@ -125,6 +197,12 @@ export function buildPanelState(src: PanelStateSource, now = Date.now()): PanelS
   const v = safe(src.vitals, { health: null, food: null });
   const tod = safe(src.timeOfDay, undefined);
   const settings = src.settings;
+  const stack = safe(() => src.stack?.() ?? [], []).map((e) => ({ name: e.name, kind: e.kind, priority: e.priority, state: e.held ? 'held' : e.state, line: e.line, etaS: e.etaS ?? null }));
+  const user = stack.find((e) => e.kind === 'user' && e.state === 'active') ?? stack.find((e) => e.kind === 'user');
+  const deaths = safe(() => src.deaths?.(), undefined);
+  const ld = deaths?.lastDeath;
+  const opt = <T>(fn: (() => T | undefined) | undefined): T | null => (fn ? (safe(fn, undefined) ?? null) : null);
+  const inv = safe(() => src.inventory?.(), undefined);
   return {
     v: PANEL_STATE_VERSION,
     ts: now,
@@ -137,7 +215,7 @@ export function buildPanelState(src: PanelStateSource, now = Date.now()): PanelS
       gameVersion: safe(src.gameVersion, ''),
     },
     status: safe(src.statusLines, []),
-    stack: safe(() => src.stack?.() ?? [], []).map((e) => ({ name: e.name, kind: e.kind, priority: e.priority, state: e.held ? 'held' : e.state, line: e.line, etaS: e.etaS ?? null })),
+    stack,
     self: {
       health: v.health ?? null,
       food: v.food ?? null,
@@ -145,13 +223,34 @@ export function buildPanelState(src: PanelStateSource, now = Date.now()): PanelS
       dimension: dimensionName(safe(src.dimension, undefined)),
       timeOfDay: tod ?? null,
       phase: phaseOf(tod),
+      saturation: opt(src.saturation),
+      weather: opt(src.weather),
+      day: opt(src.day),
+      deaths: typeof deaths?.deaths === 'number' ? deaths.deaths : null,
+      lastDeath: ld ? { cause: ld.cause, ts: ld.ts, messages: ld.messages.slice(0, 3) } : null,
     },
+    inventory: inv ? safe(() => buildInventory(inv), null) : null,
+    job: user ? { name: user.name, state: user.state, line: user.line, etaS: user.etaS } : null,
+    combat: opt(src.combat),
+    memory: opt(src.memory),
+    planner: opt(src.planner),
+    conn: opt(src.conn),
     settings: settings ? SETTING_KEYS.map((k) => safe(() => settingRow(k, settings), undefined)).filter((r): r is PanelSetting => r !== undefined) : [],
     logs: safe(src.logs, []),
     chat: safe(src.chat, []),
     commands: safe(src.commands, []),
     quick: QUICK_COMMANDS,
   };
+}
+
+// ---- Track AP: the page's poll (GET /api/state?lite=1) ----------------------------------------------
+
+/** The state without what never changes while the bot runs (setting descriptions, defaults, ranges; the command names; the quick buttons): the page has those from its first render. */
+export type PanelStateLite = Omit<PanelState, 'settings' | 'commands' | 'quick'> & { lite: true; settings: Pick<PanelSetting, 'key' | 'value' | 'source'>[] };
+
+export function liteState(s: PanelState): PanelStateLite {
+  const { settings, commands: _c, quick: _q, ...rest } = s;
+  return { ...rest, lite: true, settings: settings.map((r) => ({ key: r.key, value: r.value, source: r.source })) };
 }
 
 // ---- Track AM: the Help tab (GET /api/help, fetched once when the tab is opened; docs/ux.md) --------

@@ -30,6 +30,7 @@ import { isLoopbackInterface, panelAuth, RateLimiter } from './auth.ts';
 import { LogRing } from './logRing.ts';
 import { panelRoutes, type CommandResult } from './routes.ts';
 import { buildPanelHelp, buildPanelState, type PanelChatLine, type PanelState } from './state.ts'; // Track AM: buildPanelHelp
+import { buildMemory, chestRows, MEMORY_TTL_MS, type PanelMemory } from './memory.ts'; // Track AP
 
 export interface PanelPlan {
   mode: 'off' | 'shared' | 'separate';
@@ -146,6 +147,46 @@ export function setupPanel(d: PanelDeps): Panel {
   let boundPort: number | undefined;
   const auth = panelAuth(plan.token);
 
+  // ---- Track AP: what the statuses need beyond the existing closures (passive listeners, only when the panel serves)
+  const unsubs: (() => void)[] = [];
+  let saturation: number | undefined;
+  let rain = false;
+  let thunder = false;
+  let weatherKnown = false;
+  const hits = { n: 0, damage: 0, last: undefined as { damage: number; at: number } | undefined };
+  if (plan.mode !== 'off') {
+    unsubs.push(
+      conn.on('update_attributes', (p) => {
+        for (const a of p.attributes) if (a.name === 'minecraft:player.saturation') saturation = a.current;
+      }),
+      conn.on('level_event', (p: { event?: unknown }) => {
+        const e = p.event;
+        if (e === 'start_rain' || e === 3001) rain = true;
+        else if (e === 'stop_rain' || e === 3003) rain = false;
+        else if (e === 'start_thunder' || e === 3002) thunder = true;
+        else if (e === 'stop_thunder' || e === 3004) thunder = false;
+        else return;
+        weatherKnown = true;
+      }),
+    );
+    const off = walking.pve?.mobs.onHit((_g, damage) => {
+      if (damage <= 0) return;
+      hits.n++;
+      hits.damage += damage;
+      hits.last = { damage, at: Date.now() };
+    });
+    if (off) unsubs.push(off);
+  }
+  const cache = (): WorldCache | undefined => d.worldCache;
+  let memo: { at: number; value: PanelMemory } | undefined;
+  const memory = (): PanelMemory | undefined => {
+    const c = cache();
+    if (!c) return undefined;
+    const now = Date.now();
+    if (!memo || now - memo.at > MEMORY_TTL_MS) memo = { at: now, value: buildMemory(c, runningTask.position()) };
+    return memo.value;
+  };
+
   const state = (): PanelState =>
     buildPanelState({
       name: () => conn.username,
@@ -180,6 +221,63 @@ export function setupPanel(d: PanelDeps): Panel {
       logs: () => logs.tail(50),
       chat: () => replies.list(),
       commands: () => chat.commandNames(),
+      // Track AP: inventory and statuses
+      inventory: () => built.mobility?.world.inventory,
+      saturation: () => saturation,
+      weather: () => (weatherKnown ? (thunder ? 'thunder' : rain ? 'rain' : 'clear') : undefined),
+      day: () => {
+        const t = clock?.time;
+        return t === undefined ? undefined : Math.floor(t / 24000);
+      },
+      deaths: () => (built.respawn ? { deaths: built.respawn.deaths, lastDeath: built.respawn.lastDeath } : undefined),
+      combat: () => {
+        const p = walking.pve;
+        if (!p) return undefined;
+        const t = p.combat.totals;
+        return {
+          fights: p.stats.fights,
+          kills: p.stats.kills,
+          retargets: t.retargets,
+          flees: p.stats.flees,
+          guardTriggers: p.stats.guardTriggers,
+          hits: hits.n,
+          damageTaken: Math.round(hits.damage * 10) / 10,
+          lastHit: hits.last ? { damage: hits.last.damage, agoS: Math.round((Date.now() - hits.last.at) / 1000) } : null,
+        };
+      },
+      memory,
+      planner: () => {
+        const nav = built.mobility?.skills.nav;
+        if (!nav) return undefined;
+        const s = nav.planner?.stats;
+        const threads = d.runtime ? Number(d.runtime.get('plannerThreads')) : null;
+        return {
+          threads,
+          running: nav.planner !== undefined,
+          plans: s?.plans ?? 0,
+          interims: s?.interims ?? 0,
+          results: s?.results ?? 0,
+          failed: s?.failed ?? 0,
+          forwardMs: Math.round((s?.forwardMs ?? 0) * 10) / 10,
+          maxForwardMs: Math.round((s?.maxForwardMs ?? 0) * 100) / 100,
+          starts: s?.starts ?? 0,
+          crashes: s?.crashes ?? 0,
+        };
+      },
+      conn: () => {
+        const m = metrics.snapshot();
+        return {
+          server: d.settings.server,
+          version: conn.gameVersion,
+          state: conn.state,
+          uptimeS: m.uptimeS,
+          sessionS: m.session?.uptimeS ?? null,
+          reconnects: m.reconnects,
+          disconnects: m.disconnects,
+          kicks: m.kicks.total,
+          lastDisconnect: m.lastDisconnect ? `${m.lastDisconnect.ts} ${m.lastDisconnect.kind}: ${m.lastDisconnect.reason}`.slice(0, 200) : null,
+        };
+      },
     });
 
   const run = (text: string): CommandResult => {
@@ -214,7 +312,13 @@ export function setupPanel(d: PanelDeps): Panel {
     },
   });
 
-  const routes = panelRoutes({ state, run, limiter: new RateLimiter(5, 1000), help: () => buildPanelHelp({ commands: () => chat.commandInfo(), settings: d.runtime }) }); // Track AM: Help tab
+  const routes = panelRoutes({
+    state,
+    run,
+    limiter: new RateLimiter(5, 1000),
+    help: () => buildPanelHelp({ commands: () => chat.commandInfo(), settings: d.runtime }), // Track AM: Help tab
+    chests: () => chestRows(cache()?.chests.all() ?? [], runningTask.position()), // Track AP: the memory block's list
+  });
   const healthOptions = plan.mode === 'shared' ? { host: plan.host, auth } : {};
 
   return {
@@ -249,6 +353,7 @@ export function setupPanel(d: PanelDeps): Panel {
     },
     async stop() {
       logs.stop();
+      for (const u of unsubs.splice(0)) u(); // Track AP
       await own?.stop();
       own = undefined;
     },

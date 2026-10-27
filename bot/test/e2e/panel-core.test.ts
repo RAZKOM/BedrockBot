@@ -4,14 +4,22 @@
 //   2. the page renders (markers, cookie flow from ?token=);
 //   3. POST /api/cmd `!wp set panel` creates the waypoint (reply, then `!wp panel`), `!goto` from the
 //      panel moves the bot (truth position), and the log tail shows the command lines;
-//   4. `!panel` prints the loopback URL (no token in it).
+//   4. Track AP: with iron armour, a sword, 20 cobblestone stacks and a shulker box holding items
+//      (placed, filled, broken, picked up), `/api/state` carries them in `inventory` (counts, the
+//      armour in its slots, durability, the box's contents), the page has the 41-cell grid and every
+//      status block, and `!set` from the panel shows in the settings block;
+//   5. `!panel` prints the loopback URL (no token in it).
 // Env: PANEL_E2E_PORT (default a random port in 9640..9649) plus core-truth.ts (CORE_BDS_*).
 // Needs BDS_E2E=1 and bds-core with the truth pack (`node scripts/bds.mjs --profile core up` and `... pack`).
 import { randomInt } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { STATUS_BLOCKS } from '../../src/health/panel/page.ts'; // Track AP
 import type { PanelState } from '../../src/health/panel/state.ts';
 import { PveTruth } from './pve-truth.ts';
-import { centre, clearArea, connectPlayer, CORE_CONTAINER, E2E, FEET_Y, hdist, prepareServer, privateArea, sleep, startCli, until, waitOnline, type CoreCli } from './core-truth.ts';
+import { centre, clearArea, connectPlayer, coreCmd, CORE_CONTAINER, E2E, FEET_Y, hdist, prepareServer, privateArea, sleep, startCli, until, waitOnline, type CoreCli } from './core-truth.ts';
 
 const PORT = Number(process.env.PANEL_E2E_PORT ?? 9640 + randomInt(10));
 const TOKEN = Array.from({ length: 24 }, () => 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'[randomInt(57)]).join('');
@@ -36,6 +44,7 @@ describe.skipIf(!E2E)('core: LAN control panel (Track AE)', () => {
   let observer: Awaited<ReturnType<typeof connectPlayer>> | undefined;
   let truth: PveTruth | undefined;
   let cli: CoreCli | undefined;
+  let cacheDir: string | undefined;
 
   beforeAll(async () => {
     await prepareServer({ time: 'noon' });
@@ -43,11 +52,14 @@ describe.skipIf(!E2E)('core: LAN control panel (Track AE)', () => {
     truth = new PveTruth(observer.conn, CORE_CONTAINER);
     await truth.tp(observer.name, { x: HOME.x + 0.5, y: FEET_Y, z: HOME.z - 24 + 0.5 }, 0, 0);
     await clearArea(truth, HOME, 12, 4);
-    // the child inherits these: the token, and no world cache under the user's config directory
+    // the child inherits these: the token, and a world cache in a temporary directory (Track AP: the memory block), never under the user's config directory
     process.env.BEDROCKBOT_PANEL_TOKEN = TOKEN;
-    process.env.BEDROCKBOT_CACHE = '0';
+    cacheDir = mkdtempSync(join(tmpdir(), 'bot-e2e-panel-cache-'));
+    process.env.BEDROCKBOT_CACHE_DIR = cacheDir;
+    delete process.env.BEDROCKBOT_CACHE;
     cli = startCli(['--walk', '--health-port', String(PORT)]);
     delete process.env.BEDROCKBOT_PANEL_TOKEN;
+    delete process.env.BEDROCKBOT_CACHE_DIR;
     await waitOnline(truth, cli.name);
     await truth.tp(cli.name, centre(HOME), 0, 0);
     await until(async () => ((await fetch(`${BASE}/healthz`).catch(() => undefined))?.status === 200 ? true : undefined), 20_000, 'panel /healthz 200', 250);
@@ -58,6 +70,7 @@ describe.skipIf(!E2E)('core: LAN control panel (Track AE)', () => {
     await truth?.cleanup().catch(() => undefined);
     await truth?.clearAround(centre(HOME), 32).catch(() => undefined);
     await observer?.close();
+    if (cacheDir) rmSync(cacheDir, { recursive: true, force: true });
     console.log(`panel e2e (port ${PORT}, area cell ${area.cell}):\n  ${measurements.join('\n  ')}`);
   }, 60_000);
 
@@ -142,7 +155,99 @@ describe.skipIf(!E2E)('core: LAN control panel (Track AE)', () => {
     measurements.push(line);
   }, 90_000);
 
+  it('Track AP: the inventory block (iron armour, a sword, 20 cobblestone stacks, a shulker box with contents), the page grid, !set in the settings', async () => {
+    const name = cli!.name;
+    await truth!.tp(name, centre(HOME), 0, 0);
+    await truth!.ok('clear', [name]);
+    // a shulker box holding 2 cobblestone stacks and 10 iron ingots: placed, filled, broken (it drops with its contents), picked up
+    const boxAt = { x: HOME.x + 2, y: FEET_Y, z: HOME.z + 2 };
+    await truth!.ok('set', [boxAt.x, boxAt.y, boxAt.z, 'undyed_shulker_box']);
+    // vanilla replaceitem (the bds-core pack may predate truth:chestput)
+    for (const [slot, item, n] of [[0, 'cobblestone', 64], [1, 'cobblestone', 64], [2, 'iron_ingot', 10]] as const) await coreCmd('replaceitem', 'block', String(boxAt.x), String(boxAt.y), String(boxAt.z), 'slot.container', String(slot), item, String(n));
+    expect((await truth!.ok<{ counts: Record<string, number> }>('container', [boxAt.x, boxAt.y, boxAt.z])).counts).toEqual({ 'minecraft:cobblestone': 128, 'minecraft:iron_ingot': 10 });
+    await coreCmd('setblock', String(boxAt.x), String(boxAt.y), String(boxAt.z), 'air', 'destroy');
+    await truth!.tp(name, centre(boxAt), 0, 0);
+    await until(async () => (Object.keys((await truth!.ok<{ counts: Record<string, number> }>('inv', [name])).counts).some((k) => k.endsWith('shulker_box')) ? true : undefined), 15_000, 'shulker box picked up', 250);
+    for (const piece of ['iron_helmet', 'iron_chestplate', 'iron_leggings', 'iron_boots', 'iron_sword']) await truth!.ok('give', [name, piece, 1]);
+    await truth!.ok('give', [name, 'cobblestone', 20 * 64]); // split into 20 full stacks
+    const t0 = Date.now();
+    let equipSent = false;
+    const s = await until(
+      async () => {
+        const st = await state();
+        const inv = st.inventory;
+        if (!inv) return undefined;
+        const worn = inv.armour.every((a) => a?.name.startsWith('iron_'));
+        if (!worn && !equipSent && Date.now() - t0 > 4000) {
+          equipSent = true; // the survival kit puts armour on by itself after an inventory change; !equip if it has not yet
+          measurements.push(`!equip from the panel: ${JSON.stringify((await cmd('!equip')).body.replies)}`);
+        }
+        const cobble = inv.slots.filter((x) => x?.name === 'cobblestone');
+        return worn && cobble.length === 20 && inv.slots.some((x) => x?.name === 'iron_sword') && inv.slots.some((x) => x?.box?.known && x.box.items.length > 0) ? st : undefined;
+      },
+      30_000,
+      'inventory block: iron armour worn, the sword, 20 cobblestone stacks, the box with contents',
+      500,
+    );
+    const inv = s.inventory!;
+    expect(inv.armour.map((a) => a?.name)).toEqual(['iron_helmet', 'iron_chestplate', 'iron_leggings', 'iron_boots']);
+    expect(inv.armour.map((a) => a?.dur?.pct)).toEqual([100, 100, 100, 100]);
+    expect(inv.armour.map((a) => a?.icon)).toEqual(['helmet', 'chestplate', 'leggings', 'boots']);
+    expect(inv.armourPoints).toBe(15);
+    const cobble = inv.slots.filter((x) => x?.name === 'cobblestone');
+    expect(cobble.map((x) => x!.count)).toEqual(Array(20).fill(64));
+    expect(cobble[0]).toMatchObject({ icon: 'block', abbr: 'Co', colour: '#8d8f93' });
+    expect(inv.slots.find((x) => x?.name === 'iron_sword')).toMatchObject({ count: 1, icon: 'sword', dur: { left: 250, max: 250, pct: 100 } });
+    const box = inv.slots.find((x) => x?.name.endsWith('shulker_box'))!;
+    expect(box).toMatchObject({ icon: 'box', count: 1, box: { known: true, stacks: 3, items: [['cobblestone', 128], ['iron_ingot', 10]], more: 0 } });
+    expect(inv.selected).toBeGreaterThanOrEqual(0);
+    expect(inv.selected).toBeLessThan(9);
+    // the same as the server's view
+    const real = await truth!.ok<{ slots: ({ typeId: string; amount: number } | null)[] }>('inv', [name]);
+    expect(inv.slots.map((x) => (x ? `${x.name} ${x.count}` : null))).toEqual(real.slots.map((x) => (x ? `${x.typeId.replace(/^minecraft:/, '')} ${x.amount}` : null)));
+    expect(36 - inv.free).toBe(22);
+    // the statuses
+    expect(s.self.health).toBeGreaterThan(0);
+    expect(s.self.day).not.toBeNull();
+    expect(s.self.deaths).toBe(0);
+    expect(s.combat).toMatchObject({ fights: 0, kills: 0 });
+    expect(s.conn).toMatchObject({ state: 'spawned', reconnects: 0, kicks: 0 });
+    expect(s.planner).not.toBeNull();
+    expect(s.memory).not.toBeNull();
+    expect((await fetch(`${BASE}/api/chests`, { headers: AUTH }).then((r) => r.json())) as unknown[]).toEqual([]);
+    const lite = await fetch(`${BASE}/api/state?lite=1`, { headers: AUTH });
+    const liteText = await lite.text();
+    const full = JSON.stringify(s).length;
+    const times: number[] = [];
+    for (let i = 0; i < 10; i++) {
+      const a = performance.now();
+      await fetch(`${BASE}/api/state?lite=1`, { headers: AUTH }).then((r) => r.text());
+      times.push(performance.now() - a);
+    }
+    times.sort((a, b) => a - b);
+    expect(liteText.length).toBeLessThan(20_000);
+    // the page: the grid and every status block
+    const html = await fetch(`${BASE}/`, { headers: AUTH }).then((r) => r.text());
+    expect(html.match(/class="cell /g)).toHaveLength(41);
+    for (const id of STATUS_BLOCKS) expect(html).toContain(`id="${id}"`);
+    for (const m of ['id="theme"', 'id="stale"', 'id="clock"', 'id="helpbox"', '<symbol id="g-sword"']) expect(html).toContain(m);
+    expect(html).not.toMatch(/https?:\/\/(?!127\.0\.0\.1[:/])/); // only the bot's own URL (the log line `control panel: http://127.0.0.1:<port>/`)
+    expect(html.length).toBeLessThan(120_000);
+    // !set from the panel shows in the settings block
+    const set = await cmd('!set guardRadius 20');
+    expect(set.status).toBe(200);
+    const after = await state();
+    expect(after.settings.find((r) => r.key === 'guardRadius')).toMatchObject({ value: '20', source: 'chat' });
+    const liteAfter = (await fetch(`${BASE}/api/state?lite=1`, { headers: AUTH }).then((r) => r.json())) as { settings: { key: string; value: string; source: string }[] };
+    expect(liteAfter.settings.find((r) => r.key === 'guardRadius')).toEqual({ key: 'guardRadius', value: '20', source: 'chat' });
+    await cmd('!set guardRadius 16');
+    const line = `Track AP: /api/state ${full} bytes, ?lite=1 ${liteText.length} bytes (median ${times[5]!.toFixed(1)} ms over 10); page ${html.length} bytes; inventory ${JSON.stringify(inv).length} bytes, ${36 - inv.free} slots used, armour ${inv.armourPoints}; box ${JSON.stringify(box.box)}; memory ${JSON.stringify(s.memory)}; planner ${JSON.stringify(s.planner)}; !set reply "${set.body.replies[0]}"`;
+    console.log(line);
+    measurements.push(line);
+  }, 90_000);
+
   it('!panel prints the loopback URL; 5 commands per second', async () => {
+    await sleep(1100); // Track AP: past the rate-limit window of the previous test
     const r = await cmd('!panel');
     expect(r.body.replies[0]).toBe(`panel: http://127.0.0.1:${PORT}/ (this machine only; panel.host 0.0.0.0 + panel.token for the LAN)`);
     expect(r.body.replies[0]).not.toContain(TOKEN);

@@ -1,14 +1,15 @@
 // LAN control panel routes (Track AE, docs/panel.md), mounted with HealthServer.use():
 //   GET  /            the page (panel/page.ts)
-//   GET  /api/state   PanelState JSON (panel/state.ts), polled every 2 s
+//   GET  /api/state   PanelState JSON (panel/state.ts); the page polls ?lite=1 every 2 s (no static parts, Track AP)
 //   GET  /api/help    PanelHelp JSON (panel/state.ts buildPanelHelp), fetched once by the Help tab (Track AM)
-//   POST /api/cmd     {"text":"!wp set panel"} -> {"ok":true,"replies":[...]}; 5 per second (429 beyond)
+//   GET  /api/chests  the remembered containers (panel/memory.ts chestRows), the memory block's list (Track AP)
+//   POST /api/cmd    {"text":"!wp set panel"} -> {"ok":true,"replies":[...]}; 5 per second (429 beyond)
 // The token check runs before these (HealthServerOptions.auth, panel/auth.ts).
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { HealthRoute } from '../map/routes.ts';
 import { RateLimiter } from './auth.ts';
 import { renderPanelPage } from './page.ts';
-import type { PanelState } from './state.ts';
+import { liteState, type PanelState } from './state.ts';
 
 export interface CommandResult {
   ok: boolean;
@@ -23,6 +24,8 @@ export interface PanelRouteDeps {
   limiter?: RateLimiter;
   /** Track AM: GET /api/help (the Help tab fetches it once). */
   help?: () => unknown;
+  /** Track AP: GET /api/chests (the remembered containers, panel/memory.ts chestRows). */
+  chests?: () => unknown;
 }
 
 /** Longest command line accepted (game chat is 512). */
@@ -89,7 +92,8 @@ export function panelRoutes(deps: PanelRouteDeps): HealthRoute {
         return true;
       }
       try {
-        send(res, 200, deps.state(), method === 'HEAD');
+        const lite = /[?&]lite=1(&|$)/.test(req.url ?? ''); // Track AP: the page's poll leaves out the static parts
+        send(res, 200, lite ? liteState(deps.state()) : deps.state(), method === 'HEAD');
       } catch (e) {
         send(res, 500, { error: e instanceof Error ? e.message : String(e) });
       }
@@ -98,6 +102,14 @@ export function panelRoutes(deps: PanelRouteDeps): HealthRoute {
     if (path === '/api/help' && deps.help && read) { // Track AM: commands, settings, modes for the Help tab
       try {
         send(res, 200, deps.help(), method === 'HEAD');
+      } catch (e) {
+        send(res, 500, { error: e instanceof Error ? e.message : String(e) });
+      }
+      return true;
+    }
+    if (path === '/api/chests' && deps.chests && read) { // Track AP: the remembered containers (the memory block's link)
+      try {
+        send(res, 200, deps.chests(), method === 'HEAD');
       } catch (e) {
         send(res, 500, { error: e instanceof Error ? e.message : String(e) });
       }
