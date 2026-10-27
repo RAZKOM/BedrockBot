@@ -122,16 +122,16 @@ and 1 on the high half, upside-down stairs 1. On 1.26.60 stairs arrive as runtim
 does not know (the new `minecraft:corner` state); before terrain/shapes.ts resolved them the physics
 saw a 1.5-high box there and the local body disagreed with the server by up to 0.77 blocks.
 
-**Liquids** (body box shrunk by 0.001 touches a liquid below its surface height): water acceleration
+**Liquids** (Track AJ, 2026-10-30: water physics applies while the body box shrunk by 0.4 at the feet and the head reaches into a water cell, the liquid height ignored; above that the body moves with air physics; the climb-out lift needs the moved box free of liquid as well as of collisions; `state.inWater` now means "moving with water physics". Older measurements below): water acceleration
 0.02, then after the move velocity x 0.8 on all axes and gravity 0.005 (terminal sink 0.025 per
 tick), jump key +0.04 per tick, +0.3 upwards when pushing against a wall with free space 0.6 above
 the moved box; lava drag 0.5 and gravity 0.02; no flow push. Measured: a body that fell 3 blocks into
 2-deep still water floats 60 ticks with 0 corrections (strict mode: error 0); swimming out with jump
 + forward costs 2 to 3 corrections. `state.inWater` / `inLava` report it.
 
-Not modelled yet: sneak edge avoidance, climbables, cobweb / powder snow / soul sand / honey speed
-factors, slime bounce, fence and wall connections (post-only shapes), effects and the movement-speed
-attribute, flow push, swimming (sprint in water), flight, gliding, riding.
+Modelled since Track AJ (docs/pathfinding.md "Movement variety", decision 0032): climbables (ladder, vine, twisting / weeping / cave vines: fall clamped to 0.2, sneak holds, jump sets vy 0.2, a wall hit sets vy 0.2 after gravity, no horizontal clamp; scaffolding does not climb), surface swimming (8.55 ticks per block) and climbing out, 1- and 2-block gap jumps with a sprint run-up, sneaking along deep edges (0.05 back-off steps, 0.025 inset; BDS keeps the sneak speed one tick after release), and a float32 contact tolerance far from the origin (2^-21 x max(|x|, |z|) on the move axis).
+
+Not modelled yet: cobweb / powder snow / soul sand / honey speed factors, slime bounce, effects and the movement-speed attribute, flow push, underwater travel and sprint swimming, flight, gliding, riding.
 
 ## Corrections and teleports
 
