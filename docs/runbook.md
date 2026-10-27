@@ -107,6 +107,7 @@ container under test).
 | `cache` | bds-cache | udp/19184 | docker/compose.cache.yml (TICK_DISTANCE 10; **generated DEFAULT world, `LEVEL_SEED` 7**, peaceful) | 1.26.60.6 | cache-* e2e: world cache and debug map, tasks 7.12 / 7.15 (CACHE_BDS_*; docs/world-cache.md). The suites set `gamerule falldamage false` and work in a random area 1 500 to 9 500 blocks out (`CACHE_AREA=x,z` pins it) |
 | `farm` | bds-farm | udp/19186 | docker/compose.farm.yml (TICK_DISTANCE 10) | 1.26.60.6 | farm-*, mine-* e2e: farming and legit mining, tasks 7.13 / 7.14 (FARM_BDS_*; docs/farming.md, docs/mining.md) |
 | `food` | bds-food | udp/19190 | docker/compose.food.yml (TICK_DISTANCE 10; **difficulty easy**) | 1.26.60.6 | food-* e2e: hunting, cooking, the food chore, task 7.16 (FOOD_BDS_*; docs/food.md) |
+| `reg` | bds-reg | udp/19192 | docker/compose.reg.yml (peaceful) | 1.26.60.6 | world-registry e2e and the block palette dump (`node tools/bump-version/dump-palette.mjs --profile reg`), wave 8 Track AC (REG_BDS_*; docs/versions.md "Block states") |
 | `rl-N` | bds-rl-N | udp/19170+N | docker/compose.rl-n.yml (`N=1 docker compose -p bedrockbot-rl-1 -f docker/compose.rl-n.yml up -d`) | 1.26.60.6 | extra RL envs for SubprocVecEnv (rl/scripts/throughput.py); remove after use |
 
 Per-track details: docs/world-model.md, docs/movement.md, docs/pathfinding.md, docs/digging.md, docs/wood.md (`--task gather`), docs/rl.md, docs/interaction.md (placing, doors), docs/waypoints.md (`!wp`, `!goto <name>`, `!top`), docs/farming.md and docs/mining.md (`!farm`, `!mine`), docs/pve.md, docs/survival.md (eating, armour, keeper, avoidance), docs/food.md (`!food`, `!cook`, the food chore), docs/versions.md.
@@ -397,6 +398,7 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e surv-                 
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e core --silent=false           # tasks 7.8/7.9 on bds-core: process manager, settings (~2 min; docs/processes.md)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e nl-core --silent=false        # task 7.18 on bds-core: !do / !yes / !no with a fake model (~25 s; docs/natural-language.md)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e food- --silent=false        # task 7.16 on bds-food (easy; ~2 min; FOOD_BDS_HOST/PORT/CONTAINER, FOOD_VERBOSE=1; docs/food.md)
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e world-registry --silent=false # wave 8 Track AC on bds-reg: 1.26.60 block states vs truth (~40 s; REG_BDS_HOST/PORT/CONTAINER; docs/versions.md)
 BDS_E2E=1 BDS_SOAK=1 pnpm --filter bot exec vitest run --project e2e test/e2e/keepalive.test.ts --silent=false
 pnpm e2e:51                                    # whole e2e suite against bds-dev51 (BDS 1.26.51.1, game version 1.26.51: rollback)
 pnpm e2e:nn                                    # whole e2e suite against bds-nn (NetherNet, 1.26.60)

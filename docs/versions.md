@@ -175,3 +175,170 @@ realm) do not need to change.
   `WorldClock` in `bot/src/tasks/night.ts` handles both.
 - **Whispers.** `command_request` `/tell` works only with `version: 'latest'`; with `'52'` it is
   silently dropped.
+
+## Block states
+
+Since wave 8 (Track AC, 2026-10-29; [decision 0024](decisions/0024-block-registry-from-bds-palette.md)).
+minecraft-data's bedrock block states stop at 1.26.30; 1.26.60 changed and added states, and every
+runtime id the registry cannot resolve is a solid `unknown` block to the planner. The world registry
+now builds its runtime-id table from a palette dumped from BDS itself.
+
+**Re-dump for a new BDS** (one command; the container needs the truth pack: `node scripts/bds.mjs --profile reg pack`):
+
+```sh
+node tools/bump-version/dump-palette.mjs --profile reg            # bds-reg, writes bot/data/block-palette/<version>.json
+node tools/bump-version/dump-palette.mjs --container bds-x --port 19999 --version 1.26.61   # any local BDS
+```
+
+The game version defaults to the container's `VERSION` without its 4th part (1.26.60.6 → 1.26.60).
+For a new version (1.26.61): re-dump into `1.26.61.json`, set `blockPalette: '1.26.61'` in its version
+shim (`bot/src/world/version-shims/`), run `pnpm --filter bot test` (registry-palette) and the
+world-registry e2e. A version without a file falls back to minecraft-data's states (with a warning
+when the shim names a missing file).
+
+**Where:** `bot/data/block-palette/<version>.json`, loaded by `bot/src/world/version-shims/palette.ts`
+(compact format 1: interned strings; per block the sorted state names with their NBT tag and values,
+the default permutation and the valid combinations as mixed-radix indices; one block per line, so a
+re-dump diffs per block; writer `tools/bump-version/lib/palette-format.mjs`).
+
+**How the dump works** (about 26 s on bds-reg): `truth:palette` (packs/truth/src/palette.ts) enumerates
+`BlockTypes.getAll()`, the states of each default permutation, every combination of the states'
+`BlockStates` valid values, and `BlockPermutation.resolve` (combinations that throw are skipped: 0 on
+1.26.60.6). The Script API view is not the network view: it also reports flattened-away **legacy
+states** that the hash leaves out (`color` on 159 types such as every `*_stained_glass_pane` and
+concrete powder, `top_slot_bit` on 114 slabs next to the real `minecraft:vertical_half`, `direction`
+on 52 doors and others next to `minecraft:cardinal_direction`, `wall_block_type` on the 14 walls,
+`wood_type`, `stone_slab_type*`, `coral_color`, `dead_bit`, ...: 39 state names). So the dumper also
+places the default permutation of every type (`truth:palettestrip`, 256 per batch, 2 blocks apart),
+reads the runtime ids the server sends for them, and per type drops the smallest state subset whose
+hash matches a seen id. 1473 of 1480 types are verified that way; the 7 the probe cannot hold in place
+(air, bubble_column, flowing_water, flowing_lava, soul_fire, unknown, and pink_concrete_powder, whose
+cell held something else by the time it was read) drop the states the verified types mostly drop (`color` on
+pink_concrete_powder); the e2e below places them again.
+
+**Numbers (BDS 1.26.60.6):**
+
+| | |
+|---|---|
+| block types | 1480 (minecraft-data 1.26.30: 1356, all of them still present) |
+| permutations (network) | 23 941 (Script API: 66 053 with the legacy states) |
+| equal to a minecraft-data state (keep its state id) | 16 277 |
+| palette-only states (state ids from 16 913 up) | 7 664 |
+| file | 95 109 bytes (JSON) |
+| load | 9 to 13 ms (read + expand); hashing all states 26 ms once per process (own FNV over the NBT bytes, `fastBlockHash`, equal to `blockHash` on every state); registry build 50 ms warm, the same as without the palette (prismarine dominates) |
+
+What changed since 1.26.30 (palette vs minecraft-data, by state names):
+
+| Change | Blocks |
+|---|---|
+| `+minecraft:corner` (none, inner_left, inner_right, outer_left, outer_right) | all 64 stairs |
+| `+minecraft:connection_east/north/south/west` | 57: every fence (not gates), glass pane, hard glass pane, iron and copper bars, trip_wire |
+| `+minecraft:connection_*` incl. up (fire) / up and down (chorus_plant) | fire, chorus_plant |
+| `+redstone_east/north/south/west` (none, side, up) | redstone_wire (1296 states, was 16) |
+| new block types | 124: the poplar wood set (planks, log, wood, stripped, 3 leaves, stairs, slab, door, trapdoor, fence, gate, button, plate, signs, shelf, sapling), stairs / slab / double slab of every wool and concrete colour, icicle, ice_crystal, disc_press, shelf_mushroom, red_shrub, straw_bed |
+
+Palette-only states take hardness and collision boxes (minecraft-data blockCollisionShapes) from the
+closest minecraft-data state of the same block, or of a shape donor by name suffix for new blocks
+(`_stairs` → oak_stairs, `_slab` → oak_slab, `_door` → wooden_door, `_fence` → oak_fence, `_planks` →
+oak_planks, ...; palette.ts `shapeDonor`). icicle, ice_crystal, disc_press, shelf_mushroom and red_shrub
+have no donor: full solid cubes, as unknown ids were, but with their real names.
+
+BDS sends `minecraft:unknown` as runtime id **-2** (not its hash); the registry maps -2 to the unknown block.
+
+**Verification** (`bot/test/unit/world/registry-palette.test.ts`; `bot/test/e2e/world-registry.test.ts`
+on bds-reg): every palette state resolves to its own name and states; every runtime id of
+`fixtures/1.26.60/world-chunks` resolves (0 unknown); one of every block type placed on bds-reg (1488
+cells incl. door halves) resolves to the truth name with 0 unknown runtime ids; the strip below
+resolves to the truth name and states, 0 mismatches. Track AA's stairs special case in the terrain
+layer (`resolveNewerState`) is now redundant (no stairs id is unknown any more; the unit test checks
+both give the same boxes); it stays in place.
+
+The e2e strip, 2026-10-29 (one row per group, adjacent cells, so stairs corners and connections are the
+server's own; identical rows merged; "palette" = a state minecraft-data does not have; every row: model
+name and states = truth):
+
+| block | states | runtime id | state id |
+|---|---|---|---|
+| oak_stairs | corner=none upside_down_bit=0 weirdo_direction=0 | -122484237 | 20175 (palette) |
+| oak_stairs | corner=inner_left upside_down_bit=0 weirdo_direction=1 | 766941358 | 20177 (palette) |
+| oak_stairs | corner=none upside_down_bit=0 weirdo_direction=2 | 465409 | 20193 (palette) |
+| oak_stairs | corner=none upside_down_bit=0 weirdo_direction=3 | 61940232 | 20194 (palette) |
+| oak_stairs | corner=inner_left upside_down_bit=0 weirdo_direction=0 | 705466535 | 20176 (palette) |
+| oak_stairs | corner=outer_right upside_down_bit=0 weirdo_direction=0 | 357105324 | 20207 (palette) |
+| stone_brick_stairs | corner=none upside_down_bit=0 weirdo_direction=0 | 965355805 | 23511 (palette) |
+| stone_brick_stairs | corner=inner_left upside_down_bit=0 weirdo_direction=1 | -1339212908 | 23513 (palette) |
+| stone_brick_stairs | corner=none upside_down_bit=0 weirdo_direction=2 | 842406159 | 23529 (palette) |
+| stone_brick_stairs | corner=none upside_down_bit=0 weirdo_direction=3 | 903880982 | 23530 (palette) |
+| stone_brick_stairs | corner=inner_left upside_down_bit=0 weirdo_direction=0 | -1400687731 | 23512 (palette) |
+| cut_copper_stairs | corner=none upside_down_bit=0 weirdo_direction=0 | -374636541 | 17865 (palette) |
+| cut_copper_stairs | corner=inner_left upside_down_bit=0 weirdo_direction=1 | -544235170 | 17867 (palette) |
+| cut_copper_stairs | corner=none upside_down_bit=0 weirdo_direction=2 | -251686895 | 17883 (palette) |
+| cut_copper_stairs | corner=none upside_down_bit=0 weirdo_direction=3 | -190212072 | 17884 (palette) |
+| cut_copper_stairs | corner=inner_left upside_down_bit=0 weirdo_direction=0 | -605709993 | 17866 (palette) |
+| cut_copper_stairs | corner=none upside_down_bit=1 weirdo_direction=3 | 384954925 | 17888 (palette) |
+| white_wool_stairs | corner=none upside_down_bit=0 weirdo_direction=0 | 1191707346 | 24429 (palette) |
+| white_wool_stairs | corner=inner_left upside_down_bit=0 weirdo_direction=1 | 733564343 | 24431 (palette) |
+| white_wool_stairs | corner=none upside_down_bit=0 weirdo_direction=2 | 1314656992 | 24447 (palette) |
+| white_wool_stairs | corner=none upside_down_bit=0 weirdo_direction=3 | 1253182169 | 24448 (palette) |
+| white_wool_stairs | corner=inner_left upside_down_bit=0 weirdo_direction=0 | 795039166 | 24430 (palette) |
+| white_concrete_stairs | corner=inner_right upside_down_bit=1 weirdo_direction=1 | 1162845150 | 24383 (palette) |
+| oak_slab | vertical_half=bottom | -1547796892 | 6722 |
+| oak_slab | vertical_half=top | 1728771929 | 6723 |
+| oak_double_slab | vertical_half=bottom | 173263259 | 5345 |
+| white_wool_slab | vertical_half=bottom | 1990068687 | 24427 (palette) |
+| white_wool_slab | vertical_half=top | -311756528 | 24428 (palette) |
+| white_wool_double_slab | vertical_half=bottom | -1221361390 | 24425 (palette) |
+| poplar_slab | vertical_half=top | -1960025921 | 21416 (palette) |
+| black_wool_slab | vertical_half=bottom | -496896735 | 17223 (palette) |
+| cut_copper_slab | vertical_half=top | -99196711 | 9067 |
+| wooden_door (lower / upper) | door_hinge_bit=0 cardinal_direction=south open_bit=0 upper_block_bit=0 / 1 | 650702320 / 1706008891 | 5492 / 5500 |
+| poplar_door (lower / upper) | door_hinge_bit=1 cardinal_direction=east open_bit=1 upper_block_bit=0 / 1 | -1089404795 / -2144711366 | 20929 / 20930 (palette) |
+| iron_door (lower / upper) | door_hinge_bit=0 cardinal_direction=north open_bit=0 upper_block_bit=0 / 1 | 1609016616 / -1630644109 | 6997 / 7005 |
+| copper_door (lower / upper) | door_hinge_bit=1 cardinal_direction=west open_bit=0 upper_block_bit=0 / 1 | -1374303423 / 1865357302 | 11684 / 11692 |
+| trapdoor | direction=0 open_bit=1 upside_down_bit=0 | -1673099720 | 1290 |
+| poplar_trapdoor | direction=2 open_bit=0 upside_down_bit=0 | -1829628697 | 21481 (palette) |
+| iron_trapdoor | direction=0 open_bit=0 upside_down_bit=1 | 1081251492 | 1894 |
+| copper_trapdoor | direction=0 open_bit=0 upside_down_bit=0 | 826714304 | 11032 |
+| fence_gate | in_wall_bit=0 cardinal_direction=south open_bit=0 | -1873042880 | 286 |
+| poplar_fence_gate | in_wall_bit=0 cardinal_direction=south open_bit=1 | 2010117891 | 20966 (palette) |
+| cobblestone_wall | east=short north=none south=none west=none post=1 | 1604075163 | 3997 |
+| cobblestone_wall (x2) | east=short north=none south=none west=short post=0 | 1146933355 | 4050 |
+| blackstone_wall | east=none north=none south=none west=short post=1 | -746116502 | 6200 |
+| oak_fence | connection_east=1, others 0 | -574604076 | 20167 (palette) |
+| oak_fence | connection_east=1 connection_west=1 | 480702495 | 20168 (palette) |
+| oak_fence | connection_west=1, others 0 | -629848190 | 20160 (palette) |
+| nether_brick_fence | all connections 0 | 446961403 | 20063 (palette) |
+| poplar_fence | all connections 0 | -535511961 | 20945 (palette) |
+| glass_pane | connection_east=1, others 0 | 723880213 | 18845 (palette) |
+| glass_pane (x2) | connection_east=1 connection_west=1 | -331426358 | 18846 (palette) |
+| red_stained_glass_pane | connection_east=1 connection_west=1 | 1769262805 | 21900 (palette) |
+| iron_bars | connection_east=1 connection_west=1 | 686455481 | 19408 (palette) |
+| copper_bars | connection_west=1, others 0 | -1822166287 | 17794 (palette) |
+| redstone_wire (x2) | redstone_east=side redstone_west=side north=none south=none signal=0 | -161133073 | 22384 (palette) |
+| redstone_wire | all none, signal=0 | 1399972871 | 21951 (palette) |
+| candle | candles=2 lit=1 | -857350126 | 14956 |
+| white_candle | candles=0 lit=0 | 1754953123 | 9173 |
+| candle_cake | lit=0 | -281139171 | 15161 |
+| copper_block | | -593390456 | 7826 |
+| exposed_copper | | 600140015 | 2222 |
+| waxed_oxidized_copper | | -1317255528 | 15119 |
+| copper_bulb | lit=1 powered_bit=0 | 1229100855 | 6893 |
+| copper_grate | | 596285486 | 1963 |
+| copper_chest | cardinal_direction=north | -327497521 | 5485 |
+| copper_lantern | hanging=0 | 639828303 | 16872 |
+| lightning_rod | facing_direction=0 powered_bit=0 | 1504023697 | 3973 |
+| poplar_planks | | 1414931100 | 21364 (palette) |
+| poplar_log | pillar_axis=x | -663707234 | 21362 (palette) |
+| stripped_poplar_wood | pillar_axis=y | 303175278 | 23610 (palette) |
+| orange_poplar_leaves | persistent_bit=0 update_bit=0 | -1018857853 | 20259 (palette) |
+| poplar_sapling | age_bit=0 | -67767387 | 21381 (palette) |
+| red_shrub | | 1319997426 | 21890 (palette) |
+| disc_press | cardinal_direction=south | -1559215611 | 18225 (palette) |
+| ice_crystal | block_face=up | 1179756793 | 19373 (palette) |
+| icicle | attached_bit=0 dripstone_thickness=tip hanging=1 | -1905243028 | 19379 (palette) |
+| poplar_shelf | cardinal_direction=south powered_bit=0 powered_shelf_type=0 | 1343894540 | 21383 (palette) |
+
+95 placements, 98 non-air cells (4 upper door halves; shelf_mushroom popped off the grass), 69 of them
+palette-only states. Explicitly set stairs corners are reshaped by the server from the neighbours (an
+isolated staircase is `none`); the strip still shows inner_left, inner_right and outer_right, and the
+unit test covers all 5 corners of every stairs block by hash.

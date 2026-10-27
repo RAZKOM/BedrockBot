@@ -24,8 +24,8 @@ world.checksum(a, b);                                       // same rule as trut
 | `index.ts` | `World` facade (implements `WorldView` from `types.ts`), packet wiring, self state, `waitForChunks`, `checksum` |
 | `types.ts` | `Vec3`, `BlockInfo`, `Box`, `EntityInfo`, `ItemStack`, `ContainerView`, `SelfState`, `FindOptions`, `PacketSource`, `WorldView` |
 | `packets.ts` | shapes of the inbound packets the model reads (bedrock-protocol 3.60.1 / minecraft-data 1.26.51) |
-| `registry.ts` | `BlockRegistry`: prismarine-registry from `start_game` + `item_registry`, runtime id to state id, unknown-hash counting, `BlockInfo` cache, `blockHash()` |
-| `version-shims/` | one module per game version (`1.26.51.ts`) plus `index.ts` (`shimFor`, `SHIMS`) |
+| `registry.ts` | `BlockRegistry`: prismarine-registry from `start_game` + `item_registry`, runtime-id table (from the BDS palette dump where the shim has one), unknown-hash counting, `BlockInfo` cache, `blockHash()` |
+| `version-shims/` | one module per game version (`1.26.51.ts`, `1.26.60.ts`) plus `index.ts` (`shimFor`, `SHIMS`) and `palette.ts` (loads `bot/data/block-palette/<version>.json`, `fastBlockHash`, shape donors) |
 | `subchunk.ts` | own network subchunk decoder (`decodeSubChunk`) and the in-memory `Section` / `Layer` format |
 | `chunks.ts` | `ChunkStore`: `level_chunk`, batched `subchunk_request`, `subchunk` decode, column cache, unload by distance |
 | `updates.ts` | `BlockUpdates`: `update_block`, `update_subchunk_blocks`, `block_entity_data`, `onBlockUpdate` |
@@ -73,6 +73,24 @@ are sent in the same server tick; the reply happens to arrive first).
    (`blockHash()` reproduces prismarine-block's `getHash`). `BlockRegistry` copies the result into a
    `Map<runtimeId, stateId>` and an `Int32Array` for the reverse direction (16 913 states, about
    70 to 150 ms).
+
+   **Block palette (wave 8, Track AC, [decision 0024](decisions/0024-block-registry-from-bds-palette.md)).**
+   minecraft-data's bedrock block states stop at 1.26.30, so on 1.26.60 every stairs block (new
+   `minecraft:corner`), fence, pane, bars, fire and redstone wire (new connection states) and all 124
+   new block types were unknown ids. When the version shim names a palette (`blockPalette: '1.26.60'`),
+   the registry loads `bot/data/block-palette/1.26.60.json` (every block state as BDS 1.26.60.6 hashes
+   it, dumped through the truth pack by `tools/bump-version/dump-palette.mjs`) and hashes each state
+   (`fastBlockHash`, own FNV over the NBT bytes, 26 ms once per process): a state equal to a
+   minecraft-data state keeps that state id (16 277 of them), the other 7 664 get ids from 16 913 up.
+   Their `BlockInfo` has the server's name and states, and the hardness and collision boxes of the
+   closest minecraft-data state of the same block (or of a shape donor for new blocks: `_stairs` →
+   oak_stairs, `_door` → wooden_door, ...); new blocks without one (icicle, ice_crystal, disc_press,
+   shelf_mushroom, red_shrub) are full solid cubes. `stateIdOf(name, states)` looks in the palette first,
+   then in minecraft-data. Runtime id -2 is `minecraft:unknown` (BDS sends that block with a fixed id).
+   Versions without a palette file (1.26.51) use minecraft-data alone. Result on bds-reg: 0 unknown
+   runtime ids for one of every block type and for the recorded fixture world. The `unknown` fallback
+   (solid full cube, warned once per id, counted in `unknownRuntimeIds`) stays for ids that are still not
+   in the table. Re-dump and numbers: [versions.md](versions.md) "Block states".
 2. **Subchunks.** `decodeSubChunk()` reads storage version 1, 8 or 9 (9 carries the absolute y
    index as a signed byte, which is checked against `origin.y + dy`), one or two layers (layer 1 is
    water in waterlogged blocks), each a paletted storage with network runtime ids: header byte
@@ -98,12 +116,14 @@ registry still comes from prismarine.
 
 ## Known gaps
 
-- **Block data is 1.26.30's** (PLAN fact 3a). Blocks added in 26.40 to 26.51 have hashes the registry
-  cannot resolve. They decode as `{ name: 'unknown', stateId: -1, solid: true, boxes: [full cube],
-  states: { runtime_id } }` (safe for pathfinding), are logged once per id at warn level, and are
-  counted in `world.registry.unknownRuntimeIds` (`unknownSummary()` for a log line). None were seen
-  on the flat test world. When minecraft-data ships newer block data, bump the shim's
-  `registryVersion` / `blockDataVersion`.
+- **Block data is 1.26.30's** (PLAN fact 3a) for hardness and shapes, and for the runtime ids of
+  versions without a palette dump (1.26.51). Ids the registry cannot resolve decode as
+  `{ name: 'unknown', stateId: -1, solid: true, boxes: [full cube], states: { runtime_id } }` (safe for
+  pathfinding), are logged once per id at warn level, and are counted in
+  `world.registry.unknownRuntimeIds` (`unknownSummary()` for a log line). On 1.26.60 the palette covers
+  every block type of BDS 1.26.60.6 (above); a new BDS build needs a re-dump. Shapes of palette-only
+  states are borrowed (above); door panels of new door types (poplar_door) are minecraft-data's one
+  door shape, not the state-dependent panel the terrain layer derives for known doors.
 - **Truth area.** The truth pack can only read chunks the server keeps loaded for scripts: about 4
   chunks around the player (chunk (-3,-3) is already unloaded when standing at the spawn). The e2e
   tests pick boxes inside that area and retry on `unloaded_chunk`.

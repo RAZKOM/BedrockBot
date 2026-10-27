@@ -43,7 +43,17 @@ node schema-diff.mjs 1.26.51 1.26.60 --show packet_player_auth_input
 node make-patch.mjs 1.26.60              # -> patches/minecraft-data@3.117.0.patch (pnpm format)
 node make-patch.mjs 1.26.60 --patch-package   # also patches/minecraft-data+3.117.0.patch (patch-package format)
 node test-patch.mjs 1.26.60              # pnpm patchedDependencies + patch-package, each in a temp dir
+
+# Block states of the new BDS (minecraft-data's stop at 1.26.30): dump the palette the world registry uses
+node dump-palette.mjs --profile reg      # bds-reg (truth pack deployed) -> bot/data/block-palette/<version>.json
+node dump-palette.mjs --container bds-x --port 19999 --version 1.26.61
 ```
+
+`dump-palette.mjs` (wave 8, Track AC; docs/versions.md "Block states") joins the local BDS as an offline
+player, pages through `truth:palette` (every Script API permutation), places the default permutation of
+every block type with `truth:palettestrip` and reads back the runtime ids the server sends, drops the
+legacy Script API states the network hash leaves out (`lib/palette-format.mjs` `legacyStates`), and writes
+the compact file (about 26 s, 95 kB for 1.26.60.6). Then set `blockPalette` in the version shim.
 
 Every command prints a JSON result on stdout (progress goes to stderr) and exits non-zero on failure.
 

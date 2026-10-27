@@ -1,0 +1,32 @@
+# BDS for the block-registry e2e test and the palette dump (wave 8, Track AC; docs/versions.md "Block
+# states"): container bds-reg on udp/19192, flat world `reg`, data in docker/data/reg. Same settings as
+# compose.world.yml (offline, RakNet, flat, operator) plus peaceful (no mobs in the block strip).
+#   node scripts/bds.mjs --profile reg up
+#   node scripts/bds.mjs --profile reg pack
+#   node tools/bump-version/dump-palette.mjs --profile reg   (re-dump bot/data/block-palette/<version>.json)
+name: bedrockbot-reg
+
+services:
+  bds-reg:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-reg
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: peaceful
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: reg
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-reg
+      SERVER_PORT: "19192"
+    ports:
+      - "19192:19192/udp"
+    volumes:
+      - ./data/reg:/data
+    stdin_open: true
+    tty: true
