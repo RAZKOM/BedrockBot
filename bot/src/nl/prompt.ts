@@ -53,12 +53,13 @@ const STEP_DOCS: Record<StepKind, string> = {
   sleep: '{"command":"sleep"}: sleep in a bed',
   pause: '{"command":"pause"}: hold the running command',
   resume: '{"command":"resume"}: continue after pause',
-  get: '{"command":"get","item":"oak_log","count":N?}: get N of an item (wood, ores, stone, dirt, sand, food, crops); the first choice for get / bring / collect: it picks gather, mine, food or farm itself', // Track AD
+  get: '{"command":"get","item":"oak_log","count":N?}: get N NEW items (wood, ores, stone, dirt, sand, food, crops); the first choice for get / collect / make: it picks gather, mine, food or farm itself; never from the chests', // Track AD (Track AS: bring is the stored items)
   breed: '{"command":"breed","type":"cow"?,"pairs":N?}: feed pairs of adult animals so they breed (cow, mooshroom, sheep, pig, chicken, rabbit); pairs 1..8, only when said', // Track AK
   panel: '{"command":"panel"}: tell the control panel (web page) address', // Track AK
   drop: '{"command":"drop","what":"all"|"items"}: drop everything carried (all), or everything except food, armour, tools and weapons (items)', // Track AK
   build: '{"command":"build","shape":"fill"|"clear"|"wall"|"floor"|"pillar"|"file","x":X?,"y":Y?,"z":Z?,"x2":X?,"y2":Y?,"z2":Z?,"height":H?,"block":"cobblestone"?,"name":"<file>"?}: build from the inventory: fill / clear the box x y z to x2 y2 z2, a wall from x y z to x2 z2 H high, a floor x y z to x2 z2, a pillar H high at x y z, file = a saved structure by name (at x y z, else at the bot); no x y z = at the bot', // Track AL
   ...{ unload: '{"command":"unload","all":B?}: put the carried items away into the chests at home (keeps food, tools, armour); all: also empty full shulker boxes', stock: '{"command":"stock","item":"coal"?}: say how many of an item the chests at home hold (from memory), or the totals', chests: '{"command":"chests","scan":B?}: list the chests at home; scan: walk to them and look inside again' }, // Track AG
+  bring: '{"command":"bring","item":"torch","count":N?,"to":"home"?}: take items ALREADY STORED in the chests at home and carry them to the person asking ("bring me", "fetch from home", "bring the diamonds to me"); "to" only for another named player or "home"; get makes new items and ends at home, bring takes from the chests and ends at the player', // Track AS
   explore: '{"command":"explore","radius":R?}: walk around the unexplored land near home (radius 16..1024 blocks) so the bot remembers it: ores, forests, animals', // Track AI
   question: '{"command":"question","text":"..."}: ask the person one short question instead of guessing; last step',
   answer: '{"command":"answer","text":"..."}: answer a question about the bot (what it can do, whether it can cook, what it is doing) in up to 200 characters; nothing runs; always the only step', // Track AM
@@ -86,6 +87,7 @@ export const EXAMPLES: readonly Example[] = [
   { request: 'build a cobblestone wall from 0 -60 0 to 9 0, 4 high', plan: { steps: [{ command: 'build', shape: 'wall', x: 0, y: -60, z: 0, x2: 9, z2: 0, height: 4, block: 'cobblestone' }] } }, // Track AL
   ...[{ request: 'put your stuff away', plan: { steps: [{ command: 'unload' }] } }, { request: 'how much coal do we have', plan: { steps: [{ command: 'stock', item: 'coal' }] } }, { request: 'check what is in the chests', plan: { steps: [{ command: 'chests', scan: true }] } }] as Example[], // Track AG
   { request: 'look around the area within 200 blocks', plan: { steps: [{ command: 'explore', radius: 200 }] } }, // Track AI
+  { request: 'bring me 64 torches', plan: { steps: [{ command: 'bring', item: 'torch', count: 64 }] } }, // Track AS
 ];
 
 export function buildSystemPrompt(c: PromptContext): string {

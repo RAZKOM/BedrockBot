@@ -22,6 +22,7 @@ import { registerBuildCommands } from '../chat/commands-build.ts'; // Track AL
 import { registerHomeCommands } from '../chat/commands-home.ts'; // Track AG
 import { registerExploreCommands } from '../chat/commands-explore.ts'; // Track AI
 import { registerPanelCommands } from '../chat/commands-panel.ts'; // Track AR
+import { registerBringCommands } from '../chat/commands-bring.ts'; // Track AS
 import { formatChatLine } from '../chat/text.ts';
 import type { RuntimeSettings } from '../config/settings.ts';
 import { settingsFromValues } from '../config/settings.ts';
@@ -350,6 +351,7 @@ export const afkTask: TaskDefinition = {
       (d) => void registerHomeCommands(d, { containers, logger: ctx.logger('home') }), // Track AG: !unload, !stock, !chests, the home chore (after !get)
       (d) => void registerExploreCommands(d), // Track AI: !explore, branch mining for !mine
       registerPanelCommands, // Track AR: !select, !offhand (the control panel's inventory menu)
+      (d) => void registerBringCommands(d, { logger: ctx.logger('bring') }), // Track AS: !bring, the !get stock hint (after !get and the home logistics)
     ];
     for (const register of registrations) register(deps);
     return task;
