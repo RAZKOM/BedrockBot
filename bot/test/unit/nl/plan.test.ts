@@ -40,6 +40,7 @@ describe('plan schema', () => {
       { command: 'panel' },
       { command: 'drop', what: 'all' },
       { command: 'drop', what: 'items' },
+      { command: 'build', shape: 'wall', x: 0, y: -60, z: 0, x2: 9, z2: 0, height: 4, block: 'cobblestone' }, // Track AL
       { command: 'question', text: 'Which one?' },
       { command: 'answer', text: 'I can cook after a hunt.' }, // Track AM
     ];
@@ -157,7 +158,7 @@ describe('prompt', () => {
     expect(p).toContain('settings: guardRadius 16');
     expect(p).toContain('[chat: !goto <waypoint> | x y z (walk)]');
     expect(p).toContain('!sleep (not available on this bot)');
-    expect(EXAMPLES).toHaveLength(12); // Track AD: + get; Track AK: + breed, drop, food pen; Track AM: + two answers
+    expect(EXAMPLES).toHaveLength(13); // Track AD: + get; Track AK: + breed, drop, food pen; Track AM: + two answers; Track AL: + build
     for (const e of EXAMPLES) {
       expect(PlanSchema.safeParse(e.plan).success).toBe(true);
       expect(p).toContain(JSON.stringify(e.plan));

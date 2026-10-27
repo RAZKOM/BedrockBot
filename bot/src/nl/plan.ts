@@ -9,6 +9,7 @@
 // is not obvious. docs/natural-language.md "Adding a command".
 import { z } from 'zod';
 import { parseSettingValue, SETTING_KEYS, SettingError, type SettingKey } from '../config/settings.ts';
+import { buildStepText } from '../skills/build/spec.ts'; // Track AL
 
 const XZ = 30_000_000;
 const coordXZ = z.number().int().min(-XZ).max(XZ);
@@ -49,6 +50,7 @@ export const STEP_SCHEMAS = {
   breed: z.strictObject({ command: z.literal('breed'), type: z.enum(BREED_KINDS).optional(), pairs: z.number().int().min(1).max(8).optional() }), // Track AK
   panel: z.strictObject({ command: z.literal('panel') }), // Track AK
   drop: z.strictObject({ command: z.literal('drop'), what: z.enum(['all', 'items']) }), // Track AK: everything / everything but food, armour, tools
+  build: z.strictObject({ command: z.literal('build'), shape: z.enum(['fill', 'clear', 'wall', 'floor', 'pillar', 'file']), x: coordXZ.optional(), y: coordY.optional(), z: coordXZ.optional(), x2: coordXZ.optional(), y2: coordY.optional(), z2: coordXZ.optional(), height: z.number().int().min(1).max(64).optional(), block: blockName.optional(), name: z.string().regex(/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/).optional() }), // Track AL: !build
   question: z.strictObject({ command: z.literal('question'), text: z.string().min(1).max(200) }),
   answer: z.strictObject({ command: z.literal('answer'), text: z.string().min(1).max(200) }), // Track AM: a reply, nothing runs; the only step
 } as const;
@@ -84,6 +86,7 @@ export const StepSchema = z.discriminatedUnion('command', [
   STEP_SCHEMAS.breed, // Track AK
   STEP_SCHEMAS.panel, // Track AK
   STEP_SCHEMAS.drop, // Track AK
+  STEP_SCHEMAS.build, // Track AL
   STEP_SCHEMAS.question,
   STEP_SCHEMAS.answer, // Track AM
 ]);
@@ -132,6 +135,7 @@ export const COMMAND_SPECS: Record<Exclude<StepKind, TalkKind>, CommandSpec> = {
   breed: { chat: 'breed', wait: 'process', done: /^breed: fed /, fail: /^breed: (?!fed )/ }, // Track AK
   panel: { chat: 'panel', wait: 'none' }, // Track AK
   drop: { chat: 'drop', wait: 'reply', done: /^(dropped \d+ items of |drop: (inventory empty|nothing but))/, fail: /\(stopped at / }, // Track AK
+  build: { chat: 'build', wait: 'process', fail: /^build: / }, // Track AL
 };
 
 /** Replies that end any step and the plan. */
@@ -232,6 +236,8 @@ export function stepCommand(s: Step): string {
       return ['breed', s.type, s.pairs].filter((w) => w !== undefined).join(' ');
     case 'drop': // Track AK
       return `drop ${s.what}`;
+    case 'build': // Track AL
+      return buildStepText(s);
     case 'question':
     case 'answer': // Track AM
       return s.text;
