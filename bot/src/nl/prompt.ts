@@ -61,6 +61,7 @@ const STEP_DOCS: Record<StepKind, string> = {
   ...{ unload: '{"command":"unload","all":B?}: put the carried items away into the chests at home (keeps food, tools, armour); all: also empty full shulker boxes', stock: '{"command":"stock","item":"coal"?}: say how many of an item the chests at home hold (from memory), or the totals', chests: '{"command":"chests","scan":B?}: list the chests at home; scan: walk to them and look inside again' }, // Track AG
   bring: '{"command":"bring","item":"torch","count":N?,"to":"home"?}: take items ALREADY STORED in the chests at home and carry them to the person asking ("bring me", "fetch from home", "bring the diamonds to me"); "to" only for another named player or "home"; get makes new items and ends at home, bring takes from the chests and ends at the player', // Track AS
   explore: '{"command":"explore","radius":R?}: walk around the unexplored land near home (radius 16..1024 blocks) so the bot remembers it: ores, forests, animals', // Track AI
+  ...{ nether: '{"command":"nether"}: go into the Nether through the nearest known nether portal (it does not build portals)', overworld: '{"command":"overworld"}: come back from the Nether through the paired portal' }, // Track AT
   question: '{"command":"question","text":"..."}: ask the person one short question instead of guessing; last step',
   answer: '{"command":"answer","text":"..."}: answer a question about the bot (what it can do, whether it can cook, what it is doing) in up to 200 characters; nothing runs; always the only step', // Track AM
 };
@@ -90,6 +91,7 @@ export const EXAMPLES: readonly Example[] = [
   ...[{ request: 'put your stuff away', plan: { steps: [{ command: 'unload' }] } }, { request: 'how much coal do we have', plan: { steps: [{ command: 'stock', item: 'coal' }] } }, { request: 'check what is in the chests', plan: { steps: [{ command: 'chests', scan: true }] } }] as Example[], // Track AG
   { request: 'look around the area within 200 blocks', plan: { steps: [{ command: 'explore', radius: 200 }] } }, // Track AI
   { request: 'bring me 64 torches', plan: { steps: [{ command: 'bring', item: 'torch', count: 64 }] } }, // Track AS
+  { request: 'go to the nether', plan: { steps: [{ command: 'nether' }] } }, // Track AT
 ];
 
 export function buildSystemPrompt(c: PromptContext): string {

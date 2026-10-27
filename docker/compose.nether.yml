@@ -1,0 +1,36 @@
+# BDS for the Nether / End e2e tests (wave 10, Track AT; docs/nether.md). Like compose.explore.yml:
+# a generated DEFAULT world with a fixed seed (LEVEL_SEED 7), but difficulty normal (fire, lava and
+# magma hurt; piglins and ghasts are there), operator, own project name, container bds-nether on
+# udp/19202, data in docker/data/nether (seeded from docker/data/explore without its `worlds/` and
+# `server.properties`, so the server generated its own world and BDS was not downloaded again).
+# The truth pack teleports the bot between dimensions (packs/truth/src/nether.ts).
+#   node scripts/bds.mjs --profile nether up
+#   node scripts/bds.mjs --profile nether pack      # truth pack (needed by the nether-* e2e tests)
+name: bedrockbot-nether
+
+services:
+  bds-nether:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-nether
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: normal
+      LEVEL_TYPE: DEFAULT
+      LEVEL_SEED: "7"
+      LEVEL_NAME: nether
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-nether
+      SERVER_PORT: "19202"
+      TICK_DISTANCE: "10"
+    ports:
+      - "19202:19202/udp"
+    volumes:
+      - ./data/nether:/data
+    stdin_open: true
+    tty: true

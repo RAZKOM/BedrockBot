@@ -263,6 +263,8 @@ export class Navigator {
   lastReport: GotoReport | undefined;
   /** Track S: the `cellCost` option, settable after construction (the survival kit installs avoidance). */
   cellCost: NavigatorOptions['cellCost'];
+  /** Track AT: planner cost overrides read live each plan (the End: `maxDrop` 1, no irreversible drops; world/dimension.ts). */
+  costsOverride: (() => Partial<NonNullable<PathOptions['costs']>> | undefined) | undefined;
   private protect: NavigatorOptions['protect'];
   private digPenalty: NavigatorOptions['digPenalty'];
   /** Track R: failed goals / `any` members / action cells, skipped for a while (nav/blacklist.ts). */
@@ -371,7 +373,7 @@ export class Navigator {
     };
     return {
       ...this.pathOpts,
-      costs: { walk: sprint ? TICKS.sprint : TICKS.walk, ...(this.digPenalty?.() !== undefined ? { dig: this.digPenalty()! } : {}), ...this.pathOpts.costs },
+      costs: { walk: sprint ? TICKS.sprint : TICKS.walk, ...(this.digPenalty?.() !== undefined ? { dig: this.digPenalty()! } : {}), ...this.pathOpts.costs, ...this.costsOverride?.() }, // Track AT: costsOverride
       ...(this.protect?.() ? { protectedArea: this.protect()! } : {}),
       allowBreak: (options.allowBreak ?? false) && this.actions.dig !== undefined,
       allowPlace: (options.allowPlace ?? false) && this.actions.place !== undefined && haveThrowaway(),

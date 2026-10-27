@@ -45,6 +45,7 @@ describe('plan schema', () => {
       { command: 'explore', radius: 64 }, // Track AI
       { command: 'bring', item: 'torch', count: 64 }, // Track AS
       { command: 'bring', item: 'diamond', to: 'home' },
+      ...[{ command: 'nether' }, { command: 'overworld' }], // Track AT
       { command: 'question', text: 'Which one?' },
       { command: 'answer', text: 'I can cook after a hunt.' }, // Track AM
     ];
@@ -162,7 +163,7 @@ describe('prompt', () => {
     expect(p).toContain('settings: guardRadius 16');
     expect(p).toContain('[chat: !goto <waypoint> | x y z (walk)]');
     expect(p).toContain('!sleep (not available on this bot)');
-    expect(EXAMPLES).toHaveLength(20); // Track AS: + bring; Track AQ: + get several ores, mine several kinds; Track AD: + get; Track AK: + breed, drop, food pen; Track AM: + two answers; Track AL: + build; Track AG: + unload, stock, chests; Track AI: + explore
+    expect(EXAMPLES).toHaveLength(21); // Track AT: + nether; Track AS: + bring; Track AQ: + get several ores, mine several kinds; Track AD: + get; Track AK: + breed, drop, food pen; Track AM: + two answers; Track AL: + build; Track AG: + unload, stock, chests; Track AI: + explore
     for (const e of EXAMPLES) {
       expect(PlanSchema.safeParse(e.plan).success).toBe(true);
       expect(p).toContain(JSON.stringify(e.plan));
