@@ -354,6 +354,7 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
    * first) until both are dead. Hits taken from truth:hurtlog.
    */
   async function zombiePair(b: PveBot, at: Vec3, mode: 'on' | 'off', layout: 'flank' | 'far'): Promise<{ dead: number; hits: number; damage: number; retargets: number; ticks: number; fights: number; ms: number }> {
+    await b.truth.ok('give', [b.name, 'iron_sword', 1]); // a fresh sword per run: the suite wears one out (2026-10-30: run 5 fought with cooked beef)
     await b.truth.cleanup();
     await b.truth.clearAround(centre(at), 16);
     await teleport(b, centre(at));

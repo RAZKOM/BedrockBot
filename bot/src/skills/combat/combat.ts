@@ -228,7 +228,8 @@ export function weaponScore(name: string | undefined): number {
   if (n.endsWith('_sword')) return 200 + (d ?? 4);
   if (n.endsWith('_axe')) return 100 + (d ?? 3);
   if (n === 'trident' || n === 'mace') return 50;
-  return 1;
+  if (n.endsWith('_pickaxe') || n.endsWith('_shovel') || n.endsWith('_hoe')) return 20; // better than a fist, far below a blade
+  return 0; // food, blocks, torches: never a weapon (bds-pve 2026-10-30: a worn-out sword left the bot fighting with cooked beef, 21 damage taken)
 }
 
 /** Swords and axes only (what is worth moving from the main inventory). */
@@ -239,18 +240,23 @@ export function bladeScore(item: Pick<ItemStack, 'name'>): number {
 
 /** The hotbar slot (0..8) with the best weapon; the selected slot wins ties. undefined = empty hotbar. */
 export function bestWeaponSlot(slots: readonly (ItemStack | null)[], selected: number, toolOk: (item: ItemStack) => boolean = () => true): number | undefined {
-  let best: number | undefined;
-  let bestScore = 0;
-  for (let i = 0; i < 9; i++) {
-    const it = slots[i];
-    if (!it || it.count <= 0 || !toolOk(it)) continue; // Track S: worn weapons skipped
-    const s = weaponScore(it.name) + (i === selected ? 0.5 : 0);
-    if (s > bestScore) {
-      bestScore = s;
-      best = i;
+  // intact weapons and tools first (Track S: worn ones are spared); a worn blade is still the best thing in a fight for
+  // the bot's life, so a second pass takes a worn sword or axe over bare hands
+  for (const pass of [toolOk, (it: ItemStack) => bladeScore(it) > 0]) {
+    let best: number | undefined;
+    let bestScore = 0;
+    for (let i = 0; i < 9; i++) {
+      const it = slots[i];
+      if (!it || it.count <= 0 || !pass(it)) continue;
+      const s = weaponScore(it.name) + (i === selected ? 0.5 : 0);
+      if (s > bestScore) {
+        bestScore = s;
+        best = i;
+      }
     }
+    if (best !== undefined) return best;
   }
-  return best;
+  return undefined;
 }
 
 const AIR_ITEM: ItemV4 & { extra: unknown } = {
