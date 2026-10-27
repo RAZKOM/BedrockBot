@@ -25,6 +25,7 @@ import type { Goal } from '../nav/goals.ts';
 import { closestDistance } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { lineOfSight, type OreMemory, type SeenOre } from './seen.ts';
+import { branchMore } from './branch.ts'; // Track AI: branch mining when no target is known
 
 export type MineState = 'idle' | 'scan' | 'walk' | 'dig' | 'collect' | 'waiting' | 'paused' | 'done' | 'none_left' | 'low_health' | 'no_pickaxe' | 'stopped' | 'failed';
 
@@ -363,6 +364,7 @@ export class MineTask {
         cands.push(t);
         if (cands.length >= PROBE_CANDIDATES) break;
       }
+      if (cands.length === 0 && (await branchMore(this, this.d.skills))) continue; // Track AI: no known target: branch mining (skills/mine/branch.ts)
       if (cands.length === 0) return this.end(gen, 'none_left');
       const target = this.pickReachable(cands);
       if (!target) continue; // all probed candidates unreachable: the next scan takes the next ones

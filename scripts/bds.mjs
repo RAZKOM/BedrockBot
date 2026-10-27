@@ -33,6 +33,7 @@
 //   get    bds-get    docker/compose.get.yml            BDS 1.26.60.6, RakNet    udp/19194 (get-* e2e; Track AD)
 //   build  bds-build  docker/compose.build.yml          BDS 1.26.60.6, RakNet    udp/19200 (build-* e2e; Track AL)
 //   home   bds-home   docker/compose.home.yml           BDS 1.26.60.6, RakNet    udp/19196 (home-* e2e; Track AG)
+//   explore bds-explore docker/compose.explore.yml      BDS 1.26.60.6, RakNet    udp/19198 (explore-* e2e: !explore, branch mining; DEFAULT world, seed 7; Track AI)
 // Any other BDS_CONTAINER value works for restart/idle/cmd/logs only.
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -61,6 +62,7 @@ const PROFILES = {
   get: { container: 'bds-get', compose: 'compose.get.yml', data: 'get', port: 'udp/19194' }, // Track AD
   build: { container: 'bds-build', compose: 'compose.build.yml', data: 'build', port: 'udp/19200' }, // Track AL
   home: { container: 'bds-home', compose: 'compose.home.yml', data: 'home', port: 'udp/19196' }, // Track AG: home-* e2e (chests, !unload)
+  explore: { container: 'bds-explore', compose: 'compose.explore.yml', data: 'explore', port: 'udp/19198' }, // Track AI
 }
 const argv = process.argv.slice(2)
 const profileFlag = argv.indexOf('--profile')

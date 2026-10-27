@@ -82,10 +82,10 @@ describe('tiers and !help on the afk registry', () => {
     expect(candidates).toEqual(['commands', 'farm', 'gather', 'goto', 'health', 'inv', 'kill', 'mine', 'mode', 'no', 'pause', 'pos', 'quit', 'resume', 'set', 'stock', 'top', 'yes']); // merge: + stock (Track AG; unload and chests have auto lines)
   });
 
-  it('!help: at most 3 messages of 256, the front door only, ending with !help all and !help <command>', () => {
+  it('!help: at most 4 messages of 256, the front door only, ending with !help all and !help <command>', () => {
     const lines = chat.helpReplies([]);
     console.log(lines.join('\n'));
-    expect(lines.length).toBeLessThanOrEqual(3);
+    expect(lines.length).toBeLessThanOrEqual(4);
     for (const l of lines) expect(l.length).toBeLessThanOrEqual(256);
     const text = lines.join(' ');
     for (const n of FRONT_DOOR) expect(text, n).toContain(`!${n} `);
@@ -97,7 +97,7 @@ describe('tiers and !help on the afk registry', () => {
   it('!help shortens itself when the front door grows (after the merge)', () => {
     const more = [...infos, ...['build', 'explore', 'unload'].map((n) => ({ name: n, tier: 'front' as const, group: 'work' as const, help: `x (a long description of ${n} that takes up a good part of a chat line by itself)`, syntax: 'x', phrase: `a long description of ${n} that takes up a good part of a chat line by itself` }))];
     const lines = frontHelp(more);
-    expect(lines.length).toBeLessThanOrEqual(3);
+    expect(lines.length).toBeLessThanOrEqual(4);
     for (const n of ['build', 'explore', 'unload', ...FRONT_DOOR]) expect(lines.join(' ')).toContain(`!${n}`);
   });
 

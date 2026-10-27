@@ -1,6 +1,6 @@
 // Command tiers, the help formats and the next-step hints (wave 9, Track AM; docs/ux.md, decision 0034).
 //
-//   !help              the front-door commands by group, one phrase each (at most 3 messages)
+//   !help              the front-door commands by group, one phrase each (at most 4 messages: 12 front-door commands since wave 9)
 //   !help all          every command by group, names only (at most 4 messages); `!commands` too
 //   !help <command>    syntax, description, example, the "also on its own" line
 //   !help settings     the settings by group with their values, the mode first
@@ -15,7 +15,7 @@ import type { CommandDef, CommandGroup, CommandTier } from './chat.ts';
  * The front door: what `!help` shows. After the wave-9 merge `build` (Track AL), `explore` (Track AI)
  * and `unload` (Track AG) join it (tag their CommandDef `tier: 'front'` and add them here).
  */
-export const FRONT_DOOR: readonly string[] = ['come', 'follow', 'stop', 'home', 'get', 'guard', 'build', 'unload', 'status', 'do', 'help']; // merge: + build (Track AL), unload (Track AG)
+export const FRONT_DOOR: readonly string[] = ['come', 'follow', 'stop', 'home', 'get', 'guard', 'build', 'unload', 'explore', 'status', 'do', 'help']; // merge: + build (Track AL), unload (Track AG), explore (Track AI)
 
 export const GROUP_ORDER: readonly CommandGroup[] = ['go', 'work', 'fight', 'home', 'control', 'info'];
 
@@ -146,10 +146,10 @@ export function frontHelp(infos: readonly CommandInfo[], o: HelpOptions = {}): s
     const body = pack(parts, max, 'front door: ', '', ' | ');
     if (body.length <= 2) return [...body, footer]; // the footer on a line of its own
     lines = pack([...parts, footer], max, 'front door: ', '', ' | ');
-    if (lines.length <= 3) break;
+    if (lines.length <= 4) break;
   }
   // never more than 3: the footer (the way to the rest) is kept as the last line
-  return lines.length <= 3 ? lines : [...lines.slice(0, 2), footer];
+  return lines.length <= 4 ? lines : [...lines.slice(0, 3), footer];
 }
 
 /** `!help all` / `!commands`: every command by group, names only (front-door names first in each group). At most 4 messages. */

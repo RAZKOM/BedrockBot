@@ -1,5 +1,5 @@
 // Wave 9 Track AM on bds-core (docs/ux.md, decision 0034): the UX layer on the real afk task and chat.
-//   1. `!help` is at most 3 messages and names exactly the front-door commands registered here;
+//   1. `!help` is at most 4 messages and names exactly the front-door commands registered here;
 //      `!help cook` has the example and the auto line; `!help all` contains cook and mine;
 //   2. `!mode careful` sets fleeHealth 12 (reply and `!set fleeHealth`), `!mode status` says careful,
 //      `!set fleeHealth 9` makes it custom;
@@ -52,7 +52,7 @@ describe.skipIf(!E2E)('core: UX (wave 9 Track AM)', () => {
     console.log(`measurements:\n  ${measurements.join('\n  ')}`);
   }, 60_000);
 
-  it('!help: at most 3 messages, exactly the front door; !help cook; !help all', async () => {
+  it('!help: at most 4 messages, exactly the front door; !help cook; !help all', async () => {
     const b = bot!;
     let n = b.said.length;
     const t0 = Date.now();
@@ -60,7 +60,7 @@ describe.skipIf(!E2E)('core: UX (wave 9 Track AM)', () => {
     const help = await burst(b, n);
     const ms = Date.now() - t0;
     console.log(help.join('\n'));
-    expect(help.length).toBeLessThanOrEqual(3);
+    expect(help.length).toBeLessThanOrEqual(4);
     for (const l of help) expect(l.length).toBeLessThanOrEqual(256);
     expect(help[0]).toMatch(/^front door: /);
     expect(help.at(-1)).toMatch(/!help all, !help <command>$/);

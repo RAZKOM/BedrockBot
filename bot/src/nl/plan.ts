@@ -54,6 +54,7 @@ export const STEP_SCHEMAS = {
   unload: z.strictObject({ command: z.literal('unload'), all: z.boolean().optional() }), // Track AG: !unload [all]
   stock: z.strictObject({ command: z.literal('stock'), item: blockName.optional() }), // Track AG: !stock [item]
   chests: z.strictObject({ command: z.literal('chests'), scan: z.boolean().optional() }), // Track AG: !chests [scan]
+  explore: z.strictObject({ command: z.literal('explore'), radius: z.number().int().min(16).max(1024).optional() }), // Track AI: !explore
   question: z.strictObject({ command: z.literal('question'), text: z.string().min(1).max(200) }),
   answer: z.strictObject({ command: z.literal('answer'), text: z.string().min(1).max(200) }), // Track AM: a reply, nothing runs; the only step
 } as const;
@@ -91,6 +92,7 @@ export const StepSchema = z.discriminatedUnion('command', [
   STEP_SCHEMAS.drop, // Track AK
   STEP_SCHEMAS.build, // Track AL
   ...[STEP_SCHEMAS.unload, STEP_SCHEMAS.stock, STEP_SCHEMAS.chests], // Track AG
+  STEP_SCHEMAS.explore, // Track AI
   STEP_SCHEMAS.question,
   STEP_SCHEMAS.answer, // Track AM
 ]);
@@ -141,6 +143,7 @@ export const COMMAND_SPECS: Record<Exclude<StepKind, TalkKind>, CommandSpec> = {
   drop: { chat: 'drop', wait: 'reply', done: /^(dropped \d+ items of |drop: (inventory empty|nothing but))/, fail: /\(stopped at / }, // Track AK
   build: { chat: 'build', wait: 'process', fail: /^build: / }, // Track AL
   ...{ unload: { chat: 'unload', wait: 'process', fail: /^unload: (no home|I know no)/ }, stock: { chat: 'stock', wait: 'none' }, chests: { chat: 'chests', wait: 'process' } }, // Track AG
+  explore: { chat: 'explore', wait: 'process', fail: /^explore: / }, // Track AI
 };
 
 /** Replies that end any step and the plan. */
@@ -233,6 +236,8 @@ export function stepCommand(s: Step): string {
       return `wp del ${s.name}`;
     case 'set':
       return `set ${s.key} ${settingText(s.value)}`;
+    case 'explore': // Track AI
+      return s.radius !== undefined ? `explore ${s.radius}` : 'explore';
     case 'get': // Track AD
       return s.count !== undefined ? `get ${s.item} ${s.count}` : `get ${s.item}`;
     case 'food': // Track AK

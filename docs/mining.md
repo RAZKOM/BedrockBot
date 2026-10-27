@@ -37,6 +37,7 @@ plan. Sections "As a process", "Candidates: `mineSeenOnly`", "Ore memory across 
 | `bot/src/skills/farm/index.ts` | `createMiner(parts, { tunnelLen })`: the plain wave-6 wiring (no probe, no blacklist) |
 | `bot/src/tasks/process/mine.ts` | `MineProcess` (Track Z) |
 | `bot/src/chat/commands-farm.ts` | `!mine` (with `!farm`), `registerFarmCommands` (called from tasks/registry.ts), the passive ore scan |
+| `bot/src/skills/mine/branch.ts` | wave 9 Track AI: branch mining (`branchMore`, the miner's hook when no target is known; `BranchRun`, the Y table `BRANCH_Y`), wired per bot by `attachBranch` in chat/commands-explore.ts |
 
 ## As a process (Track Z)
 
@@ -160,6 +161,81 @@ for the *dig* instead (below).
 Nothing is placed and nothing is lit. `stop()` bumps the run's generation and cancels the running
 skill synchronously (the Digger sends `abort_break` on the next tick).
 
+## Branch mining (wave 9, Track AI)
+
+Decision record: [decisions/0030-explore-and-branch-mining.md](decisions/0030-explore-and-branch-mining.md).
+`!mine <ore> n` used to end `none_left` when the bot knew no such ore. Now, for a branch ore (coal,
+iron, copper, gold, redstone, lapis, diamond, emerald, with their deepslate twins), the loop's dead end
+calls `branchMore` (skills/mine/branch.ts, one line in `MineTask.run`): each call digs one step of the
+layout and returns to the loop, which scans again, so the normal mine loop mines whatever the new cells
+exposed (or, with `mineSeenOnly` off, whatever came within its 32-block scan). Chat:
+`branch mining iron_ore: none known, digging down to y 16 (staircase from 5760 66 -2008)` when it
+starts; at the end, besides the usual `mine iron_ore: 3/3 done`, `branch iron_ore: 3/3 in 148 s; iron at y
+16: staircase 50 steps, tunnel 3 + 8 in 1 branches, 3 finds, 169 blocks dug` (plus the reason when the
+layout ended it: `, 64 blocks of tunnel without iron (mineTunnelLen 64)`, `health 9`, `no pickaxe`,
+`staircase blocked at ...`).
+
+**The Y** (`mineBranchY`, text setting: `auto` or a whole number -64..320; a number applies to every ore):
+
+| Ore | auto Y | Vanilla 1.18+ distribution (as of 1.21; Minecraft Wiki "Ore" and the worldgen `placed_feature` files `ore_*`) |
+|---|---|---|
+| coal | 40 | `ore_coal_upper` uniform 136..320 plus `ore_coal_lower` triangle 0..192 (peak 96, less air exposure lower down); 40 keeps it under most of the terrain in stone, well inside the lower band |
+| iron | 16 | `ore_iron_middle` triangle -24..56, peak 16 (plus small veins uniform -64..72 and the mountain band 80..384) |
+| copper | 48 | `ore_copper` triangle -16..112, peak 48 |
+| gold | -16 | `ore_gold` triangle -64..32, peak -16 (badlands: extra uniform 32..256) |
+| redstone | -58 | `ore_redstone_lower` triangle -96..-32 (peak -64, clipped at the world floor) plus uniform -64..15; -58 is the lowest level with no bedrock in the tunnel |
+| lapis | 0 | `ore_lapis` triangle -32..32, peak 0 (plus buried uniform -64..64) |
+| diamond | -58 | `ore_diamond` triangle -144..16 (peak -64, clipped), most at the floor; -58 like redstone |
+| emerald | 232 | mountain biomes only, triangle -16..480, peak 232: used only when the bot stands at or above 232 (on a mountain); below that the run is skipped (`none_left` as before) |
+
+**The layout** (absolute coordinates, so it continues after the miner walked off to an ore, a
+pre-emption, the stash step or `!pause`):
+
+| Part | Rule |
+|---|---|
+| direction | the cardinal direction the bot faces (`world.self.yaw`) |
+| staircase | from the feet cell where the run starts to the Y: one block down (up when the Y is above) per step; per step 3 cells of the next column are cleared (the old head height, the old feet height, the new feet), so the body never goes straight down and the planner climbs back up the same stairs; a blocked step turns right, then left; both blocked: the run ends `blocked` |
+| main tunnel | 2 high, in the staircase's last direction; blocked: turns right / left |
+| branches | after every 3 blocks of main tunnel one branch to the left and one to the right, 2 high, up to 16 blocks; a blocked branch ends there; the bot walks back to the junction between them |
+| dig rules | every cell passes the navigator's `breakBlocker` (not next to water or lava, no sand / gravel above, not the block under the feet, nothing protected); every new feet cell needs a solid dry floor (cave gaps turn the staircase) |
+| ore in the way | a layout cell holding the asked ore is left to the miner once (the step returns, the scan finds it in the corridor wall, the loop mines and collects it); still there the next time: dug as a tunnel block |
+| torches | `allowPlace` on and torches carried: one on the floor of the cell just left, every 8 blocks of tunnel |
+| stop | n mined (the miner), `mineTunnelLen` tunnel blocks (main + branches) at the Y without a find, health below 10, no pickaxe, blocked |
+| end | a run that ended by itself (not `!stop` / `!mine stop`) walks back to the staircase's top (`walking back to the surface`, a user process through the PvE walk, so trip readiness applies) and then home when a home point is set |
+
+With `mineSeenOnly` off (the default) the scan sees buried ore through the rock, so the run tunnels to
+the first ore that comes within 32 blocks while it digs down, which can be above the best Y; the
+layout then continues from where it was. Branch mining in the classic sense (only the faces the tunnels
+open count) is `mineSeenOnly on`; the e2e runs that way with `mineTunnelLen 64`.
+
+### Measured (`explore-mine`, bds-explore, seed 7)
+
+Setup: `mineSeenOnly on`, `mineTunnelLen 64`, a diamond pickaxe (an iron one, 250 uses, wore out
+after about 270 blocks in one run: `stopped at 0/3, no pickaxe`); a start whose staircase is clear of
+the dig rules' hazards, with no exposed iron near the way down and iron touching the planned tunnel
+(the e2e picks it; see the test file). Staircase from y 64 to 73 down to y 16.
+
+| What | Result |
+|---|---|
+| staircase | 47 to 60 steps, y 16 reached after 100.9 to 131.1 s (2.1 to 2.3 s per step of 3 blocks, the walk onto the step included); 0 turns in the selected starts |
+| tunnel to 3 iron | 3 + 3 to 6 + 36 blocks of tunnel (1 to 4 branches; branches ended early under gravel twice), finds after 6 to 42 tunnel blocks |
+| blocks dug by the layout | 163 to 263; cells opened in all (the miner's own tunnels to ore it saw in caves within 32 blocks included) 141 to 404 |
+| whole run | `mine iron_ore: 3/3 done` 117 to 274 s after the command; back on the staircase's top 26 to 62 s later (163 to 330 s in all; the two gate runs 163.6 and 231.9 s) |
+| dig rules (truth) | no water or lava next to any of the 141 to 404 opened cells in every run checked |
+| drops | the miner's collect left drops in their holes in 2 of 7 runs before the hole walk existed (0 to 3 iron in the inventory); with it 3 to 6 raw iron in every later run |
+
+Iron along a branch tunnel at y 16 (unbiased: every layout the e2e start search checked with
+truth:find, 26 layouts of 60 tunnel blocks = 120 blocks dug): 2.65 iron blocks in or next to the
+tunnel cells on average (4.4 per 100 blocks of tunnel, 2.2 per 100 blocks dug), 5.3 counting the rest
+of the veins those belong to (what mining them uncovers); 10 of 26 layouts touched a vein of 3 or more.
+With `mineSeenOnly off` the 32-block scan sees much more than that (every buried iron block in a
+sphere of 32), which is why the default finds ore long before the tunnel level.
+
+Seen on the way (not this track's modules, in Open points below): exposed ore in a cave 15 blocks below
+the tunnel cost the miner about 10 minutes of failed gotos (the navigator does not dig down to it; each
+target needs 3 failed gotos of 3 plans each); the bot fell into a pocket off the miner's own tunnel and
+the plain walk up failed (the return walk now allows digging).
+
 ## Measured (`mine-cave`, bds-farm)
 
 Layout: stone 21 x 7 x 13 with a 3 x 3 x 17 corridor sealed by 2 blocks of stone at its west end;
@@ -186,6 +262,8 @@ right behind it; 4 coal ores buried two blocks deep; the bot starts outside with
 | `bot/test/e2e/mine-cave.test.ts` | the cave above (`mineSeenOnly` on), and `!mine` / `!mine stop` through the real chat commands from the server console; Track Z: the unreachable skip and the buried-ore case with `mineSeenOnly` on / off |
 | `bot/test/unit/skills/mine.test.ts` (Track Z) | buried ore targeted with `mineSeenOnly` off, one plan without progress = unreachable for the session and on the blacklist, a goto without segments, pause / resume, records persisted and recalled, `scanMarks` |
 | `bot/test/e2e/mine-memory.test.ts` (Track Z, bds-dig) | ore seen in run 1 mined by a new CLI process from memory (see "Ore memory across restarts"); env `DIG_BDS_HOST` / `DIG_BDS_PORT` / `DIG_BDS_CONTAINER`, `MINE_VERBOSE=1` (the CLI's output) |
+| `bot/test/unit/skills/branch.test.ts` (Track AI) | the Y table, layout geometry, BranchRun on a fake voxel world (staircase, tunnel, branches, turns at water / gaps / gravel, stop rules, the ore left to the miner, torches, the hole walk), `branchMore` (announce, end line, return) |
+| `bot/test/e2e/explore-mine.test.ts` (Track AI, bds-explore) | `!mine iron_ore 3` with no iron known: staircase to y 16, branches, 3 iron picked up, back on the surface within 10 min, no liquid next to any opened cell (truth); env `EXPLORE_BDS_*` (docs/explore.md) |
 
 ```sh
 node scripts/bds.mjs --profile farm up      # bds-farm, udp/19186
@@ -208,3 +286,8 @@ Env: `FARM_BDS_HOST` (127.0.0.1), `FARM_BDS_PORT` (19186), `FARM_BDS_CONTAINER` 
 - A floating / walled-off ore still costs one failed goto when the probe plan was cut short and the
   bot first walks under it.
 - Not tested in a natural cave (deepslate, gravel ceilings, water): the rules are the navigator's.
+- Wave 9 (Track AI): a seen ore deep below the bot in a cave the navigator cannot dig down to costs
+  3 failed gotos of 3 plans (100 000+ nodes each) per target before it is blacklisted; measured about
+  10 minutes for 6 such ores during a branch run. A cheap "is it below a solid floor I may not dig"
+  check, or marking it unreachable after the first full goto without progress, would fix it (miner /
+  navigator, not Track AI's files).

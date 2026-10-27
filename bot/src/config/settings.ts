@@ -91,6 +91,8 @@ export const SETTING_DEFS = {
   homeChestRadius: { kind: 'number', default: 16, min: 2, max: 48, integer: true, unit: 'blocks', description: 'home logistics: chests, barrels and shulker boxes within this radius of home are found, read and unloaded into' }, // Track AG
   homeChestWalk: { kind: 'number', default: 64, min: 0, max: 256, integer: true, unit: 'path blocks', description: 'home logistics: containers whose walk from home is longer than this (the planner\'s path) are skipped and remembered as unreachable; 0 = no path check (homeChestRadius only)' }, // Track AN
   autoUnload: { kind: 'boolean', default: true, description: 'unload into the chests at home as a chore when idle there with more than 8 stacks of unloadable items or a full shulker box' }, // Track AG
+  mineBranchY: { kind: 'text', default: 'auto', values: 'auto|-64..320', parse: (raw: string) => { const s = raw.trim().toLowerCase(); if (s === 'auto' || s === '') return 'auto'; const n = Number(s); if (!Number.isInteger(n) || n < -64 || n > 320) throw new SettingError(`mineBranchY must be auto or a whole number -64..320, got "${raw}"`); return String(n); }, description: 'branch mining: the Y of the tunnels when !mine knows no ore (auto: the best Y of the ore, e.g. iron 16, diamond -58)' }, // Track AI
+  exploreRadius: { kind: 'number', default: 128, min: 16, max: 1024, integer: true, unit: 'blocks', description: '!explore: radius of the area walked (around home, else the bot)' }, // Track AI
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;

@@ -79,7 +79,7 @@ panel or the tests, so "candidate" means: hide, do not remove, until nothing dis
 
 At most 256 characters per message (the chat cuts there) and the chat's 8 replies per 10 s.
 
-`!help` (front door, at most 3 messages; the last names `!help all` and `!help <command>`):
+`!help` (front door, at most 4 messages; the last names `!help all` and `!help <command>`):
 
 ```
 front door: go: !follow (follow a player; default you), !come (walk to you, or to the named player) | work: !get (makes wood, ores, stone, food, crops; never takes from chests) | fight: !guard (fight hostiles near home)
