@@ -202,6 +202,9 @@ interface Active {
   replan: ReplanReason | undefined;
   waitUntil: number;
   t: number;
+  /** Progress timeout (2026-10-30): the best straight-line distance to the goal point so far and the tick it was set. */
+  bestGoalDist: number;
+  goalProgressTick: number;
   search: Search | undefined;
   /** No plan-ahead until the next main plan (the last one made no progress). */
   aheadBlocked: boolean;
@@ -485,6 +488,8 @@ export class Navigator {
         replan: 'start',
         waitUntil: 0,
         t: 0,
+        bestGoalDist: Infinity,
+        goalProgressTick: 0,
         search: undefined,
         aheadBlocked: false,
         action: undefined,
@@ -665,7 +670,18 @@ export class Navigator {
     a.lastPos = { ...s.pos };
     if (this.loop.command.sprint && s.onGround) a.report.sprintTicks++;
     if (this.loop.command.sneak && a.follower) a.report.sneakTicks = (a.report.sneakTicks ?? 0) + 1; // Track AJ
-    if (a.t > a.opts.timeoutTicks) {
+    // timeoutTicks is a budget without progress, not a wall clock: a 1400-block walk timed out on the Realm after
+    // 1120 blocks. Progress = the straight-line distance to the goal point improves by a block; the budget
+    // restarts then. Goals without a point (surface, runAway, yLevel) keep the plain limit. Hard cap: 20 budgets.
+    const gp = goalPoint(a.goal);
+    if (gp) {
+      const d = Math.hypot(s.pos.x - gp.x, gp.y === undefined ? 0 : s.pos.y - gp.y, s.pos.z - gp.z);
+      if (d < a.bestGoalDist - 1) {
+        a.bestGoalDist = d;
+        a.goalProgressTick = a.t;
+      }
+    }
+    if ((gp ? a.t - a.goalProgressTick : a.t) > a.opts.timeoutTicks || a.t > a.opts.timeoutTicks * 20) {
       a.finish({ ok: false, reason: 'timeout' });
       return;
     }
@@ -1324,4 +1340,23 @@ function movementSignature(c: TerrainClass): string {
 
 function fmt(v: { x: number; y: number; z: number }): string {
   return `(${v.x.toFixed(2)}, ${v.y.toFixed(2)}, ${v.z.toFixed(2)})`;
+}
+
+/** The point a goal is about (block centres), for the progress timeout; undefined for goals without one. */
+export function goalPoint(g: NavGoal): { x: number; y: number | undefined; z: number } | undefined {
+  switch (g.type) {
+    case 'block':
+    case 'getToBlock':
+      return { x: g.p.x + 0.5, y: g.p.y, z: g.p.z + 0.5 };
+    case 'near':
+      return { x: g.p.x, y: g.p.y, z: g.p.z };
+    case 'xz':
+      return { x: g.x + 0.5, y: undefined, z: g.z + 0.5 };
+    case 'any': {
+      const pts = g.goals.map(goalPoint).filter((p): p is { x: number; y: number | undefined; z: number } => p !== undefined);
+      return pts[0];
+    }
+    default:
+      return undefined;
+  }
 }

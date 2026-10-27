@@ -34,7 +34,7 @@ skills.status();   // health, food, damage, corrections, motions, inWater, lastG
 
 `goto` resolves `{ ok: true }` or `{ ok: false, reason }` with `reason` one of `unreachable` (no path,
 a goal nobody can stand in, or 3 failures: stuck, move timeouts, failed plans, failed actions),
-`timeout` (default 6000 ticks), `interrupted` (cancel or a new goto), `blacklisted` (the goal, or
+`timeout` (default 6000 ticks without progress: the budget restarts whenever the straight-line distance to the goal point improves by a block, with a hard cap of 20 budgets; goals without a point such as surface and runAway keep the plain limit; 2026-10-30: a 1400-block walk on the Realm had timed out after 1120 blocks), `interrupted` (cancel or a new goto), `blacklisted` (the goal, or
 every member of an `any`, is on the blacklist).
 
 ## Layers
