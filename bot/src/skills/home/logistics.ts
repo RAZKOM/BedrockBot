@@ -29,7 +29,7 @@ import type { PathResult } from '../nav/astar.ts';
 import type { NavGoal } from '../nav/goals.ts';
 import type { PlaceOptions, PlaceResult } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
-import { chestNeighbours, findContainers, isHomeContainer, visitOrder, type DiscoveryWorld } from './discovery.ts';
+import { chestNeighbours, findContainers, isHomeContainer, visitOrder, visitOrderBanded, type DiscoveryWorld } from './discovery.ts';
 import { chestName, fmtPos, partnerKeys, planChests, recordFrom, unreadRecord } from './memory.ts';
 import { chestGoal, verdict } from './reach.ts';
 import { planUnload, unloadableStacks, type UnloadPlan, type UnloadSlot } from './unloader.ts';
@@ -251,7 +251,7 @@ export class HomeLogistics {
 
   /** Walk to a container, open it, remember what it holds, keep it open (the caller closes it). */
   private async visit(p: Vec3, kind: string, cancelled: () => boolean): Promise<{ ok: true; view: ContainerView; record: ChestRecord } | { ok: false; reason: string }> {
-    const g = await this.d.skills.goto(chestGoal(p), { timeoutTicks: 2400 }); // within reach from any height (stacked chests, shelves, Track AN: up to 3 blocks above the feet); `near` failed for chests above floor level on the Realm
+    const g = await this.d.skills.goto(chestGoal(p), { timeoutTicks: 800 }); // 40 s: the probe already said it is reachable; a stuck walk must not eat the scan // within reach from any height (stacked chests, shelves, Track AN: up to 3 blocks above the feet); `near` failed for chests above floor level on the Realm
     if (cancelled()) return { ok: false, reason: 'interrupted' };
     if (!g.ok) return { ok: false, reason: `goto: ${g.reason ?? 'failed'}` };
     let o = await this.d.skills.open(p);
@@ -402,9 +402,12 @@ export class HomeLogistics {
     }
     // the nearest MAX_READS_PER_SCAN by path length (straight line without probes), visited nearest-neighbour
     const take = reach.slice(0, MAX_READS_PER_SCAN).map((x) => x.f);
+    const blocksOf = new Map(reach.map((x) => [chestKey(x.f.p), x.blocks]));
     rep.pending = reach.slice(MAX_READS_PER_SCAN).map((x) => ({ ...x.f.p }));
     const start = this.d.position() ?? centre(home);
-    for (const f of visitOrder(take, start)) {
+    // visit order: nearest neighbour on a walking-aware cost (a floor change or a jump in path length from home
+    // means another room: finish the wall of chests here before walking across the room or out of the door)
+    for (const f of visitOrderBanded(take, start, (f) => blocksOf.get(chestKey(f.p)) ?? 0)) {
       if (cancelled()) return finish('interrupted');
       // the other half of a double chest read in this scan
       partners = partnerKeys(mem.all());

@@ -239,6 +239,7 @@ describe('home logistics: walking distance (Track AN)', () => {
         return answers[k];
       },
     });
+    h.settings.set('homeChestWalk', '32'); // the default is 64 (multi-floor houses); this fixture's far chest is 40 path blocks away
     const r = await h.logistics.scan(never);
     expect(r).toMatchObject({ ok: true, found: 4, radius: 16, walk: 32, reachable: 2, probes: 4, pending: [] });
     expect(r.read.map((x) => chestKey(x)).sort()).toEqual(['-3,0,0', '3,0,0']);

@@ -75,3 +75,34 @@ export function visitOrder<T extends { p: Vec3 }>(items: readonly T[], start: Ve
   }
   return out;
 }
+
+/**
+ * Visit order for a scan (Track AN follow-up): nearest neighbour from `start` on a cost that prefers the
+ * same room: straight-line distance, plus 3 per block of height difference (another floor), plus 12 when
+ * the path lengths from home differ by more than 8 blocks (another room: the probe measured them). A wall
+ * of stacked chests is read row by row before the bot walks across the room or out of the door.
+ */
+export function visitOrderBanded<T extends { p: Vec3 }>(items: readonly T[], start: Vec3, blocksFromHome: (it: T) => number): T[] {
+  const left = [...items];
+  const out: T[] = [];
+  let at = start;
+  let atBlocks: number | undefined;
+  while (left.length > 0) {
+    let best = 0;
+    let bd = Infinity;
+    left.forEach((it, i) => {
+      const dy = Math.abs(it.p.y - at.y);
+      const band = atBlocks === undefined ? 0 : Math.abs(blocksFromHome(it) - atBlocks) > 8 ? 12 : 0;
+      const d = Math.hypot(it.p.x + 0.5 - at.x, it.p.z + 0.5 - at.z) + 3 * dy + band;
+      if (d < bd) {
+        bd = d;
+        best = i;
+      }
+    });
+    const [next] = left.splice(best, 1);
+    out.push(next!);
+    at = { x: next!.p.x + 0.5, y: next!.p.y, z: next!.p.z + 0.5 };
+    atBlocks = blocksFromHome(next!);
+  }
+  return out;
+}

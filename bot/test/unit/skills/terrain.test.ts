@@ -40,6 +40,9 @@ describe('classify', () => {
     expect(classify(blockInfoOf('campfire'))).toMatchObject({ danger: true, floor: false });
     expect(classify(blockInfoOf('campfire', { extinguished: 1 }))).toMatchObject({ danger: false, floor: true, top: 0.4375 });
     expect(classify(blockInfoOf('soul_campfire', { extinguished: 1 }))).toMatchObject({ danger: false, floor: true });
+    // item frames (labels hung on chest fronts) are walked through: no box, nothing to stand on (Realm 2026-10-30: the bot stood "in frame" and the planner saw a wall)
+    expect(classify(blockInfoOf('frame'))).toMatchObject({ floor: false, top: 0, danger: false });
+    expect(boxesOf(blockInfoOf('frame'))).toEqual([]);
     expect(classify(blockInfoOf('oak_leaves'))).toMatchObject({ leaves: true, floor: true });
     expect(classify(blockInfoOf('oak_leaves')).penalty).toBeGreaterThan(0);
     expect(classify(blockInfoOf('ice')).friction).toBe(0.98);

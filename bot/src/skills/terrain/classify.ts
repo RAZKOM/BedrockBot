@@ -83,6 +83,8 @@ const DANGER_NAMES = new Set([
 /** Bedrock ground friction (vanilla values; blue ice per bedboo's measurements). */
 const FRICTION: Record<string, number> = { ice: 0.98, packed_ice: 0.98, frosted_ice: 0.98, blue_ice: 0.989, slime: 0.8 };
 /** Blocks that slow or bounce the body (not modelled by the physics yet): avoid standing on them. */
+/** Blocks a player walks through although the block data gives them a box: item frames (hung on chest fronts as labels; the Realm bot stood "in frame" and the planner saw a wall). */
+const NO_COLLISION_NAMES = new Set(['frame', 'glow_frame']);
 const SLOW_NAMES = new Set(['soul_sand', 'honey_block', 'slime', 'mud', 'ice', 'packed_ice', 'frosted_ice', 'blue_ice']);
 const CLIMB_NAMES = new Set(['ladder', 'vine', 'twisting_vines', 'weeping_vines', 'cave_vines', 'cave_vines_body_with_berries', 'cave_vines_head_with_berries', 'scaffolding']);
 const GRAVITY_NAMES = new Set(['sand', 'red_sand', 'gravel', 'suspicious_sand', 'suspicious_gravel', 'anvil', 'chipped_anvil', 'damaged_anvil', 'dragon_egg', 'scaffolding', 'pointed_dripstone']);
@@ -134,7 +136,7 @@ function make(info: BlockInfo): TerrainClass {
   // would let the planner jump onto a fence.
   const connect = connectKindOf(name);
   const arms = connect ? armsOf(info.states) : undefined;
-  const boxes = info.stateId < 0 && info.solid ? UNKNOWN_BOXES : connect && arms !== undefined ? connectedBoxes(connect, arms) : boxesOf(info);
+  const boxes = NO_COLLISION_NAMES.has(name) ? [] : info.stateId < 0 && info.solid ? UNKNOWN_BOXES : connect && arms !== undefined ? connectedBoxes(connect, arms) : boxesOf(info);
   let top = 0;
   for (const b of boxes) top = Math.max(top, b[4]);
   const covers = boxes.some((b) => b[4] === top && b[0] <= 0.5 && b[3] >= 0.5 && b[2] <= 0.5 && b[5] >= 0.5);

@@ -38,7 +38,7 @@ containers by walking distance, an unreachable memory, a read cap per scan ("Wal
 | `!unload [all]` | `unloading 8 stacks into 5 known containers`, then `unloaded: 176 cobblestone -> double chest -3 -60 -1, 32 dirt -> barrel 0 -60 -4, 128 coal -> chest 3 -60 -2, 128 oak_log -> chest 3 -60 2 (wood); kept 16 cobblestone, 1 iron_pickaxe, 5 bread`; with full chests `unloaded: 1904 cobblestone -> shulker box (into chest -3 -60 3); 2 shulker boxes filled and stored; kept ...`; `unload: no home set (!home set)`, `unload: I know no chest near home yet (!chests scan)`; `left 5 dirt (no room)` when nothing had room |
 | `!stock [item]` | `iron_ingot: 128 in chest 100 63 -48 (ores), 64 in barrel 90 63 -48 (192 in all)`; `!stock shulker`: `shulker_box: 3 in chest 1 2 3 (3 empty)`; no item: the totals; `stock: no diamond in the 5 containers I know` |
 | `!chests` | `chests: 6 remembered (3 reachable, 3 unreachable: !chests unreachable): 6 chests \| chest 3 -60 2: 26/27 free, 5 coal (0 min ago) \| ...`; the counts by kind with their labels (`3 chests (ores, wood), 1 barrel, 1 double chest`), then each reachable container, nearest first (chat cuts at 256 characters) |
-| `!chests scan` | `chests: reading the containers within 16 blocks of home (walks of up to 32 blocks)`, then `chests: 181 within 16 blocks, 140 reachable within 32 path blocks, read 64 (76 pending), 41 unreachable, in 95 s` (blocks found: a double chest is two; `2 read less than 10 min ago`, `1 forgotten`, `could not open 1 2 3 (open: timeout)` when so; with `homeChestWalk 0` no `reachable` part). Probes the unreachable ones again |
+| `!chests scan` | `chests: reading the containers within 16 blocks of home (walks of up to 64 blocks)`, then `chests: 181 within 16 blocks, 140 reachable within 32 path blocks, read 64 (76 pending), 41 unreachable, in 95 s` (blocks found: a double chest is two; `2 read less than 10 min ago`, `1 forgotten`, `could not open 1 2 3 (open: timeout)` when so; with `homeChestWalk 0` no `reachable` part). Probes the unreachable ones again |
 | `!chests unreachable` | Track AN: `chests: 3 unreachable: chest -6 -60 5: no path within 4000 nodes (0 min ago) \| chest 12 -60 0: path 38 blocks (0 min ago) \| ...`, nearest first, at most 3 messages (the last ends `... and 12 more (!chests clear forgets them, !chests scan tries again)`); `chests: none unreachable` |
 | `!chests clear` | `chests: forgot 181 containers (41 unreachable); I read them again the next time I stand near home (or !chests scan)` |
 | `!chests label x y z <text>` / `none` | `chests: chest 3 -60 2 (wood) labelled`; up to 32 characters |
@@ -77,7 +77,7 @@ walking distance? like pathfind distance to said chests? or a toggleable thing?"
   stands within 8 blocks of home. The path's length (sum of the steps, blocks) is the container's
   walking distance. A container is **unreachable** when the probe finds no path (`no path`, `no path
   within 4000 nodes`, `no path in the loaded world`) or a path longer than `homeChestWalk` (`path 38
-  blocks`; default 32, `0` = no probes: radius only, as before Track AN).
+  blocks`; default 64 (a multi-floor house: the owner's upper-floor chests are 40 to 45 path blocks from a basement home), `0` = no probes: radius only, as before Track AN).
 - **Unreachable memory**: the record keeps `unreachable` (the reason) and `unreachableAt` in
   `chests.json`; scans skip it for an hour, `!chests scan` probes it again at once, a read clears it,
   `!chests clear` forgets it with the rest. A walk that fails during a scan (`goto: ...`) marks it too.
