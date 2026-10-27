@@ -45,6 +45,8 @@ export interface WorkerPlanOptions {
   allowBreak: boolean;
   allowPlace: boolean;
   allowOpen: boolean;
+  /** Track AJ: movement-variety moves (PathOptions.moves). */
+  moves?: PathOptions['moves'];
   protectedBlocks?: string[];
   noBreak?: number[];
   noAction?: number[];
@@ -717,6 +719,7 @@ function workerOptions(o: WorkerPlanOptions): PathOptions {
     allowBreak: o.allowBreak,
     allowPlace: o.allowPlace,
     allowOpen: o.allowOpen,
+    ...(o.moves ? { moves: o.moves } : {}), // Track AJ
     ...(o.protectedBlocks ? { protectedBlocks: o.protectedBlocks } : {}),
     ...(o.noBreak ? { noBreak: new Set(o.noBreak) } : {}),
     ...(o.noAction ? { noAction: new Set(o.noAction) } : {}),

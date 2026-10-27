@@ -10,7 +10,7 @@ export type {
   MotionEvent,
   SetEntityMotionPacket,
 } from './inputLoop.ts';
-export { PHYSICS, LIQUID, ownEngine, stepBody, moveBody, moveVectorOf, playerBox, solidBoxes, yawSinCos, groundFriction, liquidContact } from './physics.ts';
+export { PHYSICS, LIQUID, CLIMB, ownEngine, stepBody, moveBody, moveVectorOf, playerBox, solidBoxes, yawSinCos, groundFriction, liquidContact, onClimbable, backOffFromEdge } from './physics.ts'; // Track AJ: CLIMB, onClimbable, backOffFromEdge
 export type { Box, MoveResult } from './physics.ts';
 export { buildInputFlags, buildAuthInput, viewDirection } from './flags.ts';
 export type { FlagContext } from './flags.ts';

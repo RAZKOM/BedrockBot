@@ -80,6 +80,8 @@ export interface NavigatorOptions {
   blacklistTicks?: number;
   /** Track AB: search budgets in the planner worker (default 500 000 nodes / 2 s main, 60 000 / 300 ms segment). */
   workerBudgets?: Partial<PlannerBudgets>;
+  /** Track AJ: the follower sneaks near deep edges (docs/pathfinding.md "Edge sneaking"). Default true. */
+  edgeSneak?: boolean;
 }
 
 export type ReplanReason = 'start' | 'correction' | 'block' | 'partial' | 'stuck' | 'timeout' | 'action' | 'retry' | 'ahead' | 'upgrade';
@@ -126,6 +128,8 @@ export interface GotoReport {
   /** Per-move timeouts (part of `stuck`). */
   moveTimeouts: number;
   failures: number;
+  /** Track AJ: ticks the follower sneaked (edge sneaking, holding on a ladder). */
+  sneakTicks?: number;
   /** Ticks spent sprinting. */
   sprintTicks: number;
   /** Longest time one tick spent in the navigator (planning slices included), ms. */
@@ -260,6 +264,8 @@ export class Navigator {
   planner: PlannerClient | undefined;
   plannerThreads: () => number = () => 0;
   readonly workerBudgets: PlannerBudgets;
+  /** Track AJ: edge sneaking (NavigatorOptions.edgeSneak), settable for measurements. */
+  edgeSneak: boolean;
   /** Track AB: block changes the planner reads (movement signature changed), numbered; worker answers older than a change near their path are dropped. */
   private worldGen = 0;
   private readonly changes: { gen: number; x: number; y: number; z: number }[] = [];
@@ -284,6 +290,7 @@ export class Navigator {
     this.unloadedWaitTicks = opts.unloadedWaitTicks ?? 200;
     this.moveTimeout = opts.moveTimeout ?? { factor: 2, margin: 10 };
     this.workerBudgets = { ...DEFAULT_PLANNER_BUDGETS, ...opts.workerBudgets }; // Track AB
+    this.edgeSneak = opts.edgeSneak ?? true; // Track AJ
     this.unsubs.push(
       world.onBlockUpdate((p, before, after) => {
         this.onBlock(p, before, after);
@@ -372,7 +379,8 @@ export class Navigator {
 
   /** Plan only (no movement, one search to the end): from the body's current node to the goal. */
   plan(goal: NavGoal, from?: Vec3, options?: GotoOptions): PathResult | undefined {
-    const start = locateNode(this.grid, from ?? this.loop.state.pos);
+    const s = this.loop.state;
+    const start = locateNode(this.grid, from ?? s.pos, from ? undefined : this.preferNode(s)); // Track AJ
     return start && findPath(this.grid, start, goal, this.planOptions(options));
   }
 
@@ -422,6 +430,7 @@ export class Navigator {
         moveTimeouts: 0,
         failures: 0,
         sprintTicks: 0,
+        sneakTicks: 0,
         maxTickMs: 0,
         planMs: 0,
         actions: { dig: 0, use: 0, place: 0, close: 0, failed: 0 },
@@ -601,6 +610,13 @@ export class Navigator {
     return locateNode(this.grid, s.pos);
   }
 
+  /** Track AJ: the node kind a plan starts from: a swim node in water, a climb node off the ground on a climber. */
+  private preferNode(s: Pick<InputLoopState, 'pos' | 'onGround' | 'inWater'>): 'swim' | 'climb' | undefined {
+    if (s.inWater) return 'swim';
+    if (!s.onGround && this.grid.climbable(Math.floor(s.pos.x), Math.floor(s.pos.y + 1e-3), Math.floor(s.pos.z))) return 'climb';
+    return undefined;
+  }
+
   /** A failure that re-plans; retreats to the last safe node first when the body is not safe. Returns true when the goto finished. */
   private failAndReplan(a: Active, s: InputLoopState, reason: ReplanReason, why: string): boolean {
     if (this.fail(a, why)) return true;
@@ -623,6 +639,7 @@ export class Navigator {
     if (a.lastPos) a.report.distance += Math.hypot(s.pos.x - a.lastPos.x, s.pos.y - a.lastPos.y, s.pos.z - a.lastPos.z);
     a.lastPos = { ...s.pos };
     if (this.loop.command.sprint && s.onGround) a.report.sprintTicks++;
+    if (this.loop.command.sneak && a.follower) a.report.sneakTicks = (a.report.sneakTicks ?? 0) + 1; // Track AJ
     if (a.t > a.opts.timeoutTicks) {
       a.finish({ ok: false, reason: 'timeout' });
       return;
@@ -640,7 +657,7 @@ export class Navigator {
     // a re-plan replaces the current plan and any search
     if (a.replan && a.t >= a.waitUntil && !a.action) {
       // plan from solid ground (an airborne body has no node yet), but do not wait forever
-      if (s.onGround || a.t - a.lastProgressTick > 20 || !a.follower) {
+      if (s.onGround || s.inWater || this.preferNode(s) === 'climb' || a.t - a.lastProgressTick > 20 || !a.follower) { // Track AJ: in water, on a ladder
         if (!this.startMain(a, s)) {
           a.guard.idle();
           return;
@@ -816,6 +833,7 @@ export class Navigator {
       allowBreak: o.allowBreak ?? false,
       allowPlace: o.allowPlace ?? false,
       allowOpen: o.allowOpen ?? false,
+      ...(o.moves ? { moves: { ...o.moves } } : {}), // Track AJ
       ...(prot ? { protectedBlocks: [...prot] } : {}),
       ...(o.noBreak?.size ? { noBreak: [...o.noBreak] } : {}),
       ...(o.noAction?.size ? { noAction: [...o.noAction] } : {}),
@@ -891,7 +909,7 @@ export class Navigator {
     a.replan = undefined;
     dropSearch(a); // Track AB
     a.follower = undefined;
-    const start = locateNode(this.grid, s.pos);
+    const start = locateNode(this.grid, s.pos, this.preferNode(s)); // Track AJ: swimming / on a ladder
     if (!start) {
       this.loop.release();
       if (this.fail(a, `no standable node at ${fmt(s.pos)}`)) return false;
@@ -1024,7 +1042,7 @@ export class Navigator {
     a.legFrom = from;
     a.legTo = to;
     const stopAtEnd = to < last || a.status === 'found';
-    a.follower = new PathFollower(a.path.slice(from, to + 1), this.grid, { sprint: a.opts.sprint, stopAtEnd, maxTurnDeg: this.maxTurn, guard: a.guard, cellCost: a.pathOpts.cellCost }); // Track S: cellCost
+    a.follower = new PathFollower(a.path.slice(from, to + 1), this.grid, { sprint: a.opts.sprint, stopAtEnd, maxTurnDeg: this.maxTurn, guard: a.guard, cellCost: a.pathOpts.cellCost, edgeSneak: this.edgeSneak }); // Track S: cellCost, Track AJ: edgeSneak
     a.passedAbs = from;
     a.aimAbs = from;
     a.passTick = a.t;

@@ -20,6 +20,8 @@ export interface BlockQuery {
   frictionAt?(x: number, y: number, z: number): number | undefined;
   /** Optional: the liquid in the block (`null` = none, `undefined` = unknown) and its surface height. */
   liquidAt?(x: number, y: number, z: number): LiquidCell | null | undefined;
+  /** Track AJ, optional: the block is climbable (ladder, vine ...; see physics.ts CLIMB). */
+  climbableAt?(x: number, y: number, z: number): boolean | undefined;
 }
 
 export interface LiquidCell {

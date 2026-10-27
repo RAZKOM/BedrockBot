@@ -79,6 +79,28 @@ export interface PathCosts {
   place: number;
   /** Ticks to open a door or fence gate (stop, use, wait for the state). */
   door: number;
+  // Track AJ: movement variety (docs/pathfinding.md "Movement variety", measured on bds-move)
+  /** Ticks per block swimming on the surface (forward + jump held). */
+  swim: number;
+  /** Extra ticks for getting into water (a preference for dry paths). */
+  swimEnter: number;
+  /** Ticks to climb out of the water onto a bank up to 1 block higher. */
+  swimOut: number;
+  /** Ticks per block climbing a ladder / vine up (0.2 blocks per tick). */
+  climbUp: number;
+  /** Ticks per block sliding down a ladder / vine (0.2 blocks per tick). */
+  climbDown: number;
+  /** Extra ticks for getting onto a ladder from its side or its top (settling in the column). */
+  climbEnter: number;
+  /** Extra ticks for getting off a ladder onto a floor beside it. */
+  climbExit: number;
+  /** Air ticks of a parkour jump landing at the same height / 1 lower (on top of the gap's walk ticks). */
+  parkourAir: number;
+  parkourAirDown: number;
+  /** Extra ticks of a 2-block parkour for the run-up (backing up 2 blocks when the body arrives without speed). */
+  parkourRunUp: number;
+  /** Extra ticks per parkour jump (a preference for walking around). */
+  parkourRisk: number;
 }
 
 /** Defaults (ticks). `walk` is the sprint rate; Navigator.goto uses TICKS.walk when sprint is off. */
@@ -94,6 +116,18 @@ export const DEFAULT_COSTS: Readonly<PathCosts> = Object.freeze({
   dig: 12,
   place: 10,
   door: 10,
+  // Track AJ (measured on bds-move, docs/pathfinding.md "Movement variety")
+  swim: 8.6,
+  swimEnter: 10,
+  swimOut: 14,
+  climbUp: 5,
+  climbDown: 5,
+  climbEnter: 8,
+  climbExit: 8,
+  parkourAir: 12,
+  parkourAirDown: 14,
+  parkourRunUp: 12,
+  parkourRisk: 10,
 });
 
 /** Ticks for a drop of `blocks` (walk off one block, fall, land). */
