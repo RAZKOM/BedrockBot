@@ -52,7 +52,7 @@ describe.skipIf(!E2E)('@bds home: chest memory, !stock, !unload (Track AG)', () 
     const end = await b.reply((s) => /^chests: \d+ within /.test(s), from, 120_000);
     notes.push(`scan: ${end} (${((Date.now() - t0) / 1000).toFixed(1)} s from the command)`);
     // the session scan of the chore may have read some of them first: read + fresh = 5
-    const m = /^chests: (\d+) within 16 blocks, (\d+) reachable within 32 path blocks, read (\d+)/.exec(end); // Track AN: the scan line
+    const m = /^chests: (\d+) within 16 blocks, (\d+) reachable within \d+ path blocks, read (\d+)/.exec(end); // Track AN: the scan line (homeChestWalk default 64)
     expect(m).not.toBeNull();
     expect(Number(m![1])).toBe(6); // 6 blocks (the double chest has two)
     const mem = b.home.memory();

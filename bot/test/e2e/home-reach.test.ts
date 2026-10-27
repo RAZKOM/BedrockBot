@@ -99,9 +99,13 @@ describe.skipIf(!E2E)('@bds home: containers by walking distance (Track AN)', ()
     const b = bot!;
     const l = L!;
     const from = b.said.length;
+    // this fixture's far chest is 38 path blocks away: pin the limit at 32 (the default is 64 since the multi-floor fix)
+    await b.command('!set homeChestWalk 32');
+    expect(await b.reply((s) => s.startsWith('homeChestWalk = '), from)).toMatch(/^homeChestWalk = 32/);
+    const from2 = b.said.length;
     const t0 = Date.now();
     await b.command('!chests scan');
-    expect(await b.reply((s) => s.startsWith('chests: reading '), from)).toBe('chests: reading the containers within 16 blocks of home (walks of up to 32 blocks)');
+    expect(await b.reply((s) => s.startsWith('chests: reading '), from2)).toBe('chests: reading the containers within 16 blocks of home (walks of up to 32 blocks)');
     const end = await b.reply((s) => /^chests: \d+ within /.test(s), from, 180_000);
     const rep = b.home.logistics.lastScan!;
     notes.push(`scan: ${end} (${((Date.now() - t0) / 1000).toFixed(1)} s from the command)`);
