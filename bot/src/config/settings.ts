@@ -60,6 +60,7 @@ export const SETTING_DEFS = {
   foodMin: { kind: 'number', default: 10, min: 0, max: 200, integer: true, unit: 'hunger points', description: 'auto food: hunt when the food carried totals fewer hunger points' }, // Track X
   foodLeave: { kind: 'number', default: 2, min: 0, max: 16, integer: true, unit: 'mobs', description: '!food never leaves fewer of a kind than this within the radius' }, // Track X
   mineSeenOnly: { kind: 'boolean', default: false, description: 'mining: only ore the bot has seen an open face of (off: any known ore, tunnelling to it)' }, // Track Z
+  plannerThreads: { kind: 'number', default: 1, min: 0, max: 1, integer: true, unit: 'threads', description: 'plan paths in a worker thread (bigger budgets, no tick waits for the planner); 0 = on the main thread' }, // Track AB
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;

@@ -26,6 +26,8 @@ import { PathFollower, PressGuard, yawTowards } from './follower.ts';
 import { goalTest, type NavGoal } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
 import { CROSS_CLEAR, NavGrid, cellKey } from './grid.ts';
 import { NavBlacklist, actionKey, goalKey } from './blacklist.ts'; // Track R
+import type { AvoidanceCostFn } from './avoidance.ts';
+import { DEFAULT_PLANNER_BUDGETS, PlannerClient, WorkerSearch, plainGoal, type PlannerBudgets, type PlannerWorld, type WorkerPlanOptions } from './worker.ts'; // Track AB
 
 /** Track R: goto options of the navigator. `blacklist`: consult and feed the failure blacklist (default: `any` and `getToBlock` goals). */
 export type NavGotoOptions = GotoOptions & { blacklist?: boolean };
@@ -76,9 +78,11 @@ export interface NavigatorOptions {
   blacklist?: NavBlacklist;
   blacklistFailures?: number;
   blacklistTicks?: number;
+  /** Track AB: search budgets in the planner worker (default 500 000 nodes / 2 s main, 60 000 / 300 ms segment). */
+  workerBudgets?: Partial<PlannerBudgets>;
 }
 
-export type ReplanReason = 'start' | 'correction' | 'block' | 'partial' | 'stuck' | 'timeout' | 'action' | 'retry' | 'ahead';
+export type ReplanReason = 'start' | 'correction' | 'block' | 'partial' | 'stuck' | 'timeout' | 'action' | 'retry' | 'ahead' | 'upgrade';
 
 export interface PlanRecord {
   reason: ReplanReason;
@@ -90,6 +94,14 @@ export interface PlanRecord {
   ms: number;
   /** Ticks the search was sliced over. */
   slices: number;
+  /** Track AB: planned in the worker or in-thread. */
+  via?: 'worker' | 'thread';
+  /** The search stopped at its node / time budget. */
+  limited?: boolean;
+  /** Track AB: the worker's interim answer of a main plan (the body walks it while the search goes on). */
+  interim?: boolean;
+  /** Track AB: the final answer of a main plan whose interim answer was walked (spliced in where the two meet). */
+  upgrade?: boolean;
 }
 
 /** What happened during one goto (for tests, metrics and logs). */
@@ -126,11 +138,16 @@ export interface GotoReport {
   retreats: number;
   /** Ticks spent waiting for unloaded chunks. */
   unloadedWait: number;
+  /** Track AB: worker answers spliced into the path being walked, and answers dropped as stale (blocks changed near them). */
+  upgrades?: number;
+  stale?: number;
 }
 
 interface Search {
-  s: PathSearch;
-  kind: 'main' | 'ahead';
+  s: PathSearch | WorkerSearch;
+  /** Track AB: 'upgrade' = a worker main plan whose interim answer is being walked. */
+  kind: 'main' | 'ahead' | 'upgrade';
+  via: 'worker' | 'thread';
   reason: ReplanReason;
   tick: number;
   slices: number;
@@ -239,6 +256,13 @@ export class Navigator {
   readonly blacklist: NavBlacklist;
   /** Track R: ticks seen by this navigator (the blacklist's clock). */
   private clock = 0;
+  /** Track AB: the planner worker (attachPlanner), its thread count setting and budgets. */
+  planner: PlannerClient | undefined;
+  plannerThreads: () => number = () => 0;
+  readonly workerBudgets: PlannerBudgets;
+  /** Track AB: block changes the planner reads (movement signature changed), numbered; worker answers older than a change near their path are dropped. */
+  private worldGen = 0;
+  private readonly changes: { gen: number; x: number; y: number; z: number }[] = [];
 
   constructor(loop: InputLoop, world: NavWorld, opts: NavigatorOptions = {}) {
     this.cellCost = opts.cellCost; // Track S
@@ -259,6 +283,7 @@ export class Navigator {
     this.aheadNodes = opts.aheadNodes ?? 64;
     this.unloadedWaitTicks = opts.unloadedWaitTicks ?? 200;
     this.moveTimeout = opts.moveTimeout ?? { factor: 2, margin: 10 };
+    this.workerBudgets = { ...DEFAULT_PLANNER_BUDGETS, ...opts.workerBudgets }; // Track AB
     this.unsubs.push(
       world.onBlockUpdate((p, before, after) => {
         this.onBlock(p, before, after);
@@ -278,6 +303,7 @@ export class Navigator {
       }),
       loop.onBeforeStep((_tick, state) => {
         this.clock++; // Track R
+        if (this.planner) this.plannerFor(); // Track AB: start / stop the worker as plannerThreads changes
         const rep = this.active?.report;
         const t0 = performance.now();
         this.onTick(state);
@@ -294,6 +320,25 @@ export class Navigator {
   dispose(): void {
     this.cancel();
     for (const u of this.unsubs.splice(0)) u();
+    this.planner?.dispose(); // Track AB
+    this.planner = undefined;
+  }
+
+  /**
+   * Track AB: plan in a worker thread (docs/pathfinding.md "Compute"). The worker mirrors `world`
+   * (World: chunk store, registry, cache) and starts at once when `threads()` > 0; `threads()` is read
+   * before every plan (the `plannerThreads` setting: 0 = in-thread). Returns a function that detaches it.
+   */
+  attachPlanner(world: PlannerWorld, opts: { threads?: () => number } = {}): () => void {
+    this.planner?.dispose();
+    const client = new PlannerClient(world, { logger: this.log });
+    this.planner = client;
+    this.plannerThreads = opts.threads ?? (() => 1);
+    if (this.plannerThreads() > 0) client.start();
+    return () => {
+      client.dispose();
+      if (this.planner === client) this.planner = undefined;
+    };
   }
 
   /** Planner options for a goto with these options (defaults: sprint on, no break / place). */
@@ -382,6 +427,8 @@ export class Navigator {
         actions: { dig: 0, use: 0, place: 0, close: 0, failed: 0 },
         retreats: 0,
         unloadedWait: 0,
+        upgrades: 0,
+        stale: 0,
         skipped,
         blacklisted: [],
       };
@@ -427,13 +474,14 @@ export class Navigator {
         finish: (r) => {
           if (this.active !== a) return;
           this.active = undefined;
+          dropSearch(a); // Track AB
           report.result = r;
           this.loop.release();
           if (!r.ok && r.reason === 'unreachable' && report.segments === 0) this.log.warn(this.noSegmentLine(a));
           this.settleBlacklist(a, r); // Track R
           this.log.info(
             `goto ${JSON.stringify(goal)}: ${r.ok ? 'ok' : r.reason} after ${report.ticks} ticks, ${report.distance.toFixed(1)} blocks, ` +
-              `${report.plans.length} plan(s), ${report.segments} segment(s), ${report.corrections} correction(s), ${report.stuck} stuck, max tick ${report.maxTickMs} ms` +
+              `${report.plans.length} plan(s)${report.plans.some((p) => p.via === 'worker') ? ' (worker)' : ''}, ${report.segments} segment(s), ${report.corrections} correction(s), ${report.stuck} stuck, max tick ${report.maxTickMs} ms` +
               `${report.reached ? `, reached member ${report.reached.index}` : ''}${skipped.length ? `, skipped ${skipped.join(' ')}` : ''}${report.blacklisted?.length ? `, blacklisted ${report.blacklisted.join(' ')}` : ''}`,
           );
           resolve(r);
@@ -497,7 +545,8 @@ export class Navigator {
     if (!a) return;
     // dirt -> grass, leaves decaying states, crops growing ...: nothing the planner sees changed
     if (before && movementSignature(classify(before)) === movementSignature(classify(after))) return;
-    if (a.search?.kind === 'ahead') a.search = undefined; // restarted on the next tick, on the new blocks
+    this.noteChange(p); // Track AB
+    if (a.search?.kind === 'ahead') dropSearch(a); // restarted on the next tick, on the new blocks
     if (a.ownCells.has(cellKey(p.x, p.y, p.z))) return;
     if (!a.path.length || a.status === undefined) return;
     for (let i = Math.max(0, a.passedAbs); i < a.path.length; i++) {
@@ -599,26 +648,9 @@ export class Navigator {
       }
     }
 
-    if (a.search) {
-      const search = a.search;
-      const res = search.s.step(this.sliceMs);
-      search.slices++;
-      if (res) {
-        a.search = undefined;
-        a.report.planMs += res.ms;
-        if (search.kind === 'main') {
-          if (!this.onMainResult(a, res, search)) {
-            a.guard.idle();
-            return;
-          }
-        } else {
-          this.onAheadResult(a, res, search);
-        }
-      } else if (search.kind === 'main') {
-        this.loop.release();
-        a.guard.idle();
-        return;
-      }
+    if (a.search && !this.stepSearch(a)) {
+      a.guard.idle();
+      return;
     }
 
     if (a.action) {
@@ -678,11 +710,177 @@ export class Navigator {
     // plan-ahead: the next segment, from the end of this one
     if (!a.search && a.status === 'partial' && !a.aheadBlocked && !a.replan && a.path.length - 1 - a.passedAbs < this.aheadNodes) {
       const end = a.path.at(-1)!;
-      a.search = { s: new PathSearch(this.grid, end, a.planGoal, this.segmentOptions(a, false)), kind: 'ahead', reason: 'ahead', tick: a.t, slices: 0 };
+      a.search = this.newSearch(a, end, 'ahead', 'ahead');
     }
   }
 
-  /** Budgets of a segment search: a main plan (the body waits for it) gets `mainMs`, a plan-ahead `segmentMs`. */
+  // ---- Track AB: searches in the worker or in-thread ------------------------------------------------
+
+  /**
+   * One tick of the running search. Returns false when the tick ends here (the goto finished, or the
+   * body waits for a main plan).
+   */
+  private stepSearch(a: Active): boolean {
+    let search = a.search!;
+    let res = search.s.step(this.sliceMs);
+    if (!res && search.s instanceof WorkerSearch && search.s.failed) {
+      if (search.kind === 'upgrade') {
+        // the interim path stays; its end plans ahead as usual
+        a.search = undefined;
+        return true;
+      }
+      // the worker crashed or went silent: the same search in-thread, with the in-thread budgets
+      search = a.search = { ...search, s: new PathSearch(this.grid, search.s.start, a.planGoal, this.segmentOptions(a, search.kind === 'main')), via: 'thread' };
+      res = search.s.step(this.sliceMs);
+    }
+    search.slices++;
+    if (res) {
+      a.search = undefined;
+      if (search.via === 'worker') {
+        if (this.stale(search, res)) {
+          a.report.stale = (a.report.stale ?? 0) + 1;
+          this.log.debug(`goto: worker plan (${search.reason}) dropped: blocks changed near its path while it was searched`);
+          if (search.kind === 'main') {
+            a.replan ??= 'block';
+            this.loop.release();
+            return false;
+          }
+          return true;
+        }
+        this.planner?.touchCached(res.path);
+      }
+      a.report.planMs += res.ms;
+      if (search.kind === 'main') {
+        if (!this.onMainResult(a, res, search)) return false;
+      } else if (search.kind === 'upgrade') {
+        if (!this.onUpgradeResult(a, res, search)) return false;
+      } else {
+        this.onAheadResult(a, res, search);
+      }
+      return true;
+    }
+    if (search.kind !== 'main') return true;
+    // a main plan in the worker: walk its interim answer (the best partial path after mainMs) while it goes on
+    const early = search.s instanceof WorkerSearch ? search.s.takeInterim() : undefined;
+    if (early && early.path.length > 1 && !this.stale(search, early)) {
+      this.planner?.touchCached(early.path);
+      if (!this.onMainResult(a, early, search, { interim: true })) {
+        dropSearch(a);
+        return false;
+      }
+      search.kind = 'upgrade';
+      a.search = search;
+      return true;
+    }
+    this.loop.release();
+    return false;
+  }
+
+  /** A main plan (or a plan-ahead from `start`) in the worker when it is ready and the options cross threads, else in-thread. */
+  private newSearch(a: Active, start: { x: number; y: number; z: number }, kind: 'main' | 'ahead', reason: ReplanReason): Search {
+    const client = this.plannerFor();
+    const main = kind === 'main';
+    if (client) {
+      const goal = plainGoal(a.planGoal);
+      const spec = goal && this.workerSpec(a, main);
+      if (goal && spec) return { s: client.search(kind, start, goal, spec, this.worldGen, main ? this.mainMs : undefined), kind, via: 'worker', reason, tick: a.t, slices: 0 };
+    }
+    return { s: new PathSearch(this.grid, start, a.planGoal, this.segmentOptions(a, main)), kind, via: 'thread', reason, tick: a.t, slices: 0 };
+  }
+
+  /** The planner worker when `plannerThreads` > 0 and it is ready (started / stopped here as the setting changes). */
+  private plannerFor(): PlannerClient | undefined {
+    const p = this.planner;
+    if (!p) return undefined;
+    if (this.plannerThreads() <= 0) {
+      if (p.started) p.stop();
+      return undefined;
+    }
+    if (!p.started) p.start();
+    return p.ready ? p : undefined;
+  }
+
+  /** The goto's planner options without functions, or undefined when the worker cannot rebuild them (custom breakTicks / cellCost). */
+  private workerSpec(a: Active, main: boolean): WorkerPlanOptions | undefined {
+    const o = a.pathOpts;
+    if (this.pathOpts.breakTicks) return undefined;
+    const cc: AvoidanceCostFn | undefined = o.cellCost;
+    if (cc && !cc.avoidance) return undefined;
+    const b = this.workerBudgets;
+    const inv = this.inventory?.();
+    const prot = o.protectedBlocks;
+    return {
+      ...(o.costs ? { costs: { ...o.costs } } : {}),
+      maxNodes: this.pathOpts.maxNodes ?? (main ? b.mainNodes : b.segmentNodes),
+      maxMs: this.pathOpts.maxMs ?? (main ? b.mainMs : b.segmentMs),
+      allowBreak: o.allowBreak ?? false,
+      allowPlace: o.allowPlace ?? false,
+      allowOpen: o.allowOpen ?? false,
+      ...(prot ? { protectedBlocks: [...prot] } : {}),
+      ...(o.noBreak?.size ? { noBreak: [...o.noBreak] } : {}),
+      ...(o.noAction?.size ? { noAction: [...o.noAction] } : {}),
+      ...(inv ? { inventory: { slots: inv.slots.map((s) => (s ? { name: s.name, count: s.count } : null)), selected: inv.selected } } : {}),
+      ...(cc?.avoidance ? { avoidance: cc.avoidance } : {}),
+    };
+  }
+
+  /** Records a block change the planner reads (for the stale check of worker answers). */
+  private noteChange(p: Vec3): void {
+    this.worldGen++;
+    this.changes.push({ gen: this.worldGen, x: p.x, y: p.y, z: p.z });
+    if (this.changes.length > 4096) this.changes.splice(0, this.changes.length - 2048);
+  }
+
+  /** A worker answer asked for before a block changed next to its path (the same rule as a re-plan on a block update). */
+  private stale(search: Search, res: PathResult): boolean {
+    if (!(search.s instanceof WorkerSearch)) return false;
+    const since = search.s.generation;
+    if (this.worldGen === since) return false;
+    for (let i = this.changes.length - 1; i >= 0; i--) {
+      const c = this.changes[i]!;
+      if (c.gen <= since) break;
+      for (const n of res.path) if (Math.abs(c.x - n.x) <= 1 && Math.abs(c.z - n.z) <= 1 && c.y >= n.y - 1 && c.y <= n.y + 2) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The final answer of a main plan whose interim path is being walked: spliced in at the first node
+   * of the remaining interim path (from the last node passed, or the action's node) that the final path
+   * also visits. Without a common node, a final path that reaches the goal makes the body re-plan from
+   * where it is (reason 'upgrade'); a partial one leaves the interim path (its end plans ahead).
+   * Returns false when the goto finished.
+   */
+  private onUpgradeResult(a: Active, res: PathResult, search: Search): boolean {
+    this.record(a, res, search, { upgrade: true });
+    a.lastMain = res.status;
+    if (res.status === 'none') {
+      a.why = `no path (exhaustive search, ${res.expanded} nodes expanded)`;
+      a.finish({ ok: false, reason: 'unreachable' });
+      return false;
+    }
+    const at = new Map<number, number>();
+    res.path.forEach((n, j) => at.set(cellKey(n.x, n.y, n.z), j));
+    const from = a.action ? a.action.node : a.passedAbs;
+    for (let k = from; k < a.path.length; k++) {
+      const n = a.path[k]!;
+      const j = at.get(cellKey(n.x, n.y, n.z));
+      if (j === undefined) continue;
+      a.path = a.path.slice(0, k + 1).concat(res.path.slice(j + 1));
+      a.status = res.status;
+      a.aheadBlocked = false;
+      a.doors = a.doors.filter((d) => d.closeAt <= k);
+      a.actedUpTo = Math.min(a.actedUpTo, k);
+      a.report.upgrades = (a.report.upgrades ?? 0) + 1;
+      if (!a.action) this.startLeg(a, a.follower ? a.legFrom + a.follower.passedIndex : a.passedAbs);
+      return true;
+    }
+    this.log.debug(`goto: the worker's ${res.status} plan does not meet the rest of the interim path; ${res.status === 'found' ? 're-planning from here' : 'walking on'}`);
+    if (res.status === 'found' && !a.action) a.replan ??= 'upgrade';
+    return true;
+  }
+
+  /** Budgets of an in-thread segment search: a main plan (the body waits for it) gets `mainMs`, a plan-ahead `segmentMs`. */
   private segmentOptions(a: Active, main: boolean): PathOptions {
     return { ...a.pathOpts, maxNodes: this.pathOpts.maxNodes ?? this.segmentNodes, maxMs: this.pathOpts.maxMs ?? (main ? this.mainMs : this.segmentMs) };
   }
@@ -691,7 +889,7 @@ export class Navigator {
   private startMain(a: Active, s: InputLoopState): boolean {
     const reason = a.replan ?? 'retry';
     a.replan = undefined;
-    a.search = undefined;
+    dropSearch(a); // Track AB
     a.follower = undefined;
     const start = locateNode(this.grid, s.pos);
     if (!start) {
@@ -729,19 +927,31 @@ export class Navigator {
     if (a.placeFailures >= 2) a.pathOpts.allowPlace = false;
     const noAction = new Set([...this.blacklist.cells('place'), ...this.blacklist.cells('use'), ...a.noAction]);
     if (noAction.size) a.pathOpts.noAction = noAction;
-    a.search = { s: new PathSearch(this.grid, start, a.planGoal, this.segmentOptions(a, true)), kind: 'main', reason, tick: a.t, slices: 0 };
+    a.search = this.newSearch(a, start, 'main', reason); // Track AB: in the worker when it is ready
     this.loop.release();
     return true;
   }
 
-  private record(a: Active, res: PathResult, search: Search): void {
-    a.report.plans.push({ reason: search.reason, tick: search.tick, status: res.status, nodes: res.path.length, expanded: res.expanded, ms: +res.ms.toFixed(2), slices: search.slices });
-    this.log.debug(`goto: plan (${search.reason}) ${res.status}, ${res.path.length} nodes, ${res.expanded} expanded, ${res.ms.toFixed(1)} ms over ${search.slices} tick(s)`);
+  private record(a: Active, res: PathResult, search: Search, flags: { interim?: boolean; upgrade?: boolean } = {}): void {
+    a.report.plans.push({
+      reason: search.reason,
+      tick: search.tick,
+      status: res.status,
+      nodes: res.path.length,
+      expanded: res.expanded,
+      ms: +res.ms.toFixed(2),
+      slices: search.slices,
+      via: search.via,
+      limited: res.limited,
+      ...flags,
+    });
+    const tag = flags.interim ? ' interim' : flags.upgrade ? ' final' : '';
+    this.log.debug(`goto: plan (${search.reason}${tag}, ${search.via}) ${res.status}, ${res.path.length} nodes, ${res.expanded} expanded, ${res.ms.toFixed(1)} ms over ${search.slices} tick(s)`);
   }
 
   /** Returns false when the goto finished or must wait. */
-  private onMainResult(a: Active, res: PathResult, search: Search): boolean {
-    this.record(a, res, search);
+  private onMainResult(a: Active, res: PathResult, search: Search, flags: { interim?: boolean } = {}): boolean {
+    this.record(a, res, search, flags);
     a.lastMain = res.status; // Track R
     if (res.status === 'none') {
       a.why = res.path.length ? `no path (exhaustive search, ${res.expanded} nodes expanded)` : 'the start node is not standable';
@@ -858,8 +1068,8 @@ export class Navigator {
       a.finish({ ok: true });
       return;
     }
-    // the end of a partial segment: wait for the plan-ahead, else re-plan from here
-    if (a.search?.kind === 'ahead') {
+    // the end of a partial segment: wait for the plan-ahead (or the worker's final answer), else re-plan from here
+    if (a.search?.kind === 'ahead' || a.search?.kind === 'upgrade') {
       this.loop.release();
       return;
     }
@@ -868,7 +1078,7 @@ export class Navigator {
 
   private beginAction(a: Active, run: Pick<ActionRun, 'kind' | 'node' | 'queue' | 'axis'>): void {
     a.follower = undefined;
-    a.search = a.search?.kind === 'ahead' ? a.search : undefined;
+    if (a.search?.kind === 'main') dropSearch(a); // Track AB: plan-aheads and worker upgrades go on
     this.loop.release();
     a.action = {
       ...run,
@@ -1048,6 +1258,12 @@ export class Navigator {
     const cmd = a.guard.apply({ forward: 1, strafe: 0, yaw, jump: s.inWater || s.inLava || s.collidedHorizontally, sprint: false, sneak: false });
     this.loop.setCommand(cmd);
   }
+}
+
+/** Track AB: ends the goto's search (a worker search is cancelled there). */
+function dropSearch(a: Active): void {
+  if (a.search?.s instanceof WorkerSearch) a.search.s.cancel();
+  a.search = undefined;
 }
 
 const signatures = new WeakMap<TerrainClass, string>();

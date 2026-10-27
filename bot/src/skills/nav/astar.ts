@@ -356,7 +356,20 @@ export class PathSearch {
     return this.finish();
   }
 
+  /**
+   * Track AB: the best path so far without ending the search (partial unless the goal was reached);
+   * the planner worker sends it as the interim answer of a long main plan.
+   */
+  peek(): PathResult {
+    return this.done ?? this.build(true);
+  }
+
   private finish(): PathResult {
+    this.done = this.build(false);
+    return this.done;
+  }
+
+  private build(interim: boolean): PathResult {
     const nodes = this.nodes;
     const end = this.found >= 0 ? this.found : this.best;
     const path: PathNode[] = [];
@@ -370,9 +383,8 @@ export class PathSearch {
     path[0]!.move = 'start';
     path[0]!.cost = 0;
     delete path[0]!.act;
-    const status = this.found >= 0 ? 'found' : this.limited || this.sawUnknown ? 'partial' : 'none';
-    this.done = { status, path, cost: nodes.g[end]!, expanded: this.expanded, ms: this.ms, unknown: this.sawUnknown, limited: this.limited };
-    return this.done;
+    const status = this.found >= 0 ? 'found' : interim || this.limited || this.sawUnknown ? 'partial' : 'none';
+    return { status, path, cost: nodes.g[end]!, expanded: this.expanded, ms: this.ms, unknown: this.sawUnknown, limited: interim || this.limited };
   }
 
   private relax(from: number, x: number, y: number, z: number, feet: number, base: number, move: number, extra = 0, trap = 0, act?: NodeActions, flags = 0): void {

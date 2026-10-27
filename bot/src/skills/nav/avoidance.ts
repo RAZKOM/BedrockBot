@@ -56,7 +56,10 @@ export interface AvoidanceDeps {
   costs?: Partial<AvoidanceCosts>;
 }
 
-interface Source {
+/** Track AB: a cost function that carries its snapshot (the planner worker rebuilds it with costFunction). */
+export type AvoidanceCostFn = ((x: number, y: number, z: number) => number) & { avoidance?: { sources: AvoidanceSource[]; costs: AvoidanceCosts } };
+
+export interface AvoidanceSource {
   x: number;
   y: number;
   z: number;
@@ -75,9 +78,9 @@ export function penalty(d: number, r: number, c: AvoidanceCosts = DEFAULT_AVOIDA
 }
 
 /** A cost function over a fixed list of sources (one snapshot). */
-export function costFunction(sources: readonly Source[], c: AvoidanceCosts = DEFAULT_AVOIDANCE_COSTS): ((x: number, y: number, z: number) => number) | undefined {
+export function costFunction(sources: readonly AvoidanceSource[], c: AvoidanceCosts = DEFAULT_AVOIDANCE_COSTS): AvoidanceCostFn | undefined {
   if (sources.length === 0) return undefined;
-  return (x, y, z) => {
+  const fn = (x: number, y: number, z: number): number => {
     const cx = x + 0.5;
     const cz = z + 0.5;
     let sum = 0;
@@ -96,6 +99,8 @@ export function costFunction(sources: readonly Source[], c: AvoidanceCosts = DEF
     }
     return sum;
   };
+  // Track AB: the sources and costs ride along, so the planner worker can rebuild the function
+  return Object.assign(fn, { avoidance: { sources: [...sources], costs: { ...c } } });
 }
 
 export class Avoidance {
@@ -110,8 +115,8 @@ export class Avoidance {
   }
 
   /** The sources right now: hostile mobs (not excluded, not players) and known spawners. */
-  sources(): Source[] {
-    const out: Source[] = [];
+  sources(): AvoidanceSource[] {
+    const out: AvoidanceSource[] = [];
     const mobR = this.d.mobRadius?.() ?? DEFAULT_AVOID_MOB_RADIUS;
     const spawnR = this.d.spawnerRadius?.() ?? DEFAULT_AVOID_SPAWNER_RADIUS;
     let mobs = 0;
