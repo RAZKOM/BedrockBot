@@ -151,7 +151,7 @@ function harness(): Harness {
   const h: Harness = { w, inv, pos: { x: -2.5, y: FEET, z: 0.5 }, calls: [], chest: new Map(), deps: undefined as never, boneMeal: true, trampleAt: new Set() };
   const skills: FarmDeps['skills'] = {
     goto: (g) => {
-      const p = g.type === 'block' ? { x: g.p.x + 0.5, y: g.p.y, z: g.p.z + 0.5 } : g.type === 'near' ? { x: g.p.x, y: FEET, z: g.p.z } : { x: g.x, y: FEET, z: g.z };
+      const p = g.type === 'block' || g.type === 'getToBlock' ? { x: g.p.x + 0.5, y: g.p.y, z: g.p.z + 0.5 } : g.type === 'near' ? { x: g.p.x, y: FEET, z: g.p.z } : g.type === 'xz' ? { x: g.x, y: FEET, z: g.z } : { x: 0, y: FEET, z: 0 };
       h.calls.push(`goto ${Math.floor(p.x)} ${Math.floor(p.z)}`);
       h.pos = p;
       return Promise.resolve({ ok: true });

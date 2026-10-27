@@ -167,7 +167,7 @@ describe('stash step', () => {
   it('chest: the stashChest setting wins over the shulker box; the bot walks there and back', async () => {
     const h = harness({ slots: full([item('stone_pickaxe', 1), item('undyed_shulker_box', 1)]), settings: { stashChest: '10 0 0' } });
     expect(await h.stash.ifFull({ label: 'mine', chest: { x: 99, y: 0, z: 0 } })).toBe(true);
-    expect(h.calls).toEqual(['goto {"x":10.5,"y":0,"z":0.5}', 'open 10,0,0', 'deposit', 'close', 'goto {"x":0,"y":0,"z":0}']);
+    expect(h.calls).toEqual(['goto {"x":10,"y":0,"z":0}', 'open 10,0,0', 'deposit', 'close', 'goto {"x":0,"y":0,"z":0}']); // getToBlock on the chest cell (within reach from any height)
     expect(h.slotTypes).toEqual(['container']);
     expect(h.stash.attempts[0]!.steps.map((s) => s.kind)).toEqual(['chest']);
   });

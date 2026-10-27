@@ -21,7 +21,7 @@ import type { CollectOptions, CollectResult } from '../collect/collect.ts';
 import { isShulkerBox, shulkerSlotsUsed, type ContainerSnapshot, type DepositResult, type OpenResult } from '../container/chest.ts';
 import { boxSpots } from '../container/stash.ts';
 import type { DigOptions, DigResult } from '../dig/digger.ts';
-import type { Goal } from '../nav/goals.ts';
+import type { NavGoal } from '../nav/goals.ts';
 import type { PlaceOptions, PlaceResult } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { chestNeighbours, findContainers, isHomeContainer, visitOrder, type DiscoveryWorld } from './discovery.ts';
@@ -36,7 +36,7 @@ export const AT_HOME = 8;
 export const MAX_BOXES_PER_RUN = 3;
 
 export interface HomeSkills {
-  goto(goal: Goal, opts?: GotoOptions): Promise<SkillResult>;
+  goto(goal: NavGoal, opts?: GotoOptions): Promise<SkillResult>;
   open(p: Vec3): Promise<OpenResult>;
   closeContainer(view: ContainerView | number): Promise<boolean>;
   snapshot(view: ContainerView): ContainerSnapshot | undefined;
@@ -204,7 +204,7 @@ export class HomeLogistics {
 
   /** Walk to a container, open it, remember what it holds, keep it open (the caller closes it). */
   private async visit(p: Vec3, kind: string, cancelled: () => boolean): Promise<{ ok: true; view: ContainerView; record: ChestRecord } | { ok: false; reason: string }> {
-    const g = await this.d.skills.goto({ type: 'near', p: centre(p), r: 2 }, { timeoutTicks: 2400 });
+    const g = await this.d.skills.goto({ type: 'getToBlock', p, reach: 4 }, { timeoutTicks: 2400 }); // within reach from any height (stacked chests, shelves); `near` failed for chests above floor level on the Realm
     if (cancelled()) return { ok: false, reason: 'interrupted' };
     if (!g.ok) return { ok: false, reason: `goto: ${g.reason ?? 'failed'}` };
     let o = await this.d.skills.open(p);

@@ -27,7 +27,7 @@ import { silentLogger, type Logger } from '../../log.ts';
 import type { BlockInfo, ContainerView, ItemStack, Vec3 } from '../../world/types.ts';
 import type { CollectOptions, CollectResult } from '../collect/collect.ts';
 import type { DigOptions, DigResult } from '../dig/digger.ts';
-import type { Goal } from '../nav/goals.ts';
+import type { NavGoal } from '../nav/goals.ts';
 import { isInteractive, REPLACEABLE, type PlaceOptions, type PlaceResult } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { isShulkerBox, shulkerSlotsUsed, type DepositResult, type OpenResult } from './chest.ts'; // Track AG: shulker names, NBT reader and slot type live in chest.ts now
@@ -71,7 +71,7 @@ export function parseChest(s: string | undefined): Vec3 | undefined {
 }
 
 export interface StashSkills {
-  goto(goal: Goal, opts?: GotoOptions): Promise<SkillResult>;
+  goto(goal: NavGoal, opts?: GotoOptions): Promise<SkillResult>;
   open(p: Vec3): Promise<OpenResult>;
   deposit(view: ContainerView, filter: (i: ItemStack) => boolean): Promise<DepositResult>;
   closeContainer(view: ContainerView | number): Promise<boolean>;
@@ -363,7 +363,7 @@ export class Stash {
   private async toChest(chest: Vec3, alive: () => boolean): Promise<StashStep> {
     const t0 = this.now();
     const step: StashStep = { kind: 'chest', where: chest, ok: false, moved: {}, total: 0, requests: 0, shared: 0, ms: 0 };
-    const g = this.seen(await this.d.skills.goto({ type: 'near', p: centre(chest), r: 2 }, { timeoutTicks: 4000 }));
+    const g = this.seen(await this.d.skills.goto({ type: 'getToBlock', p: chest, reach: 4 }, { timeoutTicks: 4000 })); // within reach from any height
     if (alive()) {
       if (!g.ok) step.reason = `goto: ${g.reason ?? 'failed'}`;
       else await this.fill(chest, undefined, step, alive);

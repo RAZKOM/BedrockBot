@@ -31,7 +31,7 @@ import type { CollectOptions, CollectResult } from '../collect/collect.ts';
 import type { DepositResult, OpenResult } from '../container/chest.ts';
 import type { DigOptions, DigResult } from '../dig/digger.ts';
 import { EYE_HEIGHT, serverReachDistance } from '../dig/look.ts';
-import type { Goal } from '../nav/goals.ts';
+import type { Goal, NavGoal } from '../nav/goals.ts';
 import type { PlaceOptions, PlaceResult } from '../place/place.ts';
 import { closestDistance, cornerDistance, SERVER_CLICK_REACH } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
@@ -96,7 +96,7 @@ export interface FarmStats {
 
 /** The skills the farmer uses (BotSkills satisfies it). */
 export interface FarmSkills {
-  goto(goal: Goal, opts?: GotoOptions): Promise<SkillResult>;
+  goto(goal: NavGoal, opts?: GotoOptions): Promise<SkillResult>;
   dig(p: Vec3, opts?: DigOptions): Promise<DigResult>;
   place(p: Vec3, opts?: PlaceOptions): Promise<PlaceResult>;
   collect(radius: number, timeoutTicks: number, opts?: CollectOptions): Promise<CollectResult>;
@@ -162,7 +162,6 @@ interface StandCell {
   score: number;
 }
 
-const centre = (p: Vec3): Vec3 => ({ x: p.x + 0.5, y: p.y + 0.5, z: p.z + 0.5 });
 
 /** Eye position for a body standing at the centre of cell (x, z) with feet height `feet`. */
 export function eyeAt(x: number, feet: number, z: number): Vec3 {
@@ -724,7 +723,7 @@ export class FarmTask {
   private async depositTrip(gen: number, chest: Vec3): Promise<boolean> {
     this.state = 'to_chest';
     this.stats.trips++;
-    const g = await this.d.skills.goto({ type: 'near', p: centre(chest), r: 2 }, { timeoutTicks: 4000 });
+    const g = await this.d.skills.goto({ type: 'getToBlock', p: chest, reach: 4 }, { timeoutTicks: 4000 }); // within reach from any height
     if (!this.alive(gen)) return false;
     if (!g.ok) {
       this.lastError = `goto chest: ${g.reason}`;

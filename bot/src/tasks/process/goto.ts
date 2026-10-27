@@ -9,14 +9,14 @@
 import type { Vec3 } from '../../connection/types.ts';
 import type { RuntimeSettings } from '../../config/settings.ts';
 import { steadySpeed } from '../../skills/nav/costs.ts';
-import { goalTest, type Goal } from '../../skills/nav/goals.ts';
+import { goalTest, type Goal, type NavGoal } from '../../skills/nav/goals.ts';
 import type { GotoReport } from '../../skills/nav/navigator.ts';
 import type { GotoOptions, SkillResult } from '../../skills/types.ts';
 import { BaseProcess, PRIORITY, type ProcessKind, type ProcessStatus, type StopReason } from './manager.ts';
 
 /** What the goto process walks with (BotSkills satisfies it; usually wrapped by `settingsMover`). */
 export interface ProcessMover {
-  goto(goal: Goal, opts?: GotoOptions): Promise<SkillResult>;
+  goto(goal: NavGoal, opts?: GotoOptions): Promise<SkillResult>; // every nav goal (getToBlock for chests)
   cancel(): void;
   readonly nav: { readonly busy: boolean; readonly lastReport?: GotoReport | undefined };
 }
@@ -26,7 +26,7 @@ export interface ProcessMover {
  * the caller's own options win, except that sprint needs both. Used for every process's walking.
  */
 export function settingsMover<M extends ProcessMover>(skills: M, settings: RuntimeSettings): M {
-  const goto = (goal: Goal, opts: GotoOptions = {}): Promise<SkillResult> =>
+  const goto = (goal: NavGoal, opts: GotoOptions = {}): Promise<SkillResult> =>
     skills.goto(goal, {
       allowBreak: settings.get('allowBreak'),
       allowPlace: settings.get('allowPlace'),

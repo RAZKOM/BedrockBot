@@ -179,7 +179,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
   d.chat.register({
     name: 'chests',
     tier: 'more', group: 'home', example: '!chests scan', auto: 'the first time each session the bot stands near home it reads every container within homeChestRadius', // Track AM tiers (merge)
-    help: '[scan | label x y z <text>|none] (the containers at home; scan: look inside again)',
+    help: '[scan | clear | label x y z <text>|none] (the containers at home; scan: look inside again; clear: forget them all)',
     run: ({ args, reply }) => {
       const a = (args[0] ?? '').toLowerCase();
       const h = home();
@@ -195,6 +195,12 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
         const p = start({ kind: 'scan' });
         void p.result.then((r) => reply(r?.kind === 'scan' ? scanLine(r.report) : 'chests: scan stopped'));
         return;
+      }
+      if (a === 'clear') {
+        const all = memory().all();
+        for (const r of all) memory().delete(r);
+        chore.newSession(); // the first scan of the session is due again
+        return reply(`chests: forgot ${all.length} containers; I read them again the next time I stand near home (or !chests scan)`);
       }
       if (a === 'label') {
         const pos = d.parseBlock(args.slice(1, 4));
@@ -214,9 +220,9 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
         reply(next.label ? `chests: ${chestName(next)} labelled` : `chests: label of ${chestName(next)} removed`);
         return;
       }
-      reply('usage: !chests [scan | label x y z <text>|none]');
+      reply('usage: !chests [scan | clear | label x y z <text>|none]');
     },
   });
-  log.info(`home: !unload, !stock, !chests ready (memory ${world.cache?.chests ? 'in the world cache' : 'in memory'}, ${memory().size} remembered: ${memory().all().slice(0, 3).map((r) => chestKey(r)).join(' ')})`);
+  log.info(`home: !unload, !stock, !chests ready (memory ${world.cache?.chests ? 'in the world cache' : 'in the world cache once it opens, else in memory'}, ${memory().size} remembered: ${memory().all().slice(0, 3).map((r) => chestKey(r)).join(' ')})`);
   return control;
 }
