@@ -446,6 +446,30 @@ describe('inventory keeper', () => {
     expect(log).toEqual(['open', 'close 2']);
     expect((await keeper.drop('diamond')).reason).toBe('none');
   });
+  it('dropWorn drops the worn armour (armor slots) and the offhand (offhand slot 1) inside the inventory screen', async () => {
+    const src = new FakeSource();
+    const loop = new TickLoop();
+    const { containers, log } = fakeScreen(src);
+    const inv = new FakeInv(slots36({}));
+    inv.windows.get(120)![0] = item('iron_helmet');
+    inv.windows.get(120)![3] = item('leather_boots');
+    inv.windows.set(119, [item('shield')]);
+    const requests = new StackRequests({ source: src, containers, loop, runtimeId: () => 1n });
+    answerRequests(src, loop);
+    const keeper = new InventoryKeeper({ inventory: inv, requests, mover: { move: () => Promise.resolve({ ok: true }) }, settings: () => keepSettings });
+    const r = await keeper.dropWorn();
+    expect(r).toEqual({ dropped: ['iron_helmet', 'leather_boots', 'shield'], refused: [] });
+    const acts = src.sent.filter((p) => p.name === 'item_stack_request').map((p) => (p.params as { requests: { actions: Record<string, unknown>[] }[] }).requests[0]!.actions[0]);
+    expect(acts).toMatchObject([
+      { type_id: 'drop', count: 1, source: { slot_type: { container_id: 'armor' }, slot: 0 } },
+      { type_id: 'drop', count: 1, source: { slot_type: { container_id: 'armor' }, slot: 3 } },
+      { type_id: 'drop', count: 1, source: { slot_type: { container_id: 'offhand' }, slot: 1 } },
+    ]);
+    expect(inv.windows.get(120)![0]).toBeNull();
+    expect(inv.windows.get(119)![0]).toBeNull();
+    expect(log[0]).toBe('open');
+    expect(log.at(-1)).toMatch(/^close /);
+  });
 });
 
 // ---- chat -------------------------------------------------------------------------------------

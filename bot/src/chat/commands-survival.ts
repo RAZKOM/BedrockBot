@@ -141,14 +141,15 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
         return;
       }
       if (item === 'all' || item === 'items') {
-        // worn armour is not in the 36 inventory slots and stays on either way
+        // `all` also sheds the worn armour and the offhand (kit.dropWorn); `items` keeps them on
         const names = new Set<string>();
         for (const st of deps.mob?.world.inventory.slots.slice(0, 36) ?? []) {
           if (!st || st.count <= 0) continue;
           if (item === 'items' && keepOnDropItems(st.name)) continue;
           names.add(st.name);
         }
-        if (names.size === 0) {
+        const worn = item === 'all' ? [120, 119].flatMap((w) => deps.mob?.world.inventory.window(w)?.slots.filter((st) => !!st && st.count > 0) ?? []) : [];
+        if (names.size === 0 && worn.length === 0) {
           reply(item === 'all' ? 'drop: inventory empty' : 'drop: nothing but food, armour, elytra, tools and weapons');
           return;
         }
@@ -165,7 +166,12 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
               break;
             }
           }
-          reply(`dropped ${dropped} items of ${kinds} kinds${failed ? ` (stopped at ${failed})` : ''}`);
+          let wornLine = '';
+          if (item === 'all' && worn.length > 0 && !failed) {
+            const w = await kit.dropWorn();
+            wornLine = `; worn: ${w.dropped.length > 0 ? `dropped ${w.dropped.join(', ')}` : 'nothing dropped'}${w.refused.length > 0 ? ` (refused: ${w.refused.join(', ')})` : ''}`;
+          }
+          reply(`dropped ${dropped} items of ${kinds} kinds${failed ? ` (stopped at ${failed})` : ''}${wornLine}`);
         })();
         return;
       }

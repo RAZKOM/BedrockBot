@@ -114,7 +114,7 @@ room in its inventory by itself.
 | `!farm [radius]` / `!farm stop` / `!farm status` | Harvests mature crops around it, replants, uses bone meal, deposits into the nearest chest. |
 | `!food [n] [pen]` / `!food status` / `!food herds` | Hunts cows, pigs, sheep, chickens and rabbits for n food items within 48 blocks, then walks to herds it remembers up to 200 blocks away; never below `foodLeave` wild adults of a kind; animals inside a fenced pen only with `pen` (or in the `chorePen` pen), never below 2 adults. <!-- Track AF --> |
 | `!breed [type] [n]` | Feeds n pairs (default 1) of adult animals within 16 blocks: cows, sheep, mooshrooms wheat; pigs carrot, potato or beetroot; chickens seeds; rabbits dandelion or carrot. With `!set autoBreed on` it breeds the `chorePen` pen every 10 minutes up to 8 adults. <!-- Track AF --> |
-| `!inv` / `!drop <item> [n]` / `!drop all` / `!drop items` | Inventory summary; drop one item, everything, or everything except food, armour, elytra, tools and weapons. |
+| `!inv` / `!drop <item> [n]` / `!drop all` / `!drop items` | Inventory summary; drop one item, everything (worn armour and the offhand too), or everything except food, armour, elytra, tools and weapons. |
 
 **Controlling what runs**
 

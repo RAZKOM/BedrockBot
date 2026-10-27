@@ -227,6 +227,11 @@ export class SurvivalKit {
     return this.exclusive<DropResult>(() => this.keeper.drop(name, n), { ok: false, item: name, dropped: 0, reason: 'busy' });
   }
 
+  /** `!drop all`: the worn armour and the offhand too. */
+  dropWorn(): Promise<{ dropped: string[]; refused: string[] }> {
+    return this.exclusive(() => this.keeper.dropWorn(), { dropped: [], refused: ['busy'] });
+  }
+
   /** One-line inventory summary for `!inv`. */
   summary(): string {
     const inv = this.d.world.inventory;

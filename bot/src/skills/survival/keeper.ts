@@ -15,7 +15,7 @@ import { silentLogger, type Logger } from '../../log.ts';
 import type { ItemStack } from '../../world/types.ts';
 import { armourSlotOf } from './armour.ts';
 import { foodInfo } from './eat.ts';
-import { inventorySlot, isOk, type StackRequests } from './screen.ts';
+import { inventorySlot, isOk, slotInfo, type StackRequests } from './screen.ts';
 import { maxDurability } from './tools.ts';
 
 export const DEFAULT_THROWAWAY_MIN = 16;
@@ -122,6 +122,8 @@ export function planKeeper(slots: readonly (ItemStack | null | undefined)[], s: 
 export interface KeeperInventory {
   readonly slots: readonly (ItemStack | null)[];
   setItem(window: number, slot: number, item: ItemStack | null): void;
+  /** Another window's slots (120 armour, 119 offhand) for `dropWorn`; optional for fakes. */
+  window?(id: number): { readonly slots: readonly (ItemStack | null)[] } | undefined;
 }
 
 export interface KeeperMover {
@@ -222,6 +224,42 @@ export class InventoryKeeper {
     } finally {
       this.running = false;
     }
+  }
+
+  /**
+   * `!drop all` also sheds the worn armour (window 120, slots 0 head .. 3 feet) and the offhand (window
+   * 119; the request slot of the offhand container is 1). Every piece is one drop request from the
+   * inventory screen; a refusal is reported, not retried.
+   */
+  async dropWorn(): Promise<{ dropped: string[]; refused: string[] }> {
+    const out = { dropped: [] as string[], refused: [] as string[] };
+    if (this.running) return out;
+    this.running = true;
+    try {
+      await this.d.requests.withScreen(async () => {
+        const pieces: { window: number; slot: number; container: string; reqSlot: number }[] = [
+          ...[0, 1, 2, 3].map((slot) => ({ window: 120, slot, container: 'armor', reqSlot: slot })),
+          { window: 119, slot: 0, container: 'offhand', reqSlot: 1 },
+        ];
+        for (const w of pieces) {
+          const it = this.d.inventory.window?.(w.window)?.slots[w.slot];
+          if (!it || it.count <= 0) continue;
+          const r = await this.d.requests.send([{ type_id: 'drop', legacy_type_id: 3, count: it.count, source: slotInfo(w.container, w.reqSlot, it.stackId), randomly: false }]);
+          if (isOk(r)) {
+            out.dropped.push(it.name);
+            this.d.inventory.setItem(w.window, w.slot, null);
+            this.stats.dropped += it.count;
+          } else {
+            out.refused.push(it.name);
+            this.log.warn(`keeper: drop worn ${it.name} (${w.container}) refused (${String(r.status)})`);
+          }
+        }
+        return true;
+      });
+    } finally {
+      this.running = false;
+    }
+    return out;
   }
 
   private async dropSlot(slot: number, count: number): Promise<boolean> {
