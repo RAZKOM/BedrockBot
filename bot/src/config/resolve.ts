@@ -79,6 +79,14 @@ export interface Settings {
   updateCheckHours: number;
   taskConfig: Record<string, unknown>;
   nl: NlConfig; // Track Y: the `nl` block with defaults (natural-language front end)
+  panel: PanelSettings; // Track AE: LAN control panel (docs/panel.md)
+}
+
+/** Track AE: the `panel` block with defaults; port undefined = the health port (off when that is off too). */
+export interface PanelSettings {
+  host: string;
+  port: number | undefined;
+  token: string | undefined;
 }
 
 export class SettingsError extends Error {
@@ -97,6 +105,8 @@ export interface ResolveEnv {
   /** Default profiles folder for Realm tokens. */
   defaultProfilesFolder?: string;
   now?: Date;
+  /** Track AE: BEDROCKBOT_PANEL_TOKEN (wins over panel.token in the config file). */
+  panelToken?: string;
 }
 
 function int(v: string | undefined, what: string, min: number, max: number): number | undefined {
@@ -118,6 +128,13 @@ function vec(v: string | undefined, what: string): Vec3 | undefined {
   const p = parseVec3(v);
   if (!p) throw new SettingsError(`bad ${what} "${v}" (expected x,y,z)`);
   return { x: p[0], y: p[1], z: p[2] };
+}
+
+// Track AE: same rule as PanelConfigSchema.token (config.ts)
+function panelToken(v: string | undefined): string | undefined {
+  if (v === undefined || v === '') return undefined;
+  if (!/^[A-Za-z0-9._~-]{16,128}$/.test(v)) throw new SettingsError('bad BEDROCKBOT_PANEL_TOKEN (16..128 of A-Z a-z 0-9 . _ ~ -)');
+  return v;
 }
 
 const fromTuple = (t: [number, number, number] | undefined): Vec3 | undefined => (t ? { x: t[0], y: t[1], z: t[2] } : undefined);
@@ -220,5 +237,6 @@ export function resolveSettings(cli: CliValues, cfg: BotConfig, env: ResolveEnv)
     updateCheckHours: seconds(cli['update-check-hours'], '--update-check-hours', true) ?? cfg.updateCheckHours ?? (target.kind === 'realm' ? 24 : 0),
     taskConfig: cfg.tasks?.[task] ?? {},
     nl: (cli[NL_VALUE_KEY] = resolveNlConfig(cfg.nl)), // Track Y: also handed to the task through its CLI values (ctx.values.$nl)
+    panel: { host: cfg.panel?.host ?? '127.0.0.1', port: cfg.panel?.port, token: panelToken(env.panelToken) ?? cfg.panel?.token }, // Track AE
   };
 }

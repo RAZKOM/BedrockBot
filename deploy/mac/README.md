@@ -107,3 +107,13 @@ worktree habit applies here too: push only what is green.
 - Logs: `realm-console.log` grows slowly (one line per nudge, about 400 B/min); rotate it with
   `newsyslog` or truncate when it bothers you. `--no-record` keeps the 1 GB/day packet capture off.
 - `--health-port` binds 127.0.0.1 only; use `ssh -L 9465:127.0.0.1:9465 chat` to read it remotely.
+- Control panel on the LAN (docs/panel.md): with no change the panel is at `http://127.0.0.1:9465/` on
+  the Mac itself (same port, nothing else changes). To use it from a phone or another machine on the
+  home network, add to `~/.bedrockbot/config.json`:
+  `"panel": { "host": "0.0.0.0", "port": 9466, "token": "<24 random characters>" }` (a fresh
+  `pnpm config:init --print | grep '"token"'` shows a freshly generated one), then `launchctl kickstart -k
+  gui/$(id -u)/com.bedrockbot.realm`. A separate port keeps `curl http://127.0.0.1:9465/metrics`
+  token-free; `!panel` in game prints the URLs (`http://<mac LAN address>:9466/`). Open
+  `http://<address>:9466/?token=<token>` once per browser (a cookie remembers it). macOS may ask to
+  allow incoming connections for `node`: allow it. The panel can make the bot walk, fight and quit:
+  keep it on the LAN, never port-forward it on the router, and change the token if it leaks.

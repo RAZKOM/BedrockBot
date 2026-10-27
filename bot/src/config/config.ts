@@ -36,6 +36,16 @@ export const RealmConfigSchema = z
   })
   .strict();
 
+// Track AE: the LAN control panel (health/panel, docs/panel.md). host 127.0.0.1 by default; any other
+// interface needs the token (`pnpm config:init` generates one). port falls back to healthPort.
+export const PanelConfigSchema = z
+  .object({
+    host: z.string().min(1).optional(),
+    port: port.optional(),
+    token: z.string().regex(/^[A-Za-z0-9._~-]{16,128}$/, 'token: 16..128 of A-Z a-z 0-9 . _ ~ -').optional(),
+  })
+  .strict();
+
 export const ConfigSchema = z
   .object({
     $schemaVersion: z.literal(1).optional(),
@@ -81,6 +91,7 @@ export const ConfigSchema = z
      */
     settings: z.record(z.string(), z.union([z.boolean(), z.number(), z.string()])).optional(),
     nl: NlConfigSchema.optional(), // Track Y: { provider: 'ollama' | 'none', url, model, timeoutMs } (docs/natural-language.md)
+    panel: PanelConfigSchema.optional(), // Track AE: LAN control panel { host, port, token } (docs/panel.md)
   })
   .strict();
 
