@@ -207,8 +207,15 @@ describe('goto on built terrain (closed loop)', () => {
     const { conn, loop } = harness({ x: 0.5, y: -60, z: 0.5 });
     const skills = new BotSkills({ loop, world: fakeWorld(gen) });
     conn.tick(2);
-    const p1 = skills.goto({ type: 'xz', x: 0, z: 50 }, { timeoutTicks: 20 });
+    // timeoutTicks is a budget without progress (2026-10-30): a walk that keeps closing in on the goal runs on,
+    // up to the hard cap of 20 budgets. A goal 5000 blocks away cannot be reached in 20 x 20 ticks, so the cap ends it.
+    const p1 = skills.goto({ type: 'xz', x: 0, z: 5000 }, { timeoutTicks: 20 });
     conn.tick(25);
+    let settled = false;
+    void p1.then(() => (settled = true));
+    await Promise.resolve();
+    expect(settled).toBe(false); // still walking: it made progress inside the budget
+    conn.tick(400);
     expect(await p1).toEqual({ ok: false, reason: 'timeout' });
     const p2 = skills.goto({ type: 'xz', x: 0, z: 50 });
     conn.tick(5);
