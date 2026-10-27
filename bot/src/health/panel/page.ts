@@ -1,24 +1,48 @@
-// GET / (Track AE, docs/panel.md): the control panel page. Server-rendered from the current
-// PanelState (status, vitals, quick buttons, settings table), then a little inline JS polls
-// /api/state every 2 s and posts commands to /api/cmd. No build step, no external assets: the bot's
-// machine may be offline from the internet. The debug map (/map) is embedded on demand.
-import type { PanelState } from './state.ts';
+// GET / (Track AE, docs/panel.md): the control panel page. Server-rendered: the structure (the
+// inventory grid's 41 cells, the status blocks, the quick buttons, the settings table) plus the
+// current state as JSON; the inline script (client.ts, Track AP) fills the nodes from that JSON at
+// once and then from /api/state every 2 s. No build step, no external assets: the bot's machine may
+// be offline from the internet (glyphs are inline SVG, fonts are the system's). The debug map
+// (/map) is embedded on demand.
+import { PANEL_SCRIPT } from './client.ts'; // Track AP
+import { glyphDefs } from './glyphs.ts'; // Track AP
+import { liteState, type PanelState } from './state.ts';
 
 export const esc = (s: string): string => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
 /** JSON for a <script type="application/json"> block (no `</script>` breakout). */
 const scriptJson = (v: unknown): string => JSON.stringify(v).replace(/</g, '\\u003c');
 
-function vitalsHtml(s: PanelState): string {
-  const p = s.self.pos;
-  const items: [string, string][] = [
-    ['health', s.self.health === null ? '-' : String(s.self.health)],
-    ['food', s.self.food === null ? '-' : String(s.self.food)],
-    ['pos', p ? `${p.x.toFixed(1)} ${p.y.toFixed(1)} ${p.z.toFixed(1)}` : '-'],
-    ['dimension', s.self.dimension ?? '-'],
-    ['time', s.self.timeOfDay === null ? '-' : `${s.self.timeOfDay} (${s.self.phase ?? ''})`],
-  ];
-  return items.map(([k, v]) => `<div class="v"><span class="k">${k}</span><span id="v-${k}">${esc(v)}</span></div>`).join('');
+/** Status blocks (Track AP): the section ids the page always has (tests look for them). */
+export const STATUS_BLOCKS = ['panel-inventory', 'panel-vitals', 'panel-status', 'panel-combat', 'panel-memory', 'panel-planner', 'panel-conn'] as const;
+
+/** One inventory cell; the script sets the glyph, colour, letters, count and durability. */
+function cell(slot: string, hint: string, extra = ''): string {
+  return `<button type="button" class="cell empty${extra}" data-slot="${slot}" title="${hint}"><svg viewBox="0 0 16 16" aria-hidden="true"><use href="#g-item"></use></svg><b class="ab"></b><i class="ct"></i><span class="dur" hidden><span></span></span></button>`;
+}
+
+function inventoryHtml(): string {
+  const equip = ['head', 'chest', 'legs', 'feet'].map((n, i) => cell(`a${i}`, n, ' eq')).join('') + cell('off', 'offhand', ' eq');
+  let main = '';
+  for (let i = 9; i < 36; i++) main += cell(`s${i}`, `inventory ${i}`);
+  let hot = '';
+  for (let i = 0; i < 9; i++) hot += cell(`s${i}`, `hotbar ${i + 1}`);
+  return `<div class="inv" id="inventory"><div class="equip" aria-label="armour and offhand">${equip}</div><div class="slots"><div class="grid9" aria-label="inventory">${main}</div><div class="grid9 hotbar" aria-label="hotbar">${hot}</div></div></div>`;
+}
+
+const kv = (rows: [string, string][]): string => `<dl class="kv">${rows.map(([id, k]) => `<dt>${k}</dt><dd id="${id}">-</dd>`).join('')}</dl>`;
+const bar = (id: string, k: string, cls: string): string => `<div class="bar"><span class="k">${k}</span><span class="track"><span id="b-${id}" class="fill ${cls}"></span></span><span id="v-${id}" class="n">-</span></div>`;
+
+function vitalsHtml(): string {
+  return `${bar('health', 'health', 'hp')}${bar('food', 'food', 'fd')}${bar('sat', 'saturation', 'st')}${bar('armour', 'armour', 'ar')}
+    <div class="clockrow"><svg id="clock" class="clock" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="9"/><path class="sky" d="M1 10a9 9 0 0 1 18 0z"/><line id="clock-hand" x1="10" y1="10" x2="10" y2="3"/></svg>${kv([
+      ['v-time', 'time'],
+      ['v-pos', 'pos'],
+      ['v-dimension', 'dimension'],
+      ['v-weather', 'weather'],
+      ['v-deaths', 'deaths'],
+      ['v-lastdeath', 'last death'],
+    ])}</div>`;
 }
 
 function settingsHtml(s: PanelState): string {
@@ -36,56 +60,107 @@ function settingsHtml(s: PanelState): string {
     .join('');
 }
 
-export function renderPanelPage(s: PanelState): string {
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
-<title>BedrockBot panel</title>
-<style>
-  :root { color-scheme: dark; --bg: #111418; --panel: #1b2027; --line: #2c333d; --text: #d8dee6; --muted: #8a94a3; --accent: #f5c542; --ok: #4ce08a; --bad: #ff7b72; }
+const THEME_BOOT = `(function(){var t=null;try{t=localStorage.getItem('bbpanel-theme')}catch(e){}if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark'}document.documentElement.dataset.theme=t})();`;
+
+const CSS = `
+  :root, [data-theme="dark"] { color-scheme: dark; --bg: #111418; --panel: #1b2027; --line: #2c333d; --text: #d8dee6; --muted: #8a94a3; --accent: #f5c542; --ok: #4ce08a; --warn: #f2b134; --bad: #ff7b72;
+    --cell: #262c35; --cellline: #3a4350; --input: #2a313b; --track: #0d1014; --hp: #e5534b; --fd: #c98a3c; --st: #e7c64a; --ar: #8fa6c4; --sky: #2f5d8c; }
+  [data-theme="light"] { color-scheme: light; --bg: #f2f4f7; --panel: #ffffff; --line: #d9dee5; --text: #1d232b; --muted: #5b6573; --accent: #b07d00; --ok: #1f9d55; --warn: #b7791f; --bad: #cf222e;
+    --cell: #e8ebef; --cellline: #c4cad2; --input: #ffffff; --track: #dde1e6; --hp: #d1343a; --fd: #b06f1c; --st: #c9a213; --ar: #5f7ea6; --sky: #8cc4f0; }
   * { box-sizing: border-box; }
-  html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, sans-serif; }
-  main { max-width: 1100px; margin: 0 auto; padding: 12px 16px 40px; display: grid; gap: 12px; grid-template-columns: 1fr; }
-  @media (min-width: 900px) { main { grid-template-columns: 1fr 1fr; } .wide { grid-column: 1 / -1; } }
-  header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { overflow-x: hidden; }
+  main { max-width: 1400px; margin: 0 auto; padding: 12px 16px 40px; display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 760px) { main { grid-template-columns: repeat(2, minmax(0, 1fr)); } .wide { grid-column: 1 / -1; } }
+  @media (min-width: 1200px) { main { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  header { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
   h1 { font-size: 18px; margin: 0; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; min-width: 0; }
   .muted { color: var(--muted); } .small { font-size: 12px; } .nowrap { white-space: nowrap; }
+  .grow { flex: 1; }
   .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--bad); margin-right: 6px; }
   .dot.ok { background: var(--ok); }
-  .vitals { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 12px; }
-  .k { color: var(--muted); display: inline-block; min-width: 72px; }
+  .stale { background: var(--bad); color: #fff; border-radius: 10px; padding: 1px 8px; font-size: 12px; font-weight: 600; }
+  body.is-stale main > section:not(#panel-commands) { opacity: .55; transition: opacity .3s; }
   pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; }
   #logs { max-height: 360px; overflow-y: auto; }
   #chat { max-height: 220px; overflow-y: auto; }
-  button, input, select { font: inherit; color: var(--text); background: #2a313b; border: 1px solid #3a4350; border-radius: 6px; padding: 6px 10px; }
+  button, input, select { font: inherit; color: var(--text); background: var(--input); border: 1px solid var(--cellline); border-radius: 6px; padding: 6px 10px; }
   button { cursor: pointer; } button:hover { border-color: var(--accent); }
   .quick { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
   form.cmd { display: flex; gap: 6px; } form.cmd input { flex: 1; min-width: 0; }
   table { width: 100%; border-collapse: collapse; } td { border-top: 1px solid var(--line); padding: 6px 4px; vertical-align: top; }
   td input { width: 80px; } .tablewrap { max-height: 420px; overflow: auto; }
-  #err { color: var(--bad); }
+  #err { color: var(--bad); font-size: 12px; }
   iframe { width: 100%; height: 420px; border: 0; border-radius: 6px; background: #000; }
-  ul.stack { margin: 6px 0 0; padding-left: 18px; }
-</style>
+  /* inventory */
+  .inv-card { container-type: inline-size; }
+  .inv { display: flex; flex-direction: column; gap: 6px; }
+  .equip, .grid9 { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 3px; max-width: 440px; }
+  .hotbar { margin-top: 6px; }
+  @container (min-width: 430px) { .inv { flex-direction: row; align-items: flex-start; } .equip { grid-template-columns: 1fr; width: 44px; flex: none; } .slots { flex: 1; min-width: 0; } }
+  .cell { position: relative; aspect-ratio: 1; min-width: 0; padding: 0; background: var(--cell); border: 1px solid var(--cellline); border-radius: 4px; overflow: hidden; }
+  .cell svg { position: absolute; left: 17%; top: 17%; width: 66%; height: 66%; fill: currentColor; }
+  .cell.empty svg { visibility: hidden; }
+  .cell.eq.empty { background-image: linear-gradient(135deg, transparent 46%, var(--cellline) 47%, var(--cellline) 53%, transparent 54%); }
+  .cell.sel { border: 2px solid var(--accent); }
+  .cell.picked { box-shadow: 0 0 0 2px var(--text) inset; }
+  .cell .ab { position: absolute; left: 2px; top: 1px; font: 600 9px/1 system-ui, sans-serif; color: var(--text); opacity: .8; }
+  .cell .ct { position: absolute; right: 2px; bottom: 3px; font: 700 11px/1 system-ui, sans-serif; font-style: normal; color: #fff; text-shadow: 0 0 2px #000, 1px 1px 0 #000; }
+  .cell .dur { position: absolute; left: 3px; right: 3px; bottom: 2px; height: 3px; background: #000a; border-radius: 2px; }
+  .cell .dur > span { display: block; height: 100%; border-radius: 2px; }
+  .iteminfo { margin-top: 8px; min-height: 2.8em; white-space: pre-wrap; }
+  /* statuses */
+  .bar { display: grid; grid-template-columns: 78px minmax(0, 1fr) auto; gap: 8px; align-items: center; margin: 3px 0; }
+  .bar .track { height: 10px; background: var(--track); border-radius: 5px; overflow: hidden; }
+  .bar .fill { display: block; height: 100%; width: 0; border-radius: 5px; transition: width .4s; }
+  .bar .n { font-variant-numeric: tabular-nums; min-width: 52px; text-align: right; }
+  .hp { background: var(--hp); } .fd { background: var(--fd); } .st { background: var(--st); } .ar { background: var(--ar); }
+  .k { color: var(--muted); }
+  .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 10px; margin: 0; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+  .clockrow { display: flex; gap: 12px; align-items: flex-start; margin-top: 8px; }
+  .clock { width: 44px; height: 44px; flex: none; }
+  .clock circle { fill: var(--track); stroke: var(--line); }
+  .clock .sky { fill: var(--sky); opacity: .55; }
+  .clock line { stroke: var(--accent); stroke-width: 2; stroke-linecap: round; }
+  .clock.night line, .clock.dusk line { stroke: var(--muted); }
+  .job { font-weight: 600; margin-bottom: 6px; overflow-wrap: anywhere; }
+  ol.stack { margin: 6px 0 8px; padding-left: 20px; } ol.stack li { margin: 3px 0; overflow-wrap: anywhere; }
+  .badge { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 8px; background: var(--cell); border: 1px solid var(--cellline); }
+  .st-active { border-color: var(--ok); color: var(--ok); } .st-held, .st-paused { border-color: var(--warn); color: var(--warn); }
+  a { color: var(--accent); }
+`;
+
+export function renderPanelPage(s: PanelState): string {
+  return `<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>BedrockBot panel</title>
+<script>${THEME_BOOT}</script>
+<style>${CSS}</style>
 </head>
 <body data-panel="v${s.v}">
+${glyphDefs()}
 <main>
   <header class="wide">
     <h1><span id="dot" class="dot${s.bot.healthy ? ' ok' : ''}"></span><span id="botname">${esc(s.bot.name || 'BedrockBot')}</span></h1>
     <span class="muted"><span id="conn">${esc(s.bot.state)}</span> &middot; <span id="server">${esc(s.bot.server)}</span> &middot; task <span id="task">${esc(s.bot.task)}</span> &middot; <span id="ver">${esc(s.bot.gameVersion)}</span></span>
-    <span id="err"></span>
+    <span id="stale" class="stale" hidden>stale</span><span id="err"></span>
+    <span class="grow"></span><button type="button" id="theme" class="small" aria-label="switch theme">light</button>
   </header>
-  <section class="wide" id="panel-status">
+  <section id="panel-inventory" class="inv-card"><h2>Inventory <span id="inv-sum" class="muted small"></span></h2>${inventoryHtml()}<div id="iteminfo" class="iteminfo muted small">tap a slot for the details</div></section>
+  <section id="panel-vitals"><h2>Bot</h2>${vitalsHtml()}</section>
+  <section id="panel-status">
     <h2>Status</h2>
-    <pre id="status">${esc(s.status.join('\n'))}</pre>
-    <ul class="stack" id="stack"></ul>
+    <div class="job" id="job">-</div>
+    <ol class="stack" id="stack"></ol>
+    <pre id="status" class="muted">${esc(s.status.join('\n'))}</pre>
   </section>
-  <section class="wide"><h2>Bot</h2><div class="vitals">${vitalsHtml(s)}</div></section>
   <section id="panel-commands">
     <h2>Commands</h2>
     <div class="quick">${s.quick.map((q) => `<button class="q" data-cmd="${esc(q)}">${esc(q)}</button>`).join('')}</div>
@@ -95,6 +170,37 @@ export function renderPanelPage(s: PanelState): string {
     <h2 style="margin-top:12px">Bot chat</h2>
     <pre id="chat"></pre>
   </section>
+  <section id="panel-combat"><h2>Combat</h2>${kv([
+    ['c-fights', 'fights'],
+    ['c-kills', 'kills'],
+    ['c-retargets', 'retargets'],
+    ['c-flees', 'flees'],
+    ['c-guard', 'guard triggers'],
+    ['c-damage', 'damage taken'],
+    ['c-lasthit', 'last hit'],
+  ])}</section>
+  <section id="panel-memory"><h2>Memory</h2>${kv([
+    ['m-chests', 'chests'],
+    ['m-read', 'chests read'],
+    ['m-herds', 'herds'],
+    ['m-forests', 'forests'],
+    ['m-ores', 'ores seen'],
+  ])}<details id="chestbox"><summary class="small"><a href="/api/chests" onclick="return false">chest list</a></summary><div id="chestwrap" class="tablewrap small"></div></details></section>
+  <section id="panel-planner"><h2>Planner</h2>${kv([
+    ['p-threads', 'threads'],
+    ['p-plans', 'plans'],
+    ['p-forward', 'forwarding'],
+    ['p-crashes', 'crashes'],
+  ])}</section>
+  <section id="panel-conn"><h2>Connection</h2>${kv([
+    ['k-server', 'server'],
+    ['k-version', 'version'],
+    ['k-state', 'state'],
+    ['k-uptime', 'uptime'],
+    ['k-reconnects', 'reconnects'],
+    ['k-kicks', 'kicks'],
+    ['k-last', 'last disconnect'],
+  ])}</section>
   <section id="panel-logs"><h2>Log (last 50 lines)</h2><pre id="logs"></pre></section>
   <section class="wide" id="panel-settings"><h2>Settings (!set)</h2><div class="tablewrap"><table><tbody id="settings">${settingsHtml(s)}</tbody></table></div></section>
   <section class="wide" id="panel-help">
@@ -104,97 +210,9 @@ export function renderPanelPage(s: PanelState): string {
     <details id="mapbox"><summary><h2 style="display:inline">Map</h2> <a href="/map" target="_blank" rel="noopener" class="small">open full page</a></summary><div id="mapwrap"></div></details>
   </section>
 </main>
-<script type="application/json" id="initial">${scriptJson(s)}</script>
+<script type="application/json" id="initial">${scriptJson(liteState(s))}</script>
 <script>
-(() => {
-  const $ = (id) => document.getElementById(id);
-  const text = (id, v) => { const e = $(id); if (e && e.textContent !== v) e.textContent = v; };
-  let last = JSON.parse($('initial').textContent);
-  const atBottom = (e) => e.scrollHeight - e.scrollTop - e.clientHeight < 30;
-  function render(s) {
-    last = s;
-    $('dot').className = 'dot' + (s.bot.healthy ? ' ok' : '');
-    text('botname', s.bot.name || 'BedrockBot'); text('conn', s.bot.state); text('server', s.bot.server); text('task', s.bot.task); text('ver', s.bot.gameVersion);
-    text('status', s.status.join('\\n'));
-    const st = $('stack'); st.textContent = '';
-    for (const e of s.stack) { const li = document.createElement('li'); li.textContent = '[' + e.state + '] ' + e.name + ' (' + e.kind + ' ' + e.priority + '): ' + e.line + (e.etaS != null ? ', eta ' + Math.round(e.etaS) + ' s' : ''); st.appendChild(li); }
-    const p = s.self.pos;
-    text('v-health', s.self.health == null ? '-' : String(s.self.health));
-    text('v-food', s.self.food == null ? '-' : String(s.self.food));
-    text('v-pos', p ? p.x.toFixed(1) + ' ' + p.y.toFixed(1) + ' ' + p.z.toFixed(1) : '-');
-    text('v-dimension', s.self.dimension || '-');
-    text('v-time', s.self.timeOfDay == null ? '-' : s.self.timeOfDay + ' (' + (s.self.phase || '') + ')');
-    const lg = $('logs'), lb = atBottom(lg); text('logs', s.logs.join('\\n')); if (lb) lg.scrollTop = lg.scrollHeight;
-    const ch = $('chat'), cb = atBottom(ch);
-    text('chat', s.chat.map((c) => new Date(c.ts).toLocaleTimeString() + ' ' + c.text + (c.sent ? '' : '  (not sent to the game)')).join('\\n'));
-    if (cb) ch.scrollTop = ch.scrollHeight;
-    for (const r of s.settings) {
-      const src = document.querySelector('[data-src="' + r.key + '"]'); if (src) src.textContent = r.source;
-      const inp = document.querySelector('[data-key="' + r.key + '"]:not(button)');
-      if (inp && document.activeElement !== inp && !inp.dataset.dirty) inp.value = r.value;
-    }
-  }
-  async function poll() {
-    try {
-      const res = await fetch('/api/state', { cache: 'no-store', credentials: 'same-origin' });
-      if (res.status === 401) { location.href = '/'; return; }
-      if (!res.ok) throw new Error('state ' + res.status);
-      render(await res.json());
-      text('err', '');
-    } catch (e) { text('err', 'offline: ' + (e && e.message ? e.message : e)); }
-  }
-  async function send(cmd) {
-    cmd = cmd.trim(); if (!cmd) return;
-    $('replies').textContent = '> ' + cmd + '\\n...';
-    try {
-      const res = await fetch('/api/cmd', { method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ text: cmd }) });
-      const r = await res.json();
-      $('replies').textContent = '> ' + (r.command || cmd) + '\\n' + ((r.replies && r.replies.length) ? r.replies.join('\\n') : (r.error || (r.ok ? '(no reply yet; see bot chat)' : 'failed')));
-    } catch (e) { $('replies').textContent = '> ' + cmd + '\\nerror: ' + (e && e.message ? e.message : e); }
-    setTimeout(poll, 300);
-  }
-  $('cmdform').addEventListener('submit', (ev) => { ev.preventDefault(); const v = $('cmd').value; $('cmd').value = ''; send(v); });
-  for (const b of document.querySelectorAll('button.q')) b.addEventListener('click', () => send(b.dataset.cmd));
-  for (const b of document.querySelectorAll('button.setbtn')) b.addEventListener('click', () => {
-    const inp = document.querySelector('[data-key="' + b.dataset.key + '"]:not(button)');
-    if (!inp) return; delete inp.dataset.dirty; send('!set ' + b.dataset.key + ' ' + inp.value);
-  });
-  for (const i of document.querySelectorAll('#settings input, #settings select')) i.addEventListener('input', () => { i.dataset.dirty = '1'; });
-  $('mapbox').addEventListener('toggle', () => {
-    const w = $('mapwrap');
-    if ($('mapbox').open && !w.firstChild) { const f = document.createElement('iframe'); f.src = '/map'; f.title = 'map'; w.appendChild(f); }
-    else if (!$('mapbox').open) w.textContent = '';
-  });
-  // Track AM: the Help tab, fetched once when first opened (GET /api/help)
-  function table(head, rows) {
-    const t = document.createElement('table'), tr = document.createElement('tr');
-    for (const h of head) { const th = document.createElement('td'); th.className = 'muted small'; th.textContent = h; tr.appendChild(th); }
-    t.appendChild(tr);
-    for (const r of rows) { const row = document.createElement('tr'); for (const c of r) { const td = document.createElement('td'); td.textContent = c; row.appendChild(td); } t.appendChild(row); }
-    return t;
-  }
-  function h2(text) { const e = document.createElement('h2'); e.style.marginTop = '12px'; e.textContent = text; return e; }
-  $('helpbox').addEventListener('toggle', async () => {
-    const w = $('helpwrap');
-    if (!$('helpbox').open || w.dataset.loaded) return;
-    w.dataset.loaded = '1'; w.textContent = 'loading...';
-    try {
-      const res = await fetch('/api/help', { cache: 'no-store', credentials: 'same-origin' });
-      if (!res.ok) throw new Error('help ' + res.status);
-      const h = await res.json();
-      w.textContent = '';
-      w.appendChild(h2('Commands'));
-      w.appendChild(table(['tier', 'group', 'syntax', 'help', 'example', 'also on its own'], h.commands.map((c) => [c.tier === 'front' ? 'front door' : 'more', c.group, '!' + c.name + (c.syntax ? ' ' + c.syntax : ''), c.help, c.example, c.auto])));
-      w.appendChild(h2('Modes (now: ' + h.mode + ')'));
-      const keys = h.modes.length ? Object.keys(h.modes[0].values) : [];
-      w.appendChild(table(['!mode'].concat(keys), h.modes.map((m) => [m.name].concat(keys.map((k) => m.values[k])))));
-      w.appendChild(h2('Settings'));
-      w.appendChild(table(['group', 'setting', 'value', 'default', 'description'], h.settings.map((s) => [s.group, s.key, s.value, s.default, s.description])));
-    } catch (e) { delete w.dataset.loaded; w.textContent = 'help: ' + (e && e.message ? e.message : e); }
-  });
-  render(last);
-  setInterval(poll, 2000);
-})();
+${PANEL_SCRIPT}
 </script>
 </body>
 </html>

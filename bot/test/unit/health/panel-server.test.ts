@@ -77,13 +77,15 @@ describe('panel state JSON', () => {
   it('has the documented shape', () => {
     const { panel } = makePanel({ healthPort: 9999 });
     const s: PanelState = panel.state();
-    expect(Object.keys(s).sort()).toEqual(['bot', 'chat', 'commands', 'logs', 'quick', 'self', 'settings', 'stack', 'status', 'ts', 'v'].sort());
+    expect(Object.keys(s).sort()).toEqual(['bot', 'chat', 'commands', 'logs', 'quick', 'self', 'settings', 'stack', 'status', 'ts', 'v', 'inventory', 'job', 'combat', 'memory', 'planner', 'conn'].sort()); // Track AP: the last six
     expect(s.v).toBe(1);
     expect(s.bot).toEqual({ name: 'UnitBot', server: '127.0.0.1:19180 (raknet)', task: 'afk', state: 'idle', healthy: false, gameVersion: '1.26.51' });
     expect(s.status[0]).toMatch(/^status: up .*pos 1\.00 -60\.00 2\.00, version 1\.26\.51, tick 0, task afk, nudges 0$/);
     expect(s.status[1]).toBe('processes: idle');
     expect(s.stack).toEqual([{ name: 'guard', kind: 'guard', priority: 60, state: 'active', line: 'guarding r=16', etaS: null }]);
-    expect(s.self).toEqual({ health: 17, food: 18, pos: { x: 1, y: -60, z: 2 }, dimension: 'overworld', timeOfDay: 13500, phase: 'night' });
+    expect(s.self).toEqual({ health: 17, food: 18, pos: { x: 1, y: -60, z: 2 }, dimension: 'overworld', timeOfDay: 13500, phase: 'night', saturation: null, weather: null, day: null, deaths: null, lastDeath: null });
+    expect(s.job).toBeNull(); // the fake stack has only the guard (an auto process)
+    expect(s.conn).toMatchObject({ server: '127.0.0.1:19180 (raknet)', state: 'idle', reconnects: 0, kicks: 0 });
     const guard = s.settings.find((r) => r.key === 'guardRadius');
     expect(guard).toEqual({ key: 'guardRadius', kind: 'number', value: '16', default: '16', min: 2, max: 64, unit: 'blocks', source: 'default', description: expect.any(String) as string });
     expect(s.settings.find((r) => r.key === 'sprint')).toMatchObject({ kind: 'boolean', value: 'on' });
@@ -98,7 +100,7 @@ describe('panel state JSON', () => {
     };
     const s = buildPanelState({ name: boom, server: 's', task: 't', connState: boom, healthy: boom, gameVersion: boom, statusLines: boom, vitals: boom, position: boom, dimension: boom, timeOfDay: boom, logs: boom, chat: boom, commands: boom });
     expect(s.bot.state).toBe('unknown');
-    expect(s.self).toEqual({ health: null, food: null, pos: null, dimension: null, timeOfDay: null, phase: null });
+    expect(s.self).toEqual({ health: null, food: null, pos: null, dimension: null, timeOfDay: null, phase: null, saturation: null, weather: null, day: null, deaths: null, lastDeath: null });
     expect(s.settings).toEqual([]);
   });
 
