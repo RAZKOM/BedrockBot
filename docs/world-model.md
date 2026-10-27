@@ -56,7 +56,8 @@ inventory_content / inventory_slot / inventory_transaction (clientbound, 'normal
   / mob_equipment (self) ─> inventory
 respawn (state 1) / move_player (self) / correct_player_move_prediction / set_health
   / update_attributes (self) / set_player_game_type / set_entity_motion (self) ─> self, onCorrection
-change_dimension ─> clear chunks and entities
+change_dimension ─> clear chunks and entities, self.pos = position (feet); world.dimensions (dimension.ts)
+player_action dimension_change_ack (from the server) ─> the same action back (Track AT, docs/nether.md)
 ```
 
 Measured on bds-world (flat world, view distance 10): the server sends 369 columns; the store asks for

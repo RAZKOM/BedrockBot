@@ -36,6 +36,7 @@ import { PlaceSkill, type PlaceOptions, type PlaceResult } from './place/place.t
 import { fellTree, type FellOptions, type FellResult } from './tree/feller.ts';
 import { detectTree, treesFrom, type Tree, type TreeOptions } from './tree/tree.ts';
 import type { SkillResult, Skills } from './types.ts'; // Track R: goto takes NavGoal / NavGotoOptions now
+import { surfaceRefusal } from '../world/dimension.ts'; // Track AT
 
 export type { Goal, GotoOptions, SkillResult, Skills, DigOptions, DigResult } from './types.ts';
 export type { CollectOptions, CollectResult } from './collect/collect.ts';
@@ -317,6 +318,9 @@ export class BotSkills implements Skills {
   }
 
   goto(goal: NavGoal, opts?: NavGotoOptions): Promise<SkillResult> { // Track R: every task 7.10 goal type
+    // Track AT: under the Nether's bedrock ceiling there is no surface (the search would only exhaust its budget)
+    const noSurface = goal.type === 'surface' ? surfaceRefusal((this.world.self as { dimension?: number }).dimension) : undefined;
+    if (noSurface) return Promise.resolve({ ok: false, reason: noSurface });
     // Synchronous start (callers check nav.busy right after the call).
     const token = this.begin('goto');
     const p = this.nav.goto(goal, opts);

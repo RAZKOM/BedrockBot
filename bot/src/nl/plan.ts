@@ -55,6 +55,7 @@ export const STEP_SCHEMAS = {
   stock: z.strictObject({ command: z.literal('stock'), item: blockName.optional() }), // Track AG: !stock [item]
   chests: z.strictObject({ command: z.literal('chests'), scan: z.boolean().optional() }), // Track AG: !chests [scan]
   explore: z.strictObject({ command: z.literal('explore'), radius: z.number().int().min(16).max(1024).optional() }), // Track AI: !explore
+  ...{ nether: z.strictObject({ command: z.literal('nether') }), overworld: z.strictObject({ command: z.literal('overworld') }) }, // Track AT: !nether, !overworld
   question: z.strictObject({ command: z.literal('question'), text: z.string().min(1).max(200) }),
   answer: z.strictObject({ command: z.literal('answer'), text: z.string().min(1).max(200) }), // Track AM: a reply, nothing runs; the only step
 } as const;
@@ -93,6 +94,7 @@ export const StepSchema = z.discriminatedUnion('command', [
   STEP_SCHEMAS.build, // Track AL
   ...[STEP_SCHEMAS.unload, STEP_SCHEMAS.stock, STEP_SCHEMAS.chests], // Track AG
   STEP_SCHEMAS.explore, // Track AI
+  ...[STEP_SCHEMAS.nether, STEP_SCHEMAS.overworld], // Track AT
   STEP_SCHEMAS.question,
   STEP_SCHEMAS.answer, // Track AM
 ]);
@@ -144,6 +146,7 @@ export const COMMAND_SPECS: Record<Exclude<StepKind, TalkKind>, CommandSpec> = {
   build: { chat: 'build', wait: 'process', fail: /^build: / }, // Track AL
   ...{ unload: { chat: 'unload', wait: 'process', fail: /^unload: (no home|I know no)/ }, stock: { chat: 'stock', wait: 'none' }, chests: { chat: 'chests', wait: 'process' } }, // Track AG
   explore: { chat: 'explore', wait: 'process', fail: /^explore: / }, // Track AI
+  ...{ nether: { chat: 'nether', wait: 'process', done: /^(in the nether|already in the nether)/, fail: /^nether: / }, overworld: { chat: 'overworld', wait: 'process', done: /^(in the overworld|already in the overworld)/, fail: /^overworld: / } }, // Track AT
 };
 
 /** Replies that end any step and the plan. */

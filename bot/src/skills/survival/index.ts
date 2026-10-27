@@ -174,6 +174,7 @@ export class SurvivalKit {
         return t !== undefined ? [t] : [];
       },
       origin: () => (loop.state.ready ? loop.state.pos : undefined),
+      lavaWorld: world, // Track AT: lava proximity costs (nav/avoidance.ts LavaIndex)
     });
     deps.skills.nav.cellCost = () => this.avoidance.costFn();
     if (deps.combat) deps.combat.toolOk = this.toolOk;

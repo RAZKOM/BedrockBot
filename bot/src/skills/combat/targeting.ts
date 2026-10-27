@@ -116,14 +116,22 @@ export function gridOf(mover: { readonly nav: unknown } | undefined): GridLike |
 
 const dist = (a: Vec3, b: Vec3): number => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 
+/** Track AT: some worn armour piece is golden (window 120 of the world model's inventory; piglins stay calm). */
+export function wearsGold(world: object): boolean {
+  const inv = (world as { inventory?: { window?(id: number): { slots: readonly ({ name: string } | null)[] } | undefined } }).inventory;
+  return inv?.window?.(120)?.slots.some((s) => !!s && s.name.startsWith('golden_')) ?? false;
+}
+
 /** Hostiles, plus neutral mobs that hit or target the bot. Never players, items or passive mobs. */
-export function isThreat(h: Pick<TargetingHost, 'mobs'>, e: EntityInfo): boolean {
+export function isThreat(h: Pick<TargetingHost, 'mobs'> & { readonly d?: { readonly world: object } }, e: EntityInfo): boolean {
   if (isPlayerEntity(e)) return false;
   const st = h.mobs.get(e.runtimeId);
   if (st?.dead) return false;
   const cls = classify(e.type);
   if (cls === 'hostile') return true;
   if (cls !== 'neutral' && cls !== 'other') return false;
+  // Track AT: a piglin (not a brute) is never fought while the bot wears gold: hitting one turns the whole group
+  if (bareType(e.type) === 'piglin' && h.d && wearsGold(h.d.world)) return false;
   const hit = h.mobs.lastHitBy;
   return h.mobs.targetsUs(e.runtimeId) || (hit?.runtimeId === e.runtimeId && performance.now() - hit.at < 10_000);
 }

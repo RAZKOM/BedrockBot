@@ -60,6 +60,7 @@ const STEP_DOCS: Record<StepKind, string> = {
   build: '{"command":"build","shape":"fill"|"clear"|"wall"|"floor"|"pillar"|"file","x":X?,"y":Y?,"z":Z?,"x2":X?,"y2":Y?,"z2":Z?,"height":H?,"block":"cobblestone"?,"name":"<file>"?}: build from the inventory: fill / clear the box x y z to x2 y2 z2, a wall from x y z to x2 z2 H high, a floor x y z to x2 z2, a pillar H high at x y z, file = a saved structure by name (at x y z, else at the bot); no x y z = at the bot', // Track AL
   ...{ unload: '{"command":"unload","all":B?}: put the carried items away into the chests at home (keeps food, tools, armour); all: also empty full shulker boxes', stock: '{"command":"stock","item":"coal"?}: say how many of an item the chests at home hold (from memory), or the totals', chests: '{"command":"chests","scan":B?}: list the chests at home; scan: walk to them and look inside again' }, // Track AG
   explore: '{"command":"explore","radius":R?}: walk around the unexplored land near home (radius 16..1024 blocks) so the bot remembers it: ores, forests, animals', // Track AI
+  ...{ nether: '{"command":"nether"}: go into the Nether through the nearest known nether portal (it does not build portals)', overworld: '{"command":"overworld"}: come back from the Nether through the paired portal' }, // Track AT
   question: '{"command":"question","text":"..."}: ask the person one short question instead of guessing; last step',
   answer: '{"command":"answer","text":"..."}: answer a question about the bot (what it can do, whether it can cook, what it is doing) in up to 200 characters; nothing runs; always the only step', // Track AM
 };
@@ -86,6 +87,7 @@ export const EXAMPLES: readonly Example[] = [
   { request: 'build a cobblestone wall from 0 -60 0 to 9 0, 4 high', plan: { steps: [{ command: 'build', shape: 'wall', x: 0, y: -60, z: 0, x2: 9, z2: 0, height: 4, block: 'cobblestone' }] } }, // Track AL
   ...[{ request: 'put your stuff away', plan: { steps: [{ command: 'unload' }] } }, { request: 'how much coal do we have', plan: { steps: [{ command: 'stock', item: 'coal' }] } }, { request: 'check what is in the chests', plan: { steps: [{ command: 'chests', scan: true }] } }] as Example[], // Track AG
   { request: 'look around the area within 200 blocks', plan: { steps: [{ command: 'explore', radius: 200 }] } }, // Track AI
+  { request: 'go to the nether', plan: { steps: [{ command: 'nether' }] } }, // Track AT
 ];
 
 export function buildSystemPrompt(c: PromptContext): string {

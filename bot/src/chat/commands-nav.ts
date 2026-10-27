@@ -23,6 +23,7 @@ import type { RespawnController } from '../tasks/respawn.ts';
 import { attachAutoWaypoints, blockOf } from '../waypoints/auto.ts';
 import { WaypointStore, waypointName, waypointsLocation, type Waypoint } from '../waypoints/store.ts';
 import { parseCommand, type Chat, type CommandDef } from './chat.ts';
+import { dimensionName, dimWaypointName, surfaceRefusal, waypointDimension } from '../world/dimension.ts'; // Track AT
 
 export const NAV_COMMANDS = ['wp', 'goto', 'top'] as const;
 const NEEDS_WALK = 'needs a task that can walk (start with --walk, --home or --target realm)';
@@ -37,6 +38,8 @@ export interface NavChatDeps {
   walk?: (goal: NavGoal, opts: NavGotoOptions, label: string, o?: { urgent?: boolean }) => Promise<SkillResult>;
   /** The home point: `!wp set home` / `!wp del home` change it too. */
   home?: { set(p: Vec3 | undefined): void };
+  /** Track AT: the current dimension (`!top` refuses in the Nether). */
+  dimension?: () => number | undefined;
 }
 
 const fmtW = (w: Pick<Waypoint, 'x' | 'y' | 'z'>): string => `${w.x} ${w.y ?? '?'} ${w.z}`;
@@ -90,7 +93,14 @@ export function registerNavChat(chat: Chat, d: NavChatDeps): void {
           p = blockOf(here);
         }
         let w: Waypoint;
-        if (n === 'home' && d.home) {
+        const dim = d.dimension?.() ?? 0; // Track AT: outside the overworld the name gets its dimension's prefix (home stays the overworld's)
+        if (dim !== 0 && waypointDimension(n) !== dim) {
+          if (n === 'home') {
+            reply('home is an overworld point; set it there (!wp set home)');
+            return;
+          }
+          w = store.set(dimWaypointName(dim, n), p);
+        } else if (n === 'home' && d.home) {
           d.home.set(p); // the home point follows (and sets the waypoint)
           w = store.get('home') ?? store.set('home', p, { auto: true });
         } else {
@@ -131,9 +141,15 @@ export function registerNavChat(chat: Chat, d: NavChatDeps): void {
       let goal: NavGoal;
       let what: string;
       if (args.length === 1) {
-        const w = store.get(args[0]!);
+        // Track AT: in the Nether / End `portal` means `nether_portal` / `end_portal`; the overworld's waypoints are not walkable there
+        const dim = d.dimension?.() ?? 0;
+        const w = (dim !== 0 ? store.get(dimWaypointName(dim, args[0]!)) : undefined) ?? store.get(args[0]!);
         if (!w) {
           reply(`no waypoint "${args[0]}" (!wp list)`);
+          return;
+        }
+        if (waypointDimension(w.name) !== dim) {
+          reply(`waypoint ${w.name} is in the ${dimensionName(waypointDimension(w.name))}, not in the ${dimensionName(dim)} (${dim === 0 ? '!overworld' : '!overworld first'})`);
           return;
         }
         goal = waypointGoal(w);
@@ -169,6 +185,11 @@ export function registerNavChat(chat: Chat, d: NavChatDeps): void {
         reply(`top ${NEEDS_WALK}`);
         return;
       }
+      const refusal = surfaceRefusal(d.dimension?.()); // Track AT
+      if (refusal) {
+        reply(`top: ${refusal}`);
+        return;
+      }
       reply('going up to the surface');
       void walk({ type: 'surface' }, { timeoutTicks: TOP_TICKS, allowPlace: true }, 'going up to the surface').then((r) => {
         const p = d.position();
@@ -187,6 +208,12 @@ export function markUrgent(p: object | undefined): boolean {
   if (!p) return false;
   (p as { urgent?: boolean }).urgent = true;
   return true;
+}
+
+/** Track AT: the waypoint store registerNavCommands loaded for a task (the portal commands share it). */
+const navStores = new WeakMap<object, WaypointStore>();
+export function waypointStoreOf(task: object): WaypointStore | undefined {
+  return navStores.get(task);
 }
 
 export interface NavCommandDeps {
@@ -220,6 +247,7 @@ export function registerNavCommands(d: NavCommandDeps): WaypointStore {
     log.info(loc.file ? `waypoints: ${loc.file} (${store.size})` : 'waypoints: in memory only (--no-config)');
   }
   const st = store;
+  navStores.set(task, st); // Track AT: the portal commands read and write the `portal` waypoints here
   const offAuto = attachAutoWaypoints({ store: st, conn: ctx.conn, respawn: d.respawn, log });
   // the navigator's place / use actions (pillar-up for !top, doors) need the packet source and a hotbar
   if (mob) mob.skills.attach({ source: ctx.conn, ...(pve ? { hotbar: pve.hotbar } : {}) });
@@ -252,6 +280,7 @@ export function registerNavCommands(d: NavCommandDeps): WaypointStore {
     position: () => task.position(),
     ...(walk ? { walk } : {}),
     ...(home ? { home } : {}),
+    ...(mob ? { dimension: () => mob.world.self.dimension } : {}), // Track AT
   });
 
   const baseLine = task.statusLine?.bind(task);

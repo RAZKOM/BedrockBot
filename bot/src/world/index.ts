@@ -23,6 +23,7 @@ import type {
 } from './types.ts';
 import { BlockUpdates } from './updates.ts';
 import type { CachedTerrain, FoundPos } from './cache/types.ts'; // Track T
+import { DimensionWatcher } from './dimension.ts'; // Track AT
 
 export const EYE_HEIGHT = 1.62;
 
@@ -81,8 +82,13 @@ export class World implements WorldView {
       selfRuntimeId: () => this.self.runtimeId,
     });
     this.inventory = new Inventory(toItem, () => this.self.runtimeId);
+    // Track AT: answers the server's dimension_change_ack (else BDS ignores the movement), reports changes; before subscribe() so 'start' sees the old dimension
+    this.dimensions = new DimensionWatcher(source, { selfRuntimeId: () => this.self.runtimeId, dimension: () => this.self.dimension, loadedColumns: () => this.chunks.loadedCount, logger: this.log });
     this.subscribe();
   }
+
+  /** Track AT: dimension changes (world/dimension.ts). */
+  readonly dimensions: DimensionWatcher;
 
   get entities(): ReadonlyMap<bigint, EntityInfo> {
     return this.entityTracker.entities;
@@ -166,6 +172,7 @@ export class World implements WorldView {
   /** Stop listening to the source. */
   dispose(): void {
     for (const u of this.unsubs.splice(0)) u();
+    this.dimensions.dispose(); // Track AT
   }
 
   // ---- wiring ----------------------------------------------------------------------------------
@@ -240,7 +247,7 @@ export class World implements WorldView {
     });
     this.on<P.ChangeDimension>('change_dimension', (p) => {
       self.dimension = p.dimension;
-      self.pos = feet(p.position);
+      self.pos = { x: p.position.x, y: p.position.y, z: p.position.z }; // Track AT: feet (measured), approximate; the move_player after the ack is exact
       chunks.clear(p.dimension);
       ents.clear();
     });
@@ -346,4 +353,5 @@ export { BlockFinder, classify } from './find.ts';
 export { boxChecksum, typeIdOf } from './checksum.ts';
 export { decodeSubChunk, Layer, Section, localIndex } from './subchunk.ts';
 export { shimFor, SHIMS } from './version-shims/index.ts';
+export { DimensionWatcher, dimensionName, dimensionIdOf } from './dimension.ts'; // Track AT
 export type * from './types.ts';
