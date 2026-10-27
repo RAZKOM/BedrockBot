@@ -260,8 +260,8 @@ sleeps on until the morning; any urgent command wakes it.
 
 While asleep the movement model does not know the sleeping pose: the input loop kept reporting its own
 body and the server corrected it once every 16 ticks (37 corrections in 30 s). The controller now
-reports the server's position (`InputLoop.setTickExtras`: `position` = head centre + 0.90625, no
-movement): 0 corrections while asleep, 1 on entering and 1 on leaving the bed.
+reports the server's position (`InputLoop.setPose`, a slot of its own beside the digger's
+`setTickExtras` since wave 9 Track AK: `position` = head centre + 0.90625, no movement): 0 corrections while asleep, 1 on entering and 1 on leaving the bed.
 
 **Measured (gaunt-sleep e2e, bds-gaunt, every run)**: home = shelter, bed 4 blocks east, time set to
 18000 with the daylight cycle on, a zombie boxed in glass 5 blocks from the bed: refused (monsters)

@@ -68,7 +68,7 @@ The bot answers in chat. Full reply texts and edge cases: docs/runbook.md "Chat 
 |---|---|
 | `!come [name] [now]` | Walks to you (or the named player) and stays there, also beyond the entity range through the locator bar. Fights or flees on the way if it must. Eats first when food or health is below 14 (`coming (eating first)`); at night without a chestplate it refuses unless you add `now`. |
 | `!follow [name]` | Follows you until `!stop`, sprinting to catch up, stopping 3 blocks away. |
-| `!goto x y z` / `!goto <waypoint>` | Walks to a feet block or a saved waypoint. Doors are opened; digging through and pillaring up need `allowBreak` / `allowPlace` (see settings). |
+| `!goto x y z` / `!goto <waypoint>` `[now]` | Walks to a feet block or a saved waypoint. Doors are opened; digging through and pillaring up need `allowBreak` / `allowPlace` (see settings). `now`: the night shelter waits for the walk, like `!come now`. |
 | `!top` | Climbs out of a cave or pit to the nearest spot under the sky. |
 | `!home` / `!home set [x y z]` / `!home go` / `!home clear` | The point it returns to after a respawn and at dawn. `set` without coordinates uses where it stands. |
 | `!shelter` / `!shelter set [x y z]` / `!shelter clear` | Where it waits out the night (from time 12000 to 23000). |

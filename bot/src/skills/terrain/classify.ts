@@ -3,7 +3,7 @@
 // trapdoors (open or closed), fence-like blocks that connect to their neighbours, and what the
 // planner may break (gravity blocks, protected blocks). Cached per state id. See docs/pathfinding.md.
 import type { BlockInfo, Box } from '../../world/types.ts';
-import { boxesOf, connectKindOf, isDoorName, resolveNewerState, type ConnectKind } from './shapes.ts';
+import { boxesOf, CONNECT_EAST, CONNECT_NORTH, CONNECT_SOUTH, CONNECT_WEST, connectedBoxes, connectKindOf, isDoorName, resolveNewerState, type ConnectKind } from './shapes.ts';
 
 export type Liquid = 'water' | 'lava';
 /** Blocks with an open / closed state the body interacts with. */
@@ -45,6 +45,12 @@ export interface TerrainClass {
   doorUpper: boolean;
   /** Fence / pane / bars: collision arms towards the neighbours (terrain/query.ts adds them). */
   connect: ConnectKind | undefined;
+  /**
+   * Track AK: the arms (CONNECT_* bits) the server put in the `minecraft:connection_*` states (BDS 1.26.60
+   * palette); `boxes` then already carry them and terrain/query.ts does not look at the neighbours.
+   * Undefined without those states (minecraft-data's fences): arms from the neighbours.
+   */
+  arms: number | undefined;
   /** A full solid cube (fences and panes connect to it). */
   fullCube: boolean;
   /** Falls when the block under it is removed (sand, gravel, concrete powder, anvils ...). */
@@ -126,7 +132,9 @@ function make(info: BlockInfo): TerrainClass {
   // Unknown runtime ids (block data older than the server) are 1.5-high obstacles: on BDS 1.26.60
   // with the 1.26.30 data every fence, glass pane and iron bars block is unknown, and a 1-high cube
   // would let the planner jump onto a fence.
-  const boxes = info.stateId < 0 && info.solid ? UNKNOWN_BOXES : boxesOf(info);
+  const connect = connectKindOf(name);
+  const arms = connect ? armsOf(info.states) : undefined;
+  const boxes = info.stateId < 0 && info.solid ? UNKNOWN_BOXES : connect && arms !== undefined ? connectedBoxes(connect, arms) : boxesOf(info);
   let top = 0;
   for (const b of boxes) top = Math.max(top, b[4]);
   const covers = boxes.some((b) => b[4] === top && b[0] <= 0.5 && b[3] >= 0.5 && b[2] <= 0.5 && b[5] >= 0.5);
@@ -163,12 +171,33 @@ function make(info: BlockInfo): TerrainClass {
     openable,
     open: Number(info.states.open_bit ?? 0) === 1,
     doorUpper: openable === 'door' && Number(info.states.upper_block_bit ?? 0) === 1,
-    connect: connectKindOf(name),
+    connect,
+    arms,
     fullCube,
     gravity: GRAVITY_NAMES.has(name) || name.endsWith('concrete_powder'),
     protect: isProtected(name),
     roof: (boxes.length > 0 && !leaves) || liquid !== undefined,
   };
+}
+
+const CONNECTION_BITS: readonly (readonly [string, number])[] = [
+  ['minecraft:connection_north', CONNECT_NORTH],
+  ['minecraft:connection_south', CONNECT_SOUTH],
+  ['minecraft:connection_west', CONNECT_WEST],
+  ['minecraft:connection_east', CONNECT_EAST],
+];
+
+/** Track AK: CONNECT_* bits from the `minecraft:connection_*` states (1 / true = an arm), undefined when the block has none of them. */
+export function armsOf(states: Readonly<Record<string, unknown>>): number | undefined {
+  let mask = 0;
+  let any = false;
+  for (const [k, bit] of CONNECTION_BITS) {
+    const v = states[k];
+    if (v === undefined) continue;
+    any = true;
+    if (v === true || Number(v) === 1) mask |= bit;
+  }
+  return any ? mask : undefined;
 }
 
 /**

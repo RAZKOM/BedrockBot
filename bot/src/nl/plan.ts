@@ -19,6 +19,8 @@ const wpName = z.string().regex(/^[a-z0-9_][a-z0-9_-]{0,31}$/);
 const playerName = z.string().regex(/^[A-Za-z0-9_]{1,16}$/);
 const mobType = z.string().regex(/^(minecraft:)?[a-z][a-z0-9_]{1,39}$/);
 const blockName = z.string().regex(/^(minecraft:)?[a-z][a-z0-9_]{1,63}$/);
+/** Track AK: the animals !breed knows (skills/food/breed.ts BREED_FOOD). */
+const BREED_KINDS = ['cow', 'mooshroom', 'sheep', 'pig', 'chicken', 'rabbit'] as const;
 
 /** Settings the model may change (`nlConfirm` is not one of them: only an owner's `!set` turns it off). */
 export const NL_SETTING_KEYS = SETTING_KEYS.filter((k) => k !== 'nlConfirm') as [SettingKey, ...SettingKey[]];
@@ -34,7 +36,7 @@ export const STEP_SCHEMAS = {
   gather: z.strictObject({ command: z.literal('gather'), count: z.number().int().min(1).max(2304) }),
   mine: z.strictObject({ command: z.literal('mine'), block: blockName, count: z.number().int().min(1).max(256) }),
   farm: z.strictObject({ command: z.literal('farm'), radius: z.number().int().min(1).max(32).optional() }),
-  food: z.strictObject({ command: z.literal('food') }),
+  food: z.strictObject({ command: z.literal('food'), pen: z.boolean().optional() }), // Track AK: pen
   eat: z.strictObject({ command: z.literal('eat') }),
   equip: z.strictObject({ command: z.literal('equip') }),
   wp_set: z.strictObject({ command: z.literal('wp_set'), name: wpName, x: coordXZ.optional(), y: coordY.optional(), z: coordXZ.optional() }),
@@ -44,6 +46,9 @@ export const STEP_SCHEMAS = {
   pause: z.strictObject({ command: z.literal('pause') }),
   resume: z.strictObject({ command: z.literal('resume') }),
   get: z.strictObject({ command: z.literal('get'), item: blockName, count: z.number().int().min(1).max(2304).optional() }), // Track AD: !get, the first choice for getting items
+  breed: z.strictObject({ command: z.literal('breed'), type: z.enum(BREED_KINDS).optional(), pairs: z.number().int().min(1).max(8).optional() }), // Track AK
+  panel: z.strictObject({ command: z.literal('panel') }), // Track AK
+  drop: z.strictObject({ command: z.literal('drop'), what: z.enum(['all', 'items']) }), // Track AK: everything / everything but food, armour, tools
   question: z.strictObject({ command: z.literal('question'), text: z.string().min(1).max(200) }),
 } as const;
 
@@ -71,6 +76,9 @@ export const StepSchema = z.discriminatedUnion('command', [
   STEP_SCHEMAS.pause,
   STEP_SCHEMAS.resume,
   STEP_SCHEMAS.get, // Track AD
+  STEP_SCHEMAS.breed, // Track AK
+  STEP_SCHEMAS.panel, // Track AK
+  STEP_SCHEMAS.drop, // Track AK
   STEP_SCHEMAS.question,
 ]);
 export type Step = z.infer<typeof StepSchema>;
@@ -115,6 +123,9 @@ export const COMMAND_SPECS: Record<Exclude<StepKind, 'question'>, CommandSpec> =
   pause: { chat: 'pause', wait: 'none' },
   resume: { chat: 'resume', wait: 'none' },
   get: { chat: 'get', wait: 'process', fail: /^get: / }, // Track AD
+  breed: { chat: 'breed', wait: 'process', done: /^breed: fed /, fail: /^breed: (?!fed )/ }, // Track AK
+  panel: { chat: 'panel', wait: 'none' }, // Track AK
+  drop: { chat: 'drop', wait: 'reply', done: /^(dropped \d+ items of |drop: (inventory empty|nothing but))/, fail: /\(stopped at / }, // Track AK
 };
 
 /** Replies that end any step and the plan. */
@@ -208,6 +219,12 @@ export function stepCommand(s: Step): string {
       return `set ${s.key} ${settingText(s.value)}`;
     case 'get': // Track AD
       return s.count !== undefined ? `get ${s.item} ${s.count}` : `get ${s.item}`;
+    case 'food': // Track AK
+      return s.pen ? 'food pen' : 'food';
+    case 'breed': // Track AK
+      return ['breed', s.type, s.pairs].filter((w) => w !== undefined).join(' ');
+    case 'drop': // Track AK
+      return `drop ${s.what}`;
     case 'question':
       return s.text;
     default:
