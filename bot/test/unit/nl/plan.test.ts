@@ -162,7 +162,7 @@ describe('prompt', () => {
     expect(p).toContain('settings: guardRadius 16');
     expect(p).toContain('[chat: !goto <waypoint> | x y z (walk)]');
     expect(p).toContain('!sleep (not available on this bot)');
-    expect(EXAMPLES).toHaveLength(18); // Track AD: + get; Track AK: + breed, drop, food pen; Track AM: + two answers; Track AL: + build; Track AG: + unload, stock, chests; Track AI: + explore; Track AS: + bring
+    expect(EXAMPLES).toHaveLength(20); // Track AS: + bring; Track AQ: + get several ores, mine several kinds; Track AD: + get; Track AK: + breed, drop, food pen; Track AM: + two answers; Track AL: + build; Track AG: + unload, stock, chests; Track AI: + explore
     for (const e of EXAMPLES) {
       expect(PlanSchema.safeParse(e.plan).success).toBe(true);
       expect(p).toContain(JSON.stringify(e.plan));

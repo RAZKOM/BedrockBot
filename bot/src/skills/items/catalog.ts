@@ -113,6 +113,8 @@ export function entryFor(input: string): CatalogEntry | undefined {
     if (n === 'wood' || n === 'log' || n === 'tree' || n === 'timber') return { strategy: 'gather', item: 'logs', doing: 'gathering wood', note: 'any log kind counts' };
     const w = WOODS.find((k) => n === k || n === `${k}_log` || n === `${k}_wood` || n === `stripped_${k}_log`);
     if (w) return { strategy: 'gather', item: `${w}_log`, doing: 'gathering wood', ...(w === 'oak' ? {} : { note: 'any log kind counts' }) };
+    // Track AQ: every ore kind in one trip (`!get ores 32`: n blocks in all, no quota per kind)
+    if (n === 'ores' || n === 'ore' || n === 'all_ores' || n === 'every_ore') return { strategy: 'mine', item: 'ores', target: 'ores', doing: 'mining every ore kind in one trip', note: 'n blocks of any ore' };
     // ores: coal, coal_ore, deepslate_coal_ore, raw_iron, iron_ingot, diamonds ...
     const base = n.replace(/^deepslate_/, '').replace(/^raw_/, '').replace(/_ore$/, '').replace(/_ingot$/, '').replace(/_lazuli$/, '').replace(/^nether_/, '');
     const ore = ORES[base] ?? (base === 'redstone_dust' ? ORES.redstone : undefined);
@@ -157,6 +159,52 @@ export function parseGetArgs(args: readonly string[]): { name: string; count: nu
   return { name: words.join('_'), count };
 }
 
+/**
+ * Track AQ: several mined items with a count each (`iron 8 coal 16`, `8 iron 16 coal`): one `!mine` with
+ * every kind and its quota, one trip. undefined when the words are not that form (one item: the plain
+ * lookup); an error when they are but an item is unknown or not mined.
+ */
+export function lookupMulti(args: readonly string[]): { items: Extract<Lookup, { command: string }>[]; command: string } | { error: string } | undefined {
+  const isNum = (s: string | undefined) => s !== undefined && /^\d+$/.test(s);
+  const nums = args.filter((w) => isNum(w)).length;
+  if (nums < 2) return undefined;
+  const words = args.filter((w) => w.toLowerCase() !== 'and' && w !== ',' && w !== '&');
+  // count after the name (`iron 8 coal 16`) or before it (`8 iron 16 coal`)
+  const after = isNum(words[words.length - 1]);
+  const pairs: { name: string; count: number }[] = [];
+  let name: string[] = [];
+  let count: number | undefined;
+  for (const w of words) {
+    if (isNum(w)) {
+      if (after) {
+        if (name.length === 0) return { error: 'a count without an item' };
+        pairs.push({ name: name.join('_'), count: Number(w) });
+        name = [];
+      } else {
+        if (count !== undefined) {
+          if (name.length === 0) return { error: 'a count without an item' };
+          pairs.push({ name: name.join('_'), count });
+          name = [];
+        }
+        count = Number(w);
+      }
+    } else name.push(w.replace(/,$/, ''));
+  }
+  if (!after && count !== undefined && name.length > 0) pairs.push({ name: name.join('_'), count });
+  else if (name.length > 0) return { error: `no count for ${name.join(' ')}` };
+  const items: Extract<Lookup, { command: string }>[] = [];
+  for (const p of pairs) {
+    if (p.count < 1) return { error: 'count must be 1 or more' };
+    const f = lookup(p.name, p.count);
+    if (f.strategy === 'unknown') return { error: `I do not know how to get ${f.name}` };
+    if (f.strategy !== 'mine') return { error: `several items in one !get are ores and mined blocks only (${f.name} is ${f.doing})` };
+    if (items.some((x) => x.target === f.target)) return { error: `${f.name} named twice` };
+    items.push(f);
+  }
+  if (items.length < 2) return undefined;
+  return { items, command: `mine ${items.map((f) => `${f.target!} ${f.count}`).join(' ')}` };
+}
+
 /** Look an item up with a count (default per strategy, bounded by the command's own maximum). */
 export function lookup(name: string, count?: number): Lookup {
   const e = entryFor(name);
@@ -168,7 +216,7 @@ export function lookup(name: string, count?: number): Lookup {
 
 /** The categories for the unknown reply. */
 export function categories(): string {
-  return 'wood, ores (coal, iron, gold, copper, diamond, redstone, lapis, emerald), stone, dirt, sand, gravel, flint, clay, food (beef, pork, mutton, chicken), string, crops (wheat, carrots, potatoes, beetroot)';
+  return 'wood, ores (coal, iron, gold, copper, diamond, redstone, lapis, emerald; `ores` = every kind, several with a count each in one trip), stone, dirt, sand, gravel, flint, clay, food (beef, pork, mutton, chicken), string, crops (wheat, carrots, potatoes, beetroot)';
 }
 
 export function unknownReply(name: string): string {

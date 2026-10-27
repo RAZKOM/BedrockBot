@@ -123,7 +123,7 @@ describe('tiers and !help on the afk registry', () => {
     expect(cook[1]).toBe('example: !cook');
     expect(cook[2]).toMatch(/^also on its own: after every hunt/);
     const get = chat.helpReplies(['!get']);
-    expect(get[0]).toMatch(/^!get <item> \[n\] \| stop \| status: makes wood.*never from chests \[work, front door\]$/);
+    expect(get[0]).toMatch(/^!get <item> \[n\] \[<item> n \.\.\.\] \| ores n \| stop \| status: makes wood.*never from chests \[work, front door\]$/); // Track AQ: several kinds per trip
     expect(get[1]).toBe('example: !get wood 16');
     expect(chat.helpReplies(['dance'])).toEqual(['no command !dance; !help all lists every command']);
   });

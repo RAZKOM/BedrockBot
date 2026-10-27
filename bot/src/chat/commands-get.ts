@@ -7,6 +7,8 @@
 //   !get stop                       stops whichever job `!get` started (or any gather / mine / food / farm)
 //   !get status                     get: 4 coal via !mine coal_ore 4: mine coal_ore 2/4 (dig, 0 skipped); stash: ...
 //   !get bread                      get: I do not know how to get bread; I can get: wood (...), ores (...), ...
+//   !get iron 8 coal 16             Track AQ: several ores in one trip (`!mine iron_ore 8 coal_ore 16`)
+//   !get ores 32                    Track AQ: every ore kind, 32 blocks in all (`!mine ores 32`)
 //
 // Farming runs one round of the field around the bot (until nothing is left to do), or until n of
 // that crop were harvested, then the farm process is stopped. The stash step (skills/container/
@@ -16,7 +18,7 @@
 import type { Containers } from '../world/containers.ts';
 import type { Logger } from '../log.ts';
 import { setStash, Stash, stashFor, stepLine } from '../skills/container/stash.ts';
-import { lookup, parseGetArgs, unknownReply, type Lookup } from '../skills/items/catalog.ts';
+import { lookup, lookupMulti, parseGetArgs, unknownReply, type Lookup } from '../skills/items/catalog.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import type { Process, ProcessManager } from '../tasks/process/manager.ts';
@@ -77,13 +79,16 @@ export class GetController {
     if (args.length === 0) return reply('usage: !get <item> [n] | stop | status');
     if (args.length === 1 && a === 'stop') return reply(this.stop());
     if (args.length === 1 && a === 'status') return reply(this.status());
-    const p = parseGetArgs(args);
-    if ('error' in p) return reply(`usage: !get <item> [n] (${p.error})`);
-    const f = lookup(p.name, p.count);
+    // Track AQ: several ores with a count each: one `!mine` job, one trip
+    const multi = lookupMulti(args);
+    if (multi && 'error' in multi) return reply(`usage: !get <item> n <item> n ... (${multi.error})`);
+    const p = multi ? undefined : parseGetArgs(args);
+    if (p && 'error' in p) return reply(`usage: !get <item> [n] (${p.error})`);
+    const f: Lookup = multi ? { ...multi.items[0]!, item: multi.items.map((x) => `${x.count} ${x.item}`).join(', '), count: multi.items.reduce((a, x) => a + x.count, 0), command: multi.command, doing: `mining ${multi.items.map((x) => x.target).join(', ')} in one trip` } : lookup(p!.name, p!.count);
     if (f.strategy === 'unknown') return reply(unknownReply(f.name));
     this.clearJob();
-    const hint = this.stockHint?.(f, p.name); // Track AS
-    reply(hint ? `${hint}; ${f.doing} anyway` : startLine(f));
+    const hint = p ? this.stockHint?.(f, p.name) : undefined; // Track AS (a single kind; a multi-kind job has no hint)
+    reply(hint ? `${hint}; ${f.doing} anyway` : multi ? `getting ${f.item}: ${f.doing}` : startLine(f));
     const kind = f.command.split(' ')[0]!;
     const before = new Set(this.h.processes.userProcesses());
     this.h.dispatch(line, f.command);
@@ -199,7 +204,7 @@ export function registerGetCommands(d: CommandDeps, extra: GetExtra = {}): GetCo
   };
   d.chat.register({
     name: 'get',
-    help: '<item> [n] | stop | status (makes wood, ore, stone, food, crops; never from chests)',
+    help: '<item> [n] [<item> n ...] | ores n | stop | status (makes wood, ore, stone, food, crops; never from chests)',
     tier: 'front', group: 'work', example: '!get wood 16', auto: 'the stash step: a full inventory during a job goes into stashChest, the job chest or a carried shulker box, then junk is dropped', // Track AM
     run: ({ line, args, reply }) => {
       c.run(line, args, reply);
