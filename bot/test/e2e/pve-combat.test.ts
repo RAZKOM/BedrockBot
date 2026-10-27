@@ -5,7 +5,11 @@
 // (truth:hurtlog). Track V (wave 7) adds: a summoned phantom is not chased while a zombie walking up
 // meanwhile is killed; 5 skeleton duels in iron armour with the arrow hits counted (truth:combatlog
 // projectile hits); a sword only in the main inventory is moved into the hotbar before the first strike
-// (truth:combatlog records the held item of every hit). Needs BDS_E2E=1 and bds-pve with the truth pack
+// (truth:combatlog records the held item of every hit). Track AH (wave 9) adds re-targeting within reach
+// against the old single target, runs alternating (`PVE_RETARGET_RUNS` each, default 5; zombies with
+// resistance `PVE_RETARGET_RESISTANCE`, default 1 = 40 %): two zombies 2 blocks apart with the bot between
+// them (both die, the fight switches, hits printed), and a zombie behind the bot while it is sent at one
+// 8 blocks away (fewer hits taken than the single target; truth:hurtlog). Needs BDS_E2E=1 and bds-pve with the truth pack
 // (`node scripts/bds.mjs --profile pve up` and `... pack`).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { KILL_REFUSED } from '../../src/chat/commands-pve.ts';
@@ -29,8 +33,10 @@ import {
   tracked,
   uniqueName,
   until,
+  type MobInfo,
   type PveBot,
 } from './pve-truth.ts';
+import type { Vec3 } from '../../src/world/types.ts';
 
 /** truth:combatlog records (packs/truth/src/combat.ts, Track V). */
 interface CombatRecord {
@@ -49,6 +55,8 @@ async function combatlog(b: PveBot, since: number): Promise<CombatRecord[]> {
 }
 
 const SKELETON_RUNS = Number(process.env.PVE_SKELETON_RUNS ?? 5);
+const RETARGET_RUNS = Number(process.env.PVE_RETARGET_RUNS ?? 5);
+const RETARGET_RESISTANCE = Number(process.env.PVE_RETARGET_RESISTANCE ?? 1);
 
 describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
   let bot: PveBot | undefined;
@@ -180,7 +188,7 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
     const fleeMs = Date.now() - t0;
     const at = await until(async () => {
       const p = await b.truth.pos(b.name);
-      return hdist(p.location, centre(SHELTER)) < 1.5 ? p : undefined;
+      return hdist(p.location, centre(SHELTER)) < 2.1 ? p : undefined; // flee v2 (Track W) ends 'arrived' within 2 blocks
     }, 30_000, 'at the shelter', 250);
     const line = `flee: fleeing ${fleeMs} ms after health 5, at the shelter ${fmt(at.location)} after ${Date.now() - t0} ms (${hdist(centre(HOME), centre(SHELTER)).toFixed(1)} blocks)`;
     console.log(line);
@@ -337,4 +345,92 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
     await b.truth.cleanup();
     await teleport(b, centre(HOME));
   }, 120_000 * SKELETON_RUNS);
+
+  // ---- Track AH (wave 9): re-targeting within reach ------------------------------------------------
+
+  /**
+   * One run: summon the zombies (resistance II: 8 iron-sword hits instead of 3, zombies in armour as on
+   * the Realm), fight the requested one with re-targeting on or off, then whatever is left (nearest
+   * first) until both are dead. Hits taken from truth:hurtlog.
+   */
+  async function zombiePair(b: PveBot, at: Vec3, mode: 'on' | 'off', layout: 'flank' | 'far'): Promise<{ dead: number; hits: number; damage: number; retargets: number; ticks: number; fights: number; ms: number }> {
+    await b.truth.cleanup();
+    await b.truth.clearAround(centre(at), 16);
+    await teleport(b, centre(at));
+    await b.truth.setHealth(b.name, 20);
+    await until(() => (b.pve.health() >= 20 ? true : undefined), 5_000, 'health 20');
+    const since = await b.truth.now();
+    const c = centre(at);
+    // flank: 2 blocks apart, the bot between them (one in front, one behind)
+    // far: the requested zombie 8 blocks away and held in place (slowness), another one 1.5 blocks behind the bot
+    const spots = layout === 'flank' ? [{ x: c.x + 1, z: c.z }, { x: c.x - 1, z: c.z }] : [{ x: c.x + 8, z: c.z }, { x: c.x - 1.5, z: c.z }];
+    const zs: MobInfo[] = [];
+    for (const p of spots) zs.push(await b.truth.summon('zombie', { x: p.x, y: FEET_Y, z: p.z }));
+    for (const z of zs) await b.truth.effect(z.entityId, 'resistance', 120, RETARGET_RESISTANCE);
+    if (layout === 'far') await b.truth.effect(zs[0]!.entityId, 'slowness', 120, 255);
+    const rids = [await tracked(b, zs[0]!), await tracked(b, zs[1]!)];
+    const t0 = Date.now();
+    let fights = 0;
+    let retargets = 0;
+    let ticks = 0;
+    let first = true;
+    for (;;) {
+      const ents = b.built.mobility!.world.entities;
+      const me = b.task.position()!;
+      const alive = rids.filter((r) => ents.has(r) && !b.pve.mobs.get(r)?.dead);
+      if (alive.length === 0 || Date.now() - t0 > 40_000) break;
+      alive.sort((x, y) => hdist(me, ents.get(x)!.pos) - hdist(me, ents.get(y)!.pos));
+      // the first fight is on the requested zombie (zs[0]); then the nearest left
+      const target = first && alive.includes(rids[0]!) ? rids[0]! : alive[0]!;
+      first = false;
+      const r = await b.pve.combat.fight(target, { retarget: mode === 'on', timeoutTicks: 600 });
+      fights++;
+      retargets += r.retargets ?? 0;
+      ticks += r.ticks;
+    }
+    const ms = Date.now() - t0;
+    await sleep(500);
+    const states = await Promise.all(zs.map((z) => b.truth.entity(z.entityId)));
+    const dead = states.filter((x) => x.valid === false || (x.health ?? 1) <= 0).length;
+    const hurt = (await b.truth.hurtlog(since)).events.filter((h) => h.victimName === b.name);
+    return { dead, hits: hurt.length, damage: +hurt.reduce((a, h) => a + h.damage, 0).toFixed(2), retargets, ticks, fights, ms };
+  }
+
+  for (const layout of ['flank', 'far'] as const) {
+    const title =
+      layout === 'flank'
+        ? `two zombies 2 blocks apart, the bot between them: both die, the fight switches; re-targeting vs one target at a time (${RETARGET_RUNS} runs each)`
+        : `a zombie behind the bot while it is sent at one 8 blocks away: re-targeting takes fewer hits than the single target (${RETARGET_RUNS} runs each)`;
+    it(title, async () => {
+      const b = bot!;
+      b.pve.setGuard({ on: false });
+      b.pve.stop();
+      if (!b.built.mobility!.world.inventory.slots.slice(0, 9).some((s) => s?.name === 'iron_sword')) await b.truth.ok('give', [b.name, 'iron_sword', 1]);
+      const sum = { on: { hits: 0, damage: 0, retargets: 0, ticks: 0 }, off: { hits: 0, damage: 0, retargets: 0, ticks: 0 } };
+      for (let i = 0; i < 2 * RETARGET_RUNS; i++) {
+        const mode = i % 2 === 0 ? 'on' : 'off';
+        const at = { x: HOME.x - 60 + 30 * (i % 5), y: FEET_Y, z: HOME.z + (layout === 'flank' ? -50 : 60) - 30 * Math.floor(i / 5) };
+        const deaths0 = b.built.respawn!.deaths;
+        const r = await zombiePair(b, at, mode, layout);
+        sum[mode].hits += r.hits;
+        sum[mode].damage += r.damage;
+        sum[mode].retargets += r.retargets;
+        sum[mode].ticks += r.ticks;
+        const line = `${layout}, re-targeting ${mode}, run ${Math.floor(i / 2) + 1}: ${r.dead}/2 dead in ${r.fights} fight(s), ${r.ticks} ticks (${r.ms} ms), ${r.retargets} retarget(s), bot hit ${r.hits} times (${r.damage} damage)`;
+        console.log(line);
+        measurements.push(line);
+        expect(b.built.respawn!.deaths).toBe(deaths0);
+        expect(r.dead).toBe(2);
+      }
+      const line = `${layout} over ${RETARGET_RUNS} runs each: re-targeting on ${sum.on.hits} hits (${sum.on.damage.toFixed(1)} damage, ${sum.on.retargets} retargets, ${sum.on.ticks} fight ticks), single target ${sum.off.hits} hits (${sum.off.damage.toFixed(1)} damage, ${sum.off.ticks} fight ticks)`;
+      console.log(line);
+      measurements.push(line);
+      expect(sum.on.retargets).toBeGreaterThanOrEqual(1);
+      // flank: no reduction measured (docs/pve.md "Targeting": knockback keeps both zombies off either way); not worse beyond noise
+      if (layout === 'flank') expect(sum.on.hits).toBeLessThanOrEqual(sum.off.hits + RETARGET_RUNS);
+      else expect(sum.on.hits).toBeLessThan(sum.off.hits);
+      await b.truth.cleanup();
+      await teleport(b, centre(HOME));
+    }, 60_000 * 2 * RETARGET_RUNS);
+  }
 });

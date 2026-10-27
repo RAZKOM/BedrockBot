@@ -14,11 +14,19 @@
 // - after a fight: `out_of_range` / `unreachable` ignore the mob for 10 s, `took_cover` 3 s,
 //   `creeper_avoided` / `interrupted` not at all, anything else 30 s. The next target
 //   is picked on the next manager tick (the ignore never blocks another mob).
+//
+// Track AH (wave 9, combat v3, docs/pve.md "Targeting", decision 0029):
+// - inside a fight the target is re-picked among the threats within reach (eye to box <= 3.2) on
+//   every strike cycle (`pickInReach`): the mob that hit us in the last 10 s first, then a creeper,
+//   then the nearest; the current target keeps a 0.3-block bonus so two equidistant mobs do not
+//   flap. A target that leaves reach while another threat is in reach is dropped at once.
+// - crowd rule (`crowdOf`, `crowded`): 3 or more melee threats within 4 blocks and health below 12:
+//   the fight ends `crowded` and `wantsFlee` is true for them (the flee trigger, like a creeper).
 import type { Logger } from '../../log.ts';
 import type { EntityInfo, Vec3 } from '../../world/types.ts';
 import type { TerrainClass } from '../terrain/classify.ts';
 import { EYE_HEIGHT, type FightResult } from './combat.ts';
-import { bareType, classify, entityFeet, isCreeper, isFlying, isPlayerEntity, reachDistance, type MobTracker } from './hostiles.ts';
+import { bareType, classify, entityFeet, isArcher, isCreeper, isFlying, isPlayerEntity, RANGED_TYPES, reachDistance, type MobTracker } from './hostiles.ts';
 
 /** Eye-to-box distance that counts as "within reach now". */
 export const REACH_NOW = 3.2;
@@ -34,6 +42,17 @@ export const MAX_DY = 6;
 export const ABOVE_CELL = 1.5;
 /** Extra chase distance beyond the guard radius (from the bot). */
 export const CHASE_EXTRA = 16;
+
+/** Track AH: how long a hit makes its mob the first choice within reach (ms). */
+export const HIT_MEMORY_MS = 10_000;
+/** Track AH: the current target's bonus (blocks) when the target is re-picked within reach. */
+export const RETARGET_BONUS = 0.3;
+/** Track AH: the crowd rule: this many melee threats ... */
+export const CROWD_COUNT = 3;
+/** ... within this distance (3D, feet to feet) ... */
+export const CROWD_RANGE = 4;
+/** ... with the health below this end the fight `crowded` and want a flight. */
+export const CROWD_HEALTH = 12;
 
 /** The planner's grid as targeting reads it (NavGrid satisfies it). */
 export interface GridLike {
@@ -57,6 +76,8 @@ export interface TargetingHost {
   readonly log: Logger;
   health(): number;
   position(): Vec3;
+  /** Track AH: the combat skill's switches (`crowdRule` false turns the crowd rule off for both sides). */
+  readonly combat?: { readonly crowdRule?: boolean; readonly busy?: boolean; readonly crowdedRecently?: boolean };
 }
 
 export interface ThreatPick {
@@ -186,9 +207,101 @@ export function pickThreat(h: TargetingHost, me: Vec3, low: boolean): ThreatPick
  * Track W's flee trigger from this side: a creeper within 8 blocks while the health is below 10 (the
  * bot does not engage it; the combat skill only keeps away, reporting `creeper_avoided`).
  */
-export function wantsFlee(h: Pick<TargetingHost, 'health' | 'position'>, threat: EntityInfo): boolean {
-  if (!isCreeper(threat.type) || h.health() >= CREEPER_MIN_HEALTH || h.health() <= 0) return false;
+export function wantsFlee(h: Pick<TargetingHost, 'health' | 'position'> & Partial<Pick<CrowdHost, 'mobs' | 'd' | 'combat'>>, threat: EntityInfo): boolean {
+  if (h.health() <= 0) return false;
+  if (!isCreeper(threat.type)) return h.mobs && h.d ? crowded(h as CrowdHost, h.position()).some((e) => e.runtimeId === threat.runtimeId) : false; // Track AH: the crowd rule
+  if (h.health() >= CREEPER_MIN_HEALTH) return false;
   return dist(entityFeet(threat), h.position()) <= CREEPER_AVOID_RANGE;
+}
+
+// ---- Track AH: re-targeting within reach, the crowd rule ----------------------------------------
+
+/** A melee threat: not a creeper (its own rules), not an archer or another ranged mob (a drowned without a trident is melee). */
+export function isMelee(e: EntityInfo, mobs: Pick<MobTracker, 'get'>): boolean {
+  const b = bareType(e.type);
+  if (isCreeper(e.type) || isArcher(e, mobs)) return false;
+  return !RANGED_TYPES.has(b) || b === 'drowned';
+}
+
+/** The melee threats within CROWD_RANGE of `me` (3D, feet to feet). */
+export function crowdOf(entities: Iterable<EntityInfo>, mobs: MobTracker, me: Vec3): EntityInfo[] {
+  const out: EntityInfo[] = [];
+  for (const e of entities) {
+    if (!isThreat({ mobs }, e) || !isMelee(e, mobs)) continue;
+    if (dist(entityFeet(e), me) <= CROWD_RANGE) out.push(e);
+  }
+  return out;
+}
+
+/** What the crowd rule reads (PveController satisfies it). */
+export interface CrowdHost {
+  readonly mobs: MobTracker;
+  readonly d: { readonly world: { readonly entities: ReadonlyMap<bigint, EntityInfo> } };
+  health(): number;
+  /** The combat skill: the rule's switch; while it fights, the fight decides (it ends `crowded`, then the flight comes). */
+  readonly combat?: { readonly crowdRule?: boolean; readonly busy?: boolean; readonly crowdedRecently?: boolean } | undefined;
+}
+
+/**
+ * The crowd rule: CROWD_COUNT (3) or more melee threats within CROWD_RANGE (4) and health below
+ * CROWD_HEALTH (12) -> the crowd (nearest first), else []. Off when `combat.crowdRule` is false.
+ * While a fight runs the fight applies it (it ends `crowded`; `crowdedRecently` for 5 ticks after,
+ * so a kill job's next fight does not hide it); a fight that keeps going (started right after a
+ * `crowded` end that brought no flight) is not overridden.
+ */
+export function crowded(h: CrowdHost, me: Vec3): EntityInfo[] {
+  const hp = h.health();
+  if (h.combat?.crowdRule === false || hp <= 0 || hp >= CROWD_HEALTH) return [];
+  if (h.combat?.busy && !h.combat.crowdedRecently) return [];
+  const c = crowdOf(h.d.world.entities.values(), h.mobs, me);
+  if (c.length < CROWD_COUNT) return [];
+  return c.sort((a, b) => dist(entityFeet(a), me) - dist(entityFeet(b), me));
+}
+
+/** The flee trigger from the crowd rule (`PveController.fleeReason`): the nearest of the crowd, if crowded. */
+export function crowdThreat(h: CrowdHost, me: Vec3): EntityInfo | undefined {
+  return crowded(h, me)[0];
+}
+
+export interface ReachCandidate {
+  e: EntityInfo;
+  /** Eye to box distance. */
+  reach: number;
+  hitUs: boolean;
+  creeper: boolean;
+}
+
+/** The threats within `reach` of the eye (players, the dead and, with `noCreepers`, creepers left out). */
+export function inReach(entities: Iterable<EntityInfo>, mobs: MobTracker, eye: Vec3, opts: { reach?: number; noCreepers?: boolean } = {}): ReachCandidate[] {
+  const out: ReachCandidate[] = [];
+  for (const e of entities) {
+    if (!isThreat({ mobs }, e)) continue;
+    const creeper = isCreeper(e.type);
+    if (creeper && opts.noCreepers) continue;
+    const r = reachDistance(eye, e);
+    if (r > (opts.reach ?? REACH_NOW)) continue;
+    out.push({ e, reach: r, hitUs: mobs.hitUsWithin(e.runtimeId, HIT_MEMORY_MS), creeper });
+  }
+  return out;
+}
+
+/**
+ * The best target among candidates within reach: a mob that hit us in the last 10 s first, then a
+ * creeper, then the nearest (eye to box); `current` gets RETARGET_BONUS. Every mob that hit us within
+ * the 10 s ranks the same (not only the very last one): two zombies taking turns must not make the
+ * bot alternate between them on every strike cycle, which spreads its damage and keeps both alive
+ * longer (docs/pve.md "Targeting", measured). undefined = no candidate.
+ */
+export function pickInReach(cands: readonly ReachCandidate[], current: bigint | undefined): ReachCandidate | undefined {
+  let best: { c: ReachCandidate; score: number } | undefined;
+  for (const c of cands) {
+    let score = c.reach;
+    if (c.hitUs) score -= 100;
+    else if (c.creeper) score -= 50;
+    if (c.e.runtimeId === current) score -= RETARGET_BONUS;
+    if (!best || score < best.score) best = { c, score };
+  }
+  return best?.c;
 }
 
 /** How long (ms) a mob is not picked again after a fight that ended `reason`; 0 = not ignored. */
@@ -197,6 +310,7 @@ export function ignoreMsAfter(reason: FightResult['reason']): number {
     case 'killed':
     case 'creeper_avoided':
     case 'interrupted':
+    case 'crowded': // Track AH: a flight follows; the mob is still a target afterwards
       return 0;
     case 'out_of_range':
     case 'unreachable':

@@ -17,7 +17,10 @@ target); without walking every command answers `<cmd> needs a task that can walk
 |---|---|
 | `bot/src/skills/combat/hostiles.ts` | `classify(type)` (hostile / neutral / passive / player / item / other), type-name matching (`zombified_piglin` = `zombie_pigman`, `villager` = `villager_v2`), entity feet / box / reach, `MobTracker`: per-mob health, creeper fuse, `target_eid`, hurt and death animations, own health drops and the `lastHitBy` guess |
 | `bot/src/skills/combat/combat.ts` | `CombatController`: `fight(runtimeId, opts)`, `attack(runtimeId)`, `selectWeapon()`, `pullWeapon()`, the attack packet builders, `coverCell` |
-| `bot/src/skills/combat/targeting.ts` | Track V: `isThreat`, `nearestHostile`, `pickThreat` (reachability-aware, creepers first), `reachability`, `wantsFlee(threat)`, `afterFight` / `ignoreMsAfter` |
+| `bot/src/skills/combat/targeting.ts` | Track V: `isThreat`, `nearestHostile`, `pickThreat` (reachability-aware, creepers first), `reachability`, `wantsFlee(threat)`, `afterFight` / `ignoreMsAfter`; Track AH: `inReach` / `pickInReach` (re-targeting), `crowdOf` / `crowded` / `crowdThreat` (crowd rule) |
+| `bot/src/skills/combat/shield.ts` | Track AH: `ShieldController`: shield into the offhand, archer shot prediction (`threat`, `shotDue`), the offhand item stack request |
+| `packs/truth/src/shield.ts` | Track AH: truth commands `stance` (isSneaking, offhand item and durability) and `blocklog` (mob melee swings and projectiles reaching a player, with the stance and the shield's durability) |
+| `bot/test/unit/skills/combat-v3.test.ts`, `bot/test/e2e/pve-crowd.test.ts` | Track AH unit tests on fakes; e2e (crowd rule, shield) on bds-pve; the re-targeting e2e is in `pve-combat.test.ts` |
 | `bot/src/skills/container/hotbar-moves.ts` | Track V: `ensureInHotbar` (main inventory -> hotbar through the task's Containers), `HotbarPuller` (failure memory, the Digger's `pullTool` hook), `digToolScore` |
 | `bot/src/skills/follow/follow.ts` | `FollowController`: `follow({ runtimeId } \| { playerName })`, `come(playerName)`, `stop()` |
 | `bot/src/tasks/pve.ts` | `PveController`: guard, flee, follow, come, kill, a resumable goto, behaviour line, options |
@@ -137,8 +140,144 @@ beef because the sword was in the main inventory. Decision record:
   `fleeHealth`, inside the shelter) creepers are never picked. `PveController.wantsFlee(threat)` is
   true for a creeper within 8 blocks below health 10 (the hook for Track W's FleeProcess).
 - **After a fight** (`afterFight`, also the guard process): `out_of_range` and `unreachable` 10 s,
-  `took_cover` 3 s, `killed` / `creeper_avoided` / `interrupted` not ignored, anything else 30 s. The
-  ignore list never blocks another mob: the next one is picked on the next evaluation.
+  `took_cover` 3 s, `killed` / `creeper_avoided` / `interrupted` / `crowded` (Track AH) not ignored,
+  anything else 30 s. The ignore list never blocks another mob: the next one is picked on the next
+  evaluation.
+
+#### Re-targeting within reach (wave 9, Track AH, decision 0029)
+
+The owner: "why not just always target whatever it can within its reach? instead of risking a hit".
+Track W saw a guard fight stay locked on one zombie while a second one landed 10 hits. Inside a fight
+(`CombatController`, `targeting.inReach` / `pickInReach`):
+
+- **On every strike cycle** (10 ticks after the last strike) the target is re-picked among the
+  threats within reach (eye to box at most 3.2; players, the dead and, below health 10 or in place,
+  creepers left out): **a mob that hit us in the last 10 s first, then a creeper, then the nearest**;
+  the current target gets a 0.3-block bonus so two equidistant mobs do not flap.
+- **A target out of reach while another threat is in reach is dropped at once** (no chase while
+  anything is in reach), except right after our own strike knocked it there: then the decision waits
+  for the next strike cycle (it usually walks back into reach by then).
+- **The new target is faced at once** (one tick, not 40 degrees per tick). BDS does not check the view
+  direction of an attack strictly (Packets); a 180-degree turn at 40 per tick cost 5 ticks per switch.
+- **Kill, next**: when the target dies another threat within reach is fought next in the same fight;
+  when nothing is in reach and the fight was switched away from the requested target, it goes back
+  to it. `FightResult` keeps the requested target (`runtimeId`, `type`, `ok` = it died) and adds
+  `retargets` (switches away from a live target), `kills`, `shieldTicks`; the log line ends with
+  `, 2 retarget(s), 2 kill(s)`; switches log `combat: retarget zombie #433 -> zombie #434 (it hit us,
+  strike cycle)` / `(zombie out of reach)`, the next mob after a kill `combat: next ...`.
+- **Not** while the target is a creeper (hit and run moves the bot out of reach on purpose) or during
+  a creeper interlude; `FightOptions.retarget: false` (or `combat.retarget = false`) is the old single
+  target.
+- **Who hit us**: `MobTracker` now takes the attacker from BDS's own signal. The attacker's
+  `entity_event { event_id: 'arm_swing' }` arrives in the same batch as the bot's hurt
+  (`set_entity_motion` knockback, `entity_event hurt_animation` data 2, `update_attributes` health) and
+  matched truth:blocklog's attacker in every hit of the probe (two zombies taking turns). A mob within
+  5 blocks that swung in the last 250 ms is the guess (`why: 'swing'`, the latest swing wins), before
+  the old rules (targets us, faces us, ranged, nearest). Every mob that hit us within 10 s ranks the
+  same (`MobTracker.hitUsWithin`), not only the very last one: with the last one only, two zombies
+  taking turns made the bot switch on every hit.
+
+Measured on bds-pve (iron sword, no armour, zombies with resistance II so a kill takes 5 hits; runs
+alternating on / off, 5 each; `pve-combat` e2e):
+
+| Layout | Re-targeting on | Single target (old) |
+|---|---|---|
+| Two zombies 2 blocks apart, the bot between them | 14 hits taken over 10 runs (two gate runs: 4 and 10), 2 to 4 switches per run, about 100 ticks per pair | 9 hits (3 and 6), about 100 ticks per pair |
+| Sent at a zombie 8 blocks away (held in place), another 1.5 blocks behind the bot | 1 hit over 10 runs (1 and 0), 1 switch per run (to the zombie behind), about 145 ticks | 6 hits (4 and 2), about 140 ticks |
+
+What the numbers say: next to the bot re-targeting is slightly worse (0 to 4 hits per run against 0 to
+2; knockback keeps both zombies off either way and focusing on one kills it sooner); an earlier version that switched at once on every knockback and turned 40
+degrees per tick took 13 hits against 5 (it alternated between the two, spreading its damage and
+standing still while turning), hence the knockback grace and the instant turn. The gain is where
+Track W saw it: a fight on a target that is not in reach while another mob is.
+
+#### Crowd rule (wave 9, Track AH)
+
+**3 or more melee threats within 4 blocks (3D, feet to feet) and health below 12**: the fight ends
+`crowded` and the PvE controller turns it into a flight, like a creeper the bot does not engage
+(`targeting.crowded` / `crowdThreat`, `wantsFlee(threat)` is true for the members; one line in
+`PveController.fleeReason`). Melee = a threat that is not a creeper, not an archer and not another
+ranged mob (a drowned without a trident is melee). While a fight runs the fight decides: the flee
+trigger counts the crowd only when no fight runs, or within 5 ticks of a `crowded` end
+(`combat.crowdedRecently`, so a kill job's next fight does not hide it). A fight started within 3 s of
+a `crowded` end applies no crowd rule (no flight came: flee was on its cooldown or cornered), so the
+bot defends instead of ending fights forever. `combat.crowdRule = false` turns the rule off on both
+sides. Counters: `totals.crowded`, metrics `pve.fight.crowded`.
+
+Measured on bds-pve (`pve-crowd` e2e): guard on, health 10, a zombie fought and 3 more summoned around
+the bot: the fight ended `crowded` 572 to 594 ms after the summons and the flight started in the same
+evaluation. Iron armour, iron sword, 3 zombies at health 11, 45 s per run:
+
+| Crowd rule | Damage per run | Deaths | Zombies killed | Flights |
+|---|---|---|---|---|
+| on | 5.5, 2.8, 5.5, 8.6, 12.4, 2.8 (mean 6.3; lowest health 3.6) | 0 | 8 of 18 | 9 |
+| off | 4.1, 1.4, 2.8, 9.7, 4.1, 4.1 (mean 4.4; lowest health 5.8) | 0 | 9 of 18 | 7 |
+
+Two gate runs of 3 runs each in the table; over all 6 suite runs (18 runs each) the mean damage was
+5.2 with the rule and 5.3 without, no death either way. The rule did not reduce the damage in this setting: in iron armour 3
+zombies do little (a zombie hit is 1.4 through iron), the bot at 11 health also runs without the rule
+(flee v2's low-health and recovery flights), and a flight with 3 zombies on its heels takes hits too
+(the run with 12.4 damage). No death either way. The rule is kept as the brief's trigger for the
+unarmoured case and larger crowds; its numbers (3, 4, 12) are constants in targeting.ts
+(`CROWD_COUNT`, `CROWD_RANGE`, `CROWD_HEALTH`) and `combat.crowdRule = false` turns it off.
+
+### Shield (wave 9, Track AH, `skills/combat/shield.ts`)
+
+A shield in the inventory goes to the **offhand** (only when no fight runs and no other window is
+open; an offhand holding anything else, a totem, is left alone; a refused move is not retried for 30
+s). In a fight the shield is **raised** (the bot sneaks) while an archer's shot is due and the bot is
+not striking, and for **10 ticks after a creeper's fuse lights**, backing off facing the creeper
+(forward -1), then the usual sprint away. It is never raised on a strike tick or within reach of a
+melee target (`f.striking`), and never outside fights.
+
+Verified on BDS 1.26.60.6 (truth:stance, truth:blocklog, docker bds-pve):
+
+- **Offhand placement**, with the inventory screen open (`interact open_inventory` ->
+  `container_open { window_id: 2, window_type: 'inventory' }`):
+  `item_stack_request { requests: [{ request_id, actions: [{ type_id: 'place', legacy_type_id: 1,
+  count: 1, source: { slot_type: { container_id: 'hotbar' }, slot: 1, stack_id: 2 }, destination: {
+  slot_type: { container_id: 'offhand' }, slot: 1, stack_id: 0 } }], custom_names: [], cause:
+  'chat_public' }] }` -> `item_stack_response { status: 'ok', containers: [{ hotbar, slot 1, count 0 },
+  { offhand, slot 1, count 1, item_stack_id 2 }] }` and `inventory_content { window_id: 'offhand' (119),
+  input: [shield] }`; truth:stance then shows `minecraft:shield` in the Offhand equipment slot. The
+  same request **without the screen is refused (status 50)**, as for armour. (The offhand's
+  `slot_type` slot is 1; the model keeps it in window 119 slot 0.) Request ids count down from -300001.
+- **Raising it is only sneaking**: player_auth_input `sneak_down` / `sneaking` / `start_sneaking`
+  (`MoveCommand.sneak`). The server answers with the actor flag `sneaking` in set_entity_data and
+  stamps the offhand item's `blocking_tick` (inventory_content 119: `blocking_tick: [0, <tick>]`, back
+  to 0 when the sneak ends); Script API `Player.isSneaking` is true. No item-use or interact packet is
+  involved.
+- **What it blocks**: standing still facing a zombie, shield up for 8 s: the zombie swung 5 times, 0 damage, 0 hurt events, 20 shield durability used (the same in every one of 4 suite runs); shield
+  down: 7 swings, 7 hits, 21 damage. In the probe each blocked zombie hit cost the shield 4 durability, a
+  blocked arrow 5; a zombie hitting from **behind** still did 3 (only the front is covered), and a
+  blocked zombie came back after about 30 ticks instead of 20 (knockback).
+- **The archer's draw is not visible to a client**: a skeleton sends no flag or metadata while it
+  draws (only `target_eid` when it starts targeting). The shot shows as `level_sound_event { sound_id:
+  'bow', entity_unique_id: <the skeleton, as [hi, lo]> }` with the arrow's `add_entity`. On normal it
+  shot every 61 ticks, the first shot 62 ticks after `target_eid`. So the shot is **predicted**: from
+  the last bow sound (else from when it started targeting us) every 61 ticks, the shield up from 14
+  ticks before to 8 after (`shotDue`); plus any arrow first seen less than 20 ticks ago within 12
+  blocks flying at the bot. Archers farther than 16 blocks are not watched.
+
+Measured (`pve-crowd` e2e, skeleton duels at 10 blocks, skeletons with resistance III so the duel
+lasts 8 hits, 5 duels with and 5 without the shield per suite run, alternating):
+
+| Suite run | With shield: arrows reaching / hurting (damage) | Without: reaching / hurting (damage) | Shield up |
+|---|---|---|---|
+| no armour | 9 / 6 (25.0) | 11 / 11 (45.0) | 103 ticks |
+| iron armour | 10 / 8 (16.0) | 9 / 9 (18.5) | 80 ticks |
+| iron armour | 9 / 6 (10.4) | 9 / 9 (16.2) | 86 ticks |
+| iron armour | 10 / 9 (19.0) | 11 / 11 (22.3) | 72 ticks |
+| iron armour | 10 / 7 (14.1) | 8 / 8 (15.9) | 113 ticks |
+
+So the prediction catches about a quarter of the arrows (12 of 48 blocked over 25 duels; arrows that
+hurt 36 with the shield against 48 without; the arrows that got through
+mostly arrived while the bot was in reach of the skeleton, striking, or outside the predicted window:
+the skeleton's period shifts after it is hit). Without armour one duel without the shield killed the bot
+(4 arrows of 6), hence the armour in the suite now. The duels with the shield are a little slower
+(sneaking slows the approach). Creeper duels with the shield, 3 per suite run, 9 in all: all killed in
+110 to 120 ticks with 3 strikes, the shield up 10 or 20 ticks (one or two fuses), **0 explosion
+damage, 0 damage**: backing off with the shield for 10 ticks did not let a fuse run out.
 
 ### Creepers (measured on bds-pve, normal difficulty)
 
@@ -189,6 +328,8 @@ an archer counts as an arrow hit (`FightResult.arrowHits`, `totals.arrowHits`).
 
 | Command | Reply |
 |---|---|
+| `stance player` (Track AH, `shield.ts`) | `{ name, isSneaking, offhand: { typeId, amount, damage, maxDurability } \| null, health, tick }` |
+| `blocklog [sinceTick] [player\|*]` (Track AH) | `{ now, events: [{ tick, kind: melee\|projectile, player, sneaking, attackerId, attackerType, projectile, shieldDamage }] }`: every mob melee hit (entityHitEntity) and projectile reaching a player, blocked or not, with the stance and the offhand shield's durability damage one tick later |
 | `combatlog [sinceTick] [player\|*]` | `{ now, events: [{ tick, kind: hit\|trigger\|explosion\|projectile, player, entityId, typeId, item, selectedSlot, eventId, distance, location, players }] }`: melee hits by players with the item in the selected slot at that moment; every creeper behaviour trigger with the nearest player's distance; explosions with the players within 16 blocks; projectiles hitting a player with the shooter and distance |
 | `held player` | `{ name, selectedSlot, typeId, amount }` |
 
@@ -330,6 +471,17 @@ BDS_E2E=1 BDS_PVE_NIGHT=1 pnpm --filter bot exec vitest run --project e2e pve   
   default 5; survival required, damage, fuse triggers and explosions reported per run), and a creeper at
   health 8 (`creeper_avoided`, no strike, at least 8 blocks away by the server, `wantsFlee` true). Every
   creeper gets a fresh spot 24 blocks from the last; the ground is restored (dirt, grass, air) at the end.
+- `pve-combat` (Track AH): re-targeting on / off alternating (`PVE_RETARGET_RUNS`, default 5 each;
+  zombies with resistance `PVE_RETARGET_RESISTANCE`, default 1): two zombies 2 blocks apart with the
+  bot between them (both die, the fight switches at least once, not worse than the single target
+  beyond noise), and a zombie behind the bot while it is sent at one 8 blocks away (fewer hits than
+  the single target). Hits from truth:hurtlog.
+- `pve-crowd` (Track AH): crowd rule (health 10, 4 zombies: `crowded`, then a flight); 3 zombies at
+  health 11 in iron armour with the rule on / off (`PVE_CROWD_RUNS`, default 3; damage, deaths, kills,
+  flights in 45 s); shield into the offhand and blocking a zombie (truth:stance, truth:blocklog);
+  skeleton duels with / without the shield (`PVE_SHIELD_RUNS`, default 5;
+  `PVE_SHIELD_SKELETON_RESISTANCE`, default 2); creeper duels with the shield
+  (`PVE_SHIELD_CREEPER_RUNS`, default 3; 0 explosion damage). About 12 min.
 - `pve-follow`: a pig with slowness 255 teleported 3 blocks every 2 s for 102 blocks; a second client
   (a real offline player, an owner) types `!come`, `!follow`, `!status`, `!stop`; leaving view (a
   400-block teleport) -> last known position -> waiting -> resumed.
@@ -380,12 +532,17 @@ second offline client, which is a real player entity to the bot), and a night wi
 
 ## Known limits
 
-- **No shield or bow**; no critical hits (no jump attacks). Sprint knockback is used against creepers only.
+- **No bow**; no critical hits (no jump attacks). Sprint knockback is used against creepers only.
+- (Track AH) The shield is raised only inside fights (not while walking, fleeing or idle), the
+  archer's shot is predicted (61 ticks, measured for skeletons on normal; other archers and other
+  difficulties may differ), and it covers the front only. Sneaking slows the approach to an archer
+  while the shield is up. Re-targeting does not reduce hits when both zombies are next to the bot
+  (knockback keeps them off either way); see "Re-targeting within reach".
 - Eating and armour come from the survival kit (docs/survival.md); flee v2 eats when 8 clear, trip
   readiness before long trips. Health regenerates slowly (food 18 or more); a recovering bot runs from
   melee hostiles within 12 for up to a minute, so a guard bot at 8 to 14 health does not defend home.
 - (Track W, gauntlet e2e) A guard fight stays on its target while another zombie hits the bot (seen:
-  10 hits in 13 s from a second zombie); targeting is Track V's. A flight from a zombie at 1.6 blocks
+  10 hits in 13 s from a second zombie); since wave 9 (Track AH) the fight re-targets a mob within reach ("Re-targeting within reach"). A flight from a zombie at 1.6 blocks
   takes 1 or 2 more hits before the sprint pulls away.
 - (Track W) `!follow` / `!come` beyond about 75 blocks use the locator bar; a player in another
   dimension (or with the locator bar off: gamerule `locatorbar` false) stays `I cannot see Steve`.

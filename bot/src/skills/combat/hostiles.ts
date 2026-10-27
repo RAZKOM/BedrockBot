@@ -332,6 +332,8 @@ export interface MobState {
   dead: boolean;
   /** Track V: network id of the item in the mob's main hand (`mob_equipment`), 0 = empty / unknown. */
   heldNetworkId?: number;
+  /** Track AH: now() of the mob's last `arm_swing` entity_event (a melee attack). */
+  lastSwingAt?: number;
 }
 
 export interface HitGuess {
@@ -339,8 +341,12 @@ export interface HitGuess {
   type: string;
   /** now() of the health drop. */
   at: number;
-  /** How it was picked: the mob targets us, faces us within 4 blocks, or is a ranged mob in range. */
-  why: 'target' | 'facing' | 'ranged' | 'nearest';
+  /**
+   * How it was picked: it swung its arm at the moment of the hit (Track AH: BDS sends the attacker's
+   * `entity_event arm_swing` in the same batch as our hurt), the mob targets us, faces us within 4
+   * blocks, or is a ranged mob in range.
+   */
+  why: 'swing' | 'target' | 'facing' | 'ranged' | 'nearest';
   damage: number;
 }
 
@@ -375,7 +381,9 @@ const toBig = (v: unknown): bigint => (typeof v === 'bigint' ? v : BigInt(v as n
 
 /**
  * Per-mob state the world model does not keep, plus the bot's own damage and a `lastHitBy` guess:
- * when the bot's health drops, the attacker is (1) the nearest mob within 6 blocks whose
+ * when the bot's health drops, the attacker is (0) a mob within 5 blocks that swung its arm in the
+ * last 250 ms (Track AH, verified on BDS 1.26.60.6: the attacker's `entity_event arm_swing` arrives
+ * with the hurt; the most recent swing wins), else (1) the nearest mob within 6 blocks whose
  * `target_eid` is the bot, else (2) the nearest hostile within 4 blocks facing the bot (yaw within
  * 60 degrees), else (3) the nearest ranged hostile within 20 blocks, else (4) the nearest hostile
  * within 4 blocks.
@@ -387,6 +395,8 @@ export class MobTracker {
   /** Own health from set_health / update_attributes. */
   selfHealth: number | undefined;
   lastHitBy: HitGuess | undefined;
+  /** Track AH: per mob, now() of the last own health drop attributed to it (the guess). */
+  readonly hitAt = new Map<bigint, number>();
   /** now() of the last own health drop. */
   lastDamageAt: number | undefined;
   private readonly o: MobTrackerOptions;
@@ -435,6 +445,8 @@ export class MobTracker {
           st.hurts++;
         } else if (p.event_id === 'death_animation') {
           st.dead = true;
+        } else if (p.event_id === 'arm_swing') {
+          st.lastSwingAt = this.now(); // Track AH: the attacker of the hit that comes with it
         }
       }),
       source.on('mob_equipment', (p) => {
@@ -474,10 +486,17 @@ export class MobTracker {
     return t !== undefined && this.selfUniqueId !== undefined && t === this.selfUniqueId;
   }
 
+  /** Track AH: the mob hit us (by the guess) within the last `ms`. */
+  hitUsWithin(rid: bigint, ms: number): boolean {
+    const at = this.hitAt.get(rid);
+    return at !== undefined && this.now() - at < ms;
+  }
+
   /** Forget mobs no longer tracked by the world model. */
   prune(): void {
     const ents = this.o.entities();
     for (const rid of [...this.mobs.keys()]) if (!ents.has(rid)) this.mobs.delete(rid);
+    for (const rid of [...this.hitAt.keys()]) if (!ents.has(rid)) this.hitAt.delete(rid);
   }
 
   /**
@@ -496,7 +515,14 @@ export class MobTracker {
       const d = Math.hypot(f.x - me.x, f.y - me.y, f.z - me.z);
       let why: HitGuess['why'] | undefined;
       let rank = 9;
-      if (d <= 6 && this.targetsUs(e.runtimeId)) {
+      const swing = this.mobs.get(e.runtimeId)?.lastSwingAt;
+      if (d <= 5 && swing !== undefined && at - swing <= 250) {
+        why = 'swing';
+        rank = -1;
+        // the most recent swing first (two mobs swinging: the later one came with this hit)
+        if (!best || best.rank > -1 || swing > (this.mobs.get(best.e.runtimeId)?.lastSwingAt ?? -Infinity)) best = { e, d, why, rank };
+        continue;
+      } else if (d <= 6 && this.targetsUs(e.runtimeId)) {
         why = 'target';
         rank = 0;
       } else if (cls === 'hostile' && d <= 4 && facing(e, me)) {
@@ -523,7 +549,10 @@ export class MobTracker {
       const damage = prev - h;
       this.lastDamageAt = this.now();
       const guess = this.guessAttacker(damage);
-      if (guess) this.lastHitBy = guess;
+      if (guess) {
+        this.lastHitBy = guess;
+        this.hitAt.set(guess.runtimeId, guess.at);
+      }
       for (const fn of [...this.hitFns]) fn(guess, damage);
     }
   }

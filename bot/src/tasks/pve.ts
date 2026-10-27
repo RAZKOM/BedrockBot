@@ -511,6 +511,7 @@ export class PveController {
       const cr = this.creeperNear(me);
       if (cr) out = { why: 'creeper', threat: cr };
     }
+    out ??= ((t) => (t ? { why: 'low' as const, threat: t } : undefined))(targeting.crowdThreat(this, me)); // Track AH: crowd rule (3+ melee within 4, health < 12), like a creeper
     if (!out && this.low() && !this.canDuel(me)) {
       const t = this.nearestHostile(me, FLEE_SCAN);
       if (t) out = { why: 'low', threat: t };

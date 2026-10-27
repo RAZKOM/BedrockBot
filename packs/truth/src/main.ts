@@ -52,6 +52,7 @@ import { gauntHandlers } from './gaunt.js'; // Track W: truth:bed, truth:sleepin
 import { getHandlers } from './get.js'; // Track AD: truth:stuff, getinv, boxitems (!get, stash)
 import { buildHandlers } from './build.js'; // Track AL: truth:blocksdiff (builder)
 import { homeHandlers } from './home.js'; // Track AG: truth:chestput (home logistics)
+import { shieldHandlers } from './shield.js'; // Track AH: truth:stance, blocklog (shield, wave 9)
 
 declare const __PACK_VERSION__: string;
 /** QuickJS console (prints to the BDS content log). */
@@ -553,6 +554,7 @@ Object.assign(handlers, gauntHandlers({ getBlock, assertLoaded, overworld })); /
 Object.assign(handlers, getHandlers({ overworld })); // Track AD: stuff, getinv, boxitems
 Object.assign(handlers, buildHandlers({ getBlock, assertLoaded, overworld })); // Track AL: blocksdiff
 Object.assign(handlers, homeHandlers({ getBlock, assertLoaded, overworld })); // Track AG: chestput
+Object.assign(handlers, shieldHandlers({ overworld })); // Track AH: stance, blocklog
 
 function blockVolume(a: Vec3, b: Vec3): BlockVolume {
   return new BlockVolume(a, b);

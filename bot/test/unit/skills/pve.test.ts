@@ -195,7 +195,7 @@ describe('!kill', () => {
     expect(await s.pve.kill('steve', 1)).toMatchObject({ ok: false, reason: 'refused_player' });
     s.ents.set(7n, mob(7n, 'minecraft:zombie', { x: 0, y: -60, z: 4 }));
     s.ents.set(8n, mob(8n, 'minecraft:zombie', { x: 0, y: -60, z: 8 }));
-    s.ents.set(9n, mob(9n, 'minecraft:husk', { x: 0, y: -60, z: 2 }));
+    s.ents.set(9n, mob(9n, 'minecraft:husk', { x: 0, y: -60, z: -3.9 })); // nearer, but out of reach (Track AH: a husk within reach would be fought first)
     const job = s.pve.kill('zombie', 2);
     await tick();
     expect(s.pve.combat.target?.runtimeId).toBe(7n); // nearest zombie, the husk is another type
