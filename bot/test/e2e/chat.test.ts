@@ -69,8 +69,9 @@ describe.skipIf(!E2E)('@bds chat commands against bds-dev', () => {
     const pos = await watcher.waitText(fromBot(/^pos /), 5_000, 'pos reply');
     expect(pos.message).toMatch(/^pos -?\d+\.\d\d -60\.00 -?\d+\.\d\d$/);
     bdsCmd('say', '!help');
-    const help = await watcher.waitText(fromBot(/^commands: /), 5_000, 'help reply');
-    expect(help.message).toBe('commands: !status !pos !quit !help');
+    // Track AM: !help is the front door (help.ts); the echo task has !status and !help in it
+    const help = await watcher.waitText(fromBot(/^front door: /), 5_000, 'help reply');
+    expect(help.message).toMatch(/^front door: info: !status \(.*\), !help \(.*\)$/);
   });
 
   it('answers an allow-listed player and ignores everyone else', async () => {

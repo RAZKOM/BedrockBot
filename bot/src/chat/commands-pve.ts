@@ -196,6 +196,7 @@ export function registerPveCommands(chat: Chat, deps: PveCommandDeps | undefined
   chat.register({
     name: 'follow',
     help: '[name] [now] (follow a player; default you)',
+    tier: 'front', group: 'go', example: '!follow', // Track AM
     run: ({ reply, sender, args: raw }) => {
       const { args, now } = splitNow(raw);
       const name = who(sender, args);
@@ -218,6 +219,7 @@ export function registerPveCommands(chat: Chat, deps: PveCommandDeps | undefined
   chat.register({
     name: 'come',
     help: '[name] [now] (walk to you, or to the named player)',
+    tier: 'front', group: 'go', example: '!come',
     run: ({ reply, sender, args: raw }) => {
       const { args, now } = splitNow(raw);
       const name = who(sender, args);
@@ -240,7 +242,8 @@ export function registerPveCommands(chat: Chat, deps: PveCommandDeps | undefined
   });
   chat.register({
     name: 'stop',
-    help: '(stop every command: follow, come, kill, goto, gather; guard and night keep running)',
+    help: '(stop every command; guard and night keep running)',
+    tier: 'front', group: 'control', example: '!stop',
     run: ({ reply }) => {
       const was = deps.stop();
       reply(`stopped (was ${was}); ${deps.behaviour()}`);
@@ -249,6 +252,7 @@ export function registerPveCommands(chat: Chat, deps: PveCommandDeps | undefined
   chat.register({
     name: 'guard',
     help: '[status] | on | off | <radius> (fight hostiles near home)',
+    tier: 'front', group: 'fight', example: '!guard on',
     run: ({ reply, args }) => {
       const a = (args[0] ?? 'status').toLowerCase();
       if (a === 'status') {
@@ -273,6 +277,7 @@ export function registerPveCommands(chat: Chat, deps: PveCommandDeps | undefined
   chat.register({
     name: 'kill',
     help: '<type> [n] [now] (kill mobs of that type within 32 blocks; never players)',
+    group: 'fight', example: '!kill zombie 3',
     run: ({ reply, args: raw }) => {
       const { args, now } = splitNow(raw);
       const [type, count] = args;
@@ -308,6 +313,7 @@ export function registerPveCommands(chat: Chat, deps: PveCommandDeps | undefined
   chat.register({
     name: 'sleep',
     help: '[on | off | status] (go to bed now, at night; on/off: sleep by itself at night)',
+    group: 'home', example: '!sleep', auto: 'at night when a bed is known within 8 blocks of the shelter or home, or at the bed waypoint (!sleep off stops that)',
     run: ({ reply, args }) => {
       if (!sl) {
         reply(`sleep ${NEEDS_WALK}`);

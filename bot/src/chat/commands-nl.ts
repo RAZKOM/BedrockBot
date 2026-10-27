@@ -65,7 +65,8 @@ export function registerNlCommands(d: CommandDeps, values: Readonly<Record<strin
   const doRe = new RegExp(`^\\s*${chat.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*do\\b`, 'i');
   chat.register({
     name: 'do',
-    help: '<text> (plain words -> a plan of commands; !yes runs it; docs/natural-language.md)',
+    help: '<text> (say it in plain words: a plan, !yes runs it; or ask me something)',
+    tier: 'front', group: 'control', example: '!do walk home then guard', // Track AM
     run: ({ line, sender }) => {
       void fe.request(line.body.replace(doRe, '').trim(), { line, sender: senderLabel(sender) });
     },
@@ -73,6 +74,7 @@ export function registerNlCommands(d: CommandDeps, values: Readonly<Record<strin
   chat.register({
     name: 'yes',
     help: '(run the plan !do proposed)',
+    group: 'control', example: '!yes',
     run: ({ sender }) => {
       fe.yes(senderLabel(sender));
     },
@@ -80,6 +82,7 @@ export function registerNlCommands(d: CommandDeps, values: Readonly<Record<strin
   chat.register({
     name: 'no',
     help: '(drop the proposed plan, or the rest of a running one)',
+    group: 'control', example: '!no',
     run: () => {
       fe.no();
     },

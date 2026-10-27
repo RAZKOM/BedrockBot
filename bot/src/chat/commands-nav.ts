@@ -59,6 +59,7 @@ export function registerNavChat(chat: Chat, d: NavChatDeps): void {
   chat.register({
     name: 'wp',
     help: '[list] | set <name> [x y z] | del <name> | <name> (waypoints)',
+    group: 'go', example: '!wp set base', auto: 'the death, home and spawn waypoints keep themselves up to date', // Track AM
     run: ({ reply, args }) => {
       const [sub, name, ...rest] = args;
       const s = sub?.toLowerCase();
@@ -118,6 +119,7 @@ export function registerNavChat(chat: Chat, d: NavChatDeps): void {
   const gotoDef: CommandDef = {
     name: 'goto',
     help: '<waypoint> | x y z [now] (walk to a waypoint or a feet block; now: before the night shelter)',
+    group: 'go', example: '!goto base',
     run: ({ reply, args: raw }) => {
       if (!walk) {
         reply(`goto ${NEEDS_WALK}`);
@@ -161,6 +163,7 @@ export function registerNavChat(chat: Chat, d: NavChatDeps): void {
   chat.register({
     name: 'top',
     help: '(walk up to the surface: out of a cave or a pit)',
+    group: 'go', example: '!top',
     run: ({ reply }) => {
       if (!walk) {
         reply(`top ${NEEDS_WALK}`);

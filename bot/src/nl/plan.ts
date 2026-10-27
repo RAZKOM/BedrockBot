@@ -23,7 +23,7 @@ const blockName = z.string().regex(/^(minecraft:)?[a-z][a-z0-9_]{1,63}$/);
 const BREED_KINDS = ['cow', 'mooshroom', 'sheep', 'pig', 'chicken', 'rabbit'] as const;
 
 /** Settings the model may change (`nlConfirm` is not one of them: only an owner's `!set` turns it off). */
-export const NL_SETTING_KEYS = SETTING_KEYS.filter((k) => k !== 'nlConfirm') as [SettingKey, ...SettingKey[]];
+export const NL_SETTING_KEYS = SETTING_KEYS.filter((k) => k !== 'nlConfirm' && k !== 'lastWelcomed') as [SettingKey, ...SettingKey[]]; // Track AM: lastWelcomed is the bot's own
 
 export const STEP_SCHEMAS = {
   goto: z.strictObject({ command: z.literal('goto'), waypoint: wpName }),
@@ -50,7 +50,12 @@ export const STEP_SCHEMAS = {
   panel: z.strictObject({ command: z.literal('panel') }), // Track AK
   drop: z.strictObject({ command: z.literal('drop'), what: z.enum(['all', 'items']) }), // Track AK: everything / everything but food, armour, tools
   question: z.strictObject({ command: z.literal('question'), text: z.string().min(1).max(200) }),
+  answer: z.strictObject({ command: z.literal('answer'), text: z.string().min(1).max(200) }), // Track AM: a reply, nothing runs; the only step
 } as const;
+
+/** Track AM: steps that only talk (no chat command runs). */
+export type TalkKind = 'question' | 'answer';
+export const isTalk = (s: { command: string }): s is Extract<Step, { command: TalkKind }> => s.command === 'question' || s.command === 'answer';
 
 export type StepKind = keyof typeof STEP_SCHEMAS;
 export const STEP_KINDS = Object.keys(STEP_SCHEMAS) as StepKind[];
@@ -80,6 +85,7 @@ export const StepSchema = z.discriminatedUnion('command', [
   STEP_SCHEMAS.panel, // Track AK
   STEP_SCHEMAS.drop, // Track AK
   STEP_SCHEMAS.question,
+  STEP_SCHEMAS.answer, // Track AM
 ]);
 export type Step = z.infer<typeof StepSchema>;
 
@@ -102,7 +108,7 @@ export interface CommandSpec {
   fail?: RegExp;
 }
 
-export const COMMAND_SPECS: Record<Exclude<StepKind, 'question'>, CommandSpec> = {
+export const COMMAND_SPECS: Record<Exclude<StepKind, TalkKind>, CommandSpec> = {
   goto: { chat: 'goto', wait: 'process', done: /^arrived at /, fail: /^(goto: |no waypoint )/ },
   goto_xyz: { chat: 'goto', wait: 'process', done: /^arrived at /, fail: /^goto: / },
   come: { chat: 'come', wait: 'process', done: /^here \(/, fail: /^come: / },
@@ -131,7 +137,7 @@ export const COMMAND_SPECS: Record<Exclude<StepKind, 'question'>, CommandSpec> =
 /** Replies that end any step and the plan. */
 export const COMMON_FAIL = /(^usage: |^unknown command |needs a task that can walk|^refused|not available)/;
 
-const ENDLESS = new Set<StepKind>(STEP_KINDS.filter((k) => k !== 'question' && COMMAND_SPECS[k].wait === 'endless'));
+const ENDLESS = new Set<StepKind>(STEP_KINDS.filter((k) => k !== 'question' && k !== 'answer' && COMMAND_SPECS[k].wait === 'endless'));
 
 export const PlanSchema = z
   .strictObject({ steps: z.array(StepSchema).min(1).max(MAX_STEPS) })
@@ -139,6 +145,7 @@ export const PlanSchema = z
     plan.steps.forEach((s, i) => {
       const last = i === plan.steps.length - 1;
       if (s.command === 'question' && !last) ctx.addIssue({ code: 'custom', path: ['steps', i], message: 'a question must be the last step' });
+      if (s.command === 'answer' && plan.steps.length > 1) ctx.addIssue({ code: 'custom', path: ['steps', i], message: 'an answer is the only step (no commands with it)' }); // Track AM
       if (ENDLESS.has(s.command) && !last) ctx.addIssue({ code: 'custom', path: ['steps', i], message: `${s.command} runs until !stop: only as the last step` });
       if (s.command === 'guard' && s.mode === 'off' && s.radius !== undefined) ctx.addIssue({ code: 'custom', path: ['steps', i, 'radius'], message: 'a radius needs guard on' });
       if (s.command === 'wp_set') {
@@ -184,7 +191,7 @@ export function parsePlan(text: string): ParseResult {
 
 /** The chat command name a step runs (`goto`, `wp`, ...); undefined for a question. */
 export function stepChatName(s: Step): string | undefined {
-  return s.command === 'question' ? undefined : COMMAND_SPECS[s.command].chat;
+  return isTalk(s) ? undefined : COMMAND_SPECS[s.command].chat; // Track AM: answer too
 }
 
 function settingText(v: boolean | number | string): string {
@@ -226,6 +233,7 @@ export function stepCommand(s: Step): string {
     case 'drop': // Track AK
       return `drop ${s.what}`;
     case 'question':
+    case 'answer': // Track AM
       return s.text;
     default:
       return s.command;
@@ -234,5 +242,5 @@ export function stepCommand(s: Step): string {
 
 /** `plan: goto home, then guard on` (a question shows as `ask "..."`). */
 export function planLine(plan: Plan): string {
-  return `plan: ${plan.steps.map((s) => (s.command === 'question' ? `ask "${s.text}"` : stepCommand(s))).join(', then ')}`;
+  return `plan: ${plan.steps.map((s) => (s.command === 'question' ? `ask "${s.text}"` : s.command === 'answer' ? `answer "${s.text}"` : stepCommand(s))).join(', then ')}`;
 }

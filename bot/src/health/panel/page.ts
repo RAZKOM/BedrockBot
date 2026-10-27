@@ -97,6 +97,9 @@ export function renderPanelPage(s: PanelState): string {
   </section>
   <section id="panel-logs"><h2>Log (last 50 lines)</h2><pre id="logs"></pre></section>
   <section class="wide" id="panel-settings"><h2>Settings (!set)</h2><div class="tablewrap"><table><tbody id="settings">${settingsHtml(s)}</tbody></table></div></section>
+  <section class="wide" id="panel-help">
+    <details id="helpbox"><summary><h2 style="display:inline">Help</h2> <span class="muted small">commands, settings, modes (!help in chat)</span></summary><div id="helpwrap" class="tablewrap"></div></details>
+  </section>
   <section class="wide" id="panel-map">
     <details id="mapbox"><summary><h2 style="display:inline">Map</h2> <a href="/map" target="_blank" rel="noopener" class="small">open full page</a></summary><div id="mapwrap"></div></details>
   </section>
@@ -161,6 +164,33 @@ export function renderPanelPage(s: PanelState): string {
     const w = $('mapwrap');
     if ($('mapbox').open && !w.firstChild) { const f = document.createElement('iframe'); f.src = '/map'; f.title = 'map'; w.appendChild(f); }
     else if (!$('mapbox').open) w.textContent = '';
+  });
+  // Track AM: the Help tab, fetched once when first opened (GET /api/help)
+  function table(head, rows) {
+    const t = document.createElement('table'), tr = document.createElement('tr');
+    for (const h of head) { const th = document.createElement('td'); th.className = 'muted small'; th.textContent = h; tr.appendChild(th); }
+    t.appendChild(tr);
+    for (const r of rows) { const row = document.createElement('tr'); for (const c of r) { const td = document.createElement('td'); td.textContent = c; row.appendChild(td); } t.appendChild(row); }
+    return t;
+  }
+  function h2(text) { const e = document.createElement('h2'); e.style.marginTop = '12px'; e.textContent = text; return e; }
+  $('helpbox').addEventListener('toggle', async () => {
+    const w = $('helpwrap');
+    if (!$('helpbox').open || w.dataset.loaded) return;
+    w.dataset.loaded = '1'; w.textContent = 'loading...';
+    try {
+      const res = await fetch('/api/help', { cache: 'no-store', credentials: 'same-origin' });
+      if (!res.ok) throw new Error('help ' + res.status);
+      const h = await res.json();
+      w.textContent = '';
+      w.appendChild(h2('Commands'));
+      w.appendChild(table(['tier', 'group', 'syntax', 'help', 'example', 'also on its own'], h.commands.map((c) => [c.tier === 'front' ? 'front door' : 'more', c.group, '!' + c.name + (c.syntax ? ' ' + c.syntax : ''), c.help, c.example, c.auto])));
+      w.appendChild(h2('Modes (now: ' + h.mode + ')'));
+      const keys = h.modes.length ? Object.keys(h.modes[0].values) : [];
+      w.appendChild(table(['!mode'].concat(keys), h.modes.map((m) => [m.name].concat(keys.map((k) => m.values[k])))));
+      w.appendChild(h2('Settings'));
+      w.appendChild(table(['group', 'setting', 'value', 'default', 'description'], h.settings.map((s) => [s.group, s.key, s.value, s.default, s.description])));
+    } catch (e) { delete w.dataset.loaded; w.textContent = 'help: ' + (e && e.message ? e.message : e); }
   });
   render(last);
   setInterval(poll, 2000);

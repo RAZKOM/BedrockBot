@@ -4,6 +4,7 @@ import type { Connection } from '../connection/connection.ts';
 import type { TextPacket } from '../connection/types.ts';
 import { createLogger, type Logger } from '../log.ts';
 import { parseText, type ChatLine } from './text.ts';
+import { commandInfo, helpReplies, type CommandInfo, type HelpSettings } from './help.ts'; // Track AM
 
 /** Who sent a chat line. The console is `say` / `tell` typed into the BDS console (or docker exec). */
 export type Sender = { kind: 'console' } | { kind: 'player'; name: string; xuid: string };
@@ -88,9 +89,22 @@ export interface CommandContext {
   reply: (message: string) => void;
 }
 
+/** Track AM (docs/ux.md): `front` commands are the short `!help`; everything else is `more` (`!help all`). */
+export type CommandTier = 'front' | 'more';
+/** Track AM: the help groups, in the order `!help` prints them. */
+export type CommandGroup = 'go' | 'work' | 'fight' | 'home' | 'control' | 'info';
+
 export interface CommandDef {
   name: string;
+  /** `<syntax> (one-line description)`: `!help <command>` splits it at the last parenthesis. */
   help: string;
+  /** Default `more` (a name in help.ts FRONT_DOOR registered without a tier counts as front). */
+  tier?: CommandTier;
+  group?: CommandGroup;
+  /** A command line that works as typed, e.g. `!get wood 16`. */
+  example?: string;
+  /** "also happens on its own when ...": only what the bot really does by itself today. */
+  auto?: string;
   run(ctx: CommandContext): void;
 }
 
@@ -146,6 +160,16 @@ export class Chat {
     this.maxReplyLength = opts.maxReplyLength ?? 256;
     this.maxReplies = opts.maxReplies ?? 8;
     this.replyWindowMs = opts.replyWindowMs ?? 10_000;
+    // Track AM: `!commands` = `!help all` (`!help` itself is registered with the built-ins, commands.ts)
+    this.register({
+      name: 'commands',
+      help: '(every command by group, names only: the same as !help all)',
+      group: 'info',
+      example: '!commands',
+      run: ({ reply }) => {
+        for (const line of this.helpReplies(['all'])) reply(line);
+      },
+    });
   }
 
   register(def: CommandDef): void {
@@ -156,8 +180,33 @@ export class Chat {
     return [...this.commands.keys()];
   }
 
+  /** Track AM: is the command registered (e.g. `!unload` once Track AG's lands). */
+  has(name: string): boolean {
+    return this.commands.has(name.toLowerCase());
+  }
+
+  /** `!name help (also on its own: ...)` per command, ` | ` between (the natural-language prompt's reference). */
   helpText(): string {
-    return [...this.commands.values()].map((c) => `${this.prefix}${c.name} ${c.help}`).join(' | ');
+    return [...this.commands.values()].map((c) => `${this.prefix}${c.name} ${c.help}${c.auto ? ` (also on its own: ${c.auto})` : ''}`).join(' | ');
+  }
+
+  /** Track AM: every command with its tier, group, syntax, description, example and auto line. */
+  commandInfo(): CommandInfo[] {
+    return [...this.commands.values()].map((c) => commandInfo(c));
+  }
+
+  /** Track AM: the settings `!help settings` lists (set by the afk task's registration, help.ts registerUx). */
+  helpSettings: HelpSettings | undefined;
+
+  /**
+   * Track AM: a next-step hint for a reply (help.ts hintFor); undefined = none. say() appends it when
+   * the result still fits in one message.
+   */
+  hinter: ((message: string) => string | undefined) | undefined;
+
+  /** Track AM: the `!help [all | settings | <command>]` reply lines. */
+  helpReplies(args: readonly string[] = []): string[] {
+    return helpReplies(this.commandInfo(), args, { prefix: this.prefix, maxLength: this.maxReplyLength, settings: this.helpSettings });
   }
 
   start(): void {
@@ -201,6 +250,8 @@ export class Chat {
       return false;
     }
     this.replyTimes.push(now);
+    const hint = this.hint(message); // Track AM
+    if (hint) message = `${message} ${hint}`;
     const text = message.length > this.maxReplyLength ? `${message.slice(0, this.maxReplyLength - 3)}...` : message;
     this.conn.queue('text', chatPacket(this.conn.username, text));
     return true;
@@ -231,6 +282,15 @@ export class Chat {
     } catch (e) {
       this.log.error(`${this.prefix}${cmd.name} failed: ${e instanceof Error ? e.message : String(e)}`);
       this.say(`${this.prefix}${cmd.name} failed`);
+    }
+  }
+
+  private hint(message: string): string | undefined {
+    try {
+      const h = this.hinter?.(message);
+      return h && message.length + 1 + h.length <= this.maxReplyLength ? h : undefined;
+    } catch {
+      return undefined;
     }
   }
 

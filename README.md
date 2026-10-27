@@ -60,17 +60,35 @@ every 1.26.60 block state.
 ## Chat commands
 
 Owners (the `owners` list in the config file, or the BDS console) type these in chat; the prefix is `!`.
-The bot answers in chat. Full reply texts and edge cases: docs/runbook.md "Chat commands".
+The bot answers in chat. Full reply texts and edge cases: docs/runbook.md "Chat commands". In the
+game, `!help` lists the front door, `!help all` every command, `!help <command>` one in depth with an
+example and what the bot also does on its own (docs/ux.md).
 
-**Where it goes**
+### Front door
+
+The nine commands an owner needs; the bot cooks, eats, wears armour, sleeps, hunts for food and makes
+room in its inventory by itself.
 
 | Command | What it does |
 |---|---|
 | `!come [name] [now]` | Walks to you (or the named player) and stays there, also beyond the entity range through the locator bar. Fights or flees on the way if it must. Eats first when food or health is below 14 (`coming (eating first)`); at night without a chestplate it refuses unless you add `now`. |
 | `!follow [name]` | Follows you until `!stop`, sprinting to catch up, stopping 3 blocks away. |
+| `!home` / `!home set [x y z]` / `!home go` / `!home clear` | The point it returns to after a respawn and at dawn. `set` without coordinates uses where it stands. |
+| `!get <item> [n]` / `!get stop` / `!get status` | The one front door for work: `!get 20 oak_log`, `!get coal 4`, `!get stone 32`, `!get beef`, `!get wheat`. It picks gathering, mining, hunting or farming by itself. When the inventory fills it empties it into the `stashChest` setting, the job's chest, or a shulker box it carries (placed, filled, picked up again), then drops junk. It makes new things and never takes from your chests. |
+| `!guard on` / `off` / `<radius>` / `!guard` | Fights hostile mobs within the radius of home (of itself without a home), picks up drops, walks back. |
+| `!stop` | Cancels every command (goto, follow, come, kill, gather, farm, mine) and a pending home return. Guard and night keep running. |
+| `!status` | Uptime, position, and the process stack: what runs now, what is paused behind it, with an ETA for walks. |
+| `!do <text>` then `!yes` / `!no` | Natural language: `!do walk home then guard` is turned into a plan of the commands above by a local model, shown as one line, and run on `!yes`; a question (`!do can you cook?`) gets a one-line answer and runs nothing. Needs `nl.provider` in the config and Ollama on the machine. Also answers chat addressed to it (`BotName, come here`). |
+| `!help` / `!help all` / `!help <command>` / `!help settings` | The front door; every command by group; one command with its example and automatic behaviour; the settings with their values. `!commands` = `!help all`. |
+
+### More
+
+**Where it goes**
+
+| Command | What it does |
+|---|---|
 | `!goto x y z` / `!goto <waypoint>` `[now]` | Walks to a feet block or a saved waypoint. Doors are opened; digging through and pillaring up need `allowBreak` / `allowPlace` (see settings). `now`: the night shelter waits for the walk, like `!come now`. |
 | `!top` | Climbs out of a cave or pit to the nearest spot under the sky. |
-| `!home` / `!home set [x y z]` / `!home go` / `!home clear` | The point it returns to after a respawn and at dawn. `set` without coordinates uses where it stands. |
 | `!shelter` / `!shelter set [x y z]` / `!shelter clear` | Where it waits out the night (from time 12000 to 23000). |
 | `!wp` / `!wp set <name> [x y z]` / `!wp del <name>` | Named waypoints per server; `death`, `home` and `spawn` are kept automatically. |
 
@@ -78,7 +96,6 @@ The bot answers in chat. Full reply texts and edge cases: docs/runbook.md "Chat 
 
 | Command | What it does |
 |---|---|
-| `!guard on` / `off` / `<radius>` / `!guard` | Fights hostile mobs within the radius of home (of itself without a home), picks up drops, walks back. |
 | `!kill <type> [n]` | Kills up to n mobs of that type within 32 blocks, nearest first. Never players. |
 | `!eat` | Eats the best food now. It also eats on its own when food drops below 18 or health is low. |
 | `!sleep` / `!sleep on` / `off` / `status` | Goes to bed now (night only; a bed within 8 blocks of the shelter, home or itself, or the `bed` waypoint) and stays until morning. It also sleeps by itself at night when a bed is known; `!sleep off` stops that. Sleeping resets the phantom timer. |
@@ -90,7 +107,6 @@ The bot answers in chat. Full reply texts and edge cases: docs/runbook.md "Chat 
 
 | Command | What it does |
 |---|---|
-| `!get <item> [n]` / `!get stop` / `!get status` | The one front door for work: `!get 20 oak_log`, `!get coal 4`, `!get stone 32`, `!get beef`, `!get wheat`. It picks gathering, mining, hunting or farming by itself. When the inventory fills it empties it into the `stashChest` setting, the job's chest, or a shulker box it carries (placed, filled, picked up again), then drops junk. |
 | `!gather <n> [x y z]` / `!gather stop` | Fells trees for n logs within 48 blocks (of the given point), puts them in the configured chest or keeps them. Says `no trees within 48 blocks` when none are loaded nearby: give it a point near a forest. |
 | `!mine <block> [n]` / `!mine stop` / `!mine status` | Mines ore it has actually seen the face of (no x-ray), digging its way there, e.g. `!mine coal_ore 8`. Ore next to water or lava is skipped. |
 | `!farm [radius]` / `!farm stop` / `!farm status` | Harvests mature crops around it, replants, uses bone meal, deposits into the nearest chest. |
@@ -102,12 +118,10 @@ The bot answers in chat. Full reply texts and edge cases: docs/runbook.md "Chat 
 
 | Command | What it does |
 |---|---|
-| `!status` | Uptime, position, and the process stack: what runs now, what is paused behind it, with an ETA for walks. |
 | `!pause` / `!resume` | Hold the current command where it stands and continue later. Guard, flee and night keep working. |
-| `!stop` | Cancels every command (goto, follow, come, kill, gather, farm, mine) and a pending home return. Guard and night keep running. |
+| `!mode careful` / `normal` / `bold` / `status` | Several safety settings at once (`fleeHealth`, `guardRadius`, `avoidMobRadius`, `avoidSpawnerRadius`, `allowBreak`, `allowPlace`; table in docs/ux.md); `status` says which one the settings match, or `custom`. |
 | `!set` / `!set <key>` / `!set <key> <value>` | Runtime settings, saved next to the config file and kept across restarts: `allowBreak` and `allowPlace` (digging through and pillaring up on walks, off by default), `closeDoors`, `sprint`, `guardRadius`, `fleeHealth` (flee below this health, 8), `followDistance`, `avoidMobRadius`, `avoidSpawnerRadius`, `toolWearLimit`, `throwawayMin`, `useBoneMeal`, `mineTunnelLen`, `nudgeInterval`, `nlConfirm`, `plannerThreads` (1: plan paths in a worker thread; 0: on the main thread), `stashChest` (`x y z` or `none`) and `stashShulker` (on), `autoBreed`, `chorePen`, `mineSeenOnly`, `autoFood`, `foodMin`, `foodLeave`. `!set <key> default` resets one. |
-| `!do <text>` then `!yes` / `!no` | Natural language: `!do walk home then guard` is turned into a plan of the commands above by a local model, shown as one line, and run on `!yes`. Needs `nl.provider` in the config and Ollama on the machine. Also answers chat addressed to it (`BotName, come here`). |
-| `!pos` / `!quit` / `!help` | Feet position; clean disconnect; the command list. |
+| `!pos` / `!quit` | Feet position; clean disconnect. |
 | `!panel` | The control panel's URL(s): a web page with status, log, map, settings and a command box, for your phone or another machine on your LAN (`panel` config block; docs/panel.md). No token in chat. |
 
 Priorities when things overlap: fleeing at low health beats everything; the night shelter beats your

@@ -58,6 +58,7 @@ export function registerFarmChat(chat: Chat, c: FarmController | undefined): voi
   chat.register({
     name: 'farm',
     help: `[radius] | stop | status (harvest, replant, bone meal; default radius ${DEFAULT_FARM_RADIUS})`,
+    group: 'work', example: '!farm 8', // Track AM
     run: ({ reply, args }) => {
       const a = (args[0] ?? '').toLowerCase();
       if (a === 'stop') return reply(c.farmStop());
@@ -70,6 +71,7 @@ export function registerFarmChat(chat: Chat, c: FarmController | undefined): voi
   chat.register({
     name: 'mine',
     help: '<block> [n] | stop | status (mine blocks the bot has seen; no x-ray)',
+    group: 'work', example: '!mine coal_ore 8',
     run: ({ reply, args }) => {
       const [block, count] = args;
       const a = (block ?? '').toLowerCase();

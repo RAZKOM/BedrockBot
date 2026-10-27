@@ -41,6 +41,7 @@ describe('plan schema', () => {
       { command: 'drop', what: 'all' },
       { command: 'drop', what: 'items' },
       { command: 'question', text: 'Which one?' },
+      { command: 'answer', text: 'I can cook after a hunt.' }, // Track AM
     ];
     for (const s of valid) expect(ok(one(s)), JSON.stringify(s)).toBe(true);
     expect(new Set(valid.map((s) => s.command))).toEqual(new Set(STEP_KINDS));
@@ -156,7 +157,7 @@ describe('prompt', () => {
     expect(p).toContain('settings: guardRadius 16');
     expect(p).toContain('[chat: !goto <waypoint> | x y z (walk)]');
     expect(p).toContain('!sleep (not available on this bot)');
-    expect(EXAMPLES).toHaveLength(10); // Track AD: + get; Track AK: + breed, drop, food pen
+    expect(EXAMPLES).toHaveLength(12); // Track AD: + get; Track AK: + breed, drop, food pen; Track AM: + two answers
     for (const e of EXAMPLES) {
       expect(PlanSchema.safeParse(e.plan).success).toBe(true);
       expect(p).toContain(JSON.stringify(e.plan));

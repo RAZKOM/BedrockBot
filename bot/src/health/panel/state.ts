@@ -3,6 +3,9 @@
 import type { Vec3 } from '../../connection/types.ts';
 import { SETTING_DEFS, SETTING_KEYS, formatSettingValue, type SettingDef, type SettingKey, type SettingSource } from '../../config/settings.ts';
 import type { StackEntry } from '../../tasks/process/manager.ts';
+import { GROUP_ORDER, settingGroups, type CommandInfo } from '../../chat/help.ts'; // Track AM: Help tab
+import { MODE_KEYS, MODE_NAMES, modeLine, modeValues } from '../../chat/modes.ts'; // Track AM
+import type { SettingValue } from '../../config/settings.ts'; // Track AM
 
 export const PANEL_STATE_VERSION = 1;
 
@@ -149,4 +152,46 @@ export function buildPanelState(src: PanelStateSource, now = Date.now()): PanelS
     commands: safe(src.commands, []),
     quick: QUICK_COMMANDS,
   };
+}
+
+// ---- Track AM: the Help tab (GET /api/help, fetched once when the tab is opened; docs/ux.md) --------
+
+export interface PanelHelpCommand {
+  name: string;
+  tier: string;
+  group: string;
+  syntax: string;
+  help: string;
+  example: string;
+  auto: string;
+}
+
+export interface PanelHelp {
+  commands: PanelHelpCommand[];
+  settings: { key: string; group: string; value: string; default: string; description: string }[];
+  modes: { name: string; values: Record<string, string> }[];
+  /** The mode the settings match now (`careful`, ..., `custom (...)`). */
+  mode: string;
+}
+
+export interface PanelHelpSource {
+  commands: () => readonly CommandInfo[];
+  settings?: { get<K extends SettingKey>(key: K): SettingValue<K> } | undefined;
+}
+
+/** The command registry (front door first, then by group), the settings by group and the modes. */
+export function buildPanelHelp(src: PanelHelpSource): PanelHelp {
+  const order = (g: string): number => GROUP_ORDER.indexOf(g as (typeof GROUP_ORDER)[number]);
+  const commands = [...src.commands()]
+    .sort((a, b) => (a.tier === b.tier ? order(a.group) - order(b.group) || a.name.localeCompare(b.name) : a.tier === 'front' ? -1 : 1))
+    .map((c) => ({ name: c.name, tier: c.tier, group: c.group, syntax: c.syntax === c.phrase ? '' : c.syntax, help: c.phrase, example: c.example ?? `!${c.name}`, auto: c.auto ?? '' }));
+  const s = src.settings;
+  const settings = settingGroups().flatMap(([group, keys]) =>
+    keys.map((k) => ({ key: k, group, value: s ? formatSettingValue(k, s.get(k)) : '', default: formatSettingValue(k, SETTING_DEFS[k].default), description: SETTING_DEFS[k].description })),
+  );
+  const modes = MODE_NAMES.map((m) => {
+    const v = modeValues(m);
+    return { name: m, values: Object.fromEntries(MODE_KEYS.map((k) => [k, formatSettingValue(k, v[k])])) };
+  });
+  return { commands, settings, modes, mode: s ? modeLine(s) : 'unknown' };
 }
