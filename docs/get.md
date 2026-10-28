@@ -41,7 +41,7 @@ Decision record: [decisions/0025-get-front-door-and-stash.md](decisions/0025-get
 `!get` replies first, then runs the command as a copy of the owner's line through the chat's own
 handler (like a `!do` plan step), so `!stop`, `!pause`, `!status` and the command's own replies work
 as for the command typed by hand. The old commands (`!gather`, `!mine`, `!food`, `!farm`) stay.
-Counts above the command's own maximum are cut to it (2304 logs, 256 blocks, 64 food).
+Counts above the command's own maximum are cut to it (2304 logs, 9216 blocks, 64 food) and the reply says so: `getting 9216 sand: ... (asked 20000, at most 9216)`.
 
 ## Catalog
 

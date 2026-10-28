@@ -15,7 +15,7 @@ mine.stats;        // mined, minedAt, targeted, unsafe, blacklisted, tunnelled, 
 mine.stop();       // cancels the running goto / dig at once
 ```
 
-Chat (afk task with walking, owners only): `!mine <block> [n]` (n 1..256, default 1) answers
+Chat (afk task with walking, owners only): `!mine <block> [n]` (n 1..9216, default 1) answers
 `mining 8 coal_ore/deepslate_coal_ore` and at the end `mine coal_ore: 8/8 done`,
 `mine coal_ore: 5/8, no seen coal_ore left (1 skipped as unsafe)`, `... stopped at 3/8, health low`
 or `... no pickaxe`; `!mine stop` answers `mine coal_ore: stopped after 3/8`; `!mine status`

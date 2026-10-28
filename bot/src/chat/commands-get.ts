@@ -88,7 +88,8 @@ export class GetController {
     if (f.strategy === 'unknown') return reply(unknownReply(f.name));
     this.clearJob();
     const hint = p ? this.stockHint?.(f, p.name) : undefined; // Track AS (a single kind; a multi-kind job has no hint)
-    reply(hint ? `${hint}; ${f.doing} anyway` : multi ? `getting ${f.item}: ${f.doing}` : startLine(f));
+    const cut = p?.count !== undefined && p.count > f.count ? ` (asked ${p.count}, at most ${f.count})` : ''; // the catalog clamps to the command's maximum
+    reply((hint ? `${hint}; ${f.doing} anyway` : multi ? `getting ${f.item}: ${f.doing}` : startLine(f)) + cut);
     const kind = f.command.split(' ')[0]!;
     const before = new Set(this.h.processes.userProcesses());
     this.h.dispatch(line, f.command);

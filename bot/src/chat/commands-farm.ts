@@ -3,7 +3,7 @@
 //   !farm [radius]          farm the farmland within radius (default 8, 1..32) of where the bot stands:
 //                           harvest, replant, bone meal, deposit into the nearest chest; until !farm stop
 //   !farm stop | status
-//   !mine <block> [n]       mine n (default 1, up to 256) seen blocks of that kind (`coal`, `iron_ore`, ...)
+//   !mine <block> [n]       mine n (default 1, up to 9216) seen blocks of that kind (`coal`, `iron_ore`, ...)
 //   !mine <block> n <block> n ...   Track AQ: several kinds in one trip, each with its quota; `ores n`: every ore kind
 //   !mine stop | status
 // Registered by the afk task (tasks/registry.ts) with the movement stack; without it every command
@@ -41,7 +41,7 @@ export const FARM_COMMANDS = ['farm', 'mine'] as const;
 const NEEDS_WALK = 'needs a task that can walk (start with --walk, --home or --target realm)';
 export const DEFAULT_FARM_RADIUS = 8;
 export const MAX_FARM_RADIUS = 32;
-export const MAX_MINE = 256;
+export const MAX_MINE = 9216; // 144 stacks (the stash step and spare shulker boxes carry the rest; was 256)
 
 /** Track AQ: kinds with quotas of one `!mine` (`iron_ore 8 coal_ore 16`). */
 export type MineKinds = { block: string; count: number }[];

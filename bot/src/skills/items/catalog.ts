@@ -27,8 +27,8 @@ export type Lookup = (CatalogEntry & { count: number; command: string; name: str
 
 /** Default counts per strategy (farm: 0 = one round of the field). */
 export const DEFAULT_COUNTS: Record<CatalogEntry['strategy'], number> = { gather: 16, mine: 8, hunt: 6, farm: 0 };
-/** Upper bounds: the commands' own (`!gather` 2304, `!mine` 256, `!food` 64, `!kill` 64). */
-export const MAX_COUNTS: Record<CatalogEntry['strategy'], number> = { gather: 2304, mine: 256, hunt: 64, farm: 2304 };
+/** Upper bounds: the commands' own (`!gather` 2304, `!mine` 9216 = MAX_MINE in chat/commands-farm.ts, `!food` 64, `!kill` 64). */
+export const MAX_COUNTS: Record<CatalogEntry['strategy'], number> = { gather: 2304, mine: 9216, hunt: 64, farm: 2304 };
 
 const WOODS = ['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'mangrove', 'cherry', 'pale_oak'];
 

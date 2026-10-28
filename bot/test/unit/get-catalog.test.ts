@@ -78,7 +78,7 @@ describe('catalog: item -> strategy', () => {
     expect(lookup('coal')).toMatchObject({ count: 8, command: 'mine coal_ore 8' });
     expect(lookup('beef')).toMatchObject({ count: 6, command: 'food 6' });
     expect(lookup('wheat')).toMatchObject({ count: 0, command: 'farm' });
-    expect(lookup('coal', 999)).toMatchObject({ count: 256, command: 'mine coal_ore 256' });
+    expect(lookup('coal', 99999)).toMatchObject({ count: 9216, command: 'mine coal_ore 9216' });
     expect(lookup('beef', 100)).toMatchObject({ count: 64 });
   });
 
