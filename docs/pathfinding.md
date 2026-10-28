@@ -45,7 +45,8 @@ every member of an `any`, is on the blacklist).
 | `terrain/classify.ts` | `TerrainClass` per state (cached): boxes, top, floor, liquid, danger, leaves, climbable, friction, `penalty` / `costFactor` (leaves, soul sand, honey, slime, mud, ice: 1 + 4), `openable` (door / trapdoor / gate) and `open`, `doorUpper`, `connect` (fence / pane), `fullCube`, `gravity` (sand, gravel, concrete powder, anvils ...), `protect` (containers, beds, spawners ...), `roof` (blocks the sky: any box but leaves, liquids). `halfTop(c, dx, dz)`: the highest box top in one half of the block. Unknown runtime ids are 1.5-high obstacles, except the ones `resolveNewerState` knows (1.26.60 stairs). |
 | `terrain/query.ts` | `worldSource(world)` (chunk store state ids; `columnTop` from the highest non-empty subchunk; `minY` / `maxY`), `boxesAtCell` (neighbour-aware boxes: fence arms, the upper door half from the lower one), `blockQueryOf(source)`: the physics' `BlockQuery`. |
 | `nav/costs.ts` | `TICKS` (walk, sprint, jump air time, fall table) derived from `input/physics.ts`; `PathCosts`, `DEFAULT_COSTS`, `dropCost`. |
-| `nav/actions.ts` | `NavActions` (dig / place / useBlock / throwawayItems), `NavBlockFace`, `breakBlocker` (the breaking safety rules). |
+| `nav/actions.ts` | `NavActions` (dig / place / useBlock / throwawayItems), `NavBlockFace`, `breakBlocker` (the breaking safety rules: a call into the shared rule set below). |
+| `nav/baritone/helper.ts` | Track BB (wave 11): the one rule set, Baritone's `MovementHelper` ported over `TerrainClass` (LGPL-3.0, `nav/baritone/LICENSE`, THIRD_PARTY_NOTICES.md): `canWalkThroughClass` / `canWalkThrough`, `canWalkOn` / `fullFloor`, `avoidWalkingInto`, `avoidBreaking` (= `breakBlocker`), `getMiningDurationTicks`, `breakTicksWith` / `bestTool` (Baritone `ToolSet`), `mustBeSolidToWalkOn`, `isReplaceable`, `canPlaceAgainst`, `isBottomSlab`, `isClimbable`, `isStillWater` / `isFlowing`, `ruleCell` (the miner's cell view). Pure, the per-cell rules allocation-free (`ruleCell` / `cellReaderOf` return one small object), over a `CellReader` (`NavGrid.cls`, or `cellReaderOf(source)`); the planner's grid, the worker's mirror grid, the follower's dig actions, the miner's tunnel checks and the Digger's tool choice call it. See "Rules". |
 | `nav/grid.ts` | `NavGrid`: cached classes, `stand`, `standThrough` (doorways), `free`, `freeColumn`, `crossing` (door / gate passage along x or z), `skyTop` / `underground` (per-chunk sky column cache), `factor`, `invalidate`. |
 | `nav/astar.ts` | `PathSearch` (resumable A*: `step(sliceMs)`), `findPath` (one go), `locateNode`. |
 | `nav/goals.ts` | Goal predicates and heuristics (blocks; the search multiplies by `costs.walk`): block, near, xz, any, getToBlock, yLevel, runAway, surface (see Goals). |
@@ -101,17 +102,76 @@ along that axis through the cell's centre sweeps; `toggle` when the toggled stat
 open gate has no box; a door panel swings to the perpendicular edge); else blocked. Only cardinal walks
 enter or leave doorway nodes.
 
-**Breaking rules** (`breakBlocker`, Baritone's): no unknown, air, liquid or unbreakable blocks; never a
-block next to water or lava (6 neighbours); never one with a gravity block on top; never the floor
+**Breaking rules** (`breakBlocker` = `nav/baritone/helper.ts` `avoidBreaking`, Track BB; the table in
+"Rules" below): no unknown, air, liquid or unbreakable blocks; never a block next to water or lava (6
+neighbours); never one with a gravity block on top (or an unsupported one beside it); never the floor
 under the start or the target (no dig-down move); never containers, beds, spawners, lecterns, hoppers,
-furnaces and the like (`TerrainClass.protect`), doors and gates, or names in `protectedBlocks`; never a
-cell a dig already failed on during this goto. Break ticks come from the break-time table with the
-best hotbar tool (`chooseTool`, docs/digging.md), or an empty hand without an inventory.
+furnaces and the like (`TerrainClass.protect`), built blocks, doors and gates, or names in
+`protectedBlocks`; never ice (it becomes water) or infested blocks; never a cell a dig already failed
+on during this goto. Break ticks come from the break-time table with the best hotbar tool
+(`breakTicksWith`: `chooseTool`, docs/digging.md), or an empty hand without an inventory.
 
 Search limits: a main plan 20 000 nodes / 40 ms of search time, a plan-ahead 20 000 / 100 ms
 (`segmentNodes`, `mainMs`, `segmentMs`; `path.maxNodes` / `path.maxMs` override both); a search runs at
 most `sliceMs` (8) per tick. `status`: `found`, `partial` (limit hit, or the search touched unloaded
 world; `unknown` / `limited` say which), `none` (exhaustive and fully known: unreachable).
+
+## Rules
+
+Wave 11 Track BB (the Baritone port; decision 0043). Baritone's `MovementHelper.java` (the static rules
+every movement asks: can I stand here, walk through this, break this, place here, what does breaking
+cost) is ported to `nav/baritone/helper.ts` over our `TerrainClass` (shapes from the registry data,
+decision 0024) and the block registry's hardness / tool table (`skills/dig`). Before, the rules lived in
+three places with gaps between them: `terrain/classify.ts` (the stand / passable classes), `nav/actions.ts`
+`breakBlocker` and `mine/tunnel.ts` (the cell checks of the tunnels). Now `NavGrid` (`passable`, `stand`,
+`swim`, `crossing`), the planner worker's mirror grid (the same `NavGrid` class over `worker-grid.ts`),
+`breakBlocker` (the planner's dig-through and the follower's dig actions, the miner, the farmer, branch
+mining), the miner's `TunnelCell` (`tunnel.ts` `tunnelCell` / `wire.ts`) and the Digger's tool choice
+(`bestTool`) call the helper, so a rule changes in one place and the worker needs no mirror of its own.
+Everything is pure; the per-cell rule functions allocate nothing (`ruleCell` and `cellReaderOf`, off the hot
+path, return one small object); a `CellReader` (`NavGrid`, or `cellReaderOf(source)` over any
+`TerrainSource`) answers the neighbour lookups. The rules the owner set stay by name: `digPenalty`,
+`protectRadius` (`BreakRules.protectedArea`), `isBuiltBlock`, the break rules, the shaft rules of
+`mine/tunnel.ts` `shaftRule`. Baritone's settings are fixed constants here (`WALK_ON_MAGMA` false,
+`WALK_ON_BOTTOM_SLAB` true, `ASSUME_WALK_ON_WATER` false).
+
+Where Baritone and our measured BDS rules disagree, the safer rule is kept (the "Kept" column):
+
+| Rule | Baritone (`MovementHelper`) | Ours before Track BB | Kept, and why |
+|---|---|---|---|
+| `canWalkThrough` (may the body occupy a cell) | YES: air, plants, open and closed wooden doors and gates (iron doors NO), a carpet or a snow layer under 3 layers over a floor, a still water source with nothing flowing and no liquid above; NO: fire, cobweb, end portal, berry bushes, powder snow, dripstone, cocoa, skulls, amethyst, azalea, slabs, trapdoors, honey, end rods, lava, flowing water, cauldrons | no collision box (a ladder's thin box aside), no liquid, no hazard, no scaffolding | ours, as a ternary: a still water source is MAYBE and only the swim moves enter it (`NavGrid.swim`: no flow-push model); doors and gates are not "walked through" but planned per axis (`crossing`, `standThrough`; a closed iron door or trapdoor in the way is CROSS_BLOCKED since Track BB, it cannot be opened by hand: `interact/use.ts handUsable`); carpets and snow layers from 2 layers are floors in their own cell (measured, decision 0022) rather than passable; every hazard without a box (fire, berry bush, powder snow, wither rose) is NO |
+| `canWalkOn` (a floor) | normal cubes except magma (setting), bubble columns and honey; azalea; ladders and vines; farmland, dirt paths, soul sand; chests; glass; stairs; slabs (bottom per setting, default on); water MAYBE (`assumeWalkOnWater`), lava MAYBE (`assumeWalkOnLava`) | the shape: a box top covering the cell's centre, at most 1 high, not a hazard | ours. Honey stays a floor with the slow penalty (x5) although Baritone refuses it: a bot standing on a honey floor must find its start node (see Known gaps; the physics does not model the stickiness). Magma stays no floor (= Baritone's default; `canWalkOn(c, { allowMagma })` is there for a sneaking follower). Known Bedrock differences: glass panes and iron bars are floors by shape (the body stands on the 1-high post; Baritone says NO), mud is a floor (Bedrock's 14/16 box; Baritone's normal-cube test says NO), ladders are never floors (climb nodes, Track AJ), water never (swim moves), lava never |
+| `fullFloor` (the floor of the node above) | (the movements test `canWalkOn` of the block below) | `below.floor && below.top === 1` | ours: a node's floor in the cell below needs a top of exactly 1; partial tops (soul sand 0.875, farmland 0.9375, slabs 0.5) are nodes in their own cell |
+| `avoidWalkingInto` | any fluid, magma (setting), cactus, berry bushes, fire, end portal, cobweb, bubble column | `TerrainClass.danger`: fire, soul fire, magma, cactus, lit campfires, berry bushes, wither rose, cobweb, powder snow, pointed dripstone, end portal, nether portal, end gateway, lava cauldron; plus liquids | ours (a superset: wither roses, powder snow, dripstone, portals, lit campfires) |
+| `avoidBreaking`: liquids | a liquid above; a liquid source beside; a flowing liquid beside unless it falls on; a block over a liquid is fine | water or lava in any of the 6 neighbours (`next_to_liquid`) | ours (stricter: a flow would reach the body; the owner's rule) |
+| `avoidBreaking`: gravity blocks | a falling block above is fine (its break time is counted, `includeFalling`); an unsupported falling block beside is refused (`avoidUpdatingFallingBlocks`) | a gravity block above refused (`gravity_above`) | ours for above (the owner's rule) plus Baritone's beside rule (`gravity_beside`: the block would fall when updated). `BreakRules.allowGravityAbove` (off everywhere) switches to Baritone's way for a move kind that wants it (Track BC) |
+| `avoidBreaking`: ice | ice refused (becomes water) | not a rule | Baritone's (`ice`: ice and frosted ice; packed and blue ice do not melt). Bedrock: broken ice over a solid block becomes water too |
+| `avoidBreaking`: infested blocks | refused | not a rule | Baritone's (`infested`: `infested_*`) |
+| `avoidBreaking`: unbreakable | `ToolSet` returns a negative speed: COST_INF | the break time was Infinity | the rule names it (`unbreakable`: registry hardness -1) |
+| `avoidBreaking`: ours | `blocksToDisallowBreaking` (empty), `isPossiblyProtected` (a TODO) | unknown runtime ids, containers / beds / spawners, built blocks (`isBuiltBlock`), doors and gates (`openable`), `protectedBlocks`, `protectedArea` (`protectRadius`), the floor under the feet (`under_feet`) | ours, all of them |
+| `getMiningDurationTicks` | 0 when `canWalkThrough`; `1 / strVsBlock` (Java hardness formula) + `blockBreakAdditionalPenalty` (2) x `breakCostMultiplierAt`; `avoidBreakingMultiplier` 0.1 on the speed of crafting tables, furnaces, chests; `includeFalling` adds the stack above, recursively | `breakTicks` (our measured BDS table with the best hotbar tool) + `PathCosts.dig` (`digPenalty` 60, `DEFAULT_COSTS.dig` 12 without the setting), composed inline in `astar.ts` `digThrough` | ours: 0 for a cell with no box, no liquid and no hazard (`digThrough`'s free rule: a hazard without a box such as fire or a berry bush is Infinity, a ladder's box is a built block and Infinity too), the measured table and `digPenalty` otherwise; Infinity for every refused case; no soft multiplier (containers and built blocks are refused outright). The falling recursion is kept behind `allowGravityAbove`. A unit test checks the planner's dig node pays exactly the helper's sum and that fire and ladder cells are refused by both |
+| `ToolSet.getBestSlot` / `getStrVsBlock` | the fastest hotbar slot, ties by material cost, silk touch preference, `itemSaver` | `chooseTool` (fewest ticks, then one that harvests, then no tool worn, then the selected slot); worn tools skipped by the Digger (Track S) | ours (`bestTool`, `breakTicksWith`): the Digger, the navigator and the worker call the same function |
+| `isReplaceable` (a place target) | air, a one-layer snow layer, large fern / tall grass, `canBeReplaced` | not a rule (pillar-up placed into air only) | Baritone's over Bedrock's replaceable set (air, liquids, fire, grass, ferns, dead bush, seagrass, vines, roots, sprouts, lichen, sculk vein, structure void, light) |
+| `canPlaceAgainst` | a normal cube (not bamboo, moving pistons, scaffolding, shulker boxes, dripstone, amethyst) or glass | not a rule | Baritone's over our `fullCube`; unknown blocks never |
+| `mustBeSolidToWalkOn` | false for climbables; waterlogged slabs / stairs / trapdoors / scaffolding / leaves by half | not a rule | Baritone's for climbers; the waterlogged cases need layer 1, which the world model does not read (docs/world-model.md): a waterlogged slab answers like a dry one |
+| `isBottomSlab` (no ascend from a bottom slab onto a full block) | by state | our stairs / slab walks are measured (decision 0022: a rise within a step is a walk) | the predicate is there for Track BC's moves; the planner's own rule stays measured |
+| `MovementDownward` / `MovementFall` | dig straight down, fall into water | `shaftRule` (a known solid floor below, no liquid in the column or 1 to 2 below, no dripstone within 3, no gravity block over the top, never within 2 of the world floor) | ours (rule 6) |
+
+Notes for Track BC (the moves that dig): test body cells with `canWalkThroughClass(c) === YES` (the planner's
+`passable`); `canWalkThrough(reader, x, y, z)` is also true for a still water source with air above (Baritone's
+rule), which only the swim moves may enter. `BreakRules.allowGravityAbove` is a rule-set option only: it is not
+forwarded through `PathOptions` nor `WorkerPlanOptions` yet (BC adds both, with the worker unit test), so every
+planner path still refuses a gravity block above a dug cell.
+
+Unit tests: `test/unit/skills/nav-baritone-helper.test.ts` (one test per rule, the planner's dig cost against
+the helper, the grid's stand rules against the helper), the worker test's rule strip (`nav-worker.test.ts`:
+magma, soul sand, berry bushes, powder snow, honey, ice over water, gravel over stone, carpet, snow layers, a
+wither rose, farmland, iron doors, infested stone, slabs, a fence, a pane, sand: the mirror answers like the
+main grid for every helper function). e2e: `test/e2e/nav-rules.test.ts` on bds-bari (udp/19206, `BARI_BDS_*`;
+the nav-* regression suites run there with `MOVE_BDS_PORT=19206 MOVE_BDS_CONTAINER=bds-bari`): a magma strip
+walked around, a berry bush line walked around, an ice barrier over lava never dug, a gravel-topped barrier
+not dug (and dug once the gravel is gone, the plan's cost carrying the dig ticks), a soul sand floor walked,
+slabs and a stairs step walked without a jump.
 
 ## Stairs and partial blocks
 
@@ -560,9 +620,15 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/e2e/nav-place.test.ts` | pillar-up (cliff, pit) and door / gate; skipped with a message until the navigator has `place` / `useBlock` actions |
 | `test/unit/skills/nav-goals.test.ts` | task 7.10 goal predicates and heuristics; closed loop: any over 10 logs, getToBlock (visible face), yLevel, runAway (also from a moving threat), surface (shaft with pillaring, cave); the blacklist (counting, expiry, keys, a walled log skipped by the next any, blame of an any member, dig cells) |
 | `test/unit/skills/tree-blacklist.test.ts` | the tree finder and the feller skip blacklisted logs; 3 failed fells blacklist an unreachable log |
+<<<<<<< HEAD
 | `test/unit/skills/nav-partial.test.ts` | Track BA: the ported bests (constants, scores, MIN_IMPROVEMENT, MIN_DIST_PATH), node-limited ends next to a U wall, in a dead-end corridor and on open ground, `no_progress`, closed loops round a U and a cup with 100 to 200-node budgets |
 | `test/e2e/nav-partial.test.ts` | Track BA: a truth-built U wall with `path.maxNodes` 100: the first plan partial, the goal reached (worker and in-thread) |
 | `test/unit/skills/nav-worker.test.ts` | Track AB: the worker's mirror vs the main grid on 200 random cells (loaded, after block updates and a re-sent column, cached after an unload); 20 random start / goal pairs in a real worker thread vs in-thread (same status, cost, expansions); the navigator walking an interim answer and splicing in the final one; a crash logged once, its search failed, the worker restarted |
+=======
+| `test/unit/skills/nav-worker.test.ts` | Track AB: the worker's mirror vs the main grid on 200 random cells (loaded, after block updates and a re-sent column, cached after an unload); 20 random start / goal pairs in a real worker thread vs in-thread (same status, cost, expansions); the navigator walking an interim answer and splicing in the final one; a crash logged once, its search failed, the worker restarted. Track BB: the rule strip (every helper rule compared between the mirror and the main grid) |
+| `test/unit/skills/nav-baritone-helper.test.ts` | Track BB: the shared rule set, one test per rule (see "Rules"), the planner's dig cost against `getMiningDurationTicks`, the grid's stand rules against `canWalkOn` / `canWalkThrough` |
+| `test/e2e/nav-rules.test.ts` | Track BB, bds-bari: magma strip, berry bushes, ice over lava, gravel over a dig (and the control without it), soul sand, slabs and stairs (see "Rules") |
+>>>>>>> worktree-agent-a0f2e306cbccbfe0c
 | `test/e2e/nav-compute.test.ts` | Track AB, worker vs in-thread on the same terrain: the house walk (1 segment, 0 corrections), 120 blocks of the cross-country course, 120 blocks through staggered walls (fewer plans, no partial segments with the worker), a sealed goal 100 blocks away with allowPlace (a 300 000+ node search, navigator tick under 20 ms) |
 | `test/e2e/nav-goals.test.ts` | any over 10 logs, getToBlock, yLevel, runAway, surface from a 4-deep shaft, a log walled in glass blacklisted after 3 failures and skipped by the next any |
 | `test/unit/skills/nav-variety.test.ts` | Track AJ: the measured water / climbing / sneak-edge physics; planner swims a river (never below the surface), swimming off, ladder up and down, vines, 1- and 2-block gaps (never over lava or a deep drop), ladder cells passable and scaffolding an obstacle; closed loops: river, ladder up and down, vine wall, both gaps, a 1-wide bridge (no fall) |
@@ -583,7 +649,9 @@ BDS_E2E=1 pnpm exec vitest run --project e2e test/e2e/nav-cross --silent=false  
 
 Env: `MOVE_BDS_HOST`, `MOVE_BDS_PORT` (19146), `MOVE_BDS_CONTAINER` (`bds-move`), `MOVE_SEED` (random goals,
 the cross-country layout; default 7), `MOVE_AREA=x,z` (pin a v2 suite's area to reproduce a run),
-`MOVE_VERBOSE=1` (corrections, teleports, navigator decisions).
+`MOVE_VERBOSE=1` (corrections, teleports, navigator decisions). Track BB: `nav-rules` runs on bds-bari
+(`node scripts/bds.mjs --profile bari up`, then `pack`; `BARI_BDS_HOST` / `BARI_BDS_PORT` 19206 /
+`BARI_BDS_CONTAINER`), and the other nav suites run there too with `MOVE_BDS_PORT=19206 MOVE_BDS_CONTAINER=bds-bari`.
 
 ## Known gaps
 
@@ -604,4 +672,10 @@ the cross-country layout; default 7), `MOVE_AREA=x,z` (pin a v2 suite's area to 
   the last landing. The follower never sprint-jumps there (checked in the sim); likely a sprint-start
   rule after horizontal collisions in the movement model (input/sprint.ts). Not investigated further.
 - Soul sand, honey, slime and ice are only penalised by the planner; the physics models ice / slime
-  friction but not the soul sand / honey speed factor.
+  friction but not the soul sand / honey speed factor. Track BB measured it on bds-bari (nav-rules): a
+  3-long soul sand floor is walked (85 ticks for the corridor against 74 on grass) with 2 corrections of
+  0.63 to 0.71 blocks, the server behind the local body (the input loop walks soul sand at full speed).
+  Honey stays a floor (Baritone refuses it; ours is penalised x5 and not modelled by the physics either).
+  A body standing on a block that is no floor to the planner (magma without the sneak setting, a hazard)
+  has no start node (`locateNode` finds none; the goto ends with no standable node): pre-existing for
+  magma and the other hazards, and the reason honey was kept a floor.

@@ -10,7 +10,9 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { silentLogger } from '../../../src/log.ts';
 import { BotSkills } from '../../../src/skills/index.ts';
-import { findPath, type PathResult } from '../../../src/skills/nav/astar.ts';
+import { breakBlocker } from '../../../src/skills/nav/actions.ts';
+import { findPath, handBreakTicks, type PathResult } from '../../../src/skills/nav/astar.ts';
+import { avoidWalkingInto, canWalkOn, canWalkThroughClass, getMiningDurationTicks } from '../../../src/skills/nav/baritone/helper.ts'; // Track BB
 import { NavGrid } from '../../../src/skills/nav/grid.ts';
 import { PlannerClient, corridor, type PlannerWorker, type WorkerPlanOptions } from '../../../src/skills/nav/worker.ts';
 import { MirrorWorld, type MirrorOp } from '../../../src/skills/nav/worker-grid.ts';
@@ -43,6 +45,32 @@ const STAIRS = [0, 1, 2, 3].map((d) => rid('oak_stairs', { weirdo_direction: d }
 const DOOR_LOW = rid('wooden_door', { upper_block_bit: 0, open_bit: 0 });
 const DOOR_UP = rid('wooden_door', { upper_block_bit: 1, open_bit: 0 });
 const LADDER = rid('ladder', { facing_direction: 3 }); // Track AJ: a ladder tower
+// Track BB: the shared rule set's blocks (docs/pathfinding.md "Rules"), in a strip at z 14 / 15 (x -20 .. 14)
+const RULE_STRIP: readonly (readonly [x: number, dy: number, rid: number])[] = [
+  [-20, 1, rid('magma')],
+  [-18, 1, rid('soul_sand')],
+  [-16, 1, rid('sweet_berry_bush')],
+  [-14, 1, rid('powder_snow')],
+  [-12, 1, rid('honey_block')],
+  [-10, 0, rid('ice')], // ice over water (the ground below it is water, see `hills`)
+  [-10, -1, WATER],
+  [-8, 1, STONE], // stone with gravel over it
+  [-8, 2, rid('gravel')],
+  [-6, 1, rid('white_carpet')],
+  [-4, 1, rid('snow_layer', { height: 3 })],
+  [-2, 1, rid('wither_rose')],
+  [0, 0, rid('farmland')],
+  [2, 1, rid('iron_door', { upper_block_bit: 0, open_bit: 0 })],
+  [2, 2, rid('iron_door', { upper_block_bit: 1, open_bit: 0 })],
+  [4, 1, rid('infested_stone')],
+  [6, 1, SLAB],
+  [8, 1, rid('oak_slab', { 'minecraft:vertical_half': 'top' })],
+  [10, 1, FENCE],
+  [12, 1, rid('glass_pane')],
+  [14, 1, rid('sand')], // an unsupported gravity block: air under it? no, on the ground; the cell beside it (13) is dug in the compare
+  [14, 2, rid('sand')],
+];
+const ruleStrip = new Map<string, number>(RULE_STRIP.map(([x, dy, r]) => [`${x},${dy}`, r]));
 /** A runtime id the registry does not know (a block newer than the data): a 1.5-high obstacle. */
 const UNKNOWN_RID = 123456789;
 
@@ -68,6 +96,11 @@ function hills(x: number, y: number, z: number): number {
   // Track AJ: an 8-high stone pillar with a ladder on its south face (the only way onto its top)
   if (x === 21 && z === -31 && y > g && y <= g + 8) return STONE;
   if (x === 21 && z === -30 && y > g && y <= g + 8) return LADDER;
+  if (z === 14) {
+    // Track BB: the rule strip (dy relative to the ground)
+    const r = ruleStrip.get(`${x},${y - g}`);
+    if (r !== undefined) return r;
+  }
   if (y < g - 2) return STONE;
   if (y < g) return DIRT;
   if (y === g) return GRASS;
@@ -184,11 +217,18 @@ async function until(fn: () => boolean, ms = 10_000): Promise<void> {
   }
 }
 
-/** Every planner-relevant fact of a cell: the block, its class, stand / standThrough, crossing, the sky column. */
-function cellFacts(grid: NavGrid, x: number, y: number, z: number): string {
+/** Every planner-relevant fact of a cell: the block, its class, stand / standThrough, crossing, the sky column, and the shared rule set's answers (Track BB). */
+function cellFacts(grid: NavGrid, x: number, y: number, z: number, neighbours = true): string {
   const b = grid.source.blockAt(x, y, z);
   const c = b && classify(b);
+  const ctx = { breakTicks: handBreakTicks, dig: 12, rules: { allowGravityAbove: true } };
   return JSON.stringify([
+    c && canWalkThroughClass(c),
+    c && canWalkOn(c),
+    c && avoidWalkingInto(c),
+    neighbours ? breakBlocker(grid, x, y, z) : null,
+    neighbours ? getMiningDurationTicks(grid, x, y, z, ctx, true) : null,
+    neighbours ? getMiningDurationTicks(grid, x, y, z, { ...ctx, rules: {} }, false) : null,
     b?.name,
     b?.stateId,
     b?.states,
@@ -232,13 +272,13 @@ describe('planner worker: the mirror', () => {
     await until(() => client.ready);
     const area = { x0: C0 * 16, x1: C1 * 16 + 15, z0: C0 * 16, z1: C1 * 16 + 15 };
     const cells = randomCells(200, 1, area);
-    const compare = (label: string, list: Vec3[]) => {
+    const compare = (label: string, list: Vec3[], neighbours = true) => {
       const main = new NavGrid(worldSource(F.world));
       const copy = new NavGrid(mirror.source);
       let bad = 0;
       for (const p of list) {
-        const a = cellFacts(main, p.x, p.y, p.z);
-        const b = cellFacts(copy, p.x, p.y, p.z);
+        const a = cellFacts(main, p.x, p.y, p.z, neighbours);
+        const b = cellFacts(copy, p.x, p.y, p.z, neighbours);
         if (a !== b) {
           bad++;
           if (bad < 4) console.log(`${label} ${p.x},${p.y},${p.z}\n main   ${a}\n mirror ${b}`);
@@ -250,6 +290,36 @@ describe('planner worker: the mirror', () => {
     // the features are in the sample (doors, stairs, unknown blocks, water ...)
     const names = new Set([...cells, { x: 4, y: groundY(4, 4) + 1, z: 4 }].map((p) => F.world.blockAt(p)?.name));
     expect(names.has('stone') && names.has('grass_block') && names.has('air')).toBe(true);
+    // Track BB: the rule strip, every cell with its neighbours in the column (the break rules read them)
+    const strip: Vec3[] = [];
+    for (const [x, dy] of RULE_STRIP) for (let k = -2; k <= 2; k++) strip.push({ x, y: groundY(x, 14) + dy + k, z: 14 }, { x: x + 1, y: groundY(x, 14) + dy + k, z: 14 });
+    compare('rule strip', strip);
+    const stripNames = new Set(strip.map((p) => F.world.blockAt(p)?.name));
+    for (const n of ['magma', 'soul_sand', 'sweet_berry_bush', 'powder_snow', 'honey_block', 'ice', 'gravel', 'white_carpet', 'snow_layer', 'wither_rose', 'farmland', 'iron_door', 'infested_stone', 'oak_slab', 'oak_fence', 'glass_pane', 'sand']) {
+      expect(stripNames.has(n), n).toBe(true);
+    }
+    // the rules answer as documented on a few strip cells (main grid; the mirror was compared above)
+    const main = new NavGrid(worldSource(F.world));
+    const gy = (x: number) => groundY(x, 14);
+    expect(main.stand(-20, gy(-20) + 2, 14)).toBeNaN(); // on magma: never
+    expect(main.stand(-18, gy(-18) + 1, 14)).toBe(gy(-18) + 1 + 0.875); // soul sand: a floor
+    expect(main.stand(-16, gy(-16) + 1, 14)).toBeNaN(); // a berry bush
+    expect(main.stand(-14, gy(-14) + 1, 14)).toBeNaN(); // powder snow
+    expect(main.stand(-12, gy(-12) + 2, 14)).toBe(gy(-12) + 2); // honey: a floor (penalised x5)
+    expect(main.crossing(2, gy(2) + 1, 14, 0)).toBe(2); // a closed iron door in the way: CROSS_BLOCKED (redstone only), never CROSS_TOGGLE
+    expect([0, 2].map((a) => main.crossing(2, gy(2) + 1, 14, a as 0 | 2))).not.toContain(1); // along the panel: clear; never a toggle
+    expect(main.stand(-10, gy(-10) + 1, 14)).toBe(gy(-10) + 1); // ice is walked on
+    expect(breakBlocker(main, -10, gy(-10), 14)).toBe('ice'); // and never dug
+    expect(breakBlocker(main, -8, gy(-8) + 1, 14)).toBe('gravity_above');
+    expect(breakBlocker(main, 4, gy(4) + 1, 14)).toBe('infested');
+    expect(main.stand(-6, gy(-6) + 1, 14)).toBe(gy(-6) + 1 + 0.0625); // carpet
+    expect(main.stand(-4, gy(-4) + 1, 14)).toBe(gy(-4) + 1 + 0.375); // 4 snow layers
+    expect(main.stand(-2, gy(-2) + 1, 14)).toBeNaN(); // wither rose
+    expect(main.stand(0, gy(0), 14)).toBe(gy(0) + 0.9375); // farmland
+    expect(main.stand(6, gy(6) + 1, 14)).toBe(gy(6) + 1.5); // a bottom slab
+    expect(main.stand(8, gy(8) + 2, 14)).toBe(gy(8) + 2); // a top slab: the node above
+    expect(main.stand(10, gy(10) + 2, 14)).toBeNaN(); // a fence is 1.5 high
+    expect(main.stand(12, gy(12) + 2, 14)).toBe(gy(12) + 2); // a pane's post is stood on
 
     // block updates (a wall, an opened door, an unknown block, a log removed) and a re-sent column
     const g = groundY(4, 4);
@@ -277,7 +347,8 @@ describe('planner worker: the mirror', () => {
     expect(client.pumpCache(cols)).toBe(true);
     await flush();
     expect(mirror.cacheCount).toBeGreaterThan(0);
-    compare('cached', randomCells(200, 2, { x0: 0, x1: C1 * 16 + 15, z0: -16, z1: 31 }));
+    // (without the break rules: they read the x / z neighbours, which may lie in a cached column the corridor did not send)
+    compare('cached', randomCells(200, 2, { x0: 0, x1: C1 * 16 + 15, z0: -16, z1: 31 }), false);
     // the rest of the unloaded columns
     const all: number[][] = [];
     for (let cx = 0; cx <= C1; cx++) for (let cz = C0; cz <= C1; cz++) all.push([cx, cz]);

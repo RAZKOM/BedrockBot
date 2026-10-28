@@ -13,7 +13,7 @@ import { probePath } from '../home/reach.ts';
 import type { Vec3 } from '../../world/types.ts';
 import { MineTask } from './miner.ts';
 import { OreMemory } from './seen.ts';
-import type { TunnelWorld } from './tunnel.ts';
+import { tunnelCell, type TunnelWorld } from './tunnel.ts'; // Track BB: tunnelCell
 
 /** Node / time budget of a probe plan (the navigator's own main plan allows 40 000 nodes / 250 ms). */
 export const PROBE_NODES = 6000;
@@ -38,8 +38,7 @@ export function createMinerFor(p: FarmParts, settings: MinerSettings = {}): { mi
     breakRule: (q) => breakBlocker(nav.grid, q.x, q.y, q.z, nav.breakRules(), []),
     cell: (q) => {
       const c = nav.grid.cls(q.x, q.y, q.z);
-      if (!c) return undefined;
-      return { open: c.boxes.length === 0 && !c.liquid, solid: c.floor && !c.liquid && !c.danger, liquid: !!c.liquid, gravity: c.gravity, dripstone: c.name.includes('pointed_dripstone') };
+      return c && tunnelCell(c); // Track BB: the shared rule set (helper canWalkThrough / canWalkOn)
     },
     blockAt: (q) => world.blockAt(q),
   };

@@ -43,7 +43,7 @@ target; several kinds with quotas in one trip (`!mine iron_ore 8 coal_ore 16`, `
 | `bot/src/skills/farm/index.ts` | `createMiner(parts, { tunnelLen })`: the plain wave-6 wiring (no probe, no blacklist) |
 | `bot/src/tasks/process/mine.ts` | `MineProcess` (Track Z) |
 | `bot/src/chat/commands-farm.ts` | `!mine` (with `!farm`), `registerFarmCommands` (called from tasks/registry.ts), the passive ore scan |
-| `bot/src/skills/mine/tunnel.ts` | Track AQ: `planTunnel` (the direct tunnel / shaft plan on the world model), `shaftRule`, `chooseTunnel`, `clearStep` (the step primitive, also branch mining's), `runTunnel`, `stairStep` / `flatStep` / `shaftStep` |
+| `bot/src/skills/mine/tunnel.ts` | Track AQ: `planTunnel` (the direct tunnel / shaft plan on the world model), `shaftRule`, `chooseTunnel`, `clearStep` (the step primitive, also branch mining's), `runTunnel`, `stairStep` / `flatStep` / `shaftStep`; Track BB: `tunnelCell` (the cell view from the shared rule set, nav/baritone/helper.ts) |
 | `bot/src/skills/mine/vein.ts` | Track AQ: `veinFrom` (18-connected flood fill of one ore kind), `oreKind`, `veinCentre` / `veinRadius` |
 | `bot/src/skills/collect/sweep.ts` | Track AQ: `sweepItems` (the floor sweep: one entity scan when nothing is near), `isWoodDrop`, `isFoodDrop` |
 | `miner.ts` `jobDropNames` / `isJobDrop` | what a job's sweeps and hole walks pick up: the ore drops (`isMineDrop`) plus the job's own block kinds and what they drop (`BLOCK_DROPS`: stone to cobblestone, gravel to gravel and flint, grass to dirt ...). Before 2026-10-30 only ore drops counted, so `!get sand 256` left every sand item on the floor |
@@ -206,8 +206,14 @@ three full plans of 100 000 nodes and their gotos. `mineDirect off` is the wave-
   of the ore with a clear line of sight, or when the ore (or another block of the asked kinds) is the
   next cell to dig: the miner's sight digs and dig take over.
 - **Rules for every cell**: the navigator's break rules (`nav.breakRules()`, `breakBlocker` without the
-  under-feet rule): the protected area around home (`protectRadius`), built blocks (`isBuiltBlock`) and
-  containers, liquid in or next to the cell, a gravity block over it, unknown blocks. A cell the way back
+  under-feet rule; since wave 11 Track BB one shared rule set, `nav/baritone/helper.ts` `avoidBreaking`,
+  the table in docs/pathfinding.md "Rules"): the protected area around home (`protectRadius`), built blocks
+  (`isBuiltBlock`) and containers, liquid in or next to the cell, a gravity block over it (or an
+  unsupported one beside it), ice, infested and unknown blocks. The planner's cell view (`TunnelCell`:
+  open / solid / hazard) comes from the same set (`tunnelCell`: Baritone's `canWalkThrough` / `canWalkOn` /
+  `avoidWalkingInto`): a ladder's or vine's cell counts as open (walked through, not dug; before Track BB a
+  ladder was a block to dig), and a hazard without a box in the line (fire, a berry bush: "air" to the break
+  rules) ends the plan with `hazard at x y z` instead of being walked into. A cell the way back
   stands on is never dug; every new feet cell needs a solid dry floor (a step blocked only by the shape
   of the ground may go one step round, e.g. walk to the hill's foot first). The first blocked cell ends
   the plan and the ore is skipped with the reason (`tunnel blocked: protected at 70965 -59 70296`) before

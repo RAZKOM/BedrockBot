@@ -36,6 +36,7 @@
 //   explore bds-explore docker/compose.explore.yml      BDS 1.26.60.6, RakNet    udp/19198 (explore-* e2e: !explore, branch mining; DEFAULT world, seed 7; Track AI)
 //   nether  bds-nether  docker/compose.nether.yml       BDS 1.26.60.6, RakNet    udp/19202 (nether-* e2e: portals, the Nether, the End; DEFAULT world, seed 7, normal; Track AT)
 //   fly     bds-fly     docker/compose.fly.yml          BDS 1.26.60.6, RakNet    udp/19204 (fly-* e2e: Elytra flight, landings; FLAT, peaceful, fall damage on; Track AU)
+//   bari   bds-bari   docker/compose.bari.yml           BDS 1.26.60.6, RakNet    udp/19206 (nav-rules and the nav-* regression suites of the Baritone port; flat, peaceful; Track BB)
 // Any other BDS_CONTAINER value works for restart/idle/cmd/logs only.
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -67,6 +68,7 @@ const PROFILES = {
   explore: { container: 'bds-explore', compose: 'compose.explore.yml', data: 'explore', port: 'udp/19198' }, // Track AI
   nether: { container: 'bds-nether', compose: 'compose.nether.yml', data: 'nether', port: 'udp/19202' }, // Track AT: nether-* e2e (portals, dimensions, lava; difficulty normal)
   fly: { container: 'bds-fly', compose: 'compose.fly.yml', data: 'fly', port: 'udp/19204' }, // Track AU: fly-* e2e (Elytra flight; flat, peaceful, fall damage on)
+  bari: { container: 'bds-bari', compose: 'compose.bari.yml', data: 'bari', port: 'udp/19206' }, // Track BB: nav-rules + nav-* regression (Baritone port; MOVE_BDS_PORT=19206 for the nav-* suites)
 }
 const argv = process.argv.slice(2)
 const profileFlag = argv.indexOf('--profile')

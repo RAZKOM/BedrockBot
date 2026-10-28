@@ -14,7 +14,7 @@
 //               'unreachable'. A failure while not standing safely first retreats to the last safe node.
 import { silentLogger, type Logger } from '../../log.ts';
 import type { BlockInfo, Vec3 } from '../../world/types.ts';
-import { chooseTool } from '../dig/tools.ts';
+import { breakTicksWith } from './baritone/helper.ts'; // Track BB: the shared break-time lookup
 import type { InputLoop, InputLoopState } from '../input/inputLoop.ts';
 import { classify, type TerrainClass } from '../terrain/classify.ts';
 import type { TerrainSource } from '../terrain/query.ts';
@@ -383,7 +383,7 @@ export class Navigator {
         (inv
           ? (c) => {
               const v = inv();
-              return v ? (chooseTool(c.name, v.slots, v.selected)?.ticks ?? Infinity) : handBreakTicks(c);
+              return v ? breakTicksWith(c, v) : handBreakTicks(c); // Track BB
             }
           : handBreakTicks),
       ...(noBreak ? { noBreak } : {}),

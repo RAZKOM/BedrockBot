@@ -66,8 +66,9 @@ export async function prepareServer(container = MOVE_CONTAINER): Promise<void> {
   }
 }
 
-export async function connectBot(prefix: string): Promise<MoveBot> {
-  await prepareServer();
+export async function connectBot(prefix: string, at: { target?: ConnectTarget; container?: string } = {}): Promise<MoveBot> { // Track BB: `at` (nav-rules on bds-bari)
+  const container = at.container ?? MOVE_CONTAINER;
+  await prepareServer(container);
   const name = uniqueName(prefix);
   const conn = new Connection({ version: E2E_VERSION, username: name, logger: silentLogger, reconnect: false });
   const world = new World(conn, { version: E2E_VERSION, logger: silentLogger });
@@ -75,7 +76,7 @@ export async function connectBot(prefix: string): Promise<MoveBot> {
   const hotbar = new Hotbar(conn, { inventory: world.inventory, runtimeId: () => world.self.runtimeId });
   const containers = new Containers(conn, world.inventory);
   const skills = new BotSkills({ loop, world, hotbar, containers, source: conn, logger: VERBOSE ? createLogger('debug', 'nav') : silentLogger });
-  const truth = new Truth(conn, MOVE_CONTAINER);
+  const truth = new Truth(conn, container);
   const corrections: CorrectionEvent[] = [];
   const events: InputLoopEvent[] = [];
   loop.onEvent((e) => {
@@ -83,7 +84,7 @@ export async function connectBot(prefix: string): Promise<MoveBot> {
     if (e.kind === 'correction') corrections.push(e);
   });
   loop.start();
-  await conn.connect(MOVE_TARGET);
+  await conn.connect(at.target ?? MOVE_TARGET);
   await world.waitForChunks(4, { timeoutMs: 30_000 });
   await loop.waitTicks(10);
   return { name, conn, world, loop, skills, truth, corrections, events };

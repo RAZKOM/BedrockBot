@@ -17,7 +17,7 @@
 import { isMainThread, parentPort, Worker, workerData, type MessagePort } from 'node:worker_threads';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { BlockInfo, Vec3 } from '../../world/types.ts';
-import { chooseTool } from '../dig/tools.ts';
+import { breakTicksWith } from './baritone/helper.ts'; // Track BB: the shared break-time lookup
 import { PathSearch, handBreakTicks, type PathOptions, type PathResult } from './astar.ts';
 import { costFunction, type AvoidanceCosts, type AvoidanceSource } from './avoidance.ts';
 import { threatsOf, type NavGoal } from './goals.ts';
@@ -725,7 +725,7 @@ function workerOptions(o: WorkerPlanOptions): PathOptions {
     ...(o.protectedArea ? { protectedArea: o.protectedArea } : {}),
     ...(o.noBreak ? { noBreak: new Set(o.noBreak) } : {}),
     ...(o.noAction ? { noAction: new Set(o.noAction) } : {}),
-    breakTicks: inv ? (c) => chooseTool(c.name, inv.slots, inv.selected)?.ticks ?? Infinity : handBreakTicks,
+    breakTicks: inv ? (c) => breakTicksWith(c, inv) : handBreakTicks, // Track BB
     ...(o.avoidance ? { cellCost: costFunction(o.avoidance.sources, o.avoidance.costs) } : {}),
   };
 }

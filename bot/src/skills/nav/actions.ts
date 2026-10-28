@@ -4,6 +4,7 @@
 // `allowPlace`; doors whenever `useBlock` is there). See docs/pathfinding.md.
 import type { Vec3 } from '../../world/types.ts';
 import type { SkillResult } from '../types.ts';
+import { avoidBreaking, type BreakReason, type BreakRuleOptions } from './baritone/helper.ts'; // Track BB
 import type { NavGrid } from './grid.ts';
 
 export type NavBlockFace = 'down' | 'up' | 'north' | 'south' | 'west' | 'east';
@@ -32,48 +33,24 @@ export const FACE_OFFSET: Readonly<Record<NavBlockFace, Readonly<Vec3>>> = Objec
   east: { x: 1, y: 0, z: 0 },
 });
 
-export interface BreakRules {
-  /** Block names never broken (on top of containers, beds and the like, which never are). */
-  protectedBlocks?: ReadonlySet<string> | readonly string[];
-  /** Nothing is broken within `r` blocks (3D, block centres) of this point: the base around home (`protectRadius`). */
-  protectedArea?: { x: number; y: number; z: number; r: number };
-}
+/**
+ * The break rules' parameters: `protectedBlocks` (names never broken, on top of containers, beds and the
+ * like, which never are), `protectedArea` (nothing is broken within `r` blocks of this point: the base
+ * around home, `protectRadius`), `allowGravityAbove` (Baritone's way, off by default: the owner's rule).
+ * Track BB: the type lives with the rule set (nav/baritone/helper.ts `BreakRuleOptions`).
+ */
+export type BreakRules = BreakRuleOptions;
 
 /**
- * Why the planner may not break the block in cell (x, y, z), or undefined when it may (Baritone's
- * rules): unknown / unbreakable / air; protected (containers, beds, spawners, `protectedBlocks`);
- * a door or gate; a liquid in or next to it (6 neighbours: it would flow in); a gravity block above
- * it (sand, gravel would fall into the gap); the cell is the floor under `feetFloor` (the block under
- * the feet: only an explicit dig-down move may break that, and there is none).
+ * Why the planner may not break the block in cell (x, y, z), or undefined when it may: the shared rule
+ * set (Track BB, nav/baritone/helper.ts `avoidBreaking`, Baritone's MovementHelper.avoidBreaking with the
+ * owner's rules): unknown / unbreakable / air; protected (containers, beds, spawners, built blocks,
+ * `protectedBlocks`); a door or gate; the protected area; the floor under `feetFloors` (the block under
+ * the feet: only an explicit dig-down move may break that); ice (becomes water); infested; a liquid in
+ * or next to it (6 neighbours: it would flow in); a gravity block above it (sand, gravel would fall into
+ * the gap); an unsupported gravity block beside it. The planner (nav/astar.ts), the worker, the follower's
+ * dig actions, the miner, the farmer and branch mining all call this.
  */
-export function breakBlocker(grid: NavGrid, x: number, y: number, z: number, rules: BreakRules = {}, feetFloors: readonly Vec3[] = []): string | undefined {
-  const c = grid.cls(x, y, z);
-  if (!c) return 'unknown';
-  if (c.boxes.length === 0 && !c.liquid) return 'air';
-  if (c.liquid) return 'liquid';
-  if (c.unknown) return 'unknown_block';
-  if (c.protect) return 'protected';
-  if (c.openable) return 'openable';
-  const prot = rules.protectedBlocks;
-  if (prot && (Array.isArray(prot) ? (prot as readonly string[]).includes(c.name) : (prot as ReadonlySet<string>).has(c.name))) return 'protected';
-  const area = rules.protectedArea;
-  if (area && Math.hypot(x + 0.5 - area.x, y + 0.5 - area.y, z + 0.5 - area.z) <= area.r) return 'protected_area';
-  for (const f of feetFloors) if (f.x === x && f.y === y && f.z === z) return 'under_feet';
-  for (const [dx, dy, dz] of NEIGHBOURS) {
-    const n = grid.cls(x + dx, y + dy, z + dz);
-    if (!n) return 'unknown';
-    if (n.liquid) return 'next_to_liquid';
-  }
-  const above = grid.cls(x, y + 1, z);
-  if (above?.gravity) return 'gravity_above';
-  return undefined;
+export function breakBlocker(grid: NavGrid, x: number, y: number, z: number, rules: BreakRules = {}, feetFloors: readonly Vec3[] = []): BreakReason | undefined {
+  return avoidBreaking(grid, x, y, z, rules, feetFloors);
 }
-
-const NEIGHBOURS: readonly (readonly [number, number, number])[] = [
-  [1, 0, 0],
-  [-1, 0, 0],
-  [0, 1, 0],
-  [0, -1, 0],
-  [0, 0, 1],
-  [0, 0, -1],
-];

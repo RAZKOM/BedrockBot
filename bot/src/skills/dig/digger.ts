@@ -23,7 +23,8 @@ import type { TickExtrasProvider } from '../input/inputLoop.ts';
 import type { SkillResult } from '../types.ts';
 import { estimateBreak, type BreakConditions } from './breakTime.ts';
 import { EYE_HEIGHT, blockCenter, checkReach, faceToward, lookAngles, type Face } from './look.ts';
-import { chooseTool, HOTBAR_SIZE } from './tools.ts';
+import { HOTBAR_SIZE } from './tools.ts';
+import { bestTool } from '../nav/baritone/helper.ts'; // Track BB: the shared break rule set's tool choice (Baritone ToolSet.getBestSlot)
 
 /** Survival delay between two breaks (250 ms, Minecraft Wiki "Breaking" / Mojang build-action guide). */
 export const BREAK_COOLDOWN_TICKS = 5;
@@ -183,7 +184,7 @@ export class Digger {
     const inv = this.world.inventory;
     let slot = inv.selected;
     if (opts.tool === undefined || opts.tool === 'best') {
-      slot = chooseTool(mining, inv.slots.map((s) => (s && !this.toolOk(s) ? null : s)), inv.selected, opts.conditions)?.slot ?? inv.selected; // Track S: worn tools count as an empty hand
+      slot = bestTool(mining.name, inv.slots, inv.selected, opts.conditions, this.toolOk)?.slot ?? inv.selected; // Track S: worn tools count as an empty hand; Track BB: helper bestTool
     } else if (typeof opts.tool === 'number') {
       if (!Number.isInteger(opts.tool) || opts.tool < 0 || opts.tool >= HOTBAR_SIZE) return Promise.resolve({ ok: false, reason: 'bad_slot' });
       slot = opts.tool;
