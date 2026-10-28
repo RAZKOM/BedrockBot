@@ -6,8 +6,8 @@
 //   getToBlock  stand next to a block, in reach, a visible face if it has one (dig, chest, door)
 //   yLevel      any cell with the feet at that y        runAway  at least r away from point(s)
 //   surface     sky above the head and not in a pit (`!top`)
-//   twoBlocks   feet in cell p or the cell below it (Track BD, Baritone GoalTwoBlocks: p at the feet or the head)
-//   threeBlocks twoBlocks plus the cell two below p (Baritone MineProcess.GoalThreeBlocks: p right over the head)
+//   twoBlocks   feet in cell p or the cell below it (Track BD, the shape of Baritone GoalTwoBlocks; done test ported in baritone/goals.ts)
+//   threeBlocks twoBlocks plus the cell two below p (the shape of Baritone MineProcess.GoalThreeBlocks; baritone/goals.ts)
 //
 // `Goal` stays the three basic goals of PLAN.md 4.3 (callers that switch over it stay exhaustive);
 // `NavGoal` is everything `Navigator.goto` accepts.
@@ -15,6 +15,7 @@ import type { Vec3 } from '../../world/types.ts';
 import { checkReach, EYE_HEIGHT } from '../dig/look.ts';
 import { PHYSICS } from '../input/physics.ts';
 import type { TerrainClass } from '../terrain/classify.ts';
+import { inThreeBlocks, inTwoBlocks } from './baritone/goals.ts'; // Track BD: Baritone's column goals (LGPL-3.0)
 
 export type Goal = { type: 'block'; p: Vec3 } | { type: 'near'; p: Vec3; r: number } | { type: 'xz'; x: number; z: number };
 
@@ -187,18 +188,18 @@ export function goalTest(goal: NavGoal, grid?: GoalGrid): GoalTest {
     }
     case 'surface':
       return surfaceTest(grid);
-    // Track BD: Baritone's column goals. The y part of its GoalBlock.calculate heuristic is not taken (`block` has none either: octile only, admissible).
+    // Track BD: Baritone's column goals (the done tests are ported: nav/baritone/goals.ts). The y part of its GoalBlock.calculate heuristic is not taken (`block` has none either: octile only, admissible).
     case 'twoBlocks': {
       const g = cell(goal.p);
       return {
-        done: (x, y, z) => x === g.x && z === g.z && (y === g.y || y === g.y - 1),
+        done: (x, y, z) => inTwoBlocks(g.x, g.y, g.z, x, y, z),
         h: (x, _y, z) => octile(g.x - x, g.z - z),
       };
     }
     case 'threeBlocks': {
       const g = cell(goal.p);
       return {
-        done: (x, y, z) => x === g.x && z === g.z && (y === g.y || y === g.y - 1 || y === g.y - 2),
+        done: (x, y, z) => inThreeBlocks(g.x, g.y, g.z, x, y, z),
         h: (x, _y, z) => octile(g.x - x, g.z - z),
       };
     }

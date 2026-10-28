@@ -44,6 +44,7 @@
 import type { BlockInfo, EntityInfo, Vec3 } from '../../../world/types.ts';
 import { classify } from '../../terrain/classify.ts';
 import { octile, type AnyGoal, type NavGoal } from '../../nav/goals.ts';
+import { inThreeBlocks, inTwoBlocks } from '../../nav/baritone/goals.ts';
 import { isExposed } from '../seen.ts';
 
 // ---- settings (Baritone Settings.java defaults, fixed here) --------------------------------------------
@@ -312,9 +313,9 @@ export function goalDoneAt(g: NavGoal, feet: Vec3): boolean {
     case 'block':
       return feet.x === g.p.x && feet.z === g.p.z && feet.y === g.p.y;
     case 'twoBlocks':
-      return feet.x === g.p.x && feet.z === g.p.z && (feet.y === g.p.y || feet.y === g.p.y - 1);
+      return inTwoBlocks(g.p.x, g.p.y, g.p.z, feet.x, feet.y, feet.z);
     case 'threeBlocks':
-      return feet.x === g.p.x && feet.z === g.p.z && (feet.y === g.p.y || feet.y === g.p.y - 1 || feet.y === g.p.y - 2);
+      return inThreeBlocks(g.p.x, g.p.y, g.p.z, feet.x, feet.y, feet.z);
     default:
       return false;
   }

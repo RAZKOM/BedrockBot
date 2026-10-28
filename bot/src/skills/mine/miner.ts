@@ -34,7 +34,8 @@
 // (blacklistClosestOnFailure); the candidates are pruned again every MINE_GOAL_UPDATE_TICKS on the way. With
 // nothing known the job explores (branch mining) and resumes when the memory knows ore again, round after
 // round, until n ("mine until n", both modes); `none_left` only when the explorer gives up.
-import { blockMining } from '../../data/mining.ts';
+import { blockMining, toolOf } from '../../data/mining.ts';
+import { canHarvest } from '../dig/breakTime.ts'; // Track BD review: the harvest rule for ores the walk digs
 import { silentLogger, type Logger } from '../../log.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../world/types.ts';
 import type { CollectOptions, CollectResult } from '../collect/collect.ts';
@@ -548,6 +549,12 @@ export class MineTask {
       if (this.modeOf() === 'baritone') {
         // Track BD: every candidate into one composite goal; the planner picks the cheapest reachable one
         const pr = this.pruneNow(pos);
+        if (pr.candidates.length === 0 && this.noTool && [...this.active].every((n) => !this.harvestable(n))) {
+          // Track BD review: no carried tool harvests any kind the job still wants (v3: the dig's no_tool);
+          // with one harvestable kind left the job explores for it instead
+          this.lastError = `no tool in the inventory harvests ${this.noTool}`;
+          return this.end(gen, 'no_pickaxe');
+        }
         if (pr.candidates.length === 0) {
           const r = await this.nothingKnown(gen);
           if (r === 'continue') continue;
@@ -705,7 +712,7 @@ export class MineTask {
     const now = blockAt(t.p);
     if (!now) return this.fail(t, 'not loaded after the approach');
     if (now.name !== t.name) {
-      if (dugByWalk && now.boxes.length === 0 && !LIQUIDS.has(now.name)) {
+      if (dugByWalk && now.boxes.length === 0 && !LIQUIDS.has(now.name) && this.harvestable(t.name)) {
         // Track BD: the walk's own dig took it (the body stands in or under its cell): counted, its drop collected below
         this.stats.walkDug++;
         this.counted(t.p, t.name, undefined);
@@ -825,15 +832,19 @@ export class MineTask {
   }
 
   private async exploreMore(): Promise<boolean> {
+    const more = await (this.d.explore ? this.d.explore(this) : branchMore(this, this.d.skills));
+    this.exploredBlocks();
+    if (!more) {
+      this.exploring = undefined;
+      return false;
+    }
     if (!this.exploring) {
+      // Track BD review: a round counts once the explorer took a step (a refused branch run is no round)
       this.stats.rounds++;
       this.exploring = { round: this.stats.rounds };
       this.log.info(`mine: nothing known, ${this.stats.mined}/${this.opts?.count ?? 0} mined: exploring (round ${this.stats.rounds})`);
     }
-    const more = await (this.d.explore ? this.d.explore(this) : branchMore(this, this.d.skills));
-    this.exploredBlocks();
-    if (!more) this.exploring = undefined;
-    return more;
+    return true;
   }
 
   // ---- Track BD: mode baritone, the composite goal ----------------------------------------------------------
@@ -858,10 +869,31 @@ export class MineTask {
   }
 
   /** Baritone `prune` over the memory's candidates (under `mineSeenOnly`) and the job's dropped items; the skipped ones reported once and blacklisted. */
+  /** Track BD review: the last prune left out an ore of this name because no carried tool harvests it. */
+  private noTool: string | undefined;
+
+  /** Track BD review: a carried tool (or the hand) harvests the block `name` (dig/breakTime.ts `canHarvest`, the Digger's rule; the Digger's pullTool brings a main-inventory tool into the hotbar). */
+  private harvestable(name: string): boolean {
+    const b = blockMining(name);
+    if (!b?.harvest) return true;
+    if (canHarvest(b, null)) return true;
+    return this.d.inventory.slots.slice(0, 36).some((it) => !!it && it.count > 0 && canHarvest(b, toolOf(it.name)));
+  }
+
   private pruneNow(pos: Vec3): PruneResult {
     const feet = cellOf(pos);
     const seenOnly = this.d.seenOnly?.() ?? false;
-    const ores: MineCandidate[] = this.d.memory.targets(this.active, pos, { seenOnly }).map((t) => ({ kind: 'ore', p: t.p, name: t.name, ...(t.cached ? { cached: true } : {}) }));
+    // Track BD review: an ore no carried tool harvests is no candidate (the planner's path would dig it for
+    // nothing: the dig with requireHarvest refuses it in v3, the walk's own dig would not)
+    this.noTool = undefined;
+    const ores: MineCandidate[] = [];
+    for (const t of this.d.memory.targets(this.active, pos, { seenOnly })) {
+      if (!this.harvestable(t.name)) {
+        this.noTool = t.name;
+        continue;
+      }
+      ores.push({ kind: 'ore', p: t.p, name: t.name, ...(t.cached ? { cached: true } : {}) });
+    }
     const drops = droppedItems(this.d.entities?.(), (n) => isJobDrop(this.drops, n), feet, this.opts?.radius ?? 32);
     const r = prune(this.goalCtx(feet), ores, drops);
     for (const s of r.skipped) {
@@ -904,7 +936,7 @@ export class MineTask {
     const r = await this.gotoComposite(gen, goal, cands);
     const rep = sk.status?.().lastGoto;
     const reached = r.result.ok && !r.restart ? (rep?.reached?.index ?? memberAt(goals, this.feetCell() ?? feet)) : -1;
-    if ((rep?.actions.dig ?? 0) > 0) this.dugOnTheWay(before, reached >= 0 ? cands[reached] : undefined);
+    if (gen === this.gen && (rep?.actions.dig ?? 0) > 0) this.dugOnTheWay(before, reached >= 0 ? cands[reached] : undefined); // not after a stop (its end line is out)
     if (!this.alive(gen)) return undefined;
     this.stats.tunnelled += rep?.actions.dig ?? 0;
     if (r.restart) {
@@ -941,7 +973,10 @@ export class MineTask {
     if (c.kind === 'drop') {
       this.state = 'collect';
       const col = await sk.collect(2, 60, { origin: { x: c.p.x + 0.5, y: c.p.y, z: c.p.z + 0.5 }, near: 1.2, filter: (i) => isJobDrop(this.drops, i.name) });
-      if (this.alive(gen)) this.addCollected(col.gained);
+      if (!this.alive(gen)) return undefined;
+      this.addCollected(col.gained);
+      // Track BD review: a drop goal that gives nothing counts as a failure (3 blacklist it), or the same goal comes back forever
+      if (!Object.values(col.gained).some((v) => v > 0)) this.fail(c, 'drop not picked up');
       return undefined;
     }
     await this.takeOre(gen, { p: c.p, name: c.name }, (rep?.actions.dig ?? 0) > 0);
@@ -957,7 +992,7 @@ export class MineTask {
     for (const c of before) {
       if (arrived && key(arrived.p) === key(c.p)) continue;
       const b = this.d.blockAt(c.p);
-      if (!b || b.boxes.length > 0 || LIQUIDS.has(b.name) || !this.active.has(c.name)) continue;
+      if (!b || b.boxes.length > 0 || LIQUIDS.has(b.name) || !this.active.has(c.name) || !this.harvestable(c.name)) continue;
       this.stats.walkDug++;
       this.counted(c.p, c.name, undefined);
       this.log.info(`mine: ${c.name} at ${fmt(c.p)} dug by the walk on the way`);

@@ -603,6 +603,56 @@ describe('MineTask in mode baritone: one composite goal, the reached ore mined',
     expect(new MineTask({ ...h.deps, mode: () => 'v3' }).modeOf()).toBe('v3');
     expect(new MineTask({ ...h.deps, mode: undefined }).modeOf()).toBe('v3');
   });
+
+  it('the harvest rule: a stone pickaxe does not make diamond ore a candidate (no_pickaxe with the reason, nothing dug); iron still is', async () => {
+    const w = wall();
+    w.load({ x: 9, y: 3, z: 0 }, 'diamond_ore');
+    const h = harness(w);
+    h.slots[0] = { name: 'stone_pickaxe', networkId: 1, count: 1, metadata: 0 };
+    const t = new MineTask(h.deps);
+    expect(await t.start({ block: 'diamond_ore', count: 1 })).toBe('no_pickaxe');
+    expect(t.lastError).toMatch(/no tool in the inventory harvests diamond_ore/);
+    expect(t.stats.composites).toBe(0);
+    expect(h.calls.filter((c) => c.startsWith('goto') || c.startsWith('dig'))).toEqual([]);
+    w.load({ x: 9, y: 1, z: 0 }, 'iron_ore');
+    expect(await t.start({ block: 'iron_ore', count: 1 })).toBe('done');
+    expect(t.stats.minedAt).toEqual([{ x: 9, y: 1, z: 0 }]);
+  });
+
+  it('the harvest rule counts a pickaxe in the main inventory (the Digger pulls it): diamond ore with the iron pickaxe in slot 20 is a candidate', async () => {
+    const w = wall();
+    w.load({ x: 9, y: 1, z: 0 }, 'diamond_ore');
+    const h = harness(w);
+    h.slots[0] = { name: 'stone_pickaxe', networkId: 1, count: 1, metadata: 0 };
+    while (h.slots.length < 21) h.slots.push(null);
+    h.slots[20] = { name: 'iron_pickaxe', networkId: 1, count: 1, metadata: 0 };
+    const t = new MineTask(h.deps);
+    expect(await t.start({ block: 'diamond_ore', count: 1 })).toBe('done');
+    expect(t.stats.minedAt).toEqual([{ x: 9, y: 1, z: 0 }]);
+  });
+
+  it('a drop goal that gives nothing fails (3 failures blacklist it): the job ends instead of walking to it forever', async () => {
+    const w = wall();
+    const h = harness(w);
+    const ents = new Map<bigint, EntityInfo>();
+    ents.set(1n, { id: 1n, type: 'minecraft:item', pos: { x: 0.5, y: 0.1, z: 3.5 }, item: { name: 'raw_iron', count: 1, networkId: 1, metadata: 0 } } as unknown as EntityInfo);
+    let collects = 0;
+    const t = new MineTask({
+      ...h.deps,
+      entities: () => ents,
+      skills: {
+        ...h.deps.skills,
+        collect: () => {
+          collects++;
+          return Promise.resolve({ ok: true, gained: {}, pickedUp: 0, skipped: 0, ticks: 1, corrections: 0 });
+        },
+      },
+    });
+    expect(await t.start({ block: 'iron_ore', count: 1 })).toBe('none_left');
+    expect(t.stats.failures).toBe(3);
+    expect(t.stats.blacklisted).toContainEqual({ x: 0, y: 0, z: 3 });
+    expect(collects).toBeLessThan(20);
+  });
 });
 
 // ---- mine until n: nothing known -> explore -> ore known -> mined -> done ------------------------------------
@@ -660,8 +710,11 @@ describe('mine until n: the explore fallback, round after round', () => {
       expect(task.stats.rounds).toBe(2);
       expect(steps).toBe(5);
       expect(task.exploring).toBeUndefined();
-      expect(lines[0]).toBe('mine iron_ore 0/2: exploring (round 1, 3 blocks)');
-      expect(lines[2]).toBe('mine iron_ore 1/2: exploring (round 2, 9 blocks)');
+      // a round counts once the explorer took a step (the first step's line is the plain one)
+      expect(lines[0]?.startsWith('mine iron_ore 0/2 (')).toBe(true);
+      expect(lines[1]).toBe('mine iron_ore 0/2: exploring (round 1, 6 blocks)');
+      expect(lines[2]?.startsWith('mine iron_ore 1/2 (')).toBe(true);
+      expect(lines[3]).toBe('mine iron_ore 1/2: exploring (round 2, 12 blocks)');
       expect(mineEndLine(task)).toBe('mine iron_ore: 2/2 done');
       // the explorer gives up (its budget): none_left with how far it explored
       const t2 = new MineTask({ ...h.deps, mode: () => mode, explore: () => Promise.resolve(++steps < 12), exploredBlocks: () => 40 });
@@ -670,6 +723,11 @@ describe('mine until n: the explore fallback, round after round', () => {
       expect(t2.stats.rounds).toBe(1);
       expect(mineEndLine(t2)).toBe('mine iron_ore: 0/5, no seen iron_ore left, explored 1 round (40 blocks dug)');
       expect(t2.summary()).not.toMatch(/exploring/);
+      // an explorer that refuses at once (not a branch ore, no layout): no round, no "explored" in the end line
+      const t3 = new MineTask({ ...h.deps, mode: () => mode, explore: () => Promise.resolve(false), exploredBlocks: () => 0 });
+      expect(await t3.start({ block: 'iron_ore', count: 5 })).toBe('none_left');
+      expect(t3.stats.rounds).toBe(0);
+      expect(mineEndLine(t3)).toBe('mine iron_ore: 0/5, no seen iron_ore left');
     });
   }
 

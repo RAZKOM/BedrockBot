@@ -745,7 +745,9 @@ export class PathSearch {
     }
 
     // Pillar-up: jump and place a block in the feet cell (full-block floors only).
-    if (opts.allowPlace && Math.abs(f0 - cy) < FLAT && !opts.noAction?.has(cellKey(cx, cy, cz))) {
+    // Track BD review: no block is placed inside the base either (`protectedArea`, the owner's protectRadius:
+    // the break rules only refused digs there; the mine process' composite gotos plan with allowPlace)
+    if (opts.allowPlace && Math.abs(f0 - cy) < FLAT && !opts.noAction?.has(cellKey(cx, cy, cz)) && !inArea(opts.protectedArea, cx, cy, cz)) {
       const room = grid.freeColumn(cx, headCell + 1, headCell + 1, cz);
       if (room === true) {
         this.relax(cur, cx, cy + 1, cz, cy + 1, costs.jump, M_PILLAR, costs.place, 0, { place: { p: { x: cx, y: cy, z: cz }, face: 'down' } });
@@ -1144,6 +1146,11 @@ export class PathSearch {
  * members of an `any`; +Infinity for goals without one (xz, surface, runAway: never dig down for a column,
  * to flee or to get out).
  */
+/** Track BD review: the cell (x, y, z) lies inside the base (`protectedArea`, the break rules' same distance test, helper.ts). */
+function inArea(area: PathOptions['protectedArea'], x: number, y: number, z: number): boolean {
+  return !!area && Math.hypot(x + 0.5 - area.x, y + 0.5 - area.y, z + 0.5 - area.z) <= area.r;
+}
+
 function goalMinY(goal: NavGoal): number {
   switch (goal.type) {
     case 'block':

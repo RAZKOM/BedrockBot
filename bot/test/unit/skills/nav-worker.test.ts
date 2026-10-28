@@ -584,6 +584,42 @@ describe('planner worker: a real worker thread', () => {
     client.dispose();
   }, 120_000);
 
+  it('Track BD review: no pillar place inside protectedArea, in the thread and the worker alike (the mine process plans with allowPlace)', async () => {
+    const F = fixtureWorld(hills);
+    const client = new PlannerClient(F.world);
+    client.start();
+    await until(() => client.ready, 20_000);
+    const main = () => new NavGrid(worldSource(F.world));
+    const inv = { slots: [{ name: 'iron_pickaxe', count: 1 }, { name: 'cobblestone', count: 64 }], selected: 0 };
+    const x = C0 * 16 + 40;
+    const z = C0 * 16 + 40;
+    const a = { x, y: groundY(x, z) + 1, z };
+    const goal: NavGoal = { type: 'block', p: { x, y: a.y + 4, z } }; // straight up into the air: only a pillar reaches it
+    const places = (r: PathResult) => r.path.filter((n) => n.act?.place).length;
+    const lines: string[] = [];
+    for (const area of [undefined, { x: a.x, y: a.y, z: a.z, r: 48 }]) {
+      const o = { maxNodes: 20_000, maxMs: 10_000, allowBreak: true, allowPlace: true, allowOpen: true, throwaway: 64, ...(area ? { protectedArea: area } : {}) };
+      const t = findPath(main(), a, goal, { ...o, breakTicks: (c) => breakTicksWith(c, inv) });
+      const s = client.search('main', a, goal, { ...o, inventory: inv }, 0);
+      let w: PathResult | undefined;
+      while (!(w = s.step())) {
+        if (s.failed) throw new Error('worker search failed');
+        await sleep(1);
+      }
+      lines.push(`${area ? 'protected' : 'open'}: thread ${t.status} ${places(t)} places, worker ${w.status} ${places(w)} places`);
+      expect(w.status, lines.at(-1)).toBe(t.status);
+      expect(places(w), lines.at(-1)).toBe(places(t));
+      if (area) {
+        expect(places(t), lines.at(-1)).toBe(0);
+        expect(t.status, lines.at(-1)).not.toBe('found');
+      } else {
+        expect(t.status, lines.at(-1)).toBe('found');
+        expect(places(t), lines.at(-1)).toBe(4);
+      }
+    }
+    client.dispose();
+  }, 120_000);
+
   it('Track BA: partial answers (the coefficient best, and no_progress with the start alone) cross the thread unchanged', async () => {
     const F = fixtureWorld(uPen);
     const client = new PlannerClient(F.world);

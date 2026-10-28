@@ -338,10 +338,15 @@ half of `shaftRule`, shared).
    dropped; `plausibleToBreak` (rule table) refuses with the reason (reported once in `stats.unsafe`,
    blacklisted); the Y limits; the blacklists (the run's, the session's unreachable set, Track R's
    navigator blacklist); nearest first by our estimate (octile distance of the columns + the height
-   difference); at most 64 (`mineMaxOreLocationsCount`).
+   difference); at most 64 (`mineMaxOreLocationsCount`). An ore no hotbar tool harvests (`canHarvest`,
+   the Digger's rule: diamond with a stone pickaxe) is no candidate; when only such ores are left the job
+   ends `no_pickaxe` (`no tool in the inventory harvests diamond_ore`; any slot counts, the Digger pulls a main-inventory pickaxe into the hotbar; with another wanted kind still harvestable the job explores for that one instead), and an ore the walk digs counts only
+   while a harvesting tool is carried.
 3. **One goto** to the composite of every candidate's goal (`coalesce`: `threeBlocks` = the feet in the
    ore's cell or one / two below it, `twoBlocks` when a gravity block sits on the ore; a drop: its
-   cell), `allowBreak` and `allowPlace` (the navigator drops place without throwaway blocks), planned
+   cell), `allowBreak` and **always `allowPlace`**, whatever the owner's `allowPlace` setting for walks
+   (the dig-down move needs the pillar back up; the navigator drops place without throwaway blocks;
+   no block is placed inside `protectRadius` of home, in the thread and the worker alike), planned
    in the planner worker when one is attached. Every 40 ticks on the way (`MINE_GOAL_UPDATE_TICKS`;
    Baritone 5) the memory is scanned and pruned again; the member the body heads for gone (mined,
    blacklisted, something else) cancels the walk and the loop builds a new composite.
@@ -349,10 +354,11 @@ half of `shaftRule`, shared).
    digs, `requireHarvest`, the vein from it, the collect and the hole walk); an ore the walk dug itself
    (the feet in its cell) counts as mined, and so does any other ore of the composite the path dug on
    the way (`dugOnTheWay`; found in the e2e: the cave's ores were dug by the path to their neighbour,
-   3 raw iron picked up and 1 counted).
+   3 raw iron picked up and 1 counted). A drop member whose collect gains nothing counts as a failure
+   (3 blacklist it), so the same drop goal does not come back forever.
 5. Failures: a goto that never got a segment or whose last plan found no path (no path to any member)
-   blacklists the candidate nearest
-   the feet by straight line for the session (Baritone `blacklistClosestOnFailure`); any other failure
+   blacklists the candidate nearest the feet by straight line for the session (Baritone
+   `blacklistClosestOnFailure`); any other failure
    counts against the heading member, 3 failures blacklist it (ours).
 6. Nothing left after prune: "mine until n" (next section).
 
@@ -368,7 +374,8 @@ When prune (or v3's candidate list) leaves nothing and the job is below n, the j
 runs the explore fallback, which is our existing branch mining (`mine/branch.ts` `branchMore`, wired by
 `attachBranch`; Baritone's `exploreForBlocks` / `GoalRunAway` branch point is not ported, see the rule
 table), one layout step per loop pass with a rescan after each. The memory learning ore ends the
-round and mining resumes; the next dead end starts round + 1 (the same branch run continues where it
+round and mining resumes; the next dead end starts round + 1 (a round counts once the explorer took a
+step; the same branch run continues where it
 was). `none_left` only when the explorer itself gives up (its own budget: `mineTunnelLen` blocks of
 tunnel at the Y without a find, blocked, health, no pickaxe, or not a branch ore). The status line
 while exploring: `mine iron_ore 212/1000: exploring (round 3, 420 blocks)` (`!status`, `!get status`);
@@ -385,7 +392,7 @@ rounds (420 blocks dug)`.
 | `mineGoalUpdateInterval` 5 ticks, re-validates the whole goal | 40 ticks; re-plans only when the heading member is gone | ours | a scan is 2 ms on the main thread and a changed composite re-plans in the worker; every 5 ticks would cancel more walks than it finds ore |
 | `mineMaxOreLocationsCount` 64 | 64 | Baritone's | |
 | sort by straight-line `distSqr` from the feet | octile of the columns + height difference | ours | a walk-cost estimate; an ore 8 down ranks behind one 8 across |
-| `blacklistClosestOnFailure` (true): no path, the closest known ore blacklisted | same, for the session and on Track R's blacklist | Baritone's | plus ours: 3 failures of the same cell blacklist it |
+| `blacklistClosestOnFailure` (true): no path, the closest known ore put on the process' own blacklist | same rule; ours (`markUnreachable`) is broader: skipped for the whole session (across `!mine` jobs) and put on Track R's navigator blacklist (6 000 ticks, every other skill skips it too) | Baritone's rule, our reach | the Track Z unreachable rule: an ore with no path is not worth a second plan in this session; plus ours: 3 failures of the same cell blacklist it |
 | `plausibleToBreak`: `getMiningDurationTicks < COST_INF` and not `avoidBreaking`; not bedrock above and below | the shared rule set (`breakRule`: `breakBlocker` without the under-feet rule: liquid beside, gravity above, unknown, `protectRadius`, `isBuiltBlock`) + Baritone's bedrock rule + the shaft hazards under a candidate below the feet (`shaftHazard`: a liquid 1-2 below, dripstone within 3 below) | ours (stricter) | rule 6: the owner's rules by name; Baritone's `MovementDownward` / `MovementFall` are less careful |
 | `allowOnlyExposedOres` + `allowOnlyExposedOresDistance` 1 (`isNextToAir`) | `mineSeenOnly` (off by default: buried ore too); the memory's 6-neighbour exposure rule | ours | the owner's setting; both modes gated |
 | `legitMine`, `legitMineYLevel`, `legitMineIncludeDiagonals` (mine only what is seen, strip-mine at a Y) | not ported: `mineSeenOnly on` + branch mining (`mineBranchY`) | ours | the same behaviour exists, measured (Track AI) |
@@ -427,7 +434,9 @@ the block is mined out), 3 runs per mode and setting, the suite run twice (6 run
 Mode baritone: 8 composites of 52 members in all per run with `mineSeenOnly` off (3 of 6 with it on),
 25 rescans on the way, 0 to 2 re-plans, 6 ores taken by the walk's own digs (2 with it on). The first
 smoke run counted 1 of 3 cave ores (3 raw iron picked up): the path to one cave ore dug the other two;
-fixed by `dugOnTheWay`. No rockets, no liquid touched.
+fixed by `dugOnTheWay`. No rockets, no liquid touched. After the review fixes (no place move inside `protectRadius`, the harvest rule, the drop
+failure) a third run gave the same picture: `mineSeenOnly` off v3 109.9 s / baritone 85.9 s for 12 ores,
+on v3 34.6 s / baritone 27.4 s for 3; `mine-tunnel` in mode baritone 10 / 10 with the same times.
 
 The regression suites in both modes (`MINE_MODE=v3` / `baritone`; bds-dig for the first four, bds-explore
 for the last two):
@@ -585,8 +594,10 @@ Env: `FARM_BDS_HOST` (127.0.0.1), `FARM_BDS_PORT` (19186), `FARM_BDS_CONTAINER` 
 - Track BD: the unreachable verdict in mode baritone is one failed composite plan in the worker (8.2 s for
   a brick-walled ore on the flat test world against v3's 0.0 s probe), and the e2e helpers plan in-thread
   unless a suite attaches the worker: a dig-heavy composite there runs out of budget.
-- Track BD: mode baritone pillars back up from deep members with the cobblestone its digs picked up (16
-  blocks placed on the test block); v3 dug staircases. Both are planner moves under the rules.
+- Track BD: mode baritone forces `allowPlace` for its gotos and pillars back up from deep members with the
+  cobblestone its digs picked up (16 blocks placed on the test block): the pillar replaces v3's staircase
+  back up. Never inside `protectRadius` (no place move there, Track BD review); outside it the owner's
+  `allowPlace off` does not stop a mining job from pillaring.
 - Track BD: Baritone's `legitMine` strip mining and `GoalRunAway` explore are not ported (branch mining
   covers them); the rescan is 40 ticks, not 5 (measured cost, see the rule table).
 - The Digger chooses tools from the hotbar only: a pickaxe in the main inventory counts for
