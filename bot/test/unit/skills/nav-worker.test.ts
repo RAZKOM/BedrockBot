@@ -12,7 +12,7 @@ import { silentLogger } from '../../../src/log.ts';
 import { BotSkills } from '../../../src/skills/index.ts';
 import { breakBlocker } from '../../../src/skills/nav/actions.ts';
 import { findPath, handBreakTicks, type PathResult } from '../../../src/skills/nav/astar.ts';
-import { avoidWalkingInto, canWalkOn, canWalkThroughClass, getMiningDurationTicks } from '../../../src/skills/nav/baritone/helper.ts'; // Track BB
+import { avoidWalkingInto, breakTicksWith, canWalkOn, canWalkThroughClass, getMiningDurationTicks } from '../../../src/skills/nav/baritone/helper.ts'; // Track BB; Track BC: breakTicksWith
 import { NavGrid } from '../../../src/skills/nav/grid.ts';
 import { PlannerClient, corridor, type PlannerWorker, type WorkerPlanOptions } from '../../../src/skills/nav/worker.ts';
 import { MirrorWorld, type MirrorOp } from '../../../src/skills/nav/worker-grid.ts';
@@ -425,6 +425,58 @@ describe('planner worker: a real worker thread', () => {
     expect(Math.abs(w.cost - t.cost)).toBeLessThanOrEqual(1);
     client.dispose();
   }, 60_000);
+
+  it('Track BC: the moves that dig plan identically in the worker: 20 dig-heavy start / goal pairs (goals inside the rock), same cost, length and break sets', async () => {
+    const F = fixtureWorld(hills);
+    const client = new PlannerClient(F.world);
+    client.start();
+    await until(() => client.ready, 20_000);
+    const main = () => new NavGrid(worldSource(F.world));
+    const inv = { slots: [{ name: 'iron_pickaxe', count: 1 }, { name: 'cobblestone', count: 64 }], selected: 0 };
+    const stands = (p: Vec3) => {
+      const f = main().stand(p.x, p.y, p.z);
+      return f !== undefined && !Number.isNaN(f);
+    };
+    const pick = (i: number, dy: number): Vec3 => {
+      for (let k = 0; ; k++) {
+        const x = C0 * 16 + 8 + Math.floor(hash(i, k + 11) * 80);
+        const z = C0 * 16 + 8 + Math.floor(hash(k + 11, i) * 80);
+        const p = { x, y: groundY(x, z) + dy, z };
+        if (dy > 0 ? stands(p) : main().cls(x, p.y, z)?.name === 'stone') return p;
+      }
+    };
+    const lines: string[] = [];
+    let same = 0;
+    let dug = 0;
+    for (let i = 0; i < 20; i++) {
+      const a = pick(2 * i, 1);
+      const b = pick(2 * i + 1, -3); // inside the stone, 3 under the grass
+      const allowGravityAbove = i % 2 === 0;
+      const allowPlace = i % 3 !== 0;
+      const spec: WorkerPlanOptions = { maxNodes: 60_000, maxMs: 20_000, allowBreak: true, allowPlace, allowOpen: true, allowGravityAbove, throwaway: allowPlace ? 64 : 0, inventory: inv };
+      const t = findPath(main(), a, { type: 'block', p: b }, { maxNodes: 60_000, maxMs: 20_000, allowBreak: true, allowPlace, allowOpen: true, allowGravityAbove, throwaway: allowPlace ? 64 : 0, breakTicks: (c) => breakTicksWith(c, inv) });
+      const s = client.search('main', a, { type: 'block', p: b }, spec, 0);
+      let w: PathResult | undefined;
+      while (!(w = s.step())) {
+        if (s.failed) throw new Error('worker search failed');
+        await sleep(1);
+      }
+      const breaks = (r: PathResult) => JSON.stringify(r.path.map((n) => [n.move, n.act?.dig ?? null, n.act?.place?.p ?? null]));
+      const nDigs = t.path.reduce((n, p) => n + (p.act?.dig?.length ?? 0), 0);
+      dug += nDigs;
+      lines.push(`${a.x},${a.y},${a.z} -> ${b.x},${b.y},${b.z}: thread ${t.status} ${t.cost.toFixed(2)} (${t.expanded}e, ${t.path.length}n, ${nDigs} digs, ${t.ms.toFixed(0)} ms) worker ${w.status} ${w.cost.toFixed(2)} (${w.expanded}e, ${w.path.length}n)`);
+      expect(w.status, lines.at(-1)).toBe(t.status);
+      expect(w.cost, lines.at(-1)).toBeCloseTo(t.cost, 9);
+      expect(w.expanded, lines.at(-1)).toBe(t.expanded);
+      expect(w.path.length, lines.at(-1)).toBe(t.path.length);
+      expect(breaks(w), lines.at(-1)).toBe(breaks(t));
+      if (w.status === 'found') same++;
+    }
+    console.log(`[nav-worker] Track BC dig moves: ${same}/20 found, ${dug} dig cells in all\n  ${lines.join('\n  ')}`);
+    expect(same).toBeGreaterThanOrEqual(15);
+    expect(dug).toBeGreaterThan(40);
+    client.dispose();
+  }, 120_000);
 
   it('Track BA: partial answers (the coefficient best, and no_progress with the start alone) cross the thread unchanged', async () => {
     const F = fixtureWorld(uPen);

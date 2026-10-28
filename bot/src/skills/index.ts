@@ -136,9 +136,12 @@ export class BotSkills implements Skills {
     const source = worldSource(opts.world);
     if (opts.usePhysicsWorld ?? true) this.loop.world = blockQueryOf(source);
     const inventory = opts.world.inventory;
+    // Track BC: section (re)placements reach the navigator's grid too (chunks re-sent after a teleport carry fills that never came as block updates)
+    const chunks = (opts.world as { chunks?: { onSection?: (fn: () => void) => () => void } }).chunks;
+    const onSection = typeof chunks?.onSection === 'function' ? (fn: () => void) => chunks.onSection!(fn) : undefined;
     this.nav = new Navigator(
       this.loop,
-      { source, onBlockUpdate: (fn) => opts.world.onBlockUpdate(fn) },
+      { source, onBlockUpdate: (fn) => opts.world.onBlockUpdate(fn), ...(onSection ? { onSection } : {}) },
       {
         ...opts,
         logger: this.log,

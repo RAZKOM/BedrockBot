@@ -156,6 +156,8 @@ export class PathFollower {
   sneakTicks = 0;
   /** Track AJ: a 2-block parkour backing up for its run-up (undefined: not decided yet). */
   private backing: boolean | undefined;
+  /** Track BC: the path has sneak moves (the low-ceiling check runs only then). */
+  private readonly hasSneak: boolean;
 
   constructor(path: readonly PathNode[], grid: NavGrid, opts: FollowerOptions = {}) {
     if (path.length === 0) throw new Error('empty path');
@@ -169,6 +171,7 @@ export class PathFollower {
     this.cellCost = opts.cellCost; // Track S
     this.edgeSneak = opts.edgeSneak ?? true; // Track AJ
     this.index = path.length > 1 ? 1 : 0;
+    this.hasSneak = path.some((n) => n.move === 'sneak'); // Track BC
     this.suffix = new Array<number>(path.length).fill(0);
     for (let i = path.length - 2; i >= 0; i--) {
       const a = path[i]!;
@@ -241,6 +244,11 @@ export class PathFollower {
     const variety = this.variety(s, target, finalLeg);
     if (variety) return { cmd: variety, done: false };
 
+    // Track BC: a dig-down move (baritone/moves.ts `downward`): the block under the feet is gone (the
+    // navigator's dig action ran before this leg) and the body drops into the node by itself; no key is
+    // pressed until it stands there (a forward press would carry it out of the 1 x 1 shaft)
+    if (target.move === 'downward') return { cmd: this.idle(), done: false };
+
     // Aim: the farthest straight-line node on the same level.
     let aim = this.index;
     if (s.onGround && (target.move === 'walk' || target.move === 'diag') && Math.abs(p.y - target.feet) < 1e-3) {
@@ -285,7 +293,10 @@ export class PathFollower {
     }
 
     // Track AJ: edge sneaking: the body centre within 0.3 of an edge with a deep drop (or lava) beyond
-    const sneak = this.edgeSneak && s.onGround && !jump && (target.move === 'walk' || target.move === 'diag') && this.nearUnsafeEdge(p, target.y);
+    // Track BC: a sneak move (into, through or out of a cell the body only fits sneaking): sneak held for the whole move,
+    // and until the whole footprint is out from under the low ceiling (released a step early, the server kept the body
+    // crouched and slow for a tick while the local body stood up: 1 correction of 0.14 at the passage's exit)
+    const sneak = target.move === 'sneak' || this.underLowCeiling(p, target.y) || (this.edgeSneak && s.onGround && !jump && (target.move === 'walk' || target.move === 'diag') && this.nearUnsafeEdge(p, target.y));
     if (sneak) {
       this.sneakTicks++;
     }
@@ -532,6 +543,21 @@ export class PathFollower {
     return false;
   }
 
+  /**
+   * Track BC: a corner of the body's footprint is in a cell the body only fits sneaking (feet cell free, not
+   * standable: a low ceiling). Read only while the path has sneak moves.
+   */
+  private underLowCeiling(p: Vec3, y: number): boolean {
+    if (!this.hasSneak) return false;
+    for (const [ox, oz] of CORNERS) {
+      const x = Math.floor(p.x + ox);
+      const z = Math.floor(p.z + oz);
+      const f = this.grid.stand(x, y, z);
+      if (f !== undefined && Number.isNaN(f) && this.grid.free(x, y, z) === true && this.grid.cls(x, y + 1, z)?.boxes.length) return true;
+    }
+    return false;
+  }
+
   private unsafeColumn(x: number, y: number, z: number): boolean {
     const key = `${x},${y},${z}`;
     const hit = this.unsafeCols.get(key);
@@ -568,7 +594,7 @@ export class PathFollower {
     // Track AJ: a swimming body bobs between 1 below and 0.6 above the surface cell
     if (node.move === 'swim') return p.y > node.feet - 1 && p.y < node.feet + 1.2;
     if (Math.abs(p.y - node.feet) >= 0.6) return false;
-    if ((node.move === 'jump' || node.move === 'drop' || node.move === 'pillar' || node.move === 'swimOut' || node.move === 'climbOut' || node.move === 'parkour') && !onGround) return false;
+    if ((node.move === 'jump' || node.move === 'drop' || node.move === 'pillar' || node.move === 'swimOut' || node.move === 'climbOut' || node.move === 'parkour' || node.move === 'downward') && !onGround) return false; // Track BC: downward
     return true;
   }
 
@@ -578,7 +604,7 @@ export class PathFollower {
    */
   private lineClear(p: Vec3, j: number): boolean {
     const n = this.path[j]!;
-    if (n.move !== 'walk' && n.move !== 'diag') return false;
+    if (n.move !== 'walk' && n.move !== 'diag') return false; // (Track BC: a sneak node is not standable: aimed at node by node)
     const feet = n.feet;
     if (Math.abs(p.y - feet) > 1e-3) return false;
     const tx = n.x + 0.5;

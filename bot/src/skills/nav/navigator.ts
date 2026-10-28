@@ -19,7 +19,7 @@ import type { InputLoop, InputLoopState } from '../input/inputLoop.ts';
 import { classify, type TerrainClass } from '../terrain/classify.ts';
 import type { TerrainSource } from '../terrain/query.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
-import { DEFAULT_THROWAWAY, type BreakRules, type NavActions } from './actions.ts';
+import { DEFAULT_THROWAWAY, DIG_REPEATS, DIG_SETTLE_TICKS, type BreakRules, type NavActions } from './actions.ts'; // Track BC: DIG_REPEATS, DIG_SETTLE_TICKS
 import { PathSearch, findPath, handBreakTicks, locateNode, type LocatedNode, type PathNode, type PathOptions, type PathResult } from './astar.ts';
 import { TICKS } from './costs.ts';
 import { PathFollower, PressGuard, yawTowards } from './follower.ts';
@@ -36,6 +36,12 @@ export type NavGotoOptions = GotoOptions & { blacklist?: boolean };
 export interface NavWorld {
   source: TerrainSource;
   onBlockUpdate(fn: (p: Vec3, before: BlockInfo | undefined, after: BlockInfo) => void): () => void;
+  /**
+   * Track BC: a section of a loaded column was (re)placed by a chunk packet (`ChunkStore.onSection`): the
+   * grid's cached cells there may be stale (a chunk re-sent after a teleport or a server-side fill carries
+   * changes that never came as block updates), so the navigator drops its grid caches. Optional (fakes).
+   */
+  onSection?(fn: () => void): () => void;
 }
 
 /** The inventory as the navigator reads it (break times with the best tool, throwaway blocks). */
@@ -175,6 +181,15 @@ interface ActionRun {
   placed: boolean;
   started: number;
   timeout: number;
+  // Track BC: a dig action keeps its whole break list in `queue` (a falling stack refills a dug cell)
+  /** The cell being dug. */
+  current: Vec3 | undefined;
+  /** No dig before this tick (a gravity block above the last dug cell is landing). */
+  settleUntil: number;
+  /** The final settle wait (allowGravityAbove: a stack already in the air lands after the last dig) has run. */
+  settled: boolean;
+  /** Dig calls made. */
+  digs: number;
 }
 
 interface DoorToClose {
@@ -277,6 +292,8 @@ export class Navigator {
   readonly workerBudgets: PlannerBudgets;
   /** Track AJ: edge sneaking (NavigatorOptions.edgeSneak), settable for measurements. */
   edgeSneak: boolean;
+  /** Track BC: Baritone's way with a gravity block over a dug cell (PathOptions.allowGravityAbove; also `path.allowGravityAbove`). Default off: the owner's rule. */
+  allowGravityAbove = false;
   /** Track AB: block changes the planner reads (movement signature changed), numbered; worker answers older than a change near their path are dropped. */
   private worldGen = 0;
   private readonly changes: { gen: number; x: number; y: number; z: number }[] = [];
@@ -304,6 +321,8 @@ export class Navigator {
     this.moveTimeout = opts.moveTimeout ?? { factor: 2, margin: 10 };
     this.workerBudgets = { ...DEFAULT_PLANNER_BUDGETS, ...opts.workerBudgets }; // Track AB
     this.edgeSneak = opts.edgeSneak ?? true; // Track AJ
+    // Track BC: a (re)placed section invalidates the grid caches (the worker mirror clears its grid the same way)
+    if (world.onSection) this.unsubs.push(world.onSection(() => this.grid.clear()));
     this.unsubs.push(
       world.onBlockUpdate((p, before, after) => {
         this.onBlock(p, before, after);
@@ -366,11 +385,15 @@ export class Navigator {
     const sprint = options.sprint ?? true;
     const inv = this.inventory;
     const throwaway = this.actions.throwawayItems ?? DEFAULT_THROWAWAY;
-    const haveThrowaway = (): boolean => {
+    // Track BC: the count too (the dig-down move's depth budget: depth + 4 blocks for the pillar back up)
+    const throwawayCount = (): number => {
       const slots = inv?.()?.slots;
-      if (!slots) return false;
-      return slots.some((s) => s && s.count > 0 && throwaway.includes(s.name));
+      if (!slots) return 0;
+      let n = 0;
+      for (const s of slots) if (s && s.count > 0 && throwaway.includes(s.name)) n += s.count;
+      return n;
     };
+    const haveThrowaway = (): boolean => throwawayCount() > 0;
     return {
       ...this.pathOpts,
       costs: { walk: sprint ? TICKS.sprint : TICKS.walk, ...(this.digPenalty?.() !== undefined ? { dig: this.digPenalty()! } : {}), ...this.pathOpts.costs, ...this.costsOverride?.() }, // Track AT: costsOverride
@@ -378,6 +401,8 @@ export class Navigator {
       allowBreak: (options.allowBreak ?? false) && this.actions.dig !== undefined,
       allowPlace: (options.allowPlace ?? false) && this.actions.place !== undefined && haveThrowaway(),
       allowOpen: this.actions.useBlock !== undefined,
+      allowGravityAbove: this.allowGravityAbove || (this.pathOpts.allowGravityAbove ?? false), // Track BC
+      throwaway: throwawayCount(), // Track BC
       breakTicks:
         this.pathOpts.breakTicks ??
         (inv
@@ -725,6 +750,19 @@ export class Navigator {
       return;
     }
 
+    // Track BC: a dug cell of the node ahead is a block again (a falling stack landed, something was placed):
+    // back to digging it before the body walks in (Baritone re-checks its positionsToBreak every tick)
+    if (a.actedUpTo > a.passedAbs && a.actedUpTo <= a.legTo + 1) {
+      const node = a.path[a.actedUpTo];
+      const cells = node?.act?.dig;
+      if (cells?.some((c) => this.grid.free(c.x, c.y, c.z) === false)) {
+        this.log.debug(`goto: a dug cell of node ${a.actedUpTo} is filled again; digging it`);
+        a.actedUpTo--;
+        this.beginAction(a, { kind: 'dig', node: a.actedUpTo + 1, queue: [...cells], axis: node!.x !== a.path[a.actedUpTo]!.x ? 0 : 2 });
+        return;
+      }
+    }
+
     const step = f.step(s, this.loop.command.yaw);
     this.loop.setCommand(step.cmd);
     if (step.done) {
@@ -877,6 +915,8 @@ export class Navigator {
       allowPlace: o.allowPlace ?? false,
       allowOpen: o.allowOpen ?? false,
       ...(o.moves ? { moves: { ...o.moves } } : {}), // Track AJ
+      allowGravityAbove: o.allowGravityAbove ?? false, // Track BC
+      throwaway: o.throwaway ?? 0, // Track BC
       ...(prot ? { protectedBlocks: [...prot] } : {}),
       ...(o.protectedArea ? { protectedArea: { ...o.protectedArea } } : {}),
       ...(o.noBreak?.size ? { noBreak: [...o.noBreak] } : {}),
@@ -1151,10 +1191,17 @@ export class Navigator {
       placed: false,
       started: a.t,
       timeout: run.kind === 'dig' ? DIG_TIMEOUT * Math.max(1, run.queue.length) : ACTION_TIMEOUT,
+      current: undefined, // Track BC
+      settleUntil: 0,
+      settled: false,
+      digs: 0,
     };
     for (const p of run.queue) {
       a.ownCells.add(cellKey(p.x, p.y, p.z));
+      if (run.kind === 'dig') this.grid.invalidate(p.x, p.y, p.z); // Track BC: the "already free" check reads the live block, never a cached class
       if (run.kind === 'use' || run.kind === 'close') a.ownCells.add(cellKey(p.x, p.y + 1, p.z));
+      // Track BC: with Baritone's gravity rule the stack over a dug cell falls into it: our own doing, no re-plan
+      if (run.kind === 'dig' && a.pathOpts.allowGravityAbove) for (let dy = 1; dy <= 3; dy++) a.ownCells.add(cellKey(p.x, p.y + dy, p.z));
     }
     this.log.debug(`goto: ${run.kind} ${run.queue.map(fmt).join(' ')} before node ${run.node}`);
   }
@@ -1183,7 +1230,7 @@ export class Navigator {
   private actionFailed(a: Active, s: InputLoopState, run: ActionRun, why: string): void {
     a.report.actions.failed++;
     this.log.info(`goto: ${run.kind} failed (${why})`);
-    const cellP = run.queue[0]; // Track R: count the failure against the action cell
+    const cellP = run.kind === 'dig' ? (run.current ?? run.queue[0]) : run.queue[0]; // Track R: count the failure against the action cell (Track BC: the cell being dug)
     if (cellP && run.kind !== 'close' && this.blacklist.fail(actionKey(run.kind, cellP), why)) a.report.blacklisted?.push(actionKey(run.kind, cellP));
     // a pillar / door cell that failed is not planned again during this goto (like a failed dig cell):
     // the re-plan looks for another way instead of spending the whole failure budget on one cell
@@ -1199,6 +1246,12 @@ export class Navigator {
     a.action = undefined;
     this.loop.setCommand({ jump: false, pitch: 0 });
     if (run.kind !== 'close') a.actedUpTo = Math.max(a.actedUpTo, run.node);
+    // Track BC: a pillar-up under a low ceiling digs the cell above the head first, then places
+    const place = run.kind === 'dig' ? a.path[run.node]?.act?.place : undefined;
+    if (place) {
+      this.beginAction(a, { kind: 'place', node: run.node, queue: [place.p], axis: run.axis });
+      return;
+    }
     // the leg that contains the move into the action's node (pillar: the leg from the new node)
     this.startLeg(a, run.kind === 'place' || run.kind === 'close' ? run.node : run.node - 1);
   }
@@ -1216,7 +1269,7 @@ export class Navigator {
     const res = run.result;
     if (res && !res.ok) {
       if (run.kind === 'dig') {
-        const p = run.queue[0];
+        const p = run.current ?? run.queue[0];
         if (p) a.noBreak.add(cellKey(p.x, p.y, p.z));
       }
       this.actionFailed(a, s, run, String(res.reason));
@@ -1224,14 +1277,34 @@ export class Navigator {
     }
     switch (run.kind) {
       case 'dig': {
-        if (res) run.queue.shift();
-        run.result = undefined;
-        while (run.queue.length && this.grid.free(run.queue[0]!.x, run.queue[0]!.y, run.queue[0]!.z) === true) run.queue.shift();
-        const p = run.queue[0];
+        // Track BC: the break order (nav/actions.ts): the whole list stays; the first cell that is not free
+        // is dug next, so a cell a falling stack refilled (allowGravityAbove) is dug again after it settles
+        if (res) {
+          run.result = undefined;
+          const p = run.current;
+          if (p && this.grid.cls(p.x, p.y + 1, p.z)?.gravity) run.settleUntil = a.t + DIG_SETTLE_TICKS;
+          run.current = undefined;
+        }
+        if (a.t < run.settleUntil) return;
+        const p = run.queue.find((c) => this.grid.free(c.x, c.y, c.z) !== true);
         if (!p) {
+          if (run.digs === 0) this.log.debug(`goto: dig cells ${run.queue.map((c) => `${fmt(c)} ${this.grid.cls(c.x, c.y, c.z)?.name ?? '?'}`).join(' ')} already free`);
+          if (a.pathOpts.allowGravityAbove && run.digs > 0 && !run.settled) {
+            // a stack already in the air reads as free cells: wait once more before the body walks in
+            run.settled = true;
+            run.settleUntil = a.t + DIG_SETTLE_TICKS;
+            return;
+          }
           this.actionDone(a, run);
           return;
         }
+        run.settled = false;
+        if (++run.digs > run.queue.length + DIG_REPEATS) {
+          run.current = p;
+          this.actionFailed(a, s, run, 'cell refilled too often');
+          return;
+        }
+        run.current = p;
         a.report.actions.dig++;
         this.call(run, this.actions.dig && (() => this.actions.dig!(p)));
         return;

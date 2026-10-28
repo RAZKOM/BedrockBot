@@ -77,6 +77,10 @@ export interface PathCosts {
   dig: number;
   /** Ticks per placed block (pillar-up) on top of the jump. */
   place: number;
+  /** Track BC: extra ticks per dig-down move (the stance over the block, the drop into its cell, settling) on top of fall[1] and the break. */
+  digDown: number;
+  /** Track BC: ticks per block walked sneaking (into, through and out of a cell the body only fits sneaking): walk / sneakScale. */
+  sneakWalk: number;
   /** Ticks to open a door or fence gate (stop, use, wait for the state). */
   door: number;
   // Track AJ: movement variety (docs/pathfinding.md "Movement variety", measured on bds-move)
@@ -115,6 +119,8 @@ export const DEFAULT_COSTS: Readonly<PathCosts> = Object.freeze({
   irreversibleDrop: 30,
   dig: 12,
   place: 10,
+  digDown: 6, // Track BC: bds-bari cave course, 11 shaft blocks in about 250 ticks = 23 per block with the 15-tick dirt break: about 8 of stance and drop against the planned fall[1] 5 + 6
+  sneakWalk: TICKS.walk / PHYSICS.sneakScale, // Track BC: 15.44 (Baritone SNEAK_ONE_BLOCK_COST 15.385)
   door: 10,
   // Track AJ (measured on bds-move, docs/pathfinding.md "Movement variety")
   swim: 8.6,
