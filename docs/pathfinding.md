@@ -90,9 +90,10 @@ is admissible). Path nodes carry `cost` (the move's ticks, for the per-move time
 box except leaves, and liquids), scanned down from the column's highest non-empty subchunk and cached
 in a 16 x 16 array per chunk; a block update in the column resets it; an unloaded column is "unknown"
 (no penalty, not cached). `underground` (default 6 ticks per node) and `irreversibleDrop` (default 30)
-are `PathCosts` fields (`path.costs` in NavigatorOptions, or per `findPath`). The best partial path
-ends at the node with the lowest heuristic plus accumulated irreversible-drop penalty, so a segment
-never ends at the bottom of a pit when a node on the rim is as close.
+are `PathCosts` fields (`path.costs` in NavigatorOptions, or per `findPath`). A partial path's end
+score adds the accumulated irreversible-drop penalty, so a segment never ends at the bottom of a pit
+when a node on the rim is as close (Track BA: the score is Baritone's, see "Segments, re-planning and
+stuck handling").
 
 **Doorways.** `crossing(x, y, z, axis)`: a door / gate cell is clear when no box of it (doors: the
 lower half's state, also for the upper half) blocks the corridor x or z in [0.2, 0.8] a body walking
@@ -156,8 +157,8 @@ with the console `setblock` / `fill`, feet heights from `truth:pos`):
   `goto unreachable without a segment: feet (x, y, z)[ airborne], in <block[states]>, on <block>,
   start node x,y,z feet f | none, goal {...}, why <reason>, plans <reason:status/nodes/expanded/ms ...>`.
   Reasons: `no path (exhaustive search, n nodes expanded)`, `the start node is not standable`,
-  `no progress possible (no node closer to the goal than the start; n expanded[, search limit hit][,
-  touched unloaded world])`, `no standable node at (...)`, `goal cell x,y,z (<block>) is not standable`.
+  `no progress possible (no node closer to the goal than the start | no partial end 5+ blocks from
+  the start (Track BA, `no_progress`); n expanded[, search limit hit][, touched unloaded world])`, `no standable node at (...)`, `goal cell x,y,z (<block>) is not standable`.
 
 ## Movement variety (Track AJ, task 7.7)
 
@@ -307,9 +308,38 @@ Block updates at cells the running goto's actions change never trigger re-plans.
 | no progress (remaining path not 0.05 shorter) for 40 ticks | re-plan (`stuck`), failure + 1 |
 | an action fails or times out (dig 600 ticks per block, use / place 100) | re-plan (`action`), failure + 1; the cell is not dug / pillared in / opened again during this goto; after 2 failed places the goto plans without pillaring |
 | a failure while the body is not on a safe node (in water / lava, airborne, no standable node) | retreat first: steer to the last safe node (forward, jump in water or against a wall) for up to 60 ticks |
-| no standable node under the body, or the best node is the start | wait 20 ticks, failure + 1 |
+| no standable node under the body, or the best node is the start (Track BA: also a `no_progress` plan, no partial end 5+ blocks out) | wait 20 ticks, failure + 1 |
 | 3 failures | `unreachable` |
 | the main search says `none`, or a `block` goal is a cell nobody can stand in | `unreachable` at once |
+
+**Partial-path end** (Track BA, ported from Baritone's `AbstractNodeCostSearch` /
+`AStarPathFinder`, `nav/baritone/bestSoFar.ts`, LGPL-3.0). A search that stops at its budget (or
+touched unloaded world) keeps 7 bests, best k scored `h + g / k + trap` for k in 1.5, 2, 2.5, 3, 4,
+5, 10 (`h` the goal heuristic, `g` the path ticks, `trap` the irreversible-drop penalty; a best is
+replaced only by a score lower by more than 0.01). The path ends at the first best (lowest k) more
+than 5 blocks (straight line, y included) from the start; with none, the result is `partial`, the
+start node alone, `reason: 'no_progress'`, which the navigator counts as a failed plan (the "best node
+is the start" row above; the blacklist as before) instead of walking 1 to 4 blocks and re-planning.
+While no best is 5+ blocks out (Baritone's `failing`), a search runs on past `maxNodes` up to 4 x it
+(Baritone's failure / primary timeout, 2 000 / 500 ms); `maxMs` stays the hard cap. Before (the one
+node with the lowest `h + trap`), the bot walked into the base of a U wall and every plan from there
+ended where it stood; now the higher coefficients pick a node round the corner. The trade: k 1.5
+prefers cheap progress, so a node-limited search past the mouth of a long open dead-end corridor
+pointing at the goal can end at its far end (main's scoring had ended past it); the next plan, from
+there, gets out: at 50 to 64 nodes the k 1.5 best of a 12-long dead end pointing at the goal is its
+far end, walked to and back (+12 ticks, about 8 %), while at 16 / 32 nodes main's unreachable becomes
+ok. `g` already includes the drop penalty, so `trap` counts once more on top of `g / k`. The bests
+are updated at expansion (Baritone: at relax): a partial path can end one move short of Baritone's
+(only closed nodes win), `failing` clears one expansion later, and a best always carries its final
+`g`. The 4 x extension also changes non-partial outcomes: a search that used to stop `partial` at
+`maxNodes` can now end `found`, or `none` (open set emptied), and `none` makes the navigator answer
+`unreachable` at once instead of counting failures. Navigator effects: a `no_progress` result with
+`unknown` and not `limited` takes the wait-for-chunks branch; a start-only worker interim is ignored
+(the body stands until the final answer); a `maxMs`-cut search that only got within 5 blocks now
+counts as a failure. Not taken from Baritone: its time budgets (ours are `maxNodes` / `maxMs`), the
+static cut-off of the last 10 % of a partial path (`pathCutoffFactor`), the bests updated when a
+neighbour is relaxed (ours: when a node is expanded), `MIN_IMPROVEMENT` for re-opening nodes (found
+paths are unchanged).
 
 The report (`skills.status().lastGoto`) has each plan (reason, tick, status, nodes, expanded, ms,
 slices), segments, corrections, motions, stuck and move timeouts, failures, distance, sprint ticks,
@@ -462,6 +492,20 @@ motions, teleports, inWater / inLava, the last goto.
 
 ## Measured
 
+### Track BA: partial-path selection (2026-10-30)
+
+Before: main's scoring (the lowest `h + trap`); after: Baritone's coefficient bests with `no_progress`
+and the 4 x node extension while failing. Closed loops are the unit sim (`nav-partial.test.ts`).
+
+| Test | Before | After |
+|---|---|---|
+| bds-move, `nav-partial` (U wall 20 wide, 3 high, arms 10 long, open away from the start; goal 30 out; `path.maxNodes` 100), worker and in-thread | unreachable after 92 / 96 ticks, 10.8 blocks: the first plan ends at the wall's base, then 4 plans of 1 node (3 re-plans, 3 failures) | ok in 184 / 185 ticks, 38.7 blocks: partial (12 nodes), plan-ahead partial (17 nodes, 106 expanded), plan-ahead found; 0 re-plans, 0 stuck, 0 failures, 0 corrections |
+| sim, the same U, goal 30 out / in its pocket / a cup (open towards the start), 100 / 200 / 200 nodes | unreachable (3 "no progress" failures) in each | ok in each, 0 failures |
+| sim, a U 3 blocks ahead, 100 nodes | partial path to (2, 0) against the wall, then unreachable | first plan ends round the corner (8, 10); ok |
+| sim, a 12-long dead-end corridor from the start, goal 30 out, 16 / 32 / 50 / 64 nodes | unreachable / unreachable / ok 147 ticks / ok 147 ticks | ok 159 ticks in each (the 50 / 64-node plans end at the corridor's far end, then get out) |
+| navigator behaviour (not measured, by construction) | a node-limited plan that got only 1 to 4 blocks out was walked; a start-only interim was not walked | a `no_progress` result with `unknown` and not `limited` takes the wait-for-chunks branch; a start-only worker interim is ignored (the body stands until the final answer); a `maxMs`-cut search that only got within 5 blocks counts as a failure |
+| unit, 1000 random paths, 128 x 128 hilly world (back to back, same machine) | p50 1.89, p95 8.13, p99 11.5, max 15.4 ms | p50 1.92, p95 8.15, p99 11.4, max 13.1 ms (identical expansions: 1828 mean) |
+
 ### v2 (bds-move, BDS 1.26.60.6, 2026-10-29)
 
 | Test | Result |
@@ -516,6 +560,8 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/e2e/nav-place.test.ts` | pillar-up (cliff, pit) and door / gate; skipped with a message until the navigator has `place` / `useBlock` actions |
 | `test/unit/skills/nav-goals.test.ts` | task 7.10 goal predicates and heuristics; closed loop: any over 10 logs, getToBlock (visible face), yLevel, runAway (also from a moving threat), surface (shaft with pillaring, cave); the blacklist (counting, expiry, keys, a walled log skipped by the next any, blame of an any member, dig cells) |
 | `test/unit/skills/tree-blacklist.test.ts` | the tree finder and the feller skip blacklisted logs; 3 failed fells blacklist an unreachable log |
+| `test/unit/skills/nav-partial.test.ts` | Track BA: the ported bests (constants, scores, MIN_IMPROVEMENT, MIN_DIST_PATH), node-limited ends next to a U wall, in a dead-end corridor and on open ground, `no_progress`, closed loops round a U and a cup with 100 to 200-node budgets |
+| `test/e2e/nav-partial.test.ts` | Track BA: a truth-built U wall with `path.maxNodes` 100: the first plan partial, the goal reached (worker and in-thread) |
 | `test/unit/skills/nav-worker.test.ts` | Track AB: the worker's mirror vs the main grid on 200 random cells (loaded, after block updates and a re-sent column, cached after an unload); 20 random start / goal pairs in a real worker thread vs in-thread (same status, cost, expansions); the navigator walking an interim answer and splicing in the final one; a crash logged once, its search failed, the worker restarted |
 | `test/e2e/nav-compute.test.ts` | Track AB, worker vs in-thread on the same terrain: the house walk (1 segment, 0 corrections), 120 blocks of the cross-country course, 120 blocks through staggered walls (fewer plans, no partial segments with the worker), a sealed goal 100 blocks away with allowPlace (a 300 000+ node search, navigator tick under 20 ms) |
 | `test/e2e/nav-goals.test.ts` | any over 10 logs, getToBlock, yLevel, runAway, surface from a 4-deep shaft, a log walled in glass blacklisted after 3 failures and skipped by the next any |

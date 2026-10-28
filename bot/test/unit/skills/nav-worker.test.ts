@@ -104,6 +104,22 @@ function baffles(x: number, y: number, z: number): number {
   return AIR;
 }
 
+/**
+ * Track BA: flat floor at y -61; a 3-high U (base across x = 12, z -10 .. 9, arms to x = 21) and a pen
+ * (a 3-high ring round (-20, -20), cells -2 .. 2 inside, a gap at its west side).
+ */
+function uPen(x: number, y: number, z: number): number {
+  if (y < -61) return STONE;
+  if (y === -61) return GRASS;
+  if (y > -58) return AIR;
+  if (x === 12 && z >= -10 && z <= 9) return STONE;
+  if (x >= 12 && x <= 21 && (z === -10 || z === 9)) return STONE;
+  const px = x + 20;
+  const pz = z + 20;
+  if (Math.max(Math.abs(px), Math.abs(pz)) === 3 && !(px === -3 && pz === 0 && y <= -59)) return STONE;
+  return AIR;
+}
+
 /** A World fed by hand: columns C0..C1 squared, 4 sections (y -64 .. -1) from a block function. */
 function fixtureWorld(blocks: (x: number, y: number, z: number) => number, opts: { cacheDir?: string } = {}) {
   const src = new ReplaySource();
@@ -336,6 +352,40 @@ describe('planner worker: a real worker thread', () => {
     console.log(`[nav-worker] ${lines.join('\n  ')}\n  stats ${JSON.stringify(client.stats)}`);
     expect(w.status).toBe(t.status);
     expect(Math.abs(w.cost - t.cost)).toBeLessThanOrEqual(1);
+    client.dispose();
+  }, 60_000);
+
+  it('Track BA: partial answers (the coefficient best, and no_progress with the start alone) cross the thread unchanged', async () => {
+    const F = fixtureWorld(uPen);
+    const client = new PlannerClient(F.world);
+    client.start();
+    await until(() => client.ready, 20_000);
+    const grid = new NavGrid(worldSource(F.world));
+    const lines: string[] = [];
+    for (const [start, goal, maxNodes] of [
+      [{ x: 0, y: -60, z: 0 }, { x: 30, y: -60, z: 0 }, 100], // ends at the U's base (11, 0)
+      [{ x: 0, y: -60, z: 0 }, { x: 17, y: -60, z: 0 }, 300],
+      [{ x: -20, y: -60, z: -20 }, { x: 20, y: -60, z: -20 }, 2], // in the pen: no_progress
+    ] as const) {
+      const spec: WorkerPlanOptions = { maxNodes, maxMs: 20_000, allowBreak: false, allowPlace: false, allowOpen: false };
+      const t = findPath(grid, start, { type: 'block', p: goal }, { maxNodes, maxMs: 20_000 });
+      const s = client.search('main', start, { type: 'block', p: goal }, spec, 0);
+      let w: PathResult | undefined;
+      while (!(w = s.step())) {
+        if (s.failed) throw new Error('worker search failed');
+        await sleep(1);
+      }
+      const e = (r: PathResult) => `${r.status}${r.reason ? `/${r.reason}` : ''} ${r.path.length}n end ${r.path.at(-1)!.x},${r.path.at(-1)!.z} ${r.expanded}e`;
+      lines.push(`${maxNodes} nodes: thread ${e(t)} worker ${e(w)}`);
+      expect(t.status, lines.at(-1)).toBe('partial');
+      expect(w.status, lines.at(-1)).toBe(t.status);
+      expect(w.reason, lines.at(-1)).toBe(t.reason);
+      expect(w.expanded, lines.at(-1)).toBe(t.expanded);
+      expect(w.path, lines.at(-1)).toEqual(t.path);
+    }
+    console.log(`[nav-worker] Track BA partial answers: ${lines.join('; ')}`);
+    expect(lines[0]).toContain('end 11,0');
+    expect(lines[2]).toContain('partial/no_progress 1n');
     client.dispose();
   }, 60_000);
 
