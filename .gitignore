@@ -15,3 +15,6 @@ bot/logs/
 
 # agent worktrees (Claude Code isolation)
 .claude/worktrees/
+
+# third-party source spikes (not committed)
+.work/
