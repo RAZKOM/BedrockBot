@@ -54,6 +54,7 @@ import { buildHandlers } from './build.js'; // Track AL: truth:blocksdiff (build
 import { homeHandlers } from './home.js'; // Track AG: truth:chestput (home logistics)
 import { shieldHandlers } from './shield.js'; // Track AH: truth:stance, blocklog (shield, wave 9)
 import { netherHandlers } from './nether.js'; // Track AT: truth:dimension, dimtp, dblock, dset, dfill, dfind, portal (wave 10)
+import { flyHandlers } from './fly.js'; // Track AU: truth:glide, glidelog, equip, boxdrop (Elytra flight, wave 11)
 
 declare const __PACK_VERSION__: string;
 /** QuickJS console (prints to the BDS content log). */
@@ -557,6 +558,7 @@ Object.assign(handlers, buildHandlers({ getBlock, assertLoaded, overworld })); /
 Object.assign(handlers, homeHandlers({ getBlock, assertLoaded, overworld })); // Track AG: chestput
 Object.assign(handlers, shieldHandlers({ overworld })); // Track AH: stance, blocklog
 Object.assign(handlers, netherHandlers({ getBlock, assertLoaded })); // Track AT: dimensions, portals
+Object.assign(handlers, flyHandlers()); // Track AU: glide, glidelog, equip, boxdrop
 
 function blockVolume(a: Vec3, b: Vec3): BlockVolume {
   return new BlockVolume(a, b);

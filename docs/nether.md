@@ -195,7 +195,13 @@ commands keep working in the overworld only.
 
 ## Later: Elytra and mending
 
-Not started (a physics track). What it will need, with what to verify on bds-nether first:
+Elytra flight was built in wave 11 (Track AU): [flight.md](flight.md) has the packets, the glide
+model, the landing method and the measurements; mending by XP is still open. The notes below are
+the plan as it stood after wave 10, kept for what they got right and wrong (the boost comes with no
+`set_entity_motion`; the glide needs the jump press with `start_gliding`; a voluntary stop in the
+air is ignored).
+
+What it will need, with what to verify on bds-nether first:
 
 - **Glide start**: on BDS 1.26.60 movement is server-authoritative, so the client sets the input flag
   `start_gliding` (and `stop_gliding`) in `player_auth_input.input_data` (both exist in minecraft-data

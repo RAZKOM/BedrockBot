@@ -200,3 +200,22 @@ node run.ts --label live-strict    # same, after setting server-authoritative-mo
 Courses (`courses.ts`, built with `truth:fill`): `flat-100`, `stairs-10`, `drop-3`, plus
 `sprint-jump-diag`, `stairs-diag` and `sneak-edge` to find rules that differ. Both engines run in the
 same `InputLoop`; only `loop.engine` changes. Results: `tools/physics-spike/results/*.json`.
+
+## Gliding (Track AU, wave 11)
+
+The elytra glide is a third mode of the body in `stepBody` (`state.gliding`), beside walking and
+swimming: `cmd.glide` asks for it, the body glides from the first airborne tick on and keeps gliding
+until it touches the ground or water (BDS ignores a voluntary `stop_gliding` in the air: measured on
+bds-fly), and `glideVelocity` applies the vanilla fall-flying formula bit for bit in float32 (the
+constants in `GLIDE`: gravity 0.08 with the lift `cos² · 0.75`, the dive term 0.1, the pull term 0.04
+with 3.2 of lift, the heading alignment 0.1, the drag 0.99 / 0.98, a 0.6-high box), with the firework
+boost (`v += l · 0.1 + (l · 1.5 − v) · 0.5` per tick while the rocket lives) applied inside the step
+after the lift and before the drag. The flags: `start_gliding` only counts together with a jump press
+(`GLIDE_START_FLAGS` in flags.ts), `stop_gliding` goes out on the tick the glide ends; the server
+confirms with the own `gliding` actor flag, which the loop also uses to end a glide it still
+predicted (`GlideEvent`). Measured on the strict server: level flight sinks 0.15 to 0.17 blocks a tick
+at 1.3 to 1.5 blocks a tick with 0 corrections over 220 ticks, a pitched glide stays within 0.0001 of
+the server, a 40-degree turn in one tick costs about 6 corrections of at most 0.004; the one real
+mismatch is the rocket's life (12 to 18 ticks, the model assumes 15 and `endBoost` re-simulates when
+`remove_entity` arrives), worth a correction of 0.05 to 0.35 per rocket. The flight controller, the
+landing method and the measurements are in [flight.md](flight.md).

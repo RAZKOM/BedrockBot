@@ -44,6 +44,7 @@ function vitalsHtml(): string {
       ['v-pos', 'pos'],
       ['v-dimension', 'dimension'],
       ['v-weather', 'weather'],
+      ['v-flight', 'flight'], // Track AU
       ['v-deaths', 'deaths'],
       ['v-lastdeath', 'last death'],
     ])}</div>`;

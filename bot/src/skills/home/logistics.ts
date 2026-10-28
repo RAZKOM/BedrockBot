@@ -28,6 +28,7 @@ import type { ContainerView, Vec3 } from '../../world/types.ts';
 import type { CollectOptions, CollectResult } from '../collect/collect.ts';
 import { isShulkerBox, shulkerContents, shulkerSlotsUsed, type ContainerSnapshot, type DepositResult, type OpenResult } from '../container/chest.ts';
 import { boxSpots } from '../container/stash.ts';
+import { isFireworksBox } from '../fly/kit.ts'; // Track AU: the fireworks box is never unloaded
 import type { DigOptions, DigResult } from '../dig/digger.ts';
 import type { PathResult } from '../nav/astar.ts';
 import type { NavGoal } from '../nav/goals.ts';
@@ -80,6 +81,8 @@ export interface HomeDeps {
   };
   /** Select a hotbar slot (Hotbar.select), so a placed shulker box is the one wanted. */
   selectHotbar?(slot: number): void;
+  /** Track AU: the inventory slot the owner named as the fireworks box (`!fly box <slot>`): kept like a fireworks-only box. */
+  flightBoxSlot?(): number | undefined;
   /** Track AN: a bounded probe plan (reach.ts probePath) from `from` to `goal`; undefined: `from` is no standable node. Without it scans use the radius only. */
   probe?(goal: NavGoal, from: Vec3): Promise<PathResult | undefined>;
   log?: Logger;
@@ -242,7 +245,7 @@ export class HomeLogistics {
     const out: UnloadSlot[] = [];
     this.d.inventory.slots.slice(0, 36).forEach((s, i) => {
       if (!s || s.count <= 0) return;
-      out.push({ slot: i, name: s.name, count: s.count, ...(isShulkerBox(s.name) ? { boxUsed: shulkerSlotsUsed(this.d.inventory.rawItem?.(0, i)) } : {}) });
+      out.push({ slot: i, name: s.name, count: s.count, ...(isShulkerBox(s.name) ? { boxUsed: shulkerSlotsUsed(this.d.inventory.rawItem?.(0, i)) } : {}), ...(isFireworksBox(s.name, this.d.inventory.rawItem?.(0, i)) || this.d.flightBoxSlot?.() === i ? { flightKit: true } : {}) }); // Track AU: the fireworks box is kept
     });
     return out;
   }

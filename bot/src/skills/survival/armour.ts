@@ -41,6 +41,11 @@ export function armourSlotOf(name: string): ArmourSlot | undefined {
   return slot !== undefined && MATERIALS[n.slice(0, us)] ? slot : undefined;
 }
 
+/** Track AU: the elytra sits in the chest slot but is not armour; while it is worn the armour pass leaves the slot alone. */
+export function wearsElytra(name: string | undefined): boolean {
+  return name !== undefined && (name === 'elytra' || name === 'minecraft:elytra');
+}
+
 /** Higher is better; 0 for an empty slot or a non-armour item. */
 export function armourScore(name: string | undefined): number {
   if (!name) return 0;
@@ -74,6 +79,7 @@ export function planArmour(
   const out: ArmourMove[] = [];
   for (const s of [0, 1, 2, 3] as const) {
     const cur = worn[s] ?? null;
+    if (s === 1 && cur && wearsElytra(cur.name)) continue; // Track AU: an elytra on the back stays on (the flight puts the chestplate back itself)
     let best: { from: number; item: ItemStack; score: number } | undefined;
     for (let i = 0; i < Math.min(slots.length, 36); i++) {
       const it = slots[i];
@@ -159,6 +165,18 @@ export class ArmourController {
     this.stats.failed += failed.length;
     this.log.info(`armour: wearing ${equipped.join(', ') || 'nothing new'}${failed.length ? `; failed ${failed.join(', ')}` : ''}`);
     return { ok: failed.length === 0, equipped, failed };
+  }
+
+  /** Track AU: one explicit move (the elytra on, the chestplate back) under the inventory screen. */
+  async wear(m: ArmourMove): Promise<boolean> {
+    if (this.running) return false;
+    this.running = true;
+    try {
+      const r = await this.d.requests.withScreen(() => this.one(m));
+      return r === true;
+    } finally {
+      this.running = false;
+    }
   }
 
   private async one(m: ArmourMove): Promise<boolean> {

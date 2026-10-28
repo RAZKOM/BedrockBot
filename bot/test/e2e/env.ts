@@ -1,7 +1,7 @@
 // Which game version and transport the e2e suites speak. Defaults are the dev setup (1.26.60 over
 // RakNet since 2026-10-28); hosts, ports and containers have their own env vars in chat-helpers.ts
-// (BDS_*), world-truth.ts (BDS_WORLD_*), skills-input.test.ts (PHYS_BDS_*), move-truth.ts (MOVE_BDS_*)
-// and dig-truth.ts (DIG_BDS_*).
+// (BDS_*), world-truth.ts (BDS_WORLD_*), skills-input.test.ts (PHYS_BDS_*), move-truth.ts (MOVE_BDS_*),
+// dig-truth.ts (DIG_BDS_*) and fly-truth.ts (FLY_BDS_*, Track AU).
 //   BOT_VERSION=1.26.51            the previous game version (rollback path, server bds-dev51)
 //   BDS_TRANSPORT=nethernet        NetherNet with LAN signalling (discovery on UDP 7551)
 // `node scripts/e2e-profile.ts dev51|nn` sets all of them for one container (see docs/versions.md).

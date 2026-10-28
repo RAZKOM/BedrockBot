@@ -111,7 +111,7 @@ export function addressedText(body: string, botName: string, prefix = '!'): stri
 }
 
 /** Owner commands that end a running plan (they replace or stop what it started). */
-const ABORT_ON = new Set(['stop', 'goto', 'come', 'follow', 'kill', 'gather', 'mine', 'farm', 'food', 'sleep', 'home', 'top', 'nether', 'overworld']); // Track AT: nether, overworld
+const ABORT_ON = new Set(['stop', 'goto', 'come', 'follow', 'kill', 'gather', 'mine', 'farm', 'food', 'sleep', 'home', 'top', 'nether', 'overworld', 'fly', 'land']); // Track AT: nether, overworld; Track AU: fly, land
 
 interface Pending {
   plan: Plan;

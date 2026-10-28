@@ -62,6 +62,7 @@ const STEP_DOCS: Record<StepKind, string> = {
   bring: '{"command":"bring","item":"torch","count":N?,"to":"home"?}: take items ALREADY STORED in the chests at home and carry them to the person asking ("bring me", "fetch from home", "bring the diamonds to me"); "to" only for another named player or "home"; get makes new items and ends at home, bring takes from the chests and ends at the player', // Track AS
   explore: '{"command":"explore","radius":R?}: walk around the unexplored land near home (radius 16..1024 blocks) so the bot remembers it: ores, forests, animals', // Track AI
   ...{ nether: '{"command":"nether"}: go into the Nether through the nearest known nether portal (it does not build portals)', overworld: '{"command":"overworld"}: come back from the Nether through the paired portal' }, // Track AT
+  fly: '{"command":"fly","to":"home"|"me"|"<waypoint>"?,"player":"<name>"?,"x":X?,"y":Y?,"z":Z?,"land":true?}: fly there with the elytra and land on it (fly to me / fly home / fly to a waypoint or to x y z); land true = land now, nothing else', // Track AU
   question: '{"command":"question","text":"..."}: ask the person one short question instead of guessing; last step',
   answer: '{"command":"answer","text":"..."}: answer a question about the bot (what it can do, whether it can cook, what it is doing) in up to 200 characters; nothing runs; always the only step', // Track AM
 };
@@ -92,6 +93,7 @@ export const EXAMPLES: readonly Example[] = [
   { request: 'look around the area within 200 blocks', plan: { steps: [{ command: 'explore', radius: 200 }] } }, // Track AI
   { request: 'bring me 64 torches', plan: { steps: [{ command: 'bring', item: 'torch', count: 64 }] } }, // Track AS
   { request: 'go to the nether', plan: { steps: [{ command: 'nether' }] } }, // Track AT
+  { request: 'fly to me', plan: { steps: [{ command: 'fly', to: 'me' }] } }, // Track AU
 ];
 
 export function buildSystemPrompt(c: PromptContext): string {

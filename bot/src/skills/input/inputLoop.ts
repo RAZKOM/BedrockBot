@@ -18,7 +18,7 @@ import {
   serverStateFromMovePlayer,
   type HistoryEntry,
 } from './history.ts';
-import { PHYSICS, ownEngine } from './physics.ts';
+import { GLIDE, PHYSICS, ownEngine } from './physics.ts';
 import { newSprintTracker, stepSprint } from './sprint.ts';
 import type { BlockQuery, BodyState, MoveCommand, PhysicsEngine, Vec3 } from './types.ts';
 import { IDLE_COMMAND, cloneBody, initialBody } from './types.ts';
@@ -58,6 +58,8 @@ export interface InputLoopOptions {
   historySize?: number;
   /** Whether sprinting is possible (survival: food above 6). Default always. */
   canSprint?: () => boolean;
+  /** Track AU: whether a glide is possible (an elytra in the chest slot). Default never. */
+  canGlide?: () => boolean;
 }
 
 export interface CorrectionEvent {
@@ -103,7 +105,17 @@ export interface MotionEvent {
   replayed: number;
 }
 
-export type InputLoopEvent = CorrectionEvent | TeleportEvent | ReadyEvent | MotionEvent;
+/** Track AU: the server's `gliding` actor flag for the own player (confirms or ends a glide). */
+export interface GlideEvent {
+  kind: 'glide';
+  gliding: boolean;
+  /** The server's tick on the packet (0 = none). */
+  tick: bigint;
+  /** Inputs re-simulated without the glide when the server ended one we still predicted. */
+  replayed: number;
+}
+
+export type InputLoopEvent = CorrectionEvent | TeleportEvent | ReadyEvent | MotionEvent | GlideEvent;
 
 /** See `InputLoop.setTickExtras`. */
 export type TickExtrasProvider = (tick: bigint) => Partial<PlayerAuthInputPacket> | undefined;
@@ -125,6 +137,9 @@ export interface InputLoopState {
   /** The body touched water / lava on the last tick. */
   inWater: boolean;
   inLava: boolean;
+  /** Track AU: the body glides (elytra); boost ticks of a firework rocket left. */
+  gliding: boolean;
+  boostTicks: number;
   teleports: number;
   /** Tick of the last input sent. */
   tick: bigint;
@@ -140,6 +155,11 @@ export class InputLoop {
   private readonly log: Logger;
   private readonly historySize: number;
   private readonly canSprint: () => boolean;
+  private readonly canGlide: () => boolean;
+  /** Track AU: a rocket was used since the last input: the next input carries boostStart. */
+  private pendingBoost: number | undefined;
+  /** Track AU: the tick of the input that carried start_gliding, until the server's flag confirms it. */
+  private glideRequestTick: bigint | undefined;
   private sprint = newSprintTracker();
   private cmd: MoveCommand = { ...IDLE_COMMAND };
   private prevCmd: MoveCommand | undefined;
@@ -167,6 +187,7 @@ export class InputLoop {
     this.log = opts.logger ?? silentLogger;
     this.historySize = opts.historySize ?? 200;
     this.canSprint = opts.canSprint ?? (() => true);
+    this.canGlide = opts.canGlide ?? (() => false);
   }
 
   /** Subscribe to the connection. Call before `connect()` so the spawn is seen. */
@@ -189,6 +210,10 @@ export class InputLoop {
       // Not in the typed overloads (kept stable for other fakes): Connection's untyped `on` serves it.
       (this.conn as unknown as UntypedOn).on('set_entity_motion', (p) => {
         this.onMotion(p as SetEntityMotionPacket);
+      }),
+      // Track AU: the own `gliding` actor flag confirms a glide or ends it (ground, water, no elytra)
+      (this.conn as unknown as UntypedOn).on('set_entity_data', (p) => {
+        this.onEntityData(p as { runtime_entity_id: bigint | number; metadata?: { key?: string; value?: unknown }[]; tick?: bigint | number });
       }),
       this.conn.onTick((tick) => {
         this.onTick(tick);
@@ -217,6 +242,8 @@ export class InputLoop {
       sprinting: b.sprinting,
       inWater: b.inWater ?? false,
       inLava: b.inLava ?? false,
+      gliding: b.gliding ?? false,
+      boostTicks: b.boostTicks ?? 0,
       teleports: this.teleports,
       tick: this.lastTick,
       ready: this.ready,
@@ -280,6 +307,33 @@ export class InputLoop {
   }
 
   /**
+   * Track AU: a firework rocket was used this tick (the item-use transaction goes out in the same
+   * batch): the glide boost runs for `ticks` ticks from the next input on (GLIDE.boostTicks by
+   * default; the rocket's remove_entity ends it early through `endBoost`).
+   */
+  boost(ticks: number = GLIDE.boostTicks): void {
+    this.pendingBoost = ticks;
+  }
+
+  /**
+   * Track AU: the server removed the boosting rocket: the boost ended `agoTicks` inputs ago (the
+   * packet's latency; default 3). The inputs since are re-simulated without it.
+   */
+  endBoost(agoTicks = 3): void {
+    this.pendingBoost = undefined;
+    if ((this.body.boostTicks ?? 0) === 0) return;
+    const at = this.lastTick - BigInt(Math.max(0, agoTicks));
+    const index = this.history.findIndex((e) => e.tick >= at);
+    if (index < 0) {
+      this.body = { ...cloneBody(this.body), boostTicks: 0 };
+      return;
+    }
+    const entries = this.history.map((e) => ({ ...e, state: cloneBody(e.state) }));
+    for (let i = index; i < entries.length; i++) entries[i]!.cmd = { ...entries[i]!.cmd, boostStart: 0 };
+    this.replayFrom(entries, index);
+  }
+
+  /**
    * Track AK: a pose provider (the sleeping body held at the bed), a second slot beside
    * `setTickExtras` so a dig or a hotbar move neither replaces it nor is replaced by it. Merged like
    * the tick extras, after them: its fields win. One provider at a time; `undefined` removes it.
@@ -331,7 +385,13 @@ export class InputLoop {
     let simulated = false;
     let moving = true;
     // BDS's own sprint rules (sticky sprint, double-tapped forward): the body sprints when the server will
-    const simCmd = { ...cmd, sprint: stepSprint(this.sprint, cmd, prev, this.canSprint()) };
+    const simCmd: MoveCommand = { ...cmd, sprint: stepSprint(this.sprint, cmd, prev, this.canSprint()) };
+    // Track AU: the glide only with an elytra on; a rocket used since the last input starts its boost here
+    if (cmd.glide && !this.canGlide()) simCmd.glide = false;
+    if (this.pendingBoost !== undefined) {
+      simCmd.boostStart = this.pendingBoost;
+      this.pendingBoost = undefined;
+    }
     if (this.skipNext) {
       // first input after a teleport: the server takes the teleport state without simulating it
       this.skipNext = false;
@@ -354,6 +414,7 @@ export class InputLoop {
       handledTeleport: this.handledTeleport,
     });
     this.handledTeleport = false;
+    if (state.gliding === true && prev.gliding !== true) this.glideRequestTick = tick; // Track AU
     const packet = buildAuthInput({ tick, cmd: sentCmd, state, flags, moving });
     for (const extras of [this.tickExtras?.(tick), this.pose?.(tick)]) {
       if (!extras) continue;
@@ -375,6 +436,50 @@ export class InputLoop {
         w.resolve();
       }
     }
+  }
+
+  /** Track AU: re-simulate `entries` from `index` on (each from the previous entry's state) and adopt the result. */
+  private replayFrom(entries: HistoryEntry[], index: number): number {
+    let replayed = 0;
+    for (let i = Math.max(1, index); i < entries.length; i++) {
+      const e = entries[i]!;
+      const prevState = entries[i - 1]!.state;
+      e.state = e.simulated ? this.engine.step(prevState, e.cmd, this.world).state : cloneBody(prevState);
+      replayed++;
+    }
+    this.history = entries;
+    if (entries.length) this.body = cloneBody(entries[entries.length - 1]!.state);
+    return replayed;
+  }
+
+  /** Track AU: the server's `gliding` flag for the own player. */
+  private onEntityData(p: { runtime_entity_id: bigint | number; metadata?: { key?: string; value?: unknown }[]; tick?: bigint | number }): void {
+    if (!this.ready || BigInt(p.runtime_entity_id) !== this.conn.runtimeId) return;
+    const flags = p.metadata?.find((m) => m.key === 'flags')?.value as { gliding?: boolean } | undefined;
+    if (!flags || typeof flags.gliding !== 'boolean') return;
+    const tick = BigInt(p.tick ?? 0);
+    if (flags.gliding) {
+      this.glideRequestTick = undefined;
+      this.emit({ kind: 'glide', gliding: true, tick, replayed: 0 });
+      return;
+    }
+    if (!this.body.gliding) return;
+    // a flags packet of the tick that carried our start_gliding (or older) describes the state before it:
+    // the server confirms with the next one (measured: the request at tick N is confirmed at N + 1)
+    if (this.glideRequestTick !== undefined && (tick === 0n || tick <= this.glideRequestTick)) return;
+    // the server ended (or refused) a glide we still predict: no glide from the input after its tick on
+    const index = tick > 0n ? this.history.findIndex((e) => e.tick > tick) : this.history.length - 1;
+    let replayed = 0;
+    if (index >= 0) {
+      const entries = this.history.map((e) => ({ ...e, state: cloneBody(e.state) }));
+      for (let i = index; i < entries.length; i++) entries[i]!.cmd = { ...entries[i]!.cmd, glide: false };
+      replayed = this.replayFrom(entries, index);
+    }
+    this.body = { ...cloneBody(this.body), gliding: false, boostTicks: 0 };
+    this.cmd = { ...this.cmd, glide: false };
+    this.glideRequestTick = undefined;
+    this.log.info(`glide ended by the server at tick ${tick} (now ${this.lastTick}); replayed ${replayed}`);
+    this.emit({ kind: 'glide', gliding: false, tick, replayed });
   }
 
   private onCorrection(p: CorrectPlayerMovePredictionPacket): void {

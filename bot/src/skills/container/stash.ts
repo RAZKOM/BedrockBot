@@ -31,6 +31,7 @@ import type { NavGoal } from '../nav/goals.ts';
 import { isInteractive, REPLACEABLE, type PlaceOptions, type PlaceResult } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { isShulkerBox, shulkerSlotsUsed, type DepositResult, type OpenResult } from './chest.ts'; // Track AG: shulker names, NBT reader and slot type live in chest.ts now
+import { isFireworksBox } from '../fly/kit.ts'; // Track AU: the fireworks box is never the stash box
 export { isShulkerBox, SHULKER_BOXES, SHULKER_SLOT_TYPE, shulkerSlotsUsed } from './chest.ts'; // Track AG: re-exported for Track AD's callers
 
 /** Fewer free inventory slots than this: stash. */
@@ -96,6 +97,8 @@ export interface StashDeps {
   log?: Logger;
   /** Tell the owner (an attempt that left the inventory full). */
   say?(msg: string): void;
+  /** Track AU: the inventory slot the owner named as the fireworks box (), never used as the stash box. */
+  flightBoxSlot?(): number | undefined;
   now?: () => number;
 }
 
@@ -327,6 +330,7 @@ export class Stash {
     let bestUsed = 27;
     this.d.inventory.slots.slice(0, 36).forEach((s, i) => {
       if (!s || s.count <= 0 || !isShulkerBox(s.name)) return;
+      if (isFireworksBox(s.name, this.d.inventory.rawItem?.(0, i)) || this.d.flightBoxSlot?.() === i) return; // Track AU: the flight kit's box
       const used = shulkerSlotsUsed(this.d.inventory.rawItem?.(0, i));
       if (used < bestUsed) {
         best = i;

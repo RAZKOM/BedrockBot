@@ -46,6 +46,9 @@ describe('plan schema', () => {
       { command: 'bring', item: 'torch', count: 64 }, // Track AS
       { command: 'bring', item: 'diamond', to: 'home' },
       ...[{ command: 'nether' }, { command: 'overworld' }], // Track AT
+      { command: 'fly', to: 'home' }, // Track AU
+      { command: 'fly', x: 100, y: 70, z: -20 },
+      { command: 'fly', land: true },
       { command: 'question', text: 'Which one?' },
       { command: 'answer', text: 'I can cook after a hunt.' }, // Track AM
     ];
@@ -54,7 +57,7 @@ describe('plan schema', () => {
   });
 
   it('rejects a made-up command and extra fields', () => {
-    expect(ok(one({ command: 'fly', to: 'moon' }))).toBe(false);
+    expect(ok(one({ command: 'warp', to: 'moon' }))).toBe(false); // Track AU: fly is a real step now
     expect(ok(one({ command: 'op', player: 'Steve' }))).toBe(false);
     expect(ok(one({ command: 'tp', x: 1, y: 2, z: 3 }))).toBe(false);
     expect(ok(one({ command: 'stop', force: true }))).toBe(false);
@@ -62,7 +65,7 @@ describe('plan schema', () => {
     expect(ok({ steps: [] })).toBe(false);
     expect(ok({ steps: Array.from({ length: 9 }, () => ({ command: 'stop' })) })).toBe(false);
     expect(parsePlan('stop please')).toEqual({ ok: false, error: 'the answer is not JSON' });
-    const r = parsePlan('{"steps":[{"command":"fly"}]}');
+    const r = parsePlan('{"steps":[{"command":"warp"}]}'); // Track AU: fly is a real step now
     expect(r.ok).toBe(false);
   });
 
@@ -163,7 +166,7 @@ describe('prompt', () => {
     expect(p).toContain('settings: guardRadius 16');
     expect(p).toContain('[chat: !goto <waypoint> | x y z (walk)]');
     expect(p).toContain('!sleep (not available on this bot)');
-    expect(EXAMPLES).toHaveLength(21); // Track AT: + nether; Track AS: + bring; Track AQ: + get several ores, mine several kinds; Track AD: + get; Track AK: + breed, drop, food pen; Track AM: + two answers; Track AL: + build; Track AG: + unload, stock, chests; Track AI: + explore
+    expect(EXAMPLES).toHaveLength(22); // Track AU: + fly; Track AT: + nether; Track AS: + bring; Track AQ: + get several ores, mine several kinds; Track AD: + get; Track AK: + breed, drop, food pen; Track AM: + two answers; Track AL: + build; Track AG: + unload, stock, chests; Track AI: + explore
     for (const e of EXAMPLES) {
       expect(PlanSchema.safeParse(e.plan).success).toBe(true);
       expect(p).toContain(JSON.stringify(e.plan));
