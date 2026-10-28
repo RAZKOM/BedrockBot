@@ -1,0 +1,33 @@
+# BDS for the crafting e2e tests (wave 11, Track AW; docs/crafting.md). Like compose.act.yml: a FLAT
+# world, difficulty peaceful, operator, own project name, container bds-craft on udp/19208, data in
+# docker/data/craft (seeded from docker/data/dev without its `worlds/` and `server.properties`, so the
+# server generated its own flat world and BDS was not downloaded again).
+#   node scripts/bds.mjs --profile craft up
+#   node scripts/bds.mjs --profile craft pack      # truth pack (needed by the craft-* e2e tests)
+name: bedrockbot-craft
+
+services:
+  bds-craft:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-craft
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: peaceful
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: craft
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-craft
+      SERVER_PORT: "19208"
+      TICK_DISTANCE: "10"
+    ports:
+      - "19208:19208/udp"
+    volumes:
+      - ./data/craft:/data
+    stdin_open: true
+    tty: true

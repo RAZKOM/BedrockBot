@@ -196,6 +196,19 @@ export class PathFollower {
     return this.passed;
   }
 
+  // Track BE: the off-path checks (nav/baritone/executor.ts) leave these moves alone
+  /**
+   * Track BE: the move under way is one the navigator's off-path / skip-ahead checks must not judge:
+   * the body in the air (a jump, a fall, an irreversible drop, a knock) or in water, or the target a
+   * swim, a climb, a parkour gap (its run-up backs away from the path), a pillar.
+   */
+  checksPaused(s: Pick<FollowerInput, 'onGround' | 'inWater'>): boolean {
+    if (!s.onGround || s.inWater === true || this.backing === true) return true;
+    const m = this.path[this.index]!.move;
+    return m === 'swim' || m === 'swimOut' || m === 'climb' || m === 'climbOut' || m === 'parkour' || m === 'pillar' || m === 'downward'; // Track BC: a dig-down drop (the body idles, then falls)
+  }
+  // Track BE end
+
   step(s: FollowerInput, currentYaw: number): FollowStep {
     const out = this.decide(s, currentYaw);
     return { ...out, cmd: this.pressGuard.apply(out.cmd) };

@@ -160,8 +160,7 @@ describe.skipIf(!E2E)('@bds nav: the shared movement rules (Track BB, bds-bari)'
     expect(dug.rep.actions.dig).toBeGreaterThanOrEqual(1);
     expect(dug.plan?.status).toBe('found');
     const digNode = dug.plan!.path.find((n) => n.act?.dig);
-    expect(digNode?.act?.dig?.length).toBeGreaterThanOrEqual(1);
-    expect(digNode?.act?.dig?.length).toBeLessThanOrEqual(2);
+    expect(digNode?.move === 'jump' ? digNode.act!.dig!.length === 1 : digNode?.move === 'walk' && digNode.act!.dig!.length === 2, dug.line).toBe(true);
     expect(digNode!.cost).toBeGreaterThanOrEqual(digNode!.act!.dig!.length * (15 + DEFAULT_COSTS.dig));
     expect(await count(L.gravel.barrier.from, L.gravel.barrier.to, 'dirt')).toBeLessThanOrEqual(6 - digNode!.act!.dig!.length);
   }, 180_000);

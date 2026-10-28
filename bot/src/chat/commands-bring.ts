@@ -33,6 +33,7 @@ import type { ProcessManager } from '../tasks/process/manager.ts';
 import type { Sender } from './chat.ts';
 import { getControllerOf } from './commands-get.ts';
 import { homeControlOf } from './commands-home.ts';
+import { carriedBoxes, keepBoxNameOf } from '../skills/home/boxing.ts'; // Track AV
 
 export interface BringExtra {
   logger?: Logger | undefined;
@@ -241,7 +242,11 @@ export function registerBringCommands(d: CommandDeps, extra: BringExtra = {}): B
   const c = new BringController({
     processes,
     records: () => logistics.records(),
-    inventory: () => mob.world.inventory.slots.slice(0, 36).filter((s): s is NonNullable<typeof s> => !!s && s.count > 0).map((s) => ({ name: s.name, count: s.count })),
+    inventory: () => {
+      // Track AV: the bot_loot boxes and the fireworks box are no "already carried" boxes
+      const kept = new Set(carriedBoxes(mob.world.inventory, keepBoxNameOf(d.task)).filter((b) => b.named || b.flightKit).map((b) => b.slot));
+      return mob.world.inventory.slots.slice(0, 36).flatMap((s, i) => (!!s && s.count > 0 && !kept.has(i) ? [{ name: s.name, count: s.count }] : []));
+    },
     home: homePoint,
     runner,
     settings: d.settings,

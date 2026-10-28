@@ -10,6 +10,9 @@ Track AN (the follow-up, [decisions/0035-home-walking-distance.md](decisions/003
 containers by walking distance, an unreachable memory, a read cap per scan ("Walking distance" below).
 Track AS (wave 10, [decisions/0040-bring.md](decisions/0040-bring.md)): `!bring` takes stored items out
 of the chests and carries them to the owner ("Bring" below).
+Track AV (wave 11, [decisions/0044-boxing.md](decisions/0044-boxing.md)): boxing a full chest's stacks into
+spare shulker boxes at `!unload`, the owner's `bot_loot` boxes, `!boxes`, packing priority in the stash step
+("Boxing at the chests" below).
 
 ## Files
 
@@ -29,12 +32,17 @@ of the chests and carries them to the owner ("Bring" below).
 | `bot/src/chat/commands-home.ts` | `!unload`, `!stock`, `!chests`; wiring of the chore, the block-update trigger, the `!get` hook |
 | `bot/src/skills/container/chest.ts` | slot type per block kind, `snapshot` / `snapshotOf`, `depositSlots`, `take`, the shulker box names and NBT readers (moved here from stash.ts) |
 | `bot/src/world/containers.ts` | `setSlotType` / `slotTypeOf`: the item_stack_request slot type per open window; a whole stack moved into an empty slot keeps its wire item (NBT) |
-| `bot/src/config/settings.ts` | `homeChestRadius` (number, 16, 2..48), `homeChestWalk` (Track AN: path blocks, 32, 0..256; 0 = radius only), `autoUnload` (boolean, on), `getSuggestsBring` (Track AS: boolean, on) |
+| `bot/src/config/settings.ts` | `homeChestRadius` (number, 16, 2..48), `homeChestWalk` (Track AN: path blocks, 32, 0..256; 0 = radius only), `autoUnload` (boolean, on), `getSuggestsBring` (Track AS: boolean, on), `keepBoxName` (Track AV: text, `bot_loot`; 1..32 characters) |
 | `bot/src/skills/nav/goals.ts` | Track AN: `getToBlock` option `low` (a side cell's feet up to `low` blocks below the block; default 1) |
 | `packs/truth/src/home.ts` | `truth:chestput` (fill a container block); reading one is `truth:container` |
 | `bot/test/unit/skills/home-*.test.ts`, `bot/test/unit/cache/chests.test.ts`, `bot/test/unit/chat/home-commands.test.ts` | unit tests on fakes |
 | `bot/test/unit/skills/home-bring.test.ts`, `bot/test/unit/chat/bring-commands.test.ts` | Track AS: unit tests on fakes |
 | `bot/test/e2e/home-chests.test.ts`, `home-shulker.test.ts`, `home-reach.test.ts` (Track AN), `home-bring.test.ts` (Track AS), `home-truth.ts` | e2e on bds-home |
+| `bot/src/skills/home/boxing.ts` | Track AV: named boxes (`isKeptBox`, `keepBoxName`), carried boxes and spares, `placesExactly`, the `!boxes` line, the `kept 4 bot_loot boxes` line |
+| `bot/src/world/inventory.ts` | Track AV: `itemDisplayName(raw)`: an item's custom name from the wire item's NBT |
+| `bot/src/skills/home/unloader.ts` | Track AV: `UnloadStep` (`box`, `compact`), `planBoxSteps`, `emptyNamed`, `blocked` |
+| `bot/src/skills/container/stash.ts` | Track AV: the named box first, packing priority (`DROP_FIRST`, `packClass`, `packOrder`), the re-pack |
+| `bot/test/unit/skills/home-boxing.test.ts`, `stash-packing.test.ts`, `bot/test/e2e/home-boxing.test.ts` | Track AV: unit tests on fakes, the e2e on bds-home |
 | `docker/compose.home.yml` | `bds-home`, udp/19196, flat, peaceful |
 
 ## Commands (owner only, afk task with walking)
@@ -48,6 +56,7 @@ of the chests and carries them to the owner ("Bring" below).
 | `!chests unreachable` | Track AN: `chests: 3 unreachable: chest -6 -60 5: no path within 4000 nodes (0 min ago) \| chest 12 -60 0: path 38 blocks (0 min ago) \| ...`, nearest first, at most 3 messages (the last ends `... and 12 more (!chests clear forgets them, !chests scan tries again)`); `chests: none unreachable` |
 | `!chests clear` | `chests: forgot 181 containers (41 unreachable); I read them again the next time I stand near home (or !chests scan)` |
 | `!chests label x y z <text>` / `none` | `chests: chest 3 -60 2 (wood) labelled`; up to 32 characters |
+| `!boxes` | Track AV: `boxes: 4 spare (1 carried, 3 in chest 1 2 3); carrying 2 bot_loot boxes (1 empty, 1 holding 1728 sand)`; `boxes: no spare empty box known (carried or in the chests I know); no bot_loot box carried` |
 | `!bring <item> [n] [to <player>\|home]` | Track AS: `bringing 64 torches to Steve (from 2 chests)`, then `brought 64 torches (from 2 chests)` ("Bring" below) |
 
 `!unload` and `!chests scan` are user processes (priority 40): `!stop` ends them, flee / guard /
@@ -136,6 +145,17 @@ shulker box (the stash step's). Further empty boxes go to the box chest (the con
 most shulker boxes; a placed shulker box never takes a box); full boxes (NBT `Items` not empty) go
 there too, or with `all` are emptied first.
 
+Track AV, before the rules: the plan's `box` steps (and Track AW's `compact` steps) run first; rule 1
+counts the items inside a chest's full boxes too, and the kinds with a home (rule 1) claim their room
+before the others' label / emptiest rules ("Boxing at the chests" below).
+
+| # | Rule (Track AV rows) | When |
+|---|---|---|
+| 0a | compact (Track AW's hook) | `plan.compact` not empty and a runner installed (`setCompactRunner`): run once before the chest trips |
+| 0b | box | the chests holding the item (loose or boxed) cannot take what the bot carries of it, and a spare empty box is known (carried first, else the chest nearest to the target holding empty boxes) |
+| - | blocked `no_spare` | the same, but no spare known: the item goes by rules 2 / 3, or is left (`left 192 cobblestone (no room; chest 1 2 3 is full and no spare shulker box is known)`) |
+| - | blocked `boxes_full` | the target chest holds no loose stack of it and has no free slot for a box (a chest full of full boxes): `left ... (no room; chest 1 2 3 is full of boxes)` |
+
 ### Spare shulker boxes
 
 When unloadable items are left and every container is full: the nearest container holding an empty
@@ -145,6 +165,103 @@ is open), the box is placed on a free cell next to the bot (Track AD's `boxSpots
 `shulker`), filled with the overflow, closed, broken and picked up, and the full box goes back into
 the box chest (the slot it came from is kept for it in the plan), else into the emptiest container
 with a free slot. Up to 3 boxes per run.
+
+## Boxing at the chests (wave 11, Track AV)
+
+The owner: "If a chest is full of empty shulkers, it can also find that chest, and load in items from a
+full chest into the shulker, break the shulker, and put it back in the chest ... all of the 8640 sand won't
+fit in one chest that is already partially full of sand, so if it sees empty shulkers it can just use one."
+Decision record: [decisions/0044-boxing.md](decisions/0044-boxing.md).
+
+### Named boxes (`bot_loot`)
+
+- **What**: a shulker box whose custom name is the setting `keepBoxName` (text, default `bot_loot`; case,
+  colour codes such as `§6` and surrounding spaces ignored). The name comes from the item NBT
+  (`world/inventory.ts itemDisplayName`), verified on BDS 1.26.60 (bds-home, a box named by
+  `truth:nameinv`): an unnamed box has `extra.has_nbt: 0`; a named empty one
+  `extra.nbt.nbt.value = {display: {type: 'compound', value: {Name: {type: 'string', value: 'bot_loot'}}}}`;
+  a named full one has `Items` and `display` side by side (naming keeps the contents; a named box placed,
+  filled, broken and picked up keeps its name).
+- **Rules**: never unloaded as an item, never put into a chest, never used for boxing, never a spare, never
+  dropped by `!drop all` / `!drop items` (`dropped 193 items of 2 kinds; kept 2 bot_loot boxes`; the drop
+  skips those slots, so an unnamed box of the same colour still goes), nor by an explicit
+  `!drop undyed_shulker_box` (`dropped 1 undyed_shulker_box; kept 2 bot_loot boxes`: rename a box to drop
+  it), nor by `!drop flightkit` (only the fireworks box's own slot goes); the stash step fills it before any
+  unnamed box; `!unload` empties it into the inventory (placed, opened, emptied, broken, picked up; between
+  deposit passes when the inventory has no room yet) and unloads its items like loose stacks; the box stays
+  carried (`kept 2 bot_loot boxes`). With a named box carried no unnamed box is held back for the stash step.
+  The fireworks box (Track AU) is checked first and keeps its own rule.
+- A box whose wire item is unknown (no raw item for its slot, e.g. after a refused request rolled the slot
+  back): its name and contents are unknown, so it is kept (`unknown_box`), never a spare, never stored or
+  taken as one, until the server sends the slot again.
+- In a chest a named box counts neither as an empty nor as a full box (`boxes.empty` / `full` leave it out;
+  `inBoxes` counts what it holds), so it is never taken as a spare.
+
+### The box step
+
+1. **The spare**: a carried unnamed empty box (not the stash step's), else one taken out of the chest the
+   plan names (into a free hotbar slot; with a full hotbar a movable hotbar stack goes to the main
+   inventory first, while the window is open).
+2. **Rounds** (at most 4): walk to the target chest, take its loose stacks of the item (fullest first, as
+   many as the box's free slots and the inventory's free slots allow), move the box into the hotbar while
+   the window is open if the place skill would pick another box, close; place the box next to the bot
+   (`placesExactly`: the selected hotbar box; another box placed is picked up again and the step fails),
+   fill it with the item's stacks (fullest first, the throwaway reserve held back; planned again after each
+   pass, up to 3, because the survival keeper may move a stack meanwhile), break it, pick it up. Another
+   round only when the inventory's room limited the take.
+3. **Store**: the full box goes into the target chest (the freed slots); the memory is refreshed from the
+   window: the box with its contents (`inBoxes`), the loose stacks reduced.
+4. Then the deposits plan again from the fresh memory: the bot's stacks of that item go into that chest.
+
+The bot's own produce is boxed too when the chest has fewer free slots than the bot carries and no loose
+stack (a chest of boxes with one free slot: 27 stacks of produce in one box). Never boxed: mixed kinds,
+kept items (food, tools, armour, totems, rockets), unstackable items, the reserve. At most 4 box steps a run
+(`MAX_BOX_STEPS`); a failed step (`skip`) plans that kind without boxing for the rest of the run.
+
+### The `compact` hook (Track AW)
+
+Crafting an item into its block form (iron ingots into iron blocks) to make room is Track AW's. The contract:
+
+- **Plan**: `UnloadPlan.compact?` (`{kind, count}[]`, `count` = items), filled by Track AW's
+  `compactPlanner(slots, plan, chests)` (`setCompactPlanner`) at the end of `planUnload`. The planner is
+  called on every plan (`HomeLogistics.plan()`, the chore's load check, each deposit round): it must be pure
+  and cheap.
+- **Run**: Track AW's `compactRunner(list, cancelled)` (`setCompactRunner`, unloader.ts). `HomeLogistics.unload`
+  calls it once, under its serial lock, before the chest trips (after `all` emptied the full boxes) when a
+  runner is installed and the list is not empty; without a runner it is skipped silently. The runner must
+  not call back into HomeLogistics (the job holds its serial lock: a nested job would wait forever). Its
+  fragment goes into the `!unload` reply after the deposits (`unloaded: ...; compacted 27 raw_iron into 3
+  raw_iron_block; ...`); a runner that throws gives `compact failed: <message>` and the unload goes on. The
+  logistics crafts nothing itself.
+
+### Packing priority in the stash step
+
+The owner: "If he has 5 shulkers and I ask for 27*64*5 sand, but he starts filling some of the shulkers
+with just stuff, will it put them back down and prioritize the sand when it realizes it doesn't have enough
+space?"
+
+| Order | What | Rule |
+|---|---|---|
+| 1 | junk that is no building block (`DROP_FIRST`: rotten flesh, poisonous potatoes, string, spider eyes, snowballs, kelp, seagrass, vines; bones, seeds, flint, feathers and arrows are not in it: bone meal, replanting, crafting) | dropped before a box is filled (a `drop` step), never boxed (unless the job is getting it) |
+| 2 | the job's produce (`StashJob.wanted`) | boxed first |
+| 3 | other items of value | boxed next |
+| 4 | filler blocks (the rest of `STASH_JUNK`: cobblestone, dirt, sand, gravel, stone kinds, ...) | boxed last, only when no produce waits |
+| re-pack | a box (named or not) holding stash junk the job does not want while produce waits | the junk taken out stack by stack into a free inventory slot, the produce deposited into each freed slot, the junk dropped right after the box is picked up again; once per box (afterwards it holds no junk, and the order above never boxes junk while produce waits). Needs a second free inventory slot besides the box's: with the inventory completely full there is no re-pack (the keeper's own full-inventory drops raced the takes) |
+
+Reply / log: `re-packed 1 box: dropped 1280 junk, boxed 20 stacks of sand` (also in the stash step line).
+Filler is boxed last rather than dropped first: the get-stash regression (coal wanted, 34 stacks of
+cobblestone) still boxes 27 stacks of cobblestone.
+
+### Measured (e2e on bds-home, 2026-10-30, home-boxing 6/6 green in two gate runs, 137 to 147 s per run)
+
+| What | Result |
+|---|---|
+| (a) a full chest of cobblestone (27 stacks), 10 stacks carried, spares 4 blocks away: the box step (take the spare, take 25 stacks, place, fill 27, break, pick up, store) | 12.5 to 14.5 s, **1 round** (25 stacks out: the inventory's 25 free slots plus 2 own stacks fill the box); the whole `!unload` 14.3 to 16.4 s, 62 requests (66 shared), 5 chest trips |
+| (b) 17 stacks of sand in the chest (10 free), 20 stacks + a bot_loot box of 27 stacks carried | 2 box steps of 10.0 to 11.6 s and 14.1 to 14.4 s, 1 round each (13 and 6 stacks out of the chest); the whole `!unload` (with emptying the named box) 36.7 to 38.7 s, 116 requests, 8 chest trips; the chest then holds 2 boxes (1728 each) + 10 stacks |
+| (d) the stash step into the named box (27 stacks of cobblestone) | 3.8 s |
+| (f) re-pack: 20 stacks of rotten flesh out, 20 stacks of sand in | 10.4 to 13.5 s for the stash step, 40 requests (20 takes, 20 deposits) |
+| (e) a full chest, no spare | 0.2 to 0.3 s (no walk), the reply names what is left and why |
+| before the fill was planned again per pass | 1 of 3 runs needed a second round: the survival keeper moved a stack during the fill (26 of 27 stacks went in) |
 
 ### Memory file (`<cache dir>[/dim<n>]/chests.json`)
 
@@ -315,6 +432,16 @@ the end.
 - `home-shulker`: the same home, every container filled with stone (truth:chestput), 30 stacks of
   cobblestone: 2 boxes filled and stored, 16 cobblestone kept, no box left in the world, the box
   chest's boxes hold 1728 and 176 cobblestone and one stays empty.
+- `home-boxing` (Track AV): (a) a chest of 27 stacks of cobblestone + a chest of 3 empty boxes, 10 stacks
+  carried, `throwawayMin 0`: `!unload` boxes 27 stacks there (box from the box chest), the chest holds 1
+  box (1728) + 10 stacks, the bot no cobblestone, memory and `!stock` (`cobblestone: 2368 in chest ...
+  (1728 in boxes)`) agree with truth; (b) 2 `bot_loot` boxes (one holding 27 stacks of sand), 20 stacks of
+  sand, the sand chest with 17 stacks (10 free), 3 spares: 2 box steps, all 64 stacks in the sand chest
+  (2 boxes + 10 loose), both named boxes carried and empty, `kept 2 bot_loot boxes`; (c) `!drop all` keeps
+  the 2 named boxes, drops an unnamed one; (d) the stash step fills the named box (hotbar slot 2), not the
+  unnamed one in slot 1; (e) a full chest, no spare: `left 192 cobblestone (no room; chest ... is full and
+  no spare shulker box is known)`; (f) a named box holding 20 stacks of rotten flesh + 7 of sand, the
+  inventory full of sand (1 slot free): re-packed, the box holds 27 stacks of sand, the flesh is dropped.
 - `home-bring` (Track AS): 4 chests by truth (A: 40 torches + 2 stacks of cobblestone, B 10 blocks from
   A: 30 torches + 1 stack, C: 8 iron ingots + 64 coal, D: a shulker box holding 2 diamonds, filled by
   truth as a block, broken and stored by the bot), a second connection 30 blocks east, `!chests scan`
@@ -328,8 +455,20 @@ the end.
 | Request | Answer |
 |---|---|
 | `chestput x y z typeId amount [stacks\|all]` | `{typeId, size, slots, free}`: `stacks` stacks of `amount` into the first free slots of the block's inventory |
+| `namebox x y z slot\|boxes name` | Track AV: `{typeId, named}`: the custom name (ItemStack.nameTag) of the item in that slot of the container, or of every shulker box in it; the item keeps its data (a box its contents) |
+| `nameinv playerName slot\|boxes name` | Track AV: the same in a player's inventory |
+| `boxmix x y z typeId amount stacks [typeId amount stacks]...` | Track AV: an undyed shulker box dropped as an item at x y z holding those stacks in that order (placed, filled a tick later, destroyed; like fly.ts `boxdrop` with mixed contents) |
 
 ## Open points
+
+- Track AV: re-pack junk: dropped at the box cell, the bot walked back over it and picked up 448 to 512 of
+  1280 rotten flesh again in 2 of 3 runs. Now the bot walks back to the job's spot first, looks up and away
+  from the box cell, then drops it: 1280 of 1280 on the floor in the review rerun. A job that later walks
+  over the spot may still pick some up (the keeper drops it again when the inventory fills).
+- Track AV: `!unload` empties a named box only when the inventory has 2 free slots; a run that starts with
+  a full inventory deposits first and empties the box in the next pass (up to 6 passes).
+- Track AV: the `!unload` reply lists every deposit; past 256 characters (the chat limit) it becomes `unloaded: 14 stacks
+  into 3 containers`.
 
 - The placer picks the first hotbar box of the wanted name: with `all` and a full box that is not in
   the hotbar while an empty box of the same colour is, the empty one may be placed (it is then just

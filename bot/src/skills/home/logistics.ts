@@ -14,6 +14,11 @@
 //            take the box, place it next to the bot, fill it, break it, pick it up and store the full box
 //            in the box chest. With `all`, full shulker boxes carried are emptied first (placed, opened,
 //            emptied into the inventory, broken, picked up) and their items unloaded like the rest.
+//            Track AV (boxing.ts, docs/home.md "Boxing at the chests"): the plan's `box` steps run first
+//            (a spare box, carried or taken from a chest; the target chest's loose stacks into the
+//            inventory, in rounds when the inventory is short of room; the box placed next to the chest,
+//            filled with that item's stacks, broken, picked up, stored in the chest), boxes named
+//            `keepBoxName` (bot_loot) are emptied into the inventory between deposit passes and kept.
 //   withdraw Track AS (`!bring`, bring.ts): plan from the memory and the inventory, walk to the nearest
 //            chest of the plan (the scan's stand cell), open it, take the item's stacks (or, when the
 //            loose stacks are not enough, whole shulker boxes holding it), refresh its memory, close;
@@ -26,7 +31,7 @@ import { silentLogger, type Logger } from '../../log.ts';
 import { chestKey, type ChestMemoryStore, type ChestRecord } from '../../world/cache/chests.ts';
 import type { ContainerView, Vec3 } from '../../world/types.ts';
 import type { CollectOptions, CollectResult } from '../collect/collect.ts';
-import { isShulkerBox, shulkerContents, shulkerSlotsUsed, type ContainerSnapshot, type DepositResult, type OpenResult } from '../container/chest.ts';
+import { isShulkerBox, maxStackOf, shulkerContents, shulkerSlotsUsed, type ContainerSnapshot, type DepositResult, type OpenResult } from '../container/chest.ts';
 import { boxSpots } from '../container/stash.ts';
 import { isFireworksBox } from '../fly/kit.ts'; // Track AU: the fireworks box is never unloaded
 import type { DigOptions, DigResult } from '../dig/digger.ts';
@@ -38,7 +43,8 @@ import { chestNeighbours, findContainers, isHomeContainer, visitOrder, visitOrde
 import { chestName, fmtPos, partnerKeys, planChests, recordFrom, unreadRecord } from './memory.ts';
 import { chestGoal, standOf, verdict } from './reach.ts';
 import { bringMatches, countOf, planBring, type BringItem } from './bring.ts'; // Track AS
-import { planUnload, unloadableStacks, type UnloadPlan, type UnloadSlot } from './unloader.ts';
+import { compactRunner, planUnload, reserveByKind, unloadableStacks, type UnloadPlan, type UnloadSlot, type UnloadStep } from './unloader.ts';
+import { BOX_SLOTS, carriedBoxes, carriedSpares, isKeptBox, keepNameOf, MAX_BOX_STEPS, namedBoxesWord, placesExactly } from './boxing.ts'; // Track AV
 
 /** A container read within this many ms is not read again by a scan. */
 export const READ_FRESH_MS = 10 * 60_000;
@@ -150,6 +156,17 @@ export interface UnloadReport {
   boxes: number;
   /** Full shulker boxes emptied (`all`). */
   emptied: number;
+  /** Track AV: box steps done: `stacks` stacks of `item` boxed at chest `chest` (its name), the empty box from `from`. */
+  boxed?: { item: string; stacks: number; chest: string; from: string; took: number; rounds: number; ms: number }[];
+  /** Track AV: named (bot_loot) boxes emptied into the inventory, and how many named boxes stayed carried. */
+  emptiedNamed?: number;
+  namedKept?: number;
+  /** Track AV: the `keepBoxName` of the run (the reply's `kept 2 bot_loot boxes`). */
+  keepName?: string;
+  /** Track AV/AW: the compact runner's reply fragment (`compacted 27 raw_iron into 3 raw_iron_block`). */
+  compacted?: string;
+  /** Track AV: why items were left (a kind whose chest could not be boxed). */
+  blocked?: { item: string; chest: string; why: 'no_spare' | 'boxes_full' }[];
   chests: number;
   /** The job's own item_stack_requests (deposits and takes). */
   requests: number;
@@ -243,11 +260,24 @@ export class HomeLogistics {
   /** The inventory as the unloader sees it (with shulker box contents from the raw items). */
   slots(): UnloadSlot[] {
     const out: UnloadSlot[] = [];
+    const keep = this.keepName();
     this.d.inventory.slots.slice(0, 36).forEach((s, i) => {
       if (!s || s.count <= 0) return;
-      out.push({ slot: i, name: s.name, count: s.count, ...(isShulkerBox(s.name) ? { boxUsed: shulkerSlotsUsed(this.d.inventory.rawItem?.(0, i)) } : {}), ...(isFireworksBox(s.name, this.d.inventory.rawItem?.(0, i)) || this.d.flightBoxSlot?.() === i ? { flightKit: true } : {}) }); // Track AU: the fireworks box is kept
+      const raw = this.d.inventory.rawItem?.(0, i);
+      out.push({ slot: i, name: s.name, count: s.count, ...(isShulkerBox(s.name) ? { boxUsed: shulkerSlotsUsed(raw) } : {}), ...(isFireworksBox(s.name, raw) || this.d.flightBoxSlot?.() === i ? { flightKit: true } : {}), ...(isKeptBox(s.name, raw, keep) ? { named: true } : {}), ...(isShulkerBox(s.name) && raw === undefined ? { unknown: true } : {}) }); // Track AU: the fireworks box is kept; Track AV: named boxes
     });
     return out;
+  }
+
+  /** Track AV: the `keepBoxName` setting (bot_loot). */
+  keepName(): string {
+    return keepNameOf(this.d.settings.get('keepBoxName'));
+  }
+
+  /** Track AV: the throwaway reserve (`throwawayMin`, default 16). */
+  private reserve(): number | undefined {
+    const r = Number(this.d.settings.get('throwawayMin'));
+    return Number.isFinite(r) && r >= 0 ? r : undefined;
   }
 
   /** What the autoUnload chore looks at: unloadable stacks carried and full boxes. */
@@ -256,10 +286,17 @@ export class HomeLogistics {
   }
 
   /** The unload plan now; `reserve`: one free slot of that chest is kept (for a full box that goes back there). */
-  plan(all = false, reserve?: string): UnloadPlan {
+  plan(all = false, reserve?: string, box: { on?: boolean; skip?: ReadonlySet<string> } = {}): UnloadPlan {
     const p = this.d.position();
     const chests = planChests(this.records()).map((c) => (c.key === reserve ? { ...c, free: Math.max(0, c.free - 1) } : c));
-    return planUnload(this.slots(), chests, { all, ...(p ? { origin: p } : {}) });
+    const r = this.reserve();
+    return planUnload(this.slots(), chests, {
+      all,
+      ...(p ? { origin: p } : {}),
+      ...(r !== undefined ? { reserve: r } : {}),
+      boxing: box.on ?? true, // Track AV
+      ...(box.skip ? { noBox: box.skip } : {}),
+    });
   }
 
   private requests(): number {
@@ -327,7 +364,19 @@ export class HomeLogistics {
       if (!s || !isShulkerBox(s.name)) return;
       for (const [k, v] of Object.entries(shulkerContents(this.d.inventory.rawItem?.(view.id, i)))) inBoxes[k] = (inBoxes[k] ?? 0) + v;
     });
-    const rec: ChestRecord = Object.keys(inBoxes).length ? { ...r, inBoxes } : r;
+    // Track AV: boxes named keepBoxName are the owner's (never spares, never the box chest's load): out of the box counts
+    const keep = this.keepName();
+    let namedEmpty = 0;
+    let namedFull = 0;
+    view.slots.forEach((s, i) => {
+      if (!s || !isShulkerBox(s.name)) return;
+      const raw = this.d.inventory.rawItem?.(view.id, i);
+      if (raw !== undefined && !isKeptBox(s.name, raw, keep)) return; // a box without its wire item is no spare either
+      if (shulkerSlotsUsed(raw) > 0) namedFull += s.count;
+      else namedEmpty += s.count;
+    });
+    const r2: ChestRecord = namedEmpty + namedFull > 0 ? { ...r, boxes: { empty: Math.max(0, r.boxes.empty - namedEmpty), full: Math.max(0, r.boxes.full - namedFull) } } : r;
+    const rec: ChestRecord = Object.keys(inBoxes).length ? { ...r2, inBoxes } : r2;
     mem.set(rec);
     return rec;
   }
@@ -355,8 +404,10 @@ export class HomeLogistics {
   /** Track AS: matching items in the inventory (slots 0..35). */
   carried(item: BringItem): number {
     let n = 0;
-    this.d.inventory.slots.slice(0, 36).forEach((s) => {
-      if (s && s.count > 0 && bringMatches(item, s.name)) n += s.count;
+    // Track AV: the bot_loot boxes and the fireworks box do not count as carried boxes
+    const kept = new Set(carriedBoxes(this.d.inventory, this.keepName(), this.d.flightBoxSlot?.()).filter((b) => b.named || b.flightKit).map((b) => b.slot));
+    this.d.inventory.slots.slice(0, 36).forEach((s, i) => {
+      if (s && s.count > 0 && !kept.has(i) && bringMatches(item, s.name)) n += s.count;
     });
     return n;
   }
@@ -607,16 +658,21 @@ export class HomeLogistics {
   private async doUnload(cancelled: () => boolean, opts: { all?: boolean }): Promise<UnloadReport> {
     const t0 = this.now();
     const r0 = this.requests();
-    const rep: UnloadReport = { ok: false, moved: [], kept: [], left: [], boxes: 0, emptied: 0, chests: 0, requests: 0, shared: 0, ms: 0 };
-    const finish = (reason?: string): UnloadReport => {
-      const plan = this.plan(opts.all);
-      rep.kept = plan.kept;
+    const rep: UnloadReport = { ok: false, moved: [], kept: [], left: [], boxes: 0, emptied: 0, chests: 0, requests: 0, shared: 0, ms: 0, boxed: [], emptiedNamed: 0, namedKept: 0, blocked: [] };
+    let finish = (reason?: string): UnloadReport => {
+      const plan = this.plan(opts.all, undefined, { on: false });
+      rep.kept = plan.kept.filter((k) => k.why !== 'named_box');
+      rep.namedKept = plan.kept.filter((k) => k.why === 'named_box').reduce((a, k) => a + k.count, 0); // Track AV
+      rep.keepName = this.keepName();
       rep.left = [];
       for (const o of plan.overflow) {
         const l = rep.left.find((x) => x.name === o.name);
         if (l) l.count += o.count;
         else rep.left.push({ name: o.name, count: o.count });
       }
+      // Track AV: why a kind was left (its chest could not be boxed), from a plan with boxing on
+      const why = this.plan(opts.all, undefined, { on: true }).blocked;
+      rep.blocked = why.filter((b) => rep.left.some((l) => l.name === b.item));
       rep.ok = reason === undefined;
       if (reason) rep.reason = reason;
       rep.shared = this.requests() - r0;
@@ -628,23 +684,71 @@ export class HomeLogistics {
     if (!this.d.home()) return finish('no_home');
     if (this.records().filter((r) => r.readAt > 0).length === 0) return finish('no_chests');
     if (cancelled()) return finish('interrupted');
+    // Track AV: the named boxes holding items now; those empty at the end were emptied
+    const namedFull = () => carriedBoxes(this.d.inventory, this.keepName(), this.d.flightBoxSlot?.()).filter((b) => b.named && !b.flightKit && b.used > 0).length;
+    const fullBefore = namedFull();
+    const finishAll = finish;
+    finish = (reason?: string): UnloadReport => {
+      rep.emptiedNamed = Math.max(0, fullBefore - namedFull());
+      return finishAll(reason);
+    };
     {
       if (opts.all) {
         const r = await this.emptyFullBoxes(rep, cancelled);
         if (r) return finish(r);
       }
+      // Track AV/AW: the compact list (crafting into blocks) first, through the installed runner, if any
+      // (Track AW's runner must not re-enter HomeLogistics: this job holds its serial lock)
+      const runner = compactRunner;
+      if (runner) {
+        const list = this.plan(opts.all).compact;
+        if (list?.length) {
+          try {
+            const frag = await runner(list, cancelled);
+            if (frag) rep.compacted = frag;
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            this.log.warn(`unload: compact: ${msg}`);
+            rep.compacted = `compact failed: ${msg}`;
+          }
+          if (cancelled()) return finish('interrupted');
+        }
+      }
       const failed = new Set<string>();
-      for (let round = 0; round < 40; round++) {
-        if (cancelled()) return finish('interrupted');
-        const plan = this.plan(opts.all);
-        const targets = new Map<string, Vec3>();
-        for (const m of plan.moves) if (!failed.has(m.to)) targets.set(m.to, planChests(this.records()).find((c) => c.key === m.to)!.pos);
-        if (targets.size === 0) break;
-        const here = this.d.position() ?? centre(this.d.home()!);
-        const [next] = visitOrder([...targets].map(([key, p]) => ({ key, p })), here);
-        const r = await this.depositAt(next!.p, rep, cancelled, opts.all ?? false);
-        if (r === 'interrupted') return finish('interrupted');
-        if (r !== 'ok') failed.add(next!.key);
+      // Track AV: box steps first; a failed step's kind is planned without boxing afterwards
+      const skip = new Set<string>();
+      let steps = 0;
+      for (let pass = 0; pass < 6; pass++) {
+        for (let round = 0; round < 40; round++) {
+          if (cancelled()) return finish('interrupted');
+          const plan = this.plan(opts.all, undefined, { on: steps < MAX_BOX_STEPS, skip });
+          const step = plan.steps.find((x) => x.kind === 'box');
+          if (step?.kind === 'box') {
+            steps++;
+            const r = await this.boxStep(step, rep, cancelled);
+            if (r === 'interrupted') return finish('interrupted');
+            if (r !== 'ok') {
+              this.log.info(`unload: box ${step.item}: ${r}`);
+              skip.add(step.item);
+            }
+            continue;
+          }
+          const targets = new Map<string, Vec3>();
+          for (const m of plan.moves) if (!failed.has(m.to)) targets.set(m.to, planChests(this.records()).find((c) => c.key === m.to)!.pos);
+          if (targets.size === 0) break;
+          const here = this.d.position() ?? centre(this.d.home()!);
+          const [next] = visitOrder([...targets].map(([key, p]) => ({ key, p })), here);
+          const r = await this.depositAt(next!.p, rep, cancelled, opts.all ?? false, skip);
+          if (r === 'interrupted') return finish('interrupted');
+          if (r !== 'ok') failed.add(next!.key);
+        }
+        // Track AV: the named boxes' items next; they are unloaded in the next pass
+        const e = await this.emptyNamedBoxes(rep, cancelled);
+        if (e === 'interrupted') return finish('interrupted');
+        if (e !== 'ok') {
+          if (e !== 'none') this.log.info(`unload: emptying a ${this.keepName()} box: ${e}`);
+          break;
+        }
       }
       // overflow: spare shulker boxes from the box chest
       for (let n = 0; n < MAX_BOXES_PER_RUN; n++) {
@@ -671,14 +775,14 @@ export class HomeLogistics {
   }
 
   /** One chest trip: walk, open (refresh), plan for this chest with what it holds, deposit, refresh, close. */
-  private async depositAt(p: Vec3, rep: UnloadReport, cancelled: () => boolean, all: boolean): Promise<string> {
+  private async depositAt(p: Vec3, rep: UnloadReport, cancelled: () => boolean, all: boolean, skip?: ReadonlySet<string>): Promise<string> {
     const rec = this.d.memory().get(p);
     const v = await this.visit(p, rec?.kind ?? 'chest', cancelled);
     if (!v.ok) return v.reason;
     rep.chests++;
     try {
       const key = chestKey(p);
-      const plan = this.plan(all);
+      const plan = this.plan(all, undefined, { on: false, ...(skip ? { skip } : {}) });
       const moves = plan.moves.filter((m) => m.to === key).map((m) => ({ slot: m.slot, count: m.count, name: m.name }));
       if (moves.length === 0) return 'nothing_fits';
       const r = await this.d.skills.depositSlots(v.view, moves);
@@ -736,7 +840,7 @@ export class HomeLogistics {
     let boxSlot: number | undefined;
     let boxName: string | undefined;
     try {
-      const slot = v.view.slots.findIndex((s, i) => !!s && isShulkerBox(s.name) && shulkerSlotsUsed(this.d.inventory.rawItem?.(v.view.id, i)) === 0);
+      const slot = v.view.slots.findIndex((s, i) => !!s && isShulkerBox(s.name) && this.d.inventory.rawItem?.(v.view.id, i) !== undefined && shulkerSlotsUsed(this.d.inventory.rawItem?.(v.view.id, i)) === 0 && !isKeptBox(s.name, this.d.inventory.rawItem?.(v.view.id, i), this.keepName())); // Track AV: never a named box
       if (slot < 0) {
         this.remember(from, v.record.kind, v.view);
         return 'the box chest holds no empty box any more';
@@ -775,7 +879,7 @@ export class HomeLogistics {
         // the box chest's slot the box came from is kept for the full box; planned again after each
         // pass (the survival keeper may move a stack to the hotbar meanwhile)
         for (let pass = 0; pass < 3; pass++) {
-          const plan = this.plan(all, chestKey(from));
+          const plan = this.plan(all, chestKey(from), { on: false });
           const moves = plan.overflow.filter((x) => !isShulkerBox(x.name)).map((x) => ({ slot: x.slot, count: x.count, name: x.name }));
           if (moves.length === 0) break;
           const r = await this.d.skills.depositSlots(o.view, moves);
@@ -825,48 +929,299 @@ export class HomeLogistics {
     return list[0];
   }
 
-  /** `all`: empty the full boxes carried into the inventory (place, open, take, break, pick up). Returns a reason to stop. */
+  /** `all`: empty the full boxes carried into the inventory (place, open, take, break, pick up). Returns a reason to stop. Track AV: not the named ones (emptied anyway, kept) and not the fireworks box. */
   private async emptyFullBoxes(rep: UnloadReport, cancelled: () => boolean): Promise<string | undefined> {
     for (let n = 0; n < MAX_BOXES_PER_RUN; n++) {
       if (cancelled()) return 'interrupted';
-      const full = [...this.boxSlots()].find(([, used]) => used > 0)?.[0];
+      const full = carriedBoxes(this.d.inventory, this.keepName(), this.d.flightBoxSlot?.()).find((b) => b.used > 0 && !b.named && !b.flightKit)?.slot;
       if (full === undefined) return undefined;
       if (this.freeSlots().length < 2) return undefined; // nothing to take the items into: unload first
-      const name = this.d.inventory.slots[full]!.name;
-      if (full < 9) this.d.selectHotbar?.(full);
-      const feet = this.d.position();
-      const spots = feet ? boxSpots((q) => this.d.world.blockAt(q), feet) : [];
-      let at: Vec3 | undefined;
-      for (const p of spots.slice(0, 3)) {
-        const r = await this.d.skills.place(p, { face: 'up', item: name });
-        if (cancelled()) return 'interrupted';
-        if (r.ok) {
-          at = p;
-          break;
+      const r = await this.emptyBox(full, rep, cancelled);
+      if (r === 'interrupted') return 'interrupted';
+      if (r.startsWith('emptied')) rep.emptied++;
+      else return undefined;
+    }
+    return undefined;
+  }
+
+  // ---- Track AV: named boxes, box steps ----------------------------------------------------------
+
+  /** Empty one named (bot_loot) box holding items into the inventory: 'ok', 'none' (no such box), or why not. */
+  private async emptyNamedBoxes(rep: UnloadReport, cancelled: () => boolean): Promise<string> {
+    const box = carriedBoxes(this.d.inventory, this.keepName(), this.d.flightBoxSlot?.()).find((b) => b.named && !b.flightKit && b.used > 0);
+    if (!box) return 'none';
+    if (this.freeSlots().length < 2) return 'no free inventory slot for its items';
+    const r = await this.emptyBox(box.slot, rep, cancelled);
+    return r.startsWith('emptied') ? 'ok' : r;
+  }
+
+  /** Place the box of `slot`, take what fits into the inventory, break it, pick it up: `emptied` / `emptied partly` or why not. */
+  private async emptyBox(slot: number, rep: UnloadReport, cancelled: () => boolean): Promise<string> {
+    const s = await this.boxToHotbar(slot, cancelled);
+    if (typeof s === 'string') return s;
+    const placed = await this.placeBox(s, cancelled);
+    if ('reason' in placed) return placed.reason;
+    let left = 0;
+    const o = await this.d.skills.open(placed.at);
+    if (o.ok) {
+      try {
+        for (let i = 0; i < o.view.slots.length; i++) {
+          if (!o.view.slots[i]) continue;
+          if (!this.d.inventory.slots.slice(0, 36).some((x) => !x)) {
+            left++;
+            continue;
+          }
+          const t = await this.d.skills.take(o.view, i);
+          if (t.moved > 0) rep.requests++;
+          if (o.view.slots[i]) left++;
+          if (!t.ok && t.reason !== 'inventory_full') break;
         }
+      } finally {
+        await this.d.skills.closeContainer(o.view);
       }
-      if (!at) return undefined;
-      const o = await this.d.skills.open(at);
+    }
+    const back = await this.breakAndPickUp(placed.at, cancelled);
+    if (typeof back === 'string') return back;
+    if (!o.ok) return `open: ${o.reason}`;
+    return left > 0 ? 'emptied partly' : 'emptied';
+  }
+
+  /** The inventory slots holding a shulker box. */
+  private boxKeys(): Set<number> {
+    return new Set(this.boxSlots().keys());
+  }
+
+  /** Break the box at `at` and pick it up again (also an empty one): its new inventory slot, or why not. */
+  private async breakAndPickUp(at: Vec3, cancelled: () => boolean): Promise<number | string> {
+    const before = this.boxKeys();
+    // a box broken meanwhile (a player, a mob, an explosion): no dig, straight to the pickup
+    const b = this.d.world.blockAt(at);
+    if (b && b.name !== 'unknown' && isShulkerBox(b.name)) {
+      const dg = await this.d.skills.dig(at);
+      if (!dg.ok && dg.reason !== 'no_block') return dg.reason === 'interrupted' ? 'interrupted' : `break: ${dg.reason ?? 'failed'}`;
+    }
+    const fresh = (): number | undefined => [...this.boxKeys()].find((i) => !before.has(i));
+    for (const radius of [4, 6]) {
+      await this.d.skills.collect(radius, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
+      if (cancelled()) return 'interrupted';
+      if (fresh() !== undefined) break;
+    }
+    return fresh() ?? `the box was not picked up again (left at ${fmtPos(at)})`;
+  }
+
+  /**
+   * Place the box of `slot` next to the bot (`slot` selected when in the hotbar; `placesExactly` must hold).
+   * A different box placed (the model moved meanwhile) is broken and picked up again.
+   */
+  private async placeBox(slot: number, cancelled: () => boolean): Promise<{ at: Vec3 } | { reason: string }> {
+    const inv = this.d.inventory.slots;
+    const name = inv[slot]?.name;
+    if (!name || !isShulkerBox(name)) return { reason: `no box in slot ${slot}` };
+    if (!placesExactly(inv, slot)) return { reason: 'the box is not in the hotbar (another box of that colour would be placed)' };
+    if (slot < 9) this.d.selectHotbar?.(slot);
+    const others = new Map<number, string>();
+    inv.slice(0, 36).forEach((x, i) => {
+      if (i !== slot && x && isShulkerBox(x.name)) others.set(i, x.name);
+    });
+    const feet = this.d.position();
+    const spots = feet ? boxSpots((q) => this.d.world.blockAt(q), feet) : [];
+    let at: Vec3 | undefined;
+    for (const p of spots.slice(0, 3)) {
+      const r = await this.d.skills.place(p, { face: 'up', item: name });
+      if (cancelled()) return { reason: 'interrupted' };
+      if (r.ok) {
+        at = p;
+        break;
+      }
+    }
+    if (!at) return { reason: 'no free cell for the box next to the bot' };
+    const now = this.d.inventory.slots;
+    if ([...others].some(([i, n]) => now[i]?.name !== n)) {
+      const back = await this.breakAndPickUp(at, cancelled);
+      return { reason: back === 'interrupted' ? 'interrupted' : 'placed another box than the one wanted (picked it up again)' };
+    }
+    return { at };
+  }
+
+  /** While a window is open: move the box of `slot` (main inventory) into a free hotbar slot; its slot after that. */
+  private async hotbarWhileOpen(slot: number): Promise<number> {
+    if (slot < 9 || placesExactly(this.d.inventory.slots, slot)) return slot;
+    const c = this.d.containers;
+    if (!c?.move) return slot;
+    const empty = () => [...Array(9).keys()].find((i) => (this.d.inventory.slots[i]?.count ?? 0) <= 0);
+    if (empty() === undefined) await this.freeHotbarSlot();
+    const to = empty();
+    if (to === undefined) return slot;
+    const r = await c.move({ window: 0, slot }, { window: 0, slot: to }, 1);
+    return r.ok ? to : slot;
+  }
+
+  /** A box the place skill would not pick by itself: open the nearest known chest and move it into the hotbar meanwhile. */
+  private async boxToHotbar(slot: number, cancelled: () => boolean): Promise<number | string> {
+    if (placesExactly(this.d.inventory.slots, slot)) return slot;
+    const here = this.d.position();
+    const near = planChests(this.records()).sort((a, b) => (here ? Math.hypot(a.pos.x - here.x, a.pos.z - here.z) - Math.hypot(b.pos.x - here.x, b.pos.z - here.z) : 0))[0];
+    if (!near) return 'the box is not in the hotbar';
+    const v = await this.visit(near.pos, near.kind, cancelled);
+    if (!v.ok) return v.reason;
+    try {
+      const to = await this.hotbarWhileOpen(slot);
+      return placesExactly(this.d.inventory.slots, to) ? to : 'the box is not in the hotbar';
+    } finally {
+      await this.d.skills.closeContainer(v.view);
+    }
+  }
+
+  /** A carried spare: unnamed, empty, not the flight kit's, not the one kept for the stash step (no named box carried: the lowest slot). */
+  private carriedSpare(): number | undefined {
+    const boxes = carriedBoxes(this.d.inventory, this.keepName(), this.d.flightBoxSlot?.());
+    const spares = carriedSpares(boxes).sort((a, b) => a.slot - b.slot);
+    const usable = boxes.some((b) => b.named && !b.flightKit) ? spares : spares.slice(1);
+    return usable.at(-1)?.slot;
+  }
+
+  /** Take one empty unnamed box out of the chest at `from` into a free hotbar slot: its inventory slot, or why not. */
+  private async takeSpare(from: { pos: Vec3; kind: string }, rep: UnloadReport, cancelled: () => boolean): Promise<number | string> {
+    if (this.freeSlots().length === 0) return 'no free inventory slot for a box';
+    const v = await this.visit(from.pos, from.kind, cancelled);
+    if (!v.ok) return v.reason;
+    rep.chests++;
+    try {
+      const keep = this.keepName();
+      const raw = (i: number) => this.d.inventory.rawItem?.(v.view.id, i);
+      const slot = v.view.slots.findIndex((s, i) => !!s && isShulkerBox(s.name) && raw(i) !== undefined && shulkerSlotsUsed(raw(i)) === 0 && !isKeptBox(s.name, raw(i), keep)); // a box without its wire item is no spare
+      if (slot < 0) {
+        this.remember(from.pos, v.record.kind, v.view);
+        return 'the chest holds no empty box any more';
+      }
+      await this.freeHotbarSlot();
+      const t = await this.d.skills.take(v.view, slot, 1, [8, 7, 6, 5, 4, 3, 2, 1, 0]);
+      if (t.moved > 0) rep.requests++;
+      this.remember(from.pos, v.record.kind, v.view);
+      if (!t.ok || t.to === undefined) return `take: ${t.reason ?? 'failed'}`;
+      return t.to;
+    } finally {
+      await this.d.skills.closeContainer(v.view);
+    }
+  }
+
+  /** The (slot, count) pairs of `item` for a box: at most `stacks` slots, fullest first, the throwaway reserve held back. */
+  private boxMoves(item: string, stacks: number): { slot: number; count: number; name: string }[] {
+    const slots = this.slots();
+    const have = slots.filter((s) => s.name === item);
+    let allowed = have.reduce((a, s) => a + s.count, 0) - (reserveByKind(slots, this.reserve()).get(item) ?? 0);
+    const out: { slot: number; count: number; name: string }[] = [];
+    for (const s of [...have].sort((a, b) => b.count - a.count || a.slot - b.slot)) {
+      if (out.length >= stacks || allowed <= 0) break;
+      const n = Math.min(s.count, allowed);
+      out.push({ slot: s.slot, count: n, name: item });
+      allowed -= n;
+    }
+    return out;
+  }
+
+  /**
+   * One `box` step: a spare box (carried, else out of `step.spare`), then in rounds: at the target chest its
+   * loose stacks of the item into the inventory (as many as the box and the inventory take), the box placed
+   * next to the bot, filled with the item's stacks, broken and picked up; the full box into the chest.
+   */
+  private async boxStep(step: Extract<UnloadStep, { kind: 'box' }>, rep: UnloadReport, cancelled: () => boolean): Promise<string> {
+    const t0 = this.now();
+    const target = planChests(this.records()).find((c) => c.key === step.chest);
+    if (!target) return 'the chest is not known any more';
+    // 1. the spare box
+    let box = step.spare === 'carried' ? this.carriedSpare() : undefined;
+    let from = 'my inventory';
+    if (box === undefined) {
+      const src = planChests(this.records()).find((c) => c.key === step.spare && c.boxes.empty > 0) ?? (() => {
+        const b = this.boxChest();
+        return b ? { pos: { x: b.x, y: b.y, z: b.z }, kind: b.kind } : undefined;
+      })();
+      if (!src) return 'no spare shulker box';
+      const r = await this.takeSpare(src, rep, cancelled);
+      if (typeof r === 'string') return r;
+      box = r;
+      from = chestName(this.d.memory().get(src.pos) ?? unreadRecord(src.pos, src.kind));
+    }
+    // 2. rounds: the chest's loose stacks out, the box filled next to it
+    let took = 0;
+    let rounds = 0;
+    for (let round = 0; round < 4; round++) {
+      if (cancelled()) return 'interrupted';
+      const need = BOX_SLOTS - shulkerSlotsUsed(this.d.inventory.rawItem?.(0, box));
+      if (need <= 0) break;
+      const v = await this.visit(target.pos, target.kind, cancelled);
+      if (!v.ok) return v.reason;
+      rep.chests++;
+      const room = this.freeSlots().length;
+      let got = 0;
+      try {
+        const loose = v.view.slots
+          .map((st, i) => ({ st, i }))
+          .filter((x) => !!x.st && x.st.count > 0 && x.st.name === step.item)
+          .sort((a, b) => b.st!.count - a.st!.count || a.i - b.i);
+        for (const { i } of loose.slice(0, Math.min(need, room))) {
+          if (cancelled()) break;
+          const t = await this.d.skills.take(v.view, i);
+          if (t.moved > 0) {
+            rep.requests++;
+            got++;
+          }
+          if (!t.ok) break;
+        }
+        box = await this.hotbarWhileOpen(box);
+        this.remember(target.pos, v.record.kind, v.view);
+      } finally {
+        await this.d.skills.closeContainer(v.view);
+      }
+      took += got;
+      if (cancelled()) return 'interrupted';
+      if (this.boxMoves(step.item, need).length === 0) break;
+      const placed = await this.placeBox(box, cancelled);
+      if ('reason' in placed) return placed.reason;
+      rounds++;
+      let moved = 0;
+      const o = await this.d.skills.open(placed.at);
       if (o.ok) {
         try {
-          for (let i = 0; i < o.view.slots.length; i++) {
-            if (!this.d.inventory.slots.slice(0, 36).some((s) => !s)) break;
-            if (!o.view.slots[i]) continue;
-            const t = await this.d.skills.take(o.view, i);
-            if (t.moved > 0) rep.requests++;
-            if (!t.ok) break;
+          // planned again after each pass: the survival keeper may move a stack to the hotbar meanwhile
+          for (let pass = 0; pass < 3; pass++) {
+            const left = BOX_SLOTS - (this.d.skills.snapshot(o.view)?.stacks ?? 0);
+            const moves = left > 0 ? this.boxMoves(step.item, left) : [];
+            if (moves.length === 0) break;
+            const r = await this.d.skills.depositSlots(o.view, moves);
+            rep.requests += r.requests;
+            moved += r.total;
+            if (r.total === 0 || r.reason === 'container_full' || cancelled()) break;
           }
         } finally {
           await this.d.skills.closeContainer(o.view);
         }
       }
-      const dg = await this.d.skills.dig(at);
-      if (!dg.ok) return dg.reason === 'interrupted' ? 'interrupted' : undefined;
-      await this.d.skills.collect(4, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
-      rep.emptied++;
-      if (cancelled()) return 'interrupted';
+      const back = await this.breakAndPickUp(placed.at, cancelled);
+      if (typeof back === 'string') return back;
+      box = back;
+      if (moved === 0) return o.ok ? 'the box took nothing' : `open: ${o.reason}`;
+      // another round only when the inventory's room, not the chest, limited the take
+      if (got < room || got === 0) break;
     }
-    return undefined;
+    // 3. the full box into the chest
+    const used = shulkerSlotsUsed(this.d.inventory.rawItem?.(0, box));
+    if (used === 0) return 'the box stayed empty';
+    const w = await this.visit(target.pos, target.kind, cancelled);
+    if (!w.ok) return w.reason;
+    rep.chests++;
+    try {
+      const r = await this.d.skills.depositSlots(w.view, [{ slot: box, count: 1 }]);
+      rep.requests += r.requests;
+      const rec = this.remember(target.pos, w.record.kind, w.view);
+      if (r.total <= 0) return `storing the box: ${r.reason ?? 'failed'}`;
+      (rep.boxed ??= []).push({ item: step.item, stacks: used, chest: chestName(rec), from, took, rounds, ms: this.now() - t0 });
+      this.log.info(`unload: boxed ${used} stacks of ${step.item} (${took} out of ${chestName(rec)}, ${rounds} round${rounds === 1 ? '' : 's'}) into a shulker box from ${from}, stored in ${chestName(rec)} (${((this.now() - t0) / 1000).toFixed(1)} s)`);
+      return 'ok';
+    } finally {
+      await this.d.skills.closeContainer(w.view);
+    }
   }
 }
 
@@ -875,12 +1230,41 @@ export function unloadLine(rep: UnloadReport): string {
   if (rep.reason === 'no_home') return 'unload: no home set (!home set)';
   if (rep.reason === 'no_chests') return 'unload: I know no chest near home yet (!chests scan)';
   const moved = rep.moved.map((m) => `${m.count} ${m.name} -> ${m.to}`).join(', ');
-  const parts = [moved ? `unloaded: ${moved}` : 'unload: nothing moved'];
+  const parts = [moved ? `unloaded: ${moved}` : rep.boxed?.length ? 'unloaded: nothing loose' : 'unload: nothing moved'];
+  if (rep.compacted) parts.push(rep.compacted); // Track AV/AW
   if (rep.emptied) parts.push(`${rep.emptied} full shulker box${rep.emptied === 1 ? '' : 'es'} emptied`);
   if (rep.boxes) parts.push(`${rep.boxes} shulker box${rep.boxes === 1 ? '' : 'es'} filled and stored`);
+  // Track AV: the box steps, the named boxes
+  const groups = new Map<string, { item: string; chest: string; from: string; stacks: number; n: number }>();
+  for (const b of rep.boxed ?? []) {
+    const k = `${b.item}|${b.chest}|${b.from}`;
+    const g = groups.get(k) ?? { item: b.item, chest: b.chest, from: b.from, stacks: 0, n: 0 };
+    g.stacks += b.stacks;
+    g.n++;
+    groups.set(k, g);
+  }
+  for (const g of groups.values()) parts.push(g.n === 1 ? `boxed ${g.stacks} stacks of ${g.item} from ${g.chest} into a shulker (box from ${g.from})` : `boxed ${g.stacks} stacks of ${g.item} from ${g.chest} into ${g.n} shulkers (boxes from ${g.from})`);
+  if (rep.emptiedNamed) parts.push(`emptied ${namedBoxesWord(rep.emptiedNamed, rep.keepName)}`);
   const kept = rep.kept.map((k) => `${k.count} ${k.name}`);
+  if (rep.namedKept) kept.unshift(namedBoxesWord(rep.namedKept, rep.keepName));
   if (kept.length) parts.push(`kept ${kept.join(', ')}`);
-  if (rep.left.length) parts.push(`left ${rep.left.map((l) => `${l.count} ${l.name}`).join(', ')} (no room)`);
+  if (rep.left.length) {
+    const why = (name: string): string => {
+      const b = rep.blocked?.find((x) => x.item === name);
+      if (!b) return 'no room';
+      const at = b.chest.replace(/,/g, ' ');
+      return b.why === 'no_spare' ? `no room; chest ${at} is full and no spare shulker box is known` : `no room; chest ${at} is full of boxes`;
+    };
+    parts.push(`left ${rep.left.map((l) => `${l.count} ${l.name} (${why(l.name)})`).join(', ')}`);
+  }
   if (rep.reason && rep.reason !== 'no_home' && rep.reason !== 'no_chests') parts.push(rep.reason === 'interrupted' ? 'interrupted' : rep.reason);
-  return parts.join('; ');
+  // Track AV: a line past 256 characters (chat cuts there) says `unloaded: 14 stacks into 3 containers` instead of the list
+  const line = parts.join('; ');
+  if (line.length > 256 && moved) {
+    const stacks = rep.moved.reduce((n, m) => n + Math.ceil(m.count / maxStackOf(m.name)), 0);
+    const chests = new Set(rep.moved.map((m) => m.to)).size;
+    parts[0] = `unloaded: ${stacks} stacks into ${chests} container${chests === 1 ? '' : 's'}`;
+    return parts.join('; ');
+  }
+  return line;
 }

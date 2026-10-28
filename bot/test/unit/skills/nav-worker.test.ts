@@ -45,6 +45,8 @@ const STAIRS = [0, 1, 2, 3].map((d) => rid('oak_stairs', { weirdo_direction: d }
 const DOOR_LOW = rid('wooden_door', { upper_block_bit: 0, open_bit: 0 });
 const DOOR_UP = rid('wooden_door', { upper_block_bit: 1, open_bit: 0 });
 const LADDER = rid('ladder', { facing_direction: 3 }); // Track AJ: a ladder tower
+const TOP_SLAB = rid('smooth_stone_slab', { 'minecraft:vertical_half': 'top' }); // Track BC: a 1.5-high passage
+const BRICKS = rid('stone_bricks'); // Track BC: a built block (never dug)
 // Track BB: the shared rule set's blocks (docs/pathfinding.md "Rules"), in a strip at z 14 / 15 (x -20 .. 14)
 const RULE_STRIP: readonly (readonly [x: number, dy: number, rid: number])[] = [
   [-20, 1, rid('magma')],
@@ -96,6 +98,24 @@ function hills(x: number, y: number, z: number): number {
   // Track AJ: an 8-high stone pillar with a ladder on its south face (the only way onto its top)
   if (x === 21 && z === -31 && y > g && y <= g + 8) return STONE;
   if (x === 21 && z === -30 && y > g && y <= g + 8) return LADDER;
+  // Track BC: a flat 1.5-high passage along x -4 .. 4 at z 20 (floor -60, top slabs at -58: sneak nodes at feet -59)
+  if (z === 20 && x >= -4 && x <= 4) {
+    if (y < -60) return STONE;
+    if (y === -60) return GRASS;
+    if (y === -58) return TOP_SLAB;
+    return AIR;
+  }
+  // Track BC: a closed corridor along x -2 .. 6 at z 25 (stone walls at z 24 / 26 and x -3 / 7), flat floor -60 (feet -59),
+  // a dirt step from x 3 on (feet -58) under a dirt lintel at (2, -57): the jump up needs a head-room break
+  if (z >= 24 && z <= 26 && x >= -3 && x <= 7) {
+    if (y < -60) return STONE;
+    if (z !== 25 || x === -3 || x === 7) return y <= -55 ? STONE : AIR;
+    if (y === -60) return GRASS;
+    if (x === 3 && y === -59) return BRICKS; // the step's first block never dug (a dig-through into it would tie with the ascend)
+    if (x > 3 && y === -59) return DIRT;
+    if (x === 2 && y === -57) return DIRT;
+    return AIR;
+  }
   if (z === 14) {
     // Track BB: the rule strip (dy relative to the ground)
     const r = ruleStrip.get(`${x},${y - g}`);
@@ -448,9 +468,12 @@ describe('planner worker: a real worker thread', () => {
     const lines: string[] = [];
     let same = 0;
     let dug = 0;
-    for (let i = 0; i < 20; i++) {
-      const a = pick(2 * i, 1);
-      const b = pick(2 * i + 1, -3); // inside the stone, 3 under the grass
+    const kinds = new Set<string>();
+    for (let i = 0; i < 22; i++) {
+      // pair 20: the body under the passage's ceiling (a sneak start node), the goal on the hills beyond;
+      // pair 21: the closed corridor with the step under a lintel (an ascend with a head-room break)
+      const a = i < 20 ? pick(2 * i, 1) : i === 20 ? { x: 0, y: -59, z: 20 } : { x: 0, y: -59, z: 25 };
+      const b = i < 20 ? pick(2 * i + 1, -3) : i === 20 ? { x: 0, y: groundY(0, 30) + 1, z: 30 } : { x: 5, y: -58, z: 25 }; // inside the stone, 3 under the grass
       const allowGravityAbove = i % 2 === 0;
       const allowPlace = i % 3 !== 0;
       const spec: WorkerPlanOptions = { maxNodes: 60_000, maxMs: 20_000, allowBreak: true, allowPlace, allowOpen: true, allowGravityAbove, throwaway: allowPlace ? 64 : 0, inventory: inv };
@@ -471,10 +494,22 @@ describe('planner worker: a real worker thread', () => {
       expect(w.path.length, lines.at(-1)).toBe(t.path.length);
       expect(breaks(w), lines.at(-1)).toBe(breaks(t));
       if (w.status === 'found') same++;
+      for (const n of t.path) kinds.add(n.move + (n.act?.dig ? '+dig' : ''));
+      if (i === 20) {
+        expect(t.status, lines.at(-1)).toBe('found');
+        expect(t.path[1]!.move).toBe('sneak');
+        expect(w.path[1]!.move).toBe('sneak');
+      }
+      if (i === 21) {
+        expect(t.status, lines.at(-1)).toBe('found');
+        const up = t.path.find((n) => n.move === 'jump' && n.act?.dig);
+        expect(up?.act?.dig).toEqual([{ x: 2, y: -57, z: 25 }]);
+      }
     }
-    console.log(`[nav-worker] Track BC dig moves: ${same}/20 found, ${dug} dig cells in all\n  ${lines.join('\n  ')}`);
-    expect(same).toBeGreaterThanOrEqual(15);
+    console.log(`[nav-worker] Track BC dig moves: ${same}/22 found, ${dug} dig cells in all, kinds ${[...kinds].sort().join(' ')}\n  ${lines.join('\n  ')}`);
+    expect(same).toBeGreaterThanOrEqual(17);
     expect(dug).toBeGreaterThan(40);
+    for (const k of ['downward+dig', 'jump+dig', 'drop+dig', 'sneak']) expect([...kinds], k).toContain(k); // (dig-through: nav-baritone-helper / nav-digmoves)
     client.dispose();
   }, 120_000);
 
@@ -568,4 +603,47 @@ describe('planner worker: a real worker thread', () => {
     expect(warnings.filter((w) => w.includes('crashed'))).toHaveLength(1);
     client.dispose();
   });
+
+  it('Track AX: plans out of a chest-floored hole (a jump from feet +0.95) and from a dirt path through a door like the in-thread planner', async () => {
+    const CHEST = rid('chest', { 'minecraft:cardinal_direction': 'south' });
+    const PATH = rid('grass_path');
+    const door = (upper: number) => rid('wooden_door', { upper_block_bit: upper, open_bit: 1, 'minecraft:cardinal_direction': 'west' });
+    // flat grass (feet -60); a 1 x 1 hole at (5, 5) with a chest in cell -62; a wall at z 10 across the
+    // world (3 high) with an open door at x 5 and a dirt path in front of it at (5, -61, 9)
+    const blocks = (x: number, y: number, z: number): number => {
+      if (x === 5 && z === 5 && y === -61) return AIR;
+      if (x === 5 && z === 5 && y === -62) return CHEST;
+      if (x === 5 && z === 9 && y === -61) return PATH;
+      if (y < -61) return STONE;
+      if (y === -61) return GRASS;
+      if (z === 10 && y >= -60 && y <= -58) return x === 5 && y === -60 ? door(0) : x === 5 && y === -59 ? door(1) : STONE;
+      return AIR;
+    };
+    const F = fixtureWorld(blocks);
+    const client = new PlannerClient(F.world);
+    client.start();
+    await until(() => client.ready, 20_000);
+    const spec: WorkerPlanOptions = { maxNodes: 100_000, maxMs: 10_000, allowBreak: false, allowPlace: false, allowOpen: false };
+    const viaWorker = async (start: Vec3, goal: Vec3): Promise<PathResult> => {
+      const ws = client.search('main', start, { type: 'block', p: goal }, spec, 0);
+      let r: PathResult | undefined;
+      while (!(r = ws.step())) {
+        if (ws.failed) throw new Error('worker search failed');
+        await sleep(1);
+      }
+      return r;
+    };
+    for (const [a, b] of [
+      [{ x: 5, y: -62, z: 5 }, { x: 10, y: -60, z: 5 }],
+      [{ x: 5, y: -61, z: 9 }, { x: 5, y: -60, z: 14 }],
+      [{ x: 5, y: -60, z: 14 }, { x: 5, y: -62, z: 5 }],
+    ] as const) {
+      const t = findPath(new NavGrid(worldSource(F.world)), a, { type: 'block', p: b }, { maxNodes: 100_000, maxMs: 10_000 });
+      const w = await viaWorker(a, b);
+      expect(t.status, `${JSON.stringify(a)} -> ${JSON.stringify(b)}`).toBe('found');
+      expect(w.status).toBe('found');
+      expect(Math.abs(w.cost - t.cost)).toBeLessThanOrEqual(1e-6);
+    }
+    client.dispose();
+  }, 60_000);
 });

@@ -232,15 +232,27 @@ export function moveBody(
   const blockedH = dx !== wanted.x || dz !== wanted.z;
   const landed = dy !== wanted.y && wanted.y < 0;
   if (blockedH && (wasOnGround || landed)) {
-    let s = start;
-    const up = clipAll(boxes, s, 1, step, e);
-    s = offsetBox(s, 0, up, 0);
-    const sx = clipAll(boxes, s, 0, wanted.x, e);
-    s = offsetBox(s, sx, 0, 0);
-    const sz = clipAll(boxes, s, 2, wanted.z, e);
-    s = offsetBox(s, 0, 0, sz);
-    const down = clipAll(boxes, s, 1, -up, e);
-    if (sx * sx + sz * sz > dx * dx + dz * dz) res = { dx: sx, dy: up + down, dz: sz };
+    const lifted = (up: number): { dx: number; dy: number; dz: number } => {
+      let s = offsetBox(start, 0, up, 0);
+      const sx = clipAll(boxes, s, 0, wanted.x, e);
+      s = offsetBox(s, sx, 0, 0);
+      const sz = clipAll(boxes, s, 2, wanted.z, e);
+      s = offsetBox(s, 0, 0, sz);
+      const down = clipAll(boxes, s, 1, -up, e);
+      return { dx: sx, dy: up + down, dz: sz };
+    };
+    const better = (c: { dx: number; dz: number }) => c.dx * c.dx + c.dz * c.dz > res.dx * res.dx + res.dz * res.dz;
+    const up = clipAll(boxes, start, 1, step, e);
+    const a = lifted(up);
+    if (better(a)) res = a;
+    // Track AX: a second candidate lifted only as far as the box swept along the move fits (Java's
+    // step: the lift clipped by what is overhead ahead, e.g. a door's lintel): from a dirt path
+    // (0.0625 low) into a 2-high doorway the full 0.5625 lift puts the head into the lintel
+    const upAhead = clipAll(boxes, sweepBox(start, wanted.x, 0, wanted.z), 1, step, e);
+    if (upAhead < up - 1e-9 && upAhead > 0) {
+      const b2 = lifted(upAhead);
+      if (better(b2)) res = b2;
+    }
   }
 
   const collidedHorizontally = res.dx !== wanted.x || res.dz !== wanted.z;

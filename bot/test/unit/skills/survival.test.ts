@@ -446,6 +446,21 @@ describe('inventory keeper', () => {
     expect(log).toEqual(['open', 'close 2']);
     expect((await keeper.drop('diamond')).reason).toBe('none');
   });
+  it('Track AV: drop(name, n, skip) never drops from the skipped slots (a bot_loot box among boxes of the same name)', async () => {
+    const src = new FakeSource();
+    const loop = new TickLoop();
+    const { containers } = fakeScreen(src);
+    const inv = new FakeInv(slots36({ 1: item('undyed_shulker_box', 1), 12: item('undyed_shulker_box', 1), 20: item('undyed_shulker_box', 1) }));
+    const requests = new StackRequests({ source: src, containers, loop, runtimeId: () => 1n });
+    answerRequests(src, loop);
+    const keeper = new InventoryKeeper({ inventory: inv, requests, mover: { move: () => Promise.resolve({ ok: true }) }, settings: () => keepSettings });
+    const r = await keeper.drop('undyed_shulker_box', undefined, new Set([12]));
+    expect(r).toEqual({ ok: true, item: 'undyed_shulker_box', dropped: 2 });
+    expect(inv.slots[12]?.name).toBe('undyed_shulker_box');
+    expect(inv.slots[1]).toBeNull();
+    expect(inv.slots[20]).toBeNull();
+    expect((await keeper.drop('undyed_shulker_box', undefined, new Set([12]))).reason).toBe('none');
+  });
   it('dropWorn drops the worn armour (armor slots) and the offhand (offhand slot 1) inside the inventory screen', async () => {
     const src = new FakeSource();
     const loop = new TickLoop();

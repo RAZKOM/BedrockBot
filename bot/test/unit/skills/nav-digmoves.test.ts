@@ -115,6 +115,52 @@ describe('Track BC planner: MovementTraverse (dig-through)', () => {
   });
 });
 
+describe('Track BC planner: the goal-below gate', () => {
+  const wallAt = (gen: GenWorld, z = 10) => gen.fill({ x: -1, y: -60, z }, { x: 1, y: -58, z }, 'dirt');
+  const opts: PathOptions = { allowPlace: true, throwaway: 64 };
+
+  it('a same-level goal behind a dirt wall: dig-through, no dig-down and no staircase into the open floor (even with the blocks for a shaft)', () => {
+    const gen = lane();
+    wallAt(gen);
+    const r = plan(gen, { x: 0, y: -60, z: 2 }, { x: 0, y: -60, z: 15 }, opts);
+    expect(r.status).toBe('found');
+    expect(r.path.some((n) => n.move === 'walk' && n.act?.dig)).toBe(true);
+    expect(r.path.some((n) => n.move === 'downward')).toBe(false);
+    expect(r.path.some((n) => n.move === 'drop' && n.act?.dig)).toBe(false);
+    expect(digs(r).every((c) => c.y >= -60)).toBe(true);
+    expect(r.expanded).toBeLessThan(300);
+  });
+
+  it('a same-level goal behind a built (undiggable) wall is unreachable without blocks to pillar over it: no staircase under it', () => {
+    const gen = lane();
+    gen.fill({ x: -1, y: -60, z: 10 }, { x: 1, y: -58, z: 10 }, 'stone_bricks');
+    expect(plan(gen, { x: 0, y: -60, z: 2 }, { x: 0, y: -60, z: 15 }, { allowPlace: false }).status).toBe('none');
+    // with throwaway blocks the way is over the wall (2 pillars and a jump onto its top), still not under it
+    const over = plan(gen, { x: 0, y: -60, z: 2 }, { x: 0, y: -60, z: 15 }, opts);
+    expect(over.status).toBe('found');
+    expect(over.path.filter((n) => n.move === 'pillar').length).toBeGreaterThanOrEqual(2);
+    expect(digs(over)).toEqual([]);
+  });
+
+  it('a goal below the wall\'s far side is reached by a staircase under it', () => {
+    const gen = lane();
+    gen.fill({ x: -1, y: -60, z: 10 }, { x: 1, y: -58, z: 10 }, 'stone_bricks');
+    gen.fill({ x: -1, y: -61, z: 14 }, { x: 1, y: -61, z: 16 }, 'air'); // a 1-deep hollow behind the wall
+    const r = plan(gen, { x: 0, y: -60, z: 2 }, { x: 0, y: -61, z: 15 }, { allowPlace: false });
+    expect(r.status).toBe('found');
+    expect(r.path.some((n) => n.move === 'drop' && n.act?.dig)).toBe(true);
+    expect(digs(r).some((c) => c.z === 10 && c.y >= -60)).toBe(false);
+  });
+
+  it('an xz goal never digs down', () => {
+    const gen = lane();
+    gen.fill({ x: -1, y: -61, z: 12 }, { x: 1, y: -61, z: 20 }, 'air');
+    const r = findPath(new NavGrid(gen), { x: 0, y: -60, z: 2 }, { type: 'xz', x: 0, z: 15 }, { allowBreak: true, ...opts });
+    expect(r.status).toBe('found');
+    expect(r.path.some((n) => n.move === 'downward' || (n.move === 'drop' && n.act?.dig))).toBe(false);
+  });
+});
+
 describe('Track BC planner: MovementAscend (jump with head-room breaks)', () => {
   /** The lane's floor rises by one from z 8 on (a dirt plateau); a dirt lintel at y -58 over z 6 .. 8 blocks the plain jump's head room. */
   function plateau(): GenWorld {
@@ -142,6 +188,19 @@ describe('Track BC planner: MovementAscend (jump with head-room breaks)', () => 
     expect(off.cost).toBeGreaterThanOrEqual(r.cost - 1e-6);
     // a goal that is not below the start plans no staircase down into the open floor: the search stays small
     expect(r.expanded).toBeLessThan(400);
+  });
+
+  it('the jump exists but for the start\'s head room alone (a lintel over the approach only): an ascend with one break', () => {
+    const gen = lane();
+    gen.fill({ x: -1, y: -60, z: 8 }, { x: 1, y: -60, z: 20 }, 'dirt'); // the plateau
+    gen.fill({ x: -1, y: -60, z: 8 }, { x: 1, y: -60, z: 8 }, 'stone_bricks'); // its first row undiggable (a dig-through into it + a plain jump would tie)
+    gen.fill({ x: -1, y: -58, z: 7 }, { x: 1, y: -58, z: 7 }, 'dirt'); // the lintel over the approach cell only
+    const r = plan(gen, { x: 0, y: -60, z: 2 }, { x: 0, y: -59, z: 15 });
+    expect(r.status).toBe('found');
+    const jump = r.path.find((n) => n.move === 'jump' && n.act?.dig);
+    expect(jump).toBeDefined();
+    expect(jump!.act!.dig!.map(key)).toEqual([key({ x: jump!.x, y: -58, z: 7 })]);
+    expect(r.path.some((n) => n.move === 'downward' || (n.move === 'drop' && n.act?.dig))).toBe(false); // a goal above: no digging down
   });
 
   it('refuses a head-room break under a gravity block, with or without allowGravityAbove (Baritone: it would fall on us)', () => {
@@ -428,6 +487,21 @@ describe('Track BC follower: the moves that dig, closed loop', () => {
     expect(rep.stuck).toBe(0);
     expect(rep.actions.dig).toBe(0);
     expect(run.pos.z).toBeGreaterThan(16);
+  });
+
+  it('sneak-through: a goto that starts mid-passage (the body under the ceiling) plans from its sneak node and gets out', async () => {
+    const gen = lane();
+    gen.fill({ x: -1, y: -59, z: 6 }, { x: 1, y: -59, z: 12 }, 'smooth_stone_slab', { 'minecraft:vertical_half': 'top' });
+    const run = await drive(gen, { x: 0.5, y: -60, z: 9.5 }, { type: 'block', p: { x: 0, y: -60, z: 16 } }, { goto: { allowBreak: false } });
+    expect(run.result, run.log.join('\n')).toEqual({ ok: true });
+    const rep = run.skills.status().lastGoto!;
+    expect(rep.plans[0]!.status).toBe('found');
+    expect(rep.sneakTicks ?? 0).toBeGreaterThan(10);
+    expect(run.pos.z).toBeGreaterThan(16);
+    // a goal under the ceiling is accepted and reached sneaking
+    const inside = await drive(gen, { x: 0.5, y: -60, z: 2.5 }, { type: 'block', p: { x: 0, y: -60, z: 9 } }, { goto: { allowBreak: false } });
+    expect(inside.result, inside.log.join('\n')).toEqual({ ok: true });
+    expect(Math.floor(inside.pos.z)).toBe(9);
   });
 
   it('budgets: a dig-heavy goto (a goal inside a dirt block, sliced searches with the worker-sized budget) keeps every navigator tick under 100 ms', async () => {

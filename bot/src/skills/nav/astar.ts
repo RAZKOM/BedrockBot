@@ -585,20 +585,22 @@ export class PathSearch {
       const nx = cx + dx;
       const nz = cz + dz;
       const axis: 0 | 2 = dx !== 0 ? 0 : 2;
-      // Same cell level or one up: walking, auto-steps (slabs), jumps.
+      // Same cell level or one up: walking, auto-steps (slabs), jumps. Track AX: from a partial floor
+      // high in its cell (a chest 0.95, a dirt path 0.9375: feet above cy + 0.75) a jump reaches the
+      // floor two cells up (a full block in cy + 1), and a doorway one cell up is a step.
       let took = false;
       let levelBlocked = false;
-      for (let ny = cy; ny <= cy + 1 && !took; ny++) {
+      const topNy = Math.floor(f0 + MAX_JUMP_RISE + 1e-6); // Track AX: cy + 1 on a full block or a slab
+      for (let ny = cy; ny <= topNy && !took; ny++) {
         const f1 = grid.stand(nx, ny, nz);
         if (f1 === undefined) {
           this.sawUnknown = true;
           continue;
         }
         if (Number.isNaN(f1)) {
-          if (ny === cy) {
-            levelBlocked = true;
-            if (this.doorway(cur, cx, cy, cz, f0, nx, nz, axis)) took = true;
-          }
+          if (ny === cy) levelBlocked = true;
+          // Track AX: a doorway at the feet level, or one cell up from a partial floor (a step of <= 0.5625)
+          if ((ny === cy || (ny === cy + 1 && !flat)) && this.doorway(cur, cx, cy, cz, f0, nx, ny, nz, axis)) took = true;
           continue;
         }
         const rise = f1 - f0;
@@ -621,6 +623,7 @@ export class PathSearch {
               if (this.stepsUp(f0, nx, ny, nz, f1, dx, dz)) this.relax(cur, nx, ny, nz, f1, costs.walk + costs.stairs, M_WALK);
               else this.relax(cur, nx, ny, nz, f1, costs.jump, M_JUMP);
             } else if (room === undefined) this.sawUnknown = true;
+            else if (ny === cy + 1) digFlags[di] = digFlags[di]! | 4; // Track BC: the jump exists but for the start's head room: an ascend with breaks
           }
           took = true;
         } else {
@@ -628,13 +631,19 @@ export class PathSearch {
         }
       }
       if (levelBlocked) {
-        digFlags[di] = 1; // Track BC: the dig moves run after this loop
+        digFlags[di] = digFlags[di]! | 1; // Track BC: the dig moves run after this loop (bit 4 may be set already)
         // Track BC: into a cell the body only fits sneaking (a low ceiling): a sneak move
         if (flat && !inPassage && this.moveOn('sneak')) {
           const fits = sneakFits(grid, nx, cy, nz);
           if (fits === undefined) this.sawUnknown = true;
           else if (fits && this.ladderPass(cx, cy, cz, nx, nz, dx, dz, false)) this.relax(cur, nx, cy, nz, cy, costs.sneakWalk, M_SNEAK, 0, 0, undefined, F_SNEAK);
         }
+      }
+      if (inPassage && !took) {
+        // Track AX: out of a doorway onto a floor a step lower in the cell below (a dirt path, farmland)
+        const f1 = grid.stand(nx, cy - 1, nz);
+        if (f1 === undefined) this.sawUnknown = true;
+        else if (isFeet(f1) && f0 - f1 <= STEP && this.crossOut(cx, cy, cz, f0, axis)) this.relax(cur, nx, cy - 1, nz, f1, costs.walk, M_WALK);
       }
       if (took || inPassage) continue;
       // Track AJ: into water at the feet level, onto a ladder from its side
@@ -792,9 +801,10 @@ export class PathSearch {
   /**
    * From a node standing on a full block at cell level cy: per cardinal direction the dig-through walk when
    * the same level is blocked (MovementTraverse), the jump with head-room breaks when the node one up is
-   * blocked (MovementAscend), the step down with breaks when no move one level down was taken
-   * (MovementDescend); and the dig-down move in the node's own column (MovementDownward, shaft rules).
-   * Doorway nodes only take the traverse along their axis (as plain walks do).
+   * blocked or the plain jump failed only for the start's head room (MovementAscend), the step down with
+   * breaks when no move one level down was taken (MovementDescend); and the dig-down move in the node's own
+   * column (MovementDownward, shaft rules). A doorway node takes the traverse in every direction like a plain
+   * walk out of it, and none of the other moves.
    */
   private digMoves(cur: number, cx: number, cy: number, cz: number, inPassage: boolean): void {
     const b = this.breaks!;
@@ -812,7 +822,7 @@ export class PathSearch {
         if (t) this.relax(cur, nx, cy, nz, cy, t.base, M_WALK, t.extra, 0, { dig: t.dig });
       }
       if (inPassage) continue;
-      if (blocked && this.moveOn('digAscend') && Number.isNaN(grid.stand(nx, cy + 1, nz)) && this.ladderPass(cx, cy, cz, nx, nz, dx, dz, true)) {
+      if (this.moveOn('digAscend') && ((blocked && Number.isNaN(grid.stand(nx, cy + 1, nz))) || (flags[di]! & 4) !== 0) && this.ladderPass(cx, cy, cz, nx, nz, dx, dz, true)) {
         const a = ascend(b, cx, cy, cz, nx, nz);
         this.takeUnknown();
         if (a) this.relax(cur, nx, cy + 1, nz, cy + 1, a.base, M_JUMP, a.extra, 0, { dig: a.dig });
@@ -1092,18 +1102,23 @@ export class PathSearch {
     return true;
   }
 
-  /** A cardinal walk into (or through) a door / gate cell at the same level. Returns true when it was one. */
-  private doorway(cur: number, cx: number, cy: number, cz: number, f0: number, nx: number, nz: number, axis: 0 | 2): boolean {
+  /**
+   * A cardinal walk into (or through) a door / gate cell (node level `ny`: the feet level, or one cell
+   * up from a partial floor, Track AX) within a step of the feet. Returns true when it was one.
+   */
+  private doorway(cur: number, cx: number, cy: number, cz: number, f0: number, nx: number, ny: number, nz: number, axis: 0 | 2): boolean {
     const grid = this.grid;
-    const f1 = grid.standThrough(nx, cy, nz);
+    const f1 = grid.standThrough(nx, ny, nz);
     if (!isFeet(f1) || Math.abs(f1 - f0) > STEP) return false;
-    if (!grid.hasPassage(nx, cy, f1, nz)) return false;
+    if (!grid.hasPassage(nx, ny, f1, nz)) return false;
     const use: Vec3[] = [];
     const cells: [number, number, number, number][] = [];
+    // Track AX: the body's cells from its feet up; a partial floor in the node's own cell (a dirt path
+    // in front of the door, a carpet) is under the feet, not in the corridor
     const topA = Math.floor(f0 + PHYSICS.height - 1e-6);
-    for (let y = cy; y <= topA; y++) cells.push([cx, y, cz, 0]);
+    for (let y = f0 > cy + FLAT ? cy + 1 : cy; y <= topA; y++) cells.push([cx, y, cz, 0]);
     const topB = Math.floor(f1 + PHYSICS.height - 1e-6);
-    for (let y = cy; y <= topB; y++) cells.push([nx, y, nz, 1]);
+    for (let y = f1 > ny + FLAT ? ny + 1 : ny; y <= topB; y++) cells.push([nx, y, nz, 1]);
     for (const [x, y, z] of cells) {
       const c = grid.crossing(x, y, z, axis);
       if (c === undefined) {
@@ -1118,7 +1133,7 @@ export class PathSearch {
         if (!use.some((u) => u.x === base.x && u.y === base.y && u.z === base.z)) use.push(base);
       }
     }
-    this.relax(cur, nx, cy, nz, f1, this.costs.walk, M_WALK, use.length * this.costs.door, 0, use.length ? { use } : undefined, F_PASSAGE);
+    this.relax(cur, nx, ny, nz, f1, this.costs.walk, M_WALK, use.length * this.costs.door, 0, use.length ? { use } : undefined, F_PASSAGE);
     return true;
   }
 
@@ -1126,8 +1141,8 @@ export class PathSearch {
 
 /**
  * Track BC: the lowest y among a goal's points: block / near / getToBlock (the block's y), yLevel, the
- * members of an `any`; -Infinity for a goal without one (xz: dig down wherever it helps); +Infinity for
- * surface and runAway (never dig down to flee or to get out).
+ * members of an `any`; +Infinity for goals without one (xz, surface, runAway: never dig down for a column,
+ * to flee or to get out).
  */
 function goalMinY(goal: NavGoal): number {
   switch (goal.type) {
@@ -1143,7 +1158,7 @@ function goalMinY(goal: NavGoal): number {
       return m;
     }
     case 'xz':
-      return -Infinity;
+      return Infinity; // a column, any height: never dig down for it (a bold `goto x z` would evaluate staircases at every node)
     default:
       return Infinity;
   }
@@ -1199,5 +1214,48 @@ export function locateNode(grid: NavGrid, pos: { x: number; y: number; z: number
       }
     }
   }
+  // Track BC: a body under a low ceiling (not in a standable cell) is in a sneak node: its own cell, sneaking
+  if (bestD > 1e-9 && Math.abs(pos.y - y0) < 0.6 && sneakFits(grid, bx, y0, bz) === true) return { x: bx, y: y0, z: bz, feet: y0 };
   return bestD < 0.75 ? bestNode : undefined;
+}
+
+/**
+ * Track AX: one line on what the cardinal moves out of a standing node find, for the "why" of a plan
+ * that expanded nothing but its start: per direction the cells from one below to two above the node's
+ * level (`blocked (<block in it>)`, `doorway`, `unloaded`, or the feet height with the rise and, for a
+ * jump, the head room above the start), e.g. `+x: -61 blocked (dirt), -60 feet -60 rise 1.50 > 1.25`.
+ */
+export function explainStart(grid: NavGrid, n: LocatedNode): string {
+  const head = Math.floor(n.feet + PHYSICS.height - 1e-6);
+  const fmt = (v: number) => String(+v.toFixed(4));
+  const labels = ['+x', '-x', '+z', '-z'];
+  const parts: string[] = [];
+  CARDINAL.forEach(([dx, dz], i) => {
+    const nx = n.x + dx;
+    const nz = n.z + dz;
+    const cells: string[] = [];
+    for (let ny = n.y - 1; ny <= n.y + 2; ny++) {
+      const f = grid.stand(nx, ny, nz);
+      if (f === undefined) {
+        cells.push(`${ny} unloaded`);
+        continue;
+      }
+      if (Number.isNaN(f)) {
+        const t = grid.standThrough(nx, ny, nz);
+        cells.push(isFeet(t) ? `${ny} doorway feet ${fmt(t)}` : `${ny} blocked (${grid.cls(nx, ny, nz)?.name ?? 'unloaded'})`);
+        continue;
+      }
+      const rise = f - n.feet;
+      let note = rise >= 0 ? ` rise ${rise.toFixed(2)}` : ` fall ${(-rise).toFixed(2)}`;
+      if (rise > MAX_JUMP_RISE + 1e-6) note += ` > ${MAX_JUMP_RISE}`;
+      else if (rise > STEP) {
+        const apex = Math.floor(f + PHYSICS.height - 1e-6);
+        const room = apex > head ? grid.freeColumn(n.x, head + 1, apex, n.z) : true;
+        note += room === true ? ' (jump)' : ` (no head room in ${head + 1}..${apex})`;
+      }
+      cells.push(`${ny} feet ${fmt(f)}${note}`);
+    }
+    parts.push(`${labels[i]}: ${cells.join(', ')}`);
+  });
+  return `start ${n.x},${n.y},${n.z} feet ${fmt(n.feet)}: ${parts.join('; ')}`;
 }

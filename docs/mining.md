@@ -53,7 +53,9 @@ target; several kinds with quotas in one trip (`!mine iron_ore 8 coal_ore 16`, `
 
 `!mine` adds a `MineProcess` (user priority 40) to the afk task's ProcessManager: guard / flee / night
 / a newer command pre-empt it (`MineTask.pause()`: the running goto / dig is cancelled at once; an
-interrupted dig is not counted as a failure), it resumes with a fresh scan, `!pause` / `!resume` hold
+interrupted dig is not counted as a failure), it resumes with a fresh scan (a pre-emption during a
+drop sweep or the end-of-job pickup goes back to the loop's wait, never out of `run()`: Realm
+2026-10-30 the job was lost silently and the guard walked the bot home), `!pause` / `!resume` hold
 and release it, `!stop` and `!mine stop` end it, `!status` lists it (`mine coal_ore 3/8 (dig, 1
 skipped), eta 40 s`). It ends by itself (n mined, none left, low health, no pickaxe) and is dropped at
 a death. The afk task's Hotbar and Containers are shared (no second Containers); `mineTunnelLen` and
@@ -398,6 +400,7 @@ right behind it; 4 coal ores buried two blocks deep; the bot starts outside with
 | Test | What |
 |---|---|
 | `bot/test/unit/skills/mine.test.ts` | exposure (walls, two-deep, behind water), memory updates (digging exposes, mining forgets), targets order, line of sight and the blocker, names, the loop with fake skills: nearest first, lava skipped, buried ignored, done / low_health / no_pickaxe, blacklist after 3 failures, tunnel cap, sight digs, stop |
+| `bot/test/e2e/gaunt-mine.test.ts` (bds-gaunt) | `!mine sand 32` on 12 2 x 2 sand patches, guard on, home 90 blocks away: a zombie summoned at the loop's drop sweep pre-empts it, the job resumes and ends `done` 32/32 with no home return (twice); the unfixed code ended `paused after 8/32` and walked home |
 | `bot/test/e2e/mine-cave.test.ts` | the cave above (`mineSeenOnly` on), and `!mine` / `!mine stop` through the real chat commands from the server console; Track Z: the unreachable skip and the buried-ore case with `mineSeenOnly` on / off |
 | `bot/test/unit/skills/mine.test.ts` (Track Z) | buried ore targeted with `mineSeenOnly` off, one plan without progress = unreachable for the session and on the blacklist, a goto without segments, pause / resume, records persisted and recalled, `scanMarks` |
 | `bot/test/e2e/mine-memory.test.ts` (Track Z, bds-dig) | ore seen in run 1 mined by a new CLI process from memory (see "Ore memory across restarts"); env `DIG_BDS_HOST` / `DIG_BDS_PORT` / `DIG_BDS_CONTAINER`, `MINE_VERBOSE=1` (the CLI's output) |

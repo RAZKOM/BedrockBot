@@ -213,8 +213,8 @@ export function traverse(ctx: BreakMoveContext, x: number, y: number, z: number,
  * Baritone MovementAscend.cost (the "no placement" branch): from feet cell (x, y, z) standing on a full
  * block up into (nx, y + 1, nz) whose floor (nx, y, nz) is a full block, breaking the head room above the
  * start (x, y + 2, z), the target's feet cell (nx, y + 1, nz) and the cell above it (nx, y + 2, nz) (the
- * falling stack above that one counted). Refused when a falling block sits over a head-room cell that must
- * be broken (Baritone: "it would fall on us and possibly suffocate us"), whatever `allowGravityAbove` says.
+ * falling stack above that one counted). Refused whenever a falling block sits 3 above the start (Baritone:
+ * "it would fall on us and possibly suffocate us"), head room broken or not, whatever `allowGravityAbove` says.
  * Baritone never ascends from a bottom slab onto a full block: our start stands on a full block (the
  * planner's measured stairs and slab walks, decision 0022, handle the partial floors). Undefined when
  * nothing needs breaking (the plain jump) or a cell is refused.
@@ -226,15 +226,15 @@ export function ascend(ctx: BreakMoveContext, x: number, y: number, z: number, n
   const top = needsDig(ctx, nx, y + 2, nz);
   if (head === undefined || feet === undefined || top === undefined) return undefined;
   if (!head && !feet && !top) return undefined;
-  if (head) {
-    // Baritone MovementAscend: a FallingBlock at src.up(3) over the head room we break would fall on us
-    const over = ctx.grid.cls(x, y + 3, z);
-    if (!over) {
-      ctx.unknown = true;
-      return undefined;
-    }
-    if (over.gravity) return undefined;
+  // Baritone MovementAscend: a FallingBlock at src.up(3) "would fall on us and possibly suffocate us": refused
+  // whenever it is there (Baritone's condition `canWalkThrough(src.up(1)) || !(srcUp2 is falling)` always holds
+  // here, the body's head cell being free), broken head room or not
+  const over = ctx.grid.cls(x, y + 3, z);
+  if (!over) {
+    ctx.unknown = true;
+    return undefined;
   }
+  if (over.gravity) return undefined;
   const floors = ctx.floors2;
   setFloor(floors[0], x, y - 1, z);
   setFloor(floors[1], nx, y, nz);
