@@ -26,6 +26,7 @@ import { breakTicks as tableBreakTicks } from '../dig/breakTime.ts';
 import { PHYSICS } from '../input/physics.ts';
 import { halfTop, type TerrainClass } from '../terrain/classify.ts';
 import { breakBlocker, type BreakRules, type NavBlockFace } from './actions.ts';
+import { BestSoFar, FAILURE_NODES_FACTOR } from './baritone/bestSoFar.ts'; // Track BA: partial-path selection (ported, LGPL-3.0)
 import { DEFAULT_COSTS, dropCost, type PathCosts } from './costs.ts';
 import { goalTest, type NavGoal, type GoalTest } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
 import { CROSS_BLOCKED, CROSS_TOGGLE, VARIETY_CLIMBER, VARIETY_LADDER, VARIETY_WATER, cellKey, type NavGrid } from './grid.ts';
@@ -79,7 +80,10 @@ export interface PathOptions {
   /** Track AJ: movement-variety moves (default: all on). */
   moves?: MoveSet;
   costs?: Partial<PathCosts>;
-  /** Give up after expanding this many nodes and return the best partial path. Default 40 000. */
+  /**
+   * Give up after expanding this many nodes and return the best partial path. Default 40 000. Track
+   * BA: up to 4 x this while no partial end 5+ blocks from the start is known (baritone/bestSoFar.ts).
+   */
   maxNodes?: number;
   /** Search-time budget in ms (summed over slices; checked every 64 expansions). Default 250. */
   maxMs?: number;
@@ -106,7 +110,8 @@ export interface PathOptions {
 export interface PathResult {
   /**
    * found: ends at the goal. partial: ends at the best node towards the goal (search limit hit, or
-   * the search touched unloaded world). none: the goal cannot be reached from the start
+   * the search touched unloaded world; Track BA: the first of Baritone's coefficient bests 5+ blocks
+   * from the start, else the start alone with reason `no_progress`). none: the goal cannot be reached from the start
    * (exhaustive), or the start is not standable.
    */
   status: 'found' | 'partial' | 'none';
@@ -121,6 +126,12 @@ export interface PathResult {
   unknown: boolean;
   /** The search stopped at maxNodes / maxMs. */
   limited: boolean;
+  /**
+   * Track BA: `no_progress`: a partial search whose bests (baritone/bestSoFar.ts) are all within
+   * MIN_DIST_PATH (5 blocks) of the start: the path is the start node alone (a failed plan, not a
+   * path to follow).
+   */
+  reason?: 'no_progress';
 }
 
 /** Highest feet rise a jump can take (apex of a standing jump is 1.2522). */
@@ -282,8 +293,10 @@ export class PathSearch {
   private readonly nodes = new Nodes();
   private readonly index = new Map<number, number>();
   private readonly open = new Heap();
-  private best = -1;
-  private bestScore = Infinity;
+  /** Track BA: the partial-path ends (Baritone's 7 coefficient bests, baritone/bestSoFar.ts). */
+  private readonly bests = new BestSoFar();
+  /** Track BA: the start node's index (the path of a `no_progress` result). */
+  private startNode = -1;
   private found = -1;
   private expanded = 0;
   private limited = false;
@@ -334,11 +347,12 @@ export class PathSearch {
       return;
     }
     const s = this.nodes.add(start.x, start.y, start.z, startFeet);
+    this.startNode = s; // Track BA
     this.nodes.g[s] = 0;
     this.nodes.flags[s] = flags;
     this.index.set(cellKey(start.x, start.y, start.z), s);
     this.open.push(s, this.h(start.x, start.y, start.z));
-    this.best = s;
+    this.bests.reset(s, start.x, start.y, start.z, this.h(start.x, start.y, start.z)); // Track BA
     this.ms = performance.now() - t0;
   }
 
@@ -398,12 +412,10 @@ export class PathSearch {
         this.found = cur;
         break;
       }
-      const score = this.h(cx, cy, cz) + nodes.trap[cur]!;
-      if (score < this.bestScore || (score === this.bestScore && nodes.g[cur]! < nodes.g[this.best]!)) {
-        this.bestScore = score;
-        this.best = cur;
-      }
-      if (++this.expanded >= this.maxNodes) {
+      // Track BA: h + g / k + trap for Baritone's 7 coefficients (was: the lowest h + trap)
+      this.bests.consider(cur, cx, cy, cz, this.h(cx, cy, cz), nodes.g[cur]!, nodes.trap[cur]!);
+      // Track BA: while no best is 5+ blocks from the start (Baritone `failing`), on up to 4 x maxNodes
+      if (++this.expanded >= this.maxNodes && (!this.bests.failing || this.expanded >= this.maxNodes * FAILURE_NODES_FACTOR)) {
         this.limited = true;
         break;
       }
@@ -435,7 +447,10 @@ export class PathSearch {
 
   private build(interim: boolean): PathResult {
     const nodes = this.nodes;
-    const end = this.found >= 0 ? this.found : this.best;
+    // Track BA: a partial path ends at the first coefficient best 5+ blocks from the start; with none,
+    // the start alone (reason no_progress)
+    const best = this.found >= 0 ? this.found : this.bests.best();
+    const end = best >= 0 ? best : this.startNode;
     const path: PathNode[] = [];
     for (let i = end; i >= 0; i = nodes.parent[i]!) {
       const node: PathNode = { x: nodes.x[i]!, y: nodes.y[i]!, z: nodes.z[i]!, feet: nodes.feet[i]!, move: MOVE_CODES[nodes.move[i]!]!, cost: nodes.mc[i]! };
@@ -451,7 +466,9 @@ export class PathSearch {
     delete path[0]!.act;
     delete path[0]!.gap;
     const status = this.found >= 0 ? 'found' : interim || this.limited || this.sawUnknown ? 'partial' : 'none';
-    return { status, path, cost: nodes.g[end]!, expanded: this.expanded, ms: this.ms, unknown: this.sawUnknown, limited: interim || this.limited };
+    const res: PathResult = { status, path, cost: nodes.g[end]!, expanded: this.expanded, ms: this.ms, unknown: this.sawUnknown, limited: interim || this.limited };
+    if (status === 'partial' && best < 0) res.reason = 'no_progress'; // Track BA
+    return res;
   }
 
   private relax(from: number, x: number, y: number, z: number, feet: number, base: number, move: number, extra = 0, trap = 0, act?: NodeActions, flags = 0): void {

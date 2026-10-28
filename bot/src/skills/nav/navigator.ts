@@ -1032,7 +1032,8 @@ export class Navigator {
       }
       // the closest reachable node is where we stand: nothing to do but wait for the world to change
       const lim = `${res.limited ? ', search limit hit' : ''}${res.unknown ? ', touched unloaded world' : ''}`;
-      if (this.fail(a, `no progress possible (no node closer to the goal than the start; ${res.expanded} expanded${lim})`)) return false;
+      const what = res.reason === 'no_progress' ? 'no partial end 5+ blocks from the start' : 'no node closer to the goal than the start'; // Track BA
+      if (this.fail(a, `no progress possible (${what}; ${res.expanded} expanded${lim})`)) return false;
       a.replan = 'retry';
       a.waitUntil = a.t + 20;
       return false;
