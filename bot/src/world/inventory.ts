@@ -213,3 +213,15 @@ export class Inventory {
     for (const fn of [...this.changeFns]) fn(window, slot);
   }
 }
+
+/**
+ * Track AV: the custom name of an item (an anvil or a script's `nameTag`), from the raw wire item's NBT:
+ * `extra.nbt.nbt.value.display.value.Name.value` (a string; colour codes such as `§6` are kept).
+ * Verified on BDS 1.26.60 (bds-home, a box named by truth:nameinv): an unnamed box has `has_nbt: 0`; a
+ * named empty one `{display: {Name: 'bot_loot'}}`; a named full one has `Items` and `display` side by side
+ * (naming keeps the contents). Undefined without a name.
+ */
+export function itemDisplayName(raw: unknown): string | undefined {
+  const v = (raw as { extra?: { nbt?: { nbt?: { value?: { display?: { value?: { Name?: { value?: unknown } } } } } } } } | undefined)?.extra?.nbt?.nbt?.value?.display?.value?.Name?.value;
+  return typeof v === 'string' ? v : undefined;
+}

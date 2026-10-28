@@ -194,10 +194,10 @@ export class InventoryKeeper {
     return r;
   }
 
-  /** Drop up to `n` (default all) of `name` from the inventory. */
-  async drop(name: string, n = Infinity): Promise<DropResult> {
+  /** Drop up to `n` (default all) of `name` from the inventory; never from the slots in `skip` (Track AV: the named boxes, the flight kit). */
+  async drop(name: string, n = Infinity, skip?: ReadonlySet<number>): Promise<DropResult> {
     const item = bare(name);
-    const have = this.d.inventory.slots.reduce((a, s) => a + (s?.name === item ? s.count : 0), 0);
+    const have = this.d.inventory.slots.reduce((a, s, i) => a + (s?.name === item && !skip?.has(i) ? s.count : 0), 0);
     if (have === 0) return { ok: false, item, dropped: 0, reason: 'none' };
     if (this.running) return { ok: false, item, dropped: 0, reason: 'busy' };
     this.running = true;
@@ -208,7 +208,7 @@ export class InventoryKeeper {
         // main inventory first, smallest stacks first (keep the hotbar stocked)
         const order = this.d.inventory.slots
           .map((s, i) => ({ s, i }))
-          .filter((x) => x.s?.name === item)
+          .filter((x) => x.s?.name === item && !skip?.has(x.i))
           .sort((a, b) => Number(a.i < 9) - Number(b.i < 9) || a.s!.count - b.s!.count);
         for (const { i } of order) {
           if (left <= 0) break;
