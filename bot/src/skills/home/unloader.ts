@@ -66,6 +66,23 @@ export interface UnloadPlan {
   fullBoxes: number[];
   /** The chest that holds the most shulker boxes (where boxes go and come from), if any. */
   boxChest: string | undefined;
+  /** Track AW: kinds to compact 9 -> 1 into blocks (skills/craft/compact.ts) before the moves, when their chest fills up or overflows; `count` = items. */
+  compact?: { kind: string; count: number }[];
+}
+
+/** Track AW: fills `UnloadPlan.compact` (installed by skills/craft/compact.ts `installCompactPlanner`); undefined = no compaction step. */
+export let compactPlanner: ((slots: readonly UnloadSlot[], plan: UnloadPlan, chests: readonly PlanChest[]) => { kind: string; count: number }[]) | undefined;
+export function setCompactPlanner(fn: typeof compactPlanner): void {
+  compactPlanner = fn;
+}
+/**
+ * Track AW: runs the plan's `compact` steps (crafts the blocks; installed by chat/commands-craft.ts, reset when the task
+ * stops). The unload job (logistics.ts doUnload, under its serial lock) calls it before the moves when installed and gets
+ * the reply fragment back (`compacted 27 raw_iron into 3 raw_iron_block`), or undefined when nothing was compacted.
+ */
+export let compactRunner: ((steps: readonly { kind: string; count: number }[], cancelled: () => boolean) => Promise<string | undefined>) | undefined;
+export function setCompactRunner(fn: typeof compactRunner): void {
+  compactRunner = fn;
 }
 
 export interface PlanOptions {
@@ -231,6 +248,8 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
       left -= n;
     }
   }
+  const compact = compactPlanner?.(slots, plan, chests); // Track AW: the compaction step
+  if (compact?.length) plan.compact = compact;
   return plan;
 }
 

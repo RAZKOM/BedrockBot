@@ -250,11 +250,15 @@ bot is idle (the shield controller, [pve.md](pve.md) "Shield"); a totem stays.
 
 ### Not from the panel, and why
 
-- **Crafting**: needs the recipe list (`crafting_data`), for 3 x 3 recipes a crafting table opened
-  like a chest (`container_open` `workbench`), and an `item_stack_request` with `craft_recipe`,
-  `results_deprecated`, a `consume` per ingredient and a `place` from `created_output`; the bot has no
-  crafting skill yet. It belongs to a skills track as `!craft <item> [n]`; the panel would then offer
-  Craft... on an item. Decision 0039 has the details.
+- **Crafting** is possible now (wave 11 Track AW, [crafting.md](crafting.md), decision 0045): `!craft
+  <item> [n]` crafts through the normal screens (the inventory's 2 x 2 grid, or a crafting table the
+  bot finds, places or makes) and `!compact [kind]` turns raw metals, ingots, gems, coal, redstone and
+  lapis into storage blocks; `!unload` compacts by itself when a chest cannot take the load. The
+  panel can offer it like every other action, as a chat command through `POST /api/cmd`: a `Craft...`
+  entry on an inventory cell (`RecipeIndex.byOutput` on the task's `craftControlOf(task)` lists what
+  the item makes, `canCraft` what the bot can make now with the shortfall for the label) sending
+  `!craft <item> <n>`, and a `Compact` quick button sending `!compact`. Not built in this track: the
+  menu entry itself (panel code is Track AR's).
 - Taking off one worn armour piece, mining a clicked spot, build markers: no command does it.
 - Moving stacks around (hotbar drag): no `!move` command; not needed for any action above.
 
