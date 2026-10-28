@@ -276,6 +276,6 @@ describe('closed loop: stairs without jumping', () => {
     const r = await run(fakeWorld(gen), { x: 0.5, y: -60, z: 0.5 }, { x: 5, y: -60, z: 5 }, { warn: (m) => warns.push(m) });
     expect(r.res).toEqual({ ok: false, reason: 'unreachable' });
     expect(warns).toHaveLength(1);
-    expect(warns[0]).toMatch(/^goto unreachable without a segment: feet \(0\.50, -60\.00, 0\.50\), in air, on grass_block, start node 0,-60,0 feet -60, goal .*"x":5.*, why no path \(exhaustive search, 1 nodes expanded\), plans start:none/);
+    expect(warns[0]).toMatch(/^goto unreachable without a segment: feet \(0\.50, -60\.00, 0\.50\), in air, on grass_block, start node 0,-60,0 feet -60, goal .*"x":5.*, why no path \(exhaustive search, 1 nodes expanded\): no move from the start 0,-60,0 feet -60: \+x: -61 blocked \(grass_block\), -60 blocked \(stone\), -59 blocked \(stone\), -58 blocked \(stone\); -x: .*, plans start:none/);
   });
 });

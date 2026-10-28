@@ -113,6 +113,13 @@ One tick, in this order (vanilla order; bedboo's recorded BDS traces confirm it 
 
 Jump in place: apex 1.2522 blocks, back on the ground after 12 ticks.
 
+**Auto-step under an overhang** (Track AX, 2026-10-30): `moveBody` tries a second step candidate, lifted
+only as far as the box swept along the move fits under what is overhead (Java's step: the lift clipped
+by `box.expandTowards(move)`), and keeps whichever goes further. From a dirt path (feet 0.0625 below
+the next floor) into a 2-high doorway the full 0.5625 lift put the head into the lintel and the body
+stopped at the door; with the clipped lift it steps in. bds-dig, 2026-10-30 (`test/e2e/nav-partial.test.ts`):
+0 corrections on that walk, twice.
+
 **Stairs and partial blocks** (measured on BDS 1.26.60.6, 2026-10-29, docs/pathfinding.md "Stairs and
 partial blocks"): the step height 0.5625 is unchanged; a stairs block is climbed from its low side by
 two auto-steps of 0.5 (4.6 ticks per step on a 6-step staircase, against 9.0 for a jump onto full

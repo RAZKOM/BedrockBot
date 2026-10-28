@@ -67,9 +67,9 @@ blocks (1.5 high) are obstacles, never floors. Costs are ticks (`DEFAULT_COSTS`)
 | walk | 4 cardinal | feet rise <= 0.5625 (auto-step), or a step down within 0.5625 (also into the cell below: farmland, dirt paths) | `walk`: 3.564 (sprint allowed) or 4.633 |
 | stairs walk (`walk`) | 4 cardinal | a rise or fall of up to 1.25 the body takes as two auto-steps: a stairs block's low half faces the mover (see "Stairs and partial blocks") | `walk` + `stairs` 1 |
 | diag | 4 diagonal | same feet height exactly; both side cells standable at it | `walk` x sqrt 2 |
-| jump | 4 cardinal | rise in (0.5625, 1.25]; the start column free up to the target's head | `jump` 9 |
+| jump | 4 cardinal | rise in (0.5625, 1.25]; the start column free up to the target's head. From a partial floor high in its cell (feet above `y + 0.75`: a chest 0.95, a dirt path 0.9375) the target can be two cells up (a full block beside the node's own cell, Track AX) | `jump` 9 |
 | drop | 4 cardinal | target column free from the feet to the head, fall through free cells, at most 3 blocks | `walk` + fall(n) (5 / 7 / 9) + `landing` 2; + `irreversibleDrop` 30 when higher than 1.25 |
-| walk through a doorway | 4 cardinal | door / gate cells let the 0.6-wide corridor pass now, or after a toggle (needs `useBlock`) | `walk` + `door` 10 per toggle |
+| walk through a doorway | 4 cardinal | door / gate cells let the 0.6-wide corridor pass now, or after a toggle (needs `useBlock`); the doorway within a step of the feet, also one cell up from a partial floor (a dirt path or carpet in front of the door, whose own cell is not part of the corridor), and out of it onto a floor a step lower in the cell below (Track AX) | `walk` + `door` 10 per toggle |
 | dig-through | 4 cardinal, same level | `allowBreak` + `dig`; full-block floors; the 1 or 2 body cells are breakable (rules below) | `walk` + per block (break ticks + `dig` 12) |
 | (dig rules, 2026-10-30) | | every dug block costs `digPenalty` ticks (setting, 60) on top of its break time, so a route walks around anything it can; nothing is broken within `protectRadius` (48) of home (`BreakRules.protectedArea`, `protected_area`), and built blocks (`isBuiltBlock`: planks, bricks, stairs, slabs, glass, doors, wool, concrete, tables, ...) are `protect` like containers everywhere. The miner's approach and sight-line digs and the farmer follow the same rules (`nav.breakRules()`) |
 | pillar-up | straight up | `allowPlace` + `place` + a throwaway block in the inventory; full-block feet; head room above | `jump` + `place` 10 |
@@ -155,7 +155,11 @@ with the console `setblock` / `fill`, feet heights from `truth:pos`):
 - **Diagnostics.** A goto that ends `unreachable` without walking a segment logs one WARN line:
   `goto unreachable without a segment: feet (x, y, z)[ airborne], in <block[states]>, on <block>,
   start node x,y,z feet f | none, goal {...}, why <reason>, plans <reason:status/nodes/expanded/ms ...>`.
-  Reasons: `no path (exhaustive search, n nodes expanded)`, `the start node is not standable`,
+  Reasons: `no path (exhaustive search, n nodes expanded)` (with 1 node expanded, Track AX: `: no move
+  from the start x,y,z feet f: +x: <cells> ; -x: ...; +z: ...; -z: ...`, `explainStart`: per cardinal
+  direction the cells from one below to two above the node's level, each `blocked (<block>)`,
+  `doorway feet f`, `unloaded` or `feet f rise r` with `> 1.25`, `(jump)` or `(no head room in a..b)`),
+  `the start node is not standable`,
   `no progress possible (no node closer to the goal than the start; n expanded[, search limit hit][,
   touched unloaded world])`, `no standable node at (...)`, `goal cell x,y,z (<block>) is not standable`.
 
