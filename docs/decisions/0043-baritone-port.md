@@ -1,6 +1,6 @@
 # 0043: Port Baritone's planner rules under LGPL-3.0 (wave 11, Tracks BA, BB, BC, BE, BD)
 
-Date: 2026-10-30. Status: accepted (BA, BB, BC, BE merged; BD pending). Supersedes decision 0005's
+Date: 2026-10-30. Status: accepted (BA, BB, BC, BE, BD merged). Supersedes decision 0005's
 "no code copied" line. Details and numbers: [../pathfinding.md](../pathfinding.md) (BA, BB, BC, BE) and
 [../mining.md](../mining.md) (BD). Licence and file list: [../../THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md).
 
@@ -35,7 +35,19 @@ leaves the path. The owner asked for a port ("In order to fix our pathfinding st
      its cost + 100 ticks fails (`overrun`).
    - BC, `moves.ts` (MovementTraverse, Ascend, Descend, Downward, Pillar `cost` functions): the moves
      that dig, with Baritone's break sets and refusals over our ticks; execution stays ours.
-   - BD, `mine/baritone/mineProcess.ts` (MineProcess): pending; see mining.md when it lands.
+   - BD, `mine/baritone/mineProcess.ts` (MineProcess: `coalesce`, `internalMiningGoal`, `prune`,
+     `plausibleToBreak`, `isNextToAir`, the dropped-items scan, `blacklistClosestOnFailure`, the settings as
+     constants) and `nav/baritone/goals.ts` (GoalTwoBlocks / GoalThreeBlocks done tests): every known ore
+     becomes one composite goal and the normal planner, whose moves dig, picks the cheapest reachable one.
+     Setting `mineMode` (`baritone`, the default since BD's gate; `v3` the old probe / tunnel planner).
+     Ours instead of Baritone's: the rescan every 40 ticks re-plans only when the heading member is gone
+     (Baritone 5 ticks); candidates sorted by octile + height (walk-cost estimate) not straight line;
+     `mineSeenOnly` for `allowOnlyExposedOres`; branch mining (`branchMore`) round after round for
+     `exploreForBlocks` ("mine until n": `!get iron 1000` is one job); `markUnreachable` is broader than
+     Baritone's in-process blacklist (session-wide and Track R's navigator blacklist); the harvest rule
+     (an ore no carried tool harvests is no candidate, a walk-dug ore counts only with a harvesting tool);
+     `legitMine` not ported. Composite gotos pass `allowPlace` (the pillar back up replaces v3's
+     staircase) but never place inside `protectRadius`.
 3. **The owner's rules win where Baritone is less careful**, by name: `digPenalty` (60 ticks per dug
    block), `protectRadius` 48 around home, built blocks never dug, the break rules (nothing beside water or
    lava, no gravity block above, never the block under the feet, unknown blocks refused), the shaft rules
@@ -52,9 +64,13 @@ leaves the path. The owner asked for a port ("In order to fix our pathfinding st
 
 ## Consequences
 
-- Mining can become one `goto(composite of ore goals, { allowBreak })` (Track BD), and the v3 probe,
-  detour ratio, `SHAFT_SAVES` and tunnel planner can be deleted once BD's gate passes in both
-  `mineSeenOnly` modes.
+- Mining is one `goto(composite of ore goals, { allowBreak })` (Track BD; mine-baritone e2e: 12 ores in
+  85.9 s against v3's 114.4 s with `mineSeenOnly` off, 3 in 26.8 s against 33.5 s with it on). The v3
+  probe, detour ratio, `SHAFT_SAVES` and tunnel planner (`planTunnel` / `chooseTunnel` / `runTunnel`,
+  `mineDirect`) stay until a cleanup track deletes them; the step helpers branch mining and `returnUp`
+  use stay.
+- The pillar is refused inside `protectRadius` for every goto, so a natural pit 2+ deep inside the base
+  is no longer pillared out of (nothing is dug there either).
 - Dig-heavy searches cost 10 to 20 times more per expansion than walks: they need the planner worker's
   2 s budget, not the 40 ms in-thread plan.
 - Any later change to a ported file keeps its header and its THIRD_PARTY_NOTICES row; a newer Baritone
