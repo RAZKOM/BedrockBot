@@ -149,10 +149,13 @@ export const PILLAR_SPARE = 4;
 
 const AIR: BlockInfo = { name: 'air', stateId: 0, states: {}, hardness: 0, solid: false, boxes: [] };
 
-/** Why the shaft may not dig `q` (the block under the feet), undefined when it may. `first`: the first block of a shaft. */
-export function shaftRule(w: TunnelWorld, q: Vec3, opened: ReadonlySet<string>, first: boolean): string | undefined {
-  const minY = w.minY ?? -64;
-  if (q.y < minY + 2) return `world floor below ${fmt(q)}`;
+/**
+ * The hazard part of the shaft rules for a block `q` the body may end up standing in or over: a liquid in
+ * its column or its 4 side neighbours 1 or 2 blocks below, pointed dripstone in the 3 x 3 columns 1 to 3
+ * blocks below. Track BD: the mine process applies it to every candidate ore below the feet (docs/mining.md
+ * "Mining v4"). Undefined when none.
+ */
+export function shaftHazard(w: TunnelWorld, q: Vec3): string | undefined {
   for (let dy = 1; dy <= 2; dy++)
     for (const [dx, dz] of [
       [0, 0],
@@ -170,6 +173,15 @@ export function shaftRule(w: TunnelWorld, q: Vec3, opened: ReadonlySet<string>, 
         const p = { x: q.x + dx, y: q.y - dy, z: q.z + dz };
         if (w.cell(p)?.dripstone) return `dripstone_below at ${fmt(p)}`;
       }
+  return undefined;
+}
+
+/** Why the shaft may not dig `q` (the block under the feet), undefined when it may. `first`: the first block of a shaft. */
+export function shaftRule(w: TunnelWorld, q: Vec3, opened: ReadonlySet<string>, first: boolean): string | undefined {
+  const minY = w.minY ?? -64;
+  if (q.y < minY + 2) return `world floor below ${fmt(q)}`;
+  const hazard = shaftHazard(w, q); // Track BD: shared with the mine process' prune
+  if (hazard) return hazard;
   const below = up(q, -1);
   const b = w.cell(below);
   if (!b) return `unknown_below at ${fmt(below)}`;

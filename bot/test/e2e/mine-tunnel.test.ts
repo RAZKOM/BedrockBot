@@ -27,6 +27,8 @@ import { E2E, FEET_Y, clearArea, connectFarmBot, killItemsNear, pollUntil, prepa
 
 const F = FEET_Y;
 const STRICT = process.env.MINE_BEFORE !== '1';
+/** Track BD: `MINE_MODE=baritone` runs the suite in mode baritone (the tunnel-plan assertions are v3's). */
+const MINE_MODE = process.env.MINE_MODE === 'baritone' ? 'baritone' : 'v3';
 const key = (p: Vec3) => `${p.x},${p.y},${p.z}`;
 const N6 = [
   [1, 0, 0],
@@ -71,7 +73,7 @@ describe.skipIf(!E2E)('@bds mine: direct tunnels and shafts (Track AQ)', () => {
   function miner(direct = true): MineTask {
     const parts = { skills: bot.skills, world: bot.world, loop: bot.loop, source: bot.conn, hotbar: bot.hotbar, containers: bot.containers, log: bot.logger };
     // `direct` is Track AQ's `mineDirect` (ignored by the code before it)
-    return createMinerFor(parts, { seenOnly: () => false, tunnelLen: () => 64, direct: () => direct }).mine;
+    return createMinerFor(parts, { seenOnly: () => false, tunnelLen: () => 64, direct: () => direct, mode: () => MINE_MODE }).mine; // Track BD: MINE_MODE=baritone runs the suite in mode baritone
   }
 
   async function run(m: MineTask, block: string, count: number, limitMs = 240_000): Promise<{ end: string; s: number }> {

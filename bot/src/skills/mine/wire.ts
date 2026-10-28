@@ -13,7 +13,7 @@ import { probePath } from '../home/reach.ts';
 import type { Vec3 } from '../../world/types.ts';
 import { MineTask } from './miner.ts';
 import { OreMemory } from './seen.ts';
-import { tunnelCell, type TunnelWorld } from './tunnel.ts'; // Track BB: tunnelCell
+import { shaftHazard, tunnelCell, type TunnelWorld } from './tunnel.ts'; // Track BB: tunnelCell; Track BD: shaftHazard
 
 /** Node / time budget of a probe plan (the navigator's own main plan allows 40 000 nodes / 250 ms). */
 export const PROBE_NODES = 6000;
@@ -24,6 +24,10 @@ export interface MinerSettings {
   seenOnly?: () => boolean;
   /** Track AQ: setting `mineDirect` (default true). */
   direct?: () => boolean;
+  /** Track BD: setting `mineMode` (`v3` | `baritone`, default v3). */
+  mode?: () => string;
+  /** Track BD: ticks between re-scans on the way in mode baritone (default MINE_GOAL_UPDATE_TICKS, 40). */
+  rescanTicks?: () => number;
 }
 
 export function createMinerFor(p: FarmParts, settings: MinerSettings = {}): { mine: MineTask; memory: OreMemory } {
@@ -67,6 +71,9 @@ export function createMinerFor(p: FarmParts, settings: MinerSettings = {}): { mi
     ...(settings.tunnelLen ? { tunnelLen: settings.tunnelLen } : {}),
     ...(settings.seenOnly ? { seenOnly: settings.seenOnly } : {}),
     ...(settings.direct ? { direct: settings.direct } : {}),
+    ...(settings.mode ? { mode: settings.mode } : {}), // Track BD
+    ...(settings.rescanTicks ? { rescanTicks: settings.rescanTicks } : {}), // Track BD
+    belowRule: (q) => shaftHazard(tunnelWorld, q), // Track BD: the shaft hazards under a candidate below the feet
     ...(p.log ? { log: p.log } : {}),
   });
   return { mine, memory };

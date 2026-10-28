@@ -78,6 +78,7 @@ function glassShell(gen: GenWorld, p: Vec3): void {
 }
 
 describe('goal predicates and heuristics', () => {
+  // (Track BD's twoBlocks / threeBlocks below: nav/goals.ts, mine/baritone/mineProcess.ts)
   it('getToBlock: the 8 columns around (block at the feet or the head), on top, 2 below; in reach; never the cell itself', () => {
     const gen = flatGen();
     const grid = new NavGrid(gen);
@@ -130,6 +131,28 @@ describe('goal predicates and heuristics', () => {
     expect(g.member!(0, -50, 0, -50)).toBe(2);
     expect(g.member!(1, -60, 1, -60)).toBe(-1);
     expect(goalTest({ type: 'any', goals: [] }).h(0, 0, 0)).toBe(0);
+  });
+
+  it('Track BD: twoBlocks / threeBlocks (Baritone GoalTwoBlocks / MineProcess.GoalThreeBlocks): the ore column, feet in its cell or 1 / 2 below; octile heuristic; keyed by the ore; found inside stone with allowBreak', () => {
+    const two = goalTest({ type: 'twoBlocks', p: { x: 5, y: -58, z: 5 } });
+    expect([two.done(5, -58, 5, -58), two.done(5, -59, 5, -59), two.done(5, -60, 5, -60), two.done(4, -58, 5, -58), two.done(5, -57, 5, -57)]).toEqual([true, true, false, false, false]);
+    const three = goalTest({ type: 'threeBlocks', p: { x: 5, y: -58, z: 5 } });
+    expect([three.done(5, -58, 5, -58), three.done(5, -59, 5, -59), three.done(5, -60, 5, -60), three.done(5, -61, 5, -61)]).toEqual([true, true, true, false]);
+    expect(three.h(0, -60, 5)).toBe(5);
+    expect(two.h(5, -40, 5)).toBe(0);
+    expect(goalKey({ type: 'twoBlocks', p: { x: 5, y: -58, z: 5 } })).toBe('b:5,-58,5');
+    expect(goalKey({ type: 'threeBlocks', p: { x: 5, y: -58, z: 5 } })).toBe('b:5,-58,5');
+    // a composite over an ore buried in stone: found with dig-through moves, the feet end in the ore's column under it
+    const gen = flatGen();
+    gen.fill({ x: 2, y: -60, z: -3 }, { x: 12, y: -55, z: 3 }, 'stone');
+    gen.put(8, -58, 0, 'iron_ore');
+    const goal: NavGoal = { type: 'any', goals: [{ type: 'threeBlocks', p: { x: 8, y: -58, z: 0 } }] };
+    const r = findPath(new NavGrid(gen), { x: 0, y: -60, z: 0 }, goal, { allowBreak: true, maxNodes: 200_000, maxMs: 20_000 });
+    expect(r.status).toBe('found');
+    expect(r.path.at(-1)).toMatchObject({ x: 8, z: 0 });
+    expect([-58, -59, -60]).toContain(r.path.at(-1)!.y);
+    expect(r.path.some((n) => n.act?.dig?.length)).toBe(true);
+    expect(findPath(new NavGrid(gen), { x: 0, y: -60, z: 0 }, goal, { maxNodes: 20_000 }).status).not.toBe('found');
   });
 
   it('yLevel and runAway', () => {

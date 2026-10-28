@@ -13,6 +13,7 @@ import { BotSkills } from '../../../src/skills/index.ts';
 import { breakBlocker } from '../../../src/skills/nav/actions.ts';
 import { findPath, handBreakTicks, type PathResult } from '../../../src/skills/nav/astar.ts';
 import { avoidWalkingInto, breakTicksWith, canWalkOn, canWalkThroughClass, getMiningDurationTicks } from '../../../src/skills/nav/baritone/helper.ts'; // Track BB; Track BC: breakTicksWith
+import { goalTest, type NavGoal } from '../../../src/skills/nav/goals.ts'; // Track BD
 import { NavGrid } from '../../../src/skills/nav/grid.ts';
 import { PlannerClient, corridor, type PlannerWorker, type WorkerPlanOptions } from '../../../src/skills/nav/worker.ts';
 import { MirrorWorld, type MirrorOp } from '../../../src/skills/nav/worker-grid.ts';
@@ -510,6 +511,76 @@ describe('planner worker: a real worker thread', () => {
     expect(same).toBeGreaterThanOrEqual(17);
     expect(dug).toBeGreaterThan(40);
     for (const k of ['downward+dig', 'jump+dig', 'drop+dig', 'sneak']) expect([...kinds], k).toContain(k); // (dig-through: nav-baritone-helper / nav-digmoves)
+    client.dispose();
+  }, 120_000);
+
+  it('Track BD: the mine process\' composite goals plan identically in the worker: 20 mine-shaped queries (twoBlocks / threeBlocks members inside the stone and exposed, mineSeenOnly off and on), same status, cost, length, break set and member', async () => {
+    const F = fixtureWorld(hills);
+    const client = new PlannerClient(F.world);
+    client.start();
+    await until(() => client.ready, 20_000);
+    const main = () => new NavGrid(worldSource(F.world));
+    const inv = { slots: [{ name: 'iron_pickaxe', count: 1 }, { name: 'cobblestone', count: 64 }], selected: 0 };
+    const stands = (p: Vec3) => {
+      const f = main().stand(p.x, p.y, p.z);
+      return f !== undefined && !Number.isNaN(f);
+    };
+    const pick = (i: number, dy: number): Vec3 => {
+      for (let k = 0; ; k++) {
+        const x = C0 * 16 + 8 + Math.floor(hash(i, k + 23) * 80);
+        const z = C0 * 16 + 8 + Math.floor(hash(k + 23, i) * 80);
+        const p = { x, y: groundY(x, z) + dy, z };
+        if (dy > 0 ? stands(p) : main().cls(x, p.y, z)?.name === (dy === 0 ? 'grass_block' : 'stone')) return p;
+      }
+    };
+    const lines: string[] = [];
+    let found = 0;
+    let dug = 0;
+    const members = new Set<number>();
+    for (let i = 0; i < 20; i++) {
+      // mineSeenOnly off (even i): 3 to 5 ores buried 3 to 6 blocks under the grass; on (odd i): the exposed grass-level
+      // blocks of 3 columns (an open face above), as the memory's seen set would give; both as Baritone's column goals
+      const seenOnly = i % 2 === 1;
+      const a = pick(3 * i, 1);
+      const n = 3 + (i % 3);
+      const goals: NavGoal[] = [];
+      for (let m = 0; m < n; m++) {
+        const b = seenOnly ? pick(3 * i + 1 + 7 * m, 0) : pick(3 * i + 1 + 7 * m, -3 - (m % 4));
+        goals.push(m % 2 === 0 ? { type: 'threeBlocks', p: b } : { type: 'twoBlocks', p: b });
+      }
+      const goal: NavGoal = { type: 'any', goals };
+      const allowPlace = i % 3 !== 0;
+      const spec: WorkerPlanOptions = { maxNodes: 60_000, maxMs: 20_000, allowBreak: true, allowPlace, allowOpen: true, throwaway: allowPlace ? 64 : 0, inventory: inv };
+      const t = findPath(main(), a, goal, { maxNodes: 60_000, maxMs: 20_000, allowBreak: true, allowPlace, allowOpen: true, throwaway: allowPlace ? 64 : 0, breakTicks: (c) => breakTicksWith(c, inv) });
+      const s = client.search('main', a, goal, spec, 0);
+      let w: PathResult | undefined;
+      while (!(w = s.step())) {
+        if (s.failed) throw new Error('worker search failed');
+        await sleep(1);
+      }
+      const breaks = (r: PathResult) => JSON.stringify(r.path.map((p) => [p.move, p.act?.dig ?? null, p.act?.place?.p ?? null]));
+      const end = (r: PathResult) => {
+        const e = r.path.at(-1);
+        return e ? goalTest(goal, main()).member!(e.x, e.y, e.z, e.feet) : -2;
+      };
+      const nDigs = t.path.reduce((k, p) => k + (p.act?.dig?.length ?? 0), 0);
+      dug += nDigs;
+      lines.push(`${seenOnly ? 'seen' : 'buried'} ${a.x},${a.y},${a.z} -> ${n} goals: thread ${t.status} ${t.cost.toFixed(2)} (${t.expanded}e, ${t.path.length}n, ${nDigs} digs, member ${end(t)}) worker ${w.status} ${w.cost.toFixed(2)} (${w.expanded}e, ${w.path.length}n, member ${end(w)})`);
+      expect(w.status, lines.at(-1)).toBe(t.status);
+      expect(w.cost, lines.at(-1)).toBeCloseTo(t.cost, 9);
+      expect(w.expanded, lines.at(-1)).toBe(t.expanded);
+      expect(w.path.length, lines.at(-1)).toBe(t.path.length);
+      expect(breaks(w), lines.at(-1)).toBe(breaks(t));
+      expect(end(w), lines.at(-1)).toBe(end(t));
+      if (t.status === 'found') {
+        found++;
+        members.add(end(t));
+        expect(end(t), lines.at(-1)).toBeGreaterThanOrEqual(0);
+      }
+    }
+    console.log(`[nav-worker] Track BD composite goals: ${found}/20 found, ${dug} dig cells in all, members reached ${[...members].sort().join(' ')}\n  ${lines.join('\n  ')}`);
+    expect(found).toBeGreaterThanOrEqual(16);
+    expect(dug).toBeGreaterThan(20);
     client.dispose();
   }, 120_000);
 

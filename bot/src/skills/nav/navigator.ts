@@ -1644,6 +1644,8 @@ export function goalPoint(g: NavGoal): { x: number; y: number | undefined; z: nu
   switch (g.type) {
     case 'block':
     case 'getToBlock':
+    case 'twoBlocks': // Track BD
+    case 'threeBlocks':
       return { x: g.p.x + 0.5, y: g.p.y, z: g.p.z + 0.5 };
     case 'near':
       return { x: g.p.x, y: g.p.y, z: g.p.z };

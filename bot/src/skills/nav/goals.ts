@@ -6,6 +6,8 @@
 //   getToBlock  stand next to a block, in reach, a visible face if it has one (dig, chest, door)
 //   yLevel      any cell with the feet at that y        runAway  at least r away from point(s)
 //   surface     sky above the head and not in a pit (`!top`)
+//   twoBlocks   feet in cell p or the cell below it (Track BD, Baritone GoalTwoBlocks: p at the feet or the head)
+//   threeBlocks twoBlocks plus the cell two below p (Baritone MineProcess.GoalThreeBlocks: p right over the head)
 //
 // `Goal` stays the three basic goals of PLAN.md 4.3 (callers that switch over it stay exhaustive);
 // `NavGoal` is everything `Navigator.goto` accepts.
@@ -64,7 +66,26 @@ export interface SurfaceGoal {
   type: 'surface';
 }
 
-export type NavGoal = Goal | AnyGoal | GetToBlockGoal | YLevelGoal | RunAwayGoal | SurfaceGoal;
+/**
+ * Track BD (Baritone GoalTwoBlocks, api/pathing/goals/GoalTwoBlocks.java): the feet cell is p (the block
+ * there dug, the body in its cell) or the cell below p (p at head height). The mine process' goal for an
+ * ore the body must get its feet or head into.
+ */
+export interface TwoBlocksGoal {
+  type: 'twoBlocks';
+  p: Vec3;
+}
+
+/**
+ * Track BD (Baritone MineProcess.GoalThreeBlocks, process/MineProcess.java): the feet cell is p, the cell
+ * below it, or the cell two below it (p right above the head: mined looking up, the "vertical shaft" case).
+ */
+export interface ThreeBlocksGoal {
+  type: 'threeBlocks';
+  p: Vec3;
+}
+
+export type NavGoal = Goal | AnyGoal | GetToBlockGoal | YLevelGoal | RunAwayGoal | SurfaceGoal | TwoBlocksGoal | ThreeBlocksGoal; // Track BD: twoBlocks, threeBlocks
 
 const SQRT2 = Math.SQRT2;
 export const DEFAULT_GET_TO_REACH = 4.5;
@@ -166,6 +187,21 @@ export function goalTest(goal: NavGoal, grid?: GoalGrid): GoalTest {
     }
     case 'surface':
       return surfaceTest(grid);
+    // Track BD: Baritone's column goals. The y part of its GoalBlock.calculate heuristic is not taken (`block` has none either: octile only, admissible).
+    case 'twoBlocks': {
+      const g = cell(goal.p);
+      return {
+        done: (x, y, z) => x === g.x && z === g.z && (y === g.y || y === g.y - 1),
+        h: (x, _y, z) => octile(g.x - x, g.z - z),
+      };
+    }
+    case 'threeBlocks': {
+      const g = cell(goal.p);
+      return {
+        done: (x, y, z) => x === g.x && z === g.z && (y === g.y || y === g.y - 1 || y === g.y - 2),
+        h: (x, _y, z) => octile(g.x - x, g.z - z),
+      };
+    }
   }
 }
 

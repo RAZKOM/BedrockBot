@@ -9,7 +9,7 @@ export type { Ternary, CellReader, HotbarView, BreakReason, BreakRuleOptions, Mi
 export { NavGrid, cellKey, CROSS_CLEAR, CROSS_TOGGLE, CROSS_BLOCKED } from './grid.ts';
 export type { Crossing } from './grid.ts';
 export { goalTest, octile, localGround, threatsOf, DEFAULT_GET_TO_REACH } from './goals.ts';
-export type { Goal, GoalTest, NavGoal, AnyGoal, GetToBlockGoal, YLevelGoal, RunAwayGoal, SurfaceGoal, Threat, GoalGrid } from './goals.ts'; // Track R: task 7.10 goals
+export type { Goal, GoalTest, NavGoal, AnyGoal, GetToBlockGoal, YLevelGoal, RunAwayGoal, SurfaceGoal, TwoBlocksGoal, ThreeBlocksGoal, Threat, GoalGrid } from './goals.ts'; // Track R: task 7.10 goals; Track BD: twoBlocks, threeBlocks
 export { NavBlacklist, goalKey, blockKey, actionKey } from './blacklist.ts'; // Track R
 export type { BlacklistEntry, BlacklistOptions, ActionKind } from './blacklist.ts';
 export { PathFollower, PressGuard, yawTowards, angleDiff, turnTowards } from './follower.ts';

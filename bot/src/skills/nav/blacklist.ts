@@ -43,6 +43,8 @@ export function goalKey(goal: NavGoal): string | undefined {
     case 'block':
     case 'near':
     case 'getToBlock':
+    case 'twoBlocks': // Track BD: the mine process' column goals are keyed by their ore block
+    case 'threeBlocks':
       return `b:${k3(goal.p)}`;
     case 'xz':
       return `xz:${fl(goal.x)},${fl(goal.z)}`;

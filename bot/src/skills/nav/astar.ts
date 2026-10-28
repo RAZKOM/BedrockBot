@@ -1150,6 +1150,10 @@ function goalMinY(goal: NavGoal): number {
     case 'near':
     case 'getToBlock':
       return goal.p.y;
+    case 'twoBlocks': // Track BD: the lowest feet cell of the mine process' column goals
+      return goal.p.y - 1;
+    case 'threeBlocks':
+      return goal.p.y - 2;
     case 'yLevel':
       return goal.y;
     case 'any': {

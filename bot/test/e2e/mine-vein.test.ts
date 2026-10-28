@@ -18,6 +18,9 @@ import { registerFarmCommands } from '../../src/chat/commands-farm.ts';
 import { silentLogger } from '../../src/log.ts';
 import type { MineTask } from '../../src/skills/mine/miner.ts';
 import { createMinerFor } from '../../src/skills/mine/wire.ts';
+
+/** Track BD: `MINE_MODE=baritone` runs the suite in mode baritone. */
+const MINE_MODE = process.env.MINE_MODE === 'baritone' ? 'baritone' : 'v3';
 import { GatherWoodTask, logsIn } from '../../src/tasks/gatherWood.ts';
 import type { Mobility } from '../../src/tasks/mobility.ts';
 import type { Vec3 } from '../../src/world/types.ts';
@@ -102,7 +105,7 @@ describe.skipIf(!E2E)('@bds mine: veins, produce on the floor, several kinds in 
     await bot.teleport({ x: s.x + 0.5, y: F, z: s.z + 0.5 }, -90);
     await bot.loadout([['iron_pickaxe', 1]]);
     expect(await pollUntil(() => vein.every((p) => bot.world.blockAt(p)?.name === 'diamond_ore'), 8_000)).toBeGreaterThanOrEqual(0);
-    const { mine: m } = createMinerFor(parts(), { seenOnly: () => false, tunnelLen: () => 64 });
+    const { mine: m } = createMinerFor(parts(), { seenOnly: () => false, tunnelLen: () => 64, mode: () => MINE_MODE }); // Track BD: MINE_MODE
     let veinSeen = '';
     const watch = setInterval(() => {
       const v = (m as unknown as { vein?: { done: number; size: number } }).vein;
@@ -187,7 +190,7 @@ describe.skipIf(!E2E)('@bds mine: veins, produce on the floor, several kinds in 
       ['coal_ore', 6],
       ['diamond_ore', 2],
     ] as const) {
-      const { mine: m } = createMinerFor(parts(), { seenOnly: () => false, tunnelLen: () => 64 });
+      const { mine: m } = createMinerFor(parts(), { seenOnly: () => false, tunnelLen: () => 64, mode: () => MINE_MODE }); // Track BD: MINE_MODE
       const t0 = performance.now();
       const { r, dist } = await walked(() => m.start({ block, count: n }));
       sepDist += dist;

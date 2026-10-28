@@ -24,16 +24,27 @@
 // with quotas in one job (`kinds`, `ores`): the candidates are the kinds still below their quota, nearest
 // first across kinds. Before each target the job's kind of items within 8 blocks is picked up
 // (collect/sweep.ts). A run that tunnelled down walks (or pillars, or digs a staircase) back up at the end.
+//
+// Wave 11 Track BD (mining v4, docs/mining.md "Mining v4: MineProcess"; setting `mineMode`): in mode `baritone`
+// the probe, the detour ratio and the straight tunnel planner are not used. Every candidate the memory knows
+// (pruned by Baritone's rules, mine/baritone/mineProcess.ts) goes into ONE composite goal of Baritone's column
+// goals and one goto with the dig moves (Track BC) finds the cheapest reachable ore by itself: tunnels,
+// staircases and shafts fall out of the search. On arrival the reached ore is mined as before (sight digs,
+// requireHarvest, the vein, the collect); a goto without a path blacklists the nearest candidate
+// (blacklistClosestOnFailure); the candidates are pruned again every MINE_GOAL_UPDATE_TICKS on the way. With
+// nothing known the job explores (branch mining) and resumes when the memory knows ore again, round after
+// round, until n ("mine until n", both modes); `none_left` only when the explorer gives up.
 import { blockMining } from '../../data/mining.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../world/types.ts';
 import type { CollectOptions, CollectResult } from '../collect/collect.ts';
 import type { DigOptions, DigResult } from '../dig/digger.ts';
 import { EYE_HEIGHT } from '../dig/look.ts';
-import type { Goal, NavGoal } from '../nav/goals.ts';
+import type { AnyGoal, Goal, NavGoal } from '../nav/goals.ts';
 import { closestDistance } from '../place/place.ts';
+import { BLACKLIST_CLOSEST_ON_FAILURE, MINE_GOAL_UPDATE_TICKS, compositeOf, droppedItems, estimate, headingMember, memberAt, nearestCandidate, prune, type MineCandidate, type MineGoalContext, type PruneResult } from './baritone/mineProcess.ts'; // Track BD
 import type { GotoOptions, SkillResult } from '../types.ts';
-import { lineOfSight, type OreMemory, type SeenOre } from './seen.ts';
+import { LIQUIDS, lineOfSight, type OreMemory, type SeenOre } from './seen.ts';
 import { branchMore, branchRunOf } from './branch.ts'; // Track AI: branch mining when no target is known
 import { pathBlocks } from '../home/reach.ts'; // Track AQ
 import { sweepItems, SWEEP_RADIUS } from '../collect/sweep.ts'; // Track AQ
@@ -128,7 +139,20 @@ export interface MineStats {
   tunnels: TunnelRecord[];
   veins: VeinRecord[];
   skipped: { p: Vec3; why: string }[];
+  /** Track BD: explore rounds (nothing known -> branch mining -> ore known again) and the blocks the explorer dug. */
+  rounds: number;
+  exploreBlocks: number;
+  /** Track BD (mode baritone): composite gotos and their members in all, re-scans on the way, walks restarted after one, ores dug by the walk itself, gotos without a path (the nearest candidate blacklisted). */
+  composites: number;
+  compositeMembers: number;
+  rescans: number;
+  replans: number;
+  walkDug: number;
+  calcFailed: number;
 }
+
+/** Track BD: a target as the loop handles it (a memory record, or a composite member). */
+export type MineTarget = Pick<SeenOre, 'p' | 'name'>;
 
 export interface MinePlan {
   status: 'found' | 'partial' | 'none';
@@ -153,8 +177,8 @@ export interface MineSkills {
   dig(p: Vec3, opts?: DigOptions): Promise<DigResult>;
   collect(radius: number, timeoutTicks: number, opts?: CollectOptions): Promise<CollectResult>;
   cancel(): void;
-  /** The navigator's report of the last goto (actions.dig counts its tunnel digs; segments 0 = it never moved). */
-  status?(): { lastGoto?: { actions: { dig: number }; segments?: number } | undefined };
+  /** The navigator's report of the last goto (actions.dig counts its tunnel digs; segments 0 = it never moved; Track BD: `reached` = the member of an `any` goal the walk ended in). */
+  status?(): { lastGoto?: { actions: { dig: number; place?: number }; segments?: number; reached?: { index: number } | undefined } | undefined };
 }
 
 export interface MineDeps {
@@ -194,6 +218,16 @@ export interface MineDeps {
   throwaways?: () => number;
   /** Track AQ: the entities (the floor sweep's cheap check, drops left in holes). */
   entities?: () => ReadonlyMap<bigint, EntityInfo>;
+  /** Track BD: setting `mineMode` (`v3` | `baritone`, default v3), read at every scan. */
+  mode?: () => string;
+  /** Track BD: ticks between re-scans of the candidates on the way (default MINE_GOAL_UPDATE_TICKS; 0 = none). */
+  rescanTicks?: () => number;
+  /** Track BD: ours, the shaft hazards under a candidate below the feet (mine/tunnel.ts shaftHazard); undefined = none. */
+  belowRule?: (p: Vec3) => string | undefined;
+  /** Track BD: the explore fallback with nothing known (one step per call, true = scan again); default branch mining (mine/branch.ts branchMore). */
+  explore?: (task: MineTask) => Promise<boolean>;
+  /** Track BD: blocks the explore fallback dug so far (the status line); default the branch run's count. */
+  exploredBlocks?: () => number;
   log?: Logger;
   now?: () => number;
 }
@@ -281,6 +315,8 @@ export class MineTask {
   /** Track AQ: the feet cell where the run's first tunnel started (the way back up), and the deepest shaft. */
   private surface: Vec3 | undefined;
   private shaftDepth = 0;
+  /** Track BD: the explore fallback runs (nothing known): its round; undefined while ore is known. */
+  exploring: { round: number } | undefined;
 
   constructor(deps: MineDeps) {
     this.d = deps;
@@ -334,6 +370,7 @@ export class MineTask {
     this.vein = undefined;
     this.surface = undefined;
     this.shaftDepth = 0;
+    this.exploring = undefined; // Track BD
     this.d.memory.watch(this.names);
     Object.assign(this.stats, newStats());
     this.stats.startedAt = this.now();
@@ -341,7 +378,7 @@ export class MineTask {
     this.black.clear();
     this.lastError = undefined;
     this.state = 'scan';
-    this.log.info(`mine: ${this.quotas.length > 1 ? this.quotaLine() : `${count} x ${[...this.names].join('/')}`}, tunnel cap ${this.tunnelLen()}, direct ${this.directOn() ? 'on' : 'off'}`);
+    this.log.info(`mine: ${this.quotas.length > 1 ? this.quotaLine() : `${count} x ${[...this.names].join('/')}`}, tunnel cap ${this.tunnelLen()}, direct ${this.directOn() ? 'on' : 'off'}, mode ${this.modeOf()}`);
     const gen = this.gen;
     return this.run(gen)
       .then((s) => {
@@ -391,8 +428,25 @@ export class MineTask {
     return (this.d.direct?.() ?? true) && !!this.d.tunnelWorld;
   }
 
+  /** Track BD: the approach (setting `mineMode`): `baritone` = the composite goal, else `v3`. */
+  modeOf(): 'baritone' | 'v3' {
+    return this.d.mode?.() === 'baritone' ? 'baritone' : 'v3';
+  }
+
+  /** Track BD: `exploring (round 3, 420 blocks)` while the explore fallback runs, else undefined. */
+  exploreLine(): string | undefined {
+    return this.exploring ? `exploring (round ${this.exploring.round}, ${this.exploredBlocks()} blocks)` : undefined;
+  }
+
+  private exploredBlocks(): number {
+    const n = this.d.exploredBlocks ? this.d.exploredBlocks() : (branchRunOf(this)?.stats.dug ?? 0);
+    this.stats.exploreBlocks = Math.max(this.stats.exploreBlocks, n);
+    return this.stats.exploreBlocks;
+  }
+
   summary(): string {
-    return `mine ${[...this.names][0] ?? '?'}: ${this.state}, ${this.stats.mined}/${this.opts?.count ?? 0} mined, ${this.stats.tunnelled} tunnelled, ${this.stats.blacklisted.length} skipped`;
+    const explore = this.exploreLine();
+    return `mine ${[...this.names][0] ?? '?'}: ${this.state}, ${this.stats.mined}/${this.opts?.count ?? 0} mined, ${this.stats.tunnelled} tunnelled, ${this.stats.blacklisted.length} skipped${this.modeOf() === 'baritone' ? ', mode baritone' : ''}${explore ? `, ${explore}` : ''}`;
   }
 
   status(): Record<string, unknown> {
@@ -410,7 +464,7 @@ export class MineTask {
   }
 
   /** Track Z: unreachable after one plan: blacklisted for this run, skipped for the session, and on Track R's blacklist. */
-  private markUnreachable(t: SeenOre, why: string): void {
+  private markUnreachable(t: MineTarget, why: string): void {
     const k = key(t.p);
     if (!this.unreachable.has(k)) {
       this.unreachable.add(k);
@@ -427,6 +481,7 @@ export class MineTask {
     if (gen !== this.gen && state !== 'stopped') return this.state;
     this.state = state;
     this.stats.finishedAt = this.now();
+    this.exploredBlocks(); // Track BD: the end line's count
     this.log.info(`${this.summary()}${this.lastError ? ` (${this.lastError})` : ''}`);
     for (const fn of [...this.doneFns]) fn(state);
     return state;
@@ -437,7 +492,7 @@ export class MineTask {
     return p ? { x: p.x, y: p.y + EYE_HEIGHT, z: p.z } : undefined;
   }
 
-  private fail(t: SeenOre, why: string): void {
+  private fail(t: MineTarget, why: string): void {
     const k = key(t.p);
     this.stats.failures++;
     const n = (this.fails.get(k) ?? 0) + 1;
@@ -490,6 +545,19 @@ export class MineTask {
       this.stats.scans++;
       this.stats.scanMs += this.d.memory.lastScanMs;
       this.stats.buriedSeen = Math.max(this.stats.buriedSeen, this.d.memory.lastBuried);
+      if (this.modeOf() === 'baritone') {
+        // Track BD: every candidate into one composite goal; the planner picks the cheapest reachable one
+        const pr = this.pruneNow(pos);
+        if (pr.candidates.length === 0) {
+          const r = await this.nothingKnown(gen);
+          if (r === 'continue') continue;
+          return r;
+        }
+        this.exploring = undefined;
+        const end = await this.mineComposite(gen, pos, pr.candidates);
+        if (end) return this.end(gen, end);
+        continue;
+      }
       // the nearest safe candidates; Track Z: up to PROBE_CANDIDATES of them are probed with a cheap
       // bounded plan and the first that leads somewhere wins (no route / no progress: skipped at once)
       const cands: SeenOre[] = [];
@@ -510,13 +578,13 @@ export class MineTask {
         cands.push(t);
         if (cands.length >= PROBE_CANDIDATES) break;
       }
-      if (cands.length === 0 && (await branchMore(this, this.d.skills))) continue; // Track AI: no known target: branch mining (skills/mine/branch.ts)
       if (cands.length === 0) {
-        await this.pickupLeft(gen); // Track AQ
-        await this.returnUp(gen); // Track AQ
-        if (!this.alive(gen)) continue; // paused: the loop waits for resume() (Realm 2026-10-30: returning here ended the job); stopped: the loop ends
-        return this.end(gen, 'none_left');
+        // Track AI: no known target: branch mining (skills/mine/branch.ts); Track BD: round after round until n
+        const r = await this.nothingKnown(gen);
+        if (r === 'continue') continue;
+        return r;
       }
+      this.exploring = undefined; // Track BD: ore known again
       const target = this.directOn() ? cands[0] : this.pickReachable(cands); // Track AQ: the approach itself probes (walk or tunnel)
       if (!target) continue; // all probed candidates unreachable: the next scan takes the next ones
       if (needsPickaxe(target.name) && !hasPickaxe(this.d.inventory.slots)) {
@@ -600,7 +668,6 @@ export class MineTask {
   }
 
   private async mineOne(gen: number, t: SeenOre): Promise<void> {
-    const sk = this.d.skills;
     const blockAt = this.d.blockAt;
     const near = () => {
       const e = this.eye();
@@ -615,42 +682,69 @@ export class MineTask {
       const a = this.directOn() ? await this.approachDirect(gen, t) : await this.approachWalk(gen, t);
       if (a !== 'ok' || !this.alive(gen)) return;
     }
+    await this.takeOre(gen, t, false);
+  }
+
+  /**
+   * The ore within reach: the sight digs, the dig with requireHarvest, the vein, the collect (the tail of
+   * `mineOne`; Track BD: mode baritone's arrival too). `dugByWalk`: the planner's path may have dug the ore
+   * itself (Baritone's column goals put the feet into its cell): an ore that is gone now counts as mined.
+   */
+  private async takeOre(gen: number, t: MineTarget, dugByWalk: boolean): Promise<void> {
+    const sk = this.d.skills;
+    const blockAt = this.d.blockAt;
+    const near = () => {
+      const e = this.eye();
+      return !!e && closestDistance(e, t.p) <= MINE_REACH;
+    };
+    const seen = () => {
+      const e = this.eye();
+      return !!e && lineOfSight(blockAt, e, t.p).clear;
+    };
     // Track Z: a target remembered by the cache (unloaded when chosen) is checked now that it is loaded
     const now = blockAt(t.p);
     if (!now) return this.fail(t, 'not loaded after the approach');
     if (now.name !== t.name) {
-      this.blacklist(t.p);
-      return this.fail(t, `is ${now.name} now`);
-    }
-    // line of sight: dig what is in the way (safety rules apply)
-    for (let i = 0; i < 3 && !seen(); i++) {
-      const e = this.eye();
-      if (!e) return;
-      const s = lineOfSight(blockAt, e, t.p);
-      if (s.clear || !s.blocker) break;
-      const why = this.d.breakRule(s.blocker);
-      if (why) return this.fail(t, `line of sight blocked at ${fmt(s.blocker)} (${why})`);
-      this.state = 'dig';
-      const r = await sk.dig(s.blocker);
-      if (!this.alive(gen)) return;
-      if (!r.ok) return this.fail(t, `sight dig ${fmt(s.blocker)}: ${r.reason}`);
-      this.stats.sightDigs++;
-      this.stats.tunnelled++;
-      this.d.memory.noteDug(s.blocker);
-    }
-    if (!near()) return this.fail(t, 'out of reach after the approach');
-    if (!seen()) return this.fail(t, 'no line of sight');
-    this.state = 'dig';
-    const r = await sk.dig(t.p, { requireHarvest: true });
-    if (!this.alive(gen)) return;
-    if (!r.ok) {
-      if (r.reason === 'no_tool') {
-        this.lastError = `no tool in the hotbar harvests ${t.name}`;
+      if (dugByWalk && now.boxes.length === 0 && !LIQUIDS.has(now.name)) {
+        // Track BD: the walk's own dig took it (the body stands in or under its cell): counted, its drop collected below
+        this.stats.walkDug++;
+        this.counted(t.p, t.name, undefined);
+        this.log.info(`mine: ${t.name} at ${fmt(t.p)} dug by the walk`);
+      } else {
         this.blacklist(t.p);
+        return this.fail(t, `is ${now.name} now`);
       }
-      return this.fail(t, `dig: ${r.reason}`);
+    } else {
+      // line of sight: dig what is in the way (safety rules apply)
+      for (let i = 0; i < 3 && !seen(); i++) {
+        const e = this.eye();
+        if (!e) return;
+        const s = lineOfSight(blockAt, e, t.p);
+        if (s.clear || !s.blocker) break;
+        const why = this.d.breakRule(s.blocker);
+        if (why) return this.fail(t, `line of sight blocked at ${fmt(s.blocker)} (${why})`);
+        this.state = 'dig';
+        const r = await sk.dig(s.blocker);
+        if (!this.alive(gen)) return;
+        if (!r.ok) return this.fail(t, `sight dig ${fmt(s.blocker)}: ${r.reason}`);
+        this.stats.sightDigs++;
+        this.stats.tunnelled++;
+        this.d.memory.noteDug(s.blocker);
+      }
+      if (!near()) return this.fail(t, 'out of reach after the approach');
+      if (!seen()) return this.fail(t, 'no line of sight');
+      this.state = 'dig';
+      const r = await sk.dig(t.p, { requireHarvest: true });
+      if (!this.alive(gen)) return;
+      if (!r.ok) {
+        if (r.reason === 'no_tool') {
+          this.lastError = `no tool in the hotbar harvests ${t.name}`;
+          this.blacklist(t.p);
+        }
+        return this.fail(t, `dig: ${r.reason}`);
+      }
+      this.counted(t.p, t.name, r.ticks);
     }
-    this.counted(t.p, t.name, r.ticks);
     // Track AQ: the rest of the vein from here, then every drop of the group
     if (await this.mineVein(gen, t)) return;
     this.state = 'collect';
@@ -702,7 +796,7 @@ export class MineTask {
     }
   }
 
-  private skip(t: SeenOre, why: string): void {
+  private skip(t: MineTarget, why: string): void {
     this.stats.skipped.push({ p: { ...t.p }, why });
     this.lastError = `${t.name} at ${fmt(t.p)}: ${why}`;
     this.markUnreachable(t, why);
@@ -710,7 +804,184 @@ export class MineTask {
 
   private feetCell(): Vec3 | undefined {
     const p = this.d.position();
-    return p ? { x: Math.floor(p.x), y: Math.floor(p.y + 1e-6), z: Math.floor(p.z) } : undefined;
+    return p ? cellOf(p) : undefined;
+  }
+
+  // ---- Track BD: nothing known -> explore, round after round ------------------------------------------------
+
+  /**
+   * Track BD (both modes): no candidate known. While the job is below n the explore fallback runs one step
+   * (`explore`, default branch mining: mine/branch.ts `branchMore`, which digs one step of its layout and
+   * returns true to scan again); the memory learning ore ends the round (the loop mines again) and the next
+   * dead end starts round + 1. The explorer giving up (its own budget: `mineTunnelLen` blocks of tunnel
+   * without a find, blocked, no pickaxe) ends the job `none_left` after the drop walk and the climb back.
+   */
+  private async nothingKnown(gen: number): Promise<'continue' | MineState> {
+    if (await this.exploreMore()) return 'continue';
+    await this.pickupLeft(gen); // Track AQ
+    await this.returnUp(gen); // Track AQ
+    if (!this.alive(gen)) return 'continue'; // paused: the loop waits for resume() (Realm 2026-10-30: returning here ended the job); stopped: the loop ends
+    return this.end(gen, 'none_left');
+  }
+
+  private async exploreMore(): Promise<boolean> {
+    if (!this.exploring) {
+      this.stats.rounds++;
+      this.exploring = { round: this.stats.rounds };
+      this.log.info(`mine: nothing known, ${this.stats.mined}/${this.opts?.count ?? 0} mined: exploring (round ${this.stats.rounds})`);
+    }
+    const more = await (this.d.explore ? this.d.explore(this) : branchMore(this, this.d.skills));
+    this.exploredBlocks();
+    if (!more) this.exploring = undefined;
+    return more;
+  }
+
+  // ---- Track BD: mode baritone, the composite goal ----------------------------------------------------------
+
+  private rescanTicks(): number {
+    const n = this.d.rescanTicks?.() ?? MINE_GOAL_UPDATE_TICKS;
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  }
+
+  /** The mine process' view of the world and the rules (mine/baritone/mineProcess.ts `MineGoalContext`). */
+  private goalCtx(feet: Vec3): MineGoalContext {
+    return {
+      blockAt: (p) => this.d.blockAt(p),
+      // without the under-feet rule (the tunnel planner's view): the dig-down move is the one move that digs the floor (Track BC)
+      breakRule: (p) => (this.d.tunnelWorld ? this.d.tunnelWorld.breakRule(p) : this.d.breakRule(p)),
+      ...(this.d.belowRule ? { belowRule: this.d.belowRule } : {}),
+      names: this.active,
+      feet,
+      blocked: (p) => this.black.has(key(p)) || this.unreachable.has(key(p)) || !!this.d.blacklist?.blocked(p),
+      exposedOnly: this.d.seenOnly?.() ?? false,
+    };
+  }
+
+  /** Baritone `prune` over the memory's candidates (under `mineSeenOnly`) and the job's dropped items; the skipped ones reported once and blacklisted. */
+  private pruneNow(pos: Vec3): PruneResult {
+    const feet = cellOf(pos);
+    const seenOnly = this.d.seenOnly?.() ?? false;
+    const ores: MineCandidate[] = this.d.memory.targets(this.active, pos, { seenOnly }).map((t) => ({ kind: 'ore', p: t.p, name: t.name, ...(t.cached ? { cached: true } : {}) }));
+    const drops = droppedItems(this.d.entities?.(), (n) => isJobDrop(this.drops, n), feet, this.opts?.radius ?? 32);
+    const r = prune(this.goalCtx(feet), ores, drops);
+    for (const s of r.skipped) {
+      if (this.black.has(key(s.p))) continue;
+      this.stats.unsafe.push({ p: { ...s.p }, why: s.why });
+      this.log.info(`mine: skipping ${this.d.blockAt(s.p)?.name ?? '?'} at ${fmt(s.p)}: ${s.why}`);
+      this.blacklist(s.p);
+    }
+    return r;
+  }
+
+  /**
+   * One goto to the composite of every candidate (Baritone's GoalComposite of GoalThreeBlocks / GoalTwoBlocks /
+   * GoalBlock), dig-through and the dig moves allowed (`allowPlace` for the dig-down move's way back; the
+   * navigator drops it without throwaway blocks), planned in the worker when one is attached. On arrival the
+   * reached member's ore is mined (`takeOre`) or the drop picked up; a goto that never got a segment going
+   * blacklists the nearest candidate (Baritone `blacklistClosestOnFailure`, the whole composite being
+   * "unreachable" otherwise); any other failure counts against the member the body headed for. Returns an end
+   * state (no pickaxe) or undefined to go on.
+   */
+  private async mineComposite(gen: number, pos: Vec3, cands: MineCandidate[]): Promise<MineState | undefined> {
+    const sk = this.d.skills;
+    const feet = cellOf(pos);
+    const hi = headingMember(cands, feet);
+    const head = cands[hi];
+    if (head?.kind === 'ore' && needsPickaxe(head.name) && !hasPickaxe(this.d.inventory.slots)) {
+      this.lastError = `no pickaxe for ${head.name}`;
+      return 'no_pickaxe';
+    }
+    if (cands.some((c) => c.p.y < feet.y)) this.surface ??= { ...feet }; // the way back up at the end (returnUp)
+    const { goal, goals } = compositeOf(this.goalCtx(feet), cands);
+    this.stats.composites++;
+    this.stats.compositeMembers += cands.length;
+    if (head) this.stats.targeted.push({ ...head.p });
+    this.log.info(`mine: composite of ${cands.length}${head ? ` (nearest ${head.name} at ${fmt(head.p)}, ${estimate(feet, head.p).toFixed(0)} blocks; ${this.d.memory.size} seen, ${this.d.memory.recalled} remembered)` : ''}`);
+    this.state = 'walk';
+    const r = await this.gotoComposite(gen, goal, cands);
+    if (!this.alive(gen)) return undefined;
+    const rep = sk.status?.().lastGoto;
+    this.stats.tunnelled += rep?.actions.dig ?? 0;
+    if (r.restart) {
+      this.stats.replans++;
+      return undefined; // the candidates changed on the way: the loop prunes again
+    }
+    const g = r.result;
+    if (!g.ok) {
+      if (g.reason === 'interrupted') return undefined;
+      if (g.reason === 'blacklisted') {
+        for (const c of cands) this.blacklist(c.p); // every member on Track R's blacklist already
+        return undefined;
+      }
+      if (!rep || rep.segments === 0) {
+        // Baritone onTick `calcFailed`: no path to any of them: blacklist the presumably unreachable closest one
+        this.stats.calcFailed++;
+        const n = BLACKLIST_CLOSEST_ON_FAILURE ? nearestCandidate(feet, cands) : undefined;
+        if (n) this.markUnreachable(n, `goto: ${g.reason}, no segment (closest of ${cands.length} blacklisted)`);
+        else if (head) this.fail(head, `goto: ${g.reason}`);
+        return undefined;
+      }
+      if (head) this.fail(head, `goto: ${g.reason}`);
+      return undefined;
+    }
+    const at = this.feetCell() ?? feet;
+    const idx = rep?.reached?.index ?? memberAt(goals, at);
+    const c = idx >= 0 ? cands[idx] : undefined;
+    if (!c) {
+      if (head) this.fail(head, 'arrived at no member of the composite');
+      return undefined;
+    }
+    if (idx !== hi) this.stats.targeted.push({ ...c.p });
+    if (c.kind === 'drop') {
+      this.state = 'collect';
+      const col = await sk.collect(2, 60, { origin: { x: c.p.x + 0.5, y: c.p.y, z: c.p.z + 0.5 }, near: 1.2, filter: (i) => isJobDrop(this.drops, i.name) });
+      if (this.alive(gen)) this.addCollected(col.gained);
+      return undefined;
+    }
+    await this.takeOre(gen, { p: c.p, name: c.name }, (rep?.actions.dig ?? 0) > 0);
+    return undefined;
+  }
+
+  /**
+   * The composite goto with Baritone's rescan: every `rescanTicks` on the way the memory is scanned and the
+   * candidates pruned again; when the member the body heads for (the lowest estimate from where it stands)
+   * is not a candidate any more (mined, blacklisted, something else there) the walk is cancelled and
+   * `restart` set (the loop builds a new composite). Nothing else re-plans: a new candidate waits for the
+   * next loop (Baritone re-validates the whole goal every 5 ticks).
+   */
+  private async gotoComposite(gen: number, goal: AnyGoal, cands: readonly MineCandidate[]): Promise<{ result: SkillResult; restart: boolean }> {
+    const sk = this.d.skills;
+    let settled = false;
+    let restart = false;
+    const p = sk.goto(goal, { allowBreak: true, allowPlace: true, timeoutTicks: 2400 }).finally(() => {
+      settled = true;
+    });
+    const every = this.rescanTicks();
+    if (every > 0) {
+      void (async () => {
+        while (!settled && this.alive(gen)) {
+          await this.d.waitTicks(every);
+          if (settled || !this.alive(gen)) break;
+          const pos = this.d.position();
+          if (!pos) continue;
+          this.d.memory.scan(pos, this.opts?.radius ?? 32);
+          this.stats.scans++;
+          this.stats.scanMs += this.d.memory.lastScanMs;
+          this.stats.rescans++;
+          const now = new Set(this.pruneNow(pos).candidates.map((c) => key(c.p)));
+          const hi = headingMember(cands, cellOf(pos));
+          const h = cands[hi];
+          if (h && !now.has(key(h.p))) {
+            this.log.info(`mine: ${h.name} at ${fmt(h.p)} is no candidate any more: re-planning`);
+            restart = true;
+            sk.cancel();
+            break;
+          }
+        }
+      })();
+    }
+    const result = await p;
+    return { result, restart: restart && !result.ok && result.reason === 'interrupted' };
   }
 
   /**
@@ -814,7 +1085,7 @@ export class MineTask {
    * between blocks; a step into the mined cells when the next block is out of reach), while its kind's
    * quota is open; then every drop of the group. False when the block was alone (the caller collects).
    */
-  private async mineVein(gen: number, t: SeenOre): Promise<boolean> {
+  private async mineVein(gen: number, t: MineTarget): Promise<boolean> {
     const kind = oreKind(t.name);
     const q0 = this.quotas.find((q) => q.names.has(t.name));
     const left = () => (q0 ? q0.want - q0.got : 0);
@@ -1064,11 +1335,23 @@ function newStats(): MineStats {
     tunnels: [],
     veins: [],
     skipped: [],
+    rounds: 0,
+    exploreBlocks: 0,
+    composites: 0,
+    compositeMembers: 0,
+    rescans: 0,
+    replans: 0,
+    walkDug: 0,
+    calcFailed: 0,
   };
 }
 
 function fmt(p: Vec3): string {
   return `${p.x} ${p.y} ${p.z}`;
+}
+
+function cellOf(p: Vec3): Vec3 {
+  return { x: Math.floor(p.x), y: Math.floor(p.y + 1e-6), z: Math.floor(p.z) };
 }
 
 /** What a mining job picks up on sight: ore drops, raw metals, gems and the ore blocks themselves (silk touch). */

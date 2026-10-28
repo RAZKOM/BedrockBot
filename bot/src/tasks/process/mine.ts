@@ -3,6 +3,8 @@
 // running goto / dig is cancelled; a cancelled dig is not counted as a failure); resumed =
 // MineTask.resume() (a fresh scan picks the nearest target again). It ends by itself (n mined, no
 // seen ore left, low health, no pickaxe) or with `!mine stop` / `!stop` / a `!farm`. A death drops it.
+// Track BD: while the job explores for more ore (nothing known, below n) the status line says so with the
+// round and the blocks dug (`mine iron_ore 212/1000: exploring (round 3, 420 blocks)`).
 import type { MineOptions, MineState, MineTask } from '../../skills/mine/miner.ts';
 import { stashFor, type Stash } from '../../skills/container/stash.ts'; // Track AD
 import { minedItem } from '../../skills/items/catalog.ts'; // Track AD
@@ -100,6 +102,8 @@ export class MineProcess extends BaseProcess {
     const etaS = s.mined > 0 && elapsedS > 0 ? ((want - s.mined) * elapsedS) / s.mined : undefined;
     const vein = this.task.vein ? `, vein ${this.task.vein.done}/${this.task.vein.size}` : ''; // Track AQ
     const what = this.task.quotas.length > 1 ? `mine: ${this.task.quotaLine()}` : `mine ${[...this.task.names][0] ?? this.opts.block} ${s.mined}/${want}`; // Track AQ: several kinds
+    const explore = this.controlled ? this.task.exploreLine() : undefined; // Track BD: `mine iron_ore 212/1000: exploring (round 3, 420 blocks)`
+    if (explore) return { line: `${what}: ${explore}`, etaS };
     return { line: `${what} (${state}, ${s.blacklisted.length} skipped${vein})`, etaS };
   }
 }

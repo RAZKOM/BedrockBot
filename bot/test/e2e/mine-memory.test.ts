@@ -176,7 +176,7 @@ describe.skipIf(!E2E)('@bds mine: ore memory survives a restart (Track Z)', () =
     const logDir = mkdtempSync(join(tmpdir(), 'bb-mine-log-'));
     cli = spawn(
       process.execPath,
-      ['src/index.ts', '--task', 'afk', '--walk', '--host', DIG_HOST, '--port', String(DIG_PORT), ...CLI_TARGET_ARGS, '--username', name2, '--no-reconnect', '--log-dir', logDir, '--set', 'mineSeenOnly=on'],
+      ['src/index.ts', '--task', 'afk', '--walk', '--host', DIG_HOST, '--port', String(DIG_PORT), ...CLI_TARGET_ARGS, '--username', name2, '--no-reconnect', '--log-dir', logDir, '--set', 'mineSeenOnly=on', ...(process.env.MINE_MODE === 'baritone' ? ['--set', 'mineMode=baritone'] : [])], // Track BD: MINE_MODE
       { cwd: BOT_DIR, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, BEDROCKBOT_CACHE_DIR: root } },
     );
     cli.stdout?.on('data', (d: Buffer) => (out += d.toString()));

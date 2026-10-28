@@ -36,6 +36,8 @@ import {
 } from './farm-truth.ts';
 
 const F = FEET_Y;
+/** Track BD: `MINE_MODE=baritone` runs the suite in mode baritone. */
+const MINE_MODE = process.env.MINE_MODE === 'baritone' ? 'baritone' : 'v3';
 
 describe.skipIf(!E2E)('@bds mine: legit mining in a cave (7.14)', () => {
   let bot: FarmBot;
@@ -86,7 +88,7 @@ describe.skipIf(!E2E)('@bds mine: legit mining in a cave (7.14)', () => {
     await bot.loadout([['stone_pickaxe', 1]]);
     expect(await pollUntil(() => bot.world.blockAt(buried[3]!)?.name === 'coal_ore' && bot.world.blockAt(lava)?.name === 'lava', 5_000)).toBeGreaterThanOrEqual(0);
     // Track Z: the legit rule is the `mineSeenOnly` option now (default off); this case keeps it on
-    ({ mine } = createMinerFor({ skills: bot.skills, world: bot.world, loop: bot.loop, source: bot.conn, hotbar: bot.hotbar, containers: bot.containers, log: bot.logger }, { seenOnly: () => true }));
+    ({ mine } = createMinerFor({ skills: bot.skills, world: bot.world, loop: bot.loop, source: bot.conn, hotbar: bot.hotbar, containers: bot.containers, log: bot.logger }, { seenOnly: () => true, mode: () => MINE_MODE }));
   }, 180_000);
 
   afterAll(async () => {
@@ -190,7 +192,7 @@ describe.skipIf(!E2E)('@bds mine: legit mining in a cave (7.14)', () => {
     const ground = { x: P.x + 10, y: F, z: P.z };
     for (const p of [...floating, ground]) await truthLoaded(bot.truth, 'set', [p.x, p.y, p.z, 'coal_ore']);
     expect(await pollUntil(() => [...floating, ground].every((p) => bot.world.blockAt(p)?.name === 'coal_ore'), 5_000)).toBeGreaterThanOrEqual(0);
-    const { mine: m3 } = createMinerFor({ skills: bot.skills, world: bot.world, loop: bot.loop, source: bot.conn, hotbar: bot.hotbar, containers: bot.containers, log: bot.logger }, { seenOnly: () => true });
+    const { mine: m3 } = createMinerFor({ skills: bot.skills, world: bot.world, loop: bot.loop, source: bot.conn, hotbar: bot.hotbar, containers: bot.containers, log: bot.logger }, { seenOnly: () => true, mode: () => MINE_MODE });
     const t0 = performance.now();
     let skippedAt: number | undefined;
     const watch = setInterval(() => {
@@ -225,7 +227,7 @@ describe.skipIf(!E2E)('@bds mine: legit mining in a cave (7.14)', () => {
     await bot.teleport({ x: mx + 0.5, y: F, z: mz - 6.5 }, 180);
     expect(await waitName(ore, 'coal_ore')).toBe(true);
     let seenOnly = true;
-    const { mine: m4 } = createMinerFor({ skills: bot.skills, world: bot.world, loop: bot.loop, source: bot.conn, hotbar: bot.hotbar, containers: bot.containers, log: bot.logger }, { seenOnly: () => seenOnly });
+    const { mine: m4 } = createMinerFor({ skills: bot.skills, world: bot.world, loop: bot.loop, source: bot.conn, hotbar: bot.hotbar, containers: bot.containers, log: bot.logger }, { seenOnly: () => seenOnly, mode: () => MINE_MODE });
     const off = await m4.start({ block: 'coal_ore', count: 1 });
     notes.push(`mineSeenOnly on: ${off}, targeted ${JSON.stringify(m4.stats.targeted)}, ore ${await blockName(ore)}`);
     expect(off).toBe('none_left');

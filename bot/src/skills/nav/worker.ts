@@ -172,6 +172,8 @@ function goalPoints(goal: NavGoal, out: { x: number; z: number }[] = []): { x: n
     case 'block':
     case 'near':
     case 'getToBlock':
+    case 'twoBlocks': // Track BD
+    case 'threeBlocks':
       out.push({ x: goal.p.x, z: goal.p.z });
       break;
     case 'xz':

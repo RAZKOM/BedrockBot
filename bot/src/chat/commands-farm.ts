@@ -127,7 +127,7 @@ export function mineEndLine(m: MineTask): string {
     // Track AQ: `mine iron+coal+diamond: iron 4/4, coal 6/6, diamond 2/2 done`
     const head = `mine ${m.quotas.map((q) => q.label).join('+')}: ${m.quotaLine()}`;
     if (m.state === 'done') return `${head} done`;
-    if (m.state === 'none_left') return `${head}, nothing else known${s.unsafe.length + s.skipped.length ? ` (${s.unsafe.length + s.skipped.length} skipped)` : ''}`;
+    if (m.state === 'none_left') return `${head}, nothing else known${s.unsafe.length + s.skipped.length ? ` (${s.unsafe.length + s.skipped.length} skipped)` : ''}${exploredText(m)}`;
     if (m.state === 'stopped') return `${head}, stopped`;
     return `${head}, ${m.state}${m.lastError ? ` (${m.lastError})` : ''}`;
   }
@@ -137,7 +137,7 @@ export function mineEndLine(m: MineTask): string {
     case 'done':
       return `mine ${name}: ${s.mined}/${want} done`;
     case 'none_left':
-      return `mine ${name}: ${s.mined}/${want}, no seen ${name} left${s.unsafe.length ? ` (${s.unsafe.length} skipped as unsafe)` : ''}${s.skipped.length ? ` (${s.skipped.length} skipped: ${s.skipped[s.skipped.length - 1]!.why})` : ''}`; // Track AQ: the skip reason
+      return `mine ${name}: ${s.mined}/${want}, no seen ${name} left${s.unsafe.length ? ` (${s.unsafe.length} skipped as unsafe)` : ''}${s.skipped.length ? ` (${s.skipped.length} skipped: ${s.skipped[s.skipped.length - 1]!.why})` : ''}${exploredText(m)}`; // Track AQ: the skip reason; Track BD: how far it explored
     case 'low_health':
       return `mine ${name}: stopped at ${s.mined}/${want}, health low`;
     case 'no_pickaxe':
@@ -147,6 +147,13 @@ export function mineEndLine(m: MineTask): string {
     default:
       return `mine ${name}: ${m.state} after ${s.mined}/${want}${m.lastError ? ` (${m.lastError})` : ''}`;
   }
+}
+
+/** Track BD: `, explored 3 rounds (420 blocks dug)` when the job ran the explore fallback, else empty. */
+function exploredText(m: MineTask): string {
+  const s = m.stats;
+  if (!s.rounds) return '';
+  return `, explored ${s.rounds} round${s.rounds === 1 ? '' : 's'} (${s.exploreBlocks} blocks dug)`;
 }
 
 export interface FarmCommandDeps {
@@ -167,6 +174,8 @@ export interface FarmCommandDeps {
   mineSeenOnly?: () => boolean;
   /** Track AQ: setting `mineDirect` (default true: direct tunnels and shafts). */
   mineDirect?: () => boolean;
+  /** Track BD: setting `mineMode` (`v3` | `baritone`). */
+  mineMode?: () => string;
   /**
    * Track Z: the afk task's process manager. With it `!farm` and `!mine` are user processes
    * (pre-empted by guard / flee / night and resumed, held by `!pause`, ended by `!stop`, shown by
@@ -230,6 +239,7 @@ export function registerFarmCommands(deps: FarmCommandDeps): FarmCommandsResult 
     ...(deps.mineTunnelLen ? { tunnelLen: deps.mineTunnelLen } : {}),
     ...(deps.mineSeenOnly ? { seenOnly: deps.mineSeenOnly } : {}),
     ...(deps.mineDirect ? { direct: deps.mineDirect } : {}), // Track AQ
+    ...(deps.mineMode ? { mode: deps.mineMode } : {}), // Track BD
   });
   const here = () => {
     const p = mob.position();

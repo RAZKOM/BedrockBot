@@ -71,7 +71,7 @@ describe.skipIf(!E2E)('@bds explore: branch mining when no ore is known (Track A
 
   beforeAll(async () => {
     await prepareServer();
-    bot = await startExploreBot('Branch', {}, { settings: { mineSeenOnly: 'on', mineTunnelLen: '64' } });
+    bot = await startExploreBot('Branch', {}, { settings: { mineSeenOnly: 'on', mineTunnelLen: '64', ...(process.env.MINE_MODE === 'baritone' ? { mineMode: 'baritone' } : {}) } }); // Track BD: MINE_MODE
   }, 120_000);
 
   afterAll(async () => {
