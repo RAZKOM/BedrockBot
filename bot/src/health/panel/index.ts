@@ -23,6 +23,7 @@ import type { Logger } from '../../log.ts';
 import type { RunningTask } from '../../tasks/base.ts';
 import type { BuiltContext } from '../../tasks/context.ts';
 import type { WalkingTask } from '../../tasks/registry.ts';
+import { flyControlOf } from '../../chat/commands-fly.ts'; // Track AU
 import type { ChatLine } from '../../chat/text.ts';
 import type { WorldCache } from '../../world/cache/cache.ts';
 import { mapRoutes, type HealthRoute } from '../map/routes.ts';
@@ -226,6 +227,7 @@ export function setupPanel(d: PanelDeps): Panel {
       // Track AP: inventory and statuses
       inventory: () => built.mobility?.world.inventory,
       saturation: () => saturation,
+      flight: () => flyControlOf(runningTask)?.state(), // Track AU
       weather: () => (weatherKnown ? (thunder ? 'thunder' : rain ? 'rain' : 'clear') : undefined),
       day: () => {
         const t = clock?.time;

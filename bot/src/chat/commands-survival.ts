@@ -18,6 +18,7 @@ import type { PveController } from '../tasks/pve.ts';
 import { Containers } from '../world/containers.ts';
 import type { PacketSource } from '../world/types.ts';
 import type { Chat } from './chat.ts';
+import { ELYTRA, flightKitMemoryOf, flightKitSlots, isElytra, keptKitLine, readKit, ROCKET, type KitInventory } from '../skills/fly/kit.ts'; // Track AU: the flight kit is kept by !drop all / items
 
 export const SURVIVAL_COMMANDS = ['eat', 'equip', 'inv', 'drop'] as const;
 const NEEDS_WALK = 'needs a task that can walk (start with --walk, --home or --target realm)';
@@ -132,7 +133,7 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
   });
   chat.register({
     name: 'drop',
-    help: '<item> [n] | all | items (drop an item, everything, or everything except food, armour, elytra, tools and weapons)',
+    help: '<item> [n] | all | items | flightkit (drop an item, everything, everything except food, armour, tools and weapons, or the flight kit; all and items keep the flight kit)',
     group: 'home', example: '!drop items', auto: 'junk (rotten flesh, string, ...) is dropped when the inventory is full',
     run: ({ reply, args }) => {
       const [item, count] = args;
@@ -140,17 +141,26 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
         reply('usage: !drop <item> [n] | all | items');
         return;
       }
+      if (item === 'flightkit') {
+        // Track AU: the flight kit (elytra, rockets, the fireworks box) is kept by all and items; this drops it
+        void dropFlightKit(kit, deps.mob?.world.inventory, deps.task).then(reply);
+        return;
+      }
       if (item === 'all' || item === 'items') {
         // `all` also sheds the worn armour and the offhand (kit.dropWorn); `items` keeps them on
         const names = new Set<string>();
-        for (const st of deps.mob?.world.inventory.slots.slice(0, 36) ?? []) {
-          if (!st || st.count <= 0) continue;
-          if (item === 'items' && keepOnDropItems(st.name)) continue;
+        const inv = deps.mob?.world.inventory;
+        const flightKit = inv ? flightKitSlots(inv, deps.task) : new Set<number>(); // Track AU: kept by both
+        inv?.slots.slice(0, 36).forEach((st, i) => {
+          if (!st || st.count <= 0) return;
+          if (flightKit.has(i)) return;
+          if (item === 'items' && keepOnDropItems(st.name)) return;
           names.add(st.name);
-        }
-        const worn = item === 'all' ? [120, 119].flatMap((w) => deps.mob?.world.inventory.window(w)?.slots.filter((st) => !!st && st.count > 0) ?? []) : [];
+        });
+        const worn = item === 'all' ? [120, 119].flatMap((w) => deps.mob?.world.inventory.window(w)?.slots.filter((st) => !!st && st.count > 0 && !isElytra(st.name)) ?? []) : [];
+        const keptKit = inv && (flightKit.size > 0 || readKit(inv).elytraWorn) ? keptKitLine(readKit(inv, flightKitMemoryOf(deps.task))) : '';
         if (names.size === 0 && worn.length === 0) {
-          reply(item === 'all' ? 'drop: inventory empty' : 'drop: nothing but food, armour, elytra, tools and weapons');
+          reply(item === 'all' ? `drop: inventory empty${keptKit ? `; ${keptKit}` : ''}` : 'drop: nothing but food, armour, elytra, tools and weapons');
           return;
         }
         void (async () => {
@@ -171,7 +181,7 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
             const w = await kit.dropWorn();
             wornLine = `; worn: ${w.dropped.length > 0 ? `dropped ${w.dropped.join(', ')}` : 'nothing dropped'}${w.refused.length > 0 ? ` (refused: ${w.refused.join(', ')})` : ''}`;
           }
-          reply(`dropped ${dropped} items of ${kinds} kinds${failed ? ` (stopped at ${failed})` : ''}${wornLine}`);
+          reply(`dropped ${dropped} items of ${kinds} kinds${failed ? ` (stopped at ${failed})` : ''}${wornLine}${keptKit ? `; ${keptKit}` : ''}`);
         })();
         return;
       }
@@ -190,9 +200,27 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
   return kit;
 }
 
+/** Track AU: `!drop flightkit`: the elytra (worn too), every rocket and the fireworks box. */
+async function dropFlightKit(kit: SurvivalKit, inv: KitInventory | undefined, task: object | undefined): Promise<string> {
+  if (!inv) return 'drop: no inventory';
+  const k = readKit(inv, flightKitMemoryOf(task));
+  const dropped: string[] = [];
+  if (k.rockets > 0) dropped.push(`${(await kit.drop(ROCKET)).dropped} rockets`);
+  if (k.boxSlot >= 0) {
+    const name = inv.slots[k.boxSlot]?.name;
+    if (name) dropped.push(`the fireworks box (${(await kit.drop(name, 1)).dropped})`);
+  }
+  if (k.elytraSlot >= 0) dropped.push(`${(await kit.drop(ELYTRA)).dropped} elytra`);
+  if (k.elytraWorn) {
+    const w = await kit.dropWorn();
+    dropped.push(w.dropped.includes('elytra') ? 'the worn elytra' : 'the worn elytra: refused');
+  }
+  return dropped.length ? `dropped the flight kit: ${dropped.join(', ')}` : 'drop: no flight kit (elytra, rockets, fireworks box)';
+}
+
 /** `!drop items` keeps these: anything with durability (tools, weapons, armour, elytra, shields), armour, real food (not rotten flesh and the like), totems, shulker boxes, ender chests. */
 const isRealFood = (n: string): boolean => { const f = foodInfo(n); return f !== undefined && !f.bad; };
 export function keepOnDropItems(name: string): boolean {
   const n = name.startsWith('minecraft:') ? name.slice(10) : name;
-  return maxDurability(n) !== undefined || armourSlotOf(n) !== undefined || isRealFood(n) || n === 'totem_of_undying' || n.endsWith('shulker_box') || n === 'ender_chest';
+  return maxDurability(n) !== undefined || armourSlotOf(n) !== undefined || isRealFood(n) || n === 'totem_of_undying' || n.endsWith('shulker_box') || n === 'ender_chest' || n === ROCKET; // Track AU: the rockets
 }

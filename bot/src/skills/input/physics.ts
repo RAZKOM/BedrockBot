@@ -324,7 +324,19 @@ export function stepBody(prev: BodyState, cmd: MoveCommand, world: BlockQuery): 
   const wet = touch.water ? { water: liquidContact(world, s.pos, height, LIQUID.waterInset).water, lava: touch.lava } : touch;
   s.inWater = wet.water;
   s.inLava = wet.lava && !wet.water;
-  if (wet.water || wet.lava) return stepInLiquid(s, cmd, world, height, wet.water ? LIQUID.water : LIQUID.lava, prev);
+  // Track AU: a firework boost that started before this tick (recorded in the input for replays)
+  if (cmd.boostStart !== undefined) s.boostTicks = cmd.boostStart;
+  if (wet.water || wet.lava) {
+    s.gliding = false; // water ends a glide (BDS does the same)
+    s.boostTicks = 0;
+    return stepInLiquid(s, cmd, world, height, wet.water ? LIQUID.water : LIQUID.lava, prev);
+  }
+  // Track AU: the elytra glide starts on an airborne tick the glide is wanted (`glide: true`) and keeps
+  // going until ground or water contact: BDS ignores a voluntary stop_gliding in the air (measured), so
+  // only an explicit `glide: false` (the loop, when the server's flag ends or refuses it) stops the model
+  s.gliding = cmd.glide === false ? false : (prev.gliding === true || cmd.glide === true) && !s.onGround;
+  if (!s.gliding) s.boostTicks = 0;
+  if (s.gliding) return stepGliding(s, cmd, world, prev);
 
   let accel: number;
   let inertia: number;
@@ -502,6 +514,104 @@ export function backOffFromEdge(world: BlockQuery, p: Vec3, dx: number, dz: numb
     dz = towardsZero(dz);
   }
   return { x: f32(dx), z: f32(dz) };
+}
+
+/**
+ * Track AU: the elytra glide, measured on BDS 1.26.60.6 (docs/flight.md "Physics"): the vanilla
+ * (Java) fall-flying formula, bit for bit in float32, with the firework boost applied inside the
+ * step after the lift, dive and heading terms and BEFORE the drag (per-tick server samples: every
+ * boosted tick within 0.001 of the server; the Java order "boost in the rocket's tick" is off by 0.01
+ * per tick). Per tick, with the look vector l (unit, pitch +90 = down), h = horizontal speed:
+ *   vy += 0.08 * (-1 + cos(pitch)^2 * 0.75)                              (lift: less gravity when level)
+ *   if vy < 0:  d = -0.1 * vy * cos^2;   v += (lx / cos, 1, lz / cos) * d  (a dive trades height for speed)
+ *   if pitch < 0 (looking up):  d = h * -sin(pitch) * 0.04;  v += (-lx / cos * d, 3.2 * d, -lz / cos * d)
+ *   v.xz += (l.xz / cos * h - v.xz) * 0.1                                 (the heading follows the look)
+ *   boost (while a rocket lives): v += l * 0.1 + (l * 1.5 - v) * 0.5
+ *   v *= (0.99, 0.98, 0.99); move with a 0.6-high box (the server sets boundingbox_height 0.6)
+ * Measured: level flight sinks 0.15 to 0.17 blocks/tick, a flight-duration-1 rocket boosts 12 to 18
+ * ticks (`boostTicks` 15 is the nominal; the rocket's remove_entity ends it) and pulls the speed
+ * towards 1.7 blocks/tick along the look. The glide ends on the ground or in water.
+ */
+export const GLIDE = Object.freeze({
+  gravity: 0.08,
+  lift: 0.75,
+  dive: 0.1,
+  pull: 0.04,
+  pullLift: 3.2,
+  align: 0.1,
+  dragH: 0.99,
+  dragV: 0.98,
+  /** Collision box height while gliding. */
+  height: 0.6,
+  boostPush: 0.1,
+  boostTarget: 1.5,
+  boostGain: 0.5,
+  /** Nominal boost ticks of one flight-duration-1 rocket (measured 12 to 18 on bds-fly, median 15; vanilla 10 + random 0..11); the rocket's remove_entity ends it early or late. */
+  boostTicks: 15,
+});
+
+/** Unit look vector in float32 for Bedrock yaw / pitch degrees (pitch +90 = down), with sin / cos(pitch). */
+export function lookVector(yawDeg: number, pitchDeg: number): { x: number; y: number; z: number; cos: number; sin: number } {
+  const yaw = f32(f32(yawDeg) * f32(Math.PI / 180));
+  const pitch = f32(f32(pitchDeg) * f32(Math.PI / 180));
+  const cp = f32(Math.cos(pitch));
+  const sp = f32(Math.sin(pitch));
+  return { x: f32(-f32(Math.sin(yaw)) * cp), y: f32(-sp), z: f32(f32(Math.cos(yaw)) * cp), cos: cp, sin: sp };
+}
+
+/** One glide tick on the velocity alone (no collisions): the formula above, float32. */
+export function glideVelocity(vel: Vec3, yawDeg: number, pitchDeg: number, boosting: boolean): Vec3 {
+  const l = lookVector(yawDeg, pitchDeg);
+  let vx = vel.x;
+  let vy = vel.y;
+  let vz = vel.z;
+  const h = f32(Math.sqrt(vx * vx + vz * vz));
+  const cos2 = f32(l.cos * l.cos);
+  vy = f32(vy + f32(GLIDE.gravity * f32(-1 + f32(cos2 * GLIDE.lift))));
+  if (vy < 0 && l.cos > 0) {
+    const d = f32(f32(vy * -GLIDE.dive) * cos2);
+    vx = f32(vx + f32(f32(l.x * d) / l.cos));
+    vy = f32(vy + d);
+    vz = f32(vz + f32(f32(l.z * d) / l.cos));
+  }
+  if (pitchDeg < 0 && l.cos > 0) {
+    const d = f32(f32(h * -l.sin) * GLIDE.pull);
+    vx = f32(vx + f32(f32(-l.x * d) / l.cos));
+    vy = f32(vy + f32(d * GLIDE.pullLift));
+    vz = f32(vz + f32(f32(-l.z * d) / l.cos));
+  }
+  if (l.cos > 0) {
+    vx = f32(vx + f32(f32(f32(f32(l.x / l.cos) * h) - vx) * GLIDE.align));
+    vz = f32(vz + f32(f32(f32(f32(l.z / l.cos) * h) - vz) * GLIDE.align));
+  }
+  if (boosting) {
+    vx = f32(vx + f32(f32(l.x * GLIDE.boostPush) + f32(f32(f32(l.x * GLIDE.boostTarget) - vx) * GLIDE.boostGain)));
+    vy = f32(vy + f32(f32(l.y * GLIDE.boostPush) + f32(f32(f32(l.y * GLIDE.boostTarget) - vy) * GLIDE.boostGain)));
+    vz = f32(vz + f32(f32(l.z * GLIDE.boostPush) + f32(f32(f32(l.z * GLIDE.boostTarget) - vz) * GLIDE.boostGain)));
+  }
+  return { x: f32(vx * GLIDE.dragH), y: f32(vy * GLIDE.dragV), z: f32(vz * GLIDE.dragH) };
+}
+
+/** Track AU: one gliding tick of the body (velocity by `glideVelocity`, then the 0.6-high box moves). */
+function stepGliding(s: BodyState, cmd: MoveCommand, world: BlockQuery, prev: BodyState): StepResult {
+  const boosting = (s.boostTicks ?? 0) > 0;
+  const v = glideVelocity(s.vel, cmd.yaw, cmd.pitch, boosting);
+  if (boosting) s.boostTicks = (s.boostTicks ?? 0) - 1;
+  const m = moveBody(world, s.pos, v, false, GLIDE.height);
+  if (!m) return { state: cloneBody(prev), jumped: false, simulated: false };
+  s.pos = { x: f32(s.pos.x + m.dx), y: f32(s.pos.y + m.dy), z: f32(s.pos.z + m.dz) };
+  s.collidedHorizontally = m.collidedHorizontally;
+  s.collidedVertically = m.collidedVertically;
+  s.onGround = m.onGround;
+  if (m.dx !== v.x) v.x = 0;
+  if (m.dz !== v.z) v.z = 0;
+  if (m.dy !== v.y) v.y = 0;
+  s.vel = v;
+  if (s.onGround) {
+    s.gliding = false; // ground contact ends the glide (stop_gliding goes out)
+    s.boostTicks = 0;
+  }
+  return { state: s, jumped: false, simulated: true };
 }
 
 /** The own engine as a PhysicsEngine. */

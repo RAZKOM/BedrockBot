@@ -57,6 +57,7 @@ export const STEP_SCHEMAS = {
   explore: z.strictObject({ command: z.literal('explore'), radius: z.number().int().min(16).max(1024).optional() }), // Track AI: !explore
   bring: z.strictObject({ command: z.literal('bring'), item: blockName, count: z.number().int().min(1).max(2304).optional(), to: playerName.optional() }), // Track AS: !bring <item> [n] [to <player>|home]
   ...{ nether: z.strictObject({ command: z.literal('nether') }), overworld: z.strictObject({ command: z.literal('overworld') }) }, // Track AT: !nether, !overworld
+  fly: z.strictObject({ command: z.literal('fly'), to: z.union([z.literal('home'), z.literal('me'), wpName]).optional(), player: playerName.optional(), x: coordXZ.optional(), y: coordY.optional(), z: coordXZ.optional(), land: z.boolean().optional() }), // Track AU: !fly <x y z> | <waypoint> | <player> | home, !land
   question: z.strictObject({ command: z.literal('question'), text: z.string().min(1).max(200) }),
   answer: z.strictObject({ command: z.literal('answer'), text: z.string().min(1).max(200) }), // Track AM: a reply, nothing runs; the only step
 } as const;
@@ -97,6 +98,7 @@ export const StepSchema = z.discriminatedUnion('command', [
   STEP_SCHEMAS.explore, // Track AI
   STEP_SCHEMAS.bring, // Track AS
   ...[STEP_SCHEMAS.nether, STEP_SCHEMAS.overworld], // Track AT
+  STEP_SCHEMAS.fly, // Track AU
   STEP_SCHEMAS.question,
   STEP_SCHEMAS.answer, // Track AM
 ]);
@@ -150,6 +152,7 @@ export const COMMAND_SPECS: Record<Exclude<StepKind, TalkKind>, CommandSpec> = {
   explore: { chat: 'explore', wait: 'process', fail: /^explore: / }, // Track AI
   bring: { chat: 'bring', wait: 'process', done: /^brought /, fail: /^bring: / }, // Track AS
   ...{ nether: { chat: 'nether', wait: 'process', done: /^(in the nether|already in the nether)/, fail: /^nether: / }, overworld: { chat: 'overworld', wait: 'process', done: /^(in the overworld|already in the overworld)/, fail: /^overworld: / } }, // Track AT
+  fly: { chat: 'fly', wait: 'process', done: /^landed /, fail: /^(fly: |elytra worn: |land: )/ }, // Track AU
 };
 
 /** Replies that end any step and the plan. */
@@ -223,6 +226,11 @@ export function stepCommand(s: Step): string {
       return `goto ${s.waypoint}`;
     case 'goto_xyz':
       return `goto ${s.x} ${s.y} ${s.z}`;
+    case 'fly': // Track AU
+      if (s.land) return 'land';
+      if (s.x !== undefined && s.y !== undefined && s.z !== undefined) return `fly ${s.x} ${s.y} ${s.z}`;
+      if (s.player) return `fly ${s.player}`;
+      return `fly ${s.to ?? 'me'}`;
     case 'come':
     case 'follow':
       return s.player ? `${s.command} ${s.player}` : s.command;

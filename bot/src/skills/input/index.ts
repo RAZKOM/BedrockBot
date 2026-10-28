@@ -8,11 +8,12 @@ export type {
   TeleportEvent,
   ReadyEvent,
   MotionEvent,
+  GlideEvent,
   SetEntityMotionPacket,
 } from './inputLoop.ts';
-export { PHYSICS, LIQUID, CLIMB, ownEngine, stepBody, moveBody, moveVectorOf, playerBox, solidBoxes, yawSinCos, groundFriction, liquidContact, onClimbable, backOffFromEdge } from './physics.ts'; // Track AJ: CLIMB, onClimbable, backOffFromEdge
+export { PHYSICS, LIQUID, CLIMB, GLIDE, ownEngine, stepBody, moveBody, moveVectorOf, playerBox, solidBoxes, yawSinCos, groundFriction, liquidContact, onClimbable, backOffFromEdge, glideVelocity, lookVector } from './physics.ts'; // Track AJ: CLIMB, onClimbable, backOffFromEdge; Track AU: GLIDE, glideVelocity, lookVector
 export type { Box, MoveResult } from './physics.ts';
-export { buildInputFlags, buildAuthInput, viewDirection } from './flags.ts';
+export { buildInputFlags, buildAuthInput, viewDirection, GLIDE_START_FLAGS } from './flags.ts'; // Track AU: GLIDE_START_FLAGS
 export type { FlagContext } from './flags.ts';
 export { applyCorrection, applyMotion, applyTeleport, serverStateFromCorrection, serverStateFromMovePlayer } from './history.ts';
 export type { HistoryEntry, ServerState, CorrectionOutcome, TeleportOutcome, MotionOutcome } from './history.ts';

@@ -180,6 +180,7 @@ export const PANEL_SCRIPT = String.raw`(() => {
       const face = $('clock'); if (face) { const c = 'clock ' + (v.phase || ''); if (face.getAttribute('class') !== c) face.setAttribute('class', c); }
     }
     text('v-weather', v.weather || 'unknown');
+    text('v-flight', v.flight || '-');
     text('v-deaths', v.deaths == null ? '-' : String(v.deaths));
     text('v-lastdeath', v.lastDeath ? v.lastDeath.cause + (v.lastDeath.messages.length ? ' (' + v.lastDeath.messages.join(', ') + ')' : '') + ', ' + new Date(v.lastDeath.ts).toLocaleTimeString() : 'none');
   }

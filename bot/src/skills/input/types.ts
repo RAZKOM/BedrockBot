@@ -38,6 +38,10 @@ export interface LiquidCell {
  * - `pitch`: Bedrock degrees, +90 = straight down, -90 = straight up
  * - `jump`: the jump key is held (the body jumps when it is on the ground and the cooldown allows)
  * - `sneak`, `sprint`: the keys are held
+ * - `glide` (Track AU): the elytra glide is wanted; the body glides from the first airborne tick on
+ *   (`start_gliding` with a jump press goes out) until it touches the ground or water
+ * - `boostStart` (Track AU): a firework rocket was used before this tick: the glide boost runs for
+ *   this many ticks from this tick on (recorded in the history so replays reproduce it)
  */
 export interface MoveCommand {
   forward: number;
@@ -47,6 +51,8 @@ export interface MoveCommand {
   jump: boolean;
   sneak: boolean;
   sprint: boolean;
+  glide?: boolean;
+  boostStart?: number;
 }
 
 export const IDLE_COMMAND: Readonly<MoveCommand> = Object.freeze({
@@ -74,6 +80,10 @@ export interface BodyState {
   /** The body touched water (lava) at the start of the last tick. Optional for older callers. */
   inWater?: boolean;
   inLava?: boolean;
+  /** Track AU: the body glides with the elytra (physics.ts GLIDE); ends on ground or water contact. */
+  gliding?: boolean;
+  /** Track AU: firework boost ticks left (0 = none). */
+  boostTicks?: number;
 }
 
 export interface StepResult {

@@ -27,6 +27,8 @@ export interface UnloadSlot {
   count: number;
   /** Shulker boxes: slots used inside (NBT `Items`), 0 = empty. */
   boxUsed?: number;
+  /** Track AU: the flight kit's fireworks box (never unloaded, never the box chest's). */
+  flightKit?: boolean;
 }
 
 /** A target container as the planner sees it (from the chest memory). */
@@ -52,7 +54,7 @@ export interface UnloadMove {
   rule: Rule;
 }
 
-export type KeepReason = 'kept' | 'reserve' | 'stash_box';
+export type KeepReason = 'kept' | 'reserve' | 'stash_box' | 'flight_kit'; // Track AU: flight_kit
 
 export interface UnloadPlan {
   moves: UnloadMove[];
@@ -193,6 +195,10 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
   let boxKept = !(opts.keepBox ?? true);
   for (const s of [...slots].sort((a, b) => a.slot - b.slot)) {
     if (s.count <= 0) continue;
+    if (s.flightKit) {
+      keep(s.name, s.count, 'flight_kit'); // Track AU: the fireworks box stays with the bot
+      continue;
+    }
     if (isShulkerBox(s.name)) {
       if ((s.boxUsed ?? 0) > 0) {
         if (opts.all) plan.fullBoxes.push(s.slot);

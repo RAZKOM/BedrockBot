@@ -29,10 +29,12 @@ control gets it).
 
 | Priority | Process | Kind | Wants control while | Pre-empted (pause) | Resumed |
 |---|---|---|---|---|---|
+| 101 | `flight` (Track AU, docs/flight.md) | auto | a flight is in the air (from the takeoff to the body standing again): nothing pre-empts a glide; the controller itself lands when the health drops under `fleeHealth`, when the elytra nears `toolWearLimit` + 20 uses, on `!fly stop` / `!land` / `!stop` | never | - |
 | 100 | `flee` | auto | health < `fleeHealth` with a hostile within 16, or a creeper within 8 with health < 10 (not while night safety walks to the shelter; a lone melee mob the bot can still take 3 hits from is duelled instead); runs away to 16 blocks first, then home or the shelter when the threat is not in the way, eating once 8 blocks clear; recovery until `fleeHealth` + 6 for up to 60 s (docs/pve.md "Flee v2"); after a flight a cooldown keeps it from starting again at once, except an urgent one: a hard trigger with the threat within 6 blocks (`FLEE_URGENT`), away from home / the shelter and not after a cornered end, bypasses the cooldown | (only a death) | walks again to the same place |
 | 85 | `guard` defending in place | auto | a hostile within reach while inside the night shelter or while the health is low | fight cancelled | a new target is picked |
 | 80 | `night` | auto | dusk to dawn with a shelter set: walking there, a retreat due, or inside (it holds the bot there) | the retreat is cancelled, not counted as a failed attempt (`waiting`) | the retreat is planned again |
 | 60 | `guard` fight | auto | guard on and a hostile within `guardRadius` of home (of the bot while a command runs); not while a kill job exists | fight cancelled (the episode ends) | a new target is picked |
+| 40 | `fly` (Track AU) | user | the ground work of a flight: the refill from the fireworks box, the elytra on, the takeoff; the landing's chestplate swap and refill | the ground step is cancelled (the flight itself is the `flight` process above) | the ground step runs again |
 | 40 | `goto` `follow` `come` `kill` `gather` | user | until done or stopped | navigator / follower / fight cancelled, gather paused (`GatherWoodTask.pause`) | goto planned again, follow restarted, come re-aimed, kill looks for its next target, gather goes on from find-tree |
 | 30 | `food` chore (Track X, docs/food.md) | auto | by day, with no user process, while the food carried is below `foodMin` and a target is in range | the hunt or the cooking is cancelled, the job remembers its progress | continues the job; backs off 10 min after an empty attempt |
 | 20 | `home` | auto | requested (after a guard fight with nothing else queued, at dawn, after a respawn) and not yet home | navigator cancelled | planned again |
@@ -115,6 +117,12 @@ its plan yet; `navRemaining` reads its `active` record read-only (an open issue 
 | `protectRadius` | 48 | number | the base: nothing is dug or broken by a walk, a `!mine` approach or a sight-line dig within this distance of home (0 = off). Built blocks (planks, bricks, stairs, slabs, glass, doors, wool, concrete, bookshelves, tables, ...: `isBuiltBlock` in terrain/classify.ts) are never dug anywhere. 2026-10-30: `!mine` dug through the owner's house |
 | `digPenalty` | 60 | number | ticks added per block a route digs through, on top of the break time: a walk of about 13 extra blocks beats one dug block, so a reachable spot is walked to and digging is for the far or the enclosed |
 | `guardReach` | 24 | number | guard (Track AO): a hostile not within reach is fought only when a probe plan (4000 nodes, 300 ms, no digging) reaches a cell within 1.5 blocks of it in at most this many path blocks; no path = ignored 30 s with the reason (`!status` shows them); 0 = the old terrain rule |
+| `autoFly` | on | boolean | flight (Track AU, docs/flight.md): `!come` / `!goto` fly with the elytra instead of walking over `flyMin` blocks when the kit is ready |
+| `flyMin` | 200 | number | flight: the distance from which they fly |
+| `flyClearance` | 12 | number | flight: the cruise clears every known column under the line by this |
+| `flyCruise` | 25 | number | flight: the cruise height above the higher end (capped by what the glide down needs) |
+| `flyGoArounds` | 4 | number | flight: approaches flown again after a miss, then the nearest safe ground |
+| `fireworksMin` | 16 | number | flight: fewer rockets in the hotbar -> refill from the fireworks box; the low-supply line when the box is empty too |
 | `guardWhileWalking` | near | text | guard while a user process walks (Track AO): `reach` fights only mobs within reach, `near` adds melee mobs, creepers and archers aiming at the bot within 6 path blocks, `all` the old behaviour |
 | `mineBranchY` | auto | text | branch mining (Track AI): `auto` picks the ore's best level (coal 40, iron 16, copper 48, gold -16, redstone -58, lapis 0, diamond -58, emerald 232 in mountains), a number overrides |
 | `exploreRadius` | 128 | number | `!explore` without a radius: the area walked around home (16..1024) |

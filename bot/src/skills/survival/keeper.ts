@@ -17,6 +17,7 @@ import { armourSlotOf } from './armour.ts';
 import { foodInfo } from './eat.ts';
 import { inventorySlot, isOk, slotInfo, type StackRequests } from './screen.ts';
 import { maxDurability } from './tools.ts';
+import { isFlightKitItem } from '../fly/kit.ts'; // Track AU: the flight kit is never dropped
 
 export const DEFAULT_THROWAWAY_MIN = 16;
 export const THROWAWAY_BLOCKS: readonly string[] = ['cobblestone', 'dirt', 'cobbled_deepslate', 'netherrack'];
@@ -28,6 +29,7 @@ const bare = (n: string): string => (n.startsWith('minecraft:') ? n.slice(10) : 
 /** Items the keeper never drops by itself (a `!drop` from the owner still can). */
 export function neverDrop(name: string): boolean {
   const n = bare(name);
+  if (isFlightKitItem(n)) return true; // Track AU: the elytra and the firework rockets (the fireworks box is a shulker box: never junk)
   if (maxDurability(n) !== undefined) return true; // tools, weapons, armour, shields ...
   if (armourSlotOf(n) !== undefined) return true;
   const food = foodInfo(n);

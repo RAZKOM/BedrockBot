@@ -9,6 +9,7 @@ import { BotSkills } from '../skills/index.ts';
 import { InputLoop, flatWorld } from '../skills/input/index.ts';
 import type { SkillResult } from '../skills/types.ts';
 import { World } from '../world/index.ts';
+import { wearsElytra } from '../skills/survival/armour.ts'; // Track AU
 import type { DeathRecord, RespawnHook } from './respawn.ts';
 
 export interface Mobility {
@@ -24,7 +25,7 @@ export function createMobility(conn: Connection, opts: { version: string; log?: 
   const log = opts.log ?? silentLogger;
   const world = new World(conn, { version: opts.version, logger: log });
   // flatWorld() until the skills point the loop at the world model (BotSkills does that).
-  const loop = new InputLoop(conn, { world: flatWorld(), logger: log, canSprint: () => world.self.food > 6 });
+  const loop = new InputLoop(conn, { world: flatWorld(), logger: log, canSprint: () => world.self.food > 6, canGlide: () => wearsElytra(world.inventory.window(120)?.slots[1]?.name) }); // Track AU: the glide needs the elytra in the chest slot
   const skills = new BotSkills({ loop, world, logger: log });
   loop.start();
   return {

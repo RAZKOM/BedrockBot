@@ -63,11 +63,24 @@ export function buildInputFlags(ctx: FlagContext): string[] {
   if (state.sneaking && !wasSneaking) flags.push('start_sneaking');
   if (!state.sneaking && wasSneaking) flags.push('stop_sneaking');
 
+  // Track AU: the elytra glide. BDS 1.26.60 starts a glide only when `start_gliding` comes with a jump
+  // press (the vanilla client presses jump in the air; measured on bds-fly: the flag alone is ignored,
+  // player_action start_glide too), and confirms it with the `gliding` actor flag. `stop_gliding` on
+  // the tick the glide ends (ground, water).
+  const wasGliding = ctx.prevState?.gliding ?? false;
+  if (state.gliding === true && !wasGliding) {
+    for (const f of GLIDE_START_FLAGS) if (!flags.includes(f)) flags.push(f);
+  }
+  if (state.gliding !== true && wasGliding) flags.push('stop_gliding');
+
   if (state.collidedVertically || state.onGround) flags.push('vertical_collision');
   if (state.collidedHorizontally) flags.push('horizontal_collision');
   if (ctx.handledTeleport) flags.push('handled_teleport');
   return flags;
 }
+
+/** Track AU: what the tick that starts a glide carries (start_gliding plus the jump press BDS needs). */
+export const GLIDE_START_FLAGS: readonly string[] = ['jump_down', 'jumping', 'want_up', 'jump_current_raw', 'jump_pressed_raw', 'start_gliding', 'start_jumping'];
 
 /** Unit view vector for Bedrock yaw/pitch degrees (pitch +90 = down). */
 export function viewDirection(yawDeg: number, pitchDeg: number): { x: number; y: number; z: number } {

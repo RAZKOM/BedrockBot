@@ -98,6 +98,13 @@ export const SETTING_DEFS = {
   portalRadius: { kind: 'number', default: 64, min: 8, max: 256, integer: true, unit: 'blocks', description: '!nether / !overworld: search radius for a nether portal block when no `portal` waypoint of this dimension is known' }, // Track AT
   guardReach: { kind: 'number', default: 24, min: 0, max: 64, integer: true, unit: 'path blocks', description: 'guard: a hostile not within reach is fought only when the planner finds a walk to it of at most this length (else ignored for 30 s); 0 = no path check' }, // Track AO
   guardWhileWalking: { kind: 'text', default: 'near', values: 'reach|near|all', parse: (raw: string) => { const v = raw.trim().toLowerCase(); if (v !== 'reach' && v !== 'near' && v !== 'all') throw new SettingError(`guardWhileWalking must be reach, near or all, got "${raw}"`); return v; }, description: 'guard during a walk (come, follow, goto, get, unload, build, ...): reach = only mobs within reach; near = also melee mobs, creepers and archers aiming at me within 6 path blocks; all = as when idle' }, // Track AO
+  // Track AU: Elytra flight (docs/flight.md)
+  autoFly: { kind: 'boolean', default: true, description: 'come / goto fly with the elytra instead of walking when the target is more than flyMin blocks away and the flight kit is ready (elytra, rockets or the fireworks box)' },
+  flyMin: { kind: 'number', default: 200, min: 20, max: 5000, integer: true, unit: 'blocks', description: 'autoFly: fly instead of walking from this distance on' },
+  flyClearance: { kind: 'number', default: 12, min: 2, max: 64, integer: true, unit: 'blocks', description: 'flight: cruise at least this far above every known column under the straight line (unknown columns count as the highest known)' },
+  flyCruise: { kind: 'number', default: 25, min: 5, max: 120, integer: true, unit: 'blocks', description: 'flight: the cruise height above the higher end of the flight (the glide down to the landing is planned from it)' },
+  flyGoArounds: { kind: 'number', default: 4, min: 0, max: 10, integer: true, unit: 'tries', description: 'flight: approaches that miss are flown again at most this often (one rocket each), then it lands on the nearest safe ground and says so' },
+  fireworksMin: { kind: 'number', default: 16, min: 0, max: 64, integer: true, unit: 'rockets', description: 'flight: fewer rockets in the hotbar than this -> refill from the fireworks box before a flight and after a landing; ask the owner once when the box is empty too' },
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;

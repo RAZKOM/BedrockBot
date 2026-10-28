@@ -24,6 +24,7 @@ import { registerExploreCommands } from '../chat/commands-explore.ts'; // Track 
 import { registerPanelCommands } from '../chat/commands-panel.ts'; // Track AR
 import { registerBringCommands } from '../chat/commands-bring.ts'; // Track AS
 import { registerPortalCommands } from '../chat/commands-portal.ts'; // Track AT
+import { registerFlyCommands } from '../chat/commands-fly.ts'; // Track AU
 import { formatChatLine } from '../chat/text.ts';
 import type { RuntimeSettings } from '../config/settings.ts';
 import { settingsFromValues } from '../config/settings.ts';
@@ -355,6 +356,7 @@ export const afkTask: TaskDefinition = {
       registerPanelCommands, // Track AR: !select, !offhand (the control panel's inventory menu)
       (d) => void registerBringCommands(d, { logger: ctx.logger('bring') }), // Track AS: !bring, the !get stock hint (after !get and the home logistics)
       registerPortalCommands, // Track AT: !nether, !overworld, !portal, the per-dimension rules, the fire escape (docs/nether.md)
+      (d) => void registerFlyCommands(d, { containers, logger: ctx.logger('fly') }), // Track AU: !fly, !land, the automatic flight of !come / !goto, the flight kit (docs/flight.md)
     ];
     for (const register of registrations) register(deps);
     return task;
