@@ -54,6 +54,29 @@ export function parseBlockText(raw: string, key: string): string {
   return n.join(' ');
 }
 
+/** Track AW: `iron_ingot 9, diamond 4` / `none` -> the same, normalised (names without the namespace, whole counts). */
+export function parseReserveText(raw: string, key: string): string {
+  const s = raw.trim().toLowerCase();
+  if (s === 'none' || s === '') return 'none';
+  const parts = s.split(/\s*,\s*/).map((part) => {
+    const m = /^(?:minecraft:)?([a-z][a-z0-9_]{0,63})\s+(\d{1,5})$/.exec(part.trim());
+    if (!m) throw new SettingError(`${key} must be "item n[, item n]" or none, got "${raw}"`);
+    return `${m[1]} ${Number(m[2])}`;
+  });
+  return parts.join(', ');
+}
+
+/** Track AW: the reserve text as a map (item -> count). */
+export function parseReserve(text: string): Map<string, number> {
+  const out = new Map<string, number>();
+  if (!text || text === 'none') return out;
+  for (const part of text.split(',')) {
+    const [name, n] = part.trim().split(/\s+/);
+    if (name && n !== undefined && Number.isFinite(Number(n))) out.set(name, Number(n));
+  }
+  return out;
+}
+
 /**
  * Every runtime setting. Placeholders (read by later tracks) are marked; adding one is one entry here
  * plus the reader calling `settings.get(key)`.
@@ -98,6 +121,9 @@ export const SETTING_DEFS = {
   portalRadius: { kind: 'number', default: 64, min: 8, max: 256, integer: true, unit: 'blocks', description: '!nether / !overworld: search radius for a nether portal block when no `portal` waypoint of this dimension is known' }, // Track AT
   guardReach: { kind: 'number', default: 24, min: 0, max: 64, integer: true, unit: 'path blocks', description: 'guard: a hostile not within reach is fought only when the planner finds a walk to it of at most this length (else ignored for 30 s); 0 = no path check' }, // Track AO
   guardWhileWalking: { kind: 'text', default: 'near', values: 'reach|near|all', parse: (raw: string) => { const v = raw.trim().toLowerCase(); if (v !== 'reach' && v !== 'near' && v !== 'all') throw new SettingError(`guardWhileWalking must be reach, near or all, got "${raw}"`); return v; }, description: 'guard during a walk (come, follow, goto, get, unload, build, ...): reach = only mobs within reach; near = also melee mobs, creepers and archers aiming at me within 6 path blocks; all = as when idle' }, // Track AO
+  // Track AW: crafting (docs/crafting.md)
+  craftReserve: { kind: 'text', default: 'none', values: 'item n[, item n]|none', parse: (raw: string) => parseReserveText(raw, 'craftReserve'), description: 'crafting / compaction: never consume below this many of an item (`iron_ingot 9, diamond 4`); none = no reserve (tools, armour, food and the flight kit are never consumed anyway)' }, // Track AW
+  compactOnUnload: { kind: 'boolean', default: true, description: '!unload: when a chest cannot take a load of raw iron, ingots, gems, coal, redstone or lapis, craft them into blocks (9 -> 1) first' }, // Track AW
   // Track AU: Elytra flight (docs/flight.md)
   autoFly: { kind: 'boolean', default: true, description: 'come / goto fly with the elytra instead of walking when the target is more than flyMin blocks away and the flight kit is ready (elytra, rockets or the fireworks box)' },
   flyMin: { kind: 'number', default: 200, min: 20, max: 5000, integer: true, unit: 'blocks', description: 'autoFly: fly instead of walking from this distance on' },
