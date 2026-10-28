@@ -46,6 +46,7 @@ target; several kinds with quotas in one trip (`!mine iron_ore 8 coal_ore 16`, `
 | `bot/src/skills/mine/tunnel.ts` | Track AQ: `planTunnel` (the direct tunnel / shaft plan on the world model), `shaftRule`, `chooseTunnel`, `clearStep` (the step primitive, also branch mining's), `runTunnel`, `stairStep` / `flatStep` / `shaftStep` |
 | `bot/src/skills/mine/vein.ts` | Track AQ: `veinFrom` (18-connected flood fill of one ore kind), `oreKind`, `veinCentre` / `veinRadius` |
 | `bot/src/skills/collect/sweep.ts` | Track AQ: `sweepItems` (the floor sweep: one entity scan when nothing is near), `isWoodDrop`, `isFoodDrop` |
+| `miner.ts` `jobDropNames` / `isJobDrop` | what a job's sweeps and hole walks pick up: the ore drops (`isMineDrop`) plus the job's own block kinds and what they drop (`BLOCK_DROPS`: stone to cobblestone, gravel to gravel and flint, grass to dirt ...). Before 2026-10-30 only ore drops counted, so `!get sand 256` left every sand item on the floor |
 | `bot/src/skills/mine/branch.ts` | wave 9 Track AI: branch mining (`branchMore`, the miner's hook when no target is known; `BranchRun`, the Y table `BRANCH_Y`), wired per bot by `attachBranch` in chat/commands-explore.ts |
 
 ## As a process (Track Z)

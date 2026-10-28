@@ -4,7 +4,7 @@
 // blocks), veins mined as one group (status `vein n/m`, one collect over the group, the quota stops it),
 // several kinds with quotas nearest first across kinds, `ores`, the chat and !get forms, the NL steps.
 import { describe, expect, it } from 'vitest';
-import { kindNames, MineTask, type MineDeps, type MinePlan } from '../../../src/skills/mine/miner.ts';
+import { isJobDrop, jobDropNames, kindNames, MineTask, type MineDeps, type MinePlan } from '../../../src/skills/mine/miner.ts';
 import { OreMemory } from '../../../src/skills/mine/seen.ts';
 import type { TunnelWorld } from '../../../src/skills/mine/tunnel.ts';
 import { blockInfoOf } from '../../../src/skills/terrain/shapes.ts';
@@ -362,5 +362,21 @@ describe('several kinds in one trip', () => {
     expect(stepCommand(m)).toBe('mine iron_ore 8 coal_ore 64');
     const g = STEP_SCHEMAS.get.parse({ command: 'get', item: 'iron', count: 8, more: [{ item: 'coal', count: 64 }] });
     expect(stepCommand(g)).toBe('get iron 8 coal 64');
+  });
+});
+
+describe('job drops (a !get sand job picks up sand, not only ore drops)', () => {
+  it('jobDropNames: the kinds themselves plus what they drop', () => {
+    const d = jobDropNames(['sand', 'minecraft:stone', 'gravel', 'grass_block']);
+    for (const n of ['sand', 'stone', 'cobblestone', 'gravel', 'flint', 'grass_block', 'dirt']) expect(d.has(n)).toBe(true);
+    expect(d.has('coal')).toBe(false);
+  });
+  it('isJobDrop: ore drops always, the job kinds too, other items never', () => {
+    const d = jobDropNames(['sand']);
+    expect(isJobDrop(d, 'minecraft:sand')).toBe(true);
+    expect(isJobDrop(d, 'raw_iron')).toBe(true);
+    expect(isJobDrop(d, 'deepslate_coal_ore')).toBe(true);
+    expect(isJobDrop(d, 'cobblestone')).toBe(false);
+    expect(isJobDrop(d, 'rotten_flesh')).toBe(false);
   });
 });

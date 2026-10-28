@@ -261,6 +261,7 @@ export class MineTask {
   readonly stats: MineStats = newStats();
   opts: MineOptions | undefined;
   names = new Set<string>();
+  private drops: ReadonlySet<string> = new Set(); // the job's pickup names (jobDropNames)
   lastError: string | undefined;
   private readonly d: MineDeps;
   private readonly log: Logger;
@@ -327,6 +328,7 @@ export class MineTask {
     this.quotas = kinds.map((k) => ({ label: kindLabel(k.block), names: kindNames(k.block), want: k.count, got: 0 }));
     if (opts.kinds?.length) this.opts.count = this.quotas.reduce((a, q) => a + q.want, 0);
     this.names = new Set(this.quotas.flatMap((q) => [...q.names]));
+    this.drops = jobDropNames(this.names); // the sweeps pick up these too (sand, cobblestone, dirt ...), not only ore drops
     this.refreshActive();
     this.vein = undefined;
     this.surface = undefined;
@@ -662,7 +664,7 @@ export class MineTask {
   private async sweepDrops(gen: number, radius: number, ticks: number): Promise<void> {
     // Track AQ (collect/sweep.ts): one entity scan when nothing of the kind is near, no grace wait
     const ents = this.d.entities;
-    const c = await sweepItems((r, t, o) => this.d.skills.collect(r, t, o), isMineDrop, { radius, ticks, position: this.d.position, ...(ents ? { entities: ents } : {}) });
+    const c = await sweepItems((r, t, o) => this.d.skills.collect(r, t, o), (n) => isJobDrop(this.drops, n), { radius, ticks, position: this.d.position, ...(ents ? { entities: ents } : {}) });
     if (c && this.alive(gen)) this.addCollected(c.gained);
   }
 
@@ -873,7 +875,7 @@ export class MineTask {
     if (this.alive(gen)) {
       this.state = 'collect';
       const before = Object.values(this.stats.collected).reduce((a, n) => a + n, 0);
-      const c = await sk.collect(veinRadius(cells) + 5, 300, { origin: veinCentre(cells), near: 1.2, filter: (i) => isMineDrop(i.name) });
+      const c = await sk.collect(veinRadius(cells) + 5, 300, { origin: veinCentre(cells), near: 1.2, filter: (i) => isJobDrop(this.drops, i.name) });
       this.addCollected(c.gained);
       for (const p of cells) {
         if (!this.alive(gen) || !this.itemsNear(p, 1.6)) continue;
@@ -881,7 +883,7 @@ export class MineTask {
         const g = await this.intoHole(gen, p);
         if (!this.alive(gen)) break;
         if (g.ok) await this.d.waitTicks(10);
-        const c2 = await sk.collect(4, 60, { origin: { x: p.x + 0.5, y: p.y, z: p.z + 0.5 }, near: 1.2, filter: (i) => isMineDrop(i.name) });
+        const c2 = await sk.collect(4, 60, { origin: { x: p.x + 0.5, y: p.y, z: p.z + 0.5 }, near: 1.2, filter: (i) => isJobDrop(this.drops, i.name) });
         this.addCollected(c2.gained);
       }
       rec.collected = Object.values(this.stats.collected).reduce((a, n) => a + n, 0) - before;
@@ -898,7 +900,7 @@ export class MineTask {
    */
   private async pickupLeft(gen: number): Promise<void> {
     if (!this.d.entities || this.stats.minedAt.length === 0) return;
-    const c = await this.d.skills.collect(6, 60, { filter: (i) => isMineDrop(i.name) });
+    const c = await this.d.skills.collect(6, 60, { filter: (i) => isJobDrop(this.drops, i.name) });
     if (!this.alive(gen)) return;
     this.addCollected(c.gained);
     const pos = this.d.position();
@@ -909,7 +911,7 @@ export class MineTask {
       const g = await this.intoHole(gen, p);
       if (!this.alive(gen)) return;
       if (g.ok) await this.d.waitTicks(10);
-      const c2 = await this.d.skills.collect(4, 60, { origin: { x: p.x + 0.5, y: p.y, z: p.z + 0.5 }, near: 1.2, filter: (i) => isMineDrop(i.name) });
+      const c2 = await this.d.skills.collect(4, 60, { origin: { x: p.x + 0.5, y: p.y, z: p.z + 0.5 }, near: 1.2, filter: (i) => isJobDrop(this.drops, i.name) });
       this.addCollected(c2.gained);
       this.log.info(`mine: drop left at ${fmt(p)}: ${g.ok ? 'walked there' : g.reason}, picked up ${JSON.stringify(c2.gained)}`);
     }
@@ -949,7 +951,7 @@ export class MineTask {
     const ents = this.d.entities?.();
     if (!ents) return 0;
     let n = 0;
-    for (const e of ents.values()) if (e.type === 'minecraft:item' && e.item && isMineDrop(e.item.name) && Math.hypot(e.pos.x - (p.x + 0.5), e.pos.y - (p.y + 0.5), e.pos.z - (p.z + 0.5)) <= r) n++;
+    for (const e of ents.values()) if (e.type === 'minecraft:item' && e.item && isJobDrop(this.drops, e.item.name) && Math.hypot(e.pos.x - (p.x + 0.5), e.pos.y - (p.y + 0.5), e.pos.z - (p.z + 0.5)) <= r) n++;
     return n;
   }
 
@@ -1064,4 +1066,25 @@ const MINE_DROPS = new Set(['diamond', 'emerald', 'coal', 'charcoal', 'raw_iron'
 export function isMineDrop(name: string): boolean {
   const n = name.startsWith('minecraft:') ? name.slice(10) : name;
   return MINE_DROPS.has(n) || n.endsWith('_ore');
+}
+
+/** What a plain block drops when mined without silk touch (the block itself when not listed). `!get sand 256` left every sand item on the floor: the sweeps only knew ore drops. */
+const BLOCK_DROPS: Record<string, readonly string[]> = {
+  stone: ['cobblestone'], deepslate: ['cobbled_deepslate'], grass_block: ['dirt'], dirt_with_roots: ['dirt'], podzol: ['dirt'], mycelium: ['dirt'],
+  gravel: ['gravel', 'flint'], clay: ['clay_ball'], snow: ['snowball'], glowstone: ['glowstone_dust'], sea_lantern: ['prismarine_crystals'],
+  bookshelf: ['book'], melon_block: ['melon_slice'], stone_bricks: ['stone_bricks'], end_stone: ['end_stone'], netherrack: ['netherrack'], blackstone: ['blackstone'],
+};
+/** The item names a job for these block kinds picks up: the ore drops plus each kind and what it drops. */
+export function jobDropNames(blockNames: Iterable<string>): Set<string> {
+  const out = new Set<string>();
+  for (const raw of blockNames) {
+    const n = raw.startsWith('minecraft:') ? raw.slice(10) : raw;
+    out.add(n);
+    for (const d of BLOCK_DROPS[n] ?? []) out.add(d);
+  }
+  return out;
+}
+export function isJobDrop(jobDrops: ReadonlySet<string>, name: string): boolean {
+  const n = name.startsWith('minecraft:') ? name.slice(10) : name;
+  return isMineDrop(n) || jobDrops.has(n);
 }
