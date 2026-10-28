@@ -15,7 +15,7 @@ import type { CommandDef, CommandGroup, CommandTier } from './chat.ts';
  * The front door: what `!help` shows. After the wave-9 merge `build` (Track AL), `explore` (Track AI)
  * and `unload` (Track AG) join it (tag their CommandDef `tier: 'front'` and add them here).
  */
-export const FRONT_DOOR: readonly string[] = ['come', 'follow', 'fly', 'stop', 'home', 'get', 'bring', 'guard', 'build', 'unload', 'explore', 'status', 'do', 'help']; // merge: + build (Track AL), unload (Track AG), explore (Track AI); wave 10: + bring (Track AS); wave 11: + fly (Track AU)
+export const FRONT_DOOR: readonly string[] = ['come', 'follow', 'stop', 'home', 'get', 'bring', 'guard', 'build', 'unload', 'explore', 'status', 'do', 'help']; // merge: + build (Track AL), unload (Track AG), explore (Track AI); wave 10: + bring (Track AS); wave 11: fly was here (Track AU) and moved to `more` (Track AU2: come and goto fly on their own)
 
 export const GROUP_ORDER: readonly CommandGroup[] = ['go', 'work', 'fight', 'home', 'control', 'info'];
 

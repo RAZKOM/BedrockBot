@@ -581,7 +581,7 @@ describe('Crafter on a fake server', () => {
     expect(h.modelCounts()).toEqual(h.server.counts());
     expect(h.server.grid.size).toBe(0);
     expect(h.windows.size).toBe(0);
-    expect(craftLine(r)).toContain('dropped 8 oak_log (no room)');
+    expect(craftLine(r)).toContain('dropped 8 oak_log (could not be taken back)');
     // a give-back refused only once: the second attempt (cell by cell) succeeds, nothing dropped
     const h2 = harness([item('oak_log', 8, 1)]);
     h2.server.failCrafts = 2;

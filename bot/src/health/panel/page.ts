@@ -2,7 +2,8 @@
 // inventory grid's 41 cells, the status blocks, the quick buttons, the settings table) plus the
 // current state as JSON; the inline script (client.ts, Track AP) fills the nodes from that JSON at
 // once and then from /api/state every 2 s. No build step, no external assets: the bot's machine may
-// be offline from the internet (glyphs are inline SVG, fonts are the system's). Track AR: the
+// be offline from the internet (glyphs are inline SVG, fonts are the system's; the item pictures are
+// the panel's own /icons/<name>.png, decision 0046, and a cell keeps its glyph without one). Track AR: the
 // settings by group with switches, Reset and the mode bar, the menu / toast / palette containers and
 // the panel's own map (a canvas the script draws from /map.json while the section is open).
 import { PANEL_SCRIPT } from './client.ts'; // Track AP
@@ -20,9 +21,9 @@ const scriptJson = (v: unknown): string => JSON.stringify(v).replace(/</g, '\\u0
 /** Status blocks (Track AP): the section ids the page always has (tests look for them). */
 export const STATUS_BLOCKS = ['panel-inventory', 'panel-vitals', 'panel-status', 'panel-combat', 'panel-memory', 'panel-planner', 'panel-conn'] as const;
 
-/** One inventory cell; the script sets the glyph, colour, letters, count and durability. */
+/** One inventory cell; the script sets the glyph, colour, letters, count and durability, and the picture when the server has one (decision 0046). */
 function cell(slot: string, hint: string, extra = ''): string {
-  return `<button type="button" class="cell empty${extra}" data-slot="${slot}" title="${hint}"><svg viewBox="0 0 16 16" aria-hidden="true"><use href="#g-item"></use></svg><b class="ab"></b><i class="ct"></i><span class="dur" hidden><span></span></span></button>`;
+  return `<button type="button" class="cell empty${extra}" data-slot="${slot}" title="${hint}"><svg viewBox="0 0 16 16" aria-hidden="true"><use href="#g-item"></use></svg><img class="ic" alt="" hidden><b class="ab"></b><i class="ct"></i><span class="dur" hidden><span></span></span></button>`;
 }
 
 function inventoryHtml(): string {
@@ -182,6 +183,9 @@ const CSS = `
   .cell { position: relative; aspect-ratio: 1; min-width: 0; padding: 0; background: var(--cell); border: 1px solid var(--cellline); border-radius: 4px; overflow: hidden; }
   .cell svg { position: absolute; left: 17%; top: 17%; width: 66%; height: 66%; fill: currentColor; }
   .cell.empty svg { visibility: hidden; }
+  .cell img.ic { position: absolute; left: 11%; top: 11%; width: 78%; height: 78%; object-fit: contain; image-rendering: pixelated; pointer-events: none; }
+  .cell.empty img.ic, .cell.tex svg { visibility: hidden; }
+  .cell.tex .ab { display: none; }
   .cell.eq.empty { background-image: linear-gradient(135deg, transparent 46%, var(--cellline) 47%, var(--cellline) 53%, transparent 54%); }
   .cell.sel { border: 2px solid var(--accent); }
   .cell.picked { box-shadow: 0 0 0 2px var(--text) inset; }

@@ -130,9 +130,15 @@ export const SETTING_DEFS = {
   autoFly: { kind: 'boolean', default: true, description: 'come / goto fly with the elytra instead of walking when the target is more than flyMin blocks away and the flight kit is ready (elytra, rockets or the fireworks box)' },
   flyMin: { kind: 'number', default: 200, min: 20, max: 5000, integer: true, unit: 'blocks', description: 'autoFly: fly instead of walking from this distance on' },
   flyClearance: { kind: 'number', default: 12, min: 2, max: 64, integer: true, unit: 'blocks', description: 'flight: cruise at least this far above every known column under the straight line (unknown columns count as the highest known)' },
-  flyCruise: { kind: 'number', default: 25, min: 5, max: 120, integer: true, unit: 'blocks', description: 'flight: the cruise height above the higher end of the flight (the glide down to the landing is planned from it)' },
+  flyCruise: { kind: 'number', default: 25, min: 5, max: 120, integer: true, unit: 'blocks', description: 'flight: no longer used since Track AU2 (the cruise height is what the glide down needs, capped by flyMaxClimb); kept so older settings files load' },
   flyGoArounds: { kind: 'number', default: 4, min: 0, max: 10, integer: true, unit: 'tries', description: 'flight: approaches that miss are flown again at most this often (one rocket each), then it lands on the nearest safe ground and says so' },
   fireworksMin: { kind: 'number', default: 16, min: 0, max: 64, integer: true, unit: 'rockets', description: 'flight: fewer rockets in the hotbar than this -> refill from the fireworks box before a flight and after a landing; ask the owner once when the box is empty too' },
+  // Track AU2: takeoff and roofs, the rocket economy, fly-then-walk (docs/flight.md)
+  flyTakeoffRun: { kind: 'number', default: 12, min: 2, max: 64, integer: true, unit: 'blocks', description: 'flight: the sky over the start and over this many blocks along the takeoff heading must be free up to the cruise height (an unknown cell counts as a roof), else !fly refuses and goto / come walk to open sky first' }, // Track AU2
+  flyRetryBlocks: { kind: 'number', default: 32, min: 8, max: 256, integer: true, unit: 'blocks', description: 'flight: goto / come that walk because the sky is closed try the takeoff again every this many blocks of walking' }, // Track AU2
+  flyMaxClimb: { kind: 'number', default: 120, min: 20, max: 250, integer: true, unit: 'blocks', description: 'flight: the climb never goes higher than this above the start; a longer glide is topped up with a rocket on the way (about 31 blocks of height, 310 of glide, each)' }, // Track AU2
+  flyMargin: { kind: 'number', default: 15, min: 0, max: 60, integer: true, unit: 'blocks', description: 'flight: the cruise fires a rocket only when the glide ahead would reach the approach entry with less than this much height to spare (less for short glides: distance / 30 - 5, none under 150 blocks)' }, // Track AU2
+  flyLandSearch: { kind: 'number', default: 48, min: 4, max: 128, integer: true, unit: 'blocks', description: 'flight: goto / come land on the nearest landable cell (open sky, a plain top with level neighbours) within this many blocks of the goal and walk the rest' }, // Track AU2
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;

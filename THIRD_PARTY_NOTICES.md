@@ -14,3 +14,16 @@ and never paste translated code. Decision record: docs/decisions/0043 (supersede
 | `src/main/java/baritone/pathing/movement/movements/MovementTraverse.java`, `MovementAscend.java`, `MovementDescend.java`, `MovementDownward.java`, `MovementPillar.java` (the `cost` functions: break sets, costs, refusals; the execution is ours) | `23723891` | `bot/src/skills/nav/baritone/moves.ts` | BC |
 | `src/main/java/baritone/pathing/path/PathExecutor.java` (`MAX_DIST_FROM_PATH`, `MAX_MAX_DIST_FROM_PATH`, `MAX_TICKS_AWAY`, `closestPathPos` / `possiblyOffPath`, the `pathPosition` skip, the movement timeout), `src/api/java/baritone/api/Settings.java` (`movementTimeoutTicks`) | `23723891` | `bot/src/skills/nav/baritone/executor.ts` | BE |
 | `src/main/java/baritone/process/MineProcess.java` (`coalesce` with `GoalThreeBlocks` and `internalMiningGoal`, `prune`, `plausibleToBreak`, `isNextToAir`, `droppedItemsScan`, the rescan interval and `blacklistClosestOnFailure` of `onTick`), `src/api/java/baritone/api/pathing/goals/GoalTwoBlocks.java` / `GoalComposite.java` (as the nav goals `twoBlocks` / `threeBlocks` / `any`, nav/goals.ts), `src/api/java/baritone/api/Settings.java` (the mine settings as constants) | `23723891` | `bot/src/skills/mine/baritone/mineProcess.ts` (licence pointer `bot/src/skills/mine/baritone/LICENSE`) | BD |
+
+## Packages the panel's item icons use (decision 0046)
+
+Nothing below is copied into this repository; `pnpm install` fetches both (`bot/package.json`, exact pins).
+
+| Package | Licence | What we use |
+|---|---|---|
+| `minecraft-assets` 1.19.0 (PrismarineJS, https://github.com/PrismarineJS/minecraft-assets) | MIT (the package's code and data layout) | read at run time from `node_modules`: the Java `26.1` item and block textures and block models, to draw the inventory icons at `GET /icons/<name>.png` (`bot/src/health/panel/icons/`) |
+| `pngjs` 7.0.0 (https://github.com/pngjs/pngjs) | MIT | decoding the textures and encoding the icons |
+
+The textures and models are Mojang's art (Minecraft is a trademark of Mojang AB / Microsoft); they are not
+part of this project, are never committed or served from a public place, and are shown only on the
+owner's own control panel. Without the package the panel falls back to its drawn glyphs.

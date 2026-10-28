@@ -228,6 +228,11 @@ export class SurvivalKit {
     return this.exclusive<DropResult>(() => this.keeper.drop(name, n, skip), { ok: false, item: name, dropped: 0, reason: 'busy' }); // Track AV: skip
   }
 
+  /** Move a main-inventory stack into the hotbar (the stash step's box); its hotbar slot, undefined when busy or refused. */
+  hotbar(slot: number): Promise<number | undefined> {
+    return this.exclusive(() => this.toHotbar(slot), undefined);
+  }
+
   /** `!drop all`: the worn armour and the offhand too. */
   dropWorn(): Promise<{ dropped: string[]; refused: string[] }> {
     return this.exclusive(() => this.keeper.dropWorn(), { dropped: [], refused: ['busy'] });

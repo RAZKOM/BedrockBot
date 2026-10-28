@@ -40,6 +40,8 @@ command registered without a tier is `more` (so `!unload`, `!stock`, `!chests`, 
 | `!status` | front | info | `!status` | |
 | `!help` | front | info | `!help get` | |
 | `!wp` | more | go | `!wp set base` | the death, home and spawn waypoints keep themselves up to date |
+| `!fly` | more | go | `!fly home` | `!come` and `!goto` fly by themselves over `flyMin` blocks (`autoFly`), land on the nearest landable cell and walk the rest; the flight kit is never dropped, stashed or unloaded (wave 11 Track AU had it on the front door; Track AU2 moved it here: the owner never needs to say "fly", `!come` and `!goto` decide) |
+| `!land` | more | go | `!land` | |
 | `!goto` | more | go | `!goto base` | |
 | `!top` | more | go | `!top` | |
 | `!gather` | more | work | `!gather 16` | |

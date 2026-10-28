@@ -62,6 +62,8 @@ export interface PanelState {
   };
   /** Track AP: the graphical inventory (inventory.ts); null without the world model. */
   inventory: PanelInventory | null;
+  /** The item pictures (GET /icons/<name>.png, icons/book.ts) are served: false when the minecraft-assets package is not installed, then the cells keep their drawn glyphs. */
+  icons: boolean;
   /** Track AP: the current job: the active user process (else the first user process) of the stack. */
   job: { name: string; state: string; line: string; etaS: number | null } | null;
   /** Track AP: PvE totals (PveController.stats + CombatController.totals) and the damage taken while the panel ran. */
@@ -140,6 +142,8 @@ export interface PanelStateSource {
   commands: () => string[];
   // ---- Track AP (all optional; a missing or throwing one gives null) ----
   inventory?: () => InventorySource | undefined;
+  /** Whether /icons/<name>.png is served. */
+  icons?: () => boolean;
   saturation?: () => number | undefined;
   /** Track AU: the flight state (chat/commands-fly.ts FlyControl.state). */
   flight?: () => { gliding: boolean; rockets: number; phase: string | undefined } | undefined;
@@ -240,6 +244,7 @@ export function buildPanelState(src: PanelStateSource, now = Date.now()): PanelS
       lastDeath: ld ? { cause: ld.cause, ts: ld.ts, messages: ld.messages.slice(0, 3) } : null,
     },
     inventory: inv ? safe(() => buildInventory(inv), null) : null,
+    icons: safe(() => src.icons?.() ?? false, false),
     job: user ? { name: user.name, state: user.state, line: user.line, etaS: user.etaS } : null,
     combat: opt(src.combat),
     memory: opt(src.memory),

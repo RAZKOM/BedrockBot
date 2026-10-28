@@ -219,7 +219,7 @@ export interface CraftResult {
   table?: { pos: Vec3; placed: boolean; pickedUp?: boolean };
   /** The last item_stack_response status that was not ok ('timeout' for no response). */
   status?: unknown;
-  /** Grid items dropped on the ground because the inventory had no room for them. */
+  /** Grid items dropped on the ground at the end: the inventory had no room for them, or their give-back was refused. */
   dropped?: Record<string, number>;
 }
 
@@ -239,7 +239,7 @@ export function craftLine(r: CraftResult): string {
   if (r.table?.placed) parts.push(r.table.pickedUp ? 'crafting table placed and picked up' : `crafting table left at ${fmt(r.table.pos)}`);
   if (r.shortfall && r.crafted < r.wanted) parts.push(`${Math.max(0, r.shortfall.need - r.shortfall.have)} ${r.shortfall.name} short for ${r.wanted}`);
   else if (r.crafted < r.wanted && r.reason !== 'done') parts.push(`stopped: ${r.reason}`);
-  if (r.dropped) parts.push(`dropped ${Object.entries(r.dropped).map(([k, v]) => `${v} ${k}`).join(', ')} (no room)`);
+  if (r.dropped) parts.push(`dropped ${Object.entries(r.dropped).map(([k, v]) => `${v} ${k}`).join(', ')} (could not be taken back)`);
   return parts.join('; ');
 }
 

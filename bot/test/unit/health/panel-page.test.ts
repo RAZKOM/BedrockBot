@@ -9,8 +9,9 @@ import { GLYPHS } from '../../../src/health/panel/glyphs.ts';
 import { ICON_CLASSES } from '../../../src/health/panel/inventory.ts';
 import { renderPanelPage, STATUS_BLOCKS } from '../../../src/health/panel/page.ts';
 import { liteState, QUICK_COMMANDS, type PanelState } from '../../../src/health/panel/state.ts';
-import { fullState } from './panel-fixtures.ts';
+import { fullInventory, fullState, stack } from './panel-fixtures.ts';
 import { RuntimeSettings } from '../../../src/config/settings.ts';
+import type { ItemStack } from '../../../src/world/types.ts';
 
 const ids = (html: string): Set<string> => new Set([...html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1]!));
 
@@ -333,6 +334,43 @@ describe('panel page script (fake DOM)', () => {
     expect(t('inv-sum')).toBe('36/36 slots used, armour 15/20');
     expect(h.debug[0]).toMatch(/^panel: render \d+\.\d\d ms, state \d+ bytes$/);
     expect(h.timers.at(-1)!.ms).toBe(POLL_MS);
+  });
+
+  it('item pictures (decision 0046): a cell asks for /icons/<name>.png, shows it once loaded, keeps its glyph for a 404 and asks once per name', async () => {
+    const h = runScript(renderPanelPage(fullState()));
+    const sword = h.cells.get('s0')!;
+    const img = sword.querySelector('img');
+    expect(img.src).toBe('/icons/iron_sword.png');
+    expect(img.hidden).toBe(true); // the glyph shows until the picture is in
+    expect(sword.classList.contains('tex')).toBe(false);
+    img.fire('load');
+    expect(img.hidden).toBe(false);
+    expect(sword.classList.contains('tex')).toBe(true);
+    // the same item in two cells: one 404 teaches the page that the name has none
+    const [c9, c10] = [h.cells.get('s9')!, h.cells.get('s10')!];
+    expect(c9.querySelector('img').src).toBe('/icons/cobblestone.png');
+    c10.querySelector('img').fire('load');
+    expect(c10.classList.contains('tex')).toBe(true);
+    c9.querySelector('img').fire('error');
+    expect(c9.querySelector('img').hidden).toBe(true);
+    expect(c9.classList.contains('tex')).toBe(false);
+    const inv = fullInventory();
+    (inv.slots as (ItemStack | null)[])[10] = stack('cobblestone', 63); // s10 changes, the item is the same
+    (inv.slots as (ItemStack | null)[])[0] = stack('diamond_pickaxe', 1); // s0 is another item
+    h.fetchQueue.push(answer(liteState(fullState({ inventory: () => inv }))));
+    await h.timers.at(-1)!.fn();
+    expect(c10.querySelector('img').hidden).toBe(true); // no new request for a name that has none
+    expect(c10.classList.contains('tex')).toBe(false);
+    expect(sword.querySelector('img').src).toBe('/icons/diamond_pickaxe.png');
+    expect(sword.querySelector('img').hidden).toBe(true); // until the new one loads
+    expect(sword.classList.contains('tex')).toBe(false);
+  });
+
+  it('item pictures: nothing is requested when the server has none, or for an empty cell', () => {
+    const h = runScript(renderPanelPage(fullState({ icons: () => false })));
+    for (const c of h.cells.values()) expect(c.querySelector('img').src).toBe('');
+    const empty = runScript(renderPanelPage(fullState({ inventory: () => ({ slots: [], selected: 0, window: () => undefined, rawItem: () => undefined }) })));
+    for (const c of empty.cells.values()) expect(c.querySelector('img').src).toBe('');
   });
 
   it('a poll writes only what changed; tapping a slot shows its details', async () => {

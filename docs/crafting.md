@@ -194,7 +194,7 @@ the `shortfall` (the limiting ingredient: have, need). `canCraft` wraps it: `no_
 4. Always: the grid is given back and the screen closed. The give-back plans its destinations with
    their counts (cells of one item merge where they fit, nothing is sent to a slot that would
    overflow); a refused give-back is retried cell by cell; a cell with no room, or one still refused,
-   is **dropped** from the grid (`drop`, an item entity at the feet, `dropped 5 raw_iron (no room)` in
+   is **dropped** from the grid (`drop`, an item entity at the feet, `dropped 5 raw_iron (could not be taken back)` in
    the reply) rather than lost at close; a cell the server refuses to move or drop is taken as empty
    on the server (a stale prediction). A table the bot placed is dug (`Digger`, the best hotbar tool)
    and picked up (the drop usually lands at the feet; else `collect` within 3 blocks); the reply says
@@ -204,6 +204,8 @@ the `shortfall` (the limiting ingredient: have, need). `canCraft` wraps it: `no_
 5. Tables left standing (a dig refused or pre-empted) stay in the Crafter's `pendingTables` (task
    state, `!status` says `1 left standing`): the next craft picks them up first when within reach,
    and a pending table found as the nearest table counts as `placed: true` (picked up after use).
+   The nearest table may be another player's (within 6 blocks): using it is vanilla-legal and it is never
+   picked up (only tables the bot placed are).
 
 ### No answer from the server
 

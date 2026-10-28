@@ -1,6 +1,7 @@
 // Track AP (docs/panel.md "Inventory"): the hand-drawn item glyphs of the panel, one inline SVG
-// <symbol> each (16 x 16, `currentColor` = the item's colour from inventory.ts itemColour). No
-// textures, no files, nothing from the internet: the whole set is about 3 KB of the page.
+// <symbol> each (16 x 16, `currentColor` = the item's colour from inventory.ts itemColour). The
+// fallback of the real icons (icons/, decision 0046) for an item without a picture; nothing from the
+// internet: the whole set is about 3 KB of the page.
 import type { IconClass } from './inventory.ts';
 
 const D = 'fill="#000" fill-opacity=".28"'; // shade

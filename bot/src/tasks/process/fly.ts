@@ -19,7 +19,7 @@ import { silentLogger, type Logger } from '../../log.ts';
 import type { FlightController, FlightReport } from '../../skills/fly/controller.ts';
 import { elytraWornLimit, kitLine, kitReady, readKit, SupplyWatch, type FlightKitMemory, type KitInventory } from '../../skills/fly/kit.ts';
 import type { FlightKitOps } from '../../skills/fly/kitops.ts';
-import { cruiseHeight, flightSeconds, hdist, type LandingTarget } from '../../skills/fly/plan.ts';
+import { cruiseHeight, flightSeconds, hdist, takeoffSky, type CellQuery, type LandingTarget } from '../../skills/fly/plan.ts';
 import type { SkillResult } from '../../skills/types.ts';
 import { BaseProcess, PRIORITY, type ProcessStatus, type StopReason } from './manager.ts';
 
@@ -29,7 +29,18 @@ export const FLIGHT_PRIORITY = PRIORITY.flee + 1;
 export interface FlyTarget extends LandingTarget {
   /** For the lines: `120 45 -30`, `home`, `Steve`, the waypoint name. */
   label: string;
+  /** Track AU2, fly-then-walk: the walk after the landing (`then walking 23 blocks`), for the status line. */
+  then?: string;
+  /**
+   * Track AU2: the real goal when this target is the goal itself with its ground still unknown at the
+   * takeoff (too far to be loaded): once the flight is within `RETARGET_WITHIN` blocks the landable
+   * cell near it is looked for again and the flight retargeted to it (`deps.landingNear`).
+   */
+  goal?: Vec3;
 }
+
+/** Track AU2: the flight re-checks the goal's ground from this far out (the server loads chunks about 160 blocks around the body). */
+export const RETARGET_WITHIN = 160;
 
 export interface FlyDeps {
   controller: FlightController;
@@ -40,6 +51,10 @@ export interface FlyDeps {
   position(): Vec3 | undefined;
   /** The highest solid block of a column (the world model, then the cache), undefined = unknown. */
   skyTop(x: number, z: number): number | undefined;
+  /** Track AU2: a cell of the world model (true = solid, false = air, undefined = not loaded) for the sky check over the takeoff. */
+  cell: CellQuery;
+  /** Track AU2, fly then walk: the landable cell near a goal (commands-fly.ts `landingNear`), for the retarget in flight. */
+  landingNear?: (goal: Vec3) => Promise<{ x: number; z: number; top: number; walk: number; loaded: boolean } | null | undefined>;
   /** The owner's lines (the supply whispers, the kept-kit notes). */
   say(msg: string): void;
   waitTicks(n: number): Promise<void>;
@@ -103,7 +118,7 @@ export class FlyProcess extends BaseProcess {
     const c = this.d.controller.status();
     if (this.phase === 'flying' && c.active) {
       const left = c.distance ?? this.distance;
-      return { line: `flying to ${this.target.label}: ${c.phase ?? '?'}, ${Math.round(left)} blocks left, ${c.rockets} rocket${c.rockets === 1 ? '' : 's'}`, etaS: flightSeconds(left) - 8 };
+      return { line: `flying to ${this.target.label}: ${c.phase ?? '?'}${c.descending ? ` (${c.descending})` : ''}, ${Math.round(left)} blocks left, ${c.rockets} rocket${c.rockets === 1 ? '' : 's'}${this.target.then ? `, ${this.target.then}` : ''}`, etaS: flightSeconds(left) - 8 };
     }
     if (this.phase === 'prepare') return { line: `readying the flight kit for ${this.target.label}` };
     if (this.phase === 'after') return { line: `landed near ${this.target.label}: the chestplate and the rockets` };
@@ -203,14 +218,23 @@ export class FlyProcess extends BaseProcess {
       this.end({ ok: false, reason: 'fly: position unknown' });
       return;
     }
-    const cz = cruiseHeight(from, this.target, (x, z) => this.d.skyTop(x, z), { clearance: s.get('flyClearance'), cruise: s.get('flyCruise') });
-    this.log.info(`fly: to ${this.target.label} (${Math.round(this.distance)} blocks): cruise y ${cz.y.toFixed(1)} (highest column ${cz.highest ?? '?'}, ${cz.unknown} unknown); ${kitLine(this.kit())}`);
+    const cz = cruiseHeight(from, this.target, (x, z) => this.d.skyTop(x, z), { clearance: s.get('flyClearance'), margin: s.get('flyMargin'), maxClimb: s.get('flyMaxClimb') });
+    // Track AU2: open sky over the start and the takeoff run (the owner's indoor takeoff flew into the roof)
+    const sky = takeoffSky(from, this.target, cz.y, s.get('flyTakeoffRun'), this.d.cell);
+    if (!sky.ok) {
+      this.log.info(`fly: ${this.target.label}: ${sky.line}`);
+      this.end({ ok: false, reason: sky.line });
+      return;
+    }
+    this.log.info(`fly: to ${this.target.label} (${Math.round(this.distance)} blocks): cruise y ${cz.y.toFixed(1)} (highest column ${cz.highest ?? '?'}, ${cz.unknown} unknown, the glide needs ${cz.needed.toFixed(0)}); ${kitLine(this.kit())}`);
     this.phase = 'flying';
     this.flight = this.d.controller.flyTo(this.target, {
       cruiseY: cz.y,
       goArounds: s.get('flyGoArounds'),
       fleeHealth: s.get('fleeHealth'),
       elytraWornAt: elytraWornLimit(wear),
+      margin: s.get('flyMargin'),
+      takeoffYaw: sky.yaw,
     });
     void this.flight.then((r) => {
       this.report = r;
@@ -219,6 +243,49 @@ export class FlyProcess extends BaseProcess {
       // the FlightProcess held control in the air; when it lets go the manager resumes us (run -> advance)
       if (this.controlled) void this.advance(this.token);
     });
+    if (this.target.goal && this.d.landingNear) void this.retargetNear(this.target.goal, this.d.landingNear);
+  }
+
+  /**
+   * Track AU2, fly then walk: the goal's ground was unknown at the takeoff; once the flight is within
+   * RETARGET_WITHIN blocks (the chunks there are loaded) the landable cell near the goal is looked for
+   * and, when it is not the goal itself, the flight is retargeted to it and the owner told.
+   */
+  private async retargetNear(goal: Vec3, near: NonNullable<FlyDeps['landingNear']>): Promise<void> {
+    // not gated on the token: the `flight` process holds control in the air and this process is paused
+    // (its token moves on) until the landing, like the flight's own `.then` above
+    let unknown = 0;
+    for (;;) {
+      await this.d.waitTicks(10);
+      if (this.done || this.phase !== 'flying' || !this.d.controller.active) return;
+      const c = this.d.controller.status();
+      if (c.distance === undefined || c.distance > RETARGET_WITHIN) continue;
+      if (c.phase === 'land' || c.phase === 'done' || c.distance < 15) return;
+      const cell = await near(goal);
+      if (this.done || this.phase !== 'flying') return;
+      if (cell === null) {
+        // loaded and nothing landable within flyLandSearch: the goal itself stays the target, no more searching
+        this.log.info(`fly: nothing landable near ${this.target.label} (${Math.round(c.distance)} blocks out): aiming at it`);
+        return;
+      }
+      if (!cell) {
+        // the goal's chunk is not loaded yet: again in 10 ticks (the chunks often arrive as the approach begins)
+        if (++unknown % 10 === 1) this.log.info(`fly: the ground at ${this.target.label} is not known yet (${Math.round(c.distance)} blocks out, ${c.phase})`);
+        continue;
+      }
+      if (!cell.loaded) {
+        if (++unknown % 10 === 1) this.log.info(`fly: the ground at ${this.target.label} is only cached so far (${Math.round(c.distance)} blocks out, ${c.phase})`);
+        continue;
+      }
+      if (cell.walk <= 0) return; // the goal itself is landable
+      const target: FlyTarget = { x: cell.x + 0.5, z: cell.z + 0.5, top: cell.top, half: 1, label: this.target.label, then: `then walking ${Math.round(cell.walk)} blocks` };
+      if (Math.abs(target.x - this.target.x) < 0.1 && Math.abs(target.z - this.target.z) < 0.1 && target.top === this.target.top) return; // the same cell as planned
+      if (!this.d.controller.retarget(target)) return;
+      (this as { target: FlyTarget }).target = target;
+      this.log.info(`fly: ${this.target.label} is not landable: landing ${Math.round(cell.walk)} blocks from it, then walking`);
+      this.d.say(`fly: landing ${Math.round(cell.walk)} blocks from ${this.target.label} (no landing spot on it), then walking`);
+      return;
+    }
   }
 
   private async after(t: number): Promise<void> {

@@ -34,7 +34,7 @@ control gets it).
 | 85 | `guard` defending in place | auto | a hostile within reach while inside the night shelter or while the health is low | fight cancelled | a new target is picked |
 | 80 | `night` | auto | dusk to dawn with a shelter set: walking there, a retreat due, or inside (it holds the bot there) | the retreat is cancelled, not counted as a failed attempt (`waiting`) | the retreat is planned again |
 | 60 | `guard` fight | auto | guard on and a hostile within `guardRadius` of home (of the bot while a command runs); not while a kill job exists | fight cancelled (the episode ends) | a new target is picked |
-| 40 | `fly` (Track AU) | user | the ground work of a flight: the refill from the fireworks box, the elytra on, the takeoff; the landing's chestplate swap and refill | the ground step is cancelled (the flight itself is the `flight` process above) | the ground step runs again |
+| 40 | `fly` (Track AU; AU2: the sky check before the jump, `fly: no open sky here (roof at y 72, 3 blocks up); walk outside first`) | user | the ground work of a flight: the refill from the fireworks box, the elytra on, the takeoff; the landing's chestplate swap and refill | the ground step is cancelled (the flight itself is the `flight` process above) | the ground step runs again |
 | 40 | `goto` `follow` `come` `kill` `gather` | user | until done or stopped | navigator / follower / fight cancelled, gather paused (`GatherWoodTask.pause`) | goto planned again, follow restarted, come re-aimed, kill looks for its next target, gather goes on from find-tree |
 | 30 | `food` chore (Track X, docs/food.md) | auto | by day, with no user process, while the food carried is below `foodMin` and a target is in range | the hunt or the cooking is cancelled, the job remembers its progress | continues the job; backs off 10 min after an empty attempt |
 | 20 | `home` | auto | requested (after a guard fight with nothing else queued, at dawn, after a respawn) and not yet home | navigator cancelled | planned again |
@@ -120,9 +120,14 @@ its plan yet; `navRemaining` reads its `active` record read-only (an open issue 
 | `autoFly` | on | boolean | flight (Track AU, docs/flight.md): `!come` / `!goto` fly with the elytra instead of walking over `flyMin` blocks when the kit is ready |
 | `flyMin` | 200 | number | flight: the distance from which they fly |
 | `flyClearance` | 12 | number | flight: the cruise clears every known column under the line by this |
-| `flyCruise` | 25 | number | flight: the cruise height above the higher end (capped by what the glide down needs) |
+| `flyCruise` | 25 | number | flight: no longer used since Track AU2 (the cruise height is what the glide down needs, capped by `flyMaxClimb`); kept so older settings files load |
 | `flyGoArounds` | 4 | number | flight: approaches flown again after a miss, then the nearest safe ground |
 | `fireworksMin` | 16 | number | flight: fewer rockets in the hotbar -> refill from the fireworks box; the low-supply line when the box is empty too |
+| `flyTakeoffRun` | 12 | number | flight (Track AU2, docs/flight.md "Takeoff and roofs"): the sky over the start and this many blocks along the heading must be free up to the cruise height (unknown = a roof), else `!fly` refuses and goto / come walk to open sky first |
+| `flyRetryBlocks` | 32 | number | flight (Track AU2): goto / come walking out from under a roof try the takeoff again every this many blocks |
+| `flyMaxClimb` | 120 | number | flight (Track AU2, "Rocket economy"): the climb's cap above the start; a longer glide is topped up on the way |
+| `flyMargin` | 15 | number | flight (Track AU2): the cruise fires only when the glide ahead would reach the approach entry with less than this to spare (less for short glides) |
+| `flyLandSearch` | 48 | number | flight (Track AU2, "Fly, then walk"): goto / come land on the nearest landable cell within this many blocks of the goal and walk the rest |
 | `guardWhileWalking` | near | text | guard while a user process walks (Track AO): `reach` fights only mobs within reach, `near` adds melee mobs, creepers and archers aiming at the bot within 6 path blocks, `all` the old behaviour |
 | `mineBranchY` | auto | text | branch mining (Track AI): `auto` picks the ore's best level (coal 40, iron 16, copper 48, gold -16, redstone -58, lapis 0, diamond -58, emerald 232 in mountains), a number overrides |
 | `exploreRadius` | 128 | number | `!explore` without a radius: the area walked around home (16..1024) |
