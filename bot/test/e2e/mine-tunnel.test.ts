@@ -29,6 +29,8 @@ const F = FEET_Y;
 const STRICT = process.env.MINE_BEFORE !== '1';
 /** Track BD: `MINE_MODE=baritone` runs the suite in mode baritone (the tunnel-plan assertions are v3's). */
 const MINE_MODE = process.env.MINE_MODE === 'baritone' ? 'baritone' : 'v3';
+/** Track BD: the assertions on v3's own tunnel planner (tunnel records, the straight line, the probe verdict) hold in mode v3 only. */
+const V3 = MINE_MODE === 'v3';
 const key = (p: Vec3) => `${p.x},${p.y},${p.z}`;
 const N6 = [
   [1, 0, 0],
@@ -41,6 +43,7 @@ const N6 = [
 
 describe.skipIf(!E2E)('@bds mine: direct tunnels and shafts (Track AQ)', () => {
   let bot: FarmBot;
+  let detachPlanner: (() => void) | undefined; // Track BD
   const cell = randomInt(64);
   const X0 = 70_000 + 128 * (cell % 8) + 64;
   const Z0 = 70_000 + 128 * Math.floor(cell / 8) + 16;
@@ -113,6 +116,11 @@ describe.skipIf(!E2E)('@bds mine: direct tunnels and shafts (Track AQ)', () => {
   beforeAll(async () => {
     await prepareServer(DIG_CONTAINER);
     bot = await connectFarmBot('Tunnel', { target: DIG_TARGET, container: DIG_CONTAINER });
+    // Track BD: mode baritone plans its dig-heavy composite goals in the planner worker (the Realm's configuration)
+    if (MINE_MODE === 'baritone') {
+      detachPlanner = bot.skills.nav.attachPlanner(bot.world);
+      expect(await pollUntil(() => !!bot.skills.nav.planner?.ready, 20_000)).toBeGreaterThanOrEqual(0);
+    }
     bot.world.onBlockUpdate((p, before, after) => {
       if (!tracking) return;
       const at = bot.loop.state.pos;
@@ -128,6 +136,7 @@ describe.skipIf(!E2E)('@bds mine: direct tunnels and shafts (Track AQ)', () => {
         await clearArea(bot.truth, X0, Z0 + 40 * i, 16, 16).catch(() => undefined);
         await killItemsNear(X0, Z0 + 40 * i, 18, DIG_CONTAINER).catch(() => undefined);
       }
+      detachPlanner?.();
       await bot.close();
     }
   }, 300_000);
@@ -151,7 +160,7 @@ describe.skipIf(!E2E)('@bds mine: direct tunnels and shafts (Track AQ)', () => {
     expect(r.end).toBe('done');
     expect(st(m).minedMs[0]!).toBeLessThan(60_000);
     expect(await blockName(ore)).not.toBe('coal_ore');
-    expect((st(m).tunnels as { mode: string }[] | undefined)?.[0]?.mode).toBe('stairs');
+    if (V3) expect((st(m).tunnels as { mode: string }[] | undefined)?.[0]?.mode).toBe('stairs');
     expect(p.y).toBeGreaterThanOrEqual(top - 0.1); // back on the floor
   }, 300_000);
 
@@ -172,7 +181,7 @@ describe.skipIf(!E2E)('@bds mine: direct tunnels and shafts (Track AQ)', () => {
       if (!STRICT) return;
       expect(r.end).toBe('done');
       expect(await blockName(ore)).not.toBe('coal_ore');
-      expect(opened.size).toBeLessThanOrEqual(16); // 1 wide, 2 high, straight
+      if (V3) expect(opened.size).toBeLessThanOrEqual(16); // 1 wide, 2 high, straight
     }, 300_000);
   }
 
@@ -185,13 +194,14 @@ describe.skipIf(!E2E)('@bds mine: direct tunnels and shafts (Track AQ)', () => {
     await bot.loadout([['iron_pickaxe', 1]]);
     expect(await waitName(ore, 'coal_ore')).toBe(true);
     const m = miner();
+    const places0 = bot.places.length; // Track BD: this case's own placements (the list is the whole suite's)
     const r = await run(m, 'coal_ore', 1, 120_000);
-    notes.push(line('hill (6 up)', m, r));
+    notes.push(`${line('hill (6 up)', m, r)}; placed ${bot.places.length - places0}`);
     if (!STRICT) return;
     expect(r.end).toBe('done');
     expect(await blockName(ore)).not.toBe('coal_ore');
-    expect((st(m).tunnels as { mode: string }[] | undefined)?.[0]?.mode).toBe('stairs');
-    expect(bot.places.length).toBe(0); // no pillar
+    if (V3) expect((st(m).tunnels as { mode: string }[] | undefined)?.[0]?.mode).toBe('stairs');
+    expect(bot.places.length - places0).toBe(0); // no pillar (Track BD: counted for this case only; mode baritone staircases up too)
   }, 300_000);
 
   /** A 13 x 13 stone tower 13 high (top y -49, feet -48) with the ore 10 below the feet in its middle. */
@@ -225,7 +235,7 @@ describe.skipIf(!E2E)('@bds mine: direct tunnels and shafts (Track AQ)', () => {
     if (!STRICT) return;
     expect(r.end).toBe('done');
     expect(await blockName(ore)).not.toBe('coal_ore');
-    expect(down).toBeDefined();
+    if (V3) expect(down).toBeDefined();
     expect(p.y).toBeGreaterThanOrEqual(top - 0.1);
   }, 300_000);
 
@@ -248,7 +258,7 @@ describe.skipIf(!E2E)('@bds mine: direct tunnels and shafts (Track AQ)', () => {
     expect(r.end).toBe('none_left');
     expect(await blockName(ore)).toBe('coal_ore');
     expect(await blockName(lava)).toBe('lava');
-    expect(m.lastError ?? JSON.stringify(st(m).skipped)).toMatch(/liquid/);
+    expect(`${m.lastError ?? ''} ${JSON.stringify(st(m).skipped)} ${JSON.stringify(st(m).unsafe)}`).toMatch(/liquid/); // Track BD: mode baritone's prune reports in unsafe
     expect(liquid).toEqual([]);
   }, 300_000);
 
@@ -271,7 +281,7 @@ describe.skipIf(!E2E)('@bds mine: direct tunnels and shafts (Track AQ)', () => {
     if (!STRICT) return;
     expect(r.end).toBe('none_left');
     expect(await blockName(ore)).toBe('coal_ore');
-    expect(m.lastError ?? JSON.stringify(st(m).skipped)).toMatch(/dripstone/);
+    expect(`${m.lastError ?? ''} ${JSON.stringify(st(m).skipped)} ${JSON.stringify(st(m).unsafe)}`).toMatch(/dripstone/);
   }, 300_000);
 
   it('dig rules: stone bricks in the line stop the tunnel with the reason', async () => {
@@ -288,9 +298,10 @@ describe.skipIf(!E2E)('@bds mine: direct tunnels and shafts (Track AQ)', () => {
     const r = await run(m, 'coal_ore', 1, 120_000);
     notes.push(line('stone bricks in the line', m, r));
     if (!STRICT) return;
+    expect(await blockName(brick)).toBe('stone_bricks');
+    if (!V3) return; // Track BD: the planner digs round the brick (the straight line is v3's rule)
     expect(r.end).toBe('none_left');
     expect(await blockName(ore)).toBe('coal_ore');
-    expect(await blockName(brick)).toBe('stone_bricks');
     expect(m.lastError ?? JSON.stringify(st(m).skipped)).toMatch(/protected/);
     expect(opened.size).toBe(0); // planned before any dig: nothing opened
   }, 300_000);
@@ -336,7 +347,7 @@ describe.skipIf(!E2E)('@bds mine: direct tunnels and shafts (Track AQ)', () => {
     if (!STRICT) return;
     expect(r.end).toBe('none_left');
     expect(st(m).unreachable.map(key)).toEqual([key(ore)]);
-    expect(st(m).unreachableMs[0]!).toBeLessThan(2_000);
-    expect(opened.size).toBe(0);
+    if (V3) expect(st(m).unreachableMs[0]!).toBeLessThan(2_000); // Track BD: mode baritone's verdict is one failed composite plan (printed)
+    if (V3) expect(opened.size).toBe(0);
   }, 900_000);
 });

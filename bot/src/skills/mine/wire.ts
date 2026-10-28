@@ -24,7 +24,7 @@ export interface MinerSettings {
   seenOnly?: () => boolean;
   /** Track AQ: setting `mineDirect` (default true). */
   direct?: () => boolean;
-  /** Track BD: setting `mineMode` (`v3` | `baritone`, default v3). */
+  /** Track BD: setting `mineMode` (`v3` | `baritone`; the setting's default is baritone, without this option the miner runs v3). */
   mode?: () => string;
   /** Track BD: ticks between re-scans on the way in mode baritone (default MINE_GOAL_UPDATE_TICKS, 40). */
   rescanTicks?: () => number;

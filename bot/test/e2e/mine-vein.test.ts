@@ -34,6 +34,7 @@ const key = (p: Vec3) => `${p.x},${p.y},${p.z}`;
 
 describe.skipIf(!E2E)('@bds mine: veins, produce on the floor, several kinds in one trip (Track AQ)', () => {
   let bot: FarmBot;
+  let detachPlanner: (() => void) | undefined; // Track BD
   const cell = randomInt(64);
   const X0 = 80_000 + 128 * (cell % 8) + 64;
   const Z0 = 80_000 + 128 * Math.floor(cell / 8) + 24;
@@ -76,6 +77,11 @@ describe.skipIf(!E2E)('@bds mine: veins, produce on the floor, several kinds in 
   beforeAll(async () => {
     await prepareServer(DIG_CONTAINER);
     bot = await connectFarmBot('Vein', { target: DIG_TARGET, container: DIG_CONTAINER });
+    // Track BD: mode baritone plans its dig-heavy composite goals in the planner worker (the Realm's configuration)
+    if (MINE_MODE === 'baritone') {
+      detachPlanner = bot.skills.nav.attachPlanner(bot.world);
+      expect(await pollUntil(() => !!bot.skills.nav.planner?.ready, 20_000)).toBeGreaterThanOrEqual(0);
+    }
   }, 180_000);
 
   afterAll(async () => {
@@ -85,6 +91,7 @@ describe.skipIf(!E2E)('@bds mine: veins, produce on the floor, several kinds in 
         await clearArea(bot.truth, X0, Z0 + 48 * i, 22, 10).catch(() => undefined);
         await killItemsNear(X0, Z0 + 48 * i, 24, DIG_CONTAINER).catch(() => undefined);
       }
+      detachPlanner?.();
       await bot.close();
     }
   }, 300_000);

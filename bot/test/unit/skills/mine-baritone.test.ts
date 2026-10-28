@@ -11,6 +11,7 @@ import { parseSettingValue } from '../../../src/config/settings.ts';
 import { mineEndLine } from '../../../src/chat/commands-farm.ts';
 import { MINE_GOAL_UPDATE_TICKS, MINE_MAX_ORE_LOCATIONS, coalesce, compositeOf, droppedItems, estimate, headingMember, memberAt, nearestCandidate, plausibleToBreak, prune, type MineCandidate, type MineGoalContext } from '../../../src/skills/mine/baritone/mineProcess.ts';
 import { MineTask, type MineDeps } from '../../../src/skills/mine/miner.ts';
+import type { SkillResult } from '../../../src/skills/types.ts';
 import { OreMemory } from '../../../src/skills/mine/seen.ts';
 import { shaftHazard, type TunnelWorld } from '../../../src/skills/mine/tunnel.ts';
 import { findPath } from '../../../src/skills/nav/astar.ts';
@@ -266,7 +267,7 @@ interface H {
   walkDigsOre: boolean;
   /** Hold the next goto until `release` is called (the rescan test). */
   hold: boolean;
-  release: ((r: { ok: boolean; reason?: string }) => void) | undefined;
+  release: ((r: SkillResult) => void) | undefined;
   lastGoto: { actions: { dig: number }; segments: number; reached?: { index: number } } | undefined;
   rescan: number;
   ticks: (() => void)[];
@@ -463,6 +464,19 @@ describe('MineTask in mode baritone: one composite goal, the reached ore mined',
     expect(h.collects.some((c) => c.origin)).toBe(true);
   });
 
+  it('another ore of the composite dug by the walk on the way (in the goal column) counts as mined (e2e: the cave ores)', async () => {
+    const w = wall();
+    w.load({ x: 9, y: 3, z: 0 }, 'iron_ore');
+    w.load({ x: 9, y: 1, z: 0 }, 'iron_ore'); // under it: the walk's body cells for the first one
+    const h = harness(w);
+    h.unreachable.add('9,1,0'); // the fake planner heads for the upper one
+    const t = new MineTask(h.deps);
+    expect(await t.start({ block: 'iron_ore', count: 2 })).toBe('done');
+    expect(t.stats.composites).toBe(1);
+    expect(t.stats.walkDug).toBe(1);
+    expect(t.stats.minedAt).toEqual([{ x: 9, y: 1, z: 0 }, { x: 9, y: 3, z: 0 }]);
+  });
+
   it('the cheapest of several: the fake planner takes the nearest by estimate; a kind whose quota is met drops out', async () => {
     const w = new World();
     const at = (x: number) => ({ x, y: -2, z: 0 });
@@ -497,6 +511,29 @@ describe('MineTask in mode baritone: one composite goal, the reached ore mined',
     expect(t.stats.minedAt).toEqual([{ x: 9, y: 1, z: 0 }]);
     expect(t.stats.composites).toBe(2);
     expect(w.blockAt({ x: 4, y: 1, z: 0 })?.name).toBe('iron_ore');
+  });
+
+  it('blacklistClosestOnFailure after walking a while: the last plan found no path (e2e mine-cave, ores floating over the bot): the closest is unreachable, no 3 failures', async () => {
+    const w = wall();
+    w.load({ x: 4, y: 1, z: 0 }, 'iron_ore');
+    w.load({ x: 9, y: 1, z: 0 }, 'iron_ore');
+    const h = harness(w);
+    const goto0 = h.deps.skills.goto.bind(h.deps.skills);
+    let first = true;
+    h.deps.skills.goto = async (g, o) => {
+      if (g.type === 'any' && first) {
+        first = false;
+        h.lastGoto = { actions: { dig: 0 }, segments: 2, plans: [{ status: 'found' }, { status: 'none' }] } as H['lastGoto'];
+        return { ok: false, reason: 'unreachable' };
+      }
+      return goto0(g, o);
+    };
+    const t = new MineTask(h.deps);
+    expect(await t.start({ block: 'iron_ore', count: 1 })).toBe('done');
+    expect(t.stats.calcFailed).toBe(1);
+    expect(t.stats.failures).toBe(0);
+    expect(t.stats.unreachable).toEqual([{ x: 4, y: 1, z: 0 }]);
+    expect(t.stats.minedAt).toEqual([{ x: 9, y: 1, z: 0 }]);
   });
 
   it('the rescan on the way: every rescanTicks the candidates are pruned again; the target gone cancels the walk and a new composite follows', async () => {

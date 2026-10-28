@@ -41,6 +41,7 @@ const MINE_MODE = process.env.MINE_MODE === 'baritone' ? 'baritone' : 'v3';
 
 describe.skipIf(!E2E)('@bds mine: legit mining in a cave (7.14)', () => {
   let bot: FarmBot;
+  let detachPlanner: (() => void) | undefined; // Track BD
   const area = new FarmArea();
   const mx = area.x0;
   const mz = area.z0;
@@ -83,6 +84,11 @@ describe.skipIf(!E2E)('@bds mine: legit mining in a cave (7.14)', () => {
   beforeAll(async () => {
     await prepareServer();
     bot = await connectFarmBot('Mine');
+    // Track BD: mode baritone plans its dig-heavy composite goals in the planner worker (the Realm's configuration)
+    if (MINE_MODE === 'baritone') {
+      detachPlanner = bot.skills.nav.attachPlanner(bot.world);
+      expect(await pollUntil(() => !!bot.skills.nav.planner?.ready, 20_000)).toBeGreaterThanOrEqual(0);
+    }
     await bot.teleport({ x: mx - 13.5, y: F, z: mz + 0.5 }, -90);
     await buildCave();
     await bot.loadout([['stone_pickaxe', 1]]);
@@ -97,6 +103,7 @@ describe.skipIf(!E2E)('@bds mine: legit mining in a cave (7.14)', () => {
     if (bot) {
       await clearArea(bot.truth, mx, mz, 18, 9).catch(() => undefined);
       await killItemsNear(mx, mz, 20).catch(() => undefined);
+      detachPlanner?.();
       await bot.close();
     }
   });

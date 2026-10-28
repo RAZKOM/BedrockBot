@@ -176,7 +176,7 @@ describe.skipIf(!E2E)('@bds mine: ore memory survives a restart (Track Z)', () =
     const logDir = mkdtempSync(join(tmpdir(), 'bb-mine-log-'));
     cli = spawn(
       process.execPath,
-      ['src/index.ts', '--task', 'afk', '--walk', '--host', DIG_HOST, '--port', String(DIG_PORT), ...CLI_TARGET_ARGS, '--username', name2, '--no-reconnect', '--log-dir', logDir, '--set', 'mineSeenOnly=on', ...(process.env.MINE_MODE === 'baritone' ? ['--set', 'mineMode=baritone'] : [])], // Track BD: MINE_MODE
+      ['src/index.ts', '--task', 'afk', '--walk', '--host', DIG_HOST, '--port', String(DIG_PORT), ...CLI_TARGET_ARGS, '--username', name2, '--no-reconnect', '--log-dir', logDir, '--set', 'mineSeenOnly=on', ...(process.env.MINE_MODE ? ['--set', `mineMode=${process.env.MINE_MODE}`] : [])], // Track BD: MINE_MODE
       { cwd: BOT_DIR, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, BEDROCKBOT_CACHE_DIR: root } },
     );
     cli.stdout?.on('data', (d: Buffer) => (out += d.toString()));
@@ -208,12 +208,13 @@ describe.skipIf(!E2E)('@bds mine: ore memory survives a restart (Track Z)', () =
       return (i.counts['minecraft:coal'] ?? 0) >= 4 || Date.now() - tCmd > minedMs + 20_000 ? i : undefined;
     }, 30_000, 'coal collected', 500);
     const controlLeft = await Promise.all(control.map(blockName));
-    const targets = out.split('\n').filter((l) => l.includes('mine: target'));
+    const BARITONE = (process.env.MINE_MODE ?? 'baritone') === 'baritone'; // Track BD (the CLI's default mode): mode baritone logs one composite per goto (`nearest coal_ore at x y z, 48 blocks`)
+    const targets = out.split('\n').filter((l) => l.includes(BARITONE ? 'mine: composite' : 'mine: target'));
     const first = targets[0] ?? '';
     notes.push(`run 2: 4 remembered ores mined ${minedMs} ms after !mine; inventory ${JSON.stringify(inv.counts)}; control ${controlLeft.join(',')}`);
-    notes.push(`targets: ${targets.map((l) => l.replace(/^.*mine: target /, '')).join(' | ')}`);
+    notes.push(`targets: ${targets.map((l) => l.replace(/^.*mine: (target|composite) /, '')).join(' | ')}`);
     notes.push(`CLI: ${out.split('\n').filter((l) => /world cache:|mine coal_ore|mining 4|remembered/.test(l)).slice(0, 6).join(' | ')}`);
-    expect(first).toMatch(/\(cache, (4[0-9]|5[0-9])\.\d blocks/); // remembered, 40+ blocks away: beyond the 32-block scan
+    expect(first).toMatch(BARITONE ? /nearest coal_ore at .*, (4[0-9]|5[0-9]) blocks/ : /\(cache, (4[0-9]|5[0-9])\.\d blocks/); // remembered, 40+ blocks away: beyond the 32-block scan
     expect(targets.every((l) => remembered.some((p) => l.includes(`at ${p.x} ${p.y} ${p.z}`)))).toBe(true);
     expect(inv.counts['minecraft:coal'] ?? 0).toBe(4);
     expect(controlLeft.every((n) => n === 'coal_ore')).toBe(true);

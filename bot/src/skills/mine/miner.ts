@@ -178,7 +178,7 @@ export interface MineSkills {
   collect(radius: number, timeoutTicks: number, opts?: CollectOptions): Promise<CollectResult>;
   cancel(): void;
   /** The navigator's report of the last goto (actions.dig counts its tunnel digs; segments 0 = it never moved; Track BD: `reached` = the member of an `any` goal the walk ended in). */
-  status?(): { lastGoto?: { actions: { dig: number; place?: number }; segments?: number; reached?: { index: number } | undefined } | undefined };
+  status?(): { lastGoto?: { actions: { dig: number; place?: number }; segments?: number; reached?: { index: number } | undefined; plans?: readonly { status: string }[] } | undefined };
 }
 
 export interface MineDeps {
@@ -898,9 +898,14 @@ export class MineTask {
     if (head) this.stats.targeted.push({ ...head.p });
     this.log.info(`mine: composite of ${cands.length}${head ? ` (nearest ${head.name} at ${fmt(head.p)}, ${estimate(feet, head.p).toFixed(0)} blocks; ${this.d.memory.size} seen, ${this.d.memory.recalled} remembered)` : ''}`);
     this.state = 'walk';
+    // the ores of the composite as they are before the walk: a path into the column of one ore may dig
+    // another on the way (e2e mine-baritone, the cave: 3 raw iron, 1 counted); those count as mined
+    const before = cands.filter((c) => c.kind === 'ore' && this.d.blockAt(c.p)?.name === c.name);
     const r = await this.gotoComposite(gen, goal, cands);
-    if (!this.alive(gen)) return undefined;
     const rep = sk.status?.().lastGoto;
+    const reached = r.result.ok && !r.restart ? (rep?.reached?.index ?? memberAt(goals, this.feetCell() ?? feet)) : -1;
+    if ((rep?.actions.dig ?? 0) > 0) this.dugOnTheWay(before, reached >= 0 ? cands[reached] : undefined);
+    if (!this.alive(gen)) return undefined;
     this.stats.tunnelled += rep?.actions.dig ?? 0;
     if (r.restart) {
       this.stats.replans++;
@@ -913,8 +918,10 @@ export class MineTask {
         for (const c of cands) this.blacklist(c.p); // every member on Track R's blacklist already
         return undefined;
       }
-      if (!rep || rep.segments === 0) {
-        // Baritone onTick `calcFailed`: no path to any of them: blacklist the presumably unreachable closest one
+      if (!rep || rep.segments === 0 || rep.plans?.at(-1)?.status === 'none') {
+        // Baritone onTick `calcFailed` (any path calculation that failed, also after walking a while: e2e mine-cave,
+        // two ores floating over the bot cost 3 failed gotos otherwise): no path to any of them: blacklist the presumably
+        // unreachable closest one
         this.stats.calcFailed++;
         const n = BLACKLIST_CLOSEST_ON_FAILURE ? nearestCandidate(feet, cands) : undefined;
         if (n) this.markUnreachable(n, `goto: ${g.reason}, no segment (closest of ${cands.length} blacklisted)`);
@@ -924,8 +931,7 @@ export class MineTask {
       if (head) this.fail(head, `goto: ${g.reason}`);
       return undefined;
     }
-    const at = this.feetCell() ?? feet;
-    const idx = rep?.reached?.index ?? memberAt(goals, at);
+    const idx = reached;
     const c = idx >= 0 ? cands[idx] : undefined;
     if (!c) {
       if (head) this.fail(head, 'arrived at no member of the composite');
@@ -940,6 +946,22 @@ export class MineTask {
     }
     await this.takeOre(gen, { p: c.p, name: c.name }, (rep?.actions.dig ?? 0) > 0);
     return undefined;
+  }
+
+  /**
+   * Ores of the composite the walk's own digs took on the way (open now, not a liquid), other than the member
+   * it arrived at (`takeOre` counts that one): counted as mined (Baritone counts the inventory; ours counts
+   * the cells), their drops left to the floor sweep.
+   */
+  private dugOnTheWay(before: readonly MineCandidate[], arrived: MineCandidate | undefined): void {
+    for (const c of before) {
+      if (arrived && key(arrived.p) === key(c.p)) continue;
+      const b = this.d.blockAt(c.p);
+      if (!b || b.boxes.length > 0 || LIQUIDS.has(b.name) || !this.active.has(c.name)) continue;
+      this.stats.walkDug++;
+      this.counted(c.p, c.name, undefined);
+      this.log.info(`mine: ${c.name} at ${fmt(c.p)} dug by the walk on the way`);
+    }
   }
 
   /**

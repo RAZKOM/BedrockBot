@@ -33,7 +33,7 @@ describe.skipIf(!E2E)('@bds mine: iron 5 to 10 blocks into the rock of a cave (T
 
   beforeAll(async () => {
     await prepareServer();
-    bot = await startExploreBot('Rock', {}, process.env.MINE_MODE === 'baritone' ? { settings: { mineMode: 'baritone' } } : {}); // Track BD: MINE_MODE
+    bot = await startExploreBot('Rock', {}, process.env.MINE_MODE ? { settings: { mineMode: process.env.MINE_MODE } } : {}); // Track BD: MINE_MODE
   }, 120_000);
 
   afterAll(async () => {

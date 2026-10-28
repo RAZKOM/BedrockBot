@@ -3,6 +3,11 @@
 Wave 9, Track AI. Decision record: [decisions/0030-explore-and-branch-mining.md](decisions/0030-explore-and-branch-mining.md).
 Branch mining (the other half of the track: `!mine` when no ore is known) is in [mining.md](mining.md)
 "Branch mining". The world cache the walk fills is in [world-cache.md](world-cache.md).
+Wave 11 Track BD made that one job ("mine until n", both `mineMode`s): with nothing known the job branch
+mines one step at a time, mines what the steps reveal, and goes back to branch mining at the next dead
+end (round 2, 3 ...) until n; it ends `none_left` only when the branch run itself gives up, and the end
+line says how far it explored (`explored 3 rounds (420 blocks dug)`); `!get status` shows
+`mine iron_ore 212/1000: exploring (round 3, 420 blocks)` (mining.md "Mine until n").
 Measured on **BDS 1.26.60.6** (container `bds-explore`, udp/19198, RakNet, offline, generated DEFAULT
 world, `LEVEL_SEED` 7, peaceful, TICK_DISTANCE 10) on 2026-10-30.
 

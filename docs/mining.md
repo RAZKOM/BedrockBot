@@ -33,6 +33,11 @@ one group with every drop collected; the job's kind of items within 8 blocks pic
 target; several kinds with quotas in one trip (`!mine iron_ore 8 coal_ore 16`, `!get ores 32`); setting
 `mineDirect`. Section "Mining v3" below.
 
+**Track BD changes (wave 11, decision 0043):** setting `mineMode` (default `baritone`): Baritone's
+MineProcess, every known ore in one composite goal of column goals and one planner search with the dig
+moves, the cheapest reachable ore first; "mine until n" (both modes): with nothing known the job branch
+mines round after round instead of ending. Section "Mining v4" below; `!set mineMode v3` is mining v3.
+
 ## Files
 
 | File | What |
@@ -47,6 +52,7 @@ target; several kinds with quotas in one trip (`!mine iron_ore 8 coal_ore 16`, `
 | `bot/src/skills/mine/vein.ts` | Track AQ: `veinFrom` (18-connected flood fill of one ore kind), `oreKind`, `veinCentre` / `veinRadius` |
 | `bot/src/skills/collect/sweep.ts` | Track AQ: `sweepItems` (the floor sweep: one entity scan when nothing is near), `isWoodDrop`, `isFoodDrop` |
 | `miner.ts` `jobDropNames` / `isJobDrop` | what a job's sweeps and hole walks pick up: the ore drops (`isMineDrop`) plus the job's own block kinds and what they drop (`BLOCK_DROPS`: stone to cobblestone, gravel to gravel and flint, grass to dirt ...). Before 2026-10-30 only ore drops counted, so `!get sand 256` left every sand item on the floor |
+| `bot/src/skills/mine/baritone/mineProcess.ts` | wave 11 Track BD, ported from Baritone `MineProcess.java` (LGPL-3.0, `./LICENSE` points at nav/baritone/LICENSE): `coalesce`, `prune`, `plausibleToBreak`, `droppedItems`, `compositeOf`, the mine settings as constants |
 | `bot/src/skills/mine/branch.ts` | wave 9 Track AI: branch mining (`branchMore`, the miner's hook when no target is known; `BranchRun`, the Y table `BRANCH_Y`), wired per bot by `attachBranch` in chat/commands-explore.ts |
 
 ## As a process (Track Z)
@@ -146,6 +152,10 @@ for *targeting* would forget ores the bot walked past and was not used; line of 
 for the *dig* instead (below).
 
 ## The loop (`MineTask`)
+
+This is the loop of mode `v3` (with Track AQ's approach below); mode `baritone` (the default since Track
+BD) replaces steps 2 and 3 by one prune and one composite goto: "Mining v4" below. Both modes share
+steps 1, 4 to 6 and "mine until n" (a dead end explores instead of ending `none_left`).
 
 1. Stop when `mined >= n` (`done`), health < 8 (`low_health`), or the next target needs a pickaxe and
    none is in the inventory (`no_pickaxe`).
@@ -302,6 +312,141 @@ The walk probe costs 1 to 21 ms on the flat world (3 probes in 53 ms in the cave
 pace (73 to 74 blocks per minute with iron, 90 with netherite on stone) includes the walk into each new
 cell; the Digger's break time alone is 8 / 5 ticks per stone block.
 
+## Mining v4: MineProcess (Track BD)
+
+Wave 11, the Baritone port (decision 0043; Baritone `23723891`, LGPL-3.0, THIRD_PARTY_NOTICES.md).
+Setting **`mineMode`** (`v3` | `baritone`, default `baritone` since this track, see "Default" below). Mining v3 joins three
+planners by hand-tuned thresholds (the walk probe, the "3 x straight line + 8" detour rule, the straight
+tunnel / shaft planner with `SHAFT_SAVES` and `mineTunnelLen`, the sight-dig fallback) and picks one
+target at a time. Baritone's `MineProcess` puts every known ore into one `GoalComposite` of column goals
+and runs the normal pathfinder, where digging is a move cost (Track BC's dig moves): tunnels, staircases
+and shafts fall out of one search and the planner picks the cheapest reachable ore by itself.
+
+Files: `bot/src/skills/mine/baritone/mineProcess.ts` (ported: `coalesce`, `internalMiningGoal`,
+`prune`, `plausibleToBreak`, `isNextToAir`, `droppedItems`, `goalComposite`, the settings as constants),
+the goals `twoBlocks` / `threeBlocks` in `nav/goals.ts` (Baritone `GoalTwoBlocks` /
+`MineProcess.GoalThreeBlocks`; `any` is `GoalComposite`; mirrored in `nav/worker.ts`, keyed by the ore
+block in `nav/blacklist.ts`), the loop in `mine/miner.ts` (`// Track BD` blocks: `mineComposite`,
+`gotoComposite`, `pruneNow`, `dugOnTheWay`, `nothingKnown`), `mine/tunnel.ts` `shaftHazard` (the hazard
+half of `shaftRule`, shared).
+
+### The loop in mode `baritone`
+
+1. Stop rules as before (n mined, health, no pickaxe for the heading ore).
+2. Scan, then **prune** the memory's candidates (`OreMemory.targets` under the current `mineSeenOnly`)
+   and the job's dropped items: dedupe; a loaded position that is not an asked block any more is
+   dropped; `plausibleToBreak` (rule table) refuses with the reason (reported once in `stats.unsafe`,
+   blacklisted); the Y limits; the blacklists (the run's, the session's unreachable set, Track R's
+   navigator blacklist); nearest first by our estimate (octile distance of the columns + the height
+   difference); at most 64 (`mineMaxOreLocationsCount`).
+3. **One goto** to the composite of every candidate's goal (`coalesce`: `threeBlocks` = the feet in the
+   ore's cell or one / two below it, `twoBlocks` when a gravity block sits on the ore; a drop: its
+   cell), `allowBreak` and `allowPlace` (the navigator drops place without throwaway blocks), planned
+   in the planner worker when one is attached. Every 40 ticks on the way (`MINE_GOAL_UPDATE_TICKS`;
+   Baritone 5) the memory is scanned and pruned again; the member the body heads for gone (mined,
+   blacklisted, something else) cancels the walk and the loop builds a new composite.
+4. On arrival: the reached member (`GotoReport.reached`) is mined as in v3 (`takeOre`: line-of-sight
+   digs, `requireHarvest`, the vein from it, the collect and the hole walk); an ore the walk dug itself
+   (the feet in its cell) counts as mined, and so does any other ore of the composite the path dug on
+   the way (`dugOnTheWay`; found in the e2e: the cave's ores were dug by the path to their neighbour,
+   3 raw iron picked up and 1 counted).
+5. Failures: a goto that never got a segment or whose last plan found no path (no path to any member)
+   blacklists the candidate nearest
+   the feet by straight line for the session (Baritone `blacklistClosestOnFailure`); any other failure
+   counts against the heading member, 3 failures blacklist it (ours).
+6. Nothing left after prune: "mine until n" (next section).
+
+Not used in mode `baritone` (left intact for `v3`): the walk probe, the detour ratio
+(`WALK_DETOUR` / `WALK_SLACK`), `SHAFT_SAVES`, `mineTunnelLen` for the approach, the straight tunnel
+planner. Kept from v3: the floor sweep before each target, the vein, the drop pickup walk, `returnUp`
+(the climb back to where the first dig below the start began), pause / resume / stop (a pause during a
+sweep keeps the job), `protectRadius` and built blocks.
+
+### Mine until n (both modes)
+
+When prune (or v3's candidate list) leaves nothing and the job is below n, the job does not end: it
+runs the explore fallback, which is our existing branch mining (`mine/branch.ts` `branchMore`, wired by
+`attachBranch`; Baritone's `exploreForBlocks` / `GoalRunAway` branch point is not ported, see the rule
+table), one layout step per loop pass with a rescan after each. The memory learning ore ends the
+round and mining resumes; the next dead end starts round + 1 (the same branch run continues where it
+was). `none_left` only when the explorer itself gives up (its own budget: `mineTunnelLen` blocks of
+tunnel at the Y without a find, blocked, health, no pickaxe, or not a branch ore). The status line
+while exploring: `mine iron_ore 212/1000: exploring (round 3, 420 blocks)` (`!status`, `!get status`);
+the end line says how far it explored: `mine iron_ore: 212/1000, no seen iron_ore left, explored 3
+rounds (420 blocks dug)`.
+
+### Rule table (Baritone vs ours)
+
+| Baritone (`MineProcess.java` / `Settings.java`) | Ours | Kept | Why |
+|---|---|---|---|
+| `coalesce` with `forceInternalMining` false: `GoalThreeBlocks` unless a `FallingBlock` is above, then `GoalTwoBlocks` | same (`coalesce`); the `forceInternalMining` branch ported too (unit-tested, off) | Baritone's | the goal shape is the point of the port |
+| `GoalComposite` (heuristic = min over members) | our `any` goal (already the same) | the same | |
+| `GoalThreeBlocks` / `GoalTwoBlocks` heuristic: `GoalBlock.calculate` (xz + y part) | octile on the column only | ours | `block` has no y term either; admissible with our tick costs (rule 5) |
+| `mineGoalUpdateInterval` 5 ticks, re-validates the whole goal | 40 ticks; re-plans only when the heading member is gone | ours | a scan is 2 ms on the main thread and a changed composite re-plans in the worker; every 5 ticks would cancel more walks than it finds ore |
+| `mineMaxOreLocationsCount` 64 | 64 | Baritone's | |
+| sort by straight-line `distSqr` from the feet | octile of the columns + height difference | ours | a walk-cost estimate; an ore 8 down ranks behind one 8 across |
+| `blacklistClosestOnFailure` (true): no path, the closest known ore blacklisted | same, for the session and on Track R's blacklist | Baritone's | plus ours: 3 failures of the same cell blacklist it |
+| `plausibleToBreak`: `getMiningDurationTicks < COST_INF` and not `avoidBreaking`; not bedrock above and below | the shared rule set (`breakRule`: `breakBlocker` without the under-feet rule: liquid beside, gravity above, unknown, `protectRadius`, `isBuiltBlock`) + Baritone's bedrock rule + the shaft hazards under a candidate below the feet (`shaftHazard`: a liquid 1-2 below, dripstone within 3 below) | ours (stricter) | rule 6: the owner's rules by name; Baritone's `MovementDownward` / `MovementFall` are less careful |
+| `allowOnlyExposedOres` + `allowOnlyExposedOresDistance` 1 (`isNextToAir`) | `mineSeenOnly` (off by default: buried ore too); the memory's 6-neighbour exposure rule | ours | the owner's setting; both modes gated |
+| `legitMine`, `legitMineYLevel`, `legitMineIncludeDiagonals` (mine only what is seen, strip-mine at a Y) | not ported: `mineSeenOnly on` + branch mining (`mineBranchY`) | ours | the same behaviour exists, measured (Track AI) |
+| `exploreForBlocks` (true): `GoalRunAway` from a branch point at `legitMineYLevel` | branch mining (`branchMore`) round after round | ours | reuse, not a second explorer; ours digs a planned layout under the dig rules |
+| `minYLevelWhileMining` / `maxYLevelWhileMining` (0 / 2031) | constants -64 / 320 | ours | the overworld's limits |
+| `mineScanDroppedItems` (true) + `droppedItemsScan`; a drop within 3 blocks of a plausible ore is not its own goal | same over the entity list with the job's drop names (`isJobDrop`), radius = the scan radius | Baritone's | |
+| `mineDropLoiterDurationMSThanksLouca` (keep a mined position as a goal while its drop may still land) | the collect after each dig, the hole walk, the floor sweep, the end-of-job pickup | ours | measured since Track AQ (7 of 7 diamonds) |
+| `WorldScanner` / `CachedWorld` (`maxCachedWorldScanCount`), unloaded positions kept | the ore memory (`seen.ts`, recall from the world cache); unloaded (cached) candidates kept, never read | the same rule | rule 7: never a block outside the world model |
+| in goal: `MineProcess` turns to and breaks every known ore it can reach | `takeOre`: line-of-sight digs, `requireHarvest`, the vein flood fill; `dugOnTheWay` counts ores the path took | ours | the Digger and the vein are measured |
+| `notificationOnMineFail` | the `!mine` end line with the skip reasons and how far it explored | ours | chat replies |
+| path costs (`ActionCosts`, Java break times) | `nav/costs.ts`, `digPenalty` 60 ticks per dug block | ours | rule 5: our Bedrock tick costs are measured |
+
+### Default
+
+**`baritone` since Track BD** (flipped in the same track after the gate below passed: `mine-baritone`
+twice, mode baritone mined as many ores as v3 in less time with `mineSeenOnly` off and on, and the
+regression suites `mine-cave`, `mine-tunnel`, `mine-vein`, `mine-memory`, `mine-rock`, `explore-mine`
+passed in both modes; `gaunt-mine` was not run, its container is not this track's). `!set mineMode v3`
+brings back mining v3, whose code stays until the cleanup track. The library default without the option
+(`createMinerFor(parts, {})`, `new MineTask(deps)`) is still v3, so the unit and e2e tests that do not
+name a mode keep measuring v3; the chat command and `!get` read the setting.
+
+### Measured (Track BD, BDS 1.26.60.6)
+
+e2e `mine-baritone` (bds-bari, flat, truth-built, planner worker attached) on 2026-10-30: one 17 x 17 x 15
+stone block with 14 iron ores at depths 2 to 9 (one straight under the start under 3 blocks of stone, one
+beside a 2-cell lava pocket, one under gravel, a 5-ore vein 6 to 7 deep, 3 in the walls / floor / ceiling
+of a closed cave 7 to 8 deep, singles 2, 6 and 8 deep), `!mine iron_ore 20`-shaped jobs (none_left once
+the block is mined out), 3 runs per mode and setting, the suite run twice (6 runs per cell in all).
+"Skipped" counts the lava and gravel ores (plus the previous row's lava ore, still in the world model).
+
+| `mineSeenOnly` | Mode | Ores mined (each run) | Time (mean of 6) | s per ore | Failed gotos | Unreachable | Digs (cells) | Placed | Lava / gravel ore |
+|---|---|---|---|---|---|---|---|---|---|
+| off | v3 | 12 x 6 | 114.4 s (108.9 to 116.7) | 9.5 | 0 to 1 | 0 to 2 | 71 to 82 | 0 | skipped (`next_to_liquid`, `gravity_above`), intact |
+| off | baritone | 12 x 6 | 85.9 s (85.4 to 87.0) | 7.2 | 0 | 0 | 45 | 16 (pillars back up from the deep members) | skipped, intact |
+| on | v3 | 3 x 6 (the cave) | 33.5 s (31.6 to 36.5) | 11.2 | 0 | 0 | 14 | 5 | not candidates, intact |
+| on | baritone | 3 x 6 | 26.8 s (24.3 to 28.8) | 8.9 | 0 | 0 | 8 to 9 | 6 | not candidates, intact |
+
+Mode baritone: 8 composites of 52 members in all per run with `mineSeenOnly` off (3 of 6 with it on),
+25 rescans on the way, 0 to 2 re-plans, 6 ores taken by the walk's own digs (2 with it on). The first
+smoke run counted 1 of 3 cave ores (3 raw iron picked up): the path to one cave ore dug the other two;
+fixed by `dugOnTheWay`. No rockets, no liquid touched.
+
+The regression suites in both modes (`MINE_MODE=v3` / `baritone`; bds-dig for the first four, bds-explore
+for the last two):
+
+| Suite | v3 | baritone |
+|---|---|---|
+| `mine-tunnel` (10 cases) | 10 / 10 | 10 / 10 (after two fixes, below); ore 4 under the floor 14.4 s, 8 into a wall 14.5 s (iron) / 13.0 s (netherite), 6 up in a hill 13.3 s (staircase, nothing placed), 10 straight down 15.6 s (pillar back up 10 placed), lava / dripstone under the ore skipped in 0.0 s with the reason, stone bricks in the line: dug round them (v3: skipped by design), water / lava by the line: both ores mined in 21.4 s, no liquid next to an opened cell; the brick-walled ore's unreachable verdict 8.2 s (v3 0.0 s: one failed composite plan in the worker instead of the probe) |
+| `mine-vein` (3) | 3 / 3; vein 7/7 first to last 9.1 s; one job 61.8 s / 115.4 blocks walked | 3 / 3; vein 7 mined, first to last 9.0 s; one job 53.4 s / 104.5 blocks |
+| `mine-memory` (1) | pass | pass: 4 remembered ores mined 29.0 s after `!mine`, the first composite's nearest member 47 blocks away, control ores untouched |
+| `mine-cave` (4) | 4 / 4 | 4 / 4; the two floating ores unreachable after 9.5 / 9.6 s, 0 failures (after the fix below) |
+| `mine-rock` (1) | 4/4 in 10.6 s | 4/4 in 19.2 s (a 64-member composite; another start in the generated world) |
+| `explore-mine` (1) | pass | pass |
+
+Fixes the gate found: (1) without the planner worker attached (the e2e helpers' default) the in-thread
+plan budget cut the dig-heavy composite searches short (hill, shaft: "unreachable" after 2.7 s); the
+suites attach the worker in mode baritone, as the Realm bot does (`plannerThreads` 1). (2) A goto that
+walked and then found no path (two ores floating over the bot) counted 3 failures per ore; a last plan
+with status `none` now counts as Baritone's `calcFailed` and blacklists the closest member at once.
+
 ## Branch mining (wave 9, Track AI)
 
 Decision record: [decisions/0030-explore-and-branch-mining.md](decisions/0030-explore-and-branch-mining.md).
@@ -410,11 +555,17 @@ right behind it; 4 coal ores buried two blocks deep; the bot starts outside with
 | `bot/test/unit/skills/mine-v3.test.ts` (Track AQ) | the MineTask loop: probe then walk / tunnel, a long detour tunnels, a blocked tunnel skips at once with the reason, `mineDirect` off, shaft + pillar back, shaft + staircase back, lava under the ore, veins as one group (status, one collect, quota), several kinds nearest first, `ores`, `!mine` / `!get` forms, the NL steps |
 | `bot/test/e2e/mine-tunnel.test.ts` (Track AQ, bds-dig) | ore 4 under the floor (staircase, back on the floor), 8 into a wall (iron and netherite pickaxe), 6 up in a hill, 10 straight down (shaft, pillar back), lava / dripstone under the ore, stone bricks in the line, water / lava by the line (no liquid next to an opened cell, truth), the cheap unreachable verdict; `MINE_BEFORE=1` runs it without assertions |
 | `bot/test/e2e/mine-vein.test.ts` (Track AQ, bds-dig) | a 7-block diamond vein (one group, 7 diamonds, truth), logs spawned 5 blocks away picked up by the gather job, `!mine iron_ore 4 coal_ore 6 diamond_ore 2` against three single jobs (walked distance) |
+| `bot/test/unit/skills/mine-baritone.test.ts` (Track BD) | `coalesce` (the three goal shapes, the asked block above / below, `forceInternalMining`), the goals in the planner (done set, heuristic, blacklist key), `prune` (loaded, still ore, protected, built, beside lava, gravity above, bedrock, the shaft hazard below, Y limits, blacklist, nearest N by estimate, dropped items), the loop in mode baritone (buried ore with `mineSeenOnly` off / not with on, the real planner digging to it, ore dug by the walk, another ore dug on the way, quotas, `blacklistClosestOnFailure` with and without segments, the rescan interval and re-plan, the rules at prune time, no pickaxe, the setting), mine until n in both modes (explore -> ore learnt -> mined -> explore again -> done), a pause during a sweep keeps the job |
+| `bot/test/unit/skills/nav-goals.test.ts`, `nav-worker.test.ts` (Track BD cases) | `twoBlocks` / `threeBlocks` done sets, heuristic and key; 20 mine-shaped composite queries (buried members with `mineSeenOnly` off, exposed with it on) plan identically in the worker (status, cost, expansions, length, break set, member) |
+| `bot/test/e2e/mine-baritone.test.ts` (Track BD, bds-bari) | the stone block of "Mining v4: Measured" in both modes x both `mineSeenOnly`, 3 runs each, then mode baritone against v3 on ores and seconds per ore (within 10 %); env `BARI_BDS_*`, `MINE_BARI_RUNS` (3) |
 | `bot/test/e2e/mine-rock.test.ts` (Track AQ, bds-explore) | `!mine iron_ore 4` from a cave with the iron 5 to 10 blocks into the rock (start chosen with truth:find): done within 5 min, 4 raw iron (truth), no liquid next to an opened cell |
 
 Track AQ's e2e run on bds-dig (`DIG_BDS_*`, `farm-truth.ts connectFarmBot(prefix, { target, container })`)
 and bds-explore (`EXPLORE_BDS_*`); `mine-cave` runs on bds-dig too with `FARM_BDS_PORT=19148
-FARM_BDS_CONTAINER=bds-dig`.
+FARM_BDS_CONTAINER=bds-dig`. Track BD: `MINE_MODE=v3` / `baritone` runs `mine-cave`, `mine-tunnel`,
+`mine-vein`, `mine-memory`, `mine-rock` and `explore-mine` in that mode (unset: the createMinerFor
+suites run v3, the CLI suites the setting's default); in mode baritone the createMinerFor suites attach
+the planner worker and v3's own tunnel-plan assertions are skipped.
 
 ```sh
 node scripts/bds.mjs --profile farm up      # bds-farm, udp/19186
@@ -429,6 +580,15 @@ Env: `FARM_BDS_HOST` (127.0.0.1), `FARM_BDS_PORT` (19186), `FARM_BDS_CONTAINER` 
 
 ## Open points
 
+- Track BD: `gaunt-mine` (bds-gaunt) and the `!get` e2e suites were not run in mode baritone (not this
+  track's containers); the pause-during-a-sweep rule is unit-tested in mode baritone.
+- Track BD: the unreachable verdict in mode baritone is one failed composite plan in the worker (8.2 s for
+  a brick-walled ore on the flat test world against v3's 0.0 s probe), and the e2e helpers plan in-thread
+  unless a suite attaches the worker: a dig-heavy composite there runs out of budget.
+- Track BD: mode baritone pillars back up from deep members with the cobblestone its digs picked up (16
+  blocks placed on the test block); v3 dug staircases. Both are planner moves under the rules.
+- Track BD: Baritone's `legitMine` strip mining and `GoalRunAway` explore are not ported (branch mining
+  covers them); the rescan is 40 ticks, not 5 (measured cost, see the rule table).
 - The Digger chooses tools from the hotbar only: a pickaxe in the main inventory counts for
   `no_pickaxe` but is not used (`no_tool` blacklists the target). The survival kit (7.11) moves tools.
 - Seen targets in unloaded chunks are remembered but not approached; with `mineSeenOnly` off the
