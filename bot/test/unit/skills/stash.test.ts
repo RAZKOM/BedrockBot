@@ -29,6 +29,8 @@ interface Opts {
   blocks?: Record<string, BlockInfo>;
   /** Track AV: raw wire items of the inventory slots (box names and contents). */
   raws?: unknown[];
+  /** Give the stash a toHotbar (SurvivalKit.hotbar): swaps the slot with hotbar slot 8. */
+  toHotbar?: boolean;
 }
 
 function harness(o: Opts) {
@@ -143,6 +145,16 @@ function harness(o: Opts) {
     selectHotbar: (slot: number) => {
       selected = slot;
     },
+    ...(o.toHotbar
+      ? {
+          toHotbar: async (slot: number) => {
+            calls.push(`toHotbar ${slot}`);
+            [slots[8], slots[slot]] = [slots[slot]!, slots[8]!];
+            if (o.raws) [o.raws[8], o.raws[slot]] = [o.raws[slot], o.raws[8]];
+            return 8;
+          },
+        }
+      : {}),
   });
   return { stash, slots, calls, containers, slotTypes, dropped, said, settings };
 }
@@ -250,6 +262,19 @@ describe('stash step', () => {
     const h = harness({ slots: full([item('stone_pickaxe', 1), item('undyed_shulker_box', 1), item('undyed_shulker_box', 1), item('undyed_shulker_box', 1)]), raws: [undefined, undefined, name('bot_loot', 27), name('§6BOT_LOOT')] });
     expect(await h.stash.ifFull({ label: 'mine' })).toBe(true);
     expect(h.calls.filter((c) => c.startsWith('placed'))).toEqual(['placed slot 3']);
+  });
+
+  it('same-coloured bot_loot boxes: the empty one in the main inventory is moved into the hotbar, not the full one in the hotbar refilled', async () => {
+    const name = (n: string, used = 0) => ({ extra: { nbt: { nbt: { value: { ...(used ? { Items: { value: { value: Array.from({ length: used }, () => ({ Name: { value: 'minecraft:sand' }, Count: { value: 64 } })) } } } : {}), display: { value: { Name: { value: n } } } } } } } });
+    const slots = () => full([item('stone_pickaxe', 1), item('green_shulker_box', 1), ...Array.from({ length: 7 }, () => item('sand')), item('green_shulker_box', 1)], 'sand');
+    const raws = () => [undefined, name('bot_loot', 27), ...Array.from({ length: 7 }, () => undefined), name('bot_loot')];
+    // without the move the place skill takes the full box of slot 1 (the bug: "inventory still full")
+    const old = harness({ slots: slots(), raws: raws() });
+    await old.stash.ifFull({ label: 'mine' });
+    expect(old.calls.filter((c) => c.startsWith('placed'))).toEqual(['placed slot 1']);
+    const h = harness({ slots: slots(), raws: raws(), toHotbar: true });
+    expect(await h.stash.ifFull({ label: 'mine' })).toBe(true);
+    expect(h.calls.filter((c) => c.startsWith('toHotbar') || c.startsWith('placed'))).toEqual(['toHotbar 9', 'placed slot 8']);
   });
 
   it('stashShulker off skips the box', async () => {

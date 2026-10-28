@@ -136,7 +136,9 @@ Rules (all named `// Track AU` in the shared files):
 - the refill: fewer than `fireworksMin` (16) rockets in the hotbar and some in the box: the box is
   placed next to the bot (`boxSpots`), opened, rockets are taken until the hotbar holds a stack,
   closed, broken (the Digger) and picked up again; before a flight and after a landing, never in the
-  air;
+  air; rockets left in the main inventory move into the hotbar, and a full hotbar first parks its least
+  useful item (a block or shulker box before food before a tool; never the elytra) in a free main slot
+  (before, `no free hotbar slot for the rockets` refused a hotbar of tools and shulker boxes);
 - the supply lines, once per count: `fireworks low: 9 rockets left and the box is empty; give me more
   (drop them or !bring fireworks_rocket 64)` when the box is empty and the rockets under
   `fireworksMin`; `elytra worn: 25 uses left; I will not fly until it is mended or replaced` at or

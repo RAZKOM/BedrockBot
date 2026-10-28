@@ -154,6 +154,8 @@ export interface StashDeps {
   flightBoxSlot?(): number | undefined;
   /** Track AV: select a hotbar slot (Hotbar.select), so the placed box is the one chosen. */
   selectHotbar?(slot: number): void;
+  /** Move a main-inventory box into the hotbar (SurvivalKit.hotbar); its hotbar slot, undefined when it could not. */
+  toHotbar?(slot: number): Promise<number | undefined>;
   now?: () => number;
 }
 
@@ -311,11 +313,11 @@ export class Stash {
         if (!alive()) return this.done(a, t0, true);
       }
       // Track AV: junk that is no building block is dropped before a box takes it
-      if (this.needed() && this.d.drop && this.d.settings.get('stashShulker') && this.shulkerSlot(job) >= 0 && this.has((n) => dropFirst(n, job.wanted))) {
+      if (this.needed() && this.d.drop && this.d.settings.get('stashShulker') && this.boxChoice(job).best && this.has((n) => dropFirst(n, job.wanted))) {
         a.steps.push(await this.dropJunk(job, alive, (n) => dropFirst(n, job.wanted)));
         if (!alive()) return this.done(a, t0, true);
       }
-      if (this.needed() && this.d.settings.get('stashShulker') && this.shulkerSlot(job) >= 0 && this.hasDepositable()) {
+      if (this.needed() && this.d.settings.get('stashShulker') && this.boxChoice(job).best && this.hasDepositable()) {
         a.steps.push(await this.viaShulker(alive, job));
         if (!alive()) return this.done(a, t0, true);
         // Track AV: the junk a re-pack took out of the box: thrown from where the job had the bot, away from it
@@ -404,9 +406,25 @@ export class Stash {
   /**
    * The carried shulker box to fill: Track AV: a box named `keepBoxName` (bot_loot) with a free slot first,
    * then the one with the most free slots (its NBT `Items`); only a box the place skill will really pick
-   * (in the hotbar, or the first of its colour); -1 when none has a free slot.
+   * (in the hotbar, or the first of its colour), unless `toHotbar` can move the best one there first;
+   * -1 when none has a free slot.
    */
-  private shulkerSlot(job: StashJob = {}): number {
+  private async shulkerSlot(job: StashJob = {}): Promise<number> {
+    const { best, exact } = this.boxChoice(job);
+    // same-coloured boxes: the place skill takes the first one in the hotbar, often a full one; move the best one there
+    if (best && exact !== best && this.d.toHotbar) {
+      const to = await this.d.toHotbar(best.i);
+      if (to !== undefined && placesExactly(this.d.inventory.slots, to)) {
+        this.log.info(`stash: moved the ${best.named ? `${keepNameOf(this.d.settings.get('keepBoxName'))} box` : 'emptiest box'} from slot ${best.i} into hotbar slot ${to}`);
+        return to;
+      }
+    }
+    if (best && exact && exact !== best) this.log.info(`stash: the ${best.named ? `${keepNameOf(this.d.settings.get('keepBoxName'))} box` : 'emptiest box'} (slot ${best.i}) is not in the hotbar: filling the box in slot ${exact.i}`);
+    return (exact ?? best)?.i ?? -1;
+  }
+
+  /** The best box to fill and the best one the place skill would pick by itself (see shulkerSlot). */
+  private boxChoice(job: StashJob): { best?: { i: number; named: boolean } | undefined; exact?: { i: number; named: boolean } | undefined } {
     const keep = keepNameOf(this.d.settings.get('keepBoxName'));
     const cands: { i: number; used: number; named: boolean }[] = [];
     // Track AV: a full box holding junk counts too while the job's produce waits (it is re-packed)
@@ -420,9 +438,7 @@ export class Stash {
       if (used < 27 || junk) cands.push({ i, used: junk ? Math.min(used, 26) : used, named: isKeptBox(s.name, raw, keep) });
     });
     cands.sort((a, b) => Number(b.named) - Number(a.named) || a.used - b.used || a.i - b.i);
-    const exact = cands.find((c) => placesExactly(this.d.inventory.slots, c.i));
-    if (cands[0] && exact && exact !== cands[0]) this.log.info(`stash: the ${cands[0].named ? `${keep} box` : 'emptiest box'} (slot ${cands[0].i}) is not in the hotbar: filling the box in slot ${exact.i}`);
-    return (exact ?? cands[0])?.i ?? -1;
+    return { best: cands[0], exact: cands.find((c) => placesExactly(this.d.inventory.slots, c.i)) };
   }
 
   private requests(): number {
@@ -465,7 +481,7 @@ export class Stash {
     const t0 = this.now();
     const sk = this.d.skills;
     const step: StashStep = { kind: 'shulker', ok: false, moved: {}, total: 0, requests: 0, shared: 0, ms: 0 };
-    const slot = this.shulkerSlot(job);
+    const slot = await this.shulkerSlot(job);
     const item = this.d.inventory.slots[slot]?.name ?? 'undyed_shulker_box';
     if (slot >= 0 && slot < 9) this.d.selectHotbar?.(slot); // Track AV: the held box is the one placed
     const feet = this.d.position();
