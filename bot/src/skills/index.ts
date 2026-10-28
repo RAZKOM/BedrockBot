@@ -154,6 +154,14 @@ export class BotSkills implements Skills {
           ...opts.actions,
         },
         inventory: opts.inventory ?? (inventory ? () => inventory : undefined),
+        // Track BE: abort the Digger's job when the navigator gives up on a dig; plan with the Digger's tool filter
+        cancelDig: opts.cancelDig ?? (() => this._digger?.cancel()),
+        toolOk:
+          opts.toolOk ??
+          (() => {
+            const d = this._digger;
+            return d ? (it) => d.toolOk(it as ItemStack) : undefined;
+          }),
       },
     );
     this.unsubs.push(
