@@ -224,8 +224,8 @@ export class SurvivalKit {
   }
 
   /** `!drop <item> [n]`. */
-  drop(name: string, n?: number): Promise<DropResult> {
-    return this.exclusive<DropResult>(() => this.keeper.drop(name, n), { ok: false, item: name, dropped: 0, reason: 'busy' });
+  drop(name: string, n?: number, skip?: ReadonlySet<number>): Promise<DropResult> {
+    return this.exclusive<DropResult>(() => this.keeper.drop(name, n, skip), { ok: false, item: name, dropped: 0, reason: 'busy' }); // Track AV: skip
   }
 
   /** `!drop all`: the worn armour and the offhand too. */

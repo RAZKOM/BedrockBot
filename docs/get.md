@@ -105,6 +105,11 @@ Steps, in order, until 2 slots are free:
    `shulker`), close, break it (the Digger's best tool; a shulker box drops itself with its contents
    with any tool), pick it up (collect radius 4, then 6). A failed open or deposit still breaks and
    picks it up again.
+   Track AV (docs/home.md "Packing priority in the stash step"): a box named `bot_loot` (`keepBoxName`)
+   first; junk that is no building block (rotten flesh, string, spider eyes, ...) is dropped before the
+   box is filled; the box takes the job's produce first, other valuables next, filler blocks last and only
+   when no produce waits; a box already holding junk while produce waits is re-packed
+   (`re-packed 1 box: dropped 1280 junk, boxed 20 stacks of sand`).
 3. **Drop junk**: junk only (`STASH_JUNK` in stash.ts: the survival keeper's junk such as rotten flesh and string, plus filler
    blocks: cobblestone, dirt, gravel, sand, stone, deepslate, tuff, seeds, leaves, ...), never the job's produce, ore, ingots or gems;
    throwaway blocks keep 16 for pillaring. Through the survival kit's `drop(name, n)`.

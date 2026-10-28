@@ -71,6 +71,16 @@ export class HomeTruth extends GetTruth {
     return truthLoaded(this, 'chestput', [p.x, p.y, p.z, typeId, amount, stacks]);
   }
 
+  /** Track AV: give the item in `which` (a slot, or `boxes`: every shulker box) of the container at p the custom name `name` (truth:namebox). */
+  nameBox(p: Vec3, which: number | 'boxes', name: string): Promise<{ named: { slot: number; typeId: string }[] }> {
+    return truthLoaded(this, 'namebox', [p.x, p.y, p.z, which, name]);
+  }
+
+  /** Track AV: the same in a player's inventory (truth:nameinv). */
+  nameInv(player: string, which: number | 'boxes', name: string): Promise<{ named: { slot: number; typeId: string }[] }> {
+    return this.ok('nameinv', [player, which, name]);
+  }
+
   /** A container's contents (truth:container), item names without the namespace. */
   async box(p: Vec3): Promise<{ typeId: string; size: number; total: number; counts: Record<string, number>; free: number }> {
     const r = await truthLoaded<{ typeId: string; size: number; total: number; counts: Record<string, number>; slots: unknown[] }>(this, 'container', [p.x, p.y, p.z]);
@@ -247,7 +257,7 @@ export async function buildHome(bot: HomeBot, c: { x: number; z: number }): Prom
 }
 
 /** clearArea with a stone floor 2 deep (a home on solid ground). */
-async function clearAreaHome(t: HomeTruth, c: { x: number; z: number }, r: number, h: number): Promise<void> {
+export async function clearAreaHome(t: HomeTruth, c: { x: number; z: number }, r: number, h: number): Promise<void> {
   const F = FEET_Y;
   await truthLoaded(t, 'fill', [c.x - r, F - 3, c.z - r, c.x + r, F - 2, c.z + r, 'stone']);
   await truthLoaded(t, 'fill', [c.x - r, F - 1, c.z - r, c.x + r, F - 1, c.z + r, 'grass_block']);
