@@ -1,6 +1,7 @@
 // Track AP (wave 9, docs/panel.md "Inventory", decision 0037): the `inventory` block of /api/state.
-// The page draws every slot itself (no textures, no internet): an icon class from a small hand-drawn
-// glyph set, a deterministic colour from the item name, a 2 to 3 letter abbreviation, the count, a
+// The page draws every slot itself (no internet): an icon class from a small hand-drawn glyph set (the
+// fallback when there is no picture; the game's own icons come from icons/, decision 0046), a
+// deterministic colour from the item name, a 2 to 3 letter abbreviation, the count, a
 // durability bar (the NBT `Damage` against skills/survival/tools.ts maxDurability) and, for a shulker
 // box, what it holds (the raw wire item's NBT `Items`, skills/container/chest.ts shulkerContents).
 import { isShulkerBox, shulkerContents, shulkerSlotsUsed } from '../../skills/container/chest.ts';

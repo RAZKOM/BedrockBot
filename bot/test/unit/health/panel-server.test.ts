@@ -24,7 +24,7 @@ afterEach(async () => {
   health = undefined;
 });
 
-function makePanel(opts: { healthPort?: number; port?: number; token?: string; owners?: string[] }) {
+function makePanel(opts: { healthPort?: number; port?: number; token?: string; owners?: string[]; icons?: PanelDeps['icons'] }) {
   const { conn } = setup();
   const metrics = new Metrics();
   metrics.attach(conn);
@@ -56,6 +56,7 @@ function makePanel(opts: { healthPort?: number; port?: number; token?: string; o
     runningTask: task,
     runtime,
     log: createLogger('info', 'panel-test'),
+    ...(opts.icons !== undefined ? { icons: opts.icons } : {}),
   };
   panel = setupPanel(deps);
   return { panel, chat, runtime };
@@ -77,7 +78,7 @@ describe('panel state JSON', () => {
   it('has the documented shape', () => {
     const { panel } = makePanel({ healthPort: 9999 });
     const s: PanelState = panel.state();
-    expect(Object.keys(s).sort()).toEqual(['bot', 'chat', 'commands', 'logs', 'quick', 'self', 'settings', 'stack', 'status', 'ts', 'v', 'inventory', 'job', 'combat', 'memory', 'planner', 'conn', 'paused'].sort()); // Track AP: inventory .. conn; Track AR: paused
+    expect(Object.keys(s).sort()).toEqual(['bot', 'chat', 'commands', 'logs', 'quick', 'self', 'settings', 'stack', 'status', 'ts', 'v', 'inventory', 'icons', 'job', 'combat', 'memory', 'planner', 'conn', 'paused'].sort()); // Track AP: inventory .. conn; Track AR: paused; icons: decision 0046
     expect(s.v).toBe(1);
     expect(s.bot).toEqual({ name: 'UnitBot', server: '127.0.0.1:19180 (raknet)', task: 'afk', state: 'idle', healthy: false, gameVersion: '1.26.51' });
     expect(s.status[0]).toMatch(/^status: up .*pos 1\.00 -60\.00 2\.00, version 1\.26\.51, tick 0, task afk, nudges 0$/);
@@ -147,6 +148,36 @@ describe('panel over HTTP', () => {
     }
     expect(html).not.toContain(TOKEN);
     expect(html).not.toMatch(/https?:\/\/(?!127\.0\.0\.1)[a-z]/i); // no external assets
+  });
+
+  it('item pictures: /icons/<name>.png behind the token, 404 for an item without art or a name that is none, state.icons says so', async () => {
+    const { base } = await startSeparate(TOKEN);
+    const auth = { authorization: `Bearer ${TOKEN}` };
+    expect((await fetch(`${base}/icons/iron_sword.png`)).status).toBe(401);
+    const r = await fetch(`${base}/icons/iron_sword.png`, { headers: auth });
+    expect(r.status).toBe(200);
+    expect(r.headers.get('content-type')).toBe('image/png');
+    expect(r.headers.get('cache-control')).toMatch(/^private, max-age=/);
+    const png = Buffer.from(await r.arrayBuffer());
+    expect(png.subarray(1, 4).toString()).toBe('PNG');
+    expect(Number(r.headers.get('content-length'))).toBe(png.length);
+    expect((await fetch(`${base}/icons/oak_planks.png`, { headers: auth })).status).toBe(200);
+    expect((await fetch(`${base}/icons/oak_planks.png`, { method: 'HEAD', headers: auth })).status).toBe(200);
+    const none = await fetch(`${base}/icons/chest.png`, { headers: auth }); // an entity model in the game
+    expect(none.status).toBe(404);
+    expect(await json(none)).toEqual({ error: 'no icon for this item' });
+    for (const bad of ['Iron_Sword', '..%2f..%2fpackage', 'iron-sword', 'x'.repeat(65)]) expect((await fetch(`${base}/icons/${bad}.png`, { headers: auth })).status).toBe(404);
+    expect((await fetch(`${base}/icons/iron_sword.png`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: '{}' })).status).toBe(405); // pictures are read-only
+    const s =(await (await fetch(`${base}/api/state`, { headers: auth })).json()) as PanelState;
+    expect(s.icons).toBe(true);
+  });
+
+  it('without the pictures (package missing): no route, state.icons false', async () => {
+    const made = makePanel({ port: 0, icons: null });
+    expect(await made.panel.start(undefined)).toBe(true);
+    const base = made.panel.urls()[0]!.replace(/\/$/, '');
+    expect((await fetch(`${base}/icons/iron_sword.png`)).status).toBe(404);
+    expect(made.panel.state().icons).toBe(false);
   });
 
   it('POST /api/cmd runs the command as the first owner and returns the replies', async () => {

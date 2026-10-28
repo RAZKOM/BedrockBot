@@ -13,7 +13,9 @@ they are; the bot's main thread must not be slowed by the poll.
 
 ## Decisions
 
-1. **Icons are drawn, not textured.** Minecraft textures are not ours to ship and would need files
+1. **Icons are drawn, not textured.** *(Superseded by [0046](0046-item-icons.md): the cells now show
+   the game's own icons, read from an npm package at install time; the glyphs below are the
+   fallback.)* Minecraft textures are not ours to ship and would need files
    or the internet. Each item gets a hand-drawn 16 x 16 inline SVG glyph for its class (18 classes,
    about 3 KB for the set, `<symbol>` + `<use>`), a colour (the material's for iron, gold, diamond,
    wood ...; else an FNV-1a hash hue of the name, so it never changes between polls or machines), a
