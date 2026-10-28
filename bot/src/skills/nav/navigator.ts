@@ -28,6 +28,7 @@ import { CROSS_CLEAR, NavGrid, cellKey } from './grid.ts';
 import { NavBlacklist, actionKey, goalKey } from './blacklist.ts'; // Track R
 import type { AvoidanceCostFn } from './avoidance.ts';
 import { DEFAULT_PLANNER_BUDGETS, PlannerClient, WorkerSearch, plainGoal, type PlannerBudgets, type PlannerWorld, type WorkerPlanOptions } from './worker.ts'; // Track AB
+import { MOVEMENT_TIMEOUT_TICKS, OFF_PATH_GRACE_TICKS, PATH_WINDOW_AHEAD, PATH_WINDOW_BACK, distanceFromPath, nodeAt, nodeOverrun, offPathState, skipAhead } from './baritone/executor.ts'; // Track BE
 
 /** Track R: goto options of the navigator. `blacklist`: consult and feed the failure blacklist (default: `any` and `getToBlock` goals). */
 export type NavGotoOptions = GotoOptions & { blacklist?: boolean };
@@ -86,9 +87,24 @@ export interface NavigatorOptions {
   workerBudgets?: Partial<PlannerBudgets>;
   /** Track AJ: the follower sneaks near deep edges (docs/pathfinding.md "Edge sneaking"). Default true. */
   edgeSneak?: boolean;
+  // Track BE: the executor's off-path checks (nav/baritone/executor.ts, docs/pathfinding.md "Off the path")
+  /**
+   * Track BE: off-path re-plans, skip-ahead, the snap to the path after a correction / knock / teleport,
+   * action overruns. Default true; false is main's behaviour (every such event re-plans).
+   */
+  offPath?: boolean;
+  /** Track BE: ticks a body 2 to 3 blocks off the path gets to come back before a re-plan. Default 20 (Baritone: 200). */
+  offPathGraceTicks?: number;
+  /** Track BE: an action fails once it runs longer than `factor` x its node's cost + `margin` ticks. Default 1 and 100 (Baritone's movementTimeoutTicks). */
+  overrun?: { factor: number; margin: number };
+  /** Track BE: abort a running dig (the Digger's cancel) when the navigator gives up on it (dig timeout). */
+  cancelDig?: () => void;
+  /** Track BE: the tool filter the Digger uses (Track S worn tools count as an empty hand), so the planned break times match the dig. */
+  toolOk?: () => ((item: { name: string; count: number }) => boolean) | undefined;
+  // Track BE end
 }
 
-export type ReplanReason = 'start' | 'correction' | 'block' | 'partial' | 'stuck' | 'timeout' | 'action' | 'retry' | 'ahead' | 'upgrade';
+export type ReplanReason = 'start' | 'correction' | 'block' | 'partial' | 'stuck' | 'timeout' | 'action' | 'retry' | 'ahead' | 'upgrade' | 'off_path' | 'overrun'; // Track BE: off_path, overrun
 
 export interface PlanRecord {
   reason: ReplanReason;
@@ -149,6 +165,11 @@ export interface GotoReport {
   /** Track AB: worker answers spliced into the path being walked, and answers dropped as stale (blocks changed near them). */
   upgrades?: number;
   stale?: number;
+  /** Track BE: off-path re-plans, legs restarted at the node the body stands in (skip-ahead; after a correction / knock / teleport), action overruns. */
+  offPath?: number;
+  skips?: number;
+  snaps?: number;
+  overruns?: number;
 }
 
 interface Search {
@@ -231,6 +252,9 @@ interface Active {
   lastPos: Vec3 | undefined;
   /** Why the last plan / failure went wrong (for the "unreachable without a segment" WARN line). */
   why: string | undefined;
+  /** Track BE: ticks in a row the body was 2 to 3 blocks off the path; the tick of a correction / knock / teleport whose path check is pending. */
+  ticksAway: number;
+  recheck: number | undefined;
   report: GotoReport;
   finish: (r: SkillResult) => void;
 }
@@ -257,6 +281,12 @@ export class Navigator {
   private readonly aheadNodes: number;
   private readonly unloadedWaitTicks: number;
   private readonly moveTimeout: { factor: number; margin: number };
+  /** Track BE: the executor's off-path checks (NavigatorOptions.offPath), settable for measurements. */
+  offPath: boolean;
+  private readonly offPathGrace: number;
+  private readonly overrun: { factor: number; margin: number };
+  private readonly cancelDig: (() => void) | undefined;
+  private readonly toolOk: NavigatorOptions['toolOk'];
   private active: Active | undefined;
   private readonly unsubs: (() => void)[] = [];
   /** Report of the last goto (also while it runs). */
@@ -304,6 +334,11 @@ export class Navigator {
     this.moveTimeout = opts.moveTimeout ?? { factor: 2, margin: 10 };
     this.workerBudgets = { ...DEFAULT_PLANNER_BUDGETS, ...opts.workerBudgets }; // Track AB
     this.edgeSneak = opts.edgeSneak ?? true; // Track AJ
+    this.offPath = opts.offPath ?? true; // Track BE
+    this.offPathGrace = opts.offPathGraceTicks ?? OFF_PATH_GRACE_TICKS; // Track BE
+    this.overrun = opts.overrun ?? { factor: 1, margin: MOVEMENT_TIMEOUT_TICKS }; // Track BE
+    this.cancelDig = opts.cancelDig; // Track BE
+    this.toolOk = opts.toolOk; // Track BE
     this.unsubs.push(
       world.onBlockUpdate((p, before, after) => {
         this.onBlock(p, before, after);
@@ -311,14 +346,15 @@ export class Navigator {
       loop.onEvent((e) => {
         const a = this.active;
         if (!a) return;
+        // Track BE: while a leg is walked, a correction / knock / teleport first checks whether the body still stands on the path
         if (e.kind === 'correction') {
           a.report.corrections++;
-          if (a.opts.replanOnCorrection) a.replan ??= 'correction';
+          if (a.opts.replanOnCorrection && !this.deferToPathCheck(a)) a.replan ??= 'correction';
         } else if (e.kind === 'motion') {
           a.report.motions++;
-          a.replan ??= 'correction';
+          if (!this.deferToPathCheck(a, e.velocity)) a.replan ??= 'correction';
         } else if (e.kind === 'teleport') {
-          a.replan = 'correction';
+          if (!this.deferToPathCheck(a)) a.replan = 'correction';
         }
       }),
       loop.onBeforeStep((_tick, state) => {
@@ -371,6 +407,8 @@ export class Navigator {
       if (!slots) return false;
       return slots.some((s) => s && s.count > 0 && throwaway.includes(s.name));
     };
+    let viewOf: NavInventory | undefined; // Track BE
+    let filtered: NavInventory | undefined;
     return {
       ...this.pathOpts,
       costs: { walk: sprint ? TICKS.sprint : TICKS.walk, ...(this.digPenalty?.() !== undefined ? { dig: this.digPenalty()! } : {}), ...this.pathOpts.costs, ...this.costsOverride?.() }, // Track AT: costsOverride
@@ -382,13 +420,26 @@ export class Navigator {
         this.pathOpts.breakTicks ??
         (inv
           ? (c) => {
-              const v = inv();
+              // Track BE: the Digger's tool filter, built once per plan (per inventory object)
+              const raw = inv();
+              if (raw !== viewOf) {
+                viewOf = raw;
+                filtered = this.toolView(raw);
+              }
+              const v = filtered;
               return v ? breakTicksWith(c, v) : handBreakTicks(c); // Track BB
             }
           : handBreakTicks),
       ...(noBreak ? { noBreak } : {}),
       cellCost: this.cellCost?.() ?? this.pathOpts.cellCost, // Track S: avoidance, read live each plan
     };
+  }
+
+  /** Track BE: the inventory as the Digger sees it: tools `toolOk` rejects (worn) are an empty hand. */
+  private toolView(v: NavInventory | undefined): NavInventory | undefined {
+    const ok = this.toolOk?.();
+    if (!v || !ok) return v;
+    return { slots: v.slots.map((s) => (s && !ok(s) ? null : s)), selected: v.selected };
   }
 
   /** Replace the protected-area getter (the base around home; registry wiring). */
@@ -468,6 +519,10 @@ export class Navigator {
         unloadedWait: 0,
         upgrades: 0,
         stale: 0,
+        offPath: 0, // Track BE
+        skips: 0,
+        snaps: 0,
+        overruns: 0,
         skipped,
         blacklisted: [],
       };
@@ -511,6 +566,8 @@ export class Navigator {
         lastProgressTick: 0,
         lastPos: undefined,
         why: undefined,
+        ticksAway: 0, // Track BE
+        recheck: undefined,
         report,
         finish: (r) => {
           if (this.active !== a) return;
@@ -707,6 +764,8 @@ export class Navigator {
       return;
     }
 
+    this.resolveRecheck(a, s); // Track BE: the path check after a correction / knock / teleport (before the re-plan below)
+
     // a re-plan replaces the current plan and any search
     if (a.replan && a.t >= a.waitUntil && !a.action) {
       // plan from solid ground (an airborne body has no node yet), but do not wait forever
@@ -728,12 +787,15 @@ export class Navigator {
       return;
     }
 
-    const f = a.follower;
+    let f = a.follower; // Track BE: let (a skip / snap restarts the leg)
     if (!f) {
       this.loop.release();
       a.guard.idle();
       return;
     }
+
+    if (this.pathChecks(a, s, f)) return; // Track BE: off the path, skip-ahead, the snap after a knock
+    f = a.follower ?? f; // Track BE: the leg a skip / snap restarted
 
     const step = f.step(s, this.loop.command.yaw);
     this.loop.setCommand(step.cmd);
@@ -783,6 +845,98 @@ export class Navigator {
       a.search = this.newSearch(a, end, 'ahead', 'ahead');
     }
   }
+
+  // ---- Track BE: the executor's off-path checks (nav/baritone/executor.ts) ------------------------------
+
+  /**
+   * A correction / knock / teleport while a leg is walked on the ground: check the body against the
+   * path on the next standing tick instead of re-planning. Not while the follower's move is one main
+   * re-plans from at once (in water, a swim / climb / parkour / pillar target, a parkour run-up): those
+   * re-plan as before.
+   */
+  private deferToPathCheck(a: Active, knock?: Vec3): boolean {
+    if (!this.offPath || !a.follower || a.action || a.retreat || a.replan || a.search?.kind === 'main') return false;
+    const s = this.loop.state;
+    if (s.gliding || a.follower.checksPaused({ onGround: true, inWater: s.inWater })) return false;
+    if (knock) {
+      // a knock: where it will land is not known yet; only one expected to land on the leg waits for the landing
+      const land = knockLanding(s.pos, knock);
+      const f = a.follower;
+      if (distanceFromPath(land, f.path, 0, f.path.length - 1) > KNOCK_ON_PATH) return false;
+      if (this.grid.cls(Math.floor(land.x), Math.floor(land.y + 0.01), Math.floor(land.z))?.liquid) return false;
+    }
+    a.recheck ??= a.t;
+    return true;
+  }
+
+  /**
+   * The pending path check after a correction / knock / teleport, before the tick's re-plan: once the
+   * body stands (or is in water, or after 20 ticks in the air: main's re-plan condition), restart the
+   * leg at the node of the leg the body stands in when it is behind the last node passed or past the
+   * aim (one between them walks on), else re-plan (`correction`) this very tick.
+   */
+  private resolveRecheck(a: Active, s: InputLoopState): void {
+    if (a.recheck === undefined) return;
+    const f = a.follower;
+    if (!f || a.action || a.retreat) {
+      a.recheck = undefined;
+      return;
+    }
+    if (a.t <= a.recheck) return; // the event's own tick: the body has not moved yet (a knock moves it from this tick on)
+    if (!s.onGround && !s.inWater && a.t - a.recheck <= 20) return; // in the air: wait for the landing
+    a.recheck = undefined;
+    if (s.inWater || !s.onGround || s.gliding) {
+      a.replan ??= 'correction';
+      return;
+    }
+    const k = nodeAt(s.pos, f.path, 0, f.path.length - 1);
+    if (k < 0) {
+      a.replan ??= 'correction';
+      return;
+    }
+    if (k < f.passedIndex || k > f.index) {
+      a.report.snaps = (a.report.snaps ?? 0) + 1;
+      this.log.debug(`goto: back on the path at node ${a.legFrom + k} after a correction / knock (was ${a.legFrom + f.passedIndex})`);
+      this.startLeg(a, a.legFrom + k);
+    }
+  }
+
+  /**
+   * Per tick, before the follower steers (Baritone PathExecutor.onTick): skip ahead when the body
+   * stands in a node past the aim; re-plan (`off_path`) when the body is more than 3 blocks from the
+   * path, or more than 2 for longer than the grace. Not while the follower's move is paused (airborne,
+   * in water, a swim, a climb, a parkour, a pillar) or the body glides. Returns true when the tick ends here.
+   */
+  private pathChecks(a: Active, s: InputLoopState, f: PathFollower): boolean {
+    if (!this.offPath || s.gliding || f.checksPaused(s)) return false;
+    const nodes = f.path;
+    const passed = f.passedIndex;
+    const k = skipAhead(s.pos, nodes, f.index);
+    if (k >= 0) {
+      a.report.skips = (a.report.skips ?? 0) + 1;
+      this.log.debug(`goto: skipping ahead from node ${a.legFrom + f.index} to ${a.legFrom + k}`);
+      this.startLeg(a, a.legFrom + k);
+      a.ticksAway = 0;
+      return false;
+    }
+    // the window: from PATH_WINDOW_BACK behind the last node passed to PATH_WINDOW_AHEAD past the aim
+    const d = distanceFromPath(s.pos, a.path, a.legFrom + passed - PATH_WINDOW_BACK, a.legFrom + f.index + PATH_WINDOW_AHEAD);
+    const st = offPathState(d, a.ticksAway + 1, this.offPathGrace);
+    if (st === 'fine') {
+      a.ticksAway = 0;
+      return false;
+    }
+    a.ticksAway++;
+    if (st === 'possibly_off') return false;
+    a.ticksAway = 0;
+    a.report.offPath = (a.report.offPath ?? 0) + 1;
+    this.log.info(`goto: off the path (${d.toFixed(2)} blocks) at ${fmt(s.pos)}: re-planning`);
+    a.replan ??= 'off_path';
+    this.loop.release();
+    a.guard.idle();
+    return true;
+  }
+  // Track BE end
 
   // ---- Track AB: searches in the worker or in-thread ------------------------------------------------
 
@@ -877,7 +1031,7 @@ export class Navigator {
     const cc: AvoidanceCostFn | undefined = o.cellCost;
     if (cc && !cc.avoidance) return undefined;
     const b = this.workerBudgets;
-    const inv = this.inventory?.();
+    const inv = this.toolView(this.inventory?.()); // Track BE: the Digger's tool filter (worker break times match too)
     const prot = o.protectedBlocks;
     return {
       ...(o.costs ? { costs: { ...o.costs } } : {}),
@@ -1190,7 +1344,7 @@ export class Navigator {
     );
   }
 
-  private actionFailed(a: Active, s: InputLoopState, run: ActionRun, why: string): void {
+  private actionFailed(a: Active, s: InputLoopState, run: ActionRun, why: string, reason: ReplanReason = 'action'): void { // Track BE: reason
     a.report.actions.failed++;
     this.log.info(`goto: ${run.kind} failed (${why})`);
     const cellP = run.queue[0]; // Track R: count the failure against the action cell
@@ -1202,7 +1356,7 @@ export class Navigator {
     a.action = undefined;
     this.loop.setCommand({ jump: false, pitch: 0 });
     a.lastProgressTick = a.t;
-    this.failAndReplan(a, s, 'action', `${run.kind} failed: ${why}`);
+    this.failAndReplan(a, s, reason, `${run.kind} failed: ${why}`); // Track BE: reason
   }
 
   private actionDone(a: Active, run: ActionRun): void {
@@ -1218,7 +1372,20 @@ export class Navigator {
     a.guard.idle();
     // a running place action (Track O's PlaceSkill) drives the jump itself
     if (!(run.kind === 'place' && run.pending)) this.loop.setCommand({ forward: 0, strafe: 0, sprint: false, sneak: false, jump: false });
+    // Track BE: Baritone PathExecutor's movement timeout: the action ran longer than its node's cost + 100 ticks
+    // (not while a call is pending: the Digger times out on its own estimate; not when the last dig just succeeded)
+    const node = a.path[run.node];
+    const justDone = run.kind === 'dig' && run.result?.ok === true;
+    if (this.offPath && node && run.kind !== 'close' && !run.pending && !(justDone && run.queue.length <= 1) && nodeOverrun(a.t - run.started, node.cost, this.overrun.factor, this.overrun.margin)) {
+      a.report.overruns = (a.report.overruns ?? 0) + 1;
+      const p = justDone ? run.queue[1] : run.queue[0]; // the cell not dug yet
+      if (run.kind === 'dig' && p) a.noBreak.add(cellKey(p.x, p.y, p.z)); // like a failed dig: not planned again this goto
+      this.actionFailed(a, s, run, `overrun (${a.t - run.started} ticks, cost ${node.cost.toFixed(1)})`, 'overrun');
+      return;
+    }
+    // Track BE end
     if (a.t - run.started > run.timeout) {
+      if (run.kind === 'dig' && run.pending) this.cancelDig?.(); // Track BE: abort the Digger's job (the next dig would get 'busy')
       this.actionFailed(a, s, run, 'timeout');
       return;
     }
@@ -1331,6 +1498,34 @@ export class Navigator {
     const cmd = a.guard.apply({ forward: 1, strafe: 0, yaw, jump: s.inWater || s.inLava || s.collidedHorizontally, sprint: false, sneak: false });
     this.loop.setCommand(cmd);
   }
+}
+
+/** Track BE: a knock expected to land farther than this (blocks) from the leg re-plans at once, as main did. */
+const KNOCK_ON_PATH = 1;
+
+/**
+ * Track BE: where a knock (`set_entity_motion` velocity v) will roughly leave the body: the air
+ * flight (horizontal x 0.91 per tick, vertical - 0.08 then x 0.98, until back at the start height,
+ * at most 40 ticks), then the ground slide (x 0.546 per tick). Flat ground assumed: an estimate.
+ */
+function knockLanding(p: Vec3, v: Vec3): Vec3 {
+  let x = p.x;
+  let y = 0;
+  let z = p.z;
+  let vx = v.x;
+  let vy = v.y;
+  let vz = v.z;
+  for (let i = 0; i < 40; i++) {
+    x += vx;
+    z += vz;
+    y += vy;
+    vx *= 0.91;
+    vz *= 0.91;
+    vy = (vy - 0.08) * 0.98;
+    if (y <= 0) break;
+  }
+  const slide = 0.546 / (1 - 0.546);
+  return { x: x + vx * slide, y: p.y, z: z + vz * slide };
 }
 
 /** Track AB: ends the goto's search (a worker search is cancelled there). */

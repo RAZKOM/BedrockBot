@@ -366,7 +366,10 @@ Block updates at cells the running goto's actions change never trigger re-plans.
 | a partial segment with fewer than `aheadNodes` (64) nodes left | plan-ahead from its last node, spliced on when ready (the leg runs on, no stop) |
 | the end of a partial segment, no plan-ahead coming | re-plan (`partial`) |
 | the main search ends at unloaded world with no progress (path of 1 node, `unknown`, not `limited`) | wait 10 ticks and plan again, up to `unloadedWaitTicks` (200) in a row: not a failure |
-| `correct_player_move_prediction` (if `replanOnCorrection`), `set_entity_motion`, a teleport | re-plan (`correction`) once on the ground |
+| `correct_player_move_prediction` (if `replanOnCorrection`), `set_entity_motion`, a teleport | re-plan (`correction`) once on the ground; Track BE: while a leg is walked, first the path check (below): standing in a node of the leg, the leg restarts there (no re-plan) |
+| Track BE: the body more than 3 blocks from the path, or more than 2 for over 20 ticks | re-plan (`off_path`), no failure |
+| Track BE: the body stands in a node past the follower's aim | the leg restarts at that node (skip-ahead), no re-plan |
+| Track BE: an action runs longer than its node's cost + 100 ticks | the action fails (`overrun`): failure + 1, blacklisted like a failed action, a dig cell not dug again this goto |
 | `World.onBlockUpdate` within 1 block (x / z) and y - 1 .. y + 2 of a node not yet passed, whose movement signature (boxes, floor, liquid, danger, cost factor, roof, open ...) changed | invalidate, re-plan (`block`); updates that change nothing the planner reads (grass to dirt) only invalidate the cache |
 | the move under way (straight line from the last node passed to the aim) takes more than 2 x its estimate + 10 ticks | re-plan (`timeout`), failure + 1 |
 | no progress (remaining path not 0.05 shorter) for 40 ticks | re-plan (`stuck`), failure + 1 |
@@ -404,6 +407,59 @@ counts as a failure. Not taken from Baritone: its time budgets (ours are `maxNod
 static cut-off of the last 10 % of a partial path (`pathCutoffFactor`), the bests updated when a
 neighbour is relaxed (ours: when a node is expanded), `MIN_IMPROVEMENT` for re-opening nodes (found
 paths are unchanged).
+
+**Off the path** (Track BE, ported from Baritone's `PathExecutor`, `nav/baritone/executor.ts`,
+LGPL-3.0; `NavigatorOptions.offPath`, default on, `false` is main's behaviour). Per tick, before the
+follower steers, and only while it walks (not during an action: dig, use, place; not while the body is
+in the air: a jump, a fall, an irreversible drop, a knock; not in water, on a swim / climb / parkour /
+pillar target, a parkour run-up, a glide):
+
+- **Distance from the path**: to the polyline of node centres at feet height, from 8 nodes behind the
+  last node passed to 16 past the aim (Baritone `closestPathPos`: to every block centre of the whole
+  path). More than `MAX_MAX_DIST_FROM_PATH` (3) blocks: re-plan at once (`off_path`). More than
+  `MAX_DIST_FROM_PATH` (2): "possibly off path", re-plan once that has held for more than 20 ticks
+  (`offPathGraceTicks`; Baritone's `MAX_TICKS_AWAY` is 200: a body that is coming back is within 2
+  blocks again in a few ticks, one the follower walks parallel to the path (see Known gaps, the aim
+  runaway) never comes back, and the stuck detector is 40). Not a failure; a pending re-plan of
+  another reason is kept.
+- **Skip-ahead**: the body stands (cell, feet within 0.6, a walk / diag / jump / drop node) in a node
+  past the follower's aim (within 64): the leg restarts there (Baritone's "Skipping forward", which
+  starts at pathPosition + 3; our aim is already the farthest node the follower walks to).
+- **The path check after an event**: a correction (with `replanOnCorrection`), a knock
+  (`set_entity_motion`) or a teleport while a leg is walked on the ground no longer re-plans at once:
+  from the next tick, once the body stands (in the air: up to 20 ticks; in water: at once), a body
+  standing in a node of the leg behind the last node passed or past the aim restarts the leg there
+  (Baritone: snap `pathPosition` back after a lag teleport, forward after a push), one between them
+  walks on; a body in no node of the leg, or in water, re-plans (`correction`), as before. The check
+  runs before the tick's re-plan, so that re-plan is not a tick late. A knock re-plans at once, as
+  before, unless its estimated landing (flight x 0.91 per tick, gravity, then the ground slide, flat
+  ground assumed) is within 1 block of the leg and not in a liquid. Events re-plan as before during an
+  action, a retreat, a main search, a glide, in water, and on a swim / climb / parkour / pillar target
+  or a parkour run-up (main re-plans there on the next tick).
+- **Overrun**: an action (dig, use, place) failing once it has run longer than its node's planned cost
+  + 100 ticks (Baritone: `ticksOnCurrent > cost + movementTimeoutTicks`; `overrun` option `{ factor 1,
+  margin 100 }`): re-plan (`overrun`), failure + 1, the action cell blacklisted as a failed action is,
+  and the next dig cell not dug again in this goto (as a failed dig). Checked only while no action call
+  is pending (the Digger times out on its own estimate, 1.5 x) and not when the last dig just
+  succeeded: in practice between two digs of one node. For n cells the dig node's cost is the sum of
+  their break times + 60 n (`digPenalty`) + the walk, so the budget is that + 100. Use and place keep
+  their 100-tick timeouts (always shorter). Walking moves keep the per-move timeout (2 x the estimate +
+  10, `timeout`): shorter than Baritone's cost + 100 for every move up to 90 ticks.
+- **Dig timeout**: the navigator's dig timeout (600 ticks per cell) now aborts the Digger's job
+  (`NavigatorOptions.cancelDig`, BotSkills wires `Digger.cancel`); before, the abandoned job made the
+  next dig answer `busy`.
+- **Break times**: the planner's break times use the Digger's tool filter (`NavigatorOptions.toolOk`,
+  BotSkills wires `Digger.toolOk`: Track S worn tools count as an empty hand), in-thread and in the
+  worker (the navigator sends the worker the filtered hotbar), so a dig is priced with the tool the
+  Digger will use.
+
+Report: `offPath` (re-plans), `skips`, `snaps` (legs restarted after an event), `overruns`.
+
+Not taken from Baritone: its per-tick cost re-check of the next 5 movements (`costVerificationLookahead`,
+`maxCostIncrease`: ours re-plans on block updates near the path), the pause while the next segment's
+search could backtrack (`shouldPause`), the sprint rules (ours are measured), the trim of walked path
+history (`maxPathHistoryLength` 300 / `pathHistoryCutoffAmount` 50: our checks read a bounded window,
+the path array of one goto is not trimmed).
 
 The report (`skills.status().lastGoto`) has each plan (reason, tick, status, nodes, expanded, ms,
 slices), segments, corrections, motions, stuck and move timeouts, failures, distance, sprint ticks,
@@ -556,6 +612,50 @@ motions, teleports, inWater / inLava, the last goto.
 
 ## Measured
 
+### Track BE: off-path checks (2026-10-30)
+
+Before: main (`offPath: false`); after: Track BE. Closed loops are the unit sim (`nav-offpath.test.ts`;
+`InputLoop.nudge` moves the body without an event, as a push the model does not explain would).
+
+| Test | Before | After |
+|---|---|---|
+| sim, a 30+-block lane, the body shoved 3.2 blocks sideways (no event) | walks on parallel to the path (the follower's aim runs ahead), 157 ticks, 0 re-plans | `off_path` re-plan 2 ticks after the shove, 158 ticks |
+| sim, shoved 1.5 / 2.5 (back to 1 after 15 ticks) | no re-plan | no re-plan |
+| sim, held 2.5 off for 40 ticks | no re-plan | `off_path` after the 20-tick grace |
+| sim, zigzag corridor, pushed forward onto path node 25 (no event) | walks back towards the node it aimed at, `timeout` re-plan, 175 ticks | skip-ahead, 0 re-plans, 113 ticks |
+| sim, zigzag, a teleport onto node 25 | `correction` re-plan, 115 ticks | snap (the leg restarts there), 0 re-plans, 115 ticks |
+| sim, closed corridor, 2-cell dirt wall, each dig 100 ticks, overrun budget forced to 0.5 x cost | both cells dug | `overrun` when the first dig finishes, the second cell not dug again |
+| sim, a dig that never finishes | the 1200-tick timeout (2 cells), the job left running | the same timeout, no overrun (pending), the Digger's job cancelled |
+| sim, a knock (`set_entity_motion`) along the lane | `correction` re-plan, 150 ticks | lands on the leg: no re-plan, 150 ticks |
+| sim, a knock sideways / during a parkour run-up / into a pool | re-plan at tick 31 / 16 / 31 | re-plan at tick 31 / 16 / 31 (sideways: then `off_path` once landed off that plan) |
+| sim, 20 goals on the hilly world | 0 re-plans, 4999 ticks | 0 re-plans, 0 off-path, 11 skip-aheads, 4912 ticks |
+| bds-move `nav-offpath`, truth tp 3 sideways off a 30-block lane (2 runs) | ok in 125 / 125 ticks, 1 `correction` re-plan | ok in 126 / 126 ticks, 1 `correction` re-plan (the tp is a teleport event; the body stands in no node of the leg) |
+| bds-move `nav-offpath`, zigzag, truth tp forward onto path node 25 (2 runs) | ok in 104 / 104 ticks, 1 `correction` re-plan | ok in 106 / 104 ticks, 0 re-plans, 1 snap |
+| bds-move regressions, once each: nav-knockback, nav-wall, nav-long, nav-hill, nav-stairs, nav-swim, nav-ladder, nav-parkour | (as documented above) | all green; no `off_path` / `overrun` plan; plans as before (wall: start + block; sealed goal unreachable after 96 ticks, 3 failures; long: 1 plan, 390 ticks; hill: 1 plan per leg; stairs, house, swim, ladder, parkour ticks identical to the documented ones) |
+
+On BDS every displacement of the body arrives as an event (a correction, `set_entity_motion`, a
+teleport), so the per-tick off-path re-plan is a safety net there (a push the movement model does not
+explain while `replanOnCorrection` is off; a follower that drifts); what BDS shows is the snap: one
+re-plan fewer, the same ticks (an in-thread re-plan of a 40-node path costs about a tick).
+
+**Heuristic weight** (Baritone `costHeuristic`, measured only, nothing shipped;
+`NAV_HEURISTIC_BENCH=1 pnpm exec vitest run --project unit test/unit/skills/nav-heuristic`). Baritone's
+3.563 is ticks per block (GoalXZ: octile distance x costHeuristic, just under its sprint cost 3.564);
+ours is octile x `costs.walk` (3.564 sprinting), so Baritone's default is our weight 1.0. Our heuristic
+x 1.0 / 1.5 / 3.563 on 20 dig-heavy queries (a 9 x 9 x 6 stone block round a 1 x 2 pocket on the
+hilly world, the start 10, 10 out, `allowBreak`, `digPenalty` 60; 4 to 8 digs per path):
+
+| Weight | Nodes expanded (sum) | Plan time (sum) | Path cost vs weight 1 (mean) |
+|---|---|---|---|
+| 1.0 (ours, = Baritone 3.563 ticks per block) | 992 513 (100 %) | 10.0 s | 1.000 |
+| 1.5 | 957 333 (96.5 %) | 9.4 s | 1.001 |
+| 3.563 | 753 837 (76.0 %) | 6.9 s | 1.003 |
+
+24 % fewer nodes at 3.563 x, short of the 40 % bar: not added as an option. A dug block costs its
+break time + 60 ticks against 3.56 for a walked one, so a heuristic over walking distance hardly
+steers a dig-heavy search (about 50 000 nodes for a goal 14 blocks away) whatever its weight.
+
+
 ### Track BA: partial-path selection (2026-10-30)
 
 Before: main's scoring (the lowest `h + trap`); after: Baritone's coefficient bests with `no_progress`
@@ -626,6 +726,9 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/unit/skills/tree-blacklist.test.ts` | the tree finder and the feller skip blacklisted logs; 3 failed fells blacklist an unreachable log |
 | `test/unit/skills/nav-partial.test.ts` | Track BA: the ported bests (constants, scores, MIN_IMPROVEMENT, MIN_DIST_PATH), node-limited ends next to a U wall, in a dead-end corridor and on open ground, `no_progress`, closed loops round a U and a cup with 100 to 200-node budgets |
 | `test/e2e/nav-partial.test.ts` | Track BA: a truth-built U wall with `path.maxNodes` 100: the first plan partial, the goal reached (worker and in-thread) |
+| `test/unit/skills/nav-offpath.test.ts` | Track BE: the ported executor rules (constants, distance from the path, states, overrun, nodeAt / skipAhead); closed loops: a 3.2-block shove re-plans within 2 ticks, 1.5 and a 2.5 that comes back do not, a body held 2.5 off re-plans after the grace, a push forward along a zigzag skips ahead, a teleport onto a later node snaps (main re-plans), a teleport off the path re-plans, knocks on / off the leg, in a parkour run-up and into water (no later than main), an overrun between two digs, a dig timeout cancelling the digger, 20 hilly goals with no off-path re-plans |
+| `test/unit/skills/nav-heuristic.test.ts` | Track BE: heuristic weights 1 / 1.5 / 3.563 on 20 dig-heavy queries (measurement; `NAV_HEURISTIC_BENCH=1`) |
+| `test/e2e/nav-offpath.test.ts` | Track BE: truth tp 3 blocks sideways off a 30-block lane, and forward onto a later node of a zigzag, checks off (main) and on |
 | `test/unit/skills/nav-worker.test.ts` | Track AB: the worker's mirror vs the main grid on 200 random cells (loaded, after block updates and a re-sent column, cached after an unload); 20 random start / goal pairs in a real worker thread vs in-thread (same status, cost, expansions); the navigator walking an interim answer and splicing in the final one; a crash logged once, its search failed, the worker restarted |
 | `test/unit/skills/nav-worker.test.ts` | Track AB: the worker's mirror vs the main grid on 200 random cells (loaded, after block updates and a re-sent column, cached after an unload); 20 random start / goal pairs in a real worker thread vs in-thread (same status, cost, expansions); the navigator walking an interim answer and splicing in the final one; a crash logged once, its search failed, the worker restarted. Track BB: the rule strip (every helper rule compared between the mirror and the main grid) |
 | `test/unit/skills/nav-baritone-helper.test.ts` | Track BB: the shared rule set, one test per rule (see "Rules"), the planner's dig cost against `getMiningDurationTicks`, the grid's stand rules against `canWalkOn` / `canWalkThrough` |
@@ -656,6 +759,11 @@ the cross-country layout; default 7), `MOVE_AREA=x,z` (pin a v2 suite's area to 
 
 ## Known gaps
 
+- Track BE: the follower's aim runs away on open straight runs: pure pursuit moves the aim up to 6
+  nodes further every tick while the straight line stays clear, so it ratchets to the end of the run.
+  A body shoved sideways less than 2 blocks walks parallel to the path and converges only at the next
+  turn or the leg's end (2 to 3 blocks: the off-path grace re-plans). The fix (cap the aim distance by
+  the lateral offset) is for a later track.
 - Fences, panes and bars: known since the BDS palette registry (decision 0024); on 1.26.60 their arms
   come from the `minecraft:connection_*` states (Track AK, decision 0031; `TerrainClass.arms`), on
   minecraft-data states from the neighbours. Palette-only doors, trapdoors, gates, stairs and slabs
