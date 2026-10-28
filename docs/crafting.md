@@ -204,6 +204,8 @@ the `shortfall` (the limiting ingredient: have, need). `canCraft` wraps it: `no_
 5. Tables left standing (a dig refused or pre-empted) stay in the Crafter's `pendingTables` (task
    state, `!status` says `1 left standing`): the next craft picks them up first when within reach,
    and a pending table found as the nearest table counts as `placed: true` (picked up after use).
+   The nearest table may be another player's (within 6 blocks): using it is vanilla-legal and it is never
+   picked up (only tables the bot placed are).
 
 ### No answer from the server
 
