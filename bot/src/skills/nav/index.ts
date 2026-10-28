@@ -1,4 +1,4 @@
-export { findPath, locateNode, handBreakTicks, PathSearch, DEFAULT_COSTS, MAX_JUMP_RISE } from './astar.ts';
+export { findPath, locateNode, explainStart, handBreakTicks, PathSearch, DEFAULT_COSTS, MAX_JUMP_RISE } from './astar.ts';
 export type { MoveKind, NodeActions, PathNode, PathCosts, PathOptions, PathResult, LocatedNode } from './astar.ts';
 export { TICKS, steadySpeed, jumpAirTicks, fallTicks, dropCost } from './costs.ts';
 export { breakBlocker, DEFAULT_THROWAWAY, FACE_OFFSET } from './actions.ts';

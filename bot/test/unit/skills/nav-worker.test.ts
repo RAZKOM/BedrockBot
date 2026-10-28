@@ -516,4 +516,47 @@ describe('planner worker: a real worker thread', () => {
     expect(warnings.filter((w) => w.includes('crashed'))).toHaveLength(1);
     client.dispose();
   });
+
+  it('Track AX: plans out of a chest-floored hole (a jump from feet +0.95) and from a dirt path through a door like the in-thread planner', async () => {
+    const CHEST = rid('chest', { 'minecraft:cardinal_direction': 'south' });
+    const PATH = rid('grass_path');
+    const door = (upper: number) => rid('wooden_door', { upper_block_bit: upper, open_bit: 1, 'minecraft:cardinal_direction': 'west' });
+    // flat grass (feet -60); a 1 x 1 hole at (5, 5) with a chest in cell -62; a wall at z 10 across the
+    // world (3 high) with an open door at x 5 and a dirt path in front of it at (5, -61, 9)
+    const blocks = (x: number, y: number, z: number): number => {
+      if (x === 5 && z === 5 && y === -61) return AIR;
+      if (x === 5 && z === 5 && y === -62) return CHEST;
+      if (x === 5 && z === 9 && y === -61) return PATH;
+      if (y < -61) return STONE;
+      if (y === -61) return GRASS;
+      if (z === 10 && y >= -60 && y <= -58) return x === 5 && y === -60 ? door(0) : x === 5 && y === -59 ? door(1) : STONE;
+      return AIR;
+    };
+    const F = fixtureWorld(blocks);
+    const client = new PlannerClient(F.world);
+    client.start();
+    await until(() => client.ready, 20_000);
+    const spec: WorkerPlanOptions = { maxNodes: 100_000, maxMs: 10_000, allowBreak: false, allowPlace: false, allowOpen: false };
+    const viaWorker = async (start: Vec3, goal: Vec3): Promise<PathResult> => {
+      const ws = client.search('main', start, { type: 'block', p: goal }, spec, 0);
+      let r: PathResult | undefined;
+      while (!(r = ws.step())) {
+        if (ws.failed) throw new Error('worker search failed');
+        await sleep(1);
+      }
+      return r;
+    };
+    for (const [a, b] of [
+      [{ x: 5, y: -62, z: 5 }, { x: 10, y: -60, z: 5 }],
+      [{ x: 5, y: -61, z: 9 }, { x: 5, y: -60, z: 14 }],
+      [{ x: 5, y: -60, z: 14 }, { x: 5, y: -62, z: 5 }],
+    ] as const) {
+      const t = findPath(new NavGrid(worldSource(F.world)), a, { type: 'block', p: b }, { maxNodes: 100_000, maxMs: 10_000 });
+      const w = await viaWorker(a, b);
+      expect(t.status, `${JSON.stringify(a)} -> ${JSON.stringify(b)}`).toBe('found');
+      expect(w.status).toBe('found');
+      expect(Math.abs(w.cost - t.cost)).toBeLessThanOrEqual(1e-6);
+    }
+    client.dispose();
+  }, 60_000);
 });

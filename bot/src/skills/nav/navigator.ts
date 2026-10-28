@@ -20,7 +20,7 @@ import { classify, type TerrainClass } from '../terrain/classify.ts';
 import type { TerrainSource } from '../terrain/query.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { DEFAULT_THROWAWAY, type BreakRules, type NavActions } from './actions.ts';
-import { PathSearch, findPath, handBreakTicks, locateNode, type LocatedNode, type PathNode, type PathOptions, type PathResult } from './astar.ts';
+import { PathSearch, explainStart, findPath, handBreakTicks, locateNode, type LocatedNode, type PathNode, type PathOptions, type PathResult } from './astar.ts';
 import { TICKS } from './costs.ts';
 import { PathFollower, PressGuard, yawTowards } from './follower.ts';
 import { goalTest, type NavGoal } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
@@ -625,6 +625,16 @@ export class Navigator {
     );
   }
 
+  /**
+   * Track AX: the reason of an exhaustive `none`; a search that expanded only its start node also
+   * says what each cardinal move out of it found (`explainStart`: the refused rise, the missing head room).
+   */
+  private noPathWhy(res: PathResult): string {
+    const why = `no path (exhaustive search, ${res.expanded} nodes expanded)`;
+    const s = res.path[0];
+    return res.expanded <= 1 && s ? `${why}: no move from the ${explainStart(this.grid, s)}` : why;
+  }
+
   private fail(a: Active, why: string): boolean {
     a.why = why;
     a.report.failures++;
@@ -917,7 +927,7 @@ export class Navigator {
     this.record(a, res, search, { upgrade: true });
     a.lastMain = res.status;
     if (res.status === 'none') {
-      a.why = `no path (exhaustive search, ${res.expanded} nodes expanded)`;
+      a.why = this.noPathWhy(res);
       a.finish({ ok: false, reason: 'unreachable' });
       return false;
     }
@@ -1016,7 +1026,7 @@ export class Navigator {
     this.record(a, res, search, flags);
     a.lastMain = res.status; // Track R
     if (res.status === 'none') {
-      a.why = res.path.length ? `no path (exhaustive search, ${res.expanded} nodes expanded)` : 'the start node is not standable';
+      a.why = res.path.length ? this.noPathWhy(res) : 'the start node is not standable';
       a.finish({ ok: false, reason: 'unreachable' });
       return false;
     }
