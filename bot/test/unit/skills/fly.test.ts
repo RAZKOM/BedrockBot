@@ -12,12 +12,19 @@ import {
   ApproachPlanner,
   approachHopeless,
   approachYaw,
+  circleYaw,
   columnsAlong,
   cruiseHeight,
   estimateRockets,
+  glideLine,
+  glideMargin,
+  pathAhead,
   profilePitch,
   PROFILE_START,
+  rocketPitchFor,
   simulateProfile,
+  spiralFit,
+  takeoffSky,
   touchdownCost,
   turnTowards,
   walkMinutes,
@@ -70,11 +77,84 @@ describe('fly: geometry', () => {
     expect(unknown.y).toBe(hill.y);
   });
 
-  it('estimateRockets and walkMinutes: about one rocket per 100 blocks plus the climb; a 420-block walk is about 1 minute', () => {
-    expect(estimateRockets(300, 20)).toBe(2 + 3 + 1);
+  it('estimateRockets (Track AU2: the climb, then a top-up per 310 blocks of glide the climb does not cover) and walkMinutes: a 420-block walk is about 1 minute', () => {
+    expect(estimateRockets(300, 36)).toBe(2); // 36 up: 2 rockets, the glide covers (36 - 10) x 10 + 45 + 56 = 361 blocks
+    expect(estimateRockets(1200, 120)).toBe(7 + 0); // 120 up covers 1100 + 150 + 56
+    expect(estimateRockets(1490, 120)).toBe(7 + 1);
+    expect(estimateRockets(100, 0)).toBe(1);
     expect(Math.round(walkMinutes(420))).toBe(1);
     expect(climbMomentum(1.06)).toBeCloseTo(14.0, 1);
     expect(climbMomentum(-0.2)).toBe(0);
+  });
+
+  it('Track AU2, the energy model: cruiseHeight climbs to what the glide needs (capped by flyMaxClimb), the margin grows with the distance, the glide line and the rocket pitch table', () => {
+    const ground: LandingTarget = { x: 0.5, z: 1200.5, top: FEET, half: 1 };
+    const long = cruiseHeight({ x: 0.5, y: FEET, z: 0.5 }, ground, () => FEET - 1);
+    expect(long.needed).toBeGreaterThan(FEET + 120);
+    expect(long.y).toBe(FEET + 120); // the cap
+    expect(cruiseHeight({ x: 0.5, y: FEET, z: 0.5 }, ground, () => FEET - 1, { maxClimb: 200 }).y).toBeCloseTo(long.needed, 6);
+    const short = cruiseHeight({ x: 0.5, y: FEET, z: 0.5 }, { ...ground, z: 300.5 }, () => FEET - 1);
+    expect(short.y).toBeGreaterThan(FEET + 30);
+    expect(short.y).toBeLessThan(FEET + 42); // about 36 up: 2 rockets
+    expect(glideMargin(15, 100)).toBe(0);
+    expect(glideMargin(15, 300)).toBe(5);
+    expect(glideMargin(15, 1000)).toBe(15);
+    expect(glideLine(ground, 56)).toBe(FEET + 10);
+    expect(glideLine(ground, 1056)).toBe(FEET + 110);
+    expect(rocketPitchFor(31)).toBe(-38);
+    expect(rocketPitchFor(14)).toBe(-20);
+    expect(rocketPitchFor(3)).toBe(-10);
+    expect(rocketPitchFor(19)).toBe(-25);
+  });
+
+  it('Track AU2, takeoffSky: a roof over the start refuses with the owner line, a tree in the run picks another heading, open sky keeps the bearing; unknown cells count as a roof', () => {
+    const from = { x: 0.5, y: FEET, z: 0.5 };
+    const target = { x: 0.5, z: 300.5 };
+    const open = takeoffSky(from, target, FEET + 40, 12, () => false);
+    expect(open).toEqual({ ok: true, yaw: 0 });
+    const roof = takeoffSky(from, target, FEET + 40, 12, (_x, y) => y === FEET + 4);
+    expect(roof.ok).toBe(false);
+    if (!roof.ok) expect(roof.line).toBe(`fly: no open sky here (roof at y ${FEET + 4}, 4 blocks up); walk outside first`);
+    const unknown = takeoffSky(from, target, FEET + 40, 12, (_x, y) => (y > FEET + 20 ? undefined : false));
+    expect(unknown.ok).toBe(false);
+    // a tree 3 wide, 8 high, 10 blocks ahead on the bearing: the start is clear, the run turns 30 degrees
+    const tree = takeoffSky(from, target, FEET + 40, 12, (x, y, z) => Math.abs(x) <= 1 && z >= 9 && z <= 11 && y <= FEET + 7);
+    expect(tree.ok).toBe(true);
+    if (tree.ok) expect(Math.abs(tree.yaw)).toBe(30);
+    // the climb cone (review item 7): a one-block bump 10 out and a trunk beside the start allow the takeoff on the bearing; a roof 3 above still refuses
+    const bump = takeoffSky(from, target, FEET + 40, 12, (x, y, z) => x === 0 && z === 10 && y <= FEET);
+    expect(bump).toEqual({ ok: true, yaw: 0 });
+    const trunk = takeoffSky(from, target, FEET + 40, 12, (x, y, z) => x === 1 && z === 0 && y <= FEET + 1);
+    expect(trunk).toEqual({ ok: true, yaw: 0 });
+    const low = takeoffSky(from, target, FEET + 40, 12, (_x, y) => y === FEET + 3);
+    expect(low.ok).toBe(false);
+    // a wall right across the run on every heading: refused, with the distance ahead
+    const walled = takeoffSky(from, target, FEET + 40, 12, (x, y, z) => Math.max(Math.abs(x), Math.abs(z)) === 6 && y <= FEET + 30);
+    expect(walled.ok).toBe(false);
+    if (!walled.ok) expect(walled.line).toMatch(/^fly: no open sky here \(roof at y -59, 1 block up, \d ahead\); walk outside first$/);
+  });
+
+  it('Track AU2, pathAhead, spiralFit and circleYaw: a solid within 20 ticks of the glide is seen, a circle fits only where every column within radius + 4 is lower, the yaw follows the circle', () => {
+    const body: FlightBody = { pos: { x: 0.5, y: 0, z: 0.5 }, vel: { x: 0, y: -0.15, z: 1.3 }, onGround: false, gliding: true, boostTicks: 0 };
+    expect(pathAhead(body, 0, 0, 20, () => false)).toBeUndefined();
+    const wall = pathAhead(body, 0, 0, 20, (_x, y, z) => z === 12 && y >= -5 && y <= 5);
+    expect(wall).toBeGreaterThan(5);
+    expect(wall).toBeLessThan(12);
+    expect(pathAhead(body, 90, 0, 20, (_x, y, z) => z === 12 && y >= -5 && y <= 5)).toBeUndefined(); // turned away
+    const flat = spiralFit({ x: 0.5, z: 0.5 }, 20, () => 0);
+    expect(flat).toEqual({ centre: { x: 0.5, z: 0.5 }, radius: 24 });
+    // walls 10 out on three sides, 20 high: nothing fits (6 + 4 reaches them)
+    const walls = spiralFit({ x: 0.5, z: 0.5 }, 20, (x, z) => (Math.abs(x) === 10 && Math.abs(z) <= 10) || (z === 10 && Math.abs(x) <= 10) ? 30 : 0);
+    expect(walls).toBeUndefined();
+    // a wall 19 out: a radius of 14 fits
+    expect(spiralFit({ x: 0.5, z: 0.5 }, 20, (x) => (x === 19 ? 30 : 0))?.radius).toBe(14);
+    expect(spiralFit({ x: 0.5, z: 0.5 }, 20, (x) => (x === 19 ? undefined : 0))).toBeDefined(); // unknown counts as high
+    expect(spiralFit({ x: 0.5, z: 0.5 }, 20, (x) => (x === 19 ? undefined : 0))?.radius).toBe(14);
+    // on the circle heading along it the yaw barely changes; well outside it turns towards the circle
+    const on = circleYaw(0, { x: 24.5, z: 0.5 }, { x: 0.5, z: 0.5 }, 24, 1); // at +x of the centre, dir +1 moves towards +z = yaw 0
+    expect(Math.abs(yawDiff(on, 0))).toBeLessThanOrEqual(30);
+    const far = circleYaw(0, { x: 60.5, z: 0.5 }, { x: 0.5, z: 0.5 }, 24, 1);
+    expect(far).toBe(15); // turning towards the circle at -x (about yaw 84), 15 degrees a tick
   });
 });
 
@@ -180,29 +260,42 @@ describe('fly: the approach planner (glide formula)', () => {
 });
 
 /** The brain flying a whole trip on stepBody over a synthetic world (the offline simulator of the track). */
-function flyTrip(o: { dist: number; up: number; half: number; startUp?: number; wall?: boolean; rockets?: number; life?: number }) {
+function flyTrip(o: { dist: number; up: number; half: number; startUp?: number; wall?: boolean; walls?: boolean; tree?: boolean; roof?: boolean; rockets?: number; life?: number; takeoffYaw?: number }) {
   const tx = 0;
   const tz = o.dist;
   const top = FEET + o.up;
   const boxes = [] as { from: { x: number; y: number; z: number }; to: { x: number; y: number; z: number }; solid: boolean }[];
   if (o.up > 0) boxes.push({ from: { x: tx - o.half, y: top - 1, z: tz - o.half }, to: { x: tx + o.half, y: top - 1, z: tz + o.half }, solid: true });
   if (o.wall) boxes.push({ from: { x: tx - 3, y: top - 1, z: tz - o.half - 10 }, to: { x: tx + 3, y: top + 11, z: tz - o.half - 10 }, solid: true });
+  if (o.walls) {
+    // Track AU2: 20-high walls 10 blocks from the centre on three sides (left, right, far)
+    boxes.push({ from: { x: tx - 10, y: top - 1, z: tz - 10 }, to: { x: tx - 10, y: top + 18, z: tz + 10 }, solid: true });
+    boxes.push({ from: { x: tx + 10, y: top - 1, z: tz - 10 }, to: { x: tx + 10, y: top + 18, z: tz + 10 }, solid: true });
+    boxes.push({ from: { x: tx - 10, y: top - 1, z: tz + 10 }, to: { x: tx + 10, y: top + 18, z: tz + 10 }, solid: true });
+  }
+  if (o.tree) boxes.push({ from: { x: -1, y: FEET, z: 9 }, to: { x: 1, y: FEET + 7, z: 11 }, solid: true }); // Track AU2: a tree 10 blocks ahead on the climb line
+  if (o.roof) boxes.push({ from: { x: -40, y: FEET + 6, z: -40 }, to: { x: 40, y: FEET + 6, z: 60 }, solid: true }); // Track AU2: a wide roof 6 above the start (the flight is already in the air under it)
   if (o.startUp) boxes.push({ from: { x: -1, y: FEET, z: -1 }, to: { x: 1, y: FEET + o.startUp - 1, z: 1 }, solid: true });
   const world: BlockQuery = withBoxes(flatWorld(), boxes);
   const skyTop = (x: number, z: number): number => {
     for (let y = 100; y >= -64; y--) if (world.solidAt(x, y, z)) return y;
     return -64;
   };
+  const groundBelow = (x: number, z: number, fromY = 100): number => {
+    for (let y = Math.floor(fromY); y >= -64; y--) if (world.solidAt(x, y, z)) return y + 1;
+    return -63;
+  };
   const target: LandingTarget = { x: tx + 0.5, z: tz + 0.5, top, half: o.half, ground: FEET };
   const start = { x: 0.5, y: FEET + (o.startUp ?? 0), z: 0.5 };
-  const cz = cruiseHeight(start, target, skyTop, {});
-  const brain = new FlightBrain(target, { cruiseY: cz.y, groundAt: (x, z) => skyTop(x, z) + 1, obstacle: (x, y, z) => world.solidAt(x, y, z) === true, seed: 5 });
+  const cz = cruiseHeight(start, target, o.roof ? () => FEET - 1 : skyTop, {});
+  const brain = new FlightBrain(target, { cruiseY: cz.y, groundAt: groundBelow, skyTop, obstacle: (x, y, z) => world.solidAt(x, y, z) === true, seed: 5, takeoffYaw: o.takeoffYaw });
   let body = initialBody(start, true);
   let cmd = { ...IDLE_COMMAND };
   let rockets = o.rockets ?? 64;
   let lastFire = -100;
   let lastAir = { vy: 0, h: 0 };
-  for (let t = 1; t < 4000; t++) {
+  let hits = 0;
+  for (let t = 1; t < 6000; t++) {
     const out = brain.step({
       tick: t,
       body: { pos: body.pos, vel: body.vel, onGround: body.onGround, gliding: body.gliding ?? false, boostTicks: body.boostTicks ?? 0 },
@@ -221,8 +314,11 @@ function flyTrip(o: { dist: number; up: number; half: number; startUp?: number; 
       lastFire = t;
     }
     if (body.gliding) lastAir = { vy: body.vel.y, h: Math.hypot(body.vel.x, body.vel.z) };
+    const before = body.vel;
     body = stepBody(body, step, world).state;
-    if (out.end) return { end: out.end, ticks: t, rockets: (o.rockets ?? 64) - rockets, goArounds: brain.stats.goArounds, lastAir, maxY: brain.stats.maxY, body };
+    // Track AU2: a collision in the air (the speed vanishes without the brain's doing) is what the path-ahead check must prevent
+    if (body.gliding && Math.hypot(before.x, before.z) > 0.6 && Math.hypot(body.vel.x, body.vel.z) < Math.hypot(before.x, before.z) * 0.3 && body.pos.y > FEET + 0.5) hits++;
+    if (out.end) return { end: out.end, ticks: t, rockets: (o.rockets ?? 64) - rockets, by: brain.stats.rocketsBy, goArounds: brain.stats.goArounds, lastAir, maxY: brain.stats.maxY, cruiseY: cz.y, descents: brain.stats.descents, steered: brain.stats.steered, hits, body };
   }
   throw new Error('the flight never ended');
 }
@@ -244,23 +340,94 @@ describe('fly: the brain flies whole trips on stepBody', () => {
     expect(r.rockets).toBeLessThanOrEqual(2);
   });
 
-  it('from 60 blocks above the platform level, 100 blocks away: spirals down and lands without a go-around', () => {
+  it('from 60 blocks above the platform level, 100 blocks away: a circle of radius 24 around the platform (the descent geometry), no go-around', () => {
     const r = flyTrip({ dist: 100, up: 40, half: 1, startUp: 100 });
     expect(r.end.ok).toBe(true);
     expect(r.goArounds).toBe(0);
     expect(r.rockets).toBeLessThanOrEqual(2);
+    expect(r.descents[0]).toMatch(/^spiral r24 at 0 out/);
+    expect(r.hits).toBe(0);
   });
 
-  it('a wall 12 high 10 blocks before the platform: at least one go-around, then a landing', () => {
+  it('Track AU2: the same with 20-high walls 10 blocks out on three sides: no circle fits there, one tangent to the approach line 30 blocks out does; a landing without a hit', () => {
+    const r = flyTrip({ dist: 100, up: 40, half: 1, startUp: 100, walls: true });
+    expect(r.end.ok, JSON.stringify(r.end)).toBe(true);
+    expect(r.descents[0]).toMatch(/^spiral r\d+ at 3\d out/);
+    expect(r.hits).toBe(0);
+    expect(r.goArounds).toBeLessThanOrEqual(2);
+  });
+
+  it('a wall 12 high 10 blocks before the platform: the planner sees it (a go-around or a circle first), then a landing without a hit', () => {
     const r = flyTrip({ dist: 150, up: 40, half: 1, wall: true });
     expect(r.end.ok).toBe(true);
-    expect(r.goArounds).toBeGreaterThanOrEqual(1);
+    expect(r.hits).toBe(0);
+    expect(r.goArounds + r.descents.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('300 blocks to a 5x5 platform 20 up: at most 6 rockets', () => {
+  it('300 blocks to a 5x5 platform 20 up: at most 4 rockets (Track AU2: the climb to the glide line, no cruise boost)', () => {
     const r = flyTrip({ dist: 300, up: 20, half: 2 });
     expect(r.end.ok).toBe(true);
-    expect(r.rockets).toBeLessThanOrEqual(6);
+    expect(r.rockets).toBeLessThanOrEqual(4);
+    expect(r.by.cruise).toBe(0);
+  });
+
+  it('Track AU2, the rocket economy on the flat: 300 blocks at most 2 rockets, 600 at most 4, 1200 at most 7 (before: 1 / 5 / 13 on bds-fly), the climb then the glide, at most one top-up per 300 blocks of glide beyond it', () => {
+    const r300 = flyTrip({ dist: 300, up: 0, half: 1 });
+    const r600 = flyTrip({ dist: 600, up: 0, half: 1 });
+    const r1200 = flyTrip({ dist: 1200, up: 0, half: 1 });
+    for (const r of [r300, r600, r1200]) expect(r.end.ok, JSON.stringify(r.end)).toBe(true);
+    expect(r300.rockets).toBeLessThanOrEqual(2);
+    expect(r600.rockets).toBeLessThanOrEqual(4);
+    expect(r1200.rockets).toBeLessThanOrEqual(7);
+    expect(r1200.maxY).toBeLessThanOrEqual(FEET + 120 + 31); // the cap of the climb plus one rocket's run-out
+    for (const [r, d] of [[r600, 600], [r1200, 1200]] as const) {
+      const cruise = Math.max(0, d - 56 - (r.maxY - FEET) * 1.25);
+      expect(r.by.cruise).toBeLessThanOrEqual(Math.max(1, Math.ceil(cruise / 300)));
+    }
+    // the Realm's 1490-block flight (17 rockets on 2026-10-30): the model takes 9 to 10
+    const realm = flyTrip({ dist: 1490, up: 0, half: 1 });
+    expect(realm.end.ok).toBe(true);
+    expect(realm.rockets).toBeLessThanOrEqual(10);
+  });
+
+  it('Track AU2, the path ahead: a tree 10 blocks ahead on the climb line is steered around (the sky check turns the takeoff 30 degrees, the climb looks 20 ticks ahead): no hit, landed', () => {
+    const r = flyTrip({ dist: 300, up: 0, half: 1, tree: true, takeoffYaw: 30 });
+    expect(r.end.ok, JSON.stringify(r.end)).toBe(true);
+    expect(r.hits).toBe(0);
+    const straight = flyTrip({ dist: 300, up: 0, half: 1, tree: true });
+    expect(straight.end.ok, JSON.stringify(straight.end)).toBe(true);
+    expect(straight.hits).toBe(0);
+    expect(straight.steered).toBeGreaterThan(0);
+  });
+
+  it('Track AU2 review: a roof 12 above a cruising body that is under the glide line: no rocket goes (the boosted path is checked before firing)', () => {
+    const target: LandingTarget = { x: 0.5, z: 600.5, top: FEET, half: 1, ground: FEET };
+    const roofY = FEET + 40 + 12;
+    const brain = new FlightBrain(target, { cruiseY: FEET + 70, groundAt: () => FEET, obstacle: (_x, y) => y === roofY, seed: 3 });
+    // a body in the cruise, 40 up at 400 blocks out: the glide line there is about 54 up, so it wants a rocket
+    const body: FlightBody = { pos: { x: 0.5, y: FEET + 40, z: 200.5 }, vel: { x: 0, y: -0.15, z: 1.4 }, onGround: false, gliding: true, boostTicks: 0 };
+    brain.phase = 'cruise';
+    let fired = false;
+    for (let t = 1; t <= 10; t++) {
+      const out = brain.step({ tick: t, body, yaw: 0, pitch: 0, rockets: 10, canFire: true, health: 20, elytraLeft: 400 });
+      if (out.control.fire) fired = true;
+    }
+    expect(fired).toBe(false);
+    expect(brain.stats.steered).toBeGreaterThan(0);
+    // the same without the roof: the rocket goes
+    const open = new FlightBrain(target, { cruiseY: FEET + 70, groundAt: () => FEET, obstacle: () => false, seed: 3 });
+    open.phase = 'cruise';
+    const out = open.step({ tick: 1, body, yaw: 0, pitch: 0, rockets: 10, canFire: true, health: 20, elytraLeft: 400 });
+    expect(out.control.fire).toBe(true);
+  });
+
+  it('Track AU2, a roof 6 above the start the sky check did not see: the climb never flies into it; the flight ends on the ground under it as `roof`, not by health', () => {
+    const r = flyTrip({ dist: 300, up: 0, half: 1, roof: true });
+    expect(r.end.ok).toBe(false);
+    if (!r.end.ok) expect(r.end.reason).toBe('roof');
+    expect(r.body.onGround).toBe(true);
+    expect(r.maxY).toBeLessThan(FEET + 6 - 0.6); // never into the roof's cells
+    expect(r.steered).toBeGreaterThan(0);
   });
 
   it('out of rockets early: the flight ends on the ground (no_rockets or landed short), never in the air', () => {
@@ -376,9 +543,11 @@ describe('fly: the kit rules', () => {
 
   it('flyEndLine words the outcomes', () => {
     const target = { x: 0.5, z: 0.5, top: -20, half: 1, label: 'home' };
-    const report = { ok: true, landedAt: { x: 0.7, y: -20, z: 0.2 }, off: 0.4, onTarget: true, rockets: 3, goArounds: 1, ticks: 200, corrections: 4, glideEnds: 1, touchdown: { vy: -0.1, h: 0.3 }, maxY: 0 };
+    const report = { ok: true, landedAt: { x: 0.7, y: -20, z: 0.2 }, off: 0.4, onTarget: true, rockets: 3, rocketsBy: { climb: 2, cruise: 0, goaround: 1, land: 0 }, descents: [], steered: 0, goArounds: 1, ticks: 200, corrections: 4, glideEnds: 1, touchdown: { vy: -0.1, h: 0.3 }, maxY: 0 };
     expect(flyEndLine({ ok: true, target, distance: 150, report, seconds: 12, notes: [] })).toBe('landed at 0.7 -20 0.2, 0.4 from the aim (home); 3 rockets, 1 go-around, 12 s');
     expect(flyEndLine({ ok: false, reason: 'stopped', target, distance: 150, report: { ...report, ok: false }, seconds: 5, notes: [] })).toMatch(/^landed \(stopped\) at /);
     expect(flyEndLine({ ok: false, reason: 'no_glide', target, distance: 150, seconds: 5, notes: [] })).toMatch(/^fly: the server did not let me glide/);
+    expect(flyEndLine({ ok: false, reason: 'roof', target, distance: 150, report: { ...report, ok: false }, seconds: 5, notes: [] })).toMatch(/^landed \(no open sky ahead: a roof\) at .*; walk outside first/);
+    expect(flyEndLine({ ok: false, reason: 'fly: no open sky here (roof at y 72, 3 blocks up); walk outside first', target, distance: 150, seconds: 0, notes: [] })).toBe('fly: no open sky here (roof at y 72, 3 blocks up); walk outside first');
   });
 });

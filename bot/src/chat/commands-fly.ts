@@ -12,7 +12,9 @@ import type { Vec3 } from '../connection/types.ts';
 import { FlightController } from '../skills/fly/controller.ts';
 import { elytraWornLimit, flightKitMemoryOf, kitLine, kitReady, readKit, SupplyWatch } from '../skills/fly/kit.ts';
 import { FlightKitOps } from '../skills/fly/kitops.ts';
-import { APPROACH_HEIGHT, columnsAlong, cruiseHeight, flightSeconds, hdist, walkMinutes, type LandingTarget } from '../skills/fly/plan.ts';
+import { APPROACH_HEIGHT, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, type CellQuery, type LandingTarget } from '../skills/fly/plan.ts';
+import { pathBlocks, probePath } from '../skills/home/reach.ts'; // Track AU2: the walk from a landing cell to the goal
+import { probeNavOf } from '../skills/combat/pathReach.ts';
 import type { Goal, GotoOptions, SkillResult } from '../skills/types.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { FlightProcess, FlyProcess, type FlyOutcome, type FlyTarget } from '../tasks/process/fly.ts';
@@ -70,8 +72,10 @@ export function flyEndLine(r: FlyOutcome): string {
       return 'fly: the server did not let me glide (is the elytra on my back?)';
     case 'lost':
       return `landed (lost) at ${at}; ${stats}`;
+    case 'roof':
+      return `landed (no open sky ahead: a roof) at ${at}; walk outside first; ${stats}`;
     default:
-      return `fly: ${r.reason ?? 'failed'}`;
+      return r.reason?.startsWith('fly: ') ? r.reason : `fly: ${r.reason ?? 'failed'}`;
   }
 }
 
@@ -87,10 +91,13 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   const memory = () => flightKitMemoryOf(task);
   const position = (): Vec3 | undefined => (loop.state.ready ? loop.state.pos : undefined);
 
-  /** The highest solid block of a column: the world model (loaded), else the cache. */
-  const skyTop = (x: number, z: number): number | undefined => {
+  /** The highest solid block of a column: the world model (loaded), else the cache; `fromY` (Track AU2) looks down from there (under a roof the roof is not the ground). */
+  const skyTop = (x: number, z: number, fromY?: number): number | undefined => {
     const p0 = position();
-    const from = Math.min(320, Math.floor((p0?.y ?? 64) + 80));
+    let from = Math.min(319, Math.floor(fromY ?? (p0?.y ?? 64) + 80));
+    // the cell at `from` already solid (a mountain more than 80 above, the bot deep underground): that is the
+    // inside of the mass, not its top; scan from the world's top instead (Track AU2 review)
+    if (fromY === undefined && world.blockAt({ x, y: from, z })?.solid) from = 319;
     let known = false;
     for (let y = from; y >= -64; y--) {
       const b = world.blockAt({ x, y, z });
@@ -101,19 +108,85 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       known = true;
       if (b.solid) return y;
     }
-    return world.cache?.columnTop(x, z);
+    return fromY === undefined ? world.cache?.columnTop(x, z) : undefined;
   };
-  /** Safe ground for an emergency landing: a known column whose top is a plain solid block with level neighbours. */
-  const groundAt = (x: number, z: number): number | undefined => {
-    const top = skyTop(x, z);
+  /** Safe ground for a landing: a known column whose top is a plain solid block with level neighbours (within a block: neither a 1-wide column nor the bottom of a hole). */
+  const groundAt = (x: number, z: number, fromY?: number): number | undefined => {
+    const top = skyTop(x, z, fromY);
     if (top === undefined) return undefined;
     const b = world.blockAt({ x, y: top, z });
     if (b && /lava|water|cactus|magma|fire|portal/.test(b.name)) return undefined;
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
-      const t = skyTop(x + dx, z + dz);
-      if (t !== undefined && t < top - 1) return undefined; // a 1-wide column
+      const t = skyTop(x + dx, z + dz, fromY);
+      if (t !== undefined && Math.abs(t - top) > 1) return undefined; // a 1-wide column, or a hole (Track AU2: a goal 3 under the floor is not landed in)
     }
     return top + 1;
+  };
+  /** Track AU2: a cell of the world model for the sky check (true = solid, false = air, undefined = not loaded). */
+  const cell: CellQuery = (x, y, z) => {
+    const b = world.blockAt({ x, y, z });
+    return b === undefined ? undefined : b.solid;
+  };
+  /** Track AU2: open sky over a landing cell: no loaded solid within 20 blocks above the feet. */
+  const openAbove = (x: number, z: number, feet: number): boolean => {
+    for (let y = feet; y <= feet + 20; y++) if (cell(x, y, z) === true) return false;
+    return true;
+  };
+  /** Track AU2: a landable cell: safe ground whose top is the block under `feet` (within a block) with open sky above. */
+  const landable = (x: number, z: number, feet?: number): number | undefined => {
+    const top = groundAt(x, z);
+    if (top === undefined) return undefined;
+    if (feet !== undefined && Math.abs(top - feet) > 1.5) return undefined;
+    return openAbove(x, z, top) ? top : undefined;
+  };
+  /**
+   * Track AU2, fly-then-walk: the landing cell for a goal: the goal itself when it is landable, else the
+   * landable cell within `radius` with the shortest walk to the goal (a bounded probe plan for the
+   * nearest few when the ground there is loaded, the straight distance otherwise). Undefined when
+   * nothing landable is known near the goal (then the goal is flown to as before).
+   */
+  /**
+   * ... Returns `undefined` when the goal's ground is not known at all (not loaded, nothing cached), `null`
+   * when it is loaded and nothing landable lies within `radius` (the flight then aims at the goal itself
+   * and stops looking), else the cell.
+   */
+  const landingNear = async (goal: Vec3, radius: number): Promise<{ x: number; z: number; top: number; walk: number; loaded: boolean } | null | undefined> => {
+    // `loaded`: the goal's cell is in the live world model; a verdict from the world cache alone is provisional
+    // (the cache may predate a structure built there) and the flight looks again when the chunks arrive
+    const loaded = world.blockAt(goal) !== undefined;
+    const own = landable(goal.x, goal.z, goal.y);
+    if (own !== undefined) return { x: goal.x, z: goal.z, top: own, walk: 0, loaded };
+    const found: { x: number; z: number; top: number; walk: number }[] = [];
+    let bestWalk = Infinity;
+    for (let r = 1; r <= radius; r++) {
+      // a cell of ring r walks at least r: once the best found walks less than r no farther ring can beat it
+      // (a roof's cells fill the inner rings before the ground cells beside the walls are seen)
+      if (r > bestWalk) break;
+      const step = r > 8 ? 2 : 1;
+      for (let dx = -r; dx <= r; dx += step) {
+        for (let dz = -r; dz <= r; dz += step) {
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+          const top = landable(goal.x + dx, goal.z + dz);
+          if (top === undefined) continue;
+          // the walk: the straight distance plus three per block of height (stairs, drops and the way round)
+          const walk = Math.hypot(dx, dz) + 3 * Math.abs(top - goal.y);
+          found.push({ x: goal.x + dx, z: goal.z + dz, top, walk });
+          if (walk < bestWalk) bestWalk = walk;
+        }
+      }
+    }
+    if (found.length === 0) return loaded ? null : undefined;
+    found.sort((a, b) => a.walk - b.walk);
+    const nav = probeNavOf(pve.mover);
+    const best = found.slice(0, 6).map((c) => ({ ...c, loaded }));
+    if (nav && loaded) {
+      for (const c of best) {
+        const r = await probePath(nav, { type: 'near', p: goal, r: 1.5 }, { x: c.x + 0.5, y: c.top, z: c.z + 0.5 });
+        c.walk = r?.status === 'found' ? pathBlocks(r.path) : c.walk * 2 + 16; // no path within the budget: well behind the ones with one
+      }
+      best.sort((a, b) => a.walk - b.walk);
+    }
+    return best[0];
   };
 
   const controller = new FlightController({
@@ -125,6 +198,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     health: () => world.self.health,
     elytraLeft: () => readKit(inv, memory()).elytraLeft,
     groundAt,
+    skyTop,
     log,
   });
   const kit = survivalKitOf(task);
@@ -160,6 +234,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       settings: d.settings,
       position,
       skyTop,
+      cell,
+      landingNear: (goal) => landingNear(goal, d.settings.get('flyLandSearch')),
       say: (m) => d.chat.say(m),
       waitTicks: (n) => loop.waitTicks(n),
       supply,
@@ -186,7 +262,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   const dim = (): number => world.self.dimension;
   /** The Nether: every known column along the line must leave the cruise height clear (unknown columns: walk). */
   const ceilingClear = (from: Vec3, target: LandingTarget): boolean => {
-    const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), cruise: d.settings.get('flyCruise') });
+    const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
     let unknown = 0;
     const cols = columnsAlong(from, target);
     for (let i = 0; i < cols.length; i += 4) {
@@ -202,38 +278,117 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     }
     return unknown <= cols.length / 8;
   };
-  /** Fly instead of walking? The target block, the reply line, or undefined (walk). */
-  const autoFly = (goalBlock: Vec3, label: string): { target: FlyTarget; line: string } | undefined => {
+  /** Track AU2: the sky over the takeoff towards `target` from here (the FlyProcess checks again before it jumps). */
+  const skyHere = (from: Vec3, target: LandingTarget) => {
+    const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
+    return takeoffSky(from, target, cz.y, d.settings.get('flyTakeoffRun'), cell);
+  };
+  type AutoFly = { kind: 'fly'; target: FlyTarget; line: string } | { kind: 'walk_out'; roof: string };
+  /**
+   * Fly instead of walking? `fly`: the landing target (the goal when it is landable, else the nearest
+   * landable cell within flyLandSearch: fly-then-walk) and the reply line; `walk_out` (Track AU2): the
+   * flight would be worth it but the sky over the start is closed: walk towards the goal and try the
+   * takeoff again every flyRetryBlocks; undefined: walk.
+   */
+  const autoFly = async (goalBlock: Vec3, label: string, half: number): Promise<AutoFly | undefined> => {
     if (!d.settings.get('autoFly')) return undefined;
     const from = position();
     if (!from || controller.active) return undefined;
-    const target: FlyTarget = { x: goalBlock.x + 0.5, z: goalBlock.z + 0.5, top: goalBlock.y, half: 1, label };
-    const distance = hdist(from, target);
+    const goalTarget: FlyTarget = { x: goalBlock.x + 0.5, z: goalBlock.z + 0.5, top: goalBlock.y, half, label };
+    const distance = hdist(from, goalTarget);
     if (distance <= d.settings.get('flyMin')) return undefined;
     const k = readKit(inv, memory());
     if (!kitReady(k, d.settings.get('toolWearLimit')).ok) return undefined;
     if (k.rockets < d.settings.get('fireworksMin') && k.boxRockets === 0) return undefined;
-    if (dim() !== OVERWORLD && !(dim() === NETHER && ceilingClear(from, target))) return undefined;
-    return { target, line: `flying (${Math.round(distance)} blocks; walking would be ~${Math.round(walkMinutes(distance))} min)` };
+    if (dim() !== OVERWORLD && !(dim() === NETHER && ceilingClear(from, goalTarget))) return undefined;
+    // the sky first (cheap); the landing cell (up to six probe plans) only when a takeoff is possible at all
+    const sky = skyHere(from, goalTarget);
+    if (!sky.ok) return { kind: 'walk_out', roof: sky.line };
+    const near = await landingNear(goalBlock, d.settings.get('flyLandSearch'));
+    // the goal's ground not in the live model (too far to be loaded; the cache may be stale): fly at the goal
+    // (or the cell the cache suggests) and look again within RETARGET_WITHIN blocks (FlyProcess.retargetNear);
+    // loaded with nothing landable near it (null): fly at the goal and do not look again
+    const landing: FlyTarget = near && near.walk > 0 ? { x: near.x + 0.5, z: near.z + 0.5, top: near.top, half: 1, label, then: `then walking ${Math.round(near.walk)} blocks` } : goalTarget;
+    const target: FlyTarget = near === null || near?.loaded ? landing : { ...landing, goal: goalBlock };
+    log.info(`fly: landing cell for ${label}: ${near ? `${near.walk > 0 ? `${near.x} ${near.top} ${near.z}, ${Math.round(near.walk)} blocks of walk` : 'the goal itself'} (${near.loaded ? 'loaded' : 'from the cache: checked again in flight'})` : near === null ? 'nothing landable near it (loaded): the goal itself' : 'nothing known there: checked again in flight'}`);
+    const line = near && near.walk > 0 ? `flying ${Math.round(hdist(from, target))} blocks to ${Math.round(near.walk)} blocks from ${label}, then walking` : `flying (${Math.round(distance)} blocks; walking would be ~${Math.round(walkMinutes(distance))} min)`;
+    return { kind: 'fly', target, line };
   };
-  const walk0 = pve.walk.bind(pve);
-  pve.walk = (goal: Goal, opts: GotoOptions = {}, label?: string): Promise<SkillResult> => {
-    if (goal.type === 'block') {
-      const f = autoFly(goal.p, label?.replace(/^walking to /, '') ?? fmt(goal.p));
-      if (f) {
-        d.chat.say(f.line);
-        return start(f.target).result.then((r) => (r.ok || r.reason === 'landed_off' ? walk0(goal, opts, label) : r.reason === 'interrupted' || r.reason === 'replaced' ? { ok: false, reason: 'interrupted' } : { ok: false, reason: flyEndLine(r) }));
+  /** After the flight: the walk for the rest (also after a miss or a roof landing), or the flight's failure. */
+  const afterFlight = (r: FlyOutcome, walk: () => Promise<SkillResult>): Promise<SkillResult> => {
+    if (r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason?.startsWith('fly: no open sky')) return walk();
+    if (r.reason === 'interrupted' || r.reason === 'replaced') return Promise.resolve({ ok: false, reason: 'interrupted' });
+    return Promise.resolve({ ok: false, reason: flyEndLine(r) });
+  };
+  /**
+   * Track AU2: the leg of a walk to open sky: the nearest cell on the way to the goal (within `step`
+   * blocks ahead, up to 4 beside the line, nearer first) that stands on its column's top under open sky
+   * (`landable`): from a tunnel or a house that is the surface, so the walk comes up, not along. None
+   * known: a plain `xz` leg `step` blocks along the line (the surface is not loaded or not landable).
+   */
+  const openSkyLeg = (from: Vec3, goalBlock: Vec3, step: number): Goal => {
+    const total = hdist(from, { x: goalBlock.x + 0.5, z: goalBlock.z + 0.5 });
+    const ux = (goalBlock.x + 0.5 - from.x) / total;
+    const uz = (goalBlock.z + 0.5 - from.z) / total;
+    for (let i = 4; i <= step; i++) {
+      for (const side of [0, 1, -1, 2, -2, 3, -3, 4, -4]) {
+        const x = Math.floor(from.x + ux * i - uz * side);
+        const z = Math.floor(from.z + uz * i + ux * side);
+        const top = landable(x, z);
+        if (top !== undefined && top >= from.y - 1) return { type: 'block', p: { x, y: top, z } };
       }
     }
-    return walk0(goal, opts, label);
+    return { type: 'xz', x: Math.floor(from.x + ux * step), z: Math.floor(from.z + uz * step) };
+  };
+  /**
+   * Track AU2: the sky over the start is closed (indoors, underground, under trees): walk towards the
+   * goal in legs of flyRetryBlocks (each to an open-sky cell on the way, `openSkyLeg`) and try the
+   * takeoff again after each; `walk` walks the whole way (the goal's own goto / come) when the legs
+   * cannot be planned or the flight is never worth it.
+   */
+  const walkOut = async (goalBlock: Vec3, label: string, half: number, first: { roof: string }, walk: () => Promise<SkillResult>, legWalk: (leg: Goal) => Promise<SkillResult>): Promise<SkillResult> => {
+    d.chat.say(`${first.roof.replace(/; walk outside first$/, '')}; walking towards ${label} and taking off outside`);
+    log.info(`fly: ${first.roof} -> walking out towards ${label}, a takeoff try every ${d.settings.get('flyRetryBlocks')} blocks`);
+    for (let leg = 0; leg < 64; leg++) {
+      const from = position();
+      if (!from) return walk();
+      const step = d.settings.get('flyRetryBlocks');
+      const total = hdist(from, { x: goalBlock.x + 0.5, z: goalBlock.z + 0.5 });
+      if (total <= Math.max(step, d.settings.get('flyMin'))) return walk();
+      const legGoal = openSkyLeg(from, goalBlock, step);
+      log.info(`fly: leg ${leg + 1} to ${legGoal.type === 'block' ? `the open-sky cell ${legGoal.p.x} ${legGoal.p.y} ${legGoal.p.z}` : legGoal.type === 'xz' ? `${legGoal.x} ${legGoal.z} (no open-sky cell known ahead)` : 'the goal'}`);
+      const r = await legWalk(legGoal);
+      if (!r.ok) return r.reason === 'interrupted' ? r : walk();
+      const again = await autoFly(goalBlock, label, half);
+      if (again?.kind === 'fly') {
+        d.chat.say(again.line);
+        return afterFlight(await start(again.target).result, walk);
+      }
+      if (!again) return walk();
+    }
+    return walk();
+  };
+  const walk0 = pve.walk.bind(pve);
+  pve.walk = async (goal: Goal, opts: GotoOptions = {}, label?: string): Promise<SkillResult> => {
+    if (goal.type !== 'block') return walk0(goal, opts, label);
+    const name = label?.replace(/^walking to /, '') ?? fmt(goal.p);
+    const f = await autoFly(goal.p, name, 1);
+    if (!f) return walk0(goal, opts, label);
+    const walk = () => walk0(goal, opts, label);
+    if (f.kind === 'walk_out') return walkOut(goal.p, name, 1, f, walk, (leg) => walk0(leg, opts, `walking to ${name} (to open sky)`));
+    d.chat.say(f.line);
+    return afterFlight(await start(f.target).result, walk);
   };
   const come0 = pve.come.bind(pve);
-  pve.come = (name: string, o: { urgent?: boolean } = {}): Promise<SkillResult> => {
+  pve.come = async (name: string, o: { urgent?: boolean } = {}): Promise<SkillResult> => {
     const feet = pve.playerFeet(name);
-    const f = feet ? autoFly({ x: Math.floor(feet.x), y: Math.round(feet.y), z: Math.floor(feet.z) }, name) : undefined;
-    if (!f) return come0(name, o);
+    const block = feet ? { x: Math.floor(feet.x), y: Math.round(feet.y), z: Math.floor(feet.z) } : undefined;
+    const f = block ? await autoFly(block, name, 2) : undefined;
+    if (!f || !block) return come0(name, o);
+    const walk = () => come0(name, o);
+    if (f.kind === 'walk_out') return walkOut(block, name, 2, f, walk, (leg) => walk0(leg, {}, `walking to ${name} (to open sky)`));
     d.chat.say(f.line);
-    return start({ ...f.target, half: 2 }).result.then((r) => (r.ok || r.reason === 'landed_off' ? come0(name, o) : r.reason === 'interrupted' || r.reason === 'replaced' ? { ok: false, reason: 'interrupted' } : { ok: false, reason: flyEndLine(r) }));
+    return afterFlight(await start(f.target).result, walk);
   };
 
   // ---- status ----------------------------------------------------------------------------------
@@ -277,10 +432,10 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   d.chat.register({
     name: 'fly',
     help: '<x y z> | <waypoint> | <player> | home | stop | status | box [<slot>] (fly there with the elytra and land on it; stop: land now)',
-    tier: 'front',
+    tier: 'more', // Track AU2: come and goto fly on their own; the front door keeps !come
     group: 'go',
     example: '!fly home',
-    auto: 'come and goto fly by themselves over flyMin blocks (autoFly); the flight kit (elytra, rockets, the fireworks box) is never dropped, stashed or unloaded',
+    auto: 'come and goto fly by themselves over flyMin blocks (autoFly), landing on the nearest landable cell and walking the rest; the flight kit (elytra, rockets, the fireworks box) is never dropped, stashed or unloaded',
     run: ({ reply, args, sender }) => {
       const sub = args[0]?.toLowerCase();
       if (sub === 'stop') {
@@ -340,6 +495,14 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       if (dim() === NETHER && from && !ceilingClear(from, t.target)) {
         reply(`fly: the Nether ceiling is too low along the way to ${t.target.label} (walk: !goto)`);
         return;
+      }
+      // Track AU2: no takeoff under a roof (the owner's indoor flight hit the ceiling three times)
+      if (from) {
+        const sky = skyHere(from, t.target);
+        if (!sky.ok) {
+          reply(sky.line);
+          return;
+        }
       }
       const p = start(t.target);
       reply(`flying to ${t.target.label} (${Math.round(distance)} blocks, about ${flightSeconds(distance)} s; ${kitLine(k)})`);

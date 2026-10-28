@@ -24,7 +24,7 @@ import type { BlockQuery } from '../input/types.ts';
 import { useItemTransaction } from '../survival/eat.ts';
 import { wireItemOf } from '../place/place.ts';
 import { PHYSICS } from '../input/physics.ts';
-import { FlightBrain, type BrainOptions, type FlightEnd, type FlightPhase } from './brain.ts';
+import { FlightBrain, type BrainOptions, type FlightEnd, type FlightEndReason as BrainEndReason, type FlightPhase } from './brain.ts';
 import { isRocket } from './kit.ts';
 import { hdist, type FlightBody, type LandingTarget } from './plan.ts';
 
@@ -70,8 +70,10 @@ export interface FlightDeps {
   health(): number;
   /** Uses left on the worn elytra (undefined when unknown). */
   elytraLeft(): number | undefined;
-  /** Safe ground under (x, z) for the emergency landing: the feet height of a body standing there, undefined = unknown or unsafe. */
-  groundAt?(x: number, z: number): number | undefined;
+  /** Safe ground under (x, z) for the emergency landing, looking down from `fromY` (Track AU2: under a roof the roof is not the ground): the feet height of a body standing there, undefined = unknown or unsafe. */
+  groundAt?(x: number, z: number, fromY?: number): number | undefined;
+  /** Track AU2: the highest solid block of a column (the world model) for the descent geometry; undefined = unknown. */
+  skyTop?(x: number, z: number): number | undefined;
   log?: Logger;
 }
 
@@ -90,7 +92,7 @@ export function skyQuery(base: BlockQuery): BlockQuery {
   };
 }
 
-export type FlightEndReason = Extract<FlightEnd, { ok: false }>['reason'] | 'no_glide' | 'no_elytra';
+export type FlightEndReason = BrainEndReason | 'no_glide' | 'no_elytra';
 
 export interface FlightReport {
   ok: boolean;
@@ -100,6 +102,12 @@ export interface FlightReport {
   off: number | undefined;
   onTarget: boolean;
   rockets: number;
+  /** Track AU2: rockets by the phase that fired them. */
+  rocketsBy: { climb: number; cruise: number; goaround: number; land: number };
+  /** Track AU2: the descent geometry flown (`spiral r12 at 0 out from 50 above`, `S-turns from 48 above`). */
+  descents: string[];
+  /** Track AU2: ticks the path-ahead check steered away from a solid. */
+  steered: number;
   goArounds: number;
   ticks: number;
   /** Corrections, glide events and motions seen during the flight (the loop's counters). */
@@ -111,7 +119,7 @@ export interface FlightReport {
   maxY: number;
 }
 
-export interface FlightOptions extends Omit<BrainOptions, 'groundAt'> {
+export interface FlightOptions extends Omit<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop'> {
   /** The brain's seed (deterministic planning per flight). */
   seed?: number;
 }
@@ -125,6 +133,8 @@ export interface FlightStatus {
   rockets: number;
   goArounds: number;
   ticks: number;
+  /** Track AU2: the descent geometry being flown, if any. */
+  descending: string | undefined;
 }
 
 export class FlightController {
@@ -175,6 +185,7 @@ export class FlightController {
       rockets: b?.stats.rockets ?? 0,
       goArounds: b?.stats.goArounds ?? 0,
       ticks: b?.stats.ticks ?? 0,
+      descending: b?.descending,
     };
   }
 
@@ -197,7 +208,7 @@ export class FlightController {
     const { loop } = this.d;
     this.target = target;
     const base = loop.world;
-    this.brain = new FlightBrain(target, { ...opts, groundAt: this.d.groundAt?.bind(this.d), obstacle: (x, y, z) => base.solidAt(x, y, z) === true });
+    this.brain = new FlightBrain(target, { ...opts, groundAt: this.d.groundAt?.bind(this.d), skyTop: this.d.skyTop?.bind(this.d), obstacle: (x, y, z) => base.solidAt(x, y, z) === true });
     this.tickNo = 0;
     this.lastFire = -1000;
     this.usedAt = undefined;
@@ -211,7 +222,7 @@ export class FlightController {
     this.bounces = 0;
     this.baseWorld = base;
     loop.world = skyQuery(base);
-    this.log.info(`flight: to ${target.x.toFixed(1)} ${target.top} ${target.z.toFixed(1)} (half ${target.half}), cruise y ${opts.cruiseY}`);
+    this.log.info(`flight: to ${target.x.toFixed(1)} ${target.top} ${target.z.toFixed(1)} (half ${target.half}), cruise y ${opts.cruiseY}${opts.takeoffYaw !== undefined ? `, takeoff heading ${Math.round(opts.takeoffYaw)}` : ''}`);
     return new Promise<FlightReport>((resolve) => {
       this.resolve = resolve;
       this.unsubs.push(
@@ -238,8 +249,16 @@ export class FlightController {
     });
   }
 
+  /** Track AU2: move the landing target while the flight is on its way (before the approach); false once the approach has begun. */
+  retarget(target: LandingTarget): boolean {
+    if (!this.brain?.retarget(target, this.body(this.d.loop.state))) return false;
+    this.target = target;
+    this.log.info(`flight: retargeted to ${target.x.toFixed(1)} ${target.top} ${target.z.toFixed(1)} (half ${target.half})`);
+    return true;
+  }
+
   /** Land now on the nearest safe ground (`!fly stop`, `!land`, health, the elytra): the flight ends `ok: false, reason`. */
-  landNow(reason: Extract<FlightEnd, { ok: false }>['reason'] = 'stopped'): void {
+  landNow(reason: BrainEndReason = 'stopped'): void {
     if (!this.brain) return;
     this.brain.landNow(reason, this.body(this.d.loop.state));
     if (this.brain.phase === 'done' && !this.settling) this.finish(false, reason);
@@ -341,6 +360,9 @@ export class FlightController {
       off: end?.off ?? (this.target ? hdist(landedAt, this.target) : undefined),
       onTarget: end?.onTarget ?? false,
       rockets: b?.stats.rockets ?? 0,
+      rocketsBy: b ? { ...b.stats.rocketsBy } : { climb: 0, cruise: 0, goaround: 0, land: 0 },
+      descents: b ? [...b.stats.descents] : [],
+      steered: b?.stats.steered ?? 0,
       goArounds: b?.stats.goArounds ?? 0,
       ticks: b?.stats.ticks ?? 0,
       corrections: s.corrections - this.corrections0,
@@ -361,8 +383,8 @@ export class FlightController {
     this.endReason = reason;
     this.log.info(
       `flight: ${ok ? 'landed' : `ended (${reason})`} at ${r.landedAt ? `${r.landedAt.x.toFixed(2)} ${r.landedAt.y.toFixed(2)} ${r.landedAt.z.toFixed(2)}` : '?'}` +
-        `${r.off !== undefined ? `, ${r.off.toFixed(2)} from the centre` : ''}; ${r.rockets} rockets, ${r.goArounds} go-arounds, ${r.ticks} ticks, ${r.corrections} corrections` +
-        `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}`,
+        `${r.off !== undefined ? `, ${r.off.toFixed(2)} from the centre` : ''}; ${r.rockets} rockets (${r.rocketsBy.climb} climb, ${r.rocketsBy.cruise} cruise, ${r.rocketsBy.goaround} go-around), ${r.goArounds} go-arounds, ${r.ticks} ticks, ${r.corrections} corrections` +
+        `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}, max y ${r.maxY.toFixed(1)}${r.descents.length ? `, descent ${r.descents.join('; ')}` : ''}${r.steered ? `, steered ${r.steered} ticks` : ''}`,
     );
     this.brain = undefined;
     const resolve = this.resolve;

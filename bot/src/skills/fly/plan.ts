@@ -52,6 +52,24 @@ export const TOUCHDOWN_VY = 0.3;
 export const TOUCHDOWN_H = 0.3;
 /** Level flight sinks about this many blocks per block flown (measured 0.15 per tick at 1.3 blocks per tick). */
 export const SINK_RATIO = 0.12;
+/**
+ * Track AU2, the glide ratio the energy model plans with: blocks of level flight per block of height.
+ * The formula's steady level glide is 10.06 (1.51 blocks a tick, sinking 0.15), and the server's
+ * glide matches the formula within 0.002 a tick (docs/flight.md "Physics"; the 8.5 of the first
+ * notes came from unsettled samples). Arriving a little high is absorbed by the approach planner and
+ * the descent geometry; arriving low costs a rocket, which the margin (`glideMargin`) guards against.
+ */
+export const GLIDE_RATIO = 10;
+/** Blocks of height one rocket buys in a back-to-back climb at the climb pitch (-38): 15.7 while it burns, the last one's momentum on top (docs/flight.md "Rocket economy"). */
+export const ROCKET_CLIMB = 18;
+/** Blocks of height one rocket fired from a level glide buys at the climb pitch, its momentum included (measured 31 on the formula; 24 at -30, 14 at -20, 6 at -10). */
+export const ROCKET_CRUISE_CLIMB = 31;
+/** The default spare height above the approach entry the cruise keeps (`flyMargin`). */
+export const DEFAULT_MARGIN = 15;
+/** The default height cap of the climb above the start (`flyMaxClimb`): a longer glide is topped up on the way. */
+export const DEFAULT_MAX_CLIMB = 120;
+/** The default takeoff run checked for open sky (`flyTakeoffRun`, blocks along the heading). */
+export const DEFAULT_TAKEOFF_RUN = 12;
 /** Blocks of ground a rocket climb covers per block of height gained (measured 1.3 blocks/tick forward at 1.06 up). */
 export const CLIMB_RUN = 1.25;
 /** Below this horizontal speed the glide stalls (the dive term no longer feeds it): pitch down. */
@@ -107,20 +125,26 @@ export function columnsAlong(a: { x: number; z: number }, b: { x: number; z: num
 }
 
 /**
- * The cruise height: `clearance` above every known column top under the straight line (unknown
- * columns count as the highest known), and at least `cruise` above the higher of the two ends;
- * never more than what a glide from the approach entry back down to the target would waste
- * (`APPROACH_HEIGHT` + SINK_RATIO x distance above the target). `skyTop(x, z)` = the highest solid
- * block of the column (undefined = unknown).
+ * The cruise height (Track AU2, the energy model of docs/flight.md "Rocket economy"): what a glide at
+ * GLIDE_RATIO from the top of the climb down to the approach entry needs, with the glide margin to
+ * spare (`glideMargin`) and the distance the climb itself covers taken off (about CLIMB_RUN blocks per
+ * block climbed; two rounds settle the circular estimate), capped at `maxClimb` above the start (a
+ * longer glide is topped up on the way: one rocket from a level glide buys about ROCKET_CRUISE_CLIMB
+ * blocks, cheaper than a level boost); never under `clearance` above every known column top under the
+ * straight line (unknown columns count as the highest known) nor under the approach entry. (Track
+ * AU's `flyCruise` cap above the higher end is gone: it made every long flight cruise 25 blocks up and
+ * boost level every 100 blocks.) `skyTop(x, z)` = the highest solid block of the column (undefined =
+ * unknown).
  */
 export function cruiseHeight(
   from: Vec3,
   target: LandingTarget,
   skyTop: (x: number, z: number) => number | undefined,
-  o: { clearance?: number; cruise?: number } = {},
-): { y: number; highest: number | undefined; unknown: number } {
+  o: { clearance?: number; margin?: number; maxClimb?: number } = {},
+): { y: number; highest: number | undefined; unknown: number; needed: number } {
   const clearance = o.clearance ?? DEFAULT_CLEARANCE;
-  const cruise = o.cruise ?? DEFAULT_CRUISE;
+  const margin = o.margin ?? DEFAULT_MARGIN;
+  const maxClimb = o.maxClimb ?? DEFAULT_MAX_CLIMB;
   let highest: number | undefined;
   let unknown = 0;
   for (const c of columnsAlong(from, target)) {
@@ -129,17 +153,188 @@ export function cruiseHeight(
     else if (highest === undefined || t > highest) highest = t;
   }
   const terrain = highest === undefined ? Math.max(from.y, target.top) : highest + 1 + clearance;
-  const ends = Math.max(from.y, target.top) + cruise;
   const distance = hdist(from, target);
-  // what the glide slope from the approach entry needs: the cruise is flown after the climb, which
-  // itself covers about CLIMB_RUN blocks per block climbed (two rounds settle the circular estimate)
-  let enough = target.top + APPROACH_HEIGHT + 2;
+  const entry = target.top + APPROACH_HEIGHT;
+  // the glide slope from the approach entry: the cruise is flown after the climb, which itself covers
+  // about CLIMB_RUN blocks per block climbed (two rounds settle the circular estimate)
+  const spare = glideMargin(margin, distance);
+  let needed = entry + spare + 2;
   for (let i = 0; i < 2; i++) {
-    const climbRun = Math.max(0, enough - from.y) * CLIMB_RUN;
-    enough = target.top + APPROACH_HEIGHT + Math.max(0, distance - APPROACH_DISTANCE - climbRun) * SINK_RATIO + 2;
+    const climbRun = Math.max(0, needed - from.y) * CLIMB_RUN;
+    needed = entry + Math.max(0, distance - APPROACH_DISTANCE - climbRun) / GLIDE_RATIO + spare + 2;
   }
-  const y = Math.max(terrain, Math.min(ends, enough), target.top + APPROACH_HEIGHT + 2);
-  return { y, highest, unknown };
+  const y = Math.max(terrain, Math.min(needed, from.y + maxClimb), entry + 2);
+  return { y, highest, unknown, needed };
+}
+
+/**
+ * The spare height the cruise keeps above the glide line towards a target `distance` blocks away:
+ * the full `margin` (flyMargin, 15) from 600 blocks on, less for a short glide (the glide ratio's
+ * error grows with the distance flown: about 3 blocks per 100), none under 150 blocks (a short
+ * flight's climb overshoots by its momentum anyway, and the approach planner wants the body low:
+ * the offline trips go around when it arrives 15 above the entry at 300 blocks).
+ */
+export function glideMargin(margin: number, distance: number): number {
+  return Math.min(margin, Math.max(0, distance / 30 - 5));
+}
+
+/** The feet height from which a glide at GLIDE_RATIO reaches the approach entry of `target` from `distance` blocks out (the glide line). */
+export function glideLine(target: LandingTarget, distance: number): number {
+  return target.top + APPROACH_HEIGHT + Math.max(0, distance - APPROACH_DISTANCE) / GLIDE_RATIO;
+}
+
+/**
+ * The climb pitch of one rocket fired from a level glide that should buy about `gain` blocks (its
+ * momentum included), from the formula's table: -10 buys 6, -20 14, -30 24, -38 31 (the efficient
+ * climb pitch; steeper buys more but leaves the speed near the stall). Rounded to 5 degrees, never
+ * steeper than the climb pitch.
+ */
+export function rocketPitchFor(gain: number): number {
+  const table: readonly (readonly [number, number])[] = [
+    [6, -10],
+    [14, -20],
+    [24, -30],
+    [31, -38],
+  ];
+  const climb = table[table.length - 1]![1];
+  if (gain <= table[0]![0]) return table[0]![1];
+  for (let i = 1; i < table.length; i++) {
+    const [g0, p0] = table[i - 1]!;
+    const [g1, p1] = table[i]!;
+    if (gain <= g1) return Math.max(climb, Math.round((p0 + ((gain - g0) / (g1 - g0)) * (p1 - p0)) / 5) * 5);
+  }
+  return climb;
+}
+
+// ---- Track AU2: the sky over the takeoff, the path ahead, the descent geometry ----------------------
+
+/** A cell query over the world model: true = solid, false = air, undefined = not loaded. */
+export type CellQuery = (x: number, y: number, z: number) => boolean | undefined;
+
+export type SkyCheck = { ok: true; yaw: number } | { ok: false; roofY: number; above: number; ahead: number; line: string };
+
+/**
+ * Open sky over the takeoff (Track AU2, docs/flight.md "Takeoff and roofs"): the start's column must be
+ * free from the head up to `cruiseY`, its eight neighbours from two above the head (a trunk beside the
+ * bot is no roof), and the columns of the first `run` blocks along the heading above the climb cone
+ * (TAKEOFF_CONE: the feet's height less 2 for the first 3 blocks, then rising 0.6 per block, the
+ * measured climb's slope with a berth: a bump on the ground 10 out is under the cone, a tree is not);
+ * an unknown cell counts as blocked here (unlike the cruise's skyQuery: a roof the model has not
+ * loaded is still a roof). A roof over the start refuses; a blocked run along the target's bearing
+ * tries other headings (30 degrees apart, the nearest first) and returns the first free one as the
+ * takeoff heading: the climb holds it until it is above the obstacle.
+ */
+export const TAKEOFF_CONE = Object.freeze({ flat: 3, slope: 0.6, berth: 2 });
+export function takeoffSky(from: Vec3, target: { x: number; z: number }, cruiseY: number, run: number, cell: CellQuery): SkyCheck {
+  const fx = Math.floor(from.x);
+  const fz = Math.floor(from.z);
+  const feet = Math.floor(from.y);
+  const y1 = Math.min(319, Math.ceil(cruiseY));
+  const roof = (x: number, z: number, y0: number): number | undefined => {
+    for (let y = Math.max(y0, feet + 1); y <= y1; y++) if (cell(x, y, z) !== false) return y;
+    return undefined;
+  };
+  const refuse = (y: number, ahead: number): SkyCheck => {
+    const above = y - feet;
+    return { ok: false, roofY: y, above, ahead, line: `fly: no open sky here (roof at y ${y}, ${above} block${above === 1 ? '' : 's'} up${ahead > 0 ? `, ${ahead} ahead` : ''}); walk outside first` };
+  };
+  let lowest: { y: number; ahead: number } | undefined;
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      const y = roof(fx + dx, fz + dz, dx === 0 && dz === 0 ? feet + 1 : feet + 3);
+      if (y !== undefined && (!lowest || y < lowest.y)) lowest = { y, ahead: 0 };
+    }
+  }
+  if (lowest) return refuse(lowest.y, 0);
+  const bearing = yawTo(from, target);
+  const runClear = (yaw: number): { y: number; ahead: number } | undefined => {
+    const r = (yaw * Math.PI) / 180;
+    const dir = { x: -Math.sin(r), z: Math.cos(r) };
+    for (let i = 1; i <= run; i++) {
+      const cone = feet - TAKEOFF_CONE.berth + Math.max(0, i - TAKEOFF_CONE.flat) * TAKEOFF_CONE.slope;
+      const y = roof(Math.floor(from.x + dir.x * i), Math.floor(from.z + dir.z * i), Math.ceil(cone));
+      if (y !== undefined) return { y, ahead: i };
+    }
+    return undefined;
+  };
+  let first: { y: number; ahead: number } | undefined;
+  for (const off of [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180]) {
+    const yaw = bearing + off;
+    const hit = runClear(yaw);
+    if (!hit) return { ok: true, yaw };
+    first ??= hit;
+  }
+  return refuse(first!.y, first!.ahead);
+}
+
+/**
+ * The path ahead (Track AU2): the glide of `ticks` ticks from `body` with `yaw` and `pitch` held, on
+ * the formula, against the world model's solid cells (unknown = free). The tick of the first hit, or
+ * undefined when the path is clear. Checked at every tick's end and midpoint like the landing's
+ * simulation (a one-block wall is thinner than a tick of flight).
+ */
+export function pathAhead(body: FlightBody, yaw: number, pitch: number, ticks: number, obstacle: Obstacle): number | undefined {
+  let pos = { ...body.pos };
+  let vel = { ...body.vel };
+  let boost = body.boostTicks;
+  for (let t = 1; t <= ticks; t++) {
+    vel = glideVelocity(vel, yaw, pitch, boost > 0);
+    if (boost > 0) boost--;
+    const nx = { x: pos.x + vel.x, y: pos.y + vel.y, z: pos.z + vel.z };
+    if (hitsObstacle(obstacle, nx) || hitsObstacle(obstacle, { x: (pos.x + nx.x) / 2, y: (pos.y + nx.y) / 2, z: (pos.z + nx.z) / 2 })) return t;
+    pos = nx;
+  }
+  return undefined;
+}
+
+/** Radii the descent spiral may use (blocks); the circle's columns must be free this much farther out (the body strays from the circle). */
+export const SPIRAL_RADII = Object.freeze({ min: 6, max: 24, berth: 4 });
+
+export interface SpiralFit {
+  centre: { x: number; z: number };
+  radius: number;
+}
+
+/**
+ * The descent geometry (Track AU2, docs/flight.md "Descent geometry"): the largest circle of radius
+ * SPIRAL_RADII.min to .max around `centre` whose columns (out to the radius plus the berth) are all
+ * lower than `below` (the height the body will come down to in the circle, minus a margin), from the
+ * world model's column tops (`skyTop`: the highest solid block, undefined = unknown, which blocks).
+ * Undefined when none fits.
+ */
+export function spiralFit(centre: { x: number; z: number }, below: number, skyTop: (x: number, z: number) => number | undefined): SpiralFit | undefined {
+  const cx = Math.floor(centre.x);
+  const cz = Math.floor(centre.z);
+  // the farthest free ring: every column within r + berth lower than `below`
+  const rMax = SPIRAL_RADII.max + SPIRAL_RADII.berth;
+  let free = Infinity;
+  for (let dx = -rMax; dx <= rMax; dx++) {
+    for (let dz = -rMax; dz <= rMax; dz++) {
+      const d = Math.hypot(dx, dz);
+      if (d > rMax || d >= free) continue;
+      const t = skyTop(cx + dx, cz + dz);
+      if (t === undefined || t + 1 >= below) free = d;
+    }
+  }
+  // the circle's radius must stay strictly inside the free ring by the berth (a wall 10 out blocks a radius of 6)
+  const radius = Math.min(SPIRAL_RADII.max, Math.ceil(free - SPIRAL_RADII.berth) - 1);
+  if (radius < SPIRAL_RADII.min) return undefined;
+  return { centre: { x: cx + 0.5, z: cz + 0.5 }, radius };
+}
+
+/**
+ * The yaw that follows a circle of `radius` around `centre` (pure pursuit on the circle: aim about
+ * 10 blocks ahead along it, `dir` +1 = clockwise seen from above in Bedrock's yaw sense), turning
+ * from `yaw` by at most 15 degrees a tick.
+ */
+export function circleYaw(yaw: number, pos: { x: number; z: number }, centre: { x: number; z: number }, radius: number, dir: 1 | -1): number {
+  const ang = Math.atan2(pos.z - centre.z, pos.x - centre.x);
+  const d = Math.max(1e-6, hdist(pos, centre));
+  // far outside the circle: head for the nearest point of it; on it: a point 10 blocks ahead along it
+  const ahead = d > radius + 10 ? 0.15 : 10 / radius;
+  const a = ang + dir * ahead;
+  const aim = { x: centre.x + Math.cos(a) * radius, z: centre.z + Math.sin(a) * radius };
+  return turnTowards(yaw, yawTo(pos, aim), 15);
 }
 
 /** Where the approach begins: `APPROACH_DISTANCE` before the target on the line from `from`, `APPROACH_HEIGHT` above its top. */
@@ -461,9 +656,16 @@ export function approachHopeless(c: ApproachChoice, missing: number, distance: n
   return (c.cost > hard && distance <= 14) || (c.cost > hard * 2 && distance <= 30);
 }
 
-/** Rockets a flight of `distance` blocks needs: the climb plus about one per 100 blocks of cruise (measured, docs/flight.md). */
+/**
+ * Rockets a flight of `distance` blocks with a climb of `climb` blocks needs (Track AU2, the energy
+ * model): one per ROCKET_CLIMB blocks of climb (at least one: the takeoff), plus a top-up per
+ * ROCKET_CRUISE_CLIMB x GLIDE_RATIO blocks of glide beyond what the climb's height covers.
+ */
 export function estimateRockets(distance: number, climb: number): number {
-  return Math.ceil(Math.max(0, climb) / 18) + Math.ceil(Math.max(0, distance - APPROACH_DISTANCE) / 100) + 1;
+  const up = Math.max(ROCKET_CLIMB, climb); // the takeoff's rocket climbs at least one rocket's worth
+  const climbRockets = Math.ceil(up / ROCKET_CLIMB);
+  const glide = Math.max(0, up - APPROACH_HEIGHT) * GLIDE_RATIO + up * CLIMB_RUN + APPROACH_DISTANCE;
+  return climbRockets + Math.ceil(Math.max(0, distance - glide) / (ROCKET_CRUISE_CLIMB * GLIDE_RATIO));
 }
 
 /** Seconds a flight of `distance` blocks takes at the cruise speed (measured 1.3 to 1.5 blocks per tick) plus takeoff and landing. */

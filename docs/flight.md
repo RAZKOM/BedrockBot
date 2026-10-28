@@ -1,13 +1,27 @@
-# Elytra flight (wave 11, Track AU)
+# Elytra flight (wave 11, Track AU; Track AU2: roofs, the rocket economy, the descent geometry, fly then walk)
 
 `!fly <x y z> | <waypoint> | <player> | home`, `!fly stop`, `!land`, and the automatic flight of
-`!come` / `!goto` over `flyMin` blocks: the bot puts on its elytra, takes off from flat ground with a
-firework rocket, climbs to a cruise height clear of everything under its line, glides in and lands
-on the target block with a flare (the design target: the 3x3 platform of a creeper farm 40 blocks up,
-within a block of its centre, no damage), then puts the chestplate back on. The flight model only
-does what a vanilla client can do (yaw, pitch, the jump key, the glide request, a rocket in the
-hand); the server stays authoritative. Decision record: [decisions/0042-elytra-flight.md](decisions/0042-elytra-flight.md).
-Container: `bds-fly` (udp/19204, FLAT, peaceful, fall damage ON; `node scripts/bds.mjs --profile fly up|pack`).
+`!come` / `!goto` over `flyMin` blocks: the bot puts on its elytra, takes off from flat ground under
+open sky with a firework rocket, climbs once to the height the glide to the target needs, glides in
+(a rocket only when the glide would fall short) and lands on the target block with a flare (the
+design target: the 3x3 platform of a creeper farm 40 blocks up, within a block of its centre, no
+damage), then puts the chestplate back on. `!come` / `!goto` land on the nearest landable cell and
+walk the rest; under a roof they walk to open sky first. The flight model only does what a vanilla
+client can do (yaw, pitch, the jump key, the glide request, a rocket in the hand); the server stays
+authoritative. Decision record: [decisions/0042-elytra-flight.md](decisions/0042-elytra-flight.md)
+(the Track AU2 addendum at its end). Container: `bds-fly` (udp/19204, FLAT, peaceful, fall damage ON;
+`node scripts/bds.mjs --profile fly up|pack`).
+
+> **The Realm, 2026-10-30 (the first day with an elytra).** Two flights by the owner's bot, from the
+> owner's words and the log: at 16:43 `!fly sand` started *indoors* at about 110 57 -43 (home): the
+> climb hit the roof three times within two seconds (1.9 damage each, 0.7 and 4.6 before), the flight
+> ended by the health rule after 73 ticks and 5 rockets ("it almost killed itself by flying into the
+> roof"). At 16:47 the same 1490-block flight from outside cruised at y 164 (the terrain floor: the
+> highest column 151) and landed on the spot after 1261 ticks with **17 rockets**, 1 go-around and 33
+> corrections ("super wasteful with fireworks ... it kind of just keeps spamming them"). Track AU2 is
+> the answer to both: the sky check before the takeoff and the path-ahead check in the air; the
+> energy model of the cruise (the same flight on the model: 9 to 10 rockets); and the descent
+> geometry ("when landing slow it could also try doing a sort of spiral depending on the geometry").
 
 ## Files
 
@@ -15,20 +29,21 @@ Container: `bds-fly` (udp/19204, FLAT, peaceful, fall damage ON; `node scripts/b
 |---|---|
 | `bot/src/skills/input/physics.ts` | `GLIDE`, `glideVelocity` (the vanilla fall-flying formula, float32), `stepGliding`, the `gliding` branch of `stepBody` |
 | `bot/src/skills/input/flags.ts`, `inputLoop.ts`, `types.ts` | `start_gliding` with a jump press (`GLIDE_START_FLAGS`), `stop_gliding`; `cmd.glide`, `boostStart`; the own `gliding` actor flag (`GlideEvent`), `boost()` / `endBoost()`, `canGlide` |
-| `bot/src/skills/fly/plan.ts` | the geometry (`cruiseHeight`, `columnsAlong`, the yaw law), the approach profile and its simulation, `touchdownCost`, the `ApproachPlanner`, `approachHopeless` |
-| `bot/src/skills/fly/brain.ts` | `FlightBrain`: the per-tick state machine (takeoff, climb, cruise, approach, go-around, land) |
-| `bot/src/skills/fly/controller.ts` | `FlightController`: the brain on the InputLoop, the rocket use, the rocket entity, the server-confirmed landing, `skyQuery` |
+| `bot/src/skills/fly/plan.ts` | the geometry (`cruiseHeight`, `columnsAlong`, the yaw law), the approach profile and its simulation, `touchdownCost`, the `ApproachPlanner`, `approachHopeless`; Track AU2: the energy model (`GLIDE_RATIO`, `glideLine`, `glideMargin`, `rocketPitchFor`), `takeoffSky`, `pathAhead`, `spiralFit`, `circleYaw` |
+| `bot/src/skills/fly/brain.ts` | `FlightBrain`: the per-tick state machine (takeoff, climb, cruise, approach, go-around, land); Track AU2: `steerClear` (the path ahead), the cruise's rocket rule, `descend` / `chooseDescent` (the circle, S-turns), `goaroundHeight`, the `roof` end |
+| `bot/src/skills/fly/controller.ts` | `FlightController`: the brain on the InputLoop, the rocket use, the rocket entity, the server-confirmed landing, `skyQuery`; the report's rockets by phase and descents (Track AU2) |
 | `bot/src/skills/fly/kit.ts`, `kitops.ts` | the flight kit (`readKit`, `kitReady`, the lines, `SupplyWatch`) and its ground work (the elytra swap, rockets to the hotbar, the refill from the box) |
-| `bot/src/tasks/process/fly.ts` | `FlyProcess` (user, 40) and `FlightProcess` (auto, 101: control in the air) |
-| `bot/src/chat/commands-fly.ts` | `!fly`, `!land`, the autoFly hooks on `pve.walk` / `pve.come`, the status line, `flyControlOf` |
+| `bot/src/tasks/process/fly.ts` | `FlyProcess` (user, 40) and `FlightProcess` (auto, 101: control in the air); the sky check before the jump (Track AU2) |
+| `bot/src/chat/commands-fly.ts` | `!fly`, `!land`, the autoFly hooks on `pve.walk` / `pve.come`, the status line, `flyControlOf`; Track AU2: `landingNear` (fly then walk), `walkOut` (the legs to open sky), `skyHere` |
 | `bot/src/tasks/mobility.ts` | `canGlide` for the loop (the elytra in the chest slot) |
 | `bot/src/skills/survival/{keeper,armour}.ts`, `container/stash.ts`, `home/{unloader,logistics}.ts`, `chat/commands-survival.ts` | the kit rules (never dropped, stashed, unloaded; `!drop all` keeps it; the armour pass leaves a worn elytra alone; `ArmourController.wear`) |
-| `bot/src/config/settings.ts` | `autoFly`, `flyMin`, `flyClearance`, `flyCruise`, `flyGoArounds`, `fireworksMin` |
+| `bot/src/config/settings.ts` | `autoFly`, `flyMin`, `flyClearance`, `flyCruise` (unused since AU2), `flyGoArounds`, `fireworksMin`; Track AU2: `flyTakeoffRun`, `flyRetryBlocks`, `flyMaxClimb`, `flyMargin`, `flyLandSearch` |
 | `bot/src/nl/{plan,prompt,executor}.ts` | the `fly` step ("fly to me", "fly home", "land") |
 | `bot/src/health/panel/*` | the `flight` line of the statuses (`gliding, 23 rockets`) |
 | `packs/truth/src/fly.ts` | `truth:glide`, `glidelog`, `equip`, `boxdrop` |
-| `bot/test/unit/skills/fly.test.ts` | the geometry, the planner, whole trips on `stepBody`, the kit rules, the supply lines |
-| `bot/test/e2e/fly-truth.ts`, `fly-glide.test.ts`, `fly-land.test.ts`, `fly-kit.test.ts` | the e2e suites on bds-fly |
+| `bot/test/unit/skills/fly.test.ts` | the geometry, the planner, whole trips on `stepBody` (the economy, the tree, the roof, the walled platform), the kit rules, the supply lines |
+| `bot/test/e2e/fly-truth.ts`, `fly-glide.test.ts`, `fly-land.test.ts`, `fly-kit.test.ts` | the e2e suites on bds-fly (Track AU) |
+| `bot/test/e2e/fly-economy.test.ts`, `fly-roof.test.ts`, `fly-descent.test.ts`, `fly-walk.test.ts` | Track AU2: the rocket economy of 300 / 600 / 1200-block flights, the room and the tree, the 10 + 10 descents, fly then walk (the pit, the house) |
 | `docker/compose.fly.yml` | `bds-fly` |
 
 ## Packets (BDS 1.26.60.6, measured on bds-fly)
@@ -79,18 +94,41 @@ The climb pitch adapts to the climb (−20 under 15 blocks, −30 under 30, else
 when the momentum will reach the cruise height, and the last 40 blocks before the approach are flown
 at pitch −6 to bleed the speed to about 1.05 (the flare's climb grows with the square of the speed).
 
+### The glide polar and what a rocket buys (Track AU2, the formula)
+
+Measured on `glideVelocity` (the formula the server matches within 0.002 a tick), the steady glide
+by pitch and one rocket fired from a steady level glide (1.48 blocks a tick), its pitch held while it
+burns (15 ticks), then level until the climb's momentum is spent:
+
+| Pitch held | Steady speed | Sink a tick | Glide ratio | | One rocket at this pitch | Up while burning | Up in all (momentum) | Glide back to the start height |
+|---|---|---|---|---|---|---|---|---|
+| −6 | 0.66 | 0.082 | 8.0 | | 0 (level) | −0.3 | −0.3 | 25 blocks (the speed, 1.67, decays) |
+| −3 | 0.91 | 0.101 | 9.0 | | −10 | 4.0 | 5.7 | 108 |
+| **0** | **1.51** | **0.150** | **10.1** | | −20 | 8.3 | 14.4 | 188 |
+| 5 | 1.54 | 0.154 | 10.0 | | −30 | 12.1 | 23.9 | 265 |
+| 10 | 1.63 | 0.168 | 9.7 | | **−38** | **14.8** | **31.2** | **321** |
+| 20 | 1.98 | 0.227 | 8.7 | | −45 | 16.9 | 37.1 | 364 (the speed left 0.77) |
+| 30 | 2.48 | 0.339 | 7.3 | | −55 | 19.3 | 44.1 | 408 (0.60: the stall is 0.55) |
+
+A back-to-back climb at −38 gains 15.7 blocks a rocket while burning (12.9 at −30, 17.9 at −45) and
+the last rocket's momentum (16) on top, over about 1.4 blocks of ground per block climbed. So the
+polar is nearly flat (a dive sheds no height worth the name: pitch 20 glides at 8.7 against 10 level),
+**height is the currency** (one rocket pitched up buys 31 blocks of height, 310 blocks of glide; the
+same rocket level buys 25 blocks), and a rocket **levelled off while it burns loses the climb** (the
+boost steers the velocity onto the look: vy halves every tick).
+
 ## The controller
 
 Phases of `FlightBrain` (one tick in, the controls out; `FlightController` applies them to the loop):
 
 | Phase | What |
 |---|---|
-| takeoff | on the ground: jump; falling: the glide request (`start_gliding` with the jump press goes out); the server's `gliding` flag confirms; 120 ticks without a confirmed glide end the flight (`no_glide`) |
-| climb | rockets back to back at the climb pitch until the body's momentum reaches the cruise height (`cruiseHeight`: `flyClearance` above the highest known column under the straight line, unknown columns as the highest known, at least `APPROACH_HEIGHT` + 2 above the target, at most what the glide down needs with the climb's own run taken off) |
-| cruise | level towards the target; a rocket when the height falls more than 7 under the wanted slope (the approach entry 10 above the target at 56 blocks, rising 0.12 per block beyond); a dive when too high (steeper the higher, never over 1.7 blocks a tick); the speed bleed before the approach; far too high (22 above the entry) within 116 blocks: a spiral (12 degrees of yaw a tick) down to 10 above |
+| takeoff | on the ground: jump; falling: the glide request (`start_gliding` with the jump press goes out); the server's `gliding` flag confirms; 120 ticks without a confirmed glide end the flight (`no_glide`); the heading is the sky check's (Track AU2, "Takeoff and roofs"), held until 12 above the start |
+| climb | rockets back to back at the climb pitch until the body's momentum reaches the cruise height (`cruiseHeight`, Track AU2: what the glide down to the approach entry needs plus the margin, with the climb's own run taken off, capped `flyMaxClimb` above the start, never under `flyClearance` above the highest known column under the straight line nor under the entry); every tick the path ahead is checked (`steerClear`) |
+| cruise | level towards the target along the glide line (Track AU2, "Rocket economy"): a rocket only when the projected height (the momentum included) is more than 3 under the line plus the margin, pitched up for the height it should buy; the speed bleed before the approach; more than 12 above the approach entry within 116 blocks: the descent geometry ("Descent geometry") down to 6 above |
 | approach | within 56 blocks (earlier when high): the `ApproachPlanner` every tick |
-| go-around | no landing plan for 6 ticks within 45 blocks, or a hard one near (cost over 35 within 14 blocks, over 70 within 30): a climbing turn away (one rocket when under the entry height), out to 68 blocks and low enough, back in, a new approach; at most `flyGoArounds` (4), then the nearest safe ground |
-| land | the emergency: `!fly stop`, `!land`, `!stop`, health under `fleeHealth`, the elytra at `toolWearLimit` + 20 uses; the nearest safe column ahead (a plain top, no lava / water / cactus / magma / fire, no 1-wide column, 10 to 60 blocks), a spiral down when far above it, then the same landing |
+| go-around | no landing plan for 6 ticks within 45 blocks, or a hard one near (cost over 35 within 14 blocks, over 70 within 30): a climbing turn away (one rocket when under the go-around height: the entry + 6, or 7 above the highest column within 30 blocks of the target, Track AU2), out to 68 blocks and low enough, back in, a new approach; at most `flyGoArounds` (4), then the nearest safe ground |
+| land | the emergency: `!fly stop`, `!land`, `!stop`, health under `fleeHealth`, the elytra at `toolWearLimit` + 20 uses, a roof or wall ahead that nothing clears (`roof`, Track AU2); the nearest safe column ahead looking down from the body (a plain top, no lava / water / cactus / magma / fire, level neighbours, 10 to 60 blocks), a circle down when far above it, then the same landing |
 | done | the body stands: 10 ticks without the server lifting it again (a "bounce": the brain flies on) |
 
 ### The landing
@@ -118,6 +156,157 @@ Why this shape: the pull-up's climb grows with the square of the speed (above), 
 needs the speed bled to about 0.9 before the flare and the flare started below the platform top; a
 constant-pitch approach cannot do both, and the real platform edge punishes every block of error
 (a touchdown at 1.3 blocks a tick slides 1.5 blocks).
+
+## Takeoff and roofs (Track AU2)
+
+The sky check (`takeoffSky`, plan.ts) runs before the jump, in `!fly` (the reply) and in the
+`FlyProcess` (autoFly): the 3 x 3 columns around the start and the columns of the first
+`flyTakeoffRun` (12) blocks along the heading must be free from the head's cell up to the cruise
+height in the world model, and **an unknown cell counts as a roof here** (the cruise's `skyQuery`
+treats unloaded cells as air; a ceiling the model has not loaded is still a ceiling). A roof over the
+start refuses: `fly: no open sky here (roof at y 72, 3 blocks up); walk outside first`. A blocked run
+along the target's bearing (a tree, a wall) tries the other headings 30 degrees apart, the nearest
+first, and the first free one becomes the takeoff heading (the log's `takeoff heading 30`): the
+takeoff and the climb hold it until the body is 12 above the start, then turn to the target.
+
+`!goto` / `!come` under a roof (indoors, underground, under trees) say `fly: no open sky here (roof
+at y 72, 3 blocks up); walking towards <goal> and taking off outside` and walk towards the goal in
+legs of up to `flyRetryBlocks` (32) blocks, each to the nearest known **open-sky cell** on the way
+(`openSkyLeg`: a cell 4 to 32 blocks ahead, up to 4 beside the line, standing on its column's top
+under open sky and not under the feet; from a tunnel that is the surface, so the walk comes up, not
+along; an `xz` leg along the line only when none is known), trying the takeoff again after each leg
+(`walkOut`, commands-fly.ts); a leg that cannot be walked, or a goal the flight is no longer worth,
+falls back to the plain walk. With "Fly, then walk" below this gives the owner's case: underground
+to a point 1000 blocks away underground = walk up, fly, land near, walk in (the e2e: a tunnel 6
+under the surface with a stair).
+
+The takeoff check is a **climb cone**, not a wall of columns: the start's own column is checked from
+the head up, its eight neighbours from two above the head (a trunk beside the bot is no roof), and
+the run's columns only above the cone (the feet's height less 2 for the first 3 blocks, then rising
+0.6 per block: a bump on the ground 10 out passes, a tree does not). Before every rocket the
+**boosted** path at the rocket's pitch is simulated for 20 ticks (`fire`): a roof 8 to 19 above,
+invisible to the unboosted check, holds the rocket.
+
+In the air the brain checks the path ahead every tick of the climb, the cruise, the descent and the
+go-around (`steerClear`, `pathAhead`): the glide of the next 20 ticks with the commanded yaw and
+pitch, on the formula, against the world model's solid cells (the planner's `hitsObstacle` box with
+its 0.4 berth, at every tick's end and midpoint). A hit tries, in this order, levelling off, pitch
+10, a turn of 30 / 60 / 90 degrees to either side (the side nearer the target first), a dive of 25,
+and flies the first that clears (`steered` ticks in the report). Nothing clears (a roof, walls all
+round): in the climb and the cruise the flight ends on the ground under it as `roof`
+(`landNow('roof')`: the emergency landing looking **down from the body** for the ground, with the
+roof's cells as the planner's walls, pitch 15 while a rocket still burns) instead of by health; in a
+go-around or a descent near the target the check only steers and never lands (low structures there
+are the planner's business: a house wall 4 blocks behind a landing cell ended a flight early on
+bds-fly before this rule). A slow body (under 0.7 blocks a tick, near the stall) is not steered:
+every path of a stalled body sinks, the speed recovery comes first. A `roof` landing's ground is
+looked for **before** the solid nothing cleared (the straight glide's first hit, less a berth), on
+the heading and 45 / 90 degrees either side, and the `land` phase keeps steering clear on the way
+down; over a void (no known ground) the fallback is 10 blocks ahead at the target's height.
+
+Offline (the unit test's trips on `stepBody`): a tree 3 x 3 x 8 ten blocks ahead on the climb line is
+cleared both with the sky check's 30-degree heading and straight at it (2 to 3 steered ticks), 0
+hits; a wide roof 6 above the start that the sky check did not see ends the flight on the ground
+under it as `roof` with the body never in the roof's cells.
+
+## Rocket economy (Track AU2)
+
+The model (`GLIDE_RATIO` 10, `ROCKET_CLIMB` 18, `ROCKET_CRUISE_CLIMB` 31; the table under "Physics"):
+a flight of D blocks needs about D / 10 blocks of height; a rocket in the climb buys about 18 blocks
+(15.7 while burning, the last one's momentum on top), a rocket fired from a level glide at −38 about
+31 (310 blocks of glide), a level boost about 25 blocks of distance. So the cheapest flight climbs
+**once** to what the glide needs and glides:
+
+- `cruiseHeight` = the glide line at the top of the climb (the approach entry, 10 above the target
+  at 56 blocks out, plus the remaining distance / 10, with the climb's own run of 1.25 blocks per
+  block taken off) plus the margin plus 2, capped `flyMaxClimb` (120) above the start and never under
+  `flyClearance` above the highest known column (Track AU's `flyCruise` cap of 25 above the ends is
+  gone: it made every long flight cruise low and boost level every 100 blocks: the Realm's 17).
+- The margin (`glideMargin`): `flyMargin` (15) from 600 blocks on, `distance / 30 − 5` under it, 0
+  under 150 blocks (the glide ratio's error grows with the distance flown; a short flight's climb
+  overshoots by its momentum anyway, and the planner wants the body low: arriving 15 above the entry
+  at 300 blocks cost a go-around in the offline trips).
+- The cruise fires only when `height + momentum < glideLine(distance) + margin − 3` (the climb hands
+  over within 3 of its height: that is on the margin, not under it) **and the body glides at 1.1 or
+  more** (a slow body after the climb or a circle sinks while it regains its speed; that sink is not
+  a shortfall: judged while slow it fired two needless top-ups at 600 blocks), pitched for the height the
+  rocket should buy (`rocketPitchFor`: the whole 31 at −38 while more than 310 blocks of glide are
+  ahead, else just enough to arrive about 8 over the margin). While a rocket burns the pitch is held:
+  the climb's last one at the climb pitch (levelled off, the boost kills the climb), a top-up at its
+  own. The cap bounds the climb's rockets, not a top-up's run-out.
+- Arriving high (the quantised rockets: up to a rocket's worth over the line) costs time, not
+  rockets: the descent geometry below, from 12 above the entry.
+
+Offline (the unit test's trips on the flat; "before" is the unchanged Track AU code **measured on
+bds-fly on 2026-10-30** in `fly-economy` with `FLY_ECON_BASELINE=1`; the bds-fly "after" numbers are in
+"Measurements"):
+
+| Flight | Before (bds-fly) | After, offline model | Climb / top-ups / go-arounds (model) |
+|---|---|---|---|
+| 300 blocks, flat ground | 1 rocket | 2 | 2 / 0 / 0 (the climb to 36 up: the second rocket's quantum) |
+| 600 | 5 | 4 | 4 / 0 / 0 |
+| 1200 | 13 | 7 (9 with 12-tick rockets) | 7 / 0 / 0 (the cap: 120 up) |
+| 1490 (the Realm's flight) | 17 (the Realm) | 9 | 7 / 2 / 0 |
+| 150 to the 3x3 at 40 up | 3 to 5 (table above) | 3 | 3 / 0 / 0 |
+| 300 to a 5x5 at 20 up | 2 to 4 | 3 | 3 / 0 / 0 |
+
+## Descent geometry (Track AU2)
+
+Arriving more than 12 above the approach entry within 116 blocks of the target (a descending
+approach, a terrain-forced cruise, the rockets' quantum), the brain comes down to 6 above the glide
+line before the approach, choosing by the world model's columns (`chooseDescent`, `spiralFit`):
+
+1. **A circle around the target**: the largest radius 6 to 24 whose columns out to the radius + 4
+   (the body strays from the circle) are all lower than the exit height − 3; flown by pure pursuit
+   on the circle (`circleYaw`: the aim 10 blocks ahead along it, 15 degrees of yaw a tick, the turn
+   direction nearer the body's heading), pitch 8 (0 over 1.4 blocks a tick, 20 near the stall): a
+   level circle sinks 0.15 to 0.2 a tick without going anywhere. The circle is left heading at the
+   target (within 45 degrees), at least 28 blocks out and **with the speed bled under 1.15** (a short
+   circle left at 1.3 to 1.5 handed the planner too much energy: the 300-block flights' go-arounds on
+   bds-fly), or 10 under the exit height whatever the heading.
+2. **A circle farther out, tangent to the approach line** 30, 45, 60 or 80 blocks before the target,
+   when none fits around it (walls near the platform): its centre a radius beside the line (the
+   largest of 24, 18, 12, 8, 6 whose columns are free, either side), turned so that the tangent at the
+   line points at the target; it is left at the tangent point (within 4 blocks, heading in within 35
+   degrees) at the glide line's height there + 6, so the approach comes in along the line, i.e. from
+   the open side. (A first version centred the circle on the line and left it wherever the heading
+   pointed at the target: 7 of 10 walled landings on bds-fly, 3 missed after 4 go-arounds; the tangent
+   exit gives 0 go-arounds offline.)
+3. **S-turns** when no circle fits anywhere: the heading swung 70 degrees off the bearing, the side
+   flipped 12 blocks either side of the line (a zig-zag at 70 degrees makes 3 to 4 blocks of path per
+   block of progress; half circles would make only 1.6), straightened out 66 blocks before the target
+   for the planner. The emergency landing (`land`) uses the circles only: no S-turns over unknown
+   ground.
+
+The go-around's height follows the same columns (`goaroundHeight`: 7 above the highest column within
+30 blocks of the target, else the entry + 6), so the climbing turn away from a walled platform is
+flown over the walls. Offline (3 seeds each): the 3x3 at 40 up in the open from a start 60 above its
+level, 100 blocks away: `spiral r24 at 0 out`, 1 rocket, 0 go-arounds, 0.1 to 0.25 from the centre;
+with 20-high walls 10 blocks out on three sides: `spiral r12 at 32 out` (the tangent circle), 1
+rocket, 0 go-arounds, 0.07 to 0.38 from the centre, 0 hits (without the go-around height the turn
+away of an earlier version hit the wall).
+
+## Fly, then walk (Track AU2)
+
+`!goto` / `!come` over `flyMin` blocks land on the goal only when it is landable: its column's top is
+the block under the goal (within a block), a plain solid (no lava / water / cactus / magma / fire)
+with level neighbours (within a block either way: neither a 1-wide column nor the bottom of a hole)
+and no loaded solid within 20 above (`landable`, commands-fly.ts). Otherwise the landing target is
+the landable cell within `flyLandSearch` (48) blocks with the shortest walk to the goal
+(`landingNear`: rings around the goal, every cell out to 8, every other beyond; the walk is the
+straight distance plus three times the height difference, refined by a bounded probe plan (reach.ts
+`probePath`, 4000 nodes, 300 ms) for the nearest six when the goal's chunk is loaded), the reply says
+`flying 980 blocks to 23 blocks from <goal>, then walking` (the status line `..., then walking 23
+blocks`), and after the landing (also after a miss or a `roof` landing) the original goto / come
+continues on foot to the real goal inside the same command. When the goal's ground is not in the live
+model at the command (too far to be loaded; the world cache alone is provisional, it may predate a
+structure) the goal itself is flown to and the flight looks again every 10 ticks from 160 blocks out
+(`retargetNear`, fly.ts): once the chunks arrive the landable cell is chosen and the flight
+retargeted (`fly: landing 23 blocks from <goal> (no landing spot on it), then walking`), also during
+the approach while still 15 blocks out (the planner re-plans from the new target; a go-around turns
+outbound again); loaded ground with nothing landable within `flyLandSearch` ends the search (the goal
+stays the target). The retarget loop is not gated on the process token: the `flight` process holds
+control in the air and the `fly` process is paused meanwhile.
 
 ## The kit
 
@@ -150,9 +339,14 @@ Rules (all named `// Track AU` in the shared files):
 | `autoFly` | on | `!come` / `!goto` fly instead of walking over `flyMin` blocks when the kit is ready (`flying (420 blocks; walking would be ~1 min)`); the Nether only under a clear ceiling along the line |
 | `flyMin` | 200 | the distance from which they fly |
 | `flyClearance` | 12 | the cruise clears every known column by this |
-| `flyCruise` | 25 | the cruise height above the higher end (capped by what the glide down needs) |
+| `flyCruise` | 25 | no longer used since Track AU2 (the cruise height is what the glide down needs, capped by `flyMaxClimb`); kept so older settings files load |
 | `flyGoArounds` | 4 | approaches flown again after a miss |
 | `fireworksMin` | 16 | the refill and the low-supply line |
+| `flyTakeoffRun` | 12 | Track AU2: the sky over the start and over this many blocks along the takeoff heading must be free up to the cruise height (an unknown cell counts as a roof), else `!fly` refuses and goto / come walk to open sky first |
+| `flyRetryBlocks` | 32 | Track AU2: goto / come that walk because the sky is closed try the takeoff again every this many blocks |
+| `flyMaxClimb` | 120 | Track AU2: the climb never goes higher than this above the start; a longer glide is topped up on the way (31 blocks of height, 310 of glide, a rocket) |
+| `flyMargin` | 15 | Track AU2: the cruise fires only when the glide ahead would reach the approach entry with less than this to spare (less for short glides: `distance / 30 − 5`, none under 150 blocks) |
+| `flyLandSearch` | 48 | Track AU2: goto / come land on the nearest landable cell within this many blocks of the goal and walk the rest |
 
 ## Processes
 
@@ -160,8 +354,9 @@ Rules (all named `// Track AU` in the shared files):
 the night retreat and every command wait for the landing. `fly` (user, 40) does the ground work and
 is cancelled and resumed like any command; `!stop` stops it (the flight still lands; the chestplate
 then stays off), `!fly stop` and `!land` land and let the trip finish. `!come` and `!goto` wrap
-`pve.come` / `pve.walk`: a flight to the target block (half 1 for a block, 2 for a player or home), then
-the walk for the last metres.
+`pve.come` / `pve.walk`: a flight to the target block (half 1 for a block, 2 for a player or home) or, since Track
+AU2, to the nearest landable cell near it, then the walk for the rest; under a roof the walk comes
+first ("Takeoff and roofs").
 
 ## Measurements (bds-fly, BDS 1.26.60.6, strict movement)
 
@@ -231,6 +426,98 @@ in the hotbar takes 56 from the box first (the box keeps 8), the low-supply line
 landing with no box, `!fly` refuses with an elytra at 25 uses, `!goto` 300 blocks flies with autoFly on
 (`flying (300 blocks; walking would be ~1 min)`) and walks with it off.
 
+## Measurements (Track AU2, bds-fly, BDS 1.26.60.6)
+
+The e2e suites of Track AU2 on the same container (fall damage on, the truth hurt log; "before" is
+the unchanged Track AU code measured the same day with `FLY_ECON_BASELINE=1`).
+
+### The rocket economy (`fly-economy`, flat ground, a ground target)
+
+| Flight | Before (Track AU) | After, the two gated rounds | After: climb / top-up / go-around rockets | Max height | Landing |
+|---|---|---|---|---|---|
+| 300 blocks | 1 rocket, 16 s | 2, 15 s and 1, 17 s | 1-2 / 0 / 0 | 34 to 39 up | 1.3 to 1.7 off (within the gate's 3), 0 damage |
+| 600 | 5, 26 s | 4, 31 s and 4, 32 s | 4 / 0 / 0 | 69 to 74 up | 0.8 to 1.0 off, 0 damage |
+| 1200 | 13, 46 s | 8, 54 s and 8, 54 s | 7 / 1 / 0 | 131 to 133 up (the cap 120 + the last rocket's run-out) | 0.7 to 1.0 off, 0 damage |
+
+Rockets per 100 blocks: 300 blocks 0.33 before, 0.33 to 0.67 after (the climb to the glide line is
+one or two rockets by the rocket quantum, where the old cruise let the body sink under the approach
+entry, which a platform cannot take); 600 blocks 0.83 before, 0.67 after; 1200 blocks 1.08 before,
+0.67 after. The old flights boosted level every 100 blocks (the Realm's 1490 blocks: 17 rockets, 1.14
+per 100; the model's: 9, 0.6). Every flight landed within 1.7 blocks of the aim with 0 damage. The
+two earlier rounds, before the glide-speed rules of "Rocket economy" (the circle left only under 1.15,
+the line judged only at 1.1 or more): 300 blocks 2, 3 (1 go-around) and 5 (2 go-arounds); 600 blocks
+4, 4 and 6 (2 needless top-ups right after the climb); 1200 blocks 8 in every round. The long ones
+arrive a rocket's worth high and circle down (`spiral r24 at 0 out from 24 to 37 above`), which is
+the 10 s of extra time.
+
+### Takeoff and roofs (`fly-roof`)
+
+A truth-built room (walls, the roof block 4 above the floor, a 2 x 2 doorway towards the goal) around
+the start, the goal 300 blocks out on the flat; then, in the open, a 3 x 3 x 8 oak-log "tree" 10 blocks
+ahead on the climb line:
+
+| Case | What happened |
+|---|---|
+| `!fly` in the room | `fly: no open sky here (roof at y -56, 4 blocks up); walk outside first` (no flight) |
+| `!goto` 300 in the room | `fly: no open sky here (roof at y -56, 4 blocks up); walking towards 74592 -60 65676 and taking off outside`; walked out of the door to 32 blocks (the leg) with no flight started, then `flying (268 blocks; walking would be ~1 min)`; landed 0.11 from the aim (1 climb rocket + 3 go-around rockets in run 1, 2 go-arounds), `arrived at 74592 -60 65676`, 0 damage |
+| the tree 10 blocks ahead | the flight starts (the tree is not over the start), `takeoff heading 30` in the log; landed 0.1 from the aim, 3 rockets (2 climb, 1 top-up), 0 go-arounds, 19 s, 0 damage; run 1 of the same test earlier: 5 rockets (2 go-arounds), 0 damage |
+
+Both runs of the suite passed. The indoor case the owner hit (the flight already in the air under a
+roof) is covered offline (the unit test's wide roof 6 above the start: the body never enters the
+roof's cells and the flight ends on the ground as `roof`).
+
+### The descent geometry (`fly-descent`: from a pillar 60 above the platform level, 100 blocks away)
+
+Two rounds of ten landings each on the 3 x 3 platform 40 up (fall damage on; "off" is the truth
+position from the centre once the body stood: the server's body slides 0.6 to 0.8 further than the
+model's):
+
+| Case | Descent chosen | On the platform | Damage | Off (server) | Rockets | Go-arounds | s |
+|---|---|---|---|---|---|---|---|
+| in the open, 2 x 10 runs | `spiral r24 at 0 out from 65 above` (the circle around the platform) in 20 of 20 | 20 of 20 | 0 in all | round 1: 0.62 to 1.01 (mean 0.79); round 2: 0.60 to 1.09 (mean 0.95) | 1 each | 0 | 25 each |
+| 20-high walls 10 blocks out on three sides, 2 x 10 runs | `spiral r12 at 32 out from 65 above` (the tangent circle on the approach line) in 20 of 20 | 20 of 20 | 0 in all | round 1: 0.64 to 1.01 (mean 0.76); round 2: 0.66 to 0.97 (mean 0.77) | 1 each | 0 | 23 each |
+
+(The first version of the walled descent, a circle centred on the line and left wherever the heading
+pointed in: 7 of 10 on the platform, 3 missed after 4 go-arounds each, 0 damage in all; replaced by
+the tangent circle.) No S-turns were needed: a circle fitted every case.
+
+### Fly, then walk (`fly-walk`)
+
+`!goto` from 300 blocks away on the flat; the goal's ground is not in the live model at the command
+(the reply is the plain `flying (300 blocks; walking would be ~1 min)`), the flight looks again once
+the chunks arrive and retargets in flight:
+
+| Goal | In flight | Landing | Then |
+|---|---|---|---|
+| 3 blocks under the floor (a one-wide trench with a stair) | `fly: landing 1 blocks from <goal> (no landing spot on it), then walking` (the trench's own cell and its neighbours fail the level-neighbours rule) | 1 block beside the trench, 0.13 off the cell, 1 rocket, 0 damage | walked down the stair; `arrived at <goal>`, standing at y −63 |
+| inside a 7 x 7 house (walls 3 high, a roof, a doorway) | `fly: landing 4 blocks from <goal> (no landing spot on it), then walking` (the roof's cells walk 12 by the height rule, the ground before the door 4) | on the ground 4 blocks before the door wall, 0 damage, 1 landing | walked in through the door; `arrived at <goal>`, standing inside |
+
+Three earlier runs of this suite found the bug the table above is free of: the retarget loop was
+gated on the process token, which moves on while the `flight` process holds control, so it never ran
+(the flight went for the goal itself and missed after 4 go-arounds, then walked the 30 blocks: the
+goal was still reached, with 0 damage, but 5 to 7 rockets). One run before the ring-search fix landed
+on the house's roof (its cells filled the inner rings before the ground cells were seen) and the walk
+down was unreachable.
+
+### Regression (`fly-glide`, `fly-land`, `fly-kit`)
+
+One round each on the Track AU2 code. `fly-glide`: landed 0.2 from the aim, 0 damage, 2 rockets (1
+climb, 1 go-around), 18 s; the elytra on in flight, the chestplate back. `fly-land`: the five 3x3/40
+landings all on the platform, 0.62 to 0.95 off, 0 damage, 3 to 5 rockets (0 to 1 go-around), 16 to
+19 s; the descending approach 1 rocket, 1.08 off (`spiral r24 at 0 out`); the 5x5 at 300 blocks 4
+rockets, 0.79 off; the 12-high wall landed (not shown in the five-line table); `!fly stop` during the
+climb of a 300-block flight landed with 0 damage **18.4 s** after the stop (the old gate was 15 s,
+measured 13.6 with Track AU's 25-up cruise; the energy model cruises that flight at 36 up and the
+circle sinks 0.15 to 0.2 a tick: the gate is 20 s now and the open point below notes it). `fly-kit`:
+all 7 (the kept kit, `!unload`, the stash step, the refill of 56, the low-supply line once, the worn
+elytra refusal, `!goto` flying with autoFly on and walking with it off).
+
+The second round of the Track AU2 suites: `fly-roof` 2 of 2 (the tree: 2 rockets, 13 s), `fly-descent`
+20 of 20 on the platform with 0 damage (open: 0.60 to 1.09 off, mean 0.95; walled: 0.66 to 0.97, mean
+0.77; 1 rocket, 0 go-arounds, 23 to 25 s each), `fly-economy` and `fly-walk`: see their tables (the
+runs before the glide-speed conditions above: 300 blocks 5 rockets with 2 go-arounds, 600 blocks 6
+with 2 needless top-ups; those two rules came from them).
+
 ## Open points
 
 - Mending by XP: a repair chore for the elytra (an XP source, `xp_orb` pickups) is a separate track;
@@ -244,4 +531,15 @@ landing with no box, `!fly` refuses with an elytra at 25 uses, `!goto` 300 block
 - The takeoff always jumps; a glide started by stepping off a ledge is handled (the fall is the
   takeoff) but not sought.
 - The stop landing from a platform flight's cruise takes 11 to 14 s (the physics: a zero-damage
-  descent sinks at most 0.2 blocks a tick); from a ground flight's cruise about 7 s.
+  descent sinks at most 0.2 blocks a tick); from a ground flight's cruise about 7 s. Since Track AU2
+  the cruise of a long flight is higher (what the glide needs, up to `flyMaxClimb`), so a stop early
+  in such a flight comes down from higher: the circle sinks 0.15 to 0.2 a tick (100 blocks = 25 to
+  33 s).
+- Track AU2: the rockets are quantised (a climb rocket 16 to 31 blocks), so a flight often arrives a
+  rocket's worth high and spends 5 to 10 s in the descent circle; a rocket pitched for a smaller gain
+  costs the same rocket, so the time is the cheaper price. The sky check sees only the world model
+  (loaded cells, unknown = roof): on a server with a short view distance a far cruise height may be
+  above the loaded subchunks and refuse a takeoff in the open; `flyTakeoffRun` and the message say
+  where. The S-turns are the offline fallback only: no e2e has needed them yet (a circle farther out
+  fitted every walled case). `landingNear` ranks by a probe plan only when the goal's chunk is loaded;
+  for a far goal the straight distance (plus 3 per block of height) decides.
