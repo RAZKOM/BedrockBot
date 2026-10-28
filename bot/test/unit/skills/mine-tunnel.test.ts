@@ -14,6 +14,7 @@ const LIQ = new Set(['water', 'lava']);
 const OPEN = new Set(['air']);
 const PROTECT = new Set(['stone_bricks', 'chest']);
 const GRAVITY = new Set(['sand', 'gravel']);
+const HAZARD = new Set(['fire', 'sweet_berry_bush']); // Track BB: no box, "air" to the break rules, never walked into
 
 /** Stone below `surface` (air from it up), with overrides; `unknown` cells answer undefined. */
 class Voxels {
@@ -42,13 +43,13 @@ function tw(v: Voxels): TunnelWorld {
     cell: (p) => {
       const n = v.get(p);
       if (n === 'unknown') return undefined;
-      return { open: OPEN.has(n), solid: !OPEN.has(n) && !LIQ.has(n) && n !== 'pointed_dripstone', liquid: LIQ.has(n), gravity: GRAVITY.has(n), dripstone: n === 'pointed_dripstone' };
+      return { open: OPEN.has(n), solid: !OPEN.has(n) && !LIQ.has(n) && n !== 'pointed_dripstone' && !HAZARD.has(n), liquid: LIQ.has(n), gravity: GRAVITY.has(n), dripstone: n === 'pointed_dripstone', hazard: HAZARD.has(n) };
     },
     blockAt: (p) => (v.get(p) === 'unknown' ? undefined : info(v.get(p))),
     breakRule: (p) => {
       const n = v.get(p);
       if (n === 'unknown') return 'unknown';
-      if (OPEN.has(n)) return 'air';
+      if (OPEN.has(n) || HAZARD.has(n)) return 'air';
       if (LIQ.has(n)) return 'liquid';
       if (PROTECT.has(n)) return 'protected';
       for (const [dx, dy, dz] of [
@@ -146,6 +147,15 @@ describe('planTunnel: dig rules', () => {
     const plan = stairs(v, O, p);
     expect(plan.ok).toBe(false);
     expect(plan.why).toMatch(/^protected at 5 1 0/);
+  });
+
+  it('Track BB: fire in the line (no box: "air" to the break rules) stops the plan as a hazard', () => {
+    const v = new Voxels(0).box({ x: 2, y: 0, z: -3 }, { x: 12, y: 5, z: 3 }, 'stone');
+    const p = ore(v, { x: 9, y: 1, z: 0 });
+    v.set({ x: 5, y: 0, z: 0 }, 'fire');
+    const plan = stairs(v, O, p);
+    expect(plan.ok).toBe(false);
+    expect(plan.why).toMatch(/^hazard at 5 0 0/);
   });
 
   it('water over the line and lava under it stop the plan (next_to_liquid)', () => {

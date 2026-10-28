@@ -26,7 +26,9 @@
 import type { BlockInfo, Vec3 } from '../../world/types.ts';
 import type { DigOptions, DigResult } from '../dig/digger.ts';
 import { EYE_HEIGHT } from '../dig/look.ts';
+import { ruleCell } from '../nav/baritone/helper.ts'; // Track BB: the shared rule set
 import type { Goal } from '../nav/goals.ts';
+import type { TerrainClass } from '../terrain/classify.ts';
 import { closestDistance } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { lineOfSight } from './seen.ts';
@@ -77,15 +79,22 @@ export function shaftStep(tip: Vec3): Step {
   return { feet, dig: [feet], floor: up(feet, -1), kind: 'shaft' };
 }
 
-/** What the planner reads of a cell. */
+/** What the planner reads of a cell (Track BB: nav/baritone/helper.ts `RuleCell`, built by `tunnelCell`). */
 export interface TunnelCell {
-  /** No collision box and no liquid: the body passes. */
+  /** The body passes: Baritone `canWalkThrough` (no collision box, no liquid, no hazard). */
   open: boolean;
-  /** A floor the body may stand on (a full box top, not a liquid, not a hazard). */
+  /** A floor the body may stand on: Baritone `canWalkOn` (a box top covering the centre, not a liquid, not a hazard). */
   solid: boolean;
   liquid: boolean;
   gravity: boolean;
   dripstone: boolean;
+  /** Track BB: the body must never move into it (Baritone `avoidWalkingInto`: liquids and hazards such as fire or a berry bush, with or without a box). Optional for older fakes. */
+  hazard?: boolean;
+}
+
+/** Track BB: the tunnel planner's cell facts of a classified block, from the shared rule set (wire.ts builds `TunnelWorld.cell` with it). */
+export function tunnelCell(c: TerrainClass): TunnelCell {
+  return ruleCell(c);
 }
 
 export interface TunnelWorld {
@@ -305,6 +314,8 @@ export function planTunnel(w: TunnelWorld, from: Vec3, goal: TunnelGoal, o: Tunn
       if (st.kind !== 'shaft' && floors.has(key(q))) return `would dig the floor of the way back at ${fmt(q)}`;
       const rule = w.breakRule(q);
       if (rule && rule !== 'air') return `${rule} at ${fmt(q)}`;
+      // Track BB: a hazard without a box (fire, a berry bush) is "air" to the break rules but never walked into
+      if (rule === 'air' && cell.hazard) return `hazard at ${fmt(q)}`;
     }
     if (st.kind === 'shaft') {
       const why = shaftRule(w, st.dig[0]!, opened, lastKind !== 'shaft');

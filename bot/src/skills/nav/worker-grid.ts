@@ -4,7 +4,8 @@
 // state id a palette references, single block changes, cached column summaries); the worker applies
 // them in order to a `MirrorWorld`, whose `source` is a TerrainSource that answers exactly like
 // `worldSource(world)` on the main thread (terrain/query.ts): loaded columns from the sections, the
-// rest from the cache stand-ins, undefined elsewhere.
+// rest from the cache stand-ins, undefined elsewhere. Track BB: the worker's NavGrid over this source runs the
+// same rule set (nav/baritone/helper.ts) as the main thread's, so a rule change needs no mirror of its own.
 import { Layer } from '../../world/subchunk.ts';
 import type { BlockInfo, Box } from '../../world/types.ts';
 import type { TerrainSource } from '../terrain/query.ts';

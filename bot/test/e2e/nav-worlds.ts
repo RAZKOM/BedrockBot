@@ -423,3 +423,62 @@ export function stairsLayout(o: Origin) {
     },
   };
 }
+
+// ---- Track BB: the shared movement rules (docs/pathfinding.md "Rules") ------------------------------
+
+/**
+ * Rules suite (bds-bari): six 3-wide corridors along +z (2-high walls, caps at both ends, 20 long), one per
+ * rule, 10 blocks apart in x. The closed lanes (2, 3) have stone brick walls: a built block the rules never
+ * dig, so the only way through is the barrier (plain stone walls were dug through: 4 x 162 ticks beat a
+ * refused barrier in the first run):
+ *   lane 0  a magma strip across two of the three floor columns (the third keeps grass): walked around
+ *   lane 1  a line of sweet berry bushes across two columns: walked around
+ *   lane 2  a 2-high ice barrier over a lava pool (stone between: ice next to lava melts on BDS, light 15)
+ *           closing the corridor: never dug (unreachable with allowBreak)
+ *   lane 3  a 2-high dirt barrier with gravel on top closing the corridor: not dug; without the gravel dug
+ *   lane 4  a 3-long soul sand floor across the corridor (`soul.fill`, placed by the test after a plain walk)
+ *   lane 5  bottom slabs, then a stairs step up onto a stone floor (walls 3 high there): walked, no jump
+ * The stairs go through the console (`stateFills`).
+ */
+export function rulesLayout(o: Origin) {
+  const L = 20;
+  const fills: Fill[] = [...clear(o.x - 4, o.z - 4, o.x + 56, o.z + L + 4, -45)];
+  const stateFills: StateFill[] = [];
+  const lane = (i: number, wallTop = -59, wall = 'stone') => {
+    const lx = o.x + 10 * i;
+    fills.push(f(lx - 2, -60, o.z, lx - 2, wallTop, o.z + L, wall));
+    fills.push(f(lx + 2, -60, o.z, lx + 2, wallTop, o.z + L, wall));
+    fills.push(f(lx - 2, -60, o.z - 1, lx + 2, wallTop, o.z - 1, wall));
+    fills.push(f(lx - 2, -60, o.z + L + 1, lx + 2, wallTop, o.z + L + 1, wall));
+    return { x: lx, start: { x: lx + 0.5, y: -60, z: o.z + 1.5 }, goal: { x: lx, y: -60, z: o.z + L - 2 } };
+  };
+  const magma = lane(0);
+  fills.push(f(magma.x - 1, -61, o.z + 10, magma.x, -61, o.z + 10, 'magma'));
+  const bush = lane(1);
+  fills.push(f(bush.x, -60, o.z + 10, bush.x + 1, -60, o.z + 10, 'sweet_berry_bush'));
+  const ice = lane(2, -59, 'stone_bricks');
+  fills.push(f(ice.x - 1, -62, o.z + 10, ice.x + 1, -62, o.z + 10, 'lava'));
+  fills.push(f(ice.x - 1, -61, o.z + 10, ice.x + 1, -61, o.z + 10, 'stone'));
+  fills.push(f(ice.x - 1, -60, o.z + 10, ice.x + 1, -59, o.z + 10, 'ice'));
+  const gravel = lane(3, -59, 'stone_bricks');
+  fills.push(f(gravel.x - 1, -60, o.z + 10, gravel.x + 1, -59, o.z + 10, 'dirt'));
+  fills.push(f(gravel.x - 1, -58, o.z + 10, gravel.x + 1, -58, o.z + 10, 'gravel'));
+  const soul = lane(4);
+  const soulFill = f(soul.x - 1, -61, o.z + 8, soul.x + 1, -61, o.z + 10, 'soul_sand');
+  const slabs = lane(5, -58);
+  fills.push(f(slabs.x - 1, -60, o.z + 4, slabs.x + 1, -60, o.z + 7, 'smooth_stone_slab'));
+  fills.push(f(slabs.x - 1, -60, o.z + 10, slabs.x + 1, -60, o.z + 16, 'stone'));
+  stateFills.push({ ...f(slabs.x - 1, -60, o.z + 9, slabs.x + 1, -60, o.z + 9, 'oak_stairs'), states: '["weirdo_direction"=2]' });
+  const layout: Layout = { name: 'rules', anchor: { x: o.x + 25.5, y: -60, z: o.z + 10.5 }, fills };
+  return {
+    layout,
+    stateFills,
+    cleanup: clear(o.x - 4, o.z - 4, o.x + 56, o.z + L + 4, -45),
+    magma: { ...magma, strip: { from: { x: magma.x - 1, y: -61, z: o.z + 10 }, to: { x: magma.x, y: -61, z: o.z + 10 } } },
+    bush: { ...bush, line: { from: { x: bush.x, y: -60, z: o.z + 10 }, to: { x: bush.x + 1, y: -60, z: o.z + 10 } } },
+    ice: { ...ice, barrier: { from: { x: ice.x - 1, y: -60, z: o.z + 10 }, to: { x: ice.x + 1, y: -59, z: o.z + 10 } }, lava: { from: { x: ice.x - 1, y: -62, z: o.z + 10 }, to: { x: ice.x + 1, y: -62, z: o.z + 10 } } },
+    gravel: { ...gravel, barrier: { from: { x: gravel.x - 1, y: -60, z: o.z + 10 }, to: { x: gravel.x + 1, y: -59, z: o.z + 10 } }, top: { from: { x: gravel.x - 1, y: -58, z: o.z + 10 }, to: { x: gravel.x + 1, y: -58, z: o.z + 10 } } },
+    soul: { ...soul, fill: soulFill },
+    slabs: { ...slabs, goal: { x: slabs.x, y: -59, z: o.z + 15 }, stairsZ: o.z + 9 },
+  };
+}

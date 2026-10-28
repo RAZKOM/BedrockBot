@@ -19,9 +19,12 @@ export interface TerrainClass {
   top: number;
   /**
    * The body can stand on the top: some box with that top covers the block's centre column and
-   * the top is at most 1 (fences, walls and closed gates are 1.5 high and count as obstacles).
+   * the top is at most 1 (fences, walls and closed gates are 1.5 high and count as obstacles), and
+   * not a hazard (magma, cactus ...). The shared rule is nav/baritone/helper.ts `canWalkOn` (Track BB).
    */
   floor: boolean;
+  /** Track BB: the shape half of `floor` alone (a box top covering the centre, at most 1 high), hazards included. */
+  floorShape: boolean;
   liquid: Liquid | undefined;
   /** Liquid surface height inside the block (source 8/9, falling 1); 0 without liquid. */
   liquidHeight: number;
@@ -172,12 +175,14 @@ function make(info: BlockInfo): TerrainClass {
   const penalty = leaves ? LEAVES_PENALTY : SLOW_NAMES.has(name) ? SLOW_PENALTY : 0;
   const b0 = boxes[0];
   const fullCube = boxes.length === 1 && b0?.[0] === 0 && b0[1] === 0 && b0[2] === 0 && b0[3] === 1 && b0[4] === 1 && b0[5] === 1;
+  const floorShape = boxes.length > 0 && covers && top <= 1; // Track BB
   return {
     name,
     states: info.states,
     boxes,
     top,
-    floor: boxes.length > 0 && covers && top <= 1 && !danger,
+    floor: floorShape && !danger, // Track BB: nav/baritone/helper.ts canWalkOn
+    floorShape,
     liquid,
     liquidHeight,
     danger,

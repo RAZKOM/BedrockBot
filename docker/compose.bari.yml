@@ -1,0 +1,37 @@
+# BDS for the Baritone-port nav rule e2e tests (wave 11, Track BB; docs/pathfinding.md "Rules"). Same
+# settings as compose.move.yml (offline, RakNet, flat, peaceful, operator, TICK_DISTANCE 10), own project
+# name, container bds-bari on udp/19206, data in docker/data/bari (seeded from docker/data/move without
+# its `worlds/` and `server.properties`, so the server generated its own flat world and BDS was not
+# downloaded again). The nav-* suites run here with MOVE_BDS_PORT=19206 MOVE_BDS_CONTAINER=bds-bari;
+# nav-rules reads BARI_BDS_*.
+#   node scripts/bds.mjs --profile bari up
+#   node scripts/bds.mjs --profile bari pack      # truth pack (needed by every nav-* e2e test)
+name: bedrockbot-bari
+
+services:
+  bds-bari:
+    image: itzg/minecraft-bedrock-server:2026.10.2
+    container_name: bds-bari
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.26.60.6"
+      TRANSPORT: raknet
+      ONLINE_MODE: "false"
+      ALLOW_LIST: "false"
+      PLAYER_IDLE_TIMEOUT: "0"
+      ALLOW_CHEATS: "true"
+      DIFFICULTY: peaceful
+      LEVEL_TYPE: FLAT
+      LEVEL_NAME: bari
+      DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+      SERVER_NAME: bds-bari
+      SERVER_PORT: "19206"
+      # Chunks within tick-distance of a player stay loaded for scripts, so truth:fill can build the
+      # nav courses without teleporting along them (default 4).
+      TICK_DISTANCE: "10"
+    ports:
+      - "19206:19206/udp"
+    volumes:
+      - ./data/bari:/data
+    stdin_open: true
+    tty: true

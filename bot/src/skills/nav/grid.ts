@@ -4,10 +4,12 @@
 // inside that cell (slab, carpet, snow layer, soul sand ...) or a block with a top of exactly 1 in the
 // cell below. See docs/pathfinding.md.
 import { classify, type TerrainClass } from '../terrain/classify.ts';
-import { CLIMBERS, boxesAtCell, type TerrainSource } from '../terrain/query.ts'; // Track AJ: CLIMBERS
+import { boxesAtCell, type TerrainSource } from '../terrain/query.ts';
 import { blockInfoOf, doorBoxes } from '../terrain/shapes.ts';
 import { PHYSICS } from '../input/physics.ts';
 import type { Box } from '../../world/types.ts';
+import { YES, avoidWalkingInto, canWalkOn, canWalkThroughClass, fullFloor, isClimbable, isStillWater } from './baritone/helper.ts'; // Track BB: the shared rule set
+import { handUsable } from '../interact/use.ts'; // Track BB: iron doors / trapdoors are redstone only (UseSkill refuses them at run time)
 
 /** Packs integer block coordinates into one exact double (x, z within +-2^20, y within +-512). */
 export function cellKey(x: number, y: number, z: number): number {
@@ -53,14 +55,18 @@ export const VARIETY_WATER = 1;
 export const VARIETY_CLIMBER = 2;
 export const VARIETY_LADDER = 4;
 
-/** Track AJ: a block the body climbs on BDS 1.26.60 (terrain/query.ts CLIMBERS). */
-export const isClimber = (c: TerrainClass): boolean => c.climbable && CLIMBERS.has(c.name);
+/** Track AJ: a block the body climbs on BDS 1.26.60 (terrain/query.ts CLIMBERS). Track BB: the helper's `isClimbable`. */
+export const isClimber = (c: TerrainClass): boolean => isClimbable(c);
 /** Track AJ: scaffolding (stood on unless sneaking, climbed by jump / sneak: not modelled; an obstacle). */
 const isScaffold = (c: TerrainClass): boolean => c.name === 'scaffolding';
-/** Track AJ: the body may occupy the cell: no collision box (a climber's thin box aside), no liquid, no hazard. */
-const passable = (c: TerrainClass): boolean => (c.boxes.length === 0 || isClimber(c)) && !c.liquid && !c.danger && !isScaffold(c);
-/** Track AJ: water the body swims on: a source (or a waterlogged plant without depth), not a bubble column. */
-const stillWater = (c: TerrainClass): boolean => c.liquid === 'water' && c.name !== 'bubble_column' && Number(c.states.liquid_depth ?? 0) === 0;
+/**
+ * Track AJ: the body may occupy the cell: no collision box (a climber's thin box aside), no liquid, no
+ * hazard, no scaffolding. Track BB: Baritone's `canWalkThrough` class rule (nav/baritone/helper.ts); a
+ * still water source answers MAYBE there and is entered by the swim moves only (`swim`).
+ */
+const passable = (c: TerrainClass): boolean => canWalkThroughClass(c) === YES;
+/** Track AJ: water the body swims on: a source (or a waterlogged plant without depth), not a bubble column. Track BB: helper `isStillWater`. */
+const stillWater = (c: TerrainClass): boolean => isStillWater(c);
 const SIDES: readonly (readonly [number, number])[] = [
   [1, 0],
   [-1, 0],
@@ -195,11 +201,12 @@ export class NavGrid {
     for (let dy = 1; dy <= 2; dy++) {
       const a = this.cls(x, y + dy, z);
       if (!a) return UNKNOWN;
-      if (a.boxes.length || a.liquid || a.danger) return BLOCKED;
+      if (a.boxes.length || avoidWalkingInto(a)) return BLOCKED; // Track BB: helper avoidWalkingInto (liquids, hazards)
     }
     for (const [dx, dz] of SIDES) {
       const n = this.cls(x + dx, y, z + dz);
       if (!n) return UNKNOWN;
+      // a still water neighbour is fine (the lane); lava, flowing water (a push the physics does not model) and hazards are not
       if (n.liquid === 'lava' || (n.liquid === 'water' && !stillWater(n)) || n.danger) return BLOCKED;
     }
     return y;
@@ -282,13 +289,14 @@ export class NavGrid {
     let feet: number;
     if (isScaffold(c)) return BLOCKED; // Track AJ: scaffolding's own rules are not modelled
     if (c.boxes.length && !(through && isPassage(c)) && !isClimber(c)) {
-      if (!c.floor || c.top >= 1) return BLOCKED;
+      // a partial block in the cell itself is the floor (slab, carpet, snow layers, soul sand ...): Track BB helper canWalkOn
+      if (!canWalkOn(c) || c.top >= 1) return BLOCKED;
       feet = y + c.top;
     } else {
-      if (c.liquid || c.danger) return BLOCKED;
+      if (avoidWalkingInto(c)) return BLOCKED; // Track BB: liquids and hazards (magma, berry bushes, powder snow, fire ...)
       const below = this.cls(x, y - 1, z);
       if (!below) return UNKNOWN;
-      if (!below.floor || below.top !== 1) return BLOCKED;
+      if (!fullFloor(below)) return BLOCKED; // Track BB: a floor whose top is exactly 1 (helper fullFloor)
       feet = y;
     }
     const headTop = Math.floor(feet + PHYSICS.height - 1e-6);
@@ -310,10 +318,11 @@ export class NavGrid {
   crossing(x: number, y: number, z: number, axis: 0 | 2): Crossing | undefined {
     const c = this.cls(x, y, z);
     if (!c) return undefined;
-    if (c.boxes.length === 0) return c.liquid || c.danger ? CROSS_BLOCKED : CROSS_CLEAR;
+    if (c.boxes.length === 0) return avoidWalkingInto(c) ? CROSS_BLOCKED : CROSS_CLEAR; // Track BB
     if (!isPassage(c)) return CROSS_BLOCKED;
     const now = boxesAtCell(this.source, x, y, z, c) ?? c.boxes;
     if (!blocksCorridor(now, axis)) return CROSS_CLEAR;
+    if (!handUsable(c.name)) return CROSS_BLOCKED; // Track BB: an iron door in the way cannot be opened by hand
     let toggled: readonly Box[];
     if (c.openable === 'gate') {
       toggled = toggledGateBoxes(c);
