@@ -2,6 +2,13 @@
 // tasks 7.1 / 7.2), and Baritone's safety rules for breaking blocks. The navigator only plans a move
 // that needs an action when the action is provided and the goto allows it (`allowBreak`,
 // `allowPlace`; doors whenever `useBlock` is there). See docs/pathfinding.md.
+//
+// Track BC: the break order. A node's `act.dig` (nav/astar.ts NodeActions) lists the cells a move breaks
+// in the order the follower breaks them (baritone/moves.ts: the start's head room first, then each column
+// top first); the body never moves into a cell before every listed cell is free. A dig node that also
+// carries `act.place` (pillar-up under a low ceiling) digs first, then places. After a dig whose cell had a
+// gravity block above it (only plannable with `allowGravityAbove`) the navigator waits `DIG_SETTLE_TICKS`
+// for the stack to land and digs the cell again until it is free.
 import type { Vec3 } from '../../world/types.ts';
 import type { SkillResult } from '../types.ts';
 import { avoidBreaking, type BreakReason, type BreakRuleOptions } from './baritone/helper.ts'; // Track BB
@@ -19,6 +26,14 @@ export interface NavActions {
   /** Item names the planner may place, preferred first. */
   throwawayItems?: string[];
 }
+
+/**
+ * Track BC: ticks the navigator waits after digging a cell that had a gravity block over it before it looks
+ * at the cell again (sand / gravel fall one block in about 5 ticks and land as a block a few ticks later).
+ */
+export const DIG_SETTLE_TICKS = 12;
+/** Track BC: digs of one cell at most (a falling stack lands in it again and again) before the action fails. */
+export const DIG_REPEATS = 8;
 
 /** Default throwaway blocks (cheap, full cubes, no gravity). */
 export const DEFAULT_THROWAWAY: readonly string[] = Object.freeze(['cobblestone', 'dirt', 'cobbled_deepslate', 'netherrack', 'stone', 'andesite', 'diorite', 'granite', 'tuff']);

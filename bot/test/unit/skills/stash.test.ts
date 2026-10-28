@@ -27,6 +27,10 @@ interface Opts {
   /** The skill call (by name) that answers 'interrupted' (a pre-emption). */
   interruptAt?: string;
   blocks?: Record<string, BlockInfo>;
+  /** Track AV: raw wire items of the inventory slots (box names and contents). */
+  raws?: unknown[];
+  /** Give the stash a toHotbar (SurvivalKit.hotbar): swaps the slot with hotbar slot 8. */
+  toHotbar?: boolean;
 }
 
 function harness(o: Opts) {
@@ -34,7 +38,9 @@ function harness(o: Opts) {
   const inventory = {
     slots,
     freeSlots: () => slots.map((s, i) => (s ? -1 : i)).filter((i) => i >= 0),
+    rawItem: (_w: number, i: number) => o.raws?.[i],
   };
+  let selected = -1;
   const calls: string[] = [];
   const containers = { stats: { requests: 0 }, opts: { chestSlotType: 'container' } };
   const slotTypes: string[] = [];
@@ -90,7 +96,9 @@ function harness(o: Opts) {
         placeFails--;
         return { ok: false, reason: 'rejected' };
       }
-      const i = slots.findIndex((s) => s && isShulkerBox(s.name));
+      // like the place skill: the held box (Track AV: selectHotbar), else the lowest slot
+      const i = selected >= 0 && slots[selected] && isShulkerBox(slots[selected]!.name) ? selected : slots.findIndex((s) => s && isShulkerBox(s.name));
+      calls.push(`placed slot ${i}`);
       box = slots[i]!.name;
       slots[i] = null;
       return { ok: true };
@@ -134,6 +142,19 @@ function harness(o: Opts) {
           },
         }),
     say: (m) => said.push(m),
+    selectHotbar: (slot: number) => {
+      selected = slot;
+    },
+    ...(o.toHotbar
+      ? {
+          toHotbar: async (slot: number) => {
+            calls.push(`toHotbar ${slot}`);
+            [slots[8], slots[slot]] = [slots[slot]!, slots[8]!];
+            if (o.raws) [o.raws[8], o.raws[slot]] = [o.raws[slot], o.raws[8]];
+            return 8;
+          },
+        }
+      : {}),
   });
   return { stash, slots, calls, containers, slotTypes, dropped, said, settings };
 }
@@ -154,7 +175,7 @@ describe('stash step', () => {
     const h = harness({ slots: full([item('stone_pickaxe', 1), item('undyed_shulker_box', 1)]) });
     expect(h.stash.needed()).toBe(true);
     expect(await h.stash.ifFull({ label: 'mine' })).toBe(true);
-    expect(h.calls).toEqual(['place 1,0,0 up undyed_shulker_box', 'open 1,0,0', 'deposit', 'close', 'dig 1,0,0', 'collect']);
+    expect(h.calls).toEqual(['place 1,0,0 up undyed_shulker_box', 'placed slot 1', 'open 1,0,0', 'deposit', 'close', 'dig 1,0,0', 'collect']);
     expect(h.slotTypes).toEqual(['container']); // Track AG: no switch any more; the chest skill sets `shulker` per window (container.test.ts)
     expect(h.containers.opts.chestSlotType).toBe('container');
     const a = h.stash.attempts[0]!;
@@ -234,6 +255,26 @@ describe('stash step', () => {
     const [a, b] = await Promise.all([h.stash.ifFull({ label: 'mine' }), h.stash.ifFull({ label: 'mine' })]);
     expect([a, b]).toEqual([true, true]);
     expect(h.stash.stats.attempts).toBe(1);
+  });
+
+  it('Track AV: a bot_loot box is filled before an unnamed spare (selected in the hotbar); a full one is skipped', async () => {
+    const name = (n: string, used = 0) => ({ extra: { nbt: { nbt: { value: { ...(used ? { Items: { value: { value: Array.from({ length: used }, () => ({ Name: { value: 'minecraft:sand' }, Count: { value: 64 } })) } } } : {}), display: { value: { Name: { value: n } } } } } } } });
+    const h = harness({ slots: full([item('stone_pickaxe', 1), item('undyed_shulker_box', 1), item('undyed_shulker_box', 1), item('undyed_shulker_box', 1)]), raws: [undefined, undefined, name('bot_loot', 27), name('§6BOT_LOOT')] });
+    expect(await h.stash.ifFull({ label: 'mine' })).toBe(true);
+    expect(h.calls.filter((c) => c.startsWith('placed'))).toEqual(['placed slot 3']);
+  });
+
+  it('same-coloured bot_loot boxes: the empty one in the main inventory is moved into the hotbar, not the full one in the hotbar refilled', async () => {
+    const name = (n: string, used = 0) => ({ extra: { nbt: { nbt: { value: { ...(used ? { Items: { value: { value: Array.from({ length: used }, () => ({ Name: { value: 'minecraft:sand' }, Count: { value: 64 } })) } } } : {}), display: { value: { Name: { value: n } } } } } } } });
+    const slots = () => full([item('stone_pickaxe', 1), item('green_shulker_box', 1), ...Array.from({ length: 7 }, () => item('sand')), item('green_shulker_box', 1)], 'sand');
+    const raws = () => [undefined, name('bot_loot', 27), ...Array.from({ length: 7 }, () => undefined), name('bot_loot')];
+    // without the move the place skill takes the full box of slot 1 (the bug: "inventory still full")
+    const old = harness({ slots: slots(), raws: raws() });
+    await old.stash.ifFull({ label: 'mine' });
+    expect(old.calls.filter((c) => c.startsWith('placed'))).toEqual(['placed slot 1']);
+    const h = harness({ slots: slots(), raws: raws(), toHotbar: true });
+    expect(await h.stash.ifFull({ label: 'mine' })).toBe(true);
+    expect(h.calls.filter((c) => c.startsWith('toHotbar') || c.startsWith('placed'))).toEqual(['toHotbar 9', 'placed slot 8']);
   });
 
   it('stashShulker off skips the box', async () => {

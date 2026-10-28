@@ -155,12 +155,14 @@ describe.skipIf(!E2E)('@bds nav: the shared movement rules (Track BB, bds-bari)'
     await bot.loop.waitTicks(5);
     const dug = await walk('gravel removed', L.gravel.start, L.gravel.goal, { allowBreak: true });
     expect(dug.res, dug.line).toEqual({ ok: true });
-    expect(dug.rep.actions.dig).toBeGreaterThanOrEqual(2);
+    // Track BC: the cheapest plan is now an ascend onto the barrier with one break (jump + 1 dig) rather than the 2-dig
+    // dig-through; either way every dug cell pays its break time + `dig`
+    expect(dug.rep.actions.dig).toBeGreaterThanOrEqual(1);
     expect(dug.plan?.status).toBe('found');
     const digNode = dug.plan!.path.find((n) => n.act?.dig);
-    expect(digNode?.act?.dig?.length).toBe(2);
-    expect(digNode!.cost).toBeGreaterThanOrEqual(2 * (15 + DEFAULT_COSTS.dig));
-    expect(await count(L.gravel.barrier.from, L.gravel.barrier.to, 'dirt')).toBeLessThanOrEqual(4);
+    expect(digNode?.move === 'jump' ? digNode.act!.dig!.length === 1 : digNode?.move === 'walk' && digNode.act!.dig!.length === 2, dug.line).toBe(true);
+    expect(digNode!.cost).toBeGreaterThanOrEqual(digNode!.act!.dig!.length * (15 + DEFAULT_COSTS.dig));
+    expect(await count(L.gravel.barrier.from, L.gravel.barrier.to, 'dirt')).toBeLessThanOrEqual(6 - digNode!.act!.dig!.length);
   }, 180_000);
 
   it('a soul sand floor is walked over (slower than the plain corridor)', async () => {

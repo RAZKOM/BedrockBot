@@ -1,0 +1,2907 @@
+{
+ "note": "Track AW: the grid recipes of interest from a bds-craft crafting_data recording (BDS 1.26.60.6, 2026-10-30); `items` maps output network ids to names",
+ "items": {
+  "-451": "raw_iron_block",
+  "-203": "barrel",
+  "5": "oak_planks",
+  "42": "iron_block",
+  "50": "torch",
+  "54": "chest",
+  "57": "diamond_block",
+  "58": "crafting_table",
+  "61": "furnace",
+  "173": "coal_block",
+  "307": "iron_ingot",
+  "323": "stick",
+  "516": "raw_iron"
+ },
+ "shaped_recipes": [
+  {
+   "recipe_id": "minecraft:barrel",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:wooden_slabs",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "invalid",
+     "metadata": 32767,
+     "count": 0
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:wooden_slabs",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": -203,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 198111737,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "7c4f1f36-07ac-a7f1-9ca6-f26a4f62519d",
+   "block": "deprecated",
+   "priority": -1,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 3998
+  },
+  {
+   "recipe_id": "minecraft:barrel_from_crimson_slab",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_slab",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "invalid",
+     "metadata": 32767,
+     "count": 0
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_slab",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": -203,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 198111737,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "a743700d-cde7-4b85-398e-b5f62f84d298",
+   "block": "deprecated",
+   "priority": 2,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 3999
+  },
+  {
+   "recipe_id": "minecraft:barrel_from_mangrove_slab",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_slab",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "invalid",
+     "metadata": 32767,
+     "count": 0
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_slab",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": -203,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 198111737,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "3044a73c-bc10-79ba-6f24-337488c987a5",
+   "block": "deprecated",
+   "priority": 2,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 4000
+  },
+  {
+   "recipe_id": "minecraft:barrel_from_warped_slab",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_slab",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "invalid",
+     "metadata": 32767,
+     "count": 0
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_slab",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": -203,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 198111737,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "f848a0c9-931f-a2a7-7138-a9fc9e81cfac",
+   "block": "deprecated",
+   "priority": 2,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 4001
+  },
+  {
+   "recipe_id": "minecraft:barrel_with_tag",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:wooden_slabs",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "invalid",
+     "metadata": 32767,
+     "count": 0
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:wooden_slabs",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": -203,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 198111737,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "2a428000-ec00-0bde-ab7b-2cfd6a361695",
+   "block": "deprecated",
+   "priority": -1,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 4002
+  },
+  {
+   "recipe_id": "Stick_bamboo_recipeId",
+   "width": 1,
+   "height": 2,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:bamboo:0",
+     "metadata": 0,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:bamboo:0",
+     "metadata": 0,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 323,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "5345d16b-32c0-3fe5-3452-29ba497347a5",
+   "block": "crafting_table",
+   "priority": 2,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:bamboo:0",
+      "metadata": 0,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 2713
+  },
+  {
+   "recipe_id": "minecraft:Chest_recipeId",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "invalid",
+     "metadata": 32767,
+     "count": 0
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 54,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": -1132117234,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "a94b04b7-b4e0-7a8c-0c2f-7cae057f6780",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "player_has_many_items"
+   },
+   "network_id": 4065
+  },
+  {
+   "recipe_id": "minecraft:Torch_charcoal_recipeId",
+   "width": 1,
+   "height": 2,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:charcoal",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 50,
+     "count": 4,
+     "metadata": 0,
+     "block_runtime_id": -1188029192,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "5f413672-2768-7c7e-ac65-f07b017e96bd",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 4769
+  },
+  {
+   "recipe_id": "minecraft:Torch_recipeId",
+   "width": 1,
+   "height": 2,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:coal",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 50,
+     "count": 4,
+     "metadata": 0,
+     "block_runtime_id": -1188029192,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "ef425783-6009-1fe1-d90d-d6725d381e81",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 4770
+  },
+  {
+   "recipe_id": "minecraft:WorkBench_recipeId",
+   "width": 2,
+   "height": 2,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 58,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 1752181952,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "554537f4-1b28-becd-4eab-f1a1626c49a5",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "always_unlocked"
+   },
+   "network_id": 4090
+  },
+  {
+   "recipe_id": "minecraft:WorkBench_recipeId_from_oak",
+   "width": 2,
+   "height": 2,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:oak_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:oak_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:oak_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:oak_planks",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 58,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 1752181952,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "674f3125-1886-c0a2-bc47-758572d129a5",
+   "block": "crafting_table",
+   "priority": 1,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "always_unlocked"
+   },
+   "network_id": 3256
+  },
+  {
+   "recipe_id": "minecraft:barrel_with_planks",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:wooden_slabs",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "invalid",
+     "metadata": 32767,
+     "count": 0
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:wooden_slabs",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": -203,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 198111737,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "3d4a9b10-c9c2-ebfd-5f87-9ca18cdc5ebb",
+   "block": "crafting_table",
+   "priority": -1,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "item_tag",
+      "tag": "minecraft:planks",
+      "metadata": 32767,
+      "count": 1
+     },
+     {
+      "type": "valid",
+      "descriptor_type": "item_tag",
+      "tag": "minecraft:wooden_slabs",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 3997
+  },
+  {
+   "recipe_id": "minecraft:chest_from_crimson_planks",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "invalid",
+     "metadata": 32767,
+     "count": 0
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_planks",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 54,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": -1132117234,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "f443de0f-62c5-8400-79cf-5843efb38399",
+   "block": "crafting_table",
+   "priority": 2,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 4682
+  },
+  {
+   "recipe_id": "minecraft:chest_from_mangrove_planks",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "invalid",
+     "metadata": 32767,
+     "count": 0
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_planks",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 54,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": -1132117234,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "d14eefae-71fa-ed18-7cbf-550e946de29d",
+   "block": "crafting_table",
+   "priority": 2,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 4618
+  },
+  {
+   "recipe_id": "minecraft:chest_from_warped_planks",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "invalid",
+     "metadata": 32767,
+     "count": 0
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_planks",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 54,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": -1132117234,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "624c5430-439e-253e-b1ee-ccdde587f890",
+   "block": "crafting_table",
+   "priority": 2,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 4683
+  },
+  {
+   "recipe_id": "minecraft:coal_block",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:coal:0",
+     "metadata": 0,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:coal:0",
+     "metadata": 0,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:coal:0",
+     "metadata": 0,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:coal:0",
+     "metadata": 0,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:coal:0",
+     "metadata": 0,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:coal:0",
+     "metadata": 0,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:coal:0",
+     "metadata": 0,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:coal:0",
+     "metadata": 0,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:coal:0",
+     "metadata": 0,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 173,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 2126838376,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "5d4a9efc-27f9-48be-26c9-9c3cdd3fb4a9",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:coal:0",
+      "metadata": 0,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 4075
+  },
+  {
+   "recipe_id": "minecraft:crafting_table_from_crimson_planks",
+   "width": 2,
+   "height": 2,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_planks",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 58,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 1752181952,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "f9456cfa-bd9b-3782-1dcf-2d49032dd19e",
+   "block": "crafting_table",
+   "priority": 2,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 4686
+  },
+  {
+   "recipe_id": "minecraft:crafting_table_from_mangrove_planks",
+   "width": 2,
+   "height": 2,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_planks",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 58,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 1752181952,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "9f46f1fd-7e0c-79b9-48c8-9a7078389fb9",
+   "block": "crafting_table",
+   "priority": 2,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 4620
+  },
+  {
+   "recipe_id": "minecraft:crafting_table_from_warped_planks",
+   "width": 2,
+   "height": 2,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_planks",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 58,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 1752181952,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "ff4e0f63-1cc3-e116-aa07-d6aa13818eaf",
+   "block": "crafting_table",
+   "priority": 2,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 4687
+  },
+  {
+   "recipe_id": "minecraft:diamond_block",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:diamond",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:diamond",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:diamond",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:diamond",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:diamond",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:diamond",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:diamond",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:diamond",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:diamond",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 57,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 1460042000,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "d741243c-a283-dbe0-fba8-f8c58604fdbd",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:diamond",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 4176
+  },
+  {
+   "recipe_id": "minecraft:furnace",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:stone_crafting_materials",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:stone_crafting_materials",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:stone_crafting_materials",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:stone_crafting_materials",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "invalid",
+     "metadata": 32767,
+     "count": 0
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:stone_crafting_materials",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:stone_crafting_materials",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:stone_crafting_materials",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:stone_crafting_materials",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 61,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": -831469991,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "a2414efb-da2a-9ae0-8ef4-329ff794a0b2",
+   "block": "crafting_table",
+   "priority": -1,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "item_tag",
+      "tag": "minecraft:stone_crafting_materials",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 4208
+  },
+  {
+   "recipe_id": "minecraft:furnace_from_blackstone",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:blackstone",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:blackstone",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:blackstone",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:blackstone",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "invalid",
+     "metadata": 32767,
+     "count": 0
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:blackstone",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:blackstone",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:blackstone",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:blackstone",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 61,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": -831469991,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "d64f1864-1e52-a4bb-895c-06dc13fb90bb",
+   "block": "crafting_table",
+   "priority": 2,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:blackstone",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 4209
+  },
+  {
+   "recipe_id": "minecraft:furnace_from_cobbled_deepslate",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:cobbled_deepslate",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:cobbled_deepslate",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:cobbled_deepslate",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:cobbled_deepslate",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "invalid",
+     "metadata": 32767,
+     "count": 0
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:cobbled_deepslate",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:cobbled_deepslate",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:cobbled_deepslate",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:cobbled_deepslate",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 61,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": -831469991,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "1f4ff100-d275-06fa-50ad-eee6b8751cbc",
+   "block": "crafting_table",
+   "priority": 2,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:cobbled_deepslate",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 4210
+  },
+  {
+   "recipe_id": "minecraft:iron_block",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_ingot",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_ingot",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_ingot",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_ingot",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_ingot",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_ingot",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_ingot",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_ingot",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_ingot",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 42,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": -939070369,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "0549b9bc-4a86-3c9d-1d3e-13a0982a488a",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:iron_ingot",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 4250
+  },
+  {
+   "recipe_id": "minecraft:iron_ingot_from_block",
+   "width": 1,
+   "height": 1,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_block",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 307,
+     "count": 9,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "31407d53-8f0f-f1d3-b2e3-d430f12b74b8",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:iron_block",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 4256
+  },
+  {
+   "recipe_id": "minecraft:iron_ingot_from_nuggets",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_nugget",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_nugget",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_nugget",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_nugget",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_nugget",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_nugget",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_nugget",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_nugget",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_nugget",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 307,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "244413fb-aef0-7ec1-0d5d-63467998fb9a",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:iron_nugget",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 4257
+  },
+  {
+   "recipe_id": "minecraft:oak_planks",
+   "width": 1,
+   "height": 1,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:oak_log",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 5,
+     "count": 4,
+     "metadata": 0,
+     "block_runtime_id": 1921718966,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "0c4d2c2a-95df-8400-cdcf-81083b7c06ba",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:oak_log",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 3587
+  },
+  {
+   "recipe_id": "minecraft:oak_planks_from_stripped",
+   "width": 1,
+   "height": 1,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stripped_oak_log",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 5,
+     "count": 4,
+     "metadata": 0,
+     "block_runtime_id": 1921718966,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "fa49c8e7-1737-e2ea-c9dd-e2a078938a81",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:stripped_oak_log",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 3588
+  },
+  {
+   "recipe_id": "minecraft:oak_planks_from_stripped_wood",
+   "width": 1,
+   "height": 1,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stripped_oak_wood",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 5,
+     "count": 4,
+     "metadata": 0,
+     "block_runtime_id": 1921718966,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "fa43ced7-d08b-777d-f616-7bc5501c11a1",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:stripped_oak_wood",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 3944
+  },
+  {
+   "recipe_id": "minecraft:oak_planks_from_wood",
+   "width": 1,
+   "height": 1,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:oak_wood",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 5,
+     "count": 4,
+     "metadata": 0,
+     "block_runtime_id": 1921718966,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "d44db7aa-c14b-8664-a905-d5162c8b1fba",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:oak_wood",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 3945
+  },
+  {
+   "recipe_id": "minecraft:raw_iron",
+   "width": 1,
+   "height": 1,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:raw_iron_block",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 516,
+     "count": 9,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "b04c4584-690f-f50c-a7f0-b0da1589798c",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:raw_iron_block",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 4402
+  },
+  {
+   "recipe_id": "minecraft:raw_iron_block",
+   "width": 3,
+   "height": 3,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:raw_iron",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:raw_iron",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:raw_iron",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:raw_iron",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:raw_iron",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:raw_iron",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:raw_iron",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:raw_iron",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:raw_iron",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": -451,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 1077242782,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "10488203-629f-d6ad-0b45-628523be1683",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:raw_iron",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 4403
+  },
+  {
+   "recipe_id": "minecraft:stick",
+   "width": 1,
+   "height": 2,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:planks",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 323,
+     "count": 4,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "f4422530-ed2a-1580-65e8-e77293128994",
+   "block": "crafting_table",
+   "priority": -1,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "item_tag",
+      "tag": "minecraft:planks",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 4453
+  },
+  {
+   "recipe_id": "minecraft:stick_from_crimson_planks",
+   "width": 1,
+   "height": 2,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:crimson_planks",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 323,
+     "count": 4,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "b641b0a7-5181-91f3-b2f0-a2c4d9c0ae9f",
+   "block": "crafting_table",
+   "priority": 2,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 4738
+  },
+  {
+   "recipe_id": "minecraft:stick_from_mangrove_planks",
+   "width": 1,
+   "height": 2,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:mangrove_planks",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 323,
+     "count": 4,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "f14f213e-3d18-64e3-cb9f-0f401819a8b0",
+   "block": "crafting_table",
+   "priority": 2,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 4642
+  },
+  {
+   "recipe_id": "minecraft:stick_from_warped_planks",
+   "width": 1,
+   "height": 2,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_planks",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:warped_planks",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 323,
+     "count": 4,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "5043d3fa-70a9-9ccc-d355-140a8b4726bf",
+   "block": "crafting_table",
+   "priority": 2,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 4739
+  },
+  {
+   "recipe_id": "minecraft:torch",
+   "width": 1,
+   "height": 2,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "item_tag",
+     "tag": "minecraft:coals",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:stick",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 50,
+     "count": 4,
+     "metadata": 0,
+     "block_runtime_id": -1188029192,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "364f6ddf-a12d-8ecf-d68d-0ef44560de8c",
+   "block": "crafting_table",
+   "priority": -1,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "item_tag",
+      "tag": "minecraft:coals",
+      "metadata": 32767,
+      "count": 1
+     },
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:stick",
+      "metadata": 32767,
+      "count": 1
+     },
+     {
+      "type": "valid",
+      "descriptor_type": "item_tag",
+      "tag": "minecraft:is_pickaxe",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 3318
+  }
+ ],
+ "shapeless_recipes": [
+  {
+   "recipe_id": "minecraft:furnace_deepslate_iron_ore",
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:deepslate_iron_ore",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 307,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "f844638f-0eff-b644-7f0c-82b29c247d8b",
+   "block": "furnace",
+   "priority": 100,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:deepslate_iron_ore",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 3098
+  },
+  {
+   "recipe_id": "minecraft:furnace_iron",
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:raw_iron",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 307,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "4342ade1-9e93-1861-9ec6-32d071aa1c8a",
+   "block": "furnace",
+   "priority": 100,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:raw_iron",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 3145
+  },
+  {
+   "recipe_id": "minecraft:furnace_iron_ore",
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_ore",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 307,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "ab402e9e-a5f0-0c17-6ec4-43fe5580eda8",
+   "block": "furnace",
+   "priority": 100,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:iron_ore",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 3161
+  },
+  {
+   "recipe_id": "minecraft:furnace_deepslate_iron_ore",
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:deepslate_iron_ore",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 307,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "99401c40-7da2-3e7d-daa6-0b8dc7153c86",
+   "block": "blast_furnace",
+   "priority": 100,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:deepslate_iron_ore",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 3099
+  },
+  {
+   "recipe_id": "minecraft:furnace_iron",
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:raw_iron",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 307,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "874e3e49-c975-3159-7d46-1331a1376391",
+   "block": "blast_furnace",
+   "priority": 100,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:raw_iron",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 3146
+  },
+  {
+   "recipe_id": "minecraft:furnace_iron_ore",
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:iron_ore",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 307,
+     "count": 1,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "fc4760cc-124e-a5f5-f832-c93aa731e0aa",
+   "block": "blast_furnace",
+   "priority": 100,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:iron_ore",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 3162
+  }
+ ],
+ "multi_recipes": [],
+ "clear_recipes": true
+}

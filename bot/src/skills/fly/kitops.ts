@@ -4,7 +4,8 @@
 //   wearElytra        the chestplate comes off into the inventory and the elytra goes into the chest
 //                     slot (armour window 120, slot 1: one `swap` or `place` item_stack_request with
 //                     the inventory screen open, survival/armour.ts); wearChestplate puts it back
-//   rocketsToHotbar   a stack of rockets moves from the main inventory into a free hotbar slot
+//   rocketsToHotbar   a stack of rockets moves from the main inventory into a free hotbar slot (a full
+//                     hotbar parks its least useful item, e.g. a shulker box, in the main inventory first)
 //   refillFromBox     the fireworks box is placed next to the bot (the stash primitive of
 //                     container/stash.ts: a free cell with a solid top), opened, rockets are taken out
 //                     up to a stack in the hotbar, it is closed, broken and picked up again
@@ -14,6 +15,7 @@ import type { Vec3 } from '../../connection/types.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { BlockInfo, ContainerView, ItemStack } from '../../world/types.ts';
 import { isShulkerBox } from '../container/chest.ts';
+import { hotbarTarget } from '../container/hotbar-moves.ts';
 import { boxSpots } from '../container/stash.ts';
 import type { ArmourController, ArmourMove } from '../survival/armour.ts';
 import { armourSlotOf } from '../survival/armour.ts';
@@ -31,7 +33,7 @@ export interface KitOpsSkills {
 }
 
 export interface KitOpsDeps {
-  inventory: KitInventory & { window(id: number): ContainerView | undefined; freeSlots(): number[] };
+  inventory: KitInventory & { window(id: number): ContainerView | undefined; freeSlots(): number[]; readonly selected?: number };
   armour: Pick<ArmourController, 'wear' | 'worn'>;
   requests: Pick<StackRequests, 'withScreen'>;
   /** world/containers.ts: a predicted move between player slots (under the inventory screen). */
@@ -116,13 +118,39 @@ export class FlightKitOps {
       const s = slots[i];
       if (s && s.count > 0 && isRocket(s.name) && (from < 0 || s.count > slots[from]!.count)) from = i;
     }
+    if (from < 0) return { ok: false, reason: 'no rockets' };
     let to = -1;
     for (let i = 8; i >= 0 && to < 0; i--) if (!slots[i]) to = i;
-    if (from < 0 || to < 0) return { ok: false, reason: to < 0 ? 'no free hotbar slot for the rockets' : 'no rockets' };
-    const count = slots[from]!.count;
-    const r = await this.d.requests.withScreen(() => this.d.move({ window: 0, slot: from }, { window: 0, slot: to }, count));
+    const r = await this.d.requests.withScreen(async () => {
+      if (to < 0) {
+        const parked = await this.makeHotbarRoom();
+        if (typeof parked === 'string') return { ok: false, reason: parked };
+        to = parked;
+      }
+      return this.d.move({ window: 0, slot: from }, { window: 0, slot: to }, slots[from]!.count);
+    });
     if (!('ok' in r) || !r.ok) return { ok: false, reason: `moving the rockets to the hotbar failed${'reason' in r && r.reason ? ` (${r.reason})` : ''}` };
     return { ok: true };
+  }
+
+  /**
+   * A full hotbar (inventory screen open): the least useful hotbar item (hotbar-moves.ts `hotbarTarget`:
+   * a block or box before food before a tool, the held slot last; never rockets or the elytra) moves into
+   * a free main-inventory slot; the freed hotbar slot, or why not.
+   */
+  private async makeHotbarRoom(): Promise<number | string> {
+    const inv = this.d.inventory;
+    const t = hotbarTarget({ slots: inv.slots, selected: inv.selected ?? -1 }, (it) => (isRocket(it.name) ? 1 : 0), (it) => it.name === 'elytra');
+    if (!t) return 'no hotbar slot can be freed for the rockets';
+    if (t.empty) return t.slot;
+    let park = -1;
+    for (let i = 9; i < 36 && park < 0; i++) if (!inv.slots[i]) park = i;
+    if (park < 0) return 'the inventory is full (no slot to move a hotbar item to for the rockets)';
+    const it = inv.slots[t.slot]!;
+    const m = await this.d.move({ window: 0, slot: t.slot }, { window: 0, slot: park }, it.count);
+    if (!m.ok) return `moving the ${it.name} out of the hotbar failed${m.reason ? ` (${m.reason})` : ''}`;
+    this.log.info(`flight kit: moved the ${it.name} from hotbar slot ${t.slot} to slot ${park} for the rockets`);
+    return t.slot;
   }
 
   /**

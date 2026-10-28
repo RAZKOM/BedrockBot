@@ -27,6 +27,7 @@ export const PANEL_SCRIPT = String.raw`(() => {
   const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
   const clear = (e) => { if (e.replaceChildren) e.replaceChildren(); else e.textContent = ''; };
   const ICONS = new Set(ICON_LIST);
+  const ICON_BASE = '/icons/';
   const POLL = POLL_MS_V, HIDDEN = HIDDEN_MS_V, CONFIRM = CONFIRM_V;
   let last = JSON.parse($('initial').textContent);
   let renders = 0, lastOk = Date.now(), timer = 0, picked = null, bytes = $('initial').textContent.length;
@@ -107,10 +108,26 @@ export const PANEL_SCRIPT = String.raw`(() => {
   const itemOf = (s, k) => { const inv = s.inventory; if (!inv) return null; if (k === 'off') return inv.offhand; if (k.charAt(0) === 'a') return inv.armour[Number(k.slice(1))] || null; return inv.slots[Number(k.slice(1))] || null; };
   const boxLine = (b) => (!b.known ? 'contents unknown (moved since the server sent it)' : b.items.length === 0 ? 'empty' : b.items.map((x) => x[1] + ' ' + nice(x[0])).join(', ') + (b.more ? ', +' + b.more + ' more kinds' : '') + ' (' + b.stacks + '/27 slots)');
   const label = (it) => nice(it.name) + (it.count > 1 ? ' x' + it.count : '') + (it.dur ? ', durability ' + it.dur.left + '/' + it.dur.max + ' (' + it.dur.pct + '%)' : '') + (it.box ? ', ' + boxLine(it.box) : '');
+  // The item pictures (GET /icons/<name>.png, decision 0046): shown once loaded, the glyph until then and for
+  // the names the server has none for (404, remembered so a cell asks once per page).
+  const noPicture = new Set();
+  let pictures = false;
+  function setPicture(el, it) {
+    const img = el.querySelector('img');
+    if (!img || !it) return; // an empty cell hides its picture by CSS and keeps it for the next time
+    if (!pictures || noPicture.has(it.name)) {
+      if (img.dataset.n) { img.dataset.n = ''; img.hidden = true; el.classList.remove('tex'); }
+      return;
+    }
+    if (img.dataset.n === it.name) return;
+    img.dataset.n = it.name; img.hidden = true; el.classList.remove('tex');
+    img.src = ICON_BASE + it.name + '.png';
+  }
   function setCell(el, it, sel) {
     const sig = it ? it.name + '|' + it.count + '|' + it.colour + '|' + (it.dur ? it.dur.left : '') + '|' + (it.box ? JSON.stringify(it.box) : '') : '';
     if (el.dataset.sig !== sig) {
       el.dataset.sig = sig;
+      setPicture(el, it);
       const use = el.querySelector('use');
       if (use) use.setAttribute('href', '#g-' + (it && ICONS.has(it.icon) ? it.icon : 'item'));
       el.style.color = it ? it.colour : '';
@@ -146,6 +163,11 @@ export const PANEL_SCRIPT = String.raw`(() => {
   }
   const box = $('iteminfo');
   for (const k in cells) {
+    const pic = cells[k].querySelector('img'), cellEl = cells[k];
+    if (pic) {
+      pic.addEventListener('load', () => { if (pic.dataset.n) { pic.hidden = false; cellEl.classList.add('tex'); } });
+      pic.addEventListener('error', () => { if (pic.dataset.n) noPicture.add(pic.dataset.n); pic.dataset.n = ''; pic.hidden = true; cellEl.classList.remove('tex'); });
+    }
     cells[k].addEventListener('click', (ev) => {
       if (picked !== null && cells[picked]) cells[picked].classList.remove('picked');
       picked = picked === k ? null : k;
@@ -157,6 +179,7 @@ export const PANEL_SCRIPT = String.raw`(() => {
   }
   function renderInventory(s) {
     const inv = s.inventory;
+    pictures = !!s.icons;
     for (const k in cells) setCell(cells[k], itemOf(s, k), !!inv && k.charAt(0) === 's' && Number(k.slice(1)) === inv.selected);
     text('inv-sum', inv ? (36 - inv.free) + '/36 slots used, armour ' + inv.armourPoints + '/20' : 'no inventory (no world model)');
     info(s);

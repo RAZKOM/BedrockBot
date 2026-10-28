@@ -45,7 +45,7 @@ export function planChests(records: readonly ChestRecord[]): PlanChest[] {
   const partners = partnerKeys(records);
   return records
     .filter((r) => r.readAt > 0 && r.size > 0 && !r.unreachable && !partners.has(chestKey(r))) // Track AN: not the unreachable ones
-    .map((r) => ({ key: chestKey(r), pos: { x: r.x, y: r.y, z: r.z }, kind: r.kind, label: r.label, free: r.free, contents: r.contents, room: r.room, boxes: r.boxes }));
+    .map((r) => ({ key: chestKey(r), pos: { x: r.x, y: r.y, z: r.z }, kind: r.kind, label: r.label, free: r.free, contents: r.contents, room: r.room, boxes: r.boxes, inBoxes: r.inBoxes })); // Track AV: inBoxes (rule 1)
 }
 
 export const fmtPos = (p: Vec3): string => `${p.x} ${p.y} ${p.z}`;
@@ -164,19 +164,23 @@ export function stockLine(store: Pick<ChestMemoryStore, 'all'>, raw: string | un
   if (!raw) {
     const total: Record<string, number> = {};
     for (const r of list) for (const [k, v] of Object.entries(r.contents)) total[k] = (total[k] ?? 0) + v;
+    for (const r of list) for (const [k, v] of Object.entries(r.inBoxes ?? {})) total[k] = (total[k] ?? 0) + v; // Track AV: boxed items count
     const what = top(total, 12);
     return `stock: ${list.length} container${list.length === 1 ? '' : 's'}: ${what || 'all empty'}`;
   }
   const q = itemQuery(raw);
-  const hits: { r: ChestRecord; n: number; empty?: number }[] = [];
+  const hits: { r: ChestRecord; n: number; empty?: number; boxed: number }[] = [];
   for (const r of list) {
     let n = 0;
     for (const [k, v] of Object.entries(r.contents)) if (itemMatches(q, k)) n += v;
-    if (n > 0) hits.push({ r, n, ...(q === 'shulker_box' ? { empty: r.boxes.empty } : {}) });
+    // Track AV: what the chest's full boxes hold counts too (`(1728 in boxes)`)
+    let boxed = 0;
+    if (q !== 'shulker_box') for (const [k, v] of Object.entries(r.inBoxes ?? {})) if (itemMatches(q, k)) boxed += v;
+    if (n + boxed > 0) hits.push({ r, n: n + boxed, boxed, ...(q === 'shulker_box' ? { empty: r.boxes.empty } : {}) });
   }
   if (hits.length === 0) return `stock: no ${q} in the ${list.length} container${list.length === 1 ? '' : 's'} I know`;
   hits.sort((a, b) => b.n - a.n);
   const total = hits.reduce((a, h) => a + h.n, 0);
-  const parts = hits.map((h) => `${h.n} in ${chestName(h.r)}${h.empty !== undefined ? ` (${h.empty} empty)` : ''}`);
+  const parts = hits.map((h) => `${h.n} in ${chestName(h.r)}${h.empty !== undefined ? ` (${h.empty} empty)` : ''}${h.boxed > 0 ? ` (${h.boxed === h.n ? 'all' : h.boxed} in boxes)` : ''}`);
   return `${q}: ${parts.join(', ')}${hits.length > 1 ? ` (${total} in all)` : ''}`;
 }

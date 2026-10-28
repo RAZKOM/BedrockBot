@@ -47,6 +47,10 @@ export interface WorkerPlanOptions {
   allowOpen: boolean;
   /** Track AJ: movement-variety moves (PathOptions.moves). */
   moves?: PathOptions['moves'];
+  /** Track BC: Baritone's way with a gravity block over a dug cell (PathOptions.allowGravityAbove). */
+  allowGravityAbove?: boolean;
+  /** Track BC: throwaway blocks in the hotbar (PathOptions.throwaway: the dig-down move's depth budget). */
+  throwaway?: number;
   protectedBlocks?: string[];
   protectedArea?: { x: number; y: number; z: number; r: number };
   noBreak?: number[];
@@ -721,6 +725,8 @@ function workerOptions(o: WorkerPlanOptions): PathOptions {
     allowPlace: o.allowPlace,
     allowOpen: o.allowOpen,
     ...(o.moves ? { moves: o.moves } : {}), // Track AJ
+    ...(o.allowGravityAbove !== undefined ? { allowGravityAbove: o.allowGravityAbove } : {}), // Track BC
+    ...(o.throwaway !== undefined ? { throwaway: o.throwaway } : {}), // Track BC
     ...(o.protectedBlocks ? { protectedBlocks: o.protectedBlocks } : {}),
     ...(o.protectedArea ? { protectedArea: o.protectedArea } : {}),
     ...(o.noBreak ? { noBreak: new Set(o.noBreak) } : {}),

@@ -54,6 +54,29 @@ export function parseBlockText(raw: string, key: string): string {
   return n.join(' ');
 }
 
+/** Track AW: `iron_ingot 9, diamond 4` / `none` -> the same, normalised (names without the namespace, whole counts). */
+export function parseReserveText(raw: string, key: string): string {
+  const s = raw.trim().toLowerCase();
+  if (s === 'none' || s === '') return 'none';
+  const parts = s.split(/\s*,\s*/).map((part) => {
+    const m = /^(?:minecraft:)?([a-z][a-z0-9_]{0,63})\s+(\d{1,5})$/.exec(part.trim());
+    if (!m) throw new SettingError(`${key} must be "item n[, item n]" or none, got "${raw}"`);
+    return `${m[1]} ${Number(m[2])}`;
+  });
+  return parts.join(', ');
+}
+
+/** Track AW: the reserve text as a map (item -> count). */
+export function parseReserve(text: string): Map<string, number> {
+  const out = new Map<string, number>();
+  if (!text || text === 'none') return out;
+  for (const part of text.split(',')) {
+    const [name, n] = part.trim().split(/\s+/);
+    if (name && n !== undefined && Number.isFinite(Number(n))) out.set(name, Number(n));
+  }
+  return out;
+}
+
 /**
  * Every runtime setting. Placeholders (read by later tracks) are marked; adding one is one entry here
  * plus the reader calling `settings.get(key)`.
@@ -92,12 +115,16 @@ export const SETTING_DEFS = {
   homeChestRadius: { kind: 'number', default: 16, min: 2, max: 48, integer: true, unit: 'blocks', description: 'home logistics: chests, barrels and shulker boxes within this radius of home are found, read and unloaded into' }, // Track AG
   homeChestWalk: { kind: 'number', default: 64, min: 0, max: 256, integer: true, unit: 'path blocks', description: 'home logistics: containers whose walk from home is longer than this (the planner\'s path) are skipped and remembered as unreachable; 0 = no path check (homeChestRadius only)' }, // Track AN
   getSuggestsBring: { kind: 'boolean', default: true, description: '!get: when the chests at home already hold enough of the item, the reply says so and names !bring (!get still makes new ones)' }, // Track AS
+  keepBoxName: { kind: 'text', default: 'bot_loot', values: 'name', parse: (raw: string) => { const v = raw.trim(); if (v.length < 1 || v.length > 32) throw new SettingError(`keepBoxName must be 1 to 32 characters, got "${raw}"`); return v; }, description: 'shulker boxes with this name (case and colour ignored) belong to the bot: never unloaded, stored, used for boxing or dropped by !drop all; the stash step fills them first; !unload empties them' }, // Track AV
   autoUnload: { kind: 'boolean', default: true, description: 'unload into the chests at home as a chore when idle there with more than 8 stacks of unloadable items or a full shulker box' }, // Track AG
   mineBranchY: { kind: 'text', default: 'auto', values: 'auto|-64..320', parse: (raw: string) => { const s = raw.trim().toLowerCase(); if (s === 'auto' || s === '') return 'auto'; const n = Number(s); if (!Number.isInteger(n) || n < -64 || n > 320) throw new SettingError(`mineBranchY must be auto or a whole number -64..320, got "${raw}"`); return String(n); }, description: 'branch mining: the Y of the tunnels when !mine knows no ore (auto: the best Y of the ore, e.g. iron 16, diamond -58)' }, // Track AI
   exploreRadius: { kind: 'number', default: 128, min: 16, max: 1024, integer: true, unit: 'blocks', description: '!explore: radius of the area walked (around home, else the bot)' }, // Track AI
   portalRadius: { kind: 'number', default: 64, min: 8, max: 256, integer: true, unit: 'blocks', description: '!nether / !overworld: search radius for a nether portal block when no `portal` waypoint of this dimension is known' }, // Track AT
   guardReach: { kind: 'number', default: 24, min: 0, max: 64, integer: true, unit: 'path blocks', description: 'guard: a hostile not within reach is fought only when the planner finds a walk to it of at most this length (else ignored for 30 s); 0 = no path check' }, // Track AO
   guardWhileWalking: { kind: 'text', default: 'near', values: 'reach|near|all', parse: (raw: string) => { const v = raw.trim().toLowerCase(); if (v !== 'reach' && v !== 'near' && v !== 'all') throw new SettingError(`guardWhileWalking must be reach, near or all, got "${raw}"`); return v; }, description: 'guard during a walk (come, follow, goto, get, unload, build, ...): reach = only mobs within reach; near = also melee mobs, creepers and archers aiming at me within 6 path blocks; all = as when idle' }, // Track AO
+  // Track AW: crafting (docs/crafting.md)
+  craftReserve: { kind: 'text', default: 'none', values: 'item n[, item n]|none', parse: (raw: string) => parseReserveText(raw, 'craftReserve'), description: 'crafting / compaction: never consume below this many of an item (`iron_ingot 9, diamond 4`); none = no reserve (tools, armour, food and the flight kit are never consumed anyway)' }, // Track AW
+  compactOnUnload: { kind: 'boolean', default: true, description: '!unload: when a chest cannot take a load of raw iron, ingots, gems, coal, redstone or lapis, craft them into blocks (9 -> 1) first' }, // Track AW
   // Track AU: Elytra flight (docs/flight.md)
   autoFly: { kind: 'boolean', default: true, description: 'come / goto fly with the elytra instead of walking when the target is more than flyMin blocks away and the flight kit is ready (elytra, rockets or the fireworks box)' },
   flyMin: { kind: 'number', default: 200, min: 20, max: 5000, integer: true, unit: 'blocks', description: 'autoFly: fly instead of walking from this distance on' },

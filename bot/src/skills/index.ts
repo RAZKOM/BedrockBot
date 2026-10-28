@@ -136,9 +136,31 @@ export class BotSkills implements Skills {
     const source = worldSource(opts.world);
     if (opts.usePhysicsWorld ?? true) this.loop.world = blockQueryOf(source);
     const inventory = opts.world.inventory;
+    // Track BC: section (re)placements reach the navigator's grid too (chunks re-sent after a teleport carry fills that never came as block updates)
+    // and a dropped column (unloaded, or replaced by a re-sent level_chunk, which arrives as a fresh unloaded column) leaves
+    // stale cells behind too, so it counts as a reload
+    const chunks = (
+      opts.world as {
+        chunks?: {
+          onSection?: (fn: (col: { loaded: boolean }, rel: number) => void) => () => void;
+          onColumnUnloaded?: (fn: (cx: number, cz: number) => void) => () => void;
+        };
+      }
+    ).chunks;
+    const onSection =
+      typeof chunks?.onSection === 'function'
+        ? (fn: (reloaded: boolean) => void) => {
+            const offSection = chunks.onSection!((col) => fn(col.loaded));
+            const offUnload = typeof chunks.onColumnUnloaded === 'function' ? chunks.onColumnUnloaded(() => fn(true)) : undefined;
+            return () => {
+              offSection();
+              offUnload?.();
+            };
+          }
+        : undefined;
     this.nav = new Navigator(
       this.loop,
-      { source, onBlockUpdate: (fn) => opts.world.onBlockUpdate(fn) },
+      { source, onBlockUpdate: (fn) => opts.world.onBlockUpdate(fn), ...(onSection ? { onSection } : {}) },
       {
         ...opts,
         logger: this.log,
@@ -154,6 +176,14 @@ export class BotSkills implements Skills {
           ...opts.actions,
         },
         inventory: opts.inventory ?? (inventory ? () => inventory : undefined),
+        // Track BE: abort the Digger's job when the navigator gives up on a dig; plan with the Digger's tool filter
+        cancelDig: opts.cancelDig ?? (() => this._digger?.cancel()),
+        toolOk:
+          opts.toolOk ??
+          (() => {
+            const d = this._digger;
+            return d ? (it) => d.toolOk(it as ItemStack) : undefined;
+          }),
       },
     );
     this.unsubs.push(

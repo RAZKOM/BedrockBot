@@ -183,6 +183,8 @@ export function registerGetCommands(d: CommandDeps, extra: GetExtra = {}): GetCo
       drop: (name, n) => survivalKitOf(d.task)?.drop(name, n) ?? Promise.resolve({ ok: false, dropped: 0, reason: 'no survival kit' }),
       log,
       say: (m) => d.chat.say(m),
+      ...(d.pve ? { selectHotbar: (slot: number) => void d.pve!.hotbar.select(slot) } : {}), // Track AV: the chosen box is the one placed
+      toHotbar: (slot) => survivalKitOf(d.task)?.hotbar(slot) ?? Promise.resolve(undefined), // same-coloured boxes: the chosen one into the hotbar
     });
   setStash(processes, stash);
   // a pre-emption (guard, flee, night) or a new command moves control: the stash step stops

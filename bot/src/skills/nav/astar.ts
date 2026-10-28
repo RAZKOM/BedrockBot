@@ -7,6 +7,14 @@
 //   jump   - cardinal, up by more than the step height and at most 1.25, head room above the start.
 //   drop   - cardinal, walk off an edge and fall up to `maxDrop` (3) blocks.
 //   pillar - straight up one block: jump and place a throwaway block under the feet (`allowPlace`).
+// Track BC, the moves that dig (`allowBreak`; baritone/moves.ts, Baritone's movements, LGPL-3.0):
+//   walk + dig   - MovementTraverse: the 1 or 2 body cells ahead are broken first (dig-through, as before).
+//   jump + dig   - MovementAscend: the head room over the start and the target's body cells are broken.
+//   drop + dig   - MovementDescend: the three body cells of the column one lower are broken, a full floor
+//                  under it (never into liquid).
+//   downward     - MovementDownward: the block under the feet is dug and the body drops one; only under the
+//                  shaft rules (mine/tunnel.ts `shaftRule`) and with pillar-up planned as the way back.
+//   pillar + dig - MovementPillar: the cell above the head is broken before the jump.
 // Track AJ, movement variety (`moves`, docs/pathfinding.md "Movement variety"):
 //   swim     - into still water (walk in, or drop up to 3 onto the surface), between surface cells
 //              (8 neighbours), never under water.
@@ -25,8 +33,9 @@ import type { Vec3 } from '../../world/types.ts';
 import { breakTicks as tableBreakTicks } from '../dig/breakTime.ts';
 import { PHYSICS } from '../input/physics.ts';
 import { halfTop, type TerrainClass } from '../terrain/classify.ts';
-import { breakBlocker, type BreakRules, type NavBlockFace } from './actions.ts';
+import type { BreakRules, NavBlockFace } from './actions.ts';
 import { BestSoFar, FAILURE_NODES_FACTOR } from './baritone/bestSoFar.ts'; // Track BA: partial-path selection (ported, LGPL-3.0)
+import { ascend, createBreakMoveContext, descend, downward, pillar, sneakFits, traverse, type BreakMoveContext } from './baritone/moves.ts'; // Track BC: the moves that dig (ported, LGPL-3.0) and sneak-through
 import { DEFAULT_COSTS, dropCost, type PathCosts } from './costs.ts';
 import { goalTest, type NavGoal, type GoalTest } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
 import { CROSS_BLOCKED, CROSS_TOGGLE, VARIETY_CLIMBER, VARIETY_LADDER, VARIETY_WATER, cellKey, type NavGrid } from './grid.ts';
@@ -34,7 +43,7 @@ import { CROSS_BLOCKED, CROSS_TOGGLE, VARIETY_CLIMBER, VARIETY_LADDER, VARIETY_W
 export type { PathCosts } from './costs.ts';
 export { DEFAULT_COSTS } from './costs.ts';
 
-export type MoveKind = 'start' | 'walk' | 'diag' | 'jump' | 'drop' | 'pillar' | 'swim' | 'swimOut' | 'climb' | 'climbOut' | 'parkour'; // Track AJ: swim .. parkour
+export type MoveKind = 'start' | 'walk' | 'diag' | 'jump' | 'drop' | 'pillar' | 'swim' | 'swimOut' | 'climb' | 'climbOut' | 'parkour' | 'downward' | 'sneak'; // Track AJ: swim .. parkour; Track BC: downward, sneak
 
 /** World changes a move needs before (dig, use) or while (place) it is walked. */
 export interface NodeActions {
@@ -74,6 +83,15 @@ export interface MoveSet {
   parkour1?: boolean;
   /** Jump 2-block gaps with a 2-block sprint run-up. */
   parkour2?: boolean;
+  // Track BC: the moves that dig (under `allowBreak`; dig-through itself is always on with it)
+  /** Jump up one block after breaking the head room (MovementAscend). */
+  digAscend?: boolean;
+  /** Step down one block after breaking into the lower column (MovementDescend). */
+  digDescend?: boolean;
+  /** Dig the block under the feet and drop one (MovementDownward; needs `allowPlace` for the way back). */
+  digDownward?: boolean;
+  /** Track BC: walk sneaking through cells the body only fits sneaking (a 1.5-high gap under a top slab). */
+  sneak?: boolean;
 }
 
 export interface PathOptions {
@@ -101,6 +119,13 @@ export interface PathOptions {
   protectedArea?: BreakRules['protectedArea'];
   /** Cells (cellKey) not to break (a dig there failed). */
   noBreak?: ReadonlySet<number>;
+  /**
+   * Track BC: Baritone's way with a gravity block over a dug cell (the falling stack is dug too and its
+   * break times are paid: `BreakRules.allowGravityAbove`). Default false: the owner's rule, refused.
+   */
+  allowGravityAbove?: boolean;
+  /** Track BC: throwaway blocks in the hotbar (the dig-down move needs the depth + 4 for the pillar back up). Default 0. */
+  throwaway?: number;
   /** Track S: extra ticks (>= 0) for a move that ends in feet cell (x, y, z): mob / spawner avoidance (nav/avoidance.ts). */
   cellCost?: (x: number, y: number, z: number) => number;
   /** Track R: cells (cellKey) not to pillar in / doors (lower half) not to open (blacklisted place / use failures). */
@@ -162,12 +187,16 @@ const M_SWIM_OUT = 7;
 const M_CLIMB = 8;
 const M_CLIMB_OUT = 9;
 const M_PARKOUR = 10;
-const MOVE_CODES: readonly MoveKind[] = ['start', 'walk', 'diag', 'jump', 'drop', 'pillar', 'swim', 'swimOut', 'climb', 'climbOut', 'parkour'];
+const M_DOWNWARD = 11; // Track BC
+const M_SNEAK = 12; // Track BC
+const MOVE_CODES: readonly MoveKind[] = ['start', 'walk', 'diag', 'jump', 'drop', 'pillar', 'swim', 'swimOut', 'climb', 'climbOut', 'parkour', 'downward', 'sneak'];
 /** Node flag: the node stands in a doorway (only cardinal walks leave it). */
 const F_PASSAGE = 1;
 /** Track AJ: node flags: swimming on the surface; climbing (feet in a climber cell, no floor). */
 const F_SWIM = 2;
 const F_CLIMB = 4;
+/** Track BC: the body only fits sneaking (a low ceiling: baritone/moves.ts `sneakFits`); only sneak moves leave it. */
+const F_SNEAK = 8;
 
 /** Binary min-heap of node indices keyed by f. */
 class Heap {
@@ -307,6 +336,18 @@ export class PathSearch {
   private pendingGap: PathNode['gap'] = undefined;
   /** Track AJ: per cardinal direction of the node being expanded: a gap starts next to it. */
   private readonly holes = new Uint8Array(4);
+  /** Track BC: per cardinal direction: the same-level cell is blocked (1), a move one level down was taken (2). */
+  private readonly digFlags = new Uint8Array(4);
+  /** Track BC: the moves that dig (baritone/moves.ts), built when `allowBreak` is on. */
+  private readonly breaks: BreakMoveContext | undefined;
+  /** Track BC: the start's y (the dig-down move's depth budget counts from it). */
+  private readonly startY: number;
+  /**
+   * Track BC: the lowest y a goal point lies at (-Infinity for goals without one: xz): digging down into open
+   * ground (a staircase, a shaft) is only planned from nodes above it. Without the gate A* digs the whole area
+   * under the search layer by layer, because every open floor ahead is one cheap dig away.
+   */
+  private readonly goalMinY: number;
 
   constructor(grid: NavGrid, start: { x: number; y: number; z: number }, goal: NavGoal, opts: PathOptions = {}) {
     this.grid = grid;
@@ -317,6 +358,21 @@ export class PathSearch {
     this.maxNodes = opts.maxNodes ?? 40_000;
     this.maxMs = opts.maxMs ?? 250;
     this.breakTicksOf = opts.breakTicks ?? handBreakTicks;
+    this.startY = start.y;
+    this.goalMinY = goalMinY(goal);
+    // Track BC: the break rules and costs every move that digs applies (baritone/moves.ts)
+    if (opts.allowBreak) {
+      const noBreak = opts.noBreak;
+      const rules: BreakRules = { protectedBlocks: opts.protectedBlocks, protectedArea: opts.protectedArea, allowGravityAbove: opts.allowGravityAbove ?? false };
+      this.breaks = createBreakMoveContext({
+        grid,
+        costs: this.costs,
+        mining: { breakTicks: this.breakTicksOf, dig: this.costs.dig, rules, noBreak: noBreak?.size ? (x, y, z) => noBreak.has(cellKey(x, y, z)) : undefined },
+        allowPlace: opts.allowPlace ?? false,
+        throwaway: opts.throwaway ?? 0,
+        minY: grid.source.minY ?? -64,
+      });
+    }
     const t0 = performance.now();
     let startFeet = grid.stand(start.x, start.y, start.z);
     let flags = 0;
@@ -341,6 +397,11 @@ export class PathSearch {
         startFeet = w;
         flags = F_SWIM;
       }
+    }
+    // Track BC: a body under a low ceiling starts from a sneak node
+    if (!isFeet(startFeet) && this.moveOn('sneak') && sneakFits(grid, start.x, start.y, start.z) === true) {
+      startFeet = start.y;
+      flags = F_SNEAK;
     }
     if (!isFeet(startFeet)) {
       this.done = { status: 'none', path: [], cost: 0, expanded: 0, ms: performance.now() - t0, unknown: false, limited: false };
@@ -506,6 +567,7 @@ export class PathSearch {
     // Track AJ: swim and climb nodes have their own moves
     if (flags0 & F_SWIM) return this.expandSwim(cur, cx, cy, cz);
     if (flags0 & F_CLIMB) return this.expandClimb(cur, cx, cy, cz, f0);
+    if (flags0 & F_SNEAK) return this.expandSneak(cur, cx, cy, cz); // Track BC
     const inPassage = (flags0 & F_PASSAGE) !== 0;
     const headCell = Math.floor(f0 + PHYSICS.height - 1e-6);
     const diag = costs.walk * Math.SQRT2;
@@ -515,6 +577,8 @@ export class PathSearch {
     const flat = Math.abs(f0 - cy) < FLAT;
     const holes = this.holes;
     holes.fill(0);
+    const digFlags = this.digFlags; // Track BC
+    digFlags.fill(0);
 
     for (let di = 0; di < 4; di++) {
       const [dx, dz] = CARDINAL[di]!;
@@ -559,13 +623,22 @@ export class PathSearch {
               if (this.stepsUp(f0, nx, ny, nz, f1, dx, dz)) this.relax(cur, nx, ny, nz, f1, costs.walk + costs.stairs, M_WALK);
               else this.relax(cur, nx, ny, nz, f1, costs.jump, M_JUMP);
             } else if (room === undefined) this.sawUnknown = true;
+            else if (ny === cy + 1) digFlags[di] = digFlags[di]! | 4; // Track BC: the jump exists but for the start's head room: an ascend with breaks
           }
           took = true;
         } else {
           took = true; // a wall: no drop either
         }
       }
-      if (levelBlocked && opts.allowBreak) this.digThrough(cur, cx, cy, cz, f0, nx, nz);
+      if (levelBlocked) {
+        digFlags[di] = digFlags[di]! | 1; // Track BC: the dig moves run after this loop (bit 4 may be set already)
+        // Track BC: into a cell the body only fits sneaking (a low ceiling): a sneak move
+        if (flat && !inPassage && this.moveOn('sneak')) {
+          const fits = sneakFits(grid, nx, cy, nz);
+          if (fits === undefined) this.sawUnknown = true;
+          else if (fits && this.ladderPass(cx, cy, cz, nx, nz, dx, dz, false)) this.relax(cur, nx, cy, nz, cy, costs.sneakWalk, M_SNEAK, 0, 0, undefined, F_SNEAK);
+        }
+      }
       if (inPassage && !took) {
         // Track AX: out of a doorway onto a floor a step lower in the cell below (a dirt path, farmland)
         const f1 = grid.stand(nx, cy - 1, nz);
@@ -608,6 +681,7 @@ export class PathSearch {
         }
         if (!Number.isNaN(f1)) {
           landing = true;
+          if (d === 1) digFlags[di] = digFlags[di]! | 2; // Track BC: a move one level down exists (no descend with breaks)
           const fall = f0 - f1;
           if (fall <= STEP) {
             // a step down into a lower cell (onto farmland, a dirt path, soul sand): a walk
@@ -631,6 +705,9 @@ export class PathSearch {
       // parkour (the scan above found the cells down to cy - 3 free when it ran to the end)
       if (holes[di] && !landing) holes[di] = (grid.variety & VARIETY_WATER) !== 0 && grid.cls(nx, cy - costs.maxDrop - 1, nz)?.liquid === 'water' ? 1 : 0;
     }
+
+    // Track BC: the moves that dig (baritone/moves.ts), from a node standing on a full block
+    if (this.breaks && flat) this.digMoves(cur, cx, cy, cz, inPassage);
 
     if (inPassage) return;
 
@@ -674,7 +751,96 @@ export class PathSearch {
         this.relax(cur, cx, cy + 1, cz, cy + 1, costs.jump, M_PILLAR, costs.place, 0, { place: { p: { x: cx, y: cy, z: cz }, face: 'down' } });
       } else if (room === undefined) {
         this.sawUnknown = true;
+      } else if (this.breaks) {
+        // Track BC: Baritone MovementPillar: break the cell above the head first
+        const m = pillar(this.breaks, cx, cy, cz);
+        this.takeUnknown();
+        if (m) this.relax(cur, cx, cy + 1, cz, cy + 1, m.base, M_PILLAR, m.extra, 0, { dig: m.dig, place: { p: { x: cx, y: cy, z: cz }, face: 'down' } });
       }
+    }
+  }
+
+  /**
+   * Track BC: moves of a sneak node (the body under a low ceiling): sneaking on into the next low cell, or
+   * out onto a node standing at the same level (both `sneak` moves at the sneak walking cost). No jumps,
+   * drops, diagonals or digs from here.
+   */
+  private expandSneak(cur: number, cx: number, cy: number, cz: number): void {
+    const grid = this.grid;
+    const costs = this.costs;
+    for (const [dx, dz] of CARDINAL) {
+      const nx = cx + dx;
+      const nz = cz + dz;
+      if (!this.ladderPass(cx, cy, cz, nx, nz, dx, dz, false)) continue;
+      const f1 = grid.stand(nx, cy, nz);
+      if (f1 === undefined) {
+        this.sawUnknown = true;
+        continue;
+      }
+      if (isFeet(f1)) {
+        if (Math.abs(f1 - cy) < FLAT) this.relax(cur, nx, cy, nz, cy, costs.sneakWalk, M_SNEAK);
+        continue;
+      }
+      const fits = sneakFits(grid, nx, cy, nz);
+      if (fits === undefined) this.sawUnknown = true;
+      else if (fits) this.relax(cur, nx, cy, nz, cy, costs.sneakWalk, M_SNEAK, 0, 0, undefined, F_SNEAK);
+    }
+  }
+
+  // ---- Track BC: the moves that dig (baritone/moves.ts; docs/pathfinding.md "Nodes and moves") -------
+
+  /** Records a move's unloaded-cell flag as `sawUnknown`. */
+  private takeUnknown(): void {
+    const b = this.breaks!;
+    if (b.unknown) {
+      this.sawUnknown = true;
+      b.unknown = false;
+    }
+  }
+
+  /**
+   * From a node standing on a full block at cell level cy: per cardinal direction the dig-through walk when
+   * the same level is blocked (MovementTraverse), the jump with head-room breaks when the node one up is
+   * blocked or the plain jump failed only for the start's head room (MovementAscend), the step down with
+   * breaks when no move one level down was taken (MovementDescend); and the dig-down move in the node's own
+   * column (MovementDownward, shaft rules). A doorway node takes the traverse in every direction like a plain
+   * walk out of it, and none of the other moves.
+   */
+  private digMoves(cur: number, cx: number, cy: number, cz: number, inPassage: boolean): void {
+    const b = this.breaks!;
+    const grid = this.grid;
+    const flags = this.digFlags;
+    const goalBelow = cy > this.goalMinY;
+    for (let di = 0; di < 4; di++) {
+      const [dx, dz] = CARDINAL[di]!;
+      const nx = cx + dx;
+      const nz = cz + dz;
+      const blocked = (flags[di]! & 1) !== 0;
+      if (blocked) {
+        const t = traverse(b, cx, cy, cz, nx, nz);
+        this.takeUnknown();
+        if (t) this.relax(cur, nx, cy, nz, cy, t.base, M_WALK, t.extra, 0, { dig: t.dig });
+      }
+      if (inPassage) continue;
+      if (this.moveOn('digAscend') && ((blocked && Number.isNaN(grid.stand(nx, cy + 1, nz))) || (flags[di]! & 4) !== 0) && this.ladderPass(cx, cy, cz, nx, nz, dx, dz, true)) {
+        const a = ascend(b, cx, cy, cz, nx, nz);
+        this.takeUnknown();
+        if (a) this.relax(cur, nx, cy + 1, nz, cy + 1, a.base, M_JUMP, a.extra, 0, { dig: a.dig });
+      }
+      if ((flags[di]! & 2) === 0 && this.moveOn('digDescend') && this.ladderPass(cx, cy, cz, nx, nz, dx, dz, false)) {
+        // into open ground (the two cells over the floor ahead are free: a staircase down) only towards a goal below;
+        // into rock or under a lintel whenever the step is blocked
+        if (goalBelow || grid.free(nx, cy, nz) !== true || grid.free(nx, cy + 1, nz) !== true) {
+          const d = descend(b, cx, cy, cz, nx, nz);
+          this.takeUnknown();
+          if (d) this.relax(cur, nx, cy - 1, nz, cy - 1, d.base, M_DROP, d.extra, 0, { dig: d.dig });
+        }
+      }
+    }
+    if (!inPassage && goalBelow && this.moveOn('digDownward')) {
+      const m = downward(b, cx, cy, cz, this.startY - (cy - 1));
+      this.takeUnknown();
+      if (m) this.relax(cur, cx, cy - 1, cz, cy - 1, m.base, M_DOWNWARD, m.extra, 0, { dig: m.dig });
     }
   }
 
@@ -971,38 +1137,30 @@ export class PathSearch {
     return true;
   }
 
-  /** Dig-through: walk into (nx, cy, nz) after breaking what fills its two body cells (full-block floors). */
-  private digThrough(cur: number, cx: number, cy: number, cz: number, f0: number, nx: number, nz: number): void {
-    if (Math.abs(f0 - cy) > FLAT) return; // the start stands on a full block: its body is cells cy, cy + 1
-    const grid = this.grid;
-    const below = grid.cls(nx, cy - 1, nz);
-    if (!below) {
-      this.sawUnknown = true;
-      return;
+}
+
+/**
+ * Track BC: the lowest y among a goal's points: block / near / getToBlock (the block's y), yLevel, the
+ * members of an `any`; +Infinity for goals without one (xz, surface, runAway: never dig down for a column,
+ * to flee or to get out).
+ */
+function goalMinY(goal: NavGoal): number {
+  switch (goal.type) {
+    case 'block':
+    case 'near':
+    case 'getToBlock':
+      return goal.p.y;
+    case 'yLevel':
+      return goal.y;
+    case 'any': {
+      let m = Infinity;
+      for (const g of goal.goals) m = Math.min(m, goalMinY(g));
+      return m;
     }
-    if (!below.floor || below.top !== 1 || below.danger) return;
-    const dig: Vec3[] = [];
-    let ticks = 0;
-    const floors = [
-      { x: cx, y: cy - 1, z: cz },
-      { x: nx, y: cy - 1, z: nz },
-    ];
-    for (const y of [cy + 1, cy]) {
-      const c = grid.cls(nx, y, nz);
-      if (!c) {
-        this.sawUnknown = true;
-        return;
-      }
-      if (c.boxes.length === 0 && !c.liquid && !c.danger) continue;
-      if (this.opts.noBreak?.has(cellKey(nx, y, nz))) return;
-      if (breakBlocker(grid, nx, y, nz, { protectedBlocks: this.opts.protectedBlocks, protectedArea: this.opts.protectedArea }, floors) !== undefined) return;
-      const t = this.breakTicksOf(c);
-      if (!Number.isFinite(t)) return;
-      ticks += t + this.costs.dig;
-      dig.push({ x: nx, y, z: nz });
-    }
-    if (!dig.length) return;
-    this.relax(cur, nx, cy, nz, cy, this.costs.walk, M_WALK, ticks, 0, { dig });
+    case 'xz':
+      return Infinity; // a column, any height: never dig down for it (a bold `goto x z` would evaluate staircases at every node)
+    default:
+      return Infinity;
   }
 }
 
@@ -1056,6 +1214,8 @@ export function locateNode(grid: NavGrid, pos: { x: number; y: number; z: number
       }
     }
   }
+  // Track BC: a body under a low ceiling (not in a standable cell) is in a sneak node: its own cell, sneaking
+  if (bestD > 1e-9 && Math.abs(pos.y - y0) < 0.6 && sneakFits(grid, bx, y0, bz) === true) return { x: bx, y: y0, z: bz, feet: y0 };
   return bestD < 0.75 ? bestNode : undefined;
 }
 

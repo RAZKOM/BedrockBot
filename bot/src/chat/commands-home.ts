@@ -12,6 +12,8 @@
 //   !chests unreachable                Track AN: the containers the bot could not get to, with the reasons
 //   !chests clear                      forget every container (read and unreachable)
 //   !chests label x y z <text>|none    give a container a label (`ores`, `wood`, `food`, `blocks`, `junk`, `tools`)
+//   !boxes                             Track AV: the spare empty shulker boxes known (carried, in the chests) and
+//                                      the boxes named keepBoxName (bot_loot) carried
 //
 // The automatic part (tasks/process/unload.ts HomeChore, PRIORITY.chore): the first scan of a session
 // when the bot first stands within 8 blocks of home, reading containers that appear within the radius
@@ -27,12 +29,14 @@ import { HomeLogistics, type ScanReport, unloadLine, type UnloadReport } from '.
 import { isHomeContainer } from '../skills/home/discovery.ts';
 import { chestKey, chestName, chestsLine, fmtPos, stockLine, unreachableLines, unreadRecord } from '../skills/home/memory.ts';
 import { probePath } from '../skills/home/reach.ts';
+import { stashFor } from '../skills/container/stash.ts'; // Track AV
+import { boxesLine, carriedBoxes, keepNameOf, setKeepBoxName } from '../skills/home/boxing.ts'; // Track AV
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { HomeChore, HomeJobProcess, type HomeJob, type HomeRunner } from '../tasks/process/unload.ts';
 import { getControllerOf } from './commands-get.ts';
 
-export const HOME_COMMANDS = ['unload', 'stock', 'chests'] as const;
+export const HOME_COMMANDS = ['unload', 'stock', 'chests', 'boxes'] as const; // Track AV: boxes
 
 export interface HomeExtra {
   /** The afk task's shared Containers (deposits are counted on it; inventory moves while a window is open). */
@@ -130,7 +134,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
         return true;
       },
       onGetUnload: (r: UnloadReport) => {
-        if (r.moved.length > 0 || r.boxes > 0) d.chat.say(unloadLine(r));
+        if (r.moved.length > 0 || r.boxes > 0 || (r.boxed?.length ?? 0) > 0) d.chat.say(unloadLine(r)); // Track AV: boxed
       },
       log,
     }),
@@ -138,6 +142,8 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
   // containers appearing / disappearing within the radius of home (not the bot's own box placing)
   const offBlocks = world.onBlockUpdate((p, before, after) => {
     if (logistics.busy) return;
+    const st = stashFor(processes); // Track AV: the stash step's own box (placed, filled, broken) is no container of home
+    if (st?.busy && st.boxAt?.x === p.x && st.boxAt.y === p.y && st.boxAt.z === p.z) return;
     const h = home();
     if (!h) return;
     const was = !!before && isHomeContainer(before.name);
@@ -155,6 +161,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     stop();
   };
 
+  setKeepBoxName(d.task, () => d.settings.get('keepBoxName')); // Track AV: !drop all / items keep the named boxes
   const start = (job: HomeJob): HomeJobProcess => processes.add(new HomeJobProcess(runner, job));
   const control: HomeControl = { logistics, chore, memory, start };
   controls.set(d.task, control);
@@ -247,6 +254,16 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
       reply('usage: !chests [scan | unreachable | clear | label x y z <text>|none]');
     },
   });
-  log.info(`home: !unload, !stock, !chests ready (memory ${world.cache?.chests ? 'in the world cache' : 'in the world cache once it opens, else in memory'}, ${memory().size} remembered: ${memory().all().slice(0, 3).map((r) => chestKey(r)).join(' ')})`);
+  d.chat.register({
+    name: 'boxes',
+    tier: 'more', group: 'home', example: '!boxes', auto: 'unloading at home boxes the stacks of a full chest into spare boxes and empties the bot_loot boxes', // Track AV
+    help: '(the spare empty shulker boxes I know, carried and in the chests, and my bot_loot boxes)',
+    run: ({ args, reply }) => {
+      if (args.length > 0) return reply('usage: !boxes');
+      const keep = keepNameOf(d.settings.get('keepBoxName'));
+      reply(boxesLine(carriedBoxes(world.inventory, keep), logistics.records(), keep));
+    },
+  });
+  log.info(`home: !unload, !stock, !chests, !boxes ready (memory ${world.cache?.chests ? 'in the world cache' : 'in the world cache once it opens, else in memory'}, ${memory().size} remembered: ${memory().all().slice(0, 3).map((r) => chestKey(r)).join(' ')})`);
   return control;
 }

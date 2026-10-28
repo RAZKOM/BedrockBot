@@ -2,9 +2,10 @@
 
 Phase 7, wave 8 Track AE; the graphical inventory, the status blocks and the responsive layout are
 wave 9 Track AP; the interaction (context menus, map actions, grouped settings, command palette) is
-wave 10 Track AR. Decision records: [decisions/0026-lan-control-panel.md](decisions/0026-lan-control-panel.md),
+wave 10 Track AR; the real item icons are wave 11. Decision records: [decisions/0026-lan-control-panel.md](decisions/0026-lan-control-panel.md),
 [decisions/0037-panel-inventory-and-statuses.md](decisions/0037-panel-inventory-and-statuses.md),
-[decisions/0039-panel-interactions.md](decisions/0039-panel-interactions.md).
+[decisions/0039-panel-interactions.md](decisions/0039-panel-interactions.md),
+[decisions/0046-item-icons.md](decisions/0046-item-icons.md).
 It extends the health endpoint ([runbook.md](runbook.md) "Operations") and embeds the debug map
 ([world-cache.md](world-cache.md)).
 
@@ -53,8 +54,9 @@ config file and restart the bot (old cookies stop working).
 
 Server-rendered (the structure, the settings table and the current state as JSON), then an inline
 script (`client.ts`) fills every node from that JSON at once and from `/api/state?lite=1` every
-2 s. No build step, no external assets: no CDN, no web fonts (the system font), no image files (the
-item glyphs are inline SVG); the machine may be offline from the internet.
+2 s. No build step, no external assets: no CDN, no web fonts (the system font), no image files in the
+page (the item glyphs are inline SVG; the real icons are requests to the panel itself, "Item icons"
+below); the machine may be offline from the internet.
 
 ### Layout
 
@@ -78,7 +80,8 @@ colour, and the four armour slots (head, chest, legs, feet) plus the offhand **b
 card is at least 430 px wide (a container query), or as a row above it on a phone. Cells scale with
 the card (about 30 px on a 360 px phone, 46 px at most).
 
-Each cell is drawn, not textured: a hand-drawn 16 x 16 glyph for the item's class (`sword`,
+Each cell shows the game's own icon when there is one ("Item icons" below) and otherwise is drawn: a
+hand-drawn 16 x 16 glyph for the item's class (`sword`,
 `pickaxe`, `axe`, `shovel`, `hoe`, `bow`, `shield`, `helmet`, `chestplate`, `leggings`, `boots`,
 `food`, `block`, `ore`, `box`, `bucket`, `torch`, else a plain rounded `item` tile) in the item's
 colour (the material's colour for iron / gold / diamond / netherite / wood / stone / leather / ... ,
@@ -89,6 +92,43 @@ below) on tools, weapons and armour (NBT `Damage` against the durability tables 
 `skills/survival/tools.ts`). Hovering shows the full name, count, durability and box contents;
 **tapping a cell** shows them in the line under the grid and opens the cell's action menu (Track AR,
 "Interaction" below; tap again to close). Empty armour slots show a diagonal stroke.
+
+### Item icons
+
+A cell asks `GET /icons/<name>.png` once per item name (`cobblestone`, `iron_sword`; Bedrock names,
+lower case) and shows the picture over its glyph when it arrives; the count, the durability bar and
+the tooltip are the same. The glyph and the letters stay when the answer is a 404 (an item with no
+icon), when the request fails, or when the server says it has no pictures (`icons: false` in the
+state: the package below is not installed; the panel logs `panel: item pictures off (the
+minecraft-assets package is not installed: pnpm install); ...` once and asks for nothing). A name that answered 404 is remembered by the page, so it is not asked again.
+
+Where the pictures come from: the `minecraft-assets` npm package (PrismarineJS, MIT; the art is
+Mojang's), folder `26.1` of `node_modules`, installed by `pnpm install` like any dependency (the Mac
+gets it through `pnpm deploy:mac`). Nothing of it is in git. The server (`health/panel/icons/`) reads
+the item and block models and textures on the first request and renders each icon on demand:
+
+- **a flat item** (`iron_sword`, `bread`, `bucket`) is its texture, untouched (16 x 16; the first
+  frame of an animated one), with the game's tints: leather armour brown, the potion's liquid, a
+  lily pad, short grass, ferns and vines the grass green;
+- **a block** (`cobblestone`, `oak_stairs`, `glass`, `oak_leaves`, `grass_block`) is its model as
+  the inventory draws it: the game's `display.gui` view (rotation 30, 225, 0), top face lit 100 %,
+  the left (east) face 80 % and the right (north) face 60 %, translucent faces over what is behind,
+  32 x 32; grass, leaves and vines carry the plains tint;
+- **no icon** (404): chests, shulker boxes, beds, banners, heads, the shield and the conduit are
+  drawn by the client's entity renderer, not from a block model; also technical blocks and
+  Bedrock-only content (cinnabar, sulfur, poplar, `element_N`). The cell keeps its glyph.
+
+Bedrock names that differ from Java's are mapped (`names.ts` `ALIASES`: `wooden_door`, `reeds`,
+`snow`, `stone_stairs`, `fireworks`, `brick_block`, ...). Over the creative catalogue and the block
+palette (1772 identifiers) 604 are drawn as blocks, 596 as flat items, 572 have no icon.
+
+The route (`routes.ts`) sits behind the same token as everything else and takes `GET` / `HEAD`:
+`200 image/png` (`cache-control: private, max-age=86400`), `404 {"error":"no icon for this item"}`
+(`private, max-age=300`), `500` when the files cannot be read (not cached, tried again on the next
+request). The name must match `[a-z0-9_]{1,64}`; the reader only opens paths named by the package's
+own index files and refuses anything outside `^[a-z0-9_]+(/[a-z0-9_]+)*$`. Rendered icons are kept
+in memory (4096 names at most). A new game version: change `ASSET_VERSION` (`icons/source.ts`) and
+the package pin.
 
 ### Status blocks
 
@@ -250,11 +290,15 @@ bot is idle (the shield controller, [pve.md](pve.md) "Shield"); a totem stays.
 
 ### Not from the panel, and why
 
-- **Crafting**: needs the recipe list (`crafting_data`), for 3 x 3 recipes a crafting table opened
-  like a chest (`container_open` `workbench`), and an `item_stack_request` with `craft_recipe`,
-  `results_deprecated`, a `consume` per ingredient and a `place` from `created_output`; the bot has no
-  crafting skill yet. It belongs to a skills track as `!craft <item> [n]`; the panel would then offer
-  Craft... on an item. Decision 0039 has the details.
+- **Crafting** is possible now (wave 11 Track AW, [crafting.md](crafting.md), decision 0045): `!craft
+  <item> [n]` crafts through the normal screens (the inventory's 2 x 2 grid, or a crafting table the
+  bot finds, places or makes) and `!compact [kind]` turns raw metals, ingots, gems, coal, redstone and
+  lapis into storage blocks; `!unload` compacts by itself when a chest cannot take the load. The
+  panel can offer it like every other action, as a chat command through `POST /api/cmd`: a `Craft...`
+  entry on an inventory cell (`RecipeIndex.byOutput` on the task's `craftControlOf(task)` lists what
+  the item makes, `canCraft` what the bot can make now with the shortfall for the label) sending
+  `!craft <item> <n>`, and a `Compact` quick button sending `!compact`. Not built in this track: the
+  menu entry itself (panel code is Track AR's).
 - Taking off one worn armour piece, mining a clicked spot, build markers: no command does it.
 - Moving stacks around (hotbar drag): no `!move` command; not needed for any action above.
 
@@ -266,6 +310,7 @@ bot is idle (the shield controller, [pve.md](pve.md) "Shield"); a totem stays.
 | `GET /api/state?lite=1` | the same without what does not change while the bot runs: `commands` and `quick` left out, `settings` rows only `key`, `value`, `source`; `"lite": true` (what the page polls; Track AP) |
 | `GET /api/chests` | the remembered containers, nearest first: `[{"x":10,"y":-60,"z":4,"kind":"chest","label":"ores","stacks":12,"size":27,"top":[["coal",320],["iron_ore",40]],"unreachable":null,"readAt":1761753600000}]` (`[]` without a world cache; Track AP) |
 | `GET /api/marks` | Track AR: what the panel's map draws beyond `/map.json`, within 256 blocks of the bot, nearest first, at most 200 each: `{"chests":[{"x":10,"y":-60,"z":4,"kind":"chest","label":"ores","unreachable":false}],"herds":[{"x":5.5,"y":-60,"z":5.5,"n":5,"kind":"cow","penned":true}]}` (empty lists without a world cache) |
+| `GET /icons/<name>.png` | the item's icon (`image/png`, 16 x 16 or 32 x 32), or 404 `{"error":"no icon for this item"}`; `HEAD` the same without the body; 405 other methods ("Item icons") |
 | `POST /api/cmd` `{"text":"!wp set base"}` | 200 `{"command":"!wp set base","ok":true,"replies":["waypoint base set to 10 -60 20"]}`; 409 `ok:false` + `error` when there is no owner to run as; 400 bad body; 413 body over 4 KiB; 429 over 5 commands per second; 405 other methods |
 | `GET /healthz`, `/metrics`, `/map`, `/map.json` | as before (runbook "Operations") |
 
@@ -282,6 +327,7 @@ bot is idle (the shield controller, [pve.md](pve.md) "Shield"); a totem stays.
             "saturation": 5, "weather": "clear", "day": 12, "deaths": 1,
             "lastDeath": { "cause": "death.attack.mob", "ts": "2026-10-29T18:00:00.000Z", "messages": ["%entity.zombie.name"] } },
   "inventory": { ... },                 // below
+  "icons": true,                        // wave 11: the server can answer /icons/<name>.png (false: the package is missing)
   "job": { "name": "get", "state": "active", "line": "getting 32 oak_log: 12/32", "etaS": 95 },
   "combat": { "fights": 14, "kills": 12, "retargets": 3, "flees": 1, "guardTriggers": 9, "hits": 21, "damageTaken": 37.5, "lastHit": { "damage": 3, "agoS": 42 } },
   "memory": { "chests": { "known": 9, "reachable": 8, "unreachable": 1, "read": 7 }, "herds": 4, "animals": 23, "forests": 6,
@@ -379,7 +425,11 @@ codes become `***`). The bot account's sign-in tokens (prismarine-auth cache) ar
 | `health/panel/state.ts` | `PanelState`, `buildPanelState`, `liteState`, quick commands, `buildPanelHelp` |
 | `health/panel/inventory.ts` | Track AP: the `inventory` block: `buildInventory`, `iconClassOf`, `itemColour`, `itemAbbr`, `durabilityOf`, `boxContents` |
 | `health/panel/memory.ts` | Track AP: the `memory` counts (`buildMemory`) and the chest list (`chestRows`) |
-| `health/panel/glyphs.ts` | Track AP: the hand-drawn item glyphs (inline SVG symbols) |
+| `health/panel/glyphs.ts` | Track AP: the hand-drawn item glyphs (inline SVG symbols); the fallback of the icons |
+| `health/panel/icons/book.ts` | wave 11: `IconBook.png(name)`: the rules (flat, block or none), the caches, the answer for `/icons/<name>.png` |
+| `health/panel/icons/source.ts` | the asset folder of the `minecraft-assets` package (`ASSET_VERSION`), `FsAssets` (path allowlist) |
+| `health/panel/icons/models.ts`, `render.ts` | the model's parent chain (`resolveModel`) and the `display.gui` renderer (`renderModel`: projection, shading, front-to-back compositing) |
+| `health/panel/icons/names.ts`, `png.ts` | the Bedrock -> Java name aliases, the solid parents, the tints; the pngjs wrapper (decode, encode, first frame, tint, overlay) |
 | `health/panel/client.ts` | Track AP: the page script (render into existing nodes, stale marker, hidden-tab back-off, theme, commands, Help, chest list); Track AR: the menus and confirmations, the settings controls and mode selector, the palette, the quick-button editor, Stop / Pause / Resume, the log filter, the map canvas |
 | `health/panel/page.ts` | the page (`renderPanelPage`): structure, CSS (themes, responsive grid), the 41 inventory cells, the status blocks; Track AR: the grouped settings rows, the mode bar, the menu, toast, palette and map markup |
 | `health/panel/menu.ts` | Track AR: the menu model as plain JavaScript (`MENU_JS`: `cellActions`, `mapActions`, `settingActions`, `setCommand`, `settingVisible`, `modeOf`, `modeChanges`, `stackActions`, `paletteMatch`, `logVisible`), embedded in the page and evaluated for the server and the tests |
@@ -397,6 +447,14 @@ pnpm --filter bot exec vitest run --project unit test/unit/health               
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-core --silent=false     # bds-core (~15 s)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-actions --silent=false  # Track AR, bds-core (~20 s)
 ```
+
+Item icons unit tests (`panel-icons.test.ts`, with `minecraft-assets` really installed): the PNG
+helpers; model resolution; the cube's three faces pinned pixel by pixel (top, left x 0.8, right x
+0.6); front-to-back compositing; tints; `IconBook`'s rules on an in-memory asset set; about 65 real
+names (blocks, tools, food, armour, potions, leaves, grass) all resolving at 16 and 32 px, grass
+green, entity-rendered items undefined. `panel-server.test.ts`: `/icons/<name>.png` behind the token
+(200, 404, 405, `state.icons`), and the panel without the package; `panel-page.test.ts`: the script
+asks once per name, never for an empty cell or when `icons` is false, and falls back on a 404.
 
 Track AR unit tests: `panel-menu.test.ts` (the menu model for every kind of cell, the map column,
 settings, modes, processes, the palette and the log filter; `/api/marks`; `liftTaskStatus`; the

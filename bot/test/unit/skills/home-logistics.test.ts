@@ -8,6 +8,7 @@ import { RuntimeSettings } from '../../../src/config/settings.ts';
 import { isShulkerBox, shulkerContents, snapshotOf } from '../../../src/skills/container/chest.ts';
 import { HomeLogistics, MAX_READS_PER_SCAN, UNREACHABLE_RETRY_MS, unloadLine, type HomeDeps, type HomeSkills, type ScanReport, type UnloadReport } from '../../../src/skills/home/logistics.ts';
 import { ChestMemory, chestKey } from '../../../src/world/cache/chests.ts';
+import { setCompactPlanner, setCompactRunner } from '../../../src/skills/home/unloader.ts';
 import type { BlockInfo, ContainerView, ItemStack, Vec3 } from '../../../src/world/types.ts';
 import type { PathResult } from '../../../src/skills/nav/astar.ts';
 import { ProcessManager } from '../../../src/tasks/process/manager.ts';
@@ -16,13 +17,20 @@ import { AUTO_UNLOAD_STACKS, HomeChore, HomeJobProcess, type HomeChoreDeps, type
 const item = (name: string, count = 64): ItemStack => ({ name, count, networkId: 1, metadata: 0 });
 const block = (name: string, solid = true): BlockInfo => ({ name, stateId: 1, states: {}, hardness: 1, solid, boxes: solid ? [[0, 0, 0, 1, 1, 1]] : [] });
 const max = (n: string) => (isShulkerBox(n) ? 1 : 64);
-const nbt = (items: { name: string; count: number }[]) => (items.length ? { extra: { nbt: { nbt: { value: { Items: { value: { value: items.map((i) => ({ Name: { value: `minecraft:${i.name}` }, Count: { value: i.count } })) } } } } } } } : undefined);
-const fromNbt = (raw: unknown) => Object.entries(shulkerContents(raw)).map(([name, count]) => ({ name, count }));
+const nbt = (items: { name: string; count: number }[], display?: unknown) =>
+  items.length || display ? { extra: { nbt: { nbt: { value: { ...(items.length ? { Items: { value: { value: items.map((i) => ({ Name: { value: `minecraft:${i.name}` }, Count: { value: i.count } })) } } } : {}), ...(display ? { display } : {}) } } } } } : { extra: { has_nbt: 0 } }; // Track AV: the server always sends the wire item (an unknown one is no spare)
+/** Track AV: the custom name compound of a wire item (kept by the fake's place / dig like the server keeps a box's name). */
+const displayOf = (raw: unknown): unknown => (raw as { extra?: { nbt?: { nbt?: { value?: { display?: unknown } } } } } | undefined)?.extra?.nbt?.nbt?.value?.display;
+const namedBox = (name: string, items: { name: string; count: number }[] = []) => nbt(items, { type: 'compound', value: { Name: { type: 'string', value: name } } });
+const fromNbt = (raw: unknown) =>
+  ((raw as { extra?: { nbt?: { nbt?: { value?: { Items?: { value?: { value?: { Name: { value: string }; Count: { value: number } }[] } } } } } } } | undefined)?.extra?.nbt?.nbt?.value?.Items?.value?.value ?? []).map((i) => ({ name: i.Name.value.replace(/^minecraft:/, ''), count: i.Count.value }));
 
 interface Box {
   kind: string;
   slots: (ItemStack | null)[];
   raws: unknown[];
+  /** Track AV: a placed box's custom name. */
+  display?: unknown;
 }
 
 /** A fake home: containers by position, an inventory, skills that act on them. */
@@ -34,9 +42,25 @@ function fakeHome(o: { containers: Record<string, { kind: string; items?: (ItemS
   }
   const inv: (ItemStack | null)[] = [...o.inv, ...Array.from({ length: 36 - o.inv.length }, () => null)];
   const invRaws: unknown[] = [...(o.invRaws ?? [])];
+  // Track AV: a box without a given raw has the server's empty wire item (no raw at all: unknown, never a spare)
+  inv.forEach((x, i) => {
+    if (x && isShulkerBox(x.name) && invRaws[i] === undefined) invRaws[i] = nbt([]);
+  });
+  for (const b of boxes.values()) b.slots.forEach((x, i) => {
+    if (x && isShulkerBox(x.name) && b.raws[i] === undefined) b.raws[i] = nbt([]);
+  });
   let pos: Vec3 = { x: 0.5, y: 0, z: 0.5 };
   const calls: string[] = [];
   let drop: { name: string; raw: unknown } | undefined;
+  let selected = 0;
+  /** Track AV: failure knobs for the box step tests. */
+  const fail = { place: false, pickup: false, onPlaced: undefined as ((key: string) => void) | undefined, onDig: undefined as ((key: string) => void) | undefined, breakOnClose: false };
+  const breakAt = (key: string): void => {
+    const b = boxes.get(key)!;
+    boxes.delete(key);
+    // one NBT entry per slot, like the server (Track AV: the slots used count)
+    drop = { name: b.kind, raw: nbt(b.slots.filter((x): x is ItemStack => !!x).map((x) => ({ name: x.name, count: x.count })), b.display) };
+  };
   let windowOf: Box | undefined;
   let cancelAt: string | undefined;
   let cancelled = false;
@@ -70,6 +94,9 @@ function fakeHome(o: { containers: Record<string, { kind: string; items?: (ItemS
     },
     closeContainer: async () => {
       calls.push('close');
+      // Track AV: a player breaks the placed box while the bot closes it
+      const key = [...boxes].find(([, b]) => b === windowOf)?.[0];
+      if (fail.breakOnClose && key && isShulkerBox(windowOf!.kind) && !(key in o.containers)) breakAt(key);
       windowOf = undefined;
       return true;
     },
@@ -117,28 +144,29 @@ function fakeHome(o: { containers: Record<string, { kind: string; items?: (ItemS
     },
     place: async (p, po) => {
       calls.push(`place ${chestKey(p)}`);
+      if (fail.place) return { ok: false, reason: 'rejected' };
       const names = [po?.item].flat();
-      const slot = inv.findIndex((s) => s && names.includes(s.name));
+      // like the place skill: the held item, else the lowest slot (hotbar first)
+      const slot = inv[selected] && names.includes(inv[selected]!.name) ? selected : inv.findIndex((s) => s && names.includes(s.name));
       if (slot < 0) return { ok: false, reason: 'no_item' };
       const raw = invRaws[slot];
       const items = fromNbt(raw);
-      boxes.set(chestKey(p), { kind: inv[slot]!.name, slots: [...items.map((i) => item(i.name, i.count)), ...Array.from({ length: 27 - items.length }, () => null)], raws: [] });
+      boxes.set(chestKey(p), { kind: inv[slot]!.name, slots: [...items.map((i) => item(i.name, i.count)), ...Array.from({ length: 27 - items.length }, () => null)], raws: [], display: displayOf(raw) });
       inv[slot] = null;
       invRaws[slot] = undefined;
+      fail.onPlaced?.(chestKey(p));
       return { ok: true };
     },
     dig: async (p) => {
       calls.push(`dig ${chestKey(p)}`);
-      const b = boxes.get(chestKey(p))!;
-      boxes.delete(chestKey(p));
-      const list = new Map<string, number>();
-      for (const s of b.slots) if (s) list.set(s.name, (list.get(s.name) ?? 0) + s.count);
-      drop = { name: b.kind, raw: nbt([...list].map(([name, count]) => ({ name, count }))) };
+      if (!boxes.has(chestKey(p))) return { ok: false, reason: 'no_block' };
+      fail.onDig?.(chestKey(p));
+      breakAt(chestKey(p));
       return { ok: true };
     },
     collect: async () => {
       calls.push('collect');
-      if (drop) {
+      if (drop && !fail.pickup) {
         const i = inv.findIndex((s) => !s);
         inv[i] = item(drop.name, 1);
         invRaws[i] = drop.raw;
@@ -166,6 +194,23 @@ function fakeHome(o: { containers: Record<string, { kind: string; items?: (ItemS
     home: () => home,
     memory: () => memory,
     settings,
+    selectHotbar: (slot: number) => {
+      selected = slot;
+    },
+    // Track AV: inventory-to-inventory moves (while a window is open)
+    containers: {
+      stats: { requests: 0 },
+      move: async (src, dst, count) => {
+        if (src.window !== 0 || dst.window !== 0 || !inv[src.slot] || inv[dst.slot]) return { ok: false };
+        void count;
+        inv[dst.slot] = inv[src.slot]!;
+        invRaws[dst.slot] = invRaws[src.slot];
+        inv[src.slot] = null;
+        invRaws[src.slot] = undefined;
+        calls.push(`move ${src.slot} -> ${dst.slot}`);
+        return { ok: true };
+      },
+    },
     now: o.now ?? (() => 1_000_000),
     ...(o.probe ? { probe: o.probe } : {}),
   });
@@ -184,6 +229,8 @@ function fakeHome(o: { containers: Record<string, { kind: string; items?: (ItemS
     setPos: (p: Vec3) => {
       pos = p;
     },
+    fail,
+    breakAt,
   };
 }
 
@@ -418,6 +465,206 @@ function fakeRunner() {
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+
+describe('home logistics: boxing at the chests and named boxes (Track AV)', () => {
+  const cobble27 = () => Array.from({ length: 27 }, () => item('cobblestone'));
+  const box = () => item('undyed_shulker_box', 1);
+
+  it("the owner's cobblestone: the full chest's stacks into a spare from the box chest, the box back into that chest, then the bot's 10 stacks", async () => {
+    const h = fakeHome({
+      containers: { '3,0,0': { kind: 'chest', items: cobble27() }, '-3,0,0': { kind: 'chest', items: [box(), box(), box()] } },
+      inv: Array.from({ length: 10 }, () => item('cobblestone')),
+    });
+    h.settings.set('throwawayMin', '0');
+    await h.logistics.scan(never);
+    expect(h.logistics.plan().steps).toEqual([{ kind: 'box', item: 'cobblestone', chest: '3,0,0', stacks: 27, produce: 0, spare: '-3,0,0' }]);
+    const r = await h.logistics.unload(never);
+    expect(r.ok).toBe(true);
+    expect(r.boxed).toEqual([expect.objectContaining({ item: 'cobblestone', stacks: 27, chest: 'chest 3 0 0', from: 'chest -3 0 0', took: 25 })]);
+    expect(r.left).toEqual([]);
+    expect(h.inv.filter((s) => s?.name === 'cobblestone')).toEqual([]);
+    const c = h.boxes.get('3,0,0')!;
+    expect(c.slots.filter((s) => s?.name === 'cobblestone').length).toBe(10);
+    const boxIdx = c.slots.findIndex((s) => s?.name === 'undyed_shulker_box');
+    expect(shulkerContents(c.raws[boxIdx])).toEqual({ cobblestone: 27 * 64 });
+    expect(h.boxes.get('-3,0,0')!.slots.filter(Boolean)).toHaveLength(2);
+    // the memory: the box with its contents, the loose stacks
+    expect(h.memory.get({ x: 3, y: 0, z: 0 })).toMatchObject({ contents: { cobblestone: 640, undyed_shulker_box: 1 }, boxes: { empty: 0, full: 1 }, inBoxes: { cobblestone: 1728 }, free: 16 });
+    expect(h.memory.get({ x: -3, y: 0, z: 0 })!.boxes).toEqual({ empty: 2, full: 0 });
+    expect(unloadLine(r)).toBe('unloaded: 512 cobblestone -> chest 3 0 0; boxed 27 stacks of cobblestone from chest 3 0 0 into a shulker (box from chest -3 0 0)');
+  });
+
+  it('bot_loot boxes: the full one is emptied and its sand unloaded (boxing as needed), both stay carried and empty; a named box in a chest is no spare', async () => {
+    const sand17 = Array.from({ length: 17 }, () => item('sand'));
+    const h = fakeHome({
+      containers: {
+        '3,0,0': { kind: 'chest', items: sand17 },
+        // a chest with a named empty box first, then 3 spares
+        '-3,0,0': { kind: 'chest', items: [box(), box(), box(), box()], raws: [namedBox('bot_loot')] },
+      },
+      inv: [box(), box(), ...Array.from({ length: 20 }, () => item('sand'))],
+      invRaws: [namedBox('§6Bot_Loot', Array.from({ length: 27 }, () => ({ name: 'sand', count: 64 }))), namedBox('bot_loot')],
+    });
+    await h.logistics.scan(never);
+    expect(h.memory.get({ x: -3, y: 0, z: 0 })!.boxes).toEqual({ empty: 3, full: 0 }); // the named one is not counted
+    const r = await h.logistics.unload(never);
+    expect(r.ok).toBe(true);
+    expect(r.left).toEqual([]);
+    expect(r.emptiedNamed).toBe(1);
+    expect(r.namedKept).toBe(2);
+    expect(unloadLine(r)).toContain('kept 2 bot_loot boxes');
+    // both named boxes carried, empty, still named
+    const named = h.inv.map((s, i) => ({ s, raw: h.invRaws[i] })).filter((x) => x.s && isShulkerBox(x.s.name));
+    expect(named).toHaveLength(2);
+    for (const x of named) {
+      expect(shulkerContents(x.raw)).toEqual({});
+      expect(JSON.stringify(displayOf(x.raw))).toMatch(/bot_loot/i);
+    }
+    expect(h.inv.some((s) => s?.name === 'sand')).toBe(false);
+    // all 64 stacks of sand in the sand chest, loose or boxed (2 boxes), the named box of the spare chest untouched
+    const c = h.boxes.get('3,0,0')!;
+    const boxedSand = c.slots.reduce((a, s, i) => a + (s && isShulkerBox(s.name) ? (shulkerContents(c.raws[i]).sand ?? 0) : 0), 0);
+    const loose = c.slots.reduce((a, s) => a + (s?.name === 'sand' ? s.count : 0), 0);
+    expect(boxedSand + loose).toBe(64 * 64);
+    expect(r.boxed!.length).toBe(2);
+    const spareChest = h.boxes.get('-3,0,0')!;
+    expect(JSON.stringify(displayOf(spareChest.raws[0]))).toContain('bot_loot');
+  });
+
+  it('the compact runner (Track AV/AW): called once with plan.compact before the chest trips, its fragment in the reply; none installed: unchanged', async () => {
+    const build = () => {
+      const h = fakeHome({ containers: { '3,0,0': { kind: 'chest', items: [...Array.from({ length: 26 }, () => item('iron_ingot')), item('iron_ingot', 10)] } }, inv: [item('iron_ingot'), item('iron_ingot')] });
+      h.settings.set('throwawayMin', '0');
+      return h;
+    };
+    const calls: unknown[] = [];
+    setCompactPlanner((sl) => [{ kind: 'iron_ingot', count: sl.filter((x) => x.name === 'iron_ingot').reduce((a, x) => a + x.count, 0) - 2 }]);
+    setCompactRunner(async (list) => {
+      calls.push(list);
+      return 'compacted 126 iron_ingot into 14 iron_block';
+    });
+    try {
+      const h = build();
+      await h.logistics.scan(never);
+      expect(h.logistics.plan().compact).toEqual([{ kind: 'iron_ingot', count: 126 }]);
+      const r = await h.logistics.unload(never);
+      expect(calls).toEqual([[{ kind: 'iron_ingot', count: 126 }]]);
+      expect(r.compacted).toBe('compacted 126 iron_ingot into 14 iron_block');
+      expect(unloadLine(r)).toContain('; compacted 126 iron_ingot into 14 iron_block');
+    } finally {
+      setCompactRunner(undefined);
+    }
+    // a runner that throws: the reply says so, the unload goes on
+    setCompactRunner(async () => {
+      throw new Error('no crafting table');
+    });
+    try {
+      const h3 = build();
+      await h3.logistics.scan(never);
+      const r3 = await h3.logistics.unload(never);
+      expect(r3.compacted).toBe('compact failed: no crafting table');
+      expect(r3.moved).toEqual([{ name: 'iron_ingot', count: 54, to: 'chest 3 0 0' }]);
+    } finally {
+      setCompactRunner(undefined);
+      setCompactPlanner(undefined);
+    }
+    const h2 = build();
+    await h2.logistics.scan(never);
+    const r2 = await h2.logistics.unload(never);
+    expect(r2.compacted).toBeUndefined();
+    expect(r2.moved).toEqual([{ name: 'iron_ingot', count: 54, to: 'chest 3 0 0' }]);
+    expect(calls).toHaveLength(1);
+  });
+
+  describe('box step failures (Track AV)', () => {
+    const owner = () => {
+      const h = fakeHome({
+        containers: { '3,0,0': { kind: 'chest', items: cobble27() }, '-3,0,0': { kind: 'chest', items: [box(), box(), box()] } },
+        inv: Array.from({ length: 10 }, () => item('cobblestone')),
+      });
+      h.settings.set('throwawayMin', '0');
+      return h;
+    };
+    const boxesCarried = (h: ReturnType<typeof owner>) => h.inv.filter((s) => s && isShulkerBox(s.name)).length;
+    const boxesOnGround = (h: ReturnType<typeof owner>) => [...h.boxes.keys()].filter((k) => k !== '3,0,0' && k !== '-3,0,0');
+
+    it('the place fails: no box step, the cobblestone goes by the other rules, nothing left in the world', async () => {
+      const h = owner();
+      await h.logistics.scan(never);
+      h.fail.place = true;
+      const r = await h.logistics.unload(never);
+      expect(r.ok).toBe(true);
+      expect(r.boxed ?? []).toEqual([]);
+      // the stacks taken out for the box went back; every cobblestone is stored, none carried
+      expect(h.inv.some((x) => x?.name === 'cobblestone')).toBe(false);
+      const stored = [...h.boxes.values()].reduce((n, b) => n + b.slots.reduce((m, x) => m + (x?.name === 'cobblestone' ? x.count : 0), 0), 0);
+      expect(stored).toBe(27 * 64 + 640);
+      expect(boxesOnGround(h)).toEqual([]);
+    });
+
+    it('the pickup fails: the step ends with the reason, the job goes on', async () => {
+      const h = owner();
+      await h.logistics.scan(never);
+      h.fail.pickup = true;
+      const r = await h.logistics.unload(never);
+      expect(r.ok).toBe(true);
+      expect(r.boxed ?? []).toEqual([]);
+    });
+
+    it('the target chest filled up meanwhile: storing the full box fails, the box stays carried', async () => {
+      const h = owner();
+      await h.logistics.scan(never);
+      h.fail.onDig = () => {
+        const c = h.boxes.get('3,0,0')!;
+        c.slots.forEach((x, i) => {
+          if (!x) c.slots[i] = item('stone');
+        });
+      };
+      const r = await h.logistics.unload(never);
+      expect(r.boxed ?? []).toEqual([]);
+      expect(h.inv.some((s, i) => s && isShulkerBox(s.name) && shulkerContents(h.invRaws[i]).cobblestone === 1728) || h.boxes.get('-3,0,0')!.slots.some((s, i) => s && isShulkerBox(s.name) && shulkerContents(h.boxes.get('-3,0,0')!.raws[i]).cobblestone === 1728)).toBe(true);
+      expect(boxesOnGround(h)).toEqual([]);
+    });
+
+    it('the spare chest was emptied meanwhile: no box step, the memory follows', async () => {
+      const h = owner();
+      await h.logistics.scan(never);
+      h.boxes.get('-3,0,0')!.slots.fill(null);
+      const r = await h.logistics.unload(never);
+      expect(r.boxed ?? []).toEqual([]);
+      expect(h.memory.get({ x: -3, y: 0, z: 0 })!.boxes.empty).toBe(0);
+      expect(boxesCarried(h)).toBe(0);
+    });
+
+    it('a box broken by someone else before the bot breaks it: no dig, picked up all the same', async () => {
+      const h = owner();
+      await h.logistics.scan(never);
+      h.fail.breakOnClose = true;
+      const r = await h.logistics.unload(never);
+      expect(r.boxed?.length).toBe(1);
+      expect(h.calls.filter((c) => c.startsWith('dig'))).toEqual([]);
+      expect(boxesOnGround(h)).toEqual([]);
+    });
+
+    it('a box without its wire item is unknown: kept, never a spare, never stored', () => {
+      const h = fakeHome({ containers: { '3,0,0': { kind: 'chest', items: cobble27() } }, inv: [box(), ...Array.from({ length: 3 }, () => item('cobblestone'))] });
+      h.invRaws[0] = undefined;
+      h.settings.set('throwawayMin', '0');
+      const p = h.logistics.plan();
+      expect(p.kept).toContainEqual({ name: 'undyed_shulker_box', count: 1, why: 'unknown_box' });
+      expect(p.moves.some((m) => m.slot === 0)).toBe(false);
+    });
+  });
+
+  it('a full chest and no spare box anywhere: the reply says what is left and why', async () => {
+    const h = fakeHome({ containers: { '3,0,0': { kind: 'chest', items: cobble27() } }, inv: Array.from({ length: 3 }, () => item('cobblestone')) });
+    h.settings.set('throwawayMin', '0');
+    await h.logistics.scan(never);
+    const r = await h.logistics.unload(never);
+    expect(r.left).toEqual([{ name: 'cobblestone', count: 192 }]);
+    expect(unloadLine(r)).toBe('unload: nothing moved; left 192 cobblestone (no room; chest 3 0 0 is full and no spare shulker box is known)');
+  });
+});
 
 describe('home processes', () => {
   it('HomeJobProcess: runs as a user process; a pre-emption cancels, the resume runs the job again', async () => {

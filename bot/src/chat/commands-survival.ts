@@ -19,6 +19,7 @@ import { Containers } from '../world/containers.ts';
 import type { PacketSource } from '../world/types.ts';
 import type { Chat } from './chat.ts';
 import { ELYTRA, flightKitMemoryOf, flightKitSlots, isElytra, keptKitLine, readKit, ROCKET, type KitInventory } from '../skills/fly/kit.ts'; // Track AU: the flight kit is kept by !drop all / items
+import { keepBoxNameOf, keptBoxesLine, keptBoxSlots } from '../skills/home/boxing.ts'; // Track AV: the named (bot_loot) boxes are kept by !drop all / items
 
 export const SURVIVAL_COMMANDS = ['eat', 'equip', 'inv', 'drop'] as const;
 const NEEDS_WALK = 'needs a task that can walk (start with --walk, --home or --target realm)';
@@ -151,16 +152,19 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
         const names = new Set<string>();
         const inv = deps.mob?.world.inventory;
         const flightKit = inv ? flightKitSlots(inv, deps.task) : new Set<number>(); // Track AU: kept by both
+        const loot = inv ? keptBoxSlots(inv, keepBoxNameOf(deps.task)) : new Set<number>(); // Track AV: kept by both
+        const keptSlots = new Set([...flightKit, ...loot]);
+        const keptLoot = loot.size ? `; ${keptBoxesLine(loot.size, keepBoxNameOf(deps.task))}` : '';
         inv?.slots.slice(0, 36).forEach((st, i) => {
           if (!st || st.count <= 0) return;
-          if (flightKit.has(i)) return;
+          if (keptSlots.has(i)) return;
           if (item === 'items' && keepOnDropItems(st.name)) return;
           names.add(st.name);
         });
         const worn = item === 'all' ? [120, 119].flatMap((w) => deps.mob?.world.inventory.window(w)?.slots.filter((st) => !!st && st.count > 0 && !isElytra(st.name)) ?? []) : [];
         const keptKit = inv && (flightKit.size > 0 || readKit(inv).elytraWorn) ? keptKitLine(readKit(inv, flightKitMemoryOf(deps.task))) : '';
         if (names.size === 0 && worn.length === 0) {
-          reply(item === 'all' ? `drop: inventory empty${keptKit ? `; ${keptKit}` : ''}` : 'drop: nothing but food, armour, elytra, tools and weapons');
+          reply(item === 'all' ? `drop: inventory empty${keptKit ? `; ${keptKit}` : ''}${keptLoot}` : `drop: nothing but food, armour, elytra, tools and weapons${keptLoot}`);
           return;
         }
         void (async () => {
@@ -168,7 +172,7 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
           let kinds = 0;
           let failed: string | undefined;
           for (const name of names) {
-            const r = await kit.drop(name);
+            const r = await kit.drop(name, undefined, keptSlots); // Track AV: never from a kept slot of the same name
             dropped += r.dropped;
             if (r.ok) kinds++;
             else if (r.reason !== 'none') {
@@ -181,7 +185,7 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
             const w = await kit.dropWorn();
             wornLine = `; worn: ${w.dropped.length > 0 ? `dropped ${w.dropped.join(', ')}` : 'nothing dropped'}${w.refused.length > 0 ? ` (refused: ${w.refused.join(', ')})` : ''}`;
           }
-          reply(`dropped ${dropped} items of ${kinds} kinds${failed ? ` (stopped at ${failed})` : ''}${wornLine}${keptKit ? `; ${keptKit}` : ''}`);
+          reply(`dropped ${dropped} items of ${kinds} kinds${failed ? ` (stopped at ${failed})` : ''}${wornLine}${keptKit ? `; ${keptKit}` : ''}${keptLoot}`);
         })();
         return;
       }
@@ -190,10 +194,15 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
         reply('usage: !drop <item> [n >= 1]');
         return;
       }
-      void kit.drop(item, n).then((r) => {
-        if (r.ok) reply(`dropped ${r.dropped} ${r.item}`);
-        else if (r.reason === 'none') reply(`drop: no ${r.item}`);
-        else reply(`drop ${r.item}: ${r.reason ?? 'failed'} after ${r.dropped}`);
+      // Track AV: `!drop <colour>_shulker_box` never throws the bot_loot boxes either (rename one to drop it)
+      const invAll = deps.mob?.world.inventory;
+      const loot1 = invAll ? keptBoxSlots(invAll, keepBoxNameOf(deps.task)) : new Set<number>();
+      const keptLoot1 = [...loot1].filter((i) => invAll?.slots[i]?.name === item.replace(/^minecraft:/, '')).length;
+      const tail = keptLoot1 ? `; ${keptBoxesLine(keptLoot1, keepBoxNameOf(deps.task))}` : '';
+      void kit.drop(item, n, loot1).then((r) => {
+        if (r.ok) reply(`dropped ${r.dropped} ${r.item}${tail}`);
+        else if (r.reason === 'none') reply(`drop: no ${r.item}${tail}`);
+        else reply(`drop ${r.item}: ${r.reason ?? 'failed'} after ${r.dropped}${tail}`);
       });
     },
   });
@@ -208,7 +217,9 @@ async function dropFlightKit(kit: SurvivalKit, inv: KitInventory | undefined, ta
   if (k.rockets > 0) dropped.push(`${(await kit.drop(ROCKET)).dropped} rockets`);
   if (k.boxSlot >= 0) {
     const name = inv.slots[k.boxSlot]?.name;
-    if (name) dropped.push(`the fireworks box (${(await kit.drop(name, 1)).dropped})`);
+    // Track AV: only the fireworks box, never another box of its colour (a bot_loot box)
+    const others = new Set(inv.slots.slice(0, 36).map((st, i) => (i !== k.boxSlot && st?.name === name ? i : -1)).filter((i) => i >= 0));
+    if (name) dropped.push(`the fireworks box (${(await kit.drop(name, 1, others)).dropped})`);
   }
   if (k.elytraSlot >= 0) dropped.push(`${(await kit.drop(ELYTRA)).dropped} elytra`);
   if (k.elytraWorn) {

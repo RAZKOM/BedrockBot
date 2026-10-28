@@ -47,6 +47,7 @@ every member of an `any`, is on the blacklist).
 | `nav/costs.ts` | `TICKS` (walk, sprint, jump air time, fall table) derived from `input/physics.ts`; `PathCosts`, `DEFAULT_COSTS`, `dropCost`. |
 | `nav/actions.ts` | `NavActions` (dig / place / useBlock / throwawayItems), `NavBlockFace`, `breakBlocker` (the breaking safety rules: a call into the shared rule set below). |
 | `nav/baritone/helper.ts` | Track BB (wave 11): the one rule set, Baritone's `MovementHelper` ported over `TerrainClass` (LGPL-3.0, `nav/baritone/LICENSE`, THIRD_PARTY_NOTICES.md): `canWalkThroughClass` / `canWalkThrough`, `canWalkOn` / `fullFloor`, `avoidWalkingInto`, `avoidBreaking` (= `breakBlocker`), `getMiningDurationTicks`, `breakTicksWith` / `bestTool` (Baritone `ToolSet`), `mustBeSolidToWalkOn`, `isReplaceable`, `canPlaceAgainst`, `isBottomSlab`, `isClimbable`, `isStillWater` / `isFlowing`, `ruleCell` (the miner's cell view). Pure, the per-cell rules allocation-free (`ruleCell` / `cellReaderOf` return one small object), over a `CellReader` (`NavGrid.cls`, or `cellReaderOf(source)`); the planner's grid, the worker's mirror grid, the follower's dig actions, the miner's tunnel checks and the Digger's tool choice call it. See "Rules". |
+| `nav/baritone/moves.ts` | Track BC (wave 11): the moves that dig, Baritone's `MovementTraverse` / `MovementAscend` / `MovementDescend` / `MovementDownward` / `MovementPillar` cost functions ported over `NavGrid` and the rule set (LGPL-3.0): per move the cells to break in break order and the cost (our movement ticks + `getMiningDurationTicks` per cell, `includeFalling` for a column's top cell), the movements' own refusals (a falling block over a broken head-room cell) and the shaft rules (`shaftBlocker` = `mine/tunnel.ts` `shaftRule` over the grid). Per-search caches of the mining ticks per cell and the shaft verdict per column. `astar.ts` calls it under `allowBreak`; the worker runs the same code. See "Nodes and moves". |
 | `nav/grid.ts` | `NavGrid`: cached classes, `stand`, `standThrough` (doorways), `free`, `freeColumn`, `crossing` (door / gate passage along x or z), `skyTop` / `underground` (per-chunk sky column cache), `factor`, `invalidate`. |
 | `nav/astar.ts` | `PathSearch` (resumable A*: `step(sliceMs)`), `findPath` (one go), `locateNode`. |
 | `nav/goals.ts` | Goal predicates and heuristics (blocks; the search multiplies by `costs.walk`): block, near, xz, any, getToBlock, yLevel, runAway, surface (see Goals). |
@@ -70,10 +71,16 @@ blocks (1.5 high) are obstacles, never floors. Costs are ticks (`DEFAULT_COSTS`)
 | diag | 4 diagonal | same feet height exactly; both side cells standable at it | `walk` x sqrt 2 |
 | jump | 4 cardinal | rise in (0.5625, 1.25]; the start column free up to the target's head. From a partial floor high in its cell (feet above `y + 0.75`: a chest 0.95, a dirt path 0.9375) the target can be two cells up (a full block beside the node's own cell, Track AX) | `jump` 9 |
 | drop | 4 cardinal | target column free from the feet to the head, fall through free cells, at most 3 blocks | `walk` + fall(n) (5 / 7 / 9) + `landing` 2; + `irreversibleDrop` 30 when higher than 1.25 |
+| walk through a doorway | 4 cardinal | door / gate cells let the 0.6-wide corridor pass now, or after a toggle (needs `useBlock`) | `walk` + `door` 10 per toggle |
+| dig-through (`walk` + `act.dig`; Baritone `MovementTraverse`) | 4 cardinal, same level | `allowBreak` + `dig`; full-block floors; the 1 or 2 body cells ahead are breakable (rules below), the upper one with the falling stack over it (`includeFalling`) | `walk` + per cell (break ticks + `dig` 12) |
 | walk through a doorway | 4 cardinal | door / gate cells let the 0.6-wide corridor pass now, or after a toggle (needs `useBlock`); the doorway within a step of the feet, also one cell up from a partial floor (a dirt path or carpet in front of the door, whose own cell is not part of the corridor), and out of it onto a floor a step lower in the cell below (Track AX) | `walk` + `door` 10 per toggle |
 | dig-through | 4 cardinal, same level | `allowBreak` + `dig`; full-block floors; the 1 or 2 body cells are breakable (rules below) | `walk` + per block (break ticks + `dig` 12) |
 | (dig rules, 2026-10-30) | | every dug block costs `digPenalty` ticks (setting, 60) on top of its break time, so a route walks around anything it can; nothing is broken within `protectRadius` (48) of home (`BreakRules.protectedArea`, `protected_area`), and built blocks (`isBuiltBlock`: planks, bricks, stairs, slabs, glass, doors, wool, concrete, tables, ...) are `protect` like containers everywhere. The miner's approach and sight-line digs and the farmer follow the same rules (`nav.breakRules()`) |
-| pillar-up | straight up | `allowPlace` + `place` + a throwaway block in the inventory; full-block feet; head room above | `jump` + `place` 10 |
+| ascend with breaks (`jump` + `act.dig`; Baritone `MovementAscend`, Track BC) | 4 cardinal, one up | `allowBreak`; the start stands on a full block, the target's floor is a full block, the same-level cell is blocked; breaks the head room over the start (x, y + 2), the target's feet cell and the cell over it (the top one with the falling stack); refused whenever a gravity block sits 3 above the start, head room broken or not (Baritone's rule, kept even with `allowGravityAbove`) | `jump` 9 + per cell (break ticks + `dig`) |
+| descend with breaks (`drop` + `act.dig`; Baritone `MovementDescend`, Track BC) | 4 cardinal, one down | `allowBreak`; a known full floor two below, the three body cells of the lower column breakable (the top one with the falling stack); never into liquid (liquid cells and cells beside one are refused); into open ground (the two cells over the floor ahead free: a staircase down) only towards a goal below the node, into rock or under a lintel whenever the plain drop is blocked | `walk` + fall(1) 5 + `landing` 2 + per cell (break ticks + `dig`) |
+| downward (`downward` + `act.dig`; Baritone `MovementDownward`, Track BC) | straight down | `allowBreak` + `allowPlace` with `throwaway` blocks for the depth below the start + 4 (the pillar back up); only towards a goal below; the shaft rules of `mine/tunnel.ts` `shaftRule` (`moves.ts shaftBlocker`): a known full floor under the dug block, no liquid in it or its 4 side neighbours 1 to 2 below, no pointed dripstone in the 3 x 3 within 3 below, no gravity block over the head, never within 2 of the world floor; the dug block passes the break rules except the under-feet one (this is the one move that digs the floor) | fall(1) 5 + `digDown` 6 + break ticks + `dig` |
+| pillar-up (Baritone `MovementPillar`) | straight up | `allowPlace` + `place` + a throwaway block in the inventory; full-block feet; head room above, or (Track BC, `allowBreak`) the cell above the head breakable (`act.dig` then `act.place`; refused under a gravity block) | `jump` + `place` 10 (+ break ticks + `dig`) |
+| sneak (`sneak`; ours, Track BC, owner: "sneaking makes you fit through smaller gaps") | 4 cardinal, same level | into, through and out of a cell the body only fits sneaking (`moves.ts sneakFits`): the feet cell passable over a full floor, the head cell blocked only by boxes whose underside is at least `sneakHeight` 1.49 above the feet (a top slab: 1.5; a top trapdoor: 1.81; a bottom slab or a carpet under a top slab: no); a standing body (1.8) is BLOCKED there, so these are sneak nodes: only sneak moves leave them (no jumps, drops, diagonals or digs); the follower holds sneak for the whole move; `moves.sneak` switches it off | `sneakWalk` 15.44 (`walk` / `sneakScale` 0.3; Baritone's SNEAK_ONE_BLOCK_COST is 15.385) |
 | swim (into water) | 4 cardinal | a still-water surface cell (see "Movement variety") at the feet level or up to 3 below; the column above it free up to the head | `walk` + fall(n) + `swimEnter` 10 |
 | swim | 8 neighbours on the surface | both side cells swim cells for a diagonal | `swim` 8.6 (x sqrt 2) |
 | swimOut | 4 cardinal | a standable bank with feet from the water cell's level up to 1 above | `swimOut` 14 |
@@ -102,10 +109,29 @@ along that axis through the cell's centre sweeps; `toggle` when the toggled stat
 open gate has no box; a door panel swings to the perpendicular edge); else blocked. Only cardinal walks
 enter or leave doorway nodes.
 
+**The moves that dig** (Track BC, wave 11; `nav/baritone/moves.ts`, Baritone's movements, LGPL-3.0). Every
+move above with `act.dig` lists its cells in break order (the start's head room first, then each column top
+first); the follower digs them all before the body moves (nav/actions.ts "the break order"), the Digger's
+tool choice as always. `PathOptions.allowGravityAbove` (`Navigator.allowGravityAbove`, `path.allowGravityAbove`;
+forwarded to the worker) switches the gravity rule to Baritone's: a stack over a dug cell is paid for
+(`includeFalling`) and dug again when it lands (the navigator waits `DIG_SETTLE_TICKS` 12 after such a dig
+and once more before the body walks in). `PathOptions.throwaway` (the hotbar's throwaway count, from the
+inventory) bounds the dig-down depth. `PathOptions.moves.digAscend` / `digDescend` / `digDownward` turn
+the three new moves off (dig-through stays with `allowBreak`). Digging down into open ground is planned only
+from nodes above the goal's lowest point (`block` / `near` / `getToBlock` y, `yLevel`, the members of an
+`any`; never for `xz`, `surface` or `runAway`, which have no height): without that gate A* digs the whole area under the
+search layer by layer, because every open floor ahead is one cheap dig away (9 211 expansions for a goal
+inside a dirt block in the 48 x 48 test world, 4 405 with it). Not taken from Baritone: `MovementDiagonal`
+breaks nothing either (it edges round one blocked corner, cost x (sqrt 2 - 0.001), and refuses two); ours
+refuses any solid corner because the footprint line check would collide; `MovementTraverse`'s bridge
+branch (placing the floor ahead), `MovementDescend`'s `dynamicFallCost` (longer falls with breaks, falls into
+water, the water bucket) and `MovementFall`'s break column: our drop rules stay; `MovementPillar` on ladders
+and in water columns.
+
 **Breaking rules** (`breakBlocker` = `nav/baritone/helper.ts` `avoidBreaking`, Track BB; the table in
 "Rules" below): no unknown, air, liquid or unbreakable blocks; never a block next to water or lava (6
 neighbours); never one with a gravity block on top (or an unsupported one beside it); never the floor
-under the start or the target (no dig-down move); never containers, beds, spawners, lecterns, hoppers,
+under the start or the target (only the dig-down move digs the block under the feet, under the shaft rules); never containers, beds, spawners, lecterns, hoppers,
 furnaces and the like (`TerrainClass.protect`), built blocks, doors and gates, or names in
 `protectedBlocks`; never ice (it becomes water) or infested blocks; never a cell a dig already failed
 on during this goto. Break ticks come from the break-time table with the best hotbar tool
@@ -154,14 +180,13 @@ Where Baritone and our measured BDS rules disagree, the safer rule is kept (the 
 | `isReplaceable` (a place target) | air, a one-layer snow layer, large fern / tall grass, `canBeReplaced` | not a rule (pillar-up placed into air only) | Baritone's over Bedrock's replaceable set (air, liquids, fire, grass, ferns, dead bush, seagrass, vines, roots, sprouts, lichen, sculk vein, structure void, light) |
 | `canPlaceAgainst` | a normal cube (not bamboo, moving pistons, scaffolding, shulker boxes, dripstone, amethyst) or glass | not a rule | Baritone's over our `fullCube`; unknown blocks never |
 | `mustBeSolidToWalkOn` | false for climbables; waterlogged slabs / stairs / trapdoors / scaffolding / leaves by half | not a rule | Baritone's for climbers; the waterlogged cases need layer 1, which the world model does not read (docs/world-model.md): a waterlogged slab answers like a dry one |
-| `isBottomSlab` (no ascend from a bottom slab onto a full block) | by state | our stairs / slab walks are measured (decision 0022: a rise within a step is a walk) | the predicate is there for Track BC's moves; the planner's own rule stays measured |
-| `MovementDownward` / `MovementFall` | dig straight down, fall into water | `shaftRule` (a known solid floor below, no liquid in the column or 1 to 2 below, no dripstone within 3, no gravity block over the top, never within 2 of the world floor) | ours (rule 6) |
+| `isBottomSlab` (no ascend from a bottom slab onto a full block) | by state | our stairs / slab walks are measured (decision 0022: a rise within a step is a walk) | Track BC's ascend with breaks starts on a full block (the body's cells are y, y + 1) and lands on one, so the slab case never arises; the planner's own rule stays measured |
+| `MovementDownward` / `MovementFall` | dig straight down, fall into water | `shaftRule` (a known solid floor below, no liquid in the column or 1 to 2 below, no dripstone within 3, no gravity block over the top, never within 2 of the world floor) | ours (rule 6): Track BC's `downward` applies them through `moves.ts shaftBlocker`, plus `allowPlace` with the throwaway blocks for the way back; `MovementFall` is not ported |
 
-Notes for Track BC (the moves that dig): test body cells with `canWalkThroughClass(c) === YES` (the planner's
-`passable`); `canWalkThrough(reader, x, y, z)` is also true for a still water source with air above (Baritone's
-rule), which only the swim moves may enter. `BreakRules.allowGravityAbove` is a rule-set option only: it is not
-forwarded through `PathOptions` nor `WorkerPlanOptions` yet (BC adds both, with the worker unit test), so every
-planner path still refuses a gravity block above a dug cell.
+Track BC (the moves that dig, `nav/baritone/moves.ts`; the table of what Baritone does and what we kept is in
+"Measured", Track BC): body cells are tested with `canWalkThroughClass(c) === YES` (the planner's `passable`);
+`BreakRules.allowGravityAbove` is forwarded through `PathOptions` and `WorkerPlanOptions` (the worker unit test
+compares 20 dig-heavy plans).
 
 Unit tests: `test/unit/skills/nav-baritone-helper.test.ts` (one test per rule, the planner's dig cost against
 the helper, the grid's stand rules against the helper), the worker test's rule strip (`nav-worker.test.ts`:
@@ -351,7 +376,9 @@ Per tick, from `InputLoop.onBeforeStep` (the command applies to the same tick):
 
 | Action | Runs | Done when |
 |---|---|---|
-| dig | `actions.dig(p)` per cell, the higher cell first; skipped when the cell is already free | every cell is free; a failure marks the cell not breakable and re-plans |
+| dig | `actions.dig(p)` per cell in the plan's break order (the higher cell first); cells already free are skipped; Track BC: the whole list is re-read after every dig (a cell a falling stack refilled under `allowGravityAbove` is dug again after `DIG_SETTLE_TICKS` 12, at most `DIG_REPEATS` 8 extra digs), and a dig node that also places (pillar under a lid) places next | every cell is free; a failure marks the cell not breakable and re-plans |
+| dig-down (Track BC) | the dig action on the block under the feet; the follower then presses nothing until the body stands in the node (`downward` target: idle) | the body is on the ground in the cell below |
+| sneak (Track BC) | no action: the follower holds sneak while the target is a `sneak` node (into, through and out of the low cells), so the body enters the gap already 1.49 high; sprint stays off for 10 ticks after | the next node is a plain walk |
 | use (door / gate) | `actions.useBlock(p)` when the cell still blocks the move's axis | `crossing` along the axis is clear (40 ticks at most); with `closeDoors` a close is scheduled on the first node out of the door cell |
 | close | `actions.useBlock(p)` on that node | the door / gate blocks the axis again |
 | place (pillar-up) | `actions.place(p, 'down')` from standing; the action jumps and clicks the top of the block below once the feet are above the cell (Track O's PlaceSkill: jump tick 4, feet +1.17, 6 ticks per step) | the result is ok and the body stands on the new block; landing back at the old height is a failure |
@@ -366,8 +393,12 @@ Block updates at cells the running goto's actions change never trigger re-plans.
 | a partial segment with fewer than `aheadNodes` (64) nodes left | plan-ahead from its last node, spliced on when ready (the leg runs on, no stop) |
 | the end of a partial segment, no plan-ahead coming | re-plan (`partial`) |
 | the main search ends at unloaded world with no progress (path of 1 node, `unknown`, not `limited`) | wait 10 ticks and plan again, up to `unloadedWaitTicks` (200) in a row: not a failure |
-| `correct_player_move_prediction` (if `replanOnCorrection`), `set_entity_motion`, a teleport | re-plan (`correction`) once on the ground |
+| `correct_player_move_prediction` (if `replanOnCorrection`), `set_entity_motion`, a teleport | re-plan (`correction`) once on the ground; Track BE: while a leg is walked, first the path check (below): standing in a node of the leg, the leg restarts there (no re-plan) |
+| Track BE: the body more than 3 blocks from the path, or more than 2 for over 20 ticks | re-plan (`off_path`), no failure |
+| Track BE: the body stands in a node past the follower's aim | the leg restarts at that node (skip-ahead), no re-plan |
+| Track BE: an action runs longer than its node's cost + 100 ticks | the action fails (`overrun`): failure + 1, blacklisted like a failed action, a dig cell not dug again this goto |
 | `World.onBlockUpdate` within 1 block (x / z) and y - 1 .. y + 2 of a node not yet passed, whose movement signature (boxes, floor, liquid, danger, cost factor, roof, open ...) changed | invalidate, re-plan (`block`); updates that change nothing the planner reads (grass to dirt) only invalidate the cache |
+| a section of a loaded column (re)placed by a chunk packet, or a column dropped (`ChunkStore.onSection` / `onColumnUnloaded`; a re-sent `level_chunk` replaces its column with a fresh unloaded one; Track BC) | once on the next tick, the grid's caches are dropped (`NavGrid.clear`): a chunk re-sent after a teleport or a server-side fill carries changes that never came as block updates, and the grid had answered from the old blocks (the nav-digmoves cave course found its shaft column "already free" that way); no re-plan by itself |
 | the move under way (straight line from the last node passed to the aim) takes more than 2 x its estimate + 10 ticks | re-plan (`timeout`), failure + 1 |
 | no progress (remaining path not 0.05 shorter) for 40 ticks | re-plan (`stuck`), failure + 1 |
 | an action fails or times out (dig 600 ticks per block, use / place 100) | re-plan (`action`), failure + 1; the cell is not dug / pillared in / opened again during this goto; after 2 failed places the goto plans without pillaring |
@@ -404,6 +435,59 @@ counts as a failure. Not taken from Baritone: its time budgets (ours are `maxNod
 static cut-off of the last 10 % of a partial path (`pathCutoffFactor`), the bests updated when a
 neighbour is relaxed (ours: when a node is expanded), `MIN_IMPROVEMENT` for re-opening nodes (found
 paths are unchanged).
+
+**Off the path** (Track BE, ported from Baritone's `PathExecutor`, `nav/baritone/executor.ts`,
+LGPL-3.0; `NavigatorOptions.offPath`, default on, `false` is main's behaviour). Per tick, before the
+follower steers, and only while it walks (not during an action: dig, use, place; not while the body is
+in the air: a jump, a fall, an irreversible drop, a knock; not in water, on a swim / climb / parkour /
+pillar target, a parkour run-up, a glide):
+
+- **Distance from the path**: to the polyline of node centres at feet height, from 8 nodes behind the
+  last node passed to 16 past the aim (Baritone `closestPathPos`: to every block centre of the whole
+  path). More than `MAX_MAX_DIST_FROM_PATH` (3) blocks: re-plan at once (`off_path`). More than
+  `MAX_DIST_FROM_PATH` (2): "possibly off path", re-plan once that has held for more than 20 ticks
+  (`offPathGraceTicks`; Baritone's `MAX_TICKS_AWAY` is 200: a body that is coming back is within 2
+  blocks again in a few ticks, one the follower walks parallel to the path (see Known gaps, the aim
+  runaway) never comes back, and the stuck detector is 40). Not a failure; a pending re-plan of
+  another reason is kept.
+- **Skip-ahead**: the body stands (cell, feet within 0.6, a walk / diag / jump / drop node) in a node
+  past the follower's aim (within 64): the leg restarts there (Baritone's "Skipping forward", which
+  starts at pathPosition + 3; our aim is already the farthest node the follower walks to).
+- **The path check after an event**: a correction (with `replanOnCorrection`), a knock
+  (`set_entity_motion`) or a teleport while a leg is walked on the ground no longer re-plans at once:
+  from the next tick, once the body stands (in the air: up to 20 ticks; in water: at once), a body
+  standing in a node of the leg behind the last node passed or past the aim restarts the leg there
+  (Baritone: snap `pathPosition` back after a lag teleport, forward after a push), one between them
+  walks on; a body in no node of the leg, or in water, re-plans (`correction`), as before. The check
+  runs before the tick's re-plan, so that re-plan is not a tick late. A knock re-plans at once, as
+  before, unless its estimated landing (flight x 0.91 per tick, gravity, then the ground slide, flat
+  ground assumed) is within 1 block of the leg and not in a liquid. Events re-plan as before during an
+  action, a retreat, a main search, a glide, in water, and on a swim / climb / parkour / pillar target
+  or a parkour run-up (main re-plans there on the next tick).
+- **Overrun**: an action (dig, use, place) failing once it has run longer than its node's planned cost
+  + 100 ticks (Baritone: `ticksOnCurrent > cost + movementTimeoutTicks`; `overrun` option `{ factor 1,
+  margin 100 }`): re-plan (`overrun`), failure + 1, the action cell blacklisted as a failed action is,
+  and the next dig cell not dug again in this goto (as a failed dig). Checked only while no action call
+  is pending (the Digger times out on its own estimate, 1.5 x) and not when the last dig just
+  succeeded: in practice between two digs of one node. For n cells the dig node's cost is the sum of
+  their break times + 60 n (`digPenalty`) + the walk, so the budget is that + 100. Use and place keep
+  their 100-tick timeouts (always shorter). Walking moves keep the per-move timeout (2 x the estimate +
+  10, `timeout`): shorter than Baritone's cost + 100 for every move up to 90 ticks.
+- **Dig timeout**: the navigator's dig timeout (600 ticks per cell) now aborts the Digger's job
+  (`NavigatorOptions.cancelDig`, BotSkills wires `Digger.cancel`); before, the abandoned job made the
+  next dig answer `busy`.
+- **Break times**: the planner's break times use the Digger's tool filter (`NavigatorOptions.toolOk`,
+  BotSkills wires `Digger.toolOk`: Track S worn tools count as an empty hand), in-thread and in the
+  worker (the navigator sends the worker the filtered hotbar), so a dig is priced with the tool the
+  Digger will use.
+
+Report: `offPath` (re-plans), `skips`, `snaps` (legs restarted after an event), `overruns`.
+
+Not taken from Baritone: its per-tick cost re-check of the next 5 movements (`costVerificationLookahead`,
+`maxCostIncrease`: ours re-plans on block updates near the path), the pause while the next segment's
+search could backtrack (`shouldPause`), the sprint rules (ours are measured), the trim of walked path
+history (`maxPathHistoryLength` 300 / `pathHistoryCutoffAmount` 50: our checks read a bounded window,
+the path array of one goto is not trimmed).
 
 The report (`skills.status().lastGoto`) has each plan (reason, tick, status, nodes, expanded, ms,
 slices), segments, corrections, motions, stuck and move timeouts, failures, distance, sprint ticks,
@@ -556,6 +640,81 @@ motions, teleports, inWater / inLava, the last goto.
 
 ## Measured
 
+### Track BC: the moves that dig (2026-10-30)
+
+What Baritone's movements do and what we kept (`nav/baritone/moves.ts`; the rule set's own table is in
+"Rules"):
+
+| Movement | Baritone (`movements/*.java`) | Ours before Track BC | Kept, and why |
+|---|---|---|---|
+| `MovementTraverse` | break `to.above()` (falling stack counted) and `to`; walk cost x sprint multiplier when nothing is broken; x 5 when standing on a ladder; a bridge branch that places the missing floor (side place, else a sneak back-place) | `digThrough`: the same two cells, full-block floors, the same rule set | Baritone's break set and cost shape over our ticks; no bridge branch (pillar-up is our only placing move: a bridge needs the sneak back-place the follower has no input for); the ladder x 5 never arises (a climb node is not a dig start) |
+| `MovementAscend` | break `dest`, `src.above(2)`, `dest.above()` (falling stack); refuse a FallingBlock at `src.above(3)` ("it would fall on us"); never from a bottom slab onto a full block; onto a bottom slab is a walk; `jumpPenalty` | the plain jump only (head room required) | Baritone's break set and the falling-block refusal (kept even with `allowGravityAbove`); the start and the target stand on full blocks (our measured slab / stairs walks, decision 0022, are the partial-floor rules); `jumpPenalty` is 0 in Baritone and not ported |
+| `MovementDescend` | break `end.above(2)` (falling stack), `end.above()`, `end`; `canWalkOn` two below, else `dynamicFallCost` (falls of 3+ with breaks, into water, with a water bucket; never onto a bottom slab); refuse when breaking in front and a FallingBlock is over the column | the plain drop only | the one-block descend with Baritone's break set; our drop rules for everything longer (`MovementFall` not ported: no bucket, the irreversible-drop penalty as today); never into liquid (the rule set refuses liquid cells and cells beside one: stricter than Baritone's "fall into water") |
+| `MovementDiagonal` | breaks nothing: edges round one blocked corner (cost x (sqrt 2 - 0.001)), refuses two; ascending / descending diagonals (`allowDiagonalAscend` / `Descend`) | both side cells standable at the same height | ours: the footprint line check (0.62 wide) would collide with a blocked corner, and the cardinal pair plus dig-through covers the route; no diagonal dig move |
+| `MovementDownward` | `canWalkOn` two below; `FALL_N_BLOCKS_COST[1]` + the mining ticks; `allowDownward` setting | none (the miner's shaft only, `mine/tunnel.ts`) | ours (rule 6): the shaft rules (`shaftBlocker`), `allowPlace` with the throwaway blocks for the depth + 4, only towards a goal below; cost fall(1) + `digDown` + the mining ticks; `moves.digDownward` is the switch |
+| `MovementPillar` | break `start.above(2)` (falling stack) with the FallingBlock-above refusal; never from a bottom slab onto a non-ladder, never a fence gate, ladders climbed instead, water columns swum; +0.1 on air | the plain pillar only (head room required) | Baritone's head-room break and refusal; full-block floors (the follower's PlaceSkill); doors and gates refused by the rule set; no ladder / water branches (climb nodes are Track AJ's) |
+| `MovementFall` | the break column over the landing, the water bucket, sneak on magma | the drop rules (3 blocks, free column) | ours: unchanged |
+| (no Baritone movement) sneak-through | a Java body does not fit under 1.5 blocks either; Baritone sneaks only on magma and for back-placing | a cell with a top slab at head height was BLOCKED | ours (owner, 2026-10-30): the `sneak` move above. Not taken: a descend into such a gap (a sneaking body stops at an edge, physics.ts `backOffFromEdge`; a standing body that falls in lands on the ceiling block), sneaking under a ceiling while digging (digs start from standing nodes only) |
+
+Measured on bds-bari (BDS 1.26.60.6, 2026-10-30; `test/e2e/nav-digmoves.test.ts`, truth-built courses, the planner
+worker attached as on the Realm; "before" is the same search with only dig-through, i.e. main's move set, in the
+test process; "plan" is the navigator's worker plan). No navigator tick over 5 ms; corrections per run are in the
+last column (0 everywhere except the cave's drop timing and the sneak exit before its fix).
+
+| Course | Before (dig-through only) | After (Track BC) | Executed (runs 3, 4, 5) |
+|---|---|---|---|
+| tunnel: 12-long, 3-high dirt hill under a stone brick roof, corridor closed | found, 57 expanded, 8 ms, cost 800, 24 digs (the dig-through move: unchanged) | the same plan (238 expanded in the worker, 11 to 12 ms) | ok in 590 to 592 ticks, 24 digs, 0 corrections, max tick 1.2 to 3.9 ms |
+| cave: start on a 12-high dirt mound, the goal in a 3 x 5 x 3 cave inside it at the ground, a lava pocket under the grass in front of the cave; cobblestone in the hotbar | no path (partial / no progress after 1.5 s and 260 000 to 300 000 expansions) | found, 15 nodes, 2 581 expanded, 29 to 46 ms in the worker: 11 dig-downs in a 1 x 1 shaft beside the cave (the shaft rules refuse the columns 1 to 2 blocks over the lava), then a step into the cave | ok in 291 to 367 ticks, 11 digs, min feet -60, lava untouched (6 of 6), health 20, max tick 0.9 to 1.3 ms; corrections: 0 in 4 of 5 runs, in the other one vertical correction of 0.739 per shaft block (the server breaks the block on its own timer and its body falls about 4 ticks before the client's `update_block` arrives; the body is idle, each re-plan found the same shaft, 367 ticks) |
+| cliff: a stone brick step under a dirt lintel over the approach and the step | none (18 expanded) | found, 10 nodes, 22 expanded, 0.3 to 0.4 ms, cost 98: one jump with 2 head-room breaks | ok in 93 to 94 ticks, 2 digs (the lintel's 4 blocks otherwise intact), 0 corrections, max tick 0.3 to 1.0 ms |
+| rock: a goal 8 blocks inside a 17 x 21 x 4 stone block, iron pickaxe | found, 10 600 expanded, 70 to 83 ms, cost 457: a straight 18-dig tunnel | found, 13 nodes, 11 200 expanded, 86 to 98 ms, cost 411: 3 ascends with breaks up the face, a plain jump onto the top, 4 descends with breaks down to the goal: 15 digs | ok in 288 to 289 ticks, 15 digs, 0 corrections, max tick 0.4 to 1.0 ms |
+| gravel: a 2-high dirt barrier with gravel on top closing a corridor | none (30 expanded; `gravity_above`) | none by default; with `allowGravityAbove`: found, 18 nodes, 40 expanded, 0.3 ms, cost 130: an ascend onto the barrier digging the dirt and the gravel cell itself (cheaper than digging under the stack) | refused: unreachable in 2 ticks, 0 digs, the 3 gravel intact; allowed: ok in 149 to 150 ticks, 2 digs, 0 corrections |
+| gravel, 2-high stack (tried once, not kept as a course) | | found: the dirt under the stack dug, the stack paid (`includeFalling`) | the two gravel fell and the lower one landed in the barrier (truth found it), but the world model never saw it (BDS sends no block update for a falling block that lands), so every re-plan walked into a block it believed was air: timeout after 2 504 ticks, 590 blocks, 0 digs beyond the first 2. The owner's rule (refused) stays the default; see Known gaps |
+| sneak: a corridor with top slabs at head height over 7 cells (a 1.5-high gap) | (dig-through only, sneak on) found: the same 8 sneak nodes (no dig move is involved) | found, 17 nodes, 43 expanded, 0.3 to 0.6 ms, cost 152: 8 walks, 8 sneak moves | ok in 164 ticks, 118 sneak ticks, 16.0 blocks for 15.5 straight, 0 digs, the 21 slabs intact; run 4: 1 correction of 0.14 at the exit (sneak released while the trailing edge was still under the last slab: the follower now holds sneak until the footprint is clear); the smallest gap a sneaking body passes on BDS is the top slab's 1.5 (the 1.49 box) |
+| in-thread fallback (the unit sim, 48 x 48 flat world, a goal inside a dirt block) | | the dig-heavy search needs 4 400 expansions, 27 to 38 ms: more than the 40 ms main-plan slice holds in one go; the worker's 2 s budget is the production path | |
+### Track BE: off-path checks (2026-10-30)
+
+Before: main (`offPath: false`); after: Track BE. Closed loops are the unit sim (`nav-offpath.test.ts`;
+`InputLoop.nudge` moves the body without an event, as a push the model does not explain would).
+
+| Test | Before | After |
+|---|---|---|
+| sim, a 30+-block lane, the body shoved 3.2 blocks sideways (no event) | walks on parallel to the path (the follower's aim runs ahead), 157 ticks, 0 re-plans | `off_path` re-plan 2 ticks after the shove, 158 ticks |
+| sim, shoved 1.5 / 2.5 (back to 1 after 15 ticks) | no re-plan | no re-plan |
+| sim, held 2.5 off for 40 ticks | no re-plan | `off_path` after the 20-tick grace |
+| sim, zigzag corridor, pushed forward onto path node 25 (no event) | walks back towards the node it aimed at, `timeout` re-plan, 175 ticks | skip-ahead, 0 re-plans, 113 ticks |
+| sim, zigzag, a teleport onto node 25 | `correction` re-plan, 115 ticks | snap (the leg restarts there), 0 re-plans, 115 ticks |
+| sim, closed corridor, 2-cell dirt wall, each dig 100 ticks, overrun budget forced to 0.5 x cost | both cells dug | `overrun` when the first dig finishes, the second cell not dug again |
+| sim, a dig that never finishes | the 1200-tick timeout (2 cells), the job left running | the same timeout, no overrun (pending), the Digger's job cancelled |
+| sim, a knock (`set_entity_motion`) along the lane | `correction` re-plan, 150 ticks | lands on the leg: no re-plan, 150 ticks |
+| sim, a knock sideways / during a parkour run-up / into a pool | re-plan at tick 31 / 16 / 31 | re-plan at tick 31 / 16 / 31 (sideways: then `off_path` once landed off that plan) |
+| sim, 20 goals on the hilly world | 0 re-plans, 4999 ticks | 0 re-plans, 0 off-path, 11 skip-aheads, 4912 ticks |
+| bds-move `nav-offpath`, truth tp 3 sideways off a 30-block lane (2 runs) | ok in 125 / 125 ticks, 1 `correction` re-plan | ok in 126 / 126 ticks, 1 `correction` re-plan (the tp is a teleport event; the body stands in no node of the leg) |
+| bds-move `nav-offpath`, zigzag, truth tp forward onto path node 25 (2 runs) | ok in 104 / 104 ticks, 1 `correction` re-plan | ok in 106 / 104 ticks, 0 re-plans, 1 snap |
+| bds-move regressions, once each: nav-knockback, nav-wall, nav-long, nav-hill, nav-stairs, nav-swim, nav-ladder, nav-parkour | (as documented above) | all green; no `off_path` / `overrun` plan; plans as before (wall: start + block; sealed goal unreachable after 96 ticks, 3 failures; long: 1 plan, 390 ticks; hill: 1 plan per leg; stairs, house, swim, ladder, parkour ticks identical to the documented ones) |
+
+On BDS every displacement of the body arrives as an event (a correction, `set_entity_motion`, a
+teleport), so the per-tick off-path re-plan is a safety net there (a push the movement model does not
+explain while `replanOnCorrection` is off; a follower that drifts); what BDS shows is the snap: one
+re-plan fewer, the same ticks (an in-thread re-plan of a 40-node path costs about a tick).
+
+**Heuristic weight** (Baritone `costHeuristic`, measured only, nothing shipped;
+`NAV_HEURISTIC_BENCH=1 pnpm exec vitest run --project unit test/unit/skills/nav-heuristic`). Baritone's
+3.563 is ticks per block (GoalXZ: octile distance x costHeuristic, just under its sprint cost 3.564);
+ours is octile x `costs.walk` (3.564 sprinting), so Baritone's default is our weight 1.0. Our heuristic
+x 1.0 / 1.5 / 3.563 on 20 dig-heavy queries (a 9 x 9 x 6 stone block round a 1 x 2 pocket on the
+hilly world, the start 10, 10 out, `allowBreak`, `digPenalty` 60; 4 to 8 digs per path):
+
+| Weight | Nodes expanded (sum) | Plan time (sum) | Path cost vs weight 1 (mean) |
+|---|---|---|---|
+| 1.0 (ours, = Baritone 3.563 ticks per block) | 992 513 (100 %) | 10.0 s | 1.000 |
+| 1.5 | 957 333 (96.5 %) | 9.4 s | 1.001 |
+| 3.563 | 753 837 (76.0 %) | 6.9 s | 1.003 |
+
+24 % fewer nodes at 3.563 x, short of the 40 % bar: not added as an option. A dug block costs its
+break time + 60 ticks against 3.56 for a walked one, so a heuristic over walking distance hardly
+steers a dig-heavy search (about 50 000 nodes for a goal 14 blocks away) whatever its weight.
+
+
 ### Track BA: partial-path selection (2026-10-30)
 
 Before: main's scoring (the lowest `h + trap`); after: Baritone's coefficient bests with `no_progress`
@@ -626,8 +785,13 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/unit/skills/tree-blacklist.test.ts` | the tree finder and the feller skip blacklisted logs; 3 failed fells blacklist an unreachable log |
 | `test/unit/skills/nav-partial.test.ts` | Track BA: the ported bests (constants, scores, MIN_IMPROVEMENT, MIN_DIST_PATH), node-limited ends next to a U wall, in a dead-end corridor and on open ground, `no_progress`, closed loops round a U and a cup with 100 to 200-node budgets |
 | `test/e2e/nav-partial.test.ts` | Track BA: a truth-built U wall with `path.maxNodes` 100: the first plan partial, the goal reached (worker and in-thread) |
+| `test/unit/skills/nav-digmoves.test.ts` | Track BC: per dig move the break set and order, the cost against the rule set, the refusals (water beside, a gravity block above with and without `allowGravityAbove`, the protected area, a built block, the floor under the feet, a falling block over a head-room cell, the shaft rules: liquid / dripstone below, gravity over the head, the world floor, no floor below, the throwaway budget), the `moves` switches, the goal-below gate; sneak-through (a top-slab ceiling: 8 sneak nodes at `sneakWalk`, a carpet under it closes the lane, a goal and a start under the ceiling); closed loops with fake actions (dig-down x 2, a descend-dig into the shaft column then dig-downs, ascend with head-room breaks, descend with a break, pillar under a lid, the sneak passage with the 1.49 sneak box); a dig-heavy goto with the worker-sized budget keeps every tick under 100 ms |
+| `test/e2e/nav-digmoves.test.ts` | Track BC, bds-bari, planner worker attached: a tunnel through a roofed dirt hill, a shaft down to a cave beside a lava pocket, a cliff under a lintel, a goal 8 blocks inside stone, a gravel-topped barrier (refused, then dug with `allowGravityAbove`), a 1.5-high passage under top slabs crossed sneaking; each with the "before" plan (dig-through only) |
+| `test/unit/skills/nav-offpath.test.ts` | Track BE: the ported executor rules (constants, distance from the path, states, overrun, nodeAt / skipAhead); closed loops: a 3.2-block shove re-plans within 2 ticks, 1.5 and a 2.5 that comes back do not, a body held 2.5 off re-plans after the grace, a push forward along a zigzag skips ahead, a teleport onto a later node snaps (main re-plans), a teleport off the path re-plans, knocks on / off the leg, in a parkour run-up and into water (no later than main), an overrun between two digs, a dig timeout cancelling the digger, 20 hilly goals with no off-path re-plans |
+| `test/unit/skills/nav-heuristic.test.ts` | Track BE: heuristic weights 1 / 1.5 / 3.563 on 20 dig-heavy queries (measurement; `NAV_HEURISTIC_BENCH=1`) |
+| `test/e2e/nav-offpath.test.ts` | Track BE: truth tp 3 blocks sideways off a 30-block lane, and forward onto a later node of a zigzag, checks off (main) and on |
 | `test/unit/skills/nav-worker.test.ts` | Track AB: the worker's mirror vs the main grid on 200 random cells (loaded, after block updates and a re-sent column, cached after an unload); 20 random start / goal pairs in a real worker thread vs in-thread (same status, cost, expansions); the navigator walking an interim answer and splicing in the final one; a crash logged once, its search failed, the worker restarted |
-| `test/unit/skills/nav-worker.test.ts` | Track AB: the worker's mirror vs the main grid on 200 random cells (loaded, after block updates and a re-sent column, cached after an unload); 20 random start / goal pairs in a real worker thread vs in-thread (same status, cost, expansions); the navigator walking an interim answer and splicing in the final one; a crash logged once, its search failed, the worker restarted. Track BB: the rule strip (every helper rule compared between the mirror and the main grid) |
+| `test/unit/skills/nav-worker.test.ts` | Track AB: the worker's mirror vs the main grid on 200 random cells (loaded, after block updates and a re-sent column, cached after an unload); 20 random start / goal pairs in a real worker thread vs in-thread (same status, cost, expansions); the navigator walking an interim answer and splicing in the final one; a crash logged once, its search failed, the worker restarted. Track BB: the rule strip (every helper rule compared between the mirror and the main grid). Track BC: 20 dig-heavy pairs (goals 3 blocks inside the stone, `allowBreak`, `allowPlace` / `throwaway` and `allowGravityAbove` varied): identical status, cost, expansions, path length and break sets |
 | `test/unit/skills/nav-baritone-helper.test.ts` | Track BB: the shared rule set, one test per rule (see "Rules"), the planner's dig cost against `getMiningDurationTicks`, the grid's stand rules against `canWalkOn` / `canWalkThrough` |
 | `test/e2e/nav-rules.test.ts` | Track BB, bds-bari: magma strip, berry bushes, ice over lava, gravel over a dig (and the control without it), soul sand, slabs and stairs (see "Rules") |
 | `test/e2e/nav-compute.test.ts` | Track AB, worker vs in-thread on the same terrain: the house walk (1 segment, 0 corrections), 120 blocks of the cross-country course, 120 blocks through staggered walls (fewer plans, no partial segments with the worker), a sealed goal 100 blocks away with allowPlace (a 300 000+ node search, navigator tick under 20 ms) |
@@ -656,6 +820,11 @@ the cross-country layout; default 7), `MOVE_AREA=x,z` (pin a v2 suite's area to 
 
 ## Known gaps
 
+- Track BE: the follower's aim runs away on open straight runs: pure pursuit moves the aim up to 6
+  nodes further every tick while the straight line stays clear, so it ratchets to the end of the run.
+  A body shoved sideways less than 2 blocks walks parallel to the path and converges only at the next
+  turn or the leg's end (2 to 3 blocks: the off-path grace re-plans). The fix (cap the aim distance by
+  the lateral offset) is for a later track.
 - Fences, panes and bars: known since the BDS palette registry (decision 0024); on 1.26.60 their arms
   come from the `minecraft:connection_*` states (Track AK, decision 0031; `TerrainClass.arms`), on
   minecraft-data states from the neighbours. Palette-only doors, trapdoors, gates, stairs and slabs
@@ -663,8 +832,32 @@ the cross-country layout; default 7), `MOVE_AREA=x,z` (pin a v2 suite's area to 
 - The partial-blocks lane (snow, slab, then grass) gave 1 correction of 0.417 in 3 of 3 runs after
   stepping off the last slab (the server one tick of falling behind); a plain slab, two slabs and
   snow + slab walked off 3 times each gave 0. Not investigated further.
-- No bridging (placing a block to cross a gap), no dig-down, no digging head room for a jump, no
-  descending by digging; pillar-up needs a full-block floor.
+- No bridging (placing a block to cross a gap); pillar-up needs a full-block floor (Track O's PlaceSkill
+  clicks the top of the block below the feet, which a slab floor in the feet cell has not; Baritone
+  refuses pillaring from a bottom slab too). Track BC: dig-down, head-room breaks for a jump and descending
+  by digging are moves now (see "Nodes and moves"); descending by digging more than one block at a time
+  (Baritone's `dynamicFallCost`) and breaking the corner cells of a diagonal are not.
+- The goal-below gate: digging down into open ground is planned only towards a goal below the node, so a
+  same-level goal behind a built (undiggable) wall is unreachable by digging under the wall: a staircase
+  under it would need the first dig into the open floor, which the gate refuses for a goal at the same
+  height. Dig-through and the ascend / descend into rock stay available at every height.
+- `allowGravityAbove` (Baritone's gravity rule) is planned and executed completely (the stack is paid, a
+  refilled cell is dug again, a dug cell that is a block again in the model sends the follower back to
+  digging), but BDS sends no block update when a falling block lands: measured on bds-bari with a 2-high
+  gravel stack, the landed gravel was in the world (truth) and invisible to the model, and the goto looped
+  on corrections against it. The option stays off (the owner's rule) until the world model learns landed
+  falling blocks (the falling-block entity's removal, or a chunk re-read).
+- The dig-down drop is server-timed: BDS breaks the block when its own break timer ends and the server
+  body falls at once, while the local body stands until the `update_block` arrives (about 4 ticks on
+  bds-bari under load): a vertical correction of 0.74 per shaft block in 1 of 5 runs of the cave course,
+  0 in the others. Harmless (the body is idle in the shaft, the re-plan is the same shaft) but each one
+  re-plans; predicting the break locally (the Digger's expected tick) would remove it.
+- Dig-heavy searches cost about 10 to 20 us per expansion (each node asks the rule set for up to 4
+  directions x 3 cells, cached per search) against about 1 us for a walk, and A* expands every node cheaper
+  than the dig route (the open ground around it): a goal inside rock 8 blocks away takes 4 000 to 45 000
+  expansions (30 to 850 ms) on the test worlds. The planner worker's 2 s budget holds them; the in-thread
+  fallback's 40 ms main plan does not (its partial path walks towards the rock and the plan-ahead takes
+  over).
 - Swimming, ladders, vines, parkour and edge sneaking: see "Movement variety" (limits there); no
   scaffolding, no underwater travel, no swimming in flowing water.
 - Trapdoors are classified (open / closed) but not toggled by the planner.

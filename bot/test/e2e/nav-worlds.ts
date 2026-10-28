@@ -424,6 +424,76 @@ export function stairsLayout(o: Origin) {
   };
 }
 
+// ---- Track BC: the moves that dig (docs/pathfinding.md "Nodes and moves") ---------------------------
+
+/**
+ * Dig-moves suite (bds-bari): five courses along +z, 12 to 14 blocks apart in x, the corridors closed with
+ * stone brick walls (built blocks: never dug) from the bedrock up:
+ *   tunnel    a 12-long, 3-high dirt hill filling a 3-wide corridor under a stone brick roof: the only way
+ *             is a 1-wide tunnel (24 digs); before Track BC: around or unreachable
+ *   cave      a 12-high dirt mound with a 3 x 5 x 3 cave inside at the ground; the start on top, the goal in
+ *             the cave; a lava pocket under the grass in front of the cave (never into it): a shaft down
+ *             beside the cave and a step in (the pillar back up needs the cobblestone in the hotbar)
+ *   cliff     a 1-high stone brick step under a dirt lintel over the approach and the step: the jump needs
+ *             two head-room breaks
+ *   rock      a goal 8 blocks inside a 17 x 21 x 4 stone block (8 from the nearest faces): a tunnel of 16
+ *             digs with the iron pickaxe
+ *   gravel    a 2-high dirt barrier with gravel on top closing a corridor: refused by default, dug with
+ *             `allowGravityAbove` (the fallen gravel is dug again)
+ */
+export function digMovesLayout(o: Origin) {
+  const fills: Fill[] = [...clear(o.x - 6, o.z - 4, o.x + 70, o.z + 32, -40)];
+  const stateFills: StateFill[] = [];
+  /** Stone brick walls at x +- 2 (from the bedrock to `top`) and caps at both ends of a corridor z 0 .. len. */
+  const corridor = (lx: number, len: number, top: number) => {
+    fills.push(f(lx - 2, -63, o.z - 1, lx - 2, top, o.z + len + 1, 'stone_bricks'));
+    fills.push(f(lx + 2, -63, o.z - 1, lx + 2, top, o.z + len + 1, 'stone_bricks'));
+    fills.push(f(lx - 1, -63, o.z - 1, lx + 1, top, o.z - 1, 'stone_bricks'));
+    fills.push(f(lx - 1, -63, o.z + len + 1, lx + 1, top, o.z + len + 1, 'stone_bricks'));
+  };
+  // tunnel
+  const tx = o.x;
+  corridor(tx, 24, -57);
+  fills.push(f(tx - 1, -60, o.z + 6, tx + 1, -58, o.z + 17, 'dirt'));
+  fills.push(f(tx - 1, -57, o.z + 5, tx + 1, -57, o.z + 18, 'stone_bricks'));
+  // cave
+  const cx = o.x + 14;
+  fills.push(f(cx - 2, -60, o.z, cx + 2, -49, o.z + 10, 'dirt'));
+  fills.push(f(cx - 1, -60, o.z + 4, cx + 1, -58, o.z + 8, 'air'));
+  fills.push(f(cx - 1, -62, o.z + 1, cx + 1, -62, o.z + 2, 'lava'));
+  // cliff
+  const kx = o.x + 28;
+  corridor(kx, 14, -57);
+  fills.push(f(kx - 1, -60, o.z + 6, kx + 1, -60, o.z + 12, 'stone_bricks'));
+  fills.push(f(kx - 1, -58, o.z + 5, kx + 1, -58, o.z + 6, 'dirt'));
+  // rock
+  const rx = o.x + 44;
+  fills.push(f(rx - 8, -60, o.z + 4, rx + 8, -57, o.z + 24, 'stone'));
+  // gravel (last: buildLayout waits for the last fill's block)
+  const gx = o.x + 56 - 2;
+  corridor(gx, 20, -57);
+  fills.push(f(gx - 1, -60, o.z + 10, gx + 1, -59, o.z + 10, 'dirt'));
+  // one gravel: a 2-high stack was tried (2026-10-30): the landed gravel never reached the world model (BDS sends no block
+  // update for a falling block that lands), so the bot looped on corrections against a block it believed was air
+  fills.push(f(gx - 1, -58, o.z + 10, gx + 1, -58, o.z + 10, 'gravel'));
+  // sneak (owner addition): a corridor with a ceiling of top slabs at head height over z 6 .. 12 (a 1.5-high gap)
+  const sx = o.x + 68;
+  corridor(sx, 20, -57);
+  stateFills.push({ ...f(sx - 1, -59, o.z + 6, sx + 1, -59, o.z + 12, 'smooth_stone_slab'), states: '["minecraft:vertical_half"="top"]' });
+  const layout: Layout = { name: 'digmoves', anchor: { x: o.x + 32.5, y: -60, z: o.z + 14.5 }, fills };
+  return {
+    layout,
+    stateFills,
+    cleanup: clear(o.x - 6, o.z - 4, o.x + 70, o.z + 32, -40),
+    sneak: { start: { x: sx + 0.5, y: -60, z: o.z + 1.5 }, goal: { x: sx, y: -60, z: o.z + 17 }, ceiling: { from: { x: sx - 1, y: -59, z: o.z + 6 }, to: { x: sx + 1, y: -59, z: o.z + 12 } } },
+    tunnel: { start: { x: tx + 0.5, y: -60, z: o.z + 2.5 }, goal: { x: tx, y: -60, z: o.z + 21 }, hill: { from: { x: tx - 1, y: -60, z: o.z + 6 }, to: { x: tx + 1, y: -58, z: o.z + 17 } } },
+    cave: { start: { x: cx + 0.5, y: -48, z: o.z + 2.5 }, goal: { x: cx, y: -60, z: o.z + 6 }, lava: { from: { x: cx - 1, y: -62, z: o.z + 1 }, to: { x: cx + 1, y: -62, z: o.z + 2 } }, mound: { from: { x: cx - 2, y: -60, z: o.z }, to: { x: cx + 2, y: -49, z: o.z + 10 } } },
+    cliff: { start: { x: kx + 0.5, y: -60, z: o.z + 1.5 }, goal: { x: kx, y: -59, z: o.z + 10 }, lintel: { from: { x: kx - 1, y: -58, z: o.z + 5 }, to: { x: kx + 1, y: -58, z: o.z + 6 } } },
+    rock: { start: { x: rx + 0.5, y: -60, z: o.z + 0.5 }, goal: { x: rx, y: -60, z: o.z + 12 }, block: { from: { x: rx - 8, y: -60, z: o.z + 4 }, to: { x: rx + 8, y: -57, z: o.z + 24 } } },
+    gravel: { start: { x: gx + 0.5, y: -60, z: o.z + 1.5 }, goal: { x: gx, y: -60, z: o.z + 18 }, barrier: { from: { x: gx - 1, y: -60, z: o.z + 10 }, to: { x: gx + 1, y: -59, z: o.z + 10 } }, top: { from: { x: gx - 1, y: -58, z: o.z + 10 }, to: { x: gx + 1, y: -58, z: o.z + 10 } } },
+  };
+}
+
 // ---- Track BB: the shared movement rules (docs/pathfinding.md "Rules") ------------------------------
 
 /**

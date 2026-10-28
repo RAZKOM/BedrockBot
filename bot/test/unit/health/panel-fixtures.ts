@@ -100,6 +100,7 @@ export function fullSource(over: Partial<PanelStateSource> = {}): PanelStateSour
     chat: () => Array.from({ length: 30 }, (_, i) => ({ ts: 1761753600000 + i * 1000, text: `waypoint panel set to 18304 -60 17024 (${i})`, sent: true })),
     commands: () => Array.from({ length: 70 }, (_, i) => `command${i}`),
     inventory: () => inv,
+    icons: () => true,
     saturation: () => 4.8,
     weather: () => 'rain',
     day: () => 12,

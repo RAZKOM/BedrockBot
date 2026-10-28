@@ -33,6 +33,8 @@ import { panelRoutes, type CommandResult } from './routes.ts';
 import { buildPanelHelp, buildPanelState, type PanelChatLine, type PanelState } from './state.ts'; // Track AM: buildPanelHelp
 import { buildMemory, chestRows, MEMORY_TTL_MS, type PanelMemory } from './memory.ts'; // Track AP
 import { mapMarks } from './marks.ts'; // Track AR
+import { IconBook } from './icons/book.ts'; // decision 0046: the item pictures
+import { assetDir, FsAssets } from './icons/source.ts';
 
 export interface PanelPlan {
   mode: 'off' | 'shared' | 'separate';
@@ -123,6 +125,8 @@ export interface PanelDeps {
   runtime?: RuntimeSettings;
   worldCache?: WorldCache;
   log: Logger;
+  /** The item pictures; default: the minecraft-assets package when it is installed (tests pass their own or null for none). */
+  icons?: IconBook | null;
 }
 
 export interface Panel {
@@ -135,6 +139,16 @@ export interface Panel {
   urls(): string[];
   state(): PanelState;
   run(text: string): CommandResult;
+}
+
+/** The item pictures from the minecraft-assets package, null (and a log line) when it is not installed. */
+function openIcons(log: Logger): IconBook | null {
+  const dir = assetDir();
+  if (!dir) {
+    log.warn('panel: item pictures off (the minecraft-assets package is not installed: pnpm install); the inventory keeps its drawn glyphs');
+    return null;
+  }
+  return new IconBook(new FsAssets(dir));
 }
 
 export function setupPanel(d: PanelDeps): Panel {
@@ -179,6 +193,7 @@ export function setupPanel(d: PanelDeps): Panel {
     });
     if (off) unsubs.push(off);
   }
+  const icons = plan.mode === 'off' ? null : d.icons !== undefined ? d.icons : openIcons(log);
   const cache = (): WorldCache | undefined => d.worldCache;
   let memo: { at: number; value: PanelMemory } | undefined;
   const memory = (): PanelMemory | undefined => {
@@ -226,6 +241,7 @@ export function setupPanel(d: PanelDeps): Panel {
       commands: () => chat.commandNames(),
       // Track AP: inventory and statuses
       inventory: () => built.mobility?.world.inventory,
+      icons: () => icons !== null,
       saturation: () => saturation,
       flight: () => flyControlOf(runningTask)?.state(), // Track AU
       weather: () => (weatherKnown ? (thunder ? 'thunder' : rain ? 'rain' : 'clear') : undefined),
@@ -323,6 +339,7 @@ export function setupPanel(d: PanelDeps): Panel {
     help: () => buildPanelHelp({ commands: () => chat.commandInfo(), settings: d.runtime }), // Track AM: Help tab
     chests: () => chestRows(cache()?.chests.all() ?? [], runningTask.position()), // Track AP: the memory block's list
     marks: () => mapMarks(cache(), runningTask.position()), // Track AR: chests and herds on the panel's map
+    ...(icons ? { icon: (name: string) => icons.png(name) } : {}), // decision 0046
   });
   const healthOptions = plan.mode === 'shared' ? { host: plan.host, auth } : {};
 

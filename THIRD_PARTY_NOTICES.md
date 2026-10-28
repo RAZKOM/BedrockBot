@@ -11,3 +11,18 @@ and never paste translated code. Decision record: docs/decisions/0043 (supersede
 |---|---|---|---|
 | `src/main/java/baritone/pathing/movement/MovementHelper.java` (the rule functions), `src/main/java/baritone/pathing/precompute/Ternary.java` (YES / NO / MAYBE), `src/main/java/baritone/utils/ToolSet.java` (`getBestDestructionTime` / `getBestSlot` as `breakTicksWith` / `bestTool`) | `23723891` | `bot/src/skills/nav/baritone/helper.ts` | BB |
 | `src/main/java/baritone/pathing/calc/AbstractNodeCostSearch.java`, `src/main/java/baritone/pathing/calc/AStarPathFinder.java` (the best-so-far bookkeeping, `failing`) | `23723891da460ef15797b02fe5b385b0c5b163cc` | `bot/src/skills/nav/baritone/bestSoFar.ts` | BA |
+| `src/main/java/baritone/pathing/movement/movements/MovementTraverse.java`, `MovementAscend.java`, `MovementDescend.java`, `MovementDownward.java`, `MovementPillar.java` (the `cost` functions: break sets, costs, refusals; the execution is ours) | `23723891` | `bot/src/skills/nav/baritone/moves.ts` | BC |
+| `src/main/java/baritone/pathing/path/PathExecutor.java` (`MAX_DIST_FROM_PATH`, `MAX_MAX_DIST_FROM_PATH`, `MAX_TICKS_AWAY`, `closestPathPos` / `possiblyOffPath`, the `pathPosition` skip, the movement timeout), `src/api/java/baritone/api/Settings.java` (`movementTimeoutTicks`) | `23723891` | `bot/src/skills/nav/baritone/executor.ts` | BE |
+
+## Packages the panel's item icons use (decision 0046)
+
+Nothing below is copied into this repository; `pnpm install` fetches both (`bot/package.json`, exact pins).
+
+| Package | Licence | What we use |
+|---|---|---|
+| `minecraft-assets` 1.19.0 (PrismarineJS, https://github.com/PrismarineJS/minecraft-assets) | MIT (the package's code and data layout) | read at run time from `node_modules`: the Java `26.1` item and block textures and block models, to draw the inventory icons at `GET /icons/<name>.png` (`bot/src/health/panel/icons/`) |
+| `pngjs` 7.0.0 (https://github.com/pngjs/pngjs) | MIT | decoding the textures and encoding the icons |
+
+The textures and models are Mojang's art (Minecraft is a trademark of Mojang AB / Microsoft); they are not
+part of this project, are never committed or served from a public place, and are shown only on the
+owner's own control panel. Without the package the panel falls back to its drawn glyphs.
