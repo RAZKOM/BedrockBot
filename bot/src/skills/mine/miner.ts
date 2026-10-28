@@ -321,6 +321,7 @@ export class MineTask {
     const count = opts.count ?? 1;
     if (!Number.isInteger(count) || count < 1) throw new Error(`count must be a positive integer, got ${count}`);
     this.gen++;
+    this.paused = false; // a new job never inherits a pause (a stale one held the next !mine forever)
     this.d.skills.cancel();
     this.opts = { ...opts, count };
     // Track AQ: kinds and quotas (one for a plain `!mine <block> n`)
@@ -342,11 +343,20 @@ export class MineTask {
     this.state = 'scan';
     this.log.info(`mine: ${this.quotas.length > 1 ? this.quotaLine() : `${count} x ${[...this.names].join('/')}`}, tunnel cap ${this.tunnelLen()}, direct ${this.directOn() ? 'on' : 'off'}`);
     const gen = this.gen;
-    return this.run(gen).catch((e: unknown) => {
-      this.lastError = e instanceof Error ? e.message : String(e);
-      this.log.error(`mine: ${this.lastError}`);
-      return this.end(gen, 'failed');
-    });
+    return this.run(gen)
+      .then((s) => {
+        // every end of the job logs its line and is a final state: a loop that left without end() (Realm
+        // 2026-10-30: 'paused', no line, the process dropped) ends 'failed' here instead
+        if (gen !== this.gen || !this.running) return s;
+        this.lastError = `the loop left in state ${s}`;
+        this.paused = false;
+        return this.end(gen, 'failed');
+      })
+      .catch((e: unknown) => {
+        this.lastError = e instanceof Error ? e.message : String(e);
+        this.log.error(`mine: ${this.lastError}`);
+        return this.end(gen, 'failed');
+      });
   }
 
   stop(): void {
@@ -458,12 +468,12 @@ export class MineTask {
       // own drops lying around (a diamond left in a hole, a drop that rolled): a short sweep before the next target
       // (Realm 2026-10-30: the bot walked past one of its own diamonds on the way to the next ore)
       await this.sweepDrops(gen, SWEEP_RADIUS, 200); // Track AQ: the job's kind within 8 blocks, one entity scan when none
-      if (!this.alive(gen)) return this.state;
+      if (!this.alive(gen)) continue; // paused: the loop waits for resume() (Realm 2026-10-30: returning here ended the job); stopped: the loop ends
       if (this.stats.mined >= o.count!) {
         await this.sweepDrops(gen, 12, 200); // the job ends with every nearby drop picked up
         await this.pickupLeft(gen); // Track AQ: drops still lying in the holes of this run
         await this.returnUp(gen); // Track AQ
-        if (!this.alive(gen)) return this.state;
+        if (!this.alive(gen)) continue; // paused: the loop waits for resume() (Realm 2026-10-30: returning here ended the job); stopped: the loop ends
         return this.end(gen, 'done');
       }
       if (this.d.health() < (o.minHealth ?? 8)) {
@@ -504,7 +514,7 @@ export class MineTask {
       if (cands.length === 0) {
         await this.pickupLeft(gen); // Track AQ
         await this.returnUp(gen); // Track AQ
-        if (!this.alive(gen)) return this.state;
+        if (!this.alive(gen)) continue; // paused: the loop waits for resume() (Realm 2026-10-30: returning here ended the job); stopped: the loop ends
         return this.end(gen, 'none_left');
       }
       const target = this.directOn() ? cands[0] : this.pickReachable(cands); // Track AQ: the approach itself probes (walk or tunnel)

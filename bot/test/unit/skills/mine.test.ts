@@ -5,6 +5,8 @@ import { MineTask, eyeGoal, hasPickaxe, needsPickaxe, resolveTargets, type MineD
 import { OreMemory, firstHit, isExposed, lineOfSight } from '../../../src/skills/mine/seen.ts';
 import { blockInfoOf } from '../../../src/skills/terrain/shapes.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
+import { MineProcess } from '../../../src/tasks/process/mine.ts';
+import { BaseProcess, PRIORITY, ProcessManager, type ProcessStatus } from '../../../src/tasks/process/manager.ts';
 
 const key = (p: Vec3) => `${p.x},${p.y},${p.z}`;
 
@@ -391,6 +393,79 @@ describe('MineTask', () => {
     for (const f of ticks.splice(0)) f();
     expect(await run).toBe('done');
     expect(t.stats.failures).toBe(0);
+  });
+});
+
+/** A guard fight stand-in: an auto process at the guard priority that wants control while `want` is set. */
+class FakeGuard extends BaseProcess {
+  readonly name = 'guard';
+  readonly kind = 'auto' as const;
+  protected override persistent = true;
+  want = false;
+  get priority(): number {
+    return PRIORITY.guard;
+  }
+  override wants(): boolean {
+    return this.want;
+  }
+  protected run(): void {}
+  protected halt(): void {}
+  status(): ProcessStatus {
+    return { line: 'guard' };
+  }
+}
+
+describe('MineProcess pre-empted during a drop sweep (Realm 2026-10-30)', () => {
+  // `!get sand 8640`: the guard paused the mine job while its pre-target drop sweep (collect r=8) ran;
+  // the sweep resolved `interrupted`, run() saw !alive(gen) and returned 'paused', the process finished
+  // without an end line and the guard's "no user process left" rule walked the bot 1500 blocks home.
+  it('stays on the stack, resumes after the fight and finishes done', async () => {
+    const r = cave();
+    r.load({ x: 3, y: 1, z: -2 }, 'coal_ore');
+    const h = harness(r);
+    const tick = () => new Promise<void>((res) => setTimeout(res, 1));
+    h.deps.waitTicks = () => tick();
+    // the first drop sweep hangs until it is cancelled (the pre-emption), as the collect skill does
+    let hold = true;
+    let interrupt: (() => void) | undefined;
+    const collect0 = h.deps.skills.collect.bind(h.deps.skills);
+    h.deps.skills.collect = (rad, t, o) => {
+      if (!hold || !o?.filter) return collect0(rad, t, o);
+      hold = false;
+      return new Promise((res) => (interrupt = () => res({ ok: false, reason: 'interrupted', gained: { coal: 1 }, pickedUp: 0, skipped: 0, ticks: 0, corrections: 0 })));
+    };
+    const cancel0 = h.deps.skills.cancel.bind(h.deps.skills);
+    h.deps.skills.cancel = () => {
+      cancel0();
+      const f = interrupt;
+      interrupt = undefined;
+      f?.();
+    };
+    const pm = new ProcessManager();
+    const guard = pm.add(new FakeGuard());
+    const task = new MineTask(h.deps);
+    const p = pm.add(new MineProcess(task, { block: 'coal_ore', count: 1 }));
+    await tick();
+    expect(interrupt).toBeDefined(); // the sweep runs
+    expect(pm.active).toBe(p);
+
+    // a zombie: the guard pre-empts the job, the sweep resolves interrupted
+    guard.want = true;
+    pm.tick();
+    expect(pm.active).toBe(guard);
+    for (let i = 0; i < 10; i++) await tick();
+    expect(task.isPaused).toBe(true);
+    expect(pm.has(p)).toBe(true); // before the fix: finished silently with 'paused'
+    expect(pm.userProcesses()).toEqual([p]); // the guard's return-home rule (ifIdle) sees the job
+
+    // the fight ends: the job resumes and finishes
+    guard.want = false;
+    pm.tick();
+    expect(pm.active).toBe(p);
+    expect(task.isPaused).toBe(false);
+    expect(await p.result).toBe('done');
+    expect(task.stats.mined).toBe(1);
+    expect(pm.has(p)).toBe(false);
   });
 });
 
