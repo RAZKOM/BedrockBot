@@ -4,6 +4,8 @@
 //   roof      a room (roof 4 above the floor, a doorway) around the start: `!fly` refuses with the roof line;
 //             `!goto` 300 blocks walks out of the room first and takes off once outside (the position changes
 //             on foot, a flight starts, 0 damage, arrived)
+//   tunnel    a tunnel 6 blocks under a raised surface with a stair up (the owner's underground case, review item 1):
+//             `!goto` 300 blocks walks up to an open-sky cell on the surface first (`openSkyLeg`), then flies, arrives
 //   tree      a tree-height obstacle (3 x 3, 8 high) 10 blocks ahead on the climb line: the sky check turns the
 //             takeoff heading, the climb looks 20 ticks ahead: 0 damage, landed
 // Env: FLY_BDS_HOST / FLY_BDS_PORT / FLY_BDS_CONTAINER (fly-truth.ts), FLY_AREA, FLY_VERBOSE=1.
@@ -89,12 +91,14 @@ describe.skipIf(!E2E)('@bds fly: roofs and the path ahead (Track AU2)', () => {
     await sleep(1500);
     // the flat world's floor is 4 under the feet, so the surface is raised: a stone slab 7 thick (F .. F + 6) over
     // 21 x 21 blocks, the surface feet at F + 7; inside it the tunnel, 2 high at the old ground level (feet F) from
-    // tz - 2 to tz + 2, then a stair of one block up per block of z to the slab's top at tz + 9
+    // tz - 2 to tz + 2 (its last cell 3 high: the jump onto the first step needs the head room), then a covered
+    // stair of one block up per block of z (3 high: feet, head, the jump) that comes out on the slab's top at tz + 9
     const surface = F + 7;
     await teleport(b, { x: tx + 0.5, y: F, z: tz + 0.5 });
     await truthLoaded(b.truth, 'fill', [tx - 10, F, tz - 10, tx + 10, F + 6, tz + 10, 'stone']);
     await truthLoaded(b.truth, 'fill', [tx, F, tz - 2, tx, F + 1, tz + 2, 'air']);
-    for (let k = 1; k <= 7; k++) await truthLoaded(b.truth, 'fill', [tx, F + k, tz + 2 + k, tx, Math.min(F + 6, F + k + 2), tz + 2 + k, 'air']);
+    await truthLoaded(b.truth, 'fill', [tx, F + 2, tz + 2, tx, F + 2, tz + 2, 'air']);
+    for (let k = 1; k <= 6; k++) await truthLoaded(b.truth, 'fill', [tx, F + k, tz + 2 + k, tx, Math.min(F + 6, F + k + 2), tz + 2 + k, 'air']);
     const inside: Vec3 = { x: tx + 0.5, y: F, z: tz + 0.5 };
     await teleport(b, inside);
     await giveFlightKit(b, { rockets: 64 });

@@ -180,6 +180,8 @@ export class FlightBrain {
   private emergency: LandingTarget | undefined;
   /** Go-around: flying away until out, then back. */
   private outbound = false;
+  /** Track AU2 review: the bearing (from the target) the go-around flies out on and comes back along: null = straight away from the target, undefined = not chosen yet. */
+  private goaroundBearing: number | null | undefined;
   private lastChoice: { pitch: number; cost: number; kind: string; phase: string } | undefined;
   /** The landing planner of the current approach (reset for every new approach). */
   private readonly planner: ApproachPlanner;
@@ -242,6 +244,7 @@ export class FlightBrain {
     if ((this.phase === 'approach' || this.phase === 'goaround') && (!body || hdist(body.pos, this.target) < 15)) return false;
     this.target = target;
     if (this.phase === 'goaround') this.outbound = true;
+    this.goaroundBearing = undefined;
     this.descent = undefined;
     this.descentNone = false;
     this.goaroundY = undefined;
@@ -694,6 +697,7 @@ export class FlightBrain {
         this.stats.goArounds++;
         this.phase = 'goaround';
         this.outbound = true;
+        this.goaroundBearing = undefined;
         this.planner.reset();
         return this.goaround(i, ctl);
       }
@@ -714,12 +718,16 @@ export class FlightBrain {
     const d = hdist(b.pos, this.target);
     const away = yawTo(this.target, b.pos);
     if (this.outbound) {
-      ctl.yaw = turnTowards(i.yaw, away, 12);
+      // the way back in must be open (Track AU2 review: a landing cell 2 blocks before a house wall, retargeted while
+      // the body circled beyond the house, went around 4 times straight away from it and came back over the house)
+      if (this.goaroundBearing === undefined) this.goaroundBearing = this.openBearing(away);
+      const outAt = this.goaroundBearing === null ? undefined : { x: this.target.x - Math.sin((this.goaroundBearing * Math.PI) / 180) * GOAROUND_OUT, z: this.target.z + Math.cos((this.goaroundBearing * Math.PI) / 180) * GOAROUND_OUT };
+      ctl.yaw = turnTowards(i.yaw, outAt ? yawTo(b.pos, outAt) : away, 12);
       const want = (this.goaroundY ??= this.goaroundHeight());
       if (b.boostTicks > 0) ctl.pitch = b.pos.y < want ? -30 : -5;
       else if (b.pos.y < want - 2 && this.fire(i, ctl, 'goaround', -30)) ctl.pitch = -30;
       else ctl.pitch = b.pos.y > want + 4 ? 10 : 0;
-      if (d >= GOAROUND_OUT && b.pos.y <= want + 6) this.outbound = false;
+      if ((outAt ? hdist(b.pos, outAt) <= 12 || d >= GOAROUND_OUT + 30 : d >= GOAROUND_OUT) && b.pos.y <= want + 6) this.outbound = false;
       this.steerClear(i, ctl, { noLanding: true });
       return ctl;
     }
@@ -731,6 +739,29 @@ export class FlightBrain {
       return this.approach(i, ctl, this.target);
     }
     return ctl;
+  }
+
+  /**
+   * Track AU2 review: the bearing (from the target) of the go-around's way back in: the bearing away from
+   * the target when the last 24 blocks of that approach line are clear (every known column top under the
+   * target's top), else the nearest of 45 / 90 / 135 / 180 degrees off it that is; null (straight away, the
+   * Track AU behaviour) when the first is clear, nothing is known or nothing is clear.
+   */
+  private openBearing(away: number): number | null {
+    const skyTop = this.o.skyTop;
+    if (!skyTop) return null;
+    const t = this.target;
+    const clear = (bearing: number): boolean => {
+      const r = (bearing * Math.PI) / 180;
+      for (let dist = t.half + 1; dist <= 24; dist++) {
+        const top = skyTop(Math.floor(t.x - Math.sin(r) * dist), Math.floor(t.z + Math.cos(r) * dist));
+        if (top !== undefined && top + 1 > t.top + 0.5) return false;
+      }
+      return true;
+    };
+    if (clear(away)) return null;
+    for (const off of [45, -45, 90, -90, 135, -135, 180]) if (clear(away + off)) return away + off;
+    return null;
   }
 
   /**
@@ -757,8 +788,8 @@ export class FlightBrain {
   /**
    * The emergency landing: safe ground ahead, as far as a shallow glide from here reaches (else straight
    * down the slope); `within` (a `roof` landing) caps the distance before the solid nothing cleared.
-   * No known ground ahead: the headings 45 and 90 degrees either side are tried before the fallback
-   * 10 blocks ahead at the target's height (a void below).
+   * No known ground ahead: the headings 45, 90 and 135 degrees either side and behind are tried (the
+   * nearest heading first) before the fallback 10 blocks ahead at the target's height (a void below).
    */
   private emergencyTarget(b: FlightBody, within?: number): LandingTarget {
     const h = Math.hypot(b.vel.x, b.vel.z);
@@ -782,7 +813,8 @@ export class FlightBrain {
       return undefined;
     };
     const dists = within !== undefined ? [6, 8, 10, 13, 16, 20, 24] : [10, 16, 24, 32, 45, 60];
-    for (const off of [0, 45, -45, 90, -90]) {
+    // ahead first, then round to behind (Track AU2 review: over a void the nearest known ground may lie back the way we came)
+    for (const off of [0, 45, -45, 90, -90, 135, -135, 180]) {
       const best = along(yaw + off, dists);
       if (best) return best;
     }

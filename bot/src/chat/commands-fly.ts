@@ -94,10 +94,19 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   /** The highest solid block of a column: the world model (loaded), else the cache; `fromY` (Track AU2) looks down from there (under a roof the roof is not the ground). */
   const skyTop = (x: number, z: number, fromY?: number): number | undefined => {
     const p0 = position();
-    let from = Math.min(319, Math.floor(fromY ?? (p0?.y ?? 64) + 80));
-    // the cell at `from` already solid (a mountain more than 80 above, the bot deep underground): that is the
-    // inside of the mass, not its top; scan from the world's top instead (Track AU2 review)
-    if (fromY === undefined && world.blockAt({ x, y: from, z })?.solid) from = 319;
+    const from = Math.min(319, Math.floor(fromY ?? (p0?.y ?? 64) + 80));
+    if (fromY === undefined && world.blockAt({ x, y: from, z })?.solid) {
+      // the cell at `from` already solid (a mountain more than 80 above, the bot deep underground): that is the
+      // inside of the mass, not its top (Track AU2 review): the highest known solid up to the world's top, the
+      // cells the model has not received skipped; `from` itself when everything above is known air
+      let unknownAbove = false;
+      for (let y = 319; y > from; y--) {
+        const b = world.blockAt({ x, y, z });
+        if (b === undefined) unknownAbove = true;
+        else if (b.solid) return y;
+      }
+      return unknownAbove ? world.cache?.columnTop(x, z) : from;
+    }
     let known = false;
     for (let y = from; y >= -64; y--) {
       const b = world.blockAt({ x, y, z });

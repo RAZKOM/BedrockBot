@@ -4,7 +4,11 @@
 // armour) and the owner's supply lines.
 import { describe, expect, it } from 'vitest';
 import { keepOnDropItems } from '../../../src/chat/commands-survival.ts';
-import { flyEndLine } from '../../../src/chat/commands-fly.ts';
+import { flyEndLine, registerFlyCommands } from '../../../src/chat/commands-fly.ts';
+import { RuntimeSettings } from '../../../src/config/settings.ts';
+import { silentLogger } from '../../../src/log.ts';
+import type { Goal, SkillResult } from '../../../src/skills/types.ts';
+import { parseBlockArgs, type CommandDeps } from '../../../src/tasks/process/deps.ts';
 import { FlightBrain, climbMomentum } from '../../../src/skills/fly/brain.ts';
 import { skyQuery } from '../../../src/skills/fly/controller.ts';
 import { elytraWornLimit, fireworksLowLine, flightKitSlots, isFireworksBox, isFlightKitItem, keptKitLine, kitLine, kitReady, readKit, SupplyWatch } from '../../../src/skills/fly/kit.ts';
@@ -38,7 +42,7 @@ import { neverDrop } from '../../../src/skills/survival/keeper.ts';
 import { planArmour } from '../../../src/skills/survival/armour.ts';
 import { planUnload } from '../../../src/skills/home/unloader.ts';
 import type { ItemStack } from '../../../src/world/types.ts';
-import { FLIGHT_PRIORITY } from '../../../src/tasks/process/fly.ts';
+import { FLIGHT_PRIORITY, FlyProcess } from '../../../src/tasks/process/fly.ts';
 import { PRIORITY } from '../../../src/tasks/process/manager.ts';
 
 const FEET = -60;
@@ -260,7 +264,7 @@ describe('fly: the approach planner (glide formula)', () => {
 });
 
 /** The brain flying a whole trip on stepBody over a synthetic world (the offline simulator of the track). */
-function flyTrip(o: { dist: number; up: number; half: number; startUp?: number; wall?: boolean; walls?: boolean; tree?: boolean; roof?: boolean; rockets?: number; life?: number; takeoffYaw?: number }) {
+function flyTrip(o: { dist: number; up: number; half: number; startUp?: number; wall?: boolean; house?: number; seed?: number; retargetFrom?: LandingTarget; retargetWithin?: number; retargetBeyond?: number; walls?: boolean; tree?: boolean; roof?: boolean; rockets?: number; life?: number; takeoffYaw?: number }) {
   const tx = 0;
   const tz = o.dist;
   const top = FEET + o.up;
@@ -276,6 +280,13 @@ function flyTrip(o: { dist: number; up: number; half: number; startUp?: number; 
   if (o.tree) boxes.push({ from: { x: -1, y: FEET, z: 9 }, to: { x: 1, y: FEET + 7, z: 11 }, solid: true }); // Track AU2: a tree 10 blocks ahead on the climb line
   if (o.roof) boxes.push({ from: { x: -40, y: FEET + 6, z: -40 }, to: { x: 40, y: FEET + 6, z: 60 }, solid: true }); // Track AU2: a wide roof 6 above the start (the flight is already in the air under it)
   if (o.startUp) boxes.push({ from: { x: -1, y: FEET, z: -1 }, to: { x: 1, y: FEET + o.startUp - 1, z: 1 }, solid: true });
+  if (o.house !== undefined) {
+    // Track AU2 review: the fly-walk house (7 x 7, walls 3 high, the roof on top, a doorway towards the start) its centre o.house blocks beyond the target
+    const hz = tz + o.house;
+    boxes.push({ from: { x: tx - 3, y: FEET, z: hz - 3 }, to: { x: tx + 3, y: FEET + 3, z: hz + 3 }, solid: true });
+    boxes.push({ from: { x: tx - 2, y: FEET, z: hz - 2 }, to: { x: tx + 2, y: FEET + 2, z: hz + 2 }, solid: false });
+    boxes.push({ from: { x: tx, y: FEET, z: hz - 3 }, to: { x: tx, y: FEET + 1, z: hz - 3 }, solid: false });
+  }
   const world: BlockQuery = withBoxes(flatWorld(), boxes);
   const skyTop = (x: number, z: number): number => {
     for (let y = 100; y >= -64; y--) if (world.solidAt(x, y, z)) return y;
@@ -288,14 +299,16 @@ function flyTrip(o: { dist: number; up: number; half: number; startUp?: number; 
   const target: LandingTarget = { x: tx + 0.5, z: tz + 0.5, top, half: o.half, ground: FEET };
   const start = { x: 0.5, y: FEET + (o.startUp ?? 0), z: 0.5 };
   const cz = cruiseHeight(start, target, o.roof ? () => FEET - 1 : skyTop, {});
-  const brain = new FlightBrain(target, { cruiseY: cz.y, groundAt: groundBelow, skyTop, obstacle: (x, y, z) => world.solidAt(x, y, z) === true, seed: 5, takeoffYaw: o.takeoffYaw });
+  const brain = new FlightBrain(target, { cruiseY: cz.y, groundAt: groundBelow, skyTop, obstacle: (x, y, z) => world.solidAt(x, y, z) === true, seed: o.seed ?? 5, takeoffYaw: o.takeoffYaw });
   let body = initialBody(start, true);
   let cmd = { ...IDLE_COMMAND };
   let rockets = o.rockets ?? 64;
   let lastFire = -100;
   let lastAir = { vy: 0, h: 0 };
   let hits = 0;
+  let retargeted = 0;
   for (let t = 1; t < 6000; t++) {
+    if (o.retargetFrom && !retargeted && Math.hypot(body.pos.x - target.x, body.pos.z - target.z) <= o.retargetWithin! && t % 10 === 0 && (o.retargetBeyond === undefined || body.pos.z > target.z + o.retargetBeyond)) retargeted = brain.retarget(o.retargetFrom, { pos: body.pos, vel: body.vel, onGround: body.onGround, gliding: body.gliding ?? false, boostTicks: body.boostTicks ?? 0 }) ? t : 0;
     const out = brain.step({
       tick: t,
       body: { pos: body.pos, vel: body.vel, onGround: body.onGround, gliding: body.gliding ?? false, boostTicks: body.boostTicks ?? 0 },
@@ -318,7 +331,7 @@ function flyTrip(o: { dist: number; up: number; half: number; startUp?: number; 
     body = stepBody(body, step, world).state;
     // Track AU2: a collision in the air (the speed vanishes without the brain's doing) is what the path-ahead check must prevent
     if (body.gliding && Math.hypot(before.x, before.z) > 0.6 && Math.hypot(body.vel.x, body.vel.z) < Math.hypot(before.x, before.z) * 0.3 && body.pos.y > FEET + 0.5) hits++;
-    if (out.end) return { end: out.end, ticks: t, rockets: (o.rockets ?? 64) - rockets, by: brain.stats.rocketsBy, goArounds: brain.stats.goArounds, lastAir, maxY: brain.stats.maxY, cruiseY: cz.y, descents: brain.stats.descents, steered: brain.stats.steered, hits, body };
+    if (out.end) return { retargeted, end: out.end, ticks: t, rockets: (o.rockets ?? 64) - rockets, by: brain.stats.rocketsBy, goArounds: brain.stats.goArounds, lastAir, maxY: brain.stats.maxY, cruiseY: cz.y, descents: brain.stats.descents, steered: brain.stats.steered, hits, body };
   }
   throw new Error('the flight never ended');
 }
@@ -419,6 +432,21 @@ describe('fly: the brain flies whole trips on stepBody', () => {
     open.phase = 'cruise';
     const out = open.step({ tick: 1, body, yaw: 0, pitch: 0, rockets: 10, canFire: true, health: 20, elytraLeft: 400 });
     expect(out.control.fire).toBe(true);
+  });
+
+  it('Track AU2 review: the fly-walk house: retargeted to the cell 2 blocks before its door wall while the body circles beyond the house: the go-around comes back from the open side and lands (before: 4 go-arounds, landed 30 off)', () => {
+    // the landable cell before the door: as flown when its ground is known at the takeoff
+    const direct = flyTrip({ dist: 295, up: 0, half: 1, house: 5 });
+    expect(direct.end.ok, JSON.stringify(direct.end)).toBe(true);
+    expect(direct.hits).toBe(0);
+    // the goal inside the house first, the retarget once the body is 10 beyond its centre (the far side of the circle)
+    for (const seed of [1, 2]) {
+      const r = flyTrip({ dist: 300, up: 0, half: 1, house: 0, seed, retargetFrom: { x: 0.5, z: 295.5, top: FEET, half: 1, ground: FEET }, retargetWithin: 60, retargetBeyond: 10 });
+      expect(r.retargeted).toBeGreaterThan(0);
+      expect(r.end.ok, JSON.stringify(r.end)).toBe(true);
+      expect(r.goArounds).toBeLessThanOrEqual(1);
+      expect(r.hits).toBe(0);
+    }
   });
 
   it('Track AU2, a roof 6 above the start the sky check did not see: the climb never flies into it; the flight ends on the ground under it as `roof`, not by health', () => {
@@ -549,5 +577,92 @@ describe('fly: the kit rules', () => {
     expect(flyEndLine({ ok: false, reason: 'no_glide', target, distance: 150, seconds: 5, notes: [] })).toMatch(/^fly: the server did not let me glide/);
     expect(flyEndLine({ ok: false, reason: 'roof', target, distance: 150, report: { ...report, ok: false }, seconds: 5, notes: [] })).toMatch(/^landed \(no open sky ahead: a roof\) at .*; walk outside first/);
     expect(flyEndLine({ ok: false, reason: 'fly: no open sky here (roof at y 72, 3 blocks up); walk outside first', target, distance: 150, seconds: 0, notes: [] })).toBe('fly: no open sky here (roof at y 72, 3 blocks up); walk outside first');
+  });
+});
+
+/**
+ * Track AU2 review: the automatic flight of `!come` / `!goto` (commands-fly.ts wraps pve.come / pve.walk)
+ * on a fake world: flat ground (the top block at FEET - 1), optionally a stone slab FEET .. FEET + 6 over
+ * |x|, |z| <= 10 with a 2-high tunnel at x = 0 (the bot underground), optionally a mountain plateau
+ * 100 high around the player (its top more than 80 above the bot: skyTop's scan starts inside it).
+ */
+function comeRig(o: { tunnel?: boolean; mountain?: boolean } = {}) {
+  const solid = (x: number, y: number, z: number): boolean => {
+    if (y < -64 || y > 319) return false;
+    if (y <= FEET - 1) return true;
+    if (o.tunnel && Math.abs(x) <= 10 && Math.abs(z) <= 10 && y <= FEET + 6) return !(x === 0 && z >= -2 && z <= 2 && y <= FEET + 1);
+    if (o.mountain && Math.abs(x) <= 30 && z >= 270 && z <= 330 && y <= FEET + 100) return true;
+    return false;
+  };
+  const block = (s: boolean) => ({ name: s ? 'stone' : 'air', stateId: 1, states: {}, hardness: s ? 1.5 : 0, solid: s, boxes: [] });
+  const slots: (ItemStack | null)[] = [item('firework_rocket', 64), item('elytra', 1, 0), ...Array.from({ length: 34 }, () => null)];
+  const inventory = { slots, selected: 0, rawItem: () => undefined, window: (id: number) => (id === 120 ? { slots: [null, null, null, null] } : undefined) };
+  const world = { blockAt: (p: { x: number; y: number; z: number }) => block(solid(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z))), inventory, entityTracker: {}, self: { health: 20, dimension: 0 }, cache: undefined };
+  const loop = { state: { ready: true, pos: { x: 0.5, y: FEET, z: 0.5 }, gliding: false, onGround: true }, waitTicks: () => Promise.resolve() };
+  const added: unknown[] = [];
+  const said: string[] = [];
+  const walks: Goal[] = [];
+  const comes: string[] = [];
+  const playerAt = { x: 0.5, y: o.mountain ? FEET + 101 : FEET, z: 300.5 };
+  const pve = {
+    walk: (g: Goal) => (walks.push(g), Promise.resolve({ ok: false, reason: 'interrupted' })),
+    come: (n: string) => (comes.push(n), Promise.resolve({ ok: true })),
+    playerFeet: (n: string) => (n === 'Steve' ? playerAt : undefined),
+    mover: undefined,
+    hotbar: undefined,
+  };
+  const settings = new RuntimeSettings();
+  const task = { name: 'afk', stop: () => {} };
+  const deps = {
+    chat: { register: () => {}, say: (m: string) => said.push(m) },
+    task,
+    conn: { queue: () => {} },
+    mobility: { loop },
+    skills: {},
+    world,
+    processes: { add: (p: unknown) => added.push(p) },
+    settings,
+    pve,
+    log: silentLogger,
+    parseBlock: parseBlockArgs,
+    needsWalking: (c: string) => `${c} needs walking`,
+  } as unknown as CommandDeps;
+  registerFlyCommands(deps);
+  return { pve: pve as unknown as { come(n: string): Promise<SkillResult> }, said, walks, comes, added, settings };
+}
+const settle = () => new Promise((r) => setTimeout(r, 20));
+
+describe('fly: the automatic flight of !come (commands-fly.ts)', () => {
+  it('!come to a player 300 blocks away under open sky flies to the player (half 2); with autoFly off it walks', async () => {
+    const r = comeRig();
+    void r.pve.come('Steve');
+    await settle();
+    expect(r.said).toEqual(['flying (300 blocks; walking would be ~1 min)']);
+    const fly = r.added.find((p): p is FlyProcess => p instanceof FlyProcess);
+    expect(fly?.target).toMatchObject({ x: 0.5, z: 300.5, top: FEET, half: 2, label: 'Steve' });
+    expect(r.comes).toEqual([]);
+    const off = comeRig();
+    off.settings.set('autoFly', false);
+    await off.pve.come('Steve');
+    expect(off.comes).toEqual(['Steve']);
+    expect(off.said).toEqual([]);
+  });
+
+  it('review item 1: underground (a tunnel 7 under the surface) !come walks to an open-sky cell on the surface first, not along the tunnel', async () => {
+    const r = comeRig({ tunnel: true });
+    void r.pve.come('Steve');
+    await settle();
+    expect(r.said[0]).toBe(`fly: no open sky here (roof at y ${FEET + 2}, 2 blocks up); walking towards Steve and taking off outside`);
+    expect(r.walks[0]).toEqual({ type: 'block', p: { x: 0, y: FEET + 7, z: 4 } });
+    expect(r.added.some((p) => p instanceof FlyProcess)).toBe(false);
+  });
+
+  it('review item 4: a player on a plateau more than 80 above the bot: its top is the plateau top, not the cell skyTop started in, so the player is landed on', async () => {
+    const r = comeRig({ mountain: true });
+    void r.pve.come('Steve');
+    await settle();
+    expect(r.said).toEqual(['flying (300 blocks; walking would be ~1 min)']);
+    const fly = r.added.find((p): p is FlyProcess => p instanceof FlyProcess);
+    expect(fly?.target).toMatchObject({ top: FEET + 101, half: 2 });
   });
 });

@@ -127,7 +127,7 @@ Phases of `FlightBrain` (one tick in, the controls out; `FlightController` appli
 | climb | rockets back to back at the climb pitch until the body's momentum reaches the cruise height (`cruiseHeight`, Track AU2: what the glide down to the approach entry needs plus the margin, with the climb's own run taken off, capped `flyMaxClimb` above the start, never under `flyClearance` above the highest known column under the straight line nor under the entry); every tick the path ahead is checked (`steerClear`) |
 | cruise | level towards the target along the glide line (Track AU2, "Rocket economy"): a rocket only when the projected height (the momentum included) is more than 3 under the line plus the margin, pitched up for the height it should buy; the speed bleed before the approach; more than 12 above the approach entry within 116 blocks: the descent geometry ("Descent geometry") down to 6 above |
 | approach | within 56 blocks (earlier when high): the `ApproachPlanner` every tick |
-| go-around | no landing plan for 6 ticks within 45 blocks, or a hard one near (cost over 35 within 14 blocks, over 70 within 30): a climbing turn away (one rocket when under the go-around height: the entry + 6, or 7 above the highest column within 30 blocks of the target, Track AU2), out to 68 blocks and low enough, back in, a new approach; at most `flyGoArounds` (4), then the nearest safe ground |
+| go-around | no landing plan for 6 ticks within 45 blocks, or a hard one near (cost over 35 within 14 blocks, over 70 within 30): a climbing turn away (since the Track AU2 review out along a bearing whose last 24 blocks into the target have no column above its top, the nearest of 0 / 45 / 90 / 135 / 180 degrees off the bearing away, so it comes back from the open side; one rocket when under the go-around height: the entry + 6, or 7 above the highest column within 30 blocks of the target, Track AU2), out to 68 blocks and low enough, back in, a new approach; at most `flyGoArounds` (4), then the nearest safe ground |
 | land | the emergency: `!fly stop`, `!land`, `!stop`, health under `fleeHealth`, the elytra at `toolWearLimit` + 20 uses, a roof or wall ahead that nothing clears (`roof`, Track AU2); the nearest safe column ahead looking down from the body (a plain top, no lava / water / cactus / magma / fire, level neighbours, 10 to 60 blocks), a circle down when far above it, then the same landing |
 | done | the body stands: 10 ticks without the server lifting it again (a "bounce": the brain flies on) |
 
@@ -201,8 +201,9 @@ are the planner's business: a house wall 4 blocks behind a landing cell ended a 
 bds-fly before this rule). A slow body (under 0.7 blocks a tick, near the stall) is not steered:
 every path of a stalled body sinks, the speed recovery comes first. A `roof` landing's ground is
 looked for **before** the solid nothing cleared (the straight glide's first hit, less a berth), on
-the heading and 45 / 90 degrees either side, and the `land` phase keeps steering clear on the way
-down; over a void (no known ground) the fallback is 10 blocks ahead at the target's height.
+the heading, then 45 / 90 / 135 degrees either side and behind (over a void the nearest known ground
+may lie back the way the body came), and the `land` phase keeps steering clear on the way
+down; with no known ground on any heading the fallback is 10 blocks ahead at the target's height.
 
 Offline (the unit test's trips on `stepBody`): a tree 3 x 3 x 8 ten blocks ahead on the climb line is
 cleared both with the sky check's 30-degree heading and straight at it (2 to 3 steered ticks), 0
@@ -304,7 +305,7 @@ structure) the goal itself is flown to and the flight looks again every 10 ticks
 (`retargetNear`, fly.ts): once the chunks arrive the landable cell is chosen and the flight
 retargeted (`fly: landing 23 blocks from <goal> (no landing spot on it), then walking`), also during
 the approach while still 15 blocks out (the planner re-plans from the new target; a go-around turns
-outbound again); loaded ground with nothing landable within `flyLandSearch` ends the search (the goal
+outbound again, and the new approach comes in from the open side: a cell before a house wall retargeted while the body circled beyond the house went around 4 times on bds-fly before the go-around chose its bearing); loaded ground with nothing landable within `flyLandSearch` ends the search (the goal
 stays the target). The retarget loop is not gated on the process token: the `flight` process holds
 control in the air and the `fly` process is paused meanwhile.
 
@@ -459,10 +460,11 @@ ahead on the climb line:
 | Case | What happened |
 |---|---|
 | `!fly` in the room | `fly: no open sky here (roof at y -56, 4 blocks up); walk outside first` (no flight) |
-| `!goto` 300 in the room | `fly: no open sky here (roof at y -56, 4 blocks up); walking towards 74592 -60 65676 and taking off outside`; walked out of the door to 32 blocks (the leg) with no flight started, then `flying (268 blocks; walking would be ~1 min)`; landed 0.11 from the aim (1 climb rocket + 3 go-around rockets in run 1, 2 go-arounds), `arrived at 74592 -60 65676`, 0 damage |
+| `!goto` 300 in the room | `fly: no open sky here (roof at y -56, 4 blocks up); walking towards 74592 -60 65676 and taking off outside`; walked out of the door (since the review: to the first open-sky cell outside, 6 blocks from the start; before it a 32-block `xz` leg) with no flight started, then `flying (268 blocks; walking would be ~1 min)`; landed 0.11 from the aim (1 climb rocket + 3 go-around rockets in run 1, 2 go-arounds), `arrived at 74592 -60 65676`, 0 damage |
 | the tree 10 blocks ahead | the flight starts (the tree is not over the start), `takeoff heading 30` in the log; landed 0.1 from the aim, 3 rockets (2 climb, 1 top-up), 0 go-arounds, 19 s, 0 damage; run 1 of the same test earlier: 5 rockets (2 go-arounds), 0 damage |
+| a tunnel under a raised surface (feet 7 below it, a covered stair up; the review's underground case) | `fly: no open sky here (roof at y -58, 2 blocks up); walking towards ... and taking off outside`; `leg 1 to the open-sky cell` on the surface 4 blocks ahead (up the stair, not along the tunnel), then `flying (296 blocks; ...)`; landed 0.28 from the aim, 2 climb rockets, 0 go-arounds, `arrived at`, 0 damage (the review fixes, 2 runs) |
 
-Both runs of the suite passed. The indoor case the owner hit (the flight already in the air under a
+Both runs of the suite passed (after the review fixes: 2 of 2 again, all three cases; the room: 1 rocket, 0.33 off; the tree: 2 rockets, 1 go-around, 0.17 off; 0 damage in all). The indoor case the owner hit (the flight already in the air under a
 roof) is covered offline (the unit test's wide roof 6 above the start: the body never enters the
 roof's cells and the flight ends on the ground as `roof`).
 
@@ -492,6 +494,12 @@ the chunks arrive and retargets in flight:
 | 3 blocks under the floor (a one-wide trench with a stair) | `fly: landing 1 blocks from <goal> (no landing spot on it), then walking` (the trench's own cell and its neighbours fail the level-neighbours rule) | 1 block beside the trench, 0.13 off the cell, 1 rocket, 0 damage | walked down the stair; `arrived at <goal>`, standing at y −63 |
 | inside a 7 x 7 house (walls 3 high, a roof, a doorway) | `fly: landing 4 blocks from <goal> (no landing spot on it), then walking` (the roof's cells walk 12 by the height rule, the ground before the door 4) | on the ground 4 blocks before the door wall, 0 damage, 1 landing | walked in through the door; `arrived at <goal>`, standing inside |
 
+After the review fixes one house run retargeted while the body circled beyond the house: every go-around
+flew straight away from the cell and came back over the house (4 go-arounds, landed 34 off, 7 rockets, 0
+damage, then walked and arrived); reproduced offline (the unit trip with the house, retargeted 10 beyond
+its centre) and fixed by the go-around's open bearing ("The controller"): offline 1 go-around and on the
+cell in every seed; on bds-fly 2 of 2 runs of the suite after the fix passed (both cases, 1 landing, 0 damage).
+
 Three earlier runs of this suite found the bug the table above is free of: the retarget loop was
 gated on the process token, which moves on while the `flight` process holds control, so it never ran
 (the flight went for the goal itself and missed after 4 go-arounds, then walked the 30 blocks: the
@@ -508,7 +516,7 @@ landings all on the platform, 0.62 to 0.95 off, 0 damage, 3 to 5 rockets (0 to 1
 rockets, 0.79 off; the 12-high wall landed (not shown in the five-line table); `!fly stop` during the
 climb of a 300-block flight landed with 0 damage **18.4 s** after the stop (the old gate was 15 s,
 measured 13.6 with Track AU's 25-up cruise; the energy model cruises that flight at 36 up and the
-circle sinks 0.15 to 0.2 a tick: the gate is 20 s now and the open point below notes it). `fly-kit`:
+circle sinks 0.15 to 0.2 a tick: the gate is 25 s now, headroom for a stop at the top of the climb; the open point below notes it). `fly-kit`:
 all 7 (the kept kit, `!unload`, the stash step, the refill of 56, the low-supply line once, the worn
 elytra refusal, `!goto` flying with autoFly on and walking with it off).
 
