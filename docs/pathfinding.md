@@ -134,6 +134,14 @@ drop into water). A replan keeps the pending closes. The follower holds sneak on
 the top), keeps the body 0.08 off a panel while climbing, and drops into the tight gap of a panel opposite the
 ladder (0.63 for a 0.6 body: within 0.0125 of the middle) by aligning on the floor first with single-tick
 forward pulses (BDS corrects a fractional move vector, measured), then walking straight in.
+Track BG2 (Realm findings, decision 0048): a click while sneaking with anything in the hand is not a use on
+BDS / Realms (the server tries the item and sends the old state back), so `UseSkill` releases sneak from the look
+ticks to the tick after the click and presses it again (the navigator leaves sneak to a running use / close). A
+close that fails is clicked once more, then left open (`closeFailed` in the report): no goto failure, no retreat.
+A re-plan schedules the pending close after the last node whose body is in the hatch cell (a re-plan while
+climbing through it, or from a node already out of it, dropped the close before). The climb controller backs
+up to a column centre behind the body instead of turning round first. Pillars need the cell 3 above the feet
+free (PlaceSkill's head room for the jump), so a 3-high room gets no pillar plan.
 
 **The moves that dig** (Track BC, wave 11; `nav/baritone/moves.ts`, Baritone's movements, LGPL-3.0). Every
 move above with `act.dig` lists its cells in break order (the start's head room first, then each column top
@@ -845,6 +853,7 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/e2e/nav-ladder.test.ts` | Track AJ: a 10-block ladder in a 1 x 1 shaft up and out, back down and out; a vine wall (climb ticks per block) |
 | `test/e2e/nav-parkour.test.ts` | Track AJ: 1-block, 2-block and 2-block-1-lower gaps over a 4-deep pit with water, 20 crossings each (`PARKOUR_RUNS`); a 1-wide bridge with a turn, edge sneaking off / on (`BRIDGE_RUNS`) |
 | `test/unit/skills/nav-trapdoor.test.ts` | Track BG: panels and `hatch` states; the planner down / up through a hatch for every facing and half (never out through the panel side), without `allowOpen`, open (no use), iron / `noAction` / `moves.trapdoor` false, the roof-layer hatch (down only), drops to a floor and into water, a panel in a doorway; closed loops with fake actions (open, closed behind, `closeTrapdoors` false) |
+| `test/e2e/nav-hatch-realm.test.ts` | Track BG2, bds-move: the owner's farm hatch rebuilt from the Realm's world cache (walking-layer trapdoor, ladder to the floor layer, a 3-high room under it); clicks from the ladder while sneaking with an empty hand, a pickaxe, a sword, a block, a shulker box (raw: rejected with an item; UseSkill: opened); with a pickaxe, a block, a shulker box held: down and up twice each, both panel sides, opened and closed behind every time, no pillar or dig (allowPlace / allowBreak on) |
 | `test/e2e/nav-trapdoor.test.ts` | Track BG, bds-move: truth-built shafts under a platform: closed hatch down and up (panel opposite the ladder and on its side), open top-half hatch down and up with no action, the roof-layer hatch (down, no plan up), a ladderless hatch over a pool (fall of 8); 0 corrections |
 
 The e2e tests use `bds-move` (udp/19146). The v1 layouts (`nav-worlds.ts`: `flat`, `hill`, `long`, `wall`)
@@ -906,9 +915,11 @@ the cross-country layout; default 7), `MOVE_AREA=x,z` (pin a v2 suite's area to 
   over).
 - Swimming, ladders, vines, parkour and edge sneaking: see "Movement variety" (limits there); no
   scaffolding, no underwater travel, no swimming in flowing water.
-- Trapdoors (Track BG): a hatch in the roof layer whose ladder ends under it (the owner's farm layout) is
-  down only: on BDS an open trapdoor is not climbable, so nobody climbs past it from the ladder top
-  (measured). Horizontally a trapdoor is only a wall or a passable open panel (`crossing`); a closed
+- Trapdoors (Track BG): a hatch in the roof layer whose ladder ends under it is down only: on BDS an open
+  trapdoor is not climbable, so nobody climbs past it from the ladder top (measured; Track BG2: holding jump and
+  forward from the top rung the feet peak at 0.55 below the exit floor, every facing and half). The owner's farm
+  is not this layout (Track BG2, world cache): its hatch is in the walking layer over a ladder that reaches the
+  floor layer. Horizontally a trapdoor is only a wall or a passable open panel (`crossing`); a closed
   trapdoor standing in a corridor is not toggled to walk through. The tight-gap alignment pulses need a free
   floor around 0.2 blocks behind the approach; approaching a tight hatch along its tight axis is not planned
   differently (the follower turns and aligns first).
