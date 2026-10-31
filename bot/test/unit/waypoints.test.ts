@@ -56,6 +56,23 @@ describe('WaypointStore', () => {
     expect(new WaypointStore({ file }).load()).toBe(1);
   });
 
+  it('`chosen` is saved and read back, and left out of the file when not set', () => {
+    const file = join(tmp, 'waypoints', 'chosen.json');
+    const s = new WaypointStore({ file });
+    s.set('home', { x: 1, y: 2, z: 3 }, { auto: true, chosen: true });
+    s.set('base', { x: 4, y: 5, z: 6 });
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as { waypoints: Record<string, Record<string, unknown>> };
+    expect(raw.waypoints.home).toMatchObject({ chosen: true });
+    expect(raw.waypoints.base).not.toHaveProperty('chosen');
+    const again = new WaypointStore({ file });
+    again.load();
+    expect(again.get('home')?.chosen).toBe(true);
+    expect(again.get('base')).not.toHaveProperty('chosen');
+    // the same position copied from the config afterwards is no longer a chosen one
+    again.set('home', { x: 1, y: 2, z: 3 }, { auto: true });
+    expect(again.get('home')).not.toHaveProperty('chosen');
+  });
+
   it('a broken file is kept aside and the store starts empty', () => {
     const file = join(tmp, 'broken.json');
     writeFileSync(file, '{ not json');
@@ -258,5 +275,70 @@ describe('registerNavCommands (the afk task wiring)', () => {
     store.set('a', { x: 0, y: 0, z: 0 });
     expect(task.statusLine!()).toEqual({ task: 'afk', nudges: 0, blacklist: 1, waypoints: 1 });
     expect(task.status()).toMatchObject({ a: 1, nav: { blacklist: [{ key: 'b:1,2,3' }], waypoints: [{ name: 'a' }] } });
+  });
+
+  describe('the home point across restarts', () => {
+    const config: Vec3 = { x: 100, y: 64, z: -50 }; // the config's `home`, handed over as the task's start value
+    const chosen: Vec3 = { x: 123, y: 54, z: -49 };
+
+    /** One start of the afk task: a fresh task and store over the same waypoint file. */
+    function boot(file: string, values: Record<string, unknown> = {}) {
+      const { conn } = setup({ username: 'Bot' });
+      const chat = new Chat(conn, { owners: parseOwners([]), log: silentLogger });
+      let home: Vec3 | undefined = config;
+      const task: WalkingTask = {
+        name: 'afk',
+        start: () => undefined,
+        stop: () => undefined,
+        status: () => ({}),
+        position: () => undefined,
+        home: { get: () => home, set: (p) => (home = p) },
+      };
+      const store = new WaypointStore({ file });
+      store.load();
+      const mob = { skills: { nav: { blacklist: new NavBlacklist({ failures: 1, now: () => 0 }) }, goto: () => Promise.resolve({ ok: true }), attach: () => undefined } } as unknown as Mobility;
+      registerNavCommands({ ctx: { chat, conn, values, logger: () => silentLogger }, task, mob, store });
+      return { task, store, home: () => home };
+    }
+
+    it('!home set outlives a restart: the saved home wins over the config\'s', () => {
+      const file = join(tmp, 'waypoints', 'home-restart.json');
+      const first = boot(file);
+      expect(first.home()).toEqual(config); // nothing saved yet: the config's home
+      first.task.home!.set(chosen);
+      const second = boot(file);
+      expect(second.home()).toEqual(chosen);
+      expect(second.store.get('home')).toMatchObject({ ...chosen, chosen: true });
+      expect(boot(file).home()).toEqual(chosen); // and again
+    });
+
+    it('a home only copied from the config is not kept: editing the config\'s `home` still works', () => {
+      const file = join(tmp, 'waypoints', 'home-config.json');
+      boot(file); // writes the config's home into the file, as every start does
+      expect(new WaypointStore({ file }).load()).toBe(1);
+      const again = boot(file);
+      expect(again.home()).toEqual(config);
+      expect(again.store.get('home')).not.toHaveProperty('chosen');
+    });
+
+    it('--home on the command line wins over the saved one, and !home clear falls back to the config', () => {
+      const file = join(tmp, 'waypoints', 'home-flag.json');
+      boot(file).task.home!.set(chosen);
+      const flagged = boot(file, { home: '100,64,-50' });
+      expect(flagged.home()).toEqual(config);
+      expect(flagged.store.get('home')).toMatchObject({ ...config, auto: true });
+      expect(flagged.store.get('home')).not.toHaveProperty('chosen');
+      boot(file).task.home!.set(chosen);
+      boot(file).task.home!.set(undefined); // !home clear
+      expect(boot(file).home()).toEqual(config);
+    });
+
+    it('!wp set home is saved like !home set', () => {
+      const file = join(tmp, 'waypoints', 'home-wp.json');
+      const first = boot(file);
+      first.task.home!.set(chosen); // what !wp set home does through the wrapped home access
+      expect(new WaypointStore({ file }).load()).toBe(1);
+      expect(boot(file).home()).toEqual(chosen);
+    });
   });
 });

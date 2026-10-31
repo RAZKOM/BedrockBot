@@ -24,7 +24,7 @@ describe('menu model: inventory cells', () => {
     const a = cellActions('s0', inv.slots[0]!, inv);
     expect(ids(a)).toEqual(['select', 'dropstack', 'unload']);
     expect(cmd(a, 'select')).toBe('!select 0');
-    expect(a.find((x) => x.id === 'dropstack')).toMatchObject({ label: 'Drop', cmd: '!drop iron_sword 1', confirm: true });
+    expect(a.find((x) => x.id === 'dropstack')).toMatchObject({ label: 'Drop', cmd: '!drop slot 0', confirm: true });
     expect(cmd(a, 'unload')).toBe('!unload');
   });
 
@@ -36,7 +36,7 @@ describe('menu model: inventory cells', () => {
     const a = cellActions('s9', inv.slots[9]!, inv);
     expect(ids(a)).toEqual(['drop1', 'dropstack', 'dropall', 'unload']);
     expect(a.find((x) => x.id === 'drop1')).toEqual({ id: 'drop1', label: 'Drop 1', cmd: '!drop cobblestone 1' });
-    expect(a.find((x) => x.id === 'dropstack')).toMatchObject({ label: 'Drop the stack (64)', cmd: '!drop cobblestone 64', confirm: true });
+    expect(a.find((x) => x.id === 'dropstack')).toMatchObject({ label: 'Drop the stack (64)', cmd: '!drop slot 9', confirm: true });
     expect(a.find((x) => x.id === 'dropall')).toMatchObject({ label: 'Drop all 1280 cobblestone', cmd: '!drop cobblestone', confirm: true });
   });
 

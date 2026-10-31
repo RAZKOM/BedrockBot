@@ -62,7 +62,7 @@ the afk task.
 |---|---|
 | `death` | the death event of tasks/respawn.ts: the last known feet block before the death |
 | `spawn` | `set_spawn_position` with a usable position: the player's spawn point (a bed, `/spawnpoint`) when `spawn_type` is `player`, else `world_position`. BDS 1.26.60.6 sends one at every join with all coordinates -2^31 (fixtures/1.26.60/login-idle), which is ignored; until a usable one arrives the world spawn from `start_game.spawn_position` is used, but only when there is no `spawn` waypoint yet (a stored bed spawn wins after a restart). Its y is 32767 on BDS ("find the ground"): stored as `null`, `!goto spawn` walks to the column. `BlockCoordinates.y` is unsigned on the wire (2^32 - 60 means -60) and is converted |
-| `home` | follows the home point: `--home` at start, `!home set` / `!home clear`, `!wp set home` / `!wp del home`. Not read back into the home point after a restart (that stays `--home` / the config file) |
+| `home` | follows the home point: `--home` / the config's `home` at start, `!home set` / `!home clear`, `!wp set home` / `!wp del home`. A home chosen by a command is saved with `"chosen": true` and read back into the home point at the next start: it wins over the config's `home`, `--home` on the command line wins over both, `!home clear` forgets it (the config's `home` applies again). A home that only came from the config is rewritten from it at every start, so editing the config still works. Before 2026-10-30 every start put the config's `home` back and `!home set` had to be typed again |
 
 ## Measured (bds-move, BDS 1.26.60.6, 2026-10-29, `nav-waypoints` e2e, 2 runs)
 
@@ -79,7 +79,7 @@ the afk task.
 
 | Test | What |
 |---|---|
-| `bot/test/unit/waypoints.test.ts` | store (set / list / delete, names, persistence across instances, broken file), server id and file location, `set_spawn_position` / `start_game` parsing, death and spawn events, the chat commands (`!wp`, `!goto <waypoint>` winning over the coordinate-only `!goto`, `!top`, no walking, home), the afk wiring (home follows, `!status` parts, hotbar attach) |
+| `bot/test/unit/waypoints.test.ts` | store (set / list / delete, names, persistence across instances, broken file), server id and file location, `set_spawn_position` / `start_game` parsing, death and spawn events, the chat commands (`!wp`, `!goto <waypoint>` winning over the coordinate-only `!goto`, `!top`, no walking, home), the afk wiring (home follows, `!status` parts, hotbar attach, the home point across restarts) |
 | `bot/test/e2e/nav-waypoints.test.ts` | the CLI on bds-move: `!wp set`, `!goto <waypoint>`, the spawn waypoint, `!top` from a 4-deep shaft, `/spawnpoint`, a death, a restart with the same config dir, `!status` |
 
 ```sh

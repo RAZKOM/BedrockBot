@@ -495,7 +495,7 @@ describe('panel page script: menus and controls (Track AR, fake DOM)', () => {
     h.fetchQueue.push(ok(['dropped 64 cobblestone']));
     stackBtn.fire('click');
     await flush();
-    expect(h.posted).toEqual(['!drop cobblestone 64']);
+    expect(h.posted).toEqual(['!drop slot 9']);
     // disarmed after 4 s: a later single tap only arms again
     h.cells.get('s10')!.fire('click');
     const all = pick(h, 'dropall');
@@ -504,7 +504,7 @@ describe('panel page script: menus and controls (Track AR, fake DOM)', () => {
     expect(all.textContent).toBe('Drop all 1280 cobblestone');
     all.fire('click');
     await flush();
-    expect(h.posted).toEqual(['!drop cobblestone 64']);
+    expect(h.posted).toEqual(['!drop slot 9']);
   });
 
   it('a shulker box shows its contents locally; the offhand cell clears; tapping the same cell closes', async () => {

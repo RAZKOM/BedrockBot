@@ -51,7 +51,7 @@ function cellActions(key, it, inv) {
   if (inv) for (var i = 0; i < inv.slots.length; i++) { var s = inv.slots[i]; if (s && s.name === n) total += s.count; }
   if (total < it.count) total = it.count;
   if (it.count > 1) out.push({ id: 'drop1', label: 'Drop 1', cmd: '!drop ' + n + ' 1' });
-  out.push({ id: 'dropstack', label: it.count > 1 ? 'Drop the stack (' + it.count + ')' : 'Drop', cmd: '!drop ' + n + ' ' + it.count, confirm: true });
+  out.push({ id: 'dropstack', label: it.count > 1 ? 'Drop the stack (' + it.count + ')' : 'Drop', cmd: '!drop slot ' + slot, confirm: true }); // this slot only (a bot_loot box too)
   if (total > it.count) out.push({ id: 'dropall', label: 'Drop all ' + total + ' ' + menuNice(n), cmd: '!drop ' + n, confirm: true });
   out.push({ id: 'unload', label: 'Unload now', cmd: '!unload' });
   return out;

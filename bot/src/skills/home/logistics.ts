@@ -77,7 +77,7 @@ export interface HomeSkills {
 
 export interface HomeDeps {
   skills: HomeSkills;
-  inventory: { readonly slots: readonly ({ name: string; count: number; metadata?: number } | null)[]; rawItem?(window: number, slot: number): unknown };
+  inventory: { readonly slots: readonly ({ name: string; count: number; metadata?: number } | null)[]; rawItem?(window: number, slot: number): unknown; window?(id: number): { readonly slots: readonly ({ name: string } | null | undefined)[] } | undefined }; // window 120: the armour worn
   world: DiscoveryWorld;
   position(): Vec3 | undefined;
   home(): Vec3 | undefined;
@@ -299,6 +299,7 @@ export class HomeLogistics {
       ...(r !== undefined ? { reserve: r } : {}),
       boxing: box.on ?? true, // Track AV
       ...(box.skip ? { noBox: box.skip } : {}),
+      worn: (this.d.inventory.window?.(120)?.slots ?? []).flatMap((x) => (x ? [x.name] : [])),
     });
   }
 
@@ -721,6 +722,7 @@ export class HomeLogistics {
       // Track AV: box steps first; a failed step's kind is planned without boxing afterwards
       const skip = new Set<string>();
       let steps = 0;
+      let lastBox = false;
       for (let pass = 0; pass < MAX_UNLOAD_PASSES; pass++) {
         for (let round = 0; round < 40; round++) {
           if (cancelled()) return finish('interrupted');
@@ -745,14 +747,19 @@ export class HomeLogistics {
           if (r === 'interrupted') return finish('interrupted');
           if (r !== 'ok') failed.add(next!.key);
         }
+        if (lastBox) break;
         // Track AV: the named boxes' items next (with `all`, every full box's but the fireworks box's); they are unloaded in the next pass
         const e = await this.emptyNextBox(opts.all ?? false, rep, cancelled);
         if (e === 'interrupted') return finish('interrupted');
         if (e !== 'ok') {
           if (e !== 'none') this.log.info(`unload: emptying a box: ${e}`);
-          break;
+          // the box's items are in the inventory already (only its pickup failed): one more pass unloads them, no further box
+          if (!e.startsWith('the box was not picked up')) break;
+          lastBox = true;
         }
       }
+      await this.fetchLeftBox(cancelled);
+      if (cancelled()) return finish('interrupted');
       // overflow: spare shulker boxes from the box chest
       for (let n = 0; n < MAX_BOXES_PER_RUN; n++) {
         if (cancelled()) return finish('interrupted');
@@ -899,7 +906,7 @@ export class HomeLogistics {
     const before = new Map(this.boxSlots());
     const dg = await this.d.skills.dig(at);
     if (!dg.ok) return dg.reason === 'interrupted' ? 'interrupted' : `break: ${dg.reason ?? 'failed'}`;
-    for (const radius of [4, 6]) {
+    for (const radius of [4, 6, 10]) {
       await this.d.skills.collect(radius, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
       if (cancelled()) return 'interrupted';
       if ([...this.boxSlots()].some(([i, used]) => used > 0 && before.get(i) !== used)) break;
@@ -992,7 +999,8 @@ export class HomeLogistics {
         for (let i = 0; i < o.view.slots.length; i++) {
           const st = o.view.slots[i];
           if (!st) continue;
-          if (this.freeSlots().length - this.slotsFor(st) < 1) {
+          // two slots stay free: the box's own, and one for whatever else lies there and is picked up with it (the pickup found the inventory full, Realm 2026-10-30)
+          if (this.freeSlots().length - this.slotsFor(st) < 2) {
             left++;
             continue;
           }
@@ -1016,6 +1024,22 @@ export class HomeLogistics {
     return new Set(this.boxSlots().keys());
   }
 
+  /** A box broken and not picked up again in this run: the run walks back for it once its items are unloaded. */
+  private leftBox: Vec3 | undefined;
+
+  /** Walk back to a box left on the ground (its items unloaded since, so there is room now) and pick it up. */
+  private async fetchLeftBox(cancelled: () => boolean): Promise<void> {
+    const at = this.leftBox;
+    this.leftBox = undefined;
+    if (!at || this.freeSlots().length === 0) return;
+    const before = this.boxKeys();
+    await this.d.skills.goto({ type: 'near', p: centre(at), r: 1.5 }, { timeoutTicks: 400 });
+    if (cancelled()) return;
+    await this.d.skills.collect(6, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
+    const ok = [...this.boxKeys()].some((i) => !before.has(i));
+    this.log.info(`unload: the box left at ${fmtPos(at)}: ${ok ? 'picked up on the second try' : 'still not found (picked up by a player, or gone)'}`);
+  }
+
   /** Break the box at `at` and pick it up again (also an empty one): its new inventory slot, or why not. */
   private async breakAndPickUp(at: Vec3, cancelled: () => boolean): Promise<number | string> {
     const before = this.boxKeys();
@@ -1026,11 +1050,12 @@ export class HomeLogistics {
       if (!dg.ok && dg.reason !== 'no_block') return dg.reason === 'interrupted' ? 'interrupted' : `break: ${dg.reason ?? 'failed'}`;
     }
     const fresh = (): number | undefined => [...this.boxKeys()].find((i) => !before.has(i));
-    for (const radius of [4, 6]) {
+    for (const radius of [4, 6, 10]) {
       await this.d.skills.collect(radius, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
       if (cancelled()) return 'interrupted';
       if (fresh() !== undefined) break;
     }
+    if (fresh() === undefined) this.leftBox = at;
     return fresh() ?? `the box was not picked up again (left at ${fmtPos(at)})`;
   }
 

@@ -55,7 +55,7 @@ export const EXAMPLE_CONFIG = `{
   // ---- AFK ----
   "nudgeInterval": 240,             // seconds between keepalive nudges; 0 = never
   "heartbeat": false,               // also send an idle input every tick
-  // "home": [0, -60, 0],           // feet block to walk back to after a respawn and at dawn
+  // "home": [0, -60, 0],           // feet block to walk back to after a respawn and at dawn (a later !home set is saved and wins)
   // "shelter": [10, -60, 10],      // feet block to walk into at dusk (time 12000), left at dawn (23000)
   // "walk": true,                  // movement stack without home/shelter, so !home set / !shelter set work
 
