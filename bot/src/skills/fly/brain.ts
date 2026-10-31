@@ -52,8 +52,11 @@ import {
   yawTo,
   type FlightBody,
   type LandingTarget,
+  type Obstacle,
   type SpiralFit,
 } from './plan.ts';
+import { assumedTop, BUILD_TOP, CLIMB_SLOPE, strictObstacle, terrainFloor, type TerrainFloor, type TerrainQuery } from './terrain.ts'; // Track BL
+import { DIVE_END_MAX, DIVE_MIN_ABOVE, DIVE_MIN_ABOVE_FORCED, divePhase, divePitch, planDive, simulateDive, type DivePhase, type DiveProfile } from './dive.ts'; // Track BL
 
 export type FlightPhase = 'takeoff' | 'climb' | 'cruise' | 'approach' | 'goaround' | 'land' | 'done';
 
@@ -114,6 +117,18 @@ export interface BrainOptions {
    * climb hold it until TAKEOFF_HOLD above the start, like the sky check's heading.
    */
   ledge?: { yaw: number };
+  /**
+   * Track BL (docs/flight.md "Terrain-safe cruise"): the column query (live, else cache, else unknown) the
+   * climb and the cruise keep their terrain floor over (the sink line never goes under it), the dive descent
+   * checks its corridor against (unknown is not air there), and the crash notes read.
+   */
+  terrain?: TerrainQuery;
+  /** Track BL: the clearance over the terrain floor (flyClearance). */
+  clearance?: number;
+  /** Track BL: the high cruise (flyHighCruise): hold over the build limit until the descent can begin. */
+  highCruise?: boolean;
+  /** Track BL: the descent from high up (flyDescent): `auto` dives when the simulation passes, `dive` from lower, `spiral` never. */
+  descent?: 'auto' | 'dive' | 'spiral';
   /** Track BF: one line per notable decision (every go-around with its reason, the hold, the corridor), for the log. */
   note?: (msg: string) => void;
   /** The planner's seed (deterministic flights). */
@@ -142,6 +157,9 @@ export interface FlightStats {
   /** Track BH, a ledge takeoff: ticks of the walk to the edge, and the height the fall took until the glide flew (LEDGE_SPEED). */
   ledgeWalkTicks?: number;
   ledgeDrop?: number;
+  /** Track BL: one line per terrain avoidance (reason, distance, height gained), and the dives flown. */
+  avoidances: string[];
+  dives: number;
 }
 
 const CLIMB_PITCH = -38;
@@ -186,6 +204,13 @@ const SPIRAL_OUT = [30, 45, 60, 80] as const;
 export const CORRIDOR_OUT = 64;
 /** Track BF: columns whose top is this far above an overhang cell's floor are the roof the corridor goes under (ignored by its go-around height). */
 const OPEN_ABOVE = 4;
+/** Track BL: the terrain floor is recomputed every this many ticks; a detour heading is held this long; the dive is looked for every DIVE_EVERY ticks. */
+const FLOOR_EVERY = 4;
+const DETOUR_TICKS = 40;
+const DIVE_EVERY = 5;
+/** Track BL: the dive is checked this many ticks ahead every tick and re-simulated every DIVE_RECHECK ticks. */
+const DIVE_AHEAD = 12;
+const DIVE_RECHECK = 10;
 
 type Descent =
   | {
@@ -202,11 +227,11 @@ export class FlightBrain {
   phase: FlightPhase = 'takeoff';
   /** The landing target (Track AU2: `retarget` may move it before the approach). */
   target: LandingTarget;
-  readonly stats: FlightStats = { rockets: 0, rocketsBy: { climb: 0, cruise: 0, goaround: 0, land: 0 }, goArounds: 0, ticks: 0, maxY: -Infinity, approachTicks: 0, descents: [], steered: 0, holdTicks: 0, goAroundReasons: [] };
+  readonly stats: FlightStats = { rockets: 0, rocketsBy: { climb: 0, cruise: 0, goaround: 0, land: 0 }, goArounds: 0, ticks: 0, maxY: -Infinity, approachTicks: 0, descents: [], steered: 0, holdTicks: 0, goAroundReasons: [], avoidances: [], dives: 0 };
   // (entryAbove is set by the cruise when it hands over to the approach)
   /** Why the flight is ending early (set by `landNow`), kept for the outcome. */
   private endReason: FlightEndReason | undefined;
-  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge'>;
+  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'terrain' | 'highCruise'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral' };
   private jumped = false;
   private requested = false;
   private wasGliding = false;
@@ -243,6 +268,17 @@ export class FlightBrain {
   private ledgeOff = false;
   /** Track BH: descent circles flown again instead of a go-around (no rocket, too high). */
   private glideRedescents = 0;
+  /** Track BL: the terrain floor (recomputed every FLOOR_EVERY ticks), the avoidance being flown, a detour heading. */
+  private floor: TerrainFloor | undefined;
+  private floorAt = -1000;
+  private avoid: { reason: string; y0: number; maxY: number; rockets0: number; clearTicks: number } | undefined;
+  private detour: { yaw: number; until: number } | undefined;
+  /** Track BL: the dive descent being flown, and the tick of the last dive search (one every DIVE_EVERY ticks). */
+  private dive: { p: DiveProfile; phase: DivePhase; from: number; since: number; aborted: boolean } | undefined;
+  private diveLook = -1000;
+  /** Track BL: a dive was aborted this approach: no other one (the circle). */
+  private diveBanned = false;
+  private diveWhy: string | undefined;
 
   constructor(target: LandingTarget, opts: BrainOptions) {
     this.target = target;
@@ -259,6 +295,10 @@ export class FlightBrain {
       takeoffYaw: opts.takeoffYaw ?? opts.ledge?.yaw,
       note: opts.note,
       ledge: opts.ledge,
+      terrain: opts.terrain,
+      highCruise: opts.highCruise,
+      clearance: opts.clearance ?? 12,
+      descentMode: opts.descent ?? 'auto',
     };
     this.planner = new ApproachPlanner(opts.seed ?? 12345, opts.obstacle);
   }
@@ -275,6 +315,7 @@ export class FlightBrain {
   /** The descent geometry being flown (`spiral r12 at 30 out`, `S-turns`), for the status line. */
   get descending(): string | undefined {
     if (this.holding && this.target.hold) return 'holding';
+    if (this.dive) return 'dive';
     if (!this.descent) return undefined;
     return this.descent.kind === 'spiral' ? `spiral r${this.descent.fit.radius}` : 'S-turns';
   }
@@ -294,6 +335,7 @@ export class FlightBrain {
     if (target.hold && (this.phase === 'approach' || this.phase === 'goaround')) this.phase = 'cruise';
     if (wasHold && !target.hold && this.holding) this.o.note?.(`holding over: the landing is confirmed after ${this.stats.holdTicks} ticks of holding`);
     this.holding = undefined;
+    this.dive = undefined;
     if (this.phase === 'goaround') this.outbound = true;
     this.goaroundBearing = undefined;
     this.descent = undefined;
@@ -315,6 +357,7 @@ export class FlightBrain {
     this.emergency = this.emergencyTarget(body, reason === 'roof' ? this.emergencyWithin : undefined);
     this.emergencyWithin = undefined;
     this.planner.reset();
+    this.dive = undefined;
     this.descent = undefined;
     this.descentNone = false;
     this.phase = 'land';
@@ -540,7 +583,9 @@ export class FlightBrain {
     const d = hdist(b.pos, this.target);
     // the climb goes on after the last rocket: a body rising at vy keeps about vy^2 / 0.08 blocks of climb
     const willReach = b.pos.y + climbMomentum(b.vel.y);
-    if (willReach >= this.o.cruiseY || d <= APPROACH_DISTANCE + 6) {
+    // Track BL: never hand over under the terrain floor ahead (a mountain the cruise height did not know)
+    const climbTo = Math.max(this.o.cruiseY, this.terrainNeed(b) ?? -Infinity);
+    if (willReach >= climbTo || d <= APPROACH_DISTANCE + 6) {
       // (Track BF: a held target or an overhang's corridor is flown from the cruise, never straight into an approach)
       // (Track BH: nor from far too high: a glide down off a ledge 40 up starts within the approach distance; the cruise's descent geometry first)
       const high = b.pos.y - (this.target.top + APPROACH_HEIGHT) > SPIRAL_ABOVE;
@@ -551,7 +596,7 @@ export class FlightBrain {
     if (b.boostTicks > 0) {
       // the momentum will carry the last blocks: the cruise takes over now (it levels the burning rocket off; a
       // -38 climb held to the end overshot the cruise by 9, and a level-off inside the climb fired one rocket more)
-      if (willReach >= this.o.cruiseY - 3) {
+      if (willReach >= climbTo - 3) {
         this.phase = 'cruise';
         return this.cruise(i, ctl);
       }
@@ -570,7 +615,7 @@ export class FlightBrain {
     // every climb rocket is a full one at the climb pitch: a rocket costs the same whatever it buys (a last one
     // tuned to the deficit cost one more rocket per climb in the offline trips), the overshoot is levelled off;
     // the boosted path at that pitch must be clear (fire checks it)
-    if (willReach < this.o.cruiseY - 6 && this.fire(i, ctl, 'climb', this.burnPitch)) ctl.pitch = this.burnPitch;
+    if (willReach < climbTo - 6 && this.fire(i, ctl, 'climb', this.burnPitch)) ctl.pitch = this.burnPitch;
     return ctl;
   }
 
@@ -587,16 +632,39 @@ export class FlightBrain {
     const dTarget = hdist(b.pos, this.target);
     // Track BF: not landable yet: hold high over it until the trip retargets (the goal's chunks, the probes)
     if (this.target.hold && dTarget <= APPROACH_DISTANCE + 60) return this.hold(i, ctl);
+    // Track BL: the dive descent being flown (hands over to the approach, or aborts back into the cruise)
+    if (this.dive) {
+      if (this.flyDive(i, ctl)) return ctl;
+      if (this.phase === 'approach') return this.approach(i, ctl, this.target);
+    }
     // Track BF: an overhang's corridor: first out to its entry, then in along it (the glide line counts the way round)
     const entry = this.linedUp(b) ? undefined : this.corridorEntry();
     const d = entry ? hdist(b.pos, entry) + CORRIDOR_OUT : dTarget;
     const h = Math.hypot(b.vel.x, b.vel.z);
     const aboveEntry = b.pos.y - (this.target.top + APPROACH_HEIGHT);
-    // far too high near the target: the descent geometry (a circle that fits the columns, else S-turns)
-    if (this.descent || (aboveEntry > SPIRAL_ABOVE && d <= APPROACH_DISTANCE + 60 && !this.descentNone)) {
+    const spiralDue = aboveEntry > SPIRAL_ABOVE && d <= APPROACH_DISTANCE + 60 && !this.descentNone;
+    // Track BL: far above the entry: the dive descent when its simulation passes (looked for every DIVE_EVERY ticks
+    // on the way in, and once more when the circle would begin); a window still ahead keeps the cruise going
+    if (!this.descent && !entry && this.diveAllowed(aboveEntry, d) && (spiralDue || this.stats.ticks - this.diveLook >= DIVE_EVERY)) {
+      this.diveLook = this.stats.ticks;
+      const r = this.tryDive(i, b, spiralDue);
+      if (r === 'dive') {
+        if (this.flyDive(i, ctl)) return ctl;
+        if (this.phase === 'approach') return this.approach(i, ctl, this.target);
+      }
+      if (r === 'wait' && spiralDue && d > APPROACH_DISTANCE + 20) {
+        // (the window is still ahead: no circle yet)
+      } else if (spiralDue) {
+        if (this.descend(i, ctl, this.target)) return ctl;
+      }
+    } else if (this.descent || spiralDue) {
+      // far too high near the target: the descent geometry (a circle that fits the columns, else S-turns)
       if (this.descend(i, ctl, this.target)) return ctl;
     }
-    ctl.yaw = turnTowards(i.yaw, yawTo(b.pos, entry ?? this.target));
+    // Track BL: a detour heading around terrain no climb clears in time
+    const detouring = this.detour !== undefined && this.stats.ticks < this.detour.until;
+    if (!detouring) this.detour = undefined;
+    ctl.yaw = turnTowards(i.yaw, detouring ? this.detour!.yaw : yawTo(b.pos, entry ?? this.target));
     // the approach starts at APPROACH_DISTANCE, earlier when high (the planner's dive candidates take about 2.5 blocks per block of height)
     if (!entry && d <= APPROACH_DISTANCE + Math.min(this.target.bearing !== undefined ? 8 : 40, Math.max(0, aboveEntry - 6) * 2.5)) {
       if (this.target.bearing !== undefined) this.o.note?.(`approach along the corridor (in from ${Math.round(this.target.bearing)}) from ${Math.round(d)} blocks out, ${Math.round(aboveEntry + APPROACH_HEIGHT)} above the floor`);
@@ -606,26 +674,44 @@ export class FlightBrain {
       return this.approach(i, ctl, this.target);
     }
     const spare = glideMargin(this.o.margin, d);
-    const above = b.pos.y + climbMomentum(b.vel.y) - glideLine(this.target, d);
+    const projected = b.pos.y + climbMomentum(b.vel.y);
+    const above = projected - glideLine(this.target, d);
+    // Track BL: the terrain floor ahead (the sink line never goes under it) and the high cruise's floor
+    const need = this.terrainNeed(b);
+    const high = this.highFloor(d);
+    const terrainShort = need !== undefined ? need - projected : -Infinity;
+    const highShort = high !== undefined ? high - projected : -Infinity;
     if (b.boostTicks > 0) {
       // a rocket burning: a top-up of the cruise climbs at the pitch chosen for it, the climb's last rocket at
       // the climb pitch (the boost steers the velocity onto the look: levelled off, a burning rocket halves vy
       // every tick and the climb's momentum is lost; the whole burn goes into height, the cap of flyMaxClimb
       // bounds the climb's rockets, not the last one's run-out)
       ctl.pitch = this.cruiseFired ? this.cruisePitch : this.o.climbPitch;
+      this.trackAvoid(b, terrainShort, i.rockets);
       this.steerClear(i, ctl);
       return ctl;
     }
     this.cruiseFired = false;
     if (i.rockets <= 0) this.noRocketTicks++;
+    const fl = this.floor;
+    // Track BL: steep (the climb a rocket can still make before the column is reached falls short): back-to-back
+    // rockets at the climb pitch; out of reach even so: a detour heading with a lower profile
+    const steep = fl !== undefined && terrainShort > 0 && terrainShort > (fl.at - 10) / CLIMB_SLOPE / 2;
+    if (steep && fl && terrainShort > (fl.at - 6) / 1.25 && !detouring && i.rockets > 0) this.chooseDetour(b, ctl.yaw, projected);
+    this.trackAvoid(b, terrainShort, i.rockets);
     // under the margin by more than 3 (the climb hands over within 3 of its height: that is on the margin, not
     // under it), judged at glide speed only: a slow body (after the climb, after a circle) sinks while it
-    // regains its speed and that sink is not a shortfall of height (two needless top-ups at 600 blocks on bds-fly)
-    if (above < spare - 3 && h >= 1.1 && i.rockets > 0) {
+    // regains its speed and that sink is not a shortfall of height (two needless top-ups at 600 blocks on bds-fly);
+    // Track BL: under the terrain floor or the high cruise's floor at any flying speed
+    const short = Math.max(terrainShort, highShort);
+    const econ = above < spare - 3 && h >= 1.1;
+    if ((econ || (short > 0 && h >= 0.8)) && i.rockets > 0) {
       // the height this rocket should buy: a whole rocket's worth while the glide ahead can use it, else just enough
       const glideAhead = d - APPROACH_DISTANCE;
-      const gain = glideAhead > ROCKET_CRUISE_CLIMB * GLIDE_RATIO ? ROCKET_CRUISE_CLIMB : Math.min(ROCKET_CRUISE_CLIMB, Math.max(6, spare + 8 - above));
-      this.cruisePitch = rocketPitchFor(gain);
+      let gain = econ ? (glideAhead > ROCKET_CRUISE_CLIMB * GLIDE_RATIO ? ROCKET_CRUISE_CLIMB : Math.min(ROCKET_CRUISE_CLIMB, Math.max(6, spare + 8 - above))) : 6;
+      if (short > 0) gain = Math.max(gain, Math.min(ROCKET_CRUISE_CLIMB, short + 8));
+      if (high !== undefined && highShort > 0) gain = ROCKET_CRUISE_CLIMB; // the high cruise: a whole rocket's worth each
+      this.cruisePitch = steep ? CLIMB_PITCH : rocketPitchFor(gain);
       // the boosted climb at that pitch must be clear for the next 20 ticks (fire checks it; else glide on)
       if (this.fire(i, ctl, 'cruise', this.cruisePitch)) {
         ctl.pitch = this.cruisePitch;
@@ -635,13 +721,180 @@ export class FlightBrain {
     }
     if (h < STALL_SPEED + 0.1) ctl.pitch = 15;
     else if (h < 0.95) ctl.pitch = 8; // slow: a shallow dive recovers the speed without a rocket
-    else if (d <= APPROACH_DISTANCE + BLEED_DISTANCE && h > APPROACH_SPEED) ctl.pitch = -6; // before the approach: bleed the speed towards APPROACH_SPEED (the flare's climb grows with its square)
+    else if (d <= APPROACH_DISTANCE + BLEED_DISTANCE && h > APPROACH_SPEED && terrainShort < 0) ctl.pitch = -6; // before the approach: bleed the speed towards APPROACH_SPEED (the flare's climb grows with its square)
     else if (h > 1.7) ctl.pitch = -3;
     else ctl.pitch = 0;
     this.steerClear(i, ctl);
     // out of rockets and sinking under the slope: the approach from wherever we are (it lands short if it must)
     if (i.rockets <= 0 && b.pos.y < this.target.top + 2 && d > APPROACH_DISTANCE) this.landNow('no_rockets', b);
     return ctl;
+  }
+
+  // ---- Track BL: the terrain floor, the high cruise, the avoidance lines, the dive descent ---------------------
+
+  /** The highest known (live or cache) column top around the body (the bound for unknown columns before any known one). */
+  private seedTop(b: FlightBody): number | undefined {
+    const q = this.o.terrain;
+    if (!q) return undefined;
+    let top: number | undefined;
+    for (const [dx, dz] of [[0, 0], [12, 0], [-12, 0], [0, 12], [0, -12]] as const) {
+      const c = q(Math.floor(b.pos.x) + dx, Math.floor(b.pos.z) + dz);
+      if (c.top !== undefined && c.src !== 'unknown') top = top === undefined ? c.top : Math.max(top, c.top);
+    }
+    return top;
+  }
+
+  /** The terrain floor's feet height now (terrain.ts terrainFloor along the heading to the target or the detour), every FLOOR_EVERY ticks. */
+  private terrainNeed(b: FlightBody): number | undefined {
+    const q = this.o.terrain;
+    if (!q) return undefined;
+    if (this.floor && this.stats.ticks - this.floorAt < FLOOR_EVERY) return this.floor.need;
+    const corridor = this.linedUp(b) ? undefined : this.corridorEntry();
+    let toward: { x: number; z: number } = corridor ?? this.target;
+    if (this.detour && this.stats.ticks < this.detour.until) {
+      const dir = yawDir(this.detour.yaw);
+      toward = { x: b.pos.x + dir.x * 200, z: b.pos.z + dir.z * 200 };
+    }
+    const seed = this.seedTop(b);
+    this.floor = terrainFloor(q, b.pos, toward, { clearance: this.o.clearance, stopAt: this.target, ...(seed !== undefined ? { seedTop: seed } : {}) });
+    this.floorAt = this.stats.ticks;
+    return this.floor.need;
+  }
+
+  /**
+   * Track BL, the high cruise: over the build limit (BUILD_TOP + 2, nothing to hit) until the descent can
+   * begin: the dive's reach from there (or the glide's, without the dive).
+   */
+  private highFloor(d: number): number | undefined {
+    if (!this.o.highCruise) return undefined;
+    const drop = BUILD_TOP + 2 - (this.target.top + APPROACH_HEIGHT);
+    const reach = this.o.descentMode === 'spiral' ? APPROACH_DISTANCE + drop * GLIDE_RATIO : APPROACH_DISTANCE + DIVE_END_MAX + drop * 1.6 + 60;
+    return d > reach ? BUILD_TOP + 2 : undefined;
+  }
+
+  /** Track BL: one line when the terrain floor starts to lift the cruise (reason, distance, the height wanted) and one when it is cleared (the height gained). */
+  private trackAvoid(b: FlightBody, terrainShort: number, rockets: number): void {
+    const fl = this.floor;
+    if (!this.avoid) {
+      if (terrainShort <= 0 || !fl || fl.need === undefined) return;
+      const what = fl.src === 'assumed' ? `unknown columns (assumed up to y ${Math.round(fl.top)})` : `terrain at y ${fl.top} (${fl.src})`;
+      const reason = `${what} ${Math.round(fl.at)} blocks ahead at ${fl.x} ${fl.z}`;
+      this.avoid = { reason, y0: b.pos.y, maxY: b.pos.y, rockets0: this.stats.rockets, clearTicks: 0 };
+      this.o.note?.(`terrain ahead: ${reason} needs y ${fl.need.toFixed(0)}, the glide would be at ${(b.pos.y + climbMomentum(b.vel.y)).toFixed(0)}: pulling up (${rockets} rockets)`);
+      return;
+    }
+    const a = this.avoid;
+    a.maxY = Math.max(a.maxY, b.pos.y);
+    a.clearTicks = terrainShort < -4 && b.boostTicks === 0 ? a.clearTicks + 1 : 0;
+    if (a.clearTicks < 20) return;
+    const line = `${a.reason}: gained ${(a.maxY - a.y0).toFixed(0)} blocks (y ${a.y0.toFixed(0)} -> ${a.maxY.toFixed(0)}), ${this.stats.rockets - a.rockets0} rockets`;
+    this.stats.avoidances.push(line);
+    this.o.note?.(`terrain cleared: ${line}`);
+    this.avoid = undefined;
+  }
+
+  /** Track BL: terrain no rocket climb clears in time: the heading (30 / 60 / 90 degrees either side) whose profile is lowest, held for DETOUR_TICKS. */
+  private chooseDetour(b: FlightBody, yaw: number, projected: number): void {
+    const q = this.o.terrain;
+    if (!q) return;
+    const seed = this.seedTop(b);
+    let best: { yaw: number; deficit: number } | undefined;
+    for (const off of [30, -30, 60, -60, 90, -90]) {
+      const dir = yawDir(yaw + off);
+      const f = terrainFloor(q, b.pos, { x: b.pos.x + dir.x * 120, z: b.pos.z + dir.z * 120 }, { clearance: this.o.clearance, ahead: 120, ...(seed !== undefined ? { seedTop: seed } : {}) });
+      const deficit = f.need === undefined ? -Infinity : f.need - projected - Math.max(0, f.at - 10) / 1.25;
+      if (!best || deficit < best.deficit) best = { yaw: yaw + off, deficit };
+    }
+    if (!best) return;
+    this.detour = { yaw: best.yaw, until: this.stats.ticks + DETOUR_TICKS };
+    this.floorAt = -1000;
+    this.o.note?.(`terrain ahead too steep to climb in time (${this.floor ? `y ${Math.round(this.floor.top)} ${Math.round(this.floor.at)} blocks out` : '?'}): a detour heading ${Math.round(yawDiff(yawTo(b.pos, this.target), best.yaw))} degrees off the bearing for ${DETOUR_TICKS} ticks`);
+  }
+
+  /** Track BL: a dive descent may be looked for (flyDescent, no corridor, no hold, high enough, near enough). */
+  private diveAllowed(aboveEntry: number, d: number): boolean {
+    if (this.o.descentMode === 'spiral' || this.target.bearing !== undefined || this.target.hold || this.phase !== 'cruise' || this.diveBanned) return false;
+    const min = this.o.descentMode === 'dive' ? DIVE_MIN_ABOVE_FORCED : DIVE_MIN_ABOVE;
+    return aboveEntry > min && d <= APPROACH_DISTANCE + DIVE_END_MAX + 1.6 * aboveEntry + 60;
+  }
+
+  /** The corridor query of the dive: unknown is not air (terrain.ts strictObstacle), and the column tops under the path. */
+  private diveCells(b: FlightBody): { obstacle: Obstacle; clearTop: (x: number, z: number) => number | undefined } {
+    const q = this.o.terrain;
+    const knownMax = this.floor?.knownMax ?? this.seedTop(b) ?? b.pos.y;
+    if (!q) return { obstacle: this.o.obstacle ?? (() => false), clearTop: (x, z) => this.o.skyTop?.(x, z) };
+    return {
+      obstacle: strictObstacle(q, this.o.obstacle, knownMax),
+      clearTop: (x, z) => {
+        const c = q(x, z);
+        return c.src === 'unknown' || c.top === undefined ? assumedTop(knownMax, 0) : c.top;
+      },
+    };
+  }
+
+  /** Track BL: the dive search now: 'dive' (committed), 'wait' (its window is still ahead), 'none' (no dive from here). */
+  private tryDive(i: BrainInput, b: FlightBody, last: boolean): 'dive' | 'wait' | 'none' {
+    const plan = planDive(b, i.yaw, this.target, this.diveCells(b));
+    const aboveEntry = b.pos.y - (this.target.top + APPROACH_HEIGHT);
+    if (plan.ok && plan.profile) {
+      this.dive = { p: plan.profile, phase: 'dive', from: b.pos.y, since: this.stats.ticks, aborted: false };
+      this.stats.dives++;
+      this.stats.descents.push(`dive ${plan.profile.divePitch}/${plan.profile.pullPitch} at ${Math.round(hdist(b.pos, this.target))} out from ${Math.round(b.pos.y - this.target.top)} above`);
+      this.o.note?.(`dive descent from ${aboveEntry.toFixed(0)} over the entry, ${hdist(b.pos, this.target).toFixed(0)} out: ${plan.why} (${plan.sims} simulations)`);
+      return 'dive';
+    }
+    if (last && !plan.wait && this.diveWhy !== plan.why) this.o.note?.(`no dive descent (${plan.why}): the descent circle`);
+    this.diveWhy = plan.why;
+    return plan.wait ? 'wait' : 'none';
+  }
+
+  /**
+   * Track BL: fly the committed dive (dive.ts divePhase / divePitch, the approach yaw law): re-simulated
+   * against the corridor every DIVE_RECHECK ticks of the dive and checked DIVE_AHEAD ticks ahead every
+   * tick; a solid or the clearance gone pulls out at once and the cruise takes over again (no second dive
+   * this approach). At the hand-over the approach begins. True while the dive's controls are set.
+   */
+  private flyDive(i: BrainInput, ctl: BrainControl): boolean {
+    const dv = this.dive!;
+    const b = i.body;
+    const ph = divePhase(dv.p, dv.phase, b.pos, b.vel);
+    const t = this.stats.ticks - dv.since;
+    if (ph === 'done' || (dv.aborted && ph === 'bleed')) {
+      this.dive = undefined;
+      const aboveEntry = b.pos.y - (this.target.top + APPROACH_HEIGHT);
+      if (dv.aborted) {
+        this.diveBanned = true;
+        return false;
+      }
+      this.o.note?.(`dive descent: handed over after ${t} ticks, ${hdist(b.pos, this.target).toFixed(0)} out, ${aboveEntry.toFixed(1)} over the entry at ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} blocks a tick (from y ${dv.from.toFixed(0)})`);
+      this.phase = 'approach';
+      this.planner.reset();
+      this.stats.entryAbove ??= aboveEntry;
+      return false;
+    }
+    dv.phase = ph;
+    ctl.glide = true;
+    ctl.yaw = approachYaw(i.yaw, b.pos, this.target);
+    ctl.pitch = divePitch(dv.p, ph);
+    if (ph === 'dive' && !dv.aborted) {
+      const cells = this.diveCells(b);
+      let why: string | undefined;
+      // (only the ticks until the pull-out: the profile pulls out over the ground, a held dive would not)
+      const until = Math.min(DIVE_AHEAD, Math.floor((b.pos.y - dv.p.pullAt) / Math.max(1, -b.vel.y)));
+      const ahead = until > 0 ? pathAhead(b, ctl.yaw, ctl.pitch, until, cells.obstacle) : undefined;
+      if (ahead !== undefined) why = `a solid ${ahead} ticks ahead`;
+      else if (t > 0 && t % DIVE_RECHECK === 0) {
+        const s = simulateDive(b, i.yaw, this.target, dv.p, 'dive', cells);
+        if (!s.ok && s.why && !/too far|too near|over the entry|under the entry/.test(s.why)) why = s.why;
+      }
+      if (why) {
+        this.o.note?.(`dive descent aborted at y ${b.pos.y.toFixed(0)} (${why}): pulling out, then the cruise`);
+        dv.aborted = true;
+        dv.phase = 'pull';
+        ctl.pitch = dv.p.pullPitch;
+      }
+    }
+    return true;
   }
 
   /**

@@ -17,6 +17,7 @@ import { APPROACH_HEIGHT, columnsAlong, cruiseHeight, flightSeconds, hdist, take
 import { pathBlocks, probePath } from '../skills/home/reach.ts'; // Track AU2: the walk from a landing cell to the goal
 import { probeNavOf } from '../skills/combat/pathReach.ts';
 import { findLanding, isHazardName, isLiquidName, stillLandable, WET_ABOVE, type BlockLookup, type LandingPlan, type ProbeOutcome } from '../skills/fly/landing.ts'; // Track BF
+import { TerrainMemo, type TerrainColumn } from '../skills/fly/terrain.ts'; // Track BL
 import type { Goal, GotoOptions, SkillResult } from '../skills/types.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { FlightProcess, FlyProcess, landingLine, targetFromPlan, type FlyOutcome, type FlyTarget } from '../tasks/process/fly.ts';
@@ -213,6 +214,43 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   };
   const cellOk = (c: { x: number; z: number; feet: number }): boolean => stillLandable(look, c, d.settings.get('flyHeadroom'));
 
+  /**
+   * Track BL (docs/flight.md "Terrain-safe cruise"): a column's highest solid block and where it came from:
+   * the live model when the chunk is loaded (subchunks not received above a solid count as unknown: the
+   * cache's top, when higher, is taken), else the world cache, else unknown. Overworld only (the Nether's
+   * bedrock roof is no terrain to fly over: its flights keep the ceiling check).
+   */
+  const terrainColumn = (x: number, z: number): TerrainColumn => {
+    if (dim() !== OVERWORLD) return { top: undefined, src: 'unknown' };
+    if (typeof world.isLoaded === 'function' && !world.isLoaded(x >> 4, z >> 4)) {
+      const t = world.cache?.columnTop(x, z);
+      return t === undefined ? { top: undefined, src: 'unknown' } : { top: t, src: 'cache' };
+    }
+    let unknownAbove = false;
+    for (let y = 319; y >= -64; y--) {
+      const b = world.blockAt({ x, y, z });
+      if (b === undefined) {
+        unknownAbove = true;
+        continue;
+      }
+      if (b.solid) return { top: unknownAbove ? Math.max(y, world.cache?.columnTop(x, z) ?? y) : y, src: 'live' };
+    }
+    return { top: -65, src: 'live' };
+  };
+  const terrain = new TerrainMemo(terrainColumn);
+  // the memo forgets a chunk's columns when the chunk (or one of its subchunks) arrives
+  (world.chunks as Partial<typeof world.chunks> | undefined)?.onColumnLoaded?.((cx, cz) => terrain.invalidateChunk(cx, cz));
+  (world.chunks as Partial<typeof world.chunks> | undefined)?.onSection?.((col) => terrain.invalidateChunk(col.cx, col.cz));
+  /** Track BL, the crash notes: what the model believes about a cell (live, else unknown with the cache's view). */
+  const describeCell = (x: number, y: number, z: number): string => {
+    const b = world.blockAt({ x, y, z });
+    if (b) return `live ${b.name.replace(/^minecraft:/, '')}`;
+    const loaded = typeof world.isLoaded === 'function' && world.isLoaded(x >> 4, z >> 4);
+
+    const c = world.cache?.blockAt(x, y, z);
+    const top = world.cache?.columnTop(x, z);
+    return `unknown (${loaded ? 'its subchunk not received' : `chunk ${x >> 4} ${z >> 4} not loaded`}; cache: ${c ? `${c.name.replace(/^minecraft:/, '')}, column top ${top ?? '?'}` : 'nothing'})`;
+  };
   const controller = new FlightController({
     loop,
     queue: (n, p) => d.conn.queue(n as never, p as never),
@@ -224,6 +262,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     groundAt,
     skyTop,
     sneakLanding: () => d.settings.get('flySneakLand') === true,
+    terrain: { query: terrain.query, tick: () => terrain.tick() }, // Track BL
+    cachedSolid: (x, y, z) => world.cache?.blockAt(x, y, z)?.solid === true,
+    describeCell,
     log,
   });
   // Track BH: the ledge takeoff's step-off is a fall the flight means: Track BI's clutch never arms while a flight runs
@@ -254,6 +295,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   processes.add(new FlightProcess(controller));
   let current: FlyProcess | undefined;
   const start = (target: FlyTarget): FlyProcess => {
+    terrain.clear(); // Track BL: a flight reads the columns afresh
+
     const p = new FlyProcess(target, {
       controller,
       kitOps,

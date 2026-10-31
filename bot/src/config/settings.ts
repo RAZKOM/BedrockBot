@@ -160,6 +160,12 @@ export const SETTING_DEFS = {
   glideDown: { kind: 'boolean', default: true, description: 'an unreachable goto / come with the goal far below glides down when a simulated glide lands' }, // Track BH
   glideDownMinDrop: { kind: 'number', default: 10, min: 4, max: 200, integer: true, unit: 'blocks', description: 'glide down: the goal at least this far below the feet' }, // Track BH
   glideDownMinDistance: { kind: 'number', default: 16, min: 4, max: 400, integer: true, unit: 'blocks', description: 'glide down: the goal at least this far away horizontally' }, // Track BH
+  flyHighCruise: { kind: 'text', default: 'auto', values: 'auto|always|off', parse: (raw: string) => { const v = raw.trim().toLowerCase(); if (v !== 'auto' && v !== 'always' && v !== 'off') throw new SettingError(`flyHighCruise must be auto, always or off, got "${raw}"`); return v; }, description: 'flight: cruise over the build limit (y 328, nothing to hit) until the descent; auto only for long trips over unknown terrain that need nearly that height anyway (it costs rockets)' }, // Track BL
+  flyDescent: { kind: 'text', default: 'auto', values: 'auto|dive|spiral', parse: (raw: string) => { const v = raw.trim().toLowerCase(); if (v !== 'auto' && v !== 'dive' && v !== 'spiral') throw new SettingError(`flyDescent must be auto, dive or spiral, got "${raw}"`); return v; }, description: 'flight: from high up, dive steeply and pull out (simulated first; auto from 24 over the approach, dive from 16) or circle down (spiral)' }, // Track BL
+  flyRecheckBlocks: { kind: 'number', default: 24, min: 4, max: 256, integer: true, unit: 'blocks', description: 'flight: a long walk looks for a takeoff again every this many blocks walked (0 checks while the goal is under flyMin)' }, // Track BL
+  flyPreferRatio: { kind: 'number', default: 1.5, min: 1, max: 10, description: 'flight: walk to a takeoff site and fly when the whole walk would take this many times longer' }, // Track BL
+  flySiteSearch: { kind: 'number', default: 48, min: 0, max: 96, integer: true, unit: 'blocks', description: 'flight: look this far around for a takeoff site to walk to when the takeoff here is refused (0 = never)' }, // Track BL
+
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;

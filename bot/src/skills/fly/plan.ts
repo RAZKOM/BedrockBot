@@ -73,6 +73,8 @@ export interface FlightBody {
 }
 
 export const DEFAULT_CLEARANCE = 12;
+/** Track BL: an unknown column under the line counts this much higher than the highest known one (terrain.ts UNKNOWN_SLACK). */
+export const UNKNOWN_SLACK_CRUISE = 24;
 export const DEFAULT_CRUISE = 25;
 export const DEFAULT_GO_AROUNDS = 4;
 /** The approach starts within this horizontal distance of the target (blocks). */
@@ -163,7 +165,8 @@ export function columnsAlong(a: { x: number; z: number }, b: { x: number; z: num
  * block climbed; two rounds settle the circular estimate), capped at `maxClimb` above the start (a
  * longer glide is topped up on the way: one rocket from a level glide buys about ROCKET_CRUISE_CLIMB
  * blocks, cheaper than a level boost); never under `clearance` above every known column top under the
- * straight line (unknown columns count as the highest known) nor under the approach entry. (Track
+ * straight line (Track BL: with any unknown column, 24 more: unknown is not air) nor under the approach entry. (Track
+
  * AU's `flyCruise` cap above the higher end is gone: it made every long flight cruise 25 blocks up and
  * boost level every 100 blocks.) `skyTop(x, z)` = the highest solid block of the column (undefined =
  * unknown).
@@ -184,7 +187,8 @@ export function cruiseHeight(
     if (t === undefined) unknown++;
     else if (highest === undefined || t > highest) highest = t;
   }
-  const terrain = highest === undefined ? Math.max(from.y, target.top) : highest + 1 + clearance;
+  // Track BL: unknown columns are not air: they count as the highest known column plus UNKNOWN_SLACK (24; terrain.ts)
+  const terrain = highest === undefined ? Math.max(from.y, target.top) : highest + 1 + clearance + (unknown > 0 ? UNKNOWN_SLACK_CRUISE : 0);
   const distance = hdist(from, target);
   const entry = target.top + APPROACH_HEIGHT;
   // the glide slope from the approach entry: the cruise is flown after the climb, which itself covers

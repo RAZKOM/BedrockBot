@@ -27,6 +27,7 @@ import { PHYSICS } from '../input/physics.ts';
 import { FlightBrain, type BrainOptions, type FlightEnd, type FlightEndReason as BrainEndReason, type FlightPhase } from './brain.ts';
 import { isRocket } from './kit.ts';
 import { hdist, type FlightBody, type LandingTarget } from './plan.ts';
+import type { TerrainQuery } from './terrain.ts';
 
 /** Ticks between two rockets (the item-use transaction must settle; the boost of one rocket lasts 14 to 20). */
 export const ROCKET_COOLDOWN = 4;
@@ -39,7 +40,11 @@ export const TAKEOFF_TIMEOUT = 120;
 export const SETTLE_TICKS = 10;
 /** Track BF: sneak goes on this far above the landing cell in the approach / land phase (FlightDeps.sneakLanding). */
 export const SNEAK_ABOVE = 2.5;
-/** A rocket entity appearing within this many blocks of the body right after a use is ours. */
+/** Track BL: a correction this far behind the local body along the heading (blocks) is the server holding it; one note per HELD_NOTE_TICKS. */
+const HELD_ERROR = 2;
+const HELD_NOTE_TICKS = 40;
+/** A rocket entity appearing within this many blocks
+ of the body right after a use is ours. */
 const ROCKET_NEAR = 4;
 
 export interface FlightLoop {
@@ -78,6 +83,12 @@ export interface FlightDeps {
   skyTop?(x: number, z: number): number | undefined;
   /** Track BF: hold sneak through the touchdown and the settle (the server's sneak edge rule stops the slide at an edge); released when the flight ends. */
   sneakLanding?(): boolean;
+  /** Track BL: the column query of the terrain floor and the dive (live, else cache, else unknown); ticked once a game tick (`tick`). */
+  terrain?: { query: TerrainQuery; tick(): void };
+  /** Track BL: a cell the live model has not received is solid in the world cache (the path-ahead check sees cache-only terrain). */
+  cachedSolid?(x: number, y: number, z: number): boolean;
+  /** Track BL: what the model believes about a cell, for the crash notes (`live stone`, `unknown (chunk not loaded); cache: column top 175`). */
+  describeCell?(x: number, y: number, z: number): string;
   log?: Logger;
 }
 
@@ -135,9 +146,15 @@ export interface FlightReport {
   sneak?: boolean;
   /** Track BH: a ledge takeoff's fall until the glide flew (blocks under the edge). */
   ledgeDrop?: number;
+  /** Track BL: the terrain avoidances (one line each) and the dive descents flown; the server held the body (a wall or a chunk it had not loaded) this many times. */
+  avoidances?: string[];
+  dives?: number;
+  held?: number;
 }
 
-export interface FlightOptions extends Omit<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop'> {
+export interface FlightOptions extends Omit<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'terrain'> {
+  /** Track BL: keep the terrain floor (default true; a glide down flies its simulated plan without it). */
+  terrainFloor?: boolean;
   /** The brain's seed (deterministic planning per flight). */
   seed?: number;
 }
@@ -175,6 +192,9 @@ export class FlightController {
   /** The brain called the landing done: ticks the body has stood since (the server may still disagree). */
   private settling: { ticks: number; end: FlightEnd; at: Vec3 } | undefined;
   private sneaked = false;
+  /** Track BL: the server held the body back (a crash note each, at most one per HELD_NOTE_TICKS). */
+  private held = 0;
+  private heldNoteAt = -1000;
   /** Landings the server undid (the body was corrected back into the air). */
   bounces = 0;
 
@@ -227,7 +247,16 @@ export class FlightController {
     const { loop } = this.d;
     this.target = target;
     const base = loop.world;
-    this.brain = new FlightBrain(target, { ...opts, groundAt: this.d.groundAt?.bind(this.d), skyTop: this.d.skyTop?.bind(this.d), obstacle: (x, y, z) => base.solidAt(x, y, z) === true, note: (m) => this.log.info(`flight: ${m}`) });
+    // Track BL: the obstacle sees the live model, and the cache where the live model has nothing (unknown stays air for the physics)
+    const cached = this.d.cachedSolid?.bind(this.d);
+    const obstacle = (x: number, y: number, z: number): boolean => {
+      const s = base.solidAt(x, y, z);
+      return s === true || (s === undefined && cached !== undefined && cached(x, y, z));
+    };
+    this.brain = new FlightBrain(target, { ...opts, groundAt: this.d.groundAt?.bind(this.d), skyTop: this.d.skyTop?.bind(this.d), obstacle, ...(this.d.terrain && opts.terrainFloor !== false ? { terrain: this.d.terrain.query } : {}), note:
+ (m) => this.log.info(`flight: ${m}`) });
+    this.held = 0;
+    this.heldNoteAt = -1000;
     this.tickNo = 0;
     this.lastFire = -1000;
     this.usedAt = undefined;
@@ -252,8 +281,12 @@ export class FlightController {
         loop.onEvent((e) => {
           if (e.kind === 'glide') {
             if (e.gliding) this.everGlided = true;
-            else this.glideEnds++;
+            else {
+              this.glideEnds++;
+              this.contactNote();
+            }
           }
+          if (e.kind === 'correction') this.correctionNote(e.local, e.server, e.error);
         }),
         this.d.entities.onAdd((e) => {
           this.onEntityAdd(e);
@@ -306,10 +339,57 @@ export class FlightController {
     return { count, slot };
   }
 
+  /**
+   * Track BL, deliverable 5: a correction that puts the server's body more than HELD_ERROR behind the local
+   * one along the heading while gliding is a wall the model did not have (or a chunk the server had not
+   * loaded: BDS holds a body at the edge of a chunk it has not loaded, the Realm's z 656.3 and 832.3): one
+   * note naming the cell ahead of the server's body and what the model believed there.
+   */
+  private correctionNote(local: Vec3 | undefined, server: Vec3, error: number | undefined): void {
+    const s = this.d.loop.state;
+    if (!this.brain || !s.gliding || !local || error === undefined || error < HELD_ERROR) return;
+    const v = s.vel;
+    const h = Math.hypot(v.x, v.z);
+    if (h < 0.3) return;
+    const ahead = ((local.x - server.x) * v.x + (local.z - server.z) * v.z) / h;
+    if (ahead < HELD_ERROR * 0.8) return;
+    this.held++;
+    if (this.tickNo - this.heldNoteAt < HELD_NOTE_TICKS) return;
+    this.heldNoteAt = this.tickNo;
+    const ux = v.x / h;
+    const uz = v.z / h;
+    const cx = Math.floor(server.x + ux * 0.9);
+    const cy = Math.floor(server.y + 0.3);
+    const cz = Math.floor(server.z + uz * 0.9);
+    const edge = (c: number, u: number): boolean => Math.abs(u) > 0.3 && Math.abs(c - Math.round(c / 16) * 16) <= 0.35;
+    const chunkEdge = edge(server.x, ux) || edge(server.z, uz);
+    const what = this.d.describeCell?.(cx, cy, cz) ?? '?';
+    this.log.warn(
+      `flight: held by the server at ${server.x.toFixed(2)} ${server.y.toFixed(2)} ${server.z.toFixed(2)} (the local body ${ahead.toFixed(1)} ahead, ${this.brain.phase}${this.target ? `, ${hdist(server, this.target).toFixed(0)} from the target` : ''}): the cell ahead ${cx} ${cy} ${cz} is ${what}${chunkEdge ? '; at a chunk edge: the server had not loaded the next chunk' : ''} (${this.held} held corrections so far)`,
+    );
+  }
+
+  /** Track BL, deliverable 5: the glide ended by contact away from the landing (mid-route): the cells around and ahead of the body and what the model believed there. */
+  private contactNote(): void {
+    const b = this.brain;
+    const s = this.d.loop.state;
+    if (!b || !this.target || b.phase === 'approach' || b.phase === 'land' || b.phase === 'done' || b.phase === 'takeoff') return;
+    if (hdist(s.pos, this.target) < 20) return;
+    const h = Math.hypot(s.vel.x, s.vel.z);
+    const ux = h > 0.05 ? s.vel.x / h : 0;
+    const uz = h > 0.05 ? s.vel.z / h : 0;
+    const cells = [
+      [Math.floor(s.pos.x + ux), Math.floor(s.pos.y + 0.3), Math.floor(s.pos.z + uz)],
+      [Math.floor(s.pos.x), Math.floor(s.pos.y - 0.5), Math.floor(s.pos.z)],
+    ] as const;
+    this.log.warn(`flight: the glide ended by contact mid-route at ${s.pos.x.toFixed(2)} ${s.pos.y.toFixed(2)} ${s.pos.z.toFixed(2)} (${b.phase}, ${hdist(s.pos, this.target).toFixed(0)} from the target): ${cells.map(([x, y, z]) => `${x} ${y} ${z} ${this.d.describeCell?.(x, y, z) ?? '?'}`).join('; ')}`);
+  }
+
   private tick(state: InputLoopState): void {
     const brain = this.brain;
     if (!brain) return;
     this.tickNo++;
+    this.d.terrain?.tick();
     const { loop } = this.d;
     if (state.gliding) this.lastAir = { vy: state.vel.y, h: Math.hypot(state.vel.x, state.vel.z) };
     // a takeoff the server never confirmed: give up (the elytra is missing or the glide is refused)
@@ -397,6 +477,8 @@ export class FlightController {
       ...(this.settling ? { slide: hdist(this.settling.at, s.pos) } : {}),
       sneak: this.sneaked,
       ...(b?.stats.ledgeDrop !== undefined ? { ledgeDrop: b.stats.ledgeDrop } : {}),
+      ...(b ? { avoidances: [...b.stats.avoidances], dives: b.stats.dives } : {}),
+      held: this.held,
     };
   }
 
@@ -422,7 +504,7 @@ export class FlightController {
     this.log.info(
       `flight: ${ok ? 'landed' : `ended (${reason})`} at ${r.landedAt ? `${r.landedAt.x.toFixed(2)} ${r.landedAt.y.toFixed(2)} ${r.landedAt.z.toFixed(2)}` : '?'}` +
         `${r.off !== undefined ? `, ${r.off.toFixed(2)} from the centre` : ''}; ${r.rockets} rockets (${r.rocketsBy.climb} climb, ${r.rocketsBy.cruise} cruise, ${r.rocketsBy.goaround} go-around), ${r.goArounds} go-arounds, ${r.ticks} ticks, ${r.corrections} corrections` +
-        `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}, max y ${r.maxY.toFixed(1)}${r.descents.length ? `, descent ${r.descents.join('; ')}` : ''}${r.steered ? `, steered ${r.steered} ticks` : ''}${r.holdTicks ? `, held ${r.holdTicks} ticks` : ''}${r.slide !== undefined ? `, slide ${r.slide.toFixed(2)}${r.sneak ? ' (sneaking)' : ''}` : ''}${r.ledgeDrop !== undefined ? `, ledge takeoff (gliding ${r.ledgeDrop.toFixed(1)} under the edge)` : ''}`,
+        `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}, max y ${r.maxY.toFixed(1)}${r.descents.length ? `, descent ${r.descents.join('; ')}` : ''}${r.steered ? `, steered ${r.steered} ticks` : ''}${r.holdTicks ? `, held ${r.holdTicks} ticks` : ''}${r.slide !== undefined ? `, slide ${r.slide.toFixed(2)}${r.sneak ? ' (sneaking)' : ''}` : ''}${r.ledgeDrop !== undefined ? `, ledge takeoff (gliding ${r.ledgeDrop.toFixed(1)} under the edge)` : ''}${r.avoidances?.length ? `, ${r.avoidances.length} terrain avoidance${r.avoidances.length === 1 ? '' : 's'}` : ''}${r.dives ? `, ${r.dives} dive${r.dives === 1 ? '' : 's'}` : ''}${r.held ? `, held by the server ${r.held} times` : ''}`,
     );
     this.brain = undefined;
     const resolve = this.resolve;

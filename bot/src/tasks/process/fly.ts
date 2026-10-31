@@ -22,6 +22,7 @@ import type { FlightKitOps } from '../../skills/fly/kitops.ts';
 import { cruiseHeight, flightSeconds, hdist, takeoffSky, type CellQuery, type LandingTarget } from '../../skills/fly/plan.ts';
 import type { LandingCell, LandingPlan } from '../../skills/fly/landing.ts';
 import { glideOptions, type Ledge } from '../../skills/fly/glide.ts';
+import { HIGH_CRUISE_Y, highCruiseWanted } from '../../skills/fly/terrain.ts'; // Track BL
 import type { SkillResult } from '../../skills/types.ts';
 import { BaseProcess, PRIORITY, type ProcessStatus, type StopReason } from './manager.ts';
 
@@ -309,12 +310,17 @@ export class FlyProcess extends BaseProcess {
       this.end({ ok: false, reason: sky.line });
       return;
     }
-    const cruiseY = glide && ledge ? this.target.top : cz.y;
+    // Track BL: the high cruise (flyHighCruise) over the build limit: `always`, or `auto` for a long trip over unseen terrain that needs nearly that height anyway
+    const high = !glide && highCruiseWanted(String(s.get('flyHighCruise')), { distance: this.distance, needed: cz.needed, unknown: cz.unknown });
+    const cruiseY = glide && ledge ? this.target.top : high ? Math.max(cz.y, HIGH_CRUISE_Y) : cz.y;
     this.log.info(
-      `fly: to ${this.target.label} (${Math.round(this.distance)} blocks): ${glide ? `a glide down (no climb, ${this.kit().rocketsHotbar} rockets at hand)` : `cruise y ${cz.y.toFixed(1)} (highest column ${cz.highest ?? '?'}, ${cz.unknown} unknown, the glide needs ${cz.needed.toFixed(0)})`}${ledge ? `, a ledge takeoff from ${ledge.x} ${ledge.feet} ${ledge.z} heading ${Math.round(ledge.yaw)}` : ''}; ${kitLine(this.kit())}`,
+      `fly: to ${this.target.label} (${Math.round(this.distance)} blocks): ${glide ? `a glide down (no climb, ${this.kit().rocketsHotbar} rockets at hand)` : `cruise y ${cruiseY.toFixed(1)}${high ? ' (the high cruise)' : ''} (highest column ${cz.highest ?? '?'}, ${cz.unknown} unknown, the glide needs ${cz.needed.toFixed(0)})`}${ledge ? `, a ledge takeoff from ${ledge.x} ${ledge.feet} ${ledge.z} heading ${Math.round(ledge.yaw)}` : ''}; ${kitLine(this.kit())}`,
     );
     this.phase = 'flying';
-    const opts = glide && ledge ? glideOptions(this.target, ledge, { margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds') }) : { cruiseY, margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(ledge ? { ledge: { yaw: ledge.yaw } } : {}) };
+    // Track BL: the terrain floor, the clearance, the high cruise and the descent mode (a glide down keeps its simulated plan: no floor)
+    const bl = { clearance: s.get('flyClearance'), descent: String(s.get('flyDescent')) as 'auto' | 'dive' | 'spiral', ...(high ? { highCruise: true } : {}) };
+    const opts = glide && ledge ? { ...glideOptions(this.target, ledge, { margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds') }), terrainFloor: false, descent: bl.descent } : { cruiseY, margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(ledge ? { ledge: { yaw: ledge.yaw } } : {}), ...bl };
+
     this.flight = this.d.controller.flyTo(this.target, {
       ...opts,
       fleeHealth: s.get('fleeHealth'),
