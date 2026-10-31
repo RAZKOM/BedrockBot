@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { FlightBrain } from '../../../src/skills/fly/brain.ts';
 import { cellsAround, ColumnView, corridorLands, corridorsOf, findLanding, floorsOf, walkTarget, type BlockLookup, type CellBlock, type LandingDeps, type LandingOptions, type ProbeOutcome } from '../../../src/skills/fly/landing.ts';
 import { columnKey, cruiseHeight, onTarget, simulateProfile, slideOut, touchdownCost, type LandingTarget } from '../../../src/skills/fly/plan.ts';
-import { flatWorld, GLIDE, IDLE_COMMAND, initialBody, stepBody, withBoxes, type BlockBox, type BlockQuery } from '../../../src/skills/input/index.ts';
+import { flatWorld, GLIDE, IDLE_COMMAND, initialBody, stepBody, withBoxes, type BlockBox } from '../../../src/skills/input/index.ts';
 
 const FEET = -60;
 const OPTS: LandingOptions = { radius: 48, headroom: 4, maxUnder: 12, probes: 16, budgetMs: 60_000 };

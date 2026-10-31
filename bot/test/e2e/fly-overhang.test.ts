@@ -99,7 +99,7 @@ describe.skipIf(!E2E)('@bds fly: landing v3 (Track BF)', () => {
     const p = parseFlight(flightLine);
     const g = await b.truth.glide(b.name);
     const dmg = await b.truth.damageSince(since, b.name);
-    const decisions = logs.filter((l) => /landing for |go-around|holding|corridor|no landing|retarget|swam up|surface:/.test(l));
+    const decisions = logs.filter((l) => /landing for |go-around|holding|corridor|no landing|retarget|swam up|surface:|bounce|emergency|nearest safe/.test(l));
     notes.push(
       `${label}: ${said.join(' | ')} | truth ${g.location.x.toFixed(2)} ${g.location.y.toFixed(2)} ${g.location.z.toFixed(2)} | damage ${dmg.total}${dmg.causes.length ? ` (${dmg.causes.join(',')})` : ''} | ${flightLine ?? 'no flight'} | ${decisions.join(' ; ')}`,
     );
@@ -197,30 +197,34 @@ describe.skipIf(!E2E)('@bds fly: landing v3 (Track BF)', () => {
     const b = bot!;
     const cx = area.x + 40;
     const cz = area.z + 40;
-    await teleport(b, { x: cx + 0.5, y: F, z: cz + 8.5 });
-    await truthLoaded(b.truth, 'fill', [cx - 4, F - 10, cz - 4, cx + 4, F - 1, cz + 4, 'water']);
-    await truthLoaded(b.truth, 'fill', [cx - 4, F - 11, cz - 4, cx + 4, F - 11, cz + 4, 'stone']);
-    const floor = { x: cx + 0.5, y: F - 10, z: cz + 0.5 };
+    // the flat world is 3 blocks deep: the pond is sunk in a mound 10 high (its top, the shore, at feet y F + 10)
+    const S = F + 10;
+    await teleport(b, { x: cx + 0.5, y: F, z: cz + 14.5 });
+    await truthLoaded(b.truth, 'fill', [cx - 12, F, cz - 12, cx + 12, S - 1, cz + 12, 'stone']);
+    await truthLoaded(b.truth, 'fill', [cx - 4, F, cz - 4, cx + 4, S - 1, cz + 4, 'water']);
+    const floor = { x: cx + 0.5, y: F, z: cz + 0.5 };
     // !goto from the floor
     await b.command('!stop');
     await sleep(500);
     await teleport(b, floor);
     const n0 = b.logs.length;
     const from = b.said.length;
-    const target = { x: cx, y: F, z: cz + 12 };
+    const target = { x: cx, y: S, z: cz + 9 };
     await b.command(`!goto ${target.x} ${target.y} ${target.z}`);
     const arrived = await b.reply((s) => s.startsWith('arrived at ') || s.startsWith('goto: '), from, 90_000);
-    const logs1 = b.logs.slice(n0).map((l) => l.replace(/^\S+ info /, ''));
+    const logs1 = b.logs.slice(n0).map((l) => l.replace(/^\S+ (info|warn) /, ''));
     notes.push(`seabed goto: ${b.said.slice(from).join(' | ')} | ${logs1.filter((l) => /swam up|failure|surface:/.test(l)).join(' ; ')}`);
     expect(arrived).toBe(`arrived at ${target.x} ${target.y} ${target.z}`);
     // idle on the floor
+    await b.command('!stop');
+    await sleep(500);
     await teleport(b, floor);
     const n1 = b.logs.length;
     const t0 = Date.now();
     const out = await until(
       async () => {
         const g = await b.truth.glide(b.name);
-        return g.location.y > F - 0.6 && g.isOnGround && hdist(g.location, { x: cx + 0.5, z: cz + 0.5 }) > 4.5 ? g : undefined;
+        return g.location.y > S - 0.6 && g.isOnGround && hdist(g.location, { x: cx + 0.5, z: cz + 0.5 }) > 4.5 ? g : undefined;
       },
       60_000,
       'out of the pond',
@@ -229,9 +233,8 @@ describe.skipIf(!E2E)('@bds fly: landing v3 (Track BF)', () => {
     const logs2 = b.logs.slice(n1).map((l) => l.replace(/^\S+ (info|warn) /, ''));
     notes.push(`seabed idle: out at ${out.location.x.toFixed(1)} ${out.location.y.toFixed(1)} ${out.location.z.toFixed(1)} after ${((Date.now() - t0) / 1000).toFixed(0)} s | ${logs2.filter((l) => /surface:|drown/.test(l)).join(' ; ')}`);
     expect(logs2.some((l) => l.includes('surface: head under water'))).toBe(true);
-    await truthLoaded(b.truth, 'fill', [cx - 4, F - 11, cz - 4, cx + 4, F - 5, cz + 4, 'stone']);
-    await truthLoaded(b.truth, 'fill', [cx - 4, F - 4, cz - 4, cx + 4, F - 2, cz + 4, 'dirt']);
-    await truthLoaded(b.truth, 'fill', [cx - 4, F - 1, cz - 4, cx + 4, F - 1, cz + 4, 'grass_block']);
+    await teleport(b, { x: cx + 0.5, y: F, z: cz + 14.5 });
+    await truthLoaded(b.truth, 'fill', [cx - 12, F, cz - 12, cx + 12, S - 1, cz + 12, 'air']);
     await teleport(b, home);
   }, 300_000);
 
@@ -267,7 +270,7 @@ describe.skipIf(!E2E)('@bds fly: landing v3 (Track BF)', () => {
       loop.setCommand = set;
       const c1 = loop.state.corrections;
       notes.push(`sneak while gliding (2 s): server gliding/vy ${samples.join(' ')}; client gliding ${loop.state.gliding}; corrections ${c1 - c0}`);
-      await b.reply((s) => s.startsWith('fly: ') || s.startsWith('landed') || s.startsWith('walked to') || /landed/.test(s), from, 240_000).catch(() => undefined);
+      await b.reply((s) => s.startsWith('fly: ') || s.startsWith('landed') || s.startsWith('walked to') || s.includes('landed'), from, 240_000).catch(() => undefined);
       await sleep(1000);
       const line = b.logs.slice(n0).find((l) => l.includes('flight: landed') || l.includes('flight: ended'));
       notes.push(`sneak while gliding flight: ${line ?? '?'}`);

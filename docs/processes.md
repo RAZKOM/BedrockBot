@@ -128,6 +128,11 @@ its plan yet; `navRemaining` reads its `active` record read-only (an open issue 
 | `flyMaxClimb` | 120 | number | flight (Track AU2, "Rocket economy"): the climb's cap above the start; a longer glide is topped up on the way |
 | `flyMargin` | 15 | number | flight (Track AU2): the cruise fires only when the glide ahead would reach the approach entry with less than this to spare (less for short glides) |
 | `flyLandSearch` | 48 | number | flight (Track AU2, "Fly, then walk"): goto / come land on the nearest landable cell within this many blocks of the goal and walk the rest |
+| `flyLandProbes` | 16 | number | flight (Track BF, docs/flight.md "Landing v3"): walking plans tried from landing cells near the goal (6000 nodes, 400 ms each) before landing on unconfirmed dry ground |
+| `flyHoldS` | 30 | number (s) | flight (Track BF): a flight whose goal's ground is not loaded (or has no confirmed landing yet) circles high near it this long, then lands on the nearest dry ground and tries to walk |
+| `flyHeadroom` | 4 | number | flight (Track BF): a cell under a roof is landable when the roof is at least this high over the feet and a corridor leads in from the open side (the approach is simulated) |
+| `flyOverhangDepth` | 10 | number | flight (Track BF): an overhang landing flies at most this many blocks under the roof (0 = never under a roof) |
+| `flySneakLand` | on | boolean | flight (Track BF): sneak through the touchdown and the settle; released when the flight ends |
 | `guardWhileWalking` | near | text | guard while a user process walks (Track AO): `reach` fights only mobs within reach, `near` adds melee mobs, creepers and archers aiming at the bot within 6 path blocks, `all` the old behaviour |
 | `mineBranchY` | auto | text | branch mining (Track AI): `auto` picks the ore's best level (coal 40, iron 16, copper 48, gold -16, redstone -58, lapis 0, diamond -58, emerald 232 in mountains), a number overrides |
 | `exploreRadius` | 128 | number | `!explore` without a radius: the area walked around home (16..1024) |

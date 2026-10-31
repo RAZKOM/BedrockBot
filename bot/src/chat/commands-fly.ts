@@ -434,7 +434,12 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
 
   // ---- commands ----------------------------------------------------------------------------------
   /** The goal of `!fly`: a block (x y z, a waypoint, home) or a player, the half width of an exact landing on it, the label. */
-  type FlyGoal = { goal: Vec3; half: number; label: string; player?: string };
+  interface FlyGoal {
+    goal: Vec3;
+    half: number;
+    label: string;
+    player?: string;
+  }
   const targetOf = (args: readonly string[], senderName: string | undefined): FlyGoal | { error: string } => {
     if (args.length === 3) {
       const p = d.parseBlock(args);

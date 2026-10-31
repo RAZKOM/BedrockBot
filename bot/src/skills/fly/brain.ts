@@ -644,7 +644,11 @@ export class FlightBrain {
       this.stats.descents.push(chosen.kind === 'spiral' ? `spiral r${chosen.fit.radius} at ${Math.round(hdist(chosen.fit.centre, aim))} out from ${Math.round(b.pos.y - aim.top)} above` : `S-turns from ${Math.round(b.pos.y - aim.top)} above`);
     }
     const dsc = this.descent;
-    if (b.pos.y <= dsc.exitY) {
+    // Track BF: a circle left at a tangent point gets a window as deep as one lap sinks (a level circle sinks
+    // 0.15 to 0.2 a tick): with only the 10 blocks under the exit height the body reached them on the far side
+    // of a 24-block circle and was forced out anywhere, too low and off the line (bds-fly, the farm: go-around)
+    const lapSink = dsc.kind === 'spiral' && dsc.exitAt ? ((2 * Math.PI * dsc.fit.radius) / Math.max(0.8, h)) * 0.18 : 0;
+    if (b.pos.y <= dsc.exitY + Math.max(0, lapSink - 10)) {
       // a circle around the aim is left heading at it (within 45 degrees) and at least 28 blocks out; a circle
       // farther out is tangent to the approach line and left at the tangent point heading in along the line
       // (the open side of a walled platform); either way at the latest 10 under the exit height

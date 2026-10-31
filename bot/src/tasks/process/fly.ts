@@ -301,7 +301,7 @@ export class FlyProcess extends BaseProcess {
     let lastLook = -Infinity;
     let holdSince: number | undefined;
     let unknown = 0;
-    const holdTicks = (this.d.settings.get('flyHoldS') as number) * 20;
+    const holdTicks = this.d.settings.get('flyHoldS') * 20;
     for (;;) {
       await this.d.waitTicks(10);
       ticks += 10;
@@ -340,7 +340,7 @@ export class FlyProcess extends BaseProcess {
       }
       this.log.info(`fly: ${plan.line}`);
       const next = targetFromPlan(plan, { label: t.label, goal, half: t.half, ...(t.exact !== undefined ? { exact: t.exact } : {}) });
-      if (!t.hold && t.cell && next.cell && next.cell.x === t.cell.x && next.cell.z === t.cell.z && next.cell.feet === t.cell.feet) continue; // the same cell
+      if (!t.hold && t.cell && next.cell?.x === t.cell.x && next.cell.z === t.cell.z && next.cell.feet === t.cell.feet) continue; // the same cell
       if (!this.d.controller.retarget(next)) {
         this.log.info(`fly: the landing could not be moved now (${c.phase}, ${Math.round(c.distance ?? 0)} blocks out)`);
         continue;

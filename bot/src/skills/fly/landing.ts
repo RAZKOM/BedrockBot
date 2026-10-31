@@ -79,7 +79,7 @@ export function floorsOf(look: BlockLookup, x: number, z: number, yTop: number, 
     }
     known = true;
     if (b.solid) {
-      const free = (c: CellBlock | undefined) => !c || !c.solid;
+      const free = (c: CellBlock | undefined) => !c?.solid;
       if (y + 2 <= yTop && free(a1) && free(a2)) {
         const wet = [a1, a2, a3].some((c) => c !== undefined && isLiquidName(c.name));
         out.push({ feet: y + 1, ceiling, wet, hazard: isHazardName(b.name) || (a1 !== undefined && isHazardName(a1.name)) });
@@ -416,7 +416,13 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   const { list, columns, live } = candidatesNear(view, goal, o);
   await yieldNow();
   if (live < columns * (o.liveShare ?? 0.85)) return { kind: 'unknown', line: `landing for ${label}: only ${live} of ${columns} columns loaded around the goal` };
-  type Probed = { c: Candidate; result: string; blocks?: number; corridor?: Corridor; status: ProbeOutcome['status'] | 'skip' };
+  interface Probed {
+    c: Candidate;
+    result: string;
+    blocks?: number;
+    corridor?: Corridor;
+    status: ProbeOutcome['status'] | 'skip';
+  }
   const probed: Probed[] = [];
   // probes that exhausted the space without a path: their whole plateau is skipped (feet -> columns)
   const dead = new Map<number, Set<number>>();
@@ -427,7 +433,12 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   let roofsLooked = 0;
   // a queue by the ranking estimate: an overhang cell is re-queued once its corridors are known, with the
   // extra walk its corridor costs (roofPenalty), so the open ground beside a deep roof comes first
-  type Entry = { c: Candidate; key: number; lb: number; corridors?: Corridor[] };
+  interface Entry {
+    c: Candidate;
+    key: number;
+    lb: number;
+    corridors?: Corridor[];
+  }
   const queue: Entry[] = list.map((c) => ({ c, key: c.est, lb: c.lb }));
   const push = (e: Entry): void => {
     let i = queue.findIndex((q) => q.key > e.key);
