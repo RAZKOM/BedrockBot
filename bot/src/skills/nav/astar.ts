@@ -39,7 +39,7 @@ import { BestSoFar, FAILURE_NODES_FACTOR } from './baritone/bestSoFar.ts'; // Tr
 import { ascend, createBreakMoveContext, descend, downward, pillar, sneakFits, traverse, type BreakMoveContext } from './baritone/moves.ts'; // Track BC: the moves that dig (ported, LGPL-3.0) and sneak-through
 import { DEFAULT_COSTS, dropCost, type PathCosts } from './costs.ts';
 import { goalTest, levelWeights, type NavGoal, type GoalTest } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
-import { CROSS_BLOCKED, CROSS_TOGGLE, VARIETY_CLIMBER, VARIETY_LADDER, VARIETY_WATER, cellKey, type NavGrid } from './grid.ts';
+import { CROSS_BLOCKED, CROSS_CLEAR, CROSS_TOGGLE, VARIETY_CLIMBER, VARIETY_LADDER, VARIETY_TRAPDOOR, VARIETY_WATER, cellKey, type NavGrid } from './grid.ts';
 
 export type { PathCosts } from './costs.ts';
 export { DEFAULT_COSTS } from './costs.ts';
@@ -93,6 +93,11 @@ export interface MoveSet {
   digDownward?: boolean;
   /** Track BC: walk sneaking through cells the body only fits sneaking (a 1.5-high gap under a top slab). */
   sneak?: boolean;
+  /**
+   * Track BG: through trapdoors in floors and ceilings (hatches): down onto the ladder under one or through
+   * it onto a floor / into water, up a ladder through one above (a closed one is opened first: `allowOpen`).
+   */
+  trapdoor?: boolean;
 }
 
 export interface PathOptions {
@@ -162,6 +167,8 @@ export interface PathResult {
 
 /** Highest feet rise a jump can take (apex of a standing jump is 1.2522). */
 export const MAX_JUMP_RISE = 1.25;
+/** Track BG: deepest fall (blocks below the feet) through a hatch into still water (Baritone's MovementFall takes any height). */
+export const HATCH_WATER_FALL = 16;
 const STEP = PHYSICS.stepHeight + 1e-6;
 const FLAT = 1e-6;
 
@@ -640,6 +647,8 @@ export class PathSearch {
           else if (fits && this.ladderPass(cx, cy, cz, nx, nz, dx, dz, false)) this.relax(cur, nx, cy, nz, cy, costs.sneakWalk, M_SNEAK, 0, 0, undefined, F_SNEAK);
         }
       }
+      // Track BG: down through a trapdoor in the walking layer or in the floor ahead (closed: opened first)
+      if (flat && !inPassage && (grid.variety & VARIETY_TRAPDOOR) !== 0 && this.moveOn('trapdoor')) this.hatchDown(cur, cx, cy, cz, f0, headCell, nx, nz, dx, dz);
       if (inPassage && !took) {
         // Track AX: out of a doorway onto a floor a step lower in the cell below (a dirt path, farmland)
         const f1 = grid.stand(nx, cy - 1, nz);
@@ -731,11 +740,7 @@ export class PathSearch {
     }
 
     // Track AJ: climb up from the foot of a ladder (the feet cell is a climber, the floor below it)
-    if (this.varietyOn(VARIETY_CLIMBER, 'climb') && grid.climbable(cx, cy, cz)) {
-      const up = grid.climb(cx, cy + 1, cz);
-      if (up === undefined) this.sawUnknown = true;
-      else if (isFeet(up) && this.climbRoom(cx, cy + 1, cz)) this.relax(cur, cx, cy + 1, cz, up, costs.climbUp, M_CLIMB, 0, 0, undefined, F_CLIMB);
-    }
+    if (this.varietyOn(VARIETY_CLIMBER, 'climb') && grid.climbable(cx, cy, cz)) this.climbUpInto(cur, cx, cy + 1, cz); // Track BG: through a hatch above too
     // Track AJ: parkour over the gaps found above
     if (flat) {
       for (let di = 0; di < 4; di++) {
@@ -903,6 +908,120 @@ export class PathSearch {
     return f === true;
   }
 
+  // ---- Track BG: trapdoors in floors and ceilings (hatches; decisions/0048-trapdoor-moves.md) ------------
+
+  /**
+   * Track AJ: up the column into climb node (x, y, z) (a climber with the cell above passable, head room
+   * over that). Track BG: a closed trapdoor right above the climber is opened from below first (`allowOpen`):
+   * the node's move carries the use.
+   */
+  private climbUpInto(cur: number, x: number, y: number, z: number): void {
+    const grid = this.grid;
+    const costs = this.costs;
+    const up = grid.climb(x, y, z);
+    if (up === undefined) {
+      this.sawUnknown = true;
+      return;
+    }
+    if (isFeet(up)) {
+      // Track BG: under a hatch (y + 2) the body stops 0.2 below it, to open it from there
+      if (this.climbRoom(x, y, z) || ((grid.variety & VARIETY_TRAPDOOR) !== 0 && grid.cls(x, y + 2, z)?.openable === 'trapdoor')) this.relax(cur, x, y, z, up, costs.climbUp, M_CLIMB, 0, 0, undefined, F_CLIMB);
+      return;
+    }
+    if ((grid.variety & VARIETY_TRAPDOOR) === 0 || !this.moveOn('trapdoor')) return;
+    const c = grid.cls(x, y, z);
+    if (!c || !grid.climbable(x, y, z) || c.liquid || c.danger || grid.cls(x, y + 1, z)?.openable !== 'trapdoor') return;
+    const use = this.hatchUse(x, y + 1, z);
+    if (!use || !this.climbRoom(x, y, z)) return;
+    this.relax(cur, x, y, z, y, costs.climbUp, M_CLIMB, use.length * costs.door, 0, use.length ? { use } : undefined, F_CLIMB);
+  }
+
+  /**
+   * Track BG: what passing vertically through trapdoor cell (x, y, z) needs: [] (open, room beside its
+   * panel), [cell] (closed: toggle it first; `allowOpen`, not blacklisted), undefined (cannot).
+   */
+  private hatchUse(x: number, y: number, z: number): Vec3[] | undefined {
+    const h = this.grid.hatch(x, y, z);
+    if (h === undefined) {
+      this.sawUnknown = true;
+      return undefined;
+    }
+    if (h === CROSS_CLEAR) return [];
+    if (h !== CROSS_TOGGLE || !this.opts.allowOpen || this.opts.noAction?.has(cellKey(x, y, z))) return undefined;
+    return [{ x, y, z }];
+  }
+
+  /**
+   * Track BG: from a node standing on a full block at level cy, along (dx, dz) down through a trapdoor in
+   * column (nx, nz): in the walking layer (cy: the walk enters past its panel) or in the floor ahead (cy - 1:
+   * the walking layer above it free). Under it: a ladder right below (a climb node: the body drops onto it
+   * and slides), else a fall through free cells onto a floor at most `maxDrop` below the feet, or into still
+   * water at most HATCH_WATER_FALL below (Baritone's MovementFall: no fall damage into water). A closed
+   * trapdoor is opened first (the move's `use`).
+   */
+  private hatchDown(cur: number, cx: number, cy: number, cz: number, f0: number, headCell: number, nx: number, nz: number, dx: number, dz: number): void {
+    const grid = this.grid;
+    const costs = this.costs;
+    for (let hy = cy; hy >= cy - 1; hy--) {
+      if (grid.cls(nx, hy, nz)?.openable !== 'trapdoor') continue;
+      const use = this.hatchUse(nx, hy, nz);
+      if (!use) continue;
+      // into the column above the hatch (the hatch in the walking layer: its panel lets the walk in)
+      let ok = true;
+      for (let y = cy; y <= Math.max(headCell, cy + 1) && ok; y++) {
+        if (y === hy) {
+          ok = grid.hatchLets(nx, y, nz, dx, dz, true);
+          continue;
+        }
+        const f = grid.free(nx, y, nz);
+        if (f === undefined) this.sawUnknown = true;
+        ok = f === true;
+      }
+      if (!ok || !this.ladderPass(cx, cy, cz, nx, nz, dx, dz, false)) continue;
+      const extra = use.length * costs.door;
+      const act = use.length ? { use } : undefined;
+      const lc = grid.cls(nx, hy - 1, nz);
+      if (!lc) {
+        this.sawUnknown = true;
+        continue;
+      }
+      if (grid.climbable(nx, hy - 1, nz) && !lc.liquid && !lc.danger) {
+        if (this.moveOn('climb')) this.relax(cur, nx, hy - 1, nz, hy - 1, costs.walk + costs.climbDown * (cy - hy + 1), M_CLIMB, costs.climbEnter + extra, 0, act, F_CLIMB);
+        continue;
+      }
+      for (let ny = hy - 1; cy - ny <= HATCH_WATER_FALL; ny--) {
+        const w = grid.cls(nx, ny, nz);
+        if (!w) {
+          this.sawUnknown = true;
+          break;
+        }
+        if (w.liquid === 'water') {
+          const s = this.moveOn('swim') ? grid.swim(nx, ny, nz) : Number.NaN;
+          if (s === undefined) this.sawUnknown = true;
+          else if (isFeet(s) && ny + 2 < hy) this.relax(cur, nx, ny, nz, s, costs.walk + (costs.fall[Math.min(cy - ny, costs.fall.length - 1)] ?? 0), M_SWIM, costs.swimEnter + extra, 0, act, F_SWIM);
+          break;
+        }
+        if (cy - ny <= costs.maxDrop + 1) {
+          const f1 = grid.stand(nx, ny, nz);
+          if (f1 === undefined) {
+            this.sawUnknown = true;
+            break;
+          }
+          if (isFeet(f1)) {
+            const fall = f0 - f1;
+            if (Math.floor(f1 + PHYSICS.height - 1e-6) < hy && fall <= costs.maxDrop + 1e-6) {
+              this.relax(cur, nx, ny, nz, f1, dropCost(costs, fall), M_DROP, extra, fall > MAX_JUMP_RISE + 1e-6 ? costs.irreversibleDrop : 0, act);
+            }
+            break;
+          }
+        }
+        const fr = grid.free(nx, ny, nz);
+        if (fr === undefined) this.sawUnknown = true;
+        if (fr !== true) break;
+      }
+    }
+  }
+
   /** Moves of a swim node: swim to the 8 neighbours on the same surface, climb out onto a bank up to 1 higher. */
   private expandSwim(cur: number, cx: number, cy: number, cz: number): void {
     const grid = this.grid;
@@ -941,10 +1060,8 @@ export class PathSearch {
   private expandClimb(cur: number, cx: number, cy: number, cz: number, f0: number): void {
     const grid = this.grid;
     const costs = this.costs;
-    // up (the feet cell is a climber: the body is lifted while its feet are in it)
-    const up = grid.climb(cx, cy + 1, cz);
-    if (up === undefined) this.sawUnknown = true;
-    else if (isFeet(up) && this.climbRoom(cx, cy + 1, cz)) this.relax(cur, cx, cy + 1, cz, up, costs.climbUp, M_CLIMB, 0, 0, undefined, F_CLIMB);
+    // up (the feet cell is a climber: the body is lifted while its feet are in it); Track BG: through a hatch above too
+    this.climbUpInto(cur, cx, cy + 1, cz);
     // down: onto the floor at the foot of the ladder, or the next climber cell
     const foot = grid.stand(cx, cy - 1, cz);
     if (foot === undefined) this.sawUnknown = true;
@@ -969,6 +1086,8 @@ export class PathSearch {
         if (f1 < cy - FLAT || f1 > cy + 1 + FLAT) break;
         const lvl = Math.floor(f1 + 1e-6);
         if (!this.ladderLets(cx, lvl, cz, dx, dz, false) || !this.ladderLets(nx, lvl, nz, dx, dz, true)) break;
+        // Track BG: a hatch in the column opened by this plan (still closed in the grid): its panel once open
+        if ((grid.variety & VARIETY_TRAPDOOR) !== 0 && (!grid.hatchLets(cx, lvl, cz, dx, dz, false) || !grid.hatchLets(cx, lvl + 1, cz, dx, dz, false))) break;
         if (f1 > cy + STEP && !this.climbRoom(cx, cy, cz)) break;
         this.relax(cur, nx, ny, nz, f1, costs.climbUp * Math.max(0, f1 - cy) + costs.walk, M_CLIMB_OUT, costs.climbExit);
         break;

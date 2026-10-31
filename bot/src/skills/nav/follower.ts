@@ -19,7 +19,8 @@
 //   not sprint for 10 ticks after a sneak.
 import type { MoveCommand, Vec3 } from '../input/types.ts';
 import type { PathNode } from './astar.ts';
-import type { NavGrid } from './grid.ts';
+import { isPanel, type NavGrid } from './grid.ts';
+import { PHYSICS } from '../input/physics.ts'; // Track BG
 
 export interface FollowerOptions {
   /** Allow sprinting on long straight runs. Default true. */
@@ -98,6 +99,20 @@ const HALF = 0.31;
 const DOUBLE_TAP_GUARD = 7;
 /** Track AJ: a climb node is reached with the feet within this of its height. */
 const CLIMB_TOLERANCE = 0.25;
+/** Track BG: a climbing body is held this far off an open trapdoor's panel (the centring stops within 0.06 of its target). */
+const PANEL_CLEAR = 0.08;
+/** Track BG: in the tight gap of a panel opposite a ladder the target lies this far inside the box the body presses against. */
+const PRESS = 0.1;
+/** Track BG: dropping into the tight gap of a hatch panel opposite a ladder, the body is aligned within this of its middle first. */
+const HATCH_ALIGN = 0.006;
+/** Track BG: walking into such a hatch, forward is pressed only while the body is slower than this (blocks/tick). */
+const HATCH_SPEED = 0.08;
+/**
+ * Track BG: how far one tick of forward from rest carries the body on default ground before it stops again:
+ * 0.098 / (1 - 0.546). BDS takes only whole inputs (a fractional move vector is corrected, measured), so the
+ * fine alignment is done with such single-tick pulses whose direction (the yaw) is chosen freely.
+ */
+const PULSE = (PHYSICS.walkSpeed * PHYSICS.impulseScale) / (1 - PHYSICS.groundFriction * PHYSICS.airInertia);
 /** Track AJ: parkour: jump once the body centre is this far from the takeoff edge (walking / sprinting). */
 const PARKOUR_JUMP_WALK = 0.15;
 const PARKOUR_JUMP_SPRINT = 0.3;
@@ -251,6 +266,10 @@ export class PathFollower {
       const there = dTarget <= this.arrive && Math.abs(p.y - target.feet) < 0.6 && s.onGround;
       if (there && (!this.stopAtEnd || speed < 0.03)) return { cmd: this.idle(), done: true };
       if (!this.stopAtEnd && this.inNode(p, target, s.onGround)) return { cmd: this.idle(), done: true };
+      // Track BG: a leg that ends on a ladder (a hatch to open above or to close behind follows): held there sneaking
+      if (target.move === 'climb' && !Number.isFinite(this.grid.stand(target.x, target.y, target.z)) && this.climbReached(p, s.onGround, target) && Math.abs(s.vel.y) < 0.1) {
+        return { cmd: { ...this.idle(), sneak: true }, done: true };
+      }
     }
 
     // Track AJ: swimming, climbing and parkour have their own controllers
@@ -359,7 +378,8 @@ export class PathFollower {
     const wet = s.inWater === true || this.grid.cls(Math.floor(p.x), Math.floor(p.y + 0.01), Math.floor(p.z))?.liquid === 'water';
     const cmd = { forward: 0, strafe: 0, yaw: this.yaw ?? 0, jump: false, sprint: false, sneak: false };
     if (m === 'swim') {
-      const aim = this.swimAim(p);
+      // Track BG: still above the water (a drop into it, e.g. through a hatch): the entry node itself, not one beyond it
+      const aim = p.y > target.feet + 1.2 ? this.index : this.swimAim(p);
       this.index = aim;
       const a = this.path[aim]!;
       this.steer(cmd, a.x + 0.5 - p.x, a.z + 0.5 - p.z);
@@ -378,6 +398,7 @@ export class PathFollower {
       const end = this.path[j]!;
       const inCol = Math.floor(p.x) === end.x && Math.floor(p.z) === end.z;
       const dy = end.feet - p.y;
+      if (s.onGround && dy < -0.5 && this.hatchEntry(cmd, s, end)) return cmd; // Track BG: the 0.63 gap of a hatch
       if (!inCol) {
         // into the column: walk towards its centre, slowly near it
         this.steer(cmd, end.x + 0.5 - p.x, end.z + 0.5 - p.z);
@@ -387,8 +408,9 @@ export class PathFollower {
         return cmd;
       }
       // hold the column, clear of a ladder's box (touching it while sliding would climb)
-      const [tx, tz] = this.columnTarget(end.x, Math.floor(p.y + 1e-3), end.z);
-      if (s.onGround && dy < -0.5 && Math.hypot(tx - p.x, tz - p.z) > 0.05) {
+      const [tx, tz, tight] = this.columnTarget(end.x, Math.floor(p.y + 1e-3), end.z, s.onGround && dy < -0.5 ? 'drop' : dy > 0.02 ? 'up' : 'down'); // Track BG: the mode
+      // (Track BG: in the 0.63 gap of a hatch panel opposite the ladder the walk goes on in a straight line to its middle)
+      if (s.onGround && dy < -0.5 && Math.hypot(tx - p.x, tz - p.z) > (tight ? 0.008 : 0.05)) {
         // still standing on the ladder's top: walk on until the body drops into the column (clear of the box)
         this.steer(cmd, tx - p.x, tz - p.z);
         if (Math.hypot(s.vel.x, s.vel.z) > 0.06) cmd.forward = 0; // slowly: the air carries the body on
@@ -496,8 +518,56 @@ export class PathFollower {
     cmd.forward = toward < want - 0.01 ? 1 : toward > want + 0.02 ? -1 : 0;
   }
 
+  /**
+   * Track BG: dropping into a climber column through the tight gap of a hatch panel opposite the ladder (the
+   * body's centre must be within 0.0125 of the gap's middle along that axis, or it stands on the ladder's top or
+   * touches the panel, and a touch while falling into the ladder's cell climbs on BDS): at rest on the floor
+   * beside the column, a single tick of forward (PULSE far) aimed so that its share along the tight axis is the
+   * offset (the rest goes along the free axis, away from the column when near it), until the offset is within
+   * HATCH_ALIGN; then walking straight in, the yaw exactly on the free axis, forward pressed only below
+   * HATCH_SPEED. False when the column is not tight this way or the body is already over it (the climb
+   * controller's drop takes over).
+   */
+  private hatchEntry(cmd: { forward: number; strafe: number; yaw: number; sneak: boolean }, s: FollowerInput, end: PathNode): boolean {
+    const p = s.pos;
+    const y = Math.floor(p.y + 1e-3);
+    const ax = this.panelAxis(end.x, y, end.z, 0, end.x + 0.5, 'drop');
+    const az = this.panelAxis(end.x, y, end.z, 2, end.z + 0.5, 'drop');
+    if (ax.tight === az.tight) return false;
+    const tightX = ax.tight;
+    const e = (tightX ? ax.t : az.t) - (tightX ? p.x : p.z);
+    const dFree = (tightX ? end.z : end.x) + 0.5 - (tightX ? p.z : p.x);
+    if (Math.abs(dFree) < 0.3) return false;
+    const sgn = Math.sign(dFree);
+    const world = (t: number, fr: number): [number, number] => (tightX ? [t, fr * sgn] : [fr * sgn, t]);
+    const speed = Math.hypot(s.vel.x, s.vel.z);
+    const turn = (dx: number, dz: number): boolean => {
+      const want = yawTowards(dx, dz);
+      this.yaw = turnTowards(this.yaw ?? cmd.yaw, want, this.maxTurn);
+      cmd.yaw = this.yaw;
+      return Math.abs(angleDiff(cmd.yaw, want)) < 0.05;
+    };
+    cmd.strafe = 0;
+    cmd.sneak = false;
+    cmd.forward = 0;
+    // moving (walking in, or a pulse settling): only a clearly lost alignment stops the walk (0.0125 is the limit)
+    if (Math.abs(e) > (speed > 1e-3 ? 0.011 : HATCH_ALIGN)) {
+      if (speed > 1e-3) return true; // let the last pulse settle
+      // a pulse of PULSE whose tight share is e; the free share away from the column when it is near
+      const t = Math.max(-PULSE, Math.min(PULSE, e));
+      const fr = Math.sqrt(Math.max(0, PULSE * PULSE - t * t)) * (Math.abs(dFree) < 0.9 ? -1 : 1);
+      if (turn(...world(t, fr))) cmd.forward = 1;
+      return true;
+    }
+    const vF = (tightX ? s.vel.z : s.vel.x) * sgn;
+    const vT = tightX ? s.vel.x : s.vel.z;
+    if (Math.abs(vT) > 2e-3) return true; // a pulse still settling
+    if (turn(...world(0, 1)) && vF < HATCH_SPEED) cmd.forward = 1;
+    return true;
+  }
+
   /** Where to hold the body in a climber column: the centre, moved 0.1 away from a ladder's box (the middle of the free 0.21 in a 1 x 1 shaft). */
-  private columnTarget(x: number, y: number, z: number): [number, number] {
+  private columnTarget(x: number, y: number, z: number, mode: 'up' | 'down' | 'drop' = 'down'): [number, number, boolean] {
     let tx = x + 0.5;
     let tz = z + 0.5;
     for (const cy of [y - 1, y, y + 1]) {
@@ -508,7 +578,57 @@ export class PathFollower {
         if (b[5] - b[2] < 0.5) tz = z + (b[2] > 0.5 ? 0.4 : 0.6);
       }
     }
-    return [tx, tz];
+    // Track BG: an open trapdoor's panel in the cells the body passes (a hatch over the ladder, or under the body)
+    let panel = false;
+    for (let cy = y - 1; cy <= y + 2 && !panel; cy++) {
+      const c = this.grid.cls(x, cy, z);
+      panel = !!c && isPanel(c);
+    }
+    if (!panel) return [tx, tz, false];
+    const ax = this.panelAxis(x, y, z, 0, tx, mode);
+    const az = this.panelAxis(x, y, z, 2, tz, mode);
+    return [ax.t, az.t, ax.tight || az.tight];
+  }
+
+  /**
+   * Track BG: the body centre's target along `axis` in a column with an open trapdoor's panel: the thin boxes
+   * (panels, ladders) in cells y - 1 .. y + 2 at the column's sides bound the centre to [lo, hi]. With room the
+   * target `t` is kept PANEL_CLEAR inside. In the tight gap of a panel opposite a ladder (0.63 for the 0.6 body):
+   * climbing up, pressed against the ladder beside the body (jump held anyway: the collision holds it 0.03 clear
+   * of the panel); else the middle, never pressed against anything: on BDS a horizontal collision while the feet
+   * are just inside the ladder's cell climbs (measured: 1 correction of 0.89 dropping in pressed against the panel).
+   */
+  private panelAxis(x: number, y: number, z: number, axis: 0 | 2, t: number, mode: 'up' | 'down' | 'drop'): { t: number; tight: boolean } {
+    const base = axis === 0 ? x : z;
+    const half = PHYSICS.width / 2;
+    let lo = -Infinity;
+    let hi = Infinity;
+    let loLadder = false;
+    let hiLadder = false;
+    for (let cy = y - 1; cy <= y + 2; cy++) {
+      const c = this.grid.cls(x, cy, z);
+      if (!c) continue;
+      const ladder = !!c.climbable && c.boxes.length > 0;
+      if (!isPanel(c) && !ladder) continue;
+      const beside = ladder && (cy === y || cy === y + 1);
+      for (const b of c.boxes) {
+        const a0 = axis === 0 ? b[0] : b[2];
+        const a1 = axis === 0 ? b[3] : b[5];
+        if (a1 - a0 > 0.5) continue; // spans this axis
+        if (a0 < 0.5) {
+          lo = Math.max(lo, base + a1 + half);
+          loLadder ||= beside;
+        } else {
+          hi = Math.min(hi, base + a0 - half);
+          hiLadder ||= beside;
+        }
+      }
+    }
+    if (hi - lo >= 2 * PANEL_CLEAR) return { t: Math.min(Math.max(t, lo + PANEL_CLEAR), hi - PANEL_CLEAR), tight: false };
+    if (hi < lo) return { t, tight: false }; // (no room at all: the planner does not plan this)
+    if (mode === 'up' && loLadder) return { t: lo - PRESS, tight: true };
+    if (mode === 'up' && hiLadder) return { t: hi + PRESS, tight: true };
+    return { t: (lo + hi) / 2, tight: true };
   }
 
   /** The farthest swim node (up to 6 ahead) whose straight line from the body keeps its footprint over swim cells. */
