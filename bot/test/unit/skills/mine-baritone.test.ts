@@ -141,13 +141,13 @@ describe('coalesce: Baritone MineProcess.coalesce', () => {
     expect(coalesce(c, at(7, -5), new Set([key(at(7, -6))]))).toEqual({ type: 'block', p: at(7, -6) }); // a candidate below only
   });
 
-  it('the goals in the planner: done in the column, the heuristic octile to it; the blacklist keys the ore block', () => {
+  it('the goals in the planner: done in the column, the heuristic octile plus the levels to it; the blacklist keys the ore block', () => {
     const two = goalTest({ type: 'twoBlocks', p: { x: 5, y: -3, z: 0 } });
     expect([two.done(5, -3, 0, -3), two.done(5, -4, 0, -4), two.done(5, -5, 0, -5), two.done(4, -3, 0, -3)]).toEqual([true, true, false, false]);
     const three = goalTest({ type: 'threeBlocks', p: { x: 5, y: -3, z: 0 } });
     expect([three.done(5, -3, 0, -3), three.done(5, -4, 0, -4), three.done(5, -5, 0, -5), three.done(5, -6, 0, -6)]).toEqual([true, true, true, false]);
     expect(three.h(0, 0, 0)).toBe(5);
-    expect(three.h(5, 10, 0)).toBe(0);
+    expect(three.h(5, 10, 0)).toBe(13 + 9); // straight above the column: the 13 levels down, the 9 beyond FREE_LEVELS priced (unit weights)
     expect(goalKey({ type: 'threeBlocks', p: { x: 5, y: -3, z: 0 } })).toBe('b:5,-3,0');
     expect(goalKey({ type: 'twoBlocks', p: { x: 5, y: -3, z: 0 } })).toBe('b:5,-3,0');
     const comp = compositeOf(ctxOf(new World(), { x: 0, y: 0, z: 0 }), [ore({ x: 5, y: -3, z: 0 }), { kind: 'drop', p: { x: 2, y: 0, z: 0 }, name: 'raw_iron' }]);
@@ -534,6 +534,21 @@ describe('MineTask in mode baritone: one composite goal, the reached ore mined',
     expect(t.stats.failures).toBe(0);
     expect(t.stats.unreachable).toEqual([{ x: 4, y: 1, z: 0 }]);
     expect(t.stats.minedAt).toEqual([{ x: 9, y: 1, z: 0 }]);
+  });
+
+  it('Realm 2026-10-31: a second composite without a path from the same cell skips every member for the run (was: one per round, the bot spinning in place)', async () => {
+    const w = wall();
+    const ores = [3, 4, 5, 6, 7, 8, 9, 10].map((x) => ({ x, y: 1, z: 0 }));
+    for (const p of ores) w.load(p, 'iron_ore');
+    const h = harness(w);
+    for (const p of ores) h.unreachable.add(key(p)); // every plan: no segment (the navigator's "no progress possible")
+    const t = new MineTask({ ...h.deps, explore: () => Promise.resolve(false), exploredBlocks: () => 0 });
+    expect(await t.start({ block: 'iron_ore', count: 1 })).toBe('none_left');
+    expect(h.calls.filter((c) => c.startsWith('goto any'))).toHaveLength(2);
+    expect(t.stats.calcFailed).toBe(2);
+    expect(t.stats.unreachable).toEqual([{ x: 3, y: 1, z: 0 }]); // the first round: the closest, for the session (Baritone)
+    expect(t.stats.blacklisted).toHaveLength(ores.length); // the second: the other 7 too, for this run
+    expect(t.stats.failures).toBe(0);
   });
 
   it('the rescan on the way: every rescanTicks the candidates are pruned again; the target gone cancels the walk and a new composite follows', async () => {

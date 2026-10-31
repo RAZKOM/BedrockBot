@@ -270,6 +270,8 @@ interface Active {
   lastPos: Vec3 | undefined;
   /** Why the last plan / failure went wrong (for the "unreachable without a segment" WARN line). */
   why: string | undefined;
+  /** The start node (cellKey) and world generation of the last plan that went nowhere (no_progress, all loaded): not searched again unchanged. */
+  noProgress: { key: number; gen: number } | undefined;
   /** Track BE: ticks in a row the body was 2 to 3 blocks off the path; the tick of a correction / knock / teleport whose path check is pending. */
   ticksAway: number;
   recheck: number | undefined;
@@ -598,6 +600,7 @@ export class Navigator {
         lastProgressTick: 0,
         lastPos: undefined,
         why: undefined,
+        noProgress: undefined,
         ticksAway: 0, // Track BE
         recheck: undefined,
         report,
@@ -1182,6 +1185,15 @@ export class Navigator {
       }
       return false;
     }
+    // the search that went nowhere from this node, nothing the planner reads changed since: it would go nowhere
+    // again (Realm 2026-10-31: three identical 2-second searches per goto, every 8 s for 15 minutes)
+    const np = a.noProgress;
+    if (reason === 'retry' && np?.key === cellKey(start.x, start.y, start.z) && np.gen === this.worldGen) {
+      this.loop.release();
+      this.log.info('goto: no retry: the same search from the same node, nothing changed since it went nowhere');
+      a.finish({ ok: false, reason: 'unreachable' });
+      return false;
+    }
     if (a.goal.type === 'block') {
       // a block goal nobody can stand in (water, a wall, mid-air) is unreachable, whatever the search says
       const g = a.goal.p;
@@ -1251,6 +1263,8 @@ export class Navigator {
       const lim = `${res.limited ? ', search limit hit' : ''}${res.unknown ? ', touched unloaded world' : ''}`;
       const what = res.reason === 'no_progress' ? 'no partial end 5+ blocks from the start' : 'no node closer to the goal than the start'; // Track BA
       if (this.fail(a, `no progress possible (${what}; ${res.expanded} expanded${lim})`)) return false;
+      const s0 = res.path[0];
+      a.noProgress = s0 && res.reason === 'no_progress' && !res.unknown ? { key: cellKey(s0.x, s0.y, s0.z), gen: this.worldGen } : undefined;
       a.replan = 'retry';
       a.waitUntil = a.t + 20;
       return false;

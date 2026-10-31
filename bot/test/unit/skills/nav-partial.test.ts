@@ -182,7 +182,7 @@ async function walk(gen: GenWorld, goal: [number, number], maxNodes: number) {
   return { result, rep, line: `${JSON.stringify(result)} ${rep.ticks} ticks, failures ${rep.failures}, plans ${rep.plans.map((q) => `${q.reason}:${q.status}/${q.nodes}`).join(' ')}` };
 }
 
-describe('closed loop with tiny node budgets (main\'s scoring: unreachable after 3 "no progress" failures in each)', () => {
+describe('closed loop with tiny node budgets (main\'s scoring: unreachable after 3 "no progress" failures, or one nothing changes after)', () => {
   it.each([
     ['U wall 12 ahead, goal 30 past it', () => uWall(12), [30, 0], 100],
     ['U wall 12 ahead, goal in its pocket', () => uWall(12), [17, 0], 200],
@@ -195,7 +195,7 @@ describe('closed loop with tiny node budgets (main\'s scoring: unreachable after
     expect(r.rep.stuck, r.line).toBe(0);
   });
 
-  it('a plan with no progress counts as a failure (3: unreachable), not as a path to walk', async () => {
+  it('a plan with no progress counts as a failure, not as a path to walk; the same search from the same node with nothing changed is not run again (unreachable at once)', async () => {
     const w = flatGen();
     w.fill({ x: -3, y: -60, z: -3 }, { x: 3, y: -58, z: 3 }, 'stone');
     w.fill({ x: -2, y: -60, z: -2 }, { x: 2, y: -58, z: 2 }, 'air');
@@ -207,8 +207,25 @@ describe('closed loop with tiny node budgets (main\'s scoring: unreachable after
     w2.fill({ x: -3, y: -60, z: 0 }, { x: -3, y: -59, z: 0 }, 'air');
     const r2 = await walk(w2, [40, 0], 2);
     expect(r2.result, r2.line).toEqual({ ok: false, reason: 'unreachable' });
-    expect(r2.rep.failures, r2.line).toBe(3);
+    expect(r2.rep.failures, r2.line).toBe(1); // Realm 2026-10-31: was 3 identical searches
+    expect(r2.rep.plans, r2.line).toHaveLength(1);
     expect(r2.rep.distance, r2.line).toBeLessThan(0.5);
     expect(r2.rep.plans.every((p) => p.nodes === 1), r2.line).toBe(true);
+    // a block the planner reads changed after the failure: searched again (and only once more, nothing changing after it)
+    const w3 = flatGen();
+    w3.fill({ x: -3, y: -60, z: -3 }, { x: 3, y: -58, z: 3 }, 'stone');
+    w3.fill({ x: -2, y: -60, z: -2 }, { x: 2, y: -58, z: 2 }, 'air');
+    w3.fill({ x: -3, y: -60, z: 0 }, { x: -3, y: -59, z: 0 }, 'air');
+    const { conn, loop } = harness({ x: 0.5, y: FEET, z: 0.5 });
+    const skills = new BotSkills({ loop, world: fakeWorld(w3), path: { maxNodes: 2 } });
+    conn.tick(5);
+    const p = skills.goto({ type: 'block', p: { x: 40, y: FEET, z: 0 } });
+    conn.tick(5);
+    w3.set(20, -60, 20, 'stone');
+    for (let t = 0; t < 4000 && skills.nav.busy; t++) conn.tick();
+    expect(await p).toEqual({ ok: false, reason: 'unreachable' });
+    const rep3 = skills.status().lastGoto!;
+    expect(rep3.failures).toBe(2);
+    expect(rep3.plans).toHaveLength(2);
   });
 });

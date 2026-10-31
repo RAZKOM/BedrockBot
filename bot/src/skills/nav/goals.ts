@@ -15,6 +15,7 @@ import type { Vec3 } from '../../world/types.ts';
 import { checkReach, EYE_HEIGHT } from '../dig/look.ts';
 import { PHYSICS } from '../input/physics.ts';
 import type { TerrainClass } from '../terrain/classify.ts';
+import type { PathCosts } from './costs.ts';
 import { inThreeBlocks, inTwoBlocks } from './baritone/goals.ts'; // Track BD: Baritone's column goals (LGPL-3.0)
 
 export type Goal = { type: 'block'; p: Vec3 } | { type: 'near'; p: Vec3; r: number } | { type: 'xz'; x: number; z: number };
@@ -101,6 +102,55 @@ export function octile(dx: number, dz: number): number {
   return ax > az ? ax + (SQRT2 - 1) * az : az + (SQRT2 - 1) * ax;
 }
 
+/**
+ * Per-level weights of the heuristic's far vertical part, in blocks of walking (the search multiplies by
+ * costs.walk): what one level down / up costs on top of the walk (`levelWeights`). Unit weights without costs.
+ */
+export interface LevelWeights {
+  down: number;
+  up: number;
+}
+
+export const UNIT_LEVELS: Readonly<LevelWeights> = Object.freeze({ down: 1, up: 1 });
+
+/**
+ * Levels of height difference the heuristic keeps admissible (`columnH`): a goal this close in height is
+ * planned optimally (the staircase over the 3-block drop, the stairs over a pillar); beyond it the levels
+ * are priced.
+ */
+export const FREE_LEVELS = 4;
+
+/**
+ * The weights of a search with these costs, the way Baritone's GoalYLevel prices a level (FALL_N_BLOCKS_COST
+ * down, JUMP_ONE_BLOCK_COST up): down, a 1-block drop's fall and landing plus the underground penalty (a
+ * staircase into the ground, walked or dug, pays it at every step); up, a jump's ticks beyond its walk.
+ */
+export function levelWeights(c: Pick<PathCosts, 'walk' | 'jump' | 'fall' | 'landing' | 'underground'>): LevelWeights {
+  return { down: ((c.fall[1] ?? 0) + c.landing + c.underground) / c.walk, up: Math.max(0, c.jump - c.walk) / c.walk };
+}
+
+/** Levels from feet cell `y` to the feet range [lo, hi]: > 0 down, < 0 up, 0 inside. */
+export function levelsOff(y: number, lo: number, hi: number): number {
+  return y > hi ? y - hi : y < lo ? y - lo : 0;
+}
+
+/**
+ * The heuristic (blocks) of a goal at a known height, `dy` levels off (levelsOff): the larger of octile and
+ * the levels (admissible: no move costs less than `walk` per level it rises or falls: a 3-block drop walk
+ * + 9 + 2, a ladder 5, a jump 9, a stairs block one level per block walked) plus, beyond FREE_LEVELS, the
+ * weighted levels (Baritone GoalBlock.calculate adds GoalYLevel to GoalXZ the same way). Without the levels
+ * a body straight above or below the goal scores 0, every node around it scores worse, and a partial search
+ * never leaves the start (Realm 2026-10-31: coal 13 blocks under the bot, `no partial end 5+ blocks from
+ * the start` for 15 minutes); priced too weakly, a goal deep under the start is approached along the
+ * surface to the column over it and never down the staircase (`!goto mine`, 119 levels down). The priced
+ * part is not admissible (an open stairs-block staircase costs less per level), as Baritone's is not.
+ */
+export function columnH(dx: number, dz: number, dy: number, w: Readonly<LevelWeights> = UNIT_LEVELS): number {
+  const levels = Math.abs(dy);
+  const far = levels > FREE_LEVELS ? (levels - FREE_LEVELS) * (dy > 0 ? w.down : w.up) : 0;
+  return Math.max(octile(dx, dz), levels) + far;
+}
+
 /** What goals read from the grid (NavGrid has both). */
 export interface GoalGrid {
   cls(x: number, y: number, z: number): TerrainClass | undefined;
@@ -125,7 +175,7 @@ export function threatsOf(goal: RunAwayGoal): Vec3[] {
   return Array.isArray(t) ? [...(t as readonly Vec3[])] : [t as Vec3];
 }
 
-export function goalTest(goal: NavGoal, grid?: GoalGrid): GoalTest {
+export function goalTest(goal: NavGoal, grid?: GoalGrid, levels: Readonly<LevelWeights> = UNIT_LEVELS): GoalTest {
   switch (goal.type) {
     case 'block': {
       const gx = Math.floor(goal.p.x);
@@ -133,7 +183,7 @@ export function goalTest(goal: NavGoal, grid?: GoalGrid): GoalTest {
       const gz = Math.floor(goal.p.z);
       return {
         done: (x, y, z) => x === gx && y === gy && z === gz,
-        h: (x, _y, z) => octile(gx - x, gz - z),
+        h: (x, y, z) => columnH(gx - x, gz - z, levelsOff(y, gy, gy), levels),
       };
     }
     case 'xz': {
@@ -152,7 +202,7 @@ export function goalTest(goal: NavGoal, grid?: GoalGrid): GoalTest {
       };
     }
     case 'any': {
-      const members = goal.goals.map((g) => goalTest(g, grid));
+      const members = goal.goals.map((g) => goalTest(g, grid, levels));
       const member = (x: number, y: number, z: number, feet: number): number => members.findIndex((m) => m.done(x, y, z, feet));
       return {
         done: (x, y, z, feet) => member(x, y, z, feet) >= 0,
@@ -165,7 +215,7 @@ export function goalTest(goal: NavGoal, grid?: GoalGrid): GoalTest {
       };
     }
     case 'getToBlock':
-      return getToBlockTest(goal, grid);
+      return getToBlockTest(goal, grid, levels);
     case 'yLevel': {
       const gy = Math.floor(goal.y);
       return {
@@ -188,25 +238,26 @@ export function goalTest(goal: NavGoal, grid?: GoalGrid): GoalTest {
     }
     case 'surface':
       return surfaceTest(grid);
-    // Track BD: Baritone's column goals (the done tests are ported: nav/baritone/goals.ts). The y part of its GoalBlock.calculate heuristic is not taken (`block` has none either: octile only, admissible).
+    // Track BD: Baritone's column goals (the done tests are ported: nav/baritone/goals.ts). The y part of their
+    // heuristic (GoalTwoBlocks: GoalBlock.calculate) as `columnH`'s levels to the feet range.
     case 'twoBlocks': {
       const g = cell(goal.p);
       return {
         done: (x, y, z) => inTwoBlocks(g.x, g.y, g.z, x, y, z),
-        h: (x, _y, z) => octile(g.x - x, g.z - z),
+        h: (x, y, z) => columnH(g.x - x, g.z - z, levelsOff(y, g.y - 1, g.y), levels),
       };
     }
     case 'threeBlocks': {
       const g = cell(goal.p);
       return {
         done: (x, y, z) => inThreeBlocks(g.x, g.y, g.z, x, y, z),
-        h: (x, _y, z) => octile(g.x - x, g.z - z),
+        h: (x, y, z) => columnH(g.x - x, g.z - z, levelsOff(y, g.y - 2, g.y), levels),
       };
     }
   }
 }
 
-function getToBlockTest(goal: GetToBlockGoal, grid: GoalGrid | undefined): GoalTest {
+function getToBlockTest(goal: GetToBlockGoal, grid: GoalGrid | undefined, levels: Readonly<LevelWeights>): GoalTest {
   const t = cell(goal.p);
   const reach = goal.reach ?? DEFAULT_GET_TO_REACH;
   const low = Math.max(1, goal.low ?? 1); // Track AN
@@ -247,7 +298,8 @@ function getToBlockTest(goal: GetToBlockGoal, grid: GoalGrid | undefined): GoalT
       if (eye.z > t.z + 1 && open(0, 0, 1)) return true;
       return false;
     },
-    h: (x, _y, z) => Math.max(0, octile(t.x - x, t.z - z) - SQRT2),
+    // the feet levels done accepts: t.y - low (a side cell) or t.y - 2 (under it) .. t.y + 1 (on top of it)
+    h: (x, y, z) => columnH(Math.max(0, octile(t.x - x, t.z - z) - SQRT2), 0, levelsOff(y, t.y - Math.max(low, 2), t.y + 1), levels),
   };
 }
 

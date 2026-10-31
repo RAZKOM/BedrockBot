@@ -305,6 +305,8 @@ export class MineTask {
   private gen = 0;
   private readonly fails = new Map<string, number>();
   private readonly black = new Set<string>();
+  /** Track BD: the feet cell of the last composite goto that never got a path (calcFailed), until one walks. */
+  private calcFailedAt: string | undefined;
   /** Track Z: ores found unreachable (one plan without progress): skipped for the rest of the session. */
   private readonly unreachable = new Set<string>();
   private readonly doneFns = new Set<(s: MineState) => void>();
@@ -378,6 +380,7 @@ export class MineTask {
     this.stats.startedAt = this.now();
     this.fails.clear();
     this.black.clear();
+    this.calcFailedAt = undefined;
     this.lastError = undefined;
     this.state = 'scan';
     this.log.info(`mine: ${this.quotas.length > 1 ? this.quotaLine() : `${count} x ${[...this.names].join('/')}`}, tunnel cap ${this.tunnelLen()}, direct ${this.directOn() ? 'on' : 'off'}, mode ${this.modeOf()}`);
@@ -947,6 +950,7 @@ export class MineTask {
       return undefined; // the candidates changed on the way: the loop prunes again
     }
     const g = r.result;
+    if ((rep?.segments ?? 0) > 0) this.calcFailedAt = undefined;
     if (!g.ok) {
       if (g.reason === 'interrupted') return undefined;
       if (g.reason === 'blacklisted') {
@@ -958,6 +962,17 @@ export class MineTask {
         // two ores floating over the bot cost 3 failed gotos otherwise): no path to any of them: blacklist the presumably
         // unreachable closest one
         this.stats.calcFailed++;
+        const at = key(feet);
+        if (this.calcFailedAt === at) {
+          // the second in a row from the same cell: the search covered every member and went nowhere; one member
+          // blacklisted per round spins (Realm 2026-10-31: 64 members, a round every 8 s for 15 minutes, the bot
+          // never moved): all of them for this run, the next round takes other ores or explores
+          this.calcFailedAt = undefined;
+          for (const c of cands) this.blacklist(c.p);
+          this.log.info(`mine: composite of ${cands.length}: no path again from ${fmt(feet)} (${g.reason}): all ${cands.length} skipped for this run`);
+          return undefined;
+        }
+        this.calcFailedAt = at;
         const n = BLACKLIST_CLOSEST_ON_FAILURE ? nearestCandidate(feet, cands) : undefined;
         if (n) this.markUnreachable(n, `goto: ${g.reason}, no segment (closest of ${cands.length} blacklisted)`);
         else if (head) this.fail(head, `goto: ${g.reason}`);
