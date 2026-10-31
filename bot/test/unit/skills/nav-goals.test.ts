@@ -139,7 +139,7 @@ describe('goal predicates and heuristics', () => {
     const three = goalTest({ type: 'threeBlocks', p: { x: 5, y: -58, z: 5 } });
     expect([three.done(5, -58, 5, -58), three.done(5, -59, 5, -59), three.done(5, -60, 5, -60), three.done(5, -61, 5, -61)]).toEqual([true, true, true, false]);
     expect(three.h(0, -60, 5)).toBe(5);
-    expect(two.h(5, -40, 5)).toBe(0);
+    expect(two.h(5, -40, 5)).toBe(18 + 14); // straight above: the levels down (FREE_LEVELS admissible, the rest priced)
     expect(goalKey({ type: 'twoBlocks', p: { x: 5, y: -58, z: 5 } })).toBe('b:5,-58,5');
     expect(goalKey({ type: 'threeBlocks', p: { x: 5, y: -58, z: 5 } })).toBe('b:5,-58,5');
     // a composite over an ore buried in stone: found with dig-through moves, the feet end in the ore's column under it
