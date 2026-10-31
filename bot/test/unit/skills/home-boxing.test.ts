@@ -87,7 +87,7 @@ describe('named boxes (boxing.ts, itemDisplayName)', () => {
 let n = 0;
 const chest = (o: Partial<PlanChest> & { key?: string }): PlanChest => {
   const i = n++;
-  return { key: o.key ?? `c${i}`, pos: o.pos ?? { x: i * 3, y: 0, z: 0 }, kind: o.kind ?? 'chest', label: o.label, free: o.free ?? 27, contents: o.contents ?? {}, room: o.room ?? {}, boxes: o.boxes ?? { empty: 0, full: 0 }, ...(o.inBoxes ? { inBoxes: o.inBoxes } : {}) };
+  return { key: o.key ?? `c${i}`, pos: o.pos ?? { x: i * 3, y: 0, z: 0 }, kind: o.kind ?? 'chest', label: o.label, free: o.free ?? 27, contents: o.contents ?? {}, room: o.room ?? {}, boxes: o.boxes ?? { empty: 0, full: 0 }, ...(o.inBoxes ? { inBoxes: o.inBoxes } : {}), ...(o.fullStacks ? { fullStacks: o.fullStacks } : {}) };
 };
 const s = (slot: number, name: string, count = 64, extra: Partial<UnloadSlot> = {}): UnloadSlot => ({ slot, name, count, ...extra });
 const stacks = (from: number, k: number, name: string): UnloadSlot[] => Array.from({ length: k }, (_, i) => s(from + i, name));
@@ -268,27 +268,33 @@ describe("unloader: tidy steps (a home chest's own full boxes' worth)", () => {
   const spares = () => chest({ key: 'spares', free: 24, contents: { undyed_shulker_box: 3 }, boxes: { empty: 3, full: 0 } });
 
   it('a chest with 27 stacks or more of one kind loose: a box step there even with nothing carried; 26: none; never without `tidy`', () => {
-    const cobble = chest({ key: 'cobble', free: 24, contents: { cobblestone: 30 * 64 } });
+    const cobble = chest({ key: 'cobble', free: 24, contents: { cobblestone: 30 * 64 }, fullStacks: { cobblestone: 30 } });
     expect(planUnload([], [cobble, spares()], { tidy: true }).steps).toEqual([{ kind: 'box', item: 'cobblestone', chest: 'cobble', stacks: 27, produce: 0, spare: 'spares', tidy: true }]);
     expect(planUnload([], [cobble, spares()]).steps).toEqual([]);
-    expect(planUnload([], [chest({ key: 'c26', free: 1, contents: { cobblestone: 26 * 64, sand: 64 } }), spares()], { tidy: true }).steps).toEqual([]);
+    expect(planUnload([], [chest({ key: 'c26', free: 1, contents: { cobblestone: 26 * 64, sand: 64 }, fullStacks: { cobblestone: 26, sand: 1 } }), spares()], { tidy: true }).steps).toEqual([]);
     // 2 boxes' worth: 2 steps; at most maxTidySteps; a carried spare first
-    const big = chest({ key: 'big', free: 0, contents: { sand: 54 * 64 } });
+    const big = chest({ key: 'big', free: 0, contents: { sand: 54 * 64 }, fullStacks: { sand: 54 } });
     expect(planUnload([], [big, spares()], { tidy: true }).steps.map((x) => x.chest)).toEqual(['big', 'big']);
     expect(planUnload([], [big, spares()], { tidy: true, maxTidySteps: 1 }).steps).toHaveLength(1);
     expect(planUnload([s(0, 'undyed_shulker_box', 1, { named: true, boxUsed: 0 }), s(1, 'undyed_shulker_box', 1, { boxUsed: 0 })], [big, spares()], { tidy: true }).steps.map((x) => (x.kind === 'box' ? x.spare : ''))).toEqual(['carried', 'spares']);
   });
 
   it('no spare: none; never the chest of spares, a box block, kept or unstackable kinds', () => {
-    const cobble = chest({ key: 'cobble', free: 0, contents: { cobblestone: 27 * 64 } });
+    const cobble = chest({ key: 'cobble', free: 0, contents: { cobblestone: 27 * 64 }, fullStacks: { cobblestone: 27 } });
     expect(planUnload([], [cobble], { tidy: true }).steps).toEqual([]);
-    const spareChest = chest({ key: 'sp', free: 0, contents: { undyed_shulker_box: 1, stone: 26 * 64 + 64 * 0, dirt: 0 }, boxes: { empty: 1, full: 0 } });
+    expect(planUnload([], [cobble, spares()], { tidy: true }).steps).toHaveLength(1);
+    // 27 stacks' worth in partial stacks (26 full): none; a (chest, item) that failed, or the only spare chest refusing: none
+    const partial = chest({ key: 'partial', free: 0, contents: { cobblestone: 27 * 64 }, fullStacks: { cobblestone: 26 } });
+    expect(planUnload([], [partial, spares()], { tidy: true }).steps).toEqual([]);
+    expect(planUnload([], [cobble, spares()], { tidy: true, noTidy: new Set(['cobble|cobblestone']) }).steps).toEqual([]);
+    expect(planUnload([], [cobble, spares()], { tidy: true, noSpareFrom: new Set(['spares']) }).steps).toEqual([]);
+    const spareChest = chest({ key: 'sp', free: 0, contents: { undyed_shulker_box: 1, stone: 26 * 64 }, fullStacks: { stone: 30 }, boxes: { empty: 1, full: 0 } });
     expect(planUnload([], [spareChest], { tidy: true }).steps).toEqual([]);
-    const labelled = chest({ key: 'lb', label: 'shulkers', free: 0, contents: { stone: 27 * 64 } });
+    const labelled = chest({ key: 'lb', label: 'shulkers', free: 0, contents: { stone: 27 * 64 }, fullStacks: { stone: 27 } });
     expect(planUnload([], [labelled, spares()], { tidy: true }).steps).toEqual([]);
-    const placedBox = chest({ key: 'pb', kind: 'undyed_shulker_box', free: 0, contents: { stone: 27 * 64 } });
+    const placedBox = chest({ key: 'pb', kind: 'undyed_shulker_box', free: 0, contents: { stone: 27 * 64 }, fullStacks: { stone: 27 } });
     expect(planUnload([], [placedBox, spares()], { tidy: true }).steps).toEqual([]);
-    const food = chest({ key: 'food', free: 0, contents: { bread: 27 * 64, iron_pickaxe: 27 } });
+    const food = chest({ key: 'food', free: 0, contents: { bread: 27 * 64, iron_pickaxe: 27 }, fullStacks: { bread: 27 } });
     expect(planUnload([], [food, spares()], { tidy: true }).steps).toEqual([]);
   });
 });

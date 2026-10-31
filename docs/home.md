@@ -44,7 +44,7 @@ there, also as an idle chore ("Full boxes out of the chests").
 | `bot/src/skills/home/boxing.ts` | Track AV: named boxes (`isKeptBox`, `keepBoxName`), carried boxes and spares, `placesExactly`, the `!boxes` line, the `kept 4 bot_loot boxes` line |
 | `bot/src/world/inventory.ts` | Track AV: `itemDisplayName(raw)`: an item's custom name from the wire item's NBT |
 | `bot/src/skills/home/unloader.ts` | Track AV: `UnloadStep` (`box`, `compact`), `planBoxSteps`, `emptyNamed`, `blocked`; wave 12: `fill` steps (`planFillSteps`, `fillTarget`), tidy steps (`planTidySteps`, `box` with `tidy`) |
-| `bot/src/skills/home/logistics.ts` | wave 12: `fillStep` (rounds through the carried boxes: `emptyBox` with `only`), `tidy` / `tidyDue` / `tidySteps` / `putBack`, `MAX_FILL_ROUNDS` |
+| `bot/src/skills/home/logistics.ts` | wave 12: `fillStep` (rounds through the carried boxes: `emptyBox` with `only`), `tidy` / `tidyDue` / `tidySteps`, `settle` / `debts` (a failed or interrupted box step puts back what it took), `leftBoxes` / `pickUpOrFetch`, `MAX_FILL_ROUNDS` |
 | `bot/src/skills/container/stash.ts` | Track AV: the named box first, packing priority (`DROP_FIRST`, `packClass`, `packOrder`), the re-pack |
 | `bot/test/unit/skills/home-boxing.test.ts`, `stash-packing.test.ts`, `bot/test/e2e/home-boxing.test.ts` | Track AV: unit tests on fakes, the e2e on bds-home |
 | `docker/compose.home.yml` | `bds-home`, udp/19196, flat, peaceful |
@@ -252,23 +252,32 @@ and then load that filled shulker into the chest."
   emptied (cobbled deepslate is a throwaway kind: 16 stay with the bot). Every full box's worth (27 x maxStack: 1728
   deepslate) is one `fill` step, `MAX_FILL_STEPS` (6) a run: 36 slots and a handful of bot_loot boxes hold about 6.
 - **Target**: rule 1 (the chest holding the most of it, loose or boxed), else 2 (label), else 3 (the emptiest unlabelled
-  chest that holds no spare: a chest of empty boxes is not one of full ones); a full box needs one free slot. No target
+  chest); never the chest of spares (one holding unnamed empty boxes, or labelled for boxes: a chest of empty boxes is not
+  one of full ones), not even by rule 1; a full box needs one free slot. A carried unnamed full box of one kind (a step
+  that could not store it) is stored by the same rule; only with no other room does it go to the box chest. No target
   or no spare: no step, the items unload loose as today (with every chest full the overflow fills a spare as before).
 - **Spare**: a carried unnamed empty box first (with a bot_loot box carried every unnamed empty box is one), else one
   out of the chest of spares nearest the target (never a named box, never the fireworks box).
 - **Order**: fill steps first, then the box steps (planned with what the fills left), then the deposits; the rest
   inside the bot_loot boxes is emptied and unloaded loose afterwards, as before.
+- **Room first**: the rounds must complete the box within `MAX_FILL_ROUNDS` (12): a take moves at most (free - 1)
+  stacks (2 slots stay free while a box stands), then a fill; 2 x ceil(items from the boxes / ((free - 1) x 64)) + 1
+  rounds. Too few free slots: the fill is put off (its kind held back, `hold`) until the other items are deposited, then
+  tried once more; still too few: no fill, the items unload loose.
 - **Execution** (`fillStep`, rounds, `MAX_FILL_ROUNDS` 12): while the loose stacks (reserve held back) do not cover
   what the spare lacks and a carried box holds more, that box is placed and **only that item** is taken out of it
   (`emptyBox` with `only`; the 2-free-slot rule of emptying holds, so the box comes back), most-of-it box first; else
   the spare is placed next to the bot, filled (merging into partial stacks, so it ends at 27 x 64), broken, picked up.
   Then the full box goes into the target chest and its record is refreshed (`inBoxes`).
-- **Failures**: a failed step takes its items back out of the spare (best effort; what stays makes it a full box like any
-  other, stored in the box chest or emptied with `all`) and the kind is not filled again in this run (`noFill`; box steps
-  still may run); the rest unloads loose. A spare not picked up again is walked to at once (`fetchLeftBox`) and the step
-  goes on. A target found full after all (the memory older than the chest) gets the box where the overflow's boxes go
-  (the chest the spare came from, else the emptiest with a free slot); with no slot anywhere it stays carried (today's
-  full-box rule).
+- **Failures**: a failed step takes its items back out of the spare; what stays in it (no room) goes into the item's
+  chest with the box, never a partly filled box into the chest of spares. The kind is not filled again in this run
+  (`noFill`; box steps and the overflow boxes still take it); the rest unloads loose. A fill round that adds no full
+  stack ends the step. A target found full after all (the memory older than the chest) gets the box in the emptiest other
+  chest with a free slot that holds no spares; with none it stays carried (the target rule above).
+- **Boxes on the ground**: a box not picked up again (a spare, or a bot_loot box after a take) is walked to at once
+  (`pickUpOrFetch`); the boxes left are a list (`leftBoxes`), also kept on a cancel, fetched at the end of every run and
+  at the start of the next. A pickup only counts the sort of box broken (a bot_loot box never becomes the spare, and an
+  unnamed box picked up with it never counts as the bot_loot box).
 - **Pre-emption**: a box placed right when the job is cancelled is broken and picked up again (`placeBox`, now for every
   user of it); the fill's own break and pickup ignore the cancel; the resumed run plans again from what is there.
 - Reply: `boxed 2 full boxes of cobbled_deepslate into chest 2 -60 1` (per kind and chest); `UnloadReport.filled`.
@@ -283,18 +292,23 @@ course)".
 
 - **What**: a home chest (the chest memory's read, reachable containers within `homeChestRadius`; never a shulker box
   block, never the chest of spares, i.e. one holding unnamed empty boxes or labelled `shulkers` / `boxes` / `spares`)
-  holding 27 full stacks' worth (27 x maxStack) of one stackable item **loose** gets a `box` step with `tidy`: 27 of its
-  stacks into a spare, the full box back into that chest. Never items held in fewer than 27 stacks' worth, never items
-  moved between chests, only whole full boxes: the step takes full stacks only and fails before taking anything when the
-  chest holds fewer full stacks than the box lacks (memory refreshed; partial stacks are left alone).
+  holding 27 **full** stacks or more of one stackable item loose (`ChestRecord.fullStacks`, counted at every read;
+  partial stacks never count) gets a `box` step with `tidy`: 27 of its full stacks into a spare, the full box back into
+  that chest. Never items held in fewer than 27 full stacks, never items moved between chests, only whole full boxes;
+  the step still fails before taking anything when the chest holds fewer full stacks than the memory said.
 - **When**: at `!unload` (and the automatic unload) after the bot's own items (the deposits, the overflow boxes), and as
   the idle chore's `tidy` job: with `autoUnload` on, at home, no user process and nothing to unload, when `tidyDue`
-  (a step plans). `MAX_TIDY_STEPS` (4) per run; the planner stops when no spare is left. A tidy job that boxed nothing
-  (or failed) makes the chore wait `TIDY_BACKOFF_MS` (10 min) before the next one.
+  (a step plans). `MAX_TIDY_STEPS` (4) per run; the planner stops when no spare is left, and counts only spares that can
+  be taken: a chest whose counted empty box the take refused (named, no wire item) gives none until it is read anew
+  (`noSpareFrom`). A failed (chest, item) is not planned again until that chest is read anew (`noTidy`), so the chore
+  never retries a failing step forever. A tidy job that boxed nothing (or failed) makes the chore wait `TIDY_BACKOFF_MS`
+  (10 min) before the next one.
 - **Execution**: the existing box step (spare, rounds of takes from the chest, place, fill, break, pick up, store). The
   reserve it holds back is the bot's own at the start (before, the chest's stacks taken out could become the bot's
-  16-block reserve). A failed tidy step's stacks go back into the chest they came from (`putBack`); its kind is not
-  tidied again in this run.
+  16-block reserve). A failed box step (tidy or not) puts what it took back into the chest it came from (`settle`): the
+  partly filled box and, for a tidy step, the loose stacks; an interrupted one owes them (`debts`) and the next run
+  (`!unload` or the tidy job) puts them back first. Boxes left on the ground are fetched after each failed step and at
+  the end.
 - Reply: the box step's `boxed 27 stacks of cobblestone from double chest 3 -60 -1 into a shulker (box from chest ...)`;
   the chore logs `tidy: ...`.
 - Measured (e2e (h), 2 runs): 30 stacks in a double chest, the bot carrying none: the tidy step 8.8 / 9.0 s (1 round of

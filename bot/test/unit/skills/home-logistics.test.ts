@@ -5,7 +5,7 @@
 // the user job process and the chore's triggers.
 import { describe, expect, it } from 'vitest';
 import { RuntimeSettings } from '../../../src/config/settings.ts';
-import { isShulkerBox, shulkerContents, snapshotOf } from '../../../src/skills/container/chest.ts';
+import { isShulkerBox, shulkerContents, shulkerSlotsUsed as shulkerSlotsUsedOf, snapshotOf } from '../../../src/skills/container/chest.ts';
 import { HomeLogistics, MAX_READS_PER_SCAN, UNREACHABLE_RETRY_MS, unloadLine, type HomeDeps, type HomeSkills, type ScanReport, type UnloadReport } from '../../../src/skills/home/logistics.ts';
 import { ChestMemory, chestKey } from '../../../src/world/cache/chests.ts';
 import { setCompactPlanner, setCompactRunner } from '../../../src/skills/home/unloader.ts';
@@ -833,7 +833,7 @@ describe('home logistics: boxing at the chests and named boxes (Track AV)', () =
       expect(onGround(h)).toEqual([]);
     });
 
-    it('the deepslate chest filled up meanwhile: the full box goes where the overflow boxes go (the chest the spare came from); nothing lost', async () => {
+    it('the deepslate chest filled up meanwhile: the full box goes into the emptiest other chest (never the chest of spares); nothing lost', async () => {
       const h = owner();
       await h.logistics.scan(never);
       const before = total(h);
@@ -849,11 +849,13 @@ describe('home logistics: boxing at the chests and named boxes (Track AV)', () =
       };
       const r = await h.logistics.unload(never);
       expect(filled).toBe(true);
-      expect(r.filled).toEqual([expect.objectContaining({ item: deep, chest: 'chest -3 0 0' })]);
+      expect(r.filled).toEqual([expect.objectContaining({ item: deep, chest: 'chest 0 0 4' })]);
       expect(total(h)).toBe(before);
       expect(onGround(h)).toEqual([]);
+      const other = h.boxes.get('0,0,4')!;
+      expect(other.slots.some((x, i) => x && isShulkerBox(x.name) && shulkerContents(other.raws[i])[deep] === 1728)).toBe(true);
       const spareChest = h.boxes.get('-3,0,0')!;
-      expect(spareChest.slots.some((x, i) => x && isShulkerBox(x.name) && shulkerContents(spareChest.raws[i])[deep] === 1728) || h.inv.some((x, i) => x && isShulkerBox(x.name) && shulkerContents(h.invRaws[i])[deep] === 1728)).toBe(true);
+      expect(spareChest.slots.some((x, i) => x && isShulkerBox(x.name) && Object.keys(shulkerContents(spareChest.raws[i])).length > 0)).toBe(false); // no full box in the chest of spares
     });
 
     it('the filled spare is not picked up again: it is fetched at the end of the run, nothing lost', async () => {
@@ -871,6 +873,60 @@ describe('home logistics: boxing at the chests and named boxes (Track AV)', () =
       expect(total(h)).toBe(before);
       // walked back to it at once, and the box was stored as planned
       expect(r.filled).toHaveLength(1);
+    });
+
+    it('M2: too little room for the rounds: the fill is put off until the other items are away, then done; no partly filled box anywhere', async () => {
+      const h = owner(26); // 4 bot_loot boxes, 2 loose stacks, 26 stacks of stone: 4 free slots (3 with the spare)
+      await h.logistics.scan(never);
+      const before = total(h);
+      const r = await h.logistics.unload(never);
+      expect(r.filled).toEqual([expect.objectContaining({ item: deep, chest: 'chest 3 0 0' })]);
+      expect(total(h)).toBe(before);
+      expect(onGround(h)).toEqual([]);
+      expect(h.inv.some((x) => x?.name === 'stone')).toBe(false);
+      const partly = [...h.boxes.values()].flatMap((b) => b.slots.map((x, i) => (x && isShulkerBox(x.name) ? (shulkerContents(b.raws[i])[deep] ?? 0) : -1))).filter((n) => n > 0 && n < 1728);
+      expect(partly).toEqual([]);
+    });
+
+    it('M3: a bot_loot box not picked up after a take is fetched at once and stays a bot_loot box (never the spare)', async () => {
+      const h = owner(0);
+      await h.logistics.scan(never);
+      const before = total(h);
+      let once = false;
+      h.fail.onDig = (key) => {
+        if (!once && h.boxes.get(key)!.display !== undefined) {
+          once = true;
+          h.fail.pickup = true;
+          h.fail.pickupUntilNear = true;
+        }
+      };
+      const r = await h.logistics.unload(never);
+      expect(once).toBe(true);
+      expect(r.filled).toHaveLength(1);
+      expect(lootBoxes(h)).toHaveLength(4);
+      expect(total(h)).toBe(before);
+      expect(onGround(h)).toEqual([]);
+    });
+
+    it('M4: cancelled while a bot_loot box lies unpicked: it is remembered and fetched by the next run', async () => {
+      const h = owner(0);
+      await h.logistics.scan(never);
+      const before = total(h);
+      let stop = false;
+      h.fail.onDig = (key) => {
+        if (!stop && h.boxes.get(key)!.display !== undefined) {
+          stop = true;
+          h.fail.pickup = true;
+        }
+      };
+      const r = await h.logistics.unload(() => stop);
+      expect(r.reason).toBe('interrupted');
+      expect(lootBoxes(h)).toHaveLength(3);
+      h.fail.pickup = false;
+      const r2 = await h.logistics.unload(never);
+      expect(r2.ok).toBe(true);
+      expect(lootBoxes(h)).toHaveLength(4);
+      expect(total(h)).toBe(before);
     });
   });
 
@@ -919,13 +975,14 @@ describe('home logistics: boxing at the chests and named boxes (Track AV)', () =
       expect(h.inv.some((x) => x?.name === 'cobblestone')).toBe(false);
     });
 
-    it('27 stacks worth in partial stacks: the step fails before anything is taken, nothing moves', async () => {
+    it("27 stacks' worth in partial stacks (26 full): no tidy step is due (M1: the chore never retries it), nothing moves", async () => {
       const h = home(27, 64);
       h.boxes.get('3,0,0')!.slots[0] = item('cobblestone', 60);
       h.boxes.get('3,0,0')!.slots[1] = item('cobblestone', 4);
       h.boxes.get('3,0,0')!.slots.push(item('cobblestone', 64));
       await h.logistics.scan(never);
-      expect(h.logistics.tidyDue()).toBe(true);
+      expect(h.memory.get({ x: 3, y: 0, z: 0 })!.fullStacks).toEqual({ cobblestone: 26 });
+      expect(h.logistics.tidyDue()).toBe(false);
       const r = await h.logistics.tidy(never);
       expect(r.boxed).toEqual([]);
       expect(cobbleIn(h, '3,0,0')).toBe(27 * 64);
@@ -943,6 +1000,62 @@ describe('home logistics: boxing at the chests and named boxes (Track AV)', () =
       expect(h.inv.some((x) => x?.name === 'cobblestone')).toBe(false);
       expect(cobbleIn(h, '3,0,0')).toBe(27 * 64); // back into the chest they came from
       expect(onGround(h)).toEqual([]);
+      // M1: not tried again until that chest is read anew
+      expect(h.logistics.tidyDue()).toBe(false);
+    });
+
+    /** Cobblestone in chest 3 (loose and in its boxes), and whether any box elsewhere holds some. */
+    const inChest = (h: ReturnType<typeof home>) => {
+      const c = h.boxes.get('3,0,0')!;
+      return c.slots.reduce((a, x, i) => a + (x?.name === 'cobblestone' ? x.count : 0) + (x && isShulkerBox(x.name) ? (shulkerContents(c.raws[i]).cobblestone ?? 0) : 0), 0);
+    };
+    const boxedElsewhere = (h: ReturnType<typeof home>) =>
+      h.inv.some((x, i) => x && isShulkerBox(x.name) && shulkerSlotsUsedOf(h.invRaws[i]) > 0) || h.boxes.get('-3,0,0')!.slots.some((x, i) => x && isShulkerBox(x.name) && shulkerSlotsUsedOf(h.boxes.get('-3,0,0')!.raws[i]) > 0);
+
+    it('H2: a tidy step failing after its first round puts the partly filled box and the stacks back into that chest', async () => {
+      const h = home(27, 64);
+      for (let i = 1; i <= 20; i++) h.inv[i] = item('stone'); // 15 free slots: two rounds
+      await h.logistics.scan(never);
+      h.fail.onDig = () => {
+        h.fail.place = true; // the second round's place fails
+      };
+      const r = await h.logistics.tidy(never);
+      expect(r.boxed).toEqual([]);
+      expect(inChest(h)).toBe(27 * 64);
+      expect(h.inv.some((x) => x?.name === 'cobblestone')).toBe(false);
+      expect(boxedElsewhere(h)).toBe(false);
+      expect(onGround(h)).toEqual([]);
+    });
+
+    it('H2: an interrupted tidy step: what it took goes back into that chest at the start of the next run', async () => {
+      const h = home(27, 64);
+      for (let i = 1; i <= 20; i++) h.inv[i] = item('stone');
+      await h.logistics.scan(never);
+      let stop = false;
+      h.fail.onDig = () => {
+        stop = true;
+      };
+      const r = await h.logistics.tidy(() => stop);
+      expect(r.reason).toBe('interrupted');
+      expect(onGround(h)).toEqual([]);
+      const r2 = await h.logistics.tidy(never);
+      expect(r2.ok).toBe(true);
+      expect(inChest(h)).toBe(27 * 64);
+      expect(h.inv.some((x) => x?.name === 'cobblestone')).toBe(false);
+      expect(boxedElsewhere(h)).toBe(false);
+    });
+
+    it('H1: the spare not picked up during a tidy step is fetched (at once), the step completes', async () => {
+      const h = home(27, 64);
+      await h.logistics.scan(never);
+      h.fail.onDig = () => {
+        h.fail.pickup = true;
+        h.fail.pickupUntilNear = true;
+      };
+      const r = await h.logistics.tidy(never);
+      expect(r.boxed).toHaveLength(1);
+      expect(onGround(h)).toEqual([]);
+      expect(h.inv.some((x) => x && isShulkerBox(x.name))).toBe(false);
     });
   });
 

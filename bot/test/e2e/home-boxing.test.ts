@@ -405,11 +405,18 @@ describe.skipIf(!E2E)('@bds home: boxing at the chests and bot_loot boxes (Track
     // the double chest: two chests placed by the bot from the same side (they pair)
     await b.truth.ok('give', [b.name, 'chest', 2]);
     await until(() => (mob.world.inventory.count('chest') >= 2 ? true : undefined), 10_000, '2 chests');
+    // (the chore reads a container that appears at once: its walk may cancel the next place, so wait for it and retry)
     for (const p of [T, T2]) {
-      const r = await mob.skills.place(p, { item: 'chest', face: 'up' });
+      let r = await mob.skills.place(p, { item: 'chest', face: 'up' });
+      for (let i = 0; i < 3 && !r.ok; i++) {
+        await until(() => (b.home.logistics.busy ? undefined : true), 60_000, 'the chore idle');
+        await teleport(b, { x: home.x + 0.5, y: F, z: home.z + 0.5 });
+        r = await mob.skills.place(p, { item: 'chest', face: 'up' });
+      }
       if (!r.ok) throw new Error(`placing the double chest half at ${at(p)}: ${r.reason}`);
       placed.push(p);
     }
+    await until(() => (b.home.logistics.busy ? undefined : true), 60_000, 'the chore idle');
     expect((await b.truth.box(T)).size).toBe(54);
     await chestAt(B);
     await b.truth.chestPut(T, 'cobblestone', 64, 30);

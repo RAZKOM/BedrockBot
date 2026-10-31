@@ -31,7 +31,7 @@
 // They come before the box steps; the remainder unloads loose.
 //
 // Tidy steps (`tidy`, docs/home.md "Full boxes out of the chests"; the owner: "if it sees a chest that has enough of
-// the same item to fill a shulker, do it"): a home chest holding 27 full stacks' worth or more of one stackable item
+// the same item to fill a shulker, do it"): a home chest holding 27 full stacks or more of one stackable item
 // loose gets `box` steps with `tidy` set: 27 of its stacks into a spare, the full box back into that chest. Never a
 // shulker box block, never the chest of spares (or one labelled for boxes); planned only on request (after the
 // deposits of `!unload`, and by the idle chore), MAX_TIDY_STEPS at most, none once no spare is left.
@@ -73,6 +73,8 @@ export interface PlanChest {
   boxes: { empty: number; full: number };
   /** Track AV: what the full boxes inside hold (rule 1 counts it; ChestRecord.inBoxes). */
   inBoxes?: Readonly<Record<string, number>> | undefined;
+  /** Full stacks by item (ChestRecord.fullStacks): a tidy step needs 27 of one item. */
+  fullStacks?: Readonly<Record<string, number>> | undefined;
 }
 
 export type Rule = 'same' | 'label' | 'emptiest' | 'boxes';
@@ -159,6 +161,12 @@ export interface PlanOptions {
   tidy?: boolean;
   /** Tidy steps at most (default MAX_TIDY_STEPS). */
   maxTidySteps?: number;
+  /** Kinds held back this round (a fill put off until the other items are away): kept, not unloaded. */
+  hold?: ReadonlySet<string>;
+  /** Tidy steps not to plan: `chestKey|item` (one failed while that chest's record stayed the same). */
+  noTidy?: ReadonlySet<string>;
+  /** Chests not to take a spare from (one refused while its record stayed the same). */
+  noSpareFrom?: ReadonlySet<string>;
   /** Item kinds not to fill a box with (a fill step for them failed in this run). */
   noFill?: ReadonlySet<string>;
   /** The armour worn (names): carried pieces no better than it are unloaded (`gearKept`). */
@@ -303,8 +311,12 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
   // the box chest: most shulker boxes inside (a box placed as a block is never one)
   const boxSims = sims.filter((s) => s.boxes > 0 && !isShulkerBox(s.c.kind)).sort((a, b) => b.boxes - a.boxes || dist(a.c, opts.origin) - dist(b.c, opts.origin));
   plan.boxChest = boxSims[0]?.c.key;
-  const toBoxChest = (slot: number, name: string): void => {
-    const target = [...boxSims, ...sims.filter((s) => !isShulkerBox(s.c.kind) && !boxSims.includes(s)).sort((a, b) => b.free - a.free || dist(a.c, opts.origin) - dist(b.c, opts.origin))].find((s) => s.free > 0);
+  const toBoxChest = (slot: number, name: string, items?: Readonly<Record<string, number>>): void => {
+    // a full box of one kind goes where a full box of that kind goes (its chest, else labelled, else the emptiest one
+    // without spares), never into the chest of empty boxes unless no other has room
+    const kinds = Object.keys(items ?? {});
+    const own = kinds.length === 1 ? fillTarget(sims, kinds[0]!, opts.origin) : undefined;
+    const target = own ?? [...boxSims, ...sims.filter((s) => !isShulkerBox(s.c.kind) && !boxSims.includes(s)).sort((a, b) => b.free - a.free || dist(a.c, opts.origin) - dist(b.c, opts.origin))].find((s) => s.free > 0);
     if (!target) {
       plan.overflow.push({ slot, name, count: 1 });
       return;
@@ -359,7 +371,7 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
     if (isShulkerBox(s.name)) {
       if ((s.boxUsed ?? 0) > 0) {
         if (opts.all) plan.fullBoxes.push(s.slot);
-        else toBoxChest(s.slot, s.name);
+        else toBoxChest(s.slot, s.name, s.boxItems);
         continue;
       }
       if (!boxKept) {
@@ -368,6 +380,10 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
         continue;
       }
       toBoxChest(s.slot, s.name);
+      continue;
+    }
+    if (opts.hold?.has(s.name)) {
+      keep(s.name, movable.get(s.slot) ?? s.count, 'kept');
       continue;
     }
     if (keptItem(s.name) && (!isGear(s.name) || gear.has(s.slot))) {
@@ -434,7 +450,7 @@ function planBoxSteps(slots: readonly UnloadSlot[], sims: SimChest[], movable: M
         plan.blocked.push({ item: name, chest: target.c.key, why: 'boxes_full' });
         break;
       }
-      const spare = takeSpare(sims, target, carriedSpares, usedSpares);
+      const spare = takeSpare(sims, target, carriedSpares, usedSpares, opts.noSpareFrom);
       if (!spare) {
         plan.blocked.push({ item: name, chest: target.c.key, why: 'no_spare' });
         break;
@@ -465,13 +481,13 @@ function planBoxSteps(slots: readonly UnloadSlot[], sims: SimChest[], movable: M
 }
 
 /** A spare for a box or fill step (simulated): a carried one first, else one out of the chest holding empty boxes nearest to `target`. */
-function takeSpare(sims: SimChest[], target: SimChest, carriedSpares: readonly number[], usedSpares: Set<number>): string | undefined {
+function takeSpare(sims: SimChest[], target: SimChest, carriedSpares: readonly number[], usedSpares: Set<number>, avoid?: ReadonlySet<string>): string | undefined {
   const mine = carriedSpares.find((x) => !usedSpares.has(x));
   if (mine !== undefined) {
     usedSpares.add(mine);
     return 'carried';
   }
-  const from = sims.filter((x) => x.empties > 0 && !isShulkerBox(x.c.kind)).sort((a, b) => Number(b === target) - Number(a === target) || dist(a.c, target.c.pos) - dist(b.c, target.c.pos))[0];
+  const from = sims.filter((x) => x.empties > 0 && !isShulkerBox(x.c.kind) && !avoid?.has(x.c.key)).sort((a, b) => Number(b === target) - Number(a === target) || dist(a.c, target.c.pos) - dist(b.c, target.c.pos))[0];
   if (!from) return undefined;
   from.empties--;
   from.boxes--;
@@ -479,15 +495,15 @@ function takeSpare(sims: SimChest[], target: SimChest, carriedSpares: readonly n
   return from.c.key;
 }
 
-/** Where a full box of `name` goes: rule 1 (most of it, loose or boxed), else 2 (label), else 3 (the emptiest unlabelled chest that holds no spare: a chest of empty boxes is not one of full ones); one free slot needed. */
+/** Where a full box of `name` goes: rule 1 (most of it, loose or boxed), else 2 (label), else 3 (the emptiest unlabelled chest); never the chest of spares (a chest of empty boxes is not one of full ones); one free slot needed. */
 function fillTarget(sims: readonly SimChest[], name: string, origin: Vec3 | undefined): SimChest | undefined {
-  const open = sims.filter((s) => s.free >= 1 && !isShulkerBox(s.c.kind));
+  const open = sims.filter((s) => s.free >= 1 && !isShulkerBox(s.c.kind) && !isSpareChest(s.c)); // never the chest of spares
   const near = (a: SimChest, b: SimChest) => dist(a.c, origin) - dist(b.c, origin);
   const held = (s: SimChest) => (s.contents[name] ?? 0) + (s.inBoxes[name] ?? 0);
   return (
     open.filter((s) => held(s) > 0).sort((a, b) => held(b) - held(a) || near(a, b))[0] ??
     open.filter((s) => labelMatches(s.c.label, name)).sort((a, b) => b.free - a.free || near(a, b))[0] ??
-    open.filter((s) => !s.c.label && s.c.boxes.empty === 0).sort((a, b) => b.free - a.free || near(a, b))[0]
+    open.filter((s) => !s.c.label).sort((a, b) => b.free - a.free || near(a, b))[0]
   );
 }
 
@@ -521,7 +537,7 @@ function planFillSteps(slots: readonly UnloadSlot[], sims: SimChest[], movable: 
     while (looseOf() + fromBoxes >= full && plan.steps.length < maxSteps) {
       const target = fillTarget(sims, name, opts.origin);
       if (!target) break;
-      const spare = takeSpare(sims, target, carriedSpares, usedSpares);
+      const spare = takeSpare(sims, target, carriedSpares, usedSpares, opts.noSpareFrom);
       if (!spare) break;
       plan.steps.push({ kind: 'fill', item: name, chest: target.c.key, spare });
       target.free--;
@@ -542,26 +558,31 @@ function planFillSteps(slots: readonly UnloadSlot[], sims: SimChest[], movable: 
 }
 
 /** A chest that holds the spare boxes (or is labelled for boxes): never tidied, its room is the spares'. */
-const isSpareChest = (c: PlanChest): boolean => c.boxes.empty > 0 || /\b(shulkers?|boxes|box|spares?)\b/i.test(c.label ?? '');
+function isSpareChest(c: PlanChest): boolean {
+  return c.boxes.empty > 0 || /\b(shulkers?|boxes|box|spares?)\b/i.test(c.label ?? '');
+}
 
 /**
  * The tidy steps (see the file comment): per home chest (not a box block, not the chest of spares) and stackable kind
- * it holds loose, one `box` step of 27 stacks per full box's worth (27 x maxStack), a spare (carried first) each, while
- * spares last. The execution takes full stacks only (a chest of partial stacks fails the step, nothing moved).
+ * it holds in 27 full stacks or more (ChestRecord.fullStacks: partial stacks never count), one `box` step of 27 stacks,
+ * a spare (carried first; never from a chest in `noSpareFrom`) each, while spares last; never a (chest, item) in
+ * `noTidy`. The execution takes full stacks only.
  */
 function planTidySteps(sims: SimChest[], carriedSpares: number[], usedSpares: Set<number>, plan: UnloadPlan, opts: PlanOptions, maxOf: (name: string) => number): void {
   const maxSteps = opts.maxTidySteps ?? MAX_TIDY_STEPS;
   const near = (a: SimChest, b: SimChest) => dist(a.c, opts.origin) - dist(b.c, opts.origin);
   for (const sim of sims.filter((x) => !isShulkerBox(x.c.kind) && !isSpareChest(x.c)).sort(near)) {
-    for (const name of Object.keys(sim.contents).sort()) {
+    const fullStacks: Record<string, number> = { ...(sim.c.fullStacks ?? {}) };
+    for (const name of Object.keys(fullStacks).sort()) {
       const max = maxOf(name);
-      if (max <= 1 || isShulkerBox(name) || keptItem(name) || opts.noBox?.has(name)) continue;
+      if (max <= 1 || isShulkerBox(name) || keptItem(name) || opts.noBox?.has(name) || opts.noTidy?.has(`${sim.c.key}|${name}`)) continue;
       const full = BOX_SLOTS * max;
-      while ((sim.contents[name] ?? 0) >= full) {
+      while ((fullStacks[name] ?? 0) >= BOX_SLOTS) {
         if (plan.steps.length >= maxSteps) return;
-        const spare = takeSpare(sims, sim, carriedSpares, usedSpares);
+        const spare = takeSpare(sims, sim, carriedSpares, usedSpares, opts.noSpareFrom);
         if (!spare) return; // no spare left: nothing more to tidy
         plan.steps.push({ kind: 'box', item: name, chest: sim.c.key, stacks: BOX_SLOTS, produce: 0, spare, tidy: true });
+        fullStacks[name] = (fullStacks[name] ?? 0) - BOX_SLOTS;
         sim.contents[name] = (sim.contents[name] ?? 0) - full;
         if (sim.contents[name] === 0) delete sim.contents[name];
         sim.free += BOX_SLOTS - 1;

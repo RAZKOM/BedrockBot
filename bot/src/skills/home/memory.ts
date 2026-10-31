@@ -45,7 +45,7 @@ export function planChests(records: readonly ChestRecord[]): PlanChest[] {
   const partners = partnerKeys(records);
   return records
     .filter((r) => r.readAt > 0 && r.size > 0 && !r.unreachable && !partners.has(chestKey(r))) // Track AN: not the unreachable ones
-    .map((r) => ({ key: chestKey(r), pos: { x: r.x, y: r.y, z: r.z }, kind: r.kind, label: r.label, free: r.free, contents: r.contents, room: r.room, boxes: r.boxes, inBoxes: r.inBoxes })); // Track AV: inBoxes (rule 1)
+    .map((r) => ({ key: chestKey(r), pos: { x: r.x, y: r.y, z: r.z }, kind: r.kind, label: r.label, free: r.free, contents: r.contents, room: r.room, boxes: r.boxes, inBoxes: r.inBoxes, ...(r.fullStacks ? { fullStacks: r.fullStacks } : {}) })); // Track AV: inBoxes (rule 1)
 }
 
 export const fmtPos = (p: Vec3): string => `${p.x} ${p.y} ${p.z}`;
