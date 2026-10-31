@@ -6,13 +6,13 @@ import { createLogger, type Logger } from '../log.ts';
 import { parseText, type ChatLine } from './text.ts';
 import { commandInfo, helpReplies, type CommandInfo, type HelpSettings } from './help.ts'; // Track AM
 import { richHelpReplies } from './help-rich.ts'; // chat style (docs/chat-style.md)
-import { colorize, Doc, fitWire, isStyled, paint, PLAIN_MODE, strip, type StyleMode, type Tone } from './style.ts';
-import { commandRequestPacket, DOC_MESSAGE_TELLRAW, SLASH_MAX, tellrawCommand, TellrawRoute, type CommandOutputLike, type RouteStatus } from './route.ts'; // the optional /tellraw route
+import { colorize, Doc, fitWire, isStyled, paint, PLAIN_MODE, strip, wireSize, type StyleMode, type Tone } from './style.ts';
+import { commandRequestPacket, isRouteStyle, routeCommand, SLASH_MAX, SlashRoute, type CommandOutputLike, type RouteStatus, type RouteStyle, type RouteVia } from './route.ts'; // the optional /me, /say, /tellraw routes
 
 /** Longest multi-line block (visible text plus codes) say() lets through when `chatLines` is on; the wire limit is style.ts MAX_WIRE. */
 const MAX_BLOCK = 440;
 
-/** The "tellraw was refused" line waits this long, so replies refused together are resent before it. */
+/** The "route was refused" line waits this long, so replies refused together are resent before it. */
 const WARN_DELAY_MS = 400;
 
 /** Who sent a chat line. The console is `say` / `tell` typed into the BDS console (or docker exec). */
@@ -161,8 +161,8 @@ export class Chat {
   private readonly replyTimes: number[] = [];
   private off: (() => void) | undefined;
   private offOutput: (() => void) | undefined;
-  private readonly route = new TellrawRoute(() => Date.now());
-  /** The `chatVia` value the last message saw, to notice a switch to tellraw (a restart counts: undefined before the first message). */
+  private readonly route = new SlashRoute(() => Date.now());
+  /** The `chatVia` value the last message saw, to notice a switch to a slash route (a restart counts: undefined before the first message). */
   private lastVia: string | undefined;
   /** A try the owner caused (a switch, a restart, `!colors`) has not been answered by a refusal yet: the first refusal is told in chat. */
   private routeTest = false;
@@ -227,12 +227,12 @@ export class Chat {
    */
   styleSource: { color(): boolean; lines(): boolean; via?(): string } | undefined;
 
-  /** The switches right now (both off when no source is wired or it throws). While replies go out as tellraw the blocks are smaller (`block`). */
+  /** The switches right now (both off when no source is wired or it throws). While replies go out as tellraw a Doc measures its messages as the command counts them (`tellraw`). */
   styleMode(): StyleMode {
     try {
       if (!this.styleSource) return PLAIN_MODE;
       const mode: StyleMode = { color: this.styleSource.color(), lines: this.styleSource.lines() };
-      if (this.tellrawWanted()) mode.block = DOC_MESSAGE_TELLRAW;
+      if (this.slashStyle() === 'tellraw') mode.tellraw = true;
       return mode;
     } catch {
       return PLAIN_MODE;
@@ -240,26 +240,27 @@ export class Chat {
   }
 
   /**
-   * Is the `chatVia tellraw` setting on and not paused by a refusal? The one place that reads the setting, so it
-   * is also where a switch to tellraw (or the first message after a start with it on) is noticed: that clears an
-   * old refusal and makes the next message the test; a refusal of it is told in chat.
+   * The slash route in use (`chatVia me | say | tellraw`), or undefined for plain chat or while the server's refusal
+   * is fresh. The one place that reads the setting, so it is also where a switch to a slash route (or the first
+   * message after a start with one on) is noticed: that clears an old refusal and makes the next message the
+   * test; a refusal of it is told in chat.
    */
-  private tellrawWanted(): boolean {
+  private slashStyle(): RouteStyle | undefined {
     try {
       const via = this.styleSource?.via?.();
       if (via !== this.lastVia) {
         this.lastVia = via;
-        if (via === 'tellraw') this.retryRoute();
+        if (isRouteStyle(via)) this.retryRoute();
       }
-      return via === 'tellraw' && this.route.usable();
+      return isRouteStyle(via) && this.route.usable() ? via : undefined;
     } catch {
-      return false;
+      return undefined;
     }
   }
 
   /**
-   * Try tellraw again now (`!colors`, a switch of `chatVia`): forgets a refusal, and the next reply is the test; if
-   * the server refuses it, the owner gets one chat line saying so. Harmless while `chatVia` is `chat`.
+   * Try the slash route again now (`!colors`, a switch of `chatVia`): forgets a refusal, and the next reply is the
+   * test; if the server refuses it, the owner gets one chat line saying so. Harmless while `chatVia` is `chat`.
    */
   retryRoute(): void {
     this.route.reset();
@@ -267,17 +268,18 @@ export class Chat {
   }
 
   /**
-   * The reply route for `!colors`: what `chatVia` asks for, and whether the server has refused it
-   * (`refused` + the server's message id; tellraw is tried again after RETRY_MS). `via` is what is in use now.
+   * The reply route for `!colors`: what `chatVia` asks for (`setting`), what is in use now (`via`: `chat` while
+   * the server's refusal is fresh), and whether the server refused (`refused` + its message id; the route is
+   * tried again after RETRY_MS).
    */
-  routeStatus(): { setting: string; via: 'chat' | 'tellraw'; route: RouteStatus } {
+  routeStatus(): { setting: string; via: RouteVia; route: RouteStatus } {
     let setting = 'chat';
     try {
       setting = this.styleSource?.via?.() ?? 'chat';
     } catch {
       /* the setting cannot be read: chat */
     }
-    return { setting, via: this.tellrawWanted() ? 'tellraw' : 'chat', route: this.route.status() };
+    return { setting, via: this.slashStyle() ?? 'chat', route: this.route.status() };
   }
 
   /**
@@ -316,7 +318,7 @@ export class Chat {
     this.off = this.conn.on('text', (p) => {
       this.handle(parseText(p));
     });
-    // a /tellraw the server refused (the bot is not an operator) comes back here as command_output; the text goes out as chat instead
+    // a /say or /tellraw the server refused (the bot is not an operator) comes back here as command_output; the text goes out as chat instead
     this.offOutput = this.conn.on('command_output', (p) => {
       this.onCommandOutput(p);
     });
@@ -331,7 +333,7 @@ export class Chat {
     this.warnTimer = undefined;
   }
 
-  /** `command_output` for one of our tellraws: when it failed, resend the text as chat once and pause tellraw (route.ts). */
+  /** `command_output` for one of our slash commands: when it failed, resend the text as chat and pause the route (route.ts). */
   private onCommandOutput(packet: Record<string, unknown>): void {
     const p = packet as CommandOutputLike;
     const first = p.output?.[0]?.message_id;
@@ -343,18 +345,21 @@ export class Chat {
     const why = id ?? 'no message id';
     if (this.conn.state !== 'spawned') return;
     this.conn.queue('text', chatPacket(this.conn.username, text));
+    const via = this.lastVia ?? 'tellraw';
     if (this.routeTest) {
-      // the owner asked for tellraw (or just switched to it): tell them it did not work, once, where they are looking
+      // the owner asked for the route (or just switched to it): tell them it did not work, once, where they are looking
       this.routeTest = false;
-      this.log.warn(`/tellraw refused (${why}); replies stay in chat. Make the bot an operator, then ${this.prefix}colors tries again`);
+      this.log.warn(`/${via} refused (${why}); replies stay in chat. ${this.prefix}colors tries again`);
+      // `/me` needs no operator rights, so a refusal of it is not about that
+      const opHint = via === 'me' ? '' : ' The bot is probably not an operator; make it one, then';
       // a moment later, so the rest of a burst that was refused together (a help block) is resent before the warning
       this.warnTimer = setTimeout(() => {
         this.warnTimer = undefined;
         if (this.conn.state !== 'spawned') return;
-        this.conn.queue('text', chatPacket(this.conn.username, this.finish(`chatVia tellraw: refused by the server (${why}), so replies stay in chat. The bot is probably not an operator; make it one, then ${this.prefix}colors tries again`)));
+        this.conn.queue('text', chatPacket(this.conn.username, this.finish(`chatVia ${via}: refused by the server (${why}), so replies stay in chat.${opHint} ${this.prefix}colors tries again`)));
       }, WARN_DELAY_MS);
     } else {
-      this.log.info(`/tellraw refused again (${why}); chat for ${Math.round(this.route.status().retryInMs ?? 0) / 1000} s more`);
+      this.log.info(`/${via} refused again (${why}); chat for ${Math.round(this.route.status().retryInMs ?? 0) / 1000} s more`);
     }
   }
 
@@ -394,14 +399,16 @@ export class Chat {
   }
 
   /**
-   * The last step: the finished text goes out as player chat, or as `/tellraw @a` when `chatVia tellraw` is on, the
-   * server has not refused it lately, and the command stays under route.ts SLASH_MAX (a longer command makes the
-   * server drop the connection). Whatever the route, the text is the same; the only command ever sent is /tellraw.
+   * The last step: the finished text goes out as player chat, or as `/me`, `/say` or `/tellraw @a` when `chatVia`
+   * asks for it, the server has not refused it lately, the style can carry the text (no `@` for /me and /say) and
+   * the command stays under route.ts SLASH_MAX (a longer command makes the server drop the connection). Whatever
+   * the route, the text is the same; the only commands ever sent are those three (route.ts routeCommand).
    */
   private send(text: string): void {
-    if (this.tellrawWanted()) {
-      const command = tellrawCommand(text);
-      if (command.length <= SLASH_MAX) {
+    const style = this.slashStyle();
+    if (style) {
+      const command = routeCommand(style, text);
+      if (command !== undefined && wireSize(command) <= SLASH_MAX) {
         const packet = commandRequestPacket(command);
         this.route.track(packet.origin.uuid, text);
         this.conn.queue('command_request', packet);
@@ -419,9 +426,9 @@ export class Chat {
   private finish(message: string): string {
     const mode = this.styleMode();
     if (isStyled(message)) return fitWire(message, message);
-    const limit = mode.lines && message.includes('\n') ? (mode.block ?? MAX_BLOCK) : this.maxReplyLength;
+    const limit = mode.lines && message.includes('\n') ? MAX_BLOCK : this.maxReplyLength;
     const text = message.length > limit ? `${message.slice(0, limit - 3)}...` : message;
-    return mode.color ? fitWire(colorize(text), strip(text)) : text;
+    return mode.color ? fitWire(colorize(text), strip(text)) : fitWire(text, text); // bytes, not characters: see style.ts MAX_WIRE
   }
 
   /** Process one parsed line (exposed for tests). */

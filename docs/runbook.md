@@ -318,16 +318,17 @@ Off by default. Turn it on in game, in this order, after each step looks right i
 1. `!colors`: a specimen of the colours and the headed layout, plus which route replies take. If you see
    `§` characters or run-together lines instead of colours, stop here: your client does not draw them.
 2. `!set chatColor on` (coloured replies), `!set chatLines on` (`!help` / `!set` as a few headed blocks).
-3. `!set chatVia tellraw` only if the bot is an operator on that world (replies as `/tellraw`: no `<Bot>` name
-   in front). The first reply after the switch (or after a restart with it on) is the test: if the server
-   refuses `/tellraw`, the same text goes out as chat and the bot says in chat that it was refused and why
-   (`chatVia tellraw: refused by the server (commands.generic.permission.selector), so replies stay in chat ...`).
-   Make the bot an operator and type `!colors`: that tries tellraw at once (otherwise it retries by itself
-   after a minute, quietly). Making the Realm bot an operator is your decision; nothing depends on it.
+3. `!set chatVia me` (replies as `/me`: `* Bot text`, works without operator rights), `say` (`[Bot] text`, operator) or
+   `tellraw` (no name in front, operator). The first reply after the switch (or after a restart with a route on) is the
+   test: if the server refuses the command, the same text goes out as chat and the bot says in chat that it was refused
+   and why (`chatVia tellraw: refused by the server (commands.generic.permission.selector), so replies stay in chat ...`).
+   Make the bot an operator and type `!colors`: that tries the route at once (otherwise it retries by itself after a
+   minute, quietly). Making the Realm bot an operator is your decision; nothing depends on it. Try them and keep the one
+   whose look you like; whether one avoids the `####` masking of digits is open.
 
 On the Mac the settings live in `~/.bedrockbot/settings.json` and apply to the next reply (no restart). A
-server limit worth knowing: a chat message over about 520 characters is dropped silently and a command of 512
-characters or more disconnects the bot; the bot keeps every message to 480 (docs/chat-style.md "Limits").
+server limit worth knowing: a chat message over about 510 BYTES is dropped silently and a command of 511 bytes
+or more disconnects the bot (a colour code is 2 bytes); the bot keeps every message to 480 bytes (docs/chat-style.md "Limits").
 
 ### Death, respawn and home (task 5.1)
 

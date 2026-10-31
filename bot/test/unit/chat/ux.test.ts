@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Chat } from '../../../src/chat/chat.ts';
 import { registerBuiltinCommands, registerHardeningCommands } from '../../../src/chat/commands.ts';
 import { FRONT_DOOR, frontHelp, hintFor, splitHelp, type HintFacts } from '../../../src/chat/help.ts';
-import { MAX_WIRE, strip } from '../../../src/chat/style.ts';
+import { MAX_WIRE, strip, wireSize } from '../../../src/chat/style.ts';
 import { applyMode, currentMode, MODE_KEYS, modeCommand, modeLine, modeValues } from '../../../src/chat/modes.ts';
 import { attachWelcome, welcomeLines, welcomeVersion } from '../../../src/chat/welcome.ts';
 import type { Connection } from '../../../src/connection/connection.ts';
@@ -395,20 +395,20 @@ describe('chat style on the afk registry (docs/chat-style.md)', () => {
 
     const front = chat.helpReplies([]);
     expect(front.length).toBeLessThanOrEqual(4);
-    for (const m of front) expect(m.length).toBeLessThanOrEqual(MAX_WIRE);
+    for (const m of front) expect(wireSize(m)).toBeLessThanOrEqual(MAX_WIRE);
     const frontText = front.map(strip).join('\n');
     for (const n of FRONT_DOOR) expect(frontText, n).toContain(`!${n} `);
     expect(frontText).not.toContain('!colors'); // a `more` command stays off the front door
 
     const all = chat.helpReplies(['all']);
     expect(all.length).toBeLessThanOrEqual(4);
-    for (const m of all) expect(m.length).toBeLessThanOrEqual(MAX_WIRE);
+    for (const m of all) expect(wireSize(m)).toBeLessThanOrEqual(MAX_WIRE);
     const allText = all.map(strip).join('\n');
     for (const n of chat.commandNames()) expect(allText, n).toContain(`!${n}`);
 
     const sets = chat.helpReplies(['settings']);
     expect(sets.length).toBeLessThanOrEqual(6);
-    for (const m of sets) expect(m.length).toBeLessThanOrEqual(MAX_WIRE);
+    for (const m of sets) expect(wireSize(m)).toBeLessThanOrEqual(MAX_WIRE);
     const setsText = sets.map(strip).join('\n');
     for (const k of Object.keys(SETTING_DEFS)) expect(setsText, k).toContain(`${k} `);
   });
