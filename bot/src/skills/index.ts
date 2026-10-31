@@ -43,6 +43,7 @@ import { fellTree, type FellOptions, type FellResult } from './tree/feller.ts';
 import { detectTree, treesFrom, type Tree, type TreeOptions } from './tree/tree.ts';
 import type { SkillResult, Skills } from './types.ts'; // Track R: goto takes NavGoal / NavGotoOptions now
 import { surfaceRefusal } from '../world/dimension.ts'; // Track AT
+import { headInWater, swimUp } from './survival/surface.ts'; // Track BF
 
 export type { Goal, GotoOptions, SkillResult, Skills, DigOptions, DigResult } from './types.ts';
 export type { CollectOptions, CollectResult } from './collect/collect.ts';
@@ -411,16 +412,35 @@ export class BotSkills implements Skills {
       return (async () => {
         await d;
         if (this.runningEpoch !== token || this.epoch !== token) return { ok: false, reason: 'interrupted' };
-        const r = await this.nav.goto(goal, opts);
+        const r = await this.nav.goto(goal, opts).then((x) => this.surfaceAndRetry(x, token, goal, opts));
         this.end(token);
         return r;
       })();
     }
-    const p = this.nav.goto(goal, opts);
+    const p = this.nav.goto(goal, opts).then((r) => this.surfaceAndRetry(r, token, goal, opts));
     void p.finally(() => {
       this.end(token);
     });
     return p;
+  }
+
+  /**
+   * Track BF: a goto that failed with the head under water (the planner has no start node on a sea
+   * floor: it swims on the surface only) swims straight up (skills/survival/surface.ts) and plans once
+   * more from the surface.
+   */
+  private async surfaceAndRetry(r: SkillResult, token: number, goal: NavGoal, opts?: NavGotoOptions): Promise<SkillResult> {
+    const w = this.world;
+    if (r.ok || r.reason !== 'unreachable' || !w.blockAt || token !== this.epoch) return r;
+    const blockAt = w.blockAt.bind(w);
+    if (!headInWater(blockAt, this.loop.state.pos)) return r;
+    const from = this.loop.state.pos;
+    const up = await swimUp(this.loop, blockAt, { cancelled: () => token !== this.epoch });
+    this.log.info(
+      `goto: no path under water at ${Math.floor(from.x)} ${Math.floor(from.y)} ${Math.floor(from.z)}; swam up ${up.rose.toFixed(1)} blocks in ${up.ticks} ticks${up.ok ? '' : ' (still under water)'}`,
+    );
+    if (!up.ok || token !== this.epoch) return r;
+    return this.nav.goto(goal, opts);
   }
 
   /** Break one block (docs/digging.md). Needs world.blockAt + world.inventory; the hotbar for tool switching. */
@@ -696,7 +716,10 @@ export class BotSkills implements Skills {
     if (!w.blockAt || !w.find) return [];
     const origin = opts.origin ?? this.loop.state.pos;
     const logs = w.find((b) => b.name.endsWith('_log') && !b.name.startsWith('stripped_'), { origin, radius, max: 4096, class: 'log' });
-    return treesFrom(w.blockAt.bind(w), logs, origin, { skip: (p) => this.nav.blacklist.blocked(p), ...opts }); // Track R: skip blacklisted logs
+    // never a tree inside the base (protectRadius of home): the owner's own trees and log builds stay
+    const area = this.nav.breakRules().protectedArea;
+    const inBase = (p: Vec3) => !!area && Math.hypot(p.x + 0.5 - area.x, p.y + 0.5 - area.y, p.z + 0.5 - area.z) <= area.r;
+    return treesFrom(w.blockAt.bind(w), logs, origin, { skip: (p) => this.nav.blacklist.blocked(p), ...opts }).filter((t) => !t.logs.some(inBase)); // Track R: skip blacklisted logs
   }
 
   /** Fell a tree from the bottom up, re-pathing when the next log is out of reach (skills/tree/feller.ts). */

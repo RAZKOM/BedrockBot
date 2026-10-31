@@ -41,6 +41,7 @@ import { PathReach, probeNavOf } from '../skills/combat/pathReach.ts'; // Track 
 import { FollowController, type FollowLoop, type FollowTarget } from '../skills/follow/follow.ts';
 import type { Goal, NavGoal } from '../skills/nav/goals.ts';
 import type { GotoOptions, SkillResult } from '../skills/types.ts';
+import { headInWater } from '../skills/survival/surface.ts'; // Track BF
 import { Hotbar } from '../world/hotbar.ts';
 import type { Inventory } from '../world/inventory.ts';
 import type { EntityInfo, PacketSource, Vec3 } from '../world/types.ts';
@@ -75,6 +76,8 @@ export interface PveWorld {
   readonly entities: ReadonlyMap<bigint, EntityInfo>;
   readonly inventory: Inventory;
   readonly self: { readonly runtimeId: bigint; readonly health: number; readonly food?: number };
+  /** Track BF: drowning attribution (the eyes in water); optional. */
+  blockAt?(p: Vec3): { name: string } | undefined;
 }
 
 /** The InputLoop as PvE drives it (`InputLoop` satisfies it). */
@@ -196,6 +199,7 @@ export class PveController {
       entities: () => world.entities,
       selfRuntimeId: () => world.self.runtimeId,
       selfPos: () => (loop.state.ready ? loop.state.pos : undefined),
+      headInWater: () => world.blockAt !== undefined && loop.state.ready && headInWater((p) => world.blockAt!(p), loop.state.pos),
     });
     this.hotbar = new Hotbar(source, { inventory: world.inventory, runtimeId: () => world.self.runtimeId });
     this.combat = new CombatController({
@@ -224,7 +228,13 @@ export class PveController {
     this.fleeProcess = this.processes.add(new FleeProcess(this));
     this.guardProcess = this.processes.add(new GuardProcess(this));
     this.unsubs.push(
-      this.mobs.onHit((g, damage) => {
+      this.mobs.onHit((g, damage, cause) => {
+        if (cause === 'drowning') {
+          // Track BF: not a fight (no duel rule, no flee from a mob); the air came from the server's `air` value when it sent one
+          const air = this.mobs.selfAir;
+          this.log.info(`pve: took ${damage.toFixed(1)} damage (drowning: head under water${air !== undefined ? `, air ${air}` : ''}), health ${this.health()}`);
+          return;
+        }
         if (damage > 0) {
           // Track W: the duel rule
           this.lastHit = { damage, at: performance.now() };

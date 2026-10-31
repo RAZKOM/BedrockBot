@@ -44,6 +44,9 @@ authoritative. Decision record: [decisions/0042-elytra-flight.md](decisions/0042
 | `bot/test/unit/skills/fly.test.ts` | the geometry, the planner, whole trips on `stepBody` (the economy, the tree, the roof, the walled platform), the kit rules, the supply lines |
 | `bot/test/e2e/fly-truth.ts`, `fly-glide.test.ts`, `fly-land.test.ts`, `fly-kit.test.ts` | the e2e suites on bds-fly (Track AU) |
 | `bot/test/e2e/fly-economy.test.ts`, `fly-roof.test.ts`, `fly-descent.test.ts`, `fly-walk.test.ts` | Track AU2: the rocket economy of 300 / 600 / 1200-block flights, the room and the tree, the 10 + 10 descents, fly then walk (the pit, the house) |
+| `bot/src/skills/fly/landing.ts` | Track BF: `findLanding` (the confirmed-path search), `floorsOf`, the wet / hazard rules, `corridorsOf` / `corridorLands` (overhangs), `stillLandable` |
+| `bot/src/skills/survival/surface.ts`, `bot/src/tasks/process/surface.ts` | Track BF: `headInWater`, `swimUp`; the `surface` process and `shoreNear` |
+| `bot/test/unit/skills/fly-landing.test.ts`, `surface.test.ts`; `bot/test/e2e/fly-overhang.test.ts` | Track BF: the farm replica on the model, the big roof, the sea, the hold; the swim up and drowning; the e2e farm / roof / water / seabed / sneak cases |
 | `docker/compose.fly.yml` | `bds-fly` |
 
 ## Packets (BDS 1.26.60.6, measured on bds-fly)
@@ -289,6 +292,9 @@ away of an earlier version hit the wall).
 
 ## Fly, then walk (Track AU2)
 
+> Since Track BF `landingNear` and `retargetNear` are replaced by the confirmed-path search and the
+> hold ("Landing v3" below); this section is the Track AU2 history.
+
 `!goto` / `!come` over `flyMin` blocks land on the goal only when it is landable: its column's top is
 the block under the goal (within a block), a plain solid (no lava / water / cactus / magma / fire)
 with level neighbours (within a block either way: neither a 1-wide column nor the bottom of a hole)
@@ -308,6 +314,98 @@ the approach while still 15 blocks out (the planner re-plans from the new target
 outbound again, and the new approach comes in from the open side: a cell before a house wall retargeted while the body circled beyond the house went around 4 times on bds-fly before the go-around chose its bearing); loaded ground with nothing landable within `flyLandSearch` ends the search (the goal
 stays the target). The retarget loop is not gated on the process token: the `flight` process holds
 control in the air and the `fly` process is paused meanwhile.
+
+## Landing v3 (Track BF)
+
+Decision record: [decisions/0047-flight-landing-v3.md](decisions/0047-flight-landing-v3.md). The
+Realm, 2026-10-30, the owner's mob farm (a 9 x 7 platform 70 up under a spawning box that overhangs
+it, a room with a ladder under the platform, the waypoint in the room): `!fly gunpowder` went around 4
+times and the emergency landing put the bot on the sea floor (every goto then `no standable node`,
+minutes on the bottom); `!goto gunpowder` kept a landing cell from the world cache on the box's roof
+(`no path` from there). Since Track BF a landing near a goal is one the bot can walk from.
+
+**The search** (skills/fly/landing.ts `findLanding`; `landingFor` in commands-fly.ts). The columns
+around the goal (`flyLandSearch`, 48) are read from the live world model only (`floorsOf`: every floor
+of a column between 36 under and 72 over the goal, its headroom, wet and hazard flags). A candidate is a
+**sound** floor: dry (no water, lava, bubble column, kelp or seagrass within 3 over it), no hazard
+block (lava, cactus, magma, fire, portal, berry bush, powder snow, wither rose, dripstone, lily pad,
+scaffolding), all four neighbours with a floor within a block. Open cells have 20 free over the feet;
+**roof** cells at least `flyHeadroom` (4) and a corridor (below). Candidates are tried by the lower
+bound of the walk (the straight distance, 3 per block of height, a roof cell's penalty 4 + 2 per block
+under) with a probe plan each (reach.ts `probePath`, 6000 nodes, 400 ms, no breaking or placing, to
+within 1.5 of the goal; at most `flyLandProbes` (16) and 6 s in all, the tick yields between them). A
+probe that fails marks the cell's whole plateau dead (one probe per roof, not one per cell); the search
+stops when the best found path is within max(2, 10 %) of every remaining lower bound. The answer:
+
+| Answer | When | The flight |
+|---|---|---|
+| `goal` | the goal's own cell is a sound open floor | exact for `!fly <x y z>` (half 1), else the plateau around it as a walk landing |
+| `cell` | a probe found a path from the cell | the cell's plateau (up to 240 cells) as a walk landing, `fly: landing 5 blocks from X (under the overhang), then walking` |
+| `unknown` | under 85 % of the columns around the goal are loaded (or the goal's own column) | **hold**: circle high over the goal (the go-around height, a rocket when 6 under), search again every 40 ticks |
+| `fallback` | loaded, but no probe found a path | the nearest dry ground (ranked: limited / no start < not probed < none; else the nearest `dryGround`), `fly: no landing spot near X with a walking path (...); landing on dry ground at x y z, then trying to walk` |
+
+One log line per search: `fly: landing for 74712 6 72844: 1010 candidates (481 under a roof), 1
+probes, 1 approach sims, 114 ms: 74715 10 72844/roof b240:path 5 -> 74715 10 72844 under a roof
+(ceiling 22), in from 240, 5 blocks of walk, 9 cells`. In flight (`watchLanding`, fly.ts) the chosen
+cell is checked every 40 ticks until 6 blocks out (`stillLandable`: still a dry floor with the
+headroom); a hold searches every 40 ticks from 160 blocks out and lands on the nearest dry ground
+after `flyHoldS` (30 s) of holding (`fly: no landing near X after 30 s (...)`).
+
+**Dry ground everywhere.** The same wet rule is in `groundAt` (the emergency landing, `!land`, the
+descent picks) and the walk landing: a column with liquid within 3 over its top is never ground.
+
+**Overhangs** (`corridorsOf`, `corridorLands`). From a roof cell, every 15 degrees: the cells of the
+feet .. feet + 3 on the line and feet + 1 .. + 2 a block to each side must be free until a column open
+to the sky (no solid feet + 4 .. + 20) within `flyOverhangDepth` (10) + 1 blocks, then 40 blocks out
+along a line rising 0.2 a block (unknown cells beyond 24 count as free); the corridors are ranked by
+the depth under the roof, 45 degrees apart. The first two candidates' best corridor is flown on the
+model (the ApproachPlanner on stepBody from 56 out / 12 up and 40 out / 7 up at 1.05 blocks a tick):
+the cell is offered only when the simulated approach lands with a cost under 30. The target carries
+the corridor's `bearing` and the roof height (`ceiling`): the brain flies to the corridor's entry
+(64 out along the bearing) before it turns in, the descent circles are the ones tangent to the
+corridor's line, the go-around flies out and back along it, and its height ignores the roof's own
+columns. Simulated (fly-landing.test.ts, the farm replica): 3 of 3 seeds on the platform, 0
+go-arounds, 7 rockets.
+
+**Walk landings** (deliverable F). A landing that is only a stop on the way (`walk: true`, the cells
+of the plateau) scores the touchdown by `touchdownCost`'s walk branch: 0.3 per block off the centre
+(a precision landing pays far more), the vertical speed over 0.35 at 40, the horizontal over 0.5 at
+25, the slide out of the cells (the predicted slide plus 0.8 for the server) at 30 per block. The
+planner's go-around rule (`approachHopeless`) is unchanged, so a go-around comes only when no
+touchdown of the profile lands on a safe cell. `!fly <x y z>` keeps the exact landing when the goal is
+landable. Every go-around logs its reason: `flight: go-around 1: no landing plan for 16 ticks (best:
+short, cost 82, 1.0 from the centre) at 45 blocks out, -9 above, 0.83 blocks a tick, a walk landing of
+9 cells`.
+
+**`!fly` flies, then walks.** `!fly <x y z> | <waypoint> | home | <player>` uses the same search, says
+the walk up front when known (`flying to X (300 blocks, about 20 s, then walking 5 blocks; ...)`),
+and after the landing walks to the block (or comes to the player) unless it landed on the goal
+itself: `walked to X`, or `fly: landed, but the walk to X failed (...)`.
+
+## Underwater recovery (Track BF)
+
+The planner swims on the surface only (grid.ts `swim` wants two free cells over the water), so a body
+on the sea floor has no start node. **BotSkills.goto**: a goto that ends `unreachable` with the head
+in water (`headInWater`: the eye cell, feet + 1.62) swims straight up (skills/survival/surface.ts
+`swimUp`: the jump key only, until the head has been out for 3 ticks, at most 400 ticks; the model
+rises about 0.135 blocks a tick, 15 blocks in about 110 ticks) and plans once more:
+`goto: no path under water at x y z; swam up 14.6 blocks in 112 ticks`. **The `surface` process**
+(tasks/process/surface.ts, auto, priority 101 like the fire escape) wants control when the head has
+been under water for 3 s (with the server's `air` value: as soon as it is under 100 of 300), swims up
+and walks to the nearest dry standable cell within 24 blocks (`shoreNear`). **Drowning**: MobTracker
+keeps the own `air` (set_entity_data key `air`); a health drop with the head under water is drowning
+when the air is at 20 or below (without an air value: unless a mob swung at the bot with the hit), and
+pve logs `pve: took 2.0 damage (drowning: head under water, air 0), health 14` instead of a mob guess
+(not counted as a hit for the duel and flee rules).
+
+## Sneak at the touchdown (Track BF)
+
+`flySneakLand` (on): the controller holds the sneak key from 2.5 blocks over the landing cell (approach
+or land phase) through the settle, and releases it once the slide after the flight has stopped (speed under 0.003, at most 40 ticks). The model: stepBody's edge
+back-off applies to a sneaking body that is on the ground and not rising (Track AJ); a gliding body
+takes the gliding branch first (no back-off), so the clipping starts on the first tick after the
+contact (the glide has ended), which is the post-landing slide. The measurements on bds-fly are under
+"Measurements (Track BF)".
 
 ## The kit
 
@@ -351,7 +449,12 @@ Rules (all named `// Track AU` in the shared files):
 | `flyRetryBlocks` | 32 | Track AU2: goto / come that walk because the sky is closed try the takeoff again every this many blocks |
 | `flyMaxClimb` | 120 | Track AU2: the climb never goes higher than this above the start; a longer glide is topped up on the way (31 blocks of height, 310 of glide, a rocket) |
 | `flyMargin` | 15 | Track AU2: the cruise fires only when the glide ahead would reach the approach entry with less than this to spare (less for short glides: `distance / 30 − 5`, none under 150 blocks) |
-| `flyLandSearch` | 48 | Track AU2: goto / come land on the nearest landable cell within this many blocks of the goal and walk the rest |
+| `flyLandSearch` | 48 | Track AU2: goto / come land on the nearest landable cell within this many blocks of the goal and walk the rest (Track BF: the radius of the confirmed-path search) |
+| `flyLandProbes` | 16 | Track BF: probe plans (6000 nodes, 400 ms each, 6 s in all) tried from landing cells before the dry-ground fallback |
+| `flyHoldS` | 30 | Track BF: seconds of holding over a goal whose ground is not loaded (or not confirmed) before landing on the nearest dry ground |
+| `flyHeadroom` | 4 | Track BF: the least free height over the feet of a landing cell under a roof |
+| `flyOverhangDepth` | 10 | Track BF: the deepest landing under a roof (0 = never under a roof) |
+| `flySneakLand` | on | Track BF: sneak through the touchdown and the settle |
 
 ## Processes
 
@@ -530,7 +633,87 @@ The second round of the Track AU2 suites: `fly-roof` 2 of 2 (the tree: 2 rockets
 runs before the glide-speed conditions above: 300 blocks 5 rockets with 2 go-arounds, 600 blocks 6
 with 2 needless top-ups; those two rules came from them).
 
+## Measurements (Track BF, bds-fly, BDS 1.26.60.6)
+
+### Landing v3 (`fly-overhang`)
+
+`!goto` from 300 blocks away; the goal's ground is never loaded at the command, so every flight holds
+briefly (1 to 22 ticks) until the search confirms a cell:
+
+| Case | Search | Landing | Then |
+|---|---|---|---|
+| farm replica (platform 70 up under the overhanging box, room with ladder; goal in the room) | 1010 candidates (481 under a roof), 1 probe, 1 approach sim, 68 to 114 ms: the platform cell 3 from the hole, corridor in from 240 | on the platform under the box; run 1 (before the descent-window fix): 11 rockets, 2 go-arounds (the circle forced out 10 under its exit height, then a slide into the ladder hole); run 2 after it: **8 rockets, 0 go-arounds**, 0.44 off, 0 damage | walked down the ladder; `arrived at` the room goal |
+| goal under a 41 x 41 roof 5 high | 5748 candidates, 2 probes (the roof top: none; the ground 20 out: path) | on the ground 20 blocks from the goal, 3 rockets, 0 go-arounds, 0 damage | walked in; `arrived at` |
+| goal in the middle of a 31 x 31 pond | 16 probes all `limited` (6000 nodes do not swim 15 blocks): the fallback, said in chat | on dry ground at the shore, 1 rocket, 0 go-arounds, 0 damage | the walk failed (`goto: unreachable`: a swim of 15 blocks to a mid-pond cell; the navigator's business) |
+| on the floor of a 10-deep pond, `!goto` 9 blocks onto the shore | 3 × `no standable node`, then `swam up 8.8 blocks in 55 ticks` | (no flight) | `arrived at` |
+| idle on the same floor | `surface: head under water ... for 201 ticks, air 98: swimming up`; surfaced after 55 ticks | (no flight) | standing on the shore 16 s after the teleport |
+
+Run 3 (after merging Track BG, the replica with a closed trapdoor over the ladder): all 5 cases passed; the
+farm 7 rockets, 1 go-around (the reason above), walked through the hatch into the room.
+
+Run 4 (final code: the level rule, sneak until stopped, the walk-back): `fly-overhang` and `fly-walk` 7 of 7;
+the farm 6 rockets, 0 go-arounds; the roof 3 rockets, 1 go-around (`best: over, cost 132, 4.4 from the
+centre at 44 blocks out, 17 above`: it arrived high); pond 1, pit 1, house 2 rockets, 0 go-arounds.
+
+### Go-arounds and rockets per landing, before and after (deliverable F)
+
+Base `9f6f97d` against Track BF, the same suites on bds-fly (the `fly-overhang` farm / roof / water cases
+and `fly-walk`; each landing is one flight):
+
+| Case | Before (9f6f97d) | After (Track BF) |
+|---|---|---|
+| farm | 7 rockets, 0 go-arounds, but landed **on the box's roof** (y 34): `goto: unreachable` | 8 / 7 / 11 rockets, 0 / 1 / 2 go-arounds (the 2 before the descent-window fix), on the platform, walked into the room |
+| big roof | 2 rockets, 0 go-arounds, landed **on the roof** (y −54): `goto: unreachable` | 3 / 2 / 2 rockets, 0 go-arounds, on the ground, walked in |
+| pond | 2 rockets, 1 go-around, dry ground | 1 / 1 / 1 rocket, 0 go-arounds, dry ground (said in chat) |
+| fly-walk pit | 2 rockets, 1 go-around | 5 rockets, 4 go-arounds (a 1-cell target on the trench's first step: the level rule below came from it), then 2 rockets, 0 go-arounds |
+| fly-walk house | 4 rockets, 2 go-arounds | 3 rockets, 1 go-around; then 1 rocket, 0 go-arounds |
+
+Per landing over the walk suites (farm, roof, pond, pit, house), the last round: before 3.4 rockets and 0.8
+go-arounds (2 of 5 goals not reached), after 2.6 rockets and 0.2 go-arounds (all reached but the mid-pond
+goal). **Level cells**: a walk landing's candidate needs three of its four neighbours at exactly its height
+(`ColumnView.level`); the first step of the 1-wide trench (neighbours at −60 and −62) was offered as a 1-cell
+target and cost 4 go-arounds.
+
+### Regression (`fly-land`, `fly-roof`, `fly-economy`) and the slide after the settle
+
+`fly-roof` and `fly-economy` passed on the Track BF code. `fly-land` failed twice before the fix below: the
+server's slide goes on after the controller's 10-tick settle, 0.6 to 1.0 blocks (the base `9f6f97d` the
+same: truth 0.62 to 1.06 off after landings reported 0.0 to 0.3 off), and two short straight-in flights
+that touched down 0.5 and 0.8 past the centre of the 3x3 slid to its edge: the body stopped at exactly
+0.27 over the edge (z 73720.27 in both), the **sneak edge rule holding it** (the server applies it to the
+post-landing slide; without sneak that body falls 40 blocks), but outside the test's footprint. Fixes: sneak
+stays on after the flight until the horizontal speed is under 0.003 (at most 40 ticks), then is released;
+an exact `!fly` landing that ended more than 0.8 from the goal block's centre walks back onto it. After:
+`fly-land` 5 of 5 (the 3x3 offs 0.03 to 0.76, 0 damage; the 5x5 at 300 blocks 0.72; the wall 0.11).
+
+### Sneak at the touchdown (`fly-overhang` sneak case)
+
+- **Sneak held while gliding** (40 ticks forced on mid-cruise): the server kept the glide (`isGliding`
+  every sample, vy −0.15 steady), 0 corrections: on BDS 1.26.60 strict movement sneak neither ends nor
+  changes a glide, and the model (gliding branch first, no sneak effect) agrees.
+- **Landings on a 3 x 3 pillar 30 up**, 2 with and 2 without sneak through the touchdown: all on the
+  pillar, 0 damage; the slide from the predicted touchdown to the settled position 0.73 / 0.75 without,
+  0.74 / 0.76 with sneak; 2 to 5 corrections either way. The slide of a flared touchdown (h about 0.35)
+  is under a block and stops on its own, so the edge rule was never reached on the pillar; `fly-land`
+  (above) did reach it: the server does apply the sneak edge rule to the slide after a glide (the body
+  held 0.27 over a 3x3's edge, no correction). The model applies the edge back-off from the first tick after
+  the contact (the glide has ended then). Sneak stays on by default (`flySneakLand`): it costs nothing
+  measurable and is the vanilla way to stop at an edge; it is released once the slide has stopped (the walk
+  sets its own keys; keeping it on into the walk near an edge is not done).
+
 ## Open points
+
+- Track BF: since Track BG the replica's hatch is a closed trapdoor lying on the platform over the ladder
+  (the planner opens it and closes it behind; `FLY_BF_TRAPDOOR=0` gives a bare hole). The owner's farm has
+  the hatch in the floor layer with the ladder ending under it: BG plans that one down only, which is the
+  direction the landing's probe needs.
+- Track BF: the farm's corridor approach sometimes enters low and slow after the descent circle (1 of the
+  3 complete farm runs: `go-around 1: no landing plan for 18 ticks (best: short, ...) at 45 blocks out, -2
+  above, 0.60 blocks a tick`).
+- Track BF: a mid-pond goal is not reached by the walk after the landing (a 15-block swim: `limited` probes,
+  `goto: unreachable`).
+- Track BF: the Realm flight at 00:07Z that ended `roof` at a cruise of y 294 to 305 with 99 steered ticks
+  is not analysed here.
 
 - Mending by XP: a repair chore for the elytra (an XP source, `xp_orb` pickups) is a separate track;
   until then the owner is asked to mend or replace it.

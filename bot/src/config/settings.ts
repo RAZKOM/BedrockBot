@@ -141,6 +141,11 @@ export const SETTING_DEFS = {
   flyMaxClimb: { kind: 'number', default: 120, min: 20, max: 250, integer: true, unit: 'blocks', description: 'flight: the climb never goes higher than this above the start; a longer glide is topped up with a rocket on the way (about 31 blocks of height, 310 of glide, each)' }, // Track AU2
   flyMargin: { kind: 'number', default: 15, min: 0, max: 60, integer: true, unit: 'blocks', description: 'flight: the cruise fires a rocket only when the glide ahead would reach the approach entry with less than this much height to spare (less for short glides: distance / 30 - 5, none under 150 blocks)' }, // Track AU2
   flyLandSearch: { kind: 'number', default: 48, min: 4, max: 128, integer: true, unit: 'blocks', description: 'flight: goto / come land on the nearest landable cell (open sky, a plain top with level neighbours) within this many blocks of the goal and walk the rest' }, // Track AU2
+  flyLandProbes: { kind: 'number', default: 16, min: 1, max: 64, integer: true, description: 'flight: walking plans tried from landing cells near the goal before landing on unconfirmed dry ground' }, // Track BF
+  flyHoldS: { kind: 'number', default: 30, min: 5, max: 300, integer: true, unit: 's', description: 'flight: hold high near a goal not loaded yet this long, then land on the nearest dry ground' }, // Track BF
+  flyHeadroom: { kind: 'number', default: 4, min: 3, max: 20, integer: true, unit: 'blocks', description: 'flight: least roof height over the feet for a landing under a roof' }, // Track BF
+  flyOverhangDepth: { kind: 'number', default: 10, min: 0, max: 24, integer: true, unit: 'blocks', description: 'flight: deepest landing under a roof (0 = never)' }, // Track BF
+  flySneakLand: { kind: 'boolean', default: true, description: 'flight: sneak through the touchdown (the slide stops at edges)' }, // Track BF
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;

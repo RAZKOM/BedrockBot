@@ -200,6 +200,11 @@ The blocks the walk placed (also those confirmed late: the walk waits for the re
 `BotSkills.scaffold` and are dug again after the pickup. `CollectResult` adds `hardWalks`,
 `scaffoldPlaced`, `scaffoldLeft`.
 
+- **Not trees** (`looksBuilt`, 2026-10-31 Realm: a log cabin next to leaves was felled as a 57-log spruce): a bottom
+  layer wider than 2 x 2, a layer with more than 9 logs, mostly sideways logs, or a built block (planks, glass,
+  stairs, slabs, fences, torches, lanterns ...), a stripped log or a door / chest touching a log; and no tree with
+  a log inside `protectRadius` of home is ever listed (`findTrees`).
+
 Test trees (`packs/truth/src/woodShapes.ts`, placed by `truth:tree`): a log column 4..6 high, leaves
 radius 2 without corners at top - 1 and top, a plus shape at top + 1 and top + 2. The lowest leaves
 are at y + h - 2, so the cells next to the trunk are free up to y + 1 and the drops are reachable.
