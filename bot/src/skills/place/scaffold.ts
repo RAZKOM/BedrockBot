@@ -81,13 +81,13 @@ export class ScaffoldRecord {
  */
 const NATURAL = new Set([
   'stone', 'granite', 'diorite', 'andesite', 'deepslate', 'tuff', 'calcite', 'dripstone_block', 'netherrack', 'basalt', 'blackstone', 'end_stone',
-  'dirt', 'coarse_dirt', 'rooted_dirt', 'grass_block', 'podzol', 'mycelium', 'mud', 'clay', 'moss_block', 'dirt_with_roots', 'grass_path', 'dirt_path',
-  'sand', 'red_sand', 'gravel', 'sandstone', 'red_sandstone', 'snow', 'snow_layer', 'powder_snow', 'ice', 'packed_ice', 'soul_sand', 'soul_soil', 'magma',
-  'terracotta', 'hardened_clay', 'crimson_nylium', 'warped_nylium', 'smooth_basalt', 'amethyst_block', 'budding_amethyst', 'pointed_dripstone', 'obsidian',
+  'dirt', 'coarse_dirt', 'rooted_dirt', 'grass_block', 'podzol', 'mycelium', 'mud', 'clay', 'moss_block', 'dirt_with_roots',
+  'sand', 'red_sand', 'gravel', 'snow', 'snow_layer', 'powder_snow', 'soul_sand', 'soul_soil', 'magma',
+  'terracotta', 'hardened_clay', 'crimson_nylium', 'warped_nylium', 'smooth_basalt', 'pointed_dripstone',
 ]);
 export function isNaturalTerrain(name: string): boolean {
   const n = name.startsWith('minecraft:') ? name.slice(10) : name;
-  return NATURAL.has(n) || n.endsWith('_ore') || n.endsWith('_leaves') || n.endsWith('_terracotta') || n === 'tallgrass' || n === 'short_grass';
+  return NATURAL.has(n) || n.endsWith('_ore') || n.endsWith('_leaves') || (n.endsWith('_terracotta') && !n.endsWith('glazed_terracotta')) || n === 'tallgrass' || n === 'short_grass';
 }
 
 export interface ScaffoldDeps {
@@ -106,6 +106,8 @@ export interface ScaffoldDeps {
   sneak?: (on: boolean) => void;
   /** True when the cleanup must stop (disposed, dead). A dig interrupted otherwise is tried again. */
   cancelled?: () => boolean;
+  /** A hostile mob near (checked on every pass): the dig-down stops 1 block above the ground (lowEnough 1). */
+  hostileNear?: () => boolean;
   logger?: Logger;
 }
 
@@ -223,6 +225,12 @@ export async function clearScaffold(record: ScaffoldRecord, deps: ScaffoldDeps, 
     record.lost++;
     log.warn(`scaffold: leaving ${key(c.p)} (${c.name}): ${why}`);
   };
+  /** Stop on column `p` without giving it up: its cells stay recorded (pending), reported as left with why. */
+  const keep = (p: Vec3, why: string) => {
+    given.add(col(p));
+    for (const c of record.cells) if (col(c.p) === col(p)) out.left.push({ p: c.p, why: `pending: ${why}` });
+    log.warn(`scaffold: the column at ${col(p)} stays pending: ${why}`);
+  };
   let interruptions = 0;
   const fails = new Map<string, number>();
   /** Count a failed dig of cell p; the count so far. */
@@ -273,11 +281,12 @@ export async function clearScaffold(record: ScaffoldRecord, deps: ScaffoldDeps, 
       const below = record.get(under);
       if (below && !given.has(col(under))) {
         deps.sneak?.(true);
-        if (opts.lowEnough !== undefined) {
+        const lowEnough = opts.lowEnough ?? (deps.hostileNear?.() ? 1 : undefined); // checked on every pass
+        if (lowEnough !== undefined) {
           // height over the first block under the column that is not ours
           let g = under.y;
           while (g > under.y - 64 && (record.has({ x: under.x, y: g, z: under.z }) || empty(deps.blockAt({ x: under.x, y: g, z: under.z })))) g--;
-          if (feet.y - g - 1 <= opts.lowEnough) break;
+          if (feet.y - g - 1 <= lowEnough) break;
         }
         // strip the other columns in reach from the top down to the feet level first
         const strip = tops().find((t) => col(t.p) !== col(under) && t.p.y >= feet.y - 1 && checkReach(eyeOf(s.pos), t.p, reach).ok);
@@ -296,9 +305,9 @@ export async function clearScaffold(record: ScaffoldRecord, deps: ScaffoldDeps, 
         // then dig down one block, land on the next one
         const fall = dropUnder(deps.blockAt, under) + 1;
         if (fall > maxDrop) {
-          for (const c of record.cells.filter((c) => col(c.p) === col(under))) leave(c, `digging it would drop the bot ${fall === Infinity ? 'into unknown world' : `${fall} blocks`}`);
-          given.add(col(under));
-          continue;
+          // never given up while the bot stands on it: it stays pending (it is the bot's floor)
+          keep(under, `digging it would drop the bot ${fall === Infinity ? 'into unknown world' : `${fall} blocks`}`);
+          break;
         }
         const y0 = s.pos.y;
         const r = await dig(under);
@@ -307,11 +316,14 @@ export async function clearScaffold(record: ScaffoldRecord, deps: ScaffoldDeps, 
           break;
         }
         if (r === 'failed') {
-          // a hit (knockback) or a correction spoils a dig: look again (the body may be off the column now), give up after 3
-          if (failed(under) < 3) continue;
-          leave(below, 'dig failed 3 times');
-          given.add(col(under));
-          continue;
+          // a hit (knockback) or a correction spoils a dig: look again (the body may be off the column now); after 3
+          // failures back off a second; after 6 stop with the column still pending (the next dig-down tries again).
+          // The cell under the feet is never given up (2026-10-31 review: given up, nothing ever dug the bot down).
+          const n = failed(under);
+          if (n % 3 === 0) await deps.waitTicks(20);
+          if (n < 6) continue;
+          keep(under, `dig failed ${n} times`);
+          break;
         }
         out.removed.push(under);
         record.delete(under);

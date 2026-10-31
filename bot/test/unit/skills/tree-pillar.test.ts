@@ -437,7 +437,8 @@ describe('review fixes (decision 0051)', () => {
     for (const n of ['oak_sapling', 'stick', 'apple', 'wheat_seeds', 'minecraft:spruce_sapling']) expect(isMinorDrop(n), n).toBe(true);
     for (const n of ['oak_log', 'diamond', 'cooked_beef']) expect(isMinorDrop(n), n).toBe(false);
     for (const n of ['stone', 'dirt', 'grass_block', 'iron_ore', 'deepslate_diamond_ore', 'oak_leaves', 'gravel', 'sand']) expect(isNaturalTerrain(n), n).toBe(true);
-    for (const n of ['cobblestone', 'oak_log', 'oak_planks', 'glass', 'stone_bricks', 'oak_fence', 'torch', 'chest']) expect(isNaturalTerrain(n), n).toBe(false);
+    for (const n of ['cobblestone', 'oak_log', 'oak_planks', 'glass', 'stone_bricks', 'oak_fence', 'torch', 'chest', 'obsidian', 'ice', 'packed_ice', 'sandstone', 'grass_path', 'dirt_path', 'amethyst_block', 'white_glazed_terracotta'])
+      expect(isNaturalTerrain(n), n).toBe(false);
   });
 
   it('M1: the sweep gives the hard walk only to the main items', async () => {

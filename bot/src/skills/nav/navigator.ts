@@ -418,7 +418,25 @@ export class Navigator {
   }
 
   get busy(): boolean {
-    return this.active !== undefined;
+    return this.active !== undefined || this.queued !== undefined; // decision 0051: a goto waiting for the dig-down off a scaffold
+  }
+
+  /** Decision 0051: a goto waiting to start (BotSkills: behind the dig-down off a scaffold); `cancel()` drops it. */
+  private queued: (() => void) | undefined;
+
+  /**
+   * Decision 0051: count a goto that waits to start as busy (callers `if (nav.busy) cancel()` take it back). `cancel()`
+   * (or the next `queue`) calls `drop`; the returned function releases the slot when the goto starts. Not used by the
+   * navigator itself.
+   */
+  queue(drop: () => void): () => void {
+    const prev = this.queued;
+    this.queued = undefined;
+    prev?.();
+    this.queued = drop;
+    return () => {
+      if (this.queued === drop) this.queued = undefined;
+    };
   }
 
   dispose(): void {
@@ -690,6 +708,9 @@ export class Navigator {
 
   cancel(): void {
     this.active?.finish({ ok: false, reason: 'interrupted' });
+    const q = this.queued; // decision 0051: a goto waiting to start is dropped too
+    this.queued = undefined;
+    q?.();
   }
 
   // ---- internals ---------------------------------------------------------------------------------

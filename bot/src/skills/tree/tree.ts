@@ -61,7 +61,6 @@ export interface TreeOptions {
 }
 
 const key = (p: Vec3) => `${p.x},${p.y},${p.z}`;
-const SIDES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] as const;
 
 /**
  * The tree that contains the log at `start`, or undefined (not a log, too big, too few leaves,
@@ -134,14 +133,7 @@ export function detectTree(blockAt: BlockLookup, start: Vec3, opts: TreeOptions 
   // a wall or a pile, not a trunk: the footprint of the lowest 3 layers (a 2 x 2 trunk is 4 columns)
   const foot = new Set(logs.filter((p) => p.y < minY + 3).map((p) => `${p.x},${p.z}`));
   if (foot.size > (opts.maxBase ?? 8)) return undefined;
-  // a built thing: planks, glass, doors, slabs, stairs, fences, torches ... touching a log (2026-10-30 review)
-  for (const p of logs) {
-    for (const [dx, dy, dz] of SIDES) {
-      if (dy === -1 && p.y === minY) continue; // the floor under the base: the soil rule (requireSoil)
-      const n = blockAt({ x: p.x + dx, y: p.y + dy, z: p.z + dz })?.name;
-      if (n && !isLog(n) && !isLeaves(n) && isBuiltBlock(n)) return undefined;
-    }
-  }
+  // a built thing (planks, glass, doors, slabs, stairs, fences, torches, containers ... touching a log): looksBuilt
   if (looksBuilt(blockAt, logs, bottom)) return undefined;
   const ax = bottom.reduce((a, p) => a + p.x, 0) / bottom.length;
   const az = bottom.reduce((a, p) => a + p.z, 0) / bottom.length;

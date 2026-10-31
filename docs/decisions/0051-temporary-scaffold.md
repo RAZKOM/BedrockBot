@@ -50,6 +50,14 @@ navigator has had a pillar move (`allowPlace`) and moves that dig (`allowBreak`)
      blocks; the fell is capped at 1200 + 60 per log ticks once a pillar was needed.
    - L1-L3: the 3-block fall limit counts the fall (air below + 1); a side dig only from natural ground; late
      placements re-checked (B2).
+7. **Second review (2026-10-31).** The cell under the feet is never given up: failed digs back off and retry,
+   and after 6 the column stays pending for the next dig-down (a hostile near, checked every pass, stops it 1
+   block above the ground). The dig-down waits for a placement still settling (a pillar jump, a late
+   confirmation, a compound skill that places). A goto waiting for the dig-down counts as `nav.busy` (a small
+   `Navigator.queue` slot, dropped by `cancel()`), and `status().busy` covers the dig-down. Combat on scaffold
+   strikes but never steps; flee's panic run comes down first. Worn tools are not counted for harvesting scaffold
+   kinds; the navigator's place hook records a cell only if it was free before the click; dispose stops the
+   dig-down; obsidian, ice, sandstone, paths, amethyst and glazed terracotta are not natural terrain.
 
 ## Consequences
 

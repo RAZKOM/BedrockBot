@@ -274,10 +274,11 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
       ...(deps.throwaways ? { throwaways: deps.throwaways } : {}),
       ...(deps.sneak ? { sneak: deps.sneak } : {}),
       cancelled: deps.cancelled,
+      ...(deps.hostileNear ? { hostileNear: deps.hostileNear } : {}),
       logger: log,
     }, copts);
     res.scaffoldRemoved! += c.removed.length;
-    res.scaffoldLeft!.push(...c.left.filter((l) => l.why !== 'interrupted' && l.why !== 'not reached'));
+    res.scaffoldLeft!.push(...c.left.filter((l) => l.why !== 'interrupted' && l.why !== 'not reached' && !l.why.startsWith('pending')));
     return c;
   };
   /**

@@ -82,12 +82,15 @@ returns the full `DigResult` (`DigOptions` / `DigResult` are exported from `skil
 - **Detection** from any log: flood fill over logs of the **same kind** (`oak_log` -> oak; stripped
   logs never count), 26-connected (branches touching only by an edge or corner belong to the tree),
   at most 160 logs (a 2 x 2 trunk 30 high and its branches; 96 before 2026-10-30) and 8 blocks
-  horizontally from the start log. Not a tree (2026-10-30 review): more than 8 columns in the lowest 3 layers (a log
-  wall), or a built block (planks, glass, doors, slabs, stairs, fences, torches ... `isBuiltBlock`) touching a
-  log on any side but the floor under the base. It is a tree when at least 3 leaves
+  horizontally from the start log, and at most 8 columns in the lowest 3 layers (a log wall is not a
+  tree; 2026-10-30 review). It is a tree when at least 3 leaves
   are within 2 blocks of its logs and its lowest logs stand on soil (dirt, grass, podzol, mud ...);
   a log column on planks or without leaves is refused (`minLeaves: 0`, `requireSoil: false` relax
   that). Two trunks side by side are one tree; canopies that touch do not join trees.
+- **Not trees** (`looksBuilt`, 2026-10-31 Realm: a log cabin next to leaves was felled as a 57-log spruce): a bottom
+  layer wider than 2 x 2, a layer with more than 9 logs, mostly sideways logs, or a built block (planks, glass,
+  stairs, slabs, fences, torches, lanterns ...), a stripped log or a door / chest touching a log; and no tree with
+  a log inside `protectRadius` of home is ever listed (`findTrees`).
 - **Felling order**: by y, then by distance from the trunk axis (mean x/z of the lowest layer).
 - **Reach**: the feller digs a log when it is within `DEFAULT_REACH` (5, eye to the closest point of
   the block) and the server's corner limit (digging.md). Standing next to a trunk, the eye is at
@@ -104,6 +107,10 @@ returns the full `DigResult` (`DigOptions` / `DigResult` are exported from `skil
 - **Only logs are dug** besides the pillar's way: `fellTree` refuses any other block unless
   `allowDig(name)` says yes (`--allow-dig`). Leaves are dug only where they are in the pillar's column
   (the head room of the next jump), its own scaffold blocks only when it digs them down.
+
+Test trees (`packs/truth/src/woodShapes.ts`, placed by `truth:tree`): a log column 4..6 high, leaves
+radius 2 without corners at top - 1 and top, a plus shape at top + 1 and top + 2. The lowest leaves
+are at y + h - 2, so the cells next to the trunk are free up to y + 1 and the drops are reachable.
 
 ## Pillar-up (decision 0051)
 
@@ -156,7 +163,12 @@ death pause) leaves its cells there, and:
 - a cancel, and any new skill but the feller (goto, collect, ...), starts the dig-down at once
   (`descendFirst`); a goto or collect waits for it, then walks. A newer call does not stop the dig-down
   (stopAll leaves its digger alone), so a guard chasing a mob first comes down, sneaking, block by block,
-  instead of fighting from a 12-high 1 x 1 column;
+  instead of fighting from a 12-high 1 x 1 column. The waiting goto counts as `nav.busy` (a
+  `Navigator.queue` slot), so `if (nav.busy) cancel()` callers (follow, GotoProcess, pve, night) take it
+  back: a cancel drops it and no stale walk runs after the dig-down; `status().busy` covers the dig-down.
+  The dig-down first waits for a placement still settling (a pillar jump in the air, a late confirmation, a
+  compound skill that places). Combat on scaffold (`skills.onScaffold()`) strikes but never steps, sneaking;
+  flee's panic run comes down first instead of sprinting off the top;
 - the next fell digs any pending scaffold first; a column the bot is no longer on (it fell off, died and
   respawned) is walked onto when it can be, else the bot pillars up beside it with harvestable blocks and
   strips the old column from the top down on the way down.
@@ -176,7 +188,12 @@ stays); else it walks onto the top of a column (no digging or placing on the way
 it digs the topmost cell of a column from the side, only while standing on natural ground (not scaffold)
 no higher than that cell; else it pillars up beside the column (once) and strips it on the way down.
 Anything else stays and is logged as `scaffold: leaving x,y,z (...)`, and counts in `lost`. A dig
-interrupted by another skill is tried again (only dispose or death stop the dig-down).
+interrupted by another skill is tried again (only dispose or death stop the dig-down). The cell under the
+feet is never given up: failed digs (hits, corrections) back off 1 s every 3 tries, and after 6 the column
+stays pending (`pending: ...` in the result, not `lost`) for the next dig-down; a dig-down that would make
+the bot fall more than 3 blocks also keeps the column pending. With a hostile near (checked on every pass)
+the dig-down stops 1 block above the ground. The navigator's place hook records a cell only if it was free
+before the click. Worn tools (the Digger's `toolOk`) do not count when choosing harvestable scaffold kinds.
 
 Collect's second approach to an item goes onto the item's floor only (`near`): the first one's `getToBlock`
 member can already be met where the bot stands, beside the cell but outside the server's pickup box for an
@@ -190,7 +207,7 @@ and 2 below it, which once ended on a 2-block pillar out of pickup reach of an i
 `allowBreak` and `allowPlace`, under the navigator's rules
 (protected area, built blocks, `digPenalty`). On such a walk the navigator digs **natural terrain only**
 (`isNaturalTerrain`: stone kinds, dirt, sand, gravel, ores, leaves, snow ...; never logs, cobblestone,
-planks, glass or anything built: the dig action refuses and the planner routes around), and places
+planks, glass, obsidian, ice, sandstone, paths, amethyst, glazed terracotta or anything built: the dig action refuses and the planner routes around), and places
 only harvestable scaffold kinds. Bounds: `hardBlocks` (8) blocks dug + placed (`block_budget` beyond);
 per walk min(`hardTicks` 300, max(120, the collect's timeout)) ticks; per collect call at most `hardWalks`
 (2) walks within about the caller's own timeout; one walk per item actor across collects (the sweeps run
@@ -200,14 +217,6 @@ The blocks the walk placed (also those confirmed late: the walk waits for the re
 `BotSkills.scaffold` and are dug again after the pickup. `CollectResult` adds `hardWalks`,
 `scaffoldPlaced`, `scaffoldLeft`.
 
-- **Not trees** (`looksBuilt`, 2026-10-31 Realm: a log cabin next to leaves was felled as a 57-log spruce): a bottom
-  layer wider than 2 x 2, a layer with more than 9 logs, mostly sideways logs, or a built block (planks, glass,
-  stairs, slabs, fences, torches, lanterns ...), a stripped log or a door / chest touching a log; and no tree with
-  a log inside `protectRadius` of home is ever listed (`findTrees`).
-
-Test trees (`packs/truth/src/woodShapes.ts`, placed by `truth:tree`): a log column 4..6 high, leaves
-radius 2 without corners at top - 1 and top, a plus shape at top + 1 and top + 2. The lowest leaves
-are at y + h - 2, so the cells next to the trunk are free up to y + 1 and the drops are reachable.
 
 ## Collect (4.4)
 
