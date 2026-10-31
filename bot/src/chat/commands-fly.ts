@@ -558,8 +558,11 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         const r = await p.result;
         if (r.reason === 'interrupted' || r.reason === 'replaced') return;
         reply(flyEndLine(r));
-        // on the goal itself (an exact landing that stood on it): nothing to walk
-        const onGoal = r.ok && r.target.cell?.kind === 'goal' && r.report?.onTarget === true;
+        // on the goal itself (an exact landing that stood on it): nothing to walk. The server's slide goes on after the
+        // settle (bds-fly: 0.6 to 1.0 blocks more, once to a 3x3 platform's edge, held there by the sneak): wait for
+        // the body to stop, and walk back onto the goal block when it ended more than 0.8 from its centre
+        for (let i = 0; i < 40 && Math.hypot(loop.state.vel.x, loop.state.vel.z) > 0.003; i++) await loop.waitTicks(1);
+        const onGoal = r.ok && r.target.cell?.kind === 'goal' && r.report?.onTarget === true && hdist(loop.state.pos, goalTarget) <= 0.8;
         if (onGoal) return;
         const walkable = r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing';
         if (!walkable) return;
