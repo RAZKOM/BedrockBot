@@ -28,6 +28,8 @@ export interface FallPolicy {
   noWater?: { x: number; y: number; z: number; r: number };
   /** Why damaging falls (and clutches) are off, for the reply when a goto fails ("health 9 with margin 8"). */
   blocked?: string;
+  /** Review L1: landing cells (nav/grid.ts cellKey) of drops the step-off check refused lately: not planned. */
+  refused?: number[];
 }
 
 /** Defaults of the planner-side numbers. */

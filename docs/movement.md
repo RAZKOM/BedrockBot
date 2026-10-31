@@ -266,7 +266,7 @@ B4): the fall would kill, leave less than `fallMargin`, or cost more than half o
 (health + absorption - margin); never in creative or spectator; inside home's `protectRadius` and in a fight
 (the combat controller busy, or something hurt the bot in the last 3 s outside a fall landing) only when the
 fall would kill, so the weapon stays in hand otherwise. Nothing is armed while the fall is slowed where the
-model sees no landing (review B3): a ladder or vine at the body (`climbableAt`), a cobweb, scaffolding,
+model sees no landing (review B3): a ladder or vine in the feet cell (`onClimbable`, as the physics and the server count it: a vine wall beside the fall slows nothing, review M2), a cobweb, scaffolding,
 powder snow or a berry bush in the body's cells, a honey block beside it (the wall slide), Slow Falling
 (`mob_effect` id 27 for the own runtime id); they also end the counted fall, as a teleport and a body that is
 not ready do. When it clutches and a water bucket is in the hotbar (`clutch` setting on, not in the Nether:

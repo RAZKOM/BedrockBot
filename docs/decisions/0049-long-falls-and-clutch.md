@@ -31,7 +31,7 @@ B (the elytra glide down) went to another track (BF, the flight rewrite) and is 
    drop. Off while the health is unknown, the bot burns or a hostile is within 16 blocks; never in the End
    (`maxDrop` 1), never onto slime or a bed, never into water (yet), never through a ladder or vine. Every
    tick the body stands before a planned long drop the navigator asks the live policy again (`dropCheck`):
-   health, hostiles, the bucket and the landing may have changed; refused, it stops and re-plans.
+   health, hostiles, the bucket and the landing may have changed; refused, it stops and re-plans without that drop for 200 ticks. Until a damaging landing's health packet arrives (at most 40 ticks), its predicted damage counts against the budget, so a second chained drop is not taken on the stale health (review M1).
 3. **The clutch is one reactive controller, also for planned drops.** The `FallGuard` simulates the rest
    of every fall with the movement model; when the landing matters (review B4: it would kill, leave less
    than the margin, or cost more than half of what is above it; never in creative, in the base or in a fight

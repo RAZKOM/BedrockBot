@@ -29,6 +29,7 @@ export function explainFallRefusal(
     fallPolicy({ enabled: true, health: 20, healthKnown: true, absorption: 0, margin: st.fallMargin, epf: 0, burning: false, hostileDistance: Infinity, bucket: false, clutchOn: false, waterWorks: true, clutchMax: st.clutchMaxDrop })!;
   const loose: FallPolicy = { ...base, hpBudget: 1000, clutch: false };
   delete loose.blocked;
+  delete loose.refused; // the drops the step-off check refused are what the note explains
   if (!start) return undefined;
   // a small in-thread budget (review: never block the main thread for long): the note is a courtesy
   const res = findPath(nav.grid, start, goal, { ...nav.planOptions(opts), falls: loose, maxMs: EXPLAIN_MS, maxNodes: EXPLAIN_NODES });

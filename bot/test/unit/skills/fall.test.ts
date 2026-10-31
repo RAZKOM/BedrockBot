@@ -318,6 +318,40 @@ describe('closed loop: the navigator drops 12 blocks; the FallGuard clutches', (
     skills.dispose();
   });
 
+  it('M1: two chained 13-block drops at 20 HP (margin 8): the second is refused while the first landing\'s health packet has not come', async () => {
+    // a tower (feet -34) on a wide step (feet -47) on the ground (feet -60): 13 + 13 blocks, 10 HP each
+    const g = flatGen({ x: -32, y: -64, z: -32 }, { x: 72, y: 40, z: 64 });
+    g.fill({ x: 0, y: -60, z: 0 }, { x: 9, y: -48, z: 10 }, 'stone');
+    g.fill({ x: 0, y: -47, z: 0 }, { x: 6, y: -35, z: 10 }, 'stone');
+    const h = harness({ x: 3, y: -34, z: 5 });
+    const self = { health: 20, food: 20, healthKnown: true };
+    const skills = new BotSkills({ loop: h.loop, world: { ...fakeWorld(g), self }, maxFailures: 1 });
+    h.conn.tick(3);
+    let res: { ok: boolean } | undefined;
+    void skills.goto({ type: 'block', p: { x: 30, y: -60, z: 5 } }).then((r) => (res = r));
+    let minFeet = Infinity;
+    let landed = -1;
+    let budgetAfterLanding: number | undefined;
+    for (let t = 0; t < 800 && res === undefined; t++) {
+      h.conn.tick();
+      await flush();
+      const y = h.loop.state.pos.y;
+      minFeet = Math.min(minFeet, y);
+      if (landed < 0 && h.loop.state.onGround && y < -46.9) {
+        landed = t;
+      }
+      if (landed >= 0 && t === landed + 2) {
+        budgetAfterLanding = skills.falls.policy()!.hpBudget; // the guard sees the landing on the next tick
+      }
+      if (landed >= 0 && t === landed + 30) self.health = 10; // the landing's health packet, 30 ticks late
+    }
+    expect(landed).toBeGreaterThan(0);
+    expect(budgetAfterLanding).toBeCloseTo(2, 3); // 20 still shown - 10 pending - 8
+    expect(minFeet).toBeGreaterThan(-47.1); // the first drop taken, never the second
+    expect(res?.ok).toBe(false);
+    skills.dispose();
+  });
+
   /** A FallGuard over a GenWorld with a fake inventory / hotbar / server: the click places water like BDS does. */
   function clutchRig(g: GenWorld, start: Vec3, opts: { bucket?: boolean; health?: number; gameMode?: string; keepFullBucket?: boolean; throwOnPickup?: boolean } = {}) {
     const h = harness(start);
@@ -372,11 +406,11 @@ describe('closed loop: the navigator drops 12 blocks; the FallGuard clutches', (
   }
 
   /** A fall from feet y over a stone block at (0, -61, 0) in a flat world, run for `ticks`. */
-  async function fallRun(y: number, opts: Parameters<typeof clutchRig>[2] & { setup?: (g: GenWorld) => void; before?: (r: ReturnType<typeof clutchRig>) => void; ticks?: number } = {}) {
+  async function fallRun(y: number, opts: Parameters<typeof clutchRig>[2] & { setup?: (g: GenWorld) => void; before?: (r: ReturnType<typeof clutchRig>) => void; ticks?: number; x?: number } = {}) {
     const g = flatGen({ x: -16, y: -64, z: -16 }, { x: 32, y: 60, z: 32 });
     g.put(0, -61, 0, 'stone');
     opts.setup?.(g);
-    const r = clutchRig(g, { x: 0.5, y, z: 0.5 }, opts);
+    const r = clutchRig(g, { x: opts.x ?? 0.5, y, z: 0.5 }, opts);
     opts.before?.(r);
     for (let t = 0; t < (opts.ticks ?? 120); t++) {
       r.h.conn.tick();
@@ -439,6 +473,14 @@ describe('closed loop: the navigator drops 12 blocks; the FallGuard clutches', (
 
   describe('review fixes: when the FallGuard does not clutch, and how it always ends', () => {
   const placeClicks = (c: { held: string }[]) => c.filter((k) => k.held === 'water_bucket').length;
+
+  it('M2: a vine wall beside the fall (not in the feet cell) slows nothing: the clutch still fires', async () => {
+    // the body at x 0.75 (box 0.45 .. 1.05), vines in column x 1 all the way down: the server counts the fall in full
+    const r = await fallRun(-30, { x: 0.75, setup: (g) => g.fill({ x: 1, y: -60, z: 0 }, { x: 1, y: -35, z: 0 }, 'vine', { vine_direction_bits: 8 }) });
+    expect(placeClicks(r.clicks)).toBe(1);
+    expect(r.guard.last).toMatchObject({ placed: true, recovered: true });
+    r.guard.dispose();
+  });
 
   it('B3: no clutch through a ladder column, a cobweb, or with Slow Falling', async () => {
     const ladder = await fallRun(-30, { setup: (g) => g.fill({ x: 0, y: -60, z: 0 }, { x: 0, y: -40, z: 0 }, 'ladder', { facing_direction: 2 }), ticks: 300 });

@@ -15,7 +15,7 @@
 // (the follower's swim move holds forward through the fall; the reactive clutch and the water landing
 // are the FallGuard's).
 import { dropCost, type PathCosts } from '../nav/costs.ts';
-import type { NavGrid } from '../nav/grid.ts';
+import { cellKey, type NavGrid } from '../nav/grid.ts';
 import { fallDamage } from './damage.ts';
 import { clutchHelps, type FallPolicy } from './policy.ts';
 import { clutchTarget } from './waterlog.ts';
@@ -58,6 +58,7 @@ export function longDrops(grid: NavGrid, costs: PathCosts, p: FallPolicy, x: num
       if (grid.climbable(x, y, z) === true) return false; // a ladder / vine catches the body: no fall (the climb moves)
       continue;
     }
+    if (p.refused?.includes(cellKey(x, y, z))) return false; // review L1: refused at the step off lately
     const fall = f0 - f1;
     const own = f1 > y + 1e-6; // a partial floor in the feet cell (a bottom slab), else the block below
     const fy = own ? y : y - 1;

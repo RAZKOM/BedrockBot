@@ -195,7 +195,7 @@ walks it like any drop (creep off the edge, let go of forward in the air), and t
 its own rule (the planned clutch drop is that reactive clutch). Every tick the body still stands before a
 long drop the navigator asks the live policy again (`Navigator.dropCheck` = `FallGuard.acceptsDrop`, the
 same scan): health dropped, a hostile came, the bucket left the hotbar, the landing changed: the body stops
-and re-plans. While the water is picked up the follower holds still (`Navigator.pauseFollow`), and re-plans
+and re-plans, and that landing stays out of the plans for 200 ticks (`FallPolicy.refused`, review L1). Until a damaging landing's health packet arrives (or for 40 ticks), its predicted damage counts against the budget (review M1: two chained drops on a laggy server). While the water is picked up the follower holds still (`Navigator.pauseFollow`), and re-plans
 wait until the flow has receded (`Navigator.holdPlans`, 16 ticks after the pickup). A ladder or vine in the
 column ends the scan (no fall: the climb moves).
 

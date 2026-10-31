@@ -30,10 +30,10 @@ import { classify as classifyEntity } from '../combat/hostiles.ts';
 import { clickBlockTransaction } from '../container/chest.ts';
 import { EYE_HEIGHT } from '../dig/look.ts';
 import type { InputLoop, InputLoopState } from '../input/inputLoop.ts';
-import { PHYSICS } from '../input/physics.ts';
+import { onClimbable, PHYSICS } from '../input/physics.ts';
 import type { BlockQuery, BodyState, LiquidCell } from '../input/types.ts';
 import { DEFAULT_COSTS, type PathCosts } from '../nav/costs.ts';
-import type { NavGrid } from '../nav/grid.ts';
+import { cellKey, type NavGrid } from '../nav/grid.ts';
 import { acceptsDrop } from './plan.ts';
 import { closestDistance, cornerDistance, SERVER_CLICK_REACH, wireItemOf } from '../place/place.ts';
 import { BurnWatch } from '../survival/fire.ts';
@@ -60,6 +60,10 @@ const RECOVER_TRIES = 6;
 const RECOVER_GAP = 5;
 /** Ticks after a pickup the flow around the landing takes to recede (the navigator's re-plans wait). */
 const SETTLE_TICKS = 16;
+/** Review M1: ticks a landing's predicted damage counts against the budget when no health drop shows it. */
+const PENDING_TICKS = 40;
+/** Review L1: ticks a drop the step-off check refused stays out of the plans. */
+const REFUSED_DROP_TICKS = 200;
 /** Longest the landed / recovering phase may last before the guard gives up (review H1). */
 const RECOVER_TIMEOUT = 100;
 /** A mob or anything else hurt the bot within this many ticks: in a fight (no clutch unless the fall kills). */
@@ -154,6 +158,10 @@ export class FallGuard {
   private hurtAt = -Infinity;
   /** Tick of the last landing from more than 3 blocks (its health drop is the fall, not a fight). */
   private fallLandAt = -Infinity;
+  /** Review M1: damage of the last landing whose health packet has not come yet (subtracted from the health in the policy). */
+  private pendingDamage = 0;
+  /** Review L1: landing cells (cellKey) whose drop the step-off check refused, and until which tick. */
+  private readonly refusedDrops = new Map<number, number>();
   /** Slow Falling on the bot (mob_effect for its own runtime id). */
   private slowFalling = false;
   private effectSource: unknown;
@@ -229,18 +237,23 @@ export class FallGuard {
   /** The fall is slowed or caught where the model sees no landing: a climbable, cobweb, scaffolding, a honey wall, powder snow, Slow Falling (review B3). */
   private slowed(s: { pos: Vec3 }): boolean {
     if (this.slowFalling) return true;
-    const q = this.d.loop.world;
+    // a ladder / vine only in the feet cell, as the physics and the server count it (review M2: a vine wall beside
+    // the fall does not slow it)
+    if (onClimbable(this.d.loop.world, s.pos)) return true;
     const g = this.d.grid;
-    const w = PHYSICS.width / 2 + 0.1; // a honey wall slides the body from beside it
+    const body = PHYSICS.width / 2;
+    const wide = body + 0.1; // a honey wall slides the body from beside it
     const y0 = Math.floor(s.pos.y - 0.5);
     const y1 = Math.floor(s.pos.y + PHYSICS.height);
-    for (let x = Math.floor(s.pos.x - w); x <= Math.floor(s.pos.x + w); x++)
-      for (let z = Math.floor(s.pos.z - w); z <= Math.floor(s.pos.z + w); z++)
+    for (let x = Math.floor(s.pos.x - wide); x <= Math.floor(s.pos.x + wide); x++)
+      for (let z = Math.floor(s.pos.z - wide); z <= Math.floor(s.pos.z + wide); z++) {
+        const inBody = x >= Math.floor(s.pos.x - body) && x <= Math.floor(s.pos.x + body) && z >= Math.floor(s.pos.z - body) && z <= Math.floor(s.pos.z + body);
         for (let y = y0; y <= y1; y++) {
-          if (q.climbableAt?.(x, y, z) === true) return true;
           const n = g.cls(x, y, z)?.name;
-          if (n !== undefined && SLOWING_NAMES.has(n)) return true;
+          if (n === undefined) continue;
+          if (n === 'honey_block' || (inBody && SLOWING_NAMES.has(n))) return true;
         }
+      }
     return false;
   }
 
@@ -266,7 +279,10 @@ export class FallGuard {
 
   /** Review B1 / Medium: the planned long drop from `from` into `to` still holds with the live policy (fall/plan.ts acceptsDrop). */
   acceptsDrop(from: { y: number; feet: number }, to: { x: number; y: number; z: number }, costs: PathCosts = DEFAULT_COSTS): boolean {
-    return acceptsDrop(this.d.grid, costs, this.policy(), from, to);
+    const ok = acceptsDrop(this.d.grid, costs, this.policy(), from, to);
+    // review L1: a refused drop stays out of the re-plans for a while (no plan / refuse loop on a borderline budget)
+    if (!ok) this.refusedDrops.set(cellKey(to.x, to.y, to.z), this.ticks + REFUSED_DROP_TICKS);
+    return ok;
   }
 
   get settling(): boolean {
@@ -330,9 +346,10 @@ export class FallGuard {
     const st = this.settings();
     const self = this.d.world.self;
     const worn = this.d.world.inventory?.window(120)?.slots ?? [];
-    return fallPolicy({
+    for (const [k, until] of this.refusedDrops) if (until <= this.ticks) this.refusedDrops.delete(k);
+    const p = fallPolicy({
       enabled: st.longFalls,
-      health: self.health,
+      health: self.health - this.pendingDamage, // review M1: a landing whose health packet is still on its way
       healthKnown: self.healthKnown === true,
       absorption: self.absorption ?? 0,
       margin: st.fallMargin,
@@ -346,6 +363,8 @@ export class FallGuard {
       noDamage: this.noDamage(),
       ...(this.protect() ? { noWater: this.protect()! } : {}),
     });
+    if (p && this.refusedDrops.size) p.refused = [...this.refusedDrops.keys()]; // review L1
+    return p;
   }
 
   // ---- the clutch --------------------------------------------------------------------------------
@@ -367,13 +386,25 @@ export class FallGuard {
     }
     // a health drop that is not a fall landing (the fall guard's own counted fall is 0 on the ground then): in a fight
     const h = this.d.world.self.health;
-    if (this.lastHealth !== undefined && h < this.lastHealth && this.ticks - this.fallLandAt > 20) this.hurtAt = this.ticks;
+    if (this.lastHealth !== undefined && h < this.lastHealth) {
+      if (this.ticks - this.fallLandAt > 20) this.hurtAt = this.ticks;
+      else this.pendingDamage = 0; // review M1: the landing's health packet came; the health is current again
+    }
     this.lastHealth = h;
+    if (this.pendingDamage > 0 && this.ticks - this.fallLandAt > PENDING_TICKS) this.pendingDamage = 0;
     // the fall the server counts: downward movement since the body last stood, swam or climbed (a ladder,
     // cobweb, scaffolding, honey wall or Slow Falling ends it too: review B3)
     const slowed = !s.onGround && this.slowed(s);
     const grounded = s.onGround || s.inWater || s.inLava || s.gliding || slowed;
-    if (grounded && this.counted > 3) this.fallLandAt = this.ticks; // the health drop of this landing is the fall's
+    if (grounded && this.counted > 3) {
+      this.fallLandAt = this.ticks; // the health drop of this landing is the fall's
+      // review M1: until its health packet arrives, the damage this landing will cost counts against the budget
+      if (s.onGround && !s.inWater && this.phase === 'idle') {
+        const b = this.landingBlock(s.pos);
+        const name = b ? this.d.grid.cls(b.x, b.y, b.z)?.name : undefined;
+        this.pendingDamage = damageForCounted(this.counted, landingFactor(name), this.factor());
+      }
+    }
     if (grounded) {
       this.counted = 0;
       this.refusedNote = undefined; // a refusal is noted once per fall
