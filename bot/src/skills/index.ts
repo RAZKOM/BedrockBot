@@ -437,7 +437,6 @@ export class BotSkills implements Skills {
     if (noSurface) return Promise.resolve({ ok: false, reason: noSurface });
     // Synchronous start (callers check nav.busy right after the call).
     const token = this.begin('goto');
-<<<<<<< HEAD
     if (this.descent) {
       // decision 0051: standing on scaffold: dig it down first, then walk. The waiting goto counts as nav.busy, and a
       // cancel (or a newer call) drops it: `if (nav.busy) cancel()` callers take it back as from a walking one.
@@ -456,16 +455,13 @@ export class BotSkills implements Skills {
             resolve({ ok: false, reason: 'interrupted' });
             return;
           }
-          const r = await this.nav.goto(goal, opts).then((x) => this.surfaceAndRetry(x, token, goal, opts));
+          const r = await this.nav.goto(goal, opts).then((x) => this.surfaceAndRetry(x, token, goal, opts)).then((x) => (!x.ok && x.reason === 'unreachable' ? this.withFallNote(goal, x, opts) : x));
           this.end(token);
           resolve(r);
         });
       });
     }
-    const p = this.nav.goto(goal, opts).then((r) => this.surfaceAndRetry(r, token, goal, opts));
-=======
     const p = this.nav.goto(goal, opts).then((r) => this.surfaceAndRetry(r, token, goal, opts)).then((r) => (!r.ok && r.reason === 'unreachable' ? this.withFallNote(goal, r, opts) : r)); // Track BF: swim up; Track BI: say why a long fall was refused
->>>>>>> main
     void p.finally(() => {
       this.end(token);
     });
