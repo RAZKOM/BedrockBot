@@ -268,7 +268,11 @@ interface H {
   /** Hold the next goto until `release` is called (the rescan test). */
   hold: boolean;
   release: ((r: SkillResult) => void) | undefined;
-  lastGoto: { actions: { dig: number }; segments: number; reached?: { index: number } } | undefined;
+  lastGoto: { actions: { dig: number }; segments: number; reached?: { index: number }; plans?: { status: string; noProgress?: boolean; unknown?: boolean }[] } | undefined;
+  /** The fake planner's last plan when no member has a path (default: a no-progress plan over loaded world). */
+  failPlan: { status: string; noProgress?: boolean; unknown?: boolean };
+  /** Blocks the fake planner's failing goto dug anyway (before it gave up). */
+  failDigs: number;
   rescan: number;
   ticks: (() => void)[];
   slots: (ItemStack | null)[];
@@ -290,6 +294,8 @@ function harness(w: World, start: Vec3 = { x: 0, y: 0, z: 0 }): H {
     hold: false,
     release: undefined,
     lastGoto: undefined,
+    failPlan: { status: 'partial', noProgress: true },
+    failDigs: 0,
     rescan: 0,
     ticks: [],
     slots: [{ name: 'iron_pickaxe', networkId: 1, count: 1, metadata: 0 }],
@@ -327,7 +333,7 @@ function harness(w: World, start: Vec3 = { x: 0, y: 0, z: 0 }): H {
           }
         });
         if (best < 0) {
-          h.lastGoto = { actions: { dig: 0 }, segments: 0 };
+          h.lastGoto = { actions: { dig: h.failDigs }, segments: 0, plans: [h.failPlan] };
           return Promise.resolve({ ok: false, reason: 'unreachable' });
         }
         const mg = g.goals[best]!;
@@ -523,7 +529,7 @@ describe('MineTask in mode baritone: one composite goal, the reached ore mined',
     h.deps.skills.goto = async (g, o) => {
       if (g.type === 'any' && first) {
         first = false;
-        h.lastGoto = { actions: { dig: 0 }, segments: 2, plans: [{ status: 'found' }, { status: 'none' }] } as H['lastGoto'];
+        h.lastGoto = { actions: { dig: 0 }, segments: 2, plans: [{ status: 'found' }, { status: 'none' }] };
         return { ok: false, reason: 'unreachable' };
       }
       return goto0(g, o);
@@ -549,6 +555,24 @@ describe('MineTask in mode baritone: one composite goal, the reached ore mined',
     expect(t.stats.unreachable).toEqual([{ x: 3, y: 1, z: 0 }]); // the first round: the closest, for the session (Baritone)
     expect(t.stats.blacklisted).toHaveLength(ores.length); // the second: the other 7 too, for this run
     expect(t.stats.failures).toBe(0);
+    // not for a failure that is no real "no path": a plan over unloaded world, a goto that timed out; and not when
+    // blocks were dug since the last one (the cell's surroundings changed): one member per round as before
+    for (const variant of ['unknown', 'timeout', 'dug'] as const) {
+      const w2 = wall();
+      for (const p of ores) w2.load(p, 'iron_ore');
+      const h2 = harness(w2);
+      for (const p of ores) h2.unreachable.add(key(p));
+      if (variant === 'unknown') h2.failPlan = { status: 'partial', noProgress: true, unknown: true };
+      if (variant === 'dug') h2.failDigs = 1;
+      const deps = { ...h2.deps, explore: () => Promise.resolve(false), exploredBlocks: () => 0 };
+      if (variant === 'timeout') {
+        const sk = deps.skills;
+        deps.skills = { ...sk, goto: async (g, o) => ((await sk.goto(g, o)).ok ? { ok: true } : { ok: false, reason: 'timeout' }) };
+      }
+      const t2 = new MineTask(deps);
+      expect(await t2.start({ block: 'iron_ore', count: 1 }), variant).toBe('none_left');
+      expect(t2.stats.calcFailed, variant).toBe(ores.length);
+    }
   });
 
   it('the rescan on the way: every rescanTicks the candidates are pruned again; the target gone cancels the walk and a new composite follows', async () => {

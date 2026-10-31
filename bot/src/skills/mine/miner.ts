@@ -180,7 +180,7 @@ export interface MineSkills {
   collect(radius: number, timeoutTicks: number, opts?: CollectOptions): Promise<CollectResult>;
   cancel(): void;
   /** The navigator's report of the last goto (actions.dig counts its tunnel digs; segments 0 = it never moved; Track BD: `reached` = the member of an `any` goal the walk ended in). */
-  status?(): { lastGoto?: { actions: { dig: number; place?: number }; segments?: number; reached?: { index: number } | undefined; plans?: readonly { status: string }[] } | undefined };
+  status?(): { lastGoto?: { actions: { dig: number; place?: number }; segments?: number; reached?: { index: number } | undefined; plans?: readonly { status: string; noProgress?: boolean; unknown?: boolean }[] } | undefined };
 }
 
 export interface MineDeps {
@@ -305,7 +305,7 @@ export class MineTask {
   private gen = 0;
   private readonly fails = new Map<string, number>();
   private readonly black = new Set<string>();
-  /** Track BD: the feet cell of the last composite goto that never got a path (calcFailed), until one walks. */
+  /** Track BD: the feet cell (and the dig tallies) of the last composite goto that found no path at all, until one walks. */
   private calcFailedAt: string | undefined;
   /** Track Z: ores found unreachable (one plan without progress): skipped for the rest of the session. */
   private readonly unreachable = new Set<string>();
@@ -962,8 +962,12 @@ export class MineTask {
         // two ores floating over the bot cost 3 failed gotos otherwise): no path to any of them: blacklist the presumably
         // unreachable closest one
         this.stats.calcFailed++;
-        const at = key(feet);
-        if (this.calcFailedAt === at) {
+        // a real "no path": the navigator gave up on an exhaustive search or a no-progress one over loaded world (not
+        // a timeout, chunks still loading); the same cell with nothing dug since (a direct dig, a tunnel) repeats it
+        const last = rep?.plans?.at(-1);
+        const noPath = g.reason === 'unreachable' && !!last && (last.status === 'none' || (!!last.noProgress && !last.unknown));
+        const at = noPath ? `${key(feet)}|${this.stats.mined}|${this.stats.tunnelled}` : undefined;
+        if (at && this.calcFailedAt === at) {
           // the second in a row from the same cell: the search covered every member and went nowhere; one member
           // blacklisted per round spins (Realm 2026-10-31: 64 members, a round every 8 s for 15 minutes, the bot
           // never moved): all of them for this run, the next round takes other ores or explores

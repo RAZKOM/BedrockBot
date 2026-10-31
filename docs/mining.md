@@ -358,9 +358,11 @@ half of `shaftRule`, shared).
    (3 blacklist it), so the same drop goal does not come back forever.
 5. Failures: a goto that never got a segment or whose last plan found no path (no path to any member)
    blacklists the candidate nearest the feet by straight line for the session (Baritone
-   `blacklistClosestOnFailure`); a second such goto in a row from the same feet cell blacklists every
-   member of its composite for the run (ours, 2026-10-31: one member per round spun the bot in place for
-   15 minutes over 64 members; the next round takes other ores or explores); any other failure
+   `blacklistClosestOnFailure`); a second such goto in a row from the same feet cell with nothing dug since,
+   both real "no path" answers (`unreachable` after an exhaustive plan or a no-progress one over loaded world;
+   not a timeout or unloaded chunks), blacklists every member of its composite for the run (ours,
+   2026-10-31: one member per round spun the bot in place for 15 minutes over 64 members; the next round
+   takes other ores or explores); any other failure
    counts against the heading member, 3 failures blacklist it (ours).
 6. Nothing left after prune: "mine until n" (next section).
 

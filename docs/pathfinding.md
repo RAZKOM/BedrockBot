@@ -405,7 +405,7 @@ Block updates at cells the running goto's actions change never trigger re-plans.
 | an action fails or times out (dig 600 ticks per block, use / place 100) | re-plan (`action`), failure + 1; the cell is not dug / pillared in / opened again during this goto; after 2 failed places the goto plans without pillaring |
 | a failure while the body is not on a safe node (in water / lava, airborne, no standable node) | retreat first: steer to the last safe node (forward, jump in water or against a wall) for up to 60 ticks |
 | no standable node under the body, or the best node is the start (Track BA: also a `no_progress` plan, no partial end 5+ blocks out) | wait 20 ticks, failure + 1 |
-| the retry after a `no_progress` plan (all loaded) would start from the same node with no block change the planner reads since (`worldGen`) | `unreachable` at once, no search (2026-10-31: the same 2-second search ran 3 times per goto, every 8 s for 15 minutes) |
+| the retry after a `no_progress` plan (all loaded) would start from the same node, by the same planner (worker / in-thread), with no block change the planner reads since (`worldGen`: block updates, re-sent sections) | `unreachable` at once, no search (2026-10-31: the same 2-second search ran 3 times per goto, every 8 s for 15 minutes). Not after the 40 ms in-thread stand-in while the worker starts (its retry runs in the worker), not for a `runAway` from a moving threat, and not once a plan with a path came back in between. Changes outside `worldGen` do not count: mob avoidance costs, a new tool or more throwaway blocks (the next goto plans with them) |
 | 3 failures | `unreachable` |
 | the main search says `none`, or a `block` goal is a cell nobody can stand in | `unreachable` at once |
 

@@ -228,4 +228,48 @@ describe('closed loop with tiny node budgets (main\'s scoring: unreachable after
     expect(rep3.failures).toBe(2);
     expect(rep3.plans).toHaveLength(2);
   });
+
+  it('the no-retry skip: not after the in-thread stand-in search while the worker starts; not once a plan went somewhere in between', async () => {
+    const pen = () => {
+      const w = flatGen();
+      w.fill({ x: -3, y: -60, z: -3 }, { x: 3, y: -58, z: 3 }, 'stone');
+      w.fill({ x: -2, y: -60, z: -2 }, { x: 2, y: -58, z: 2 }, 'air');
+      w.fill({ x: -3, y: -60, z: 0 }, { x: -3, y: -59, z: 0 }, 'air');
+      return w;
+    };
+    // a worker attached but never ready: every plan is the in-thread stand-in, retried as before (3 failures)
+    {
+      const { conn, loop } = harness({ x: 0.5, y: FEET, z: 0.5 });
+      const skills = new BotSkills({ loop, world: fakeWorld(pen()), path: { maxNodes: 2 } });
+      const nav = skills.nav as unknown as { planner: unknown; plannerThreads: () => number };
+      nav.planner = { started: true, ready: false, start() {}, stop() {}, dispose() {}, touchCached() {} };
+      nav.plannerThreads = () => 1;
+      conn.tick(5);
+      const p = skills.goto({ type: 'block', p: { x: 40, y: FEET, z: 0 } });
+      for (let t = 0; t < 4000 && skills.nav.busy; t++) conn.tick();
+      expect(await p).toEqual({ ok: false, reason: 'unreachable' });
+      const rep = skills.status().lastGoto!;
+      expect(rep.plans.every((q) => q.via === 'thread' && q.noProgress)).toBe(true);
+      expect(rep.failures).toBe(3);
+      nav.planner = undefined;
+    }
+    // a plan that went somewhere clears the record: a no-progress plan from the same node after it is retried
+    {
+      const w = pen();
+      const { conn, loop } = harness({ x: 0.5, y: FEET, z: 0.5 });
+      const skills = new BotSkills({ loop, world: fakeWorld(w), path: { maxNodes: 2 } });
+      const nav = skills.nav as unknown as { active: { noProgress: unknown } | undefined; onMainResult: (...args: unknown[]) => boolean };
+      conn.tick(5);
+      const p = skills.goto({ type: 'block', p: { x: 40, y: FEET, z: 0 } });
+      conn.tick(2);
+      const a = nav.active!;
+      expect(a.noProgress).toBeDefined(); // the first plan went nowhere
+      // a plan with a path comes back (as from the worker after a block change): the record goes
+      const at = { x: 0, y: FEET, z: 0, feet: FEET, move: 'start' as const, cost: 0 };
+      nav.onMainResult(a, { status: 'partial', path: [at, { ...at, x: 1, move: 'walk' as const }], cost: 4, expanded: 9, ms: 0, unknown: false, limited: true }, { s: undefined, kind: 'main', via: 'thread', reason: 'retry', tick: 0, slices: 0 });
+      expect(a.noProgress).toBeUndefined();
+      skills.cancel();
+      await p;
+    }
+  });
 });
