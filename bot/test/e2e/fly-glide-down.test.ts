@@ -130,7 +130,10 @@ describe.skipIf(!E2E)('@bds fly: glide down and ledge takeoff (Track BH)', () =>
     const cz = area.z + 100;
     await pillar(cx, cz, 12);
     const goal = { x: cx, y: F, z: cz + 150 };
-    const r = await run('noreach', { x: cx + 0.5, y: F + 12, z: cz + 0.5 }, `!goto ${goal.x} ${goal.y} ${goal.z}`, { rockets: 0, end: (s) => s.startsWith('fly: no glide down') });
+    // Track BI: with longFalls on, the walk drops the 12 blocks (about 8 HP) and arrives; off, it has no way down
+    const falls = bot!.settings.get('longFalls');
+    bot!.settings.set('longFalls', false);
+    const r = await run('noreach', { x: cx + 0.5, y: F + 12, z: cz + 0.5 }, `!goto ${goal.x} ${goal.y} ${goal.z}`, { rockets: 0, end: (s) => s.startsWith('fly: no glide down') }).finally(() => bot!.settings.set('longFalls', falls));
     expect(r.end).toMatch(/^fly: no glide down to /);
     await until(() => bot!.said.slice(-3).find((s) => s !== r.end && arrivedOrFailed(s)), 20_000, 'the walk failure').catch(() => undefined);
     notes.push(`noreach after: ${bot!.said.slice(-3).join(' | ')}`);

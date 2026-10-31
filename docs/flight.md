@@ -473,6 +473,9 @@ brain's `ledgeTakeoff`:
 
 The finish log line says `ledge takeoff (gliding X under the edge)`.
 
+The step-off is flight input, not a navigator move, so Track BI's `dropCheck` never refuses it. The water
+bucket clutch never arms while a flight runs (`FallGuard.intended` is wired to `controller.active`).
+
 The dive from a standstill, measured on glideVelocity:
 
 - reaching 0.9 blocks a tick costs about 12.5 blocks of drop at any pitch up to 20;

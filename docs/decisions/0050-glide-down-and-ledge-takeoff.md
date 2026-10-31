@@ -76,4 +76,9 @@ The takeoff always jumped. The Realm logs of 2026-10-31 showed what went wrong:
 - `GotoReport` has a `why` (the navigator's reason for a failed goto). This is the one additive navigator
   line of this track.
 - `BotSkills.goto` has a third retry after the swim-up: `unproneAndRetry`.
+- With Track BI ([0049](0049-long-falls-and-clutch.md)): the ledge step-off is flight input, not a
+  navigator move, so `Navigator.dropCheck` never sees it. The walk to the edge cell is a goto on the
+  platform with no drop. The water-bucket clutch never arms while a flight runs: `FallGuard.intended` is a
+  new hook, wired to `controller.active`. The goto chain is swim-up, then unprone, then Track BI's fall
+  note. The glide-down fallback wraps `pve.walk` / `pve.come` outside that chain, so it sees the noted result.
 - Four settings: `flyLedgeTakeoff`, `glideDown`, `glideDownMinDrop`, `glideDownMinDistance`.

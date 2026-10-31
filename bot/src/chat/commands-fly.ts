@@ -189,7 +189,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const target = { type: 'near' as const, p: { x: goal.x + 0.5, y: goal.y, z: goal.z + 0.5 }, r: 1.5 };
     const probe = nav
       ? async (from: Vec3): Promise<ProbeOutcome> => {
-          const r = await probePath(nav, target, from, { nodes: LAND_PROBE_NODES, ms: LAND_PROBE_MS });
+          const r = await probePath(nav, target, from, { nodes: LAND_PROBE_NODES, ms: LAND_PROBE_MS, noLongFalls: true });
           if (!r) return { status: 'nostart' };
           if (r.status === 'found') return { status: 'found', blocks: pathBlocks(r.path) };
           return r.status === 'none' ? { status: 'none' } : { status: 'limited' };
@@ -427,7 +427,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         const k = x * 65536 + z;
         if (seen.has(k)) continue;
         seen.add(k);
-        const r = await probePath(nav, { type: 'near', p: { x: x + 0.5, y: top, z: z + 0.5 }, r: 0.5 }, from, { nodes: LAND_PROBE_NODES, ms: LAND_PROBE_MS });
+        const r = await probePath(nav, { type: 'near', p: { x: x + 0.5, y: top, z: z + 0.5 }, r: 0.5 }, from, { nodes: LAND_PROBE_NODES, ms: LAND_PROBE_MS, noLongFalls: true });
         if (r?.status === 'found') return { goal, tried };
         tried.push(`${x} ${top} ${z}:${r ? r.status : 'nostart'}`);
         if (tried.length >= LEG_PROBES) return { goal: { type: 'xz', x: Math.floor(from.x + ux * step), z: Math.floor(from.z + uz * step) }, tried };
