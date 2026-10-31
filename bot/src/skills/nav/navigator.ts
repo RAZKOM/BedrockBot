@@ -185,6 +185,8 @@ export interface GotoReport {
   overruns?: number;
   /** Track BH: why a failed goto failed (the planner's own words: `no path (exhaustive search, 1708 nodes expanded)`), for the glide-down line. */
   why?: string;
+  /** Track BG2: doors / hatches that stayed open behind the body (two close clicks failed; not a goto failure). */
+  closeFailed?: number;
 }
 
 interface Search {
@@ -220,6 +222,8 @@ interface ActionRun {
   settled: boolean;
   /** Dig calls made. */
   digs: number;
+  /** Track BG2: a failed close was clicked again once. */
+  retried?: boolean;
 }
 
 interface DoorToClose {
@@ -428,7 +432,25 @@ export class Navigator {
   }
 
   get busy(): boolean {
-    return this.active !== undefined;
+    return this.active !== undefined || this.queued !== undefined; // decision 0051: a goto waiting for the dig-down off a scaffold
+  }
+
+  /** Decision 0051: a goto waiting to start (BotSkills: behind the dig-down off a scaffold); `cancel()` drops it. */
+  private queued: (() => void) | undefined;
+
+  /**
+   * Decision 0051: count a goto that waits to start as busy (callers `if (nav.busy) cancel()` take it back). `cancel()`
+   * (or the next `queue`) calls `drop`; the returned function releases the slot when the goto starts. Not used by the
+   * navigator itself.
+   */
+  queue(drop: () => void): () => void {
+    const prev = this.queued;
+    this.queued = undefined;
+    prev?.();
+    this.queued = drop;
+    return () => {
+      if (this.queued === drop) this.queued = undefined;
+    };
   }
 
   dispose(): void {
@@ -702,6 +724,9 @@ export class Navigator {
 
   cancel(): void {
     this.active?.finish({ ok: false, reason: 'interrupted' });
+    const q = this.queued; // decision 0051: a goto waiting to start is dropped too
+    this.queued = undefined;
+    q?.();
   }
 
   // ---- internals ---------------------------------------------------------------------------------
@@ -1339,8 +1364,18 @@ export class Navigator {
     a.status = res.status;
     a.aheadBlocked = false;
     a.doors = [];
-    // Track BG: a hatch this goto opened and the new path does not pass through again is closed behind as well
-    for (const h of a.hatches) if (this.grid.cls(h.x, h.y, h.z)?.open && !res.path.some((n) => n.x === h.x && n.z === h.z && n.feet < h.y + 1 && n.feet + BODY_HEIGHT > h.y)) this.scheduleHatchClose(a, h, 0);
+    // Track BG: a hatch this goto opened is closed behind on the new path as well. Track BG2: after the LAST node
+    // whose body is in the hatch cell (a re-plan while the body climbs through it, e.g. after a small correction,
+    // used to drop the close: the new path starts in the hatch cell)
+    for (const h of a.hatches) {
+      if (!this.grid.cls(h.x, h.y, h.z)?.open) continue;
+      let last = 0;
+      for (let i = 0; i < res.path.length; i++) {
+        const n = res.path[i]!;
+        if (n.x === h.x && n.z === h.z && n.feet < h.y + 1 && n.feet + BODY_HEIGHT > h.y) last = i;
+      }
+      this.scheduleHatchClose(a, h, last);
+    }
     a.actedUpTo = -1;
     a.report.segments++;
     this.startLeg(a, 0);
@@ -1371,7 +1406,9 @@ export class Navigator {
   private startLeg(a: Active, from: number): void {
     const last = a.path.length - 1;
     let to = last;
-    for (let i = from + 1; i <= last; i++) {
+    // Track BG2: a close due at the leg's first node (a re-plan from a node already out of the hatch cell) runs first
+    if (a.doors.some((d) => d.closeAt === from)) to = from;
+    else for (let i = from + 1; i <= last; i++) {
       if (i > a.actedUpTo && a.path[i]!.act) {
         to = i - 1;
         break;
@@ -1486,10 +1523,21 @@ export class Navigator {
   }
 
   private actionFailed(a: Active, s: InputLoopState, run: ActionRun, why: string, reason: ReplanReason = 'action'): void { // Track BE: reason
+    if (run.kind === 'close') {
+      // Track BG2: a door / hatch left open behind the body is no reason to stop the goto: no failure count, no
+      // retreat, no re-plan (on the Realm a rejected close from the ladder made the bot climb back out of the shaft)
+      a.report.closeFailed = (a.report.closeFailed ?? 0) + 1;
+      this.log.info(`goto: close failed (${why}), left open`);
+      a.action = undefined;
+      this.loop.setCommand({ jump: false, pitch: 0 });
+      a.lastProgressTick = a.t;
+      this.startLeg(a, run.node);
+      return;
+    }
     a.report.actions.failed++;
     this.log.info(`goto: ${run.kind} failed (${why})`);
     const cellP = run.kind === 'dig' ? (run.current ?? run.queue[0]) : run.queue[0]; // Track R: count the failure against the action cell (Track BC: the cell being dug)
-    if (cellP && run.kind !== 'close' && this.blacklist.fail(actionKey(run.kind, cellP), why)) a.report.blacklisted?.push(actionKey(run.kind, cellP));
+    if (cellP && this.blacklist.fail(actionKey(run.kind, cellP), why)) a.report.blacklisted?.push(actionKey(run.kind, cellP));
     // a pillar / door cell that failed is not planned again during this goto (like a failed dig cell):
     // the re-plan looks for another way instead of spending the whole failure budget on one cell
     if (cellP && (run.kind === 'place' || run.kind === 'use')) a.noAction.add(cellKey(cellP.x, cellP.y, cellP.z));
@@ -1521,7 +1569,10 @@ export class Navigator {
     // a running place action (Track O's PlaceSkill) drives the jump itself
     // Track BG: on a ladder (a hatch opened from below, closed behind) sneak holds the body where it is
     const onLadder = !s.onGround && this.grid.climbable(Math.floor(s.pos.x), Math.floor(s.pos.y + 1e-3), Math.floor(s.pos.z)) === true;
-    if (!(run.kind === 'place' && run.pending)) this.loop.setCommand({ forward: 0, strafe: 0, sprint: false, sneak: onLadder, jump: false });
+    // Track BG2: a running use / close owns sneak (UseSkill releases it for the click: sneaking with an item in the
+    // hand uses the item, not the trapdoor)
+    const useOwnsSneak = run.pending && (run.kind === 'use' || run.kind === 'close');
+    if (!(run.kind === 'place' && run.pending)) this.loop.setCommand(useOwnsSneak ? { forward: 0, strafe: 0, sprint: false, jump: false } : { forward: 0, strafe: 0, sprint: false, sneak: onLadder, jump: false });
     // Track BE: Baritone PathExecutor's movement timeout: the action ran longer than its node's cost + 100 ticks
     // (not while a call is pending: the Digger times out on its own estimate; not when the last dig just succeeded)
     const node = a.path[run.node];
@@ -1542,7 +1593,14 @@ export class Navigator {
       return;
     }
     if (run.pending) return;
-    const res = run.result;
+    let res = run.result;
+    if (res && !res.ok && run.kind === 'close' && !run.retried) {
+      // Track BG2: a failed close is clicked once more (then actionFailed lets the walk go on with it open)
+      this.log.info(`goto: close failed (${String(res.reason)}), clicking once more`);
+      run.retried = true;
+      run.result = undefined;
+      res = undefined;
+    }
     if (res && !res.ok) {
       if (run.kind === 'dig') {
         const p = run.current ?? run.queue[0];

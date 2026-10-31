@@ -96,6 +96,10 @@ export interface CombatMover {
   goto(goal: Goal, opts?: GotoOptions): Promise<SkillResult>;
   cancel(): void;
   readonly nav: { readonly busy: boolean };
+  /** Decision 0051: on pending scaffold (a felling pillar) or digging down from it: strike, never step (BotSkills). */
+  onScaffold?(): boolean;
+  /** Decision 0051: dig down off pending scaffold (BotSkills.descendFirst). */
+  descendFirst?(): Promise<void>;
 }
 
 export interface CombatHotbar {
@@ -1002,7 +1006,8 @@ export class CombatController {
       // never chased: face it, strike within reach, give up when it stays out of reach
       this.takeOver(f);
       yaw = f.snap ? wantYaw : turnTowards(loop.command.yaw, wantYaw, TURN);
-      loop.setCommand({ yaw, pitch: wantPitch, forward: 0, strafe: 0, sprint: false, sneak: false, jump: false });
+      const perch = this.d.mover.onScaffold?.() ?? false; // decision 0051: on a pillar: keep sneaking
+      loop.setCommand({ yaw, pitch: wantPitch, forward: 0, strafe: 0, sprint: false, sneak: perch, jump: false });
       tg.outOfReach = reachNow > f.o.reach + 0.2 ? tg.outOfReach + 1 : 0;
       if (tg.outOfReach >= FLYING_OUT_OF_REACH) {
         this.endTarget(f, 'unreachable');
@@ -1030,7 +1035,13 @@ export class CombatController {
           sprint = archer;
         } else if (hd < 1.0) forward = -1;
       }
-      loop.setCommand({ yaw, pitch: wantPitch, forward, strafe: 0, sprint, sneak: false, jump: forward > 0 && s.collidedHorizontally && s.onGround });
+      // decision 0051: on pending scaffold (a 1 x 1 pillar top, or digging down from it) strike only, never step
+      const perch = this.d.mover.onScaffold?.() ?? false;
+      if (perch) {
+        forward = 0;
+        sprint = false;
+      }
+      loop.setCommand({ yaw, pitch: wantPitch, forward, strafe: 0, sprint, sneak: perch, jump: forward > 0 && s.collidedHorizontally && s.onGround });
     } else {
       // approach with the navigator; it steers yaw, we steer the pitch
       const moved = tg.gotoAt ? Math.hypot(feet.x - tg.gotoAt.x, feet.z - tg.gotoAt.z) : Infinity;

@@ -381,6 +381,7 @@ export function pillar(ctx: BreakMoveContext, x: number, y: number, z: number): 
     return undefined;
   }
   if (over.gravity) return undefined;
+  if (over.boxes.length > 0) return undefined; // Track BG2: the jump's head room (PlaceSkill: no_headroom)
   const floors = ctx.floors1;
   setFloor(floors[0], x, y - 1, z);
   ctx.mining.feetFloors = floors;

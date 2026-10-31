@@ -46,7 +46,7 @@ The Realm: docs/runbook.md "Realm join (you do this)".
 | PvE | guard radius, fights with sword and knockback, creeper evasion, flee when hurt, follow / come / kill; all behaviours run on a process manager with priorities (flee > night > guard > your command > home) | `bot/src/tasks/pve.ts`, docs/pve.md, docs/processes.md |
 | Survival | eats, wears the best armour, spares worn tools, keeps throwaway blocks, drops junk, avoids mobs and spawners when planning | `bot/src/skills/survival/`, docs/survival.md |
 | World | chunks, block updates, entities, inventory; a persistent per-server cache the planner and finders use beyond the loaded area; `/map` on the health port | `bot/src/world/`, docs/world-model.md, docs/world-cache.md |
-| Work | wood gathering, farming (harvest, replant, bone meal, chest), legit mining of ore it has seen | docs/wood.md, docs/farming.md, docs/mining.md |
+| Work | wood gathering (tall and 2 x 2 trees from a temporary pillar it digs away again), farming (harvest, replant, bone meal, chest), legit mining of ore it has seen; pickups on ledges and in holes with a bounded dig / place walk | docs/wood.md, docs/farming.md, docs/mining.md |
 | Natural language | `!do <text>` turns a sentence into a checked plan of the commands below (local Ollama; off until configured) | `bot/src/nl/`, docs/natural-language.md |
 | RL | Phase 6 bridge and Gymnasium env, frozen; hand-written behaviours replaced the trained-policy plan | `bot/src/bridge/`, `rl/`, docs/rl.md |
 

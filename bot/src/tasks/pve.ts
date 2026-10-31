@@ -748,7 +748,11 @@ class FleeProcess extends BaseProcess {
         ax += (me.x - t.x) / (d * d);
         az += (me.z - t.z) / (d * d);
       }
-      if (ax !== 0 || az !== 0) c.d.loop.setCommand({ yaw: (Math.atan2(-ax, az) * 180) / Math.PI, pitch: 0, forward: 1, strafe: 0, sprint: true, jump: false });
+      if (c.mover.onScaffold?.()) {
+        // decision 0051: on a felling pillar: come down first (sneaking, block by block), no sprint off the top
+        c.d.loop.setCommand({ forward: 0, strafe: 0, sprint: false, jump: false, sneak: true });
+        void c.mover.descendFirst?.();
+      } else if (ax !== 0 || az !== 0) c.d.loop.setCommand({ yaw: (Math.atan2(-ax, az) * 180) / Math.PI, pitch: 0, forward: 1, strafe: 0, sprint: true, jump: false });
       if (--this.panic === 0) {
         c.d.loop.release();
         if (this.ep) this.ep.goalKey = '';

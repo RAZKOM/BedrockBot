@@ -54,7 +54,7 @@ async function connectWithBudget(prefix: string, maxNodes: number): Promise<Move
   await conn.connect(MOVE_TARGET);
   await world.waitForChunks(4, { timeoutMs: 30_000 });
   await loop.waitTicks(10);
-  return { name, conn, world, loop, skills, truth, corrections, events };
+  return { name, conn, world, loop, skills, hotbar, truth, corrections, events };
 }
 
 const planLine = (p: PlanRecord): string => `${p.reason}${p.interim ? '(interim)' : p.upgrade ? '(final)' : ''}@${p.tick}:${p.status}/${p.nodes}n/${p.expanded}e/${p.via ?? '?'}${p.limited ? '/limit' : ''}`;

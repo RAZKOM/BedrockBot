@@ -93,6 +93,15 @@ blocks (1.5 high) are obstacles, never floors. Costs are ticks (`DEFAULT_COSTS`)
 | hatch up (`climb`; Track BG) | straight up | from a climb node to a hatch over the column (closed: toggled from below; open: the climb continues past the panel), then `climbOut` | `climbUp` (+ `door`) |
 | parkour | 4 cardinal | 1- or 2-block gap at the feet level, clear up to the head (+3), a floor at most 3 below or water at most 4 below, no lava / hazard / ladder in it; full-block landing at the same height or 1 lower that stops an overshoot; 2-block gaps need 2 standable cells behind the takeoff | g x `walk` + `parkourAir` 12 (1 lower: `parkourAirDown` 14) + `parkourRisk` 10 (+ `parkourRunUp` 12 for g = 2) |
 
+Scaffold walks (2026-10-30, decision 0051; no planner change): `BotSkills.scaffoldGoto` runs a goto with
+`allowBreak` + `allowPlace` while a hook on the navigator's `dig` / `place` actions records every block the
+walk places (`ScaffoldRecord`, skills/place/scaffold.ts) and counts dug + placed blocks; past the budget it
+cancels the walk (`block_budget`). During such a walk the pillar places the throwaway kinds that come back
+when dug (`BotSkills.scaffoldItems`: harvestable by the hotbar's tools or the hand, the fastest first). The
+collect skill's `hard` option uses it for items the plain walk cannot reach and digs the recorded blocks
+again afterwards (docs/wood.md "Pickups that may dig and place"). The feller's pillar does not use the
+planner: it places with the PlaceSkill directly (docs/wood.md "Pillar-up").
+
 Every move into node B also pays: B's floor `costFactor` (x 5 on leaves, soul sand, honey, slime, mud,
 ice) on the base cost, and `underground` (6) when a roof block is anywhere above B's head. Lava and
 hazards are never entered; water only by the swim moves, on its surface (Track AJ). Heuristic: `walk` x octile distance, plus for
@@ -136,6 +145,14 @@ drop into water). A replan keeps the pending closes. The follower holds sneak on
 the top), keeps the body 0.08 off a panel while climbing, and drops into the tight gap of a panel opposite the
 ladder (0.63 for a 0.6 body: within 0.0125 of the middle) by aligning on the floor first with single-tick
 forward pulses (BDS corrects a fractional move vector, measured), then walking straight in.
+Track BG2 (Realm findings, decision 0048): a click while sneaking with anything in the hand is not a use on
+BDS / Realms (the server tries the item and sends the old state back), so `UseSkill` releases sneak from the look
+ticks to the tick after the click and presses it again (the navigator leaves sneak to a running use / close). A
+close that fails is clicked once more, then left open (`closeFailed` in the report): no goto failure, no retreat.
+A re-plan schedules the pending close after the last node whose body is in the hatch cell (a re-plan while
+climbing through it, or from a node already out of it, dropped the close before). The climb controller backs
+up to a column centre behind the body instead of turning round first. Pillars need the cell 3 above the feet
+free (PlaceSkill's head room for the jump), so a 3-high room gets no pillar plan.
 
 **The moves that dig** (Track BC, wave 11; `nav/baritone/moves.ts`, Baritone's movements, LGPL-3.0). Every
 move above with `act.dig` lists its cells in break order (the start's head room first, then each column top
@@ -889,6 +906,7 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/unit/skills/fall.test.ts` | Track BI: the measured fall damage model (heights, soft landings, enchantments), the waterloggable table and the clutch target, the live policy, long drops in the planner (a 12-block plateau: none without a policy, the drop with its cost, refused over the budget / with maxDrop 1 / health unknown, Feather Falling, the staircase preferred, hay without a budget, the clutch drop, refused onto a top slab / in the no-water area / over clutchMax), the note on a refused fall, closed loops (the drop walked, the note at health 12, the clutch with a fake server), the scan's planner cost on 300 random paths; review fixes: no plannable drop beyond the budget with a bucket (B1), the clutch pricing and its tie, a ladder column, `acceptsDrop`, the drop re-checked before the step off (health 20 -> 12 on the way: no drop, the note), `shouldClutch` (margin, kill, creative, base, fight), no clutch through ladders / cobwebs / with Slow Falling (B3), the guard bounded when the bucket never empties (H1), finish on an exception and on dispose |
 | `test/e2e/fall-long.test.ts` | Track BI, bds-gaunt: a 12-block tower with no way down but the fall: walked and arrived (8 HP, the model's), and at health 12 unreachable with the note, twice each |
 | `test/unit/skills/nav-trapdoor.test.ts` | Track BG: panels and `hatch` states; the planner down / up through a hatch for every facing and half (never out through the panel side), without `allowOpen`, open (no use), iron / `noAction` / `moves.trapdoor` false, the roof-layer hatch (down only), drops to a floor and into water, a panel in a doorway; closed loops with fake actions (open, closed behind, `closeTrapdoors` false) |
+| `test/e2e/nav-hatch-realm.test.ts` | Track BG2, bds-move: the owner's farm hatch rebuilt from the Realm's world cache (walking-layer trapdoor, ladder to the floor layer, a 3-high room under it); clicks from the ladder while sneaking with an empty hand, a pickaxe, a sword, a block, a shulker box (raw: rejected with an item; UseSkill: opened); with a pickaxe, a block, a shulker box held: down and up twice each, both panel sides, opened and closed behind every time, no pillar or dig (allowPlace / allowBreak on) |
 | `test/e2e/nav-trapdoor.test.ts` | Track BG, bds-move: truth-built shafts under a platform: closed hatch down and up (panel opposite the ladder and on its side), open top-half hatch down and up with no action, the roof-layer hatch (down, no plan up), a ladderless hatch over a pool (fall of 8); 0 corrections |
 
 The e2e tests use `bds-move` (udp/19146). The v1 layouts (`nav-worlds.ts`: `flat`, `hill`, `long`, `wall`)
@@ -950,9 +968,11 @@ the cross-country layout; default 7), `MOVE_AREA=x,z` (pin a v2 suite's area to 
   over).
 - Swimming, ladders, vines, parkour and edge sneaking: see "Movement variety" (limits there); no
   scaffolding, no underwater travel, no swimming in flowing water.
-- Trapdoors (Track BG): a hatch in the roof layer whose ladder ends under it (the owner's farm layout) is
-  down only: on BDS an open trapdoor is not climbable, so nobody climbs past it from the ladder top
-  (measured). Horizontally a trapdoor is only a wall or a passable open panel (`crossing`); a closed
+- Trapdoors (Track BG): a hatch in the roof layer whose ladder ends under it is down only: on BDS an open
+  trapdoor is not climbable, so nobody climbs past it from the ladder top (measured; Track BG2: holding jump and
+  forward from the top rung the feet peak at 0.55 below the exit floor, every facing and half). The owner's farm
+  is not this layout (Track BG2, world cache): its hatch is in the walking layer over a ladder that reaches the
+  floor layer. Horizontally a trapdoor is only a wall or a passable open panel (`crossing`); a closed
   trapdoor standing in a corridor is not toggled to walk through. The tight-gap alignment pulses need a free
   floor around 0.2 blocks behind the approach; approaching a tight hatch along its tight axis is not planned
   differently (the follower turns and aligns first).
