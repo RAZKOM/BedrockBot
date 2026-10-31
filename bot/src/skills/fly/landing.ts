@@ -210,6 +210,20 @@ export class ColumnView {
     }
     return true;
   }
+
+  /**
+   * At least three of the four neighbours are floors at exactly this height (a touchdown slides about a
+   * block: a single cell between steps, like the first step of a 1-wide trench, is a precision landing
+   * into a slot; bds-fly fly-walk: 4 go-arounds onto such a 1-cell target).
+   */
+  level(x: number, z: number, f: Floor): boolean {
+    let n = 0;
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      const g = this.floorNear(x + dx, z + dz, f.feet, 0);
+      if (g && !g.wet && !g.hazard) n++;
+    }
+    return n >= 3;
+  }
 }
 
 /** An open corridor into an overhang: the bearing (Bedrock yaw, from the cell outwards) and the blocks under the roof. */
@@ -382,7 +396,7 @@ export function candidatesNear(view: ColumnView, goal: Vec3, o: Pick<LandingOpti
         for (const f of floors) {
           if (f.feet > goal.y + 48 || f.feet < goal.y - 32) continue;
           const kind = view.kindOf(f, o.headroom);
-          if (!kind || !view.sound(x, z, f)) continue;
+          if (!kind || !view.sound(x, z, f) || !view.level(x, z, f)) continue;
           const dy = f.feet - goal.y;
           list.push({ x, z, feet: f.feet, kind, ceiling: f.ceiling, est: Math.hypot(dx, dz) + 3 * Math.abs(dy), lb: Math.hypot(dx, dz, dy) });
         }

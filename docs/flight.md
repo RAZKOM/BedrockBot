@@ -631,7 +631,46 @@ The second round of the Track AU2 suites: `fly-roof` 2 of 2 (the tree: 2 rockets
 runs before the glide-speed conditions above: 300 blocks 5 rockets with 2 go-arounds, 600 blocks 6
 with 2 needless top-ups; those two rules came from them).
 
+## Measurements (Track BF, bds-fly, BDS 1.26.60.6)
+
+### Landing v3 (`fly-overhang`)
+
+`!goto` from 300 blocks away; the goal's ground is never loaded at the command, so every flight holds
+briefly (1 to 22 ticks) until the search confirms a cell:
+
+| Case | Search | Landing | Then |
+|---|---|---|---|
+| farm replica (platform 70 up under the overhanging box, room with ladder; goal in the room) | 1010 candidates (481 under a roof), 1 probe, 1 approach sim, 68 to 114 ms: the platform cell 3 from the hole, corridor in from 240 | on the platform under the box; run 1 (before the descent-window fix): 11 rockets, 2 go-arounds (the circle forced out 10 under its exit height, then a slide into the ladder hole); run 2 after it: **8 rockets, 0 go-arounds**, 0.44 off, 0 damage | walked down the ladder; `arrived at` the room goal |
+| goal under a 41 x 41 roof 5 high | 5748 candidates, 2 probes (the roof top: none; the ground 20 out: path) | on the ground 20 blocks from the goal, 3 rockets, 0 go-arounds, 0 damage | walked in; `arrived at` |
+| goal in the middle of a 31 x 31 pond | 16 probes all `limited` (6000 nodes do not swim 15 blocks): the fallback, said in chat | on dry ground at the shore, 1 rocket, 0 go-arounds, 0 damage | the walk failed (`goto: unreachable`: a swim of 15 blocks to a mid-pond cell; the navigator's business) |
+| on the floor of a 10-deep pond, `!goto` 9 blocks onto the shore | 3 × `no standable node`, then `swam up 8.8 blocks in 55 ticks` | (no flight) | `arrived at` |
+| idle on the same floor | `surface: head under water ... for 201 ticks, air 98: swimming up`; surfaced after 55 ticks | (no flight) | standing on the shore 16 s after the teleport |
+
+### Sneak at the touchdown (`fly-overhang` sneak case)
+
+- **Sneak held while gliding** (40 ticks forced on mid-cruise): the server kept the glide (`isGliding`
+  every sample, vy −0.15 steady), 0 corrections: on BDS 1.26.60 strict movement sneak neither ends nor
+  changes a glide, and the model (gliding branch first, no sneak effect) agrees.
+- **Landings on a 3 x 3 pillar 30 up**, 2 with and 2 without sneak through the touchdown: all on the
+  pillar, 0 damage; the slide from the predicted touchdown to the settled position 0.73 / 0.75 without,
+  0.74 / 0.76 with sneak; 2 to 5 corrections either way. The slide of a flared touchdown (h about 0.35)
+  is under a block and stops on its own, so the edge rule was never reached on the pillar: whether the
+  server applies the sneak edge rule to the first ground ticks after a glide is not shown by these runs
+  (no correction came from it either). The model applies the edge back-off from the first tick after
+  the contact (the glide has ended then). Sneak stays on by default (`flySneakLand`): it costs nothing
+  measurable and is the vanilla way to stop at an edge; it is released when the flight ends (the walk
+  sets its own keys; keeping it on into the walk near an edge is not done).
+
 ## Open points
+
+- Track BF: the owner's farm has an **open trapdoor** over the ladder; the planner does not pass an open
+  trapdoor (canWalkThroughClass: boxes, not climbable), so the probe from the platform fails there and the
+  flight falls back to the nearest dry ground until Track BG's trapdoor moves land (the e2e replica uses a
+  bare hole; `FLY_BF_TRAPDOOR=1` puts the trapdoor in).
+- Track BF: a mid-pond goal is not reached by the walk after the landing (a 15-block swim: `limited` probes,
+  `goto: unreachable`).
+- Track BF: the Realm flight at 00:07Z that ended `roof` at a cruise of y 294 to 305 with 99 steered ticks
+  is not analysed here.
 
 - Mending by XP: a repair chore for the elytra (an XP source, `xp_orb` pickups) is a separate track;
   until then the owner is asked to mend or replace it.
