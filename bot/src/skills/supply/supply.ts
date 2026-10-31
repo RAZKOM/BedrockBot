@@ -47,6 +47,8 @@ export interface SupplyDeps {
   records?(): ChestRecord[];
   /** The home route (HomeLogistics.withdraw); without it `ensure` never fetches from home. */
   withdraw?(cancelled: () => boolean, req: { item: BringItem; want: number }): Promise<WithdrawReport>;
+  /** Carried boxes owed to a chest (HomeLogistics.owedSlots: an extract's box not back yet): never a source or a stow target. */
+  owed?(): Set<number>;
   /** The home logistics' serial lock (HomeLogistics.exclusive); without it the box work runs at once. */
   serial?<T>(fn: () => Promise<T>): Promise<T>;
   log?: Logger;
@@ -99,9 +101,10 @@ export class Supply {
     this.log = d.log ?? silentLogger;
   }
 
-  /** The carried boxes items may come out of or go into (not the flight kit's, not unknown ones). */
+  /** The carried boxes items may come out of or go into (not the flight kit's, not unknown ones, not one owed to a chest). */
   boxes(): CarriedBox[] {
-    return carriedBoxes(this.d.inventory, this.d.keepName(), this.d.flightBoxSlot?.()).filter((b) => !b.flightKit && !b.unknown);
+    const owed = this.d.owed?.() ?? new Set<number>();
+    return carriedBoxes(this.d.inventory, this.d.keepName(), this.d.flightBoxSlot?.()).filter((b) => !b.flightKit && !b.unknown && !owed.has(b.slot));
   }
 
   loose(names: Names): number {

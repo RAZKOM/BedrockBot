@@ -91,7 +91,8 @@ export function endLine(job: BringJob, r: BringResult | undefined): string {
   if (short > 0) notes.push(`${short} short: the chests hold no more`);
   if (w.boxes.length) notes.push(`${w.boxes.length === 1 ? 'a full shulker box' : `${w.boxes.length} full shulker boxes`} out of ${[...new Set(w.boxes.map((b) => b.from))].join(', ')}`);
   // Track BJ: items taken out of a box next to the bot, the box put back
-  for (const e of w.extracted ?? []) if (e.items > 0 || !e.back) notes.push(`${e.items} taken out of a shulker box from ${e.from}${e.back ? ', the box went back' : '; the box stays with me'}`);
+  for (const e of w.extracted ?? []) if (e.items > 0 || !e.back) notes.push(`${e.items} taken out of a shulker box from ${e.from}${e.back ? ', the box went back' : '; the box goes back to that chest later'}`);
+  if (w.notes?.length) notes.push(...w.notes); // Track BJ: an earlier box not back yet
   if (w.reason === 'inventory_full') notes.push('my inventory is full');
   const d = r.deliver;
   if (!d.ok) return `bring: carrying ${text} but could not get to ${'player' in job.to ? job.to.player : 'home'}: ${d.reason ?? 'failed'}`;

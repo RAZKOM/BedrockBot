@@ -16,7 +16,11 @@
 //             found: remembered and walked to at once, else later (`fetchLeft`)
 //   recover   a box still standing (its break was interrupted: `standing` keeps it until the box is confirmed
 //             gone) is broken and picked up, the boxes left on the ground fetched; at the start of every job that
-//             uses boxes (the unload's debts, `!bring`'s withdrawal, the Supply's ensure / stow, the build's run)
+//             uses boxes (the unload's debts, `!bring`'s withdrawal, the Supply's ensure / stow, the build's run).
+//             Only within RECOVER_RANGE blocks of the bot (a farther one is kept, and chat said where it was left);
+//             a box on the ground is given up after MAX_FETCH_TRIES walks or LEFT_MAX_AGE_MS (said in chat)
+//   cancel    after a pre-emption the clean-up is short (one break, one pickup within 4 blocks), the rest is left
+//             to `recover`: the process that pre-empted owns the bot
 //
 // The logistics' BoxOps and the Supply's share one `BoxState` (left boxes, standing cells), so either job clears
 // what the other left behind; the home chore ignores the block updates of a standing cell.
@@ -25,7 +29,7 @@
 import { silentLogger, type Logger } from '../../log.ts';
 import type { BlockInfo, ContainerView, Vec3 } from '../../world/types.ts';
 import type { CollectOptions, CollectResult } from '../collect/collect.ts';
-import { isShulkerBox, maxStackOf, shulkerSlotsUsed, type DepositResult, type OpenResult } from '../container/chest.ts';
+import { isShulkerBox, maxStackOf, shulkerContents, shulkerSlotsUsed, type DepositResult, type OpenResult } from '../container/chest.ts';
 import { boxSpots } from '../container/stash.ts';
 import type { DigOptions, DigResult } from '../dig/digger.ts';
 import { isKeptBox, placesExactly } from '../home/boxing.ts';
@@ -61,7 +65,17 @@ export interface BoxOpsDeps {
   label?: string;
   /** Another BoxOps' state to share (the task's Supply shares the logistics'). */
   state?: BoxState;
+  /** A line for the owner (chat): where a box was left, a box given up. */
+  notify?(line: string): void;
+  now?(): number;
 }
+
+/** Track BJ: `recover` walks to a box within this many blocks of the bot only. */
+export const RECOVER_RANGE = 24;
+/** Track BJ: walks to a box left on the ground before it is given up. */
+export const MAX_FETCH_TRIES = 3;
+/** Track BJ: a box left on the ground this long is given up (30 min). */
+export const LEFT_MAX_AGE_MS = 30 * 60_000;
 
 /** Boxes a BoxOps left in the world (shared by the BoxOps of one task). */
 export interface BoxState {
@@ -69,6 +83,8 @@ export interface BoxState {
   readonly leftBoxes: Vec3[];
   /** Cells (`x,y,z`) where a box stands or is being placed: no home container; cleared once the box is confirmed gone. */
   readonly standing: Set<string>;
+  /** Per left box (`x,y,z`): walks so far and when it was left. */
+  readonly left?: Map<string, { tries: number; since: number }>;
 }
 
 /** Counts of what a step did (the callers' reports: UnloadReport, WithdrawReport). */
@@ -87,7 +103,40 @@ export class BoxOps {
   constructor(d: BoxOpsDeps) {
     this.d = d;
     this.log = d.log ?? silentLogger;
-    this.state = d.state ?? { leftBoxes: [], standing: new Set() };
+    this.state = d.state ?? { leftBoxes: [], standing: new Set(), left: new Map() };
+  }
+
+  private now(): number {
+    return this.d.now?.() ?? Date.now();
+  }
+
+  private meta(at: Vec3): { tries: number; since: number } {
+    const m = this.state.left;
+    const k = cellKey(at);
+    let e = m?.get(k);
+    if (!e) {
+      e = { tries: 0, since: this.now() };
+      m?.set(k, e);
+    }
+    return e;
+  }
+
+  /** Within RECOVER_RANGE blocks of the bot (unknown position: yes). */
+  private inRange(at: Vec3): boolean {
+    const f = this.d.position();
+    return !f || Math.hypot(f.x - at.x - 0.5, f.y - at.y, f.z - at.z - 0.5) <= RECOVER_RANGE;
+  }
+
+  /** Remember a box left on the ground (once per cell). */
+  private leave(at: Vec3): void {
+    if (this.leftBoxes.some((p) => cellKey(p) === cellKey(at))) return;
+    this.leftBoxes.push(at);
+    this.meta(at);
+  }
+
+  /** Say where a box was left when it is still on the ground (not picked up by the walk to it). */
+  private sayLeft(at: Vec3): void {
+    if (this.leftBoxes.some((p) => cellKey(p) === cellKey(at))) this.d.notify?.(`left a shulker box on the ground at ${fmtPos(at)}; I pick it up when I am near it again`);
   }
 
   /** Boxes broken and not picked up again (BoxState). */
@@ -120,6 +169,7 @@ export class BoxOps {
         this.standing.delete(k);
         continue;
       }
+      if (!this.inRange(at)) continue; // far away: kept (chat said where)
       const feet = this.d.position();
       if (feet && Math.hypot(feet.x - x - 0.5, feet.z - z - 0.5) > 3.5) await this.d.skills.goto({ type: 'near', p: centre(at), r: 2 }, { timeoutTicks: 400 });
       const back = await this.breakAndPickUp(at, () => false);
@@ -173,6 +223,19 @@ export class BoxOps {
     return Math.ceil(Math.max(0, st.count - room) / max);
   }
 
+  /** What identifies the box of `slot`: its name, its custom name and its contents. */
+  private identity(slot: number): string {
+    const raw = this.d.inventory.rawItem?.(0, slot);
+    const c = shulkerContents(raw);
+    return `${this.d.inventory.slots[slot]?.name ?? ''}|${this.namedAt(slot)}|${Object.keys(c).sort().map((k) => `${k}:${c[k]}`).join(',')}`;
+  }
+
+  /** The slot of the box with identity `id` (`prefer` first). */
+  private locate(id: string, prefer: number): number | undefined {
+    if (isShulkerBox(this.d.inventory.slots[prefer]?.name ?? '') && this.identity(prefer) === id) return prefer;
+    return [...this.boxKeys()].find((i) => this.identity(i) === id);
+  }
+
   /** The box of `slot` where the place skill picks it (`toHotbar`), or why not. */
   private async exact(slot: number, cancelled: () => boolean): Promise<number | string> {
     if (placesExactly(this.d.inventory.slots, slot)) return slot;
@@ -188,9 +251,12 @@ export class BoxOps {
    */
   async takeOut(slot: number, tally: BoxTally, cancelled: () => boolean, only?: { item: string | ((name: string) => boolean); want: number }, out?: { slot?: number }, avoid?: (p: Vec3) => boolean): Promise<string> {
     const named = this.namedAt(slot);
+    const id = this.identity(slot);
     const s = await this.exact(slot, cancelled);
     if (typeof s === 'string') {
-      if (out && isShulkerBox(this.d.inventory.slots[slot]?.name ?? '')) out.slot = slot; // never placed: still there
+      // never placed: still carried, maybe moved by the hotbar move (found by its name and contents)
+      const at = this.locate(id, slot);
+      if (out && at !== undefined) out.slot = at;
       return s;
     }
     const placed = await this.place(s, cancelled, avoid);
@@ -224,8 +290,8 @@ export class BoxOps {
         await this.d.skills.closeContainer(o.view);
       }
     }
-    // picked up also after a cancel (never left standing; an interrupted break: `standing` keeps it for `recover`)
-    const back = await this.pickUpOrFetch(placed.at, () => false, named);
+    // picked up also after a cancel (a short try; the rest and an interrupted break: `standing` / the left boxes for `recover`)
+    const back = await this.cleanUp(placed.at, cancelled, named);
     if (typeof back === 'string') return back;
     if (out) out.slot = back;
     if (cancelled()) return 'interrupted';
@@ -261,7 +327,7 @@ export class BoxOps {
         await this.d.skills.closeContainer(o.view);
       }
     }
-    const back = await this.pickUpOrFetch(placed.at, () => false, named);
+    const back = await this.cleanUp(placed.at, cancelled, named);
     return { moved, back, ...(o.ok ? {} : { open: o.reason }) };
   }
 
@@ -272,9 +338,20 @@ export class BoxOps {
   async fetchLeft(cancelled: () => boolean, keep = false): Promise<boolean> {
     let got = false;
     const todo = this.leftBoxes.splice(0);
+    const later: Vec3[] = [];
     while (todo.length > 0) {
       if (this.freeSlots().length === 0 || cancelled()) break;
       const at = todo.shift()!;
+      const m = this.meta(at);
+      if (this.now() - m.since > LEFT_MAX_AGE_MS || m.tries >= MAX_FETCH_TRIES) {
+        this.giveUp(at);
+        continue;
+      }
+      if (!this.inRange(at)) {
+        later.push(at); // far away: kept (chat said where)
+        continue;
+      }
+      m.tries++;
       const before = this.boxKeys();
       await this.d.skills.goto({ type: 'near', p: centre(at), r: 1.5 }, { timeoutTicks: 400 });
       if (cancelled()) {
@@ -284,11 +361,18 @@ export class BoxOps {
       await this.d.skills.collect(6, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
       const ok = [...this.boxKeys()].some((i) => !before.has(i));
       got ||= ok;
-      if (!ok && keep) this.leftBoxes.push(at);
-      this.log.info(`${this.label}: the box left at ${fmtPos(at)}: ${ok ? 'picked up on the second try' : keep ? 'not found yet (tried again by the next job)' : 'still not found (picked up by a player, or gone)'}`);
+      this.log.info(`${this.label}: the box left at ${fmtPos(at)}: ${ok ? 'picked up on the second try' : keep && m.tries < MAX_FETCH_TRIES ? 'not found yet (tried again by the next job)' : 'still not found (picked up by a player, or gone)'}`);
+      if (ok) this.state.left?.delete(cellKey(at));
+      else if (keep && m.tries < MAX_FETCH_TRIES) later.push(at);
+      else this.giveUp(at);
     }
-    this.leftBoxes.push(...todo);
+    this.leftBoxes.push(...later, ...todo);
     return got;
+  }
+
+  private giveUp(at: Vec3): void {
+    this.state.left?.delete(cellKey(at));
+    this.d.notify?.(`gave up on the shulker box left at ${fmtPos(at)} (not found)`);
   }
 
   /**
@@ -296,25 +380,38 @@ export class BoxOps {
    * box broken is (true) or is not (false) a bot_loot box: a new slot of the other sort (another box lying there) is
    * not taken for it. A box not picked up is remembered (also on a cancel) and fetched later.
    */
-  async breakAndPickUp(at: Vec3, cancelled: () => boolean, named?: boolean): Promise<number | string> {
+  async breakAndPickUp(at: Vec3, cancelled: () => boolean, named?: boolean, quick = false): Promise<number | string> {
     const before = this.boxKeys();
     // a box broken meanwhile (a player, a mob, an explosion): no dig, straight to the pickup
     const b = this.d.blockAt(at);
     if (b && b.name !== 'unknown' && isShulkerBox(b.name)) {
       const dg = await this.d.skills.dig(at);
       // still standing: `standing` keeps the cell (the chore ignores it; `recover` breaks it later)
-      if (!dg.ok && dg.reason !== 'no_block') return dg.reason === 'interrupted' ? 'interrupted' : `break: ${dg.reason ?? 'failed'}`;
+      if (!dg.ok && dg.reason !== 'no_block') {
+        this.d.notify?.(`a shulker box still stands at ${fmtPos(at)}; I break it and pick it up when I am near it again`);
+        return dg.reason === 'interrupted' ? 'interrupted' : `break: ${dg.reason ?? 'failed'}`;
+      }
     }
     const fresh = (): number | undefined => [...this.boxKeys()].find((i) => !before.has(i) && (named === undefined || this.namedAt(i) === named));
-    for (const radius of [4, 6, 10]) {
+    // `quick` (after a cancel): one pickup close by, the rest is left to `recover`
+    for (const radius of quick ? [4] : [4, 6, 10]) {
       await this.d.skills.collect(radius, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
       if (fresh() !== undefined) break;
       if (cancelled()) break;
     }
     this.standing.delete(cellKey(at)); // gone from the world (picked up, or an item on the ground)
-    if (fresh() === undefined) this.leftBoxes.push(at);
+    if (fresh() === undefined) this.leave(at);
     if (fresh() === undefined && cancelled()) return 'interrupted';
     return fresh() ?? `the box was not picked up again (left at ${fmtPos(at)})`;
+  }
+
+  /** After the work at a placed box: cancelled meanwhile, the short clean-up (see the file comment), else pickUpOrFetch. */
+  private cleanUp(at: Vec3, cancelled: () => boolean, named?: boolean): Promise<number | string> {
+    if (!cancelled()) return this.pickUpOrFetch(at, () => false, named);
+    return this.breakAndPickUp(at, cancelled, named, true).then((r) => {
+      if (typeof r === 'string') this.sayLeft(at);
+      return r;
+    });
   }
 
   /** breakAndPickUp, then (not picked up) a walk to it at once: its slot, or why not. */
@@ -323,7 +420,9 @@ export class BoxOps {
     const back = await this.breakAndPickUp(at, cancelled, named);
     if (typeof back !== 'string' || back === 'interrupted') return back;
     await this.fetchLeft(cancelled, true);
-    return [...this.boxKeys()].find((i) => !keys.has(i) && (named === undefined || this.namedAt(i) === named)) ?? back;
+    const got = [...this.boxKeys()].find((i) => !keys.has(i) && (named === undefined || this.namedAt(i) === named));
+    if (got === undefined) this.sayLeft(at);
+    return got ?? back;
   }
 
   /**
@@ -357,7 +456,8 @@ export class BoxOps {
     if (!at) return { reason: 'no free cell for the box next to the bot', slot };
     // a pre-emption right after the place: the box is broken and picked up again rather than left standing
     if (cancelled()) {
-      const back = await this.breakAndPickUp(at, () => false);
+      const back = await this.breakAndPickUp(at, cancelled, undefined, true);
+      if (typeof back === 'string') this.sayLeft(at);
       return { reason: 'interrupted', ...(typeof back === 'number' ? { slot: back } : {}) };
     }
     const now = this.d.inventory.slots;

@@ -14,12 +14,15 @@
 //             864 dirt, 216 ender pearls):
 //               still needed >= HALF   whole boxes (one inventory slot each) mostly full of the item (>= HALF of
 //                                      it), the fullest first, before the loose stacks: `!bring dirt 1000` brings
-//                                      a full box, not 16 stacks; a box holding less of it (a mixed box) is
-//                                      never taken whole, items are taken out of it as below
-//               still needed <  HALF   no whole box: the bot takes the box out, places it next to itself,
-//                                      takes just what is needed, picks the box up and puts it back into its
-//                                      chest (`extract`; the box holding enough with the least in it, else the
-//                                      fullest); `!bring dirt 10` from a chest of dirt boxes brings 10 dirt
+//                                      a full box, not 16 stacks
+//               after the loose stacks a box holding nothing but the item is taken whole when what is still
+//                                      needed is at least what it holds (it would be emptied anyway)
+//               else                   the bot takes the box out, places it next to itself, takes just what is
+//                                      needed, picks the box up and puts it back into its chest (`extract`: a
+//                                      mixed box, or a need smaller than the box; the box holding enough with
+//                                      the least in it, else the fullest; never a bot_loot box); `!bring dirt
+//                                      10` from a chest of dirt boxes brings 10 dirt. An extract never empties
+//                                      a box, so no box goes back empty (it would count as a spare)
 //
 // The logistics (logistics.ts `withdraw`) plans again before every chest trip with the memory as
 // that trip left it, so a chest that held less than remembered only sends the bot on to the next one.
@@ -137,6 +140,15 @@ export function takesWhole(left: number, half: number): boolean {
   return left >= half;
 }
 
+/**
+ * Track BJ: a box holding `inside` of the item (`total` items in all) is taken whole with `left` still needed: mostly
+ * full of it for a big need, or nothing but the item and no more than is needed (see the file comment).
+ */
+export function wholeOk(inside: number, total: number, left: number, half: number): boolean {
+  if (inside <= 0) return false;
+  return (takesWhole(left, half) && inside >= half) || (inside === total && inside <= left);
+}
+
 /** Track BJ: the box to take items out of: the one holding enough with the least of it, else the fullest (indices into `counts`). */
 export function extractChoice(counts: readonly number[], left: number): number | undefined {
   let best: number | undefined;
@@ -180,7 +192,7 @@ export function planBring(records: readonly ChestRecord[], item: BringItem, want
   let left = need;
   const half = halfBox(item);
   // every box holding the item, by chest (nearest chest first)
-  const boxes = item.boxes ? [] : list.flatMap((r, ri) => boxesOf(r).map((b) => ({ r, ri, n: countOf(item, b), used: false }))).filter((b) => b.n > 0);
+  const boxes = item.boxes ? [] : list.flatMap((r, ri) => boxesOf(r).map((b) => ({ r, ri, n: countOf(item, b), total: Object.values(b).reduce((a, x) => a + x, 0), used: false }))).filter((b) => b.n > 0);
   const src = (r: ChestRecord, take: number, box: boolean, extract = false): void => {
     const key = chestKey(r);
     const last = plan.sources.at(-1);
@@ -207,8 +219,16 @@ export function planBring(records: readonly ChestRecord[], item: BringItem, want
     src(r, n, false);
     left -= n;
   }
-  // the loose stacks were not enough: items out of one box at a time (the boxes mostly full of it went whole above)
+  // the loose stacks were not enough: a box of nothing but the item whole when it would be emptied anyway, else items
+  // out of one box at a time
   while (left > 0) {
+    for (const b of [...boxes].sort((x, y) => y.n - x.n || x.ri - y.ri)) {
+      if (b.used || !wholeOk(b.n, b.total, left, half)) continue;
+      b.used = true;
+      src(b.r, b.n, true);
+      left -= b.n;
+    }
+    if (left <= 0) break;
     const rest = boxes.filter((b) => !b.used);
     const i = extractChoice(rest.map((b) => b.n), left);
     if (i === undefined) break;

@@ -446,16 +446,22 @@ either taking them to the player or home." Decision record:
    (`halfBox`: 27 x the stack size / 2: 864 dirt, 216 ender pearls, 13 diamond swords):
    - still needed at least half a box: whole boxes holding at least half a box of the item are taken first,
      fullest first, before loose stacks; then the loose stacks;
-   - less: the loose stacks first; what is still missing is **taken out** of one box: the smallest box that holds
-     enough, else the fullest. The box is taken into a free hotbar slot, the chest closed, the box placed next to
+   - less: the loose stacks first; then a box holding **nothing but the item** comes whole when what is still
+     missing is at least what it holds (it would be emptied anyway; `!bring diamond 2` with a box of 2 diamonds
+     brings the box); otherwise what is still missing is **taken out** of one box (a mixed box, or a need smaller
+     than the box): the smallest box that holds enough, else the fullest; never a `bot_loot` box. The box is taken into a free hotbar slot, the chest closed, the box placed next to
      the bot (boxes.ts `takeOut`), just what is missing taken out, the box broken, picked up and put back into the
      chest it came from (`storeBox`; it keeps the rest);
-   - a box holding less than half a box of the item (a mixed box, a part-used one) is never taken whole, also for a
-     large need: items are taken out of it.
+   - a mixed box holding less than half a box of the item is never taken whole, also for a large need: items are
+     taken out of it. An extract therefore never empties a box, so no empty box goes back into a chest (it would
+     count as a spare there; `bring.ts wholeOk`, the plan and the withdrawal share it).
    - The extract never loses the box: a box that cannot be placed (no free cell, the place fails) or does not
      open comes whole as before; an interrupted extract (the box is always picked up again) or a box its chest no
-     longer takes is a debt: the next withdrawal or unload puts it back into that chest first (found by what it
-     holds), never into another chest.
+     longer takes is a debt: the next withdrawal or unload puts it back into that chest first (found by the NBT it
+     holds), never into another chest. Meanwhile the box is owed: no Supply source or stow target, never unloaded or
+     emptied elsewhere. A put-back that fails (the chest full, the box not with the bot) is kept and said in the
+     reply (`the shulker box from chest 1 2 3 could not go back yet (...)`), and given up after 3 tries (`gave up
+     putting the shulker box back into chest 1 2 3 (...); it stays with me`).
    The replies say which: `a full shulker box comes along` / `2 full shulker boxes out of chest ...`, or
    `some taken out of a shulker box, which goes back` / `10 taken out of a shulker box from chest ..., the box
    went back`. `!bring shulker` takes empty boxes before full ones.
@@ -492,7 +498,8 @@ starts again from where the bot stands. `!bring stop` / `!stop` end it.
 |---|---|
 | `!bring torch 64 to Steve` | `bringing 64 torches to Steve (from 2 chests)`, then `brought 64 torches (from 2 chests)` |
 | `!bring iron 20` (8 in stock) | `bringing 20 iron to Steve (from 1 chest, only 8 known: 12 short)`, `brought 8 iron_ingots (from 1 chest; 12 short: the chests hold no more)` |
-| `!bring diamond 2` (only in a box) | Track BJ: `bringing 2 diamonds to Steve (from 1 chest, some taken out of a shulker box, which goes back)`, `brought 2 diamonds (from 1 chest; 2 taken out of a shulker box from chest 0 -60 -4, the box went back)` |
+| `!bring diamond 2` (only in a box of 2) | `bringing 2 diamonds to Steve (from 1 chest, a full shulker box comes along)`, `brought 1 shulker box holding 2 diamonds (from 1 chest; a full shulker box out of chest 0 -60 -4)` (Track BJ: the box would be emptied anyway) |
+| `!bring sand 10` (a box of 1728 sand) | `bringing 10 sand to Steve (from 1 chest, some taken out of a shulker box, which goes back)`, `brought 10 sand (from 1 chest; 10 taken out of a shulker box from chest 0 -60 -4, the box went back)` |
 | `!bring dirt 1000` (boxes of 1728 dirt) | `bringing 1000 dirt to Steve (from 1 chest, a full shulker box comes along)`, `brought 1 shulker box holding 1728 dirt (from 1 chest; a full shulker box out of chest 0 -60 -4)` |
 | `!bring coal home` | `bringing 64 coal to home (from 1 chest)`, `brought 64 coal home (from 1 chest)` |
 | `!bring torch` (none) | `bring: no torch in the 5 containers I know (!stock torch; !get torch makes new ones)`; no chest read: `bring: I know no chest near home yet (!chests scan)` |
@@ -511,7 +518,7 @@ do I have" and "get me n of it loose" for every job, so no feature hand-rolls bo
 
 | Part | What |
 |---|---|
-| `BoxOps` (supply/boxes.ts) | the primitives: `place` (a carried box on a `boxSpots` cell next to the bot, never on a cell `avoid` names nor below one), `takeOut` (items out of a placed box, two inventory slots always free, optional item filter and amount), `putIn` (place, deposit up to 3 passes, break, pick up), `breakAndPickUp` / `pickUpOrFetch` / `fetchLeft` (a box left on the ground is fetched later), `recover`. A cancel never leaves a box standing: the box is always broken and picked up again. The logistics' BoxOps and the Supply's share one state: `standing` (cells where a box stands or is being placed, marked before the place and cleared once the box is confirmed gone; the home chore ignores their block updates) and the left boxes. A box whose break was interrupted stays `standing`; `recover` breaks and picks it up and fetches the left boxes at the start of the next unload, withdrawal, ensure, stow or build run |
+| `BoxOps` (supply/boxes.ts) | the primitives: `place` (a carried box on a `boxSpots` cell next to the bot, never on a cell `avoid` names nor below one), `takeOut` (items out of a placed box, two inventory slots always free, optional item filter and amount), `putIn` (place, deposit up to 3 passes, break, pick up), `breakAndPickUp` / `pickUpOrFetch` / `fetchLeft` (a box left on the ground is fetched later), `recover`. A cancel never leaves a box standing: the box is always broken and picked up again. The logistics' BoxOps and the Supply's share one state: `standing` (cells where a box stands or is being placed, marked before the place and cleared once the box is confirmed gone; the home chore ignores their block updates) and the left boxes. A box whose break was interrupted stays `standing`; `recover` breaks and picks it up and fetches the left boxes at the start of the next unload, withdrawal, ensure, stow or build run (the build: on the ground, never on a column), within 24 blocks of the bot only (a farther one is kept). Chat says where a box was left (`left a shulker box on the ground at x y z; I pick it up when I am near it again`); a box on the ground is given up after 3 walks or 30 minutes (`gave up on the shulker box left at x y z (not found)`). After a cancel the clean-up is one break and one pickup within 4 blocks (no walk): the process that pre-empted owns the bot |
 | `Supply.available(item)` | loose + inside the carried boxes (not the fireworks box, not unknown ones; `bot_loot` boxes count) + the chest memory at home (loose and boxed, `stockOf`) |
 | `Supply.ensure(item, n, opts)` | n loose by the cheapest route: the carried box holding most of it, just what is missing taken out (at most 4 boxes, stopping at the first round that does not end with the box back; 2 free inventory slots needed, else `my inventory is full`); with `home` the rest through `!bring`'s withdrawal. The box work runs under the logistics' serial lock (never during an unload, scan or withdrawal) |
 | `Supply.room(item)` | how many more fit loose with 4 slots kept free: the build caps a refill to it |
@@ -545,7 +552,7 @@ Users:
 | 64 torches: 40 + 30 in two chests 10 blocks apart, to a player 30 blocks away | 13.6 / 13.7 s from the command; 1.92 blocks from the player; truth: 64 torches carried, 6 left (memory and truth) |
 | 3 stacks of cobblestone (2 + 1) from the same two chests to the same player | 13.6 / 13.7 s; 1.92 blocks from the player; truth 192 cobblestone |
 | iron 20 with 8 iron ingots in one chest | 7.4 / 7.5 s; 8 brought, 12 short said twice |
-| diamond 2, only in a shulker box | 7.5 s; the box (NBT 2 diamonds) carried, the chest's record without boxes. Track BJ (2026-10-31, 6/6 green): 12.4 s; 2 diamonds carried, the empty box back in D (truth), D's record `boxes {empty 1}` |
+| diamond 2, only in a shulker box | 7.5 s; the box (NBT 2 diamonds) carried, the chest's record without boxes. Track BJ second review: the box comes whole again (it holds nothing but the 2 diamonds asked for) |
 | coal home, the bot 20 blocks east | 5.5 / 5.6 s; 1.95 blocks from home, 64 coal |
 
 ## Measured (e2e on bds-home, 2026-10-29)
@@ -611,7 +618,7 @@ the end.
   truth as a block, broken and stored by the bot), a second connection 30 blocks east, `!chests scan`
   first: `!bring torch 64 to <player>` (64 carried, within 2 blocks of the player, 6 left in memory and
   truth, `!stock torch`), 3 stacks of cobblestone (measured), `!bring iron 20` (12 short, 8 brought),
-  `!bring diamond 2` (Track BJ: 2 taken out of the box, the box goes back into D), `!get coal 4` (the hint line, then
+  `!bring diamond 2` (the box comes whole: it holds just the 2 diamonds), `!get coal 4` (the hint line, then
   `!get stop`), `!bring coal home` from 20 blocks away (within 2 blocks of home).
 - `home-supply` (Track BJ): chest A with 640 loose dirt + a box of 1728 dirt, B with a box of 1728 sand, C empty:
   `!bring dirt 1000` (the box whole, the loose dirt stays), `!bring sand 10` (taken out, the box back in B);

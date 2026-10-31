@@ -47,19 +47,29 @@ describe.skipIf(!E2E)('@bds home: shulker-aware jobs (Track BJ)', () => {
     return inv.slots.flatMap((s, k) => (k < 36 && !!s && isShulkerBox(s.name) ? [k] : []));
   };
 
-  /** A full box of `item` (`stacks` stacks of 64) in the bot's inventory: filled by truth as a block, broken and picked up by the bot. */
+  /**
+   * A full box of `item` (`stacks` stacks of 64) in the bot's inventory: filled by truth as a block, broken and picked up by
+   * the bot. Robust against an earlier file on the same server (review of f8a0c6e: the setup flaked after home-bring):
+   * stray items around the cell are removed first, the box's contents are polled by truth (no fixed sleep), and the box
+   * picked up is matched by what it holds (its NBT may arrive a moment after the slot); the pickup is retried.
+   */
   async function makeBox(b: HomeBot, item: string, stacks: number, at: Vec3 = L.spot): Promise<number> {
     const mob = b.built.mobility!;
+    const want = 64 * stacks;
+    await b.truth.ok('clearmobs', [at.x + 0.5, at.y, at.z + 0.5, 8]); // stray boxes and items of earlier runs
     const before = new Set(boxSlots(b));
     await truthLoaded(b.truth, 'set', [at.x, at.y, at.z, 'undyed_shulker_box']);
     await b.truth.chestPut(at, item, 64, stacks);
-    await sleep(300);
+    await until(async () => ((await b.truth.box(at)).counts[item] === want ? true : undefined), 10_000, `truth: the box holds ${want} ${item}`);
     const dg = await mob.skills.dig(at);
     if (!dg.ok) throw new Error(`breaking the box: ${dg.reason}`);
-    await mob.skills.collect(5, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
-    const slot = await until(() => boxSlots(b).find((k) => !before.has(k)), 10_000, 'the box in the inventory');
-    const inside = shulkerContents(mob.world.inventory.rawItem(0, slot));
-    if (inside[item] !== 64 * stacks) throw new Error(`the box holds ${JSON.stringify(inside)}`);
+    const mine = (): number | undefined => boxSlots(b).find((k) => !before.has(k) && shulkerContents(mob.world.inventory.rawItem(0, k))[item] === want);
+    for (let attempt = 0; attempt < 3 && mine() === undefined; attempt++) {
+      await mob.skills.collect(5 + 3 * attempt, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
+      await until(() => mine(), 4_000, 'the box in the inventory').catch(() => undefined);
+    }
+    const slot = mine();
+    if (slot === undefined) throw new Error(`the box was not picked up (new box slots: ${JSON.stringify(boxSlots(b).filter((k) => !before.has(k)).map((k) => shulkerContents(mob.world.inventory.rawItem(0, k))))})`);
     return slot;
   }
 

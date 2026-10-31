@@ -20,9 +20,11 @@ last source); `!build` counted loose blocks only; the unload plan kept every cro
      break, pick up), which replaces the three inline copies. `place` takes an `avoid` predicate (a cell and the
      cell above it). The logistics' and the Supply's BoxOps share one `BoxState`: `standing` (marked before the
      place, cleared once the box is confirmed gone; the home chore ignores those cells) and the left boxes. A cancel
-     never leaves a box standing (the pickup ignores it); a box whose break itself was interrupted stays `standing`
-     and `recover` breaks it, then fetches the left boxes, at the start of the next unload, withdrawal, ensure, stow
-     or build run.
+     never leaves a box standing; its clean-up is short (one break, one pickup within 4 blocks, no walk: the
+     pre-empting process owns the bot). A box whose break was interrupted stays `standing` and `recover` breaks it,
+     then fetches the left boxes, at the start of the next unload, withdrawal, ensure, stow or build run (the build:
+     on the ground, never in a column phase), only within `RECOVER_RANGE` (24) blocks of the bot. Chat says where
+     a box was left; one on the ground is given up after `MAX_FETCH_TRIES` (3) walks or 30 minutes (said).
    - `Supply` (supply.ts): `available(item)` (loose + carried boxes + the chest memory at home), `ensure(item, n,
      {avoid, home})` (carried boxes first, at most 4 box rounds, ending at the first round that does not end
      `emptied`; 2 free inventory slots needed; with `home` the rest through `!bring`'s withdrawal), `stow(item,
@@ -33,11 +35,15 @@ last source); `!build` counted loose blocks only; the unload plan kept every cro
 2. **`!bring` threshold: half a box** (`halfBox` = floor(27 x stack size / 2)). Still needed at least half a box:
    whole boxes holding at least half a box, fullest first, before loose stacks. Less: loose stacks first, then
    just what is missing is taken out of one box (the smallest box holding enough, else the fullest) next to the
-   bot, and the box goes back into its chest. A box holding less than half a box of the item (a mixed box) is
-   never taken whole, in the plan and in the withdrawal. The chest record keeps every box's contents (`boxList`).
+   bot, and the box goes back into its chest. After the loose stacks, a box holding nothing but the item comes
+   whole when the need left is at least what it holds (it would be emptied anyway); a mixed box holding less than
+   half a box of the item is never taken whole (`wholeOk`, shared by the plan and the withdrawal). An extract thus
+   never empties a box: no empty box goes back to count as a spare. A `bot_loot` box is never taken out of. The chest record keeps every box's contents (`boxList`).
    An extract needs 3 free inventory slots, else the box comes whole; a box that cannot be placed or opened comes
-   whole too; an interrupted extract or a box its chest no longer takes becomes a debt (`Debt.contents`: found by
-   what it holds) that the next withdrawal or unload settles into that chest first. Half a box keeps a big order to few chest trips and a
+   whole too; an interrupted extract or a box its chest no longer takes becomes a debt (`Debt.contents`, from the
+   box's NBT: found by what it holds) that the next withdrawal or unload settles into that chest first. An owed box
+   is no Supply source or stow target and is never unloaded or emptied elsewhere (`owedSlots`); a failed put-back
+   (chest full, box not found) is kept, said in the reply, and given up after `MAX_DEBT_TRIES` (3), also said. Half a box keeps a big order to few chest trips and a
    whole box in the inventory (one slot) where it is worth a box, and a small order to loose items.
 3. **`!build`**: materials count the carried boxes; the runner refills on the ground from a box placed off the
    build's footprint (at most what fits loose with 4 slots free, `Supply.room`), tops up a column's blocks and

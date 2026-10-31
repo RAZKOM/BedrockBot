@@ -102,16 +102,15 @@ describe('bring: Track BJ, whole boxes or items out of a box', () => {
     expect(p.sources).toEqual([{ key: '4,0,0', pos: { x: 4, y: 0, z: 0 }, kind: 'chest', take: 10, box: false, extract: true }]);
   });
 
-  it('boxes holding less than half a box of it are never taken whole, also for a big need: items out of them', () => {
+  it('a box of nothing but the item comes whole when it would be emptied anyway; the rest out of a box', () => {
     const small = { dirt: 500 };
     const p = planBring([boxRec(4, {}, [small, small, small])], dirt, 1200, 0, o);
     expect(p.sources.map((s) => [s.take, s.box, !!s.extract, s.boxes])).toEqual([
-      [500, false, true, undefined], // 500 < 864: out of the box, not the box
-      [500, false, true, undefined],
-      [200, false, true, undefined],
+      [1000, true, false, 2], // 500 <= what is still needed: whole
+      [200, false, true, undefined], // 200 < 500: out of the box
     ]);
     const q = planBring([boxRec(4, {}, [small, small, small])], dirt, 1900, 0, o);
-    expect(q.sources.every((s) => !s.box && s.extract)).toBe(true);
+    expect(q.sources.map((s) => [s.take, s.box, s.boxes])).toEqual([[1500, true, 3]]);
     expect(q.short).toBe(400);
     // a mixed box with 5 dirt (review 01b9b9d #9): never whole, even with 1000 missing
     const r = planBring([boxRec(4, {}, [{ dirt: 5, stone: 1000 }, { dirt: 1728 }])], dirt, 1000, 0, o);
@@ -155,11 +154,17 @@ describe('bring: the plan', () => {
     const p = planBring(records, dia, 1, 0, { x: 0, y: 0, z: 0 });
     expect(p.sources).toHaveLength(1);
     expect(p.sources[0]!.box).toBe(false);
-    // Track BJ: 2 still needed is far below half a box: taken out of the box, not the box
+    // Track BJ: 2 still needed and a box of nothing but 2 diamonds: emptied anyway, so it comes whole
     const q = planBring(records, dia, 3, 0, { x: 0, y: 0, z: 0 });
     expect(q.sources.map((s) => [s.key, s.take, s.box, !!s.extract])).toEqual([
       ['2,0,0', 1, false, false],
-      ['4,0,0', 2, false, true],
+      ['4,0,0', 2, true, false],
+    ]);
+    // 1 still needed: below what the box holds: taken out of it
+    const e = planBring(records, dia, 2, 0, { x: 0, y: 0, z: 0 });
+    expect(e.sources.map((s) => [s.key, s.take, s.box, !!s.extract])).toEqual([
+      ['2,0,0', 1, false, false],
+      ['4,0,0', 1, false, true],
     ]);
     // the other half of a double chest is never a source
     const dbl = [rec(2, { diamond: 5 }, { partner: { x: 3, y: 0, z: 0 } }), rec(3, { diamond: 5 })];

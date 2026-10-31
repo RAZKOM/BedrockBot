@@ -113,6 +113,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     ...(containers ? { containers } : {}),
     ...(d.pve ? { selectHotbar: (slot: number) => void d.pve!.hotbar.select(slot) } : {}),
     probe: (goal, from) => probePath(mob.skills.nav, goal, from), // Track AN: walking distance
+    notify: (line) => d.chat.say(line), // Track BJ: where a box was left
     log,
   });
   const runner: HomeRunner = {
@@ -185,8 +186,9 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     toHotbar: async (slot) => (await survivalKitOf(d.task)?.hotbar(slot)) ?? 'the box is not in the hotbar',
     log,
     label: 'supply',
+    notify: (line: string) => d.chat.say(line),
   });
-  setSupply(d.task, new Supply({ ops, inventory: world.inventory, keepName: () => logistics.keepName(), records: () => logistics.records(), withdraw: (c, req) => logistics.withdraw(c, req), serial: (fn) => logistics.exclusive(fn), log }));
+  setSupply(d.task, new Supply({ ops, inventory: world.inventory, keepName: () => logistics.keepName(), records: () => logistics.records(), withdraw: (c, req) => logistics.withdraw(c, req), owed: () => logistics.owedSlots(), serial: (fn) => logistics.exclusive(fn), log }));
 
   d.chat.register({
     name: 'unload',

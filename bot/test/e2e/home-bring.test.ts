@@ -11,8 +11,8 @@
 //             inventory, the bot within 2 blocks of the player); the memory says 6 left
 //   stacks    3 stacks of cobblestone from 2 chests 10 blocks apart to the player 30 blocks away (time)
 //   short     `!bring iron 20` with 8 in stock: the reply says 12 short, brings 8
-//   box       `!bring diamond 2`: the only source is the box: Track BJ: 2 is far below half a box, so the
-//             diamonds are taken out of it next to the bot and the box goes back into D (the reply says so)
+//   box       `!bring diamond 2`: the only source is the box: Track BJ: it holds nothing but the 2 diamonds
+//             asked for, so it would be emptied anyway: the box comes whole (no empty box goes back to D)
 //   get hint  `!get coal 4` with 64 coal in the chests: the hint line (then `!get stop`)
 //   home      `!bring coal home` from 20 blocks away: the coal is carried to home
 // Env: HOME_BDS_HOST / HOME_BDS_PORT / HOME_BDS_CONTAINER (home-truth.ts), HOME_VERBOSE=1.
@@ -207,20 +207,19 @@ describe.skipIf(!E2E)('@bds home: !bring (Track AS)', () => {
     expect(await nearPlayer(b)).toBeLessThanOrEqual(2.5);
   }, 240_000);
 
-  it('!bring diamond 2: the only source is a shulker box: taken out of it, the box goes back (Track BJ)', async () => {
+  it('!bring diamond 2: the only source is a shulker box holding just them: the box comes whole (Track BJ)', async () => {
     const b = bot!;
     const l = L!;
     await reset(b);
     const r = await bring(b, `!bring diamond 2 to ${playerName}`);
     const counts = await b.truth.counts(b.name);
     notes.push(`box: ${r.start} | ${r.end} (${(r.ms / 1000).toFixed(1)} s; truth ${JSON.stringify(counts)})`);
-    expect(r.start).toBe(`bringing 2 diamonds to ${playerName} (from 1 chest, some taken out of a shulker box, which goes back)`);
-    expect(r.end).toBe(`brought 2 diamonds (from 1 chest; 2 taken out of a shulker box from chest ${l.d.x} ${l.d.y} ${l.d.z}, the box went back)`);
-    expect(counts.diamond).toBe(2);
-    expect(counts.undyed_shulker_box ?? 0).toBe(0);
-    expect((await b.truth.box(l.d)).counts.undyed_shulker_box ?? 0).toBe(1);
+    expect(r.start).toBe(`bringing 2 diamonds to ${playerName} (from 1 chest, a full shulker box comes along)`);
+    expect(r.end).toBe(`brought 1 shulker box holding 2 diamonds (from 1 chest; a full shulker box out of chest ${l.d.x} ${l.d.y} ${l.d.z})`);
+    expect(counts.undyed_shulker_box).toBe(1);
+    expect((await b.truth.box(l.d)).counts.undyed_shulker_box ?? 0).toBe(0);
     const d = b.home.memory().get(l.d)!;
-    expect(d.boxes).toEqual({ empty: 1, full: 0 });
+    expect(d.boxes).toEqual({ empty: 0, full: 0 });
     expect(d.inBoxes).toBeUndefined();
     expect(await nearPlayer(b)).toBeLessThanOrEqual(2.5);
   }, 240_000);

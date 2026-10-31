@@ -133,7 +133,10 @@ runner uses the task's `Supply`:
 - **Stow**: at the end (done or stopped), what was taken out and not used goes back into a carried box
   (`Supply.stow`, down to what the build held at the start).
 - **A pause** (`!stop`, `!build pause`, a pre-emption) during a refill: the box is picked up again; a box whose
-  break was interrupted stays marked and the next run (on the ground) recovers it first (`Supply.recover`).
+  break was interrupted stays marked and the next run recovers it first (`Supply.recover`), on the ground only:
+  never while the next step is a column top's place or the descend (a walk would leave the column).
+- **Inventory full**: the boxes still hold the block but nothing more fits loose: the build stops with `my
+  inventory is full (my shulker boxes still hold 100 cobblestone)` instead of `out of cobblestone`.
 - Stats: `refills`, `refilled`, `stowed`. Without carried boxes nothing changes: `out of cobblestone` stops it.
 
 Measured (e2e home-supply on bds-home, 2026-10-31): fill 5 x 3 x 5 cobblestone with 20 loose and a carried

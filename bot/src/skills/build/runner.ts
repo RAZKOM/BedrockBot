@@ -177,8 +177,10 @@ export class BuildRunner {
     this.running = true;
     this.since = performance.now();
     try {
+      // Track BJ: a paused refill's box first, never in a column phase (the walk would leave the column top)
+      if (this.d.supply?.recover && !this.inColumnPhase() && this.d.onGround()) await this.d.supply.recover(() => epoch !== this.epoch);
+      if (epoch !== this.epoch) return { state: 'paused' };
       this.checkColumn();
-      if (this.d.supply?.recover && this.d.onGround()) await this.d.supply.recover(() => epoch !== this.epoch); // Track BJ: a paused refill's box
       if (this.index === 0 && this.plan.scaffoldPeak > 0) await this.topUpScaffold(this.plan.scaffoldPeak, epoch); // Track BJ
       while (this.index < this.plan.steps.length) {
         if (epoch !== this.epoch) return { state: 'paused' };
@@ -370,11 +372,16 @@ export class BuildRunner {
   }
 
   /** On resume: a column step without the bot on the column top -> dig the column and pillar again. */
+  /** The current step is a column top's place / scaffold or the descend: the bot stands on (or comes down) a column. */
+  private inColumnPhase(): boolean {
+    const s = this.plan.steps[this.index];
+    return !!s && (((s.op === 'place' || s.op === 'scaffold') && s.top !== undefined) || s.op === 'descend');
+  }
+
   private checkColumn(): void {
     const s = this.plan.steps[this.index];
     if (!s) return;
-    const inPhase = ((s.op === 'place' || s.op === 'scaffold') && s.top !== undefined) || s.op === 'descend';
-    if (!inPhase) return;
+    if (!this.inColumnPhase()) return;
     let j = this.index;
     while (j >= 0 && this.plan.steps[j]!.op !== 'pillar') j--;
     const pillar = this.plan.steps[j];
@@ -496,6 +503,9 @@ export class BuildRunner {
       }
       if (usable(this.d.inventory, it, r) < 1) {
         const kept = (r.throwaway ?? THROWAWAY_BLOCKS).includes(it) && this.d.inventory.count(it) > 0 ? ` (${this.d.inventory.count(it)} kept as the throwaway reserve)` : '';
+        // Track BJ: the boxes still hold it, but nothing more fits loose
+        const boxed = this.d.supply?.carried(it) ?? 0;
+        if (boxed > 0 && this.d.supply?.room && this.d.supply.room([it]) <= 0) return `fatal:my inventory is full (my shulker boxes still hold ${boxed} ${it})`;
         return `fatal:out of ${it}${kept}`;
       }
       items = [it];

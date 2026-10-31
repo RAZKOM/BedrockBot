@@ -164,6 +164,46 @@ describe('build runner with carried boxes', () => {
     expect(r.stats.placed).toBe(75);
   });
 
+  it('paused on a column top: the run after it does not recover boxes there (no walk off the column); the column completes', async () => {
+    const w = new FlatWorld();
+    const p = planBuild(w, spec(`pillar 3 ${F} 0 7 cobblestone`), { start: START });
+    const bot = new FakeBot(w, new FakeInventory({ cobblestone: 7, dirt: 64 }), { x: 0.5, y: F, z: 0.5 });
+    bot.throwawayMin = 0;
+    const sup = new FakeSupply(bot, {});
+    const recovered: number[] = [];
+    Object.assign(sup, {
+      recover: () => {
+        recovered.push(bot.feet.y - F);
+        bot.feet = { x: 12.5, y: F, z: 12.5 }; // a box left far away: the walk to it
+        return Promise.resolve();
+      },
+    });
+    const r = new BuildRunner(p, { ...bot.deps(), supply: sup });
+    let paused = false;
+    bot.onStep = () => {
+      if (!paused && bot.feet.y > F) {
+        paused = true;
+        r.pause();
+      }
+    };
+    expect(await r.run()).toEqual({ state: 'paused' });
+    const top = bot.feet.y - F;
+    expect(top).toBe(1); // on the pillar
+    expect(await r.run()).toEqual({ state: 'done' });
+    expect(recovered).toEqual([0]); // the first run only (on the ground); never on the column
+    for (let y = F; y < F + 7; y++) expect(w.name({ x: 3, y, z: 0 })).toBe('cobblestone');
+    expect(r.stats.placed).toBe(7);
+  });
+
+  it('nothing more fits loose but the boxes hold it: the stop says the inventory is full', async () => {
+    const w = new FlatWorld();
+    const p = planBuild(w, spec(`fill 2 ${F} 2 6 ${F + 2} 6 cobblestone`), { start: START });
+    const bot = new FakeBot(w, new FakeInventory({ cobblestone: 20, dirt: 16 }), { x: 0.5, y: F, z: 0.5 });
+    const sup = Object.assign(new FakeSupply(bot, { cobblestone: 100 }), { room: () => 0 });
+    const r = new BuildRunner(p, { ...bot.deps(), supply: sup });
+    expect(await r.run()).toEqual({ state: 'stopped', reason: 'my inventory is full (my shulker boxes still hold 100 cobblestone)' });
+  });
+
   it('without a supply nothing changes: out of a block stops the build', async () => {
     const w = new FlatWorld();
     const p = planBuild(w, spec(`fill 2 ${F} 2 6 ${F + 2} 6 cobblestone`), { start: START });
