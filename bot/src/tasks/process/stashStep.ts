@@ -12,6 +12,8 @@ export interface StashJob {
   /** The job's produce: never dropped as junk, packed first. */
   wanted(name: string): boolean;
   pause(): void;
+  /** Before the step walks off (the job paused): e.g. a quarry climbs out of its pit. */
+  leave?(): Promise<void>;
   resume(): void;
   /** Still full after the step: end the job with 'inventory full'. */
   full(): void;
@@ -35,15 +37,19 @@ export class StashStep {
     if (!s || this.busy || !ready || !s.needed()) return;
     this.busy = true;
     job.pause();
-    void s
-      .ifFull({ label: job.label, wanted: (n) => job.wanted(n) })
-      .then((ok) => {
+    void (async () => {
+      try {
+        if (job.leave) {
+          await job.leave();
+          if (!alive()) return;
+        }
+        const ok = await s.ifFull({ label: job.label, wanted: (n) => job.wanted(n) });
         if (!alive()) return;
         if (ok) job.resume();
         else job.full();
-      })
-      .finally(() => {
+      } finally {
         this.busy = false;
-      });
+      }
+    })();
   }
 }

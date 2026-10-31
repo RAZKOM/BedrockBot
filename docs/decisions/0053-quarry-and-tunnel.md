@@ -77,6 +77,13 @@ branch mining places torches; the mine process runs the stash step when the inve
   of the bot's body. Reused instead of copied: wire.ts `minerTunnelWorld` / `throwawayCount` /
   `feetFloorOf` (extracted from `createMinerFor`), build/types.ts `key` / `fmtCell`.
 
+Round 3 (same day): the climb's and wayOut's rule no longer counts the floor under the bot's feet or a
+player standing on a cell as a refusal (both move on); every end but a stop climbs out first (no pickaxe,
+a failed slice, inventory full via `QuarryJob.abort`), and the stash step climbs out before its walk
+(`StashJob.leave` -> `QuarryJob.surface`). The climb goes up the treads one by one with walks that dig
+nothing, digging a cell left over a tread itself, before falling back to `climbTo`; outside the box its
+digs follow what hangs on a cell too. The stair head prefers an open side and is read with the treads.
+
 ## Consequences
 
 - A quarry next to water leaves pillars of rock under and around it; the owner can clear those by hand

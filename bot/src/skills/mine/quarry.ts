@@ -29,9 +29,11 @@
 //              each open or still diggable): a cave, a liquid or a refused cell there ends the job
 //              (`no way out below y N`) before it goes deeper. The treads are the navigator's kept cells
 //              while the job lives (Navigator.keptCells: no other walk digs them)
-//   end        quarry: back up to the stair head (tunnel.ts climbTo: walk, pillar, a staircase dug inside
-//              the box under the job's own refusals), also after `no way out`; tunnel: the bot stays at
-//              the tunnel's end
+//   end        quarry: back up to the stair head before every end but a stop (done, no way out, no
+//              pickaxe, inventory full, a failed slice), and before the stash step walks off: the treads
+//              one by one (walkStairs: a cell left over a tread is dug first, no other walk digs inside
+//              the base), else tunnel.ts climbTo (walk, pillar, a staircase dug inside the box under the
+//              job's own refusals). Tunnel: the bot stays at the tunnel's end
 //   tunnel     after each cross-section: the centre column (feet and head) must be open, else the tunnel
 //              ends there with the reason; floor holes of the cross-section are filled with throwaway
 //              blocks; a torch every TORCH_EVERY (8) blocks when torches are carried, on the floor of
@@ -240,10 +242,10 @@ export function staircase(b: Box, near: Vec3): Vec3[] {
 
 /**
  * The stair head of a quarry: the feet cell outside the box beside the first tread's column, on the
- * ground at the box's top (y max + 1), on the side nearest `near`. The bot steps from it down onto the
- * first tread, and climbs back to it at the end.
+ * ground at the box's top (y max + 1): an open one (`open`: feet and head clear) first, then the side
+ * nearest `near`. The bot steps from it down onto the first tread, and climbs back to it at the end.
  */
-export function stairHead(b: Box, near: Vec3): Vec3 {
+export function stairHead(b: Box, near: Vec3, open?: (p: Vec3) => boolean): Vec3 {
   const c = ringOf(b, near).cells[0]!;
   const out: Vec3[] = [];
   for (const [dx, dz] of SIDES) {
@@ -251,7 +253,7 @@ export function stairHead(b: Box, near: Vec3): Vec3 {
     const z = c.z + dz;
     if (x < b.min.x || x > b.max.x || z < b.min.z || z > b.max.z) out.push({ x, y: b.max.y + 1, z });
   }
-  const d = (p: Vec3) => Math.hypot(p.x + 0.5 - near.x, p.z + 0.5 - near.z);
+  const d = (p: Vec3) => Math.hypot(p.x + 0.5 - near.x, p.z + 0.5 - near.z) + (open && !open(p) ? 1000 : 0);
   out.sort((p, q) => d(p) - d(q));
   return out[0]!;
 }
@@ -287,14 +289,14 @@ const int = (s: string | undefined): number | undefined => {
   return Number(s);
 };
 
-/** A quarry spec over a box, with the staircase from the corner nearest `feet`. */
-export function quarrySpec(box: Box, feet: Vec3): QuarrySpec {
+/** A quarry spec over a box, with the staircase from the corner nearest `feet` (`open`: stairHead's). */
+export function quarrySpec(box: Box, feet: Vec3, open?: (p: Vec3) => boolean): QuarrySpec {
   const near = { x: feet.x + 0.5, y: feet.y, z: feet.z + 0.5 };
-  return { kind: 'quarry', label: `quarry ${sizeLabel(box)}`, box, slices: quarrySlices(box), keep: staircase(box, near), start: { ...feet }, exit: stairHead(box, near) };
+  return { kind: 'quarry', label: `quarry ${sizeLabel(box)}`, box, slices: quarrySlices(box), keep: staircase(box, near), start: { ...feet }, exit: stairHead(box, near, open) };
 }
 
-/** `!quarry` arguments (without stop / status). `yaw`: the bot's (the direction of `here` without one). */
-export function parseQuarryArgs(args: readonly string[], feet: Vec3, yaw: number | undefined): ParseResult {
+/** `!quarry` arguments (without stop / status). `yaw`: the bot's (the direction of `here` without one); `open`: stairHead's. */
+export function parseQuarryArgs(args: readonly string[], feet: Vec3, yaw: number | undefined, open?: (p: Vec3) => boolean): ParseResult {
   let box: Box;
   let facing: Dir | undefined;
   if ((args[0] ?? '').toLowerCase() === 'here') {
@@ -313,7 +315,7 @@ export function parseQuarryArgs(args: readonly string[], feet: Vec3, yaw: number
   }
   const why = checkQuarryBox(box);
   if (why) return { error: `quarry: ${why}` };
-  const spec = quarrySpec(box, feet);
+  const spec = quarrySpec(box, feet, open);
   return { spec: facing ? { ...spec, dir: facing } : spec };
 }
 
@@ -420,7 +422,7 @@ function fullCube(b: BlockLike): boolean {
   return b.boxes.length === 1 && x?.[0] === 0 && x[1] === 0 && x[2] === 0 && x[3] === 1 && x[4] === 1 && x[5] === 1;
 }
 
-/** Natural non-cube blocks that may sit on a dug cell (they drop): hardness under this (plants 0, snow layers 0.1). */
+/** Natural non-cube blocks that may sit on a dug cell (they drop): hardness up to this (plants 0, snow layers 0.1, glow lichen and sculk veins 0.2). */
 const LOOSE_HARDNESS = 0.2;
 /** Natural non-cube blocks harder than that, dug over like a cube (they fall or drop). */
 const LOOSE_NAMES: ReadonlySet<string> = new Set(['mud', 'soul_sand', 'dirt_path', 'grass_path', 'farmland']);
@@ -452,6 +454,8 @@ export class QuarryJob {
   private activeMs = 0;
   private counted = false;
   private holding = false;
+  /** abort(): the reason the job ends with once it is out of the pit. */
+  private aborting: string | undefined;
   /** The tunnel's own torches (on the floor, not on a wall: the cells beside them may be dug). */
   private readonly ownTorches = new Set<string>();
 
@@ -580,9 +584,14 @@ export class QuarryJob {
       if (was === undefined || p.y > was) this.stopped.set(colKey(p.x, p.z), p.y);
     }
     if (rule !== undefined) return rule;
+    return this.hangs(p);
+  }
+
+  /** What hangs on cell p: a block on top, a wall block beside, a player on it (the reason), undefined when nothing. */
+  private hangs(p: Vec3): string | undefined {
     const up = { ...p, y: p.y + 1 };
     const top = this.h.blockAt(up);
-    if (top && !isAirName(top.name) && !isLiquid(top) && (isBuiltBlock(top.name) || (!fullCube(top) && (top.hardness ?? 0) >= LOOSE_HARDNESS && !LOOSE_NAMES.has(top.name)))) return 'supports a block';
+    if (top && !isAirName(top.name) && !isLiquid(top) && (isBuiltBlock(top.name) || (!fullCube(top) && (top.hardness ?? 0) > LOOSE_HARDNESS && !LOOSE_NAMES.has(top.name)))) return 'supports a block';
     for (const [dx, dz] of SIDES) {
       const q = { x: p.x + dx, y: p.y, z: p.z + dz };
       const s = this.h.blockAt(q);
@@ -592,9 +601,15 @@ export class QuarryJob {
     return undefined;
   }
 
-  /** The climb's rule: inside the box the job's own refusals (a staircase out may be dug there), outside the miner's (the protected area too). */
-  private climbRule(p: Vec3): string | undefined {
-    return inBox(this.spec.box, p) ? this.refusal(p) : this.h.tunnelWorld?.breakRule(p);
+  /**
+   * The climb's rule: inside the box the job's own refusals (a staircase out may be dug there), outside
+   * the miner's (the protected area too) and what hangs on the cell. The floor under the feet is not a
+   * reason here (the climb checks its own floor); `way`: a player on the cell is not one either (it moves
+   * on, wayOut asks whether the stairs can be made walkable).
+   */
+  private climbRule(p: Vec3, way = false): string | undefined {
+    const why = inBox(this.spec.box, p) ? this.refusal(p) : (this.h.tunnelWorld?.breakRule(p) ?? this.hangs(p));
+    return why === 'under_feet' || (way && why === 'player on it') ? undefined : why;
   }
 
   /**
@@ -603,6 +618,15 @@ export class QuarryJob {
    * refused; outside: the climb's rule). The reason when not, undefined when they do.
    */
   wayOut(i: number): string | undefined {
+    const exit = this.spec.exit;
+    if (exit && i > 0)
+      for (const c of [exit, { ...exit, y: exit.y + 1 }]) {
+        const a = this.h.blockAt(c);
+        if (!a) return `the stair head ${fmtCell(c)} is not loaded`;
+        if (isLiquid(a)) return `${a.name} at the stair head ${fmtCell(c)}`;
+        const why = a.boxes.length > 0 ? this.climbRule(c, true) : undefined;
+        if (why !== undefined && why !== 'air') return `${a.name} at the stair head ${fmtCell(c)} stays (${why})`;
+      }
     for (const t of this.spec.keep.slice(0, i)) {
       const b = this.h.blockAt(t);
       if (!b) return `the tread at ${fmtCell(t)} is not loaded`;
@@ -614,7 +638,7 @@ export class QuarryJob {
         if (!a) return `${fmtCell(c)} over the tread is not loaded`;
         if (isLiquid(a)) return `${a.name} over the tread at ${fmtCell(t)}`;
         if (a.boxes.length === 0) continue;
-        const why = this.climbRule(c);
+        const why = this.climbRule(c, true);
         if (why !== undefined && why !== 'air') return `${a.name} over the tread at ${fmtCell(t)} stays (${why})`;
       }
     }
@@ -712,30 +736,66 @@ export class QuarryJob {
         this.counted = true;
         this.total = n - this.spec.keep.filter((p) => (this.h.blockAt(p)?.boxes.length ?? 0) > 0).length;
       }
+      if (this.aborting) return await this.leave(e, 'failed', this.aborting);
       while (this.index < this.spec.slices.length) {
-        if (!carriesPickaxe(this.h.slots())) return this.end('failed', 'no pickaxe');
+        if (!carriesPickaxe(this.h.slots())) return await this.leave(e, 'failed', 'no pickaxe');
         const way = this.spec.kind === 'quarry' ? this.wayOut(this.index) : undefined;
-        if (way) {
-          // the stairs are broken under the layers dug so far: no deeper, out while it can
-          this.state = 'climb';
-          await this.climbOut(e);
-          if (!this.alive(e)) return;
-          return this.end('blocked', `no way out below y ${this.spec.box.max.y - this.index + 1}: ${way}`);
-        }
+        // the stairs are broken under the layers dug so far: no deeper, out while it can
+        if (way) return await this.leave(e, 'blocked', `no way out below y ${this.spec.box.max.y - this.index + 1}: ${way}`);
         const r = await this.slice(this.index, e);
         if (!this.alive(e)) return;
-        if (r !== 'ok') return this.end(r.end, r.why);
+        if (r !== 'ok') return await this.leave(e, r.end, r.why);
         this.index++;
         this.stats.slicesDone = this.index;
       }
-      if (this.spec.kind === 'quarry') {
-        this.state = 'climb';
-        await this.climbOut(e);
-        if (!this.alive(e)) return;
-      }
-      this.end('done');
+      await this.leave(e, 'done');
     } catch (err) {
-      if (e === this.epoch) this.end('failed', err instanceof Error ? err.message : String(err));
+      if (e !== this.epoch) return;
+      const why = err instanceof Error ? err.message : String(err);
+      try {
+        await this.leave(e, 'failed', why);
+      } catch {
+        if (e === this.epoch) this.end('failed', why);
+      }
+    }
+  }
+
+  /** End the job (not a stop): a quarry climbs out of its pit first (inside the base no other walk digs it out). */
+  private async leave(e: number, s: QuarryState, why?: string): Promise<void> {
+    if (this.spec.kind === 'quarry') {
+      this.state = 'climb';
+      await this.climbOut(e);
+      if (!this.alive(e)) return;
+    }
+    this.end(s, why);
+  }
+
+  /** End the job with `why` (the stash step found the inventory still full): a quarry climbs out first. */
+  abort(why: string): void {
+    if (!this.running) return;
+    this.aborting = why;
+    if (this.state !== 'paused') this.pause();
+    void this.loop();
+  }
+
+  /**
+   * Paused (the stash step is about to walk to a chest): a quarry climbs out of its pit first, so that
+   * walk starts on the surface (inside the base it digs nothing, and a cell left over a tread would trap
+   * it). Paused again after; a pre-emption meanwhile pauses the climb.
+   */
+  async surface(): Promise<void> {
+    if (this.state !== 'paused' || this.spec.kind !== 'quarry') return;
+    const e = ++this.epoch;
+    while (this.runner?.busy && e === this.epoch) await this.h.waitTicks(1);
+    if (e !== this.epoch || this.state !== 'paused') return;
+    this.state = 'climb';
+    try {
+      await this.climbOut(e);
+    } finally {
+      if (e === this.epoch && this.state === 'climb') {
+        this.epoch++;
+        this.state = 'paused';
+      }
     }
   }
 
@@ -866,13 +926,21 @@ export class QuarryJob {
     return r.ok;
   }
 
-  /** Quarry: back up to the stair head (stairs, else tunnel.ts climbTo's pillar or dug staircase). */
+  /** Quarry: back up to the stair head (the treads, else tunnel.ts climbTo's pillar or dug staircase). */
   private async climbOut(e: number): Promise<void> {
     const top = this.spec.exit ?? this.spec.start;
     const pos = this.h.position();
     if (!pos || pos.y >= top.y - 0.5) return;
     this.log.info(`${this.spec.label}: back up to ${fmtCell(top)}`);
-    const w = this.h.tunnelWorld;
+    const up = await this.walkStairs(e, top);
+    if (!this.alive(e)) return;
+    if (up) {
+      this.stats.climb = { ok: true, dug: 0, placed: 0 };
+      return;
+    }
+    // the climb's staircase is planned and dug under the job's rules (inside the box) too
+    const tw = this.h.tunnelWorld;
+    const w: TunnelWorld | undefined = tw && { breakRule: (p) => this.climbRule(p), cell: (p) => tw.cell(p), blockAt: (p) => tw.blockAt(p) };
     const r = await climbTo(
       {
         dig: (p) => this.h.dig(p),
@@ -890,5 +958,36 @@ export class QuarryJob {
     );
     if (r.interrupted) return;
     this.stats.climb = { ok: r.ok, dug: r.dug, placed: r.placed, ...(r.reason ? { why: r.reason } : {}) };
+  }
+
+  /**
+   * Up the treads one at a time (walks that dig and place nothing), from the first one at or above the
+   * feet to the stair head. A walk that fails gets the solid cells over its tread dug (those the job may
+   * dig: a cell the plan left) and one more try. True when at the stair head.
+   */
+  private async walkStairs(e: number, top: Vec3): Promise<boolean> {
+    const pos = this.h.position();
+    if (!pos || this.spec.keep.length === 0) return false;
+    const y = Math.floor(pos.y + 1e-3);
+    const steps = [...this.spec.keep.filter((t) => t.y + 1 >= y).map((t) => ({ ...t, y: t.y + 1 })).reverse(), top];
+    for (const s of steps) {
+      let r = await this.h.goto({ type: 'block', p: s }, { allowBreak: false, allowPlace: false, timeoutTicks: 400 });
+      if (!this.alive(e)) return false;
+      if (r.ok) continue;
+      let dug = 0;
+      for (let dy = 0; dy <= 2; dy++) {
+        const c = { ...s, y: s.y + dy };
+        const b = this.h.blockAt(c);
+        if (!b || b.boxes.length === 0 || this.climbRule(c) !== undefined) continue;
+        const d = await this.h.dig(c);
+        if (!this.alive(e)) return false;
+        if (d.ok) dug++;
+      }
+      if (dug === 0) return false;
+      this.log.info(`${this.spec.label}: dug ${dug} over the tread under ${fmtCell(s)}`);
+      r = await this.h.goto({ type: 'block', p: s }, { allowBreak: false, allowPlace: false, timeoutTicks: 400 });
+      if (!this.alive(e) || !r.ok) return false;
+    }
+    return true;
   }
 }

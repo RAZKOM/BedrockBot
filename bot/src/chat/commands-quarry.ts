@@ -12,6 +12,7 @@
 // Registered by the afk task (tasks/registry.ts, one line). Without walking: `quarry needs a task that can walk`.
 // Refused at the start: a quarry box farther than 64 blocks or not loaded, a player in or over the box.
 // The stair treads are the navigator's kept cells while the job lives (Navigator.keptCells).
+import { isLiquid } from '../skills/build/sim.ts';
 import { fmtCell } from '../skills/build/types.ts';
 import { entityFeet, isPlayerEntity } from '../skills/combat/hostiles.ts';
 import { breakBlocker } from '../skills/nav/actions.ts';
@@ -131,7 +132,9 @@ export function registerQuarryCommands(d: CommandDeps): void {
     const pos = mob.position();
     if (!pos) return reply(`${kind}: not ready yet`);
     const feet = { x: Math.floor(pos.x), y: Math.floor(pos.y + 1e-3), z: Math.floor(pos.z) };
-    const r = kind === 'quarry' ? parseQuarryArgs(args, feet, world.self.yaw) : parseTunnelArgs(args, feet, world.self.yaw);
+    // the stair head: an open one (feet and head clear) first
+    const open = (p: { x: number; y: number; z: number }) => [p, { ...p, y: p.y + 1 }].every((c) => world.blockAt(c)?.boxes.length === 0 && !isLiquid(world.blockAt(c)));
+    const r = kind === 'quarry' ? parseQuarryArgs(args, feet, world.self.yaw, open) : parseTunnelArgs(args, feet, world.self.yaw);
     if ('error' in r) return reply(r.error);
     start(r.spec, reply);
   };

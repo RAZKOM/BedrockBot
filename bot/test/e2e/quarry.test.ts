@@ -80,13 +80,13 @@ describe.skipIf(!E2E)('@bds quarry and tunnel (Track BK)', () => {
   }, 120_000);
 
   afterAll(async () => {
+    console.log(`[quarry e2e] area cell ${area.cell} (${area.x}, ${area.z})\n  ${notes.join('\n  ')}`);
     if (bot) {
       for (let i = 0; i < row; i++) await clearArea(bot.truth, { x: area.x, z: area.z - 60 + 40 * i }, 24, 12).catch(() => undefined);
       await bot.stop();
     }
     rmSync(builds, { recursive: true, force: true });
-    console.log(`[quarry e2e] area cell ${area.cell} (${area.x}, ${area.z})\n  ${notes.join('\n  ')}`);
-  }, 120_000);
+  }, 600_000); // 7 sites to clear (radius 24)
 
   it('!quarry here 8 8 4 east digs the whole box but the stairs and climbs back out', async () => {
     const b = bot!;

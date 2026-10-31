@@ -73,14 +73,9 @@ export class QuarryProcess extends BaseProcess {
         label: this.name,
         wanted: (n) => this.wanted(n),
         pause: () => this.job.pause(),
+        leave: () => this.job.surface(),
         resume: () => this.job.resume(),
-        full: () => {
-          this.job.stop();
-          this.job.state = 'failed';
-          this.job.lastError = 'inventory full';
-          this.finish();
-          this.resolve('failed');
-        },
+        full: () => this.job.abort('inventory full'), // out of the pit first; the job's end ends the process (run)
       },
       () => t === this.token && !this.done,
     );

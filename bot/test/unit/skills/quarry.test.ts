@@ -71,6 +71,33 @@ function expectWalkable(w: FlatWorld, treads: readonly Vec3[]): void {
   }
 }
 
+/** A walk that digs and places nothing on the fake world: feet cells on a solid floor with 2 open cells, steps one block up (head room) or down. */
+function walkable(w: FlatWorld, from: Vec3, to: Vec3): boolean {
+  const open = (p: Vec3) => w.blockAt(p)!.boxes.length === 0 && !LIQ.test(w.name(p));
+  const stand = (p: Vec3) => open(p) && open({ ...p, y: p.y + 1 }) && w.blockAt({ ...p, y: p.y - 1 })!.boxes.length > 0;
+  const seen = new Set([key(from)]);
+  const q = [from];
+  while (q.length > 0) {
+    const c = q.shift()!;
+    if (key(c) === key(to)) return true;
+    for (const [dx, dz] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ] as const)
+      for (const dy of [0, 1, -1]) {
+        const n = { x: c.x + dx, y: c.y + dy, z: c.z + dz };
+        if (seen.has(key(n)) || Math.abs(n.x - from.x) > 20 || Math.abs(n.z - from.z) > 20 || !stand(n)) continue;
+        if (dy === 1 && !open({ ...c, y: c.y + 2 })) continue;
+        if (dy === -1 && !open({ ...n, y: n.y + 2 })) continue;
+        seen.add(key(n));
+        q.push(n);
+      }
+  }
+  return false;
+}
+
 function solidIn(w: FlatWorld, b: Box): Vec3[] {
   const out: Vec3[] = [];
   for (let y = b.min.y; y <= b.max.y; y++) for (let x = b.min.x; x <= b.max.x; x++) for (let z = b.min.z; z <= b.max.z; z++) if (w.blockAt({ x, y, z })!.boxes.length > 0) out.push({ x, y, z });
@@ -160,6 +187,10 @@ describe('quarry planning', () => {
     expect(s.dir).toEqual(SOUTH);
     expect(stairHead(boxOf({ x: 30, y: -61, z: 0 }, { x: 33, y: -63, z: 3 }), { x: 0.5, y: F, z: 0.5 })).toEqual({ x: 29, y: F, z: 0 });
     expect(spec(parseQuarryArgs(['1', '-61', '1', '3', '-62', '3'], FEET, 0)).dir).toBeUndefined();
+    // an open side first: the corner 1 1 has two outside sides, 0 -60 1 (nearer by the sort) blocked
+    const b = boxOf({ x: 1, y: -61, z: 1 }, { x: 4, y: -62, z: 4 });
+    expect(stairHead(b, { x: 0.5, y: F, z: 0.5 })).toEqual({ x: 0, y: F, z: 1 });
+    expect(stairHead(b, { x: 0.5, y: F, z: 0.5 }, (p) => !(p.x === 0 && p.z === 1))).toEqual({ x: 1, y: F, z: 0 });
   });
 
   it('the site: a box farther than 64 blocks or not loaded is refused; players in or over the box are found', () => {
@@ -377,6 +408,97 @@ describe('quarry job (fake world)', () => {
     expect(await job.start()).toBe('done');
     expect(takes.length).toBeGreaterThan(0);
     expect(takes.every((t) => t === job.take)).toBe(true);
+  });
+
+  it('wayOut: a player or the bot on a cell left over a tread does not end the job; the stair head is read too', () => {
+    const { world, host, bot } = setup();
+    const s = spec(parseQuarryArgs(['here', '4', '4', '4'], FEET, 0)); // tread 0 at 0 -62 1: 0 -61 1 (grass) over it
+    const job = new QuarryJob(s, host);
+    host.players = () => [{ x: 0.5, y: F, z: 1.5 }];
+    expect(job.refusal({ x: 0, y: -61, z: 1 })).toBe('player on it');
+    expect(job.wayOut(1)).toBeUndefined();
+    host.players = () => [];
+    bot.feet = { x: 0.5, y: F, z: 1.5 };
+    host.breakRule = (p) => (key(feetFloorOf(bot.feet)[0]!) === key(p) ? 'under_feet' : rule(world, p));
+    expect(job.refusal({ x: 0, y: -61, z: 1 })).toBe('under_feet');
+    expect(job.wayOut(1)).toBeUndefined();
+    // the stair head 0 -60 0: a block there with a torch on it stays (outside the box: what hangs on it counts too)
+    world.set({ x: 0, y: F, z: 0 }, 'dirt');
+    world.cells.set(key({ x: 0, y: F + 1, z: 0 }), { name: 'torch', boxes: [] });
+    expect(job.wayOut(1)).toBe('dirt at the stair head 0 -60 0 stays (supports a block)');
+  });
+
+  it('inventory full with a cell left over a tread, no walk digging (the base): the job climbs out, digging that cell, then ends', async () => {
+    const { world, host, bot, digs } = setup();
+    const s = spec(parseQuarryArgs(['here', '4', '4', '4'], FEET, 0)); // treads 0 -62 1, 1 -63 1, 1 -64 2
+    const left = { x: 1, y: -62, z: 1 }; // over tread 1 -63 1: the runner cannot dig it (out of reach), the job may
+    let strict = false;
+    const deps = bot.deps();
+    host.dig = (p) => {
+      if (!strict && key(p) === key(left)) return Promise.resolve({ ok: false, reason: 'out_of_reach' });
+      digs.push({ ...p });
+      return deps.dig(p);
+    };
+    host.goto = (g, o) => {
+      const f = { x: Math.floor(bot.feet.x), y: Math.floor(bot.feet.y + 1e-3), z: Math.floor(bot.feet.z) };
+      if (strict && g.type === 'block' && !walkable(world, f, g.p)) return Promise.resolve({ ok: false, reason: 'no path' });
+      return deps.goto(g, o);
+    };
+    const job = new QuarryJob(s, host);
+    bot.onStep = () => {
+      const bottom = digs.filter((p) => p.y === -64);
+      if (!strict && bottom.length >= 5) {
+        // the stash step: paused with the bot down in the bottom layer, the inventory still full
+        strict = true;
+        job.pause();
+        setTimeout(() => {
+          const d = bottom[bottom.length - 1]!;
+          bot.feet = { x: d.x + 0.5, y: -64, z: d.z + 0.5 };
+          expect(walkable(world, d, s.exit!)).toBe(false); // trapped: the cell over tread 1 blocks the stairs
+          job.abort('inventory full');
+        }, 5);
+      }
+    };
+    expect(await job.start()).toBe('failed');
+    expect(job.lastError).toBe('inventory full');
+    expect(world.name(left)).toBe('air'); // dug on the way up
+    expect(job.stats.climb?.ok).toBe(true);
+    expect(Math.floor(bot.feet.y)).toBe(F);
+    expectWalkable(world, s.keep);
+  });
+
+  it('surface(): paused for the stash step, a quarry climbs out first and stays paused; resume goes back down', async () => {
+    const { world, host, bot } = setup();
+    const s = spec(parseQuarryArgs(['here', '4', '4', '3'], FEET, 0));
+    const job = new QuarryJob(s, host);
+    let surfaced = false;
+    bot.onStep = () => {
+      if (!surfaced && job.index === 2) {
+        surfaced = true;
+        job.pause();
+        setTimeout(() => {
+          void job.surface().then(() => {
+            expect(Math.floor(bot.feet.y)).toBe(F);
+            expect(job.state).toBe('paused');
+            job.resume();
+          });
+        }, 5);
+      }
+    };
+    expect(await job.start()).toBe('done');
+    expect(surfaced).toBe(true);
+    expect(solidIn(world, s.box).map(key).sort()).toEqual(s.keep.map(key).sort());
+  });
+
+  it('no pickaxe in the middle of the job: it climbs out before it ends', async () => {
+    const { host, bot, inv, digs } = setup();
+    const job = new QuarryJob(spec(parseQuarryArgs(['here', '4', '4', '3'], FEET, 0)), host);
+    bot.onStep = () => {
+      if (job.index === 1 && digs.length > 20) inv.items.delete('diamond_pickaxe'); // checked before the next layer
+    };
+    expect(await job.start()).toBe('failed');
+    expect(job.lastError).toBe('no pickaxe');
+    expect(Math.floor(bot.feet.y)).toBe(F);
   });
 
   it('stop mid-job: nothing more is dug and the job ends stopped', async () => {
