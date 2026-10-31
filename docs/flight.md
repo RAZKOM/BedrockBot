@@ -841,7 +841,43 @@ an exact `!fly` landing that ended more than 0.8 from the goal block's centre wa
   measurable and is the vanilla way to stop at an edge; it is released once the slide has stopped (the walk
   sets its own keys; keeping it on into the walk near an edge is not done).
 
+## Measurements (Track BH, bds-fly, BDS 1.26.60.6)
+
+### `fly-glide-down`
+
+There were five green runs of 5 cases each: two before the merges of main, one after Track BI, and two
+after BG2 and ADR 0051. The table gives typical values; they varied little between runs.
+
+| Case | Result |
+|---|---|
+| pillar (bedrock 3 x 3, 40 up, goal 60 away, 0 rockets) | walk `no path (exhaustive search, 9 nodes)`; 16 ledges on 9 cells, the simulation took 533 ms and landed 0.4 from the centre in 283 ticks; real flight: landed 0.32 from the centre, 279 ticks, 0 rockets, 3 corrections, gliding 9.2 under the edge after 18 ticks of walk; arrived, 0 damage, 19 s in all |
+| ledge (the same pillar, `!fly` 150 away, 64 rockets) | `ledge takeoff (a small platform)`; landed 0.10 from the centre, 2 rockets, 0 go-arounds, 410 ticks, 0 damage, 24 s |
+| noreach (bedrock pillar 12 up, goal 150 away, 0 rockets, `longFalls` off) | every ledge's simulation is down 123 to 132 blocks short; the owner hears `fly: no glide down ...: no simulated glide lands there (...)`, then `goto: unreachable (the way down is a 12-block drop (8 HP); long falls are off ...)`; the bot stays on the pillar, 0 damage, 2 s |
+| farm (the platform under the box, `!goto` 400 away and 130 lower) | `ledge takeoff (a roof 12 up)`: 32 ledges on 47 cells, the +x edge; landed 0.03 to 0.07 from the centre, 2 rockets, 0 go-arounds, 732 to 860 ticks; arrived, 0 damage, 41 to 48 s |
+| prone (teleported into a 1-high gap under persistent leaves) | BDS sets the crawl pose at once (`box height 0.60`); the goto breaks the leaves over the head (one block, 6 ticks), stands up (`box height 1.80`), and with `allowBreak` digs out 3 more leaves; arrived 12 blocks away |
+
+With Track BI's `longFalls` on, the noreach pillar is walked down instead (a 12-block drop, 8 HP), so the
+case turns it off.
+
+### Regressions
+
+`fly-land`, `fly-walk`, `fly-overhang` and `fly-roof` passed 15/15 three times: before the merges, after
+Track BI (with the landing probes fixed, see below) and after BG2 and ADR 0051.
+
+After merging Track BI, `fly-overhang`'s roof case landed on the roof once, taking 3 fall damage. The
+landing probe had confirmed a walk from the roof with a planned 6-block long fall. Landing probes now plan
+without long falls (`probePath(..., { noLongFalls: true })`); after that the case passed again.
+
 ## Open points
+
+- Track BH: there is no crawl move. A prone body under blocks it may not break stays where it is and asks
+  for help. Digging out of a gap uses `allowBreak` for one walk, under the navigator's break rules.
+- Track BH: a glide down is tried only when the walk finds no way. When Track BI's long falls make a
+  hurting drop walkable, the walk takes the drop (8 HP for 12 blocks) even with an elytra on.
+- Track BH: during a glide with 0 rockets the low-supply line (`fireworks low: 0 rockets left ...`) still
+  goes out once, although the glide needed none.
+- Track BH: the pose log says `prone` while gliding (BDS gives the gliding body a 0.6 box). `state.prone`
+  ignores gliding, but the log line is noise.
 
 - Track BF: since Track BG the replica's hatch is a closed trapdoor lying on the platform over the ladder
   (the planner opens it and closes it behind; `FLY_BF_TRAPDOOR=0` gives a bare hole). The owner's farm has
