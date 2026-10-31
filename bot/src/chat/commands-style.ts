@@ -16,7 +16,7 @@ export function routeLine(route: Route | undefined, prefix = '!'): string {
   }
   if (route.via === 'tellraw') return 'replies go out as /tellraw (chatVia tellraw); if a line has no <name> in front, it works';
   const mins = Math.max(1, Math.round((route.route.retryInMs ?? 0) / 60_000));
-  return `chatVia tellraw is set but the server refused /tellraw (${route.route.reason ?? 'failed'}): replies go out as chat, tellraw is tried again in ${mins} min (the bot must be an operator)`;
+  return `chatVia tellraw is set but the server refused /tellraw (${route.route.reason ?? 'failed'}): replies go out as chat, tellraw is tried again in ${mins} min or when you type ${prefix}colors (the bot must be an operator)`;
 }
 
 /** The messages `!colors` sends (exported for the tests). */
@@ -58,6 +58,7 @@ export function registerStyleCommands(chat: Chat): void {
     group: 'info',
     example: '!colors',
     run: ({ reply }) => {
+      chat.retryRoute(); // `!colors` is also the retest of chatVia tellraw: the demo below is the test message
       for (const m of colorsDemo(chat.styleMode(), chat.prefix, chat.routeStatus())) reply(m);
     },
   });

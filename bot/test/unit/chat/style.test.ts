@@ -5,7 +5,7 @@ import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Chat, type CommandDef } from '../../../src/chat/chat.ts';
-import { colorsDemo } from '../../../src/chat/commands-style.ts';
+import { colorsDemo, registerStyleCommands } from '../../../src/chat/commands-style.ts';
 import { settingGroups, SETTING_GROUPS } from '../../../src/chat/help.ts';
 import { SETTING_DEFS, SETTING_KEYS } from '../../../src/config/settings.ts';
 import { colorize, DOC_MESSAGE, Doc, fitWire, isStyled, MAX_WIRE, paint, strip } from '../../../src/chat/style.ts';
@@ -320,15 +320,78 @@ describe('Chat.say, layout and the rich help', () => {
       expect(client.sentOf('text').map((p) => p.message)).toEqual(['one', 'two', 'three']);
     });
 
-    it('tries /tellraw again after the pause (the owner may have made the bot an operator meanwhile)', async () => {
+    it('tries /tellraw again by itself after a minute (the owner may have made the bot an operator meanwhile)', async () => {
       chat.say('first');
       await flushed();
       client.receive('command_output', OUTPUT_REFUSED(uuidOf(0)));
-      await vi.advanceTimersByTimeAsync(10 * 60_000 + 1000);
+      await vi.advanceTimersByTimeAsync(30_000);
+      chat.say('too soon');
+      await flushed();
+      expect(commands()).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(31_000);
       chat.say('later');
       await flushed();
       expect(commands()).toHaveLength(2);
       expect(chat.routeStatus().route.state).toBe('on');
+    });
+
+    it('tells the owner once, after the replies, when the test is refused; the automatic retries refuse quietly', async () => {
+      chat.say('one');
+      chat.say('two');
+      await flushed();
+      client.receive('command_output', OUTPUT_REFUSED(uuidOf(0)));
+      client.receive('command_output', OUTPUT_REFUSED(uuidOf(1)));
+      await vi.advanceTimersByTimeAsync(600);
+      const texts = client.sentOf('text').map((p) => String(p.message));
+      expect(texts.slice(0, 2)).toEqual(['one', 'two']); // the refused replies first
+      expect(texts).toHaveLength(3);
+      expect(texts[2]).toContain('refused by the server (commands.generic.permission.selector)');
+      expect(texts[2]).toContain('!colors tries again');
+      await vi.advanceTimersByTimeAsync(61_000); // the automatic retry is refused too: no second warning
+      chat.say('three');
+      await flushed();
+      client.receive('command_output', OUTPUT_REFUSED(uuidOf(2)));
+      await vi.advanceTimersByTimeAsync(600);
+      expect(client.sentOf('text').map((p) => String(p.message)).slice(3)).toEqual(['three']);
+    });
+
+    it('does not warn when the test goes through (success is silent)', async () => {
+      chat.say('one');
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(client.sentOf('text')).toHaveLength(0);
+    });
+
+    it('retryRoute (what !colors does) and switching chatVia to tellraw try at once, not after the pause', async () => {
+      chat.say('first');
+      await flushed();
+      client.receive('command_output', OUTPUT_REFUSED(uuidOf(0)));
+      chat.say('paused');
+      await flushed();
+      expect(commands()).toHaveLength(1);
+      chat.retryRoute();
+      chat.say('retry');
+      await flushed();
+      expect(commands()).toHaveLength(2);
+      client.receive('command_output', OUTPUT_REFUSED(uuidOf(1)));
+      chat.say('paused again');
+      via = 'chat';
+      chat.say('as chat');
+      via = 'tellraw'; // the switch back is the test
+      chat.say('switched');
+      await flushed();
+      expect(commands()).toHaveLength(3);
+      expect(String(client.sentOf('command_request')[2]?.command)).toContain('switched');
+    });
+
+    it('!colors is the retest: the demo goes out as the test message', async () => {
+      registerStyleCommands(chat);
+      chat.say('first');
+      await flushed();
+      client.receive('command_output', OUTPUT_REFUSED(uuidOf(0)));
+      const before = commands().length;
+      client.receive('text', { needs_translation: false, category: 'authored', type: 'announcement', source_name: 'Server', message: '[Server] !colors', xuid: '' });
+      await flushed();
+      expect(commands().length).toBeGreaterThan(before); // not paused: tried again at once
     });
 
     it('ignores the output of other commands (whispers, anything it did not send) and successes', async () => {

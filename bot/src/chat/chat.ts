@@ -12,6 +12,9 @@ import { commandRequestPacket, DOC_MESSAGE_TELLRAW, SLASH_MAX, tellrawCommand, T
 /** Longest multi-line block (visible text plus codes) say() lets through when `chatLines` is on; the wire limit is style.ts MAX_WIRE. */
 const MAX_BLOCK = 440;
 
+/** The "tellraw was refused" line waits this long, so replies refused together are resent before it. */
+const WARN_DELAY_MS = 400;
+
 /** Who sent a chat line. The console is `say` / `tell` typed into the BDS console (or docker exec). */
 export type Sender = { kind: 'console' } | { kind: 'player'; name: string; xuid: string };
 
@@ -159,7 +162,11 @@ export class Chat {
   private off: (() => void) | undefined;
   private offOutput: (() => void) | undefined;
   private readonly route = new TellrawRoute(() => Date.now());
-  private routeLogged = false;
+  /** The `chatVia` value the last message saw, to notice a switch to tellraw (a restart counts: undefined before the first message). */
+  private lastVia: string | undefined;
+  /** A try the owner caused (a switch, a restart, `!colors`) has not been answered by a refusal yet: the first refusal is told in chat. */
+  private routeTest = false;
+  private warnTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(conn: Connection, opts: ChatOptions = {}) {
     this.conn = conn;
@@ -232,13 +239,31 @@ export class Chat {
     }
   }
 
-  /** Is the `chatVia tellraw` setting on and not paused by a refusal? */
+  /**
+   * Is the `chatVia tellraw` setting on and not paused by a refusal? The one place that reads the setting, so it
+   * is also where a switch to tellraw (or the first message after a start with it on) is noticed: that clears an
+   * old refusal and makes the next message the test; a refusal of it is told in chat.
+   */
   private tellrawWanted(): boolean {
     try {
-      return this.styleSource?.via?.() === 'tellraw' && this.route.usable();
+      const via = this.styleSource?.via?.();
+      if (via !== this.lastVia) {
+        this.lastVia = via;
+        if (via === 'tellraw') this.retryRoute();
+      }
+      return via === 'tellraw' && this.route.usable();
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Try tellraw again now (`!colors`, a switch of `chatVia`): forgets a refusal, and the next reply is the test; if
+   * the server refuses it, the owner gets one chat line saying so. Harmless while `chatVia` is `chat`.
+   */
+  retryRoute(): void {
+    this.route.reset();
+    this.routeTest = true;
   }
 
   /**
@@ -302,6 +327,8 @@ export class Chat {
     this.off = undefined;
     this.offOutput?.();
     this.offOutput = undefined;
+    clearTimeout(this.warnTimer);
+    this.warnTimer = undefined;
   }
 
   /** `command_output` for one of our tellraws: when it failed, resend the text as chat once and pause tellraw (route.ts). */
@@ -313,11 +340,22 @@ export class Chat {
     const successCount = typeof p.success_count === 'number' ? p.success_count : 0;
     const text = this.route.onOutput(uuid, successCount, id);
     if (text === undefined) return;
-    if (!this.routeLogged) {
-      this.routeLogged = true;
-      this.log.warn(`/tellraw refused (${id ?? 'no message id'}); replies go out as chat for a while. Make the bot an operator to use chatVia tellraw`);
+    const why = id ?? 'no message id';
+    if (this.conn.state !== 'spawned') return;
+    this.conn.queue('text', chatPacket(this.conn.username, text));
+    if (this.routeTest) {
+      // the owner asked for tellraw (or just switched to it): tell them it did not work, once, where they are looking
+      this.routeTest = false;
+      this.log.warn(`/tellraw refused (${why}); replies stay in chat. Make the bot an operator, then ${this.prefix}colors tries again`);
+      // a moment later, so the rest of a burst that was refused together (a help block) is resent before the warning
+      this.warnTimer = setTimeout(() => {
+        this.warnTimer = undefined;
+        if (this.conn.state !== 'spawned') return;
+        this.conn.queue('text', chatPacket(this.conn.username, this.finish(`chatVia tellraw: refused by the server (${why}), so replies stay in chat. The bot is probably not an operator; make it one, then ${this.prefix}colors tries again`)));
+      }, WARN_DELAY_MS);
+    } else {
+      this.log.info(`/tellraw refused again (${why}); chat for ${Math.round(this.route.status().retryInMs ?? 0) / 1000} s more`);
     }
-    if (this.conn.state === 'spawned') this.conn.queue('text', chatPacket(this.conn.username, text));
   }
 
   /** Every parsed chat line (including truth lines and our own echo). */

@@ -12,8 +12,10 @@
 //   a command of 480 characters works; 512 makes the server DROP THE CONNECTION (chat only drops the message)
 //
 // So the route is an opt-in setting (`chatVia tellraw`) with a safety net: a refused or failed tellraw is
-// resent as ordinary chat at once, and tellraw is not tried again for RETRY_MS. A message whose command would
-// pass SLASH_MAX never becomes a command; it goes out as chat.
+// resent as ordinary chat at once, and tellraw is not tried again by itself for RETRY_MS. Switching the
+// setting to tellraw, a restart and `!colors` try at once, and when that try is refused the owner is told in
+// chat (Chat.onCommandOutput). A message whose command would pass SLASH_MAX never becomes a command; it goes
+// out as chat.
 import { randomUUID } from 'node:crypto';
 
 /** Longest slash command we ever send. 480 works on BDS 1.26.60.6, 512 drops the connection. */
@@ -22,8 +24,11 @@ export const SLASH_MAX = 480;
 /** The text budget of a Doc message when the route is tellraw: the command wraps it in about 37 characters plus JSON escapes. */
 export const DOC_MESSAGE_TELLRAW = 420;
 
-/** After a refusal, wait this long before trying tellraw again (the owner may have made the bot an operator meanwhile). */
-export const RETRY_MS = 10 * 60_000;
+/**
+ * After a refusal, wait this long before trying tellraw again by itself (the owner may have made the bot an
+ * operator meanwhile). Switching `chatVia` to tellraw, a restart and `!colors` try at once instead.
+ */
+export const RETRY_MS = 60_000;
 
 /** The `command_request` packet the bot sends. */
 export interface CommandRequest extends Record<string, unknown> {
@@ -89,6 +94,12 @@ export class TellrawRoute {
   /** May the next message try tellraw? (No while a refusal is fresh.) */
   usable(): boolean {
     return this.now() >= this.offUntil;
+  }
+
+  /** Forget a refusal: the next message tries tellraw again (the setting was switched, or the owner asked with `!colors`). */
+  reset(): void {
+    this.offUntil = 0;
+    this.reason = undefined;
   }
 
   /** A tellraw command went out under `uuid` carrying `text` (the chat form of the same message). */

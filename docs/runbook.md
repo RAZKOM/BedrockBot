@@ -319,9 +319,11 @@ Off by default. Turn it on in game, in this order, after each step looks right i
    `§` characters or run-together lines instead of colours, stop here: your client does not draw them.
 2. `!set chatColor on` (coloured replies), `!set chatLines on` (`!help` / `!set` as a few headed blocks).
 3. `!set chatVia tellraw` only if the bot is an operator on that world (replies as `/tellraw`: no `<Bot>` name
-   in front). If the server refuses the command, the same text goes out as chat, the log says
-   `/tellraw refused (<message id>)` once, `!colors` shows the refusal and tellraw is tried again after 10
-   minutes. Making the Realm bot an operator is your decision; nothing depends on it.
+   in front). The first reply after the switch (or after a restart with it on) is the test: if the server
+   refuses `/tellraw`, the same text goes out as chat and the bot says in chat that it was refused and why
+   (`chatVia tellraw: refused by the server (commands.generic.permission.selector), so replies stay in chat ...`).
+   Make the bot an operator and type `!colors`: that tries tellraw at once (otherwise it retries by itself
+   after a minute, quietly). Making the Realm bot an operator is your decision; nothing depends on it.
 
 On the Mac the settings live in `~/.bedrockbot/settings.json` and apply to the next reply (no restart). A
 server limit worth knowing: a chat message over about 520 characters is dropped silently and a command of 512
