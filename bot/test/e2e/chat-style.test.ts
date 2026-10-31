@@ -4,6 +4,7 @@
 // Runs only with BDS_E2E=1:  BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e chat-style
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Chat } from '../../src/chat/chat.ts';
+import { strip } from '../../src/chat/style.ts';
 import { Connection } from '../../src/connection/connection.ts';
 import { silentLogger } from '../../src/log.ts';
 import { bdsCmd, connectObserver, E2E, isChatFrom, sleep, TARGET, VERSION, type Observer } from './chat-helpers.ts';
@@ -115,7 +116,22 @@ describe.skipIf(!E2E)('@bds chat style: the /tellraw route', () => {
     chat.say('after deop two');
     await watcher.waitText((t) => isChatFrom(t, BOT) && t.message === 'after deop two', 5_000, 'chat while paused');
     expect(watcher.texts.filter((t) => t.type === 'json_whisper' && rawtext(t.message).startsWith('after deop'))).toHaveLength(0);
+    // the test was refused, so the owner is told in chat, once, with how to retry
+    const warning = await watcher.waitText((t) => isChatFrom(t, BOT) && strip(t.message).includes('refused by the server'), 5_000, 'refusal warning');
+    expect(strip(warning.message)).toContain('commands.generic');
+    expect(strip(warning.message)).toContain('!colors tries again');
+    expect(watcher.texts.filter((t) => isChatFrom(t, BOT) && strip(t.message).includes('refused by the server'))).toHaveLength(1);
     expect(conn.state).toBe('spawned');
+  }, 30_000);
+
+  it('opped again: !colors (retryRoute) tries at once instead of waiting for the pause, and /tellraw is delivered', async () => {
     bdsCmd('op', BOT);
+    await sleep(1_500);
+    expect(chat.routeStatus().route.state).toBe('refused'); // still paused from the refusal
+    chat.retryRoute();
+    chat.say('back on tellraw');
+    await watcher.waitText((t) => t.type === 'json_whisper' && rawtext(t.message) === 'back on tellraw', 8_000, 'tellraw after retry');
+    expect(chat.routeStatus()).toMatchObject({ via: 'tellraw', route: { state: 'on' } });
+    expect(conn.state).toBe('spawned');
   }, 30_000);
 });

@@ -145,8 +145,13 @@ The safety net is built in, do not duplicate it:
 
 - A command longer than `SLASH_MAX` (480) is never sent; that reply goes out as chat.
 - A refused `/tellraw` (its `command_output` has `success_count` 0 and the uuid we sent) is resent as chat at
-  once, the route pauses for 10 minutes (`RETRY_MS`), and the bot logs the server's message id once. `!colors`
-  shows the route (`replies go out as ...`, or the refusal and the minutes left).
+  once and the route pauses for a minute (`RETRY_MS`), after which the next reply tries tellraw again by itself.
+- **Switching `chatVia` to tellraw, a restart with it on, and `!colors` try at once** (`Chat.retryRoute`): the
+  next reply is the test. If the server refuses it, the owner gets one chat line a moment later (after the
+  refused replies were resent): `chatVia tellraw: refused by the server (<message id>), so replies stay in chat.
+  The bot is probably not an operator; make it one, then !colors tries again`. The automatic retries after that
+  refuse quietly (a log line only), so a non-operator account never gets a stream of warnings. Success is silent
+  on the wire, so a working tellraw shows as replies without the `<Bot>` name. `!colors` shows the route.
 - **Only `/tellraw @a` is ever sent by this route** (a unit test checks that even a reply that says `/op Bot`
   or `/stop` goes out as text inside the JSON). Do not add other commands to `Chat.send`.
 - Making the bot an operator on a Realm is the owner's decision. Do not assume it, and do not ask the bot to

@@ -38,10 +38,12 @@ chunking.
 6. **`/tellraw` is an optional route, with a safety net.** `chatVia tellraw` sends the finished text as
    `/tellraw @a {"rawtext":[{"text":...}]}`: no `<Bot>` name before every line, and (to be confirmed) no player
    chat filter, which masked digits as `####` on the owner's client on 2026-10-29. It needs operator rights: a
-   non-operator's command is refused at once (`command_output`, success 0), so the text is resent as chat, the
-   route pauses for 10 minutes (it is tried again then) and the refusal is logged once. A command that would
-   pass 480 characters is never sent. The route only ever sends `/tellraw @a`. Making the bot an operator on a
-   Realm stays the owner's decision.
+   non-operator's command is refused at once (`command_output`, success 0), so the text is resent as chat and
+   the route pauses for a minute. The owner never has to wait for that: switching the setting, a restart and
+   `!colors` try at once, and a refused try like that is announced in chat with the server's reason (the
+   automatic retries stay quiet). A command that would pass 480 characters is never sent. The route only ever
+   sends `/tellraw @a`. Making the bot an operator on a Realm stays the owner's decision. (First version: a
+   10-minute pause and a log line only; the owner opped the bot and saw nothing happen, hence this.)
 
 ## Alternatives rejected
 
