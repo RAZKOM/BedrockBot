@@ -1,4 +1,4 @@
-// Track BH (docs/flight.md "Glide down" and "Ledge takeoff"; decisions/0050-glide-down-and-ledge-takeoff.md):
+// Track BH (docs/flight.md "Glide down" and "Ledge takeoff"; decisions/0054-glide-down-and-ledge-takeoff.md):
 //
 //   - the ledge takeoff: an edge of the start's platform whose fall corridor is clear (no wall or overhang
 //     along the heading for LEDGE_CORRIDOR blocks, nothing under the edge closer than the glide needs to

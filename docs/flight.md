@@ -412,7 +412,7 @@ contact (the glide has ended), which is the post-landing slide. The measurements
 
 ## Glide down and ledge takeoff (Track BH)
 
-Decision record: [decisions/0050-glide-down-and-ledge-takeoff.md](decisions/0050-glide-down-and-ledge-takeoff.md).
+Decision record: [decisions/0054-glide-down-and-ledge-takeoff.md](decisions/0054-glide-down-and-ledge-takeoff.md).
 
 > **The Realm, 2026-10-31.** 04:34Z `!goto home` from the owner's farm platform (9 x 7, 135 above the
 > goal, under the spawning box that overhangs it): the sky check refused the jump takeoff (the box), and

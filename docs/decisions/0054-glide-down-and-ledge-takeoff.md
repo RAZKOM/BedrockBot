@@ -1,4 +1,4 @@
-# 0050: Glide down when the walk has no way on; take off by stepping off a ledge
+# 0054: Glide down when the walk has no way on; take off by stepping off a ledge
 
 Date: 2026-10-31. Status: accepted (Phase 7, wave 11 Track BH; builds on [0042](0042-elytra-flight.md) and
 [0047](0047-flight-landing-v3.md)). Server: BDS 1.26.60.6 (`bds-fly`, udp/19204, strict movement).
