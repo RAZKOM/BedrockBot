@@ -7,7 +7,7 @@ export type { Goal, DigOptions, DigResult };
 
 export type SkillResult =
   | { ok: true }
-  | { ok: false; reason: 'unreachable' | 'timeout' | 'corrected' | 'interrupted' | 'no_tool' | (string & {}) };
+  | { ok: false; reason: 'unreachable' | 'timeout' | 'corrected' | 'interrupted' | 'no_tool' | (string & {}); /** Track BI: why, in words (a refused long fall). */ note?: string };
 
 export interface GotoOptions {
   /** Give up with 'timeout' after this many ticks. Default 6000 (5 min). */

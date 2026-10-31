@@ -225,3 +225,20 @@ export function itemDisplayName(raw: unknown): string | undefined {
   const v = (raw as { extra?: { nbt?: { nbt?: { value?: { display?: { value?: { Name?: { value?: unknown } } } } } } } } | undefined)?.extra?.nbt?.nbt?.value?.display?.value?.Name?.value;
   return typeof v === 'string' ? v : undefined;
 }
+
+/**
+ * Track BI: the enchantments of a raw wire item: `extra.nbt.nbt.value.ench.value.value[]` of `{id, lvl}` shorts
+ * (verified on BDS 1.26.60 with /enchant on diamond boots: feather falling id 2, protection id 0). Undefined
+ * without any.
+ */
+export function itemEnchants(raw: unknown): { id: number; lvl: number }[] | undefined {
+  const list = (raw as { extra?: { nbt?: { nbt?: { value?: { ench?: { value?: { value?: unknown } } } } } } } | undefined)?.extra?.nbt?.nbt?.value?.ench?.value?.value;
+  if (!Array.isArray(list)) return undefined;
+  const out: { id: number; lvl: number }[] = [];
+  for (const e of list as { id?: { value?: unknown }; lvl?: { value?: unknown } }[]) {
+    const id = e.id?.value;
+    const lvl = e.lvl?.value;
+    if (typeof id === 'number' && typeof lvl === 'number') out.push({ id, lvl });
+  }
+  return out.length ? out : undefined;
+}

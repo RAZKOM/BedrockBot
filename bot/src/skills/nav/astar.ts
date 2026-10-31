@@ -39,6 +39,8 @@ import { BestSoFar, FAILURE_NODES_FACTOR } from './baritone/bestSoFar.ts'; // Tr
 import { ascend, createBreakMoveContext, descend, downward, pillar, sneakFits, traverse, type BreakMoveContext } from './baritone/moves.ts'; // Track BC: the moves that dig (ported, LGPL-3.0) and sneak-through
 import { DEFAULT_COSTS, dropCost, type PathCosts } from './costs.ts';
 import { goalTest, levelWeights, type NavGoal, type GoalTest } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
+import { longDrops, type LongDrop } from '../fall/plan.ts'; // Track BI: long falls
+import type { FallPolicy } from '../fall/policy.ts';
 import { CROSS_BLOCKED, CROSS_CLEAR, CROSS_TOGGLE, VARIETY_CLIMBER, VARIETY_LADDER, VARIETY_TRAPDOOR, VARIETY_WATER, cellKey, type NavGrid } from './grid.ts';
 
 export type { PathCosts } from './costs.ts';
@@ -136,6 +138,8 @@ export interface PathOptions {
   cellCost?: (x: number, y: number, z: number) => number;
   /** Track R: cells (cellKey) not to pillar in / doors (lower half) not to open (blacklisted place / use failures). */
   noAction?: ReadonlySet<number>;
+  /** Track BI: drops deeper than `maxDrop` (damage within the health budget, water-bucket clutches; skills/fall/plan.ts). Default none. */
+  falls?: FallPolicy;
 }
 
 export interface PathResult {
@@ -711,6 +715,7 @@ export class PathSearch {
           break; // only fall through free cells
         }
       }
+      if (opts.falls && !landing && costs.maxDrop >= 3) this.longDrops(cur, cy, f0, nx, nz); // Track BI: deeper drops (skills/fall/plan.ts)
       // Track AJ: nothing to land on within 3 (mid-air, a deep pit) and no water right below that: no
       // parkour (the scan above found the cells down to cy - 3 free when it ran to the end)
       if (holes[di] && !landing) holes[di] = (grid.variety & VARIETY_WATER) !== 0 && grid.cls(nx, cy - costs.maxDrop - 1, nz)?.liquid === 'water' ? 1 : 0;
@@ -899,6 +904,13 @@ export class PathSearch {
     if (room !== true) return;
     const costs = this.costs;
     this.relax(cur, nx, ny, nz, w, costs.walk + (d > 0 ? (costs.fall[d] ?? 0) : 0), M_SWIM, costs.swimEnter, 0, undefined, F_SWIM);
+  }
+
+  /** Track BI: drops deeper than maxDrop into column (nx, nz) (skills/fall/plan.ts), relaxed as drop moves. */
+  private longDrops(cur: number, cy: number, f0: number, nx: number, nz: number): void {
+    const out: LongDrop[] = [];
+    if (longDrops(this.grid, this.costs, this.opts.falls!, nx, cy, nz, f0, out)) this.sawUnknown = true;
+    for (const o of out) this.relax(cur, nx, o.y, nz, o.feet, o.base, M_DROP, o.extra, o.trap);
   }
 
   /** A climb into node (x, y, z) has head room: the cell above the body (y + 2) is passable. */

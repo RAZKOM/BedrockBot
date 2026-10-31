@@ -177,6 +177,13 @@ export const afkTask: TaskDefinition = {
       });
       mob.skills.nav.setDigPenalty(() => settings.get('digPenalty'));
       mob.skills.throwawayReserve = () => settings.get('throwawayMin'); // decision 0051: the scaffold lends it only until a block is left behind
+      // Track BI: long falls and the water bucket clutch; no clutch water is ever planned inside the base
+      mob.skills.falls.settings = () => ({ longFalls: settings.get('longFalls'), fallMargin: settings.get('fallMargin'), clutch: settings.get('clutch'), clutchMaxDrop: settings.get('clutchMaxDrop') });
+      mob.skills.falls.protect = () => {
+        const h = home;
+        const r = settings.get('protectRadius');
+        return h && r > 0 ? { x: h.x + 0.5, y: h.y, z: h.z + 0.5, r } : undefined;
+      };
     }
     if (mob && processes) {
       const nightRef: { p?: NightProcess } = {};
@@ -210,6 +217,7 @@ export const afkTask: TaskDefinition = {
         settings,
       });
       pve = p;
+      mob.skills.falls.inCombat = () => p.combat.busy; // Track BI: no clutch in a fight unless the fall would kill (the weapon stays in hand)
       // dig / place / doors / chests for every walk and for !gather (the settings decide what the planner may use)
       containers = new Containers(ctx.conn, mob.world.inventory, { logger: ctx.logger('gather') });
       mob.skills.attach({ hotbar: p.hotbar, containers, source: ctx.conn });
