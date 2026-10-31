@@ -391,7 +391,11 @@ export class BotSkills implements Skills {
     const u = await this.unprone(() => token !== this.epoch);
     this.log.info(`goto: prone at ${from.x.toFixed(1)} ${from.y.toFixed(1)} ${from.z.toFixed(1)} (no standable node); ${u.ok ? `standing again${u.dug.length ? ` after breaking ${u.dug.join(', ')}` : ''}` : `still prone: ${u.why ?? '?'}`}`);
     if (!u.ok || token !== this.epoch) return r;
-    return this.nav.goto(goal, opts);
+    const again = await this.nav.goto(goal, opts);
+    if (again.ok || again.reason !== 'unreachable' || opts?.allowBreak === true || token !== this.epoch) return again;
+    // standing, but boxed in (a 1-high gap under a canopy or a slab roof all round): dig out once, the break rules hold
+    this.log.info(`goto: standing but no way out of the gap; digging out (allowBreak for this walk)`);
+    return this.nav.goto(goal, { ...opts, allowBreak: true });
   }
 
   /**

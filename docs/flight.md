@@ -47,6 +47,9 @@ authoritative. Decision record: [decisions/0042-elytra-flight.md](decisions/0042
 | `bot/src/skills/fly/landing.ts` | Track BF: `findLanding` (the confirmed-path search), `floorsOf`, the wet / hazard rules, `corridorsOf` / `corridorLands` (overhangs), `stillLandable` |
 | `bot/src/skills/survival/surface.ts`, `bot/src/tasks/process/surface.ts` | Track BF: `headInWater`, `swimUp`; the `surface` process and `shoreNear` |
 | `bot/test/unit/skills/fly-landing.test.ts`, `surface.test.ts`; `bot/test/e2e/fly-overhang.test.ts` | Track BF: the farm replica on the model, the big roof, the sea, the hold; the swim up and drowning; the e2e farm / roof / water / seabed / sneak cases |
+| `bot/src/skills/fly/glide.ts` | Track BH: `findLedges`, `smallPlatform`, `simulateFlight` (the whole flight on the live model), `planGlideDown`, `ledgeTakeoff`, `jumpTakeoff`, `glideKitReady` |
+| `bot/src/skills/fly/prone.ts` | Track BH: `headCells`, `recoverProne` (the crawl pose after a glide) |
+| `bot/test/unit/skills/fly-glide.test.ts`; `bot/test/e2e/fly-glide-down.test.ts` | Track BH: the ledges, the glide down from a pillar / a cliff, the glide that cannot reach, the farm overhang takeoff, the canopy, the prone cells; the e2e pillar / ledge / noreach / farm / prone cases |
 | `docker/compose.fly.yml` | `bds-fly` |
 
 ## Packets (BDS 1.26.60.6, measured on bds-fly)
@@ -407,6 +410,136 @@ takes the gliding branch first (no back-off), so the clipping starts on the firs
 contact (the glide has ended), which is the post-landing slide. The measurements on bds-fly are under
 "Measurements (Track BF)".
 
+## Glide down and ledge takeoff (Track BH)
+
+Decision record: [decisions/0050-glide-down-and-ledge-takeoff.md](decisions/0050-glide-down-and-ledge-takeoff.md).
+
+> **The Realm, 2026-10-31.** 04:34Z `!goto home` from the owner's farm platform (9 x 7, 135 above the
+> goal, under the spawning box that overhangs it): the sky check refused the jump takeoff (the box), and
+> walkOut's first leg went to an "open-sky cell" at y 176, the top of the box, which no walk reaches; then
+> the plain walk ended `no path (exhaustive search)`. 04:46Z a flight that ended `roof` came down in a
+> tree canopy and left the bot in the crawl pose: every goto said `no standable node ... on oak_leaves`.
+
+### Glide down (a walk with no way on)
+
+`!goto`, `!come`, waypoint walks and the process walks (`pve.walk` / `pve.come`) that end `unreachable`,
+`no progress possible` or `no path` look for a glide down (`glideFallback` in chat/commands-fly.ts) when:
+
+- `glideDown` is on, the bot is in the Overworld and not in the air, and it is not fleeing, guarding,
+  fighting a fire, surfacing or holding a combat target;
+- the goal is `glideDownMinDrop` (10) or more below the feet and `glideDownMinDistance` (16) or more away.
+  This also applies under `flyMin`, where autoFly never asked;
+- the elytra is ready (`glideKitReady`: an elytra under the wear limit, the chestplate swap). Rockets are
+  optional.
+
+The log line carries the walk's end and the planner's own reason (`GotoReport.why`, e.g. `no path
+(exhaustive search, 1832 nodes)`). The landing comes from findLanding: a dry cell with a confirmed walking
+path to the goal (Track BF). A `fallback` landing, or none at all, refuses the glide.
+
+For a landing within 500 blocks (`GLIDE_SIM_RANGE`), `planGlideDown` (skills/fly/glide.ts) finds the
+platform's ledges toward it (`findLedges`) and simulates the **whole flight** from each one. The simulation
+runs the brain on stepBody over the live world model: unknown cells count as air, the rockets are as
+carried, and `cruiseY` is the landing's top so the brain never climbs. The first ledge whose simulation
+lands on the landing's cells, dry and with no collision, wins. A farther (or unloaded) goal with rockets
+is flown with the simulated takeoff described below.
+
+When no plan works, the owner hears `fly: no glide down to <goal>: <why>` and the walk's failure stands.
+The why is one of `no simulated glide lands there (...)`, `beyond a glide without rockets` or `no landing
+near it with a walking path`. When a plan is accepted the owner hears `gliding down to <goal> (62 blocks,
+40 down; the walk found no way; stepping off at x y z; ...)`; then comes the flight, then the walk for the
+rest in the same command. A goal above the bot never glides.
+
+### Ledge takeoff (step off an edge)
+
+`findLedges` looks at the platform the bot stands on: the cells at the same feet height it can walk to, up
+to 10 blocks out. It checks 8 headings. An edge cell counts when:
+
+- the next cell along the heading drops 12 or more (`LEDGE_MIN_DROP`), and so do the first 4 cells along
+  the fall;
+- the fall corridor is free for 10 blocks (`LEDGE_CORRIDOR`), from the feet to 2 above and one cell to
+  each side: no wall and no overhang in the way.
+
+Edges are ranked by the angle to the target (15 degrees counts as one block) plus the walk to the edge.
+
+The FlyProcess walks to the edge cell with an ordinary goto and checks that the bot stands on it. Then the
+brain's `ledgeTakeoff`:
+
+1. turns to the heading;
+2. **sneaks** forward to the edge (the edge back-off stops it on the rim);
+3. **releases** the sneak after 2 still ticks (or after 60), so the walk carries it off;
+4. requests the glide as the fall begins (`vy < 0`);
+5. dives at pitch 20 (`LEDGE_DIVE`) until 0.7 blocks a tick (`LEDGE_SPEED`);
+6. goes on to the climb (with rockets) or the cruise.
+
+The finish log line says `ledge takeoff (gliding X under the edge)`.
+
+The dive from a standstill, measured on glideVelocity:
+
+- reaching 0.9 blocks a tick costs about 12.5 blocks of drop at any pitch up to 20;
+- pitch 20 to 0.7 blocks a tick costs 8.7 blocks of drop over 17 blocks out;
+- steeper is worse (pitch 40: 17.7 blocks).
+
+Hence the 12-block minimum drop.
+
+The ledge takeoff is used:
+
+- always, for a glide down (above);
+- for a flight (`!fly`, autoFly, the far glide down) when `flyLedgeTakeoff` is on and either the sky check
+  refuses the jump takeoff (a roof, an overhang, no free run) **or** the start is a small platform. A small
+  platform is one whose standable area at the feet's height has 12 cells or fewer, or nothing farther
+  than 3 blocks from the start. `ledgeTakeoff` simulates up to 4 ledges for 300 ticks (until the approach)
+  and takes the first that is still flying, dry and without a collision.
+
+Example: on the farm platform under its box, the bot steps off the +x edge, glides out from under the box
+and climbs. The unit test flies 800 ticks with no hit and ends above the box.
+
+### The jump takeoff simulated (canopies)
+
+The jump takeoff's heading no longer comes from the sky check alone. `jumpTakeoff` simulates the first 300
+ticks (the takeoff and the climb) on candidate headings: the sky's first, then 30, 60, ... 180 degrees to
+each side. It prefers a heading whose climb needs **no steering** at all. A heading that clears only by
+steering around a solid is the fallback (`heading 0: clear only by steering 14 ticks`).
+
+When every heading meets a solid, the reply is `fly: no clear climb from here (the simulated climb meets a
+solid on every heading: trees, a wall); walk outside first`, and goto / come walk out as before.
+
+### Walk-out legs probed
+
+walkOut now probes each open-sky leg from the bot before walking it (`probePath`, 6000 nodes, 400 ms).
+It tries at most 6 candidates (`LEG_PROBES`), nearest first. If none is found it takes a plain `xz` leg.
+The leg line names the failed probes (`no path to 12 176 -40:exhausted, ...`), so a box top is never
+chosen again.
+
+### Prone after a glide
+
+A glide that ends under less than 1.8 blocks of headroom (a canopy, a slab roof, a 1-high gap) leaves the
+body in the crawl pose. BDS sets the `crawling` (or `swimming`) actor flag and a `boundingbox_height` of
+0.6; a bot teleported into a 1-high gap gets the same pose (the e2e uses this). The InputLoop tracks the
+pose from the bot's own entity data: `state.prone` is set when the bot is out of water and not gliding,
+and the log says `pose: prone (crawling true, ...)`.
+
+The planner plans a standing body and has no start node there. Two places recover:
+
+- **`BotSkills.goto`**, after the swim-up retry. An `unreachable` goto while prone runs `recoverProne`
+  (skills/fly/prone.ts):
+  1. It breaks the cells a standing box would take over the prone one, leaves first. Each break must pass
+     the navigator's break rules (protected blocks, containers, the base's protect radius).
+  2. It waits up to 40 ticks for the server to stand the body up.
+  3. It plans once more.
+  4. If the bot is still boxed in (a gap under a roof all round), it plans once more with `allowBreak` for
+     that walk. The log says `goto: standing but no way out of the gap; digging out`.
+
+  The log line reads `goto: prone at x y z (no standable node); standing again after breaking oak_leaves ...`.
+- **`FlyProcess.after()`**. If the bot is prone after the landing it runs the same recovery. When that fails
+  the owner hears `fly: I landed somewhere I cannot stand up (...); help me out`.
+
+There is no crawl move: a prone body that may not break what is over it stays where it is.
+
+### Foliage
+
+The emergency / `roof` landing ground (`groundAt`) never takes a column whose top is leaves, azalea or
+vines. It takes the next column down the line with open ground instead (the Realm canopy end).
+
 ## The kit
 
 The flight kit is the elytra, the firework rockets and **the fireworks box**: any shulker box whose
@@ -455,6 +588,10 @@ Rules (all named `// Track AU` in the shared files):
 | `flyHeadroom` | 4 | Track BF: the least free height over the feet of a landing cell under a roof |
 | `flyOverhangDepth` | 10 | Track BF: the deepest landing under a roof (0 = never under a roof) |
 | `flySneakLand` | on | Track BF: sneak through the touchdown and the settle |
+| `flyLedgeTakeoff` | on | Track BH: step off a platform edge to take off when the jump takeoff is refused (a roof, an overhang, no run) or the start is a small platform; the ledge is simulated first |
+| `glideDown` | on | Track BH: a goto / come that ends with no way on to a goal far below glides down with the elytra when a simulated glide from a ledge lands near it (rockets optional), then walks |
+| `glideDownMinDrop` | 10 | Track BH: the goal at least this far below the feet |
+| `glideDownMinDistance` | 16 | Track BH: the goal at least this far away horizontally |
 
 ## Processes
 
@@ -723,8 +860,8 @@ an exact `!fly` landing that ended more than 0.8 from the goal block's centre wa
 - The Nether ceiling check only sees loaded columns (and walks when more than an eighth are unknown).
 - A wall right in the straight line is avoided by a go-around, never by a lateral dodge; a go-around
   costs about 150 ticks and sometimes a rocket.
-- The takeoff always jumps; a glide started by stepping off a ledge is handled (the fall is the
-  takeoff) but not sought.
+- Track BH: the ledge takeoff (above) is sought only when the jump takeoff is refused or the start is
+  a small platform; a wide plateau with an open sky still jumps even if a cliff edge is nearer the target.
 - The stop landing from a platform flight's cruise takes 11 to 14 s (the physics: a zero-damage
   descent sinks at most 0.2 blocks a tick); from a ground flight's cruise about 7 s. Since Track AU2
   the cruise of a long flight is higher (what the glide needs, up to `flyMaxClimb`), so a stop early
