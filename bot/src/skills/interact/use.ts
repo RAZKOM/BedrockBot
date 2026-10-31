@@ -11,6 +11,13 @@
 //   lever       open_bit (on / off)
 //
 // Iron doors and iron trapdoors do not open by hand ('not_usable').
+//
+// Track BG2 (decision 0048 "Realm findings"): a click while SNEAKING with anything in the hand is not a use on
+// BDS / Realms: the server tries the item (a block is placed, a tool does nothing) and answers with the old
+// state (update_block restores: 'rejected'). Measured on bds-move from a ladder: empty hand opens sneaking or
+// not; a pickaxe, a sword, cobblestone, a shulker box open only standing. So a click with a non-empty hand while
+// the input loop holds sneak (the navigator on a ladder, edge sneaking) releases sneak from the look ticks to the
+// tick after the click and presses it again afterwards.
 import { silentLogger, type Logger } from '../../log.ts';
 import type { Inventory } from '../../world/inventory.ts';
 import type { ItemV4 } from '../../world/packets.ts';
@@ -79,6 +86,8 @@ export interface UseOptions {
   reach?: number;
   /** Turn the view to the block first (2 ticks). Default true. */
   look?: boolean;
+  /** Track BG2: measurements only: click while sneaking as the input loop holds it (no release; BDS then uses the held item). */
+  keepSneak?: boolean;
 }
 
 export type UseResult = (SkillResult & { reason?: UseReason | (string & {}) }) & {
@@ -101,7 +110,9 @@ export type UseResult = (SkillResult & { reason?: UseReason | (string & {}) }) &
 
 export interface UseLoop {
   readonly state: { pos: Vec3; tick: bigint; ready: boolean };
-  setCommand(c: { yaw?: number; pitch?: number }): void;
+  /** Track BG2: the held input command (sneak is released for a click with an item in the hand). */
+  readonly command?: { readonly sneak?: boolean };
+  setCommand(c: { yaw?: number; pitch?: number; sneak?: boolean }): void;
   waitTicks(n: number): Promise<void>;
 }
 
@@ -179,7 +190,7 @@ export class UseSkill {
   }
 
   private async run(p: Vec3, opts: UseOptions): Promise<UseResult> {
-    const { loop, world, source } = this.d;
+    const { loop, world } = this.d;
     const t0 = loop.state.tick;
     const ms0 = performance.now();
     if (!loop.state.ready) return { ok: false, reason: 'not_ready' };
@@ -197,16 +208,33 @@ export class UseSkill {
     if ((want === 'open' && before) || (want === 'closed' && !before)) return { ok: true, block: b.name, kind, open: before, changed: false, ticks: 0 };
 
     const reach = opts.reach ?? DEFAULT_CLICK_REACH;
-    let eye = this.eye();
+    const eye = this.eye();
     const out = (e: Vec3) => closestDistance(e, p) > reach || cornerDistance(e, p) > SERVER_CLICK_REACH;
     if (out(eye)) return { ok: false, reason: 'out_of_reach', block: b.name, kind, open: before, distance: closestDistance(eye, p), serverDistance: cornerDistance(eye, p) };
 
+    // Track BG2: sneaking with an item in the hand uses the item, not the block: sneak is released for the click
+    const slot = world.inventory.selected;
+    const unsneak = !opts.keepSneak && loop.command?.sneak === true && !!world.inventory.slots[slot];
+    if (unsneak) loop.setCommand({ sneak: false });
+    try {
+      return await this.click(p, opts, b, kind, holder, before, unsneak, t0, ms0);
+    } finally {
+      if (unsneak && loop.command?.sneak !== true) loop.setCommand({ sneak: true }); // a click that never went out
+    }
+  }
+
+  private async click(p: Vec3, opts: UseOptions, b: BlockInfo, kind: UsableKind, holder: Vec3, before: boolean, unsneak: boolean, t0: bigint, ms0: number): Promise<UseResult> {
+    const { loop, world, source } = this.d;
+    const reach = opts.reach ?? DEFAULT_CLICK_REACH;
+    const out = (e: Vec3) => closestDistance(e, p) > reach || cornerDistance(e, p) > SERVER_CLICK_REACH;
     if (opts.look ?? true) {
-      loop.setCommand(lookAngles(eye, blockCenter(p)));
+      loop.setCommand(lookAngles(this.eye(), blockCenter(p)));
       await loop.waitTicks(2);
+    } else if (unsneak) {
+      await loop.waitTicks(1); // the server sees the stop before the click
     }
     if (this.cancelled) return { ok: false, reason: 'interrupted', block: b.name, kind, open: before };
-    eye = this.eye();
+    const eye = this.eye();
     if (out(eye)) return { ok: false, reason: 'out_of_reach', block: b.name, kind, open: before, distance: closestDistance(eye, p), serverDistance: cornerDistance(eye, p) };
     const faceNum = faceToward(eye, p);
     const face = faceOf(faceNum) ?? 'up';
@@ -226,7 +254,10 @@ export class UseSkill {
     source.queue('inventory_transaction', clickBlockTransaction({ pos: p, face: faceNum, hotbarSlot: slot, held, eye, blockRuntimeId: world.chunks.runtimeIdAt(p.x, p.y, p.z) ?? 0 }));
     try {
       const timeout = opts.timeoutTicks ?? 20;
-      for (let i = 0; i < timeout && !done && !this.cancelled; i++) await loop.waitTicks(1);
+      for (let i = 0; i < timeout && !done && !this.cancelled; i++) {
+        await loop.waitTicks(1);
+        if (unsneak && i === 0) loop.setCommand({ sneak: true }); // Track BG2: the click has gone out: hold again
+      }
     } finally {
       off();
     }

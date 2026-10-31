@@ -507,8 +507,18 @@ export class PathFollower {
       cmd.forward = 0;
       return;
     }
-    if (d > 0.05) this.yaw = turnTowards(this.yaw ?? cmd.yaw, yawTowards(dx, dz), this.maxTurn);
+    // Track BG2: a centre behind the body (an overshoot) is reached backing up, not after a turn of up to 180
+    // degrees at 30 per tick with no input meanwhile: dropped into a hatch's column with some speed left, the
+    // body hit the far side of the shaft during the turn (a ladder cell: the server climbs, a 0.72 correction)
+    const back = d > 0.05 && Math.abs(angleDiff(this.yaw ?? cmd.yaw, yawTowards(dx, dz) + 180)) <= 60;
+    if (d > 0.05) this.yaw = turnTowards(this.yaw ?? cmd.yaw, yawTowards(dx, dz) + (back ? 180 : 0), this.maxTurn);
     cmd.yaw = this.yaw ?? cmd.yaw;
+    if (back) {
+      const toward = (s.vel.x * dx + s.vel.z * dz) / d;
+      const want = Math.min(0.08, d * 0.25);
+      cmd.forward = toward < want - 0.01 ? -1 : toward > want + 0.02 ? 1 : 0;
+      return;
+    }
     if (Math.abs(angleDiff(cmd.yaw, yawTowards(dx, dz))) > 45) {
       cmd.forward = 0;
       return;

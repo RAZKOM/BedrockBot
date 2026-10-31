@@ -47,6 +47,8 @@ export interface MoveBot {
   world: World;
   loop: InputLoop;
   skills: BotSkills;
+  /** Track BG2: hotbar slot selection (a held item for the Realm-faithful hatch cases). */
+  hotbar: Hotbar;
   truth: Truth;
   corrections: CorrectionEvent[];
   events: InputLoopEvent[];
@@ -87,7 +89,7 @@ export async function connectBot(prefix: string, at: { target?: ConnectTarget; c
   await conn.connect(at.target ?? MOVE_TARGET);
   await world.waitForChunks(4, { timeoutMs: 30_000 });
   await loop.waitTicks(10);
-  return { name, conn, world, loop, skills, truth, corrections, events };
+  return { name, conn, world, loop, skills, hotbar, truth, corrections, events };
 }
 
 export async function disconnectBot(bot: MoveBot | undefined): Promise<void> {
