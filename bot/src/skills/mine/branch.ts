@@ -64,6 +64,20 @@ export const BRANCH_EVERY = 3;
 export const BRANCH_MIN_HEALTH = 10;
 /** A torch every this many blocks of tunnel. */
 export const TORCH_EVERY = 8;
+/** A torch anywhere in the inventory (Track BK: shared with !tunnel). */
+export function carriesTorch(slots: readonly (ItemStack | null)[]): boolean {
+  return slots.slice(0, 36).some((x) => !!x && x.count > 0 && x.name === 'torch');
+}
+
+/**
+ * A torch on the floor of cell `p` (the cell must be open with a solid floor; no jump: never a pillar).
+ * Track BK: always the floor's top face; the placer's own choice once hung it on the next block of a
+ * `!tunnel` (the west face of the stone ahead), which the next cross-section dug and popped the torch.
+ */
+export function placeTorch(place: (p: Vec3, o?: PlaceOptions) => Promise<PlaceResult>, p: Vec3): Promise<PlaceResult> {
+  return place(p, { item: 'torch', jump: false, face: 'up' });
+}
+
 /** Failed digs / walks of one step before the step counts as blocked. */
 const STEP_ATTEMPTS = 3;
 
@@ -457,9 +471,9 @@ export class BranchRun {
 
   private async torch(behind: Vec3): Promise<void> {
     if (++this.sinceTorch < TORCH_EVERY || !this.h.allowPlace() || !this.h.place) return;
-    if (!this.h.slots().slice(0, 36).some((x) => !!x && x.count > 0 && x.name === 'torch')) return;
+    if (!carriesTorch(this.h.slots())) return;
     this.sinceTorch = 0;
-    const r = await this.h.place(behind, { item: 'torch', jump: false });
+    const r = await placeTorch((p, o) => this.h.place!(p, o), behind);
     if (r.ok) this.stats.torches++;
     else this.h.log?.info(`branch: torch at ${fmt(behind)}: ${r.reason}`);
   }

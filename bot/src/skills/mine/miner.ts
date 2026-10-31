@@ -50,7 +50,7 @@ import { branchMore, branchRunOf } from './branch.ts'; // Track AI: branch minin
 import { pathBlocks } from '../home/reach.ts'; // Track AQ
 import { sweepItems, SWEEP_RADIUS } from '../collect/sweep.ts'; // Track AQ
 import type { EntityInfo } from '../../world/types.ts';
-import { chooseTunnel, PILLAR_SPARE, planTunnel, runTunnel, type TunnelPlan, type TunnelWorld } from './tunnel.ts'; // Track AQ
+import { chooseTunnel, climbTo, PILLAR_SPARE, planTunnel, runTunnel, type TunnelPlan, type TunnelWorld } from './tunnel.ts'; // Track AQ; Track BK: climbTo
 import { oreKind, veinCentre, veinFrom, veinRadius } from './vein.ts'; // Track AQ
 import { DEFAULT_JUNK } from '../survival/keeper.ts';
 
@@ -1324,41 +1324,36 @@ export class MineTask {
     const pos = this.d.position();
     if (!top || !pos || pos.y >= top.y - 1.5 || branchRunOf(this)) return;
     const t0 = this.now();
-    const have0 = this.d.throwaways?.() ?? 0;
     const sk = this.d.skills;
-    let dug = 0;
-    this.state = 'walk';
+    const w = this.d.tunnelWorld;
     this.log.info(`mine: back up to ${fmt(top)}`);
-    let g = await sk.goto({ type: 'block', p: top }, { allowBreak: false, allowPlace: false, timeoutTicks: 1200 });
-    if (!this.alive(gen)) return;
-    if (!g.ok && have0 > 0) {
-      g = await sk.goto({ type: 'block', p: top }, { allowBreak: false, allowPlace: true, timeoutTicks: 2400 });
-      if (!this.alive(gen)) return;
-    }
-    if (!g.ok && this.d.tunnelWorld) {
-      const w = this.d.tunnelWorld;
-      const feet = this.feetCell();
-      if (feet) {
-        const climb = planTunnel(w, feet, { kind: 'feet', p: top }, { mode: 'stairs' });
-        if (climb.ok) {
-          this.state = 'dig';
-          const r = await runTunnel(
-            { dig: (p, o) => sk.dig(p, o), goto: (gl, o) => sk.goto(gl, o), breakRule: (p) => w.breakRule(p), free: (p) => w.cell(p)?.open, position: () => this.d.position(), waitTicks: (n) => this.d.waitTicks(n), alive: () => this.alive(gen) },
-            w,
-            climb,
-            (c) => {
-              this.stats.tunnelled++;
-              this.d.memory.noteDug(c);
-            },
-          );
-          dug = r.dug;
-          if (!this.alive(gen)) return;
-          if (r.ok) g = await sk.goto({ type: 'block', p: top }, { allowBreak: true, allowPlace: false, timeoutTicks: 1200 });
-        } else this.log.info(`mine: no staircase back up: ${climb.why ?? 'blocked'}`);
-      }
-    }
-    const placed = Math.max(0, have0 - (this.d.throwaways?.() ?? 0));
-    this.stats.tunnels.push({ mode: 'climb', target: { ...top }, planned: 0, dug, placed, ms: this.now() - t0, ok: g.ok, ...(g.ok ? {} : { why: g.reason ?? 'failed' }) });
+    // Track BK: the walk / pillar / staircase sequence lives in tunnel.ts climbTo (shared with !quarry)
+    const g = await climbTo(
+      {
+        dig: (p, o) => sk.dig(p, o),
+        goto: (gl, o) => sk.goto(gl, o),
+        breakRule: (p) => w?.breakRule(p),
+        free: (p) => w?.cell(p)?.open,
+        position: () => this.d.position(),
+        waitTicks: (n) => this.d.waitTicks(n),
+        alive: () => this.alive(gen),
+        ...(this.d.throwaways ? { throwaways: this.d.throwaways } : {}),
+      },
+      w,
+      top,
+      {
+        phase: (ph) => {
+          this.state = ph;
+        },
+        onDug: (c) => {
+          this.stats.tunnelled++;
+          this.d.memory.noteDug(c);
+        },
+        log: (m) => this.log.info(`mine: ${m}`),
+      },
+    );
+    if (g.interrupted) return;
+    this.stats.tunnels.push({ mode: 'climb', target: { ...top }, planned: 0, dug: g.dug, placed: g.placed, ms: this.now() - t0, ok: g.ok, ...(g.ok ? {} : { why: g.reason ?? 'failed' }) });
     if (g.ok) this.surface = undefined;
   }
 

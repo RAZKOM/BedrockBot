@@ -343,6 +343,8 @@ export class Navigator {
   /** Track BI: a planned drop deeper than 3 still holds (the live fall policy); false stops the body and re-plans. */
   dropCheck: ((from: PathNode, to: PathNode, costs: PathCosts) => boolean) | undefined;
   private protect: NavigatorOptions['protect'];
+  /** Track BK: cells (cellKey) no goto may dig while a job holds them (a quarry's stair treads); every goto's noBreak starts with them. */
+  readonly keptCells = new Set<number>();
   private digPenalty: NavigatorOptions['digPenalty'];
   /** Track R: failed goals / `any` members / action cells, skipped for a while (nav/blacklist.ts). */
   readonly blacklist: NavBlacklist;
@@ -615,7 +617,7 @@ export class Navigator {
         blacklisted: [],
       };
       this.lastReport = report;
-      const noBreak = new Set<number>();
+      const noBreak = new Set<number>(this.keptCells); // Track BK: the kept cells
       const a: Active = {
         goal,
         planGoal,

@@ -10,7 +10,7 @@ import type { FarmParts } from '../farm/index.ts';
 import { breakBlocker, DEFAULT_THROWAWAY } from '../nav/actions.ts';
 import { findPath, locateNode } from '../nav/astar.ts';
 import { probePath } from '../home/reach.ts';
-import type { Vec3 } from '../../world/types.ts';
+import type { ItemStack, Vec3 } from '../../world/types.ts';
 import { MineTask } from './miner.ts';
 import { OreMemory } from './seen.ts';
 import { shaftHazard, tunnelCell, type TunnelWorld } from './tunnel.ts'; // Track BB: tunnelCell; Track BD: shaftHazard
@@ -30,23 +30,40 @@ export interface MinerSettings {
   rescanTicks?: () => number;
 }
 
-export function createMinerFor(p: FarmParts, settings: MinerSettings = {}): { mine: MineTask; memory: OreMemory } {
-  const { skills, world, loop } = p;
-  const memory = new OreMemory(world);
-  const feetFloor = (): Vec3[] => {
-    const s = loop.state.pos;
-    return [{ x: Math.floor(s.x), y: Math.floor(s.y + 1e-6) - 1, z: Math.floor(s.z) }];
-  };
-  const nav = skills.nav;
-  const tunnelWorld: TunnelWorld = {
+/** The floor under the feet at `pos` (breakBlocker's `feetFloors`: never dug from under the bot). */
+export function feetFloorOf(pos: Vec3): Vec3[] {
+  return [{ x: Math.floor(pos.x), y: Math.floor(pos.y + 1e-6) - 1, z: Math.floor(pos.z) }];
+}
+
+/**
+ * The tunnel planner's world view (Track AQ): the navigator's grid and break rules without the
+ * under-feet rule (tunnel.ts checks the floor itself). Shared with `!quarry`'s climb out (Track BK).
+ */
+export function minerTunnelWorld(p: Pick<FarmParts, 'skills' | 'world'>): TunnelWorld {
+  const nav = p.skills.nav;
+  return {
     breakRule: (q) => breakBlocker(nav.grid, q.x, q.y, q.z, nav.breakRules(), []),
     cell: (q) => {
       const c = nav.grid.cls(q.x, q.y, q.z);
       return c && tunnelCell(c); // Track BB: the shared rule set (helper canWalkThrough / canWalkOn)
     },
-    blockAt: (q) => world.blockAt(q),
+    blockAt: (q) => p.world.blockAt(q),
   };
-  const throwaway = new Set<string>(DEFAULT_THROWAWAY);
+}
+
+const THROWAWAY = new Set<string>(DEFAULT_THROWAWAY);
+
+/** Throwaway blocks in the main inventory (a pillar back up). */
+export function throwawayCount(slots: readonly (ItemStack | null)[]): number {
+  return slots.slice(0, 36).reduce((a, s) => a + (s && THROWAWAY.has(s.name) ? s.count : 0), 0);
+}
+
+export function createMinerFor(p: FarmParts, settings: MinerSettings = {}): { mine: MineTask; memory: OreMemory } {
+  const { skills, world, loop } = p;
+  const memory = new OreMemory(world);
+  const feetFloor = (): Vec3[] => feetFloorOf(loop.state.pos);
+  const nav = skills.nav;
+  const tunnelWorld = minerTunnelWorld(p);
   const mine = new MineTask({
     skills,
     memory,
@@ -57,7 +74,7 @@ export function createMinerFor(p: FarmParts, settings: MinerSettings = {}): { mi
     },
     walkProbe: (goal) => probePath(nav, goal, loop.state.pos), // Track AQ
     tunnelWorld, // Track AQ
-    throwaways: () => world.inventory.slots.slice(0, 36).reduce((a, s) => a + (s && throwaway.has(s.name) ? s.count : 0), 0), // Track AQ
+    throwaways: () => throwawayCount(world.inventory.slots), // Track AQ
     entities: () => world.entities, // Track AQ
     blacklist: nav.blacklist,
     breakRule: (q) => breakBlocker(nav.grid, q.x, q.y, q.z, nav.breakRules(), feetFloor()),

@@ -80,7 +80,7 @@ describe('tiers and !help on the afk registry', () => {
     for (const n of ['cook', 'eat', 'equip', 'sleep', 'food', 'get', 'drop', 'home', 'shelter', 'breed', 'wp']) expect(byName.get(n)?.auto, n).toBeTruthy();
     // the deletion candidates of docs/ux.md: `more` without an automatic trigger
     const candidates = infos.filter((c) => c.tier === 'more' && !c.auto).map((c) => c.name).sort();
-    expect(candidates).toEqual(['colors', 'commands', 'farm', 'gather', 'goto', 'health', 'inv', 'kill', 'land', 'mine', 'mode', 'nether', 'no', 'overworld', 'pause', 'pos', 'quit', 'resume', 'set', 'stock', 'top', 'yes']); // merge: + stock (Track AG; unload and chests have auto lines); Track AT: + nether, overworld (portal has an auto line); Track AU: + land (fly has the auto line); chat style: + colors (a demo, nothing runs by itself)
+    expect(candidates).toEqual(['colors', 'commands', 'farm', 'gather', 'goto', 'health', 'inv', 'kill', 'land', 'mine', 'mode', 'nether', 'no', 'overworld', 'pause', 'pos', 'quarry', 'quit', 'resume', 'set', 'stock', 'top', 'tunnel', 'yes']); // merge: + stock (Track AG; unload and chests have auto lines); Track AT: + nether, overworld (portal has an auto line); Track AU: + land (fly has the auto line); chat style: + colors (a demo, nothing runs by itself)
   });
 
   it('!help: at most 4 messages of 256, the front door only, ending with !help all and !help <command>', () => {
