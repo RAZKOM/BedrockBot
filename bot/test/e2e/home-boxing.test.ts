@@ -231,6 +231,17 @@ describe.skipIf(!E2E)('@bds home: boxing at the chests and bot_loot boxes (Track
     expect(r).toMatch(/^dropped 193 items of 2 kinds/);
     expect((await b.truth.counts(b.name)).undyed_shulker_box).toBe(2);
     expect(named().filter((x) => x.named)).toHaveLength(2);
+    // the owner's explicit drops: one slot (the panel's Drop), then `!drop bot_loot` (2026-10-31: no way to drop them)
+    const slot = named().find((x) => x.named)!.slot;
+    const r1 = await ask(`!drop slot ${slot}`, (s) => s.startsWith('dropped ') || s.startsWith('drop'), 30_000);
+    notes.push(`(c) !drop slot ${slot}: ${r1}`);
+    expect(r1).toBe('dropped 1 undyed_shulker_box');
+    await until(() => (inv.count('undyed_shulker_box') === 1 ? true : undefined), 10_000, 'one box left');
+    const r2 = await ask('!drop bot_loot', (s) => s.startsWith('dropped ') || s.startsWith('drop'), 30_000);
+    notes.push(`(c) !drop bot_loot: ${r2}`);
+    await b.truth.clearAround({ x: c.x + 0.5, y: F, z: c.z + 0.5 }, 24);
+    expect(r2).toBe('dropped 1 undyed_shulker_box');
+    expect((await b.truth.counts(b.name)).undyed_shulker_box ?? 0).toBe(0);
   }, 120_000);
 
   it('(d) the stash step fills the bot_loot box before an unnamed spare', async () => {

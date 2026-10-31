@@ -570,6 +570,21 @@ describe('home logistics: boxing at the chests and named boxes (Track AV)', () =
     expect(JSON.stringify(displayOf(spareChest.raws[0]))).toContain('bot_loot');
   });
 
+  it('a bot_loot box that is not picked up again: the items it held are still unloaded (one more pass), no further box is emptied', async () => {
+    const h = fakeHome({
+      containers: { '3,0,0': { kind: 'chest', items: [item('sand')] } },
+      inv: [box(), box()],
+      invRaws: [namedBox('bot_loot', Array.from({ length: 5 }, () => ({ name: 'sand', count: 64 }))), namedBox('bot_loot', [{ name: 'sand', count: 64 }])],
+    });
+    await h.logistics.scan(never);
+    h.fail.pickup = true;
+    const r = await h.logistics.unload(never);
+    expect(h.inv.some((s) => s?.name === 'sand')).toBe(false); // before: the 5 stacks stayed in the inventory
+    expect(h.boxes.get('3,0,0')!.slots.reduce((a, s) => a + (s?.name === 'sand' ? s.count : 0), 0)).toBe(6 * 64);
+    expect(r.emptiedNamed).toBe(1); // the lost box; the second (still carried, still holding its stack) is left for the next !unload
+    expect(h.inv.filter((s) => s && isShulkerBox(s.name))).toHaveLength(1);
+  });
+
   it('the compact runner (Track AV/AW): called once with plan.compact before the chest trips, its fragment in the reply; none installed: unchanged', async () => {
     const build = () => {
       const h = fakeHome({ containers: { '3,0,0': { kind: 'chest', items: [...Array.from({ length: 26 }, () => item('iron_ingot')), item('iron_ingot', 10)] } }, inv: [item('iron_ingot'), item('iron_ingot')] });

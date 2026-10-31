@@ -19,7 +19,7 @@ import { Containers } from '../world/containers.ts';
 import type { PacketSource } from '../world/types.ts';
 import type { Chat } from './chat.ts';
 import { ELYTRA, flightKitMemoryOf, flightKitSlots, isElytra, keptKitLine, readKit, ROCKET, type KitInventory } from '../skills/fly/kit.ts'; // Track AU: the flight kit is kept by !drop all / items
-import { keepBoxNameOf, keptBoxesLine, keptBoxSlots } from '../skills/home/boxing.ts'; // Track AV: the named (bot_loot) boxes are kept by !drop all / items
+import { keepBoxNameOf, keepNameOf, keptBoxesLine, keptBoxSlots } from '../skills/home/boxing.ts'; // Track AV: the named (bot_loot) boxes are kept by !drop all / items
 
 export const SURVIVAL_COMMANDS = ['eat', 'equip', 'inv', 'drop'] as const;
 const NEEDS_WALK = 'needs a task that can walk (start with --walk, --home or --target realm)';
@@ -134,17 +134,58 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
   });
   chat.register({
     name: 'drop',
-    help: '<item> [n] | all | items | flightkit (drop an item, everything, everything except food, armour, tools and weapons, or the flight kit; all and items keep the flight kit)',
+    help: '<item> [n] | all | items | flightkit | slot <0..35> | bot_loot [n] (drop an item, everything, everything except food, armour, tools and weapons, the flight kit, one inventory slot, or the named boxes; all and items keep the flight kit and the bot_loot boxes)',
     group: 'home', example: '!drop items', auto: 'junk (rotten flesh, string, ...) is dropped when the inventory is full',
     run: ({ reply, args }) => {
       const [item, count] = args;
       if (!item) {
-        reply('usage: !drop <item> [n] | all | items');
+        reply('usage: !drop <item> [n] | all | items | flightkit | slot <0..35> | bot_loot [n]');
         return;
       }
       if (item === 'flightkit') {
         // Track AU: the flight kit (elytra, rockets, the fireworks box) is kept by all and items; this drops it
         void dropFlightKit(kit, deps.mob?.world.inventory, deps.task).then(reply);
+        return;
+      }
+      // an explicit slot (the panel's Drop) or `bot_loot`: the owner's own choice, so the kept boxes and the flight kit go too
+      if (item === 'slot' || item === keepNameOf(keepBoxNameOf(deps.task)).toLowerCase()) {
+        const inv = deps.mob?.world.inventory;
+        if (!inv) {
+          reply('drop: no inventory');
+          return;
+        }
+        let slots: number[];
+        if (item === 'slot') {
+          const i = Number(count);
+          if (!Number.isInteger(i) || i < 0 || i > 35) {
+            reply('usage: !drop slot <0..35>');
+            return;
+          }
+          slots = [i];
+        } else {
+          const n = count === undefined ? Infinity : Number(count);
+          if (!(n >= 1)) {
+            reply(`usage: !drop ${item} [n >= 1]`);
+            return;
+          }
+          slots = [...keptBoxSlots(inv, keepBoxNameOf(deps.task))].sort((a, b) => a - b).slice(0, n);
+        }
+        void (async () => {
+          const out: string[] = [];
+          for (const i of slots) {
+            const st = inv.slots[i];
+            if (!st || st.count <= 0) continue;
+            // every other slot of that name is skipped: only this one goes
+            const others = new Set(inv.slots.slice(0, 36).map((x, j) => (j !== i && x?.name === st.name ? j : -1)).filter((j) => j >= 0));
+            const r = await kit.drop(st.name, st.count, others);
+            if (!r.ok) {
+              out.push(`${st.name} (slot ${i}): ${r.reason ?? 'failed'}`);
+              break;
+            }
+            out.push(`${r.dropped} ${r.item}`);
+          }
+          reply(out.length ? `dropped ${out.join(', ')}` : item === 'slot' ? `drop: slot ${count} is empty` : `drop: no ${item} box carried`);
+        })();
         return;
       }
       if (item === 'all' || item === 'items') {

@@ -188,14 +188,17 @@ Decision record: [decisions/0044-boxing.md](decisions/0044-boxing.md).
 - **Rules**: never unloaded as an item, never put into a chest, never used for boxing, never a spare, never
   dropped by `!drop all` / `!drop items` (`dropped 193 items of 2 kinds; kept 2 bot_loot boxes`; the drop
   skips those slots, so an unnamed box of the same colour still goes), nor by an explicit
-  `!drop undyed_shulker_box` (`dropped 1 undyed_shulker_box; kept 2 bot_loot boxes`: rename a box to drop
-  it), nor by `!drop flightkit` (only the fireworks box's own slot goes); the stash step fills it before any
+  `!drop undyed_shulker_box` (`dropped 1 undyed_shulker_box; kept 2 bot_loot boxes`: `!drop bot_loot [n]` drops
+  them, `!drop slot <0..35>` one slot whatever it holds, which is what the panel's Drop button sends), nor by `!drop flightkit` (only the fireworks box's own slot goes); the stash step fills it before any
   unnamed box, the emptiest named box first: the place skill takes the first hotbar box of a colour, so a
   chosen box in the main inventory is moved into the hotbar first (`SurvivalKit.hotbar`; before that fix
   a full `bot_loot` box in the hotbar was refilled over and over while eight empty ones of the same colour
   waited, and the job stopped `inventory still full`); `!unload` empties it into the inventory (placed, opened, emptied, broken, picked up; between
   deposit passes when the inventory has no room yet) and unloads its items like loose stacks; the box stays
-  carried (`kept 2 bot_loot boxes`). With a named box carried no unnamed box is held back for the stash step.
+  carried (`kept 2 bot_loot boxes`). A box not picked up again (`unload: emptying a box: the box was not picked
+  up again (left at x y z)`; the collect tries radius 4, 6 and 10) no longer ends the job with its items in the
+  inventory: one more deposit pass unloads them, no further box is emptied in that run (2026-10-31 Realm: the
+  items were pulled into the inventory and left there). With a named box carried no unnamed box is held back for the stash step.
   The fireworks box (Track AU) is checked first and keeps its own rule.
 - A box whose wire item is unknown (no raw item for its slot, e.g. after a refused request rolled the slot
   back): its name and contents are unknown, so it is kept (`unknown_box`), never a spare, never stored or
