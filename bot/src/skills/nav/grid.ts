@@ -5,7 +5,7 @@
 // cell below. See docs/pathfinding.md.
 import { classify, type TerrainClass } from '../terrain/classify.ts';
 import { boxesAtCell, type TerrainSource } from '../terrain/query.ts';
-import { blockInfoOf, doorBoxes } from '../terrain/shapes.ts';
+import { blockInfoOf, doorBoxes, partialBoxes } from '../terrain/shapes.ts';
 import { PHYSICS } from '../input/physics.ts';
 import type { Box } from '../../world/types.ts';
 import { YES, avoidWalkingInto, canWalkOn, canWalkThroughClass, fullFloor, isClimbable, isStillWater } from './baritone/helper.ts'; // Track BB: the shared rule set
@@ -54,6 +54,64 @@ const isPassage = (c: TerrainClass): boolean => c.openable === 'door' || c.opena
 export const VARIETY_WATER = 1;
 export const VARIETY_CLIMBER = 2;
 export const VARIETY_LADDER = 4;
+/** Track BG: a trapdoor (open or closed) was classified (the planner's hatch moves run from then on). */
+export const VARIETY_TRAPDOOR = 8;
+
+/**
+ * Track BG: an open trapdoor whose panel stands at one side of its cell (one box, full height, at most 0.25
+ * thick): the body passes it like a ladder's thin box (decision 0048). Measured on BDS 1.26.60: it is not
+ * climbed (not even right above a ladder), and minecraft-data's per-direction boxes match the server.
+ */
+export function isPanel(c: TerrainClass): boolean {
+  if (c.openable !== 'trapdoor' || !c.open || c.boxes.length !== 1) return false;
+  return thinPanel(c.boxes[0]!);
+}
+
+/** Track BG: a full-height box at most 0.25 thick along x or z (an open trapdoor's panel). */
+function thinPanel(b: Box): boolean {
+  if (b[1] > EPS || b[4] < 1 - EPS) return false;
+  return b[3] - b[0] <= 0.25 + EPS || b[5] - b[2] <= 0.25 + EPS;
+}
+
+/**
+ * Track BG: thin boxes let a cardinal walk along (dx, dz) enter (`enter`) or leave their cell through the
+ * cell's centre (Track AJ's `climberLets` rule: a box on the far side when entering is fine, the body
+ * stops in front of it; leaving towards it is not).
+ */
+function thinLets(boxes: readonly Box[], dx: number, dz: number, enter: boolean): boolean {
+  const axis = dx !== 0 ? 0 : 2;
+  const dir = dx + dz;
+  for (const b of boxes) {
+    const lo = axis === 0 ? b[0] : b[2];
+    const hi = axis === 0 ? b[3] : b[5];
+    const plo = axis === 0 ? b[2] : b[0];
+    const phi = axis === 0 ? b[5] : b[3];
+    if (!(plo < CORRIDOR_HI - EPS && phi > CORRIDOR_LO + EPS)) continue; // beside the corridor
+    // the body sweeps [-inf, 0.8] entering along +axis, [0.2, +inf] leaving along +axis
+    const sweptLo = enter === dir > 0 ? -Infinity : CORRIDOR_LO;
+    const sweptHi = enter === dir > 0 ? CORRIDOR_HI : Infinity;
+    if (lo < sweptHi - EPS && hi > sweptLo + EPS) return false;
+  }
+  return true;
+}
+
+const toggledTrapdoors = new Map<string, readonly Box[]>();
+
+/** Track BG: boxes of a trapdoor with `open_bit` flipped (minecraft-data's shape, else the donor's by name suffix). */
+export function toggledTrapdoorBoxes(c: TerrainClass): readonly Box[] {
+  const key = `${c.name}|${JSON.stringify(c.states)}`;
+  let hit = toggledTrapdoors.get(key);
+  if (!hit) {
+    const states = { ...c.states, open_bit: c.open ? 0 : 1 };
+    try {
+      hit = blockInfoOf(c.name, states).boxes;
+    } catch {
+      hit = partialBoxes(c.name, states) ?? [[0, 0, 0, 1, 1, 1]];
+    }
+    toggledTrapdoors.set(key, hit);
+  }
+  return hit;
+}
 
 /** Track AJ: a block the body climbs on BDS 1.26.60 (terrain/query.ts CLIMBERS). Track BB: the helper's `isClimbable`. */
 export const isClimber = (c: TerrainClass): boolean => isClimbable(c);
@@ -62,9 +120,10 @@ const isScaffold = (c: TerrainClass): boolean => c.name === 'scaffolding';
 /**
  * Track AJ: the body may occupy the cell: no collision box (a climber's thin box aside), no liquid, no
  * hazard, no scaffolding. Track BB: Baritone's `canWalkThrough` class rule (nav/baritone/helper.ts); a
- * still water source answers MAYBE there and is entered by the swim moves only (`swim`).
+ * still water source answers MAYBE there and is entered by the swim moves only (`swim`). Track BG: an
+ * open trapdoor's panel is a thin box like a ladder's (`isPanel`; the helper's rule is unchanged).
  */
-const passable = (c: TerrainClass): boolean => canWalkThroughClass(c) === YES;
+const passable = (c: TerrainClass): boolean => canWalkThroughClass(c) === YES || isPanel(c);
 /** Track AJ: water the body swims on: a source (or a waterlogged plant without depth), not a bubble column. Track BB: helper `isStillWater`. */
 const stillWater = (c: TerrainClass): boolean => isStillWater(c);
 const SIDES: readonly (readonly [number, number])[] = [
@@ -127,6 +186,8 @@ export class NavGrid {
     // Track AJ: what kinds of movement-variety cells this grid has seen (the planner skips the checks until then)
     if (c.liquid === 'water') this.variety |= VARIETY_WATER;
     if (c.climbable && isClimber(c)) this.variety |= c.boxes.length ? VARIETY_CLIMBER | VARIETY_LADDER : VARIETY_CLIMBER;
+    // Track BG: trapdoors; an open one's panel is a thin box the ladder checks (climberLets) look at
+    if (c.openable === 'trapdoor') this.variety |= isPanel(c) ? VARIETY_TRAPDOOR | VARIETY_LADDER : VARIETY_TRAPDOOR;
     return c;
   }
 
@@ -219,27 +280,65 @@ export class NavGrid {
    */
   climberLets(x: number, y: number, z: number, dx: number, dz: number, enter: boolean): boolean {
     const c = this.cls(x, y, z);
-    if (!c || !isClimber(c) || !c.boxes.length) return true;
-    const axis = dx !== 0 ? 0 : 2;
-    const dir = dx + dz;
-    for (const b of c.boxes) {
-      const lo = axis === 0 ? b[0] : b[2];
-      const hi = axis === 0 ? b[3] : b[5];
-      const plo = axis === 0 ? b[2] : b[0];
-      const phi = axis === 0 ? b[5] : b[3];
-      if (!(plo < CORRIDOR_HI - EPS && phi > CORRIDOR_LO + EPS)) continue; // beside the corridor
-      // the body sweeps [-inf, 0.8] entering along +axis, [0.2, +inf] leaving along +axis
-      const sweptLo = enter === dir > 0 ? -Infinity : CORRIDOR_LO;
-      const sweptHi = enter === dir > 0 ? CORRIDOR_HI : Infinity;
-      if (lo < sweptHi - EPS && hi > sweptLo + EPS) return false;
+    if (!c || !(isClimber(c) || isPanel(c)) || !c.boxes.length) return true; // Track BG: an open trapdoor's panel too
+    return thinLets(c.boxes, dx, dz, enter);
+  }
+
+  /** Track AJ: the cell holds a climber with a collision box (a ladder). Track BG: or an open trapdoor's panel. */
+  thinClimber(x: number, y: number, z: number): boolean {
+    const c = this.cls(x, y, z);
+    return !!c && ((isClimber(c) && c.boxes.length > 0) || isPanel(c));
+  }
+
+  // ---- Track BG: trapdoors in floors and ceilings (hatches; decision 0048) -----------------------------
+
+  /**
+   * Track BG: how the body passes vertically through trapdoor cell (x, y, z): CROSS_CLEAR (open: its panel
+   * stands at one side and the 0.6-wide body fits beside it and beside a ladder's box above or below),
+   * CROSS_TOGGLE (closed, opened by hand, and open it would be CROSS_CLEAR), CROSS_BLOCKED (not a trapdoor,
+   * a closed iron one, no room). undefined = not loaded.
+   */
+  hatch(x: number, y: number, z: number): Crossing | undefined {
+    const c = this.cls(x, y, z);
+    if (!c) return undefined;
+    if (c.openable !== 'trapdoor' || c.liquid || c.danger) return CROSS_BLOCKED;
+    const open = c.open ? c.boxes : toggledTrapdoorBoxes(c);
+    if (open.length !== 1 || !thinPanel(open[0]!) || !this.hatchRoom(x, y, z, open[0]!)) return CROSS_BLOCKED;
+    if (c.open) return CROSS_CLEAR;
+    return handUsable(c.name) ? CROSS_TOGGLE : CROSS_BLOCKED; // an iron trapdoor is redstone only
+  }
+
+  /** Track BG: the free width beside panel `b` and beside a ladder's box in the cells above / below fits the body (+0.02). */
+  private hatchRoom(x: number, y: number, z: number, b: Box): boolean {
+    for (const axis of [0, 2] as const) {
+      let lo = 0;
+      let hi = 1;
+      const cut = (box: Box): void => {
+        const a0 = axis === 0 ? box[0] : box[2];
+        const a1 = axis === 0 ? box[3] : box[5];
+        if (a1 - a0 > 0.5) return; // spans this axis: not a strip at one of its sides
+        if (a0 < EPS) lo = Math.max(lo, a1);
+        else if (a1 > 1 - EPS) hi = Math.min(hi, a0);
+      };
+      cut(b);
+      for (const dy of [-1, 1]) {
+        const n = this.cls(x, y + dy, z);
+        if (n && isClimber(n)) for (const box of n.boxes) cut(box);
+      }
+      if (hi - lo < PHYSICS.width + 0.02) return false;
     }
     return true;
   }
 
-  /** Track AJ: the cell holds a climber with a collision box (a ladder). */
-  thinClimber(x: number, y: number, z: number): boolean {
+  /**
+   * Track BG: a cardinal walk along (dx, dz) entering (`enter`) or leaving trapdoor cell (x, y, z) is not
+   * stopped by its panel once the trapdoor is open (its boxes now, or toggled when it is closed). True for
+   * other cells.
+   */
+  hatchLets(x: number, y: number, z: number, dx: number, dz: number, enter: boolean): boolean {
     const c = this.cls(x, y, z);
-    return !!c && isClimber(c) && c.boxes.length > 0;
+    if (c?.openable !== 'trapdoor') return true;
+    return thinLets(c.open ? c.boxes : toggledTrapdoorBoxes(c), dx, dz, enter);
   }
 
   /** Cells y0..y1 (inclusive) of a column are all free. undefined = some unknown. */
@@ -288,7 +387,7 @@ export class NavGrid {
     if (!c) return UNKNOWN;
     let feet: number;
     if (isScaffold(c)) return BLOCKED; // Track AJ: scaffolding's own rules are not modelled
-    if (c.boxes.length && !(through && isPassage(c)) && !isClimber(c)) {
+    if (c.boxes.length && !(through && isPassage(c)) && !isClimber(c) && !isPanel(c)) { // Track BG: a panel is a thin box
       // a partial block in the cell itself is the floor (slab, carpet, snow layers, soul sand ...): Track BB helper canWalkOn
       if (!canWalkOn(c) || c.top >= 1) return BLOCKED;
       feet = y + c.top;

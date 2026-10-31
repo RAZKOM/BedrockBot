@@ -6,7 +6,7 @@ export type { NavActions, NavBlockFace, BreakRules } from './actions.ts';
 // Track BB: the shared rule set (Baritone's MovementHelper over TerrainClass; docs/pathfinding.md "Rules")
 export { canWalkThroughClass, canWalkThrough, canWalkOn, fullFloor, avoidWalkingInto, avoidBreaking, mustBeSolidToWalkOn, isReplaceable, canPlaceAgainst, isNormalCube, isBottomSlab, isSlab, isStairs, isClimbable, isStillWater, isFlowing, getMiningDurationTicks, breakTicksWith, bestTool, ruleCell, cellReaderOf, YES, NO, MAYBE, WALK_ON_MAGMA, WALK_ON_BOTTOM_SLAB, ASSUME_WALK_ON_WATER } from './baritone/helper.ts';
 export type { Ternary, CellReader, HotbarView, BreakReason, BreakRuleOptions, MiningContext, RuleCell } from './baritone/helper.ts';
-export { NavGrid, cellKey, CROSS_CLEAR, CROSS_TOGGLE, CROSS_BLOCKED } from './grid.ts';
+export { NavGrid, cellKey, CROSS_CLEAR, CROSS_TOGGLE, CROSS_BLOCKED, isPanel } from './grid.ts'; // Track BG: isPanel
 export type { Crossing } from './grid.ts';
 export { goalTest, octile, localGround, threatsOf, DEFAULT_GET_TO_REACH } from './goals.ts';
 export type { Goal, GoalTest, NavGoal, AnyGoal, GetToBlockGoal, YLevelGoal, RunAwayGoal, SurfaceGoal, TwoBlocksGoal, ThreeBlocksGoal, Threat, GoalGrid } from './goals.ts'; // Track R: task 7.10 goals; Track BD: twoBlocks, threeBlocks

@@ -10,7 +10,10 @@
 //                                             `autoUnload` on an unload when more than 8 stacks of
 //                                             unloadable items or a full shulker box are carried, or
 //                                             when a `!get` job just ended at home (its reply then says
-//                                             what went where)
+//                                             what went where); then, with nothing to unload, a tidy job
+//                                             when a home chest holds 27 full stacks' worth of one item
+//                                             loose and a spare is known (docs/home.md "Full boxes out of
+//                                             the chests"; at most every TIDY_BACKOFF_MS when it boxed nothing)
 import type { ScanReport, UnloadReport } from '../../skills/home/logistics.ts';
 import { BaseProcess, PRIORITY, type ProcessKind, type ProcessStatus, type StopReason } from './manager.ts';
 
@@ -18,24 +21,29 @@ import { BaseProcess, PRIORITY, type ProcessKind, type ProcessStatus, type StopR
 export const AUTO_UNLOAD_STACKS = 8;
 /** After an unload that left items (or failed), the chore waits this long before trying again (ms). */
 export const UNLOAD_BACKOFF_MS = 5 * 60_000;
+/** After a tidy job that boxed nothing (or failed), the chore waits this long before the next one (ms). */
+export const TIDY_BACKOFF_MS = 10 * 60_000;
 /** After a scan that failed for some containers, the chore does not retry them for this long (ms). */
 export const SCAN_BACKOFF_MS = 2 * 60_000;
 /** The chore looks at its triggers at most this often (ms). */
 const CHECK_MS = 1000;
 
-export type HomeJob = { kind: 'unload'; all?: boolean } | { kind: 'scan'; force?: boolean; retry?: boolean; only?: { x: number; y: number; z: number }[] }; // Track AN: retry
-export type HomeJobResult = { kind: 'unload'; report: UnloadReport } | { kind: 'scan'; report: ScanReport };
+export type HomeJob = { kind: 'unload'; all?: boolean } | { kind: 'scan'; force?: boolean; retry?: boolean; only?: { x: number; y: number; z: number }[] } | { kind: 'tidy' }; // Track AN: retry
+export type HomeJobResult = { kind: 'unload'; report: UnloadReport } | { kind: 'scan'; report: ScanReport } | { kind: 'tidy'; report: UnloadReport };
 
 /** What the processes drive (HomeLogistics satisfies it; unit tests fake it). */
 export interface HomeRunner {
   unload(cancelled: () => boolean, opts?: { all?: boolean }): Promise<UnloadReport>;
   scan(cancelled: () => boolean, opts?: { force?: boolean; retry?: boolean; only?: { x: number; y: number; z: number }[] }): Promise<ScanReport>;
+  /** The home chests' own full boxes' worth into spares (tidy steps only). */
+  tidy?(cancelled: () => boolean): Promise<UnloadReport>;
   /** Cancel the running skill (goto, dig, ...). */
   cancel(): void;
 }
 
 function runJob(r: HomeRunner, job: HomeJob, cancelled: () => boolean): Promise<HomeJobResult> {
   if (job.kind === 'unload') return r.unload(cancelled, { all: job.all ?? false }).then((report) => ({ kind: 'unload', report }));
+  if (job.kind === 'tidy') return (r.tidy ? r.tidy(cancelled) : Promise.reject(new Error('no tidy'))).then((report) => ({ kind: 'tidy', report }));
   return r.scan(cancelled, { ...(job.force ? { force: true } : {}), ...(job.retry ? { retry: true } : {}), ...(job.only ? { only: job.only } : {}) }).then((report) => ({ kind: 'scan', report }));
 }
 
@@ -109,6 +117,8 @@ export interface HomeChoreDeps {
   load(): { stacks: number; fullBoxes: number };
   /** Read containers remembered around home. */
   known(): number;
+  /** A tidy job is due (a home chest holds a full box's worth of one item loose, a spare is known). */
+  tidyDue?(): boolean;
   /** A `!get` job ended (since the last call): true once per job. */
   getEnded?(): boolean;
   /** The report of an unload run for a `!get` job (the line goes to chat). */
@@ -133,9 +143,10 @@ export class HomeChore extends BaseProcess {
   private running = false;
   private lastCheck = -Infinity;
   private unloadAfter = 0;
+  private tidyAfter = 0;
   private scanAfter = 0;
   last: HomeJobResult | undefined;
-  readonly stats = { scans: 0, unloads: 0, getUnloads: 0 };
+  readonly stats = { scans: 0, unloads: 0, getUnloads: 0, tidies: 0 };
 
   constructor(d: HomeChoreDeps) {
     super();
@@ -191,6 +202,7 @@ export class HomeChore extends BaseProcess {
     this.getWaiting = false;
     if (t < this.unloadAfter) return undefined;
     if (load.stacks > AUTO_UNLOAD_STACKS || load.fullBoxes > 0) return { kind: 'unload' };
+    if (t >= this.tidyAfter && this.d.runner.tidy && this.d.tidyDue?.()) return { kind: 'tidy' };
     return undefined;
   }
 
@@ -225,6 +237,10 @@ export class HomeChore extends BaseProcess {
         for (const p of r.report.pending ?? []) this.appeared(p);
       }
       if (failed > 0 || !r?.report.ok) this.scanAfter = t + SCAN_BACKOFF_MS;
+    } else if (job.kind === 'tidy') {
+      this.stats.tidies++;
+      const rep = r?.kind === 'tidy' ? r.report : undefined;
+      if (!rep || !rep.ok || !rep.boxed?.length) this.tidyAfter = t + TIDY_BACKOFF_MS;
     } else {
       this.stats.unloads++;
       if (forGet) {
@@ -253,11 +269,11 @@ export class HomeChore extends BaseProcess {
   }
 
   behaviour(): string {
-    return this.job?.kind === 'unload' ? 'unloading at home' : 'reading the chests at home';
+    return this.job?.kind === 'unload' ? 'unloading at home' : this.job?.kind === 'tidy' ? 'boxing full stacks in the chests at home' : 'reading the chests at home';
   }
 
   status(): ProcessStatus {
     const j = this.job;
-    return { line: `home chore: ${j ? (j.kind === 'unload' ? 'unloading' : `reading ${j.only ? j.only.length : 'all'} containers`) : 'idle'}` };
+    return { line: `home chore: ${j ? (j.kind === 'unload' ? 'unloading' : j.kind === 'tidy' ? 'boxing full stacks in the chests' : `reading ${j.only ? j.only.length : 'all'} containers`) : 'idle'}` };
   }
 }

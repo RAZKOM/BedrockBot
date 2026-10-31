@@ -115,6 +115,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
   const runner: HomeRunner = {
     unload: (c, o) => logistics.unload(c, o),
     scan: (c, o) => logistics.scan(c, o),
+    tidy: (c) => logistics.tidy(c),
     cancel: () => mob.skills.cancel(),
   };
   // the !get job the chore has seen end (once per job)
@@ -127,6 +128,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
       autoUnload: () => d.settings.get('autoUnload'),
       load: () => logistics.load(),
       known: () => logistics.records().filter((r) => r.readAt > 0).length,
+      tidyDue: () => logistics.tidyDue(),
       getEnded: () => {
         const job = getControllerOf(d.task)?.job;
         if (!job || job === seenJob || !job.process?.done) return false;

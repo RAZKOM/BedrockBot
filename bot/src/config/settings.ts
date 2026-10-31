@@ -85,6 +85,7 @@ export const SETTING_DEFS = {
   allowBreak: { kind: 'boolean', default: false, description: 'walks may dig through blocks in the way (planner dig-through moves)' },
   allowPlace: { kind: 'boolean', default: false, description: 'walks may pillar up with throwaway blocks (planner place moves)' },
   closeDoors: { kind: 'boolean', default: false, description: 'close doors and gates behind after walking through' },
+  closeTrapdoors: { kind: 'boolean', default: true, description: 'close a trapdoor in a floor or ceiling behind after climbing or dropping through it (it was closed before)' },
   sprint: { kind: 'boolean', default: true, description: 'sprint on long straight runs (walks, follow)' },
   guardRadius: { kind: 'number', default: 16, min: 2, max: 64, integer: true, unit: 'blocks', description: 'guard: fight hostiles within this radius of home' },
   fleeHealth: { kind: 'number', default: 8, min: 0, max: 20, unit: 'health', description: 'flee to the shelter / home below this health with a hostile near (0 = never)' },

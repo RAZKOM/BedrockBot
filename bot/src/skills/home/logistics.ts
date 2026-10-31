@@ -20,6 +20,12 @@
 //            inventory, in rounds when the inventory is short of room; the box placed next to the chest,
 //            filled with that item's stacks, broken, picked up, stored in the chest), boxes named
 //            `keepBoxName` (bot_loot) are emptied into the inventory between deposit passes and kept.
+//            Fill steps (before the box steps): every full box's worth of one item the bot has (loose plus in
+//            its bot_loot boxes) goes into a spare, in rounds (the item taken out of a bot_loot box, the
+//            spare placed, filled, broken, picked up), and the full box into that item's chest. After the
+//            deposits, tidy steps: a home chest holding 27 full stacks of one item loose gets them boxed there.
+//   tidy     the idle chore's part of that: tidy steps only (MAX_TIDY_STEPS); what a failed step took out
+//            of a chest goes back there.
 //   withdraw Track AS (`!bring`, bring.ts): plan from the memory and the inventory, walk to the nearest
 //            chest of the plan (the scan's stand cell), open it, take the item's stacks (or, when the
 //            loose stacks are not enough, whole shulker boxes holding it), refresh its memory, close;
@@ -45,7 +51,8 @@ import { chestName, fmtPos, partnerKeys, planChests, recordFrom, unreadRecord } 
 import { chestGoal, standOf, verdict } from './reach.ts';
 import { bringMatches, countOf, planBring, type BringItem } from './bring.ts'; // Track AS
 import { compactRunner, planUnload, reserveByKind, unloadableStacks, type UnloadPlan, type UnloadSlot, type UnloadStep } from './unloader.ts';
-import { BOX_SLOTS, carriedBoxes, carriedSpares, isKeptBox, keepNameOf, MAX_BOX_STEPS, namedBoxesWord, placesExactly } from './boxing.ts'; // Track AV
+import { BOX_SLOTS, carriedBoxes, carriedSpares, isKeptBox, keepNameOf, MAX_BOX_STEPS, MAX_FILL_STEPS, MAX_TIDY_STEPS, namedBoxesWord, placesExactly } from './boxing.ts'; // Track AV
+import { DEFAULT_THROWAWAY_MIN, THROWAWAY_BLOCKS } from '../survival/keeper.ts';
 
 /** A container read within this many ms is not read again by a scan. */
 export const READ_FRESH_MS = 10 * 60_000;
@@ -55,6 +62,8 @@ export const AT_HOME = 8;
 export const MAX_BOXES_PER_RUN = 3;
 /** Deposit passes per unload run at most: each one unloads, then empties the next carried box (`all`: every full box of the inventory). */
 export const MAX_UNLOAD_PASSES = 24;
+/** Rounds of one fill step at most (a take out of a carried box, or a fill of the spare: 27 stacks need 2 to 4 with ~25 free slots). */
+export const MAX_FILL_ROUNDS = 12;
 /** Track AN: a container found unreachable is not probed again for this long (ms), unless `!chests scan`. */
 export const UNREACHABLE_RETRY_MS = 60 * 60_000;
 /** Track AN: containers opened per scan at most (the rest stays pending for the next idle moment). */
@@ -161,6 +170,8 @@ export interface UnloadReport {
   emptied: number;
   /** Track AV: box steps done: `stacks` stacks of `item` boxed at chest `chest` (its name), the empty box from `from`. */
   boxed?: { item: string; stacks: number; chest: string; from: string; took: number; rounds: number; ms: number }[];
+  /** Fill steps done: a spare filled with 27 full stacks of `item` (`took` items out of the carried boxes), stored in `chest` (its name). */
+  filled?: { item: string; chest: string; from: string; took: number; rounds: number; ms: number }[];
   /** Track AV: named (bot_loot) boxes emptied into the inventory, and how many named boxes stayed carried. */
   emptiedNamed?: number;
   namedKept?: number;
@@ -194,6 +205,14 @@ export interface WithdrawReport {
   chests: number;
   requests: number;
   ms: number;
+}
+
+/** What an interrupted or failed box step took: `loose` items of `item` and the box it was filling, owed to `chest`. */
+interface Debt {
+  chest: string;
+  item: string;
+  loose: number;
+  box: number | undefined;
 }
 
 const centre = (p: Vec3): Vec3 => ({ x: p.x + 0.5, y: p.y, z: p.z + 0.5 });
@@ -267,7 +286,7 @@ export class HomeLogistics {
     this.d.inventory.slots.slice(0, 36).forEach((s, i) => {
       if (!s || s.count <= 0) return;
       const raw = this.d.inventory.rawItem?.(0, i);
-      out.push({ slot: i, name: s.name, count: s.count, ...(isShulkerBox(s.name) ? { boxUsed: shulkerSlotsUsed(raw) } : {}), ...(isFireworksBox(s.name, raw) || this.d.flightBoxSlot?.() === i ? { flightKit: true } : {}), ...(isKeptBox(s.name, raw, keep) ? { named: true } : {}), ...(isShulkerBox(s.name) && raw === undefined ? { unknown: true } : {}) }); // Track AU: the fireworks box is kept; Track AV: named boxes
+      out.push({ slot: i, name: s.name, count: s.count, ...(isShulkerBox(s.name) ? { boxUsed: shulkerSlotsUsed(raw) } : {}), ...(isShulkerBox(s.name) && shulkerSlotsUsed(raw) > 0 ? { boxItems: shulkerContents(raw) } : {}), ...(isFireworksBox(s.name, raw) || this.d.flightBoxSlot?.() === i ? { flightKit: true } : {}), ...(isKeptBox(s.name, raw, keep) ? { named: true } : {}), ...(isShulkerBox(s.name) && raw === undefined ? { unknown: true } : {}) }); // Track AU: the fireworks box is kept; Track AV: named boxes
     });
     return out;
   }
@@ -289,7 +308,7 @@ export class HomeLogistics {
   }
 
   /** The unload plan now; `reserve`: one free slot of that chest is kept (for a full box that goes back there). */
-  plan(all = false, reserve?: string, box: { on?: boolean; skip?: ReadonlySet<string> } = {}): UnloadPlan {
+  plan(all = false, reserve?: string, box: { on?: boolean; fill?: boolean; tidy?: boolean; skip?: ReadonlySet<string>; skipFill?: ReadonlySet<string>; hold?: ReadonlySet<string> } = {}): UnloadPlan {
     const p = this.d.position();
     const chests = planChests(this.records()).map((c) => (c.key === reserve ? { ...c, free: Math.max(0, c.free - 1) } : c));
     const r = this.reserve();
@@ -298,9 +317,31 @@ export class HomeLogistics {
       ...(p ? { origin: p } : {}),
       ...(r !== undefined ? { reserve: r } : {}),
       boxing: box.on ?? true, // Track AV
+      filling: box.fill ?? box.on ?? true,
+      ...(box.tidy ? { tidy: true } : {}),
       ...(box.skip ? { noBox: box.skip } : {}),
+      ...(box.skipFill ? { noFill: box.skipFill } : {}),
+      ...(box.hold?.size ? { hold: box.hold } : {}),
+      noTidy: this.unchanged(this.tidyFailed),
+      noSpareFrom: this.unchanged(this.spareRefused),
       worn: (this.d.inventory.window?.(120)?.slots ?? []).flatMap((x) => (x ? [x.name] : [])),
     });
+  }
+
+  /** Tidy steps that failed, by `chestKey|item`: the chest's readAt then (not planned again until the chest is read anew). */
+  private readonly tidyFailed = new Map<string, number>();
+  /** Chests that gave no spare though the memory counted one, with their readAt then. */
+  private readonly spareRefused = new Map<string, number>();
+
+  /** The keys of `m` whose chest record was not read again since (the others are dropped). */
+  private unchanged(m: Map<string, number>): Set<string> {
+    const out = new Set<string>();
+    for (const [k, at] of m) {
+      const [x, y, z] = k.split('|')[0]!.split(',').map(Number);
+      if (this.d.memory().get({ x: x!, y: y!, z: z! })?.readAt === at) out.add(k);
+      else m.delete(k);
+    }
+    return out;
   }
 
   private requests(): number {
@@ -380,7 +421,13 @@ export class HomeLogistics {
       else namedEmpty += s.count;
     });
     const r2: ChestRecord = namedEmpty + namedFull > 0 ? { ...r, boxes: { empty: Math.max(0, r.boxes.empty - namedEmpty), full: Math.max(0, r.boxes.full - namedFull) } } : r;
-    const rec: ChestRecord = Object.keys(inBoxes).length ? { ...r2, inBoxes } : r2;
+    // the full stacks by item (a tidy step boxes 27 of them; partial stacks never count)
+    const fullStacks: Record<string, number> = {};
+    for (const st of view.slots) if (st && !isShulkerBox(st.name) && maxStackOf(st.name) > 1 && st.count >= maxStackOf(st.name)) fullStacks[st.name] = (fullStacks[st.name] ?? 0) + 1;
+    const r3: ChestRecord = { ...r2 };
+    delete r3.fullStacks;
+    if (Object.keys(fullStacks).length) r3.fullStacks = fullStacks;
+    const rec: ChestRecord = Object.keys(inBoxes).length ? { ...r3, inBoxes } : r3;
     mem.set(rec);
     return rec;
   }
@@ -398,6 +445,16 @@ export class HomeLogistics {
   /** Unload at home (see the file comment). */
   unload(cancelled: () => boolean, opts: { all?: boolean } = {}): Promise<UnloadReport> {
     return this.serial(() => this.doUnload(cancelled, opts));
+  }
+
+  /** The idle chore's tidy job: the home chests' own full boxes' worth into spares (tidy steps only). */
+  tidy(cancelled: () => boolean): Promise<UnloadReport> {
+    return this.serial(() => this.doTidy(cancelled));
+  }
+
+  /** A tidy step is due: a home chest holds 27 full stacks' worth of one item loose and a spare is known. */
+  tidyDue(): boolean {
+    return this.plan(false, undefined, { tidy: true }).steps.length > 0;
   }
 
   /** Track AS: take `want` of the item out of the chests at home (see the file comment); what is carried counts first. */
@@ -662,7 +719,7 @@ export class HomeLogistics {
   private async doUnload(cancelled: () => boolean, opts: { all?: boolean }): Promise<UnloadReport> {
     const t0 = this.now();
     const r0 = this.requests();
-    const rep: UnloadReport = { ok: false, moved: [], kept: [], left: [], boxes: 0, emptied: 0, chests: 0, requests: 0, shared: 0, ms: 0, boxed: [], emptiedNamed: 0, namedKept: 0, blocked: [] };
+    const rep: UnloadReport = { ok: false, moved: [], kept: [], left: [], boxes: 0, emptied: 0, chests: 0, requests: 0, shared: 0, ms: 0, boxed: [], filled: [], emptiedNamed: 0, namedKept: 0, blocked: [] };
     let finish = (reason?: string): UnloadReport => {
       const plan = this.plan(opts.all, undefined, { on: false });
       rep.kept = plan.kept.filter((k) => k.why !== 'named_box');
@@ -719,15 +776,37 @@ export class HomeLogistics {
         }
       }
       const failed = new Set<string>();
-      // Track AV: box steps first; a failed step's kind is planned without boxing afterwards
+      // Track AV: fill and box steps first; a failed step's kind is planned without that kind of step afterwards
       const skip = new Set<string>();
+      const skipFill = new Set<string>();
       let steps = 0;
+      let fills = 0;
       let lastBox = false;
+      // a fill the inventory has too little room for is put off once: the other items go first (its kind is held back)
+      const deferFill = new Set<string>();
+      let deferred = false;
+      // what an interrupted box step left in the inventory goes back first
+      if ((await this.settleDebts(rep, cancelled)) === 'interrupted') return finish('interrupted');
       for (let pass = 0; pass < MAX_UNLOAD_PASSES; pass++) {
         for (let round = 0; round < 40; round++) {
           if (cancelled()) return finish('interrupted');
-          const plan = this.plan(opts.all, undefined, { on: steps < MAX_BOX_STEPS, skip });
-          const step = plan.steps.find((x) => x.kind === 'box');
+          const plan = this.plan(opts.all, undefined, { on: steps < MAX_BOX_STEPS, fill: fills < MAX_FILL_STEPS, skip, skipFill: new Set([...skipFill, ...deferFill]), hold: deferFill });
+          const step = plan.steps[0];
+          if (step?.kind === 'fill') {
+            const r = await this.fillStep(step, rep, cancelled, opts.all ?? false);
+            if (r === 'interrupted') return finish('interrupted');
+            if (r.startsWith('defer: ')) {
+              this.log.info(`unload: fill a box of ${step.item}: ${r.slice(7)}${deferred ? '' : ' (after the other items)'}`);
+              (deferred ? skipFill : deferFill).add(step.item);
+              continue;
+            }
+            fills++;
+            if (r !== 'ok') {
+              this.log.info(`unload: fill a box of ${step.item}: ${r}`);
+              skipFill.add(step.item);
+            }
+            continue;
+          }
           if (step?.kind === 'box') {
             steps++;
             const r = await this.boxStep(step, rep, cancelled);
@@ -740,10 +819,16 @@ export class HomeLogistics {
           }
           const targets = new Map<string, Vec3>();
           for (const m of plan.moves) if (!failed.has(m.to)) targets.set(m.to, planChests(this.records()).find((c) => c.key === m.to)!.pos);
-          if (targets.size === 0) break;
+          if (targets.size === 0) {
+            if (deferFill.size === 0) break;
+            // the other items are away: the put-off fills get their turn with the emptier inventory
+            deferFill.clear();
+            deferred = true;
+            continue;
+          }
           const here = this.d.position() ?? centre(this.d.home()!);
           const [next] = visitOrder([...targets].map(([key, p]) => ({ key, p })), here);
-          const r = await this.depositAt(next!.p, rep, cancelled, opts.all ?? false, skip);
+          const r = await this.depositAt(next!.p, rep, cancelled, opts.all ?? false, skip, deferFill);
           if (r === 'interrupted') return finish('interrupted');
           if (r !== 'ok') failed.add(next!.key);
         }
@@ -758,12 +843,12 @@ export class HomeLogistics {
           lastBox = true;
         }
       }
-      await this.fetchLeftBox(cancelled);
+      await this.fetchLeftBoxes(cancelled);
       if (cancelled()) return finish('interrupted');
-      // overflow: spare shulker boxes from the box chest
+      // overflow: spare shulker boxes from the box chest (a failed fill's or box step's kind included)
       for (let n = 0; n < MAX_BOXES_PER_RUN; n++) {
         if (cancelled()) return finish('interrupted');
-        const plan = this.plan(opts.all);
+        const plan = this.plan(opts.all, undefined, { skip, skipFill });
         if (!plan.overflow.some((o) => !isShulkerBox(o.name))) break;
         const r = await this.viaSpareBox(rep, cancelled, opts.all ?? false);
         if (r === 'interrupted') return finish('interrupted');
@@ -772,6 +857,9 @@ export class HomeLogistics {
           break;
         }
       }
+      // tidy: the home chests' own full boxes' worth, after the bot's items
+      const t = await this.tidySteps(rep, cancelled, skip);
+      if (t === 'interrupted') return finish('interrupted');
       return finish();
     }
   }
@@ -785,14 +873,14 @@ export class HomeLogistics {
   }
 
   /** One chest trip: walk, open (refresh), plan for this chest with what it holds, deposit, refresh, close. */
-  private async depositAt(p: Vec3, rep: UnloadReport, cancelled: () => boolean, all: boolean, skip?: ReadonlySet<string>): Promise<string> {
+  private async depositAt(p: Vec3, rep: UnloadReport, cancelled: () => boolean, all: boolean, skip?: ReadonlySet<string>, hold?: ReadonlySet<string>): Promise<string> {
     const rec = this.d.memory().get(p);
     const v = await this.visit(p, rec?.kind ?? 'chest', cancelled);
     if (!v.ok) return v.reason;
     rep.chests++;
     try {
       const key = chestKey(p);
-      const plan = this.plan(all, undefined, { on: false, ...(skip ? { skip } : {}) });
+      const plan = this.plan(all, undefined, { on: false, ...(skip ? { skip } : {}), ...(hold ? { hold } : {}) });
       const moves = plan.moves.filter((m) => m.to === key).map((m) => ({ slot: m.slot, count: m.count, name: m.name }));
       if (moves.length === 0) return 'nothing_fits';
       const r = await this.d.skills.depositSlots(v.view, moves);
@@ -830,7 +918,7 @@ export class HomeLogistics {
     if (!c?.move) return;
     const main = this.freeSlots().filter((i) => i >= 9);
     if (main.length < 2) return; // one for the stack moved out, one for the box
-    const plan = this.plan();
+    const plan = this.plan(false, undefined, { on: false }); // without the steps: a stack a fill or box step takes is movable too
     const movable = new Set(plan.moves.map((m) => m.slot).concat(plan.overflow.map((o) => o.slot)));
     const h = [...Array(9).keys()].find((i) => movable.has(i) && !isShulkerBox(inv[i]?.name ?? ''));
     if (h === undefined) return;
@@ -987,24 +1075,30 @@ export class HomeLogistics {
    * The slot the placed box left stays free for it: the broken box drops as an item and needs a slot to come back to
    * (the contents filled it, the box stayed on the ground and the run stuck, Realm 2026-10-30).
    */
-  private async emptyBox(slot: number, rep: UnloadReport, cancelled: () => boolean): Promise<string> {
+  private async emptyBox(slot: number, rep: UnloadReport, cancelled: () => boolean, only?: { item: string; want: number }): Promise<string> {
+    const named = isKeptBox(this.d.inventory.slots[slot]?.name ?? '', this.d.inventory.rawItem?.(0, slot), this.keepName());
     const s = await this.boxToHotbar(slot, cancelled);
     if (typeof s === 'string') return s;
     const placed = await this.placeBox(s, cancelled);
     if ('reason' in placed) return placed.reason;
     let left = 0;
+    let got = 0;
     const o = await this.d.skills.open(placed.at);
     if (o.ok) {
       try {
         for (let i = 0; i < o.view.slots.length; i++) {
           const st = o.view.slots[i];
           if (!st) continue;
+          // `only` (a fill step): that item, `want` of it at most; the rest stays in the box
+          if (only && (st.name !== only.item || got >= only.want)) continue;
+          const count = only ? Math.min(st.count, only.want - got) : undefined;
           // two slots stay free: the box's own, and one for whatever else lies there and is picked up with it (the pickup found the inventory full, Realm 2026-10-30)
-          if (this.freeSlots().length - this.slotsFor(st) < 2) {
+          if (this.freeSlots().length - this.slotsFor(count === undefined ? st : { ...st, count }) < 2) {
             left++;
             continue;
           }
-          const t = await this.d.skills.take(o.view, i);
+          const t = await this.d.skills.take(o.view, i, count);
+          got += t.moved;
           if (t.moved > 0) rep.requests++;
           if (o.view.slots[i]) left++;
           if (!t.ok && t.reason !== 'inventory_full') break;
@@ -1013,7 +1107,7 @@ export class HomeLogistics {
         await this.d.skills.closeContainer(o.view);
       }
     }
-    const back = await this.breakAndPickUp(placed.at, cancelled);
+    const back = await this.pickUpOrFetch(placed.at, cancelled, named);
     if (typeof back === 'string') return back;
     if (!o.ok) return `open: ${o.reason}`;
     return left > 0 ? 'emptied partly' : 'emptied';
@@ -1024,24 +1118,39 @@ export class HomeLogistics {
     return new Set(this.boxSlots().keys());
   }
 
-  /** A box broken and not picked up again in this run: the run walks back for it once its items are unloaded. */
-  private leftBox: Vec3 | undefined;
+  /** Boxes broken and not picked up again: the run walks back for them (at once, or once their items are unloaded). */
+  private readonly leftBoxes: Vec3[] = [];
 
-  /** Walk back to a box left on the ground (its items unloaded since, so there is room now) and pick it up. */
-  private async fetchLeftBox(cancelled: () => boolean): Promise<void> {
-    const at = this.leftBox;
-    this.leftBox = undefined;
-    if (!at || this.freeSlots().length === 0) return;
-    const before = this.boxKeys();
-    await this.d.skills.goto({ type: 'near', p: centre(at), r: 1.5 }, { timeoutTicks: 400 });
-    if (cancelled()) return;
-    await this.d.skills.collect(6, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
-    const ok = [...this.boxKeys()].some((i) => !before.has(i));
-    this.log.info(`unload: the box left at ${fmtPos(at)}: ${ok ? 'picked up on the second try' : 'still not found (picked up by a player, or gone)'}`);
+  /** Walk back to the boxes left on the ground and pick them up: true when a box came back. */
+  private async fetchLeftBoxes(cancelled: () => boolean): Promise<boolean> {
+    let got = false;
+    while (this.leftBoxes.length > 0 && this.freeSlots().length > 0) {
+      const at = this.leftBoxes.shift()!;
+      const before = this.boxKeys();
+      await this.d.skills.goto({ type: 'near', p: centre(at), r: 1.5 }, { timeoutTicks: 400 });
+      if (cancelled()) {
+        this.leftBoxes.unshift(at);
+        return got;
+      }
+      await this.d.skills.collect(6, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
+      const ok = [...this.boxKeys()].some((i) => !before.has(i));
+      got ||= ok;
+      this.log.info(`unload: the box left at ${fmtPos(at)}: ${ok ? 'picked up on the second try' : 'still not found (picked up by a player, or gone)'}`);
+    }
+    return got;
   }
 
-  /** Break the box at `at` and pick it up again (also an empty one): its new inventory slot, or why not. */
-  private async breakAndPickUp(at: Vec3, cancelled: () => boolean): Promise<number | string> {
+  /** Is the box in inventory slot `i` a named (bot_loot) one? */
+  private namedAt(i: number): boolean {
+    return isKeptBox(this.d.inventory.slots[i]?.name ?? '', this.d.inventory.rawItem?.(0, i), this.keepName());
+  }
+
+  /**
+   * Break the box at `at` and pick it up again (also an empty one): its new inventory slot, or why not. `named`: the
+   * box broken is (true) or is not (false) a bot_loot box: a new slot of the other sort (another box lying there) is
+   * not taken for it. A box not picked up is remembered (also on a cancel) and fetched later.
+   */
+  private async breakAndPickUp(at: Vec3, cancelled: () => boolean, named?: boolean): Promise<number | string> {
     const before = this.boxKeys();
     // a box broken meanwhile (a player, a mob, an explosion): no dig, straight to the pickup
     const b = this.d.world.blockAt(at);
@@ -1049,14 +1158,24 @@ export class HomeLogistics {
       const dg = await this.d.skills.dig(at);
       if (!dg.ok && dg.reason !== 'no_block') return dg.reason === 'interrupted' ? 'interrupted' : `break: ${dg.reason ?? 'failed'}`;
     }
-    const fresh = (): number | undefined => [...this.boxKeys()].find((i) => !before.has(i));
+    const fresh = (): number | undefined => [...this.boxKeys()].find((i) => !before.has(i) && (named === undefined || this.namedAt(i) === named));
     for (const radius of [4, 6, 10]) {
       await this.d.skills.collect(radius, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
-      if (cancelled()) return 'interrupted';
       if (fresh() !== undefined) break;
+      if (cancelled()) break;
     }
-    if (fresh() === undefined) this.leftBox = at;
+    if (fresh() === undefined) this.leftBoxes.push(at);
+    if (fresh() === undefined && cancelled()) return 'interrupted';
     return fresh() ?? `the box was not picked up again (left at ${fmtPos(at)})`;
+  }
+
+  /** breakAndPickUp, then (not picked up) a walk to it at once: its slot, or why not. */
+  private async pickUpOrFetch(at: Vec3, cancelled: () => boolean, named?: boolean): Promise<number | string> {
+    const keys = this.boxKeys();
+    const back = await this.breakAndPickUp(at, cancelled, named);
+    if (typeof back !== 'string' || back === 'interrupted') return back;
+    await this.fetchLeftBoxes(cancelled);
+    return [...this.boxKeys()].find((i) => !keys.has(i) && (named === undefined || this.namedAt(i) === named)) ?? back;
   }
 
   /**
@@ -1078,13 +1197,18 @@ export class HomeLogistics {
     let at: Vec3 | undefined;
     for (const p of spots.slice(0, 3)) {
       const r = await this.d.skills.place(p, { face: 'up', item: name });
-      if (cancelled()) return { reason: 'interrupted' };
       if (r.ok) {
         at = p;
         break;
       }
+      if (cancelled()) return { reason: 'interrupted' };
     }
     if (!at) return { reason: 'no free cell for the box next to the bot' };
+    // a pre-emption right after the place: the box is broken and picked up again rather than left standing
+    if (cancelled()) {
+      await this.breakAndPickUp(at, () => false);
+      return { reason: 'interrupted' };
+    }
     const now = this.d.inventory.slots;
     if ([...others].some(([i, n]) => now[i]?.name !== n)) {
       const back = await this.breakAndPickUp(at, cancelled);
@@ -1141,7 +1265,8 @@ export class HomeLogistics {
       const raw = (i: number) => this.d.inventory.rawItem?.(v.view.id, i);
       const slot = v.view.slots.findIndex((s, i) => !!s && isShulkerBox(s.name) && raw(i) !== undefined && shulkerSlotsUsed(raw(i)) === 0 && !isKeptBox(s.name, raw(i), keep)); // a box without its wire item is no spare
       if (slot < 0) {
-        this.remember(from.pos, v.record.kind, v.view);
+        const rec = this.remember(from.pos, v.record.kind, v.view);
+        if (rec.boxes.empty > 0) this.spareRefused.set(chestKey(from.pos), rec.readAt); // counted, but none usable
         return 'the chest holds no empty box any more';
       }
       await this.freeHotbarSlot();
@@ -1149,6 +1274,7 @@ export class HomeLogistics {
       if (t.moved > 0) rep.requests++;
       this.remember(from.pos, v.record.kind, v.view);
       if (!t.ok || t.to === undefined) return `take: ${t.reason ?? 'failed'}`;
+      if (this.namedAt(t.to)) return 'took a bot_loot box for a spare'; // never: the take refuses named boxes
       return t.to;
     } finally {
       await this.d.skills.closeContainer(v.view);
@@ -1156,10 +1282,10 @@ export class HomeLogistics {
   }
 
   /** The (slot, count) pairs of `item` for a box: at most `stacks` slots, fullest first, the throwaway reserve held back. */
-  private boxMoves(item: string, stacks: number): { slot: number; count: number; name: string }[] {
+  private boxMoves(item: string, stacks: number, hold: number, fullOnly = false): { slot: number; count: number; name: string }[] {
     const slots = this.slots();
-    const have = slots.filter((s) => s.name === item);
-    let allowed = have.reduce((a, s) => a + s.count, 0) - (reserveByKind(slots, this.reserve()).get(item) ?? 0);
+    const have = slots.filter((s) => s.name === item && (!fullOnly || s.count >= maxStackOf(item)));
+    let allowed = have.reduce((a, s) => a + s.count, 0) - hold;
     const out: { slot: number; count: number; name: string }[] = [];
     for (const s of [...have].sort((a, b) => b.count - a.count || a.slot - b.slot)) {
       if (out.length >= stacks || allowed <= 0) break;
@@ -1174,9 +1300,88 @@ export class HomeLogistics {
    * One `box` step: a spare box (carried, else out of `step.spare`), then in rounds: at the target chest its
    * loose stacks of the item into the inventory (as many as the box and the inventory take), the box placed
    * next to the bot, filled with the item's stacks, broken and picked up; the full box into the chest.
+   * The reserve held back is the bot's own at the start (the chest's stacks never become the reserve). A tidy
+   * step takes and boxes full stacks only, and none at all when the chest holds fewer than the box lacks.
    */
   private async boxStep(step: Extract<UnloadStep, { kind: 'box' }>, rep: UnloadReport, cancelled: () => boolean): Promise<string> {
+    const before = this.looseCount(step.item);
+    this.stepBox = undefined;
+    const r = await this.boxStepRun(step, rep, cancelled);
+    if (r === 'ok') return r;
+    // what it took out of the chest (a tidy step: the loose stacks too) and a partly filled box go back into that chest
+    const debt: Debt = { chest: step.chest, item: step.item, loose: step.tidy ? Math.max(0, this.looseCount(step.item) - before) : 0, box: this.stepBox };
+    if (r === 'interrupted') {
+      this.debts.push(debt);
+      return r;
+    }
+    const back = await this.settle(debt, rep, cancelled);
+    if (back !== 'ok') this.log.info(`unload: box ${step.item}: ${r}; putting it back into ${step.chest}: ${back}`);
+    return r;
+  }
+
+  /** The box a running box step fills (its inventory slot), for the put-back after a failure. */
+  private stepBox: number | undefined;
+  /** What interrupted box steps left in the inventory: put back at the start of the next run. */
+  private readonly debts: Debt[] = [];
+
+  /** The debts of interrupted box steps first: 'ok', or 'interrupted'. */
+  private async settleDebts(rep: UnloadReport, cancelled: () => boolean): Promise<string> {
+    await this.fetchLeftBoxes(cancelled);
+    while (this.debts.length > 0) {
+      if (cancelled()) return 'interrupted';
+      const d = this.debts.shift()!;
+      const r = await this.settle(d, rep, cancelled);
+      if (r === 'interrupted') {
+        this.debts.unshift(d);
+        return r;
+      }
+      if (r !== 'ok') this.log.info(`unload: putting ${d.item} back into ${d.chest}: ${r}`);
+    }
+    return 'ok';
+  }
+
+  /**
+   * Put back what a failed box step took: `loose` items of `item` (fullest stacks first) and the partly filled box
+   * (an unnamed box holding only `item`, in slot `box` or, the slot moved, any such box) into the chest `chest`.
+   */
+  private async settle(d: Debt, rep: UnloadReport, cancelled: () => boolean): Promise<string> {
+    const only = (i: number) => {
+      const st = this.d.inventory.slots[i];
+      if (!st || !isShulkerBox(st.name) || this.namedAt(i)) return false;
+      const c = shulkerContents(this.d.inventory.rawItem?.(0, i));
+      const k = Object.keys(c);
+      return k.length === 1 && k[0] === d.item;
+    };
+    const box = d.box !== undefined && only(d.box) ? d.box : d.box !== undefined ? [...this.boxKeys()].find(only) : undefined;
+    const moves: { slot: number; count: number; name?: string }[] = [];
+    let left = Math.min(d.loose, this.looseCount(d.item));
+    for (const s of this.slots().filter((x) => x.name === d.item).sort((a, b) => b.count - a.count || a.slot - b.slot)) {
+      if (left <= 0) break;
+      const n = Math.min(s.count, left);
+      moves.push({ slot: s.slot, count: n, name: d.item });
+      left -= n;
+    }
+    if (box !== undefined) moves.push({ slot: box, count: 1 });
+    if (moves.length === 0) return 'ok';
+    const c = planChests(this.records()).find((x) => x.key === d.chest);
+    if (!c) return 'the chest is not known any more';
+    const v = await this.visit(c.pos, c.kind, cancelled);
+    if (!v.ok) return v.reason;
+    rep.chests++;
+    try {
+      const r = await this.d.skills.depositSlots(v.view, moves);
+      rep.requests += r.requests;
+      this.remember(c.pos, v.record.kind, v.view);
+      return r.reason === undefined || r.ok ? 'ok' : r.reason;
+    } finally {
+      await this.d.skills.closeContainer(v.view);
+    }
+  }
+
+  private async boxStepRun(step: Extract<UnloadStep, { kind: 'box' }>, rep: UnloadReport, cancelled: () => boolean): Promise<string> {
     const t0 = this.now();
+    const hold = reserveByKind(this.slots(), this.reserve()).get(step.item) ?? 0;
+    const fullOnly = step.tidy === true;
     const target = planChests(this.records()).find((c) => c.key === step.chest);
     if (!target) return 'the chest is not known any more';
     // 1. the spare box
@@ -1193,6 +1398,7 @@ export class HomeLogistics {
       box = r;
       from = chestName(this.d.memory().get(src.pos) ?? unreadRecord(src.pos, src.kind));
     }
+    this.stepBox = box;
     // 2. rounds: the chest's loose stacks out, the box filled next to it
     let took = 0;
     let rounds = 0;
@@ -1208,8 +1414,12 @@ export class HomeLogistics {
       try {
         const loose = v.view.slots
           .map((st, i) => ({ st, i }))
-          .filter((x) => !!x.st && x.st.count > 0 && x.st.name === step.item)
+          .filter((x) => !!x.st && x.st.count > 0 && x.st.name === step.item && (!fullOnly || x.st.count >= maxStackOf(step.item)))
           .sort((a, b) => b.st!.count - a.st!.count || a.i - b.i);
+        if (fullOnly && loose.length < need) {
+          this.remember(target.pos, v.record.kind, v.view);
+          return `the chest holds ${loose.length} full stacks of ${step.item}, the box lacks ${need}`;
+        }
         for (const { i } of loose.slice(0, Math.min(need, room))) {
           if (cancelled()) break;
           const t = await this.d.skills.take(v.view, i);
@@ -1220,13 +1430,14 @@ export class HomeLogistics {
           if (!t.ok) break;
         }
         box = await this.hotbarWhileOpen(box);
+        this.stepBox = box;
         this.remember(target.pos, v.record.kind, v.view);
       } finally {
         await this.d.skills.closeContainer(v.view);
       }
       took += got;
       if (cancelled()) return 'interrupted';
-      if (this.boxMoves(step.item, need).length === 0) break;
+      if (this.boxMoves(step.item, need, hold, fullOnly).length === 0) break;
       const placed = await this.placeBox(box, cancelled);
       if ('reason' in placed) return placed.reason;
       rounds++;
@@ -1237,7 +1448,7 @@ export class HomeLogistics {
           // planned again after each pass: the survival keeper may move a stack to the hotbar meanwhile
           for (let pass = 0; pass < 3; pass++) {
             const left = BOX_SLOTS - (this.d.skills.snapshot(o.view)?.stacks ?? 0);
-            const moves = left > 0 ? this.boxMoves(step.item, left) : [];
+            const moves = left > 0 ? this.boxMoves(step.item, left, hold, fullOnly) : [];
             if (moves.length === 0) break;
             const r = await this.d.skills.depositSlots(o.view, moves);
             rep.requests += r.requests;
@@ -1248,9 +1459,12 @@ export class HomeLogistics {
           await this.d.skills.closeContainer(o.view);
         }
       }
-      const back = await this.breakAndPickUp(placed.at, cancelled);
+      // broken and picked up again also after a cancel (never left standing); not picked up: walked to at once
+      const back = await this.pickUpOrFetch(placed.at, () => false, false);
       if (typeof back === 'string') return back;
       box = back;
+      this.stepBox = box;
+      if (cancelled()) return 'interrupted';
       if (moved === 0) return o.ok ? 'the box took nothing' : `open: ${o.reason}`;
       // another round only when the inventory's room, not the chest, limited the take
       if (got < room || got === 0) break;
@@ -1273,6 +1487,220 @@ export class HomeLogistics {
       await this.d.skills.closeContainer(w.view);
     }
   }
+
+  // ---- tidy: the home chests' own full boxes' worth ----------------------------------------------
+
+  /**
+   * Tidy steps (MAX_TIDY_STEPS at most; the planner stops when no spare is left): 'ok', or 'interrupted'. A failed
+   * step's kind is not tidied again in this run; what it left in the inventory goes back into the chests.
+   */
+  private async tidySteps(rep: UnloadReport, cancelled: () => boolean, skip: Set<string>): Promise<string> {
+    for (let n = 0; n < MAX_TIDY_STEPS; n++) {
+      if (cancelled()) return 'interrupted';
+      const step = this.plan(false, undefined, { tidy: true, skip }).steps.find((x) => x.kind === 'box');
+      if (step?.kind !== 'box') break;
+      const r = await this.boxStep(step, rep, cancelled); // a failure puts back what it took (boxStep)
+      if (r === 'interrupted') return r;
+      if (r !== 'ok') {
+        this.log.info(`unload: tidy ${step.item} in ${step.chest}: ${r}`);
+        skip.add(step.item);
+        // not again until that chest is read anew (the chore would retry it every 10 minutes)
+        const [x, y, z] = step.chest.split(',').map(Number);
+        const at = this.d.memory().get({ x: x!, y: y!, z: z! })?.readAt;
+        if (at !== undefined) this.tidyFailed.set(`${step.chest}|${step.item}`, at);
+        await this.fetchLeftBoxes(cancelled);
+      }
+    }
+    await this.fetchLeftBoxes(cancelled);
+    return cancelled() ? 'interrupted' : 'ok';
+  }
+
+  private async doTidy(cancelled: () => boolean): Promise<UnloadReport> {
+    const t0 = this.now();
+    const r0 = this.requests();
+    const rep: UnloadReport = { ok: false, moved: [], kept: [], left: [], boxes: 0, emptied: 0, chests: 0, requests: 0, shared: 0, ms: 0, boxed: [], filled: [] };
+    const settled = this.d.home() ? await this.settleDebts(rep, cancelled) : 'no_home';
+    const r = settled === 'ok' ? await this.tidySteps(rep, cancelled, new Set()) : settled;
+    rep.ok = r === 'ok';
+    if (r !== 'ok') rep.reason = r;
+    rep.shared = this.requests() - r0;
+    rep.ms = this.now() - t0;
+    this.log.info(`tidy: ${rep.boxed?.length ? unloadLine(rep) : 'nothing boxed'}${rep.reason ? ` (${rep.reason})` : ''}`);
+    return rep;
+  }
+
+  // ---- fill steps: full boxes out of what the bot carries ---------------------------------------
+
+  /** Items of `item` loose in the inventory. */
+  private looseCount(item: string): number {
+    return this.d.inventory.slots.slice(0, 36).reduce((a, s) => a + (s?.name === item ? s.count : 0), 0);
+  }
+
+  /** The (slot, count) pairs of `item` for the spare: `want` items at most, fullest stacks first, the throwaway reserve held back. */
+  private fillMoves(item: string, want: number): { slot: number; count: number; name: string }[] {
+    const slots = this.slots();
+    const have = slots.filter((s) => s.name === item);
+    let allowed = Math.min(want, have.reduce((a, s) => a + s.count, 0) - (reserveByKind(slots, this.reserve()).get(item) ?? 0));
+    const out: { slot: number; count: number; name: string }[] = [];
+    for (const s of [...have].sort((a, b) => b.count - a.count || a.slot - b.slot)) {
+      if (allowed <= 0) break;
+      const n = Math.min(s.count, allowed);
+      out.push({ slot: s.slot, count: n, name: item });
+      allowed -= n;
+    }
+    return out;
+  }
+
+  /** The carried box to take `item` out of: a bot_loot box (with `all` any full one; never the fireworks box, never `spare`), the most of it first. */
+  private fillSource(item: string, spare: number, all: boolean): number | undefined {
+    const boxes = carriedBoxes(this.d.inventory, this.keepName(), this.d.flightBoxSlot?.()).filter((b) => b.slot !== spare && !b.flightKit && !b.unknown && b.used > 0 && (b.named || all) && (b.contents[item] ?? 0) > 0);
+    return boxes.sort((a, b) => (b.contents[item] ?? 0) - (a.contents[item] ?? 0) || a.slot - b.slot)[0]?.slot;
+  }
+
+  /**
+   * One `fill` step: a spare (carried, else out of `step.spare`), then rounds until it holds 27 full stacks of the item:
+   * while the loose stacks (the reserve held back) do not cover what it lacks and a carried box holds more, that box is
+   * placed and only that item taken out of it (two inventory slots stay free, as when emptying); else the spare is placed
+   * next to the bot, filled, broken and picked up. Then the full box goes into `step.chest`. A failure before the store
+   * takes the items back out of the spare (best effort: what stays in it makes it a full box like any other, stored in
+   * the box chest or, with `all`, emptied); a spare that is not picked up again is walked to at once. A target found
+   * full after all (an old memory) gets the box stored where the overflow's boxes go.
+   */
+  private async fillStep(step: Extract<UnloadStep, { kind: 'fill' }>, rep: UnloadReport, cancelled: () => boolean, all: boolean): Promise<string> {
+    const t0 = this.now();
+    const target = planChests(this.records()).find((c) => c.key === step.chest);
+    if (!target) return 'the chest is not known any more';
+    const max = maxStackOf(step.item);
+    const full = BOX_SLOTS * max;
+    // 0. can the rounds complete the box? a take keeps 2 slots free while the box stands (its own slot one of them):
+    // (free - 1) stacks a take, then a fill; too little room: put off (the caller unloads the other items first)
+    const free = this.freeSlots().length - (step.spare === 'carried' ? 0 : 1);
+    const fromBoxes = full - this.fillMoves(step.item, full).reduce((a, m) => a + m.count, 0);
+    if (fromBoxes > 0) {
+      const per = (free - 1) * max;
+      if (per <= 0 || 2 * Math.ceil(fromBoxes / per) + 1 > MAX_FILL_ROUNDS) return `defer: ${free} free inventory slots are too few to take ${fromBoxes} ${step.item} out of the boxes within ${MAX_FILL_ROUNDS} rounds`;
+    }
+    // 1. the spare box
+    let box = step.spare === 'carried' ? this.carriedSpare() : undefined;
+    let from = 'my inventory';
+    if (box === undefined) {
+      const src = planChests(this.records()).find((c) => c.key === step.spare && c.boxes.empty > 0) ?? (() => {
+        const b = this.boxChest();
+        return b ? { pos: { x: b.x, y: b.y, z: b.z }, kind: b.kind } : undefined;
+      })();
+      if (!src) return 'no spare shulker box';
+      const r = await this.takeSpare(src, rep, cancelled);
+      if (typeof r === 'string') return r;
+      box = r;
+      from = chestName(this.d.memory().get(src.pos) ?? unreadRecord(src.pos, src.kind));
+    }
+    let spare = box;
+    const inBox = (): number => shulkerContents(this.d.inventory.rawItem?.(0, spare))[step.item] ?? 0;
+    // a failure takes the items back out of the spare; what stays (no room) goes into the item's chest with the box,
+    // never a partly filled box into the chest of spares
+    const fail = async (why: string): Promise<string> => {
+      if (why === 'interrupted' || cancelled() || shulkerSlotsUsed(this.d.inventory.rawItem?.(0, spare)) === 0) return why;
+      const r = await this.emptyBox(spare, rep, cancelled);
+      this.log.info(`unload: fill a box of ${step.item}: ${why}; its items taken back out of the spare: ${r}`);
+      if (r === 'interrupted') return r;
+      const still = [...this.boxKeys()].find((i) => !this.namedAt(i) && Object.keys(shulkerContents(this.d.inventory.rawItem?.(0, i))).join() === step.item);
+      if (still !== undefined && r !== 'emptied') {
+        const st = await this.storeBox(target.pos, target.kind, still, cancelled, rep);
+        if (typeof st === 'string') this.log.info(`unload: fill a box of ${step.item}: the partly filled box into ${step.chest}: ${st}`);
+      }
+      return why;
+    };
+    // the reserve of a throwaway kind may grow as items come out of the boxes: take that much more
+    const r0 = this.reserve() ?? DEFAULT_THROWAWAY_MIN;
+    const reserveGap = (): number => (THROWAWAY_BLOCKS.includes(step.item) ? Math.max(0, r0 - [...reserveByKind(this.slots(), r0).values()].reduce((a, n) => a + n, 0)) : 0);
+    // 2. rounds
+    let took = 0;
+    let rounds = 0;
+    for (let round = 0; round < MAX_FILL_ROUNDS; round++) {
+      if (cancelled()) return 'interrupted';
+      const need = full - inBox();
+      if (need <= 0) break;
+      const loose = this.fillMoves(step.item, need).reduce((a, m) => a + m.count, 0);
+      const src = loose < need ? this.fillSource(step.item, spare, all) : undefined;
+      if (src !== undefined && this.freeSlots().length >= 2) {
+        const before = this.looseCount(step.item);
+        const r = await this.emptyBox(src, rep, cancelled, { item: step.item, want: need - loose + reserveGap() });
+        if (r === 'interrupted') return r;
+        const got = this.looseCount(step.item) - before;
+        took += Math.max(0, got);
+        if (got > 0) continue;
+        if (loose === 0) return fail(`taking ${step.item} out of a box: ${r}`);
+      }
+      if (loose === 0) return fail(`not enough ${step.item}`);
+      const hb = await this.boxToHotbar(spare, cancelled);
+      if (typeof hb === 'string') return fail(hb);
+      spare = hb;
+      const placed = await this.placeBox(spare, cancelled);
+      if ('reason' in placed) return fail(placed.reason);
+      rounds++;
+      const stacksBefore = Math.floor(inBox() / max);
+      let moved = 0;
+      const o = await this.d.skills.open(placed.at);
+      if (o.ok) {
+        try {
+          // planned again after each pass: the survival keeper may move a stack to the hotbar meanwhile
+          for (let pass = 0; pass < 3; pass++) {
+            const moves = this.fillMoves(step.item, full - (this.d.skills.snapshot(o.view)?.counts[step.item] ?? 0));
+            if (moves.length === 0) break;
+            const r = await this.d.skills.depositSlots(o.view, moves);
+            rep.requests += r.requests;
+            moved += r.total;
+            if (r.total === 0 || r.reason === 'container_full' || cancelled()) break;
+          }
+        } finally {
+          await this.d.skills.closeContainer(o.view);
+        }
+      }
+      // broken and picked up again also after a cancel: never left standing; not picked up: walk to it at once
+      // (the spare's slot is free, the deposits freed more); never a bot_loot box lying there taken for it
+      const back = await this.pickUpOrFetch(placed.at, () => false, false);
+      if (typeof back === 'string') return back;
+      spare = back;
+      if (cancelled()) return 'interrupted';
+      if (moved === 0) return fail(o.ok ? 'the box took nothing' : `open: ${o.reason}`);
+      if (Math.floor(inBox() / max) <= stacksBefore) return fail('a fill round added no full stack');
+    }
+    if (inBox() < full) return fail(`the box holds ${inBox()} of ${full} ${step.item}`);
+    // 3. the full box into the chest; that chest full after all (the memory was older than the chest): the chest the
+    // spare came from, else the emptiest one with a free slot (as the overflow's boxes); else it stays carried (a full
+    // box like any other)
+    const stored = await this.storeBox(target.pos, target.kind, spare, cancelled, rep);
+    let at = stored;
+    if (typeof stored === 'string' && stored !== 'interrupted') {
+      const partners = partnerKeys(this.records());
+      const alt = this.records()
+        .filter((r) => r.readAt > 0 && !r.unreachable && r.free > 0 && !isShulkerBox(r.kind) && r.boxes.empty === 0 && !partners.has(chestKey(r)) && chestKey(r) !== chestKey(target.pos))
+        .sort((a, b) => b.free - a.free)[0];
+      if (alt) {
+        this.log.info(`unload: fill a box of ${step.item}: ${chestName(this.d.memory().get(target.pos) ?? unreadRecord(target.pos, target.kind))}: ${stored}; storing it in ${chestName(alt)}`);
+        at = await this.storeBox({ x: alt.x, y: alt.y, z: alt.z }, alt.kind, spare, cancelled, rep);
+      }
+    }
+    if (typeof at === 'string') return at;
+    (rep.filled ??= []).push({ item: step.item, chest: chestName(at), from, took, rounds, ms: this.now() - t0 });
+    this.log.info(`unload: filled a box with ${full} ${step.item} (${took} out of the carried boxes, ${rounds} round${rounds === 1 ? '' : 's'}; the box from ${from}), stored in ${chestName(at)} (${((this.now() - t0) / 1000).toFixed(1)} s)`);
+    return 'ok';
+  }
+
+  /** Walk to a chest, put the box of `slot` in, refresh its record: the record, or why not. */
+  private async storeBox(p: Vec3, kind: string, slot: number, cancelled: () => boolean, rep: UnloadReport): Promise<ChestRecord | string> {
+    const w = await this.visit(p, kind, cancelled);
+    if (!w.ok) return w.reason;
+    rep.chests++;
+    try {
+      const r = await this.d.skills.depositSlots(w.view, [{ slot, count: 1 }]);
+      rep.requests += r.requests;
+      const rec = this.remember(p, w.record.kind, w.view);
+      return r.total > 0 ? rec : `storing the box: ${r.reason ?? 'failed'}`;
+    } finally {
+      await this.d.skills.closeContainer(w.view);
+    }
+  }
 }
 
 /** `unloaded: 64 coal -> chest 100 63 -48, ...; 1 shulker box filled; kept 16 cobblestone, 1 bread; left 5 dirt (no room)` */
@@ -1280,10 +1708,18 @@ export function unloadLine(rep: UnloadReport): string {
   if (rep.reason === 'no_home') return 'unload: no home set (!home set)';
   if (rep.reason === 'no_chests') return 'unload: I know no chest near home yet (!chests scan)';
   const moved = rep.moved.map((m) => `${m.count} ${m.name} -> ${m.to}`).join(', ');
-  const parts = [moved ? `unloaded: ${moved}` : rep.boxed?.length ? 'unloaded: nothing loose' : 'unload: nothing moved'];
+  const parts = [moved ? `unloaded: ${moved}` : rep.boxed?.length || rep.filled?.length ? 'unloaded: nothing loose' : 'unload: nothing moved'];
   if (rep.compacted) parts.push(rep.compacted); // Track AV/AW
   if (rep.emptied) parts.push(`${rep.emptied} full shulker box${rep.emptied === 1 ? '' : 'es'} emptied`);
   if (rep.boxes) parts.push(`${rep.boxes} shulker box${rep.boxes === 1 ? '' : 'es'} filled and stored`);
+  // the fill steps: `boxed 2 full boxes of cobbled_deepslate into chest 1 2 3`
+  const fills = new Map<string, { item: string; chest: string; n: number }>();
+  for (const f of rep.filled ?? []) {
+    const g = fills.get(`${f.item}|${f.chest}`) ?? { item: f.item, chest: f.chest, n: 0 };
+    g.n++;
+    fills.set(`${f.item}|${f.chest}`, g);
+  }
+  for (const g of fills.values()) parts.push(`boxed ${g.n} full box${g.n === 1 ? '' : 'es'} of ${g.item} into ${g.chest}`);
   // Track AV: the box steps, the named boxes
   const groups = new Map<string, { item: string; chest: string; from: string; stacks: number; n: number }>();
   for (const b of rep.boxed ?? []) {
