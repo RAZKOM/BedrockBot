@@ -1,0 +1,298 @@
+// Track BJ (wave 12, decision 0052, docs/home.md "Supply"): the carried shulker box next to the bot, the
+// one routine every job uses. Moved here out of the home logistics (logistics.ts, Track AG/AV), where the
+// unload's box, fill and empty steps grew it; `!bring`'s extract and the build's refill (supply.ts) use it
+// too, so there is one copy of each step:
+//
+//   place     the box of an inventory slot onto a free cell next to the bot (stash.ts boxSpots; never a cell
+//             `avoid` names, e.g. the build's footprint); it must be the box the place skill picks
+//             (`placesExactly`; `toHotbar` moves it there first); a different box placed (the model moved
+//             meanwhile) is broken and picked up again
+//   take out  open it, take what fits (or `only` that item, `want` of it at most), always keeping two
+//             inventory slots free (the box's own and one for whatever else lies there and is picked up with
+//             it: the pickup found the inventory full, Realm 2026-10-30), close
+//   put in    open it, deposit the moves the caller plans (planned again after each pass: the survival keeper
+//             may move a stack to the hotbar meanwhile), close
+//   pick up   break it (a box broken meanwhile: straight to the pickup) and collect it, nearer first; not
+//             found: remembered and walked to at once, else later (`fetchLeft`)
+//
+// Container traffic goes through the skills given (the chest skill sets the `shulker` slot type per window).
+import { silentLogger, type Logger } from '../../log.ts';
+import type { BlockInfo, ContainerView, Vec3 } from '../../world/types.ts';
+import type { CollectOptions, CollectResult } from '../collect/collect.ts';
+import { isShulkerBox, maxStackOf, shulkerSlotsUsed, type DepositResult, type OpenResult } from '../container/chest.ts';
+import { boxSpots } from '../container/stash.ts';
+import type { DigOptions, DigResult } from '../dig/digger.ts';
+import { isKeptBox, placesExactly } from '../home/boxing.ts';
+import { fmtPos } from '../home/memory.ts';
+import type { NavGoal } from '../nav/goals.ts';
+import type { PlaceOptions, PlaceResult } from '../place/place.ts';
+import type { GotoOptions, SkillResult } from '../types.ts';
+
+export interface BoxSkills {
+  goto(goal: NavGoal, opts?: GotoOptions): Promise<SkillResult>;
+  open(p: Vec3): Promise<OpenResult>;
+  closeContainer(view: ContainerView | number): Promise<boolean>;
+  take(view: ContainerView, slot: number, count?: number, prefer?: readonly number[]): Promise<{ ok: boolean; reason?: string; to?: number; moved: number }>;
+  depositSlots(view: ContainerView, moves: readonly { slot: number; count: number; name?: string }[]): Promise<DepositResult>;
+  place(p: Vec3, opts?: PlaceOptions): Promise<PlaceResult>;
+  dig(p: Vec3, opts?: DigOptions): Promise<DigResult>;
+  collect(radius: number, timeoutTicks: number, opts?: CollectOptions): Promise<CollectResult>;
+}
+
+export interface BoxOpsDeps {
+  skills: BoxSkills;
+  inventory: { readonly slots: readonly ({ name: string; count: number; metadata?: number } | null)[]; rawItem?(window: number, slot: number): unknown };
+  blockAt(p: Vec3): BlockInfo | undefined;
+  position(): Vec3 | undefined;
+  /** The `keepBoxName` setting (bot_loot): a picked-up box of the other sort is not taken for the one broken. */
+  keepName(): string;
+  /** Select a hotbar slot (Hotbar.select), so the placed box is the one wanted. */
+  selectHotbar?(slot: number): void;
+  /** A box the place skill would not pick by itself: move it where it would (its slot), or why not. */
+  toHotbar?(slot: number, cancelled: () => boolean): Promise<number | string>;
+  log?: Logger;
+  /** The log lines' prefix (`unload`, `supply`). */
+  label?: string;
+}
+
+/** Counts of what a step did (the callers' reports: UnloadReport, WithdrawReport). */
+export interface BoxTally {
+  requests: number;
+}
+
+const centre = (p: Vec3): Vec3 => ({ x: p.x + 0.5, y: p.y, z: p.z + 0.5 });
+
+export class BoxOps {
+  private readonly d: BoxOpsDeps;
+  private readonly log: Logger;
+  /** Boxes broken and not picked up again: walked back for (at once, or once there is room). */
+  readonly leftBoxes: Vec3[] = [];
+  /** Cells (`x,y,z`) where a box of this one stands now: no home container (the chore ignores their block updates). */
+  readonly standing = new Set<string>();
+
+  constructor(d: BoxOpsDeps) {
+    this.d = d;
+    this.log = d.log ?? silentLogger;
+  }
+
+  private get label(): string {
+    return this.d.label ?? 'unload';
+  }
+
+  /** Free inventory slots (0..35). */
+  freeSlots(): number[] {
+    const out: number[] = [];
+    this.d.inventory.slots.slice(0, 36).forEach((s, i) => {
+      if (!s || s.count <= 0) out.push(i);
+    });
+    for (let i = this.d.inventory.slots.length; i < 36; i++) out.push(i);
+    return out;
+  }
+
+  /** Box slots carried (inventory slot -> NBT slots used). */
+  boxSlots(): Map<number, number> {
+    const out = new Map<number, number>();
+    this.d.inventory.slots.slice(0, 36).forEach((s, i) => {
+      if (s && s.count > 0 && isShulkerBox(s.name)) out.set(i, shulkerSlotsUsed(this.d.inventory.rawItem?.(0, i)));
+    });
+    return out;
+  }
+
+  /** The inventory slots holding a shulker box. */
+  boxKeys(): Set<number> {
+    return new Set(this.boxSlots().keys());
+  }
+
+  /** Is the box in inventory slot `i` a named (bot_loot) one? */
+  namedAt(i: number): boolean {
+    return isKeptBox(this.d.inventory.slots[i]?.name ?? '', this.d.inventory.rawItem?.(0, i), this.d.keepName());
+  }
+
+  /** New inventory slots that taking the stack `st` out of a window uses: none for what tops up partial stacks of the same item (a shulker box never stacks). */
+  slotsFor(st: { name: string; count: number; metadata?: number }): number {
+    const max = maxStackOf(st.name);
+    let room = 0;
+    if (!isShulkerBox(st.name)) {
+      for (const s of this.d.inventory.slots.slice(0, 36)) {
+        if (s?.name === st.name && s.metadata === st.metadata && s.count < max) room += max - s.count;
+      }
+    }
+    return Math.ceil(Math.max(0, st.count - room) / max);
+  }
+
+  /** The box of `slot` where the place skill picks it (`toHotbar`), or why not. */
+  private async exact(slot: number, cancelled: () => boolean): Promise<number | string> {
+    if (placesExactly(this.d.inventory.slots, slot)) return slot;
+    if (!this.d.toHotbar) return 'the box is not in the hotbar';
+    return this.d.toHotbar(slot, cancelled);
+  }
+
+  /**
+   * Place the box of `slot`, take what fits into the inventory (`only`: that item, `want` of it at most; the rest stays in
+   * the box), break it, pick it up: `emptied` / `emptied partly` or why not; `out.slot`: where the box came back to.
+   * The slot the placed box left stays free for it: the broken box drops as an item and needs a slot to come back to
+   * (the contents filled it, the box stayed on the ground and the run stuck, Realm 2026-10-30).
+   */
+  async takeOut(slot: number, tally: BoxTally, cancelled: () => boolean, only?: { item: string | ((name: string) => boolean); want: number }, out?: { slot?: number }, avoid?: (p: Vec3) => boolean): Promise<string> {
+    const named = this.namedAt(slot);
+    const s = await this.exact(slot, cancelled);
+    if (typeof s === 'string') return s;
+    const placed = await this.place(s, cancelled, avoid);
+    if ('reason' in placed) return placed.reason;
+    let left = 0;
+    let got = 0;
+    const o = await this.d.skills.open(placed.at);
+    if (o.ok) {
+      try {
+        for (let i = 0; i < o.view.slots.length; i++) {
+          const st = o.view.slots[i];
+          if (!st) continue;
+          if (only && (!(typeof only.item === 'string' ? st.name === only.item : only.item(st.name)) || got >= only.want)) continue;
+          const count = only ? Math.min(st.count, only.want - got) : undefined;
+          // two slots stay free (see the file comment)
+          if (this.freeSlots().length - this.slotsFor(count === undefined ? st : { ...st, count }) < 2) {
+            left++;
+            continue;
+          }
+          const t = await this.d.skills.take(o.view, i, count);
+          got += t.moved;
+          if (t.moved > 0) tally.requests++;
+          if (o.view.slots[i]) left++;
+          if (!t.ok && t.reason !== 'inventory_full') break;
+        }
+      } finally {
+        await this.d.skills.closeContainer(o.view);
+      }
+    }
+    const back = await this.pickUpOrFetch(placed.at, cancelled, named);
+    if (typeof back === 'string') return back;
+    if (out) out.slot = back;
+    if (!o.ok) return `open: ${o.reason}`;
+    return left > 0 ? 'emptied partly' : 'emptied';
+  }
+
+  /**
+   * Place the box of `slot` (where the place skill picks it) next to the bot, deposit `moves(view)` in up to 3 passes
+   * (an empty list ends them), close, break it and pick it up again, also after a cancel (never left standing): the
+   * items moved, the box's slot after the pickup (or why it did not come back), and why the box did not open.
+   */
+  async putIn(slot: number, moves: (view: ContainerView) => { slot: number; count: number; name?: string }[], tally: BoxTally, cancelled: () => boolean, opts: { onMoved?: (r: DepositResult) => void; avoid?: (p: Vec3) => boolean } = {}): Promise<{ moved: number; back: number | string; open?: string } | { reason: string }> {
+    const named = this.namedAt(slot);
+    const s = await this.exact(slot, cancelled);
+    if (typeof s === 'string') return { reason: s };
+    const placed = await this.place(s, cancelled, opts.avoid);
+    if ('reason' in placed) return placed;
+    let moved = 0;
+    const o = await this.d.skills.open(placed.at);
+    if (o.ok) {
+      try {
+        for (let pass = 0; pass < 3; pass++) {
+          const m = moves(o.view);
+          if (m.length === 0) break;
+          const r = await this.d.skills.depositSlots(o.view, m);
+          tally.requests += r.requests;
+          moved += r.total;
+          opts.onMoved?.(r);
+          if (r.total === 0 || r.reason === 'container_full' || cancelled()) break;
+        }
+      } finally {
+        await this.d.skills.closeContainer(o.view);
+      }
+    }
+    const back = await this.pickUpOrFetch(placed.at, () => false, named);
+    return { moved, back, ...(o.ok ? {} : { open: o.reason }) };
+  }
+
+  /** Walk back to the boxes left on the ground and pick them up: true when a box came back. */
+  async fetchLeft(cancelled: () => boolean): Promise<boolean> {
+    let got = false;
+    while (this.leftBoxes.length > 0 && this.freeSlots().length > 0) {
+      const at = this.leftBoxes.shift()!;
+      const before = this.boxKeys();
+      await this.d.skills.goto({ type: 'near', p: centre(at), r: 1.5 }, { timeoutTicks: 400 });
+      if (cancelled()) {
+        this.leftBoxes.unshift(at);
+        return got;
+      }
+      await this.d.skills.collect(6, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
+      const ok = [...this.boxKeys()].some((i) => !before.has(i));
+      got ||= ok;
+      this.log.info(`${this.label}: the box left at ${fmtPos(at)}: ${ok ? 'picked up on the second try' : 'still not found (picked up by a player, or gone)'}`);
+    }
+    return got;
+  }
+
+  /**
+   * Break the box at `at` and pick it up again (also an empty one): its new inventory slot, or why not. `named`: the
+   * box broken is (true) or is not (false) a bot_loot box: a new slot of the other sort (another box lying there) is
+   * not taken for it. A box not picked up is remembered (also on a cancel) and fetched later.
+   */
+  async breakAndPickUp(at: Vec3, cancelled: () => boolean, named?: boolean): Promise<number | string> {
+    const before = this.boxKeys();
+    this.standing.delete(`${at.x},${at.y},${at.z}`);
+    // a box broken meanwhile (a player, a mob, an explosion): no dig, straight to the pickup
+    const b = this.d.blockAt(at);
+    if (b && b.name !== 'unknown' && isShulkerBox(b.name)) {
+      const dg = await this.d.skills.dig(at);
+      if (!dg.ok && dg.reason !== 'no_block') return dg.reason === 'interrupted' ? 'interrupted' : `break: ${dg.reason ?? 'failed'}`;
+    }
+    const fresh = (): number | undefined => [...this.boxKeys()].find((i) => !before.has(i) && (named === undefined || this.namedAt(i) === named));
+    for (const radius of [4, 6, 10]) {
+      await this.d.skills.collect(radius, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
+      if (fresh() !== undefined) break;
+      if (cancelled()) break;
+    }
+    if (fresh() === undefined) this.leftBoxes.push(at);
+    if (fresh() === undefined && cancelled()) return 'interrupted';
+    return fresh() ?? `the box was not picked up again (left at ${fmtPos(at)})`;
+  }
+
+  /** breakAndPickUp, then (not picked up) a walk to it at once: its slot, or why not. */
+  async pickUpOrFetch(at: Vec3, cancelled: () => boolean, named?: boolean): Promise<number | string> {
+    const keys = this.boxKeys();
+    const back = await this.breakAndPickUp(at, cancelled, named);
+    if (typeof back !== 'string' || back === 'interrupted') return back;
+    await this.fetchLeft(cancelled);
+    return [...this.boxKeys()].find((i) => !keys.has(i) && (named === undefined || this.namedAt(i) === named)) ?? back;
+  }
+
+  /**
+   * Place the box of `slot` next to the bot (`slot` selected when in the hotbar; `placesExactly` must hold), never on a
+   * cell `avoid` names (nor under one: the lid). A different box placed (the model moved meanwhile) is broken and picked up again.
+   */
+  async place(slot: number, cancelled: () => boolean, avoid?: (p: Vec3) => boolean): Promise<{ at: Vec3 } | { reason: string }> {
+    const inv = this.d.inventory.slots;
+    const name = inv[slot]?.name;
+    if (!name || !isShulkerBox(name)) return { reason: `no box in slot ${slot}` };
+    if (!placesExactly(inv, slot)) return { reason: 'the box is not in the hotbar (another box of that colour would be placed)' };
+    if (slot < 9) this.d.selectHotbar?.(slot);
+    const others = new Map<number, string>();
+    inv.slice(0, 36).forEach((x, i) => {
+      if (i !== slot && x && isShulkerBox(x.name)) others.set(i, x.name);
+    });
+    const feet = this.d.position();
+    const spots = (feet ? boxSpots((q) => this.d.blockAt(q), feet) : []).filter((p) => !avoid || (!avoid(p) && !avoid({ ...p, y: p.y + 1 })));
+    let at: Vec3 | undefined;
+    for (const p of spots.slice(0, 3)) {
+      const r = await this.d.skills.place(p, { face: 'up', item: name });
+      if (r.ok) {
+        at = p;
+        this.standing.add(`${p.x},${p.y},${p.z}`);
+        break;
+      }
+      if (cancelled()) return { reason: 'interrupted' };
+    }
+    if (!at) return { reason: 'no free cell for the box next to the bot' };
+    // a pre-emption right after the place: the box is broken and picked up again rather than left standing
+    if (cancelled()) {
+      await this.breakAndPickUp(at, () => false);
+      return { reason: 'interrupted' };
+    }
+    const now = this.d.inventory.slots;
+    if ([...others].some(([i, n]) => now[i]?.name !== n)) {
+      const back = await this.breakAndPickUp(at, cancelled);
+      return { reason: back === 'interrupted' ? 'interrupted' : 'placed another box than the one wanted (picked it up again)' };
+    }
+    return { at };
+  }
+}

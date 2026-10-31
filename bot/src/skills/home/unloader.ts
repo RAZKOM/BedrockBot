@@ -35,6 +35,13 @@
 // loose gets `box` steps with `tidy` set: 27 of its stacks into a spare, the full box back into that chest. Never a
 // shulker box block, never the chest of spares (or one labelled for boxes); planned only on request (after the
 // deposits of `!unload`, and by the idle chore), MAX_TIDY_STEPS at most, none once no spare is left.
+//
+// Track BJ (decision 0052; the owner: "crops that it harvested being not unloadable cause it considers it food"):
+// crops that are food too (CROP_FOODS: carrots, potatoes, beetroots, melon slices, berries) are no longer kept whole.
+// The food reserve (`foodReserve`, default 64 items) is filled by the best food carried: other food (cooked, bread,
+// ...) is still never unloaded and counts first; the crops fill what it leaves, the best (nutrition + saturation)
+// first; their surplus is unloaded like loot. Of each item the farm replants (wheat_seeds, beetroot_seeds, carrot,
+// potato; farm/crops.ts SEEDS) `seedReserve` (default 32) stays for `!farm`; the rest of the seeds goes too.
 import { keepOnDropItems } from '../../chat/commands-survival.ts';
 import { DEFAULT_THROWAWAY_MIN, THROWAWAY_BLOCKS } from '../survival/keeper.ts';
 import { isShulkerBox, maxStackOf } from '../container/chest.ts';
@@ -42,6 +49,8 @@ import type { Vec3 } from '../../world/types.ts';
 import { labelMatches } from './categories.ts';
 import { BOX_SLOTS, MAX_BOX_STEPS, MAX_FILL_STEPS, MAX_TIDY_STEPS } from './boxing.ts'; // Track AV
 import { maxDurability } from '../survival/tools.ts';
+import { foodInfo } from '../survival/eat.ts'; // Track BJ
+import { SEEDS } from '../farm/crops.ts'; // Track BJ
 import { armourScore, armourSlotOf } from '../survival/armour.ts';
 
 /** One inventory slot as the planner sees it. */
@@ -88,7 +97,7 @@ export interface UnloadMove {
   rule: Rule;
 }
 
-export type KeepReason = 'kept' | 'reserve' | 'stash_box' | 'flight_kit' | 'named_box' | 'unknown_box'; // Track AU: flight_kit; Track AV: named_box
+export type KeepReason = 'kept' | 'reserve' | 'stash_box' | 'flight_kit' | 'named_box' | 'unknown_box' | 'food_reserve'; // Track AU: flight_kit; Track AV: named_box; Track BJ: food_reserve
 
 /**
  * Track AV: a step that makes room before the deposits.
@@ -171,6 +180,48 @@ export interface PlanOptions {
   noFill?: ReadonlySet<string>;
   /** The armour worn (names): carried pieces no better than it are unloaded (`gearKept`). */
   worn?: readonly string[];
+  /** Track BJ: food items kept in all, the crops filling what the other food leaves (default DEFAULT_FOOD_RESERVE). */
+  foodReserve?: number;
+  /** Track BJ: of each seed the farm replants, this many kept (default DEFAULT_SEED_RESERVE). */
+  seedReserve?: number;
+}
+
+/** Track BJ: crops that are food too: kept only within the food reserve (see the file comment). */
+export const CROP_FOODS: ReadonlySet<string> = new Set(['carrot', 'potato', 'beetroot', 'melon_slice', 'sweet_berries', 'glow_berries']);
+export const DEFAULT_FOOD_RESERVE = 64;
+export const DEFAULT_SEED_RESERVE = 32;
+
+const bareName = (n: string): string => (n.startsWith('minecraft:') ? n.slice(10) : n);
+
+/**
+ * Track BJ: of each crop kind, how many stay: the food reserve's share (the other food carried counts first, then the
+ * crops by food value) or the seed reserve of a seed the farm plants, whichever is more.
+ */
+export function cropReserve(slots: readonly { name: string; count: number }[], food = DEFAULT_FOOD_RESERVE, seeds = DEFAULT_SEED_RESERVE): Map<string, number> {
+  const have = new Map<string, number>();
+  let other = 0;
+  for (const s of slots) {
+    const n = bareName(s.name);
+    if (s.count <= 0 || isShulkerBox(n)) continue;
+    if (CROP_FOODS.has(n) || SEEDS.has(n)) have.set(n, (have.get(n) ?? 0) + s.count);
+    else {
+      const f = foodInfo(n);
+      if (f && !f.bad) other += s.count;
+    }
+  }
+  const out = new Map<string, number>();
+  let budget = Math.max(0, food - other);
+  const value = (n: string): number => (foodInfo(n)?.nutrition ?? 0) + (foodInfo(n)?.saturation ?? 0);
+  for (const n of [...have.keys()].filter((k) => CROP_FOODS.has(k)).sort((a, b) => value(b) - value(a) || a.localeCompare(b))) {
+    const k = Math.min(have.get(n)!, budget);
+    budget -= k;
+    if (k > 0) out.set(n, k);
+  }
+  for (const n of have.keys()) {
+    const k = SEEDS.has(n) ? Math.max(out.get(n) ?? 0, Math.min(have.get(n)!, seeds)) : 0;
+    if (k > 0) out.set(n, k);
+  }
+  return out;
 }
 
 /** Gear the bot has no skill for (no ranged attack, no fishing, no riding): unloaded like loot, never kept. */
@@ -235,7 +286,7 @@ interface SimChest {
 
 /** Why an item is never unloaded (`keepOnDropItems`), without the shulker boxes (handled apart). */
 export function keptItem(name: string): boolean {
-  return !isShulkerBox(name) && keepOnDropItems(name);
+  return !isShulkerBox(name) && keepOnDropItems(name) && !CROP_FOODS.has(bareName(name)); // Track BJ: crops: the food reserve (cropReserve)
 }
 
 /** Throwaway reserve per kind: `reserve` in all, the kinds in THROWAWAY_BLOCKS order (cobblestone first). */
@@ -341,6 +392,17 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
     }
     keep(kind, r, 'reserve');
   }
+  // Track BJ: the food reserve's crops and the farm's seeds, held back the same way
+  for (const [kind, r] of cropReserve(slots, opts.foodReserve, opts.seedReserve)) {
+    let hold = r;
+    for (const s of [...slots].filter((x) => bareName(x.name) === kind).sort((a, b) => b.slot - a.slot)) {
+      if (hold <= 0) break;
+      const h = Math.min(hold, movable.get(s.slot) ?? s.count);
+      movable.set(s.slot, (movable.get(s.slot) ?? s.count) - h);
+      hold -= h;
+    }
+    if (r - hold > 0) keep(kind, r - hold, 'food_reserve');
+  }
 
   // Track AV: a named box carried serves the stash step: no unnamed box is held back for it
   let boxKept = !(opts.keepBox ?? true) || slots.some((s) => s.named && !s.flightKit && s.count > 0);
@@ -410,7 +472,7 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
 }
 
 /** Stacks of unloadable items carried (the autoUnload trigger counts these) and full shulker boxes. */
-export function unloadableStacks(slots: readonly UnloadSlot[], opts: Pick<PlanOptions, 'reserve' | 'throwaway'> = {}): { stacks: number; fullBoxes: number } {
+export function unloadableStacks(slots: readonly UnloadSlot[], opts: Pick<PlanOptions, 'reserve' | 'throwaway' | 'foodReserve' | 'seedReserve'> = {}): { stacks: number; fullBoxes: number } {
   const plan = planUnload(slots, [], { ...opts, keepBox: true, boxing: false });
   const stacks = new Set(plan.overflow.filter((o) => !isShulkerBox(o.name)).map((o) => o.slot)).size;
   const fullBoxes = slots.filter((s) => isShulkerBox(s.name) && (s.boxUsed ?? 0) > 0 && !s.flightKit).length; // Track AV: not the fireworks box

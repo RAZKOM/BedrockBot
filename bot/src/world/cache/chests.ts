@@ -35,6 +35,8 @@ export interface ChestRecord {
   boxes: { empty: number; full: number };
   /** Track AS: items inside the full shulker boxes by name (`!bring`, the `!get` hint); absent when none. */
   inBoxes?: Record<string, number>;
+  /** Track BJ: the same per full box, in slot order (`!bring` takes a box whole or takes items out of it by what one box holds); absent when none. */
+  boxList?: Record<string, number>[];
   /** Full stacks (count = max stack size) by item name when read (the tidy steps need 27 of them); absent when none. */
   fullStacks?: Record<string, number>;
   /** A double chest (54 slots). */
@@ -251,6 +253,7 @@ function parseRecord(v: unknown): ChestRecord | undefined {
     room: numbers(o.room),
     boxes: { empty: Number(b.empty ?? 0) || 0, full: Number(b.full ?? 0) || 0 },
     ...(o.inBoxes && typeof o.inBoxes === 'object' && Object.keys(numbers(o.inBoxes)).length ? { inBoxes: numbers(o.inBoxes) } : {}), // Track AS
+    ...(Array.isArray(o.boxList) && o.boxList.length ? { boxList: o.boxList.map(numbers) } : {}), // Track BJ
     ...(o.fullStacks && typeof o.fullStacks === 'object' && Object.keys(numbers(o.fullStacks)).length ? { fullStacks: numbers(o.fullStacks) } : {}),
     double: o.double === true,
     ...(partner ? { partner } : {}),

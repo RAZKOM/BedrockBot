@@ -11,7 +11,9 @@
 // memory or the inventory knows (`!bring shulker`, `!bring torches 64`). n defaults to one stack. What
 // the bot carries counts first; then the nearest chests by the memory's counts; full shulker boxes
 // holding the item only when the loose stacks are not enough (the whole box comes along; the reply
-// says so). The delivery is `!come`'s walk (the tracked player, else the locator bar's position; a
+// says so). Track BJ (decision 0052): half a box of the item or more still needed: whole boxes mostly
+// full of it come first (`!bring dirt 1000`: a full box, then loose stacks); less: the items are taken
+// out of a box next to the bot and the box goes back (`!bring dirt 10` from boxes only: 10 dirt). The delivery is `!come`'s walk (the tracked player, else the locator bar's position; a
 // long trip eats first) and stops within 2 blocks; `home`, the console, or an owner who is not online:
 // the bot carries the items home and says so. A user process (BringProcess): flee, guard and night
 // pre-empt it as usual and it carries on afterwards.
@@ -87,7 +89,9 @@ export function endLine(job: BringJob, r: BringResult | undefined): string {
   notes.push(w.from.length ? `from ${plural(w.from.length, 'chest')}` : 'I carried them');
   const short = job.want - loose - boxItems;
   if (short > 0) notes.push(`${short} short: the chests hold no more`);
-  if (w.boxes.length) notes.push(`the only source: a full shulker box out of ${[...new Set(w.boxes.map((b) => b.from))].join(', ')}`);
+  if (w.boxes.length) notes.push(`${w.boxes.length === 1 ? 'a full shulker box' : `${w.boxes.length} full shulker boxes`} out of ${[...new Set(w.boxes.map((b) => b.from))].join(', ')}`);
+  // Track BJ: items taken out of a box next to the bot, the box put back
+  for (const e of w.extracted ?? []) if (e.items > 0 || !e.back) notes.push(`${e.items} taken out of a shulker box from ${e.from}${e.back ? ', the box went back' : '; the box stays with me'}`);
   if (w.reason === 'inventory_full') notes.push('my inventory is full');
   const d = r.deliver;
   if (!d.ok) return `bring: carrying ${text} but could not get to ${'player' in job.to ? job.to.player : 'home'}: ${d.reason ?? 'failed'}`;
@@ -149,7 +153,9 @@ export class BringController {
     const chests = new Set(plan.sources.map((s) => s.key)).size;
     if (plan.carried > 0) parts.push(`${Math.min(plan.carried, want)} carried`);
     if (chests > 0) parts.push(`from ${plural(chests, 'chest')}`);
-    if (plan.sources.some((s) => s.box)) parts.push('a full shulker box comes along: the only source');
+    const boxes = plan.sources.reduce((a, s) => a + (s.boxes ?? 0), 0); // Track BJ
+    if (boxes > 0) parts.push(boxes === 1 ? 'a full shulker box comes along' : `${boxes} full shulker boxes come along`);
+    if (plan.sources.some((s) => s.extract)) parts.push('some taken out of a shulker box, which goes back');
     if (plan.short > 0) parts.push(`only ${want - plan.short} known: ${plan.short} short`);
     const who = 'player' in to ? to.player : 'home';
     reply(`bringing ${itemsText(want, item.boxes ? 'shulker_box' : item.word)} to ${who}${parts.length ? ` (${parts.join(', ')})` : ''}${note}${this.h.processes.paused ? ' (held: !resume)' : ''}`);

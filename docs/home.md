@@ -35,7 +35,7 @@ there, also as an idle chore ("Full boxes out of the chests").
 | `bot/src/chat/commands-home.ts` | `!unload`, `!stock`, `!chests`; wiring of the chore, the block-update trigger, the `!get` hook |
 | `bot/src/skills/container/chest.ts` | slot type per block kind, `snapshot` / `snapshotOf`, `depositSlots`, `take`, the shulker box names and NBT readers (moved here from stash.ts) |
 | `bot/src/world/containers.ts` | `setSlotType` / `slotTypeOf`: the item_stack_request slot type per open window; a whole stack moved into an empty slot keeps its wire item (NBT) |
-| `bot/src/config/settings.ts` | `homeChestRadius` (number, 16, 2..48), `homeChestWalk` (Track AN: path blocks, 32, 0..256; 0 = radius only), `autoUnload` (boolean, on), `getSuggestsBring` (Track AS: boolean, on), `keepBoxName` (Track AV: text, `bot_loot`; 1..32 characters) |
+| `bot/src/config/settings.ts` | `homeChestRadius` (number, 16, 2..48), `homeChestWalk` (Track AN: path blocks, 32, 0..256; 0 = radius only), `autoUnload` (boolean, on), `getSuggestsBring` (Track AS: boolean, on), `keepBoxName` (Track AV: text, `bot_loot`; 1..32 characters), `foodReserve` (Track BJ: items, 64, 0..2304), `seedReserve` (Track BJ: items per seed kind, 32, 0..2304) |
 | `bot/src/skills/nav/goals.ts` | Track AN: `getToBlock` option `low` (a side cell's feet up to `low` blocks below the block; default 1) |
 | `packs/truth/src/home.ts` | `truth:chestput` (fill a container block); reading one is `truth:container` |
 | `bot/test/unit/skills/home-*.test.ts`, `bot/test/unit/cache/chests.test.ts`, `bot/test/unit/chat/home-commands.test.ts` | unit tests on fakes |
@@ -47,6 +47,9 @@ there, also as an idle chore ("Full boxes out of the chests").
 | `bot/src/skills/home/logistics.ts` | wave 12: `fillStep` (rounds through the carried boxes: `emptyBox` with `only`), `tidy` / `tidyDue` / `tidySteps`, `settle` / `debts` (a failed or interrupted box step puts back what it took), `leftBoxes` / `pickUpOrFetch`, `MAX_FILL_ROUNDS` |
 | `bot/src/skills/container/stash.ts` | Track AV: the named box first, packing priority (`DROP_FIRST`, `packClass`, `packOrder`), the re-pack |
 | `bot/test/unit/skills/home-boxing.test.ts`, `stash-packing.test.ts`, `bot/test/e2e/home-boxing.test.ts` | Track AV: unit tests on fakes, the e2e on bds-home |
+| `bot/src/skills/supply/boxes.ts` | Track BJ: `BoxOps`, the shared box primitives (place a carried box off the cells to avoid, `takeOut`, `putIn`, break and pick up, fetch a box left on the ground), moved here out of `HomeLogistics` |
+| `bot/src/skills/supply/supply.ts` | Track BJ: `Supply` (`available`, `ensure`, `stow`, `topUpThrowaway`), `setSupply` / `supplyOf` (one per task, registered by commands-home) |
+| `bot/test/unit/skills/supply.test.ts`, `build-supply.test.ts`, `home-crops.test.ts`, `home-fakes.ts`, `bot/test/e2e/home-supply.test.ts` | Track BJ: unit tests on fakes (the fake home moved to `home-fakes.ts`), the e2e on bds-home |
 | `docker/compose.home.yml` | `bds-home`, udp/19196, flat, peaceful |
 
 ## Commands (owner only, afk task with walking)
@@ -142,7 +145,15 @@ names; `wood` / `logs` / `planks` / `timber`; `food` / `meat` / `crops` / `farm`
 / `cobble` / `building` / `dirt`; `junk` / `trash` / `misc` / `drops`; `tools` / `gear` / `weapons` /
 `armour`.
 
-Never unloaded: food, totems, ender chests, and of the gear (anything with durability or armour) only the
+Crops and food (Track BJ, decision [0052](decisions/0052-shulker-aware-jobs.md)): the owner: "crops that it harvested
+being not unloadable cause it considers it food". The crops that are also food (`CROP_FOODS`: carrot, potato,
+beetroot, melon slice, sweet berries, glow berries) are no longer kept whole: a food reserve of `foodReserve` items
+(default 64) is filled by the other food first (bread, cooked meat ...), then by the crops with the best food value
+(nutrition + saturation); the crops beyond it are unloaded like loot. Of every item `!farm` replants (`SEEDS`: wheat
+seeds, beetroot seeds, carrot, potato ...) `seedReserve` (default 32) stays. Both show as `food_reserve` in the kept
+list; at 0 every crop and seed goes. The autoUnload trigger counts the crop stacks beyond the reserve.
+
+Never unloaded: food (other than the crops above), totems, ender chests, and of the gear (anything with durability or armour) only the
 best of each class (`gearKept`: each armour slot with the worn armour counted, each tool kind by tier,
 shield, shears, elytra ...; spares of that rank stay). Worse pieces and the gear the bot has no skill for
 (`UNUSED_GEAR`: bow, crossbow, trident, fishing rod, mace ...) are unloaded like loot (2026-10-31 Realm: a bot
@@ -428,10 +439,21 @@ either taking them to the player or home." Decision record:
 2. **Carried first**: what the bot carries of those names counts; only the rest comes from chests.
 3. **Nearest chest first, by the memory's counts** (read, reachable containers within
    `homeChestRadius`; never the other half of a double chest), straight-line distance from the bot.
-4. **Shulker boxes only when the loose stacks are not enough**: a full box holding the item is taken
-   whole (the memory knows what full boxes hold: `inBoxes` on the chest record, from the boxes' NBT
-   `Items` at every read); both replies say `the only source: a full shulker box out of chest ...`.
-   `!bring shulker` takes empty boxes before full ones.
+4. **Shulker boxes: whole for large amounts, taken out of for small ones** (Track BJ, decision
+   [0052](decisions/0052-shulker-aware-jobs.md); the owner: "!get 1000 dirt ... only ask for 10, itll bring a whole
+   shulker"). The memory knows every full box's contents (`boxList` on the chest record, one entry per box, from
+   the boxes' NBT `Items` at every read; `inBoxes` is their sum). The threshold is **half a box**
+   (`halfBox`: 27 x the stack size / 2: 864 dirt, 216 ender pearls, 13 diamond swords):
+   - still needed at least half a box: whole boxes holding at least half a box of the item are taken first,
+     fullest first, before loose stacks; then the loose stacks;
+   - less: the loose stacks first; what is still missing is **taken out** of one box: the smallest box that holds
+     enough, else the fullest. The box is taken into a free hotbar slot, the chest closed, the box placed next to
+     the bot (boxes.ts `takeOut`), just what is missing taken out, the box broken, picked up and put back into the
+     chest it came from (`storeBox`; it keeps the rest);
+   - a box with less than half a box left after the loose stacks for a large need is taken out of too.
+   The replies say which: `a full shulker box comes along` / `2 full shulker boxes out of chest ...`, or
+   `some taken out of a shulker box, which goes back` / `10 taken out of a shulker box from chest ..., the box
+   went back`. `!bring shulker` takes empty boxes before full ones.
 5. **Short**: what the chests do not hold is said at the start (`only 8 known: 12 short`) and at the
    end (`12 short: the chests hold no more`); the bot brings what there is.
 
@@ -441,7 +463,8 @@ Plan, walk to the plan's first chest (the scan's stand cell, `face: false`, the 
 scan), open it, take the item's stacks with `chest.take` (or whole boxes), refresh that chest's record
 from the window, close, plan again. A chest that held less than remembered gives what it has and the
 refreshed memory sends the next round to the next chest; a chest that gives nothing is not tried again
-in this job. The memory follows every take at once: counts go down, an emptied chest loses the item, a
+in this job. Track BJ: an extract needs 3 free inventory slots (the box, and two kept free while taking out);
+without them the box comes whole. The memory follows every take at once: counts go down, an emptied chest loses the item, a
 box taken out leaves the box counts and `inBoxes`; `!stock` shows it right away and the next scan
 refreshes it anyway.
 
@@ -464,7 +487,8 @@ starts again from where the bot stands. `!bring stop` / `!stop` end it.
 |---|---|
 | `!bring torch 64 to Steve` | `bringing 64 torches to Steve (from 2 chests)`, then `brought 64 torches (from 2 chests)` |
 | `!bring iron 20` (8 in stock) | `bringing 20 iron to Steve (from 1 chest, only 8 known: 12 short)`, `brought 8 iron_ingots (from 1 chest; 12 short: the chests hold no more)` |
-| `!bring diamond 2` (only in a box) | `bringing 2 diamonds to Steve (from 1 chest, a full shulker box comes along: the only source)`, `brought 1 shulker box holding 2 diamonds (from 1 chest; the only source: a full shulker box out of chest 0 -60 -4)` |
+| `!bring diamond 2` (only in a box) | Track BJ: `bringing 2 diamonds to Steve (from 1 chest, some taken out of a shulker box, which goes back)`, `brought 2 diamonds (from 1 chest; 2 taken out of a shulker box from chest 0 -60 -4, the box went back)` |
+| `!bring dirt 1000` (boxes of 1728 dirt) | `bringing 1000 dirt to Steve (from 1 chest, a full shulker box comes along)`, `brought 1 shulker box holding 1728 dirt (from 1 chest; a full shulker box out of chest 0 -60 -4)` |
 | `!bring coal home` | `bringing 64 coal to home (from 1 chest)`, `brought 64 coal home (from 1 chest)` |
 | `!bring torch` (none) | `bring: no torch in the 5 containers I know (!stock torch; !get torch makes new ones)`; no chest read: `bring: I know no chest near home yet (!chests scan)` |
 | `!bring status` / `stop` | `bring: bring 64 torch to Steve: walking to Steve, 12 blocks left (running)`, `bring: idle (last: brought ...)`; `stopped bring ...`, `bring: nothing to stop` |
@@ -474,6 +498,40 @@ NL (`!do`): the `bring` step (`{"command":"bring","item":"torch","count":64,"to"
 64 torches", "fetch some coal from home", "bring the diamonds to me" map to it; "get me coal" stays
 `get`. The prompt's step lines say the difference, so the answer step can explain it.
 
+## Supply: one shulker layer for every job (wave 12, Track BJ)
+
+The owner: "all of the smart shulker features ... arent universally applied to all features ... With building
+too ... scaffolding". Decision [0052](decisions/0052-shulker-aware-jobs.md). One layer answers "how many of this
+do I have" and "get me n of it loose" for every job, so no feature hand-rolls box handling:
+
+| Part | What |
+|---|---|
+| `BoxOps` (supply/boxes.ts) | the primitives: `place` (a carried box on a `boxSpots` cell next to the bot, never on a cell `avoid` names nor below one), `takeOut` (items out of a placed box, two inventory slots always free, optional item filter and amount), `putIn` (place, deposit up to 3 passes, break, pick up), `breakAndPickUp` / `pickUpOrFetch` / `fetchLeft` (a box left on the ground is fetched later). `standing` holds the cells where a box of the layer stands, so the home chore does not read it as a new container |
+| `Supply.available(item)` | loose + inside the carried boxes (not the fireworks box, not unknown ones; `bot_loot` boxes count) + the chest memory at home (loose and boxed, `stockOf`) |
+| `Supply.ensure(item, n, opts)` | n loose by the cheapest route: the carried box holding most of it, just what is missing taken out (at most 4 boxes); with `home` the rest through `!bring`'s withdrawal |
+| `Supply.stow(item, keep)` | the loose surplus beyond `keep` into a carried box with room (`bot_loot` first, then the emptiest) |
+| `Supply.topUpThrowaway(min)` | `ensure` over the throwaway kinds |
+
+Users:
+
+- `!bring`: its extract is `BoxOps.takeOut`; its spare-box and fill steps (`viaSpareBox`, `boxStepRun`,
+  `fillStep`) use `BoxOps.putIn`; `Supply.ensure`'s home route is the bring withdrawal.
+- `!build` (docs/build.md "Materials"): the materials count the carried boxes; the runner refills a block it
+  ran out of from a box placed off the build's footprint, tops up a column's blocks and scaffold blocks on the
+  ground before pillaring, and stows the rest at the end.
+- The throwaway reserve: the build's scaffold top-up. Navigation, mining and the fall clutch read the loose
+  inventory only (see the ADR, "Deferred").
+- `!get` stays chest-free: it never calls the home route.
+
+### Measured (e2e home-supply on bds-home, 2026-10-31, 4/4 green, 131 s)
+
+| What | Result |
+|---|---|
+| `!bring dirt 1000`, chest A: 640 loose dirt + a box of 1728 dirt | 2.9 s; the box carried whole, A keeps its 640 loose dirt |
+| `!bring sand 10`, chest B: a box of 1728 sand | 7.8 s; 10 sand carried, the box back in B, memory `boxList [{sand: 1718}]` |
+| `!build` fill 5 x 3 x 5 cobblestone, 20 loose + a carried box of cobblestone | 75 / 75 placed in 62 s; 55 out of the box (placed off the footprint), the box holds 73, 0 loose cobblestone left, the 16 dirt reserve kept |
+| `!unload` with 192 carrots, 64 wheat seeds, 20 cooked beef | 148 carrots and 32 seeds unloaded; 44 carrots, 32 seeds and the beef kept |
+
 ### Measured (e2e on bds-home, 2026-10-30, two runs, 6/6 green each, 89 s per run)
 
 | What | Result |
@@ -481,7 +539,7 @@ NL (`!do`): the `bring` step (`{"command":"bring","item":"torch","count":64,"to"
 | 64 torches: 40 + 30 in two chests 10 blocks apart, to a player 30 blocks away | 13.6 / 13.7 s from the command; 1.92 blocks from the player; truth: 64 torches carried, 6 left (memory and truth) |
 | 3 stacks of cobblestone (2 + 1) from the same two chests to the same player | 13.6 / 13.7 s; 1.92 blocks from the player; truth 192 cobblestone |
 | iron 20 with 8 iron ingots in one chest | 7.4 / 7.5 s; 8 brought, 12 short said twice |
-| diamond 2, only in a shulker box | 7.5 s; the box (NBT 2 diamonds) carried, the chest's record without boxes |
+| diamond 2, only in a shulker box | 7.5 s; the box (NBT 2 diamonds) carried, the chest's record without boxes. Track BJ (2026-10-31, 6/6 green): 12.4 s; 2 diamonds carried, the empty box back in D (truth), D's record `boxes {empty 1}` |
 | coal home, the bot 20 blocks east | 5.5 / 5.6 s; 1.95 blocks from home, 64 coal |
 
 ## Measured (e2e on bds-home, 2026-10-29)
@@ -547,8 +605,12 @@ the end.
   truth as a block, broken and stored by the bot), a second connection 30 blocks east, `!chests scan`
   first: `!bring torch 64 to <player>` (64 carried, within 2 blocks of the player, 6 left in memory and
   truth, `!stock torch`), 3 stacks of cobblestone (measured), `!bring iron 20` (12 short, 8 brought),
-  `!bring diamond 2` (the box comes along; D's record without boxes), `!get coal 4` (the hint line, then
+  `!bring diamond 2` (Track BJ: 2 taken out of the box, the box goes back into D), `!get coal 4` (the hint line, then
   `!get stop`), `!bring coal home` from 20 blocks away (within 2 blocks of home).
+- `home-supply` (Track BJ): chest A with 640 loose dirt + a box of 1728 dirt, B with a box of 1728 sand, C empty:
+  `!bring dirt 1000` (the box whole, the loose dirt stays), `!bring sand 10` (taken out, the box back in B);
+  `!build` with a carried box of cobblestone 14 blocks out of the home radius (the refill, the box off the
+  footprint); `!unload` of a farm haul (the crop surplus goes, the reserve stays).
 
 ### Truth commands (`packs/truth/src/home.ts`)
 
