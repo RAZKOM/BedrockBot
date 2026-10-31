@@ -86,6 +86,9 @@ blocks (1.5 high) are obstacles, never floors. Costs are ticks (`DEFAULT_COSTS`)
 | swimOut | 4 cardinal | a standable bank with feet from the water cell's level up to 1 above | `swimOut` 14 |
 | climb | up / down a column; onto it from its foot, its side (no floor) or its top | ladder / vine cells (`grid.climb`), the cell above the body passable | `climbUp` / `climbDown` 5 per block; from the side `walk` + `climbEnter` 8, from the top `walk` + `climbDown` + `climbEnter` |
 | climbOut | 4 cardinal off a climb node | a floor beside the column, feet from the node's level up to 1 above | `climbUp` x rise + `walk` + `climbExit` 8 |
+| hatch down (`climb`; Track BG) | 4 cardinal, then down | a trapdoor (any half, open or closed, any facing) in the walking layer or one below, a ladder / vine under it: onto the ladder below the hatch (see "Trapdoors") | `walk` + `climbDown` per block + `climbEnter` (+ `door` 10 when it is toggled) |
+| hatch drop (`drop` / `swim`; Track BG) | 4 cardinal, then down | the same hatch without a ladder under it: a floor within `maxDrop`, or water up to `HATCH_WATER_FALL` 16 below | as drop (`irreversibleDrop` over 1.25) / swim (fall + `swimEnter`) (+ `door`) |
+| hatch up (`climb`; Track BG) | straight up | from a climb node to a hatch over the column (closed: toggled from below; open: the climb continues past the panel), then `climbOut` | `climbUp` (+ `door`) |
 | parkour | 4 cardinal | 1- or 2-block gap at the feet level, clear up to the head (+3), a floor at most 3 below or water at most 4 below, no lava / hazard / ladder in it; full-block landing at the same height or 1 lower that stops an overshoot; 2-block gaps need 2 standable cells behind the takeoff | g x `walk` + `parkourAir` 12 (1 lower: `parkourAirDown` 14) + `parkourRisk` 10 (+ `parkourRunUp` 12 for g = 2) |
 
 Every move into node B also pays: B's floor `costFactor` (x 5 on leaves, soul sand, honey, slime, mud,
@@ -108,6 +111,28 @@ lower half's state, also for the upper half) blocks the corridor x or z in [0.2,
 along that axis through the cell's centre sweeps; `toggle` when the toggled state would be clear (an
 open gate has no box; a door panel swings to the perpendicular edge); else blocked. Only cardinal walks
 enter or leave doorway nodes.
+
+**Trapdoors** (Track BG, decision 0048; `grid.ts` `hatch` / `hatchLets` / `isPanel`, `astar.ts` `hatchDown` /
+`climbUpInto` / `hatchUse`). A trapdoor in a floor or a ceiling, usually over a ladder shaft, is a vertical
+passage. `grid.hatch(x, y, z)` is `CROSS_CLEAR` for an open trapdoor whose panel (one full-height box at most
+0.25 thick) leaves the 0.6 body room beside it and beside a ladder's box in the cells y - 1 .. y + 1 (free width
+>= 0.62), `CROSS_TOGGLE` for a closed one that would leave that room open and is hand-usable (wooden), else
+blocked (iron, too tight, not a trapdoor). An open panel is `passable` (an open trapdoor cell is free to the
+body except the panel; it is never a floor). Moves:
+- down: from a standable node beside it, a hatch in the walking layer (the cell the feet enter) or in the floor
+  layer one below (the ladder ending under it); a ladder / vine under the hatch gives a climb node on it, else
+  the column is scanned down for water (a swim node, up to 16 blocks) or a floor within `maxDrop`;
+- up: a climb whose next cell up holds a hatch (closed: `act.use` on it, then the climb goes on; open: the
+  climb goes past the panel) and `climbOut` beside the column, the panel's side refused by `hatchLets`;
+- a closed hatch costs `door` (10) and needs `allowOpen` (`useBlock`); `moves.trapdoor = false` switches the
+  hatch moves off (the planner worker gets the flag with `moves`).
+The navigator toggles before the move like a door (the use action re-checks `c.open` in the world model after
+the click; failures time out and re-plan) and, with `closeTrapdoors` (setting, default true), closes the hatch
+behind the body once it is in another column or its head is below the hatch (within reach 4.5; not after a
+drop into water). A replan keeps the pending closes. The follower holds sneak on ladders (no slipping off at
+the top), keeps the body 0.08 off a panel while climbing, and drops into the tight gap of a panel opposite the
+ladder (0.63 for a 0.6 body: within 0.0125 of the middle) by aligning on the floor first with single-tick
+forward pulses (BDS corrects a fractional move vector, measured), then walking straight in.
 
 **The moves that dig** (Track BC, wave 11; `nav/baritone/moves.ts`, Baritone's movements, LGPL-3.0). Every
 move above with `act.dig` lists its cells in break order (the start's head room first, then each column top
@@ -800,6 +825,8 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/e2e/nav-swim.test.ts` | Track AJ: a 6-wide river (0 corrections, health 20), an 18-block lane (swim ticks per block), a 1-deep ditch |
 | `test/e2e/nav-ladder.test.ts` | Track AJ: a 10-block ladder in a 1 x 1 shaft up and out, back down and out; a vine wall (climb ticks per block) |
 | `test/e2e/nav-parkour.test.ts` | Track AJ: 1-block, 2-block and 2-block-1-lower gaps over a 4-deep pit with water, 20 crossings each (`PARKOUR_RUNS`); a 1-wide bridge with a turn, edge sneaking off / on (`BRIDGE_RUNS`) |
+| `test/unit/skills/nav-trapdoor.test.ts` | Track BG: panels and `hatch` states; the planner down / up through a hatch for every facing and half (never out through the panel side), without `allowOpen`, open (no use), iron / `noAction` / `moves.trapdoor` false, the roof-layer hatch (down only), drops to a floor and into water, a panel in a doorway; closed loops with fake actions (open, closed behind, `closeTrapdoors` false) |
+| `test/e2e/nav-trapdoor.test.ts` | Track BG, bds-move: truth-built shafts under a platform: closed hatch down and up (panel opposite the ladder and on its side), open top-half hatch down and up with no action, the roof-layer hatch (down, no plan up), a ladderless hatch over a pool (fall of 8); 0 corrections |
 
 The e2e tests use `bds-move` (udp/19146). The v1 layouts (`nav-worlds.ts`: `flat`, `hill`, `long`, `wall`)
 have fixed areas; every v2 suite builds in its own random chunk-aligned area (`privateOrigin()`, x 2048
@@ -860,7 +887,12 @@ the cross-country layout; default 7), `MOVE_AREA=x,z` (pin a v2 suite's area to 
   over).
 - Swimming, ladders, vines, parkour and edge sneaking: see "Movement variety" (limits there); no
   scaffolding, no underwater travel, no swimming in flowing water.
-- Trapdoors are classified (open / closed) but not toggled by the planner.
+- Trapdoors (Track BG): a hatch in the roof layer whose ladder ends under it (the owner's farm layout) is
+  down only: on BDS an open trapdoor is not climbable, so nobody climbs past it from the ladder top
+  (measured). Horizontally a trapdoor is only a wall or a passable open panel (`crossing`); a closed
+  trapdoor standing in a corridor is not toggled to walk through. The tight-gap alignment pulses need a free
+  floor around 0.2 blocks behind the approach; approaching a tight hatch along its tight axis is not planned
+  differently (the follower turns and aligns first).
 - Climbing the cave hill's four 1-block terraces in a row (jumping while pushed against each step,
   then accelerating on top) gave one correction of 0.418 (client ahead) in 2 of 4 runs, right after
   the last landing. The follower never sprint-jumps there (checked in the sim); likely a sprint-start

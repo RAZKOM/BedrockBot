@@ -262,6 +262,8 @@ interface Active {
   /** Cells our own actions change: their block updates do not trigger re-plans. */
   ownCells: Set<number>;
   doors: DoorToClose[];
+  /** Track BG: hatches (trapdoors in floors / ceilings) this goto opened, to close behind (closeTrapdoors). */
+  hatches: Vec3[];
   /** Path index up to which the nodes' actions have run (their moves are plain walks now). */
   actedUpTo: number;
   unloadedTicks: number;
@@ -280,6 +282,10 @@ interface Active {
 const DIG_TIMEOUT = 600;
 const ACTION_TIMEOUT = 100;
 const DOOR_WAIT = 40;
+/** Track BG: a hatch is closed behind only from a node whose eye (feet + 1.62) is within this of its centre (UseSkill reach: 5 to its closest point). */
+const HATCH_CLOSE_REACH = 4.5;
+const EYE = 1.62;
+const BODY_HEIGHT = 1.8;
 
 export class Navigator {
   readonly grid: NavGrid;
@@ -528,6 +534,7 @@ export class Navigator {
       allowBreak: options.allowBreak ?? false,
       allowPlace: options.allowPlace ?? false,
       closeDoors: options.closeDoors ?? false,
+      closeTrapdoors: options.closeTrapdoors ?? true, // Track BG
     };
     return new Promise((resolve) => {
       const report: GotoReport = {
@@ -592,6 +599,7 @@ export class Navigator {
         placeFailures: 0,
         ownCells: new Set(),
         doors: [],
+        hatches: [], // Track BG
         actedUpTo: -1,
         unloadedTicks: 0,
         bestProgress: -Infinity,
@@ -1260,6 +1268,8 @@ export class Navigator {
     a.status = res.status;
     a.aheadBlocked = false;
     a.doors = [];
+    // Track BG: a hatch this goto opened and the new path does not pass through again is closed behind as well
+    for (const h of a.hatches) if (this.grid.cls(h.x, h.y, h.z)?.open && !res.path.some((n) => n.x === h.x && n.z === h.z && n.feet < h.y + 1 && n.feet + BODY_HEIGHT > h.y)) this.scheduleHatchClose(a, h, 0);
     a.actedUpTo = -1;
     a.report.segments++;
     this.startLeg(a, 0);
@@ -1438,7 +1448,9 @@ export class Navigator {
     const run = a.action!;
     a.guard.idle();
     // a running place action (Track O's PlaceSkill) drives the jump itself
-    if (!(run.kind === 'place' && run.pending)) this.loop.setCommand({ forward: 0, strafe: 0, sprint: false, sneak: false, jump: false });
+    // Track BG: on a ladder (a hatch opened from below, closed behind) sneak holds the body where it is
+    const onLadder = !s.onGround && this.grid.climbable(Math.floor(s.pos.x), Math.floor(s.pos.y + 1e-3), Math.floor(s.pos.z)) === true;
+    if (!(run.kind === 'place' && run.pending)) this.loop.setCommand({ forward: 0, strafe: 0, sprint: false, sneak: onLadder, jump: false });
     // Track BE: Baritone PathExecutor's movement timeout: the action ran longer than its node's cost + 100 ticks
     // (not while a call is pending: the Digger times out on its own estimate; not when the last dig just succeeded)
     const node = a.path[run.node];
@@ -1511,7 +1523,7 @@ export class Navigator {
         }
         // use: wait until the door / gate lets the body pass; close: until it is in the way again
         const want = run.kind === 'use';
-        const clear = this.grid.crossing(p.x, p.y, p.z, run.axis) === CROSS_CLEAR;
+        const clear = this.passageOpen(p, run.axis); // Track BG: a trapdoor by its state
         if (run.waitClear) {
           if (clear === want) {
             run.waitClear = undefined;
@@ -1530,7 +1542,12 @@ export class Navigator {
           run.queue.shift();
           return;
         }
-        if (want && a.opts.closeDoors) this.scheduleClose(a, p, run.axis, run.node);
+        if (want && this.grid.cls(p.x, p.y, p.z)?.openable === 'trapdoor') {
+          if (a.opts.closeTrapdoors) {
+            a.hatches.push(p); // Track BG: closed behind, also after a re-plan
+            this.scheduleHatchClose(a, p, run.node);
+          }
+        } else if (want && a.opts.closeDoors) this.scheduleClose(a, p, run.axis, run.node);
         if (want) a.report.actions.use++;
         else a.report.actions.close++;
         this.call(run, this.actions.useBlock && (() => this.actions.useBlock!(p)));
@@ -1560,6 +1577,33 @@ export class Navigator {
         return;
       }
     }
+  }
+
+  /**
+   * Track BG: the door / gate at `p` lets the body pass along `axis` (CROSS_CLEAR); a trapdoor (a hatch in a
+   * floor or ceiling, passed vertically) by its state: open.
+   */
+  private passageOpen(p: Vec3, axis: 0 | 2): boolean {
+    const c = this.grid.cls(p.x, p.y, p.z);
+    if (c?.openable === 'trapdoor') return c.open;
+    return this.grid.crossing(p.x, p.y, p.z, axis) === CROSS_CLEAR;
+  }
+
+  /**
+   * Track BG: close the hatch at `p` (opened for node `node`) once the body is clear of its cell: the first
+   * later node in another column, or whose body (feet + 1.8) is below it. Not when that node is a swim node (the
+   * leg could not stop there) or out of reach (the eye more than HATCH_CLOSE_REACH from the hatch's centre).
+   */
+  private scheduleHatchClose(a: Active, p: Vec3, node: number): void {
+    let j = node;
+    for (; j < a.path.length; j++) {
+      const n = a.path[j]!;
+      if (n.x !== p.x || n.z !== p.z || n.feet + BODY_HEIGHT <= p.y + 1e-6) break;
+    }
+    const n = a.path[j];
+    if (!n || n.move === 'swim' || n.move === 'swimOut') return;
+    if (Math.hypot(n.x + 0.5 - (p.x + 0.5), n.feet + EYE - (p.y + 0.5), n.z + 0.5 - (p.z + 0.5)) > HATCH_CLOSE_REACH) return;
+    a.doors.push({ p, axis: 0, closeAt: j });
   }
 
   /** Close the door at `p` once the body has left its cells (the first node after `node` outside them). */

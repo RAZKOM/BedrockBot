@@ -22,6 +22,8 @@ export interface GotoOptions {
   allowPlace?: boolean;
   /** Close doors and gates the goto opened, once through. Default false. */
   closeDoors?: boolean;
+  /** Track BG: close a trapdoor (hatch) the goto opened in a floor or ceiling, once the body is clear of it. Default true. */
+  closeTrapdoors?: boolean;
 }
 
 export interface Skills {
