@@ -3,25 +3,35 @@
 // It prints in colour whatever `chatColor` / `chatLines` say, because its job is to answer "does my client
 // draw this?" before the settings are turned on. The last line says what the two settings are now.
 import type { Chat } from './chat.ts';
+import { ROUTE_INFO } from './route.ts';
 import { colorize, Doc, type StyleMode } from './style.ts';
 
 const SHOWN: StyleMode = { color: true, lines: true };
 
 type Route = ReturnType<Chat['routeStatus']>;
 
-/** The one line about the reply route (chat or /tellraw), for the end of `!colors`. */
+/** What `chatVia` offers, one line, for `!colors` while replies still go out as player chat. */
+function viaChoices(prefix: string): string {
+  return `${prefix}set chatVia me (* Bot text, no operator needed), say ([Bot] text, operator) or tellraw (no name in front, operator)`;
+}
+
+/** The one line about the reply route (chat, /me, /say or /tellraw), for the end of `!colors`. */
 export function routeLine(route: Route | undefined, prefix = '!'): string {
-  if (!route || (route.setting !== 'tellraw' && route.route.state === 'on')) {
-    return `replies go out as player chat (chatVia chat; ${prefix}set chatVia tellraw sends /tellraw instead: no <name> in front, but the bot must be an operator)`;
+  if (!route || (route.setting === 'chat' && route.route.state === 'on')) {
+    return `replies go out as player chat (chatVia chat; ${viaChoices(prefix)} instead)`;
   }
-  if (route.via === 'tellraw') return 'replies go out as /tellraw (chatVia tellraw); if a line has no <name> in front, it works';
+  if (route.via !== 'chat') {
+    const info = ROUTE_INFO[route.via];
+    return `replies go out as /${route.via} (chatVia ${route.via}; they look like "${info.shows}"${info.needsOp ? ', the bot has to be an operator' : ''}); a line that looks like that means it works`;
+  }
   const mins = Math.max(1, Math.round((route.route.retryInMs ?? 0) / 60_000));
-  return `chatVia tellraw is set but the server refused /tellraw (${route.route.reason ?? 'failed'}): replies go out as chat, tellraw is tried again in ${mins} min or when you type ${prefix}colors (the bot must be an operator)`;
+  const needs = route.setting === 'me' ? '' : ' (the bot must be an operator)';
+  return `chatVia ${route.setting} is set but the server refused it (${route.route.reason ?? 'failed'}): replies go out as chat, it is tried again in ${mins} min or when you type ${prefix}colors${needs}`;
 }
 
 /** The messages `!colors` sends (exported for the tests). */
 export function colorsDemo(current: StyleMode, prefix = '!', route?: Route): string[] {
-  const d = new Doc(current.block ? { ...SHOWN, block: current.block } : SHOWN);
+  const d = new Doc(current.tellraw ? { ...SHOWN, tellraw: true } : SHOWN);
   d.title('chat colours', 'what your client draws');
   d.section('tones');
   d.item(`${prefix}command`, 'a command you can type');

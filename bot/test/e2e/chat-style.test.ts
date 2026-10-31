@@ -52,9 +52,17 @@ describe.skipIf(!E2E)('@bds chat style: what the server relays', () => {
   it('relays a 480 character message (style.ts MAX_WIRE) and DROPS a long one without any error', async () => {
     const ok = 'q'.repeat(480 - 'L1 '.length);
     expect(await relay('L1', ok)).toBe(ok);
-    // measured 2026-10-31 on BDS 1.26.60.6: 503 characters relayed, 523 not. If this starts failing, MAX_WIRE has to move.
+    // measured 2026-10-31 on BDS 1.26.60.6: 503 bytes relayed, 515 not. If this starts failing, MAX_WIRE has to move.
     const long = 'q'.repeat(530);
     expect(await relay('L2', long)).toBeUndefined();
+    expect(sender.closed).toBe(false);
+    expect(sender.kick).toBeUndefined();
+  }, 30_000);
+
+  it('counts UTF-8 BYTES, not characters: a colour code is 2 bytes, so 480 characters can be too long', async () => {
+    const body = (signs: number): string => 'q'.repeat(480 - 'B1 '.length - signs) + S.repeat(signs);
+    expect(await relay('B1', body(20))).toBe(body(20)); // 480 characters, 500 bytes
+    expect(await relay('B2', body(40))).toBeUndefined(); // 480 characters, 520 bytes: dropped without an error
     expect(sender.closed).toBe(false);
     expect(sender.kick).toBeUndefined();
   }, 30_000);
@@ -68,11 +76,12 @@ describe.skipIf(!E2E)('@bds chat style: the /tellraw route', () => {
   let conn: Connection;
   let chat: Chat;
   let watcher: Observer;
+  let via = 'tellraw';
 
   beforeAll(async () => {
     conn = new Connection({ version: VERSION, username: BOT, logger: silentLogger, reconnect: false });
     chat = new Chat(conn, { log: silentLogger, maxReplies: 100 });
-    chat.styleSource = { color: () => true, lines: () => true, via: () => 'tellraw' };
+    chat.styleSource = { color: () => true, lines: () => true, via: () => via };
     chat.start();
     await conn.connect(TARGET);
     watcher = await connectObserver('E2ETellWatch');
@@ -103,6 +112,10 @@ describe.skipIf(!E2E)('@bds chat style: the /tellraw route', () => {
     for (const b of blocks) chat.say(b);
     const last = blocks.at(-1)!;
     await watcher.waitText((t) => t.type === 'json_whisper' && rawtext(t.message) === last, 8_000, 'last help block');
+    // framed: the first page opens with the rule carrying the title and the page, the last one closes with a plain rule
+    expect(strip(blocks[0]!)).toMatch(/^={3,} settings 1\/\d+ ={3,}\n/);
+    expect(strip(last).endsWith('='.repeat(30))).toBe(true);
+    expect(blocks.length).toBeGreaterThan(1);
     expect(chat.routeStatus().via).toBe('tellraw');
     expect(conn.state).toBe('spawned');
   }, 30_000);
@@ -133,5 +146,45 @@ describe.skipIf(!E2E)('@bds chat style: the /tellraw route', () => {
     await watcher.waitText((t) => t.type === 'json_whisper' && rawtext(t.message) === 'back on tellraw', 8_000, 'tellraw after retry');
     expect(chat.routeStatus()).toMatchObject({ via: 'tellraw', route: { state: 'on' } });
     expect(conn.state).toBe('spawned');
+  }, 30_000);
+
+  // /say and /me, measured 2026-10-31: /say needs an operator and arrives as an announcement "[Bot] text"; /me needs none and
+  // arrives as chat "* Bot text" (no source name); both relay colour codes and newlines; an @a selector in the text is expanded.
+  it('chatVia say (operator): arrives as an announcement "[Bot] text" with the codes and the newline intact', async () => {
+    via = 'say';
+    const message = `${S}6${S}lTitle${S}r\nsecond line 12`;
+    chat.say(message);
+    const got = await watcher.waitText((t) => t.type === 'announcement' && t.message === `[${BOT}] ${message}`, 8_000, 'say message');
+    expect(got.source_name).toBe(BOT);
+    expect(chat.routeStatus()).toMatchObject({ via: 'say', route: { state: 'on' } });
+  }, 30_000);
+
+  it('chatVia me works for a NON-operator: arrives as chat "* Bot text", and no warning is sent', async () => {
+    bdsCmd('deop', BOT);
+    await sleep(1_500);
+    via = 'me';
+    const asChat = (): number => watcher.texts.filter((t) => isChatFrom(t, BOT)).length;
+    const before = asChat(); // earlier tests left their fallback lines in the watcher's list
+    const message = `${S}aok${S}r\nline two`;
+    chat.say(message);
+    await watcher.waitText((t) => t.type === 'chat' && t.message === `* ${BOT} ${message}`, 8_000, 'me message');
+    await sleep(1_200);
+    expect(chat.routeStatus()).toMatchObject({ setting: 'me', via: 'me', route: { state: 'on' } });
+    expect(asChat()).toBe(before); // nothing came as player chat
+    // an @ selector never goes through /me (the server would expand it, or refuse the command)
+    chat.say('ping @a end');
+    await watcher.waitText((t) => isChatFrom(t, BOT) && t.message === 'ping @a end', 8_000, 'chat for a reply with @');
+    expect(chat.routeStatus().route.state).toBe('on');
+  }, 40_000);
+
+  it('chatVia say as a non-operator: refused, resent as chat, and the warning blames operator rights', async () => {
+    via = 'say';
+    chat.say('say as non-op');
+    await watcher.waitText((t) => isChatFrom(t, BOT) && t.message === 'say as non-op', 8_000, 'fallback chat');
+    const warning = await watcher.waitText((t) => isChatFrom(t, BOT) && strip(t.message).startsWith('chatVia say: refused by the server (commands.generic.error.permissions)'), 5_000, 'say warning');
+    expect(strip(warning.message)).toContain('not an operator');
+    expect(chat.routeStatus()).toMatchObject({ setting: 'say', via: 'chat', route: { state: 'refused' } });
+    expect(conn.state).toBe('spawned');
+    bdsCmd('op', BOT);
   }, 30_000);
 });

@@ -8,8 +8,8 @@ import { Chat, type CommandDef } from '../../../src/chat/chat.ts';
 import { colorsDemo, registerStyleCommands } from '../../../src/chat/commands-style.ts';
 import { settingGroups, SETTING_GROUPS } from '../../../src/chat/help.ts';
 import { SETTING_DEFS, SETTING_KEYS } from '../../../src/config/settings.ts';
-import { colorize, DOC_MESSAGE, Doc, fitWire, isStyled, MAX_WIRE, paint, strip } from '../../../src/chat/style.ts';
-import { commandRequestPacket, fitsTellraw, SLASH_MAX, tellrawCommand, TellrawRoute } from '../../../src/chat/route.ts';
+import { colorize, DOC_MESSAGE, DOC_TELLRAW, Doc, fitWire, isStyled, MAX_WIRE, paint, RULE_WIDTH, strip, wireSize } from '../../../src/chat/style.ts';
+import { commandRequestPacket, fitsTellraw, isRouteStyle, ROUTE_INFO, ROUTE_VIAS, routeCommand, SLASH_MAX, SlashRoute, tellrawCommand } from '../../../src/chat/route.ts';
 import { silentLogger } from '../../../src/log.ts';
 import { connectAndSpawn, setup, type FakeClient } from '../connection-fakes.ts';
 
@@ -77,9 +77,9 @@ describe('colorize', () => {
   it('strip removes a dangling trailing sign too; fitWire falls back to the plain text', () => {
     expect(strip(`a${S}`)).toBe('a');
     const long = colorize('1 '.repeat(120).trim());
-    expect(long.length).toBeGreaterThan(MAX_WIRE);
+    expect(wireSize(long)).toBeGreaterThan(MAX_WIRE);
     const fit = fitWire(long, strip(long));
-    expect(fit.length).toBeLessThanOrEqual(MAX_WIRE);
+    expect(wireSize(fit)).toBeLessThanOrEqual(MAX_WIRE);
     expect(isStyled(fit)).toBe(false);
   });
 });
@@ -88,15 +88,23 @@ describe('Doc', () => {
   it('lays out title, sections, pairs and a note; the plain form is the text without codes', () => {
     const build = (mode: { color: boolean; lines: boolean }) =>
       new Doc(mode).title('settings', '3').section('safety').pairs([{ key: 'fleeHealth', value: '12' }, { key: 'sprint', value: 'on' }]).note('!set <key> explains one').messages();
-    expect(build({ color: false, lines: true })).toEqual(['settings 3\nsafety\nfleeHealth 12  sprint on\n!set <key> explains one']);
+    const rule = '='.repeat(RULE_WIDTH);
+    const plain = `${'='.repeat(10)} settings ${'='.repeat(10)}\n3\nsafety\nfleeHealth 12  sprint on\n!set <key> explains one\n${rule}`; // 8 letters: 10 + 10 bars around the label
+    expect(build({ color: false, lines: true })).toEqual([plain]);
     const colored = build({ color: true, lines: true });
-    expect(colored.map(strip)).toEqual(['settings 3\nsafety\nfleeHealth 12  sprint on\n!set <key> explains one']);
-    expect(colored[0]).toContain(`${S}6${S}lsettings${S}r`); // title: gold bold
+    expect(colored.map(strip)).toEqual([plain]);
+    expect(colored[0]).toContain(`${S}6${S}lsettings${S}r`); // title: gold bold, inside the opening rule
+    expect(colored[0]).toContain(`${S}7${'='.repeat(10)}${S}r`); // the rule: gray
     expect(colored[0]).toContain(`sprint ${S}aon${S}r`); // on: green
     expect(colored[0]).toContain(`fleeHealth ${S}612${S}r`); // number: gold
   });
 
-  it('packs into messages that fit, and no message starts without a heading', () => {
+  it('a Doc without a title is not framed (a small answer); with frame: false a title is a plain first line', () => {
+    expect(new Doc({ color: false, lines: true }).line('one').line('two').messages()).toEqual(['one\ntwo']);
+    expect(new Doc({ color: false, lines: true }, { frame: false }).title('t', 'meta').line('x').messages()).toEqual(['t meta\nx']);
+  });
+
+  it('packs into messages that fit, numbers the pages in the rule, and closes only the last', () => {
     const d = new Doc({ color: true, lines: true });
     d.title('big', 'test');
     for (let g = 0; g < 6; g++) {
@@ -106,9 +114,58 @@ describe('Doc', () => {
     d.note('!help <command> explains one');
     const msgs = d.messages();
     expect(msgs.length).toBeGreaterThan(3);
-    for (const m of msgs) expect(m.length).toBeLessThanOrEqual(DOC_MESSAGE);
-    for (const m of msgs.slice(1)) expect(strip(m.split('\n')[0]!)).toMatch(/^g\d( \(cont\.\))?$/);
-    expect(strip(msgs.at(-1)!).endsWith('explains one')).toBe(true);
+    for (const m of msgs) expect(wireSize(m)).toBeLessThanOrEqual(DOC_MESSAGE);
+    msgs.forEach((m, i) => {
+      const lines = strip(m).split('\n');
+      expect(lines[0]).toMatch(new RegExp(`^={3,} big ${i + 1}/${msgs.length} ={3,}$`));
+      expect(lines[0]).toHaveLength(RULE_WIDTH);
+      expect(lines.at(-1) === '='.repeat(RULE_WIDTH)).toBe(i === msgs.length - 1); // the closing rule only on the last page
+    });
+    expect(strip(msgs[0]!).split('\n')[1]).toBe('test'); // the meta line opens the first page only
+    for (const m of msgs.slice(1)) expect(strip(m.split('\n')[1]!)).toMatch(/^g\d( \(cont\.\))?$/); // no page starts without a heading
+    expect(strip(msgs.at(-1)!).split('\n').at(-2)).toBe('!help <command> explains one');
+  });
+
+  it('keeps a small section whole: its heading does not end a page with one line, "(cont.)" on the next', () => {
+    const d = new Doc({ color: false, lines: true }, { max: 200 });
+    d.title('t');
+    d.section('first').line('a'.repeat(60)).line('b'.repeat(60));
+    d.section('small').line('s1').line('s2').line('s3');
+    const pages = d.messages().map((m) => m.split('\n'));
+    expect(pages).toHaveLength(2);
+    expect(pages[0]).not.toContain('small'); // it did not start on page 1 with room for only part of it
+    expect(pages[1]!.slice(1, 5)).toEqual(['small', 's1', 's2', 's3']);
+    expect(pages.flat().some((l) => l.includes('(cont.)'))).toBe(false);
+  });
+
+  it('limits are BYTES, not characters: a section sign is 2 bytes and the server counts bytes (measured 2026-10-31)', () => {
+    expect(wireSize('abc')).toBe(3);
+    expect(wireSize(`${S}a`)).toBe(3);
+    // 480 characters with 40 signs are 520 bytes: dropped silently as chat, a disconnect as a command
+    const text = `${'x'.repeat(430)}${S}a${`${S}b`.repeat(19)}`; // 470 characters, 490 bytes
+    expect(text.length).toBeLessThan(MAX_WIRE);
+    expect(wireSize(text)).toBeGreaterThan(MAX_WIRE);
+    expect(wireSize(fitWire(text, text))).toBeLessThanOrEqual(MAX_WIRE);
+    expect(isStyled(fitWire(text, text))).toBe(false); // fell back to the plain text
+    // a coloured Doc is packed by bytes: many coloured values make pages with fewer characters, never more bytes
+    const d = new Doc({ color: true, lines: true }).title('big');
+    for (let g = 0; g < 6; g++) d.section(`g${g}`).pairs(Array.from({ length: 40 }, (_, i) => ({ key: `key${i}`, value: i % 2 ? 'on' : String(i) })));
+    for (const m of d.messages()) expect(wireSize(m)).toBeLessThanOrEqual(DOC_MESSAGE);
+  });
+
+  it('on the tellraw route every pair is a line of its own, and sizes count as the JSON counts them', () => {
+    const entries = Array.from({ length: 12 }, (_, i) => ({ key: `key${i}`, value: String(i) }));
+    const packed = new Doc({ color: false, lines: true }).title('t').pairs(entries).messages()[0]!.split('\n');
+    const stacked = new Doc({ color: false, lines: true, tellraw: true }).title('t').pairs(entries).messages()[0]!.split('\n');
+    expect(packed.length).toBeLessThan(stacked.length);
+    expect(stacked.filter((l) => /^key\d+ \d+$/.test(l))).toHaveLength(12);
+    // a message is measured with its newlines and quotes doubled, so its command stays under SLASH_MAX
+    const d = new Doc({ color: false, lines: true, tellraw: true }).title('t');
+    for (let g = 0; g < 8; g++) d.section(`g${g}`).pairs(Array.from({ length: 30 }, (_, i) => ({ key: `k"${i}`, value: String(i) })));
+    const msgs = d.messages();
+    expect(msgs.length).toBeGreaterThan(2);
+    for (const m of msgs) expect(wireSize(tellrawCommand(m))).toBeLessThanOrEqual(SLASH_MAX);
+    expect(DOC_TELLRAW + wireSize(tellrawCommand(""))).toBeLessThanOrEqual(SLASH_MAX);
   });
 
   it('never splits a line and cuts one that is too long', () => {
@@ -171,7 +228,7 @@ describe('Chat.say, layout and the rich help', () => {
     mode = { color: true, lines: false };
     chat.say('1 '.repeat(120).trim());
     const [m] = await sent();
-    expect(m!.length).toBeLessThanOrEqual(MAX_WIRE);
+    expect(wireSize(m!)).toBeLessThanOrEqual(MAX_WIRE);
     expect(isStyled(m!)).toBe(false);
   });
 
@@ -209,7 +266,8 @@ describe('Chat.say, layout and the rich help', () => {
     expect(chat.layout(['stock: coal 12'], build)).toEqual(['stock: coal 12']);
     expect(chat.layout(() => ['lazy'], build)).toEqual(['lazy']);
     mode = { color: false, lines: true };
-    expect(chat.layout(['stock: coal 12'], build)).toEqual(['stock\ncoal 12']);
+    const [doc] = chat.layout(['stock: coal 12'], build);
+    expect(doc!.split('\n')).toEqual([expect.stringMatching(/^={3,} stock ={3,}$/), 'coal 12', '='.repeat(RULE_WIDTH)]);
   });
 
   it('the rich help lists what is registered, by group, in messages that fit', () => {
@@ -223,7 +281,8 @@ describe('Chat.say, layout and the rich help', () => {
     mode = { color: true, lines: true };
 
     const front = chat.helpReplies([]).map(strip).join('\n');
-    expect(front).toMatch(/^commands what you can ask me\n/);
+    expect(front).toMatch(/^={3,} commands ={3,}\nwhat you can ask me\n/);
+    expect(front.endsWith('='.repeat(RULE_WIDTH))).toBe(true);
     expect(front).toContain('go\n!come  come to you');
     expect(front).toContain('work\n!get  get new items'); // the command, then its phrase
     expect(front).not.toContain('!colors'); // a `more` command stays out of the front door
@@ -237,14 +296,14 @@ describe('Chat.say, layout and the rich help', () => {
 
     const settings = chat.helpReplies(['settings']);
     expect(settings.length).toBeLessThanOrEqual(6);
-    for (const m of settings) expect(m.length).toBeLessThanOrEqual(MAX_WIRE);
+    for (const m of settings) expect(wireSize(m)).toBeLessThanOrEqual(MAX_WIRE);
     const text = settings.map(strip).join('\n');
     for (const k of SETTING_KEYS) expect(text, `setting ${k} missing from the rich settings list`).toContain(`${k} `);
   });
 
   it('!colors prints in colour whatever the switches say, in messages that fit, and names the switches', () => {
     const msgs = colorsDemo({ color: false, lines: false });
-    for (const m of msgs) expect(m.length).toBeLessThanOrEqual(MAX_WIRE);
+    for (const m of msgs) expect(wireSize(m)).toBeLessThanOrEqual(MAX_WIRE);
     expect(msgs.every(isStyled)).toBe(true);
     const text = msgs.map(strip).join('\n');
     expect(text).toContain('chat colours');
@@ -253,7 +312,7 @@ describe('Chat.say, layout and the rich help', () => {
     expect(text).toContain('replies go out as player chat'); // and which route they take
   });
 
-  describe('the /tellraw route (chatVia)', () => {
+  describe('the slash routes (chatVia me, say, tellraw)', () => {
     const OUTPUT_REFUSED = (uuid: string) => ({ origin: { uuid }, output_type: 'error', success_count: 0, output: [{ success: false, message_id: 'commands.generic.permission.selector', parameters: [] }] });
     const commands = (): string[] => client.sentOf('command_request').map((p) => String(p.command));
     const uuidOf = (i: number): string => (client.sentOf('command_request')[i]?.origin as { uuid: string }).uuid;
@@ -271,7 +330,7 @@ describe('Chat.say, layout and the rich help', () => {
       expect(client.sentOf('text')).toHaveLength(0);
       const [cmd] = commands();
       expect(cmd).toMatch(/^\/tellraw @a \{"rawtext":\[\{"text":".*"\}\]\}$/);
-      expect(cmd!.length).toBeLessThanOrEqual(480);
+      expect(wireSize(cmd!)).toBeLessThanOrEqual(480);
       expect(cmd).not.toContain('\n'); // the newline travels as \n inside the JSON
       const json = JSON.parse(cmd!.slice('/tellraw @a '.length)) as { rawtext: { text: string }[] };
       expect(json.rawtext[0]!.text).toBe(nasty);
@@ -292,7 +351,7 @@ describe('Chat.say, layout and the rich help', () => {
       await flushed();
       expect(commands()).toHaveLength(1);
       expect(client.sentOf('text')).toHaveLength(1);
-      for (const c of commands()) expect(c.length).toBeLessThanOrEqual(480);
+      for (const c of commands()) expect(wireSize(c)).toBeLessThanOrEqual(480);
     });
 
     it('a refused /tellraw is resent as chat once, the route pauses, and later replies go out as chat', async () => {
@@ -405,12 +464,73 @@ describe('Chat.say, layout and the rich help', () => {
       expect(chat.routeStatus().route.state).toBe('on');
     });
 
-    it('while it is on, blocks are smaller so their command fits; when it is off or paused they are the usual size', () => {
+    it('on tellraw a Doc is measured as the command counts it and every setting has its own line; the command always fits', () => {
       mode = { color: true, lines: true };
-      expect(chat.styleMode().block).toBe(420);
-      for (const m of chat.helpReplies(['settings'])) expect(tellrawCommand(m).length).toBeLessThanOrEqual(480);
+      chat.helpSettings = { get: (k) => SETTING_DEFS[k].default };
+      expect(chat.styleMode().tellraw).toBe(true);
+      const msgs = chat.helpReplies(['settings']);
+      for (const m of msgs) expect(wireSize(tellrawCommand(m))).toBeLessThanOrEqual(SLASH_MAX);
+      const lines = msgs.map(strip).join('\n').split('\n');
+      for (const k of SETTING_KEYS) expect(lines.filter((l) => l.startsWith(`${k} `)), `${k} on a line of its own`).toHaveLength(1);
       via = 'chat';
-      expect(chat.styleMode().block).toBeUndefined();
+      expect(chat.styleMode().tellraw).toBeUndefined();
+      via = 'me';
+      expect(chat.styleMode().tellraw).toBeUndefined();
+      for (const m of chat.helpReplies(['settings'])) expect(wireSize(`/me ${m}`)).toBeLessThanOrEqual(SLASH_MAX); // /me and /say take the usual Doc size
+    });
+
+    it('chatVia me and say send /me and /say with the text as it is (no JSON), not a chat packet', async () => {
+      via = 'me';
+      chat.say(`${S}agreen${S}r "quoted" back\\slash line1\nline2`);
+      via = 'say';
+      chat.say('second');
+      await flushed();
+      expect(commands()).toEqual([`/me ${S}agreen${S}r "quoted" back\\slash line1\nline2`, '/say second']);
+      expect(client.sentOf('text')).toHaveLength(0);
+    });
+
+    it('a reply with an @ in it never goes out through /me or /say (the server expands selectors in them); tellraw carries it', async () => {
+      via = 'me';
+      chat.say('ping @a end');
+      via = 'say';
+      chat.say('ping @a end');
+      await flushed();
+      expect(commands()).toHaveLength(0);
+      expect(client.sentOf('text').map((p) => p.message)).toEqual(['ping @a end', 'ping @a end']);
+      expect(chat.routeStatus().route.state).toBe('on'); // not a refusal: nothing was tried
+      via = 'tellraw';
+      chat.say('ping @a end');
+      await flushed();
+      expect(commands()).toHaveLength(1);
+    });
+
+    it('a command under 480 characters but over 480 BYTES is not sent (colour codes are 2 bytes; 511 bytes disconnects the bot)', async () => {
+      const message = `${S}a1${S}r `.repeat(60); // 360 characters, 480 bytes: fits as chat, but the command adds 37 more
+      expect(message.length + tellrawCommand('').length).toBeLessThan(SLASH_MAX); // by characters it would have been sent
+      chat.say(message);
+      await flushed();
+      expect(commands()).toHaveLength(0);
+      const sent = client.sentOf('text').map((p) => String(p.message));
+      expect(sent).toEqual([message]);
+      expect(wireSize(sent[0]!)).toBeLessThanOrEqual(MAX_WIRE);
+    });
+
+    it('a refused /me is resent as chat and its warning does not blame operator rights; a refused /say does', async () => {
+      via = 'me';
+      chat.say('one');
+      await flushed();
+      client.receive('command_output', OUTPUT_REFUSED(uuidOf(0)));
+      await vi.advanceTimersByTimeAsync(600);
+      const [resent, warning] = client.sentOf('text').map((p) => String(p.message));
+      expect(resent).toBe('one');
+      expect(warning).toContain('chatVia me: refused by the server');
+      expect(warning).not.toContain('operator');
+      via = 'say';
+      chat.say('two');
+      await flushed();
+      client.receive('command_output', OUTPUT_REFUSED(uuidOf(1)));
+      await vi.advanceTimersByTimeAsync(600);
+      expect(String(client.sentOf('text').at(-1)?.message)).toContain('chatVia say: refused by the server (commands.generic.permission.selector), so replies stay in chat. The bot is probably not an operator');
     });
 
     it('chatVia chat (the default) never sends a command', async () => {
@@ -444,9 +564,36 @@ describe('route.ts', () => {
     expect(p.origin).toEqual({ type: 'player', uuid: 'u-1', request_id: '', player_entity_id: 0n });
   });
 
-  it('TellrawRoute: a failure for a tracked uuid returns its text and pauses; everything else is ignored', () => {
+  it('routeCommand: /me and /say take the text as it is, an @ or an empty text cannot go, tellraw wraps JSON; nothing else is ever built', () => {
+    const text = `${S}agreen${S}r "q" back\\slash\nline2`;
+    expect(routeCommand('me', text)).toBe(`/me ${text}`);
+    expect(routeCommand('say', text)).toBe(`/say ${text}`);
+    expect(routeCommand('tellraw', text)).toBe(tellrawCommand(text));
+    for (const style of ['me', 'say'] as const) {
+      expect(routeCommand(style, 'ping @a')).toBeUndefined();
+      expect(routeCommand(style, '   ')).toBeUndefined();
+    }
+    expect(routeCommand('tellraw', 'ping @a')).toContain('ping @a'); // inside the JSON string a selector is just text
+    for (const hostile of ['/op Bot', '/stop', 'x\n/kill Steve']) {
+      for (const style of ['me', 'say', 'tellraw'] as const) expect(routeCommand(style, hostile)).toMatch(/^\/(me|say|tellraw @a) /);
+    }
+  });
+
+  it('the chatVia setting, ROUTE_VIAS and ROUTE_INFO agree (a new route is added in all three)', () => {
+    expect(SETTING_DEFS.chatVia.values.split('|')).toEqual([...ROUTE_VIAS]);
+    for (const v of ROUTE_VIAS) {
+      expect(SETTING_DEFS.chatVia.parse(` ${v.toUpperCase()} `)).toBe(v);
+      expect(ROUTE_INFO[v].shows).toBeTruthy();
+      expect(isRouteStyle(v)).toBe(v !== 'chat');
+    }
+    expect(() => SETTING_DEFS.chatVia.parse('tell')).toThrow(/chatVia must be/);
+    // only the operator-only routes say so (measured on BDS 1.26.60.6: /me works for a non-operator)
+    expect(ROUTE_VIAS.filter((v) => ROUTE_INFO[v].needsOp)).toEqual(['say', 'tellraw']);
+  });
+
+  it('SlashRoute: a failure for a tracked uuid returns its text and pauses; everything else is ignored', () => {
     let t = 1000;
-    const r = new TellrawRoute(() => t, 5000);
+    const r = new SlashRoute(() => t, 5000);
     r.track('a', 'text a');
     r.track('b', 'text b');
     expect(r.onOutput('zzz', 0, 'x')).toBeUndefined();
@@ -462,9 +609,9 @@ describe('route.ts', () => {
     expect(r.status()).toEqual({ state: 'on' });
   });
 
-  it('TellrawRoute forgets what it never heard back about (success is silent), so it cannot grow', () => {
+  it('SlashRoute forgets what it never heard back about (success is silent), so it cannot grow', () => {
     let t = 0;
-    const r = new TellrawRoute(() => t);
+    const r = new SlashRoute(() => t);
     for (let i = 0; i < 200; i++) {
       r.track(`u${i}`, 't');
       t += 100;

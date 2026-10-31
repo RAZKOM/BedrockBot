@@ -15,18 +15,41 @@
 //      the bot logs. Colour only ever adds emphasis, never information.
 //   5. Server limits (measured on BDS 1.26.60.6, docs/chat-style.md "Limits"): a chat message of 503
 //      characters is relayed, 523 is DROPPED WITHOUT AN ERROR. Every message that leaves Chat.say() is
-//      at most MAX_WIRE characters, codes included; Doc packs to that.
+//      at most MAX_WIRE BYTES, codes included (a section sign is 2 bytes in UTF-8, and the server counts
+//      bytes: measured, docs/chat-style.md "Limits"); Doc packs to that.
 
 const S = '§';
 
 /** The section sign, for the rare place that must test for "already styled" (Chat.say). */
 export const SECTION = S;
 
-/** Hard cap for one chat message with its codes (the server drops longer ones silently). */
+/**
+ * Hard cap for one chat message with its codes, in UTF-8 bytes (a section sign counts 2). The server drops a longer
+ * chat message silently (measured on BDS 1.26.60.6: 503 bytes relayed, 515 dropped) and disconnects the sender of a
+ * longer command (505 delivered, 511 disconnected).
+ */
 export const MAX_WIRE = 480;
 
-/** Default size of one Doc message (visible text plus codes). Leaves room for the codes up to MAX_WIRE. */
+/** The size of `s` as the server counts it: UTF-8 bytes. Every limit in this module and in route.ts is measured with it. */
+export function wireSize(s: string): number {
+  return Buffer.byteLength(s, 'utf8');
+}
+
+/** Default size of one Doc message in bytes, codes included (Chat.finish lets this much through for a multi-line message). */
 export const DOC_MESSAGE = 440;
+
+/**
+ * Size of one Doc message on the tellraw route, counted as the JSON string counts it (a newline, a quote and a
+ * backslash take two characters). The command wraps the text in 37 more characters; the sum stays under
+ * route.ts SLASH_MAX (a unit test checks it).
+ */
+export const DOC_TELLRAW = 440;
+
+/** A section that has to be split starts a message only where its heading and this many lines fit (no heading with one line, then "(cont.)"). */
+const KEEP_WITH_HEADING = 3;
+
+/** Width of the rule lines that frame a titled Doc, in characters (about 180 pixels: narrower than any chat panel). */
+export const RULE_WIDTH = 30;
 
 /** What a piece of text means. One place decides how each looks (CODE below). */
 export type Tone =
@@ -61,8 +84,12 @@ export interface StyleMode {
   color: boolean;
   /** Use multi-line blocks (Doc) for long answers instead of the one-line packed ones. */
   lines: boolean;
-  /** Size of one Doc message when it is not DOC_MESSAGE: smaller on the tellraw route, whose command wraps the text (route.ts). */
-  block?: number;
+  /**
+   * The replies go out as /tellraw (route.ts). A Doc then measures its messages the way the JSON counts them
+   * (DOC_TELLRAW) and puts every `pairs` entry (every setting) on its own line: there is no `<Bot>` prefix and no
+   * packing to save a line.
+   */
+  tellraw?: boolean;
 }
 
 export const PLAIN_MODE: StyleMode = { color: false, lines: false };
@@ -142,11 +169,19 @@ export function colorize(text: string): string {
   return paintSpans(main, true) + tail;
 }
 
+/** `text` cut so that it, with "..." added, is at most `bytes` bytes (text that fits is returned as it is). */
+function cutTo(text: string, bytes: number): string {
+  if (wireSize(text) <= bytes) return text;
+  let t = text.slice(0, bytes - 3);
+  while (t.length > 0 && wireSize(t) > bytes - 3) t = t.slice(0, -1);
+  return `${t}...`;
+}
+
 /** `styled` when it fits the wire limit, else the plain fallback cut to fit (the server would drop a longer one). */
 export function fitWire(styled: string, fallback: string): string {
-  if (styled.length <= MAX_WIRE) return styled;
+  if (wireSize(styled) <= MAX_WIRE) return styled;
   const plain = strip(fallback);
-  return plain.length <= MAX_WIRE ? plain : `${plain.slice(0, MAX_WIRE - 3)}...`;
+  return cutTo(plain, MAX_WIRE);
 }
 
 // ---- Doc: a multi-line answer ----------------------------------------------------------------------
@@ -178,6 +213,10 @@ interface Section {
  * most `max` characters, never splits a line, and when a section runs over to the next message it
  * repeats the heading there with `(cont.)`, so no message is a headless blob.
  *
+ * A Doc with a title is framed: every message opens with a rule that carries the title and, when the answer
+ * needs several messages, the page (`=== settings 2/4 ===`), and the last message ends with a plain rule. A
+ * Doc without a title (a small answer) has no frame.
+ *
  *   const d = new Doc({ color: true, lines: true });
  *   d.title('settings', '64 settings');
  *   d.section('safety');
@@ -191,14 +230,25 @@ export class Doc {
   readonly mode: StyleMode;
   private readonly max: number;
   private readonly width: number;
-  private titleLine: string | undefined;
+  private readonly frame: boolean;
+  private titleText: string | undefined;
+  private metaText: string | undefined;
   private readonly sections: Section[] = [{ lines: [] }];
   private footer: string | undefined;
 
-  constructor(mode: StyleMode, o: { max?: number; width?: number } = {}) {
+  constructor(mode: StyleMode, o: { max?: number; width?: number; frame?: boolean } = {}) {
     this.mode = mode;
-    this.max = Math.min(o.max ?? mode.block ?? DOC_MESSAGE, MAX_WIRE);
+    this.max = Math.min(o.max ?? (mode.tellraw ? DOC_TELLRAW : DOC_MESSAGE), MAX_WIRE);
     this.width = o.width ?? 46;
+    this.frame = o.frame ?? true;
+  }
+
+  /** How much of the message budget `s` uses: its size in bytes, or on the tellraw route its size as the JSON string counts it. */
+  private size(s: string): number {
+    if (!this.mode.tellraw) return wireSize(s);
+    let n = wireSize(s);
+    for (const c of s) if (c === '\n' || c === '"' || c === '\\') n++;
+    return n;
   }
 
   private p(tone: Tone, text: string): string {
@@ -212,10 +262,27 @@ export class Doc {
     return base ? `${CODE[base]}${body}${RESET}` : body;
   }
 
-  /** The block's title, once, at the top: `settings` + gray context. */
+  /**
+   * The block's title: it goes into the rule that frames every message (with the page when there are several),
+   * and `meta` (gray context: a count, a mode) is the first line of the first message.
+   */
   title(text: string, meta?: string): this {
-    this.titleLine = this.p('head', strip(text)) + (meta ? ` ${this.p('dim', strip(meta))}` : '');
+    this.titleText = strip(text);
+    this.metaText = meta ? strip(meta) : undefined;
     return this;
+  }
+
+  /** A rule line `===== label =====` of RULE_WIDTH characters; no label: a plain rule. The label is the title, then the page. */
+  private rule(page?: string): string {
+    const parts: { plain: string; shown: string }[] = [];
+    if (this.titleText) parts.push({ plain: this.titleText, shown: this.p('head', this.titleText) });
+    if (page) parts.push({ plain: page, shown: this.p('dim', page) });
+    if (parts.length === 0) return this.p('dim', '='.repeat(RULE_WIDTH));
+    const plain = parts.map((x) => x.plain).join(' ');
+    const shown = parts.map((x) => x.shown).join(' ');
+    const bars = Math.max(6, RULE_WIDTH - plain.length - 2); // the label never makes the rule shorter than RULE_WIDTH, only longer
+    const left = Math.floor(bars / 2);
+    return `${this.p('dim', '='.repeat(left))} ${shown} ${this.p('dim', '='.repeat(bars - left))}`;
   }
 
   /** A new section with a heading line; the lines added next belong to it. */
@@ -261,16 +328,21 @@ export class Doc {
     return this.wrap(items.map((t) => ({ plain: strip(t), shown: this.p(tone, strip(t)) })), ' ');
   }
 
-  /** `key value  key value` pairs wrapped to the block's width; the value's tone by what it is (valueTone). */
+  /**
+   * `key value  key value` pairs wrapped to the block's width; the value's tone by what it is (valueTone). On the
+   * tellraw route (`mode.tellraw`) every pair is a line of its own.
+   */
   pairs(entries: readonly Pair[]): this {
-    return this.wrap(
-      entries.map((e) => {
-        const value = strip(e.value);
-        const tone = e.tone ?? valueTone(value);
-        return { plain: `${strip(e.key)} ${value}`, shown: `${strip(e.key)} ${tone ? this.p(tone, value) : value}` };
-      }),
-      '  ',
-    );
+    const parts = entries.map((e) => {
+      const value = strip(e.value);
+      const tone = e.tone ?? valueTone(value);
+      return { plain: `${strip(e.key)} ${value}`, shown: `${strip(e.key)} ${tone ? this.p(tone, value) : value}` };
+    });
+    if (this.mode.tellraw) {
+      for (const part of parts) this.add(part.shown);
+      return this;
+    }
+    return this.wrap(parts, '  ');
   }
 
   private wrap(parts: readonly { plain: string; shown: string }[], sep: string): this {
@@ -294,29 +366,61 @@ export class Doc {
     return this;
   }
 
-  /** The finished messages (each at most `max` characters, codes included); at least one. */
+  /**
+   * The finished messages (each at most `max` characters, codes included; on the tellraw route as the JSON counts
+   * them); at least one. A titled Doc is framed (see the class comment), and its pages are numbered when there
+   * are several.
+   */
   messages(): string[] {
+    const framed = this.frame && this.titleText !== undefined;
+    if (!framed) {
+      const lead = this.titleText !== undefined ? [this.p('head', this.titleText) + (this.metaText ? ` ${this.p('dim', this.metaText)}` : '')] : [];
+      return this.pack(lead, this.max);
+    }
+    const lead = this.metaText ? [this.p('dim', this.metaText)] : [];
+    const nl = this.size('\n');
+    const topCost = this.size(this.rule('99/99')) + nl; // the longest page label
+    const bottom = this.p('dim', '='.repeat(RULE_WIDTH));
+    const bottomCost = this.size(bottom) + nl;
+    let budget = this.max - topCost;
+    let pages = this.pack(lead, budget);
+    if (this.size(pages[pages.length - 1]!) + bottomCost > budget) {
+      budget -= bottomCost; // the closing rule does not fit under the last page: leave room for it everywhere
+      pages = this.pack(lead, budget);
+    }
+    return pages.map((body, i) => {
+      const label = pages.length > 1 ? `${i + 1}/${pages.length}` : undefined;
+      return `${this.rule(label)}\n${body}${i === pages.length - 1 ? `\n${bottom}` : ''}`;
+    });
+  }
+
+  /** `lead` lines, then the sections, packed into messages of at most `budget` (see `size`). */
+  private pack(lead: readonly string[], budget: number): string[] {
     const out: string[] = [];
     let cur: string[] = [];
     let curLen = 0;
+    const nl = this.size('\n');
     const push = (): void => {
       if (cur.length) out.push(cur.join('\n'));
       cur = [];
       curLen = 0;
     };
-    const room = (line: string): boolean => curLen + (cur.length ? 1 : 0) + line.length <= this.max;
+    const room = (line: string): boolean => curLen + (cur.length ? nl : 0) + this.size(line) <= budget;
     const put = (line: string): void => {
-      const l = line.length > this.max ? `${strip(line).slice(0, this.max - 3)}...` : line;
+      const l = this.size(line) > budget ? cutTo(strip(line), budget) : line;
       if (!room(l)) push();
-      curLen += (cur.length ? 1 : 0) + l.length;
+      curLen += (cur.length ? nl : 0) + this.size(l);
       cur.push(l);
     };
-    if (this.titleLine) put(this.titleLine);
+    for (const l of lead) put(l);
     for (const sec of this.sections) {
       if (sec.heading === undefined && sec.lines.length === 0) continue;
       if (sec.heading !== undefined) {
-        // a heading is never left alone at the end of a message: keep it with its first line
-        if (sec.lines.length && !room(`${sec.heading}\n${sec.lines[0]!}`)) push();
+        // a heading is never left at the end of a message with a line or two: a small section (up to half a
+        // message) stays whole, a big one starts only where its first KEEP_WITH_HEADING lines fit under it
+        const whole = [sec.heading, ...sec.lines].join('\n');
+        const keep = this.size(whole) <= budget / 2 ? whole : [sec.heading, ...sec.lines.slice(0, KEEP_WITH_HEADING)].join('\n');
+        if (sec.lines.length && !room(keep)) push();
         put(sec.heading);
       }
       sec.lines.forEach((l, i) => {
