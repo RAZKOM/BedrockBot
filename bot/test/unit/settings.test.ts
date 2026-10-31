@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Chat, CommandDef } from '../../src/chat/chat.ts';
 import { chunkLine, registerSettingsCommands } from '../../src/chat/commands.ts';
+import { PLAIN_MODE } from '../../src/chat/style.ts';
 import { parseConfig } from '../../src/config/config.ts';
 import {
   applyStartupSettings,
@@ -160,7 +161,7 @@ describe('settings file location', () => {
 describe('!set', () => {
   function setup(file?: string) {
     const defs = new Map<string, CommandDef>();
-    const chat = { register: (d: CommandDef) => defs.set(d.name, d) } as unknown as Chat;
+    const chat = { register: (d: CommandDef) => defs.set(d.name, d), styleMode: () => PLAIN_MODE, prefix: '!' } as unknown as Chat;
     const settings = RuntimeSettings.open(file);
     registerSettingsCommands({ chat, settings } as unknown as CommandDeps);
     const run = (...args: string[]) => {

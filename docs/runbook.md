@@ -311,6 +311,22 @@ navigator skips for now, docs/pathfinding.md "Blacklist") and `waypoints <n>` (d
 Everyone else is ignored (logged as "not an owner"). Truth-pack lines (`@truth ...`), json/system
 messages and the bot's own echo are never parsed as commands.
 
+#### Chat style: colour, multi-line help, /tellraw (decision 0050, docs/chat-style.md)
+
+Off by default. Turn it on in game, in this order, after each step looks right in your client:
+
+1. `!colors`: a specimen of the colours and the headed layout, plus which route replies take. If you see
+   `§` characters or run-together lines instead of colours, stop here: your client does not draw them.
+2. `!set chatColor on` (coloured replies), `!set chatLines on` (`!help` / `!set` as a few headed blocks).
+3. `!set chatVia tellraw` only if the bot is an operator on that world (replies as `/tellraw`: no `<Bot>` name
+   in front). If the server refuses the command, the same text goes out as chat, the log says
+   `/tellraw refused (<message id>)` once, `!colors` shows the refusal and tellraw is tried again after 10
+   minutes. Making the Realm bot an operator is your decision; nothing depends on it.
+
+On the Mac the settings live in `~/.bedrockbot/settings.json` and apply to the next reply (no restart). A
+server limit worth knowing: a chat message over about 520 characters is dropped silently and a command of 512
+characters or more disconnects the bot; the bot keeps every message to 480 (docs/chat-style.md "Limits").
+
 ### Death, respawn and home (task 5.1)
 
 Every task can use the shared `RespawnController` (bot/src/tasks/respawn.ts; `ctx.respawn()` in a
@@ -636,6 +652,9 @@ Write the result into PLAN.md fact 8b and this runbook.
   (a signalling-service restart and a kick are verified).
 - How long the cached tokens stay valid before a new device code is needed (8 h verified).
 - Whether `/tell` (update whispers) works for a non-operator on a Realm; the notifier also logs.
+- Chat style on the Realm (docs/chat-style.md): whether the bot account is an operator (`/tellraw`), whether the
+  Realm relays `§` codes and newlines as BDS does, how the owner's client draws them (`!colors`), and whether a
+  tellraw message avoids the `####` digit masking the owner's client applies to player chat (seen 2026-10-29).
 - Whether an established NetherNet session could survive a signalling-service restart (today
   bedrock-protocol ends it; reconnect covers it in about 1 s).
 

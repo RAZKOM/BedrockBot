@@ -1,5 +1,4 @@
 // Built-in chat commands (PLAN.md task 1.2 and 4.4): !status !pos !quit !help.
-import { randomUUID } from 'node:crypto';
 import type { Connection } from '../connection/connection.ts';
 import { formatDuration, type Metrics } from '../connection/metrics.ts';
 import type { Vec3 } from '../connection/types.ts';
@@ -7,6 +6,11 @@ import type { Chat, Sender } from './chat.ts';
 import { senderLabel } from './chat.ts';
 import { describeSetting, formatSettingValue, SETTING_KEYS, SettingError, settingKey } from '../config/settings.ts'; // Track Q
 import type { CommandDeps } from '../tasks/process/deps.ts'; // Track Q
+import type { HelpSettings } from './help.ts';
+import { richSettings } from './help-rich.ts'; // chat style (docs/chat-style.md)
+import { commandRequestPacket } from './route.ts';
+
+export { commandRequestPacket }; // kept for the importers that knew it from here
 
 export interface BuiltinDeps {
   conn: Connection;
@@ -259,20 +263,8 @@ export function registerHardeningCommands(chat: Chat, deps: HardeningDeps): void
   });
 }
 
-/**
- * A slash command sent as the bot (`command_request`), e.g. `/tell Steve hi`. Used to whisper the
- * owners (update notifier). `/tell` needs no operator rights on BDS (*unverified on a Realm*).
- * 1.26.x: `version` must be the string 'latest' and `player_entity_id` must be present, else the
- * server drops the request (bedrock-protocol docs/API.md "Running commands").
- */
-export function commandRequestPacket(command: string, uuid: string = randomUUID()): Record<string, unknown> {
-  return {
-    command: command.startsWith('/') ? command : `/${command}`,
-    origin: { type: 'player', uuid, request_id: '', player_entity_id: 0n },
-    internal: false,
-    version: 'latest',
-  };
-}
+// A slash command sent as the bot (`command_request`) is built by route.ts commandRequestPacket (moved there
+// with the tellraw route, which needs it too); `/tell` needs no operator rights on BDS (*unverified on a Realm*).
 
 /** Whisper `message` to every named owner (XUID-only owners cannot be addressed by /tell). Returns the names. */
 export function whisperOwners(conn: Pick<Connection, 'state' | 'queue'>, names: readonly string[], message: string): string[] {
@@ -399,6 +391,14 @@ export function registerSettingsCommands(deps: CommandDeps): void {
     run: ({ reply, args }) => {
       const [name, ...rest] = args;
       if (name === undefined) {
+        const mode = deps.chat.styleMode();
+        if (mode.lines) {
+          // chatLines on: grouped, one heading per group (the same Doc as `!help settings`)
+          const modeLine = deps.chat.helpSettings?.mode;
+          const hs: HelpSettings = { get: (k) => s.get(k), ...(modeLine ? { mode: modeLine } : {}) };
+          for (const m of richSettings(hs, { prefix: deps.chat.prefix, mode })) reply(m);
+          return;
+        }
         for (const line of chunkLine('settings: ', SETTING_KEYS.map((k) => `${k} ${formatSettingValue(k, s.get(k))}`))) reply(line);
         return;
       }

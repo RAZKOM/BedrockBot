@@ -5,6 +5,12 @@ import type { TextPacket } from '../connection/types.ts';
 import { createLogger, type Logger } from '../log.ts';
 import { parseText, type ChatLine } from './text.ts';
 import { commandInfo, helpReplies, type CommandInfo, type HelpSettings } from './help.ts'; // Track AM
+import { richHelpReplies } from './help-rich.ts'; // chat style (docs/chat-style.md)
+import { colorize, Doc, fitWire, isStyled, paint, PLAIN_MODE, strip, type StyleMode, type Tone } from './style.ts';
+import { commandRequestPacket, DOC_MESSAGE_TELLRAW, SLASH_MAX, tellrawCommand, TellrawRoute, type CommandOutputLike, type RouteStatus } from './route.ts'; // the optional /tellraw route
+
+/** Longest multi-line block (visible text plus codes) say() lets through when `chatLines` is on; the wire limit is style.ts MAX_WIRE. */
+const MAX_BLOCK = 440;
 
 /** Who sent a chat line. The console is `say` / `tell` typed into the BDS console (or docker exec). */
 export type Sender = { kind: 'console' } | { kind: 'player'; name: string; xuid: string };
@@ -151,6 +157,9 @@ export class Chat {
   private readonly commandListeners = new Set<(e: CommandEvent) => void>();
   private readonly replyTimes: number[] = [];
   private off: (() => void) | undefined;
+  private offOutput: (() => void) | undefined;
+  private readonly route = new TellrawRoute(() => Date.now());
+  private routeLogged = false;
 
   constructor(conn: Connection, opts: ChatOptions = {}) {
     this.conn = conn;
@@ -204,9 +213,77 @@ export class Chat {
    */
   hinter: ((message: string) => string | undefined) | undefined;
 
+  /**
+   * Chat style switches, read live on every message (docs/chat-style.md). Set by the afk task's UX wiring
+   * (modes.ts registerUxCommands) from the `chatColor`, `chatLines` and `chatVia` settings; undefined = all
+   * off / chat, which is how every unit test and every other task runs.
+   */
+  styleSource: { color(): boolean; lines(): boolean; via?(): string } | undefined;
+
+  /** The switches right now (both off when no source is wired or it throws). While replies go out as tellraw the blocks are smaller (`block`). */
+  styleMode(): StyleMode {
+    try {
+      if (!this.styleSource) return PLAIN_MODE;
+      const mode: StyleMode = { color: this.styleSource.color(), lines: this.styleSource.lines() };
+      if (this.tellrawWanted()) mode.block = DOC_MESSAGE_TELLRAW;
+      return mode;
+    } catch {
+      return PLAIN_MODE;
+    }
+  }
+
+  /** Is the `chatVia tellraw` setting on and not paused by a refusal? */
+  private tellrawWanted(): boolean {
+    try {
+      return this.styleSource?.via?.() === 'tellraw' && this.route.usable();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The reply route for `!colors`: what `chatVia` asks for, and whether the server has refused it
+   * (`refused` + the server's message id; tellraw is tried again after RETRY_MS). `via` is what is in use now.
+   */
+  routeStatus(): { setting: string; via: 'chat' | 'tellraw'; route: RouteStatus } {
+    let setting = 'chat';
+    try {
+      setting = this.styleSource?.via?.() ?? 'chat';
+    } catch {
+      /* the setting cannot be read: chat */
+    }
+    return { setting, via: this.tellrawWanted() ? 'tellraw' : 'chat', route: this.route.status() };
+  }
+
+  /**
+   * `text` in a tone when `chatColor` is on, else `text` unchanged. For the one time a command KNOWS what its
+   * words mean and does not want them guessed: `reply(`${chat.paint('bad', 'refused')}: no chest`)`. A reply
+   * with a painted part is sent as it is (the automatic colour skips it), so paint the parts that matter.
+   */
+  paint(tone: Tone, text: string): string {
+    return paint(tone, text, this.styleMode().color);
+  }
+
+  /**
+   * The messages of a long, structured answer. With `chatLines` on: what `build` makes of a fresh Doc in the
+   * live modes. Off: `plain`, exactly as given. Write both once; do not test the modes yourself.
+   *
+   *   for (const m of chat.layout(oldLines, (d) => d.title('stock').pairs(rows))) reply(m);
+   */
+  layout(plain: readonly string[] | (() => string[]), build: (d: Doc) => void): string[] {
+    const mode = this.styleMode();
+    if (!mode.lines) return typeof plain === 'function' ? plain() : [...plain];
+    const d = new Doc(mode);
+    build(d);
+    return d.messages();
+  }
+
   /** Track AM: the `!help [all | settings | <command>]` reply lines. */
   helpReplies(args: readonly string[] = []): string[] {
-    return helpReplies(this.commandInfo(), args, { prefix: this.prefix, maxLength: this.maxReplyLength, settings: this.helpSettings });
+    const mode = this.styleMode();
+    const infos = this.commandInfo();
+    if (mode.lines) return richHelpReplies(infos, args, { prefix: this.prefix, maxLength: this.maxReplyLength, settings: this.helpSettings, mode });
+    return helpReplies(infos, args, { prefix: this.prefix, maxLength: this.maxReplyLength, settings: this.helpSettings });
   }
 
   start(): void {
@@ -214,11 +291,33 @@ export class Chat {
     this.off = this.conn.on('text', (p) => {
       this.handle(parseText(p));
     });
+    // a /tellraw the server refused (the bot is not an operator) comes back here as command_output; the text goes out as chat instead
+    this.offOutput = this.conn.on('command_output', (p) => {
+      this.onCommandOutput(p);
+    });
   }
 
   stop(): void {
     this.off?.();
     this.off = undefined;
+    this.offOutput?.();
+    this.offOutput = undefined;
+  }
+
+  /** `command_output` for one of our tellraws: when it failed, resend the text as chat once and pause tellraw (route.ts). */
+  private onCommandOutput(packet: Record<string, unknown>): void {
+    const p = packet as CommandOutputLike;
+    const first = p.output?.[0]?.message_id;
+    const id = typeof first === 'string' ? first : undefined;
+    const uuid = typeof p.origin?.uuid === 'string' ? p.origin.uuid : undefined;
+    const successCount = typeof p.success_count === 'number' ? p.success_count : 0;
+    const text = this.route.onOutput(uuid, successCount, id);
+    if (text === undefined) return;
+    if (!this.routeLogged) {
+      this.routeLogged = true;
+      this.log.warn(`/tellraw refused (${id ?? 'no message id'}); replies go out as chat for a while. Make the bot an operator to use chatVia tellraw`);
+    }
+    if (this.conn.state === 'spawned') this.conn.queue('text', chatPacket(this.conn.username, text));
   }
 
   /** Every parsed chat line (including truth lines and our own echo). */
@@ -252,9 +351,39 @@ export class Chat {
     this.replyTimes.push(now);
     const hint = this.hint(message); // Track AM
     if (hint) message = `${message} ${hint}`;
-    const text = message.length > this.maxReplyLength ? `${message.slice(0, this.maxReplyLength - 3)}...` : message;
-    this.conn.queue('text', chatPacket(this.conn.username, text));
+    this.send(this.finish(message));
     return true;
+  }
+
+  /**
+   * The last step: the finished text goes out as player chat, or as `/tellraw @a` when `chatVia tellraw` is on, the
+   * server has not refused it lately, and the command stays under route.ts SLASH_MAX (a longer command makes the
+   * server drop the connection). Whatever the route, the text is the same; the only command ever sent is /tellraw.
+   */
+  private send(text: string): void {
+    if (this.tellrawWanted()) {
+      const command = tellrawCommand(text);
+      if (command.length <= SLASH_MAX) {
+        const packet = commandRequestPacket(command);
+        this.route.track(packet.origin.uuid, text);
+        this.conn.queue('command_request', packet);
+        return;
+      }
+    }
+    this.conn.queue('text', chatPacket(this.conn.username, text));
+  }
+
+  /**
+   * The text that goes on the wire (docs/chat-style.md): cut to the reply limit, then coloured when `chatColor`
+   * is on. A message that already carries codes (a Doc block, `!colors`) is left as it is. Whatever the codes
+   * add, the result is at most style.ts MAX_WIRE characters: the server drops a longer chat message silently.
+   */
+  private finish(message: string): string {
+    const mode = this.styleMode();
+    if (isStyled(message)) return fitWire(message, message);
+    const limit = mode.lines && message.includes('\n') ? (mode.block ?? MAX_BLOCK) : this.maxReplyLength;
+    const text = message.length > limit ? `${message.slice(0, limit - 3)}...` : message;
+    return mode.color ? fitWire(colorize(text), strip(text)) : text;
   }
 
   /** Process one parsed line (exposed for tests). */
