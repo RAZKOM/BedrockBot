@@ -77,7 +77,7 @@ export interface HomeSkills {
 
 export interface HomeDeps {
   skills: HomeSkills;
-  inventory: { readonly slots: readonly ({ name: string; count: number; metadata?: number } | null)[]; rawItem?(window: number, slot: number): unknown };
+  inventory: { readonly slots: readonly ({ name: string; count: number; metadata?: number } | null)[]; rawItem?(window: number, slot: number): unknown; window?(id: number): { readonly slots: readonly ({ name: string } | null | undefined)[] } | undefined }; // window 120: the armour worn
   world: DiscoveryWorld;
   position(): Vec3 | undefined;
   home(): Vec3 | undefined;
@@ -299,6 +299,7 @@ export class HomeLogistics {
       ...(r !== undefined ? { reserve: r } : {}),
       boxing: box.on ?? true, // Track AV
       ...(box.skip ? { noBox: box.skip } : {}),
+      worn: (this.d.inventory.window?.(120)?.slots ?? []).flatMap((x) => (x ? [x.name] : [])),
     });
   }
 

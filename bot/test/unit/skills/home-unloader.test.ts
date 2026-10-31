@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import { categoryOf, labelCategory, labelMatches } from '../../../src/skills/home/categories.ts';
 import { chestsLine, itemMatches, itemQuery, kindsLine, kindWord, planChests, recordFrom, stockLine, unreachableLines, unreadRecord } from '../../../src/skills/home/memory.ts';
-import { planUnload, reserveByKind, unloadableStacks, type PlanChest, type UnloadSlot } from '../../../src/skills/home/unloader.ts';
+import { gearKept, planUnload, reserveByKind, unloadableStacks, type PlanChest, type UnloadSlot } from '../../../src/skills/home/unloader.ts';
 import { snapshotOf } from '../../../src/skills/container/chest.ts';
 import { ChestMemory } from '../../../src/world/cache/chests.ts';
 
@@ -15,6 +15,30 @@ const chest = (o: Partial<PlanChest> & { key?: string }): PlanChest => {
 const s = (slot: number, name: string, count = 64, boxUsed?: number): UnloadSlot => ({ slot, name, count, ...(boxUsed !== undefined ? { boxUsed } : {}) });
 
 describe('unloader: the decision table', () => {
+  it('gear: the best of each class stays (the worn armour counts), worse pieces and bows go; spares of the best rank stay', () => {
+    const worn = ['netherite_helmet', 'netherite_chestplate', 'netherite_leggings', 'netherite_boots'];
+    const slots = [
+      s(0, 'netherite_pickaxe', 1),
+      s(1, 'netherite_sword', 1),
+      s(2, 'iron_sword', 1),
+      s(3, 'leather_chestplate', 1),
+      s(4, 'golden_boots', 1),
+      s(5, 'bow', 1),
+      s(6, 'crossbow', 1),
+      s(7, 'netherite_pickaxe', 1),
+      s(8, 'stone_pickaxe', 1),
+      s(9, 'shield', 1),
+      s(10, 'cooked_beef', 16),
+      s(11, 'golden_helmet', 1),
+    ];
+    expect([...gearKept(slots, worn)].sort((a, b) => a - b)).toEqual([0, 1, 7, 9]);
+    // nothing worn: the best carried piece of each armour slot stays
+    expect([...gearKept([s(0, 'leather_chestplate', 1), s(1, 'iron_chestplate', 1), s(2, 'golden_boots', 1)])].sort()).toEqual([1, 2]);
+    const p = planUnload(slots, [chest({ key: 'c' })], { worn });
+    expect(p.moves.map((m) => m.name).sort()).toEqual(['bow', 'crossbow', 'golden_boots', 'golden_helmet', 'iron_sword', 'leather_chestplate', 'stone_pickaxe']);
+    expect(p.kept.map((k) => `${k.count} ${k.name}`).sort()).toEqual(['1 netherite_sword', '1 shield', '16 cooked_beef', '2 netherite_pickaxe']);
+  });
+
   it('rule 1: a chest that already holds the item, the one holding most first', () => {
     const a = chest({ key: 'a', contents: { coal: 10 }, room: { coal: 54 }, free: 26 });
     const b = chest({ key: 'b', contents: { coal: 100 }, room: { coal: 28 }, free: 20 });

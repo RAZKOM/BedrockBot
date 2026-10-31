@@ -138,8 +138,12 @@ names; `wood` / `logs` / `planks` / `timber`; `food` / `meat` / `crops` / `farm`
 / `cobble` / `building` / `dirt`; `junk` / `trash` / `misc` / `drops`; `tools` / `gear` / `weapons` /
 `armour`.
 
-Never unloaded: food, tools, weapons, armour (anything with durability), totems, ender chests (the
-list `!drop items` keeps), the throwaway reserve (16 blocks of cobblestone, dirt, cobbled deepslate
+Never unloaded: food, totems, ender chests, and of the gear (anything with durability or armour) only the
+best of each class (`gearKept`: each armour slot with the worn armour counted, each tool kind by tier,
+shield, shears, elytra ...; spares of that rank stay). Worse pieces and the gear the bot has no skill for
+(`UNUSED_GEAR`: bow, crossbow, trident, fishing rod, mace ...) are unloaded like loot (2026-10-31 Realm: a bot
+in full netherite carried leather and gold armour, bows and an iron sword around; before, everything
+`!drop items` keeps stayed), the throwaway reserve (16 blocks of cobblestone, dirt, cobbled deepslate
 and netherrack in all, cobblestone first, held back from the last slots of a kind) and one empty
 shulker box (the stash step's). Further empty boxes go to the box chest (the container holding the
 most shulker boxes; a placed shulker box never takes a box); full boxes (NBT `Items` not empty) go

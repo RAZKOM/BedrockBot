@@ -29,6 +29,8 @@ import { isShulkerBox, maxStackOf } from '../container/chest.ts';
 import type { Vec3 } from '../../world/types.ts';
 import { labelMatches } from './categories.ts';
 import { BOX_SLOTS, MAX_BOX_STEPS } from './boxing.ts'; // Track AV
+import { maxDurability } from '../survival/tools.ts';
+import { armourScore, armourSlotOf } from '../survival/armour.ts';
 
 /** One inventory slot as the planner sees it. */
 export interface UnloadSlot {
@@ -139,6 +141,57 @@ export interface PlanOptions {
   maxBoxSteps?: number;
   /** Track AV: item kinds not to box (a box step for them failed in this run). */
   noBox?: ReadonlySet<string>;
+  /** The armour worn (names): carried pieces no better than it are unloaded (`gearKept`). */
+  worn?: readonly string[];
+}
+
+/** Gear the bot has no skill for (no ranged attack, no fishing, no riding): unloaded like loot, never kept. */
+export const UNUSED_GEAR: ReadonlySet<string> = new Set(['bow', 'crossbow', 'trident', 'fishing_rod', 'mace', 'carrot_on_a_stick', 'warped_fungus_on_a_stick', 'brush']);
+const TOOL_RANK: Readonly<Record<string, number>> = { wooden: 0, golden: 1, stone: 2, iron: 3, diamond: 4, netherite: 5 };
+const TOOL_CLASSES = ['sword', 'pickaxe', 'axe', 'shovel', 'hoe'];
+
+/** The class one carried piece of gear competes in (an armour slot, a tool kind, or the item itself); undefined: no gear, or gear the bot never uses. */
+function gearClass(n: string): string | undefined {
+  if (UNUSED_GEAR.has(n)) return undefined;
+  const a = armourSlotOf(n);
+  if (a !== undefined) return `armour ${a}`;
+  const us = n.lastIndexOf('_');
+  if (us > 0 && TOOL_RANK[n.slice(0, us)] !== undefined && TOOL_CLASSES.includes(n.slice(us + 1))) return n.slice(us + 1);
+  return maxDurability(n) !== undefined ? n : undefined;
+}
+
+function gearRank(n: string): number {
+  if (armourSlotOf(n) !== undefined) return armourScore(n);
+  const us = n.lastIndexOf('_');
+  return TOOL_RANK[n.slice(0, us)] ?? 0;
+}
+
+/** Items with durability or armour: kept by `!unload` only when `gearKept` keeps their slot. */
+export function isGear(name: string): boolean {
+  const n = name.startsWith('minecraft:') ? name.slice(10) : name;
+  return maxDurability(n) !== undefined || armourSlotOf(n) !== undefined;
+}
+
+/**
+ * The gear slots `!unload` keeps: per class (each armour slot, each tool kind, shield, shears, elytra ...) the
+ * carried pieces of the best rank among those carried and the armour worn (spares of that rank stay too);
+ * worse pieces and `UNUSED_GEAR` are unloaded (2026-10-31 Realm: leather and gold armour, bows and an iron
+ * sword stayed with a bot in full netherite).
+ */
+export function gearKept(slots: readonly { slot: number; name: string; count: number }[], worn: readonly string[] = []): Set<number> {
+  const best = new Map<string, number>();
+  const strip = (x: string) => (x.startsWith('minecraft:') ? x.slice(10) : x);
+  for (const name of [...worn, ...slots.filter((s) => s.count > 0).map((s) => s.name)].map(strip)) {
+    const c = gearClass(name);
+    if (c !== undefined) best.set(c, Math.max(best.get(c) ?? -1, gearRank(name)));
+  }
+  const out = new Set<number>();
+  for (const s of slots) {
+    const n = strip(s.name);
+    const c = gearClass(n);
+    if (s.count > 0 && c !== undefined && gearRank(n) >= best.get(c)!) out.add(s.slot);
+  }
+  return out;
 }
 
 interface SimChest {
@@ -214,6 +267,7 @@ function pick(sims: readonly SimChest[], name: string, max: number, origin: Vec3
 /** The plan for one unload (see the file comment). */
 export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanChest[], opts: PlanOptions = {}): UnloadPlan {
   const maxOf = opts.maxStack ?? maxStackOf;
+  const gear = gearKept(slots, opts.worn);
   const sims: SimChest[] = chests.map((c) => ({ c, free: c.free, room: { ...c.room }, contents: { ...c.contents }, boxes: c.boxes.empty + c.boxes.full, inBoxes: { ...(c.inBoxes ?? {}) }, empties: c.boxes.empty }));
   const plan: UnloadPlan = { moves: [], kept: [], overflow: [], fullBoxes: [], boxChest: undefined, emptyNamed: [], steps: [], blocked: [] };
   const keep = (name: string, count: number, why: KeepReason) => {
@@ -294,7 +348,7 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
       toBoxChest(s.slot, s.name);
       continue;
     }
-    if (keptItem(s.name)) {
+    if (keptItem(s.name) && (!isGear(s.name) || gear.has(s.slot))) {
       keep(s.name, s.count, 'kept');
       continue;
     }

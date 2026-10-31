@@ -258,11 +258,17 @@ export function registerNavCommands(d: NavCommandDeps): WaypointStore {
     const set = home.set.bind(home);
     home.set = (p) => {
       set(p);
-      if (p) st.set('home', p, { auto: true });
+      if (p) st.set('home', p, { auto: true, chosen: true });
       else st.delete('home');
     };
+    // A home chosen with !home set outlives restarts: it wins over the config's `home` (which used to be written
+    // over the saved waypoint at every start), --home on the command line wins over both, !home clear forgets it.
+    const saved = st.get('home');
     const cur = home.get();
-    if (cur) st.set('home', cur, { auto: true });
+    if (saved?.chosen && saved.y !== null && ctx.values.home === undefined) {
+      if (cur?.x !== saved.x || cur.y !== saved.y || cur.z !== saved.z) log.info(`home: ${fmtW(saved)}, saved by the last !home set (the start gave ${cur ? fmtW(cur) : 'none'})`);
+      set({ x: saved.x, y: saved.y, z: saved.z });
+    } else if (cur) st.set('home', cur, { auto: true });
   }
 
   const walk = mob

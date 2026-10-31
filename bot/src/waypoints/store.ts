@@ -29,6 +29,8 @@ export interface Waypoint extends WaypointPos {
   auto: boolean;
   /** ISO time it was set. */
   at: string;
+  /** Only `home`: chosen by a command (!home set, !wp set home), not copied from the config / --home. The next start keeps it over the config's `home`. */
+  chosen?: boolean;
 }
 
 export const AUTO_WAYPOINTS = ['death', 'home', 'spawn'] as const;
@@ -53,6 +55,7 @@ const FileSchema = z.object({
       z: z.number().int(),
       auto: z.boolean().optional(),
       at: z.string().optional(),
+      chosen: z.boolean().optional(),
     }),
   ),
 });
@@ -91,7 +94,7 @@ export class WaypointStore {
       for (const [raw, w] of Object.entries(data.waypoints)) {
         const name = waypointName(raw);
         if (!name) continue;
-        this.points.set(name, { name, x: w.x, y: w.y, z: w.z, auto: w.auto ?? false, at: w.at ?? '' });
+        this.points.set(name, { name, x: w.x, y: w.y, z: w.z, auto: w.auto ?? false, at: w.at ?? '', ...(w.chosen ? { chosen: true } : {}) });
       }
       this.log.info(`waypoints: ${this.points.size} from ${f}`);
     } catch (e) {
@@ -120,14 +123,15 @@ export class WaypointStore {
   }
 
   /** Set (and persist) a waypoint; positions are floored to the block. Unchanged positions are not rewritten. */
-  set(name: string, p: WaypointPos, opts: { auto?: boolean } = {}): Waypoint {
+  set(name: string, p: WaypointPos, opts: { auto?: boolean; chosen?: boolean } = {}): Waypoint {
     const n = waypointName(name);
     if (!n) throw new Error(`bad waypoint name "${name}" (1..32 of a-z 0-9 _ -)`);
     const pos = { x: Math.floor(p.x), y: p.y === null ? null : Math.floor(p.y), z: Math.floor(p.z) };
     const old = this.points.get(n);
     const auto = opts.auto ?? false;
-    if (old?.x === pos.x && old.y === pos.y && old.z === pos.z && old.auto === auto) return old;
-    const w: Waypoint = { name: n, ...pos, auto, at: this.now().toISOString() };
+    const chosen = opts.chosen ?? false;
+    if (old?.x === pos.x && old.y === pos.y && old.z === pos.z && old.auto === auto && (old.chosen ?? false) === chosen) return old;
+    const w: Waypoint = { name: n, ...pos, auto, at: this.now().toISOString(), ...(chosen ? { chosen } : {}) };
     this.points.set(n, w);
     this.save();
     this.emit(n, w);
@@ -157,7 +161,7 @@ export class WaypointStore {
     const f = this.file;
     if (!f) return;
     const waypoints: Record<string, Omit<Waypoint, 'name'>> = {};
-    for (const w of this.list()) waypoints[w.name] = { x: w.x, y: w.y, z: w.z, auto: w.auto, at: w.at };
+    for (const w of this.list()) waypoints[w.name] = { x: w.x, y: w.y, z: w.z, auto: w.auto, at: w.at, ...(w.chosen ? { chosen: true } : {}) };
     const body = `${JSON.stringify({ version: 1, ...(this.server ? { server: this.server } : {}), waypoints }, null, 2)}\n`;
     try {
       mkdirSync(dirname(f), { recursive: true });
