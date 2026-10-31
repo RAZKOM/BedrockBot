@@ -759,7 +759,9 @@ export class PathSearch {
     // Track BD review: no block is placed inside the base either (`protectedArea`, the owner's protectRadius:
     // the break rules only refused digs there; the mine process' composite gotos plan with allowPlace)
     if (opts.allowPlace && Math.abs(f0 - cy) < FLAT && !opts.noAction?.has(cellKey(cx, cy, cz)) && !inArea(opts.protectedArea, cx, cy, cz)) {
-      const room = grid.freeColumn(cx, headCell + 1, headCell + 1, cz);
+      // Track BG2: the jump needs the cell over that free as well (Track O's PlaceSkill refuses with no_headroom
+      // otherwise: on the Realm a pillar in a 3-high room under the farm's platform failed twice)
+      const room = grid.freeColumn(cx, headCell + 1, headCell + 2, cz);
       if (room === true) {
         this.relax(cur, cx, cy + 1, cz, cy + 1, costs.jump, M_PILLAR, costs.place, 0, { place: { p: { x: cx, y: cy, z: cz }, face: 'down' } });
       } else if (room === undefined) {

@@ -762,7 +762,7 @@ export class MineTask {
     const origin = { x: t.p.x + 0.5, y: t.p.y, z: t.p.z + 0.5 };
     // everything but the keeper's junk: the stash step throws that away (rotten flesh it dropped was picked up again at every ore)
     const notJunk = (i: ItemStack) => !DEFAULT_JUNK.includes(i.name);
-    const c = await sk.collect(5, 120, { origin, near: 1.2, filter: notJunk });
+    const c = await sk.collect(5, 120, { origin, near: 1.2, filter: notJunk, hard: true, hardFilter: (i) => isJobDrop(this.drops, i.name) });
     this.addCollected(c.gained);
     this.log.info(`mine: ${t.name} at ${fmt(t.p)} mined, collect ${c.ok ? 'ok' : c.reason}: ${JSON.stringify(c.gained)}`); // Track AQ
     if (!this.alive(gen) || c.pickedUp > 0 || !this.d.stand) return;
@@ -773,7 +773,7 @@ export class MineTask {
     const g = await this.intoHole(gen, t.p); // Track AQ: digs the rock over the hole when there is no head room
     if (!this.alive(gen) || !g.ok) return;
     await this.d.waitTicks(15);
-    const c2 = await sk.collect(4, 60, { origin, near: 1.2, filter: notJunk });
+    const c2 = await sk.collect(4, 60, { origin, near: 1.2, filter: notJunk, hard: true, hardFilter: (i) => isJobDrop(this.drops, i.name) });
     this.addCollected(c2.gained);
   }
 
@@ -781,7 +781,7 @@ export class MineTask {
   private async sweepDrops(gen: number, radius: number, ticks: number): Promise<void> {
     // Track AQ (collect/sweep.ts): one entity scan when nothing of the kind is near, no grace wait
     const ents = this.d.entities;
-    const c = await sweepItems((r, t, o) => this.d.skills.collect(r, t, o), (n) => isJobDrop(this.drops, n), { radius, ticks, position: this.d.position, ...(ents ? { entities: ents } : {}) });
+    const c = await sweepItems((r, t, o) => this.d.skills.collect(r, t, o), (n) => isJobDrop(this.drops, n), { radius, ticks, position: this.d.position, hard: (n) => isJobDrop(this.drops, n), ...(ents ? { entities: ents } : {}) });
     if (c && this.alive(gen)) this.addCollected(c.gained);
   }
 
@@ -994,7 +994,7 @@ export class MineTask {
     if (idx !== hi) this.stats.targeted.push({ ...c.p });
     if (c.kind === 'drop') {
       this.state = 'collect';
-      const col = await sk.collect(2, 60, { origin: { x: c.p.x + 0.5, y: c.p.y, z: c.p.z + 0.5 }, near: 1.2, filter: (i) => isJobDrop(this.drops, i.name) });
+      const col = await sk.collect(2, 60, { origin: { x: c.p.x + 0.5, y: c.p.y, z: c.p.z + 0.5 }, near: 1.2, filter: (i) => isJobDrop(this.drops, i.name), hard: true });
       if (!this.alive(gen)) return undefined;
       this.addCollected(col.gained);
       // Track BD review: a drop goal that gives nothing counts as a failure (3 blacklist it), or the same goal comes back forever
@@ -1235,7 +1235,7 @@ export class MineTask {
     if (this.alive(gen)) {
       this.state = 'collect';
       const before = Object.values(this.stats.collected).reduce((a, n) => a + n, 0);
-      const c = await sk.collect(veinRadius(cells) + 5, 300, { origin: veinCentre(cells), near: 1.2, filter: (i) => isJobDrop(this.drops, i.name) });
+      const c = await sk.collect(veinRadius(cells) + 5, 300, { origin: veinCentre(cells), near: 1.2, filter: (i) => isJobDrop(this.drops, i.name), hard: true });
       this.addCollected(c.gained);
       for (const p of cells) {
         if (!this.alive(gen) || !this.itemsNear(p, 1.6)) continue;
@@ -1243,7 +1243,7 @@ export class MineTask {
         const g = await this.intoHole(gen, p);
         if (!this.alive(gen)) break;
         if (g.ok) await this.d.waitTicks(10);
-        const c2 = await sk.collect(4, 60, { origin: { x: p.x + 0.5, y: p.y, z: p.z + 0.5 }, near: 1.2, filter: (i) => isJobDrop(this.drops, i.name) });
+        const c2 = await sk.collect(4, 60, { origin: { x: p.x + 0.5, y: p.y, z: p.z + 0.5 }, near: 1.2, filter: (i) => isJobDrop(this.drops, i.name), hard: true });
         this.addCollected(c2.gained);
       }
       rec.collected = Object.values(this.stats.collected).reduce((a, n) => a + n, 0) - before;
@@ -1271,7 +1271,7 @@ export class MineTask {
       const g = await this.intoHole(gen, p);
       if (!this.alive(gen)) return;
       if (g.ok) await this.d.waitTicks(10);
-      const c2 = await this.d.skills.collect(4, 60, { origin: { x: p.x + 0.5, y: p.y, z: p.z + 0.5 }, near: 1.2, filter: (i) => isJobDrop(this.drops, i.name) });
+      const c2 = await this.d.skills.collect(4, 60, { origin: { x: p.x + 0.5, y: p.y, z: p.z + 0.5 }, near: 1.2, filter: (i) => isJobDrop(this.drops, i.name), hard: true });
       this.addCollected(c2.gained);
       this.log.info(`mine: drop left at ${fmt(p)}: ${g.ok ? 'walked there' : g.reason}, picked up ${JSON.stringify(c2.gained)}`);
     }

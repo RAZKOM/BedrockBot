@@ -133,6 +133,8 @@ export interface FlightReport {
   slide?: number;
   /** Track BF: sneak was held through the touchdown (FlightDeps.sneakLanding). */
   sneak?: boolean;
+  /** Track BH: a ledge takeoff's fall until the glide flew (blocks under the edge). */
+  ledgeDrop?: number;
 }
 
 export interface FlightOptions extends Omit<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop'> {
@@ -240,7 +242,7 @@ export class FlightController {
     this.bounces = 0;
     this.baseWorld = base;
     loop.world = skyQuery(base);
-    this.log.info(`flight: to ${describeTarget(target)}, cruise y ${opts.cruiseY}${opts.takeoffYaw !== undefined ? `, takeoff heading ${Math.round(opts.takeoffYaw)}` : ''}`);
+    this.log.info(`flight: to ${describeTarget(target)}, cruise y ${opts.cruiseY}${opts.takeoffYaw !== undefined ? `, takeoff heading ${Math.round(opts.takeoffYaw)}` : ''}${opts.ledge ? `, ledge takeoff heading ${Math.round(opts.ledge.yaw)}` : ''}`);
     return new Promise<FlightReport>((resolve) => {
       this.resolve = resolve;
       this.unsubs.push(
@@ -346,7 +348,8 @@ export class FlightController {
     // Track BF: sneak through the touchdown (docs/flight.md "Sneak at the touchdown")
     const low = this.target !== undefined && state.pos.y - this.target.top < SNEAK_ABOVE && (brain.phase === 'land' || brain.phase === 'approach' || brain.phase === 'done');
     if (low && this.d.sneakLanding?.() === true) this.sneaked = true;
-    loop.setCommand({ yaw: c.yaw, pitch: c.pitch, jump: c.jump, glide: c.glide, forward: 0, strafe: 0, sprint: false, sneak: this.sneaked && low });
+    // (Track BH: the ledge takeoff walks to the edge sneaking and steps off: `forward`, `sneak` from the brain)
+    loop.setCommand({ yaw: c.yaw, pitch: c.pitch, jump: c.jump, glide: c.glide, forward: c.forward ?? 0, strafe: 0, sprint: false, sneak: (this.sneaked && low) || c.sneak === true });
     if (c.fire && rockets.slot >= 0) this.fire(rockets.slot, state.pos);
     if (out.end) this.settling = { ticks: 0, end: out.end, at: { ...state.pos } };
   }
@@ -393,6 +396,7 @@ export class FlightController {
       holdTicks: b?.stats.holdTicks ?? 0,
       ...(this.settling ? { slide: hdist(this.settling.at, s.pos) } : {}),
       sneak: this.sneaked,
+      ...(b?.stats.ledgeDrop !== undefined ? { ledgeDrop: b.stats.ledgeDrop } : {}),
     };
   }
 
@@ -418,7 +422,7 @@ export class FlightController {
     this.log.info(
       `flight: ${ok ? 'landed' : `ended (${reason})`} at ${r.landedAt ? `${r.landedAt.x.toFixed(2)} ${r.landedAt.y.toFixed(2)} ${r.landedAt.z.toFixed(2)}` : '?'}` +
         `${r.off !== undefined ? `, ${r.off.toFixed(2)} from the centre` : ''}; ${r.rockets} rockets (${r.rocketsBy.climb} climb, ${r.rocketsBy.cruise} cruise, ${r.rocketsBy.goaround} go-around), ${r.goArounds} go-arounds, ${r.ticks} ticks, ${r.corrections} corrections` +
-        `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}, max y ${r.maxY.toFixed(1)}${r.descents.length ? `, descent ${r.descents.join('; ')}` : ''}${r.steered ? `, steered ${r.steered} ticks` : ''}${r.holdTicks ? `, held ${r.holdTicks} ticks` : ''}${r.slide !== undefined ? `, slide ${r.slide.toFixed(2)}${r.sneak ? ' (sneaking)' : ''}` : ''}`,
+        `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}, max y ${r.maxY.toFixed(1)}${r.descents.length ? `, descent ${r.descents.join('; ')}` : ''}${r.steered ? `, steered ${r.steered} ticks` : ''}${r.holdTicks ? `, held ${r.holdTicks} ticks` : ''}${r.slide !== undefined ? `, slide ${r.slide.toFixed(2)}${r.sneak ? ' (sneaking)' : ''}` : ''}${r.ledgeDrop !== undefined ? `, ledge takeoff (gliding ${r.ledgeDrop.toFixed(1)} under the edge)` : ''}`,
     );
     this.brain = undefined;
     const resolve = this.resolve;

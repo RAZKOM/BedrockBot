@@ -140,6 +140,12 @@ export interface InputLoopState {
   /** Track AU: the body glides (elytra); boost ticks of a firework rocket left. */
   gliding: boolean;
   boostTicks: number;
+  /**
+   * Track BH: the server holds the own player in the crawl / swim pose out of water (its `crawling` or
+   * `swimming` actor flag, or a bounding box under 1 block high, not gliding): a glide that ended under less
+   * than 1.8 of headroom leaves the body there (skills/fly/prone.ts digs it free).
+   */
+  prone?: boolean;
   teleports: number;
   /** Tick of the last input sent. */
   tick: bigint;
@@ -244,6 +250,7 @@ export class InputLoop {
       inLava: b.inLava ?? false,
       gliding: b.gliding ?? false,
       boostTicks: b.boostTicks ?? 0,
+      prone: this.ownPose.prone && !(b.gliding ?? false) && !(b.inWater ?? false),
       teleports: this.teleports,
       tick: this.lastTick,
       ready: this.ready,
@@ -452,9 +459,24 @@ export class InputLoop {
     return replayed;
   }
 
+  /** Track BH: the own pose from the server's actor data (`crawling` / `swimming` flags, `boundingbox_height`), see InputLoopState.prone. */
+  private readonly ownPose = { crawling: false, swimming: false, height: undefined as number | undefined, prone: false };
+  private onPose(metadata: { key?: string; value?: unknown }[] | undefined): void {
+    if (!metadata) return;
+    const flags = metadata.find((m) => m.key === 'flags')?.value as { crawling?: boolean; swimming?: boolean } | undefined;
+    if (flags && typeof flags.crawling === 'boolean') this.ownPose.crawling = flags.crawling;
+    if (flags && typeof flags.swimming === 'boolean') this.ownPose.swimming = flags.swimming;
+    const h = metadata.find((m) => m.key === 'boundingbox_height')?.value;
+    if (typeof h === 'number') this.ownPose.height = h;
+    const prone = this.ownPose.crawling || this.ownPose.swimming || (this.ownPose.height !== undefined && this.ownPose.height < 1);
+    if (prone !== this.ownPose.prone) this.log.info(`pose: ${prone ? 'prone' : 'standing'} (crawling ${this.ownPose.crawling}, swimming ${this.ownPose.swimming}, box height ${this.ownPose.height?.toFixed(2) ?? '?'})`);
+    this.ownPose.prone = prone;
+  }
+
   /** Track AU: the server's `gliding` flag for the own player. */
   private onEntityData(p: { runtime_entity_id: bigint | number; metadata?: { key?: string; value?: unknown }[]; tick?: bigint | number }): void {
     if (!this.ready || BigInt(p.runtime_entity_id) !== this.conn.runtimeId) return;
+    this.onPose(p.metadata);
     const flags = p.metadata?.find((m) => m.key === 'flags')?.value as { gliding?: boolean } | undefined;
     if (!flags || typeof flags.gliding !== 'boolean') return;
     const tick = BigInt(p.tick ?? 0);

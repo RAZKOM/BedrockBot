@@ -71,12 +71,14 @@ const yieldLoop = (): Promise<void> => new Promise((r) => setImmediate(r));
 
 /**
  * One bounded probe plan from `from` (feet) to `goal`, sliced; undefined when `from` is no standable
- * node (then nothing can be said about any container).
+ * node (then nothing can be said about any container). `noLongFalls` (Track BH): without Track BI's
+ * planned long drops (a flight's landing must be walkable without fall damage).
  */
-export async function probePath(nav: ProbeNav, goal: NavGoal, from: Vec3, budget: { nodes?: number; ms?: number } = {}): Promise<PathResult | undefined> {
+export async function probePath(nav: ProbeNav, goal: NavGoal, from: Vec3, budget: { nodes?: number; ms?: number; noLongFalls?: boolean } = {}): Promise<PathResult | undefined> {
   const start = locateNode(nav.grid, from);
   if (!start) return undefined;
   const opts: PathOptions = { ...nav.planOptions({ allowBreak: false, allowPlace: false, sprint: false }), maxNodes: budget.nodes ?? PROBE_NODES, maxMs: budget.ms ?? PROBE_MS };
+  if (budget.noLongFalls) delete opts.falls;
   const search = new PathSearch(nav.grid, start, goal, opts);
   for (;;) {
     const r = search.step(PROBE_SLICE_MS);

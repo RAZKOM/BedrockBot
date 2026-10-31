@@ -34,9 +34,18 @@ function setup() {
   const state = { pos: { x: 0.5, y: 0, z: 0.5 }, tick: 0n, ready: true };
   const pending: (() => void)[] = [];
   const server = { mode: 'toggle' as 'toggle' | 'restore' | 'silent' };
+  // Track BG2: the held command; `sneaks` records every sneak the skill sets
+  const command = { sneak: false };
+  const sneaks: boolean[] = [];
   const loop = {
     state,
-    setCommand: () => undefined,
+    command,
+    setCommand: (c: { sneak?: boolean }) => {
+      if (c.sneak !== undefined) {
+        command.sneak = c.sneak;
+        sneaks.push(c.sneak);
+      }
+    },
     async waitTicks(n: number) {
       for (let i = 0; i < n; i++) {
         state.tick++;
@@ -55,7 +64,8 @@ function setup() {
       const holder = stateHolder(p, b);
       const h = at(holder);
       if (server.mode === 'silent') return;
-      if (server.mode === 'restore') {
+      // BDS (measured, Track BG2): sneaking with an item in the hand the click uses the item: the old state comes back
+      if (server.mode === 'restore' || (command.sneak && inv.slots[inv.selected])) {
         pending.push(() => update(holder, h));
         return;
       }
@@ -72,7 +82,7 @@ function setup() {
     loop,
     world: { blockAt: at, onBlockUpdate: (fn) => (listeners.add(fn), () => listeners.delete(fn)), chunks: { runtimeIdAt: () => 555 }, inventory: inv },
   });
-  return { skill, blocks, sent, server, state };
+  return { skill, blocks, sent, server, state, command, sneaks, inv };
 }
 
 describe('usable blocks', () => {
@@ -100,6 +110,26 @@ describe('usable blocks', () => {
 });
 
 describe('UseSkill', () => {
+  it('Track BG2: sneaking with an item in the hand, sneak is released for the click and pressed again after it', async () => {
+    const e = setup();
+    e.inv.setItem(0, 0, { name: 'netherite_pickaxe', networkId: 7, count: 1, metadata: 0 });
+    e.command.sneak = true;
+    const o = await e.skill.useBlock({ x: -2, y: 0, z: 0 });
+    expect(o).toMatchObject({ ok: true, kind: 'trapdoor', open: true });
+    expect(e.sneaks).toEqual([false, true]);
+    expect(e.command.sneak).toBe(true);
+    // the empty hand: sneak stays (a sneaking click with an empty hand uses the block on BDS)
+    e.inv.setItem(0, 0, null);
+    e.sneaks.length = 0;
+    expect(await e.skill.useBlock({ x: -2, y: 0, z: 0 })).toMatchObject({ ok: true, open: false });
+    expect(e.sneaks).toEqual([]);
+    // not sneaking: nothing to release
+    e.inv.setItem(0, 0, { name: 'cobblestone', networkId: 8, count: 16, metadata: 0 });
+    e.command.sneak = false;
+    expect(await e.skill.useBlock({ x: -2, y: 0, z: 0 })).toMatchObject({ ok: true, open: true });
+    expect(e.sneaks).toEqual([]);
+  });
+
   it('opens a door (click on the block, face seen from the eye), then closes it via the upper half', async () => {
     const e = setup();
     expect(e.skill.isOpen({ x: 2, y: 1, z: 0 })).toBe(false);

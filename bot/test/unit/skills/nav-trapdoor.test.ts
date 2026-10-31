@@ -182,10 +182,10 @@ function fakeActions(gen: GenWorld, log: string[], loop: InputLoop): NavActions 
   };
 }
 
-async function drive(gen: GenWorld, start: Vec3, goal: NavGoal, goto: GotoOptions = {}, maxTicks = 1500) {
+async function drive(gen: GenWorld, start: Vec3, goal: NavGoal, goto: GotoOptions = {}, maxTicks = 1500, actions = fakeActions) {
   const { conn, loop } = harness(start);
   const log: string[] = [];
-  const skills = new BotSkills({ loop, world: fakeWorld(gen), actions: fakeActions(gen, log, loop) });
+  const skills = new BotSkills({ loop, world: fakeWorld(gen), actions: actions(gen, log, loop) });
   conn.tick(3);
   let result: SkillResult | undefined;
   const p = skills.goto(goal, goto).then((r) => (result = r));
@@ -218,6 +218,30 @@ describe('closed loop: hatches (Track BG)', () => {
       expect(gen.blockAt(0, -53, -3)?.states.open_bit).toBe(0);
     });
   }
+
+  it('Track BG2: a close the server rejects is clicked once more, then left open: no goto failure, no retreat', async () => {
+    const gen = hatchWorld('B');
+    // opens fine, every close is rejected (the Realm: a sneaking click from the ladder with an item in the hand)
+    const rejecting = (g: GenWorld, log: string[], loop: InputLoop): NavActions => {
+      const inner = fakeActions(g, log, loop);
+      return {
+        useBlock: async (p) => {
+          if (Number(g.blockAt(p.x, p.y, p.z)!.states.open_bit ?? 0) === 0) return inner.useBlock!(p);
+          log.push(`use ${p.x},${p.y},${p.z} -> rejected`);
+          await loop.waitTicks(3);
+          return { ok: false, reason: 'rejected' };
+        },
+      };
+    };
+    const down = await drive(gen, { x: 2.5, y: -53, z: 2.5 }, { type: 'block', p: ROOM }, {}, 1500, rejecting);
+    expect(down.result, down.log.join('\n')).toEqual({ ok: true });
+    expect(down.log.map((l) => l.split(' at ')[0])).toEqual(['use 0,-53,-3 -> open', 'use 0,-53,-3 -> rejected', 'use 0,-53,-3 -> rejected']);
+    expect(down.rep.actions).toMatchObject({ use: 1, failed: 0 });
+    expect(down.rep.retreats).toBe(0);
+    expect(down.rep.closeFailed).toBe(1);
+    expect(Math.abs(down.pos.y + 60)).toBeLessThan(1e-6);
+    expect(gen.blockAt(0, -53, -3)?.states.open_bit).toBe(1);
+  });
 
   it('closeTrapdoors false leaves the hatch open', async () => {
     const gen = hatchWorld('B');

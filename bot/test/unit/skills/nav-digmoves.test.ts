@@ -332,6 +332,27 @@ describe('Track BC planner: MovementPillar (pillar-up under a low ceiling)', () 
   });
 });
 
+describe('Track BG2 planner: a pillar needs head room for the jump (PlaceSkill: no_headroom)', () => {
+  it('no pillar in a 3-high room (the cell 3 above the feet is a block); in a 4-high one, yes; pillar + dig refused under a second block', () => {
+    const goal = { x: 0, y: -59, z: 2 }; // only a block placed at (0, -60, 2) makes this a node
+    const opts: PathOptions = { allowPlace: true, throwaway: 64 };
+    for (const [top, found] of [[-57, false], [-56, true]] as const) {
+      const gen = lane();
+      gen.fill({ x: -1, y: top, z: 0 }, { x: 1, y: top, z: 20 }, 'stone_bricks');
+      const r = plan(gen, { x: 0, y: -60, z: 0 }, goal, { ...opts, allowBreak: false });
+      expect(r.status === 'found', `ceiling ${top}`).toBe(found);
+      if (found) expect(r.path.at(-1)!.move).toBe('pillar');
+    }
+    // the pit under a dirt lid (MovementPillar) with another block right over the lid: refused (the head room after the dig)
+    const gen = lane();
+    gen.fill({ x: 0, y: -62, z: 2 }, { x: 0, y: -61, z: 2 }, 'air');
+    gen.put(0, -60, 2, 'dirt');
+    gen.put(0, -59, 2, 'dirt');
+    const r = findPath(new NavGrid(gen), { x: 0, y: -62, z: 2 }, { type: 'block', p: { x: 0, y: -60, z: 10 } }, { allowBreak: true, ...opts });
+    expect(r.path.some((n) => n.move === 'pillar' && n.act?.dig?.some((c) => c.y === -60) && n.act.place?.p.y === -62)).toBe(false);
+  });
+});
+
 describe('Track BC planner: sneak-through (a 1.5-high gap under top slabs)', () => {
   const TOP_SLAB = { 'minecraft:vertical_half': 'top' };
   /** The lane with a ceiling of top slabs at head height over z 6 .. 12 (gap 1.5); `floor` adds carpet under it (gap 1.44). */
