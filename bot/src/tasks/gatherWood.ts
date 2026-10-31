@@ -382,6 +382,9 @@ export class GatherWoodTask {
       const saplingsBefore = this.saplings();
       const c = await this.d.skills.collect(o.collectRadius ?? 8, o.collectTicks ?? 300, {
         origin: { x: tree.base.x + 0.5, y: tree.base.y, z: tree.base.z + 0.5 },
+        // a log on a ledge or caught in another canopy: one walk that may dig and place (decision 0051)
+        hard: true,
+        hardFilter: (i) => isLog(i.name),
       });
       if (!this.alive(gen)) break;
       this.stats.saplings += Math.max(0, this.saplings() - saplingsBefore);

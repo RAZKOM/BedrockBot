@@ -43,7 +43,7 @@ export async function sweepItems(collect: CollectFn, kind: (name: string) => boo
   const at = o.origin ?? o.position?.();
   if (o.entities && at && itemsOfKind(o.entities(), at, radius, kind) === 0) return undefined;
   const filter = (i: ItemStack) => kind(i.name);
-  const r = await collect(radius, o.ticks ?? 200, { filter, graceTicks: 0, ...(o.origin ? { origin: o.origin } : {}) });
+  const r = await collect(radius, o.ticks ?? 200, { filter, graceTicks: 0, hard: true, ...(o.origin ? { origin: o.origin } : {}) });
   return r as CollectResult | undefined;
 }
 

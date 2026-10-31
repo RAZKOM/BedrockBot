@@ -5,10 +5,17 @@
 //
 // Inventory full: an item whose kind does not fit (no empty slot and no partial stack with room) is
 // skipped; when only such items are left the result is { ok: false, reason: 'inventory_full' }.
+//
+// Hard to reach (`hard`, decision 0051): an item the plain walk cannot reach (on a ledge, in a hole, behind
+// leaves) gets one walk that may dig and place (the navigator's allowBreak / allowPlace under the same rules:
+// protected area, digPenalty, throwaway blocks), bounded by `hardBlocks` blocks dug + placed and `hardTicks`.
+// The blocks that walk placed are scaffold: they are dug again after the pickup (place/scaffold.ts), unless
+// removing them would strand the bot (then they stay and the log says so).
 import { silentLogger, type Logger } from '../../log.ts';
 import type { EntityInfo, ItemStack, Vec3 } from '../../world/types.ts';
 import { maxStackOf } from '../container/chest.ts';
 import type { NavGoal } from '../nav/goals.ts';
+import { ScaffoldRecord, type ClearResult } from '../place/scaffold.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 
 export interface CollectDeps {
@@ -22,6 +29,12 @@ export interface CollectDeps {
   logger?: Logger;
   /** Clock of EntityInfo.updatedAt (performance.now by default). */
   now?: () => number;
+  /** A walk that may dig and place, recording the blocks it places and stopping after `maxBlocks` (BotSkills.scaffoldGoto). */
+  hardGoto?: (goal: NavGoal, opts: GotoOptions, record: ScaffoldRecord, maxBlocks: number) => Promise<SkillResult>;
+  /** Item actors such a walk was tried for already, kept across collect calls (one walk per item: the sweeps run before every target). */
+  hardTried?: Set<bigint>;
+  /** Dig the recorded scaffold again (BotSkills.clearScaffold). */
+  clearScaffold?: (record: ScaffoldRecord) => Promise<ClearResult>;
 }
 
 export interface CollectOptions {
@@ -46,6 +59,14 @@ export interface CollectOptions {
    * dig would otherwise miss it. Default 10.
    */
   graceTicks?: number;
+  /** An item the plain walk cannot reach gets one walk that may dig and place (scaffold dug again after). Default false. */
+  hard?: boolean;
+  /** Only these items get that walk (default every item the collect takes). */
+  hardFilter?: (item: ItemStack) => boolean;
+  /** Blocks dug + placed by that walk at most. Default 8. */
+  hardBlocks?: number;
+  /** Ticks for that walk at most (on top of `timeoutTicks`). Default 300. */
+  hardTicks?: number;
 }
 
 export type CollectResult = SkillResult & {
@@ -57,6 +78,10 @@ export type CollectResult = SkillResult & {
   skipped: number;
   ticks: number;
   corrections: number;
+  /** Walks that may dig and place (`hard`), scaffold blocks they placed and left in the world. */
+  hardWalks?: number;
+  scaffoldPlaced?: number;
+  scaffoldLeft?: number;
 };
 
 const ITEM = 'minecraft:item';
@@ -80,6 +105,10 @@ export async function collectItems(radius: number, timeoutTicks: number, deps: C
   const elapsed = () => Number(deps.state().tick - tick0);
   let ticks = 0;
   let pickedUp = 0;
+  const hardTried = deps.hardTried ?? new Set<bigint>();
+  let hardWalks = 0;
+  let scaffoldPlaced = 0;
+  let scaffoldLeft = 0;
   const result = (r: SkillResult): CollectResult => {
     const after = totals(deps.inventory.slots);
     const gained: Record<string, number> = {};
@@ -87,8 +116,10 @@ export async function collectItems(radius: number, timeoutTicks: number, deps: C
       const d = c - (before.get(n) ?? 0);
       if (d > 0) gained[n] = d;
     }
-    const out = { ...r, gained, pickedUp, skipped: skip.size, ticks: elapsed(), corrections: deps.state().corrections - c0 };
-    log.info(`collect r=${radius}: ${r.ok ? 'ok' : r.reason}, gained ${JSON.stringify(gained)}, ${pickedUp} picked up, ${skip.size} skipped, ${ticks} ticks`);
+    const out: CollectResult = { ...r, gained, pickedUp, skipped: skip.size, ticks: elapsed(), corrections: deps.state().corrections - c0 };
+    if (hardWalks) Object.assign(out, { hardWalks, scaffoldPlaced, scaffoldLeft });
+    const hard = hardWalks ? `, ${hardWalks} hard walk(s) (${scaffoldPlaced} scaffold placed, ${scaffoldLeft} left)` : '';
+    log.info(`collect r=${radius}: ${r.ok ? 'ok' : r.reason}, gained ${JSON.stringify(gained)}, ${pickedUp} picked up, ${skip.size} skipped, ${ticks} ticks${hard}`);
     return out;
   };
   const candidates = (): EntityInfo[] =>
@@ -101,7 +132,8 @@ export async function collectItems(radius: number, timeoutTicks: number, deps: C
         Math.hypot(e.pos.x - origin.x, e.pos.y - origin.y, e.pos.z - origin.z) <= radius,
     );
 
-  while ((ticks = elapsed()) < timeoutTicks) {
+  let hardTicks = 0; // ticks spent in hard walks and their cleanup: on top of timeoutTicks
+  while ((ticks = elapsed()) - hardTicks < timeoutTicks) {
     if (deps.cancelled()) return result({ ok: false, reason: 'interrupted' });
     const all = candidates();
     const fits = all.filter((e) => deps.inventory.room(e.item!.name, maxStackOf(e.item!.name)) > 0);
@@ -137,6 +169,26 @@ export async function collectItems(radius: number, timeoutTicks: number, deps: C
     const goal: NavGoal = { type: 'any', goals: [{ type: 'near', p: { x: e.pos.x, y: cell.y, z: e.pos.z }, r: opts.near ?? 0.8 }, { type: 'getToBlock', p: cell, reach: 1.6, face: false, low: 2 }] };
     const g = await deps.goto(goal, { timeoutTicks: Math.max(20, Math.min(400, timeoutTicks - ticks)) });
     if (!g.ok && g.reason === 'interrupted') return result({ ok: false, reason: 'interrupted' });
+    if (!g.ok && g.reason === 'unreachable' && opts.hard && deps.hardGoto && !hardTried.has(e.runtimeId) && (!opts.hardFilter || opts.hardFilter(e.item!))) {
+      // on a ledge, in a hole: one walk that may dig and place, its scaffold dug again after the pickup
+      hardTried.add(e.runtimeId);
+      hardWalks++;
+      const h0 = elapsed();
+      const record = new ScaffoldRecord();
+      const left = opts.hardTicks ?? 300; // on top of the collect's own time: a pillar of 4 takes about 60 ticks plus the walk
+      const h = await deps.hardGoto(goal, { allowBreak: true, allowPlace: true, timeoutTicks: left }, record, opts.hardBlocks ?? 8);
+      log.info(`collect: ${e.item!.name} at ${e.pos.x.toFixed(1)} ${e.pos.y.toFixed(1)} ${e.pos.z.toFixed(1)}: walk with digging / placing ${h.ok ? 'ok' : h.reason}, ${record.size} scaffold block(s)`);
+      if (h.ok) {
+        for (let i = 0; i < 10 && deps.entities().has(e.runtimeId); i++) await deps.waitTicks(1);
+        if (!deps.entities().has(e.runtimeId)) pickedUp++;
+      }
+      scaffoldPlaced += record.size;
+      if (record.size > 0 && deps.clearScaffold) scaffoldLeft += (await deps.clearScaffold(record)).left.length;
+      else scaffoldLeft += record.size;
+      hardTicks += elapsed() - h0;
+      if (deps.cancelled()) return result({ ok: false, reason: 'interrupted' });
+      continue;
+    }
     if (!g.ok && g.reason === 'unreachable') {
       // e.g. on top of leaves; try again later (leaves decay), then give up on it
       log.info(`collect: ${e.item!.name} at ${e.pos.x.toFixed(1)} ${e.pos.y.toFixed(1)} ${e.pos.z.toFixed(1)} unreachable (attempt ${n})`);

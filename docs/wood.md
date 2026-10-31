@@ -55,8 +55,9 @@ trees <n>, corrections <n>, deaths <n>`.
 | File | What |
 |---|---|
 | `bot/src/skills/tree/tree.ts` | `detectTree`, `treesFrom`, `remainingLogs`, `logKind`, `isLog`, `isLeaves` (pure, over a block lookup) |
-| `bot/src/skills/tree/feller.ts` | `fellTree` (bottom-up felling with re-pathing), `standSpots` |
-| `bot/src/skills/collect/collect.ts` | `collectItems` (walk over item entities, inventory-full detection) |
+| `bot/src/skills/tree/feller.ts` | `fellTree` (bottom-up felling with re-pathing and pillar-up), `standSpots`, `pillarSpots`, `planColumn` |
+| `bot/src/skills/place/scaffold.ts` | `ScaffoldRecord` (cells placed as scaffold), `pillarStep`, `clearScaffold` (dig it again), `dropUnder` |
+| `bot/src/skills/collect/collect.ts` | `collectItems` (walk over item entities, inventory-full detection, the `hard` walk that may dig and place) |
 | `bot/src/skills/container/chest.ts` | `ChestSkill` (open / deposit / close), `clickBlockTransaction`, `maxStackOf` |
 | `bot/src/world/containers.ts` | `Containers`: container_open / container_close, item_stack_request with prediction, item_stack_response |
 | `bot/src/world/inventory.ts` | raw wire `ItemV4` per slot (`rawItem`), `setItem`, `removeWindow`, `freeSlots`, `room` (additions) |
@@ -80,7 +81,8 @@ returns the full `DigResult` (`DigOptions` / `DigResult` are exported from `skil
 
 - **Detection** from any log: flood fill over logs of the **same kind** (`oak_log` -> oak; stripped
   logs never count), 26-connected (branches touching only by an edge or corner belong to the tree),
-  at most 96 logs and 8 blocks horizontally from the start log. It is a tree when at least 3 leaves
+  at most 160 logs (a 2 x 2 trunk 30 high and its branches; 96 before 2026-10-30) and 8 blocks
+  horizontally from the start log, at most 8 logs in the lowest layer (a log wall is not a tree). It is a tree when at least 3 leaves
   are within 2 blocks of its logs and its lowest logs stand on soil (dirt, grass, podzol, mud ...);
   a log column on planks or without leaves is refused (`minLeaves: 0`, `requireSoil: false` relax
   that). Two trunks side by side are one tree; canopies that touch do not join trees.
@@ -93,12 +95,72 @@ returns the full `DigResult` (`DigOptions` / `DigResult` are exported from `skil
   blocks horizontally and 6 below / 1 above the log from which it is in reach (reach - 0.25 margin)
   is scored by `-3 x (remaining logs in reach) + distance to the trunk + 0.3 x distance to the bot
   + 0.5 x height difference`; the bot walks to the best (up to 4 tries). A log no cell reaches is
-  skipped and reported in `left` (`{ ok: false, reason: 'logs_left' }`).
-- **Pillar-up is not implemented** (it needs block placement under the feet while jumping). Trees
-  taller than 7 logs on flat ground therefore leave their top logs (unit test: a 9-high trunk ends
-  with 7 broken, 2 left). None of the test trees (4..6) needs it.
-- **Only logs are dug.** `fellTree` refuses any other block unless `allowDig(name)` says yes
-  (`--allow-dig`); leaves are never broken by default.
+  skipped and reported in `left` (`{ ok: false, reason: 'logs_left' }`), unless a pillar reaches it.
+- **Pillar-up** (2026-10-30, decision 0051): see below. Without throwaway blocks a log no stand cell
+  reaches is skipped as before (unit test: a 9-high trunk ends with 7 broken, 2 left, and the log
+  line says `no throwaway blocks for a pillar`).
+- **Only logs are dug** besides the pillar's way: `fellTree` refuses any other block unless
+  `allowDig(name)` says yes (`--allow-dig`). Leaves are dug only where they are in the pillar's column
+  (the head room of the next jump), its own scaffold blocks only when it digs them down.
+
+## Pillar-up (decision 0051)
+
+The owner (2026-10-30): "When gathering items, why is it not building like temporary pillars it then
+destroys? [...] with wood it kind of gets stuck on tall trees. It does end up leaving floating tree
+parts". When no stand cell reaches the next log and the bot carries throwaway blocks
+(`DEFAULT_THROWAWAY`: cobblestone, dirt, cobbled deepslate, netherrack, stone ...; the same list as the
+navigator's pillar move), the feller builds a temporary pillar. Of the kinds carried it places those the
+hotbar's tools (or the hand) harvest, fastest to dig first (`BotSkills.scaffoldItems`): without a pickaxe
+dirt, not cobblestone (the first e2e run dug cobblestone by hand: 200 ticks a block, and no drop).
+
+
+
+1. **Column** (`pillarSpots`): every column within 2 blocks of the log (the trunk column itself once its
+   lower logs are gone). Its foot is the first cell under the log's height that is not passable (air,
+   leaves and the tree's own logs are passable) and must be standable with the feet and head cells free.
+   `planColumn` finds the lowest top feet height from which the log is in reach (reach 4.75 and the
+   server corner limit) and checks every cell from the foot to 2 above the top (the jump's head room):
+   passable, none inside the protected area. Score: blocks + 0.5 x leaves - 2 x logs reachable from the
+   top + 0.1 x walk. At most `maxScaffold` (40) blocks and never more than the throwaway blocks carried
+   (the keeper's reserve is lent, as the build runner does: the blocks come back).
+2. **Climb**: walk to the foot (`goto block`, no digging), then per block: dig the head room (2 and 3
+   above the feet: leaves, or a log of the tree, which counts as felled), `PlaceSkill.place(feet cell)`
+   (jump, place under the feet, land), record the cell (`ScaffoldRecord`, with the block placed).
+3. **Fell from the pillar**: the loop digs every log in reach; when the next log is above, the pillar
+   grows in the same column (2 tries per log); when it is not reachable from this column the bot
+   comes down first and the loop starts over from the ground (stand cells, then another pillar).
+   It never walks off the pillar.
+4. **Come down** (`clearScaffold`, also at the end): standing on a recorded cell, dig the block under
+   the feet and drop one block (no fall damage), down to the ground. The drop of each block falls with
+   the bot and is picked up on the way. Only recorded cells that still hold the block placed there are
+   dug; a recorded cell holding anything else is never touched.
+
+Protected area: nothing is placed and no leaves are dug within `protectRadius` of home (the navigator's
+break rules' distance test, `BotSkills.inProtectedArea`). A log only a pillar would reach there is
+skipped with `no pillar: inside the protected area (no scaffold in the base)` in the log; logs the
+ground reaches are felled as before. `FellResult` adds `pillars`, `scaffoldPlaced`, `scaffoldRemoved`,
+`scaffoldLeft` (with why), `leavesDug`.
+
+### Temporary scaffold in general (`skills/place/scaffold.ts`)
+
+`ScaffoldRecord` holds the cells a job step placed only to reach something; `clearScaffold` digs them
+at the end of the step: down the column the bot stands on (a dig-down that would drop it more than
+3 blocks is refused: that block stays), else it walks onto the top of a column (no digging or placing
+on the way) and digs it down, else it digs a cell in reach from the side only while it stands on
+natural ground no higher than that column's top (so the scaffold is never its way down). Anything else
+stays and is logged as `scaffold: leaving x,y,z (...)`: removing it would strand the bot.
+
+### Pickups that may dig and place (`collect` with `hard`)
+
+An item the plain walk reports `unreachable` (a drop on a ledge, in a hole, caught on leaves) gets one
+walk (`BotSkills.scaffoldGoto`) with `allowBreak` and `allowPlace`, under the navigator's rules
+(protected area, built blocks, `digPenalty`, throwaway blocks; without throwaway blocks it may only
+dig). Bounds: `hardBlocks` (8) blocks dug + placed (the walk stops with `block_budget` beyond),
+`hardTicks` (300) ticks, one such walk per item actor across collects (the sweeps run before every
+target). The blocks the navigator placed on that walk (its place action reports each one) are
+scaffold and are dug again after the pickup. Who uses it: gather wood's collect after each tree (logs
+only, `hardFilter`), the floor sweeps (`sweepItems`: wood, food, mine), the miner's collects and its
+pickup walks. `CollectResult` adds `hardWalks`, `scaffoldPlaced`, `scaffoldLeft`.
 
 Test trees (`packs/truth/src/woodShapes.ts`, placed by `truth:tree`): a log column 4..6 high, leaves
 radius 2 without corners at top - 1 and top, a plus shape at top + 1 and top + 2. The lowest leaves
@@ -250,6 +312,7 @@ four runs the logs dropped at the death were picked up again by a later collect.
 | `bot/test/unit/skills/tree.test.ts` | detection from every log, branches, touching trees, kinds, refusals (bare column, not on soil, too big), order, `treesFrom` |
 | `bot/test/unit/skills/tree-feller.test.ts` | closed loop (FakeConnection + InputLoop + BotSkills + a stand-in server that breaks a block 3 ticks after start_break): bottom-up order, re-path, 9-high trunk leaves 2, cancel, a new skill cancels the running one, `standSpots` |
 | `bot/test/unit/skills/collect.test.ts` | nearest first, inventory full, partial stacks, unreachable, never picked up, filter, cancel, timeout |
+| `bot/test/unit/skills/tree-pillar.test.ts` | pillar-up on fakes: a 20-high spruce and a 2 x 2 jungle 25 high felled, every scaffold block dug again, only its own blocks dug, falls of 1; no throwaway blocks = as before; protected area; `planColumn` / `pillarSpots`; `clearScaffold` (a replaced block left alone, a drop of 5 refused, a column walked onto from a ledge); collect's `hard` walk |
 | `bot/test/unit/skills/container.test.ts` | window tracking, the exact request shape, prediction / reconciliation / rollback / timeout, serialisation round trip with the 1.26.60 protocol, `ChestSkill` open / deposit / close / container_full / refusals |
 | `bot/test/unit/skills/gather.test.ts` | state machine with fake skills: one trip, inventory full, failing trees, no chest, death pause/resume, stop/waiting; `!gather` parsing |
 | `packs/truth/test/unit/wood-shapes.test.ts` | `treeShape` |
@@ -257,6 +320,7 @@ four runs the logs dropped at the death were picked up again by a later collect.
 | `bot/test/e2e/wood-chest.test.ts` | 4.5 on `chest-room` |
 | `bot/test/e2e/wood-gather.test.ts` | 4.6 from the CLI on `gather-forest` (24 trees, about 120 logs) |
 | `bot/test/e2e/wood-death.test.ts` | the CLI bot is killed while carrying logs and still delivers 15 logs |
+| `bot/test/e2e/wood-pillar.test.ts` | pillar-up: a 20-high spruce and a 2 x 2 jungle 22 high felled with no log and no cobblestone left, back on the ground, no damage; a log on a 4-high ledge picked up with the `hard` walk and its scaffold dug again |
 
 Server and pack:
 

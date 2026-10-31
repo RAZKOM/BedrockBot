@@ -88,6 +88,15 @@ blocks (1.5 high) are obstacles, never floors. Costs are ticks (`DEFAULT_COSTS`)
 | climbOut | 4 cardinal off a climb node | a floor beside the column, feet from the node's level up to 1 above | `climbUp` x rise + `walk` + `climbExit` 8 |
 | parkour | 4 cardinal | 1- or 2-block gap at the feet level, clear up to the head (+3), a floor at most 3 below or water at most 4 below, no lava / hazard / ladder in it; full-block landing at the same height or 1 lower that stops an overshoot; 2-block gaps need 2 standable cells behind the takeoff | g x `walk` + `parkourAir` 12 (1 lower: `parkourAirDown` 14) + `parkourRisk` 10 (+ `parkourRunUp` 12 for g = 2) |
 
+Scaffold walks (2026-10-30, decision 0051; no planner change): `BotSkills.scaffoldGoto` runs a goto with
+`allowBreak` + `allowPlace` while a hook on the navigator's `dig` / `place` actions records every block the
+walk places (`ScaffoldRecord`, skills/place/scaffold.ts) and counts dug + placed blocks; past the budget it
+cancels the walk (`block_budget`). During such a walk the pillar places the throwaway kinds that come back
+when dug (`BotSkills.scaffoldItems`: harvestable by the hotbar's tools or the hand, the fastest first). The
+collect skill's `hard` option uses it for items the plain walk cannot reach and digs the recorded blocks
+again afterwards (docs/wood.md "Pickups that may dig and place"). The feller's pillar does not use the
+planner: it places with the PlaceSkill directly (docs/wood.md "Pillar-up").
+
 Every move into node B also pays: B's floor `costFactor` (x 5 on leaves, soul sand, honey, slime, mud,
 ice) on the base cost, and `underground` (6) when a roof block is anywhere above B's head. Lava and
 hazards are never entered; water only by the swim moves, on its surface (Track AJ). Heuristic: `walk` x octile distance, plus for

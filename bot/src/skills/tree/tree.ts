@@ -41,7 +41,7 @@ export interface Tree {
 }
 
 export interface TreeOptions {
-  /** Max logs in one tree (bigger structures are refused: houses, log piles). Default 96. */
+  /** Max logs in one tree (bigger structures are refused: houses, log piles). Default 160 (a 2 x 2 jungle or spruce trunk 30 high with its branches). */
   maxLogs?: number;
   /** Max horizontal distance of a log from the start log. Default 8. */
   radius?: number;
@@ -49,6 +49,8 @@ export interface TreeOptions {
   minLeaves?: number;
   /** The base must stand on soil (dirt, grass ...). Default true. */
   requireSoil?: boolean;
+  /** Max logs in the lowest layer (a 2 x 2 trunk is 4, two trunks side by side 2 to 8; a log wall more). Default 8. */
+  maxBase?: number;
   /**
    * Logs to leave alone (the navigator's failure blacklist: logs nobody could get to). `treesFrom`
    * starts no tree from them and drops a tree whose every log is skipped.
@@ -67,7 +69,7 @@ export function detectTree(blockAt: BlockLookup, start: Vec3, opts: TreeOptions 
   const s = { x: Math.floor(start.x), y: Math.floor(start.y), z: Math.floor(start.z) };
   const kind = logKind(blockAt(s)?.name);
   if (!kind) return undefined;
-  const maxLogs = opts.maxLogs ?? 96;
+  const maxLogs = opts.maxLogs ?? 160;
   const radius = opts.radius ?? 8;
   const seen = new Set<string>([key(s)]);
   const logs: Vec3[] = [];
@@ -100,6 +102,7 @@ export function detectTree(blockAt: BlockLookup, start: Vec3, opts: TreeOptions 
   const top = Math.max(...logs.map((p) => p.y));
   // trunk axis: the mean x/z of the lowest layer
   const bottom = logs.filter((p) => p.y === minY);
+  if (bottom.length > (opts.maxBase ?? 8)) return undefined; // a wall or a pile, not a trunk
   const ax = bottom.reduce((a, p) => a + p.x, 0) / bottom.length;
   const az = bottom.reduce((a, p) => a + p.z, 0) / bottom.length;
   const axial = (p: Vec3) => Math.hypot(p.x - ax, p.z - az);

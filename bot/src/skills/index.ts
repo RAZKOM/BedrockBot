@@ -33,6 +33,10 @@ import { angleDiff, turnTowards, yawTowards } from './nav/follower.ts';
 import { blockQueryOf, worldSource, type BlockStore } from './terrain/query.ts';
 import { UseSkill, type UseOptions, type UseResult } from './interact/use.ts';
 import { PlaceSkill, type PlaceOptions, type PlaceResult } from './place/place.ts';
+import { clearScaffold, type ClearResult, type ScaffoldRecord } from './place/scaffold.ts';
+import { estimateBreak } from './dig/breakTime.ts';
+import { blockMining, toolOf } from '../data/mining.ts';
+import type { GotoOptions } from './types.ts';
 import { fellTree, type FellOptions, type FellResult } from './tree/feller.ts';
 import { detectTree, treesFrom, type Tree, type TreeOptions } from './tree/tree.ts';
 import type { SkillResult, Skills } from './types.ts'; // Track R: goto takes NavGoal / NavGotoOptions now
@@ -125,6 +129,12 @@ export class BotSkills implements Skills {
   private _user: UseSkill | undefined;
   /** Bumped by every public skill call and by cancel(); compound skills stop when it changes. */
   private epoch = 0;
+  /** Blocks the navigator places / digs while a scaffold walk runs (scaffoldGoto): recorded and counted. */
+  private navHook: { placed(p: Vec3, name: string): void; dug(p: Vec3): void } | undefined;
+  /** Throwaway blocks the navigator's pillar and the feller's pillar place (NavActions.throwawayItems). */
+  private readonly throwawayItems: readonly string[];
+  /** Item actors a collect already tried a walk with digging / placing for (one per item; trimmed at 256). */
+  private readonly hardTried = new Set<bigint>();
   private runningName: string | undefined;
   private runningEpoch = -1;
 
@@ -132,6 +142,7 @@ export class BotSkills implements Skills {
     this.loop = opts.loop;
     this.world = opts.world;
     this.log = opts.logger ?? silentLogger;
+    this.throwawayItems = opts.actions?.throwawayItems ?? DEFAULT_THROWAWAY;
     this.attach(opts);
     const source = worldSource(opts.world);
     if (opts.usePhysicsWorld ?? true) this.loop.world = blockQueryOf(source);
@@ -166,12 +177,19 @@ export class BotSkills implements Skills {
         logger: this.log,
         // the navigator's dig-through move breaks blocks with the Digger directly (not this.dig(), which would cancel the goto)
         actions: {
-          dig: (p) => this.digger?.dig(p) ?? Promise.resolve({ ok: false, reason: 'no_digger' }),
+          dig: (p) =>
+            (this.digger?.dig(p) ?? Promise.resolve({ ok: false as const, reason: 'no_digger' })).then((r) => {
+              if (r.ok) this.navHook?.dug(p); // a scaffold walk counts its digs
+              return r;
+            }),
           // pillar-up and door moves use the PlaceSkill / UseSkill objects directly for the same reason; the navigator names
           // the neighbour it clicks across `face` (pillar: 'down'), the PlaceSkill the support face it clicks (pillar: 'up')
           place: (p, face) =>
-            this.placer?.place(p, { face: oppositeFace(face), item: [...(opts.actions?.throwawayItems ?? DEFAULT_THROWAWAY)], look: false }) ??
-            Promise.resolve({ ok: false as const, reason: 'no_placer' }),
+            // a scaffold walk places the kinds that come back when dug again (scaffoldItems)
+            (this.placer?.place(p, { face: oppositeFace(face), item: this.navHook ? this.scaffoldItems() : [...(opts.actions?.throwawayItems ?? DEFAULT_THROWAWAY)], look: false }) ?? Promise.resolve({ ok: false as const, reason: 'no_placer' })).then((r) => {
+              if (r.ok) this.navHook?.placed(p, ('block' in r ? r.block : undefined) ?? this.world.blockAt?.(p)?.name ?? 'unknown'); // a scaffold walk records what it placed
+              return r;
+            }),
           useBlock: (p) => this.user?.useBlock(p, { want: 'toggle' }) ?? Promise.resolve({ ok: false as const, reason: 'no_user' }),
           ...opts.actions,
         },
@@ -382,6 +400,7 @@ export class BotSkills implements Skills {
     if (!entities || !inventory) {
       return Promise.resolve({ ok: false, reason: 'no_entities', gained: {}, pickedUp: 0, skipped: 0, ticks: 0, corrections: 0 });
     }
+    if (this.hardTried.size > 256) this.hardTried.clear();
     return this.run('collect', (cancelled) =>
       collectItems(
         radius,
@@ -394,10 +413,103 @@ export class BotSkills implements Skills {
           inventory,
           cancelled,
           logger: this.log,
+          hardGoto: (g, o, record, maxBlocks) => this.scaffoldGoto(g, o, record, maxBlocks),
+          hardTried: this.hardTried,
+          clearScaffold: (record) => this.clearScaffold(record, cancelled),
         },
         opts,
       ),
     );
+  }
+
+  /**
+   * A goto that may dig and place (the navigator's allowBreak / allowPlace, under the same rules: protected area,
+   * digPenalty, throwaway blocks): every block it places goes into `record` (scaffold to dig again later), and it
+   * stops with 'block_budget' once it placed and dug more than `maxBlocks` blocks. Not a public skill: the
+   * compound skills call it between their own steps.
+   */
+  async scaffoldGoto(goal: NavGoal, o: GotoOptions, record: ScaffoldRecord, maxBlocks: number): Promise<SkillResult> {
+    let n = 0;
+    let over = false;
+    const count = () => {
+      if (++n > maxBlocks && !over) {
+        over = true;
+        this.nav.cancel();
+      }
+    };
+    const hook = {
+      placed: (p: Vec3, name: string) => {
+        record.add(p, name);
+        count();
+      },
+      dug: (p: Vec3) => {
+        record.delete(p);
+        count();
+      },
+    };
+    this.navHook = hook;
+    try {
+      const r = await this.nav.goto(goal, o);
+      return over ? { ok: false, reason: 'block_budget' } : r;
+    } finally {
+      if (this.navHook === hook) this.navHook = undefined;
+    }
+  }
+
+  /** Dig the recorded scaffold again (place/scaffold.ts): down its column, else from the side when safe. */
+  clearScaffold(record: ScaffoldRecord, cancelled: () => boolean = () => false): Promise<ClearResult> {
+    const w = this.world;
+    const d = this.digger;
+    if (!w.blockAt || !d) return Promise.resolve({ removed: [], left: record.cells.map((c) => ({ p: c.p, why: 'no digger' })), gone: [] });
+    return clearScaffold(record, {
+      blockAt: w.blockAt.bind(w),
+      state: () => this.loop.state,
+      dig: (p, o) => d.dig(p, o),
+      goto: (g, o) => this.nav.goto(g, o),
+      waitTicks: (n) => this.loop.waitTicks(n),
+      cancelled,
+      logger: this.log,
+    });
+  }
+
+  /** Throwaway blocks carried (inventory and hotbar), of `kinds` (default every throwaway kind). */
+  throwawayCount(kinds: readonly string[] = this.throwawayItems): number {
+    const inv = this.world.inventory;
+    if (!inv) return 0;
+    let n = 0;
+    for (const s of inv.slots.slice(0, 36)) if (s && kinds.includes(s.name)) n += s.count;
+    return n;
+  }
+
+  /**
+   * The throwaway kinds carried that make good scaffold, best first: kinds the hotbar's best tool (or the hand) harvests
+   * (they drop when dug again: cobblestone without a pickaxe is lost and takes 10 s per block), then the fastest to dig.
+   * Only the harvestable kinds when there are any (2026-10-30 e2e: cobblestone dug by hand, 200 ticks a block, no drop).
+   */
+  scaffoldItems(): string[] {
+    const inv = this.world.inventory;
+    if (!inv) return [...this.throwawayItems];
+    const carried = this.throwawayItems.filter((n) => this.throwawayCount([n]) > 0);
+    const tools = [null, ...inv.slots.slice(0, 9).map((s) => s?.name ?? null)];
+    const rank = (name: string): { harvest: boolean; ticks: number } => {
+      const b = blockMining(name);
+      if (!b) return { harvest: false, ticks: Infinity };
+      let best = { harvest: false, ticks: Infinity };
+      for (const t of tools) {
+        const e = estimateBreak(b, toolOf(t));
+        if ((e.canHarvest && !best.harvest) || (e.canHarvest === best.harvest && e.ticks < best.ticks)) best = { harvest: e.canHarvest, ticks: e.ticks };
+      }
+      return best;
+    };
+    const ranked = carried.map((n) => ({ n, ...rank(n) })).sort((a, b) => Number(b.harvest) - Number(a.harvest) || a.ticks - b.ticks);
+    const good = ranked.filter((r) => r.harvest);
+    return (good.length ? good : ranked).map((r) => r.n);
+  }
+
+  /** Inside the protected area (the base around home, protectRadius): the navigator's break rules' distance test. */
+  private inProtectedArea(p: Vec3): boolean {
+    const a = this.nav.breakRules().protectedArea;
+    return !!a && Math.hypot(p.x + 0.5 - a.x, p.y + 0.5 - a.y, p.z + 0.5 - a.z) <= a.r;
   }
 
   /** Open a chest or barrel next to the bot; rejects with the reason when it does not open. */
@@ -488,6 +600,15 @@ export class BotSkills implements Skills {
           cancelled,
           logger: this.log,
           blacklist: this.nav.blacklist, // Track R
+          // pillar-up next to a tall trunk (decision 0051): the PlaceSkill directly (not this.place, which would cancel the fell)
+          ...(this.placer
+            ? {
+                place: (p: Vec3) => this.placer?.place(p, { face: 'up', item: this.scaffoldItems(), look: false }) ?? Promise.resolve({ ok: false, reason: 'no_placer' }),
+                throwaways: () => this.throwawayCount(this.scaffoldItems()),
+              }
+            : {}),
+          protectedAt: (p) => this.inProtectedArea(p),
+          waitTicks: (n) => this.loop.waitTicks(n),
         },
         opts,
       ),
