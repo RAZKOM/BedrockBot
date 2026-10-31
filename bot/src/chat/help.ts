@@ -80,7 +80,7 @@ export const SETTING_GROUPS: readonly (readonly [string, readonly string[]])[] =
   ['safety', ['fleeHealth', 'guardRadius', 'guardReach', 'guardWhileWalking', 'avoidMobRadius', 'avoidSpawnerRadius', 'protectRadius', 'autoSleep', 'longFalls', 'fallMargin', 'clutch', 'clutchMaxDrop']],
   ['walking', ['allowBreak', 'allowPlace', 'closeDoors', 'closeTrapdoors', 'sprint', 'followDistance', 'plannerThreads', 'digPenalty', 'portalRadius']],
   ['work', ['mineMode', 'mineSeenOnly', 'mineDirect', 'mineTunnelLen', 'mineBranchY', 'exploreRadius', 'useBoneMeal', 'toolWearLimit', 'throwawayMin', 'buildScaffold', 'craftReserve']],
-  ['food', ['autoFood', 'foodMin', 'foodLeave', 'autoBreed', 'chorePen']],
+  ['food', ['autoFood', 'foodMin', 'foodLeave', 'autoBreed', 'chorePen', 'foodReserve', 'seedReserve']],
   ['home', ['stashChest', 'stashShulker', 'keepBoxName', 'homeChestRadius', 'homeChestWalk', 'autoUnload', 'compactOnUnload', 'getSuggestsBring']],
   ['flight', ['autoFly', 'flyMin', 'flyClearance', 'flyCruise', 'flyGoArounds', 'fireworksMin', 'flyTakeoffRun', 'flyRetryBlocks', 'flyMaxClimb', 'flyMargin', 'flyLandSearch', 'flyLandProbes', 'flyHoldS', 'flyHeadroom', 'flyOverhangDepth', 'flySneakLand', 'flyLedgeTakeoff', 'glideDown', 'glideDownMinDrop', 'glideDownMinDistance']],
   ['chat', ['nlConfirm', 'chatColor', 'chatLines', 'chatVia', 'lastWelcomed']],
