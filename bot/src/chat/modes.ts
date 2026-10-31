@@ -8,6 +8,7 @@
 import { formatSettingValue, SETTING_DEFS, type RuntimeSettings, type SettingKey } from '../config/settings.ts';
 import { findCookers, rawFoodCounts } from '../skills/food/finder.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
+import { registerStyleCommands } from './commands-style.ts';
 import { hintFor } from './help.ts';
 import { attachWelcome } from './welcome.ts';
 
@@ -95,6 +96,9 @@ export function registerUxCommands(d: CommandDeps): void {
     },
   });
   chat.helpSettings = { get: (k) => settings.get(k), mode: () => modeLine(settings) };
+  // chat style (docs/chat-style.md): the two switches are read live on every message; `!colors` demos them
+  chat.styleSource = { color: () => settings.get('chatColor'), lines: () => settings.get('chatLines'), via: () => settings.get('chatVia') };
+  registerStyleCommands(chat);
   const world = d.world;
   chat.hinter = (m) =>
     hintFor(
@@ -121,6 +125,7 @@ export function registerUxCommands(d: CommandDeps): void {
   d.task.stop = () => {
     offWelcome();
     chat.hinter = undefined;
+    chat.styleSource = undefined;
     stop();
   };
 }

@@ -71,12 +71,20 @@ export interface HelpSettings {
   mode?: () => string;
 }
 
-/** Settings by group for `!help settings` and the panel (a key not listed lands in `other`). */
+/**
+ * Settings by group for `!help settings`, `!set` and the panel. EVERY setting belongs to a group here: a
+ * unit test (test/unit/chat/style.test.ts) fails for a key in no group, so a new setting is placed when it
+ * is added (an ungrouped key would land in a catch-all `other` blob, which is what this list prevents).
+ */
 export const SETTING_GROUPS: readonly (readonly [string, readonly string[]])[] = [
-  ['safety', ['fleeHealth', 'guardRadius', 'avoidMobRadius', 'avoidSpawnerRadius']],
-  ['walking', ['allowBreak', 'allowPlace', 'closeDoors', 'closeTrapdoors', 'sprint', 'followDistance', 'plannerThreads']],
-  ['work', ['mineSeenOnly', 'mineDirect', 'mineTunnelLen', 'useBoneMeal', 'toolWearLimit', 'throwawayMin', 'stashChest', 'stashShulker']],
+  ['safety', ['fleeHealth', 'guardRadius', 'guardReach', 'guardWhileWalking', 'avoidMobRadius', 'avoidSpawnerRadius', 'protectRadius', 'autoSleep', 'longFalls', 'fallMargin', 'clutch', 'clutchMaxDrop']],
+  ['walking', ['allowBreak', 'allowPlace', 'closeDoors', 'closeTrapdoors', 'sprint', 'followDistance', 'plannerThreads', 'digPenalty', 'portalRadius']],
+  ['work', ['mineMode', 'mineSeenOnly', 'mineDirect', 'mineTunnelLen', 'mineBranchY', 'exploreRadius', 'useBoneMeal', 'toolWearLimit', 'throwawayMin', 'buildScaffold', 'craftReserve']],
   ['food', ['autoFood', 'foodMin', 'foodLeave', 'autoBreed', 'chorePen']],
+  ['home', ['stashChest', 'stashShulker', 'keepBoxName', 'homeChestRadius', 'homeChestWalk', 'autoUnload', 'compactOnUnload', 'getSuggestsBring']],
+  ['flight', ['autoFly', 'flyMin', 'flyClearance', 'flyCruise', 'flyGoArounds', 'fireworksMin', 'flyTakeoffRun', 'flyRetryBlocks', 'flyMaxClimb', 'flyMargin', 'flyLandSearch', 'flyLandProbes', 'flyHoldS', 'flyHeadroom', 'flyOverhangDepth', 'flySneakLand']],
+  ['chat', ['nlConfirm', 'chatColor', 'chatLines', 'chatVia', 'lastWelcomed']],
+  ['system', ['nudgeInterval']],
 ];
 
 /** [group, keys] for every setting key that exists (unknown names dropped, the rest in `other`). */
@@ -113,7 +121,7 @@ export function pack(parts: readonly string[], max: number, first = '', next = '
   return lines.map((l) => (l.length > max ? `${l.slice(0, max - 3)}...` : l));
 }
 
-function byGroup(infos: readonly CommandInfo[]): [CommandGroup, CommandInfo[]][] {
+export function byGroup(infos: readonly CommandInfo[]): [CommandGroup, CommandInfo[]][] {
   const out: [CommandGroup, CommandInfo[]][] = [];
   for (const g of GROUP_ORDER) {
     const list = infos.filter((c) => c.group === g);
@@ -129,7 +137,7 @@ export interface HelpOptions {
   settings?: HelpSettings | undefined;
 }
 
-const FOOTER = (p: string, mode: boolean): string => `more: ${mode ? `${p}mode careful|normal|bold, ` : ''}${p}help settings, ${p}help all, ${p}help <command>`;
+export const FOOTER = (p: string, mode: boolean): string => `more: ${mode ? `${p}mode careful|normal|bold, ` : ''}${p}help settings, ${p}help all, ${p}help <command>`;
 
 /** `!help`: the front door by group, one phrase each; the last line names `!help all` and `!help <command>`. At most 3 messages. */
 export function frontHelp(infos: readonly CommandInfo[], o: HelpOptions = {}): string[] {
