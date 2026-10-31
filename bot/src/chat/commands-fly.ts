@@ -226,6 +226,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     sneakLanding: () => d.settings.get('flySneakLand') === true,
     log,
   });
+  // Track BH: the ledge takeoff's step-off is a fall the flight means: Track BI's clutch never arms while a flight runs
+  const falls = (mob.skills as { falls?: { intended: () => boolean } } | undefined)?.falls;
+  if (falls) falls.intended = () => controller.active;
   const kit = survivalKitOf(task);
   const containers = extra.containers;
   const kitOps = new FlightKitOps({

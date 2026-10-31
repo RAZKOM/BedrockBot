@@ -54,7 +54,8 @@ every member of an `any`, is on the blacklist).
 | `nav/blacklist.ts` | `NavBlacklist`: goals, `any` members and action cells that failed 3 times, skipped for 6000 ticks (see Blacklist). |
 | `nav/follower.ts` | `PathFollower`: a path leg to per-tick MoveCommands; `PressGuard` (no accidental double taps). |
 | `nav/navigator.ts` | `Navigator`: segments, plan-ahead, legs and actions, re-planning, per-move timeouts, retreat, the report. |
-| `index.ts` | `BotSkills` facade: wires `actions.dig` to the Digger (not `this.dig()`, which would cancel the goto) and the world inventory (best tool, throwaway blocks); `place` / `useBlock` are wired by Track O's PlaceSkill / UseSkill. |
+| `index.ts` | `BotSkills` facade: wires `actions.dig` to the Digger (not `this.dig()`, which would cancel the goto) and the world inventory (best tool, throwaway blocks); `place` / `useBlock` are wired by Track O's PlaceSkill / UseSkill. Track BI: builds the `FallGuard` (`skills.falls`), wires `nav.fallPolicy` / `nav.holdPlans` to it and adds the refused-fall note to an `unreachable` goto. |
+| `fall/damage.ts`, `fall/waterlog.ts`, `fall/policy.ts`, `fall/plan.ts`, `fall/explain.ts`, `fall/clutch.ts` | Track BI: the measured fall damage model, the waterloggable table and clutch target, the long-fall policy, the planner's long drops (`longDrops`, called by `astar.ts`), the note on a refused fall, the `FallGuard` (reactive clutch, pickup). See "Long falls" and docs/movement.md "Falls and the water bucket clutch". |
 
 ## Nodes and moves
 
@@ -71,6 +72,7 @@ blocks (1.5 high) are obstacles, never floors. Costs are ticks (`DEFAULT_COSTS`)
 | diag | 4 diagonal | same feet height exactly; both side cells standable at it | `walk` x sqrt 2 |
 | jump | 4 cardinal | rise in (0.5625, 1.25]; the start column free up to the target's head. From a partial floor high in its cell (feet above `y + 0.75`: a chest 0.95, a dirt path 0.9375) the target can be two cells up (a full block beside the node's own cell, Track AX) | `jump` 9 |
 | drop | 4 cardinal | target column free from the feet to the head, fall through free cells, at most 3 blocks | `walk` + fall(n) (5 / 7 / 9) + `landing` 2; + `irreversibleDrop` 30 when higher than 1.25 |
+| long drop (`drop`; Track BI) | 4 cardinal | `falls` policy: nothing to land on within 3, the first floor below within `maxScan` (48); harmless, a water-bucket clutch, or damage within the health budget (see "Long falls") | `walk` + fall(n) + `landing` + `irreversibleDrop` + (0 / `clutchCost` 40 / HP x `hpCost` 40) |
 | walk through a doorway | 4 cardinal | door / gate cells let the 0.6-wide corridor pass now, or after a toggle (needs `useBlock`) | `walk` + `door` 10 per toggle |
 | dig-through (`walk` + `act.dig`; Baritone `MovementTraverse`) | 4 cardinal, same level | `allowBreak` + `dig`; full-block floors; the 1 or 2 body cells ahead are breakable (rules below), the upper one with the falling stack over it (`includeFalling`) | `walk` + per cell (break ticks + `dig` 12) |
 | walk through a doorway | 4 cardinal | door / gate cells let the 0.6-wide corridor pass now, or after a toggle (needs `useBlock`); the doorway within a step of the feet, also one cell up from a partial floor (a dirt path or carpet in front of the door, whose own cell is not part of the corridor), and out of it onto a floor a step lower in the cell below (Track AX) | `walk` + `door` 10 per toggle |
@@ -151,7 +153,7 @@ inside a dirt block in the 48 x 48 test world, 4 405 with it). Not taken from Ba
 breaks nothing either (it edges round one blocked corner, cost x (sqrt 2 - 0.001), and refuses two); ours
 refuses any solid corner because the footprint line check would collide; `MovementTraverse`'s bridge
 branch (placing the floor ahead), `MovementDescend`'s `dynamicFallCost` (longer falls with breaks, falls into
-water, the water bucket) and `MovementFall`'s break column: our drop rules stay; `MovementPillar` on ladders
+water, the water bucket) and `MovementFall`'s break column: our drop rules stay (Track BI added long drops and the clutch with its own code, see "Long falls"); `MovementPillar` on ladders
 and in water columns.
 
 **Breaking rules** (`breakBlocker` = `nav/baritone/helper.ts` `avoidBreaking`, Track BB; the table in
@@ -167,6 +169,45 @@ Search limits: a main plan 20 000 nodes / 40 ms of search time, a plan-ahead 20 
 (`segmentNodes`, `mainMs`, `segmentMs`; `path.maxNodes` / `path.maxMs` override both); a search runs at
 most `sliceMs` (8) per tick. `status`: `found`, `partial` (limit hit, or the search touched unloaded
 world; `unknown` / `limited` say which), `none` (exhaustive and fully known: unreachable).
+
+## Long falls (Track BI, wave 11)
+
+Owner: "When it gets stuck on top of a mountain it determines its end goal unreachable. This is kind of
+silly considering it can fall and survive, or water bucket clutch." The drop move stops at `maxDrop`
+(3 blocks, no damage); with a fall policy (`PathOptions.falls`, read live before every plan:
+`Navigator.fallPolicy`, wired by `BotSkills` to its `FallGuard`, docs/movement.md "Falls and the water
+bucket clutch") a cardinal neighbour whose column is free from the feet down past `maxDrop` is scanned on
+down to `maxScan` (48) blocks (`skills/fall/plan.ts longDrops`, called by `astar.ts` after the plain drop
+scan; the worker runs the same code, the policy is a plain object in `WorkerPlanOptions.falls`). On the
+first floor below it takes the cheapest of:
+
+| Way | When | Cost on top of the drop's ticks (`walk` + fall(n) + `landing`) and `irreversibleDrop` 30 |
+|---|---|---|
+| harmless | the landing does no damage (hay from up to 12 blocks, honey up to 6) | 0 |
+| damage | the damage (measured model, armour enchantments) within `hpBudget` = health + absorption - `fallMargin` (8) | damage x `hpCost` 40 (a 12-block fall, 8 HP: 320 ticks, about 90 blocks of walking) |
+| clutch | a damage drop within the budget that the FallGuard will clutch (`policy.ts clutchHelps`: more than half the budget; `falls.clutch`: a water bucket in the hotbar, the `clutch` setting, not in the Nether; the landing block takes a clutch: a full block that takes no water with air above, or a bottom slab, `waterlog.ts clutchTarget`; the fall at most `clutchMaxDrop` 40; outside `noWater`, home's `protectRadius`). A bucket never makes a drop beyond the budget plannable: a clutch only saves HP, never a life (it can fail; review B1) | `clutchCost` 40 + a quarter of the HP cost (the risk it fails); a tie goes to the damage drop |
+
+Never onto slime or a bed (the body bounces), never into water (the follower's swim move holds forward
+through the fall; the FallGuard handles a fall into water anyway), never with `maxDrop` below 3 (the End).
+The policy is off (`hpBudget` 0, no clutch) while the health is unknown, the bot burns, or a hostile is
+within 16 blocks (`blocked`); harmless landings stay allowed. A long drop is a `drop` node; the follower
+walks it like any drop (creep off the edge, let go of forward in the air), and the FallGuard clutches it by
+its own rule (the planned clutch drop is that reactive clutch). Every tick the body still stands before a
+long drop the navigator asks the live policy again (`Navigator.dropCheck` = `FallGuard.acceptsDrop`, the
+same scan): health dropped, a hostile came, the bucket left the hotbar, the landing changed: the body stops
+and re-plans, and that landing stays out of the plans for 200 ticks (`FallPolicy.refused`, review L1). Until a damaging landing's health packet arrives (or for 40 ticks), its predicted damage counts against the budget (review M1: two chained drops on a laggy server). While the water is picked up the follower holds still (`Navigator.pauseFollow`), and re-plans
+wait until the flow has receded (`Navigator.holdPlans`, 16 ticks after the pickup). A ladder or vine in the
+column ends the scan (no fall: the climb moves).
+
+A goto that ends `unreachable` gets a `note` when a long fall would have reached the goal
+(`fall/explain.ts`: one more plan with the budget lifted, in-thread but capped at 25 ms / 15 000 nodes, and not when the blacklist refused the goal): `the way down is a 12-block drop (8 HP), refused:
+it would leave 4 HP, the margin is 8` (or `refused: on fire`, `a hostile 10 blocks away`, `health
+unknown`, `long falls are off (!set longFalls on)`). `!goto` prints it in parentheses.
+
+Settings: `longFalls` (on), `fallMargin` (8 HP), `clutch` (on), `clutchMaxDrop` (40 blocks). Measured on
+bds-gaunt (`test/e2e/fall-long.test.ts`, twice): the 12-block tower walked in 85 ticks, 8 HP (the model's),
+0 corrections; at health 12 the note above, the body still on top. The planner cost of the scan: 300 random
+paths on the hilly test world, p50 2.44 / p99 18.3 ms without, 2.52 / 18.8 ms with the policy.
 
 ## Rules
 
@@ -680,7 +721,8 @@ on the third, and the next `any` over it and a free log skipped it and reached t
 
 `BotSkills.status()`: health and food, the last 20 health drops (`falling: true` with `fallDistance`
 when the body landed from more than 3 blocks within the 20 ticks before), corrections, knockback
-motions, teleports, inWater / inLava, the last goto.
+motions, teleports, inWater / inLava, the last goto. Track BI: `skills.falls.last` / `stats` for the
+clutch (docs/movement.md "Falls and the water bucket clutch").
 
 ## Measured
 
@@ -697,7 +739,7 @@ What Baritone's movements do and what we kept (`nav/baritone/moves.ts`; the rule
 | `MovementDiagonal` | breaks nothing: edges round one blocked corner (cost x (sqrt 2 - 0.001)), refuses two; ascending / descending diagonals (`allowDiagonalAscend` / `Descend`) | both side cells standable at the same height | ours: the footprint line check (0.62 wide) would collide with a blocked corner, and the cardinal pair plus dig-through covers the route; no diagonal dig move |
 | `MovementDownward` | `canWalkOn` two below; `FALL_N_BLOCKS_COST[1]` + the mining ticks; `allowDownward` setting | none (the miner's shaft only, `mine/tunnel.ts`) | ours (rule 6): the shaft rules (`shaftBlocker`), `allowPlace` with the throwaway blocks for the depth + 4, only towards a goal below; cost fall(1) + `digDown` + the mining ticks; `moves.digDownward` is the switch |
 | `MovementPillar` | break `start.above(2)` (falling stack) with the FallingBlock-above refusal; never from a bottom slab onto a non-ladder, never a fence gate, ladders climbed instead, water columns swum; +0.1 on air | the plain pillar only (head room required) | Baritone's head-room break and refusal; full-block floors (the follower's PlaceSkill); doors and gates refused by the rule set; no ladder / water branches (climb nodes are Track AJ's) |
-| `MovementFall` | the break column over the landing, the water bucket, sneak on magma | the drop rules (3 blocks, free column) | ours: unchanged |
+| `MovementFall` | the break column over the landing, the water bucket, sneak on magma | the drop rules (3 blocks, free column); Track BI: long drops with a damage budget or a water-bucket clutch | ours, not ported: Track BI wrote its own (measured Bedrock damage, the waterloggable table; "Long falls", decision 0049); no break column, no magma sneak |
 | (no Baritone movement) sneak-through | a Java body does not fit under 1.5 blocks either; Baritone sneaks only on magma and for back-placing | a cell with a top slab at head height was BLOCKED | ours (owner, 2026-10-30): the `sneak` move above. Not taken: a descend into such a gap (a sneaking body stops at an edge, physics.ts `backOffFromEdge`; a standing body that falls in lands on the ceiling block), sneaking under a ceiling while digging (digs start from standing nodes only) |
 
 Measured on bds-bari (BDS 1.26.60.6, 2026-10-30; `test/e2e/nav-digmoves.test.ts`, truth-built courses, the planner
@@ -844,6 +886,8 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/e2e/nav-swim.test.ts` | Track AJ: a 6-wide river (0 corrections, health 20), an 18-block lane (swim ticks per block), a 1-deep ditch |
 | `test/e2e/nav-ladder.test.ts` | Track AJ: a 10-block ladder in a 1 x 1 shaft up and out, back down and out; a vine wall (climb ticks per block) |
 | `test/e2e/nav-parkour.test.ts` | Track AJ: 1-block, 2-block and 2-block-1-lower gaps over a 4-deep pit with water, 20 crossings each (`PARKOUR_RUNS`); a 1-wide bridge with a turn, edge sneaking off / on (`BRIDGE_RUNS`) |
+| `test/unit/skills/fall.test.ts` | Track BI: the measured fall damage model (heights, soft landings, enchantments), the waterloggable table and the clutch target, the live policy, long drops in the planner (a 12-block plateau: none without a policy, the drop with its cost, refused over the budget / with maxDrop 1 / health unknown, Feather Falling, the staircase preferred, hay without a budget, the clutch drop, refused onto a top slab / in the no-water area / over clutchMax), the note on a refused fall, closed loops (the drop walked, the note at health 12, the clutch with a fake server), the scan's planner cost on 300 random paths; review fixes: no plannable drop beyond the budget with a bucket (B1), the clutch pricing and its tie, a ladder column, `acceptsDrop`, the drop re-checked before the step off (health 20 -> 12 on the way: no drop, the note), `shouldClutch` (margin, kill, creative, base, fight), no clutch through ladders / cobwebs / with Slow Falling (B3), the guard bounded when the bucket never empties (H1), finish on an exception and on dispose |
+| `test/e2e/fall-long.test.ts` | Track BI, bds-gaunt: a 12-block tower with no way down but the fall: walked and arrived (8 HP, the model's), and at health 12 unreachable with the note, twice each |
 | `test/unit/skills/nav-trapdoor.test.ts` | Track BG: panels and `hatch` states; the planner down / up through a hatch for every facing and half (never out through the panel side), without `allowOpen`, open (no use), iron / `noAction` / `moves.trapdoor` false, the roof-layer hatch (down only), drops to a floor and into water, a panel in a doorway; closed loops with fake actions (open, closed behind, `closeTrapdoors` false) |
 | `test/e2e/nav-trapdoor.test.ts` | Track BG, bds-move: truth-built shafts under a platform: closed hatch down and up (panel opposite the ladder and on its side), open top-half hatch down and up with no action, the roof-layer hatch (down, no plan up), a ladderless hatch over a pool (fall of 8); 0 corrections |
 

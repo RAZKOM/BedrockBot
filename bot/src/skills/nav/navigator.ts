@@ -22,7 +22,7 @@ import type { TerrainSource } from '../terrain/query.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { DEFAULT_THROWAWAY, DIG_REPEATS, DIG_SETTLE_TICKS, type BreakRules, type NavActions } from './actions.ts'; // Track BC: DIG_REPEATS, DIG_SETTLE_TICKS
 import { PathSearch, explainStart, findPath, handBreakTicks, locateNode, type LocatedNode, type PathNode, type PathOptions, type PathResult } from './astar.ts';
-import { TICKS } from './costs.ts';
+import { DEFAULT_COSTS, TICKS, type PathCosts } from './costs.ts'; // Track BI: DEFAULT_COSTS, PathCosts (dropCheck)
 import { PathFollower, PressGuard, yawTowards } from './follower.ts';
 import { goalTest, type NavGoal } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
 import { CROSS_CLEAR, NavGrid, cellKey } from './grid.ts';
@@ -330,6 +330,14 @@ export class Navigator {
   cellCost: NavigatorOptions['cellCost'];
   /** Track AT: planner cost overrides read live each plan (the End: `maxDrop` 1, no irreversible drops; world/dimension.ts). */
   costsOverride: (() => Partial<NonNullable<PathOptions['costs']>> | undefined) | undefined;
+  /** Track BI: the long-fall policy read live each plan (skills/fall: health, armour, the water bucket, settings); undefined = no drops deeper than maxDrop. */
+  fallPolicy: (() => PathOptions['falls']) | undefined;
+  /** Track BI: re-plans wait while this is true (a clutch's water and its flow around the landing are not gone yet). */
+  holdPlans: (() => boolean) | undefined;
+  /** Track BI: the follower holds still while this is true (a clutch's water is being picked up). */
+  pauseFollow: (() => boolean) | undefined;
+  /** Track BI: a planned drop deeper than 3 still holds (the live fall policy); false stops the body and re-plans. */
+  dropCheck: ((from: PathNode, to: PathNode, costs: PathCosts) => boolean) | undefined;
   private protect: NavigatorOptions['protect'];
   private digPenalty: NavigatorOptions['digPenalty'];
   /** Track R: failed goals / `any` members / action cells, skipped for a while (nav/blacklist.ts). */
@@ -488,6 +496,7 @@ export class Navigator {
           : handBreakTicks),
       ...(noBreak ? { noBreak } : {}),
       cellCost: this.cellCost?.() ?? this.pathOpts.cellCost, // Track S: avoidance, read live each plan
+      ...(this.fallPolicy ? { falls: this.fallPolicy() } : {}), // Track BI: long falls, read live each plan
     };
   }
 
@@ -832,7 +841,7 @@ export class Navigator {
     this.resolveRecheck(a, s); // Track BE: the path check after a correction / knock / teleport (before the re-plan below)
 
     // a re-plan replaces the current plan and any search
-    if (a.replan && a.t >= a.waitUntil && !a.action) {
+    if (a.replan && a.t >= a.waitUntil && !a.action && !this.holdPlans?.()) { // Track BI: holdPlans (a clutch's water is still there)
       // plan from solid ground (an airborne body has no node yet), but do not wait forever
       if (s.onGround || s.inWater || this.preferNode(s) === 'climb' || a.t - a.lastProgressTick > 20 || !a.follower) { // Track AJ: in water, on a ladder
         if (!this.startMain(a, s)) {
@@ -876,6 +885,27 @@ export class Navigator {
     if (this.pathChecks(a, s, f)) return; // Track BE: off the path, skip-ahead, the snap after a knock
     f = a.follower ?? f; // Track BE: the leg a skip / snap restarted
 
+    // Track BI: the follower holds still while a clutch's water is picked up; a long drop ahead is checked against
+    // the live fall policy every tick the body still stands before it (health, hostiles, the bucket, the landing)
+    if (this.pauseFollow?.()) {
+      this.loop.release();
+      a.guard.idle();
+      a.lastProgressTick = a.t;
+      a.passTick = a.t;
+      return;
+    }
+    if (this.dropCheck && s.onGround) {
+      const ni = a.legFrom + f.passedIndex + 1;
+      const to = a.path[ni];
+      const from = a.path[ni - 1];
+      if (to?.move === 'drop' && from && from.feet - to.feet > 3 + 1e-6 && !this.dropCheck(from, to, { ...DEFAULT_COSTS, ...a.pathOpts.costs })) {
+        this.log.info(`goto: the ${(from.feet - to.feet).toFixed(1)}-block drop ahead is no longer safe; re-planning`);
+        this.loop.release();
+        a.guard.idle();
+        a.replan ??= 'block';
+        return;
+      }
+    }
     const step = f.step(s, this.loop.command.yaw);
     this.loop.setCommand(step.cmd);
     if (step.done) {
@@ -1128,6 +1158,7 @@ export class Navigator {
       ...(o.noAction?.size ? { noAction: [...o.noAction] } : {}),
       ...(inv ? { inventory: { slots: inv.slots.map((s) => (s ? { name: s.name, count: s.count } : null)), selected: inv.selected } } : {}),
       ...(cc?.avoidance ? { avoidance: cc.avoidance } : {}),
+      ...(o.falls ? { falls: { ...o.falls } } : {}), // Track BI
     };
   }
 
