@@ -432,7 +432,15 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (!nav) return { line: 'no probe planner' };
     const t0 = Date.now();
     const memo = new RecheckState(refusedTakeoffs);
-    const cands = siteCandidates(from, goalTarget, radius, (x, z) => landable(x, z), (x, z) => memo.nearRefused({ x: x + 0.5, z: z + 0.5 }, t0) && hdist(from, { x: x + 0.5, z: z + 0.5 }) < 8);
+    // a cell standing on a thin roof or a canopy (air two and three under its top block) is no ground to walk to
+    const ground = (x: number, z: number): number | undefined => {
+      const f = landable(x, z);
+      if (f === undefined || (cell(x, f - 2, z) === false && cell(x, f - 3, z) === false)) return undefined;
+      return f;
+    };
+    const cands = siteCandidates(from, goalTarget, radius, ground, (x, z) => memo.nearRefused({ x: x + 0.5, z: z + 0.5 }, t0) && hdist(from, { x: x + 0.5, z: z + 0.5 }) < 8);
+    // a cell beside one whose walk was not found is not probed again (the same pocket)
+    const noPath: { x: number; z: number }[] = [];
     const total = hdist(from, goalTarget);
     const ratio = d.settings.get('flyPreferRatio');
     const notes: string[] = [];
@@ -441,6 +449,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     for (const c of cands) {
       if (sims >= SITE_SIMS || probes >= SITE_PROBES || Date.now() - t0 > SITE_BUDGET_MS) break;
       if (!preferSite(total, c.dist, c.flyDist, ratio)) continue;
+      if (noPath.some((p) => Math.abs(p.x - c.x) <= 6 && Math.abs(p.z - c.z) <= 6)) continue;
       const at = { x: c.x + 0.5, y: c.feet, z: c.z + 0.5 };
       const name = `${c.x} ${c.feet} ${c.z}`;
       sims++;
@@ -452,7 +461,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       probes++;
       const r = await probePath(nav, { type: 'near', p: { x: at.x, y: c.feet, z: at.z }, r: 0.5 }, from, { nodes: LAND_PROBE_NODES, ms: LAND_PROBE_MS, noLongFalls: true });
       if (r?.status !== 'found') {
+        noPath.push({ x: c.x, z: c.z });
         notes.push(`${name}: no path (${r ? r.status : 'nostart'})`);
+
         continue;
       }
       const walk = pathBlocks(r.path);

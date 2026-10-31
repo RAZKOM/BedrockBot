@@ -229,8 +229,9 @@ export async function simulateFlight(
 ): Promise<SimResult> {
   const world = deps.world;
   const brain = new FlightBrain(target, { ...opts, ...(deps.groundAt ? { groundAt: deps.groundAt } : {}), ...(deps.skyTop ? { skyTop: deps.skyTop } : {}), ...(deps.terrain ? { terrain: deps.terrain } : {}), obstacle: (x, y, z) => world.solidAt(x, y, z) === true });
-  // Track BL: the corridor check against the terrain the live model does not know
-  let knownMax = Math.floor(start.y) - 1;
+  // Track BL: the corridor check against the terrain the live model does not know; the highest known top is taken from the live columns passed beyond
+  // LEDGE_RADIUS + 2 of the start (a start on a platform in the air, the farm 135 over home, is no terrain: the ground around it is)
+  let knownMax = -64;
   let unknownHits = 0;
   let body = initialBody(start, true);
   let cmd: MoveCommand = { ...IDLE_COMMAND, yaw: s.yaw ?? opts.ledge?.yaw ?? 0 };
@@ -261,7 +262,7 @@ export async function simulateFlight(
     if (deps.terrain && before.gliding) {
       const c = deps.terrain(Math.floor(body.pos.x), Math.floor(body.pos.z));
       if (c.src === 'live') {
-        if (c.top !== undefined) knownMax = Math.max(knownMax, c.top);
+        if (c.top !== undefined && hdist(body.pos, start) > LEDGE_RADIUS + 2) knownMax = Math.max(knownMax, c.top);
       } else if (c.src === 'cache' ? c.top !== undefined && body.pos.y < c.top + 1 : body.pos.y < assumedTop(knownMax, 0) + 1) {
         hits++;
         unknownHits++;

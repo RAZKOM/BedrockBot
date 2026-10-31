@@ -737,7 +737,9 @@ export class FlightBrain {
     const q = this.o.terrain;
     if (!q) return undefined;
     let top: number | undefined;
-    for (const [dx, dz] of [[0, 0], [12, 0], [-12, 0], [0, 12], [0, -12]] as const) {
+    // a ring 16 out, not the column under the body: a start on a platform in the air (a pillar, the farm over home) is no terrain;
+    // the ground around it is (e2e: from a 3x3 platform 200 up the floor over the unknown columns climbed the flight to y 190)
+    for (const [dx, dz] of [[16, 0], [-16, 0], [0, 16], [0, -16], [11, 11], [-11, 11], [11, -11], [-11, -11]] as const) {
       const c = q(Math.floor(b.pos.x) + dx, Math.floor(b.pos.z) + dz);
       if (c.top !== undefined && c.src !== 'unknown') top = top === undefined ? c.top : Math.max(top, c.top);
     }

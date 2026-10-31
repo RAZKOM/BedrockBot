@@ -50,6 +50,10 @@ authoritative. Decision record: [decisions/0042-elytra-flight.md](decisions/0042
 | `bot/src/skills/fly/glide.ts` | Track BH: `findLedges`, `smallPlatform`, `simulateFlight` (the whole flight on the live model), `planGlideDown`, `ledgeTakeoff`, `jumpTakeoff`, `glideKitReady` |
 | `bot/src/skills/fly/prone.ts` | Track BH: `headCells`, `recoverProne` (the crawl pose after a glide) |
 | `bot/test/unit/skills/fly-glide.test.ts`; `bot/test/e2e/fly-glide-down.test.ts` | Track BH: the ledges, the glide down from a pillar / a cliff, the glide that cannot reach, the farm overhang takeoff, the canopy, the prone cells; the e2e pillar / ledge / noreach / farm / prone cases |
+| `bot/src/skills/fly/terrain.ts` | Track BL: `terrainFloor` (the floor ahead, unknown is not air), `assumedTop`, `strictObstacle`, `highCruiseWanted`, `TerrainMemo` |
+| `bot/src/skills/fly/dive.ts` | Track BL: `planDive` / `simulateDive` (the dive descent, simulated whole before it is flown) |
+| `bot/src/skills/fly/sites.ts` | Track BL: `siteCandidates`, `preferSite`, `RecheckState` (the takeoff-site search and the walk re-check) |
+| `bot/test/unit/skills/fly-terrain.test.ts`, `fly-trip.ts`; `bot/test/e2e/fly-terrain.test.ts` | Track BL: the floor, the ridges / tower / unknown / cache-only trips, the dive against the circle, the site ranking and the re-check; the e2e wall / tower / ridge / dive / site / nosite / recheck cases |
 | `docker/compose.fly.yml` | `bds-fly` |
 
 ## Packets (BDS 1.26.60.6, measured on bds-fly)
@@ -543,6 +547,103 @@ There is no crawl move: a prone body that may not break what is over it stays wh
 The emergency / `roof` landing ground (`groundAt`) never takes a column whose top is leaves, azalea or
 vines. It takes the next column down the line with open ground instead (the Realm canopy end).
 
+## Terrain-safe cruise, dive descent, takeoff sites (Track BL)
+
+ADR [0055](decisions/0055-terrain-safe-cruise.md). The Realm flights out of home kept ending `roof` /
+`landed_off` / `lost` 250 to 340 blocks out against mountains. The cruise economy let the body sink along the
+glide line into a ridge the cache knew, and the model counted unknown cells as air. At chunk edges the
+server held the body (z 656.30 and 832.30) while the model ran on.
+
+### Terrain-safe cruise
+
+- **The floor** (`terrain.ts terrainFloor`). The columns under the next 200 blocks of the heading are
+  scanned every 2 blocks, every 4 ticks. Each is live (the model; subchunks not received above a solid take
+  the cache's top when higher), cache, or unknown.
+  - A known column needs `top + 1 + flyClearance + s / 10` at the body, `s` blocks before it.
+  - An unknown column is assumed to stand at `knownMax + 24 + 0.25 × (blocks past the last known column)`,
+    capped at 320.
+  - The scan stops 40 blocks before the target, where the approach takes over.
+- **Unknown is not air.** The climb levels off at the higher of the cruise height and the floor. The cruise
+  fires a rocket whenever the projected height is under the floor (at any speed from 0.8 b/t), never bleeds
+  speed while under it, and pitches up at the climb pitch when the floor rises steeply. `cruiseHeight` adds
+  24 when any column on the line is unknown.
+- **Detour.** When the floor rises faster than a rocket climb can follow (`(at − 6) / 1.25`), a heading
+  30 to 90 degrees off is held for 40 ticks. `steerClear` stays the last resort.
+- **Log lines.** `flight: terrain ahead: <src> top y T at D blocks (need y N, short S): pulling up` when the
+  floor starts lifting the cruise, and `flight: terrain cleared: ... gained N blocks (y a -> b), k rockets`
+  when it is passed.
+- **Crash notes.** `flight: held by the server at x y z: the cell ahead x y z is <live block | unknown
+  (chunk cx cz not loaded; cache: ...)>; at a chunk edge: the server had not loaded the next chunk`, at
+  most one every 40 ticks. A glide ended by contact mid-route gets the same note. The finish line counts
+  `avoidances`, `dives` and `held`.
+
+### High cruise
+
+`flyHighCruise always` flies the cruise at y 328 (build limit + 8) or higher. The Realm accepted flight over
+320 (the 00:04Z flight reached y 389 with 4 corrections). `auto` takes it only for trips of 1500 blocks or
+more with unknown columns on the line whose glide needs y 288 or more anyway. The cost, offline (rockets /
+ticks):
+
+| trip | economy + floor | high cruise |
+|---|---|---|
+| 300 from y 70 | 1 / – | 13 / – |
+| 1200 flat | 7 / – | 24 / – |
+| 2300 flat | 14 / – | 27 / – |
+| 2300 from y 70 | 6 / 1673 | 19 / 1759 |
+
+### Dive descent
+
+`flyDescent auto` (the default) tries a dive every 5 ticks of the cruise once the descent is due.
+- **The profile.** The dive pitch is 55 to 85 degrees and the pull -15, -30 or -45. The pull height is
+  solved in two rounds, then the brain bleeds at -6 to the hand-over.
+- **The hand-over to the approach:** 48 to 72 blocks out, 3 below to 5 above the approach entry, at
+  1.05 b/t or slower, the sink under 0.35.
+- **The check.** The best four profiles are simulated against `strictObstacle`. The pull-out must stay 6
+  blocks over known or assumed terrain past 48 blocks out.
+- **Abort.** When the window is still ahead, the brain waits (and does not start a circle while more than
+  76 blocks out). It pulls out and goes back to the cruise in two cases: the path ahead meets a solid
+  before the pull height, or the re-simulation every 10 ticks fails. A dive is not tried again on that
+  flight.
+- **Not used:** corridor and overhang landings keep their approach.
+
+### Takeoff sites
+
+When the takeoff here is refused (a roof, a canopy, a valley), `commands-fly.ts takeoffSite` searches for a
+site to walk to:
+1. **Candidates** (`sites.ts siteCandidates`). Every second cell within `flySiteSearch` (48) in any direction
+   that stands on its column's top under 20 blocks of open sky, within 12 blocks of the feet height. Cells
+   on a thin roof or a canopy (air 2 and 3 under the top block) are left out. They are ranked by
+   `1.3 × distance` of walking (0.178 s a block) plus `flightSeconds` from there.
+2. **Takeoff.** The takeoff is simulated from each candidate (up to 12): a ledge when the platform is small,
+   else the jump on every heading 30 degrees apart. The simulation carries the terrain columns: the brain
+   keeps the floor, and a climbing turn into cache-only terrain or under an unknown column's assumed top
+   counts as a hit.
+3. **Walk.** The walk is probed (6000 nodes, 400 ms, no long falls; up to 6, 3 s in all) to the ones that
+   clear. A cell within 6 blocks of one without a path is skipped.
+4. **Choice.** The first candidate with `walk × 0.178 + flightSeconds(from there) < walk-all / flyPreferRatio`
+   wins. The owner hears `walking 27 blocks to take off from X Y Z, then flying (420 blocks; walking would
+   be ~1 min)`. On arrival the takeoff is checked again: refused, the owner is told and the walk goes on,
+   watched.
+5. **No site:** the Track AU2 walk-out legs, unchanged, as the fallback.
+
+### Flight re-check on long walks
+
+A `!goto` / `!come` that walks (the kit not ready, too few rockets, no site worth it) is watched once a
+second (`sites.ts RecheckState`). It looks for a takeoff again in three cases:
+- every `flyRecheckBlocks` (24) blocks walked;
+- when the kit becomes ready (rockets picked up);
+- when the body comes out from under a roof.
+
+Limits:
+- **Cheap gates first:** autoFly on, the walk process in control (not flee, guard or a fight), no combat
+  target, the goal still over `flyMin`.
+- **Rate:** at most one takeoff + landing search per 20 s, and none within 16 blocks of a refused takeoff
+  for 5 min.
+
+A chance found: the walk is stopped at a safe spot (standing, dry, |vy| ≤ 0.1, not a ladder, vine or
+scaffolding; up to 3 s more of walking to find one). The takeoff is checked again from there and the flight
+goes. The log says `fly: the walk to X stopped at x y z for a flight (the flight kit is ready)`.
+
 ## The kit
 
 The flight kit is the elytra, the firework rockets and **the fireworks box**: any shulker box whose
@@ -595,6 +696,11 @@ Rules (all named `// Track AU` in the shared files):
 | `glideDown` | on | Track BH: a goto / come that ends with no way on to a goal far below glides down with the elytra when a simulated glide from a ledge lands near it (rockets optional), then walks |
 | `glideDownMinDrop` | 10 | Track BH: the goal at least this far below the feet |
 | `glideDownMinDistance` | 16 | Track BH: the goal at least this far away horizontally |
+| `flyHighCruise` | auto | Track BL: `always` cruises at y 328 or higher (over everything), `off` never, `auto` only for trips of 1500+ blocks over unknown terrain whose glide needs nearly that height anyway |
+| `flyDescent` | auto | Track BL: `dive` / `auto` dive steeply to the approach when the simulated profile is clear (else the circle), `spiral` always circles |
+| `flyRecheckBlocks` | 24 | Track BL: a walk that did not fly looks for a takeoff again every this many blocks (and when the kit becomes ready, and out from under a roof) |
+| `flyPreferRatio` | 1.5 | Track BL: walk to a takeoff site and fly when the whole walk would take this many times longer |
+| `flySiteSearch` | 48 | Track BL: the radius of the takeoff-site search when the takeoff here is refused (0 = off: the walk-out legs) |
 
 ## Processes
 
@@ -868,7 +974,44 @@ After merging Track BI, `fly-overhang`'s roof case landed on the roof once, taki
 landing probe had confirmed a walk from the roof with a planned 6-block long fall. Landing probes now plan
 without long falls (`probePath(..., { noLongFalls: true })`); after that the case passed again.
 
+## Measurements (Track BL)
+
+### Offline (the whole-trip simulator, `fly-terrain.test.ts`)
+
+| trip | before: end, rockets, steered ticks | after: end, rockets, steered ticks |
+|---|---|---|
+| ridge 100 high at 560..710 of 1200 | `roof` at 566 ticks, 8, 34 | landed, 9, 0 |
+| ridge 80 high at 860..1010 of 1200 | landed, 9, 116 | landed, 11, 0 |
+| the same ridge 100 unknown until 96 blocks away | `roof`, 8, 34 | landed, 10, 0 |
+| the same ridge 100 known only to the cache | `roof`, 8, 34 | landed, 9, 0 |
+| tower 90 high at 200 of 300 | landed, 6, 0 | landed, 8, 0 |
+| flat 300 / 1200 | 2 / 7 | 2 / 7 |
+
+Dive against circle, ticks to touchdown, 0 hits, 0 go-arounds:
+
+| start | dive | circle |
+|---|---|---|
+| 100 above, 250 out, 3x3 | 213 | 801 |
+| 200 above, 350 out | 292 | 1431 |
+| 300 above, 450 out | 372 | 2056 |
+| flat 100 above | 251 | 808 |
+| flat 300 above | 417 | 2063 |
+| 60 above, 100 out | 149 | 471 |
+
+BL_E2E_MEASUREMENTS
+
 ## Open points
+
+- Track BL: a column that stays unknown until the body reaches it (a server that never sends the chunk)
+  is assumed only 24 blocks over the highest known top. A taller mountain there is met by `steerClear` and
+  logged as a held / contact note.
+- Track BL: no lateral dodge round a single tower; the detour heading only when no climb clears in time.
+- Track BL: the walk re-check covers `!goto` and `!come`, not `follow`. The takeoff-site search runs only
+  when the takeoff here is refused, not for every walk over `flyMin`. The walk-out legs (the fallback) still
+  stop and start every `flyRetryBlocks`.
+- Track BL: `flyHighCruise auto` is conservative (offline the high cruise cost 2 to 3 times the rockets).
+  Whether the Realm's chunk-edge holds go away at y 328 is not measured.
+
 
 - Track BH: there is no crawl move. A prone body under blocks it may not break stays where it is and asks
   for help. Digging out of a gap uses `allowBreak` for one walk, under the navigator's break rules.
