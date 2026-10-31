@@ -52,6 +52,7 @@ import { sweepItems, SWEEP_RADIUS } from '../collect/sweep.ts'; // Track AQ
 import type { EntityInfo } from '../../world/types.ts';
 import { chooseTunnel, PILLAR_SPARE, planTunnel, runTunnel, type TunnelPlan, type TunnelWorld } from './tunnel.ts'; // Track AQ
 import { oreKind, veinCentre, veinFrom, veinRadius } from './vein.ts'; // Track AQ
+import { DEFAULT_JUNK } from '../survival/keeper.ts';
 
 export type MineState = 'idle' | 'scan' | 'walk' | 'dig' | 'collect' | 'waiting' | 'paused' | 'done' | 'none_left' | 'low_health' | 'no_pickaxe' | 'stopped' | 'failed';
 
@@ -756,7 +757,9 @@ export class MineTask {
     if (await this.mineVein(gen, t)) return;
     this.state = 'collect';
     const origin = { x: t.p.x + 0.5, y: t.p.y, z: t.p.z + 0.5 };
-    const c = await sk.collect(5, 120, { origin, near: 1.2 });
+    // everything but the keeper's junk: the stash step throws that away (rotten flesh it dropped was picked up again at every ore)
+    const notJunk = (i: ItemStack) => !DEFAULT_JUNK.includes(i.name);
+    const c = await sk.collect(5, 120, { origin, near: 1.2, filter: notJunk });
     this.addCollected(c.gained);
     this.log.info(`mine: ${t.name} at ${fmt(t.p)} mined, collect ${c.ok ? 'ok' : c.reason}: ${JSON.stringify(c.gained)}`); // Track AQ
     if (!this.alive(gen) || c.pickedUp > 0 || !this.d.stand) return;
@@ -767,7 +770,7 @@ export class MineTask {
     const g = await this.intoHole(gen, t.p); // Track AQ: digs the rock over the hole when there is no head room
     if (!this.alive(gen) || !g.ok) return;
     await this.d.waitTicks(15);
-    const c2 = await sk.collect(4, 60, { origin, near: 1.2 });
+    const c2 = await sk.collect(4, 60, { origin, near: 1.2, filter: notJunk });
     this.addCollected(c2.gained);
   }
 

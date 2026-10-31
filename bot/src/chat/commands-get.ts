@@ -18,6 +18,7 @@
 import type { Containers } from '../world/containers.ts';
 import type { Logger } from '../log.ts';
 import { setStash, Stash, stashFor, stepLine } from '../skills/container/stash.ts';
+import { breakBlocker } from '../skills/nav/actions.ts';
 import { lookup, lookupMulti, parseGetArgs, unknownReply, type Lookup } from '../skills/items/catalog.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
@@ -185,6 +186,7 @@ export function registerGetCommands(d: CommandDeps, extra: GetExtra = {}): GetCo
       say: (m) => d.chat.say(m),
       ...(d.pve ? { selectHotbar: (slot: number) => void d.pve!.hotbar.select(slot) } : {}), // Track AV: the chosen box is the one placed
       toHotbar: (slot) => survivalKitOf(d.task)?.hotbar(slot) ?? Promise.resolve(undefined), // same-coloured boxes: the chosen one into the hotbar
+      breakBlocker: (p) => breakBlocker(mob.skills.nav.grid, p.x, p.y, p.z, mob.skills.nav.breakRules()), // a mine shaft: dig a cell for the box
     });
   setStash(processes, stash);
   // a pre-emption (guard, flee, night) or a new command moves control: the stash step stops

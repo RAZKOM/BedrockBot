@@ -154,6 +154,8 @@ export interface StashDeps {
   flightBoxSlot?(): number | undefined;
   /** Track AV: select a hotbar slot (Hotbar.select), so the placed box is the one chosen. */
   selectHotbar?(slot: number): void;
+  /** Why the block in a cell may not be dug (the miner's break rules: nav/actions.ts `breakBlocker`); without it no cell is dug for the box. */
+  breakBlocker?(p: Vec3): string | undefined;
   /** Move a main-inventory box into the hotbar (SurvivalKit.hotbar); its hotbar slot, undefined when it could not. */
   toHotbar?(slot: number): Promise<number | undefined>;
   now?: () => number;
@@ -249,6 +251,33 @@ export function boxSpots(blockAt: (p: Vec3) => BlockInfo | undefined, feet: Vec3
     out.push({ p, d: Math.hypot(p.x + 0.5 - feet.x, p.z + 0.5 - feet.z) });
   }
   return out.sort((a, b) => a.d - b.d).map((o) => o.p);
+}
+
+/**
+ * Cells beside the feet a box fits in once dug (no free cell: a 1-wide mine shaft): the cell and the one above
+ * (the lid) each empty or breakable (`blocker` answers why not, the miner's break rules), at least one solid,
+ * a full solid top below, not in the body; nearest first, the 4 sides only (in reach of the dig).
+ */
+export function carveSpots(blockAt: (p: Vec3) => BlockInfo | undefined, feet: Vec3, blocker: (p: Vec3) => string | undefined): { p: Vec3; dig: Vec3[] }[] {
+  const f = { x: Math.floor(feet.x), y: Math.floor(feet.y + 1e-6), z: Math.floor(feet.z) };
+  const out: { p: Vec3; dig: Vec3[]; d: number }[] = [];
+  for (const [dx, dz] of RING.slice(0, 4)) {
+    const p = { x: f.x + dx, y: f.y, z: f.z + dz };
+    if (!fullTop(blockAt({ ...p, y: p.y - 1 }))) continue;
+    if (feet.x + 0.3 > p.x && feet.x - 0.3 < p.x + 1 && feet.z + 0.3 > p.z && feet.z - 0.3 < p.z + 1) continue;
+    const dig: Vec3[] = [];
+    let ok = true;
+    for (const q of [{ ...p, y: p.y + 1 }, p]) {
+      if (empty(blockAt(q))) continue;
+      if (blocker(q) !== undefined) {
+        ok = false;
+        break;
+      }
+      dig.push(q); // the lid cell first: the cell under it is never dug with a block left hanging over the box
+    }
+    if (ok && dig.length > 0) out.push({ p, dig, d: Math.hypot(p.x + 0.5 - feet.x, p.z + 0.5 - feet.z) });
+  }
+  return out.sort((a, b) => a.d - b.d || a.dig.length - b.dig.length).map(({ p, dig }) => ({ p, dig }));
 }
 
 export class Stash {
@@ -485,9 +514,29 @@ export class Stash {
     const item = this.d.inventory.slots[slot]?.name ?? 'undyed_shulker_box';
     if (slot >= 0 && slot < 9) this.d.selectHotbar?.(slot); // Track AV: the held box is the one placed
     const feet = this.d.position();
-    const spots = feet ? boxSpots((q) => this.d.blockAt(q), feet) : [];
+    let spots = feet ? boxSpots((q) => this.d.blockAt(q), feet) : [];
+    if (spots.length === 0 && feet && this.d.breakBlocker) {
+      // a 1-wide shaft or tunnel (mining): dig a cell for the box beside the feet
+      const blocker = this.d.breakBlocker.bind(this.d);
+      for (const c of carveSpots((q) => this.d.blockAt(q), feet, blocker)) {
+        let dug = true;
+        for (const q of c.dig) {
+          const r = this.seen(await sk.dig(q));
+          if (!alive()) return { ...step, ms: this.now() - t0 };
+          if (!r.ok) {
+            dug = false;
+            break;
+          }
+        }
+        if (dug && boxSpots((q) => this.d.blockAt(q), feet).some((q) => q.x === c.p.x && q.y === c.p.y && q.z === c.p.z)) {
+          this.log.info(`stash: no free cell next to the bot: dug ${c.dig.length} block${c.dig.length === 1 ? '' : 's'} for the box at ${fmt(c.p)}`);
+          spots = [c.p];
+          break;
+        }
+      }
+    }
     if (spots.length === 0) {
-      step.reason = 'no free cell next to the bot';
+      step.reason = this.d.breakBlocker ? 'no free cell next to the bot (and none it may dig)' : 'no free cell next to the bot';
       step.ms = this.now() - t0;
       return step;
     }

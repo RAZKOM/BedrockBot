@@ -173,7 +173,7 @@ steps 1, 4 to 6 and "mine until n" (a dead end explores instead of ending `none_
 4. Line of sight: rays from the eye to the centres of the target's open faces and its centre; when
    none reaches it, the first solid block on the ray is dug (same break rules), up to 3 blocks.
 5. Dig with `requireHarvest: true` (the Digger's best hotbar tool; `no_tool` blacklists), note the
-   dug cell, `collect` within 5 blocks for 120 ticks (approach radius 1.2). The drop of an ore in a
+   dug cell, `collect` within 5 blocks for 120 ticks (approach radius 1.2; everything but the keeper's junk `DEFAULT_JUNK`, which the stash step throws away: rotten flesh it dropped was picked up again at every ore, 2026-10-31 Realm). The drop of an ore in a
    wall usually stays in the hole it left, where nobody can stand: when that collect picked nothing
    up, the bot walks to the standable cell right next to the hole (`stats.pickupWalks`), waits 15
    ticks for the server's pickup and collects once more. (Found in the second e2e run: 4 of 8 coal

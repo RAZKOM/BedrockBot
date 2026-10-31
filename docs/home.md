@@ -143,7 +143,10 @@ list `!drop items` keeps), the throwaway reserve (16 blocks of cobblestone, dirt
 and netherrack in all, cobblestone first, held back from the last slots of a kind) and one empty
 shulker box (the stash step's). Further empty boxes go to the box chest (the container holding the
 most shulker boxes; a placed shulker box never takes a box); full boxes (NBT `Items` not empty) go
-there too, or with `all` are emptied first.
+there too, or with `all` are emptied, one after the other (the box is placed, its items taken into the
+inventory but for the slot the box needs back, then it is broken and picked up; what was taken is
+unloaded before the next box, and a box that did not fit at once is emptied again after that). The
+fireworks box is never emptied.
 
 Track AV, before the rules: the plan's `box` steps (and Track AW's `compact` steps) run first; rule 1
 counts the items inside a chest's full boxes too, and the kinds with a home (rule 1) claim their room

@@ -154,9 +154,11 @@ function harness(r: Rock): H {
         return Promise.resolve({ ok: true, ticks: 23 });
       },
       // the sweeps for the job's own drops (filter set) find nothing in this world; the per-dig collect finds the drop
-      collect: (_r: number, _t: number, o?: { filter?: unknown }) => {
-        const gained: Record<string, number> = o?.filter ? {} : { coal: 1 };
-        return Promise.resolve({ ok: true, gained, pickedUp: o?.filter ? 0 : 1, skipped: 0, ticks: o?.filter ? 1 : 5, corrections: 0 });
+      collect: (_r: number, _t: number, o?: { filter?: (i: { name: string }) => boolean }) => {
+        // the pickup after a dig takes everything but the keeper's junk; the sweeps take the job's drops only
+        const all = !o?.filter || o.filter({ name: 'cobblestone' });
+        const gained: Record<string, number> = all ? { coal: 1 } : {};
+        return Promise.resolve({ ok: true, gained, pickedUp: all ? 1 : 0, skipped: 0, ticks: all ? 5 : 1, corrections: 0 });
       },
       cancel: () => h.calls.push('cancel'),
     },
@@ -261,8 +263,8 @@ describe('MineTask', () => {
     const h = harness(r);
     let n = 0;
     const nothing: Record<string, number> = {};
-    h.deps.skills.collect = (_r: number, _t: number, o?: { filter?: unknown }) => {
-      if (o?.filter) return Promise.resolve({ ok: true, gained: nothing, pickedUp: 0, skipped: 0, ticks: 1, corrections: 0 }); // the drop sweeps see nothing
+    h.deps.skills.collect = (_r: number, _t: number, o?: { filter?: (i: { name: string }) => boolean }) => {
+      if (o?.filter && !o.filter({ name: 'cobblestone' })) return Promise.resolve({ ok: true, gained: nothing, pickedUp: 0, skipped: 0, ticks: 1, corrections: 0 }); // the drop sweeps see nothing
       return Promise.resolve({ ok: true, gained: n++ === 0 ? nothing : { coal: 1 }, pickedUp: n === 1 ? 0 : 1, skipped: 0, ticks: 5, corrections: 0 });
     };
     const gotos: string[] = [];

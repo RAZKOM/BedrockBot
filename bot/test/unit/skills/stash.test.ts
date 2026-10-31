@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseSettingValue, RuntimeSettings, describeSetting } from '../../../src/config/settings.ts';
 import { CONTAINER_BLOCKS } from '../../../src/skills/container/chest.ts';
-import { boxSpots, depositable, isShulkerBox, MIN_FREE_SLOTS, parseChest, Stash, stepLine, withSlotType, type StashSkills, isStashJunk, junkDropCount, shulkerSlotsUsed } from '../../../src/skills/container/stash.ts';
+import { boxSpots, carveSpots, depositable, isShulkerBox, MIN_FREE_SLOTS, parseChest, Stash, stepLine, withSlotType, type StashSkills, isStashJunk, junkDropCount, shulkerSlotsUsed } from '../../../src/skills/container/stash.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 
 const item = (name: string, count = 64): ItemStack => ({ name, count, networkId: 1, metadata: 0 });
@@ -31,6 +31,8 @@ interface Opts {
   raws?: unknown[];
   /** Give the stash a toHotbar (SurvivalKit.hotbar): swaps the slot with hotbar slot 8. */
   toHotbar?: boolean;
+  /** Give the stash the break rules (a dig turns the cell into air); undefined from it: may dig. */
+  breakBlocker?: (p: Vec3) => string | undefined;
 }
 
 function harness(o: Opts) {
@@ -52,6 +54,7 @@ function harness(o: Opts) {
   const said: string[] = [];
   let pos: Vec3 = { x: 0.5, y: 0, z: 0.5 };
   const intr = (name: string) => o.interruptAt === name;
+  const blocks: Record<string, BlockInfo> = { ...o.blocks };
   const skills: StashSkills = {
     goto: async (g) => {
       calls.push(`goto ${JSON.stringify((g as { p?: Vec3 }).p)}`);
@@ -106,6 +109,7 @@ function harness(o: Opts) {
     dig: async (p) => {
       calls.push(`dig ${key(p)}`);
       if (intr('dig')) return { ok: false, reason: 'interrupted' };
+      blocks[key(p)] = AIR;
       return { ok: true };
     },
     collect: async () => {
@@ -122,7 +126,7 @@ function harness(o: Opts) {
   const stash = new Stash({
     skills,
     inventory,
-    blockAt: world(o.blocks),
+    blockAt: world(blocks),
     position: () => pos,
     settings,
     containers,
@@ -145,6 +149,7 @@ function harness(o: Opts) {
     selectHotbar: (slot: number) => {
       selected = slot;
     },
+    ...(o.breakBlocker ? { breakBlocker: o.breakBlocker } : {}),
     ...(o.toHotbar
       ? {
           toHotbar: async (slot: number) => {
@@ -162,6 +167,20 @@ function harness(o: Opts) {
 const full = (extra: (ItemStack | null)[] = [], fill = 'cobblestone') => [...extra, ...Array.from({ length: 36 - extra.length }, () => item(fill))];
 
 describe('stash step', () => {
+  it('a 1-wide mine shaft: digs a cell beside the feet for the box (break rules allow it), fills it, picks it up', async () => {
+    const shaft: Record<string, BlockInfo> = {};
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1], [2, 0], [-2, 0], [0, 2], [0, -2]]) for (const y of [0, 1]) shaft[`${dx},${y},${dz}`] = STONE;
+    const h = harness({ slots: full([item('netherite_pickaxe', 1), item('green_shulker_box', 1)]), blocks: shaft, breakBlocker: () => undefined });
+    expect(await h.stash.ifFull({ label: 'mine' })).toBe(true);
+    expect(h.calls.slice(0, 3)).toEqual(['dig 1,1,0', 'dig 1,0,0', 'place 1,0,0 up green_shulker_box']);
+    expect(h.stash.attempts[0]?.steps.find((x) => x.kind === 'shulker')?.ok).toBe(true);
+    // without the break rules (or every side refused) the step still ends 'no free cell'
+    const refused = harness({ slots: full([item('netherite_pickaxe', 1), item('green_shulker_box', 1)]), blocks: shaft, breakBlocker: () => 'next_to_liquid', drop: false });
+    expect(await refused.stash.ifFull({ label: 'mine' })).toBe(false);
+    expect(refused.calls.filter((c) => c.startsWith('dig'))).toEqual([]);
+    expect(refused.stash.attempts[0]?.steps[0]?.reason).toBe('no free cell next to the bot (and none it may dig)');
+  });
+
   it('does nothing while 2 or more slots are free', async () => {
     const h = harness({ slots: [item('stone_pickaxe', 1), item('cobblestone')] });
     expect(MIN_FREE_SLOTS).toBe(2);
@@ -318,6 +337,22 @@ describe('stash helpers', () => {
     expect(edge[0]).toEqual({ x: 0, y: 0, z: 1 });
     // a chest below is no support (a click on it opens it)
     expect(boxSpots(world({ '1,-1,0': { ...STONE, name: 'chest' } }), at)[0]).toEqual({ x: -1, y: 0, z: 0 });
+  });
+
+  it('carve cells for the box in a 1-wide shaft: the 4 sides, lid cell first, the break rules refuse', () => {
+    // a shaft: stone all round the feet and the head (the bot at 0,0,0 in a dug column)
+    const shaft: Record<string, BlockInfo> = {};
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1], [2, 0], [-2, 0], [0, 2], [0, -2]]) for (const y of [0, 1]) shaft[`${dx},${y},${dz}`] = STONE;
+    const at = { x: 0.5, y: 0, z: 0.5 };
+    expect(boxSpots(world(shaft), at)).toEqual([]);
+    expect(carveSpots(world(shaft), at, () => undefined)[0]).toEqual({ p: { x: 1, y: 0, z: 0 }, dig: [{ x: 1, y: 1, z: 0 }, { x: 1, y: 0, z: 0 }] });
+    // the break rules refuse the east side (lava behind it): the next side
+    const west = carveSpots(world(shaft), at, (p) => (p.x === 1 ? 'next_to_liquid' : undefined));
+    expect(west[0]?.p).toEqual({ x: -1, y: 0, z: 0 });
+    expect(west).toHaveLength(3);
+    // a side with the lid cell open already needs one dig
+    expect(carveSpots(world({ ...shaft, '0,1,1': AIR }), at, (p) => (p.x === 0 ? undefined : 'protected'))[0]).toEqual({ p: { x: 0, y: 0, z: 1 }, dig: [{ x: 0, y: 0, z: 1 }] });
+    expect(carveSpots(world(shaft), at, () => 'protected_area')).toEqual([]);
   });
 
   it('shulker boxes open like chests (all 17 names)', () => {

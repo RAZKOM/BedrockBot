@@ -166,8 +166,8 @@ function fakeHome(o: { containers: Record<string, { kind: string; items?: (ItemS
     },
     collect: async () => {
       calls.push('collect');
-      if (drop && !fail.pickup) {
-        const i = inv.findIndex((s) => !s);
+      const i = inv.findIndex((s) => !s);
+      if (drop && !fail.pickup && i >= 0) { // a full inventory leaves the box on the ground
         inv[i] = item(drop.name, 1);
         invRaws[i] = drop.raw;
         drop = undefined;
@@ -422,6 +422,45 @@ describe('home logistics: unload', () => {
     const box = h.inv.findIndex((s) => s?.name === 'red_shulker_box');
     expect(box).toBeGreaterThanOrEqual(0);
     expect(shulkerContents(h.invRaws[box])).toEqual({});
+  });
+
+  it('`all` with a nearly full inventory: the emptied box keeps its slot (the contents never fill it), so it is picked up again and emptied for good once the rest is unloaded', async () => {
+    const h = fakeHome({
+      containers: { '3,0,0': { kind: 'chest', size: 100 } },
+      inv: [item('red_shulker_box', 1), ...Array.from({ length: 33 }, () => item('gravel'))], // 2 free slots, 3 once the box is placed
+      invRaws: [nbt(Array.from({ length: 27 }, () => ({ name: 'sand', count: 64 })))],
+    });
+    await h.logistics.scan(never);
+    const r = await h.logistics.unload(never, { all: true });
+    expect(r).toMatchObject({ ok: true, emptied: 1 });
+    expect([...h.boxes.keys()]).toEqual(['3,0,0']); // no box left standing
+    const box = h.inv.findIndex((s) => s?.name === 'red_shulker_box');
+    expect(box).toBeGreaterThanOrEqual(0); // carried again, not left on the ground
+    expect(shulkerContents(h.invRaws[box])).toEqual({}); // two stacks out (one slot held back for the box), unloaded, then the rest
+    const c = h.boxes.get('3,0,0')!;
+    expect(c.slots.reduce((a, s, i) => a + (s?.name === 'sand' ? s.count : 0) + (s && isShulkerBox(s.name) ? (shulkerContents(c.raws[i]).sand ?? 0) : 0), 0)).toBe(27 * 64);
+  });
+
+  it('`all` empties every full box it carries and unloads each one before the next (not the fireworks box)', async () => {
+    const stacks = (name: string) => Array.from({ length: 27 }, () => ({ name, count: 64 }));
+    const h = fakeHome({
+      containers: { '3,0,0': { kind: 'chest', size: 54 }, '-3,0,0': { kind: 'chest', size: 54 } },
+      inv: [item('red_shulker_box', 1), item('blue_shulker_box', 1), item('lime_shulker_box', 1), item('yellow_shulker_box', 1), ...Array.from({ length: 20 }, () => item('gravel'))], // 12 free slots: no box fits at once
+      invRaws: [nbt(stacks('sand')), nbt(stacks('clay_ball')), nbt(stacks('flint')), nbt([{ name: 'firework_rocket', count: 64 }])],
+    });
+    await h.logistics.scan(never);
+    const r = await h.logistics.unload(never, { all: true });
+    expect(r).toMatchObject({ ok: true, emptied: 3, left: [] });
+    expect([...h.boxes.keys()].sort()).toEqual(['-3,0,0', '3,0,0']); // no box left standing
+    // nothing but boxes (the fireworks box and the spare kept for the stash step) stays in the inventory
+    expect(h.inv.filter((s) => s && !isShulkerBox(s.name))).toEqual([]);
+    const rocket = h.inv.findIndex((s) => s?.name === 'yellow_shulker_box');
+    expect(shulkerContents(h.invRaws[rocket])).toEqual({ firework_rocket: 64 });
+    // the boxes still carried are empty; the stacks of all three are in the chests, loose or boxed again by the unloader
+    for (const [i, s] of h.inv.entries()) if (s && isShulkerBox(s.name) && i !== rocket) expect(shulkerContents(h.invRaws[i])).toEqual({});
+    const inChests = [...h.boxes.values()].flatMap((c) => c.slots.map((s, i) => ({ s, raw: c.raws[i] }))).filter((x) => x.s);
+    const total = (name: string) => inChests.reduce((a, x) => a + (x.s!.name === name ? x.s!.count : 0) + (isShulkerBox(x.s!.name) ? (shulkerContents(x.raw)[name] ?? 0) : 0), 0);
+    expect([total('sand'), total('clay_ball'), total('flint'), total('gravel')]).toEqual([27 * 64, 27 * 64, 27 * 64, 20 * 64]);
   });
 
   it('a cancelled job ends `interrupted`; no home or no chest answer at once', async () => {

@@ -12,8 +12,9 @@
 //            open it, refresh its memory, plan again for that chest with what it really holds, deposit,
 //            close; repeat. Then, while unloadable items are left and a chest holds an empty shulker box:
 //            take the box, place it next to the bot, fill it, break it, pick it up and store the full box
-//            in the box chest. With `all`, full shulker boxes carried are emptied first (placed, opened,
-//            emptied into the inventory, broken, picked up) and their items unloaded like the rest.
+//            in the box chest. With `all`, full shulker boxes carried (not the fireworks box) are emptied
+//            (placed, opened, emptied into the inventory but for the slot the box needs back, broken,
+//            picked up) and their items unloaded like the rest, one box after the other until none holds items.
 //            Track AV (boxing.ts, docs/home.md "Boxing at the chests"): the plan's `box` steps run first
 //            (a spare box, carried or taken from a chest; the target chest's loose stacks into the
 //            inventory, in rounds when the inventory is short of room; the box placed next to the chest,
@@ -52,6 +53,8 @@ export const READ_FRESH_MS = 10 * 60_000;
 export const AT_HOME = 8;
 /** Shulker boxes filled per unload run at most. */
 export const MAX_BOXES_PER_RUN = 3;
+/** Deposit passes per unload run at most: each one unloads, then empties the next carried box (`all`: every full box of the inventory). */
+export const MAX_UNLOAD_PASSES = 24;
 /** Track AN: a container found unreachable is not probed again for this long (ms), unless `!chests scan`. */
 export const UNREACHABLE_RETRY_MS = 60 * 60_000;
 /** Track AN: containers opened per scan at most (the rest stays pending for the next idle moment). */
@@ -74,7 +77,7 @@ export interface HomeSkills {
 
 export interface HomeDeps {
   skills: HomeSkills;
-  inventory: { readonly slots: readonly ({ name: string; count: number } | null)[]; rawItem?(window: number, slot: number): unknown };
+  inventory: { readonly slots: readonly ({ name: string; count: number; metadata?: number } | null)[]; rawItem?(window: number, slot: number): unknown };
   world: DiscoveryWorld;
   position(): Vec3 | undefined;
   home(): Vec3 | undefined;
@@ -718,7 +721,7 @@ export class HomeLogistics {
       // Track AV: box steps first; a failed step's kind is planned without boxing afterwards
       const skip = new Set<string>();
       let steps = 0;
-      for (let pass = 0; pass < 6; pass++) {
+      for (let pass = 0; pass < MAX_UNLOAD_PASSES; pass++) {
         for (let round = 0; round < 40; round++) {
           if (cancelled()) return finish('interrupted');
           const plan = this.plan(opts.all, undefined, { on: steps < MAX_BOX_STEPS, skip });
@@ -742,11 +745,11 @@ export class HomeLogistics {
           if (r === 'interrupted') return finish('interrupted');
           if (r !== 'ok') failed.add(next!.key);
         }
-        // Track AV: the named boxes' items next; they are unloaded in the next pass
-        const e = await this.emptyNamedBoxes(rep, cancelled);
+        // Track AV: the named boxes' items next (with `all`, every full box's but the fireworks box's); they are unloaded in the next pass
+        const e = await this.emptyNextBox(opts.all ?? false, rep, cancelled);
         if (e === 'interrupted') return finish('interrupted');
         if (e !== 'ok') {
-          if (e !== 'none') this.log.info(`unload: emptying a ${this.keepName()} box: ${e}`);
+          if (e !== 'none') this.log.info(`unload: emptying a box: ${e}`);
           break;
         }
       }
@@ -938,24 +941,45 @@ export class HomeLogistics {
       if (this.freeSlots().length < 2) return undefined; // nothing to take the items into: unload first
       const r = await this.emptyBox(full, rep, cancelled);
       if (r === 'interrupted') return 'interrupted';
-      if (r.startsWith('emptied')) rep.emptied++;
-      else return undefined;
+      if (r === 'emptied') rep.emptied++;
+      else return undefined; // partly: the deposit passes make room, then emptyNextBox comes back for the rest
     }
     return undefined;
   }
 
   // ---- Track AV: named boxes, box steps ----------------------------------------------------------
 
-  /** Empty one named (bot_loot) box holding items into the inventory: 'ok', 'none' (no such box), or why not. */
-  private async emptyNamedBoxes(rep: UnloadReport, cancelled: () => boolean): Promise<string> {
-    const box = carriedBoxes(this.d.inventory, this.keepName(), this.d.flightBoxSlot?.()).find((b) => b.named && !b.flightKit && b.used > 0);
+  /**
+   * Empty one carried box holding items into the inventory: a named (bot_loot) one, with `all` any unnamed one too
+   * (never the fireworks box): 'ok', 'none' (no such box), or why not. The items are unloaded in the next pass, which
+   * comes back here for the next box.
+   */
+  private async emptyNextBox(all: boolean, rep: UnloadReport, cancelled: () => boolean): Promise<string> {
+    const box = carriedBoxes(this.d.inventory, this.keepName(), this.d.flightBoxSlot?.()).find((b) => !b.flightKit && b.used > 0 && (b.named || all));
     if (!box) return 'none';
     if (this.freeSlots().length < 2) return 'no free inventory slot for its items';
     const r = await this.emptyBox(box.slot, rep, cancelled);
+    if (r === 'emptied' && !box.named) rep.emptied++; // the named ones are counted by emptiedNamed
     return r.startsWith('emptied') ? 'ok' : r;
   }
 
-  /** Place the box of `slot`, take what fits into the inventory, break it, pick it up: `emptied` / `emptied partly` or why not. */
+  /** New inventory slots that taking the stack `st` out of a window uses: none for what tops up partial stacks of the same item (a shulker box never stacks). */
+  private slotsFor(st: { name: string; count: number; metadata?: number }): number {
+    const max = maxStackOf(st.name);
+    let room = 0;
+    if (!isShulkerBox(st.name)) {
+      for (const s of this.d.inventory.slots.slice(0, 36)) {
+        if (s?.name === st.name && s.metadata === st.metadata && s.count < max) room += max - s.count;
+      }
+    }
+    return Math.ceil(Math.max(0, st.count - room) / max);
+  }
+
+  /**
+   * Place the box of `slot`, take what fits into the inventory, break it, pick it up: `emptied` / `emptied partly` or why not.
+   * The slot the placed box left stays free for it: the broken box drops as an item and needs a slot to come back to
+   * (the contents filled it, the box stayed on the ground and the run stuck, Realm 2026-10-30).
+   */
   private async emptyBox(slot: number, rep: UnloadReport, cancelled: () => boolean): Promise<string> {
     const s = await this.boxToHotbar(slot, cancelled);
     if (typeof s === 'string') return s;
@@ -966,8 +990,9 @@ export class HomeLogistics {
     if (o.ok) {
       try {
         for (let i = 0; i < o.view.slots.length; i++) {
-          if (!o.view.slots[i]) continue;
-          if (!this.d.inventory.slots.slice(0, 36).some((x) => !x)) {
+          const st = o.view.slots[i];
+          if (!st) continue;
+          if (this.freeSlots().length - this.slotsFor(st) < 1) {
             left++;
             continue;
           }
