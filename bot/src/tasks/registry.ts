@@ -176,6 +176,7 @@ export const afkTask: TaskDefinition = {
         return h && r > 0 ? { x: h.x + 0.5, y: h.y, z: h.z + 0.5, r } : undefined;
       });
       mob.skills.nav.setDigPenalty(() => settings.get('digPenalty'));
+      mob.skills.throwawayReserve = () => settings.get('throwawayMin'); // decision 0051: the scaffold lends it only until a block is left behind
     }
     if (mob && processes) {
       const nightRef: { p?: NightProcess } = {};

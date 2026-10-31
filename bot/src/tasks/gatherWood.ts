@@ -329,7 +329,7 @@ export class GatherWoodTask {
       }
 
       // Track AQ (collect/sweep.ts): logs lying within 8 blocks first (own drops left, the owner's dropped wood)
-      if (this.d.entities && (await sweepItems((r, t, c) => this.d.skills.collect(r, t, c), isWoodDrop, { entities: this.d.entities, position: this.d.position }))?.pickedUp) continue;
+      if (this.d.entities && (await sweepItems((r, t, c) => this.d.skills.collect(r, t, c), isWoodDrop, { entities: this.d.entities, position: this.d.position, hard: isLog }))?.pickedUp) continue;
       if (!this.alive(gen)) break;
 
       // find-tree
@@ -369,7 +369,7 @@ export class GatherWoodTask {
       this.stats.digFailures += f.digFailures;
       if (f.broken.length > 0) this.forest = undefined; // Track Z: the forest yielded logs
       if (f.ok) this.stats.treesFelled++;
-      else if (f.reason !== 'interrupted') {
+      else if (f.reason !== 'interrupted' && f.reason !== 'hostile_near') {
         this.stats.treesFailed++;
         this.treeFails.set(key(tree.base), (this.treeFails.get(key(tree.base)) ?? 0) + 1);
         this.log.warn(`gather: tree at ${key(tree.base)}: ${f.reason ?? 'failed'} (${f.left.length} logs left)`);

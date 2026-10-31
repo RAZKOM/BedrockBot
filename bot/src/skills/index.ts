@@ -33,7 +33,9 @@ import { angleDiff, turnTowards, yawTowards } from './nav/follower.ts';
 import { blockQueryOf, worldSource, type BlockStore } from './terrain/query.ts';
 import { UseSkill, type UseOptions, type UseResult } from './interact/use.ts';
 import { PlaceSkill, type PlaceOptions, type PlaceResult } from './place/place.ts';
-import { clearScaffold, type ClearResult, type ScaffoldRecord } from './place/scaffold.ts';
+import { clearScaffold, isNaturalTerrain, LATE_PLACE_TICKS, onScaffold, recordPlaced, ScaffoldRecord, type ClearResult } from './place/scaffold.ts';
+import { HOSTILE_TYPES, bareType } from './combat/hostiles.ts';
+import { DEFAULT_THROWAWAY_MIN } from './survival/keeper.ts';
 import { estimateBreak } from './dig/breakTime.ts';
 import { blockMining, toolOf } from '../data/mining.ts';
 import type { GotoOptions } from './types.ts';
@@ -130,7 +132,20 @@ export class BotSkills implements Skills {
   /** Bumped by every public skill call and by cancel(); compound skills stop when it changes. */
   private epoch = 0;
   /** Blocks the navigator places / digs while a scaffold walk runs (scaffoldGoto): recorded and counted. */
-  private navHook: { placed(p: Vec3, name: string): void; dug(p: Vec3): void } | undefined;
+  private navHook: { placed(p: Vec3): void; dug(p: Vec3): void } | undefined;
+  /**
+   * Decision 0051: the pending scaffold (pillar and pickup blocks placed only to reach something, not dug again yet).
+   * It outlives the skill that placed it: a skill cancelled on top of its pillar leaves the cells here, and the next
+   * skill that moves the bot (goto, collect, fellTree) or a cancel digs them down first (`descendFirst`).
+   */
+  readonly scaffold = new ScaffoldRecord();
+  /** The dig-down running now (descendFirst); goto / collect / fellTree wait for it, stopAll leaves its digger alone. */
+  private descent: Promise<void> | undefined;
+  private disposed = false;
+  /** Placements of a scaffold walk still being re-checked (a late server confirmation). */
+  private lateChecks = 0;
+  /** Throwaway blocks the keeper keeps (setting `throwawayMin`); scaffold may borrow them only while none was ever left behind. */
+  throwawayReserve: () => number = () => DEFAULT_THROWAWAY_MIN;
   /** Throwaway blocks the navigator's pillar and the feller's pillar place (NavActions.throwawayItems). */
   private readonly throwawayItems: readonly string[];
   /** Item actors a collect already tried a walk with digging / placing for (one per item; trimmed at 256). */
@@ -177,19 +192,36 @@ export class BotSkills implements Skills {
         logger: this.log,
         // the navigator's dig-through move breaks blocks with the Digger directly (not this.dig(), which would cancel the goto)
         actions: {
-          dig: (p) =>
-            (this.digger?.dig(p) ?? Promise.resolve({ ok: false as const, reason: 'no_digger' })).then((r) => {
+          dig: (p) => {
+            // a scaffold walk (a pickup's hard walk) digs natural terrain only, never the owner's builds (decision 0051)
+            const name = this.world.blockAt?.(p)?.name;
+            if (this.navHook && name && !isNaturalTerrain(name) && !this.scaffold.has(p)) return Promise.resolve({ ok: false as const, reason: 'not_natural' });
+            return (this.digger?.dig(p) ?? Promise.resolve({ ok: false as const, reason: 'no_digger' })).then((r) => {
               if (r.ok) this.navHook?.dug(p); // a scaffold walk counts its digs
               return r;
-            }),
+            });
+          },
           // pillar-up and door moves use the PlaceSkill / UseSkill objects directly for the same reason; the navigator names
           // the neighbour it clicks across `face` (pillar: 'down'), the PlaceSkill the support face it clicks (pillar: 'up')
           place: (p, face) =>
             // a scaffold walk places the kinds that come back when dug again (scaffoldItems)
-            (this.placer?.place(p, { face: oppositeFace(face), item: this.navHook ? this.scaffoldItems() : [...(opts.actions?.throwawayItems ?? DEFAULT_THROWAWAY)], look: false }) ?? Promise.resolve({ ok: false as const, reason: 'no_placer' })).then((r) => {
-              if (r.ok) this.navHook?.placed(p, ('block' in r ? r.block : undefined) ?? this.world.blockAt?.(p)?.name ?? 'unknown'); // a scaffold walk records what it placed
-              return r;
-            }),
+            {
+              const hook = this.navHook;
+              const kinds = hook ? this.scaffoldItems() : [...(opts.actions?.throwawayItems ?? DEFAULT_THROWAWAY)];
+              if (hook && kinds.length === 0) return Promise.resolve({ ok: false as const, reason: 'no_scaffold_item' });
+              return (this.placer?.place(p, { face: oppositeFace(face), item: kinds, look: false }) ?? Promise.resolve({ ok: false as const, reason: 'no_placer' })).then((r) => {
+                // a scaffold walk records what it placed, also a click the server confirmed late (re-checked in the background)
+                if (hook && this.world.blockAt) {
+                  this.lateChecks++;
+                  void recordPlaced(this.scaffold, p, r, { blockAt: this.world.blockAt.bind(this.world), waitTicks: (n) => this.loop.waitTicks(n) }, kinds)
+                    .then((placed) => {
+                      if (placed) hook.placed(p);
+                    })
+                    .finally(() => this.lateChecks--);
+                }
+                return r;
+              });
+            },
           useBlock: (p) => this.user?.useBlock(p, { want: 'toggle' }) ?? Promise.resolve({ ok: false as const, reason: 'no_user' }),
           ...opts.actions,
         },
@@ -303,6 +335,7 @@ export class BotSkills implements Skills {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.cancel();
     this.nav.dispose();
     for (const u of this.unsubs.splice(0)) u();
@@ -316,6 +349,7 @@ export class BotSkills implements Skills {
     const token = ++this.epoch;
     this.runningName = name;
     this.runningEpoch = token;
+    if (name !== 'fell') void this.descendFirst(); // decision 0051: off the pillar first (the feller handles its own)
     return token;
   }
 
@@ -325,7 +359,7 @@ export class BotSkills implements Skills {
 
   private stopAll(): void {
     this.nav.cancel();
-    this._digger?.cancel();
+    if (!this.descent) this._digger?.cancel(); // a dig-down off the scaffold finishes (decision 0051)
     this._placer?.cancel();
     this._user?.cancel();
     this.look?.resolve();
@@ -371,6 +405,17 @@ export class BotSkills implements Skills {
     if (noSurface) return Promise.resolve({ ok: false, reason: noSurface });
     // Synchronous start (callers check nav.busy right after the call).
     const token = this.begin('goto');
+    if (this.descent) {
+      // decision 0051: standing on scaffold: dig it down first, then walk (a newer call supersedes this one)
+      const d = this.descent;
+      return (async () => {
+        await d;
+        if (this.runningEpoch !== token || this.epoch !== token) return { ok: false, reason: 'interrupted' };
+        const r = await this.nav.goto(goal, opts);
+        this.end(token);
+        return r;
+      })();
+    }
     const p = this.nav.goto(goal, opts);
     void p.finally(() => {
       this.end(token);
@@ -401,8 +446,9 @@ export class BotSkills implements Skills {
       return Promise.resolve({ ok: false, reason: 'no_entities', gained: {}, pickedUp: 0, skipped: 0, ticks: 0, corrections: 0 });
     }
     if (this.hardTried.size > 256) this.hardTried.clear();
-    return this.run('collect', (cancelled) =>
-      collectItems(
+    return this.run('collect', async (cancelled) => {
+      await this.descendFirst(); // decision 0051: off the scaffold first
+      return collectItems(
         radius,
         timeoutTicks,
         {
@@ -413,13 +459,61 @@ export class BotSkills implements Skills {
           inventory,
           cancelled,
           logger: this.log,
-          hardGoto: (g, o, record, maxBlocks) => this.scaffoldGoto(g, o, record, maxBlocks),
+          hardGoto: (g, o, _record, maxBlocks) => this.scaffoldGoto(g, o, maxBlocks),
           hardTried: this.hardTried,
-          clearScaffold: (record) => this.clearScaffold(record, cancelled),
+          scaffold: this.scaffold,
+          clearScaffold: () => this.clearScaffold(cancelled),
         },
         opts,
-      ),
+      );
+    });
+  }
+
+  /**
+   * Decision 0051: standing on pending scaffold, dig it down (sneaking, one block at a time) and wait for it; at once
+   * otherwise. One dig-down at a time; a cancel or a newer skill does not stop it (only dispose or death does).
+   */
+  descendFirst(): Promise<void> {
+    if (this.descent) return this.descent;
+    const w = this.world;
+    const d = this.digger;
+    if (!w.blockAt || !d || this.scaffold.size === 0) return Promise.resolve();
+    const blockAt = w.blockAt.bind(w);
+    if (!onScaffold(this.scaffold, { blockAt, state: () => this.loop.state })) return Promise.resolve();
+    this.log.info(`scaffold: on the pillar with ${this.scaffold.size} block(s) pending; digging down first`);
+    const run = clearScaffold(
+      this.scaffold,
+      {
+        blockAt,
+        state: () => this.loop.state,
+        dig: (p, o) => d.dig(p, o),
+        waitTicks: (n) => this.loop.waitTicks(n),
+        sneak: (on) => this.loop.setCommand({ sneak: on }),
+        cancelled: () => this.disposed || this.world.self.health <= 0,
+        logger: this.log,
+      },
+      // with a hostile near, the last block (a fall of 1) stays pending: its hits spoil every dig at the foot
+      { downOnly: true, ...(this.hostileNear(12) ? { lowEnough: 1 } : {}) },
+    ).then(
+      () => undefined,
+      () => undefined,
     );
+    this.descent = run.finally(() => {
+      this.descent = undefined;
+    });
+    return this.descent;
+  }
+
+  /** A hostile mob within `r` blocks (the feller does not pillar then, and comes down). */
+  hostileNear(r = 12): boolean {
+    const ents = this.world.entities;
+    if (!ents) return false;
+    const p = this.loop.state.pos;
+    for (const e of ents.values()) {
+      if (!HOSTILE_TYPES.has(bareType(e.type))) continue;
+      if (Math.hypot(e.pos.x - p.x, e.pos.y - p.y, e.pos.z - p.z) <= r) return true;
+    }
+    return false;
   }
 
   /**
@@ -428,7 +522,7 @@ export class BotSkills implements Skills {
    * stops with 'block_budget' once it placed and dug more than `maxBlocks` blocks. Not a public skill: the
    * compound skills call it between their own steps.
    */
-  async scaffoldGoto(goal: NavGoal, o: GotoOptions, record: ScaffoldRecord, maxBlocks: number): Promise<SkillResult> {
+  async scaffoldGoto(goal: NavGoal, o: GotoOptions, maxBlocks: number): Promise<SkillResult> {
     let n = 0;
     let over = false;
     const count = () => {
@@ -438,36 +532,40 @@ export class BotSkills implements Skills {
       }
     };
     const hook = {
-      placed: (p: Vec3, name: string) => {
-        record.add(p, name);
-        count();
-      },
+      placed: () => count(),
       dug: (p: Vec3) => {
-        record.delete(p);
+        this.scaffold.delete(p);
         count();
       },
     };
     this.navHook = hook;
     try {
       const r = await this.nav.goto(goal, o);
+      // a placement still being confirmed (late under lag) is recorded before the walk counts as over
+      for (let i = 0; i < LATE_PLACE_TICKS + 5 && this.lateChecks > 0; i++) await this.loop.waitTicks(1);
       return over ? { ok: false, reason: 'block_budget' } : r;
     } finally {
       if (this.navHook === hook) this.navHook = undefined;
     }
   }
 
-  /** Dig the recorded scaffold again (place/scaffold.ts): down its column, else from the side when safe. */
-  clearScaffold(record: ScaffoldRecord, cancelled: () => boolean = () => false): Promise<ClearResult> {
+  /** Dig the pending scaffold again (place/scaffold.ts): down its column, else from the side when safe, else climbing beside it. */
+  async clearScaffold(cancelled: () => boolean = () => false): Promise<ClearResult> {
+    await this.descendFirst();
     const w = this.world;
     const d = this.digger;
-    if (!w.blockAt || !d) return Promise.resolve({ removed: [], left: record.cells.map((c) => ({ p: c.p, why: 'no digger' })), gone: [] });
+    const record = this.scaffold;
+    if (!w.blockAt || !d) return { removed: [], left: record.cells.map((c) => ({ p: c.p, why: 'no digger' })), gone: [] };
+    const placer = this.placer;
     return clearScaffold(record, {
       blockAt: w.blockAt.bind(w),
       state: () => this.loop.state,
       dig: (p, o) => d.dig(p, o),
       goto: (g, o) => this.nav.goto(g, o),
       waitTicks: (n) => this.loop.waitTicks(n),
-      cancelled,
+      ...(placer ? { place: (p: Vec3) => this.pillarPlace(p), throwaways: () => this.scaffoldBudget() } : {}),
+      sneak: (on) => this.loop.setCommand({ sneak: on }),
+      cancelled: () => cancelled() || this.disposed,
       logger: this.log,
     });
   }
@@ -484,11 +582,12 @@ export class BotSkills implements Skills {
   /**
    * The throwaway kinds carried that make good scaffold, best first: kinds the hotbar's best tool (or the hand) harvests
    * (they drop when dug again: cobblestone without a pickaxe is lost and takes 10 s per block), then the fastest to dig.
-   * Only the harvestable kinds when there are any (2026-10-30 e2e: cobblestone dug by hand, 200 ticks a block, no drop).
+   * Only harvestable kinds (2026-10-30 e2e: cobblestone dug by hand, 200 ticks a block, no drop): none when the
+   * tools at hand harvest none of the kinds carried, and then nothing is pillared.
    */
   scaffoldItems(): string[] {
     const inv = this.world.inventory;
-    if (!inv) return [...this.throwawayItems];
+    if (!inv) return [];
     const carried = this.throwawayItems.filter((n) => this.throwawayCount([n]) > 0);
     const tools = [null, ...inv.slots.slice(0, 9).map((s) => s?.name ?? null)];
     const rank = (name: string): { harvest: boolean; ticks: number } => {
@@ -501,9 +600,29 @@ export class BotSkills implements Skills {
       }
       return best;
     };
-    const ranked = carried.map((n) => ({ n, ...rank(n) })).sort((a, b) => Number(b.harvest) - Number(a.harvest) || a.ticks - b.ticks);
-    const good = ranked.filter((r) => r.harvest);
-    return (good.length ? good : ranked).map((r) => r.n);
+    return carried
+      .map((n) => ({ n, ...rank(n) }))
+      .filter((r) => r.harvest)
+      .sort((a, b) => a.ticks - b.ticks)
+      .map((r) => r.n);
+  }
+
+  /**
+   * Scaffold blocks the bot may place now: the harvestable kinds carried. The keeper's throwaway reserve
+   * (`throwawayReserve`) is lent only while no scaffold block was ever left behind; after one was, the reserve stays.
+   */
+  scaffoldBudget(): number {
+    const have = this.throwawayCount(this.scaffoldItems());
+    if (this.scaffold.lost === 0) return have;
+    const others = this.throwawayCount() - have;
+    return Math.max(0, have - Math.max(0, this.throwawayReserve() - others));
+  }
+
+  /** One pillar block under the feet with a harvestable scaffold kind (the PlaceSkill directly: not a public skill). */
+  private pillarPlace(p: Vec3): Promise<{ ok: boolean; reason?: string; block?: string }> {
+    const kinds = this.scaffoldItems();
+    if (kinds.length === 0) return Promise.resolve({ ok: false, reason: 'no_scaffold_item' });
+    return this.placer?.place(p, { face: 'up', item: kinds, look: false }) ?? Promise.resolve({ ok: false, reason: 'no_placer' });
   }
 
   /** Inside the protected area (the base around home, protectRadius): the navigator's break rules' distance test. */
@@ -588,8 +707,9 @@ export class BotSkills implements Skills {
       return Promise.resolve({ ok: false, reason: 'no_digger', broken: [], left: tree.logs, repaths: 0, digFailures: 0, corrections: 0, ticksDigging: 0 });
     }
     const blockAt = w.blockAt.bind(w);
-    return this.run('fell', (cancelled) =>
-      fellTree(
+    return this.run('fell', async (cancelled) => {
+      await this.descent; // a dig-down already running finishes first; the feller handles the rest of the scaffold
+      return fellTree(
         tree,
         {
           blockAt,
@@ -601,24 +721,32 @@ export class BotSkills implements Skills {
           logger: this.log,
           blacklist: this.nav.blacklist, // Track R
           // pillar-up next to a tall trunk (decision 0051): the PlaceSkill directly (not this.place, which would cancel the fell)
-          ...(this.placer
-            ? {
-                place: (p: Vec3) => this.placer?.place(p, { face: 'up', item: this.scaffoldItems(), look: false }) ?? Promise.resolve({ ok: false, reason: 'no_placer' }),
-                throwaways: () => this.throwawayCount(this.scaffoldItems()),
-              }
-            : {}),
+          ...(this.placer ? { place: (p: Vec3) => this.pillarPlace(p), throwaways: () => this.scaffoldBudget() } : {}),
           protectedAt: (p) => this.inProtectedArea(p),
           waitTicks: (n) => this.loop.waitTicks(n),
+          scaffold: this.scaffold, // decision 0051: pending scaffold outlives the fell
+          hostileNear: () => this.hostileNear(12),
+          sneak: (on) => this.loop.setCommand({ sneak: on }),
+          drops: () => {
+            const out: Vec3[] = [];
+            const b = tree.base;
+            for (const e of this.world.entities?.values() ?? []) {
+              if (e.type !== 'minecraft:item' || !e.item?.name.endsWith('_log')) continue;
+              if (Math.hypot(e.pos.x - b.x - 0.5, e.pos.z - b.z - 0.5) <= 8) out.push(e.pos);
+            }
+            return out;
+          },
         },
         opts,
-      ),
-    );
+      );
+    });
   }
 
   cancel(): void {
     this.epoch++;
     this.runningName = undefined;
     this.stopAll();
+    void this.descendFirst(); // decision 0051: a cancel on top of the pillar still comes down
   }
 
   status(): SkillsStatus {

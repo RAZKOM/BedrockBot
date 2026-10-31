@@ -2,6 +2,7 @@
 // branches, 26-connected) plus the leaves around them, and the felling order (bottom up).
 // Pure functions over a block lookup, so the same code runs on the world model and in unit tests.
 import type { BlockInfo, Vec3 } from '../../world/types.ts';
+import { isBuiltBlock } from '../terrain/classify.ts';
 
 export type BlockLookup = (p: Vec3) => BlockInfo | undefined;
 
@@ -59,6 +60,7 @@ export interface TreeOptions {
 }
 
 const key = (p: Vec3) => `${p.x},${p.y},${p.z}`;
+const SIDES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] as const;
 
 /**
  * The tree that contains the log at `start`, or undefined (not a log, too big, too few leaves,
@@ -102,7 +104,17 @@ export function detectTree(blockAt: BlockLookup, start: Vec3, opts: TreeOptions 
   const top = Math.max(...logs.map((p) => p.y));
   // trunk axis: the mean x/z of the lowest layer
   const bottom = logs.filter((p) => p.y === minY);
-  if (bottom.length > (opts.maxBase ?? 8)) return undefined; // a wall or a pile, not a trunk
+  // a wall or a pile, not a trunk: the footprint of the lowest 3 layers (a 2 x 2 trunk is 4 columns)
+  const foot = new Set(logs.filter((p) => p.y < minY + 3).map((p) => `${p.x},${p.z}`));
+  if (foot.size > (opts.maxBase ?? 8)) return undefined;
+  // a built thing: planks, glass, doors, slabs, stairs, fences, torches ... touching a log (2026-10-30 review)
+  for (const p of logs) {
+    for (const [dx, dy, dz] of SIDES) {
+      if (dy === -1 && p.y === minY) continue; // the floor under the base: the soil rule (requireSoil)
+      const n = blockAt({ x: p.x + dx, y: p.y + dy, z: p.z + dz })?.name;
+      if (n && !isLog(n) && !isLeaves(n) && isBuiltBlock(n)) return undefined;
+    }
+  }
   const ax = bottom.reduce((a, p) => a + p.x, 0) / bottom.length;
   const az = bottom.reduce((a, p) => a + p.z, 0) / bottom.length;
   const axial = (p: Vec3) => Math.hypot(p.x - ax, p.z - az);

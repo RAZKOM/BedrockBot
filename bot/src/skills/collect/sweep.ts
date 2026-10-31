@@ -22,6 +22,11 @@ export interface SweepOptions {
   entities?: () => ReadonlyMap<bigint, EntityInfo>;
   /** Feet of the bot (the centre of the cheap check when no origin is given). */
   position?: () => Vec3 | undefined;
+  /**
+   * The job's main items (logs for wood, ore drops for the miner, food for the hunter): only these get the collect's
+   * walk that may dig and place (decision 0051); without it no such walk. Saplings, sticks, apples and seeds never do.
+   */
+  hard?: (name: string) => boolean;
 }
 
 /** Item entities of the kind within `radius` of `origin`. */
@@ -43,7 +48,8 @@ export async function sweepItems(collect: CollectFn, kind: (name: string) => boo
   const at = o.origin ?? o.position?.();
   if (o.entities && at && itemsOfKind(o.entities(), at, radius, kind) === 0) return undefined;
   const filter = (i: ItemStack) => kind(i.name);
-  const r = await collect(radius, o.ticks ?? 200, { filter, graceTicks: 0, hard: true, ...(o.origin ? { origin: o.origin } : {}) });
+  const hard = o.hard;
+  const r = await collect(radius, o.ticks ?? 200, { filter, graceTicks: 0, ...(hard ? { hard: true, hardFilter: (i: ItemStack) => hard(i.name) } : {}), ...(o.origin ? { origin: o.origin } : {}) });
   return r as CollectResult | undefined;
 }
 
@@ -53,6 +59,12 @@ const bare = (n: string) => (n.startsWith('minecraft:') ? n.slice(10) : n);
 export function isWoodDrop(name: string): boolean {
   const n = bare(name);
   return isLog(n) || n.endsWith('_sapling') || n === 'stick' || n === 'apple' || n === 'mangrove_propagule';
+}
+
+/** Food items proper (what `!food n` counts), the hunter's main items. */
+export function isFoodItem(name: string): boolean {
+  const f = foodInfo(bare(name));
+  return !!f && !f.bad;
 }
 
 /** Food's kind: every food item but the bad ones (what `!food n` counts), and leather / feathers / wool from the hunt. */

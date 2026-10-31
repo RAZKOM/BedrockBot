@@ -2,12 +2,18 @@
 // a body that falls onto the first solid block under it, goto = teleport onto a standable cell, place = a pillar
 // block under the feet (the body rises by one), dig = air (the body drops when its floor goes).
 import { describe, expect, it } from 'vitest';
-import { collectItems, type CollectDeps } from '../../../src/skills/collect/collect.ts';
-import { clearScaffold, dropUnder, ScaffoldRecord } from '../../../src/skills/place/scaffold.ts';
+import { collectItems, isMinorDrop, type CollectDeps } from '../../../src/skills/collect/collect.ts';
+import { sweepItems } from '../../../src/skills/collect/sweep.ts';
+import { clearScaffold, dropUnder, isNaturalTerrain, pillarStep, ScaffoldRecord } from '../../../src/skills/place/scaffold.ts';
 import { fellTree, pillarSpots, planColumn, type FellDeps } from '../../../src/skills/tree/feller.ts';
 import { detectTree } from '../../../src/skills/tree/tree.ts';
 import type { NavGoal } from '../../../src/skills/nav/goals.ts';
-import type { BlockInfo, EntityInfo, Vec3 } from '../../../src/world/types.ts';
+import type { BlockInfo, EntityInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
+import type { ItemV4 } from '../../../src/world/packets.ts';
+import { Inventory } from '../../../src/world/inventory.ts';
+import { BotSkills } from '../../../src/skills/index.ts';
+import { fakeWorld, harness } from './fakes.ts';
+import { flatGen } from './genworld.ts';
 
 const GROUND = -61; // top of the floor; feet at -60
 const k = (x: number, y: number, z: number) => `${x},${y},${z}`;
@@ -279,7 +285,7 @@ describe('collect: a walk that may dig and place for an item the walk cannot rea
     expect(r.ok).toBe(true);
     expect(r.pickedUp).toBe(1);
     expect(f.calls.hard).toBe(1);
-    expect(f.calls.opts[0]).toMatchObject({ allowBreak: true, allowPlace: true, timeoutTicks: 300 });
+    expect(f.calls.opts[0]).toMatchObject({ allowBreak: true, allowPlace: true, timeoutTicks: 200 });
     expect(f.calls.cleared).toHaveLength(1);
     expect(r.hardWalks).toBe(1);
     expect(r.scaffoldPlaced).toBe(4);
@@ -297,5 +303,220 @@ describe('collect: a walk that may dig and place for an item the walk cannot rea
     f.deps.hardTried = new Set([1n]);
     await collectItems(8, 100, f.deps, { hard: true });
     expect(f.calls.hard).toBe(0);
+  });
+});
+
+describe('review fixes (decision 0051)', () => {
+  it('B1: a fell cancelled on top of its pillar leaves the cells pending in the shared record; the next fell digs them down first', async () => {
+    const b = new Blocks();
+    const logs = tree(b, 0, 0, 20, 'spruce');
+    const t = detectTree(b.at, logs[0]!)!;
+    const w = world(b, { x: 4.5, y: -60, z: 0.5 }, 64);
+    const shared = new ScaffoldRecord();
+    let stop = false;
+    w.deps.scaffold = shared;
+    w.deps.cancelled = () => stop;
+    const place = w.deps.place!;
+    w.deps.place = async (p) => {
+      const r = await place(p);
+      if (w.log.placed.length >= 10) stop = true; // a guard pre-empts the fell 10 blocks up
+      return r;
+    };
+    const r1 = await fellTree(t, w.deps);
+    expect(r1.reason).toBe('interrupted');
+    expect(shared.size).toBe(10);
+    expect(w.body.pos.y).toBe(-50);
+    stop = false;
+    w.deps.place = place;
+    const r2 = await fellTree(t, w.deps);
+    expect(r2.ok, w.log.lines.join('\n')).toBe(true);
+    expect(shared.size).toBe(0);
+    expect(cobbleLeft(b)).toEqual([]);
+    expect(w.body.pos.y).toBe(-60);
+    expect(w.log.maxFall).toBeLessThanOrEqual(1);
+  });
+
+  it('B1: a pillar the bot is no longer on (it fell off, died) is climbed beside and stripped top down', async () => {
+    const b = new Blocks();
+    const rec = new ScaffoldRecord();
+    for (let y = -60; y < -48; y++) {
+      b.set(0, y, 0, 'cobblestone');
+      rec.add({ x: 0, y, z: 0 }, 'cobblestone');
+    }
+    const w = world(b, { x: 3.5, y: -60, z: 0.5 }, 32);
+    const r = await clearScaffold(rec, { blockAt: b.at, state: () => w.body, dig: w.deps.dig, goto: w.deps.goto, waitTicks: () => Promise.resolve(), place: w.deps.place!, throwaways: w.deps.throwaways! });
+    expect(r.left).toEqual([]);
+    expect(cobbleLeft(b)).toEqual([]);
+    expect(w.body.pos.y).toBe(-60);
+    expect(w.log.maxFall).toBeLessThanOrEqual(1);
+    // the old column went from the top down: never a block left floating over a dug one
+    const old = w.log.dug.filter((d) => d.p.x === 0 && d.p.z === 0).map((d) => d.p.y);
+    expect(old).toEqual([...old].sort((a, c) => c - a));
+  });
+
+  it('B2: a placement the server confirms late (after the placer timed out) is still recorded', async () => {
+    const b = new Blocks();
+    const rec = new ScaffoldRecord();
+    const body = { pos: { x: 0.5, y: -60, z: 0.5 }, onGround: true };
+    let ticks = 0;
+    const r = await pillarStep(rec, {
+      blockAt: (p) => {
+        if (ticks >= 6 && p.x === 0 && p.y === -60 && p.z === 0) b.set(0, -60, 0, 'dirt');
+        return b.at(p);
+      },
+      state: () => body,
+      place: () => Promise.resolve({ ok: false, reason: 'timeout' }),
+      waitTicks: (n) => {
+        ticks += n;
+        return Promise.resolve();
+      },
+      kinds: ['dirt'],
+    });
+    expect(r.ok).toBe(true);
+    expect(rec.get({ x: 0, y: -60, z: 0 })?.name).toBe('dirt');
+    // a refusal before the click is not waited for
+    const rec2 = new ScaffoldRecord();
+    const r2 = await pillarStep(rec2, { blockAt: b.at, state: () => ({ pos: { x: 5.5, y: -60, z: 5.5 } }), place: () => Promise.resolve({ ok: false, reason: 'no_item' }), waitTicks: () => Promise.reject(new Error('no wait')) });
+    expect(r2.ok).toBe(false);
+    expect(rec2.size).toBe(0);
+  });
+
+  it('H2: no pillar with a hostile near, and a bot on its pillar comes down (sneaking) when one shows up', async () => {
+    const b = new Blocks();
+    const logs = tree(b, 0, 0, 14, 'oak');
+    const t = detectTree(b.at, logs[0]!)!;
+    const w = world(b, { x: 3.5, y: -60, z: 0.5 }, 64);
+    let hostile = true;
+    w.deps.hostileNear = () => hostile;
+    const r1 = await fellTree(t, w.deps);
+    expect(r1.reason).toBe('hostile_near');
+    expect(w.log.placed).toEqual([]);
+    hostile = false;
+    const sneaks: boolean[] = [];
+    w.deps.sneak = (on) => sneaks.push(on);
+    const place = w.deps.place!;
+    w.deps.place = async (p) => {
+      const r = await place(p);
+      if (w.log.placed.length >= 3) hostile = true;
+      return r;
+    };
+    const shared = new ScaffoldRecord();
+    w.deps.scaffold = shared;
+    const r2 = await fellTree(t, w.deps);
+    expect(r2.reason).toBe('hostile_near');
+    // down to the last block (a fall of 1): that one stays pending, the hits at the foot would spoil its dig
+    expect(w.body.pos.y).toBe(-59);
+    expect(shared.size).toBe(1);
+    expect(cobbleLeft(b)).toHaveLength(1);
+    expect(sneaks).toContain(true);
+    // the hostile gone, the next fell digs the pending block first and finishes the tree
+    hostile = false;
+    w.deps.place = place;
+    const r3 = await fellTree(t, w.deps);
+    expect(r3.ok, w.log.lines.join('\n')).toBe(true);
+    expect(shared.size).toBe(0);
+    expect(cobbleLeft(b)).toEqual([]);
+    expect(w.body.pos.y).toBe(-60);
+    expect(sneaks.at(-1)).toBe(false);
+  });
+
+  it('L1: a dig-down that would fall 4 blocks is refused, 3 is allowed', async () => {
+    for (const [depth, ok] of [[2, true], [3, false]] as const) {
+      const b = new Blocks();
+      for (let y = -61 - depth; y <= -61; y++) b.set(0, y, 0, 'air');
+      b.set(0, -61, 0, 'cobblestone');
+      const rec = new ScaffoldRecord();
+      rec.add({ x: 0, y: -61, z: 0 }, 'cobblestone');
+      const w = world(b, { x: 0.5, y: -60, z: 0.5 }, 0);
+      const r = await clearScaffold(rec, { blockAt: b.at, state: () => w.body, dig: w.deps.dig, waitTicks: () => Promise.resolve() });
+      expect(r.removed.length === 1, `depth ${depth}`).toBe(ok);
+    }
+  });
+
+  it('M1 / M3: minor drops never get a hard walk; hard walks dig natural terrain only', () => {
+    for (const n of ['oak_sapling', 'stick', 'apple', 'wheat_seeds', 'minecraft:spruce_sapling']) expect(isMinorDrop(n), n).toBe(true);
+    for (const n of ['oak_log', 'diamond', 'cooked_beef']) expect(isMinorDrop(n), n).toBe(false);
+    for (const n of ['stone', 'dirt', 'grass_block', 'iron_ore', 'deepslate_diamond_ore', 'oak_leaves', 'gravel', 'sand']) expect(isNaturalTerrain(n), n).toBe(true);
+    for (const n of ['cobblestone', 'oak_log', 'oak_planks', 'glass', 'stone_bricks', 'oak_fence', 'torch', 'chest']) expect(isNaturalTerrain(n), n).toBe(false);
+  });
+
+  it('M1: the sweep gives the hard walk only to the main items', async () => {
+    const seen: unknown[] = [];
+    const collect = (_r: number, _t: number, o?: unknown) => {
+      seen.push(o);
+      return Promise.resolve(undefined);
+    };
+    await sweepItems(collect, (n) => n.endsWith('_log') || n.endsWith('_sapling'), { hard: (n) => n.endsWith('_log') });
+    const o = seen[0] as { hard?: boolean; hardFilter?: (i: { name: string }) => boolean };
+    expect(o.hard).toBe(true);
+    expect(o.hardFilter?.({ name: 'oak_log' })).toBe(true);
+    expect(o.hardFilter?.({ name: 'oak_sapling' })).toBe(false);
+    await sweepItems(collect, (n) => n.endsWith('_log'));
+    expect((seen[1] as { hard?: boolean }).hard).toBeUndefined();
+  });
+
+  it('M2: at most hardWalks walks per collect call', async () => {
+    const entities = new Map<bigint, EntityInfo>();
+    for (let i = 1n; i <= 4n; i++) {
+      entities.set(i, { runtimeId: i, uniqueId: i, type: 'minecraft:item', item: { name: 'oak_log', networkId: 17, count: 1, metadata: 0 }, pos: { x: Number(i) + 0.5, y: -55.875, z: 0.5 }, vel: { x: 0, y: 0, z: 0 }, yaw: 0, pitch: 0, headYaw: 0, onGround: true, updatedAt: 0 });
+    }
+    const state = { pos: { x: 0.5, y: -60, z: 0.5 }, corrections: 0, tick: 0n };
+    let walks = 0;
+    const deps: CollectDeps = {
+      entities: () => entities,
+      state: () => state,
+      waitTicks: (n) => {
+        state.tick += BigInt(n);
+        return Promise.resolve();
+      },
+      goto: () => Promise.resolve({ ok: false, reason: 'unreachable' }),
+      inventory: { slots: [], room: () => 64, count: () => 0 },
+      cancelled: () => false,
+      hardGoto: () => {
+        walks++;
+        state.tick += 50n;
+        return Promise.resolve({ ok: false, reason: 'unreachable' });
+      },
+    };
+    const r = await collectItems(8, 400, deps, { hard: true });
+    expect(walks).toBe(2);
+    expect(r.hardWalks).toBe(2);
+  });
+
+  it('H1: scaffold only with kinds the tools at hand harvest; the reserve is lent only until a block was left behind', () => {
+    const ids: Record<number, string> = { 4: 'cobblestone', 3: 'dirt', 270: 'wooden_pickaxe' };
+    const toItem = (i: ItemV4): ItemStack | null => (i.network_id === 0 ? null : { name: ids[i.network_id]!, networkId: i.network_id, count: i.count, metadata: 0 });
+    const inventory = new Inventory(toItem, () => 7n);
+    const { loop } = harness({ x: 0.5, y: -60, z: 0.5 });
+    const skills = new BotSkills({ loop, world: { ...fakeWorld(flatGen()), inventory } });
+    const v4 = (id: number, count: number): ItemV4 => ({ network_id: id, count, metadata: 0, has_stack_id: false, block_runtime_id: 0 });
+    inventory.handleInventorySlot({ window_id: 0, slot: 1, item: v4(4, 20) });
+    expect(skills.scaffoldItems()).toEqual([]); // cobblestone by hand: no drop, so no pillar at all
+    expect(skills.scaffoldBudget()).toBe(0);
+    inventory.handleInventorySlot({ window_id: 0, slot: 2, item: v4(3, 10) });
+    expect(skills.scaffoldItems()).toEqual(['dirt']);
+    inventory.handleInventorySlot({ window_id: 0, slot: 0, item: v4(270, 1) });
+    expect(skills.scaffoldItems()).toContain('cobblestone');
+    expect(skills.scaffoldBudget()).toBe(30); // the 16 reserve is lent while nothing was ever left behind
+    skills.scaffold.lost = 1;
+    expect(skills.scaffoldBudget()).toBe(14); // 30 carried - 16 reserve
+    skills.dispose();
+  });
+
+  it('M4: a log wall or logs touching built blocks are not a tree', () => {
+    const b = new Blocks();
+    const logs = tree(b, 0, 0, 6, 'oak');
+    expect(detectTree(b.at, logs[0]!)).toBeDefined();
+    b.set(1, -58, 0, 'oak_fence');
+    expect(detectTree(b.at, logs[0]!)).toBeUndefined();
+    b.set(1, -58, 0, 'air');
+    b.set(-1, -57, 0, 'torch');
+    expect(detectTree(b.at, logs[0]!)).toBeUndefined();
+    // a wall: 1 log at the bottom, but 9 columns within the lowest 3 layers
+    const w = new Blocks();
+    w.set(20, -60, 0, 'oak_log');
+    for (let x = 16; x <= 24; x++) for (let y = -59; y <= -55; y++) w.set(x, y, 0, 'oak_log');
+    for (let x = 16; x <= 24; x++) w.set(x, -54, 0, 'oak_leaves');
+    expect(detectTree(w.at, { x: 20, y: -60, z: 0 })).toBeUndefined();
   });
 });

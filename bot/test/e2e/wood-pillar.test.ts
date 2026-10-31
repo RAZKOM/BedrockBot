@@ -30,6 +30,8 @@ function pillarLayout(x0: number, z0: number): { layout: WoodLayout; trees: Tall
   const trees: TallTree[] = [
     { name: 'spruce 20', x: x0, z: z0, h: 20, kind: 'spruce', wide: false },
     { name: 'jungle 2x2 22', x: x0 + 12, z: z0, h: 22, kind: 'jungle', wide: true },
+    { name: 'spruce 20 (hostile)', x: x0 + 16, z: z0 + 10, h: 20, kind: 'spruce', wide: false },
+    { name: 'spruce 16 (cancel)', x: x0 - 4, z: z0 + 10, h: 16, kind: 'spruce', wide: false },
   ];
   const blocks: WoodLayout['blocks'] = [];
   for (const t of trees) {
@@ -87,8 +89,8 @@ describe.skipIf(!E2E)('@bds wood: pillar up to fell tall trees, scaffold dug aga
     bot = await connectWoodBot('Pillar');
     await bot.teleport(L.layout.start);
     await buildLayout(bot.truth, L.layout);
-    const last = logsOf(L.trees.at(-1)!).at(-1)!;
-    expect(await pollUntil(() => bot.world.blockAt(last)?.name === 'jungle_log', 10_000)).toBeGreaterThanOrEqual(0);
+    const tops = L.trees.map((t) => ({ p: logsOf(t).at(-1)!, name: `${t.kind}_log` }));
+    expect(await pollUntil(() => tops.every((t) => bot.world.blockAt(t.p)?.name === t.name), 10_000)).toBeGreaterThanOrEqual(0);
     await bot.truth.ok('clear', [bot.name]);
     await bot.loop.waitTicks(10);
     await give('diamond_axe', 1);
@@ -131,6 +133,12 @@ describe.skipIf(!E2E)('@bds wood: pillar up to fell tall trees, scaffold dug aga
       expect(bot.skills.status().damage.length).toBe(dmg0);
       expect(bot.world.self.health).toBeGreaterThanOrEqual(health0);
       await pollUntil(() => bot.world.inventory.count(`${t.kind}_log`) - log0 >= logs.length, 3_000);
+      // a log that bounced onto the canopy falls when the leaves decay (as gather's later sweeps would find it): up to 90 s
+      for (let i = 0; i < 9 && bot.world.inventory.count(`${t.kind}_log`) - log0 < logs.length; i++) {
+        await bot.loop.waitTicks(200);
+        await bot.skills.collect(12, 200, { origin: { x: t.x + 0.5, y: FEET_Y, z: t.z + 0.5 }, filter: (it) => it.name === `${t.kind}_log` });
+        if (i === 0) notes.push(`${t.name}: a log was still out of reach after the collect; waiting for the canopy to decay`);
+      }
       expect(bot.world.inventory.count(`${t.kind}_log`) - log0).toBe(logs.length);
       await stocked();
     }, 600_000);
@@ -162,4 +170,76 @@ describe.skipIf(!E2E)('@bds wood: pillar up to fell tall trees, scaffold dug aga
     expect(bot.world.self.health).toBeGreaterThanOrEqual(health0);
     await stocked();
   }, 300_000);
+
+  /** Start a fell and wait until the bot stands `up` blocks above the ground (on its pillar). */
+  const fellUntilUp = async (t: TallTree, up: number) => {
+    const tree = bot.skills.treeAt(logsOf(t)[0]!);
+    expect(tree, t.name).toBeDefined();
+    const fell = bot.skills.fellTree(tree!);
+    const high = await pollUntil(() => bot.loop.state.pos.y >= FEET_Y + up && bot.skills.scaffold.size >= up, 120_000);
+    expect(high, `${t.name}: never ${up} up`).toBeGreaterThanOrEqual(0);
+    return { tree: tree!, fell };
+  };
+  const boxOf = (t: TallTree) => ({ from: { x: t.x - 4, y: FEET_Y, z: t.z - 4 }, to: { x: t.x + 5, y: FEET_Y + t.h + 2, z: t.z + 5 } });
+
+  it('B1: a hostile shows up while the bot is 10 up its pillar: it comes down (sneaking, block by block), the pillar is gone, the tree is finished later', async () => {
+    const t = L.trees[2]!;
+    await stock();
+    await bot.teleport({ x: t.x + 4.5, y: FEET_Y, z: t.z + 0.5 });
+    const { tree, fell } = await fellUntilUp(t, 10);
+    const up = bot.loop.state.pos.y - FEET_Y;
+    let killed = false;
+    try {
+      await consoleCommand(WOOD_CONTAINER, 'difficulty', 'easy');
+      await consoleCommand(WOOD_CONTAINER, 'summon', 'husk', String(t.x + 4), String(FEET_Y), String(t.z));
+      const r = await fell;
+      const pos = bot.loop.state.pos;
+      // the fight: the test kills the husk once the bot is down (the guard process does it in the full bot)
+      await consoleCommand(WOOD_CONTAINER, 'kill', `@e[type=husk,x=${t.x},y=${FEET_Y},z=${t.z},r=24]`);
+      killed = true;
+      notes.push(`hostile: summoned ${up.toFixed(1)} up, fell ${r.reason}, end y ${pos.y.toFixed(2)}, pending scaffold ${bot.skills.scaffold.size}, ${r.scaffoldRemoved} dug again`);
+      expect(r.reason).toBe('hostile_near');
+      // down to the last block at most (a fall of 1): that one stays pending while the husk hits at the foot
+      expect(pos.y - FEET_Y).toBeLessThan(1.01);
+      expect(bot.skills.scaffold.size).toBeLessThanOrEqual(1);
+      expect(await scaffoldIn(boxOf(t).from, boxOf(t).to)).toBe(bot.skills.scaffold.size);
+    } finally {
+      if (!killed) await consoleCommand(WOOD_CONTAINER, 'kill', `@e[type=husk,x=${t.x},y=${FEET_Y},z=${t.z},r=24]`);
+      await consoleCommand(WOOD_CONTAINER, 'difficulty', 'peaceful');
+    }
+    await bot.loop.waitTicks(20);
+    const r2 = await bot.skills.fellTree(tree);
+    await bot.skills.collect(10, 600, { origin: { x: t.x + 0.5, y: FEET_Y, z: t.z + 0.5 } });
+    notes.push(`hostile: second fell ${r2.ok ? 'ok' : r2.reason}, ${r2.scaffoldPlaced} placed / ${r2.scaffoldRemoved} dug again`);
+    expect(r2.ok).toBe(true);
+    expect(bot.skills.scaffold.size).toBe(0);
+    expect(Math.abs(bot.loop.state.pos.y - FEET_Y)).toBeLessThan(0.01);
+    expect((await logsInBox(bot.truth, boxOf(t).from, boxOf(t).to)).count).toBe(0);
+    expect(await scaffoldIn(boxOf(t).from, boxOf(t).to)).toBe(0);
+    await stocked();
+  }, 600_000);
+
+  it('B1: a goto pre-empting the fell on top of the pillar digs it down first, then walks', async () => {
+    const t = L.trees[3]!;
+    await stock();
+    await bot.teleport({ x: t.x + 4.5, y: FEET_Y, z: t.z + 0.5 });
+    const health0 = bot.world.self.health;
+    const dmg0 = bot.skills.status().damage.length;
+    const { fell } = await fellUntilUp(t, 8);
+    const dest = { x: t.x + 6, y: FEET_Y, z: t.z - 3 };
+    const g = await bot.skills.goto({ type: 'block', p: dest }, { timeoutTicks: 2400 });
+    const r = await fell;
+    const pos = bot.loop.state.pos;
+    notes.push(`cancel: fell ${r.reason}, goto ${JSON.stringify(g)}, end ${pos.x.toFixed(2)} ${pos.y.toFixed(2)} ${pos.z.toFixed(2)}, pending scaffold ${bot.skills.scaffold.size}`);
+    expect(r.reason).toBe('interrupted');
+    expect(g).toEqual({ ok: true });
+    expect(Math.floor(pos.x)).toBe(dest.x);
+    expect(Math.abs(pos.y - FEET_Y)).toBeLessThan(0.01);
+    expect(bot.skills.scaffold.size).toBe(0);
+    expect(await scaffoldIn(boxOf(t).from, boxOf(t).to)).toBe(0);
+    expect(bot.skills.status().damage.length).toBe(dmg0);
+    expect(bot.world.self.health).toBeGreaterThanOrEqual(health0);
+    await bot.skills.collect(10, 300, { origin: { x: t.x + 0.5, y: FEET_Y, z: t.z + 0.5 } });
+    await stocked();
+  }, 600_000);
 });

@@ -32,6 +32,24 @@ navigator has had a pillar move (`allowPlace`) and moves that dig (`allowBreak`)
    log only a pillar reaches there is skipped with that reason); without throwaway blocks everything
    behaves as before. Scaffold blocks may come from the keeper's throwaway reserve: they come back.
 5. **No planner change.** The navigator's API (allowPlace, allowBreak, its actions) is used as it is.
+6. **Review fixes (2026-10-30, before merge).**
+   - B1: the pending scaffold lives on BotSkills (`skills.scaffold`), not in the job. A cancel or any new
+     skill but the feller starts the dig-down at once (`descendFirst`); goto and collect wait for it; a newer
+     call does not stop it. The next fell digs pending scaffold first, climbing beside a column the bot is
+     no longer on and stripping it top down.
+   - B2: a placement is recorded whenever the cell was free before the click and holds a scaffold kind
+     after it, also when the placer timed out or was interrupted (re-checked for 40 ticks); a scaffold walk
+     waits for those re-checks before it ends.
+   - H1: only kinds the tools at hand harvest are scaffold (none: no pillar); the keeper's reserve is lent
+     only until a scaffold block was left behind.
+   - H2: sneak on the scaffold; no pillar with a hostile within 12 blocks; a hostile showing up brings the
+     bot down (`hostile_near`).
+   - M1-M5: hard walks only for the job's main items (never saplings, sticks, apples, seeds), at most 2 per
+     collect within the caller's timeout scale, natural terrain only (the dig action refuses anything else on
+     such walks); tree detection refuses log walls (footprint of the lowest 3 layers) and logs touching built
+     blocks; the fell is capped at 1200 + 60 per log ticks once a pillar was needed.
+   - L1-L3: the 3-block fall limit counts the fall (air below + 1); a side dig only from natural ground; late
+     placements re-checked (B2).
 
 ## Consequences
 
@@ -40,6 +58,7 @@ navigator has had a pillar move (`allowPlace`) and moves that dig (`allowBreak`)
   lowest layer (a log wall stays refused).
 - A pillar costs about 1.5 s per block up and down on BDS; the drops of the dug scaffold fall with the bot
   and are picked up on the way.
-- Open: a cancelled fell (death, a newer command) leaves its pillar standing (reported in
-  `scaffoldLeft`); a log whose every column within 2 blocks is blocked (by anything but air, leaves and the tree's logs) stays; the `hard` pickup walk's
+- The guard fights from the ground: a goto pre-empting a fell on its pillar first digs it down (about
+  1.3 s a block with dirt by hand).
+- Open: a log whose every column within 2 blocks is blocked (by anything but air, leaves and the tree's logs) stays; the `hard` pickup walk's
   scaffold cleanup assumes the navigator's placed blocks are pillar or bridge cells it can stand on.

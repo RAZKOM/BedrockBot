@@ -20,14 +20,14 @@ import type { Vec3 } from '../../world/types.ts';
 import { checkReach, DEFAULT_REACH, EYE_HEIGHT } from '../dig/look.ts';
 import type { DigOptions, DigResult } from '../dig/digger.ts';
 import type { Goal } from '../nav/goals.ts';
-import { clearScaffold, pillarStep, ScaffoldRecord, type ClearResult } from '../place/scaffold.ts';
+import { clearScaffold, onScaffold as standsOnScaffold, pillarStep, ScaffoldRecord, type ClearOptions, type ClearResult } from '../place/scaffold.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { isLeaves, isLog, remainingLogs, type BlockLookup, type Tree } from './tree.ts';
 
 export interface FellDeps {
   blockAt: BlockLookup;
   /** Feet position and the correction counter (InputLoop.state). */
-  state: () => { pos: Vec3; corrections: number; onGround?: boolean };
+  state: () => { pos: Vec3; corrections: number; onGround?: boolean; tick?: bigint };
   dig: (p: Vec3, opts?: DigOptions) => Promise<DigResult>;
   goto: (goal: Goal, opts?: GotoOptions) => Promise<SkillResult>;
   /** Feet height of a body standing in cell (x, y, z), NaN = blocked, undefined = unknown (NavGrid.stand). */
@@ -45,6 +45,14 @@ export interface FellDeps {
   protectedAt?: (p: Vec3) => boolean;
   /** Wait n ticks (landing after a dug scaffold block). Needed for the pillar. */
   waitTicks?: (n: number) => Promise<void>;
+  /** The pending scaffold (BotSkills.scaffold): outlives this call, so a cancelled fell's pillar is dug down by whoever moves the bot next. Default a fresh one. */
+  scaffold?: ScaffoldRecord;
+  /** A hostile mob within about 12 blocks: no pillar is started or grown, and a bot on its pillar comes down. */
+  hostileNear?: () => boolean;
+  /** Hold sneak while standing on scaffold (knockback, a correction do not push it off). */
+  sneak?: (on: boolean) => void;
+  /** Positions of log item drops near the tree (the canopy check before coming down). */
+  drops?: () => Vec3[];
 }
 
 export interface FellOptions {
@@ -64,6 +72,8 @@ export interface FellOptions {
   pillar?: boolean;
   /** Highest pillar in blocks. Default 40. */
   maxScaffold?: number;
+  /** Ticks for the whole fell at most once a pillar was needed (the rest is reported). Default 1200 + 60 per log. */
+  maxTicks?: number;
 }
 
 export interface FellResult {
@@ -228,7 +238,11 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
   const skipped = new Set<string>();
   const failsAt = new Map<string, number>();
   const pillarTries = new Map<string, number>();
-  const scaffold = new ScaffoldRecord();
+  const scaffold = deps.scaffold ?? new ScaffoldRecord();
+  const t0 = deps.state().tick;
+  const maxTicks = opts.maxTicks ?? 1200 + 60 * tree.logs.length;
+  const overTime = () => t0 !== undefined && deps.state().tick !== undefined && Number(deps.state().tick! - t0) > maxTicks;
+  const sneakReach = 0.35; // the sneaking eye is lower: plan with less reach on the pillar
   const treeLogs = new Set(tree.logs.map(key));
   const waitTicks = deps.waitTicks;
   const place = deps.place;
@@ -246,12 +260,9 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
     const p = deps.state().pos;
     return { x: Math.floor(p.x), y: Math.floor(p.y + 1e-3), z: Math.floor(p.z) };
   };
-  const onScaffold = (): boolean => {
-    const f = feetCell();
-    return scaffold.has({ x: f.x, y: f.y - 1, z: f.z });
-  };
+  const onScaffold = (): boolean => standsOnScaffold(scaffold, deps);
   /** Dig the pillar down (every recorded block that is still there), back on the ground. */
-  const comeDown = async (): Promise<ClearResult | undefined> => {
+  const comeDown = async (copts: ClearOptions = {}): Promise<ClearResult | undefined> => {
     if (scaffold.size === 0 || !waitTicks) return undefined;
     const c = await clearScaffold(scaffold, {
       blockAt: deps.blockAt,
@@ -259,12 +270,40 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
       dig: (p) => deps.dig(p, { tool: 'best' }),
       goto: deps.goto,
       waitTicks,
+      ...(place ? { place } : {}),
+      ...(deps.throwaways ? { throwaways: deps.throwaways } : {}),
+      ...(deps.sneak ? { sneak: deps.sneak } : {}),
       cancelled: deps.cancelled,
       logger: log,
-    });
+    }, copts);
     res.scaffoldRemoved! += c.removed.length;
     res.scaffoldLeft!.push(...c.left.filter((l) => l.why !== 'interrupted' && l.why !== 'not reached'));
     return c;
+  };
+  /**
+   * Before leaving the pillar: a log drop that bounced onto the canopy (it rests on leaves, out of any later walk's
+   * reach) gets the leaf under it dug, so it falls to the ground (2026-10-30 e2e: 1 of 20 spruce logs stayed on the
+   * leaves for 90 s). At most 6 leaves, in reach of the sneaking eye, never inside the protected area.
+   */
+  const dropStuckLogs = async (): Promise<void> => {
+    if (!deps.drops || !onScaffold()) return;
+    let dug = 0;
+    for (const p of deps.drops()) {
+      if (dug >= 6 || deps.cancelled()) break;
+      const leaf = { x: Math.floor(p.x), y: Math.floor(p.y - 0.5), z: Math.floor(p.z) };
+      if (!isLeaves(deps.blockAt(leaf)?.name) || deps.protectedAt?.(leaf)) continue;
+      const s = deps.state().pos;
+      if (!checkReach({ x: s.x, y: s.y + EYE_HEIGHT - sneakReach, z: s.z }, leaf, reach).ok) continue;
+      const r = await deps.dig(leaf, { tool: 'best' });
+      if (r.ok) {
+        dug++;
+        res.leavesDug!++;
+      }
+    }
+    if (dug > 0) {
+      log.info(`fell: dug ${dug} leaf block(s) under log drops on the canopy`);
+      await waitTicks?.(10);
+    }
   };
   /** Clear the head room of the next jump (2 and 3 above the feet): leaves and the tree's own logs, nothing else. */
   const headRoom = async (): Promise<boolean> => {
@@ -285,19 +324,21 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
     return true;
   };
   /** Pillar up in the current column until the feet are at `top`. */
-  const climb = async (top: number): Promise<'ok' | 'failed' | 'interrupted'> => {
+  const climb = async (top: number): Promise<'ok' | 'failed' | 'interrupted' | 'hostile'> => {
     let fails = 0;
     while (feetCell().y < top) {
       if (deps.cancelled()) return 'interrupted';
+      if (deps.hostileNear?.()) return 'hostile';
       if ((deps.throwaways?.() ?? 0) <= 0 || scaffold.size >= maxScaffold) return 'failed';
       if (!(await headRoom())) {
         log.info(`fell: no head room to pillar at ${key(feetCell())}`);
         return 'failed';
       }
       if (deps.cancelled()) return 'interrupted';
-      const r = await pillarStep(scaffold, { blockAt: deps.blockAt, state: deps.state, place: place! });
+      const r = await pillarStep(scaffold, { blockAt: deps.blockAt, state: deps.state, place: place!, waitTicks: waitTicks! });
       if (r.ok) {
         res.scaffoldPlaced!++;
+        deps.sneak?.(true);
         continue;
       }
       if (r.reason === 'interrupted') return 'interrupted';
@@ -318,8 +359,27 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
     return res;
   };
 
+  // a pillar left by an earlier fell (cancelled, a death): dig it down first
+  if (scaffold.size > 0 && waitTicks) {
+    const d = await comeDown();
+    if (d?.interrupted) return finish(false, 'interrupted');
+  }
   for (let iter = 0; iter < 8 * tree.logs.length + 16; iter++) {
     if (deps.cancelled()) return finish(false, 'interrupted');
+    if (res.pillars && overTime()) {
+      log.warn(`fell: over ${maxTicks} ticks; stopping`);
+      const d = await comeDown();
+      if (d?.interrupted) return finish(false, 'interrupted');
+      return finish(false, 'time_cap');
+    }
+    if (onScaffold() && deps.hostileNear?.()) {
+      // down to the last block (a fall of 1 is harmless; its hits spoil every dig at the foot): the rest stays
+      // pending and the next fell (or cancel / goto) digs it
+      log.warn('fell: a hostile mob is near; coming down from the pillar');
+      const d = await comeDown({ downOnly: true, lowEnough: 1 });
+      if (d?.interrupted) return finish(false, 'interrupted');
+      return finish(false, 'hostile_near');
+    }
     const remaining = remainingLogs(deps.blockAt, tree).filter((p) => !skipped.has(key(p)));
     const listed = remaining.find((p) => deps.blacklist?.blocked(p));
     if (listed) {
@@ -335,7 +395,8 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
       continue;
     }
     const s = deps.state();
-    const eye = { x: s.pos.x, y: s.pos.y + EYE_HEIGHT, z: s.pos.z };
+    const up = onScaffold();
+    const eye = { x: s.pos.x, y: s.pos.y + EYE_HEIGHT - (up ? sneakReach : 0), z: s.pos.z };
     if (checkReach(eye, target, reach + 0.25).ok) {
       const r = await deps.dig(target, { tool: 'best', ...opts.dig });
       if (r.ok) {
@@ -357,15 +418,16 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
       }
     }
     // On the pillar: extend it while the log is in reach of this column, else come down first (never walk off it).
-    if (onScaffold()) {
+    if (up) {
       const f = feetCell();
-      const c = planColumn(f.x, f.z, f.y, target, ctx());
+      const c = planColumn(f.x, f.z, f.y, target, { ...ctx(), reach: reach - sneakReach });
       if (!('why' in c) && c.blocks > 0 && (pillarTries.get(key(target)) ?? 0) < 2) {
         pillarTries.set(key(target), (pillarTries.get(key(target)) ?? 0) + 1);
         const r = await climb(c.top);
         if (r === 'interrupted') return finish(false, 'interrupted');
-        if (r === 'ok') continue;
+        if (r === 'ok' || r === 'hostile') continue; // hostile: the loop top comes down
       }
+      await dropStuckLogs();
       const d = await comeDown();
       if (d?.interrupted) return finish(false, 'interrupted');
       if (onScaffold()) break; // could not come down: stop (what is left is reported)
@@ -386,9 +448,13 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
     }
     // Pillar up next to it (twice per log at most).
     let why = `no stand cell reaches it (${spots.length} candidates)`;
+    if (!moved && canPillar && deps.hostileNear?.()) {
+      log.info(`fell: ${key(target)}: no pillar with a hostile mob near`);
+      return finish(false, 'hostile_near');
+    }
     if (!moved && canPillar && (pillarTries.get(key(target)) ?? 0) < 2) {
       pillarTries.set(key(target), (pillarTries.get(key(target)) ?? 0) + 1);
-      const c = ctx();
+      const c = { ...ctx(), reach: reach - sneakReach };
       const p = pillarSpots(target, c, { from: s.pos, others: remaining });
       if (p.spots.length === 0) why += `; no pillar: ${p.why.join('; ')}`;
       for (const spot of p.spots.slice(0, 2)) {
@@ -405,8 +471,8 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
         log.info(`fell: pillar of ${spot.blocks} block(s) at ${key(spot.foot)} for ${key(target)} (${spot.leaves} leaves in the way)`);
         const r = await climb(spot.top);
         if (r === 'interrupted') return finish(false, 'interrupted');
-        if (r === 'ok') {
-          moved = true;
+        if (r === 'ok' || r === 'hostile') {
+          moved = true; // hostile: the loop top comes down
           break;
         }
         why += '; the pillar stopped';
@@ -421,6 +487,7 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
     }
   }
   if (scaffold.size > 0) {
+    await dropStuckLogs();
     const d = await comeDown();
     if (d?.interrupted) return finish(false, 'interrupted');
   }
