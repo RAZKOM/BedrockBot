@@ -284,6 +284,17 @@ export function setupPanel(d: PanelDeps): Panel {
           crashes: s?.crashes ?? 0,
         };
       },
+      link: () => {
+        const l = conn.link;
+        const r = built.respawn;
+        const death = r?.dead ? r.lastDeath : undefined;
+        const died = death ? Date.parse(death.ts) : NaN;
+        return {
+          ...l,
+          lastDisconnect: metrics.lastDisconnect,
+          ...(r?.dead ? { dead: { since: Number.isFinite(died) ? died : Date.now(), cause: death?.cause ?? 'unknown', respawnAt: r.respawnDelayMs >= 0 && Number.isFinite(died) ? died + r.respawnDelayMs : null } } : {}),
+        };
+      },
       conn: () => {
         const m = metrics.snapshot();
         return {

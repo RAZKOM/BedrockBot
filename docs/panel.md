@@ -157,7 +157,7 @@ the package pin.
   main-thread milliseconds spent forwarding world changes to the worker (total and the longest flush),
   crashes and starts;
 - **Connection**: server, game version, state, uptime and session, reconnects and disconnects, kicks,
-  the last disconnect;
+  the last disconnect (while the bot is not in the game the banner below says it first);
 - **Commands**: quick buttons, by default `!status`, `!home go`, `!stop`, `!guard on`, `!guard off`,
   `!eat`, `!equip`, `!inv` (no `!come`: it needs a player in the game; **edit buttons** changes them,
   Track AR), a command box with the **command palette** (any `!command`; the `!` is added when
@@ -171,6 +171,31 @@ the package pin.
 - **Help**: the command registry, the modes and the settings (Track AM), fetched when opened;
 - **Map**: the panel's own map (Track AR; it was the `/map` page in a frame), drawn only while the
   section is open, plus a link to the full debug page.
+
+### When the bot is not connected
+
+A banner across the top of the page (`#panel-link`, under the header) shows whenever the bot is not
+in the game, and goes away by itself on the first poll after it spawned again; nothing to reload. It
+comes from `state.link` (`panelLink` in `state.ts`, from `Connection.link`, the metrics' last
+disconnect and the respawn controller) and the page's `linkView` (`menu.ts`, so the unit tests run
+the same code):
+
+| Phase | Banner | What still works |
+|---|---|---|
+| `connecting` (the first join, or before it) | **Connecting**, for how long, the last disconnect if any | `!status`, `!set`, `!mode`, `!help`, `!panel`, `!stop`, `!pause`, `!resume` |
+| `reconnecting` (a session ended, the backoff runs) | **Disconnected: reconnecting** or **Kicked: reconnecting** (red), the last disconnect (kind, reason, how long ago), **next try in 12 s (attempt 3)** or **attempt 3 running**, since when | the same |
+| `signin` (a Realm join waits for the Microsoft device code) | **Not signed in**, the code in large type, a link to the sign-in page, when the code expires | the same |
+| `dead` (spawned, between the death and the respawn) | **Dead: respawning**, the cause, how long ago, **respawn in 2 s** (or: automatic respawn is off) | every command (they queue for after the respawn); no inventory or map actions |
+| `offline` (closed for good: the bot is stopping) | **Offline**, since when, the last disconnect | the same as `connecting` |
+| the panel does not answer (a poll failed: the bot process restarts or stopped) | **Panel not answering**, for how long; the red **stale** badge and the error stay in the header | nothing is sent; the page keeps polling every 2 s and comes back by itself |
+
+While the banner shows, the inventory cells and the map are greyed (`body.is-offline`), a cell's or a
+column's menu lists no command entries (only local ones such as a box's contents) and says why, the
+quick buttons that need the game are disabled, and the command box does not send a command that
+needs the game: it answers `not sent: Kicked: reconnecting. !status, !set, !help and !stop still
+work.` (`offlineOk` in `menu.ts` is the list). The inventory line says `(last known)`: the cells keep
+what the bot carried when it left. The banner is one column on a phone (rows wrap), and the spinner
+stops with `prefers-reduced-motion`.
 
 ### Live updates
 
@@ -207,13 +232,18 @@ contents. What the menu model (`health/panel/menu.ts` `cellActions`) offers:
 | Cell | Entries (command) |
 |---|---|
 | a hotbar slot that is not held, empty or not | **Select (hold slot n)** (`!select <0..8>`) |
-| armour in the inventory | **Equip (best armour)** (`!equip`: the best pieces carried, not necessarily this one) |
+| armour or an elytra in the inventory | **Wear this** (`!equip slot <n>`: exactly this piece, even when it is worse than the worn one; an elytra goes into the chest slot, **Wear this (chest slot)**; the piece it replaces goes into this cell's slot), **Wear the best armour** (`!equip`) |
 | shield, totem of undying, arrows, fireworks, nautilus shell, maps | **To the offhand** (`!offhand <item>`) |
 | food | **Eat (best food)** (`!eat`: the eater picks the food) |
 | a shulker box | **Show contents** (local: the line under the grid) |
 | any item | **Drop 1** (`!drop <item> 1`, stacks only), **Drop the stack (n)** / **Drop** (`!drop <item> <n>`, confirmed), **Drop all n item** when more than this stack is carried (`!drop <item>`, confirmed), **Unload now** (`!unload`) |
 | the offhand | **Back into the inventory** (`!offhand clear`) |
 | worn armour | nothing (no command takes one piece off; `!drop all` sheds everything) |
+
+A piece worn with **Wear this** stays on: the survival kit's automatic armour pass skips that armour
+slot while the chosen item is still worn (`ArmourController` pins, `docs/survival.md` "Armour worn by
+hand"). **Wear the best armour** (`!equip`) forgets the choices; the flight kit's own elytra swap
+(before a takeoff, the chestplate after the landing) ends the pin on the chest slot.
 
 `!drop <item> <n>` drops that many of the item, smallest stacks and the main inventory first (the
 survival kit's rule), so "the stack" is the cell's count, not necessarily that cell.
@@ -339,6 +369,9 @@ bot is idle (the shield controller, [pve.md](pve.md) "Shield"); a totem stays.
   "logs": ["2026-10-29T18:52:53.123Z INFO  [health] panel: !wp set panel (as console)", "..."],
   "chat": [{ "ts": 1761753600000, "text": "waypoint panel set to 18304 -60 17024", "sent": true }],
   "commands": ["status", "pos", "quit", "help", "..."],
+  "link": { "phase": "reconnecting", "state": "connecting", "since": 1761753597000, "retryAt": 1761753612000, "attempt": 3,
+            "lastDisconnect": { "ts": "2026-10-29T16:00:00.000Z", "kind": "kick", "reason": "kicked_for_idle" },
+            "signIn": null, "death": null },   // "When the bot is not connected"; phase "online" = no banner
   "quick": ["!status", "!home go", "!stop", "!guard on", "!guard off", "!eat", "!equip", "!inv"]
 }
 ```
@@ -466,6 +499,14 @@ and the switch and the two-tap mode, the changed-only and search filters, quick 
 storage with save and defaults, the log filters, the palette from `/api/help`, the map's poll, its
 right-click menu, Walk here on the surface and the waypoint name prompt), `panel-server.test.ts`
 (`paused`, `/api/marks` behind the token).
+
+Offline banner unit tests: `panel-menu.test.ts` (`panelLink` for every phase, `linkView`'s titles and
+rows, `offlineOk`, **Wear this** for armour and the elytra), `panel-page.test.ts` (the markup hides the
+banner while online; reconnecting shows why and when, greys the cells, disables the quick buttons that
+need the game, empties the cell menu but for local entries, refuses `!goto` and sends `!status`, and
+the next poll with the bot spawned clears all of it; sign-in shows the code and the link; dead keeps
+the commands; a failed poll shows **Panel not answering** until the next answer),
+`connection-reconnect.test.ts` (`Connection.link`: since when, the scheduled retry and the attempt).
 
 `panel-actions` (bds-core; `PANEL_ACTIONS_E2E_PORT`, default a random port in 9650..9659): the CLI with
 `--walk --health-port <port>` and a token; every action is computed with the menu model from the live

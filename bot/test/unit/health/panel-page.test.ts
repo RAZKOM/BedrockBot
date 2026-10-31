@@ -178,6 +178,8 @@ interface Harness {
   rows: Map<string, FakeEl>;
   inputs: Map<string, FakeEl>;
   modeButtons: FakeEl[];
+  /** The quick buttons (button.q). */
+  quick: FakeEl[];
 }
 
 function runScript(html: string, opts: { storageThrows?: boolean; prefersLight?: boolean; storage?: Record<string, string> } = {}): Harness {
@@ -232,6 +234,7 @@ function runScript(html: string, opts: { storageThrows?: boolean; prefersLight?:
     return b;
   });
   const h: Harness = {
+    quick,
     posted: [],
     rows,
     inputs,
@@ -629,6 +632,104 @@ describe('panel page script: menus and controls (Track AR, fake DOM)', () => {
     pal.children[1]!.fire('pointerdown');
     expect(h.els.get('cmd')!.value).toBe('!goto ');
     expect(pal.hidden).toBe(true);
+  });
+});
+
+describe('panel page script: the offline banner (fake DOM)', () => {
+  const kickedState = (now: number) =>
+    fullState({
+      connState: () => 'connecting',
+      healthy: () => false,
+      link: () => ({ state: 'connecting', since: now - 3000, retryAt: now + 20_000, attempt: 2, lastDisconnect: { ts: new Date(now - 60_000).toISOString(), kind: 'kick', reason: 'kicked_for_idle' } }),
+    });
+  const rows = (h: Harness): string[] => h.els.get('link-rows')!.children.map((c) => c.textContent);
+
+  it('the markup: the banner is hidden while online and shown for a disconnected state', () => {
+    expect(renderPanelPage(fullState())).toMatch(/<section id="panel-link" class="wide link" role="status" aria-live="polite" hidden>/);
+    expect(renderPanelPage(kickedState(Date.now()))).toMatch(/<section id="panel-link" class="wide link" role="status" aria-live="polite">/);
+  });
+
+  it('reconnecting: the banner says why and when, actions are greyed, world commands are not sent; it all comes back when the bot spawns', async () => {
+    const h = runScript(renderPanelPage(kickedState(Date.now())));
+    const banner = h.els.get('panel-link')!;
+    expect(banner.hidden).toBe(false);
+    expect(banner.className).toBe('wide link link-bad');
+    expect(h.els.get('link-title')!.textContent).toBe('Kicked: reconnecting');
+    expect(h.els.get('link-detail')!.textContent).toMatch(/not in the game/);
+    const r = rows(h);
+    expect(r.slice(0, 2)).toEqual(['last disconnect', 'kick: kicked_for_idle (1 min ago)']);
+    expect(r[2]).toBe('next try');
+    expect(r[3]).toMatch(/^in (19|20) s \(attempt 2\)$/);
+    expect(h.els.get('link-signin')!.hidden).toBe(true);
+    expect(h.doc.body.classList.contains('is-offline')).toBe(true);
+    expect(h.els.get('inv-sum')!.textContent).toBe('36/36 slots used, armour 15/20 (last known)');
+    const q = (c: string) => h.quick.find((b) => b.dataset.cmd === c)!;
+    expect(q('!status').disabled).toBe(false);
+    expect(q('!home go').disabled).toBe(true);
+    expect(q('!stop').disabled).toBe(false);
+    // a cell's menu: no command actions, a note instead; a box still shows its contents (local)
+    h.cells.get('s0')!.fire('click');
+    expect(labels(h)).toEqual([]);
+    expect(h.els.get('menu')!.children.map((c) => c.textContent)).toContain('Kicked: reconnecting: actions come back when the bot has spawned');
+    h.cells.get('s32')!.fire('click');
+    expect(labels(h)).toEqual(['Show contents']);
+    // the command box: a world command is not sent, !status is
+    h.els.get('cmd')!.value = '!goto 1 2 3';
+    h.els.get('cmdform')!.fireWith('submit', {});
+    await flush();
+    expect(h.posted).toEqual([]);
+    expect(h.els.get('replies')!.textContent).toBe('> !goto 1 2 3\nnot sent: Kicked: reconnecting. !status, !set, !help and !stop still work.');
+    h.fetchQueue.push(ok(['status: up 2h']));
+    h.els.get('cmd')!.value = '!status';
+    h.els.get('cmdform')!.fireWith('submit', {});
+    await flush();
+    expect(h.posted).toEqual(['!status']);
+    // the bot spawns again: the next poll clears the banner and brings the actions back
+    h.fetchQueue.push(answer(liteState(fullState())));
+    await h.timers.at(-1)!.fn();
+    expect(banner.hidden).toBe(true);
+    expect(h.doc.body.classList.contains('is-offline')).toBe(false);
+    expect(q('!home go').disabled).toBe(false);
+    expect(h.els.get('inv-sum')!.textContent).toBe('36/36 slots used, armour 15/20');
+    h.cells.get('s0')!.fire('click');
+    expect(labels(h)).toEqual(['Select (hold slot 1)', 'Drop', 'Unload now']);
+  });
+
+  it('sign-in and dead: the code and link, the respawn countdown (commands still go through while dead)', async () => {
+    const now = Date.now();
+    const h = runScript(renderPanelPage(fullState({ connState: () => 'connecting', link: () => ({ state: 'connecting', since: now, attempt: 0, signIn: { verification_uri: 'https://microsoft.com/link', user_code: 'ABCD1234', expires_in: 900, at: now } }) })));
+    expect(h.els.get('link-title')!.textContent).toBe('Not signed in');
+    expect(h.els.get('link-signin')!.hidden).toBe(false);
+    expect(h.els.get('link-url')!.getAttribute('href')).toBe('https://microsoft.com/link');
+    expect(h.els.get('link-code')!.textContent).toBe('ABCD1234');
+    h.fetchQueue.push(answer(liteState(fullState({ link: () => ({ state: 'spawned', dead: { since: now - 500, cause: 'death.attack.mob', respawnAt: now + 1500 } }) }))));
+    await h.timers.at(-1)!.fn();
+    expect(h.els.get('link-title')!.textContent).toBe('Dead: respawning');
+    expect(h.els.get('panel-link')!.className).toBe('wide link link-dead');
+    expect(h.els.get('link-signin')!.hidden).toBe(true);
+    expect(h.doc.body.classList.contains('is-offline')).toBe(true);
+    expect(h.quick.find((b) => b.dataset.cmd === '!home go')!.disabled).toBe(false);
+    h.fetchQueue.push(ok(['ok']));
+    h.els.get('cmd')!.value = '!guard on';
+    h.els.get('cmdform')!.fireWith('submit', {});
+    await flush();
+    expect(h.posted).toEqual(['!guard on']);
+  });
+
+  it('the panel does not answer (the bot process restarts): the banner says so, and the first answer clears it', async () => {
+    const h = runScript(renderPanelPage(fullState()));
+    expect(h.els.get('panel-link')!.hidden).toBe(true);
+    h.fetchQueue.push(() => Promise.reject(new Error('Failed to fetch')));
+    await h.timers.at(-1)!.fn();
+    expect(h.els.get('panel-link')!.hidden).toBe(false);
+    expect(h.els.get('panel-link')!.className).toBe('wide link link-down');
+    expect(h.els.get('link-title')!.textContent).toBe('Panel not answering');
+    expect(h.doc.body.classList.contains('is-offline')).toBe(true);
+    expect(h.els.get('err')!.textContent).toBe('offline: Failed to fetch');
+    h.fetchQueue.push(answer(liteState(fullState())));
+    await h.timers.at(-1)!.fn();
+    expect(h.els.get('panel-link')!.hidden).toBe(true);
+    expect(h.doc.body.classList.contains('is-offline')).toBe(false);
   });
 });
 

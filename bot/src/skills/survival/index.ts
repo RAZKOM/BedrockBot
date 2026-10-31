@@ -17,7 +17,7 @@ import type { ItemV4 } from '../../world/packets.ts';
 import type { EntityInfo, ItemStack, PacketSource, Vec3 } from '../../world/types.ts';
 import { Avoidance, DEFAULT_AVOID_MOB_RADIUS, DEFAULT_AVOID_SPAWNER_RADIUS, SpawnerIndex, type SpawnerWorld } from '../nav/avoidance.ts';
 import { wireItemOf } from '../place/place.ts';
-import { ARMOUR_SLOT_NAMES, ArmourController, type EquipResult } from './armour.ts';
+import { ARMOUR_SLOT_NAMES, ArmourController, type EquipResult, type WearResult } from './armour.ts';
 import { chooseFood, EatController, wantsToEat, type EatResult } from './eat.ts';
 import { DEFAULT_JUNK, DEFAULT_THROWAWAY_MIN, hotbarThrowaway, InventoryKeeper, THROWAWAY_BLOCKS, type DropResult } from './keeper.ts';
 import { StackRequests, type ScreenContainers } from './screen.ts';
@@ -218,9 +218,20 @@ export class SurvivalKit {
     return this.exclusive<EatResult>(() => this.eater.eat({ force: true }), { ok: false, reason: 'busy' });
   }
 
-  /** `!equip`: an armour pass now. */
-  equip(): Promise<EquipResult> {
-    return this.exclusive<EquipResult>(() => this.armour.equip(), { ok: false, equipped: [], failed: [], reason: 'busy' });
+  /** `!equip`: an armour pass now. `reset` (the command) forgets the manual choices first: the best armour again. */
+  equip(opts: { reset?: boolean } = {}): Promise<EquipResult> {
+    return this.exclusive<EquipResult>(
+      () => {
+        if (opts.reset) this.armour.clearPins();
+        return this.armour.equip();
+      },
+      { ok: false, equipped: [], failed: [], reason: 'busy' },
+    );
+  }
+
+  /** `!equip slot <n>` / `!equip <item>` (the panel's "Wear this"): that piece or the elytra on, kept on by the automatic pass (armour.ts pins). */
+  wear(from: number): Promise<WearResult> {
+    return this.exclusive<WearResult>(() => this.armour.wearSlot(from), { ok: false, reason: 'busy' });
   }
 
   /** `!drop <item> [n]`. */
@@ -251,7 +262,8 @@ export class SurvivalKit {
       .slice(0, 8)
       .map(([k, v]) => `${k} x${v}`)
       .join(', ');
-    const worn = this.armour.worn().map((w, i) => `${ARMOUR_SLOT_NAMES[i]} ${w ? w.name : '-'}`);
+    const pins = this.armour.pinned();
+    const worn = this.armour.worn().map((w, i) => `${ARMOUR_SLOT_NAMES[i]} ${w ? w.name : '-'}${pins.has(i as 0 | 1 | 2 | 3) ? ' (by hand)' : ''}`);
     const tools = slots
       .filter((s): s is ItemStack => !!s && maxDurability(s.name) !== undefined)
       .map((s) => `${s.name} ${durabilityLeft(s)}/${maxDurability(s.name)}${this.toolOk(s) ? '' : ' (worn)'}`);
@@ -268,7 +280,7 @@ export class SurvivalKit {
     return {
       busy: this.busy,
       eat: this.eater.stats,
-      armour: this.armour.stats,
+      armour: { ...this.armour.stats, pinned: Object.fromEntries([...this.armour.pinned()].map(([s, n]) => [ARMOUR_SLOT_NAMES[s], n])) },
       keeper: this.keeper.stats,
       avoidance: this.avoidance.last,
       spawnerScans: this.spawners.scans,

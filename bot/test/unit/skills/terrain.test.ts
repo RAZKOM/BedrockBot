@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { blockInfoOf, blockQueryOf, boxesOf, classify } from '../../../src/skills/terrain/index.ts';
+import { isBuiltBlock } from '../../../src/skills/terrain/classify.ts';
 import { flatGen } from './genworld.ts';
 
 describe('block shapes (minecraft-data blockCollisionShapes)', () => {
@@ -46,6 +47,9 @@ describe('classify', () => {
     // built blocks are never dug by a route (2026-10-30: !mine went through the owner's bookshelves and stone bricks)
     for (const n of ['bookshelf', 'stone_bricks', 'deepslate_brick_stairs', 'oak_planks', 'glass', 'spruce_door', 'cobblestone_wall', 'white_concrete', 'crafting_table']) expect(classify(blockInfoOf(n)).protect, n).toBe(true);
     for (const n of ['stone', 'dirt', 'cobblestone', 'sand', 'gravel', 'oak_log', 'coal_ore', 'deepslate', 'sandstone', 'grass_block']) expect(classify(blockInfoOf(n)).protect, n).toBe(false);
+    // ores under a built prefix stay natural (Realm 2026-10-31: every copper_ore was skipped as protected); the copper blocks stay built
+    for (const n of ['copper_ore', 'deepslate_copper_ore', 'quartz_ore']) expect(isBuiltBlock(n), n).toBe(false);
+    for (const n of ['copper_block', 'cut_copper', 'copper_door', 'copper_grate', 'quartz_block']) expect(isBuiltBlock(n), n).toBe(true);
     expect(classify(blockInfoOf('oak_leaves'))).toMatchObject({ leaves: true, floor: true });
     expect(classify(blockInfoOf('oak_leaves')).penalty).toBeGreaterThan(0);
     expect(classify(blockInfoOf('ice')).friction).toBe(0.98);
