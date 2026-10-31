@@ -32,7 +32,7 @@ describe.skipIf(!E2E)('@bds fly: fly, then walk (Track AU2)', () => {
   /**
    * `!goto` the goal and wait for the arrival. The flight's decision is either said up front (`flying N
    * blocks to M blocks from <goal>, then walking`, when the goal's ground is known) or in flight once
-   * the chunks there are loaded (`fly: landing M blocks from <goal> (no landing spot on it), then walking`).
+   * the chunks there are loaded (`fly: landing M blocks from <goal>, then walking`).
    */
   async function gotoAndMeasure(label: string, start: Vec3, goal: Vec3): Promise<{ flying: string; decision: string | undefined; arrived: string; pos: Vec3; damage: number; landings: number; flightLog: string | undefined; said: string[] }> {
     const b = bot!;
@@ -47,7 +47,7 @@ describe.skipIf(!E2E)('@bds fly: fly, then walk (Track AU2)', () => {
     const flying = await b.reply((s) => s.startsWith('flying') || s.startsWith('fly: ') || s.startsWith('goto: '), from, 20_000);
     const arrived = await b.reply((s) => s.startsWith('arrived at ') || s.startsWith('goto: '), from, 240_000);
     const said = b.said.slice(from);
-    const decision = said.find((s) => /^flying \d+ blocks to \d+ blocks from .*, then walking$/.test(s) || /^fly: landing \d+ blocks from .* \(no landing spot on it\), then walking$/.test(s));
+    const decision = said.find((s) => /^flying \d+ blocks to \d+ blocks from .*, then walking$/.test(s) || /^fly: landing \d+ blocks from .*, then walking$/.test(s)); // Track BF: `(under the overhang)` or nothing
     const g = await b.truth.glide(b.name);
     const dmg = await b.truth.damageSince(since, b.name);
     const logs = b.logs.slice(n0);

@@ -20,6 +20,7 @@ import type { FlightController, FlightReport } from '../../skills/fly/controller
 import { elytraWornLimit, kitLine, kitReady, readKit, SupplyWatch, type FlightKitMemory, type KitInventory } from '../../skills/fly/kit.ts';
 import type { FlightKitOps } from '../../skills/fly/kitops.ts';
 import { cruiseHeight, flightSeconds, hdist, takeoffSky, type CellQuery, type LandingTarget } from '../../skills/fly/plan.ts';
+import type { LandingCell, LandingPlan } from '../../skills/fly/landing.ts';
 import type { SkillResult } from '../../skills/types.ts';
 import { BaseProcess, PRIORITY, type ProcessStatus, type StopReason } from './manager.ts';
 
@@ -32,15 +33,51 @@ export interface FlyTarget extends LandingTarget {
   /** Track AU2, fly-then-walk: the walk after the landing (`then walking 23 blocks`), for the status line. */
   then?: string;
   /**
-   * Track AU2: the real goal when this target is the goal itself with its ground still unknown at the
-   * takeoff (too far to be loaded): once the flight is within `RETARGET_WITHIN` blocks the landable
-   * cell near it is looked for again and the flight retargeted to it (`deps.landingNear`).
+   * Track AU2 / BF: the real goal of a flight that ends in a walk. Track BF: while the target `hold`s
+   * (the goal's ground is not live yet) the landing is looked for every LOOK_EVERY ticks from
+   * RETARGET_WITHIN blocks out and the flight retargeted once it is confirmed (`deps.landing`).
    */
   goal?: Vec3;
+  /** Track BF: the landing cell (re-checked in the descent: dry, sound, live). */
+  cell?: LandingCell;
+  /** Track BF: the landing is the nearest dry ground, no walking path was confirmed (why). */
+  fallback?: string;
+  /** Track BF: the half width of an exact landing on the goal (`!fly <x y z>`), when it is landable. */
+  exact?: number;
 }
 
 /** Track AU2: the flight re-checks the goal's ground from this far out (the server loads chunks about 160 blocks around the body). */
 export const RETARGET_WITHIN = 160;
+/** Track BF: the landing search runs at most every this many ticks while the target holds. */
+export const LOOK_EVERY = 40;
+
+/**
+ * Track BF: the flight target for a landing plan (landing.ts `findLanding`): the goal itself held high
+ * while nothing is known or confirmed, else the plan's target with the lines the owner sees.
+ */
+export function targetFromPlan(plan: LandingPlan, base: { label: string; goal: Vec3; half: number; exact?: number }): FlyTarget {
+  const goal = base.goal;
+  const common = { label: base.label, goal, ...(base.exact !== undefined ? { exact: base.exact } : {}) };
+  switch (plan.kind) {
+    case 'unknown':
+    case 'none':
+      return { x: goal.x + 0.5, z: goal.z + 0.5, top: goal.y, half: base.half, hold: true, ...common };
+    case 'goal':
+      return { ...plan.target, ...common, cell: plan.cell };
+    case 'cell':
+      return { ...plan.target, ...common, cell: plan.cell, then: `then walking ${Math.round(plan.walk)} blocks` };
+    case 'fallback':
+      return { ...plan.target, ...common, cell: plan.cell, fallback: plan.why, then: `then trying to walk ${Math.round(plan.walk)} blocks` };
+  }
+}
+
+/** Track BF: the owner's line for a landing that is not on the goal (undefined for the goal itself or a hold). */
+export function landingLine(t: FlyTarget, walk: number): string | undefined {
+  if (t.hold || !t.cell || t.cell.kind === 'goal') return undefined;
+  const at = `${t.cell.x} ${t.cell.feet} ${t.cell.z}`;
+  if (t.fallback) return `fly: no landing spot near ${t.label} with a walking path (${t.fallback}); landing on dry ground at ${at}, then trying to walk`;
+  return `fly: landing ${Math.round(walk)} blocks from ${t.label}${t.bearing !== undefined ? ' (under the overhang)' : ''}, then walking`;
+}
 
 export interface FlyDeps {
   controller: FlightController;
@@ -53,8 +90,10 @@ export interface FlyDeps {
   skyTop(x: number, z: number): number | undefined;
   /** Track AU2: a cell of the world model (true = solid, false = air, undefined = not loaded) for the sky check over the takeoff. */
   cell: CellQuery;
-  /** Track AU2, fly then walk: the landable cell near a goal (commands-fly.ts `landingNear`), for the retarget in flight. */
-  landingNear?: (goal: Vec3) => Promise<{ x: number; z: number; top: number; walk: number; loaded: boolean } | null | undefined>;
+  /** Track BF, fly then walk: the landing for a goal (landing.ts `findLanding`, commands-fly.ts), for the look in flight. */
+  landing?: (goal: Vec3, label: string, exact: number | undefined) => Promise<LandingPlan>;
+  /** Track BF: the landing cell is still dry, sound and live (re-checked in the descent). */
+  cellOk?: (cell: LandingCell) => boolean;
   /** The owner's lines (the supply whispers, the kept-kit notes). */
   say(msg: string): void;
   waitTicks(n: number): Promise<void>;
@@ -243,48 +282,72 @@ export class FlyProcess extends BaseProcess {
       // the FlightProcess held control in the air; when it lets go the manager resumes us (run -> advance)
       if (this.controlled) void this.advance(this.token);
     });
-    if (this.target.goal && this.d.landingNear) void this.retargetNear(this.target.goal, this.d.landingNear);
+    if (this.target.goal && this.d.landing) void this.watchLanding(this.target.goal, this.d.landing);
   }
 
   /**
-   * Track AU2, fly then walk: the goal's ground was unknown at the takeoff; once the flight is within
-   * RETARGET_WITHIN blocks (the chunks there are loaded) the landable cell near the goal is looked for
-   * and, when it is not the goal itself, the flight is retargeted to it and the owner told.
+   * Track BF (docs/flight.md "Landing v3"): the landing of a flight that ends in a walk is only ever a
+   * cell of the live world model with a confirmed walking path to the goal. While the target holds
+   * (the goal's ground is not loaded, or nothing near it is known) the landing is looked for every
+   * LOOK_EVERY ticks from RETARGET_WITHIN blocks out, and the flight retargeted once there is one (a
+   * confirmed cell, or the nearest dry ground with a line saying so). A chosen cell is re-checked in
+   * the descent (dry, sound, live) and searched again when it fails. Holding longer than `flyHoldS`
+   * ends the flight on the nearest dry ground (`no_landing`; the walk still runs).
    */
-  private async retargetNear(goal: Vec3, near: NonNullable<FlyDeps['landingNear']>): Promise<void> {
+  private async watchLanding(goal: Vec3, find: NonNullable<FlyDeps['landing']>): Promise<void> {
     // not gated on the token: the `flight` process holds control in the air and this process is paused
     // (its token moves on) until the landing, like the flight's own `.then` above
+    let ticks = 0;
+    let lastLook = -Infinity;
+    let holdSince: number | undefined;
     let unknown = 0;
+    const holdTicks = (this.d.settings.get('flyHoldS') as number) * 20;
     for (;;) {
       await this.d.waitTicks(10);
+      ticks += 10;
       if (this.done || this.phase !== 'flying' || !this.d.controller.active) return;
       const c = this.d.controller.status();
-      if (c.distance === undefined || c.distance > RETARGET_WITHIN) continue;
-      if (c.phase === 'land' || c.phase === 'done' || c.distance < 15) return;
-      const cell = await near(goal);
-      if (this.done || this.phase !== 'flying') return;
-      if (cell === null) {
-        // loaded and nothing landable within flyLandSearch: the goal itself stays the target, no more searching
-        this.log.info(`fly: nothing landable near ${this.target.label} (${Math.round(c.distance)} blocks out): aiming at it`);
-        return;
+      if (c.phase === 'land' || c.phase === 'done') return;
+      const t = this.target;
+      if (!t.hold) {
+        // a chosen cell: re-checked every LOOK_EVERY ticks until the touchdown is near
+        if (c.distance !== undefined && c.distance < 6) return;
+        if (!t.cell || !this.d.cellOk || ticks - lastLook < LOOK_EVERY) continue;
+        lastLook = ticks;
+        if (this.d.cellOk(t.cell)) continue;
+        this.log.info(`fly: the landing cell ${t.cell.x} ${t.cell.feet} ${t.cell.z} is no longer landable (${Math.round(c.distance ?? 0)} blocks out): looking again`);
+      } else {
+        if (c.distance === undefined || c.distance > RETARGET_WITHIN) continue;
+        if (c.descending === 'holding') holdSince ??= ticks;
+        if (holdSince !== undefined && ticks - holdSince > holdTicks) {
+          this.log.info(`fly: held ${Math.round((ticks - holdSince) / 20)} s over ${t.label} without a landing: the nearest dry ground`);
+          this.d.say(`fly: no landing near ${t.label} after ${Math.round((ticks - holdSince) / 20)} s (its ground did not load or nothing walks there); landing on the nearest dry ground, then trying to walk`);
+          this.d.controller.landNow('no_landing');
+          return;
+        }
+        if (ticks - lastLook < LOOK_EVERY) continue;
+        lastLook = ticks;
       }
-      if (!cell) {
-        // the goal's chunk is not loaded yet: again in 10 ticks (the chunks often arrive as the approach begins)
-        if (++unknown % 10 === 1) this.log.info(`fly: the ground at ${this.target.label} is not known yet (${Math.round(c.distance)} blocks out, ${c.phase})`);
+      const plan = await find(goal, t.label, t.exact);
+      if (this.done || this.phase !== 'flying' || !this.d.controller.active) return;
+      if (plan.kind === 'unknown' || plan.kind === 'none') {
+        if (++unknown % 5 === 1) this.log.info(`fly: ${plan.line} (${Math.round(c.distance ?? 0)} blocks out, ${c.phase}${c.descending ? `, ${c.descending}` : ''})`);
+        if (!t.hold) {
+          const held = targetFromPlan(plan, { label: t.label, goal, half: t.half, ...(t.exact !== undefined ? { exact: t.exact } : {}) });
+          if (this.d.controller.retarget(held)) (this as { target: FlyTarget }).target = held;
+        }
         continue;
       }
-      if (!cell.loaded) {
-        if (++unknown % 10 === 1) this.log.info(`fly: the ground at ${this.target.label} is only cached so far (${Math.round(c.distance)} blocks out, ${c.phase})`);
+      this.log.info(`fly: ${plan.line}`);
+      const next = targetFromPlan(plan, { label: t.label, goal, half: t.half, ...(t.exact !== undefined ? { exact: t.exact } : {}) });
+      if (!t.hold && t.cell && next.cell && next.cell.x === t.cell.x && next.cell.z === t.cell.z && next.cell.feet === t.cell.feet) continue; // the same cell
+      if (!this.d.controller.retarget(next)) {
+        this.log.info(`fly: the landing could not be moved now (${c.phase}, ${Math.round(c.distance ?? 0)} blocks out)`);
         continue;
       }
-      if (cell.walk <= 0) return; // the goal itself is landable
-      const target: FlyTarget = { x: cell.x + 0.5, z: cell.z + 0.5, top: cell.top, half: 1, label: this.target.label, then: `then walking ${Math.round(cell.walk)} blocks` };
-      if (Math.abs(target.x - this.target.x) < 0.1 && Math.abs(target.z - this.target.z) < 0.1 && target.top === this.target.top) return; // the same cell as planned
-      if (!this.d.controller.retarget(target)) return;
-      (this as { target: FlyTarget }).target = target;
-      this.log.info(`fly: ${this.target.label} is not landable: landing ${Math.round(cell.walk)} blocks from it, then walking`);
-      this.d.say(`fly: landing ${Math.round(cell.walk)} blocks from ${this.target.label} (no landing spot on it), then walking`);
-      return;
+      (this as { target: FlyTarget }).target = next;
+      const line = landingLine(next, plan.kind === 'goal' ? 0 : plan.walk);
+      if (line) this.d.say(line);
     }
   }
 

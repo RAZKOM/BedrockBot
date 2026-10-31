@@ -37,6 +37,7 @@ import { fellTree, type FellOptions, type FellResult } from './tree/feller.ts';
 import { detectTree, treesFrom, type Tree, type TreeOptions } from './tree/tree.ts';
 import type { SkillResult, Skills } from './types.ts'; // Track R: goto takes NavGoal / NavGotoOptions now
 import { surfaceRefusal } from '../world/dimension.ts'; // Track AT
+import { headInWater, swimUp } from './survival/surface.ts'; // Track BF
 
 export type { Goal, GotoOptions, SkillResult, Skills, DigOptions, DigResult } from './types.ts';
 export type { CollectOptions, CollectResult } from './collect/collect.ts';
@@ -353,11 +354,30 @@ export class BotSkills implements Skills {
     if (noSurface) return Promise.resolve({ ok: false, reason: noSurface });
     // Synchronous start (callers check nav.busy right after the call).
     const token = this.begin('goto');
-    const p = this.nav.goto(goal, opts);
+    const p = this.nav.goto(goal, opts).then((r) => this.surfaceAndRetry(r, token, goal, opts));
     void p.finally(() => {
       this.end(token);
     });
     return p;
+  }
+
+  /**
+   * Track BF: a goto that failed with the head under water (the planner has no start node on a sea
+   * floor: it swims on the surface only) swims straight up (skills/survival/surface.ts) and plans once
+   * more from the surface.
+   */
+  private async surfaceAndRetry(r: SkillResult, token: number, goal: NavGoal, opts?: NavGotoOptions): Promise<SkillResult> {
+    const w = this.world;
+    if (r.ok || r.reason !== 'unreachable' || !w.blockAt || token !== this.epoch) return r;
+    const blockAt = w.blockAt.bind(w);
+    if (!headInWater(blockAt, this.loop.state.pos)) return r;
+    const from = this.loop.state.pos;
+    const up = await swimUp(this.loop, blockAt, { cancelled: () => token !== this.epoch });
+    this.log.info(
+      `goto: no path under water at ${Math.floor(from.x)} ${Math.floor(from.y)} ${Math.floor(from.z)}; swam up ${up.rose.toFixed(1)} blocks in ${up.ticks} ticks${up.ok ? '' : ' (still under water)'}`,
+    );
+    if (!up.ok || token !== this.epoch) return r;
+    return this.nav.goto(goal, opts);
   }
 
   /** Break one block (docs/digging.md). Needs world.blockAt + world.inventory; the hotbar for tool switching. */

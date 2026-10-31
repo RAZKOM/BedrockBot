@@ -37,6 +37,8 @@ export const TAKEOFF_TIMEOUT = 120;
  * server putting it back in the air (a correction after a touchdown the server did not see).
  */
 export const SETTLE_TICKS = 10;
+/** Track BF: sneak goes on this far above the landing cell in the approach / land phase (FlightDeps.sneakLanding). */
+export const SNEAK_ABOVE = 2.5;
 /** A rocket entity appearing within this many blocks of the body right after a use is ours. */
 const ROCKET_NEAR = 4;
 
@@ -74,6 +76,8 @@ export interface FlightDeps {
   groundAt?(x: number, z: number, fromY?: number): number | undefined;
   /** Track AU2: the highest solid block of a column (the world model) for the descent geometry; undefined = unknown. */
   skyTop?(x: number, z: number): number | undefined;
+  /** Track BF: hold sneak through the touchdown and the settle (the server's sneak edge rule stops the slide at an edge); released when the flight ends. */
+  sneakLanding?(): boolean;
   log?: Logger;
 }
 
@@ -93,6 +97,12 @@ export function skyQuery(base: BlockQuery): BlockQuery {
 }
 
 export type FlightEndReason = BrainEndReason | 'no_glide' | 'no_elytra';
+
+/** Track BF: a landing target for the log (`12.5 64 -3.5 (half 1)`, `... (12 cells, walk, in from 270)`, `... (hold)`). */
+export function describeTarget(t: LandingTarget): string {
+  const how = t.hold ? 'hold' : t.cells ? `${t.cells.size} cells${t.walk ? ', walk' : ''}${t.bearing !== undefined ? `, in from ${Math.round(t.bearing)} under the roof at y ${t.ceiling ?? '?'}` : ''}` : `half ${t.half}`;
+  return `${t.x.toFixed(1)} ${t.top} ${t.z.toFixed(1)} (${how})`;
+}
 
 export interface FlightReport {
   ok: boolean;
@@ -117,6 +127,12 @@ export interface FlightReport {
   /** Touchdown speeds (the velocity of the last airborne tick), blocks per tick. */
   touchdown: { vy: number; h: number } | undefined;
   maxY: number;
+  /** Track BF: ticks held over a goal that was not landable yet. */
+  holdTicks?: number;
+  /** Track BF: horizontal distance from the predicted touchdown to where the body stood when the flight ended (the post-landing slide). */
+  slide?: number;
+  /** Track BF: sneak was held through the touchdown (FlightDeps.sneakLanding). */
+  sneak?: boolean;
 }
 
 export interface FlightOptions extends Omit<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop'> {
@@ -155,7 +171,8 @@ export class FlightController {
   private endReason: FlightEndReason | undefined;
   private baseWorld: BlockQuery | undefined;
   /** The brain called the landing done: ticks the body has stood since (the server may still disagree). */
-  private settling: { ticks: number; end: FlightEnd } | undefined;
+  private settling: { ticks: number; end: FlightEnd; at: Vec3 } | undefined;
+  private sneaked = false;
   /** Landings the server undid (the body was corrected back into the air). */
   bounces = 0;
 
@@ -208,7 +225,7 @@ export class FlightController {
     const { loop } = this.d;
     this.target = target;
     const base = loop.world;
-    this.brain = new FlightBrain(target, { ...opts, groundAt: this.d.groundAt?.bind(this.d), skyTop: this.d.skyTop?.bind(this.d), obstacle: (x, y, z) => base.solidAt(x, y, z) === true });
+    this.brain = new FlightBrain(target, { ...opts, groundAt: this.d.groundAt?.bind(this.d), skyTop: this.d.skyTop?.bind(this.d), obstacle: (x, y, z) => base.solidAt(x, y, z) === true, note: (m) => this.log.info(`flight: ${m}`) });
     this.tickNo = 0;
     this.lastFire = -1000;
     this.usedAt = undefined;
@@ -219,10 +236,11 @@ export class FlightController {
     this.lastAir = undefined;
     this.endReason = undefined;
     this.settling = undefined;
+    this.sneaked = false;
     this.bounces = 0;
     this.baseWorld = base;
     loop.world = skyQuery(base);
-    this.log.info(`flight: to ${target.x.toFixed(1)} ${target.top} ${target.z.toFixed(1)} (half ${target.half}), cruise y ${opts.cruiseY}${opts.takeoffYaw !== undefined ? `, takeoff heading ${Math.round(opts.takeoffYaw)}` : ''}`);
+    this.log.info(`flight: to ${describeTarget(target)}, cruise y ${opts.cruiseY}${opts.takeoffYaw !== undefined ? `, takeoff heading ${Math.round(opts.takeoffYaw)}` : ''}`);
     return new Promise<FlightReport>((resolve) => {
       this.resolve = resolve;
       this.unsubs.push(
@@ -253,7 +271,7 @@ export class FlightController {
   retarget(target: LandingTarget): boolean {
     if (!this.brain?.retarget(target, this.body(this.d.loop.state))) return false;
     this.target = target;
-    this.log.info(`flight: retargeted to ${target.x.toFixed(1)} ${target.top} ${target.z.toFixed(1)} (half ${target.half})`);
+    this.log.info(`flight: retargeted to ${describeTarget(target)}`);
     return true;
   }
 
@@ -309,7 +327,7 @@ export class FlightController {
         this.finish(end.ok, end.ok ? undefined : end.reason, end);
         return;
       } else {
-        loop.setCommand({ glide: false, jump: false, pitch: 0, forward: 0, strafe: 0 });
+        loop.setCommand({ glide: false, jump: false, pitch: 0, forward: 0, strafe: 0, sneak: this.sneaked });
         return;
       }
     }
@@ -325,9 +343,12 @@ export class FlightController {
       elytraLeft: this.d.elytraLeft(),
     });
     const c = out.control;
-    loop.setCommand({ yaw: c.yaw, pitch: c.pitch, jump: c.jump, glide: c.glide, forward: 0, strafe: 0, sprint: false, sneak: false });
+    // Track BF: sneak through the touchdown (docs/flight.md "Sneak at the touchdown")
+    const low = this.target !== undefined && state.pos.y - this.target.top < SNEAK_ABOVE && (brain.phase === 'land' || brain.phase === 'approach' || brain.phase === 'done');
+    if (low && this.d.sneakLanding?.() === true) this.sneaked = true;
+    loop.setCommand({ yaw: c.yaw, pitch: c.pitch, jump: c.jump, glide: c.glide, forward: 0, strafe: 0, sprint: false, sneak: this.sneaked && low });
     if (c.fire && rockets.slot >= 0) this.fire(rockets.slot, state.pos);
-    if (out.end) this.settling = { ticks: 0, end: out.end };
+    if (out.end) this.settling = { ticks: 0, end: out.end, at: { ...state.pos } };
   }
 
   private fire(slot: number, feet: Vec3): void {
@@ -369,6 +390,9 @@ export class FlightController {
       glideEnds: this.glideEnds,
       touchdown: this.lastAir,
       maxY: b?.stats.maxY ?? s.pos.y,
+      holdTicks: b?.stats.holdTicks ?? 0,
+      ...(this.settling ? { slide: hdist(this.settling.at, s.pos) } : {}),
+      sneak: this.sneaked,
     };
   }
 
@@ -377,14 +401,14 @@ export class FlightController {
     const r = this.report(ok, reason, end);
     for (const u of this.unsubs) u();
     this.unsubs = [];
-    this.d.loop.setCommand({ glide: false, jump: false, pitch: 0, forward: 0, strafe: 0 });
+    this.d.loop.setCommand({ glide: false, jump: false, pitch: 0, forward: 0, strafe: 0, sneak: false });
     if (this.baseWorld) this.d.loop.world = this.baseWorld;
     this.baseWorld = undefined;
     this.endReason = reason;
     this.log.info(
       `flight: ${ok ? 'landed' : `ended (${reason})`} at ${r.landedAt ? `${r.landedAt.x.toFixed(2)} ${r.landedAt.y.toFixed(2)} ${r.landedAt.z.toFixed(2)}` : '?'}` +
         `${r.off !== undefined ? `, ${r.off.toFixed(2)} from the centre` : ''}; ${r.rockets} rockets (${r.rocketsBy.climb} climb, ${r.rocketsBy.cruise} cruise, ${r.rocketsBy.goaround} go-around), ${r.goArounds} go-arounds, ${r.ticks} ticks, ${r.corrections} corrections` +
-        `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}, max y ${r.maxY.toFixed(1)}${r.descents.length ? `, descent ${r.descents.join('; ')}` : ''}${r.steered ? `, steered ${r.steered} ticks` : ''}`,
+        `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}, max y ${r.maxY.toFixed(1)}${r.descents.length ? `, descent ${r.descents.join('; ')}` : ''}${r.steered ? `, steered ${r.steered} ticks` : ''}${r.holdTicks ? `, held ${r.holdTicks} ticks` : ''}${r.slide !== undefined ? `, slide ${r.slide.toFixed(2)}${r.sneak ? ' (sneaking)' : ''}` : ''}`,
     );
     this.brain = undefined;
     const resolve = this.resolve;

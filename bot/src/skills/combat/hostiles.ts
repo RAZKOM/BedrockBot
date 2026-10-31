@@ -362,8 +362,16 @@ export interface MobTrackerOptions {
   selfRuntimeId: () => bigint;
   /** Own feet position, for the attacker guess. */
   selfPos: () => Vec3 | undefined;
+  /** Track BF: the bot's eyes are in a water cell (skills/survival/surface.ts headInWater); drowning attribution. */
+  headInWater?: () => boolean;
   now?: () => number;
 }
+
+/** Track BF: why a health drop came without a mob guess. */
+export type HitCause = 'drowning';
+
+/** Bedrock's full air supply (set_entity_data `air`, ticks; 15 s). */
+export const MAX_AIR = 300;
 
 interface AttrLike {
   name: string;
@@ -394,6 +402,8 @@ export class MobTracker {
   selfUniqueId: bigint | undefined;
   /** Own health from set_health / update_attributes. */
   selfHealth: number | undefined;
+  /** Track BF: own air supply (set_entity_data `air`, 0..300 ticks), undefined until the server sends it. */
+  selfAir: number | undefined;
   lastHitBy: HitGuess | undefined;
   /** Track AH: per mob, now() of the last own health drop attributed to it (the guess). */
   readonly hitAt = new Map<bigint, number>();
@@ -402,7 +412,7 @@ export class MobTracker {
   private readonly o: MobTrackerOptions;
   private readonly now: () => number;
   private readonly unsubs: (() => void)[] = [];
-  private readonly hitFns = new Set<(h: HitGuess | undefined, damage: number) => void>();
+  private readonly hitFns = new Set<(h: HitGuess | undefined, damage: number, cause?: HitCause) => void>();
 
   constructor(source: MobPacketSource, opts: MobTrackerOptions) {
     this.o = opts;
@@ -432,7 +442,10 @@ export class MobTracker {
       }),
       source.on('set_entity_data', (p) => {
         const rid = toBig(p.runtime_entity_id);
-        if (rid === this.o.selfRuntimeId()) return;
+        if (rid === this.o.selfRuntimeId()) {
+          for (const m of (p.metadata ?? []) as MetaLike[]) if (m.key === 'air' && typeof m.value === 'number') this.selfAir = m.value;
+          return;
+        }
         this.meta(this.state(rid), (p.metadata ?? []) as MetaLike[]);
       }),
       source.on('entity_event', (p) => {
@@ -459,7 +472,10 @@ export class MobTracker {
         this.prune();
       }),
       source.on('respawn', (p) => {
-        if (p.state === 1) this.selfHealth = undefined;
+        if (p.state === 1) {
+          this.selfHealth = undefined;
+          this.selfAir = undefined;
+        }
       }),
     );
   }
@@ -469,7 +485,7 @@ export class MobTracker {
   }
 
   /** Called with the guess (or undefined) on every own health drop. */
-  onHit(fn: (h: HitGuess | undefined, damage: number) => void): () => void {
+  onHit(fn: (h: HitGuess | undefined, damage: number, cause?: HitCause) => void): () => void {
     this.hitFns.add(fn);
     return () => {
       this.hitFns.delete(fn);
@@ -548,13 +564,26 @@ export class MobTracker {
     if (prev !== undefined && h < prev && h > 0) {
       const damage = prev - h;
       this.lastDamageAt = this.now();
-      const guess = this.guessAttacker(damage);
+      const raw = this.guessAttacker(damage);
+      const cause = this.drowning(raw) ? 'drowning' : undefined;
+      const guess = cause ? undefined : raw;
       if (guess) {
         this.lastHitBy = guess;
         this.hitAt.set(guess.runtimeId, guess.at);
       }
-      for (const fn of [...this.hitFns]) fn(guess, damage);
+      for (const fn of [...this.hitFns]) fn(guess, damage, cause);
     }
+  }
+
+  /**
+   * Track BF: a health drop with the head under water is drowning when the air is out (the server's
+   * `air` at 20 or below: it sends the value in steps), or, without an air value, unless a mob swung
+   * at the bot with the hit (a drowned under water).
+   */
+  drowning(guess: HitGuess | undefined): boolean {
+    if (!(this.o.headInWater?.() ?? false)) return false;
+    if (this.selfAir !== undefined) return this.selfAir <= 20;
+    return guess?.why !== 'swing';
   }
 
   private fresh(rid: bigint): MobState {
