@@ -198,7 +198,10 @@ Decision record: [decisions/0044-boxing.md](decisions/0044-boxing.md).
   carried (`kept 2 bot_loot boxes`). A box not picked up again (`unload: emptying a box: the box was not picked
   up again (left at x y z)`; the collect tries radius 4, 6 and 10) no longer ends the job with its items in the
   inventory: one more deposit pass unloads them, no further box is emptied in that run (2026-10-31 Realm: the
-  items were pulled into the inventory and left there). With a named box carried no unnamed box is held back for the stash step.
+  items were pulled into the inventory and left there), then the bot walks back to the box and picks it up
+  (`unload: the box left at x y z: picked up on the second try`). Emptying a box leaves two inventory slots
+  free, the box's own and one for whatever else lies there and is picked up with it (with one, the pickup
+  once found the inventory full). With a named box carried no unnamed box is held back for the stash step.
   The fireworks box (Track AU) is checked first and keeps its own rule.
 - A box whose wire item is unknown (no raw item for its slot, e.g. after a refused request rolled the slot
   back): its name and contents are unknown, so it is kept (`unknown_box`), never a spare, never stored or

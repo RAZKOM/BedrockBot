@@ -757,6 +757,8 @@ export class HomeLogistics {
           lastBox = true;
         }
       }
+      await this.fetchLeftBox(cancelled);
+      if (cancelled()) return finish('interrupted');
       // overflow: spare shulker boxes from the box chest
       for (let n = 0; n < MAX_BOXES_PER_RUN; n++) {
         if (cancelled()) return finish('interrupted');
@@ -996,7 +998,8 @@ export class HomeLogistics {
         for (let i = 0; i < o.view.slots.length; i++) {
           const st = o.view.slots[i];
           if (!st) continue;
-          if (this.freeSlots().length - this.slotsFor(st) < 1) {
+          // two slots stay free: the box's own, and one for whatever else lies there and is picked up with it (the pickup found the inventory full, Realm 2026-10-30)
+          if (this.freeSlots().length - this.slotsFor(st) < 2) {
             left++;
             continue;
           }
@@ -1020,6 +1023,22 @@ export class HomeLogistics {
     return new Set(this.boxSlots().keys());
   }
 
+  /** A box broken and not picked up again in this run: the run walks back for it once its items are unloaded. */
+  private leftBox: Vec3 | undefined;
+
+  /** Walk back to a box left on the ground (its items unloaded since, so there is room now) and pick it up. */
+  private async fetchLeftBox(cancelled: () => boolean): Promise<void> {
+    const at = this.leftBox;
+    this.leftBox = undefined;
+    if (!at || this.freeSlots().length === 0) return;
+    const before = this.boxKeys();
+    await this.d.skills.goto({ type: 'near', p: centre(at), r: 1.5 }, { timeoutTicks: 400 });
+    if (cancelled()) return;
+    await this.d.skills.collect(6, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
+    const ok = [...this.boxKeys()].some((i) => !before.has(i));
+    this.log.info(`unload: the box left at ${fmtPos(at)}: ${ok ? 'picked up on the second try' : 'still not found (picked up by a player, or gone)'}`);
+  }
+
   /** Break the box at `at` and pick it up again (also an empty one): its new inventory slot, or why not. */
   private async breakAndPickUp(at: Vec3, cancelled: () => boolean): Promise<number | string> {
     const before = this.boxKeys();
@@ -1035,6 +1054,7 @@ export class HomeLogistics {
       if (cancelled()) return 'interrupted';
       if (fresh() !== undefined) break;
     }
+    if (fresh() === undefined) this.leftBox = at;
     return fresh() ?? `the box was not picked up again (left at ${fmtPos(at)})`;
   }
 
