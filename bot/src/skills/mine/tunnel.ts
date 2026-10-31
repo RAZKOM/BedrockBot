@@ -466,3 +466,52 @@ export async function runTunnel(io: TunnelIO, w: TunnelWorld, plan: TunnelPlan, 
   }
   return { ok: true, dug, steps: n };
 }
+
+// ---- the way back up (Track BK: the miner's returnUp, shared with !quarry) ---------------------------
+
+/** What climbing back up needs: the tunnel IO and the throwaway blocks carried (a pillar). */
+export interface ClimbIO extends TunnelIO {
+  throwaways?(): number;
+}
+
+export interface ClimbResult {
+  ok: boolean;
+  reason?: string;
+  /** Blocks the staircase dug; throwaway blocks the walk placed (a pillar). */
+  dug: number;
+  placed: number;
+  /** A pause or stop came in between: nothing more was tried. */
+  interrupted?: boolean;
+}
+
+/**
+ * Back up to feet cell `top` after a run that dug down: a walk (staircases are climbable), else a walk that
+ * may place (a pillar up a shaft, when throwaway blocks are carried), else a staircase dug up from where the
+ * bot stands (planTunnel 'feet' on `w`, every cell under its break rules) and the walk again. `hooks.phase`
+ * hears the walk / dig phases (the miner's state).
+ */
+export async function climbTo(io: ClimbIO, w: TunnelWorld | undefined, top: Vec3, hooks: { phase?(p: 'walk' | 'dig'): void; onDug?(p: Vec3): void; log?(m: string): void } = {}): Promise<ClimbResult> {
+  const have0 = io.throwaways?.() ?? 0;
+  let dug = 0;
+  const cut = (): ClimbResult => ({ ok: false, dug, placed: 0, interrupted: true });
+  hooks.phase?.('walk');
+  let g = await io.goto({ type: 'block', p: top }, { allowBreak: false, allowPlace: false, timeoutTicks: 1200 });
+  if (!io.alive()) return cut();
+  if (!g.ok && have0 > 0) {
+    g = await io.goto({ type: 'block', p: top }, { allowBreak: false, allowPlace: true, timeoutTicks: 2400 });
+    if (!io.alive()) return cut();
+  }
+  const pos = io.position();
+  if (!g.ok && w && pos) {
+    const feet = { x: Math.floor(pos.x), y: Math.floor(pos.y + 1e-6), z: Math.floor(pos.z) };
+    const climb = planTunnel(w, feet, { kind: 'feet', p: top }, { mode: 'stairs' });
+    if (climb.ok) {
+      hooks.phase?.('dig');
+      const r = await runTunnel(io, w, climb, (p) => hooks.onDug?.(p));
+      dug = r.dug;
+      if (!io.alive()) return cut();
+      if (r.ok) g = await io.goto({ type: 'block', p: top }, { allowBreak: true, allowPlace: false, timeoutTicks: 1200 });
+    } else hooks.log?.(`no staircase back up: ${climb.why ?? 'blocked'}`);
+  }
+  return { ok: g.ok, ...(g.ok ? {} : { reason: g.reason ?? 'failed' }), dug, placed: Math.max(0, have0 - (io.throwaways?.() ?? 0)) };
+}

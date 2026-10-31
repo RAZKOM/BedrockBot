@@ -6,9 +6,9 @@
 // Track BD: while the job explores for more ore (nothing known, below n) the status line says so with the
 // round and the blocks dug (`mine iron_ore 212/1000: exploring (round 3, 420 blocks)`).
 import type { MineOptions, MineState, MineTask } from '../../skills/mine/miner.ts';
-import { stashFor, type Stash } from '../../skills/container/stash.ts'; // Track AD
 import { minedItem } from '../../skills/items/catalog.ts'; // Track AD
 import { BaseProcess, PRIORITY, type ProcessStatus, type StopReason } from './manager.ts';
+import { StashStep } from './stashStep.ts'; // Track BK: the stash step, shared with the quarry
 
 export class MineProcess extends BaseProcess {
   readonly name = 'mine';
@@ -45,8 +45,8 @@ export class MineProcess extends BaseProcess {
     this.task.resume();
   }
 
-  /** Track AD: the stash step runs (the task is paused meanwhile). */
-  private stashing = false;
+  /** Track AD: the stash step (Track BK: tasks/process/stashStep.ts, shared with the quarry). */
+  private readonly stash = new StashStep();
 
   /**
    * Track AD (docs/get.md "Stash"): every tick in control, when fewer than 2 inventory slots are free
@@ -55,30 +55,26 @@ export class MineProcess extends BaseProcess {
    * control change, commands-get) and the next tick in control checks again.
    */
   tick(): void {
-    const s = stashFor(this.manager);
-    if (!s || this.stashing || !this.started || !this.controlled || !this.task.running || this.task.state === 'collect' || !s.needed()) return;
-    void this.stashStep(s, this.token);
-  }
-
-  private async stashStep(s: Stash, t: number): Promise<void> {
-    this.stashing = true;
-    this.task.pause();
-    try {
-      const names = [...this.task.names];
-      const ok = await s.ifFull({ label: 'mine', wanted: (n) => names.some((b) => minedItem(b) === n) });
-      if (t !== this.token || this.done) return;
-      if (ok) {
-        this.task.resume();
-        return;
-      }
-      this.task.stop();
-      this.task.state = 'failed';
-      this.task.lastError = 'inventory full';
-      this.finish();
-      this.resolve('failed');
-    } finally {
-      this.stashing = false;
-    }
+    const t = this.token;
+    const names = this.task.names;
+    this.stash.check(
+      this.manager,
+      this.started && this.controlled && this.task.running && this.task.state !== 'collect',
+      {
+        label: 'mine',
+        wanted: (n) => [...names].some((b) => minedItem(b) === n),
+        pause: () => this.task.pause(),
+        resume: () => this.task.resume(),
+        full: () => {
+          this.task.stop();
+          this.task.state = 'failed';
+          this.task.lastError = 'inventory full';
+          this.finish();
+          this.resolve('failed');
+        },
+      },
+      () => t === this.token && !this.done,
+    );
   }
 
   protected halt(why: 'pause' | 'stop'): void {

@@ -54,6 +54,7 @@ mines round after round instead of ending. Section "Mining v4" below; `!set mine
 | `miner.ts` `jobDropNames` / `isJobDrop` | what a job's sweeps and hole walks pick up: the ore drops (`isMineDrop`) plus the job's own block kinds and what they drop (`BLOCK_DROPS`: stone to cobblestone, gravel to gravel and flint, grass to dirt ...). Before 2026-10-30 only ore drops counted, so `!get sand 256` left every sand item on the floor |
 | `bot/src/skills/mine/baritone/mineProcess.ts` | wave 11 Track BD, ported from Baritone `MineProcess.java` (LGPL-3.0, `./LICENSE` points at nav/baritone/LICENSE): `coalesce`, `prune`, `plausibleToBreak`, `droppedItems`, `compositeOf`, the mine settings as constants |
 | `bot/src/skills/mine/branch.ts` | wave 9 Track AI: branch mining (`branchMore`, the miner's hook when no target is known; `BranchRun`, the Y table `BRANCH_Y`), wired per bot by `attachBranch` in chat/commands-explore.ts |
+| `bot/src/skills/mine/quarry.ts` | wave 11 Track BK: `!quarry` / `!tunnel` (boxes, slices, the staircase, `QuarryJob` over the builder's clear), wired by chat/commands-quarry.ts, run by tasks/process/quarry.ts; `tunnel.ts climbTo` (the way back up, shared with the miner) and tasks/process/stashStep.ts (the stash step, shared with MineProcess) |
 
 ## As a process (Track Z)
 
@@ -553,6 +554,47 @@ right behind it; 4 coal ores buried two blocks deep; the bot starts outside with
 | Track Z: unreachable skip | see "Unreachable ores": 2 floating ores skipped, 1 failed goto each, run 12.9 s, probes 92 to 101 ms in total |
 | Track Z: a buried ore behind 6 blocks of stone (a 10-thick wall, never exposed) | `mineSeenOnly` on: `none_left`, not targeted, still there; off: `done` after 16.8 to 17.1 s, 5 blocks tunnelled (3 of them line-of-sight digs), the ore gone, coal in the inventory |
 
+## Quarry and tunnel (wave 11, Track BK)
+
+`!quarry` digs out a box for its stone, `!tunnel` cuts a straight tunnel. Decision
+[0053](decisions/0053-quarry-and-tunnel.md). Both are built from parts that existed: each slice of the
+box is a `!build clear` (the builder's stand planner and runner: walk to a stand, dig with the Digger's
+tool choice, verify, collect every 16 digs), every cell passes the navigator's break rules, the way out
+is the miner's climb, the stash step is the mine process's.
+
+```
+!quarry here <w> <d> <depth> [north|south|east|west]   d forward from one block ahead, w wide around the
+                                                       bot (an even width has the extra column on the
+                                                       right), from the block under its feet down depth
+                                                       layers; the direction the bot faces without one
+!quarry <x1> <y1> <z1> <x2> <y2> <z2>                  any box, corners inclusive, in any order
+!tunnel <here|north|south|east|west> <length> [<w>x<h>] from the bot's feet, w wide around its column,
+                                                       h high from its feet; default 3x3
+!quarry stop | status, !tunnel stop | status           (`!stop` stops either)
+```
+
+| Rule | What |
+|---|---|
+| order | quarry: layers top first; tunnel: cross-sections nearest first. Each slice is planned on the live world when it starts and again after every pause (eat, fight, night, the stash step); far from the job (24 blocks) the bot first walks back (no digging, no placing): to the quarry's start, to the tunnel's last cleared block |
+| refusals | the navigator's break rules (`breakBlocker`) without the protected area: the owner gave the box, so `protectRadius` does not apply, but built blocks, containers, beds, spawners, ice, infested blocks, a liquid in or next to the cell, a gravity block right above or unsupported beside are never dug. A refused cell is shown to the builder's planner as unbreakable (it stays, the bot may stand on it); the rules are asked again right before each dig |
+| liquids | a cell refused for a liquid stops its column: nothing under it is dug in the later layers (`stopped column (liquid)`), so water and lava stay walled in by their own rock. No sealing with placed blocks |
+| stairs | a quarry deeper than 1 keeps depth - 1 treads along its perimeter, from the column nearest the bot, each one lower than the last (a spiral when the box is deeper than its perimeter; at least 4 blocks between treads of one column). The bot walks in and out on them without placing or digging, inside the base too. A 1-wide box gets a straight staircase as long as the box |
+| end | quarry: back up to the start (tunnel.ts `climbTo`: walk, else pillar with throwaway blocks, else a dug staircase); tunnel: the bot stays at its end |
+| tunnel | after each cross-section the centre column (feet and head) must be open, else the tunnel ends `blocked` with the reason; floor holes of the cross-section get a throwaway block (cobblestone, dirt, ...); a torch on the left wall every 8 blocks when torches are carried (the lane itself in a tunnel narrower than 3). Neither needs `allowPlace` (the walker's pillar setting) |
+| inventory | the stash step of the mine process (`tasks/process/stashStep.ts`): fewer than 2 free slots -> chest (`stashChest`), shulker box, dropping junk; the dug blocks' items are the produce (kept, boxed first). `!set quarryKeepStone off`: stone, cobblestone, deepslate, dirt and the like count as junk and are dropped when full. Still full: the job ends `inventory full` |
+| limits | a pickaxe in the inventory; quarry at most 64 on every side (`quarry: 65x4x8 is too big (at most 64 on every side)`); tunnel 1..256 long, 1..9 wide, 2..9 high |
+| status | `quarry 8x4x8: layer 2/4, 120 dug, 3 skipped (run), eta 1 min 20 s`; the end line adds the reasons, the time, the blocks by kind and torches: `quarry 8x4x8: layer 4/4, 253 dug, 0 skipped done in 412 s [253 stone]` |
+
+Measured (`quarry.test.ts`, bds-dig, BDS 1.26.60.6, diamond pickaxe, stone platform): `!quarry here 8 8 4
+east` 253 stone dug in 241 s (63 blocks/min), all 253 cobblestone picked up, the 3 treads left, the bot back
+on the platform; a 6x3x6 quarry with a water source in its top layer: 91 dug, 15 left (10 stopped column,
+4 next_to_liquid, 1 liquid), the water did not move, 82 s; `!stop` after 20 blocks: the process gone, 20
+cells open 1.5 s and 5.5 s later; `!tunnel east 20` (3x3): 180 dug in 113 s, the floor intact.
+
+Files: `bot/src/skills/mine/quarry.ts` (boxes, slices, the staircase, the argument forms, `QuarryJob`),
+`bot/src/tasks/process/quarry.ts` (`QuarryProcess`), `bot/src/chat/commands-quarry.ts` (the commands and
+the wiring), `bot/src/tasks/process/stashStep.ts` (the stash step, shared with `MineProcess`).
+
 ## Tests
 
 | Test | What |
@@ -572,6 +614,8 @@ right behind it; 4 coal ores buried two blocks deep; the bot starts outside with
 | `bot/test/unit/skills/nav-goals.test.ts`, `nav-worker.test.ts` (Track BD cases) | `twoBlocks` / `threeBlocks` done sets, heuristic and key; 20 mine-shaped composite queries (buried members with `mineSeenOnly` off, exposed with it on) plan identically in the worker (status, cost, expansions, length, break set, member) |
 | `bot/test/e2e/mine-baritone.test.ts` (Track BD, bds-bari) | the stone block of "Mining v4: Measured" in both modes x both `mineSeenOnly`, 3 runs each, then mode baritone against v3 on ores and seconds per ore (within 10 %); env `BARI_BDS_*`, `MINE_BARI_RUNS` (3) |
 | `bot/test/e2e/mine-rock.test.ts` (Track AQ, bds-explore) | `!mine iron_ore 4` from a cave with the iron 5 to 10 blocks into the rock (start chosen with truth:find): done within 5 min, 4 raw iron (truth), no liquid next to an opened cell |
+| `bot/test/unit/skills/quarry.test.ts` (Track BK) | here / tunnel boxes, layer order, the 64 cap, the argument forms, the staircase (perimeter order, spiral clearance, 1-wide box), whole jobs on the builder's fake world: the box empty but the treads, water (the water and its neighbours stay, the columns under them stop), built blocks and gravel over the box, stop, pause + resume far away (re-plan, walk back), no pickaxe, the tunnel (lane, floor fill, torches, blocked by water) |
+| `bot/test/e2e/quarry.test.ts` (Track BK, bds-dig) | `!quarry here 8 8 4 east` on a stone platform (blocksdiff: air but the 3 treads, back up, the cobblestone carried, `!quarry status`), `!tunnel east 20` (3x3, 2 torches, the floor kept), a quarry with a water source in the top layer (exact blocksdiff of what stays), `!stop` mid-quarry (nothing dug afterwards); env `QUARRY_BDS_HOST` / `QUARRY_BDS_PORT` / `QUARRY_BDS_CONTAINER` (127.0.0.1, 19148, bds-dig), `QUARRY_VERBOSE=1` |
 
 Track AQ's e2e run on bds-dig (`DIG_BDS_*`, `farm-truth.ts connectFarmBot(prefix, { target, container })`)
 and bds-explore (`EXPLORE_BDS_*`); `mine-cave` runs on bds-dig too with `FARM_BDS_PORT=19148

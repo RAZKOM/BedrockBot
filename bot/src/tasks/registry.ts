@@ -21,6 +21,7 @@ import { registerUxCommands } from '../chat/modes.ts'; // Track AM
 import { registerBuildCommands } from '../chat/commands-build.ts'; // Track AL
 import { registerHomeCommands } from '../chat/commands-home.ts'; // Track AG
 import { registerExploreCommands } from '../chat/commands-explore.ts'; // Track AI
+import { registerQuarryCommands } from '../chat/commands-quarry.ts'; // Track BK
 import { registerPanelCommands } from '../chat/commands-panel.ts'; // Track AR
 import { registerBringCommands } from '../chat/commands-bring.ts'; // Track AS
 import { registerPortalCommands } from '../chat/commands-portal.ts'; // Track AT
@@ -363,6 +364,7 @@ export const afkTask: TaskDefinition = {
       (d) => void registerBuildCommands(d, { values: ctx.values, logger: ctx.logger('build') }), // Track AL: !build (fill, clear, replace, wall, floor, pillar, file)
       (d) => void registerHomeCommands(d, { containers, logger: ctx.logger('home') }), // Track AG: !unload, !stock, !chests, the home chore (after !get)
       (d) => void registerExploreCommands(d), // Track AI: !explore, branch mining for !mine
+      registerQuarryCommands, // Track BK: !quarry, !tunnel (docs/mining.md "Quarry and tunnel")
       registerPanelCommands, // Track AR: !select, !offhand (the control panel's inventory menu)
       (d) => void registerBringCommands(d, { logger: ctx.logger('bring') }), // Track AS: !bring, the !get stock hint (after !get and the home logistics)
       registerPortalCommands, // Track AT: !nether, !overworld, !portal, the per-dimension rules, the fire escape (docs/nether.md)
