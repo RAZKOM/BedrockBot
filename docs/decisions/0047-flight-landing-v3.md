@@ -59,7 +59,7 @@ touchdown.
    3 s (or the server's air drops under 100 of 300). Damage with the head under water and the air out
    is logged as drowning, not as a mob.
 7. **Sneak through the touchdown** (`flySneakLand`, on): from 2.5 blocks over the landing cell in the
-   approach / land phase until the flight ends; released then (the walk sets its own keys).
+   approach / land phase until the slide after the flight has stopped; released then (the walk sets its own keys). An exact `!fly` landing that slid more than 0.8 off the goal block walks back onto it.
 
 ## Consequences
 

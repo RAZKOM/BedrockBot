@@ -401,7 +401,7 @@ pve logs `pve: took 2.0 damage (drowning: head under water, air 0), health 14` i
 ## Sneak at the touchdown (Track BF)
 
 `flySneakLand` (on): the controller holds the sneak key from 2.5 blocks over the landing cell (approach
-or land phase) through the settle, and releases it when the flight ends. The model: stepBody's edge
+or land phase) through the settle, and releases it once the slide after the flight has stopped (speed under 0.003, at most 40 ticks). The model: stepBody's edge
 back-off applies to a sneaking body that is on the ground and not rising (Track AJ); a gliding body
 takes the gliding branch first (no back-off), so the clipping starts on the first tick after the
 contact (the glide has ended), which is the post-landing slide. The measurements on bds-fly are under
@@ -651,6 +651,10 @@ briefly (1 to 22 ticks) until the search confirms a cell:
 Run 3 (after merging Track BG, the replica with a closed trapdoor over the ladder): all 5 cases passed; the
 farm 7 rockets, 1 go-around (the reason above), walked through the hatch into the room.
 
+Run 4 (final code: the level rule, sneak until stopped, the walk-back): `fly-overhang` and `fly-walk` 7 of 7;
+the farm 6 rockets, 0 go-arounds; the roof 3 rockets, 1 go-around (`best: over, cost 132, 4.4 from the
+centre at 44 blocks out, 17 above`: it arrived high); pond 1, pit 1, house 2 rockets, 0 go-arounds.
+
 ### Go-arounds and rockets per landing, before and after (deliverable F)
 
 Base `9f6f97d` against Track BF, the same suites on bds-fly (the `fly-overhang` farm / roof / water cases
@@ -670,6 +674,18 @@ goal). **Level cells**: a walk landing's candidate needs three of its four neigh
 (`ColumnView.level`); the first step of the 1-wide trench (neighbours at −60 and −62) was offered as a 1-cell
 target and cost 4 go-arounds.
 
+### Regression (`fly-land`, `fly-roof`, `fly-economy`) and the slide after the settle
+
+`fly-roof` and `fly-economy` passed on the Track BF code. `fly-land` failed twice before the fix below: the
+server's slide goes on after the controller's 10-tick settle, 0.6 to 1.0 blocks (the base `9f6f97d` the
+same: truth 0.62 to 1.06 off after landings reported 0.0 to 0.3 off), and two short straight-in flights
+that touched down 0.5 and 0.8 past the centre of the 3x3 slid to its edge: the body stopped at exactly
+0.27 over the edge (z 73720.27 in both), the **sneak edge rule holding it** (the server applies it to the
+post-landing slide; without sneak that body falls 40 blocks), but outside the test's footprint. Fixes: sneak
+stays on after the flight until the horizontal speed is under 0.003 (at most 40 ticks), then is released;
+an exact `!fly` landing that ended more than 0.8 from the goal block's centre walks back onto it. After:
+`fly-land` 5 of 5 (the 3x3 offs 0.03 to 0.76, 0 damage; the 5x5 at 300 blocks 0.72; the wall 0.11).
+
 ### Sneak at the touchdown (`fly-overhang` sneak case)
 
 - **Sneak held while gliding** (40 ticks forced on mid-cruise): the server kept the glide (`isGliding`
@@ -678,11 +694,11 @@ target and cost 4 go-arounds.
 - **Landings on a 3 x 3 pillar 30 up**, 2 with and 2 without sneak through the touchdown: all on the
   pillar, 0 damage; the slide from the predicted touchdown to the settled position 0.73 / 0.75 without,
   0.74 / 0.76 with sneak; 2 to 5 corrections either way. The slide of a flared touchdown (h about 0.35)
-  is under a block and stops on its own, so the edge rule was never reached on the pillar: whether the
-  server applies the sneak edge rule to the first ground ticks after a glide is not shown by these runs
-  (no correction came from it either). The model applies the edge back-off from the first tick after
+  is under a block and stops on its own, so the edge rule was never reached on the pillar; `fly-land`
+  (above) did reach it: the server does apply the sneak edge rule to the slide after a glide (the body
+  held 0.27 over a 3x3's edge, no correction). The model applies the edge back-off from the first tick after
   the contact (the glide has ended then). Sneak stays on by default (`flySneakLand`): it costs nothing
-  measurable and is the vanilla way to stop at an edge; it is released when the flight ends (the walk
+  measurable and is the vanilla way to stop at an edge; it is released once the slide has stopped (the walk
   sets its own keys; keeping it on into the walk near an edge is not done).
 
 ## Open points
