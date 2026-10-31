@@ -94,6 +94,10 @@ returns the full `DigResult` (`DigOptions` / `DigResult` are exported from `skil
   is scored by `-3 x (remaining logs in reach) + distance to the trunk + 0.3 x distance to the bot
   + 0.5 x height difference`; the bot walks to the best (up to 4 tries). A log no cell reaches is
   skipped and reported in `left` (`{ ok: false, reason: 'logs_left' }`).
+- **Not trees** (`looksBuilt`, 2026-10-31 Realm: a log cabin next to leaves was felled as a 57-log spruce): a bottom
+  layer wider than 2 x 2, a layer with more than 9 logs, mostly sideways logs, or a built block (planks, glass,
+  stairs, slabs, fences, torches, lanterns ...), a stripped log or a door / chest touching a log; and no tree with
+  a log inside `protectRadius` of home is ever listed (`findTrees`).
 - **Pillar-up is not implemented** (it needs block placement under the feet while jumping). Trees
   taller than 7 logs on flat ground therefore leave their top logs (unit test: a 9-high trunk ends
   with 7 broken, 2 left). None of the test trees (4..6) needs it.
