@@ -58,7 +58,7 @@ The owner also asked for three more changes:
    - The whole profile is simulated before it commits, and it pulls out at least 6 blocks over known or
      assumed terrain.
    - It aborts to the circle if the re-simulation fails or the path ahead meets a solid before the pull.
-   - Corridor and overhang landings keep their approach.
+   - Corridor and overhang landings keep their approach, and so does a target with known columns more than 3 above it within 20 blocks (walls, trees).
    Offline, the time to touchdown fell by 3.7 to 5.5 times (100 above: 213 against 801 ticks, 300 above:
    372 against 2056).
 5. **Crash notes.** When the server holds the body, the log names the cell ahead and what the model

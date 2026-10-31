@@ -101,7 +101,8 @@ describe.skipIf(!E2E)('@bds fly: the descent geometry (Track AU2)', () => {
     for (let i = 0; i < RUNS; i++) runs.push(await flyFromPillar(`open #${i + 1}`));
     expect(runs.every((r) => r.onPlatform), runs.map((r) => `${r.label}: ${r.reply}`).join(' | ')).toBe(true);
     expect(runs.map((r) => r.damage)).toEqual(runs.map(() => 0));
-    expect(runs.filter((r) => /^spiral r\d+ at 0 out/.test(r.descent)).length).toBeGreaterThanOrEqual(RUNS - 1);
+    // Track BL: flyDescent auto dives where the simulated dive is clear (the open platform), else the circle around it
+    expect(runs.filter((r) => /^spiral r\d+ at 0 out/.test(r.descent) || r.descent.startsWith('dive ')).length).toBeGreaterThanOrEqual(RUNS - 1);
   }, 900_000);
 
   it(`${RUNS} landings with 20-high walls 10 blocks out on three sides: no circle around the platform, all on it, 0 damage`, async () => {

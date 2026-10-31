@@ -609,6 +609,12 @@ export class FlightBrain {
       this.phase = 'cruise';
       return this.cruise(i, ctl);
     }
+    // Track BL: within 6 of the climb's top and no rocket burning: no rocket would be fired for it (below), so the cruise takes over
+    // (e2e: from a platform 200 up the climb hung at y 151 under a cruise of 152 all the way to the target, no dive looked for)
+    if (willReach >= climbTo - 6) {
+      this.phase = 'cruise';
+      return this.cruise(i, ctl);
+    }
     // between rockets: keep the speed, pitch up only while it lasts; the next rocket only when the momentum will not carry us there
     ctl.pitch = h < STALL_SPEED + 0.15 ? 10 : h < 0.9 ? -10 : this.o.climbPitch;
     if (this.steerClear(i, ctl)) return ctl;
@@ -817,7 +823,30 @@ export class FlightBrain {
   private diveAllowed(aboveEntry: number, d: number): boolean {
     if (this.o.descentMode === 'spiral' || this.target.bearing !== undefined || this.target.hold || this.phase !== 'cruise' || this.diveBanned) return false;
     const min = this.o.descentMode === 'dive' ? DIVE_MIN_ABOVE_FORCED : DIVE_MIN_ABOVE;
-    return aboveEntry > min && d <= APPROACH_DISTANCE + DIVE_END_MAX + 1.6 * aboveEntry + 60;
+    return aboveEntry > min && d <= APPROACH_DISTANCE + DIVE_END_MAX + 1.6 * aboveEntry + 60 && !this.targetWalled();
+  }
+
+  /**
+   * Track BL: walls or trees within 20 blocks of the target rise above it (more than 3): the descent planner's circle or S-turns
+   * fit such a place, the dive's low hand-over does not (e2e fly-descent walled: 1 of 10 dives went round 4 times and touched a
+   * wall). Known columns only, once per target.
+   */
+  private walled: { t: LandingTarget; v: boolean } | undefined;
+  private targetWalled(): boolean {
+    if (this.walled?.t === this.target) return this.walled.v;
+    let v = false;
+    const tx = Math.floor(this.target.x);
+    const tz = Math.floor(this.target.z);
+    const inner = this.target.half + 2;
+    for (let dx = -20; dx <= 20 && !v; dx += 2) {
+      for (let dz = -20; dz <= 20 && !v; dz += 2) {
+        if (Math.abs(dx) <= inner && Math.abs(dz) <= inner) continue;
+        const top = this.o.skyTop?.(tx + dx, tz + dz);
+        if (top !== undefined && top > this.target.top + 2) v = true;
+      }
+    }
+    this.walled = { t: this.target, v };
+    return v;
   }
 
   /** The corridor query of the dive: unknown is not air (terrain.ts strictObstacle), and the column tops under the path. */

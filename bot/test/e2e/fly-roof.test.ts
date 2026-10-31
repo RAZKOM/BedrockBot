@@ -55,9 +55,10 @@ describe.skipIf(!E2E)('@bds fly: roofs and the path ahead (Track AU2)', () => {
     from = b.said.length;
     await b.command(`!goto ${target.x} ${target.y} ${target.z}`);
     // (`walking to ...` is !goto's own first line; the flight's decision follows it)
-    const first = await b.reply((s) => s.startsWith('fly: ') || s.startsWith('flying') || s.startsWith('goto: '), from, 15_000);
+    // Track BL: the takeoff-site search finds the open sky outside the door first (`walking N blocks to take off from X Y Z, then flying`)
+    const first = await b.reply((s) => s.startsWith('fly: ') || s.startsWith('flying') || s.startsWith('goto: ') || s.startsWith('walking ') && s.includes('to take off from'), from, 15_000);
     notes.push(`roof: !goto -> ${first}`);
-    expect(first).toMatch(/^fly: no open sky here \(roof at y -56, 4 blocks up\); walking towards \S+ \S+ \S+ and taking off outside$/);
+    expect(first).toMatch(/^fly: no open sky here \(roof at y -56, 4 blocks up\); walking towards \S+ \S+ \S+ and taking off outside$|^walking \d+ blocks to take off from -?\d+ -?\d+ -?\d+, then flying/);
     // on foot first: the position changes while no flight has started
     const moved = await until(async () => {
       const g = await b.truth.glide(b.name);
@@ -107,9 +108,10 @@ describe.skipIf(!E2E)('@bds fly: roofs and the path ahead (Track AU2)', () => {
     const n0 = b.logs.length;
     const from = b.said.length;
     await b.command(`!goto ${target.x} ${target.y} ${target.z}`);
-    const first = await b.reply((s) => s.startsWith('fly: ') || s.startsWith('flying') || s.startsWith('goto: '), from, 15_000);
+    // Track BL: the takeoff-site search finds the slab's top up the stair first (`walking N blocks to take off from X Y Z, then flying`)
+    const first = await b.reply((s) => s.startsWith('fly: ') || s.startsWith('flying') || s.startsWith('goto: ') || s.startsWith('walking ') && s.includes('to take off from'), from, 15_000);
     notes.push(`tunnel: !goto -> ${first}`);
-    expect(first).toMatch(/^fly: no open sky here \(roof at y -58, 2 blocks up\); walking towards \S+ \S+ \S+ and taking off outside$/);
+    expect(first).toMatch(/^fly: no open sky here \(roof at y -58, 2 blocks up\); walking towards \S+ \S+ \S+ and taking off outside$|^walking \d+ blocks to take off from -?\d+ -?\d+ -?\d+, then flying/);
     // up to the surface (the slab's top) on foot before any flight
     const legs = () => b.logs.slice(n0).filter((l) => l.includes('fly: leg') || l.includes('goto') || l.includes('nav')).map((l) => l.replace(/^\S+ /, '')).slice(0, 12).join(' ; ');
     const up = await until(async () => {

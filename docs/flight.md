@@ -581,15 +581,14 @@ server held the body (z 656.30 and 832.30) while the model ran on.
 
 `flyHighCruise always` flies the cruise at y 328 (build limit + 8) or higher. The Realm accepted flight over
 320 (the 00:04Z flight reached y 389 with 4 corrections). `auto` takes it only for trips of 1500 blocks or
-more with unknown columns on the line whose glide needs y 288 or more anyway. The cost, offline (rockets /
-ticks):
+more with unknown columns on the line whose glide needs y 288 or more anyway. The cost, offline (rockets):
 
 | trip | economy + floor | high cruise |
 |---|---|---|
-| 300 from y 70 | 1 / – | 13 / – |
-| 1200 flat | 7 / – | 24 / – |
-| 2300 flat | 14 / – | 27 / – |
-| 2300 from y 70 | 6 / 1673 | 19 / 1759 |
+| 300 from y 70 | 1 | 13 |
+| 1200 flat | 7 | 24 |
+| 2300 flat | 14 | 27 |
+| 2300 from y 70 (1673 / 1759 ticks) | 6 | 19 |
 
 ### Dive descent
 
@@ -604,7 +603,8 @@ ticks):
   76 blocks out). It pulls out and goes back to the cruise in two cases: the path ahead meets a solid
   before the pull height, or the re-simulation every 10 ticks fails. A dive is not tried again on that
   flight.
-- **Not used:** corridor and overhang landings keep their approach.
+- **Not used:** corridor and overhang landings keep their approach, and so does a target with known columns more than 3 over it within 20 blocks (walls, trees: the circle or S-turns fit there; in the walled fly-descent case 1 dive in 10 went round 4 times and touched a wall).
+- **Two fixes found by the e2e:** the start's own platform (columns under the feet within 6 blocks) gets the clearance but not the unknown slack in `cruiseHeight`, and the terrain floor is seeded from a ring 16 blocks out, not the column under the body. Before, a flight from a 3x3 platform 200 up climbed 50 blocks before its glide down. Also, the climb hands over to the cruise once it is within 6 blocks of its top with no rocket burning. Before, it could hang 1 block under the cruise height all the way to the target, so no dive was ever looked for.
 
 ### Takeoff sites
 
@@ -998,7 +998,36 @@ Dive against circle, ticks to touchdown, 0 hits, 0 go-arounds:
 | flat 300 above | 417 | 2063 |
 | 60 above, 100 out | 149 | 471 |
 
-BL_E2E_MEASUREMENTS
+### e2e (`fly-terrain`, bds-fly, each case twice, the final code)
+
+| case | rockets | s | damage | crashes (held / contact notes) |
+|---|---|---|---|---|
+| wall 80 high, 81 wide, 180 out of 300, built after the takeoff | 3, 3 | 19, 22 | 0, 0 | 0, 0 |
+| tower 9x9, 100 high, 220 out of 300 | 8, 9 | 50, 49 | 0, 0 | 0, 0 |
+| mountain profile up to 100 high, 300..420 out of 700 | 8, 9 | 32, 55 | 0, 0 | 0, 0 |
+| dive from a 3x3 platform 100 up, 250 out | 1, 1 | 42, 42 | 0, 0 | 0, 0 |
+| circle, the same | 1, 1 | 40, 40 | 0, 0 | 0, 0 |
+| dive from a 3x3 platform 200 up, 350 out | 1, 1 | 71, 74 | 0, 0 | 0, 0 |
+| circle, the same | 1, 1 | 74, 72 | 0, 0 | 0, 0 |
+
+- **Dive timing.** In the final run the "dive" rows fell back to the circle (see Open points). Two earlier
+  runs that did dive from 100 up landed in 15 to 17 s, against 40 to 49 s for the circle, with 1 to 2
+  rockets and 0 damage. In `fly-descent` (60 above, 100 out) the open platform dives 10 of 10 (9 to 11 s,
+  every landing on the platform, 0 damage). The walled platform keeps the circle 10 of 10 (23 s, 0 damage).
+- **site** (2 of 2). The roof is 91 x 86, 3 up; the only open sky is 27 or more blocks behind the start.
+  The owner hears `walking 28 blocks to take off from X -60 Z, then flying (400 blocks; ...)`. The search
+  took 83 to 90 ms (289 cells, 1 takeoff simulated, 1 walk probed). The takeoff went away from the goal
+  (heading 90 off), turned back, and arrived with 2 rockets and 0 damage.
+- **nosite** (2 of 2). Roof 121 x 121: `0 open-sky cells within 48`. The fallback walk-out legs ran, then
+  the flight, then the arrival, 0 damage.
+- **recheck** (2 of 2). The walk started with 2 rockets; 64 were given after 6 s. The log says
+  `fly: the walk to ... stopped at ... for a flight (the flight kit is ready)`, then the flight and the
+  arrival, 0 damage.
+- **Regressions:** `fly-land` 5/5, `fly-walk` 2/2, `fly-overhang` 5/5, `fly-roof` 3/3, `fly-glide-down`
+  5/5, `fly-economy` 3/3 (300 / 600 / 1200: 2 / 5 / 8 rockets), `fly-descent` 2/2 (20 landings).
+- **Changed expectations.** `fly-roof` now accepts the site line, because the room's door and the
+  tunnel's stair top are found as takeoff sites (`walking 16 / 23 blocks to take off from ...`).
+  `fly-descent` accepts a dive on the open platform.
 
 ## Open points
 
@@ -1009,7 +1038,12 @@ BL_E2E_MEASUREMENTS
 - Track BL: the walk re-check covers `!goto` and `!come`, not `follow`. The takeoff-site search runs only
   when the takeoff here is refused, not for every walk over `flyMin`. The walk-out legs (the fallback) still
   stop and start every `flyRetryBlocks`.
-- Track BL: `flyHighCruise auto` is conservative (offline the high cruise cost 2 to 3 times the rockets).
+- Track BL: the dive from a 3x3 platform 100 / 200 up in `fly-terrain` engaged in earlier runs but fell
+  back to the circle in the final one. The flights start with the target held (its ground not loaded), and
+  after the retarget the 200-up flight never logged a dive attempt. Not analysed further; the fallback is
+  the safe circle (0 damage).
+- Track BL: `flyHighCruise auto` is conservative
+ (offline the high cruise cost 2 to 3 times the rockets).
   Whether the Realm's chunk-edge holds go away at y 328 is not measured.
 
 

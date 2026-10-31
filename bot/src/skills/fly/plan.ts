@@ -181,14 +181,23 @@ export function cruiseHeight(
   const margin = o.margin ?? DEFAULT_MARGIN;
   const maxClimb = o.maxClimb ?? DEFAULT_MAX_CLIMB;
   let highest: number | undefined;
+  let startTop: number | undefined;
   let unknown = 0;
   for (const c of columnsAlong(from, target)) {
     const t = skyTop(c.x, c.z);
+    // Track BL: the start's own platform (under the feet, within 6 blocks) gets the clearance but not the unknown slack (e2e: from a
+    // 3x3 platform 200 up its top + clearance + 24 climbed the flight 50 blocks before the glide down)
+    if (t !== undefined && t < from.y && hdist(c, from) <= 6) {
+      startTop = Math.max(startTop ?? t, t);
+      continue;
+    }
     if (t === undefined) unknown++;
     else if (highest === undefined || t > highest) highest = t;
   }
   // Track BL: unknown columns are not air: they count as the highest known column plus UNKNOWN_SLACK (24; terrain.ts)
-  const terrain = highest === undefined ? Math.max(from.y, target.top) : highest + 1 + clearance + (unknown > 0 ? UNKNOWN_SLACK_CRUISE : 0);
+  const along = highest === undefined ? Math.max(from.y, target.top) : highest + 1 + clearance + (unknown > 0 ? UNKNOWN_SLACK_CRUISE : 0);
+  const terrain = Math.max(along, startTop === undefined ? -Infinity : startTop + 1 + clearance);
+  if (startTop !== undefined && (highest === undefined || startTop > highest)) highest = startTop;
   const distance = hdist(from, target);
   const entry = target.top + APPROACH_HEIGHT;
   // the glide slope from the approach entry: the cruise is flown after the climb, which itself covers
