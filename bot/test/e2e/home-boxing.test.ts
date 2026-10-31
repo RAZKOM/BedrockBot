@@ -15,6 +15,13 @@
 //   (f) packing (the owner: "will it put them back down and prioritize the sand?"): a bot_loot box holding
 //       20 stacks of rotten flesh and 7 of sand, the inventory full of sand (one slot free): the stash step (job: sand)
 //       re-packs it: the box holds 27 stacks of sand, the rotten flesh is on the floor
+//   (g) fill steps (the owner: "if it has 5 bot_loot boxes half full of deepslate ... fill up one or more full shulkers"):
+//       4 bot_loot boxes of 10 stacks of cobbled deepslate and 2 loose stacks, a chest with 5 stacks of it and plenty of
+//       room, a chest of 3 empty boxes: `!unload` fills one spare with 27 x 64 and stores it in the deepslate chest, the
+//       rest goes there loose; the spare chest holds 2 boxes, the bot its 4 bot_loot boxes (empty), nothing on the ground
+//   (h) tidy steps (the owner: "if it sees a chest that has enough of the same item to fill a shulker, do it"): a double
+//       chest (placed by the bot) holding 30 loose stacks of cobblestone, a chest of 3 empty boxes, the bot carrying none:
+//       `!unload` leaves 1 full box (27 x 64) + 3 stacks in the double chest, the spare chest one box fewer
 // Env: HOME_BDS_HOST / HOME_BDS_PORT / HOME_BDS_CONTAINER (home-truth.ts), HOME_VERBOSE=1.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Vec3 } from '../../src/connection/types.ts';
@@ -206,7 +213,7 @@ describe.skipIf(!E2E)('@bds home: boxing at the chests and bot_loot boxes (Track
     const inBoxes = await boxesIn(S);
     notes.push(`(b) truth sand chest: ${JSON.stringify(s.counts)} free ${s.free}; boxes ${JSON.stringify(inBoxes)}`);
     expect((s.counts.sand ?? 0) + inBoxes.reduce((a, x) => a + (x.sand ?? 0), 0)).toBe(64 * 64);
-    expect(inBoxes.length).toBe(rep.boxed!.length);
+    expect(inBoxes.length).toBe(rep.boxed!.length + (rep.filled?.length ?? 0)); // the box steps' boxes and the fill step's (47 stacks carried: one full box's worth)
     expect(b.home.memory().get(S)!.inBoxes?.sand).toBe(inBoxes.reduce((a, x) => a + (x.sand ?? 0), 0));
     await removeChest(S);
     await removeChest(B);
@@ -236,6 +243,7 @@ describe.skipIf(!E2E)('@bds home: boxing at the chests and bot_loot boxes (Track
     const r1 = await ask(`!drop slot ${slot}`, (s) => s.startsWith('dropped ') || s.startsWith('drop'), 30_000);
     notes.push(`(c) !drop slot ${slot}: ${r1}`);
     expect(r1).toBe('dropped 1 undyed_shulker_box');
+    expect(b.built.mobility!.loop.command.pitch).toBeLessThan(10); // faced the asker, aimed up: never straight down
     await until(() => (inv.count('undyed_shulker_box') === 1 ? true : undefined), 10_000, 'one box left');
     const r2 = await ask('!drop bot_loot', (s) => s.startsWith('dropped ') || s.startsWith('drop'), 30_000);
     notes.push(`(c) !drop bot_loot: ${r2}`);
@@ -325,4 +333,111 @@ describe.skipIf(!E2E)('@bds home: boxing at the chests and bot_loot boxes (Track
     expect(flesh).toBeGreaterThan(0);
     await b.truth.clearAround({ x: c.x + 0.5, y: F, z: c.z + 0.5 }, 24);
   }, 180_000);
+
+  it('(g) 4 bot_loot boxes of deepslate and 2 loose stacks: one full box filled from a spare and stored in the deepslate chest, the rest loose', async () => {
+    const b = bot!;
+    await fresh();
+    const mob = b.built.mobility!;
+    const inv = mob.world.inventory;
+    const deep = 'cobbled_deepslate';
+    const D = { x: c.x + 2, y: F, z: c.z + 1 };
+    const B = { x: c.x - 2, y: F, z: c.z - 1 };
+    await teleport(b, { x: home.x + 0.5, y: F, z: home.z + 0.5 });
+    await b.truth.ok('clear', [b.name]);
+    // 4 boxes of 10 stacks each (dropped by truth, picked up one by one, before the chests appear), then named bot_loot
+    await until(() => (b.home.logistics.busy ? undefined : true), 60_000, 'the chore idle');
+    const drop = { x: c.x, y: F, z: c.z + 3 };
+    for (let k = 1; k <= 4; k++) {
+      await b.truth.ok('boxdrop', [drop.x, drop.y, drop.z, deep, 64, 10]);
+      await sleep(500);
+      for (let i = 0; i < 3 && carriedBoxes(inv).length < k; i++) {
+        await mob.skills.collect(5, 160, { origin: { x: drop.x + 0.5, y: F, z: drop.z + 0.5 }, filter: (it) => isShulkerBox(it.name) });
+      }
+      await until(() => (carriedBoxes(inv).length === k ? true : undefined), 10_000, `box ${k} in the inventory`);
+    }
+    await b.truth.nameInv(b.name, 'boxes', 'bot_loot');
+    await until(() => (named().filter((x) => x.named).length === 4 ? true : undefined), 10_000, 'the 4 boxes named in the model');
+    await b.truth.stuff(b.name, deep, 2);
+    await until(() => (inv.count(deep) === 128 ? true : undefined), 10_000, '2 loose stacks');
+    await chestAt(D);
+    await chestAt(B);
+    await b.truth.chestPut(D, deep, 64, 5);
+    await b.truth.chestPut(B, 'undyed_shulker_box', 1, 3);
+    notes.push(`(g) scan: ${await scan()}`);
+    const boxes = await ask('!boxes', (s) => s.startsWith('boxes: '));
+    notes.push(`(g) ${boxes}`);
+    expect(boxes).toBe(`boxes: 3 spare (3 in chest ${at(B)}); carrying 4 bot_loot boxes (${Array.from({ length: 4 }, () => `1 holding 640 ${deep}`).join(', ')})`);
+    const { end, ms } = await unload();
+    expect(end).toContain(`boxed 1 full box of ${deep} into chest ${at(D)}`);
+    expect(end).toContain('kept 4 bot_loot boxes');
+    const rep = b.home.logistics.lastUnload!;
+    expect(rep.left).toEqual([]);
+    expect(rep.filled).toHaveLength(1);
+    notes.push(`(g) fill step: ${JSON.stringify(rep.filled)}; the whole !unload ${(ms / 1000).toFixed(1)} s`);
+    // truth: the deepslate chest holds 1 box of 27 x 64 and the rest loose (5 + 40 + 2 - 27 = 20 stacks)
+    const d = await b.truth.box(D);
+    const inD = await boxesIn(D);
+    notes.push(`(g) truth chest D: ${JSON.stringify(d.counts)} free ${d.free}; boxes ${JSON.stringify(inD)}`);
+    expect(inD).toEqual([{ [deep]: 1728 }]);
+    expect(d.counts).toEqual({ [deep]: 5 * 64 + 4 * 640 + 128 - 1728, undyed_shulker_box: 1 });
+    expect((await b.truth.box(B)).counts).toEqual({ undyed_shulker_box: 2 });
+    // the bot: its 4 bot_loot boxes, empty, and nothing else
+    const after = named();
+    expect(after.filter((x) => x.named)).toHaveLength(4);
+    expect(after.every((x) => x.used === 0)).toBe(true);
+    expect(await b.truth.counts(b.name)).toEqual({ undyed_shulker_box: 4 });
+    // memory agrees; no box or drop left in the world
+    expect(b.home.memory().get(D)).toMatchObject({ inBoxes: { [deep]: 1728 }, boxes: { empty: 0, full: 1 } });
+    expect((await b.truth.boxItems({ x: c.x + 0.5, y: F, z: c.z + 0.5 }, 12)).filter((i) => i.typeId.endsWith('shulker_box'))).toHaveLength(0);
+    await removeChest(D);
+    await removeChest(B);
+  }, 500_000);
+
+  it("(h) a home chest's own 30 stacks of cobblestone: 27 of them boxed there at !unload, 3 stay loose", async () => {
+    const b = bot!;
+    await fresh();
+    const mob = b.built.mobility!;
+    const T = { x: c.x + 3, y: F, z: c.z - 1 };
+    const T2 = { x: c.x + 3, y: F, z: c.z };
+    const B = { x: c.x - 2, y: F, z: c.z + 2 };
+    await teleport(b, { x: home.x + 0.5, y: F, z: home.z + 0.5 });
+    await b.truth.ok('clear', [b.name]);
+    // the double chest: two chests placed by the bot from the same side (they pair)
+    await b.truth.ok('give', [b.name, 'chest', 2]);
+    await until(() => (mob.world.inventory.count('chest') >= 2 ? true : undefined), 10_000, '2 chests');
+    // (the chore reads a container that appears at once: its walk may cancel the next place, so wait for it and retry)
+    for (const p of [T, T2]) {
+      let r = await mob.skills.place(p, { item: 'chest', face: 'up' });
+      for (let i = 0; i < 3 && !r.ok; i++) {
+        await until(() => (b.home.logistics.busy ? undefined : true), 60_000, 'the chore idle');
+        await teleport(b, { x: home.x + 0.5, y: F, z: home.z + 0.5 });
+        r = await mob.skills.place(p, { item: 'chest', face: 'up' });
+      }
+      if (!r.ok) throw new Error(`placing the double chest half at ${at(p)}: ${r.reason}`);
+      placed.push(p);
+    }
+    await until(() => (b.home.logistics.busy ? undefined : true), 60_000, 'the chore idle');
+    expect((await b.truth.box(T)).size).toBe(54);
+    await chestAt(B);
+    await b.truth.chestPut(T, 'cobblestone', 64, 30);
+    await b.truth.chestPut(B, 'undyed_shulker_box', 1, 3);
+    await b.truth.ok('clear', [b.name]);
+    await b.truth.ok('give', [b.name, 'iron_pickaxe', 1]);
+    notes.push(`(h) scan: ${await scan()}`);
+    expect(b.home.logistics.tidyDue()).toBe(true);
+    const { end, ms } = await unload();
+    expect(end).toMatch(/boxed 27 stacks of cobblestone from (double )?chest -?\d+ -?\d+ -?\d+ into a shulker \(box from chest /);
+    const rep = b.home.logistics.lastUnload!;
+    notes.push(`(h) tidy step: ${JSON.stringify(rep.boxed)}; the whole !unload ${(ms / 1000).toFixed(1)} s`);
+    const t = await b.truth.box(T);
+    const inT = await boxesIn(T);
+    notes.push(`(h) truth double chest: ${JSON.stringify(t.counts)} free ${t.free}; boxes ${JSON.stringify(inT)}`);
+    expect(inT).toEqual([{ cobblestone: 1728 }]);
+    expect(t.counts).toEqual({ cobblestone: 3 * 64, undyed_shulker_box: 1 });
+    expect((await b.truth.box(B)).counts).toEqual({ undyed_shulker_box: 2 });
+    expect(await b.truth.counts(b.name)).toEqual({ iron_pickaxe: 1 });
+    expect(b.home.logistics.tidyDue()).toBe(false);
+    expect((await b.truth.boxItems({ x: c.x + 0.5, y: F, z: c.z + 0.5 }, 12)).filter((i) => i.typeId.endsWith('shulker_box'))).toHaveLength(0);
+    for (const p of [T, T2, B]) await removeChest(p);
+  }, 500_000);
 });

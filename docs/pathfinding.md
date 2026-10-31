@@ -75,7 +75,7 @@ blocks (1.5 high) are obstacles, never floors. Costs are ticks (`DEFAULT_COSTS`)
 | dig-through (`walk` + `act.dig`; Baritone `MovementTraverse`) | 4 cardinal, same level | `allowBreak` + `dig`; full-block floors; the 1 or 2 body cells ahead are breakable (rules below), the upper one with the falling stack over it (`includeFalling`) | `walk` + per cell (break ticks + `dig` 12) |
 | walk through a doorway | 4 cardinal | door / gate cells let the 0.6-wide corridor pass now, or after a toggle (needs `useBlock`); the doorway within a step of the feet, also one cell up from a partial floor (a dirt path or carpet in front of the door, whose own cell is not part of the corridor), and out of it onto a floor a step lower in the cell below (Track AX) | `walk` + `door` 10 per toggle |
 | dig-through | 4 cardinal, same level | `allowBreak` + `dig`; full-block floors; the 1 or 2 body cells are breakable (rules below) | `walk` + per block (break ticks + `dig` 12) |
-| (dig rules, 2026-10-30) | | every dug block costs `digPenalty` ticks (setting, 60) on top of its break time, so a route walks around anything it can; nothing is broken within `protectRadius` (48) of home (`BreakRules.protectedArea`, `protected_area`), and built blocks (`isBuiltBlock`: planks, bricks, stairs, slabs, glass, doors, wool, concrete, tables, ...) are `protect` like containers everywhere. The miner's approach and sight-line digs and the farmer follow the same rules (`nav.breakRules()`). Track BD: nothing is placed there either: the pillar (plain and break-then-pillar, `astar.ts` `inArea`, the worker alike) is refused inside `protectedArea`, for every goto with `allowPlace` (`!top`, `returnUp`, the mine composite); a miner's shaft is outside the area by construction, but a natural pit 2+ deep inside the base is no longer pillared out of |
+| (dig rules, 2026-10-30) | | every dug block costs `digPenalty` ticks (setting, 60) on top of its break time, so a route walks around anything it can; nothing is broken within `protectRadius` (48) of home (`BreakRules.protectedArea`, `protected_area`), and built blocks (`isBuiltBlock`: planks, bricks, stairs, slabs, glass, doors, wool, concrete, tables, ...) are `protect` like containers everywhere (ores never are: `copper_ore` and `quartz_ore` matched the `copper_` / `quartz_` prefixes until 2026-10-31, every copper ore skipped as `protected`). The miner's approach and sight-line digs and the farmer follow the same rules (`nav.breakRules()`). Track BD: nothing is placed there either: the pillar (plain and break-then-pillar, `astar.ts` `inArea`, the worker alike) is refused inside `protectedArea`, for every goto with `allowPlace` (`!top`, `returnUp`, the mine composite); a miner's shaft is outside the area by construction, but a natural pit 2+ deep inside the base is no longer pillared out of |
 | ascend with breaks (`jump` + `act.dig`; Baritone `MovementAscend`, Track BC) | 4 cardinal, one up | `allowBreak`; the start stands on a full block, the target's floor is a full block, the same-level cell is blocked; breaks the head room over the start (x, y + 2), the target's feet cell and the cell over it (the top one with the falling stack); refused whenever a gravity block sits 3 above the start, head room broken or not (Baritone's rule, kept even with `allowGravityAbove`) | `jump` 9 + per cell (break ticks + `dig`) |
 | descend with breaks (`drop` + `act.dig`; Baritone `MovementDescend`, Track BC) | 4 cardinal, one down | `allowBreak`; a known full floor two below, the three body cells of the lower column breakable (the top one with the falling stack); never into liquid (liquid cells and cells beside one are refused); into open ground (the two cells over the floor ahead free: a staircase down) only towards a goal below the node, into rock or under a lintel whenever the plain drop is blocked | `walk` + fall(1) 5 + `landing` 2 + per cell (break ticks + `dig`) |
 | downward (`downward` + `act.dig`; Baritone `MovementDownward`, Track BC) | straight down | `allowBreak` + `allowPlace` with `throwaway` blocks for the depth below the start + 4 (the pillar back up); only towards a goal below; the shaft rules of `mine/tunnel.ts` `shaftRule` (`moves.ts shaftBlocker`): a known full floor under the dug block, no liquid in it or its 4 side neighbours 1 to 2 below, no pointed dripstone in the 3 x 3 within 3 below, no gravity block over the head, never within 2 of the world floor; the dug block passes the break rules except the under-feet one (this is the one move that digs the floor) | fall(1) 5 + `digDown` 6 + break ticks + `dig` |
@@ -86,12 +86,16 @@ blocks (1.5 high) are obstacles, never floors. Costs are ticks (`DEFAULT_COSTS`)
 | swimOut | 4 cardinal | a standable bank with feet from the water cell's level up to 1 above | `swimOut` 14 |
 | climb | up / down a column; onto it from its foot, its side (no floor) or its top | ladder / vine cells (`grid.climb`), the cell above the body passable | `climbUp` / `climbDown` 5 per block; from the side `walk` + `climbEnter` 8, from the top `walk` + `climbDown` + `climbEnter` |
 | climbOut | 4 cardinal off a climb node | a floor beside the column, feet from the node's level up to 1 above | `climbUp` x rise + `walk` + `climbExit` 8 |
+| hatch down (`climb`; Track BG) | 4 cardinal, then down | a trapdoor (any half, open or closed, any facing) in the walking layer or one below, a ladder / vine under it: onto the ladder below the hatch (see "Trapdoors") | `walk` + `climbDown` per block + `climbEnter` (+ `door` 10 when it is toggled) |
+| hatch drop (`drop` / `swim`; Track BG) | 4 cardinal, then down | the same hatch without a ladder under it: a floor within `maxDrop`, or water up to `HATCH_WATER_FALL` 16 below | as drop (`irreversibleDrop` over 1.25) / swim (fall + `swimEnter`) (+ `door`) |
+| hatch up (`climb`; Track BG) | straight up | from a climb node to a hatch over the column (closed: toggled from below; open: the climb continues past the panel), then `climbOut` | `climbUp` (+ `door`) |
 | parkour | 4 cardinal | 1- or 2-block gap at the feet level, clear up to the head (+3), a floor at most 3 below or water at most 4 below, no lava / hazard / ladder in it; full-block landing at the same height or 1 lower that stops an overshoot; 2-block gaps need 2 standable cells behind the takeoff | g x `walk` + `parkourAir` 12 (1 lower: `parkourAirDown` 14) + `parkourRisk` 10 (+ `parkourRunUp` 12 for g = 2) |
 
 Every move into node B also pays: B's floor `costFactor` (x 5 on leaves, soul sand, honey, slime, mud,
 ice) on the base cost, and `underground` (6) when a roof block is anywhere above B's head. Lava and
-hazards are never entered; water only by the swim moves, on its surface (Track AJ). Heuristic: `walk` x octile distance (no move is cheaper per block, so it
-is admissible). Path nodes carry `cost` (the move's ticks, for the per-move timeout) and `act`
+hazards are never entered; water only by the swim moves, on its surface (Track AJ). Heuristic: `walk` x octile distance, plus for
+goals at a known height the levels to it (`columnH`, Goals below: admissible within 4 levels, priced beyond them, so not admissible
+overall, as Baritone's GoalBlock is not). Path nodes carry `cost` (the move's ticks, for the per-move timeout) and `act`
 (`dig` cells, `use` doors, `place` block).
 
 **Surface preference.** `NavGrid.skyTop(x, z)` is the highest `roof` block of a column (anything with a
@@ -108,6 +112,28 @@ lower half's state, also for the upper half) blocks the corridor x or z in [0.2,
 along that axis through the cell's centre sweeps; `toggle` when the toggled state would be clear (an
 open gate has no box; a door panel swings to the perpendicular edge); else blocked. Only cardinal walks
 enter or leave doorway nodes.
+
+**Trapdoors** (Track BG, decision 0048; `grid.ts` `hatch` / `hatchLets` / `isPanel`, `astar.ts` `hatchDown` /
+`climbUpInto` / `hatchUse`). A trapdoor in a floor or a ceiling, usually over a ladder shaft, is a vertical
+passage. `grid.hatch(x, y, z)` is `CROSS_CLEAR` for an open trapdoor whose panel (one full-height box at most
+0.25 thick) leaves the 0.6 body room beside it and beside a ladder's box in the cells y - 1 .. y + 1 (free width
+>= 0.62), `CROSS_TOGGLE` for a closed one that would leave that room open and is hand-usable (wooden), else
+blocked (iron, too tight, not a trapdoor). An open panel is `passable` (an open trapdoor cell is free to the
+body except the panel; it is never a floor). Moves:
+- down: from a standable node beside it, a hatch in the walking layer (the cell the feet enter) or in the floor
+  layer one below (the ladder ending under it); a ladder / vine under the hatch gives a climb node on it, else
+  the column is scanned down for water (a swim node, up to 16 blocks) or a floor within `maxDrop`;
+- up: a climb whose next cell up holds a hatch (closed: `act.use` on it, then the climb goes on; open: the
+  climb goes past the panel) and `climbOut` beside the column, the panel's side refused by `hatchLets`;
+- a closed hatch costs `door` (10) and needs `allowOpen` (`useBlock`); `moves.trapdoor = false` switches the
+  hatch moves off (the planner worker gets the flag with `moves`).
+The navigator toggles before the move like a door (the use action re-checks `c.open` in the world model after
+the click; failures time out and re-plan) and, with `closeTrapdoors` (setting, default true), closes the hatch
+behind the body once it is in another column or its head is below the hatch (within reach 4.5; not after a
+drop into water). A replan keeps the pending closes. The follower holds sneak on ladders (no slipping off at
+the top), keeps the body 0.08 off a panel while climbing, and drops into the tight gap of a panel opposite the
+ladder (0.63 for a 0.6 body: within 0.0125 of the middle) by aligning on the floor first with single-tick
+forward pulses (BDS corrects a fractional move vector, measured), then walking straight in.
 
 **The moves that dig** (Track BC, wave 11; `nav/baritone/moves.ts`, Baritone's movements, LGPL-3.0). Every
 move above with `act.dig` lists its cells in break order (the start's head room first, then each column top
@@ -404,6 +430,7 @@ Block updates at cells the running goto's actions change never trigger re-plans.
 | an action fails or times out (dig 600 ticks per block, use / place 100) | re-plan (`action`), failure + 1; the cell is not dug / pillared in / opened again during this goto; after 2 failed places the goto plans without pillaring |
 | a failure while the body is not on a safe node (in water / lava, airborne, no standable node) | retreat first: steer to the last safe node (forward, jump in water or against a wall) for up to 60 ticks |
 | no standable node under the body, or the best node is the start (Track BA: also a `no_progress` plan, no partial end 5+ blocks out) | wait 20 ticks, failure + 1 |
+| the retry after a `no_progress` plan (all loaded) would start from the same node, by the same planner (worker / in-thread), with no block change the planner reads since (`worldGen`: block updates, re-sent sections) | `unreachable` at once, no search (2026-10-31: the same 2-second search ran 3 times per goto, every 8 s for 15 minutes). Not after the 40 ms in-thread stand-in while the worker starts (its retry runs in the worker), not for a `runAway` from a moving threat, and not once a plan with a path came back in between. Changes outside `worldGen` do not count: mob avoidance costs, a new tool or more throwaway blocks (the next goto plans with them) |
 | 3 failures | `unreachable` |
 | the main search says `none`, or a `block` goal is a cell nobody can stand in | `unreachable` at once |
 
@@ -584,14 +611,31 @@ node (feet cell + feet height) and an estimate in blocks (`GoalTest.done` / `h`,
 
 | Goal | Done when | Heuristic |
 |---|---|---|
-| `block {p}` | the feet cell is p | octile to p's column |
+| `block {p}` | the feet cell is p | `columnH`: octile to p's column, levels to p.y |
 | `near {p, r}` | feet within r of p (3D) | octile - r |
 | `xz {x, z}` | any cell of the column | octile |
 | `any {goals}` | some member is done; `member()` says which (the first) | min over the members |
-| `getToBlock {p, reach = 4.5, face = true}` | the feet cell is in one of the 8 columns around p with p at the feet or the head (feet cell y or y - 1), or right on top of p, or 2 below it; p within `reach` (eye to the closest point, plus the server's corner limit: `checkReach`, docs/digging.md); and when p has an exposed face at all (a neighbour that is not a full cube), one such face turned to the eye. From the 4 sides, on top or below, that face borders the cell the bot stands in; from a diagonal the eye sees two side faces, which walls or glass may cover. Track AN: `low` (default 1) lets a side cell's feet be up to `low` blocks below p (home logistics uses 3: chests on stacks and pillars) | octile - sqrt 2 |
+| `getToBlock {p, reach = 4.5, face = true}` | the feet cell is in one of the 8 columns around p with p at the feet or the head (feet cell y or y - 1), or right on top of p, or 2 below it; p within `reach` (eye to the closest point, plus the server's corner limit: `checkReach`, docs/digging.md); and when p has an exposed face at all (a neighbour that is not a full cube), one such face turned to the eye. From the 4 sides, on top or below, that face borders the cell the bot stands in; from a diagonal the eye sees two side faces, which walls or glass may cover. Track AN: `low` (default 1) lets a side cell's feet be up to `low` blocks below p (home logistics uses 3: chests on stacks and pillars) | `columnH`: octile - sqrt 2, levels to p.y - max(low, 2) .. p.y + 1 |
 | `yLevel {y}` | the feet cell's y is y | difference in y |
 | `runAway {from, r}` | at least r (horizontally, from the cell centre) from every threat; `from` is a point, points, or a function read at every plan | r - distance to the nearest threat |
 | `surface` | sky above the head (`NavGrid.skyTop`, the sky-column cache) and the feet no more than a step (0.5625) below the local ground: the 25th percentile of the column tops in the 7 x 7 columns around, + 1. A 1 x 1 to 3 x 3 pit or a ravine floor is below it, the foot of a cliff or a tree is not | the rise to the local ground |
+
+`twoBlocks` / `threeBlocks` (Track BD) use `columnH` too, the levels to their feet range (p.y - 1 / p.y - 2
+.. p.y). **Levels** (`columnH`, 2026-10-31): the heuristic of a goal at a known height is max(octile,
+levels) plus, beyond `FREE_LEVELS` (4), the levels priced like a staircase into the ground
+(`levelWeights` from the search's costs: down `fall[1] + landing + underground` = 13 ticks, up `jump -
+walk` = 5.4 ticks, over `walk`; Baritone's GoalBlock adds GoalYLevel's FALL_N_BLOCKS_COST / JUMP_ONE_BLOCK_COST
+the same way). Within 4 levels the heuristic stays admissible (no move costs less than `walk` per level:
+a 3-block drop walk + 9 + 2, a ladder 5, a jump 9), so the short-range choices stay optimal (the
+staircase over a 3-block drop, the stairs over a pillar). Before, the column goals had no y part (octile
+only): a body straight above a goal scored 0, every node around it worse, so a search cut short by its
+budget had no partial end 5+ blocks out (`no_progress`) - the Realm miner stood over a coal ore 13 blocks
+down, its 64-member composites failed 3 x 2 s every 8 s for 15 minutes; and `!goto mine` (298 -54 -93, a
+hand-dug staircase 119 levels down whose entrance is 9 blocks from home) walked the surface to the column
+over the goal. Measured on the Realm's world cache (.work, not in the repo), budget 350 ms: the composite
+from 195 70 -28 found (20 k nodes; before: `no_progress`), `!goto mine` found down the staircase in 1 750
+nodes (before: partial to 298 73 -93, the surface over the goal; 86 k nodes without digging, none in budget
+with it). Callers without costs (goto.ts remaining distance, the blame of an `any` member) get unit weights.
 
 `goto` with an `any` goal reports the member reached in `report.reached` (`{ index, goal }`, the index
 into `goal.goals`). A `runAway` whose `from` is a function is checked again when the path ends: if the
@@ -800,6 +844,8 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/e2e/nav-swim.test.ts` | Track AJ: a 6-wide river (0 corrections, health 20), an 18-block lane (swim ticks per block), a 1-deep ditch |
 | `test/e2e/nav-ladder.test.ts` | Track AJ: a 10-block ladder in a 1 x 1 shaft up and out, back down and out; a vine wall (climb ticks per block) |
 | `test/e2e/nav-parkour.test.ts` | Track AJ: 1-block, 2-block and 2-block-1-lower gaps over a 4-deep pit with water, 20 crossings each (`PARKOUR_RUNS`); a 1-wide bridge with a turn, edge sneaking off / on (`BRIDGE_RUNS`) |
+| `test/unit/skills/nav-trapdoor.test.ts` | Track BG: panels and `hatch` states; the planner down / up through a hatch for every facing and half (never out through the panel side), without `allowOpen`, open (no use), iron / `noAction` / `moves.trapdoor` false, the roof-layer hatch (down only), drops to a floor and into water, a panel in a doorway; closed loops with fake actions (open, closed behind, `closeTrapdoors` false) |
+| `test/e2e/nav-trapdoor.test.ts` | Track BG, bds-move: truth-built shafts under a platform: closed hatch down and up (panel opposite the ladder and on its side), open top-half hatch down and up with no action, the roof-layer hatch (down, no plan up), a ladderless hatch over a pool (fall of 8); 0 corrections |
 
 The e2e tests use `bds-move` (udp/19146). The v1 layouts (`nav-worlds.ts`: `flat`, `hill`, `long`, `wall`)
 have fixed areas; every v2 suite builds in its own random chunk-aligned area (`privateOrigin()`, x 2048
@@ -860,7 +906,12 @@ the cross-country layout; default 7), `MOVE_AREA=x,z` (pin a v2 suite's area to 
   over).
 - Swimming, ladders, vines, parkour and edge sneaking: see "Movement variety" (limits there); no
   scaffolding, no underwater travel, no swimming in flowing water.
-- Trapdoors are classified (open / closed) but not toggled by the planner.
+- Trapdoors (Track BG): a hatch in the roof layer whose ladder ends under it (the owner's farm layout) is
+  down only: on BDS an open trapdoor is not climbable, so nobody climbs past it from the ladder top
+  (measured). Horizontally a trapdoor is only a wall or a passable open panel (`crossing`); a closed
+  trapdoor standing in a corridor is not toggled to walk through. The tight-gap alignment pulses need a free
+  floor around 0.2 blocks behind the approach; approaching a tight hatch along its tight axis is not planned
+  differently (the follower turns and aligns first).
 - Climbing the cave hill's four 1-block terraces in a row (jumping while pushed against each step,
   then accelerating on top) gave one correction of 0.418 (client ahead) in 2 of 4 runs, right after
   the last landing. The follower never sprint-jumps there (checked in the sim); likely a sprint-start

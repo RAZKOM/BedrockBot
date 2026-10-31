@@ -45,8 +45,14 @@ describe.skipIf(!E2E)('@bds home: spare shulker boxes when the chests are full (
     const l = L!;
     const mob = b.built.mobility!;
     // every container full (truth), the box chest with its 3 empty boxes
-    for (const p of [l.coal, l.wood, l.empty, l.boxes, l.barrel]) await b.truth.chestPut(p, 'stone', 64, 'all');
+    // (the empty double chest gets 3 kinds, fewer than 27 stacks each: 27 stacks of one kind would make it a tidy
+    // step's chest after the unload, docs/home.md "Full boxes out of the chests", and use the last spare)
+    await b.truth.chestPut(l.empty, 'stone', 64, 26);
+    await b.truth.chestPut(l.empty, 'dirt', 64, 26);
+    await b.truth.chestPut(l.empty, 'gravel', 64, 'all');
+    for (const p of [l.coal, l.wood, l.boxes, l.barrel]) await b.truth.chestPut(p, 'stone', 64, 'all');
     for (const p of [l.coal, l.wood, l.empty, l.boxes, l.barrel]) expect((await b.truth.box(p)).free).toBe(0);
+    await b.home.logistics.scan(() => false, { force: true }); // the memory knows they are full (the fill steps plan from it)
     await teleport(b, { x: l.home.x + 0.5, y: F, z: l.home.z + 0.5 });
     await b.truth.ok('clear', [b.name]);
     await b.truth.ok('give', [b.name, 'iron_pickaxe', 1]);

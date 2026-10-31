@@ -64,7 +64,8 @@ then `kit.overrides`, then the defaults:
 | Command | Reply |
 |---|---|
 | `!eat` | `ate cooked_beef: food 19 -> 20` / `eat: no food` / `eat: not hungry (food 20)` |
-| `!equip` | `equip: wearing chest diamond_chestplate` / `equip: nothing better (iron_helmet, ...)` |
+| `!equip` | the best armour (and forgets the pieces worn by hand): `equip: wearing chest diamond_chestplate` / `equip: nothing better (iron_helmet, ...)` |
+| `!equip slot <0..35>`, `!equip <item>` | wear exactly that piece or the elytra, even a worse one (the panel's **Wear this**): `equip: wearing elytra (chest), netherite_chestplate into slot 14; kept on until !equip` |
 | `!inv` | `inv 2/36, held 0 iron_sword x1; armour head -, chest -, legs -, feet -; food 20 (best cooked_beef); throwaway 0 in hotbar; tools iron_sword 250/250; items iron_sword x1, cooked_beef x1` |
 | `!drop <item> [n]` | `dropped 10 stone` / `drop: no diamond` |
 
@@ -77,7 +78,24 @@ Every 10 ticks, while spawned and alive, at most one inventory action at a time,
 1. **Armour** after an inventory change (and on spawn): every armour slot gets the best piece from the
    inventory (0..35) that beats what is worn; points x 10 + toughness (leather < golden = chainmail <
    iron < diamond < netherite per slot), a piece at the wear limit last. Not during a fight, not while
-   digging or placing.
+   digging or placing. Not over a piece worn by hand (below) or an elytra.
+
+### Armour worn by hand
+
+`!equip slot <n>` / `!equip <item>` (`SurvivalKit.wear`, `ArmourController.wearSlot`) puts that exact
+piece on with the same request as the automatic pass (`place` into an empty armour slot, `swap` with
+the worn piece, which lands in the slot the new one came from) and **pins** the armour slot to it.
+While the pinned item is still worn, `plan()` skips the slot, so neither the automatic pass nor the
+trip preparation (`prepareTrip`) swap the better piece back while walking. The pin ends:
+
+- on `!equip` without arguments (`clearPins`: the best armour again);
+- on any other `wear` of that slot: the flight kit's elytra before a takeoff and the chestplate after
+  the landing (a feature that needs the slot takes it over; after a flight the chest slot is back to
+  normal rules);
+- by itself when the slot holds anything else (`!drop all`, a broken piece, a swap by the server).
+
+The pins are in memory: a restart forgets them (the elytra stays on anyway: the pass never replaces
+an elytra). `!inv` marks a pinned piece `(by hand)`; the kit's status has `armour.pinned`.
 2. **Eat** when food < 18 (natural regeneration needs 18), or health < 10 and food < 20. Best food:
    saturation + 1.5 x the nutrition that is not wasted, raw chicken ranked down, golden apples only
    below health 6, rotten flesh / spider eye / pufferfish / poisonous potato only when nothing else is

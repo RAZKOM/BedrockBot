@@ -131,7 +131,7 @@ const CSS = `
   .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--bad); margin-right: 6px; }
   .dot.ok { background: var(--ok); }
   .stale { background: var(--bad); color: #fff; border-radius: 10px; padding: 1px 8px; font-size: 12px; font-weight: 600; }
-  body.is-stale main > section:not(#panel-commands) { opacity: .55; transition: opacity .3s; }
+  body.is-stale main > section:not(#panel-commands):not(#panel-link) { opacity: .55; transition: opacity .3s; }
   pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; }
   #logs { max-height: 360px; overflow-y: auto; }
   #chat { max-height: 220px; overflow-y: auto; }
@@ -214,6 +214,23 @@ const CSS = `
   .badge { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 8px; background: var(--cell); border: 1px solid var(--cellline); }
   .st-active { border-color: var(--ok); color: var(--ok); } .st-held, .st-paused { border-color: var(--warn); color: var(--warn); }
   a { color: var(--accent); }
+  /* the offline banner (docs/panel.md "When the bot is not connected"): the link state, greyed actions */
+  .link { display: flex; gap: 12px; align-items: flex-start; border-color: var(--warn); box-shadow: inset 4px 0 0 var(--warn); }
+  .link[hidden] { display: none; }
+  .link.link-bad, .link.link-down { border-color: var(--bad); box-shadow: inset 4px 0 0 var(--bad); }
+  .link .spin { flex: none; width: 18px; height: 18px; margin-top: 2px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--warn); animation: spin 1s linear infinite; }
+  .link.link-bad .spin, .link.link-down .spin { border-top-color: var(--bad); }
+  .link.link-dead .spin { animation: none; border-color: var(--hp); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .link .spin { animation: none; } }
+  .link .lt { font-size: 16px; font-weight: 700; margin: 0 0 2px; }
+  .link .kv { margin-top: 6px; }
+  .link .signin { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+  .link .code { font: 700 18px/1.2 ui-monospace, Menlo, Consolas, monospace; letter-spacing: .12em; padding: 2px 8px; border: 1px dashed var(--accent); border-radius: 6px; }
+  button:disabled { opacity: .45; cursor: not-allowed; border-color: var(--cellline); }
+  body.is-offline #inventory .cell, body.is-offline #mapview { opacity: .5; filter: grayscale(.7); }
+  body.is-offline #btn-pause, body.is-offline #btn-resume { opacity: 1; }
+  .menu .note { font-size: 12px; color: var(--warn); padding: 4px 8px; }
 `;
 
 export function renderPanelPage(s: PanelState): string {
@@ -236,6 +253,7 @@ ${glyphDefs()}
     <span id="stale" class="stale" hidden>stale</span><span id="err"></span>
     <span class="grow"></span><button type="button" id="theme" class="small" aria-label="switch theme">light</button>
   </header>
+  <section id="panel-link" class="wide link" role="status" aria-live="polite"${s.link.phase === 'online' ? ' hidden' : ''}><span class="spin" aria-hidden="true"></span><div class="grow"><div class="lt" id="link-title">${esc(s.link.phase)}</div><div id="link-detail" class="small"></div><dl class="kv small" id="link-rows"></dl><div id="link-signin" class="signin" hidden><a id="link-url" target="_blank" rel="noopener noreferrer">open the sign-in page</a><span>code <span id="link-code" class="code"></span></span></div></div></section>
   <section id="panel-inventory" class="inv-card"><h2>Inventory <span id="inv-sum" class="muted small"></span></h2>${inventoryHtml()}<div id="iteminfo" class="iteminfo muted small">tap or right-click a slot: actions and details</div></section>
   <section id="panel-vitals"><h2>Bot</h2>${vitalsHtml()}</section>
   <section id="panel-status">

@@ -85,6 +85,7 @@ export const SETTING_DEFS = {
   allowBreak: { kind: 'boolean', default: false, description: 'walks may dig through blocks in the way (planner dig-through moves)' },
   allowPlace: { kind: 'boolean', default: false, description: 'walks may pillar up with throwaway blocks (planner place moves)' },
   closeDoors: { kind: 'boolean', default: false, description: 'close doors and gates behind after walking through' },
+  closeTrapdoors: { kind: 'boolean', default: true, description: 'close a trapdoor in a floor or ceiling behind after climbing or dropping through it (it was closed before)' },
   sprint: { kind: 'boolean', default: true, description: 'sprint on long straight runs (walks, follow)' },
   guardRadius: { kind: 'number', default: 16, min: 2, max: 64, integer: true, unit: 'blocks', description: 'guard: fight hostiles within this radius of home' },
   fleeHealth: { kind: 'number', default: 8, min: 0, max: 20, unit: 'health', description: 'flee to the shelter / home below this health with a hostile near (0 = never)' },
@@ -98,6 +99,7 @@ export const SETTING_DEFS = {
   useBoneMeal: { kind: 'boolean', default: true, description: 'farming: use bone meal on crops (placeholder, Track U)' },
   mineTunnelLen: { kind: 'number', default: 32, min: 1, max: 256, integer: true, unit: 'blocks', description: 'mining: tunnel length per branch (placeholder)' },
   nlConfirm: { kind: 'boolean', default: true, description: '!do and chat to the bot: show the plan and wait for !yes before running it' }, // Track Y
+  autoSleep: { kind: 'boolean', default: true, description: 'go to bed by itself at night (a bed near the shelter or home, or the bed waypoint); !sleep on / off sets it' }, // 2026-10-31: !sleep off was lost at every restart
   autoFood: { kind: 'boolean', default: true, description: 'hunt food mobs as a chore by day when the inventory food is below foodMin' }, // Track X
   foodMin: { kind: 'number', default: 10, min: 0, max: 200, integer: true, unit: 'hunger points', description: 'auto food: hunt when the food carried totals fewer hunger points' }, // Track X
   foodLeave: { kind: 'number', default: 2, min: 0, max: 16, integer: true, unit: 'mobs', description: '!food never leaves fewer of a kind than this within the radius' }, // Track X

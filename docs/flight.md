@@ -420,7 +420,9 @@ Rules (all named `// Track AU` in the shared files):
   elytra included;
 - the armour pass leaves a worn elytra alone (the flight swaps the chestplate back itself); `!fly`
   never starts without the elytra in the chest slot (`ArmourController.wear`, confirmed by the
-  server's `inventory_slot`);
+  server's `inventory_slot`); an elytra or chestplate worn by hand (`!equip slot <n>`, the panel's
+  **Wear this**) is pinned against the armour pass, and the flight's own swaps end that pin
+  (docs/survival.md "Armour worn by hand"): after a landing the chestplate goes back on as usual;
 - the refill: fewer than `fireworksMin` (16) rockets in the hotbar and some in the box: the box is
   placed next to the bot (`boxSpots`), opened, rockets are taken until the hotbar holds a stack,
   closed, broken (the Digger) and picked up again; before a flight and after a landing, never in the

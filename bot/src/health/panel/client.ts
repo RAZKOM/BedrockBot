@@ -31,6 +31,7 @@ export const PANEL_SCRIPT = String.raw`(() => {
   const POLL = POLL_MS_V, HIDDEN = HIDDEN_MS_V, CONFIRM = CONFIRM_V;
   let last = JSON.parse($('initial').textContent);
   let renders = 0, lastOk = Date.now(), timer = 0, picked = null, bytes = $('initial').textContent.length;
+  let link = linkView(last.link, Date.now(), null), downSince = null;
   const atBottom = (e) => e.scrollHeight - e.scrollTop - e.clientHeight < 30;
   const nice = (n) => String(n).replace(/_/g, ' ');
   const num = (v, d) => (v == null ? '-' : (d ? Number(v).toFixed(d) : String(v)));
@@ -63,7 +64,9 @@ export const PANEL_SCRIPT = String.raw`(() => {
   function openMenu(key, title, actions, x, y, local) {
     clear(menu); menuKey = key; armed = null;
     menu.appendChild(el('div', 'mt', title));
-    if (!actions.length) menu.appendChild(el('div', 'mt', 'no action for this'));
+    // the bot is not in the game: only local actions (a box's contents); the rest come back when it spawns
+    if (!link.actions) { const n = actions.length; actions = actions.filter((a) => !a.cmd); if (n > actions.length) menu.appendChild(el('div', 'note', (link.title || 'not in the game') + ': actions come back when the bot has spawned')); }
+    else if (!actions.length) menu.appendChild(el('div', 'mt', 'no action for this'));
     for (const a of actions) {
       const b = el('button', 'mi' + (a.confirm ? ' danger' : ''), a.label);
       b.type = 'button'; b.dataset.act = a.id; b.setAttribute('role', 'menuitem');
@@ -181,7 +184,7 @@ export const PANEL_SCRIPT = String.raw`(() => {
     const inv = s.inventory;
     pictures = !!s.icons;
     for (const k in cells) setCell(cells[k], itemOf(s, k), !!inv && k.charAt(0) === 's' && Number(k.slice(1)) === inv.selected);
-    text('inv-sum', inv ? (36 - inv.free) + '/36 slots used, armour ' + inv.armourPoints + '/20' : 'no inventory (no world model)');
+    text('inv-sum', inv ? (36 - inv.free) + '/36 slots used, armour ' + inv.armourPoints + '/20' + (link.actions ? '' : ' (last known)') : 'no inventory (no world model)');
     info(s);
   }
   // ---- statuses ----
@@ -323,8 +326,26 @@ export const PANEL_SCRIPT = String.raw`(() => {
     modeArmed = d.length ? m : null;
     text('mode-diff', d.length ? m + ' changes ' + d.map((x) => x.key + ' ' + x.from + ' -> ' + x.to).join(', ') + '; tap ' + m + ' again to apply' : 'the settings already match ' + m);
   });
+  // ---- the offline banner: what the link is doing, greyed actions, back to normal when the bot spawns ----
+  let linkSig = '';
+  function applyLink(v) {
+    link = v;
+    const sec = $('panel-link');
+    if (sec.hidden !== !v.show) sec.hidden = !v.show;
+    const cls = 'wide link link-' + v.kind; if (sec.className !== cls) sec.className = cls;
+    if (document.body.classList.contains('is-offline') !== !v.actions) document.body.classList.toggle('is-offline', !v.actions);
+    for (const b of document.querySelectorAll('button.q')) { const off = !v.commands && !offlineOk(b.dataset.cmd); if (b.disabled !== off) { b.disabled = off; b.title = off ? 'the bot is not in the game' : ''; } }
+    if (!v.show) return;
+    text('link-title', v.title); text('link-detail', v.detail);
+    const sig = JSON.stringify(v.rows);
+    if (sig !== linkSig) { linkSig = sig; const dl = $('link-rows'); clear(dl); for (const r of v.rows) { dl.appendChild(el('dt', '', r[0])); dl.appendChild(el('dd', '', r[1])); } }
+    const si = $('link-signin'), on = !!(v.signIn && (v.signIn.url || v.signIn.code));
+    if (si.hidden !== !on) si.hidden = !on;
+    if (on) { const a = $('link-url'), u = /^https:\/\//.test(v.signIn.url || '') ? v.signIn.url : ''; if (u && a.getAttribute('href') !== u) a.setAttribute('href', u); a.hidden = !u; text('link-code', v.signIn.code || '-'); }
+  }
   function render(s) {
     last = s;
+    applyLink(linkView(s.link, Date.now(), null));
     const dot = $('dot'), dc = 'dot' + (s.bot.healthy ? ' ok' : ''); if (dot.className !== dc) dot.className = dc;
     text('botname', s.bot.name || 'BedrockBot'); text('conn', s.bot.state); text('server', s.bot.server); text('task', s.bot.task); text('ver', s.bot.gameVersion);
     renderInventory(s);
@@ -358,15 +379,25 @@ export const PANEL_SCRIPT = String.raw`(() => {
       const body = await res.text();
       bytes = body.length;
       timed(JSON.parse(body));
-      lastOk = Date.now();
+      lastOk = Date.now(); downSince = null;
       stale(false, '');
-    } catch (e) { stale(true, 'offline: ' + (e && e.message ? e.message : e)); }
+    } catch (e) {
+      if (downSince === null) downSince = lastOk;
+      stale(true, 'offline: ' + (e && e.message ? e.message : e));
+      applyLink(linkView(last.link, Date.now(), downSince));
+    }
     schedule(document.hidden ? HIDDEN : POLL);
   }
   document.addEventListener('visibilitychange', () => { if (!document.hidden) schedule(0); });
   // ---- commands ----
   async function send(cmd, pop) {
     cmd = cmd.trim(); if (!cmd) return;
+    if (!link.commands && !offlineOk(cmd)) {
+      const why = '> ' + cmd + '\nnot sent: ' + (link.title || 'the bot is not in the game') + '. ' + (link.kind === 'down' ? 'The panel does not answer.' : '!status, !set, !help and !stop still work.');
+      $('replies').textContent = why;
+      if (pop) toast(why);
+      return why;
+    }
     $('replies').textContent = '> ' + cmd + '\n...';
     let out;
     try {

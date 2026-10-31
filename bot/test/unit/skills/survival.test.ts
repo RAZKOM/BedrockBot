@@ -5,7 +5,7 @@
 // bending around a spawner and a mob while a goal inside the zone stays reachable).
 import { describe, expect, it } from 'vitest';
 import { Chat, parseOwners } from '../../../src/chat/chat.ts';
-import { registerSurvivalCommands, SURVIVAL_COMMANDS } from '../../../src/chat/commands-survival.ts';
+import { parseEquipArgs, registerSurvivalCommands, SURVIVAL_COMMANDS, wearReply } from '../../../src/chat/commands-survival.ts';
 import { createDeserializer, createSerializer } from '../../../src/connection/protocol.ts';
 import { bestWeaponSlot } from '../../../src/skills/combat/combat.ts';
 import { Digger, type DigLoop, type DigWorld } from '../../../src/skills/dig/index.ts';
@@ -33,6 +33,7 @@ import {
   DEFAULT_JUNK,
   useItemTransaction,
   wantsToEat,
+  wearMove,
 } from '../../../src/skills/survival/index.ts';
 import type { ItemV4 } from '../../../src/world/packets.ts';
 import type { BlockInfo, EntityInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
@@ -385,6 +386,98 @@ describe('armour', () => {
     expect(r.ok).toBe(false);
     expect(inv.slots[12]?.name).toBe('iron_boots');
     expect(inv.windows.get(120)![3]?.name).toBe('leather_boots');
+  });
+});
+
+describe('armour worn by hand (!equip slot, the panel\'s Wear this)', () => {
+  const setup = (fill: Record<number, ItemStack>, worn: (ItemStack | null)[]) => {
+    const src = new FakeSource();
+    const loop = new TickLoop();
+    const { containers } = fakeScreen(src);
+    const inv = new FakeInv(slots36(fill));
+    worn.forEach((w, i) => (inv.windows.get(120)![i] = w));
+    const requests = new StackRequests({ source: src, containers, loop, runtimeId: () => 1n });
+    answerRequests(src, loop);
+    const reqs = () => src.sent.filter((p) => p.name === 'item_stack_request').map((p) => (p.params as { requests: { actions: Record<string, unknown>[] }[] }).requests[0]!.actions[0]!);
+    return { inv, ctl: new ArmourController({ inventory: inv, requests }), reqs };
+  };
+
+  it('wearMove: the slot an item goes into (the elytra: chest), or why not', () => {
+    const s = slots36({ 3: item('elytra'), 4: item('iron_boots'), 5: item('bread', 3) });
+    expect(wearMove(s, [null, item('netherite_chestplate'), null, null], 3)).toEqual({ slot: 1, from: 3, item: 'elytra', replaces: 'netherite_chestplate' });
+    expect(wearMove(s, [null, null, null, null], 4)).toEqual({ slot: 3, from: 4, item: 'iron_boots', replaces: null });
+    expect(wearMove(s, [], 5)).toBe('bread is not armour or an elytra');
+    expect(wearMove(s, [], 6)).toBe('slot 6 is empty');
+    expect(wearMove(s, [], 36)).toBe('slot must be 0..35');
+  });
+
+  it('the elytra replaces the netherite chestplate (which goes into the elytra\'s slot) and the automatic pass leaves it on', async () => {
+    const { inv, ctl, reqs } = setup({ 14: item('elytra') }, [null, item('netherite_chestplate'), null, null]);
+    const r = await ctl.wearSlot(14);
+    expect(r).toEqual({ ok: true, item: 'elytra', slot: 1, replaces: 'netherite_chestplate' });
+    expect(reqs()[0]).toMatchObject({ type_id: 'swap', source: { slot_type: { container_id: 'inventory' }, slot: 14 }, destination: { slot_type: { container_id: 'armor' }, slot: 1 } });
+    expect(ctl.worn()[1]?.name).toBe('elytra');
+    expect(inv.slots[14]?.name).toBe('netherite_chestplate');
+    expect(ctl.pinned()).toEqual(new Map([[1, 'elytra']]));
+    expect(ctl.plan()).toEqual([]);
+    expect((await ctl.equip()).equipped).toEqual([]); // the auto pass: nothing to do
+    expect(ctl.worn()[1]?.name).toBe('elytra');
+  });
+
+  it('a worse piece is worn on request and stays; !equip (clearPins) or another wear of the slot ends that', async () => {
+    const { inv, ctl } = setup({ 2: item('leather_chestplate') }, [null, item('diamond_chestplate'), null, null]);
+    expect((await ctl.wearSlot(2)).ok).toBe(true);
+    expect(ctl.worn()[1]?.name).toBe('leather_chestplate');
+    expect(inv.slots[2]?.name).toBe('diamond_chestplate');
+    expect(ctl.plan()).toEqual([]); // the better one in the inventory is not put back while walking
+    ctl.clearPins(); // !equip
+    expect(ctl.plan().map((m) => m.item)).toEqual(['diamond_chestplate']);
+    // pinned again, then a feature's own wear of the slot (the flight kit) ends the pin
+    expect((await ctl.wearSlot(2)).ok).toBe(true); // diamond back on by hand
+    expect((await ctl.wearSlot(2)).ok).toBe(true); // leather again by hand
+    expect(ctl.pinned().get(1)).toBe('leather_chestplate');
+    expect(await ctl.wear({ slot: 1, from: 2, item: 'diamond_chestplate', replaces: 'leather_chestplate' })).toBe(true);
+    expect(ctl.pinned().size).toBe(0);
+  });
+
+  it('a pin ends by itself when the slot holds something else (dropped, broken, swapped elsewhere)', async () => {
+    const { inv, ctl } = setup({ 2: item('leather_chestplate'), 3: item('iron_chestplate') }, [null, null, null, null]);
+    expect((await ctl.wearSlot(2)).ok).toBe(true);
+    expect(ctl.plan()).toEqual([]);
+    inv.windows.get(120)![1] = null; // gone (dropped by !drop all, broken)
+    expect(ctl.plan().map((m) => m.item)).toEqual(['iron_chestplate']);
+    expect(ctl.pinned().size).toBe(0);
+  });
+
+  it('a reconnect (the armour window cleared until the server sends it again) keeps the pin', async () => {
+    const { inv, ctl } = setup({ 2: item('leather_chestplate'), 3: item('iron_chestplate') }, [null, null, null, null]);
+    expect((await ctl.wearSlot(2)).ok).toBe(true);
+    const w = inv.windows.get(120)!;
+    inv.windows.delete(120); // start_game: inventory cleared
+    expect(ctl.pinned().size).toBe(1);
+    inv.windows.set(120, w); // the armour window again, the same piece worn
+    expect(ctl.plan()).toEqual([]);
+  });
+});
+
+describe('!equip arguments', () => {
+  const s = slots36({ 0: item('iron_sword'), 7: item('elytra'), 20: item('leather_boots'), 21: item('leather_boots') });
+  it('none = the best armour; slot <n>; an item name = its first slot', () => {
+    expect(parseEquipArgs([], s)).toEqual({ kind: 'best' });
+    expect(parseEquipArgs(['slot', '7'], s)).toEqual({ kind: 'slot', slot: 7 });
+    expect(parseEquipArgs(['slot', '35'], s)).toEqual({ kind: 'slot', slot: 35 });
+    expect(parseEquipArgs(['elytra'], s)).toEqual({ kind: 'slot', slot: 7 });
+    expect(parseEquipArgs(['minecraft:leather_boots'], s)).toEqual({ kind: 'slot', slot: 20 });
+  });
+  it('usage and errors', () => {
+    for (const a of [['slot'], ['slot', '36'], ['slot', '-1'], ['slot', 'x']]) expect(parseEquipArgs(a, s)).toMatchObject({ kind: 'error', reason: expect.stringMatching(/^usage: !equip/) as string });
+    expect(parseEquipArgs(['iron_sword'], s)).toMatchObject({ kind: 'error', reason: expect.stringMatching(/^equip: iron_sword is not armour or an elytra/) as string });
+    expect(parseEquipArgs(['iron_helmet'], s)).toEqual({ kind: 'error', reason: 'equip: no iron_helmet in the inventory' });
+  });
+  it('the reply', () => {
+    expect(wearReply({ ok: true, item: 'elytra', slot: 1, replaces: 'netherite_chestplate' }, 14)).toBe('equip: wearing elytra (chest), netherite_chestplate into slot 14; kept on until !equip');
+    expect(wearReply({ ok: true, item: 'iron_boots', slot: 3, replaces: null }, 4)).toBe('equip: wearing iron_boots (feet); kept on until !equip');
+    expect(wearReply({ ok: false, reason: 'slot 6 is empty' }, 6)).toBe('equip: slot 6 is empty');
   });
 });
 

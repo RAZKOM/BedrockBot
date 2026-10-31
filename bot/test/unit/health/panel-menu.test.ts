@@ -7,7 +7,8 @@ import { findSlot, freeSlot, parseHotbarSlot, registerPanelCommands, type PanelC
 import { RuntimeSettings } from '../../../src/config/settings.ts';
 import { liftTaskStatus, mapRoutes } from '../../../src/health/map/routes.ts';
 import { mapMarks } from '../../../src/health/panel/marks.ts';
-import { cellActions, logVisible, mapActions, modeChanges, modeOf, paletteMatch, parseLog, setCommand, settingActions, settingVisible, stackActions, wpName, type MenuAction } from '../../../src/health/panel/menu.ts';
+import { panelLink } from '../../../src/health/panel/state.ts';
+import { cellActions, linkView, offlineOk, logVisible, mapActions, modeChanges, modeOf, paletteMatch, parseLog, setCommand, settingActions, settingVisible, stackActions, wpName, type MenuAction } from '../../../src/health/panel/menu.ts';
 import { enumValues, modesData, renderPanelPage } from '../../../src/health/panel/page.ts';
 import { settingGroups } from '../../../src/chat/help.ts';
 import type { ItemStack } from '../../../src/world/types.ts';
@@ -44,6 +45,7 @@ describe('menu model: inventory cells', () => {
     expect(ids(cellActions('s4', inv.slots[4]!, inv))).toEqual(['select', 'eat', 'drop1', 'dropstack', 'unload']);
     const helmet = { name: 'iron_helmet', count: 1, icon: 'helmet', colour: '#c9ccd1', abbr: 'IHe' } as const;
     expect(cmd(cellActions('s20', helmet, inv), 'equip')).toBe('!equip');
+    expect(cmd(cellActions('s20', helmet, inv), 'wear')).toBe('!equip slot 20');
     const shield = { name: 'shield', count: 1, icon: 'shield', colour: '#a9824f', abbr: 'Sh' } as const;
     expect(cmd(cellActions('s20', shield, inv), 'offhand')).toBe('!offhand shield');
     const totem = { name: 'totem_of_undying', count: 1, icon: 'item', colour: '#fff000', abbr: 'TOU' } as const;
@@ -61,6 +63,64 @@ describe('menu model: inventory cells', () => {
     expect(cellActions('off', null, inv)).toEqual([]);
     expect(cellActions('a0', inv.armour[0]!, inv)).toEqual([]); // no command takes one piece off
     expect(cellActions('s0', inv.slots[0]!, null).map((x) => x.id)).toEqual(['select', 'dropstack', 'unload']);
+  });
+});
+
+describe('menu model: wear this exact piece', () => {
+  const inv = fullState().inventory!;
+  it('an armour piece or the elytra: Wear this sends !equip slot <n> (worn even when worse), then the best armour', () => {
+    const elytra = { name: 'elytra', count: 1, icon: 'chestplate', colour: '#9d9dc4', abbr: 'El' } as const;
+    const a = cellActions('s14', elytra, inv);
+    expect(ids(a).slice(0, 2)).toEqual(['wear', 'equip']);
+    expect(a[0]).toEqual({ id: 'wear', label: 'Wear this (chest slot)', cmd: '!equip slot 14' });
+    expect(a[1]).toEqual({ id: 'equip', label: 'Wear the best armour', cmd: '!equip' });
+    const boots = { name: 'leather_boots', count: 1, icon: 'boots', colour: '#a0653a', abbr: 'LBo' } as const;
+    expect(cellActions('s3', boots, inv).find((x) => x.id === 'wear')).toEqual({ id: 'wear', label: 'Wear this', cmd: '!equip slot 3' });
+    expect(ids(cellActions('s4', inv.slots[4]!, inv))).not.toContain('wear'); // bread
+  });
+});
+
+describe('the offline banner: link phases and the view', () => {
+  const now = 1_761_753_600_000;
+  it('panelLink: online, connecting, reconnecting (scheduled or running), sign-in, dead, offline', () => {
+    expect(panelLink({ state: 'spawned', since: now - 5000 }, now)).toMatchObject({ phase: 'online', since: now - 5000, retryAt: null });
+    expect(panelLink({ state: 'idle' }, now).phase).toBe('connecting');
+    expect(panelLink({ state: 'connecting', since: now - 1000, attempt: 0 }, now).phase).toBe('connecting');
+    const kicked = { ts: '2026-10-29T18:00:00.000Z', kind: 'kick', reason: 'kicked: You were kicked' };
+    expect(panelLink({ state: 'connecting', since: now - 3000, retryAt: now + 4000, attempt: 3, lastDisconnect: kicked }, now)).toEqual({
+      phase: 'reconnecting', state: 'connecting', since: now - 3000, retryAt: now + 4000, attempt: 3, lastDisconnect: kicked, signIn: null, death: null,
+    });
+    expect(panelLink({ state: 'connecting', retryAt: now - 1, attempt: 2 }, now)).toMatchObject({ phase: 'reconnecting', retryAt: null });
+    expect(panelLink({ state: 'connecting', attempt: 0, signIn: { message: 'open it', verification_uri: 'https://microsoft.com/link', user_code: 'ABCD1234', expires_in: 900, at: now - 60_000 } }, now)).toMatchObject({
+      phase: 'signin', signIn: { message: 'open it', url: 'https://microsoft.com/link', code: 'ABCD1234', expiresAt: now + 840_000 },
+    });
+    expect(panelLink({ state: 'spawned', dead: { since: now - 1500, cause: 'death.attack.mob', respawnAt: now + 500 } }, now)).toMatchObject({ phase: 'dead', since: now - 1500, retryAt: now + 500, death: { cause: 'death.attack.mob' } });
+    expect(panelLink({ state: 'closed', since: now - 10_000 }, now).phase).toBe('offline');
+  });
+
+  it('linkView: no banner online; what each phase says and which actions stay', () => {
+    expect(linkView(panelLink({ state: 'spawned' }, now), now, null)).toMatchObject({ show: false, actions: true, commands: true });
+    const kicked = { ts: new Date(now - 120_000).toISOString(), kind: 'kick', reason: 'kicked_for_idle' };
+    const r = linkView(panelLink({ state: 'connecting', since: now - 3000, retryAt: now + 12_000, attempt: 4, lastDisconnect: kicked }, now), now, null);
+    expect(r).toMatchObject({ show: true, kind: 'bad', title: 'Kicked: reconnecting', actions: false, commands: false });
+    expect(r.rows).toEqual([['last disconnect', 'kick: kicked_for_idle (2 min ago)'], ['next try', 'in 12 s (attempt 4)'], ['state since', '3 s ago']]);
+    const closed = { ts: new Date(now - 5000).toISOString(), kind: 'closed', reason: 'server restart' };
+    expect(linkView(panelLink({ state: 'connecting', attempt: 1, lastDisconnect: closed }, now), now, null)).toMatchObject({ kind: 'wait', title: 'Disconnected: reconnecting', rows: [['last disconnect', 'closed: server restart (5 s ago)'], ['next try', 'attempt 1 running']] });
+    expect(linkView(panelLink({ state: 'connecting', since: now - 65_000 }, now), now, null)).toMatchObject({ title: 'Connecting', rows: [['for', '1 min']] });
+    const sign = linkView(panelLink({ state: 'connecting', since: now - 30_000, signIn: { verification_uri: 'https://microsoft.com/link', user_code: 'ABCD1234', expires_in: 900, at: now - 30_000 } }, now), now, null);
+    expect(sign).toMatchObject({ title: 'Not signed in', signIn: { url: 'https://microsoft.com/link', code: 'ABCD1234' }, commands: false });
+    expect(sign.rows).toEqual([['code', 'ABCD1234'], ['code expires', 'in 14 min'], ['waiting', '30 s']]);
+    const dead = linkView(panelLink({ state: 'spawned', dead: { since: now - 1000, cause: 'death.attack.mob', respawnAt: now + 1000 } }, now), now, null);
+    expect(dead).toMatchObject({ kind: 'dead', title: 'Dead: respawning', actions: false, commands: true, rows: [['died', '1 s ago'], ['respawn', 'in 1 s']] });
+    expect(linkView(panelLink({ state: 'spawned', dead: { since: now, cause: 'x', respawnAt: null } }, now), now, null).rows[1]).toEqual(['respawn', 'automatic respawn is off (respawn delay negative)']);
+    expect(linkView(panelLink({ state: 'closed', since: now - 4000 }, now), now, null)).toMatchObject({ kind: 'bad', title: 'Offline', actions: false, commands: false });
+    // the panel itself does not answer (the bot process restarts): whatever the last state said
+    expect(linkView(panelLink({ state: 'spawned' }, now), now, now - 7000)).toMatchObject({ show: true, kind: 'down', title: 'Panel not answering', rows: [['no answer for', '7 s']], actions: false, commands: false });
+  });
+
+  it('offlineOk: the commands that answer without the game', () => {
+    for (const c of ['!status', 'status', '!set guardRadius 8', '!help', '!stop', '!pause', '!resume', '!mode careful', '!panel']) expect([c, offlineOk(c)]).toEqual([c, true]);
+    for (const c of ['!goto 1 2 3', '!equip slot 3', '!drop slot 4', '!eat', '!inv', '!home go', '']) expect([c, offlineOk(c)]).toEqual([c, false]);
   });
 });
 

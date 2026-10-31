@@ -358,7 +358,11 @@ half of `shaftRule`, shared).
    (3 blacklist it), so the same drop goal does not come back forever.
 5. Failures: a goto that never got a segment or whose last plan found no path (no path to any member)
    blacklists the candidate nearest the feet by straight line for the session (Baritone
-   `blacklistClosestOnFailure`); any other failure
+   `blacklistClosestOnFailure`); a second such goto in a row from the same feet cell with nothing dug since,
+   both real "no path" answers (`unreachable` after an exhaustive plan or a no-progress one over loaded world;
+   not a timeout or unloaded chunks), blacklists every member of its composite for the run (ours,
+   2026-10-31: one member per round spun the bot in place for 15 minutes over 64 members; the next round
+   takes other ores or explores); any other failure
    counts against the heading member, 3 failures blacklist it (ours).
 6. Nothing left after prune: "mine until n" (next section).
 
@@ -388,7 +392,7 @@ rounds (420 blocks dug)`.
 |---|---|---|---|
 | `coalesce` with `forceInternalMining` false: `GoalThreeBlocks` unless a `FallingBlock` is above, then `GoalTwoBlocks` | same (`coalesce`); the `forceInternalMining` branch ported too (unit-tested, off) | Baritone's | the goal shape is the point of the port |
 | `GoalComposite` (heuristic = min over members) | our `any` goal (already the same) | the same | |
-| `GoalThreeBlocks` / `GoalTwoBlocks` heuristic: `GoalBlock.calculate` (xz + y part) | octile on the column only | ours | `block` has no y term either; admissible with our tick costs (rule 5) |
+| `GoalThreeBlocks` / `GoalTwoBlocks` heuristic: `GoalBlock.calculate` (xz + y part) | `columnH`: max(octile, levels to the feet range), plus the levels beyond 4 priced from our costs (docs/pathfinding.md "Goals") | Baritone's (y part taken, 2026-10-31) | octile only scored a body straight over an ore 0: no partial path ever left the start (Realm, coal 13 below) |
 | `mineGoalUpdateInterval` 5 ticks, re-validates the whole goal | 40 ticks; re-plans only when the heading member is gone | ours | a scan is 2 ms on the main thread and a changed composite re-plans in the worker; every 5 ticks would cancel more walks than it finds ore |
 | `mineMaxOreLocationsCount` 64 | 64 | Baritone's | |
 | sort by straight-line `distSqr` from the feet | octile of the columns + height difference | ours | a walk-cost estimate; an ore 8 down ranks behind one 8 across |

@@ -1,5 +1,5 @@
 export { Connection, VersionGateError, EYE_HEIGHT, TICK_MS, TERMINAL_KICK_REASONS, TERMINAL_PLAY_STATUS } from './connection.ts';
-export type { ConnectionOptions, ProtocolClient, ClientFactory, PingFn, ServerInfo, ReconnectPolicy } from './connection.ts';
+export type { ConnectionLink, ConnectionOptions, ProtocolClient, ClientFactory, PingFn, ServerInfo, ReconnectPolicy } from './connection.ts';
 export { PacketRecorder, parseRecording, serializeRecord, toJsonSafe, jsonSafeReplacer } from './recorder.ts';
 export type { RecordLine, RecordDir, RecorderOptions } from './recorder.ts';
 export { backoffDelay, defaultBackoff } from './backoff.ts';

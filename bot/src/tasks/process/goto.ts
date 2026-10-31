@@ -31,6 +31,7 @@ export function settingsMover<M extends ProcessMover>(skills: M, settings: Runti
       allowBreak: settings.get('allowBreak'),
       allowPlace: settings.get('allowPlace'),
       closeDoors: settings.get('closeDoors'),
+      closeTrapdoors: settings.get('closeTrapdoors'), // Track BG
       ...opts,
       sprint: (opts.sprint ?? true) && settings.get('sprint'),
     });

@@ -1,6 +1,8 @@
 // Survival-kit chat commands and wiring (PLAN.md task 7.11, Track S, docs/survival.md), owner-only:
 //   !eat                 eat the best food now (the server refuses at food 20)
-//   !equip               put on the best armour from the inventory now
+//   !equip               put on the best armour from the inventory now (forgets the manual choices)
+//   !equip slot <0..35>  wear exactly that piece or the elytra, even a worse one (the panel's "Wear
+//   !equip <item>        this"); the automatic armour pass keeps it on (survival/armour.ts pins)
 //   !inv                 inventory summary (slots, held item, armour, food, throwaway blocks, tool wear)
 //   !drop <item> [n]     drop n (default all) of an item (the owner may drop anything)
 // `registerSurvivalCommands(deps)` is called once by the afk task (tasks/registry.ts). With the
@@ -9,14 +11,17 @@
 // tools and the PlaceSkill can fetch blocks), the hooks (tool wear, avoidance), and wraps the task's
 // stop() / status(). Without walking every command answers "<cmd> needs a task that can walk".
 import { silentLogger, type Logger } from '../log.ts';
-import { armourSlotOf } from '../skills/survival/armour.ts';
+import { ARMOUR_SLOT_NAMES, armourSlotOf, wearSlotOf } from '../skills/survival/armour.ts';
+import type { ItemStack } from '../world/types.ts';
 import { foodInfo } from '../skills/survival/eat.ts';
 import { SurvivalKit, type SurvivalSettings } from '../skills/survival/index.ts';
 import { maxDurability } from '../skills/survival/tools.ts';
 import type { Mobility } from '../tasks/mobility.ts';
 import type { PveController } from '../tasks/pve.ts';
 import { Containers } from '../world/containers.ts';
-import type { PacketSource } from '../world/types.ts';
+import type { PacketSource, Vec3 } from '../world/types.ts';
+import { findPlayer } from '../skills/follow/follow.ts';
+import { entityFeet } from '../skills/combat/hostiles.ts';
 import type { Chat } from './chat.ts';
 import { ELYTRA, flightKitMemoryOf, flightKitSlots, isElytra, keptKitLine, readKit, ROCKET, type KitInventory } from '../skills/fly/kit.ts'; // Track AU: the flight kit is kept by !drop all / items
 import { keepBoxNameOf, keepNameOf, keptBoxesLine, keptBoxSlots } from '../skills/home/boxing.ts'; // Track AV: the named (bot_loot) boxes are kept by !drop all / items
@@ -114,10 +119,19 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
   });
   chat.register({
     name: 'equip',
-    help: '(wear the best armour from the inventory)',
-    group: 'home', example: '!equip', auto: 'it puts on better armour as soon as it carries some',
-    run: ({ reply }) => {
-      void kit.equip().then((r) => {
+    help: '[slot <0..35> | <item>] (wear the best armour from the inventory; with a slot or an item: wear exactly that piece or the elytra, kept on until !equip)',
+    group: 'home', example: '!equip slot 12', auto: 'it puts on better armour as soon as it carries some, except over a piece worn by hand',
+    run: ({ reply, args }) => {
+      const want = parseEquipArgs(args, deps.mob?.world.inventory.slots ?? []);
+      if (want.kind === 'error') {
+        reply(want.reason);
+        return;
+      }
+      if (want.kind === 'slot') {
+        void kit.wear(want.slot).then((r) => reply(wearReply(r, want.slot)));
+        return;
+      }
+      void kit.equip({ reset: true }).then((r) => {
         if (r.reason) reply(`equip: ${r.reason}`);
         else if (r.equipped.length === 0 && r.failed.length === 0) reply(`equip: nothing better (${kit.armour.worn().map((w) => w?.name ?? '-').join(', ')})`);
         else reply(`equip: wearing ${r.equipped.join(', ') || 'nothing new'}${r.failed.length ? `; failed ${r.failed.join(', ')}` : ''}`);
@@ -136,15 +150,16 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
     name: 'drop',
     help: '<item> [n] | all | items | flightkit | slot <0..35> | bot_loot [n] (drop an item, everything, everything except food, armour, tools and weapons, the flight kit, one inventory slot, or the named boxes; all and items keep the flight kit and the bot_loot boxes)',
     group: 'home', example: '!drop items', auto: 'junk (rotten flesh, string, ...) is dropped when the inventory is full',
-    run: ({ reply, args }) => {
+    run: ({ reply, args, sender }) => {
       const [item, count] = args;
+      const facing = (): Promise<void> => faceForDrop(deps.mob, sender.kind === 'player' ? sender.name.replace(/§./g, '') : undefined);
       if (!item) {
         reply('usage: !drop <item> [n] | all | items | flightkit | slot <0..35> | bot_loot [n]');
         return;
       }
       if (item === 'flightkit') {
         // Track AU: the flight kit (elytra, rockets, the fireworks box) is kept by all and items; this drops it
-        void dropFlightKit(kit, deps.mob?.world.inventory, deps.task).then(reply);
+        void facing().then(() => dropFlightKit(kit, deps.mob?.world.inventory, deps.task)).then(reply);
         return;
       }
       // an explicit slot (the panel's Drop) or `bot_loot`: the owner's own choice, so the kept boxes and the flight kit go too
@@ -171,6 +186,7 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
           slots = [...keptBoxSlots(inv, keepBoxNameOf(deps.task))].sort((a, b) => a - b).slice(0, n);
         }
         void (async () => {
+          await facing();
           const out: string[] = [];
           for (const i of slots) {
             const st = inv.slots[i];
@@ -209,6 +225,7 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
           return;
         }
         void (async () => {
+          await facing();
           let dropped = 0;
           let kinds = 0;
           let failed: string | undefined;
@@ -240,7 +257,7 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
       const loot1 = invAll ? keptBoxSlots(invAll, keepBoxNameOf(deps.task)) : new Set<number>();
       const keptLoot1 = [...loot1].filter((i) => invAll?.slots[i]?.name === item.replace(/^minecraft:/, '')).length;
       const tail = keptLoot1 ? `; ${keptBoxesLine(keptLoot1, keepBoxNameOf(deps.task))}` : '';
-      void kit.drop(item, n, loot1).then((r) => {
+      void facing().then(() => kit.drop(item, n, loot1)).then((r) => {
         if (r.ok) reply(`dropped ${r.dropped} ${r.item}${tail}`);
         else if (r.reason === 'none') reply(`drop: no ${r.item}${tail}`);
         else reply(`drop ${r.item}: ${r.reason ?? 'failed'} after ${r.dropped}${tail}`);
@@ -248,6 +265,51 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
     },
   });
   return kit;
+}
+
+/**
+ * Before a drop: face the player who asked (else straight ahead) and aim over their head, so the stacks fly
+ * towards them and away from the bot's feet (it looked straight down and picked its own drop up again).
+ * Skipped while a skill runs: a job's walk or dig keeps its view.
+ */
+async function faceForDrop(mob: Mobility | undefined, player: string | undefined): Promise<void> {
+  const me = mob?.position();
+  if (!mob || !me || mob.skills.status().busy) return;
+  const e = player ? findPlayer(mob.world.entities, player) : undefined;
+  let to: Vec3;
+  if (e && Math.hypot(entityFeet(e).x - me.x, entityFeet(e).z - me.z) > 0.5) {
+    const f = entityFeet(e);
+    to = { x: f.x, y: f.y + 3, z: f.z };
+  } else {
+    const yaw = (mob.loop.command.yaw * Math.PI) / 180;
+    to = { x: me.x - Math.sin(yaw) * 4, y: me.y + 1.62 + 1.5, z: me.z + Math.cos(yaw) * 4 };
+  }
+  await mob.skills.lookAt(to);
+}
+
+export type EquipArgs = { kind: 'best' } | { kind: 'slot'; slot: number } | { kind: 'error'; reason: string };
+
+const EQUIP_USAGE = 'usage: !equip | !equip slot <0..35> | !equip <item> (an armour piece or elytra)';
+
+/** `!equip` arguments: none = the best armour; `slot <n>`; an item name = the first inventory slot holding it (hotbar first). */
+export function parseEquipArgs(args: readonly string[], slots: readonly (ItemStack | null | undefined)[]): EquipArgs {
+  const [a, b] = args;
+  if (a === undefined) return { kind: 'best' };
+  if (a === 'slot') {
+    const n = Number(b);
+    return b !== undefined && /^\d{1,2}$/.test(b) && n >= 0 && n <= 35 ? { kind: 'slot', slot: n } : { kind: 'error', reason: EQUIP_USAGE };
+  }
+  const name = a.toLowerCase().replace(/^minecraft:/, '');
+  if (wearSlotOf(name) === undefined) return { kind: 'error', reason: `equip: ${name} is not armour or an elytra; ${EQUIP_USAGE}` };
+  for (let i = 0; i < Math.min(36, slots.length); i++) if (slots[i]?.name === name && slots[i]!.count > 0) return { kind: 'slot', slot: i };
+  return { kind: 'error', reason: `equip: no ${name} in the inventory` };
+}
+
+/** The reply to `!equip slot <n>`. */
+export function wearReply(r: { ok: boolean; item?: string; slot?: number; replaces?: string | null; reason?: string }, from: number): string {
+  if (!r.ok) return `equip: ${r.item ? `${r.item}: ` : ''}${r.reason ?? 'failed'}`;
+  const where = r.slot !== undefined ? ARMOUR_SLOT_NAMES[r.slot] : 'armour';
+  return `equip: wearing ${r.item} (${where})${r.replaces ? `, ${r.replaces} into slot ${from}` : ''}; kept on until !equip`;
 }
 
 /** Track AU: `!drop flightkit`: the elytra (worn too), every rocket and the fireworks box. */

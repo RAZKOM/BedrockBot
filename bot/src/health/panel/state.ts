@@ -74,6 +74,8 @@ export interface PanelState {
   planner: PanelPlanner | null;
   /** Track AP: the connection (metrics). */
   conn: PanelConn | null;
+  /** Whether the bot is in the game, and if not why and until when (the page's offline banner, link() below). */
+  link: PanelLink;
   settings: PanelSetting[];
   logs: string[];
   chat: PanelChatLine[];
@@ -106,6 +108,68 @@ export interface PanelPlanner {
   maxForwardMs: number;
   starts: number;
   crashes: number;
+}
+
+/**
+ * The link to the game as the offline banner shows it (docs/panel.md "When the bot is not connected"):
+ *   online        spawned and alive: no banner
+ *   connecting    the first join (or before it)
+ *   reconnecting  the session ended; a reconnect is scheduled (retryAt) or running (attempt n)
+ *   signin        a Realm join waits for the Microsoft device-code sign-in (signIn)
+ *   dead          spawned but dead until the respawn (death)
+ *   offline       closed for good (no reconnect: the bot is stopping)
+ */
+export interface PanelLink {
+  phase: 'online' | 'connecting' | 'reconnecting' | 'signin' | 'dead' | 'offline';
+  /** The connection state (idle / connecting / spawned / closed). */
+  state: string;
+  /** Epoch ms the phase began (the state change; the death); null when unknown. */
+  since: number | null;
+  /** Epoch ms of the next reconnect attempt (or the respawn press while dead); null when none is scheduled. */
+  retryAt: number | null;
+  /** Reconnect attempts since the last spawn. */
+  attempt: number;
+  lastDisconnect: { ts: string; kind: string; reason: string } | null;
+  signIn: { message: string | null; url: string | null; code: string | null; expiresAt: number | null } | null;
+  death: { cause: string } | null;
+}
+
+/** What `link` reads (Connection.link, the metrics' last disconnect, the respawn controller). */
+export interface PanelLinkSource {
+  state: string;
+  since?: number;
+  retryAt?: number;
+  attempt?: number;
+  signIn?: { message?: string; verification_uri?: string; user_code?: string; expires_in?: number; at: number };
+  lastDisconnect?: { ts: string; kind: string; reason: string } | null;
+  /** Dead (between the death and the respawn): when, why, and when the respawn is pressed (null: never). */
+  dead?: { since: number; cause: string; respawnAt: number | null };
+}
+
+/** The banner's phase and facts from the link source (pure; `now` epoch ms). */
+export function panelLink(l: PanelLinkSource, now = Date.now()): PanelLink {
+  const sign = l.signIn;
+  const last = l.lastDisconnect ? { ts: l.lastDisconnect.ts, kind: l.lastDisconnect.kind, reason: String(l.lastDisconnect.reason).slice(0, 200) } : null;
+  const attempt = l.attempt ?? 0;
+  let phase: PanelLink['phase'];
+  if (l.state === 'spawned') phase = l.dead ? 'dead' : 'online';
+  else if (l.state === 'closed') phase = 'offline';
+  else if (sign) phase = 'signin';
+  else if ((l.retryAt !== undefined && l.retryAt > now) || attempt > 0) phase = 'reconnecting';
+  else phase = 'connecting';
+  return {
+    phase,
+    state: l.state,
+    since: phase === 'dead' ? (l.dead?.since ?? null) : (l.since ?? null),
+    retryAt: phase === 'dead' ? (l.dead?.respawnAt ?? null) : phase === 'reconnecting' && l.retryAt !== undefined && l.retryAt > now ? l.retryAt : null,
+    attempt,
+    lastDisconnect: last,
+    signIn:
+      phase === 'signin' && sign
+        ? { message: sign.message ?? null, url: sign.verification_uri ?? null, code: sign.user_code ?? null, expiresAt: sign.expires_in !== undefined ? sign.at + sign.expires_in * 1000 : null }
+        : null,
+    death: phase === 'dead' && l.dead ? { cause: l.dead.cause } : null,
+  };
 }
 
 export interface PanelConn {
@@ -156,6 +220,8 @@ export interface PanelStateSource {
   conn?: () => PanelConn | undefined;
   /** Track AR: ProcessManager.paused. */
   paused?: () => boolean | undefined;
+  /** The offline banner's facts (absent: from connState alone). */
+  link?: () => PanelLinkSource;
 }
 
 const DIMENSIONS: Record<number, string> = { 0: 'overworld', 1: 'nether', 2: 'the_end' };
@@ -250,6 +316,7 @@ export function buildPanelState(src: PanelStateSource, now = Date.now()): PanelS
     memory: opt(src.memory),
     planner: opt(src.planner),
     conn: opt(src.conn),
+    link: panelLink(safe(() => src.link?.() ?? { state: safe(src.connState, 'unknown') }, { state: safe(src.connState, 'unknown') }), now),
     settings: settings ? SETTING_KEYS.map((k) => safe(() => settingRow(k, settings), undefined)).filter((r): r is PanelSetting => r !== undefined) : [],
     logs: safe(src.logs, []),
     chat: safe(src.chat, []),

@@ -280,11 +280,11 @@ describe('GotoProcess', () => {
     const s = new RuntimeSettings();
     const m = settingsMover(mover as unknown as ProcessMover, s);
     void m.goto({ type: 'xz', x: 1, z: 1 });
-    expect(mover.calls.at(-1)!.opts).toEqual({ allowBreak: false, allowPlace: false, closeDoors: false, sprint: true });
+    expect(mover.calls.at(-1)!.opts).toEqual({ allowBreak: false, allowPlace: false, closeDoors: false, closeTrapdoors: true, sprint: true });
     s.set('allowBreak', 'on');
     s.set('sprint', 'off');
     void m.goto({ type: 'xz', x: 1, z: 1 }, { timeoutTicks: 5 });
-    expect(mover.calls.at(-1)!.opts).toEqual({ allowBreak: true, allowPlace: false, closeDoors: false, timeoutTicks: 5, sprint: false });
+    expect(mover.calls.at(-1)!.opts).toEqual({ allowBreak: true, allowPlace: false, closeDoors: false, closeTrapdoors: true, timeoutTicks: 5, sprint: false });
     s.set('sprint', 'on');
     void m.goto({ type: 'xz', x: 1, z: 1 }, { sprint: false, allowBreak: false });
     expect(mover.calls.at(-1)!.opts).toMatchObject({ allowBreak: false, sprint: false });
