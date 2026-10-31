@@ -1,4 +1,4 @@
-// e2e (tag @bds), Track BH: the water bucket clutch on bds-gaunt (fall-truth.ts), each case twice:
+// e2e (tag @bds), Track BI: the water bucket clutch on bds-gaunt (fall-truth.ts), each case twice:
 //   planned    a 30-block stone tower, the goal on the ground east of it, a water bucket in the hotbar (a
 //              30-block fall is 26 HP): the walk plans the clutch drop (40 ticks against 26 x 40 for the HP),
 //              the FallGuard places the water on the landing block, the bot lands in it (0 fall damage),

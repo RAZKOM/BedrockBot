@@ -1,4 +1,4 @@
-// Track BH (docs/pathfinding.md "Long falls"): why a goto that ended `unreachable` did not take a long fall.
+// Track BI (docs/pathfinding.md "Long falls"): why a goto that ended `unreachable` did not take a long fall.
 // One more plan (in-thread, to the end) with the damage budget lifted: when it finds the goal over a drop
 // deeper than maxDrop, the note names the drop, its damage and why the live policy refused it (health and
 // the margin, burning, a hostile near, health unknown, or long falls switched off).

@@ -1,4 +1,4 @@
-// Track BH (docs/pathfinding.md "Long falls"): what the planner may do with falls deeper than the 3
+// Track BI (docs/pathfinding.md "Long falls"): what the planner may do with falls deeper than the 3
 // harmless blocks, read live before every plan (BotSkills -> Navigator.fallPolicy) and handed to the
 // planner (also in the worker: a plain object). Built from the bot's health, absorption, armour
 // enchantments, burning flag, nearby hostiles, the water bucket in the hotbar, the dimension and the

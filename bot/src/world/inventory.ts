@@ -227,7 +227,7 @@ export function itemDisplayName(raw: unknown): string | undefined {
 }
 
 /**
- * Track BH: the enchantments of a raw wire item: `extra.nbt.nbt.value.ench.value.value[]` of `{id, lvl}` shorts
+ * Track BI: the enchantments of a raw wire item: `extra.nbt.nbt.value.ench.value.value[]` of `{id, lvl}` shorts
  * (verified on BDS 1.26.60 with /enchant on diamond boots: feather falling id 2, protection id 0). Undefined
  * without any.
  */

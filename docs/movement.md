@@ -227,7 +227,7 @@ mismatch is the rocket's life (12 to 18 ticks, the model assumes 15 and `endBoos
 `remove_entity` arrives), worth a correction of 0.05 to 0.35 per rocket. The flight controller, the
 landing method and the measurements are in [flight.md](flight.md).
 
-## Falls and the water bucket clutch (Track BH, wave 11)
+## Falls and the water bucket clutch (Track BI, wave 11)
 
 `bot/src/skills/fall/`: the Bedrock fall damage model (`damage.ts`), what a water bucket does to each
 block (`waterlog.ts`), the planner's long-fall policy (`policy.ts`, `plan.ts`; the planner side is in

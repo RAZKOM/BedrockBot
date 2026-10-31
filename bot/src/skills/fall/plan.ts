@@ -1,4 +1,4 @@
-// Track BH (docs/pathfinding.md "Long falls"): the planner's drops deeper than `maxDrop` (3). nav/astar.ts
+// Track BI (docs/pathfinding.md "Long falls"): the planner's drops deeper than `maxDrop` (3). nav/astar.ts
 // calls `longDrops` for a cardinal neighbour whose column is free from the feet down past maxDrop (the
 // plain drop found nothing to land on) when the search has a FallPolicy; the planner worker runs the
 // same code. Per landing it takes the cheapest of:

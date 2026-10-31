@@ -7,7 +7,7 @@ export type { Goal, DigOptions, DigResult };
 
 export type SkillResult =
   | { ok: true }
-  | { ok: false; reason: 'unreachable' | 'timeout' | 'corrected' | 'interrupted' | 'no_tool' | (string & {}); /** Track BH: why, in words (a refused long fall). */ note?: string };
+  | { ok: false; reason: 'unreachable' | 'timeout' | 'corrected' | 'interrupted' | 'no_tool' | (string & {}); /** Track BI: why, in words (a refused long fall). */ note?: string };
 
 export interface GotoOptions {
   /** Give up with 'timeout' after this many ticks. Default 6000 (5 min). */
@@ -22,6 +22,8 @@ export interface GotoOptions {
   allowPlace?: boolean;
   /** Close doors and gates the goto opened, once through. Default false. */
   closeDoors?: boolean;
+  /** Track BG: close a trapdoor (hatch) the goto opened in a floor or ceiling, once the body is clear of it. Default true. */
+  closeTrapdoors?: boolean;
 }
 
 export interface Skills {

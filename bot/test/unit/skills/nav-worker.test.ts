@@ -754,7 +754,7 @@ describe('planner worker: a real worker thread', () => {
     client.dispose();
   }, 60_000);
 
-  it('Track BH: long drops (damage within the budget, hay, a clutch) plan identically in the worker', async () => {
+  it('Track BI: long drops (damage within the budget, hay, a clutch) plan identically in the worker', async () => {
     const HAY = rid('hay_block', { pillar_axis: 'y' });
     // flat grass (feet -60); a stone plateau x 0..10, z 0..10 with its top at -49 (feet -48, 12 over the ground); hay under its east edge at z 0..3
     const blocks = (x: number, y: number, z: number): number => {

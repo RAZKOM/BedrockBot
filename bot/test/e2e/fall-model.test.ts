@@ -1,4 +1,4 @@
-// e2e (tag @bds), Track BH: the fall damage model and the waterloggable table against bds-gaunt
+// e2e (tag @bds), Track BI: the fall damage model and the waterloggable table against bds-gaunt
 // (fall-truth.ts; the first measurements, 2026-10-30, are in docs/movement.md "Falls"):
 //   heights      walking off stone pillars of 4 .. 20 blocks: truth:hurtlog's fall damage = damage.ts
 //   landings     teleported over hay (22), honey (12, 22), water (22): the landing factors

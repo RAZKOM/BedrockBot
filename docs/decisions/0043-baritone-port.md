@@ -75,7 +75,7 @@ leaves the path. The owner asked for a port ("In order to fix our pathfinding st
   2 s budget, not the 40 ms in-thread plan.
 - Any later change to a ported file keeps its header and its THIRD_PARTY_NOTICES row; a newer Baritone
   commit is a deliberate re-port, not an automatic update.
-- 2026-10-30, Track BH ([0049](0049-long-falls-and-clutch.md)): long falls and the water bucket clutch
+- 2026-10-30, Track BI ([0049](0049-long-falls-and-clutch.md)): long falls and the water bucket clutch
   came back as ours, not as a port of `dynamicFallCost` / `MovementFall`: the Bedrock fall damage, the
   waterloggable blocks and the click timing were measured on BDS and differ from Java. No Baritone code
   was added; the ported files and THIRD_PARTY_NOTICES.md are unchanged.

@@ -59,7 +59,7 @@ export interface WorkerPlanOptions {
   inventory?: { slots: ({ name: string; count: number } | null)[]; selected: number };
   /** Mob / spawner avoidance snapshot (nav/avoidance.ts costFunction). */
   avoidance?: { sources: AvoidanceSource[]; costs: AvoidanceCosts };
-  /** Track BH: long falls (PathOptions.falls, a plain object). */
+  /** Track BI: long falls (PathOptions.falls, a plain object). */
   falls?: PathOptions['falls'];
 }
 
@@ -737,7 +737,7 @@ function workerOptions(o: WorkerPlanOptions): PathOptions {
     ...(o.noAction ? { noAction: new Set(o.noAction) } : {}),
     breakTicks: inv ? (c) => breakTicksWith(c, inv) : handBreakTicks, // Track BB
     ...(o.avoidance ? { cellCost: costFunction(o.avoidance.sources, o.avoidance.costs) } : {}),
-    ...(o.falls ? { falls: o.falls } : {}), // Track BH
+    ...(o.falls ? { falls: o.falls } : {}), // Track BI
   };
 }
 

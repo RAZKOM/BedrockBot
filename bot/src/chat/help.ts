@@ -74,7 +74,7 @@ export interface HelpSettings {
 /** Settings by group for `!help settings` and the panel (a key not listed lands in `other`). */
 export const SETTING_GROUPS: readonly (readonly [string, readonly string[]])[] = [
   ['safety', ['fleeHealth', 'guardRadius', 'avoidMobRadius', 'avoidSpawnerRadius']],
-  ['walking', ['allowBreak', 'allowPlace', 'closeDoors', 'sprint', 'followDistance', 'plannerThreads']],
+  ['walking', ['allowBreak', 'allowPlace', 'closeDoors', 'closeTrapdoors', 'sprint', 'followDistance', 'plannerThreads']],
   ['work', ['mineSeenOnly', 'mineDirect', 'mineTunnelLen', 'useBoneMeal', 'toolWearLimit', 'throwawayMin', 'stashChest', 'stashShulker']],
   ['food', ['autoFood', 'foodMin', 'foodLeave', 'autoBreed', 'chorePen']],
 ];

@@ -1,4 +1,4 @@
-// Track BH (docs/movement.md "Falls"): the Bedrock fall damage model, measured on BDS 1.26.60.6
+// Track BI (docs/movement.md "Falls"): the Bedrock fall damage model, measured on BDS 1.26.60.6
 // (bds-gaunt, truth:hurtlog, 2026-10-30; test/e2e/fall-damage.test.ts):
 //
 //   counted   the fall distance the server counts is the drop up to the tick BEFORE the landing tick:

@@ -85,6 +85,7 @@ export const SETTING_DEFS = {
   allowBreak: { kind: 'boolean', default: false, description: 'walks may dig through blocks in the way (planner dig-through moves)' },
   allowPlace: { kind: 'boolean', default: false, description: 'walks may pillar up with throwaway blocks (planner place moves)' },
   closeDoors: { kind: 'boolean', default: false, description: 'close doors and gates behind after walking through' },
+  closeTrapdoors: { kind: 'boolean', default: true, description: 'close a trapdoor in a floor or ceiling behind after climbing or dropping through it (it was closed before)' },
   sprint: { kind: 'boolean', default: true, description: 'sprint on long straight runs (walks, follow)' },
   guardRadius: { kind: 'number', default: 16, min: 2, max: 64, integer: true, unit: 'blocks', description: 'guard: fight hostiles within this radius of home' },
   fleeHealth: { kind: 'number', default: 8, min: 0, max: 20, unit: 'health', description: 'flee to the shelter / home below this health with a hostile near (0 = never)' },
@@ -140,7 +141,7 @@ export const SETTING_DEFS = {
   flyMaxClimb: { kind: 'number', default: 120, min: 20, max: 250, integer: true, unit: 'blocks', description: 'flight: the climb never goes higher than this above the start; a longer glide is topped up with a rocket on the way (about 31 blocks of height, 310 of glide, each)' }, // Track AU2
   flyMargin: { kind: 'number', default: 15, min: 0, max: 60, integer: true, unit: 'blocks', description: 'flight: the cruise fires a rocket only when the glide ahead would reach the approach entry with less than this much height to spare (less for short glides: distance / 30 - 5, none under 150 blocks)' }, // Track AU2
   flyLandSearch: { kind: 'number', default: 48, min: 4, max: 128, integer: true, unit: 'blocks', description: 'flight: goto / come land on the nearest landable cell (open sky, a plain top with level neighbours) within this many blocks of the goal and walk the rest' }, // Track AU2
-  // Track BH: long falls and the water bucket clutch (docs/movement.md "Falls", docs/pathfinding.md "Long falls")
+  // Track BI: long falls and the water bucket clutch (docs/movement.md "Falls", docs/pathfinding.md "Long falls")
   longFalls: { kind: 'boolean', default: true, description: 'walks may drop more than 3 blocks if the fall leaves fallMargin health (not burning, no hostile near)' },
   fallMargin: { kind: 'number', default: 8, min: 1, max: 20, integer: true, unit: 'HP', description: 'longFalls: health a planned fall must leave' },
   clutch: { kind: 'boolean', default: true, description: 'a fall that would hurt: water from a hotbar water bucket on the landing block, picked up again' },

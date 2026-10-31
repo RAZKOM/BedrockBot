@@ -1,4 +1,4 @@
-// e2e (tag @bds), Track BH: long falls on bds-gaunt (fall-truth.ts). A 12-block stone tower with no way down
+// e2e (tag @bds), Track BI: long falls on bds-gaunt (fall-truth.ts). A 12-block stone tower with no way down
 // but the fall; the goal on the ground 10 blocks east. With health 20 the walk drops the 12 blocks and
 // arrives; the server's fall damage (truth:hurtlog) is the model's (8 HP). With health 12 (the margin is
 // 8) the goto refuses: unreachable with the note that names the drop and the reason; the bot stays on top.

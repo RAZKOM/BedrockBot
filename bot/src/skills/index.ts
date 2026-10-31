@@ -37,8 +37,8 @@ import { fellTree, type FellOptions, type FellResult } from './tree/feller.ts';
 import { detectTree, treesFrom, type Tree, type TreeOptions } from './tree/tree.ts';
 import type { SkillResult, Skills } from './types.ts'; // Track R: goto takes NavGoal / NavGotoOptions now
 import { surfaceRefusal } from '../world/dimension.ts'; // Track AT
-import { FallGuard, type FallGuardDeps } from './fall/clutch.ts'; // Track BH
-import { explainFallRefusal } from './fall/explain.ts'; // Track BH
+import { FallGuard, type FallGuardDeps } from './fall/clutch.ts'; // Track BI
+import { explainFallRefusal } from './fall/explain.ts'; // Track BI
 
 export type { Goal, GotoOptions, SkillResult, Skills, DigOptions, DigResult } from './types.ts';
 export type { CollectOptions, CollectResult } from './collect/collect.ts';
@@ -111,7 +111,7 @@ const LOOK_TURN = 30;
 
 export class BotSkills implements Skills {
   readonly nav: Navigator;
-  /** Track BH: long falls and the water-bucket clutch (skills/fall/clutch.ts). */
+  /** Track BI: long falls and the water-bucket clutch (skills/fall/clutch.ts). */
   readonly falls: FallGuard;
   private readonly loop: InputLoop;
   private readonly world: SkillsWorld;
@@ -190,7 +190,7 @@ export class BotSkills implements Skills {
           }),
       },
     );
-    // Track BH: long falls (the planner's policy, read live) and the water-bucket clutch
+    // Track BI: long falls (the planner's policy, read live) and the water-bucket clutch
     this.falls = new FallGuard({
       loop: this.loop,
       world: opts.world as unknown as FallGuardDeps['world'],
@@ -302,7 +302,7 @@ export class BotSkills implements Skills {
   dispose(): void {
     this.cancel();
     this.nav.dispose();
-    this.falls.dispose(); // Track BH
+    this.falls.dispose(); // Track BI
     for (const u of this.unsubs.splice(0)) u();
   }
 
@@ -369,14 +369,14 @@ export class BotSkills implements Skills {
     if (noSurface) return Promise.resolve({ ok: false, reason: noSurface });
     // Synchronous start (callers check nav.busy right after the call).
     const token = this.begin('goto');
-    const p = this.nav.goto(goal, opts).then((r) => (!r.ok && r.reason === 'unreachable' ? this.withFallNote(goal, r, opts) : r)); // Track BH: say why a long fall was refused
+    const p = this.nav.goto(goal, opts).then((r) => (!r.ok && r.reason === 'unreachable' ? this.withFallNote(goal, r, opts) : r)); // Track BI: say why a long fall was refused
     void p.finally(() => {
       this.end(token);
     });
     return p;
   }
 
-  /** Track BH: a failed goto that a long fall would have made: the note says why the fall was refused. */
+  /** Track BI: a failed goto that a long fall would have made: the note says why the fall was refused. */
   private withFallNote(goal: NavGoal, r: Extract<SkillResult, { ok: false }>, opts?: NavGotoOptions): SkillResult {
     try {
       const note = explainFallRefusal(this.nav, this.falls, goal, opts);

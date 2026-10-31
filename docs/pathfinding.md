@@ -54,8 +54,8 @@ every member of an `any`, is on the blacklist).
 | `nav/blacklist.ts` | `NavBlacklist`: goals, `any` members and action cells that failed 3 times, skipped for 6000 ticks (see Blacklist). |
 | `nav/follower.ts` | `PathFollower`: a path leg to per-tick MoveCommands; `PressGuard` (no accidental double taps). |
 | `nav/navigator.ts` | `Navigator`: segments, plan-ahead, legs and actions, re-planning, per-move timeouts, retreat, the report. |
-| `index.ts` | `BotSkills` facade: wires `actions.dig` to the Digger (not `this.dig()`, which would cancel the goto) and the world inventory (best tool, throwaway blocks); `place` / `useBlock` are wired by Track O's PlaceSkill / UseSkill. Track BH: builds the `FallGuard` (`skills.falls`), wires `nav.fallPolicy` / `nav.holdPlans` to it and adds the refused-fall note to an `unreachable` goto. |
-| `fall/damage.ts`, `fall/waterlog.ts`, `fall/policy.ts`, `fall/plan.ts`, `fall/explain.ts`, `fall/clutch.ts` | Track BH: the measured fall damage model, the waterloggable table and clutch target, the long-fall policy, the planner's long drops (`longDrops`, called by `astar.ts`), the note on a refused fall, the `FallGuard` (reactive clutch, pickup). See "Long falls" and docs/movement.md "Falls and the water bucket clutch". |
+| `index.ts` | `BotSkills` facade: wires `actions.dig` to the Digger (not `this.dig()`, which would cancel the goto) and the world inventory (best tool, throwaway blocks); `place` / `useBlock` are wired by Track O's PlaceSkill / UseSkill. Track BI: builds the `FallGuard` (`skills.falls`), wires `nav.fallPolicy` / `nav.holdPlans` to it and adds the refused-fall note to an `unreachable` goto. |
+| `fall/damage.ts`, `fall/waterlog.ts`, `fall/policy.ts`, `fall/plan.ts`, `fall/explain.ts`, `fall/clutch.ts` | Track BI: the measured fall damage model, the waterloggable table and clutch target, the long-fall policy, the planner's long drops (`longDrops`, called by `astar.ts`), the note on a refused fall, the `FallGuard` (reactive clutch, pickup). See "Long falls" and docs/movement.md "Falls and the water bucket clutch". |
 
 ## Nodes and moves
 
@@ -72,7 +72,7 @@ blocks (1.5 high) are obstacles, never floors. Costs are ticks (`DEFAULT_COSTS`)
 | diag | 4 diagonal | same feet height exactly; both side cells standable at it | `walk` x sqrt 2 |
 | jump | 4 cardinal | rise in (0.5625, 1.25]; the start column free up to the target's head. From a partial floor high in its cell (feet above `y + 0.75`: a chest 0.95, a dirt path 0.9375) the target can be two cells up (a full block beside the node's own cell, Track AX) | `jump` 9 |
 | drop | 4 cardinal | target column free from the feet to the head, fall through free cells, at most 3 blocks | `walk` + fall(n) (5 / 7 / 9) + `landing` 2; + `irreversibleDrop` 30 when higher than 1.25 |
-| long drop (`drop`; Track BH) | 4 cardinal | `falls` policy: nothing to land on within 3, the first floor below within `maxScan` (48); harmless, a water-bucket clutch, or damage within the health budget (see "Long falls") | `walk` + fall(n) + `landing` + `irreversibleDrop` + (0 / `clutchCost` 40 / HP x `hpCost` 40) |
+| long drop (`drop`; Track BI) | 4 cardinal | `falls` policy: nothing to land on within 3, the first floor below within `maxScan` (48); harmless, a water-bucket clutch, or damage within the health budget (see "Long falls") | `walk` + fall(n) + `landing` + `irreversibleDrop` + (0 / `clutchCost` 40 / HP x `hpCost` 40) |
 | walk through a doorway | 4 cardinal | door / gate cells let the 0.6-wide corridor pass now, or after a toggle (needs `useBlock`) | `walk` + `door` 10 per toggle |
 | dig-through (`walk` + `act.dig`; Baritone `MovementTraverse`) | 4 cardinal, same level | `allowBreak` + `dig`; full-block floors; the 1 or 2 body cells ahead are breakable (rules below), the upper one with the falling stack over it (`includeFalling`) | `walk` + per cell (break ticks + `dig` 12) |
 | walk through a doorway | 4 cardinal | door / gate cells let the 0.6-wide corridor pass now, or after a toggle (needs `useBlock`); the doorway within a step of the feet, also one cell up from a partial floor (a dirt path or carpet in front of the door, whose own cell is not part of the corridor), and out of it onto a floor a step lower in the cell below (Track AX) | `walk` + `door` 10 per toggle |
@@ -88,6 +88,9 @@ blocks (1.5 high) are obstacles, never floors. Costs are ticks (`DEFAULT_COSTS`)
 | swimOut | 4 cardinal | a standable bank with feet from the water cell's level up to 1 above | `swimOut` 14 |
 | climb | up / down a column; onto it from its foot, its side (no floor) or its top | ladder / vine cells (`grid.climb`), the cell above the body passable | `climbUp` / `climbDown` 5 per block; from the side `walk` + `climbEnter` 8, from the top `walk` + `climbDown` + `climbEnter` |
 | climbOut | 4 cardinal off a climb node | a floor beside the column, feet from the node's level up to 1 above | `climbUp` x rise + `walk` + `climbExit` 8 |
+| hatch down (`climb`; Track BG) | 4 cardinal, then down | a trapdoor (any half, open or closed, any facing) in the walking layer or one below, a ladder / vine under it: onto the ladder below the hatch (see "Trapdoors") | `walk` + `climbDown` per block + `climbEnter` (+ `door` 10 when it is toggled) |
+| hatch drop (`drop` / `swim`; Track BG) | 4 cardinal, then down | the same hatch without a ladder under it: a floor within `maxDrop`, or water up to `HATCH_WATER_FALL` 16 below | as drop (`irreversibleDrop` over 1.25) / swim (fall + `swimEnter`) (+ `door`) |
+| hatch up (`climb`; Track BG) | straight up | from a climb node to a hatch over the column (closed: toggled from below; open: the climb continues past the panel), then `climbOut` | `climbUp` (+ `door`) |
 | parkour | 4 cardinal | 1- or 2-block gap at the feet level, clear up to the head (+3), a floor at most 3 below or water at most 4 below, no lava / hazard / ladder in it; full-block landing at the same height or 1 lower that stops an overshoot; 2-block gaps need 2 standable cells behind the takeoff | g x `walk` + `parkourAir` 12 (1 lower: `parkourAirDown` 14) + `parkourRisk` 10 (+ `parkourRunUp` 12 for g = 2) |
 
 Every move into node B also pays: B's floor `costFactor` (x 5 on leaves, soul sand, honey, slime, mud,
@@ -112,6 +115,28 @@ along that axis through the cell's centre sweeps; `toggle` when the toggled stat
 open gate has no box; a door panel swings to the perpendicular edge); else blocked. Only cardinal walks
 enter or leave doorway nodes.
 
+**Trapdoors** (Track BG, decision 0048; `grid.ts` `hatch` / `hatchLets` / `isPanel`, `astar.ts` `hatchDown` /
+`climbUpInto` / `hatchUse`). A trapdoor in a floor or a ceiling, usually over a ladder shaft, is a vertical
+passage. `grid.hatch(x, y, z)` is `CROSS_CLEAR` for an open trapdoor whose panel (one full-height box at most
+0.25 thick) leaves the 0.6 body room beside it and beside a ladder's box in the cells y - 1 .. y + 1 (free width
+>= 0.62), `CROSS_TOGGLE` for a closed one that would leave that room open and is hand-usable (wooden), else
+blocked (iron, too tight, not a trapdoor). An open panel is `passable` (an open trapdoor cell is free to the
+body except the panel; it is never a floor). Moves:
+- down: from a standable node beside it, a hatch in the walking layer (the cell the feet enter) or in the floor
+  layer one below (the ladder ending under it); a ladder / vine under the hatch gives a climb node on it, else
+  the column is scanned down for water (a swim node, up to 16 blocks) or a floor within `maxDrop`;
+- up: a climb whose next cell up holds a hatch (closed: `act.use` on it, then the climb goes on; open: the
+  climb goes past the panel) and `climbOut` beside the column, the panel's side refused by `hatchLets`;
+- a closed hatch costs `door` (10) and needs `allowOpen` (`useBlock`); `moves.trapdoor = false` switches the
+  hatch moves off (the planner worker gets the flag with `moves`).
+The navigator toggles before the move like a door (the use action re-checks `c.open` in the world model after
+the click; failures time out and re-plan) and, with `closeTrapdoors` (setting, default true), closes the hatch
+behind the body once it is in another column or its head is below the hatch (within reach 4.5; not after a
+drop into water). A replan keeps the pending closes. The follower holds sneak on ladders (no slipping off at
+the top), keeps the body 0.08 off a panel while climbing, and drops into the tight gap of a panel opposite the
+ladder (0.63 for a 0.6 body: within 0.0125 of the middle) by aligning on the floor first with single-tick
+forward pulses (BDS corrects a fractional move vector, measured), then walking straight in.
+
 **The moves that dig** (Track BC, wave 11; `nav/baritone/moves.ts`, Baritone's movements, LGPL-3.0). Every
 move above with `act.dig` lists its cells in break order (the start's head room first, then each column top
 first); the follower digs them all before the body moves (nav/actions.ts "the break order"), the Digger's
@@ -128,7 +153,7 @@ inside a dirt block in the 48 x 48 test world, 4 405 with it). Not taken from Ba
 breaks nothing either (it edges round one blocked corner, cost x (sqrt 2 - 0.001), and refuses two); ours
 refuses any solid corner because the footprint line check would collide; `MovementTraverse`'s bridge
 branch (placing the floor ahead), `MovementDescend`'s `dynamicFallCost` (longer falls with breaks, falls into
-water, the water bucket) and `MovementFall`'s break column: our drop rules stay (Track BH added long drops and the clutch with its own code, see "Long falls"); `MovementPillar` on ladders
+water, the water bucket) and `MovementFall`'s break column: our drop rules stay (Track BI added long drops and the clutch with its own code, see "Long falls"); `MovementPillar` on ladders
 and in water columns.
 
 **Breaking rules** (`breakBlocker` = `nav/baritone/helper.ts` `avoidBreaking`, Track BB; the table in
@@ -145,7 +170,7 @@ Search limits: a main plan 20 000 nodes / 40 ms of search time, a plan-ahead 20 
 most `sliceMs` (8) per tick. `status`: `found`, `partial` (limit hit, or the search touched unloaded
 world; `unknown` / `limited` say which), `none` (exhaustive and fully known: unreachable).
 
-## Long falls (Track BH, wave 11)
+## Long falls (Track BI, wave 11)
 
 Owner: "When it gets stuck on top of a mountain it determines its end goal unreachable. This is kind of
 silly considering it can fall and survive, or water bucket clutch." The drop move stops at `maxDrop`
@@ -692,7 +717,7 @@ on the third, and the next `any` over it and a free log skipped it and reached t
 
 `BotSkills.status()`: health and food, the last 20 health drops (`falling: true` with `fallDistance`
 when the body landed from more than 3 blocks within the 20 ticks before), corrections, knockback
-motions, teleports, inWater / inLava, the last goto. Track BH: `skills.falls.last` / `stats` for the
+motions, teleports, inWater / inLava, the last goto. Track BI: `skills.falls.last` / `stats` for the
 clutch (docs/movement.md "Falls and the water bucket clutch").
 
 ## Measured
@@ -710,7 +735,7 @@ What Baritone's movements do and what we kept (`nav/baritone/moves.ts`; the rule
 | `MovementDiagonal` | breaks nothing: edges round one blocked corner (cost x (sqrt 2 - 0.001)), refuses two; ascending / descending diagonals (`allowDiagonalAscend` / `Descend`) | both side cells standable at the same height | ours: the footprint line check (0.62 wide) would collide with a blocked corner, and the cardinal pair plus dig-through covers the route; no diagonal dig move |
 | `MovementDownward` | `canWalkOn` two below; `FALL_N_BLOCKS_COST[1]` + the mining ticks; `allowDownward` setting | none (the miner's shaft only, `mine/tunnel.ts`) | ours (rule 6): the shaft rules (`shaftBlocker`), `allowPlace` with the throwaway blocks for the depth + 4, only towards a goal below; cost fall(1) + `digDown` + the mining ticks; `moves.digDownward` is the switch |
 | `MovementPillar` | break `start.above(2)` (falling stack) with the FallingBlock-above refusal; never from a bottom slab onto a non-ladder, never a fence gate, ladders climbed instead, water columns swum; +0.1 on air | the plain pillar only (head room required) | Baritone's head-room break and refusal; full-block floors (the follower's PlaceSkill); doors and gates refused by the rule set; no ladder / water branches (climb nodes are Track AJ's) |
-| `MovementFall` | the break column over the landing, the water bucket, sneak on magma | the drop rules (3 blocks, free column); Track BH: long drops with a damage budget or a water-bucket clutch | ours, not ported: Track BH wrote its own (measured Bedrock damage, the waterloggable table; "Long falls", decision 0049); no break column, no magma sneak |
+| `MovementFall` | the break column over the landing, the water bucket, sneak on magma | the drop rules (3 blocks, free column); Track BI: long drops with a damage budget or a water-bucket clutch | ours, not ported: Track BI wrote its own (measured Bedrock damage, the waterloggable table; "Long falls", decision 0049); no break column, no magma sneak |
 | (no Baritone movement) sneak-through | a Java body does not fit under 1.5 blocks either; Baritone sneaks only on magma and for back-placing | a cell with a top slab at head height was BLOCKED | ours (owner, 2026-10-30): the `sneak` move above. Not taken: a descend into such a gap (a sneaking body stops at an edge, physics.ts `backOffFromEdge`; a standing body that falls in lands on the ceiling block), sneaking under a ceiling while digging (digs start from standing nodes only) |
 
 Measured on bds-bari (BDS 1.26.60.6, 2026-10-30; `test/e2e/nav-digmoves.test.ts`, truth-built courses, the planner
@@ -857,8 +882,10 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/e2e/nav-swim.test.ts` | Track AJ: a 6-wide river (0 corrections, health 20), an 18-block lane (swim ticks per block), a 1-deep ditch |
 | `test/e2e/nav-ladder.test.ts` | Track AJ: a 10-block ladder in a 1 x 1 shaft up and out, back down and out; a vine wall (climb ticks per block) |
 | `test/e2e/nav-parkour.test.ts` | Track AJ: 1-block, 2-block and 2-block-1-lower gaps over a 4-deep pit with water, 20 crossings each (`PARKOUR_RUNS`); a 1-wide bridge with a turn, edge sneaking off / on (`BRIDGE_RUNS`) |
-| `test/unit/skills/fall.test.ts` | Track BH: the measured fall damage model (heights, soft landings, enchantments), the waterloggable table and the clutch target, the live policy, long drops in the planner (a 12-block plateau: none without a policy, the drop with its cost, refused over the budget / with maxDrop 1 / health unknown, Feather Falling, the staircase preferred, hay without a budget, the clutch drop, refused onto a top slab / in the no-water area / over clutchMax), the note on a refused fall, closed loops (the drop walked, the note at health 12, the clutch with a fake server), the scan's planner cost on 300 random paths |
-| `test/e2e/fall-long.test.ts` | Track BH, bds-gaunt: a 12-block tower with no way down but the fall: walked and arrived (8 HP, the model's), and at health 12 unreachable with the note, twice each |
+| `test/unit/skills/fall.test.ts` | Track BI: the measured fall damage model (heights, soft landings, enchantments), the waterloggable table and the clutch target, the live policy, long drops in the planner (a 12-block plateau: none without a policy, the drop with its cost, refused over the budget / with maxDrop 1 / health unknown, Feather Falling, the staircase preferred, hay without a budget, the clutch drop, refused onto a top slab / in the no-water area / over clutchMax), the note on a refused fall, closed loops (the drop walked, the note at health 12, the clutch with a fake server), the scan's planner cost on 300 random paths |
+| `test/e2e/fall-long.test.ts` | Track BI, bds-gaunt: a 12-block tower with no way down but the fall: walked and arrived (8 HP, the model's), and at health 12 unreachable with the note, twice each |
+| `test/unit/skills/nav-trapdoor.test.ts` | Track BG: panels and `hatch` states; the planner down / up through a hatch for every facing and half (never out through the panel side), without `allowOpen`, open (no use), iron / `noAction` / `moves.trapdoor` false, the roof-layer hatch (down only), drops to a floor and into water, a panel in a doorway; closed loops with fake actions (open, closed behind, `closeTrapdoors` false) |
+| `test/e2e/nav-trapdoor.test.ts` | Track BG, bds-move: truth-built shafts under a platform: closed hatch down and up (panel opposite the ladder and on its side), open top-half hatch down and up with no action, the roof-layer hatch (down, no plan up), a ladderless hatch over a pool (fall of 8); 0 corrections |
 
 The e2e tests use `bds-move` (udp/19146). The v1 layouts (`nav-worlds.ts`: `flat`, `hill`, `long`, `wall`)
 have fixed areas; every v2 suite builds in its own random chunk-aligned area (`privateOrigin()`, x 2048
@@ -919,7 +946,12 @@ the cross-country layout; default 7), `MOVE_AREA=x,z` (pin a v2 suite's area to 
   over).
 - Swimming, ladders, vines, parkour and edge sneaking: see "Movement variety" (limits there); no
   scaffolding, no underwater travel, no swimming in flowing water.
-- Trapdoors are classified (open / closed) but not toggled by the planner.
+- Trapdoors (Track BG): a hatch in the roof layer whose ladder ends under it (the owner's farm layout) is
+  down only: on BDS an open trapdoor is not climbable, so nobody climbs past it from the ladder top
+  (measured). Horizontally a trapdoor is only a wall or a passable open panel (`crossing`); a closed
+  trapdoor standing in a corridor is not toggled to walk through. The tight-gap alignment pulses need a free
+  floor around 0.2 blocks behind the approach; approaching a tight hatch along its tight axis is not planned
+  differently (the follower turns and aligns first).
 - Climbing the cave hill's four 1-block terraces in a row (jumping while pushed against each step,
   then accelerating on top) gave one correction of 0.418 (client ahead) in 2 of 4 runs, right after
   the last landing. The follower never sprint-jumps there (checked in the sim); likely a sprint-start
