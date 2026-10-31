@@ -2,6 +2,8 @@
 // branches, 26-connected) plus the leaves around them, and the felling order (bottom up).
 // Pure functions over a block lookup, so the same code runs on the world model and in unit tests.
 import type { BlockInfo, Vec3 } from '../../world/types.ts';
+import { isBuiltBlock } from '../terrain/classify.ts';
+import { isInteractive } from '../place/place.ts';
 
 export type BlockLookup = (p: Vec3) => BlockInfo | undefined;
 
@@ -63,6 +65,32 @@ const key = (p: Vec3) => `${p.x},${p.y},${p.z}`;
  * not on soil). Logs are 26-connected (branches may touch only by an edge or corner) and of the
  * same kind as the start log.
  */
+/**
+ * A log structure the owner built, not a tree (Realm 2026-10-31: a log cabin next to leaves was felled as a
+ * 57-log spruce): a trunk wider than 2 x 2 at the bottom, a layer with more logs than any canopy has, mostly
+ * sideways logs (beams), or a built block, a stripped log or a container / door touching a log.
+ */
+export function looksBuilt(blockAt: BlockLookup, logs: readonly Vec3[], bottom: readonly Vec3[]): boolean {
+  if (bottom.length > 4) return true;
+  const perLayer = new Map<number, number>();
+  for (const p of logs) perLayer.set(p.y, (perLayer.get(p.y) ?? 0) + 1);
+  if ([...perLayer.values()].some((n) => n > MAX_LAYER_LOGS)) return true;
+  let sideways = 0;
+  for (const p of logs) {
+    const axis = blockAt(p)?.states.pillar_axis;
+    if (axis === 'x' || axis === 'z') sideways++;
+    for (const [dx, dy, dz] of FACES) {
+      const n = blockAt({ x: p.x + dx, y: p.y + dy, z: p.z + dz })?.name;
+      if (n && (n.startsWith('stripped_') || isBuiltBlock(n) || isInteractive(n))) return true;
+    }
+  }
+  return sideways > 6 && sideways * 2 > logs.length;
+}
+
+/** More logs than this in one layer is a wall or a floor (a 2 x 2 trunk with its branches stays under it). */
+export const MAX_LAYER_LOGS = 9;
+const FACES: readonly (readonly [number, number, number])[] = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+
 export function detectTree(blockAt: BlockLookup, start: Vec3, opts: TreeOptions = {}): Tree | undefined {
   const s = { x: Math.floor(start.x), y: Math.floor(start.y), z: Math.floor(start.z) };
   const kind = logKind(blockAt(s)?.name);
@@ -100,6 +128,7 @@ export function detectTree(blockAt: BlockLookup, start: Vec3, opts: TreeOptions 
   const top = Math.max(...logs.map((p) => p.y));
   // trunk axis: the mean x/z of the lowest layer
   const bottom = logs.filter((p) => p.y === minY);
+  if (looksBuilt(blockAt, logs, bottom)) return undefined;
   const ax = bottom.reduce((a, p) => a + p.x, 0) / bottom.length;
   const az = bottom.reduce((a, p) => a + p.z, 0) / bottom.length;
   const axial = (p: Vec3) => Math.hypot(p.x - ax, p.z - az);

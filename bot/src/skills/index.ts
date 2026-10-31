@@ -498,7 +498,10 @@ export class BotSkills implements Skills {
     if (!w.blockAt || !w.find) return [];
     const origin = opts.origin ?? this.loop.state.pos;
     const logs = w.find((b) => b.name.endsWith('_log') && !b.name.startsWith('stripped_'), { origin, radius, max: 4096, class: 'log' });
-    return treesFrom(w.blockAt.bind(w), logs, origin, { skip: (p) => this.nav.blacklist.blocked(p), ...opts }); // Track R: skip blacklisted logs
+    // never a tree inside the base (protectRadius of home): the owner's own trees and log builds stay
+    const area = this.nav.breakRules().protectedArea;
+    const inBase = (p: Vec3) => !!area && Math.hypot(p.x + 0.5 - area.x, p.y + 0.5 - area.y, p.z + 0.5 - area.z) <= area.r;
+    return treesFrom(w.blockAt.bind(w), logs, origin, { skip: (p) => this.nav.blacklist.blocked(p), ...opts }).filter((t) => !t.logs.some(inBase)); // Track R: skip blacklisted logs
   }
 
   /** Fell a tree from the bottom up, re-pathing when the next log is out of reach (skills/tree/feller.ts). */
