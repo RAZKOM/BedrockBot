@@ -52,11 +52,37 @@ branch mining places torches; the mine process runs the stash step when the inve
   `carriesTorch` / `placeTorch` (BranchRun.torch uses them), tasks/process/stashStep.ts `StashStep` (was
   MineProcess.tick / stashStep).
 
+## Review fixes (2026-10-31)
+
+- **The stairs stay a way out.** A 1-wide box deeper than its length + 1 and a 1x1 box deeper than 1
+  are refused at parse time. Before each layer the treads above it are read on the live world (`wayOut`:
+  solid, the 3 cells over each open or diggable and not refused); a cave in a tread, a liquid, or a refused
+  cell over one (water behind the wall, a chest) ends the job `blocked: no way out below y N` before it
+  goes deeper, and the bot climbs out (climbTo may dig a staircase inside the box under the job's own
+  refusals). The treads are held as `Navigator.keptCells` while the job lives: the one nav hook, a set
+  every goto's `noBreak` starts with (navigator.ts, two lines), so a fight's or an unload trip's walk does
+  not dig them.
+- **What hangs on a cell keeps it.** A built block by name is refused even without a collision box (a
+  torch, a rail: the break rules call those air); a cell under a built block or a hard non-cube block is
+  refused (`supports a block`), and one beside a built non-cube block (`holds a wall block`: a wall torch,
+  a ladder, a sign). The tunnel's own torches stand on the floor and are left out of that rule.
+- **Players.** A cell a player stands on is refused at the plan and at the dig; `!quarry` refuses to
+  start while a player is in or over the box, and the start reply names the direction `here` resolved.
+- **The stair head.** A quarry starts at the feet cell outside the box beside the first tread (the bot
+  walks there first when farther than 6 blocks) and climbs back to it; a box farther than 64 blocks or
+  not loaded is refused.
+- The dig-time recheck has the live feet floor (`feetFloorOf`, as the miner's); with `quarryKeepStone` off
+  the job's collects leave junk on the ground (throwaway blocks only while short of the reserve); the
+  solid-cell count for the ETA yields every 4096 cells; narrow tunnels put the torch on a floor cell clear
+  of the bot's body. Reused instead of copied: wire.ts `minerTunnelWorld` / `throwawayCount` /
+  `feetFloorOf` (extracted from `createMinerFor`), build/types.ts `key` / `fmtCell`.
+
 ## Consequences
 
 - A quarry next to water leaves pillars of rock under and around it; the owner can clear those by hand
   or with `!build clear` once the water is gone.
-- The staircase costs depth - 1 blocks of the box; a 1-wide box gets a straight staircase only as long as
-  the box, the rest relies on the climb at the end.
+- The staircase costs depth - 1 blocks of the box; a 1-wide box can be only as deep as its length + 1.
+- A liquid or a chest by the staircase ends a quarry early (`no way out`) rather than digging past a
+  broken stair; supports of built blocks and of hard non-cube blocks stay as pillars.
 - The planner's stands come from the builder's simple stand model (full-block tops, 1-block steps); a
   ledge it misjudges costs a failed walk and a retry, then the cell is skipped and reported.

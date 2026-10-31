@@ -11,6 +11,14 @@
 //            it and everything under them stay (the columns stop), everything else is dug: no cell next
 //            to the water was opened, the water did not spread
 //   stop     `!stop` in the middle of an 8 x 8 x 4 quarry: the process is gone and nothing more is dug
+//   wall water  `!quarry here 6 6 3 east` with a water source in the platform just outside the box's far
+//            wall: the box cell beside it and the one under it stay, the rest is dug, the stairs are
+//            walkable (the 3 cells over each tread air) and the bot gets out
+//   built    `!quarry here 6 6 3 east` with a plank wall beyond the box, a wall torch hanging on it over
+//            the box, a door and a torch standing on the box's top: they all survive with the cells
+//            under them, the rest is dug
+//   spiral   `!quarry here 2 2 6 east`: 5 treads round a 2 x 2 shaft (one column twice), all dug but them,
+//            the bot back on top
 import './quarry-env.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -92,7 +100,7 @@ describe.skipIf(!E2E)('@bds quarry and tunnel (Track BK)', () => {
     const t0 = Date.now();
     await b.command('!quarry here 8 8 4 east');
     const first = await b.reply((m) => m.startsWith('quarry '), from);
-    expect(first).toMatch(/^quarry 8x4x8: -?\d+ -?\d+ -?\d+ to -?\d+ -?\d+ -?\d+, 4 layers, stairs from /);
+    expect(first).toMatch(/^quarry 8x4x8 going east: -?\d+ -?\d+ -?\d+ to -?\d+ -?\d+ -?\d+, 4 layers, stairs from /);
     await sleep(8000);
     const sFrom = b.said.length;
     await b.command('!quarry status');
@@ -163,6 +171,99 @@ describe.skipIf(!E2E)('@bds quarry and tunnel (Track BK)', () => {
     expect(end).toMatch(/^quarry 6x3x6: layer 3\/3, \d+ dug, 15 skipped \(10 stopped column \(liquid\), 4 next_to_liquid, 1 liquid\) done in /);
     expect(diff.diffs).toBe(0);
     expect(around.diffs).toBe(0);
+  }, 960_000);
+
+  /** The 3 cells over every tread are air (feet, head, the step up). */
+  async function treadsWalkable(spec: QuarrySpec): Promise<number> {
+    let bad = 0;
+    for (const t of spec.keep) bad += (await bot!.truth.blocksDiff({ ...t, y: t.y + 1 }, { ...t, y: t.y + 3 }, () => 'air')).diffs;
+    return bad;
+  }
+
+  it('water outside the far wall: the cell beside it and the one under it stay, the stairs stay walkable, the bot gets out', async () => {
+    const b = bot!;
+    const s = await site();
+    const feet = await platform(s);
+    const spec = expectedSpec(feet, 'here 6 6 3 east');
+    const water = { x: spec.box.max.x + 1, y: TOP - 1, z: s.z + 1 }; // in the platform, against the box's east wall
+    await truthLoaded(b.truth, 'set', [water.x, water.y, water.z, 'water']);
+    await sleep(500);
+    const keep = new Set(spec.keep.map(key));
+    const stay = new Set([key({ ...water, x: water.x - 1 }), key({ ...water, x: water.x - 1, y: water.y - 1 })]);
+    const from = b.said.length;
+    await b.command('!quarry here 6 6 3 east');
+    const end = await b.reply((m) => m.startsWith('quarry 6x3x6: layer') && m.includes(' in '), from, 900_000);
+    const diff = await b.truth.blocksDiff(spec.box.min, spec.box.max, (c) => (keep.has(key(c)) || stay.has(key(c)) ? 'stone' : 'air'));
+    const w = await b.truth.blocksDiff(water, water, () => 'water');
+    const walk = await treadsWalkable(spec);
+    const pos = await settled(b);
+    notes.push(`wall water: ${end} | blocksdiff ${diff.diffs} of ${diff.count} ${JSON.stringify(diff.first.slice(0, 6))} | water ${w.diffs === 0 ? 'kept' : JSON.stringify(w.first)} | treads blocked ${walk} | feet y ${pos.y.toFixed(2)}`);
+    expect(end).toMatch(/^quarry 6x3x6: layer 3\/3, \d+ dug, 2 skipped \(.*\) done in /);
+    expect(diff.diffs).toBe(0);
+    expect(w.diffs).toBe(0);
+    expect(walk).toBe(0);
+    expect(pos.y).toBeGreaterThan(TOP + 0.5);
+  }, 960_000);
+
+  it('a plank wall with a wall torch, a door and a torch next to and on the box: they survive with their supports', async () => {
+    const b = bot!;
+    const s = await site();
+    const feet = await platform(s);
+    const spec = expectedSpec(feet, 'here 6 6 3 east');
+    const wx = spec.box.max.x + 1;
+    await fill({ x: wx, y: TOP + 1, z: spec.box.min.z }, { x: wx, y: TOP + 2, z: spec.box.max.z }, 'oak_planks');
+    const wallTorch = { x: wx - 1, y: TOP + 1, z: s.z + 1 }; // hangs on the planks, over the box's east column
+    const door = { x: s.x + 3, y: TOP + 1, z: s.z + 2 };
+    const torch = { x: s.x + 4, y: TOP + 1, z: s.z - 1 };
+    await truthLoaded(b.truth, 'setblock', [wallTorch.x, wallTorch.y, wallTorch.z, 'torch', 'torch_facing_direction=east']);
+    await truthLoaded(b.truth, 'setblock', [door.x, door.y, door.z, 'wooden_door']);
+    await truthLoaded(b.truth, 'setblock', [torch.x, torch.y, torch.z, 'torch']);
+    await sleep(800);
+    for (const [p, n] of [
+      [wallTorch, 'torch'],
+      [door, 'wooden_door'],
+      [torch, 'torch'],
+    ] as const)
+      expect((await b.truth.blocksDiff(p, p, () => n)).diffs, `${n} at ${key(p)} before the job`).toBe(0);
+    const keep = new Set(spec.keep.map(key));
+    const stay = new Set([wallTorch, door, torch].map((p) => key({ ...p, y: TOP })));
+    const from = b.said.length;
+    await b.command('!quarry here 6 6 3 east');
+    const end = await b.reply((m) => m.startsWith('quarry 6x3x6: layer') && m.includes(' in '), from, 900_000);
+    const diff = await b.truth.blocksDiff(spec.box.min, spec.box.max, (c) => (keep.has(key(c)) || stay.has(key(c)) ? 'stone' : 'air'));
+    const kept = [
+      await b.truth.blocksDiff(wallTorch, wallTorch, () => 'torch'),
+      await b.truth.blocksDiff(door, door, () => 'wooden_door'),
+      await b.truth.blocksDiff(torch, torch, () => 'torch'),
+      await b.truth.blocksDiff({ x: wx, y: TOP + 1, z: spec.box.min.z }, { x: wx, y: TOP + 2, z: spec.box.max.z }, () => 'oak_planks'),
+    ];
+    const walk = await treadsWalkable(spec);
+    notes.push(`built: ${end} | blocksdiff ${diff.diffs} of ${diff.count} ${JSON.stringify(diff.first.slice(0, 6))} | wall torch, door, torch, planks: ${kept.map((k) => (k.diffs ? JSON.stringify(k.first) : 'kept')).join(', ')} | treads blocked ${walk}`);
+    expect(end).toMatch(/^quarry 6x3x6: layer 3\/3, \d+ dug, \d+ skipped \(.*supports a block.*\) done in /);
+    for (const k of kept) expect(k.diffs).toBe(0);
+    expect(diff.diffs).toBe(0);
+    expect(walk).toBe(0);
+  }, 960_000);
+
+  it('!quarry here 2 2 6 east: a spiral round the shaft, all dug but the treads, the bot back on top', async () => {
+    const b = bot!;
+    const s = await site();
+    const feet = await platform(s);
+    const spec = expectedSpec(feet, 'here 2 2 6 east');
+    expect(spec.keep).toHaveLength(5);
+    const keep = new Set(spec.keep.map(key));
+    const from = b.said.length;
+    const t0 = Date.now();
+    await b.command('!quarry here 2 2 6 east');
+    const end = await b.reply((m) => m.startsWith('quarry 2x6x2: layer') && m.includes(' in '), from, 900_000);
+    const diff = await b.truth.blocksDiff(spec.box.min, spec.box.max, (c) => (keep.has(key(c)) ? 'stone' : 'air'));
+    const walk = await treadsWalkable(spec);
+    const pos = await settled(b);
+    notes.push(`spiral: ${end} | ${((Date.now() - t0) / 1000).toFixed(0)} s | blocksdiff ${diff.diffs} of ${diff.count} ${JSON.stringify(diff.first.slice(0, 6))} | treads blocked ${walk} | feet y ${pos.y.toFixed(2)}`);
+    expect(end).toMatch(/^quarry 2x6x2: layer 6\/6, 19 dug, 0 skipped done in /);
+    expect(diff.diffs).toBe(0);
+    expect(walk).toBe(0);
+    expect(pos.y).toBeGreaterThan(TOP + 0.5);
   }, 960_000);
 
   it('!stop in the middle of a quarry: the process ends and nothing more is dug', async () => {

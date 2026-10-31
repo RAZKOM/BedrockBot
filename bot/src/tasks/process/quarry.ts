@@ -3,13 +3,21 @@
 // skill is cancelled); resumed = QuarryJob.resume() (the current slice is planned again from where the
 // bot stands, after walking back to the job when it is far). The stash step runs like mine's
 // (tasks/process/stashStep.ts): the dug blocks' items are the produce (kept, packed first) unless
-// `quarryKeepStone` is off. It ends by itself (every slice, a blocked tunnel, no pickaxe, inventory full)
+// `quarryKeepStone` is off, and then the job's collects leave the junk on the ground (else they pick up
+// what the stash step dropped), keeping only enough throwaway blocks for the keeper's reserve. It ends by itself (every slice, a blocked tunnel, no pickaxe, inventory full)
 // or with `!quarry stop` / `!tunnel stop` / `!stop`. A death drops it.
 import { isStashJunk } from '../../skills/container/stash.ts';
 import { minedItem } from '../../skills/items/catalog.ts';
 import type { QuarryJob, QuarryState } from '../../skills/mine/quarry.ts';
+import { THROWAWAY_BLOCKS } from '../../skills/survival/keeper.ts';
 import { BaseProcess, PRIORITY, type ProcessStatus, type StopReason } from './manager.ts';
 import { StashStep } from './stashStep.ts';
+
+/** What the job's collects pick up: everything with quarryKeepStone on; else no junk, but throwaway blocks while short of the reserve. */
+export function quarryTakes(name: string, keepStone: boolean, throwawayShort: boolean): boolean {
+  if (keepStone || !isStashJunk(name)) return true;
+  return throwawayShort && THROWAWAY_BLOCKS.includes(name.replace(/^minecraft:/, ''));
+}
 
 export class QuarryProcess extends BaseProcess {
   readonly kind = 'user' as const;
@@ -27,6 +35,7 @@ export class QuarryProcess extends BaseProcess {
     this.job = job;
     this.name = job.spec.kind;
     this.keepStone = keepStone;
+    job.take = (n) => quarryTakes(n, this.keepStone(), job.throwawayShort());
     this.result = new Promise((r) => {
       this.resolve = r;
     });

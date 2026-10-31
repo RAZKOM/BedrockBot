@@ -2,9 +2,14 @@
 // slices, the staircase, the argument forms) and whole jobs on the builder's flat fake world (the bot
 // walks by teleporting, digs at once): layer order, the stairs kept, refusals (liquids stop their
 // columns, built blocks stay), stop and pause / resume, the tunnel's lane, floor and torches.
+// Review fixes: the stairs stay a way out (1-wide refusals, the live tread check before each layer,
+// treads walkable after the job), supports of built blocks stay, players, the stair head approach,
+// the kept cells, the dig-time feet floor, the collect filter, narrow-tunnel torches.
 import { describe, expect, it } from 'vitest';
 import { isBuiltBlock } from '../../../src/skills/terrain/classify.ts';
-import { boxOf, checkQuarryBox, hereBox, parseQuarryArgs, parseTunnelArgs, quarrySlices, quarrySpec, QuarryJob, ringOf, staircase, tunnelSpec, type Box, type QuarryHost, type QuarrySpec } from '../../../src/skills/mine/quarry.ts';
+import { boxOf, checkQuarryBox, checkQuarrySite, hereBox, overlapsBody, parseQuarryArgs, parseTunnelArgs, playerOver, quarrySlices, quarrySpec, QuarryJob, ringOf, stairHead, staircase, tunnelSpec, type Box, type QuarryHost, type QuarrySpec } from '../../../src/skills/mine/quarry.ts';
+import { feetFloorOf } from '../../../src/skills/mine/wire.ts';
+import { quarryTakes } from '../../../src/tasks/process/quarry.ts';
 import type { Vec3 } from '../../../src/world/types.ts';
 import { key } from '../../../src/skills/build/types.ts';
 import { FakeBot, FakeInventory, FlatWorld } from './build-fakes.ts';
@@ -56,6 +61,14 @@ function setup(o: { inv?: Record<string, number> } = {}) {
     throwawayMin: () => 0,
   };
   return { world, inv, bot, host, digs };
+}
+
+/** Every tread solid with its feet, head and step-up cells open (the live world after the job). */
+function expectWalkable(w: FlatWorld, treads: readonly Vec3[]): void {
+  for (const t of treads) {
+    expect(w.blockAt(t)!.boxes.length, `tread ${key(t)}`).toBeGreaterThan(0);
+    for (let dy = 1; dy <= 3; dy++) expect(w.name({ ...t, y: t.y + dy }), `over tread ${key(t)} +${dy}`).toBe('air');
+  }
 }
 
 function solidIn(w: FlatWorld, b: Box): Vec3[] {
@@ -131,6 +144,38 @@ describe('quarry planning', () => {
     ]);
   });
 
+  it('a 1x1 box deeper than 1 and a 1-wide box deeper than its length + 1 are refused (no room for the stairs)', () => {
+    expect(checkQuarryBox(boxOf({ x: 0, y: -61, z: 0 }, { x: 0, y: -62, z: 0 }))).toBe('1x2x1: a 1x1 box can be 1 deep at most (no room for stairs out)');
+    expect(checkQuarryBox(boxOf({ x: 0, y: -61, z: 0 }, { x: 0, y: -61, z: 0 }))).toBeUndefined();
+    expect(checkQuarryBox(boxOf({ x: 0, y: -61, z: 0 }, { x: 0, y: -64, z: 2 }))).toBeUndefined(); // 3 long, 4 deep: 3 treads
+    expect(checkQuarryBox(boxOf({ x: 0, y: -61, z: 0 }, { x: 0, y: -65, z: 2 }))).toBe('1x5x3: a 1-wide box can be its length + 1 (4) deep at most (no room for stairs out)');
+    expect('error' in parseQuarryArgs(['here', '1', '1', '3'], FEET, 0)).toBe(true);
+    expect('error' in parseQuarryArgs(['here', '1', '3', '4'], FEET, 0)).toBe(false);
+    expect('error' in parseQuarryArgs(['here', '1', '3', '5'], FEET, 0)).toBe(true);
+  });
+
+  it('the stair head: outside the box beside the first tread, at the top, on the side of the bot; here says its direction', () => {
+    const s = spec(parseQuarryArgs(['here', '4', '4', '3'], FEET, 0));
+    expect(s.exit).toEqual(FEET); // the box starts one block ahead: the head is where the bot stands
+    expect(s.dir).toEqual(SOUTH);
+    expect(stairHead(boxOf({ x: 30, y: -61, z: 0 }, { x: 33, y: -63, z: 3 }), { x: 0.5, y: F, z: 0.5 })).toEqual({ x: 29, y: F, z: 0 });
+    expect(spec(parseQuarryArgs(['1', '-61', '1', '3', '-62', '3'], FEET, 0)).dir).toBeUndefined();
+  });
+
+  it('the site: a box farther than 64 blocks or not loaded is refused; players in or over the box are found', () => {
+    const b = boxOf({ x: 1, y: -61, z: 1 }, { x: 4, y: -63, z: 4 });
+    const w = new FlatWorld();
+    expect(checkQuarrySite(b, FEET, (p) => w.blockAt(p))).toBeUndefined();
+    expect(checkQuarrySite(boxOf({ x: 100, y: -61, z: 0 }, { x: 103, y: -63, z: 3 }), FEET, (p) => w.blockAt(p))).toBe('the box is 100 blocks away (at most 64)');
+    expect(checkQuarrySite(b, FEET, (p) => (p.x === 4 && p.z === 4 ? undefined : w.blockAt(p)))).toBe('the box is not loaded (4 -63 4)');
+    expect(playerOver(b, [{ x: 2.5, y: F, z: 2.5 }])).toEqual({ x: 2.5, y: F, z: 2.5 }); // on the top layer
+    expect(playerOver(b, [{ x: 0.5, y: F, z: 0.5 }])).toBeUndefined(); // beside it
+    expect(playerOver(b, [{ x: 2.5, y: F + 5, z: 2.5 }])).toBeUndefined(); // high above
+    expect(overlapsBody({ x: 2.5, y: F, z: 2.5 }, { x: 2, y: F, z: 2 })).toBe(true);
+    expect(overlapsBody({ x: 2.5, y: F, z: 2.5 }, { x: 2, y: F - 1, z: 2 })).toBe(false);
+    expect(overlapsBody({ x: 2.9, y: F, z: 2.5 }, { x: 3, y: F + 1, z: 2 })).toBe(true); // 0.3 over the edge
+  });
+
   it('tunnel arguments: a direction or here, the length, WxH (default 3x3); cross-sections from one block ahead at the feet', () => {
     const s = spec(parseTunnelArgs(['here', '20'], FEET, -90)); // yaw -90 = east
     expect(s.label).toBe('tunnel east 20 (3x3)');
@@ -190,7 +235,7 @@ describe('quarry job (fake world)', () => {
     expect(reasons).toContain('liquid');
   });
 
-  it('built blocks are never dug (the cell under one is); gravel over the box keeps the block under it', async () => {
+  it('built blocks are never dug, nor the cell under one; gravel over the box keeps the block under it', async () => {
     const { world, host } = setup();
     const s = quarrySpec(boxOf({ x: 1, y: -61, z: 1 }, { x: 4, y: -62, z: 4 }), FEET);
     world.set({ x: 3, y: -61, z: 3 }, 'oak_planks');
@@ -198,10 +243,140 @@ describe('quarry job (fake world)', () => {
     const job = new QuarryJob(s, host);
     expect(await job.start()).toBe('done');
     expect(world.name({ x: 3, y: -61, z: 3 })).toBe('oak_planks');
-    expect(world.name({ x: 3, y: -62, z: 3 })).toBe('air');
+    expect(world.name({ x: 3, y: -62, z: 3 })).toBe('dirt'); // its support
     expect(world.name({ x: 2, y: -61, z: 3 })).toBe('grass_block');
     expect(job.stats.skipped.get('3,-61,3')).toBe('protected');
+    expect(job.stats.skipped.get('3,-62,3')).toBe('supports a block');
     expect(job.stats.skipped.get('2,-61,3')).toBe('gravity_above');
+  });
+
+  it('what hangs on a cell keeps it: a torch on top (no collision box), a wall torch beside; a torch in the box stays too', async () => {
+    const { world, host } = setup();
+    const s = quarrySpec(boxOf({ x: 1, y: -61, z: 1 }, { x: 5, y: -62, z: 5 }), FEET);
+    const thin = (p: Vec3, name: string) => world.cells.set(key(p), { name, boxes: [] });
+    thin({ x: 3, y: -60, z: 3 }, 'torch'); // on the top layer, outside the box
+    thin({ x: 6, y: -61, z: 2 }, 'torch'); // a wall torch on the box's east side, outside it
+    thin({ x: 2, y: -62, z: 4 }, 'torch'); // in the box (the bottom layer)
+    const job = new QuarryJob(s, host);
+    expect(await job.start()).toBe('done');
+    expect(world.name({ x: 3, y: -60, z: 3 })).toBe('torch');
+    expect(world.name({ x: 3, y: -61, z: 3 })).toBe('grass_block');
+    expect(job.stats.skipped.get('3,-61,3')).toBe('supports a block');
+    expect(world.name({ x: 5, y: -61, z: 2 })).toBe('grass_block'); // the wall torch hangs on it
+    expect(job.stats.skipped.get('5,-61,2')).toBe('holds a wall block');
+    expect(world.name({ x: 2, y: -62, z: 4 })).toBe('torch');
+    expect(job.stats.skipped.get('2,-62,4')).toBe('protected');
+    expect(world.name({ x: 4, y: -61, z: 4 })).toBe('air'); // the rest is dug
+  });
+
+  it('a player on a cell keeps it, at the plan and at the dig (one who walks on later)', async () => {
+    const { world, host, bot, digs } = setup();
+    const players: Vec3[] = [{ x: 2.5, y: F, z: 2.5 }];
+    host.players = () => players;
+    const s = quarrySpec(boxOf({ x: 1, y: -61, z: 1 }, { x: 4, y: -61, z: 4 }), FEET);
+    bot.onStep = () => {
+      if (digs.length === 1 && players.length === 1) players.push({ x: 4.5, y: F, z: 4.5 }); // the far corner: dug last
+    };
+    const job = new QuarryJob(s, host);
+    expect(await job.start()).toBe('done');
+    expect(world.name({ x: 2, y: -61, z: 2 })).toBe('grass_block');
+    expect(world.name({ x: 4, y: -61, z: 4 })).toBe('grass_block');
+    expect(job.stats.skipped.get('2,-61,2')).toBe('player on it');
+    expect(job.stats.skipped.get('4,-61,4')).toBe('player on it');
+    expect(job.stats.dug).toBe(14);
+  });
+
+  it('the treads are walkable after the job: a 4x4 box and a 2x2 spiral 8 deep, the bot back at the stair head', async () => {
+    for (const box of [boxOf({ x: -2, y: -61, z: 1 }, { x: 1, y: -64, z: 4 }), boxOf({ x: 1, y: -61, z: 1 }, { x: 2, y: -68, z: 2 })]) {
+      const { world, host, bot } = setup();
+      const s = quarrySpec(box, FEET);
+      const job = new QuarryJob(s, host);
+      expect(await job.start()).toBe('done');
+      expect(s.keep).toHaveLength(box.max.y - box.min.y);
+      expectWalkable(world, s.keep);
+      expect(solidIn(world, box).map(key).sort()).toEqual(s.keep.map(key).sort());
+      expect(Math.floor(bot.feet.y)).toBe(F);
+    }
+  });
+
+  it('a cave in a tread: no layer under it is dug, the job ends "no way out" and the bot climbs out', async () => {
+    const { world, host, bot } = setup();
+    const s = spec(parseQuarryArgs(['here', '4', '4', '4'], FEET, 0)); // treads 0 -62 1, 1 -63 1, 1 -64 2
+    world.set(s.keep[1]!, 'air');
+    const job = new QuarryJob(s, host);
+    expect(await job.start()).toBe('blocked');
+    expect(job.lastError).toBe('no way out below y -62: the tread at 1 -63 1 is open (air)');
+    expect(world.name({ x: -1, y: -62, z: 3 })).toBe('air'); // layers -61 and -62 dug
+    expect(world.name({ x: -1, y: -63, z: 3 })).toBe('dirt'); // nothing deeper
+    expectWalkable(world, s.keep.slice(0, 1));
+    expect(Math.floor(bot.feet.y)).toBe(F);
+  });
+
+  it('water outside the wall beside a cell over a tread: that cell stays, so the job ends before it goes deeper', async () => {
+    const { world, host, bot } = setup();
+    const s = spec(parseQuarryArgs(['here', '4', '4', '4'], FEET, 0));
+    liquid(world, { x: 2, y: -62, z: 1 }); // east of 1 -62 1, the cell over tread 1 -63 1
+    const job = new QuarryJob(s, host);
+    expect(await job.start()).toBe('blocked');
+    expect(job.lastError).toBe('no way out below y -62: dirt over the tread at 1 -63 1 stays (next_to_liquid)');
+    expect(world.name({ x: 1, y: -62, z: 1 })).toBe('dirt');
+    expect(world.name({ x: -1, y: -63, z: 3 })).toBe('dirt');
+    expect(world.name({ x: 2, y: -62, z: 1 })).toBe('water');
+    expectWalkable(world, s.keep.slice(0, 1));
+    expect(Math.floor(bot.feet.y)).toBe(F);
+  });
+
+  it('a box away from the bot: it walks to the stair head first; the treads are held as kept cells for the job', async () => {
+    const { host, bot } = setup();
+    const calls: [number, boolean][] = [];
+    host.keepCells = (cells, on) => calls.push([cells.length, on]);
+    const s = quarrySpec(boxOf({ x: 30, y: -61, z: 0 }, { x: 33, y: -63, z: 3 }), FEET);
+    const job = new QuarryJob(s, host);
+    expect(await job.start()).toBe('done');
+    expect(bot.log[0]).toBe('goto 29,-60,0');
+    expect(calls).toEqual([
+      [2, true],
+      [2, false],
+    ]);
+  });
+
+  it('the dig-time recheck reads the live feet floor: the cell under the bot is never dug', async () => {
+    const { world, host, bot } = setup();
+    host.breakRule = (p) => (key(feetFloorOf(bot.feet)[0]!) === key(p) ? 'under_feet' : rule(world, p));
+    const underDug: Vec3[] = [];
+    const deps = bot.deps();
+    host.dig = (p) => {
+      if (key(feetFloorOf(bot.feet)[0]!) === key(p)) underDug.push(p);
+      return deps.dig(p);
+    };
+    const job = new QuarryJob(quarrySpec(boxOf({ x: 1, y: -61, z: 1 }, { x: 3, y: -62, z: 3 }), FEET), host);
+    bot.feet = { x: 2.5, y: F, z: 2.5 };
+    expect(job.refusal({ x: 2, y: -61, z: 2 })).toBe('under_feet'); // standing on it: refused at the dig
+    // on the box at the plan: that cell is still planned (the runner digs it from another stand)
+    expect(await job.start()).toBe('done');
+    expect(world.name({ x: 2, y: -61, z: 2 })).toBe('air');
+    expect(job.stats.skipped.size).toBe(0);
+    expect(underDug).toEqual([]);
+    expect(feetFloorOf({ x: 2.5, y: F + 1e-9, z: -0.5 })).toEqual([{ x: 2, y: F - 1, z: -1 }]);
+  });
+
+  it('collects with quarryKeepStone off leave the junk (the stash step dropped it) but take throwaway blocks while short', async () => {
+    expect(quarryTakes('cobblestone', true, false)).toBe(true);
+    expect(quarryTakes('cobblestone', false, false)).toBe(false);
+    expect(quarryTakes('cobblestone', false, true)).toBe(true);
+    expect(quarryTakes('stone', false, true)).toBe(false);
+    expect(quarryTakes('coal', false, false)).toBe(true);
+    const { host } = setup();
+    const takes: (((n: string) => boolean) | undefined)[] = [];
+    host.collect = (_r, _t, take) => {
+      takes.push(take);
+      return Promise.resolve({ ok: true });
+    };
+    const job = new QuarryJob(quarrySpec(boxOf({ x: 1, y: -61, z: 1 }, { x: 4, y: -62, z: 4 }), FEET), host);
+    job.take = (n) => quarryTakes(n, false, job.throwawayShort());
+    expect(await job.start()).toBe('done');
+    expect(takes.length).toBeGreaterThan(0);
+    expect(takes.every((t) => t === job.take)).toBe(true);
   });
 
   it('stop mid-job: nothing more is dug and the job ends stopped', async () => {
@@ -268,6 +443,26 @@ describe('tunnel job (fake world)', () => {
     expect(job.stats.torches).toBe(1);
     expect(world.name({ x: 8, y: F, z: -1 })).toBe('torch'); // east: the left hand is north (-z)
     expect(inv.count('torch')).toBe(3);
+  });
+
+  it('a 1x2 tunnel: the torch goes on a floor cell clear of the bot (the lane behind it)', async () => {
+    const { world, host, inv, bot } = setup({ inv: { torch: 2 } });
+    rock(world);
+    const s = tunnelSpec(FEET, EAST, 8, 1, 2);
+    const at: Vec3[] = [];
+    host.place = (p, o) => {
+      if (o.item === 'torch') {
+        at.push({ ...p });
+        if (overlapsBody(bot.feet, p)) return Promise.resolve({ ok: false, reason: 'in_body' });
+      }
+      return bot.deps().place(p, o);
+    };
+    const job = new QuarryJob(s, host);
+    expect(await job.start()).toBe('done');
+    expect(job.stats.torches).toBe(1);
+    expect(at).toHaveLength(1);
+    expect(world.name(at[0]!)).toBe('torch');
+    expect(inv.count('torch')).toBe(1);
   });
 
   it('a hole in the floor is filled with a throwaway block; water in the lane ends the tunnel there with the reason', async () => {

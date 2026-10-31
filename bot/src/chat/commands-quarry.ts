@@ -10,10 +10,15 @@
 // cross-section at a time), a staircase kept in the quarry's wall, the break rules on every cell (inside
 // the base too, the owner gave the box, but never built blocks or containers), the stash step when full.
 // Registered by the afk task (tasks/registry.ts, one line). Without walking: `quarry needs a task that can walk`.
-import { breakBlocker, DEFAULT_THROWAWAY } from '../skills/nav/actions.ts';
+// Refused at the start: a quarry box farther than 64 blocks or not loaded, a player in or over the box.
+// The stair treads are the navigator's kept cells while the job lives (Navigator.keptCells).
+import { fmtCell } from '../skills/build/types.ts';
+import { entityFeet, isPlayerEntity } from '../skills/combat/hostiles.ts';
+import { breakBlocker } from '../skills/nav/actions.ts';
+import { cellKey } from '../skills/nav/grid.ts';
 import { carriesPickaxe } from '../skills/mine/branch.ts';
-import { parseQuarryArgs, parseTunnelArgs, QuarryJob, type QuarryHost, type QuarryKind, type QuarrySpec } from '../skills/mine/quarry.ts';
-import { tunnelCell, type TunnelWorld } from '../skills/mine/tunnel.ts';
+import { checkQuarrySite, dirName, parseQuarryArgs, parseTunnelArgs, playerOver, QuarryJob, type QuarryHost, type QuarryKind, type QuarrySpec } from '../skills/mine/quarry.ts';
+import { feetFloorOf, minerTunnelWorld, throwawayCount } from '../skills/mine/wire.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { formatEta } from '../tasks/process/manager.ts';
@@ -48,33 +53,33 @@ export function registerQuarryCommands(d: CommandDeps): void {
   const log = d.log;
   const mover = settingsMover(skills, d.settings);
   const nav = skills.nav;
-  const throwaway = new Set<string>(DEFAULT_THROWAWAY);
-  // the climb back up at the end: the miner's rules (the protected area included: it digs outside the box)
-  const tunnelWorld: TunnelWorld = {
-    breakRule: (q) => breakBlocker(nav.grid, q.x, q.y, q.z, nav.breakRules(), []),
-    cell: (q) => {
-      const c = nav.grid.cls(q.x, q.y, q.z);
-      return c && tunnelCell(c);
-    },
-    blockAt: (q) => world.blockAt(q),
-  };
+  const players = () => [...world.entities.values()].filter(isPlayerEntity).map(entityFeet);
   const host: QuarryHost = {
     blockAt: (p) => world.blockAt(p),
-    // the box was given by the owner: no protected area, every other break rule (built blocks, containers, liquids, gravity)
-    breakRule: (q) => breakBlocker(nav.grid, q.x, q.y, q.z, {}, []),
+    // the box was given by the owner: no protected area, every other break rule (built blocks, containers, liquids, gravity, the floor under the feet)
+    breakRule: (q) => breakBlocker(nav.grid, q.x, q.y, q.z, {}, feetFloorOf(mob.loop.state.pos)),
+    players,
+    keepCells: (cells, on) => {
+      for (const c of cells) {
+        const k = cellKey(c.x, c.y, c.z);
+        if (on) nav.keptCells.add(k);
+        else nav.keptCells.delete(k);
+      }
+    },
     position: () => mob.position(),
     onGround: () => mob.loop.state.onGround,
     goto: (g, o) => mover.goto(g, o),
     place: (p, o) => skills.place(p, o),
     dig: (p) => skills.dig(p),
-    collect: (r, t) => skills.collect(r, t),
+    collect: (r, t, take) => skills.collect(r, t, take ? { filter: (i) => take(i.name) } : {}),
     waitTicks: (n) => mob.loop.waitTicks(n),
     inventory: world.inventory,
     slots: () => world.inventory.slots,
     throwawayMin: () => d.settings.get('throwawayMin'),
     cancel: () => skills.cancel(),
-    tunnelWorld,
-    throwaways: () => world.inventory.slots.slice(0, 36).reduce((a, s) => a + (s && throwaway.has(s.name) ? s.count : 0), 0),
+    // the climb back up at the end: the miner's rules (the protected area included: it digs outside the box)
+    tunnelWorld: minerTunnelWorld({ skills, world }),
+    throwaways: () => throwawayCount(world.inventory.slots),
     log,
   };
 
@@ -84,6 +89,12 @@ export function registerQuarryCommands(d: CommandDeps): void {
 
   const start = (spec: QuarrySpec, reply: (m: string) => void): void => {
     if (!carriesPickaxe(world.inventory.slots)) return reply(`${spec.kind} needs a pickaxe`);
+    if (spec.kind === 'quarry') {
+      const why = checkQuarrySite(spec.box, spec.start, (p) => world.blockAt(p));
+      if (why) return reply(`quarry: ${why}`);
+      const pl = playerOver(spec.box, players());
+      if (pl) return reply(`quarry: a player is in or over the box (at ${fmtCell({ x: Math.floor(pl.x), y: Math.floor(pl.y), z: Math.floor(pl.z) })}); step off it first`);
+    }
     const old = live();
     if (old) processes.stop(old, 'replaced');
     const job = new QuarryJob(spec, host);
@@ -93,8 +104,9 @@ export function registerQuarryCommands(d: CommandDeps): void {
       if (s !== 'stopped') reply(quarryEndLine(job, s));
     });
     const b = spec.box;
-    const stairs = spec.keep.length ? `, stairs from ${spec.keep[0]!.x} ${spec.keep[0]!.y} ${spec.keep[0]!.z}` : '';
-    reply(`${spec.label}: ${b.min.x} ${b.min.y} ${b.min.z} to ${b.max.x} ${b.max.y} ${b.max.z}, ${spec.slices.length} ${spec.kind === 'quarry' ? 'layers' : 'blocks'}${stairs}${processes.paused ? ' (held: !resume)' : ''}`);
+    const stairs = spec.keep.length ? `, stairs from ${fmtCell(spec.keep[0]!)}` : '';
+    const facing = spec.dir ? ` going ${dirName(spec.dir)}` : '';
+    reply(`${spec.label}${facing}: ${fmtCell(b.min)} to ${fmtCell(b.max)}, ${spec.slices.length} ${spec.kind === 'quarry' ? 'layers' : 'blocks'}${stairs}${processes.paused ? ' (held: !resume)' : ''}`);
   };
 
   const command = (kind: QuarryKind) => ({ reply, args }: { reply: (m: string) => void; args: string[] }) => {
