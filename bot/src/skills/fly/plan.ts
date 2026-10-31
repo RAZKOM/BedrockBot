@@ -29,6 +29,38 @@ export interface LandingTarget {
   half: number;
   /** Feet height of the ground around the platform (a glide ending there is short); default top - 24. */
   ground?: number;
+  /**
+   * Track BF, a landing for a walk (fly then walk, docs/flight.md "Landing v3"): the cells (`columnKey`)
+   * a touchdown may end in, every one of them with a confirmed walking path to the goal (the landing
+   * cell's flat, dry neighbourhood); the planner scores by safety and slide room, not by the distance
+   * from the centre (an off-centre touchdown in the set is as good as the centre: no go-around for it).
+   */
+  cells?: ReadonlySet<number>;
+  /** Track BF: the touchdown is only a stop on the way (with `cells`): the off-centre cost is small. */
+  walk?: boolean;
+  /**
+   * Track BF, under an overhang: the bearing (Bedrock yaw, from the target outwards) of the open
+   * corridor the approach must come in along (a ceiling over the cell: no approach from elsewhere).
+   */
+  bearing?: number;
+  /** Track BF: the lowest solid above the landing cells (a ceiling under an overhang), for the log. */
+  ceiling?: number;
+  /**
+   * Track BF: not landable yet (the goal's ground is not in the live world model, or no cell is
+   * confirmed): the brain holds high near it (a circle) and never lands; the trip retargets it.
+   */
+  hold?: boolean;
+}
+
+/** Track BF: the key of column (x, z) in `LandingTarget.cells`. */
+export function columnKey(x: number, z: number): number {
+  return (x & 0xffff) * 65536 + (z & 0xffff);
+}
+
+/** Track BF: the unit vector (x, z) of a Bedrock yaw (0 = +z, 90 = -x). */
+export function yawDir(yaw: number): { x: number; z: number } {
+  const r = (yaw * Math.PI) / 180;
+  return { x: -Math.sin(r), z: Math.cos(r) };
 }
 
 /** The body as the planner sees it (feet position, blocks per tick). */
@@ -429,8 +461,12 @@ export function simulateProfile(body: FlightBody, yaw: number, target: LandingTa
   let y = yaw;
   let boost = body.boostTicks;
   let ps = st;
-  const inside = (p: Vec3): boolean => Math.abs(p.x - target.x) <= target.half + 0.2 && Math.abs(p.z - target.z) <= target.half + 0.2;
+  const inside = (p: Vec3): boolean => onTarget(target, p);
   const ground = target.ground ?? target.top - 24;
+  // Track BF: near the target only its floor (and below) is no obstacle, with a thin berth: a wall on a
+  // platform, a ceiling over an overhang landing still count (before, the whole check stopped there)
+  const nearObstacle: Obstacle | undefined = obstacle ? (x, y, z) => y >= target.top && obstacle(x, y, z) : undefined;
+  const nearZone = target.half + 0.6 + OBSTACLE_BERTH;
   for (let t = 1; t <= maxTicks; t++) {
     y = approachYaw(y, pos, target);
     const { pitch, next } = profilePitch(prof, ps, pos, vel, target);
@@ -452,8 +488,12 @@ export function simulateProfile(body: FlightBody, yaw: number, target: LandingTa
     if (nx.y <= ground) return { kind: 'short', pos: nx, vel, ticks: t, off: hdist(nx, target) };
     // a block in the way of the body's box (0.6 wide, 0.6 high while gliding; the platform's own top row is the landing)
     // (checked at the step's end and its midpoint: a one-block wall is thinner than a tick of flight)
-    if (obstacle && hdist(nx, target) > target.half + 0.6 + OBSTACLE_BERTH && (hitsObstacle(obstacle, nx) || hitsObstacle(obstacle, { x: (pos.x + nx.x) / 2, y: (pos.y + nx.y) / 2, z: (pos.z + nx.z) / 2 }))) {
-      return { kind: 'wall', pos: nx, vel, ticks: t, off: hdist(nx, target) };
+    if (obstacle) {
+      const mid = { x: (pos.x + nx.x) / 2, y: (pos.y + nx.y) / 2, z: (pos.z + nx.z) / 2 };
+      const near = hdist(nx, target) <= nearZone;
+      const o = near ? nearObstacle! : obstacle;
+      const berth = near ? NEAR_BERTH : OBSTACLE_BERTH;
+      if (hitsObstacle(o, nx, berth) || hitsObstacle(o, mid, berth)) return { kind: 'wall', pos: nx, vel, ticks: t, off: hdist(nx, target) };
     }
     // past the target above its top: overshoot
     const toT = { x: target.x - nx.x, z: target.z - nx.z };
@@ -471,6 +511,14 @@ export function simulateProfile(body: FlightBody, yaw: number, target: LandingTa
  */
 export function touchdownCost(td: Touchdown, target: LandingTarget): number {
   const h = Math.hypot(td.vel.x, td.vel.z);
+  if (td.kind === 'landed' && target.walk && target.cells) {
+    // Track BF, a landing for a walk: anywhere in the confirmed cells is fine; what counts is the damage
+    // (vy), the slide staying inside the cells (the server slides up to 0.8 further than the model) and time
+    const vy = Math.max(0, -td.vel.y - TOUCHDOWN_VY);
+    const hs = Math.max(0, h - WALK_TOUCHDOWN_H);
+    const out = slideOut(target, td.pos, td.vel, h * 1.2 + SERVER_SLIDE);
+    return td.off * WALK_OFF_COST + vy * 40 + hs * 25 + out * 30 + Math.max(0, td.ticks - 60) * TICK_COST;
+  }
   if (td.kind === 'landed') {
     const vy = Math.max(0, -td.vel.y - TOUCHDOWN_VY);
     const hs = Math.max(0, h - TOUCHDOWN_H);
@@ -485,16 +533,51 @@ export function touchdownCost(td: Touchdown, target: LandingTarget): number {
   return 60 + td.off;
 }
 
+/**
+ * Track BF: the touchdown point `at` is on the target: inside the confirmed cells of a walk landing,
+ * else inside the platform's footprint (half + 0.2).
+ */
+export function onTarget(target: LandingTarget, at: { x: number; z: number }): boolean {
+  if (target.cells) return target.cells.has(columnKey(Math.floor(at.x), Math.floor(at.z)));
+  return Math.abs(at.x - target.x) <= target.half + 0.2 && Math.abs(at.z - target.z) <= target.half + 0.2;
+}
+
+/** Track BF: the server's body slides this much further after the glide ends than the model's (measured 0.6 to 0.8). */
+export const SERVER_SLIDE = 0.8;
+/** Track BF: a walk landing's touchdown speed above which the slide counts (the cells give room). */
+export const WALK_TOUCHDOWN_H = 0.5;
+/** Track BF: a walk landing's cost per block from the centre (a block of walk; the exact landing's is 2). */
+export const WALK_OFF_COST = 0.3;
+/** Track BF: the berth around the body near the target (its own walls and ceiling; farther out OBSTACLE_BERTH). */
+export const NEAR_BERTH = 0.1;
+
+/**
+ * Track BF: how much of a slide of `dist` blocks from `at` along the horizontal velocity leaves the
+ * target's cells: 0 = it stays inside, towards 1 = it leaves at once (quarter-block steps).
+ */
+export function slideOut(target: LandingTarget, at: { x: number; z: number }, vel: { x: number; z: number }, dist: number): number {
+  const h = Math.hypot(vel.x, vel.z);
+  if (h < 1e-6 || dist <= 0) return onTarget(target, at) ? 0 : 1;
+  const ux = vel.x / h;
+  const uz = vel.z / h;
+  const steps = Math.max(1, Math.ceil(dist / 0.25));
+  for (let i = 0; i <= steps; i++) {
+    const s = (dist * i) / steps;
+    if (!onTarget(target, { x: at.x + ux * s, z: at.z + uz * s })) return 1 - i / (steps + 1);
+  }
+  return 0;
+}
+
 /** The gliding body's box (half width 0.3, height 0.6) with a berth of OBSTACLE_BERTH around it and under the feet (the real body strays a few tenths from the plan between corrections; grazing a block's edge counts) overlaps a solid cell. */
 export const OBSTACLE_BERTH = 0.4;
-export function hitsObstacle(obstacle: Obstacle, p: Vec3): boolean {
-  const r = 0.3 + OBSTACLE_BERTH;
+export function hitsObstacle(obstacle: Obstacle, p: Vec3, berth = OBSTACLE_BERTH): boolean {
+  const r = 0.3 + berth;
   const x0 = Math.floor(p.x - r);
   const x1 = Math.floor(p.x + r);
   const z0 = Math.floor(p.z - r);
   const z1 = Math.floor(p.z + r);
-  const y0 = Math.floor(p.y - OBSTACLE_BERTH);
-  const y1 = Math.floor(p.y + 0.6 + OBSTACLE_BERTH);
+  const y0 = Math.floor(p.y - berth);
+  const y1 = Math.floor(p.y + 0.6 + berth);
   for (let x = x0; x <= x1; x++) for (let z = z0; z <= z1; z++) for (let y = y0; y <= y1; y++) if (obstacle(x, y, z)) return true;
   return false;
 }

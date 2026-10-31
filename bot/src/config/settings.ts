@@ -146,6 +146,11 @@ export const SETTING_DEFS = {
   fallMargin: { kind: 'number', default: 8, min: 1, max: 20, integer: true, unit: 'HP', description: 'longFalls: health a planned fall must leave' },
   clutch: { kind: 'boolean', default: true, description: 'a fall that would kill or eat most HP above fallMargin: water from a hotbar bucket, picked up again' },
   clutchMaxDrop: { kind: 'number', default: 40, min: 4, max: 200, integer: true, unit: 'blocks', description: 'clutch: deepest drop a walk plans with a clutch' },
+  flyLandProbes: { kind: 'number', default: 16, min: 1, max: 64, integer: true, description: 'flight: walking plans tried from landing cells near the goal before landing on unconfirmed dry ground' }, // Track BF
+  flyHoldS: { kind: 'number', default: 30, min: 5, max: 300, integer: true, unit: 's', description: 'flight: hold high near a goal not loaded yet this long, then land on the nearest dry ground' }, // Track BF
+  flyHeadroom: { kind: 'number', default: 4, min: 3, max: 20, integer: true, unit: 'blocks', description: 'flight: least roof height over the feet for a landing under a roof' }, // Track BF
+  flyOverhangDepth: { kind: 'number', default: 10, min: 0, max: 24, integer: true, unit: 'blocks', description: 'flight: deepest landing under a roof (0 = never)' }, // Track BF
+  flySneakLand: { kind: 'boolean', default: true, description: 'flight: sneak through the touchdown (the slide stops at edges)' }, // Track BF
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;

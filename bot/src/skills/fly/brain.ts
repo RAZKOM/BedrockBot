@@ -41,7 +41,9 @@ import {
   ROCKET_CRUISE_CLIMB,
   rocketPitchFor,
   spiralFit,
+  SPIRAL_RADII,
   STALL_SPEED,
+  yawDir,
   turnTowards,
   yawDiff,
   yawTo,
@@ -74,7 +76,8 @@ export interface BrainControl {
   fire: boolean;
 }
 
-export type FlightEndReason = 'landed_off' | 'no_rockets' | 'health' | 'elytra_worn' | 'stopped' | 'lost' | 'roof';
+/** (Track BF: `no_landing`: the hold over a goal that never got a landing timed out; the nearest dry ground.) */
+export type FlightEndReason = 'landed_off' | 'no_rockets' | 'health' | 'elytra_worn' | 'stopped' | 'lost' | 'roof' | 'no_landing';
 
 export type FlightEnd =
   | { ok: true; landedAt: Vec3; off: number; onTarget: boolean }
@@ -99,6 +102,8 @@ export interface BrainOptions {
   margin?: number;
   /** Track AU2: the takeoff heading the sky check chose (held until the climb is above the obstacles); default towards the target. */
   takeoffYaw?: number;
+  /** Track BF: one line per notable decision (every go-around with its reason, the hold, the corridor), for the log. */
+  note?: (msg: string) => void;
   /** The planner's seed (deterministic flights). */
   seed?: number;
 }
@@ -118,6 +123,10 @@ export interface FlightStats {
   steered: number;
   /** Track AU2: the height above the approach entry when the cruise handed over to the approach (the energy model's arrival). */
   entryAbove?: number;
+  /** Track BF: ticks spent holding high near a target that is not landable yet (`LandingTarget.hold`). */
+  holdTicks: number;
+  /** Track BF: why each go-around was flown (one line each). */
+  goAroundReasons: string[];
 }
 
 const CLIMB_PITCH = -38;
@@ -152,6 +161,10 @@ const STURN_WIDTH = 12;
 const STURN_ANGLE = 70;
 /** Track AU2: where a circle is tried when none fits around the target (blocks before it on the approach line). */
 const SPIRAL_OUT = [30, 45, 60, 80] as const;
+/** Track BF: an overhang's corridor is entered from this far out along its bearing. */
+export const CORRIDOR_OUT = 64;
+/** Track BF: columns whose top is this far above an overhang cell's floor are the roof the corridor goes under (ignored by its go-around height). */
+const OPEN_ABOVE = 4;
 
 type Descent =
   | {
@@ -168,11 +181,11 @@ export class FlightBrain {
   phase: FlightPhase = 'takeoff';
   /** The landing target (Track AU2: `retarget` may move it before the approach). */
   target: LandingTarget;
-  readonly stats: FlightStats = { rockets: 0, rocketsBy: { climb: 0, cruise: 0, goaround: 0, land: 0 }, goArounds: 0, ticks: 0, maxY: -Infinity, approachTicks: 0, descents: [], steered: 0 };
+  readonly stats: FlightStats = { rockets: 0, rocketsBy: { climb: 0, cruise: 0, goaround: 0, land: 0 }, goArounds: 0, ticks: 0, maxY: -Infinity, approachTicks: 0, descents: [], steered: 0, holdTicks: 0, goAroundReasons: [] };
   // (entryAbove is set by the cruise when it hands over to the approach)
   /** Why the flight is ending early (set by `landNow`), kept for the outcome. */
   private endReason: FlightEndReason | undefined;
-  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw'>;
+  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note'>;
   private jumped = false;
   private requested = false;
   private wasGliding = false;
@@ -200,6 +213,8 @@ export class FlightBrain {
   private emergencyWithin: number | undefined;
   /** Track AU2: the descent geometry was tried and found nothing at this aim (no second search per approach). */
   private descentNone = false;
+  /** Track BF: the holding circle over a target that is not landable yet (`LandingTarget.hold`). */
+  private holding: { fit: SpiralFit; dir: 1 | -1; y: number } | undefined;
 
   constructor(target: LandingTarget, opts: BrainOptions) {
     this.target = target;
@@ -214,6 +229,7 @@ export class FlightBrain {
       obstacle: opts.obstacle,
       skyTop: opts.skyTop,
       takeoffYaw: opts.takeoffYaw,
+      note: opts.note,
     };
     this.planner = new ApproachPlanner(opts.seed ?? 12345, opts.obstacle);
   }
@@ -229,6 +245,7 @@ export class FlightBrain {
 
   /** The descent geometry being flown (`spiral r12 at 30 out`, `S-turns`), for the status line. */
   get descending(): string | undefined {
+    if (this.holding && this.target.hold) return 'holding';
     if (!this.descent) return undefined;
     return this.descent.kind === 'spiral' ? `spiral r${this.descent.fit.radius}` : 'S-turns';
   }
@@ -242,7 +259,12 @@ export class FlightBrain {
     if (this.phase === 'land' || this.phase === 'done') return false;
     // in the approach only while there is room to re-plan (the goal's chunks often load just as it begins)
     if ((this.phase === 'approach' || this.phase === 'goaround') && (!body || hdist(body.pos, this.target) < 15)) return false;
+    const wasHold = this.target.hold === true;
     this.target = target;
+    // Track BF: a target that is not landable yet is held over from the cruise (no approach to it)
+    if (target.hold && (this.phase === 'approach' || this.phase === 'goaround')) this.phase = 'cruise';
+    if (wasHold && !target.hold && this.holding) this.o.note?.(`holding over: the landing is confirmed after ${this.stats.holdTicks} ticks of holding`);
+    this.holding = undefined;
     if (this.phase === 'goaround') this.outbound = true;
     this.goaroundBearing = undefined;
     this.descent = undefined;
@@ -443,7 +465,8 @@ export class FlightBrain {
     // the climb goes on after the last rocket: a body rising at vy keeps about vy^2 / 0.08 blocks of climb
     const willReach = b.pos.y + climbMomentum(b.vel.y);
     if (willReach >= this.o.cruiseY || d <= APPROACH_DISTANCE + 6) {
-      this.phase = d <= APPROACH_DISTANCE + 6 ? 'approach' : 'cruise';
+      // (Track BF: a held target or an overhang's corridor is flown from the cruise, never straight into an approach)
+      this.phase = d <= APPROACH_DISTANCE + 6 && !this.target.hold && this.linedUp(b) ? 'approach' : 'cruise';
       return this.phase === 'approach' ? this.approach(i, ctl, this.target) : this.cruise(i, ctl);
     }
     const h = Math.hypot(b.vel.x, b.vel.z);
@@ -483,16 +506,22 @@ export class FlightBrain {
   private cruise(i: BrainInput, ctl: BrainControl): BrainControl {
     const b = i.body;
     ctl.glide = true;
-    const d = hdist(b.pos, this.target);
+    const dTarget = hdist(b.pos, this.target);
+    // Track BF: not landable yet: hold high over it until the trip retargets (the goal's chunks, the probes)
+    if (this.target.hold && dTarget <= APPROACH_DISTANCE + 60) return this.hold(i, ctl);
+    // Track BF: an overhang's corridor: first out to its entry, then in along it (the glide line counts the way round)
+    const entry = this.linedUp(b) ? undefined : this.corridorEntry();
+    const d = entry ? hdist(b.pos, entry) + CORRIDOR_OUT : dTarget;
     const h = Math.hypot(b.vel.x, b.vel.z);
     const aboveEntry = b.pos.y - (this.target.top + APPROACH_HEIGHT);
     // far too high near the target: the descent geometry (a circle that fits the columns, else S-turns)
     if (this.descent || (aboveEntry > SPIRAL_ABOVE && d <= APPROACH_DISTANCE + 60 && !this.descentNone)) {
       if (this.descend(i, ctl, this.target)) return ctl;
     }
-    ctl.yaw = turnTowards(i.yaw, yawTo(b.pos, this.target));
+    ctl.yaw = turnTowards(i.yaw, yawTo(b.pos, entry ?? this.target));
     // the approach starts at APPROACH_DISTANCE, earlier when high (the planner's dive candidates take about 2.5 blocks per block of height)
-    if (d <= APPROACH_DISTANCE + Math.min(40, Math.max(0, aboveEntry - 6) * 2.5)) {
+    if (!entry && d <= APPROACH_DISTANCE + Math.min(this.target.bearing !== undefined ? 8 : 40, Math.max(0, aboveEntry - 6) * 2.5)) {
+      if (this.target.bearing !== undefined) this.o.note?.(`approach along the corridor (in from ${Math.round(this.target.bearing)}) from ${Math.round(d)} blocks out, ${Math.round(aboveEntry + APPROACH_HEIGHT)} above the floor`);
       this.phase = 'approach';
       this.planner.reset();
       this.stats.entryAbove ??= aboveEntry;
@@ -538,6 +567,63 @@ export class FlightBrain {
   }
 
   /**
+   * Track BF: the body is lined up with the target's corridor (an overhang landing: `bearing`): at
+   * least 36 blocks out along it, within 30 degrees of it, heading in (within 60 degrees). Always
+   * true without a corridor.
+   */
+  private linedUp(b: FlightBody): boolean {
+    const bearing = this.target.bearing;
+    if (bearing === undefined) return true;
+    const rel = { x: b.pos.x - this.target.x, z: b.pos.z - this.target.z };
+    const dist = Math.hypot(rel.x, rel.z);
+    if (dist < 1e-6) return false;
+    const off = Math.abs(yawDiff(bearing, yawTo(this.target, b.pos)));
+    const h = Math.hypot(b.vel.x, b.vel.z);
+    const heading = h > 0.05 ? (Math.atan2(-b.vel.x, b.vel.z) * 180) / Math.PI : bearing + 180;
+    return dist * Math.cos((off * Math.PI) / 180) >= 36 && off <= 30 && Math.abs(yawDiff(heading, bearing + 180)) <= 60;
+  }
+
+  /** Track BF: the corridor's entry point (CORRIDOR_OUT out along the bearing), undefined without a corridor. */
+  private corridorEntry(): { x: number; z: number } | undefined {
+    const bearing = this.target.bearing;
+    if (bearing === undefined) return undefined;
+    const d = yawDir(bearing);
+    return { x: this.target.x + d.x * CORRIDOR_OUT, z: this.target.z + d.z * CORRIDOR_OUT };
+  }
+
+  /**
+   * Track BF: hold high over a target that is not landable yet (its chunks have not arrived, the
+   * landing is being confirmed): a circle of the largest radius that fits the columns at the hold
+   * height (the go-around height: 7 over the highest column within 30 blocks, at least the approach
+   * entry + 6), a rocket when it sinks 6 under it, never an approach. The trip retargets the flight
+   * (or ends the hold after `flyHoldS`).
+   */
+  private hold(i: BrainInput, ctl: BrainControl): BrainControl {
+    const b = i.body;
+    const t = this.target;
+    this.stats.holdTicks++;
+    if (!this.holding) {
+      const y = Math.max(this.goaroundHeight(), glideLine(t, APPROACH_DISTANCE) + SPIRAL_UNTIL);
+      const fit = (this.o.skyTop ? spiralFit(t, Math.max(y, b.pos.y) - 3, this.o.skyTop) : undefined) ?? { centre: { x: t.x, z: t.z }, radius: SPIRAL_RADII.max };
+      const heading = Math.hypot(b.vel.x, b.vel.z) > 0.05 ? (Math.atan2(-b.vel.x, b.vel.z) * 180) / Math.PI : 0;
+      const ang = Math.atan2(b.pos.z - fit.centre.z, b.pos.x - fit.centre.x);
+      const tangent = (s: 1 | -1): number => (Math.atan2(s * Math.sin(ang), s * Math.cos(ang)) * 180) / Math.PI;
+      const dir: 1 | -1 = Math.abs(yawDiff(heading, tangent(1))) <= Math.abs(yawDiff(heading, tangent(-1))) ? 1 : -1;
+      this.holding = { fit, dir, y };
+      this.o.note?.(`holding over ${t.x.toFixed(0)} ${t.top} ${t.z.toFixed(0)} (not landable yet): circle r${fit.radius} at y ${Math.round(y)}`);
+    }
+    const hd = this.holding;
+    const h = Math.hypot(b.vel.x, b.vel.z);
+    ctl.glide = true;
+    ctl.yaw = circleYaw(i.yaw, b.pos, hd.fit.centre, hd.fit.radius, hd.dir);
+    if (b.boostTicks > 0) ctl.pitch = b.pos.y < hd.y ? -30 : -5;
+    else if (b.pos.y < hd.y - 6 && h >= 0.9 && this.fire(i, ctl, 'cruise', -30)) ctl.pitch = -30;
+    else ctl.pitch = h < STALL_SPEED + 0.1 ? 20 : b.pos.y > hd.y + 8 ? 8 : h > 1.4 ? 0 : 3;
+    this.steerClear(i, ctl, { noLanding: true });
+    return ctl;
+  }
+
+  /**
    * Track AU2, the descent geometry (docs/flight.md "Descent geometry"): far too high near `aim`, come
    * down to SPIRAL_UNTIL above the glide line without going anywhere. A circle of the largest radius
    * (6 to 24) whose columns are all lower than the exit height less 3 is flown around the aim; when
@@ -558,7 +644,11 @@ export class FlightBrain {
       this.stats.descents.push(chosen.kind === 'spiral' ? `spiral r${chosen.fit.radius} at ${Math.round(hdist(chosen.fit.centre, aim))} out from ${Math.round(b.pos.y - aim.top)} above` : `S-turns from ${Math.round(b.pos.y - aim.top)} above`);
     }
     const dsc = this.descent;
-    if (b.pos.y <= dsc.exitY) {
+    // Track BF: a circle left at a tangent point gets a window as deep as one lap sinks (a level circle sinks
+    // 0.15 to 0.2 a tick): with only the 10 blocks under the exit height the body reached them on the far side
+    // of a 24-block circle and was forced out anywhere, too low and off the line (bds-fly, the farm: go-around)
+    const lapSink = dsc.kind === 'spiral' && dsc.exitAt ? ((2 * Math.PI * dsc.fit.radius) / Math.max(0.8, h)) * 0.18 : 0;
+    if (b.pos.y <= dsc.exitY + Math.max(0, lapSink - 10)) {
       // a circle around the aim is left heading at it (within 45 degrees) and at least 28 blocks out; a circle
       // farther out is tangent to the approach line and left at the tangent point heading in along the line
       // (the open side of a walled platform); either way at the latest 10 under the exit height
@@ -619,8 +709,10 @@ export class FlightBrain {
         return memo.get(k);
       };
       const d = hdist(b.pos, aim);
-      const ux = d > 1e-6 ? (b.pos.x - aim.x) / d : 0;
-      const uz = d > 1e-6 ? (b.pos.z - aim.z) / d : 1;
+      // Track BF: an overhang's corridor fixes the approach line (only the tangent circles on it, left heading in)
+      const corridor = aim === this.target && this.target.bearing !== undefined ? yawDir(this.target.bearing) : undefined;
+      const ux = corridor ? corridor.x : d > 1e-6 ? (b.pos.x - aim.x) / d : 0;
+      const uz = corridor ? corridor.z : d > 1e-6 ? (b.pos.z - aim.z) / d : 1;
       const heading = Math.hypot(b.vel.x, b.vel.z) > 0.05 ? (Math.atan2(-b.vel.x, b.vel.z) * 180) / Math.PI : 0;
       // along a circle the body moves by s * (-sin ang, cos ang) of its angle from the centre; Bedrock's yaw of (dx, dz) is atan2(-dx, dz)
       const tangent = (centre: { x: number; z: number }, at: { x: number; z: number }, s: 1 | -1): number => {
@@ -629,7 +721,7 @@ export class FlightBrain {
       };
       // around the aim: the largest circle that fits, turned the way the heading already points
       const exit0 = exitAt(APPROACH_DISTANCE);
-      if (b.pos.y > exit0) {
+      if (b.pos.y > exit0 && !corridor) {
         const fit = spiralFit(aim, Math.min(b.pos.y, exit0) - 3, skyTop);
         if (fit) {
           const dir: 1 | -1 = Math.abs(yawDiff(heading, tangent(fit.centre, b.pos, 1))) <= Math.abs(yawDiff(heading, tangent(fit.centre, b.pos, -1))) ? 1 : -1;
@@ -637,8 +729,8 @@ export class FlightBrain {
         }
       }
       // farther out: a circle tangent to the approach line at `out`, its centre a radius to one side
-      for (const out of SPIRAL_OUT) {
-        if (out > d + 10) continue; // never a circle behind the body
+      for (const out of corridor ? ([45, 60, 80, 30] as const) : SPIRAL_OUT) {
+        if (out > d + 10 && !corridor) continue; // never a circle behind the body
         const exitY = exitAt(Math.max(out, APPROACH_DISTANCE));
         if (b.pos.y <= exitY) continue;
         const p = { x: aim.x + ux * out, z: aim.z + uz * out };
@@ -656,6 +748,7 @@ export class FlightBrain {
       }
     }
     if (this.phase === 'land') return undefined; // the emergency landing from high up: the planner's dive, not S-turns over unknown ground
+    if (this.target.bearing !== undefined) return undefined; // Track BF: S-turns would come in from anywhere, not along the corridor
     const exitY = exitAt(APPROACH_DISTANCE);
     if (b.pos.y <= exitY) return undefined;
     return { kind: 'sturn', side: 1, anchor: { x: b.pos.x, z: b.pos.z }, exitY };
@@ -693,7 +786,16 @@ export class FlightBrain {
     }
     this.lastChoice = { pitch: choice.pitch, cost: choice.cost, kind: choice.touchdown.kind, phase: choice.phase };
     if (this.phase === 'approach' && approachHopeless(choice, this.planner.missing, d)) {
+      // Track BF: every go-around says why (the loops the owner saw were not explained in the log)
+      const td = choice.touchdown;
+      const why =
+        td.kind !== 'landed'
+          ? `no landing plan for ${this.planner.missing} ticks (best: ${td.kind}, cost ${choice.cost.toFixed(0)}, ${td.off.toFixed(1)} from the centre)`
+          : `hard touchdown ahead (cost ${choice.cost.toFixed(0)}: vy ${td.vel.y.toFixed(2)}, h ${Math.hypot(td.vel.x, td.vel.z).toFixed(2)}, ${td.off.toFixed(1)} from the centre)`;
+      const line = `${why} at ${d.toFixed(0)} blocks out, ${(b.pos.y - aim.top).toFixed(0)} above, ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} blocks a tick${aim.walk ? `, a walk landing of ${aim.cells?.size ?? 0} cells` : `, half ${aim.half}`}`;
+      this.stats.goAroundReasons.push(line);
       if (this.stats.goArounds < this.o.goArounds && i.rockets > 0) {
+        this.o.note?.(`go-around ${this.stats.goArounds + 1}: ${line}`);
         this.stats.goArounds++;
         this.phase = 'goaround';
         this.outbound = true;
@@ -702,6 +804,7 @@ export class FlightBrain {
         return this.goaround(i, ctl);
       }
       // no go-around left: land on the nearest safe ground instead and report
+      this.o.note?.(`no go-around left (${this.stats.goArounds} flown, ${i.rockets} rockets): the nearest safe ground; ${line}`);
       this.landNow(this.stats.goArounds >= this.o.goArounds ? 'landed_off' : 'no_rockets', b);
       return this.approach(i, ctl, this.aim);
     }
@@ -751,6 +854,7 @@ export class FlightBrain {
     const skyTop = this.o.skyTop;
     if (!skyTop) return null;
     const t = this.target;
+    if (t.bearing !== undefined) return t.bearing; // Track BF: an overhang is only ever approached along its corridor
     const clear = (bearing: number): boolean => {
       const r = (bearing * Math.PI) / 180;
       for (let dist = t.half + 1; dist <= 24; dist++) {
@@ -775,6 +879,21 @@ export class FlightBrain {
     if (!skyTop) return y;
     const cx = Math.floor(this.target.x);
     const cz = Math.floor(this.target.z);
+    const bearing = this.target.bearing;
+    if (bearing !== undefined) {
+      // Track BF: an overhang's go-around is flown out and back along its corridor: only the columns of the corridor's
+      // open stretch count (the roof over the cell is what the corridor goes under, not over)
+      const d = yawDir(bearing);
+      for (let s = Math.ceil(this.target.half) + 2; s <= GOAROUND_OUT; s++) {
+        for (const lat of [-3, 0, 3]) {
+          const x = Math.floor(this.target.x + d.x * s + d.z * lat);
+          const z = Math.floor(this.target.z + d.z * s - d.x * lat);
+          const t = skyTop(x, z);
+          if (t !== undefined && t < this.target.top + OPEN_ABOVE && t + 1 + 6 > y) y = t + 1 + 6;
+        }
+      }
+      return y;
+    }
     for (let dx = -30; dx <= 30; dx++) {
       for (let dz = -30; dz <= 30; dz++) {
         if (dx * dx + dz * dz > 900) continue;

@@ -19,6 +19,7 @@ import { BurnWatch } from '../skills/survival/fire.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { FireProcess, PortalProcess, type PortalOutcome } from '../tasks/process/portal.ts';
+import { SurfaceProcess } from '../tasks/process/surface.ts'; // Track BF
 import { bedsWork, dimensionName, dimWaypointName, hasDayCycle, NETHER, OVERWORLD, THE_END, voidBelow } from '../world/dimension.ts';
 
 export const PORTAL_COMMANDS = ['nether', 'overworld', 'portal'] as const;
@@ -111,6 +112,17 @@ export function registerPortalCommands(d: CommandDeps): void {
     }),
   );
   fires.set(task, fire);
+  // ---- underwater escape (Track BF): head under water too long -> swim up, walk to the nearest dry ground
+  processes.add(
+    new SurfaceProcess({
+      loop,
+      blockAt: (p) => world.blockAt(p),
+      grid: skills.nav.grid,
+      mover,
+      air: () => pve?.mobs.selfAir,
+      log,
+    }),
+  );
   const stop = task.stop.bind(task);
   task.stop = () => {
     offChange();

@@ -40,6 +40,7 @@ import { surfaceRefusal } from '../world/dimension.ts'; // Track AT
 import { FallGuard, type FallGuardDeps } from './fall/clutch.ts'; // Track BI
 import { explainFallRefusal } from './fall/explain.ts'; // Track BI
 import { locateNode } from './nav/astar.ts'; // Track BI: the start of the explaining plan
+import { headInWater, swimUp } from './survival/surface.ts'; // Track BF
 
 export type { Goal, GotoOptions, SkillResult, Skills, DigOptions, DigResult } from './types.ts';
 export type { CollectOptions, CollectResult } from './collect/collect.ts';
@@ -372,7 +373,7 @@ export class BotSkills implements Skills {
     if (noSurface) return Promise.resolve({ ok: false, reason: noSurface });
     // Synchronous start (callers check nav.busy right after the call).
     const token = this.begin('goto');
-    const p = this.nav.goto(goal, opts).then((r) => (!r.ok && r.reason === 'unreachable' ? this.withFallNote(goal, r, opts) : r)); // Track BI: say why a long fall was refused
+    const p = this.nav.goto(goal, opts).then((r) => this.surfaceAndRetry(r, token, goal, opts)).then((r) => (!r.ok && r.reason === 'unreachable' ? this.withFallNote(goal, r, opts) : r)); // Track BF: swim up; Track BI: say why a long fall was refused
     void p.finally(() => {
       this.end(token);
     });
@@ -391,6 +392,25 @@ export class BotSkills implements Skills {
       this.log.warn(`fall note: ${e instanceof Error ? e.message : String(e)}`);
       return r;
     }
+    }
+
+  /**
+   * Track BF: a goto that failed with the head under water (the planner has no start node on a sea
+   * floor: it swims on the surface only) swims straight up (skills/survival/surface.ts) and plans once
+   * more from the surface.
+   */
+  private async surfaceAndRetry(r: SkillResult, token: number, goal: NavGoal, opts?: NavGotoOptions): Promise<SkillResult> {
+    const w = this.world;
+    if (r.ok || r.reason !== 'unreachable' || !w.blockAt || token !== this.epoch) return r;
+    const blockAt = w.blockAt.bind(w);
+    if (!headInWater(blockAt, this.loop.state.pos)) return r;
+    const from = this.loop.state.pos;
+    const up = await swimUp(this.loop, blockAt, { cancelled: () => token !== this.epoch });
+    this.log.info(
+      `goto: no path under water at ${Math.floor(from.x)} ${Math.floor(from.y)} ${Math.floor(from.z)}; swam up ${up.rose.toFixed(1)} blocks in ${up.ticks} ticks${up.ok ? '' : ' (still under water)'}`,
+    );
+    if (!up.ok || token !== this.epoch) return r;
+    return this.nav.goto(goal, opts);
   }
 
   /** Break one block (docs/digging.md). Needs world.blockAt + world.inventory; the hotbar for tool switching. */

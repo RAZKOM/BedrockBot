@@ -639,7 +639,9 @@ describe('fly: the automatic flight of !come (commands-fly.ts)', () => {
     await settle();
     expect(r.said).toEqual(['flying (300 blocks; walking would be ~1 min)']);
     const fly = r.added.find((p): p is FlyProcess => p instanceof FlyProcess);
-    expect(fly?.target).toMatchObject({ x: 0.5, z: 300.5, top: FEET, half: 2, label: 'Steve' });
+    // Track BF: a landable goal is a walk landing: any of its flat dry neighbourhood (an off-centre touchdown is no go-around)
+    expect(fly?.target).toMatchObject({ x: 0.5, z: 300.5, top: FEET, walk: true, label: 'Steve', cell: { kind: 'goal' } });
+    expect(fly?.target.cells?.size).toBeGreaterThan(9);
     expect(r.comes).toEqual([]);
     const off = comeRig();
     off.settings.set('autoFly', false);
@@ -663,6 +665,6 @@ describe('fly: the automatic flight of !come (commands-fly.ts)', () => {
     await settle();
     expect(r.said).toEqual(['flying (300 blocks; walking would be ~1 min)']);
     const fly = r.added.find((p): p is FlyProcess => p instanceof FlyProcess);
-    expect(fly?.target).toMatchObject({ top: FEET + 101, half: 2 });
+    expect(fly?.target).toMatchObject({ top: FEET + 101, walk: true, cell: { kind: 'goal' } });
   });
 });

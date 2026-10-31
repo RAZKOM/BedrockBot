@@ -59,6 +59,8 @@ describe.skipIf(!E2E)('@bds fly: landings on platforms (Track AU)', () => {
       expect(await b.reply((s) => s === 'landing', from)).toBe('landing');
     }
     const end = await b.reply((s) => s.startsWith('landed') || s.startsWith('fly: '), from, o.timeoutMs ?? 90_000);
+    // Track BF: a landing that slid more than 0.8 off the goal block walks back onto it (`walked to ...`)
+    await b.reply((s) => s.startsWith('walked to') || s.startsWith('fly: landed, but'), from, 4000).catch(() => undefined);
     await sleep(600);
     const g = await b.truth.glide(b.name);
     const dmg = await b.truth.damageSince(since, b.name);
