@@ -295,7 +295,7 @@ describe('Chat.say, layout and the rich help', () => {
     expect(one).toContain('work · front door');
 
     const settings = chat.helpReplies(['settings']);
-    expect(settings.length).toBeLessThanOrEqual(6);
+    expect(settings.length).toBeLessThanOrEqual(7); // Track BH: four glide / ledge settings took the list to 7 messages
     for (const m of settings) expect(wireSize(m)).toBeLessThanOrEqual(MAX_WIRE);
     const text = settings.map(strip).join('\n');
     for (const k of SETTING_KEYS) expect(text, `setting ${k} missing from the rich settings list`).toContain(`${k} `);
