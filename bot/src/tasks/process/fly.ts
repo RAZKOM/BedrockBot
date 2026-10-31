@@ -21,6 +21,7 @@ import { elytraWornLimit, kitLine, kitReady, readKit, SupplyWatch, type FlightKi
 import type { FlightKitOps } from '../../skills/fly/kitops.ts';
 import { cruiseHeight, flightSeconds, hdist, takeoffSky, type CellQuery, type LandingTarget } from '../../skills/fly/plan.ts';
 import type { LandingCell, LandingPlan } from '../../skills/fly/landing.ts';
+import { glideOptions, type Ledge } from '../../skills/fly/glide.ts';
 import type { SkillResult } from '../../skills/types.ts';
 import { BaseProcess, PRIORITY, type ProcessStatus, type StopReason } from './manager.ts';
 
@@ -44,6 +45,13 @@ export interface FlyTarget extends LandingTarget {
   fallback?: string;
   /** Track BF: the half width of an exact landing on the goal (`!fly <x y z>`), when it is landable. */
   exact?: number;
+  /**
+   * Track BH: take off by stepping off this edge of the start's platform (walk there, sneak to the edge,
+   * step off, glide as the fall begins) instead of the jump (glide.ts findLedges / ledgeTakeoff).
+   */
+  ledge?: Ledge;
+  /** Track BH, the glide down: no climb (the cruise height is the target's), rockets optional, no refill from the box. */
+  glide?: boolean;
 }
 
 /** Track AU2: the flight re-checks the goal's ground from this far out (the server loads chunks about 160 blocks around the body). */
@@ -94,6 +102,8 @@ export interface FlyDeps {
   landing?: (goal: Vec3, label: string, exact: number | undefined) => Promise<LandingPlan>;
   /** Track BF: the landing cell is still dry, sound and live (re-checked in the descent). */
   cellOk?: (cell: LandingCell) => boolean;
+  /** Track BH: walk to a block (the ledge's edge cell) without a process of its own (the navigator; BotSkills.goto). */
+  walkTo?: (p: Vec3) => Promise<SkillResult>;
   /** The owner's lines (the supply whispers, the kept-kit notes). */
   say(msg: string): void;
   waitTicks(n: number): Promise<void>;
@@ -212,19 +222,26 @@ export class FlyProcess extends BaseProcess {
     const s = this.d.settings;
     const wear = s.get('toolWearLimit');
     let kit = this.kit();
+    const glide = this.target.glide === true;
     const ready = kitReady(kit, wear);
-    if (!ready.ok) {
+    // Track BH: a glide down needs no rocket (the elytra's uses are checked the same)
+    if (!ready.ok && !(glide && ready.reason === 'no_rockets')) {
       this.end({ ok: false, reason: ready.line });
       return;
     }
     const min = s.get('fireworksMin');
-    if (kit.rocketsHotbar < min && kit.boxRockets > 0) {
+    if (glide) {
+      // rockets optional: into the hotbar when there are some, no refill (no box placed on a ledge)
+      if (kit.rocketsHotbar === 0 && kit.rockets > 0) await this.d.kitOps.rocketsToHotbar();
+      if (t !== this.token) return;
+      kit = this.kit();
+    } else if (kit.rocketsHotbar < min && kit.boxRockets > 0) {
       const r = await this.d.kitOps.refillFromBox(() => t === this.token);
       if (t !== this.token) return;
       this.notes.push(`refill before: ${r.ok ? `${r.taken} rockets` : (r.reason ?? 'failed')}`);
       kit = this.kit();
     }
-    if (kit.rocketsHotbar === 0) {
+    if (kit.rocketsHotbar === 0 && !glide) {
       const r = await this.d.kitOps.rocketsToHotbar();
       if (t !== this.token) return;
       if (!r.ok) {
@@ -233,7 +250,7 @@ export class FlyProcess extends BaseProcess {
       }
       kit = this.kit();
     }
-    if (kit.rocketsHotbar === 0 && kit.rockets === 0) {
+    if (kit.rocketsHotbar === 0 && kit.rockets === 0 && !glide) {
       this.end({ ok: false, reason: 'fly: no firework rockets at hand' });
       return;
     }
@@ -252,28 +269,52 @@ export class FlyProcess extends BaseProcess {
         return;
       }
     }
+    // Track BH: a ledge takeoff walks to the edge cell first (the navigator, no digging needed: the ledge is on the start's platform)
+    const ledge = this.target.ledge;
+    if (ledge) {
+      const at = { x: ledge.x, y: ledge.feet, z: ledge.z };
+      const here = this.d.position();
+      const there = here && Math.floor(here.x) === ledge.x && Math.floor(here.z) === ledge.z && Math.abs(here.y - ledge.feet) < 0.5;
+      if (!there) {
+        const w = this.d.walkTo ? await this.d.walkTo(at) : { ok: false, reason: 'no walking' };
+        if (t !== this.token) return;
+        if (!w.ok) {
+          this.end({ ok: false, reason: `fly: could not walk to the edge at ${ledge.x} ${ledge.feet} ${ledge.z} (${w.reason ?? 'failed'})` });
+          return;
+        }
+      }
+      await this.d.waitTicks(4);
+      if (t !== this.token) return;
+    }
     const from = this.d.position();
     if (!from) {
       this.end({ ok: false, reason: 'fly: position unknown' });
       return;
     }
+    if (ledge && (Math.floor(from.x) !== ledge.x || Math.floor(from.z) !== ledge.z || Math.abs(from.y - ledge.feet) > 0.5)) {
+      this.end({ ok: false, reason: `fly: not on the edge cell ${ledge.x} ${ledge.feet} ${ledge.z} after the walk (at ${Math.floor(from.x)} ${Math.floor(from.y)} ${Math.floor(from.z)})` });
+      return;
+    }
     const cz = cruiseHeight(from, this.target, (x, z) => this.d.skyTop(x, z), { clearance: s.get('flyClearance'), margin: s.get('flyMargin'), maxClimb: s.get('flyMaxClimb') });
-    // Track AU2: open sky over the start and the takeoff run (the owner's indoor takeoff flew into the roof)
-    const sky = takeoffSky(from, this.target, cz.y, s.get('flyTakeoffRun'), this.d.cell);
-    if (!sky.ok) {
+    // Track AU2: open sky over the start and the takeoff run (the owner's indoor takeoff flew into the roof); Track BH: a
+    // ledge takeoff was simulated from the edge instead (its corridor, the glide out from under an overhang)
+    const sky = ledge ? undefined : takeoffSky(from, this.target, cz.y, s.get('flyTakeoffRun'), this.d.cell);
+    if (sky && !sky.ok) {
       this.log.info(`fly: ${this.target.label}: ${sky.line}`);
       this.end({ ok: false, reason: sky.line });
       return;
     }
-    this.log.info(`fly: to ${this.target.label} (${Math.round(this.distance)} blocks): cruise y ${cz.y.toFixed(1)} (highest column ${cz.highest ?? '?'}, ${cz.unknown} unknown, the glide needs ${cz.needed.toFixed(0)}); ${kitLine(this.kit())}`);
+    const cruiseY = glide && ledge ? this.target.top : cz.y;
+    this.log.info(
+      `fly: to ${this.target.label} (${Math.round(this.distance)} blocks): ${glide ? `a glide down (no climb, ${this.kit().rocketsHotbar} rockets at hand)` : `cruise y ${cz.y.toFixed(1)} (highest column ${cz.highest ?? '?'}, ${cz.unknown} unknown, the glide needs ${cz.needed.toFixed(0)})`}${ledge ? `, a ledge takeoff from ${ledge.x} ${ledge.feet} ${ledge.z} heading ${Math.round(ledge.yaw)}` : ''}; ${kitLine(this.kit())}`,
+    );
     this.phase = 'flying';
+    const opts = glide && ledge ? glideOptions(this.target, ledge, { margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds') }) : { cruiseY, margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(ledge ? { ledge: { yaw: ledge.yaw } } : {}) };
     this.flight = this.d.controller.flyTo(this.target, {
-      cruiseY: cz.y,
-      goArounds: s.get('flyGoArounds'),
+      ...opts,
       fleeHealth: s.get('fleeHealth'),
       elytraWornAt: elytraWornLimit(wear),
-      margin: s.get('flyMargin'),
-      takeoffYaw: sky.yaw,
+      ...(sky?.ok ? { takeoffYaw: sky.yaw } : {}),
     });
     void this.flight.then((r) => {
       this.report = r;

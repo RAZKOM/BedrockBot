@@ -146,6 +146,10 @@ export const SETTING_DEFS = {
   flyHeadroom: { kind: 'number', default: 4, min: 3, max: 20, integer: true, unit: 'blocks', description: 'flight: least roof height over the feet for a landing under a roof' }, // Track BF
   flyOverhangDepth: { kind: 'number', default: 10, min: 0, max: 24, integer: true, unit: 'blocks', description: 'flight: deepest landing under a roof (0 = never)' }, // Track BF
   flySneakLand: { kind: 'boolean', default: true, description: 'flight: sneak through the touchdown (the slide stops at edges)' }, // Track BF
+  flyLedgeTakeoff: { kind: 'boolean', default: true, description: 'flight: step off a platform edge to take off when the jump takeoff is blocked (a roof, an overhang, no run) or the start is a small platform' }, // Track BH
+  glideDown: { kind: 'boolean', default: true, description: 'goto / come that end unreachable with the goal far below glide down with the elytra when a simulated glide lands near it (rockets optional)' }, // Track BH
+  glideDownMinDrop: { kind: 'number', default: 10, min: 4, max: 200, integer: true, unit: 'blocks', description: 'glide down: the goal at least this far below the feet' }, // Track BH
+  glideDownMinDistance: { kind: 'number', default: 16, min: 4, max: 400, integer: true, unit: 'blocks', description: 'glide down: the goal at least this far away horizontally' }, // Track BH
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;

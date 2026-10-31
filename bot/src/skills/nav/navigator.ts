@@ -183,6 +183,8 @@ export interface GotoReport {
   skips?: number;
   snaps?: number;
   overruns?: number;
+  /** Track BH: why a failed goto failed (the planner's own words: `no path (exhaustive search, 1708 nodes expanded)`), for the glide-down line. */
+  why?: string;
 }
 
 interface Search {
@@ -631,6 +633,7 @@ export class Navigator {
           this.active = undefined;
           dropSearch(a); // Track AB
           report.result = r;
+          if (!r.ok && a.why) report.why = a.why; // Track BH
           this.loop.release();
           if (!r.ok && r.reason === 'unreachable' && report.segments === 0) this.log.warn(this.noSegmentLine(a));
           this.settleBlacklist(a, r); // Track R
