@@ -133,6 +133,10 @@ export interface PlanRecord {
   interim?: boolean;
   /** Track AB: the final answer of a main plan whose interim answer was walked (spliced in where the two meet). */
   upgrade?: boolean;
+  /** Track BA: a `no_progress` answer (no partial end 5+ blocks from the start). */
+  noProgress?: boolean;
+  /** The search touched unloaded world. */
+  unknown?: boolean;
 }
 
 /** What happened during one goto (for tests, metrics and logs). */
@@ -272,6 +276,11 @@ interface Active {
   lastPos: Vec3 | undefined;
   /** Why the last plan / failure went wrong (for the "unreachable without a segment" WARN line). */
   why: string | undefined;
+  /**
+   * The start node (cellKey), world generation and planner (worker / in-thread) of the last plan that went
+   * nowhere (no_progress, all loaded, its full budget): not searched again unchanged by the same planner.
+   */
+  noProgress: { key: number; gen: number; via: Search['via'] } | undefined;
   /** Track BE: ticks in a row the body was 2 to 3 blocks off the path; the tick of a correction / knock / teleport whose path check is pending. */
   ticksAway: number;
   recheck: number | undefined;
@@ -370,7 +379,14 @@ export class Navigator {
     // Track BC: a re-sent section of a loaded column may carry changes the grid cached the old way (a chunk re-sent
     // after a teleport, a server-side fill): the caches are dropped once, at the top of the next tick (a section
     // event fires per subchunk of every new column too: those have nothing cached)
-    if (world.onSection) this.unsubs.push(world.onSection((reloaded) => void (reloaded && (this.gridDirty = true))));
+    if (world.onSection)
+      this.unsubs.push(
+        world.onSection((reloaded) => {
+          if (!reloaded) return;
+          this.gridDirty = true;
+          this.worldGen++; // a re-sent section can carry changes that never came as block updates (the no-progress retry skip)
+        }),
+      );
     this.unsubs.push(
       world.onBlockUpdate((p, before, after) => {
         this.onBlock(p, before, after);
@@ -606,6 +622,7 @@ export class Navigator {
         lastProgressTick: 0,
         lastPos: undefined,
         why: undefined,
+        noProgress: undefined,
         ticksAway: 0, // Track BE
         recheck: undefined,
         report,
@@ -1190,6 +1207,16 @@ export class Navigator {
       }
       return false;
     }
+    // the search that went nowhere from this node, nothing the planner reads changed since: it would go nowhere
+    // again (Realm 2026-10-31: three identical 2-second searches per goto, every 8 s for 15 minutes)
+    // (never for a goal that moves: a runAway threat read again at every plan)
+    const np = a.noProgress;
+    if (reason === 'retry' && np?.key === cellKey(start.x, start.y, start.z) && np.gen === this.worldGen && np.via === (this.plannerFor() ? 'worker' : 'thread') && !movingGoal(a.planGoal)) {
+      this.loop.release();
+      this.log.info('goto: no retry: the same search from the same node, nothing changed since it went nowhere');
+      a.finish({ ok: false, reason: 'unreachable' });
+      return false;
+    }
     if (a.goal.type === 'block') {
       // a block goal nobody can stand in (water, a wall, mid-air) is unreachable, whatever the search says
       const g = a.goal.p;
@@ -1230,6 +1257,8 @@ export class Navigator {
       slices: search.slices,
       via: search.via,
       limited: res.limited,
+      ...(res.reason === 'no_progress' ? { noProgress: true } : {}),
+      ...(res.unknown ? { unknown: true } : {}),
       ...flags,
     });
     const tag = flags.interim ? ' interim' : flags.upgrade ? ' final' : '';
@@ -1259,11 +1288,19 @@ export class Navigator {
       const lim = `${res.limited ? ', search limit hit' : ''}${res.unknown ? ', touched unloaded world' : ''}`;
       const what = res.reason === 'no_progress' ? 'no partial end 5+ blocks from the start' : 'no node closer to the goal than the start'; // Track BA
       if (this.fail(a, `no progress possible (${what}; ${res.expanded} expanded${lim})`)) return false;
+      // recorded for the retry skip: a worker search, or in-thread with no worker at all (not the 40 ms in-thread
+      // stand-in while the worker starts: its retry runs in the worker with 50 x the budget)
+      const s0 = res.path[0];
+      const full = search.via === 'worker' || !this.planner || this.plannerThreads() <= 0;
+      a.noProgress = s0 && res.reason === 'no_progress' && !res.unknown && full ? { key: cellKey(s0.x, s0.y, s0.z), gen: this.worldGen, via: search.via } : undefined;
       a.replan = 'retry';
       a.waitUntil = a.t + 20;
       return false;
     }
-    if (res.path.length > 1) a.unloadedTicks = 0;
+    if (res.path.length > 1) {
+      a.unloadedTicks = 0;
+      a.noProgress = undefined; // a plan went somewhere: a later failure from the same node is searched again
+    }
     a.path = res.path;
     a.status = res.status;
     a.aheadBlocked = false;
@@ -1662,6 +1699,12 @@ function knockLanding(p: Vec3, v: Vec3): Vec3 {
 }
 
 /** Track AB: ends the goto's search (a worker search is cancelled there). */
+/** A goal read again at every plan (a runAway from a moving threat, also as an `any` member): no retry is the same search. */
+function movingGoal(g: NavGoal): boolean {
+  if (g.type === 'runAway') return typeof g.from === 'function';
+  return g.type === 'any' && g.goals.some(movingGoal);
+}
+
 function dropSearch(a: Active): void {
   if (a.search?.s instanceof WorkerSearch) a.search.s.cancel();
   a.search = undefined;

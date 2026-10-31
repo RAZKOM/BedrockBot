@@ -25,7 +25,8 @@
 //              takeoff), landing at the same height or 1 lower; water or a floor within 3 below, no lava.
 // Cost of a move into node B = base ticks x B's floor factor (leaves, soul sand, ice) + `underground`
 // when B has a roof above the head + `irreversibleDrop` for a drop higher than a jump + break / place
-// / door ticks. Heuristic: costs.walk x octile distance (admissible: no move is cheaper per block).
+// / door ticks. Heuristic: costs.walk x (octile distance + the levels to the goal's height, priced like a
+// staircase: goals.ts `columnH`, Baritone's GoalBlock; not admissible, as Baritone's is not).
 //
 // `PathSearch` runs in slices (`step(ms)`) so the navigator never blocks a tick for long;
 // `findPath` runs one to the end.
@@ -37,7 +38,7 @@ import type { BreakRules, NavBlockFace } from './actions.ts';
 import { BestSoFar, FAILURE_NODES_FACTOR } from './baritone/bestSoFar.ts'; // Track BA: partial-path selection (ported, LGPL-3.0)
 import { ascend, createBreakMoveContext, descend, downward, pillar, sneakFits, traverse, type BreakMoveContext } from './baritone/moves.ts'; // Track BC: the moves that dig (ported, LGPL-3.0) and sneak-through
 import { DEFAULT_COSTS, dropCost, type PathCosts } from './costs.ts';
-import { goalTest, type NavGoal, type GoalTest } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
+import { goalTest, levelWeights, type NavGoal, type GoalTest } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
 import { CROSS_BLOCKED, CROSS_CLEAR, CROSS_TOGGLE, VARIETY_CLIMBER, VARIETY_LADDER, VARIETY_TRAPDOOR, VARIETY_WATER, cellKey, type NavGrid } from './grid.ts';
 
 export type { PathCosts } from './costs.ts';
@@ -361,7 +362,7 @@ export class PathSearch {
     this.goal = goal;
     this.opts = opts;
     this.costs = { ...DEFAULT_COSTS, ...opts.costs };
-    this.test = goalTest(goal, grid); // Track R: getToBlock / surface read the grid
+    this.test = goalTest(goal, grid, levelWeights(this.costs)); // Track R: getToBlock / surface read the grid; levels priced by the costs
     this.maxNodes = opts.maxNodes ?? 40_000;
     this.maxMs = opts.maxMs ?? 250;
     this.breakTicksOf = opts.breakTicks ?? handBreakTicks;

@@ -85,6 +85,7 @@ describe.skipIf(!E2E)('gaunt: sleeping (Track W)', () => {
     let n0 = b.said.length;
     await gauntCmd('say', '!sleep off');
     await until(() => saidSince(b, n0, 'sleep: auto off'), 10_000, '!sleep off reply');
+    expect(night?.autoSleep).toBe(false); // through the saved setting autoSleep
     await b.truth.time(18000);
     await until(() => {
       const t = b.pve.timeOfDay();

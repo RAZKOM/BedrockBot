@@ -10,7 +10,7 @@
 //
 // Track BD (docs/mining.md "Mining v4: MineProcess"): the done tests of Baritone's column goals, the
 // mine process' goal for an ore (`coalesce`). nav/goals.ts names the shapes (`twoBlocks`, `threeBlocks`)
-// and adds our heuristic (octile on the column); the planner worker uses the same goalTest.
+// and adds our heuristic (octile plus the levels to the feet range: `columnH`); the planner worker uses the same goalTest.
 
 /**
  * Baritone GoalTwoBlocks.isInGoal: the feet cell is the goal cell (gx, gy, gz) or the cell below it (the

@@ -101,8 +101,9 @@ room in its inventory by itself.
 |---|---|
 | `!kill <type> [n]` | Kills up to n mobs of that type within 32 blocks, nearest first. Never players. |
 | `!eat` | Eats the best food now. It also eats on its own when food drops below 18 or health is low. |
-| `!sleep` / `!sleep on` / `off` / `status` | Goes to bed now (night only; a bed within 8 blocks of the shelter, home or itself, or the `bed` waypoint) and stays until morning. It also sleeps by itself at night when a bed is known; `!sleep off` stops that. Sleeping resets the phantom timer. |
+| `!sleep` / `!sleep on` / `off` / `status` | Goes to bed now (night only; a bed within 8 blocks of the shelter, home or itself, or the `bed` waypoint) and stays until morning. It also sleeps by itself at night when a bed is known; `!sleep off` stops that (saved as the setting `autoSleep`, so it survives restarts; `!set autoSleep on` or the panel's settings work too). Sleeping resets the phantom timer. |
 | `!equip` | Puts on the best armour from its inventory. Also automatic. |
+| `!equip slot <0..35>` / `!equip <item>` | Wears exactly that piece or the elytra, even a worse one; kept on until `!equip` (the panel's "Wear this"). |
 | `!health` | Health, food, deaths and the last death cause. |
 | `!panel` | The control panel URLs (status, log, map, a command box) on the health port. |
 
@@ -119,7 +120,7 @@ room in its inventory by itself.
 | `!food [n] [pen]` / `!food status` / `!food herds` | Hunts cows, pigs, sheep, chickens and rabbits for n food items within 48 blocks, then walks to herds it remembers up to 200 blocks away; never below `foodLeave` wild adults of a kind; animals inside a fenced pen only with `pen` (or in the `chorePen` pen), never below 2 adults. <!-- Track AF --> |
 | `!breed [type] [n]` | Feeds n pairs (default 1) of adult animals within 16 blocks: cows, sheep, mooshrooms wheat; pigs carrot, potato or beetroot; chickens seeds; rabbits dandelion or carrot. With `!set autoBreed on` it breeds the `chorePen` pen every 10 minutes up to 8 adults. <!-- Track AF --> |
 | `!craft <item> [n]` / `!compact [kind]` | Crafts through the normal screens, as a player does: the inventory's 2x2 grid, or a crafting table (one within reach, else it places the one it carries and picks it up again; with planks it makes one). `!compact` turns raw iron / copper / gold, ingots, gems, coal, redstone and lapis into storage blocks (9 -> 1); `!unload` does that by itself when a chest cannot take the load (`compactOnUnload`). Tools, armour, food and the flight kit are never ingredients; `craftReserve` keeps counts back (docs/crafting.md). <!-- Track AW --> |
-| `!inv` / `!drop <item> [n]` / `!drop all` / `!drop items` / `!drop slot <0..35>` / `!drop bot_loot [n]` | Inventory summary; drop one item, everything (worn armour and the offhand too), or everything except food, armour, elytra, tools and weapons; one inventory slot, whatever it holds (the panel's Drop button), or the `bot_loot` boxes, which the other drops keep. |
+| `!inv` / `!drop <item> [n]` / `!drop all` / `!drop items` / `!drop slot <0..35>` / `!drop bot_loot [n]` | Inventory summary; drop one item, everything (worn armour and the offhand too), or everything except food, armour, elytra, tools and weapons; one inventory slot, whatever it holds (the panel's Drop button), or the `bot_loot` boxes, which the other drops keep. The bot turns to whoever asked (else straight ahead) and throws upward, so it does not pick its own drop up again; not while a job is walking or digging. |
 
 **Controlling what runs**
 

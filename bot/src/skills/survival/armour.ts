@@ -12,6 +12,13 @@
 //   with a worn piece is what replaces it (an upgrade).
 //
 // Ranking per slot: armour points x 10 + toughness, a near-broken piece (toolOk false) last.
+//
+// Manual choices (`!equip slot <n>` / `!equip <item>`, the panel's "Wear this"): `wearSlot` puts that
+// exact piece (or the elytra) on whatever it ranks, and pins the armour slot to it. While the pinned
+// item is still worn the automatic pass (plan / equip) leaves that slot alone, so a worse chestplate or
+// the elytra chosen by the owner is not swapped back while walking. The pin ends by itself when the
+// slot holds anything else (the flight kit's swap, `!drop all`, a broken piece), on any other `wear`
+// of that slot (the flight kit), and on `clearPins` (`!equip` without arguments: the best armour again).
 import { silentLogger, type Logger } from '../../log.ts';
 import type { ItemStack } from '../../world/types.ts';
 import { inventorySlot, isOk, slotInfo, type StackRequests } from './screen.ts';
@@ -74,10 +81,12 @@ export function planArmour(
   slots: readonly (ItemStack | null | undefined)[],
   worn: readonly (ItemStack | null | undefined)[],
   ok: (item: ItemStack) => boolean = () => true,
+  keep: ReadonlySet<ArmourSlot> = new Set(),
 ): ArmourMove[] {
   const score = (it: ItemStack | null | undefined): number => (it ? armourScore(it.name) - (ok(it) ? 0 : 1000) : -Infinity);
   const out: ArmourMove[] = [];
   for (const s of [0, 1, 2, 3] as const) {
+    if (keep.has(s)) continue; // a manual choice (pinned) stays on
     const cur = worn[s] ?? null;
     if (s === 1 && cur && wearsElytra(cur.name)) continue; // Track AU: an elytra on the back stays on (the flight puts the chestplate back itself)
     let best: { from: number; item: ItemStack; score: number } | undefined;
@@ -90,6 +99,34 @@ export function planArmour(
     if (best && best.score > score(cur)) out.push({ slot: s, from: best.from, item: best.item.name, replaces: cur?.name ?? null });
   }
   return out;
+}
+
+/** The armour slot a worn item goes into: armour by its kind, the elytra into the chest slot. */
+export function wearSlotOf(name: string): ArmourSlot | undefined {
+  return wearsElytra(name) ? 1 : armourSlotOf(name);
+}
+
+/**
+ * The move that puts the item in inventory slot `from` (0..35) on, whatever it ranks (`!equip slot`),
+ * or why not.
+ */
+export function wearMove(slots: readonly (ItemStack | null | undefined)[], worn: readonly (ItemStack | null | undefined)[], from: number): ArmourMove | string {
+  if (!Number.isInteger(from) || from < 0 || from > 35) return 'slot must be 0..35';
+  const it = slots[from];
+  if (!it || it.count <= 0) return `slot ${from} is empty`;
+  const slot = wearSlotOf(it.name);
+  if (slot === undefined) return `${it.name} is not armour or an elytra`;
+  return { slot, from, item: it.name, replaces: worn[slot]?.name ?? null };
+}
+
+export interface WearResult {
+  ok: boolean;
+  /** The item put on and where. */
+  item?: string;
+  slot?: ArmourSlot;
+  /** What came off into the inventory slot the piece came from (null: the slot was empty). */
+  replaces?: string | null;
+  reason?: string;
 }
 
 export interface ArmourInventory {
@@ -118,6 +155,8 @@ export class ArmourController {
   private readonly d: ArmourDeps;
   private readonly log: Logger;
   private running = false;
+  /** Manual choices: armour slot -> the item the owner put on (see the file comment). */
+  private readonly pins = new Map<ArmourSlot, string>();
   readonly stats = { equipped: 0, failed: 0, passes: 0 };
 
   constructor(deps: ArmourDeps) {
@@ -135,9 +174,34 @@ export class ArmourController {
     return [0, 1, 2, 3].map((i) => w[i] ?? null);
   }
 
-  /** The pieces a pass would put on. */
+  /** The armour slots a manual choice holds (a pin whose item is no longer worn is dropped here). */
+  pinned(): Map<ArmourSlot, string> {
+    // a reconnect clears the windows until the server sends the armour again: no pruning on a missing window
+    if (this.d.inventory.window(WINDOW_ARMOR)) {
+      const worn = this.worn();
+      for (const [s, name] of this.pins) if (worn[s]?.name !== name) this.pins.delete(s);
+    }
+    return new Map(this.pins);
+  }
+
+  /** Forget the manual choices: the next pass puts the best armour on again (`!equip`). */
+  clearPins(): void {
+    this.pins.clear();
+  }
+
+  /** The pieces a pass would put on (pinned slots left alone). */
   plan(): ArmourMove[] {
-    return planArmour(this.d.inventory.slots, this.worn(), this.d.toolOk);
+    return planArmour(this.d.inventory.slots, this.worn(), this.d.toolOk, new Set(this.pinned().keys()));
+  }
+
+  /** `!equip slot <n>`: wear exactly that piece (or the elytra), even a worse one, and pin it. */
+  async wearSlot(from: number): Promise<WearResult> {
+    const m = wearMove(this.d.inventory.slots, this.worn(), from);
+    if (typeof m === 'string') return { ok: false, reason: m };
+    if (this.running) return { ok: false, reason: 'busy' };
+    const ok = await this.wear(m, { pin: true });
+    this.log.info(`armour: ${ok ? 'wearing' : 'could not put on'} ${m.item} (${ARMOUR_SLOT_NAMES[m.slot]}, by hand)${ok && m.replaces ? `; ${m.replaces} into slot ${from}` : ''}`);
+    return ok ? { ok: true, item: m.item, slot: m.slot, replaces: m.replaces } : { ok: false, item: m.item, slot: m.slot, reason: 'the item stack request was refused' };
   }
 
   /** Put on every better piece (one screen for all of them). */
@@ -167,12 +231,20 @@ export class ArmourController {
     return { ok: failed.length === 0, equipped, failed };
   }
 
-  /** Track AU: one explicit move (the elytra on, the chestplate back) under the inventory screen. */
-  async wear(m: ArmourMove): Promise<boolean> {
+  /**
+   * Track AU: one explicit move (the elytra on, the chestplate back) under the inventory screen.
+   * `pin` (a manual choice) keeps the automatic pass off that slot; any other wear of the slot (the
+   * flight kit) ends a pin there.
+   */
+  async wear(m: ArmourMove, opts: { pin?: boolean } = {}): Promise<boolean> {
     if (this.running) return false;
     this.running = true;
     try {
       const r = await this.d.requests.withScreen(() => this.one(m));
+      if (r === true) {
+        if (opts.pin) this.pins.set(m.slot, m.item);
+        else this.pins.delete(m.slot);
+      }
       return r === true;
     } finally {
       this.running = false;

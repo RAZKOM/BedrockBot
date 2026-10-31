@@ -77,6 +77,27 @@ describe('Connection reconnect policy', () => {
     ]);
   });
 
+  it('link (the panel banner): state and since when, the scheduled retry and the attempt, back to 0 on spawn', async () => {
+    const { conn, clients } = setup({ reconnect: { baseMs: 100, jitter: 0 } });
+    expect(conn.link).toMatchObject({ state: 'idle', attempt: 0 });
+    await connectAndSpawn(conn, clients);
+    const spawned = conn.link;
+    expect(spawned).toMatchObject({ state: 'spawned', attempt: 0 });
+    expect(spawned.retryAt).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(5_000);
+    clients[0]!.kick('kicked');
+    const waiting = conn.link;
+    expect(waiting).toMatchObject({ state: 'connecting', attempt: 1, retryAt: Date.now() + 100 });
+    expect(waiting.since).toBe(Date.now());
+    expect(waiting.since).toBeGreaterThanOrEqual(spawned.since + 5_000);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(conn.link.retryAt).toBeUndefined(); // the attempt runs
+    expect(conn.link.attempt).toBe(1);
+    clients[1]!.spawn();
+    expect(conn.link).toMatchObject({ state: 'spawned', attempt: 0 });
+    expect(conn.link.signIn).toBeUndefined();
+  });
+
   it('a silent close (server restart, RakNet timeout) is kind "closed" and reconnects', async () => {
     const { conn, clients } = setup({ reconnect: { baseMs: 100, jitter: 0 } });
     const closes: CloseInfo[] = [];
