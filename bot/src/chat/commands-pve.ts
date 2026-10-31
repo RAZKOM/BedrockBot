@@ -107,15 +107,21 @@ export function registerPveCommandsFor(d: CommandDeps): void {
         },
         log: d.log,
       });
+      // the saved setting: `!sleep on / off` and `!set autoSleep` both persist it
+      night.autoSleep = d.settings.get('autoSleep');
+      const offSetting = d.settings.onChange((k, v) => {
+        if (k === 'autoSleep') night.autoSleep = v === true;
+      });
       const stop = task.stop.bind(task);
       task.stop = () => {
+        offSetting();
         sleeper.dispose();
         stop();
       };
       sleep = {
         request: () => night.requestSleep(),
         setAuto: (on) => {
-          night.autoSleep = on;
+          d.settings.set('autoSleep', on);
         },
         status: () => {
           const s = night.sleepStatus();
@@ -322,7 +328,7 @@ export function registerPveCommands(chat: Chat, deps: PveCommandDeps | undefined
       const a = (args[0] ?? '').toLowerCase();
       if (a === 'on' || a === 'off') {
         sl.setAuto(a === 'on');
-        reply(`sleep: auto ${a} (${a === 'on' ? 'to bed at night when a bed is near the shelter or home, or at the bed waypoint' : 'only on !sleep'})`);
+        reply(`sleep: auto ${a} (${a === 'on' ? 'to bed at night when a bed is near the shelter or home, or at the bed waypoint' : 'only on !sleep'}; saved as the setting autoSleep)`);
         return;
       }
       if (a === 'status') {

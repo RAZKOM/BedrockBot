@@ -236,6 +236,7 @@ describe.skipIf(!E2E)('@bds home: boxing at the chests and bot_loot boxes (Track
     const r1 = await ask(`!drop slot ${slot}`, (s) => s.startsWith('dropped ') || s.startsWith('drop'), 30_000);
     notes.push(`(c) !drop slot ${slot}: ${r1}`);
     expect(r1).toBe('dropped 1 undyed_shulker_box');
+    expect(b.built.mobility!.loop.command.pitch).toBeLessThan(10); // faced the asker, aimed up: never straight down
     await until(() => (inv.count('undyed_shulker_box') === 1 ? true : undefined), 10_000, 'one box left');
     const r2 = await ask('!drop bot_loot', (s) => s.startsWith('dropped ') || s.startsWith('drop'), 30_000);
     notes.push(`(c) !drop bot_loot: ${r2}`);
