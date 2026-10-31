@@ -3,11 +3,16 @@
 // takeoff from under an overhang (the Realm's farm platform under the spawning box).
 import { describe, expect, it } from 'vitest';
 import { flatWorld, withBoxes, type BlockQuery } from '../../../src/skills/input/index.ts';
-import { findLedges, ledgeFall, ledgeTakeoff, planGlideDown, simulateFlight, smallPlatform, type SimDeps } from '../../../src/skills/fly/glide.ts';
+import { findLedges, jumpTakeoff, ledgeFall, ledgeTakeoff, planGlideDown, simulateFlight, smallPlatform, type SimDeps } from '../../../src/skills/fly/glide.ts';
+import { headCells, recoverProne } from '../../../src/skills/fly/prone.ts';
 import { columnKey, cruiseHeight, yawDiff, type CellQuery, type LandingTarget } from '../../../src/skills/fly/plan.ts';
 
 const FEET = -60;
-type Box = { from: { x: number; y: number; z: number }; to: { x: number; y: number; z: number }; solid: boolean };
+interface Box {
+  from: { x: number; y: number; z: number };
+  to: { x: number; y: number; z: number };
+  solid: boolean;
+}
 
 function rig(boxes: Box[]) {
   const world: BlockQuery = withBoxes(flatWorld(), boxes);
@@ -124,5 +129,62 @@ describe('fly glide: the ledge takeoff from under an overhang (the Realm farm, 2
     expect(sim.hits).toBe(0);
     expect(sim.end).toBeUndefined();
     expect(sim.body.pos.y).toBeGreaterThan(Y + 23);
+  });
+});
+
+describe('fly glide: the jump takeoff simulated (the Realm canopy, 2026-10-31 04:46Z)', () => {
+  it('a wide canopy 8 to 13 up across the takeoff heading: that heading hits, another one clears', async () => {
+    const canopy: Box = { from: { x: -12, y: FEET + 8, z: 4 }, to: { x: 12, y: FEET + 13, z: 30 }, solid: true };
+    const { deps } = rig([canopy]);
+    const from = { x: 0.5, y: FEET, z: 0.5 };
+    const target: LandingTarget = { x: 0.5, z: 600.5, top: FEET, half: 1 };
+    const cz = cruiseHeight(from, target, deps.skyTop!, {});
+    const straight = await jumpTakeoff(deps, from, target, { cruiseY: cz.y }, 64, [0]);
+    expect(straight.line).toMatch(/heading 0: (clear only by steering|hits a solid)/);
+    const any = await jumpTakeoff(deps, from, target, { cruiseY: cz.y }, 64, [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180]);
+    expect(any.yaw, any.line).toBeDefined();
+    expect(Math.abs(yawDiff(any.yaw!, 0))).toBeGreaterThan(1);
+  });
+});
+
+describe('fly glide: prone after a glide (the cells over the body)', () => {
+  it('a body prone under leaves 1 above: the leaves over it are broken first; a protected block refuses', async () => {
+    const solid = new Map<string, string>([
+      ['0,1,0', 'oak_leaves'],
+      ['1,1,0', 'oak_log'],
+    ]);
+    const block = (x: number, y: number, z: number) => {
+      const n = solid.get(`${x},${y},${z}`);
+      return n ? { name: n, solid: true } : { name: 'air', solid: false };
+    };
+    expect(headCells({ x: 0.5, y: 0, z: 0.5 }, block).map((c) => c.name)).toEqual(['oak_leaves']);
+    expect(headCells({ x: 0.8, y: 0, z: 0.5 }, block).map((c) => c.name)).toEqual(['oak_leaves', 'oak_log']);
+    let prone = true;
+    const dug: string[] = [];
+    const r = await recoverProne({
+      pos: () => ({ x: 0.5, y: 0, z: 0.5 }),
+      prone: () => prone,
+      block,
+      breakBlocker: () => undefined,
+      dig: (p) => {
+        dug.push(`${p.x},${p.y},${p.z}`);
+        solid.delete(`${p.x},${p.y},${p.z}`);
+        prone = false;
+        return Promise.resolve({ ok: true });
+      },
+      waitTicks: () => Promise.resolve(),
+    });
+    expect(r.ok).toBe(true);
+    expect(dug).toEqual(['0,1,0']);
+    const refused = await recoverProne({
+      pos: () => ({ x: 0.5, y: 0, z: 0.5 }),
+      prone: () => true,
+      block: (_x, y) => (y === 1 ? { name: 'chest', solid: true } : { name: 'air', solid: false }),
+      breakBlocker: () => 'protected',
+      dig: () => Promise.resolve({ ok: true }),
+      waitTicks: () => Promise.resolve(),
+    });
+    expect(refused.ok).toBe(false);
+    expect(refused.why).toMatch(/may not be broken \(protected\)/);
   });
 });

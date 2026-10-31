@@ -10,7 +10,7 @@
 // added to the manager here.
 import type { Vec3 } from '../connection/types.ts';
 import { FlightController, skyQuery } from '../skills/fly/controller.ts';
-import { glideKitReady, ledgeTakeoff, planGlideDown, smallPlatform, type Ledge, type SimDeps } from '../skills/fly/glide.ts'; // Track BH
+import { glideKitReady, jumpTakeoff, ledgeTakeoff, planGlideDown, smallPlatform, type Ledge, type SimDeps } from '../skills/fly/glide.ts'; // Track BH
 import { elytraWornLimit, flightKitMemoryOf, kitLine, kitReady, readKit, SupplyWatch } from '../skills/fly/kit.ts';
 import { FlightKitOps } from '../skills/fly/kitops.ts';
 import { APPROACH_HEIGHT, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, type CellQuery, type LandingTarget, type SkyCheck } from '../skills/fly/plan.ts';
@@ -150,6 +150,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (top === undefined) return undefined;
     const b = world.blockAt({ x, y: top, z });
     if (b && isHazardName(b.name)) return undefined;
+    // Track BH: never a canopy (the Realm, 2026-10-31: a `roof` end on oak leaves left the body prone in the tree): the open ground beyond or under it
+    if (b && /leaves|azalea|vine/.test(b.name)) return undefined;
     if (wetAbove(x, z, top)) return undefined;
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
       const t = skyTop(x + dx, z + dz, fromY);
@@ -261,6 +263,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       landing: landingFor,
       cellOk,
       walkTo: (p) => skills.goto({ type: 'block', p }, {}), // Track BH: to the ledge's edge cell
+      prone: () => loop.state.prone === true,
+      unprone: () => (skills as { unprone?: () => Promise<{ ok: boolean; dug: string[]; why?: string }> }).unprone?.() ?? Promise.resolve({ ok: false, dug: [], why: 'no digging' }),
       say: (m) => d.chat.say(m),
       waitTicks: (n) => loop.waitTicks(n),
       supply,
@@ -326,6 +330,23 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     log.info(`fly: ledge takeoff (${why}): ${r.line}`);
     return r.ledge;
   };
+  /**
+   * Track BH: how this flight takes off: a ledge (ledgeFor), else the jump along the first heading whose
+   * simulated climb meets no solid (the sky check's first, then 30 degrees apart: the Realm's takeoff into a
+   * tree canopy, 2026-10-31), else refused with the line (walk out).
+   */
+  const takeoffFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number): Promise<{ ledge?: Ledge; takeoffYaw?: number } | { refuse: string }> => {
+    const ledge = await ledgeFor(from, target, sky, rockets);
+    if (ledge) return { ledge };
+    if (!sky.ok) return { refuse: sky.line };
+    const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
+    const yaws = [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180].map((o) => sky.yaw + o);
+    const r = await jumpTakeoff(simDeps(), from, target, { cruiseY: cz.y, margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds') }, rockets, yaws);
+    if (r.yaw !== undefined && r.yaw === sky.yaw) return { takeoffYaw: r.yaw };
+    log.info(`fly: the simulated climb: ${r.line}`);
+    if (r.yaw !== undefined) return { takeoffYaw: r.yaw };
+    return { refuse: 'fly: no clear climb from here (the simulated climb meets a solid on every heading: trees, a wall); walk outside first' };
+  };
   type AutoFly = { kind: 'fly'; target: FlyTarget; line: string; said?: string | undefined } | { kind: 'walk_out'; roof: string };
   /**
    * Track BF: the flight's target for a goal (the landing plan: the goal itself, a confirmed cell, the
@@ -359,11 +380,11 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     // the sky first (cheap); the landing cell (up to six probe plans) only when a takeoff is possible at all
     const sky = skyHere(from, goalTarget);
     // Track BH: a ledge takeoff where the jump takeoff is refused (an overhang, a blocked run) or the start is a small platform
-    const ledge = await ledgeFor(from, goalTarget, sky, k.rocketsHotbar || k.rockets);
-    if (!sky.ok && !ledge) return { kind: 'walk_out', roof: sky.line };
+    const tk = await takeoffFor(from, goalTarget, sky, k.rocketsHotbar || k.rockets);
+    if ('refuse' in tk) return { kind: 'walk_out', roof: tk.refuse };
     // Track BF: the landing (a cell of the live model with a confirmed walk, or the goal held high until its ground loads)
     const f = await planFlight(from, goalBlock, label, half, false);
-    if (ledge) f.target.ledge = ledge;
+    Object.assign(f.target, tk);
     return { kind: 'fly', ...f };
   };
   /** Track BF: the reply line of a flight and, for a landing on unconfirmed dry ground, the line saying so. */
@@ -486,9 +507,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       // far (or its ground not loaded): a flight with rockets, the landing held until its ground loads, the takeoff simulated
       const t0 = targetFromPlan(plan, base);
       const sky = skyHere(from, t0);
-      const ledge = await ledgeFor(from, t0, sky, rockets);
-      if (ledge || sky.ok) target = { ...t0, ...(ledge ? { ledge } : {}) };
-      else why = `no takeoff from here (${sky.line.replace(/^fly: /, '').replace(/; walk outside first$/, '')}, no ledge with a clear fall)`;
+      const tk = await takeoffFor(from, t0, sky, rockets);
+      if (!('refuse' in tk)) target = { ...t0, ...tk };
+      else why = `no takeoff from here (${tk.refuse.replace(/^fly: /, '').replace(/; walk outside first$/, '')}; no ledge with a clear fall)`;
     } else {
       why = `the goal is ${Math.round(dist)} blocks away, beyond a glide without rockets`;
     }
@@ -650,13 +671,14 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       // near it, held high while its ground is not loaded), then the walk for the rest
       void (async () => {
         // Track BH: a ledge takeoff where the jump is refused (an overhang, a blocked run) or the start is a small platform
-        const ledge = await ledgeFor(from, goalTarget, sky, k.rocketsHotbar || k.rockets);
-        if (!sky.ok && !ledge) {
-          reply(sky.line);
+        // (and the jump along a heading whose simulated climb is clear: trees, walls)
+        const tk = await takeoffFor(from, goalTarget, sky, k.rocketsHotbar || k.rockets);
+        if ('refuse' in tk) {
+          reply(tk.refuse);
           return;
         }
         const f = await planFlight(from, t.goal, t.label, t.half, true);
-        if (ledge) f.target.ledge = ledge;
+        Object.assign(f.target, tk);
         if (controller.active) {
           reply('fly: already flying');
           return;

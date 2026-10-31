@@ -50,6 +50,8 @@ export interface FlyTarget extends LandingTarget {
    * step off, glide as the fall begins) instead of the jump (glide.ts findLedges / ledgeTakeoff).
    */
   ledge?: Ledge;
+  /** Track BH: the jump takeoff's heading whose simulated climb is clear (commands-fly takeoffFor; else the sky check's). */
+  takeoffYaw?: number;
   /** Track BH, the glide down: no climb (the cruise height is the target's), rockets optional, no refill from the box. */
   glide?: boolean;
 }
@@ -104,6 +106,9 @@ export interface FlyDeps {
   cellOk?: (cell: LandingCell) => boolean;
   /** Track BH: walk to a block (the ledge's edge cell) without a process of its own (the navigator; BotSkills.goto). */
   walkTo?: (p: Vec3) => Promise<SkillResult>;
+  /** Track BH: the body is held prone (InputLoopState.prone) and the way out (BotSkills.unprone: break what keeps it from standing). */
+  prone?: () => boolean;
+  unprone?: () => Promise<{ ok: boolean; dug: string[]; why?: string }>;
   /** The owner's lines (the supply whispers, the kept-kit notes). */
   say(msg: string): void;
   waitTicks(n: number): Promise<void>;
@@ -314,7 +319,7 @@ export class FlyProcess extends BaseProcess {
       ...opts,
       fleeHealth: s.get('fleeHealth'),
       elytraWornAt: elytraWornLimit(wear),
-      ...(sky?.ok ? { takeoffYaw: sky.yaw } : {}),
+      ...(sky?.ok ? { takeoffYaw: this.target.takeoffYaw ?? sky.yaw } : {}),
     });
     void this.flight.then((r) => {
       this.report = r;
@@ -399,6 +404,13 @@ export class FlyProcess extends BaseProcess {
     // stand still a moment: the landing's last corrections
     await this.d.waitTicks(5);
     if (t !== this.token) return;
+    // Track BH: a glide that ended under less than 1.8 of headroom (a canopy, a slab roof) leaves the body prone: dig it free
+    if (this.d.prone?.() && this.d.unprone) {
+      const u = await this.d.unprone();
+      if (t !== this.token) return;
+      this.log.info(`fly: prone after the landing: ${u.ok ? `standing again${u.dug.length ? ` after breaking ${u.dug.join(', ')}` : ''}` : `still prone (${u.why ?? '?'})`}`);
+      if (!u.ok) this.d.say(`fly: I landed somewhere I cannot stand up (${u.why ?? '?'}); help me out`);
+    }
     const c = await this.d.kitOps.wearChestplate();
     if (t !== this.token) return;
     if (!c.ok) this.notes.push(c.reason ?? 'chestplate not put back');

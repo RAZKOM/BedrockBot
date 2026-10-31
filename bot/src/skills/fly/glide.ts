@@ -318,6 +318,37 @@ export async function ledgeTakeoff(
   return { ledge: undefined, line: `${found.ledges.length} ledges on ${found.cells} cells, none clear: ${tried.join('; ')}` };
 }
 
+/**
+ * Track BH (the Realm, 2026-10-31 04:46Z: a takeoff straight into a tree canopy, `steerClear` saw it 3 ticks
+ * before the impact): the jump takeoff's first TAKEOFF_SIM_TICKS ticks simulated with the real options and
+ * rockets along `yaws` (the sky check's heading first); the first heading whose climb meets no solid (leaves
+ * count) is returned with the line; undefined when none clears.
+ */
+export async function jumpTakeoff(
+  deps: SimDeps,
+  from: Vec3,
+  target: LandingTarget,
+  opts: Omit<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'ledge' | 'takeoffYaw'>,
+  rockets: number,
+  yaws: readonly number[],
+): Promise<{ yaw: number | undefined; line: string }> {
+  const tried: string[] = [];
+  // a climb the path-ahead check had to steer (it saw the solid only 20 ticks ahead: the Realm's steered 3 ticks, then
+  // hit) is kept only as the last resort: a heading whose climb needs no steering at all comes first
+  let steered: number | undefined;
+  for (const yaw of yaws) {
+    const sim = await simulateFlight(deps, from, target, { ...opts, takeoffYaw: yaw }, { rockets, yaw, maxTicks: TAKEOFF_SIM_TICKS, until: (b) => b.phase === 'approach' });
+    const ok = sim.hits === 0 && !sim.wet && (sim.end ? landedOn(target, sim) : sim.phase !== 'land' && sim.phase !== 'takeoff');
+    if (ok && sim.stats.steered === 0) {
+      tried.push(`heading ${Math.round(yaw)}: clear`);
+      return { yaw, line: tried.join('; ') };
+    }
+    if (ok) steered ??= yaw;
+    tried.push(`heading ${Math.round(yaw)}: ${ok ? `clear only by steering ${sim.stats.steered} ticks` : sim.hits ? `hits a solid ${sim.hits} times` : sim.end ? simWhy(target, sim) : `${sim.phase} after ${sim.ticks} ticks`}`);
+  }
+  return { yaw: steered, line: tried.join('; ') };
+}
+
 export interface GlideDownOptions {
   /** The goal must be at least this far below the feet (glideDownMinDrop). */
   minDrop: number;

@@ -27,7 +27,8 @@ import type { InputLoop } from './input/inputLoop.ts';
 import { PHYSICS } from './input/physics.ts';
 import { Navigator, type GotoReport, type NavGotoOptions, type NavigatorOptions } from './nav/navigator.ts';
 import type { NavGoal } from './nav/goals.ts'; // Track R
-import { DEFAULT_THROWAWAY } from './nav/actions.ts';
+import { breakBlocker, DEFAULT_THROWAWAY } from './nav/actions.ts';
+import { recoverProne, type ProneResult } from './fly/prone.ts'; // Track BH
 import { oppositeFace } from './place/face.ts';
 import { angleDiff, turnTowards, yawTowards } from './nav/follower.ts';
 import { blockQueryOf, worldSource, type BlockStore } from './terrain/query.ts';
@@ -354,11 +355,43 @@ export class BotSkills implements Skills {
     if (noSurface) return Promise.resolve({ ok: false, reason: noSurface });
     // Synchronous start (callers check nav.busy right after the call).
     const token = this.begin('goto');
-    const p = this.nav.goto(goal, opts).then((r) => this.surfaceAndRetry(r, token, goal, opts));
+    const p = this.nav
+      .goto(goal, opts)
+      .then((r) => this.surfaceAndRetry(r, token, goal, opts))
+      .then((r) => this.unproneAndRetry(r, token, goal, opts));
     void p.finally(() => {
       this.end(token);
     });
     return p;
+  }
+
+  /**
+   * Track BH: the body is held prone (the crawl pose after a glide ended under less than 1.8 of headroom):
+   * the planner plans a standing body and has no start node there. Break what keeps it from standing
+   * (skills/fly/prone.ts, the navigator's break rules) and plan once more.
+   */
+  unprone(cancelled: () => boolean = () => false): Promise<ProneResult> {
+    const w = this.world;
+    const digger = this.digger;
+    if (!w.blockAt || !digger) return Promise.resolve({ ok: !this.loop.state.prone, dug: [], why: 'no digging' });
+    const blockAt = w.blockAt.bind(w);
+    return recoverProne({
+      pos: () => this.loop.state.pos,
+      prone: () => this.loop.state.prone === true && !cancelled(),
+      block: (x, y, z) => blockAt({ x, y, z }),
+      breakBlocker: (x, y, z) => breakBlocker(this.nav.grid, x, y, z, this.nav.breakRules()),
+      dig: (q) => digger.dig(q),
+      waitTicks: (n) => this.loop.waitTicks(n),
+    });
+  }
+
+  private async unproneAndRetry(r: SkillResult, token: number, goal: NavGoal, opts?: NavGotoOptions): Promise<SkillResult> {
+    if (r.ok || r.reason !== 'unreachable' || token !== this.epoch || this.loop.state.prone !== true) return r;
+    const from = this.loop.state.pos;
+    const u = await this.unprone(() => token !== this.epoch);
+    this.log.info(`goto: prone at ${from.x.toFixed(1)} ${from.y.toFixed(1)} ${from.z.toFixed(1)} (no standable node); ${u.ok ? `standing again${u.dug.length ? ` after breaking ${u.dug.join(', ')}` : ''}` : `still prone: ${u.why ?? '?'}`}`);
+    if (!u.ok || token !== this.epoch) return r;
+    return this.nav.goto(goal, opts);
   }
 
   /**
