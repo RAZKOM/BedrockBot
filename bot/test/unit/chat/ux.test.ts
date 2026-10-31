@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Chat } from '../../../src/chat/chat.ts';
 import { registerBuiltinCommands, registerHardeningCommands } from '../../../src/chat/commands.ts';
 import { FRONT_DOOR, frontHelp, hintFor, splitHelp, type HintFacts } from '../../../src/chat/help.ts';
+import { MAX_WIRE, strip, wireSize } from '../../../src/chat/style.ts';
 import { applyMode, currentMode, MODE_KEYS, modeCommand, modeLine, modeValues } from '../../../src/chat/modes.ts';
 import { attachWelcome, welcomeLines, welcomeVersion } from '../../../src/chat/welcome.ts';
 import type { Connection } from '../../../src/connection/connection.ts';
@@ -79,7 +80,7 @@ describe('tiers and !help on the afk registry', () => {
     for (const n of ['cook', 'eat', 'equip', 'sleep', 'food', 'get', 'drop', 'home', 'shelter', 'breed', 'wp']) expect(byName.get(n)?.auto, n).toBeTruthy();
     // the deletion candidates of docs/ux.md: `more` without an automatic trigger
     const candidates = infos.filter((c) => c.tier === 'more' && !c.auto).map((c) => c.name).sort();
-    expect(candidates).toEqual(['commands', 'farm', 'gather', 'goto', 'health', 'inv', 'kill', 'land', 'mine', 'mode', 'nether', 'no', 'overworld', 'pause', 'pos', 'quarry', 'quit', 'resume', 'set', 'stock', 'top', 'tunnel', 'yes']); // merge: + stock (Track AG; unload and chests have auto lines); Track AT: + nether, overworld (portal has an auto line); Track AU: + land (fly has the auto line); Track BK: + quarry, tunnel
+    expect(candidates).toEqual(['colors', 'commands', 'farm', 'gather', 'goto', 'health', 'inv', 'kill', 'land', 'mine', 'mode', 'nether', 'no', 'overworld', 'pause', 'pos', 'quarry', 'quit', 'resume', 'set', 'stock', 'top', 'tunnel', 'yes']); // merge: + stock (Track AG; unload and chests have auto lines); Track AT: + nether, overworld (portal has an auto line); Track AU: + land (fly has the auto line); chat style: + colors (a demo, nothing runs by itself)
   });
 
   it('!help: at most 4 messages of 256, the front door only, ending with !help all and !help <command>', () => {
@@ -380,5 +381,35 @@ describe('!get never takes from chests', () => {
     expect(src('skills/container/stash.ts')).not.toMatch(/import \{[^}]*\btake\b[^}]*\} from '\.\/chest\.ts'/);
     expect(src('skills/items/catalog.ts')).not.toMatch(/container|chest\.|\.open\(/i);
     expect(src('chat/commands-get.ts')).not.toMatch(/\.open\(|withdraw/);
+  });
+});
+
+describe('chat style on the afk registry (docs/chat-style.md)', () => {
+  it('chatLines on: !help, !help all and !help settings are multi-line messages that fit, and cover everything registered', () => {
+    const { chat, settings } = afkChat();
+    expect(chat.has('colors')).toBe(true);
+    // off (the default): the packed one-line forms, as before
+    expect(chat.helpReplies([]).some((l) => l.startsWith('front door: '))).toBe(true);
+    settings.set('chatLines', 'on');
+    settings.set('chatColor', 'on');
+
+    const front = chat.helpReplies([]);
+    expect(front.length).toBeLessThanOrEqual(4);
+    for (const m of front) expect(wireSize(m)).toBeLessThanOrEqual(MAX_WIRE);
+    const frontText = front.map(strip).join('\n');
+    for (const n of FRONT_DOOR) expect(frontText, n).toContain(`!${n} `);
+    expect(frontText).not.toContain('!colors'); // a `more` command stays off the front door
+
+    const all = chat.helpReplies(['all']);
+    expect(all.length).toBeLessThanOrEqual(4);
+    for (const m of all) expect(wireSize(m)).toBeLessThanOrEqual(MAX_WIRE);
+    const allText = all.map(strip).join('\n');
+    for (const n of chat.commandNames()) expect(allText, n).toContain(`!${n}`);
+
+    const sets = chat.helpReplies(['settings']);
+    expect(sets.length).toBeLessThanOrEqual(7); // Track BH: four glide / ledge settings took the list to 7 messages
+    for (const m of sets) expect(wireSize(m)).toBeLessThanOrEqual(MAX_WIRE);
+    const setsText = sets.map(strip).join('\n');
+    for (const k of Object.keys(SETTING_DEFS)) expect(setsText, k).toContain(`${k} `);
   });
 });

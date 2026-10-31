@@ -117,6 +117,31 @@ the reserve still needs after the other throwaway kinds are counted (75 cobblest
 from the reserve, because they come back. The scaffold note (`1 scaffold block, picked up again`)
 and a reserve shortfall are added in brackets.
 
+Carried shulker boxes (Track BJ, decision [0052](decisions/0052-shulker-aware-jobs.md), docs/home.md "Supply"):
+what the carried boxes hold counts as material (not the fireworks box; `bot_loot` boxes do), and the line says
+what will come out of them (`...; have everything (out of my shulker boxes as needed: 55 cobblestone)`). The
+runner uses the task's `Supply`:
+
+- **Refill**: out of a block (or of scaffold blocks) while on the ground, it takes what the rest of the build
+  still needs of it (at most what fits loose with 4 slots free, `Supply.room`) out of the carried box holding most
+  of it (`Supply.ensure`); the box is placed on a cell
+  next to the bot that is not in the build's footprint (the planned cells and the pillar / descend columns),
+  emptied of just that, broken and picked up. Never from a column top.
+- **Before a column**: on the ground before pillaring, the column's own blocks and the scaffold blocks for it
+  (its height, plus the throwaway-kind places on it) are topped up the same way; scaffold blocks prefer the
+  throwaway kinds the build does not place.
+- **Stow**: at the end (done or stopped), what was taken out and not used goes back into a carried box
+  (`Supply.stow`, down to what the build held at the start).
+- **A pause** (`!stop`, `!build pause`, a pre-emption) during a refill: the box is picked up again; a box whose
+  break was interrupted stays marked and the next run recovers it first (`Supply.recover`), on the ground only:
+  never while the next step is a column top's place or the descend (a walk would leave the column).
+- **Inventory full**: the boxes still hold the block but nothing more fits loose: the build stops with `my
+  inventory is full (my shulker boxes still hold 100 cobblestone)` instead of `out of cobblestone`.
+- Stats: `refills`, `refilled`, `stowed`. Without carried boxes nothing changes: `out of cobblestone` stops it.
+
+Measured (e2e home-supply on bds-home, 2026-10-31): fill 5 x 3 x 5 cobblestone with 20 loose and a carried
+box: 75 / 75 placed in 62 s, 55 out of the box in one refill, no loose cobblestone left over.
+
 ## Formats
 
 Folders, first hit wins: `values.builds` (tests), env `BEDROCKBOT_BUILDS`, **`builds/` next to the

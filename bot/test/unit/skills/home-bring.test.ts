@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { RuntimeSettings } from '../../../src/config/settings.ts';
 import { isShulkerBox, snapshotOf } from '../../../src/skills/container/chest.ts';
-import { defaultCount, itemsText, parseBringArgs, planBring, resolveBringItem, stockOf } from '../../../src/skills/home/bring.ts';
+import { boxesOf, defaultCount, extractChoice, halfBox, itemsText, parseBringArgs, planBring, resolveBringItem, stockOf } from '../../../src/skills/home/bring.ts';
 import { HomeLogistics, type HomeSkills } from '../../../src/skills/home/logistics.ts';
 import { stockLine } from '../../../src/skills/home/memory.ts';
 import { ChestMemory, chestKey, type ChestRecord } from '../../../src/world/cache/chests.ts';
@@ -61,6 +61,71 @@ describe('bring: the word, the arguments, the reply words', () => {
   });
 });
 
+describe('bring: Track BJ, whole boxes or items out of a box', () => {
+  const dirt = resolveBringItem('dirt', ['dirt']);
+  const full = { dirt: 1728 };
+  const o = { x: 0, y: 0, z: 0 };
+  const boxRec = (x: number, contents: Record<string, number>, list: Record<string, number>[]) =>
+    rec(x, { ...contents, undyed_shulker_box: list.length }, { boxes: { empty: 0, full: list.length }, inBoxes: list.reduce<Record<string, number>>((a, b) => { for (const [k, v] of Object.entries(b)) a[k] = (a[k] ?? 0) + v; return a; }, {}), boxList: list });
+
+  it('half a box is the threshold; the extract box is the one holding enough with the least', () => {
+    expect(halfBox(dirt)).toBe(864);
+    expect(halfBox(resolveBringItem('ender_pearl', ['ender_pearl']))).toBe(216);
+    expect(extractChoice([0, 1728, 100, 30], 50)).toBe(2);
+    expect(extractChoice([0, 1728, 100, 30], 200)).toBe(1);
+    expect(extractChoice([10, 30], 200)).toBe(1);
+    expect(extractChoice([0, 0], 5)).toBeUndefined();
+  });
+
+  it('!bring dirt 1000 with loose dirt and a full box: the box first, not 16 stacks', () => {
+    const p = planBring([rec(2, { dirt: 640 }), boxRec(4, {}, [full])], dirt, 1000, 0, o);
+    expect(p.sources.map((s) => [s.key, s.take, s.box, s.boxes])).toEqual([['4,0,0', 1000, true, 1]]);
+    expect(p.short).toBe(0);
+  });
+
+  it('!bring dirt 2000: one box, then the loose remainder; a second box only once the loose stacks run out', () => {
+    const p = planBring([rec(2, { dirt: 640 }), boxRec(4, {}, [full, full])], dirt, 2000, 0, o);
+    expect(p.sources.map((s) => [s.key, s.take, s.box, !!s.extract])).toEqual([
+      ['4,0,0', 1728, true, false],
+      ['2,0,0', 272, false, false],
+    ]);
+    const q = planBring([rec(2, { dirt: 100 }), boxRec(4, {}, [full, full])], dirt, 2000, 0, o);
+    expect(q.sources.map((s) => [s.key, s.take, s.box, !!s.extract])).toEqual([
+      ['4,0,0', 1728, true, false],
+      ['2,0,0', 100, false, false],
+      ['4,0,0', 172, false, true],
+    ]);
+  });
+
+  it('!bring dirt 10 with boxes only: taken out of the smallest box holding enough; never a whole box', () => {
+    const p = planBring([boxRec(4, {}, [full, { dirt: 40, stone: 64 }])], dirt, 10, 0, o);
+    expect(p.sources).toEqual([{ key: '4,0,0', pos: { x: 4, y: 0, z: 0 }, kind: 'chest', take: 10, box: false, extract: true }]);
+  });
+
+  it('a box of nothing but the item comes whole when it would be emptied anyway; the rest out of a box', () => {
+    const small = { dirt: 500 };
+    const p = planBring([boxRec(4, {}, [small, small, small])], dirt, 1200, 0, o);
+    expect(p.sources.map((s) => [s.take, s.box, !!s.extract, s.boxes])).toEqual([
+      [1000, true, false, 2], // 500 <= what is still needed: whole
+      [200, false, true, undefined], // 200 < 500: out of the box
+    ]);
+    const q = planBring([boxRec(4, {}, [small, small, small])], dirt, 1900, 0, o);
+    expect(q.sources.map((s) => [s.take, s.box, s.boxes])).toEqual([[1500, true, 3]]);
+    expect(q.short).toBe(400);
+    // a mixed box with 5 dirt (review 01b9b9d #9): never whole, even with 1000 missing
+    const r = planBring([boxRec(4, {}, [{ dirt: 5, stone: 1000 }, { dirt: 1728 }])], dirt, 1000, 0, o);
+    expect(r.sources.map((s) => [s.take, s.box, !!s.extract])).toEqual([[1000, true, false]]);
+    const m = planBring([boxRec(4, {}, [{ dirt: 5, stone: 1000 }])], dirt, 1000, 0, o);
+    expect(m.sources.map((s) => [s.take, s.box, !!s.extract])).toEqual([[5, false, true]]);
+  });
+
+  it('an old record without the per-box list: its boxes as one', () => {
+    const r = rec(4, { undyed_shulker_box: 1 }, { boxes: { empty: 0, full: 1 }, inBoxes: { dirt: 1728 } });
+    expect(boxesOf(r)).toEqual([{ dirt: 1728 }]);
+    expect(planBring([r], dirt, 900, 0, o).sources[0]).toMatchObject({ box: true, take: 900 });
+  });
+});
+
 describe('bring: the plan', () => {
   const torch = resolveBringItem('torch', ['torch']);
 
@@ -89,10 +154,17 @@ describe('bring: the plan', () => {
     const p = planBring(records, dia, 1, 0, { x: 0, y: 0, z: 0 });
     expect(p.sources).toHaveLength(1);
     expect(p.sources[0]!.box).toBe(false);
+    // Track BJ: 2 still needed and a box of nothing but 2 diamonds: emptied anyway, so it comes whole
     const q = planBring(records, dia, 3, 0, { x: 0, y: 0, z: 0 });
-    expect(q.sources.map((s) => [s.key, s.take, s.box])).toEqual([
-      ['2,0,0', 1, false],
-      ['4,0,0', 2, true],
+    expect(q.sources.map((s) => [s.key, s.take, s.box, !!s.extract])).toEqual([
+      ['2,0,0', 1, false, false],
+      ['4,0,0', 2, true, false],
+    ]);
+    // 1 still needed: below what the box holds: taken out of it
+    const e = planBring(records, dia, 2, 0, { x: 0, y: 0, z: 0 });
+    expect(e.sources.map((s) => [s.key, s.take, s.box, !!s.extract])).toEqual([
+      ['2,0,0', 1, false, false],
+      ['4,0,0', 1, false, true],
     ]);
     // the other half of a double chest is never a source
     const dbl = [rec(2, { diamond: 5 }, { partner: { x: 3, y: 0, z: 0 } }), rec(3, { diamond: 5 })];
@@ -224,18 +296,20 @@ describe('bring: the withdrawal (logistics.withdraw)', () => {
     expect(r).toMatchObject({ ok: true, taken: { iron_ingot: 8 }, carried: 8, chests: 1 });
   });
 
-  it('a shulker box holding the item, the only source: the whole box is taken; its memory leaves the box counts', async () => {
-    const h = fakeHome({ '3,0,0': { items: [item('dirt', 5), item('undyed_shulker_box', 1)], raws: [undefined, nbt([{ name: 'diamond', count: 2 }, { name: 'stone', count: 64 }])] } });
+  it('Track BJ: a big need: the box full of the item is taken whole before the loose stacks; its memory leaves the box counts', async () => {
+    const full = Array.from({ length: 27 }, () => ({ name: 'dirt', count: 64 }));
+    const h = fakeHome({ '3,0,0': { items: [item('dirt', 5), item('undyed_shulker_box', 1)], raws: [undefined, nbt(full)] } });
     await h.logistics.scan(never);
     const before = h.memory.get({ x: 3, y: 0, z: 0 })!;
     expect(before.boxes).toEqual({ empty: 0, full: 1 });
-    expect(before.inBoxes).toEqual({ diamond: 2, stone: 64 });
-    const dia = resolveBringItem('diamond', ['diamond']);
-    const r = await h.logistics.withdraw(never, { item: dia, want: 2 });
-    expect(r).toMatchObject({ ok: true, taken: { undyed_shulker_box: 1 }, boxes: [{ name: 'undyed_shulker_box', items: 2, from: 'chest 3 0 0' }], carried: 0 });
+    expect(before.inBoxes).toEqual({ dirt: 1728 });
+    expect(before.boxList).toEqual([{ dirt: 1728 }]);
+    const r = await h.logistics.withdraw(never, { item: resolveBringItem('dirt', ['dirt']), want: 1000 });
+    expect(r).toMatchObject({ ok: true, taken: { undyed_shulker_box: 1 }, boxes: [{ name: 'undyed_shulker_box', items: 1728, from: 'chest 3 0 0' }], carried: 0 });
     const after = h.memory.get({ x: 3, y: 0, z: 0 })!;
     expect(after.boxes).toEqual({ empty: 0, full: 0 });
     expect(after.inBoxes).toBeUndefined();
+    expect(after.boxList).toBeUndefined();
     expect(after.contents).toEqual({ dirt: 5 });
     expect(h.inv.some((s) => s?.name === 'undyed_shulker_box')).toBe(true);
   });

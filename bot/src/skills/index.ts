@@ -27,7 +27,8 @@ import type { InputLoop } from './input/inputLoop.ts';
 import { PHYSICS } from './input/physics.ts';
 import { Navigator, type GotoReport, type NavGotoOptions, type NavigatorOptions } from './nav/navigator.ts';
 import type { NavGoal } from './nav/goals.ts'; // Track R
-import { DEFAULT_THROWAWAY } from './nav/actions.ts';
+import { breakBlocker, DEFAULT_THROWAWAY } from './nav/actions.ts';
+import { recoverProne, type ProneResult } from './fly/prone.ts'; // Track BH
 import { oppositeFace } from './place/face.ts';
 import { angleDiff, turnTowards, yawTowards } from './nav/follower.ts';
 import { blockQueryOf, worldSource, type BlockStore } from './terrain/query.ts';
@@ -455,13 +456,22 @@ export class BotSkills implements Skills {
             resolve({ ok: false, reason: 'interrupted' });
             return;
           }
-          const r = await this.nav.goto(goal, opts).then((x) => this.surfaceAndRetry(x, token, goal, opts)).then((x) => (!x.ok && x.reason === 'unreachable' ? this.withFallNote(goal, x, opts) : x));
+          const r = await this.nav
+            .goto(goal, opts)
+            .then((x) => this.surfaceAndRetry(x, token, goal, opts))
+            .then((x) => this.unproneAndRetry(x, token, goal, opts))
+            .then((x) => (!x.ok && x.reason === 'unreachable' ? this.withFallNote(goal, x, opts) : x));
           this.end(token);
           resolve(r);
         });
       });
     }
-    const p = this.nav.goto(goal, opts).then((r) => this.surfaceAndRetry(r, token, goal, opts)).then((r) => (!r.ok && r.reason === 'unreachable' ? this.withFallNote(goal, r, opts) : r)); // Track BF: swim up; Track BI: say why a long fall was refused
+    // Track BF: swim up; Track BH: stand up from the crawl pose; Track BI: say why a long fall was refused
+    const p = this.nav
+      .goto(goal, opts)
+      .then((r) => this.surfaceAndRetry(r, token, goal, opts))
+      .then((r) => this.unproneAndRetry(r, token, goal, opts))
+      .then((r) => (!r.ok && r.reason === 'unreachable' ? this.withFallNote(goal, r, opts) : r));
     void p.finally(() => {
       this.end(token);
     });
@@ -481,6 +491,39 @@ export class BotSkills implements Skills {
       return r;
     }
     }
+
+  /**
+   * Track BH: the body is held prone (the crawl pose after a glide ended under less than 1.8 of headroom):
+   * the planner plans a standing body and has no start node there. Break what keeps it from standing
+   * (skills/fly/prone.ts, the navigator's break rules) and plan once more.
+   */
+  unprone(cancelled: () => boolean = () => false): Promise<ProneResult> {
+    const w = this.world;
+    const digger = this.digger;
+    if (!w.blockAt || !digger) return Promise.resolve({ ok: !this.loop.state.prone, dug: [], why: 'no digging' });
+    const blockAt = w.blockAt.bind(w);
+    return recoverProne({
+      pos: () => this.loop.state.pos,
+      prone: () => this.loop.state.prone === true && !cancelled(),
+      block: (x, y, z) => blockAt({ x, y, z }),
+      breakBlocker: (x, y, z) => breakBlocker(this.nav.grid, x, y, z, this.nav.breakRules()),
+      dig: (q) => digger.dig(q),
+      waitTicks: (n) => this.loop.waitTicks(n),
+    });
+  }
+
+  private async unproneAndRetry(r: SkillResult, token: number, goal: NavGoal, opts?: NavGotoOptions): Promise<SkillResult> {
+    if (r.ok || r.reason !== 'unreachable' || token !== this.epoch || this.loop.state.prone !== true) return r;
+    const from = this.loop.state.pos;
+    const u = await this.unprone(() => token !== this.epoch);
+    this.log.info(`goto: prone at ${from.x.toFixed(1)} ${from.y.toFixed(1)} ${from.z.toFixed(1)} (no standable node); ${u.ok ? `standing again${u.dug.length ? ` after breaking ${u.dug.join(', ')}` : ''}` : `still prone: ${u.why ?? '?'}`}`);
+    if (!u.ok || token !== this.epoch) return r;
+    const again = await this.nav.goto(goal, opts);
+    if (again.ok || again.reason !== 'unreachable' || opts?.allowBreak === true || token !== this.epoch) return again;
+    // standing, but boxed in (a 1-high gap under a canopy or a slab roof all round): dig out once, the break rules hold
+    this.log.info(`goto: standing but no way out of the gap; digging out (allowBreak for this walk)`);
+    return this.nav.goto(goal, { ...opts, allowBreak: true });
+  }
 
   /**
    * Track BF: a goto that failed with the head under water (the planner has no start node on a sea

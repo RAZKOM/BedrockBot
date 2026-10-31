@@ -35,6 +35,9 @@ import type { CommandDeps } from '../tasks/process/deps.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { HomeChore, HomeJobProcess, type HomeJob, type HomeRunner } from '../tasks/process/unload.ts';
 import { getControllerOf } from './commands-get.ts';
+import { survivalKitOf } from './commands-survival.ts';
+import { BoxOps } from '../skills/supply/boxes.ts'; // Track BJ
+import { setSupply, Supply } from '../skills/supply/supply.ts'; // Track BJ
 
 export const HOME_COMMANDS = ['unload', 'stock', 'chests', 'boxes'] as const; // Track AV: boxes
 
@@ -110,6 +113,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     ...(containers ? { containers } : {}),
     ...(d.pve ? { selectHotbar: (slot: number) => void d.pve!.hotbar.select(slot) } : {}),
     probe: (goal, from) => probePath(mob.skills.nav, goal, from), // Track AN: walking distance
+    notify: (line) => d.chat.say(line), // Track BJ: where a box was left
     log,
   });
   const runner: HomeRunner = {
@@ -146,6 +150,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     if (logistics.busy) return;
     const st = stashFor(processes); // Track AV: the stash step's own box (placed, filled, broken) is no container of home
     if (st?.busy && st.boxAt?.x === p.x && st.boxAt.y === p.y && st.boxAt.z === p.z) return;
+    if (logistics.boxes.standing.has(`${p.x},${p.y},${p.z}`)) return; // Track BJ: a box of the logistics or the Supply (a build next to home)
     const h = home();
     if (!h) return;
     const was = !!before && isHomeContainer(before.name);
@@ -167,6 +172,23 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
   const start = (job: HomeJob): HomeJobProcess => processes.add(new HomeJobProcess(runner, job));
   const control: HomeControl = { logistics, chore, memory, start };
   controls.set(d.task, control);
+  // Track BJ (decision 0052): the task's supply layer: carried boxes first (placed wherever the bot is: the box goes into
+  // the hotbar with the survival kit, never by a walk to a home chest), then the chests at home through `!bring`'s withdrawal.
+  // It shares the logistics' box state (left and standing boxes) and serial lock.
+  const ops = new BoxOps({
+    state: logistics.boxes.state,
+    skills: logistics.skillsForBoxes(),
+    inventory: world.inventory,
+    blockAt: (p) => world.blockAt(p),
+    position: () => mob.position(),
+    keepName: () => logistics.keepName(),
+    ...(d.pve ? { selectHotbar: (slot: number) => void d.pve!.hotbar.select(slot) } : {}),
+    toHotbar: async (slot) => (await survivalKitOf(d.task)?.hotbar(slot)) ?? 'the box is not in the hotbar',
+    log,
+    label: 'supply',
+    notify: (line: string) => d.chat.say(line),
+  });
+  setSupply(d.task, new Supply({ ops, inventory: world.inventory, keepName: () => logistics.keepName(), records: () => logistics.records(), withdraw: (c, req) => logistics.withdraw(c, req), owed: () => logistics.owedSlots(), serial: (fn) => logistics.exclusive(fn), log }));
 
   d.chat.register({
     name: 'unload',

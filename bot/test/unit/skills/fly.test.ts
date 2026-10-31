@@ -630,13 +630,17 @@ function comeRig(o: { tunnel?: boolean; mountain?: boolean } = {}) {
   registerFlyCommands(deps);
   return { pve: pve as unknown as { come(n: string): Promise<SkillResult> }, said, walks, comes, added, settings };
 }
-const settle = () => new Promise((r) => setTimeout(r, 20));
+// (Track BH: the takeoff is simulated before the reply now: wait for the first line, up to 5 s)
+const settle = async (rig?: { said: string[] }): Promise<void> => {
+  for (let i = 0; i < 250 && rig?.said.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+  await new Promise((r) => setTimeout(r, 20));
+};
 
 describe('fly: the automatic flight of !come (commands-fly.ts)', () => {
   it('!come to a player 300 blocks away under open sky flies to the player (half 2); with autoFly off it walks', async () => {
     const r = comeRig();
     void r.pve.come('Steve');
-    await settle();
+    await settle(r);
     expect(r.said).toEqual(['flying (300 blocks; walking would be ~1 min)']);
     const fly = r.added.find((p): p is FlyProcess => p instanceof FlyProcess);
     // Track BF: a landable goal is a walk landing: any of its flat dry neighbourhood (an off-centre touchdown is no go-around)
@@ -653,7 +657,7 @@ describe('fly: the automatic flight of !come (commands-fly.ts)', () => {
   it('review item 1: underground (a tunnel 7 under the surface) !come walks to an open-sky cell on the surface first, not along the tunnel', async () => {
     const r = comeRig({ tunnel: true });
     void r.pve.come('Steve');
-    await settle();
+    await settle(r);
     expect(r.said[0]).toBe(`fly: no open sky here (roof at y ${FEET + 2}, 2 blocks up); walking towards Steve and taking off outside`);
     expect(r.walks[0]).toEqual({ type: 'block', p: { x: 0, y: FEET + 7, z: 4 } });
     expect(r.added.some((p) => p instanceof FlyProcess)).toBe(false);
@@ -662,7 +666,7 @@ describe('fly: the automatic flight of !come (commands-fly.ts)', () => {
   it('review item 4: a player on a plateau more than 80 above the bot: its top is the plateau top, not the cell skyTop started in, so the player is landed on', async () => {
     const r = comeRig({ mountain: true });
     void r.pve.come('Steve');
-    await settle();
+    await settle(r);
     expect(r.said).toEqual(['flying (300 blocks; walking would be ~1 min)']);
     const fly = r.added.find((p): p is FlyProcess => p instanceof FlyProcess);
     expect(fly?.target).toMatchObject({ top: FEET + 101, walk: true, cell: { kind: 'goal' } });

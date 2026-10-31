@@ -127,6 +127,8 @@ export class FallGuard {
   protect: () => { x: number; y: number; z: number; r: number } | undefined = () => undefined;
   /** A fight runs (registry wiring: the combat controller is busy): no clutch unless the fall would kill. */
   inCombat: () => boolean = () => false;
+  /** Track BH: a fall the flight means (an elytra flight runs: the ledge takeoff steps off an edge): never armed. */
+  intended: () => boolean = () => false;
   /** The last clutch tried or refused (tests, status). */
   last: ClutchRecord | undefined;
   readonly stats = { clutches: 0, placed: 0, recovered: 0, refused: 0, waterLeft: 0 };
@@ -440,7 +442,7 @@ export class FallGuard {
   /** Predict the landing; arm the clutch when it would hurt. */
   private arm(tick: bigint, s: InputLoopState): void {
     const st = this.settings();
-    if (!st.clutch || this.d.loop.command.glide) return;
+    if (!st.clutch || this.d.loop.command.glide || this.intended()) return;
     const land = this.predictLanding(s);
     if (!land) return;
     const self = this.d.world.self;

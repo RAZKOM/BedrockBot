@@ -200,9 +200,14 @@ no longer switches the Containers' private option.
 | | `!get <item> [n]` | `!bring <item> [n] [to <player>\|home]` |
 |---|---|---|
 | makes or moves | makes new items (gathers, mines, hunts, farms) | moves items already stored in the chests at home |
-| takes from chests | never | only from chests (loose stacks first, a full shulker box as the last source) |
+| takes from chests | never | only from chests (half a box or more: whole boxes first; less: loose stacks, then a few out of a box) |
 | ends | where the job ends; at home `!unload` / the `autoUnload` chore put it away | within 2 blocks of the player; `home`, the console or a player not online: at home |
 | stock known | the reply names `!bring` when the chests already hold n | the reply says what is short |
+
+Track BJ (decision [0052](decisions/0052-shulker-aware-jobs.md)): `!get` stays chest-free. The shared supply
+layer (docs/home.md "Supply") is the only route that takes from the chests at home, and only `!bring` (and a job
+asking `Supply.ensure` with `home` explicitly) uses it; `!get` never does. `!bring` takes whole shulker boxes for
+half a box or more, and takes a few items out of a box (the box goes back) for less.
 
 The same item words work for both (`iron`, `wood`, `coal`, `diamonds`); `!bring` also knows any item
 the chest memory knows (`!bring torches`, `!bring shulker`). The planning rules, the delivery and the

@@ -25,6 +25,7 @@ import type { BlockReader } from '../skills/build/sim.ts';
 import { BUILD_USAGE, parseSpec } from '../skills/build/spec.ts';
 import type { BuildSpec, Cell } from '../skills/build/types.ts';
 import { lookup } from '../skills/items/catalog.ts';
+import { supplyOf } from '../skills/supply/supply.ts'; // Track BJ
 import type { Logger } from '../log.ts';
 
 export const BUILD_HELP = 'fill|clear|replace|wall|floor|pillar|file ... [fetch]; materials, status, stop (builds walls, floors, boxes, saved structures)';
@@ -39,6 +40,8 @@ export interface BuildHost {
   world: BlockReader;
   position(): Cell | undefined;
   inventory: { count(name: string): number };
+  /** Track BJ: items of a kind inside the carried shulker boxes (the task's Supply); the materials count them. */
+  boxed?(name: string): number;
   throwawayMin(): number;
   scaffold(): boolean;
   processes: Pick<ProcessManager, 'add' | 'stop' | 'find' | 'userProcesses'>;
@@ -103,7 +106,8 @@ export class BuildController {
   }
 
   private materialsFor(plan: Plan): Materials {
-    return materialsOf(plan, this.h.inventory, { throwawayMin: this.h.throwawayMin() });
+    const boxed = this.h.boxed?.bind(this.h);
+    return materialsOf(plan, this.h.inventory, { throwawayMin: this.h.throwawayMin() }, boxed);
   }
 
   /** `!build materials [<build>]`. */
@@ -243,12 +247,16 @@ export function registerBuildCommands(d: CommandDeps, extra: BuildExtra = {}): B
     inventory: world.inventory,
     reserve: () => ({ throwawayMin: d.settings.get('throwawayMin') }),
     cancel: () => skills.cancel(),
+    get supply() {
+      return supplyOf(d.task); // Track BJ: registered by commands-home
+    },
     log,
   };
   const c = new BuildController({
     world: { blockAt: (p) => world.blockAt(p) },
     position: () => mob.position(),
     inventory: world.inventory,
+    boxed: (name) => supplyOf(d.task)?.carried(name) ?? 0, // Track BJ
     throwawayMin: () => d.settings.get('throwawayMin'),
     scaffold: () => d.settings.get('buildScaffold'),
     processes,

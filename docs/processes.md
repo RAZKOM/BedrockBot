@@ -133,6 +133,10 @@ its plan yet; `navRemaining` reads its `active` record read-only (an open issue 
 | `flyHeadroom` | 4 | number | flight (Track BF): a cell under a roof is landable when the roof is at least this high over the feet and a corridor leads in from the open side (the approach is simulated) |
 | `flyOverhangDepth` | 10 | number | flight (Track BF): an overhang landing flies at most this many blocks under the roof (0 = never under a roof) |
 | `flySneakLand` | on | boolean | flight (Track BF): sneak through the touchdown and the settle; released when the flight ends |
+| `flyLedgeTakeoff` | on | boolean | flight (Track BH, docs/flight.md "Ledge takeoff"): step off a platform edge (sneak to the rim, release, glide as the fall begins) when the jump takeoff is refused or the start is a small platform |
+| `glideDown` | on | boolean | flight (Track BH, "Glide down"): a goto / come that ends unreachable with the goal far below glides down when a simulated glide from a ledge lands near it (rockets optional), then walks |
+| `glideDownMinDrop` | 10 | number | flight (Track BH): the glide down only for a goal at least this far below the feet |
+| `glideDownMinDistance` | 16 | number | flight (Track BH): the glide down only for a goal at least this far away horizontally |
 | `guardWhileWalking` | near | text | guard while a user process walks (Track AO): `reach` fights only mobs within reach, `near` adds melee mobs, creepers and archers aiming at the bot within 6 path blocks, `all` the old behaviour |
 | `mineBranchY` | auto | text | branch mining (Track AI): `auto` picks the ore's best level (coal 40, iron 16, copper 48, gold -16, redstone -58, lapis 0, diamond -58, emerald 232 in mountains), a number overrides |
 | `exploreRadius` | 128 | number | `!explore` without a radius: the area walked around home (16..1024) |

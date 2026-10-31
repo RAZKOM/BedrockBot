@@ -3,8 +3,11 @@
 // (yaw, pitch, the jump key, the glide request, a rocket). Phases:
 //
 //   takeoff   on the ground: jump; falling: request the glide (start_gliding goes out with the next
-//             input; from a ledge the fall is the takeoff); along the takeoff heading the sky check chose
-//   climb     rockets back to back, pitched up, until the cruise height; the path ahead is checked
+//             input; from a ledge the fall is the takeoff); along the takeoff heading the sky check chose.
+//             Track BH, the ledge takeoff (`ledge`): sneak-walk to the edge along its heading, release the
+//             sneak there and step off; the glide is requested as the fall begins and dived (LEDGE_DIVE)
+//             until it flies (LEDGE_SPEED), no rocket needed
+//   climb    rockets back to back, pitched up, until the cruise height; the path ahead is checked
 //             every tick (Track AU2): a solid within 20 ticks of the predicted glide levels the climb
 //             off or turns it, and when nothing clears (a roof) the flight ends on the ground under it
 //   cruise    level towards the target along the glide line (Track AU2, the energy model): a rocket
@@ -74,6 +77,9 @@ export interface BrainControl {
   glide: boolean;
   /** Use a rocket this tick. */
   fire: boolean;
+  /** Track BH, the ledge takeoff: walk forward (the walk to the edge and the step off), sneaking up to the edge. */
+  forward?: number;
+  sneak?: boolean;
 }
 
 /** (Track BF: `no_landing`: the hold over a goal that never got a landing timed out; the nearest dry ground.) */
@@ -102,6 +108,12 @@ export interface BrainOptions {
   margin?: number;
   /** Track AU2: the takeoff heading the sky check chose (held until the climb is above the obstacles); default towards the target. */
   takeoffYaw?: number;
+  /**
+   * Track BH: a ledge takeoff instead of the jump (docs/flight.md "Ledge takeoff"): the body stands on the
+   * edge cell; `yaw` is the heading off the edge (the fall corridor checked along it). The takeoff and the
+   * climb hold it until TAKEOFF_HOLD above the start, like the sky check's heading.
+   */
+  ledge?: { yaw: number };
   /** Track BF: one line per notable decision (every go-around with its reason, the hold, the corridor), for the log. */
   note?: (msg: string) => void;
   /** The planner's seed (deterministic flights). */
@@ -127,9 +139,18 @@ export interface FlightStats {
   holdTicks: number;
   /** Track BF: why each go-around was flown (one line each). */
   goAroundReasons: string[];
+  /** Track BH, a ledge takeoff: ticks of the walk to the edge, and the height the fall took until the glide flew (LEDGE_SPEED). */
+  ledgeWalkTicks?: number;
+  ledgeDrop?: number;
 }
 
 const CLIMB_PITCH = -38;
+/** Track BH, the ledge takeoff: the dive's pitch after the step off and the speed at which the glide flies (then the usual phases). */
+export const LEDGE_DIVE = 20;
+export const LEDGE_SPEED = 0.7;
+/** Track BH: the sneak is released at the edge once the body stood still this many ticks (the edge rule holds it), or after LEDGE_WALK_MAX ticks of walking. */
+const LEDGE_STILL = 2;
+const LEDGE_WALK_MAX = 60;
 
 /** The rocket climb's pitch for a climb of `height` blocks: shallow for a short one (a -38 climb overshoots a 12-block one by 14 blocks of momentum). */
 export function climbPitchFor(height: number): number {
@@ -185,7 +206,7 @@ export class FlightBrain {
   // (entryAbove is set by the cruise when it hands over to the approach)
   /** Why the flight is ending early (set by `landNow`), kept for the outcome. */
   private endReason: FlightEndReason | undefined;
-  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note'>;
+  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge'>;
   private jumped = false;
   private requested = false;
   private wasGliding = false;
@@ -215,6 +236,13 @@ export class FlightBrain {
   private descentNone = false;
   /** Track BF: the holding circle over a target that is not landable yet (`LandingTarget.hold`). */
   private holding: { fit: SpiralFit; dir: 1 | -1; y: number } | undefined;
+  /** Track BH, the ledge takeoff: ticks walked towards the edge, ticks standing still there, the sneak released, the step taken. */
+  private ledgeWalk = 0;
+  private ledgeStill = 0;
+  private ledgeReleased = false;
+  private ledgeOff = false;
+  /** Track BH: descent circles flown again instead of a go-around (no rocket, too high). */
+  private glideRedescents = 0;
 
   constructor(target: LandingTarget, opts: BrainOptions) {
     this.target = target;
@@ -228,8 +256,9 @@ export class FlightBrain {
       groundAt: opts.groundAt,
       obstacle: opts.obstacle,
       skyTop: opts.skyTop,
-      takeoffYaw: opts.takeoffYaw,
+      takeoffYaw: opts.takeoffYaw ?? opts.ledge?.yaw,
       note: opts.note,
+      ledge: opts.ledge,
     };
     this.planner = new ApproachPlanner(opts.seed ?? 12345, opts.obstacle);
   }
@@ -367,6 +396,7 @@ export class FlightBrain {
 
   private takeoff(i: BrainInput, ctl: BrainControl): BrainControl {
     const b = i.body;
+    if (this.o.ledge) return this.ledgeTakeoff(i, ctl, this.o.ledge.yaw);
     ctl.yaw = turnTowards(i.yaw, this.climbYaw(b), 30);
     ctl.pitch = 0;
     if (b.gliding) {
@@ -386,6 +416,52 @@ export class FlightBrain {
     } else if (b.onGround && this.jumped && !this.requested) {
       // back on the ground without a glide (the jump was spent): jump again
       this.jumped = false;
+    }
+    return ctl;
+  }
+
+  /**
+   * Track BH, the ledge takeoff (docs/flight.md "Ledge takeoff"): turn to the edge's heading, walk to the
+   * edge sneaking (the edge rule holds the body there whatever happens), release the sneak once it stands
+   * still at the edge and walk off; the glide is requested on the first falling tick ("from a ledge the
+   * fall is the takeoff") and dived at LEDGE_DIVE along the heading until it flies at LEDGE_SPEED, then
+   * the climb (which hands over to the cruise at once when the cruise height is not above the start).
+   */
+  private ledgeTakeoff(i: BrainInput, ctl: BrainControl, yaw: number): BrainControl {
+    const b = i.body;
+    const h = Math.hypot(b.vel.x, b.vel.z);
+    ctl.yaw = turnTowards(i.yaw, yaw, 30);
+    if (b.gliding) {
+      if (h >= LEDGE_SPEED) {
+        this.stats.ledgeDrop = (this.startY ?? b.pos.y) - b.pos.y;
+        this.o.note?.(`ledge takeoff: gliding at ${h.toFixed(2)} blocks a tick, ${this.stats.ledgeDrop.toFixed(1)} under the edge, after ${this.ledgeWalk} ticks of walk`);
+        this.phase = 'climb';
+        return this.climb(i, ctl);
+      }
+      ctl.glide = true;
+      ctl.pitch = LEDGE_DIVE;
+      return ctl;
+    }
+    if (b.onGround && !this.ledgeOff) {
+      ctl.pitch = 0;
+      ctl.sneak = !this.ledgeReleased;
+      if (Math.abs(yawDiff(ctl.yaw, yaw)) > 1) return ctl; // turned first: a walk while turning drifts off the edge's line
+      this.ledgeWalk++;
+      this.stats.ledgeWalkTicks = this.ledgeWalk;
+      ctl.forward = 1;
+      if (!this.ledgeReleased) {
+        this.ledgeStill = h < 0.003 && this.ledgeWalk > 3 ? this.ledgeStill + 1 : 0;
+        if (this.ledgeStill >= LEDGE_STILL || this.ledgeWalk > LEDGE_WALK_MAX) this.ledgeReleased = true;
+      }
+      return ctl;
+    }
+    // off the edge: the glide as soon as the fall begins (BDS wants the request while falling)
+    this.ledgeOff = true;
+    ctl.forward = 1;
+    ctl.pitch = LEDGE_DIVE;
+    if (!b.onGround && b.vel.y < 0) {
+      this.requested = true;
+      ctl.glide = true;
     }
     return ctl;
   }
@@ -466,7 +542,9 @@ export class FlightBrain {
     const willReach = b.pos.y + climbMomentum(b.vel.y);
     if (willReach >= this.o.cruiseY || d <= APPROACH_DISTANCE + 6) {
       // (Track BF: a held target or an overhang's corridor is flown from the cruise, never straight into an approach)
-      this.phase = d <= APPROACH_DISTANCE + 6 && !this.target.hold && this.linedUp(b) ? 'approach' : 'cruise';
+      // (Track BH: nor from far too high: a glide down off a ledge 40 up starts within the approach distance; the cruise's descent geometry first)
+      const high = b.pos.y - (this.target.top + APPROACH_HEIGHT) > SPIRAL_ABOVE;
+      this.phase = d <= APPROACH_DISTANCE + 6 && !this.target.hold && this.linedUp(b) && !high ? 'approach' : 'cruise';
       return this.phase === 'approach' ? this.approach(i, ctl, this.target) : this.cruise(i, ctl);
     }
     const h = Math.hypot(b.vel.x, b.vel.z);
@@ -802,6 +880,23 @@ export class FlightBrain {
         this.goaroundBearing = undefined;
         this.planner.reset();
         return this.goaround(i, ctl);
+      }
+      // Track BH: without a rocket but too high (`over`, the entry more than 4 under the body): a descent circle again
+      // instead of the emergency landing (the glide down has height to spend, no rocket to climb with); at most twice
+      if (td.kind === 'over' && b.pos.y - (aim.top + APPROACH_HEIGHT) > 4 && this.glideRedescents < 2) {
+        this.glideRedescents++;
+        this.o.note?.(`no rocket for a go-around, too high: a descent circle again (${this.glideRedescents}); ${line}`);
+        this.phase = 'cruise';
+        this.descent = undefined;
+        this.descentNone = false;
+        this.planner.reset();
+        const c = this.chooseDescent(b, aim);
+        if (c) {
+          this.descent = c;
+          this.stats.descents.push(c.kind === 'spiral' ? `spiral r${c.fit.radius} at ${Math.round(hdist(c.fit.centre, aim))} out from ${Math.round(b.pos.y - aim.top)} above (again)` : `S-turns from ${Math.round(b.pos.y - aim.top)} above (again)`);
+          if (this.descend(i, ctl, aim)) return ctl;
+        }
+        return this.cruise(i, ctl);
       }
       // no go-around left: land on the nearest safe ground instead and report
       this.o.note?.(`no go-around left (${this.stats.goArounds} flown, ${i.rockets} rockets): the nearest safe ground; ${line}`);

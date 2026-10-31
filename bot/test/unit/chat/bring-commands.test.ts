@@ -90,16 +90,32 @@ describe('!bring', () => {
     expect(t.said[1]).toBe('brought 10 iron_ingots (from 1 chest; 10 short: the chests hold no more)');
   });
 
-  it('a shulker box as the only source: said at the start and the end', async () => {
-    const t = host([rec(3, { undyed_shulker_box: 1 }, { boxes: { empty: 0, full: 1 }, inBoxes: { diamond: 2 } })]);
+  it('Track BJ: a few out of a shulker box: taken out of it, the box goes back; said at the start and the end', async () => {
+    // a box of 5 diamonds: 2 asked for (a box of only 2 would come whole: it would be emptied anyway)
+    const t = host([rec(3, { undyed_shulker_box: 1 }, { boxes: { empty: 0, full: 1 }, inBoxes: { diamond: 5 } })]);
     t.run('diamond 2');
-    expect(t.said[0]).toBe('bringing 2 diamonds to Steve (from 1 chest, a full shulker box comes along: the only source)');
-    t.pending.withdraw[0]!(report({ taken: { undyed_shulker_box: 1 }, boxes: [{ name: 'undyed_shulker_box', items: 2, from: 'chest 3 0 0' }], from: ['chest 3 0 0'], carried: 0, chests: 1 }));
+    expect(t.said[0]).toBe('bringing 2 diamonds to Steve (from 1 chest, some taken out of a shulker box, which goes back)');
+    t.pending.withdraw[0]!(report({ taken: { diamond: 2 }, extracted: [{ items: 2, from: 'chest 3 0 0', back: true }], from: ['chest 3 0 0'], carried: 2, chests: 2 }));
     await flush();
     expect(t.calls).toContain('deliver Steve');
     t.pending.deliver[0]!({ ok: true, at: 'player' });
     await flush();
-    expect(t.said[1]).toBe('brought 1 shulker box holding 2 diamonds (from 1 chest; the only source: a full shulker box out of chest 3 0 0)');
+    expect(t.said[1]).toBe('brought 2 diamonds (from 1 chest; 2 taken out of a shulker box from chest 3 0 0, the box went back)');
+  });
+
+  it('Track BJ: a big need: whole full boxes come along first, the rest loose', async () => {
+    const box = { dirt: 1728 };
+    const t = host([rec(3, { dirt: 300, undyed_shulker_box: 2 }, { boxes: { empty: 0, full: 2 }, inBoxes: { dirt: 3456 }, boxList: [box, box] })]);
+    t.run('dirt 2000');
+    expect(t.said[0]).toBe('bringing 2000 dirt to Steve (from 1 chest, a full shulker box comes along)');
+    t.pending.withdraw[0]!(report({ taken: { undyed_shulker_box: 1, dirt: 272 }, boxes: [{ name: 'undyed_shulker_box', items: 1728, from: 'chest 3 0 0' }], from: ['chest 3 0 0'], carried: 272, chests: 1 }));
+    await flush();
+    t.pending.deliver[0]!({ ok: true, at: 'player' });
+    await flush();
+    expect(t.said[1]).toBe('brought 272 dirt and 1 shulker box holding 1728 dirt (from 1 chest; a full shulker box out of chest 3 0 0)');
+    // the box could not go back yet: said (a debt: it goes back before the next withdrawal or unload)
+    const job: BringJob = { item: resolveBringItem('dirt', ['dirt']), want: 10, to: { player: 'Steve' } };
+    expect(endLine(job, { withdraw: report({ taken: { dirt: 10 }, extracted: [{ items: 10, from: 'chest 3 0 0', back: false }], from: ['chest 3 0 0'], carried: 10 }), deliver: { ok: true, at: 'player' } })).toBe('brought 10 dirt (from 1 chest; 10 taken out of a shulker box from chest 3 0 0; the box goes back to that chest later)');
   });
 
   it('nothing known: no process; nothing found after all: the reply says so', async () => {

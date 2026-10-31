@@ -99,6 +99,9 @@ export const SETTING_DEFS = {
   useBoneMeal: { kind: 'boolean', default: true, description: 'farming: use bone meal on crops (placeholder, Track U)' },
   mineTunnelLen: { kind: 'number', default: 32, min: 1, max: 256, integer: true, unit: 'blocks', description: 'mining: tunnel length per branch (placeholder)' },
   nlConfirm: { kind: 'boolean', default: true, description: '!do and chat to the bot: show the plan and wait for !yes before running it' }, // Track Y
+  chatColor: { kind: 'boolean', default: false, description: 'colour the bot\'s chat replies (commands, numbers, done / failed, notes); try !colors first (docs/chat-style.md)' },
+  chatLines: { kind: 'boolean', default: false, description: 'long answers (!help, !set) as a few multi-line messages with headings instead of packed lines; try !colors first' },
+  chatVia: { kind: 'text', default: 'chat', values: 'chat|me|say|tellraw', parse: (raw: string) => { const v = raw.trim().toLowerCase(); if (v !== 'chat' && v !== 'me' && v !== 'say' && v !== 'tellraw') throw new SettingError(`chatVia must be chat, me, say or tellraw, got "${raw}"`); return v; }, description: 'how replies are sent: chat (<Bot> text), me (/me: * Bot text, no operator needed), say (/say: [Bot] text, operator) or tellraw (/tellraw: no name in front, operator); a refused one falls back to chat; see !colors' },
   autoSleep: { kind: 'boolean', default: true, description: 'go to bed by itself at night (a bed near the shelter or home, or the bed waypoint); !sleep on / off sets it' }, // 2026-10-31: !sleep off was lost at every restart
   autoFood: { kind: 'boolean', default: true, description: 'hunt food mobs as a chore by day when the inventory food is below foodMin' }, // Track X
   foodMin: { kind: 'number', default: 10, min: 0, max: 200, integer: true, unit: 'hunger points', description: 'auto food: hunt when the food carried totals fewer hunger points' }, // Track X
@@ -120,6 +123,8 @@ export const SETTING_DEFS = {
   homeChestWalk: { kind: 'number', default: 64, min: 0, max: 256, integer: true, unit: 'path blocks', description: 'home logistics: containers whose walk from home is longer than this (the planner\'s path) are skipped and remembered as unreachable; 0 = no path check (homeChestRadius only)' }, // Track AN
   getSuggestsBring: { kind: 'boolean', default: true, description: '!get: when the chests at home already hold enough of the item, the reply says so and names !bring (!get still makes new ones)' }, // Track AS
   keepBoxName: { kind: 'text', default: 'bot_loot', values: 'name', parse: (raw: string) => { const v = raw.trim(); if (v.length < 1 || v.length > 32) throw new SettingError(`keepBoxName must be 1 to 32 characters, got "${raw}"`); return v; }, description: 'shulker boxes with this name (case and colour ignored) belong to the bot: never unloaded, stored, used for boxing or dropped by !drop all; the stash step fills them first; !unload empties them' }, // Track AV
+  foodReserve: { kind: 'number', default: 64, min: 0, max: 2304, integer: true, unit: 'items', description: '!unload: food kept in all; crops that are food (carrots, potatoes, beetroots, melon slices, berries) fill what the other food leaves, their surplus is unloaded (other food is never unloaded)' }, // Track BJ
+  seedReserve: { kind: 'number', default: 32, min: 0, max: 2304, integer: true, unit: 'items', description: '!unload: of each seed !farm replants (wheat seeds, beetroot seeds, carrots, potatoes) this many stay with the bot' }, // Track BJ
   autoUnload: { kind: 'boolean', default: true, description: 'unload into the chests at home as a chore when idle there with more than 8 stacks of unloadable items or a full shulker box' }, // Track AG
   mineBranchY: { kind: 'text', default: 'auto', values: 'auto|-64..320', parse: (raw: string) => { const s = raw.trim().toLowerCase(); if (s === 'auto' || s === '') return 'auto'; const n = Number(s); if (!Number.isInteger(n) || n < -64 || n > 320) throw new SettingError(`mineBranchY must be auto or a whole number -64..320, got "${raw}"`); return String(n); }, description: 'branch mining: the Y of the tunnels when !mine knows no ore (auto: the best Y of the ore, e.g. iron 16, diamond -58)' }, // Track AI
   exploreRadius: { kind: 'number', default: 128, min: 16, max: 1024, integer: true, unit: 'blocks', description: '!explore: radius of the area walked (around home, else the bot)' }, // Track AI
@@ -152,6 +157,10 @@ export const SETTING_DEFS = {
   flyHeadroom: { kind: 'number', default: 4, min: 3, max: 20, integer: true, unit: 'blocks', description: 'flight: least roof height over the feet for a landing under a roof' }, // Track BF
   flyOverhangDepth: { kind: 'number', default: 10, min: 0, max: 24, integer: true, unit: 'blocks', description: 'flight: deepest landing under a roof (0 = never)' }, // Track BF
   flySneakLand: { kind: 'boolean', default: true, description: 'flight: sneak through the touchdown (the slide stops at edges)' }, // Track BF
+  flyLedgeTakeoff: { kind: 'boolean', default: true, description: 'flight: step off an edge when the jump takeoff is blocked or the start is a small platform' }, // Track BH
+  glideDown: { kind: 'boolean', default: true, description: 'an unreachable goto / come with the goal far below glides down when a simulated glide lands' }, // Track BH
+  glideDownMinDrop: { kind: 'number', default: 10, min: 4, max: 200, integer: true, unit: 'blocks', description: 'glide down: the goal at least this far below the feet' }, // Track BH
+  glideDownMinDistance: { kind: 'number', default: 16, min: 4, max: 400, integer: true, unit: 'blocks', description: 'glide down: the goal at least this far away horizontally' }, // Track BH
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;

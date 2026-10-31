@@ -15,7 +15,8 @@ Decision record: [decisions/0034-ux-tiers-help-modes.md](decisions/0034-ux-tiers
 | `bot/src/chat/modes.ts` | `!mode`, `MODE_CHANGES`, `modeValues` / `currentMode` / `modeLine` / `applyMode`; `registerUxCommands` (one entry in tasks/registry.ts: `!mode`, `!help settings`, the hints, the welcome) |
 | `bot/src/chat/welcome.ts` | `attachWelcome`, `welcomeLines`, `welcomeVersion`, `WELCOME_NEWS` |
 | `bot/src/chat/commands*.ts`, `health/panel/index.ts` | one line per command: `tier` / `group` / `example` / `auto` |
-| `bot/src/config/settings.ts` | `lastWelcomed` (text, default `none`) |
+| `bot/src/config/settings.ts` | `lastWelcomed` (text, default `none`); `chatColor`, `chatLines`, `chatVia` (chat style, off by default) |
+| `bot/src/chat/style.ts`, `help-rich.ts`, `commands-style.ts`, `route.ts` | colours, multi-line help and `!set` blocks, `!colors`, the `/tellraw` route: **[chat-style.md](chat-style.md)** (read it before you print more than one line) |
 | `bot/src/nl/plan.ts`, `prompt.ts`, `executor.ts` | the `answer` step (`isTalk`), its rules and two examples |
 | `bot/src/health/panel/state.ts`, `routes.ts`, `page.ts` | `buildPanelHelp`, `GET /api/help`, the Help section |
 | `bot/test/unit/chat/ux.test.ts` | unit tests (real afk registry, fakes) |
@@ -80,6 +81,11 @@ panel or the tests, so "candidate" means: hide, do not remove, until nothing dis
 ## Help formats
 
 At most 256 characters per message (the chat cuts there) and the chat's 8 replies per 10 s.
+
+These are the plain forms (what runs with the default settings, and what the tests and the panel compare).
+With `chatLines` on, `!help`, `!help all`, `!help <command>`, `!help settings` and `!set` are headed multi-line
+blocks built from the same metadata (`help-rich.ts`); with `chatColor` on they are coloured. See
+[chat-style.md](chat-style.md) and `!colors`.
 
 `!help` (front door, at most 4 messages; the last names `!help all` and `!help <command>`):
 
