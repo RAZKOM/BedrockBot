@@ -37,6 +37,9 @@ import { fellTree, type FellOptions, type FellResult } from './tree/feller.ts';
 import { detectTree, treesFrom, type Tree, type TreeOptions } from './tree/tree.ts';
 import type { SkillResult, Skills } from './types.ts'; // Track R: goto takes NavGoal / NavGotoOptions now
 import { surfaceRefusal } from '../world/dimension.ts'; // Track AT
+import { FallGuard, type FallGuardDeps } from './fall/clutch.ts'; // Track BI
+import { explainFallRefusal } from './fall/explain.ts'; // Track BI
+import { locateNode } from './nav/astar.ts'; // Track BI: the start of the explaining plan
 import { headInWater, swimUp } from './survival/surface.ts'; // Track BF
 
 export type { Goal, GotoOptions, SkillResult, Skills, DigOptions, DigResult } from './types.ts';
@@ -110,6 +113,8 @@ const LOOK_TURN = 30;
 
 export class BotSkills implements Skills {
   readonly nav: Navigator;
+  /** Track BI: long falls and the water-bucket clutch (skills/fall/clutch.ts). */
+  readonly falls: FallGuard;
   private readonly loop: InputLoop;
   private readonly world: SkillsWorld;
   private readonly log: Logger;
@@ -187,6 +192,19 @@ export class BotSkills implements Skills {
           }),
       },
     );
+    // Track BI: long falls (the planner's policy, read live) and the water-bucket clutch
+    this.falls = new FallGuard({
+      loop: this.loop,
+      world: opts.world as unknown as FallGuardDeps['world'],
+      grid: this.nav.grid,
+      source: () => this.parts.source,
+      hotbar: () => this.parts.hotbar,
+      logger: this.log,
+    });
+    this.nav.fallPolicy = () => this.falls.policy();
+    this.nav.holdPlans = () => this.falls.settling;
+    this.nav.pauseFollow = () => this.falls.recovering;
+    this.nav.dropCheck = (from, to, costs) => this.falls.acceptsDrop(from, to, costs);
     this.unsubs.push(
       this.loop.onBeforeStep((tick, s) => {
         this.trackFall(tick, s.onGround, s.pos.y, s.inWater);
@@ -288,6 +306,7 @@ export class BotSkills implements Skills {
   dispose(): void {
     this.cancel();
     this.nav.dispose();
+    this.falls.dispose(); // Track BI
     for (const u of this.unsubs.splice(0)) u();
   }
 
@@ -354,12 +373,26 @@ export class BotSkills implements Skills {
     if (noSurface) return Promise.resolve({ ok: false, reason: noSurface });
     // Synchronous start (callers check nav.busy right after the call).
     const token = this.begin('goto');
-    const p = this.nav.goto(goal, opts).then((r) => this.surfaceAndRetry(r, token, goal, opts));
+    const p = this.nav.goto(goal, opts).then((r) => this.surfaceAndRetry(r, token, goal, opts)).then((r) => (!r.ok && r.reason === 'unreachable' ? this.withFallNote(goal, r, opts) : r)); // Track BF: swim up; Track BI: say why a long fall was refused
     void p.finally(() => {
       this.end(token);
     });
     return p;
   }
+
+  /** Track BI: a failed goto that a long fall would have made: the note says why the fall was refused. */
+  private withFallNote(goal: NavGoal, r: Extract<SkillResult, { ok: false }>, opts?: NavGotoOptions): SkillResult {
+    try {
+      // not when the blacklist refused the goal / every member (nothing was planned)
+      const rep = this.nav.lastReport;
+      if (!rep || rep.skipped?.length || rep.plans.length === 0) return r;
+      const note = explainFallRefusal(this.nav, this.falls, locateNode(this.nav.grid, this.loop.state.pos), goal, opts);
+      return note ? { ...r, note } : r;
+    } catch (e) {
+      this.log.warn(`fall note: ${e instanceof Error ? e.message : String(e)}`);
+      return r;
+    }
+    }
 
   /**
    * Track BF: a goto that failed with the head under water (the planner has no start node on a sea

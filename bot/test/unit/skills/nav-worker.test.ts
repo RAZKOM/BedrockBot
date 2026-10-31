@@ -753,4 +753,45 @@ describe('planner worker: a real worker thread', () => {
     }
     client.dispose();
   }, 60_000);
+
+  it('Track BI: long drops (damage within the budget, hay, a clutch) plan identically in the worker', async () => {
+    const HAY = rid('hay_block', { pillar_axis: 'y' });
+    // flat grass (feet -60); a stone plateau x 0..10, z 0..10 with its top at -49 (feet -48, 12 over the ground); hay under its east edge at z 0..3
+    const blocks = (x: number, y: number, z: number): number => {
+      if (x >= 0 && x <= 10 && z >= 0 && z <= 10 && y >= -60 && y <= -49) return STONE;
+      if (x === 11 && z <= 3 && z >= 0 && y === -61) return HAY;
+      if (y < -61) return STONE;
+      if (y === -61) return GRASS;
+      return AIR;
+    };
+    const F = fixtureWorld(blocks);
+    const client = new PlannerClient(F.world);
+    client.start();
+    await until(() => client.ready, 20_000);
+    const base = { hpBudget: 12, factor: 1, hpCost: 40, maxScan: 48, clutch: false, clutchMax: 40, clutchCost: 40 };
+    const cases: { falls?: typeof base; goal: Vec3; want: PathResult['status'] }[] = [
+      { goal: { x: 20, y: -60, z: 6 }, want: 'none' },
+      { falls: base, goal: { x: 20, y: -60, z: 6 }, want: 'found' },
+      { falls: { ...base, hpBudget: 7 }, goal: { x: 20, y: -60, z: 6 }, want: 'found' }, // the hay (0 HP) only
+      { falls: { ...base, hpBudget: 0, clutch: true }, goal: { x: 20, y: -60, z: 6 }, want: 'found' },
+      { falls: { ...base, hpBudget: 0, maxScan: 10 }, goal: { x: 20, y: -60, z: 6 }, want: 'none' },
+    ];
+    const a = { x: 9, y: -48, z: 6 };
+    for (const c of cases) {
+      const spec: WorkerPlanOptions = { maxNodes: 100_000, maxMs: 10_000, allowBreak: false, allowPlace: false, allowOpen: false, ...(c.falls ? { falls: c.falls } : {}) };
+      const t = findPath(new NavGrid(worldSource(F.world)), a, { type: 'block', p: c.goal }, { maxNodes: 100_000, maxMs: 10_000, ...(c.falls ? { falls: c.falls } : {}) });
+      const ws = client.search('main', a, { type: 'block', p: c.goal }, spec, 0);
+      let w: PathResult | undefined;
+      while (!(w = ws.step())) {
+        if (ws.failed) throw new Error('worker search failed');
+        await sleep(1);
+      }
+      const what = `${JSON.stringify(c.falls)}: thread ${t.status} ${t.cost.toFixed(2)} worker ${w.status} ${w.cost.toFixed(2)}`;
+      expect(t.status, what).toBe(c.want);
+      expect(w.status, what).toBe(t.status);
+      expect(Math.abs(w.cost - t.cost), what).toBeLessThanOrEqual(1e-6);
+      expect(w.path.map((n) => `${n.x},${n.y},${n.z}`), what).toEqual(t.path.map((n) => `${n.x},${n.y},${n.z}`));
+    }
+    client.dispose();
+  }, 60_000);
 });
