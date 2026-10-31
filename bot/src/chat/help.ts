@@ -82,7 +82,7 @@ export const SETTING_GROUPS: readonly (readonly [string, readonly string[]])[] =
   ['work', ['mineMode', 'mineSeenOnly', 'mineDirect', 'mineTunnelLen', 'mineBranchY', 'exploreRadius', 'useBoneMeal', 'toolWearLimit', 'throwawayMin', 'buildScaffold', 'craftReserve']],
   ['food', ['autoFood', 'foodMin', 'foodLeave', 'autoBreed', 'chorePen']],
   ['home', ['stashChest', 'stashShulker', 'keepBoxName', 'homeChestRadius', 'homeChestWalk', 'autoUnload', 'compactOnUnload', 'getSuggestsBring']],
-  ['flight', ['autoFly', 'flyMin', 'flyClearance', 'flyCruise', 'flyGoArounds', 'fireworksMin', 'flyTakeoffRun', 'flyRetryBlocks', 'flyMaxClimb', 'flyMargin', 'flyLandSearch', 'flyLandProbes', 'flyHoldS', 'flyHeadroom', 'flyOverhangDepth', 'flySneakLand']],
+  ['flight', ['autoFly', 'flyMin', 'flyClearance', 'flyCruise', 'flyGoArounds', 'fireworksMin', 'flyTakeoffRun', 'flyRetryBlocks', 'flyMaxClimb', 'flyMargin', 'flyLandSearch', 'flyLandProbes', 'flyHoldS', 'flyHeadroom', 'flyOverhangDepth', 'flySneakLand', 'flyLedgeTakeoff', 'glideDown', 'glideDownMinDrop', 'glideDownMinDistance']],
   ['chat', ['nlConfirm', 'chatColor', 'chatLines', 'chatVia', 'lastWelcomed']],
   ['system', ['nudgeInterval']],
 ];
