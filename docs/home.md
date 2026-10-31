@@ -13,6 +13,9 @@ of the chests and carries them to the owner ("Bring" below).
 Track AV (wave 11, [decisions/0044-boxing.md](decisions/0044-boxing.md)): boxing a full chest's stacks into
 spare shulker boxes at `!unload`, the owner's `bot_loot` boxes, `!boxes`, packing priority in the stash step
 ("Boxing at the chests" below).
+Full boxes (wave 12): `!unload` fills spare boxes with every full box's worth of one item the bot has, loose and in its
+`bot_loot` boxes ("Full boxes from what the bot carries"), and boxes a home chest's own 27 full stacks of one item
+there, also as an idle chore ("Full boxes out of the chests").
 
 ## Files
 
@@ -40,7 +43,8 @@ spare shulker boxes at `!unload`, the owner's `bot_loot` boxes, `!boxes`, packin
 | `bot/test/e2e/home-chests.test.ts`, `home-shulker.test.ts`, `home-reach.test.ts` (Track AN), `home-bring.test.ts` (Track AS), `home-truth.ts` | e2e on bds-home |
 | `bot/src/skills/home/boxing.ts` | Track AV: named boxes (`isKeptBox`, `keepBoxName`), carried boxes and spares, `placesExactly`, the `!boxes` line, the `kept 4 bot_loot boxes` line |
 | `bot/src/world/inventory.ts` | Track AV: `itemDisplayName(raw)`: an item's custom name from the wire item's NBT |
-| `bot/src/skills/home/unloader.ts` | Track AV: `UnloadStep` (`box`, `compact`), `planBoxSteps`, `emptyNamed`, `blocked` |
+| `bot/src/skills/home/unloader.ts` | Track AV: `UnloadStep` (`box`, `compact`), `planBoxSteps`, `emptyNamed`, `blocked`; wave 12: `fill` steps (`planFillSteps`, `fillTarget`), tidy steps (`planTidySteps`, `box` with `tidy`) |
+| `bot/src/skills/home/logistics.ts` | wave 12: `fillStep` (rounds through the carried boxes: `emptyBox` with `only`), `tidy` / `tidyDue` / `tidySteps` / `putBack`, `MAX_FILL_ROUNDS` |
 | `bot/src/skills/container/stash.ts` | Track AV: the named box first, packing priority (`DROP_FIRST`, `packClass`, `packOrder`), the re-pack |
 | `bot/test/unit/skills/home-boxing.test.ts`, `stash-packing.test.ts`, `bot/test/e2e/home-boxing.test.ts` | Track AV: unit tests on fakes, the e2e on bds-home |
 | `docker/compose.home.yml` | `bds-home`, udp/19196, flat, peaceful |
@@ -49,7 +53,7 @@ spare shulker boxes at `!unload`, the owner's `bot_loot` boxes, `!boxes`, packin
 
 | Command | Reply |
 |---|---|
-| `!unload [all]` | `unloading 8 stacks into 5 known containers`, then `unloaded: 176 cobblestone -> double chest -3 -60 -1, 32 dirt -> barrel 0 -60 -4, 128 coal -> chest 3 -60 -2, 128 oak_log -> chest 3 -60 2 (wood); kept 16 cobblestone, 1 iron_pickaxe, 5 bread`; with full chests `unloaded: 1904 cobblestone -> shulker box (into chest -3 -60 3); 2 shulker boxes filled and stored; kept ...`; `unload: no home set (!home set)`, `unload: I know no chest near home yet (!chests scan)`; `left 5 dirt (no room)` when nothing had room |
+| `!unload [all]` | `unloading 8 stacks into 5 known containers`, then `unloaded: 176 cobblestone -> double chest -3 -60 -1, 32 dirt -> barrel 0 -60 -4, 128 coal -> chest 3 -60 -2, 128 oak_log -> chest 3 -60 2 (wood); kept 16 cobblestone, 1 iron_pickaxe, 5 bread`; with full chests `unloaded: 1904 cobblestone -> shulker box (into chest -3 -60 3); 2 shulker boxes filled and stored; kept ...`; a full box's worth carried: `unloaded: 960 cobbled_deepslate -> chest 2 -60 1; boxed 1 full box of cobbled_deepslate into chest 2 -60 1; kept 4 bot_loot boxes`; a chest's own 27 stacks: `...; boxed 27 stacks of cobblestone from double chest 3 -60 -1 into a shulker (box from chest -2 -60 2)`; `unload: no home set (!home set)`, `unload: I know no chest near home yet (!chests scan)`; `left 5 dirt (no room)` when nothing had room |
 | `!stock [item]` | `iron_ingot: 128 in chest 100 63 -48 (ores), 64 in barrel 90 63 -48 (192 in all)`; `!stock shulker`: `shulker_box: 3 in chest 1 2 3 (3 empty)`; no item: the totals; `stock: no diamond in the 5 containers I know` |
 | `!chests` | `chests: 6 remembered (3 reachable, 3 unreachable: !chests unreachable): 6 chests \| chest 3 -60 2: 26/27 free, 5 coal (0 min ago) \| ...`; the counts by kind with their labels (`3 chests (ores, wood), 1 barrel, 1 double chest`), then each reachable container, nearest first (chat cuts at 256 characters) |
 | `!chests scan` | `chests: reading the containers within 16 blocks of home (walks of up to 64 blocks)`, then `chests: 181 within 16 blocks, 140 reachable within 32 path blocks, read 64 (76 pending), 41 unreachable, in 95 s` (blocks found: a double chest is two; `2 read less than 10 min ago`, `1 forgotten`, `could not open 1 2 3 (open: timeout)` when so; with `homeChestWalk 0` no `reachable` part). Probes the unreachable ones again |
@@ -159,6 +163,7 @@ before the others' label / emptiest rules ("Boxing at the chests" below).
 | # | Rule (Track AV rows) | When |
 |---|---|---|
 | 0a | compact (Track AW's hook) | `plan.compact` not empty and a runner installed (`setCompactRunner`): run once before the chest trips |
+| 0a' | fill (wave 12) | the bot has a full box's worth (27 x maxStack) of a stackable item, loose plus in its bot_loot boxes (with `all` its other full boxes too), the reserve held back, a target with a free slot and a spare are known ("Full boxes from what the bot carries") |
 | 0b | box | the chests holding the item (loose or boxed) cannot take what the bot carries of it, and a spare empty box is known (carried first, else the chest nearest to the target holding empty boxes) |
 | - | blocked `no_spare` | the same, but no spare known: the item goes by rules 2 / 3, or is left (`left 192 cobblestone (no room; chest 1 2 3 is full and no spare shulker box is known)`) |
 | - | blocked `boxes_full` | the target chest holds no loose stack of it and has no free slot for a box (a chest full of full boxes): `left ... (no room; chest 1 2 3 is full of boxes)` |
@@ -234,6 +239,67 @@ stack (a chest of boxes with one free slot: 27 stacks of produce in one box). Ne
 kept items (food, tools, armour, totems, rockets), unstackable items, the reserve. At most 4 box steps a run
 (`MAX_BOX_STEPS`); a failed step (`skip`) plans that kind without boxing for the rest of the run.
 
+## Full boxes from what the bot carries (wave 12)
+
+The owner: "I have a chest full of empty shulker boxes ... if it has 5 bot_loot boxes half full of deepslate, it should
+know that it can in fact fill up one or more full shulkers with said deepslate. Instead of dumping all of its available
+deepslate into my deepslate chest while unloading, it should go get one of the unnamed shulkers, fill it with deepslate,
+and then load that filled shulker into the chest."
+
+- **Count** (planner, `planFillSteps`): per stackable kind (not kept items, not boxes), the loose stacks (`movable`,
+  the reserve held back) plus what the carried `bot_loot` boxes hold (NBT `Items`, `UnloadSlot.boxItems`; with `all`
+  every other full box too; never the fireworks box, never an unknown box), less the reserve those items would add once
+  emptied (cobbled deepslate is a throwaway kind: 16 stay with the bot). Every full box's worth (27 x maxStack: 1728
+  deepslate) is one `fill` step, `MAX_FILL_STEPS` (6) a run: 36 slots and a handful of bot_loot boxes hold about 6.
+- **Target**: rule 1 (the chest holding the most of it, loose or boxed), else 2 (label), else 3 (the emptiest unlabelled
+  chest that holds no spare: a chest of empty boxes is not one of full ones); a full box needs one free slot. No target
+  or no spare: no step, the items unload loose as today (with every chest full the overflow fills a spare as before).
+- **Spare**: a carried unnamed empty box first (with a bot_loot box carried every unnamed empty box is one), else one
+  out of the chest of spares nearest the target (never a named box, never the fireworks box).
+- **Order**: fill steps first, then the box steps (planned with what the fills left), then the deposits; the rest
+  inside the bot_loot boxes is emptied and unloaded loose afterwards, as before.
+- **Execution** (`fillStep`, rounds, `MAX_FILL_ROUNDS` 12): while the loose stacks (reserve held back) do not cover
+  what the spare lacks and a carried box holds more, that box is placed and **only that item** is taken out of it
+  (`emptyBox` with `only`; the 2-free-slot rule of emptying holds, so the box comes back), most-of-it box first; else
+  the spare is placed next to the bot, filled (merging into partial stacks, so it ends at 27 x 64), broken, picked up.
+  Then the full box goes into the target chest and its record is refreshed (`inBoxes`).
+- **Failures**: a failed step takes its items back out of the spare (best effort; what stays makes it a full box like any
+  other, stored in the box chest or emptied with `all`) and the kind is not filled again in this run (`noFill`; box steps
+  still may run); the rest unloads loose. A spare not picked up again is walked to at once (`fetchLeftBox`) and the step
+  goes on. A target found full after all (the memory older than the chest) gets the box where the overflow's boxes go
+  (the chest the spare came from, else the emptiest with a free slot); with no slot anywhere it stays carried (today's
+  full-box rule).
+- **Pre-emption**: a box placed right when the job is cancelled is broken and picked up again (`placeBox`, now for every
+  user of it); the fill's own break and pickup ignore the cancel; the resumed run plans again from what is there.
+- Reply: `boxed 2 full boxes of cobbled_deepslate into chest 2 -60 1` (per kind and chest); `UnloadReport.filled`.
+- Measured (e2e (g) on bds-home, 2026-10-30, 2 runs): 4 bot_loot boxes of 10 stacks + 2 loose stacks: the fill step
+  23.2 / 25.7 s (spare out of the box chest, 3 takes of 1600 deepslate out of the boxes, 1 fill of 27 stacks, store),
+  the whole `!unload` (with emptying the 4 boxes' rest and the deposits) 42.6 / 46.3 s.
+
+## Full boxes out of the chests (tidy, wave 12)
+
+The owner: "if it sees a chest that has enough of the same item to fill a shulker, do it (if one of the home chests of
+course)".
+
+- **What**: a home chest (the chest memory's read, reachable containers within `homeChestRadius`; never a shulker box
+  block, never the chest of spares, i.e. one holding unnamed empty boxes or labelled `shulkers` / `boxes` / `spares`)
+  holding 27 full stacks' worth (27 x maxStack) of one stackable item **loose** gets a `box` step with `tidy`: 27 of its
+  stacks into a spare, the full box back into that chest. Never items held in fewer than 27 stacks' worth, never items
+  moved between chests, only whole full boxes: the step takes full stacks only and fails before taking anything when the
+  chest holds fewer full stacks than the box lacks (memory refreshed; partial stacks are left alone).
+- **When**: at `!unload` (and the automatic unload) after the bot's own items (the deposits, the overflow boxes), and as
+  the idle chore's `tidy` job: with `autoUnload` on, at home, no user process and nothing to unload, when `tidyDue`
+  (a step plans). `MAX_TIDY_STEPS` (4) per run; the planner stops when no spare is left. A tidy job that boxed nothing
+  (or failed) makes the chore wait `TIDY_BACKOFF_MS` (10 min) before the next one.
+- **Execution**: the existing box step (spare, rounds of takes from the chest, place, fill, break, pick up, store). The
+  reserve it holds back is the bot's own at the start (before, the chest's stacks taken out could become the bot's
+  16-block reserve). A failed tidy step's stacks go back into the chest they came from (`putBack`); its kind is not
+  tidied again in this run.
+- Reply: the box step's `boxed 27 stacks of cobblestone from double chest 3 -60 -1 into a shulker (box from chest ...)`;
+  the chore logs `tidy: ...`.
+- Measured (e2e (h), 2 runs): 30 stacks in a double chest, the bot carrying none: the tidy step 8.8 / 9.0 s (1 round of
+  27 takes), the whole `!unload` 9.2 / 9.4 s.
+
 ### The `compact` hook (Track AW)
 
 Crafting an item into its block form (iron ingots into iron blocks) to make room is Track AW's. The contract:
@@ -300,7 +366,7 @@ the container's fresh snapshot.
 | Process | Kind, priority | Wants control |
 |---|---|---|
 | `unload`, `chests` (`HomeJobProcess`) | user, 40 | until the job ends |
-| `home-chore` (`HomeChore`) | auto, 30 (chore) | within 8 blocks of home (4 vertical) and no user process: the session scan, appeared containers; with `autoUnload` on and at least one read container: more than 8 stacks of unloadable items or any full shulker box (an unload that left items or failed waits 5 minutes), or a `!get` job that just ended at home (anything unloadable; the line `unloaded: ...` goes to chat after the job's reply) |
+| `home-chore` (`HomeChore`) | auto, 30 (chore) | within 8 blocks of home (4 vertical) and no user process: the session scan, appeared containers; with `autoUnload` on and at least one read container: more than 8 stacks of unloadable items or any full shulker box (an unload that left items or failed waits 5 minutes), or a `!get` job that just ended at home (anything unloadable; the line `unloaded: ...` goes to chat after the job's reply); wave 12: nothing to unload and a tidy step due: the `tidy` job (one that boxed nothing waits 10 minutes) |
 
 Both jobs run one after the other on one `HomeLogistics` (a pre-empted job finishes its current step
 before the next starts). All container traffic goes through the task's one Containers: `requests` in
@@ -457,7 +523,11 @@ the end.
   the 2 named boxes, drops an unnamed one; (d) the stash step fills the named box (hotbar slot 2), not the
   unnamed one in slot 1; (e) a full chest, no spare: `left 192 cobblestone (no room; chest ... is full and
   no spare shulker box is known)`; (f) a named box holding 20 stacks of rotten flesh + 7 of sand, the
-  inventory full of sand (1 slot free): re-packed, the box holds 27 stacks of sand, the flesh is dropped.
+  inventory full of sand (1 slot free): re-packed, the box holds 27 stacks of sand, the flesh is dropped;
+  (g) wave 12: 4 `bot_loot` boxes of 10 stacks of cobbled deepslate + 2 loose stacks, a chest with 5 stacks of it (room),
+  3 spares: one full box (27 x 64) filled and stored in the deepslate chest, the other 960 loose there, the spare chest
+  holds 2, the 4 named boxes carried and empty, nothing on the ground; (h) wave 12: a double chest (placed by the bot)
+  with 30 loose stacks of cobblestone, 3 spares, the bot carrying none: `!unload` leaves 1 full box + 3 stacks there.
 - `home-bring` (Track AS): 4 chests by truth (A: 40 torches + 2 stacks of cobblestone, B 10 blocks from
   A: 30 torches + 1 stack, C: 8 iron ingots + 64 coal, D: a shulker box holding 2 diamonds, filled by
   truth as a block, broken and stored by the bot), a second connection 30 blocks east, `!chests scan`

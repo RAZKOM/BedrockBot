@@ -24,6 +24,14 @@ export const DEFAULT_KEEP_BOX_NAME = 'bot_loot';
 export const BOX_SLOTS = 27;
 /** Box steps (`box`) per unload run at most. */
 export const MAX_BOX_STEPS = 4;
+/**
+ * Fill steps (a spare filled with 27 full stacks of what the bot carries, loose and in its bot_loot boxes) per unload
+ * run at most: 36 slots and a few bot_loot boxes of 27 hold about 6 boxes' worth; each step is bounded (its rounds
+ * by MAX_FILL_ROUNDS in logistics.ts), so a run stays within a few minutes.
+ */
+export const MAX_FILL_STEPS = 6;
+/** Tidy steps (a chest's own 27 full stacks of one item into a spare, the box back there) per run at most: like MAX_BOX_STEPS, a run never spends ages. */
+export const MAX_TIDY_STEPS = 4;
 
 /** `§6Bot_Loot ` -> `bot_loot`: colour / format codes and surrounding spaces dropped, lower case. */
 export function plainName(s: string): string {

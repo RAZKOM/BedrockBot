@@ -23,12 +23,24 @@
 // them (topped up with the bot's own stacks), put the box back into that chest; the kinds with a home claim
 // their room before the label / emptiest rules. Track AW's compaction (`compact`, crafting into blocks) is
 // filled by its `compactPlanner` at the end and run by its `compactRunner` (logistics.ts doUnload).
+//
+// Fill steps (docs/home.md "Full boxes from what the bot carries"): per stackable kind, what the bot has in all (loose,
+// plus inside its bot_loot boxes; with `all` inside its other full boxes too, never the fireworks box), the reserve held
+// back; every full box's worth (27 x maxStack) becomes a `fill` step: a spare filled with it and stored by the rules
+// above (the chest holding the item, else labelled, else the emptiest one without spares; one free slot for the box).
+// They come before the box steps; the remainder unloads loose.
+//
+// Tidy steps (`tidy`, docs/home.md "Full boxes out of the chests"; the owner: "if it sees a chest that has enough of
+// the same item to fill a shulker, do it"): a home chest holding 27 full stacks' worth or more of one stackable item
+// loose gets `box` steps with `tidy` set: 27 of its stacks into a spare, the full box back into that chest. Never a
+// shulker box block, never the chest of spares (or one labelled for boxes); planned only on request (after the
+// deposits of `!unload`, and by the idle chore), MAX_TIDY_STEPS at most, none once no spare is left.
 import { keepOnDropItems } from '../../chat/commands-survival.ts';
 import { DEFAULT_THROWAWAY_MIN, THROWAWAY_BLOCKS } from '../survival/keeper.ts';
 import { isShulkerBox, maxStackOf } from '../container/chest.ts';
 import type { Vec3 } from '../../world/types.ts';
 import { labelMatches } from './categories.ts';
-import { BOX_SLOTS, MAX_BOX_STEPS } from './boxing.ts'; // Track AV
+import { BOX_SLOTS, MAX_BOX_STEPS, MAX_FILL_STEPS, MAX_TIDY_STEPS } from './boxing.ts'; // Track AV
 import { maxDurability } from '../survival/tools.ts';
 import { armourScore, armourSlotOf } from '../survival/armour.ts';
 
@@ -45,6 +57,8 @@ export interface UnloadSlot {
   named?: boolean;
   /** Track AV: a box whose wire item is unknown (name, contents): kept, never a spare, never stored. */
   unknown?: boolean;
+  /** Shulker boxes holding items: what they hold (NBT `Items`), for the fill steps. */
+  boxItems?: Readonly<Record<string, number>>;
 }
 
 /** A target container as the planner sees it (from the chest memory). */
@@ -80,14 +94,10 @@ export type KeepReason = 'kept' | 'reserve' | 'stash_box' | 'flight_kit' | 'name
  *            `produce` stacks the bot carries, put the full box into `chest`; `spare`: `carried` or the
  *            key of the chest the empty box comes from
  */
-export interface UnloadStep {
-  kind: 'box';
-  item: string;
-  chest: string;
-  stacks: number;
-  produce: number;
-  spare: string;
-}
+export type UnloadStep =
+  | { kind: 'box'; item: string; chest: string; stacks: number; produce: number; spare: string; tidy?: true }
+  /** fill: a spare (`carried` or a chest key) filled with 27 full stacks of `item` (the loose ones first, then out of the carried boxes), stored in `chest` */
+  | { kind: 'fill'; item: string; chest: string; spare: string };
 
 export interface UnloadPlan {
   moves: UnloadMove[];
@@ -101,7 +111,7 @@ export interface UnloadPlan {
   boxChest: string | undefined;
   /** Track AV: slots of named (bot_loot) boxes holding items: emptied into the inventory, kept. */
   emptyNamed: number[];
-  /** Track AV: steps before the deposits (box), in order. */
+  /** Track AV: steps before the deposits (fill, then box), in order. */
   steps: UnloadStep[];
   /** Track AV: kinds whose chest is full and could not be boxed: `no_spare` (no empty box known), `boxes_full` (the chest holds no loose stack of it and no free slot for a box). */
   blocked: { item: string; chest: string; why: 'no_spare' | 'boxes_full' }[];
@@ -139,8 +149,18 @@ export interface PlanOptions {
   boxing?: boolean;
   /** Track AV: box steps at most (default MAX_BOX_STEPS). */
   maxBoxSteps?: number;
+  /** Fill steps (default: as `boxing`). */
+  filling?: boolean;
+  /** Fill steps at most (default MAX_FILL_STEPS). */
+  maxFillSteps?: number;
   /** Track AV: item kinds not to box (a box step for them failed in this run). */
   noBox?: ReadonlySet<string>;
+  /** Tidy steps only (no fill or box steps for the bot's items): the chests' own full boxes' worth (default false). */
+  tidy?: boolean;
+  /** Tidy steps at most (default MAX_TIDY_STEPS). */
+  maxTidySteps?: number;
+  /** Item kinds not to fill a box with (a fill step for them failed in this run). */
+  noFill?: ReadonlySet<string>;
   /** The armour worn (names): carried pieces no better than it are unloaded (`gearKept`). */
   worn?: readonly string[];
 }
@@ -315,7 +335,9 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
   const spareSlots = slots.filter((s) => isShulkerBox(s.name) && !s.named && !s.flightKit && !s.unknown && (s.boxUsed ?? 0) === 0 && s.count > 0).sort((a, b) => a.slot - b.slot);
   const carriedSpares = (boxKept ? spareSlots : spareSlots.slice(1)).map((s) => s.slot);
   const usedSpares = new Set<number>();
-  if (opts.boxing ?? true) planBoxSteps(slots, sims, movable, carriedSpares, usedSpares, plan, opts, maxOf);
+  if (!opts.tidy && (opts.filling ?? opts.boxing ?? true)) planFillSteps(slots, sims, movable, carriedSpares, usedSpares, plan, opts, maxOf);
+  if (opts.tidy) planTidySteps(sims, carriedSpares, usedSpares, plan, opts, maxOf);
+  else if (opts.boxing ?? true) planBoxSteps(slots, sims, movable, carriedSpares, usedSpares, plan, opts, maxOf);
   // Track AV: kinds with a home (rule 1) claim their room first
   const home = (name: string) => sims.some((x) => (x.contents[name] ?? 0) + (x.inBoxes[name] ?? 0) > 0);
   for (const s of [...slots].sort((a, b) => Number(!home(a.name)) - Number(!home(b.name)) || a.slot - b.slot)) {
@@ -333,7 +355,7 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
       if ((s.boxUsed ?? 0) > 0) plan.emptyNamed.push(s.slot);
       continue;
     }
-    if (usedSpares.has(s.slot)) continue; // Track AV: a spare a box step fills
+    if (usedSpares.has(s.slot)) continue; // Track AV: a spare a box or fill step fills
     if (isShulkerBox(s.name)) {
       if ((s.boxUsed ?? 0) > 0) {
         if (opts.all) plan.fullBoxes.push(s.slot);
@@ -390,10 +412,9 @@ const stacksOf = (items: number, max: number): number => Math.ceil(items / max);
  * the boxed items), so the moves after it go to the chest.
  */
 function planBoxSteps(slots: readonly UnloadSlot[], sims: SimChest[], movable: Map<number, number>, carriedSpares: number[], usedSpares: Set<number>, plan: UnloadPlan, opts: PlanOptions, maxOf: (name: string) => number): void {
-  const maxSteps = opts.maxBoxSteps ?? MAX_BOX_STEPS;
+  const maxSteps = (opts.maxBoxSteps ?? MAX_BOX_STEPS) + plan.steps.length; // the fill steps before them have their own limit
   const kinds: string[] = [];
   for (const s of [...slots].sort((a, b) => a.slot - b.slot)) if (!kinds.includes(s.name) && !isShulkerBox(s.name) && !s.flightKit && !keptItem(s.name)) kinds.push(s.name);
-  const spareChests = sims.filter((x) => x.empties > 0 && !isShulkerBox(x.c.kind));
   for (const name of kinds) {
     const max = maxOf(name);
     if (max <= 1 || opts.noBox?.has(name)) continue; // unstackable items gain nothing from a box
@@ -413,20 +434,7 @@ function planBoxSteps(slots: readonly UnloadSlot[], sims: SimChest[], movable: M
         plan.blocked.push({ item: name, chest: target.c.key, why: 'boxes_full' });
         break;
       }
-      let spare: string | undefined;
-      const mine = carriedSpares.find((x) => !usedSpares.has(x));
-      if (mine !== undefined) {
-        usedSpares.add(mine);
-        spare = 'carried';
-      } else {
-        const from = spareChests.filter((x) => x.empties > 0).sort((a, b) => Number(b === target) - Number(a === target) || dist(a.c, target.c.pos) - dist(b.c, target.c.pos))[0];
-        if (from) {
-          from.empties--;
-          from.boxes--;
-          from.free++;
-          spare = from.c.key;
-        }
-      }
+      const spare = takeSpare(sims, target, carriedSpares, usedSpares);
       if (!spare) {
         plan.blocked.push({ item: name, chest: target.c.key, why: 'no_spare' });
         break;
@@ -451,6 +459,114 @@ function planBoxSteps(slots: readonly UnloadSlot[], sims: SimChest[], movable: M
         const n = Math.min(m, left);
         movable.set(s.slot, m - n);
         left -= n;
+      }
+    }
+  }
+}
+
+/** A spare for a box or fill step (simulated): a carried one first, else one out of the chest holding empty boxes nearest to `target`. */
+function takeSpare(sims: SimChest[], target: SimChest, carriedSpares: readonly number[], usedSpares: Set<number>): string | undefined {
+  const mine = carriedSpares.find((x) => !usedSpares.has(x));
+  if (mine !== undefined) {
+    usedSpares.add(mine);
+    return 'carried';
+  }
+  const from = sims.filter((x) => x.empties > 0 && !isShulkerBox(x.c.kind)).sort((a, b) => Number(b === target) - Number(a === target) || dist(a.c, target.c.pos) - dist(b.c, target.c.pos))[0];
+  if (!from) return undefined;
+  from.empties--;
+  from.boxes--;
+  from.free++;
+  return from.c.key;
+}
+
+/** Where a full box of `name` goes: rule 1 (most of it, loose or boxed), else 2 (label), else 3 (the emptiest unlabelled chest that holds no spare: a chest of empty boxes is not one of full ones); one free slot needed. */
+function fillTarget(sims: readonly SimChest[], name: string, origin: Vec3 | undefined): SimChest | undefined {
+  const open = sims.filter((s) => s.free >= 1 && !isShulkerBox(s.c.kind));
+  const near = (a: SimChest, b: SimChest) => dist(a.c, origin) - dist(b.c, origin);
+  const held = (s: SimChest) => (s.contents[name] ?? 0) + (s.inBoxes[name] ?? 0);
+  return (
+    open.filter((s) => held(s) > 0).sort((a, b) => held(b) - held(a) || near(a, b))[0] ??
+    open.filter((s) => labelMatches(s.c.label, name)).sort((a, b) => b.free - a.free || near(a, b))[0] ??
+    open.filter((s) => !s.c.label && s.c.boxes.empty === 0).sort((a, b) => b.free - a.free || near(a, b))[0]
+  );
+}
+
+/**
+ * The `fill` steps (see the file comment): per stackable kind the bot's loose items (`movable`: the reserve is held
+ * back) plus what its bot_loot boxes hold (with `all` its other full boxes too; never the fireworks box or an unknown
+ * box), less the reserve those would add once emptied; one step per full box's worth while a target and a spare are
+ * known. The simulation stores the box in the target and takes the loose items first, so the moves after it carry
+ * only the remainder (what is left in the boxes is emptied and unloaded later, like today).
+ */
+function planFillSteps(slots: readonly UnloadSlot[], sims: SimChest[], movable: Map<number, number>, carriedSpares: number[], usedSpares: Set<number>, plan: UnloadPlan, opts: PlanOptions, maxOf: (name: string) => number): void {
+  const maxSteps = opts.maxFillSteps ?? MAX_FILL_STEPS;
+  const boxed = new Map<string, number>();
+  for (const s of slots) {
+    if (!isShulkerBox(s.name) || s.flightKit || s.unknown || (s.boxUsed ?? 0) <= 0 || !(s.named || opts.all)) continue;
+    for (const [k, v] of Object.entries(s.boxItems ?? {})) boxed.set(k, (boxed.get(k) ?? 0) + v);
+  }
+  // the reserve once the boxes are emptied (the loose part of it is out of `movable` already)
+  const loose = slots.filter((s) => !isShulkerBox(s.name));
+  const reserve = opts.reserve ?? DEFAULT_THROWAWAY_MIN;
+  const kindsOf = opts.throwaway ?? THROWAWAY_BLOCKS;
+  const reserveNow = reserveByKind(loose, reserve, kindsOf);
+  const reserveAll = reserveByKind([...loose, ...[...boxed].map(([name, count]) => ({ slot: -1, name, count }))], reserve, kindsOf);
+  const kinds = [...new Set([...[...loose].sort((a, b) => a.slot - b.slot).map((s) => s.name), ...boxed.keys()])];
+  for (const name of kinds) {
+    const max = maxOf(name);
+    if (max <= 1 || isShulkerBox(name) || keptItem(name) || opts.noFill?.has(name)) continue;
+    const full = BOX_SLOTS * max;
+    const looseOf = (): number => loose.filter((s) => s.name === name).reduce((a, s) => a + (movable.get(s.slot) ?? s.count), 0);
+    let fromBoxes = Math.max(0, (boxed.get(name) ?? 0) - Math.max(0, (reserveAll.get(name) ?? 0) - (reserveNow.get(name) ?? 0)));
+    while (looseOf() + fromBoxes >= full && plan.steps.length < maxSteps) {
+      const target = fillTarget(sims, name, opts.origin);
+      if (!target) break;
+      const spare = takeSpare(sims, target, carriedSpares, usedSpares);
+      if (!spare) break;
+      plan.steps.push({ kind: 'fill', item: name, chest: target.c.key, spare });
+      target.free--;
+      target.boxes++;
+      target.inBoxes[name] = (target.inBoxes[name] ?? 0) + full;
+      // the loose stacks go in first (the last slots of the kind first), then the boxes' items
+      let left = full;
+      for (const s of [...loose].filter((x) => x.name === name).sort((a, b) => b.slot - a.slot)) {
+        if (left <= 0) break;
+        const m = movable.get(s.slot) ?? s.count;
+        const n = Math.min(m, left);
+        movable.set(s.slot, m - n);
+        left -= n;
+      }
+      fromBoxes -= left;
+    }
+  }
+}
+
+/** A chest that holds the spare boxes (or is labelled for boxes): never tidied, its room is the spares'. */
+const isSpareChest = (c: PlanChest): boolean => c.boxes.empty > 0 || /\b(shulkers?|boxes|box|spares?)\b/i.test(c.label ?? '');
+
+/**
+ * The tidy steps (see the file comment): per home chest (not a box block, not the chest of spares) and stackable kind
+ * it holds loose, one `box` step of 27 stacks per full box's worth (27 x maxStack), a spare (carried first) each, while
+ * spares last. The execution takes full stacks only (a chest of partial stacks fails the step, nothing moved).
+ */
+function planTidySteps(sims: SimChest[], carriedSpares: number[], usedSpares: Set<number>, plan: UnloadPlan, opts: PlanOptions, maxOf: (name: string) => number): void {
+  const maxSteps = opts.maxTidySteps ?? MAX_TIDY_STEPS;
+  const near = (a: SimChest, b: SimChest) => dist(a.c, opts.origin) - dist(b.c, opts.origin);
+  for (const sim of sims.filter((x) => !isShulkerBox(x.c.kind) && !isSpareChest(x.c)).sort(near)) {
+    for (const name of Object.keys(sim.contents).sort()) {
+      const max = maxOf(name);
+      if (max <= 1 || isShulkerBox(name) || keptItem(name) || opts.noBox?.has(name)) continue;
+      const full = BOX_SLOTS * max;
+      while ((sim.contents[name] ?? 0) >= full) {
+        if (plan.steps.length >= maxSteps) return;
+        const spare = takeSpare(sims, sim, carriedSpares, usedSpares);
+        if (!spare) return; // no spare left: nothing more to tidy
+        plan.steps.push({ kind: 'box', item: name, chest: sim.c.key, stacks: BOX_SLOTS, produce: 0, spare, tidy: true });
+        sim.contents[name] = (sim.contents[name] ?? 0) - full;
+        if (sim.contents[name] === 0) delete sim.contents[name];
+        sim.free += BOX_SLOTS - 1;
+        sim.boxes++;
+        sim.inBoxes[name] = (sim.inBoxes[name] ?? 0) + full;
       }
     }
   }

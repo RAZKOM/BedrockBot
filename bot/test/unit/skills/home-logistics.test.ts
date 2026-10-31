@@ -12,7 +12,7 @@ import { setCompactPlanner, setCompactRunner } from '../../../src/skills/home/un
 import type { BlockInfo, ContainerView, ItemStack, Vec3 } from '../../../src/world/types.ts';
 import type { PathResult } from '../../../src/skills/nav/astar.ts';
 import { ProcessManager } from '../../../src/tasks/process/manager.ts';
-import { AUTO_UNLOAD_STACKS, HomeChore, HomeJobProcess, type HomeChoreDeps, type HomeRunner } from '../../../src/tasks/process/unload.ts';
+import { AUTO_UNLOAD_STACKS, TIDY_BACKOFF_MS, HomeChore, HomeJobProcess, type HomeChoreDeps, type HomeRunner } from '../../../src/tasks/process/unload.ts';
 
 const item = (name: string, count = 64): ItemStack => ({ name, count, networkId: 1, metadata: 0 });
 const block = (name: string, solid = true): BlockInfo => ({ name, stateId: 1, states: {}, hardness: 1, solid, boxes: solid ? [[0, 0, 0, 1, 1, 1]] : [] });
@@ -390,7 +390,8 @@ describe('home logistics: unload', () => {
   });
 
   it('all chests full: an empty box from the box chest takes the rest and goes back full', async () => {
-    const stone = Array.from({ length: 27 }, () => item('stone'));
+    // two kinds, fewer than 27 stacks each: no tidy step (a chest's own 27 stacks of one kind would be boxed there)
+    const stone = Array.from({ length: 27 }, (_, i) => item(i < 13 ? 'stone' : 'dirt'));
     const boxChest = [item('undyed_shulker_box', 1), item('undyed_shulker_box', 1), ...Array.from({ length: 25 }, () => item('stone'))];
     const h = fakeHome({
       containers: { '3,0,0': { kind: 'chest', items: stone }, '-3,0,0': { kind: 'chest', items: boxChest } },
@@ -483,9 +484,16 @@ function fakeRunner() {
   let release: (() => void) | undefined;
   const scanRep = (): ScanReport => ({ ok: true, found: 1, read: [], fresh: 0, forgotten: 0, failed: [], requests: 0, ms: 1, pending: runner.nextPending.splice(0) });
   const unloadRep = (moved = 1): UnloadReport => ({ ok: true, moved: moved ? [{ name: 'coal', count: 64, to: 'chest 1 2 3' }] : [], kept: [], left: [], boxes: 0, emptied: 0, chests: 1, requests: 1, shared: 1, ms: 1 });
-  const runner: HomeRunner & { calls: string[]; finish(): void; nextPending: Vec3[] } = {
+  const runner: HomeRunner & { calls: string[]; finish(): void; nextPending: Vec3[]; tidyBoxed: number } = {
     calls,
     nextPending: [],
+    tidyBoxed: 0,
+    tidy: (c) => {
+      calls.push('tidy');
+      return new Promise((r) => {
+        release = () => r({ ...unloadRep(0), ok: !c(), boxed: Array.from({ length: runner.tidyBoxed }, () => ({ item: 'cobblestone', stacks: 27, chest: 'chest 1 2 3', from: 'chest 4 5 6', took: 27, rounds: 1, ms: 1 })) });
+      });
+    },
     unload: (c, o) => {
       calls.push(`unload${o?.all ? ' all' : ''}`);
       return new Promise((r) => {
@@ -566,7 +574,9 @@ describe('home logistics: boxing at the chests and named boxes (Track AV)', () =
     const boxedSand = c.slots.reduce((a, s, i) => a + (s && isShulkerBox(s.name) ? (shulkerContents(c.raws[i]).sand ?? 0) : 0), 0);
     const loose = c.slots.reduce((a, s) => a + (s?.name === 'sand' ? s.count : 0), 0);
     expect(boxedSand + loose).toBe(64 * 64);
-    expect(r.boxed!.length).toBe(2);
+    // one full box of sand out of the loose stacks and the bot_loot box (fill), then the chest's own stacks boxed
+    expect(r.filled).toEqual([expect.objectContaining({ item: 'sand', chest: 'chest 3 0 0', from: 'chest -3 0 0', took: 448 })]);
+    expect(r.boxed!.length).toBe(1);
     const spareChest = h.boxes.get('-3,0,0')!;
     expect(JSON.stringify(displayOf(spareChest.raws[0]))).toContain('bot_loot');
   });
@@ -725,6 +735,217 @@ describe('home logistics: boxing at the chests and named boxes (Track AV)', () =
     });
   });
 
+  describe('fill steps: full boxes out of what the bot carries', () => {
+    const deep = 'cobbled_deepslate';
+    const tenStacks = () => Array.from({ length: 10 }, () => ({ name: deep, count: 64 }));
+    /** 4 bot_loot boxes of 10 stacks, 2 loose stacks, `filler` stacks of stone (a small inventory); a chest with 5 stacks of deepslate, a chest of 3 spares, an empty chest. */
+    const owner = (filler = 20) => {
+      const h = fakeHome({
+        containers: {
+          '3,0,0': { kind: 'chest', items: Array.from({ length: 5 }, () => item(deep)) },
+          '-3,0,0': { kind: 'chest', items: [box(), box(), box()] },
+          '0,0,4': { kind: 'chest' },
+        },
+        inv: [box(), box(), box(), box(), item(deep), item(deep), ...Array.from({ length: filler }, () => item('stone'))],
+        invRaws: [namedBox('bot_loot', tenStacks()), namedBox('bot_loot', tenStacks()), namedBox('bot_loot', tenStacks()), namedBox('bot_loot', tenStacks())],
+      });
+      h.settings.set('throwawayMin', '0');
+      return h;
+    };
+    /** Deepslate anywhere: loose or in boxes, carried, in the chests, in boxes standing in the world. */
+    const total = (h: ReturnType<typeof owner>): number => {
+      let n = h.inv.reduce((a, x, i) => a + (x?.name === deep ? x.count : 0) + (x && isShulkerBox(x.name) ? (shulkerContents(h.invRaws[i])[deep] ?? 0) : 0), 0);
+      for (const b of h.boxes.values()) n += b.slots.reduce((a, x, i) => a + (x?.name === deep ? x.count : 0) + (x && isShulkerBox(x.name) ? (shulkerContents(b.raws[i])[deep] ?? 0) : 0), 0);
+      return n;
+    };
+    const onGround = (h: ReturnType<typeof owner>) => [...h.boxes.keys()].filter((k) => !['3,0,0', '-3,0,0', '0,0,4'].includes(k));
+    const lootBoxes = (h: ReturnType<typeof owner>) => h.inv.map((x, i) => ({ x, raw: h.invRaws[i] })).filter((y) => y.x && isShulkerBox(y.x.name) && JSON.stringify(displayOf(y.raw) ?? '').includes('bot_loot'));
+
+    it("the owner's deepslate: in rounds through the bot_loot boxes (a small inventory), one full box into the deepslate chest, the rest loose; the boxes kept, empty", async () => {
+      const h = owner();
+      await h.logistics.scan(never);
+      expect(h.logistics.plan().steps).toEqual([{ kind: 'fill', item: deep, chest: '3,0,0', spare: '-3,0,0' }]);
+      const before = total(h);
+      const r = await h.logistics.unload(never);
+      expect(r.ok).toBe(true);
+      expect(r.left).toEqual([]);
+      expect(r.filled).toEqual([expect.objectContaining({ item: deep, chest: 'chest 3 0 0', from: 'chest -3 0 0', took: 1600 })]);
+      // 10 free slots, 2 kept free while a box stands: at most 8 stacks a take, so several rounds
+      expect(r.filled![0]!.rounds).toBeGreaterThan(1);
+      const c = h.boxes.get('3,0,0')!;
+      const boxes = c.slots.map((x, i) => (x && isShulkerBox(x.name) ? shulkerContents(c.raws[i]) : undefined)).filter(Boolean);
+      expect(boxes).toEqual([{ [deep]: 1728 }]);
+      expect(c.slots.reduce((a, x) => a + (x?.name === deep ? x.count : 0), 0)).toBe(5 * 64 + 4 * 640 + 128 - 1728);
+      expect(h.boxes.get('-3,0,0')!.slots.filter(Boolean)).toHaveLength(2);
+      expect(lootBoxes(h)).toHaveLength(4);
+      for (const b of lootBoxes(h)) expect(shulkerContents(b.raw)).toEqual({});
+      expect(h.inv.some((x) => x?.name === deep)).toBe(false);
+      expect(total(h)).toBe(before);
+      expect(onGround(h)).toEqual([]);
+      expect(h.memory.get({ x: 3, y: 0, z: 0 })).toMatchObject({ inBoxes: { [deep]: 1728 }, boxes: { empty: 0, full: 1 } });
+      expect(unloadLine(r)).toContain(`boxed 1 full box of ${deep} into chest 3 0 0`);
+      expect(unloadLine(r)).toContain('kept 4 bot_loot boxes');
+    });
+
+    it('a carried spare is used first (no trip to the chest of spares)', async () => {
+      const h = owner(0);
+      h.inv[6] = box();
+      h.invRaws[6] = nbt([]);
+      await h.logistics.scan(never);
+      expect(h.logistics.plan().steps).toEqual([{ kind: 'fill', item: deep, chest: '3,0,0', spare: 'carried' }]);
+      const r = await h.logistics.unload(never);
+      expect(r.filled).toEqual([expect.objectContaining({ from: 'my inventory' })]);
+      expect(h.boxes.get('-3,0,0')!.slots.filter(Boolean)).toHaveLength(3);
+      expect(onGround(h)).toEqual([]);
+    });
+
+    it('the place fails: no fill, the deepslate unloads loose as today (what stays in the bot_loot boxes stays), nothing lost or left in the world', async () => {
+      const h = owner();
+      await h.logistics.scan(never);
+      const before = total(h);
+      h.fail.place = true;
+      const r = await h.logistics.unload(never);
+      expect(r.filled).toEqual([]);
+      expect(h.inv.some((x) => x?.name === deep)).toBe(false);
+      expect(total(h)).toBe(before);
+      expect(onGround(h)).toEqual([]);
+      // the spare went back to the chest of spares
+      expect(h.boxes.get('-3,0,0')!.slots.filter(Boolean)).toHaveLength(3);
+      expect(lootBoxes(h)).toHaveLength(4);
+    });
+
+    it('the spare is placed while the job is cancelled: it is broken and picked up again, the job ends interrupted', async () => {
+      const h = owner();
+      await h.logistics.scan(never);
+      const before = total(h);
+      let stop = false;
+      h.fail.onPlaced = (key) => {
+        if (h.boxes.get(key)!.display === undefined) stop = true; // the spare (unnamed), not a bot_loot box
+      };
+      const r = await h.logistics.unload(() => stop);
+      expect(r.reason).toBe('interrupted');
+      expect(onGround(h)).toEqual([]);
+      expect(total(h)).toBe(before);
+      // resumed (a fresh run): the fill goes on from what is there
+      const r2 = await h.logistics.unload(never);
+      expect(r2.filled).toHaveLength(1);
+      expect(total(h)).toBe(before);
+      expect(onGround(h)).toEqual([]);
+    });
+
+    it('the deepslate chest filled up meanwhile: the full box goes where the overflow boxes go (the chest the spare came from); nothing lost', async () => {
+      const h = owner();
+      await h.logistics.scan(never);
+      const before = total(h);
+      let filled = false;
+      h.fail.onDig = (key) => {
+        const b = h.boxes.get(key)!;
+        if (b.display !== undefined || filled || b.slots.filter(Boolean).length < 27) return;
+        filled = true;
+        const c = h.boxes.get('3,0,0')!;
+        c.slots.forEach((x, i) => {
+          if (!x) c.slots[i] = item('dirt');
+        });
+      };
+      const r = await h.logistics.unload(never);
+      expect(filled).toBe(true);
+      expect(r.filled).toEqual([expect.objectContaining({ item: deep, chest: 'chest -3 0 0' })]);
+      expect(total(h)).toBe(before);
+      expect(onGround(h)).toEqual([]);
+      const spareChest = h.boxes.get('-3,0,0')!;
+      expect(spareChest.slots.some((x, i) => x && isShulkerBox(x.name) && shulkerContents(spareChest.raws[i])[deep] === 1728) || h.inv.some((x, i) => x && isShulkerBox(x.name) && shulkerContents(h.invRaws[i])[deep] === 1728)).toBe(true);
+    });
+
+    it('the filled spare is not picked up again: it is fetched at the end of the run, nothing lost', async () => {
+      const h = owner(0);
+      await h.logistics.scan(never);
+      const before = total(h);
+      h.fail.onDig = (key) => {
+        if (h.boxes.get(key)!.display === undefined) {
+          h.fail.pickup = true;
+          h.fail.pickupUntilNear = true;
+        }
+      };
+      const r = await h.logistics.unload(never);
+      expect(onGround(h)).toEqual([]);
+      expect(total(h)).toBe(before);
+      // walked back to it at once, and the box was stored as planned
+      expect(r.filled).toHaveLength(1);
+    });
+  });
+
+  describe("tidy steps: a home chest's own 27 full stacks of one item into a box there", () => {
+    const home = (stacks: number, count = 64) => {
+      const h = fakeHome({
+        containers: {
+          '3,0,0': { kind: 'chest', items: Array.from({ length: stacks }, () => item('cobblestone', count)) },
+          '-3,0,0': { kind: 'chest', items: [box(), box(), box(), ...Array.from({ length: 20 }, () => item('cobblestone'))] }, // the chest of spares: never tidied
+        },
+        inv: [item('iron_pickaxe', 1)],
+      });
+      h.settings.set('throwawayMin', '0');
+      return h;
+    };
+    const onGround = (h: ReturnType<typeof home>) => [...h.boxes.keys()].filter((k) => k !== '3,0,0' && k !== '-3,0,0');
+    const cobbleIn = (h: ReturnType<typeof home>, key: string) => h.boxes.get(key)!.slots.reduce((a, x) => a + (x?.name === 'cobblestone' ? x.count : 0), 0);
+
+    it('!unload, the bot carrying none of it: the chest of 30 stacks holds 1 full box + 3 stacks after, the spare chest one box fewer', async () => {
+      const h = home(30, 64);
+      await h.logistics.scan(never);
+      expect(h.logistics.plan().steps).toEqual([]); // not part of the bot's own unload plan
+      expect(h.logistics.tidyDue()).toBe(true);
+      const r = await h.logistics.unload(never);
+      expect(r.ok).toBe(true);
+      expect(r.boxed).toEqual([expect.objectContaining({ item: 'cobblestone', stacks: 27, chest: 'chest 3 0 0', from: 'chest -3 0 0' })]);
+      const c = h.boxes.get('3,0,0')!;
+      expect(c.slots.map((x, i) => (x && isShulkerBox(x.name) ? shulkerContents(c.raws[i]) : undefined)).filter(Boolean)).toEqual([{ cobblestone: 1728 }]);
+      expect(cobbleIn(h, '3,0,0')).toBe(3 * 64);
+      expect(h.boxes.get('-3,0,0')!.slots.filter((x) => x && isShulkerBox(x.name))).toHaveLength(2);
+      expect(cobbleIn(h, '-3,0,0')).toBe(20 * 64);
+      expect(h.inv.some((x) => x?.name === 'cobblestone')).toBe(false);
+      expect(onGround(h)).toEqual([]);
+      expect(h.logistics.tidyDue()).toBe(false);
+      expect(unloadLine(r)).toContain('boxed 27 stacks of cobblestone from chest 3 0 0 into a shulker (box from chest -3 0 0)');
+    });
+
+    it('the chore job (tidy): at most MAX_TIDY_STEPS, stops when no spare is left', async () => {
+      const h = home(27, 64);
+      await h.logistics.scan(never);
+      const r = await h.logistics.tidy(never);
+      expect(r.ok).toBe(true);
+      expect(r.boxed).toHaveLength(1);
+      expect(cobbleIn(h, '3,0,0')).toBe(0);
+      expect(onGround(h)).toEqual([]);
+      expect(h.inv.some((x) => x?.name === 'cobblestone')).toBe(false);
+    });
+
+    it('27 stacks worth in partial stacks: the step fails before anything is taken, nothing moves', async () => {
+      const h = home(27, 64);
+      h.boxes.get('3,0,0')!.slots[0] = item('cobblestone', 60);
+      h.boxes.get('3,0,0')!.slots[1] = item('cobblestone', 4);
+      h.boxes.get('3,0,0')!.slots.push(item('cobblestone', 64));
+      await h.logistics.scan(never);
+      expect(h.logistics.tidyDue()).toBe(true);
+      const r = await h.logistics.tidy(never);
+      expect(r.boxed).toEqual([]);
+      expect(cobbleIn(h, '3,0,0')).toBe(27 * 64);
+      expect(h.inv.some((x) => x?.name === 'cobblestone')).toBe(false);
+      expect(h.boxes.get('-3,0,0')!.slots.filter((x) => x && isShulkerBox(x.name)).length + h.inv.filter((x) => x && isShulkerBox(x.name)).length).toBe(3);
+      expect(onGround(h)).toEqual([]);
+    });
+
+    it('the place fails: the stacks taken out go back into the chest', async () => {
+      const h = home(27, 64);
+      await h.logistics.scan(never);
+      h.fail.place = true;
+      const r = await h.logistics.tidy(never);
+      expect(r.boxed).toEqual([]);
+      expect(h.inv.some((x) => x?.name === 'cobblestone')).toBe(false);
+      expect(cobbleIn(h, '3,0,0')).toBe(27 * 64); // back into the chest they came from
+      expect(onGround(h)).toEqual([]);
+    });
+  });
+
   it('a full chest and no spare box anywhere: the reply says what is left and why', async () => {
     const h = fakeHome({ containers: { '3,0,0': { kind: 'chest', items: cobble27() } }, inv: Array.from({ length: 3 }, () => item('cobblestone')) });
     h.settings.set('throwawayMin', '0');
@@ -813,6 +1034,42 @@ describe('home processes', () => {
     h.advance(2000);
     pm.tick();
     expect(h.runner.calls).toEqual(['scan', 'unload']);
+  });
+
+  it('HomeChore: with nothing to unload, a tidy job when one is due; after one that boxed nothing it waits', async () => {
+    let due = true;
+    const h = chore({ tidyDue: () => due });
+    h.c.sessionScan = false;
+    h.state.stacks = AUTO_UNLOAD_STACKS + 1;
+    const pm = new ProcessManager();
+    pm.add(h.c);
+    h.advance(2000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['unload']); // the bot's own items first
+    h.state.stacks = 0;
+    h.runner.finish();
+    await tick();
+    h.runner.tidyBoxed = 2;
+    h.advance(2000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['unload', 'tidy']);
+    h.runner.finish();
+    await tick();
+    // it boxed something: the next one may follow at once; this one boxes nothing: back off
+    h.runner.tidyBoxed = 0;
+    h.advance(2000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['unload', 'tidy', 'tidy']);
+    h.runner.finish();
+    await tick();
+    h.advance(2000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['unload', 'tidy', 'tidy']);
+    h.advance(TIDY_BACKOFF_MS);
+    due = false;
+    pm.tick();
+    expect(h.runner.calls).toEqual(['unload', 'tidy', 'tidy']); // nothing due
+    expect(h.c.stats.tidies).toBe(2);
   });
 
   it('HomeChore: an appeared container is read; a !get job that ended at home is unloaded even below the threshold and reported', async () => {

@@ -147,9 +147,9 @@ describe('unloader: box steps (Track AV)', () => {
     const other = chest({ key: 'other', free: 27 });
     const spares = chest({ key: 'spares', free: 0, boxes: { empty: 5, full: 0 }, contents: { undyed_shulker_box: 5, stone: 22 * 64 } });
     const p = planUnload(stacks(0, 30, 'cobblestone'), [home, other, spares], { reserve: 0 });
-    // 27 stacks into one box (2 free slots -> 1), then the last 3 stacks into a second one (the chest's last slot): all of it stays together
+    // 27 stacks into one box (a fill step: a full box's worth carried; 2 free slots -> 1), then the last 3 stacks into a second one (the chest's last slot): all of it stays together
     expect(p.steps).toEqual([
-      { kind: 'box', item: 'cobblestone', chest: 'home', stacks: 0, produce: 27, spare: 'spares' },
+      { kind: 'fill', item: 'cobblestone', chest: 'home', spare: 'spares' },
       { kind: 'box', item: 'cobblestone', chest: 'home', stacks: 0, produce: 3, spare: 'spares' },
     ]);
     expect(p.moves.filter((m) => m.name === 'cobblestone')).toEqual([]);
@@ -178,6 +178,118 @@ describe('unloader: box steps (Track AV)', () => {
     } finally {
       setCompactPlanner(undefined);
     }
+  });
+});
+
+describe('unloader: fill steps (full boxes out of what the bot carries)', () => {
+  const deep = 'cobbled_deepslate';
+  /** A bot_loot box holding `k` stacks of `name`. */
+  const loot = (slot: number, k: number, name = deep): UnloadSlot => s(slot, 'undyed_shulker_box', 1, { named: true, boxUsed: k, boxItems: { [name]: k * 64 } });
+  const owner = () => ({
+    deepChest: chest({ key: 'deep', free: 20, contents: { [deep]: 5 * 64 } }),
+    spares: chest({ key: 'spares', free: 24, contents: { undyed_shulker_box: 3 }, boxes: { empty: 3, full: 0 } }),
+  });
+
+  it("the owner's deepslate: 4 bot_loot boxes of 10 stacks and 2 loose ones are a full box's worth: one fill step though the chest has room", () => {
+    const { deepChest, spares } = owner();
+    const slots = [loot(0, 10), loot(1, 10), loot(2, 10), loot(3, 10), s(4, deep), s(5, deep)];
+    const p = planUnload(slots, [deepChest, spares]); // the reserve (16) counts the boxes' deepslate too
+    expect(p.steps).toEqual([{ kind: 'fill', item: deep, chest: 'deep', spare: 'spares' }]);
+    // the 2 loose stacks go into the box first: none of them is deposited loose; the boxes are emptied and their rest unloaded later
+    expect(p.moves.filter((m) => m.name === deep)).toEqual([]);
+    expect(p.emptyNamed).toEqual([0, 1, 2, 3]);
+    expect(p.kept).toContainEqual({ name: 'undyed_shulker_box', count: 4, why: 'named_box' });
+    // 2 full boxes' worth (60 stacks): 2 steps; at most maxFillSteps; off with boxing off, filling off, or noFill
+    const two = [loot(0, 27), loot(1, 27), ...stacks(2, 6, deep)];
+    expect(planUnload(two, [deepChest, spares], { reserve: 0 }).steps).toEqual([
+      { kind: 'fill', item: deep, chest: 'deep', spare: 'spares' },
+      { kind: 'fill', item: deep, chest: 'deep', spare: 'spares' },
+    ]);
+    expect(planUnload(two, [deepChest, spares], { reserve: 0, maxFillSteps: 1 }).steps).toHaveLength(1);
+    expect(planUnload(two, [deepChest, spares], { reserve: 0, boxing: false }).steps).toEqual([]);
+    expect(planUnload(two, [deepChest, spares], { reserve: 0, filling: false }).steps).toEqual([]);
+    expect(planUnload(two, [deepChest, spares], { reserve: 0, noFill: new Set([deep]) }).steps).toEqual([]);
+  });
+
+  it('less than a full box in all: no fill step, the loose stacks unload as today', () => {
+    const { deepChest, spares } = owner();
+    const p = planUnload([loot(0, 13), loot(1, 13), s(2, deep, 63)], [deepChest, spares], { reserve: 0 });
+    expect(p.steps).toEqual([]);
+    expect(p.moves).toEqual([{ slot: 2, name: deep, count: 63, to: 'deep', rule: 'same' }]);
+    // exactly a full box's worth, but the reserve holds 16 back: none either
+    expect(planUnload([loot(0, 27)], [deepChest, spares]).steps).toEqual([]);
+    // 27 stacks loose alone are a full box's worth too
+    expect(planUnload(stacks(0, 27, 'sand'), [chest({ key: 'sand', free: 27, contents: { sand: 64 } }), spares], { reserve: 0 }).steps).toEqual([{ kind: 'fill', item: 'sand', chest: 'sand', spare: 'spares' }]);
+  });
+
+  it('the spare: a carried one first (with a bot_loot box carried every unnamed empty box is one), else the chest of spares; none: loose as today', () => {
+    const { deepChest, spares } = owner();
+    const slots = [loot(0, 27), s(1, 'undyed_shulker_box', 1, { boxUsed: 0 }), s(2, deep)];
+    expect(planUnload(slots, [deepChest, spares], { reserve: 0 }).steps).toEqual([{ kind: 'fill', item: deep, chest: 'deep', spare: 'carried' }]);
+    // no spare anywhere: no step, nothing blocked (the chest has room: the deepslate goes there loose)
+    const none = planUnload([loot(0, 27), s(1, deep)], [deepChest], { reserve: 0 });
+    expect(none.steps).toEqual([]);
+    expect(none.blocked).toEqual([]);
+    expect(none.moves).toEqual([{ slot: 1, name: deep, count: 64, to: 'deep', rule: 'same' }]);
+    // never the fireworks box, never an unknown box, never a bot_loot box as the spare
+    const kit = planUnload([loot(0, 27), s(1, 'red_shulker_box', 1, { flightKit: true, boxUsed: 0 }), s(2, 'undyed_shulker_box', 1, { unknown: true }), loot(3, 0, deep), s(4, deep)], [deepChest], { reserve: 0 });
+    expect(kit.steps).toEqual([]);
+  });
+
+  it('the destination: the chest holding the item (loose or boxed), else a labelled one, else the emptiest without spares; one free slot', () => {
+    const spares = chest({ key: 'spares', free: 26, boxes: { empty: 1, full: 0 }, contents: { undyed_shulker_box: 1 } });
+    const slots = [loot(0, 27), s(1, deep)];
+    const boxedHome = chest({ key: 'boxed', free: 1, contents: { undyed_shulker_box: 26 }, inBoxes: { [deep]: 26 * 1728 }, boxes: { empty: 0, full: 26 } });
+    const blocks = chest({ key: 'blocks', label: 'blocks', free: 3 });
+    const empty = chest({ key: 'empty', free: 20 });
+    expect(planUnload(slots, [spares, empty, blocks, boxedHome], { reserve: 0 }).steps[0]).toMatchObject({ kind: 'fill', chest: 'boxed' });
+    // the home chest is full: the label, then the emptiest unlabelled chest (not the one of spares, though it has more room)
+    const fullHome = chest({ key: 'full', free: 0, contents: { [deep]: 27 * 64 } });
+    expect(planUnload(slots, [spares, empty, blocks, fullHome], { reserve: 0 }).steps[0]).toMatchObject({ kind: 'fill', chest: 'blocks' });
+    expect(planUnload(slots, [spares, empty, fullHome], { reserve: 0 }).steps[0]).toMatchObject({ kind: 'fill', chest: 'empty' });
+    // only the chest of spares has room: no fill step (the overflow fills a spare there as today)
+    expect(planUnload(slots, [spares, fullHome], { reserve: 0 }).steps.some((x) => x.kind === 'fill')).toBe(false);
+  });
+
+  it('`all`: the other full boxes count too (not the fireworks box); kept items, unstackables and other kinds inside never', () => {
+    const { deepChest, spares } = owner();
+    const unnamed = s(0, 'undyed_shulker_box', 1, { boxUsed: 20, boxItems: { [deep]: 20 * 64 } });
+    const kit = s(1, 'red_shulker_box', 1, { flightKit: true, boxUsed: 27, boxItems: { [deep]: 27 * 64 } });
+    const slots = [unnamed, kit, ...stacks(2, 8, deep)];
+    expect(planUnload(slots, [deepChest, spares], { reserve: 0 }).steps).toEqual([]);
+    expect(planUnload(slots, [deepChest, spares], { reserve: 0, all: true }).steps).toEqual([{ kind: 'fill', item: deep, chest: 'deep', spare: 'spares' }]);
+    const mixed = s(0, 'undyed_shulker_box', 1, { named: true, boxUsed: 27, boxItems: { bread: 27 * 64 } });
+    const tools = s(1, 'undyed_shulker_box', 1, { named: true, boxUsed: 27, boxItems: { iron_pickaxe: 27 } });
+    expect(planUnload([mixed, tools], [chest({ key: 'any', free: 27 }), spares], { reserve: 0 }).steps).toEqual([]);
+  });
+});
+
+describe("unloader: tidy steps (a home chest's own full boxes' worth)", () => {
+  const spares = () => chest({ key: 'spares', free: 24, contents: { undyed_shulker_box: 3 }, boxes: { empty: 3, full: 0 } });
+
+  it('a chest with 27 stacks or more of one kind loose: a box step there even with nothing carried; 26: none; never without `tidy`', () => {
+    const cobble = chest({ key: 'cobble', free: 24, contents: { cobblestone: 30 * 64 } });
+    expect(planUnload([], [cobble, spares()], { tidy: true }).steps).toEqual([{ kind: 'box', item: 'cobblestone', chest: 'cobble', stacks: 27, produce: 0, spare: 'spares', tidy: true }]);
+    expect(planUnload([], [cobble, spares()]).steps).toEqual([]);
+    expect(planUnload([], [chest({ key: 'c26', free: 1, contents: { cobblestone: 26 * 64, sand: 64 } }), spares()], { tidy: true }).steps).toEqual([]);
+    // 2 boxes' worth: 2 steps; at most maxTidySteps; a carried spare first
+    const big = chest({ key: 'big', free: 0, contents: { sand: 54 * 64 } });
+    expect(planUnload([], [big, spares()], { tidy: true }).steps.map((x) => x.chest)).toEqual(['big', 'big']);
+    expect(planUnload([], [big, spares()], { tidy: true, maxTidySteps: 1 }).steps).toHaveLength(1);
+    expect(planUnload([s(0, 'undyed_shulker_box', 1, { named: true, boxUsed: 0 }), s(1, 'undyed_shulker_box', 1, { boxUsed: 0 })], [big, spares()], { tidy: true }).steps.map((x) => (x.kind === 'box' ? x.spare : ''))).toEqual(['carried', 'spares']);
+  });
+
+  it('no spare: none; never the chest of spares, a box block, kept or unstackable kinds', () => {
+    const cobble = chest({ key: 'cobble', free: 0, contents: { cobblestone: 27 * 64 } });
+    expect(planUnload([], [cobble], { tidy: true }).steps).toEqual([]);
+    const spareChest = chest({ key: 'sp', free: 0, contents: { undyed_shulker_box: 1, stone: 26 * 64 + 64 * 0, dirt: 0 }, boxes: { empty: 1, full: 0 } });
+    expect(planUnload([], [spareChest], { tidy: true }).steps).toEqual([]);
+    const labelled = chest({ key: 'lb', label: 'shulkers', free: 0, contents: { stone: 27 * 64 } });
+    expect(planUnload([], [labelled, spares()], { tidy: true }).steps).toEqual([]);
+    const placedBox = chest({ key: 'pb', kind: 'undyed_shulker_box', free: 0, contents: { stone: 27 * 64 } });
+    expect(planUnload([], [placedBox, spares()], { tidy: true }).steps).toEqual([]);
+    const food = chest({ key: 'food', free: 0, contents: { bread: 27 * 64, iron_pickaxe: 27 } });
+    expect(planUnload([], [food, spares()], { tidy: true }).steps).toEqual([]);
   });
 });
 
