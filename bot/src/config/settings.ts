@@ -140,6 +140,11 @@ export const SETTING_DEFS = {
   flyMaxClimb: { kind: 'number', default: 120, min: 20, max: 250, integer: true, unit: 'blocks', description: 'flight: the climb never goes higher than this above the start; a longer glide is topped up with a rocket on the way (about 31 blocks of height, 310 of glide, each)' }, // Track AU2
   flyMargin: { kind: 'number', default: 15, min: 0, max: 60, integer: true, unit: 'blocks', description: 'flight: the cruise fires a rocket only when the glide ahead would reach the approach entry with less than this much height to spare (less for short glides: distance / 30 - 5, none under 150 blocks)' }, // Track AU2
   flyLandSearch: { kind: 'number', default: 48, min: 4, max: 128, integer: true, unit: 'blocks', description: 'flight: goto / come land on the nearest landable cell (open sky, a plain top with level neighbours) within this many blocks of the goal and walk the rest' }, // Track AU2
+  // Track BH: long falls and the water bucket clutch (docs/movement.md "Falls", docs/pathfinding.md "Long falls")
+  longFalls: { kind: 'boolean', default: true, description: 'walks may drop more than 3 blocks if the fall leaves fallMargin health (not burning, no hostile near)' },
+  fallMargin: { kind: 'number', default: 8, min: 1, max: 20, integer: true, unit: 'HP', description: 'longFalls: health a planned fall must leave' },
+  clutch: { kind: 'boolean', default: true, description: 'a fall that would hurt: water from a hotbar water bucket on the landing block, picked up again' },
+  clutchMaxDrop: { kind: 'number', default: 40, min: 4, max: 200, integer: true, unit: 'blocks', description: 'clutch: deepest drop a walk plans with a clutch' },
 } as const satisfies Record<string, SettingDef>;
 
 export type SettingKey = keyof typeof SETTING_DEFS;

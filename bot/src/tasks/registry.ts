@@ -176,6 +176,13 @@ export const afkTask: TaskDefinition = {
         return h && r > 0 ? { x: h.x + 0.5, y: h.y, z: h.z + 0.5, r } : undefined;
       });
       mob.skills.nav.setDigPenalty(() => settings.get('digPenalty'));
+      // Track BH: long falls and the water bucket clutch; no clutch water is ever planned inside the base
+      mob.skills.falls.settings = () => ({ longFalls: settings.get('longFalls'), fallMargin: settings.get('fallMargin'), clutch: settings.get('clutch'), clutchMaxDrop: settings.get('clutchMaxDrop') });
+      mob.skills.falls.protect = () => {
+        const h = home;
+        const r = settings.get('protectRadius');
+        return h && r > 0 ? { x: h.x + 0.5, y: h.y, z: h.z + 0.5, r } : undefined;
+      };
     }
     if (mob && processes) {
       const nightRef: { p?: NightProcess } = {};

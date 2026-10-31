@@ -56,6 +56,8 @@ export interface ItemStack {
   blockRuntimeId?: number;
   /** Track S: durability used up (the item NBT's `Damage`), when the item has one. */
   damage?: number;
+  /** Track BH: enchantments (the item NBT's `ench`: Bedrock ids, protection 0, feather falling 2), when it has any. */
+  enchants?: { id: number; lvl: number }[];
 }
 
 export interface ContainerView {
@@ -72,6 +74,10 @@ export interface SelfState {
   yaw: number;
   pitch: number;
   health: number;
+  /** Track BH: the server sent the health (set_health / the health attribute); false = the default 20 is a guess. */
+  healthKnown?: boolean;
+  /** Track BH: absorption hearts (the `minecraft:absorption` attribute), 0 without. */
+  absorption?: number;
   food: number;
   gameMode: string;
   runtimeId: bigint;

@@ -226,3 +226,85 @@ the server, a 40-degree turn in one tick costs about 6 corrections of at most 0.
 mismatch is the rocket's life (12 to 18 ticks, the model assumes 15 and `endBoost` re-simulates when
 `remove_entity` arrives), worth a correction of 0.05 to 0.35 per rocket. The flight controller, the
 landing method and the measurements are in [flight.md](flight.md).
+
+## Falls and the water bucket clutch (Track BH, wave 11)
+
+`bot/src/skills/fall/`: the Bedrock fall damage model (`damage.ts`), what a water bucket does to each
+block (`waterlog.ts`), the planner's long-fall policy (`policy.ts`, `plan.ts`; the planner side is in
+[pathfinding.md](pathfinding.md) "Long falls"), the note on a refused fall (`explain.ts`) and the
+`FallGuard` (`clutch.ts`), which `BotSkills` builds for every bot (`skills.falls`). Decision record:
+[decisions/0049-long-falls-and-clutch.md](decisions/0049-long-falls-and-clutch.md).
+
+```ts
+skills.falls.policy();          // { hpBudget, factor, clutch, ... } or undefined (longFalls off): read before every plan
+skills.falls.last;              // the last clutch: predicted HP, target, click tick and reach, placed, recovered, reason
+skills.falls.stats;             // { clutches, placed, recovered, refused, waterLeft }
+fallDamage(12);                 // 8 (damage.ts); fallDamage(22, 'hay_block') 2; fallDamage(12, 'stone', epfFactor(12)) 4.16
+```
+
+### The damage model (measured on BDS 1.26.60.6, bds-gaunt, truth:hurtlog)
+
+| What | Rule | Measured |
+|---|---|---|
+| counted distance | the drop up to the tick BEFORE the landing tick (the landing tick's clipped move does not count); from rest the body is at D(t) = sum of (v - 0.08) x 0.98 after t ticks and lands on the first tick with D(t) >= h | 12 blocks: D(18) = 12.002 lands, D(17) = 10.807 counts |
+| damage | ceil(counted x landing factor - 3) | walking off stone pillars, each height twice: 4 -> 1, 5 -> 2, 6 -> 3, 7 -> 4, 8 -> 5, 9 -> 6, 10 -> 7, 11 -> 8, **12 -> 8**, 13 -> 10, 14 -> 11, 16 -> 13, 18 -> 15, **20 -> 16**, 22 -> 19; teleported: 3.25 -> 0, 3.5 -> 1, 4.5 -> 2, 15 -> 12 (ceil(h - 3) is wrong at 12 and 20, the counted distance is right everywhere) |
+| landing factor (on the distance) | hay_block 0.2, honey_block 0.5, beds 0.5 (and a bounce), water (any depth), slime, powder snow 0; slabs, leaves and every other floor 1 | hay 6 / 12 / 22 -> 0 / 0 / 2; honey 6 / 12 / 22 -> 0 / 3 / 8; bed 22 -> 8 + 1 (bounce); water, slime, powder snow 0 at 6, 12, 22; slabs and leaves like stone. Cobwebs and scaffolding gave 0 or the full damage depending on whether the tick ended inside them: counted as 1 |
+| armour | no reduction from armour points; EPF = 3 x Feather Falling (boots) + the Protection levels of every worn piece, at most 20; damage x (1 - 0.04 x EPF), fractional (health is a float) | diamond boots: 5 / 8 / 19 (none); FF IV 2.6 / 4.16 / 9.88 (x 0.52); FF I x 0.88; Protection IV boots x 0.84; FF IV + P IV x 0.36; FF IV + 4 x P IV 1 / 1.6 / 3.8 (x 0.2, the cap) |
+| health after | health + absorption - damage | |
+
+Enchantments come from the item NBT (`ench`: id 0 protection, 2 feather falling; `world/inventory.ts`
+`itemEnchants` -> `ItemStack.enchants`); absorption and "health known" from the attributes
+(`World.self.absorption`, `healthKnown`).
+
+### The water bucket clutch (`FallGuard`)
+
+Every tick the body falls (not gliding, not in water), the rest of the fall is simulated with the
+movement model (`loop.engine` over the live blocks, the current command) to the landing tick; the
+counted fall (this fall so far, the server's way, plus the predicted ticks before the landing) gives
+the damage on the landing block. When it hurts and a water bucket is in the hotbar (`clutch` setting
+on, not in the Nether: `waterWorks`), and the landing block takes a clutch (`waterlog.ts`
+`clutchTarget`), the bucket is selected and the view turned down; the landing is predicted again every
+tick (a walk's follower lets go of forward in the air and the landing column moves) and the click goes
+out on the first tick the landing block's top corner is within 6.5 of the eye (BDS accepts up to 7.19;
+or within 7.14 when the landing is 2 ticks away): `item_use / click_block` on its top face, queued
+before that tick's `player_auth_input`, so the server places the water before it moves the body into
+it. The water is predicted in the movement model until the `update_block` shows it. Once the body is
+down, the empty bucket clicks the cell holding the water (face up) until the `update_block` shows it
+gone (at most 6 clicks, 5 ticks apart); the previous hotbar slot and pitch come back, and the
+navigator's re-plans wait until 16 ticks after the pickup (`Navigator.holdPlans`: a plan from inside the
+flow found no move, the cells around were flowing water).
+
+Where the water goes (`waterlog.ts`, measured: the bot clicked the top face of each block, the
+`update_block` packets and truth:block showed the water):
+
+| Block clicked | Water | Breaks a fall onto it (8 and 12 blocks) |
+|---|---|---|
+| stone, glass, hay, dirt, any full block that takes no water | a source in the cell above | yes (0) |
+| soul sand | a bubble column above | (not tried) |
+| bottom slab | inside the slab (layer 1); the feet end inside its cell | yes (0) |
+| top slab, stairs (either way up), fences, walls, panes, iron bars, leaves, copper grate, mangrove roots, lantern, scaffolding, ladder, campfire (put out) | inside the block (layer 1), nothing above | no: top slab 4 / 8, stairs 5 / 8, fence 5 / 8, leaves, pane, grate 5 / 8 (the full damage) |
+| chest, trapdoor, standing / hanging sign | none: the click used the block (the trapdoor opened, the sign's editor) | |
+| snow layer, moss carpet | washed away (flowing water in its cell, the source above) | |
+
+So the clutch target is a full cube that is not waterloggable and not interactive, with air above it
+(the source goes there), or a bottom slab (waterlogged); anything else is refused with the reason
+(`skills.falls.last.reason`), and the fall is taken as it comes. Picking the water up: `click_block`
+on the cell that holds it (the source, or the waterlogged slab itself), face 1, with the empty bucket.
+Landings that do no damage (water, slime, powder snow, hay up to 12 blocks) are never clutched.
+
+Measured (e2e, each case twice, all 0 fall damage, the bucket back, no water left):
+
+| Case | Click | Landing |
+|---|---|---|
+| click lead time (scripted clicks, 20-block fall, 1.4 to 1.5 blocks a tick) | 1, 2 or 3 ticks before the landing (eye 3.9 / 5.4 / 6.8 from the block's corner): 0 damage each; 4 ticks (8.1): refused by the server, 16 damage | |
+| planned 30-block drop (`goto`, fall-clutch) | eye 5.90 from the corner, 2 ticks before the landing | 1 pickup click; the goto arrives |
+| reactive, walking off 20 blocks | 5.37, 2 ticks | 1 pickup |
+| reactive, walking off 50 blocks (about 3 blocks a tick at the end) | 6.67, 2 ticks | 1 pickup |
+| reactive onto a strip of bottom slabs, 20 blocks | 5.77, 3 ticks | the slab waterlogged, 1 pickup from the slab |
+| reactive onto top slabs, 12 blocks | refused (`would take the water inside`) | 8 HP, as the model says |
+
+Tests: `test/unit/skills/fall.test.ts` (the model, the table, the policy, the planner's long drops, the
+note, the clutch in a closed loop with a fake server), `test/unit/skills/nav-worker.test.ts` (long drops
+in the worker), `test/e2e/fall-model.test.ts`, `fall-long.test.ts`, `fall-clutch.test.ts` on bds-gaunt
+(`FALL_BDS_PORT` 19188, `FALL_BDS_CONTAINER`; or bds-surv on 19182; `FALL_OUT=<file>` appends the
+summaries).

@@ -322,6 +322,10 @@ export class Navigator {
   cellCost: NavigatorOptions['cellCost'];
   /** Track AT: planner cost overrides read live each plan (the End: `maxDrop` 1, no irreversible drops; world/dimension.ts). */
   costsOverride: (() => Partial<NonNullable<PathOptions['costs']>> | undefined) | undefined;
+  /** Track BH: the long-fall policy read live each plan (skills/fall: health, armour, the water bucket, settings); undefined = no drops deeper than maxDrop. */
+  fallPolicy: (() => PathOptions['falls']) | undefined;
+  /** Track BH: re-plans wait while this is true (a clutch's water and its flow around the landing are not gone yet). */
+  holdPlans: (() => boolean) | undefined;
   private protect: NavigatorOptions['protect'];
   private digPenalty: NavigatorOptions['digPenalty'];
   /** Track R: failed goals / `any` members / action cells, skipped for a while (nav/blacklist.ts). */
@@ -480,6 +484,7 @@ export class Navigator {
           : handBreakTicks),
       ...(noBreak ? { noBreak } : {}),
       cellCost: this.cellCost?.() ?? this.pathOpts.cellCost, // Track S: avoidance, read live each plan
+      ...(this.fallPolicy ? { falls: this.fallPolicy() } : {}), // Track BH: long falls, read live each plan
     };
   }
 
@@ -821,7 +826,7 @@ export class Navigator {
     this.resolveRecheck(a, s); // Track BE: the path check after a correction / knock / teleport (before the re-plan below)
 
     // a re-plan replaces the current plan and any search
-    if (a.replan && a.t >= a.waitUntil && !a.action) {
+    if (a.replan && a.t >= a.waitUntil && !a.action && !this.holdPlans?.()) { // Track BH: holdPlans (a clutch's water is still there)
       // plan from solid ground (an airborne body has no node yet), but do not wait forever
       if (s.onGround || s.inWater || this.preferNode(s) === 'climb' || a.t - a.lastProgressTick > 20 || !a.follower) { // Track AJ: in water, on a ladder
         if (!this.startMain(a, s)) {
@@ -1117,6 +1122,7 @@ export class Navigator {
       ...(o.noAction?.size ? { noAction: [...o.noAction] } : {}),
       ...(inv ? { inventory: { slots: inv.slots.map((s) => (s ? { name: s.name, count: s.count } : null)), selected: inv.selected } } : {}),
       ...(cc?.avoidance ? { avoidance: cc.avoidance } : {}),
+      ...(o.falls ? { falls: { ...o.falls } } : {}), // Track BH
     };
   }
 

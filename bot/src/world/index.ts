@@ -5,7 +5,7 @@ import { boxChecksum } from './checksum.ts';
 import { ChunkStore, type ChunkStoreOptions } from './chunks.ts';
 import { EntityTracker } from './entities.ts';
 import { BlockFinder } from './find.ts';
-import { Inventory } from './inventory.ts';
+import { Inventory, itemEnchants } from './inventory.ts';
 import type * as P from './packets.ts';
 import { toBigInt } from './packets.ts';
 import { BlockRegistry } from './registry.ts';
@@ -189,6 +189,8 @@ export class World implements WorldView {
     if (i.block_runtime_id) stack.blockRuntimeId = i.block_runtime_id;
     const damage = (i as { extra?: { nbt?: { nbt?: { value?: { Damage?: { value?: unknown } } } } } }).extra?.nbt?.nbt?.value?.Damage?.value; // Track S: tool / armour wear
     if (typeof damage === 'number') stack.damage = damage;
+    const enchants = itemEnchants(i); // Track BH: Feather Falling / Protection for the fall damage model
+    if (enchants) stack.enchants = enchants;
     return stack;
   }
 
@@ -276,11 +278,15 @@ export class World implements WorldView {
     });
     this.on<P.SetHealth>('set_health', (p) => {
       self.health = p.health;
+      self.healthKnown = true; // Track BH
     });
     this.on<P.UpdateAttributes>('update_attributes', (p) => {
       if (toBigInt(p.runtime_entity_id) !== self.runtimeId) return;
       for (const a of p.attributes) {
-        if (a.name === 'minecraft:health') self.health = a.current;
+        if (a.name === 'minecraft:health') {
+          self.health = a.current;
+          self.healthKnown = true; // Track BH
+        } else if (a.name === 'minecraft:absorption') self.absorption = a.current; // Track BH
         else if (a.name === 'minecraft:player.hunger') self.food = a.current;
       }
     });

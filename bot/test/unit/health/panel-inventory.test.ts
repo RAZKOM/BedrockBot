@@ -134,7 +134,7 @@ describe('statuses', () => {
     const inv = Buffer.byteLength(JSON.stringify(s.inventory));
     console.log(`panel state: poll (?lite=1) ${bytes} bytes, full ${full} (inventory ${inv}, logs ${Buffer.byteLength(JSON.stringify(s.logs))}, settings ${Buffer.byteLength(JSON.stringify(s.settings))} full / ${Buffer.byteLength(JSON.stringify(lite.settings))} lite)`);
     expect(bytes).toBeLessThan(20_000); // what the page polls every 2 s
-    expect(full).toBeLessThan(28_500); // GET /api/state for scripts: everything (Track AU: six flight settings with their descriptions ride along, about 1.5 KB; Track BD: the mineMode row, 175 bytes, took main's 27 957 over 28 000)
+    expect(full).toBeLessThan(29_500); // GET /api/state for scripts: everything (Track AU: six flight settings with their descriptions ride along, about 1.5 KB; Track BD: the mineMode row, 175 bytes, took main's 27 957 over 28 000; Track BH: four fall / clutch settings, about 650 bytes)
     expect(inv).toBeLessThan(6_000);
     expect(lite.settings.find((r) => r.key === 'guardRadius')).toEqual({ key: 'guardRadius', value: '16', source: 'default' });
     expect(Object.keys(lite)).not.toContain('commands');

@@ -25,7 +25,7 @@ import type { Vec3 } from '../connection/types.ts';
 
 export interface PveCommandDeps {
   follow(name: string, o?: { urgent?: boolean }): string;
-  come(name: string, o?: { urgent?: boolean }): Promise<{ ok: boolean; reason?: string }>;
+  come(name: string, o?: { urgent?: boolean }): Promise<{ ok: boolean; reason?: string; note?: string }>; // Track BH: note
   stop(): string;
   guard(): { on: boolean; radius: number };
   setGuard(g: { on?: boolean; radius?: number }): { on: boolean; radius: number };
@@ -242,7 +242,7 @@ export function registerPveCommands(chat: Chat, deps: PveCommandDeps | undefined
       void deps.come(name, now ? { urgent: true } : {}).then((r) => {
         if (r.ok) reply(`here (${name})`);
         else if (r.reason === 'not_found') reply(`come: I cannot see ${name}`);
-        else if (r.reason !== 'interrupted') reply(`come: ${r.reason ?? 'failed'}`);
+        else if (r.reason !== 'interrupted') reply(`come: ${r.reason ?? 'failed'}${r.note ? ` (${r.note})` : ''}`); // Track BH: note
       });
     },
   });
