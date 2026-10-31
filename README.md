@@ -103,6 +103,7 @@ room in its inventory by itself.
 | `!eat` | Eats the best food now. It also eats on its own when food drops below 18 or health is low. |
 | `!sleep` / `!sleep on` / `off` / `status` | Goes to bed now (night only; a bed within 8 blocks of the shelter, home or itself, or the `bed` waypoint) and stays until morning. It also sleeps by itself at night when a bed is known; `!sleep off` stops that. Sleeping resets the phantom timer. |
 | `!equip` | Puts on the best armour from its inventory. Also automatic. |
+| `!equip slot <0..35>` / `!equip <item>` | Wears exactly that piece or the elytra, even a worse one; kept on until `!equip` (the panel's "Wear this"). |
 | `!health` | Health, food, deaths and the last death cause. |
 | `!panel` | The control panel URLs (status, log, map, a command box) on the health port. |
 

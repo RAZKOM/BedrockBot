@@ -78,7 +78,7 @@ describe('panel state JSON', () => {
   it('has the documented shape', () => {
     const { panel } = makePanel({ healthPort: 9999 });
     const s: PanelState = panel.state();
-    expect(Object.keys(s).sort()).toEqual(['bot', 'chat', 'commands', 'logs', 'quick', 'self', 'settings', 'stack', 'status', 'ts', 'v', 'inventory', 'icons', 'job', 'combat', 'memory', 'planner', 'conn', 'paused'].sort()); // Track AP: inventory .. conn; Track AR: paused; icons: decision 0046
+    expect(Object.keys(s).sort()).toEqual(['bot', 'chat', 'commands', 'logs', 'quick', 'self', 'settings', 'stack', 'status', 'ts', 'v', 'inventory', 'icons', 'job', 'combat', 'memory', 'planner', 'conn', 'paused', 'link'].sort()); // Track AP: inventory .. conn; Track AR: paused; icons: decision 0046; link: the offline banner
     expect(s.v).toBe(1);
     expect(s.bot).toEqual({ name: 'UnitBot', server: '127.0.0.1:19180 (raknet)', task: 'afk', state: 'idle', healthy: false, gameVersion: '1.26.51' });
     expect(s.status[0]).toMatch(/^status: up .*pos 1\.00 -60\.00 2\.00, version 1\.26\.51, tick 0, task afk, nudges 0$/);

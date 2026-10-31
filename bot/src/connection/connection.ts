@@ -60,6 +60,19 @@ export interface ReconnectPolicy extends BackoffPolicy {
   maxAttempts: number;
 }
 
+/** `Connection.link`: what the panel's offline banner needs (docs/panel.md "When the bot is not connected"). */
+export interface ConnectionLink {
+  state: ConnectionState;
+  /** Date.now() of the last state change. */
+  since: number;
+  /** Date.now() when the scheduled reconnect fires (absent: none scheduled). */
+  retryAt?: number;
+  /** Reconnect attempts since the last spawn (0 = connected, or the first try). */
+  attempt: number;
+  /** A Microsoft device-code prompt waiting for the human (Realm sign-in), with Date.now() it came. */
+  signIn?: DeviceCodePrompt & { at: number };
+}
+
 export interface ConnectionOptions {
   /** Game version to speak, e.g. '1.26.51'. Must be supported by bedrock-protocol. */
   version: string;
@@ -162,6 +175,12 @@ export class Connection {
   private readonly onDeviceCode: (prompt: DeviceCodePrompt) => void;
 
   private _state: ConnectionState = 'idle';
+  /** Date.now() of the last state change (the panel's offline banner, docs/panel.md). */
+  private _stateSince = Date.now();
+  /** Date.now() when the scheduled reconnect fires; undefined while none is scheduled. */
+  private _retryAt: number | undefined;
+  /** The Microsoft device-code prompt of the current attempt (Realm), until it spawns or the session ends. */
+  private _signIn: { prompt: DeviceCodePrompt; at: number } | undefined;
   private _gameVersion: string;
   private _runtimeId = 0n;
   private _tick = 0n;
@@ -234,6 +253,16 @@ export class Connection {
   get serverInfo(): ServerInfo | undefined {
     return this._serverInfo;
   }
+  /** The link as the panel's offline banner shows it: state and since when, the next retry, the reconnect attempt, a pending sign-in. */
+  get link(): ConnectionLink {
+    return {
+      state: this._state,
+      since: this._stateSince,
+      ...(this._retryAt !== undefined ? { retryAt: this._retryAt } : {}),
+      attempt: this.attempt,
+      ...(this._signIn ? { signIn: { ...this._signIn.prompt, at: this._signIn.at } } : {}),
+    };
+  }
 
   // ---- public API ---------------------------------------------------------------------------
 
@@ -268,6 +297,7 @@ export class Connection {
     this.userClosed = true;
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
+    this._retryAt = undefined;
     const client = this.client;
     if (client) {
       this.lastReason.set(this.session, { reason: `client: ${reason}`, kind: 'client' });
@@ -358,7 +388,10 @@ export class Connection {
   // ---- session lifecycle ----------------------------------------------------------------------
 
   private setState(s: ConnectionState): void {
-    if (this._state !== s) this.log.debug(`state ${this._state} -> ${s}`);
+    if (this._state !== s) {
+      this.log.debug(`state ${this._state} -> ${s}`);
+      this._stateSince = Date.now();
+    }
     this._state = s;
   }
 
@@ -366,6 +399,7 @@ export class Connection {
     const target = this.target;
     if (!target || this.userClosed) return;
     const session = ++this.session;
+    this._retryAt = undefined;
     this.setState('connecting');
     if (target.kind === 'realm') {
       this.recorder?.record('meta', 'connect', { target: realmLabel(target), transport: 'nethernet', signalling: 'services', version: this.version, attempt: this.attempt });
@@ -378,6 +412,7 @@ export class Connection {
             this.log.debug(args.map(String).join(' '));
           },
           onMsaCode: (p) => {
+            this._signIn = { prompt: p, at: Date.now() };
             this.onDeviceCode(p);
           },
         });
@@ -564,6 +599,7 @@ export class Connection {
   private onSpawned(): void {
     clearTimeout(this.spawnTimer);
     this.attempt = 0;
+    this._signIn = undefined;
     this.setState('spawned');
     this.spawnedAt = performance.now();
     this.log.info(`spawned as ${this.username} (runtime id ${this._runtimeId})`);
@@ -589,6 +625,7 @@ export class Connection {
     this.pending = [];
     this.client = undefined;
     this.lastReason.delete(session);
+    this._signIn = undefined;
     this.recorder?.record('meta', 'close', { reason, kind: end.kind }, this._tick);
 
     const policy = this.reconnectPolicy;
@@ -611,6 +648,7 @@ export class Connection {
     }
     const delay = backoffDelay(this.attempt, policy);
     this.attempt++;
+    this._retryAt = Date.now() + delay;
     this.setState('connecting');
     this.log.warn(`connection lost (${reason}); reconnect attempt ${this.attempt} in ${delay} ms`);
     this.emitClose(this.closeInfo(end, true, delay));
@@ -624,6 +662,7 @@ export class Connection {
   private fail(err: Error, end: EndReason = { reason: err.message, kind: 'error' }): void {
     clearTimeout(this.spawnTimer);
     clearTimeout(this.reconnectTimer);
+    this._retryAt = undefined;
     this.stopTicker();
     const client = this.client;
     this.client = undefined;

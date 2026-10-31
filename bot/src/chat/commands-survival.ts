@@ -1,6 +1,8 @@
 // Survival-kit chat commands and wiring (PLAN.md task 7.11, Track S, docs/survival.md), owner-only:
 //   !eat                 eat the best food now (the server refuses at food 20)
-//   !equip               put on the best armour from the inventory now
+//   !equip               put on the best armour from the inventory now (forgets the manual choices)
+//   !equip slot <0..35>  wear exactly that piece or the elytra, even a worse one (the panel's "Wear
+//   !equip <item>        this"); the automatic armour pass keeps it on (survival/armour.ts pins)
 //   !inv                 inventory summary (slots, held item, armour, food, throwaway blocks, tool wear)
 //   !drop <item> [n]     drop n (default all) of an item (the owner may drop anything)
 // `registerSurvivalCommands(deps)` is called once by the afk task (tasks/registry.ts). With the
@@ -9,7 +11,8 @@
 // tools and the PlaceSkill can fetch blocks), the hooks (tool wear, avoidance), and wraps the task's
 // stop() / status(). Without walking every command answers "<cmd> needs a task that can walk".
 import { silentLogger, type Logger } from '../log.ts';
-import { armourSlotOf } from '../skills/survival/armour.ts';
+import { ARMOUR_SLOT_NAMES, armourSlotOf, wearSlotOf } from '../skills/survival/armour.ts';
+import type { ItemStack } from '../world/types.ts';
 import { foodInfo } from '../skills/survival/eat.ts';
 import { SurvivalKit, type SurvivalSettings } from '../skills/survival/index.ts';
 import { maxDurability } from '../skills/survival/tools.ts';
@@ -116,10 +119,19 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
   });
   chat.register({
     name: 'equip',
-    help: '(wear the best armour from the inventory)',
-    group: 'home', example: '!equip', auto: 'it puts on better armour as soon as it carries some',
-    run: ({ reply }) => {
-      void kit.equip().then((r) => {
+    help: '[slot <0..35> | <item>] (wear the best armour from the inventory; with a slot or an item: wear exactly that piece or the elytra, kept on until !equip)',
+    group: 'home', example: '!equip slot 12', auto: 'it puts on better armour as soon as it carries some, except over a piece worn by hand',
+    run: ({ reply, args }) => {
+      const want = parseEquipArgs(args, deps.mob?.world.inventory.slots ?? []);
+      if (want.kind === 'error') {
+        reply(want.reason);
+        return;
+      }
+      if (want.kind === 'slot') {
+        void kit.wear(want.slot).then((r) => reply(wearReply(r, want.slot)));
+        return;
+      }
+      void kit.equip({ reset: true }).then((r) => {
         if (r.reason) reply(`equip: ${r.reason}`);
         else if (r.equipped.length === 0 && r.failed.length === 0) reply(`equip: nothing better (${kit.armour.worn().map((w) => w?.name ?? '-').join(', ')})`);
         else reply(`equip: wearing ${r.equipped.join(', ') || 'nothing new'}${r.failed.length ? `; failed ${r.failed.join(', ')}` : ''}`);
@@ -273,6 +285,31 @@ async function faceForDrop(mob: Mobility | undefined, player: string | undefined
     to = { x: me.x - Math.sin(yaw) * 4, y: me.y + 1.62 + 1.5, z: me.z + Math.cos(yaw) * 4 };
   }
   await mob.skills.lookAt(to);
+}
+
+export type EquipArgs = { kind: 'best' } | { kind: 'slot'; slot: number } | { kind: 'error'; reason: string };
+
+const EQUIP_USAGE = 'usage: !equip | !equip slot <0..35> | !equip <item> (an armour piece or elytra)';
+
+/** `!equip` arguments: none = the best armour; `slot <n>`; an item name = the first inventory slot holding it (hotbar first). */
+export function parseEquipArgs(args: readonly string[], slots: readonly (ItemStack | null | undefined)[]): EquipArgs {
+  const [a, b] = args;
+  if (a === undefined) return { kind: 'best' };
+  if (a === 'slot') {
+    const n = Number(b);
+    return b !== undefined && /^\d{1,2}$/.test(b) && n >= 0 && n <= 35 ? { kind: 'slot', slot: n } : { kind: 'error', reason: EQUIP_USAGE };
+  }
+  const name = a.toLowerCase().replace(/^minecraft:/, '');
+  if (wearSlotOf(name) === undefined) return { kind: 'error', reason: `equip: ${name} is not armour or an elytra; ${EQUIP_USAGE}` };
+  for (let i = 0; i < Math.min(36, slots.length); i++) if (slots[i]?.name === name && slots[i]!.count > 0) return { kind: 'slot', slot: i };
+  return { kind: 'error', reason: `equip: no ${name} in the inventory` };
+}
+
+/** The reply to `!equip slot <n>`. */
+export function wearReply(r: { ok: boolean; item?: string; slot?: number; replaces?: string | null; reason?: string }, from: number): string {
+  if (!r.ok) return `equip: ${r.item ? `${r.item}: ` : ''}${r.reason ?? 'failed'}`;
+  const where = r.slot !== undefined ? ARMOUR_SLOT_NAMES[r.slot] : 'armour';
+  return `equip: wearing ${r.item} (${where})${r.replaces ? `, ${r.replaces} into slot ${from}` : ''}; kept on until !equip`;
 }
 
 /** Track AU: `!drop flightkit`: the elytra (worn too), every rocket and the fireworks box. */
