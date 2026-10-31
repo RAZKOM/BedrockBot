@@ -97,12 +97,33 @@ describe('detectTree', () => {
     plant(w, 10, 10, 5);
     w.put(10, -61, 10, 'oak_planks');
     expect(detectTree(at(w), { x: 10, y: -59, z: 10 })).toBeUndefined();
-    expect(detectTree(at(w), { x: 10, y: -59, z: 10 }, { requireSoil: false })).toBeDefined();
+    expect(detectTree(at(w), { x: 10, y: -59, z: 10 }, { requireSoil: false })).toBeUndefined(); // planks touch a log: built
     // a log wall
     w.fill({ x: -20, y: -60, z: -20 }, { x: -10, y: -52, z: -20 }, 'oak_log');
     w.fill({ x: -20, y: -51, z: -21 }, { x: -10, y: -51, z: -19 }, 'oak_leaves');
     expect(detectTree(at(w), { x: -15, y: -55, z: -20 })).toBeUndefined();
     expect(detectTree(at(w), { x: 5, y: -61, z: 5 })).toBeUndefined();
+  });
+
+  it('log builds are no trees (Realm 2026-10-31: a log cabin next to leaves was felled)', () => {
+    const w = flatGen();
+    // a cabin: a row of 6 posts, 4 high, leaves on the roof, on grass
+    for (let x = 0; x < 6; x++) for (let y = -60; y < -56; y++) w.put(x, y, 0, 'spruce_log');
+    w.fill({ x: 0, y: -56, z: -1 }, { x: 5, y: -56, z: 1 }, 'spruce_leaves');
+    expect(detectTree(at(w), { x: 2, y: -58, z: 0 })).toBeUndefined();
+    // a single post with a door beside it, leaves above: built
+    for (let y = -60; y < -55; y++) w.put(20, y, 20, 'oak_log');
+    w.fill({ x: 19, y: -55, z: 19 }, { x: 21, y: -54, z: 21 }, 'oak_leaves');
+    w.put(21, -60, 20, 'wooden_door');
+    expect(detectTree(at(w), { x: 20, y: -58, z: 20 })).toBeUndefined();
+    // a floor of sideways logs on a post
+    for (let x = 30; x < 36; x++) for (let z = 30; z < 32; z++) w.put(x, -57, z, 'oak_log');
+    for (let y = -60; y < -57; y++) w.put(32, y, 30, 'oak_log');
+    w.fill({ x: 30, y: -56, z: 30 }, { x: 35, y: -55, z: 31 }, 'oak_leaves');
+    expect(detectTree(at(w), { x: 32, y: -59, z: 30 })).toBeUndefined();
+    // a real tree still is one
+    const logs = plant(w, 50, 50, 5);
+    expect(detectTree(at(w), logs[0]!)).toBeDefined();
   });
 
   it('remainingLogs follows the world', () => {
