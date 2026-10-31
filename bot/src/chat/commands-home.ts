@@ -144,13 +144,12 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
       log,
     }),
   );
-  const supplyBox: { ops?: BoxOps } = {}; // Track BJ: set below
   // containers appearing / disappearing within the radius of home (not the bot's own box placing)
   const offBlocks = world.onBlockUpdate((p, before, after) => {
     if (logistics.busy) return;
     const st = stashFor(processes); // Track AV: the stash step's own box (placed, filled, broken) is no container of home
     if (st?.busy && st.boxAt?.x === p.x && st.boxAt.y === p.y && st.boxAt.z === p.z) return;
-    if (supplyBox.ops?.standing.has(`${p.x},${p.y},${p.z}`)) return; // Track BJ: a refill's box (a build next to home)
+    if (logistics.boxes.standing.has(`${p.x},${p.y},${p.z}`)) return; // Track BJ: a box of the logistics or the Supply (a build next to home)
     const h = home();
     if (!h) return;
     const was = !!before && isHomeContainer(before.name);
@@ -173,8 +172,10 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
   const control: HomeControl = { logistics, chore, memory, start };
   controls.set(d.task, control);
   // Track BJ (decision 0052): the task's supply layer: carried boxes first (placed wherever the bot is: the box goes into
-  // the hotbar with the survival kit, never by a walk to a home chest), then the chests at home through `!bring`'s withdrawal
+  // the hotbar with the survival kit, never by a walk to a home chest), then the chests at home through `!bring`'s withdrawal.
+  // It shares the logistics' box state (left and standing boxes) and serial lock.
   const ops = new BoxOps({
+    state: logistics.boxes.state,
     skills: logistics.skillsForBoxes(),
     inventory: world.inventory,
     blockAt: (p) => world.blockAt(p),
@@ -185,8 +186,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     log,
     label: 'supply',
   });
-  supplyBox.ops = ops;
-  setSupply(d.task, new Supply({ ops, inventory: world.inventory, keepName: () => logistics.keepName(), records: () => logistics.records(), withdraw: (c, req) => logistics.withdraw(c, req), log }));
+  setSupply(d.task, new Supply({ ops, inventory: world.inventory, keepName: () => logistics.keepName(), records: () => logistics.records(), withdraw: (c, req) => logistics.withdraw(c, req), serial: (fn) => logistics.exclusive(fn), log }));
 
   d.chat.register({
     name: 'unload',

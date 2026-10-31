@@ -15,11 +15,19 @@
 //                          then the unnamed one with the most room; boxes.ts putIn): what a refill took out and the
 //                          job did not use goes back, so the inventory does not fill up with it
 //
+//   recover()              the boxes a job left behind (a box still standing after an interrupted break, one left on
+//                          the ground): broken, picked up, fetched (boxes.ts recover); ensure and stow start with it
+//   room(item)             how many more of it fit loose (4 slots kept free): the build caps a refill to it
+//
+// The box work (recover, the carried-box rounds of ensure, stow) runs under the home logistics' serial lock (`serial`):
+// never while an unload, scan or withdrawal uses boxes or the shared BoxState; ensure's home route takes the lock itself.
+//
 // Users: `!bring` (the home route is its own withdrawal; its extract is boxes.ts takeOut), `!build` (the materials
 // count carried boxes; the runner refills a block it ran out of and tops up the scaffold blocks before a column,
 // then stows the rest; runner.ts), the throwaway top-up (`topUpThrowaway`). The stash step (stash.ts) keeps its own
 // packing order for filling boxes; it places and picks up with the same cell rules (boxSpots).
 import { silentLogger, type Logger } from '../../log.ts';
+import { maxStackOf } from '../container/chest.ts';
 import type { ChestRecord } from '../../world/cache/chests.ts';
 import type { Vec3 } from '../../world/types.ts';
 import { BOX_SLOTS, carriedBoxes, type CarriedBox } from '../home/boxing.ts';
@@ -39,6 +47,8 @@ export interface SupplyDeps {
   records?(): ChestRecord[];
   /** The home route (HomeLogistics.withdraw); without it `ensure` never fetches from home. */
   withdraw?(cancelled: () => boolean, req: { item: BringItem; want: number }): Promise<WithdrawReport>;
+  /** The home logistics' serial lock (HomeLogistics.exclusive); without it the box work runs at once. */
+  serial?<T>(fn: () => Promise<T>): Promise<T>;
   log?: Logger;
 }
 
@@ -75,6 +85,10 @@ const list = (n: Names): string[] => (typeof n === 'string' ? [n] : [...n]).map(
 
 /** Box rounds per ensure at most (each one a place, take, break and pickup). */
 export const MAX_ENSURE_ROUNDS = 4;
+/** Free inventory slots ensure needs to start (the box's own slot frees one more; takeOut keeps two free). */
+export const ENSURE_MIN_FREE = 2;
+/** Inventory slots `room` keeps free (the box, its pickup, what the job picks up meanwhile). */
+export const ROOM_MARGIN = 4;
 
 export class Supply {
   private readonly d: SupplyDeps;
@@ -115,29 +129,38 @@ export class Supply {
     return { loose, carried, home, total: loose + carried + home };
   }
 
+  private serial<T>(fn: () => Promise<T>): Promise<T> {
+    return this.d.serial ? this.d.serial(fn) : fn();
+  }
+
+  /** How many more of `names` (the first one's stack size) fit loose with `margin` slots kept free. */
+  room(names: Names, margin = ROOM_MARGIN): number {
+    const ns = list(names);
+    const max = maxStackOf(ns[0] ?? '');
+    let partial = 0;
+    let free = 0;
+    for (let i = 0; i < 36; i++) {
+      const s = this.d.inventory.slots[i];
+      if (!s || s.count <= 0) free++;
+      else if (ns.includes(s.name.replace(/^minecraft:/, ''))) partial += Math.max(0, max - s.count);
+    }
+    return Math.max(0, free - margin) * max + partial;
+  }
+
+  /** The boxes a job left behind (see the file comment). */
+  recover(cancelled: () => boolean = () => false): Promise<void> {
+    if (!this.d.ops.pending) return Promise.resolve();
+    return this.serial(() => this.d.ops.recover(cancelled));
+  }
+
   /** Make `n` of `names` loose (see the file comment). */
   async ensure(names: Names, n: number, opts: EnsureOptions = {}): Promise<EnsureResult> {
     const ns = list(names);
     const cancelled = opts.cancelled ?? (() => false);
     const res: EnsureResult = { ok: false, loose: this.loose(ns), fromBoxes: 0, fromHome: 0 };
-    const tally = { requests: 0 };
-    for (let round = 0; round < MAX_ENSURE_ROUNDS && res.loose < n; round++) {
-      if (cancelled()) return { ...res, reason: 'interrupted' };
-      const box = this.boxes()
-        .map((b) => ({ b, has: ns.reduce((x, k) => x + (b.contents[k] ?? 0), 0) }))
-        .filter((x) => x.has > 0)
-        .sort((a, b) => b.has - a.has || a.b.slot - b.b.slot)[0];
-      if (!box) break;
-      const before = res.loose;
-      const r = await this.d.ops.takeOut(box.b.slot, tally, cancelled, { item: (k) => ns.includes(k.replace(/^minecraft:/, '')), want: n - res.loose }, undefined, opts.avoid);
-      res.loose = this.loose(ns);
-      res.fromBoxes += Math.max(0, res.loose - before);
-      this.log.info(`supply: ${res.loose - before} ${ns.join('/')} out of the box in slot ${box.b.slot} (${r}); ${res.loose} of ${n} loose`);
-      if (r === 'interrupted') return { ...res, reason: r };
-      if (res.loose <= before) {
-        res.reason = r;
-        break;
-      }
+    if (res.loose < n) {
+      const stop = await this.serial(() => this.fromBoxes(ns, n, res, cancelled, opts.avoid));
+      if (stop) return { ...res, reason: stop };
     }
     if (res.loose < n && opts.home && this.d.withdraw) {
       const before = res.loose;
@@ -152,12 +175,49 @@ export class Supply {
     return res;
   }
 
+  /** ensure's carried-box rounds (under the serial lock): 'interrupted' ends ensure at once; other stops are in `res.reason`. */
+  private async fromBoxes(ns: string[], n: number, res: EnsureResult, cancelled: () => boolean, avoid: ((p: Vec3) => boolean) | undefined): Promise<string | undefined> {
+    if (this.d.ops.pending) await this.d.ops.recover(cancelled);
+    if (cancelled()) return 'interrupted';
+    if (this.boxes().length > 0 && this.d.ops.freeSlots().length < ENSURE_MIN_FREE) {
+      res.reason = 'my inventory is full';
+      return undefined;
+    }
+    const tally = { requests: 0 };
+    for (let round = 0; round < MAX_ENSURE_ROUNDS && res.loose < n; round++) {
+      if (cancelled()) return 'interrupted';
+      const box = this.boxes()
+        .map((b) => ({ b, has: ns.reduce((x, k) => x + (b.contents[k] ?? 0), 0) }))
+        .filter((x) => x.has > 0)
+        .sort((a, b) => b.has - a.has || a.b.slot - b.b.slot)[0];
+      if (!box) break;
+      const before = res.loose;
+      const r = await this.d.ops.takeOut(box.b.slot, tally, cancelled, { item: (k) => ns.includes(k.replace(/^minecraft:/, '')), want: n - res.loose }, undefined, avoid);
+      res.loose = this.loose(ns);
+      res.fromBoxes += Math.max(0, res.loose - before);
+      this.log.info(`supply: ${res.loose - before} ${ns.join('/')} out of the box in slot ${box.b.slot} (${r}); ${res.loose} of ${n} loose`);
+      if (r === 'interrupted') return r;
+      // anything but emptied (the box not back, no cell, not opened): no further round
+      if (res.loose <= before || !r.startsWith('emptied')) {
+        res.reason = r;
+        break;
+      }
+    }
+    return undefined;
+  }
+
   /**
    * Put the loose items of `names` beyond `keep` back into a carried box with room: a bot_loot box first, then the one
    * with the most free slots. The items stowed, and why it stopped short.
    */
-  async stow(names: Names, keep: number, opts: Pick<EnsureOptions, 'cancelled' | 'avoid'> = {}): Promise<{ stowed: number; reason?: string }> {
-    const ns = list(names);
+  stow(names: Names, keep: number, opts: Pick<EnsureOptions, 'cancelled' | 'avoid'> = {}): Promise<{ stowed: number; reason?: string }> {
+    return this.serial(async () => {
+      if (this.d.ops.pending) await this.d.ops.recover(opts.cancelled ?? (() => false));
+      return this.stowNow(list(names), keep, opts);
+    });
+  }
+
+  private async stowNow(ns: string[], keep: number, opts: Pick<EnsureOptions, 'cancelled' | 'avoid'>): Promise<{ stowed: number; reason?: string }> {
     const surplus = this.loose(ns) - keep;
     if (surplus <= 0) return { stowed: 0 };
     const box = this.boxes()

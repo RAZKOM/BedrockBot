@@ -49,7 +49,7 @@ there, also as an idle chore ("Full boxes out of the chests").
 | `bot/test/unit/skills/home-boxing.test.ts`, `stash-packing.test.ts`, `bot/test/e2e/home-boxing.test.ts` | Track AV: unit tests on fakes, the e2e on bds-home |
 | `bot/src/skills/supply/boxes.ts` | Track BJ: `BoxOps`, the shared box primitives (place a carried box off the cells to avoid, `takeOut`, `putIn`, break and pick up, fetch a box left on the ground), moved here out of `HomeLogistics` |
 | `bot/src/skills/supply/supply.ts` | Track BJ: `Supply` (`available`, `ensure`, `stow`, `topUpThrowaway`), `setSupply` / `supplyOf` (one per task, registered by commands-home) |
-| `bot/test/unit/skills/supply.test.ts`, `build-supply.test.ts`, `home-crops.test.ts`, `home-fakes.ts`, `bot/test/e2e/home-supply.test.ts` | Track BJ: unit tests on fakes (the fake home moved to `home-fakes.ts`), the e2e on bds-home |
+| `bot/test/unit/skills/supply.test.ts`, `supply-recovery.test.ts`, `build-supply.test.ts`, `home-crops.test.ts`, `home-fakes.ts`, `bot/test/e2e/home-supply.test.ts` | Track BJ: unit tests on fakes (the fake home moved to `home-fakes.ts`), the e2e on bds-home |
 | `docker/compose.home.yml` | `bds-home`, udp/19196, flat, peaceful |
 
 ## Commands (owner only, afk task with walking)
@@ -450,7 +450,12 @@ either taking them to the player or home." Decision record:
      enough, else the fullest. The box is taken into a free hotbar slot, the chest closed, the box placed next to
      the bot (boxes.ts `takeOut`), just what is missing taken out, the box broken, picked up and put back into the
      chest it came from (`storeBox`; it keeps the rest);
-   - a box with less than half a box left after the loose stacks for a large need is taken out of too.
+   - a box holding less than half a box of the item (a mixed box, a part-used one) is never taken whole, also for a
+     large need: items are taken out of it.
+   - The extract never loses the box: a box that cannot be placed (no free cell, the place fails) or does not
+     open comes whole as before; an interrupted extract (the box is always picked up again) or a box its chest no
+     longer takes is a debt: the next withdrawal or unload puts it back into that chest first (found by what it
+     holds), never into another chest.
    The replies say which: `a full shulker box comes along` / `2 full shulker boxes out of chest ...`, or
    `some taken out of a shulker box, which goes back` / `10 taken out of a shulker box from chest ..., the box
    went back`. `!bring shulker` takes empty boxes before full ones.
@@ -506,9 +511,10 @@ do I have" and "get me n of it loose" for every job, so no feature hand-rolls bo
 
 | Part | What |
 |---|---|
-| `BoxOps` (supply/boxes.ts) | the primitives: `place` (a carried box on a `boxSpots` cell next to the bot, never on a cell `avoid` names nor below one), `takeOut` (items out of a placed box, two inventory slots always free, optional item filter and amount), `putIn` (place, deposit up to 3 passes, break, pick up), `breakAndPickUp` / `pickUpOrFetch` / `fetchLeft` (a box left on the ground is fetched later). `standing` holds the cells where a box of the layer stands, so the home chore does not read it as a new container |
+| `BoxOps` (supply/boxes.ts) | the primitives: `place` (a carried box on a `boxSpots` cell next to the bot, never on a cell `avoid` names nor below one), `takeOut` (items out of a placed box, two inventory slots always free, optional item filter and amount), `putIn` (place, deposit up to 3 passes, break, pick up), `breakAndPickUp` / `pickUpOrFetch` / `fetchLeft` (a box left on the ground is fetched later), `recover`. A cancel never leaves a box standing: the box is always broken and picked up again. The logistics' BoxOps and the Supply's share one state: `standing` (cells where a box stands or is being placed, marked before the place and cleared once the box is confirmed gone; the home chore ignores their block updates) and the left boxes. A box whose break was interrupted stays `standing`; `recover` breaks and picks it up and fetches the left boxes at the start of the next unload, withdrawal, ensure, stow or build run |
 | `Supply.available(item)` | loose + inside the carried boxes (not the fireworks box, not unknown ones; `bot_loot` boxes count) + the chest memory at home (loose and boxed, `stockOf`) |
-| `Supply.ensure(item, n, opts)` | n loose by the cheapest route: the carried box holding most of it, just what is missing taken out (at most 4 boxes); with `home` the rest through `!bring`'s withdrawal |
+| `Supply.ensure(item, n, opts)` | n loose by the cheapest route: the carried box holding most of it, just what is missing taken out (at most 4 boxes, stopping at the first round that does not end with the box back; 2 free inventory slots needed, else `my inventory is full`); with `home` the rest through `!bring`'s withdrawal. The box work runs under the logistics' serial lock (never during an unload, scan or withdrawal) |
+| `Supply.room(item)` | how many more fit loose with 4 slots kept free: the build caps a refill to it |
 | `Supply.stow(item, keep)` | the loose surplus beyond `keep` into a carried box with room (`bot_loot` first, then the emptiest) |
 | `Supply.topUpThrowaway(min)` | `ensure` over the throwaway kinds |
 

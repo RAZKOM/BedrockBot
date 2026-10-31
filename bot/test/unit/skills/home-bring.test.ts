@@ -102,17 +102,22 @@ describe('bring: Track BJ, whole boxes or items out of a box', () => {
     expect(p.sources).toEqual([{ key: '4,0,0', pos: { x: 4, y: 0, z: 0 }, kind: 'chest', take: 10, box: false, extract: true }]);
   });
 
-  it('small boxes and a big need: whole boxes while half a box or more is missing, then items out of boxes', () => {
+  it('boxes holding less than half a box of it are never taken whole, also for a big need: items out of them', () => {
     const small = { dirt: 500 };
     const p = planBring([boxRec(4, {}, [small, small, small])], dirt, 1200, 0, o);
     expect(p.sources.map((s) => [s.take, s.box, !!s.extract, s.boxes])).toEqual([
-      [500, true, false, 1], // 1200 missing: whole
-      [500, false, true, undefined], // 700 missing: below half a box, out of the fullest box
+      [500, false, true, undefined], // 500 < 864: out of the box, not the box
+      [500, false, true, undefined],
       [200, false, true, undefined],
     ]);
     const q = planBring([boxRec(4, {}, [small, small, small])], dirt, 1900, 0, o);
-    expect(q.sources.map((s) => [s.take, s.box, s.boxes])).toEqual([[1500, true, 3]]);
+    expect(q.sources.every((s) => !s.box && s.extract)).toBe(true);
     expect(q.short).toBe(400);
+    // a mixed box with 5 dirt (review 01b9b9d #9): never whole, even with 1000 missing
+    const r = planBring([boxRec(4, {}, [{ dirt: 5, stone: 1000 }, { dirt: 1728 }])], dirt, 1000, 0, o);
+    expect(r.sources.map((s) => [s.take, s.box, !!s.extract])).toEqual([[1000, true, false]]);
+    const m = planBring([boxRec(4, {}, [{ dirt: 5, stone: 1000 }])], dirt, 1000, 0, o);
+    expect(m.sources.map((s) => [s.take, s.box, !!s.extract])).toEqual([[5, false, true]]);
   });
 
   it('an old record without the per-box list: its boxes as one', () => {

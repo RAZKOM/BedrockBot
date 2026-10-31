@@ -50,7 +50,7 @@ import { chestNeighbours, findContainers, isHomeContainer, visitOrder, visitOrde
 import { chestName, fmtPos, partnerKeys, planChests, recordFrom, unreadRecord } from './memory.ts';
 import { chestGoal, standOf, verdict } from './reach.ts';
 import { bringMatches, countOf, extractChoice, halfBox, planBring, takesWhole, type BringItem } from './bring.ts'; // Track AS; Track BJ: halves, extracts
-import { compactRunner, planUnload, reserveByKind, unloadableStacks, type UnloadPlan, type UnloadSlot, type UnloadStep } from './unloader.ts';
+import { compactRunner, heldBack, planUnload, unloadableStacks, type UnloadPlan, type UnloadSlot, type UnloadStep } from './unloader.ts';
 import { BOX_SLOTS, carriedBoxes, carriedSpares, isKeptBox, keepNameOf, MAX_BOX_STEPS, MAX_FILL_STEPS, MAX_TIDY_STEPS, namedBoxesWord, placesExactly } from './boxing.ts'; // Track AV
 import { DEFAULT_THROWAWAY_MIN, THROWAWAY_BLOCKS } from '../survival/keeper.ts';
 
@@ -215,6 +215,8 @@ interface Debt {
   item: string;
   loose: number;
   box: number | undefined;
+  /** Track BJ: an extract's box: the box holding exactly this (any slot; also one fetched from the ground later). */
+  contents?: Record<string, number>;
 }
 
 const centre = (p: Vec3): Vec3 => ({ x: p.x + 0.5, y: p.y, z: p.z + 0.5 });
@@ -252,6 +254,11 @@ export class HomeLogistics {
   /** A job runs (block updates it causes itself are ignored by the trigger). */
   get busy(): boolean {
     return this.running > 0;
+  }
+
+  /** Track BJ: run `fn` under the serial lock (the task's Supply: its box work never overlaps a home job). */
+  exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    return this.serial(fn);
   }
 
   /** Run `fn` after the previous job ended (serialised), counted in `busy`. */
@@ -478,6 +485,12 @@ export class HomeLogistics {
     return this.serial(() => this.doTidy(cancelled));
   }
 
+  /** Track BJ: of `item`, what the unload holds back (the throwaway reserve, the food and seed reserve; unloader.ts heldBack). */
+  private holdOf(item: string): number {
+    const r = this.reserve();
+    return heldBack(this.slots(), { ...(r !== undefined ? { reserve: r } : {}), ...this.crops() }).all.get(item) ?? 0;
+  }
+
   /** A tidy step is due: a home chest holds 27 full stacks' worth of one item loose and a spare is known. */
   tidyDue(): boolean {
     return this.plan(false, undefined, { tidy: true }).steps.length > 0;
@@ -512,6 +525,10 @@ export class HomeLogistics {
       return rep;
     };
     if (!this.d.home()) return finish('no_home');
+    // Track BJ: an earlier extract's box (or one left standing / on the ground) goes back first
+    if (this.debts.length > 0 || this.boxes.pending) {
+      if ((await this.settleDebts(rep, cancelled)) === 'interrupted') return finish('interrupted');
+    }
     const failed = new Set<string>();
     let boxItems = 0;
     for (let round = 0; round < 24; round++) {
@@ -533,6 +550,7 @@ export class HomeLogistics {
       let got = 0;
       let full = false;
       let extractSlot: number | undefined; // Track BJ: the box taken out for an extract (the chest is closed first)
+      let extractBox: { name: string; inside: number } | undefined;
       try {
         let left = plan.need;
         const used = (i: number): number => shulkerSlotsUsed(this.d.inventory.rawItem?.(v.view.id, i));
@@ -542,6 +560,7 @@ export class HomeLogistics {
           const i = extractChoice(inside, left);
           if (i !== undefined && this.boxes.freeSlots().length >= 3) {
             await this.freeHotbarSlot();
+            extractBox = { name: v.view.slots[i]!.name, inside: inside[i]! };
             const t = await this.d.skills.take(v.view, i, 1, [8, 7, 6, 5, 4, 3, 2, 1, 0]);
             if (t.moved > 0) rep.requests++;
             if (t.ok && t.to !== undefined) extractSlot = await this.hotbarWhileOpen(t.to);
@@ -572,11 +591,12 @@ export class HomeLogistics {
             }
           }
         } else {
-          // whole boxes holding the item, the fullest first (Track BJ: while half a box or more is still needed)
+          // whole boxes holding the item, the fullest first (Track BJ: while half a box or more is still needed, and only
+          // boxes holding half a box of it or more, like the plan: a mixed box with a few of it is taken out of instead)
           const half = halfBox(req.item);
           const order = v.view.slots
             .map((st, i) => ({ i, inside: st && isShulkerBox(st.name) ? countOf(req.item, shulkerContents(this.d.inventory.rawItem?.(v.view.id, i))) : 0 }))
-            .filter((x) => x.inside > 0)
+            .filter((x) => x.inside > 0 && x.inside >= half)
             .sort((a, b) => b.inside - a.inside || a.i - b.i);
           for (const { i, inside } of order) {
             if (!takesWhole(left, half) || cancelled()) break;
@@ -604,8 +624,9 @@ export class HomeLogistics {
         await this.d.skills.closeContainer(v.view);
       }
       if (extractSlot !== undefined) {
-        const e = await this.extractFrom(extractSlot, next, req.item, plan.need, rep, cancelled);
+        const e = await this.extractFrom(extractSlot, next, req.item, plan.need, extractBox!, rep, cancelled);
         got += e.got;
+        boxItems += e.whole ?? 0;
         if (e.reason === 'interrupted') return finish('interrupted');
         if (e.reason) this.log.info(`bring: taking ${req.item.word} out of a box from ${chestName(v.record)}: ${e.reason}`);
         if (e.got === 0 && this.boxes.freeSlots().length < 3) full = true;
@@ -622,13 +643,14 @@ export class HomeLogistics {
    * bot, `want` of the item taken out of it (two inventory slots kept free, see emptyBox), broken, picked up and put
    * back into that chest. What was taken, and why it stopped short (a box not put back is carried: the reply says so).
    */
-  private async extractFrom(slot: number, from: { pos: Vec3; kind: string }, item: BringItem, want: number, rep: WithdrawReport, cancelled: () => boolean): Promise<{ got: number; reason?: string }> {
+  private async extractFrom(slot: number, from: { key: string; pos: Vec3; kind: string }, item: BringItem, want: number, box: { name: string; inside: number }, rep: WithdrawReport, cancelled: () => boolean): Promise<{ got: number; whole?: number; reason?: string }> {
     const byName = (): Record<string, number> => {
       const m: Record<string, number> = {};
       for (const s of this.d.inventory.slots.slice(0, 36)) if (s && s.count > 0 && bringMatches(item, s.name)) m[s.name] = (m[s.name] ?? 0) + s.count;
       return m;
     };
     const before = byName();
+    const contents = { ...shulkerContents(this.d.inventory.rawItem?.(0, slot)) };
     const out: { slot?: number } = {};
     const r = await this.boxes.takeOut(slot, rep, cancelled, { item: (n) => bringMatches(item, n), want }, out);
     let got = 0;
@@ -637,16 +659,40 @@ export class HomeLogistics {
       if (n <= 0) continue;
       rep.taken[k] = (rep.taken[k] ?? 0) + n;
       got += n;
+      // what the box holds now (the debt below finds it by that)
+      const left = (contents[k] ?? 0) - n;
+      if (left > 0) contents[k] = left;
+      else delete contents[k];
     }
     const name = chestName(this.d.memory().get(from.pos) ?? unreadRecord(from.pos, from.kind));
     if (got > 0 && !rep.from.includes(name)) rep.from.push(name);
+    // nothing came out and the box is carried as it was (no free cell, the place failed, it did not open): it comes whole
+    if (got === 0 && r !== 'interrupted' && out.slot !== undefined) {
+      rep.taken[box.name] = (rep.taken[box.name] ?? 0) + 1;
+      rep.boxes.push({ name: box.name, items: box.inside, from: name });
+      if (!rep.from.includes(name)) rep.from.push(name);
+      this.log.info(`bring: taking ${item.word} out of a shulker box from ${name}: ${r}; the box comes whole`);
+      return { got: box.inside, whole: box.inside };
+    }
     const line = { items: got, from: name, back: false };
     (rep.extracted ??= []).push(line);
-    if (r === 'interrupted' || out.slot === undefined) return { got, reason: r };
+    // the box goes back into its chest: at once, else (interrupted, not stored, left on the ground) as a debt the next
+    // withdrawal or unload settles first (never filed elsewhere by an unload)
+    const debt = (at: number | undefined): void => {
+      this.debts.push({ chest: from.key, item: '', loose: 0, box: at, contents });
+    };
+    if (r === 'interrupted' || out.slot === undefined) {
+      debt(out.slot);
+      this.log.info(`bring: took ${got} ${item.word} out of a shulker box from ${name}; the box goes back later (${r})`);
+      return { got, reason: r === 'interrupted' ? r : `the box goes back later: ${r}` };
+    }
     const back = await this.storeBox(from.pos, from.kind, out.slot, cancelled, rep);
     line.back = typeof back !== 'string';
-    this.log.info(`bring: took ${got} ${item.word} out of a shulker box from ${name}; the box ${typeof back !== 'string' ? 'went back' : `stays with me (${back})`}`);
-    if (typeof back === 'string') return { got, reason: back === 'interrupted' ? back : `the box stays with me: ${back}` };
+    this.log.info(`bring: took ${got} ${item.word} out of a shulker box from ${name}; the box ${typeof back !== 'string' ? 'went back' : `goes back later (${back})`}`);
+    if (typeof back === 'string') {
+      debt(out.slot);
+      return { got, reason: back === 'interrupted' ? back : `the box goes back later: ${back}` };
+    }
     return { got, ...(r.startsWith('emptied') ? {} : { reason: r }) };
   }
 
@@ -1036,7 +1082,7 @@ export class HomeLogistics {
       { onMoved: (r) => this.addMoved(rep, r.moved, `shulker box (into ${chestName(from)})`) },
     );
     if ('reason' in put) return put.reason;
-    if (typeof put.back === 'string') return put.back === 'interrupted' || put.moved > 0 ? put.back : 'the box was not filled';
+    if (typeof put.back === 'string') return put.back === 'interrupted' ? put.back : `the box was left on the ground${put.moved > 0 ? '' : ' unfilled'}: ${put.back}`;
     if (cancelled()) return 'interrupted';
     const full = put.back;
     if (shulkerSlotsUsed(this.d.inventory.rawItem?.(0, full)) === 0) return 'the box was not filled';
@@ -1205,8 +1251,8 @@ export class HomeLogistics {
   private readonly debts: Debt[] = [];
 
   /** The debts of interrupted box steps first: 'ok', or 'interrupted'. */
-  private async settleDebts(rep: UnloadReport, cancelled: () => boolean): Promise<string> {
-    await this.boxes.fetchLeft(cancelled);
+  private async settleDebts(rep: { chests: number; requests: number }, cancelled: () => boolean): Promise<string> {
+    await this.boxes.recover(cancelled); // Track BJ: a box left standing too
     while (this.debts.length > 0) {
       if (cancelled()) return 'interrupted';
       const d = this.debts.shift()!;
@@ -1224,15 +1270,16 @@ export class HomeLogistics {
    * Put back what a failed box step took: `loose` items of `item` (fullest stacks first) and the partly filled box
    * (an unnamed box holding only `item`, in slot `box` or, the slot moved, any such box) into the chest `chest`.
    */
-  private async settle(d: Debt, rep: UnloadReport, cancelled: () => boolean): Promise<string> {
+  private async settle(d: Debt, rep: { chests: number; requests: number }, cancelled: () => boolean): Promise<string> {
     const only = (i: number) => {
       const st = this.d.inventory.slots[i];
       if (!st || !isShulkerBox(st.name) || this.boxes.namedAt(i)) return false;
       const c = shulkerContents(this.d.inventory.rawItem?.(0, i));
       const k = Object.keys(c);
+      if (d.contents) return k.length === Object.keys(d.contents).length && k.every((x) => c[x] === d.contents![x]);
       return k.length === 1 && k[0] === d.item;
     };
-    const box = d.box !== undefined && only(d.box) ? d.box : d.box !== undefined ? [...this.boxes.boxKeys()].find(only) : undefined;
+    const box = d.box !== undefined && only(d.box) ? d.box : d.box !== undefined || d.contents ? [...this.boxes.boxKeys()].find(only) : undefined;
     const moves: { slot: number; count: number; name?: string }[] = [];
     let left = Math.min(d.loose, this.looseCount(d.item));
     for (const s of this.slots().filter((x) => x.name === d.item).sort((a, b) => b.count - a.count || a.slot - b.slot)) {
@@ -1260,7 +1307,7 @@ export class HomeLogistics {
 
   private async boxStepRun(step: Extract<UnloadStep, { kind: 'box' }>, rep: UnloadReport, cancelled: () => boolean): Promise<string> {
     const t0 = this.now();
-    const hold = reserveByKind(this.slots(), this.reserve()).get(step.item) ?? 0;
+    const hold = this.holdOf(step.item); // Track BJ: the crop and seed reserve too
     const fullOnly = step.tidy === true;
     const target = planChests(this.records()).find((c) => c.key === step.chest);
     if (!target) return 'the chest is not known any more';
@@ -1409,7 +1456,7 @@ export class HomeLogistics {
   private fillMoves(item: string, want: number): { slot: number; count: number; name: string }[] {
     const slots = this.slots();
     const have = slots.filter((s) => s.name === item);
-    let allowed = Math.min(want, have.reduce((a, s) => a + s.count, 0) - (reserveByKind(slots, this.reserve()).get(item) ?? 0));
+    let allowed = Math.min(want, have.reduce((a, s) => a + s.count, 0) - this.holdOf(item)); // Track BJ: the crop and seed reserve too
     const out: { slot: number; count: number; name: string }[] = [];
     for (const s of [...have].sort((a, b) => b.count - a.count || a.slot - b.slot)) {
       if (allowed <= 0) break;
@@ -1481,7 +1528,7 @@ export class HomeLogistics {
     };
     // the reserve of a throwaway kind may grow as items come out of the boxes: take that much more
     const r0 = this.reserve() ?? DEFAULT_THROWAWAY_MIN;
-    const reserveGap = (): number => (THROWAWAY_BLOCKS.includes(step.item) ? Math.max(0, r0 - [...reserveByKind(this.slots(), r0).values()].reduce((a, n) => a + n, 0)) : 0);
+    const reserveGap = (): number => (THROWAWAY_BLOCKS.includes(step.item) ? Math.max(0, r0 - [...heldBack(this.slots(), { reserve: r0 }).throwaway.values()].reduce((a, n) => a + n, 0)) : 0);
     // 2. rounds
     let took = 0;
     let rounds = 0;

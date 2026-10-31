@@ -48,14 +48,17 @@ class FakeSupply implements RunnerSupply {
     this.calls.push(`ensure ${ns.join('/')} ${target} at y ${this.bot.feet.y - F}${opts.avoid ? '' : ' (no avoid)'}`);
     return Promise.resolve({ ok: loose >= target, loose, fromBoxes: from });
   }
+  /** Like Supply.stow: `keep` in all across the names, the surplus of the last names first. */
   stow(n: string | readonly string[], keep: number) {
     const ns = this.names(n);
+    let extra = Math.max(0, ns.reduce((a, k) => a + this.bot.inv.count(k), 0) - keep);
     let stowed = 0;
-    for (const k of ns) {
-      const extra = Math.max(0, this.bot.inv.count(k) - keep);
-      this.bot.inv.add(k, -extra);
-      this.boxed.set(k, (this.boxed.get(k) ?? 0) + extra);
-      stowed += extra;
+    for (const k of [...ns].reverse()) {
+      const m = Math.min(extra, this.bot.inv.count(k));
+      this.bot.inv.add(k, -m);
+      this.boxed.set(k, (this.boxed.get(k) ?? 0) + m);
+      stowed += m;
+      extra -= m;
     }
     this.calls.push(`stow ${ns.join('/')} keep ${keep}: ${stowed}`);
     return Promise.resolve({ stowed });
@@ -116,6 +119,49 @@ describe('build runner with carried boxes', () => {
     expect(bot.inv.count('dirt')).toBe(0);
     expect(sup.boxed.get('dirt')).toBe(64);
     expect(w.name({ x: 2, y: F, z: 0 })).toBe('air'); // the scaffold column is gone
+  });
+
+  it('a refill takes no more than fits loose (a big wall must not fill the inventory)', async () => {
+    const w = new FlatWorld();
+    const p = planBuild(w, spec(`fill 2 ${F} 2 6 ${F + 2} 6 cobblestone`), { start: START });
+    const bot = new FakeBot(w, new FakeInventory({ cobblestone: 20, dirt: 16 }), { x: 0.5, y: F, z: 0.5 });
+    const sup = new FakeSupply(bot, { cobblestone: 100 });
+    const room = Object.assign(sup, { room: () => 30 });
+    const r = new BuildRunner(p, { ...bot.deps(), supply: room });
+    const end = await r.run();
+    expect(sup.calls[0]).toBe('ensure cobblestone 30 at y 0'); // 55 needed, 30 fit
+    expect(end).toEqual({ state: 'done' }); // refilled again when out
+    expect(sup.calls.filter((c) => c.startsWith('ensure'))).toEqual(['ensure cobblestone 30 at y 0', 'ensure cobblestone 25 at y 0']); // the remaining 25
+  });
+
+  it('!stop (a pause) during a refill: the run after it recovers the box first (on the ground)', async () => {
+    const w = new FlatWorld();
+    const p = planBuild(w, spec(`fill 2 ${F} 2 6 ${F + 2} 6 cobblestone`), { start: START });
+    const bot = new FakeBot(w, new FakeInventory({ cobblestone: 20, dirt: 16 }), { x: 0.5, y: F, z: 0.5 });
+    const sup = new FakeSupply(bot, { cobblestone: 100 });
+    const r = new BuildRunner(p, { ...bot.deps(), supply: sup });
+    const ensure = sup.ensure.bind(sup);
+    let paused = false;
+    sup.ensure = (n, t, o) => {
+      if (!paused) {
+        paused = true;
+        r.pause(); // the box stays behind (the fake's ensure gives nothing)
+        return Promise.resolve({ ok: false, loose: 0, fromBoxes: 0, reason: 'interrupted' });
+      }
+      return ensure(n, t, o);
+    };
+    const recovered: string[] = [];
+    Object.assign(sup, {
+      recover: () => {
+        recovered.push(`recover at y ${bot.feet.y - F}`);
+        return Promise.resolve();
+      },
+    });
+    expect(await r.run()).toEqual({ state: 'paused' });
+    expect(recovered).toEqual(['recover at y 0']);
+    expect(await r.run()).toEqual({ state: 'done' });
+    expect(recovered).toEqual(['recover at y 0', 'recover at y 0']);
+    expect(r.stats.placed).toBe(75);
   });
 
   it('without a supply nothing changes: out of a block stops the build', async () => {

@@ -303,6 +303,19 @@ export function reserveByKind(slots: readonly UnloadSlot[], reserve = DEFAULT_TH
   return out;
 }
 
+/**
+ * Track BJ: what the unload holds back of each kind: the throwaway reserve (`reserveByKind`) and the crop / seed reserve
+ * (`cropReserve`); `all` sums them. The one rule for the planner and the logistics' box and fill steps (they must not pack
+ * what the plan keeps).
+ */
+export function heldBack(slots: readonly UnloadSlot[], opts: Pick<PlanOptions, 'reserve' | 'throwaway' | 'foodReserve' | 'seedReserve'> = {}): { throwaway: Map<string, number>; crops: Map<string, number>; all: Map<string, number> } {
+  const throwaway = reserveByKind(slots, opts.reserve ?? DEFAULT_THROWAWAY_MIN, opts.throwaway ?? THROWAWAY_BLOCKS);
+  const crops = cropReserve(slots, opts.foodReserve, opts.seedReserve);
+  const all = new Map(throwaway);
+  for (const [k, v] of crops) all.set(k, (all.get(k) ?? 0) + v);
+  return { throwaway, crops, all };
+}
+
 function capacity(s: SimChest, name: string, max: number): number {
   return (s.room[name] ?? 0) + s.free * max;
 }
@@ -378,7 +391,8 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
     move(slot, name, 1, target.c.key, 'boxes');
   };
 
-  const reserve = reserveByKind(slots, opts.reserve ?? DEFAULT_THROWAWAY_MIN, opts.throwaway ?? THROWAWAY_BLOCKS);
+  const held = heldBack(slots, opts); // Track BJ: shared with the logistics' box and fill steps
+  const reserve = held.throwaway;
   // hold the reserve back from the last slots of each kind
   const movable = new Map<number, number>();
   for (const s of slots) movable.set(s.slot, s.count);
@@ -393,7 +407,7 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
     keep(kind, r, 'reserve');
   }
   // Track BJ: the food reserve's crops and the farm's seeds, held back the same way
-  for (const [kind, r] of cropReserve(slots, opts.foodReserve, opts.seedReserve)) {
+  for (const [kind, r] of held.crops) {
     let hold = r;
     for (const s of [...slots].filter((x) => bareName(x.name) === kind).sort((a, b) => b.slot - a.slot)) {
       if (hold <= 0) break;

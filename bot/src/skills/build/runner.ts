@@ -59,6 +59,10 @@ export interface RunnerSupply {
   carried(names: string | readonly string[]): number;
   ensure(names: string | readonly string[], n: number, opts: { cancelled?: () => boolean; avoid?: (p: Cell) => boolean }): Promise<{ ok: boolean; loose: number; fromBoxes: number; reason?: string }>;
   stow(names: string | readonly string[], keep: number, opts: { cancelled?: () => boolean; avoid?: (p: Cell) => boolean }): Promise<{ stowed: number; reason?: string }>;
+  /** How many more of it fit loose (a margin of slots kept free): a refill takes no more. */
+  room?(names: string | readonly string[]): number;
+  /** A box an interrupted refill left standing or on the ground: picked up again (at the start of a run). */
+  recover?(cancelled: () => boolean): Promise<void>;
 }
 
 export interface RunnerStats {
@@ -174,6 +178,7 @@ export class BuildRunner {
     this.since = performance.now();
     try {
       this.checkColumn();
+      if (this.d.supply?.recover && this.d.onGround()) await this.d.supply.recover(() => epoch !== this.epoch); // Track BJ: a paused refill's box
       if (this.index === 0 && this.plan.scaffoldPeak > 0) await this.topUpScaffold(this.plan.scaffoldPeak, epoch); // Track BJ
       while (this.index < this.plan.steps.length) {
         if (epoch !== this.epoch) return { state: 'paused' };
@@ -254,6 +259,10 @@ export class BuildRunner {
   private async refill(items: readonly string[], target: number, epoch: number): Promise<boolean> {
     const s = this.d.supply;
     if (!s || s.carried(items) <= 0) return false;
+    // no more than fits loose with a margin (a 2000-block wall must not fill the inventory)
+    const loose = items.reduce((a, k) => a + this.d.inventory.count(k), 0);
+    if (s.room) target = Math.min(target, loose + s.room(items));
+    if (target <= loose) return false;
     const r = await s.ensure(items, target, { cancelled: () => epoch !== this.epoch, avoid: (p) => this.footprint.has(key(p)) });
     if (r.fromBoxes > 0) {
       this.stats.refills = (this.stats.refills ?? 0) + 1;
@@ -284,7 +293,7 @@ export class BuildRunner {
     }
     for (const it of items) {
       const need = this.needOf(it, this.index + 1, end);
-      if (usable(this.d.inventory, it, this.reserve()) < need) await this.refill([it], this.d.inventory.count(it) + need, epoch);
+      if (usable(this.d.inventory, it, this.reserve()) < need) await this.refill([it], this.reserveFor(it) + need, epoch);
     }
     // the scaffold blocks on top of the column's own places of a throwaway kind (the pillar may take that kind)
     const kinds = this.d.reserve().throwaway ?? THROWAWAY_BLOCKS;

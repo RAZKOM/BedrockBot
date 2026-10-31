@@ -48,7 +48,7 @@ export function fakeHome(o: { containers: Record<string, { kind: string; items?:
   let drop: { name: string; raw: unknown } | undefined;
   let selected = 0;
   /** Track AV: failure knobs for the box step tests. */
-  const fail = { place: false, pickup: false, pickupUntilNear: false, onPlaced: undefined as ((key: string) => void) | undefined, onDig: undefined as ((key: string) => void) | undefined, breakOnClose: false };
+  const fail = { place: false, pickup: false, pickupUntilNear: false, onPlaced: undefined as ((key: string) => void) | undefined, onDig: undefined as ((key: string) => void) | undefined, breakOnClose: false, digInterrupt: false };
   const breakAt = (key: string): void => {
     const b = boxes.get(key)!;
     boxes.delete(key);
@@ -155,6 +155,11 @@ export function fakeHome(o: { containers: Record<string, { kind: string; items?:
     dig: async (p) => {
       calls.push(`dig ${chestKey(p)}`);
       if (!boxes.has(chestKey(p))) return { ok: false, reason: 'no_block' };
+      // Track BJ: a pre-emption cancels the dig once (the box stays standing)
+      if (fail.digInterrupt) {
+        fail.digInterrupt = false;
+        return { ok: false, reason: 'interrupted' };
+      }
       fail.onDig?.(chestKey(p));
       breakAt(chestKey(p));
       return { ok: true };

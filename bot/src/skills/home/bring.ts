@@ -12,9 +12,10 @@
 //             Track BJ (decision 0052, docs/home.md "Bring"): the shulker boxes by what one box holds
 //             (ChestRecord.boxList), with one threshold, half a full box of the item (HALF: 27 stacks / 2,
 //             864 dirt, 216 ender pearls):
-//               still needed >= HALF   whole boxes (one inventory slot each), the fullest first; with a need of
-//                                      HALF or more boxes mostly full of the item (>= HALF of it) come before
-//                                      the loose stacks: `!bring dirt 1000` brings a full box, not 16 stacks
+//               still needed >= HALF   whole boxes (one inventory slot each) mostly full of the item (>= HALF of
+//                                      it), the fullest first, before the loose stacks: `!bring dirt 1000` brings
+//                                      a full box, not 16 stacks; a box holding less of it (a mixed box) is
+//                                      never taken whole, items are taken out of it as below
 //               still needed <  HALF   no whole box: the bot takes the box out, places it next to itself,
 //                                      takes just what is needed, picks the box up and puts it back into its
 //                                      chest (`extract`; the box holding enough with the least in it, else the
@@ -206,10 +207,8 @@ export function planBring(records: readonly ChestRecord[], item: BringItem, want
     src(r, n, false);
     left -= n;
   }
-  // the loose stacks were not enough: any box, whole while a big part is missing, else items out of one box
+  // the loose stacks were not enough: items out of one box at a time (the boxes mostly full of it went whole above)
   while (left > 0) {
-    whole(1);
-    if (left <= 0) break;
     const rest = boxes.filter((b) => !b.used);
     const i = extractChoice(rest.map((b) => b.n), left);
     if (i === undefined) break;
