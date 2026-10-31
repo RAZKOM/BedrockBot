@@ -776,7 +776,7 @@ export class FlightBrain {
   private trackAvoid(b: FlightBody, terrainShort: number, rockets: number): void {
     const fl = this.floor;
     if (!this.avoid) {
-      if (terrainShort <= 0 || !fl || fl.need === undefined) return;
+      if (terrainShort <= 0 || fl?.need === undefined) return;
       const what = fl.src === 'assumed' ? `unknown columns (assumed up to y ${Math.round(fl.top)})` : `terrain at y ${fl.top} (${fl.src})`;
       const reason = `${what} ${Math.round(fl.at)} blocks ahead at ${fl.x} ${fl.z}`;
       this.avoid = { reason, y0: b.pos.y, maxY: b.pos.y, rockets0: this.stats.rockets, clearTicks: 0 };

@@ -142,7 +142,6 @@ export function planDive(body: FlightBody, yaw: number, target: LandingTarget, c
   let sims = 0;
   const passing: { p: DiveProfile; s: DiveSim }[] = [];
   let far = 0;
-  let near = 0;
   let lastWhy = 'no candidate';
   for (const divePitchDeg of DIVE_PITCHES) {
     for (const pullPitch of PULL_PITCHES) {
@@ -162,7 +161,6 @@ export function planDive(body: FlightBody, yaw: number, target: LandingTarget, c
       else {
         lastWhy = s.why ?? '?';
         if (s.end.d > DIVE_END_MAX && s.why?.includes('too far')) far++;
-        else near++;
       }
     }
   }

@@ -18,6 +18,7 @@ import { pathBlocks, probePath } from '../skills/home/reach.ts'; // Track AU2: t
 import { probeNavOf } from '../skills/combat/pathReach.ts';
 import { findLanding, isHazardName, isLiquidName, stillLandable, WET_ABOVE, type BlockLookup, type LandingPlan, type ProbeOutcome } from '../skills/fly/landing.ts'; // Track BF
 import { TerrainMemo, type TerrainColumn } from '../skills/fly/terrain.ts'; // Track BL
+import { preferSite, RECHECK_EVERY_MS, RecheckState, SITE_BUDGET_MS, SITE_PROBES, SITE_SIMS, siteCandidates } from '../skills/fly/sites.ts'; // Track BL
 import type { Goal, GotoOptions, SkillResult } from '../skills/types.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { FlightProcess, FlyProcess, landingLine, targetFromPlan, type FlyOutcome, type FlyTarget } from '../tasks/process/fly.ts';
@@ -358,22 +359,33 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
     return takeoffSky(from, target, cz.y, d.settings.get('flyTakeoffRun'), cell);
   };
-  /** Track BH: the world for the flight simulations (unknown cells are air, as in the flight's own skyQuery). */
-  const simDeps = (): SimDeps & { cell: CellQuery } => ({ world: loop.world ? skyQuery(loop.world) : { solidAt: (x, y, z) => cell(x, y, z) ?? false }, groundAt, skyTop, cell, yieldNow: () => new Promise((r) => setImmediate(r)) });
+  /**
+   * Track BH: the world for the flight simulations (unknown cells are air, as in the flight's own skyQuery).
+   * Track BL: `strict` (a takeoff of a flight with rockets) adds the terrain columns: the simulated climb
+   * keeps the terrain floor, and its climbing turn into terrain the live model does not know is a hit.
+   */
+  const simDeps = (strict = false): SimDeps & { cell: CellQuery } => ({
+    world: loop.world ? skyQuery(loop.world) : { solidAt: (x, y, z) => cell(x, y, z) ?? false },
+    groundAt,
+    skyTop,
+    cell,
+    yieldNow: () => new Promise((r) => setImmediate(r)),
+    ...(strict && dim() === OVERWORLD ? { terrain: terrain.query } : {}),
+  });
   /**
    * Track BH (docs/flight.md "Ledge takeoff"): a ledge of the start's platform to step off instead of the
    * jump, when the jump takeoff is refused (a roof over the start: an overhang, a blocked run) or the start
    * is a small platform; its takeoff simulated with the flight's options and rockets. Undefined: none (or
    * not wanted: the jump takeoff is fine).
    */
-  const ledgeFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number): Promise<Ledge | undefined> => {
+  const ledgeFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number, quiet = false): Promise<Ledge | undefined> => {
     if (!d.settings.get('flyLedgeTakeoff')) return undefined;
     const small = smallPlatform(cell, from);
     if (sky.ok && !small) return undefined;
     const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
     const why = sky.ok ? 'a small platform' : sky.ahead === 0 ? `a roof ${sky.above} up` : `the run blocked ${sky.ahead} ahead`;
-    const r = await ledgeTakeoff(simDeps(), from, target, { cruiseY: cz.y, margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds') }, rockets);
-    log.info(`fly: ledge takeoff (${why}): ${r.line}`);
+    const r = await ledgeTakeoff(simDeps(true), from, target, { cruiseY: cz.y, margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds') }, rockets);
+    if (!quiet) log.info(`fly: ledge takeoff (${why}): ${r.line}`);
     return r.ledge;
   };
   /**
@@ -381,19 +393,78 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * simulated climb meets no solid (the sky check's first, then 30 degrees apart: the Realm's takeoff into a
    * tree canopy, 2026-10-31), else refused with the line (walk out).
    */
-  const takeoffFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number): Promise<{ ledge?: Ledge; takeoffYaw?: number } | { refuse: string }> => {
-    const ledge = await ledgeFor(from, target, sky, rockets);
+  const takeoffFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number, quiet = false): Promise<{ ledge?: Ledge; takeoffYaw?: number } | { refuse: string }> => {
+    const ledge = await ledgeFor(from, target, sky, rockets, quiet);
     if (ledge) return { ledge };
     if (!sky.ok) return { refuse: sky.line };
     const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
     const yaws = [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180].map((o) => sky.yaw + o);
-    const r = await jumpTakeoff(simDeps(), from, target, { cruiseY: cz.y, margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds') }, rockets, yaws);
+    // Track BL: any heading (the climbing turn back towards the goal is part of the simulation, its corridor checked with unknown-is-not-air)
+    const r = await jumpTakeoff(simDeps(true), from, target, { cruiseY: cz.y, margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds') }, rockets, yaws);
     if (r.yaw !== undefined && r.yaw === sky.yaw) return { takeoffYaw: r.yaw };
-    log.info(`fly: the simulated climb: ${r.line}`);
+    if (!quiet) log.info(`fly: the simulated climb: ${r.line}`);
     if (r.yaw !== undefined) return { takeoffYaw: r.yaw };
     return { refuse: 'fly: no clear climb from here (the simulated climb meets a solid on every heading: trees, a wall); walk outside first' };
   };
-  type AutoFly = { kind: 'fly'; target: FlyTarget; line: string; said?: string | undefined } | { kind: 'walk_out'; roof: string };
+  /** Track BL: a takeoff site to walk to (sites.ts): the cell, the walk there (blocks of the probed path), the flight from there and its takeoff. */
+  interface TakeoffSite {
+    x: number;
+    feet: number;
+    z: number;
+    walk: number;
+    flyDist: number;
+    takeoff: { ledge?: Ledge; takeoffYaw?: number };
+  }
+  type AutoFly = { kind: 'fly'; target: FlyTarget; line: string; said?: string | undefined } | { kind: 'site'; site: TakeoffSite; line: string } | { kind: 'walk_out'; roof: string };
+  /** Track BL: the refused takeoffs of this task (sites.ts RecheckState: no new try near one for a while). */
+  const refusedTakeoffs: { x: number; z: number; at: number }[] = [];
+  /**
+   * Track BL (docs/flight.md "Takeoff sites"): the takeoff from here is refused: the open-sky cells within
+   * flySiteSearch blocks in any direction (sites.ts siteCandidates, cheapest walk + flight first), the takeoff
+   * simulated from each (any heading, the climbing turn's corridor with unknown-is-not-air), the walk probed
+   * to those that clear; the first whose walk + flight beats walking the whole way by flyPreferRatio wins.
+   * Bounded: SITE_SIMS simulations, SITE_PROBES probes, SITE_BUDGET_MS. Undefined site: none (the line says why).
+   */
+  const takeoffSite = async (from: Vec3, goalTarget: FlyTarget, rockets: number): Promise<{ site?: TakeoffSite; line: string }> => {
+    const radius = d.settings.get('flySiteSearch');
+    const nav = probeNavOf(pve.mover);
+    if (radius <= 0) return { line: 'the site search is off (flySiteSearch 0)' };
+    if (!nav) return { line: 'no probe planner' };
+    const t0 = Date.now();
+    const memo = new RecheckState(refusedTakeoffs);
+    const cands = siteCandidates(from, goalTarget, radius, (x, z) => landable(x, z), (x, z) => memo.nearRefused({ x: x + 0.5, z: z + 0.5 }, t0) && hdist(from, { x: x + 0.5, z: z + 0.5 }) < 8);
+    const total = hdist(from, goalTarget);
+    const ratio = d.settings.get('flyPreferRatio');
+    const notes: string[] = [];
+    let sims = 0;
+    let probes = 0;
+    for (const c of cands) {
+      if (sims >= SITE_SIMS || probes >= SITE_PROBES || Date.now() - t0 > SITE_BUDGET_MS) break;
+      if (!preferSite(total, c.dist, c.flyDist, ratio)) continue;
+      const at = { x: c.x + 0.5, y: c.feet, z: c.z + 0.5 };
+      const name = `${c.x} ${c.feet} ${c.z}`;
+      sims++;
+      const tk = await takeoffFor(at, goalTarget, skyHere(at, goalTarget), rockets, true);
+      if ('refuse' in tk) {
+        notes.push(`${name}: no takeoff`);
+        continue;
+      }
+      probes++;
+      const r = await probePath(nav, { type: 'near', p: { x: at.x, y: c.feet, z: at.z }, r: 0.5 }, from, { nodes: LAND_PROBE_NODES, ms: LAND_PROBE_MS, noLongFalls: true });
+      if (r?.status !== 'found') {
+        notes.push(`${name}: no path (${r ? r.status : 'nostart'})`);
+        continue;
+      }
+      const walk = pathBlocks(r.path);
+      if (!preferSite(total, walk, c.flyDist, ratio)) {
+        notes.push(`${name}: a ${Math.round(walk)}-block walk, not worth it`);
+        continue;
+      }
+      const site: TakeoffSite = { x: c.x, feet: c.feet, z: c.z, walk, flyDist: c.flyDist, takeoff: tk };
+      return { site, line: `${cands.length} open-sky cells within ${radius}, ${sims} takeoffs simulated, ${probes} walks probed in ${Date.now() - t0} ms: ${name} (${Math.round(walk)} blocks walk, ${tk.ledge ? `a ledge heading ${Math.round(tk.ledge.yaw)}` : `heading ${Math.round(tk.takeoffYaw ?? 0)}`})${notes.length ? `; ${notes.join(', ')}` : ''}` };
+    }
+    return { line: `${cands.length} open-sky cells within ${radius}, ${sims} takeoffs simulated, ${probes} walks probed in ${Date.now() - t0} ms: none worth it${notes.length ? ` (${notes.join(', ')})` : ''}` };
+  };
   /**
    * Track BF: the flight's target for a goal (the landing plan: the goal itself, a confirmed cell, the
    * nearest dry ground, or the goal held high while its ground is not loaded) and the reply line.
@@ -412,7 +483,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * flight would be worth it but the sky over the start is closed: walk towards the goal and try the
    * takeoff again every flyRetryBlocks; undefined: walk.
    */
-  const autoFly = async (goalBlock: Vec3, label: string, half: number): Promise<AutoFly | undefined> => {
+  const autoFly = async (goalBlock: Vec3, label: string, half: number, o: { site?: boolean; quiet?: boolean } = {}): Promise<AutoFly | undefined> => {
     if (!d.settings.get('autoFly')) return undefined;
     const from = position();
     if (!from || controller.active) return undefined;
@@ -426,8 +497,17 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     // the sky first (cheap); the landing cell (up to six probe plans) only when a takeoff is possible at all
     const sky = skyHere(from, goalTarget);
     // Track BH: a ledge takeoff where the jump takeoff is refused (an overhang, a blocked run) or the start is a small platform
-    const tk = await takeoffFor(from, goalTarget, sky, k.rocketsHotbar || k.rockets);
-    if ('refuse' in tk) return { kind: 'walk_out', roof: tk.refuse };
+    const tk = await takeoffFor(from, goalTarget, sky, k.rocketsHotbar || k.rockets, o.quiet);
+    if ('refuse' in tk) {
+      refusedTakeoffs.push({ x: from.x, z: from.z, at: Date.now() });
+      // Track BL: a takeoff site within walking distance (any direction) before the walk out towards the goal
+      if (o.site !== false) {
+        const s = await takeoffSite(from, goalTarget, k.rocketsHotbar || k.rockets);
+        log.info(`fly: the takeoff here is refused (${tk.refuse.replace(/^fly: /, '').replace(/; walk outside first$/, '')}); the takeoff-site search: ${s.line}`);
+        if (s.site) return { kind: 'site', site: s.site, line: `walking ${Math.round(s.site.walk)} blocks to take off from ${s.site.x} ${s.site.feet} ${s.site.z}, then flying (${Math.round(distance)} blocks; walking would be ~${Math.round(walkMinutes(distance))} min)` };
+      }
+      return { kind: 'walk_out', roof: tk.refuse };
+    }
     // Track BF: the landing (a cell of the live model with a confirmed walk, or the goal held high until its ground loads)
     const f = await planFlight(from, goalBlock, label, half, false);
     Object.assign(f.target, tk);
@@ -497,7 +577,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       log.info(`fly: leg ${leg + 1} to ${legGoal.type === 'block' ? `the open-sky cell ${legGoal.p.x} ${legGoal.p.y} ${legGoal.p.z}` : legGoal.type === 'xz' ? `${legGoal.x} ${legGoal.z} (no ${tried.length ? 'reachable ' : ''}open-sky cell known ahead)` : 'the goal'}${tried.length ? ` (no path to ${tried.join(', ')})` : ''}`);
       const r = await legWalk(legGoal);
       if (!r.ok) return r.reason === 'interrupted' ? r : walk();
-      const again = await autoFly(goalBlock, label, half);
+      const again = await autoFly(goalBlock, label, half, { site: false });
       if (again?.kind === 'fly') {
         sayFlight(again);
         return afterFlight(await start(again.target).result, walk);
@@ -567,6 +647,121 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     d.chat.say(`${target.glide ? 'gliding down' : 'flying'} to ${label} (${Math.round(dist)} blocks, ${Math.round(drop)} down; the walk found no way${lg ? `; stepping off at ${lg.x} ${lg.feet} ${lg.z}` : ''}${target.then ? `; ${target.then}` : ''})`);
     return afterFlight(await start(target).result, walk);
   };
+  /**
+   * Track BL: carry out an automatic flight's decision: fly from here; walk to the takeoff site and fly
+   * from there (the takeoff checked again on arrival: refused, the walk goes on, watched); walk out
+   * towards the goal in legs (Track AU2, the fallback when no site is worth it).
+   */
+  const runAuto = async (f: AutoFly, goal: () => Vec3 | undefined, label: string, half: number, walk: () => Promise<SkillResult>, legWalk: (leg: Goal) => Promise<SkillResult>): Promise<SkillResult> => {
+    const g0 = goal();
+    if (!g0) return walk();
+    if (f.kind === 'walk_out') return walkOut(g0, label, half, f, walk, legWalk);
+    if (f.kind === 'fly') {
+      sayFlight(f);
+      return afterFlight(await start(f.target).result, walk);
+    }
+    d.chat.say(f.line);
+    const s = f.site;
+    log.info(`fly: walking ${Math.round(s.walk)} blocks to the takeoff site ${s.x} ${s.feet} ${s.z}, then flying ${Math.round(s.flyDist)} blocks to ${label}`);
+    const r = await legWalk({ type: 'block', p: { x: s.x, y: s.feet, z: s.z } });
+    if (!r.ok && r.reason === 'interrupted') return r;
+    const g = goal() ?? g0;
+    const again = r.ok ? await autoFly(g, label, half, { site: false }) : undefined;
+    if (again?.kind === 'fly') {
+      sayFlight(again);
+      return afterFlight(await start(again.target).result, walk);
+    }
+    const here = position();
+    if (here) refusedTakeoffs.push({ x: here.x, z: here.z, at: Date.now() });
+    const why = !r.ok ? `the walk there failed (${r.reason ?? '?'})` : again?.kind === 'walk_out' ? again.roof.replace(/^fly: /, '').replace(/; walk outside first$/, '') : 'no flight from there';
+    log.info(`fly: no takeoff from the site ${s.x} ${s.feet} ${s.z}: ${why}; walking to ${label}`);
+    d.chat.say(`fly: no takeoff from ${s.x} ${s.feet} ${s.z} after all (${why}); walking to ${label}`);
+    return watchWalk(goal, label, half, walk, walk, legWalk);
+  };
+  /** Track BL: a safe place to stop a walk for a takeoff: standing, dry, not on a ladder, a vine or scaffolding. */
+  const safeStop = (): boolean => {
+    const s = loop.state;
+    if (!s.onGround || s.inWater || s.inLava || Math.abs(s.vel.y) > 0.1) return false;
+    const at = world.blockAt({ x: Math.floor(s.pos.x), y: Math.floor(s.pos.y), z: Math.floor(s.pos.z) });
+    return !at || !/ladder|vine|scaffolding|water|lava/.test(at.name);
+  };
+  /**
+   * Track BL (docs/flight.md "Flight re-check on long walks"): a walk that did not fly (the kit or the rockets
+   * missing, the sky closed, no site worth it) looks for a takeoff again while it walks (sites.ts
+   * RecheckState: every flyRecheckBlocks blocks walked, when the kit becomes ready, when the walk comes out
+   * from under a roof; the cheap gates first, the takeoff and the landing search at most every
+   * RECHECK_SEARCH_MS, never near a refused takeoff). A chance found: the walk is stopped at a safe spot
+   * (standing, dry, no ladder), the takeoff is checked again from there and the flight (or the walk to its
+   * site) goes; else the walk resumes. Never while another process (flee, guard, a fight) has control.
+   */
+  const watchWalk = async (goal: () => Vec3 | undefined, label: string, half: number, walking: () => Promise<SkillResult>, rest: () => Promise<SkillResult>, legWalk: (leg: Goal) => Promise<SkillResult>): Promise<SkillResult> => {
+    const every = d.settings.get('flyRecheckBlocks');
+    const from = position();
+    const g0 = goal();
+    const goalAt = (g: Vec3) => ({ x: g.x + 0.5, z: g.z + 0.5 });
+    if (!d.settings.get('autoFly') || every <= 0 || !from || !g0 || hdist(from, goalAt(g0)) <= d.settings.get('flyMin') + every) return walking();
+    const res = walking();
+    const proc = (processes as { active?: unknown }).active;
+    if (!proc || typeof (processes as { stop?: unknown }).stop !== 'function') return res;
+    const state = new RecheckState(refusedTakeoffs);
+    let found: Exclude<AutoFly, { kind: 'walk_out' }> | undefined;
+    let why = '';
+    let busy = false;
+    let done = false;
+    const timer = setInterval(() => {
+      if (busy || done || found) return;
+      const p = position();
+      const g = goal();
+      if (!p || !g || processes.active !== proc || controller.active || pve.combat.target) return;
+      if (hdist(p, goalAt(g)) <= d.settings.get('flyMin')) return;
+      const k = readKit(inv, memory());
+      const kit = kitReady(k, d.settings.get('toolWearLimit')).ok && (k.rockets >= d.settings.get('fireworksMin') || k.boxRockets > 0);
+      const due = state.due(p, kit, openAbove(Math.floor(p.x), Math.floor(p.z), Math.floor(p.y)), every, Date.now());
+      if (!due) return;
+      busy = true;
+      void (async () => {
+        try {
+          const f = await autoFly(g, label, half, { quiet: true });
+          if (done || !f) return;
+          if (f.kind === 'walk_out') {
+            state.refused(p, Date.now());
+            return;
+          }
+          // a safe spot to stop (not mid-jump, on a ladder or in water): up to 3 s more of the walk
+          for (let i = 0; i < 12 && !safeStop() && !done; i++) await loop.waitTicks(5);
+          if (done || !safeStop() || processes.active !== proc) return;
+          found = f;
+          why = due === 'kit' ? 'the flight kit is ready' : due === 'sky' ? 'out from under the roof' : `${every} blocks on`;
+          processes.stop(proc as Parameters<typeof processes.stop>[0], 'replaced');
+        } finally {
+          busy = false;
+        }
+      })();
+    }, RECHECK_EVERY_MS);
+    (timer as { unref?: () => void }).unref?.();
+    const r = await res;
+    done = true;
+    clearInterval(timer);
+    if (!found || r.ok) return r;
+    const g = goal();
+    const here = position();
+    if (!g || !here) return rest();
+    log.info(`fly: the walk to ${label} stopped at ${fmt(here)} for a flight (${why})`);
+    if (found.kind === 'fly') {
+      // the takeoff again from where the walk stopped (it walked on while the landing was searched)
+      const k = readKit(inv, memory());
+      const tk = await takeoffFor(here, found.target, skyHere(here, found.target), k.rocketsHotbar || k.rockets);
+      if ('refuse' in tk) {
+        state.refused(here, Date.now());
+        log.info(`fly: no takeoff where the walk stopped (${tk.refuse}); walking on`);
+        return watchWalk(goal, label, half, rest, rest, legWalk);
+      }
+      delete found.target.ledge;
+      delete found.target.takeoffYaw;
+      Object.assign(found.target, tk);
+    }
+    return runAuto(found, goal, label, half, rest, legWalk);
+  };
   const walk0 = pve.walk.bind(pve);
   pve.walk = async (goal: Goal, opts: GotoOptions = {}, label?: string): Promise<SkillResult> => {
     if (goal.type !== 'block') return walk0(goal, opts, label);
@@ -574,25 +769,27 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const plain = () => walk0(goal, opts, label);
     // Track BH: the walk, and a glide down when it finds no way to a goal far below
     const walkOrGlide = async (): Promise<SkillResult> => glideFallback(await plain(), goal.p, name, 1, plain);
+    const legWalk = (leg: Goal) => walk0(leg, opts, `walking to ${name} (to open sky)`);
     const f = await autoFly(goal.p, name, 1);
-    if (!f) return walkOrGlide();
-    if (f.kind === 'walk_out') return walkOut(goal.p, name, 1, f, walkOrGlide, (leg) => walk0(leg, opts, `walking to ${name} (to open sky)`));
-    sayFlight(f);
-    return afterFlight(await start(f.target).result, plain);
+    // Track BL: a walk that does not fly looks for a takeoff again on the way
+    if (!f) return watchWalk(() => goal.p, name, 1, plain, plain, legWalk).then((r) => glideFallback(r, goal.p, name, 1, plain));
+    return runAuto(f, () => goal.p, name, 1, f.kind === 'walk_out' ? walkOrGlide : plain, legWalk);
   };
   const come0 = pve.come.bind(pve);
   pve.come = async (name: string, o: { urgent?: boolean } = {}): Promise<SkillResult> => {
-    const feet = pve.playerFeet(name);
-    const block = feet ? { x: Math.floor(feet.x), y: Math.round(feet.y), z: Math.floor(feet.z) } : undefined;
+    const playerBlock = (): Vec3 | undefined => {
+      const feet = pve.playerFeet(name);
+      return feet ? { x: Math.floor(feet.x), y: Math.round(feet.y), z: Math.floor(feet.z) } : undefined;
+    };
+    const block = playerBlock();
     const plain = () => come0(name, o);
     const f = block ? await autoFly(block, name, 2) : undefined;
     if (!block) return plain();
-    if (!f) return glideFallback(await plain(), block, name, 2, plain);
-    const walk = () => come0(name, o);
-    if (f.kind === 'walk_out') return walkOut(block, name, 2, f, walk, (leg) => walk0(leg, {}, `walking to ${name} (to open sky)`));
-    sayFlight(f);
-    return afterFlight(await start(f.target).result, walk);
+    const legWalk = (leg: Goal) => walk0(leg, {}, `walking to ${name} (to open sky)`);
+    if (!f) return watchWalk(playerBlock, name, 2, plain, plain, legWalk).then((r) => glideFallback(r, block, name, 2, plain));
+    return runAuto(f, playerBlock, name, 2, plain, legWalk);
   };
+
 
   // ---- status ----------------------------------------------------------------------------------
   const baseLine = task.statusLine?.bind(task);

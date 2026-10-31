@@ -37,7 +37,7 @@ import {
   type FlightBody,
   type LandingTarget,
 } from '../../../src/skills/fly/plan.ts';
-import { flatWorld, GLIDE, glideVelocity, IDLE_COMMAND, initialBody, stepBody, withBoxes, type BlockQuery } from '../../../src/skills/input/index.ts';
+import { glideVelocity } from '../../../src/skills/input/index.ts';
 import { flyTrip } from './fly-trip.ts';
 import { neverDrop } from '../../../src/skills/survival/keeper.ts';
 import { planArmour } from '../../../src/skills/survival/armour.ts';

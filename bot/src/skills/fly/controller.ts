@@ -251,7 +251,7 @@ export class FlightController {
     const cached = this.d.cachedSolid?.bind(this.d);
     const obstacle = (x: number, y: number, z: number): boolean => {
       const s = base.solidAt(x, y, z);
-      return s === true || (s === undefined && cached !== undefined && cached(x, y, z));
+      return s === true || (s === undefined && cached?.(x, y, z) === true);
     };
     this.brain = new FlightBrain(target, { ...opts, groundAt: this.d.groundAt?.bind(this.d), skyTop: this.d.skyTop?.bind(this.d), obstacle, ...(this.d.terrain && opts.terrainFloor !== false ? { terrain: this.d.terrain.query } : {}), note:
  (m) => this.log.info(`flight: ${m}`) });

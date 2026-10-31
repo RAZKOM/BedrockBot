@@ -18,6 +18,7 @@ import { FlightBrain, type BrainOptions, type FlightEnd, type FlightStats } from
 import { elytraWornLimit, elytraWornLine, type FlightKit } from './kit.ts';
 import { GLIDE } from '../input/physics.ts';
 import { hdist, onTarget, yawDiff, yawTo, type CellQuery, type LandingTarget } from './plan.ts';
+import { assumedTop, type TerrainQuery } from './terrain.ts'; // Track BL
 
 /** The ledge's fall corridor: no solid at the body's height (feet .. head + 1) this many blocks out along the heading, a block either side. */
 export const LEDGE_CORRIDOR = 10;
@@ -189,6 +190,13 @@ export interface SimDeps {
   groundAt?: GroundAt;
   skyTop?: (x: number, z: number) => number | undefined;
   yieldNow?: () => Promise<void>;
+  /**
+   * Track BL (docs/flight.md "Takeoff sites"): the terrain columns for the takeoff's climbing turn. The
+   * simulated brain gets the terrain floor (as the real flight does), and the body inside a cache-only
+   * column's terrain or under an unknown column's assumed top (terrain.ts assumedTop over the highest live
+   * top passed) counts as a hit: unknown is not air for the corridor check.
+   */
+  terrain?: TerrainQuery;
 }
 
 export interface SimResult {
@@ -198,6 +206,8 @@ export interface SimResult {
   hits: number;
   /** The body ended in water or lava. */
   wet: boolean;
+  /** Track BL: of the hits, those inside terrain the live model does not know (cache-only or the unknown columns' assumed top). */
+  unknownHits?: number;
   body: BodyState;
   stats: FlightStats;
   /** The phase the simulation stopped in (`until`). */
@@ -218,7 +228,10 @@ export async function simulateFlight(
   s: { rockets?: number; maxTicks?: number; yaw?: number; until?: (brain: FlightBrain, body: BodyState) => boolean } = {},
 ): Promise<SimResult> {
   const world = deps.world;
-  const brain = new FlightBrain(target, { ...opts, ...(deps.groundAt ? { groundAt: deps.groundAt } : {}), ...(deps.skyTop ? { skyTop: deps.skyTop } : {}), obstacle: (x, y, z) => world.solidAt(x, y, z) === true });
+  const brain = new FlightBrain(target, { ...opts, ...(deps.groundAt ? { groundAt: deps.groundAt } : {}), ...(deps.skyTop ? { skyTop: deps.skyTop } : {}), ...(deps.terrain ? { terrain: deps.terrain } : {}), obstacle: (x, y, z) => world.solidAt(x, y, z) === true });
+  // Track BL: the corridor check against the terrain the live model does not know
+  let knownMax = Math.floor(start.y) - 1;
+  let unknownHits = 0;
   let body = initialBody(start, true);
   let cmd: MoveCommand = { ...IDLE_COMMAND, yaw: s.yaw ?? opts.ledge?.yaw ?? 0 };
   let rockets = s.rockets ?? 0;
@@ -231,7 +244,7 @@ export async function simulateFlight(
     if (t % SIM_YIELD === 0 && deps.yieldNow) await deps.yieldNow();
     const fb = { pos: body.pos, vel: body.vel, onGround: body.onGround, gliding: body.gliding ?? false, boostTicks: body.boostTicks ?? 0 };
     const out = brain.step({ tick: t, body: fb, yaw: cmd.yaw, pitch: cmd.pitch, rockets, canFire: t - lastFire >= 4, health: 20, elytraLeft: 400 });
-    if (out.end) return { end: out.end, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase };
+    if (out.end) return { end: out.end, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits };
     const c = out.control;
     cmd = { ...cmd, yaw: c.yaw, pitch: c.pitch, jump: c.jump, glide: c.glide, forward: c.forward ?? 0, sneak: c.sneak === true, sprint: false };
     const step: MoveCommand = { ...cmd, ...(c.fire && rockets > 0 ? { boostStart: GLIDE.boostTicks } : {}) };
@@ -245,10 +258,19 @@ export async function simulateFlight(
     body = r.state;
     // a collision in the air: the glide met a wall (its speed cut) or a ceiling (the rise stopped by a solid)
     if (before.gliding && body.pos.y > Math.floor(body.pos.y) + 0.05 && (body.collidedHorizontally || (body.collidedVertically && !body.onGround))) hits++;
+    if (deps.terrain && before.gliding) {
+      const c = deps.terrain(Math.floor(body.pos.x), Math.floor(body.pos.z));
+      if (c.src === 'live') {
+        if (c.top !== undefined) knownMax = Math.max(knownMax, c.top);
+      } else if (c.src === 'cache' ? c.top !== undefined && body.pos.y < c.top + 1 : body.pos.y < assumedTop(knownMax, 0) + 1) {
+        hits++;
+        unknownHits++;
+      }
+    }
     if (body.inWater || body.inLava || liquidContact(world, body.pos).water || liquidContact(world, body.pos).lava) wet = true;
-    if (s.until?.(brain, body)) return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase };
+    if (s.until?.(brain, body)) return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits };
   }
-  return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase };
+  return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits };
 }
 
 /** The simulated landing is on the target: inside a walk landing's cells (else the platform), at its height, dry, no hit, no early end. */
@@ -344,7 +366,8 @@ export async function jumpTakeoff(
       return { yaw, line: tried.join('; ') };
     }
     if (ok) steered ??= yaw;
-    tried.push(`heading ${Math.round(yaw)}: ${ok ? `clear only by steering ${sim.stats.steered} ticks` : sim.hits ? `hits a solid ${sim.hits} times` : sim.end ? simWhy(target, sim) : `${sim.phase} after ${sim.ticks} ticks`}`);
+    tried.push(`heading ${Math.round(yaw)}: ${ok ? `clear only by steering ${sim.stats.steered} ticks` : sim.unknownHits ? `the climbing turn enters terrain not loaded (${sim.unknownHits} ticks)` : sim.hits ? `hits a solid ${sim.hits} times` : sim.end ? simWhy(target, sim) : `${sim.phase} after ${sim.ticks} ticks`}`);
+
   }
   return { yaw: steered, line: tried.join('; ') };
 }
