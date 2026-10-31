@@ -401,7 +401,17 @@ export class FlightController {
     const r = this.report(ok, reason, end);
     for (const u of this.unsubs) u();
     this.unsubs = [];
-    this.d.loop.setCommand({ glide: false, jump: false, pitch: 0, forward: 0, strafe: 0, sneak: false });
+    this.d.loop.setCommand({ glide: false, jump: false, pitch: 0, forward: 0, strafe: 0, sneak: this.sneaked });
+    // Track BF: sneak stays on until the slide has stopped (the settle ends after 10 ticks with the body still
+    // moving: bds-fly measured 0.6 to 2.2 blocks more after the report), then is released (at most 40 ticks)
+    if (this.sneaked) {
+      let n = 0;
+      const off = this.d.loop.onBeforeStep((_t, s) => {
+        if (++n < 40 && Math.hypot(s.vel.x, s.vel.z) > 0.003) return;
+        off();
+        if (!this.brain) this.d.loop.setCommand({ sneak: false });
+      });
+    }
     if (this.baseWorld) this.d.loop.world = this.baseWorld;
     this.baseWorld = undefined;
     this.endReason = reason;

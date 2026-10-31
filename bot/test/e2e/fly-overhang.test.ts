@@ -2,8 +2,8 @@
 // the goal, never in water; on bds-fly (flat, peaceful, fall damage ON, truth pack). One afk-task bot:
 //   farm      the Realm's mob farm as a truth-built replica 300 blocks away: a 9 x 7 platform 70 over the
 //             ground under a wide spawning box that overhangs it (12 blocks of headroom), a 4 x 4 shaft up
-//             from the platform, a room under the platform with a ladder down from a hole (a bare hole:
-//             the planner does not walk through an open trapdoor yet, Track BG); the goal is in the room.
+//             from the platform, a room under the platform with a ladder down from a hole under a
+//             CLOSED trapdoor (Track BG opens and closes it; FLY_BF_TRAPDOOR=0: a bare hole); the goal is in the room.
 //             `!goto` lands on the platform (in under the box along a corridor) and walks down the ladder
 //   roof      a goal under a 41 x 41 roof 5 high: lands on the ground (not on the roof) and walks in
 //   water     a goal in the middle of a pond: never lands in the water (lands on the shore)
@@ -127,7 +127,8 @@ describe.skipIf(!E2E)('@bds fly: landing v3 (Track BF)', () => {
     await fill(-4, Y - 1, -3, 4, Y - 1, 3, 'stone');
     await fill(2, Y - 1, 0, 2, Y - 1, 0, 'air');
     for (let y = Y - 4; y <= Y - 1; y++) await truthLoaded(b.truth, 'setblock', [cx + 2, y, cz, 'ladder', 'facing_direction=4']);
-    if (y0Trapdoor()) await truthLoaded(b.truth, 'setblock', [cx + 2, Y - 1, cz, 'trapdoor', 'open_bit=true', 'direction=0']);
+    // a CLOSED spruce trapdoor lying on the platform over the ladder (Track BG's layout B: the ladder reaches into the hatch's floor cell, both ways)
+    if (y0Trapdoor()) await truthLoaded(b.truth, 'setblock', [cx + 2, Y, cz, 'spruce_trapdoor', 'open_bit=false', 'direction=3', 'upside_down_bit=false']);
     // the shaft up to the box
     await fill(-4, Y, -2, -1, Y + 11, 1, 'stone');
     await fill(-3, Y, -1, -2, Y + 11, 0, 'air');
@@ -291,7 +292,7 @@ describe.skipIf(!E2E)('@bds fly: landing v3 (Track BF)', () => {
   }, 1_200_000);
 });
 
-/** FLY_BF_TRAPDOOR=1: an open trapdoor in the farm's hole (the owner's farm; the planner refuses it until Track BG). */
+/** The farm's hatch: a closed trapdoor over the ladder (Track BG opens it and closes it behind); FLY_BF_TRAPDOOR=0: a bare hole. */
 function y0Trapdoor(): boolean {
-  return process.env.FLY_BF_TRAPDOOR === '1';
+  return process.env.FLY_BF_TRAPDOOR !== '0';
 }

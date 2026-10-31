@@ -648,6 +648,28 @@ briefly (1 to 22 ticks) until the search confirms a cell:
 | on the floor of a 10-deep pond, `!goto` 9 blocks onto the shore | 3 × `no standable node`, then `swam up 8.8 blocks in 55 ticks` | (no flight) | `arrived at` |
 | idle on the same floor | `surface: head under water ... for 201 ticks, air 98: swimming up`; surfaced after 55 ticks | (no flight) | standing on the shore 16 s after the teleport |
 
+Run 3 (after merging Track BG, the replica with a closed trapdoor over the ladder): all 5 cases passed; the
+farm 7 rockets, 1 go-around (the reason above), walked through the hatch into the room.
+
+### Go-arounds and rockets per landing, before and after (deliverable F)
+
+Base `9f6f97d` against Track BF, the same suites on bds-fly (the `fly-overhang` farm / roof / water cases
+and `fly-walk`; each landing is one flight):
+
+| Case | Before (9f6f97d) | After (Track BF) |
+|---|---|---|
+| farm | 7 rockets, 0 go-arounds, but landed **on the box's roof** (y 34): `goto: unreachable` | 8 / 7 / 11 rockets, 0 / 1 / 2 go-arounds (the 2 before the descent-window fix), on the platform, walked into the room |
+| big roof | 2 rockets, 0 go-arounds, landed **on the roof** (y −54): `goto: unreachable` | 3 / 2 / 2 rockets, 0 go-arounds, on the ground, walked in |
+| pond | 2 rockets, 1 go-around, dry ground | 1 / 1 / 1 rocket, 0 go-arounds, dry ground (said in chat) |
+| fly-walk pit | 2 rockets, 1 go-around | 5 rockets, 4 go-arounds (a 1-cell target on the trench's first step: the level rule below came from it), then 2 rockets, 0 go-arounds |
+| fly-walk house | 4 rockets, 2 go-arounds | 3 rockets, 1 go-around; then 1 rocket, 0 go-arounds |
+
+Per landing over the walk suites (farm, roof, pond, pit, house), the last round: before 3.4 rockets and 0.8
+go-arounds (2 of 5 goals not reached), after 2.6 rockets and 0.2 go-arounds (all reached but the mid-pond
+goal). **Level cells**: a walk landing's candidate needs three of its four neighbours at exactly its height
+(`ColumnView.level`); the first step of the 1-wide trench (neighbours at −60 and −62) was offered as a 1-cell
+target and cost 4 go-arounds.
+
 ### Sneak at the touchdown (`fly-overhang` sneak case)
 
 - **Sneak held while gliding** (40 ticks forced on mid-cruise): the server kept the glide (`isGliding`
@@ -665,10 +687,13 @@ briefly (1 to 22 ticks) until the search confirms a cell:
 
 ## Open points
 
-- Track BF: the owner's farm has an **open trapdoor** over the ladder; the planner does not pass an open
-  trapdoor (canWalkThroughClass: boxes, not climbable), so the probe from the platform fails there and the
-  flight falls back to the nearest dry ground until Track BG's trapdoor moves land (the e2e replica uses a
-  bare hole; `FLY_BF_TRAPDOOR=1` puts the trapdoor in).
+- Track BF: since Track BG the replica's hatch is a closed trapdoor lying on the platform over the ladder
+  (the planner opens it and closes it behind; `FLY_BF_TRAPDOOR=0` gives a bare hole). The owner's farm has
+  the hatch in the floor layer with the ladder ending under it: BG plans that one down only, which is the
+  direction the landing's probe needs.
+- Track BF: the farm's corridor approach sometimes enters low and slow after the descent circle (1 of the
+  3 complete farm runs: `go-around 1: no landing plan for 18 ticks (best: short, ...) at 45 blocks out, -2
+  above, 0.60 blocks a tick`).
 - Track BF: a mid-pond goal is not reached by the walk after the landing (a 15-block swim: `limited` probes,
   `goto: unreachable`).
 - Track BF: the Realm flight at 00:07Z that ended `roof` at a cruise of y 294 to 305 with 99 steered ticks

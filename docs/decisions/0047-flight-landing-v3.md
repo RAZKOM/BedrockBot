@@ -67,7 +67,8 @@ touchdown.
   than the corridor depth lands outside it on the ground; the sea floor is never a landing.
 - The hold costs time when the goal is far beyond the view distance (circling until the chunks come),
   capped by `flyHoldS`.
-- The open trapdoor over the farm's ladder is not passable for the planner (canWalkThroughClass: it
-  has boxes and is not climbable); the probe fails there, so the owner's real farm falls back to the
-  nearest dry ground until Track BG's trapdoor moves land. The e2e replica uses a bare hole.
+- The farm's hatch: with Track BG (merged) the planner goes down through a trapdoor over a ladder, so the
+  probe from the platform finds the room; the e2e replica has a closed trapdoor over the ladder.
+- A walk landing's cell must be level (three of four neighbours at its exact height): a single cell
+  between steps is a slot, not a landing (bds-fly: 4 go-arounds onto the first step of a trench).
 - astar.ts / grid.ts are unchanged.
