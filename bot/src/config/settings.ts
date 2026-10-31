@@ -98,6 +98,7 @@ export const SETTING_DEFS = {
   useBoneMeal: { kind: 'boolean', default: true, description: 'farming: use bone meal on crops (placeholder, Track U)' },
   mineTunnelLen: { kind: 'number', default: 32, min: 1, max: 256, integer: true, unit: 'blocks', description: 'mining: tunnel length per branch (placeholder)' },
   nlConfirm: { kind: 'boolean', default: true, description: '!do and chat to the bot: show the plan and wait for !yes before running it' }, // Track Y
+  autoSleep: { kind: 'boolean', default: true, description: 'go to bed by itself at night (a bed near the shelter or home, or the bed waypoint); !sleep on / off sets it' }, // 2026-10-31: !sleep off was lost at every restart
   autoFood: { kind: 'boolean', default: true, description: 'hunt food mobs as a chore by day when the inventory food is below foodMin' }, // Track X
   foodMin: { kind: 'number', default: 10, min: 0, max: 200, integer: true, unit: 'hunger points', description: 'auto food: hunt when the food carried totals fewer hunger points' }, // Track X
   foodLeave: { kind: 'number', default: 2, min: 0, max: 16, integer: true, unit: 'mobs', description: '!food never leaves fewer of a kind than this within the radius' }, // Track X
