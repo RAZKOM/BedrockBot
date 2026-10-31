@@ -261,18 +261,31 @@ Enchantments come from the item NBT (`ench`: id 0 protection, 2 feather falling;
 Every tick the body falls (not gliding, not in water), the rest of the fall is simulated with the
 movement model (`loop.engine` over the live blocks, the current command) to the landing tick; the
 counted fall (this fall so far, the server's way, plus the predicted ticks before the landing) gives
-the damage on the landing block. When it hurts and a water bucket is in the hotbar (`clutch` setting
-on, not in the Nether: `waterWorks`), and the landing block takes a clutch (`waterlog.ts`
-`clutchTarget`), the bucket is selected and the view turned down; the landing is predicted again every
+the damage on the landing block. It clutches only when that matters (`policy.ts shouldClutch`, review
+B4): the fall would kill, leave less than `fallMargin`, or cost more than half of what is above the margin
+(health + absorption - margin); never in creative or spectator; inside home's `protectRadius` and in a fight
+(the combat controller busy, or something hurt the bot in the last 3 s outside a fall landing) only when the
+fall would kill, so the weapon stays in hand otherwise. Nothing is armed while the fall is slowed where the
+model sees no landing (review B3): a ladder or vine at the body (`climbableAt`), a cobweb, scaffolding,
+powder snow or a berry bush in the body's cells, a honey block beside it (the wall slide), Slow Falling
+(`mob_effect` id 27 for the own runtime id); they also end the counted fall, as a teleport and a body that is
+not ready do. When it clutches and a water bucket is in the hotbar (`clutch` setting on, not in the Nether:
+`waterWorks`), and the landing block takes a clutch (`waterlog.ts` `clutchTarget`), the bucket is selected
+and the view turned down; the landing is predicted again every
 tick (a walk's follower lets go of forward in the air and the landing column moves) and the click goes
 out on the first tick the landing block's top corner is within 6.5 of the eye (BDS accepts up to 7.19;
 or within 7.14 when the landing is 2 ticks away): `item_use / click_block` on its top face, queued
 before that tick's `player_auth_input`, so the server places the water before it moves the body into
 it. The water is predicted in the movement model until the `update_block` shows it. Once the body is
-down, the empty bucket clicks the cell holding the water (face up) until the `update_block` shows it
-gone (at most 6 clicks, 5 ticks apart); the previous hotbar slot and pitch come back, and the
-navigator's re-plans wait until 16 ticks after the pickup (`Navigator.holdPlans`: a plan from inside the
-flow found no move, the cells around were flowing water).
+down, the empty bucket clicks the cell holding the water (face up, only within reach: 5 to the closest
+point, 7.19 to the corner) until the `update_block` shows it gone (at most 6 clicks, 5 ticks apart; 18
+inside the base); the navigator's follower holds still meanwhile (`Navigator.pauseFollow`), the previous
+hotbar slot and pitch come back, and the navigator's re-plans wait until 16 ticks after the pickup
+(`Navigator.holdPlans`: a plan from inside the flow found no move, the cells around were flowing water).
+The landed phase is bounded (review H1: 100 ticks, 300 inside the base): a bucket that never empties, a
+cell out of reach or a lost update ends it, logged and counted as water left (`stats.waterLeft`), as an
+unloaded water cell is. An exception in the guard or a dispose mid-clutch runs the same finish (slot,
+pitch, the water counted).
 
 Where the water goes (`waterlog.ts`, measured: the bot clicked the top face of each block, the
 `update_block` packets and truth:block showed the water):
@@ -297,8 +310,10 @@ Measured (e2e, each case twice, all 0 fall damage, the bucket back, no water lef
 | Case | Click | Landing |
 |---|---|---|
 | click lead time (scripted clicks, 20-block fall, 1.4 to 1.5 blocks a tick) | 1, 2 or 3 ticks before the landing (eye 3.9 / 5.4 / 6.8 from the block's corner): 0 damage each; 4 ticks (8.1): refused by the server, 16 damage | |
-| planned 30-block drop (`goto`, fall-clutch) | eye 5.90 from the corner, 2 ticks before the landing | 1 pickup click; the goto arrives |
-| reactive, walking off 20 blocks | 5.37, 2 ticks | 1 pickup |
+| planned 30-block drop (`goto`, first version, with Health Boost) | eye 5.90 from the corner, 2 ticks before the landing | 1 pickup click; the goto arrives. Since review B1 a drop beyond the budget is no longer plannable at health 20: the refused 20-block case below |
+| planned 15-block drop at health 20, no Health Boost (12 HP within the budget, clutched; after review B1 / B4) | 5.72, 3 ticks before the landing | 1 pickup; the goto arrives (bds-gaunt twice x 2 runs, bds-surv twice) |
+| planned 20-block drop (16 HP) with a bucket at health 20 | refused: `unreachable` with the note (`... 20-block drop (16 HP), refused: it would leave 4 HP, the margin is 8`), still on top, 0 damage | |
+| reactive, walking off 20 blocks (health 20 since the review: 16 HP) | 5.37, 2 ticks | 1 pickup |
 | reactive, walking off 50 blocks (about 3 blocks a tick at the end) | 6.67, 2 ticks | 1 pickup |
 | reactive onto a strip of bottom slabs, 20 blocks | 5.77, 3 ticks | the slab waterlogged, 1 pickup from the slab |
 | reactive onto top slabs, 12 blocks | refused (`would take the water inside`) | 8 HP, as the model says |

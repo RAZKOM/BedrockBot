@@ -184,19 +184,23 @@ first floor below it takes the cheapest of:
 | Way | When | Cost on top of the drop's ticks (`walk` + fall(n) + `landing`) and `irreversibleDrop` 30 |
 |---|---|---|
 | harmless | the landing does no damage (hay from up to 12 blocks, honey up to 6) | 0 |
-| clutch | `falls.clutch` (a water bucket in the hotbar, the `clutch` setting, not in the Nether), the landing block takes a clutch (a full block that takes no water with air above, or a bottom slab: `waterlog.ts clutchTarget`), the fall at most `clutchMaxDrop` (40), outside `noWater` (home's `protectRadius`) | `clutchCost` 40 |
 | damage | the damage (measured model, armour enchantments) within `hpBudget` = health + absorption - `fallMargin` (8) | damage x `hpCost` 40 (a 12-block fall, 8 HP: 320 ticks, about 90 blocks of walking) |
+| clutch | a damage drop within the budget that the FallGuard will clutch (`policy.ts clutchHelps`: more than half the budget; `falls.clutch`: a water bucket in the hotbar, the `clutch` setting, not in the Nether; the landing block takes a clutch: a full block that takes no water with air above, or a bottom slab, `waterlog.ts clutchTarget`; the fall at most `clutchMaxDrop` 40; outside `noWater`, home's `protectRadius`). A bucket never makes a drop beyond the budget plannable: a clutch only saves HP, never a life (it can fail; review B1) | `clutchCost` 40 + a quarter of the HP cost (the risk it fails); a tie goes to the damage drop |
 
 Never onto slime or a bed (the body bounces), never into water (the follower's swim move holds forward
 through the fall; the FallGuard handles a fall into water anyway), never with `maxDrop` below 3 (the End).
 The policy is off (`hpBudget` 0, no clutch) while the health is unknown, the bot burns, or a hostile is
 within 16 blocks (`blocked`); harmless landings stay allowed. A long drop is a `drop` node; the follower
-walks it like any drop (creep off the edge, let go of forward in the air), and the FallGuard clutches when
-the landing would hurt and a bucket is carried (the deliberate clutch drop is that reactive clutch; the
-navigator holds its re-plans while the water is still there: `Navigator.holdPlans`).
+walks it like any drop (creep off the edge, let go of forward in the air), and the FallGuard clutches it by
+its own rule (the planned clutch drop is that reactive clutch). Every tick the body still stands before a
+long drop the navigator asks the live policy again (`Navigator.dropCheck` = `FallGuard.acceptsDrop`, the
+same scan): health dropped, a hostile came, the bucket left the hotbar, the landing changed: the body stops
+and re-plans. While the water is picked up the follower holds still (`Navigator.pauseFollow`), and re-plans
+wait until the flow has receded (`Navigator.holdPlans`, 16 ticks after the pickup). A ladder or vine in the
+column ends the scan (no fall: the climb moves).
 
 A goto that ends `unreachable` gets a `note` when a long fall would have reached the goal
-(`fall/explain.ts`: one more plan with the budget lifted): `the way down is a 12-block drop (8 HP), refused:
+(`fall/explain.ts`: one more plan with the budget lifted, in-thread but capped at 25 ms / 15 000 nodes, and not when the blacklist refused the goal): `the way down is a 12-block drop (8 HP), refused:
 it would leave 4 HP, the margin is 8` (or `refused: on fire`, `a hostile 10 blocks away`, `health
 unknown`, `long falls are off (!set longFalls on)`). `!goto` prints it in parentheses.
 
@@ -882,7 +886,7 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/e2e/nav-swim.test.ts` | Track AJ: a 6-wide river (0 corrections, health 20), an 18-block lane (swim ticks per block), a 1-deep ditch |
 | `test/e2e/nav-ladder.test.ts` | Track AJ: a 10-block ladder in a 1 x 1 shaft up and out, back down and out; a vine wall (climb ticks per block) |
 | `test/e2e/nav-parkour.test.ts` | Track AJ: 1-block, 2-block and 2-block-1-lower gaps over a 4-deep pit with water, 20 crossings each (`PARKOUR_RUNS`); a 1-wide bridge with a turn, edge sneaking off / on (`BRIDGE_RUNS`) |
-| `test/unit/skills/fall.test.ts` | Track BI: the measured fall damage model (heights, soft landings, enchantments), the waterloggable table and the clutch target, the live policy, long drops in the planner (a 12-block plateau: none without a policy, the drop with its cost, refused over the budget / with maxDrop 1 / health unknown, Feather Falling, the staircase preferred, hay without a budget, the clutch drop, refused onto a top slab / in the no-water area / over clutchMax), the note on a refused fall, closed loops (the drop walked, the note at health 12, the clutch with a fake server), the scan's planner cost on 300 random paths |
+| `test/unit/skills/fall.test.ts` | Track BI: the measured fall damage model (heights, soft landings, enchantments), the waterloggable table and the clutch target, the live policy, long drops in the planner (a 12-block plateau: none without a policy, the drop with its cost, refused over the budget / with maxDrop 1 / health unknown, Feather Falling, the staircase preferred, hay without a budget, the clutch drop, refused onto a top slab / in the no-water area / over clutchMax), the note on a refused fall, closed loops (the drop walked, the note at health 12, the clutch with a fake server), the scan's planner cost on 300 random paths; review fixes: no plannable drop beyond the budget with a bucket (B1), the clutch pricing and its tie, a ladder column, `acceptsDrop`, the drop re-checked before the step off (health 20 -> 12 on the way: no drop, the note), `shouldClutch` (margin, kill, creative, base, fight), no clutch through ladders / cobwebs / with Slow Falling (B3), the guard bounded when the bucket never empties (H1), finish on an exception and on dispose |
 | `test/e2e/fall-long.test.ts` | Track BI, bds-gaunt: a 12-block tower with no way down but the fall: walked and arrived (8 HP, the model's), and at health 12 unreachable with the note, twice each |
 | `test/unit/skills/nav-trapdoor.test.ts` | Track BG: panels and `hatch` states; the planner down / up through a hatch for every facing and half (never out through the panel side), without `allowOpen`, open (no use), iron / `noAction` / `moves.trapdoor` false, the roof-layer hatch (down only), drops to a floor and into water, a panel in a doorway; closed loops with fake actions (open, closed behind, `closeTrapdoors` false) |
 | `test/e2e/nav-trapdoor.test.ts` | Track BG, bds-move: truth-built shafts under a platform: closed hatch down and up (panel opposite the ladder and on its side), open top-half hatch down and up with no action, the roof-layer hatch (down, no plan up), a ladderless hatch over a pool (fall of 8); 0 corrections |

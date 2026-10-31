@@ -7,8 +7,9 @@ import { describe, expect, it } from 'vitest';
 import { BotSkills } from '../../../src/skills/index.ts';
 import { FallGuard, CLUTCH_REACH } from '../../../src/skills/fall/clutch.ts';
 import { countedFall, epfFactor, fallDamage, fallEpf, landingFactor, landingTick, maxDropFor } from '../../../src/skills/fall/damage.ts';
-import { explainFallRefusal } from '../../../src/skills/fall/explain.ts';
-import { fallPolicy, type FallPolicy, type FallPolicyInputs } from '../../../src/skills/fall/policy.ts';
+import { EXPLAIN_MS, explainFallRefusal } from '../../../src/skills/fall/explain.ts';
+import { acceptsDrop } from '../../../src/skills/fall/plan.ts';
+import { clutchHelps, fallPolicy, shouldClutch, type FallPolicy, type FallPolicyInputs } from '../../../src/skills/fall/policy.ts';
 import { clutchTarget, isWaterloggable } from '../../../src/skills/fall/waterlog.ts';
 import { DEFAULT_COSTS, NavGrid, dropCost, findPath, type PathResult } from '../../../src/skills/nav/index.ts';
 import { cornerDistance } from '../../../src/skills/place/place.ts';
@@ -67,7 +68,7 @@ describe('fall damage model (measured on BDS 1.26.60.6)', () => {
 
 describe('waterloggable blocks and the clutch target (measured on BDS 1.26.60.6)', () => {
   it('knows the measured waterloggable blocks and the ones that take the water above', () => {
-    for (const n of ['oak_slab', 'oak_stairs', 'oak_fence', 'cobblestone_wall', 'glass_pane', 'iron_bars', 'oak_leaves', 'scaffolding', 'lantern', 'copper_grate', 'mangrove_roots', 'ladder', 'campfire', 'chest', 'spruce_trapdoor', 'standing_sign', 'oak_hanging_sign']) expect(isWaterloggable(n), n).toBe(true);
+    for (const n of ['oak_slab', 'oak_stairs', 'oak_fence', 'cobblestone_wall', 'glass_pane', 'iron_bars', 'oak_leaves', 'azalea_leaves_flowered', 'azalea_leaves', 'cherry_leaves', 'scaffolding', 'lantern', 'copper_grate', 'mangrove_roots', 'ladder', 'campfire', 'chest', 'spruce_trapdoor', 'standing_sign', 'oak_hanging_sign']) expect(isWaterloggable(n), n).toBe(true);
     for (const n of ['stone', 'glass', 'hay_block', 'soul_sand', 'dirt', 'grass_block', 'stone_double_slab', 'oak_planks']) expect(isWaterloggable(n), n).toBe(false);
   });
 
@@ -82,6 +83,7 @@ describe('waterloggable blocks and the clutch target (measured on BDS 1.26.60.6)
     };
     expect(refused('oak_slab', { 'minecraft:vertical_half': 'top' })).toMatch(/waterlogged|inside/);
     expect(refused('oak_leaves')).toMatch(/inside/);
+    expect(refused('azalea_leaves_flowered')).toMatch(/inside/); // review B2: not a plain full block
     expect(refused('copper_grate')).toMatch(/inside/);
     expect(refused('oak_fence')).toMatch(/inside/);
     expect(refused('glass_pane')).toMatch(/inside/);
@@ -170,19 +172,75 @@ describe('planner: long drops (fall/plan.ts through astar)', () => {
     expect(longDrop(r)!.cost).toBeCloseTo(dropCost(DEFAULT_COSTS, 12) + DEFAULT_COSTS.irreversibleDrop, 3);
   });
 
-  it('a water bucket: the clutch drop (clutchCost, no HP) even without budget; refused onto a top slab and inside the no-water area', () => {
+  it('B1: a water bucket never makes a drop beyond the budget plannable (a failed clutch must not kill)', () => {
     const g = plateau();
-    const p = policy({ bucket: true, health: 9 });
+    for (const health of [9, 15]) expect(findPath(new NavGrid(g), TOP, BELOW, { falls: policy({ bucket: true, health }) }).status, `health ${health}`).toBe('none');
+    expect(findPath(new NavGrid(g), TOP, BELOW, { falls: policy({ bucket: true, healthKnown: false }) }).status).toBe('none');
+  });
+
+  it('B4: within the budget a drop the FallGuard will clutch (more than half the budget) is priced as the clutch + a quarter of the HP; a small one stays a damage drop', () => {
+    const g = plateau();
+    const p = policy({ bucket: true }); // budget 12, 8 HP > 6: the guard clutches it
     const r = findPath(new NavGrid(g), TOP, BELOW, { falls: p });
     expect(r.status).toBe('found');
-    expect(longDrop(r)!.cost).toBeCloseTo(dropCost(DEFAULT_COSTS, 12) + DEFAULT_COSTS.irreversibleDrop + p.clutchCost, 3);
+    expect(longDrop(r)!.cost).toBeCloseTo(dropCost(DEFAULT_COSTS, 12) + DEFAULT_COSTS.irreversibleDrop + p.clutchCost + 0.25 * 8 * p.hpCost, 3);
+    // absorption 8: budget 20, 8 HP is not more than half: no clutch, the damage drop
+    const q = policy({ bucket: true, absorption: 8 });
+    expect(longDrop(findPath(new NavGrid(g), TOP, BELOW, { falls: q }))!.cost).toBeCloseTo(dropCost(DEFAULT_COSTS, 12) + DEFAULT_COSTS.irreversibleDrop + 8 * q.hpCost, 3);
+    // a tie goes to the damage drop: clutchCost = 0.75 x the HP cost
+    const tie = { ...p, clutchCost: 0.75 * 8 * p.hpCost };
+    expect(longDrop(findPath(new NavGrid(g), TOP, BELOW, { falls: tie }))!.cost).toBeCloseTo(dropCost(DEFAULT_COSTS, 12) + DEFAULT_COSTS.irreversibleDrop + 8 * p.hpCost, 3);
+    // onto a top slab, inside the no-water area, over clutchMax: the plain damage drop
+    const plain = dropCost(DEFAULT_COSTS, 12) + DEFAULT_COSTS.irreversibleDrop + 8 * p.hpCost;
+    expect(longDrop(findPath(new NavGrid(g), TOP, BELOW, { falls: { ...p, noWater: { x: 5, y: -60, z: 5, r: 40 } } }))!.cost).toBeCloseTo(plain, 3);
+    expect(longDrop(findPath(new NavGrid(g), TOP, BELOW, { falls: { ...p, clutchMax: 10 } }))!.cost).toBeCloseTo(plain, 3);
     const slab = plateau({ landing: 'oak_slab', landingStates: { 'minecraft:vertical_half': 'top' } });
-    // the slab strip is the landing all along the east edge; south / north / west the grass still takes a clutch
     const viaSlab = findPath(new NavGrid(slab), TOP, { type: 'block', p: { x: 11, y: -60, z: 5 } }, { falls: p });
     expect(viaSlab.status).toBe('found');
-    expect(viaSlab.path.at(-1)!.move).not.toBe('drop'); // landed elsewhere and walked onto the slab
-    expect(findPath(new NavGrid(g), TOP, BELOW, { falls: { ...p, noWater: { x: 5, y: -60, z: 5, r: 40 } } }).status).toBe('none');
-    expect(findPath(new NavGrid(g), TOP, BELOW, { falls: { ...p, clutchMax: 10 } }).status).toBe('none');
+    expect(longDrop(viaSlab)!.x).not.toBe(11); // a top slab takes no clutch: the clutch drop lands on the grass beside and walks
+  });
+
+  it('a ladder in the column is no fall (the climb moves take it)', () => {
+    const g = plateau();
+    for (let z = 0; z <= 10; z++) g.fill({ x: 11, y: -60, z }, { x: 11, y: -52, z }, 'ladder', { facing_direction: 5 });
+    const r = findPath(new NavGrid(g), TOP, BELOW, { falls: policy() });
+    expect(longDrop(r)?.y === -60 && longDrop(r)?.x === 11).toBe(false);
+  });
+
+  it('acceptsDrop: the live policy re-checked before the step off (health dropped, the bucket gone)', () => {
+    const g = plateau();
+    const grid = new NavGrid(g);
+    const from = { y: -48, feet: -48 };
+    const to = { x: 11, y: -60, z: 5 };
+    expect(acceptsDrop(grid, DEFAULT_COSTS, policy(), from, to)).toBe(true);
+    expect(acceptsDrop(grid, DEFAULT_COSTS, policy({ health: 12 }), from, to)).toBe(false);
+    expect(acceptsDrop(grid, DEFAULT_COSTS, policy({ hostileDistance: 5 }), from, to)).toBe(false);
+    expect(acceptsDrop(grid, DEFAULT_COSTS, undefined, from, to)).toBe(false);
+    expect(acceptsDrop(grid, { ...DEFAULT_COSTS, maxDrop: 1 }, policy(), from, to)).toBe(false);
+  });
+});
+
+describe('B4: the reactive clutch rule (shouldClutch)', () => {
+  const s = (o: Partial<Parameters<typeof shouldClutch>[0]>) => shouldClutch({ damage: 8, health: 20, absorption: 0, margin: 8, ...o });
+  it('only when it matters: past half of what is above the margin, past the margin, or a kill', () => {
+    expect(s({ damage: 1 }).yes).toBe(false);
+    expect(s({ damage: 6 }).yes).toBe(false); // exactly half of 12
+    expect(s({ damage: 6.5 }).yes).toBe(true);
+    expect(s({ damage: 3, health: 10 }).yes).toBe(true); // 2 above the margin
+    expect(s({ damage: 30 }).yes).toBe(true);
+    expect(s({ damage: 8, absorption: 8 }).yes).toBe(false); // 20 above the margin
+  });
+  it('never in creative; in the base and in a fight only when the fall would kill', () => {
+    expect(s({ damage: 30, noDamage: true }).yes).toBe(false);
+    expect(s({ damage: 10, inBase: true })).toEqual({ yes: false, reason: 'inside the base (only a fall that would kill)' });
+    expect(s({ damage: 20, inBase: true }).yes).toBe(true);
+    expect(s({ damage: 10, inCombat: true }).yes).toBe(false);
+    expect(s({ damage: 25, inCombat: true }).yes).toBe(true);
+  });
+  it('clutchHelps (the planner side) matches', () => {
+    expect(clutchHelps(6, { hpBudget: 12 })).toBe(false);
+    expect(clutchHelps(6.5, { hpBudget: 12 })).toBe(true);
+    expect(clutchHelps(1, { hpBudget: 0 })).toBe(true);
   });
 });
 
@@ -190,18 +248,17 @@ describe('the note on a refused fall', () => {
   it('names the drop, its damage and the refusal', () => {
     const g = plateau();
     const grid = new NavGrid(g);
-    const nav = {
-      grid,
-      fallPolicy: undefined as (() => FallPolicy | undefined) | undefined,
-      plan(goal: NavGoalBlock) {
-        return findPath(grid, TOP, goal, { falls: this.fallPolicy?.() });
-      },
-    };
+    const nav = { grid, planOptions: () => ({}) };
     const guard = (p: FallPolicy | undefined) => ({ policy: () => p, settings: () => ({ longFalls: true, fallMargin: 8, clutch: true, clutchMaxDrop: 40 }), damageOf: (h: number, l?: string) => fallDamage(h, l) });
-    expect(explainFallRefusal(nav as never, guard(policy({ health: 12 })), BELOW)).toBe('the way down is a 12-block drop (8 HP), refused: it would leave 4 HP, the margin is 8');
-    expect(explainFallRefusal(nav as never, guard(policy({ burning: true })), BELOW)).toBe('the way down is a 12-block drop (8 HP), refused: on fire');
-    expect(explainFallRefusal(nav as never, guard(undefined), BELOW)).toBe('the way down is a 12-block drop (8 HP); long falls are off (!set longFalls on)');
-    expect(nav.fallPolicy).toBeUndefined(); // restored
+    expect(explainFallRefusal(nav, guard(policy({ health: 12 })), TOP, BELOW)).toBe('the way down is a 12-block drop (8 HP), refused: it would leave 4 HP, the margin is 8');
+    expect(explainFallRefusal(nav, guard(policy({ burning: true })), TOP, BELOW)).toBe('the way down is a 12-block drop (8 HP), refused: on fire');
+    expect(explainFallRefusal(nav, guard(undefined), TOP, BELOW)).toBe('the way down is a 12-block drop (8 HP); long falls are off (!set longFalls on)');
+    expect(explainFallRefusal(nav, guard(undefined), undefined, BELOW)).toBeUndefined();
+    // the budget: a big world is cut off, never a long block of the tick
+    const big = new NavGrid(hillyGen(7));
+    const t0 = performance.now();
+    explainFallRefusal({ grid: big, planOptions: () => ({}) }, guard(policy()), { x: -60, y: -40, z: -60 }, { type: 'block', p: { x: 60, y: -40, z: 60 } });
+    expect(performance.now() - t0).toBeLessThan(EXPLAIN_MS * 8);
   });
 });
 
@@ -239,25 +296,56 @@ describe('closed loop: the navigator drops 12 blocks; the FallGuard clutches', (
     skills.dispose();
   });
 
+  it('the drop is re-checked before the step off: health drops to 12 on the way to the edge -> no drop, unreachable with the note', async () => {
+    const g = plateau();
+    const start = { x: 2, y: -48, z: 5 };
+    const h = harness(start);
+    const self = { health: 20, food: 20, healthKnown: true };
+    const world = { ...fakeWorld(g), self };
+    const skills = new BotSkills({ loop: h.loop, world, maxFailures: 1 });
+    h.conn.tick(3);
+    let res: unknown;
+    void skills.goto(BELOW).then((r) => (res = r));
+    let minFeet = Infinity;
+    for (let t = 0; t < 600 && res === undefined; t++) {
+      if (t === 5) self.health = 12; // planned with 20 (budget 12); now the 8 HP would leave 4
+      h.conn.tick();
+      await flush();
+      minFeet = Math.min(minFeet, h.loop.state.pos.y);
+    }
+    expect(minFeet).toBeGreaterThan(-48.1); // never stepped off
+    expect(res).toEqual({ ok: false, reason: 'unreachable', note: 'the way down is a 12-block drop (8 HP), refused: it would leave 4 HP, the margin is 8' });
+    skills.dispose();
+  });
+
   /** A FallGuard over a GenWorld with a fake inventory / hotbar / server: the click places water like BDS does. */
-  function clutchRig(g: GenWorld, start: Vec3, opts: { bucket?: boolean } = {}) {
+  function clutchRig(g: GenWorld, start: Vec3, opts: { bucket?: boolean; health?: number; gameMode?: string; keepFullBucket?: boolean; throwOnPickup?: boolean } = {}) {
     const h = harness(start);
     h.loop.world = blockQueryOf(g);
     const slots: (ItemStack | null)[] = Array.from({ length: 36 }, () => null);
     if (opts.bucket ?? true) slots[3] = { name: 'water_bucket', networkId: 1, count: 1, metadata: 0 };
     const inv = { slots, selected: 0, window: (id: number) => (id === 120 ? { slots: [null, null, null, null] } : undefined) };
     const clicks: { tick: bigint; pos: Vec3; slot: number; held: string; eye: Vec3; feet: Vec3 }[] = [];
+    const handlers = new Map<string, ((p: Record<string, unknown>) => void)[]>();
     const source = {
+      on(name: string, fn: (p: Record<string, unknown>) => void) {
+        handlers.set(name, [...(handlers.get(name) ?? []), fn]);
+        return () => undefined;
+      },
+      emit(name: string, p: Record<string, unknown>) {
+        for (const fn of handlers.get(name) ?? []) fn(p);
+      },
       queue(name: string, p: unknown) {
         if (name !== 'inventory_transaction') return;
         const d = (p as { transaction: { transaction_data: { block_position: Vec3; hotbar_slot: number; player_pos: Vec3 } } }).transaction.transaction_data;
         const held = slots[d.hotbar_slot]?.name ?? 'air';
+        if (held === 'bucket' && opts.throwOnPickup) throw new Error('boom');
         clicks.push({ tick: h.loop.state.tick, pos: { ...d.block_position }, slot: d.hotbar_slot, held, eye: d.player_pos, feet: { ...h.loop.state.pos } });
         // the server: a water bucket on a full block's top puts a source above; an empty bucket on water takes it
         const q = d.block_position;
         if (held === 'water_bucket') {
           g.set(q.x, q.y + 1, q.z, 'water');
-          slots[d.hotbar_slot] = { name: 'bucket', networkId: 2, count: 1, metadata: 0 };
+          if (!opts.keepFullBucket) slots[d.hotbar_slot] = { name: 'bucket', networkId: 2, count: 1, metadata: 0 };
         } else if (held === 'bucket' && g.blockAt(q.x, q.y, q.z)?.name === 'water') {
           g.set(q.x, q.y, q.z, 'air');
           slots[d.hotbar_slot] = { name: 'water_bucket', networkId: 1, count: 1, metadata: 0 };
@@ -275,12 +363,26 @@ describe('closed loop: the navigator drops 12 blocks; the FallGuard clutches', (
     };
     const guard = new FallGuard({
       loop: h.loop,
-      world: { self: { health: 20, healthKnown: true }, inventory: inv, chunks: { runtimeIdAt: () => 0 }, blockAt: (p) => g.blockAt(p.x, p.y, p.z), onBlockUpdate: (fn) => g.onBlockUpdate(fn) },
+      world: { self: { health: opts.health ?? 20, healthKnown: true, runtimeId: 7n, ...(opts.gameMode ? { gameMode: opts.gameMode } : {}) }, inventory: inv, chunks: { runtimeIdAt: () => 0 }, blockAt: (p) => g.blockAt(p.x, p.y, p.z), onBlockUpdate: (fn) => g.onBlockUpdate(fn) },
       grid: new NavGrid(g),
       source: () => source,
       hotbar: () => hotbar,
     });
-    return { h, guard, clicks, selects, inv };
+    return { h, guard, clicks, selects, inv, source };
+  }
+
+  /** A fall from feet y over a stone block at (0, -61, 0) in a flat world, run for `ticks`. */
+  async function fallRun(y: number, opts: Parameters<typeof clutchRig>[2] & { setup?: (g: GenWorld) => void; before?: (r: ReturnType<typeof clutchRig>) => void; ticks?: number } = {}) {
+    const g = flatGen({ x: -16, y: -64, z: -16 }, { x: 32, y: 60, z: 32 });
+    g.put(0, -61, 0, 'stone');
+    opts.setup?.(g);
+    const r = clutchRig(g, { x: 0.5, y, z: 0.5 }, opts);
+    opts.before?.(r);
+    for (let t = 0; t < (opts.ticks ?? 120); t++) {
+      r.h.conn.tick();
+      await flush();
+    }
+    return { ...r, g };
   }
 
   it('reactive clutch from 30 blocks: one click on the stone top within reach before the landing, lands in the water, picks it up, slot restored', async () => {
@@ -333,6 +435,80 @@ describe('closed loop: the navigator drops 12 blocks; the FallGuard clutches', (
       if (c.block === 'oak_slab') expect(guard.last?.reason).toMatch(/inside/);
       guard.dispose();
     }
+  });
+
+  describe('review fixes: when the FallGuard does not clutch, and how it always ends', () => {
+  const placeClicks = (c: { held: string }[]) => c.filter((k) => k.held === 'water_bucket').length;
+
+  it('B3: no clutch through a ladder column, a cobweb, or with Slow Falling', async () => {
+    const ladder = await fallRun(-30, { setup: (g) => g.fill({ x: 0, y: -60, z: 0 }, { x: 0, y: -40, z: 0 }, 'ladder', { facing_direction: 2 }), ticks: 300 });
+    expect(placeClicks(ladder.clicks), 'ladder').toBe(0);
+    ladder.guard.dispose();
+    const web = await fallRun(-30, { setup: (g) => g.put(0, -56, 0, 'web'), ticks: 300 });
+    expect(placeClicks(web.clicks), 'web').toBe(0); // the web ends the fall; 4 blocks below it are 1 HP: no clutch
+    web.guard.dispose();
+    const slow = await fallRun(-30, {
+      before: (r) => {
+        r.h.conn.tick(); // the guard subscribes to mob_effect on its first tick
+        r.source.emit('mob_effect', { runtime_entity_id: 7n, event_id: 'add', effect_id: 27 });
+      },
+    });
+    expect(placeClicks(slow.clicks), 'slow falling').toBe(0);
+    slow.guard.dispose();
+  });
+
+  it('B4: no clutch for a fall within the margin, in creative, in a fight or in the base unless it kills', async () => {
+    const small = await fallRun(-54); // 6 blocks: 3 HP of 12 above the margin
+    expect(placeClicks(small.clicks)).toBe(0);
+    expect(small.guard.last?.reason ?? 'none').toMatch(/none|enough above the margin/);
+    small.guard.dispose();
+    const creative = await fallRun(-30, { gameMode: 'creative' });
+    expect(placeClicks(creative.clicks)).toBe(0);
+    creative.guard.dispose();
+    const fight16 = await fallRun(-40, { before: (r) => (r.guard.inCombat = () => true) }); // 20 blocks, 16 HP < 20: no
+    expect(placeClicks(fight16.clicks)).toBe(0);
+    fight16.guard.dispose();
+    const fightKill = await fallRun(-30, { before: (r) => (r.guard.inCombat = () => true) }); // 30 blocks, 26 HP: kills, clutch
+    expect(placeClicks(fightKill.clicks)).toBe(1);
+    fightKill.guard.dispose();
+    const base = await fallRun(-40, { before: (r) => (r.guard.protect = () => ({ x: 0, y: -60, z: 0, r: 48 })) });
+    expect(placeClicks(base.clicks)).toBe(0);
+    expect(base.guard.last?.reason).toMatch(/base/);
+    base.guard.dispose();
+    const baseKill = await fallRun(-30, { before: (r) => (r.guard.protect = () => ({ x: 0, y: -60, z: 0, r: 48 })) });
+    expect(placeClicks(baseKill.clicks)).toBe(1);
+    expect(baseKill.guard.last).toMatchObject({ placed: true, recovered: true });
+    baseKill.guard.dispose();
+  });
+
+  it('H1: a bucket that never empties: the guard gives up within its timeout, counts the water left and releases the navigator', async () => {
+    const r = await fallRun(-30, { keepFullBucket: true, ticks: 260 });
+    expect(placeClicks(r.clicks)).toBe(1);
+    expect(r.guard.busy).toBe(false);
+    expect(r.guard.settling).toBe(false);
+    expect(r.guard.recovering).toBe(false);
+    expect(r.guard.stats.waterLeft).toBe(1);
+    expect(r.guard.last?.reason).toMatch(/no pickup within/);
+    expect(r.inv.selected).toBe(0);
+    r.guard.dispose();
+  });
+
+  it('an exception mid-clutch and a dispose mid-clutch finish it: the slot and the pitch come back, the water is counted', async () => {
+    const r = await fallRun(-30, { throwOnPickup: true });
+    expect(r.guard.busy).toBe(false);
+    expect(r.guard.stats.waterLeft).toBe(1);
+    expect(r.guard.last?.reason).toMatch(/error/);
+    expect(r.inv.selected).toBe(0);
+    expect(r.h.loop.command.pitch).toBe(0);
+    r.guard.dispose();
+    const d = await fallRun(-30, { ticks: 24 }); // armed (the bucket selected, looking down), not landed yet
+    expect(d.guard.busy).toBe(true);
+    expect(d.inv.selected).toBe(3);
+    d.guard.dispose();
+    expect(d.guard.busy).toBe(false);
+    expect(d.inv.selected).toBe(0);
+    expect(d.h.loop.command.pitch).toBe(0);
+  });
   });
 });
 

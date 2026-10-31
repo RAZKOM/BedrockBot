@@ -39,6 +39,7 @@ import type { SkillResult, Skills } from './types.ts'; // Track R: goto takes Na
 import { surfaceRefusal } from '../world/dimension.ts'; // Track AT
 import { FallGuard, type FallGuardDeps } from './fall/clutch.ts'; // Track BI
 import { explainFallRefusal } from './fall/explain.ts'; // Track BI
+import { locateNode } from './nav/astar.ts'; // Track BI: the start of the explaining plan
 
 export type { Goal, GotoOptions, SkillResult, Skills, DigOptions, DigResult } from './types.ts';
 export type { CollectOptions, CollectResult } from './collect/collect.ts';
@@ -201,6 +202,8 @@ export class BotSkills implements Skills {
     });
     this.nav.fallPolicy = () => this.falls.policy();
     this.nav.holdPlans = () => this.falls.settling;
+    this.nav.pauseFollow = () => this.falls.recovering;
+    this.nav.dropCheck = (from, to, costs) => this.falls.acceptsDrop(from, to, costs);
     this.unsubs.push(
       this.loop.onBeforeStep((tick, s) => {
         this.trackFall(tick, s.onGround, s.pos.y, s.inWater);
@@ -379,7 +382,10 @@ export class BotSkills implements Skills {
   /** Track BI: a failed goto that a long fall would have made: the note says why the fall was refused. */
   private withFallNote(goal: NavGoal, r: Extract<SkillResult, { ok: false }>, opts?: NavGotoOptions): SkillResult {
     try {
-      const note = explainFallRefusal(this.nav, this.falls, goal, opts);
+      // not when the blacklist refused the goal / every member (nothing was planned)
+      const rep = this.nav.lastReport;
+      if (!rep || rep.skipped?.length || rep.plans.length === 0) return r;
+      const note = explainFallRefusal(this.nav, this.falls, locateNode(this.nav.grid, this.loop.state.pos), goal, opts);
       return note ? { ...r, note } : r;
     } catch (e) {
       this.log.warn(`fall note: ${e instanceof Error ? e.message : String(e)}`);

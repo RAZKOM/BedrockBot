@@ -144,7 +144,7 @@ export const SETTING_DEFS = {
   // Track BI: long falls and the water bucket clutch (docs/movement.md "Falls", docs/pathfinding.md "Long falls")
   longFalls: { kind: 'boolean', default: true, description: 'walks may drop more than 3 blocks if the fall leaves fallMargin health (not burning, no hostile near)' },
   fallMargin: { kind: 'number', default: 8, min: 1, max: 20, integer: true, unit: 'HP', description: 'longFalls: health a planned fall must leave' },
-  clutch: { kind: 'boolean', default: true, description: 'a fall that would hurt: water from a hotbar water bucket on the landing block, picked up again' },
+  clutch: { kind: 'boolean', default: true, description: 'a fall that would kill or eat most HP above fallMargin: water from a hotbar bucket, picked up again' },
   clutchMaxDrop: { kind: 'number', default: 40, min: 4, max: 200, integer: true, unit: 'blocks', description: 'clutch: deepest drop a walk plans with a clutch' },
 } as const satisfies Record<string, SettingDef>;
 

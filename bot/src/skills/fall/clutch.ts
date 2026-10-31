@@ -5,7 +5,10 @@
 //   clutch     every tick the body falls, the rest of the fall is simulated with the movement model
 //              (InputLoop.engine over the live blocks, the current command) to the landing tick; the
 //              counted fall (the server's: the drop up to the tick before the landing tick, damage.ts)
-//              gives the damage on the landing block. When it would hurt and a water bucket is in the
+//              gives the damage on the landing block. When it matters (policy.ts shouldClutch: it would kill,
+//              cross fallMargin or cost more than half the HP above it; not in creative, in the base or a
+//              fight unless it kills; nothing armed while a ladder, cobweb, honey or Slow Falling slows the
+//              fall) and a water bucket is in the
 //              hotbar (not in the Nether, the landing block takes water where the feet end:
 //              waterlog.ts clutchTarget), the bucket is selected and the view turned down; on the first
 //              tick the landing block's top is within click reach (eye to its min corner <= 6.5, BDS
@@ -29,11 +32,13 @@ import { EYE_HEIGHT } from '../dig/look.ts';
 import type { InputLoop, InputLoopState } from '../input/inputLoop.ts';
 import { PHYSICS } from '../input/physics.ts';
 import type { BlockQuery, BodyState, LiquidCell } from '../input/types.ts';
+import { DEFAULT_COSTS, type PathCosts } from '../nav/costs.ts';
 import type { NavGrid } from '../nav/grid.ts';
-import { cornerDistance, SERVER_CLICK_REACH, wireItemOf } from '../place/place.ts';
+import { acceptsDrop } from './plan.ts';
+import { closestDistance, cornerDistance, SERVER_CLICK_REACH, wireItemOf } from '../place/place.ts';
 import { BurnWatch } from '../survival/fire.ts';
 import { damageForCounted, epfFactor, fallDamage, fallEpf, landingFactor } from './damage.ts';
-import { fallPolicy, FALL_HOSTILE_RADIUS, type FallPolicy } from './policy.ts';
+import { fallPolicy, FALL_HOSTILE_RADIUS, shouldClutch, type FallPolicy } from './policy.ts';
 import { clutchTarget, type ClutchTarget } from './waterlog.ts';
 
 /** The settings the guard reads (config/settings.ts: longFalls, fallMargin, clutch, clutchMaxDrop). */
@@ -55,6 +60,16 @@ const RECOVER_TRIES = 6;
 const RECOVER_GAP = 5;
 /** Ticks after a pickup the flow around the landing takes to recede (the navigator's re-plans wait). */
 const SETTLE_TICKS = 16;
+/** Longest the landed / recovering phase may last before the guard gives up (review H1). */
+const RECOVER_TIMEOUT = 100;
+/** A mob or anything else hurt the bot within this many ticks: in a fight (no clutch unless the fall kills). */
+const HURT_COMBAT_TICKS = 60;
+/** Own reach for the pickup click: eye to the closest point of the water cell. */
+const PICKUP_REACH = 5;
+/** Bedrock effect id of Slow Falling (mob_effect; verified in test/e2e/fall-clutch.test.ts). */
+export const SLOW_FALLING_EFFECT = 27;
+/** Blocks that slow a fall (or end it) without a landing the model sees: no clutch is armed in or next to them. */
+const SLOWING_NAMES = new Set(['web', 'scaffolding', 'honey_block', 'powder_snow', 'sweet_berry_bush']);
 
 export interface FallGuardDeps {
   loop: Pick<InputLoop, 'state' | 'command' | 'setCommand' | 'onBeforeStep' | 'engine'> & { world: BlockQuery };
@@ -104,8 +119,10 @@ export interface ClutchRecord {
 export class FallGuard {
   /** Settings, read live (registry wiring replaces it). */
   settings: () => FallSettings = () => DEFAULT_FALL_SETTINGS;
-  /** The base around home: no planned clutch there, a reactive one always recovers (registry wiring). */
+  /** The base around home: no planned clutch there, a reactive one only when the fall would kill (registry wiring). */
   protect: () => { x: number; y: number; z: number; r: number } | undefined = () => undefined;
+  /** A fight runs (registry wiring: the combat controller is busy): no clutch unless the fall would kill. */
+  inCombat: () => boolean = () => false;
   /** The last clutch tried or refused (tests, status). */
   last: ClutchRecord | undefined;
   readonly stats = { clutches: 0, placed: 0, recovered: 0, refused: 0, waterLeft: 0 };
@@ -124,13 +141,23 @@ export class FallGuard {
   private prevSlot = -1;
   private prevPitch = 0;
   private wait = 0;
-  private tries = 0;
   private predicted: BlockQuery | undefined;
   private real: BlockQuery | undefined;
   private refusedNote: string | undefined;
   /** Ticks seen, and the tick until which the navigator's re-plans wait after a clutch (`settling`). */
   private ticks = 0;
   private settleUntil = 0;
+  /** Tick (this.ticks) the landed phase began (the H1 timeout). */
+  private landedAt = 0;
+  /** Health seen last tick and the tick something last hurt the bot outside a fall landing. */
+  private lastHealth: number | undefined;
+  private hurtAt = -Infinity;
+  /** Tick of the last landing from more than 3 blocks (its health drop is the fall, not a fight). */
+  private fallLandAt = -Infinity;
+  /** Slow Falling on the bot (mob_effect for its own runtime id). */
+  private slowFalling = false;
+  private effectSource: unknown;
+  private offEffect: (() => void) | undefined;
 
   constructor(deps: FallGuardDeps) {
     this.d = deps;
@@ -141,7 +168,7 @@ export class FallGuard {
           this.step(tick, s);
         } catch (e) {
           this.log.warn(`fall guard: ${e instanceof Error ? e.message : String(e)}`);
-          this.reset();
+          this.safeFinish('an error in the guard');
         }
       }),
       deps.world.onBlockUpdate((p) => {
@@ -149,12 +176,77 @@ export class FallGuard {
         if (t?.water.x === p.x && t.water.y === p.y && t.water.z === p.z) this.unpredict();
       }),
     );
+    const onEvent = (deps.loop as { onEvent?: (fn: (e: { kind: string }) => void) => () => void }).onEvent;
+    if (onEvent)
+      this.unsubs.push(
+        onEvent.call(deps.loop, (e) => {
+          if (e.kind !== 'teleport') return;
+          // a teleport ends the fall (review Low): nothing counted carries over, an armed clutch stops
+          this.counted = 0;
+          this.prevY = undefined;
+          if (this.phase === 'armed') this.safeFinish('teleported');
+        }),
+      );
   }
 
   dispose(): void {
+    if (this.phase !== 'idle') this.safeFinish('disposed');
     for (const u of this.unsubs.splice(0)) u();
+    this.offEffect?.();
     this.burn?.dispose();
     this.unpredict();
+  }
+
+  /** finish() that never throws (an error or dispose mid-clutch: slot and pitch come back, the water is counted). */
+  private safeFinish(reason: string): void {
+    try {
+      if (this.rec) this.rec.reason ??= reason;
+      if (this.target && (this.phase === 'placed' || this.phase === 'landed' || this.phase === 'recovering') && this.waterAt(this.target) !== false) {
+        this.giveUp(this.target);
+        return;
+      }
+      this.finish();
+    } catch (e) {
+      this.log.warn(`fall guard: finish failed: ${e instanceof Error ? e.message : String(e)}`);
+      this.reset();
+    }
+  }
+
+  /** Slow Falling on the bot: tracked from mob_effect on the packet source once it is attached. */
+  private watchEffects(): void {
+    const src = this.d.source();
+    if (!src?.on || src === this.effectSource) return;
+    this.offEffect?.();
+    this.effectSource = src;
+    this.offEffect = src.on('mob_effect', (p) => {
+      const q = p as { runtime_entity_id?: number | bigint; event_id?: string | number; effect_id?: number };
+      if (q.runtime_entity_id === undefined || BigInt(q.runtime_entity_id) !== (this.d.world.self.runtimeId ?? -1n)) return;
+      if (q.effect_id !== SLOW_FALLING_EFFECT) return;
+      this.slowFalling = q.event_id !== 'remove' && q.event_id !== 3;
+    });
+  }
+
+  /** The fall is slowed or caught where the model sees no landing: a climbable, cobweb, scaffolding, a honey wall, powder snow, Slow Falling (review B3). */
+  private slowed(s: { pos: Vec3 }): boolean {
+    if (this.slowFalling) return true;
+    const q = this.d.loop.world;
+    const g = this.d.grid;
+    const w = PHYSICS.width / 2 + 0.1; // a honey wall slides the body from beside it
+    const y0 = Math.floor(s.pos.y - 0.5);
+    const y1 = Math.floor(s.pos.y + PHYSICS.height);
+    for (let x = Math.floor(s.pos.x - w); x <= Math.floor(s.pos.x + w); x++)
+      for (let z = Math.floor(s.pos.z - w); z <= Math.floor(s.pos.z + w); z++)
+        for (let y = y0; y <= y1; y++) {
+          if (q.climbableAt?.(x, y, z) === true) return true;
+          const n = g.cls(x, y, z)?.name;
+          if (n !== undefined && SLOWING_NAMES.has(n)) return true;
+        }
+    return false;
+  }
+
+  /** Something hurt the bot recently outside a fall landing (a mob, an arrow): in a fight. */
+  private fighting(): boolean {
+    return this.inCombat() || this.ticks - this.hurtAt < HURT_COMBAT_TICKS;
   }
 
   /** The clutch is under way (armed, waiting for the landing, recovering the water). */
@@ -167,6 +259,16 @@ export class FallGuard {
    * pickup (the flow recedes). The navigator holds its re-plans meanwhile (a plan from inside the flow finds
    * no move: the cells around are flowing water).
    */
+  /** The body is down and the water is being picked up: the navigator's follower holds still (the pickup's reach). */
+  get recovering(): boolean {
+    return this.phase === 'landed' || this.phase === 'recovering';
+  }
+
+  /** Review B1 / Medium: the planned long drop from `from` into `to` still holds with the live policy (fall/plan.ts acceptsDrop). */
+  acceptsDrop(from: { y: number; feet: number }, to: { x: number; y: number; z: number }, costs: PathCosts = DEFAULT_COSTS): boolean {
+    return acceptsDrop(this.d.grid, costs, this.policy(), from, to);
+  }
+
   get settling(): boolean {
     return (this.phase !== 'idle' && this.phase !== 'armed') || this.ticks < this.settleUntil;
   }
@@ -217,12 +319,17 @@ export class FallGuard {
     return this.d.world.self.dimension ?? 0;
   }
 
+  /** Creative / spectator: no fall damage (World.self.gameMode as the server sent it, a name or a number). */
+  private noDamage(): boolean {
+    const mode = String(this.d.world.self.gameMode ?? '');
+    return mode === 'creative' || mode === '1' || mode === 'spectator' || mode === '6';
+  }
+
   /** The planner's long-fall policy now (undefined: off). */
   policy(): FallPolicy | undefined {
     const st = this.settings();
     const self = this.d.world.self;
     const worn = this.d.world.inventory?.window(120)?.slots ?? [];
-    const mode = String(self.gameMode ?? '');
     return fallPolicy({
       enabled: st.longFalls,
       health: self.health,
@@ -236,7 +343,7 @@ export class FallGuard {
       clutchOn: st.clutch,
       waterWorks: waterWorks(this.dimension()),
       clutchMax: st.clutchMaxDrop,
-      noDamage: mode === 'creative' || mode === '1' || mode === 'spectator' || mode === '6',
+      noDamage: this.noDamage(),
       ...(this.protect() ? { noWater: this.protect()! } : {}),
     });
   }
@@ -248,22 +355,34 @@ export class FallGuard {
     this.phase = 'idle';
     this.target = undefined;
     this.wait = 0;
-    this.tries = 0;
   }
 
   private step(tick: bigint, s: InputLoopState): void {
     this.ticks++;
+    this.watchEffects();
     if (!s.ready) {
       this.prevY = undefined;
+      this.counted = 0;
       return;
     }
-    // the fall the server counts: downward movement since the body last stood, swam or climbed
-    const grounded = s.onGround || s.inWater || s.inLava || s.gliding;
+    // a health drop that is not a fall landing (the fall guard's own counted fall is 0 on the ground then): in a fight
+    const h = this.d.world.self.health;
+    if (this.lastHealth !== undefined && h < this.lastHealth && this.ticks - this.fallLandAt > 20) this.hurtAt = this.ticks;
+    this.lastHealth = h;
+    // the fall the server counts: downward movement since the body last stood, swam or climbed (a ladder,
+    // cobweb, scaffolding, honey wall or Slow Falling ends it too: review B3)
+    const slowed = !s.onGround && this.slowed(s);
+    const grounded = s.onGround || s.inWater || s.inLava || s.gliding || slowed;
+    if (grounded && this.counted > 3) this.fallLandAt = this.ticks; // the health drop of this landing is the fall's
     if (grounded) {
       this.counted = 0;
       this.refusedNote = undefined; // a refusal is noted once per fall
     } else if (this.prevY !== undefined && s.pos.y < this.prevY) this.counted += this.prevY - s.pos.y;
     this.prevY = s.pos.y;
+    if (slowed && this.phase === 'armed') {
+      this.safeFinish('the fall is slowed (climbable, cobweb, scaffolding, honey, Slow Falling)');
+      return;
+    }
     if (!grounded && this.phase === 'idle' && s.vel.y < 0) this.arm(tick, s);
     if (this.phase === 'armed' || this.phase === 'placed') {
       if (grounded) {
@@ -277,6 +396,7 @@ export class FallGuard {
           return;
         }
         this.phase = 'landed';
+        this.landedAt = this.ticks;
         this.wait = 2;
         return;
       }
@@ -300,8 +420,19 @@ export class FallGuard {
       return;
     }
     const slot = this.bucketSlot();
-    const why = slot < 0 ? 'no water bucket in the hotbar' : !waterWorks(this.dimension()) ? 'water evaporates here' : undefined;
-    const target = why ? ({ ok: false, reason: why } as const) : clutchTarget(land.block.x, land.block.y, land.block.z, land.floor, land.above);
+    const t0 = clutchTarget(land.block.x, land.block.y, land.block.z, land.floor, land.above);
+    // review B4: only a clutch that matters (the margin, a life), never in creative, in the base or in a fight unless it kills
+    const verdict = shouldClutch({
+      damage,
+      health: self.health,
+      absorption: self.absorption ?? 0,
+      margin: st.fallMargin,
+      noDamage: this.noDamage(),
+      inBase: t0.ok && this.inBase(t0),
+      inCombat: this.fighting(),
+    });
+    const why = !verdict.yes ? verdict.reason : slot < 0 ? 'no water bucket in the hotbar' : !waterWorks(this.dimension()) ? 'water evaporates here' : undefined;
+    const target = why ? ({ ok: false, reason: why } as const) : t0;
     const rec: ClutchRecord = { tick: Number(tick), predicted: damage, counted: land.counted, landing: land.name, target, placed: false, recovered: false, pickups: 0, healthBefore: self.health };
     if (!target.ok) {
       const note = `${land.name}@${land.block.x},${land.block.y},${land.block.z}:${target.reason}`;
@@ -309,7 +440,9 @@ export class FallGuard {
         this.refusedNote = note;
         this.stats.refused++;
         this.last = { ...rec, reason: target.reason };
-        this.log.info(`fall of ${land.counted.toFixed(1)} onto ${land.name} (${damage.toFixed(1)} HP): no clutch, ${target.reason}`);
+        const line = `fall of ${land.counted.toFixed(1)} onto ${land.name} (${damage.toFixed(1)} HP): no clutch, ${target.reason}`;
+        if (verdict.yes) this.log.info(line);
+        else this.log.debug(line);
       }
       return;
     }
@@ -378,18 +511,27 @@ export class FallGuard {
   private recover(tick: bigint, s: InputLoopState): void {
     const t = this.target!;
     const rec = this.rec!;
+    const water = this.waterAt(t);
+    // review H1: the landed phase is bounded (a bucket that never empties, a cell out of reach, a lost update)
+    const limit = this.inBase(t) ? 3 * RECOVER_TIMEOUT : RECOVER_TIMEOUT;
+    if (this.ticks - this.landedAt > limit) {
+      rec.reason ??= `no pickup within ${limit} ticks`;
+      if (water === false && rec.pickups > 0) rec.recovered = true;
+      if (water === false) this.finish();
+      else this.giveUp(t);
+      return;
+    }
     if (this.wait > 0) {
       this.wait--;
       return;
     }
     rec.healthAfter ??= this.d.world.self.health;
-    const water = this.waterAt(t);
     if (water === false) {
       if (this.phase === 'recovering' || rec.pickups > 0) {
         rec.recovered = true;
         this.stats.recovered++;
         this.log.info(`clutch: water at ${fmt(t.water)} picked up (${rec.pickups} clicks)`);
-      } else if (++this.tries <= 10) {
+      } else if (this.ticks - this.landedAt <= 12) {
         return; // the update_block may still be on its way
       } else {
         rec.reason ??= 'the server placed no water';
@@ -399,31 +541,29 @@ export class FallGuard {
       return;
     }
     if (water === undefined) {
-      this.finish();
+      rec.reason ??= 'the water cell is not loaded';
+      this.giveUp(t); // logged and counted: it may still be there
       return;
     }
     rec.placed = true;
-    if (this.phase === 'landed') this.tries = 0;
     const inv = this.d.world.inventory;
     const src = this.d.source();
-    if (!inv || !src) return this.finish();
-    const slot = this.bucketSlot('bucket');
-    if (slot < 0) {
-      // the server has not turned the bucket into an empty one yet
-      if (++this.tries > 20) {
-        rec.reason = 'no empty bucket';
-        this.giveUp(t);
-      }
+    if (!inv || !src) {
+      rec.reason ??= 'no packet source';
+      this.giveUp(t);
       return;
     }
+    const slot = this.bucketSlot('bucket');
+    if (slot < 0) return; // the server has not turned the bucket into an empty one yet (bounded by the timeout above)
     if (rec.pickups >= (this.inBase(t) ? 3 * RECOVER_TRIES : RECOVER_TRIES)) { // inside the base: no water source is ever left there, try longer
       rec.reason = 'the pickup clicks did not take the water';
       this.giveUp(t);
       return;
     }
+    const eye = { x: s.pos.x, y: s.pos.y + EYE_HEIGHT, z: s.pos.z };
+    if (closestDistance(eye, t.water) > PICKUP_REACH || cornerDistance(eye, t.water) > SERVER_CLICK_REACH) return; // out of reach: wait (the follower is held meanwhile)
     if (inv.selected !== slot) this.d.hotbar()?.select(slot);
     const held = wireItemOf(inv.slots[slot], inv.rawItem?.(0, slot) ?? this.d.hotbar()?.rawItem(slot));
-    const eye = { x: s.pos.x, y: s.pos.y + EYE_HEIGHT, z: s.pos.z };
     src.queue('inventory_transaction', clickBlockTransaction({ pos: t.water, face: 1, hotbarSlot: slot, held, eye, blockRuntimeId: this.d.world.chunks?.runtimeIdAt(t.water.x, t.water.y, t.water.z) ?? 0 }));
     rec.pickups++;
     this.phase = 'recovering';
@@ -498,7 +638,8 @@ export class FallGuard {
         const above = own ? undefined : g.cls(block.x, block.y + 1, block.z);
         return { ticks: k, counted, pos: n.pos, name: floor?.name ?? 'unknown', block, floor, above };
       }
-      if (n.pos.y < b.pos.y) counted += b.pos.y - n.pos.y;
+      if (this.slowed(n)) counted = 0; // a ladder / web / honey wall on the way ends the counted fall
+      else if (n.pos.y < b.pos.y) counted += b.pos.y - n.pos.y;
       b = n;
     }
     return undefined;

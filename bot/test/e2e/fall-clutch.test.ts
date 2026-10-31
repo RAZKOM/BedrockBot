@@ -1,12 +1,13 @@
 // e2e (tag @bds), Track BI: the water bucket clutch on bds-gaunt (fall-truth.ts), each case twice:
-//   planned    a 30-block stone tower, the goal on the ground east of it, a water bucket in the hotbar (a
-//              30-block fall is 26 HP): the walk plans the clutch drop (40 ticks against 26 x 40 for the HP),
-//              the FallGuard places the water on the landing block, the bot lands in it (0 fall damage),
-//              picks the water up again (the water bucket is back, no water left around the tower) and walks
-//              on to the goal
-//   reactive   the bot walks off the edge of a 20-block tower with no goto at all: clutch, 0 damage,
-//              bucket back, no water left; the same from 50 blocks (about 3 blocks per tick at the end)
-// The bot wears Health Boost (40 HP, 80 for the 50-block case) so a missed clutch cannot kill it mid-suite.
+//   planned    a 15-block stone tower, the goal on the ground east of it, a water bucket in the hotbar, health
+//              20 and no Health Boost: the 12 HP fit the budget (20 - margin 8), so the walk plans the drop; it
+//              is more than half the budget, so the FallGuard clutches it: the water on the landing block, 0
+//              fall damage, the water picked up again (the water bucket back, no water left) and on to the goal
+//   refused    the 20-block tower with the bucket at health 20: 16 HP is beyond the budget (12), a clutch never
+//              makes it plannable (a failed clutch would leave 4 HP): unreachable with the note, still on top
+//   reactive   the bot walks off the edge of a 20-block tower (health 20, 16 HP) with no goto at all: clutch,
+//              0 damage, bucket back, no water left; the same from 50 blocks (about 3 blocks per tick at the
+//              end) with Health Boost (80 HP) so a missed clutch cannot kill it mid-suite
 //   slab       the same onto a strip of bottom slabs: the water waterlogs the slab the feet end in (0
 //              damage), picked up from the slab (its second layer is empty again)
 //   top slab   onto top slabs from 12 blocks: refused (the water would be inside the slab, not where the
@@ -21,14 +22,14 @@ describe.skipIf(!E2E)('@bds water bucket clutch (bds-gaunt)', () => {
   let bot: FallBot;
   const o = fallArea();
   const summary: string[] = [];
-  // four towers 5 x 5 along z: planned 30 high at z o.z, reactive 20 at o.z + 24, slab 20 at o.z + 48, top slab 12 at o.z + 72
+  // five towers 5 x 5 along z: planned 15 high at z o.z, reactive 20 at o.z + 24, slab 20 at o.z + 48, top slab 12 at o.z + 72, 50 at o.z + 96
   const tower = (i: number) => ({ x: o.x, z: o.z + 24 * i });
 
   beforeAll(async () => {
     bot = await connectFallBot('FallClutch', { x: o.x + 10, y: -60, z: o.z + 36 });
     await fillAt(bot, { x: o.x - 8, y: -60, z: o.z - 8 }, { x: o.x + 24, y: -8, z: o.z + 108 }, 'air');
     await fillAt(bot, { x: o.x - 8, y: -61, z: o.z - 8 }, { x: o.x + 24, y: -61, z: o.z + 108 }, 'grass_block');
-    const heights = [30, 20, 20, 12, 50];
+    const heights = [15, 20, 20, 12, 50];
     for (let i = 0; i < 5; i++) {
       const t = tower(i);
       await fillAt(bot, { x: t.x, y: -60, z: t.z }, { x: t.x + 4, y: -61 + heights[i]!, z: t.z + 4 }, 'stone');
@@ -59,11 +60,12 @@ describe.skipIf(!E2E)('@bds water bucket clutch (bds-gaunt)', () => {
   const buckets = async () => Object.fromEntries(Object.entries((await bot.truth.ok<{ counts: Record<string, number> }>('inv', [bot.name])).counts).map(([k, v]) => [k.replace('minecraft:', ''), v]));
 
   /** Walk off the east edge of tower i (from its top centre row) and wait until the clutch is over. */
-  async function stepOff(i: number, h: number, amplifier = 4): Promise<number> {
+  async function stepOff(i: number, h: number, amplifier?: number): Promise<number> {
     const t = tower(i);
     await tpBot(bot, { x: t.x + 4.5, y: -60 + h, z: t.z + 2.5 }, -90);
-    await toughen(bot, amplifier);
-    await bot.loop.waitTicks(5);
+    if (amplifier === undefined) await setHealth(bot, 20);
+    else await toughen(bot, amplifier);
+    await bot.loop.waitTicks(70); // a health drop by truth:sethealth reads as a fight for 60 ticks (no clutch unless it kills)
     const since = await bot.pve.now();
     bot.loop.setCommand({ yaw: -90, forward: 1 });
     for (let k = 0; k < 40 && bot.loop.state.onGround; k++) await bot.loop.waitTicks(1);
@@ -74,12 +76,12 @@ describe.skipIf(!E2E)('@bds water bucket clutch (bds-gaunt)', () => {
   }
 
   for (const rep of [1, 2]) {
-    it(`planned: a 30-block drop with the clutch, 0 damage, bucket recovered, no water left (run ${rep})`, async () => {
+    it(`planned at health 20, no Health Boost: a 15-block drop (12 HP, within the budget) clutched, 0 damage, bucket recovered, no water left (run ${rep})`, async () => {
       await kit(bot, [['water_bucket', 1], ['bread', 4]]);
       const t = tower(0);
-      await tpBot(bot, { x: t.x + 2.5, y: -30, z: t.z + 2.5 }, -90);
-      await toughen(bot);
-      await bot.loop.waitTicks(10);
+      await tpBot(bot, { x: t.x + 2.5, y: -45, z: t.z + 2.5 }, -90);
+      await setHealth(bot, 20);
+      await bot.loop.waitTicks(70);
       const since = await bot.pve.now();
       const res = await bot.skills.goto({ type: 'block', p: { x: t.x + 14, y: -60, z: t.z + 2 } }, { timeoutTicks: 1500 });
       for (let k = 0; k < 100 && bot.skills.falls.busy; k++) await bot.loop.waitTicks(1);
@@ -95,6 +97,25 @@ describe.skipIf(!E2E)('@bds water bucket clutch (bds-gaunt)', () => {
       expect(inv.water_bucket).toBe(1);
       expect(water).toBe(0);
     }, 180_000);
+  }
+
+  for (const rep of [1, 2]) {
+    it(`planned beyond the budget: the 20-block tower (16 HP) with a bucket at health 20 is refused (a failed clutch must not kill) (run ${rep})`, async () => {
+      await kit(bot, [['water_bucket', 1]]);
+      const t = tower(1);
+      await tpBot(bot, { x: t.x + 2.5, y: -40, z: t.z + 2.5 }, -90);
+      await setHealth(bot, 20);
+      await bot.loop.waitTicks(10);
+      const since = await bot.pve.now();
+      const res = await bot.skills.goto({ type: 'block', p: { x: t.x + 14, y: -60, z: t.z + 2 } }, { timeoutTicks: 1500 });
+      const hurt = await fallHurts(bot, since);
+      const p = await bot.truth.pos(bot.name);
+      summary.push(`planned refused run ${rep}: ${JSON.stringify(res)}, feet ${p.location.y.toFixed(2)}, fall damage ${hurt.total}`);
+      expect(res).toMatchObject({ ok: false, reason: 'unreachable' });
+      expect((res as { note?: string }).note).toBe('the way down is a 20-block drop (16 HP), refused: it would leave 4 HP, the margin is 8');
+      expect(p.location.y).toBeCloseTo(-40, 1);
+      expect(hurt.total).toBe(0);
+    }, 120_000);
   }
 
   for (const rep of [1, 2]) {

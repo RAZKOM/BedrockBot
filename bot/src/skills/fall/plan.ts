@@ -4,10 +4,11 @@
 // same code. Per landing it takes the cheapest of:
 //
 //   harmless   the landing does no damage (hay up to 12 blocks, honey up to 6): the drop's ticks
-//   clutch     a water bucket in the hotbar, the landing block takes a clutch (waterlog.ts clutchTarget),
-//              the fall at most clutchMax, outside the no-water area: + clutchCost (the bot's FallGuard
-//              places the water while falling and picks it up again; skills/fall/clutch.ts)
 //   damage     the damage (damage.ts, enchantments included) within hpBudget: + damage x hpCost
+//   clutch     a damage drop the FallGuard will clutch (policy.ts clutchHelps: more than half the budget; a
+//              water bucket in the hotbar, the landing block takes a clutch, the fall at most clutchMax,
+//              outside the no-water area): + clutchCost + a quarter of the HP cost (the risk it fails).
+//              Never beyond the budget: a failed clutch must not kill (review B1).
 //
 // Every long drop also pays the irreversible-drop penalty (as a trap: a partial path does not end at the
 // bottom of it when the rim is as close). Never onto slime or a bed (the body bounces) and not into water
@@ -16,7 +17,7 @@
 import { dropCost, type PathCosts } from '../nav/costs.ts';
 import type { NavGrid } from '../nav/grid.ts';
 import { fallDamage } from './damage.ts';
-import type { FallPolicy } from './policy.ts';
+import { clutchHelps, type FallPolicy } from './policy.ts';
 import { clutchTarget } from './waterlog.ts';
 
 /** One long drop the planner may relax: into feet cell (x, y, z) of the scanned column. */
@@ -54,6 +55,7 @@ export function longDrops(grid: NavGrid, costs: PathCosts, p: FallPolicy, x: num
     if (f1 === undefined) return true;
     if (Number.isNaN(f1)) {
       if (grid.free(x, y, z) !== true) return false; // water, an obstacle, a hazard: no landing here
+      if (grid.climbable(x, y, z) === true) return false; // a ladder / vine catches the body: no fall (the climb moves)
       continue;
     }
     const fall = f0 - f1;
@@ -70,15 +72,32 @@ export function longDrops(grid: NavGrid, costs: PathCosts, p: FallPolicy, x: num
       if (!best || extra < best.extra) best = { y, feet: f1, base, extra, trap: costs.irreversibleDrop, how, damage: dmg };
     };
     if (damage <= 0) take('harmless', 0, 0);
-    if (p.clutch && damage > 0 && fall <= p.clutchMax + 1e-6 && !inArea(p.noWater, x, fy, z)) {
-      const t = clutchTarget(x, fy, z, floor, own ? undefined : grid.cls(x, y, z));
-      if (t.ok) take('clutch', p.clutchCost, 0);
+    // the damage must fit the budget even with a bucket: a clutch only saves HP, never a life (it can fail)
+    else if (damage <= p.hpBudget + 1e-9) {
+      take('damage', damage * p.hpCost, damage);
+      // the FallGuard clutches this fall by itself (clutchHelps): priced as the clutch plus a quarter of the HP
+      // (the risk it fails); the plain damage drop wins a tie
+      if (p.clutch && clutchHelps(damage, p) && fall <= p.clutchMax + 1e-6 && !inArea(p.noWater, x, fy, z)) {
+        const t = clutchTarget(x, fy, z, floor, own ? undefined : grid.cls(x, y, z));
+        if (t.ok) take('clutch', p.clutchCost + 0.25 * damage * p.hpCost, damage);
+      }
     }
-    if (damage > 0 && damage <= p.hpBudget + 1e-9) take('damage', damage * p.hpCost, damage);
     if (best) out.push(best);
     return false;
   }
   return false;
+}
+
+/**
+ * The live policy still takes the planned long drop from node `from` into node `to` (the same scan the planner
+ * ran; the navigator asks every tick before the body steps off: health, hostiles, the bucket and the landing
+ * may have changed since the plan). Undefined policy: no.
+ */
+export function acceptsDrop(grid: NavGrid, costs: PathCosts, p: FallPolicy | undefined, from: { y: number; feet: number }, to: { x: number; y: number; z: number }): boolean {
+  if (!p || costs.maxDrop < 3) return false;
+  const out: LongDrop[] = [];
+  longDrops(grid, costs, p, to.x, from.y, to.z, from.feet, out);
+  return out.some((o) => o.y === to.y);
 }
 
 function inArea(a: FallPolicy['noWater'], x: number, y: number, z: number): boolean {

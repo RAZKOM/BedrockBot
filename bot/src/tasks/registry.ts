@@ -216,6 +216,7 @@ export const afkTask: TaskDefinition = {
         settings,
       });
       pve = p;
+      mob.skills.falls.inCombat = () => p.combat.busy; // Track BI: no clutch in a fight unless the fall would kill (the weapon stays in hand)
       // dig / place / doors / chests for every walk and for !gather (the settings decide what the planner may use)
       containers = new Containers(ctx.conn, mob.world.inventory, { logger: ctx.logger('gather') });
       mob.skills.attach({ hotbar: p.hotbar, containers, source: ctx.conn });

@@ -88,6 +88,42 @@ export function fallPolicy(i: FallPolicyInputs): FallPolicy | undefined {
   };
 }
 
+/** The planner's half of the clutch rule: the FallGuard will clutch a planned damage drop of `damage` HP (more than half the budget). */
+export function clutchHelps(damage: number, p: Pick<FallPolicy, 'hpBudget'>): boolean {
+  return damage > Math.max(0, p.hpBudget) / 2 + 1e-9;
+}
+
+/** What the reactive clutch weighs (review B4). */
+export interface ClutchSituation {
+  /** Predicted damage of the fall (HP). */
+  damage: number;
+  health: number;
+  absorption: number;
+  /** Setting `fallMargin`. */
+  margin: number;
+  /** Creative / spectator. */
+  noDamage?: boolean;
+  /** The landing is inside the base (home's protectRadius). */
+  inBase?: boolean;
+  /** A fight runs or a mob hurt the bot in the last seconds (the weapon stays in hand). */
+  inCombat?: boolean;
+}
+
+/**
+ * Clutch this fall? Only when it matters: the fall would kill, leave less than `fallMargin`, or cost more than
+ * half of what is above the margin (health + absorption - margin). Never in creative / spectator; inside the
+ * base and in a fight only when the fall would kill. `reason` says why not.
+ */
+export function shouldClutch(s: ClutchSituation): { yes: boolean; reason?: string } {
+  if (s.noDamage) return { yes: false, reason: 'no fall damage in this game mode' };
+  const kills = s.damage >= s.health + s.absorption - 1e-9;
+  if (s.inBase && !kills) return { yes: false, reason: 'inside the base (only a fall that would kill)' };
+  if (s.inCombat && !kills) return { yes: false, reason: 'in a fight (only a fall that would kill)' };
+  const above = Math.max(0, s.health + s.absorption - s.margin);
+  if (kills || s.damage > above / 2 + 1e-9) return { yes: true };
+  return { yes: false, reason: `${fmtHp(+s.damage.toFixed(1))} HP leaves enough above the margin` };
+}
+
 function fmtHp(h: number): string {
   return Number.isInteger(h) ? String(h) : h.toFixed(1);
 }

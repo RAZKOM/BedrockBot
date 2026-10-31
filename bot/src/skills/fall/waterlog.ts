@@ -63,13 +63,13 @@ const WATERLOG_EXACT = new Set([
   'sculk_shrieker',
   'light_block',
 ]);
-const WATERLOG_SUFFIXES = ['_slab', '_stairs', '_fence', '_wall', '_pane', 'leaves', '_grate', '_lantern', '_trapdoor', 'trapdoor', '_sign', '_hanging_sign', '_fence_gate', '_candle', 'candle', '_coral', '_coral_fan', '_coral_wall_fan', '_chain', '_lightning_rod', '_shelf', '_bars'];
+const WATERLOG_SUFFIXES = ['_slab', '_stairs', '_fence', '_wall', '_pane', '_grate', '_lantern', '_trapdoor', 'trapdoor', '_sign', '_hanging_sign', '_fence_gate', '_candle', 'candle', '_coral', '_coral_fan', '_coral_wall_fan', '_chain', '_lightning_rod', '_shelf', '_bars'];
 
 /** True when a water bucket used on `name` (without namespace) waterlogs it instead of placing water above. */
 export function isWaterloggable(name: string): boolean {
   const n = name.startsWith('minecraft:') ? name.slice(10) : name;
   if (n.endsWith('_double_slab')) return false;
-  return WATERLOG_EXACT.has(n) || WATERLOG_SUFFIXES.some((s) => n.endsWith(s));
+  return n.includes('leaves') || WATERLOG_EXACT.has(n) || WATERLOG_SUFFIXES.some((s) => n.endsWith(s)); // any leaves: azalea_leaves_flowered too
 }
 
 /** What the clutch needs to know about a landing block (TerrainClass satisfies it). */
