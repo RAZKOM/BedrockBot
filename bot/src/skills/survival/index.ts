@@ -19,8 +19,8 @@ import { Avoidance, DEFAULT_AVOID_MOB_RADIUS, DEFAULT_AVOID_SPAWNER_RADIUS, Spaw
 import { wireItemOf } from '../place/place.ts';
 import { ARMOUR_SLOT_NAMES, ArmourController, type EquipResult, type WearResult } from './armour.ts';
 import { chooseFood, EatController, wantsToEat, type EatResult } from './eat.ts';
-import { DEFAULT_JUNK, DEFAULT_THROWAWAY_MIN, hotbarThrowaway, InventoryKeeper, THROWAWAY_BLOCKS, type DropResult } from './keeper.ts';
-import { StackRequests, type ScreenContainers } from './screen.ts';
+import { DEFAULT_JUNK, DEFAULT_THROWAWAY_MIN, hotbarThrowaway, InventoryKeeper, pickHotbarVictim, THROWAWAY_BLOCKS, type DropResult } from './keeper.ts';
+import { inventorySlot, StackRequests, type ScreenContainers } from './screen.ts';
 import { DEFAULT_TOOL_WEAR_LIMIT, durabilityLeft, makeToolOk, maxDurability } from './tools.ts';
 
 export * from './armour.ts';
@@ -353,27 +353,34 @@ export class SurvivalKit {
     let dst = -1;
     for (let i = 0; i < 9 && dst < 0; i++) if (!inv.slots[i]) dst = i;
     if (dst < 0) {
-      // swap with the hotbar slot that is least useful: junk, else the last non-tool slot
-      const s = this.settings();
-      for (let i = 8; i >= 0 && dst < 0; i--) if (inv.slots[i] && s.junk.includes(inv.slots[i]!.name)) dst = i;
-      for (let i = 8; i >= 0 && dst < 0; i--) if (inv.slots[i] && maxDurability(inv.slots[i]!.name) === undefined && i !== inv.selected) dst = i;
-      if (dst < 0) return undefined;
+      // swap with the hotbar slot that is least useful: junk, else the last non-tool slot (keeper.ts pickHotbarVictim)
+      dst = pickHotbarVictim(inv.slots, inv.selected, this.settings().junk);
+      if (dst < 0) {
+        this.log.warn(`hotbar: no slot to swap ${it.name} (slot ${slot}) into: every hotbar slot is a tool or the selected one`);
+        return undefined;
+      }
       const other = inv.slots[dst]!;
       const r = await this.requests.withScreen(async () => {
         inv.setItem(0, slot, { ...other });
         inv.setItem(0, dst, { ...it });
         const res = await this.requests.send([
-          { type_id: 'swap', legacy_type_id: 2, source: { slot_type: { container_id: 'inventory' }, slot, stack_id: it.stackId ?? 0 }, destination: { slot_type: { container_id: 'hotbar' }, slot: dst, stack_id: other.stackId ?? 0 } },
+          { type_id: 'swap', legacy_type_id: 2, source: inventorySlot(slot, it.stackId), destination: inventorySlot(dst, other.stackId) },
         ]);
         if (res.status === 'ok' || res.status === 0) return true;
         inv.setItem(0, slot, it);
         inv.setItem(0, dst, other);
         return false;
       });
-      if (r !== true) return undefined;
+      if (r !== true) {
+        this.log.warn(`hotbar: swapping ${it.name} (slot ${slot}) with ${other.name} (hotbar slot ${dst}) was refused`);
+        return undefined;
+      }
     } else {
       const r = await this.requests.withScreen(() => this.d.containers.move({ window: 0, slot }, { window: 0, slot: dst }, it.count));
-      if (!r.ok) return undefined;
+      if (!r.ok) {
+        this.log.warn(`hotbar: moving ${it.name} (slot ${slot}) into hotbar slot ${dst} failed: ${r.reason ?? 'refused'}`);
+        return undefined;
+      }
     }
     this.d.hotbar.noteRaw?.(dst, wireItemOf(inv.slots[dst], undefined));
     return dst;

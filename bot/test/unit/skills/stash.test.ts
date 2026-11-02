@@ -5,9 +5,10 @@ import { describe, expect, it } from 'vitest';
 import { parseSettingValue, RuntimeSettings, describeSetting } from '../../../src/config/settings.ts';
 import { CONTAINER_BLOCKS } from '../../../src/skills/container/chest.ts';
 import { boxSpots, carveSpots, depositable, isShulkerBox, MIN_FREE_SLOTS, parseChest, Stash, stepLine, withSlotType, type StashSkills, isStashJunk, junkDropCount, shulkerSlotsUsed } from '../../../src/skills/container/stash.ts';
+import { DEFAULT_JUNK, pickHotbarVictim } from '../../../src/skills/survival/keeper.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 
-const item = (name: string, count = 64): ItemStack => ({ name, count, networkId: 1, metadata: 0 });
+const item =(name: string, count = 64): ItemStack => ({ name, count, networkId: 1, metadata: 0 });
 const AIR: BlockInfo = { name: 'air', stateId: 0, states: {}, hardness: 0, solid: false, boxes: [] };
 const STONE: BlockInfo = { name: 'stone', stateId: 1, states: {}, hardness: 1.5, solid: true, boxes: [[0, 0, 0, 1, 1, 1]] };
 const key = (p: Vec3) => `${p.x},${p.y},${p.z}`;
@@ -99,8 +100,15 @@ function harness(o: Opts) {
         placeFails--;
         return { ok: false, reason: 'rejected' };
       }
-      // like the place skill: the held box (Track AV: selectHotbar), else the lowest slot
-      const i = selected >= 0 && slots[selected] && isShulkerBox(slots[selected]!.name) ? selected : slots.findIndex((s) => s && isShulkerBox(s.name));
+      // like the place skill (selectItem): the held box (Track AV: selectHotbar), else the lowest hotbar slot of that
+      // name, else the first main slot of it, which is fetched into an EMPTY hotbar slot (none: move_failed)
+      const wanted = po?.item;
+      const fits = (s: ItemStack | null | undefined): boolean => !!s && isShulkerBox(s.name) && (typeof wanted !== 'string' || s.name === wanted);
+      let i = selected >= 0 && fits(slots[selected]) ? selected : slots.findIndex((s, k) => k < 9 && fits(s));
+      if (i < 0) {
+        i = slots.findIndex((s) => fits(s));
+        if (i >= 9 && !slots.slice(0, 9).some((s) => !s)) return { ok: false, reason: 'move_failed' };
+      }
       calls.push(`placed slot ${i}`);
       box = slots[i]!.name;
       slots[i] = null;
@@ -152,11 +160,15 @@ function harness(o: Opts) {
     ...(o.breakBlocker ? { breakBlocker: o.breakBlocker } : {}),
     ...(o.toHotbar
       ? {
+          // SurvivalKit.toHotbar: an empty hotbar slot, else the slot pickHotbarVictim names
           toHotbar: async (slot: number) => {
             calls.push(`toHotbar ${slot}`);
-            [slots[8], slots[slot]] = [slots[slot]!, slots[8]!];
-            if (o.raws) [o.raws[8], o.raws[slot]] = [o.raws[slot], o.raws[8]];
-            return 8;
+            let dst = slots.slice(0, 9).findIndex((s) => !s);
+            if (dst < 0) dst = pickHotbarVictim(slots, selected, DEFAULT_JUNK);
+            if (dst < 0) return undefined;
+            [slots[dst], slots[slot]] = [slots[slot]!, slots[dst]!];
+            if (o.raws) [o.raws[dst], o.raws[slot]] = [o.raws[slot], o.raws[dst]];
+            return dst;
           },
         }
       : {}),
@@ -294,6 +306,29 @@ describe('stash step', () => {
     const h = harness({ slots: slots(), raws: raws(), toHotbar: true });
     expect(await h.stash.ifFull({ label: 'mine' })).toBe(true);
     expect(h.calls.filter((c) => c.startsWith('toHotbar') || c.startsWith('placed'))).toEqual(['toHotbar 9', 'placed slot 8']);
+  });
+
+  it('a full hotbar (tools, rockets, the fireworks box): a bot_loot box in the main inventory is swapped in, not left to a place that cannot fetch it', async () => {
+    const named = (n: string, extra: Record<string, unknown> = {}) => ({ extra: { nbt: { nbt: { value: { ...extra, display: { value: { Name: { value: n } } } } } } } });
+    const rocketItems = { Items: { value: { value: [{ Name: { value: 'minecraft:firework_rocket' }, Count: { value: 64 } }] } } };
+    const slots = () => [
+      item('netherite_pickaxe', 1), item('netherite_axe', 1), item('netherite_sword', 1), item('netherite_shovel', 1), // hotbar 0-3
+      item('firework_rocket', 50), item('cooked_beef', 8), item('cobblestone', 16), item('wheat_seeds', 2), item('red_shulker_box', 1), // hotbar 4-8
+      ...Array.from({ length: 9 }, () => item('undyed_shulker_box', 1)), // 9-17: nine empty bot_loot boxes
+      ...Array.from({ length: 18 }, () => item('sand')),
+    ];
+    const raws = () => [...Array.from({ length: 8 }, () => undefined), named('bot_fireworks', rocketItems), ...Array.from({ length: 9 }, () => named('bot_loot'))];
+    // nothing makes room (no toHotbar): the place skill finds no empty hotbar slot -> move_failed (the "inventory still full" bug)
+    const old = harness({ slots: slots(), raws: raws() });
+    await old.stash.ifFull({ label: 'mine' });
+    expect(old.stash.attempts[0]?.steps.find((s) => s.kind === 'shulker')?.reason).toBe('place: move_failed');
+    // with the swap: a slot is freed (the seeds, not the rockets or the fireworks box), the box placed from the hotbar
+    const h = harness({ slots: slots(), raws: raws(), toHotbar: true });
+    expect(await h.stash.ifFull({ label: 'mine' })).toBe(true);
+    expect(h.calls.filter((c) => c.startsWith('toHotbar') || c.startsWith('placed'))).toEqual(['toHotbar 9', 'placed slot 7']);
+    expect(h.slots[8]?.name).toBe('red_shulker_box');
+    expect(h.slots[4]?.name).toBe('firework_rocket');
+    expect(h.stash.attempts[0]?.steps.find((s) => s.kind === 'shulker')?.ok).toBe(true);
   });
 
   it('stashShulker off skips the box', async () => {

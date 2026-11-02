@@ -101,7 +101,10 @@ an elytra). `!inv` marks a pinned piece `(by hand)`; the kit's status has `armou
    below health 6, rotten flesh / spider eye / pufferfish / poisonous potato only when nothing else is
    there and food < 6; chorus fruit, suspicious stew and enchanted golden apples never. A stack in the
    main inventory is moved into an empty hotbar slot first (else swapped with junk or the last
-   non-tool slot). Not during a fight unless health < 6; not while digging / placing; **not while the
+   non-tool slot, `pickHotbarVictim` in keeper.ts: not the selected slot, and the rockets, elytra and
+   shulker boxes, the fireworks box among them, only when nothing else is left; the stash step swaps
+   its shulker box in the same way when the hotbar is full, since the place skill only fetches a box
+   from the main inventory into an EMPTY hotbar slot and otherwise fails with `move_failed`). Not during a fight unless health < 6; not while digging / placing; **not while the
    navigator walks unless food < 6 or health < 10** (see Packets: eating slows the body and the
    movement model does not know it). A hit of 4 or more stops the bite (above health 6) and pauses
    automatic eating 3 s. The previously held slot is selected again afterwards.

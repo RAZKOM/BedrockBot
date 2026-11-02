@@ -435,18 +435,21 @@ export class Stash {
   /**
    * The carried shulker box to fill: Track AV: a box named `keepBoxName` (bot_loot) with a free slot first,
    * then the one with the most free slots (its NBT `Items`); only a box the place skill will really pick
-   * (in the hotbar, or the first of its colour), unless `toHotbar` can move the best one there first;
+   * (in the hotbar, or the first of its colour while the hotbar has an empty slot to fetch it into),
+   * unless `toHotbar` can move the best one there first;
    * -1 when none has a free slot.
    */
   private async shulkerSlot(job: StashJob = {}): Promise<number> {
     const { best, exact } = this.boxChoice(job);
-    // same-coloured boxes: the place skill takes the first one in the hotbar, often a full one; move the best one there
+    // same-coloured boxes: the place skill takes the first one in the hotbar, often a full one; move the best one there.
+    // A box in the main inventory is no `exact` one while the hotbar is full (the place skill only fetches it into an empty slot).
     if (best && exact !== best && this.d.toHotbar) {
       const to = await this.d.toHotbar(best.i);
       if (to !== undefined && placesExactly(this.d.inventory.slots, to)) {
         this.log.info(`stash: moved the ${best.named ? `${keepNameOf(this.d.settings.get('keepBoxName'))} box` : 'emptiest box'} from slot ${best.i} into hotbar slot ${to}`);
         return to;
       }
+      if (!exact) this.log.warn(`stash: the box in slot ${best.i} could not be moved into the hotbar (survival kit busy, no slot to swap, or refused): the place skill cannot fetch it into a full hotbar`);
     }
     if (best && exact && exact !== best) this.log.info(`stash: the ${best.named ? `${keepNameOf(this.d.settings.get('keepBoxName'))} box` : 'emptiest box'} (slot ${best.i}) is not in the hotbar: filling the box in slot ${exact.i}`);
     return (exact ?? best)?.i ?? -1;

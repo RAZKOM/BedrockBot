@@ -127,6 +127,15 @@ again, box full`) and kept in `Stash.attempts` (last 50); `!get status` shows th
 every request on the task's one Containers while the step ran (the keeper restocking the hotbar with
 cobblestone added one in every run).
 
+The box has to be in the hotbar to be placed: the place skill fetches a box from the main inventory
+only into an EMPTY hotbar slot (`place: move_failed` otherwise, the whole job then ends "inventory
+still full"). With a full hotbar the stash swaps the chosen box in first (`SurvivalKit.hotbar`; the
+slot given up is picked by `pickHotbarVictim`: junk, else an ordinary item, the flight kit's rockets
+and a shulker box last) and warns in the log when it cannot (`stash: the box in slot N could not be
+moved into the hotbar ...`, plus the kit's own `hotbar: ...` line with the reason).
+`placesExactly` (home/boxing.ts) is the one rule behind this, for the stash, the supply layer and the
+home unload alike.
+
 ### Packet facts (BDS 1.26.60.6, verified on bds-get)
 
 | What | Seen |

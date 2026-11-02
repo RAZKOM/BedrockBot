@@ -104,14 +104,20 @@ export function namedBoxesWord(n: number, keepName: string = DEFAULT_KEEP_BOX_NA
   return `${n} ${keepNameOf(keepName)} box${n === 1 ? '' : 'es'}`;
 }
 
-/** `place` picks the held box, else the lowest hotbar slot of that name, else the first main slot: true when that is `slot` (after selecting it if it is in the hotbar). */
+/**
+ * `place` picks the held box, else the lowest hotbar slot of that name, else the first main slot:
+ * true when that is `slot` (after selecting it if it is in the hotbar). A box in the main inventory
+ * only counts while the hotbar has an empty slot: the place skill fetches it into one and gives up
+ * (`move_failed`) when there is none, so with a full hotbar the box has to be swapped in first.
+ */
 export function placesExactly(slots: readonly ({ name: string; count: number } | null)[], slot: number): boolean {
   if (slot < 9) return true;
   const name = slots[slot]?.name;
   if (!name) return false;
   for (let i = 0; i < 9; i++) if (slots[i]?.name === name && (slots[i]?.count ?? 0) > 0) return false;
   for (let i = 9; i < slot; i++) if (slots[i]?.name === name && (slots[i]?.count ?? 0) > 0) return false;
-  return true;
+  for (let i = 0; i < 9; i++) if (!slots[i]) return true; // PlaceSkill.selectItem: `!inv.slots[s]` is an empty slot
+  return false;
 }
 
 const top = (c: Record<string, number>): string =>

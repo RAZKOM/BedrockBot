@@ -18,6 +18,7 @@ import { foodInfo } from './eat.ts';
 import { inventorySlot, isOk, slotInfo, type StackRequests } from './screen.ts';
 import { maxDurability } from './tools.ts';
 import { isFlightKitItem } from '../fly/kit.ts'; // Track AU: the flight kit is never dropped
+import { isShulkerBox } from '../container/chest.ts';
 
 export const DEFAULT_THROWAWAY_MIN = 16;
 export const THROWAWAY_BLOCKS: readonly string[] = ['cobblestone', 'dirt', 'cobbled_deepslate', 'netherrack'];
@@ -69,6 +70,21 @@ export function hotbarThrowaway(slots: readonly (ItemStack | null | undefined)[]
     if (s && throwaway.includes(s.name)) n += s.count;
   }
   return n;
+}
+
+/**
+ * The hotbar slot to swap out when something has to come in (a shulker box for the stash step, food
+ * to eat) and no slot is empty: junk first (the last such slot), else the last slot holding no tool
+ * and not the selected one, preferring one that is neither the flight kit (rockets, elytra) nor a
+ * shulker box (the fireworks box): the flight code expects those in the hotbar. Only when nothing
+ * else is left do those qualify too. -1 when every slot is a tool, empty or selected.
+ */
+export function pickHotbarVictim(slots: readonly (ItemStack | null | undefined)[], selected: number, junk: readonly string[]): number {
+  for (let i = 8; i >= 0; i--) if (slots[i] && junk.includes(slots[i]!.name)) return i;
+  const plain = (i: number): boolean => !!slots[i] && maxDurability(bare(slots[i].name)) === undefined && i !== selected;
+  for (let i = 8; i >= 0; i--) if (plain(i) && !isFlightKitItem(bare(slots[i]!.name)) && !isShulkerBox(slots[i]!.name)) return i;
+  for (let i = 8; i >= 0; i--) if (plain(i)) return i;
+  return -1;
 }
 
 /** What the keeper would do now (at most one stocking move and the drops for a full inventory). */

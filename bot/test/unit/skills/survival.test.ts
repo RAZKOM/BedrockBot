@@ -25,6 +25,7 @@ import {
   makeToolOk,
   maxDurability,
   neverDrop,
+  pickHotbarVictim,
   planArmour,
   planKeeper,
   releaseItemTransaction,
@@ -517,6 +518,22 @@ describe('inventory keeper', () => {
     ]);
     const noJunk = { ...full, 8: item('iron_ingot'), 30: item('iron_ingot'), 31: item('iron_ingot') };
     expect(planKeeper(slots36(noJunk), keepSettings).filter((p) => p.kind === 'drop')).toEqual([]);
+  });
+
+  it('pickHotbarVictim: junk first, then the last plain slot; the flight kit and shulker boxes only when nothing else is left; never a tool or the selected slot', () => {
+    const hotbar = (fill: Record<number, ItemStack>) => slots36(fill).slice(0, 9);
+    const tools = { 0: item('netherite_pickaxe'), 1: item('netherite_axe'), 2: item('netherite_sword'), 3: item('netherite_shovel') };
+    // junk wins over everything, the last one of it
+    expect(pickHotbarVictim(hotbar({ ...tools, 4: item('rotten_flesh'), 5: item('cobblestone'), 6: item('string'), 7: item('cooked_beef') }), -1, DEFAULT_JUNK)).toBe(6);
+    // the user's setup: rockets, beef, cobblestone, seeds, the fireworks box in slot 8 -> the seeds (slot 7), not the box or the rockets
+    expect(pickHotbarVictim(hotbar({ ...tools, 4: item('firework_rocket', 50), 5: item('cooked_beef', 8), 6: item('cobblestone', 16), 7: item('wheat_seeds', 2), 8: item('red_shulker_box') }), -1, DEFAULT_JUNK)).toBe(7);
+    // the selected slot is skipped
+    expect(pickHotbarVictim(hotbar({ ...tools, 5: item('cooked_beef'), 7: item('wheat_seeds') }), 7, DEFAULT_JUNK)).toBe(5);
+    // only the flight kit and a box left: they go rather than nothing (the last of them)
+    expect(pickHotbarVictim(hotbar({ ...tools, 4: item('firework_rocket', 50), 8: item('red_shulker_box') }), -1, DEFAULT_JUNK)).toBe(8);
+    // every slot a tool, empty or selected: -1
+    expect(pickHotbarVictim(hotbar({ ...tools, 4: item('stone_pickaxe') }), -1, DEFAULT_JUNK)).toBe(-1);
+    expect(pickHotbarVictim(hotbar({ 0: item('cooked_beef') }), 0, DEFAULT_JUNK)).toBe(-1);
   });
 
   it('drop(name, n) sends drop requests (main inventory first) inside the inventory screen', async () => {

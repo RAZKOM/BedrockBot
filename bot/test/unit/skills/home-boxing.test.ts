@@ -74,6 +74,17 @@ describe('named boxes (boxing.ts, itemDisplayName)', () => {
     expect(placesExactly(inv, 12)).toBe(false);
   });
 
+  it('placesExactly: a main-inventory box needs an empty hotbar slot (the place skill fetches it into one, move_failed otherwise)', () => {
+    const box = { name: 'undyed_shulker_box', count: 1 };
+    const inv = Array.from({ length: 36 }, () => null as { name: string; count: number } | null);
+    inv[12] = box;
+    for (let i = 0; i < 9; i++) inv[i] = { name: i === 8 ? 'red_shulker_box' : 'cobblestone', count: 1 }; // a full hotbar, another colour of box in it
+    expect(placesExactly(inv, 12)).toBe(false);
+    inv[5] = null;
+    expect(placesExactly(inv, 12)).toBe(true);
+    expect(placesExactly(inv, 8)).toBe(true); // in the hotbar: always
+  });
+
   it('!boxes: spares carried and in the chests, the named boxes carried', () => {
     const rec = (x: number, empty: number, extra: Partial<ChestRecord> = {}): ChestRecord => ({ x, y: 0, z: 0, kind: 'chest', size: 27, free: 20, stacks: 7, contents: {}, room: {}, boxes: { empty, full: 0 }, double: false, readAt: 1, ...extra });
     const slots = [{ name: 'undyed_shulker_box', count: 1 }, { name: 'undyed_shulker_box', count: 1 }, { name: 'undyed_shulker_box', count: 1 }];
