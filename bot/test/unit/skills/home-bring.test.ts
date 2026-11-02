@@ -112,7 +112,7 @@ describe('bring: Track BJ, whole boxes or items out of a box', () => {
     const q = planBring([boxRec(4, {}, [small, small, small])], dirt, 1900, 0, o);
     expect(q.sources.map((s) => [s.take, s.box, s.boxes])).toEqual([[1500, true, 3]]);
     expect(q.short).toBe(400);
-    // a mixed box with 5 dirt (review 3b2478c #9): never whole, even with 1000 missing
+    // a mixed box with 5 dirt (review 24a8c9a #9): never whole, even with 1000 missing
     const r = planBring([boxRec(4, {}, [{ dirt: 5, stone: 1000 }, { dirt: 1728 }])], dirt, 1000, 0, o);
     expect(r.sources.map((s) => [s.take, s.box, !!s.extract])).toEqual([[1000, true, false]]);
     const m = planBring([boxRec(4, {}, [{ dirt: 5, stone: 1000 }])], dirt, 1000, 0, o);

@@ -49,7 +49,7 @@ describe.skipIf(!E2E)('@bds home: shulker-aware jobs (Track BJ)', () => {
 
   /**
    * A full box of `item` (`stacks` stacks of 64) in the bot's inventory: filled by truth as a block, broken and picked up by
-   * the bot. Robust against an earlier file on the same server (review of 7177d95: the setup flaked after home-bring):
+   * the bot. Robust against an earlier file on the same server (review of 75220ea: the setup flaked after home-bring):
    * stray items around the cell are removed first, the box's contents are polled by truth (no fixed sleep), and the box
    * picked up is matched by what it holds (its NBT may arrive a moment after the slot); the pickup is retried.
    */
