@@ -5,8 +5,8 @@ Server: BDS 1.26.60.6 (`bds-get`, flat, peaceful). Details and numbers: [../get.
 
 ## Context
 
-The owner found four work commands confusing ("doesn't it kind of make no sense to have a gather
-command as well as a mine command?"): `!gather` fells trees, `!mine` digs blocks, `!food` hunts,
+The owner found four work commands confusing (they asked whether a separate gather command next to a
+mine command makes sense at all): `!gather` fells trees, `!mine` digs blocks, `!food` hunts,
 `!farm` harvests, and the owner has to know which one gets the item they want. They also asked how
 mining handles shulker boxes: until now a full inventory ended a gather without a chest (`inventory
 full and no chest`), and mining or hunting simply stopped picking things up. The PLAN.md wave 7 note

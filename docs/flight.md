@@ -15,13 +15,13 @@ authoritative. Decision record: [decisions/0042-elytra-flight.md](decisions/0042
 > **The Realm, 2026-10-30 (the first day with an elytra).** Two flights by the owner's bot, from the
 > owner's words and the log: at 16:43 `!fly sand` started *indoors* at about 110 57 -43 (home): the
 > climb hit the roof three times within two seconds (1.9 damage each, 0.7 and 4.6 before), the flight
-> ended by the health rule after 73 ticks and 5 rockets ("it almost killed itself by flying into the
-> roof"). At 16:47 the same 1490-block flight from outside cruised at y 164 (the terrain floor: the
+> ended by the health rule after 73 ticks and 5 rockets (the owner saw it nearly kill itself on the
+> roof). At 16:47 the same 1490-block flight from outside cruised at y 164 (the terrain floor: the
 > highest column 151) and landed on the spot after 1261 ticks with **17 rockets**, 1 go-around and 33
-> corrections ("super wasteful with fireworks ... it kind of just keeps spamming them"). Track AU2 is
+> corrections (the owner found it very wasteful, firing rocket after rocket). Track AU2 is
 > the answer to both: the sky check before the takeoff and the path-ahead check in the air; the
 > energy model of the cruise (the same flight on the model: 9 to 10 rockets); and the descent
-> geometry ("when landing slow it could also try doing a sort of spiral depending on the geometry").
+> geometry (the owner suggested a spiral to slow the landing where the geometry allows).
 
 ## Files
 

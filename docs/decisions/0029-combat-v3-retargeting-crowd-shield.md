@@ -9,8 +9,8 @@ reach", "Crowd rule", "Shield". Builds on [0017](0017-combat-that-keeps-the-bot-
 
 A fight (guard, `!kill`) stayed on the target it started with until that target died or the fight
 gave up. Track W's gauntlet saw a guard fight locked on one zombie while a second zombie landed 10
-hits in 13 s. The owner: "why not just always target whatever it can within its reach? instead of
-risking a hit. presumably if a hostile mob is within its reach then it's being targeted". Two more
+hits in 13 s. The owner asked why the bot does not always target whatever is within its reach
+instead of risking being hit, since a hostile mob within reach is presumably targeting the bot. Two more
 gaps: nothing made the bot leave a crowd it was losing before its health hit `fleeHealth`, and a
 shield, Bedrock's main defence against skeletons, was ignored.
 

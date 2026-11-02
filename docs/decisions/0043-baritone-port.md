@@ -12,7 +12,7 @@ fallback. Partial paths were pure greedy (one best node scored `h + trap`) and o
 The owner's Realm sessions showed the cost: a bot stuck in a 1x1 hole over a chest, a mine job walking
 1500 blocks home, ore left unreached. Baritone (cabaletta/baritone, LGPL-3.0) solves the same problems
 with one planner whose moves dig, several partial-path bests and an executor that notices when the body
-leaves the path. The owner asked for a port ("In order to fix our pathfinding stuff and mining issues").
+leaves the path. The owner asked for a port, to fix the pathfinding and mining issues.
 
 ## Decision
 

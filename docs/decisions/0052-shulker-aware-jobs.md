@@ -5,9 +5,10 @@ Date: 2026-10-31. Status: accepted. Details: [../home.md](../home.md) "Supply", 
 
 ## Context
 
-The owner: "So im noticing that all of the smart shulker features ... aren't universally applied ... !get 1000
-dirt ... only ask for 10, itll bring a whole shulker. With building too ... scaffolding ... crops that it harvested
-being not unloadable cause it considers it food". Before this track, box handling lived in each feature:
+The owner noticed that the smart shulker box features were not applied everywhere: a request for only 10 dirt
+(unlike `!get 1000 dirt`) still brought a whole shulker box, building and scaffolding ignored boxes, and
+harvested crops were never unloaded because the bot counted them as food. Before this track, box handling
+lived in each feature:
 `HomeLogistics` had its own place / empty / break / pick-up helpers and three inline copies of the
 place-deposit-pickup sequence (`viaSpareBox`, `boxStepRun`, `fillStep`); `!bring` only knew whole boxes (as the
 last source); `!build` counted loose blocks only; the unload plan kept every crop as food.

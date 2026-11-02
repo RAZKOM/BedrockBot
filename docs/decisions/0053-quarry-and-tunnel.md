@@ -4,9 +4,9 @@ Date: 2026-10-31. Status: accepted. Details: [../mining.md](../mining.md) "Quarr
 
 ## Context
 
-The owner: "Also do we have like a straight up quarry command? or like a dig 3x3 tunnel or something?
-Like mine out this area would be awesome way to collect stone", and, about the code base in general: "Is
-this not building on top of itself and instead rehandrolling the same logic over and over?" The bot had
+The owner asked for a plain quarry command or a 3 x 3 tunnel command, since mining out an area would
+be a good way to collect stone, and asked about the code base in general whether it builds on itself or
+hand-rolls the same logic again and again. The bot had
 every piece but no command: `!build clear` (Track AL) digs a box with a stand planner and a runner that
 walks, digs and collects; the navigator's break rules (nav/baritone/helper.ts `avoidBreaking`) refuse
 built blocks, containers, liquids and gravity hazards; the miner climbs back up out of its tunnels;

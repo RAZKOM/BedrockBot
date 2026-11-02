@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/require-await -- the fakes answer like the async skills they stand for */
 // Wave 11 Track AV: packing priority of the stash step (skills/container/stash.ts): junk that is no building
 // block is dropped before a box is filled, the job's produce goes into the box first, filler last, and a box
-// already holding junk is re-packed (the owner: "will it put them back down and prioritize the sand?").
+// already holding junk is re-packed (the owner asked that other items come back out so the sand goes first).
 import { describe, expect, it } from 'vitest';
 import { RuntimeSettings } from '../../../src/config/settings.ts';
 import { dropFirst, packClass, packOrder, repackJunk, repackLine, Stash, stepLine, type StashSkills } from '../../../src/skills/container/stash.ts';

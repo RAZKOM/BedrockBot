@@ -69,9 +69,8 @@ Counts above the command's own maximum are cut to it (2304 logs, 9216 blocks, 64
 
 ## Several ores in one trip (wave 10, Track AQ)
 
-Owner, 2026-10-30: "what about doing !get ores, or multiple ores that are batched together and can be
-found efficiently vs doing !get iron, !get coal, etc. all individually and potentially retracing steps a
-lot". `!get <item> n <item> n ...` (count after or before each item, `and` and commas ignored) where every
+The owner asked (2026-10-30) for `!get ores`, or several ores batched into one efficient trip, instead of
+separate `!get iron`, `!get coal` and so on that may retrace a lot of steps. `!get <item> n <item> n ...` (count after or before each item, `and` and commas ignored) where every
 item is mined (ores and plain blocks of the catalog) becomes one `!mine <block> n <block> n ...`: one job,
 one trip. Its candidates are the kinds still below their quota, nearest first across kinds from wherever
 the bot stands (not kind by kind); a kind drops out when its quota is met; the job ends when every quota

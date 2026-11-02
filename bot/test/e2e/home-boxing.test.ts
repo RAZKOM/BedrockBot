@@ -12,14 +12,14 @@
 //   (c) `!drop all` keeps the bot_loot boxes (an unnamed box and the cobblestone go)
 //   (d) the stash step (inventory full) fills the bot_loot box, not the unnamed spare in a lower hotbar slot
 //   (e) a full chest and no spare box anywhere: the reply says what is left and why
-//   (f) packing (the owner: "will it put them back down and prioritize the sand?"): a bot_loot box holding
+//   (f) packing (the owner asked that other items come back out so the sand goes first): a bot_loot box holding
 //       20 stacks of rotten flesh and 7 of sand, the inventory full of sand (one slot free): the stash step (job: sand)
 //       re-packs it: the box holds 27 stacks of sand, the rotten flesh is on the floor
-//   (g) fill steps (the owner: "if it has 5 bot_loot boxes half full of deepslate ... fill up one or more full shulkers"):
+//   (g) fill steps (the owner asked that half-full bot_loot boxes of deepslate become one or more full spare boxes):
 //       4 bot_loot boxes of 10 stacks of cobbled deepslate and 2 loose stacks, a chest with 5 stacks of it and plenty of
 //       room, a chest of 3 empty boxes: `!unload` fills one spare with 27 x 64 and stores it in the deepslate chest, the
 //       rest goes there loose; the spare chest holds 2 boxes, the bot its 4 bot_loot boxes (empty), nothing on the ground
-//   (h) tidy steps (the owner: "if it sees a chest that has enough of the same item to fill a shulker, do it"): a double
+//   (h) tidy steps (the owner asked that a chest with enough of one item to fill a shulker box get one filled): a double
 //       chest (placed by the bot) holding 30 loose stacks of cobblestone, a chest of 3 empty boxes, the bot carrying none:
 //       `!unload` leaves 1 full box (27 x 64) + 3 stacks in the double chest, the spare chest one box fewer
 // Env: HOME_BDS_HOST / HOME_BDS_PORT / HOME_BDS_CONTAINER (home-truth.ts), HOME_VERBOSE=1.

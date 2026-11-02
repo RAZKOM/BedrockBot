@@ -1,11 +1,10 @@
 // e2e (tag @bds), Track BG2 (decisions/0048-trapdoor-moves.md "Realm findings (BG2)", docs/pathfinding.md
-// "Trapdoors"): the owner's farm hatch, rebuilt on bds-move from the Realm's world cache (YourRealm,
-// x 35..47, z 55..65, y 128..137), shifted to a private area (Realm y 135 = -53 here):
+// "Trapdoors"): a farm-style hatch on bds-move, built in a private area:
 //   - a stone platform (floor layer -54, feet -53) with a spruce trapdoor in its WALKING layer (-53), a wall
-//     block beside it (the Realm's x - 1 column), a ladder under it on that wall (-57 .. -54: up into the floor
-//     layer), a room 3 high under the platform (feet -57, floor -58; a crafting table and a barrel in it);
-//   - the held item as on the Realm: a netherite pickaxe, a block (cobblestone), a red shulker box; the bot
-//     carries throwaway blocks and plans with allowPlace and allowBreak (the Realm's settings);
+//     block beside it, a ladder under it on that wall (-57 .. -54: up into the floor layer), a room 3 high
+//     under the platform (feet -57, floor -58; a crafting table and a barrel in it);
+//   - the held item varies: a netherite pickaxe, a block (cobblestone), a red shulker box; the bot carries
+//     throwaway blocks and plans with allowPlace and allowBreak;
 //   - per item: down from the platform into the room (opened, closed behind from the ladder) and up again
 //     (opened from below while on the ladder, closed behind from the platform), twice each.
 // The probe case measures the cause: a click on the trapdoor from the ladder with each item, sneaking and not.
@@ -19,25 +18,25 @@ import { consoleCommand } from './skills-truth.ts';
 const TRACE = process.env.NAV_TRACE === '1';
 const f = (x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, block: string): Fill => ({ from: { x: x1, y: y1, z: z1 }, to: { x: x2, y: y2, z: z2 }, block });
 
-describe.skipIf(!E2E)('@bds nav: the Realm farm hatch with an item in the hand (bds-move)', () => {
+describe.skipIf(!E2E)('@bds nav: the farm hatch with an item in the hand (bds-move)', () => {
   let bot: MoveBot;
   const summary: string[] = [];
   const o = privateOrigin();
   const flat = (x1: number, z1: number, x2: number, z2: number): Fill[] => [f(x1, -64, z1, x2, -64, z2, 'bedrock'), f(x1, -63, z1, x2, -62, z2, 'dirt'), f(x1, -61, z1, x2, -61, z2, 'grass_block'), f(x1, -60, z1, x2, -45, z2, 'air')];
-  // the hatch column (Realm -71, 60); the room east of it (Realm x 41 .. 42, z 57 .. 60)
+  // the hatch column; the room east of it (x + 1 .. x + 2, z - 3 .. z)
   const H = { x: o.x + 6, z: o.z + 8 };
   const hatch: Vec3 = { x: H.x, y: -53, z: H.z };
-  const roomGoal: Vec3 = { x: H.x + 1, y: -57, z: H.z }; // Realm (41, 131, 60)
-  const platformGoal: Vec3 = { x: H.x + 3, y: -53, z: H.z - 4 }; // Realm (43, 135, 56): the owner's spot
+  const roomGoal: Vec3 = { x: H.x + 1, y: -57, z: H.z };
+  const platformGoal: Vec3 = { x: H.x + 3, y: -53, z: H.z - 4 }; // on the platform, off the hatch
   const platformStart: Vec3 = { x: H.x + 3.5, y: -53, z: H.z - 3.5 };
   const fills: Fill[] = [
     ...flat(o.x - 4, o.z - 4, o.x + 20, o.z + 20),
     f(H.x - 4, -58, H.z - 6, H.x + 4, -54, H.z + 2, 'stone'), // the platform's body
     f(H.x + 1, -57, H.z - 3, H.x + 2, -55, H.z, 'air'), // the room
     f(H.x, -57, H.z, H.x, -54, H.z, 'air'), // the shaft (the ladder goes in)
-    f(H.x - 1, -53, H.z, H.x - 1, -52, H.z, 'stone'), // the wall block beside the hatch (Realm x -72)
+    f(H.x - 1, -53, H.z, H.x - 1, -52, H.z, 'stone'), // the wall block beside the hatch
   ];
-  const layout: Layout = { name: 'hatch-realm', anchor: { x: H.x + 0.5, y: -53, z: H.z - 5.5 }, fills };
+  const layout: Layout = { name: 'hatch', anchor: { x: H.x + 0.5, y: -53, z: H.z - 5.5 }, fills };
 
   const ITEMS = [
     ['netherite_pickaxe', 'a pickaxe'],
@@ -57,7 +56,7 @@ describe.skipIf(!E2E)('@bds nav: the Realm farm hatch with an item in the hand (
     throw new Error(`trapdoor at ${fmt(hatch)} not seen`);
   }
 
-  /** Inventory: `item` selected in slot 0, 32 cobblestone as throwaway blocks in slot 8 (the Realm bot carries blocks). */
+  /** Inventory: `item` selected in slot 0, 32 cobblestone as throwaway blocks in slot 8 (the bot carries blocks). */
   async function hold(item: string | undefined): Promise<void> {
     await bot.truth.ok('clear', [bot.name]);
     if (item) await bot.truth.ok('give', [bot.name, item, 1]);
@@ -87,7 +86,7 @@ describe.skipIf(!E2E)('@bds nav: the Realm farm hatch with an item in the hand (
   }, 240_000);
 
   afterAll(async () => {
-    console.log(`[nav-hatch-realm e2e] area ${o.x},${o.z}\n  ${summary.join('\n  ')}`);
+    console.log(`[nav-hatch e2e] area ${o.x},${o.z}\n  ${summary.join('\n  ')}`);
     try {
       if (bot) {
         await teleport(bot, layout.anchor);
@@ -113,7 +112,7 @@ describe.skipIf(!E2E)('@bds nav: the Realm farm hatch with an item in the hand (
     tr.stop();
     offTrace();
     const got = bot.corrections.slice(before);
-    if (TRACE && got.length) console.log(`[nav-hatch-realm trace] ${label}\n${trace.join('\n')}`);
+    if (TRACE && got.length) console.log(`[nav-hatch trace] ${label}\n${trace.join('\n')}`);
     const rep = bot.skills.status().lastGoto!;
     const td = await truthDiff(bot);
     const m = plan ? plan.path.map((n) => n.move) : [];

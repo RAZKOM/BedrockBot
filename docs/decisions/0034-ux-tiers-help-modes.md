@@ -4,10 +4,10 @@ Date: 2026-10-29. Status: accepted (Track AM, wave 9). Server: BDS 1.26.60.6 (bd
 
 ## Context
 
-The owner: "just because the commands exist doesn't mean a user will ever use them. Maybe like a
-simple help and a deep dive help menu? like I'm never going to call !cook, but it should still know
-how to do it for when it gathers its food". And: "if I can do !get wood or !get iron and it just works
-then it's fine to hide the other two [!gather, !mine]. As long as it doesn't get it from my chests."
+The owner pointed out that commands existing does not mean a user will ever use them, and suggested a
+simple help and a deep-dive help: they would never call `!cook` themselves, but the bot should still know
+how to cook when it gathers its food. They also said that if `!get wood` and `!get iron` just work, hiding
+`!gather` and `!mine` is fine, as long as `!get` does not take the items from their chests.
 `!help` printed all 35 command names in one line; settings had to be learnt key by key; nothing told
 an owner what changed after an update.
 

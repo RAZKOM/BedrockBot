@@ -4,10 +4,10 @@ Date: 2026-10-31. Status: accepted (Phase 7, UX). Details: [../chat-style.md](..
 
 ## Context
 
-The owner: "What about §? How can we implement the chat color character to improve the ux", then "my main
-problem is with like !help or !set where a lot of text is printed, it kind of all garbles up into one blob.
-so separation and context help", and "make sure its reusable for future agents to know how to use it and not
-just set it and forget in places". Later: "/tellraw if available should be used".
+The owner asked for the chat colour character (§) to improve readability. The main problem was long
+replies such as `!help` or `!set`, which printed as one blob; separation and context would help. The
+solution had to be reusable, so that future agents know how to use it and do not set it and forget it in
+places. Later the owner asked that `/tellraw` be used when it is available.
 
 Replies were one packed line per message (`!set` and `!help` chunked at 256 characters, 8 replies per 10
 seconds), with no emphasis. Nothing stopped the next feature from adding its own colour codes or its own

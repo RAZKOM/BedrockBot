@@ -1,7 +1,7 @@
 # Crafting and compaction: `!craft`, `!compact`, the compaction step of `!unload` (wave 11, Track AW)
 
-The owner's words (2026-10-30): "if a chest has iron blocks and iron ore, and it's full and trying to
-drop off more iron ore, then it should craft them into blocks to make it fit." So: crafting as a
+The owner asked (2026-10-30) that a full chest holding iron blocks and iron ore, with the bot trying to
+drop off more iron ore, get its ore crafted into blocks so the load fits. So: crafting as a
 skill, and compaction (9 raw iron -> 1 raw iron block, 9 ingots -> 1 block, the same for copper,
 gold, diamond, emerald, coal, redstone, lapis, netherite) as its first use, called by the unload plan
 when a chest cannot take the bot's load. Nothing here gives an advantage over other players: the bot

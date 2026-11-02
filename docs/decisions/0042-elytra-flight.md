@@ -5,10 +5,9 @@ Server: BDS 1.26.60.6 (`bds-fly`, udp/19204, strict server-authoritative movemen
 
 ## Context
 
-The owner's words: "elytra flight is the most important, it has to be able to land precisely on
-blocks high up like a platform for a creeper farm, ideally with little to no damage, efficient with
-fireworks, and I'll give it a shulker of fireworks it shouldn't get rid of and it can just ask for
-more when low". The bot plays on the owner's Realm with other players, so the flight may only do
+The owner named elytra flight the most important part: the bot has to land precisely on blocks high
+up, such as a creeper farm platform, ideally with little to no damage, use fireworks efficiently, keep
+the shulker box of fireworks the owner gives it, and ask for more when low. The bot plays on the owner's Realm with other players, so the flight may only do
 what a vanilla client does: yaw, pitch, the jump key, the glide request and a firework in the hand.
 Track AT had left the packet questions open (which flag starts a glide, how the boost arrives).
 
@@ -87,9 +86,8 @@ Track AT had left the packet questions open (which flag starts a glide, how the 
 
 The first day on the Realm (docs/flight.md, the note at the top): an indoor takeoff flew into the roof
 three times and ended by health; a 1490-block flight landed on the spot but spent 17 rockets. The
-owner's words: "it just tried to fly away while inside and it almost killed itself by flying into the
-roof. It is also super wasteful with fireworks ... and also when landing slow it could also try doing
-a sort of spiral depending on the geometry." Measured before modelled (the glide polar and what a
+owner reported that it took off indoors and nearly killed itself flying into the roof, that it was very
+wasteful with fireworks, and suggested a spiral to slow the landing where the geometry allows. Measured before modelled (the glide polar and what a
 rocket buys, docs/flight.md "Physics"), then four decisions on top of the seven above:
 
 8. **No takeoff under a roof, and the path ahead is checked in the air.** Before the jump the 3 x 3

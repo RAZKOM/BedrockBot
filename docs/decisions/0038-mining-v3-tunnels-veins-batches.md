@@ -7,12 +7,12 @@ Servers: BDS 1.26.60.6 (`bds-dig` flat, `bds-explore` seed 7). Details and numbe
 
 ## Context
 
-The owner on the Realm (2026-10-30): "why is it struggling so bad to mine through stuff to reach ores?
-Shouldn't it just mine directly to the ores, break the group, pick them up, then proceed to the next
-nearest group?", "if I say get wood, and drop wood on the floor it should try to pick it up", then
-"it can 100% dig straight down (avoiding lava and drops onto lava or dangerous stuff like dripstone)",
-and "what about doing !get ores, or multiple ores batched together ... vs doing !get iron, !get coal
-individually and potentially retracing steps a lot". The logs: an approach was a walk with dig-through,
+The owner on the Realm (2026-10-30) asked why the bot struggled so much to mine through to ores instead
+of mining straight to them, breaking the group, picking it up and moving on to the next nearest group;
+asked that wood dropped on the floor during a wood job be picked up; noted that it can certainly dig
+straight down (avoiding lava, drops onto lava and hazards such as dripstone); and asked for `!get ores`,
+or several ores batched into one trip, instead of separate `!get iron`, `!get coal` that may retrace a
+lot of steps. The logs: an approach was a walk with dig-through,
 which digs sideways through 1 or 2 blocks and never down, so an ore 2 blocks under the floor or 6 into
 rock was "unreachable" after 3 plans of 100 000 nodes (1.4 s each); a vein was mined one block at a time
 with a re-scan between; drops in holes were left. The dig rules of 2026-10-30 (`protectRadius`, built

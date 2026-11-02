@@ -1,6 +1,6 @@
 // Track AW (wave 11, docs/crafting.md "Compaction"): the 9 -> 1 block table and the plans behind
-// `!compact` and the unload hook. The owner: "if a chest has iron blocks and iron ore, and it's full
-// and trying to drop off more iron ore, then it should craft them into blocks to make it fit".
+// `!compact` and the unload hook. The owner asked that a full chest holding iron blocks and iron ore,
+// with the bot trying to drop off more iron ore, get its ore crafted into blocks so the load fits.
 // Only storage blocks a vanilla player crafts back 1 -> 9 are listed: raw metal blocks and the
 // ingot / gem / dust blocks; never sand, cobblestone, wheat, melons or anything that does not come
 // back as the same item.

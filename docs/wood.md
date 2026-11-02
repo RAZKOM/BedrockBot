@@ -114,9 +114,8 @@ are at y + h - 2, so the cells next to the trunk are free up to y + 1 and the dr
 
 ## Pillar-up (decision 0051)
 
-The owner (2026-10-30): "When gathering items, why is it not building like temporary pillars it then
-destroys? [...] with wood it kind of gets stuck on tall trees. It does end up leaving floating tree
-parts". When no stand cell reaches the next log and the bot carries scaffold blocks, the feller builds a
+The owner asked (2026-10-30) why the bot does not build temporary pillars while gathering and break them
+afterwards: with wood it got stuck on tall trees and left floating tree parts behind. When no stand cell reaches the next log and the bot carries scaffold blocks, the feller builds a
 temporary pillar. Scaffold blocks are the throwaway kinds carried (`DEFAULT_THROWAWAY`: cobblestone,
 dirt, cobbled deepslate, netherrack, stone ...) that the hotbar's tools or the hand **harvest**, fastest to
 dig first (`BotSkills.scaffoldItems`): without a pickaxe dirt, never cobblestone (the first e2e run dug

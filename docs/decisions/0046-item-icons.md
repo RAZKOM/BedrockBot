@@ -5,7 +5,7 @@ Details: [../panel.md](../panel.md) "Item icons".
 
 ## Context
 
-The owner: "Can we make the webui show the real minecraft icons and not just random ones?" The
+The owner asked for the web UI to show the real Minecraft icons instead of generated ones. The
 inventory of 0037 drew a hand-drawn glyph per item class, a hash colour and a few letters. 0037 chose
 that because the textures are Mojang's art (not ours to ship) and the page may be offline. Both
 constraints still hold; the owner's request outweighs the first half of the choice, so the question is

@@ -5,11 +5,10 @@ Date: 2026-10-30. Status: accepted (Phase 7, wave 11, Track BI). Details: [../pa
 
 ## Context
 
-The owner: "When it gets stuck on top of a mountain for example, it determines its end goal unreachable.
-This is kind of silly considering it has 3 options: A. Fall and survive, B: glide down with elytra, or C:
-Water bucket clutch which we haven't implemented. A general water bucket clutch feature if it detects
-it's falling or even fall on purpose to clutch would be awesome. It just has to know about water
-loggable blocks." The planner's drop stopped at 3 blocks (no damage); every deeper edge was a wall.
+The owner noticed that a bot stuck on top of a mountain declared its goal unreachable, although it has 3
+options: A, fall and survive; B, glide down with elytra; C, a water bucket clutch (not implemented then).
+They asked for a general clutch, used when the bot detects it is falling or even falls on purpose to clutch,
+which has to know the waterloggable blocks. The planner's drop stopped at 3 blocks (no damage); every deeper edge was a wall.
 Baritone's `MovementFall` / `dynamicFallCost` were left out of the port (0043) on purpose: Java's numbers.
 B (the elytra glide down) went to another track (BF, the flight rewrite) and is not part of this one.
 

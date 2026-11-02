@@ -1,6 +1,6 @@
 // Track BJ (wave 12, decision 0052, docs/home.md "Supply"): one answer to "how many of this do I have, and
-// get me n of it loose" for every job, so no feature hand-rolls its own shulker logic. The owner: "all of the
-// smart shulker features ... arent universally applied to all features".
+// get me n of it loose" for every job, so no feature hand-rolls its own shulker logic. The owner noticed that
+// the smart shulker box features were not applied to every feature.
 //
 //   available(item)        loose in the inventory + inside the carried shulker boxes (any but the flight kit's
 //                          fireworks box and boxes whose wire item is unknown; the bot_loot boxes count) + what the

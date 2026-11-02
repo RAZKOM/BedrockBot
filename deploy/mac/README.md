@@ -7,7 +7,9 @@ Measured footprint on BDS and the Realm: about 300 MB RSS, a few percent of one 
 Everything below is per user account, needs no `sudo`, and touches only `~/.local`, `~/BedrockBot`,
 `~/.bedrockbot` and `~/Library/LaunchAgents`.
 
-## One-time setup (done for `chat` on 2026-10-29)
+## One-time setup
+
+In the commands below `<host>` is the ssh host of the Mac (an alias from `~/.ssh/config` or `user@address`).
 
 ```sh
 # Node 24 + pnpm under ~/.local (no Homebrew needed)
@@ -18,7 +20,7 @@ export PATH=~/.local/node/bin:$PATH
 corepack enable --install-directory ~/.local/node/bin
 
 # code: a bare repo the dev machine pushes to, and a checkout of it
-git init --bare ~/bedrockbot.git          # on the dev machine: git push chat:bedrockbot.git main
+git init --bare ~/bedrockbot.git          # on the dev machine: git push <host>:bedrockbot.git main
 git clone ~/bedrockbot.git ~/BedrockBot
 cd ~/BedrockBot && pnpm install --frozen-lockfile && pnpm --filter bot test
 grep -c _triedDefaultHost bot/node_modules/bedrock-protocol/src/nethernet/signalling.js   # 2 = patched
@@ -48,13 +50,18 @@ Config lives outside the repo in `~/.bedrockbot/config.json` (names only, never 
 }
 ```
 
+`home` is only the starting value. `!home set x y z` in chat is saved next to the config
+(`~/.bedrockbot/waypoints/realm-<name>.json`) and wins over it at every later start, so it is typed
+once; `!home clear` forgets it and the config's `home` applies again. A `--home` in the launchd
+arguments would win over both (the plist has none).
+
 ## Sign in once (you, interactively)
 
 Only one client per Microsoft account: stop any other bot on that account first, or the new login
 kicks the old one.
 
 ```sh
-ssh chat
+ssh <host>
 export PATH=~/.local/node/bin:$PATH
 cd ~/BedrockBot/bot && node src/index.ts --task afk --target realm
 ```
@@ -91,7 +98,7 @@ bumped build is pushed; the update notifier whispers the owners meanwhile.
 From the dev machine, after every merge that passed the gate:
 
 ```sh
-pnpm deploy:mac        # = git push chat:bedrockbot.git main && ssh chat "cd ~/BedrockBot && git pull -q && bash deploy/mac/update.sh"
+BEDROCKBOT_DEPLOY_HOST=<host> pnpm deploy:mac   # = git push <host>:bedrockbot.git main, then on the Mac: git pull && bash deploy/mac/update.sh
 ```
 
 `update.sh` pulls, installs, rebuilds raknet-native if needed, runs the unit tests and restarts the
@@ -103,10 +110,10 @@ worktree habit applies here too: push only what is green.
 
 ## Notes
 
-- The Mac must not sleep (`pmset -g`: `sleep 0`); `chat` has sleep prevented already.
+- The Mac must not sleep (`pmset -g`: `sleep 0`); prevent it in System Settings (or `sudo pmset -a sleep 0`) before leaving the bot there.
 - Logs: `realm-console.log` grows slowly (one line per nudge, about 400 B/min); rotate it with
   `newsyslog` or truncate when it bothers you. `--no-record` keeps the 1 GB/day packet capture off.
-- `--health-port` binds 127.0.0.1 only; use `ssh -L 9465:127.0.0.1:9465 chat` to read it remotely.
+- `--health-port` binds 127.0.0.1 only; use `ssh -L 9465:127.0.0.1:9465 <host>` to read it remotely.
 - Control panel on the LAN (docs/panel.md): with no change the panel is at `http://127.0.0.1:9465/` on
   the Mac itself (same port, nothing else changes). To use it from a phone or another machine on the
   home network, add to `~/.bedrockbot/config.json`:

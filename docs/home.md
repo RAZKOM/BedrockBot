@@ -1,9 +1,8 @@
 # Home logistics: chest memory, `!unload`, spare shulker boxes (wave 9, Track AG)
 
-The owner's idea: "it would be cool for it to auto know the chests at home within a radius so maybe
-it goes in and finds items in chests, and then makes a decision of where to unload its stuff. If it
-finds a chest of like empty shulkers it can also use those in case a chest fills up of regular item
-stacks". The bot now finds the containers around home, remembers what they hold, decides where each
+The owner's idea: the bot should know the chests within a radius of home on its own, look at what they
+hold, and decide where to unload; a chest of empty shulker boxes could be used too when a chest fills up
+with regular item stacks. The bot now finds the containers around home, remembers what they hold, decides where each
 stack it carries goes, and fills spare shulker boxes when the chests are full.
 Decision record: [decisions/0028-home-logistics.md](decisions/0028-home-logistics.md).
 Track AN (the follow-up, [decisions/0035-home-walking-distance.md](decisions/0035-home-walking-distance.md)):
@@ -90,8 +89,8 @@ unloads their items like the rest.
 ## Walking distance (Track AN)
 
 The owner's Realm: 181 containers within `homeChestRadius` 16 of home, and every one above floor
-level ended `goto: unreachable` after 3 plans; the owner asked "instead of radius can it be like
-walking distance? like pathfind distance to said chests? or a toggleable thing?". Now:
+level ended `goto: unreachable` after 3 plans; the owner asked for walking (pathfinding) distance to the
+chests instead of a radius, or a toggle between the two. Now:
 
 - **Candidates**: the radius stays the cheap filter (`homeChestRadius`, 16, up to 48).
 - **Probe plans first** (no walking): every candidate gets a bounded plan (reach.ts `probePath`:
@@ -145,8 +144,8 @@ names; `wood` / `logs` / `planks` / `timber`; `food` / `meat` / `crops` / `farm`
 / `cobble` / `building` / `dirt`; `junk` / `trash` / `misc` / `drops`; `tools` / `gear` / `weapons` /
 `armour`.
 
-Crops and food (Track BJ, decision [0052](decisions/0052-shulker-aware-jobs.md)): the owner: "crops that it harvested
-being not unloadable cause it considers it food". The crops that are also food (`CROP_FOODS`: carrot, potato,
+Crops and food (Track BJ, decision [0052](decisions/0052-shulker-aware-jobs.md)): the owner reported that
+harvested crops were never unloaded because the bot counted them as food. The crops that are also food (`CROP_FOODS`: carrot, potato,
 beetroot, melon slice, sweet berries, glow berries) are no longer kept whole: a food reserve of `foodReserve` items
 (default 64) is filled by the other food first (bread, cooked meat ...), then by the crops with the best food value
 (nutrition + saturation); the crops beyond it are unloaded like loot. Of every item `!farm` replants (`SEEDS`: wheat
@@ -191,9 +190,9 @@ with a free slot. Up to 3 boxes per run.
 
 ## Boxing at the chests (wave 11, Track AV)
 
-The owner: "If a chest is full of empty shulkers, it can also find that chest, and load in items from a
-full chest into the shulker, break the shulker, and put it back in the chest ... all of the 8640 sand won't
-fit in one chest that is already partially full of sand, so if it sees empty shulkers it can just use one."
+The owner asked that the bot find a chest full of empty shulker boxes, load items from a full chest into a box,
+break the box and put it back in the chest: 8640 sand will not fit in one chest already partly full of sand, so
+an empty shulker box should simply be used.
 Decision record: [decisions/0044-boxing.md](decisions/0044-boxing.md).
 
 ### Named boxes (`bot_loot`)
@@ -252,10 +251,9 @@ kept items (food, tools, armour, totems, rockets), unstackable items, the reserv
 
 ## Full boxes from what the bot carries (wave 12)
 
-The owner: "I have a chest full of empty shulker boxes ... if it has 5 bot_loot boxes half full of deepslate, it should
-know that it can in fact fill up one or more full shulkers with said deepslate. Instead of dumping all of its available
-deepslate into my deepslate chest while unloading, it should go get one of the unnamed shulkers, fill it with deepslate,
-and then load that filled shulker into the chest."
+The owner keeps a chest full of empty shulker boxes and asked that a bot carrying 5 `bot_loot` boxes half full of
+deepslate notice it can fill one or more whole boxes with that deepslate: instead of dumping all of it loose into the
+deepslate chest while unloading, it should fetch an unnamed box, fill it with deepslate and store the full box.
 
 - **Count** (planner, `planFillSteps`): per stackable kind (not kept items, not boxes), the loose stacks (`movable`,
   the reserve held back) plus what the carried `bot_loot` boxes hold (NBT `Items`, `UnloadSlot.boxItems`; with `all`
@@ -298,8 +296,7 @@ and then load that filled shulker into the chest."
 
 ## Full boxes out of the chests (tidy, wave 12)
 
-The owner: "if it sees a chest that has enough of the same item to fill a shulker, do it (if one of the home chests of
-course)".
+The owner asked that a home chest holding enough of one item to fill a shulker box get that box filled.
 
 - **What**: a home chest (the chest memory's read, reachable containers within `homeChestRadius`; never a shulker box
   block, never the chest of spares, i.e. one holding unnamed empty boxes or labelled `shulkers` / `boxes` / `spares`)
@@ -343,9 +340,9 @@ Crafting an item into its block form (iron ingots into iron blocks) to make room
 
 ### Packing priority in the stash step
 
-The owner: "If he has 5 shulkers and I ask for 27*64*5 sand, but he starts filling some of the shulkers
-with just stuff, will it put them back down and prioritize the sand when it realizes it doesn't have enough
-space?"
+The owner asked what happens when the bot has 5 shulker boxes, is asked for 27 x 64 x 5 sand, and has already
+filled some boxes with other items: it should take those back out and give the sand priority once it sees the
+space is short.
 
 | Order | What | Rule |
 |---|---|---|
@@ -417,9 +414,9 @@ timeout); the visit clicks once more after a timeout.
 
 ## Bring (wave 10, Track AS)
 
-The owner: "maybe like a retrieve command for bringing items to the player instead of unloading at
-home. or some way to differentiate between getting already gotten items or getting new resources and
-either taking them to the player or home." Decision record:
+The owner asked for a retrieve command that brings items to the player instead of unloading at home, or some
+way to tell fetching already stored items apart from gathering new resources, with either one ending at the
+player or at home. Decision record:
 [decisions/0040-bring.md](decisions/0040-bring.md).
 
 | | `!get <item> [n]` | `!bring <item> [n] [to <player>\|home]` |
@@ -440,8 +437,8 @@ either taking them to the player or home." Decision record:
 3. **Nearest chest first, by the memory's counts** (read, reachable containers within
    `homeChestRadius`; never the other half of a double chest), straight-line distance from the bot.
 4. **Shulker boxes: whole for large amounts, taken out of for small ones** (Track BJ, decision
-   [0052](decisions/0052-shulker-aware-jobs.md); the owner: "!get 1000 dirt ... only ask for 10, itll bring a whole
-   shulker"). The memory knows every full box's contents (`boxList` on the chest record, one entry per box, from
+   [0052](decisions/0052-shulker-aware-jobs.md); the owner noted that asking for only 10 dirt
+   still brought a whole shulker box, which only a large request should). The memory knows every full box's contents (`boxList` on the chest record, one entry per box, from
    the boxes' NBT `Items` at every read; `inBoxes` is their sum). The threshold is **half a box**
    (`halfBox`: 27 x the stack size / 2: 864 dirt, 216 ender pearls, 13 diamond swords):
    - still needed at least half a box: whole boxes holding at least half a box of the item are taken first,
@@ -512,8 +509,8 @@ NL (`!do`): the `bring` step (`{"command":"bring","item":"torch","count":64,"to"
 
 ## Supply: one shulker layer for every job (wave 12, Track BJ)
 
-The owner: "all of the smart shulker features ... arent universally applied to all features ... With building
-too ... scaffolding". Decision [0052](decisions/0052-shulker-aware-jobs.md). One layer answers "how many of this
+The owner noticed that the smart shulker box features were not applied to every feature, building and
+scaffolding included. Decision [0052](decisions/0052-shulker-aware-jobs.md). One layer answers "how many of this
 do I have" and "get me n of it loose" for every job, so no feature hand-rolls box handling:
 
 | Part | What |

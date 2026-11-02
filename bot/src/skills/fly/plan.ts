@@ -81,7 +81,7 @@ export const DEFAULT_GO_AROUNDS = 4;
 export const APPROACH_DISTANCE = 56;
 /** The approach entry: this many blocks above the platform top at the approach distance. */
 export const APPROACH_HEIGHT = 10;
-/** Touchdown speeds the landing aims under (blocks per tick): the owner's "little to no damage". */
+/** Touchdown speeds the landing aims under (blocks per tick): the owner asked for landings with little to no damage. */
 export const TOUCHDOWN_VY = 0.3;
 export const TOUCHDOWN_H = 0.3;
 /** Level flight sinks about this many blocks per block flown (measured 0.15 per tick at 1.3 blocks per tick). */

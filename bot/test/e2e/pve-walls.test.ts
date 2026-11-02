@@ -1,5 +1,5 @@
 // Track AO (wave 9, docs/pve.md "Path-reachable targets", decision 0036) on bds-pve (difficulty normal,
-// midnight): the owner's "it gets stuck trying to fight mobs behind walls when on its way to places".
+// midnight): the owner reported the bot getting stuck fighting mobs behind walls on its way to places.
 // Guard on (radius 16), iron armour and an iron sword, food 20; each run on a fresh spot of a random
 // 256-block cell from x, z = 8192, its mobs summoned with a per-run tag (pve-truth.ts):
 //   (a) wall: a zombie 4 blocks from the bot in a closed 3-high glass pen (the wall 2 blocks from the

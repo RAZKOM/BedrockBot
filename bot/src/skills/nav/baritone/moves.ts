@@ -54,7 +54,7 @@ import { YES, avoidWalkingInto, canWalkThroughClass, fullFloor, getMiningDuratio
 // ---- sneak-through (ours, not Baritone's: a Java body does not fit under 1.5 blocks either) ----------------
 
 /**
- * Track BC (owner, 2026-10-30: "sneaking makes you fit through smaller gaps"): the body may occupy cell
+ * Track BC (the owner, 2026-10-30, pointed out that sneaking fits through smaller gaps): the body may occupy cell
  * (x, y, z) sneaking: its feet cell is passable over a full floor, and its head cell is blocked only by
  * boxes whose underside is at least the sneaking box's height (input/physics.ts `sneakHeight` 1.49,
  * bedboo-measured on BDS) above the feet: a top slab leaves 1.5, a top trapdoor 1.81. A standing body

@@ -5,8 +5,8 @@ udp/19208). Details: [../crafting.md](../crafting.md).
 
 ## Context
 
-The owner: "if a chest has iron blocks and iron ore, and it's full and trying to drop off more iron
-ore, then it should craft them into blocks to make it fit." Decision 0039 had left crafting to a
+The owner asked that a full chest holding iron blocks and iron ore, with the bot trying to drop off
+more iron ore, get its ore crafted into blocks so the load fits. Decision 0039 had left crafting to a
 skills track with a guess at the packets (`craft_recipe`, `results_deprecated`, a `consume` per
 ingredient, a `place` from `created_output`), unverified. The bot plays on a Realm with other
 players: it may only do what a vanilla client can do through the crafting screens.

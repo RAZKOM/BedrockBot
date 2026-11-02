@@ -185,7 +185,7 @@ export function kitLine(kit: FlightKit): string {
 }
 
 /**
- * The owner's supply lines, "like the mending stuff": each one once, and not again until what it
+ * The owner's supply lines: each one once, and not again until what it
  * reports changed (the rocket count, the uses left). Checked after a landing and before a refused flight.
  */
 export class SupplyWatch {

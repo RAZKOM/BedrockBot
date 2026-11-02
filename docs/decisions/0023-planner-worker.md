@@ -6,7 +6,7 @@ Servers: BDS 1.26.60.6 (`bds-move`, `bds-cache`). Details and numbers: [../pathf
 
 ## Context
 
-The owner asked whether the bot uses the Mac's compute or is "rated to the Realm tick speed". It was
+The owner asked whether the bot uses the Mac's compute or is limited to the Realm's tick speed. It was
 the latter: A* ran on the main thread, in slices of 8 ms per 50 ms tick so the physics loop kept its
 pace, with a budget of 40 ms for a main plan (the body stands and waits for it) and 100 ms / 20 000
 nodes for a plan-ahead segment. Long or awkward routes (a forest 50 to 100 blocks away, the way home

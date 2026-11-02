@@ -14,7 +14,7 @@ box that overhangs it, a room with a ladder and an open trapdoor under the platf
   water. Every goto after that failed with `no standable node` (the planner swims on the surface only)
   and the bot sat on the bottom for minutes (alive by Protection IV, Respiration and eating); pve
   logged the drowning damage as `probably <some mob>`.
-- 00:04Z `!goto gunpowder`: the landing cell came from the world cache (40 176 60, the box's roof);
+- 00:04Z `!goto gunpowder`: the landing cell came from the world cache (the spawn box's roof);
   once the chunks loaded `landingNear` returned the same roof cell (its probe plan failed, but the
   roof still won the walk estimate) and the flight silently kept it. The goto from the roof:
   `no path (exhaustive search, 1832 nodes)`.

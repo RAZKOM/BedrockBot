@@ -13,7 +13,7 @@
     "bds:idle": "node scripts/bds.mjs idle",
     "bds:cmd": "node scripts/bds.mjs cmd",
     "bds:logs": "node scripts/bds.mjs logs",
-    "deploy:mac": "git push chat:bedrockbot.git main && ssh chat \"cd ~/BedrockBot && git pull -q && bash deploy/mac/update.sh\"",
+    "deploy:mac": "node scripts/deploy-mac.mjs",
     "pack:deploy": "pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/dev --restart bds-dev && node scripts/bds.mjs up",
     "test": "pnpm -r --if-present test",
     "lint": "pnpm -r --if-present lint",

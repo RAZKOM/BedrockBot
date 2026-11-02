@@ -51,14 +51,14 @@ reached by digging), and a bot in the room could not get out. The owner's farm h
 
 ## Realm findings (BG2)
 
-Date: 2026-10-31. On the owner's Realm (YourRealm, farm hatch at 40 135 60) the hatch was opened from the
+Date: 2026-10-31. On a Realm (a farm hatch in a platform floor) the hatch was opened from the
 platform, but the close from the ladder was `rejected`, the goto counted a failure and retreated, and the hatch
 stayed open; going up, two pillars failed with `no_headroom` and the click from below was `rejected`.
 
-- **Layout** (the Realm world cache, 2-bit classes x 35..47, z 55..65, y 128..137): a platform with feet
-  135, the trapdoor in its walking layer, a wall block west of it, the ladder column under it from 131 up into
-  the floor layer 134, a room x 41..42, z 57..60, feet 131, 3 high (ceiling 134), closed except for the
-  shaft. So it is case B (down and up), not the down-only roof-layer case.
+- **Layout** (read from the Realm's world cache): a platform with the trapdoor in its walking layer, a wall
+  block west of it, the ladder column under it from 4 blocks below up into the floor layer, and a 3-high room
+  beside the shaft (its ceiling one block under the floor layer), closed except for the shaft. So it is case B
+  (down and up), not the down-only roof-layer case.
 - **Cause 1: sneaking with an item in the hand.** BDS (and the Realm) treat a sneaking click with a non-empty
   hand as an item use: the trapdoor does not toggle and the server sends the old state back (`update_block`
   restores: our `rejected`). Measured on bds-move from the top rung: empty hand opens sneaking or not; a
@@ -90,7 +90,7 @@ stayed open; going up, two pillars failed with `no_headroom` and the click from 
 - **Measured: no climbing out of a roof-layer hatch.** Holding jump (and forward towards each exit) from the top
   rung under an open trapdoor in the floor layer: the feet peak at -53.45 for an exit floor at -53, for all 4
   facings and both halves. Case A stays down only.
-- e2e `nav-hatch-realm` (the farm replica: 3 items x 2 panel sides x down and up twice): 2 runs, 48 of 48 gotos
+- e2e `nav-hatch` (the farm replica: 3 items x 2 panel sides x down and up twice): 2 runs, 48 of 48 gotos
   ok, 0 corrections, use 1 / close 1 / place 0 / dig 0 each; 80 to 93 ticks, except the first climb with the
   panel opposite the ladder in run 2 (136 to 138 ticks, 1 stuck recovered). Regressions: `nav-trapdoor` and
   `nav-ladder` all ok with 0 corrections.

@@ -1,6 +1,6 @@
 // Track AO (wave 9, docs/pve.md "Path-reachable targets", decision 0036): can the bot walk to a mob,
-// and how far? The owner on the Realm: "It also gets stuck trying to fight mobs behind walls when on
-// its way to places." The terrain rule of targeting.ts (`reachability`: the mob stands on a standable
+// and how far? The owner reported from the Realm that the bot got stuck fighting mobs behind walls on
+// its way to places. The terrain rule of targeting.ts (`reachability`: the mob stands on a standable
 // cell) says nothing about a path: a zombie behind a glass wall, a fence or a window passed it, the
 // fight pre-empted the walk, and the approach failed `unreachable` again and again.
 //

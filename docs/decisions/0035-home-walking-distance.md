@@ -7,8 +7,8 @@ Server: BDS 1.26.60.6 (`bds-home`). Details and numbers: [../home.md](../home.md
 
 On the owner's Realm the first session scan found 181 containers within `homeChestRadius` 16 of home
 and walked to each one; every chest above floor level ended `goto: unreachable` after several plans,
-and the next session tried them all again. The owner asked for "walking distance ... or a toggleable
-thing".
+and the next session tried them all again. The owner asked for walking distance as the measure, or a toggleable
+setting.
 
 ## Decisions
 

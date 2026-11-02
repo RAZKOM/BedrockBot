@@ -30,13 +30,13 @@
 // above (the chest holding the item, else labelled, else the emptiest one without spares; one free slot for the box).
 // They come before the box steps; the remainder unloads loose.
 //
-// Tidy steps (`tidy`, docs/home.md "Full boxes out of the chests"; the owner: "if it sees a chest that has enough of
-// the same item to fill a shulker, do it"): a home chest holding 27 full stacks or more of one stackable item
+// Tidy steps (`tidy`, docs/home.md "Full boxes out of the chests"; the owner asked that a chest holding enough of one
+// item to fill a shulker box get that box filled): a home chest holding 27 full stacks or more of one stackable item
 // loose gets `box` steps with `tidy` set: 27 of its stacks into a spare, the full box back into that chest. Never a
 // shulker box block, never the chest of spares (or one labelled for boxes); planned only on request (after the
 // deposits of `!unload`, and by the idle chore), MAX_TIDY_STEPS at most, none once no spare is left.
 //
-// Track BJ (decision 0052; the owner: "crops that it harvested being not unloadable cause it considers it food"):
+// Track BJ (decision 0052; the owner reported harvested crops were never unloaded since the bot counted them as food):
 // crops that are food too (CROP_FOODS: carrots, potatoes, beetroots, melon slices, berries) are no longer kept whole.
 // The food reserve (`foodReserve`, default 64 items) is filled by the best food carried: other food (cooked, bread,
 // ...) is still never unloaded and counts first; the crops fill what it leaves, the best (nutrition + saturation)

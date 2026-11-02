@@ -4,12 +4,12 @@ Date: 2026-10-30. Status: accepted. Details: [../home.md](../home.md) "Boxing at
 
 ## Context
 
-The owner named the shulker boxes he gives the bot `bot_loot`: "Those are ones it should keep." For
-unloading: "If a chest is full of empty shulkers, it can also find that chest, and load in items from a
-full chest into the shulker, break the shulker, and put it back in the chest ... all of the 8640 sand won't
-fit in one chest that is already partially full of sand, so if it sees empty shulkers it can just use one."
-Later: "If he has 5 shulkers and I ask for 27*64*5 sand, but he starts filling some of the shulkers with
-just stuff, will it put them back down and prioritize the sand?"
+The owner named the shulker boxes they give the bot `bot_loot` and asked that the bot keep those. For
+unloading: when a chest is full of empty shulker boxes, the bot can find that chest, load items from a
+full chest into a box, break the box and put it back in the chest (a large amount of sand will not fit in
+one chest that is already partly full of sand, so an empty box can take it). Later the owner asked what
+happens when the bot carries five boxes and is asked for five boxes' worth of sand after it has started
+filling some of them with other items: would it put those back down and prioritise the sand?
 
 ## Decision
 

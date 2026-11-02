@@ -1,7 +1,7 @@
 // Track AV (wave 11, docs/home.md "Boxing at the chests", decisions/0044-boxing.md): the owner's named
 // shulker boxes and the spare empty boxes. Pure helpers over the inventory model and the chest memory.
 //
-// The owner: "I named the shulkers for it bot_loot ... Those are ones it should keep." A shulker box whose
+// The owner names the bot's own shulker boxes `bot_loot`, and the bot keeps those. A shulker box whose
 // custom name (world/inventory.ts itemDisplayName: the item NBT's `display.Name`) is the `keepBoxName`
 // setting (default `bot_loot`; case, colour codes and surrounding spaces ignored) is the bot's own:
 //   - never unloaded as an item, never put into a chest, never used for boxing, never a spare

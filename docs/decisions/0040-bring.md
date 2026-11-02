@@ -6,9 +6,9 @@ Server: BDS 1.26.60.6 (`bds-home`). Details and numbers: [../home.md](../home.md
 
 ## Context
 
-The owner: "maybe like a retrieve command for bringing items to the player instead of unloading at
-home. or some way to differentiate between getting already gotten items or getting new resources and
-either taking them to the player or home." Since wave 9 the bot knows what the chests at home hold
+The owner asked for a retrieve command that brings items to the player instead of unloading at home,
+or some way to tell fetching already stored items apart from gathering new resources, with either one
+ending at the player or at home. Since wave 9 the bot knows what the chests at home hold
 (0028) but had no way to take anything back out; `!get` makes new things and must never take from
 chests (0034's rule).
 

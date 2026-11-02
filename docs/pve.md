@@ -152,7 +152,7 @@ beef because the sword was in the main inventory. Decision record:
 
 #### Re-targeting within reach (wave 9, Track AH, decision 0029)
 
-The owner: "why not just always target whatever it can within its reach? instead of risking a hit".
+The owner asked why the bot does not always target whatever is within its reach instead of risking being hit.
 Track W saw a guard fight stay locked on one zombie while a second one landed 10 hits. Inside a fight
 (`CombatController`, `targeting.inReach` / `pickInReach`):
 
@@ -229,8 +229,8 @@ unarmoured case and larger crowds; its numbers (3, 4, 12) are constants in targe
 
 #### Path-reachable targets (wave 9, Track AO, decision 0036)
 
-The owner on the Realm: "It also gets stuck trying to fight mobs behind walls when on its way to
-places." The terrain rule above says nothing about a path: on a `!come`, `!goto`, `!get` or `!unload`
+The owner reported from the Realm that the bot got stuck fighting mobs behind walls on its way
+to places. The terrain rule above says nothing about a path: on a `!come`, `!goto`, `!get` or `!unload`
 walk guard picked a hostile standing on a standable cell behind a wall, a fence or a window, the fight
 pre-empted the walk, the approach failed `unreachable` up to 3 times (each a full plan), the mob was
 ignored for 10 s and the next guard tick picked it again or its neighbour. Now

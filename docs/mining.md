@@ -187,10 +187,10 @@ skill synchronously (the Digger sends `abort_break` on the next tick).
 ## Mining v3 (wave 10, Track AQ)
 
 Decision record: [decisions/0038-mining-v3-tunnels-veins-batches.md](decisions/0038-mining-v3-tunnels-veins-batches.md).
-The owner on the Realm, 2026-10-30: "why is it struggling so bad to mine through stuff to reach ores?
-Shouldn't it just mine directly to the ores, break the group, pick them up, then proceed to the next
-nearest group?", "it can 100% dig straight down", "if I say get wood, and drop wood on the floor it
-should try to pick it up", and batching several ores into one trip. Files: `skills/mine/tunnel.ts`
+The owner on the Realm, 2026-10-30, asked why the bot struggled so much to mine through to ores instead of
+mining straight to them, breaking the group, picking it up and moving on to the next nearest group; noted
+that it can certainly dig straight down; asked that wood dropped on the floor during a wood job be picked
+up; and asked for several ores batched into one trip. Files: `skills/mine/tunnel.ts`
 (plan, rules, step primitive, run), `skills/mine/vein.ts` (flood fill), `skills/collect/sweep.ts` (the
 floor sweep), the loop in `skills/mine/miner.ts`, the wiring in `skills/mine/wire.ts`.
 

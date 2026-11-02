@@ -9,7 +9,7 @@
 //                with the most room; selected in the hotbar so that box is the one placed): place it on a free solid-topped cell next to the bot (open space above
 //                for the lid), open it, deposit the same way, close it, break it (the Digger's best
 //                tool; a shulker box drops itself with its contents with any tool) and pick it up
-//                Track AV, packing (the owner: "will it put them back down and prioritize the sand?"):
+//                Track AV, packing (the owner asked that other items come back out so the sand goes first):
 //                junk that is no building block (DROP_FIRST: rotten flesh, string, spider eyes, ...) is
 //                dropped before a box is filled and never boxed; the box takes the job's produce first,
 //                then other items of value, filler blocks (cobblestone, sand, ...) last and only when no

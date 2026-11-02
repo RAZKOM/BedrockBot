@@ -1,6 +1,6 @@
 # The Nether, the End and dimension changes (wave 10, Track AT)
 
-The first half of the owner's "Elytra, Nether and End" wish: dimension changes done right, portal
+The first half of the owner's wish for elytra flight, the Nether and the End: dimension changes done right, portal
 travel, and the Nether survivable. The End is read-only (never off the void edge). Elytra flight is a
 later physics track: its plan is the last section. Decision: [0041](decisions/0041-dimensions-portals-nether-safety.md).
 

@@ -6,10 +6,9 @@ and [0037](0037-panel-inventory-and-statuses.md)). Server: BDS 1.26.60.6 (`bds-c
 
 ## Context
 
-The owner: "The UI we made should be interactive, i.e. be able to drop items in the inv by clicking
-them, or even craft stuff would be cool but maybe that can come later. ... in the UI we can maybe
-organize items by like toggleable settings, default values, etc... Like context menu on stuff like the
-inventory or on the map to navigate could be awesome." The page stays server-rendered HTML with inline
+The owner asked for an interactive UI: drop inventory items by clicking them (crafting could come
+later), settings organized with toggles and default values, and context menus on the inventory and on
+the map for navigation. The page stays server-rendered HTML with inline
 JS and CSS, no internet assets, token auth, the rate limit and every existing endpoint unchanged.
 
 ## Decisions

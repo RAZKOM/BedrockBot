@@ -6,8 +6,8 @@ Server: BDS 1.26.60.6 (`bds-pve`, `bds-gaunt`). Details and numbers: [../pve.md]
 
 ## Context
 
-The owner on the Realm: "It also gets stuck trying to fight mobs behind walls when on its way to
-places." Guard's reachability rule (0017) was a terrain check (the mob stands on a standable cell), not
+The owner reported from the Realm that the bot got stuck fighting mobs behind walls on its way to
+places. Guard's reachability rule (0017) was a terrain check (the mob stands on a standable cell), not
 a path. On a walk a mob behind a wall, a fence or a window passed it, the fight pre-empted the walk,
 the approach failed `unreachable` up to 3 times (each goto with the navigator's own 3 failed plans),
 the mob was ignored for 10 s and the next guard tick picked it again or its neighbour.

@@ -5,8 +5,8 @@ Server: BDS 1.26.60.6 (`bds-core`). Details: [../panel.md](../panel.md) "The pag
 
 ## Context
 
-The owner, reaching the panel from a phone over a tailnet: "improve the web view. One such thing is
-the ability to see its inventory graphically and other such statuses." The page of 0026 showed the
+The owner, reaching the panel from a phone over a tailnet, asked for a better web view, starting with
+the bot's inventory and other statuses shown graphically. The page of 0026 showed the
 `!status` text, five vitals and the stack as plain lines. The machine may be offline from the
 internet, so no CDN, fonts or image files; the token auth, the rate limit and the endpoints stay as
 they are; the bot's main thread must not be slowed by the poll.

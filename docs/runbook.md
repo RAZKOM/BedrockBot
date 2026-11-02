@@ -605,8 +605,8 @@ Stop with Ctrl+C or `!quit` from an owner (clean disconnect, exit 0).
 ### Measured on the Realm (2026-10-29, game 1.26.60)
 
 Bot account BotAccount, Realm region SouthCentralUs, difficulty normal, owner commands from the
-Realm chat. The Realm bot runs on the Mac from its own clone (`deploy/mac/`, updated by `pnpm deploy:mac`, which
-lints and tests before it restarts), so work in this tree cannot break a running stay; the earlier
+Realm chat. The Realm bot runs on the Mac from its own clone (`deploy/mac/`, updated by `pnpm deploy:mac` with
+`BEDROCKBOT_DEPLOY_HOST` set to the Mac's ssh host, which lints and tests before it restarts), so work in this tree cannot break a running stay; the earlier
 `../BedrockBot-realm` worktree on the Windows machine is no longer used.
 
 - **Join**: `realms.pickRealm` found the Realm by name; the join record names the regional

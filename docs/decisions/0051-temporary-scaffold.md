@@ -4,10 +4,10 @@ Date: 2026-10-30. Status: accepted. Details: [../wood.md](../wood.md) "Pillar-up
 
 ## Context
 
-The owner: "When gathering items, why is it not building like temporary pillars it then destroys? For
-example with wood it kind of gets stuck on tall trees. It does end up leaving floating tree parts, but I
-feel like this also applies for when it gets stuck on other ores or item pickups. Either breaking blocks
-to reach the target or placing permanent or temporary ones." The feller only re-pathed to ground cells
+The owner asked why the bot does not build temporary pillars while gathering and break them afterwards:
+with wood it got stuck on tall trees and left floating tree parts, and the same applies when it gets stuck
+on ores or item pickups. It should either break blocks to reach the target or place permanent or temporary
+ones. The feller only re-pathed to ground cells
 (trees above 7 logs kept their tops), collect and the miner's pickup walks were walk-only, although the
 navigator has had a pillar move (`allowPlace`) and moves that dig (`allowBreak`) since decision 0043.
 

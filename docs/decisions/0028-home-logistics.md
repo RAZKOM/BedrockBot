@@ -5,9 +5,9 @@ Server: BDS 1.26.60.6 (`bds-home`, flat, peaceful). Details and numbers: [../hom
 
 ## Context
 
-The owner asked for the bot to "auto know the chests at home within a radius", look inside them,
-"make a decision of where to unload its stuff", and use "a chest of like empty shulkers ... in case a
-chest fills up of regular item stacks". Until now a job's produce went to one configured chest
+The owner asked for the bot to learn the chests at home within a radius, look inside them, decide
+where to unload its stuff, and use a chest of empty shulker boxes when a chest fills up of regular item
+stacks. Until now a job's produce went to one configured chest
 (`--chest`, `stashChest`) or stayed in the inventory; the bot had no idea what any chest held. Track AD
 (0025) left two open points this track depends on: the item_stack_request slot type per window
 (shulker boxes `shulker`, barrels probably `barrel`), and the shulker box names being added to the
