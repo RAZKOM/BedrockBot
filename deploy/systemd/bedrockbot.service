@@ -1,0 +1,30 @@
+# systemd user unit that keeps the Realm AFK bot running on a Linux server (deploy/README.md).
+#
+#   mkdir -p ~/.config/systemd/user ~/.bedrockbot/logs
+#   cp ~/BedrockBot/deploy/systemd/bedrockbot.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now bedrockbot.service
+#   loginctl enable-linger "$USER"        # keep user services running after you log out (may need sudo)
+#
+# It assumes Node under ~/.local/node and the checkout in ~/BedrockBot, as the README sets them up; edit the
+# two paths below otherwise. Everything about the Realm (name, owner gamertag, home, health port) comes from
+# ~/.bedrockbot/config.json; only "--target realm" lives here, because the config file may not select a Realm.
+# The bot exits 1 when reconnecting gives up, 2 on a config error, 3 on a game-version mismatch; the unit
+# starts it again a minute later, so a game update keeps retrying until the bot is bumped.
+[Unit]
+Description=BedrockBot Realm AFK bot
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=%h/BedrockBot/bot
+Environment=NODE_ENV=production
+Environment=PATH=%h/.local/node/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/node/bin/node src/index.ts --task afk --target realm --no-record
+Restart=always
+RestartSec=60
+StandardOutput=append:%h/.bedrockbot/logs/realm-console.log
+StandardError=append:%h/.bedrockbot/logs/realm-console.log
+
+[Install]
+WantedBy=default.target

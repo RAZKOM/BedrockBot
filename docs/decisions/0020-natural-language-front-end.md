@@ -55,6 +55,6 @@ already validates its arguments, refuses players and runs as a process the owner
 - Replies are observed by wrapping the chat instance's `say` (commands-nl.ts) rather than changing
   chat.ts; another wrapper later must call through.
 - The Ollama request / response shapes are from the API documentation and unverified live; the first
-  manual run on the Mac (`node scripts/nl-try.ts`) checks them, then `!do` on the `chat` server.
+  manual run on the Mac (`node scripts/nl-try.ts`) checks them, then `!do` on the server.
 - Quality depends on the model; qwen2.5:7b is the default because it follows JSON schemas well at a
   size a Mac runs comfortably. The 20 phrasings in the unit tests are the yardstick for a manual check.

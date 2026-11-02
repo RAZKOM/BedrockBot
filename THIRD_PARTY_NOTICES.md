@@ -1,5 +1,9 @@
 # Third-party notices
 
+The repository's own code is MIT (LICENSE). The two folders ported from Baritone (below) are LGPL-3.0 and keep
+their own notices. `patches/` and `tools/bump-version/patches/` hold patches against `bedrock-protocol` and
+`minecraft-data` (both MIT); they are applied to those packages at install time and keep their licences.
+
 Code translated from other projects lives in its own folder with the upstream licence next to it. Baritone
 (https://github.com/cabaletta/baritone, LGPL-3.0; cloned read-only at `.work/baritone`, branch `1.21.11`,
 commit `23723891da460ef15797b02fe5b385b0c5b163cc`) is ported file by file under `bot/src/skills/nav/baritone/`
@@ -19,6 +23,8 @@ and never paste translated code. Decision record: docs/decisions/0043 (supersede
 ## Packages the panel's item icons use (decision 0046)
 
 Nothing below is copied into this repository; `pnpm install` fetches both (`bot/package.json`, exact pins).
+`minecraft-assets` is an optional dependency: `pnpm install --no-optional` leaves out the game art, and the panel then draws
+glyphs instead.
 
 | Package | Licence | What we use |
 |---|---|---|
@@ -28,3 +34,5 @@ Nothing below is copied into this repository; `pnpm install` fetches both (`bot/
 The textures and models are Mojang's art (Minecraft is a trademark of Mojang AB / Microsoft); they are not
 part of this project, are never committed or served from a public place, and are shown only on the
 owner's own control panel. Without the package the panel falls back to its drawn glyphs.
+
+Minecraft is a trademark of Mojang AB. This project is independent and is not approved by or associated with Mojang or Microsoft.

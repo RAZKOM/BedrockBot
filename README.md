@@ -41,7 +41,7 @@ The Realm: docs/runbook.md "Realm join (you do this)".
 | Area | State | Where |
 |---|---|---|
 | Connection | RakNet and NetherNet, version gate, reconnect with backoff, kick log, packet recorder; Realm join with the device-code sign-in you do yourself | `bot/src/connection/`, docs/versions.md, docs/runbook.md "Realm join" |
-| AFK on the Realm | 24 h stays verified, auto-reconnect, keepalive nudges, auto-respawn, home point, night shelter, health endpoint, update notifier; runs on a Mac under launchd (`deploy/mac/`) | `bot/src/tasks/afk.ts`, docs/runbook.md "Operations" |
+| AFK on the Realm | 24 h stays verified, auto-reconnect, keepalive nudges, auto-respawn, home point, night shelter, health endpoint, update notifier; runs as a service on a macOS or Linux server (`deploy/`) | `bot/src/tasks/afk.ts`, docs/runbook.md "Operations" |
 | Movement | own Bedrock physics, A* with tick costs, surface preference, doors, dig-through and pillar-up moves, long falls within a health budget (measured Bedrock fall damage) and the water bucket clutch (also when it falls by accident), goals (nearest of, adjacent to, Y level, run away, surface), waypoints, blacklist of failed goals | `bot/src/skills/nav/`, `bot/src/skills/fall/`, docs/pathfinding.md, docs/movement.md, docs/waypoints.md |
 | PvE | guard radius, fights with sword and knockback, creeper evasion, flee when hurt, follow / come / kill; all behaviours run on a process manager with priorities (flee > night > guard > your command > home) | `bot/src/tasks/pve.ts`, docs/pve.md, docs/processes.md |
 | Survival | eats, wears the best armour, spares worn tools, keeps throwaway blocks, drops junk, avoids mobs and spawners when planning | `bot/src/skills/survival/`, docs/survival.md |
@@ -144,8 +144,8 @@ resumes afterwards; a pending home return is dropped by any new command.
 BedrockBot/
   PLAN.md                    plan, verified facts, phases, risks
   README.md                  this file
-  package.json               pnpm workspace root: bds:*, bot:afk, bot:realm, config:init, update:check, deploy:mac, test, lint
-  deploy/mac/                launchd agent, update script and notes for running the Realm bot on a Mac
+  package.json               pnpm workspace root: bds:*, bot:afk, bot:realm, config:init, update:check, deploy:server, test, lint
+  deploy/                    launchd / systemd units, update script and notes for running the Realm bot on a server
   .nvmrc                     Node 24
   bot/                       the bot (TypeScript, ESM, Node runs .ts directly)
     src/index.ts             CLI: bot --task afk|echo|gather|rl [--target bds|realm] (docs/runbook.md "Bot")
@@ -181,3 +181,16 @@ BedrockBot/
 pnpm -r test && pnpm lint                                   # unit tests and lint
 BDS_E2E=1 pnpm --filter bot test:e2e                        # e2e against the local servers (docs/runbook.md "Tests")
 ```
+
+## Licence
+
+MIT, see [LICENSE](LICENSE), except the two folders ported from Baritone (`bot/src/skills/nav/baritone/`,
+`bot/src/skills/mine/baritone/`), which are LGPL-3.0; [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists
+them and the other third-party material.
+
+No Minecraft art is part of this repository. The control panel can show the game's item pictures, which it
+draws at run time from the optional `minecraft-assets` npm package (`pnpm install --no-optional` leaves it
+out, and the panel then falls back to drawn glyphs); see docs/panel.md.
+
+Minecraft is a trademark of Mojang AB. This is an independent project, not approved by or associated with
+Mojang or Microsoft.

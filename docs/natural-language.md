@@ -42,7 +42,7 @@ Bot:   I know no waypoint "castle" (known: home, spawn, mine). Which one, or whi
    `--waypoints home,base,mine`, `--model`, `--url`, `--prompt` (print the system prompt), `--schema`
    (print the JSON schema), `--fake` (no model: the six worked examples), `--no-config`.
 5. Start the bot as usual; the log says `natural language: ollama qwen2.5:7b (!do, or "Bot, ...")`.
-   Then on the `chat` server: `!do come here`, `!yes`.
+   Then on the server: `!do come here`, `!yes`.
 
 ## Commands
 
@@ -188,4 +188,4 @@ in its values (`$nl`); tests inject a provider as `$nlProvider`.
   `!no` drops a plan (from `!do` and from `say <bot>, walk home`); an unknown waypoint yields a
   question. Measured: plan line ~250 ms after `!do`, 15 blocks home in ~3.7 s, guard on ~0.5 s later.
 - Manual with Ollama on the Mac: the 20 phrasings of phrasings.test.ts through `nl-try.ts`, then
-  `!do` on the `chat` server.
+  `!do` on the server.

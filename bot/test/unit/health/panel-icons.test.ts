@@ -220,7 +220,8 @@ describe('IconBook', () => {
   });
 });
 
-describe('the minecraft-assets package', () => {
+// The package is an optional dependency (art we do not ship): without it these checks are skipped.
+describe.skipIf(!assetDir())('the minecraft-assets package', () => {
   const dir = assetDir();
   const real = () => new IconBook(new FsAssets(dir!));
 

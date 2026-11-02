@@ -1,6 +1,7 @@
 {
   "name": "bedrockbot",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@12.16.1",
   "engines": {
@@ -13,7 +14,7 @@
     "bds:idle": "node scripts/bds.mjs idle",
     "bds:cmd": "node scripts/bds.mjs cmd",
     "bds:logs": "node scripts/bds.mjs logs",
-    "deploy:mac": "node scripts/deploy-mac.mjs",
+    "deploy:server": "node scripts/deploy-server.mjs",
     "pack:deploy": "pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/dev --restart bds-dev && node scripts/bds.mjs up",
     "test": "pnpm -r --if-present test",
     "lint": "pnpm -r --if-present lint",

@@ -43,7 +43,7 @@ not be slowed (the physics loop runs every 50 ms).
 - Existing endpoints, ports and the Mac deployment are unchanged without a `panel` block; `/` used
   to be a 404 and is now the panel on 127.0.0.1.
 - With the panel on the health port and a token, `/metrics` and `/map` need the token too; a local
-  `curl /metrics` keeps working with a separate `panel.port` (documented in deploy/mac/README.md).
+  `curl /metrics` keeps working with a separate `panel.port` (documented in deploy/README.md).
 - Panel commands show in the game chat like typed ones; the chat's 8 replies per 10 s limit applies,
   but the panel still shows dropped replies (`not sent to the game`).
 - `!come` / `!follow` from the panel target the first owner by name (they need that player online).

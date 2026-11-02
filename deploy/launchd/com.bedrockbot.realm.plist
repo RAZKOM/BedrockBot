@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  launchd user agent that keeps the Realm AFK bot running on a Mac (deploy/mac/README.md).
+  launchd user agent that keeps the Realm AFK bot running on a Mac (deploy/README.md).
   Replace /Users/USER with the account's home directory before loading. Everything about the
   Realm (name, owner gamertag, home, health port) comes from ~/.bedrockbot/config.json; only
   "--target realm" lives here, because the config file may not select a Realm by design.

@@ -104,7 +104,7 @@ minecraft-assets package is not installed: pnpm install); ...` once and asks for
 
 Where the pictures come from: the `minecraft-assets` npm package (PrismarineJS, MIT; the art is
 Mojang's), folder `26.1` of `node_modules`, installed by `pnpm install` like any dependency (the Mac
-gets it through `pnpm deploy:mac`). Nothing of it is in git. The server (`health/panel/icons/`) reads
+gets it through `pnpm deploy:server`). Nothing of it is in git. The server (`health/panel/icons/`) reads
 the item and block models and textures on the first request and renders each icon on demand:
 
 - **a flat item** (`iron_sword`, `bread`, `bucket`) is its texture, untouched (16 x 16; the first

@@ -2,6 +2,7 @@
   "name": "@bedrockbot/truth-pack",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Ground-truth behavior pack for BDS (stable @minecraft/server 2.10.0 only): /scriptevent truth:* commands answered with '@truth {json}' chat messages.",
   "type": "module",
   "engines": {

@@ -178,9 +178,6 @@ importers:
       bedrock-protocol:
         specifier: github:PrismarineJS/bedrock-protocol#c9e1fbf21dc6abde8d89920996575791b79e66cf
         version: https://codeload.github.com/PrismarineJS/bedrock-protocol/tar.gz/c9e1fbf21dc6abde8d89920996575791b79e66cf(patch_hash=312465660051d9d02f229b78038e057237cd70b6d4ba0f29630a9f4341d2e0d7)
-      minecraft-assets:
-        specifier: 1.19.0
-        version: 1.19.0
       minecraft-data:
         specifier: 3.117.0
         version: 3.117.0(patch_hash=fb525936e506c279a49dc41bea3d1ecdbb0370d3d0082e47ee3b0c1a9d8e5f45)
@@ -224,6 +221,10 @@ importers:
       vitest:
         specifier: 5.0.5
         version: 5.0.5(@types/node@24.19.2)(vite@8.3.5(@types/node@24.19.2)(esbuild@0.28.2))
+    optionalDependencies:
+      minecraft-assets:
+        specifier: 1.19.0
+        version: 1.19.0
 
   packs/truth:
     devDependencies:
@@ -3784,7 +3785,8 @@ snapshots:
     dependencies:
       readable-stream: 1.0.34
 
-  minecraft-assets@1.19.0: {}
+  minecraft-assets@1.19.0:
+    optional: true
 
   minecraft-data@3.117.0(patch_hash=fb525936e506c279a49dc41bea3d1ecdbb0370d3d0082e47ee3b0c1a9d8e5f45): {}
 

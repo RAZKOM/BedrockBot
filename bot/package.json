@@ -2,6 +2,7 @@
   "name": "bot",
   "version": "0.0.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Minecraft Bedrock bot (TypeScript, Node 24, ESM)",
   "engines": {
@@ -17,13 +18,15 @@
   },
   "dependencies": {
     "bedrock-protocol": "github:PrismarineJS/bedrock-protocol#c9e1fbf21dc6abde8d89920996575791b79e66cf",
-    "minecraft-assets": "1.19.0",
     "minecraft-data": "3.117.0",
     "pngjs": "7.0.0",
     "prismarine-chunk": "1.41.0",
     "prismarine-nbt": "2.8.0",
     "prismarine-registry": "1.12.0",
     "zod": "4.6.7"
+  },
+  "optionalDependencies": {
+    "minecraft-assets": "1.19.0"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
