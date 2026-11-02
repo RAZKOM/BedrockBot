@@ -496,7 +496,7 @@ sources, `bot/test/unit/fixtures/update/`), `tasks-respawn`, `tasks-night`, `tas
 ## Realm join (you do this)
 
 PLAN.md tasks 1.6 and 1.7. Agents never run this: it signs in to a Microsoft account and connects
-to a public service. **Verified on a real Realm on 2026-10-29** (game 1.26.60, commit 02c0a1c plus
+to a public service. **Verified on a real Realm on 2026-10-29** (game 1.26.60, commit 17ee000 plus
 `patches/bedrock-protocol.patch`; numbers under "Measured on the Realm" below). Statements still
 marked *unverified* come from reading bedrock-protocol's source, not from a measurement.
 
