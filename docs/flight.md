@@ -903,10 +903,10 @@ centre at 44 blocks out, 17 above`: it arrived high); pond 1, pit 1, house 2 roc
 
 ### Go-arounds and rockets per landing, before and after (deliverable F)
 
-Base `9f6f97d` against Track BF, the same suites on bds-fly (the `fly-overhang` farm / roof / water cases
+Base `3561a5c` against Track BF, the same suites on bds-fly (the `fly-overhang` farm / roof / water cases
 and `fly-walk`; each landing is one flight):
 
-| Case | Before (9f6f97d) | After (Track BF) |
+| Case | Before (3561a5c) | After (Track BF) |
 |---|---|---|
 | farm | 7 rockets, 0 go-arounds, but landed **on the box's roof** (y 34): `goto: unreachable` | 8 / 7 / 11 rockets, 0 / 1 / 2 go-arounds (the 2 before the descent-window fix), on the platform, walked into the room |
 | big roof | 2 rockets, 0 go-arounds, landed **on the roof** (y −54): `goto: unreachable` | 3 / 2 / 2 rockets, 0 go-arounds, on the ground, walked in |
@@ -923,7 +923,7 @@ target and cost 4 go-arounds.
 ### Regression (`fly-land`, `fly-roof`, `fly-economy`) and the slide after the settle
 
 `fly-roof` and `fly-economy` passed on the Track BF code. `fly-land` failed twice before the fix below: the
-server's slide goes on after the controller's 10-tick settle, 0.6 to 1.0 blocks (the base `9f6f97d` the
+server's slide goes on after the controller's 10-tick settle, 0.6 to 1.0 blocks (the base `3561a5c` the
 same: truth 0.62 to 1.06 off after landings reported 0.0 to 0.3 off), and two short straight-in flights
 that touched down 0.5 and 0.8 past the centre of the 3x3 slid to its edge: the body stopped at exactly
 0.27 over the edge (z 73720.27 in both), the **sneak edge rule holding it** (the server applies it to the

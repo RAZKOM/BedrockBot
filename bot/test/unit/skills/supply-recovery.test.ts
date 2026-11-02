@@ -1,4 +1,4 @@
-// Track BJ (decision 0052, review of 01b9b9d): the supply layer never loses a box. `!bring`'s extract box goes back into
+// Track BJ (decision 0052, review of 32eb6a2): the supply layer never loses a box. `!bring`'s extract box goes back into
 // its chest also when the extract fails or is interrupted (at once, else as a debt the next withdrawal or unload settles;
 // a box that cannot be placed comes whole); a box whose break was interrupted stays `standing` until `recover` breaks
 // it; a cancel never leaves a box on the ground; ensure needs free slots, stops on any failure of a round and runs
@@ -195,7 +195,7 @@ describe('the unload holds the crop and seed reserve back in box and fill steps'
   });
 });
 
-describe('second review (f8a0c6e): owed boxes, retries, far boxes, short clean-up', () => {
+describe('second review (dc333dd): owed boxes, retries, far boxes, short clean-up', () => {
   /** A withdrawal whose box could not go back (the chest filled meanwhile): the box is owed to chest 3 0 0. */
   async function owedHome() {
     const h = dirtHome(26);
