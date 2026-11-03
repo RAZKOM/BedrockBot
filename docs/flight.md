@@ -1076,6 +1076,24 @@ landing first (`takeOver`, commands-fly.ts; `FlyProcess.adopt` / `handOver`, tas
 - `!fly` in the air skips the kit check (a glide with no rockets left can still turn), `!fly stop`, `!land`
   and `!stop` land as before.
 
+## The trips home fly too
+
+`!goto` and `!come` flew by themselves since Track AU, but the trips home the bot makes on its own walked
+the whole way (the owner: far from home it walked all the way back). `pve.returnHome` is wrapped like
+`pve.walk` (commands-fly.ts): the dawn return, the respawn return, the walk home after a guard fight, a
+food job or branch mining go through the same decision (`autoFly`: over `flyMin`, the kit ready, open sky,
+a landing near home), and fly as the **home return**: the FlyProcess is named `home`, kind `auto`,
+`PRIORITY.home` (20), so `!stop`, a death and a new command drop it exactly as they drop the walk home (in
+the air the flight lands; with the mid-air takeover a new command takes the flight over instead). After
+the landing the rest is the plain walk home. `ifIdle` returns keep their rule (`busy` while a command
+runs, checked again after the landing search). Under a roof, without the kit or for a short trip it walks
+as before.
+
+Still walking: the night shelter and the bed (the night process, priority 80, holds control: a flight
+there would need its own path inside it), and the walks inside a job (the cook step, herd marks, the
+breeding pen, remembered forests, the stash chest, `!bring`): a flight there would have to run inside the
+job's own process rather than as a process of its own.
+
 ## Open points
 
 - Track BL: a column that stays unknown until the body reaches it (a server that never sends the chunk)
