@@ -186,6 +186,7 @@ export function registerGetCommands(d: CommandDeps, extra: GetExtra = {}): GetCo
       say: (m) => d.chat.say(m),
       ...(d.pve ? { selectHotbar: (slot: number) => void d.pve!.hotbar.select(slot) } : {}), // Track AV: the chosen box is the one placed
       toHotbar: (slot) => survivalKitOf(d.task)?.hotbar(slot) ?? Promise.resolve(undefined), // same-coloured boxes: the chosen one into the hotbar
+      waitTicks: (n) => mob.loop.waitTicks(n), // a busy junk drop is tried again
       breakBlocker: (p) => breakBlocker(mob.skills.nav.grid, p.x, p.y, p.z, mob.skills.nav.breakRules()), // a mine shaft: dig a cell for the box
     });
   setStash(processes, stash);
