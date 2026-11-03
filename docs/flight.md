@@ -1029,6 +1029,25 @@ Dive against circle, ticks to touchdown, 0 hits, 0 go-arounds:
   tunnel's stair top are found as takeoff sites (`walking 16 / 23 blocks to take off from ...`).
   `fly-descent` accepts a dive on the open platform.
 
+## A new trip in the air
+
+A `!goto`, `!come` or `!fly` sent while a flight is in the air takes that flight over instead of
+landing first (`takeOver`, commands-fly.ts; `FlyProcess.adopt` / `handOver`, tasks/process/fly.ts):
+
+- the landing for the new goal is found as for any flight (`findLanding`: the goal when it is landable,
+  else a confirmed cell near it, held high while its ground is not loaded), and the flight is retargeted
+  to it there (`FlightController.retarget`); the cruise height is raised when the new trip needs more
+  (never lowered; the cruise's rockets cover the distance). The bot says `flying on to <goal> (N blocks)`.
+- the trip that started the flight ends `replaced` without a landing, and its walk after the landing never
+  runs. Before this, the old flight landed where it was going and its walk then replaced the new one, so
+  the bot ended up where it was first sent.
+- the new trip does the ground work after the landing (chestplate, refill) and the walk for the rest.
+- the brain refuses a retarget once the approach is within 15 blocks of the touchdown, or while it lands:
+  the flight then lands where it was going (`fly: too close to the landing to turn now; landing first,
+  then going to <goal>`) and the trip starts again from the ground, flying again when it is worth it.
+- `!fly` in the air skips the kit check (a glide with no rockets left can still turn), `!fly stop`, `!land`
+  and `!stop` land as before.
+
 ## Open points
 
 - Track BL: a column that stays unknown until the body reaches it (a server that never sends the chunk)

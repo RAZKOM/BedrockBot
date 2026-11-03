@@ -325,10 +325,12 @@ export class FlightBrain {
    * was unknown at the takeoff) while the flight is still on its way (takeoff, climb or cruise; the
    * approach and the landing keep theirs). True when taken.
    */
-  retarget(target: LandingTarget, body?: FlightBody): boolean {
+  retarget(target: LandingTarget, body?: FlightBody, o: { cruiseY?: number } = {}): boolean {
     if (this.phase === 'land' || this.phase === 'done') return false;
     // in the approach only while there is room to re-plan (the goal's chunks often load just as it begins)
     if ((this.phase === 'approach' || this.phase === 'goaround') && (!body || hdist(body.pos, this.target) < 15)) return false;
+    // a new trip taken over in the air: the climb goes on to the higher of the two cruise heights (the cruise's rockets cover the distance)
+    if (o.cruiseY !== undefined && o.cruiseY > this.o.cruiseY) this.o.cruiseY = o.cruiseY;
     const wasHold = this.target.hold === true;
     this.target = target;
     // Track BF: a target that is not landable yet is held over from the cruise (no approach to it)
