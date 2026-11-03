@@ -158,6 +158,7 @@ export const SETTING_DEFS = {
   flyOverhangDepth: { kind: 'number', default: 10, min: 0, max: 24, integer: true, unit: 'blocks', description: 'flight: deepest landing under a roof (0 = never)' }, // Track BF
   flySneakLand: { kind: 'boolean', default: true, description: 'flight: sneak through the touchdown (the slide stops at edges)' }, // Track BF
   flyLedgeTakeoff: { kind: 'boolean', default: true, description: 'flight: step off an edge when the jump takeoff is blocked or the start is a small platform' }, // Track BH
+  flyVerticalTakeoff: { kind: 'boolean', default: true, description: 'flight: go straight up the open column over the bot when the jump takeoff is blocked on every heading (trees, walls, a shaft)' },
   glideDown: { kind: 'boolean', default: true, description: 'an unreachable goto / come with the goal far below glides down when a simulated glide lands' }, // Track BH
   glideDownMinDrop: { kind: 'number', default: 10, min: 4, max: 200, integer: true, unit: 'blocks', description: 'glide down: the goal at least this far below the feet' }, // Track BH
   glideDownMinDistance: { kind: 'number', default: 16, min: 4, max: 400, integer: true, unit: 'blocks', description: 'glide down: the goal at least this far away horizontally' }, // Track BH

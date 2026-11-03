@@ -10,7 +10,7 @@
 // added to the manager here.
 import type { Vec3 } from '../connection/types.ts';
 import { FlightController, skyQuery } from '../skills/fly/controller.ts';
-import { glideKitReady, jumpTakeoff, ledgeTakeoff, planGlideDown, smallPlatform, type Ledge, type SimDeps } from '../skills/fly/glide.ts'; // Track BH
+import { glideKitReady, jumpTakeoff, ledgeTakeoff, planGlideDown, smallPlatform, verticalTakeoff, type Ledge, type SimDeps } from '../skills/fly/glide.ts'; // Track BH
 import { elytraWornLimit, flightKitMemoryOf, kitLine, kitReady, readKit, SupplyWatch } from '../skills/fly/kit.ts';
 import { FlightKitOps } from '../skills/fly/kitops.ts';
 import { APPROACH_HEIGHT, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, type CellQuery, type LandingTarget, type SkyCheck } from '../skills/fly/plan.ts';
@@ -389,14 +389,30 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     return r.ledge;
   };
   /**
+   * The vertical takeoff (glide.ts verticalTakeoff): straight up the open column over the bot, then the climb
+   * from above the trees or walls around it. Tried when the jump takeoff is refused on every heading, and when
+   * the sky check refused for the 3 x 3 or the run (not for a roof right over the head).
+   */
+  const verticalFor = async (from: Vec3, target: LandingTarget, rockets: number, quiet = false): Promise<{ vertical: number; takeoffYaw: number } | undefined> => {
+    if (!d.settings.get('flyVerticalTakeoff')) return undefined;
+    const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
+    const r = await verticalTakeoff(simDeps(true), from, target, { cruiseY: cz.y, margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds') }, rockets, d.settings.get('flyTakeoffRun'));
+    if (!quiet) log.info(`fly: vertical takeoff: ${r.line}`);
+    return r.top !== undefined && r.yaw !== undefined ? { vertical: r.top, takeoffYaw: r.yaw } : undefined;
+  };
+  /**
    * Track BH: how this flight takes off: a ledge (ledgeFor), else the jump along the first heading whose
    * simulated climb meets no solid (the sky check's first, then 30 degrees apart: the Realm's takeoff into a
-   * tree canopy, 2026-10-31), else refused with the line (walk out).
+   * tree canopy, 2026-10-31), else straight up the open column over the bot (verticalFor), else refused with
+   * the line (walk out, or a takeoff site).
    */
-  const takeoffFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number, quiet = false): Promise<{ ledge?: Ledge; takeoffYaw?: number } | { refuse: string }> => {
+  const takeoffFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number, quiet = false): Promise<{ ledge?: Ledge; takeoffYaw?: number; vertical?: number } | { refuse: string }> => {
     const ledge = await ledgeFor(from, target, sky, rockets, quiet);
     if (ledge) return { ledge };
-    if (!sky.ok) return { refuse: sky.line };
+    if (!sky.ok) {
+      // the 3 x 3 or the run blocked leaves the column over the head (a roof right over it: verticalFor says so at once)
+      return (await verticalFor(from, target, rockets, quiet)) ?? { refuse: sky.line };
+    }
     const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
     const yaws = [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180].map((o) => sky.yaw + o);
     // Track BL: any heading (the climbing turn back towards the goal is part of the simulation, its corridor checked with unknown-is-not-air)
@@ -404,7 +420,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (r.yaw !== undefined && r.yaw === sky.yaw) return { takeoffYaw: r.yaw };
     if (!quiet) log.info(`fly: the simulated climb: ${r.line}`);
     if (r.yaw !== undefined) return { takeoffYaw: r.yaw };
-    return { refuse: 'fly: no clear climb from here (the simulated climb meets a solid on every heading: trees, a wall); walk outside first' };
+    const v = await verticalFor(from, target, rockets, quiet);
+    if (v) return v;
+    return { refuse: 'fly: no clear climb from here (the simulated climb meets a solid on every heading: trees, a wall, and none straight up); walk outside first' };
   };
   /** Track BL: a takeoff site to walk to (sites.ts): the cell, the walk there (blocks of the probed path), the flight from there and its takeoff. */
   interface TakeoffSite {
@@ -769,6 +787,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       }
       delete found.target.ledge;
       delete found.target.takeoffYaw;
+      delete found.target.vertical;
       Object.assign(found.target, tk);
     }
     return runAuto(found, goal, label, half, rest, legWalk);

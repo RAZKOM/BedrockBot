@@ -17,7 +17,7 @@ import { IDLE_COMMAND, initialBody, type BlockQuery, type BodyState, type MoveCo
 import { FlightBrain, type BrainOptions, type FlightEnd, type FlightStats } from './brain.ts';
 import { elytraWornLimit, elytraWornLine, type FlightKit } from './kit.ts';
 import { GLIDE } from '../input/physics.ts';
-import { hdist, onTarget, yawDiff, yawTo, type CellQuery, type LandingTarget } from './plan.ts';
+import { hdist, onTarget, takeoffSky, yawDiff, yawTo, type CellQuery, type LandingTarget } from './plan.ts';
 import { assumedTop, type TerrainQuery } from './terrain.ts'; // Track BL
 
 /** The ledge's fall corridor: no solid at the body's height (feet .. head + 1) this many blocks out along the heading, a block either side. */
@@ -371,6 +371,61 @@ export async function jumpTakeoff(
 
   }
   return { yaw: steered, line: tried.join('; ') };
+}
+
+/** The vertical takeoff's straight climb: the lowest and highest hand-over over the start, and the step between the heights tried. */
+export const VERTICAL_MIN = 6;
+export const VERTICAL_MAX = 48;
+const VERTICAL_STEP = 2;
+/** Open cells the column must have over the hand-over height (the head, and the pitch-over's first ticks). */
+export const VERTICAL_SPARE = 3;
+/** Simulations at most for one vertical takeoff (each a whole climb). */
+const VERTICAL_SIMS = 3;
+
+/**
+ * The vertical takeoff (docs/flight.md "Vertical takeoff"): when the jump takeoff is refused (trees, walls, a
+ * courtyard, a shaft; any heading), go straight up the start's column and take off from above it. The column
+ * over the head must be open (an unknown cell counts as blocked) up to the hand-over height plus
+ * VERTICAL_SPARE; the hand-over height is the lowest from VERTICAL_MIN up whose sky check (plan.ts
+ * `takeoffSky` from that height: its 3 x 3 and its run along a heading) passes; the whole climb is then
+ * simulated (as `jumpTakeoff`: no hit, dry, it gets to the approach). `top` (blocks over the feet) and the
+ * heading, or undefined with the why.
+ */
+export async function verticalTakeoff(
+  deps: SimDeps & { cell: CellQuery },
+  from: Vec3,
+  target: LandingTarget,
+  opts: Omit<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'ledge' | 'takeoffYaw' | 'vertical'>,
+  rockets: number,
+  run: number,
+): Promise<{ top?: number; yaw?: number; line: string }> {
+  if (rockets <= 0) return { line: 'no rockets for a straight climb' };
+  const fx = Math.floor(from.x);
+  const fz = Math.floor(from.z);
+  const feet = Math.floor(from.y);
+  const highest = Math.min(VERTICAL_MAX, Math.floor(opts.cruiseY) - feet);
+  let open = 0;
+  for (let y = feet + 1; y <= feet + highest + VERTICAL_SPARE; y++) {
+    if (deps.cell(fx, y, fz) !== false) break;
+    open = y - feet;
+  }
+  if (open < VERTICAL_MIN + VERTICAL_SPARE) return { line: `the column over the start is open only ${open} up` };
+  const tried: string[] = [];
+  let sims = 0;
+  for (let top = VERTICAL_MIN; top + VERTICAL_SPARE <= open && top <= highest; top += VERTICAL_STEP) {
+    const sky = takeoffSky({ x: from.x, y: feet + top, z: from.z }, target, opts.cruiseY, run, deps.cell);
+    if (!sky.ok) continue;
+    const sim = await simulateFlight(deps, from, target, { ...opts, vertical: { top }, takeoffYaw: sky.yaw }, { rockets, yaw: sky.yaw, maxTicks: TAKEOFF_SIM_TICKS, until: (b) => b.phase === 'approach' });
+    sims++;
+    const ok = sim.hits === 0 && !sim.wet && (sim.end ? landedOn(target, sim) : sim.phase !== 'land' && sim.phase !== 'takeoff');
+    if (ok) {
+      tried.push(`${top} up, heading ${Math.round(sky.yaw)}: clear`);
+      return { top, yaw: sky.yaw, line: tried.join('; ') };
+    }
+    tried.push(`${top} up: ${sim.hits ? `hits a solid ${sim.hits} times` : sim.end ? simWhy(target, sim) : `${sim.phase} after ${sim.ticks} ticks`}`);
+    if (sims >= VERTICAL_SIMS) break;
+  }
+  return { line: tried.length ? tried.join('; ') : `no height up to ${Math.min(open - VERTICAL_SPARE, highest)} with open sky around it` };
 }
 
 export interface GlideDownOptions {
