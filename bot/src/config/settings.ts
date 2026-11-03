@@ -105,7 +105,7 @@ export const SETTING_DEFS = {
   autoSleep: { kind: 'boolean', default: true, description: 'go to bed by itself at night (a bed near the shelter or home, or the bed waypoint); !sleep on / off sets it' }, // 2026-10-31: !sleep off was lost at every restart
   autoFood: { kind: 'boolean', default: true, description: 'hunt food mobs as a chore by day when the inventory food is below foodMin' }, // Track X
   foodMin: { kind: 'number', default: 10, min: 0, max: 200, integer: true, unit: 'hunger points', description: 'auto food: hunt when the food carried totals fewer hunger points' }, // Track X
-  foodLeave: { kind: 'number', default: 2, min: 0, max: 16, integer: true, unit: 'mobs', description: '!food never leaves fewer of a kind than this within the radius' }, // Track X
+  foodLeave: { kind: 'number', default: 0, min: 0, max: 16, integer: true, unit: 'mobs', description: '!food leaves this many wild adults of a kind within the radius (penned animals are never hunted unless asked: !food n pen, chorePen)' }, // Track X
   mineSeenOnly: { kind: 'boolean', default: false, description: 'mining: only ore the bot has seen an open face of (off: any known ore, tunnelling to it)' }, // Track Z
   mineDirect: { kind: 'boolean', default: true, description: 'mining: no walk to an ore (or a long detour): dig a 1-wide 2-high tunnel or a shaft straight to it, under the dig rules (off: walk with dig-through only)' }, // Track AQ
   quarryKeepStone: { kind: 'boolean', default: true, description: '!quarry / !tunnel: stone, cobblestone, deepslate, dirt and the like are the produce of the job (kept, stashed first); off: the stash step drops them as junk when the inventory is full' }, // Track BK

@@ -53,6 +53,7 @@ describe.skipIf(!E2E)('food: gather, cook, auto trigger (task 7.16)', () => {
     await prepareServer();
     const settings = new RuntimeSettings();
     settings.applyStartup('autoFood', false);
+    settings.applyStartup('foodLeave', 2); // the measured cases keep 2 wild cows (the default is 0 since the owner asked)
     bot = await startFoodBot('Food', { home: HOME }, { settings });
     await teleport(bot, centre(HOME));
     await bot.truth.clearAround(centre(HOME), 80);
