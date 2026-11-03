@@ -28,7 +28,8 @@ import type { Chat } from './chat.ts';
 /** What the chat commands drive (unit tests fake it). */
 export interface FarmController {
   /** Start farming; the reply. */
-  farm(radius: number): string;
+  /** Start farming; `wait`: the old wait-and-rescan mode; `onEnd` gets the line when a following run is done. */
+  farm(radius: number, o?: { wait?: boolean; onEnd?: (msg: string) => void }): string;
   farmStop(): string;
   farmStatus(): string;
   /** Start mining; `onEnd` gets the final line. The immediate reply. Track AQ: `kinds` = several kinds with quotas (block / n: the first and the sum). */
@@ -86,15 +87,18 @@ export function registerFarmChat(chat: Chat, c: FarmController | undefined): voi
   }
   chat.register({
     name: 'farm',
-    help: `[radius] | stop | status (harvest, replant, bone meal; default radius ${DEFAULT_FARM_RADIUS})`,
+    help: `[radius] [wait] | stop | status (harvest, replant, bone meal; follows the field as it walks and stops when nothing is ready to harvest or plant; wait: stay and re-scan every minute; default radius ${DEFAULT_FARM_RADIUS})`,
     group: 'work', example: '!farm 8', // Track AM
     run: ({ reply, args }) => {
-      const a = (args[0] ?? '').toLowerCase();
+      const words = args.map((x) => x.toLowerCase());
+      const a = words[0] ?? '';
       if (a === 'stop') return reply(c.farmStop());
       if (a === 'status') return reply(c.farmStatus());
-      const r = a === '' ? DEFAULT_FARM_RADIUS : Number(a);
-      if (!Number.isInteger(r) || r < 1 || r > MAX_FARM_RADIUS) return reply(`usage: !farm [radius 1..${MAX_FARM_RADIUS}] | stop | status`);
-      reply(c.farm(r));
+      const wait = words.includes('wait');
+      const rest = words.filter((x) => x !== 'wait');
+      const r = rest.length === 0 ? DEFAULT_FARM_RADIUS : Number(rest[0]);
+      if (rest.length > 1 || !Number.isInteger(r) || r < 1 || r > MAX_FARM_RADIUS) return reply(`usage: !farm [radius 1..${MAX_FARM_RADIUS}] [wait] | stop | status`);
+      reply(c.farm(r, { wait, onEnd: (m) => reply(m) }));
     },
   });
   chat.register({
@@ -261,13 +265,17 @@ export function registerFarmCommands(deps: FarmCommandDeps): FarmCommandsResult 
     let mp: MineProcess | undefined;
     const live = <P extends { done: boolean }>(p: P | undefined) => (p && !p.done ? p : undefined);
     registerFarmChat(deps.chat, {
-      farm: (radius) => {
+      farm: (radius, o = {}) => {
         const at = here();
         if (!at) return 'farm: not ready yet';
         const m = live(mp);
         if (m) pm.stop(m, 'stopped'); // farming and mining exclude each other
-        fp = pm.add(new FarmProcess(farm, { center: { x: at.x + 0.5, y: at.y, z: at.z + 0.5 }, radius }));
-        return `farming r=${radius} around ${at.x} ${at.y} ${at.z}${pm.paused ? ' (held: !resume)' : ''}`;
+        const p = new FarmProcess(farm, { center: { x: at.x + 0.5, y: at.y, z: at.z + 0.5 }, radius, follow: !o.wait });
+        fp = pm.add(p);
+        void p.result.then((s) => {
+          if (s === 'done') o.onEnd?.(`farm: done, nothing left to harvest or plant; ${farm.summary()}`);
+        });
+        return `farming r=${radius} around ${at.x} ${at.y} ${at.z}${o.wait ? ', waiting for crops' : ', following the field'}${pm.paused ? ' (held: !resume)' : ''}`;
       },
       farmStop: () => {
         const p = live(fp);
@@ -298,13 +306,15 @@ export function registerFarmCommands(deps: FarmCommandDeps): FarmCommandsResult 
     return { farm, mine, memory, farmProcess: () => live(fp), mineProcess: () => live(mp) };
   }
   registerFarmChat(deps.chat, {
-    farm: (radius) => {
+    farm: (radius, o = {}) => {
       const at = here();
       if (!at) return 'farm: not ready yet';
       mine.stop();
       deps.stopOthers?.();
-      void farm.start({ center: { x: at.x + 0.5, y: at.y, z: at.z + 0.5 }, radius });
-      return `farming r=${radius} around ${at.x} ${at.y} ${at.z}`;
+      void farm.start({ center: { x: at.x + 0.5, y: at.y, z: at.z + 0.5 }, radius, follow: !o.wait }).then((s) => {
+        if (s === 'done') o.onEnd?.(`farm: done, nothing left to harvest or plant; ${farm.summary()}`);
+      });
+      return `farming r=${radius} around ${at.x} ${at.y} ${at.z}${o.wait ? ', waiting for crops' : ', following the field'}`;
     },
     farmStop: () => {
       const was = farm.running;
