@@ -16,7 +16,7 @@ import type { ItemStack } from '../world/types.ts';
 import { foodInfo } from '../skills/survival/eat.ts';
 import { SurvivalKit, type SurvivalSettings } from '../skills/survival/index.ts';
 import { supplyOf } from '../skills/supply/supply.ts';
-import { maxDurability } from '../skills/survival/tools.ts';
+import { durabilityLeft, hasMending, maxDurability, mendReserve, setAsideForMending } from '../skills/survival/tools.ts';
 import type { Mobility } from '../tasks/mobility.ts';
 import type { PveController } from '../tasks/pve.ts';
 import { Containers } from '../world/containers.ts';
@@ -27,7 +27,7 @@ import type { Chat } from './chat.ts';
 import { ELYTRA, flightKitMemoryOf, flightKitSlots, isElytra, keptKitLine, readKit, ROCKET, type KitInventory } from '../skills/fly/kit.ts'; // Track AU: the flight kit is kept by !drop all / items
 import { keepBoxNameOf, keepNameOf, keptBoxesLine, keptBoxSlots } from '../skills/home/boxing.ts'; // Track AV: the named (bot_loot) boxes are kept by !drop all / items
 
-export const SURVIVAL_COMMANDS = ['eat', 'equip', 'inv', 'drop'] as const;
+export const SURVIVAL_COMMANDS = ['eat', 'equip', 'inv', 'drop', 'mend'] as const;
 const NEEDS_WALK = 'needs a task that can walk (start with --walk, --home or --target realm)';
 
 export interface SurvivalCommandDeps {
@@ -117,6 +117,80 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
         else if (r.reason === 'not_hungry') reply(`eat: not hungry (food ${r.foodBefore})`);
         else reply(`eat: ${r.reason ?? 'failed'}${r.item ? ` (${r.item})` : ''}`);
       });
+    },
+  });
+  // ---- Mending (the owner: a Mending tool or elytra is not worn down to breaking; it is set aside and mended) ----
+  const mob = deps.mob!;
+  const inv = mob.world.inventory;
+  const mendLimit = (): { limit: number; pct: number } => {
+    const s = kit.settings();
+    return { limit: s.toolWearLimit, pct: s.mendAt };
+  };
+  /** Every carried, worn or held Mending item: where it is, its uses left, and whether it is set aside. */
+  const mendItems = (): { item: ItemStack; where: string; left: number | undefined; max: number | undefined; aside: boolean }[] => {
+    const out: { item: ItemStack; where: string; left: number | undefined; max: number | undefined; aside: boolean }[] = [];
+    const { limit, pct } = mendLimit();
+    const add = (it: ItemStack | null | undefined, where: string): void => {
+      if (!it || it.count <= 0 || !hasMending(it)) return;
+      const left = durabilityLeft(it);
+      out.push({ item: it, where, left, max: maxDurability(it.name), aside: !!setAsideForMending(it, limit, pct) || (left !== undefined && left <= Math.max(limit, mendReserve(it.name, pct))) });
+    };
+    inv.slots.slice(0, 36).forEach((it, i) => add(it, `slot ${i}`));
+    (inv.window?.(120)?.slots ?? []).forEach((it) => add(it, 'worn'));
+    add(inv.window?.(119)?.slots[0], 'offhand');
+    return out;
+  };
+  const mendStatus = (): string => {
+    const items = mendItems();
+    if (items.length === 0) return 'mend: nothing with Mending carried, worn or held';
+    const list = items.map((m) => `${m.item.name} ${m.left ?? '?'}/${m.max ?? '?'} (${m.where}${m.aside ? ', set aside: !mend ' + m.item.name : ''})`);
+    return `mend: ${list.join(', ')}; the XP the bot picks up repairs what it wears and holds (fights, mining coal / redstone / lapis / quartz ore, smelting); set aside at ${mendLimit().pct}% (mendAt)`;
+  };
+  // tell the owner once when an item goes below its reserve
+  const told = new Set<string>();
+  let tick = 0;
+  mob.loop.onBeforeStep(() => {
+    if (++tick % 200 !== 0) return;
+    for (const m of mendItems()) {
+      const k = `${m.item.name}:${m.where}`;
+      if (!m.aside) {
+        told.delete(k);
+        continue;
+      }
+      if (told.has(k)) continue;
+      told.add(k);
+      chat.say(`${m.item.name} has Mending and is down to ${m.left ?? '?'} uses: set aside so it does not break; !mend ${m.item.name} to repair it`);
+    }
+  });
+  chat.register({
+    name: 'mend',
+    help: '[<item>] (Mending items: what is set aside; with an item: hold it in the offhand so the XP picked up repairs it)',
+    tier: 'more',
+    group: 'home',
+    example: '!mend diamond_pickaxe',
+    auto: `a tool, weapon, armour piece or elytra with Mending is set aside (not used) at mendAt % of its durability instead of being worn down to breaking`,
+    run: ({ reply, args, line }) => {
+      const want = args[0]?.toLowerCase().replace(/^minecraft:/, '');
+      if (!want || want === 'status') {
+        reply(mendStatus());
+        return;
+      }
+      const m = mendItems().find((x) => x.item.name === want);
+      if (!m) {
+        reply(`mend: no ${want} with Mending carried (${mendStatus().replace(/^mend: /, '')})`);
+        return;
+      }
+      if (m.where === 'worn' || m.where === 'offhand') {
+        reply(`mend: the ${want} is ${m.where === 'worn' ? 'worn' : 'in the offhand'}: every XP orb the bot picks up repairs it (${m.left ?? '?'}/${m.max ?? '?'})`);
+        return;
+      }
+      if (armourSlotOf(want) !== undefined || isElytra(want)) {
+        reply(`mend: wear it to repair it (!equip ${m.where}): worn pieces are repaired by the XP the bot picks up`);
+        return;
+      }
+      // a tool or weapon: into the offhand (the shield goes back only into an empty offhand: !offhand clear when done)
+      chat.handle({ ...line, body: `${chat.prefix}offhand ${want}`, message: `${chat.prefix}offhand ${want}` });
+      reply(`mend: holding the ${want} in the offhand: the XP the bot picks up repairs it (guard fights, mining coal / redstone / lapis / quartz ore, smelting); !offhand clear when it is mended`);
     },
   });
   chat.register({

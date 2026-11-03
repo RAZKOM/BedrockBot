@@ -383,7 +383,7 @@ export class FlyProcess extends BaseProcess {
     this.flight = this.d.controller.flyTo(this.target, {
       ...opts,
       fleeHealth: s.get('fleeHealth'),
-      elytraWornAt: elytraWornLimit(wear),
+      elytraWornAt: elytraWornLimit(wear, this.kit()),
       ...(sky?.ok ? { takeoffYaw: this.target.takeoffYaw ?? sky.yaw } : vertical !== undefined && this.target.takeoffYaw !== undefined ? { takeoffYaw: this.target.takeoffYaw } : {}),
     });
     void this.flight.then((r) => {

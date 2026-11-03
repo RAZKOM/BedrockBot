@@ -11,7 +11,7 @@ import type { Chat } from '../chat/chat.ts';
 import { isOwner } from '../chat/chat.ts';
 import { registerGatherCommands, registerProcessCommands, registerSettingsCommands } from '../chat/commands.ts';
 import { registerPveCommandsFor } from '../chat/commands-pve.ts';
-import { registerSurvivalCommands } from '../chat/commands-survival.ts'; // Track S
+import { registerSurvivalCommands, survivalKitOf } from '../chat/commands-survival.ts'; // Track S
 import { registerNavCommands } from '../chat/commands-nav.ts'; // Track R
 import { registerFarmCommands } from '../chat/commands-farm.ts'; // Track U
 import { registerNlCommands } from '../chat/commands-nl.ts'; // Track Y
@@ -353,9 +353,9 @@ export const afkTask: TaskDefinition = {
       registerSettingsCommands,
       registerAfkGather,
       // other tracks: one entry each below this line
-      (d) => registerFarmCommands({ chat: d.chat, conn: d.conn, mob, processes: d.processes, hotbar: pve?.hotbar, containers, gather: d.task.gather?.task, alive: () => !respawn.dead, logger: (s) => ctx.logger(s), useBoneMeal: () => d.settings.get('useBoneMeal'), mineTunnelLen: () => d.settings.get('mineTunnelLen'), mineSeenOnly: () => d.settings.get('mineSeenOnly'), mineDirect: () => d.settings.get('mineDirect'), mineMode: () => d.settings.get('mineMode') /* Track BD */ }), // Track Z (was Track U): processes, shared Hotbar/Containers, settings, cached forests for !gather
+      (d) => registerFarmCommands({ chat: d.chat, conn: d.conn, mob, processes: d.processes, hotbar: pve?.hotbar, containers, gather: d.task.gather?.task, alive: () => !respawn.dead, logger: (s) => ctx.logger(s), useBoneMeal: () => d.settings.get('useBoneMeal'), mineTunnelLen: () => d.settings.get('mineTunnelLen'), mineSeenOnly: () => d.settings.get('mineSeenOnly'), mineDirect: () => d.settings.get('mineDirect'), mineMode: () => d.settings.get('mineMode') /* Track BD */, toolOk: (it) => survivalKitOf(d.task)?.toolOk(it) ?? true }), // Track Z (was Track U): processes, shared Hotbar/Containers, settings, cached forests for !gather
       () => registerNavCommands({ ctx, task, mob, pve, respawn }), // Track R
-      (d) => registerSurvivalCommands({ chat: d.chat, source: d.conn, mob, pve, task, containers, inactive: () => respawn.dead || ctx.conn.state !== 'spawned', logger: ctx.logger('survival') }), // Track S
+      (d) => registerSurvivalCommands({ chat: d.chat, source: d.conn, mob, pve, task, containers, inactive: () => respawn.dead || ctx.conn.state !== 'spawned', logger: ctx.logger('survival'), settings: () => ({ toolWearLimit: d.settings.get('toolWearLimit'), mendAt: d.settings.get('mendAt'), throwawayMin: d.settings.get('throwawayMin'), avoidMobRadius: d.settings.get('avoidMobRadius'), avoidSpawnerRadius: d.settings.get('avoidSpawnerRadius') }) }), // Track S; the runtime settings reach the kit (they never did: !set toolWearLimit, avoidMobRadius and !mode had no effect on it)
       (d) => void registerNlCommands(d, ctx.values), // Track Y
       (d) => void registerFoodCommands(d, { containers, clock }), // Track X: !food, !cook, the food chore
       (d) => void (d.skills && d.world && d.skills.nav.attachPlanner(d.world, { threads: () => d.settings.get('plannerThreads') })), // Track AB: planner worker (plannerThreads)

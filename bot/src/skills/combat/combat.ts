@@ -61,6 +61,7 @@
 // Packet shape verified on BDS 1.26.60.6 (docs/pve.md "Packets"): transaction_type
 // 'item_use_on_entity', transaction_data { entity_runtime_id, action_type 'attack', hotbar_slot,
 // hand 'main_hand', held_item (the wire item as the server sent it), player_pos (eye), click_pos 0 }.
+import { hasMending } from '../survival/tools.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { ItemV4 } from '../../world/packets.ts';
 import type { EntityInfo, ItemStack, Vec3 } from '../../world/types.ts';
@@ -245,8 +246,9 @@ export function bladeScore(item: Pick<ItemStack, 'name'>): number {
 /** The hotbar slot (0..8) with the best weapon; the selected slot wins ties. undefined = empty hotbar. */
 export function bestWeaponSlot(slots: readonly (ItemStack | null)[], selected: number, toolOk: (item: ItemStack) => boolean = () => true): number | undefined {
   // intact weapons and tools first (Track S: worn ones are spared); a worn blade is still the best thing in a fight for
-  // the bot's life, so a second pass takes a worn sword or axe over bare hands
-  for (const pass of [toolOk, (it: ItemStack) => bladeScore(it) > 0]) {
+  // the bot's life, so a second pass takes a worn sword or axe over bare hands: one without Mending first (a Mending
+  // blade set aside to be mended is the owner's important one), then any
+  for (const pass of [toolOk, (it: ItemStack) => bladeScore(it) > 0 && !hasMending(it), (it: ItemStack) => bladeScore(it) > 0]) {
     let best: number | undefined;
     let bestScore = 0;
     for (let i = 0; i < 9; i++) {
