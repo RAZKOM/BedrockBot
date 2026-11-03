@@ -17,15 +17,16 @@
 // The herd memory observes the entity tracker once a second; the breeding chore (settings autoBreed,
 // chorePen) is wired here too.
 import type { Vec3 } from '../connection/types.ts';
+import { strip } from './style.ts';
 import { BabyTracker, foodKindOf, FOOD_ANIMALS, inventoryFoodPoints, rawFoodCounts } from '../skills/food/finder.ts';
 import { Breeder, BREED_FOOD, breedItemCount, type BreedResult } from '../skills/food/breed.ts'; // Track AF
 import { countsLine, HerdMemory, HERD_RANGE } from '../skills/food/herds.ts'; // Track AF
-import { closePenGates, leavePen, PenDetector, type Pen } from '../skills/food/pen.ts'; // Track AF
+import { closePenGates, leavePen, PenDetector, penNear, type Pen } from '../skills/food/pen.ts'; // Track AF
 import { entityFeet } from '../skills/combat/hostiles.ts'; // Track AF
 import { Cooker, type CookContainers, type CookResult } from '../skills/food/cook.ts';
 import { Hunter } from '../skills/food/hunter.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
-import { BREED_RADIUS, COOK_NEAR, DEFAULT_FOOD_ITEMS, HOME_RETURN_NEAR, FOOD_RADIUS, FoodController, parseChorePen, type FoodJobResult } from '../tasks/process/food.ts';
+import { BREED_PERIOD_MS, BREED_RADIUS, BREED_TARGET, COOK_NEAR, DEFAULT_FOOD_ITEMS, FOOD_RADIUS, FoodController, HOME_RETURN_NEAR, noPenLine, parseChorePen, type FoodJobResult } from '../tasks/process/food.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { isNight } from '../tasks/night.ts';
 
@@ -91,7 +92,7 @@ export function registerFoodCommands(d: CommandDeps, extra: FoodCommandExtra = {
   const closeGates = (pen: Pen, cancelled: () => boolean) => closePenGates(penMove, pen, cancelled);
   const chorePen = (): Pen | undefined => {
     const p = parseChorePen(d.settings.get('chorePen'));
-    return p ? pens.penAt({ x: p.x + 0.5, y: p.y, z: p.z + 0.5 }) : undefined;
+    return p ? penNear((f) => pens.penAt(f), p) : undefined;
   };
   const herds = new HerdMemory({
     entities: () => world.entities,
@@ -261,12 +262,74 @@ export function registerFoodCommands(d: CommandDeps, extra: FoodCommandExtra = {
       });
     },
   });
+  /** The adults and babies of each kind standing in `pen` (loaded entities). */
+  const penAnimals = (pen: Pen): string => {
+    const n = new Map<string, { adults: number; babies: number }>();
+    for (const e of world.entities.values()) {
+      const k = foodKindOf(e.type);
+      if (!k || pens.penAt(entityFeet(e))?.id !== pen.id) continue;
+      const c = n.get(k) ?? { adults: 0, babies: 0 };
+      if (babies.isBaby(e.runtimeId)) c.babies++;
+      else c.adults++;
+      n.set(k, c);
+    }
+    return n.size ? [...n].map(([k, c]) => `${c.adults} ${k}${c.adults === 1 ? '' : 's'}${c.babies ? ` + ${c.babies} ${c.babies === 1 ? 'baby' : 'babies'}` : ''}`).join(', ') : 'no animals in it now';
+  };
+  const penLine = (pen: Pen): string => `pen ${pen.max.x - pen.min.x + 1} x ${pen.max.z - pen.min.z + 1} (${pen.cells} cells)`;
+  /** `!breed status`: the setting, the pen it finds there and what is in it, the chore's last word. */
+  const breedStatus = (): string => {
+    const set = d.settings.get('chorePen');
+    const at = parseChorePen(set);
+    const parts = [`autoBreed ${d.settings.get('autoBreed') ? 'on' : 'off'}`];
+    if (!at) parts.push('no chorePen (stand in the pen and say !breed pen here)');
+    else if (!world.blockAt({ x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) })) parts.push(`chorePen ${set} (not loaded here)`);
+    else {
+      const pen = chorePen();
+      parts.push(pen ? `chorePen ${set}: ${penLine(pen)}, ${penAnimals(pen)}` : noPenLine(set));
+    }
+    const chore = food.breedChore;
+    if (chore?.lastWhy) parts.push(`last check: ${chore.lastWhy}`);
+    if (chore?.last) parts.push(`last run: ${chore.last.pairs} pair(s), ${chore.last.babies} bab${chore.last.babies === 1 ? 'y' : 'ies'}`);
+    parts.push(`the chore breeds by day every ${BREED_PERIOD_MS / 60_000} min while a kind has fewer than ${BREED_TARGET} adults, and the food chore may take this pen down to 2 of a kind`);
+    return `breed: ${parts.join('; ')}`;
+  };
   // Track AF: !breed [type] [n]
   d.chat.register({
     name: 'breed',
-    help: `[type] [n] (feed n pairs, default 1, of adult animals within ${BREED_RADIUS} blocks: cow / sheep / mooshroom wheat, pig carrot / potato / beetroot, chicken seeds, rabbit dandelion / carrot)`,
-    group: 'work', example: '!breed cow 2', auto: 'with autoBreed on and chorePen set it breeds that pen by day every 10 minutes while a kind has fewer than 8 adults',
-    run: ({ reply, args }) => {
+    help: `[type] [n] | pen [here|x y z|none] | status (feed n pairs, default 1, of adult animals within ${BREED_RADIUS} blocks, two of a pair always in the same pen: cow / sheep / mooshroom wheat, pig carrot / potato / beetroot, chicken seeds, rabbit dandelion / carrot; pen: the pen the chore keeps)`,
+    group: 'work', example: '!breed pen here', auto: `with autoBreed on and a pen set (!breed pen here, standing inside it) it breeds that pen's own animals by day every 10 minutes while a kind has fewer than ${BREED_TARGET} adults; never animals outside the pen`,
+    run: ({ reply, args, sender }) => {
+      const sub0 = args[0]?.toLowerCase();
+      if (sub0 === 'status') {
+        reply(breedStatus());
+        return;
+      }
+      if (sub0 === 'pen') {
+        const rest = args.slice(1);
+        if (rest[0]?.toLowerCase() === 'none') {
+          d.settings.set('chorePen', 'none');
+          reply('breed: no pen (the chore breeds nothing)');
+          return;
+        }
+        let at: Vec3 | undefined;
+        if (rest.length === 0 || rest[0]?.toLowerCase() === 'here') {
+          const who = sender.kind === 'player' ? pve.playerFeet(strip(sender.name)) : undefined;
+          at = who ?? mobility.loop.state.pos;
+        } else if (rest.length === 3 && rest.every((x) => /^-?\d+(\.\d+)?$/.test(x))) at = { x: Number(rest[0]), y: Number(rest[1]), z: Number(rest[2]) };
+        if (!at) {
+          reply('usage: !breed pen [here|x y z|none] (here: where you stand, inside the pen)');
+          return;
+        }
+        const cell = { x: Math.floor(at.x), y: Math.floor(at.y + 0.01), z: Math.floor(at.z) };
+        const pen = penNear((p) => pens.penAt(p), cell);
+        if (!pen) {
+          reply(`breed: no fenced pen at ${cell.x} ${cell.y} ${cell.z} (a fence, wall or gate all round, at most 25 x 25; stand inside it); chorePen not changed`);
+          return;
+        }
+        d.settings.set('chorePen', `${cell.x} ${cell.y} ${cell.z}`);
+        reply(`breed: chorePen ${cell.x} ${cell.y} ${cell.z}, ${penLine(pen)}, ${penAnimals(pen)}${d.settings.get('autoBreed') ? '' : '; !set autoBreed on to breed it by itself'}`);
+        return;
+      }
       let kind: string | undefined;
       let n = 1;
       for (const w of args.map((x) => x.toLowerCase())) {
