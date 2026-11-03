@@ -869,7 +869,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         const k = readKit(inv, memory());
         const c = controller.status();
         const flight = c.active ? `; flying to ${current?.target.label ?? '?'}: ${c.phase}, ${c.distance !== undefined ? `${Math.round(c.distance)} blocks to go, ` : ''}${c.rockets} rockets used, ${c.goArounds} go-arounds` : current ? `; ${current.status().line}` : '';
-        const worn = k.elytraLeft !== undefined && k.elytraLeft <= elytraWornLimit(d.settings.get('toolWearLimit')) ? ' (worn: no flights)' : '';
+        const worn = k.elytraLeft !== undefined && k.elytraLeft <= elytraWornLimit(d.settings.get('toolWearLimit'), k) ? (k.elytraMending ? ' (set aside to be mended: no flights)' : ' (worn: no flights)') : '';
         reply(`fly: ${kitLine(k)}${worn}${memory().namedBoxSlot !== undefined ? `, box named: slot ${memory().namedBoxSlot}` : ''}${flight}`);
         return;
       }

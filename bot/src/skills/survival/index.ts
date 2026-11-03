@@ -21,7 +21,7 @@ import { ARMOUR_SLOT_NAMES, ArmourController, type EquipResult, type WearResult 
 import { chooseFood, EatController, wantsToEat, type EatResult } from './eat.ts';
 import { DEFAULT_JUNK, DEFAULT_THROWAWAY_MIN, hotbarThrowaway, InventoryKeeper, pickHotbarVictim, THROWAWAY_BLOCKS, type DropResult } from './keeper.ts';
 import { inventorySlot, StackRequests, type ScreenContainers } from './screen.ts';
-import { DEFAULT_TOOL_WEAR_LIMIT, durabilityLeft, makeToolOk, maxDurability } from './tools.ts';
+import { DEFAULT_MEND_AT, DEFAULT_TOOL_WEAR_LIMIT, durabilityLeft, makeToolOk, maxDurability } from './tools.ts';
 
 export * from './armour.ts';
 export * from './eat.ts';
@@ -32,6 +32,8 @@ export * from './tools.ts';
 export interface SurvivalSettings {
   /** A tool with this many uses left or fewer is not chosen. Default 10. */
   toolWearLimit: number;
+  /** A Mending item at or under this percent of its durability is set aside (mendAt). Default 10. */
+  mendAt: number;
   /** Throwaway blocks to keep in the hotbar. Default 16. */
   throwawayMin: number;
   /** Planner penalty radius around hostile mobs (0 = off). Default 4. */
@@ -48,6 +50,7 @@ export interface SurvivalSettings {
 
 export const DEFAULT_SURVIVAL_SETTINGS: Readonly<SurvivalSettings> = Object.freeze({
   toolWearLimit: DEFAULT_TOOL_WEAR_LIMIT,
+  mendAt: DEFAULT_MEND_AT,
   throwawayMin: DEFAULT_THROWAWAY_MIN,
   avoidMobRadius: DEFAULT_AVOID_MOB_RADIUS,
   avoidSpawnerRadius: DEFAULT_AVOID_SPAWNER_RADIUS,
@@ -140,7 +143,10 @@ export class SurvivalKit {
     this.d = deps;
     this.log = deps.logger ?? silentLogger;
     const { world, loop, hotbar, containers, source } = deps;
-    this.toolOk = makeToolOk(() => this.settings().toolWearLimit);
+    this.toolOk = makeToolOk(
+      () => this.settings().toolWearLimit,
+      () => this.settings().mendAt,
+    );
     this.requests = new StackRequests({ source, containers, loop, runtimeId: () => world.self.runtimeId });
     this.eater = new EatController({
       loop,

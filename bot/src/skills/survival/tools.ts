@@ -72,13 +72,43 @@ export function durabilityLeft(item: Pick<ItemStack, 'name' | 'damage'>): number
   return Math.max(0, max - (item.damage ?? 0));
 }
 
+/** Bedrock's enchantment id of Mending (NBT `ench` id 26). */
+export const ENCH_MENDING = 26;
+/** Default `mendAt`: a Mending item at or under this share of its durability (percent) is set aside to be mended. */
+export const DEFAULT_MEND_AT = 10;
+
+/** The item carries Mending (ItemStack.enchants, world/inventory.ts itemEnchants). */
+export function hasMending(item: { enchants?: readonly { id: number }[] | undefined }): boolean {
+  return (item.enchants ?? []).some((e) => e.id === ENCH_MENDING);
+}
+
+/** Uses left at or under which a Mending item is set aside (`pct` of its maximum, rounded up); 0 without durability or pct 0. */
+export function mendReserve(name: string, pct: number): number {
+  const max = maxDurability(name);
+  return max === undefined || pct <= 0 ? 0 : Math.ceil((max * pct) / 100);
+}
+
 /**
- * `toolOk(item)`: false when the item has durability and at most `limit()` uses left; true for
- * anything without durability (blocks, food, an empty hand never reach it).
+ * A Mending item set aside to be mended: worn down to the reserve but not yet to the hard limit (`toolWearLimit`): the
+ * owner wants such an item kept, not used until it breaks (`!mend` repairs it). undefined: not a Mending item, or fine.
  */
-export function makeToolOk(limit: () => number = () => DEFAULT_TOOL_WEAR_LIMIT): (item: Pick<ItemStack, 'name' | 'damage'>) => boolean {
+export function setAsideForMending(item: Pick<ItemStack, 'name' | 'damage' | 'enchants'>, limit: number, pct: number): { left: number; reserve: number } | undefined {
+  if (!hasMending(item)) return undefined;
+  const left = durabilityLeft(item);
+  const reserve = mendReserve(item.name, pct);
+  return left !== undefined && left <= reserve && left > limit ? { left, reserve } : undefined;
+}
+
+/**
+ * `toolOk(item)`: false when the item has durability and at most `limit()` uses left (a Mending item: at most its
+ * mending reserve, `mendAt()` percent of its maximum, when that is more); true for anything without durability
+ * (blocks, food, an empty hand never reach it).
+ */
+export function makeToolOk(limit: () => number = () => DEFAULT_TOOL_WEAR_LIMIT, mendAt?: () => number): (item: Pick<ItemStack, 'name' | 'damage' | 'enchants'>) => boolean {
   return (item) => {
     const left = durabilityLeft(item);
-    return left === undefined || left > limit();
+    if (left === undefined) return true;
+    const reserve = mendAt && hasMending(item) ? mendReserve(item.name, mendAt()) : 0;
+    return left > Math.max(limit(), reserve);
   };
 }

@@ -293,6 +293,37 @@ up 5 s later at time of day 2 to 8, next to the bed; 2 corrections in all (into 
 the night process ended. `!sleep off` then night: still awake after 3 s; `!sleep`: `going to bed` ->
 `sleeping (bed ...)` after 1.9 s -> `good morning (slept 5 s)` after 6.9 s.
 
+## Mending
+
+The owner: a tool or elytra with Mending is not to be worn down to breaking; it is set aside and mended.
+
+- **Read**: Mending is enchantment id 26 in the item's NBT (`ench`, world/inventory.ts `itemEnchants`);
+  `hasMending`, `mendReserve`, `setAsideForMending` in skills/survival/tools.ts.
+- **Set aside** (`mendAt`, default 10 %, 0 = off): the survival kit's tool rule (`makeToolOk`) refuses a Mending
+  item at or under `mendAt` percent of its durability (a diamond pickaxe at 157 of 1561 uses), on top of
+  `toolWearLimit`. The Digger does not dig with it, the armour choice does not pick it, the weapon choice takes a
+  worn blade without Mending before it and the Mending one only when there is nothing else (a fight for its life).
+- **Mining** ends `no_pickaxe` with the reason when the only pickaxe is set aside (`mine iron_ore: stopped at 3/8,
+  the diamond_pickaxe is set aside to be mended (150 uses left; !mend)`); before, a worn pickaxe still counted and
+  the job failed ore after ore with `no_tool`.
+- **Elytra**: a Mending elytra is set aside at 10 % (44 of 432 uses; `elytraWornLimit(toolWearLimit, kit)`): no
+  takeoff (`elytra set aside to be mended: 40 uses left (it has Mending: !mend) ...`), and a flight lands at once
+  when it gets there.
+- **The owner is told** once when an item goes under its reserve (`diamond_pickaxe has Mending and is down to 150
+  uses: set aside so it does not break; !mend diamond_pickaxe to repair it`).
+- **`!mend`** lists the Mending items (where, uses left, set aside or not). `!mend <item>`: a worn piece or the
+  elytra is repaired while worn (`!equip slot N` to wear it); a tool or weapon goes into the offhand (`!offhand`),
+  so the XP orbs the bot picks up repair it (Bedrock repairs a random damaged Mending item held or worn): guard
+  fights, mining coal / redstone / lapis / quartz ore, smelting. `!offhand clear` when it is done (the shield goes
+  back only into an empty offhand).
+- **Settings reach the kit now**: the survival kit took only its built-in defaults; `toolWearLimit`, `mendAt`,
+  `throwawayMin`, `avoidMobRadius`, `avoidSpawnerRadius` (and `!mode careful / bold`) are passed to it
+  (tasks/registry.ts).
+
+Not done yet: a chore that goes and earns the XP by itself (hunting at night or standing at a mob farm until
+the item is mended), and the player's XP level in the status (the `update_attributes` level and experience are
+not read). Not verified on BDS: that an orb picked up with the item in the offhand repairs it (vanilla rule).
+
 ## Open points
 
 - Eating while walking is avoided, not fixed: the input loop could apply the item-use slowdown so a

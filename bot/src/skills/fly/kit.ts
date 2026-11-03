@@ -6,7 +6,7 @@
 // not one; the owner can name one with `!fly box <slot>`, see `FlightKitMemory`). The kit is never
 // dropped by the keeper, never stashed, never unloaded, never used as the stash box, and kept by
 // `!drop all` / `!drop items`; `!drop flightkit` drops it.
-import { durabilityLeft, maxDurability } from '../survival/tools.ts';
+import { DEFAULT_MEND_AT, durabilityLeft, hasMending, maxDurability, mendReserve } from '../survival/tools.ts';
 import { isShulkerBox, shulkerContents, shulkerSlotsUsed } from '../container/chest.ts';
 import type { ItemStack } from '../../world/types.ts';
 
@@ -92,6 +92,8 @@ export interface FlightKit {
   elytraWorn: boolean;
   /** Uses left on the elytra at hand (worn first), undefined without one. */
   elytraLeft: number | undefined;
+  /** The elytra at hand has Mending: it is set aside at its mending reserve (elytraWornLimit), not flown until it breaks. */
+  elytraMending?: boolean;
   /** Rockets in the hotbar (slots 0..8) and in the whole inventory. */
   rocketsHotbar: number;
   rockets: number;
@@ -133,12 +135,18 @@ export function readKit(inv: KitInventory, memory: FlightKitMemory = {}): Flight
   });
   const piece = elytraWorn ? worn : elytraSlot >= 0 ? slots[elytraSlot] : null;
   const elytraLeft = piece ? durabilityLeft(piece) : undefined;
-  return { elytraSlot, elytraWorn, elytraLeft, rocketsHotbar, rockets, boxSlot, boxRockets: box };
+  const elytraMending = !!piece && hasMending(piece);
+  return { elytraSlot, elytraWorn, elytraLeft, ...(elytraMending ? { elytraMending } : {}), rocketsHotbar, rockets, boxSlot, boxRockets: box };
 }
 
-/** `toolWearLimit` + the reserve: at or under this many uses the elytra is "worn" (no takeoff; land now). */
-export function elytraWornLimit(toolWearLimit: number): number {
-  return toolWearLimit + ELYTRA_RESERVE;
+/**
+ * `toolWearLimit` + the reserve: at or under this many uses the elytra is "worn" (no takeoff; land now). A Mending elytra
+ * (`kit.elytraMending`) is set aside earlier, at its mending reserve (DEFAULT_MEND_AT percent: 44 of 432 uses), so it
+ * is mended (`!mend`) instead of flown until it breaks.
+ */
+export function elytraWornLimit(toolWearLimit: number, kit?: Pick<FlightKit, 'elytraMending'>): number {
+  const base = toolWearLimit + ELYTRA_RESERVE;
+  return kit?.elytraMending ? Math.max(base, mendReserve(ELYTRA, DEFAULT_MEND_AT)) : base;
 }
 
 export function elytraMax(): number {
@@ -146,8 +154,8 @@ export function elytraMax(): number {
 }
 
 /** `elytra worn: 25 uses left; I will not fly until it is mended or replaced` */
-export function elytraWornLine(left: number): string {
-  return `elytra worn: ${left} uses left; I will not fly until it is mended or replaced`;
+export function elytraWornLine(left: number, mending = false): string {
+  return mending ? `elytra set aside to be mended: ${left} uses left (it has Mending: !mend); I will not fly it until then` : `elytra worn: ${left} uses left; I will not fly until it is mended or replaced`;
 }
 
 /** `fireworks low: 9 rockets left and the box is empty; give me more (drop them or !bring fireworks_rocket 64)` */
@@ -172,7 +180,7 @@ export type KitRefusal = 'no_elytra' | 'elytra_worn' | 'no_rockets';
  */
 export function kitReady(kit: FlightKit, toolWearLimit: number): { ok: true } | { ok: false; reason: KitRefusal; line: string } {
   if (!kit.elytraWorn && kit.elytraSlot < 0) return { ok: false, reason: 'no_elytra', line: 'fly: no elytra (I need one in the inventory or on my back)' };
-  if (kit.elytraLeft !== undefined && kit.elytraLeft <= elytraWornLimit(toolWearLimit)) return { ok: false, reason: 'elytra_worn', line: elytraWornLine(kit.elytraLeft) };
+  if (kit.elytraLeft !== undefined && kit.elytraLeft <= elytraWornLimit(toolWearLimit, kit)) return { ok: false, reason: 'elytra_worn', line: elytraWornLine(kit.elytraLeft, kit.elytraMending) };
   if (kit.rockets === 0 && kit.boxRockets === 0) return { ok: false, reason: 'no_rockets', line: 'fly: no firework rockets (give me some, or a shulker box of them)' };
   return { ok: true };
 }
@@ -201,10 +209,10 @@ export class SupplyWatch {
         out.push(fireworksLowLine(kit.rockets));
       }
     } else this.saidRockets = undefined;
-    if (kit.elytraLeft !== undefined && kit.elytraLeft <= elytraWornLimit(toolWearLimit)) {
+    if (kit.elytraLeft !== undefined && kit.elytraLeft <= elytraWornLimit(toolWearLimit, kit)) {
       if (this.saidUses !== kit.elytraLeft) {
         this.saidUses = kit.elytraLeft;
-        out.push(elytraWornLine(kit.elytraLeft));
+        out.push(elytraWornLine(kit.elytraLeft, kit.elytraMending));
       }
     } else this.saidUses = undefined;
     return out;

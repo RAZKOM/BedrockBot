@@ -22,7 +22,7 @@ import type { ProcessManager } from '../tasks/process/manager.ts';
 import { MineProcess } from '../tasks/process/mine.ts';
 import { Containers } from '../world/containers.ts';
 import { Hotbar } from '../world/hotbar.ts';
-import type { PacketSource } from '../world/types.ts';
+import type { ItemStack, PacketSource } from '../world/types.ts';
 import type { Chat } from './chat.ts';
 
 /** What the chat commands drive (unit tests fake it). */
@@ -141,7 +141,7 @@ export function mineEndLine(m: MineTask): string {
     case 'low_health':
       return `mine ${name}: stopped at ${s.mined}/${want}, health low`;
     case 'no_pickaxe':
-      return `mine ${name}: stopped at ${s.mined}/${want}, no pickaxe`;
+      return `mine ${name}: stopped at ${s.mined}/${want}, ${m.lastError ?? 'no pickaxe'}`; // e.g. the pickaxe set aside to be mended
     case 'stopped':
       return `mine ${name}: stopped after ${s.mined}/${want}`;
     default:
@@ -176,6 +176,8 @@ export interface FarmCommandDeps {
   mineDirect?: () => boolean;
   /** Track BD: setting `mineMode` (`v3` | `baritone`). */
   mineMode?: () => string;
+  /** The survival kit's tool rule (worn, set aside for mending): a pickaxe failing it ends the mine job with the reason. */
+  toolOk?: (item: ItemStack) => boolean;
   /**
    * Track Z: the afk task's process manager. With it `!farm` and `!mine` are user processes
    * (pre-empted by guard / flee / night and resumed, held by `!pause`, ended by `!stop`, shown by
@@ -240,6 +242,7 @@ export function registerFarmCommands(deps: FarmCommandDeps): FarmCommandsResult 
     ...(deps.mineSeenOnly ? { seenOnly: deps.mineSeenOnly } : {}),
     ...(deps.mineDirect ? { direct: deps.mineDirect } : {}), // Track AQ
     ...(deps.mineMode ? { mode: deps.mineMode } : {}), // Track BD
+    ...(deps.toolOk ? { toolOk: deps.toolOk } : {}),
   });
   const here = () => {
     const p = mob.position();

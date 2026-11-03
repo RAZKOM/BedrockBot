@@ -53,6 +53,7 @@ import type { EntityInfo } from '../../world/types.ts';
 import { chooseTunnel, climbTo, PILLAR_SPARE, planTunnel, runTunnel, type TunnelPlan, type TunnelWorld } from './tunnel.ts'; // Track AQ; Track BK: climbTo
 import { oreKind, veinCentre, veinFrom, veinRadius } from './vein.ts'; // Track AQ
 import { DEFAULT_JUNK } from '../survival/keeper.ts';
+import { durabilityLeft, hasMending } from '../survival/tools.ts';
 
 export type MineState = 'idle' | 'scan' | 'walk' | 'dig' | 'collect' | 'waiting' | 'paused' | 'done' | 'none_left' | 'low_health' | 'no_pickaxe' | 'stopped' | 'failed';
 
@@ -184,6 +185,8 @@ export interface MineSkills {
 }
 
 export interface MineDeps {
+  /** The tool rule (SurvivalKit.toolOk: worn, or a Mending item set aside to be mended): a pickaxe failing it does not count. */
+  toolOk?: (item: ItemStack) => boolean;
   skills: MineSkills;
   memory: OreMemory;
   /** Plan only (Navigator.plan) with the given goto options: the tunnel-length check. */
@@ -280,8 +283,9 @@ export function needsPickaxe(name: string): boolean {
   return blockMining(name)?.harvest?.types.includes('pickaxe') ?? false;
 }
 
-export function hasPickaxe(slots: readonly (ItemStack | null)[]): boolean {
-  return slots.slice(0, 36).some((s) => !!s && s.count > 0 && s.name.endsWith('_pickaxe'));
+/** A pickaxe is carried (`toolOk`: one the Digger may use: not worn out, not set aside for mending). */
+export function hasPickaxe(slots: readonly (ItemStack | null)[], toolOk: (item: ItemStack) => boolean = () => true): boolean {
+  return slots.slice(0, 36).some((s) => !!s && s.count > 0 && s.name.endsWith('_pickaxe') && toolOk(s));
 }
 
 /** Goal: the eye (feet + 1.62) within `r` of the block's centre. */
@@ -598,8 +602,8 @@ export class MineTask {
       this.exploring = undefined; // Track BD: ore known again
       const target = this.directOn() ? cands[0] : this.pickReachable(cands); // Track AQ: the approach itself probes (walk or tunnel)
       if (!target) continue; // all probed candidates unreachable: the next scan takes the next ones
-      if (needsPickaxe(target.name) && !hasPickaxe(this.d.inventory.slots)) {
-        this.lastError = `no pickaxe for ${target.name}`;
+      if (needsPickaxe(target.name) && !hasPickaxe(this.d.inventory.slots, this.d.toolOk)) {
+        this.lastError = this.pickaxeWhy(target.name);
         return this.end(gen, 'no_pickaxe');
       }
       this.stats.targeted.push({ ...target.p });
@@ -878,12 +882,20 @@ export class MineTask {
   /** Track BD review: the last prune left out an ore of this name because no carried tool harvests it. */
   private noTool: string | undefined;
 
+  /** Why no pickaxe counts: none carried, or the ones carried are worn out or set aside to be mended. */
+  private pickaxeWhy(name: string): string {
+    const all = this.d.inventory.slots.slice(0, 36).filter((s): s is ItemStack => !!s && s.count > 0 && s.name.endsWith('_pickaxe'));
+    if (all.length === 0) return `no pickaxe for ${name}`;
+    const mending = all.find((s) => hasMending(s));
+    return mending ? `the ${mending.name} is set aside to be mended (${durabilityLeft(mending) ?? '?'} uses left; !mend)` : `the pickaxe is worn out (${all.map((s) => `${s.name} ${durabilityLeft(s) ?? '?'} left`).join(', ')})`;
+  }
+
   /** Track BD review: a carried tool (or the hand) harvests the block `name` (dig/breakTime.ts `canHarvest`, the Digger's rule; the Digger's pullTool brings a main-inventory tool into the hotbar). */
   private harvestable(name: string): boolean {
     const b = blockMining(name);
     if (!b?.harvest) return true;
     if (canHarvest(b, null)) return true;
-    return this.d.inventory.slots.slice(0, 36).some((it) => !!it && it.count > 0 && canHarvest(b, toolOf(it.name)));
+    return this.d.inventory.slots.slice(0, 36).some((it) => !!it && it.count > 0 && (this.d.toolOk?.(it) ?? true) && canHarvest(b, toolOf(it.name)));
   }
 
   private pruneNow(pos: Vec3): PruneResult {
@@ -925,8 +937,8 @@ export class MineTask {
     const feet = cellOf(pos);
     const hi = headingMember(cands, feet);
     const head = cands[hi];
-    if (head?.kind === 'ore' && needsPickaxe(head.name) && !hasPickaxe(this.d.inventory.slots)) {
-      this.lastError = `no pickaxe for ${head.name}`;
+    if (head?.kind === 'ore' && needsPickaxe(head.name) && !hasPickaxe(this.d.inventory.slots, this.d.toolOk)) {
+      this.lastError = this.pickaxeWhy(head.name);
       return 'no_pickaxe';
     }
     if (cands.some((c) => c.p.y < feet.y)) this.surface ??= { ...feet }; // the way back up at the end (returnUp)
