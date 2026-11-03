@@ -32,9 +32,47 @@ describe('build order', () => {
     expect(o.map((b) => `${b.pos.x},${b.pos.y}`)).toEqual(['2,0', '1,0', '0,0', '2,1', '1,1', '0,1', '2,2', '1,2', '0,2']);
   });
 
-  it('clear: top layer first, nearest first', () => {
+  it('clear: top layer first; the next layer starts at the corner where the last one ended', () => {
     const c = topDown({ min: { x: 0, y: 0, z: 0 }, max: { x: 2, y: 1, z: 0 } }, { x: 0, y: 0, z: 0 });
-    expect(c.map((p) => `${p.x},${p.y}`)).toEqual(['0,1', '1,1', '2,1', '0,0', '1,0', '2,0']);
+    expect(c.map((p) => `${p.x},${p.y}`)).toEqual(['0,1', '1,1', '2,1', '2,0', '1,0', '0,0']);
+  });
+
+  it('clear: lanes back and forth along the longer side from the corner nearest the bot, every dig next to the one before', () => {
+    const box = { min: { x: 0, y: 0, z: 0 }, max: { x: 9, y: 0, z: 5 } }; // 10 along x, 6 across: lanes of 4 then 2
+    const c = topDown(box, { x: 11, y: 0, z: -1 }, 4);
+    expect(c).toHaveLength(60);
+    expect(new Set(c.map((p) => `${p.x},${p.z}`)).size).toBe(60);
+    expect(c[0]).toEqual({ x: 9, y: 0, z: 0 }); // the corner nearest the bot
+    // every dig next to the one before, except one step of at most a lane's width at the lane change
+    const steps = c.slice(1).map((p, i) => Math.abs(p.x - c[i]!.x) + Math.abs(p.z - c[i]!.z));
+    expect(steps.filter((d) => d > 1)).toHaveLength(1);
+    expect(Math.max(...steps)).toBeLessThanOrEqual(4);
+    // the first lane is z 0..3 swept towards -x, the second z 4..5 swept back towards +x
+    expect(c.slice(0, 40).every((p) => p.z <= 3)).toBe(true);
+    expect(c[39]!.x).toBe(0);
+    expect(c[40]).toMatchObject({ x: 0 });
+    expect(c.at(-1)!.x).toBe(9);
+  });
+
+  it('clear: the planned walk between stands stays short (a 32 x 32 layer: was 863 stand moves and about 10 000 blocks), and a box 3 deep is dug out completely', () => {
+    const walk = (w: number, d: number) => {
+      const p = planBuild(new FlatWorld(), spec(`clear 1 ${F - d} 1 ${w} ${F - 1} ${w}`), { start: START, scaffold: false });
+      let blocks = 0;
+      let prev = START;
+      for (const s of p.steps) {
+        const st = s.op === 'dig' ? s.stand : undefined;
+        if (!st) continue;
+        blocks += Math.hypot(st.x - prev.x, st.y - prev.y, st.z - prev.z);
+        prev = st;
+      }
+      return { work: p.work, skipped: p.skipped.length, blocks };
+    };
+    const flat = walk(32, 1);
+    expect(flat).toMatchObject({ work: 1024, skipped: 0 });
+    expect(flat.blocks).toBeLessThan(600);
+    const deep = walk(16, 3);
+    expect(deep).toMatchObject({ work: 768, skipped: 0 });
+    expect(deep.blocks).toBeLessThan(500);
   });
 });
 
