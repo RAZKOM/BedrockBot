@@ -295,8 +295,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   const supply = new SupplyWatch();
   processes.add(new FlightProcess(controller));
   let current: FlyProcess | undefined;
-  const start = (target: FlyTarget): FlyProcess => {
-    terrain.clear(); // Track BL: a flight reads the columns afresh
+  /** `adopt`: take over the flight in the air for this target (FlyProcess.adopt) instead of a takeoff; the trip before it hands over. */
+  const start = (target: FlyTarget, o: { adopt?: { cruiseY?: number } } = {}): FlyProcess => {
+    if (!o.adopt) terrain.clear(); // Track BL: a flight reads the columns afresh (a taken-over flight keeps what it read)
 
     const p = new FlyProcess(target, {
       controller,
@@ -317,6 +318,10 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       supply,
       log,
     });
+    if (o.adopt) {
+      current?.handOver(); // replaced below without landing: the flight is this trip's now
+      p.adopt(o.adopt.cruiseY);
+    }
     current = p;
     processes.add(p);
     void p.result.finally(() => {
@@ -534,6 +539,43 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing' || r.reason?.startsWith('fly: no open sky')) return walk();
     if (r.reason === 'interrupted' || r.reason === 'replaced') return Promise.resolve({ ok: false, reason: 'interrupted' });
     return Promise.resolve({ ok: false, reason: flyEndLine(r) });
+  };
+  /**
+   * A new trip (`!goto`, `!come`, `!fly`) while a flight is in the air: the flight takes the new goal there
+   * (the landing found as for any flight, the cruise raised when the new trip needs more) instead of landing
+   * first; the trip that started it ends `replaced` and its walk never runs (it used to run after the
+   * landing and replace the new walk, so the bot went where it was first sent). Undefined when nothing is
+   * in the air (or the flight landed while the landing was looked for): the trip starts from the ground.
+   */
+  const takeOver = async (goalBlock: Vec3, label: string, half: number, exact: boolean): Promise<FlyProcess | undefined> => {
+    const old = current;
+    if (!controller.active || old?.phase !== 'flying') return undefined;
+    const plan = await landingFor(goalBlock, label, exact ? half : undefined);
+    if (!controller.active || current !== old || old.phase !== 'flying') return undefined;
+    const target = targetFromPlan(plan, { label, goal: goalBlock, half, ...(exact ? { exact: half } : {}) });
+    const from = position();
+    const cruiseY = from ? cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') }).y : undefined;
+    const p = start(target, { adopt: cruiseY !== undefined ? { cruiseY } : {} });
+    const walk = plan.kind === 'cell' || plan.kind === 'fallback' ? plan.walk : 0;
+    const dist = from ? Math.round(hdist(from, target)) : undefined;
+    if (p.retargeted) d.chat.say(`flying on to ${label}${dist !== undefined ? ` (${dist} blocks)` : ''}${walk > 0 ? `, then walking ${Math.round(walk)} blocks` : ''}`);
+    else d.chat.say(`fly: too close to the landing to turn now; landing first, then going to ${label}`);
+    if (p.retargeted && plan.kind === 'fallback') {
+      const line = landingLine(target, walk);
+      if (line) d.chat.say(line);
+    }
+    return p;
+  };
+  /**
+   * The rest of a trip that took over a flight: the walk after the landing as after any flight; a flight
+   * that could not be turned (`retargeted` false) landed where it was going, so the trip starts again from
+   * the ground (`again`: it may fly again).
+   */
+  const afterTakeOver = async (p: FlyProcess, again: () => Promise<SkillResult>, walk: () => Promise<SkillResult>): Promise<SkillResult> => {
+    const r = await p.result;
+    const landed = r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing';
+    if (!p.retargeted && landed) return again();
+    return afterFlight(r, walk);
   };
   /**
    * Track AU2: the leg of a walk to open sky: the nearest cell on the way to the goal (within `step`
@@ -781,6 +823,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     // Track BH: the walk, and a glide down when it finds no way to a goal far below
     const walkOrGlide = async (): Promise<SkillResult> => glideFallback(await plain(), goal.p, name, 1, plain);
     const legWalk = (leg: Goal) => walk0(leg, opts, `walking to ${name} (to open sky)`);
+    const air = await takeOver(goal.p, name, 1, false);
+    if (air) return afterTakeOver(air, () => pve.walk(goal, opts, label), plain);
     const f = await autoFly(goal.p, name, 1);
     // Track BL: a walk that does not fly looks for a takeoff again on the way
     if (!f) return watchWalk(() => goal.p, name, 1, plain, plain, legWalk).then((r) => glideFallback(r, goal.p, name, 1, plain));
@@ -794,8 +838,10 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     };
     const block = playerBlock();
     const plain = () => come0(name, o);
-    const f = block ? await autoFly(block, name, 2) : undefined;
     if (!block) return plain();
+    const air = await takeOver(block, name, 2, false);
+    if (air) return afterTakeOver(air, () => pve.come(name, o), plain);
+    const f = await autoFly(block, name, 2);
     const legWalk = (leg: Goal) => walk0(leg, {}, `walking to ${name} (to open sky)`);
     if (!f) return watchWalk(playerBlock, name, 2, plain, plain, legWalk).then((r) => glideFallback(r, block, name, 2, plain));
     return runAuto(f, playerBlock, name, 2, plain, legWalk);
@@ -847,14 +893,15 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     return { error: `fly: no waypoint or player "${what}" (!wp list; a player must be in sight or on the locator bar)` };
   };
 
-  d.chat.register({
+  const flyDef: Parameters<typeof d.chat.register>[0] = {
     name: 'fly',
     help: '<x y z> | <waypoint> | <player> | home | stop | status | box [<slot>] (fly there with the elytra and land on it; stop: land now)',
     tier: 'more', // Track AU2: come and goto fly on their own; the front door keeps !come
     group: 'go',
     example: '!fly home',
     auto: 'come and goto fly by themselves over flyMin blocks (autoFly), landing on the nearest landable cell and walking the rest; the flight kit (elytra, rockets, the fireworks box) is never dropped, stashed or unloaded',
-    run: ({ reply, args, sender }) => {
+    run: (ctx) => {
+      const { reply, args, sender } = ctx;
       const sub = args[0]?.toLowerCase();
       if (sub === 'stop') {
         const p = current;
@@ -899,6 +946,29 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       const t = targetOf(args, sender.kind === 'player' ? sender.name : undefined);
       if ('error' in t) {
         reply(t.error);
+        return;
+      }
+      // already in the air: the flight takes the new goal there (no landing first); after a landing it could not avoid, `!fly` again from the ground
+      if (controller.active && current?.phase === 'flying') {
+        void (async () => {
+          const p = await takeOver(t.goal, t.label, t.half, true);
+          if (!p) {
+            reply('fly: the flight is landing; try again once it stands');
+            return;
+          }
+          const r = await p.result;
+          const landed = r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing';
+          if (!p.retargeted && landed) {
+            void flyDef.run(ctx);
+            return;
+          }
+          if (r.reason === 'interrupted' || r.reason === 'replaced') return;
+          reply(flyEndLine(r));
+          if (!landed || (r.ok && r.target.cell?.kind === 'goal' && r.report?.onTarget === true)) return;
+          const w = t.player ? await come0(t.player) : await walk0({ type: 'block', p: t.goal }, {}, `walking to ${t.label}`);
+          if (w.ok) reply(`walked to ${t.label}`);
+          else if (w.reason !== 'interrupted') reply(`fly: landed, but the walk to ${t.label} failed (${w.reason ?? 'failed'})`);
+        })();
         return;
       }
       const k = readKit(inv, memory());
@@ -957,7 +1027,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         else if (w.reason !== 'interrupted') reply(`fly: landed, but the walk to ${t.label} failed (${w.reason ?? 'failed'})`);
       })();
     },
-  });
+  };
+  d.chat.register(flyDef);
   d.chat.register({
     name: 'land',
     help: '(land now on the nearest safe ground)',
