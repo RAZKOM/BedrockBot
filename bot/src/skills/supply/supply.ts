@@ -24,7 +24,10 @@
 //
 // Users: `!bring` (the home route is its own withdrawal; its extract is boxes.ts takeOut), `!build` (the materials
 // count carried boxes; the runner refills a block it ran out of and tops up the scaffold blocks before a column,
-// then stows the rest; runner.ts), the throwaway top-up (`topUpThrowaway`). The stash step (stash.ts) keeps its own
+// then stows the rest; runner.ts), the throwaway top-up (`topUpThrowaway`), and through `restockFromBoxes` /
+// `carried`: the eater (no food loose: 16 good food out of a box, never mid-fight or off the ground), the food chore
+// (boxed food counts with the loose food), tunnel and branch torches (32 out of a box when none is loose), and the
+// flight (rockets in any other carried box before the takeoff; the kit check counts them). The stash step (stash.ts) keeps its own
 // packing order for filling boxes; it places and picks up with the same cell rules (boxSpots).
 import { silentLogger, type Logger } from '../../log.ts';
 import { maxStackOf } from '../container/chest.ts';
@@ -260,6 +263,16 @@ const supplies = new WeakMap<object, Supply>();
 export function setSupply(task: object, s: Supply): void {
   supplies.set(task, s);
 }
+/**
+ * A job out of an item (torches for a tunnel, food, rockets): n of it out of the carried shulker boxes, when they hold
+ * any (Supply.ensure; the home route is not taken). True when some came out.
+ */
+export async function restockFromBoxes(task: object | undefined, item: string | readonly string[], n: number): Promise<boolean> {
+  const s = supplyOf(task);
+  if (!s || s.carried(item) <= 0) return false;
+  return (await s.ensure(item, n)).ok;
+}
+
 export function supplyOf(task: object | undefined): Supply | undefined {
   return task ? supplies.get(task) : undefined;
 }

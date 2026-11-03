@@ -66,6 +66,8 @@ export function parseChorePen(v: string): Vec3 | undefined {
 }
 
 export interface FoodDeps {
+  /** Hunger points of the food inside the carried shulker boxes (Supply.carried): counted with the loose food by the chore. */
+  boxedFoodPoints?(): number;
   processes: ProcessManager;
   settings: Pick<RuntimeSettings, 'get'>;
   hunter: Hunter;
@@ -333,7 +335,7 @@ export class FoodChore extends BaseProcess {
     const d = this.d;
     return {
       auto: d.settings.get('autoFood'),
-      points: inventoryFoodPoints(d.inventory.slots),
+      points: inventoryFoodPoints(d.inventory.slots) + (d.boxedFoodPoints?.() ?? 0),
       min: d.settings.get('foodMin'),
       day: d.isDay(),
       users: d.processes.userProcesses().length,

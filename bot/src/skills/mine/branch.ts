@@ -65,6 +65,9 @@ export const BRANCH_MIN_HEALTH = 10;
 /** A torch every this many blocks of tunnel. */
 export const TORCH_EVERY = 8;
 /** A torch anywhere in the inventory (Track BK: shared with !tunnel). */
+/** Torches taken out of a carried box at once when none is loose. */
+export const TORCH_RESTOCK = 32;
+
 export function carriesTorch(slots: readonly (ItemStack | null)[]): boolean {
   return slots.slice(0, 36).some((x) => !!x && x.count > 0 && x.name === 'torch');
 }
@@ -164,6 +167,8 @@ const fmt = (p: Vec3) => `${p.x} ${p.y} ${p.z}`;
 
 /** What branch mining needs from the bot (wired by chat/commands-explore.ts `attachBranch`). */
 export interface BranchHost {
+  /** Make n of an item loose out of the carried shulker boxes (Supply.ensure); false when none came out. */
+  restock?(item: string, n: number): Promise<boolean>;
   dig(p: Vec3, opts?: DigOptions): Promise<DigResult>;
   goto(goal: Goal, opts?: GotoOptions): Promise<SkillResult>;
   place?(p: Vec3, opts?: PlaceOptions): Promise<PlaceResult>;
@@ -471,7 +476,8 @@ export class BranchRun {
 
   private async torch(behind: Vec3): Promise<void> {
     if (++this.sinceTorch < TORCH_EVERY || !this.h.allowPlace() || !this.h.place) return;
-    if (!carriesTorch(this.h.slots())) return;
+    // none loose: the torches in a carried box (the owner: the boxes' contents were never used by the jobs)
+    if (!carriesTorch(this.h.slots()) && !(await this.h.restock?.('torch', TORCH_RESTOCK))) return;
     this.sinceTorch = 0;
     const r = await placeTorch((p, o) => this.h.place!(p, o), behind);
     if (r.ok) this.stats.torches++;

@@ -36,6 +36,7 @@ import {
   wantsToEat,
   wearMove,
 } from '../../../src/skills/survival/index.ts';
+import { BOX_FOOD_TAKE, type EatDeps } from '../../../src/skills/survival/eat.ts';
 import type { ItemV4 } from '../../../src/world/packets.ts';
 import type { BlockInfo, EntityInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 import { harness, fakeWorld } from './fakes.ts';
@@ -226,7 +227,7 @@ describe('food choice', () => {
   });
 });
 
-function eatSetup(slots: (ItemStack | null)[], food = 10) {
+function eatSetup(slots: (ItemStack | null)[], food = 10, extra: Partial<Pick<EatDeps, 'fromBoxes' | 'canStop'>> = {}) {
   const src = new FakeSource();
   const loop = new TickLoop();
   const inv = new FakeInv(slots);
@@ -253,6 +254,7 @@ function eatSetup(slots: (ItemStack | null)[], food = 10) {
       inv.slots[slot] = null;
       return Promise.resolve(7);
     },
+    ...extra,
   });
   const clicks = () => src.sent.filter((p) => p.name === 'inventory_transaction').map((p) => (p.params as { transaction: { transaction_type: string; transaction_data: { action_type: string } } }).transaction);
   return { src, loop, inv, self, selects, eater, clicks, fetched };
@@ -284,6 +286,42 @@ describe('EatController', () => {
     const r = await t.eater.eat();
     expect(r).toMatchObject({ ok: true, item: 'cooked_beef', slot: 7, fetched: true });
     expect(t.fetched).toEqual([20]);
+  });
+
+  it('no food loose: takes food out of a carried box (the good foods only), then eats; not while it cannot stop', async () => {
+    const asked: { names: readonly string[]; n: number }[] = [];
+    const t: ReturnType<typeof eatSetup> = eatSetup(slots36({ 0: item('dirt') }), 10, {
+      fromBoxes: (names, n) => {
+        asked.push({ names, n });
+        t.inv.slots[5] = item('cooked_beef', n);
+        return Promise.resolve(true);
+      },
+    });
+    t.loop.onTick = () => {
+      if (t.clicks().length) t.self.food = 18;
+    };
+    const r = await t.eater.eat();
+    expect(r).toMatchObject({ ok: true, item: 'cooked_beef' });
+    expect(asked).toHaveLength(1);
+    expect(asked[0]!.n).toBe(BOX_FOOD_TAKE);
+    expect(asked[0]!.names).toContain('cooked_beef');
+    expect(asked[0]!.names).not.toContain('rotten_flesh');
+    // only rotten flesh loose: the box food is taken out too and eaten instead
+    const asked2: number[] = [];
+    const u: ReturnType<typeof eatSetup> = eatSetup(slots36({ 0: item('rotten_flesh', 4) }), 4, {
+      fromBoxes: (_n, n) => {
+        asked2.push(n);
+        u.inv.slots[5] = item('bread', n);
+        return Promise.resolve(true);
+      },
+    });
+    u.loop.onTick = () => {
+      if (u.clicks().length) u.self.food = 9;
+    };
+    expect(await u.eater.eat()).toMatchObject({ ok: true, item: 'bread' });
+    // in a fight (cannot stop): no box is placed
+    const v = eatSetup(slots36({ 0: item('dirt') }), 10, { fromBoxes: () => Promise.reject(new Error('placed a box mid-fight')), canStop: () => false });
+    expect((await v.eater.eat()).reason).toBe('no_food');
   });
 
   it('does nothing when not hungry or without food; force eats above 18 but not at 20', async () => {
