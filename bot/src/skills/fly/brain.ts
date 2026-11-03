@@ -118,6 +118,13 @@ export interface BrainOptions {
    */
   ledge?: { yaw: number };
   /**
+   * The vertical takeoff (docs/flight.md "Vertical takeoff"): jump, start the glide looking straight up and
+   * fire rockets until the climb's momentum carries the body `top` blocks over the start, then the usual
+   * climb along `takeoffYaw` (held until TAKEOFF_HOLD above that point). Needs only the column over the
+   * start to be open up to there: a clearing in a forest, a courtyard, a shaft.
+   */
+  vertical?: { top: number };
+  /**
    * Track BL (docs/flight.md "Terrain-safe cruise"): the column query (live, else cache, else unknown) the
    * climb and the cruise keep their terrain floor over (the sink line never goes under it), the dive descent
    * checks its corridor against (unknown is not air there), and the crash notes read.
@@ -157,6 +164,9 @@ export interface FlightStats {
   /** Track BH, a ledge takeoff: ticks of the walk to the edge, and the height the fall took until the glide flew (LEDGE_SPEED). */
   ledgeWalkTicks?: number;
   ledgeDrop?: number;
+  /** The vertical takeoff: the height over the start where the straight climb handed over, and the rockets it fired. */
+  verticalTop?: number;
+  verticalRockets?: number;
   /** Track BL: one line per terrain avoidance (reason, distance, height gained), and the dives flown. */
   avoidances: string[];
   dives: number;
@@ -175,6 +185,14 @@ export function climbPitchFor(height: number): number {
   return height <= 15 ? -20 : height <= 30 ? -30 : CLIMB_PITCH;
 }
 
+/**
+ * Blocks a body rising at vy straight up still climbs after the boost ends: looking straight up the glide has
+ * no lift, so gravity takes the whole 0.08 a tick (with the drag a little more): vy^2 / (2 x 0.1), on the
+ * short side (climbMomentum below is the level glide's, about four times this).
+ */
+export function verticalCoast(vy: number): number {
+  return vy > 0 ? (vy * vy) / 0.2 : 0;
+}
 /** Blocks a body rising at vy still climbs after the boost ends (pitched level: vy decays by about 0.04 per tick). */
 export function climbMomentum(vy: number): number {
   return vy > 0 ? (vy * vy) / 0.08 : 0;
@@ -195,6 +213,8 @@ const GOAROUND_OUT = APPROACH_DISTANCE + 12;
 export const LOOKAHEAD_TICKS = 20;
 /** Track AU2: the climb holds the takeoff heading until this far above the start (above a tree). */
 const TAKEOFF_HOLD = 12;
+/** The vertical takeoff's look: straight up (negative pitch = up). */
+export const VERTICAL_PITCH = -90;
 /** Track AU2: the lateral swing of the S-turns (blocks each side of the line) and their heading off the bearing (degrees). */
 const STURN_WIDTH = 12;
 const STURN_ANGLE = 70;
@@ -231,7 +251,7 @@ export class FlightBrain {
   // (entryAbove is set by the cruise when it hands over to the approach)
   /** Why the flight is ending early (set by `landNow`), kept for the outcome. */
   private endReason: FlightEndReason | undefined;
-  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'terrain' | 'highCruise'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral' };
+  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral' };
   private jumped = false;
   private requested = false;
   private wasGliding = false;
@@ -295,6 +315,7 @@ export class FlightBrain {
       takeoffYaw: opts.takeoffYaw ?? opts.ledge?.yaw,
       note: opts.note,
       ledge: opts.ledge,
+      vertical: opts.vertical,
       terrain: opts.terrain,
       highCruise: opts.highCruise,
       clearance: opts.clearance ?? 12,
@@ -435,13 +456,14 @@ export class FlightBrain {
 
   /** The heading the takeoff and the early climb hold: the sky check's heading until TAKEOFF_HOLD above the start, else the target's. */
   private climbYaw(b: FlightBody): number {
-    if (this.o.takeoffYaw !== undefined && this.startY !== undefined && b.pos.y < this.startY + TAKEOFF_HOLD) return this.o.takeoffYaw;
+    if (this.o.takeoffYaw !== undefined && this.startY !== undefined && b.pos.y < this.startY + (this.o.vertical?.top ?? 0) + TAKEOFF_HOLD) return this.o.takeoffYaw;
     return yawTo(b.pos, this.target);
   }
 
   private takeoff(i: BrainInput, ctl: BrainControl): BrainControl {
     const b = i.body;
     if (this.o.ledge) return this.ledgeTakeoff(i, ctl, this.o.ledge.yaw);
+    if (this.o.vertical) return this.verticalTakeoff(i, ctl, this.o.vertical.top);
     ctl.yaw = turnTowards(i.yaw, this.climbYaw(b), 30);
     ctl.pitch = 0;
     if (b.gliding) {
@@ -460,6 +482,44 @@ export class FlightBrain {
       ctl.pitch = this.o.climbPitch;
     } else if (b.onGround && this.jumped && !this.requested) {
       // back on the ground without a glide (the jump was spent): jump again
+      this.jumped = false;
+    }
+    return ctl;
+  }
+
+  /**
+   * The vertical takeoff (docs/flight.md "Vertical takeoff"): the jump, the glide requested on the first
+   * falling tick with the look straight up, a rocket whenever none burns, until the body plus its climb's
+   * momentum reaches `top` over the start (or no rocket is left); then the usual climb, which pitches down
+   * a little to gain speed from the near hover and fires its next rocket at the climb pitch.
+   */
+  private verticalTakeoff(i: BrainInput, ctl: BrainControl, top: number): BrainControl {
+    const b = i.body;
+    ctl.yaw = turnTowards(i.yaw, this.climbYaw(b), 30);
+    ctl.pitch = VERTICAL_PITCH;
+    if (b.gliding) {
+      ctl.glide = true;
+      const start = this.startY ?? b.pos.y;
+      // the hand-over only once the body itself is over the top (pitched over below it, the climb turns into
+      // what it rose out of); a rocket whenever none burns and the coast straight up would not get there
+      if (b.pos.y >= start + top || (i.rockets <= 0 && b.boostTicks === 0)) {
+        this.stats.verticalTop = b.pos.y - start;
+        this.o.note?.(`vertical takeoff: ${this.stats.verticalTop.toFixed(1)} up (aiming for ${top}), ${this.stats.verticalRockets ?? 0} rocket${this.stats.verticalRockets === 1 ? '' : 's'}; the climb turns to heading ${Math.round(this.climbYaw(b))}`);
+        this.phase = 'climb';
+        return this.climb(i, ctl);
+      }
+      if (b.boostTicks === 0 && b.pos.y + verticalCoast(b.vel.y) < start + top && this.fire(i, ctl, 'climb')) this.stats.verticalRockets = (this.stats.verticalRockets ?? 0) + 1;
+      return ctl;
+    }
+    if (b.onGround && !this.jumped) {
+      this.jumped = true;
+      ctl.jump = true;
+      return ctl;
+    }
+    if (!b.onGround && b.vel.y < 0) {
+      this.requested = true;
+      ctl.glide = true;
+    } else if (b.onGround && this.jumped && !this.requested) {
       this.jumped = false;
     }
     return ctl;
