@@ -24,7 +24,7 @@ import type { LandingCell, LandingPlan } from '../../skills/fly/landing.ts';
 import { glideOptions, type Ledge } from '../../skills/fly/glide.ts';
 import { HIGH_CRUISE_Y, highCruiseWanted } from '../../skills/fly/terrain.ts'; // Track BL
 import type { SkillResult } from '../../skills/types.ts';
-import { BaseProcess, PRIORITY, type ProcessStatus, type StopReason } from './manager.ts';
+import { BaseProcess, PRIORITY, type ProcessKind, type ProcessStatus, type StopReason } from './manager.ts';
 
 /** The flight in the air outranks flee (100): nothing pre-empts a glide. */
 export const FLIGHT_PRIORITY = PRIORITY.flee + 1;
@@ -132,8 +132,9 @@ export interface FlyOutcome {
 }
 
 export class FlyProcess extends BaseProcess {
-  readonly name = 'fly';
-  readonly kind = 'user' as const;
+  readonly name: string;
+  readonly kind: ProcessKind;
+  private readonly prio: number;
   readonly target: FlyTarget;
   readonly result: Promise<FlyOutcome>;
   phase: FlyPhase = 'prepare';
@@ -146,8 +147,15 @@ export class FlyProcess extends BaseProcess {
   private readonly distance: number;
   private flight: Promise<FlightReport> | undefined;
 
-  constructor(target: FlyTarget, deps: FlyDeps) {
+  /**
+   * `as`: the trip home (pve.returnHome through commands-fly) flies as the low-priority home return: named `home`,
+   * kind `auto`, PRIORITY.home, so !stop, a death and a new command drop it as they drop the walk home.
+   */
+  constructor(target: FlyTarget, deps: FlyDeps, as: { name?: string; kind?: ProcessKind; priority?: number } = {}) {
     super();
+    this.name = as.name ?? 'fly';
+    this.kind = as.kind ?? 'user';
+    this.prio = as.priority ?? PRIORITY.user;
     this.target = target;
     this.d = deps;
     this.log = deps.log ?? silentLogger;
@@ -159,7 +167,7 @@ export class FlyProcess extends BaseProcess {
   }
 
   get priority(): number {
-    return PRIORITY.user;
+    return this.prio;
   }
 
   /** Land now (`!fly stop`, `!land`): the trip then finishes its ground work. */

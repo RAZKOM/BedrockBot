@@ -516,7 +516,7 @@ describe('fly: the kit rules', () => {
  * |x|, |z| <= 10 with a 2-high tunnel at x = 0 (the bot underground), optionally a mountain plateau
  * 100 high around the player (its top more than 80 above the bot: skyTop's scan starts inside it).
  */
-function comeRig(o: { tunnel?: boolean; mountain?: boolean } = {}) {
+function comeRig(o: { tunnel?: boolean; mountain?: boolean; home?: { x: number; y: number; z: number }; users?: number } = {}) {
   const solid = (x: number, y: number, z: number): boolean => {
     if (y < -64 || y > 319) return false;
     if (y <= FEET - 1) return true;
@@ -534,7 +534,9 @@ function comeRig(o: { tunnel?: boolean; mountain?: boolean } = {}) {
   const walks: Goal[] = [];
   const comes: string[] = [];
   const playerAt = { x: 0.5, y: o.mountain ? FEET + 101 : FEET, z: 300.5 };
+  const homes: string[] = [];
   const pve = {
+    returnHome: (why: string) => (homes.push(why), Promise.resolve({ ok: true })),
     walk: (g: Goal) => (walks.push(g), Promise.resolve({ ok: false, reason: 'interrupted' })),
     come: (n: string) => (comes.push(n), Promise.resolve({ ok: true })),
     playerFeet: (n: string) => (n === 'Steve' ? playerAt : undefined),
@@ -542,7 +544,7 @@ function comeRig(o: { tunnel?: boolean; mountain?: boolean } = {}) {
     hotbar: undefined,
   };
   const settings = new RuntimeSettings();
-  const task = { name: 'afk', stop: () => {} };
+  const task = { name: 'afk', stop: () => {}, ...(o.home ? { home: { get: () => o.home } } : {}) };
   const deps = {
     chat: { register: () => {}, say: (m: string) => said.push(m) },
     task,
@@ -550,7 +552,7 @@ function comeRig(o: { tunnel?: boolean; mountain?: boolean } = {}) {
     mobility: { loop },
     skills: {},
     world,
-    processes: { add: (p: unknown) => added.push(p) },
+    processes: { add: (p: unknown) => added.push(p), find: () => [], stop: () => true, userProcesses: () => Array.from({ length: o.users ?? 0 }, () => ({})) },
     settings,
     pve,
     log: silentLogger,
@@ -558,13 +560,38 @@ function comeRig(o: { tunnel?: boolean; mountain?: boolean } = {}) {
     needsWalking: (c: string) => `${c} needs walking`,
   } as unknown as CommandDeps;
   registerFlyCommands(deps);
-  return { pve: pve as unknown as { come(n: string): Promise<SkillResult> }, said, walks, comes, added, settings };
+  return { pve: pve as unknown as { come(n: string): Promise<SkillResult>; returnHome(why: string, o?: { ifIdle?: boolean }): Promise<SkillResult> }, said, walks, comes, added, settings, homes };
 }
 // (Track BH: the takeoff is simulated before the reply now: wait for the first line, up to 5 s)
 const settle = async (rig?: { said: string[] }): Promise<void> => {
   for (let i = 0; i < 250 && rig?.said.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
   await new Promise((r) => setTimeout(r, 20));
 };
+
+describe('fly: the trips home the bot makes by itself fly too (pve.returnHome)', () => {
+  it('home 300 blocks away: a flight as the home return (named home, auto, the home priority); near home: the walk', async () => {
+    const r = comeRig({ home: { x: 0, y: FEET, z: 300 } });
+    void r.pve.returnHome('dawn');
+    for (let i = 0; i < 250 && !r.added.some((p) => p instanceof FlyProcess); i++) await new Promise((res) => setTimeout(res, 20));
+    const fly = r.added.find((p): p is FlyProcess => p instanceof FlyProcess);
+    expect(fly).toBeDefined();
+    expect(fly).toMatchObject({ name: 'home', kind: 'auto' });
+    expect(fly!.priority).toBe(PRIORITY.home);
+    expect(fly!.target).toMatchObject({ x: 0.5, z: 300.5, label: 'home' });
+    expect(r.homes).toEqual([]); // not walked
+    const near = comeRig({ home: { x: 0, y: FEET, z: 20 } });
+    expect(await near.pve.returnHome('dawn')).toMatchObject({ ok: true });
+    expect(near.homes).toEqual(['dawn']);
+    expect(near.added.some((p) => p instanceof FlyProcess)).toBe(false);
+  });
+
+  it('ifIdle with a command running: nothing (busy), as the walk home did', async () => {
+    const r = comeRig({ home: { x: 0, y: FEET, z: 300 }, users: 1 });
+    expect(await r.pve.returnHome('food', { ifIdle: true })).toMatchObject({ ok: false, reason: 'busy' });
+    expect(r.added.some((p) => p instanceof FlyProcess)).toBe(false);
+    expect(r.homes).toEqual([]);
+  });
+});
 
 describe('fly: the automatic flight of !come (commands-fly.ts)', () => {
   it('!come to a player 300 blocks away under open sky flies to the player (half 2); with autoFly off it walks', async () => {
