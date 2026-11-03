@@ -9,7 +9,7 @@
 //                 pillars up on it, places from the top what it can reach from there, then digs the
 //                 column away under its feet on the way down (`buildScaffold` off: such cells are
 //                 skipped).
-//   clear         a dig list, top layer first, nearest cell first inside a layer; never the block
+//   clear         a dig list, top layer first, in lanes back and forth inside a layer (topDown); never the block
 //                 under the feet, nothing next to water or lava, nothing unbreakable.
 //   replace       like clear over the cells holding `from`; each is dug and `to` placed at once.
 //
@@ -80,14 +80,67 @@ export class PlanError extends Error {
 const dist = (a: Cell, b: Cell) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const hdist = (a: Cell, b: Cell) => Math.hypot(a.x - b.x, a.z - b.z);
 
-/** The cells a clear / replace box holds, top layer first, nearest to `ref` first inside a layer. */
-export function topDown(box: { min: Cell; max: Cell }, ref: Cell): Cell[] {
+/** A clear's stand higher than one block over its target costs this much more per block (Planner.standFor `low`). */
+export const CLEAR_HIGH_STAND = 3;
+/** Cells across one lane of the clear order (`topDown`): about what a stand in the dug lane reaches to either side. */
+export const CLEAR_LANE = 4;
+
+/**
+ * The cells a clear / replace box holds, top layer first. Inside a layer the cells go in lanes, back and
+ * forth (a boustrophedon): the sweep runs along the layer's longer side, the lanes are CLEAR_LANE cells
+ * across, the first lane starts at the corner nearest `ref` (the next layer at the corner nearest where
+ * the last one ended), and each lane's cells go row by row across, so consecutive digs are neighbours and
+ * a stand digs everything around it before the bot moves on. The old order (nearest to `ref` first, rings)
+ * took each ring end to end: on a 32 x 32 layer 863 stand moves and about 10 000 blocks walked between
+ * stands for 1024 digs.
+ */
+export function topDown(box: { min: Cell; max: Cell }, ref: Cell, lane = CLEAR_LANE): Cell[] {
   const out: Cell[] = [];
+  const sx = box.max.x - box.min.x + 1;
+  const sz = box.max.z - box.min.z + 1;
+  // sweep along the longer side (fewer lane turns); `u` runs along the sweep, `v` across it
+  const alongX = sx >= sz;
+  const nu = alongX ? sx : sz;
+  const nv = alongX ? sz : sx;
+  const cell = (u: number, v: number, y: number): Cell => (alongX ? { x: box.min.x + u, y, z: box.min.z + v } : { x: box.min.x + v, y, z: box.min.z + u });
+  let from = ref;
   for (let y = box.max.y; y >= box.min.y; y--) {
-    const layer: Cell[] = [];
-    for (let x = box.min.x; x <= box.max.x; x++) for (let z = box.min.z; z <= box.max.z; z++) layer.push({ x, y, z });
-    layer.sort((a, b) => hdist(a, ref) - hdist(b, ref) || a.x - b.x || a.z - b.z);
-    out.push(...layer);
+    // the corner nearest `from`: which end of the sweep and which side of the lanes the layer starts at
+    const corners = [
+      [false, false],
+      [true, false],
+      [false, true],
+      [true, true],
+    ] as const;
+    let best: (typeof corners)[number] = corners[0];
+    let bestD = Infinity;
+    for (const c of corners) {
+      const p = cell(c[0] ? nu - 1 : 0, c[1] ? nv - 1 : 0, y);
+      const d = hdist(p, from);
+      if (d < bestD) {
+        bestD = d;
+        best = c;
+      }
+    }
+    const [uRev, vRev] = best;
+    let forward = !uRev;
+    for (let v0 = 0; v0 < nv; v0 += lane) {
+      const vs: number[] = [];
+      for (let v = v0; v < Math.min(nv, v0 + lane); v++) vs.push(vRev ? nv - 1 - v : v);
+      for (let i = 0; i < nu; i++) {
+        const u = forward ? i : nu - 1 - i;
+        // across the lane from the end nearer the last cell (the first row from the start corner): rows go
+        // back and forth, so the row's last cell is next to the next row's first; a lane change steps at most
+        // a lane's width across
+        const last = out.length > 0 && out[out.length - 1]!.y === y ? out[out.length - 1]! : cell(uRev ? nu - 1 : 0, vRev ? nv - 1 : 0, y);
+        const a = cell(u, vs[0]!, y);
+        const z = cell(u, vs[vs.length - 1]!, y);
+        const row = hdist(a, last) <= hdist(z, last) ? vs : [...vs].reverse();
+        for (const v of row) out.push(cell(u, v, y));
+      }
+      forward = !forward;
+    }
+    from = out[out.length - 1] ?? from;
   }
   return out;
 }
@@ -124,21 +177,29 @@ class Planner {
     return this.cache.set;
   }
 
-  /** A reachable stand from which `ok(f)` holds: the current one if it does, else the nearest to it. */
-  standFor(t: Cell, ok: (f: Cell) => boolean): Cell | undefined {
+  /**
+   * A reachable stand from which `ok(f)` holds: the current one if it does, else the nearest to it.
+   * `low` (a clear's digs): a stand higher than one over the target costs CLEAR_HIGH_STAND per block
+   * more, so the bot follows the dig down into the pit instead of walking the rim (the planner's walks
+   * only step one block up or down: from the rim a pit two deep is out of reach).
+   */
+  standFor(t: Cell, ok: (f: Cell) => boolean, low = false): Cell | undefined {
     const rules = { isBlocked: (p: Cell) => this.sim.isBlocked(p) };
+    const high = (f: Cell): number => (low ? Math.max(0, f.y - t.y - 1) : 0);
+    let found: Cell | undefined;
     for (const fresh of [false, true]) {
       const set = this.reachable(fresh);
-      if (set.has(key(this.cur)) && canStand(this.sim, this.cur, rules) && ok(this.cur)) return this.cur;
-      let best: Cell | undefined;
-      let bestD = Infinity;
+      const curOk = set.has(key(this.cur)) && canStand(this.sim, this.cur, rules) && ok(this.cur);
+      if (curOk && high(this.cur) === 0) return this.cur;
+      let best: Cell | undefined = curOk ? this.cur : undefined;
+      let bestD = curOk ? CLEAR_HIGH_STAND * high(this.cur) : Infinity;
       const r = Math.ceil(this.o.reach);
       for (let dy = -r - 1; dy <= r; dy++) {
         for (let dx = -r; dx <= r; dx++) {
           for (let dz = -r; dz <= r; dz++) {
             const f = { x: t.x + dx, y: t.y + dy, z: t.z + dz };
             if (!set.has(key(f)) || !canStand(this.sim, f, rules) || !ok(f)) continue;
-            const d = dist(f, this.cur) + 0.001 * centreDistance(f, t);
+            const d = dist(f, this.cur) + 0.001 * centreDistance(f, t) + CLEAR_HIGH_STAND * high(f);
             if (d < bestD) {
               bestD = d;
               best = f;
@@ -146,17 +207,20 @@ class Planner {
           }
         }
       }
-      if (best) return best;
+      // a clear's best stand over the dig level in the cached set: look again in the fresh one (a pit floor dug since)
+      if (best && high(best) === 0) return best;
+      found ??= best;
+      if (best && fresh) return best;
     }
-    return undefined;
+    return found;
   }
 
   placeStand(t: Cell): Cell | undefined {
     return this.standFor(t, (f) => canPlaceFrom(this.sim, f, t, this.o.reach));
   }
 
-  digStand(t: Cell): Cell | undefined {
-    return this.standFor(t, (f) => canDigFrom(f, t, this.o.reach));
+  digStand(t: Cell, low = false): Cell | undefined {
+    return this.standFor(t, (f) => canDigFrom(f, t, this.o.reach), low);
   }
 
   addScaffold(p: Cell): void {
@@ -353,7 +417,7 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
         p.cur = stand;
         count(itemFor(rep.to));
       } else {
-        const stand = p.digStand(t);
+        const stand = p.digStand(t, true);
         if (!stand) {
           plan.skipped.push({ pos: t, reason: 'out of reach' });
           continue;
