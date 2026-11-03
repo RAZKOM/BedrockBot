@@ -170,10 +170,11 @@ export type KitRefusal = 'no_elytra' | 'elytra_worn' | 'no_rockets';
  * Whether a flight may start: an elytra (worn or carried) above the worn limit, and rockets at hand
  * (in the inventory or in the box). The reply text for a refusal.
  */
-export function kitReady(kit: FlightKit, toolWearLimit: number): { ok: true } | { ok: false; reason: KitRefusal; line: string } {
+/** `otherRockets`: rockets in the other carried shulker boxes (Supply.carried), taken out before the takeoff. */
+export function kitReady(kit: FlightKit, toolWearLimit: number, otherRockets = 0): { ok: true } | { ok: false; reason: KitRefusal; line: string } {
   if (!kit.elytraWorn && kit.elytraSlot < 0) return { ok: false, reason: 'no_elytra', line: 'fly: no elytra (I need one in the inventory or on my back)' };
   if (kit.elytraLeft !== undefined && kit.elytraLeft <= elytraWornLimit(toolWearLimit)) return { ok: false, reason: 'elytra_worn', line: elytraWornLine(kit.elytraLeft) };
-  if (kit.rockets === 0 && kit.boxRockets === 0) return { ok: false, reason: 'no_rockets', line: 'fly: no firework rockets (give me some, or a shulker box of them)' };
+  if (kit.rockets === 0 && kit.boxRockets === 0 && otherRockets <= 0) return { ok: false, reason: 'no_rockets', line: 'fly: no firework rockets (give me some, or a shulker box of them)' };
   return { ok: true };
 }
 

@@ -15,6 +15,7 @@ import { ARMOUR_SLOT_NAMES, armourSlotOf, wearSlotOf } from '../skills/survival/
 import type { ItemStack } from '../world/types.ts';
 import { foodInfo } from '../skills/survival/eat.ts';
 import { SurvivalKit, type SurvivalSettings } from '../skills/survival/index.ts';
+import { supplyOf } from '../skills/supply/supply.ts';
 import { maxDurability } from '../skills/survival/tools.ts';
 import type { Mobility } from '../tasks/mobility.ts';
 import type { PveController } from '../tasks/pve.ts';
@@ -72,6 +73,7 @@ export function createSurvivalKit(deps: SurvivalCommandDeps): SurvivalKit | unde
     combat: pve.combat,
     ...(deps.inactive ? { inactive: deps.inactive } : {}),
     ...(deps.settings ? { settings: deps.settings } : {}),
+    ...(deps.task ? { supply: () => supplyOf(deps.task) } : {}),
     logger: log,
   });
   const task = deps.task;

@@ -11,7 +11,8 @@
 import type { Vec3 } from '../connection/types.ts';
 import { FlightController, skyQuery } from '../skills/fly/controller.ts';
 import { glideKitReady, jumpTakeoff, ledgeTakeoff, planGlideDown, smallPlatform, type Ledge, type SimDeps } from '../skills/fly/glide.ts'; // Track BH
-import { elytraWornLimit, flightKitMemoryOf, kitLine, kitReady, readKit, SupplyWatch } from '../skills/fly/kit.ts';
+import { elytraWornLimit, flightKitMemoryOf, kitLine, kitReady, readKit, ROCKET, SupplyWatch } from '../skills/fly/kit.ts';
+import { restockFromBoxes, supplyOf } from '../skills/supply/supply.ts';
 import { FlightKitOps } from '../skills/fly/kitops.ts';
 import { APPROACH_HEIGHT, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, type CellQuery, type LandingTarget, type SkyCheck } from '../skills/fly/plan.ts';
 import { pathBlocks, probePath } from '../skills/home/reach.ts'; // Track AU2: the walk from a landing cell to the goal
@@ -313,6 +314,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       prone: () => loop.state.prone === true,
       unprone: () => (skills as { unprone?: () => Promise<{ ok: boolean; dug: string[]; why?: string }> }).unprone?.() ?? Promise.resolve({ ok: false, dug: [], why: 'no digging' }),
       say: (m) => d.chat.say(m),
+      restock: (item, n) => restockFromBoxes(d.task, item, n),
       waitTicks: (n) => loop.waitTicks(n),
       supply,
       log,
@@ -502,8 +504,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const distance = hdist(from, goalTarget);
     if (distance <= d.settings.get('flyMin')) return undefined;
     const k = readKit(inv, memory());
-    if (!kitReady(k, d.settings.get('toolWearLimit')).ok) return undefined;
-    if (k.rockets < d.settings.get('fireworksMin') && k.boxRockets === 0) return undefined;
+    const boxed = supplyOf(d.task)?.carried(ROCKET) ?? 0; // rockets in the other carried boxes come out before the takeoff
+    if (!kitReady(k, d.settings.get('toolWearLimit'), boxed).ok) return undefined;
+    if (k.rockets < d.settings.get('fireworksMin') && k.boxRockets === 0 && boxed === 0) return undefined;
     if (dim() !== OVERWORLD && !(dim() === NETHER && ceilingClear(from, goalTarget))) return undefined;
     // the sky first (cheap); the landing cell (up to six probe plans) only when a takeoff is possible at all
     const sky = skyHere(from, goalTarget);
@@ -902,7 +905,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         return;
       }
       const k = readKit(inv, memory());
-      const ready = kitReady(k, d.settings.get('toolWearLimit'));
+      const ready = kitReady(k, d.settings.get('toolWearLimit'), supplyOf(d.task)?.carried(ROCKET) ?? 0);
       if (!ready.ok) {
         reply(ready.line);
         for (const line of supply.check(k, d.settings.get('fireworksMin'), d.settings.get('toolWearLimit'))) if (line !== ready.line) reply(line);

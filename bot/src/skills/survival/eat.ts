@@ -191,8 +191,22 @@ export interface EatDeps {
   source: { queue(name: string, params: Record<string, unknown>): void };
   /** Move a stack from a main-inventory slot into the hotbar (returns the hotbar slot). */
   toHotbar?: (slot: number) => Promise<number | undefined>;
+  /**
+   * No food loose: take some out of the carried shulker boxes (Supply.ensure: place the box, take, pick it up).
+   * True when food came out. Only asked while the body stands on dry ground and is not fighting.
+   */
+  fromBoxes?: (names: readonly string[], n: number) => Promise<boolean>;
+  /** The body may stop to place a box now (standing, dry, not in a fight). */
+  canStop?: () => boolean;
   logger?: Logger;
 }
+
+/** The foods taken out of a carried box when none is loose: every food but the bad, the risky and the precious ones. */
+export const BOX_FOODS: readonly string[] = Object.entries(FOODS)
+  .filter(([, f]) => !f.bad && !f.risky && !f.precious)
+  .map(([n]) => n);
+/** How many food items one trip into a box takes out. */
+export const BOX_FOOD_TAKE = 16;
 
 export interface EatOptions {
   /** Eat even when full enough by the rule (still refused by the server at food 20). */
@@ -242,7 +256,17 @@ export class EatController {
     if (!this.d.loop.state.ready) return { ok: false, reason: 'not_ready' };
     const s = { food: this.d.self.food, health: this.d.self.health };
     if (s.food >= 20 || (!opts.force && !wantsToEat(s))) return { ok: false, reason: 'not_hungry', foodBefore: s.food };
-    const pick = chooseFood(this.d.inventory.slots, s);
+    let pick = chooseFood(this.d.inventory.slots, s);
+    // only bad food loose (or none) while the boxes hold real food: take some out first (the owner: the bot knew what
+    // its boxes held but went hungry)
+    if ((!pick || foodInfo(pick.name)?.bad) && this.d.fromBoxes && (this.d.canStop?.() ?? true)) {
+      this.running = true;
+      try {
+        if (await this.d.fromBoxes(BOX_FOODS, BOX_FOOD_TAKE)) pick = chooseFood(this.d.inventory.slots, s) ?? pick;
+      } finally {
+        this.running = false;
+      }
+    }
     if (!pick) return { ok: false, reason: 'no_food', foodBefore: s.food };
     this.running = true;
     this.cancelled = undefined;

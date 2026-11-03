@@ -24,6 +24,7 @@ import type { CommandDeps } from '../tasks/process/deps.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { formatEta } from '../tasks/process/manager.ts';
 import { QuarryProcess } from '../tasks/process/quarry.ts';
+import { restockFromBoxes } from '../skills/supply/supply.ts';
 
 /** The running quarry / tunnel process by task (tests). */
 const current = new WeakMap<object, () => QuarryProcess | undefined>();
@@ -76,6 +77,7 @@ export function registerQuarryCommands(d: CommandDeps): void {
     waitTicks: (n) => mob.loop.waitTicks(n),
     inventory: world.inventory,
     slots: () => world.inventory.slots,
+    restock: (item, n) => restockFromBoxes(d.task, item, n),
     throwawayMin: () => d.settings.get('throwawayMin'),
     cancel: () => skills.cancel(),
     // the climb back up at the end: the miner's rules (the protected area included: it digs outside the box)

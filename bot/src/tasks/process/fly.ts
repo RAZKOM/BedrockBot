@@ -17,7 +17,7 @@ import type { Vec3 } from '../../connection/types.ts';
 import type { RuntimeSettings } from '../../config/settings.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { FlightController, FlightReport } from '../../skills/fly/controller.ts';
-import { elytraWornLimit, kitLine, kitReady, readKit, SupplyWatch, type FlightKitMemory, type KitInventory } from '../../skills/fly/kit.ts';
+import { elytraWornLimit, kitLine, kitReady, readKit, ROCKET, SupplyWatch, type FlightKitMemory, type KitInventory } from '../../skills/fly/kit.ts';
 import type { FlightKitOps } from '../../skills/fly/kitops.ts';
 import { cruiseHeight, flightSeconds, hdist, takeoffSky, type CellQuery, type LandingTarget } from '../../skills/fly/plan.ts';
 import type { LandingCell, LandingPlan } from '../../skills/fly/landing.ts';
@@ -110,6 +110,8 @@ export interface FlyDeps {
   /** Track BH: the body is held prone (InputLoopState.prone) and the way out (BotSkills.unprone: break what keeps it from standing). */
   prone?: () => boolean;
   unprone?: () => Promise<{ ok: boolean; dug: string[]; why?: string }>;
+  /** Rockets out of any other carried shulker box (Supply.ensure) when the fireworks box has none; true when some came out. */
+  restock?(item: string, n: number): Promise<boolean>;
   /** The owner's lines (the supply whispers, the kept-kit notes). */
   say(msg: string): void;
   waitTicks(n: number): Promise<void>;
@@ -229,6 +231,14 @@ export class FlyProcess extends BaseProcess {
     const wear = s.get('toolWearLimit');
     let kit = this.kit();
     const glide = this.target.glide === true;
+    const min0 = s.get('fireworksMin');
+    // no rockets loose and no fireworks box: the ones in another carried box come out first
+    if (!glide && kit.rockets < min0 && kit.boxRockets === 0 && this.d.restock) {
+      const ok = await this.d.restock(ROCKET, 64);
+      if (t !== this.token) return;
+      this.notes.push(`rockets out of a carried box: ${ok ? 'yes' : 'none'}`);
+      kit = this.kit();
+    }
     const ready = kitReady(kit, wear);
     // Track BH: a glide down needs no rocket (the elytra's uses are checked the same)
     if (!ready.ok && !(glide && ready.reason === 'no_rockets')) {
