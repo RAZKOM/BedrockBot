@@ -18,6 +18,19 @@ import type { Goal } from '../nav/goals.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 
 export const PEN_RADIUS = 12;
+
+/**
+ * The pen at a point the owner gave (`chorePen`, `!breed pen`): the feet block inside the pen, or the ground
+ * block under it (what the debug screen shows under the feet), or one above: the first of the three levels
+ * whose fill finds a fenced pen. undefined when none does.
+ */
+export function penNear(penAt: (feet: Vec3) => Pen | undefined, p: Vec3): Pen | undefined {
+  for (const dy of [0, 1, -1]) {
+    const pen = penAt({ x: Math.floor(p.x) + 0.5, y: Math.floor(p.y) + dy, z: Math.floor(p.z) + 0.5 });
+    if (pen) return pen;
+  }
+  return undefined;
+}
 /** A pen keeps at least this many adults of each kind (the hunt never goes below it). */
 export const PEN_KEEP = 2;
 

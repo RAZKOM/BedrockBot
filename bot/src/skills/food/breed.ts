@@ -188,6 +188,29 @@ export function breedable(
   return out;
 }
 
+/**
+ * The pair to feed from `list` (nearest to the bot first): the first animal with a partner in the same pen
+ * (`penId`: undefined = not in a pen; two animals outside any pen pair up), and its nearest such partner.
+ */
+export function samePenPair(list: readonly EntityInfo[], penId: (e: EntityInfo) => string | undefined, dist: (a: Vec3, b: Vec3) => number): [EntityInfo, EntityInfo] | undefined {
+  for (const a of list) {
+    const id = penId(a);
+    const fa = entityFeet(a);
+    let best: EntityInfo | undefined;
+    let bestD = Infinity;
+    for (const b of list) {
+      if (b === a || penId(b) !== id) continue;
+      const dd = dist(entityFeet(b), fa);
+      if (dd < bestD) {
+        bestD = dd;
+        best = b;
+      }
+    }
+    if (best) return [a, best];
+  }
+  return undefined;
+}
+
 export class Breeder {
   private readonly d: BreederDeps;
   private readonly log: Logger;
@@ -278,9 +301,14 @@ export class Breeder {
       const me = this.d.loop.state.pos;
       const dist = (a: Vec3, b: Vec3): number => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
       list.sort((a, b) => dist(entityFeet(a), me) - dist(entityFeet(b), me));
-      const a = list[0]!;
-      const fa = entityFeet(a);
-      const b = list.slice(1).sort((x, y) => dist(entityFeet(x), fa) - dist(entityFeet(y), fa))[0]!;
+      // the two of a pair stand on the same side of every fence (both in one pen, or both outside any): a pair
+      // split by a fence ate the food, made no baby and was locked out for 5 minutes
+      const pair = samePenPair(list, (e) => this.d.penOf?.(e)?.id, dist);
+      if (!pair) {
+        if (res.pairs === 0) return finish('no_pair');
+        break;
+      }
+      const [a, b] = pair;
       let fedPair = 0;
       for (const e of [a, b]) {
         const r = await this.feed(e, kind, cancelled);
