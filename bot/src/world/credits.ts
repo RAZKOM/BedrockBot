@@ -53,7 +53,7 @@ export class CreditsWatcher {
     this.now = opts.now ?? (() => performance.now());
     this.unsubs.push(
       source.on('show_credits', (p) => {
-        this.onShowCredits(p as { runtime_entity_id?: bigint | number; status?: number });
+        this.onShowCredits(p);
       }),
       // the server moves the player out (overworld spawn) or a new session starts: the credits are over
       source.on('change_dimension', () => {
