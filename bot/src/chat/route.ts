@@ -153,6 +153,15 @@ export class SlashRoute {
   }
 
   /**
+   * Switch the route off for `ms` without a command_output, e.g. after the server KICKED the bot for a command
+   * (`invalid_command_request_packet`): the next session's replies go out as chat, so a reconnect cannot loop.
+   */
+  refuse(reason: string, ms: number = this.retryMs): void {
+    this.offUntil = Math.max(this.offUntil, this.now() + ms);
+    this.reason = reason;
+  }
+
+  /**
    * A `command_output` arrived. Returns the text to resend as chat when it answers one of our commands and it
    * failed; undefined for every other command (whispers, truth commands) and for a success.
    */
