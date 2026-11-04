@@ -154,6 +154,24 @@ Dimension 2, the void below. `maxDrop` 1 (above); endermen rules unchanged (neut
 dragon logic (the e2e removes the dragon with `/kill`). `!nether` / `!overworld` from the End reply
 that the exit portal is not handled.
 
+## The end credits
+
+Walking (or being pushed) into the End's exit portal makes the server start the credits:
+`show_credits { runtime_entity_id, status: 0 }`. A real client plays them and answers `status: 1`;
+until that answer the server keeps the player parked in the portal block and kicks it with
+`invalid_command_request_packet` for any slash command (seen on a Realm, 2026-11-04: every `/me`
+reply kicked the bot, and each rejoin landed in the same portal, so it looped). The server starts the
+credits again on every join while the player stands in the portal.
+
+`world/credits.ts` (CreditsWatcher, owned by the World) answers the start at once. The server then
+moves the player to the Overworld spawn the way it does after a death (a respawn, then
+`change_dimension`), so the respawn handler logs a death with cause unknown and moves the `death`
+waypoint to the portal. While the credits show (until `change_dimension` or `start_game`, at most
+30 s), `Chat.slashHold` sends replies as plain chat. Whatever triggers it, a kick whose reason matches
+`invalid_command_request` turns the slash route off for 10 minutes across the reconnect
+(chat.ts `COMMAND_KICK`, `KICK_OFF_MS`). This is measured on the Realm only; there is no BDS e2e (it
+needs a killed dragon or a placed exit portal).
+
 ## Measurements
 
 | What | Value |
