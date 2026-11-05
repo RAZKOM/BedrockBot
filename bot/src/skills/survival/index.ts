@@ -112,6 +112,8 @@ export interface SurvivalDeps {
   inactive?: () => boolean;
   /** Settings getter (a settings registry); unknown keys fall back to the defaults. */
   settings?: () => Partial<SurvivalSettings>;
+  /** The carried-box supply (skills/supply/supply.ts; registered later by the home logistics): food out of a box. */
+  supply?: () => { carried(names: readonly string[]): number; ensure(names: readonly string[], n: number): Promise<{ ok: boolean }> } | undefined;
   logger?: Logger;
 }
 
@@ -155,6 +157,16 @@ export class SurvivalKit {
       hotbar,
       source,
       toHotbar: (slot) => this.toHotbar(slot),
+      fromBoxes: async (names, n) => {
+        const s = deps.supply?.();
+        if (!s || s.carried(names) <= 0) return false;
+        this.log.info(`eat: no food loose; taking up to ${n} out of a carried box`);
+        return (await s.ensure(names, n)).ok;
+      },
+      canStop: () => {
+        const st = loop.state as { onGround?: boolean; inWater?: boolean };
+        return st.onGround !== false && st.inWater !== true && !deps.combat?.busy;
+      },
       logger: this.log,
     });
     this.armour = new ArmourController({ inventory: world.inventory, requests: this.requests, toolOk: this.toolOk, logger: this.log });

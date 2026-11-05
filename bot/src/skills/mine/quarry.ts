@@ -53,7 +53,7 @@ import type { PlaceOptions, PlaceResult } from '../place/place.ts';
 import { THROWAWAY_BLOCKS } from '../survival/keeper.ts';
 import { isBuiltBlock } from '../terrain/classify.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
-import { carriesPickaxe, carriesTorch, dirFromYaw, placeTorch, TORCH_EVERY, turnRight, type Dir } from './branch.ts';
+import { carriesPickaxe, carriesTorch, dirFromYaw, placeTorch, TORCH_EVERY, TORCH_RESTOCK, turnRight, type Dir } from './branch.ts';
 import { climbTo, type TunnelWorld } from './tunnel.ts';
 
 export interface Box {
@@ -351,6 +351,8 @@ export function tunnelSpec(feet: Vec3, dir: Dir, len: number, w: number, h: numb
 
 /** What a quarry job needs from the bot (chat/commands-quarry.ts wires it; the unit tests fake it). */
 export interface QuarryHost {
+  /** Make n of an item loose out of the carried shulker boxes (Supply.ensure); false when none came out. */
+  restock?(item: string, n: number): Promise<boolean>;
   blockAt(p: Vec3): BlockLike | undefined;
   /** The navigator's break rules without the protected area, with the floor under the feet (nav/actions.ts breakBlocker): undefined = may, `air` = open, else the reason. */
   breakRule(p: Vec3): string | undefined;
@@ -880,7 +882,7 @@ export class QuarryJob {
       if (!this.alive(e)) return 'ok';
       if (!ok && o === 0) return { end: 'blocked', why: `no floor at ${fmtCell(f)} (no throwaway block placed)` };
     }
-    if ((i + 1) % TORCH_EVERY === 0 && carriesTorch(this.h.slots())) {
+    if ((i + 1) % TORCH_EVERY === 0 && (carriesTorch(this.h.slots()) || (await this.h.restock?.('torch', TORCH_RESTOCK)))) {
       const at = this.torchCell(i);
       if (at) {
         const p = await placeTorch((q, o) => this.h.place(q, o ?? {}), at);

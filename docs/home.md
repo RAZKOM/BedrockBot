@@ -511,7 +511,18 @@ NL (`!do`): the `bring` step (`{"command":"bring","item":"torch","count":64,"to"
 
 The owner noticed that the smart shulker box features were not applied to every feature, building and
 scaffolding included. Decision [0052](decisions/0052-shulker-aware-jobs.md). One layer answers "how many of this
-do I have" and "get me n of it loose" for every job, so no feature hand-rolls box handling:
+do I have" and "get me n of it loose" for every job, so no feature hand-rolls box handling.
+
+Only `!build` used it until the owner pointed out again that the bot knew what its boxes held but never used it
+for food and the like. Now also (through `restockFromBoxes` / `carried`):
+
+| Job | What it takes out of a carried box |
+|---|---|
+| eating (`EatController`, also trip readiness) | no food loose, or only bad food: 16 of the good foods (`BOX_FOODS`: no rotten flesh, raw chicken or golden apples), then eats; never while fighting, in water or off the ground |
+| the food chore | counts the food in the boxes with the loose food (`boxedFoodPoints`): no hunt while the boxes hold enough |
+| `!tunnel`, `!quarry` torches, branch mining | no torch loose at a torch spot: 32 torches (`TORCH_RESTOCK`) |
+| flights (`!fly`, autoFly) | no rockets loose and no fireworks box: 64 rockets from any other carried box (a `bot_loot` or mixed box) before the takeoff; the kit check (`kitReady`) counts them |
+
 
 | Part | What |
 |---|---|
