@@ -23,6 +23,7 @@ import { preferSite, RECHECK_EVERY_MS, RecheckState, SITE_BUDGET_MS, SITE_PROBES
 import type { Goal, GotoOptions, SkillResult } from '../skills/types.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { FlightProcess, FlyProcess, landingLine, targetFromPlan, type FlyOutcome, type FlyTarget } from '../tasks/process/fly.ts';
+import { PRIORITY } from '../tasks/process/manager.ts';
 import { waypointStoreOf, waypointGoal } from './commands-nav.ts';
 import { survivalKitOf } from './commands-survival.ts';
 import { NETHER, OVERWORLD } from '../world/dimension.ts';
@@ -296,8 +297,11 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   const supply = new SupplyWatch();
   processes.add(new FlightProcess(controller));
   let current: FlyProcess | undefined;
-  /** `adopt`: take over the flight in the air for this target (FlyProcess.adopt) instead of a takeoff; the trip before it hands over. */
-  const start = (target: FlyTarget, o: { adopt?: { cruiseY?: number } } = {}): FlyProcess => {
+  /**
+   * `adopt`: take over the flight in the air for this target (FlyProcess.adopt) instead of a takeoff; the trip before it hands over.
+   * `home`: the trip home (the returnHome wrapper below): the FlyProcess runs as the home return (`home`, auto, PRIORITY.home).
+   */
+  const start = (target: FlyTarget, o: { adopt?: { cruiseY?: number }; home?: boolean } = {}): FlyProcess => {
     if (!o.adopt) terrain.clear(); // Track BL: a flight reads the columns afresh (a taken-over flight keeps what it read)
 
     const p = new FlyProcess(target, {
@@ -319,7 +323,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       waitTicks: (n) => loop.waitTicks(n),
       supply,
       log,
-    });
+    }, o.home ? { name: 'home', kind: 'auto', priority: PRIORITY.home } : {});
     if (o.adopt) {
       current?.handOver(); // replaced below without landing: the flight is this trip's now
       p.adopt(o.adopt.cruiseY);
@@ -851,6 +855,23 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     // Track BL: a walk that does not fly looks for a takeoff again on the way
     if (!f) return watchWalk(() => goal.p, name, 1, plain, plain, legWalk).then((r) => glideFallback(r, goal.p, name, 1, plain));
     return runAuto(f, () => goal.p, name, 1, f.kind === 'walk_out' ? walkOrGlide : plain, legWalk);
+  };
+  // the trips home the bot makes by itself (dawn, respawn, after a guard fight, after a food or branch mining job): they
+  // fly too, over flyMin, as the low-priority home return (the owner: far from home it walked the whole way back)
+  const returnHome0 = pve.returnHome.bind(pve);
+  pve.returnHome = async (why: string, opts: { timeoutTicks?: number; ifIdle?: boolean } = {}): Promise<SkillResult> => {
+    const h = task.home?.get();
+    if (!h || controller.active) return returnHome0(why, opts);
+    const busy = (): boolean => !!opts.ifIdle && processes.userProcesses().length > 0;
+    if (busy()) return { ok: false, reason: 'busy' };
+    const goal = { x: Math.floor(h.x), y: Math.floor(h.y), z: Math.floor(h.z) };
+    const f = await autoFly(goal, 'home', 1, { site: false, quiet: true });
+    if (f?.kind !== 'fly' || controller.active) return returnHome0(why, opts);
+    if (busy()) return { ok: false, reason: 'busy' }; // a command came while the landing was looked for
+    for (const p of processes.find('home')) processes.stop(p, 'replaced');
+    log.info(`${why}: flying home to ${goal.x} ${goal.y} ${goal.z} (${f.line})`);
+    const r = await start(f.target, { home: true }).result;
+    return afterFlight(r, () => returnHome0(why, { ...opts, ifIdle: false }));
   };
   const come0 = pve.come.bind(pve);
   pve.come = async (name: string, o: { urgent?: boolean } = {}): Promise<SkillResult> => {
