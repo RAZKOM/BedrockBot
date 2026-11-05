@@ -77,7 +77,14 @@ replaces the old).
   the edge of the work area (the build's box plus 6 blocks; the edge is assumed reachable from
   outside). Placed blocks become stands as the build grows (a floor's middle is reached by walking
   on its edge).
-- **Clear / replace**: dig lists, top layer first, nearest cell first inside a layer. Never the block
+- **Clear / replace**: dig lists, top layer first. Inside a layer the cells go in lanes 4 wide, back and
+  forth along the layer's longer side, from the corner nearest the bot (the next layer from the corner
+  where the last one ended): consecutive digs are neighbours, so one stand digs everything around it
+  before the bot moves on. A dig's stand more than one block over its target costs 3 per block more, so
+  the bot follows the dig down into the pit instead of walking the rim (the planner's walks step one
+  block up or down; from the rim a pit two deep is out of reach). Measured on the planner (flat world,
+  stand-to-stand walking): a 32 x 32 layer 368 blocks instead of 10 050 with the old nearest-first
+  rings, a 32 x 32 x 4 box 1 389 instead of 40 278, every cell dug in both. Never the block
   under the feet (a stand on the target is not used), never a block next to water or lava, never an
   unbreakable one; liquids are skipped. A replace digs the cell and places the new block from the
   same stand (it needs another clickable neighbour of the cell).

@@ -547,6 +547,33 @@ There is no crawl move: a prone body that may not break what is over it stays wh
 The emergency / `roof` landing ground (`groundAt`) never takes a column whose top is leaves, azalea or
 vines. It takes the next column down the line with open ground instead (the Realm canopy end).
 
+### Vertical takeoff (straight up)
+
+Another technique in the takeoff chain, not a replacement: the order is the ledge (when it applies), the
+jump along the sky check's heading, the jump on the other 11 headings, then **straight up**, then a
+takeoff site to walk to, then the walk-out legs (`takeoffFor`, commands-fly.ts). It is tried when the
+jump is refused on every heading, and when the sky check refuses for the 3 x 3 around the start or the
+run along the heading (a roof right over the head closes the column too and refuses at once).
+
+- **The column** (glide.ts `verticalTakeoff`): the cells over the head must be open, an unknown cell
+  counts as blocked, up to the hand-over height plus `VERTICAL_SPARE` (3).
+- **The hand-over height**: the lowest from `VERTICAL_MIN` (6) up, 2 at a time, at most `VERTICAL_MAX`
+  (48) and the cruise height, from which the usual sky check (`takeoffSky`: its 3 x 3, its run along a
+  heading) passes. The whole climb from the ground is then simulated, as for the jump (no hit, dry, it
+  reaches the approach); at most 3 simulations.
+- **The flight** (brain.ts `verticalTakeoff`): jump, request the glide on the first falling tick looking
+  straight up (pitch -90), a rocket whenever none burns and the coast straight up (`verticalCoast`: vy² /
+  0.2, gravity takes the whole 0.08 a tick with no lift) would not reach the height; the hand-over only
+  once the body is over it (pitched over earlier, the climb turns into what it rose out of), then the
+  usual climb along the chosen heading, held until `TAKEOFF_HOLD` (12) above the hand-over. Logged as
+  `vertical takeoff: 22.4 up (aiming for 22), 1 rocket; the climb turns to heading 0`.
+- **Offline** (fly-vertical.test.ts, stepBody): a 3 x 3 clearing and a 1 x 1 shaft in a 20-high forest
+  where every jump heading hits: hand-over 22 up with 1 rocket, no drift (under 0.3 blocks), no hit, lands
+  300 blocks away.
+- **Not measured on BDS yet**: that the server starts the glide and boosts the rocket with the look
+  straight up as the model does. Until an e2e run has measured it, `!set flyVerticalTakeoff off` takes it
+  out of the chain.
+
 ## Terrain-safe cruise, dive descent, takeoff sites (Track BL)
 
 ADR [0055](decisions/0055-terrain-safe-cruise.md). The Realm flights out of home kept ending `roof` /
@@ -693,6 +720,7 @@ Rules (all named `// Track AU` in the shared files):
 | `flyOverhangDepth` | 10 | Track BF: the deepest landing under a roof (0 = never under a roof) |
 | `flySneakLand` | on | Track BF: sneak through the touchdown and the settle |
 | `flyLedgeTakeoff` | on | Track BH: step off a platform edge to take off when the jump takeoff is refused (a roof, an overhang, no run) or the start is a small platform; the ledge is simulated first |
+| `flyVerticalTakeoff` | on | go straight up the open column over the bot when the jump takeoff is refused on every heading (trees, walls, a shaft), then climb from above; simulated first ("Vertical takeoff") |
 | `glideDown` | on | Track BH: a goto / come that ends with no way on to a goal far below glides down with the elytra when a simulated glide from a ledge lands near it (rockets optional), then walks |
 | `glideDownMinDrop` | 10 | Track BH: the goal at least this far below the feet |
 | `glideDownMinDistance` | 16 | Track BH: the goal at least this far away horizontally |
@@ -1028,6 +1056,25 @@ Dive against circle, ticks to touchdown, 0 hits, 0 go-arounds:
 - **Changed expectations.** `fly-roof` now accepts the site line, because the room's door and the
   tunnel's stair top are found as takeoff sites (`walking 16 / 23 blocks to take off from ...`).
   `fly-descent` accepts a dive on the open platform.
+
+## A new trip in the air
+
+A `!goto`, `!come` or `!fly` sent while a flight is in the air takes that flight over instead of
+landing first (`takeOver`, commands-fly.ts; `FlyProcess.adopt` / `handOver`, tasks/process/fly.ts):
+
+- the landing for the new goal is found as for any flight (`findLanding`: the goal when it is landable,
+  else a confirmed cell near it, held high while its ground is not loaded), and the flight is retargeted
+  to it there (`FlightController.retarget`); the cruise height is raised when the new trip needs more
+  (never lowered; the cruise's rockets cover the distance). The bot says `flying on to <goal> (N blocks)`.
+- the trip that started the flight ends `replaced` without a landing, and its walk after the landing never
+  runs. Before this, the old flight landed where it was going and its walk then replaced the new one, so
+  the bot ended up where it was first sent.
+- the new trip does the ground work after the landing (chestplate, refill) and the walk for the rest.
+- the brain refuses a retarget once the approach is within 15 blocks of the touchdown, or while it lands:
+  the flight then lands where it was going (`fly: too close to the landing to turn now; landing first,
+  then going to <goal>`) and the trip starts again from the ground, flying again when it is worth it.
+- `!fly` in the air skips the kit check (a glide with no rockets left can still turn), `!fly stop`, `!land`
+  and `!stop` land as before.
 
 ## Open points
 

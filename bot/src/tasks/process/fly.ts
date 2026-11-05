@@ -53,6 +53,8 @@ export interface FlyTarget extends LandingTarget {
   ledge?: Ledge;
   /** Track BH: the jump takeoff's heading whose simulated climb is clear (commands-fly takeoffFor; else the sky check's). */
   takeoffYaw?: number;
+  /** The vertical takeoff: straight up this many blocks over the feet, then the climb along `takeoffYaw` (commands-fly takeoffFor, glide.ts verticalTakeoff). */
+  vertical?: number;
   /** Track BH, the glide down: no climb (the cruise height is the target's), rockets optional, no refill from the box. */
   glide?: boolean;
 }
@@ -147,6 +149,10 @@ export class FlyProcess extends BaseProcess {
   private readonly t0 = Date.now();
   private readonly distance: number;
   private flight: Promise<FlightReport> | undefined;
+  /** A new trip took this flight over in the air (`handOver`): stopping this process does not land it. */
+  private handedOver = false;
+  /** `adopt`: the flight in the air flies to this trip's target now (false: it lands where it was going first). */
+  retargeted = false;
 
   constructor(target: FlyTarget, deps: FlyDeps) {
     super();
@@ -194,8 +200,41 @@ export class FlyProcess extends BaseProcess {
     // the ground steps check the token between their moves; the flight itself is not ours to stop here
   }
 
+  /**
+   * A new trip takes over this flight in the air (the next FlyProcess `adopt`s it): when this process is
+   * replaced it ends `replaced` without landing, and its trip's walk does not run.
+   */
+  handOver(): void {
+    this.handedOver = true;
+  }
+
+  /**
+   * Take over the flight in the air for this trip instead of preparing a new one (a `!goto`, `!come` or
+   * `!fly` while flying; the trip before it `handOver`s): the flight is retargeted to this trip's target,
+   * its cruise raised when the new trip needs more; once it lands this process does the ground work
+   * (chestplate, refill) as after its own flight. A retarget the brain refuses (the approach has begun,
+   * the touchdown is near) leaves the flight going to where it was: `retargeted` is false then and the
+   * caller starts the trip again from the ground. False when there is no flight to take over.
+   */
+  adopt(cruiseY?: number): boolean {
+    const f = this.d.controller.flight;
+    if (!f || this.phase !== 'prepare') return false;
+    this.phase = 'flying';
+    this.flight = f;
+    this.retargeted = this.d.controller.retarget(this.target, cruiseY !== undefined ? { cruiseY } : {});
+    this.log.info(`fly: the flight in the air ${this.retargeted ? 'flies on' : 'lands where it was going first (too close to its touchdown to move it), then the trip starts again'} to ${this.target.label}`);
+    void f.then((r) => {
+      this.report = r;
+      if (this.done) return;
+      this.phase = 'after';
+      if (this.controlled) void this.advance(this.token);
+    });
+    if (this.retargeted && this.target.goal && this.d.landing) void this.watchLanding(this.target.goal, this.d.landing);
+    return true;
+  }
+
   protected override onStopped(reason: StopReason): void {
-    if (this.phase === 'flying' && this.d.controller.active) {
+    if (this.phase === 'flying' && this.d.controller.active && !this.handedOver) {
       this.log.info(`fly: stopped (${reason}) in the air: landing`);
       this.d.controller.landNow('stopped');
     }
@@ -314,7 +353,9 @@ export class FlyProcess extends BaseProcess {
     const cz = cruiseHeight(from, this.target, (x, z) => this.d.skyTop(x, z), { clearance: s.get('flyClearance'), margin: s.get('flyMargin'), maxClimb: s.get('flyMaxClimb') });
     // Track AU2: open sky over the start and the takeoff run (the owner's indoor takeoff flew into the roof); Track BH: a
     // ledge takeoff was simulated from the edge instead (its corridor, the glide out from under an overhang)
-    const sky = ledge ? undefined : takeoffSky(from, this.target, cz.y, s.get('flyTakeoffRun'), this.d.cell);
+    // (the vertical takeoff was checked from its hand-over height: the column, then the sky check there, then simulated)
+    const vertical = ledge ? undefined : this.target.vertical;
+    const sky = ledge || vertical !== undefined ? undefined : takeoffSky(from, this.target, cz.y, s.get('flyTakeoffRun'), this.d.cell);
     if (sky && !sky.ok) {
       this.log.info(`fly: ${this.target.label}: ${sky.line}`);
       this.end({ ok: false, reason: sky.line });
@@ -324,18 +365,18 @@ export class FlyProcess extends BaseProcess {
     const high = !glide && highCruiseWanted(String(s.get('flyHighCruise')), { distance: this.distance, needed: cz.needed, unknown: cz.unknown });
     const cruiseY = glide && ledge ? this.target.top : high ? Math.max(cz.y, HIGH_CRUISE_Y) : cz.y;
     this.log.info(
-      `fly: to ${this.target.label} (${Math.round(this.distance)} blocks): ${glide ? `a glide down (no climb, ${this.kit().rocketsHotbar} rockets at hand)` : `cruise y ${cruiseY.toFixed(1)}${high ? ' (the high cruise)' : ''} (highest column ${cz.highest ?? '?'}, ${cz.unknown} unknown, the glide needs ${cz.needed.toFixed(0)})`}${ledge ? `, a ledge takeoff from ${ledge.x} ${ledge.feet} ${ledge.z} heading ${Math.round(ledge.yaw)}` : ''}; ${kitLine(this.kit())}`,
+      `fly: to ${this.target.label} (${Math.round(this.distance)} blocks): ${glide ? `a glide down (no climb, ${this.kit().rocketsHotbar} rockets at hand)` : `cruise y ${cruiseY.toFixed(1)}${high ? ' (the high cruise)' : ''} (highest column ${cz.highest ?? '?'}, ${cz.unknown} unknown, the glide needs ${cz.needed.toFixed(0)})`}${ledge ? `, a ledge takeoff from ${ledge.x} ${ledge.feet} ${ledge.z} heading ${Math.round(ledge.yaw)}` : ''}${vertical !== undefined ? `, a vertical takeoff ${vertical} up, then heading ${Math.round(this.target.takeoffYaw ?? 0)}` : ''}; ${kitLine(this.kit())}`,
     );
     this.phase = 'flying';
     // Track BL: the terrain floor, the clearance, the high cruise and the descent mode (a glide down keeps its simulated plan: no floor)
     const bl = { clearance: s.get('flyClearance'), descent: String(s.get('flyDescent')) as 'auto' | 'dive' | 'spiral', ...(high ? { highCruise: true } : {}) };
-    const opts = glide && ledge ? { ...glideOptions(this.target, ledge, { margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds') }), terrainFloor: false, descent: bl.descent } : { cruiseY, margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(ledge ? { ledge: { yaw: ledge.yaw } } : {}), ...bl };
+    const opts = glide && ledge ? { ...glideOptions(this.target, ledge, { margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds') }), terrainFloor: false, descent: bl.descent } : { cruiseY, margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(ledge ? { ledge: { yaw: ledge.yaw } } : {}), ...(vertical !== undefined ? { vertical: { top: vertical } } : {}), ...bl };
 
     this.flight = this.d.controller.flyTo(this.target, {
       ...opts,
       fleeHealth: s.get('fleeHealth'),
       elytraWornAt: elytraWornLimit(wear),
-      ...(sky?.ok ? { takeoffYaw: this.target.takeoffYaw ?? sky.yaw } : {}),
+      ...(sky?.ok ? { takeoffYaw: this.target.takeoffYaw ?? sky.yaw } : vertical !== undefined && this.target.takeoffYaw !== undefined ? { takeoffYaw: this.target.takeoffYaw } : {}),
     });
     void this.flight.then((r) => {
       this.report = r;

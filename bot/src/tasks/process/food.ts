@@ -75,7 +75,8 @@ export interface FoodDeps {
   /** Cancel the running skill (fight, walk) on a pause / stop. */
   cancel(): void;
   /** After a job: walk home if one is set and nothing is queued. */
-  afterJob?(): void;
+  /** After a job: the home return. `from`: where a user's food job started (no walk home from a job started far away). */
+  afterJob?(from?: Vec3): void;
   log?: Logger;
   now?: () => number;
   /** Track AF: remembered herds (beyond 48 blocks). */
@@ -117,6 +118,11 @@ export interface FoodJobResult {
 }
 
 /** One hunt-then-cook job (shared by `!food`, `!cook` and the chore); resumable after a pause. */
+/** The food job cooks after its hunt only at a furnace or smoker within this many blocks of the bot. */
+export const COOK_NEAR = 32;
+/** A user's food job walks home afterwards only when it started within this many blocks of home. */
+export const HOME_RETURN_NEAR = 64;
+
 export class FoodJob {
   phase: 'hunt' | 'cook' | 'done' = 'hunt';
   gained = 0;
@@ -125,6 +131,8 @@ export class FoodJob {
   huntReason = '';
   cookResult: CookResult | undefined;
   center: Vec3 | undefined;
+  /** Where the job started (the hunt's first centre; the herd trips move `center`). */
+  startedAt: Vec3 | undefined;
   readonly want: number;
   readonly opts: { hunt: boolean; cook: boolean; pens?: boolean };
   /** Track AF: the herd mark being walked to, cells already visited, trips made (log lines). */
@@ -149,6 +157,7 @@ export class FoodJob {
   async run(d: FoodDeps, cancelled: () => boolean): Promise<boolean> {
     if (this.phase === 'hunt') {
       this.center ??= d.position();
+      this.startedAt ??= { ...this.center };
       const anyPen = this.opts.pens === true;
       for (;;) {
         if (!this.trip) {
@@ -195,7 +204,8 @@ export class FoodJob {
     }
     if (this.phase === 'cook') {
       if (rawFoodCounts(d.inventory.slots).size > 0 && (d.cooker.canCook() || !this.opts.hunt)) {
-        const r = await d.cooker.cook({}, cancelled);
+        // after a hunt only a furnace near the bot (COOK_NEAR): far from home the raw food is kept, not carried home to cook
+        const r = await d.cooker.cook(this.opts.hunt ? { near: COOK_NEAR } : {}, cancelled);
         if (r.reason === 'interrupted') {
           if (cancelled()) return false;
         }
@@ -259,7 +269,7 @@ export class FoodProcess extends BaseProcess {
         if (!over || t !== this.token) return;
         this.finish();
         this.resolve(this.job.result());
-        this.d.afterJob?.();
+        this.d.afterJob?.(this.job.startedAt);
       },
       (err: unknown) => {
         this.d.log?.warn(`food: ${err instanceof Error ? err.message : String(err)}`);

@@ -21,9 +21,9 @@ import {
 import { Hunter } from '../../../src/skills/food/hunter.ts';
 import type { FightResult } from '../../../src/skills/combat/combat.ts';
 import type { BlockInfo, ContainerView, EntityInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
-import { FoodChore, FoodController, NOTHING_FOUND_BACKOFF_MS, type FoodDeps } from '../../../src/tasks/process/food.ts';
+import { COOK_NEAR, FoodChore, FoodController, FoodJob, NOTHING_FOUND_BACKOFF_MS, type FoodDeps } from '../../../src/tasks/process/food.ts';
 import { BaseProcess, PRIORITY, ProcessManager, type ProcessStatus } from '../../../src/tasks/process/manager.ts';
-import { foodReply, isChoreTime } from '../../../src/chat/commands-food.ts';
+import { cookReply, foodReply, isChoreTime } from '../../../src/chat/commands-food.ts';
 
 const item = (name: string, count: number, stackId?: number): ItemStack => ({ name, networkId: 1, count, metadata: 0, ...(stackId !== undefined ? { stackId } : {}) });
 
@@ -211,7 +211,7 @@ describe('Hunter', () => {
 
 // ---- cooker on a fake furnace ---------------------------------------------------------------------
 
-function fakeFurnace(opts: { block?: string; inv: (ItemStack | null)[] }) {
+function fakeFurnace(opts: { block?: string; inv: (ItemStack | null)[]; at?: Vec3 }) {
   const block = opts.block ?? 'furnace';
   const fpos = { x: 3, y: -60, z: 0 };
   const windows = new Map<number, (ItemStack | null)[]>([[0, opts.inv]]);
@@ -268,7 +268,7 @@ function fakeFurnace(opts: { block?: string; inv: (ItemStack | null)[] }) {
   };
   const world = {
     blockAt: (p: Vec3) => (p.x === fpos.x && p.y === fpos.y && p.z === fpos.z ? ({ name: block, stateId: 0, states: {}, hardness: 3.5, solid: true, boxes: [] } as BlockInfo) : undefined),
-    find: () => [fpos],
+    find: (_pred: unknown, o: { origin: Vec3; radius: number }) => (Math.hypot(fpos.x - o.origin.x, fpos.z - o.origin.z) <= o.radius ? [fpos] : []),
     chunks: { runtimeIdAt: () => 42 },
     inventory: {
       get slots() {
@@ -284,7 +284,7 @@ function fakeFurnace(opts: { block?: string; inv: (ItemStack | null)[] }) {
   };
   const per = cookTicksOf(block);
   const loop = {
-    state: { pos: { x: 0.5, y: -60, z: 0.5 }, ready: true },
+    state: { pos: opts.at ?? { x: 0.5, y: -60, z: 0.5 }, ready: true },
     setCommand: () => undefined,
     waitTicks: (n: number) => {
       ticks += n;
@@ -356,6 +356,18 @@ describe('Cooker', () => {
     expect(first.destination.slot_type.container_id).toBe('smoker_ingredient');
   });
 
+  it('after a hunt only a furnace near the bot: far from home the raw food is kept (no walk home to cook); near home it cooks', async () => {
+    const far = fakeFurnace({ inv: [item('beef', 4, 2), item('coal', 2, 3), ...Array.from({ length: 34 }, () => null)], at: { x: 500.5, y: -60, z: 0.5 } });
+    const r = await far.cooker.cook({ near: COOK_NEAR }, () => false);
+    expect(r.reason).toBe('no_furnace_near');
+    expect(far.walks).toEqual([]);
+    expect(cookReply(r, 0)).toBe(`cook: no furnace or smoker within ${COOK_NEAR} blocks; the raw food is kept (!cook cooks it at home)`);
+    // !cook from there still walks to the home furnace
+    expect((await far.cooker.cook({}, () => false)).ok).toBe(true);
+    const near = fakeFurnace({ inv: [item('beef', 4, 2), item('coal', 2, 3), ...Array.from({ length: 34 }, () => null)] });
+    expect((await near.cooker.cook({ near: COOK_NEAR }, () => false)).ok).toBe(true);
+  });
+
   it('refuses without raw food, a furnace or fuel', async () => {
     const none = fakeFurnace({ inv: [item('coal', 1), ...Array.from({ length: 35 }, () => null)] });
     expect((await none.cooker.cook({}, () => false)).reason).toBe('nothing_to_cook');
@@ -384,6 +396,7 @@ class UserProc extends BaseProcess {
 
 function choreRig(opts: { points?: number; day?: boolean; targets?: number; autoFood?: boolean; user?: boolean } = {}) {
   const settings = new RuntimeSettings();
+  settings.set('foodLeave', 2); // these chore tests check the keep rule (the default is 0)
   if (opts.autoFood === false) settings.set('autoFood', false);
   const pm = new ProcessManager();
   let now = 0;
@@ -413,6 +426,7 @@ function choreRig(opts: { points?: number; day?: boolean; targets?: number; auto
     user,
     settings,
     h,
+    deps,
     setDay: (d: boolean) => {
       day = d;
     },
@@ -437,11 +451,39 @@ describe('food chore: the food in the carried boxes', () => {
   });
 });
 
+describe('food job: cooking and the way home', () => {
+  it('the hunt cooks only at a furnace near the bot; the job reports where it started (no walk home from far away)', async () => {
+    const r = choreRig({ targets: 2 });
+    r.settings.set('foodLeave', 0);
+    r.h.slots[2] = item('coal', 4);
+    const asked: unknown[] = [];
+    r.deps.cooker = { canCook: () => true, cook: (o: unknown) => (asked.push(o), Promise.resolve({ ok: false, reason: 'no_furnace_near', cooked: {}, fuel: {}, ticks: 0 })), phase: 'idle' } as unknown as Cooker;
+    const job = new FoodJob(4, { hunt: true, cook: true });
+    expect(await job.run(r.deps, () => false)).toBe(true);
+    expect(asked).toEqual([{ near: COOK_NEAR }]);
+    expect(job.startedAt).toEqual({ x: 0, y: -60, z: 0 });
+    // !cook (no hunt) asks for the home furnace as before
+    const cook = new FoodJob(0, { hunt: false, cook: true });
+    r.h.slots[3] = item('beef', 2);
+    await cook.run(r.deps, () => false);
+    expect(asked.at(-1)).toEqual({});
+  });
+
+  it('with the default foodLeave 0 the hunt takes every wild adult in reach', async () => {
+    const r = choreRig({ targets: 3 });
+    r.settings.set('foodLeave', SETTING_DEFS.foodLeave.default);
+    const job = new FoodJob(20, { hunt: true, cook: false });
+    await job.run(r.deps, () => false);
+    expect(job.killed).toBe(3);
+    expect(r.h.entities.size).toBe(0);
+  });
+});
+
 describe('food chore (auto trigger)', () => {
   it('settings and the chore priority', () => {
     expect(SETTING_DEFS.autoFood.default).toBe(true);
     expect(SETTING_DEFS.foodMin.default).toBe(10);
-    expect(SETTING_DEFS.foodLeave.default).toBe(2);
+    expect(SETTING_DEFS.foodLeave.default).toBe(0); // wild animals are not kept by default; pens are (pen.ts)
     expect(PRIORITY.chore).toBe(30);
     expect(PRIORITY.chore).toBeLessThan(PRIORITY.user);
     expect(PRIORITY.chore).toBeGreaterThan(PRIORITY.home);
@@ -535,6 +577,6 @@ describe('food chore (auto trigger)', () => {
     const res = await p.result;
     expect(res).toMatchObject({ ok: true, gained: 2, killed: 1 });
     expect(foodReply(res, 2, 2)).toBe('food: 2/2 items from 1 cow');
-    expect(foodReply({ ok: false, reason: 'none_left', gained: 1, killed: 1, kinds: { pig: 1 } }, 6, 2)).toBe('food: 1/6 items from 1 pig, nothing left to hunt within 48 blocks (keeping 2 of each)');
+    expect(foodReply({ ok: false, reason: 'none_left', gained: 1, killed: 1, kinds: { pig: 1 } }, 6, 2)).toBe('food: 1/6 items from 1 pig, nothing left to hunt within 48 blocks (keeping 2 wild of each)');
   });
 });

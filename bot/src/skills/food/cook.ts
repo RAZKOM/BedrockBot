@@ -193,11 +193,16 @@ export interface CookerDeps {
 export interface CookOptions {
   /** Furnaces within this radius of home. Default 16. */
   radius?: number;
+  /**
+   * Furnaces within this many blocks of the bot only, wherever home is (the food job after its hunt: a hunt
+   * far from home keeps its raw food instead of walking home to cook it; `!cook` there cooks it later).
+   */
+  near?: number;
   /** Give up waiting this many ticks after the expected end. Default 200. */
   slackTicks?: number;
 }
 
-export type CookReason = 'done' | 'nothing_to_cook' | 'no_furnace' | 'no_fuel' | 'unreachable' | 'open_failed' | 'furnace_busy' | 'request_failed' | 'timeout' | 'interrupted' | 'not_ready';
+export type CookReason = 'done' | 'nothing_to_cook' | 'no_furnace' | 'no_furnace_near' | 'no_fuel' | 'unreachable' | 'open_failed' | 'furnace_busy' | 'request_failed' | 'timeout' | 'interrupted' | 'not_ready';
 
 export interface CookResult {
   ok: boolean;
@@ -231,10 +236,10 @@ export class Cooker {
     this.req.dispose();
   }
 
-  /** Furnaces / smokers within the radius of home (else the bot), nearest to the bot first. */
-  furnaces(radius = 16): Vec3[] {
+  /** Furnaces / smokers within the radius of home (else the bot; `near`: of the bot), nearest to the bot first. */
+  furnaces(radius = 16, near = false): Vec3[] {
     const me = this.d.loop.state.pos;
-    const origin = this.d.home() ?? me;
+    const origin = near ? me : (this.d.home() ?? me);
     return findCookers(this.d.world, origin, radius).sort((a, b) => Math.hypot(a.x + 0.5 - me.x, a.z + 0.5 - me.z) - Math.hypot(b.x + 0.5 - me.x, b.z + 0.5 - me.z));
   }
 
@@ -258,8 +263,8 @@ export class Cooker {
     const { world, loop } = this.d;
     if (!loop.state.ready) return done('not_ready');
     if (rawFoodCounts(world.inventory.slots).size === 0) return done('nothing_to_cook');
-    const list = this.furnaces(o.radius ?? 16);
-    if (list.length === 0) return done('no_furnace');
+    const list = o.near !== undefined ? this.furnaces(o.near, true) : this.furnaces(o.radius ?? 16);
+    if (list.length === 0) return done(o.near !== undefined ? 'no_furnace_near' : 'no_furnace');
     let opened: { id: number; type: string; block: string; pos: Vec3 } | undefined;
     for (const p of list) {
       if (cancelled()) return done('interrupted');

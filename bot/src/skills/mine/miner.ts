@@ -291,6 +291,17 @@ export function eyeGoal(p: Vec3, r = APPROACH_EYE_RANGE): Goal {
 
 const key = (p: Vec3) => `${p.x},${p.y},${p.z}`;
 
+/**
+ * Skip reasons that go away while the job digs: the sand or gravel over the target is mined, an unsupported
+ * gravity block beside it is gone, a neighbour loads, the bot steps off it. A target skipped for one of these
+ * waits (looked at again on the next scan) instead of being blacklisted for the run: `!get sand` had skipped
+ * every sand block under another one for good, so only the top layer of a sand bed was ever mined.
+ */
+const WAITING_SKIPS: ReadonlySet<string> = new Set(['gravity_above', 'gravity_beside', 'unknown', 'unloaded', 'under_feet']);
+export function waitingSkip(why: string): boolean {
+  return WAITING_SKIPS.has(why);
+}
+
 export class MineTask {
   readonly name = 'mine';
   state: MineState = 'idle';
@@ -305,6 +316,8 @@ export class MineTask {
   private gen = 0;
   private readonly fails = new Map<string, number>();
   private readonly black = new Set<string>();
+  /** Targets skipped for a reason that goes away (`waitingSkip`): position -> the reason last reported, so each is logged once. */
+  private readonly waiting = new Map<string, string>();
   /** Track BD: the feet cell (and the dig tallies) of the last composite goto that found no path at all, until one walks. */
   private calcFailedAt: string | undefined;
   /** Track Z: ores found unreachable (one plan without progress): skipped for the rest of the session. */
@@ -380,6 +393,7 @@ export class MineTask {
     this.stats.startedAt = this.now();
     this.fails.clear();
     this.black.clear();
+    this.waiting.clear();
     this.calcFailedAt = undefined;
     this.lastError = undefined;
     this.state = 'scan';
@@ -581,9 +595,7 @@ export class MineTask {
         }
         const why = this.d.breakRule(t.p);
         if (why) {
-          this.stats.unsafe.push({ p: { ...t.p }, why });
-          this.log.info(`mine: skipping ${t.name} at ${fmt(t.p)}: ${why}`);
-          this.blacklist(t.p);
+          this.skipRule(t.p, t.name, why);
           continue;
         }
         cands.push(t);
@@ -904,11 +916,28 @@ export class MineTask {
     const r = prune(this.goalCtx(feet), ores, drops);
     for (const s of r.skipped) {
       if (this.black.has(key(s.p))) continue;
-      this.stats.unsafe.push({ p: { ...s.p }, why: s.why });
-      this.log.info(`mine: skipping ${this.d.blockAt(s.p)?.name ?? '?'} at ${fmt(s.p)}: ${s.why}`);
-      this.blacklist(s.p);
+      this.skipRule(s.p, this.d.blockAt(s.p)?.name ?? '?', s.why);
     }
     return r;
+  }
+
+  /**
+   * A target the rules refuse now: reported with the reason; blacklisted for the run unless the reason goes
+   * away as the job digs (`waitingSkip`: then it is reported once and looked at again on the next scan).
+   */
+  private skipRule(p: Vec3, name: string, why: string): void {
+    const k = key(p);
+    if (!waitingSkip(why)) {
+      this.waiting.delete(k);
+      this.stats.unsafe.push({ p: { ...p }, why });
+      this.log.info(`mine: skipping ${name} at ${fmt(p)}: ${why}`);
+      this.blacklist(p);
+      return;
+    }
+    if (this.waiting.get(k) === why) return;
+    this.waiting.set(k, why);
+    this.stats.unsafe.push({ p: { ...p }, why });
+    this.log.info(`mine: ${name} at ${fmt(p)} waits: ${why}`);
   }
 
   /**
@@ -1182,10 +1211,20 @@ export class MineTask {
     while (remaining.length > 0 && left() > 0 && this.alive(gen)) {
       const e = this.eye();
       if (!e) break;
-      remaining.sort((a, b) => closestDistance(e, a) - closestDistance(e, b));
-      const next = remaining.find((p) => this.near(p) && this.seen(p));
+      // members refused for good leave the group; those that wait (sand or gravel still over them, the one
+      // under the feet) stay until the blocks above are dug: a sand bed is taken top down from here
+      remaining = remaining.filter((p) => {
+        const b = this.d.blockAt(p);
+        if (!b || !this.names.has(b.name)) return false;
+        const why = this.d.breakRule(p);
+        return !why || waitingSkip(why);
+      });
+      const ready = remaining.filter((p) => !this.d.breakRule(p));
+      if (ready.length === 0) break;
+      ready.sort((a, b) => closestDistance(e, a) - closestDistance(e, b));
+      const next = ready.find((p) => this.near(p) && this.seen(p));
       if (!next) {
-        const p = remaining[0]!;
+        const p = ready[0]!;
         if (this.near(p) && sights < 2 * group.length) {
           // something between the eye and the block (a corner of the rock): dig it, same rules
           const s = lineOfSight(this.d.blockAt, e, p);
