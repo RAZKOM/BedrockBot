@@ -26,7 +26,7 @@ import { entityFeet } from '../skills/combat/hostiles.ts'; // Track AF
 import { Cooker, type CookContainers, type CookResult } from '../skills/food/cook.ts';
 import { Hunter } from '../skills/food/hunter.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
-import { BREED_PERIOD_MS, BREED_RADIUS, BREED_TARGET, DEFAULT_FOOD_ITEMS, FOOD_RADIUS, FoodController, noPenLine, parseChorePen, type FoodJobResult } from '../tasks/process/food.ts';
+import { BREED_PERIOD_MS, BREED_RADIUS, BREED_TARGET, COOK_NEAR, DEFAULT_FOOD_ITEMS, FOOD_RADIUS, FoodController, HOME_RETURN_NEAR, noPenLine, parseChorePen, type FoodJobResult } from '../tasks/process/food.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { isNight } from '../tasks/night.ts';
 
@@ -158,8 +158,12 @@ export function registerFoodCommands(d: CommandDeps, extra: FoodCommandExtra = {
       if (pve.combat.busy) pve.combat.cancel();
       if (pve.mover.nav.busy) pve.mover.cancel();
     },
-    afterJob: () => {
-      if (home()) void pve.returnHome('food', { ifIdle: true, timeoutTicks: 6000 });
+    afterJob: (from) => {
+      const h = home();
+      if (!h) return;
+      // a !food started far from home stays there (it was sent there); the chores and jobs near home go back
+      if (from && Math.hypot(from.x - h.x, from.z - h.z) > HOME_RETURN_NEAR) return;
+      void pve.returnHome('food', { ifIdle: true, timeoutTicks: 6000 });
     },
     log,
     herds, // Track AF
@@ -234,7 +238,7 @@ export function registerFoodCommands(d: CommandDeps, extra: FoodCommandExtra = {
         return;
       }
       const leave = d.settings.get('foodLeave');
-      reply(`gathering ${n} food items (${herdLine()} within ${FOOD_RADIUS}; keeping ${leave} of each${withPens ? ', pens down to 2 of each' : ''})`);
+      reply(`gathering ${n} food items (${herdLine()} within ${FOOD_RADIUS}; ${leave > 0 ? `keeping ${leave} wild of each` : 'wild animals'}${withPens ? ', pens down to 2 of each' : ', pens left alone'})`);
       void food.food(n, withPens).result.then((r) => {
         reply(foodReply(r, n, leave));
       });
@@ -382,7 +386,7 @@ export function foodReply(r: FoodJobResult, want: number, leave: number): string
     .join(', ');
   let s: string;
   if (r.reason === 'interrupted') s = `food: stopped after ${r.gained}/${want} items`;
-  else if (r.reason === 'none_left') s = `food: ${r.gained}/${want} items${kinds ? ` from ${kinds}` : ''}, nothing left to hunt within ${FOOD_RADIUS} blocks (keeping ${leave} of each)`;
+  else if (r.reason === 'none_left') s = `food: ${r.gained}/${want} items${kinds ? ` from ${kinds}` : ''}, nothing left to hunt within ${FOOD_RADIUS} blocks${leave > 0 ? ` (keeping ${leave} wild of each)` : ''}`;
   else s = `food: ${r.gained}/${want} items${kinds ? ` from ${kinds}` : ''}`;
   if (r.trips?.length) s += ` (${r.trips.length} walk${r.trips.length === 1 ? '' : 's'} to remembered herds)`; // Track AF
   if (r.cook) {
@@ -406,6 +410,8 @@ function cookReason(r: string): string {
   switch (r) {
     case 'no_furnace':
       return 'no furnace or smoker within 16 blocks of home';
+    case 'no_furnace_near':
+      return `no furnace or smoker within ${COOK_NEAR} blocks; the raw food is kept (!cook cooks it at home)`;
     case 'no_fuel':
       return 'no fuel (coal, charcoal, planks, logs, dried kelp blocks)';
     case 'nothing_to_cook':

@@ -629,6 +629,33 @@ describe('MineTask in mode baritone: one composite goal, the reached ore mined',
     for (const p of ['5,1,0', '7,1,0', '0,-5,0']) expect(w.blockAt({ x: Number(p.split(',')[0]), y: Number(p.split(',')[1]), z: 0 })?.name).toBe('iron_ore');
   });
 
+  it('a sand column: the sand under sand waits (gravity_above), not blacklisted for the run, and is mined once the sand over it is gone', async () => {
+    const w = wall();
+    for (let y = 1; y <= 3; y++) w.load({ x: 9, y, z: 0 }, 'sand');
+    const h = harness(w);
+    h.walkDigsOre = true; // the walk ends with the feet in the top sand's cell (it digs that one and the head cell)
+    const t = new MineTask(h.deps);
+    expect(await t.start({ block: 'sand', count: 3 })).toBe('done');
+    expect(t.stats.mined).toBe(3);
+    expect(t.stats.blacklisted).toEqual([]);
+    for (let y = 1; y <= 3; y++) expect(w.blockAt({ x: 9, y, z: 0 })?.name).toBe('air');
+    // reported once each as waiting, not as refused for good
+    expect(t.stats.unsafe.filter((u) => u.why === 'gravity_above').length).toBeLessThanOrEqual(2);
+  });
+
+  it('the vein takes a sand pillar beside the bot top down from where it stands (the lower sand, nearer the eye, waits for the sand over it)', async () => {
+    const w = new World();
+    w.load({ x: 1, y: 0, z: 0 }, 'sand'); // the composite's member: the walk ends with the feet in its cell
+    for (let y = 0; y <= 3; y++) w.load({ x: 2, y, z: 0 }, 'sand'); // the pillar beside it
+    const h = harness(w);
+    h.walkDigsOre = true;
+    const t = new MineTask(h.deps);
+    expect(await t.start({ block: 'sand', count: 5 })).toBe('done');
+    expect(t.stats.composites).toBe(1);
+    expect(t.stats.veins[0]?.mined).toBe(5);
+    expect(h.calls.filter((c) => c.startsWith('dig ')).slice(-4)).toEqual(['dig 2,3,0', 'dig 2,2,0', 'dig 2,1,0', 'dig 2,0,0']);
+  });
+
   it('no pickaxe for the nearest ore ends no_pickaxe; the setting parses', async () => {
     const w = wall();
     w.load({ x: 9, y: 1, z: 0 }, 'iron_ore');

@@ -45,7 +45,7 @@ docs/runbook.md (server row, two command rows, test line, per-track pointer).
 
 | Command | Reply |
 |---|---|
-| `!food [n]` | `gathering 6 food items (cow 4+1 baby within 48; keeping 2 of each)`, then `food: 6/6 items from 2 cow` (with a furnace near home and fuel: `; cooked 6 cooked_beef`), `food: 5/6 items from 2 cow, nothing left to hunt within 48 blocks (keeping 2 of each)`, `food: stopped after 2/6 items` (`!stop`). n is 1..64, default 8 |
+| `!food [n]` | `gathering 6 food items (cow 4+1 baby within 48; wild animals, pens left alone)` (with `foodLeave` 2: `keeping 2 wild of each`), then `food: 6/6 items from 2 cow` (with a furnace near home and fuel: `; cooked 6 cooked_beef`), `food: 5/6 items from 2 cow, nothing left to hunt within 48 blocks (keeping 2 of each)`, `food: stopped after 2/6 items` (`!stop`). n is 1..64, default 8 |
 | `!food status` | `food: 0 points carried (foodMin 10), auto on, day, next try in 512 s; cow 2 within 48; last chore: 4 items (none_left)` |
 | `!food [n] pen` (Track AF) | the same; animals inside pens may be taken too, never below 2 adults of a kind (`gathering 6 food items (no wild food mobs; in pens cow 4+1 baby within 48; keeping 2 of each, pens down to 2 of each)`) |
 | `!food herds` (Track AF) | `food: 2 herd(s) remembered: 22155 -59 21132 (4 blocks, 0 min ago): cow 1 \| ...` (wild counts, then `pen cow 3`) |
@@ -62,7 +62,7 @@ Without walking both answer `<cmd> needs a task that can walk (...)`.
 |---|---|---|---|
 | `autoFood` | on | on/off | the food chore may run by itself |
 | `foodMin` | 10 | 0..200 hunger points | the chore runs when the food carried totals fewer points (cooked beef 8, raw beef 3, bread 5, ...; rotten flesh, spider eyes, pufferfish, poisonous potatoes do not count) |
-| `foodLeave` | 2 | 0..16 mobs | never reduce a kind below this many **wild adults** within the 48-block radius (`!food` and the chore); Track AF: animals in pens do not count (see "Pens") |
+| `foodLeave` | 0 | 0..16 mobs | wild adults of a kind left alive within the 48-block radius (`!food` and the chore); 0: every wild adult may be hunted. Animals in pens are never hunted unless asked (`!food n pen`, `chorePen`), and then down to 2 (see "Pens"). Was 2 until the owner asked for only the pens to be kept; raise it near a farm the pen detector misses |
 | `autoBreed` | off | on/off | Track AF: the breeding chore may run (needs `chorePen`) |
 | `chorePen` | none | `x y z` or `none` | Track AF: a block inside the owner's pen: the hunt may take its animals down to 2 adults of a kind, and `autoBreed` breeds it. `!set chorePen 120 64 -30` |
 
@@ -85,7 +85,11 @@ mover (closed gates and doors are opened by the planner; `closeDoors` closes the
 Food items are counted as the inventory delta around each kill (leather, feathers, wool are picked up
 but not counted). Stops at n items or when no target is left.
 
-**Cook** (`Cooker`): after a hunt (when raw food and fuel are carried) and on `!cook`. A furnace or
+**Cook** (`Cooker`): after a hunt (when raw food and fuel are carried) and on `!cook`. After a hunt
+only a furnace or smoker within `COOK_NEAR` (32) blocks **of the bot**: a hunt far from home keeps its
+raw food instead of walking home to cook it (`cook: no furnace or smoker within 32 blocks; the raw food
+is kept (!cook cooks it at home)`), and a `!food` started more than `HOME_RETURN_NEAR` (64) blocks from
+home stays where it is afterwards (the chores and jobs near home still walk home). `!cook`: a furnace or
 smoker (lit or not; blast furnaces do not cook food) within 16 blocks of home (of the bot without a
 home), found with `World.find` (cached marks too when a world cache is open), nearest to the bot
 first; walk to it (`getToBlock`, reach 4), open it, take out whatever lies in the output slot, then per
@@ -310,8 +314,8 @@ removes every entity within 80 blocks of home and resets the 71 x 71 area (pen a
   passes within about 80 blocks. Marks are not shared between bots.
 - Track AF: breeding was verified with cows (wheat); the other kinds' foods are vanilla facts, not
   measured here. No sheep shearing, no egg collection.
-- The leave rule keeps 2 wild adults of each kind within 48 blocks (Track AF: pens are recognised, see
-  "Pens").
+- The leave rule keeps `foodLeave` wild adults of each kind within 48 blocks (default 0 since the owner
+  asked; Track AF: pens are recognised, see "Pens"). A pen the detector misses counts as wild.
 - With `foodLeave` 2 and 4 cows, `!food 6` can kill only 2 cows: 2 to 6 beef by the loot table (the e2e
   saw 4 to 6). The test therefore asserts the 2 kills, the 2 survivors and at least 2 beef, and logs
   when fewer than 4 came.

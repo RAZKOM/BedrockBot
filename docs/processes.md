@@ -134,6 +134,7 @@ its plan yet; `navRemaining` reads its `active` record read-only (an open issue 
 | `flyOverhangDepth` | 10 | number | flight (Track BF): an overhang landing flies at most this many blocks under the roof (0 = never under a roof) |
 | `flySneakLand` | on | boolean | flight (Track BF): sneak through the touchdown and the settle; released when the flight ends |
 | `flyLedgeTakeoff` | on | boolean | flight (Track BH, docs/flight.md "Ledge takeoff"): step off a platform edge (sneak to the rim, release, glide as the fall begins) when the jump takeoff is refused or the start is a small platform |
+| `flyVerticalTakeoff` | on | boolean | flight (docs/flight.md "Vertical takeoff"): straight up the open column over the bot when the jump takeoff is refused on every heading, then the climb from above |
 | `glideDown` | on | boolean | flight (Track BH, "Glide down"): a goto / come that ends unreachable with the goal far below glides down when a simulated glide from a ledge lands near it (rockets optional), then walks |
 | `glideDownMinDrop` | 10 | number | flight (Track BH): the glide down only for a goal at least this far below the feet |
 | `glideDownMinDistance` | 16 | number | flight (Track BH): the glide down only for a goal at least this far away horizontally |

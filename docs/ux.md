@@ -119,7 +119,7 @@ it. `!help nosuch`: `no command !nosuch; !help all lists every command`.
 
 ```
 settings: mode normal (!mode careful|normal|bold); safety: fleeHealth 8, guardRadius 16, avoidMobRadius 4, avoidSpawnerRadius 8; walking: allowBreak off, allowPlace off, closeDoors off, sprint on, followDistance 3, plannerThreads 1
-work: mineSeenOnly off, mineTunnelLen 32, useBoneMeal on, toolWearLimit 10, throwawayMin 16, stashChest none, stashShulker on; food: autoFood on, foodMin 10, foodLeave 2, autoBreed off, chorePen none
+work: mineSeenOnly off, mineTunnelLen 32, useBoneMeal on, toolWearLimit 10, throwawayMin 16, stashChest none, stashShulker on; food: autoFood on, foodMin 10, foodLeave 0, autoBreed off, chorePen none
 other: nudgeInterval 240, nlConfirm on, lastWelcomed none; !set <key> explains one
 ```
 
