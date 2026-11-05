@@ -179,6 +179,8 @@ export class FlightController {
   private target: LandingTarget | undefined;
   private unsubs: (() => void)[] = [];
   private resolve: ((r: FlightReport) => void) | undefined;
+  /** The promise of the flight that runs (`flight`). */
+  private current: Promise<FlightReport> | undefined;
   private lastFire = -1000;
   private tickNo = 0;
   private usedAt: number | undefined;
@@ -206,6 +208,11 @@ export class FlightController {
   /** A flight runs (from `flyTo` until the body stands after it). */
   get active(): boolean {
     return this.brain !== undefined;
+  }
+
+  /** The flight that runs now (the promise `flyTo` returned), undefined on the ground: a new trip in the air takes it over (FlyProcess.adopt). */
+  get flight(): Promise<FlightReport> | undefined {
+    return this.brain ? this.current : undefined;
   }
 
   /** In the air (gliding) right now. */
@@ -272,7 +279,7 @@ export class FlightController {
     this.baseWorld = base;
     loop.world = skyQuery(base);
     this.log.info(`flight: to ${describeTarget(target)}, cruise y ${opts.cruiseY}${opts.takeoffYaw !== undefined ? `, takeoff heading ${Math.round(opts.takeoffYaw)}` : ''}${opts.ledge ? `, ledge takeoff heading ${Math.round(opts.ledge.yaw)}` : ''}`);
-    return new Promise<FlightReport>((resolve) => {
+    const flight = new Promise<FlightReport>((resolve) => {
       this.resolve = resolve;
       this.unsubs.push(
         loop.onBeforeStep((tick, state) => {
@@ -300,11 +307,16 @@ export class FlightController {
       );
       loop.setCommand({ forward: 0, strafe: 0, sprint: false, sneak: false, jump: false });
     });
+    this.current = flight;
+    return flight;
   }
 
-  /** Track AU2: move the landing target while the flight is on its way (before the approach); false once the approach has begun. */
-  retarget(target: LandingTarget): boolean {
-    if (!this.brain?.retarget(target, this.body(this.d.loop.state))) return false;
+  /**
+   * Track AU2: move the landing target while the flight is on its way (before the approach); false once the approach has begun.
+   * `cruiseY`: a new trip taken over in the air may need a higher cruise than the one the flight started with (never lowered).
+   */
+  retarget(target: LandingTarget, o: { cruiseY?: number } = {}): boolean {
+    if (!this.brain?.retarget(target, this.body(this.d.loop.state), o)) return false;
     this.target = target;
     this.log.info(`flight: retargeted to ${describeTarget(target)}`);
     return true;

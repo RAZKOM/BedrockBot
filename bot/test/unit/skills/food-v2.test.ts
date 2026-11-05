@@ -389,6 +389,7 @@ describe('breeding', () => {
 
 function jobRig(opts: { herdAt?: Vec3; cows?: number; autoBreed?: boolean; chorePen?: string; wheat?: number; penned?: number } = {}) {
   const settings = new RuntimeSettings();
+  settings.set('foodLeave', 2); // the herd tests check the keep rule (the default is 0)
   settings.set('autoFood', false); // the food chore would hunt the chorePen pen first
   if (opts.autoBreed) settings.set('autoBreed', true);
   if (opts.chorePen) settings.set('chorePen', opts.chorePen);
