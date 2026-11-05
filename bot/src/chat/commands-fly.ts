@@ -10,7 +10,7 @@
 // added to the manager here.
 import type { Vec3 } from '../connection/types.ts';
 import { FlightController, skyQuery } from '../skills/fly/controller.ts';
-import { glideKitReady, jumpTakeoff, ledgeTakeoff, planGlideDown, smallPlatform, type Ledge, type SimDeps } from '../skills/fly/glide.ts'; // Track BH
+import { glideKitReady, jumpTakeoff, ledgeTakeoff, planGlideDown, smallPlatform, verticalTakeoff, type Ledge, type SimDeps } from '../skills/fly/glide.ts'; // Track BH
 import { elytraWornLimit, flightKitMemoryOf, kitLine, kitReady, readKit, SupplyWatch } from '../skills/fly/kit.ts';
 import { FlightKitOps } from '../skills/fly/kitops.ts';
 import { APPROACH_HEIGHT, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, type CellQuery, type LandingTarget, type SkyCheck } from '../skills/fly/plan.ts';
@@ -296,9 +296,12 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   const supply = new SupplyWatch();
   processes.add(new FlightProcess(controller));
   let current: FlyProcess | undefined;
-  /** `home`: the trip home (the returnHome wrapper below): the FlyProcess runs as the home return (`home`, auto, PRIORITY.home). */
-  const start = (target: FlyTarget, o: { home?: boolean } = {}): FlyProcess => {
-    terrain.clear(); // Track BL: a flight reads the columns afresh
+  /**
+   * `adopt`: take over the flight in the air for this target (FlyProcess.adopt) instead of a takeoff; the trip before it hands over.
+   * `home`: the trip home (the returnHome wrapper below): the FlyProcess runs as the home return (`home`, auto, PRIORITY.home).
+   */
+  const start = (target: FlyTarget, o: { adopt?: { cruiseY?: number }; home?: boolean } = {}): FlyProcess => {
+    if (!o.adopt) terrain.clear(); // Track BL: a flight reads the columns afresh (a taken-over flight keeps what it read)
 
     const p = new FlyProcess(target, {
       controller,
@@ -319,6 +322,10 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       supply,
       log,
     }, o.home ? { name: 'home', kind: 'auto', priority: PRIORITY.home } : {});
+    if (o.adopt) {
+      current?.handOver(); // replaced below without landing: the flight is this trip's now
+      p.adopt(o.adopt.cruiseY);
+    }
     current = p;
     processes.add(p);
     void p.result.finally(() => {
@@ -391,14 +398,30 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     return r.ledge;
   };
   /**
+   * The vertical takeoff (glide.ts verticalTakeoff): straight up the open column over the bot, then the climb
+   * from above the trees or walls around it. Tried when the jump takeoff is refused on every heading, and when
+   * the sky check refused for the 3 x 3 or the run (not for a roof right over the head).
+   */
+  const verticalFor = async (from: Vec3, target: LandingTarget, rockets: number, quiet = false): Promise<{ vertical: number; takeoffYaw: number } | undefined> => {
+    if (!d.settings.get('flyVerticalTakeoff')) return undefined;
+    const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
+    const r = await verticalTakeoff(simDeps(true), from, target, { cruiseY: cz.y, margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds') }, rockets, d.settings.get('flyTakeoffRun'));
+    if (!quiet) log.info(`fly: vertical takeoff: ${r.line}`);
+    return r.top !== undefined && r.yaw !== undefined ? { vertical: r.top, takeoffYaw: r.yaw } : undefined;
+  };
+  /**
    * Track BH: how this flight takes off: a ledge (ledgeFor), else the jump along the first heading whose
    * simulated climb meets no solid (the sky check's first, then 30 degrees apart: the Realm's takeoff into a
-   * tree canopy, 2026-10-31), else refused with the line (walk out).
+   * tree canopy, 2026-10-31), else straight up the open column over the bot (verticalFor), else refused with
+   * the line (walk out, or a takeoff site).
    */
-  const takeoffFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number, quiet = false): Promise<{ ledge?: Ledge; takeoffYaw?: number } | { refuse: string }> => {
+  const takeoffFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number, quiet = false): Promise<{ ledge?: Ledge; takeoffYaw?: number; vertical?: number } | { refuse: string }> => {
     const ledge = await ledgeFor(from, target, sky, rockets, quiet);
     if (ledge) return { ledge };
-    if (!sky.ok) return { refuse: sky.line };
+    if (!sky.ok) {
+      // the 3 x 3 or the run blocked leaves the column over the head (a roof right over it: verticalFor says so at once)
+      return (await verticalFor(from, target, rockets, quiet)) ?? { refuse: sky.line };
+    }
     const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
     const yaws = [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180].map((o) => sky.yaw + o);
     // Track BL: any heading (the climbing turn back towards the goal is part of the simulation, its corridor checked with unknown-is-not-air)
@@ -406,7 +429,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (r.yaw !== undefined && r.yaw === sky.yaw) return { takeoffYaw: r.yaw };
     if (!quiet) log.info(`fly: the simulated climb: ${r.line}`);
     if (r.yaw !== undefined) return { takeoffYaw: r.yaw };
-    return { refuse: 'fly: no clear climb from here (the simulated climb meets a solid on every heading: trees, a wall); walk outside first' };
+    const v = await verticalFor(from, target, rockets, quiet);
+    if (v) return v;
+    return { refuse: 'fly: no clear climb from here (the simulated climb meets a solid on every heading: trees, a wall, and none straight up); walk outside first' };
   };
   /** Track BL: a takeoff site to walk to (sites.ts): the cell, the walk there (blocks of the probed path), the flight from there and its takeoff. */
   interface TakeoffSite {
@@ -536,6 +561,43 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing' || r.reason?.startsWith('fly: no open sky')) return walk();
     if (r.reason === 'interrupted' || r.reason === 'replaced') return Promise.resolve({ ok: false, reason: 'interrupted' });
     return Promise.resolve({ ok: false, reason: flyEndLine(r) });
+  };
+  /**
+   * A new trip (`!goto`, `!come`, `!fly`) while a flight is in the air: the flight takes the new goal there
+   * (the landing found as for any flight, the cruise raised when the new trip needs more) instead of landing
+   * first; the trip that started it ends `replaced` and its walk never runs (it used to run after the
+   * landing and replace the new walk, so the bot went where it was first sent). Undefined when nothing is
+   * in the air (or the flight landed while the landing was looked for): the trip starts from the ground.
+   */
+  const takeOver = async (goalBlock: Vec3, label: string, half: number, exact: boolean): Promise<FlyProcess | undefined> => {
+    const old = current;
+    if (!controller.active || old?.phase !== 'flying') return undefined;
+    const plan = await landingFor(goalBlock, label, exact ? half : undefined);
+    if (!controller.active || current !== old || old.phase !== 'flying') return undefined;
+    const target = targetFromPlan(plan, { label, goal: goalBlock, half, ...(exact ? { exact: half } : {}) });
+    const from = position();
+    const cruiseY = from ? cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') }).y : undefined;
+    const p = start(target, { adopt: cruiseY !== undefined ? { cruiseY } : {} });
+    const walk = plan.kind === 'cell' || plan.kind === 'fallback' ? plan.walk : 0;
+    const dist = from ? Math.round(hdist(from, target)) : undefined;
+    if (p.retargeted) d.chat.say(`flying on to ${label}${dist !== undefined ? ` (${dist} blocks)` : ''}${walk > 0 ? `, then walking ${Math.round(walk)} blocks` : ''}`);
+    else d.chat.say(`fly: too close to the landing to turn now; landing first, then going to ${label}`);
+    if (p.retargeted && plan.kind === 'fallback') {
+      const line = landingLine(target, walk);
+      if (line) d.chat.say(line);
+    }
+    return p;
+  };
+  /**
+   * The rest of a trip that took over a flight: the walk after the landing as after any flight; a flight
+   * that could not be turned (`retargeted` false) landed where it was going, so the trip starts again from
+   * the ground (`again`: it may fly again).
+   */
+  const afterTakeOver = async (p: FlyProcess, again: () => Promise<SkillResult>, walk: () => Promise<SkillResult>): Promise<SkillResult> => {
+    const r = await p.result;
+    const landed = r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing';
+    if (!p.retargeted && landed) return again();
+    return afterFlight(r, walk);
   };
   /**
    * Track AU2: the leg of a walk to open sky: the nearest cell on the way to the goal (within `step`
@@ -771,6 +833,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       }
       delete found.target.ledge;
       delete found.target.takeoffYaw;
+      delete found.target.vertical;
       Object.assign(found.target, tk);
     }
     return runAuto(found, goal, label, half, rest, legWalk);
@@ -783,6 +846,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     // Track BH: the walk, and a glide down when it finds no way to a goal far below
     const walkOrGlide = async (): Promise<SkillResult> => glideFallback(await plain(), goal.p, name, 1, plain);
     const legWalk = (leg: Goal) => walk0(leg, opts, `walking to ${name} (to open sky)`);
+    const air = await takeOver(goal.p, name, 1, false);
+    if (air) return afterTakeOver(air, () => pve.walk(goal, opts, label), plain);
     const f = await autoFly(goal.p, name, 1);
     // Track BL: a walk that does not fly looks for a takeoff again on the way
     if (!f) return watchWalk(() => goal.p, name, 1, plain, plain, legWalk).then((r) => glideFallback(r, goal.p, name, 1, plain));
@@ -813,8 +878,10 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     };
     const block = playerBlock();
     const plain = () => come0(name, o);
-    const f = block ? await autoFly(block, name, 2) : undefined;
     if (!block) return plain();
+    const air = await takeOver(block, name, 2, false);
+    if (air) return afterTakeOver(air, () => pve.come(name, o), plain);
+    const f = await autoFly(block, name, 2);
     const legWalk = (leg: Goal) => walk0(leg, {}, `walking to ${name} (to open sky)`);
     if (!f) return watchWalk(playerBlock, name, 2, plain, plain, legWalk).then((r) => glideFallback(r, block, name, 2, plain));
     return runAuto(f, playerBlock, name, 2, plain, legWalk);
@@ -866,14 +933,15 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     return { error: `fly: no waypoint or player "${what}" (!wp list; a player must be in sight or on the locator bar)` };
   };
 
-  d.chat.register({
+  const flyDef: Parameters<typeof d.chat.register>[0] = {
     name: 'fly',
     help: '<x y z> | <waypoint> | <player> | home | stop | status | box [<slot>] (fly there with the elytra and land on it; stop: land now)',
     tier: 'more', // Track AU2: come and goto fly on their own; the front door keeps !come
     group: 'go',
     example: '!fly home',
     auto: 'come and goto fly by themselves over flyMin blocks (autoFly), landing on the nearest landable cell and walking the rest; the flight kit (elytra, rockets, the fireworks box) is never dropped, stashed or unloaded',
-    run: ({ reply, args, sender }) => {
+    run: (ctx) => {
+      const { reply, args, sender } = ctx;
       const sub = args[0]?.toLowerCase();
       if (sub === 'stop') {
         const p = current;
@@ -918,6 +986,29 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       const t = targetOf(args, sender.kind === 'player' ? sender.name : undefined);
       if ('error' in t) {
         reply(t.error);
+        return;
+      }
+      // already in the air: the flight takes the new goal there (no landing first); after a landing it could not avoid, `!fly` again from the ground
+      if (controller.active && current?.phase === 'flying') {
+        void (async () => {
+          const p = await takeOver(t.goal, t.label, t.half, true);
+          if (!p) {
+            reply('fly: the flight is landing; try again once it stands');
+            return;
+          }
+          const r = await p.result;
+          const landed = r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing';
+          if (!p.retargeted && landed) {
+            void flyDef.run(ctx);
+            return;
+          }
+          if (r.reason === 'interrupted' || r.reason === 'replaced') return;
+          reply(flyEndLine(r));
+          if (!landed || (r.ok && r.target.cell?.kind === 'goal' && r.report?.onTarget === true)) return;
+          const w = t.player ? await come0(t.player) : await walk0({ type: 'block', p: t.goal }, {}, `walking to ${t.label}`);
+          if (w.ok) reply(`walked to ${t.label}`);
+          else if (w.reason !== 'interrupted') reply(`fly: landed, but the walk to ${t.label} failed (${w.reason ?? 'failed'})`);
+        })();
         return;
       }
       const k = readKit(inv, memory());
@@ -976,7 +1067,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         else if (w.reason !== 'interrupted') reply(`fly: landed, but the walk to ${t.label} failed (${w.reason ?? 'failed'})`);
       })();
     },
-  });
+  };
+  d.chat.register(flyDef);
   d.chat.register({
     name: 'land',
     help: '(land now on the nearest safe ground)',
