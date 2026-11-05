@@ -164,7 +164,11 @@ steps 1, 4 to 6 and "mine until n" (a dead end explores instead of ending `none_
    plus the known ones with `mineSeenOnly` off), nearest first, that are not blacklisted or
    unreachable and that the navigator's break rules allow (`breakBlocker`: not next to water or lava
    (6 neighbours), no sand / gravel on top, not the block under the feet, not protected). An unsafe
-   target is reported in `stats.unsafe` with the rule and blacklisted. No target left: `none_left`.
+   target is reported in `stats.unsafe` with the rule and blacklisted, unless the rule is one the job's
+   own digging lifts (sand / gravel on top or an unsupported one beside, the block under the feet, a
+   neighbour not loaded yet): such a target **waits**, reported once, and is looked at again on the next
+   scan (`!get sand` had blacklisted every sand block under another one, so only a bed's top layer was
+   mined). No target left: `none_left`.
    Of the nearest 3 the first whose probe plan leads somewhere is chosen (Track Z, "Unreachable ores").
 3. Approach: `goto` a `near` goal on the **eye** (feet + 1.62) within 3.5 blocks of the target's
    centre, `allowBreak: true`. Before walking, `nav.plan` is asked for the route and its dig cells
@@ -255,6 +259,9 @@ neighbours (18-connected; deepslate twins and lit redstone count as one kind; at
 miner takes it from where it stands: the nearest block in reach (4.6) and in sight, a line-of-sight dig
 (same rules) when one is in reach but hidden, a step into the vein's own holes (no digging) when the
 next block is out of reach; no scan or re-plan between blocks; it stops when the kind's quota is met.
+A member the rules refuse for now (sand or gravel still over it, the block under the feet) stays in the
+group and is taken once the blocks over it are dug, so a sand pillar or bed in reach goes top down
+without a new plan; a member refused for good (beside water, protected) leaves the group.
 Then one collect over the whole group and a walk into each hole whose drop is still there (the rock over
 a hole without head room is dug first when the rules allow). `!status`: `mine diamond_ore 3/7 (dig, 0
 skipped, vein 3/7)`; `stats.veins` has each group (size, mined, first and last block, collected).
@@ -337,7 +344,7 @@ half of `shaftRule`, shared).
 2. Scan, then **prune** the memory's candidates (`OreMemory.targets` under the current `mineSeenOnly`)
    and the job's dropped items: dedupe; a loaded position that is not an asked block any more is
    dropped; `plausibleToBreak` (rule table) refuses with the reason (reported once in `stats.unsafe`,
-   blacklisted); the Y limits; the blacklists (the run's, the session's unreachable set, Track R's
+   blacklisted; a rule the digging lifts, such as sand on top, only waits: see step 2 of v3 above); the Y limits; the blacklists (the run's, the session's unreachable set, Track R's
    navigator blacklist); nearest first by our estimate (octile distance of the columns + the height
    difference); at most 64 (`mineMaxOreLocationsCount`). An ore no hotbar tool harvests (`canHarvest`,
    the Digger's rule: diamond with a stone pickaxe) is no candidate; when only such ores are left the job
