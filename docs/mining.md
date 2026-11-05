@@ -262,6 +262,15 @@ next block is out of reach; no scan or re-plan between blocks; it stops when the
 A member the rules refuse for now (sand or gravel still over it, the block under the feet) stays in the
 group and is taken once the blocks over it are dug, so a sand pillar or bed in reach goes top down
 without a new plan; a member refused for good (beside water, protected) leaves the group.
+
+**Sand and gravel in bulk** (`fallSafe`, the vein's `digRule`). The owner's rule against digging under a
+falling block is about not suffocating: a block landing in the bot's own cells. A dig the vein makes from
+where the body stands may take a block with sand or gravel over it (or an unsupported one beside it) when
+no column that can fall overlaps the body (the body's 0.6-wide box, an unknown cell counts as unsafe). The
+column then drops into the dug cell; after `DIG_SETTLE_TICKS` (12) the cell is a member again and is dug
+from the same spot: a pillar 10 high beside the bot, its top out of reach, is taken from the bottom in one
+vein (11 blocks, 1 composite). The walks and the composite goals still never dig under a falling block
+(a goal there would put the body in the column).
 Then one collect over the whole group and a walk into each hole whose drop is still there (the rock over
 a hole without head room is dug first when the rules allow). `!status`: `mine diamond_ore 3/7 (dig, 0
 skipped, vein 3/7)`; `stats.veins` has each group (size, mined, first and last block, collected).

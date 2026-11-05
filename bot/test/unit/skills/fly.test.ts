@@ -452,6 +452,8 @@ describe('fly: the kit rules', () => {
     expect(worn).toMatchObject({ ok: false, reason: 'elytra_worn', line: 'elytra worn: 25 uses left; I will not fly until it is mended or replaced' });
     expect(elytraWornLimit(10)).toBe(30);
     expect(kitReady(readKit(inv([item('elytra')])), 10)).toMatchObject({ ok: false, reason: 'no_rockets' });
+    // rockets in another carried box (a bot_loot or mixed box) count: they come out before the takeoff
+    expect(kitReady(readKit(inv([item('elytra')])), 10, 32)).toMatchObject({ ok: true });
     expect(kitReady(readKit(inv([item('elytra'), item('undyed_shulker_box')], null, { 1: raw64 })), 10)).toEqual({ ok: true });
   });
 

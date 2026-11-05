@@ -24,6 +24,8 @@ import { closePenGates, leavePen, PenDetector, type Pen } from '../skills/food/p
 import { entityFeet } from '../skills/combat/hostiles.ts'; // Track AF
 import { Cooker, type CookContainers, type CookResult } from '../skills/food/cook.ts';
 import { Hunter } from '../skills/food/hunter.ts';
+import { FOODS } from '../skills/survival/eat.ts';
+import { supplyOf } from '../skills/supply/supply.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { BREED_RADIUS, COOK_NEAR, DEFAULT_FOOD_ITEMS, HOME_RETURN_NEAR, FOOD_RADIUS, FoodController, parseChorePen, type FoodJobResult } from '../tasks/process/food.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
@@ -156,6 +158,14 @@ export function registerFoodCommands(d: CommandDeps, extra: FoodCommandExtra = {
     cancel: () => {
       if (pve.combat.busy) pve.combat.cancel();
       if (pve.mover.nav.busy) pve.mover.cancel();
+    },
+    // the food in the carried boxes counts too (the eater takes it out when nothing is loose)
+    boxedFoodPoints: () => {
+      const s = supplyOf(d.task);
+      if (!s) return 0;
+      let total = 0;
+      for (const [name, f] of Object.entries(FOODS)) if (!f.bad) total += s.carried(name) * f.nutrition;
+      return total;
     },
     afterJob: (from) => {
       const h = home();

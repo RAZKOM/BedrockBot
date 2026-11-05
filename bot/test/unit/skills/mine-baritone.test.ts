@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 import { parseSettingValue } from '../../../src/config/settings.ts';
 import { mineEndLine } from '../../../src/chat/commands-farm.ts';
 import { MINE_GOAL_UPDATE_TICKS, MINE_MAX_ORE_LOCATIONS, coalesce, compositeOf, droppedItems, estimate, headingMember, memberAt, nearestCandidate, plausibleToBreak, prune, type MineCandidate, type MineGoalContext } from '../../../src/skills/mine/baritone/mineProcess.ts';
-import { MineTask, type MineDeps } from '../../../src/skills/mine/miner.ts';
+import { fallSafe, MineTask, type MineDeps } from '../../../src/skills/mine/miner.ts';
 import type { SkillResult } from '../../../src/skills/types.ts';
 import { OreMemory } from '../../../src/skills/mine/seen.ts';
 import { shaftHazard, type TunnelWorld } from '../../../src/skills/mine/tunnel.ts';
@@ -653,7 +653,53 @@ describe('MineTask in mode baritone: one composite goal, the reached ore mined',
     expect(await t.start({ block: 'sand', count: 5 })).toBe('done');
     expect(t.stats.composites).toBe(1);
     expect(t.stats.veins[0]?.mined).toBe(5);
-    expect(h.calls.filter((c) => c.startsWith('dig ')).slice(-4)).toEqual(['dig 2,3,0', 'dig 2,2,0', 'dig 2,1,0', 'dig 2,0,0']);
+    // (beside the bot the pillar may also be dug from below since its column cannot fall on the bot: fallSafe; the
+    // fake world has no falling blocks, so only which blocks were dug is checked here)
+    expect(new Set(h.calls.filter((c) => c.startsWith('dig ')).slice(-4))).toEqual(new Set(['dig 2,3,0', 'dig 2,2,0', 'dig 2,1,0', 'dig 2,0,0']));
+  });
+
+  it('a sand pillar 10 high beside the bot (its top out of reach): dug at the bottom from the side, the column falls in and is dug again, never in the bot\'s own column', async () => {
+    const w = new World();
+    w.load({ x: 1, y: 0, z: 0 }, 'sand'); // the composite's member: the walk ends with the feet in its cell
+    for (let y = 0; y < 10; y++) w.load({ x: 2, y, z: 0 }, 'sand');
+    const h = harness(w);
+    h.walkDigsOre = true;
+    // the server's falling blocks: a dug cell under sand is filled by the column over it
+    const sk = h.deps.skills;
+    const fakeDig = sk.dig.bind(sk);
+    const digs: Vec3[] = [];
+    sk.dig = async (p, o) => {
+      const r = await fakeDig(p, o);
+      digs.push({ ...p });
+      for (let y = p.y; GRAVITY.has(w.blockAt({ x: p.x, y: y + 1, z: p.z })?.name ?? ''); y++) {
+        w.set({ x: p.x, y, z: p.z }, w.blockAt({ x: p.x, y: y + 1, z: p.z })!.name);
+        w.set({ x: p.x, y: y + 1, z: p.z }, 'air');
+      }
+      return r;
+    };
+    const t = new MineTask(h.deps);
+    expect(await t.start({ block: 'sand', count: 11 })).toBe('done');
+    expect(t.stats.mined).toBe(11);
+    expect(t.stats.composites).toBe(1);
+    for (let y = 0; y < 10; y++) expect(w.blockAt({ x: 2, y, z: 0 })?.name).toBe('air');
+    // every dig of the pillar from beside it (the bot stands in column x 1), at the reachable bottom
+    expect(digs.every((p) => p.x === 2 && p.y <= 2)).toBe(true);
+  });
+
+  it('fallSafe: the falling column may not overlap the body (the owner\'s rule was about suffocating)', () => {
+    const w = new World();
+    for (let y = 0; y < 4; y++) w.load({ x: 2, y, z: 0 }, 'sand');
+    const blockAt = (p: Vec3) => w.blockAt(p);
+    expect(fallSafe(blockAt, { x: 2, y: 1, z: 0 }, { x: 1.5, y: 0, z: 0.5 })).toBe(true); // beside the column
+    expect(fallSafe(blockAt, { x: 2, y: 2, z: 0 }, { x: 2.5, y: 0, z: 0.5 })).toBe(false); // under it
+    expect(fallSafe(blockAt, { x: 2, y: 1, z: 0 }, { x: 1.75, y: 0, z: 0.5 })).toBe(false); // the body's edge reaches into the column
+    // an unsupported gravel block beside the cell falls in its own column
+    w.load({ x: 5, y: 2, z: 0 }, 'stone');
+    w.load({ x: 6, y: 2, z: 0 }, 'gravel'); // air under it
+    expect(fallSafe(blockAt, { x: 5, y: 2, z: 0 }, { x: 6.5, y: 0, z: 0.5 })).toBe(false);
+    expect(fallSafe(blockAt, { x: 5, y: 2, z: 0 }, { x: 4.5, y: 0, z: 0.5 })).toBe(true);
+    // unknown cells: unsafe
+    expect(fallSafe(() => undefined, { x: 0, y: 0, z: 0 }, { x: 5.5, y: 0, z: 0.5 })).toBe(false);
   });
 
   it('no pickaxe for the nearest ore ends no_pickaxe; the setting parses', async () => {
