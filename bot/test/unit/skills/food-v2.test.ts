@@ -8,15 +8,15 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { describeSetting, parseSettingValue, RuntimeSettings, SETTING_DEFS, SettingError } from '../../../src/config/settings.ts';
 import { breedReply, foodReply } from '../../../src/chat/commands-food.ts';
-import { Breeder, breedable, breedItemCount, breedFoodOf, feedTransaction } from '../../../src/skills/food/breed.ts';
+import { Breeder, breedable, breedItemCount, breedFoodOf, feedTransaction, samePenPair } from '../../../src/skills/food/breed.ts';
 import type { Cooker } from '../../../src/skills/food/cook.ts';
 import { pickTarget } from '../../../src/skills/food/finder.ts';
 import { cellKey, HerdMemory, markOffers } from '../../../src/skills/food/herds.ts';
 import { Hunter } from '../../../src/skills/food/hunter.ts';
-import { detectPen, inPenOrRim, PenDetector, penExit, penGates, type Pen } from '../../../src/skills/food/pen.ts';
+import { detectPen, inPenOrRim, PenDetector, penExit, penGates, penNear, type Pen } from '../../../src/skills/food/pen.ts';
 import { blockInfoOf } from '../../../src/skills/terrain/shapes.ts';
 import type { FightResult } from '../../../src/skills/combat/combat.ts';
-import { BREED_PERIOD_MS, FoodController, FoodJob, parseChorePen, type FoodDeps } from '../../../src/tasks/process/food.ts';
+import { BREED_PERIOD_MS, FoodController, FoodJob, noPenLine, parseChorePen, type FoodDeps } from '../../../src/tasks/process/food.ts';
 import { ProcessManager } from '../../../src/tasks/process/manager.ts';
 import { HerdMarks, type HerdMark } from '../../../src/world/cache/herds.ts';
 import type { BlockInfo, EntityInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
@@ -378,6 +378,26 @@ describe('breeding', () => {
     expect(list.get('cow')?.map((e) => e.runtimeId)).toEqual([3n]);
   });
 
+  it('a pair is two animals in the same pen (or both outside any): never split by a fence', () => {
+    const dist = (a: Vec3, b: Vec3) => Math.hypot(a.x - b.x, a.z - b.z);
+    // nearest first: 1 in pen A, 2 just over the fence in pen B, 3 in pen A further away, 4 and 5 wild
+    const list = [ent(1, 'cow', 1, 0), ent(2, 'cow', 2, 0), ent(3, 'cow', 6, 0), ent(4, 'cow', 20, 0), ent(5, 'cow', 21, 0)];
+    const pen = (e: EntityInfo) => ({ 1: 'A', 2: 'B', 3: 'A' } as Record<string, string>)[String(e.runtimeId)];
+    expect(samePenPair(list, pen, dist)?.map((e) => e.runtimeId)).toEqual([1n, 3n]);
+    // 2 is alone in its pen: the next pair is the two wild ones
+    expect(samePenPair([list[1]!, list[3]!, list[4]!], pen, dist)?.map((e) => e.runtimeId)).toEqual([4n, 5n]);
+    expect(samePenPair([list[0]!, list[1]!], pen, dist)).toBeUndefined();
+  });
+
+  it('the pen at a given point: the feet block, the ground block under it (what the debug screen shows), or one above', () => {
+    const found: Pen = { id: 'p', y: -60, min: { x: 0, z: 0 }, max: { x: 4, z: 4 }, cells: 25, fences: 20 };
+    const penAt = (f: Vec3) => (f.y === -60 ? found : undefined);
+    expect(penNear(penAt, { x: 2, y: -60, z: 2 })).toBe(found);
+    expect(penNear(penAt, { x: 2, y: -61, z: 2 })).toBe(found); // the ground block
+    expect(penNear(penAt, { x: 2, y: -59, z: 2 })).toBe(found);
+    expect(penNear(penAt, { x: 2, y: -63, z: 2 })).toBeUndefined();
+  });
+
   it('replies', () => {
     expect(breedReply({ ok: true, reason: 'done', kind: 'cow', fed: 2, pairs: 1, babies: 1, refused: 0, ms: 3000 }, 1)).toBe('breed: fed 1/1 cow pair, 1 baby so far');
     expect(breedReply({ ok: false, reason: 'no_food', kind: 'pig', fed: 0, pairs: 0, babies: 0, refused: 0, ms: 0 }, 2)).toBe('breed: no food for the pigs (carrot / potato / beetroot)');
@@ -530,9 +550,12 @@ describe('breeding chore', () => {
     expect(r.pm.active?.priority).toBe(30);
     await flush();
     r.pm.tick();
-    // walked to the pen; nothing breedable there in this fake: done, next look in 10 minutes
+    // walked to the pen; no fenced pen found there in this fake: nothing fed (it used to breed whatever stood
+    // near the point, wild animals included), done, next look in 10 minutes
     expect(r.walks[0]).toMatchObject({ x: 120, z: 0 });
     expect(ctl.breedChore!.running).toBe(false);
+    expect(ctl.breedChore!.lastWhy).toBe(noPenLine('120 -60 0'));
+    expect(ctl.breedChore!.last).toMatchObject({ fed: 0, reason: 'no_pair' });
     expect(ctl.breedChore!.nextTry).toBe(2000 + BREED_PERIOD_MS);
   });
 
