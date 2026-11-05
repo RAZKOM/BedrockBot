@@ -36,9 +36,9 @@ import type { PlaceOptions, PlaceResult } from '../place/place.ts';
 import { closestDistance, cornerDistance, SERVER_CLICK_REACH } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import type { ClickResult } from './click.ts';
-import { BONE_MEAL, FARMLAND, FARM_ITEMS, SEEDS, fieldCell, posKey, scanField, type CropDef, type FieldCell, type FieldScan } from './crops.ts';
+import { BONE_MEAL, CROPS, FARMLAND, FARM_ITEMS, SEEDS, fieldCell, posKey, scanField, type CropDef, type FieldCell, type FieldScan } from './crops.ts';
 
-export type FarmState = 'idle' | 'scan' | 'walk' | 'harvest' | 'bonemeal' | 'plant' | 'collect' | 'to_chest' | 'deposit' | 'waiting' | 'full' | 'paused' | 'stopped' | 'failed';
+export type FarmState = 'idle' | 'done' | 'scan' | 'walk' | 'harvest' | 'bonemeal' | 'plant' | 'collect' | 'to_chest' | 'deposit' | 'waiting' | 'full' | 'paused' | 'stopped' | 'failed';
 
 export interface FarmOptions {
   /** Centre of the field (feet position or block). */
@@ -59,7 +59,21 @@ export interface FarmOptions {
   cellAttempts?: number;
   /** Stop after this many rounds (tests); default unlimited. */
   maxRounds?: number;
+  /**
+   * Follow the field (`!farm`; docs/farming.md "Following the field"): every round scans around the start, around
+   * where the bot worked and around farmland found at the edge of a scan, so a field longer than the radius is
+   * worked as the bot walks along it; empty farmland with no known crop gets the seed carried most; and the job
+   * ends `done` when nothing is ready to harvest or plant (instead of waiting for crops to grow). Default off:
+   * the old wait-and-rescan around `center` (`!farm r wait`).
+   */
+  follow?: boolean;
+  /** Following: no scan centre farther than this from `center`. Default FARM_FOLLOW_RANGE (64). */
+  maxRange?: number;
 }
+
+/** Following the field: scan centres at most this far from the start, and at most this many of them. */
+export const FARM_FOLLOW_RANGE = 64;
+export const FARM_FOLLOW_AREAS = 32;
 
 export interface FarmStats {
   startedAt: number | undefined;
@@ -212,6 +226,15 @@ export function routeTramples(path: FarmPlan['path'], blockAt: (p: Vec3) => Bloc
   return false;
 }
 
+/** Following: add scan centre `p` unless one is within half the radius of it already, it is beyond `range` from the start, or there are FARM_FOLLOW_AREAS. */
+export function addArea(areas: Vec3[], p: Vec3, start: Vec3, radius: number, range: number): boolean {
+  if (areas.length >= FARM_FOLLOW_AREAS) return false;
+  if (Math.hypot(p.x - start.x, p.z - start.z) > range) return false;
+  if (areas.some((a) => Math.abs(a.x - p.x) <= radius / 2 && Math.abs(a.z - p.z) <= radius / 2 && Math.abs(a.y - p.y) <= 4)) return false;
+  areas.push({ ...p });
+  return true;
+}
+
 export class FarmTask {
   readonly name = 'farm';
   state: FarmState = 'idle';
@@ -348,6 +371,9 @@ export class FarmTask {
     const radius = o.radius ?? 8;
     const minFree = o.minFreeSlots ?? 2;
     let depositFails = 0;
+    /** Following: the scan centres (the start first). */
+    const areas: Vec3[] = [{ ...o.center }];
+    this.areas = areas;
     while (this.alive(gen)) {
       if (o.maxRounds !== undefined && this.stats.rounds >= o.maxRounds) return this.end(gen, 'idle');
       if (this.paused) {
@@ -385,19 +411,24 @@ export class FarmTask {
 
       this.state = 'scan';
       this.stats.rounds++;
-      const scan = this.scan(o.center, radius);
+      const scan = o.follow ? this.scanFollow(areas, radius, o.maxRange ?? FARM_FOLLOW_RANGE) : this.scan(o.center, radius);
       const work = this.workOf(scan);
       if (work.length === 0) {
-        // anything left on the ground in the field?
-        if (this.dropsNear(o.center, radius + 2) && inv.freeSlots().length > 0) {
+        // anything left on the ground in the field? (following: around the bot, which is where it last worked)
+        const dropsAt = o.follow ? (this.d.position() ?? o.center) : o.center;
+        if (this.dropsNear(dropsAt, radius + 2) && inv.freeSlots().length > 0) {
           this.state = 'collect';
           this.stats.collectRounds++;
           // dropsNear looks in a square; the collect radius is a circle: cover the square's corners (Track Z: a
           // drop in a corner of a 9 x 9 field was 6.4 blocks from the centre and stayed there)
-          const c = await this.d.skills.collect(Math.ceil((radius + 2) * Math.SQRT2), 300, { origin: o.center, filter: (i) => FARM_ITEMS.has(i.name) });
+          const c = await this.d.skills.collect(Math.ceil((radius + 2) * Math.SQRT2), 300, { origin: dropsAt, filter: (i) => FARM_ITEMS.has(i.name) });
           this.addCollected(c);
           if (!this.alive(gen)) break;
           if (c.pickedUp > 0) continue;
+        }
+        if (o.follow) {
+          this.log.info(`farm: nothing left to harvest or plant (${scan.cells.length} farmland in ${areas.length} area${areas.length === 1 ? '' : 's'}, ${scan.growing.length} growing)`);
+          return this.end(gen, 'done');
         }
         this.state = 'waiting';
         this.stats.waits++;
@@ -432,8 +463,47 @@ export class FarmTask {
       }
       this.stats.stands++;
       await this.workHere(gen, scan);
+      // following: where it worked is scanned from now on (the field beyond the start's radius comes into view)
+      const at = this.d.position();
+      if (o.follow && at) addArea(areas, at, o.center, radius, o.maxRange ?? FARM_FOLLOW_RANGE);
     }
     return this.state;
+  }
+
+  /** Following: the scan centres of the current run (status, tests). */
+  areas: readonly Vec3[] = [];
+
+  /**
+   * Following (docs/farming.md "Following the field"): the union of the scans around every centre in `areas`
+   * (cells deduplicated); farmland within 1 of a scan's edge adds a centre there, so the next round sees the
+   * field beyond it. Empty cells with no known crop get the carried seed the bot has most of.
+   */
+  private scanFollow(areas: Vec3[], radius: number, range: number): FieldScan {
+    const seen = new Map<string, FieldCell>();
+    // (areas grows while it is walked: an array's for-of visits the centres added during the loop too)
+    for (const a of areas) {
+      const s = this.scan(a, radius);
+      for (const c of s.cells) {
+        seen.set(posKey(c.soil), c);
+        if (Math.abs(c.soil.x + 0.5 - a.x) >= radius - 1 || Math.abs(c.soil.z + 0.5 - a.z) >= radius - 1) addArea(areas, { x: c.soil.x + 0.5, y: c.soil.y + 1, z: c.soil.z + 0.5 }, areas[0]!, radius, range);
+      }
+    }
+    const cells = [...seen.values()];
+    const carried = this.carriedCrop();
+    // empty farmland: the crop remembered for it (or the field's most common one) when its seed is carried, else the
+    // seed carried most (an empty field, or the field's own seed ran out: the owner wants every empty cell planted)
+    for (const c of cells) if (c.state === 'empty' && (!c.kind || this.d.world.inventory.count(c.kind.seed) === 0)) c.kind = carried;
+    return { cells, mature: cells.filter((c) => c.state === 'mature'), growing: cells.filter((c) => c.state === 'growing'), empty: cells.filter((c) => c.state === 'empty') };
+  }
+
+  /** The crop of the seed item carried most (for farmland nothing is remembered for), undefined without seeds. */
+  private carriedCrop(): CropDef | undefined {
+    let best: { c: CropDef; n: number } | undefined;
+    for (const c of Object.values(CROPS)) {
+      const n = this.d.world.inventory.count(c.seed);
+      if (n > 0 && (!best || n > best.n)) best = { c, n };
+    }
+    return best?.c;
   }
 
   private async sleep(gen: number, ticks: number): Promise<void> {
@@ -699,7 +769,11 @@ export class FarmTask {
   private findChest(): Vec3 | undefined {
     if (this.chest) return this.chest;
     const o = this.opts!;
-    const found = this.d.world.find((b) => b.name === 'chest' || b.name === 'barrel', { origin: o.center, radius: (o.radius ?? 8) + 16, max: 1 });
+    const isChest = (b: { name: string }) => b.name === 'chest' || b.name === 'barrel';
+    let found = this.d.world.find(isChest, { origin: o.center, radius: (o.radius ?? 8) + 16, max: 1 });
+    // following the field: the bot may be far from the start by now
+    const at = o.follow ? this.d.position() : undefined;
+    if (!found.length && at) found = this.d.world.find(isChest, { origin: at, radius: (o.radius ?? 8) + 16, max: 1 });
     this.chest = found[0];
     if (this.chest) this.log.info(`farm: using the chest at ${fmt(this.chest)}`);
     return this.chest;

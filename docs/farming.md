@@ -15,8 +15,10 @@ farm.state;   // scan | walk | harvest | bonemeal | plant | collect | to_chest |
 farm.stats;   // harvested, planted, boneMealUsed, boneMealGrown, trips, deposited, trampleRoutesRefused, harvestTicks, plantTicks ...
 ```
 
-Chat (afk task with walking, owners only): `!farm [radius]` (1..32, default 8) farms the farmland
-within the radius of where the bot stands (`farming r=8 around 10 -60 3`); `!farm stop`
+Chat (afk task with walking, owners only): `!farm [radius] [wait]` (1..32, default 8) farms the farmland
+around where the bot stands and **follows the field** as it walks (`farming r=8 around 10 -60 3, following
+the field`; next section), ending `farm: done, nothing left to harvest or plant; ...`; `!farm 8 wait`
+keeps the old mode (the field within the radius of the start, re-scanned every minute until stopped); `!farm stop`
 (`stopped; farm: stopped, 81 harvested, 81 planted, ...`); `!farm status`. `!farm` stops a running
 `!mine` (they exclude each other); since Track Z it is a user process of the afk task (next section).
 
@@ -112,6 +114,24 @@ per-cell hook this wave, so the farmer:
 On a 9 x 9 field with a grass rim the middle column is 4.78 blocks from the rim for planting, beyond
 the planning margin, so the bot steps onto the farmland for the middle cells (walking, no trample).
 
+## Following the field (`follow`, the default for `!farm`)
+
+The owner's ask: find the nearest crops, harvest and replant them, and keep going as more come into view,
+until nothing is ready to harvest and no empty farmland can be planted. With `follow` (FarmOptions):
+
+- **Scan centres** (`areas`): the start, then every place the bot worked from, and farmland found within
+  1 of a scan's edge (the field goes on there). A new centre within half the radius of another, farther
+  than `maxRange` (`FARM_FOLLOW_RANGE`, 64) from the start, or past `FARM_FOLLOW_AREAS` (32) is not added.
+  Each round scans around every centre and works the union (cells counted once): a strip 30 long is
+  worked end to end with radius 3.
+- **Planting**: an empty cell gets the crop remembered for it (or the field's most common crop) when its
+  seed is carried, else the seed carried most, so an empty field is planted and a field whose own seed
+  ran out gets what the bot has.
+- **The end**: no harvest, plant or bone meal work left in any centre: drops are collected around the bot,
+  then the job ends `done` (no waiting for crops to grow). The deposit chest is looked for around the start,
+  then around the bot.
+- `!farm status` shows `following (N areas)`. `!get wheat` drives the same `!farm` and gets its done line.
+
 ## The loop (`FarmTask`)
 
 Each round: inventory check -> scan -> work -> stand -> act:
@@ -131,8 +151,8 @@ Each round: inventory check -> scan -> work -> stand -> act:
   empty cells (each planting waits while a fresh seed drop lies within pickup range, below); collect
   drops within 6 blocks; plant what is still empty. (Wave 6 replanted each crop at once after its
   harvest; Track Z harvests first, see "Rejected plantings".)
-- **Nothing to do**: collect drops still lying in the field, else state `waiting` and re-scan after
-  `waitTicks` (1200) until `stop()`. With bone meal on, replanted crops are bone-mealed in the next
+- **Nothing to do**: collect drops still lying in the field, then following: `done`; else (`wait`)
+  state `waiting` and re-scan after `waitTicks` (1200) until `stop()`. With bone meal on, replanted crops are bone-mealed in the next
   rounds until the bone meal is gone.
 
 ## Measured
