@@ -4,7 +4,7 @@
 // already holding junk is re-packed (the owner asked that other items come back out so the sand goes first).
 import { describe, expect, it } from 'vitest';
 import { RuntimeSettings } from '../../../src/config/settings.ts';
-import { dropFirst, packClass, packOrder, repackJunk, repackLine, Stash, stepLine, type StashSkills } from '../../../src/skills/container/stash.ts';
+import { dropFirst, packClass, sameKinds, packOrder, repackJunk, repackLine, Stash, stepLine, type StashSkills } from '../../../src/skills/container/stash.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 
 const item = (name: string, count = 64): ItemStack => ({ name, count, networkId: 1, metadata: 0 });
@@ -13,6 +13,13 @@ const STONE: BlockInfo = { name: 'stone', stateId: 1, states: {}, hardness: 1.5,
 const sand = (n: string) => n === 'sand';
 
 describe('stash packing (Track AV)', () => {
+  it('the box choice ranks a box by the waiting kinds it already holds (one kind per box, part stacks topped up)', () => {
+    expect(sameKinds(['sand', 'cobblestone'], new Set(['sand']))).toBe(1);
+    expect(sameKinds(['minecraft:sand'], new Set(['sand', 'gravel']))).toBe(1);
+    expect(sameKinds(['raw_iron'], new Set(['sand']))).toBe(0);
+    expect(sameKinds([], new Set(['sand']))).toBe(0);
+  });
+
   it('classes: produce, value, filler; junk that is no block is dropped first, never boxed', () => {
     expect(packClass('sand', sand)).toBe(0);
     expect(packClass('raw_iron', sand)).toBe(1);
@@ -22,11 +29,17 @@ describe('stash packing (Track AV)', () => {
     expect(packClass('rotten_flesh', (n) => n === 'rotten_flesh')).toBe(0); // the job is getting it
     expect(dropFirst('string')).toBe(true);
     expect(dropFirst('cobblestone')).toBe(false);
-    for (const n of ['bone', 'wheat_seeds', 'flint', 'feather', 'arrow']) {
+    for (const n of ['bone', 'wheat_seeds', 'flint']) {
       expect(dropFirst(n), n).toBe(false);
       expect(repackJunk(n, sand), n).toBe(false);
       expect(packClass(n, sand), n).toBe(2);
     }
+    // mob drops the bot has no use for: dropped first like rotten flesh (they ended up as a few in every box)
+    for (const n of ['feather', 'arrow', 'egg']) {
+      expect(dropFirst(n), n).toBe(true);
+      expect(packClass(n, sand), n).toBeUndefined();
+    }
+    expect(packClass('arrow', (x) => x === 'arrow')).toBe(0); // unless the job is getting them
     expect(repackJunk('rotten_flesh', sand)).toBe(true);
     expect(repackJunk('gravel', sand)).toBe(true);
     expect(repackJunk('sand', sand)).toBe(false);
@@ -132,6 +145,18 @@ describe('stash packing (Track AV)', () => {
     await z.stash.ifFull({ label: 'get', wanted: sand });
     expect(z.calls.filter((c) => c.startsWith('take'))).toHaveLength(0);
     expect(z.boxSlots.filter((x) => x?.name === 'rotten_flesh')).toHaveLength(20);
+  });
+
+  it('with an empty box and one already holding sand, the sand goes into the sand box (was: the emptiest box, so every box got some of everything)', () => {
+    const nbt = (items: { name: string; count: number }[]) => ({ extra: { nbt: { nbt: { value: { Items: { value: { value: items.map((b) => ({ Name: { value: `minecraft:${b.name}` }, Count: { value: b.count } })) } } } } } } });
+    const h = harness([], [item('iron_shovel', 1), item('undyed_shulker_box', 1), item('undyed_shulker_box', 1), item('raw_iron', 3), ...Array.from({ length: 32 }, () => item('sand'))]);
+    h.raws[1] = nbt([]);
+    h.raws[2] = nbt([{ name: 'sand', count: 64 }, { name: 'sand', count: 20 }, { name: 'gravel', count: 64 }]);
+    const choice = (h.stash as unknown as { boxChoice(job: { wanted?: (n: string) => boolean }): { best?: { i: number } } }).boxChoice({ wanted: sand });
+    expect(choice.best?.i).toBe(2);
+    // nothing of the job's waiting: the box that holds the raw iron's kind wins over the empty one too
+    h.raws[2] = nbt([{ name: 'raw_iron', count: 10 }]);
+    expect((h.stash as unknown as { boxChoice(job: object): { best?: { i: number } } }).boxChoice({}).best?.i).toBe(2);
   });
 
   it('drops junk that is no block before boxing, boxes the produce before filler, never junk while produce waits', async () => {

@@ -70,10 +70,16 @@ export function junkDropCount(name: string, have: number): number {
 }
 
 /**
+ * Mob drops the bot has no use for (it shoots no bow and crafts no arrows): picked up by the sweeps after a fight
+ * on a mining run, they ended up as a few in every box. Dropped first like rotten flesh.
+ */
+export const MOB_JUNK: readonly string[] = ['arrow', 'feather', 'egg'];
+
+/**
  * Track AV: junk dropped before a box is filled, never boxed: the keeper's junk and the small drops that are
  * no building block. Filler blocks of STASH_JUNK (cobblestone, sand, gravel, ...) are boxed last instead.
  */
-export const DROP_FIRST: ReadonlySet<string> = new Set([...DEFAULT_JUNK, 'snowball', 'seagrass', 'vine', 'kelp']); // not bones (bone meal), seeds (replanting), flint, feathers, arrows: those are boxed
+export const DROP_FIRST: ReadonlySet<string> = new Set([...DEFAULT_JUNK, 'snowball', 'seagrass', 'vine', 'kelp', ...MOB_JUNK]); // not bones (bone meal), seeds (replanting), flint: those are boxed
 
 /** Track AV: dropped before boxing (DROP_FIRST, unless the job is getting it). */
 export function dropFirst(name: string, wanted?: (name: string) => boolean): boolean {
@@ -101,12 +107,19 @@ export function packOrder(slots: readonly ({ name: string; count: number } | nul
 }
 
 /** Track AV: stash junk a re-pack leaves in the box (bone meal, replanting, crafting). */
-export const REPACK_KEEPS: ReadonlySet<string> = new Set(['bone', 'arrow', 'feather', 'flint', 'wheat_seeds', 'melon_seeds', 'pumpkin_seeds', 'beetroot_seeds']);
+export const REPACK_KEEPS: ReadonlySet<string> = new Set(['bone', 'flint', 'wheat_seeds', 'melon_seeds', 'pumpkin_seeds', 'beetroot_seeds']);
 
 /** Track AV: what a re-pack takes out of a box (and drops): stash junk the job does not want, not REPACK_KEEPS. */
 export function repackJunk(name: string, wanted?: (name: string) => boolean): boolean {
   const n = name.startsWith('minecraft:') ? name.slice(10) : name;
   return isStashJunk(n) && !REPACK_KEEPS.has(n) && !wanted?.(n);
+}
+
+/** How many of the kinds waiting to be packed a box already holds (the box choice ranks by it). */
+export function sameKinds(inside: readonly string[], waiting: ReadonlySet<string>): number {
+  const norm = (n: string) => (n.startsWith('minecraft:') ? n.slice(10) : n);
+  const w = new Set([...waiting].map(norm));
+  return inside.filter((n) => w.has(norm(n))).length;
 }
 
 /** What the step deposits into a chest or shulker box: everything `!drop items` would drop. */
@@ -158,6 +171,8 @@ export interface StashDeps {
   breakBlocker?(p: Vec3): string | undefined;
   /** Move a main-inventory box into the hotbar (SurvivalKit.hotbar); its hotbar slot, undefined when it could not. */
   toHotbar?(slot: number): Promise<number | undefined>;
+  /** Wait ticks (a busy drop is tried again after a moment). */
+  waitTicks?(n: number): Promise<void>;
   now?: () => number;
 }
 
@@ -458,18 +473,27 @@ export class Stash {
   /** The best box to fill and the best one the place skill would pick by itself (see shulkerSlot). */
   private boxChoice(job: StashJob): { best?: { i: number; named: boolean } | undefined; exact?: { i: number; named: boolean } | undefined } {
     const keep = keepNameOf(this.d.settings.get('keepBoxName'));
-    const cands: { i: number; used: number; named: boolean }[] = [];
+    const cands: { i: number; used: number; named: boolean; same: number }[] = [];
     // Track AV: a full box holding junk counts too while the job's produce waits (it is re-packed)
     const produce = this.has((n) => packClass(n, job.wanted) === 0);
+    // what waits to be packed: the produce, else the other items of value (then filler)
+    const waiting = new Set<string>();
+    for (const cls of [0, 1, 2] as const) {
+      for (const s of this.d.inventory.slots.slice(0, 36)) if (s && s.count > 0 && packClass(s.name, job.wanted) === cls) waiting.add(s.name);
+      if (waiting.size) break;
+    }
     this.d.inventory.slots.slice(0, 36).forEach((s, i) => {
       if (!s || s.count <= 0 || !isShulkerBox(s.name)) return;
       const raw = this.d.inventory.rawItem?.(0, i);
       if (isFireworksBox(s.name, raw) || this.d.flightBoxSlot?.() === i) return; // Track AU: the flight kit's box
       const used = shulkerSlotsUsed(raw);
-      const junk = produce && !!this.d.containers?.move && Object.keys(shulkerContents(raw)).some((n) => repackJunk(n, job.wanted));
-      if (used < 27 || junk) cands.push({ i, used: junk ? Math.min(used, 26) : used, named: isKeptBox(s.name, raw, keep) });
+      const inside = Object.keys(shulkerContents(raw));
+      const junk = produce && !!this.d.containers?.move && inside.some((n) => repackJunk(n, job.wanted));
+      if (used < 27 || junk) cands.push({ i, used: junk ? Math.min(used, 26) : used, named: isKeptBox(s.name, raw, keep), same: sameKinds(inside, waiting) });
     });
-    cands.sort((a, b) => Number(b.named) - Number(a.named) || a.used - b.used || a.i - b.i);
+    // the owner's named box first; then the box that already holds what is waiting (its part stacks are topped up and
+    // each box keeps to one kind: the emptiest box first spread every kind over every box); then the emptiest
+    cands.sort((a, b) => Number(b.named) - Number(a.named) || b.same - a.same || a.used - b.used || a.i - b.i);
     return { best: cands[0], exact: cands.find((c) => placesExactly(this.d.inventory.slots, c.i)) };
   }
 
@@ -720,8 +744,15 @@ export class Stash {
     for (const [n, c] of have) if (junkDropCount(n, c) > 0) names.set(n, junkDropCount(n, c));
     if (names.size === 0) step.reason = 'no junk';
     for (const [n, count] of names) {
-      const r = await this.d.drop!(n, count);
+      let r = await this.d.drop!(n, count);
       if (!alive()) break;
+      if (!r.ok && r.reason === 'busy') {
+        // the keeper was dropping something else: once more a moment later (it used to give up on every junk kind left)
+        await (this.d.waitTicks?.(10) ?? new Promise<void>((res) => setTimeout(res, 500)));
+        if (!alive()) break;
+        r = await this.d.drop!(n, count);
+        if (!alive()) break;
+      }
       step.requests++;
       if (r.dropped > 0) {
         step.moved[n] = (step.moved[n] ?? 0) + r.dropped;
