@@ -1,7 +1,9 @@
 // Debug map routes for the health server (PLAN.md task 7.15): GET /map (the page) and GET /map.json
 // (the data, schema.ts). Mounted with HealthServerOptions.routes (connection/health.ts).
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { MapBuilder, parseMapQuery, type MapSource } from './data.ts';
+import { gzipSync } from 'node:zlib';
+import { buildWithColours, MapBuilder, parseMapQuery, type MapSource } from './data.ts';
+import { installedBlockColours } from '../panel/icons/colours.ts'; // Track PC: the palette's map colours
 import { MAP_PAGE } from './page.ts';
 
 export type HealthRoute = (path: string, req: IncomingMessage, res: ServerResponse) => boolean;
@@ -24,10 +26,15 @@ export function liftTaskStatus(s: unknown): unknown {
   return out;
 }
 
-/** Route handler: true when it answered the request. */
+/** Track PC: /map.json bodies at least this long are gzipped for clients that accept it. */
+export const GZIP_MIN = 4096;
+
+/** Route handler: true when it answered the request. `src.colours` undefined = the installed package's block colours (null: none). */
 export function mapRoutes(src: MapSource): HealthRoute & { builder: MapBuilder } {
   const task = src.taskStatus;
-  const builder = new MapBuilder(task ? { ...src, taskStatus: () => liftTaskStatus(task()) } : src); // Track AR: waypoints and shelter on the map
+  const colours = src.colours === undefined ? installedBlockColours() : src.colours; // Track PC
+  const withColours: MapSource = { ...src, colours };
+  const builder = new MapBuilder(task ? { ...withColours, taskStatus: () => liftTaskStatus(task()) } : withColours); // Track AR: waypoints and shelter on the map
   const handler = (path: string, req: IncomingMessage, res: ServerResponse): boolean => {
     if (path === '/map' || path === '/map/') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
@@ -35,17 +42,20 @@ export function mapRoutes(src: MapSource): HealthRoute & { builder: MapBuilder }
       return true;
     }
     if (path === '/map.json') {
-      let body: string;
-      let status = 200;
+      const answer = (status: number, body: string): void => {
+        // Track PC: gzip when the client takes it (base64 of mostly uniform columns shrinks 3 to 5 times)
+        const gz = body.length >= GZIP_MIN && /\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''));
+        res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...(gz ? { 'content-encoding': 'gzip', vary: 'accept-encoding' } : {}) });
+        res.end(req.method === 'HEAD' ? undefined : gz ? gzipSync(body, { level: 6 }) : body);
+      };
+      const fail = (e: unknown): void => answer(500, JSON.stringify({ error: e instanceof Error ? e.message : String(e) }));
       try {
         const url = new URL(req.url ?? '/', 'http://localhost');
-        body = JSON.stringify(builder.build(parseMapQuery(url.searchParams)));
+        // Track PC: answered once the palette's colours are known (the first request reads the art)
+        buildWithColours(builder, colours, parseMapQuery(url.searchParams)).then((j) => answer(200, JSON.stringify(j)), fail);
       } catch (e) {
-        status = 500;
-        body = JSON.stringify({ error: e instanceof Error ? e.message : String(e) });
+        fail(e);
       }
-      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-      res.end(req.method === 'HEAD' ? undefined : body);
       return true;
     }
     return false;

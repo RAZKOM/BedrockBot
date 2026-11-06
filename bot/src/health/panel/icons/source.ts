@@ -27,6 +27,9 @@ export function assetDir(version = ASSET_VERSION): string | undefined {
   }
 }
 
+/** Track PC: parsed index files by path, shared by every FsAssets of the process (IconBook, BlockColours). */
+const parsed = new Map<string, Promise<unknown>>();
+
 const SAFE_PATH = /^[a-z0-9_]+(\/[a-z0-9_]+)*$/;
 
 export class FsAssets implements AssetSource {
@@ -36,8 +39,16 @@ export class FsAssets implements AssetSource {
     this.dir = dir;
   }
 
-  async json(file: string): Promise<unknown> {
-    return JSON.parse(await readFile(join(this.dir, file), 'utf8'));
+  /** Parsed once per file per process (the icons and the map colours share blocks_models.json); a failed read is not kept. */
+  json(file: string): Promise<unknown> {
+    const path = join(this.dir, file);
+    let p = parsed.get(path);
+    if (!p) {
+      p = readFile(path, 'utf8').then((t): unknown => JSON.parse(t));
+      p.catch(() => parsed.delete(path));
+      parsed.set(path, p);
+    }
+    return p;
   }
 
   async png(path: string): Promise<Uint8Array | undefined> {

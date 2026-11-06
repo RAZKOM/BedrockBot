@@ -30,11 +30,19 @@ import { mapRoutes, type HealthRoute } from '../map/routes.ts';
 import { isLoopbackInterface, panelAuth, RateLimiter } from './auth.ts';
 import { LogRing } from './logRing.ts';
 import { panelRoutes, type CommandResult } from './routes.ts';
-import { buildPanelHelp, buildPanelState, type PanelChatLine, type PanelState } from './state.ts'; // Track AM: buildPanelHelp
+import { buildPanelHelp, buildPanelState, liteState, type PanelChatLine, type PanelState } from './state.ts'; // Track AM: buildPanelHelp; decision 0061: liteState for the stream
 import { buildMemory, chestRows, MEMORY_TTL_MS, type PanelMemory } from './memory.ts'; // Track AP
 import { mapMarks } from './marks.ts'; // Track AR
 import { IconBook } from './icons/book.ts'; // decision 0046: the item pictures
 import { assetDir, FsAssets } from './icons/source.ts';
+import { eventRoutes } from '../../events/routes.ts'; // decision 0059: GET /api/events
+import { viaPanel } from '../../events/actor.ts';
+import { events as eventBus, type EventBus } from '../../events/bus.ts'; // decision 0061: the events topic
+import { formatEvent } from '../../events/registry.ts';
+import { clientModules } from './assets.ts'; // decision 0061: the page's browser modules
+import { StreamHub, type Topic } from './stream.ts'; // decision 0061: the push channel
+import { PANEL_BUDGETS } from './budgets.ts';
+import { EVENTS_TOPIC, STATE_SAMPLE_MS, STATE_TOPIC } from './shared.ts';
 
 export interface PanelPlan {
   mode: 'off' | 'shared' | 'separate';
@@ -127,6 +135,8 @@ export interface PanelDeps {
   log: Logger;
   /** The item pictures; default: the minecraft-assets package when it is installed (tests pass their own or null for none). */
   icons?: IconBook | null;
+  /** Decision 0061: where the `events` stream topic comes from; default the process's event bus (decision 0059). */
+  events?: Pick<EventBus, 'subscribe'>;
 }
 
 export interface Panel {
@@ -139,6 +149,16 @@ export interface Panel {
   urls(): string[];
   state(): PanelState;
   run(text: string): CommandResult;
+  /**
+   * Decision 0061: the push channel. Other modules add topics here (docs/panel.md "Add a topic"):
+   * `panel.hub.topic('jobs', { kind: 'event' }).publish(...)`; the page listens with `page.listen('jobs', fn)`.
+   * The panel itself carries `state` and `events` (every bot event, decision 0059).
+   */
+  readonly hub: StreamHub;
+  /** The state topic (a snapshot on connect, then deltas; sampled every STATE_SAMPLE_MS while a stream listens). */
+  readonly stateTopic: Topic;
+  /** Add a route behind the panel's token (asked after the panel's own, before the health server's); works before or after start(). */
+  use(route: HealthRoute): void;
 }
 
 /** The item pictures from the minecraft-assets package, null (and a log line) when it is not installed. */
@@ -311,13 +331,32 @@ export function setupPanel(d: PanelDeps): Panel {
       },
     });
 
+  // ---- decision 0061: the push channel (GET /api/stream) and its state topic
+  const hub = new StreamHub({ log });
+  const stateTopic = hub.topic(STATE_TOPIC, { kind: 'state', read: () => liteState(state()), sampleMs: STATE_SAMPLE_MS, budget: PANEL_BUDGETS.snapshot, deltaBudget: PANEL_BUDGETS.delta });
+  // the events topic (decision 0059, docs/events.md "Live subscription"): every new event as it is
+  // recorded, with its display text; a page that connects late asks GET /api/events?since=<id> once
+  const eventsTopic = hub.topic(EVENTS_TOPIC, { kind: 'event', budget: PANEL_BUDGETS.event });
+  if (plan.mode !== 'off') unsubs.push((d.events ?? eventBus).subscribe((e) => eventsTopic.publish({ ...e, text: formatEvent(e) })));
+  let pushT: NodeJS.Timeout | undefined;
+  /** After a command: push the state soon (the command's effect: settings, stack, chat), not only on the next sample. */
+  const pushSoon = (): void => {
+    if (pushT || hub.stats().clients === 0) return;
+    pushT = setTimeout(() => {
+      pushT = undefined;
+      stateTopic.refresh();
+    }, 250);
+    pushT.unref();
+  };
+
   const run = (text: string): CommandResult => {
     const line = panelLine(chat.owners, text);
     if (!line) return { ok: false, replies: [], error: 'no owner to run commands as (owners empty and consoleOwner off)' };
     const as = line.type === 'announcement' ? 'console' : line.source;
     log.info(`panel: ${text} (as ${as})`);
     const mark = replies.total;
-    chat.handle(line);
+    viaPanel(() => chat.handle(line)); // decision 0059: command.received source panel
+    pushSoon(); // decision 0061: the stream shows the effect without waiting for the sampler
     return { ok: true, replies: replies.since(mark) };
   };
 
@@ -352,6 +391,14 @@ export function setupPanel(d: PanelDeps): Panel {
     marks: () => mapMarks(cache(), runningTask.position()), // Track AR: chests and herds on the panel's map
     ...(icons ? { icon: (name: string) => icons.png(name) } : {}), // decision 0046
   });
+  // decision 0061: one route list behind the token: the panel's own routes, the stream, whatever other
+  // modules add with use() (docs/panel.md "Add a topic"), then the page's modules (/ui/<hash>/...)
+  let modulesRoute: HealthRoute | undefined;
+  const routeList: HealthRoute[] = [routes, hub.route()];
+  const allRoutes: HealthRoute = (path, req, res) => {
+    for (const r of routeList) if (r(path, req, res)) return true;
+    return modulesRoute?.(path, req, res) ?? false;
+  };
   const healthOptions = plan.mode === 'shared' ? { host: plan.host, auth } : {};
 
   return {
@@ -360,19 +407,32 @@ export function setupPanel(d: PanelDeps): Panel {
     state,
     run,
     urls,
+    hub,
+    stateTopic,
+    use: (route) => {
+      routeList.push(route);
+    },
     async start(health) {
       if (plan.mode === 'off') return true;
       if (plan.refused) log.error(plan.refused);
+      try {
+        modulesRoute = clientModules().route(); // decision 0061: stripped once, kept in memory
+      } catch (e) {
+        log.error(`panel: the page's modules do not load: ${e instanceof Error ? e.message : String(e)}`);
+        return false;
+      }
       logs.tap();
       if (plan.mode === 'shared') {
         if (!health) return false;
-        health.use(routes);
+        health.use(allRoutes);
+        health.use(eventRoutes()); // decision 0059
         boundPort = plan.port;
       } else {
         const mob = built.mobility;
         const map = mapRoutes({ world: mob?.world, cache: d.worldCache, position: () => runningTask.position(), skillsStatus: () => mob?.skills.status(), taskStatus: () => runningTask.status(), server: d.settings.server });
         own = new HealthServer({ port: plan.port ?? 0, host: plan.host, metrics, alive: () => runningTask.alive?.() ?? true, log, routes: map, auth });
-        own.use(routes);
+        own.use(allRoutes);
+        own.use(eventRoutes()); // decision 0059
         try {
           boundPort = await own.start();
         } catch (e) {
@@ -386,6 +446,8 @@ export function setupPanel(d: PanelDeps): Panel {
     },
     async stop() {
       logs.stop();
+      hub.close(); // decision 0061: ends every stream
+      if (pushT) clearTimeout(pushT);
       for (const u of unsubs.splice(0)) u(); // Track AP
       await own?.stop();
       own = undefined;

@@ -162,6 +162,8 @@ function exploredText(m: MineTask): string {
 
 export interface FarmCommandDeps {
   chat: Chat;
+  /** Walk (or fly) home when nothing else is queued: a mine job ended with a full inventory (it unloads there). */
+  returnHome?: (why: string) => void;
   /** The connection (Hotbar / Containers listen to it, clicks are queued on it). */
   conn: PacketSource;
   /** The movement stack; undefined when the task does not walk. */
@@ -295,6 +297,8 @@ export function registerFarmCommands(deps: FarmCommandDeps): FarmCommandsResult 
         mp = pm.add(p);
         void p.result.then((s) => {
           if (s !== 'stopped') onEnd(mineEndLine(mine));
+          // a full inventory away from home: go home and unload rather than idle where the job stopped (Realm death 2026-11-05)
+          if (s === 'failed' && mine.lastError === 'inventory full') deps.returnHome?.('mine: inventory full');
         });
         return `${startText(block, n, kinds)}${pm.paused ? ' (held: !resume)' : ''}`;
       },

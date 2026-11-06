@@ -29,6 +29,7 @@ import { UpdateNotifier } from './update/notifier.ts';
 import { defaultCacheRoot, openWorldCache } from './world/cache/index.ts'; // Track T
 import { mapRoutes } from './health/map/routes.ts'; // Track T
 import { setupPanel } from './health/panel/index.ts'; // Track AE: LAN control panel (docs/panel.md)
+import { events, eventsRoot, openEventStore, wireEvents } from './events/index.ts'; // decision 0059: the bot's history (docs/events.md)
 import { gatherTask } from './tasks/gatherWood.ts';
 import { rlTaskDefinition } from './tasks/rlAgent.ts';
 import { registerTask } from './tasks/registry.ts';
@@ -282,6 +283,9 @@ async function main(argv: string[]): Promise<number> {
   // Track T: persistent world cache for walking tasks (docs/world-cache.md); env BEDROCKBOT_CACHE=0 off, BEDROCKBOT_CACHE_DIR root
   const cacheRoot = process.env.BEDROCKBOT_CACHE_DIR ?? defaultCacheRoot(loaded?.path ?? defaultConfigPath());
   const worldCache = built.mobility && process.env.BEDROCKBOT_CACHE !== '0' ? openWorldCache(built.mobility.world, { root: cacheRoot, server: target.kind === 'bds' ? `${target.host}:${target.port}` : server, logger: log }) : undefined;
+  // decision 0059: the event history next to the world cache (docs/events.md); BEDROCKBOT_EVENTS=0 memory only, BEDROCKBOT_EVENTS_DIR root
+  openEventStore({ root: eventsRoot({ env: process.env, configPath: loaded?.path, noConfig: values['no-config'] === true, defaultConfigPath: defaultConfigPath() }), server: target.kind === 'bds' ? `${target.host}:${target.port}` : server, settings: runtime, log: createLogger(settings.logLevel, 'events') });
+  const eventWiring = wireEvents({ conn, server, chat, respawn: built.respawn, inventory: built.mobility?.world.inventory, blockAt: (p) => built.mobility?.world.blockAt(p)?.name, hits: (runningTask as WalkingTask).pve?.mobs, toolWearLimit: () => Number(runtime.get('toolWearLimit')), fireworksMin: () => Number(runtime.get('fireworksMin')) });
 
   let health: HealthServer | undefined;
   let notifier: UpdateNotifier | undefined;
@@ -293,11 +297,13 @@ async function main(argv: string[]): Promise<number> {
     runningTask.stop();
     built.stop();
     worldCache?.close(); // Track T: write the remembered chunks
+    eventWiring.stop(); // decision 0059: the batches (items, damage) are written before the store closes
     notifier?.stop();
     chat.stop();
     // Waits until RakNet has sent the disconnect packet, so the server ends the session now.
     if (conn.state !== 'closed') await conn.disconnectAndFlush(why);
     metrics.stopWriter();
+    await events.close(); // decision 0059: flush the event files
     await health?.stop();
     await recorder?.close();
     if (recorder) log.info(`recorded ${recorder.count} packets to ${settings.record}`);

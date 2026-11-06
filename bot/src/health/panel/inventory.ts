@@ -10,9 +10,9 @@ import { foodInfo } from '../../skills/survival/eat.ts';
 import { maxDurability } from '../../skills/survival/tools.ts';
 import type { ItemStack } from '../../world/types.ts';
 
-/** Glyphs the page has (page.ts GLYPHS); `item` is the plain coloured tile. */
-export const ICON_CLASSES = ['sword', 'pickaxe', 'axe', 'shovel', 'hoe', 'bow', 'shield', 'helmet', 'chestplate', 'leggings', 'boots', 'food', 'block', 'ore', 'box', 'bucket', 'torch', 'item'] as const;
-export type IconClass = (typeof ICON_CLASSES)[number];
+/** Glyphs the page has (page.ts GLYPHS); `item` is the plain coloured tile. The list lives in shared.ts (decision 0061: the page's modules read it too). */
+import { ICON_CLASSES, type IconClass } from './shared.ts';
+export { ICON_CLASSES, type IconClass };
 
 /** Shulker box contents in the payload: at most this many kinds (the biggest), the rest counted in `more`. */
 export const BOX_KINDS_MAX = 8;

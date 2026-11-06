@@ -105,6 +105,8 @@ export function registerQuarryCommands(d: CommandDeps): void {
     proc = processes.add(p);
     void p.result.then((s) => {
       if (s !== 'stopped') reply(quarryEndLine(job, s));
+      // a full inventory: go home and unload rather than idle at the pit (Realm death 2026-11-05)
+      if (s !== 'stopped' && job.lastError === 'inventory full' && d.task.home?.get()) void d.pve?.returnHome(`${spec.kind}: inventory full`, { ifIdle: true, timeoutTicks: 6000 });
     });
     const b = spec.box;
     const stairs = spec.keep.length ? `, stairs from ${fmtCell(spec.keep[0]!)}` : '';

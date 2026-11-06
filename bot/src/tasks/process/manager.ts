@@ -20,6 +20,7 @@
 // that finishes calls `manager.finished(this)` (BaseProcess.finish does), which removes it at once.
 import type { Metrics } from '../../connection/metrics.ts';
 import { silentLogger, type Logger } from '../../log.ts';
+import { jobAdded, jobFinished, jobRemoved } from '../../events/jobs.ts'; // decision 0059: job events
 
 export const PRIORITY = {
   flee: 100,
@@ -176,6 +177,7 @@ export class ProcessManager {
     p.attach?.(this);
     this.entries.push({ p, state: 'new', seq: ++this.seq });
     this.log.debug(`process: + ${p.name} (${p.kind}, priority ${p.priority})`);
+    jobAdded(p); // decision 0059
     this.arbitrate();
     return p;
   }
@@ -209,6 +211,7 @@ export class ProcessManager {
     const [e] = this.entries.splice(i, 1);
     if (this.current === e) this.current = undefined;
     this.log.debug(`process: - ${p.name} (done)`);
+    jobFinished(p); // decision 0059
   }
 
   /**
@@ -292,6 +295,7 @@ export class ProcessManager {
     this.entries.splice(i, 1);
     if (this.current === e) this.current = undefined;
     this.log.debug(`process: - ${e.p.name} (${reason})`);
+    jobRemoved(e.p, reason); // decision 0059
     try {
       e.p.stop(reason);
     } catch (err) {

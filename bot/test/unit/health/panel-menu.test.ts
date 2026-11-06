@@ -7,6 +7,7 @@ import { findSlot, freeSlot, parseHotbarSlot, registerPanelCommands, type PanelC
 import { RuntimeSettings } from '../../../src/config/settings.ts';
 import { liftTaskStatus, mapRoutes } from '../../../src/health/map/routes.ts';
 import { mapMarks } from '../../../src/health/panel/marks.ts';
+import { PANEL_BUDGETS } from '../../../src/health/panel/budgets.ts';
 import { panelLink } from '../../../src/health/panel/state.ts';
 import { cellActions, linkView, offlineOk, logVisible, mapActions, modeChanges, modeOf, paletteMatch, parseLog, setCommand, settingActions, settingVisible, stackActions, wpName, type MenuAction } from '../../../src/health/panel/menu.ts';
 import { enumValues, modesData, renderPanelPage } from '../../../src/health/panel/page.ts';
@@ -231,10 +232,10 @@ describe('page: the settings by group, the mode selector, the menu and map marku
     expect(JSON.parse(/<script type="application\/json" id="modes-data">([^<]*)<\/script>/.exec(html)![1]!)).toEqual(modesData());
   });
 
-  it('menu, toast, palette, log filters, Pause / Resume, the map canvas and legend; under 160 KB', () => {
+  it('menu, toast, palette, log filters, Pause / Resume, the map canvas and legend; under 162 KB', () => {
     for (const m of ['id="menu"', 'id="toast"', 'id="palette"', 'id="quick-edit"', 'id="log-level"', 'id="log-mod"', 'id="btn-pause"', 'id="btn-resume"', 'id="mapcv"', 'id="map-follow"', 'class="legend', 'id="set-changed"', 'id="set-q"']) expect(html).toContain(m);
     expect(html).not.toContain('<iframe');
-    expect(Buffer.byteLength(html)).toBeLessThan(160_000);
+    expect(Buffer.byteLength(html)).toBeLessThan(PANEL_BUDGETS.html); // decision 0061: the page without its script (was 162 KB with it)
   });
 });
 

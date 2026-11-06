@@ -102,3 +102,18 @@ describe('pickThreat', () => {
     expect(ignoreMsAfter('timeout')).toBe(30_000);
   });
 });
+
+describe('pickThreat guard centre (Realm death 2026-11-05: idle 1400 blocks from home)', () => {
+  const zombie = (): Map<bigint, EntityInfo> => new Map([[8n, mob(8n, 'minecraft:zombie', { x: 4.5, y: -60, z: 0.5 })]]);
+  it('watches home while the bot idles within the radius of home', () => {
+    // home 10 blocks east of the bot: the zombie 4 west of home... is 6 from home: fought
+    expect(pickThreat(host(zombie(), { home: { x: 10, y: -60, z: 0 } }), { x: 0.5, y: -60, z: 0.5 }, false)?.e.runtimeId).toBe(8n);
+    // home 12 east, the bot 12 west of home: a mob 20 from home but next to the bot... is out of the home radius
+    const far = new Map([[9n, mob(9n, 'minecraft:zombie', { x: -6.5, y: -60, z: 0.5 })]]);
+    expect(pickThreat(host(far, { home: { x: 12, y: -60, z: 0 } }), { x: 0.5, y: -60, z: 0.5 }, false)).toBeUndefined();
+  });
+  it('watches the bot itself when it idles far from home', () => {
+    const h = host(zombie(), { home: { x: 183, y: -60, z: -1440 } });
+    expect(pickThreat(h, { x: 0.5, y: -60, z: 0.5 }, false)?.e.runtimeId).toBe(8n);
+  });
+});

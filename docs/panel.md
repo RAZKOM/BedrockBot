@@ -52,11 +52,19 @@ config file and restart the bot (old cookies stop working).
 
 ## The page (`GET /`)
 
-Server-rendered (the structure, the settings table and the current state as JSON), then an inline
-script (`client.ts`) fills every node from that JSON at once and from `/api/state?lite=1` every
-2 s. No build step, no external assets: no CDN, no web fonts (the system font), no image files in the
-page (the item glyphs are inline SVG; the real icons are requests to the panel itself, "Item icons"
-below); the machine may be offline from the internet.
+The server renders the structure, the settings table and the current state as JSON. Then the page's
+browser modules (TypeScript under `health/panel/client/`, type-stripped at startup and served by the
+bot; "Browser modules" below) fill every node from that JSON at once. After that the push channel
+keeps them current: `GET /api/stream`, with `/api/state?lite=1` polling as the fallback ("Live
+updates"; decision 0061).
+
+There is no build step and nothing external:
+
+- no CDN and no web fonts (the system font);
+- no image files in the page: the item glyphs are inline SVG, and the real icons are requests to
+  the panel itself ("Item icons" below).
+
+The machine may be offline from the internet.
 
 ### Layout
 
@@ -199,14 +207,40 @@ stops with `prefers-reduced-motion`.
 
 ### Live updates
 
-Every poll renders into the nodes the server rendered: a text node is written only when its text
-changed, a bar only when its width changed, an inventory cell only when its item, count, durability
-or contents changed (a signature per cell), the process list only when the stack changed. Nothing
-replaces the page's HTML, so there is no flicker, an open `<details>`, a half-typed command or a
-setting being edited stay as they are, and the log keeps its scroll position. Polls run every 2 s
-while the tab is visible and every 10 s while it is hidden (`document.hidden`); coming back polls at
-once. Every 30th render logs its time in the browser's console (`panel: render 0.42 ms, state 9524
-bytes`, level debug / verbose).
+Decision 0061. Each new state, from the stream or a poll, renders into the nodes the server
+rendered. A node is written only when what it shows changed:
+
+- a text node when its text changed;
+- a bar when its width changed;
+- an inventory cell when its item, count, durability or contents changed (a signature per cell);
+- the process list when the stack changed.
+
+Nothing replaces the page's HTML. So there is no flicker, an open `<details>`, a half-typed command
+or a setting being edited stays as it is, and the log keeps its scroll position.
+
+**How the state arrives** (`client/transport.ts`):
+
+| When | What the page does |
+|---|---|
+| visible tab, `EventSource` there | `GET /api/stream?topics=state`: a snapshot, then a delta about once a second while something changes, and 250 ms after each command; no polling |
+| the stream refused (503: 8 streams open; 401), no state within 6 s (a proxy that buffers), or 3 drops in a row | polls `/api/state?lite=1` every 2 s; tries the stream again after 30 s, doubling per failure up to 8 min |
+| no `EventSource` (an old browser) | polls every 2 s, as before |
+| hidden tab (`document.hidden`) | closes the stream and polls every 10 s; visible again reopens the stream at once, resuming from the last id |
+
+**Why a hidden tab polls instead of keeping the stream:** the server keeps no per-client throttle
+state, a background tab does not hold one of the 8 stream slots, and phones suspend background tabs
+anyway.
+
+A dropped stream behaves like a failed poll: the **stale** badge and **Panel not answering** show
+until the next state. `EventSource` reconnects by itself, with `Last-Event-ID`. A delta applies only
+to a state from the same stream. A delta that does not apply, or comes before any snapshot, makes the
+page reopen the stream without an id, which brings a fresh snapshot. A polled state also drops the
+id.
+
+Every 30th render logs its time in the browser's console, at level debug / verbose. Examples:
+`panel: render 0.42 ms, state 9524 bytes`, and for a streamed state
+`panel: render 0.10 ms, state 341 bytes (stream delta)`. Fallbacks log too:
+`panel: stream off (refused); polling, next try in 30 s`.
 
 ## Interaction (Track AR)
 
@@ -332,16 +366,208 @@ bot is idle (the shield controller, [pve.md](pve.md) "Shield"); a totem stays.
 - Taking off one worn armour piece, mining a clicked spot, build markers: no command does it.
 - Moving stacks around (hotbar drag): no `!move` command; not needed for any action above.
 
+## Push channel (`GET /api/stream`)
+
+Decision 0061; the hub is `health/panel/stream.ts` (`StreamHub`), one per panel. The channel is
+Server-Sent Events behind the same token and cookie as every route.
+
+**What a client receives:**
+
+- `retry: 2000`, then a `hello` event: `{"boot":"Xk3...","resumed":false,"topics":["state"],"hb":5000}`;
+- then a message per topic, `event: <topic>`, `id: <boot>.<seq>`, `data: <JSON>`.
+
+**Topic kinds:**
+
+- **State topics** (`state`) send `{"snap": <value>}` on connect, then `{"d": [<ops>]}` deltas.
+- **Event topics** pass each published value through as it is.
+
+**The panel's own topics:**
+
+| Topic | Kind | What |
+|---|---|---|
+| `state` | state | the lite state (what `/api/state?lite=1` answers) |
+| `events` | event | every bot event as it is recorded (decision 0059, [events.md](events.md)): the stored record plus its display text, e.g. `{"id":412,"ts":1762300000000,"kind":"command.received","sev":"info","data":{"command":"set","text":"!set guardRadius 9","source":"panel","sender":"console"},"text":"!set guardRadius 9 from console (panel)"}`, 200 to 400 bytes |
+
+`index.ts` subscribes to the event bus while the panel serves (`events.subscribe`) and unsubscribes in
+`stop()`. A page that connects late asks `GET /api/events` once for what it missed, then follows the
+topic. Event ids increase across restarts, so a gap shows. The page has no events UI yet (programme
+step 5).
+
+**Resuming.** One sequence numbers every message of every topic. A client that reconnects with
+`Last-Event-ID` (or `?last=<id>`) gets what it missed from the replay ring (512 messages, 1 MiB),
+and `hello.resumed` is true. An id from another boot, or one older than the ring, gets fresh
+snapshots instead.
+
+**Query.** `?topics=state,events` limits the stream to those topics (400 when none is registered).
+Without it the stream carries every topic.
+
+**Deltas** (`client/delta.ts`, the same code on both sides) are a list of ops on JSON paths:
+
+| Op | Meaning | Example |
+|---|---|---|
+| `["s", path, value]` | set the key or array index at `path` (`[]`: the whole value) | `["s", ["inventory", "slots", 9, "count"], 63]` |
+| `["d", path]` | delete the object key at `path` | `["d", ["self", "lastDeath"]]` |
+| `["a", path, drop, tail]` | a ring that scrolled: drop `drop` items from the front, append `tail` | `["a", ["logs"], 1, ["... INFO  [move] arrived"]]` |
+
+The diff writes each change in the shortest JSON form:
+
+- one changed inventory cell is one `s` op;
+- a scrolled log is one `a` op;
+- anything else is replaced.
+
+The hub computes each delta once per publish for every client. It sends a snapshot instead when the
+delta would be longer.
+
+**When the state is sent:**
+
+- the state topic is sampled every second (`STATE_SAMPLE_MS`), only while a stream listens;
+- a command from the panel pushes 250 ms after it runs;
+- an unchanged state sends nothing.
+
+**Limits:**
+
+| What | Value | Beyond it |
+|---|---|---|
+| streams at once | 8 | 503 with `retry-after: 30` (the page polls instead) |
+| socket buffer per client | 256 KiB unsent | the client is dropped (log line); it reconnects and resumes, and the others never wait for it |
+| heartbeat | an `hb` event after 5 s of quiet | the page's watchdog: no state or heartbeat for 15 s and the page falls back to polling |
+
+**Headers:** `cache-control: no-store, no-transform`, `x-accel-buffering: no` (so nginx does not
+buffer the stream).
+
+**Stopping.** `stop()` ends every stream, and a stopping hub answers 503.
+
+`hub.stats()` gives these counters:
+
+- clients, opened, refused, dropped, resumed and the sequence;
+- per topic: published, snapshots, last and largest message and largest delta.
+
+### Add a topic
+
+Something new the page should hear about without polling (an event list, a job queue, map tiles,
+notifications) is a topic. Nothing in the panel's files changes.
+
+1. **Server.** In the module that owns the data, take `panel.hub` from `setupPanel`'s result, then
+   register once and publish.
+   - An event:
+     ```ts
+     const notes = panel.hub.topic('notes', { kind: 'event', budget: 2_000 });
+     notes.publish({ ts: Date.now(), text: 'emptied the chest at 100 64 -50' });
+     ```
+   - A value the page mirrors:
+     ```ts
+     const jobs = panel.hub.topic('jobs', { kind: 'state', read: () => jobList(), sampleMs: 1000, budget: 8_000, deltaBudget: 1_000 });
+     ```
+     Then call `jobs.refresh()` after a change, or let `sampleMs` poll `read`. `jobs.publish(v)`
+     also works.
+
+   Topic names are `[a-z][a-z0-9-]*`. `hello`, `hb` and a name already registered throw.
+2. **Fallback route.** If the data must also reach a page that cannot stream, add it with
+   `panel.use((path, req, res) => ...)`. Routes added this way sit behind the panel's token, are
+   tried after the panel's own routes and before the modules, and work before or after `start()`.
+   Only `state` has a built-in polling fallback.
+3. **Page.** In the card's module (`client/<card>.ts`, set up from `main.ts`), call
+   `page.listen('notes', (data, id) => ...)` inside the setup (the same for the panel's own
+   `events` topic). The transport adds the topic to
+   `?topics=` and reopens a running stream, resuming from the last id. A listener that throws is
+   logged and the stream goes on. A listener is called only while the page streams: a polling page
+   needs step 2.
+4. **Tests.**
+   - A unit test publishes through a real hub. `panel-stream.test.ts` and `panel-server.test.ts`
+     ("... a module adds a topic and a route") show the pattern with `openSse` from
+     `test/unit/health/panel-sse.ts`.
+   - A page test uses `runPage(html, { stream: true })` and `FakeEventSource.emit` from
+     `panel-dom.ts`.
+
+**Reviewer checklist** for a new topic:
+
+- [ ] The payload is JSON with no secrets: no token, no sign-in data, no file paths of the machine.
+      Everything on a topic reaches every page.
+- [ ] It has a `budget` (and a `deltaBudget` for state). The numbers are in this file's "Budgets"
+      table, or the reason they are not.
+- [ ] It is published from one owning module. Nothing publishes on a topic another module owns.
+- [ ] State topics are idempotent snapshots. Event topics tolerate a replay after a resume: the page
+      may see an event twice after a lost ring, so events carry an id or timestamp.
+- [ ] Sampling (`sampleMs`) is only for values without a change signal. It runs only while a stream
+      listens, but `read` must still be cheap (well under 1 ms).
+- [ ] The page side has a fallback, or the card says it needs the stream.
+- [ ] There is a test on a real hub, and on the page with the fake EventSource.
+
+## Browser modules
+
+Decision 0061; `health/panel/assets.ts`. The page's script is the TypeScript files under
+`health/panel/client/` plus `health/panel/shared.ts`.
+
+**Serving.** At startup the bot strips their types once with Node's `module.stripTypeScriptTypes`,
+keeps the results in memory, and serves them as native ES modules:
+
+- **URL:** `GET /ui/<hash>/client/main.ts`. `<hash>` is 12 characters over every module, so a bot
+  started with other code serves new URLs.
+- **Relative imports** (`./menu.ts`, `../shared.ts`) resolve under the same prefix, as in the
+  source tree.
+- **Answer:** `text/javascript; charset=utf-8`, `cache-control: private, max-age=31536000,
+  immutable`, an ETag (304 on `If-None-Match`), `x-content-type-options: nosniff`, and gzip when
+  the browser accepts it.
+- **The page** carries one `<script type="module" src=".../client/boot.ts">` and a
+  `<link rel="modulepreload">` per module, so the browser fetches them in parallel on the first
+  visit and from its cache afterwards.
+- **Other hashes:** a module of another hash (an old tab after a restart) answers 404
+  `another version of the page: reload it`.
+
+**Rules,** checked at load (on a problem the panel logs it and does not start) and by
+`panel-modules.test.ts`:
+
+- A client module imports only `./<module>.ts` and `../shared.ts`. There is no Node module, no
+  server module, no package and no CDN.
+- `shared.ts` holds constants and wire types. Its only imports are `export type ... from`, which
+  stripping erases.
+- A type-only import is written `import type { X }`, or mixed with a value
+  (`import { a, type X }`). Never write `import { type X }` alone: it strips to `import {} from`,
+  which the browser would fetch.
+- No dynamic `import()`.
+- Only `boot.ts` reads browser globals (`document`, `window`, `fetch`, `EventSource`,
+  `localStorage`...). It builds an `Env` and calls `start(env)` in `main.ts`, and every other module
+  gets what it needs through that. This is why the tests run the real modules on a fake DOM.
+- The client type-checks without the DOM lib, through its own small interfaces (`client/dom.ts`).
+- The server imports only the pure modules: `client/delta.ts` (the stream computes deltas) and
+  `client/menu.ts` (re-exported by `health/panel/menu.ts` for the tests and the e2e).
+- A file with only types (`client/page.ts`) is not served.
+- Every module is reachable from `boot.ts`. Each module stays under its byte budget.
+
+**Adding a card** is one module, `client/<card>.ts`, exporting `setup<Card>(page)` that returns a
+render function, plus one line in `main.ts` to call it and its render. The markup stays in `page.ts`.
+
+## Budgets
+
+`health/panel/budgets.ts` (`PANEL_BUDGETS`) has one budget per piece instead of one cap on the whole
+page, so a new card raises the piece it lives in. Raise a number only with the reason written in
+"Measured" below.
+
+| Piece | Budget | Worst case (unit fixture) | Live (bds-core e2e) | Enforced by |
+|---|---|---|---|---|
+| `html`: `GET /` (structure, CSS, glyphs, the embedded lite state) | 120 000 | 108 328 | 95.9 to 101 KB | `panel-budgets`, `panel-menu`, `panel-core`, `panel-actions`, `panel-stream` |
+| `module`: one browser module, raw | 20 000 | 14 531 (`map.ts`) | the same | load at startup (refuses), `panel-budgets`, `panel-stream` |
+| `modules`: all modules, raw | 120 000 | 94 052 (32 110 gzip) | the same | `panel-budgets`, `panel-stream` |
+| `snapshot`: a state snapshot (= the lite poll) | 24 000 | 19 569 | 7.6 to 12.5 KB | `panel-budgets`, `panel-stream`, a log warning once at run time |
+| `delta`: one state delta on a busy second | 4 000 | 682 (14 ops) | 340 to 660 | `panel-budgets`, `panel-stream`, a log warning once at run time |
+| `event`: one message on the `events` topic | 2 000 | - | 242 | `panel-stream`, a log warning once at run time |
+
+To print the worst case:
+`PANEL_MEASURE=1 pnpm --filter bot exec vitest run --project unit test/unit/health/panel-budgets.test.ts`.
+
 ## API
 
 | Request | Answer |
 |---|---|
 | `GET /api/state` | `PanelState` JSON (below) |
-| `GET /api/state?lite=1` | the same without what does not change while the bot runs: `commands` and `quick` left out, `settings` rows only `key`, `value`, `source`; `"lite": true` (what the page polls; Track AP) |
+| `GET /api/state?lite=1` | the same without what does not change while the bot runs: `commands` and `quick` left out, `settings` rows only `key`, `value`, `source`; `"lite": true` (what the page polls when it does not stream; Track AP) |
+| `GET /api/stream[?topics=state,events][&last=<id>]` | decision 0061: Server-Sent Events ("Push channel"): `hello`, then per topic a snapshot and deltas (state) or each message (events), ids `<boot>.<seq>`, resume with `Last-Event-ID`; heartbeats `hb`; 400 no such topic, 503 at 8 streams (`retry-after: 30`) or stopping, 405 other methods |
+| `GET /ui/<hash>/<path>.ts` | decision 0061: a browser module, type-stripped ("Browser modules"): `text/javascript`, immutable cache, ETag / 304, gzip; `HEAD` the same without the body; 404 another hash or no such module; 405 other methods |
 | `GET /api/chests` | the remembered containers, nearest first: `[{"x":10,"y":-60,"z":4,"kind":"chest","label":"ores","stacks":12,"size":27,"top":[["coal",320],["iron_ore",40]],"unreachable":null,"readAt":1761753600000}]` (`[]` without a world cache; Track AP) |
 | `GET /api/marks` | Track AR: what the panel's map draws beyond `/map.json`, within 256 blocks of the bot, nearest first, at most 200 each: `{"chests":[{"x":10,"y":-60,"z":4,"kind":"chest","label":"ores","unreachable":false}],"herds":[{"x":5.5,"y":-60,"z":5.5,"n":5,"kind":"cow","penned":true}]}` (empty lists without a world cache) |
 | `GET /icons/<name>.png` | the item's icon (`image/png`, 16 x 16 or 32 x 32), or 404 `{"error":"no icon for this item"}`; `HEAD` the same without the body; 405 other methods ("Item icons") |
 | `POST /api/cmd` `{"text":"!wp set base"}` | 200 `{"command":"!wp set base","ok":true,"replies":["waypoint base set to 10 -60 20"]}`; 409 `ok:false` + `error` when there is no owner to run as; 400 bad body; 413 body over 4 KiB; 429 over 5 commands per second; 405 other methods |
+| `GET /api/events`, `/api/events/summary`, `/api/events/kinds` | decision 0059: the bot's event history (filters, the 8-hour summary, the registry); mounted from `bot/src/events/routes.ts`, documented in [events.md](events.md) "Query API" |
 | `GET /healthz`, `/metrics`, `/map`, `/map.json` | as before (runbook "Operations") |
 
 `PanelState` (`v` 1; `bot/src/health/panel/state.ts`):
@@ -421,7 +647,7 @@ is on; with no owner at all the panel answers 409. Every panel command is logged
 Replies are captured by wrapping the chat instance's `say` (everything the bot says goes through it),
 so they also go to the game chat, exactly as when the owner typed the command there. The replies said
 during the call come back in the response; later ones (`arrived at`, `kill zombie: 3/3 done`) appear
-in `chat` on the next poll.
+in `chat` with the next state (pushed, or the next poll).
 
 ## Auth (`panel/auth.ts`)
 
@@ -452,9 +678,13 @@ codes become `***`). The bot account's sign-in tokens (prismarine-auth cache) ar
 
 | File | What |
 |---|---|
-| `health/panel/index.ts` | `setupPanel` (wiring, `!panel`), `planPanel` (where it serves), `panelLine` (the owner a command runs as), `panelUrls`, `ChatTap` (the bot's replies) |
+| `health/panel/index.ts` | `setupPanel` (wiring, `!panel`), `planPanel` (where it serves), `panelLine` (the owner a command runs as), `panelUrls`, `ChatTap` (the bot's replies); decision 0061: the stream hub and its `state` topic (`panel.hub`, `panel.stateTopic`), the push after a command, the route list other modules add to (`panel.use`) |
 | `health/panel/auth.ts` | `checkRequest` (token, cookie, loopback Host, POST rules), `panelAuth` (the health server hook), `RateLimiter` |
-| `health/panel/routes.ts` | `/`, `/api/state` (and `?lite=1`), `/api/help`, `/api/chests`, `/api/marks` (Track AR), `/api/cmd` |
+| `health/panel/routes.ts` | `/`, `/api/state` (and `?lite=1`), `/api/help`, `/api/chests`, `/api/marks` (Track AR), `/api/cmd` (`/api/stream` and `/ui/<hash>/*` are mounted next to it by `index.ts`) |
+| `health/panel/stream.ts` | decision 0061: `StreamHub` (topics, snapshots and deltas, the sequence and replay ring, heartbeats, the stream cap, slow clients, the sampler, `stats()`), `parseEventId` |
+| `health/panel/assets.ts` | decision 0061: the browser modules: `loadClientModules` (strip and check), `ClientModules` (hash, URLs, the `/ui/<hash>/` route), `clientModules()` (once per process), `ENTRY_MODULE` |
+| `health/panel/shared.ts` | decision 0061: constants and wire types shared by the server and the page (poll and stream timings, storage keys, icon classes, `StreamHello`, `export type` of the state shapes) |
+| `health/panel/budgets.ts` | decision 0061: `PANEL_BUDGETS` ("Budgets") |
 | `health/panel/state.ts` | `PanelState`, `buildPanelState`, `liteState`, quick commands, `buildPanelHelp` |
 | `health/panel/inventory.ts` | Track AP: the `inventory` block: `buildInventory`, `iconClassOf`, `itemColour`, `itemAbbr`, `durabilityOf`, `boxContents` |
 | `health/panel/memory.ts` | Track AP: the `memory` counts (`buildMemory`) and the chest list (`chestRows`) |
@@ -463,9 +693,11 @@ codes become `***`). The bot account's sign-in tokens (prismarine-auth cache) ar
 | `health/panel/icons/source.ts` | the asset folder of the `minecraft-assets` package (`ASSET_VERSION`), `FsAssets` (path allowlist) |
 | `health/panel/icons/models.ts`, `render.ts` | the model's parent chain (`resolveModel`) and the `display.gui` renderer (`renderModel`: projection, shading, front-to-back compositing) |
 | `health/panel/icons/names.ts`, `png.ts` | the Bedrock -> Java name aliases, the solid parents, the tints; the pngjs wrapper (decode, encode, first frame, tint, overlay) |
-| `health/panel/client.ts` | Track AP: the page script (render into existing nodes, stale marker, hidden-tab back-off, theme, commands, Help, chest list); Track AR: the menus and confirmations, the settings controls and mode selector, the palette, the quick-button editor, Stop / Pause / Resume, the log filter, the map canvas |
+| `health/panel/client/boot.ts`, `main.ts`, `page.ts`, `dom.ts` | decision 0061: the entry (the only module reading browser globals); the wiring (`start(env)`: theme, the cards, render, stale marker); the shared `Page` object; the small DOM interfaces and helpers (`makeUi`, `nice`, `dur`, ...) |
+| `health/panel/client/transport.ts`, `delta.ts` | decision 0061: how the state arrives (stream, fallback polling, hidden tab, `on(topic)`); the delta codec (also used by the server) |
+| `health/panel/client/inventory.ts`, `cards.ts`, `logs.ts`, `settings.ts`, `link.ts`, `commands.ts`, `popup.ts`, `map.ts`, `tables.ts` | the page's cards, one module each (until decision 0061 the one `client.ts` string; Track AP and AR behaviour unchanged): the cells and their menu; bot, vitals, status, stack, combat, memory, planner, connection, chat; the log and its filter; the settings controls and modes; the offline banner; the command box, quick buttons and palette; toast and menu; the map canvas; Help and the chest list |
 | `health/panel/page.ts` | the page (`renderPanelPage`): structure, CSS (themes, responsive grid), the 41 inventory cells, the status blocks; Track AR: the grouped settings rows, the mode bar, the menu, toast, palette and map markup |
-| `health/panel/menu.ts` | Track AR: the menu model as plain JavaScript (`MENU_JS`: `cellActions`, `mapActions`, `settingActions`, `setCommand`, `settingVisible`, `modeOf`, `modeChanges`, `stackActions`, `paletteMatch`, `logVisible`), embedded in the page and evaluated for the server and the tests |
+| `health/panel/client/menu.ts` (re-exported by `health/panel/menu.ts`) | Track AR: the menu model (`cellActions`, `mapActions`, `settingActions`, `setCommand`, `settingVisible`, `modeOf`, `modeChanges`, `stackActions`, `paletteMatch`, `offlineOk`, `linkView`, `parseLog`, `logVisible`); a typed module since decision 0061 (it was the `MENU_JS` string): the page imports it, the server and the tests through `menu.ts` |
 | `health/panel/marks.ts` | Track AR: `GET /api/marks` (`mapMarks`: chests and herds near the bot) |
 | `health/map/routes.ts` | Track AR: `liftTaskStatus` (the afk task's waypoints and shelter into `/map.json`) |
 | `chat/commands-panel.ts` | Track AR: `!select`, `!offhand` (one line in `tasks/registry.ts`) |
@@ -479,7 +711,61 @@ codes become `***`). The bot account's sign-in tokens (prismarine-auth cache) ar
 pnpm --filter bot exec vitest run --project unit test/unit/health                       # token, cookie, rate limit, state shape, HTTP, config; Track AP: inventory, statuses, memory, payload, page markup, the script on a fake DOM
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-core --silent=false     # bds-core (~15 s)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-actions --silent=false  # Track AR, bds-core (~20 s)
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-stream --silent=false   # decision 0061, bds-core (~28 s)
+PANEL_MEASURE=1 pnpm --filter bot exec vitest run --project unit test/unit/health/panel-budgets.test.ts  # print the worst-case budgets
 ```
+
+Decision 0061 unit tests:
+
+- `panel-delta.test.ts`: the delta ops, a cell as one op and a scrolled log as one op, the real state
+  on a busy second, and 300 random edits that round-trip.
+- `panel-stream.test.ts`, the hub over real HTTP:
+  - names, kinds and ids;
+  - hello, then a snapshot, then deltas; an unchanged value sends nothing; events pass through;
+  - one sequence over every topic;
+  - resuming with `Last-Event-ID` or `?last=`; another boot, or a gap the ring lost, gets a snapshot;
+  - the sampler, heartbeats, the topic filter and 400;
+  - the cap (503) and `close()`; a slow client dropped while the others go on.
+- `panel-transport.test.ts`, the page's transport on the fake DOM with a fake `EventSource`:
+  - the stream opens at once, and a snapshot and deltas render with no polling;
+  - a command schedules no poll;
+  - a delta before a snapshot, or one that does not apply, reopens the stream;
+  - a drop shows the stale badge and **Panel not answering**, and a resumed delta clears them;
+  - refused or 3 drops lead to polling, with retry and back-off;
+  - the open and quiet watchdogs;
+  - a hidden tab polls every 10 s and reopens with `&last=`;
+  - `page.listen` adds a topic, and a throwing listener is contained;
+  - without `EventSource` the page polls.
+- `panel-modules.test.ts`, the guards in "Browser modules":
+  - the import rules and `shared.ts` type-only exports;
+  - no globals outside `boot.ts`;
+  - the server imports only `delta.ts` and `menu.ts`;
+  - every module is reachable from the entry, and types-only files are not served;
+  - the loader refuses a Node import, a server import, `import { type X }` and `import()`.
+- `panel-budgets.test.ts`: every piece of "Budgets" on the worst-case fixture.
+- `panel-server.test.ts`:
+  - the modules behind the token: 401, `text/javascript`, types stripped, the API paths present;
+  - immutable cache, ETag, 304, `HEAD`, 404 for another hash;
+  - the stream through the panel: 401, the panel's `events` topic (an event on the bus arrives with its text; `stop()` unsubscribes), a module's own topic (`jobs`) plus a `panel.use`
+    route, a snapshot of the lite state, and `!set guardRadius 8` arriving as a delta within 1.5 s.
+- `panel-page.test.ts` runs the real modules (`start(env)`) on the fake DOM (`panel-dom.ts`). It
+  also checks that the page's only script is the entry module, with a modulepreload for every
+  module.
+
+`panel-stream` e2e (bds-core; `PANEL_E2E_PORT`, default a random port in 9940..9949). It runs the CLI
+with `--walk --health-port <port>` and a token, then checks:
+
+- the page under its budget, one entry module plus a modulepreload per module;
+- every module 401 without the token; with it `text/javascript`, immutable, types stripped, gzip
+  (the same code) and 304;
+- `/api/stream` 401 without the token, then hello and a snapshot (time and size); 10 s idle (deltas,
+  heartbeats, bytes per second), and the applied state equals `?lite=1`;
+- `!set guardRadius 9` from the panel arriving as a delta (latency), and a truth `give` of 7 oak
+  planks arriving as an inventory delta;
+- a resume with `Last-Event-ID` replaying only deltas after a change made while away; the result
+  equals a fresh snapshot, and another boot's id gets a snapshot;
+- 8 streams open and the ninth 503 with `retry-after: 30`, while `?lite=1` still answers;
+- `!quit` ending the streams and exiting 0.
 
 Item icons unit tests (`panel-icons.test.ts`, with `minecraft-assets` really installed): the PNG
 helpers; model resolution; the cube's three faces pinned pixel by pixel (top, left x 0.8, right x
@@ -516,7 +802,8 @@ offhand** with a totem then **Back into the inventory**, then a shield (the stat
 map's **Walk here** 6 blocks east on the column's surface from the tile (truth position), **Set
 waypoint here** (`!wp <name>` and the waypoint in `/map.json`), a setting's **Reset**, and the
 **Stop** button of a running 30-block `!goto` (the stack empties, the bot stands short of the goal);
-plus the page markers, the page under 160 KB and the poll under 24 KB.
+plus the page markers, the page under 160 KB (since decision 0061 under `PANEL_BUDGETS.html`) and the
+poll under 24 KB.
 
 Track AR, measured on bds-core (2026-10-30, two runs each green): the page 104.9 KB (panel-core's
 loaded inventory: 109.6 KB; the unit test's worst case 116.6 KB, script 45.7 KB, glyphs 2.9 KB;
@@ -554,3 +841,40 @@ characters, 30 chat lines): poll 16.5 KB (`settings` 1.7 KB instead of 6.4 KB), 
 inventory 4.2 KB, the page 75 KB (script 17 KB, glyphs 3 KB). Render time (the script on the unit
 test's fake DOM, every one of the 36 cells changing on every poll): median 0.16 ms, max 1.8 ms over
 50 polls; a browser adds layout and paint, which the console line (`panel: render ... ms`) shows.
+
+### Measured (decision 0061)
+
+**Live, on bds-core** (2026-11-05, Windows dev machine, other agents' BDS containers running).
+Four green runs of `BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-stream
+--silent=false`, two before and two after merging the event store (decision 0059). The numbers are
+from the last two:
+
+| What | Value |
+|---|---|
+| page | 95.9 KB, down from 140 to 150 KB with the inline script |
+| the 16 modules | 94.1 KB raw, 32.1 KB gzip; largest `map.ts` 14.5 / 4.8 KB, `menu.ts` 13.6 / 4.5 KB, `transport.ts` 8.1 / 2.6 KB |
+| first snapshot | 7.6 KB, 2 ms after the request |
+| idle, 10 s | 9 deltas, median 340 bytes, max 372 to 410 bytes (the clock, uptime, the status line, the log); 0 heartbeats, since the deltas keep the stream busy; about 315 bytes/s, where polling moved a 7 to 12 KB state every 2 s (3.5 to 6 KB/s) |
+| `!set` from the panel to the delta on the page | 267 to 269 ms (630 to 660 bytes) |
+| the same command on the `events` topic | 242 bytes (`!set guardRadius 9 from console (panel)`), also listed by `/api/events` |
+| a truth `give` of 7 oak planks to the inventory delta | 730 to 740 ms (about 450 to 480 bytes: the cell, the clock, the status line) |
+| resume after a 2.5 s gap with a change | 1 delta replayed, 680 bytes, instead of an 8.4 KB snapshot |
+| cap | 8 streams open, the ninth 503 (`retry-after: 30`); `?lite=1` meanwhile in 1 ms |
+
+The existing e2e still pass on the same container after the merge: `panel-core` (6 tests, port
+9946) and `panel-actions` (8 tests, port 9947 or 9948). Two changes to them:
+
+- their page caps now use `PANEL_BUDGETS.html`;
+- panel-actions now expects **Drop the stack** to send `!drop slot <n>`. That has been the menu's
+  command since `!drop slot` shipped; the test was stale.
+
+**Worst-case unit fixture** (`PANEL_MEASURE=1 ... panel-budgets.test.ts`):
+
+| What | Value |
+|---|---|
+| page | 108 328 bytes: CSS 11.7 KB, embedded state 19.5 KB, glyphs 7.2 KB, preload links 1.1 KB; the rest is the server-rendered structure |
+| snapshot | 19 569 bytes |
+| busy-second delta | 682 bytes, 14 ops: two cells, a scrolled log, a chat line, vitals, position, the clock, the stack line, uptime |
+| delta with the whole inventory reversed and 5 log lines | 3 835 bytes |
+
+**Startup.** Stripping and checking the modules takes 14 to 17 ms, once per process.

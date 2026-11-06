@@ -26,6 +26,7 @@ import { decodeSeenMarks } from './summary.ts'; // Track Z: ore memory (seen mar
 import { HerdMarks } from './herds.ts'; // Track AF: herd marks (food v2), a sidecar of the cache dir
 import { ChestMemory } from './chests.ts'; // Track AG: chest memory (home logistics), a sidecar of the cache dir
 import { Y_NONE, type CachedMark, type CachedTerrain } from './types.ts';
+import { roofedDimension, type SurfaceData } from './surface.ts'; // Track PC: the map's surface layer
 
 export interface WorldCacheOptions {
   /** Directory of this server's region files (`<config dir>/cache/<server id>`). */
@@ -72,6 +73,8 @@ export interface MapTile {
   updatedAt: number;
   y: Int16Array;
   cls: Uint8Array;
+  /** Track PC: the surface layer (names compacted, a copy); undefined for a record without one. */
+  surf?: SurfaceData;
 }
 
 export interface WorldCacheStats {
@@ -278,7 +281,7 @@ export class WorldCache implements CachedTerrain {
     const oldSummary = read ? this.cachedSummary(cx, cz) : undefined;
     const old = read && oldSummary ? { summary: oldSummary, cells: read.cells, roofCols: read.roofCols } : undefined;
     const t0 = performance.now();
-    const { summary, diffs } = summarizeColumn(col, table, old);
+    const { summary, diffs } = summarizeColumn(col, table, old, Date.now(), roofedDimension(dim));
     this.stats.summarized++;
     this.stats.summarizeMs += performance.now() - t0;
     this.carrySeen(dim, cx, cz, k, summary, oldSummary); // Track Z: remembered seen ores stay seen
@@ -301,7 +304,7 @@ export class WorldCache implements CachedTerrain {
     const prev = this.live.get(k);
     if (!prev) return;
     const t0 = performance.now();
-    const next = summarizeColumn(col, table).summary;
+    const next = summarizeColumn(col, table, undefined, Date.now(), roofedDimension(h.chunks.dimension)).summary;
     next.applySeen(prev.seenMarks()); // Track Z
     this.live.set(k, next);
     this.stats.summarized++;
@@ -329,6 +332,8 @@ export class WorldCache implements CachedTerrain {
       return st !== undefined && table.of(st).roof;
     });
     s.setMark(x, y, z, f.mark);
+    const air = h.registry.airStateId;
+    s.rescanSurface(x, z, (yy) => h.chunks.stateIdAt(bx, yy, bz) ?? air, (st) => table.of(st)); // Track PC
     // neighbours' exposed flags
     for (const [dx, dy, dz] of NEIGHBOURS) {
       const nx = x + dx;
@@ -724,7 +729,7 @@ export class WorldCache implements CachedTerrain {
 
   private setTile(k: number, s: ChunkSummary, live: boolean): MapTile {
     const surf = s.surface();
-    const t: MapTile = { cx: s.cx, cz: s.cz, live, rev: s.rev, updatedAt: s.updatedAt, y: surf.y, cls: surf.cls };
+    const t: MapTile = { cx: s.cx, cz: s.cz, live, rev: s.rev, updatedAt: s.updatedAt, y: surf.y, cls: surf.cls, ...(s.surf ? { surf: s.surf.compact() } : {}) }; // Track PC: surface names
     touchLru(this.tiles, k, t);
     while (this.tiles.size > this.maxTiles) this.tiles.delete(this.tiles.keys().next().value!);
     return t;
@@ -748,10 +753,11 @@ export class WorldCache implements CachedTerrain {
   /** Counts for status pages. */
   info(): { live: number; dirty: number; decoded: number; regions: number; tiles: number; approxBytes: number } {
     let bytes = 0;
-    for (const s of this.live.values()) bytes += s.cells.length + 1024 + s.marks.size * 48;
-    for (const s of this.decodedLru.values()) bytes += s.cells.length + 1024 + s.marks.size * 48;
+    const surfBytes = (s: ChunkSummary): number => (s.surf ? (s.surf.under ? 2600 : 1300) : 0); // Track PC
+    for (const s of this.live.values()) bytes += s.cells.length + 1024 + s.marks.size * 48 + surfBytes(s);
+    for (const s of this.decodedLru.values()) bytes += s.cells.length + 1024 + s.marks.size * 48 + surfBytes(s);
     for (const r of this.regions.values()) for (const d of r.chunks.values()) bytes += d.length;
-    bytes += this.tiles.size * 800;
+    for (const t of this.tiles.values()) bytes += 800 + (t.surf ? (t.surf.under ? 2600 : 1300) : 0); // Track PC: surface layers
     return { live: this.live.size, dirty: this.dirtyLive.size, decoded: this.decodedLru.size, regions: this.regions.size, tiles: this.tiles.size, approxBytes: bytes };
   }
 

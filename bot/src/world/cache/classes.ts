@@ -37,6 +37,32 @@ export function isInteresting(name: string): boolean {
   return name.endsWith('_ore') || name.endsWith('_bed') || name.endsWith('_door') || name.endsWith('shulker_box'); // Track AG: shulker boxes are container marks like chests and barrels
 }
 
+// ---- Track PC (decision 0060): what the 2D map sees of a block --------------------------------------
+
+/** The map looks past it (the surface is the block below). */
+export const VIS_NONE = 0;
+/** A visible block: the column's surface when nothing visible is above it. */
+export const VIS_BLOCK = 1;
+/** A liquid surface: the map records it, the floor under it and the depth. */
+export const VIS_LIQUID = 2;
+export type MapVisibility = typeof VIS_NONE | typeof VIS_BLOCK | typeof VIS_LIQUID;
+
+/** Blocks the map looks through: air, technical blocks, clear glass, and things too small to see from above (torches, buttons, levers, tripwire). */
+const SEE_THROUGH = new Set(['air', 'cave_air', 'void_air', 'light_block', 'barrier', 'structure_void', 'invisible_bedrock', 'moving_block', 'glass', 'glass_pane', 'hard_glass', 'hard_glass_pane', 'lever', 'trip_wire', 'tripwire', 'tripwire_hook', 'unknown_air']);
+
+/**
+ * How the map sees a block (Track PC, docs/world-cache.md "Surface layer"): liquids (water, lava and
+ * the water plants the planner treats as water: seagrass, kelp, bubble columns) are a liquid surface,
+ * named by their fluid; air, technical blocks, clear glass, torches, buttons, levers and tripwire are
+ * looked through; everything else is visible, including what has no collision box (flowers, grass,
+ * snow layers, carpets, rails, redstone), because that is what the ground looks like from above.
+ */
+export function mapView(name: string, c: Pick<TerrainClass, 'liquid'>): { vis: MapVisibility; name: string } {
+  if (c.liquid) return { vis: VIS_LIQUID, name: c.liquid };
+  if (SEE_THROUGH.has(name) || name.startsWith('light_block') || name.endsWith('_button') || /(^|_)torch$/.test(name) || name.startsWith('colored_torch')) return { vis: VIS_NONE, name };
+  return { vis: VIS_BLOCK, name };
+}
+
 /** The cache class of a block as the planner sees it (layer 0). */
 export function cellClassOf(c: TerrainClass): CellClass {
   if (c.danger) return CLS_AVOID;
@@ -56,6 +82,10 @@ export interface StateFacts {
   mark: string | undefined;
   /** Small integer per distinct movement signature. */
   sig: number;
+  /** Track PC: how the map sees it (VIS_NONE / VIS_BLOCK / VIS_LIQUID). */
+  vis: MapVisibility;
+  /** Track PC: the name the map records (the fluid for liquids: `water`, `lava`). */
+  mapName: string;
 }
 
 /** Synthetic stand-ins: index by class, plus LEAVES for solid cells above the column's roof. */
@@ -93,7 +123,8 @@ export class StateTable {
 
   private make(info: BlockInfo): StateFacts {
     const c = classify(info);
-    return { cls: cellClassOf(c), roof: c.roof, mark: isInteresting(info.name) ? info.name : undefined, sig: this.sigId(c) };
+    const view = mapView(info.name, c); // Track PC
+    return { cls: cellClassOf(c), roof: c.roof, mark: isInteresting(info.name) ? info.name : undefined, sig: this.sigId(c), vis: view.vis, mapName: view.name };
   }
 
   /** Stand-in blocks: [air, stone, water, lava, oak_leaves]. Needs a ready registry. */

@@ -1,6 +1,8 @@
 // LAN control panel routes (Track AE, docs/panel.md), mounted with HealthServer.use():
 //   GET  /            the page (panel/page.ts)
-//   GET  /api/state   PanelState JSON (panel/state.ts); the page polls ?lite=1 every 2 s (no static parts, Track AP)
+//   GET  /api/state   PanelState JSON (panel/state.ts); ?lite=1 = without the static parts (Track AP): the page's fallback poll
+//   GET  /api/stream  the push channel (panel/stream.ts, decision 0061; mounted by index.ts, not here)
+//   GET  /ui/<hash>/* the page's browser modules (panel/assets.ts, decision 0061; mounted by index.ts)
 //   GET  /api/help    PanelHelp JSON (panel/state.ts buildPanelHelp), fetched once by the Help tab (Track AM)
 //   GET  /api/chests  the remembered containers (panel/memory.ts chestRows), the memory block's list (Track AP)
 //   GET  /api/marks  chests and herds near the bot (panel/marks.ts), the panel map's markers (Track AR)
