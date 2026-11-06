@@ -1,7 +1,8 @@
 # Persistent world cache and debug map (`bot/src/world/cache`, `bot/src/health/map`)
 
 PLAN.md Phase 7, tasks 7.12 (persistent world cache) and 7.15 (debug map). Decision record:
-[decisions/0015-world-cache.md](decisions/0015-world-cache.md). The world model it extends is in
+[decisions/0015-world-cache.md](decisions/0015-world-cache.md); the surface layer and the block colours
+of the 2D map: [decisions/0060-surface-layer.md](decisions/0060-surface-layer.md). The world model it extends is in
 [world-model.md](world-model.md), the planner that reads it in [pathfinding.md](pathfinding.md).
 
 ```ts
@@ -26,7 +27,8 @@ It is closed (written) on every graceful exit.
 |---|---|
 | `world/cache/types.ts` | classes (`CLS_AIR`, `CLS_SOLID`, `CLS_WATER`, `CLS_AVOID`), `CachedMark`, `CachedTerrain` (what query.ts and find.ts read), `FoundPos` |
 | `world/cache/classes.ts` | `StateTable`: per state id the class, roof flag, mark name and movement-signature id; the stand-ins |
-| `world/cache/summary.ts` | `ChunkSummary` (cells, tops, roofs, marks), `summarizeColumn` (plus the diff against what the planner read), record encode / decode, `checksum()` |
+| `world/cache/summary.ts` | `ChunkSummary` (cells, tops, roofs, marks, surface), `summarizeColumn` (plus the diff against what the planner read), record encode / decode, `checksum()` |
+| `world/cache/surface.ts` | Track PC: the surface layer: `SurfaceData` (name table, top and under-roof layers), `scanTop`, `scanUnderRoof`, `roofedDimension`, the record trailer |
 | `world/cache/region.ts` | region file format, atomic read / write |
 | `world/cache/cache.ts` | `WorldCache`: hooks, live summaries, LRUs, flushes, lookups, map tiles, stats |
 | `world/cache/trees.ts` | `findCachedTrees`, `cachedLookup` |
@@ -35,6 +37,8 @@ It is closed (written) on every graceful exit.
 | `health/map/schema.ts` | zod schema of `/map.json` |
 | `health/map/data.ts` | `MapBuilder` (the JSON), `parseMapQuery`, status shape helpers |
 | `health/map/page.ts` | the `/map` page (HTML + canvas, no dependencies) |
+| `health/map/paint.ts` | Track PC: `PAINT_JS`, how a 2D map paints tiles (block colours, relief, liquids, the class view, the hover text); the page embeds it, the panel will |
+| `health/panel/icons/colours.ts` | Track PC: `BlockColours`, a map colour per block name from the `minecraft-assets` art (top-face average), `CLASS_FALLBACK` |
 | `health/map/routes.ts` | `mapRoutes(source)`: the route hook for `HealthServer` |
 
 ## Format
@@ -46,6 +50,7 @@ It is closed (written) on every graceful exit.
 | cells | 2 bits x 256 x rows | class per cell from the dimension floor (y0, -64 in the overworld) up to the top of the highest non-empty subchunk (`rows`, a multiple of 16; cells above are air). Index `(y - y0) * 256 + z * 16 + x`, 4 cells per byte, low bits first |
 | top | int16 x 256 | highest solid y per column (`-32768` = none) |
 | roof | int16 x 256 | highest roof block per column (the planner's sky rule: any collision box except leaves, and liquids) |
+| surface (Track PC) | name table + 5 bytes x 256 per layer | per column the block a 2D map shows, its y, and under a liquid the floor block and the depth; in the Nether a second layer under the roof ("Surface layer" below) |
 | marks | 6 bytes each + a name table | logs (natural, not stripped), chests, trapped / ender chests, barrels, shulker boxes (Track AG; the chest memory `chests.json` beside the regions is docs/home.md), crafting tables, furnaces / blast furnaces / smokers (lit too), beds, mob / trial spawners, every `*_ore` and ancient debris, farmland, doors; with position and an `exposed` bit (a face touches air or water inside the chunk: an ore the bot could have seen) |
 | updatedAt | float64 | wall-clock ms of the last change seen |
 
@@ -58,7 +63,11 @@ torches ...). Layer 0 only, as the planner reads it.
 **Record** (little endian, then raw deflate level 6): `u8 version, i32 cx, i32 cz, f64 updatedAt,
 i16 y0, u16 rows, i16 top[256], i16 roof[256], u8 cells[rows * 64], u16 nameCount, (u8 len, utf8)...,
 u32 markCount, (u32 key = yRel << 8 | z << 4 | x, u8 nameIndex, u8 flags)...` with keys ascending;
-flags bit 0 = exposed, bit 1 = seen (Track Z, next section).
+flags bit 0 = exposed, bit 1 = seen (Track Z, next section); then the optional **surface trailer**
+(Track PC): `u8 'S' (0x53), u8 surface version 1, u8 flags (bit 0 = under-roof layer), u8 nameCount,
+(u8 len, utf8)..., per layer (top, then under): u8 idx[256], i16 y[256], u8 floor[256], u8 depth[256]`.
+Column index `z * 16 + x`; name index 255 = none. The top layer's y is stored as `y - max(top, roof)`
+of the column (0 or 1 almost everywhere, so it deflates to almost nothing); the under layer's y as is.
 
 ### Seen marks (Track Z: ore memory, decision 0021)
 
@@ -82,6 +91,86 @@ Measured: `decodeSeenMarks` over the stored records of a natural-terrain run (bd
 2 013 chunks) costs 0.021 ms per chunk, so a login of 369 columns pays under 10 ms for the carry. The
 summaries' checksums include the flags byte (a flagged mark changes the chunk checksum).
 
+### Surface layer (Track PC, decision 0060)
+
+What a 2D map needs of a column is its top block, which is cheap to keep. Every summary built from a
+loaded column carries it (`ChunkSummary.surf`, `SurfaceData`):
+
+- **top layer**: the highest block on layer 0 that the map sees (`mapView` in `classes.ts`, per state
+  in `StateTable` as `vis` / `mapName`): visible blocks count **with or without a collision box**
+  (flowers, short grass, snow layers, carpets, rails, redstone: that is what the ground looks like from
+  above); the map **looks through** air, technical blocks (light blocks, barriers, structure voids,
+  invisible bedrock), clear glass and glass panes (stained glass is visible), torches, buttons, levers
+  and tripwire; **liquids** (water, lava, and the water plants the planner treats as water: seagrass,
+  kelp, bubble columns) are a liquid surface named by the fluid (`water`, `lava`), with the **floor**
+  (the first visible non-liquid block below) and the **depth** (cells from the surface to the floor;
+  one byte, 255 = 255 or deeper; no floor above the dimension floor = floor none);
+- **under-roof layer** (`roofedDimension(dim)`: the Nether only): the top layer of a Nether column is
+  its bedrock roof, which tells a map nothing. Below the roof (the first run of non-air-class cells
+  from the top) the scan takes **the first floor with two open cells above it**: a floor is a solid
+  block or a liquid, open is the cache's air class (air, roots, fungi, vines, fire), so a one-cell slit
+  in the roof counts as roof and the weeping vines hanging from it are passed. When the cell above the
+  floor is a visible plant (crimson roots on nylium), that is the surface shown, at its own y; a lava
+  sea is a liquid surface with its floor and depth like water. Why this one: it is where the bot can
+  walk and what the Nether's terrain looks like, the highest open space under the roof; a full Y-slice
+  view (step 2) needs the cells, which the cache already has (`cls`), not more layers;
+- **stored** as a per-chunk name table (at most 255 names; a 256th distinct name in one chunk reads as
+  none; natural terrain has 1 to 12 names per chunk, mean 3 to 7) plus one byte per column per field;
+  names are compacted (unused ones dropped) when the record is written;
+- **kept current**: a block update on a loaded column re-reads that column's surface from the real
+  blocks (`rescanSurface`, from the top of the stored rows down to the first visible block, deeper for
+  liquids and the under-roof layer), so a placed pumpkin, a mined hilltop or a drained pool shows at
+  once; a section re-send re-summarizes the column;
+- **compatible both ways**: the record version stays 1. A record written before the layer has no
+  trailer: `surf` is undefined, `surfaceAt` returns undefined, the map tile has no `s`, and the map draws
+  the column by class as before. A record with the trailer is read by an older bot (which stops after
+  the marks) without the layer; if that bot rewrites the chunk the trailer is gone until the column
+  loads again. A damaged trailer drops the layer, not the chunk. The planner's `cells` / `top` / `roof`
+  are untouched, so planning, stand-ins and corrections do not change. The checksum covers the layer.
+
+**Recipe: read the surface of a column.**
+
+```ts
+const s = cache.summary(x >> 4, z >> 4);                 // live or remembered (decodes the record)
+const top = s?.surfaceAt(x & 15, z & 15);                // { name: 'grass_block', y: 64 } or undefined
+// water: { name: 'water', y: 62, depth: 5, floor: 'sand', floorY: 57 }
+const under = s?.surfaceAt(x & 15, z & 15, 'under');     // Nether: the first standable floor under the roof
+if (!s?.surf) { /* a record written before decision 0060: only cls / top / roof */ }
+```
+
+From the command line: `node src/world/cache/cli.ts surface <dir> <cx> <cz> [--dim 1]` prints every
+column of one chunk; `info` counts the chunks that have the layer (`surfaceChunks`).
+
+**Reviewer checklist** (changes to the surface layer):
+
+- the planner's arrays and the stand-ins are not touched, and nothing in the planner reads `surf`;
+- new see-through or liquid rules go in `mapView` (one place), with a case in `surface.test.ts`;
+- the trailer stays after the marks with its tag, the record version stays 1, and a record without it
+  still loads (`surface.test.ts` "records written before the layer", "older readers");
+- a format change bumps `SURFACE_VERSION`; a reader seeing a newer surface version reads the record
+  without the layer;
+- the map gets names and colours through `/map.json` (`s`, `p`, `palette`), never a colour table in
+  git; painting rules change in `paint.ts` only.
+
+### Block colours (Track PC)
+
+`BlockColours` (`health/panel/icons/colours.ts`, next to the item icons) gives each block name a map
+colour: the Java block state of the name (Bedrock names through the icons' `ALIASES` plus a few map
+ones: `flowing_water`, `seagrass` and `kelp` are water, `magma` is `magma_block`, ...), its first
+variant's model (resolved like the icons), the **up face of the model's highest unrotated box** (else
+the model's `top` / `end` / `all` / `cross` / `particle` texture: water, plants drawn as crossed planes),
+and the **alpha-weighted average** of that texture's first frame (transparent texels do not count),
+with the plains tint of the face multiplied in (grass block top, leaves, short grass, ferns, vines,
+lily pads, sugar cane; water `#3f76e4`). Computed on the first request per name and kept in memory
+(4 096 names at most); `peek(name)` is the cached answer (a number, `null` = no art, undefined = not
+computed yet), `load(names)` computes. A block without art (Bedrock-only blocks, entity-rendered ones,
+or no package: `pnpm install --no-optional`) has no colour and the map paints the class fallback
+(`CLASS_FALLBACK`: nothing `#181a1e`, solid `#8a8a80`, water `#2f6fd0`, avoid `#e0531f`). The parsed
+index files are shared with the icons (`FsAssets.json` keeps one parse per file per process). Nothing
+derived from the art is written anywhere. The guard test fails when a common overworld or Nether
+surface block (grass, sand, stone, water, lava, the leaves, snow, dirt, gravel, ice, terracotta,
+netherrack, nylium, ...) gets no colour while the package is installed.
+
 **Region file** `r.<rx>.<rz>.bin` (32 x 32 chunks, `rx = cx >> 5`): `"BBWC", u8 version 1, u8 0,
 u16 count, (u8 lx, u8 lz, u32 length, record)...`. Overworld files sit directly in
 `<root>/<server id>/`, other dimensions in `<root>/<server id>/dim<N>/`.
@@ -100,7 +189,7 @@ the sorted `cx,cz:checksum` lines) and, with `--chunks`, every chunk's.
 | When | What |
 |---|---|
 | a column finishes loading (`ChunkStore.onColumnLoaded`) | summarized (`summarizeColumn`), kept "live"; if the planner read stand-ins from this column while it was not loaded, the read cells whose stand-in differs from the real block are announced (next section) |
-| a block update on a loaded column (`onBlockSet`) | the live summary's cell, column top / roof, mark and the neighbours' exposed bits are updated |
+| a block update on a loaded column (`onBlockSet`) | the live summary's cell, column top / roof, mark and the neighbours' exposed bits are updated; Track PC: the column's surface is re-read from the real blocks |
 | a loaded column's section is re-sent (`onSection`) | the column is summarized again |
 | a column unloads (`onColumnUnloaded`) | the live summary is encoded into its region (memory) and kept decoded in the LRU |
 | every `flushIntervalMs` (30 s) | dirty live summaries are encoded; changed regions are written (async, `<file>.<pid>.<n>.tmp` + rename) |
@@ -227,17 +316,34 @@ sets grass under each trunk).
 polls `/map.json` every second with `since` (the last `rev`) and `win` (the last window), so only
 changed tiles travel; it draws:
 
-- chunk tiles: per column the surface (max of top and roof) coloured by class (solid green to brown to
-  white by height, water blue, avoid orange-red, nothing dark), remembered-only chunks dimmed, loaded
-  ones outlined;
+- chunk tiles (Track PC, `paint.ts`): **blocks** (default): each column in its surface block's colour
+  (the response palette, "Block colours"), with the in-game map's relief rule: **darker (180/220) when
+  the column to the north is higher, lighter (255/220) when it is lower**, the same when equal (row 0
+  of a tile compares with the tile to the north, so a tile is repainted when its north neighbour
+  arrives); liquids instead shaded by depth like the game (lighter when shallow, darker when deep, a
+  checkerboard between); columns without surface data or colour in their class's flat colour with the
+  relief. **classes**: the view of before (solid green to brown to white by height, water blue, avoid
+  orange-red, nothing dark). The **layer** select shows the under-roof layer in the Nether (`auto`, the
+  default, picks it where a tile has it). Remembered-only chunks are dimmed, loaded ones outlined;
 - the bot (arrow by yaw), its trail (sampled once a second), the last goto's goal (and its path when the
   report has `path`), entities by kind (players, hostiles, neutral, passive, items), home and shelter
   (from the task status), waypoints from a `waypoints` field of the task or skills status (array of
   `{name, x, y, z}` / `{name, pos}` or a `{name: vec}` record);
-- a side panel: server, position, navigator state, cache counts and the cell under the cursor.
+- a side panel: server, position, navigator state, cache counts and the column under the cursor:
+  `grass_block, y 64`, `water, y 62, 5 deep over sand`, `crimson_roots, y 41 (under the roof)`, or the
+  class and height for a column without surface data.
 
 `/map.json` (`MapJsonSchema`): `v`, `ts`, `server`, `dimension`, `rev`, `center`, `radius` (default 12,
 max 64), `window`, `tiles[] {cx, cz, live, rev, updatedAt, y (base64 int16 x 256), c (base64 2-bit x 256)}`,
+Track PC additive (`v` stays 1): per tile `s` (base64 u8 x 256: surface name per column as an index into
+the tile's `p`, 255 = none), `p` (the tile's names as indices into the response's `palette`), `sy`
+(base64 int16 x 256 surface y, only when it differs from `y` somewhere: flowers, snow layers, glass
+roofs), `f` / `d` (floor index into `p` and depth, base64 u8 x 256 each, only when the tile has a
+liquid column), `u {s, sy, f?, d?}` (the under-roof layer, Nether); and `palette[] {name, rgb}` (`#rrggbb`,
+null = no art: paint the class colour). A tile without `s` is a record written before the layer. The
+route answers once the palette's colours are computed (at most 3 s; the first request after a start
+reads the art, later ones find them cached) and gzips bodies of 4 KiB and more for clients that accept
+it (browsers and `fetch` do).
 `bot`, `trail`, `nav {busy, running, path, goal, result, plans}`, `entities[] {id, type, name?, kind, x, y, z}`
 (feet, nearest 256), `home`, `shelter`, `waypoints`, `cache {dir, live, decoded, regions, approxBytes,
 lookups, corrections, errors}`.
@@ -261,6 +367,16 @@ end or no path within the cached corridor, and one run (before the steepness fil
 through a mountain area (start y 152) but the walk ended `unreachable` after 3 stuck re-plans on
 terraces. The suite now tries up to 14 areas and skips plans that climb more than 24 blocks.
 
+## Measured: the surface layer (bds-cache, BDS 1.26.60.6, seed 7, 2026-11-05; 5 e2e runs)
+
+| What | Result |
+|---|---|
+| correctness | 48 random columns per run within 40 blocks of the bot compared with the server's own blocks (`truth:blocks` over y -64..319, scanned with the same rule): 48 / 48 in every run (plains and ocean, badlands, frozen ocean, ice spikes); a pumpkin set on the ground showed as the surface, and after its removal the block under it; the `/map.json` names equal the cache for every sampled column; after a hop of 600 blocks and a quit, fresh processes (`cli.ts surface`) read the same 49 columns from the regions |
+| record growth per chunk | raw +1 310 to +1 376 B; **deflated +99 to +203 B, +6.7 to +11.1 %** (1 425 -> 1 570 and 1 635 -> 1 817 ocean, 2 229 -> 2 432 badlands, 1 554 -> 1 707 and 1 492 -> 1 592 frozen ocean) over 369 to 396 live chunks per run; 1 to 12 surface names per chunk (mean 3.4 to 6.7). `cache-world` after the change: region files 1 752 B per chunk on disk, every checksum equal after the reload |
+| summarize on load | 0.68 to 0.80 ms per column (the surface scan included; before: 0.64 to 0.90) |
+| `/map.json` tile growth | +1 082 to +1 337 B per tile as JSON: r = 4 (81 tiles) 158 to 179 kB uncompressed, **16 to 21 kB gzipped on the wire**; `sy` in 3 to 81 of the 81 tiles, floor / depth in 2 to 79 (ocean). `cache-map` (the CLI, r = 12, 369 tiles): 756 kB uncompressed (was 236 to 315 kB) |
+| colours | the first `/map.json` after a start: 33 to 44 ms with the colours of 18 to 31 names read and averaged; the next one 4 to 6 ms; every palette name had a colour in every run |
+
 ## Tests
 
 | Test | What |
@@ -273,6 +389,10 @@ terraces. The suite now tries up to 14 areas and skips plans that climb more tha
 | `test/e2e/cache-gather.test.ts` (Track Z) | a forest planted and seen by run 1; after the restart a new CLI process at a treeless start (`!gather 8`) walks to it and gathers 8 logs; the cost of `decodeSeenMarks` per stored chunk |
 | `test/e2e/mine-memory.test.ts` (Track Z, bds-dig) | seen ore persisted by run 1 and mined from memory by a new CLI process ([mining.md](mining.md)) |
 | `test/e2e/cache-map.test.ts` | the CLI with `--health-port 953x`: `/map.json` validates, incremental polling, `/map` serves the page, region files written on a graceful exit |
+| `test/unit/cache/surface.test.ts` (Track PC) | what a column shows (`mapView`, flowers, glass, torches, liquids with floor and depth), updates on block changes (and the map tile), encode / decode round trip and checksum, records without the trailer, older readers of new records, a damaged trailer, the 255-name table, compaction, the Nether's under-roof layer (slits, vines, plants, lava sea, a column loaded in dimension 1) |
+| `test/unit/health/map-colours.test.ts` (Track PC) | the top-face average (alpha, tint), name and tint rules, model and state lookups, a fake package (cached, null without art, fallbacks), **guard**: the common surface blocks all get a colour from the installed package; `PAINT_JS`: plain JavaScript, relief, liquids, dimming, the class view, old tiles |
+| `test/unit/cache/map.test.ts` (Track PC) | tiles carry `s` / `p` / `palette`, `f` / `d` only with liquid, `sy` only when it differs, decoded with the page's code; colours filled once computed; the schema's additive fields; gzip on the route |
+| `test/e2e/cache-surface.test.ts` (Track PC) | after standing in a private area: sampled columns against `truth:blocks`, a placed and removed pumpkin, `/map.json` names and colours on a health server (ports 9930 to 9939), the record and tile growth, and a fresh process reading the same names after a restart |
 
 ```sh
 node scripts/bds.mjs --profile cache up      # bds-cache, udp/19184 (first start generates the world: ~2 min)
@@ -284,7 +404,8 @@ node src/world/cache/cli.ts info "%LOCALAPPDATA%\bedrockbot\cache\127.0.0.1-1918
 
 Env: `CACHE_BDS_HOST`, `CACHE_BDS_PORT` (19184), `CACHE_BDS_CONTAINER` (`bds-cache`), `CACHE_AREA=x,z`
 (pin the area), `CACHE_MAIN_MS` (the nav suite's main plan budget, default 600), `CACHE_HEALTH_PORT`
-(pin the map suite's port; default the first free of 9531 to 9538), `CACHE_VERBOSE=1`. The suites
+(pin the map suite's port; default the first free of 9531 to 9538; the surface suite's default is the
+first free of 9930 to 9939), `CACHE_VERBOSE=1`. The suites
 set `gamerule falldamage false` (the hops teleport to y 300 and let the bot fall), peaceful, no mob
 spawning, noon; they work in random areas 1 500 to 9 500 blocks from spawn, plant and remove their
 own trees, and delete their cache directories.
@@ -297,6 +418,10 @@ own trees, and delete their cache directories.
 - The navigator does not distinguish cached from loaded cells (see "What the navigator would need").
 - Blocks changed while a column is unloaded are only learnt when it loads again. Block entities
   (chest contents), block states, light and biomes are not cached.
+- Surface layer (Track PC): only layer 0 is read, so a waterlogged block shows as the block, not as
+  water; colours are the plains tints (no biome colours: swamp water and badlands grass look like
+  plains); the map shows only the top layer outside the Nether (caves need a Y-slice over the cells,
+  step 2); a column's surface reflects its last load or block update, like everything else here.
 - `exposed` looks only inside the chunk (an ore on a chunk border facing the next chunk's cave reads
   as buried).
 - Region writes rewrite the whole region (7 to 11 ms async for about 250 chunks); a region of 1 024

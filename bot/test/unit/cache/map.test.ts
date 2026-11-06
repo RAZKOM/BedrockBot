@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { HealthServer } from '../../../src/connection/health.ts';
-import { asWaypoints, MapBuilder, parseMapQuery } from '../../../src/health/map/data.ts';
+import { asWaypoints, buildWithColours, MapBuilder, parseMapQuery, type MapColourSource } from '../../../src/health/map/data.ts';
+import { mapDecodeTile, mapDescribe } from '../../../src/health/map/paint.ts';
+import { MAP_PAGE } from '../../../src/health/map/page.ts';
 import { mapRoutes } from '../../../src/health/map/routes.ts';
 import { MapJsonSchema } from '../../../src/health/map/schema.ts';
 import { silentLogger } from '../../../src/log.ts';
@@ -133,6 +135,78 @@ describe('/map.json', () => {
   });
 });
 
+describe('/map.json surface layer (Track PC)', () => {
+  /** Colours of a fake package: computed on load, after a tick. */
+  function fakeColours(table: Record<string, number | null>): MapColourSource & { loads: string[][] } {
+    const done = new Map<string, number | null>();
+    const loads: string[][] = [];
+    return {
+      loads,
+      peek: (n) => done.get(n),
+      load: async (names) => {
+        const list = [...names];
+        loads.push(list);
+        await new Promise((r) => setTimeout(r, 5));
+        for (const n of list) done.set(n, table[n] ?? null);
+      },
+    };
+  }
+
+  it('tiles carry the surface names (palette + indices), floor and depth only where there is a liquid, sy only when it differs', () => {
+    const { world, cache } = world3x3();
+    const j = new MapBuilder({ world, cache }).build({ r: 1 });
+    expect(() => MapJsonSchema.parse(j)).not.toThrow();
+    expect(j.palette.map((e) => e.name).sort()).toEqual(['stone', 'water']);
+    expect(j.palette.every((e) => e.rgb === null)).toBe(true); // no colour source
+    const plain = j.tiles.find((t) => t.cx === 0 && t.cz === 0)!;
+    const wet = j.tiles.find((t) => t.cx === 1 && t.cz === 0)!;
+    expect(plain.s).toBeDefined();
+    expect(plain.sy).toBeUndefined(); // stone at the top height everywhere
+    expect(plain.f).toBeUndefined();
+    expect(wet.f).toBeDefined();
+    expect(wet.d).toBeDefined();
+    expect(wet.u).toBeUndefined();
+    // decoded with the page's own code: the same as the cache
+    const dec = mapDecodeTile(wet, j.palette);
+    expect(dec.top!.names[0]).toBe('water');
+    expect(dec.top!.floor[0]).toBe('stone');
+    expect(dec.top!.depth![0]).toBe(1);
+    expect(dec.top!.names[4]).toBe('stone');
+    expect(mapDescribe(dec, 'auto', 0)).toBe('water, y -49, 1 deep over stone');
+    expect(cache.liveSummary(1, 0)!.surfaceAt(0, 0)).toEqual({ name: 'water', y: -49, depth: 1, floor: 'stone', floorY: -50 });
+  });
+
+  it('fills the palette colours once they are computed (the route waits for the first ones)', async () => {
+    const { world, cache } = world3x3();
+    const colours = fakeColours({ stone: 0x808080 });
+    const b = new MapBuilder({ world, cache, colours });
+    expect(b.build({ r: 1 }).palette.every((e) => e.rgb === null)).toBe(true);
+    const j = await buildWithColours(b, colours, { r: 1 });
+    expect(Object.fromEntries(j.palette.map((e) => [e.name, e.rgb]))).toEqual({ stone: '#808080', water: null });
+    expect(() => MapJsonSchema.parse(j)).not.toThrow();
+    const again = await buildWithColours(b, colours, { r: 1 });
+    expect(again.palette.find((e) => e.name === 'stone')!.rgb).toBe('#808080');
+    expect(colours.loads).toHaveLength(1); // known names are not loaded again
+  });
+
+  it('the /map page script (with PAINT_JS embedded) is valid JavaScript', () => {
+    const script = /<script>([\s\S]*)<\/script>/.exec(MAP_PAGE)?.[1];
+    expect(script).toContain('function mapPixels');
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval -- compiled, not run: a syntax check of the page script
+    expect(() => new Function(script!)).not.toThrow();
+  });
+
+  it('the schema takes the additive fields and rejects bad ones', () => {
+    const j = new MapBuilder({}).build();
+    const t = { cx: 0, cz: 0, live: true, rev: 1, updatedAt: 0, y: Buffer.alloc(512).toString('base64'), c: Buffer.alloc(64).toString('base64') };
+    const s = Buffer.alloc(256).toString('base64');
+    expect(MapJsonSchema.safeParse({ ...j, tiles: [{ ...t, s, p: [0] }], palette: [{ name: 'stone', rgb: '#808080' }] }).success).toBe(true);
+    expect(MapJsonSchema.safeParse({ ...j, tiles: [{ ...t, s: 'abc' }] }).success).toBe(false);
+    expect(MapJsonSchema.safeParse({ ...j, palette: [{ name: 'stone', rgb: 'red' }] }).success).toBe(false);
+    expect(MapJsonSchema.safeParse({ ...j, tiles: [{ ...t, s, p: [0], u: { s, sy: t.y } }] }).success).toBe(true);
+  });
+});
+
 describe('/map routes on the health server', () => {
   it('serves the page and the JSON next to /healthz', async () => {
     const { world, cache } = world3x3();
@@ -146,10 +220,15 @@ describe('/map routes on the health server', () => {
       const html = await page.text();
       expect(html).toContain('<canvas');
       expect(html).toContain('map.json');
+      expect(html).toContain('function mapPixels'); // Track PC: the shared painting is embedded
       const res = await fetch(`http://127.0.0.1:${port}/map.json?r=3`);
       expect(res.status).toBe(200);
+      expect(res.headers.get('content-encoding')).toBe('gzip'); // Track PC: fetch asks for gzip, the body is over GZIP_MIN
       const j = MapJsonSchema.parse(await res.json());
       expect(j.tiles).toHaveLength(9);
+      const plain = await fetch(`http://127.0.0.1:${port}/map.json?r=3`, { headers: { 'accept-encoding': 'identity' } });
+      expect(plain.headers.get('content-encoding')).toBeNull();
+      expect(MapJsonSchema.parse(await plain.json()).tiles).toHaveLength(9);
       expect(j.server).toBe('test');
       expect((await fetch(`http://127.0.0.1:${port}/healthz`)).status).toBe(200);
       expect((await fetch(`http://127.0.0.1:${port}/nope`)).status).toBe(404);

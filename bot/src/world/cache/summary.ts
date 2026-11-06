@@ -9,6 +9,8 @@ import { localIndex } from '../subchunk.ts';
 import type { StateTable } from './classes.ts';
 import { SYN_LEAVES } from './classes.ts';
 import { CLS_AIR, CLS_SOLID, CLS_WATER, Y_NONE, type CachedMark, type CellClass } from './types.ts';
+import type { StateFacts } from './classes.ts';
+import { readTrailer, scanColumnInto, SurfaceData, trailerSize, writeTrailer, type SurfaceColumn } from './surface.ts'; // Track PC: the map's surface layer
 
 export const SUMMARY_VERSION = 1;
 
@@ -65,6 +67,8 @@ export class ChunkSummary {
   /** Process-local change counter (debug map). */
   rev: number;
   private surfaceCache: { y: Int16Array; cls: Uint8Array } | undefined;
+  /** Track PC (decision 0060): the map's surface layer; undefined for a record written without one. */
+  surf: SurfaceData | undefined;
 
   constructor(cx: number, cz: number, y0: number, rows: number, updatedAt = Date.now()) {
     this.cx = cx;
@@ -208,6 +212,22 @@ export class ChunkSummary {
     return this.surfaceCache;
   }
 
+  /**
+   * Track PC: the surface block of column (x, z) (local) as a 2D map shows it, with the floor and depth
+   * under a liquid; `under` = the first standable floor under the roof (roofed dimensions only).
+   * undefined when the summary has no surface data or the column shows nothing.
+   */
+  surfaceAt(x: number, z: number, layer: 'top' | 'under' = 'top'): SurfaceColumn | undefined {
+    const d = this.surf;
+    const l = layer === 'top' ? d?.top : d?.under;
+    return d && l ? d.read(l, colIndex(x, z)) : undefined;
+  }
+
+  /** Track PC: re-reads the surface of column (x, z) from the real blocks (a block update in a loaded column). */
+  rescanSurface(x: number, z: number, stateAt: (y: number) => number, facts: (s: number) => StateFacts): void {
+    if (this.surf) scanColumnInto(this.surf, colIndex(x, z), stateAt, facts, this.y0 + this.rows - 1, this.y0);
+  }
+
   /** FNV-1a over the classes, column arrays and marks (not the timestamps): equal for equal content. */
   checksum(): string {
     return (fnv1a32(encodeBody(this, false)) >>> 0).toString(16).padStart(8, '0');
@@ -240,7 +260,7 @@ export interface ReadCells {
  * also returns the read cells whose stand-in differs from the real block by movement signature, and
  * the roof cell of every read column whose roof moved.
  */
-export function summarizeColumn(col: Column, table: StateTable, old?: ReadCells, now = Date.now()): { summary: ChunkSummary; diffs: CellDiff[] } {
+export function summarizeColumn(col: Column, table: StateTable, old?: ReadCells, now = Date.now(), roofed = false): { summary: ChunkSummary; diffs: CellDiff[] } {
   const y0 = col.minCY * 16;
   const hi = highestSection(col);
   const s = new ChunkSummary(col.cx, col.cz, y0, (hi + 1) * 16, now);
@@ -292,6 +312,20 @@ export function summarizeColumn(col: Column, table: StateTable, old?: ReadCells,
     }
   }
   s.refreshExposed();
+  // Track PC: the map's surface layer (and the under-roof layer in a roofed dimension)
+  const surf = new SurfaceData(roofed);
+  const facts = (st: number): StateFacts => table.of(st);
+  for (let ci = 0; ci < 256; ci++) {
+    const x = ci & 15;
+    const z = ci >> 4;
+    const stateAt = (y: number): number => {
+      const r = y - y0;
+      const l = col.sections[r >> 4]?.layers[0];
+      return l ? l.stateAt(localIndex(x, y, z)) : air;
+    };
+    scanColumnInto(surf, ci, stateAt, facts, y0 + s.rows - 1, y0);
+  }
+  s.surf = surf;
   if (old && synSigs) {
     // the cells the planner read as stand-ins: compare by movement signature
     const cellAt = (x: number, y: number, z: number): void => {
@@ -330,7 +364,9 @@ export function summarizeColumn(col: Column, table: StateTable, old?: ReadCells,
  * Record layout (little endian), before deflate:
  *   u8 version, i32 cx, i32 cz, f64 updatedAt, i16 y0, u16 rows, i16 top[256], i16 roof[256],
  *   u8 cells[rows * 64], u16 nameCount, (u8 len, utf8 name) x nameCount,
- *   u32 markCount, (u32 key, u8 nameIndex, u8 flags[bit0 exposed, bit1 seen (Track Z)]) x markCount (keys ascending).
+ *   u32 markCount, (u32 key, u8 nameIndex, u8 flags[bit0 exposed, bit1 seen (Track Z)]) x markCount (keys ascending),
+ *   then (Track PC) the optional surface trailer (surface.ts writeTrailer). Readers that stop after the
+ *   marks (record version 1 before decision 0060) ignore it.
  * `withHeader` false drops version, position and timestamp (the checksum input).
  */
 function encodeBody(s: ChunkSummary, withHeader: boolean): Uint8Array {
@@ -346,7 +382,8 @@ function encodeBody(s: ChunkSummary, withHeader: boolean): Uint8Array {
   }
   const nameBytes = names.map((n) => Buffer.from(n, 'utf8'));
   const head = withHeader ? 1 + 4 + 4 + 8 : 0;
-  const size = head + 4 + 1024 + s.cells.length + 2 + nameBytes.reduce((a, b) => a + 1 + b.length, 0) + 4 + keys.length * 6;
+  const surf = s.surf?.compact(); // Track PC: the surface trailer, names compacted
+  const size = head + 4 + 1024 + s.cells.length + 2 + nameBytes.reduce((a, b) => a + 1 + b.length, 0) + 4 + keys.length * 6 + (surf ? trailerSize(surf) : 0);
   const buf = Buffer.alloc(size);
   let o = 0;
   if (withHeader) {
@@ -374,7 +411,15 @@ function encodeBody(s: ChunkSummary, withHeader: boolean): Uint8Array {
     o = buf.writeUInt8(nameIdx.get(m.name)!, o);
     o = buf.writeUInt8((m.exposed ? 1 : 0) | (m.seen ? 2 : 0), o); // Track Z: bit 1 = seen
   }
+  if (surf) writeTrailer(buf, o, surf, surfaceBase(s));
   return buf;
+}
+
+/** Track PC: per column max(top, roof), the reference the surface trailer stores the top layer's y against. */
+function surfaceBase(s: ChunkSummary): Int16Array {
+  const b = new Int16Array(256);
+  for (let i = 0; i < 256; i++) b[i] = Math.max(s.top[i]!, s.roof[i]!);
+  return b;
 }
 
 /** The uncompressed record (exposed for size measurements). */
@@ -433,6 +478,11 @@ export function decodeSummary(data: Uint8Array): ChunkSummary {
       if (name === undefined) throw new SummaryFormatError('bad name index');
       const flags = buf.readUInt8(o + 5);
       s.marks.set(buf.readUInt32LE(o), { name, exposed: (flags & 1) === 1, ...((flags & 2) === 2 ? { seen: true } : {}) }); // Track Z: bit 1 = seen
+    }
+    try {
+      s.surf = readTrailer(buf, o, surfaceBase(s)); // Track PC: absent in records written before decision 0060
+    } catch {
+      s.surf = undefined; // a damaged trailer costs the map colours, not the chunk
     }
     return s;
   } catch (e) {

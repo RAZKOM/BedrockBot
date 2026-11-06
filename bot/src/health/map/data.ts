@@ -3,10 +3,20 @@
 // navigator report has one) and the task status (home, shelter, waypoints when present). Everything
 // is optional, so the page works for any task. See docs/world-cache.md ("Debug map").
 import { bareType, classify as entityClass, entityFeet } from '../../skills/combat/hostiles.ts';
-import type { WorldCache } from '../../world/cache/cache.ts';
+import type { MapTile, WorldCache } from '../../world/cache/cache.ts';
 import { currentRev } from '../../world/cache/summary.ts';
+import { NO_NAME, type SurfaceLayer } from '../../world/cache/surface.ts';
+import { hexColour } from '../panel/icons/colours.ts';
 import type { EntityInfo, Vec3 } from '../../world/types.ts';
-import { MAP_JSON_VERSION, type MapEntityJson, type MapJson, type MapTileJson } from './schema.ts';
+import { MAP_JSON_VERSION, type MapEntityJson, type MapJson, type MapPaletteEntry, type MapTileJson } from './schema.ts';
+
+/** Track PC: map colours of block names (health/panel/icons/colours.ts BlockColours satisfies it). */
+export interface MapColourSource {
+  /** `0xRRGGBB`, null = no art (the class colour), undefined = not computed yet. */
+  peek(name: string): number | null | undefined;
+  /** Computes the colours of these names. */
+  load(names: Iterable<string>): Promise<void>;
+}
 
 export interface MapSource {
   /** The world model (self, entities). */
@@ -19,6 +29,8 @@ export interface MapSource {
   /** The running task's status (home, shelter, waypoints when it has them). */
   taskStatus?: () => unknown;
   server?: string | null;
+  /** Track PC: block colours for the palette; without one every palette colour is null. */
+  colours?: MapColourSource | null;
 }
 
 export interface MapQuery {
@@ -62,11 +74,54 @@ export function asWaypoints(v: unknown): { name: string; x: number; y: number; z
   return out.slice(0, 500);
 }
 
-function packTile(t: { cx: number; cz: number; live: boolean; rev: number; updatedAt: number; y: Int16Array; cls: Uint8Array }): MapTileJson {
-  const y = Buffer.from(t.y.buffer, t.y.byteOffset, t.y.byteLength);
+const b64 = (a: Uint8Array | Int16Array): string => Buffer.from(a.buffer, a.byteOffset, a.byteLength).toString('base64');
+
+/** Track PC: the response palette (block names in first-seen order). */
+class PaletteBuilder {
+  readonly entries: MapPaletteEntry[] = [];
+  private readonly ids = new Map<string, number>();
+  private readonly colours: MapColourSource | null | undefined;
+
+  constructor(colours: MapColourSource | null | undefined) {
+    this.colours = colours;
+  }
+
+  index(name: string): number {
+    let i = this.ids.get(name);
+    if (i === undefined) {
+      i = this.entries.length;
+      const c = this.colours?.peek(name);
+      this.entries.push({ name, rgb: typeof c === 'number' ? hexColour(c) : null });
+      this.ids.set(name, i);
+    }
+    return i;
+  }
+}
+
+/** Track PC: floor and depth of a layer, only when it has a liquid column. */
+function liquidFields(l: SurfaceLayer): { f: string; d: string } | undefined {
+  for (let i = 0; i < 256; i++) if (l.depth[i]! > 0 || l.floor[i] !== NO_NAME) return { f: b64(l.floor), d: b64(l.depth) };
+  return undefined;
+}
+
+function packTile(t: MapTile, pal: PaletteBuilder): MapTileJson {
   const c = Buffer.alloc(64);
   for (let i = 0; i < 256; i++) c[i >> 2] = c[i >> 2]! | ((t.cls[i]! & 3) << ((i & 3) * 2));
-  return { cx: t.cx, cz: t.cz, live: t.live, rev: t.rev, updatedAt: t.updatedAt, y: y.toString('base64'), c: c.toString('base64') };
+  const out: MapTileJson = { cx: t.cx, cz: t.cz, live: t.live, rev: t.rev, updatedAt: t.updatedAt, y: b64(t.y), c: c.toString('base64') };
+  const sd = t.surf; // Track PC: the surface layer (names compacted by the cache)
+  if (sd) {
+    out.p = sd.names.map((n) => pal.index(n));
+    out.s = b64(sd.top.idx);
+    for (let i = 0; i < 256; i++) {
+      if (sd.top.idx[i] !== NO_NAME && sd.top.y[i] !== t.y[i]) {
+        out.sy = b64(sd.top.y);
+        break;
+      }
+    }
+    Object.assign(out, liquidFields(sd.top));
+    if (sd.under) out.u = { s: b64(sd.under.idx), sy: b64(sd.under.y), ...liquidFields(sd.under) };
+  }
+  return out;
 }
 
 function goalPoint(goal: unknown, botY: number): Vec3 | null {
@@ -119,6 +174,7 @@ export class MapBuilder {
     const since = q.since ?? -1;
     const win = q.win;
     const tiles: MapTileJson[] = [];
+    const pal = new PaletteBuilder(this.src.colours); // Track PC
     if (cache) {
       for (let cx = window.cx0; cx <= window.cx1; cx++) {
         for (let cz = window.cz0; cz <= window.cz1; cz++) {
@@ -126,7 +182,7 @@ export class MapBuilder {
           const t = cache.tile(cx, cz);
           if (!t) continue;
           if (inOld && t.rev <= since) continue;
-          tiles.push(packTile(t));
+          tiles.push(packTile(t, pal));
         }
       }
     }
@@ -175,6 +231,7 @@ export class MapBuilder {
       radius,
       window,
       tiles,
+      palette: pal.entries,
       bot: pos ? { x: +pos.x.toFixed(3), y: +pos.y.toFixed(3), z: +pos.z.toFixed(3), yaw: +(world?.self.yaw ?? 0).toFixed(1) } : null,
       trail: [...this.trail],
       nav: {
@@ -204,6 +261,26 @@ export class MapBuilder {
           : null,
     };
   }
+}
+
+/**
+ * Track PC: `build`, then the colours of palette names not computed yet are computed (at most
+ * `waitMs`: the first request after a start reads the art) and filled in.
+ */
+export async function buildWithColours(b: MapBuilder, colours: MapColourSource | null | undefined, q: MapQuery = {}, waitMs = 3000): Promise<MapJson> {
+  const j = b.build(q);
+  if (!colours) return j;
+  const missing = j.palette.filter((e) => colours.peek(e.name) === undefined).map((e) => e.name);
+  if (missing.length > 0) {
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([colours.load(missing).catch(() => undefined), new Promise<void>((r) => (timer = setTimeout(r, waitMs)))]);
+    clearTimeout(timer);
+    for (const e of j.palette) {
+      const c = colours.peek(e.name);
+      if (typeof c === 'number') e.rgb = hexColour(c);
+    }
+  }
+  return j;
 }
 
 /** Parses the /map.json query string. */

@@ -28,7 +28,7 @@ glyphs instead.
 
 | Package | Licence | What we use |
 |---|---|---|
-| `minecraft-assets` 1.19.0 (PrismarineJS, https://github.com/PrismarineJS/minecraft-assets) | MIT (the package's code and data layout) | read at run time from `node_modules`: the Java `26.1` item and block textures and block models, to draw the inventory icons at `GET /icons/<name>.png` (`bot/src/health/panel/icons/`) |
+| `minecraft-assets` 1.19.0 (PrismarineJS, https://github.com/PrismarineJS/minecraft-assets) | MIT (the package's code and data layout) | read at run time from `node_modules`: the Java `26.1` item and block textures and block models, to draw the inventory icons at `GET /icons/<name>.png` (`bot/src/health/panel/icons/`), and the block states, models and top-face textures to give the 2D map a colour per block (the average of the top face, computed in memory, never written: `icons/colours.ts`) |
 | `pngjs` 7.0.0 (https://github.com/pngjs/pngjs) | MIT | decoding the textures and encoding the icons |
 
 The textures and models are Mojang's art (Minecraft is a trademark of Mojang AB / Microsoft); they are not

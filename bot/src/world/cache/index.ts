@@ -14,7 +14,8 @@ import { WorldCache, type CacheHost, type WorldCacheOptions } from './cache.ts';
 export { WorldCache } from './cache.ts';
 export type { CacheHost, MapTile, WorldCacheOptions, WorldCacheStats } from './cache.ts';
 export { ChunkSummary, decodeSummary, encodeSummary, encodeRaw, summarizeColumn, currentRev } from './summary.ts';
-export { StateTable, isInteresting, cellClassOf } from './classes.ts';
+export { StateTable, isInteresting, cellClassOf, mapView, VIS_NONE, VIS_BLOCK, VIS_LIQUID, type MapVisibility } from './classes.ts';
+export { SurfaceData, NO_NAME, MAX_NAMES, MAX_DEPTH, roofedDimension, scanTop, scanUnderRoof, type SurfaceLayer, type SurfaceColumn, type ColumnSurface } from './surface.ts'; // Track PC
 export { parseRegion, serializeRegion, readRegion, regionFileName, regionOf, slotOf, REGION_SIZE } from './region.ts';
 export { findCachedTrees, cachedLookup, type CachedTree } from './trees.ts';
 export * from './types.ts';
