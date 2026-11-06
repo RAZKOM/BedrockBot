@@ -40,13 +40,21 @@ export interface Volume {
   id: VolumeId;
   kind: VolumeKind;
   dim: number;
-  /** Inclusive cell bounds. */
+  /**
+   * Inclusive cell bounds. For a `sky` volume min.y is the HIGHEST column top in the chunk plus 1 (the
+   * lowest y that is open sky over every column: edgeCost prices a climb over a ridge from it) and max.y
+   * the world's top; for an `unknown` volume the section's real bounds (y = sy * 16 .. sy * 16 + 15).
+   */
   min: Vec3;
   max: Vec3;
   /** Passable cells in the component. */
   cells: number;
   /** Cells with a standable floor under them (walkable without placing). 0 for a shaft or open water. */
   floorCells: number;
+  /** Clear cells over the floor cells (feet up to the first solid), min and max over them; rough. Undefined without floor cells. */
+  headroom?: { min: number; max: number };
+  /** The narrowest horizontal cross-section of the component across its longest horizontal axis (blocks); rough, 16 for sky. */
+  minSpan: number;
   known: Knowledge;
 }
 
@@ -60,14 +68,22 @@ export type PortalAxis = 'x' | 'y' | 'z';
 /** The opening between two volumes: the shared face cells of a section or chunk border, or a volume's contact with the sky. */
 export interface Portal {
   id: PortalId;
-  /** The two volumes it joins (unordered; edges are traversable both ways unless a mode's cost says otherwise). */
+  /**
+   * The two volumes it joins (edges are traversable both ways unless a mode's cost says otherwise). For
+   * axis 'y' a is the UPPER volume and b the lower one (a shaft entered from above crosses a -> b); for
+   * axis 'x' / 'z' a is the volume on the lower coordinate side.
+   */
   a: VolumeId;
   b: VolumeId;
   axis: PortalAxis;
   /** Inclusive bounds of the opening cells (one cell thick along the axis). */
   min: Vec3;
   max: Vec3;
-  /** The cell nearest the opening's centre that is inside it (a waypoint aims here). */
+  /**
+   * The centre of the largest clear rectangle in the opening (`clearance`), cell coordinates with .5 on
+   * the axes where the rectangle is even (a waypoint aims here). For axis 'x' / 'z', y is the rectangle's
+   * lowest cell (feet height), not its middle.
+   */
   center: Vec3;
   /**
    * The largest clear rectangle in the opening: for axis 'x' / 'z' height = vertical extent, width =
@@ -98,14 +114,27 @@ export interface CoarseCost {
    * waypoint (Infinity: impassable for this mode). `outcome` is the last markPortal outcome for this mode, if any.
    */
   edgeCost(portal: Portal, from: Volume, to: Volume, blocks: number, outcome?: PortalOutcome): number;
-  /** Ticks per block through unknown space (high, not Infinity). */
+  /**
+   * Ticks per block through unknown space (high, not Infinity). A mode may price unknown volumes by their
+   * y bounds instead inside edgeCost (high unknown sky nearly free for fly); this is the flat fallback.
+   */
   unknownCost: number;
+  /**
+   * The cost of switching INTO this mode from `from` inside volume `at` (near portal `near` when the switch
+   * is at one): Infinity where it is impossible (fly from water; walk from fly without a floor). Absent:
+   * `PlanRequest.modeSwitchCost`.
+   */
+  switchCost?(from: CoarseMode, at: Volume, near?: Portal): number;
 }
 
 /** One stretch of a corridor travelled in one mode. */
 export interface CorridorLeg {
   mode: CoarseMode;
-  /** Where the leg starts and ends (feet positions for walk / mine, body positions for fly). */
+  /**
+   * Where the leg starts and ends (feet positions for walk / mine, body positions for fly). A fly leg
+   * followed by a walk / mine leg ends on a standable feet cell (a floor), so the flight can land on it;
+   * so does the last fly leg when `PlanRequest.goalStanding`.
+   */
   from: Vec3;
   to: Vec3;
   /** The portal the leg enters through (undefined for the first leg) and the one it leaves by (undefined for the last). */
@@ -160,8 +189,12 @@ export interface PlanRequest {
   dim?: number;
   /** Modes the corridor may use; ['fly'] asks for a fly-only corridor (takeoff and landing included), to compare against a mixed one. */
   modes: readonly CoarseMode[];
-  /** Ticks added at every change of mode (a takeoff, a landing). Default 40. */
+  /** Ticks added at every change of mode (a takeoff, a landing) where the entered mode's cost has no `switchCost`. Default 40. */
   modeSwitchCost?: number;
+  /** The mode the bot is in at the start (default 'walk'): a bot already gliding pays no takeoff. */
+  startMode?: CoarseMode;
+  /** The corridor ends standing on the goal's floor (default true); false for a passing waypoint (the flight need not land). */
+  goalStanding?: boolean;
   /** Search limits; defaults 200 000 nodes / 500 ms (the search runs in a worker). */
   maxNodes?: number;
   maxMs?: number;
