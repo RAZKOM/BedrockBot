@@ -209,6 +209,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         maxUnder: d.settings.get('flyOverhangDepth'),
         probes: d.settings.get('flyLandProbes'),
         budgetMs: LAND_BUDGET_MS,
+        style: String(d.settings.get('flyLandStyle')) as 'auto' | 'flare' | 'brake', // Track F1: the precision goal, the brake's corridors
         ...(exact !== undefined ? { exact } : {}),
       },
     );

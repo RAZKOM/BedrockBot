@@ -1,5 +1,5 @@
 // Track AP (docs/panel.md "The page"): the page markup (41 inventory cells, a marker for every status
-// block, no external URLs, under 160 KB since Track AR) and the inline script run on a small fake DOM: the first
+// block, no external URLs, under 160 KB since Track AR, 164 KB since Track F1) and the inline script run on a small fake DOM: the first
 // render fills the cells and blocks from the embedded state, a poll updates only what changed, a
 // failed poll shows the stale marker, a hidden tab polls every 10 s, the theme toggle survives a
 // storage that throws. Track AR: the context menus, confirmations, Stop / Pause, settings, quick buttons, log filter and palette.
@@ -36,12 +36,12 @@ describe('panel page markup', () => {
     for (const m of ['id="panel-commands"', 'id="cmdform"', 'data-cmd="!home go"', 'id="panel-settings"', 'data-key="guardRadius"', 'id="panel-logs"', 'id="helpbox"', 'id="panel-map"', 'id="stale"', 'id="theme"', 'id="clock"', 'href="/api/chests"']) expect(html).toContain(m);
   });
 
-  it('no external URLs, no external assets, under 160 KB (Track AR; was 120 KB)', () => {
+  it('no external URLs, no external assets, under 164 KB (Track AR; was 120 KB; Track F1: was 160 KB, main at 159 715 before the flyLandStyle row)', () => {
     expect(html.match(/https?:\/\//g)).toBeNull(); // the bot's own links are relative (/map, /api/chests)
     expect(html).not.toMatch(/<link\b|@import|url\(|\ssrc="(?!\/)/);
     const bytes = Buffer.byteLength(html);
     console.log(`panel page: ${bytes} bytes (script ${Buffer.byteLength(PANEL_SCRIPT)}, glyphs ${Buffer.byteLength(Object.values(GLYPHS).join(''))})`);
-    expect(bytes).toBeLessThan(160_000);
+    expect(bytes).toBeLessThan(164_000);
   });
 
   it('the embedded state is the lite poll shape, with no closing script tag in it', () => {

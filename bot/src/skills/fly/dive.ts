@@ -12,8 +12,8 @@
 // under the path (`clearTop`). A profile is taken only when it ends inside the hand-over window (DIVE_END_MIN
 // to DIVE_END_MAX blocks before the target, the entry height -3 to +8, slow and level) without passing the
 // target; else the brain waits (the window is still ahead) or flies the circle (too close: it never fits).
-import { glideVelocity } from '../input/physics.ts';
-import { APPROACH_HEIGHT, approachYaw, hdist, hitsObstacle, type FlightBody, type LandingTarget, type Obstacle } from './plan.ts';
+import type { Vec3 } from '../../connection/types.ts';
+import { APPROACH_HEIGHT, approachYaw, entryTop, glideRollout, hdist, hitsObstacle, midpoint, type FlightBody, type LandingTarget, type Obstacle } from './plan.ts';
 
 /** The hand-over window: this many blocks before the target centre (the planner starts at 56). */
 export const DIVE_END_MIN = 48;
@@ -88,49 +88,51 @@ export function divePitch(p: DiveProfile, phase: DivePhase): number {
  * box with its berth, at every tick's end and midpoint) and the clearance over each column's top (`clearTop`).
  */
 export function simulateDive(body: FlightBody, yaw: number, target: LandingTarget, p: DiveProfile, phase0: DivePhase = 'dive', cells?: { obstacle: Obstacle; clearTop?: (x: number, z: number) => number | undefined }): DiveSim {
-  let pos = { ...body.pos };
-  let vel = { ...body.vel };
-  let y = yaw;
   let phase: DivePhase = phase0;
   let minClear = Infinity;
   let maxSpeed = 0;
-  let boost = body.boostTicks;
-  const entry = target.top + APPROACH_HEIGHT;
-  const fail = (why: string, t: number): DiveSim => ({ ok: false, why, ticks: t, end: { ...pos, d: hdist(pos, target), h: Math.hypot(vel.x, vel.z), vy: vel.y }, minClear, maxSpeed });
-  for (let t = 1; t <= MAX_TICKS; t++) {
-    const ph = divePhase(p, phase, pos, vel);
-    if (ph === 'done') {
-      const d = hdist(pos, target);
-      const end = { ...pos, d, h: Math.hypot(vel.x, vel.z), vy: vel.y };
-      const sim = { ticks: t - 1, end, minClear, maxSpeed };
-      if (d < DIVE_END_MIN) return { ok: false, why: `ends ${d.toFixed(0)} out (too near)`, ...sim };
-      if (d > DIVE_END_MAX) return { ok: false, why: `ends ${d.toFixed(0)} out (too far)`, ...sim };
-      if (pos.y < entry - DIVE_END_BELOW) return { ok: false, why: `ends ${(entry - pos.y).toFixed(0)} under the entry`, ...sim };
-      if (pos.y > entry + DIVE_END_ABOVE) return { ok: false, why: `ends ${(pos.y - entry).toFixed(0)} over the entry`, ...sim };
-      return { ok: true, ...sim };
-    }
-    phase = ph;
-    y = approachYaw(y, pos, target);
-    vel = glideVelocity(vel, y, divePitch(p, phase), boost > 0);
-    if (boost > 0) boost--;
-    const nx = { x: pos.x + vel.x, y: pos.y + vel.y, z: pos.z + vel.z };
-    maxSpeed = Math.max(maxSpeed, Math.hypot(vel.x, vel.y, vel.z));
-    if (hdist(nx, target) < DIVE_END_MIN - 16) return fail('passes the target', t);
-    if (nx.y <= target.top) return fail('reaches the ground', t);
-    if (cells) {
-      const mid = { x: (pos.x + nx.x) / 2, y: (pos.y + nx.y) / 2, z: (pos.z + nx.z) / 2 };
-      if (hitsObstacle(cells.obstacle, nx) || hitsObstacle(cells.obstacle, mid)) return fail(`a solid at ${Math.floor(nx.x)} ${Math.floor(nx.y)} ${Math.floor(nx.z)}`, t);
-      const top = cells.clearTop?.(Math.floor(nx.x), Math.floor(nx.z));
-      if (top !== undefined) {
-        const clear = nx.y - (top + 1);
-        minClear = Math.min(minClear, clear);
-        // the hand-over itself is at the entry height (10 over the top): only the columns farther than the window are held to the clearance
-        if (clear < DIVE_CLEARANCE && hdist(nx, target) > DIVE_END_MIN) return fail(`${clear.toFixed(0)} over the column ${Math.floor(nx.x)} ${Math.floor(nx.z)} (top ${top})`, t);
+  const entry = entryTop(target) + APPROACH_HEIGHT;
+  const fail = (why: string, t: number, pos: Vec3, vel: Vec3): DiveSim => ({ ok: false, why, ticks: t, end: { ...pos, d: hdist(pos, target), h: Math.hypot(vel.x, vel.z), vy: vel.y }, minClear, maxSpeed });
+  // Track F1: on the shared rollout (plan.ts glideRollout): the dive law, the hand-over its `done`
+  const r = glideRollout<DiveSim>(
+    body,
+    yaw,
+    0,
+    MAX_TICKS,
+    (s) => {
+      const ph = divePhase(p, phase, s.pos, s.vel);
+      if (ph === 'done') return { yaw: s.yaw, pitch: s.pitch, done: true };
+      phase = ph;
+      return { yaw: approachYaw(s.yaw, s.pos, target), pitch: divePitch(p, phase) };
+    },
+    ({ t, pos, next: nx, vel }) => {
+      maxSpeed = Math.max(maxSpeed, Math.hypot(vel.x, vel.y, vel.z));
+      if (hdist(nx, target) < DIVE_END_MIN - 16) return fail('passes the target', t, pos, vel);
+      if (nx.y <= target.top) return fail('reaches the ground', t, pos, vel);
+      if (cells) {
+        if (hitsObstacle(cells.obstacle, nx) || hitsObstacle(cells.obstacle, midpoint(pos, nx))) return fail(`a solid at ${Math.floor(nx.x)} ${Math.floor(nx.y)} ${Math.floor(nx.z)}`, t, pos, vel);
+        const top = cells.clearTop?.(Math.floor(nx.x), Math.floor(nx.z));
+        if (top !== undefined) {
+          const clear = nx.y - (top + 1);
+          minClear = Math.min(minClear, clear);
+          // the hand-over itself is at the entry height (10 over the top): only the columns farther than the window are held to the clearance
+          if (clear < DIVE_CLEARANCE && hdist(nx, target) > DIVE_END_MIN) return fail(`${clear.toFixed(0)} over the column ${Math.floor(nx.x)} ${Math.floor(nx.z)} (top ${top})`, t, pos, vel);
+        }
       }
-    }
-    pos = nx;
-  }
-  return fail('no hand-over', MAX_TICKS);
+      return undefined;
+    },
+  );
+  if (r.result) return r.result;
+  if (!r.done) return fail('no hand-over', MAX_TICKS, r.pos, r.vel);
+  const pos = r.pos;
+  const d = hdist(pos, target);
+  const end = { ...pos, d, h: Math.hypot(r.vel.x, r.vel.z), vy: r.vel.y };
+  const sim = { ticks: r.ticks, end, minClear, maxSpeed };
+  if (d < DIVE_END_MIN) return { ok: false, why: `ends ${d.toFixed(0)} out (too near)`, ...sim };
+  if (d > DIVE_END_MAX) return { ok: false, why: `ends ${d.toFixed(0)} out (too far)`, ...sim };
+  if (pos.y < entry - DIVE_END_BELOW) return { ok: false, why: `ends ${(entry - pos.y).toFixed(0)} under the entry`, ...sim };
+  if (pos.y > entry + DIVE_END_ABOVE) return { ok: false, why: `ends ${(pos.y - entry).toFixed(0)} over the entry`, ...sim };
+  return { ok: true, ...sim };
 }
 
 /**
@@ -138,7 +140,7 @@ export function simulateDive(body: FlightBody, yaw: number, target: LandingTarge
  * hand-over height), the passing ones by time against the cells, the first clear one taken.
  */
 export function planDive(body: FlightBody, yaw: number, target: LandingTarget, cells: { obstacle: Obstacle; clearTop?: (x: number, z: number) => number | undefined }): DivePlan {
-  const entry = target.top + APPROACH_HEIGHT;
+  const entry = entryTop(target) + APPROACH_HEIGHT;
   let sims = 0;
   const passing: { p: DiveProfile; s: DiveSim }[] = [];
   let far = 0;

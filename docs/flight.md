@@ -54,6 +54,10 @@ authoritative. Decision record: [decisions/0042-elytra-flight.md](decisions/0042
 | `bot/src/skills/fly/dive.ts` | Track BL: `planDive` / `simulateDive` (the dive descent, simulated whole before it is flown) |
 | `bot/src/skills/fly/sites.ts` | Track BL: `siteCandidates`, `preferSite`, `RecheckState` (the takeoff-site search and the walk re-check) |
 | `bot/test/unit/skills/fly-terrain.test.ts`, `fly-trip.ts`; `bot/test/e2e/fly-terrain.test.ts` | Track BL: the floor, the ridges / tower / unknown / cache-only trips, the dive against the circle, the site ranking and the re-check; the e2e wall / tower / ridge / dive / site / nosite / recheck cases |
+| `bot/src/skills/fly/maneuvers.ts` | Track F1: the manoeuvre library (`Maneuver`, `runManeuver`, `runChain`, the swept cells), the turn geometry (`turnRate`, `turnOffsetFor`, `turnRadius`), the station keeping (`keepYaw`), the stubs |
+| `bot/src/skills/fly/brake.ts` | Track F1: the brake / elevator landing family (`BRAKE_FAMILY`, `simulateBrake`, `brakeControl`, `BrakePlanner`); its K and the whole landing as library manoeuvres (`settleOnto`, `brakeApproach`) |
+| `bot/src/skills/fly/maneuvers-route.ts` | Track F1: the library as Track F2 route-planner edges (`asRoute`, `settleRoute`, `approachRoute`, `routeLibrary`) |
+| `bot/test/unit/skills/fly-maneuvers.test.ts`, `fly-maneuvers-route.test.ts`, `fly-brake.test.ts`, `fly-worlds.ts`; `bot/test/e2e/fly-maneuver.test.ts` | Track F1: every manoeuvre on stepBody against the model; the route edges flown as F2 flies them; the brake family, the precision goals, the pillar / shaft / roof / wall / farm trips, the go-around shortening, the flare regression; the e2e pillar / roof3 / roof4 / shaft2 / shaft1 / wall / farm cases |
 | `docker/compose.fly.yml` | `bds-fly` |
 
 ## Packets (BDS 1.26.60.6, measured on bds-fly)
@@ -671,6 +675,384 @@ A chance found: the walk is stopped at a safe spot (standing, dry, |vy| ≤ 0.1,
 scaffolding; up to 3 s more of walking to find one). The takeoff is checked again from there and the flight
 goes. The log says `fly: the walk to X stopped at x y z for a flight (the flight kit is ready)`.
 
+## Manoeuvres (flight v2, Track F1)
+
+ADR [0057](decisions/0057-flight-manoeuvres.md). The flare of Track AU lands on a 3 x 3 platform or open
+ground. It touches down at 0.27 to 0.35 blocks a tick, and the server slides the body 0.6 to 0.8 further.
+It cannot land on a block-wide cell. Track F1 adds three things:
+
+- a library of manoeuvres, each a pure control law that a planner can roll out on the model and check
+  against the world;
+- a second landing family built from them, the **brake / elevator landing**: stop over the cell, keep
+  station, sink straight down;
+- the **precision goals** it makes landable: a 1 x 1 pillar top, a shaft floor, a cell under a roof 3
+  above, a cell before a wall.
+
+### One rollout, one profile search
+
+`plan.ts glideRollout(body, yaw, pitch, ticks, law, check)` is the one formula-level tick loop of the
+planners. Each tick the law gives the look (`{ yaw, pitch, fire?, done? }`). A rocket gives `GLIDE.boostTicks`
+of boost from that tick on, like stepBody's `boostStart`. `glideVelocity` then moves the body, and the
+checker sees the tick's move (`{ t, pos, next, vel, yaw, pitch, boosting }`). A value from the checker
+ends the rollout. These run on it:
+
+- `pathAhead`;
+- the flare profiles (`simulateProfile` with `touchdownCheck`);
+- the dive (`simulateDive`);
+- the brake landing;
+- every manoeuvre.
+
+A deterministic fingerprint of eight whole trips, three dive plans, the path ahead and one profile is the
+same before and after the refactor.
+
+`ProfilePlanner<P, S>` is the profile search: random samples across the ranges and around the plan, a hill
+climb, the phase kept. It runs a `ProfileFamily`:
+
+- the parameters, their ranges and steps;
+- the free set per phase;
+- the samples per tick;
+- the simulation and the control law.
+
+`FLARE_FAMILY` is Track AU's profile, and `ApproachPlanner` is that family on the search. `BRAKE_FAMILY` is
+in brake.ts.
+
+### The library (`fly/maneuvers.ts`)
+
+A `Maneuver<P>` has:
+
+- `entry(state, p)`: why it cannot start, or nothing;
+- `law(state, p)`: a fresh closure that gives the look each tick and `done` at its exit;
+- `maxTicks(p)`;
+- a `status`: `measured` (flown on bds-fly), `model` (the formula only) or `stub`.
+
+`runManeuver(m, p, state, { obstacle, berth, target, rockets, maxTicks })` rolls it out on `glideRollout`.
+It returns a run with:
+
+- `end`: `done`, `landed`, `hit`, `missed`, `timeout` or `refused`;
+- `out`, the state handed over;
+- `ticks` and `rockets`;
+- `swept`, the cells the 0.6-high box overlapped at every tick's end and midpoint, as a set of `cellKey`;
+- `touchdown`, `minY`, `maxY` and `moved`.
+
+`runChain` flies manoeuvres one after the other. This is the edge interface for Track F2: state in, then
+state out with the swept cells, the ticks and the rockets.
+
+The physics the laws use (the glide formula, docs above "Physics"):
+
+- **The heading follows the look by a tenth a tick** (`v.xz += (l̂·h − v.xz)·0.1`). Looking straight back
+  takes a fifth of the speed a tick. Looking 96.4 degrees off turns the velocity fastest: 6.38 degrees a
+  tick, for a radius of about 9 times the speed in blocks, at about 10 % of the speed lost a tick. The rate
+  at offset θ is `atan2(0.1 sin θ, 0.9 + 0.1 cos θ)` (`turnRate`, inverted by `turnOffsetFor`).
+- **The dive term pushes along the look** by a tenth of the sink, 0.015 a tick at the hover's 0.149. Near a
+  standstill the look is a thruster. A look flipped by 180 degrees every tick cancels out: the hover sinks
+  0.149 a tick at pitch 0 (0.166 at ±10, 0.222 to 0.225 at ±20, 0.339 at 30) and stays put.
+- **The pull term (pitch up) lifts along any heading.** At pitch −30, looking back, it pushes the body
+  forward and up by `0.04 h sin 30`. This holds the height through a brake.
+- **The station-keeping law** (`keepYaw`, gains `KEEP`):
+  - The wanted velocity is `kp·error`, capped at `vmax`, and the look points along `wanted − kd·velocity`.
+  - Within `band` of the point and nearly still (`still`), the look flips every tick.
+  - With kp 0.15, kd 1, vmax 0.3 and band 0.04 it settles from 3 blocks off in about 33 ticks, overshoots
+    by about 0.15, then stays within 0.05.
+  - While fast the same law is the brake: the look points straight back.
+
+| Manoeuvre | Status | Law | Use |
+|---|---|---|---|
+| `brake180` | model | the look back along the velocity, the pitch holding the entry height (`holdPitch`: −30 on it, −40 under, towards 0 over) | stop in 3.5 to 5.5 blocks |
+| `partialBrake` | model | the look held 100 to 170 degrees off the entry heading to one side | a brake that also moves the stop point sideways (from 140) |
+| `hover` | model | station keeping over a point | wait, sink 0.149 a tick in place |
+| `creep` | model | station keeping onto a new point, at most `vmax` a tick | the last blocks onto a cell |
+| `elevator` | model | station keeping while sinking to a height | down a shaft, onto a pillar, under a roof |
+| `snapTurn` | model | the look snapped to a heading under a rocket | a 90-degree turn in 4 ticks |
+| `glideTurn` | model | the look offset for a radius at the speed now | a turn without a rocket |
+| `zoomClimb` | model | pitch up along the heading until the top of the climb | hop an obstacle without a rocket |
+| `flare` | measured | Track AU's segment B | the flare landing's pull-up |
+| `spiral` | measured | Track AU2's descent circle | lose height in place |
+| `dive` | measured | Track BL's dive, pull, bleed | lose height fast |
+| `verticalClimb` | model | pitch −90 on rockets until the coast reaches the top | the vertical takeoff's climb (once the glide has taken: Track F2 measured that a rocket before the server's gliding flag does nothing) |
+| `settleOnto` (brake.ts) | measured | the brake landing's K: station keeping over the cell centre, braking at pitchK while fast, sinking at pitchE | onto a cell from up to 16 out (every e2e brake landing flew it) |
+| `brakeApproach` (brake.ts) | measured | the brake landing with fixed parameters: A2 towards the cell at pitchA until brakeAt, then K | the whole landing as one law, for the route planner |
+| `shortBoost`, `stackedBoost`, `wallKiss`, `rocketBrake` | stub | refuse every entry | see "The stubs" below |
+
+### Characterisation (the model; stepBody in the flat world gives the same end state)
+
+From the state in column 2 (a level glide has vy −0.1, still has vy −0.15). The last column is the distance
+between the stepBody flight's end and the model's. The two are one formula: stepBody adds only the
+collisions.
+
+| Manoeuvre | From | Ticks | Moved | Height | Speed after | Heading after | Rockets | stepBody vs model |
+|---|---|---|---|---|---|---|---|---|
+| brake180 (hold) | 1.05 level | 8 | 3.5 | −0.24 | 0.18 (vy −0.05) | 0 | 0 | 0.000 (8 ticks) |
+| brake180 pitch 0 | 1.05 level | 7 | 3.0 | −0.83 | 0.16 (vy −0.13) | 0 | 0 | 0.000 (7 ticks) |
+| brake180 pitch −20 | 1.05 level | 8 | 3.4 | −0.40 | 0.16 (vy −0.06) | 0 | 0 | 0.000 (8 ticks) |
+| brake180 pitch −40 | 1.05 level | 8 | 3.6 | −0.17 | 0.19 (vy −0.05) | 0 | 0 | 0.000 (8 ticks) |
+| brake180 (hold) | 1.48 level | 10 | 5.5 | +0.30 | 0.17 (vy 0.00) | 0 | 0 | 0.000 (10 ticks) |
+| brake180 pitch 0 | 1.48 level | 8 | 4.5 | −0.96 | 0.18 (vy −0.13) | 0 | 0 | 0.000 (8 ticks) |
+| brake180 pitch −20 | 1.48 level | 9 | 5.1 | −0.09 | 0.20 (vy −0.03) | 0 | 0 | 0.000 (9 ticks) |
+| brake180 pitch −40 | 1.48 level | 10 | 5.6 | +0.62 | 0.19 (vy 0.02) | 0 | 0 | 0.000 (10 ticks) |
+| partialBrake 120 | 1.48 level | 40 | 12.1 | −1.34 | 0.29 (vy −0.15) | 117 | 0 | 0.000 (40 ticks) |
+| partialBrake 140 | 1.48 level | 14 | 7.0 | +0.50 | 0.20 (vy −0.03) | 68 | 0 | 0.000 (14 ticks) |
+| partialBrake 160 | 1.48 level | 11 | 5.8 | +0.34 | 0.18 (vy −0.01) | 34 | 0 | 0.000 (11 ticks) |
+| partialBrake 170 | 1.48 level | 10 | 5.5 | +0.31 | 0.18 (vy −0.00) | 16 | 0 | 0.000 (10 ticks) |
+| hover 60 ticks pitch 0 | still | 60 | 0.0 | −8.97 | 0.01 (vy −0.15) | – | 0 | 0.000 (60 ticks) |
+| hover 60 ticks pitch 20 | still | 60 | 0.0 | −12.95 | 0.01 (vy −0.23) | – | 0 | 0.000 (60 ticks) |
+| hover 60 ticks pitch 30 | still | 60 | 0.0 | −18.53 | 0.01 (vy −0.34) | – | 0 | 0.000 (60 ticks) |
+| creep 1 sideways | still | 19 | 0.9 | −2.84 | 0.02 (vy −0.15) | −90 | 0 | 0.000 (19 ticks) |
+| creep 3 sideways | still | 32 | 2.9 | −4.79 | 0.01 (vy −0.15) | −90 | 0 | 0.000 (32 ticks) |
+| creep 6 sideways | still | 45 | 5.9 | −6.73 | 0.02 (vy −0.15) | −90 | 0 | 0.000 (45 ticks) |
+| elevator 10 down pitch 0 | still | 67 | 0.0 | −10.02 | 0.01 (vy −0.15) | – | 0 | 0.000 (67 ticks) |
+| elevator 10 down pitch 20 | still | 47 | 0.0 | −10.01 | 0.01 (vy −0.23) | – | 0 | 0.000 (47 ticks) |
+| elevator 10 down pitch 30 | still | 35 | 0.0 | −10.10 | 0.01 (vy −0.33) | – | 0 | 0.000 (35 ticks) |
+| snapTurn to −45 | 1.48 level | 3 | 4.6 | −0.11 | 1.61 (vy −0.02) | −42 | 1 | 0.000 (3 ticks) |
+| snapTurn to −90 | 1.48 level | 4 | 5.4 | −0.13 | 1.58 (vy −0.02) | −88 | 1 | 0.000 (4 ticks) |
+| snapTurn to −135 | 1.48 level | 3 | 3.0 | −0.11 | 1.38 (vy −0.02) | −131 | 1 | 0.000 (3 ticks) |
+| glideTurn 90, radius 15 | 1.48 level | 20 | 18.7 | −2.65 | 0.87 (vy −0.15) | −90 | 0 | 0.000 (20 ticks) |
+| glideTurn 90, radius 20 | 1.48 level | 24 | 25.0 | −3.24 | 0.99 (vy −0.15) | −89 | 0 | 0.000 (24 ticks) |
+| glideTurn 90, radius 40 | 1.48 level | 43 | 50.9 | −6.06 | 1.22 (vy −0.15) | −89 | 0 | 0.000 (43 ticks) |
+| zoomClimb −30 | 1.0 level | 38 | 23.5 | +4.65 | 0.35 (vy 0.04) | 0 | 0 | 0.000 (38 ticks) |
+| zoomClimb −45 | 1.0 level | 30 | 18.3 | +4.13 | 0.35 (vy 0.05) | 0 | 0 | 0.000 (30 ticks) |
+| zoomClimb −60 | 1.0 level | 26 | 15.7 | +2.66 | 0.34 (vy −0.02) | 0 | 0 | 0.000 (26 ticks) |
+| zoomClimb −30 | 1.48 level | 52 | 40.2 | +22.33 | 0.34 (vy 0.28) | 0 | 0 | 0.000 (52 ticks) |
+| zoomClimb −45 | 1.48 level | 41 | 31.4 | +21.12 | 0.34 (vy 0.38) | 0 | 0 | 0.000 (41 ticks) |
+| zoomClimb −60 | 1.48 level | 35 | 26.8 | +18.00 | 0.34 (vy 0.36) | 0 | 0 | 0.000 (35 ticks) |
+| flare −60 | 1.05 level | 27 | 16.8 | +3.81 | 0.34 (vy 0.02) | 0 | 0 | 0.000 (27 ticks) |
+| spiral r12, 20 down | 1.0 | 102 | 24.4 | −20.09 | 0.70 (vy −0.16) | 5 | 0 | 0.000 (102 ticks) |
+| dive 75 / pull −30 from 250 up | 1.2 | 126 | 154.2 | −124.95 | 1.05 (vy −0.03) | 0 | 0 | 0.000 (126 ticks) |
+| verticalClimb 30 | still, pitch −90 | 23 | 0.0 | +30.54 | 0.00 (vy 0.74) | – | 1 | 0.000 (23 ticks) |
+
+Notes on the table:
+
+- The glide turn's radius comes out about 0.9 times the radius asked: the dive term turns the velocity
+  too, and the speed decays in the turn.
+- The radius asked must be at least about 9 times the speed; under that the turn runs at the rate cap.
+- partialBrake at 100 to 120 degrees off is a turn, not a brake: the speed stays over 0.2 for its 40 ticks.
+- These are the formula's numbers. On bds-fly2 the brake, the station keeping and the elevator flew the
+  e2e landings below with 1 to 7 corrections a flight.
+
+### The brake / elevator landing (`fly/brake.ts`)
+
+| Segment | Law | Parameters (range, step) |
+|---|---|---|
+| A1 | the approach yaw law, `pitchA1` for `ticksA1` ticks | pitchA1 −30 to 45 (5), ticksA1 0 to 40 (4) |
+| A2 | the approach yaw law, `pitchA2` until `brakeAt` from the cell centre | pitchA2 −30 to 45 (5), brakeAt 2 to 16 (1) |
+| K | `keepYaw` over the cell centre: the brake at `pitchK` while faster than 0.35 a tick (`BRAKE_FAST`), then the hover / creep / elevator at `pitchE` until the feet touch the cell | pitchK −45 to 0 (5), pitchE 0 to 30 (10) |
+
+How the brake family plans and is costed:
+
+- **The simulation.** `simulateBrake` runs the profile on `glideRollout`, up to 400 ticks, with
+  `touchdownCheck` minus the overshoot test (the brake comes back to the cell). In K the body is short as
+  soon as it is under the cell's top beside it; in A, at 2 under the top, which no brake climbs back from.
+- **The cost.** `touchdownCost` has one change for a precision cell (`precise`, or a target a block wide):
+  the server's slide counts in proportion to the speed (`SERVER_SLIDE · h / 0.33`). A flared touchdown on a
+  1 x 1 top costs about 6 more than a nearly still one.
+- **The samples.** A runs 60 wide samples (20 once a soft plan exists), 24 near ones and 2 hill-climb
+  rounds. In K only `pitchK` and `pitchE` are free: 12 (4), 6 and 2.
+- **The CPU.** Offline it runs about 33 simulations a tick, about 0.5 ms a tick on average and 11 ms at most.
+
+The brain (`landStyle`, the setting `flyLandStyle`) chooses the family:
+
+- `flare` and `brake` plan only their own family.
+- `auto` (the default) plans the flare. It plans the brake as well in two cases:
+  - on a precision cell;
+  - while the flare is missing: `BRAKE_RESCUE` (3) ticks without a landing plan, or a plan over
+    `BRAKE_RESCUE_COST` (35) within 30 blocks.
+- The brake is flown when its cost plus `BRAKE_BIAS` (4) is under the flare's. Changing the family being
+  flown takes `BRAKE_SWITCH` (2) more.
+- The family is committed once the flare's pull-up (B) or the brake's K begins, but only to a plan that
+  lands. A flare pulling up into an overshoot may still become a brake.
+- The plan not flown is reset when it would have committed itself.
+- The go-around decision uses the better of the two (the fewer missing ticks).
+- On a plain platform the brake is never planned unless the flare misses. `auto` then flies exactly the flare
+  of before: the same ticks, rockets and touchdown on four whole trips (a unit test).
+
+The brain flies the brake's yaw (`ApproachChoice.yaw`), since the family has its own yaw law. The stats
+and the `flight: landed` log line carry the family (`landing brake (53 ticks braked / station-kept)`), and
+the line also counts the brakes that took over from a missing flare (`brakeRescues`).
+
+### Precision goals (`landing.ts preciseGoal`)
+
+An exact goal (`!fly <x y z>`) that is no plain floor (Track BF's `sound` fails, or the roof is lower than
+`flyHeadroom`) becomes the target itself. It must pass these checks:
+
+- dry and no hazard;
+- `PRECISE_HEADROOM` (3) or more of room. Track F2 measured on bds-fly3 that a gliding body entering a
+  2-high bore lands (BDS ends the glide there), so 3 is the least room the brake can fly in;
+- a brake simulation (`BrakePlanner`, the world's solids as walls) lands on it: from the approach entry
+  along four bearings or, under a roof, along a corridor (`corridorsOf` with the room the roof leaves,
+  `corridorLands` with the brake).
+
+The target carries:
+
+- `precise: true`;
+- its floor's `cells` (the same height, connected, within 1.5: the four cells of a 2 x 2 shaft);
+- for a shaft, its `rim`: the lowest top of the columns around those cells, when each is a wall from the
+  floor up and 2 or more high.
+
+`entryTop(target)` (the rim when it is higher than the top) is what the approach entry, the glide line, the
+cruise height, the go-around height, the open bearing and the dive are flown over. Only K comes down inside.
+
+Two more uses of the brake in the landing search:
+
+- `stillLandable` re-checks a precision cell for dryness and room only, since `sound` is not asked of it.
+- Track BF's walk-landing search, with the style `auto` or `brake`, also counts the overhang cells that
+  only the brake's corridor simulation lands on, and marks them precise.
+
+`flyLandStyle flare` keeps the Track BF search unchanged.
+
+### Go-arounds shortened (stop and re-aim)
+
+The case is the fly-walk house: the target is retargeted to the cell before the door wall while the body
+circles beyond the house. It arrives 16 above the cell at 29 blocks out, at 0.8 a tick.
+
+- The flare's plans pass over the cell (`over`, cost 128), and after 6 ticks it goes around.
+- In `auto` the brake takes over at the third missing tick. It glides in, brakes and sinks the 16 blocks
+  onto the cell.
+
+| Seed | flare | auto |
+|---|---|---|
+| 1 | 1 go-around, 478 ticks, 3 rockets, 0.09 off | 0 go-arounds, 360 ticks, 2 rockets, 0.00 off (brake) |
+| 2 | 1 go-around, 475 ticks, 3 rockets, 0.35 off | 0 go-arounds, 367 ticks, 2 rockets, 0.00 off (brake) |
+
+The other go-arounds of the offline suite cannot be rescued. The overhang corridors arrive 3 to 10 under
+the floor at 45 blocks out, and the farm 10 under, both at 0.6 to 0.8 a tick. No family lands from there
+without a rocket.
+
+On bds-fly2, the regression run of `fly-descent` (`auto`, 3 x 3 platform, the dive from 65 above) had
+one rescue: in open run 9 the flare's plans missed after the dive and the brake took over. It landed in
+141 ticks with 1 rocket, 0.01 from the centre at a touchdown of 0.01 a tick (`landing brake (33 ticks
+braked / station-kept, 1 instead of a go-around)`). The nine flared runs took 141 to 195 ticks and touched
+down at 0.31 to 0.35 a tick.
+
+### Offline (whole trips on stepBody, `fly-brake.test.ts`)
+
+From 300 blocks south (the farm from 300 behind the box), the goal through `findLanding`:
+
+| Case | Style | Seed | Off | Touchdown vy / h | Ticks | Rockets | Go-arounds | K ticks |
+|---|---|---|---|---|---|---|---|---|
+| 1 x 1 pillar 8 high | auto (brake) | 5 / 11 | 0.06 / 0.03 | −0.12 / 0.01, −0.13 / 0.01 | 363 / 368 | 2 / 2 | 0 / 0 | 15 / 14 |
+| 2 x 2 shaft 10 deep | auto (brake) | 5 / 11 | 0.01 / 0.01 | −0.20 / 0.01, −0.28 / 0.01 | 394 / 387 | 2 / 2 | 0 / 0 | 65 / 50 |
+| 1 x 1 shaft 10 deep | auto (brake) | 5 / 11 | 0.01 / 0.01 | −0.28 / 0.01, −0.28 / 0.01 | 383 / 397 | 2 / 2 | 0 / 0 | 48 / 50 |
+| roof 3 above, 20 up | auto (brake) | 5 / 11 | 0.77 / 0.14 (in the 9 cells) | −0.15 / 0.14, −0.24 / 0.30 | 310 / 291 | 3 / 3 | 0 / 0 | 31 / 7 |
+| roof 4 above, 20 up | auto (brake) | 5 / 11 | 0.28 / 0.29 | −0.15 / 0.07, −0.15 / 0.07 | 330 / 325 | 3 / 3 | 0 / 0 | 54 / 48 |
+| wall 6 behind | brake | 5 / 11 | 0.05 / 0.03 | −0.12 / 0.01, −0.13 / 0.01 | 414 / 418 | 2 / 2 | 0 / 0 | 12 / 15 |
+| farm platform under the box | brake | 5 / 11 | on the cells | −0.16 / 0.04, −0.16 / 0.01 | 641 / 653 | 9 / 9 | 1 / 1 | 42 / 50 |
+
+Against the flare on the same goals:
+
+- **The shafts:** 4 go-arounds, then landed off the cell.
+- **The pillar:** a touchdown at 0.35 a tick (the server would slide it off).
+- **The wall case:** `auto` keeps the flare, since it is a plain floor (0.16 / 0.07 off, h 0.34).
+- **The farm:** the flare also goes around once (Track BF's corridor arrives low).
+
+### e2e (`fly-maneuver.test.ts`, bds-fly2, each case twice)
+
+From 150 blocks of each goal, with the goal given exactly (`!fly x y z`). The farm is a `!goto` to the room
+under the box, 300 out. The style is `auto` unless the case says `brake`. "Off" is where the bot stood
+after the settle, from the cell centre. "Corr." is the server's corrections in the flight. "K" is the
+ticks braked and station-kept.
+
+| Case | Run | Style flown | On the cell | Off | Damage | Rockets | Corr. | Ticks | K | Touchdown vy / h | Go-arounds |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 x 1 pillar 8 high | 1 | brake | yes | 0.04 | 0 | 1 | 1 | 185 | 53 | −0.198 / 0.006 | 0 |
+| | 2 | brake | yes | 0.04 | 0 | 2 | 3 | 270 | 12 | −0.120 / 0.013 | 0 |
+| roof 3 above (20 up) | 1 | brake | yes | 0.02 | 0 | 4 | 3 | 298 | 24 | −0.149 / 0.002 | 1 |
+| | 2 | brake | yes | 0.59 | 0 | 4 | 6 | 297 | 7 | −0.188 / 0.302 | 0 |
+| roof 4 above (20 up) | 1 | brake | yes | 0.02 | 0 | 2 | 2 | 209 | 19 | −0.142 / 0.010 | 0 |
+| | 2 | brake | yes | 0.10 | 0 | 4 | 3 | 317 | 12 | −0.238 / 0.014 | 0 |
+| 2 x 2 shaft 10 deep | 1 | brake | yes | 0.04 | 0 | 3 | 4 | 215 | 64 | −0.256 / 0.015 | 0 |
+| | 2 | brake | yes | 0.02 | 0 | 2 | 4 | 348 | 53 | −0.254 / 0.012 | 0 |
+| 1 x 1 shaft 10 deep | 1 | brake | yes | 0.02 | 0 | 1 | 1 | 229 | 65 | −0.203 / 0.007 | 0 |
+| | 2 | brake | yes | 0.03 | 0 | 1 | 1 | 231 | 65 | −0.251 / 0.010 | 0 |
+| wall 10 high 6 behind (`brake`) | 1 | brake | yes | 0.04 | 0 | 5 | 4 | 589 | 50 | −0.171 / 0.004 | 1 |
+| | 2 | brake | yes | 0.06 | 0 | 2 | 2 | 265 | 17 | −0.141 / 0.022 | 0 |
+| farm replica (`brake`) | 1 | brake | yes (the platform) | 0.02 | 0 | 8 | 7 | 477 | 38 | −0.158 / 0.018 | 0 |
+| | 2 | brake | yes (the platform) | 0.01 | 0 | 7 | 5 | 515 | 34 | −0.202 / 0.015 | 0 |
+
+Fourteen landings out of fourteen were on the cell, with 0 damage. Thirteen stood within 0.10 of the
+centre (the median 0.03 to 0.04). The server accepted the look flipped every tick and the one-tick snaps,
+with 1 to 7 corrections a flight.
+
+The exceptions:
+
+- **The roof-3 run 2** (0.59 off) came in along the corridor at 0.30 a tick with 7 ticks of K. It slid
+  0.48 (sneaking) and stayed in the floor's cells.
+- **The two go-arounds:**
+  - roof 3, run 1: `no landing plan for 6 ticks (best: flare over, cost 135, 1.5 from the centre) at 43
+    blocks out, 21 above, 1.12 blocks a tick`, the corridor entry too high and fast;
+  - wall, run 1: `no landing plan for 6 ticks (best: brake wall, cost 207, 6.7 from the centre) at 11
+    blocks out, 5 above, 0.22 blocks a tick`: every brake plan from there ended against the wall, past the
+    cell.
+
+  Both landed on the second approach.
+- **The farm** case lands on the platform under the box, on the cell that Track BF's search picks (3 from the
+  room goal, 70 up), and walks the rest down the ladder.
+
+### The stubs (until Track F0 reports)
+
+| Stub | The idea | What F0 must measure |
+|---|---|---|
+| `shortBoost` | cut a rocket's burn short by a hotbar slot switch | does BDS end the boost when the rocket leaves the hand (in Java the boost belongs to the rocket entity and survives the switch)? |
+| `stackedBoost` | a second rocket before the first one's burn ends | do two boosts add up, or does the second only extend the first? |
+| `wallKiss` | touch a wall under the impact-damage threshold as a brake | the threshold speed on BDS (`kinetic` damage). Track F2 measured on bds-fly3 4 to 8 damage a touch at 1.3 to 1.7 a tick and 0 for a slow touch; the threshold between them is still open |
+| `rocketBrake` | a rocket fired looking back: stops in 2 to 3 ticks, then reverses | useful only with the short boost |
+
+They refuse every entry (`not available: not measured on the server yet (Track F0)`), so a planner can list
+them without flying them.
+
+### The planner's edges (`fly/maneuvers-route.ts`, for Track F2)
+
+Track F2's route planner takes a manoeuvre as an edge through its own interface (route/types.ts
+`Maneuver`):
+
+- `applies(s)`: whether the edge may start from this state;
+- `control(start, now, i)`: the look and the rocket of tick i;
+- `ticks(start)`: at most 40;
+- `done(start, now, i)`: the exit, met after tick i.
+
+The planner flies the law itself on its tick-exact `stepState` and sweeps the box through its grid, so an
+edge has no world check or outcome estimate of its own. maneuvers-route.ts mirrors that interface
+structurally (a scratch type-check against F2's route/types.ts passes) and holds these:
+
+- **`asRoute(m, p, o)`** wraps a library manoeuvre:
+  - `p` is the parameters, or a function of the start state that gives them (a turn by an offset from the
+    heading);
+  - `applies` asks for a glide that has taken (no `glideIn`), `quiet` (no rocket that may burn: boost
+    max 0), `rocket` (one in the hand), a further condition, and the manoeuvre's `entry`;
+  - the law keeps its memory per start (a zoom remembers it has risen). `done` evaluates the law for the
+    next tick and hands that look to the `control` that follows, so the law sees each tick once. A call with
+    i = 0 starts it afresh, and two edges from the same start fly the same controls (a unit test).
+- **`settleRoute(goal, pitchE)`** is brake.ts `settleOnto`, the brake landing's K as a manoeuvre. It
+  brakes over the cell centre, creeps onto it and sinks at pitchE. It applies within 16 of the cell, over
+  its top, and the planner chains it edge after edge until the touchdown.
+- **`approachRoute(goal, pitchA, brakeAt)`** is brake.ts `brakeApproach`: the whole brake landing with
+  fixed parameters (A2 at pitchA, then K), from up to 48 out.
+- **`routeLibrary(goals)`** is the edge set:
+  - for each landing goal, the settle at pitch 0 and 20 and five approaches: pitch −10 (holds the height
+    over a rim), 0 and 10, each braking 4 or 8 out;
+  - the brake180 (holding the height, and at pitch 0) and the 4-tick hover. These replace F2's minimal
+    `brake180`, `hover` and `settle`;
+  - with `extras` (the default): the partial brakes 140 and 160, the powered snaps 45 and 90 (a rocket),
+    the glide turns 45 and 90 at radius 20, and the zooms −30 and −45, each to both sides.
+
+  Every edge's family is `maneuver`.
+
+F2's `planRoute` from 24 out at 1.0 a tick, with F2's library and then with its brake / hover / settle
+replaced by `routeLibrary` (scratch, offline, margin 0.3):
+
+| Landing | Library | Complete | Ticks | Off | Touchdown vy / h | Nodes | ms |
+|---|---|---|---|---|---|---|---|
+| flat cell, 6 above (F2's unit test) | F2 | yes | 27 | 0.29 | −0.12 / 0.22 | 8 040 | 73 |
+| | F2 + F1 | yes | 44 | 0.01 | −0.14 / 0.006 | 110 | 2 |
+| 1 x 1 pillar 8 high, 6 above | F2 | yes | 27 | 0.29 | −0.12 / 0.22 | 9 839 | 65 |
+| | F2 + F1 | yes | 44 | 0.01 | −0.14 / 0.006 | 110 | 1 |
+| 3 x 3 platform 5 high, 6 above | F2 | yes | 27 | 0.29 | −0.12 / 0.22 | 9 605 | 56 |
+| | F2 + F1 | yes | 44 | 0.01 | −0.14 / 0.006 | 110 | 1 |
+
+On the 1 x 1 shaft 10 deep, F2's own `edgeOf` lands the chain `approach-10/4`, settle, settle (margin
+0.1, 118 ticks from 3 over the rim, 0.004 off, h 0.008), but `planRoute` finds it with neither library
+within 60 000 nodes. The search, not the edges, is what misses there. On the 2 x 2 shaft, a settle at the
+goal cell's centre is 0.5 from two walls, so a margin of 0.2 touches them; it needs a landing goal of
+several cells or a smaller margin in a shaft.
+
 ## The kit
 
 The flight kit is the elytra, the firework rockets and **the fireworks box**: any shulker box whose
@@ -729,6 +1111,7 @@ Rules (all named `// Track AU` in the shared files):
 | `flyRecheckBlocks` | 24 | Track BL: a walk that did not fly looks for a takeoff again every this many blocks (and when the kit becomes ready, and out from under a roof) |
 | `flyPreferRatio` | 1.5 | Track BL: walk to a takeoff site and fly when the whole walk would take this many times longer |
 | `flySiteSearch` | 48 | Track BL: the radius of the takeoff-site search when the takeoff here is refused (0 = off: the walk-out legs) |
+| `flyLandStyle` | auto | Track F1: `flare` lands with the flare only, `brake` with the brake / elevator landing only, `auto` flies the flare and takes the brake for a precision goal (a pillar top, a shaft floor, a cell under a low roof) or when the flare's plans keep missing ("Manoeuvres") |
 
 ## Processes
 
@@ -1095,6 +1478,20 @@ breeding pen, remembered forests, the stash chest, `!bring`): a flight there wou
 job's own process rather than as a process of its own.
 
 ## Open points
+
+- Track F1: a corridor approach under a roof at ground level (the roof cases of `fly-brake.test.ts` on the
+  ground, not 20 up) ends `roof`: the cruise and the corridor entry come in under the roof's level. The
+  test cases stand on a platform 20 up. This is a Track BF / AU2 corridor limit, not the brake's.
+- Track F1: the farm and the overhang corridors still go around once when the corridor entry arrives
+  3 to 10 under the floor (Track BF's open point below). No family lands from there without a rocket.
+- Track F1: the touchdown under a roof 3 above is up to 0.30 a tick (the brake comes in along the
+  corridor and has 3 of room to sink). Elsewhere the brake touches down under 0.02 a tick offline.
+- Track F1: the glide-down check (`planGlideDown`'s `simulateFlight`) always simulates the brain in `auto`,
+  while the glide down itself flies the setting's style. On a plain floor the two fly the same flare; with
+  `flyLandStyle brake` the check may accept or refuse a glide that the brake would fly differently. A glide
+  down that brakes is not measured on the server.
+- Track F1: the hotbar-switch boost, rocket stacking, the wall kiss and the rocket brake are stubs until
+  Track F0 measures them ("The stubs").
 
 - Track BL: a column that stays unknown until the body reaches it (a server that never sends the chunk)
   is assumed only 24 blocks over the highest known top. A taller mountain there is met by `steerClear` and

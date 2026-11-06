@@ -23,8 +23,13 @@
 //     off the centre is no reason to go around (`LandingTarget.cells`, plan.ts touchdownCost)
 //   - nothing confirmed: the nearest safe dry ground (the flight lands there, says so, and the walk
 //     still runs: it may find a way the bounded probe missed)
+//   - Track F1, a precision goal (`!fly <x y z>` onto a cell that is no plain floor: a pillar top, a shaft
+//     floor, an edge, a cell under a roof 3 above): dry and safe, it is the target itself (`precise`, the
+//     shaft's `rim`, its floor's `cells`) when the brake / elevator landing's simulation (brake.ts) lands
+//     on it, from above or along a corridor (`preciseGoal`); `style flare` keeps the Track BF behaviour
 import type { Vec3 } from '../../connection/types.ts';
-import { ApproachPlanner, APPROACH_DISTANCE, columnKey, hdist, yawDir, type FlightBody, type LandingTarget, type Obstacle } from './plan.ts';
+import { BrakePlanner } from './brake.ts';
+import { ApproachPlanner, APPROACH_DISTANCE, APPROACH_HEIGHT, columnKey, entryTop, hdist, yawDir, type FlightBody, type LandingTarget, type Obstacle } from './plan.ts';
 
 /** A cell of the live world model as the search sees it. */
 export interface CellBlock {
@@ -137,6 +142,8 @@ export interface LandingOptions {
   exact?: number;
   /** Share of the candidate columns that must be live, else the search is `unknown` (partly loaded). */
   liveShare?: number;
+  /** Track F1: the landing family (flyLandStyle): `flare` keeps the Track BF search; `auto` / `brake` add the precision goal and the brake's corridors. */
+  style?: 'auto' | 'flare' | 'brake';
 }
 
 export interface LandingCell {
@@ -144,6 +151,8 @@ export interface LandingCell {
   z: number;
   feet: number;
   kind: CandidateKind | 'goal' | 'ground';
+  /** Track F1: a precision goal (no plain floor: stillLandable checks it dry, safe and with PRECISE_HEADROOM). */
+  precise?: boolean;
 }
 
 export type LandingPlan =
@@ -234,13 +243,14 @@ export interface Corridor {
 
 /**
  * The open corridors into an overhang cell (x, z) at `feet`: bearings 15 degrees apart along which the
- * glide's cells (feet .. feet + 3 on the line, feet + 1 .. feet + 2 a block either side) are free and
+ * glide's cells (feet .. feet + free - 1 on the line: 4, Track F1: 3 for the brake under a roof 3 above;
+ * feet + 1 .. feet + 2 a block either side) are free and
  * loaded until a column with open sky over the feet (`OPEN_SKY`) within `maxUnder` blocks, and beyond
  * it the approach from above (cells around a line rising 0.2 per block) is free for 40 blocks (cells
  * beyond 24 out may be unloaded). Sorted: the shortest stretch under the roof first, bearings 45
  * degrees apart at least.
  */
-export function corridorsOf(look: BlockLookup, x: number, z: number, feet: number, maxUnder: number): Corridor[] {
+export function corridorsOf(look: BlockLookup, x: number, z: number, feet: number, maxUnder: number, free = 4): Corridor[] {
   const solidOr = (cx: number, y: number, cz: number, unknown: boolean): boolean => {
     const b = look(cx, y, cz);
     return b === undefined ? unknown : b.solid;
@@ -254,14 +264,14 @@ export function corridorsOf(look: BlockLookup, x: number, z: number, feet: numbe
     let ok = true;
     for (let s = 1; s <= maxUnder + 1 && ok; s++) {
       const c = col(s);
-      for (let y = feet; y <= feet + 3; y++) if (solidOr(c.x, y, c.z, true)) ok = false;
+      for (let y = feet; y <= feet + free - 1; y++) if (solidOr(c.x, y, c.z, true)) ok = false;
       for (const lat of [-1, 1]) {
         const l = col(s, lat);
         for (let y = feet + 1; y <= feet + 2; y++) if (solidOr(l.x, y, l.z, true)) ok = false;
       }
       if (!ok) break;
       let open = true;
-      for (let y = feet + 4; y <= feet + OPEN_SKY; y++) {
+      for (let y = feet + free; y <= feet + OPEN_SKY; y++) {
         if (solidOr(c.x, y, c.z, true)) {
           open = false;
           break;
@@ -288,24 +298,99 @@ export function corridorsOf(look: BlockLookup, x: number, z: number, feet: numbe
  * The approach simulation into an overhang along `bearing`: from the corridor's entry (56 out, 12
  * above the floor, 1.05 blocks a tick heading in; and from 40 out, 7 above) the approach planner
  * (the flight's own, with the world's solids as walls) must find a profile that lands on the target.
+ * Track F1: `style` brake simulates the brake / elevator landing (brake.ts) instead, `auto` the flare
+ * first, then the brake (`style` in the result: the family that landed).
  */
-export function corridorLands(target: LandingTarget, bearing: number, obstacle: Obstacle, seed = 7): { ok: boolean; cost: number; kind: string } {
+export function corridorLands(target: LandingTarget, bearing: number, obstacle: Obstacle, seed = 7, style: 'auto' | 'flare' | 'brake' = 'flare'): { ok: boolean; cost: number; kind: string; style: 'flare' | 'brake' } {
   const d = yawDir(bearing);
-  let best = { ok: false, cost: Infinity, kind: 'none' };
-  for (const [out, up] of [
-    [APPROACH_DISTANCE, 12],
-    [40, 7],
-  ] as const) {
-    const body: FlightBody = { pos: { x: target.x + d.x * out, y: target.top + up, z: target.z + d.z * out }, vel: { x: -d.x * 1.05, y: -0.1, z: -d.z * 1.05 }, onGround: false, gliding: true, boostTicks: 0 };
-    const planner = new ApproachPlanner(seed, obstacle);
-    const c = planner.step(body, bearing + 180, target);
-    if (c.cost < best.cost) best = { ok: c.touchdown.kind === 'landed' && c.cost < CORRIDOR_COST, cost: c.cost, kind: c.touchdown.kind };
-    if (best.ok) break;
+  let best: { ok: boolean; cost: number; kind: string; style: 'flare' | 'brake' } = { ok: false, cost: Infinity, kind: 'none', style: style === 'brake' ? 'brake' : 'flare' };
+  for (const family of style === 'auto' ? (['flare', 'brake'] as const) : ([style] as const)) {
+    for (const [out, up] of [
+      [APPROACH_DISTANCE, 12],
+      [40, 7],
+    ] as const) {
+      const body: FlightBody = { pos: { x: target.x + d.x * out, y: target.top + up, z: target.z + d.z * out }, vel: { x: -d.x * 1.05, y: -0.1, z: -d.z * 1.05 }, onGround: false, gliding: true, boostTicks: 0 };
+      const c = family === 'flare' ? new ApproachPlanner(seed, obstacle).step(body, bearing + 180, target) : new BrakePlanner(seed, obstacle).step(body, bearing + 180, target);
+      if (c.cost < best.cost) best = { ok: c.touchdown.kind === 'landed' && c.cost < CORRIDOR_COST, cost: c.cost, kind: c.touchdown.kind, style: family };
+      if (best.ok) return best;
+    }
   }
   return best;
 }
 /** An overhang approach is flown only when its simulated plan costs under this (a soft landing; the go-around threshold is 35). */
 export const CORRIDOR_COST = 30;
+
+/** Track F1: the least room over a precision goal (feet .. feet + 2 free: the gliding box 0.6 high, the brake's height wobble). */
+export const PRECISE_HEADROOM = 3;
+
+/** Track F1: the top (feet height) of the wall in column (x, z) that rises from `feet` (solid from there up, at most to `to`; unknown counts as solid), or -Infinity (open at `feet`: no wall, a roof over it is none either). */
+function wallTop(look: BlockLookup, x: number, z: number, feet: number, to: number): number {
+  let y = feet;
+  for (; y <= to; y++) {
+    const b = look(x, y, z);
+    if (b !== undefined && !b.solid) break;
+  }
+  return y === feet ? -Infinity : y;
+}
+
+/**
+ * Track F1 (docs/flight.md "Manoeuvres"): the exact goal (x, z) on floor `f` as a precision target for the
+ * brake / elevator landing (brake.ts): dry and safe, PRECISE_HEADROOM or more over it, with its floor's
+ * cells (the same height, connected, within 1.5: a 2 x 2 shaft floor), a shaft's rim (the lowest top of
+ * the columns around those cells when every one rises 2 or more over the feet: the approach, the glide
+ * line and the go-around fly over it) and, under a roof (a ceiling within OPEN_SKY), the corridor in
+ * (corridorsOf with the room the roof leaves). The landing is simulated (BrakePlanner, the world's solids as
+ * walls): from above along four bearings, or along the corridors; undefined when nothing lands.
+ */
+export function preciseGoal(view: ColumnView, look: BlockLookup, obstacle: Obstacle, x: number, z: number, f: Floor, o: Pick<LandingOptions, 'maxUnder'>): { target: LandingTarget; line: string } | undefined {
+  if (f.wet || f.hazard) return undefined;
+  const room = f.ceiling === undefined ? Infinity : f.ceiling - f.feet;
+  if (room < PRECISE_HEADROOM) return undefined;
+  // the floor's cells: the same height, dry, connected, within 1.5
+  const cells = new Set<number>([columnKey(x, z)]);
+  const list: [number, number][] = [[x, z]];
+  for (const [cx, cz] of list) {
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      const nx = cx + dx;
+      const nz = cz + dz;
+      if (cells.has(columnKey(nx, nz)) || Math.hypot(nx - x, nz - z) > 1.5) continue;
+      const g = view.floorNear(nx, nz, f.feet, 0);
+      if (!g || g.wet || g.hazard || (g.ceiling === undefined ? Infinity : g.ceiling - g.feet) < PRECISE_HEADROOM) continue;
+      cells.add(columnKey(nx, nz));
+      list.push([nx, nz]);
+    }
+  }
+  // the rim: every column around the cells is a wall from the floor up, 2 or more over the feet (a shaft), its lowest top
+  let rim = Infinity;
+  for (const [cx, cz] of list) {
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        if (cells.has(columnKey(cx + dx, cz + dz))) continue;
+        rim = Math.min(rim, wallTop(look, cx + dx, cz + dz, f.feet, f.feet + OPEN_SKY));
+      }
+    }
+  }
+  const shaft = Number.isFinite(rim) && rim >= f.feet + 2;
+  const base: LandingTarget = { x: x + 0.5, z: z + 0.5, top: f.feet, half: 0.5, precise: true, ...(cells.size > 1 ? { cells } : {}), ...(shaft ? { rim } : {}) };
+  const what = shaft ? `a shaft floor ${rim - f.feet} deep (${cells.size} cell${cells.size === 1 ? '' : 's'})` : room > OPEN_SKY ? `a precision cell (${cells.size} cell${cells.size === 1 ? '' : 's'} at its height)` : `a cell under a roof ${room} above`;
+  if (room > OPEN_SKY) {
+    // open above: the brake from the approach entry over its top (or the rim) along four bearings
+    for (const bearing of [0, 90, 180, 270]) {
+      const d = yawDir(bearing);
+      const body: FlightBody = { pos: { x: base.x + d.x * APPROACH_DISTANCE, y: entryTop(base) + APPROACH_HEIGHT, z: base.z + d.z * APPROACH_DISTANCE }, vel: { x: -d.x * 1.05, y: -0.1, z: -d.z * 1.05 }, onGround: false, gliding: true, boostTicks: 0 };
+      const c = new BrakePlanner(7, obstacle).step(body, bearing + 180, base);
+      if (c.touchdown.kind === 'landed' && c.cost < CORRIDOR_COST) return { target: base, line: `${what}, the brake landing simulated in from ${bearing} (cost ${c.cost.toFixed(1)})` };
+    }
+    return undefined;
+  }
+  // under a roof: along a corridor with the room it leaves
+  for (const k of corridorsOf(look, x, z, f.feet, o.maxUnder, Math.min(4, room)).slice(0, 3)) {
+    const t: LandingTarget = { ...base, bearing: k.bearing, ...(f.ceiling !== undefined ? { ceiling: f.ceiling } : {}) };
+    const sim = corridorLands(t, k.bearing, obstacle, 7, 'brake');
+    if (sim.ok) return { target: t, line: `${what}, in from ${k.bearing} (${k.under} under the roof, the brake landing simulated: cost ${sim.cost.toFixed(1)})` };
+  }
+  return undefined;
+}
 
 /** The ranking's extra walk for an overhang landing: 4, and 2 per block of the corridor under the roof (the open ground beside a big roof wins). */
 export function roofPenalty(corridor: Corridor | undefined): number {
@@ -427,6 +512,15 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
       o.exact !== undefined ? { x: gx + 0.5, z: gz + 0.5, top: own.feet, half: o.exact } : walkTarget(cell, cellsAround(view, cell, 'open', walkSlack(0) + 1, o.headroom));
     return { kind: 'goal', cell, walk: 0, target, line: `landing for ${label}: the goal itself (${fmtCell(cell)}, ${o.exact !== undefined ? 'exact' : `${target.cells?.size ?? 1} cells`})` };
   }
+  // Track F1: an exact goal that is no plain floor (a pillar top, a shaft floor, an edge, under a low roof): the
+  // brake / elevator landing onto it when its simulation lands (flyLandStyle flare: the Track BF search below)
+  if (o.exact !== undefined && own && o.style !== 'flare') {
+    const p = preciseGoal(view, deps.look, deps.obstacle, gx, gz, own, o);
+    if (p) {
+      const cell: LandingCell = { x: gx, z: gz, feet: own.feet, kind: 'goal', precise: true };
+      return { kind: 'goal', cell, walk: 0, target: p.target, line: `landing for ${label}: the goal itself (${fmtCell(cell)}, ${p.line})` };
+    }
+  }
   const { list, columns, live } = candidatesNear(view, goal, o);
   await yieldNow();
   if (live < columns * (o.liveShare ?? 0.85)) return { kind: 'unknown', line: `landing for ${label}: only ${live} of ${columns} columns loaded around the goal` };
@@ -437,6 +531,8 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
     corridor?: Corridor;
     status: ProbeOutcome['status'] | 'skip';
   }
+  // Track F1: the overhang cells only the brake's simulation lands on (the brain plans the brake there from the start)
+  const brakeOnly = new Set<Candidate>();
   const probed: Probed[] = [];
   // probes that exhausted the space without a path: their whole plateau is skipped (feet -> columns)
   const dead = new Map<number, Set<number>>();
@@ -482,8 +578,10 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
       for (const k of corridors.slice(0, 2)) {
         sims++;
         const target = walkTarget({ ...c, kind: 'roof' }, cells, { bearing: k.bearing });
-        if (corridorLands(target, k.bearing, deps.obstacle).ok) {
+        const sim = corridorLands(target, k.bearing, deps.obstacle, 7, o.style ?? 'flare');
+        if (sim.ok) {
           corridor = k;
+          if (sim.style === 'brake') brakeOnly.add(c);
           break;
         }
       }
@@ -522,7 +620,7 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
     const walk = best.blocks - roofPenalty(best.corridor);
     const cell: LandingCell = { x: c.x, z: c.z, feet: c.feet, kind: c.kind };
     const cells = cellsAround(view, cell, c.kind, walkSlack(walk), o.headroom);
-    const target = walkTarget(cell, cells, best.corridor ? { bearing: best.corridor.bearing, ...(c.ceiling !== undefined ? { ceiling: c.ceiling } : {}) } : {});
+    const target = walkTarget(cell, cells, best.corridor ? { bearing: best.corridor.bearing, ...(c.ceiling !== undefined ? { ceiling: c.ceiling } : {}), ...(brakeOnly.has(c) ? { precise: true } : {}) } : {});
     return { kind: 'cell', cell, walk, target, line: `${head} -> ${fmtCell(cell)}${best.corridor ? ` under a roof (ceiling ${c.ceiling}), in from ${best.corridor.bearing}` : ''}, ${Math.round(walk)} blocks of walk, ${cells.size} cells` };
   }
   // nothing confirmed: the nearest safe dry ground; a probe that ran out of budget before one that proved there is no way
@@ -561,10 +659,11 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   return { kind: 'fallback', cell: pick, walk: est, target: walkTarget(pick, cells), why, line: `${head} -> none confirmed: dry ground at ${fmtCell(pick)} (${why})` };
 }
 
-/** The walk from `p` to the goal is still what the plan said: the landing cell is dry, sound and live (re-checked in the descent). */
-export function stillLandable(look: BlockLookup, c: { x: number; z: number; feet: number }, headroom: number): boolean {
+/** The walk from `p` to the goal is still what the plan said: the landing cell is dry, sound and live (re-checked in the descent; Track F1: a precision goal dry, safe and with PRECISE_HEADROOM). */
+export function stillLandable(look: BlockLookup, c: { x: number; z: number; feet: number; precise?: boolean }, headroom: number): boolean {
   const view = new ColumnView(look, c.feet);
   const f = view.floorNear(c.x, c.z, c.feet, 0);
+  if (c.precise) return !!f && !f.wet && !f.hazard && (f.ceiling === undefined || f.ceiling - f.feet >= PRECISE_HEADROOM);
   return !!f && view.kindOf(f, headroom) !== undefined && view.sound(c.x, c.z, f);
 }
 
