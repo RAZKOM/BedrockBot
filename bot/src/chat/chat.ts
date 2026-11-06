@@ -15,6 +15,12 @@ const MAX_BLOCK = 440;
 /** The "route was refused" line waits this long, so replies refused together are resent before it. */
 const WARN_DELAY_MS = 400;
 
+/** A kick the server gives for a slash command it would not take (seen on the Realm during the End credits). */
+export const COMMAND_KICK = /invalid_command_request/i;
+
+/** After such a kick, replies go out as plain chat this long (a restart or `!colors` tries the route again sooner). */
+export const KICK_OFF_MS = 10 * 60_000;
+
 /** Who sent a chat line. The console is `say` / `tell` typed into the BDS console (or docker exec). */
 export type Sender = { kind: 'console' } | { kind: 'player'; name: string; xuid: string };
 
@@ -161,6 +167,7 @@ export class Chat {
   private readonly replyTimes: number[] = [];
   private off: (() => void) | undefined;
   private offOutput: (() => void) | undefined;
+  private offClose: (() => void) | undefined;
   private readonly route = new SlashRoute(() => Date.now());
   /** The `chatVia` value the last message saw, to notice a switch to a slash route (a restart counts: undefined before the first message). */
   private lastVia: string | undefined;
@@ -227,6 +234,9 @@ export class Chat {
    */
   styleSource: { color(): boolean; lines(): boolean; via?(): string } | undefined;
 
+  /** True while no slash command may be sent (the End credits, world/credits.ts): replies go out as plain chat. */
+  slashHold: (() => boolean) | undefined;
+
   /** The switches right now (both off when no source is wired or it throws). While replies go out as tellraw a Doc measures its messages as the command counts them (`tellraw`). */
   styleMode(): StyleMode {
     try {
@@ -252,6 +262,7 @@ export class Chat {
         this.lastVia = via;
         if (isRouteStyle(via)) this.retryRoute();
       }
+      if (this.slashHold?.()) return undefined; // e.g. the End credits: the server kicks for any command until they end
       return isRouteStyle(via) && this.route.usable() ? via : undefined;
     } catch {
       return undefined;
@@ -322,6 +333,10 @@ export class Chat {
     this.offOutput = this.conn.on('command_output', (p) => {
       this.onCommandOutput(p);
     });
+    // a kick FOR a command (the End credits, 2026-11-04): replies go out as chat for a while, so the reconnect does not loop
+    this.offClose = typeof this.conn.onClose === 'function' ? this.conn.onClose((info) => {
+      this.onClose(info);
+    }) : undefined;
   }
 
   stop(): void {
@@ -329,8 +344,18 @@ export class Chat {
     this.off = undefined;
     this.offOutput?.();
     this.offOutput = undefined;
+    this.offClose?.();
+    this.offClose = undefined;
     clearTimeout(this.warnTimer);
     this.warnTimer = undefined;
+  }
+
+  /** The server dropped the connection over a command request: the slash route stays off for KICK_OFF_MS, across the reconnect. */
+  private onClose(info: { kind?: string; reason?: string; kick?: { reason: string } }): void {
+    const reason = info.kick?.reason ?? info.reason ?? '';
+    if (info.kind !== 'kick' || !COMMAND_KICK.test(reason)) return;
+    this.route.refuse(reason, KICK_OFF_MS);
+    this.log.warn(`kicked for a command request (${reason}): replies go out as plain chat for ${KICK_OFF_MS / 60_000} min`);
   }
 
   /** `command_output` for one of our slash commands: when it failed, resend the text as chat and pause the route (route.ts). */

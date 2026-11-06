@@ -90,6 +90,8 @@ export const SETTING_DEFS = {
   guardRadius: { kind: 'number', default: 16, min: 2, max: 64, integer: true, unit: 'blocks', description: 'guard: fight hostiles within this radius of home' },
   fleeHealth: { kind: 'number', default: 8, min: 0, max: 20, unit: 'health', description: 'flee to the shelter / home below this health with a hostile near (0 = never)' },
   nudgeInterval: { kind: 'number', default: 240, min: 0, max: 86400, unit: 's', description: 'keepalive nudge interval (0 = never); applies from the next nudge' },
+  eventsDays: { kind: 'number', default: 14, min: 1, max: 365, integer: true, unit: 'days', description: 'event history: days kept (docs/events.md)' }, // decision 0059
+  eventsMaxMb: { kind: 'number', default: 64, min: 1, max: 4096, integer: true, unit: 'MB', description: 'event history: size cap, oldest days go first' }, // decision 0059
   followDistance: { kind: 'number', default: 3, min: 1, max: 16, unit: 'blocks', description: '!follow stops this close to the target' },
   // placeholders read by other tracks (wave 6: nav, survival, farming, mining)
   avoidMobRadius: { kind: 'number', default: 4, min: 0, max: 32, unit: 'blocks', description: 'planner: keep this far from hostile mobs (placeholder, Track R/S)' },

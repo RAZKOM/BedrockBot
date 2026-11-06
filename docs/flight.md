@@ -59,6 +59,11 @@ authoritative. Decision record: [decisions/0042-elytra-flight.md](decisions/0042
 | `bot/src/skills/fly/maneuvers-route.ts` | Track F1: the library as Track F2 route-planner edges (`asRoute`, `settleRoute`, `approachRoute`, `routeLibrary`) |
 | `bot/test/unit/skills/fly-maneuvers.test.ts`, `fly-maneuvers-route.test.ts`, `fly-brake.test.ts`, `fly-worlds.ts`; `bot/test/e2e/fly-maneuver.test.ts` | Track F1: every manoeuvre on stepBody against the model; the route edges flown as F2 flies them; the brake family, the precision goals, the pillar / shaft / roof / wall / farm trips, the go-around shortening, the flare regression; the e2e pillar / roof3 / roof4 / shaft2 / shaft1 / wall / farm cases |
 | `docker/compose.fly.yml` | `bds-fly` |
+| `bot/src/skills/fly/route/types.ts` | Track F2: the route problem (`RouteState` with the boost range, `RouteControl`, `RouteGoal`, the `Maneuver` plug, `RouteEdge`, `RoutePlan`, the costs) |
+| `bot/src/skills/fly/route/grid.ts`, `primitives.ts`, `search.ts`, `robust.ts` | Track F2: the grid and the swept box (`sweep`), the manoeuvre library and `edgeOf` (the burn branches, `replay`), the hybrid A* (`planRoute`, `heuristic`, `energyHeight`), the burn check (`checkRobust`) |
+| `bot/src/skills/fly/route/tracker.ts`, `worker.ts`, `live.ts` | Track F2: the per-tick tracker (`RouteTracker`), the search in a worker thread (`RoutePlannerClient`, `snapshotFor`), the tracker on the InputLoop (`flyRoute`) |
+| `bot/src/skills/fly/route/courses.ts`, `bench.ts` | Track F2: the course generator (`tunnel`, `field`, `standardCourses`, the fills for the truth pack) and the offline harness (`flyCourse`, `benchLine`) |
+| `bot/test/unit/skills/fly-route.test.ts`; `bot/test/e2e/fly-route.test.ts` | Track F2: the sweep, the primitives against stepBody, the search, the tracker, the worker, the benchmark set; the e2e tunnels on bds-fly3 |
 
 ## Packets (BDS 1.26.60.6, measured on bds-fly)
 
@@ -1477,6 +1482,240 @@ there would need its own path inside it), and the walks inside a job (the cook s
 breeding pen, remembered forests, the stash chest, `!bring`): a flight there would have to run inside the
 job's own process rather than as a process of its own.
 
+## Route planner (Track F2)
+
+Decision record: [decisions/0058-flight-planner.md](decisions/0058-flight-planner.md). Container: `bds-fly3`
+(udp/19212, FLAT, peaceful, fall damage ON, the truth pack; not in `scripts/bds.mjs`; the fly e2e helpers read
+`FLY_BDS_PORT=19212 FLY_BDS_CONTAINER=bds-fly3`). The planner that lets the bot fly a random tunnel with
+curves and turns and take off out of a tight place: a search over the body's state in the voxel grid with the
+glide formula as its edges, a tracker that flies the plan tick by tick, and the benchmark that says what it can
+and cannot do. Nothing calls it from a command yet (`flyRoute` is the e2e's entry; the integration is Track F3).
+
+### The problem (`route/types.ts`)
+
+| Piece | What |
+|---|---|
+| state | feet position, velocity, the look yaw, the boost ticks left as a **range** (`min`, `max`, and the `nom` the plan is simulated with: a rocket burns 12 to 18 ticks, the plan assumes 15, the end is known about 3 ticks late), gliding or standing, rockets in the hand, goals passed |
+| controls a tick | yaw, pitch, a rocket; for a takeoff the jump key and the glide request |
+| the body | the 0.6 x 0.6 x 0.6 gliding box over the feet (physics.ts GLIDE.height), with a margin round it (`margin`: 0.3 in a 3 x 3 bore, 0.2 in a 2 x 2, 0.12 in a 1-wide one, plan.ts's 0.4 in the open) |
+| the grid | the world model's solid cells; **an unknown cell is solid** (the takeoff sky check's rule; the cruise's `skyQuery` does the opposite on purpose) |
+| goals | in order: a **waypoint** (pass through a box: the feet inside it at a tick's end or midpoint), a **landing** (touch the cell's top inside it at under 0.3 blocks a tick, vertical and horizontal); a **takeoff** is a start state that stands |
+| cost | ticks + 20 per rocket (`ROCKET_COST`) + the risk: per tick, 1 minus the box's clearance over 1 block (`RISK_COST` 0.5 a tick at the wall) |
+
+### The swept box (`route/grid.ts`)
+
+A tick moves the box up to 2.5 blocks, more than a cell, and `moveBody` moves it along **y, then x, then z**.
+`sweep` samples the box every quarter block along those three legs (the corners included) against the solid
+cells of the move's hull: a hit when a cell is within the margin of any sample, else the least distance (the
+risk). Two things the straight line misses: a body climbing a 45-degree stair rises into the step's ceiling
+before it goes forward (the first staircase run hit with the tracker 0.00 off its plan, before the order was
+copied), and a fast diagonal move in a 2-wide diagonal bore collides on the axis path although the line is
+clear (the per-axis order is why random 2 x 2 tunnels are at the edge of what the body can do at all). The
+first version swept the hull of the two end boxes: it failed every curved bore on the hull's corners.
+
+### The search (`route/search.ts`, `route/primitives.ts`)
+
+Hybrid A*: the state is continuous, the closed set lives on a lattice (half-block cells, 15-degree heading
+buckets, speed buckets of 0.25, sink buckets of 0.2, a boost bucket, the rockets, the goals passed). An
+expansion flies every primitive of the library from the node's exact state for 3 ticks (`EDGE_TICKS`: the look
+lags the velocity by about 2 ticks under a rocket) on `glideVelocity`, sweeping every tick; an edge that hits
+is dropped, the rest become children with the cost above. The heuristic: the chained distance through the
+remaining goals over the boosted speed (1.7), plus the rockets the climb beyond the body's **energy height**
+needs (vy² / 0.08 of momentum plus 11 h² of zoom climb; 45 blocks a rocket; infinite when the hand cannot buy
+it, so an unreachable goal is refused at once), and for a landing the ticks to bleed the speed (6 a block a
+tick) and to come down at 0.2 a tick. It is a weighted A* (a steep dive beats 1.7 a tick; the bleed is an
+estimate): fast, not optimal. Budgets in nodes and ms; when they run out the best partial plan comes back (most
+goals passed, then nearest the next), with `why`.
+
+The primitives are a **`Maneuver`** (types.ts): a name and family, `applies(state)`, `control(start, now,
+tick)` (yaw, pitch, fire), `ticks(start)` and an optional `done`. `edgeOf` simulates one and takes the swept
+boxes, the ticks, the rockets and the clearance from the simulation. The minimal library (temporary, until
+Track F1's manoeuvres plug in): steady glides at −20 to 35, coordinated turns (the look held 25 / 50 / 90
+degrees off the velocity, level or 15 down), rockets straight at −60 to 20 (−45 is the staircase's), powered
+snaps (a rocket with the look snapped 45 / 90 off the heading), the boost held along the velocity, the 180
+brake (until under 0.2 a tick), the hover flip, the settle onto a landing cell (the hover held until contact
+within 4 blocks of the cell) and the jump takeoff (jump + glide, then a pitch, a rocket on the first gliding
+tick or none; under a 2-high ceiling the jump is clipped as moveBody clips it). The library for a state is 30 to
+45 edges.
+
+**What F1's manoeuvres must expose to plug in**: the `Maneuver` interface, nothing else: a pure control law
+over `(start, now, tick)` returning `{ yaw, pitch, fire }` in absolute Bedrock degrees, `applies` (speed range,
+a rocket needed or burning, a standing body), `ticks` (at most 40) and optionally `done`. No side effects, no
+own collision check, no own estimate of the outcome: the planner sweeps what the law does. A manoeuvre that
+needs the goal (a brake aimed at a cell) is built per request (`libraryFor(families, ticks, takeoffYaws,
+goals)`), as `settle` is. The families (`glide`, `turn`, `rocket`, `brake`, `hover`, `takeoff`, `maneuver`)
+only serve the benchmark's ablations.
+
+### Robust to the burn (`route/robust.ts`, the burn branches)
+
+From every rocket the search carries two shadow bodies, the burn at its shortest (12) and its longest (18),
+stepped with the same controls and swept like the nominal: an edge is only taken when all three clear, until
+the shadows have converged back onto the nominal (within 0.3 after the burn). A plan found that way is robust
+to the burn by construction; when none exists the search runs once more without the branches (the rest of the
+budget) and the plan says `robust: false`. A finished plan is re-flown open loop with every burn end 12..18 of
+every rocket, the others nominal, plus all-shortest and all-longest (`checkRobust`: 6 branches a rocket + 2),
+and reports whether every branch clears and still passes the goals, and the least clearance. The open-loop
+check is the conservative statement: the tracker flies closed loop and corrects most of the drift (the
+staircase's plan is "robust NO" open loop and flown without a hit three times out of three).
+
+### The tracker (`route/tracker.ts`)
+
+Every tick the real body (the loop's state; stepBody's in the benchmark) is matched to the plan's reference
+state nearest in time (the plan's start counts), and the next control is **re-optimised around the plan's**:
+the plan's control and yaw perturbations of ±4 / 8 / 16 and pitch of ±6 / 12 are each flown 8 ticks on the
+formula followed by the plan's controls, scored by the weighted distance to the reference path and a hit
+penalty, and the best first tick is flown (the landing planner's style). The burn is **read off the body**:
+the velocity the last control produced is either the boosted or the plain glide step of the last one (the gain
+is 0.5 towards 1.5 along the look), so an early end is known a tick after it, not three, and a burn past the
+nominal is seen as it goes on. A new plan is asked for from the real state (the boost range as believed, the
+goals left) when the body is a block off the reference (`REPLAN_ERROR`), when the corridor of the next 20 plan
+ticks is blocked in the grid (`noteWorldChange`: newly loaded chunks, a changed block; checked every 4 ticks
+anyway), when a correction moved the body (`noteCorrection`), when the burn ended before the plan assumed, or
+when the plan runs out. The old plan is flown meanwhile (a worker may answer later); with no plan a level glide
+along the heading is held; when the planner finds no edge from the body's state (it drifted inside the margin)
+the first edges of the next plan keep half the body's real clearance and an **evade** rule flies the control
+clear of a hit the longest with no margin while the planner is asked again; 40 ticks without any plan fail.
+A passed goal does not end the plan (its goals are its own list); a landing goal is passed when the body stands
+on the cell.
+
+### Off the main thread (`route/worker.ts`)
+
+The 0023 pattern: the same file as a `worker_threads` Worker (`workerData.bedrockbotRoute`), one search at a
+time; `RoutePlannerClient.plannerOver(grid)` is a tracker planner that snapshots the box around the start and
+the goals (padded 24, at most 256 a side; one byte a cell, 1 = solid or unknown; outside = solid) on the main
+thread and resolves the plan from the worker. The unit test checks 500 random cells of the snapshot against the
+grid and that the worker's plan is the in-thread plan control for control. The in-thread search answers
+synchronously (the benchmark, the e2e's 300 ms budget).
+
+### Benchmark (`route/courses.ts`, `route/bench.ts`; the unit test prints the table)
+
+The courses are fully known worlds over the flat ground plus the fill boxes that build them with `truth:fill`
+(the hull in stone slabs under 32 768 blocks, the bore in run-length air boxes), so the offline and the server
+runs fly the same cells. A tunnel is a centreline of segments (straights, arcs of a radius and angle, sharp
+corners, slopes) carved as the bore's cross-section every quarter block (an odd width through cell centres, an
+even one along cell boundaries; the band's every cell at any heading); the waypoints are the bore's
+cross-section at each segment's end and the exit. The harness flies the course on stepBody with the tracker,
+the burn of every rocket drawn at random in 12..18 (seeded) and its end told 3 ticks late, the planner
+in-thread with 40 000 nodes / 2 s. Metrics: success (every goal passed by the real body), hits (a collision while
+gliding; the speed at the first), the least clearance of the real body from any solid, ticks, rockets, the
+plans (re-plans, partial ones, ms), the tracker's largest error from its reference, the first plan's
+robustness over the burn branches (open loop).
+
+The standard set, seed 3 (`stair*` from standing; the rest entering at 1.2 blocks a tick with 8 rockets; the
+fields at 1.3 with 4):
+
+| Course | Result | Clearance | Ticks | Rockets | First plan | Robust (open loop) |
+|---|---|---|---|---|---|---|
+| straight 3x3, 40 long | ok, 0 hits | 0.38 | 37 | 1 | 2210 expanded, 391 ms | yes (0.45) |
+| straight 2x2 | ok, 0 hits | 0.53 | 37 | 1 | 435, 75 ms | yes (0.55) |
+| straight 1x2 (1 wide, 2 high; margin 0.12) | ok, 0 hits | 0.19 | 25 | 0 | 37, 7 ms | (no rocket) |
+| curve r16, 90°, 3x3 | ok, 0 hits | 0.31 | 30 | 1 | 2058, 446 ms | NO (0.00; flown 1.11 off at most, re-planned) |
+| curve r8, 3x3 | ok, 0 hits | 0.35 | 19 | 1 | 339, 56 ms | yes (0.35) |
+| curve r4, 3x3 | ok, 0 hits | 0.62 | 15 | 1 | 132, 22 ms | yes (0.62) |
+| curve r8, 2x2 | ok, 0 hits | 0.27 | 27 | 1 | 165, 26 ms | yes (0.27) |
+| corner 90°, 3x3 | ok, 0 hits | 0.37 | 14 | 1 | 75, 12 ms | yes (0.37) |
+| corner 90°, 2x2 | ok, 0 hits | 0.29 | 26 | 1 | 36, 5 ms | yes (0.29) |
+| S-bend 2x2 (r6, 60° each way) | ok, 0 hits | 0.26 | 19 | 1 | 56, 10 ms, partial first | yes (0.26) |
+| climb 3x3 (6 up over 20) | ok, 0 hits | 0.34 | 31 | 1 | 129, 23 ms | yes (0.34) |
+| drop 3x3 (8 down over 20) | ok, 0 hits | 0.31 | 30 | 1 | 814, 96 ms | yes (0.31) |
+| **staircase 45°, 3 high, from standing** (margin 0.15) | ok, 0 hits | 0.16 | 44 | 1 | 479, 82 ms | NO (0.00; flown 0.00 off) |
+| staircase 45°, 2 high, from standing | **hit** at 1.48 a tick after goal 1 | 0 | 8 | 1 | 2, partial | NO |
+| 1-high slot, 6 long (margin 0.12) | ok, 0 hits | 0.13 | 4 | 0 | 1, 0 ms | |
+| 1-high slot, 12 long | ok, 0 hits | 0.12 | 8 | 0 | 3, 1 ms | |
+| random 3x3 a (4 segments, seed 11) | ok, 0 hits | 0.30 | 47 | 2 | 3877, 937 ms | yes (0.30) |
+| random 3x3 b (seed 12) | ok, 0 hits | 0.38 | 47 | 1 | 6912, 2002 ms (the budget), partial first | yes (0.40) |
+| random 2x2 a (curves only, seed 21) | **hit** at 1.30 a tick after goal 3 of 5 | 0 | 21 | 1 | 51, partial | |
+| random 2x2 b (seed 22) | ok, 0 hits | 0.21 | 33 | 1 | 50, 11 ms, partial first | yes (0.21) |
+| field 1 (18 pillars and slabs in 60 x 24 x 60) | ok, 0 hits | 0.80 | 51 | 1 | 1177, 505 ms, partial first | yes |
+| field 2 | ok, 0 hits | 1.00 | 42 | 2 | 1459, 484 ms, partial first | yes |
+| field 3 | ok, 0 hits | 0.95 | 44 | 1 | 1743, 590 ms, partial first | yes |
+
+Against the envelope: a 90-degree turn needs a rocket in every bore (the glide turn's radius of 6 to 15 at
+a sink of 0.15 a tick does not fit a 3-high bore for 12 to 20 ticks), and the planner finds the powered snap
+(radius 1.4 to 3.7) and the boost held level through every curve down to radius 4; the 3-high staircase is
+flown as the envelope predicted (a 45-degree climb under boost at pitch −45, about ±0.4 of slack: the margin is
+0.15 there), the 2-high one is not (2.2 blocks needed; the jump is clipped to 0.2 by the ceiling and every edge
+from there is inside the margin); a 1-high slot is threaded level (the box is 0.6 high, the sink 0.15 a tick:
+0.4 of slack lasts under 3 ticks without a boost, and a boost at pitch 0 pulls the sink to 0). The fields' first
+plans are partial by the 2 s budget and the flights still arrive: the tracker re-plans from the partial plan's
+end. The random 2 x 2 tunnels are at the edge: their diagonal parts allow only slow flight (the per-axis path
+above), and a slow glide sinks out of a 2-high bore.
+
+The same courses with the world loading 12 blocks ahead of the body (`view: 12`: unknown is solid beyond,
+"chunks" every 4 blocks) are flown with re-plans on the loaded cells (the unit test's straight 3 x 3: ok, 0
+hits, re-plans > 0). From a stalled start (the body put into the bore at rest, as the e2e does it): curve r8
+3x3, S-bend 2x2 and corner 3x3 ok with 0 hits.
+
+The planning cost: an expansion is 30 to 45 edges of 3 swept ticks, about 0.1 to 0.15 ms; a tunnel's first
+plan 5 to 500 ms, a long random 3 x 3 up to the 2 s budget (40 000 nodes); the tracker's tick (35 candidates
+over 8 ticks) under a millisecond. The live driver gives the search 300 ms in-thread; the worker takes it off
+the tick when the integration wants more.
+
+### On the server (`route/live.ts`, `test/e2e/fly-route.test.ts`)
+
+`flyRoute(deps, { goals, margin, ... })` binds the tracker to the InputLoop for one route: the loop's state is
+the body, the control becomes the command (yaw, pitch, the jump key for a takeoff, the glide requested once
+the body falls and kept), a rocket is used as the controller does it (the firework's item-use transaction,
+`loop.boost()`, the rocket entity's `remove_entity` ending it with `loop.endBoost()` and the tracker's
+`rocketEnded`) and only once the loop's `GlideEvent` has confirmed the glide, the loop's corrections go to the
+tracker; the search runs in the worker (`planner`) or in-thread. The report: the end (`done`, `ground`, `failed`, `timeout`), ticks,
+rockets, the local model's hits, corrections and the largest, the least clearance, the goals reached, the
+tracker's stats. The e2e builds a course of the benchmark with the truth pack in the private area (the same
+fills), puts the bot in its bore with an elytra on and 16 rockets in the hand, flies it twice and reads the
+server's damage from the hurt log and the truth position against the exit. The numbers are under
+"Measurements (Track F2)".
+
+## Measurements (Track F2, bds-fly3, BDS 1.26.60.6)
+
+`fly-route` builds three courses of the benchmark with the truth pack and flies each twice with `flyRoute`
+(the search in the worker, 600 ms / 40 000 nodes; the local model's glide box margin as the benchmark's).
+Seven rounds were needed to get the takeoff and the entry right; the table is run 6 (the last one whose notes
+were printed), run 7 on the same code passed the suite's gate 3 of 3; the findings below are what the earlier
+rounds measured.
+
+| Course | Start | Run | End | Ticks | Rockets | Local hits | Corrections (max) | Damage (truth) | Plans (re / partial, ms) | Max error |
+|---|---|---|---|---|---|---|---|---|---|---|
+| tunnel 3x3: straight 10, curve r8 90°, straight 8, corner 90°, straight 10 (open exit) | standing in the bore | 1 | **done** 4/4, at the exit | 39 | 2 | 0 | 0 | 0 | 3 (2 / 0, 82) | 0.23 |
+| | | 2 | **done** 4/4, at the exit | 39 | 2 | 1 (a wall touch) | 1 (1.47) | 0 | 5 (4 / 1, 52) | 1.17 |
+| S-bend 2x2 (r6, 60° each way), open entrance and exit | gliding 14 blocks before the entrance, 10 up | 1 | ground after goal 1 of 5 | 36 | 1 | 0 | 1 (0.13) | 0 | 3 (2 / 3, 1033) | 4.63 |
+| | | 2 | **done** 5/5, at the exit | 51 | 1 | 0 | 2 (0.71) | 0 | 8 (7 / 5, 655) | 3.30 |
+| staircase 45°, 3 high (open exit) | standing in the flat section | 1 | done 3/3, at the top | 91 | 3 | 20 | 4 (1.55) | **13.5** (flyIntoWall x2) | 34 (33 / 29, 170) | 2.09 |
+| | | 2 | done 3/3, at the top | 48 | 3 | 9 | 2 (2.41) | **8.2** (flyIntoWall x2) | 21 (20 / 19, 21) | 2.17 |
+
+The gate: the tunnel done at the exit with 0 damage in both runs; the staircase done at the top (its damage
+recorded, not gated); the S-bend recorded. In run 4 (the search in-thread, the glide requested as the model
+does it) the staircase was flown twice with 0 damage and 0 hits, 29 ticks and 1 rocket each; the falling-tick
+rule below made the tunnel pass and the staircase scrape: the takeoff plan in its flat 3-high section is now a
+partial one (every primitive from the jump's apex hits at the margin of 0.15) and the body climbs the steps on
+re-plans every few ticks, touching them. The next step is a takeoff primitive measured by Track F0 on the
+server, not a longer guess.
+
+What the rounds measured on the server (the per-tick samples of `truth:glidelog` against the local trace):
+
+- **A glide starts only once the body falls.** After a jump the server's gliding flag comes 7 ticks later
+  (the rise of 6 ticks, then the request on the first falling tick, confirmed the tick after: run 5's trace
+  `7:a vy 0.42 ... 13:a vy -0.15, 14:G`); the brain's takeoff requests the glide on a falling tick for the
+  same reason. The model's loop glides from the first airborne tick when asked, 6 ticks before the server: a
+  correction of 0.89 every takeoff until the driver asked on the falling tick (run 6: 0 corrections in the
+  tunnel's first run). The planner's takeoff models those ticks as plain jump physics (`glideIn`, GLIDE_DELAY
+  7; 2 for a jump clipped by a ceiling).
+- **A rocket used before the server's gliding flag does nothing.** Runs 3 and 4: the plan's rocket on the
+  first local gliding tick left the server's body falling back to the floor; the driver holds a use until the
+  loop's `GlideEvent` confirmed the glide (`heldFires` in the report), the tracker read the missing boost off
+  the velocity a tick later (`burns read`).
+- **An in-thread search stalls the loop.** 300 ms of search blocked 6 ticks of input (run 4: a second plan
+  right after the jump put the body on the ground); the e2e plans in the worker since run 5. The tracker's
+  reference is matched anywhere up to the expected index when a plan arrives late.
+- **The local model is stale right after a build.** A plan made on cells the model had not received went
+  through stone (run 4, "the corridor ahead is blocked" at once); the e2e waits until every fill of the
+  course answers as built in the loop's block query.
+- **A gliding body teleported into a 2-high bore lands.** BDS ended the glide on the teleport (run 3) and a
+  glide requested 1.6 blocks up never started before the ground (run 4): the S-bend is entered from the open
+  air 10 blocks up, 14 before the entrance, and the open-air approach is where the 40 000-node budget runs out
+  (the partial first plans of the S-bend rows; a distance field through the bore is the open point).
+- **flyIntoWall** at 1.3 to 1.7 blocks a tick through a step's corner costs 4 to 8 damage a touch (the
+  staircase rows); the tunnel's one wall touch at low speed cost none. The threshold is Track F0's.
+
 ## Open points
 
 - Track F1: a corridor approach under a roof at ground level (the roof cases of `fly-brake.test.ts` on the
@@ -1493,6 +1732,23 @@ job's own process rather than as a process of its own.
 - Track F1: the hotbar-switch boost, rocket stacking, the wall kiss and the rocket brake are stubs until
   Track F0 measures them ("The stubs").
 
+- Track F2: the 2-high 45-degree staircase is not flown (the envelope's 2.2 blocks; the jump clipped to 0.2
+  under the ceiling leaves no edge within the margin), nor the fast diagonal parts of 2 x 2 bores (the per-axis
+  collision path); a 1-block step in a 2-high bore leaves a 1-high opening, so the random 2 x 2 courses have
+  curves only.
+- Track F2: the heuristic is an estimate (a weighted A*): the fields' and the long random tunnels' first plans
+  are partial within 2 s and the flight relies on re-planning; a distance field through the bore would guide
+  the search better. The lattice's buckets and the risk weight are untuned.
+- Track F2: the landing goal is flown offline only (a 1 x 1 cell in open air: a brake and the settle), not the
+  brake / elevator landings of Track F1 and not on the server; the stacked rockets, the slot switch and the
+  impact threshold wait for Track F0's measurements (`stackRockets` is off).
+- Track F2: `flyRoute` is the e2e's entry only; no command, no process, no integration with the FlightBrain
+  (Track F3). The live driver's rocket plumbing duplicates the controller's.
+- Track F2: on the server the 3-high staircase is climbed but scraped (8 to 13 of flyIntoWall, "Measurements
+  (Track F2)"): the takeoff out of its flat section has no complete plan at the margin of 0.15 once the jump
+  is modelled as the server flies it (7 ticks of plain jump before the glide). A takeoff primitive measured by
+  Track F0 (the jump's rise, the glide's first ticks, the first rocket) is the next step, as is a planner
+  heuristic that does not drown in the open air before an entrance (the S-bend's partial first plans).
 - Track BL: a column that stays unknown until the body reaches it (a server that never sends the chunk)
   is assumed only 24 blocks over the highest known top. A taller mountain there is met by `steerClear` and
   logged as a held / contact note.

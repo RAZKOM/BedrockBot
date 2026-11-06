@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { MapJson } from '../../src/health/map/schema.ts';
+import { PANEL_BUDGETS } from '../../src/health/panel/budgets.ts';
 import { cellActions, mapActions, settingActions, stackActions, type MenuAction } from '../../src/health/panel/menu.ts';
 import type { PanelState } from '../../src/health/panel/state.ts';
 import { centre, clearArea, connectPlayer, CORE_CONTAINER, E2E, FEET_Y, hdist, prepareServer, privateArea, sleep, startCli, until, waitOnline, type CoreCli } from './core-truth.ts';
@@ -119,7 +120,7 @@ describe.skipIf(!E2E)('core: control panel actions (Track AR)', () => {
     const html = await fetch(`${BASE}/`, { headers: AUTH }).then((r) => r.text());
     for (const m of ['id="menu"', 'id="toast"', 'id="palette"', 'id="mapcv"', 'id="modes-data"', 'data-grp="safety"', 'data-reset="guardRadius"', 'id="btn-pause"', 'id="log-level"']) expect(html).toContain(m);
     expect(html).not.toMatch(/https?:\/\/(?!127\.0\.0\.1[:/])/);
-    expect(html.length).toBeLessThan(160_000);
+    expect(Buffer.byteLength(html)).toBeLessThan(PANEL_BUDGETS.html); // decision 0061
     const lite = await fetch(`${BASE}/api/state?lite=1`, { headers: AUTH }).then((r) => r.text());
     expect(lite.length).toBeLessThan(24_000);
     const marks = (await fetch(`${BASE}/api/marks`, { headers: AUTH }).then((r) => r.json())) as { chests: unknown[]; herds: unknown[] };
@@ -149,7 +150,7 @@ describe.skipIf(!E2E)('core: control panel actions (Track AR)', () => {
     const menu = cellActions(`s${slot}`, inv0.slots[slot]!, inv0);
     expect(menu.map((x) => x.id)).toEqual(expect.arrayContaining(['drop1', 'dropstack', 'dropall']));
     const a = action(menu, 'dropstack');
-    expect(a).toMatchObject({ cmd: '!drop cobblestone 64', confirm: true });
+    expect(a).toMatchObject({ cmd: `!drop slot ${slot}`, confirm: true }); // this slot only (since !drop slot)
     const before = (await inv())['minecraft:cobblestone'];
     expect(before).toBe(128);
     const t0 = Date.now();

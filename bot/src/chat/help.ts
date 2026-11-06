@@ -84,7 +84,7 @@ export const SETTING_GROUPS: readonly (readonly [string, readonly string[]])[] =
   ['home', ['stashChest', 'stashShulker', 'keepBoxName', 'homeChestRadius', 'homeChestWalk', 'autoUnload', 'compactOnUnload', 'getSuggestsBring']],
   ['flight', ['autoFly', 'flyMin', 'flyClearance', 'flyCruise', 'flyGoArounds', 'fireworksMin', 'flyTakeoffRun', 'flyRetryBlocks', 'flyMaxClimb', 'flyMargin', 'flyLandSearch', 'flyLandProbes', 'flyHoldS', 'flyHeadroom', 'flyOverhangDepth', 'flySneakLand', 'flyLedgeTakeoff', 'flyVerticalTakeoff', 'glideDown', 'glideDownMinDrop', 'glideDownMinDistance', 'flyHighCruise', 'flyDescent', 'flyLandStyle', 'flyRecheckBlocks', 'flyPreferRatio', 'flySiteSearch']],
   ['chat', ['nlConfirm', 'chatColor', 'chatLines', 'chatVia', 'lastWelcomed']],
-  ['system', ['nudgeInterval']],
+  ['system', ['nudgeInterval', 'eventsDays', 'eventsMaxMb']],
 ];
 
 /** [group, keys] for every setting key that exists (unknown names dropped, the rest in `other`). */

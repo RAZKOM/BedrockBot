@@ -13,6 +13,9 @@ import { parseCommandBody } from '../../../src/health/panel/routes.ts';
 import { createLogger, silentLogger } from '../../../src/log.ts';
 import type { CommandDeps } from '../../../src/tasks/process/deps.ts';
 import { setup } from '../connection-fakes.ts';
+import { applyDelta, type DeltaOp, type Json } from '../../../src/health/panel/client/delta.ts'; // decision 0061
+import { openSse } from './panel-sse.ts';
+import { EventBus } from '../../../src/events/bus.ts'; // decision 0059: the events topic
 
 const TOKEN = 'Abcdefghijklmnopqrstuvwx';
 let panel: Panel | undefined;
@@ -24,7 +27,7 @@ afterEach(async () => {
   health = undefined;
 });
 
-function makePanel(opts: { healthPort?: number; port?: number; token?: string; owners?: string[]; icons?: PanelDeps['icons'] }) {
+function makePanel(opts: { healthPort?: number; port?: number; token?: string; owners?: string[]; icons?: PanelDeps['icons']; events?: PanelDeps['events'] }) {
   const { conn } = setup();
   const metrics = new Metrics();
   metrics.attach(conn);
@@ -57,13 +60,14 @@ function makePanel(opts: { healthPort?: number; port?: number; token?: string; o
     runtime,
     log: createLogger('info', 'panel-test'),
     ...(opts.icons !== undefined ? { icons: opts.icons } : {}),
+    events: opts.events ?? new EventBus(), // never the process's bus in a unit test
   };
   panel = setupPanel(deps);
   return { panel, chat, runtime };
 }
 
-async function startSeparate(token?: string, owners?: string[]) {
-  const made = makePanel({ port: 0, token, owners });
+async function startSeparate(token?: string, owners?: string[], events?: PanelDeps['events']) {
+  const made = makePanel({ port: 0, token, owners, events });
   expect(made.panel.plan.mode).toBe('separate');
   expect(await made.panel.start(undefined)).toBe(true);
   const base = made.panel.urls()[0]!.replace(/\/$/, '');
@@ -143,11 +147,44 @@ describe('panel over HTTP', () => {
     const page = await fetch(`${base}/`, { headers: { cookie: cookie.split(';')[0]! } });
     expect(page.status).toBe(200);
     const html = await page.text();
-    for (const marker of ['<title>BedrockBot panel</title>', 'data-panel="v1"', 'id="panel-status"', 'id="cmdform"', 'id="panel-settings"', 'data-key="guardRadius"', 'data-cmd="!home go"', "fetch('/map.json?'", '/api/marks', 'id="menu"', '/api/state', '/api/cmd']) {
+    for (const marker of ['<title>BedrockBot panel</title>', 'data-panel="v1"', 'id="panel-status"', 'id="cmdform"', 'id="panel-settings"', 'data-key="guardRadius"', 'data-cmd="!home go"', 'id="menu"', '<script type="module" src="/ui/']) {
       expect(html).toContain(marker);
     }
     expect(html).not.toContain(TOKEN);
     expect(html).not.toMatch(/https?:\/\/(?!127\.0\.0\.1)[a-z]/i); // no external assets
+    // decision 0061: the page's modules, behind the same cookie, as JavaScript
+    const cookieH = { cookie: cookie.split(';')[0]! };
+    const urls = [...html.matchAll(/<link rel="modulepreload" href="([^"]+)">/g)].map((m) => m[1]!);
+    expect(urls.length).toBeGreaterThan(10);
+    let code = '';
+    for (const u of urls) {
+      expect((await fetch(`${base}${u}`)).status).toBe(401);
+      const m = await fetch(`${base}${u}`, { headers: cookieH });
+      expect(m.status).toBe(200);
+      expect(m.headers.get('content-type')).toBe('text/javascript; charset=utf-8');
+      code += await m.text();
+    }
+    for (const marker of ['/map.json?', "'/api/marks'", "'/api/state?lite=1'", "'/api/cmd'", "'/api/stream'"]) expect(code).toContain(marker);
+    expect(code).not.toMatch(/:\s*(string|number|boolean)\b[,)=]/); // the types are stripped
+  });
+
+  it('decision 0061: the modules are cached as immutable under a content hash; another hash is a 404', async () => {
+    const { base } = await startSeparate(TOKEN);
+    const auth = { authorization: `Bearer ${TOKEN}` };
+    const html = await (await fetch(`${base}/`, { headers: auth })).text();
+    const entry = /<script type="module" src="([^"]+)">/.exec(html)![1]!;
+    expect(entry).toMatch(/^\/ui\/[A-Za-z0-9_-]{12}\/client\/boot\.ts$/);
+    const r = await fetch(`${base}${entry}`, { headers: { ...auth, 'accept-encoding': 'identity' } });
+    expect(r.headers.get('cache-control')).toBe('private, max-age=31536000, immutable');
+    expect(r.headers.get('x-content-type-options')).toBe('nosniff');
+    const etag = r.headers.get('etag')!;
+    const body = await r.text();
+    expect(body).toContain("from './main.ts'");
+    expect((await fetch(`${base}${entry}`, { headers: { ...auth, 'if-none-match': etag } })).status).toBe(304);
+    expect((await fetch(`${base}${entry}`, { method: 'HEAD', headers: auth })).status).toBe(200);
+    expect((await fetch(`${base}${entry.replace(/\/ui\/[^/]+\//, '/ui/AAAAAAAAAAAA/')}`, { headers: auth })).status).toBe(404);
+    expect((await fetch(`${base}${entry.replace('boot.ts', 'nope.ts')}`, { headers: auth })).status).toBe(404);
+    expect((await fetch(`${base}${entry.replace('client/boot.ts', '../index.ts')}`, { headers: auth })).status).toBe(404); // only the browser modules
   });
 
   it('item pictures: /icons/<name>.png behind the token, 404 for an item without art or a name that is none, state.icons says so', async () => {
@@ -197,6 +234,61 @@ describe('panel over HTTP', () => {
     expect((await post(base, '!nosuch', auth).then(json)).replies).toEqual(['unknown command !nosuch; try !help']);
     expect((await fetch(`${base}/api/cmd`, { method: 'POST', headers: { ...auth, 'content-type': 'text/plain' }, body: '{"text":"!pos"}' })).status).toBe(403);
     expect((await fetch(`${base}/api/cmd`, { headers: auth })).status).toBe(405);
+  });
+
+  it('decision 0061: /api/stream behind the token: the lite state as a snapshot, a command pushes its effect, bot events on the events topic, a module adds a topic and a route', async () => {
+    const bus = new EventBus();
+    bus.strict = true;
+    const { base, panel } = await startSeparate(TOKEN, undefined, bus);
+    const auth = { authorization: `Bearer ${TOKEN}` };
+    expect((await fetch(`${base}/api/stream`)).status).toBe(401);
+    // what another module does (docs/panel.md "Add a topic"): its topic on the hub, its route behind the token
+    const jobs = panel.hub.topic('jobs', { kind: 'event' });
+    expect(() => panel.hub.topic('events', { kind: 'event' })).toThrow(/exists/); // the panel's own (decision 0059 events)
+    panel.use((path, _req, res) => {
+      if (path !== '/api/jobs') return false;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('[]');
+      return true;
+    });
+    expect((await fetch(`${base}/api/jobs`)).status).toBe(401);
+    expect((await fetch(`${base}/api/jobs`, { headers: auth })).status).toBe(200);
+    const s = await openSse(`${base}/api/stream`, auth);
+    try {
+      expect((JSON.parse((await s.next('hello')).data) as { topics: string[] }).topics).toEqual(['state', 'events', 'jobs']);
+      interface Lite {
+        lite: boolean;
+        settings: { key: string; value: string; source: string }[];
+        bot: { name: string };
+      }
+      let have = (JSON.parse((await s.next('state')).data) as { snap: Lite }).snap;
+      expect(have.lite).toBe(true);
+      expect(have.bot.name).toBe('UnitBot');
+      expect(have.settings.find((r) => r.key === 'guardRadius')).toEqual({ key: 'guardRadius', value: '16', source: 'default' });
+      const t0 = Date.now();
+      expect((await post(base, '!set guardRadius 8', auth)).status).toBe(200);
+      while (have.settings.find((r) => r.key === 'guardRadius')!.value !== '8') {
+        const m = JSON.parse((await s.next('state', 3000)).data) as { snap?: Lite; d?: DeltaOp[] };
+        have = m.snap ?? (applyDelta(have as unknown as Json, m.d!) as unknown as Lite);
+      }
+      const ms = Date.now() - t0;
+      expect(have.settings.find((r) => r.key === 'guardRadius')).toEqual({ key: 'guardRadius', value: '8', source: 'chat' });
+      expect(ms).toBeLessThan(1500); // pushed 250 ms after the command (the sampler would take up to 1 s)
+      jobs.publish({ text: 'chest emptied' });
+      expect(JSON.parse((await s.next('jobs')).data)).toEqual({ text: 'chest emptied' });
+      // a bot event (docs/events.md "Live subscription"): the record plus its display text
+      const e = bus.emit('command.received', { command: 'pos', text: '!pos', source: 'panel', sender: 'Steve' })!;
+      const m = await s.next('events');
+      expect(JSON.parse(m.data)).toEqual({ ...e, text: '!pos from Steve (panel)' });
+      expect(Number(m.id.split('.')[1])).toBeGreaterThan(0);
+    } finally {
+      s.close();
+    }
+    // stop() unsubscribes: a later event is not published
+    const before = panel.hub.stats().topics.events!.published;
+    await panel.stop();
+    bus.emit('command.received', { command: 'pos', text: '!pos', source: 'panel', sender: 'Steve' });
+    expect(panel.hub.stats().topics.events!.published).toBe(before);
   });
 
   it('rate limit: 5 commands per second, then 429', async () => {

@@ -100,6 +100,8 @@ export function registerUxCommands(d: CommandDeps): void {
   chat.styleSource = { color: () => settings.get('chatColor'), lines: () => settings.get('chatLines'), via: () => settings.get('chatVia') };
   registerStyleCommands(chat);
   const world = d.world;
+  // the End credits: no /me, /say or /tellraw until the server moves the bot out of the exit portal (world/credits.ts)
+  chat.slashHold = world ? () => world.credits.showing : undefined;
   chat.hinter = (m) =>
     hintFor(
       m,
@@ -126,6 +128,7 @@ export function registerUxCommands(d: CommandDeps): void {
     offWelcome();
     chat.hinter = undefined;
     chat.styleSource = undefined;
+    chat.slashHold = undefined;
     stop();
   };
 }

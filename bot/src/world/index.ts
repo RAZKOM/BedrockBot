@@ -24,6 +24,7 @@ import type {
 import { BlockUpdates } from './updates.ts';
 import type { CachedTerrain, FoundPos } from './cache/types.ts'; // Track T
 import { DimensionWatcher } from './dimension.ts'; // Track AT
+import { CreditsWatcher } from './credits.ts';
 
 export const EYE_HEIGHT = 1.62;
 
@@ -84,11 +85,16 @@ export class World implements WorldView {
     this.inventory = new Inventory(toItem, () => this.self.runtimeId);
     // Track AT: answers the server's dimension_change_ack (else BDS ignores the movement), reports changes; before subscribe() so 'start' sees the old dimension
     this.dimensions = new DimensionWatcher(source, { selfRuntimeId: () => this.self.runtimeId, dimension: () => this.self.dimension, loadedColumns: () => this.chunks.loadedCount, logger: this.log });
+    // the End exit portal's credits: answered at once, else the server parks the bot in the portal (world/credits.ts)
+    this.credits = new CreditsWatcher(source, { selfRuntimeId: () => this.self.runtimeId, logger: this.log });
     this.subscribe();
   }
 
   /** Track AT: dimension changes (world/dimension.ts). */
   readonly dimensions: DimensionWatcher;
+
+  /** The end credits (world/credits.ts): `showing` while the server has not moved the bot out of the exit portal. */
+  readonly credits: CreditsWatcher;
 
   get entities(): ReadonlyMap<bigint, EntityInfo> {
     return this.entityTracker.entities;
@@ -173,6 +179,7 @@ export class World implements WorldView {
   dispose(): void {
     for (const u of this.unsubs.splice(0)) u();
     this.dimensions.dispose(); // Track AT
+    this.credits.dispose();
   }
 
   // ---- wiring ----------------------------------------------------------------------------------
