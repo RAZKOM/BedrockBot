@@ -61,6 +61,8 @@ export interface WorkerPlanOptions {
   avoidance?: { sources: AvoidanceSource[]; costs: AvoidanceCosts };
   /** Track BI: long falls (PathOptions.falls, a plain object). */
   falls?: PathOptions['falls'];
+  /** PathOptions.farmlandDropCost (the farmer's trampling rule). */
+  farmlandDropCost?: number;
 }
 
 /** What the client reads from the world model (`World` satisfies it). */
@@ -738,6 +740,7 @@ function workerOptions(o: WorkerPlanOptions): PathOptions {
     breakTicks: inv ? (c) => breakTicksWith(c, inv) : handBreakTicks, // Track BB
     ...(o.avoidance ? { cellCost: costFunction(o.avoidance.sources, o.avoidance.costs) } : {}),
     ...(o.falls ? { falls: o.falls } : {}), // Track BI
+    ...(o.farmlandDropCost ? { farmlandDropCost: o.farmlandDropCost } : {}),
   };
 }
 

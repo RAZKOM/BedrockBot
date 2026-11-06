@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest';
 import type { Chat, CommandDef } from '../../../src/chat/chat.ts';
 import { DEFAULT_FARM_RADIUS, registerFarmChat, type FarmController } from '../../../src/chat/commands-farm.ts';
 import { CROPS, cropForSeed, fieldCell, growthOf, isMature, scanField } from '../../../src/skills/farm/crops.ts';
-import { addArea, FarmTask, FARM_FOLLOW_AREAS, eyeAt, floorOf, routeTramples, workInReach, type FarmDeps, type FarmPlan } from '../../../src/skills/farm/farmer.ts';
+import { addArea, FarmTask, FARM_FOLLOW_AREAS, eyeAt, farmlandDrop, floorOf, routeTramples, workInReach, type FarmDeps, type FarmPlan } from '../../../src/skills/farm/farmer.ts';
+import { hotbarRoom } from '../../../src/skills/place/place.ts';
 import { blockInfoOf } from '../../../src/skills/terrain/shapes.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 
@@ -116,6 +117,28 @@ describe('reach and trampling rules', () => {
     expect(workInReach(eye, 'harvest', cell(5, 4), 0)).toBe(false);
   });
 
+  it('farmlandDrop: the deepest fall onto farmland of a route', () => {
+    const at = (p: Vec3) => (p.y === SOIL && p.x >= 2 ? blockInfoOf('farmland') : p.y < FEET ? blockInfoOf('grass_block') : blockInfoOf('air'));
+    const route = (feet0: number, x: number) => [{ x: 0, y: FEET, z: 0, feet: feet0, move: 'start' }, { x, y: SOIL, z: 0, feet: SOIL + 0.9375, move: 'drop' }];
+    expect(farmlandDrop(route(SOIL + 0.9375 + 1, 2), at)).toBeCloseTo(1, 6);
+    expect(farmlandDrop(route(SOIL + 0.9375 + 0.5, 2), at)).toBe(0);
+    expect(farmlandDrop(route(SOIL + 0.9375 + 2, 1), at)).toBe(0); // onto grass
+  });
+
+  it('hotbarRoom: an empty hotbar slot, else parks the least useful item (not a tool, not the selected one)', () => {
+    const st = (name: string): ItemStack => ({ name, networkId: 1, count: 1, metadata: 0 });
+    const slots: (ItemStack | null)[] = new Array<ItemStack | null>(36).fill(null);
+    slots[3] = st('cobblestone');
+    expect(hotbarRoom(slots, 0, 20, () => false)).toEqual({ dst: 0 });
+    for (let s = 0; s < 9; s++) slots[s] = st(s === 4 ? 'dirt' : 'iron_pickaxe');
+    slots[20] = st('carrot');
+    expect(hotbarRoom(slots, 4, 20, (i) => i.name === 'carrot')).toEqual({ dst: 4, park: 9 }); // dirt, even selected, before a tool
+    slots[4] = st('iron_sword');
+    expect(hotbarRoom(slots, 0, 20, (i) => i.name === 'carrot')).toEqual({ dst: 8, park: 9 }); // all tools: the highest unselected
+    for (let s = 9; s < 36; s++) slots[s] = st('stone');
+    expect(hotbarRoom(slots, 0, 20, () => false)).toBeUndefined(); // no free main slot to park in
+  });
+
   it('finds the floor block of a node and refuses drops onto farmland', () => {
     expect(floorOf(0, SOIL, 0, SOIL + 0.9375)).toEqual({ x: 0, y: SOIL, z: 0 }); // standing on farmland
     expect(floorOf(0, FEET, 0, FEET)).toEqual({ x: 0, y: SOIL, z: 0 });
@@ -124,7 +147,7 @@ describe('reach and trampling rules', () => {
     const at = (p: Vec3) => w.blockAt(p);
     const path = (move: string, x: number, y: number, feet: number) => [{ x: 0, y: FEET + 1, z: 0, feet: FEET + 1, move: 'start' }, { x, y, z: 0, feet, move }];
     expect(routeTramples(path('drop', 2, SOIL, SOIL + 0.9375), at)).toBe(true);
-    expect(routeTramples(path('walk', 2, SOIL, SOIL + 0.9375), at)).toBe(false);
+    expect(routeTramples(path('climb', 2, SOIL, SOIL + 0.9375), at)).toBe(false); // down a ladder: no fall
     expect(routeTramples(path('drop', 3, FEET, FEET), at)).toBe(false); // onto grass
     // the 0.0625 step from grass onto farmland is a 'drop' for the planner, not a fall
     expect(routeTramples([{ x: 1, y: FEET, z: 0, feet: FEET, move: 'start' }, { x: 2, y: SOIL, z: 0, feet: SOIL + 0.9375, move: 'drop' }], at)).toBe(false);
@@ -143,12 +166,14 @@ interface Harness {
   boneMeal: boolean;
   /** goto targets whose route "drops onto farmland" (plan). */
   trampleAt: Set<string>;
+  /** How far those routes fall onto the farmland (default 1.0625: one terrace). */
+  fall: number;
 }
 
 function harness(): Harness {
   const w = new FakeWorld();
   const inv = new FakeInv();
-  const h: Harness = { w, inv, pos: { x: -2.5, y: FEET, z: 0.5 }, calls: [], chest: new Map(), deps: undefined as never, boneMeal: true, trampleAt: new Set() };
+  const h: Harness = { w, inv, pos: { x: -2.5, y: FEET, z: 0.5 }, calls: [], chest: new Map(), deps: undefined as never, boneMeal: true, trampleAt: new Set(), fall: 1.0625 };
   const skills: FarmDeps['skills'] = {
     goto: (g) => {
       const p = g.type === 'block' || g.type === 'getToBlock' ? { x: g.p.x + 0.5, y: g.p.y, z: g.p.z + 0.5 } : g.type === 'near' ? { x: g.p.x, y: FEET, z: g.p.z } : g.type === 'xz' ? { x: g.x, y: FEET, z: g.z } : { x: 0, y: FEET, z: 0 };
@@ -196,7 +221,7 @@ function harness(): Harness {
     skills,
     plan: (g): FarmPlan => {
       const p = g.type === 'block' ? g.p : { x: 0, y: 0, z: 0 };
-      return h.trampleAt.has(key(p)) ? { status: 'found', path: [{ x: -1, y: FEET + 1, z: 0, feet: FEET + 1, move: 'start' }, { x: 0, y: SOIL, z: 0, feet: SOIL + 0.9375, move: 'drop' }] } : { status: 'found', path: [] };
+      return h.trampleAt.has(key(p)) ? { status: 'found', path: [{ x: -1, y: FEET + 1, z: 0, feet: SOIL + 0.9375 + h.fall, move: 'start' }, { x: 0, y: SOIL, z: 0, feet: SOIL + 0.9375, move: 'drop' }] } : { status: 'found', path: [] };
     },
     // the grass around the field is standable at feet -60, farmland at -60.0625 (node y -61)
     stand: (x, y, z) => {
@@ -261,7 +286,7 @@ describe('FarmTask: following the field', () => {
     expect(addArea(areas, { x: 2, y: FEET, z: 0 }, start, 8, 64)).toBe(false); // within half the radius
     expect(addArea(areas, { x: 10, y: FEET, z: 0 }, start, 8, 64)).toBe(true);
     expect(addArea(areas, { x: 70, y: FEET, z: 0 }, start, 8, 64)).toBe(false); // beyond the range
-    for (let i = 0; i < 50; i++) addArea(areas, { x: 20 + i * 5, y: FEET, z: 20 }, start, 8, 1000);
+    for (let i = 0; i < 200; i++) addArea(areas, { x: 20 + i * 5, y: FEET, z: 20 }, start, 8, 1000);
     expect(areas.length).toBe(FARM_FOLLOW_AREAS);
   });
 });
@@ -333,6 +358,41 @@ describe('FarmTask', () => {
     expect(f.stats.harvested).toBe(1);
     const g = h.calls.find((c) => c.startsWith('goto'))!;
     expect(g).toBe('goto 1 0');
+  });
+
+  it('a terraced field: takes a one-terrace step onto farmland when every route needs one, never a deeper fall', async () => {
+    const step = harness();
+    field(step.w, 0, 0, 1, 1, 'wheat', 7);
+    for (let z = -6; z <= 6; z++) for (let x = -6; x <= 6; x++) step.trampleAt.add(key({ x, y: FEET, z }));
+    for (let z = -6; z <= 6; z++) for (let x = -6; x <= 6; x++) step.trampleAt.add(key({ x, y: SOIL, z }));
+    const f = new FarmTask(step.deps);
+    await f.start({ center: { x: 0.5, y: FEET, z: 0.5 }, radius: 0, maxRounds: 1, waitTicks: 20 });
+    expect(f.stats.terraceSteps).toBe(1);
+    expect(f.stats.harvested).toBe(1);
+
+    const deep = harness();
+    deep.fall = 2;
+    field(deep.w, 0, 0, 1, 1, 'wheat', 7);
+    for (const k of step.trampleAt) deep.trampleAt.add(k);
+    const g = new FarmTask(deep.deps);
+    await g.start({ center: { x: 0.5, y: FEET, z: 0.5 }, radius: 0, maxRounds: 1, waitTicks: 20 });
+    expect(g.stats.terraceSteps).toBe(0);
+    expect(g.stats.harvested).toBe(0);
+  });
+
+  it('no standing cell for some of the work: only that work is set aside, the rest of a big field is still worked', async () => {
+    const h = harness();
+    h.fall = 2;
+    field(h.w, 0, 0, 1, 1, 'wheat', 7); // unreachable: every cell around it falls 2 onto farmland
+    field(h.w, 20, 0, 1, 1, 'wheat', 7); // reachable
+    for (let z = -6; z <= 6; z++) for (let x = -6; x <= 6; x++) for (const y of [FEET, SOIL]) h.trampleAt.add(key({ x, y, z }));
+    h.pos = { x: 0.5, y: FEET, z: -3.5 };
+    const f = new FarmTask(h.deps);
+    // the near crop scores best every round; once set aside (3 failures) the far one is harvested
+    await f.start({ center: { x: 10.5, y: FEET, z: 0.5 }, radius: 12, maxRounds: 6, waitTicks: 20 });
+    expect(f.stats.harvested).toBe(1);
+    expect(h.w.blockAt({ x: 20, y: FEET, z: 0 }).name).toBe('wheat'); // replanted
+    expect(h.w.blockAt({ x: 0, y: FEET, z: 0 }).states.growth).toBe(7); // left alone
   });
 
   it('stop() ends the loop and cancels the skills', async () => {

@@ -325,6 +325,8 @@ interface Active {
   finish: (r: SkillResult) => void;
 }
 
+/** GotoOptions.avoidFarmlandDrops: a fall onto farmland costs this many ticks (about a 40-block detour). */
+export const FARMLAND_DROP_COST = 200;
 const DIG_TIMEOUT = 600;
 const ACTION_TIMEOUT = 100;
 const DOOR_WAIT = 40;
@@ -562,6 +564,7 @@ export class Navigator {
       ...(noBreak ? { noBreak } : {}),
       cellCost: this.cellCost?.() ?? this.pathOpts.cellCost, // Track S: avoidance, read live each plan
       ...(this.fallPolicy ? { falls: this.fallPolicy() } : {}), // Track BI: long falls, read live each plan
+      ...(options.avoidFarmlandDrops ? { farmlandDropCost: FARMLAND_DROP_COST } : {}),
     };
   }
 
@@ -656,6 +659,7 @@ export class Navigator {
       allowPlace: options.allowPlace ?? false,
       closeDoors: options.closeDoors ?? false,
       closeTrapdoors: options.closeTrapdoors ?? true, // Track BG
+      avoidFarmlandDrops: options.avoidFarmlandDrops ?? false, // the farmer: plan around falls onto farmland
     };
     return new Promise((resolve) => {
       const report: GotoReport = {
@@ -1350,6 +1354,7 @@ export class Navigator {
       ...(inv ? { inventory: { slots: inv.slots.map((s) => (s ? { name: s.name, count: s.count } : null)), selected: inv.selected } } : {}),
       ...(cc?.avoidance ? { avoidance: cc.avoidance } : {}),
       ...(o.falls ? { falls: { ...o.falls } } : {}), // Track BI
+      ...(o.farmlandDropCost ? { farmlandDropCost: o.farmlandDropCost } : {}),
     };
   }
 

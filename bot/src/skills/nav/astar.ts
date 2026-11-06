@@ -140,7 +140,16 @@ export interface PathOptions {
   noAction?: ReadonlySet<number>;
   /** Track BI: drops deeper than `maxDrop` (damage within the health budget, water-bucket clutches; skills/fall/plan.ts). Default none. */
   falls?: FallPolicy;
+  /**
+   * Extra ticks for a move that falls more than FARMLAND_SAFE_FALL onto farmland (it can trample it;
+   * docs/farming.md "Trampling"): the farmer's routes take the paths and steps around a terraced field
+   * instead of dropping a terrace onto the crops. Default 0 (off).
+   */
+  farmlandDropCost?: number;
 }
+
+/** Falls up to this height onto farmland never trampled it (measured, docs/farming.md). */
+export const FARMLAND_SAFE_FALL = 0.75;
 
 export interface PathResult {
   /**
@@ -553,6 +562,7 @@ export class PathSearch {
     let cost = base * grid.factor(x, y, z, feet) + extra + trap;
     if (this.costs.underground > 0 && grid.underground(x, z, feet)) cost += this.costs.underground;
     if (this.opts.cellCost) cost += this.opts.cellCost(x, y, z); // Track S: avoidance
+    if (this.opts.farmlandDropCost && nodes.feet[from]! - feet > FARMLAND_SAFE_FALL && grid.cls(x, feet - y > 1e-6 ? y : y - 1, z)?.name === 'farmland') cost += this.opts.farmlandDropCost;
     const g = nodes.g[from]! + cost;
     if (i === undefined) {
       i = nodes.add(x, y, z, feet);

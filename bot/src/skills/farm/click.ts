@@ -14,7 +14,7 @@ import type { ItemV4 } from '../../world/packets.ts';
 import type { BlockInfo, PacketSource, Vec3 } from '../../world/types.ts';
 import { clickBlockTransaction } from '../container/chest.ts';
 import { blockCenter, EYE_HEIGHT, lookAngles, type Face } from '../dig/look.ts';
-import { closestDistance, cornerDistance, DEFAULT_CLICK_REACH, SERVER_CLICK_REACH, wireItemOf } from '../place/place.ts';
+import { closestDistance, cornerDistance, DEFAULT_CLICK_REACH, hotbarRoom, SERVER_CLICK_REACH, wireItemOf } from '../place/place.ts';
 import type { SkillResult } from '../types.ts';
 
 export type ClickReason = 'not_ready' | 'unloaded' | 'no_item' | 'no_hotbar' | 'move_failed' | 'out_of_reach' | 'rejected' | 'timeout' | 'interrupted' | 'busy';
@@ -190,12 +190,20 @@ export class ItemClicker {
       let src = -1;
       for (let s = 9; s < 36 && src < 0; s++) if (fits(s)) src = s;
       if (src < 0) return { ok: false, reason: 'no_item' };
-      let dst = -1;
-      for (let s = 0; s < 9 && dst < 0; s++) if (!inv.slots[s]) dst = s;
+      // a full hotbar: park its least useful item first (place.ts hotbarRoom)
+      const room = hotbarRoom(inv.slots, inv.selected, src, (i) => i.name === item);
       const mover = this.d.containers;
-      if (dst < 0 || !mover) return { ok: false, reason: 'move_failed' };
+      if (!room || !mover) return { ok: false, reason: 'move_failed' };
+      const dst = room.dst;
       const n = inv.slots[src]!.count;
-      const r = await this.withInventoryOpen(mover, () => mover.move({ window: 0, slot: src }, { window: 0, slot: dst }, n));
+      const parked = room.park !== undefined ? inv.slots[dst]! : undefined;
+      const r = await this.withInventoryOpen(mover, async () => {
+        if (parked && room.park !== undefined) {
+          const pr = await mover.move({ window: 0, slot: dst }, { window: 0, slot: room.park }, parked.count);
+          if (!pr.ok) return pr;
+        }
+        return mover.move({ window: 0, slot: src }, { window: 0, slot: dst }, n);
+      });
       if (!r.ok) return { ok: false, reason: 'move_failed' };
       this.d.hotbar?.noteRaw?.(dst, wireItemOf(inv.slots[dst], undefined));
       slot = dst;

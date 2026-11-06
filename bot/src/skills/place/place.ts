@@ -26,6 +26,7 @@ import type { BlockInfo, ItemStack, PacketSource, Vec3 } from '../../world/types
 import { clickBlockTransaction } from '../container/chest.ts';
 import { EYE_HEIGHT, lookAngles, type Face } from '../dig/look.ts';
 import type { BlockQuery } from '../input/types.ts';
+import { maxDurability } from '../survival/tools.ts';
 import type { SkillResult } from '../types.ts';
 import { BLOCK_FACES, faceIndex, facePoint, faceVisibleFrom, supportOf, type BlockFace } from './face.ts';
 
@@ -257,6 +258,26 @@ export function isBlockItem(i: ItemStack | null | undefined): i is ItemStack {
   return !!i && i.count > 0 && i.blockRuntimeId !== undefined && i.blockRuntimeId !== 0;
 }
 
+/**
+ * Where an item from main-inventory slot `src` goes in the hotbar: an empty hotbar slot (`dst`), else
+ * the least useful hotbar item (no durability before tools and weapons, the selected slot last, never
+ * one that `wanted` accepts) parked first in a free main slot (`park`, never `src`). undefined = no room.
+ */
+export function hotbarRoom(slots: readonly (ItemStack | null)[], selected: number, src: number, wanted: (i: ItemStack) => boolean): { dst: number; park?: number } | undefined {
+  for (let s = 0; s < 9; s++) if (!slots[s]) return { dst: s };
+  let park = -1;
+  for (let s = 9; s < 36 && park < 0; s++) if (!slots[s] && s !== src) park = s;
+  if (park < 0) return undefined;
+  let best: { slot: number; rank: number } | undefined;
+  for (let s = 8; s >= 0; s--) {
+    const it = slots[s]!;
+    if (wanted(it)) continue;
+    const rank = (maxDurability(it.name) !== undefined ? 20 : 0) + (s === selected ? 5 : 0);
+    if (!best || rank < best.rank) best = { slot: s, rank };
+  }
+  return best ? { dst: best.slot, park } : undefined;
+}
+
 /** The wire item to echo for a model slot: the server's own if it still matches, else built from the model. */
 export function wireItemOf(stack: ItemStack | null | undefined, raw: ItemV4 | undefined): ItemV4 {
   if (!stack) return { network_id: 0, count: 0, metadata: 0, has_stack_id: false, block_runtime_id: 0, extra: { has_nbt: 0, can_place_on: [], can_destroy: [] } } as ItemV4;
@@ -483,7 +504,7 @@ export class PlaceSkill {
     return out;
   }
 
-  /** Select (and if needed fetch into the hotbar) the item to place. */
+  /** Select (and if needed fetch into the hotbar, making room in a full one) the item to place. */
   private async selectItem(want: string | string[] | undefined): Promise<{ ok: true; slot: number; item: string } | { ok: false; reason: PlaceReason }> {
     const inv = this.d.world.inventory;
     const names = want === undefined ? undefined : (Array.isArray(want) ? want : [want]).map((n) => (n.startsWith('minecraft:') ? n.slice(10) : n));
@@ -510,11 +531,20 @@ export class PlaceSkill {
       if (src < 0) return { ok: false, reason: 'no_item' };
       const mover = this.d.containers;
       if (!mover) return { ok: false, reason: 'no_item' };
-      let dst = -1;
-      for (let s = 0; s < 9 && dst < 0; s++) if (!inv.slots[s]) dst = s;
-      if (dst < 0) return { ok: false, reason: 'move_failed' };
+      // a full hotbar: park its least useful item in a free main slot first (a Realm farm: the carrots
+      // picked up landed in the main inventory behind a full hotbar and every planting failed)
+      const room = hotbarRoom(inv.slots, inv.selected, src, (i) => fits(i));
+      if (!room) return { ok: false, reason: 'move_failed' };
+      const dst = room.dst;
       const stack = inv.slots[src]!;
-      const r = await this.withInventoryOpen(() => mover.move({ window: 0, slot: src }, { window: 0, slot: dst }, stack.count));
+      const parked = room.park !== undefined ? inv.slots[dst]! : undefined;
+      const r = await this.withInventoryOpen(async () => {
+        if (parked && room.park !== undefined) {
+          const pr = await mover.move({ window: 0, slot: dst }, { window: 0, slot: room.park }, parked.count);
+          if (!pr.ok) return pr;
+        }
+        return mover.move({ window: 0, slot: src }, { window: 0, slot: dst }, stack.count);
+      });
       if (!r.ok) {
         this.log.warn(`place: moving ${stack.name} ${src} -> ${dst} failed: ${r.reason}`);
         return { ok: false, reason: 'move_failed' };

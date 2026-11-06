@@ -111,6 +111,22 @@ per-cell hook this wave, so the farmer:
    the planner calls the 0.0625 step from grass onto farmland a drop too, that one is fine);
 3. never presses jump itself. `collect` walks to drops over the field (walks only on a flat field).
 
+Terraced fields (2026-11-06, a large sloping carrot field on the Realm: rows of farmland one block apart):
+
+- the farmer's plans and gotos pass `avoidFarmlandDrops` (GotoOptions), which sets the planner's
+  `farmlandDropCost` (200 ticks, about a 40-block detour) on any move falling more than 0.75 onto farmland
+  (`nav/astar.ts` relax; it crosses to the planner worker), so routes take the steps and paths around the
+  terraces instead of jumping off a terrace onto the crops;
+- up to `STAND_TRIES` (24) standing cells are planned per round; when every route still falls onto farmland,
+  the first whose deepest such fall is at most `TERRACE_FALL` (1.1, one terrace) is taken
+  (`stats.terraceSteps`; measured 1 in 4 such falls trample). Deeper falls are never taken;
+- a round with no standing cell sets aside only the work the refused cells were picked for (before, every work
+  item of the whole followed field was failed, so three such rounds ended the job `done` after 94 of 1491 cells).
+
+The same run planted nothing: the harvested carrots went to the main inventory behind a full hotbar and
+PlaceSkill / ItemClicker gave up (`move_failed`) when no hotbar slot was empty. Both now park the least useful
+hotbar item (`hotbarRoom` in `place/place.ts`: no tools, the selected slot last) in a free main slot first.
+
 On a 9 x 9 field with a grass rim the middle column is 4.78 blocks from the rim for planting, beyond
 the planning margin, so the bot steps onto the farmland for the middle cells (walking, no trample).
 
@@ -121,7 +137,8 @@ until nothing is ready to harvest and no empty farmland can be planted. With `fo
 
 - **Scan centres** (`areas`): the start, then every place the bot worked from, and farmland found within
   1 of a scan's edge (the field goes on there). A new centre within half the radius of another, farther
-  than `maxRange` (`FARM_FOLLOW_RANGE`, 64) from the start, or past `FARM_FOLLOW_AREAS` (32) is not added.
+  than `maxRange` (`FARM_FOLLOW_RANGE`, 64) from the start, or past `FARM_FOLLOW_AREAS` (128; was 32, a big
+  field filled them) is not added.
   Each round scans around every centre and works the union (cells counted once): a strip 30 long is
   worked end to end with radius 3.
 - **Planting**: an empty cell gets the crop remembered for it (or the field's most common crop) when its

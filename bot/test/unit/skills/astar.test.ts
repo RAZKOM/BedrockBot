@@ -201,3 +201,21 @@ describe('findPath performance (PLAN.md 3.5: 1000 random paths under 50 ms each)
     expect(p(0.95)).toBeLessThan(50);
   });
 });
+
+describe('farmlandDropCost (the farmer on a terraced field)', () => {
+  it('plans around a ledge drop onto farmland when a way down onto grass exists', async () => {
+    const { farmlandDrop } = await import('../../../src/skills/farm/farmer.ts');
+    const w = flatGen();
+    w.fill({ x: 0, y: -60, z: -3 }, { x: 4, y: -60, z: 0 }, 'stone'); // a ledge, feet -59
+    w.fill({ x: -6, y: -61, z: 1 }, { x: 10, y: -61, z: 3 }, 'farmland'); // the field below it
+    const at = (p: { x: number; y: number; z: number }) => w.blockAt(p.x, p.y, p.z);
+    const from = { x: 2, y: -59, z: 0 };
+    const goal = { type: 'block' as const, p: { x: 2, y: -60, z: 5 } };
+    const plain = findPath(new NavGrid(w), from, goal);
+    expect(plain.status).toBe('found');
+    expect(farmlandDrop(plain.path, at)).toBeGreaterThan(0.75); // straight off the ledge onto the crops
+    const careful = findPath(new NavGrid(w), from, goal, { farmlandDropCost: 200 });
+    expect(careful.status).toBe('found');
+    expect(farmlandDrop(careful.path, at)).toBe(0); // down onto the grass beside the ledge, then across the rows
+  });
+});

@@ -24,6 +24,8 @@ export interface GotoOptions {
   closeDoors?: boolean;
   /** Track BG: close a trapdoor (hatch) the goto opened in a floor or ceiling, once the body is clear of it. Default true. */
   closeTrapdoors?: boolean;
+  /** Plan around falls onto farmland (PathOptions.farmlandDropCost: the farmer, a terraced field). Default false. */
+  avoidFarmlandDrops?: boolean;
 }
 
 export interface Skills {

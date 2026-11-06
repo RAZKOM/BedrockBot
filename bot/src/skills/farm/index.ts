@@ -44,7 +44,7 @@ export function createFarmer(p: FarmParts, settings: { useBoneMeal?: () => boole
   });
   const farm = new FarmTask({
     skills,
-    plan: (goal) => skills.nav.plan(goal),
+    plan: (goal) => skills.nav.plan(goal, undefined, { avoidFarmlandDrops: true }),
     stand: (x, y, z) => skills.nav.grid.stand(x, y, z),
     world,
     click: (q, item) => clicker.useOn(q, item),

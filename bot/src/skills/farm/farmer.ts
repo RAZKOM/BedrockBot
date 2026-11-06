@@ -73,7 +73,7 @@ export interface FarmOptions {
 
 /** Following the field: scan centres at most this far from the start, and at most this many of them. */
 export const FARM_FOLLOW_RANGE = 64;
-export const FARM_FOLLOW_AREAS = 32;
+export const FARM_FOLLOW_AREAS = 128;
 
 export interface FarmStats {
   startedAt: number | undefined;
@@ -88,6 +88,8 @@ export interface FarmStats {
   standFailures: number;
   /** Candidate standing cells refused because their route dropped onto farmland. */
   trampleRoutesRefused: number;
+  /** Standing cells reached by stepping down one terrace onto farmland (no other route; TERRACE_FALL). */
+  terraceSteps: number;
   collectRounds: number;
   collected: Record<string, number>;
   trips: number;
@@ -210,6 +212,9 @@ export const PICKUP_FRESH_MS = 1000;
 /** Track Z: at most this many ticks of waiting for such a pickup before a planting (drops are picked up about 10 ticks after they spawn). */
 export const SETTLE_TICKS = 16;
 
+/** Standing cells (best first) whose routes are planned before giving up on a round. */
+export const STAND_TRIES = 24;
+
 /** Falls up to this height onto farmland never trampled it (measured: 0/16 up to 0.75, 3/12 at 0.9 to 1.1). */
 export const SAFE_FALL = 0.75;
 
@@ -218,13 +223,30 @@ export const SAFE_FALL = 0.75;
  * from grass onto farmland (the planner calls it a drop) and jumps up onto farmland are fine.
  */
 export function routeTramples(path: FarmPlan['path'], blockAt: (p: Vec3) => BlockInfo | undefined): boolean {
+  return farmlandDrop(path, blockAt) > SAFE_FALL;
+}
+
+/** Moves that go down without a fall (a ladder or vine, out of water). */
+const CONTROLLED: ReadonlySet<string> = new Set(['climb', 'climbOut', 'swim', 'swimOut']);
+
+/** The deepest fall of a planned route onto farmland (0 = none; drops, parkour and the like). */
+export function farmlandDrop(path: FarmPlan['path'], blockAt: (p: Vec3) => BlockInfo | undefined): number {
+  let worst = 0;
   for (let i = 1; i < path.length; i++) {
     const n = path[i]!;
-    if (n.move !== 'drop' || path[i - 1]!.feet - n.feet <= SAFE_FALL) continue;
-    if (blockAt(floorOf(n.x, n.y, n.z, n.feet))?.name === FARMLAND) return true;
+    const fall = path[i - 1]!.feet - n.feet;
+    if (fall <= SAFE_FALL || fall <= worst || CONTROLLED.has(n.move)) continue;
+    if (blockAt(floorOf(n.x, n.y, n.z, n.feet))?.name === FARMLAND) worst = fall;
   }
-  return false;
+  return worst;
 }
+
+/**
+ * A terraced field (rows of farmland one block apart, no path between them): when no route reaches the work
+ * without a fall onto farmland, one that steps down a single terrace (at most this high) is taken (measured: 1 in
+ * 4 such falls trampled). Deeper falls are never taken.
+ */
+export const TERRACE_FALL = 1.1;
 
 /** Following: add scan centre `p` unless one is within half the radius of it already, it is beyond `range` from the start, or there are FARM_FOLLOW_AREAS. */
 export function addArea(areas: Vec3[], p: Vec3, start: Vec3, radius: number, range: number): boolean {
@@ -442,13 +464,15 @@ export class FarmTask {
       const stand = this.chooseStand(work, o.reachMargin ?? 0.35);
       if (!stand) {
         this.stats.failures++;
-        for (const w of work) this.failCell(w.cell);
-        this.log.warn(`farm: no standing cell reaches any of ${work.length} work items`);
+        // only the work the refused cells were chosen for: the rest of a big field is tried next round (a Realm
+        // terraced field: failing every item ended the job after 94 of 1491 cells)
+        for (const w of this.refusedWork.length ? this.refusedWork : work) this.failCell(w.cell);
+        this.log.warn(`farm: no standing cell reaches ${this.refusedWork.length || work.length} of ${work.length} work items`);
         await this.d.waitTicks(20);
         continue;
       }
       this.state = 'walk';
-      const g = await this.d.skills.goto({ type: 'block', p: { x: stand.x, y: stand.y, z: stand.z } }, { timeoutTicks: 2400 });
+      const g = await this.d.skills.goto({ type: 'block', p: { x: stand.x, y: stand.y, z: stand.z } }, { timeoutTicks: 2400, avoidFarmlandDrops: true });
       if (!this.alive(gen)) break;
       if (!g.ok) {
         if (g.reason === 'interrupted') {
@@ -576,19 +600,34 @@ export class FarmTask {
       }
     }
     cands.sort((a, b) => a.score - b.score);
-    for (const c of cands.slice(0, 12)) {
+    this.refusedWork = [];
+    let terrace: StandCell | undefined;
+    const tried = new Set<Work>();
+    for (const c of cands.slice(0, STAND_TRIES)) {
       if (!this.d.plan) return c;
+      for (const w of c.work) tried.add(w);
       const p = this.d.plan({ type: 'block', p: { x: c.x, y: c.y, z: c.z } });
       if (!p || p.status === 'none') continue;
-      if (routeTramples(p.path, blockAt)) {
+      const fall = farmlandDrop(p.path, blockAt);
+      if (fall > SAFE_FALL) {
         this.stats.trampleRoutesRefused++;
-        this.log.info(`farm: route to ${c.x} ${c.y} ${c.z} drops onto farmland; trying another cell`);
+        if (!terrace && fall <= TERRACE_FALL) terrace = c;
         continue;
       }
       return c;
     }
+    if (terrace) {
+      this.stats.terraceSteps++;
+      this.log.info(`farm: every route steps down onto farmland; taking the one-terrace step to ${terrace.x} ${terrace.y} ${terrace.z}`);
+      return terrace;
+    }
+    if (this.stats.trampleRoutesRefused) this.log.info(`farm: ${Math.min(cands.length, STAND_TRIES)} standing cells refused (routes drop onto farmland or none found)`);
+    this.refusedWork = [...tried];
     return undefined;
   }
+
+  /** The work the standing cells refused by the last chooseStand() were picked for. */
+  private refusedWork: Work[] = [];
 
   private eyeNow(): Vec3 | undefined {
     const p = this.d.position();
@@ -797,7 +836,7 @@ export class FarmTask {
   private async depositTrip(gen: number, chest: Vec3): Promise<boolean> {
     this.state = 'to_chest';
     this.stats.trips++;
-    const g = await this.d.skills.goto({ type: 'getToBlock', p: chest, reach: 4, face: false }, { timeoutTicks: 4000 }); // within reach from any height
+    const g = await this.d.skills.goto({ type: 'getToBlock', p: chest, reach: 4, face: false }, { timeoutTicks: 4000, avoidFarmlandDrops: true }); // within reach from any height
     if (!this.alive(gen)) return false;
     if (!g.ok) {
       this.lastError = `goto chest: ${g.reason}`;
@@ -835,6 +874,7 @@ function newStats(): FarmStats {
     stands: 0,
     standFailures: 0,
     trampleRoutesRefused: 0,
+    terraceSteps: 0,
     collectRounds: 0,
     collected: {},
     trips: 0,
