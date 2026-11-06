@@ -79,7 +79,9 @@ home walks back home after a guard fight. Rules are evaluated every 5 ticks.
 
 **Guard** (`!guard on`): targets are hostiles, plus neutral mobs that hit the bot in the last 10 s or
 target it (`target_eid`), never players, passive mobs or items. Range: within the radius of home (of
-the bot when no home is set or while following) and at most radius + 16 from the bot, within 6
+the bot when no home is set, while following or a command runs, and while the bot is farther than the
+radius from home; a mob that hit the bot in the last 10 s whatever the centre) and at most radius + 16
+from the bot, within 6
 blocks of height, and reachable ("Targeting" below, wave 7). Priority: a creeper within 6 blocks,
 then the mob that hit us, then mobs targeting us, then the nearest. After a fight the mob is ignored
 for 10 s (`out_of_range`, `unreachable`), 3 s (`took_cover`), not at all (`killed`,
@@ -444,7 +446,7 @@ Realm the flight ran home through the mobs, and a bot at 8 health went straight 
 | Re-planning | checked every 2 s; a running leg is kept unless the nearest threat gained on the bot (every new goto stops the body briefly) |
 | No plan | a leg that cannot start or finds no way (typically: knocked into the air, `no standable node`) with a threat within 8: 15 ticks of sprinting straight away by hand (yaw away from the threats, weighted by 1/d²), then plan again; without a threat near: 1 s standing |
 | Eating | (health below 10, or recovering with food below 18: natural regeneration needs 18, and a run showed the bot stuck at 12 health for minutes because every kit bite after a flight was cut off by the next guard fight) and every hostile 8 or more away: the kit's `eat()` (one bite at a time); the kit's own automatic eating is held for the flight and restored after |
-| Ends | arrived (10 s before another flight); 2 s out of danger when there is no home to go to or a command waits; cornered (the 4th no-plan in a row with a threat within 4: guard defends in place; 3 s); 60 s |
+| Ends | arrived (10 s before another flight); 2 s out of danger when there is no home to go to or a command waits; cornered (the 4th no-plan in a row with a threat within 4: guard defends in place; 3 s); caught (a threat within 2.5 that keeps hitting the bot for 3 s of the flight: guard defends in place; 3 s); 60 s |
 | Hysteresis | after a flight, for up to 1 min, a melee hostile within 12 starts a flight again (not a fight) until the health is back to `fleeHealth` + 6 (14); no cooldown after a safe end while recovering. Ranged mobs (skeleton, stray, bogged, pillager, blaze, witch, ghast, drowned, evoker) never start a recovery flight: running from an archer in a line only gives it targets (the first gauntlet runs lost 20 health to two skeletons that way) |
 
 Status: `fleeing away (12)`, `fleeing away (up to 40)`, `fleeing to home 10 -60 3, 12 blocks left`;
@@ -644,3 +646,15 @@ second offline client, which is a real player entity to the bot), and a night wi
 - Endermen are neutral: guard ignores them until one hits or targets the bot.
 - While running away the bot does not face the attacker.
 - `!follow` overrides the night shelter until `!stop`.
+
+### Realm death 2026-11-05 (idle far from home)
+
+A `!mine sand` job 1400 blocks from home ended `inventory full`: the stash step's box-to-hotbar move and junk
+drop answered `busy` because a keeper pass held the survival kit's lock. With no command left, guard measured
+its radius from home, so no mob near the bot was a target: husks and a drowned hit it 105 times over 40
+minutes without a blow back, and the flight at 7 health never got clear of the drowned. Fixes: the guard
+centre is the bot while it is farther than the radius from home, and a mob that hit the bot is a target
+whatever the centre (a fight far away does not walk home afterwards); the kit's `drop` and `hotbar` wait up
+to 5 s for a running op (`queued`); a mine or quarry job that ends `inventory full` goes home (it unloads
+there) when nothing else is queued; the flee `caught` rule above.
+
