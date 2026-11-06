@@ -34,6 +34,7 @@
 import type { Metrics } from '../connection/metrics.ts';
 import { RuntimeSettings } from '../config/settings.ts';
 import { silentLogger, type Logger } from '../log.ts';
+import { events } from '../events/bus.ts'; // decision 0059: combat.flee
 import { CombatController, type CombatLoop, type CombatMover, type FightOptions, type FightResult } from '../skills/combat/combat.ts';
 import { bareType, classify, entityFeet, isPlayerEntity, MobTracker, typeMatches } from '../skills/combat/hostiles.ts';
 import * as targeting from '../skills/combat/targeting.ts'; // Track V: reachability-aware targeting, creeper rank
@@ -715,6 +716,7 @@ class FleeProcess extends BaseProcess {
       this.ep = { why: plan.why, from: plan.threat.type, start: { ...me }, startAt: performance.now(), phase: 'away', dest: c.fleeTarget(me), safeSince: undefined, planAt: 0, goalKey: '', bites: 0, stallUntil: 0, cornered: false, planNearest: Infinity, panics: 0 };
       c.stats.flees++;
       c.d.metrics?.inc('pve.flees');
+      events.emit('combat.flee', { why: plan.why, from: bareType(plan.threat.type), health: Math.round(c.health() * 10) / 10 }); // decision 0059
       this.cornered = false;
       this.recoverTo = Math.min(20, c.fleeHealth + FLEE_RECOVER);
       this.recoverUntil = performance.now() + FLEE_RECOVER_MS;

@@ -342,6 +342,7 @@ bot is idle (the shield controller, [pve.md](pve.md) "Shield"); a totem stays.
 | `GET /api/marks` | Track AR: what the panel's map draws beyond `/map.json`, within 256 blocks of the bot, nearest first, at most 200 each: `{"chests":[{"x":10,"y":-60,"z":4,"kind":"chest","label":"ores","unreachable":false}],"herds":[{"x":5.5,"y":-60,"z":5.5,"n":5,"kind":"cow","penned":true}]}` (empty lists without a world cache) |
 | `GET /icons/<name>.png` | the item's icon (`image/png`, 16 x 16 or 32 x 32), or 404 `{"error":"no icon for this item"}`; `HEAD` the same without the body; 405 other methods ("Item icons") |
 | `POST /api/cmd` `{"text":"!wp set base"}` | 200 `{"command":"!wp set base","ok":true,"replies":["waypoint base set to 10 -60 20"]}`; 409 `ok:false` + `error` when there is no owner to run as; 400 bad body; 413 body over 4 KiB; 429 over 5 commands per second; 405 other methods |
+| `GET /api/events`, `/api/events/summary`, `/api/events/kinds` | decision 0059: the bot's event history (filters, the 8-hour summary, the registry); mounted from `bot/src/events/routes.ts`, documented in [events.md](events.md) "Query API" |
 | `GET /healthz`, `/metrics`, `/map`, `/map.json` | as before (runbook "Operations") |
 
 `PanelState` (`v` 1; `bot/src/health/panel/state.ts`):

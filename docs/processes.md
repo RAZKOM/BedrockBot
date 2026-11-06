@@ -106,6 +106,8 @@ its plan yet; `navRemaining` reads its `active` record read-only (an open issue 
 | `guardRadius` | 16 | 2..64 blocks | guard (also `!guard <radius>`, `--guard <radius>`) |
 | `fleeHealth` | 8 | 0..20 | flee, guard in place (also `--flee-health`) |
 | `nudgeInterval` | 240 | 0..86400 s | keepalive nudge; a change nudges once now, then on the new cadence (also `--nudge-interval`) |
+| `eventsDays` | 14 | 1..365 days | event history: days of files kept (docs/events.md "Storage"; decision 0059) |
+| `eventsMaxMb` | 64 | 1..4096 MB | event history: total size cap, the oldest days go first, today's file stays |
 | `followDistance` | 3 | 1..16 blocks | follow (stop distance; a change restarts a running follow) |
 | `avoidMobRadius` | 4 | 0..32 blocks | placeholder (Track R/S planner cost) |
 | `avoidSpawnerRadius` | 8 | 0..64 blocks | placeholder (Track R/S) |

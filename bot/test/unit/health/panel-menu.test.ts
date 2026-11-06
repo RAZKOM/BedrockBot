@@ -231,10 +231,10 @@ describe('page: the settings by group, the mode selector, the menu and map marku
     expect(JSON.parse(/<script type="application\/json" id="modes-data">([^<]*)<\/script>/.exec(html)![1]!)).toEqual(modesData());
   });
 
-  it('menu, toast, palette, log filters, Pause / Resume, the map canvas and legend; under 160 KB', () => {
+  it('menu, toast, palette, log filters, Pause / Resume, the map canvas and legend; under 162 KB', () => {
     for (const m of ['id="menu"', 'id="toast"', 'id="palette"', 'id="quick-edit"', 'id="log-level"', 'id="log-mod"', 'id="btn-pause"', 'id="btn-resume"', 'id="mapcv"', 'id="map-follow"', 'class="legend', 'id="set-changed"', 'id="set-q"']) expect(html).toContain(m);
     expect(html).not.toContain('<iframe');
-    expect(Buffer.byteLength(html)).toBeLessThan(160_000);
+    expect(Buffer.byteLength(html)).toBeLessThan(162_000); // decision 0059: two settings rows took it to 160 936
   });
 });
 

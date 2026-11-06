@@ -35,6 +35,8 @@ import { buildMemory, chestRows, MEMORY_TTL_MS, type PanelMemory } from './memor
 import { mapMarks } from './marks.ts'; // Track AR
 import { IconBook } from './icons/book.ts'; // decision 0046: the item pictures
 import { assetDir, FsAssets } from './icons/source.ts';
+import { eventRoutes } from '../../events/routes.ts'; // decision 0059: GET /api/events
+import { viaPanel } from '../../events/actor.ts';
 
 export interface PanelPlan {
   mode: 'off' | 'shared' | 'separate';
@@ -317,7 +319,7 @@ export function setupPanel(d: PanelDeps): Panel {
     const as = line.type === 'announcement' ? 'console' : line.source;
     log.info(`panel: ${text} (as ${as})`);
     const mark = replies.total;
-    chat.handle(line);
+    viaPanel(() => chat.handle(line)); // decision 0059: command.received source panel
     return { ok: true, replies: replies.since(mark) };
   };
 
@@ -367,12 +369,14 @@ export function setupPanel(d: PanelDeps): Panel {
       if (plan.mode === 'shared') {
         if (!health) return false;
         health.use(routes);
+        health.use(eventRoutes()); // decision 0059
         boundPort = plan.port;
       } else {
         const mob = built.mobility;
         const map = mapRoutes({ world: mob?.world, cache: d.worldCache, position: () => runningTask.position(), skillsStatus: () => mob?.skills.status(), taskStatus: () => runningTask.status(), server: d.settings.server });
         own = new HealthServer({ port: plan.port ?? 0, host: plan.host, metrics, alive: () => runningTask.alive?.() ?? true, log, routes: map, auth });
         own.use(routes);
+        own.use(eventRoutes()); // decision 0059
         try {
           boundPort = await own.start();
         } catch (e) {
