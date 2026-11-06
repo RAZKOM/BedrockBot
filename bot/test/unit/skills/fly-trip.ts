@@ -7,7 +7,7 @@ import { flatWorld, GLIDE, IDLE_COMMAND, initialBody, stepBody, withBoxes, type 
 
 export const FEET = -60;
 
-export function flyTrip(o: { dist: number; up: number; half: number; startUp?: number; wall?: boolean; house?: number; seed?: number; retargetFrom?: LandingTarget; retargetWithin?: number; retargetBeyond?: number; walls?: boolean; tree?: boolean; roof?: boolean; rockets?: number; life?: number; takeoffYaw?: number; descent?: 'auto' | 'dive' | 'spiral'; terrain?: boolean; extra?: { from: { x: number; y: number; z: number }; to: { x: number; y: number; z: number }; solid: boolean }[]; unknown?: (x: number, z: number) => boolean; cacheOnly?: (x: number, z: number) => boolean; highCruise?: boolean; notes?: string[]; view?: number }) {
+export function flyTrip(o: { dist: number; up: number; half: number; startUp?: number; wall?: boolean; house?: number; seed?: number; retargetFrom?: LandingTarget; retargetWithin?: number; retargetBeyond?: number; walls?: boolean; tree?: boolean; roof?: boolean; rockets?: number; life?: number; takeoffYaw?: number; descent?: 'auto' | 'dive' | 'spiral'; terrain?: boolean; extra?: { from: { x: number; y: number; z: number }; to: { x: number; y: number; z: number }; solid: boolean }[]; unknown?: (x: number, z: number) => boolean; cacheOnly?: (x: number, z: number) => boolean; highCruise?: boolean; notes?: string[]; view?: number; landStyle?: 'auto' | 'flare' | 'brake' }) {
   const tx = 0;
   const tz = o.dist;
   const top = FEET + o.up;
@@ -51,7 +51,7 @@ export function flyTrip(o: { dist: number; up: number; half: number; startUp?: n
   o = { ...o, ...(blind ? { unknown: blind } : {}) };
   const terrain = o.terrain ? (x: number, z: number) => (o.unknown?.(x, z) ? { top: undefined, src: 'unknown' as const } : { top: skyTop(x, z), src: o.cacheOnly?.(x, z) ? ('cache' as const) : ('live' as const) }) : undefined;
   const seen = (x: number, y: number, z: number): boolean => (o.unknown?.(x, z) ? false : o.cacheOnly?.(x, z) ? y <= skyTop(x, z) : world.solidAt(x, y, z) === true);
-  const brain = new FlightBrain(target, { cruiseY: o.highCruise ? 328 : cz.y, groundAt: groundBelow, skyTop: (x, z) => (o.unknown?.(x, z) ? undefined : skyTop(x, z)), obstacle: seen, seed: o.seed ?? 5, takeoffYaw: o.takeoffYaw, descent: o.descent ?? 'spiral', ...(terrain ? { terrain } : {}), ...(o.highCruise ? { highCruise: true } : {}), ...(o.notes ? { note: (m: string) => o.notes!.push(m) } : {}) });
+  const brain = new FlightBrain(target, { cruiseY: o.highCruise ? 328 : cz.y, groundAt: groundBelow, skyTop: (x, z) => (o.unknown?.(x, z) ? undefined : skyTop(x, z)), obstacle: seen, seed: o.seed ?? 5, takeoffYaw: o.takeoffYaw, descent: o.descent ?? 'spiral', ...(terrain ? { terrain } : {}), ...(o.highCruise ? { highCruise: true } : {}), ...(o.notes ? { note: (m: string) => o.notes!.push(m) } : {}), ...(o.landStyle ? { landStyle: o.landStyle } : {}) });
   let body = initialBody(start, true);
   let cmd = { ...IDLE_COMMAND };
   let rockets = o.rockets ?? 64;
@@ -84,7 +84,7 @@ export function flyTrip(o: { dist: number; up: number; half: number; startUp?: n
     at = { x: body.pos.x, z: body.pos.z };
     // Track AU2: a collision in the air (the speed vanishes without the brain's doing) is what the path-ahead check must prevent
     if (body.gliding && Math.hypot(before.x, before.z) > 0.6 && Math.hypot(body.vel.x, body.vel.z) < Math.hypot(before.x, before.z) * 0.3 && body.pos.y > FEET + 0.5) hits++;
-    if (out.end) return { avoidances: brain.stats.avoidances, dives: brain.stats.dives, startY: start.y, retargeted, end: out.end, ticks: t, rockets: (o.rockets ?? 64) - rockets, by: brain.stats.rocketsBy, goArounds: brain.stats.goArounds, lastAir, maxY: brain.stats.maxY, cruiseY: cz.y, descents: brain.stats.descents, steered: brain.stats.steered, hits, body };
+    if (out.end) return { avoidances: brain.stats.avoidances, dives: brain.stats.dives, startY: start.y, retargeted, end: out.end, ticks: t, rockets: (o.rockets ?? 64) - rockets, by: brain.stats.rocketsBy, goArounds: brain.stats.goArounds, lastAir, maxY: brain.stats.maxY, cruiseY: cz.y, descents: brain.stats.descents, steered: brain.stats.steered, hits, body, stats: brain.stats };
   }
   throw new Error('the flight never ended');
 }

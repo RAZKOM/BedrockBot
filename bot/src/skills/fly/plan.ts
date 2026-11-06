@@ -16,8 +16,13 @@
 // Every tick the planner simulates the current profile and its neighbours (a hill climb over the
 // four parameters; a coarse grid when it has no plan that lands) and flies the first tick of the best.
 // No teleports, nothing a vanilla client could not do: yaw, pitch and the rocket are the only controls.
+//
+// Track F1 (docs/flight.md "Manoeuvres", decisions/0057): `glideRollout` is the one formula-level
+// rollout every planner here runs on (the path ahead, the flare profiles, the dive, the brake / elevator
+// landings of brake.ts and the manoeuvre library of maneuvers.ts), and `ProfilePlanner` the one profile
+// search (the flare family below, the brake family of brake.ts).
 import type { Vec3 } from '../../connection/types.ts';
-import { glideVelocity } from '../input/physics.ts';
+import { GLIDE, glideVelocity } from '../input/physics.ts';
 
 /** A landing target: the block top to stand on (feet y = `top`), its centre and half width in blocks (1 = 3 x 3). */
 export interface LandingTarget {
@@ -50,6 +55,23 @@ export interface LandingTarget {
    * confirmed): the brain holds high near it (a circle) and never lands; the trip retargets it.
    */
   hold?: boolean;
+  /**
+   * Track F1: the feet height of the rim around a cell that lies below its surroundings (the floor of a
+   * shaft): the approach entry, the glide line and the go-around are flown over the rim, not over the
+   * floor (`entryTop`); only the brake / elevator landing comes down inside it.
+   */
+  rim?: number;
+  /**
+   * Track F1: a precision cell (a pillar top, a shaft floor, a cell before a wall or under a low roof:
+   * landing.ts findLanding's exact goal that is not a plain flat floor): flown by the landing family
+   * the cost picks, which for such a cell is the brake / elevator landing (brake.ts).
+   */
+  precise?: boolean;
+}
+
+/** Track F1: the height the approach is measured from: the target's top, or the rim around a shaft floor. */
+export function entryTop(t: LandingTarget): number {
+  return t.rim !== undefined && t.rim > t.top ? t.rim : t.top;
 }
 
 /** Track BF: the key of column (x, z) in `LandingTarget.cells`. */
@@ -195,11 +217,11 @@ export function cruiseHeight(
     else if (highest === undefined || t > highest) highest = t;
   }
   // Track BL: unknown columns are not air: they count as the highest known column plus UNKNOWN_SLACK (24; terrain.ts)
-  const along = highest === undefined ? Math.max(from.y, target.top) : highest + 1 + clearance + (unknown > 0 ? UNKNOWN_SLACK_CRUISE : 0);
+  const along = highest === undefined ? Math.max(from.y, entryTop(target)) : highest + 1 + clearance + (unknown > 0 ? UNKNOWN_SLACK_CRUISE : 0);
   const terrain = Math.max(along, startTop === undefined ? -Infinity : startTop + 1 + clearance);
   if (startTop !== undefined && (highest === undefined || startTop > highest)) highest = startTop;
   const distance = hdist(from, target);
-  const entry = target.top + APPROACH_HEIGHT;
+  const entry = entryTop(target) + APPROACH_HEIGHT;
   // the glide slope from the approach entry: the cruise is flown after the climb, which itself covers
   // about CLIMB_RUN blocks per block climbed (two rounds settle the circular estimate)
   const spare = glideMargin(margin, distance);
@@ -225,7 +247,7 @@ export function glideMargin(margin: number, distance: number): number {
 
 /** The feet height from which a glide at GLIDE_RATIO reaches the approach entry of `target` from `distance` blocks out (the glide line). */
 export function glideLine(target: LandingTarget, distance: number): number {
-  return target.top + APPROACH_HEIGHT + Math.max(0, distance - APPROACH_DISTANCE) / GLIDE_RATIO;
+  return entryTop(target) + APPROACH_HEIGHT + Math.max(0, distance - APPROACH_DISTANCE) / GLIDE_RATIO;
 }
 
 /**
@@ -319,17 +341,99 @@ export function takeoffSky(from: Vec3, target: { x: number; z: number }, cruiseY
  * simulation (a one-block wall is thinner than a tick of flight).
  */
 export function pathAhead(body: FlightBody, yaw: number, pitch: number, ticks: number, obstacle: Obstacle): number | undefined {
+  const look = { yaw, pitch };
+  return glideRollout(body, yaw, pitch, ticks, () => look, (k) => (hitsObstacle(obstacle, k.next) || hitsObstacle(obstacle, midpoint(k.pos, k.next)) ? k.t : undefined)).result;
+}
+
+// ---- Track F1: the shared rollout -----------------------------------------------------------------
+
+/** The body a rollout law sees at the start of a tick (feet, blocks a tick) with the look it holds. */
+export interface RolloutState {
+  pos: Vec3;
+  vel: Vec3;
+  boostTicks: number;
+  yaw: number;
+  pitch: number;
+}
+
+/** A rollout law's controls for one tick: the look, a rocket (only when none burns), or `done` (the law ends before this tick). */
+export interface RolloutLook {
+  yaw: number;
+  pitch: number;
+  fire?: boolean;
+  done?: boolean;
+}
+
+/** One tick of a rollout for the checker: from `pos` to `next` with the tick's velocity and look. */
+export interface RolloutTick {
+  t: number;
+  pos: Vec3;
+  next: Vec3;
+  vel: Vec3;
+  yaw: number;
+  pitch: number;
+  boosting: boolean;
+}
+
+export interface RolloutEnd<R> {
+  /** What the checker returned (it ended the rollout), else undefined. */
+  result: R | undefined;
+  /** Ticks flown (the law's `done` tick is not flown). */
+  ticks: number;
+  /** The law said it was done. */
+  done: boolean;
+  /** The state after the last flown tick (the tick the checker stopped included). */
+  pos: Vec3;
+  vel: Vec3;
+  boostTicks: number;
+  yaw: number;
+  pitch: number;
+  /** Rockets the law fired. */
+  rockets: number;
+}
+
+/** The midpoint of a tick's move (a one-block wall is thinner than a tick of flight: checked at the end and the midpoint). */
+export const midpoint = (a: Vec3, b: Vec3): Vec3 => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 });
+
+/**
+ * Track F1: the one formula-level rollout of the flight planners (the path ahead, the flare profiles, the
+ * dive, the brake / elevator landings, the manoeuvre library): from `body` with the look (`yaw`, `pitch`)
+ * the law sees first, each tick `law` gives the look (and a rocket: `GLIDE.boostTicks` of boost from this
+ * tick on, as stepBody's `boostStart`), glideVelocity moves the body (no collisions: the checker sees the
+ * world), and `check` sees the tick's move; a value from it ends the rollout. Pure.
+ */
+export function glideRollout<R>(
+  body: { pos: Vec3; vel: Vec3; boostTicks: number },
+  yaw: number,
+  pitch: number,
+  ticks: number,
+  law: (s: RolloutState, t: number) => RolloutLook,
+  check?: (k: RolloutTick) => R | undefined,
+): RolloutEnd<R> {
   let pos = { ...body.pos };
   let vel = { ...body.vel };
   let boost = body.boostTicks;
+  let y = yaw;
+  let p = pitch;
+  let rockets = 0;
   for (let t = 1; t <= ticks; t++) {
-    vel = glideVelocity(vel, yaw, pitch, boost > 0);
+    const look = law({ pos, vel, boostTicks: boost, yaw: y, pitch: p }, t);
+    if (look.done) return { result: undefined, ticks: t - 1, done: true, pos, vel, boostTicks: boost, yaw: y, pitch: p, rockets };
+    if (look.fire && boost <= 0) {
+      boost = GLIDE.boostTicks;
+      rockets++;
+    }
+    y = look.yaw;
+    p = look.pitch;
+    const boosting = boost > 0;
+    vel = glideVelocity(vel, y, p, boosting);
     if (boost > 0) boost--;
     const nx = { x: pos.x + vel.x, y: pos.y + vel.y, z: pos.z + vel.z };
-    if (hitsObstacle(obstacle, nx) || hitsObstacle(obstacle, { x: (pos.x + nx.x) / 2, y: (pos.y + nx.y) / 2, z: (pos.z + nx.z) / 2 })) return t;
+    const r = check?.({ t, pos, next: nx, vel, yaw: y, pitch: p, boosting });
+    if (r !== undefined) return { result: r, ticks: t, done: false, pos: nx, vel, boostTicks: boost, yaw: y, pitch: p, rockets };
     pos = nx;
   }
-  return undefined;
+  return { result: undefined, ticks, done: false, pos, vel, boostTicks: boost, yaw: y, pitch: p, rockets };
 }
 
 /** Radii the descent spiral may use (blocks); the circle's columns must be free this much farther out (the body strays from the circle). */
@@ -385,10 +489,10 @@ export function circleYaw(yaw: number, pos: { x: number; z: number }, centre: { 
 /** Where the approach begins: `APPROACH_DISTANCE` before the target on the line from `from`, `APPROACH_HEIGHT` above its top. */
 export function approachEntry(from: { x: number; z: number }, target: LandingTarget, distance = APPROACH_DISTANCE): Vec3 {
   const d = hdist(from, target);
-  if (d < 1e-6) return { x: target.x, y: target.top + APPROACH_HEIGHT, z: target.z - distance };
+  if (d < 1e-6) return { x: target.x, y: entryTop(target) + APPROACH_HEIGHT, z: target.z - distance };
   const ux = (from.x - target.x) / d;
   const uz = (from.z - target.z) / d;
-  return { x: target.x + ux * distance, y: target.top + APPROACH_HEIGHT, z: target.z + uz * distance };
+  return { x: target.x + ux * distance, y: entryTop(target) + APPROACH_HEIGHT, z: target.z + uz * distance };
 }
 
 export type TouchdownKind = 'landed' | 'short' | 'over' | 'wall' | 'none';
@@ -469,24 +573,39 @@ export function profilePitch(prof: ApproachProfile, st: ProfileState, pos: Vec3,
  * hit its side, reach the ground, or `maxTicks`.
  */
 export function simulateProfile(body: FlightBody, yaw: number, target: LandingTarget, prof: ApproachProfile, st: ProfileState = PROFILE_START, maxTicks = 240, obstacle?: Obstacle): Touchdown {
-  let pos = { ...body.pos };
-  let vel = { ...body.vel };
-  let y = yaw;
-  let boost = body.boostTicks;
   let ps = st;
+  const r = glideRollout(
+    body,
+    yaw,
+    0,
+    maxTicks,
+    (s) => {
+      const y = approachYaw(s.yaw, s.pos, target);
+      const { pitch, next } = profilePitch(prof, ps, s.pos, s.vel, target);
+      ps = next;
+      return { yaw: y, pitch };
+    },
+    touchdownCheck(target, obstacle, true),
+  );
+  return r.result ?? { kind: 'none', pos: r.pos, vel: r.vel, ticks: maxTicks, off: hdist(r.pos, target) };
+}
+
+/**
+ * The touchdown checker of a landing rollout (the flare's and, Track F1, the brake's): the feet crossing
+ * the target's top inside its footprint (`landed`), just beside it or on the ground (`short`), into its
+ * side from below or into a solid cell of the world model in the body's box (`wall`; near the target only
+ * the cells from its top up count, with a thin berth: a wall on a platform, a ceiling over an overhang,
+ * a shaft's walls), and with `over` the target passed above its top (the flare's overshoot; the brake
+ * comes back to the cell, so it has none).
+ */
+export function touchdownCheck(target: LandingTarget, obstacle: Obstacle | undefined, over: boolean, nearBerth = NEAR_BERTH): (k: RolloutTick) => Touchdown | undefined {
   const inside = (p: Vec3): boolean => onTarget(target, p);
   const ground = target.ground ?? target.top - 24;
   // Track BF: near the target only its floor (and below) is no obstacle, with a thin berth: a wall on a
   // platform, a ceiling over an overhang landing still count (before, the whole check stopped there)
   const nearObstacle: Obstacle | undefined = obstacle ? (x, y, z) => y >= target.top && obstacle(x, y, z) : undefined;
   const nearZone = target.half + 0.6 + OBSTACLE_BERTH;
-  for (let t = 1; t <= maxTicks; t++) {
-    y = approachYaw(y, pos, target);
-    const { pitch, next } = profilePitch(prof, ps, pos, vel, target);
-    ps = next;
-    vel = glideVelocity(vel, y, pitch, boost > 0);
-    if (boost > 0) boost--;
-    const nx = { x: pos.x + vel.x, y: pos.y + vel.y, z: pos.z + vel.z };
+  return ({ t, pos, next: nx, vel }) => {
     // crossing the platform's top plane inside the footprint: touchdown (far from the platform the body
     // just flies on below its top: the approach comes in low on purpose)
     if (pos.y >= target.top && nx.y <= target.top) {
@@ -502,20 +621,21 @@ export function simulateProfile(body: FlightBody, yaw: number, target: LandingTa
     // a block in the way of the body's box (0.6 wide, 0.6 high while gliding; the platform's own top row is the landing)
     // (checked at the step's end and its midpoint: a one-block wall is thinner than a tick of flight)
     if (obstacle) {
-      const mid = { x: (pos.x + nx.x) / 2, y: (pos.y + nx.y) / 2, z: (pos.z + nx.z) / 2 };
+      const mid = midpoint(pos, nx);
       const near = hdist(nx, target) <= nearZone;
       const o = near ? nearObstacle! : obstacle;
-      const berth = near ? NEAR_BERTH : OBSTACLE_BERTH;
+      const berth = near ? nearBerth : OBSTACLE_BERTH;
       if (hitsObstacle(o, nx, berth) || hitsObstacle(o, mid, berth)) return { kind: 'wall', pos: nx, vel, ticks: t, off: hdist(nx, target) };
     }
     // past the target above its top: overshoot
-    const toT = { x: target.x - nx.x, z: target.z - nx.z };
-    if (nx.y > target.top && hdist(nx, target) > target.half + 0.5 && toT.x * vel.x + toT.z * vel.z < 0 && hdist(pos, target) < target.half + 3) {
-      return { kind: 'over', pos: nx, vel, ticks: t, off: hdist(nx, target) };
+    if (over) {
+      const toT = { x: target.x - nx.x, z: target.z - nx.z };
+      if (nx.y > target.top && hdist(nx, target) > target.half + 0.5 && toT.x * vel.x + toT.z * vel.z < 0 && hdist(pos, target) < target.half + 3) {
+        return { kind: 'over', pos: nx, vel, ticks: t, off: hdist(nx, target) };
+      }
     }
-    pos = nx;
-  }
-  return { kind: 'none', pos, vel, ticks: maxTicks, off: hdist(pos, target) };
+    return undefined;
+  };
 }
 
 /**
@@ -538,7 +658,16 @@ export function touchdownCost(td: Touchdown, target: LandingTarget): number {
     // the slide after touchdown must stay on the platform: speed counts against the room left
     const room = Math.max(0.05, target.half + 0.5 - td.off);
     // the time term keeps a plan from parachuting down at stall speed for hundreds of ticks (an emergency landing from high up)
-    return td.off * 2 + vy * 40 + hs * 40 + Math.max(0, h * 1.2 - room) * 30 + Math.max(0, td.ticks - 60) * TICK_COST;
+    const time = Math.max(0, td.ticks - 60) * TICK_COST;
+    if (target.precise || target.half < 1) {
+      // Track F1, a precision cell (a pillar top, a shaft floor; any target a block wide): the server's own slide
+      // (0.6 to 0.8 more than the model's after a flared touchdown at 0.33) counts too, in proportion to the speed;
+      // a brake touchdown nearly stopped slides nothing. With cells the room is the cells' (a 2x2 shaft floor)
+      const slide = h * 1.2 + SERVER_SLIDE * Math.min(1, h / FLARE_TOUCHDOWN_H);
+      const out = target.cells ? slideOut(target, td.pos, td.vel, slide) * slide : Math.max(0, slide - room);
+      return td.off * 2 + vy * 40 + hs * 40 + out * 30 + time;
+    }
+    return td.off * 2 + vy * 40 + hs * 40 + Math.max(0, h * 1.2 - room) * 30 + time;
   }
   if (td.kind === 'wall') return 200 + h * 30 + Math.max(0, target.top - td.pos.y) * 2;
   if (td.kind === 'over') return 120 + Math.max(0, td.pos.y - target.top) * 3 + td.off;
@@ -557,6 +686,8 @@ export function onTarget(target: LandingTarget, at: { x: number; z: number }): b
 
 /** Track BF: the server's body slides this much further after the glide ends than the model's (measured 0.6 to 0.8). */
 export const SERVER_SLIDE = 0.8;
+/** Track F1: the touchdown speed of the flared landings SERVER_SLIDE was measured after (0.27 to 0.35, docs/flight.md "Measurements"). */
+export const FLARE_TOUCHDOWN_H = 0.33;
 /** Track BF: a walk landing's touchdown speed above which the slide counts (the cells give room). */
 export const WALK_TOUCHDOWN_H = 0.5;
 /** Track BF: a walk landing's cost per block from the centre (a block of walk; the exact landing's is 2). */
@@ -611,47 +742,112 @@ export const GOOD_COST = 8;
 const STEPS: Record<keyof ApproachProfile, number> = { pitchA1: 5, ticksA1: 4, pitchA2: 5, flareAt: 1, pitchB: 5, pitchC: 5 };
 const PARAMS = Object.keys(RANGES) as (keyof ApproachProfile)[];
 
-export interface ApproachChoice {
+/** Track F1: the landing families the approach chooses from (`flyLandStyle`: auto picks by cost). */
+export type LandStyle = 'flare' | 'brake';
+/** Track F1: the phase of a landing plan: the flare's segments, or the brake family's K (brake, station keeping, elevator). */
+export type LandingPhase = ProfilePhase | 'K';
+
+export interface ApproachChoice<P = ApproachProfile> {
   pitch: number;
+  /** Track F1: the yaw the plan commands this tick (the brake family's law); undefined: the approach yaw law. */
+  yaw?: number;
   cost: number;
   touchdown: Touchdown;
-  profile: ApproachProfile;
-  phase: ProfilePhase;
+  profile: P;
+  phase: LandingPhase;
+  /** Track F1: the family the plan belongs to. */
+  style: LandStyle;
   /** Simulations this tick. */
   sims: number;
 }
 
 /**
- * The approach planner of one landing: keeps the profile being flown and its phase, re-optimises the
- * free parameters every tick (random samples around and across the ranges, then a hill climb; more
- * samples while no plan lands) and returns the pitch to hold now. `reset()` for a new approach (a
- * go-around). Deterministic: a seeded generator, so a flight replays the same.
+ * Track F1: a family of landing profiles for the profile search (`ProfilePlanner`): its numeric
+ * parameters with their ranges and hill-climb steps (`params` in sampling order), the phase state, which
+ * parameters are still ahead of the flown phase, the simulation of a profile from the body (a Touchdown
+ * for touchdownCost) and its control law for the tick flown now. The flare family is below; the brake /
+ * elevator family is brake.ts.
  */
-export class ApproachPlanner {
-  private prof: ApproachProfile | undefined;
-  private st: ProfileState = { ...PROFILE_START };
-  private last: ApproachChoice | undefined;
+export interface ProfileFamily<P extends object, S> {
+  readonly style: LandStyle;
+  readonly params: readonly (keyof P)[];
+  readonly ranges: { readonly [K in keyof P]: readonly [number, number] };
+  readonly steps: { readonly [K in keyof P]: number };
+  /** The profile a first wide sample starts from (its fixed parameters). */
+  readonly base: P;
+  readonly start: S;
+  /** The parameters still free in phase state `st` (the hill climb walks them in this order). */
+  free(st: S): Set<keyof P>;
+  /** Samples this tick: across the ranges (`wide`), around the plan (`near`), and the hill climb's rounds. */
+  samples(st: S, good: boolean): { wide: number; near: number; rounds: number };
+  simulate(body: FlightBody, yaw: number, target: LandingTarget, p: P, st: S, obstacle: Obstacle | undefined): Touchdown;
+  /** The controls of the tick flown now and the phase state after it. */
+  control(p: P, st: S, body: FlightBody, yaw: number, target: LandingTarget): { pitch: number; yaw?: number; next: S };
+  phase(st: S): LandingPhase;
+}
+
+/** The flare family (Track AU): A1, A2, the flare B, the settle C (see the file comment). */
+export const FLARE_FAMILY: ProfileFamily<ApproachProfile, ProfileState> = {
+  style: 'flare',
+  params: PARAMS,
+  ranges: RANGES,
+  steps: STEPS,
+  base: { pitchA1: 0, ticksA1: 0, pitchA2: 0, flareAt: 12, pitchB: -60, pitchC: -10 },
+  start: PROFILE_START,
+  free(st) {
+    const s = new Set<keyof ApproachProfile>(['pitchC']);
+    if (st.phase !== 'C') s.add('pitchB');
+    if (st.phase === 'A1' || st.phase === 'A2') {
+      s.add('pitchA2');
+      s.add('flareAt');
+    }
+    if (st.phase === 'A1') {
+      s.add('pitchA1');
+      s.add('ticksA1');
+    }
+    return s;
+  },
+  samples: (_st, good) => ({ wide: good ? 30 : 120, near: 40, rounds: 3 }),
+  simulate: (body, yaw, target, p, st, obstacle) => simulateProfile(body, yaw, target, p, st, 240, obstacle),
+  control: (p, st, body, _yaw, target) => profilePitch(p, st, body.pos, body.vel, target),
+  phase: (st) => st.phase,
+};
+
+/**
+ * The profile search of one landing (Track F1: one search for every family; the flare's ApproachPlanner
+ * below, the brake family's BrakePlanner of brake.ts): keeps the profile being flown and its phase,
+ * re-optimises the free parameters every tick (random samples around and across the ranges, then a hill
+ * climb; more samples while no plan lands) and returns the controls to fly now. `reset()` for a new
+ * approach (a go-around). Deterministic: a seeded generator, so a flight replays the same.
+ */
+export class ProfilePlanner<P extends object, S> {
+  private prof: P | undefined;
+  private st: S;
+  private last: ApproachChoice<P> | undefined;
   private seed: number;
   private readonly obstacle: Obstacle | undefined;
+  readonly family: ProfileFamily<P, S>;
   /** Consecutive ticks whose best plan does not land. */
   missing = 0;
 
-  constructor(seed = 12345, obstacle?: Obstacle) {
+  constructor(family: ProfileFamily<P, S>, seed = 12345, obstacle?: Obstacle) {
+    this.family = family;
+    this.st = { ...family.start };
     this.seed = seed >>> 0 || 1;
     this.obstacle = obstacle;
   }
 
-  get state(): Readonly<ProfileState> {
+  get state(): Readonly<S> {
     return this.st;
   }
 
-  get current(): ApproachChoice | undefined {
+  get current(): ApproachChoice<P> | undefined {
     return this.last;
   }
 
   reset(): void {
     this.prof = undefined;
-    this.st = { ...PROFILE_START };
+    this.st = { ...this.family.start };
     this.last = undefined;
     this.missing = 0;
   }
@@ -666,43 +862,45 @@ export class ApproachPlanner {
     return this.seed / 4294967296;
   }
 
-  private sample(base: ApproachProfile | undefined, free: ReadonlySet<keyof ApproachProfile>, local: boolean): ApproachProfile {
-    const out: ApproachProfile = base ? { ...base } : { pitchA1: 0, ticksA1: 0, pitchA2: 0, flareAt: 12, pitchB: -60, pitchC: -10 };
-    for (const k of PARAMS) {
+  private sample(base: P | undefined, free: ReadonlySet<keyof P>, local: boolean): P {
+    const f = this.family;
+    const out = (base ? { ...base } : { ...f.base }) as Record<keyof P, number>;
+    for (const k of f.params) {
       if (!free.has(k)) continue;
-      const [lo, hi] = RANGES[k];
-      const v = local && base ? base[k] + (this.rnd() * 2 - 1) * STEPS[k] * 3 : lo + this.rnd() * (hi - lo);
+      const [lo, hi] = f.ranges[k];
+      const v = local && base ? (base as Record<keyof P, number>)[k] + (this.rnd() * 2 - 1) * f.steps[k] * 3 : lo + this.rnd() * (hi - lo);
       out[k] = Math.round(clamp(v, lo, hi));
     }
-    return out;
+    return out as P;
   }
 
-  /** Plan from the body now (yaw = the yaw the brain will command this tick) and advance the profile's phase. */
-  step(body: FlightBody, yaw: number, target: LandingTarget): ApproachChoice {
+  /** Plan from the body now (yaw = the yaw the brain commands this tick, or the current look for a family with its own yaw law) and advance the profile's phase. */
+  step(body: FlightBody, yaw: number, target: LandingTarget): ApproachChoice<P> {
+    const f = this.family;
     let sims = 0;
-    const evalP = (p: ApproachProfile): { p: ApproachProfile; cost: number; td: Touchdown } => {
+    const evalP = (p: P): { p: P; cost: number; td: Touchdown } => {
       sims++;
-      const td = simulateProfile(body, yaw, target, p, this.st, 240, this.obstacle);
+      const td = f.simulate(body, yaw, target, p, this.st, this.obstacle);
       return { p, cost: touchdownCost(td, target), td };
     };
-    const free = this.freeParams();
+    const free = f.free(this.st);
     let best = this.prof ? evalP(this.prof) : undefined;
     // samples: many across the ranges until a soft landing is planned (GOOD_COST), fewer around the plan afterwards
     const good = best?.td.kind === 'landed' && best.cost <= GOOD_COST;
-    const wide = good ? 30 : 120;
-    const near = 40;
-    for (let n = 0; n < wide + near; n++) {
-      const r = evalP(this.sample(best?.p, free, n >= wide));
+    const n0 = f.samples(this.st, good);
+    for (let n = 0; n < n0.wide + n0.near; n++) {
+      const r = evalP(this.sample(best?.p, free, n >= n0.wide));
       if (!best || r.cost < best.cost) best = r;
     }
-    // the hill climb: each free parameter one step either way, until no step helps (at most 3 rounds)
-    for (let round = 0; round < 3 && best; round++) {
+    // the hill climb: each free parameter one step either way, until no step helps (at most `rounds` rounds)
+    for (let round = 0; round < n0.rounds && best; round++) {
       let improved = false;
       for (const k of free) {
         for (const dir of [-1, 1]) {
-          const [lo, hi] = RANGES[k];
-          const v = clamp(best.p[k] + dir * STEPS[k], lo, hi);
-          if (v === best.p[k]) continue;
+          const [lo, hi] = f.ranges[k];
+          const cur = (best.p as Record<keyof P, number>)[k];
+          const v = clamp(cur + dir * f.steps[k], lo, hi);
+          if (v === cur) continue;
           const r = evalP({ ...best.p, [k]: v });
           if (r.cost < best.cost - 1e-9) {
             best = r;
@@ -714,26 +912,18 @@ export class ApproachPlanner {
     }
     const b = best!;
     this.prof = b.p;
-    const { pitch, next } = profilePitch(b.p, this.st, body.pos, body.vel, target);
-    this.st = next;
+    const c = f.control(b.p, this.st, body, yaw, target);
+    this.st = c.next;
     this.missing = b.td.kind === 'landed' ? 0 : this.missing + 1;
-    this.last = { pitch, cost: b.cost, touchdown: b.td, profile: b.p, phase: this.st.phase, sims };
+    this.last = { pitch: c.pitch, ...(c.yaw !== undefined ? { yaw: c.yaw } : {}), cost: b.cost, touchdown: b.td, profile: b.p, phase: f.phase(this.st), style: f.style, sims };
     return this.last;
   }
+}
 
-  /** The parameters still ahead of the flown phase. */
-  private freeParams(): Set<keyof ApproachProfile> {
-    const s = new Set<keyof ApproachProfile>(['pitchC']);
-    if (this.st.phase !== 'C') s.add('pitchB');
-    if (this.st.phase === 'A1' || this.st.phase === 'A2') {
-      s.add('pitchA2');
-      s.add('flareAt');
-    }
-    if (this.st.phase === 'A1') {
-      s.add('pitchA1');
-      s.add('ticksA1');
-    }
-    return s;
+/** The flare family's planner (Track AU's ApproachPlanner, on the shared search since Track F1). */
+export class ApproachPlanner extends ProfilePlanner<ApproachProfile, ProfileState> {
+  constructor(seed = 12345, obstacle?: Obstacle) {
+    super(FLARE_FAMILY, seed, obstacle);
   }
 }
 
@@ -743,7 +933,7 @@ const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.m
  * The approach cannot end on the platform from here: no plan landed for `patience` ticks within
  * `within` blocks of the target, or the touchdown ahead is hard (cost over `hard`) and near: go around.
  */
-export function approachHopeless(c: ApproachChoice, missing: number, distance: number, o: { patience?: number; within?: number; hard?: number } = {}): boolean {
+export function approachHopeless(c: Pick<ApproachChoice<unknown>, 'touchdown' | 'cost'>, missing: number, distance: number, o: { patience?: number; within?: number; hard?: number } = {}): boolean {
   const patience = o.patience ?? 6;
   const within = o.within ?? 45;
   const hard = o.hard ?? 35;

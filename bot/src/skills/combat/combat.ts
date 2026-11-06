@@ -63,6 +63,7 @@
 // hand 'main_hand', held_item (the wire item as the server sent it), player_pos (eye), click_pos 0 }.
 import { hasMending } from '../survival/tools.ts';
 import { silentLogger, type Logger } from '../../log.ts';
+import { events } from '../../events/bus.ts'; // decision 0059: combat.fight / combat.kill
 import type { ItemV4 } from '../../world/packets.ts';
 import type { EntityInfo, ItemStack, Vec3 } from '../../world/types.ts';
 import { containersOf, HotbarPuller, type HotbarMoveContainers } from '../container/hotbar-moves.ts';
@@ -791,6 +792,7 @@ export class CombatController {
         `${f.arrowHits ? `, ${f.arrowHits} arrow hit(s)` : ''}${f.interludes.length ? `, in between: ${f.interludes.map((i) => `${bareType(i.type)} ${i.reason}`).join(', ')}` : ''}` +
         `, ${f.retargets} retarget(s), ${f.kills} kill(s)${f.shieldTicks ? `, shield up ${f.shieldTicks} ticks` : ''}`,
     );
+    events.emit('combat.fight', { mob: bareType(f.req.type), outcome: reason, ticks: f.t, attacks: f.attacks, landed: f.landed, damageTaken: r.damageTaken, kills: f.kills }); // decision 0059
     f.resolve(r);
   }
 
@@ -800,6 +802,7 @@ export class CombatController {
       this.settle(f, f.tg, true);
       this.totals.kills++;
       f.kills++;
+      events.emit('combat.kill', { mob: bareType(f.tg.type) }); // decision 0059
     }
     if (reason === 'creeper_avoided') this.totals.creepersAvoided++;
     if (reason === 'took_cover') this.totals.cover++;

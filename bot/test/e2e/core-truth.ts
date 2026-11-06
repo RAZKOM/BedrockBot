@@ -252,12 +252,12 @@ export interface CoreCli {
   kill(): void;
 }
 
-/** `node src/index.ts --task afk ...` against bds-core with no config file and a temporary log dir. */
-export function startCli(args: string[], name = uniqueName('CoreCli')): CoreCli {
+/** `node src/index.ts --task afk ...` against bds-core (or `target`, decision 0059's e2e on bds-pve) with no config file and a temporary log dir. */
+export function startCli(args: string[], name = uniqueName('CoreCli'), target: { host: string; port: number } = { host: CORE_HOST, port: CORE_PORT }): CoreCli {
   const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-core-'));
   const child = spawn(
     process.execPath,
-    ['src/index.ts', '--task', 'afk', '--host', CORE_HOST, '--port', String(CORE_PORT), ...CLI_TARGET_ARGS, '--username', name, '--no-reconnect', '--log-dir', dir, ...args],
+    ['src/index.ts', '--task', 'afk', '--host', target.host, '--port', String(target.port), ...CLI_TARGET_ARGS, '--username', name, '--no-reconnect', '--log-dir', dir, ...args],
     { cwd: BOT_DIR, stdio: ['ignore', 'pipe', 'pipe'] },
   );
   let out = '';

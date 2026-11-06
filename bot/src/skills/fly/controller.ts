@@ -150,6 +150,10 @@ export interface FlightReport {
   avoidances?: string[];
   dives?: number;
   held?: number;
+  /** Track F1: the landing family flown (`flare`, `brake`), the approaches the brake took over from a missing flare, the ticks in the brake's K. */
+  landStyle?: 'flare' | 'brake';
+  brakeRescues?: number;
+  brakeTicks?: number;
 }
 
 export interface FlightOptions extends Omit<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'terrain'> {
@@ -491,6 +495,7 @@ export class FlightController {
       ...(b?.stats.ledgeDrop !== undefined ? { ledgeDrop: b.stats.ledgeDrop } : {}),
       ...(b ? { avoidances: [...b.stats.avoidances], dives: b.stats.dives } : {}),
       held: this.held,
+      ...(b?.stats.landStyle ? { landStyle: b.stats.landStyle, brakeRescues: b.stats.brakeRescues, brakeTicks: b.stats.brakeTicks } : {}),
     };
   }
 
@@ -516,7 +521,7 @@ export class FlightController {
     this.log.info(
       `flight: ${ok ? 'landed' : `ended (${reason})`} at ${r.landedAt ? `${r.landedAt.x.toFixed(2)} ${r.landedAt.y.toFixed(2)} ${r.landedAt.z.toFixed(2)}` : '?'}` +
         `${r.off !== undefined ? `, ${r.off.toFixed(2)} from the centre` : ''}; ${r.rockets} rockets (${r.rocketsBy.climb} climb, ${r.rocketsBy.cruise} cruise, ${r.rocketsBy.goaround} go-around), ${r.goArounds} go-arounds, ${r.ticks} ticks, ${r.corrections} corrections` +
-        `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}, max y ${r.maxY.toFixed(1)}${r.descents.length ? `, descent ${r.descents.join('; ')}` : ''}${r.steered ? `, steered ${r.steered} ticks` : ''}${r.holdTicks ? `, held ${r.holdTicks} ticks` : ''}${r.slide !== undefined ? `, slide ${r.slide.toFixed(2)}${r.sneak ? ' (sneaking)' : ''}` : ''}${r.ledgeDrop !== undefined ? `, ledge takeoff (gliding ${r.ledgeDrop.toFixed(1)} under the edge)` : ''}${r.avoidances?.length ? `, ${r.avoidances.length} terrain avoidance${r.avoidances.length === 1 ? '' : 's'}` : ''}${r.dives ? `, ${r.dives} dive${r.dives === 1 ? '' : 's'}` : ''}${r.held ? `, held by the server ${r.held} times` : ''}`,
+        `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}, max y ${r.maxY.toFixed(1)}${r.descents.length ? `, descent ${r.descents.join('; ')}` : ''}${r.steered ? `, steered ${r.steered} ticks` : ''}${r.holdTicks ? `, held ${r.holdTicks} ticks` : ''}${r.slide !== undefined ? `, slide ${r.slide.toFixed(2)}${r.sneak ? ' (sneaking)' : ''}` : ''}${r.ledgeDrop !== undefined ? `, ledge takeoff (gliding ${r.ledgeDrop.toFixed(1)} under the edge)` : ''}${r.avoidances?.length ? `, ${r.avoidances.length} terrain avoidance${r.avoidances.length === 1 ? '' : 's'}` : ''}${r.dives ? `, ${r.dives} dive${r.dives === 1 ? '' : 's'}` : ''}${r.held ? `, held by the server ${r.held} times` : ''}${r.landStyle ? `, landing ${r.landStyle}${r.landStyle === 'brake' ? ` (${r.brakeTicks} ticks braked / station-kept${r.brakeRescues ? `, ${r.brakeRescues} instead of a go-around` : ''})` : ''}` : ''}`,
     );
     this.brain = undefined;
     const resolve = this.resolve;

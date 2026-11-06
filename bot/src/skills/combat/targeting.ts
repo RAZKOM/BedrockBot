@@ -193,7 +193,10 @@ export function pickThreat(h: TargetingHost, me: Vec3, low: boolean): ThreatPick
   }
   const home = h.d.home();
   const commanded = h.processes.userProcesses().length > 0;
-  const center = !commanded && home && !inPlace ? { x: home.x + 0.5, y: home.y, z: home.z + 0.5 } : me;
+  // Guard watches home while the bot idles there; away from home (farther than the radius, e.g. idle
+  // after a job stopped 1400 blocks out: the Realm death of 2026-11-05) it watches the bot itself.
+  const homeC = home ? { x: home.x + 0.5, y: home.y, z: home.z + 0.5 } : undefined;
+  const center = !commanded && homeC && !inPlace && dist(me, homeC) <= h.guardRadius ? homeC : me;
   const eye = { x: me.x, y: me.y + EYE_HEIGHT, z: me.z };
   const now = performance.now();
   const hit = h.mobs.lastHitBy;
@@ -226,7 +229,8 @@ export function pickThreat(h: TargetingHost, me: Vec3, low: boolean): ThreatPick
       if (reachDistance(eye, e) > REACH_NOW) continue;
       kind = 'inPlace';
     } else {
-      if (dist(f, center) > radius || d > radius + CHASE_EXTRA) continue;
+      // a mob that hit us in the last 10 s is fought whatever the centre (it is next to us, not near home)
+      if ((!hitUs && dist(f, center) > radius) || d > radius + CHASE_EXTRA) continue;
       if (Math.abs(f.y - me.y) > MAX_DY) continue;
       const r = reachability(grid, me, e);
       if (!r) {

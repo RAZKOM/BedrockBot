@@ -18,7 +18,11 @@
 //             profile (approach pitches to a flare point, a hard pull-up that trades the speed for
 //             height, a shallow settle) every tick from the real body and the brain flies its pitch:
 //             the body comes in low, zoom-climbs to the platform top with the speed bled off and
-//             sinks onto it near its centre; the server's glide ends on ground contact
+//             sinks onto it near its centre; the server's glide ends on ground contact.
+//             Track F1 (`landStyle`): or the brake / elevator landing of brake.ts (brake near the cell,
+//             keep station over it, sink straight down): chosen by cost where the flare cannot be soft
+//             (a 1 x 1 cell, a shaft floor) and, in `auto`, instead of a go-around when the flare's
+//             plans miss (stop and re-aim: no rocket, no circuit)
 //   goaround  no candidate lands: one rocket, a climbing turn away, back out to the approach
 //             distance, and a new approach (at most `goArounds`)
 //   land      an emergency or the go-arounds used up: the nearest safe ground ahead, same landing
@@ -36,6 +40,7 @@ import {
   circleYaw,
   DEFAULT_GO_AROUNDS,
   DEFAULT_MARGIN,
+  entryTop,
   GLIDE_RATIO,
   glideLine,
   glideMargin,
@@ -50,11 +55,14 @@ import {
   turnTowards,
   yawDiff,
   yawTo,
+  type ApproachChoice,
   type FlightBody,
   type LandingTarget,
+  type LandStyle,
   type Obstacle,
   type SpiralFit,
 } from './plan.ts';
+import { BRAKE_BIAS, BrakePlanner } from './brake.ts'; // Track F1
 import { assumedTop, BUILD_TOP, CLIMB_SLOPE, strictObstacle, terrainFloor, type TerrainFloor, type TerrainQuery } from './terrain.ts'; // Track BL
 import { DIVE_END_MAX, DIVE_MIN_ABOVE, DIVE_MIN_ABOVE_FORCED, divePhase, divePitch, planDive, simulateDive, type DivePhase, type DiveProfile } from './dive.ts'; // Track BL
 
@@ -140,6 +148,13 @@ export interface BrainOptions {
   note?: (msg: string) => void;
   /** The planner's seed (deterministic flights). */
   seed?: number;
+  /**
+   * Track F1, the landing family (flyLandStyle): `flare` (the zoom climb and settle, Track AU), `brake`
+   * (brake, keep station, sink straight down: brake.ts), `auto` (default): the brake where its plan costs
+   * BRAKE_BIAS less than the flare's on a precision cell (`LandingTarget.precise`, or a target a block
+   * wide), elsewhere only when the flare's plans keep missing (instead of the go-around).
+   */
+  landStyle?: 'auto' | LandStyle;
 }
 
 export interface FlightStats {
@@ -170,6 +185,11 @@ export interface FlightStats {
   /** Track BL: one line per terrain avoidance (reason, distance, height gained), and the dives flown. */
   avoidances: string[];
   dives: number;
+  /** Track F1: the landing family of the last approach tick (the landing flown, once down). */
+  landStyle?: LandStyle;
+  /** Track F1: approaches the brake took over from a flare whose plans kept missing (each a go-around saved), and ticks flown in the brake's K. */
+  brakeRescues: number;
+  brakeTicks: number;
 }
 
 const CLIMB_PITCH = -38;
@@ -231,6 +251,11 @@ const DIVE_EVERY = 5;
 /** Track BL: the dive is checked this many ticks ahead every tick and re-simulated every DIVE_RECHECK ticks. */
 const DIVE_AHEAD = 12;
 const DIVE_RECHECK = 10;
+/** Track F1, `landStyle auto`: the brake is planned as well once the flare's plans missed this many ticks in a row, or one costs over BRAKE_RESCUE_COST within 30 blocks (approachHopeless goes around at 6 and 35). */
+export const BRAKE_RESCUE = 3;
+export const BRAKE_RESCUE_COST = 35;
+/** Track F1: the family being flown is changed only for a plan this much cheaper (no flip-flop between them). */
+export const BRAKE_SWITCH = 2;
 
 type Descent =
   | {
@@ -247,11 +272,11 @@ export class FlightBrain {
   phase: FlightPhase = 'takeoff';
   /** The landing target (Track AU2: `retarget` may move it before the approach). */
   target: LandingTarget;
-  readonly stats: FlightStats = { rockets: 0, rocketsBy: { climb: 0, cruise: 0, goaround: 0, land: 0 }, goArounds: 0, ticks: 0, maxY: -Infinity, approachTicks: 0, descents: [], steered: 0, holdTicks: 0, goAroundReasons: [], avoidances: [], dives: 0 };
+  readonly stats: FlightStats = { rockets: 0, rocketsBy: { climb: 0, cruise: 0, goaround: 0, land: 0 }, goArounds: 0, ticks: 0, maxY: -Infinity, approachTicks: 0, descents: [], steered: 0, holdTicks: 0, goAroundReasons: [], avoidances: [], dives: 0, brakeRescues: 0, brakeTicks: 0 };
   // (entryAbove is set by the cruise when it hands over to the approach)
   /** Why the flight is ending early (set by `landNow`), kept for the outcome. */
   private endReason: FlightEndReason | undefined;
-  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral' };
+  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral' };
   private jumped = false;
   private requested = false;
   private wasGliding = false;
@@ -261,9 +286,12 @@ export class FlightBrain {
   private outbound = false;
   /** Track AU2 review: the bearing (from the target) the go-around flies out on and comes back along: null = straight away from the target, undefined = not chosen yet. */
   private goaroundBearing: number | null | undefined;
-  private lastChoice: { pitch: number; cost: number; kind: string; phase: string } | undefined;
+  private lastChoice: { pitch: number; cost: number; kind: string; phase: string; style: LandStyle } | undefined;
   /** The landing planner of the current approach (reset for every new approach). */
   private readonly planner: ApproachPlanner;
+  /** Track F1: the brake / elevator landing's planner (reset with the flare's), and the family flown last tick in this approach. */
+  private readonly brakePlanner: BrakePlanner;
+  private flown: LandStyle | undefined;
   private startY: number | undefined;
   private noRocketTicks = 0;
   /** Track AU2: the descent geometry being flown (far too high near the target). */
@@ -320,8 +348,65 @@ export class FlightBrain {
       highCruise: opts.highCruise,
       clearance: opts.clearance ?? 12,
       descentMode: opts.descent ?? 'auto',
+      landStyle: opts.landStyle ?? 'auto',
     };
     this.planner = new ApproachPlanner(opts.seed ?? 12345, opts.obstacle);
+    this.brakePlanner = new BrakePlanner(((opts.seed ?? 12345) * 7 + 3) >>> 0, opts.obstacle);
+  }
+
+  /** A new approach (a go-around, a retarget, a forced landing, a bounce): both landing planners start over. */
+  private resetPlanners(): void {
+    this.planner.reset();
+    this.brakePlanner.reset();
+    this.flown = undefined;
+  }
+
+  /** Track F1: ticks without a landing plan (the family flown, or the better of the two while both are planned). */
+  private missingNow = 0;
+
+  /**
+   * Track F1, the landing family this tick (`landStyle`): `flare` and `brake` plan only their own; `auto`
+   * plans the flare, and the brake as well on a precision cell (a block wide, `precise`) or while the
+   * flare's plans keep missing (BRAKE_RESCUE ticks without a landing, or a hard one ahead): the brake is
+   * flown when its plan costs BRAKE_BIAS less (BRAKE_SWITCH more to change the family being flown).
+   * Committed once the flare's pull-up (B) or the brake's K begins: then only that family plans.
+   */
+  private landingChoice(b: FlightBody, look: number, yaw: number, aim: LandingTarget): ApproachChoice<unknown> {
+    const style = this.o.landStyle;
+    // (committed only to a plan that lands: a flare that pulls up into an overshoot may still become a brake)
+    const flareCommitted = this.flown === 'flare' && (this.planner.state.phase === 'B' || this.planner.state.phase === 'C') && this.planner.current?.touchdown.kind === 'landed';
+    const brakeCommitted = this.flown === 'brake' && this.brakePlanner.state.phase === 'K' && this.brakePlanner.current?.touchdown.kind === 'landed';
+    if (style === 'brake' || (style === 'auto' && brakeCommitted)) return this.flownWith('brake', this.brakePlanner.step(b, look, aim), this.brakePlanner.missing);
+    const f = this.planner.step(b, yaw, aim);
+    if (style === 'flare' || flareCommitted) return this.flownWith('flare', f, this.planner.missing);
+    const precise = aim.precise === true || aim.half < 1;
+    const struggling = this.planner.missing >= BRAKE_RESCUE || (f.touchdown.kind === 'landed' && f.cost > BRAKE_RESCUE_COST && hdist(b.pos, aim) <= 30);
+    if (!precise && !struggling && this.flown !== 'brake') {
+      if (this.brakePlanner.state.phase !== 'A1') this.brakePlanner.reset();
+      return this.flownWith('flare', f, this.planner.missing);
+    }
+    const k = this.brakePlanner.step(b, look, aim);
+    const brakeScore = k.cost + BRAKE_BIAS;
+    const brake = this.flown === 'brake' ? !(f.cost + BRAKE_SWITCH < brakeScore) : brakeScore + (this.flown === 'flare' ? BRAKE_SWITCH : 0) < f.cost;
+    const missing = Math.min(this.planner.missing, this.brakePlanner.missing);
+    if (brake) {
+      if (this.flown !== 'brake' && !precise) {
+        this.stats.brakeRescues++;
+        this.o.note?.(`brake landing instead of the flare (flare: ${f.touchdown.kind}, cost ${f.cost.toFixed(0)}; brake: ${k.touchdown.kind}, cost ${k.cost.toFixed(0)}) at ${hdist(b.pos, aim).toFixed(0)} blocks out`);
+      }
+      if (f.phase === 'B' || f.phase === 'C') this.planner.reset();
+      return this.flownWith('brake', k, missing);
+    }
+    if (k.phase === 'K') this.brakePlanner.reset();
+    return this.flownWith('flare', f, missing);
+  }
+
+  private flownWith(style: LandStyle, c: ApproachChoice<unknown>, missing: number): ApproachChoice<unknown> {
+    this.flown = style;
+    this.stats.landStyle = style;
+    if (style === 'brake' && c.phase === 'K') this.stats.brakeTicks++;
+    this.missingNow = missing;
+    return c;
   }
 
   /** The current aim (the landing target, or the emergency one). */
@@ -329,7 +414,7 @@ export class FlightBrain {
     return this.emergency ?? this.target;
   }
 
-  get lastApproach(): { pitch: number; cost: number; kind: string; phase: string } | undefined {
+  get lastApproach(): { pitch: number; cost: number; kind: string; phase: string; style: LandStyle } | undefined {
     return this.lastChoice;
   }
 
@@ -364,7 +449,7 @@ export class FlightBrain {
     this.descent = undefined;
     this.descentNone = false;
     this.goaroundY = undefined;
-    this.planner.reset();
+    this.resetPlanners();
     return true;
   }
 
@@ -379,7 +464,7 @@ export class FlightBrain {
     }
     this.emergency = this.emergencyTarget(body, reason === 'roof' ? this.emergencyWithin : undefined);
     this.emergencyWithin = undefined;
-    this.planner.reset();
+    this.resetPlanners();
     this.dive = undefined;
     this.descent = undefined;
     this.descentNone = false;
@@ -395,7 +480,7 @@ export class FlightBrain {
     if (this.phase !== 'done') return;
     if (this.endReason === undefined && hdist(body.pos, this.target) <= APPROACH_DISTANCE) {
       this.phase = 'approach';
-      this.planner.reset();
+      this.resetPlanners();
       return;
     }
     this.phase = 'cruise';
@@ -650,7 +735,7 @@ export class FlightBrain {
     if (willReach >= climbTo || d <= APPROACH_DISTANCE + 6) {
       // (Track BF: a held target or an overhang's corridor is flown from the cruise, never straight into an approach)
       // (Track BH: nor from far too high: a glide down off a ledge 40 up starts within the approach distance; the cruise's descent geometry first)
-      const high = b.pos.y - (this.target.top + APPROACH_HEIGHT) > SPIRAL_ABOVE;
+      const high = b.pos.y - (entryTop(this.target) + APPROACH_HEIGHT) > SPIRAL_ABOVE;
       this.phase = d <= APPROACH_DISTANCE + 6 && !this.target.hold && this.linedUp(b) && !high ? 'approach' : 'cruise';
       return this.phase === 'approach' ? this.approach(i, ctl, this.target) : this.cruise(i, ctl);
     }
@@ -709,7 +794,7 @@ export class FlightBrain {
     const entry = this.linedUp(b) ? undefined : this.corridorEntry();
     const d = entry ? hdist(b.pos, entry) + CORRIDOR_OUT : dTarget;
     const h = Math.hypot(b.vel.x, b.vel.z);
-    const aboveEntry = b.pos.y - (this.target.top + APPROACH_HEIGHT);
+    const aboveEntry = b.pos.y - (entryTop(this.target) + APPROACH_HEIGHT);
     const spiralDue = aboveEntry > SPIRAL_ABOVE && d <= APPROACH_DISTANCE + 60 && !this.descentNone;
     // Track BL: far above the entry: the dive descent when its simulation passes (looked for every DIVE_EVERY ticks
     // on the way in, and once more when the circle would begin); a window still ahead keeps the cruise going
@@ -737,7 +822,7 @@ export class FlightBrain {
     if (!entry && d <= APPROACH_DISTANCE + Math.min(this.target.bearing !== undefined ? 8 : 40, Math.max(0, aboveEntry - 6) * 2.5)) {
       if (this.target.bearing !== undefined) this.o.note?.(`approach along the corridor (in from ${Math.round(this.target.bearing)}) from ${Math.round(d)} blocks out, ${Math.round(aboveEntry + APPROACH_HEIGHT)} above the floor`);
       this.phase = 'approach';
-      this.planner.reset();
+      this.resetPlanners();
       this.stats.entryAbove ??= aboveEntry;
       return this.approach(i, ctl, this.target);
     }
@@ -837,7 +922,7 @@ export class FlightBrain {
    */
   private highFloor(d: number): number | undefined {
     if (!this.o.highCruise) return undefined;
-    const drop = BUILD_TOP + 2 - (this.target.top + APPROACH_HEIGHT);
+    const drop = BUILD_TOP + 2 - (entryTop(this.target) + APPROACH_HEIGHT);
     const reach = this.o.descentMode === 'spiral' ? APPROACH_DISTANCE + drop * GLIDE_RATIO : APPROACH_DISTANCE + DIVE_END_MAX + drop * 1.6 + 60;
     return d > reach ? BUILD_TOP + 2 : undefined;
   }
@@ -928,7 +1013,7 @@ export class FlightBrain {
   /** Track BL: the dive search now: 'dive' (committed), 'wait' (its window is still ahead), 'none' (no dive from here). */
   private tryDive(i: BrainInput, b: FlightBody, last: boolean): 'dive' | 'wait' | 'none' {
     const plan = planDive(b, i.yaw, this.target, this.diveCells(b));
-    const aboveEntry = b.pos.y - (this.target.top + APPROACH_HEIGHT);
+    const aboveEntry = b.pos.y - (entryTop(this.target) + APPROACH_HEIGHT);
     if (plan.ok && plan.profile) {
       this.dive = { p: plan.profile, phase: 'dive', from: b.pos.y, since: this.stats.ticks, aborted: false };
       this.stats.dives++;
@@ -954,14 +1039,14 @@ export class FlightBrain {
     const t = this.stats.ticks - dv.since;
     if (ph === 'done' || (dv.aborted && ph === 'bleed')) {
       this.dive = undefined;
-      const aboveEntry = b.pos.y - (this.target.top + APPROACH_HEIGHT);
+      const aboveEntry = b.pos.y - (entryTop(this.target) + APPROACH_HEIGHT);
       if (dv.aborted) {
         this.diveBanned = true;
         return false;
       }
       this.o.note?.(`dive descent: handed over after ${t} ticks, ${hdist(b.pos, this.target).toFixed(0)} out, ${aboveEntry.toFixed(1)} over the entry at ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} blocks a tick (from y ${dv.from.toFixed(0)})`);
       this.phase = 'approach';
-      this.planner.reset();
+      this.resetPlanners();
       this.stats.entryAbove ??= aboveEntry;
       return false;
     }
@@ -1086,7 +1171,7 @@ export class FlightBrain {
         b.pos.y <= dsc.exitY - 10;
       if (leave) {
         this.descent = undefined;
-        this.planner.reset();
+        this.resetPlanners();
         return false;
       }
     }
@@ -1105,7 +1190,7 @@ export class FlightBrain {
       // close before the approach: straighten out, the planner takes it from here
       if (hdist(b.pos, aim) <= APPROACH_DISTANCE + 10) {
         this.descent = undefined;
-        this.planner.reset();
+        this.resetPlanners();
         return false;
       }
     }
@@ -1189,7 +1274,7 @@ export class FlightBrain {
       return ctl;
     }
     // the emergency landing from high up: the descent geometry over the spot first (the planner has no soft way down from there)
-    if (this.phase === 'land' && (this.descent || (b.pos.y - (aim.top + APPROACH_HEIGHT) > SPIRAL_ABOVE && !this.descentNone)) && hdist(b.pos, aim) < 40) {
+    if (this.phase === 'land' && (this.descent || (b.pos.y - (entryTop(aim) + APPROACH_HEIGHT) > SPIRAL_ABOVE && !this.descentNone)) && hdist(b.pos, aim) < 40) {
       if (this.descend(i, ctl, aim)) return ctl;
     }
     ctl.yaw = approachYaw(i.yaw, b.pos, aim);
@@ -1198,7 +1283,9 @@ export class FlightBrain {
       return ctl;
     }
     const d = hdist(b.pos, aim);
-    const choice = this.planner.step(b, ctl.yaw, aim);
+    const choice = this.landingChoice(b, i.yaw, ctl.yaw, aim);
+    // Track F1: the brake family has its own yaw law (the approach yaw, then the brake / station keeping)
+    if (choice.yaw !== undefined) ctl.yaw = choice.yaw;
     // the emergency landing keeps steering clear of solids on the way down (the planner's cells see the ground around the aim, the path-ahead check the rest)
     if (this.phase === 'land' && d > aim.half + 4) {
       const probe: BrainControl = { ...ctl, pitch: choice.pitch };
@@ -1208,13 +1295,13 @@ export class FlightBrain {
         return ctl;
       }
     }
-    this.lastChoice = { pitch: choice.pitch, cost: choice.cost, kind: choice.touchdown.kind, phase: choice.phase };
-    if (this.phase === 'approach' && approachHopeless(choice, this.planner.missing, d)) {
+    this.lastChoice = { pitch: choice.pitch, cost: choice.cost, kind: choice.touchdown.kind, phase: choice.phase, style: choice.style };
+    if (this.phase === 'approach' && approachHopeless(choice, this.missingNow, d)) {
       // Track BF: every go-around says why (the loops the owner saw were not explained in the log)
       const td = choice.touchdown;
       const why =
         td.kind !== 'landed'
-          ? `no landing plan for ${this.planner.missing} ticks (best: ${td.kind}, cost ${choice.cost.toFixed(0)}, ${td.off.toFixed(1)} from the centre)`
+          ? `no landing plan for ${this.missingNow} ticks (best: ${choice.style} ${td.kind}, cost ${choice.cost.toFixed(0)}, ${td.off.toFixed(1)} from the centre)`
           : `hard touchdown ahead (cost ${choice.cost.toFixed(0)}: vy ${td.vel.y.toFixed(2)}, h ${Math.hypot(td.vel.x, td.vel.z).toFixed(2)}, ${td.off.toFixed(1)} from the centre)`;
       const line = `${why} at ${d.toFixed(0)} blocks out, ${(b.pos.y - aim.top).toFixed(0)} above, ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} blocks a tick${aim.walk ? `, a walk landing of ${aim.cells?.size ?? 0} cells` : `, half ${aim.half}`}`;
       this.stats.goAroundReasons.push(line);
@@ -1224,18 +1311,18 @@ export class FlightBrain {
         this.phase = 'goaround';
         this.outbound = true;
         this.goaroundBearing = undefined;
-        this.planner.reset();
+        this.resetPlanners();
         return this.goaround(i, ctl);
       }
       // Track BH: without a rocket but too high (`over`, the entry more than 4 under the body): a descent circle again
       // instead of the emergency landing (the glide down has height to spend, no rocket to climb with); at most twice
-      if (td.kind === 'over' && b.pos.y - (aim.top + APPROACH_HEIGHT) > 4 && this.glideRedescents < 2) {
+      if (td.kind === 'over' && b.pos.y - (entryTop(aim) + APPROACH_HEIGHT) > 4 && this.glideRedescents < 2) {
         this.glideRedescents++;
         this.o.note?.(`no rocket for a go-around, too high: a descent circle again (${this.glideRedescents}); ${line}`);
         this.phase = 'cruise';
         this.descent = undefined;
         this.descentNone = false;
-        this.planner.reset();
+        this.resetPlanners();
         const c = this.chooseDescent(b, aim);
         if (c) {
           this.descent = c;
@@ -1300,7 +1387,7 @@ export class FlightBrain {
       const r = (bearing * Math.PI) / 180;
       for (let dist = t.half + 1; dist <= 24; dist++) {
         const top = skyTop(Math.floor(t.x - Math.sin(r) * dist), Math.floor(t.z + Math.cos(r) * dist));
-        if (top !== undefined && top + 1 > t.top + 0.5) return false;
+        if (top !== undefined && top + 1 > entryTop(t) + 0.5) return false; // Track F1: a shaft's rim is no obstacle to its own approach
       }
       return true;
     };
@@ -1315,7 +1402,7 @@ export class FlightBrain {
    * away and back is flown over them, not into them).
    */
   private goaroundHeight(): number {
-    let y = this.target.top + APPROACH_HEIGHT + 6;
+    let y = entryTop(this.target) + APPROACH_HEIGHT + 6;
     const skyTop = this.o.skyTop;
     if (!skyTop) return y;
     const cx = Math.floor(this.target.x);

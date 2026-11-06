@@ -711,6 +711,16 @@ curl -s "http://127.0.0.1:9464/map.json?r=4" | head -c 600
 start http://127.0.0.1:9464/map            # Windows; open the URL in any browser
 ```
 
+### Event history (decision 0059)
+
+The bot records what it does (connections and kicks, deaths, fights, jobs and why they failed, items,
+chests, low resources, owner commands) in `<config dir>/events/<server id>/YYYY-MM-DD.jsonl` (UTC
+days, one JSON event per line), next to the world cache. `!set eventsDays` (default 14) and
+`!set eventsMaxMb` (default 64) bound it; env `BEDROCKBOT_EVENTS_DIR` moves the root,
+`BEDROCKBOT_EVENTS=0` keeps it in memory only (also the case with `--no-config`). Deleting the
+directory is always safe. With the panel on, `GET /api/events?min=notable` and
+`GET /api/events/summary?hours=8` answer behind the panel token. Details: docs/events.md.
+
 ### LAN control panel (Track AE)
 
 With `--health-port` (or `panel.port`) the same server also serves the control panel; details,

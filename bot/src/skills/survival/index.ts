@@ -121,6 +121,22 @@ const STEP_TICKS = 10;
 const KEEPER_EVERY = 100;
 const HIT_PAUSE_TICKS = 60;
 
+
+/** How long `queued` waits for a running survival op (ms). */
+export const QUEUE_WAIT_MS = 5_000;
+
+/** Wait until `op()` is undefined (each op settling, ok or not), at most `waitMs`; false on the timeout. */
+export async function awaitIdle(op: () => Promise<unknown> | undefined, waitMs: number): Promise<boolean> {
+  const until = performance.now() + waitMs;
+  for (let cur = op(); cur; cur = op()) {
+    const left = until - performance.now();
+    if (left <= 0) return false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([cur.then(() => undefined, () => undefined), new Promise<void>((r) => { timer = setTimeout(r, left); })]);
+    clearTimeout(timer);
+  }
+  return true;
+}
 export class SurvivalKit {
   readonly eater: EatController;
   readonly armour: ArmourController;
@@ -254,12 +270,12 @@ export class SurvivalKit {
 
   /** `!drop <item> [n]`. */
   drop(name: string, n?: number, skip?: ReadonlySet<number>): Promise<DropResult> {
-    return this.exclusive<DropResult>(() => this.keeper.drop(name, n, skip), { ok: false, item: name, dropped: 0, reason: 'busy' }); // Track AV: skip
+    return this.queued<DropResult>(() => this.keeper.drop(name, n, skip), { ok: false, item: name, dropped: 0, reason: 'busy' }); // Track AV: skip; waits out a keeper pass
   }
 
   /** Move a main-inventory stack into the hotbar (the stash step's box); its hotbar slot, undefined when busy or refused. */
   hotbar(slot: number): Promise<number | undefined> {
-    return this.exclusive(() => this.toHotbar(slot), undefined);
+    return this.queued(() => this.toHotbar(slot), undefined);
   }
 
   /** `!drop all`: the worn armour and the offhand too. */
@@ -322,6 +338,17 @@ export class SurvivalKit {
 
   private fighting(): boolean {
     return this.d.combat?.busy ?? false;
+  }
+
+  /**
+   * Like `exclusive`, but a caller that needs the result (the stash step's drop and box-to-hotbar) waits
+   * up to `waitMs` for the running op (a keeper pass, a meal) instead of failing `busy` at once: on the
+   * Realm 2026-11-05 a keeper pass held the lock, the stash gave up "busy", the mine stopped with a full
+   * inventory and the bot idled far from home until it died.
+   */
+  private async queued<T, B = T>(fn: () => Promise<T>, busy: B, waitMs = QUEUE_WAIT_MS): Promise<T | B> {
+    if (!(await awaitIdle(() => this.op, waitMs))) return busy;
+    return this.exclusive(fn, busy);
   }
 
   private exclusive<T, B = T>(fn: () => Promise<T>, busy: B): Promise<T | B> {
