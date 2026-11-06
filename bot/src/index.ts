@@ -27,6 +27,7 @@ import { allTasks, getTask, onChatContaining, taskNames, type WalkingTask } from
 import { currentPins, runUpdateCheck } from './update/check.ts';
 import { UpdateNotifier } from './update/notifier.ts';
 import { defaultCacheRoot, openWorldCache } from './world/cache/index.ts'; // Track T
+import { attachCoarseLayer } from './skills/coarse/index.ts'; // Track CB
 import { mapRoutes } from './health/map/routes.ts'; // Track T
 import { setupPanel } from './health/panel/index.ts'; // Track AE: LAN control panel (docs/panel.md)
 import { events, eventsRoot, openEventStore, wireEvents } from './events/index.ts'; // decision 0059: the bot's history (docs/events.md)
@@ -283,6 +284,9 @@ async function main(argv: string[]): Promise<number> {
   // Track T: persistent world cache for walking tasks (docs/world-cache.md); env BEDROCKBOT_CACHE=0 off, BEDROCKBOT_CACHE_DIR root
   const cacheRoot = process.env.BEDROCKBOT_CACHE_DIR ?? defaultCacheRoot(loaded?.path ?? defaultConfigPath());
   const worldCache = built.mobility && process.env.BEDROCKBOT_CACHE !== '0' ? openWorldCache(built.mobility.world, { root: cacheRoot, server: target.kind === 'bds' ? `${target.host}:${target.port}` : server, logger: log }) : undefined;
+  // Track CB (decision 0066): the coarse layer over the cache (docs/coarse.md); long walks ask it for a corridor (coarseMin)
+  const coarse = worldCache && built.mobility ? attachCoarseLayer(built.mobility.world, { logger: createLogger(settings.logLevel, 'coarse') }) : undefined;
+  if (coarse && built.mobility) built.mobility.skills.nav.attachCoarse(coarse.layer, { minBlocks: () => Number(runtime.get('coarseMin')) });
   // decision 0059: the event history next to the world cache (docs/events.md); BEDROCKBOT_EVENTS=0 memory only, BEDROCKBOT_EVENTS_DIR root
   openEventStore({ root: eventsRoot({ env: process.env, configPath: loaded?.path, noConfig: values['no-config'] === true, defaultConfigPath: defaultConfigPath() }), server: target.kind === 'bds' ? `${target.host}:${target.port}` : server, settings: runtime, log: createLogger(settings.logLevel, 'events') });
   const eventWiring = wireEvents({ conn, server, chat, respawn: built.respawn, inventory: built.mobility?.world.inventory, blockAt: (p) => built.mobility?.world.blockAt(p)?.name, hits: (runningTask as WalkingTask).pve?.mobs, toolWearLimit: () => Number(runtime.get('toolWearLimit')), fireworksMin: () => Number(runtime.get('fireworksMin')) });
@@ -296,6 +300,7 @@ async function main(argv: string[]): Promise<number> {
     log.info(`exiting (${why})`);
     runningTask.stop();
     built.stop();
+    coarse?.detach(); // Track CB
     worldCache?.close(); // Track T: write the remembered chunks
     eventWiring.stop(); // decision 0059: the batches (items, damage) are written before the store closes
     notifier?.stop();

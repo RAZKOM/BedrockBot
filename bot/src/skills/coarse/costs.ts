@@ -88,7 +88,7 @@ export function walkCost(opts: { unknownCost?: number } = {}): CoarseCost {
   return {
     mode: 'walk',
     clearance: { height: 2, width: 1 },
-    ticksPerBlock: WALK_TICKS * 0.9,
+    ticksPerBlock: WALK_TICKS,
     unknownCost,
     allows: (_kind: VolumeKind) => true,
     edgeCost(portal, from, to, blocks, outcome) {
@@ -107,7 +107,7 @@ export function mineCost(opts: { unknownCost?: number; digTicks?: number } = {})
   return {
     mode: 'mine',
     clearance: { height: 1, width: 1 },
-    ticksPerBlock: WALK_TICKS * 0.9,
+    ticksPerBlock: WALK_TICKS,
     unknownCost,
     allows: () => true,
     edgeCost(portal, from, to, blocks, outcome) {

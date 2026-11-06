@@ -579,6 +579,17 @@ slices), segments, corrections, motions, stuck and move timeouts, failures, dist
 `maxTickMs` (longest tick in the navigator, planning included), `planMs`, action counts, retreats and
 ticks waited for unloaded chunks.
 
+## Long trips: the coarse layer (Track CB, decision 0066)
+
+A goto whose goal is farther than `coarseMin` (96 blocks, straight line; 0 = off) first asks the coarse layer
+([coarse.md](coarse.md), `bot/src/skills/coarse`) for a corridor: a search over the open space of every chunk
+the bot has ever seen (the world cache, underground included) that finds the cave entrance 400 blocks back or
+the way round a ravine, which no segment of the planner above can see. The navigator then plans towards the
+corridor's waypoints a window at a time (`nav/corridor.ts`: the farthest within 32 blocks of corridor, as a
+`near` goal; the goto's own goal once the rest is short), re-plans the corridor when chunks near it change or a
+waypoint cannot be reached (its opening is marked failed for 30 minutes), and falls back to everything above
+when there is no corridor. The report has `corridor` (requests, status, waypoints passed and failed).
+
 ## Compute
 
 Wave 8 Track AB, [decisions/0023](decisions/0023-planner-worker.md). The question was whether the bot

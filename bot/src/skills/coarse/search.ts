@@ -18,6 +18,12 @@ export const SLICE_MS = 6;
 export const DEFAULT_SWITCH_COST = 40;
 /** The heuristic's slope for a cost without `ticksPerBlock`. */
 export const DEFAULT_TICKS_PER_BLOCK = 0.5;
+/**
+ * Weighted A* (f = g + HEURISTIC_WEIGHT x h, Baritone's greedy search): a corridor at most this factor
+ * dearer than the cheapest, for a fraction of the nodes (plain A* across 64 x 64 hilly chunks expanded
+ * 48 000 nodes and built every chunk; at 1.5 a few thousand). The corridor is rough anyway.
+ */
+export const HEURISTIC_WEIGHT = 1.5;
 /** A start or goal cell inside solid is looked for up to this many cells above / below. */
 const SNAP = 2;
 /**
@@ -88,7 +94,7 @@ class Heap {
   }
 }
 
-const f = (n: Node): number => n.g + n.h;
+const f = (n: Node): number => n.g + HEURISTIC_WEIGHT * n.h;
 
 export interface SearchDeps {
   graph: CoarseGraph;

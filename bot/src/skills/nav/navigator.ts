@@ -30,6 +30,8 @@ import { NavBlacklist, actionKey, goalKey } from './blacklist.ts'; // Track R
 import type { AvoidanceCostFn } from './avoidance.ts';
 import { DEFAULT_PLANNER_BUDGETS, PlannerClient, WorkerSearch, plainGoal, type PlannerBudgets, type PlannerWorld, type WorkerPlanOptions } from './worker.ts'; // Track AB
 import { MOVEMENT_TIMEOUT_TICKS, OFF_PATH_GRACE_TICKS, PATH_WINDOW_AHEAD, PATH_WINDOW_BACK, distanceFromPath, nodeAt, nodeOverrun, offPathState, skipAhead } from './baritone/executor.ts'; // Track BE
+import { corridorState, fineTarget, touches, waypointGoal, type CorridorState } from './corridor.ts'; // Track CB: following a coarse corridor
+import type { CoarseLayer, CoarseMode, CorridorStatus } from '../coarse/types.ts'; // Track CB
 
 /** Track R: goto options of the navigator. `blacklist`: consult and feed the failure blacklist (default: `any` and `getToBlock` goals). */
 export type NavGotoOptions = GotoOptions & { blacklist?: boolean };
@@ -113,7 +115,23 @@ export interface NavigatorOptions {
   // Track BE end
 }
 
-export type ReplanReason = 'start' | 'correction' | 'block' | 'partial' | 'stuck' | 'timeout' | 'action' | 'retry' | 'ahead' | 'upgrade' | 'off_path' | 'overrun'; // Track BE: off_path, overrun
+export type ReplanReason = 'start' | 'correction' | 'block' | 'partial' | 'stuck' | 'timeout' | 'action' | 'retry' | 'ahead' | 'upgrade' | 'off_path' | 'overrun' | 'corridor'; // Track BE: off_path, overrun; Track CB: corridor
+
+/** Track CB: what the coarse layer did for a goto (docs/coarse.md). */
+export interface CorridorReport {
+  /** Corridor requests made (the start, a change near the corridor, a failed waypoint, the end of a partial one). */
+  requests: number;
+  /** Waypoints the fine planner could not reach (their portals marked failed). */
+  failed: number;
+  /** The last corridor: status, legs, blocks, waypoints, search time (ms). */
+  status?: CorridorStatus;
+  legs?: number;
+  blocks?: number;
+  waypoints?: number;
+  ms?: number;
+  /** Waypoints reached. */
+  passed: number;
+}
 
 export interface PlanRecord {
   reason: ReplanReason;
@@ -187,10 +205,15 @@ export interface GotoReport {
   why?: string;
   /** Track BG2: doors / hatches that stayed open behind the body (two close clicks failed; not a goto failure). */
   closeFailed?: number;
+  /** Track CB: the coarse corridor followed, when the goal was far enough to ask for one. */
+  corridor?: CorridorReport;
 }
 
 interface Search {
   s: PathSearch | WorkerSearch;
+  /** Track CB: the goal searched: a corridor waypoint (`wp` its index) or the goto's plan goal. */
+  goal: NavGoal;
+  wp?: number;
   /** Track AB: 'upgrade' = a worker main plan whose interim answer is being walked. */
   kind: 'main' | 'ahead' | 'upgrade';
   via: 'worker' | 'thread';
@@ -286,10 +309,18 @@ interface Active {
    * The start node (cellKey), world generation and planner (worker / in-thread) of the last plan that went
    * nowhere (no_progress, all loaded, its full budget): not searched again unchanged by the same planner.
    */
-  noProgress: { key: number; gen: number; via: Search['via'] } | undefined;
+  noProgress: { key: number; gen: number; via: Search['via']; wp: number | undefined } | undefined;
   /** Track BE: ticks in a row the body was 2 to 3 blocks off the path; the tick of a correction / knock / teleport whose path check is pending. */
   ticksAway: number;
   recheck: number | undefined;
+  /** Track CB: the coarse corridor being followed (undefined: none asked for, none found, or dropped: the raw goal as before). */
+  corridor: CorridorState | undefined;
+  /** Track CB: a corridor request is in flight (asked at tick `corridorAt`); chunks near the corridor changed since. */
+  corridorPending: boolean;
+  corridorAt: number;
+  corridorDirty: boolean;
+  /** Track CB: waypoints the fine planner failed to reach; past CORRIDOR_MAX_FAILURES no corridor is asked for again. */
+  corridorFailures: number;
   report: GotoReport;
   finish: (r: SkillResult) => void;
 }
@@ -301,6 +332,12 @@ const DOOR_WAIT = 40;
 const HATCH_CLOSE_REACH = 4.5;
 const EYE = 1.62;
 const BODY_HEIGHT = 1.8;
+/** Track CB: the first main plan waits this long for the corridor asked at the start (the search runs in slices; 500 ms is its default budget). */
+const CORRIDOR_WAIT_TICKS = 12;
+/** Track CB: a corridor is re-planned after a change near it at most this often (ticks). */
+const CORRIDOR_REPLAN_TICKS = 60;
+/** Track CB: failed waypoints before the goto stops asking for corridors (the raw goal as before). */
+const CORRIDOR_MAX_FAILURES = 3;
 
 export class Navigator {
   readonly grid: NavGrid;
@@ -328,6 +365,8 @@ export class Navigator {
   private readonly toolOk: NavigatorOptions['toolOk'];
   private active: Active | undefined;
   private readonly unsubs: (() => void)[] = [];
+  /** Track CB: the coarse layer (attachCoarse) and the distance from which a goto asks it for a corridor. */
+  private coarse: { layer: CoarseLayer; minBlocks: () => number; off: () => void } | undefined;
   /** Report of the last goto (also while it runs). */
   lastReport: GotoReport | undefined;
   /** Track S: the `cellCost` option, settable after construction (the survival kit installs avoidance). */
@@ -457,6 +496,8 @@ export class Navigator {
 
   dispose(): void {
     this.cancel();
+    this.coarse?.off(); // Track CB
+    this.coarse = undefined;
     for (const u of this.unsubs.splice(0)) u();
     this.planner?.dispose(); // Track AB
     this.planner = undefined;
@@ -539,6 +580,35 @@ export class Navigator {
   /** Replace the dig-penalty getter (ticks per dug block; registry wiring). */
   setDigPenalty(fn: NavigatorOptions['digPenalty']): void {
     this.digPenalty = fn;
+  }
+
+  /**
+   * Track CB (docs/coarse.md): plan long walks over the coarse layer. A goto whose goal is farther than
+   * `minBlocks()` (straight line; 0 = off) asks `layer` for a corridor and feeds the fine planner its
+   * waypoints a window at a time; a corridor is re-planned when chunks near it change or a waypoint cannot
+   * be reached (its portal marked failed), and dropped (the raw goal, as before) when none is found.
+   * Returns the function that detaches the layer.
+   */
+  attachCoarse(layer: CoarseLayer, opts: { minBlocks: () => number }): () => void {
+    this.coarse?.off();
+    const off = layer.onChange((chunks) => {
+      const a = this.active;
+      if (!a?.corridor || a.corridorPending) return;
+      if (touches(a.corridor, chunks, a.corridor.corridor.dim)) a.corridorDirty = true;
+    });
+    const c = { layer, minBlocks: opts.minBlocks, off };
+    this.coarse = c;
+    return () => {
+      if (this.coarse === c) {
+        off();
+        this.coarse = undefined;
+      }
+    };
+  }
+
+  /** Track CB: the coarse layer attached, if any (flight registers its cost on it). */
+  get coarseLayer(): CoarseLayer | undefined {
+    return this.coarse?.layer;
   }
 
   /** The break rules every direct dig must respect too (the miner's sight line, the farmer): the protected area. */
@@ -660,6 +730,11 @@ export class Navigator {
         noProgress: undefined,
         ticksAway: 0, // Track BE
         recheck: undefined,
+        corridor: undefined, // Track CB
+        corridorPending: false,
+        corridorAt: 0,
+        corridorDirty: false,
+        corridorFailures: 0,
         report,
         finish: (r) => {
           if (this.active !== a) return;
@@ -673,13 +748,15 @@ export class Navigator {
           this.log.info(
             `goto ${JSON.stringify(goal)}: ${r.ok ? 'ok' : r.reason} after ${report.ticks} ticks, ${report.distance.toFixed(1)} blocks, ` +
               `${report.plans.length} plan(s)${report.plans.some((p) => p.via === 'worker') ? ' (worker)' : ''}, ${report.segments} segment(s), ${report.corrections} correction(s), ${report.stuck} stuck, max tick ${report.maxTickMs} ms` +
-              `${report.reached ? `, reached member ${report.reached.index}` : ''}${skipped.length ? `, skipped ${skipped.join(' ')}` : ''}${report.blacklisted?.length ? `, blacklisted ${report.blacklisted.join(' ')}` : ''}`,
+              `${report.reached ? `, reached member ${report.reached.index}` : ''}${skipped.length ? `, skipped ${skipped.join(' ')}` : ''}${report.blacklisted?.length ? `, blacklisted ${report.blacklisted.join(' ')}` : ''}` +
+              `${report.corridor ? `, corridor ${report.corridor.status ?? 'pending'} (${report.corridor.requests} request(s), ${report.corridor.passed} waypoint(s) passed, ${report.corridor.failed} failed)` : ''}`, // Track CB
           );
           resolve(r);
         },
       };
       this.active = a;
       if (nothingLeft) a.finish({ ok: false, reason: members && skipped.length === 0 ? 'unreachable' : 'blacklisted' }); // Track R
+      else this.requestCorridor(a, 'start'); // Track CB
     });
   }
 
@@ -866,6 +943,17 @@ export class Navigator {
     }
 
     this.resolveRecheck(a, s); // Track BE: the path check after a correction / knock / teleport (before the re-plan below)
+
+    // Track CB: chunks near the corridor changed: ask for a fresh one (throttled); the first plan waits briefly for the corridor
+    if (a.corridorDirty && !a.corridorPending && a.t - a.corridorAt >= CORRIDOR_REPLAN_TICKS) {
+      a.corridorDirty = false;
+      this.requestCorridor(a, 'change');
+    }
+    if (a.replan === 'start' && a.corridorPending && a.t < a.corridorAt + CORRIDOR_WAIT_TICKS) {
+      this.loop.release();
+      a.guard.idle();
+      return;
+    }
 
     // a re-plan replaces the current plan and any search
     if (a.replan && a.t >= a.waitUntil && !a.action && !this.holdPlans?.()) { // Track BI: holdPlans (a clutch's water is still there)
@@ -1090,7 +1178,7 @@ export class Navigator {
         return true;
       }
       // the worker crashed or went silent: the same search in-thread, with the in-thread budgets
-      search = a.search = { ...search, s: new PathSearch(this.grid, search.s.start, a.planGoal, this.segmentOptions(a, search.kind === 'main')), via: 'thread' };
+      search = a.search = { ...search, s: new PathSearch(this.grid, search.s.start, search.goal, this.segmentOptions(a, search.kind === 'main')), via: 'thread' };
       res = search.s.step(this.sliceMs);
     }
     search.slices++;
@@ -1140,12 +1228,88 @@ export class Navigator {
   private newSearch(a: Active, start: { x: number; y: number; z: number }, kind: 'main' | 'ahead', reason: ReplanReason): Search {
     const client = this.plannerFor();
     const main = kind === 'main';
+    // Track CB: towards the corridor's next window when one is followed, else the goto's goal
+    const target = this.corridorTarget(a, start);
+    const navGoal = target ? waypointGoal(target.p) : a.planGoal;
+    const wp = target?.index;
     if (client) {
-      const goal = plainGoal(a.planGoal);
+      const goal = plainGoal(navGoal);
       const spec = goal && this.workerSpec(a, main);
-      if (goal && spec) return { s: client.search(kind, start, goal, spec, this.worldGen, main ? this.mainMs : undefined), kind, via: 'worker', reason, tick: a.t, slices: 0 };
+      if (goal && spec) return { s: client.search(kind, start, goal, spec, this.worldGen, main ? this.mainMs : undefined), kind, via: 'worker', reason, tick: a.t, slices: 0, goal: navGoal, wp };
     }
-    return { s: new PathSearch(this.grid, start, a.planGoal, this.segmentOptions(a, main)), kind, via: 'thread', reason, tick: a.t, slices: 0 };
+    return { s: new PathSearch(this.grid, start, navGoal, this.segmentOptions(a, main)), kind, via: 'thread', reason, tick: a.t, slices: 0, goal: navGoal, wp };
+  }
+
+  // ---- Track CB: the coarse corridor (docs/coarse.md "Following a corridor on foot") ------------------------
+
+  /** The corridor waypoint the next search from `from` should aim at, or undefined for the goto's own goal. */
+  private corridorTarget(a: Active, from: { x: number; y: number; z: number }): { index: number; p: Vec3 } | undefined {
+    const st = a.corridor;
+    if (!st) return undefined;
+    const before = st.next;
+    const t = fineTarget(st, { x: from.x + 0.5, y: from.y, z: from.z + 0.5 });
+    if (st.next > before && a.report.corridor) a.report.corridor.passed += st.next - before;
+    // a partial corridor walked to its end: ask for the next stretch from here, the raw goal meanwhile
+    if (!t && !st.toGoal && st.next >= st.wps.length) {
+      a.corridor = undefined;
+      this.requestCorridor(a, 'extend');
+    }
+    return t;
+  }
+
+  /** Ask the coarse layer for a corridor from the body to the goal (when one is attached, the goal has a point and is far enough). */
+  private requestCorridor(a: Active, why: 'start' | 'change' | 'failed' | 'extend'): void {
+    const co = this.coarse;
+    if (!co || a.corridorPending || a.corridorFailures >= CORRIDOR_MAX_FAILURES) return;
+    const min = co.minBlocks();
+    const gp = goalPoint(a.goal);
+    if (!(min > 0) || !gp) return;
+    const pos = this.loop.state.pos;
+    if (why === 'start' && Math.hypot(gp.x - pos.x, gp.z - pos.z) < min) return;
+    const gy = gp.y ?? (this.grid.source.columnTop?.(Math.floor(gp.x), Math.floor(gp.z)) ?? Math.floor(pos.y)) + 1;
+    const modes: CoarseMode[] = a.opts.allowBreak ? ['walk', 'mine'] : ['walk'];
+    const rep = (a.report.corridor ??= { requests: 0, failed: 0, passed: 0 });
+    rep.requests++;
+    a.corridorPending = true;
+    a.corridorAt = a.t;
+    a.corridorDirty = false;
+    co.layer.plan({ start: { x: pos.x, y: Math.floor(pos.y + 1e-3), z: pos.z }, goal: { x: gp.x, y: gy, z: gp.z }, modes, goalStanding: true }).then(
+      (c) => {
+        if (this.active !== a) return;
+        a.corridorPending = false;
+        rep.status = c.status;
+        rep.legs = c.legs.length;
+        rep.blocks = Math.round(c.blocks);
+        rep.ms = +c.ms.toFixed(1);
+        const st = corridorState(c);
+        rep.waypoints = st?.wps.length ?? 0;
+        this.log.info(`goto: corridor (${why}) ${c.status}: ${c.legs.length} leg(s), ${Math.round(c.blocks)} blocks, ${st?.wps.length ?? 0} waypoint(s), ${c.expanded} expanded, ${c.ms.toFixed(0)} ms${c.reason ? ` (${c.reason})` : ''}`);
+        a.corridor = st;
+        if (!st) return;
+        // the plan under way aims at the raw goal (or an old corridor): re-plan towards the corridor
+        if (!a.action && a.replan === undefined) a.replan = 'corridor';
+      },
+      (e: unknown) => {
+        if (this.active !== a) return;
+        a.corridorPending = false;
+        this.log.warn(`goto: corridor request failed: ${e instanceof Error ? e.message : String(e)}`);
+      },
+    );
+  }
+
+  /** The fine planner could not reach corridor waypoint `wp`: its portal is marked failed and a fresh corridor asked for; the raw goal meanwhile. */
+  private corridorFailed(a: Active, wp: number, why: string): void {
+    const st = a.corridor;
+    if (!st) return;
+    const portal = st.portals[wp];
+    const mode = st.modes[wp] ?? 'walk';
+    if (portal) this.coarse?.layer.markPortal(portal.id, mode, 'failed');
+    a.corridorFailures++;
+    if (a.report.corridor) a.report.corridor.failed++;
+    this.log.info(`goto: corridor waypoint ${wp} ${fmt(st.wps[wp]!)} unreachable (${why})${portal ? `; portal ${portal.id} marked failed for ${mode}` : ''}`);
+    a.corridor = undefined;
+    a.noProgress = undefined;
+    this.requestCorridor(a, 'failed');
   }
 
   /** The planner worker when `plannerThreads` > 0 and it is ready (started / stopped here as the setting changes). */
@@ -1232,7 +1396,7 @@ export class Navigator {
       const j = at.get(cellKey(n.x, n.y, n.z));
       if (j === undefined) continue;
       a.path = a.path.slice(0, k + 1).concat(res.path.slice(j + 1));
-      a.status = res.status;
+      a.status = search.wp !== undefined && res.status === 'found' ? 'partial' : res.status; // Track CB
       a.aheadBlocked = false;
       a.doors = a.doors.filter((d) => d.closeAt <= k);
       a.actedUpTo = Math.min(a.actedUpTo, k);
@@ -1272,7 +1436,8 @@ export class Navigator {
     // again (Realm 2026-10-31: three identical 2-second searches per goto, every 8 s for 15 minutes)
     // (never for a goal that moves: a runAway threat read again at every plan)
     const np = a.noProgress;
-    if (reason === 'retry' && np?.key === cellKey(start.x, start.y, start.z) && np.gen === this.worldGen && np.via === (this.plannerFor() ? 'worker' : 'thread') && !movingGoal(a.planGoal)) {
+    const wp = this.corridorTarget(a, start)?.index; // Track CB: the same search means the same goal (a corridor waypoint or the raw goal)
+    if (reason === 'retry' && np?.key === cellKey(start.x, start.y, start.z) && np.gen === this.worldGen && np.via === (this.plannerFor() ? 'worker' : 'thread') && np.wp === wp && !movingGoal(a.planGoal)) {
       this.loop.release();
       this.log.info('goto: no retry: the same search from the same node, nothing changed since it went nowhere');
       a.finish({ ok: false, reason: 'unreachable' });
@@ -1331,12 +1496,21 @@ export class Navigator {
     this.record(a, res, search, flags);
     a.lastMain = res.status; // Track R
     if (res.status === 'none') {
+      // Track CB: a corridor waypoint with no path is the corridor's failure, not the goto's: re-plan towards the raw goal
+      if (search.wp !== undefined && a.corridor) {
+        this.loop.release();
+        this.corridorFailed(a, search.wp, this.noPathWhy(res));
+        a.replan = 'retry';
+        a.waitUntil = a.t + 1;
+        return false;
+      }
       a.why = res.path.length ? this.noPathWhy(res) : 'the start node is not standable';
       a.finish({ ok: false, reason: 'unreachable' });
       return false;
     }
     if (res.path.length === 1 && res.status !== 'found') {
       this.loop.release();
+      if (search.wp !== undefined && a.corridor && !(res.unknown && !res.limited)) this.corridorFailed(a, search.wp, res.reason === 'no_progress' ? 'no progress towards it' : 'no node closer to it'); // Track CB
       if (res.unknown && !res.limited && a.unloadedTicks < this.unloadedWaitTicks) {
         // the segment ends at unloaded world: wait for the chunks
         a.unloadedTicks += 10;
@@ -1353,7 +1527,7 @@ export class Navigator {
       // stand-in while the worker starts: its retry runs in the worker with 50 x the budget)
       const s0 = res.path[0];
       const full = search.via === 'worker' || !this.planner || this.plannerThreads() <= 0;
-      a.noProgress = s0 && res.reason === 'no_progress' && !res.unknown && full ? { key: cellKey(s0.x, s0.y, s0.z), gen: this.worldGen, via: search.via } : undefined;
+      a.noProgress = s0 && res.reason === 'no_progress' && !res.unknown && full ? { key: cellKey(s0.x, s0.y, s0.z), gen: this.worldGen, via: search.via, wp: search.wp } : undefined;
       a.replan = 'retry';
       a.waitUntil = a.t + 20;
       return false;
@@ -1363,7 +1537,7 @@ export class Navigator {
       a.noProgress = undefined; // a plan went somewhere: a later failure from the same node is searched again
     }
     a.path = res.path;
-    a.status = res.status;
+    a.status = search.wp !== undefined && res.status === 'found' ? 'partial' : res.status; // Track CB: a reached waypoint is not the goal: the leg's end plans on
     a.aheadBlocked = false;
     a.doors = [];
     // Track BG: a hatch this goto opened is closed behind on the new path as well. Track BG2: after the LAST node
@@ -1395,7 +1569,7 @@ export class Navigator {
     }
     const oldLast = a.path.length - 1;
     a.path = a.path.concat(res.path.slice(1));
-    a.status = res.status;
+    a.status = search.wp !== undefined && res.status === 'found' ? 'partial' : res.status; // Track CB
     a.report.segments++;
     // the leg that ran to the old end now runs on into the new segment
     if (a.legTo === oldLast && !a.action) {
