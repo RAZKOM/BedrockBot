@@ -4,7 +4,6 @@
 // Node side keeps its import path and runs exactly the code the browser runs.
 export {
   cellActions,
-  mapActions,
   wpName,
   settingActions,
   setCommand,

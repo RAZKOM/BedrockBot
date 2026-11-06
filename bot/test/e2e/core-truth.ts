@@ -5,7 +5,7 @@
 // unique name, in its own random area, and summons its mobs with a per-run tag removed at the end.
 // The CLI runs (`node src/index.ts`) use a temporary log dir and settings file outside the repo.
 //
-// Env: CORE_BDS_HOST (127.0.0.1), CORE_BDS_PORT (19180), CORE_BDS_CONTAINER (bds-core); game version
+// Env: CORE_BDS_HOST (127.0.0.1), CORE_BDS_PORT (19180), CORE_BDS_CONTAINER (bds-core), CORE_FEET_Y (-60); game version
 // and transport from env.ts (BOT_VERSION, BDS_TRANSPORT); CORE_VERBOSE=1 logs the bot's lines.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomInt } from 'node:crypto';
@@ -35,8 +35,11 @@ export const CORE_PORT = Number(process.env.CORE_BDS_PORT ?? 19180);
 export const CORE_CONTAINER = process.env.CORE_BDS_CONTAINER ?? 'bds-core';
 export const CORE_TARGET: ConnectTarget = bdsTarget(CORE_HOST, CORE_PORT);
 export const VERBOSE = process.env.CORE_VERBOSE === '1';
-/** Flat world: grass top at y = -61, feet at -60. */
-export const FEET_Y = -60;
+/**
+ * Flat world: grass top at y = -61, feet at -60. CORE_FEET_Y moves it (decision 0062: the panel e2e on
+ * a generated world such as bds-cache, `CORE_FEET_Y=240`: clearArea then builds a floating floor).
+ */
+export const FEET_Y = Number(process.env.CORE_FEET_Y ?? -60);
 const BOT_DIR = fileURLToPath(new URL('../..', import.meta.url));
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));

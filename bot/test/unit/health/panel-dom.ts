@@ -3,6 +3,7 @@
 // client/main.ts start(env) with it, exactly as boot.ts does with the browser.
 import { start, type Started } from '../../../src/health/panel/client/main.ts';
 import type { Env } from '../../../src/health/panel/client/dom.ts';
+import { VIEW_KEY } from '../../../src/health/panel/shared.ts';
 
 export class FakeClassList {
   readonly set = new Set<string>();
@@ -159,6 +160,9 @@ export interface Harness {
   modeButtons: FakeEl[];
   /** The quick buttons (button.q). */
   quick: FakeEl[];
+  /** Decision 0062: the map's layer radios ([data-layer]) and overlay switches ([data-ov]). */
+  layers: FakeEl[];
+  overlays: FakeEl[];
   started: Started;
   /** The streams the page opened (with `stream: true`). */
   streams: FakeEventSource[];
@@ -170,6 +174,8 @@ export interface PageOptions {
   storageThrows?: boolean;
   prefersLight?: boolean;
   storage?: Record<string, string>;
+  /** Answers queued before the page starts (the map screen fetches while start() runs). */
+  answers?: (() => Promise<unknown>)[];
   /** Give the page an EventSource (the push channel); without one it polls like an old browser. */
   stream?: boolean;
 }
@@ -224,7 +230,21 @@ export function runPage(html: string, opts: PageOptions = {}): Harness {
     b.dataset.mode = m[1]!;
     return b;
   });
+  // decision 0062: the map screen's layer radios and overlay switches
+  const layers = [...html.matchAll(/data-layer="([^"]+)"/g)].map((m) => {
+    const r = new FakeEl();
+    r.dataset.layer = m[1]!;
+    r.checked = m[1] === 'surface';
+    return r;
+  });
+  const overlays = [...html.matchAll(/data-ov="([^"]+)"/g)].map((m) => {
+    const c = new FakeEl();
+    c.dataset.ov = m[1]!;
+    return c;
+  });
   const h = {
+    layers,
+    overlays,
     quick,
     posted: [],
     rows,
@@ -234,16 +254,17 @@ export function runPage(html: string, opts: PageOptions = {}): Harness {
     cells,
     timers: [],
     doc: { hidden: false, body: new FakeEl('body'), documentElement: new FakeEl('html'), listeners: new Map() },
-    fetchQueue: [],
+    fetchQueue: [...(opts.answers ?? [])],
     fetched: [],
     debug: [],
-    storage: new Map(Object.entries(opts.storage ?? {})),
+    // decision 0062: the page opens on the map screen; the card tests start on the cards (a map test passes { [VIEW_KEY]: 'map' })
+    storage: new Map(Object.entries({ [VIEW_KEY]: 'cards', ...opts.storage })),
     streams: [],
   } as unknown as Harness;
   const document = {
     getElementById: el,
     querySelectorAll: (sel: string) =>
-      sel === '#inventory .cell' ? [...cells.values()] : sel === 'button.q' ? quick : sel === '#settings tr[data-row]' ? [...rows.values()] : sel === '#settings tr[data-grp]' ? grps : sel === 'button.mode' ? modeButtons : [],
+      sel === '#inventory .cell' ? [...cells.values()] : sel === 'button.q' ? quick : sel === '#settings tr[data-row]' ? [...rows.values()] : sel === '#settings tr[data-grp]' ? grps : sel === 'button.mode' ? modeButtons : sel === '[data-layer]' ? layers : sel === '[data-ov]' ? overlays : [],
     querySelector: (sel: string) => {
       const k = /^\[data-key="([^"]+)"\]:not\(button\)$/.exec(sel)?.[1];
       if (k) return inputs.get(k) ?? null;

@@ -37,6 +37,11 @@ export interface Ctx2D {
   fillRect(x: number, y: number, w: number, h: number): void;
   strokeRect(x: number, y: number, w: number, h: number): void;
   drawImage(img: El, x: number, y: number, w: number, h: number): void;
+  /** Decision 0062: a part (sx, sy, sw, sh) of img into (dx, dy, dw, dh). */
+  drawImage(img: El, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, dw: number, dh: number): void;
+  font: string;
+  fillText(text: string, x: number, y: number): void;
+  setLineDash(segments: number[]): void;
   beginPath(): void;
   moveTo(x: number, y: number): void;
   lineTo(x: number, y: number): void;

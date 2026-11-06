@@ -7,7 +7,7 @@
 // blocks, entity-rendered ones) has no colour, and the map uses the fallback colour of its cache class.
 import { blockTint, GRASS, javaName, spriteTint } from './names.ts';
 import { faceTexture, modelKey, resolveModel, type RawModel, type ResolvedModel } from './models.ts';
-import { decodePng, firstFrame } from './png.ts';
+import { decodePng, encodePng, firstFrame, tinted, type Raster } from './png.ts';
 import { texturePath } from './book.ts';
 import { assetDir, FsAssets, type AssetSource } from './source.ts';
 
@@ -191,7 +191,11 @@ export class BlockColours {
     return this.index;
   }
 
-  private async make(name: string): Promise<number | null> {
+  /**
+   * The top face the map sees of a block: the first frame of its top texture (the model's up face, else
+   * `<block>_top`, else `<block>`) with any opaque texel, and the tint the game multiplies in. null = no art.
+   */
+  private async face(name: string): Promise<{ r: Raster; tint: number | undefined } | null> {
     const idx = await this.loadIndex();
     const j = javaBlockName(name);
     const tint = mapTint(j);
@@ -203,11 +207,55 @@ export class BlockColours {
     for (const path of paths) {
       const bytes = await this.src.png(path);
       if (!bytes) continue;
-      const c = averageColour(firstFrame(decodePng(bytes)).data, tinted ? tint : undefined);
-      if (c !== undefined) return c;
+      const r = firstFrame(decodePng(bytes));
+      let opaque = false;
+      for (let i = 3; i < r.data.length && !opaque; i += 4) opaque = r.data[i]! > 0;
+      if (opaque) return { r, tint: tinted ? tint : undefined };
     }
     return null;
   }
+
+  private async make(name: string): Promise<number | null> {
+    const f = await this.face(name);
+    return f ? (averageColour(f.r.data, f.tint) ?? null) : null;
+  }
+
+  /**
+   * Decision 0062 (GET /tex/<block>.png): the block's top face as a 16 x 16 PNG, tinted like its map
+   * colour (the same face as `colour`), undefined when there is no art. Kept in memory (TEX_MAX names);
+   * nothing is written anywhere. A read error rejects (the route answers 500, not cached).
+   */
+  async texture(name: string): Promise<Buffer | undefined> {
+    const hit = this.tex.get(name);
+    if (hit !== undefined) return hit ?? undefined;
+    const f = await this.face(name);
+    let png: Buffer | null = null;
+    if (f) {
+      const r = f.r.w === 16 && f.r.h === 16 ? f.r : scaleNearest(f.r, 16);
+      png = encodePng(f.tint !== undefined ? tinted(r, f.tint) : r);
+    }
+    if (this.tex.size >= TEX_MAX) this.tex.clear();
+    this.tex.set(name, png);
+    return png ?? undefined;
+  }
+
+  private readonly tex = new Map<string, Buffer | null>();
+}
+
+/** Textures the map keeps as PNG (16 x 16, a few hundred bytes each). */
+const TEX_MAX = 2048;
+
+/** A square raster scaled to n x n (nearest texel; high-resolution art). */
+function scaleNearest(r: Raster, n: number): Raster {
+  const out = new Uint8Array(n * n * 4);
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const sx = Math.floor((x * r.w) / n);
+      const sy = Math.floor((y * r.h) / n);
+      out.set(r.data.subarray((sy * r.w + sx) * 4, (sy * r.w + sx) * 4 + 4), (y * n + x) * 4);
+    }
+  }
+  return { w: n, h: n, data: out };
 }
 
 let installed: BlockColours | null | undefined;

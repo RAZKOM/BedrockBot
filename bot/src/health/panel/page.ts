@@ -8,7 +8,8 @@
 // without one). Track AR: the settings by group with switches, Reset and the mode bar, the menu /
 // toast / palette containers and the panel's own map (a canvas drawn from /map.json while open).
 import { clientModules, ENTRY_MODULE } from './assets.ts'; // decision 0061
-import { THEME_KEY } from './shared.ts';
+import { THEME_KEY, VIEW_KEY } from './shared.ts';
+import { MAP_LAYERS, MAP_OVERLAYS } from './client/mapdefs.ts'; // decision 0062: the map screen's switches
 import { glyphDefs } from './glyphs.ts'; // Track AP
 import { liteState, type PanelSetting, type PanelState } from './state.ts';
 import { settingGroups } from '../../chat/help.ts'; // Track AR: the settings groups
@@ -92,26 +93,50 @@ export function modesData(): { name: string; values: Record<string, string> }[] 
   });
 }
 
-/** The map's legend (Track AR; the colours are the script's MAP_COL). */
-const LEGEND: [string, string][] = [
-  ['#ffffff', 'bot'],
-  ['#f5c542', 'path / goal'],
-  ['#4ce08a', 'home'],
-  ['#c08cff', 'shelter'],
-  ['#5cd6ff', 'waypoint'],
-  ['#b5793a', 'chest'],
-  ['#b0e57c', 'herd'],
-  ['#ff5050', 'hostile'],
-  ['#e8e8e8', 'player'],
-];
-
-function mapHtml(): string {
-  return `<div class="maptools small"><label><input type="checkbox" id="map-follow" checked> follow bot</label> <button type="button" id="map-zin" aria-label="zoom in">+</button><button type="button" id="map-zout" aria-label="zoom out">&minus;</button> <select id="map-r" aria-label="radius"><option>4</option><option selected>8</option><option>12</option><option>16</option></select> chunks <span id="map-info" class="muted"></span></div>
-    <div id="mapview" class="mapview"><canvas id="mapcv"></canvas><div id="maptip" class="tip" hidden></div></div>
-    <div class="legend small muted">${LEGEND.map(([c, n]) => `<span><i style="background:${c}"></i>${n}</span>`).join('')} <span>right-click or long-press: walk here, home, shelter, waypoint</span></div>`;
+/**
+ * Decision 0062: the map screen (client/mapview.ts; docs/map.md). A fixed full-screen layer over the
+ * cards: the canvas, the HUD (health, food, job + ETA, Stop), the controls, the layers / overlays panel
+ * (switches from mapdefs.ts, so a new overlay needs no markup), the Y-slice bar and the action sheet.
+ */
+function mapScreenHtml(): string {
+  const btn = (id: string, label: string, aria: string, cls = ''): string => `<button type="button" id="${id}"${cls ? ` class="${cls}"` : ''} aria-label="${aria}" title="${aria}">${label}</button>`;
+  const layers = MAP_LAYERS.map((l) => `<label><input type="radio" name="map-layer" data-layer="${l.id}"${l.id === 'surface' ? ' checked' : ''}> ${esc(l.label)}</label>`).join('');
+  const ovs = MAP_OVERLAYS.map((o) => `<label><input type="checkbox" data-ov="${o.id}"${o.on ? ' checked' : ''}><i style="background:${o.colour}"></i>${esc(o.label)}</label>`).join('');
+  return `<div id="mapscreen" class="mapscreen">
+  <canvas id="mapcv" aria-label="map of the world around the bot"></canvas>
+  <div class="hud" id="hud">
+    <div class="hudrow"><span class="track"><span id="hud-hpbar" class="fill hp"></span></span><b id="hud-hp">-</b><span class="track"><span id="hud-foodbar" class="fill fd"></span></span><b id="hud-food">-</b></div>
+    <div class="hudrow"><span id="hud-job" class="hudjob">idle</span>${btn('hud-stop', 'Stop', 'stop the current job (!stop)', 'danger')}</div>
+  </div>
+  <div class="mapctl">
+    ${btn('view-cards', 'Cards', 'show the cards')}
+    ${btn('map-follow', '&#9678;', 'follow the bot (re-centre)', 'on')}
+    ${btn('map-zin', '+', 'zoom in')}
+    ${btn('map-zout', '&minus;', 'zoom out')}
+    ${btn('map-box', '&#9633;', 'box mode: drag a box for clear, fill, quarry')}
+    ${btn('map-layers-btn', '&#9776;', 'layers and overlays')}
+  </div>
+  <div id="map-layers" class="maplayers small" hidden>
+    <div class="lh">layer</div><div class="opts">${layers}</div>
+    <div class="lh">overlays</div><div class="opts">${ovs}</div>
+    <div class="opts"><label><input type="checkbox" id="map-tex" checked> textures when zoomed in</label> <a href="/map" target="_blank" rel="noopener">debug map</a></div>
+  </div>
+  <div id="map-slice" class="mapslice" hidden>${btn('map-ydown', '&minus;', 'one block lower')}<input type="range" id="map-y" min="-64" max="319" value="64" aria-label="slice height">${btn('map-yup', '+', 'one block higher')}<b id="map-yv">y 64</b></div>
+  <div id="map-status" class="mapstatus small"></div>
+  <div id="map-sheet" class="sheet" role="dialog" aria-label="map actions" hidden>
+    <div class="sheethead"><b id="sheet-title"></b>${btn('sheet-close', '&times;', 'close')}</div>
+    <div id="sheet-body" class="small"></div>
+    <div id="sheet-box" class="small sheetbox" hidden><label>y <input id="box-y1" type="number" inputmode="numeric"></label><label>to <input id="box-y2" type="number" inputmode="numeric"></label><select id="box-block" aria-label="block to place"></select><span id="box-size" class="muted"></span></div>
+    <div id="sheet-acts" class="acts"></div>
+    <div id="sheet-confirm" class="confirm" hidden><input id="sheet-name" maxlength="32" autocapitalize="off" spellcheck="false" aria-label="name" hidden><pre id="sheet-cmd"></pre><div>${btn('sheet-send', 'Send', 'send this command', 'primary')} ${btn('sheet-cancel', 'Cancel', 'do not send')}</div></div>
+    <pre id="sheet-reply" class="small muted"></pre>
+  </div>
+</div>`;
 }
 
 const THEME_BOOT = `(function(){var t=null;try{t=localStorage.getItem('${THEME_KEY}')}catch(e){}if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark'}document.documentElement.dataset.theme=t})();`;
+/** Decision 0062: the view (map / cards) before the first paint, so the page does not flash the other one. */
+const VIEW_BOOT = `(function(){var v=null;try{v=localStorage.getItem('${VIEW_KEY}')}catch(e){}document.documentElement.dataset.view=v==='cards'?'cards':'map'})();`;
 
 const CSS = `
   :root, [data-theme="dark"] { color-scheme: dark; --bg: #111418; --panel: #1b2027; --line: #2c333d; --text: #d8dee6; --muted: #8a94a3; --accent: #f5c542; --ok: #4ce08a; --warn: #f2b134; --bad: #ff7b72;
@@ -171,11 +196,36 @@ const CSS = `
   .pal button { display: block; width: 100%; text-align: left; border: 0; border-radius: 0; background: transparent; padding: 6px 8px; }
   .pal button:hover { background: var(--cell); }
   .stopbtn { margin-left: 6px; padding: 1px 8px; font-size: 12px; color: var(--bad); }
-  .mapview { position: relative; height: 380px; border-radius: 6px; overflow: hidden; background: #0b0d10; touch-action: none; }
-  .mapview canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
-  .tip { position: absolute; z-index: 5; pointer-events: none; background: #000c; color: #fff; font-size: 12px; padding: 3px 7px; border-radius: 4px; white-space: nowrap; }
-  .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; }
-  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; border: 1px solid #0006; }
+  /* decision 0062: the map screen (fixed, full screen; the cards stay in the page behind it) */
+  [data-view="map"] main { display: none; }
+  [data-view="cards"] #mapscreen { display: none; }
+  .mapscreen { position: fixed; inset: 0; z-index: 5; background: #0b0d10; color: #e6eaf0; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .mapscreen canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+  .mapscreen button { background: #1b2027e6; color: #e6eaf0; border-color: #3a4350; min-width: 40px; min-height: 40px; padding: 4px 8px; }
+  .mapscreen button.on { border-color: var(--accent); color: var(--accent); }
+  .mapscreen button.danger { color: #ff7b72; } .mapscreen button.primary { border-color: var(--accent); }
+  .hud { position: absolute; left: 8px; top: 8px; max-width: calc(100% - 72px); background: #111418d9; border: 1px solid #2c333d; border-radius: 8px; padding: 6px 8px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+  .hudrow { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .hud .track { width: 54px; height: 8px; background: #0d1014; border-radius: 4px; overflow: hidden; flex: none; }
+  .hud .fill { display: block; height: 100%; width: 0; } .hud b { min-width: 18px; font-variant-numeric: tabular-nums; }
+  .hudjob { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hud button { min-height: 30px; padding: 2px 10px; }
+  .mapctl { position: absolute; right: 8px; top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .maplayers { position: absolute; right: 60px; top: 8px; max-width: min(300px, calc(100% - 76px)); max-height: calc(100% - 16px); overflow-y: auto; background: #111418f0; border: 1px solid #2c333d; border-radius: 8px; padding: 8px 10px; }
+  .maplayers[hidden], .mapslice[hidden], .sheet[hidden], .sheet [hidden] { display: none; }
+  .maplayers .lh { color: #8a94a3; text-transform: uppercase; font-size: 11px; margin: 4px 0 2px; }
+  .maplayers .opts { display: flex; flex-wrap: wrap; gap: 4px 10px; } .maplayers label { white-space: nowrap; }
+  .maplayers i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 2px; vertical-align: middle; border: 1px solid #0006; }
+  .mapslice { position: absolute; left: 8px; right: 64px; bottom: 30px; display: flex; gap: 6px; align-items: center; background: #111418d9; border-radius: 8px; padding: 4px 6px; }
+  .mapslice input { flex: 1; min-width: 0; }
+  .mapstatus { position: absolute; left: 8px; bottom: 6px; color: #8a94a3; pointer-events: none; text-shadow: 0 0 2px #000; }
+  .sheet { position: absolute; left: 0; right: 0; bottom: 0; max-height: 62%; overflow-y: auto; background: #1b2027f5; border-top: 1px solid #3a4350; border-radius: 12px 12px 0 0; padding: 10px 12px 14px; display: flex; flex-direction: column; gap: 8px; user-select: text; -webkit-user-select: text; }
+  @media (min-width: 760px) { .sheet { left: auto; right: 64px; bottom: 8px; width: 380px; border-radius: 10px; border: 1px solid #3a4350; } }
+  .sheethead { display: flex; align-items: center; gap: 8px; } .sheethead b { flex: 1; overflow-wrap: anywhere; }
+  .sheet .acts { display: flex; flex-wrap: wrap; gap: 6px; }
+  .sheetbox { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; } .sheetbox input { width: 76px; }
+  .sheet .confirm { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--accent); border-radius: 8px; padding: 8px; }
+  .sheet pre { font-size: 13px; }
   /* inventory */
   .inv-card { container-type: inline-size; }
   .inv { display: flex; flex-direction: column; gap: 6px; }
@@ -230,7 +280,7 @@ const CSS = `
   .link .signin { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
   .link .code { font: 700 18px/1.2 ui-monospace, Menlo, Consolas, monospace; letter-spacing: .12em; padding: 2px 8px; border: 1px dashed var(--accent); border-radius: 6px; }
   button:disabled { opacity: .45; cursor: not-allowed; border-color: var(--cellline); }
-  body.is-offline #inventory .cell, body.is-offline #mapview { opacity: .5; filter: grayscale(.7); }
+  body.is-offline #inventory .cell, body.is-offline #mapcv { opacity: .5; filter: grayscale(.7); }
   body.is-offline #btn-pause, body.is-offline #btn-resume { opacity: 1; }
   .menu .note { font-size: 12px; color: var(--warn); padding: 4px 8px; }
 `;
@@ -255,7 +305,7 @@ export function renderPanelPage(s: PanelState, mods: PageModules = pageModules()
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>BedrockBot panel</title>
-<script>${THEME_BOOT}</script>
+<script>${THEME_BOOT}${VIEW_BOOT}</script>
 <style>${CSS}</style>
 ${mods.preload.map((u) => `<link rel="modulepreload" href="${esc(u)}">`).join('\n')}
 </head>
@@ -266,7 +316,7 @@ ${glyphDefs()}
     <h1><span id="dot" class="dot${s.bot.healthy ? ' ok' : ''}"></span><span id="botname">${esc(s.bot.name || 'BedrockBot')}</span></h1>
     <span class="muted"><span id="conn">${esc(s.bot.state)}</span> &middot; <span id="server">${esc(s.bot.server)}</span> &middot; task <span id="task">${esc(s.bot.task)}</span> &middot; <span id="ver">${esc(s.bot.gameVersion)}</span></span>
     <span id="stale" class="stale" hidden>stale</span><span id="err"></span>
-    <span class="grow"></span><button type="button" id="theme" class="small" aria-label="switch theme">light</button>
+    <span class="grow"></span><button type="button" id="view-map" class="small" aria-label="show the map">Map</button> <button type="button" id="theme" class="small" aria-label="switch theme">light</button>
   </header>
   <section id="panel-link" class="wide link" role="status" aria-live="polite"${s.link.phase === 'online' ? ' hidden' : ''}><span class="spin" aria-hidden="true"></span><div class="grow"><div class="lt" id="link-title">${esc(s.link.phase)}</div><div id="link-detail" class="small"></div><dl class="kv small" id="link-rows"></dl><div id="link-signin" class="signin" hidden><a id="link-url" target="_blank" rel="noopener noreferrer">open the sign-in page</a><span>code <span id="link-code" class="code"></span></span></div></div></section>
   <section id="panel-inventory" class="inv-card"><h2>Inventory <span id="inv-sum" class="muted small"></span></h2>${inventoryHtml()}<div id="iteminfo" class="iteminfo muted small">tap or right-click a slot: actions and details</div></section>
@@ -327,10 +377,8 @@ ${glyphDefs()}
   <section class="wide" id="panel-help">
     <details id="helpbox"><summary><h2 style="display:inline">Help</h2> <span class="muted small">commands, settings, modes (!help in chat)</span></summary><div id="helpwrap" class="tablewrap"></div></details>
   </section>
-  <section class="wide" id="panel-map">
-    <details id="mapbox"><summary><h2 style="display:inline">Map</h2> <a href="/map" target="_blank" rel="noopener" class="small">open full page</a></summary><div id="mapwrap">${mapHtml()}</div></details>
-  </section>
 </main>
+${mapScreenHtml()}
 <div id="menu" class="menu" role="menu" hidden></div>
 <div id="toast" class="toast" role="status" hidden></div>
 <script type="application/json" id="modes-data">${scriptJson(modesData())}</script>

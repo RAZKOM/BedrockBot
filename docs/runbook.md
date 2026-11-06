@@ -691,7 +691,7 @@ curl -s http://127.0.0.1:9464/metrics
 With `--health-port`, a walking task (`--walk`, `--home`, `--shelter`, gather) also serves:
 
 - `GET /map`: a page (no dependencies) that draws the remembered chunks top-down (colour by surface
-  class, shade by height; chunks that are only remembered are dimmed, loaded ones outlined), the
+  class, shade by height; chunks that are only remembered fade toward pale grey with age, loaded ones outlined), the
   bot and its trail, the last goto's goal (and its path once the navigator report exposes one),
   entities (players, hostiles, passive mobs, items), home, shelter and waypoints when the task's
   status has them. Refreshes every second; drag to pan, wheel to zoom, "follow" re-centres.

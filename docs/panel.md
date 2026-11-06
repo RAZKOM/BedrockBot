@@ -74,10 +74,16 @@ or blocked storage just means the choice is not kept). Without a stored choice t
 `prefers-color-scheme: light` gives the light theme. A tiny script in `<head>` sets the theme before
 the first paint (no dark flash on a light phone).
 
+**The page opens on the map** (decision 0062; [map.md](map.md)), a full-screen map with a small HUD
+(health, food, the job and its ETA, Stop). The **Cards** button switches to the cards and the **Map**
+button in the header switches back. The choice is kept in `localStorage` `bbpanel-view`, and a tiny
+script in `<head>` applies it before the first paint. A page on the cards joins no map topic and runs
+no map timer.
+
 The cards sit in a grid: **one column on a phone** (under 760 px wide; the order is inventory, bot,
-status, commands, combat, memory, planner, connection, log, settings, help, map), **two columns** on
+status, commands, combat, memory, planner, connection, log, settings, help), **two columns** on
 a tablet or a small laptop window, **three** from 1200 px (inventory, bot and status side by side on
-the first row). Settings, help and map always span the full width. Nothing is wider than the screen
+the first row). Settings and help always span the full width. Nothing is wider than the screen
 at 360 px: tables scroll inside their card, long lines wrap, and the body never scrolls sideways.
 
 ### Inventory
@@ -176,9 +182,9 @@ the package pin.
 - **Settings**: the `!set` table by group with switches, Reset, the mode selector and filters (Track
   AR, "Interaction" below; every row shows the default and where the value came from: default / file
   / startup / chat);
-- **Help**: the command registry, the modes and the settings (Track AM), fetched when opened;
-- **Map**: the panel's own map (Track AR; it was the `/map` page in a frame), drawn only while the
-  section is open, plus a link to the full debug page.
+- **Help**: the command registry, the modes and the settings (Track AM), fetched when opened.
+
+The map card is gone. Its successor is the map screen ("Map screen" below).
 
 ### When the bot is not connected
 
@@ -282,30 +288,16 @@ hand"). **Wear the best armour** (`!equip`) forgets the choices; the flight kit'
 `!drop <item> <n>` drops that many of the item, smallest stacks and the main inventory first (the
 survival kit's rule), so "the stack" is the cell's count, not necessarily that cell.
 
-### Map
+### Map screen
 
-The **Map** section draws its own canvas (it no longer frames `/map`): `/map.json` every 2 s while
-the section is open (the tiles as before, the bot as an arrow by its yaw, the trail, the current path
-and goal), and every 10 s `GET /api/marks` for the remembered chests and herds. A legend names the
-colours: bot, path / goal, home (square), shelter (square), waypoints (diamonds), chests, herds,
-hostiles, players. **Follow bot** (on by default) keeps the bot centred; dragging turns it off; `+` /
-`-` or the wheel zoom; the radius select sets the window (4 to 16 chunks). Hovering (or tapping) shows
-what is under the pointer: the nearest marker within 10 px with its name (`waypoint base`, `chest
-"ores"`, `herd: 5 cow (penned)`), else the column (`18310 17280: solid at y -61 (remembered)`).
+Decision 0062. The map screen has its own guide, [map.md](map.md). It covers the views, gestures,
+layers (surface, classes, Y-slice), the shared painting (`client/paint.ts`, also behind `/map`), the
+wire (`/api/map/tiles`, the `map` and `map-live` topics, `/api/map/slice`, `/tex/`), the overlays,
+and the point and box actions. Every action shows its exact `!command` before Send, and the reply
+appears under it. The guide also has the recipes "add an overlay" and "add a map action".
 
-**Right-click or long-press** (550 ms) a column for its menu (`mapActions`):
-
-| Entry | Command |
-|---|---|
-| Walk here | `!goto x y z`, y = the column's surface + 1 from the tile (`Walk here (height unknown)` uses the bot's y for a column the cache never saw) |
-| Set home here | `!home set x y z` (confirmed) |
-| Set shelter here | `!shelter set x y z` (confirmed) |
-| Set waypoint here... | asks for a name in the menu (1..32 of a-z 0-9 _ -), then `!wp set <name> x y z` |
-
-Mine here and build markers are not offered: `!get <ore> n` is not positional and there is no
-marker command. The map's waypoints and shelter now really show: the map routes lift the afk task's
-`nav.waypoints` and `night.shelter` into `/map.json`'s `waypoints` / `shelter` (`map/routes.ts`
-`liftTaskStatus`; before, the JSON had none for the afk task).
+The afk task's waypoints and shelter still reach the map through `map/routes.ts` `liftTaskStatus`,
+which lifts `nav.waypoints` and `night.shelter` into `/map.json` and `map-live`.
 
 ### Settings
 
@@ -545,12 +537,16 @@ page, so a new card raises the piece it lives in. Raise a number only with the r
 
 | Piece | Budget | Worst case (unit fixture) | Live (bds-core e2e) | Enforced by |
 |---|---|---|---|---|
-| `html`: `GET /` (structure, CSS, glyphs, the embedded lite state) | 120 000 | 108 328 | 95.9 to 101 KB | `panel-budgets`, `panel-menu`, `panel-core`, `panel-actions`, `panel-stream` |
-| `module`: one browser module, raw | 20 000 | 14 531 (`map.ts`) | the same | load at startup (refuses), `panel-budgets`, `panel-stream` |
-| `modules`: all modules, raw | 120 000 | 94 052 (32 110 gzip) | the same | `panel-budgets`, `panel-stream` |
+| `html`: `GET /` (structure, CSS, glyphs, the embedded lite state) | 120 000 | 116 431 (decision 0062: plus the map screen's markup and CSS) | 104.4 KB (bds-cache) | `panel-budgets`, `panel-menu`, `panel-core`, `panel-actions`, `panel-stream`, `panel-map` |
+| `module`: one browser module, raw | 20 000 | 15 605 (`paint.ts`; `mapview.ts` 15 156) | the same | load at startup (refuses), `panel-budgets`, `panel-stream` |
+| `modules`: all modules, raw | 170 000 (120 000 before decision 0062) | 159 909 (52 636 gzip; the map screen about 79 KB of it) | the same | `panel-budgets`, `panel-stream` |
 | `snapshot`: a state snapshot (= the lite poll) | 24 000 | 19 569 | 7.6 to 12.5 KB | `panel-budgets`, `panel-stream`, a log warning once at run time |
 | `delta`: one state delta on a busy second | 4 000 | 682 (14 ops) | 340 to 660 | `panel-budgets`, `panel-stream`, a log warning once at run time |
 | `event`: one message on the `events` topic | 2 000 | - | 242 | `panel-stream`, a log warning once at run time |
+| `mapMessage`: one `map` topic message (decision 0062) | 96 000 | 75 259 (21 synthetic worst-case tiles) | 1.0 KB (1 tile) to 39 KB (27 tiles) | `panel-budgets`, `map-live`, `panel-map`, a log warning once |
+| `mapLive`: a `map-live` snapshot | 24 000 | 13 894 | - | `panel-budgets`, `map-live`, a log warning once |
+| `mapLiveDelta`: a `map-live` delta on a busy second | 4 000 | 1 276 | - | `panel-budgets`, a log warning once |
+| `mapFetch`: `GET /api/map/tiles` r=8, gzipped | 120 000 | 38 904 (smooth overworld; random art 596 004, only printed) | r=4 9.6 to 23.8 KB | `panel-budgets`, `map-live` |
 
 To print the worst case:
 `PANEL_MEASURE=1 pnpm --filter bot exec vitest run --project unit test/unit/health/panel-budgets.test.ts`.
@@ -565,6 +561,10 @@ To print the worst case:
 | `GET /ui/<hash>/<path>.ts` | decision 0061: a browser module, type-stripped ("Browser modules"): `text/javascript`, immutable cache, ETag / 304, gzip; `HEAD` the same without the body; 404 another hash or no such module; 405 other methods |
 | `GET /api/chests` | the remembered containers, nearest first: `[{"x":10,"y":-60,"z":4,"kind":"chest","label":"ores","stacks":12,"size":27,"top":[["coal",320],["iron_ore",40]],"unreachable":null,"readAt":1761753600000}]` (`[]` without a world cache; Track AP) |
 | `GET /api/marks` | Track AR: what the panel's map draws beyond `/map.json`, within 256 blocks of the bot, nearest first, at most 200 each: `{"chests":[{"x":10,"y":-60,"z":4,"kind":"chest","label":"ores","unreachable":false}],"herds":[{"x":5.5,"y":-60,"z":5.5,"n":5,"kind":"cow","penned":true}]}` (empty lists without a world cache) |
+| `GET /api/marks?cx&cz&r` | decision 0062: the same for a window (centre chunk, radius in chunks, at most 16), plus `blocks` from the cache's marks (`{"ore":[[x,y,z,"diamond_ore"]],"spawner":[...],"bed":[...],"station":[...],"farmland":[...],"forest":[[x,y,z,logs]]}`, nearest first, only the kinds present) and chest contents (`top`, `stacks`, `size`, `readAt`); [map.md](map.md) "Wire" |
+| `GET /api/map/tiles?cid&cx&cz&r&pal[&since&win][&live=1]` | decision 0062: the compact tiles of a window (r up to 16), the palette entries from index `pal`, the window registered for the `map` topic; `live=1` adds the overlays ([map.md](map.md) "Wire") |
+| `GET /api/map/slice?y&cx&cz&r&pal` | decision 0062: the Y-slice: the cache class of every cell at y and the block names of loaded columns (r up to 8); 400 without a numeric y |
+| `GET /tex/<block>.png` | decision 0062: the block's 16 x 16 top face from the installed game's art (the same allowlist and cache as `/icons/`), or 404 and the map keeps the colour |
 | `GET /icons/<name>.png` | the item's icon (`image/png`, 16 x 16 or 32 x 32), or 404 `{"error":"no icon for this item"}`; `HEAD` the same without the body; 405 other methods ("Item icons") |
 | `POST /api/cmd` `{"text":"!wp set base"}` | 200 `{"command":"!wp set base","ok":true,"replies":["waypoint base set to 10 -60 20"]}`; 409 `ok:false` + `error` when there is no owner to run as; 400 bad body; 413 body over 4 KiB; 429 over 5 commands per second; 405 other methods |
 | `GET /api/events`, `/api/events/summary`, `/api/events/kinds` | decision 0059: the bot's event history (filters, the 8-hour summary, the registry); mounted from `bot/src/events/routes.ts`, documented in [events.md](events.md) "Query API" |
@@ -695,10 +695,11 @@ codes become `***`). The bot account's sign-in tokens (prismarine-auth cache) ar
 | `health/panel/icons/names.ts`, `png.ts` | the Bedrock -> Java name aliases, the solid parents, the tints; the pngjs wrapper (decode, encode, first frame, tint, overlay) |
 | `health/panel/client/boot.ts`, `main.ts`, `page.ts`, `dom.ts` | decision 0061: the entry (the only module reading browser globals); the wiring (`start(env)`: theme, the cards, render, stale marker); the shared `Page` object; the small DOM interfaces and helpers (`makeUi`, `nice`, `dur`, ...) |
 | `health/panel/client/transport.ts`, `delta.ts` | decision 0061: how the state arrives (stream, fallback polling, hidden tab, `on(topic)`); the delta codec (also used by the server) |
-| `health/panel/client/inventory.ts`, `cards.ts`, `logs.ts`, `settings.ts`, `link.ts`, `commands.ts`, `popup.ts`, `map.ts`, `tables.ts` | the page's cards, one module each (until decision 0061 the one `client.ts` string; Track AP and AR behaviour unchanged): the cells and their menu; bot, vitals, status, stack, combat, memory, planner, connection, chat; the log and its filter; the settings controls and modes; the offline banner; the command box, quick buttons and palette; toast and menu; the map canvas; Help and the chest list |
-| `health/panel/page.ts` | the page (`renderPanelPage`): structure, CSS (themes, responsive grid), the 41 inventory cells, the status blocks; Track AR: the grouped settings rows, the mode bar, the menu, toast, palette and map markup |
-| `health/panel/client/menu.ts` (re-exported by `health/panel/menu.ts`) | Track AR: the menu model (`cellActions`, `mapActions`, `settingActions`, `setCommand`, `settingVisible`, `modeOf`, `modeChanges`, `stackActions`, `paletteMatch`, `offlineOk`, `linkView`, `parseLog`, `logVisible`); a typed module since decision 0061 (it was the `MENU_JS` string): the page imports it, the server and the tests through `menu.ts` |
-| `health/panel/marks.ts` | Track AR: `GET /api/marks` (`mapMarks`: chests and herds near the bot) |
+| `health/panel/client/inventory.ts`, `cards.ts`, `logs.ts`, `settings.ts`, `link.ts`, `commands.ts`, `popup.ts`, `tables.ts` | the page's cards, one module each (until decision 0061 the one `client.ts` string; Track AP and AR behaviour unchanged): the cells and their menu; bot, vitals, status, stack, combat, memory, planner, connection, chat; the log and its filter; the settings controls and modes; the offline banner; the command box, quick buttons and palette; toast and menu; Help and the chest list |
+| `health/panel/page.ts` | the page (`renderPanelPage`): structure, CSS (themes, responsive grid), the 41 inventory cells, the status blocks; Track AR: the grouped settings rows, the mode bar, the menu, toast, palette and map markup; decision 0062: the map screen markup and CSS (`mapScreenHtml`), the view switch before the first paint |
+| `health/panel/client/menu.ts` (re-exported by `health/panel/menu.ts`) | Track AR: the menu model (`cellActions`, `settingActions`, `setCommand`, `settingVisible`, `modeOf`, `modeChanges`, `stackActions`, `paletteMatch`, `offlineOk`, `linkView`, `parseLog`, `logVisible`); a typed module since decision 0061 (it was the `MENU_JS` string): the page imports it, the server and the tests through `menu.ts` |
+| `health/panel/client/paint.ts`, `tiles.ts`, `mapview.ts`, `mapinput.ts`, `maptex.ts`, `overlays.ts`, `mapsheet.ts`, `mapdefs.ts`; `health/map/live.ts` | decision 0062: the map screen (the painting shared with `/map`, the tile store, the view, gestures, textures, overlays, the action sheet, the registries; `MapLive`: the `map` and `map-live` topics, `/api/map/tiles`, `/api/map/slice`); one line each in [map.md](map.md) "Files" |
+| `health/panel/marks.ts` | Track AR: `GET /api/marks` (`mapMarks`: chests and herds near the bot); decision 0062: a window (`marksWindow`), chest contents, the block marks (`blockMarks`) |
 | `health/map/routes.ts` | Track AR: `liftTaskStatus` (the afk task's waypoints and shelter into `/map.json`) |
 | `chat/commands-panel.ts` | Track AR: `!select`, `!offhand` (one line in `tasks/registry.ts`) |
 | `health/panel/logRing.ts` | `LogRing`: the last log lines (wraps `console.error`, which every logger writes with), redaction |
@@ -782,9 +783,10 @@ before and after, a refusal), `panel-page.test.ts` (the script on the fake DOM: 
 menu, an action posts its command and toasts the reply, a drop needs a second tap and disarms after
 4 s, the box shows its contents locally, Stop per user process and Pause / Resume by `paused`, Reset
 and the switch and the two-tap mode, the changed-only and search filters, quick buttons kept in
-storage with save and defaults, the log filters, the palette from `/api/help`, the map's poll, its
-right-click menu, Walk here on the surface and the waypoint name prompt), `panel-server.test.ts`
-(`paused`, `/api/marks` behind the token).
+storage with save and defaults, the log filters, the palette from `/api/help`), `panel-server.test.ts`
+(`paused`, `/api/marks` behind the token). The map card's tests (its poll, its right-click menu, Walk
+here and the waypoint prompt) became the map screen's tests in decision 0062; see [map.md](map.md)
+"Tests". The fake-DOM harness (`panel-dom.ts`) opens on the cards unless a test stores the map view.
 
 Offline banner unit tests: `panel-menu.test.ts` (`panelLink` for every phase, `linkView`'s titles and
 rows, `offlineOk`, **Wear this** for armour and the elytra), `panel-page.test.ts` (the markup hides the
@@ -878,3 +880,31 @@ The existing e2e still pass on the same container after the merge: `panel-core` 
 | delta with the whole inventory reversed and 5 log lines | 3 835 bytes |
 
 **Startup.** Stripping and checking the modules takes 14 to 17 ms, once per process.
+
+### Measured (decision 0062)
+
+These numbers come from a live run on bds-cache, a generated world (2026-11-05, Windows dev machine,
+other agents' BDS containers running). `panel-map` passed four runs in a row
+(ports 9952 to 9954, then 9950), and [map.md](map.md) "Measured" has the payload table.
+
+| What | Value |
+|---|---|
+| page | 104.4 KB, 23 modules (159.9 KB raw, 52.6 KB gzip; the map screen about 79 KB of it) |
+| a block set by truth, to its tile on the `map` topic | 71 to 922 ms (the tick is 1 s) |
+| `map` messages | 1 tile 1.0 KB; the first after a registration 25 tiles 35.7 KB |
+| 10 s open, r=4, the bot standing | 12 `map` messages, 14.7 KB raw (2.4 KB gzip); the old poll would have moved 22.0 KB raw (7.1 KB gzip) |
+| surface of 40 sampled columns against truth | 40 of 40 in every run |
+| Y-slice of 2 304 cells at the platform and at a natural height | 2 304 of 2 304 in every run |
+| Go here, 8 blocks | 1.9 to 2.2 s |
+| box Clear, 6 dirt blocks | 9.7 to 9.9 s |
+
+**The existing e2e on bds-cache.** These also pass on the same container:
+
+- `panel-core` (6 tests), `panel-actions` (8) and `panel-stream` (6), with `CORE_BDS_PORT=19184
+  CORE_BDS_CONTAINER=bds-cache CORE_FEET_Y=240`, ports 9955 to 9957;
+- `cache-map` (1) and `cache-surface` (1), with `CACHE_HEALTH_PORT` 9958 / 9959.
+
+Two changes to the older tests:
+
+- panel-core's page marker is now `id="mapscreen"`;
+- panel-actions accepts `blocks` in `/api/marks`.

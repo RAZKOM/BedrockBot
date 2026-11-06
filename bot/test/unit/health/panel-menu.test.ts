@@ -6,10 +6,12 @@ import type { Chat, CommandDef } from '../../../src/chat/chat.ts';
 import { findSlot, freeSlot, parseHotbarSlot, registerPanelCommands, type PanelCommandDeps, type PanelKit } from '../../../src/chat/commands-panel.ts';
 import { RuntimeSettings } from '../../../src/config/settings.ts';
 import { liftTaskStatus, mapRoutes } from '../../../src/health/map/routes.ts';
-import { mapMarks } from '../../../src/health/panel/marks.ts';
+import { blockMarkKind, blockMarks, mapMarks, marksWindow } from '../../../src/health/panel/marks.ts';
+import { FOREST_LOGS } from '../../../src/health/panel/memory.ts';
 import { PANEL_BUDGETS } from '../../../src/health/panel/budgets.ts';
 import { panelLink } from '../../../src/health/panel/state.ts';
-import { cellActions, linkView, offlineOk, logVisible, mapActions, modeChanges, modeOf, paletteMatch, parseLog, setCommand, settingActions, settingVisible, stackActions, wpName, type MenuAction } from '../../../src/health/panel/menu.ts';
+import { boxActions, boxSize, orderedBox, pointActions, tunnelTo } from '../../../src/health/panel/client/mapdefs.ts';
+import { cellActions, linkView, offlineOk, logVisible, modeChanges, modeOf, paletteMatch, parseLog, setCommand, settingActions, settingVisible, stackActions, wpName, type MenuAction } from '../../../src/health/panel/menu.ts';
 import { enumValues, modesData, renderPanelPage } from '../../../src/health/panel/page.ts';
 import { settingGroups } from '../../../src/chat/help.ts';
 import type { ItemStack } from '../../../src/world/types.ts';
@@ -126,18 +128,38 @@ describe('the offline banner: link phases and the view', () => {
 });
 
 describe('menu model: map, settings, processes, palette, log', () => {
-  it('map: walk / home / shelter / waypoint on the surface (feet = surface + 1)', () => {
-    const a = mapActions(10.7, -3.2, 63, -60);
-    expect(a.map((x) => [x.id, x.cmd, !!x.confirm])).toEqual([
-      ['walk', '!goto 10 64 -4', false],
-      ['home', '!home set 10 64 -4', true],
-      ['shelter', '!shelter set 10 64 -4', true],
-      ['wp', '!wp set {name} 10 64 -4', false],
+  it('map (decision 0062, mapdefs.ts): block actions on the surface (feet = surface + 1), box actions with the exact commands', () => {
+    const bot = { x: 100.5, y: 64, z: -49.5 };
+    const a = pointActions({ x: 104, z: -50, y: 63, block: 'stone', bot, elytra: true });
+    expect(a.map((x) => [x.id, x.cmd])).toEqual([
+      ['walk', '!goto 104 64 -50'],
+      ['fly', '!fly 104 64 -50'],
+      ['wp', '!wp set {name} 104 64 -50'],
+      ['home', '!home set 104 64 -50'],
+      ['shelter', '!shelter set 104 64 -50'],
+      ['dig', '!build clear 104 63 -50 104 63 -50'],
+      ['tunnel', '!tunnel east 4'],
     ]);
-    expect(a[3]!.prompt).toMatch(/waypoint name/);
-    expect(mapActions(0, 0, null, -60.4)[0]).toEqual({ id: 'walk', label: 'Walk here (height unknown)', cmd: '!goto 0 -61 0' });
-    expect(mapActions(0, 0, -32768, 70)[0]!.cmd).toBe('!goto 0 70 0');
-    expect(mapActions(0, 0, null, null)).toEqual([]);
+    expect(a[2]!.prompt).toMatch(/waypoint name/);
+    // no elytra: no Fly; water and bedrock are not dug; off the bot's lines: no tunnel; height unknown: the bot's y
+    expect(pointActions({ x: 90, z: -60, y: 62, block: 'water', bot, elytra: false }).map((x) => x.id)).toEqual(['walk', 'wp', 'home', 'shelter']);
+    expect(pointActions({ x: 100, z: -40, y: null, block: null, bot, elytra: false })[0]).toEqual({ id: 'walk', label: 'Go here', cmd: '!goto 100 64 -40' });
+    expect(tunnelTo({ x: 100, z: -40, y: null, block: null, bot, elytra: false })).toEqual({ dir: 'south', length: 10 });
+    expect(pointActions({ x: 0, z: 0, y: null, block: null, bot: null, elytra: false })).toEqual([]);
+    // a box dragged from the south-east corner: ordered corners, the wall keeps the drag direction
+    const box = { x1: 105, z1: -46, x2: 101, z2: -50, y1: 66, y2: 64 };
+    expect(boxSize(orderedBox(box)).text).toBe('5 x 3 x 5 = 75 blocks');
+    expect(boxActions(box, { block: null }).map((x) => [x.id, x.cmd, !!x.confirm])).toEqual([
+      ['clear', '!build clear 101 64 -50 105 66 -46', true],
+      ['quarry', '!quarry 101 64 -50 105 66 -46', true],
+    ]);
+    expect(boxActions(box, { block: 'cobblestone' }).map((x) => x.cmd)).toEqual([
+      '!build clear 101 64 -50 105 66 -46',
+      '!build fill 101 64 -50 105 66 -46 cobblestone',
+      '!build floor 101 64 -50 105 -46 cobblestone',
+      '!build wall 105 64 -46 101 -50 3 cobblestone',
+      '!quarry 101 64 -50 105 66 -46',
+    ]);
     expect([wpName(' Base_1 '), wpName(''), wpName('a b'), wpName('x'.repeat(33))]).toEqual(['base_1', null, null, null]);
   });
 
@@ -207,6 +229,36 @@ describe('GET /api/marks: chests and herds near the bot', () => {
     expect(m.herds).toEqual([{ x: 5.5, y: -60, z: 5.5, n: 5, kind: 'cow', penned: true }]);
     expect(mapMarks(undefined, { x: 0, y: 0, z: 0 })).toEqual({ chests: [], herds: [] });
     expect(mapMarks(src, undefined)).toEqual({ chests: [], herds: [] });
+    // decision 0062: what the chest memory knows of the contents (the map's tap)
+    const read = mapMarks({ chests: { all: () => [chest(2, 0, { contents: { coal: 12, cobblestone: 64, dirt: 3 }, stacks: 3, size: 27, readAt: 5 })] as never[] } }, { x: 0, y: -60, z: 0 });
+    expect(read.chests[0]).toMatchObject({ stacks: 3, size: 27, readAt: 5, top: [['cobblestone', 64], ['coal', 12], ['dirt', 3]] });
+  });
+
+  it('decision 0062: block marks from the cache columns: ores, spawners, beds, stations, farmland, forests (log centroid), nearest first, in the window', () => {
+    const marks = (list: [number, number, number, string][]) => ({ markList: () => list.map(([x, y, z, name]) => ({ x, y, z, name, exposed: true })) });
+    const logs = Array.from({ length: FOREST_LOGS }, (_, i): [number, number, number, string] => [20 + (i % 4), 70, 4 + Math.floor(i / 4), 'oak_log']);
+    const cols: Record<string, ReturnType<typeof marks>> = {
+      '0,0': marks([[3, 12, 4, 'iron_ore'], [9, -20, 9, 'deepslate_diamond_ore'], [5, 64, 5, 'red_bed'], [6, 64, 5, 'crafting_table'], [7, 64, 5, 'lit_furnace'], [8, 63, 8, 'farmland'], [2, 30, 2, 'mob_spawner'], [1, 64, 1, 'stone']]),
+      '1,0': marks(logs),
+      '9,9': marks([[150, 12, 150, 'gold_ore']]),
+    };
+    const src = { summary: (cx: number, cz: number) => cols[`${cx},${cz}`], known: (cx: number, cz: number) => `${cx},${cz}` in cols };
+    const b = blockMarks(src, { x: 0, y: 64, z: 0 }, 40);
+    expect(b.ore).toEqual([[3, 12, 4, 'iron_ore'], [9, -20, 9, 'deepslate_diamond_ore']]);
+    expect(b.spawner).toEqual([[2, 30, 2, 'mob_spawner']]);
+    expect(b.bed).toEqual([[5, 64, 5, 'red_bed']]);
+    expect(b.station).toEqual([[6, 64, 5, 'crafting_table'], [7, 64, 5, 'lit_furnace']]);
+    expect(b.farmland).toEqual([[8, 63, 8, 'farmland']]);
+    expect(b.forest).toHaveLength(1);
+    expect(b.forest![0]![3]).toBe(FOREST_LOGS);
+    expect(JSON.stringify(b)).not.toContain('gold_ore'); // outside the window
+    expect(blockMarks({}, { x: 0, y: 64, z: 0 }, 40)).toEqual({});
+    expect(blockMarkKind('trial_spawner')).toBe('spawner');
+    expect(blockMarkKind('oak_log')).toBeUndefined();
+    // the page asks for its window: ?cx&cz&r -> the centre of the chunk, r chunks + 8 blocks
+    expect(marksWindow('/api/marks?cx=2&cz=-3&r=4')).toEqual({ origin: { x: 40, y: 64, z: -40 }, radius: 72 });
+    expect(marksWindow('/api/marks?cx=2&cz=-3&r=99')!.radius).toBe(16 * 16 + 8);
+    expect(marksWindow('/api/marks')).toBeUndefined();
   });
 });
 
@@ -232,8 +284,8 @@ describe('page: the settings by group, the mode selector, the menu and map marku
     expect(JSON.parse(/<script type="application\/json" id="modes-data">([^<]*)<\/script>/.exec(html)![1]!)).toEqual(modesData());
   });
 
-  it('menu, toast, palette, log filters, Pause / Resume, the map canvas and legend; under 162 KB', () => {
-    for (const m of ['id="menu"', 'id="toast"', 'id="palette"', 'id="quick-edit"', 'id="log-level"', 'id="log-mod"', 'id="btn-pause"', 'id="btn-resume"', 'id="mapcv"', 'id="map-follow"', 'class="legend', 'id="set-changed"', 'id="set-q"']) expect(html).toContain(m);
+  it('menu, toast, palette, log filters, Pause / Resume, the map screen and its switches; under 162 KB', () => {
+    for (const m of ['id="menu"', 'id="toast"', 'id="palette"', 'id="quick-edit"', 'id="log-level"', 'id="log-mod"', 'id="btn-pause"', 'id="btn-resume"', 'id="mapcv"', 'id="map-follow"', 'id="map-sheet"', 'data-ov="chests"', 'data-layer="slice"', 'id="set-changed"', 'id="set-q"']) expect(html).toContain(m);
     expect(html).not.toContain('<iframe');
     expect(Buffer.byteLength(html)).toBeLessThan(PANEL_BUDGETS.html); // decision 0061: the page without its script (was 162 KB with it)
   });

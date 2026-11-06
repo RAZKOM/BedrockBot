@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { HEALTH_HOST, HealthServer, summarize } from '../../src/connection/health.ts';
 import { Metrics } from '../../src/connection/metrics.ts';
 import { TARGET, setup } from './connection-fakes.ts';
+import { onFetchablePort } from './health/panel-sse.ts';
 
 let server: HealthServer | undefined;
 afterEach(async () => {
@@ -22,8 +23,9 @@ describe('HealthServer', () => {
     metrics.attach(conn);
     metrics.provide(() => ({ task: 'afk', server: '127.0.0.1:19132 (raknet)', taskStatus: { logsPerHour: 12.5 } }));
     let alive = true;
-    server = new HealthServer({ port: 0, metrics, alive: () => alive });
-    const port = await server.start();
+    const started = await onFetchablePort(() => new HealthServer({ port: 0, metrics, alive: () => alive }), (s) => s.start(), (s) => s.stop());
+    server = started.server;
+    const port = started.port;
     expect(port).toBeGreaterThan(0);
 
     expect((await get(port, '/healthz')).status).toBe(503);

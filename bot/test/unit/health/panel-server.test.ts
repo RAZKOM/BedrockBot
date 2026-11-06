@@ -14,7 +14,8 @@ import { createLogger, silentLogger } from '../../../src/log.ts';
 import type { CommandDeps } from '../../../src/tasks/process/deps.ts';
 import { setup } from '../connection-fakes.ts';
 import { applyDelta, type DeltaOp, type Json } from '../../../src/health/panel/client/delta.ts'; // decision 0061
-import { openSse } from './panel-sse.ts';
+import { onFetchablePort, openSse } from './panel-sse.ts';
+import { decodePng } from '../../../src/health/panel/icons/png.ts'; // decision 0062: the textures
 import { EventBus } from '../../../src/events/bus.ts'; // decision 0059: the events topic
 
 const TOKEN = 'Abcdefghijklmnopqrstuvwx';
@@ -66,12 +67,16 @@ function makePanel(opts: { healthPort?: number; port?: number; token?: string; o
   return { panel, chat, runtime };
 }
 
+/** A separate-mode panel's start: its port (from its URL). */
+async function startOwn(m: ReturnType<typeof makePanel>): Promise<number> {
+  expect(m.panel.plan.mode).toBe('separate');
+  expect(await m.panel.start(undefined)).toBe(true);
+  return Number(new URL(m.panel.urls()[0]!).port);
+}
+
 async function startSeparate(token?: string, owners?: string[], events?: PanelDeps['events']) {
-  const made = makePanel({ port: 0, token, owners, events });
-  expect(made.panel.plan.mode).toBe('separate');
-  expect(await made.panel.start(undefined)).toBe(true);
-  const base = made.panel.urls()[0]!.replace(/\/$/, '');
-  return { ...made, base };
+  const { server: made, port } = await onFetchablePort(() => makePanel({ port: 0, token, owners, events }), startOwn, (m) => m.panel.stop());
+  return { ...made, base: `http://127.0.0.1:${port}` };
 }
 
 const json = async (r: Response) => (await r.json()) as Record<string, unknown>;
@@ -164,7 +169,7 @@ describe('panel over HTTP', () => {
       expect(m.headers.get('content-type')).toBe('text/javascript; charset=utf-8');
       code += await m.text();
     }
-    for (const marker of ['/map.json?', "'/api/marks'", "'/api/state?lite=1'", "'/api/cmd'", "'/api/stream'"]) expect(code).toContain(marker);
+    for (const marker of ["'/api/map/tiles'", '/api/marks?', '/tex/', "'/api/state?lite=1'", "'/api/cmd'", "'/api/stream'"]) expect(code).toContain(marker);
     expect(code).not.toMatch(/:\s*(string|number|boolean)\b[,)=]/); // the types are stripped
   });
 
@@ -209,10 +214,29 @@ describe('panel over HTTP', () => {
     expect(s.icons).toBe(true);
   });
 
+  it('decision 0062: block textures /tex/<block>.png (16 x 16 top face) behind the token, the same name rules, 404 without art', async () => {
+    const { base } = await startSeparate(TOKEN);
+    const auth = { authorization: `Bearer ${TOKEN}` };
+    expect((await fetch(`${base}/tex/stone.png`)).status).toBe(401);
+    for (const name of ['stone', 'grass_block', 'water']) {
+      const r = await fetch(`${base}/tex/${name}.png`, { headers: auth });
+      expect([name, r.status]).toEqual([name, 200]);
+      expect(r.headers.get('content-type')).toBe('image/png');
+      expect(r.headers.get('cache-control')).toMatch(/^private, max-age=86400/);
+      const png = decodePng(Buffer.from(await r.arrayBuffer()));
+      expect([png.w, png.h]).toEqual([16, 16]);
+    }
+    const none = await fetch(`${base}/tex/no_such_block.png`, { headers: auth });
+    expect(none.status).toBe(404);
+    expect(none.headers.get('cache-control')).toMatch(/max-age=300/);
+    expect(await json(none)).toEqual({ error: 'no texture for this block' });
+    for (const bad of ['Stone', '..%2f..%2fpackage', 'oak-log', 'x'.repeat(65)]) expect((await fetch(`${base}/tex/${bad}.png`, { headers: auth })).status).toBe(404);
+    expect((await fetch(`${base}/tex/stone.png`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: '{}' })).status).toBe(405);
+  });
+
   it('without the pictures (package missing): no route, state.icons false', async () => {
-    const made = makePanel({ port: 0, icons: null });
-    expect(await made.panel.start(undefined)).toBe(true);
-    const base = made.panel.urls()[0]!.replace(/\/$/, '');
+    const { server: made, port } = await onFetchablePort(() => makePanel({ port: 0, icons: null }), startOwn, (m) => m.panel.stop());
+    const base = `http://127.0.0.1:${port}`;
     expect((await fetch(`${base}/icons/iron_sword.png`)).status).toBe(404);
     expect(made.panel.state().icons).toBe(false);
   });
@@ -255,7 +279,7 @@ describe('panel over HTTP', () => {
     expect((await fetch(`${base}/api/jobs`, { headers: auth })).status).toBe(200);
     const s = await openSse(`${base}/api/stream`, auth);
     try {
-      expect((JSON.parse((await s.next('hello')).data) as { topics: string[] }).topics).toEqual(['state', 'events', 'jobs']);
+      expect((JSON.parse((await s.next('hello')).data) as { topics: string[] }).topics).toEqual(['state', 'events', 'map', 'map-live', 'jobs']); // decision 0062: the map's topics
       interface Lite {
         lite: boolean;
         settings: { key: string; value: string; source: string }[];
@@ -315,8 +339,9 @@ describe('panel over HTTP', () => {
     const { panel } = makePanel({ healthPort: 1, token: TOKEN });
     expect(panel.plan.mode).toBe('shared');
     expect(panel.healthOptions.host).toBe('127.0.0.1');
-    health = new HealthServer({ port: 0, metrics: new Metrics(), log: silentLogger, ...panel.healthOptions });
-    const port = await health.start();
+    const started = await onFetchablePort(() => new HealthServer({ port: 0, metrics: new Metrics(), log: silentLogger, ...panel.healthOptions }), (s) => s.start(), (s) => s.stop());
+    health = started.server;
+    const port = started.port;
     expect(await panel.start(health)).toBe(true);
     const base = `http://127.0.0.1:${port}`;
     expect((await fetch(`${base}/metrics`)).status).toBe(401);

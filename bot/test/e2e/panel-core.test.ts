@@ -13,7 +13,7 @@
 // Needs BDS_E2E=1 and bds-core with the truth pack (`node scripts/bds.mjs --profile core up` and `... pack`).
 import { randomInt } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PANEL_BUDGETS } from '../../src/health/panel/budgets.ts';
@@ -53,12 +53,14 @@ describe.skipIf(!E2E)('core: LAN control panel (Track AE)', () => {
     truth = new PveTruth(observer.conn, CORE_CONTAINER);
     await truth.tp(observer.name, { x: HOME.x + 0.5, y: FEET_Y, z: HOME.z - 24 + 0.5 }, 0, 0);
     await clearArea(truth, HOME, 12, 4);
-    // the child inherits these: the token, and a world cache in a temporary directory (Track AP: the memory block), never under the user's config directory
+    // the child inherits these: the token, and a world cache in a temporary directory (Track AP: the memory block), never under the user's config directory;
+    // decision 0062: a config file there too, so `!wp set panel` writes <tmp>/waypoints/, not the user's waypoints
     process.env.BEDROCKBOT_PANEL_TOKEN = TOKEN;
     cacheDir = mkdtempSync(join(tmpdir(), 'bot-e2e-panel-cache-'));
+    writeFileSync(join(cacheDir, 'config.json'), '{}\n');
     process.env.BEDROCKBOT_CACHE_DIR = cacheDir;
     delete process.env.BEDROCKBOT_CACHE;
-    cli = startCli(['--walk', '--health-port', String(PORT)]);
+    cli = startCli(['--walk', '--health-port', String(PORT), '--config', join(cacheDir, 'config.json')]);
     delete process.env.BEDROCKBOT_PANEL_TOKEN;
     delete process.env.BEDROCKBOT_CACHE_DIR;
     await waitOnline(truth, cli.name);
@@ -110,7 +112,7 @@ describe.skipIf(!E2E)('core: LAN control panel (Track AE)', () => {
     const page = await fetch(`${BASE}/`, { headers: { cookie } });
     expect(page.status).toBe(200);
     const html = await page.text();
-    for (const m of ['<title>BedrockBot panel</title>', 'id="panel-status"', 'id="cmdform"', 'data-cmd="!home go"', 'data-key="guardRadius"', 'id="panel-map"', cli!.name]) expect(html).toContain(m);
+    for (const m of ['<title>BedrockBot panel</title>', 'id="panel-status"', 'id="cmdform"', 'data-cmd="!home go"', 'data-key="guardRadius"', 'id="mapscreen"', cli!.name]) expect(html).toContain(m);
     expect(html).not.toContain(TOKEN);
     expect((await fetch(`${BASE}/map`, { headers: { cookie } })).status).toBe(200);
     measurements.push(`page: ${html.length} bytes`);

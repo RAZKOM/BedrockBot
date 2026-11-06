@@ -218,15 +218,18 @@ const off = events.subscribe((e) => send({ ...e, text: formatEvent(e) })); // ev
 ```
 
 The listener runs synchronously inside `emit` (keep it cheap; a throw is caught and logged once).
-Wiring the panel's push topic (Track PA's topic hub) is a few lines in `health/panel/index.ts`:
+The panel's push channel (decision 0061, docs/panel.md "Add a topic") is wired this way:
+`health/panel/index.ts` registers the `events` topic on its StreamHub and subscribes to the bus, so
+every new event goes to every page that streams the topic, with its display text:
 
 ```ts
-const offEvents = events.subscribe((e) => hub.publish('events', { ...e, text: formatEvent(e) }));
-unsubs.push(offEvents);
+const eventsTopic = hub.topic(EVENTS_TOPIC, { kind: 'event', budget: PANEL_BUDGETS.event });
+unsubs.push(events.subscribe((e) => eventsTopic.publish({ ...e, text: formatEvent(e) })));
 ```
 
-A client that connects late asks `GET /api/events?since=<last id it has>` once and then follows the
-topic; ids are increasing across restarts, so a gap is visible.
+A page joins it with `page.listen('events', fn)` (`GET /api/stream?topics=state,events`). A page that
+connects late asks `GET /api/events?since=<last id it has>` once and then follows the topic; ids
+increase across restarts, so a gap shows.
 
 ## Storage
 

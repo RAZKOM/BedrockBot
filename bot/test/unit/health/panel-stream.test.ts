@@ -10,7 +10,7 @@ import { applyDelta, type DeltaOp, type Json } from '../../../src/health/panel/c
 import { parseEventId, StreamHub } from '../../../src/health/panel/stream.ts';
 import { HEARTBEAT_EVENT, HELLO_EVENT, STATE_TOPIC, type StreamHello } from '../../../src/health/panel/shared.ts';
 import { silentLogger } from '../../../src/log.ts';
-import { FETCH_BAD_PORTS, openSse, type SseStream } from './panel-sse.ts';
+import { onFetchablePort, openSse, type SseStream } from './panel-sse.ts';
 
 const servers: HealthServer[] = [];
 const streams: SseStream[] = [];
@@ -23,13 +23,17 @@ afterEach(async () => {
 
 async function serve(hub: StreamHub): Promise<string> {
   hubs.push(hub);
-  for (;;) {
-    const server = new HealthServer({ port: 0, metrics: new Metrics(), log: silentLogger });
-    server.use(hub.route());
-    servers.push(server);
-    const port = await server.start();
-    if (!FETCH_BAD_PORTS.has(port)) return `http://127.0.0.1:${port}`;
-  }
+  const { server, port } = await onFetchablePort(
+    () => {
+      const s = new HealthServer({ port: 0, metrics: new Metrics(), log: silentLogger });
+      s.use(hub.route());
+      return s;
+    },
+    (s) => s.start(),
+    (s) => s.stop(),
+  );
+  servers.push(server);
+  return `http://127.0.0.1:${port}`;
 }
 
 async function sse(url: string, headers: Record<string, string> = {}): Promise<SseStream> {

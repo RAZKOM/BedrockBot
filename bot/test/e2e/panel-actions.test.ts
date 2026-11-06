@@ -13,13 +13,14 @@
 // Env: PANEL_ACTIONS_E2E_PORT (default a random port in 9650..9659) plus core-truth.ts (CORE_BDS_*).
 // Needs BDS_E2E=1 and bds-core with the truth pack (`node scripts/bds.mjs --profile core up` and `... pack`).
 import { randomInt } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { MapJson } from '../../src/health/map/schema.ts';
 import { PANEL_BUDGETS } from '../../src/health/panel/budgets.ts';
-import { cellActions, mapActions, settingActions, stackActions, type MenuAction } from '../../src/health/panel/menu.ts';
+import { pointActions } from '../../src/health/panel/client/mapdefs.ts';
+import { cellActions, settingActions, stackActions, type MenuAction } from '../../src/health/panel/menu.ts';
 import type { PanelState } from '../../src/health/panel/state.ts';
 import { centre, clearArea, connectPlayer, CORE_CONTAINER, E2E, FEET_Y, hdist, prepareServer, privateArea, sleep, startCli, until, waitOnline, type CoreCli } from './core-truth.ts';
 import { PveTruth } from './pve-truth.ts';
@@ -51,6 +52,10 @@ function action(menu: MenuAction[], id: string): MenuAction {
   expect(a, `menu offers ${id}: ${JSON.stringify(menu.map((x) => x.id))}`).toBeDefined();
   return a!;
 }
+
+/** The map screen's block actions for column (x, z) with surface y `sy` (decision 0062: mapdefs.ts, what the sheet offers). */
+const mapActions = (x: number, z: number, sy: number | null, botY: number | null): MenuAction[] =>
+  pointActions({ x: Math.floor(x), z: Math.floor(z), y: sy, block: null, bot: botY === null ? null : { x, y: botY, z }, elytra: false });
 
 /** A reply that may come after the POST returned (async commands reply later): the panel chat. */
 async function replyLike(re: RegExp, sinceTs: number, timeoutMs = 10_000): Promise<string> {
@@ -84,9 +89,10 @@ describe.skipIf(!E2E)('core: control panel actions (Track AR)', () => {
     await clearArea(truth, HOME, 14, 4);
     process.env.BEDROCKBOT_PANEL_TOKEN = TOKEN;
     cacheDir = mkdtempSync(join(tmpdir(), 'bot-e2e-panel-act-cache-'));
+    writeFileSync(join(cacheDir, 'config.json'), '{}\n'); // decision 0062: the waypoints go to <tmp>/waypoints/, not the user's
     process.env.BEDROCKBOT_CACHE_DIR = cacheDir; // the map's tiles and markers, never under the user's config directory
     delete process.env.BEDROCKBOT_CACHE;
-    cli = startCli(['--walk', '--health-port', String(PORT)]);
+    cli = startCli(['--walk', '--health-port', String(PORT), '--config', join(cacheDir, 'config.json')]);
     delete process.env.BEDROCKBOT_PANEL_TOKEN;
     delete process.env.BEDROCKBOT_CACHE_DIR;
     await waitOnline(truth, cli.name);
@@ -124,7 +130,7 @@ describe.skipIf(!E2E)('core: control panel actions (Track AR)', () => {
     const lite = await fetch(`${BASE}/api/state?lite=1`, { headers: AUTH }).then((r) => r.text());
     expect(lite.length).toBeLessThan(24_000);
     const marks = (await fetch(`${BASE}/api/marks`, { headers: AUTH }).then((r) => r.json())) as { chests: unknown[]; herds: unknown[] };
-    expect(marks).toEqual({ chests: expect.any(Array) as unknown[], herds: expect.any(Array) as unknown[] });
+    expect(marks).toMatchObject({ chests: expect.any(Array) as unknown[], herds: expect.any(Array) as unknown[] }); // decision 0062: plus `blocks` (spawners, beds, ...) when the bot has a cache
     measurements.push(`page ${html.length} bytes, ?lite=1 ${lite.length} bytes, /api/marks ${JSON.stringify(marks).length} bytes`);
   });
 

@@ -26,13 +26,16 @@ import type { WalkingTask } from '../../tasks/registry.ts';
 import { flyControlOf } from '../../chat/commands-fly.ts'; // Track AU
 import type { ChatLine } from '../../chat/text.ts';
 import type { WorldCache } from '../../world/cache/cache.ts';
-import { mapRoutes, type HealthRoute } from '../map/routes.ts';
+import { mapRoutes, mapSource, type HealthRoute } from '../map/routes.ts';
+import { MapBuilder } from '../map/data.ts'; // decision 0062: the map screen
+import { MapLive } from '../map/live.ts';
+import type { BlockColours } from './icons/colours.ts';
 import { isLoopbackInterface, panelAuth, RateLimiter } from './auth.ts';
 import { LogRing } from './logRing.ts';
 import { panelRoutes, type CommandResult } from './routes.ts';
 import { buildPanelHelp, buildPanelState, liteState, type PanelChatLine, type PanelState } from './state.ts'; // Track AM: buildPanelHelp; decision 0061: liteState for the stream
 import { buildMemory, chestRows, MEMORY_TTL_MS, type PanelMemory } from './memory.ts'; // Track AP
-import { mapMarks } from './marks.ts'; // Track AR
+import { mapMarks, marksWindow, MARKS_RADIUS } from './marks.ts'; // Track AR; decision 0062: a window and the block marks
 import { IconBook } from './icons/book.ts'; // decision 0046: the item pictures
 import { assetDir, FsAssets } from './icons/source.ts';
 import { eventRoutes } from '../../events/routes.ts'; // decision 0059: GET /api/events
@@ -137,6 +140,8 @@ export interface PanelDeps {
   icons?: IconBook | null;
   /** Decision 0061: where the `events` stream topic comes from; default the process's event bus (decision 0059). */
   events?: Pick<EventBus, 'subscribe'>;
+  /** Decision 0062: block colours and top-face textures of the map; default the installed package's (null: none). */
+  colours?: BlockColours | null;
 }
 
 export interface Panel {
@@ -157,6 +162,8 @@ export interface Panel {
   readonly hub: StreamHub;
   /** The state topic (a snapshot on connect, then deltas; sampled every STATE_SAMPLE_MS while a stream listens). */
   readonly stateTopic: Topic;
+  /** Decision 0062: the map screen's tiles, overlays and slices (topics `map`, `map-live`; /api/map/*); undefined while the panel is off. */
+  readonly map: MapLive | undefined;
   /** Add a route behind the panel's token (asked after the panel's own, before the health server's); works before or after start(). */
   use(route: HealthRoute): void;
 }
@@ -382,19 +389,38 @@ export function setupPanel(d: PanelDeps): Panel {
     },
   });
 
+  // ---- decision 0062: the map screen (docs/map.md): tiles over the `map` topic, overlays on `map-live`, /api/map/*
+  const mob = built.mobility;
+  const mapSrc = mapSource({
+    world: mob?.world,
+    cache: d.worldCache,
+    position: () => runningTask.position(),
+    skillsStatus: () => mob?.skills.status(),
+    taskStatus: () => runningTask.status(),
+    server: d.settings.server,
+    ...(d.colours !== undefined ? { colours: d.colours } : {}),
+  });
+  const colours = mapSrc.colours as BlockColours | null | undefined;
+  const map = plan.mode === 'off' ? undefined : new MapLive({ hub, builder: new MapBuilder(mapSrc), source: mapSrc, colours, log });
+
   const routes = panelRoutes({
     state,
     run,
     limiter: new RateLimiter(5, 1000),
     help: () => buildPanelHelp({ commands: () => chat.commandInfo(), settings: d.runtime }), // Track AM: Help tab
     chests: () => chestRows(cache()?.chests.all() ?? [], runningTask.position()), // Track AP: the memory block's list
-    marks: () => mapMarks(cache(), runningTask.position()), // Track AR: chests and herds on the panel's map
+    marks: (url) => {
+      // Track AR: chests and herds on the panel's map; decision 0062: the map's window and the block marks
+      const w = marksWindow(url);
+      return mapMarks(cache(), w?.origin ?? runningTask.position(), w?.radius ?? MARKS_RADIUS);
+    },
     ...(icons ? { icon: (name: string) => icons.png(name) } : {}), // decision 0046
+    ...(colours && typeof colours.texture === 'function' ? { tex: (name: string) => colours.texture(name) } : {}), // decision 0062
   });
   // decision 0061: one route list behind the token: the panel's own routes, the stream, whatever other
   // modules add with use() (docs/panel.md "Add a topic"), then the page's modules (/ui/<hash>/...)
   let modulesRoute: HealthRoute | undefined;
-  const routeList: HealthRoute[] = [routes, hub.route()];
+  const routeList: HealthRoute[] = [routes, hub.route(), ...(map ? [map.route()] : [])];
   const allRoutes: HealthRoute = (path, req, res) => {
     for (const r of routeList) if (r(path, req, res)) return true;
     return modulesRoute?.(path, req, res) ?? false;
@@ -409,6 +435,7 @@ export function setupPanel(d: PanelDeps): Panel {
     urls,
     hub,
     stateTopic,
+    map,
     use: (route) => {
       routeList.push(route);
     },
@@ -428,9 +455,8 @@ export function setupPanel(d: PanelDeps): Panel {
         health.use(eventRoutes()); // decision 0059
         boundPort = plan.port;
       } else {
-        const mob = built.mobility;
-        const map = mapRoutes({ world: mob?.world, cache: d.worldCache, position: () => runningTask.position(), skillsStatus: () => mob?.skills.status(), taskStatus: () => runningTask.status(), server: d.settings.server });
-        own = new HealthServer({ port: plan.port ?? 0, host: plan.host, metrics, alive: () => runningTask.alive?.() ?? true, log, routes: map, auth });
+        const debugMap = mapRoutes(mapSrc);
+        own = new HealthServer({ port: plan.port ?? 0, host: plan.host, metrics, alive: () => runningTask.alive?.() ?? true, log, routes: debugMap, auth });
         own.use(allRoutes);
         own.use(eventRoutes()); // decision 0059
         try {
@@ -447,6 +473,7 @@ export function setupPanel(d: PanelDeps): Panel {
     async stop() {
       logs.stop();
       hub.close(); // decision 0061: ends every stream
+      map?.stop(); // decision 0062
       if (pushT) clearTimeout(pushT);
       for (const u of unsubs.splice(0)) u(); // Track AP
       await own?.stop();

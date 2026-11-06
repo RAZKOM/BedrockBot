@@ -41,8 +41,8 @@ export interface MemorySource {
   seenMarks?(origin: Vec3, radius: number): CachedMark[];
 }
 
-const isLog = (n: string): boolean => (n.endsWith('_log') && !n.startsWith('stripped_')) || n === 'crimson_stem' || n === 'warped_stem';
-const isOre = (n: string): boolean => n.endsWith('_ore') || n === 'ancient_debris';
+export const isLog = (n: string): boolean => (n.endsWith('_log') && !n.startsWith('stripped_')) || n === 'crimson_stem' || n === 'warped_stem';
+export const isOre = (n: string): boolean => n.endsWith('_ore') || n === 'ancient_debris';
 
 
 /** Count what the bot remembers (any source may be missing: its counts are 0). */

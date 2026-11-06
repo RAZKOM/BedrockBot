@@ -8,8 +8,30 @@
 /** The page's poll of /api/state?lite=1 when the stream is not used (fallback), and while the tab is hidden. */
 export const POLL_MS = 2000;
 export const HIDDEN_POLL_MS = 10_000;
-/** The map section polls /map.json this often while it is open; /api/marks every 5th time. */
+/** Decision 0062: the map screen asks for its tiles this often only while the stream does not deliver (fallback). */
 export const MAP_POLL_MS = 2000;
+
+// ---- decision 0062: the map screen (docs/map.md) ------------------------------------------------------
+
+/** Stream topics of the map (health/map/live.ts): tile changes (event) and the overlays (state). */
+export const MAP_TOPIC = 'map';
+export const MAP_LIVE_TOPIC = 'map-live';
+/** Routes of the map screen (behind the token). */
+export const MAP_TILES_PATH = '/api/map/tiles';
+export const MAP_SLICE_PATH = '/api/map/slice';
+/** Largest window radius (chunks) of a tiles fetch and of a slice. */
+export const MAP_TILES_MAX_R = 16;
+export const MAP_SLICE_MAX_R = 8;
+/** A registered window lives this long after its last fetch; the page fetches (0 tiles when nothing changed) every WINDOW_TOUCH_MS. */
+export const WINDOW_TTL_MS = 120_000;
+export const WINDOW_TOUCH_MS = 45_000;
+/** The map's marks (chests, ores, beds ...) are fetched again this often while the map shows. */
+export const MARKS_REFRESH_MS = 15_000;
+/** Top-face textures: GET /tex/<block>.png (16 x 16). */
+export const TEX_PREFIX = '/tex/';
+/** localStorage keys: the view (map / cards), the map's overlays and layer. */
+export const VIEW_KEY = 'bbpanel-view';
+export const MAP_PREFS_KEY = 'bbpanel-map';
 /** A destructive menu action stays armed this long after the first tap. */
 export const CONFIRM_MS = 4000;
 /** localStorage keys: the quick buttons, the theme. */
@@ -59,4 +81,5 @@ export type { PanelState, PanelStateLite, PanelLink, PanelSetting, PanelChatLine
 export type { PanelItem, PanelInventory } from './inventory.ts';
 export type { PanelMarks } from './marks.ts';
 export type { PanelChestRow } from './memory.ts';
-export type { MapJson, MapTileJson } from '../map/schema.ts';
+export type { MapJson, MapTileJson, CompactTileJson, SliceTileJson } from '../map/schema.ts';
+export type { MapLiveJson } from '../map/data.ts';

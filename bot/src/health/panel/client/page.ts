@@ -25,4 +25,6 @@ export interface Page {
   refreshSoon(): void;
   /** Listen to another stream topic (docs/panel.md "Add a topic"; transport.ts `on`); call it in a card's setup. */
   listen(topic: string, fn: (data: string, id: string) => void): void;
+  /** Decision 0062: the page streams now (topics arrive); false = it polls, so a topic's data needs its own fallback. */
+  streaming(): boolean;
 }

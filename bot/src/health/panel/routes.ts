@@ -5,7 +5,8 @@
 //   GET  /ui/<hash>/* the page's browser modules (panel/assets.ts, decision 0061; mounted by index.ts)
 //   GET  /api/help    PanelHelp JSON (panel/state.ts buildPanelHelp), fetched once by the Help tab (Track AM)
 //   GET  /api/chests  the remembered containers (panel/memory.ts chestRows), the memory block's list (Track AP)
-//   GET  /api/marks  chests and herds near the bot (panel/marks.ts), the panel map's markers (Track AR)
+//   GET  /api/marks  chests and herds near the bot (panel/marks.ts), the panel map's markers (Track AR); decision 0062: ?cx=&cz=&r= a window, plus the block marks
+//   GET  /tex/<block>.png  decision 0062: the block's top face (16 x 16) for the map's closest zooms; 404 = the map keeps the colour
 //   GET  /icons/<item>.png  the item's picture for the inventory cells (panel/icons/, decision 0046); 404 = the cell keeps its glyph
 //   POST /api/cmd    {"text":"!wp set panel"} -> {"ok":true,"replies":[...]}; 5 per second (429 beyond)
 // The token check runs before these (HealthServerOptions.auth, panel/auth.ts).
@@ -30,10 +31,12 @@ export interface PanelRouteDeps {
   help?: () => unknown;
   /** Track AP: GET /api/chests (the remembered containers, panel/memory.ts chestRows). */
   chests?: () => unknown;
-  /** Track AR: GET /api/marks (panel/marks.ts mapMarks: chests and herds for the map). */
-  marks?: () => unknown;
+  /** Track AR: GET /api/marks (panel/marks.ts mapMarks: chests and herds for the map); decision 0062: the request URL (a window). */
+  marks?: (url?: string) => unknown;
   /** GET /icons/<item>.png: the item's picture (panel/icons/book.ts IconBook.png), undefined = no art for it (404). */
   icon?: (name: string) => Promise<Buffer | undefined>;
+  /** Decision 0062: GET /tex/<block>.png: the block's top face (panel/icons/colours.ts BlockColours.texture), undefined = no art (404). */
+  tex?: (name: string) => Promise<Buffer | undefined>;
 }
 
 /** Longest command line accepted (game chat is 512). */
@@ -41,6 +44,8 @@ export const MAX_COMMAND_LENGTH = 256;
 const MAX_BODY = 4096;
 /** `/icons/iron_sword.png`: an item name is lower-case words and digits (the namespace is left off). */
 const ICON_PATH = /^\/icons\/([a-z0-9_]{1,64})\.png$/;
+/** Decision 0062: `/tex/grass_block.png`, the same name rule as the icons. */
+const TEX_PATH = /^\/tex\/([a-z0-9_]{1,64})\.png$/;
 
 function send(res: ServerResponse, status: number, body: unknown, head = false): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -127,22 +132,25 @@ export function panelRoutes(deps: PanelRouteDeps): HealthRoute {
     }
     if (path === '/api/marks' && deps.marks && read) { // Track AR: chests and herds for the panel's map
       try {
-        send(res, 200, deps.marks(), method === 'HEAD');
+        send(res, 200, deps.marks(req.url), method === 'HEAD');
       } catch (e) {
         send(res, 500, { error: e instanceof Error ? e.message : String(e) });
       }
       return true;
     }
-    const icon = deps.icon && read ? ICON_PATH.exec(path) : null;
-    if (icon) {
-      deps.icon!(icon[1]!).then(
+    const pic = deps.icon && read ? ICON_PATH.exec(path) : null;
+    const tex = !pic && deps.tex && read ? TEX_PATH.exec(path) : null;
+    const name = (pic ?? tex)?.[1];
+    if (name) {
+      // a picture (an item icon, decision 0046; a block's top face, decision 0062): 200 cached a day, 404 five minutes, 500 not cached
+      (pic ? deps.icon! : deps.tex!)(name).then(
         (png) => {
           if (png) {
             res.writeHead(200, { 'content-type': 'image/png', 'content-length': png.length, 'cache-control': 'private, max-age=86400' });
             res.end(method === 'HEAD' ? undefined : png);
           } else {
             res.writeHead(404, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'private, max-age=300' });
-            res.end(method === 'HEAD' ? undefined : `${JSON.stringify({ error: 'no icon for this item' })}\n`);
+            res.end(method === 'HEAD' ? undefined : `${JSON.stringify({ error: pic ? 'no icon for this item' : 'no texture for this block' })}\n`);
           }
         },
         (e: unknown) => {

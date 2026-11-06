@@ -1,8 +1,5 @@
 // Debug map (PLAN.md task 7.15, Track T): /map.json against its zod schema, tiles, incremental
 // updates (since / win), status shapes (path, goal, home, waypoints), and the routes on the health server.
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { HealthServer } from '../../../src/connection/health.ts';
 import { asWaypoints, buildWithColours, MapBuilder, parseMapQuery, type MapColourSource } from '../../../src/health/map/data.ts';
@@ -10,54 +7,10 @@ import { mapDecodeTile, mapDescribe } from '../../../src/health/map/paint.ts';
 import { MAP_PAGE } from '../../../src/health/map/page.ts';
 import { mapRoutes } from '../../../src/health/map/routes.ts';
 import { MapJsonSchema } from '../../../src/health/map/schema.ts';
-import { silentLogger } from '../../../src/log.ts';
-import { WorldCache } from '../../../src/world/cache/index.ts';
-import { World } from '../../../src/world/index.ts';
-import { encodeSubChunk, fillSection, readyRegistry, recordedLogin, ReplaySource } from '../world/helpers.ts';
+import { onFetchablePort } from '../health/panel-sse.ts';
+import { cleanMapWorlds, rid, world3x3 } from './map-world.ts'; // shared with map-live.test.ts (decision 0062)
 
-const dirs: string[] = [];
-afterEach(() => {
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
-});
-
-const reg = readyRegistry();
-const rid = (name: string): number => reg.runtimeIdOf(reg.stateIdOf(name)!);
-
-function world3x3() {
-  const src = new ReplaySource();
-  const world = new World(src, { logger: silentLogger, defer: (fn) => fn() });
-  const { startGame, itemRegistry } = recordedLogin();
-  src.emit('start_game', startGame);
-  src.emit('item_registry', itemRegistry as unknown as Record<string, unknown>);
-  src.emit('network_chunk_publisher_update', { coordinates: { x: 8, y: 0, z: 8 }, radius: 32, saved_chunks: [] });
-  const dir = mkdtempSync(join(tmpdir(), 'bb-map-'));
-  dirs.push(dir);
-  const cache = new WorldCache({ dir, flushIntervalMs: 0, logger: silentLogger });
-  cache.attach(world);
-  const stone = rid('stone');
-  const water = rid('water');
-  for (let cx = -1; cx <= 1; cx++) {
-    for (let cz = -1; cz <= 1; cz++) {
-      src.emit('level_chunk', { x: cx, z: cz, dimension: 0, sub_chunk_count: 0, highest_subchunk_count: 1, cache_enabled: false, blobs: [], payload: Buffer.alloc(0) });
-      const sec = fillSection((x, y) => (y < 15 ? stone : cx === 1 && x < 4 ? water : stone));
-      src.emit('subchunk', { cache_enabled: false, dimension: 0, origin: { x: cx, y: -4, z: cz }, entries: [{ dx: 0, dy: 0, dz: 0, result: 'success', payload: encodeSubChunk([sec], { y: -4 }) }] });
-    }
-  }
-  world.self.pos = { x: 4.5, y: -48, z: 4.5 };
-  world.entityTracker.entities.set(5n, {
-    runtimeId: 5n,
-    uniqueId: 5n,
-    type: 'minecraft:zombie',
-    pos: { x: 10, y: -48, z: 3 },
-    vel: { x: 0, y: 0, z: 0 },
-    yaw: 0,
-    pitch: 0,
-    headYaw: 0,
-    onGround: true,
-    updatedAt: 0,
-  });
-  return { src, world, cache };
-}
+afterEach(cleanMapWorlds);
 
 describe('/map.json', () => {
   it('validates against the schema with tiles, bot, entities, path, goal, home and waypoints', () => {
@@ -211,8 +164,7 @@ describe('/map routes on the health server', () => {
   it('serves the page and the JSON next to /healthz', async () => {
     const { world, cache } = world3x3();
     const metrics = { snapshot: () => ({ state: 'spawned', uptimeS: 1, rates: { correctionsPerMin: 0 }, reconnects: 0, kicks: { byReason: {} }, counters: {}, gameVersion: 'x' }) };
-    const server = new HealthServer({ port: 0, metrics: metrics as never, routes: mapRoutes({ world, cache, server: 'test' }) });
-    const port = await server.start();
+    const { server, port } = await onFetchablePort(() => new HealthServer({ port: 0, metrics: metrics as never, routes: mapRoutes({ world, cache, server: 'test' }) }), (s) => s.start(), (s) => s.stop());
     try {
       const page = await fetch(`http://127.0.0.1:${port}/map`);
       expect(page.status).toBe(200);

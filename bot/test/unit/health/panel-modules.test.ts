@@ -75,8 +75,8 @@ describe('panel browser modules (decision 0061)', () => {
     expect(bad).toEqual([]);
   });
 
-  it('the server imports only the pure client modules (delta.ts, menu.ts); those import no dom.ts', () => {
-    const pure = new Set(['delta.ts', 'menu.ts']);
+  it('the server imports only the pure client modules (delta.ts, menu.ts, paint.ts, mapdefs.ts); those import no dom.ts', () => {
+    const pure = new Set(['delta.ts', 'menu.ts', 'paint.ts', 'mapdefs.ts']); // decision 0062: the painting and the map's registries
     const bad: string[] = [];
     for (const p of allTs(SRC)) {
       if (p.startsWith(CLIENT + sep)) continue;
@@ -89,7 +89,7 @@ describe('panel browser modules (decision 0061)', () => {
       }
     }
     expect(bad).toEqual([]);
-    for (const f of pure) expect(sourceImports(read(join(CLIENT, f))).filter((s) => s !== '../shared.ts')).toEqual([]);
+    for (const f of pure) expect(sourceImports(read(join(CLIENT, f))).filter((s) => s !== '../shared.ts' && !pure.has(s.replace(/^\.\//, '')))).toEqual([]); // each other and shared.ts only
   });
 
   it('every module is reachable from the entry, and loading them gives the import graph', () => {

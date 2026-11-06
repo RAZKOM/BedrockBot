@@ -37,6 +37,32 @@ export const MapTileSchema = z.object({
   u: z.object({ s: b64(256), sy: b64(512), f: b64(256).optional(), d: b64(256).optional() }).optional(),
 });
 
+/**
+ * Decision 0062 (docs/map.md "Wire"): the compact tile of the map screen (GET /api/map/tiles and the
+ * `map` stream topic). The same fields as a /map.json tile, except: `p` indexes the panel's global
+ * palette (sent once per client), the heights are `yb` + `y8` (256 x u8 offsets from yb, 255 = nothing)
+ * when the tile's range fits (else `y` as before), and the surface y is `sd` (256 x int8, sy - y) when
+ * every offset fits (else `sy` as before).
+ */
+export const CompactTileSchema = MapTileSchema.omit({ y: true }).extend({
+  y: b64(512).optional(),
+  yb: int.optional(),
+  y8: b64(256).optional(),
+  sd: b64(256).optional(),
+});
+
+/** Decision 0062: one tile of a Y-slice (GET /api/map/slice): the class of every column at `y`; loaded columns also the block name (`n`, u8 into `p`, 255 = none). */
+export const SliceTileSchema = z.object({
+  cx: int,
+  cz: int,
+  live: z.boolean(),
+  updatedAt: num,
+  y: int,
+  c: b64(64),
+  n: b64(256).optional(),
+  p: z.array(int.nonnegative()).max(255).optional(),
+});
+
 /** Track PC: a block name of the response and its map colour (`#rrggbb`), null when there is no art for it (draw the class colour). */
 export const MapPaletteEntrySchema = z.object({ name: z.string().min(1).max(64), rgb: z.string().regex(/^#[0-9a-f]{6}$/).nullable() });
 
@@ -105,3 +131,5 @@ export type MapJson = z.infer<typeof MapJsonSchema>;
 export type MapTileJson = z.infer<typeof MapTileSchema>;
 export type MapEntityJson = z.infer<typeof MapEntitySchema>;
 export type MapPaletteEntry = z.infer<typeof MapPaletteEntrySchema>;
+export type CompactTileJson = z.infer<typeof CompactTileSchema>;
+export type SliceTileJson = z.infer<typeof SliceTileSchema>;

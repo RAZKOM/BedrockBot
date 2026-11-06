@@ -75,22 +75,6 @@ export function cellActions(key: string, it: PanelItem | null, inv: Pick<PanelIn
   return out;
 }
 
-/** Actions for map column x z: sy = its surface y (null = unknown: the bot's y is used for walking). */
-export function mapActions(x: number, z: number, sy: number | null | undefined, botY?: number | null): MenuAction[] {
-  x = Math.floor(x);
-  z = Math.floor(z);
-  const known = sy !== null && sy !== undefined && sy > -32768;
-  const fy = known ? sy + 1 : botY === null || botY === undefined ? null : Math.floor(botY);
-  if (fy === null) return [];
-  const at = `${x} ${fy} ${z}`;
-  return [
-    { id: 'walk', label: `Walk here${known ? '' : ' (height unknown)'}`, cmd: `!goto ${at}` },
-    { id: 'home', label: 'Set home here', cmd: `!home set ${at}`, confirm: true },
-    { id: 'shelter', label: 'Set shelter here', cmd: `!shelter set ${at}`, confirm: true },
-    { id: 'wp', label: 'Set waypoint here...', cmd: `!wp set {name} ${at}`, prompt: 'waypoint name (a-z 0-9 _ -)' },
-  ];
-}
-
 /** A waypoint name as !wp takes it (1..32 of a-z 0-9 _ -), or null. */
 export function wpName(s: string | null | undefined): string | null {
   const t = String(s ?? '').trim().toLowerCase();

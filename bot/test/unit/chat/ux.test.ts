@@ -4,14 +4,12 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { Chat } from '../../../src/chat/chat.ts';
-import { registerBuiltinCommands, registerHardeningCommands } from '../../../src/chat/commands.ts';
 import { FRONT_DOOR, frontHelp, hintFor, splitHelp, type HintFacts } from '../../../src/chat/help.ts';
 import { MAX_WIRE, strip, wireSize } from '../../../src/chat/style.ts';
 import { applyMode, currentMode, MODE_KEYS, modeCommand, modeLine, modeValues } from '../../../src/chat/modes.ts';
 import { attachWelcome, welcomeLines, welcomeVersion } from '../../../src/chat/welcome.ts';
 import type { Connection } from '../../../src/connection/connection.ts';
-import { Metrics } from '../../../src/connection/metrics.ts';
-import { RuntimeSettings, SETTING_DEFS, SETTINGS_VALUE_KEY } from '../../../src/config/settings.ts';
+import { RuntimeSettings, SETTING_DEFS } from '../../../src/config/settings.ts';
 import { panelRoutes } from '../../../src/health/panel/routes.ts';
 import { buildPanelHelp, type PanelHelp } from '../../../src/health/panel/state.ts';
 import { silentLogger } from '../../../src/log.ts';
@@ -20,40 +18,8 @@ import { parsePlan } from '../../../src/nl/plan.ts';
 import { buildSystemPrompt, EXAMPLES } from '../../../src/nl/prompt.ts';
 import { lookup, unknownReply } from '../../../src/skills/items/catalog.ts';
 import { GET_PROCESSES } from '../../../src/chat/commands-get.ts';
-import type { CommonTaskOptions, TaskContext } from '../../../src/tasks/base.ts';
-import { createMobility, type Mobility } from '../../../src/tasks/mobility.ts';
-import { WorldClock } from '../../../src/tasks/night.ts';
-import { afkTask } from '../../../src/tasks/registry.ts';
-import { RespawnController } from '../../../src/tasks/respawn.ts';
-import { setup as connSetup } from '../connection-fakes.ts';
+import { afkChat } from './afk-chat.ts'; // shared with the map screen's guard test (decision 0062)
 import { context as nlContext, makeFrontEnd, standardCommands } from '../nl/helpers.ts';
-
-/** The afk task with walking, plus the CLI's built-ins and hardening commands (index.ts order). */
-function afkChat(settings = new RuntimeSettings()) {
-  const { conn } = connSetup();
-  const chat = new Chat(conn, { log: silentLogger });
-  let m: Mobility | undefined;
-  const COMMON: CommonTaskOptions = { nudgeIntervalS: 240, heartbeat: false, home: undefined, shelter: undefined, walk: true, respawnDelayMs: 2000 };
-  const ctx: TaskContext = {
-    name: 'afk',
-    conn,
-    metrics: new Metrics(),
-    chat,
-    log: silentLogger,
-    version: '1.26.60',
-    options: COMMON,
-    values: { [SETTINGS_VALUE_KEY]: settings },
-    taskConfig: {},
-    logger: () => silentLogger,
-    respawn: () => new RespawnController(conn),
-    mobility: () => (m ??= createMobility(conn, { version: '1.26.60' })),
-    clock: () => new WorldClock(conn),
-  };
-  const task = afkTask.create(ctx);
-  registerBuiltinCommands(chat, { conn, metrics: new Metrics(), position: () => undefined, quit: () => undefined });
-  registerHardeningCommands(chat, { health: () => ({ health: 20, deaths: 0, dead: false, healthy: true }), position: () => undefined });
-  return { chat, task, settings };
-}
 
 /** A Chat on a fake spawned connection; `sent` collects the chat packets' text. */
 function bareChat(maxReplyLength = 256) {

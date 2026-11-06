@@ -6,9 +6,12 @@ import { describe, expect, it } from 'vitest';
 import { averageColour, BlockColours, CLASS_FALLBACK, fallbackColour, firstStateModel, hexColour, installedBlockColours, javaBlockName, mapTint, topTexture, WATER_TINT } from '../../../src/health/panel/icons/colours.ts';
 import { GRASS } from '../../../src/health/panel/icons/names.ts';
 import { resolveModel, type RawModel } from '../../../src/health/panel/icons/models.ts';
-import { encodePng } from '../../../src/health/panel/icons/png.ts';
+import { decodePng, encodePng } from '../../../src/health/panel/icons/png.ts';
 import { assetDir, type AssetSource } from '../../../src/health/panel/icons/source.ts';
-import { mapClassColour, mapDecodeTile, mapDescribe, mapHexRgb, mapLayerFor, mapPixels, mapRelief, mapWaterShade, PAINT_JS } from '../../../src/health/map/paint.ts';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import { mapClassColour, mapDecodeTile, mapDescribe, mapFade, mapHexRgb, mapLayerFor, mapPixels, mapRelief, mapWaterShade, MAP_PALE, PAINT_JS, PAINT_MODULE, paintScript } from '../../../src/health/map/paint.ts';
+import type { CompactTileJson } from '../../../src/health/map/schema.ts';
 import type { MapTileJson } from '../../../src/health/map/schema.ts';
 
 /** A 2 x 2 RGBA texture. */
@@ -76,6 +79,18 @@ describe('block colours: the average', () => {
     const n = reads;
     expect(await c.colour('redstuff')).toBe(0xc80a0a);
     expect(reads).toBe(n);
+    // decision 0062: the top face as a 16 x 16 PNG (scaled up from the 1 x 1 art, tinted like the colour), cached; none without art
+    const face = await c.texture('redstuff');
+    const r = decodePng(face!);
+    expect([r.w, r.h]).toEqual([16, 16]);
+    expect(Array.from(r.data.subarray(15 * 64 + 60, 15 * 64 + 64))).toEqual([200, 10, 10, 255]);
+    const w = decodePng((await c.texture('water'))!);
+    expect(Array.from(w.data.subarray(0, 3))).not.toEqual([200, 200, 200]); // the water tint
+    expect(await c.texture('no_such_block')).toBeUndefined();
+    const before = reads;
+    expect(await c.texture('redstuff')).toBe(face);
+    expect(await c.texture('no_such_block')).toBeUndefined();
+    expect(reads).toBe(before);
     expect(CLASS_FALLBACK).toHaveLength(4);
     expect(fallbackColour(2)).toBe(CLASS_FALLBACK[2]);
     expect(fallbackColour(9)).toBe(CLASS_FALLBACK[1]);
@@ -132,8 +147,45 @@ const PAL = [{ name: 'stone', rgb: '#808080' }, { name: 'water', rgb: '#2040c0' 
 const px = (p: Uint8ClampedArray, x: number, z: number) => Array.from(p.subarray((z * 16 + x) * 4, (z * 16 + x) * 4 + 3));
 
 describe('map painting (PAINT_JS)', () => {
-  it('is plain JavaScript the page embeds (no backticks, no template holes, no imports)', () => {
-    expect(PAINT_JS).not.toMatch(/`|\$\{|\bimport\b|\brequire\(/);
+  it('decision 0062: PAINT_JS is the shared module as a classic script (types, imports and export keywords gone) and paints the same pixels', () => {
+    expect(PAINT_JS).toBe(paintScript(readFileSync(PAINT_MODULE, 'utf8')));
+    expect(PAINT_JS).not.toMatch(/^\s*(import|export)\s/m);
+    expect(PAINT_JS).not.toMatch(/<\/script/i);
+    expect(PAINT_JS).not.toMatch(/\bwindow\b|\bdocument\b|\batob\(/); // runs anywhere: base64 decoded by the module
+    interface Api {
+      mapDecodeTile: typeof mapDecodeTile;
+      mapPixels: typeof mapPixels;
+    }
+    const api = runInNewContext(`${PAINT_JS}\n;({ mapDecodeTile, mapPixels });`) as Api; // what the /map page runs, in a fresh context
+    const t = tile({ ys: (z) => 60 + z, name: (x) => (x < 4 ? 1 : 0), liquid: true });
+    expect(Array.from(api.mapPixels(api.mapDecodeTile(t, PAL), 'block', 'auto', null, 0))).toEqual(Array.from(mapPixels(mapDecodeTile(t, PAL), 'block', 'auto', null, 0)));
+  });
+
+  it('decision 0062: the compact tile (yb + y8 heights, sd surface offsets) decodes to the same tile as the /map.json form', () => {
+    const legacy = tile({ ys: (z) => 60 + z, name: (x) => (x < 4 ? 1 : 0), liquid: true });
+    const y8 = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) y8[i] = i >> 4;
+    y8[17] = 255; // one column with nothing recorded
+    const sd = new Int8Array(256).fill(-2);
+    const compact: CompactTileJson = { ...legacy, y: undefined, yb: 60, y8: b64(y8), sd: b64(new Uint8Array(sd.buffer)) };
+    const a = mapDecodeTile(legacy, PAL);
+    const b = mapDecodeTile(compact, PAL);
+    expect(b.ys[16]).toBe(61);
+    expect(b.ys[17]).toBe(-32768);
+    expect(b.top!.y[16]).toBe(59); // 61 - 2
+    expect(b.top!.names).toEqual(a.top!.names);
+    expect(b.top!.depth).toEqual(a.top!.depth);
+  });
+
+  it('decision 0062: the freshness fade (live 0; remembered 0.25 + 0.35 x (1 - 2^(-age / 24 h)), at most 0.6)', () => {
+    const now = 1_800_000_000_000;
+    const h = 3_600_000;
+    expect(mapFade(true, now - 100 * h, now)).toBe(0);
+    expect(mapFade(false, now, now)).toBeCloseTo(0.25, 6);
+    expect(mapFade(false, now - 24 * h, now)).toBeCloseTo(0.425, 6);
+    expect(mapFade(false, now - 48 * h, now)).toBeCloseTo(0.5125, 6);
+    expect(mapFade(false, now - 10_000 * h, now)).toBeCloseTo(0.6, 6);
+    expect(mapFade(false, now - h, undefined)).toBe(0.25); // no clock (the old call shape)
   });
 
   it('relief: darker when the north neighbour is higher, lighter when lower, the same when equal or unknown', () => {
@@ -159,7 +211,7 @@ describe('map painting (PAINT_JS)', () => {
     expect(px(mapPixels(g, 'block', 'auto', null), 0, 4)).toEqual([138, 138, 128]);
   });
 
-  it('shades liquids by depth, dims remembered tiles, and keeps the class view of before', () => {
+  it('shades liquids by depth, pales remembered tiles, and keeps the class view of before', () => {
     const dec = mapDecodeTile(tile({ name: (x) => (x < 12 ? 1 : 0), liquid: true }), PAL);
     const p = mapPixels(dec, 'block', 'auto', null);
     expect(px(p, 0, 0)).toEqual([0x20, 0x40, 0xc0].map((v) => Math.round(v * (255 / 220)))); // depth 0 (x) -> shallow
@@ -168,8 +220,9 @@ describe('map painting (PAINT_JS)', () => {
     expect(mapDescribe(dec, 'auto', 13)).toBe('stone, y 64');
     const cls = mapPixels(dec, 'class', 'auto', null);
     expect(px(cls, 13, 0)).toEqual(mapClassColour(1, 64));
+    // decision 0062: a remembered tile is paled toward MAP_PALE by its fade (0.25 without a clock), not dimmed
     const dim = mapPixels(mapDecodeTile(tile({ live: false }), PAL), 'block', 'auto', null);
-    expect(px(dim, 2, 2)).toEqual([0x80, 0x80, 0x80].map((v) => Math.round(v * 0.55)));
+    expect(px(dim, 2, 2)).toEqual(MAP_PALE.map((v) => Math.round(0x80 * 0.75 + v * 0.25)));
   });
 
   it('tiles without surface data (old records) draw by class in both views', () => {

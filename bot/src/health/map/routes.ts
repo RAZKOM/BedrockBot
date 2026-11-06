@@ -29,12 +29,22 @@ export function liftTaskStatus(s: unknown): unknown {
 /** Track PC: /map.json bodies at least this long are gzipped for clients that accept it. */
 export const GZIP_MIN = 4096;
 
+/**
+ * The source a map builder reads: `colours` undefined = the installed package's block colours (null:
+ * none; Track PC), the afk task's waypoints and shelter lifted (Track AR). Shared by /map.json and the
+ * panel's map screen (decision 0062, health/map/live.ts).
+ */
+export function mapSource(src: MapSource): MapSource & { colours: MapSource['colours'] } {
+  const task = src.taskStatus;
+  const colours = src.colours === undefined ? installedBlockColours() : src.colours;
+  return { ...src, colours, ...(task ? { taskStatus: () => liftTaskStatus(task()) } : {}) };
+}
+
 /** Route handler: true when it answered the request. `src.colours` undefined = the installed package's block colours (null: none). */
 export function mapRoutes(src: MapSource): HealthRoute & { builder: MapBuilder } {
-  const task = src.taskStatus;
-  const colours = src.colours === undefined ? installedBlockColours() : src.colours; // Track PC
-  const withColours: MapSource = { ...src, colours };
-  const builder = new MapBuilder(task ? { ...withColours, taskStatus: () => liftTaskStatus(task()) } : withColours); // Track AR: waypoints and shelter on the map
+  const full = mapSource(src);
+  const colours = full.colours;
+  const builder = new MapBuilder(full);
   const handler = (path: string, req: IncomingMessage, res: ServerResponse): boolean => {
     if (path === '/map' || path === '/map/') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });

@@ -37,7 +37,7 @@ It is closed (written) on every graceful exit.
 | `health/map/schema.ts` | zod schema of `/map.json` |
 | `health/map/data.ts` | `MapBuilder` (the JSON), `parseMapQuery`, status shape helpers |
 | `health/map/page.ts` | the `/map` page (HTML + canvas, no dependencies) |
-| `health/map/paint.ts` | Track PC: `PAINT_JS`, how a 2D map paints tiles (block colours, relief, liquids, the class view, the hover text); the page embeds it, the panel will |
+| `health/map/paint.ts` | Track PC: `PAINT_JS`, how a 2D map paints tiles (block colours, relief, liquids, the class view, the hover text); since decision 0062 generated from the panel's browser module `health/panel/client/paint.ts` (type-stripped, imports and exports removed), so `/map` and the panel paint alike |
 | `health/panel/icons/colours.ts` | Track PC: `BlockColours`, a map colour per block name from the `minecraft-assets` art (top-face average), `CLASS_FALLBACK` |
 | `health/map/routes.ts` | `mapRoutes(source)`: the route hook for `HealthServer` |
 
@@ -324,7 +324,7 @@ changed tiles travel; it draws:
   checkerboard between); columns without surface data or colour in their class's flat colour with the
   relief. **classes**: the view of before (solid green to brown to white by height, water blue, avoid
   orange-red, nothing dark). The **layer** select shows the under-roof layer in the Nether (`auto`, the
-  default, picks it where a tile has it). Remembered-only chunks are dimmed, loaded ones outlined;
+  default, picks it where a tile has it). Remembered-only chunks fade toward a pale grey with age (decision 0062, [map.md](map.md) "Painting"), loaded ones outlined;
 - the bot (arrow by yaw), its trail (sampled once a second), the last goto's goal (and its path when the
   report has `path`), entities by kind (players, hostiles, neutral, passive, items), home and shelter
   (from the task status), waypoints from a `waypoints` field of the task or skills status (array of

@@ -1,8 +1,9 @@
 // GET /map (PLAN.md task 7.15): a dependency-free page that polls /map.json every second and draws
 // the cached chunks top-down (Track PC, decision 0060: each column in its surface block's colour with
-// the in-game map's relief shading, or the class view; remembered-only chunks dimmed), the bot (arrow
+// the in-game map's relief shading, or the class view; remembered-only chunks paler with age), the bot (arrow
 // by yaw) and its trail, the planned path and the goal, entities, home, shelter and waypoints. Drag to
-// pan, wheel or +/- to zoom, "follow" re-centres on the bot. The painting is paint.ts PAINT_JS.
+// pan, wheel or +/- to zoom, "follow" re-centres on the bot. The painting is the shared module
+// health/panel/client/paint.ts, embedded as PAINT_JS (decision 0062).
 import { PAINT_JS } from './paint.ts';
 
 export const MAP_PAGE = `<!doctype html>
@@ -47,7 +48,7 @@ export const MAP_PAGE = `<!doctype html>
       <div id="legend-block">blocks: the surface block's colour, darker where the column to the north is higher, lighter where lower; water darker with depth. Chunks remembered before block colours: grey / blue / orange by class</div>
       <div><span style="background:#fff"></span>bot <span style="background:#f5c542"></span>path / goal <span style="background:#ff5050"></span>hostile <span style="background:#5cd6ff"></span>player</div>
       <div><span style="background:#b0e57c"></span>passive <span style="background:#ffd27f"></span>item <span style="background:#4ce08a"></span>home <span style="background:#c08cff"></span>shelter / waypoint</div>
-      <div>dimmed chunks: remembered (not loaded); outlined: loaded</div>
+      <div>paler chunks: remembered (not loaded), the older the paler; outlined: loaded</div>
     </div>
   </div>
 </div>
@@ -70,7 +71,7 @@ ${PAINT_JS}
   function paintTile(entry) {
     const north = tiles.get(entry.t.cx + ',' + (entry.t.cz - 1));
     const g = entry.img.getContext('2d'), img = g.createImageData(16, 16);
-    img.data.set(mapPixels(entry.t, modeSel.value, layerSel.value, north ? north.t : null));
+    img.data.set(mapPixels(entry.t, modeSel.value, layerSel.value, north ? north.t : null, Date.now()));
     g.putImageData(img, 0, 0);
   }
   function addTile(raw, palette) {

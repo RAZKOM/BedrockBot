@@ -9,7 +9,7 @@ import { setupCommands } from './commands.ts';
 import { setupInventory } from './inventory.ts';
 import { setupLink } from './link.ts';
 import { setupLogs } from './logs.ts';
-import { setupMap } from './map.ts';
+import { setupMapView } from './mapview.ts';
 import { linkView } from './menu.ts';
 import type { Lite, Page } from './page.ts';
 import { setupPopup } from './popup.ts';
@@ -43,6 +43,7 @@ export function start(env: Env): Started {
     applyLink: unset,
     refreshSoon: () => undefined,
     listen: (topic, fn) => listeners.push([topic, fn]), // handed to the transport once it exists (below)
+    streaming: () => !!env.EventSource, // until the transport exists (below): a browser with EventSource streams
   };
 
   // ---- theme (dark by default; prefers-color-scheme; a stored choice wins: page.ts sets it before the first paint)
@@ -65,7 +66,7 @@ export function start(env: Env): Started {
   const renderCards = setupCards(page);
   const renderLogs = setupLogs(page);
   const renderSettings = setupSettings(page);
-  setupMap(page);
+  const renderMap = setupMapView(page); // decision 0062: the map screen
   setupTables(page, (cmds) => commands.setHelp(cmds));
 
   function render(s: Lite): void {
@@ -75,6 +76,7 @@ export function start(env: Env): Started {
     renderCards(s);
     renderLogs(s);
     renderSettings(s);
+    renderMap(s);
   }
   let renders = 0;
   const timed = (s: Lite, bytes: number, via: string): void => {
@@ -113,6 +115,7 @@ export function start(env: Env): Started {
   page.refreshSoon = () => transport.refreshSoon();
   for (const [topic, fn] of listeners.splice(0)) transport.on(topic, fn);
   page.listen = (topic, fn) => transport.on(topic, fn);
+  page.streaming = () => transport.mode() === 'stream';
 
   timed(last, initial.length, '');
   transport.start();

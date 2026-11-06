@@ -30,6 +30,21 @@ export const FETCH_BAD_PORTS: ReadonlySet<number> = new Set([
   526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
 ]);
 
+/**
+ * Starts a server on port 0 until it gets a port fetch() can reach (not in FETCH_BAD_PORTS): `make` builds
+ * a fresh one, `start` returns its port, `stop` closes one that got a bad port. Every unit test that
+ * fetches from a port-0 server starts it through this.
+ */
+export async function onFetchablePort<S>(make: () => S, start: (s: S) => Promise<number>, stop: (s: S) => unknown): Promise<{ server: S; port: number }> {
+  for (let i = 0; i < 20; i++) {
+    const server = make();
+    const port = await start(server);
+    if (!FETCH_BAD_PORTS.has(port)) return { server, port };
+    await stop(server);
+  }
+  throw new Error('no port fetch() accepts in 20 tries');
+}
+
 export async function openSse(url: string, headers: Record<string, string> = {}): Promise<SseStream> {
   const ac = new AbortController();
   const res = await fetch(url, { headers: { accept: 'text/event-stream', ...headers }, signal: ac.signal });

@@ -7,9 +7,9 @@
 // buttons, log filter and palette. The stream transport: panel-transport.test.ts; budgets: panel-budgets.test.ts.
 import { readdirSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { CONFIRM_MS, HIDDEN_POLL_MS, POLL_MS, QUICK_KEY } from '../../../src/health/panel/shared.ts';
+import { CONFIRM_MS, HIDDEN_POLL_MS, MAP_PREFS_KEY, POLL_MS, QUICK_KEY, VIEW_KEY } from '../../../src/health/panel/shared.ts';
 import { clientModules } from '../../../src/health/panel/assets.ts';
-import { answer, flush, FakeEl, runPage, type Harness } from './panel-dom.ts';
+import { answer, flush, runPage, type FakeEl, type Harness } from './panel-dom.ts';
 import { GLYPHS } from '../../../src/health/panel/glyphs.ts';
 import { ICON_CLASSES } from '../../../src/health/panel/inventory.ts';
 import { renderPanelPage, STATUS_BLOCKS } from '../../../src/health/panel/page.ts';
@@ -40,7 +40,7 @@ describe('panel page markup', () => {
     const named = new Set([...src.matchAll(/\b(?:text|width|\$|need)\('([a-z-]+)'/g)].map((m) => m[1]!));
     expect(named.size).toBeGreaterThan(60);
     for (const id of named) expect([id, have.has(id)]).toEqual([id, true]);
-    for (const m of ['id="panel-commands"', 'id="cmdform"', 'data-cmd="!home go"', 'id="panel-settings"', 'data-key="guardRadius"', 'id="panel-logs"', 'id="helpbox"', 'id="panel-map"', 'id="stale"', 'id="theme"', 'id="clock"', 'href="/api/chests"']) expect(html).toContain(m);
+    for (const m of ['id="panel-commands"', 'id="cmdform"', 'data-cmd="!home go"', 'id="panel-settings"', 'data-key="guardRadius"', 'id="panel-logs"', 'id="helpbox"', 'id="mapscreen"', 'id="view-map"', 'id="stale"', 'id="theme"', 'id="clock"', 'href="/api/chests"']) expect(html).toContain(m);
   });
 
   it('no external URLs or assets: the only script is the entry module, the only links preload the modules', () => {
@@ -493,57 +493,177 @@ describe('panel page script: the offline banner (fake DOM)', () => {
   });
 });
 
-describe('panel page script: the map (Track AR, fake DOM and canvas)', () => {
-  it('opening the map polls /map.json and /api/marks; a right-click opens the column menu; Walk here sends !goto on the surface', async () => {
-    const h = runPage(renderPanelPage(fullState()));
-    const y = Buffer.from(new Int16Array(256).fill(-61).buffer).toString('base64');
-    const c = Buffer.alloc(64, 0b01010101).toString('base64'); // class 1 (solid) everywhere
-    const mapJson = {
-      v: 1, ts: 0, server: null, dimension: 0, rev: 5, center: { cx: 6, cz: 12 }, radius: 8, window: { cx0: -2, cz0: 4, cx1: 14, cz1: 20 },
-      tiles: [{ cx: 6, cz: 12, live: true, rev: 5, updatedAt: 0, y, c }],
-      bot: { x: 100.5, y: -60, z: 200.5, yaw: 0 }, trail: [], nav: { busy: false, running: null, path: null, goal: null, result: null, plans: 0 },
-      entities: [], home: { x: 98, y: -60, z: 200 }, shelter: null, waypoints: [{ name: 'base', x: 101, y: -60, z: 203 }], cache: null,
-    };
-    h.fetchQueue.push(answer(mapJson), answer({ chests: [{ x: 99, y: -60, z: 198, kind: 'chest', label: 'ores', unreachable: false }], herds: [] }));
-    const view = new FakeEl('mapview');
-    view.clientWidth = 400;
-    view.clientHeight = 380;
-    h.els.set('mapview', view);
-    const radius = new FakeEl('map-r');
-    radius.value = '8'; // the selected option
-    h.els.set('map-r', radius);
-    const follow = new FakeEl('map-follow');
-    follow.checked = true; // checked in the markup
-    h.els.set('map-follow', follow);
-    h.els.get('mapbox')!.open = true;
-    h.els.get('mapbox')!.fire('toggle');
+describe('panel page script: the map screen (decision 0062, fake DOM and canvas)', () => {
+  // the fixture's bot stands at 18311.5 -60 17027.5: chunk 1144, 1064; the canvas is 360 x 640 (the
+  // fallback size of the fake DOM), 3 px per block, so the screen centre (180, 320) is the bot
+  const b64 = (b: Buffer): string => b.toString('base64');
+  const tile = (over: Record<string, unknown> = {}) => ({
+    cx: 1144, cz: 1064, live: true, rev: 5, updatedAt: 0,
+    y: b64(Buffer.from(new Int16Array(256).fill(-61).buffer)), c: b64(Buffer.alloc(64, 0b01010101)), s: b64(Buffer.alloc(256, 0)), p: [0],
+    ...over,
+  });
+  const tilesAnswer = (over: Record<string, unknown> = {}) => ({
+    ts: 0, dim: 0, rev: 5, center: { cx: 1144, cz: 1064 }, radius: 4, window: { cx0: 1140, cz0: 1060, cx1: 1148, cz1: 1068 },
+    tiles: [tile()], palFrom: 0, palette: [{ name: 'grass_block', rgb: '#5f9f35' }], ...over,
+  });
+  const marks = { chests: [{ x: 18313, y: -60, z: 17030, kind: 'chest', label: 'ores', unreachable: false, stacks: 2, size: 27, top: [['coal', 12]], readAt: Date.now() - 60_000 }], herds: [], blocks: { ore: [[18308, -61, 17026, 'iron_ore']] } };
+  const actsOf = (h: Harness): FakeEl[] => h.els.get('sheet-acts')!.children.filter((b) => b.dataset.act);
+  const act = (h: Harness, id: string): FakeEl => actsOf(h).find((b) => b.dataset.act === id)!;
+  const tap = (h: Harness, x: number, y: number): void => {
+    const cv = h.els.get('mapcv')!;
+    cv.fireWith('pointerdown', { pointerId: 1, clientX: x, clientY: y, button: 0 });
+    cv.fireWith('pointerup', { pointerId: 1, clientX: x, clientY: y, button: 0 });
+  };
+  /** Runs the pending draws (the view draws in a 16 ms timer) and returns the status line. */
+  const status = (h: Harness): string => {
+    for (const t of h.timers.filter((x) => x.ms === 16)) t.fn();
+    return h.els.get('map-status')!.textContent;
+  };
+  const open = (opts: { stream?: boolean; storage?: Record<string, string> } = {}): Harness =>
+    runPage(renderPanelPage(fullState()), { stream: opts.stream ?? true, storage: { [VIEW_KEY]: 'map', ...opts.storage }, answers: [answer(tilesAnswer()), answer(marks)] });
+
+  it('opens on the map: tiles and marks for the window, the map topics on the stream, the HUD, and one tap back to the cards', async () => {
+    const h = open();
     await flush();
-    expect(h.fetched.slice(-2)).toEqual(['/map.json?r=8&since=-1', '/api/marks']);
-    expect(h.els.get('map-info')!.textContent).toBe('idle; 1 chests, 0 herds');
-    // the bot is at the centre (200, 190 on a 400 x 380 canvas, 4 px per block): 6 blocks east = x 224
-    h.els.get('mapcv')!.fireWith('contextmenu', { clientX: 224, clientY: 190 });
-    const menu = h.els.get('menu')!;
-    expect(menu.hidden).toBe(false);
-    expect(menu.children[0]!.textContent).toBe('106 200: solid at y -61');
-    expect(labels(h)).toEqual(['Walk here', 'Set home here', 'Set shelter here', 'Set waypoint here...']);
-    h.fetchQueue.push(ok(['walking to 106 -60 200']));
-    pick(h, 'walk').fire('click');
+    expect(h.doc.documentElement.dataset.view).toBe('map');
+    expect(h.fetched[0]).toMatch(/^\/api\/map\/tiles\?cid=m[0-9a-z]+&r=\d+&cx=1144&cz=1064&pal=0$/); // streaming: no live=1
+    expect(h.fetched[1]).toMatch(/^\/api\/marks\?cx=1144&cz=1064&r=\d+$/);
+    expect(h.streams[0]!.url).toBe('/api/stream?topics=state,map,map-live');
+    expect(status(h)).toBe('1 chunks');
+    expect(h.els.get('hud-hp')!.textContent).toBe('17.5');
+    expect(h.els.get('hud-job')!.textContent).toMatch(/^get: getting 32 oak_log: 12\/32/);
+    h.els.get('view-cards')!.fire('click');
+    expect(h.doc.documentElement.dataset.view).toBe('cards');
+    expect(h.storage.get(VIEW_KEY)).toBe('cards');
+    h.els.get('view-map')!.fire('click');
+    expect(h.doc.documentElement.dataset.view).toBe('map');
+    expect(h.storage.get(VIEW_KEY)).toBe('map');
+  });
+
+  it('a page on the cards joins no map topic and fetches no tile until the map shows', () => {
+    const h = runPage(renderPanelPage(fullState()), { stream: true });
+    expect(h.doc.documentElement.dataset.view).toBe('cards');
+    expect(h.streams[0]!.url).toBe('/api/stream?topics=state');
+    expect(h.fetched.filter((u) => u.startsWith('/api/map'))).toEqual([]);
+  });
+
+  it('tiles over the stream: a message adds its tiles, a gap (from newer than our rev) fetches what changed since our rev, a dimension change starts over', async () => {
+    const h = open();
     await flush();
-    expect(h.posted).toEqual(['!goto 106 -60 200']);
-    // the waypoint asks for a name in the menu, then sends
-    h.els.get('mapcv')!.fireWith('contextmenu', { clientX: 228, clientY: 194 });
-    pick(h, 'wp').fire('click');
-    const input = menu.children.find((x) => x.maxLength === 32)!;
-    input.value = 'Panel_Map';
-    h.fetchQueue.push(ok(['waypoint panel_map set to 107 -60 201']));
-    menu.children.find((x) => x.textContent === 'Set waypoint')!.fire('click');
+    const es = h.streams[0]!;
+    es.emit('map', { from: 5, rev: 7, dim: 0, tiles: [tile({ cx: 1145, rev: 7 })] }, 'b.1');
+    expect(status(h)).toBe('2 chunks');
+    h.fetchQueue.push(answer(tilesAnswer({ rev: 9, tiles: [] })));
+    es.emit('map', { from: 8, rev: 9, dim: 0, tiles: [] }, 'b.2'); // we have 7: one was missed
+    expect(h.fetched.at(-1)).toMatch(/&since=7&win=1140%2C1060%2C1148%2C1068$/);
     await flush();
-    expect(h.posted.at(-1)).toBe('!wp set panel_map 107 -60 201');
-    // a marker under the cursor names itself in the menu title (the home square at 98.5, 200.5)
-    h.els.get('mapcv')!.fireWith('contextmenu', { clientX: 200 - 8, clientY: 190 });
-    expect(menu.children[0]!.textContent).toBe('home (98 200: solid at y -61)');
-    // closing the section stops the map's polling
-    h.els.get('mapbox')!.open = false;
-    h.els.get('mapbox')!.fire('toggle');
+    h.fetchQueue.push(answer(tilesAnswer({ dim: 1, rev: 10 })));
+    es.emit('map', { from: 9, rev: 10, dim: 1, reset: true }, 'b.3');
+    expect(h.fetched.at(-1)).not.toContain('since=');
+  });
+
+  it('tap a block: the sheet names it and what is there; Go here shows the exact command and sends it only on Send', async () => {
+    const h = open();
+    await flush();
+    tap(h, 186, 329); // 2 blocks east, 3 south of the bot: 18313 17030 (the chest)
+    expect(h.els.get('map-sheet')!.hidden).toBe(false);
+    expect(h.els.get('sheet-title')!.textContent).toBe('18313 17030: grass_block, y -61');
+    const body = h.els.get('sheet-body')!.children.map((c) => c.textContent);
+    expect(body).toEqual(['loaded now', 'chest "ores" (y -60)', '  holds 12 coal (2/27 slots)', '  read 60 s ago']);
+    expect(actsOf(h).map((b) => b.dataset.act)).toEqual(['walk', 'wp', 'home', 'shelter', 'dig']);
+    act(h, 'walk').fire('click');
+    expect(h.els.get('sheet-confirm')!.hidden).toBe(false);
+    expect(h.els.get('sheet-cmd')!.textContent).toBe('!goto 18313 -60 17030');
+    expect(h.posted).toEqual([]);
+    h.fetchQueue.push(ok(['walking to 18313 -60 17030']));
+    h.els.get('sheet-send')!.fire('click');
+    await flush();
+    expect(h.posted).toEqual(['!goto 18313 -60 17030']);
+    expect(h.els.get('sheet-reply')!.textContent).toBe('> !goto 18313 -60 17030\nwalking to 18313 -60 17030');
+    // a waypoint asks its name; Send stays off until it is a valid one
+    act(h, 'wp').fire('click');
+    expect(h.els.get('sheet-name')!.hidden).toBe(false);
+    expect(h.els.get('sheet-send')!.disabled).toBe(true);
+    expect(h.els.get('sheet-cmd')!.textContent).toBe('!wp set <name> 18313 -60 17030');
+    h.els.get('sheet-name')!.value = 'Panel_Map';
+    h.els.get('sheet-name')!.fire('input');
+    expect(h.els.get('sheet-send')!.disabled).toBe(false);
+    expect(h.els.get('sheet-cmd')!.textContent).toBe('!wp set panel_map 18313 -60 17030');
+    // dig: one block, through !build clear
+    act(h, 'dig').fire('click');
+    expect(h.els.get('sheet-cmd')!.textContent).toBe('!build clear 18313 -61 17030 18313 -61 17030');
+    h.els.get('sheet-cancel')!.fire('click');
+    expect(h.els.get('sheet-confirm')!.hidden).toBe(true);
+    h.els.get('sheet-close')!.fire('click');
+    expect(h.els.get('map-sheet')!.hidden).toBe(true);
+  });
+
+  it('box mode: drag a box; the sheet shows the size and the y range from the surface; Clear shows its command, then sends', async () => {
+    const h = open();
+    await flush();
+    h.els.get('map-box')!.fire('click');
+    const cv = h.els.get('mapcv')!;
+    cv.fireWith('pointerdown', { pointerId: 1, clientX: 180, clientY: 320, button: 0 }); // 18311 17027
+    cv.fireWith('pointermove', { pointerId: 1, clientX: 192, clientY: 326, button: 0 }); // 18315 17029
+    cv.fireWith('pointerup', { pointerId: 1, clientX: 192, clientY: 326, button: 0 });
+    expect(h.els.get('map-sheet')!.hidden).toBe(false);
+    expect(h.els.get('sheet-box')!.hidden).toBe(false);
+    expect(h.els.get('sheet-title')!.textContent).toBe('box 18311 17027 to 18315 17029');
+    expect([h.els.get('box-y1')!.value, h.els.get('box-y2')!.value]).toEqual(['-61', '-61']);
+    expect(h.els.get('box-size')!.textContent).toBe('5 x 1 x 3 = 15 blocks');
+    expect(actsOf(h).map((b) => b.dataset.act)).toEqual(['clear', 'quarry']); // fill / floor / wall need a picked block
+    act(h, 'clear').fire('click');
+    expect(h.els.get('sheet-cmd')!.textContent).toBe('!build clear 18311 -61 17027 18315 -61 17029\n5 x 1 x 3 = 15 blocks');
+    h.fetchQueue.push(ok(['clearing 15 blocks']));
+    h.els.get('sheet-send')!.fire('click');
+    await flush();
+    expect(h.posted).toEqual(['!build clear 18311 -61 17027 18315 -61 17029']);
+    // a picked block offers fill / floor / wall
+    h.els.get('box-block')!.value = 'cobblestone';
+    h.els.get('box-block')!.fire('change');
+    expect(actsOf(h).map((b) => b.dataset.act)).toEqual(['clear', 'fill', 'floor', 'wall', 'quarry']);
+    act(h, 'floor').fire('click');
+    expect(h.els.get('sheet-cmd')!.textContent).toBe('!build floor 18311 -61 17027 18315 17029 cobblestone\n5 x 1 x 3 = 15 blocks');
+  });
+
+  it('layers: the Y-slice fetches its height and the switches are kept in this browser; overlays from the map-live topic', async () => {
+    const h = open();
+    await flush();
+    const slice = h.layers.find((l) => l.dataset.layer === 'slice')!;
+    slice.checked = true;
+    slice.fire('change');
+    expect(h.els.get('map-slice')!.hidden).toBe(false);
+    expect(h.els.get('map-yv')!.textContent).toBe('y -60');
+    h.fetchQueue.push(answer({ ts: 0, y: -60, tiles: [{ cx: 1144, cz: 1064, live: true, updatedAt: 0, y: -60, c: b64(Buffer.alloc(64, 0)) }], palFrom: 1, palette: [] }));
+    await h.timers.find((t) => t.ms === 250)!.fn();
+    await flush();
+    expect(h.fetched.at(-1)).toMatch(/^\/api\/map\/slice\?y=-60&cx=1144&cz=1064&r=\d+&pal=1$/);
+    expect(status(h)).toBe('1 chunks, slice y -60 (1)');
+    h.els.get('map-yup')!.fire('click');
+    expect(h.els.get('map-yv')!.textContent).toBe('y -59');
+    expect(JSON.parse(h.storage.get(MAP_PREFS_KEY)!)).toMatchObject({ layer: 'slice' });
+    const items = h.overlays.find((o) => o.dataset.ov === 'items')!;
+    items.checked = true;
+    items.fire('change');
+    expect((JSON.parse(h.storage.get(MAP_PREFS_KEY)!) as { ov: Record<string, boolean> }).ov.items).toBe(true);
+    // follow mode moves with the bot; a pan turns it off, the target button turns it on again
+    h.streams[0]!.emit('map-live', { snap: { dim: 0, bot: [18400.5, -60, 17100.5, 90], trail: [], path: null, goal: null, busy: false, result: null, ents: {}, home: null, shelter: null, wps: [] } }, 'b.1');
+    tap(h, 180, 320);
+    expect(h.els.get('sheet-title')!.textContent).toMatch(/^18400 17100: /);
+    const cv = h.els.get('mapcv')!;
+    cv.fireWith('pointerdown', { pointerId: 1, clientX: 100, clientY: 100, button: 0 });
+    cv.fireWith('pointermove', { pointerId: 1, clientX: 160, clientY: 100, button: 0 });
+    cv.fireWith('pointerup', { pointerId: 1, clientX: 160, clientY: 100, button: 0 });
+    expect(h.els.get('map-follow')!.classList.contains('on')).toBe(false);
+    h.els.get('map-follow')!.fire('click');
+    expect(h.els.get('map-follow')!.classList.contains('on')).toBe(true);
+  });
+
+  it('without the stream the tiles are polled with the overlays (live=1); a storage that throws still shows the map', async () => {
+    const h = open({ stream: false });
+    await flush();
+    expect(h.fetched[0]).toMatch(/&live=1$/);
+    const blocked = runPage(renderPanelPage(fullState()), { storageThrows: true });
+    expect(blocked.doc.documentElement.dataset.view).toBe('map');
   });
 });
