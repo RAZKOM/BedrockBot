@@ -99,6 +99,19 @@ The truth pack read the farmland after each try (`probe-trample`, 4 tries per he
 | a 1-block drop (goto) onto farmland | 0/1 (but see 1.0 above) |
 | a jump up onto farmland one block higher (fall about 0.3) | 0/1 |
 
+**Sneaking does not prevent it** (2026-11-06, `farm-sneak-land`, BDS 1.26.60.6): fresh lanes (a 2-block stone
+ledge 1 or 2 high, then 4 moist farmland cells without crops), the bot walks off (no sprint, no sneak on the
+ledge) and with sneak holds the key from its first airborne tick until 20 ticks after landing (25 to 27 ticks
+of sneak per try); the truth pack reads the lane (any `dirt` = trampled). Conditions interleaved try by try.
+
+| Ledge (fall onto farmland) | Without sneak | Sneak from mid-air through the landing |
+|---|---|---|
+| 1 block (1.0625) | 5/16 (a 2-try first run: 0/2) | 8/16 (first run: 2/2) |
+| 2 blocks (2.0625) | 16/16 (first run: 2/2) | 16/16 (first run: 2/2) |
+
+Sneak is no better at 1 block (if anything worse, within noise) and changes nothing at 2, so the follower does
+not sneak on drops and the farmer's limits (`SAFE_FALL`, `TERRACE_FALL`, `HOE_FALL`) stay as they are.
+
 So: walking never tramples; jumping in place and dropping onto farmland can. The planner has no
 per-cell hook this wave, so the farmer:
 
@@ -276,6 +289,7 @@ harvested, 25 planted, the field complete).
 | `bot/test/unit/skills/farm.test.ts` | crops and growth, field scan and crop memory, reaches (the 9-wide field's middle), floors, `routeTramples`; the loop with a fake world and skills: 3 x 3 harvest + replant from off-field cells, bone meal on / off, deposit when full keeping one seed stack, a trampling route refused, stop; `!farm` / `!mine` parsing |
 | `bot/test/e2e/farm-field.test.ts` | the 9 x 9 wheat field, two cycles, chest deposit when full, bone meal (see Measured) |
 | `bot/test/unit/skills/farm.test.ts` (Track Z) | harvest-first order and the pickup wait, pause / resume, `FarmProcess` pre-empted by a fake guard and resumed, `!stop` |
+| `bot/test/e2e/farm-sneak-land.test.ts` (probe) | drops off 1- and 2-block ledges onto fresh farmland with and without sneak held in the air; prints trampled / tries per condition (env `SNEAK_TRIES`, default 12) |
 | `bot/test/e2e/farm-process.test.ts` (Track Z, bds-core) | `!farm` as a process: guard pre-emption and resume, `!status`, `!pause` / `!resume` / `!stop` (env `CORE_BDS_*`, `CORE_VERBOSE=1`) |
 
 ```sh
