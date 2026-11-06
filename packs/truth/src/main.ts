@@ -58,6 +58,7 @@ import { flyHandlers } from './fly.js'; // Track AU: truth:glide, glidelog, equi
 import { craftHandlers } from './craft.js'; // Track AW: truth:kit, craftinv, table (crafting, wave 11)
 import { courseHandlers } from './course.js'; // Track F4a: truth:course (the flight benchmark's obstacle courses)
 import { caveHandlers } from './cave.js'; // Track F5a: truth:cave (a real cave rebuilt from the bot's world cache)
+import { waterHandlers } from './water.js'; // Track W1: truth:water (the water course of the walking tests)
 
 declare const __PACK_VERSION__: string;
 /** QuickJS console (prints to the BDS content log). */
@@ -565,6 +566,7 @@ Object.assign(handlers, flyHandlers()); // Track AU: glide, glidelog, equip, box
 Object.assign(handlers, craftHandlers({ getBlock, assertLoaded, overworld })); // Track AW: kit, craftinv, table
 Object.assign(handlers, courseHandlers({ reply, replyError, overworld })); // Track F4a: course
 Object.assign(handlers, caveHandlers({ reply, replyError, overworld })); // Track F5a: cave
+Object.assign(handlers, waterHandlers({ reply, replyError, overworld })); // Track W1: water
 
 function blockVolume(a: Vec3, b: Vec3): BlockVolume {
   return new BlockVolume(a, b);

@@ -114,7 +114,7 @@ corridor ranks ways, the fine planner prices the steps.
 
 | | walk | mine |
 |---|---|---|
-| per block | 4 (`WALK_TICKS`; a sprint is 3.6, a walk 4.7), x 3 swimming, 16 through unknown (`UNKNOWN_TICKS`) | the same |
+| per block | 4 (`WALK_TICKS`; a sprint is 3.6, a walk 4.7), 10 swimming (`SWIM_TICKS`, Track W1: the fine planner's 8.6 on the surface, 10.5 under water across, 8 up), 16 through unknown (`UNKNOWN_TICKS`) | the same |
 | per portal | 10 (`PORTAL_TICKS`) | 10 |
 | an opening it cannot walk (`walkable` false) | Infinity | + 2 blocks dug (a narrow opening widened), a y opening without a floor: + the drop (at least 2) dug or pillared |
 | a dig portal | Infinity | + `dug` x 80 (`DIG_TICKS`: 15 to 20 of break time plus `digPenalty` 60: 13 walked blocks per dug block, as the fine planner) |

@@ -87,7 +87,7 @@ function runOps(dim: Dimension, ops: readonly CourseOp[]): Promise<void> {
 }
 
 /** Create a ticking area and wait for its chunks (at most LOAD_TIMEOUT ticks). */
-function loadArea(id: string, dim: Dimension, from: Vec3, to: Vec3): Promise<void> {
+export function loadArea(id: string, dim: Dimension, from: Vec3, to: Vec3): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = system.runTimeout(() => reject(new TruthError('unloaded_chunk', `the ticking area ${id} did not load in ${LOAD_TIMEOUT} ticks`, { from, to })), LOAD_TIMEOUT);
     world.tickingAreaManager.createTickingArea(id, { dimension: dim, from, to }).then(

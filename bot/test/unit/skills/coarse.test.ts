@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import { CoarseLayerImpl, terrainSource, type CoarseCost, type Corridor } from '../../../src/skills/coarse/index.ts';
 import type { Vec3 } from '../../../src/world/types.ts';
-import { FAILED_DECAY_MS, mineCost } from '../../../src/skills/coarse/costs.ts';
+import { FAILED_DECAY_MS, SWIM_CLEARANCE, SWIM_TICKS, WALK_TICKS, mineCost } from '../../../src/skills/coarse/costs.ts';
 import { flatGen, GenWorld } from './genworld.ts';
 
 const F = -60; // feet on the flat world's grass
@@ -267,5 +267,40 @@ describe('coarse layer: unknown space, stable ids, feedback, fly', () => {
     expect(c.status).toBe('found');
     expect(c.legs[0]!.minClearance).toEqual({ height: 2, width: 1 });
     expect(c.legs[0]!.portals.every((p) => p.floorY === -50)).toBe(true);
+  });
+});
+
+describe('coarse layer: water (Track W1, docs/pathfinding.md "Water (Track W1)")', () => {
+  /** The cave world with its tunnel flooded over x 50..57 (water from the floor up `high` cells, stone above). */
+  function floodedCave(high: number): GenWorld {
+    const gen = caveWorld();
+    if (high < 3) gen.fill({ x: 50, y: -50 + high, z: 0 }, { x: 57, y: -48, z: 0 }, 'stone');
+    gen.fill({ x: 50, y: -50, z: 0 }, { x: 57, y: -51 + high, z: 0 }, 'water');
+    return gen;
+  }
+  const A = { x: 30.5, y: -50, z: 0.5 };
+  const B = { x: 70.5, y: -50, z: 0.5 };
+
+  it('a flooded stretch of the tunnel is a water volume the walk corridor swims through, priced per block swum', async () => {
+    const { layer } = layerOf(floodedCave(3));
+    expect(layer.volumeAt({ x: 53, y: -50, z: 0 })?.kind).toBe('water');
+    const c = await layer.plan({ start: A, goal: B, modes: ['walk'] });
+    expect(c.status, c.reason).toBe('found');
+    expect(c.legs[0]!.minClearance.height).toBeGreaterThanOrEqual(SWIM_CLEARANCE.height);
+    // dearer than the dry tunnel by the blocks swum (SWIM_TICKS against WALK_TICKS a block)
+    const dry = await layerOf(caveWorld()).layer.plan({ start: A, goal: B, modes: ['walk'] });
+    expect(c.cost).toBeGreaterThan(dry.cost);
+  });
+
+  it('a flooded stretch 2 high is swum; 1 high is refused on foot (the body does not fit)', async () => {
+    const two = await layerOf(floodedCave(2)).layer.plan({ start: A, goal: B, modes: ['walk'] });
+    expect(two.status, two.reason).toBe('found');
+    const one = await layerOf(floodedCave(1)).layer.plan({ start: A, goal: B, modes: ['walk'] });
+    expect(one.status).not.toBe('found');
+  });
+
+  it('the swim price and clearance: SWIM_TICKS a block (the fine planner\'s swim / dive costs), a 2 x 1 opening', () => {
+    expect(SWIM_TICKS).toBeGreaterThan(2 * WALK_TICKS);
+    expect(SWIM_CLEARANCE).toEqual({ height: 2, width: 1 });
   });
 });

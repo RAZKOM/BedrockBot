@@ -122,6 +122,14 @@ const PARKOUR_RUN_SPEED = 0.25;
 const EDGE_SNEAK = 0.3;
 /** Track AJ: no sprint for this many ticks after a sneak (BDS keeps walking; measured on 1.26.60). */
 const SPRINT_AFTER_SNEAK = 10;
+/** Track W1: a final surface node (a `near` goal in water) is reached within this of its centre. */
+const SWIM_ARRIVE = 0.7;
+/** Track W1: a dive node is reached with the feet from this far below its height ... */
+const DIVE_BELOW = 0.45;
+/** ... to this far above it. */
+const DIVE_ABOVE = 0.55;
+/** Track W1: under water the body sinks (sneak) towards a node lower than this (blocks); nearer, it is held level. */
+const DIVE_SINK = 0.4;
 const CORNERS: readonly (readonly [number, number])[] = [
   [-HALF, -HALF],
   [-HALF, HALF],
@@ -220,7 +228,7 @@ export class PathFollower {
   checksPaused(s: Pick<FollowerInput, 'onGround' | 'inWater'>): boolean {
     if (!s.onGround || s.inWater === true || this.backing === true) return true;
     const m = this.path[this.index]!.move;
-    return m === 'swim' || m === 'swimOut' || m === 'climb' || m === 'climbOut' || m === 'parkour' || m === 'pillar' || m === 'downward'; // Track BC: a dig-down drop (the body idles, then falls)
+    return m === 'swim' || m === 'swimOut' || m === 'dive' || m === 'climb' || m === 'climbOut' || m === 'parkour' || m === 'pillar' || m === 'downward'; // Track BC: a dig-down drop (the body idles, then falls); Track W1: dive
   }
   // Track BE end
 
@@ -245,8 +253,8 @@ export class PathFollower {
         continue;
       }
       if (!this.inNode(p, node, s.onGround)) break;
-      // Track AJ: swim nodes are passed without centring (the next one is aimed at in a straight line)
-      if (node.move === 'swim') {
+      // Track AJ: swim nodes are passed without centring (the next one is aimed at in a straight line). Track W1: dive nodes too
+      if (node.move === 'swim' || node.move === 'dive') {
         this.index++;
         continue;
       }
@@ -257,12 +265,26 @@ export class PathFollower {
 
     for (let k = this.passed + 1; k <= Math.min(this.index, last); k++) if (this.inNode(p, path[k]!, true)) this.passed = k;
 
-    const target = path[this.index]!;
+    let target = path[this.index]!;
+    // Track W1: a path that is its start alone at a surface node (a `near` goal around a swimmer, reached at once): held
+    // there like a swim node (the body sank to the pool's floor at a `start` node and got stuck there, bds-fly)
+    if (target.move === 'start') {
+      const w = this.grid.swim(target.x, target.y, target.z);
+      if (w !== undefined && Number.isFinite(w)) target = { ...target, move: 'swim' };
+      else {
+        const d = this.grid.dive(target.x, target.y, target.z);
+        if (d !== undefined && Number.isFinite(d)) target = { ...target, move: 'dive' }; // (a goal under the surface, reached at once)
+      }
+    }
     const finalLeg = this.index === last;
     const speed = Math.hypot(s.vel.x, s.vel.z);
     const dTarget = Math.hypot(target.x + 0.5 - p.x, target.z + 0.5 - p.z);
 
     if (finalLeg) {
+      // Track W1: a `near` goal reached at a surface node (the followed player swimming): there once in its cell
+      if (target.move === 'swim' && this.inNode(p, target, s.onGround) && dTarget < SWIM_ARRIVE) return { cmd: { ...this.idle(), jump: true }, done: true };
+      // Track W1: a `near` goal under the surface reached at a dive node (a waypoint on a pool's floor, a player diving)
+      if (target.move === 'dive' && this.inNode(p, target, s.onGround) && dTarget < SWIM_ARRIVE) return { cmd: this.idle(), done: true };
       const there = dTarget <= this.arrive && Math.abs(p.y - target.feet) < 0.6 && s.onGround;
       if (there && (!this.stopAtEnd || speed < 0.03)) return { cmd: this.idle(), done: true };
       if (!this.stopAtEnd && this.inNode(p, target, s.onGround)) return { cmd: this.idle(), done: true };
@@ -374,15 +396,19 @@ export class PathFollower {
   private variety(s: FollowerInput, target: PathNode, finalLeg: boolean): FollowStep['cmd'] | undefined {
     const p = s.pos;
     const m = target.move;
-    if (m !== 'swim' && m !== 'swimOut' && m !== 'climb' && m !== 'climbOut' && m !== 'parkour') return undefined;
+    if (m !== 'swim' && m !== 'swimOut' && m !== 'climb' && m !== 'climbOut' && m !== 'parkour' && m !== 'dive') return undefined;
     const wet = s.inWater === true || this.grid.cls(Math.floor(p.x), Math.floor(p.y + 0.01), Math.floor(p.z))?.liquid === 'water';
     const cmd = { forward: 0, strafe: 0, yaw: this.yaw ?? 0, jump: false, sprint: false, sneak: false };
+    if (m === 'dive') return this.dive(cmd, s, target);
     if (m === 'swim') {
       // Track BG: still above the water (a drop into it, e.g. through a hatch): the entry node itself, not one beyond it
       const aim = p.y > target.feet + 1.2 ? this.index : this.swimAim(p);
       this.index = aim;
       const a = this.path[aim]!;
-      this.steer(cmd, a.x + 0.5 - p.x, a.z + 0.5 - p.z);
+      // Track W1: up a column onto the surface (from a dive node below): centred in it (a waterfall has open sides)
+      const prev = this.path[aim - 1];
+      if (prev?.x === a.x && prev.z === a.z && prev.feet < a.feet - 0.5 && p.y < a.feet - 0.2) this.centre(cmd, s, a.x + 0.5, a.z + 0.5, true);
+      else this.steer(cmd, a.x + 0.5 - p.x, a.z + 0.5 - p.z);
       cmd.jump = wet || !s.onGround;
       if (s.sprinting && s.onGround) cmd.forward = 0; // end a sticky sprint before the water
       return cmd;
@@ -475,6 +501,31 @@ export class PathFollower {
     } else {
       this.brake(cmd, s, target, finalLeg);
     }
+    return cmd;
+  }
+
+  /**
+   * Track W1: a dive target (docs/pathfinding.md "Water (Track W1)"): towards its column (centred in it for a move
+   * up or down the same column, as in a 1 x 1 shaft or a waterfall), its height held with the keys the server
+   * swims with: jump below it (0.135 a tick up), sneak more than DIVE_SINK above it (about 0.2 a tick down; never
+   * with forward: BDS slows a sneaking swim differently from the model), else jump only while sinking.
+   */
+  private dive(cmd: FollowStep['cmd'], s: FollowerInput, target: PathNode): FollowStep['cmd'] {
+    const p = s.pos;
+    const tx = target.x + 0.5;
+    const tz = target.z + 0.5;
+    const prev = this.path[this.index - 1];
+    const sameColumn = prev?.x === target.x && prev.z === target.z;
+    const inCol = Math.floor(p.x) === target.x && Math.floor(p.z) === target.z;
+    if (sameColumn || (inCol && Math.hypot(tx - p.x, tz - p.z) < 0.3)) this.centre(cmd, s, tx, tz, true);
+    else this.steer(cmd, tx - p.x, tz - p.z);
+    const dy = target.feet - p.y;
+    if (dy > 0.05) cmd.jump = true;
+    else if (dy < -DIVE_SINK && (cmd.forward === 0 || (inCol && Math.hypot(tx - p.x, tz - p.z) < 0.25))) {
+      cmd.sneak = true;
+      cmd.forward = 0;
+    } else cmd.jump = dy > -0.25 && s.vel.y < -0.01;
+    if (s.sprinting) cmd.forward = 0; // a sprint in water starts swimming (not modelled)
     return cmd;
   }
 
@@ -736,6 +787,7 @@ export class PathFollower {
     if (Math.floor(p.x) !== node.x || Math.floor(p.z) !== node.z) return false;
     // Track AJ: a swimming body bobs between 1 below and 0.6 above the surface cell
     if (node.move === 'swim') return p.y > node.feet - 1 && p.y < node.feet + 1.2;
+    if (node.move === 'dive') return p.y > node.feet - DIVE_BELOW && p.y < node.feet + DIVE_ABOVE; // Track W1
     if (Math.abs(p.y - node.feet) >= 0.6) return false;
     if ((node.move === 'jump' || node.move === 'drop' || node.move === 'pillar' || node.move === 'swimOut' || node.move === 'climbOut' || node.move === 'parkour' || node.move === 'downward') && !onGround) return false; // Track BC: downward
     return true;

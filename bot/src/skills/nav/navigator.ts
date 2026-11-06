@@ -32,6 +32,7 @@ import { DEFAULT_PLANNER_BUDGETS, PlannerClient, WorkerSearch, plainGoal, type P
 import { MOVEMENT_TIMEOUT_TICKS, OFF_PATH_GRACE_TICKS, PATH_WINDOW_AHEAD, PATH_WINDOW_BACK, distanceFromPath, nodeAt, nodeOverrun, offPathState, skipAhead } from './baritone/executor.ts'; // Track BE
 import { corridorState, fineTarget, touches, waypointGoal, type CorridorState } from './corridor.ts'; // Track CB: following a coarse corridor
 import type { CoarseLayer, CoarseMode, CorridorStatus } from '../coarse/types.ts'; // Track CB
+import { AirClock, bodyInWater, headUnderWater } from './water.ts'; // Track W1
 
 /** Track R: goto options of the navigator. `blacklist`: consult and feed the failure blacklist (default: `any` and `getToBlock` goals). */
 export type NavGotoOptions = GotoOptions & { blacklist?: boolean };
@@ -379,6 +380,13 @@ export class Navigator {
   fallPolicy: (() => PathOptions['falls']) | undefined;
   /** Track BI: re-plans wait while this is true (a clutch's water and its flow around the landing are not gone yet). */
   holdPlans: (() => boolean) | undefined;
+  /**
+   * Track W1: the server's air supply (0..300 ticks; MobTracker.selfAir), read at each plan; undefined (or a getter
+   * returning undefined) = the navigator's own clock (`airClock`: down 1 a tick with the head under water).
+   */
+  air: (() => number | undefined) | undefined;
+  /** Track W1: the local air estimate, stepped every tick (nav/water.ts). */
+  readonly airClock = new AirClock();
   /** Track BI: the follower holds still while this is true (a clutch's water is being picked up). */
   pauseFollow: (() => boolean) | undefined;
   /** Track BI: a planned drop deeper than 3 still holds (the live fall policy); false stops the body and re-plans. */
@@ -464,6 +472,7 @@ export class Navigator {
       }),
       loop.onBeforeStep((_tick, state) => {
         this.clock++; // Track R
+        if (state.ready) this.airClock.step(headUnderWater(this.cellOf, state.pos)); // Track W1
         if (this.planner) this.plannerFor(); // Track AB: start / stop the worker as plannerThreads changes
         const rep = this.active?.report;
         const t0 = performance.now();
@@ -476,6 +485,14 @@ export class Navigator {
 
   get busy(): boolean {
     return this.active !== undefined || this.queued !== undefined; // decision 0051: a goto waiting for the dig-down off a scaffold
+  }
+
+  /** Track W1: the grid's cell classes (water.ts reads them). */
+  private readonly cellOf = (x: number, y: number, z: number): TerrainClass | undefined => this.grid.cls(x, y, z);
+
+  /** Track W1: the air supply now: the server's value when wired and known, else the local clock. */
+  airNow(): number {
+    return this.air?.() ?? this.airClock.air;
   }
 
   /** Decision 0051: a goto waiting to start (BotSkills: behind the dig-down off a scaffold); `cancel()` drops it. */
@@ -565,6 +582,7 @@ export class Navigator {
       cellCost: this.cellCost?.() ?? this.pathOpts.cellCost, // Track S: avoidance, read live each plan
       ...(this.fallPolicy ? { falls: this.fallPolicy() } : {}), // Track BI: long falls, read live each plan
       ...(options.avoidFarmlandDrops ? { farmlandDropCost: FARMLAND_DROP_COST } : {}),
+      air: this.airNow(), // Track W1: read live each plan (a start under water plans its way up within it)
     };
   }
 
@@ -850,7 +868,7 @@ export class Navigator {
         .join(',');
       return st ? `${b.name}[${st}]` : b.name;
     };
-    const start = locateNode(this.grid, p);
+    const start = locateNode(this.grid, p, this.preferNode(s)); // Track W1: the swim / dive node in water
     const plans = a.report.plans.map((r) => `${r.reason}:${r.status}/${r.nodes}n/${r.expanded}e/${r.ms}ms`).join(' ');
     return (
       `goto unreachable without a segment: feet ${fmt(p)}${s.onGround ? '' : ' airborne'}, in ${block(y)}, on ${block(y - 1)}, ` +
@@ -880,15 +898,29 @@ export class Navigator {
     return false;
   }
 
+  /**
+   * Track W1: no keys while the body waits for a plan or a corridor; in water it holds its depth instead (jump
+   * while it sinks: about level, the head stays where it was), so a body under water does not sink to the
+   * bottom between plans (the Realm, 2026-11-06: following through a cave pool).
+   */
+  private idleBody(s: InputLoopState): void {
+    if (bodyInWater(this.cellOf, s)) this.loop.setCommand({ forward: 0, strafe: 0, sprint: false, sneak: false, jump: s.vel.y < 0 });
+    else this.loop.release();
+  }
+
   /** Standing on a standable node, on the ground, out of liquids. */
   private safeHere(s: InputLoopState): LocatedNode | undefined {
     if (!s.onGround || s.inWater || s.inLava) return undefined;
     return locateNode(this.grid, s.pos);
   }
 
-  /** Track AJ: the node kind a plan starts from: a swim node in water, a climb node off the ground on a climber. */
+  /**
+   * Track AJ: the node kind a plan starts from: a swim node in water, a climb node off the ground on a climber.
+   * Track W1: "in water" as water.ts `bodyInWater` says (a body bobbing at the surface leaves the physics test for
+   * a tick); locateNode then finds the surface node or, under water, the dive node.
+   */
   private preferNode(s: Pick<InputLoopState, 'pos' | 'onGround' | 'inWater'>): 'swim' | 'climb' | undefined {
-    if (s.inWater) return 'swim';
+    if (bodyInWater(this.cellOf, s)) return 'swim';
     if (!s.onGround && this.grid.climbable(Math.floor(s.pos.x), Math.floor(s.pos.y + 1e-3), Math.floor(s.pos.z))) return 'climb';
     return undefined;
   }
@@ -954,7 +986,7 @@ export class Navigator {
       this.requestCorridor(a, 'change');
     }
     if (a.replan === 'start' && a.corridorPending && a.t < a.corridorAt + CORRIDOR_WAIT_TICKS) {
-      this.loop.release();
+      this.idleBody(s); // Track W1: in water, held at its depth
       a.guard.idle();
       return;
     }
@@ -971,6 +1003,7 @@ export class Navigator {
     }
 
     if (a.search && !this.stepSearch(a)) {
+      if (!a.follower) this.idleBody(s); // Track W1: waiting for the plan in water: held at its depth, not sinking
       a.guard.idle();
       return;
     }
@@ -982,7 +1015,7 @@ export class Navigator {
 
     let f = a.follower; // Track BE: let (a skip / snap restarts the leg)
     if (!f) {
-      this.loop.release();
+      this.idleBody(s); // Track W1
       a.guard.idle();
       return;
     }
@@ -1085,6 +1118,12 @@ export class Navigator {
   private deferToPathCheck(a: Active, knock?: Vec3): boolean {
     if (!this.offPath || !a.follower || a.action || a.retreat || a.replan || a.search?.kind === 'main') return false;
     const s = this.loop.state;
+    // Track W1: a correction while swimming or diving (the server's flow push, a waterfall's lift): the water
+    // controllers steer from wherever the body is; the check after it re-plans only once it is off the path
+    if (!knock && s.inWater && !s.gliding && waterMove(a.follower.path[a.follower.index]?.move)) {
+      a.recheck ??= a.t;
+      return true;
+    }
     if (s.gliding || a.follower.checksPaused({ onGround: true, inWater: s.inWater })) return false;
     if (knock) {
       // a knock: where it will land is not known yet; only one expected to land on the leg waits for the landing
@@ -1113,6 +1152,11 @@ export class Navigator {
     if (a.t <= a.recheck) return; // the event's own tick: the body has not moved yet (a knock moves it from this tick on)
     if (!s.onGround && !s.inWater && a.t - a.recheck <= 20) return; // in the air: wait for the landing
     a.recheck = undefined;
+    // Track W1: in water on a swim / dive move: walk on while the body is within WATER_ON_PATH of the leg around it
+    if (s.inWater && !s.gliding && waterMove(f.path[f.index]?.move)) {
+      if (distanceFromPath(s.pos, f.path, f.passedIndex - 1, f.index + 1) > WATER_ON_PATH) a.replan ??= 'correction';
+      return;
+    }
     if (s.inWater || !s.onGround || s.gliding) {
       a.replan ??= 'correction';
       return;
@@ -1355,6 +1399,7 @@ export class Navigator {
       ...(cc?.avoidance ? { avoidance: cc.avoidance } : {}),
       ...(o.falls ? { falls: { ...o.falls } } : {}), // Track BI
       ...(o.farmlandDropCost ? { farmlandDropCost: o.farmlandDropCost } : {}),
+      ...(o.air !== undefined ? { air: o.air } : {}), // Track W1
     };
   }
 
@@ -1425,9 +1470,9 @@ export class Navigator {
     a.replan = undefined;
     dropSearch(a); // Track AB
     a.follower = undefined;
-    const start = locateNode(this.grid, s.pos, this.preferNode(s)); // Track AJ: swimming / on a ladder
+    const start = locateNode(this.grid, s.pos, this.preferNode(s)); // Track AJ: swimming / on a ladder; Track W1: under water
     if (!start) {
-      this.loop.release();
+      this.idleBody(s); // Track W1
       if (this.fail(a, `no standable node at ${fmt(s.pos)}`)) return false;
       a.replan = 'retry';
       a.waitUntil = a.t + 20;
@@ -1473,7 +1518,7 @@ export class Navigator {
     const noAction = new Set([...this.blacklist.cells('place'), ...this.blacklist.cells('use'), ...a.noAction]);
     if (noAction.size) a.pathOpts.noAction = noAction;
     a.search = this.newSearch(a, start, 'main', reason); // Track AB: in the worker when it is ready
-    this.loop.release();
+    this.idleBody(s); // Track W1: in water, held at its depth while the plan is searched
     return true;
   }
 
@@ -1945,6 +1990,13 @@ export class Navigator {
 
 /** Track BE: a knock expected to land farther than this (blocks) from the leg re-plans at once, as main did. */
 const KNOCK_ON_PATH = 1;
+/** Track W1: a correction in water re-plans only when it leaves the body farther than this (blocks) from the leg. */
+const WATER_ON_PATH = 1.5;
+
+/** Track W1: the swimming and diving moves (their controllers steer from wherever the body is). */
+function waterMove(m: PathNode['move'] | undefined): boolean {
+  return m === 'swim' || m === 'dive' || m === 'swimOut';
+}
 
 /**
  * Track BE: where a knock (`set_entity_motion` velocity v) will roughly leave the body: the air

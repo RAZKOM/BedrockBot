@@ -105,6 +105,17 @@ export interface PathCosts {
   parkourRunUp: number;
   /** Extra ticks per parkour jump (a preference for walking around). */
   parkourRisk: number;
+  // Track W1: under water (docs/pathfinding.md "Water (Track W1)", measured on bds-fly)
+  /** Ticks per block swum under water across (forward held: 0.098 blocks per tick steady, 0.089 from rest). */
+  dive: number;
+  /** Ticks per block rising under water (jump held: 0.135 per tick in still water, 0.17 in a waterfall). */
+  diveUp: number;
+  /** Ticks per block sinking under water (sneak held: about 0.2 per tick). */
+  diveDown: number;
+  /** Extra ticks for going under (a preference for the surface; the sky cost `underground` counts water as a roof as well). */
+  diveEnter: number;
+  /** Extra ticks per move into a node whose head is under water (the air runs down there). */
+  underwater: number;
 }
 
 /** Defaults (ticks). `walk` is the sprint rate; Navigator.goto uses TICKS.walk when sprint is off. */
@@ -134,6 +145,12 @@ export const DEFAULT_COSTS: Readonly<PathCosts> = Object.freeze({
   parkourAirDown: 14,
   parkourRunUp: 12,
   parkourRisk: 10,
+  // Track W1 (measured on bds-fly, docs/pathfinding.md "Water (Track W1)")
+  dive: 10.5,
+  diveUp: 8,
+  diveDown: 6,
+  diveEnter: 4,
+  underwater: 2,
 });
 
 /** Ticks for a drop of `blocks` (walk off one block, fall, land). */

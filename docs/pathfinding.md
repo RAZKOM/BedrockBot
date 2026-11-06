@@ -104,7 +104,7 @@ planner: it places with the PlaceSkill directly (docs/wood.md "Pillar-up").
 
 Every move into node B also pays: B's floor `costFactor` (x 5 on leaves, soul sand, honey, slime, mud,
 ice) on the base cost, and `underground` (6) when a roof block is anywhere above B's head. Lava and
-hazards are never entered; water only by the swim moves, on its surface (Track AJ). Heuristic: `walk` x octile distance, plus for
+hazards are never entered; water only by the swim moves, on its surface (Track AJ), and the dive moves under it (Track W1). Heuristic: `walk` x octile distance, plus for
 goals at a known height the levels to it (`columnH`, Goals below: admissible within 4 levels, priced beyond them, so not admissible
 overall, as Baritone's GoalBlock is not). Path nodes carry `cost` (the move's ticks, for the per-move timeout) and `act`
 (`dig` cells, `use` doors, `place` block).
@@ -389,8 +389,9 @@ from crossing a ladder's box (entering its cell towards the box is fine: the bod
 it). `variety` bits (water / climber / ladder seen) let the planner skip all of this on terrain
 without them (the 1000-path benchmark is unchanged).
 
-**Planner (`nav/astar.ts`).** Swim and climb nodes are flagged; a goal is never reached in them. Swim
-nodes are always surface cells: the planner never plans underwater travel (air is not modelled).
+**Planner (`nav/astar.ts`).** Swim and climb nodes are flagged; a goal is never reached in them (Track W1:
+except a `near` goal around a point in water). Swim nodes are always surface cells; travel under water is Track
+W1's dive nodes (see "Water (Track W1)").
 Water is entered from a standing node at the feet level or by a drop of up to 3 onto the surface;
 left onto a bank up to 1 block above the water cell. A ladder is climbed from its foot (the feet cell
 is a climber, the floor below it), entered from its side at the feet level (a shaft without floor) or
@@ -430,10 +431,150 @@ bridge (the follower already holds the lane: 0 falls and 0 corrections either wa
 pushed towards an edge (knockback, a landing off-centre). It cost 1 correction per walk until the
 model learned that BDS keeps the sneak speed for one tick after the release.
 
-Limits: no underwater travel (no air model), no swimming in flowing water (no flow push model), no
-sprint-swimming; no scaffolding; no ladder-to-ladder side steps, no jump off a ladder; parkour only
-cardinal, 1 or 2 blocks, the same height or 1 lower, and only over water or at most a 3-block drop;
-no jump up across a gap. Twisting / weeping / cave vines climb in the physics but have no e2e course.
+Limits: no swimming on flowing water's surface (no flow push model; Track W1 swims through flowing and
+falling water under its surface: see "Water (Track W1)"), no sprint-swimming; no scaffolding; no
+ladder-to-ladder side steps, no jump off a ladder; parkour only cardinal, 1 or 2 blocks, the same height or
+1 lower, and only over water or at most a 3-block drop; no jump up across a gap. Twisting / weeping / cave
+vines climb in the physics but have no e2e course.
+
+## Water (Track W1)
+
+Decision record: [decisions/0070-water-travel.md](decisions/0070-water-travel.md). What the owner saw
+(Realm, 2026-11-06, `!follow` through a cave): the bot did not know it was in water (`start node none` over
+and over while it sank to the bottom), its head stayed under water for 38 s before the surface rule swam it up,
+and it could not climb up water. Track W1 plans through water on the surface (Track AJ's swim nodes) and under
+it (dive nodes), within the air supply, and keeps a following body at the surface.
+
+**One source of truth (`nav/water.ts`).** The planner, the navigator and the follower read these rules;
+nothing else in nav decides "in water" on its own.
+
+| Question | Rule |
+|---|---|
+| in water (`bodyInWater`) | the water physics test (`InputLoopState.inWater`: the body box shrunk by 0.4 at the feet and the head touches a water cell), or water in the feet cell, or in the cell under it while the feet are less than 0.6 above that cell's top (a body bobbing at the surface leaves the physics test for a tick or two) |
+| head under water (`headUnderWater`) | the eye (feet + 1.62) under the water surface of its cell (a source 8/9 high, falling water full) |
+| air | the server's `air` (set_entity_data, 0..300; `MobTracker.selfAir`, wired by commands-portal.ts as `skills.nav.air`), else the navigator's `AirClock` (down 1 a tick with the head under, up 4 a tick out of it) |
+| water a body moves through (`diveWater`) | any water block without a box or hazard: a source, flowing or falling water, kelp, seagrass; not a bubble column (its push is not modelled) |
+
+Left outside (other owners): survival/surface.ts `headInWater` (the SurfaceProcess, by block name),
+fall/damage.ts and fly/landing.ts (liquid names for landings).
+
+**Start node.** `Navigator.preferNode` answers `swim` whenever `bodyInWater`; `locateNode` then finds the
+surface node or, under water, the dive node of the feet cell. While a plan is searched or a corridor awaited
+the navigator holds the body's depth in water (`idleBody`: jump while it sinks) instead of releasing every key.
+A correction while swimming or diving (the server's flow push, a waterfall's lift) re-plans only when it leaves
+the body more than 1.5 from the leg (`WATER_ON_PATH`): the water controllers steer from wherever the body is.
+
+**Dive nodes (`NavGrid.dive`, `moves.dive`, on by default, needs `swim`).** A cell of dive water whose head
+cell holds dive water or is passable and that is no surface swim node. Moves (`astar.ts` `expandDive`):
+
+| Move | From, to | Ticks |
+|---|---|---|
+| down (sneak) | a surface or dive node to the dive node under it | `diveDown` 6 (+ `diveEnter` 4 from the surface) |
+| up (jump) | a dive node to the dive or surface node over it (a water column, a waterfall) | `diveUp` 8 |
+| across | to the 4 neighbours at the same level, the diagonals with both side cells water | `dive` 10.5 (x sqrt 2) |
+| in | from a standing node into water at the feet level that is no surface node (under a low roof, flowing water), or a drop into it | walk + `diveEnter` |
+| out (`swimOut`) | from a dive node onto a floor beside at the feet level or 1 higher (the cell over the head water or free for the rise) | `swimOut` 14 (+ `diveUp` for the step up) |
+| head under water | every move into a node whose eye is under water | + `underwater` 2 |
+
+**Never over a 1-block lip.** A swimming body does not get out onto a bank 2 above the top water cell
+(measured, below); no move is planned there (`swimOut` stays at most 1 above the water cell). A pool whose only
+rim is a lip has no way out without digging or placing a step (not done).
+
+**The air budget.** The planned ticks with the head under water since the last breathing node (`wet`, the
+moves' own ticks, not the preference prices) stay within `airBudget`: from a breathing start (300 - `AIR_KEEP`
+110) / `AIR_MARGIN` 1.5 = 126.7 ticks (about 12 blocks across); from a start under water (air - 20) / 1.5, at
+least `AIR_MIN_BUDGET` 60 (so a way up is always found). `AIR_KEEP` 110 is above the SurfaceProcess threshold
+(100), so the escape never cuts a planned dive. A partial path never ends with the head under water. A `near`
+goal around a point under the surface (its cell and the one above are water: a waypoint on a pool's floor, a
+player diving) is reached at a dive node within its radius too, when the stretch there plus the way straight up
+to air (`diveUp` a water cell; never under a roof) fits `diveGoalBudget` (the same budget without the minimum).
+A `near` goal around a point in water but not under the surface is reached at a surface node only (Track AJ).
+
+**Follower (`nav/follower.ts` `dive`).** Towards the node's column (centred in it for a move up or down the
+same column: a 1 x 1 shaft, a waterfall), the height held with the server's keys: jump while below the node
+(0.135 a tick up), sneak while more than 0.4 above it (about 0.2 a tick down; never with forward: BDS slows a
+sneaking swim differently from the model), else jump only while sinking; no sprint. A dive node is reached with
+the feet from 0.45 under to 0.55 over its height. Up a column onto the surface: centred in it. A path that is
+its start alone at a surface or dive node (a `near` goal reached at once) is held there like a swim / dive node;
+a final surface or dive node is reached within 0.7 of its centre.
+
+**Follow (`follow/follow.ts`).** In water with nothing driving the body (close to the target, a plan reached
+while the target drifts) the jump key is held: it treads water at the surface instead of sinking (the Realm's
+"sank to the bottom while following"). In water `close` holds to the stop distance + 1 (the body bobs) and a
+walk in progress is not cut short at the stop distance; "in water" lasts 10 ticks after the physics test drops
+(a bob's top). A reached plan counts as settled while the body is within the stop distance + 1 (a target that
+drifted less than `replanDistance` is not re-planned for ever).
+
+**Physics (`input/physics.ts`).** The sneak key in water adds -0.04 a tick the way the jump key adds +0.04.
+Still not modelled: the flow push (a waterfall lifts faster than the model, a current drifts the body) and
+sprint-swimming.
+
+**Coarse layer (`coarse/costs.ts`).** A walker's water volume costs `SWIM_TICKS` 10 a block (the fine
+planner's 8.6 on the surface, 10.5 under water across, 8 up; was 3 x `WALK_TICKS` = 12); a horizontal opening
+into, out of or between water volumes is walkable at `SWIM_CLEARANCE` 2 x 1 without a floor; up out of water onto
+floor cells or into water counts. The layer's types are unchanged; a water volume does not say whether its way
+runs on the surface or under it (the fine planner keeps the stretch under water within the air).
+
+**The water course (truth pack `truth:water list | build <name> x y z | clear <name> x y z`).** Six stations
+(`packs/truth/src/water-layout.ts`, the same layouts the unit tests plan on): `pool2` (2 deep), `pool6` (6 deep
+on a 6-high platform, also a start on its floor), `column` (a 1 x 1 water column 8 high in a stone block, entered
+under water from a sunken basin), `waterfall` (falling water in front of a 12-high wall up to a shelf), `lip` (a
+pit whose rim is 2 above the water, with one step out in a corner), `tunnel` (two dry rooms joined by a 3-long
+sump under a roof). Two server facts shaped them (measured): a water fill with a side open to air beside other
+water flows out at once (the column's first inlet spread 4 flowing cells in front of it), so no station has a
+water face towards air but at its top; and `setblock ... flowing_water` keeps the kicked cell a source that
+falls and also spreads one cell forward, which falls too: the waterfall is 2 wide (`flows` lists the cells the
+server ends up with; the e2e compares the bot's world with them: 0 stray, 0 missing on every station).
+
+**Measured (bds-fly, BDS 1.26.60, 2026-11-06).** The probe (a raw client in a 6-deep pool, the model stepped
+beside the server):
+
+| What | Server | Model |
+|---|---|---|
+| idle in deep water | -0.025 a tick down | the same, 0 corrections |
+| sneak from a slow sink | v.y -0.158 after 8 ticks, 3.7 blocks in 30 ticks | -0.158 after 8 ticks (2 corrections of 0.81 before the sneak rule, 0 after) |
+| jump from the floor | 0.135 a tick up in still water | the same, 0 corrections |
+| jump in the waterfall | about 0.17 a tick up | 0.135 (1 correction of 0.2 per climb: not modelled) |
+| forward under water | 0.098 a tick steady, 0.089 from rest | the same, 0 corrections |
+| forward + sneak under water | 2.5 blocks in 40 ticks | 2 corrections of 0.56 (the follower never sneaks with forward) |
+| a current (flowing water at the feet) | drifts the body 0.03 a tick | not modelled (2 corrections of 0.69) |
+| forward + jump against a bank 2 over the top water cell, 300 ticks | the feet bob from 0.98 under to 1.55 over the top cell's floor; never out | the same, 0 corrections |
+| air under water (no Respiration) | down 1 a tick (300 to 13 in about 290 ticks), refilled within seconds at the surface | `AirClock` |
+
+The e2e (`test/e2e/nav-water.test.ts`, `truth:water` stations, the server's air wired; final run):
+
+| Station | Done | Ticks | Plan (swim, dive, swimOut) | In water | Air low | Health | Corrections |
+|---|---|---|---|---|---|---|---|
+| pool2 (2 deep, across) | yes | 120 | 9, 0, 1 | 60 | 300 | 20 | 0 |
+| pool6 (6 deep, across) | yes | 120 | 9, 0, 1 | 60 | 300 | 20 | 0 |
+| column (in under water, 8 up) | yes | 101 | 3, 9, 1 | 75 | 236 | 20 | 0 |
+| waterfall (up to the shelf) | yes | 136 | 2, 12, 1 | 84 | 246 | 20 | 1 (0.20, the waterfall's lift) |
+| lip (out at the step) | yes | 100 | 3, 0, 1 | 35 | 300 | 20 | 0 |
+| tunnel (the 3-long sump) | yes | 118 | 2, 5, 1 | 59 | 252 | 20 | 0 |
+| pool6 from its floor (6 under) | yes | 101 | 5, 4, 1 | 67 | 250 | 20 | 0 |
+| pool6 from the bank to a point on its floor (`near` r 1.5) | yes, 1.0 from the point | 88 | 8, 4, 0 | 64 | 277 | 20 | 0 |
+| follow a player through pool2 (truth:tp moves it across) | yes, on the far bank after 13.1 s | 261 | 9 plans | 158 | 300 | 20 | |
+
+Follow: mid-pool the bot was 3.0 from the swimming target with its feet at the surface (lowest over 4 s 0.7
+under the top water cell's floor), air 300 throughout; the same in the three final runs. Before the treading rule the bot sat on the pool's floor
+there (air 255 to 175 over 4 s, low 145); before the settled slack it stopped 4.4 from the target.
+
+The model's closed loops over the same layouts (`nav-water.test.ts`): pool2 122 ticks, pool6 122, column 102
+(air low 264), waterfall 132 (246), tunnel 118 (255), pool6 from its floor 101 (186 from 200), lip 98, pool6 from
+the bank to its floor 88 (292); 0 stuck.
+
+The owner's cave offline (Track F5a's private fixture, the walk navigator in a closed loop over it, route A's 22
+legs as F5a's harness walks them, `near` r 1.5 at each leg's feet cell): 15 of 22 legs walked before Track W1, 19
+of 22 after. Legs 3, 5, 6 and 7 start or end in the cave's water (a floor under 1 to 7 water cells, a 30-block
+flooded passage); before, each failed at once (`no standable node`, `start node none`); now each swims or dives
+(129 to 254 of its ticks in water). The 3 legs left fail dry: a start the cache reads as a 2-high step, a 21-high
+climb through a narrow shaft (search limit) and a 14-block drop (the long-fall policy is not wired in the
+harness).
+
+Limits: no flow push model (a waterfall climbs with 1 small correction; no swimming against a current on the
+surface); no sprint-swimming (the swim pose and its 1-high gaps); bubble columns are refused; no way out over a
+1-block lip (needs a dig or a placed step); a start in water at an explicit `plan(goal, from)` is not located
+(`locateNode` without the preference; plan from the body's own position).
 
 ## Following a path
 
@@ -912,6 +1053,9 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/e2e/nav-goals.test.ts` | any over 10 logs, getToBlock, yLevel, runAway, surface from a 4-deep shaft, a log walled in glass blacklisted after 3 failures and skipped by the next any |
 | `test/unit/skills/nav-variety.test.ts` | Track AJ: the measured water / climbing / sneak-edge physics; planner swims a river (never below the surface), swimming off, ladder up and down, vines, 1- and 2-block gaps (never over lava or a deep drop), ladder cells passable and scaffolding an obstacle; closed loops: river, ladder up and down, vine wall, both gaps, a 1-wide bridge (no fall) |
 | `test/e2e/nav-swim.test.ts` | Track AJ: a 6-wide river (0 corrections, health 20), an 18-block lane (swim ticks per block), a 1-deep ditch |
+| `test/unit/skills/nav-water.test.ts` | Track W1: the water rules (air budget, air clock, in water / head under water, dive nodes, a point under the surface), the sneak physics; the planner over every `truth:water` station (pool2 on the surface only, pool6 from its floor, the column, the waterfall, the lip refused and the step taken, the tunnel's sump and a 20-long one refused, a low-air start, `near` goals in and under water, never under a roof); closed loops over every station (air kept, 0 stuck) |
+| `test/unit/skills/nav-worker.test.ts`, `coarse.test.ts`, `follow.test.ts` (Track W1 cases) | the worker plans under water as the thread does (dive nodes, the air budget); walk corridors through a flooded cave 3 and 2 high, not 1; treading water in follow (settled, close, the bob's hysteresis, out of water, the target swimming off) |
+| `test/e2e/nav-water.test.ts` (bds-fly, `WATER_BDS_PORT` / `WATER_BDS_CONTAINER`) | Track W1: every station from its start, pool6 from its floor and to a point on its floor, a follow behind a second client moved through a pool; completion, ticks, air low-point, damage, corrections, the bot's water against the layout |
 | `test/e2e/nav-ladder.test.ts` | Track AJ: a 10-block ladder in a 1 x 1 shaft up and out, back down and out; a vine wall (climb ticks per block) |
 | `test/e2e/nav-parkour.test.ts` | Track AJ: 1-block, 2-block and 2-block-1-lower gaps over a 4-deep pit with water, 20 crossings each (`PARKOUR_RUNS`); a 1-wide bridge with a turn, edge sneaking off / on (`BRIDGE_RUNS`) |
 | `test/unit/skills/fall.test.ts` | Track BI: the measured fall damage model (heights, soft landings, enchantments), the waterloggable table and the clutch target, the live policy, long drops in the planner (a 12-block plateau: none without a policy, the drop with its cost, refused over the budget / with maxDrop 1 / health unknown, Feather Falling, the staircase preferred, hay without a budget, the clutch drop, refused onto a top slab / in the no-water area / over clutchMax), the note on a refused fall, closed loops (the drop walked, the note at health 12, the clutch with a fake server), the scan's planner cost on 300 random paths; review fixes: no plannable drop beyond the budget with a bucket (B1), the clutch pricing and its tie, a ladder column, `acceptsDrop`, the drop re-checked before the step off (health 20 -> 12 on the way: no drop, the note), `shouldClutch` (margin, kill, creative, base, fight), no clutch through ladders / cobwebs / with Slow Falling (B3), the guard bounded when the bucket never empties (H1), finish on an exception and on dispose |
@@ -978,7 +1122,8 @@ the cross-country layout; default 7), `MOVE_AREA=x,z` (pin a v2 suite's area to 
   fallback's 40 ms main plan does not (its partial path walks towards the rock and the plan-ahead takes
   over).
 - Swimming, ladders, vines, parkour and edge sneaking: see "Movement variety" (limits there); no
-  scaffolding, no underwater travel, no swimming in flowing water.
+  scaffolding. Under water and up water: see "Water (Track W1)" (limits there: no flow push model, no
+  sprint-swimming, no way out over a 1-block lip, bubble columns refused).
 - Trapdoors (Track BG): a hatch in the roof layer whose ladder ends under it is down only: on BDS an open
   trapdoor is not climbable, so nobody climbs past it from the ladder top (measured; Track BG2: holding jump and
   forward from the top rung the feet peak at 0.55 below the exit floor, every facing and half). The owner's farm

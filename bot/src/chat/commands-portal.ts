@@ -98,6 +98,7 @@ export function registerPortalCommands(d: CommandDeps): void {
   }
   // the End: no irreversible drops (an edge over the void is never taken)
   skills.nav.costsOverride = () => (voidBelow(dim()) ? { maxDrop: 1 } : undefined);
+  skills.nav.air = () => pve?.mobs.selfAir; // Track W1: the server's air supply for plans under water (nav/water.ts)
 
   // ---- fire / lava escape ------------------------------------------------------------------------
   const watch = new BurnWatch(d.conn, { selfRuntimeId: () => world.self.runtimeId, health: () => world.self.health, inLava: () => loop.state.inLava });

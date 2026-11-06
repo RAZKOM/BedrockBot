@@ -6,6 +6,14 @@ import { cleanName, findPlayer, FollowController } from '../../../src/skills/fol
 import type { EntityInfo } from '../../../src/world/types.ts';
 import { FakeLoop, FakeMover, mob } from './pve-fakes.ts';
 
+/** Track W1: a loop whose body is in water (`inWater`, the physics test of the input loop). */
+class WetLoop extends FakeLoop {
+  inWater = true;
+  override get state() {
+    return { ...super.state, inWater: this.inWater };
+  }
+}
+
 function setup(ents: Map<bigint, EntityInfo>) {
   const loop = new FakeLoop();
   const mover = new FakeMover();
@@ -90,6 +98,53 @@ describe('FollowController', () => {
     expect(s.mover.gotos[0]).toMatchObject({ goal: { type: 'near', p: { x: 20, y: -60, z: 5 }, r: 2 }, sprint: true });
     s.mover.finish({ ok: true });
     expect(await p).toEqual({ ok: true });
+  });
+
+  it('Track W1: in water with nothing driving it treads water (jump held) instead of sinking; stops out of it', async () => {
+    const ents = new Map<bigint, EntityInfo>([[5n, mob(5n, 'minecraft:player', { x: 0, y: -59.38, z: 6 }, { username: 'Steve' })]]);
+    const loop = new WetLoop();
+    loop.pos = { x: 0, y: -61.2, z: 0 };
+    const mover = new FakeMover();
+    const f = new FollowController({ loop, mover, entities: () => ents });
+    void f.follow({ playerName: 'steve' });
+    loop.step();
+    expect(mover.gotos).toHaveLength(1);
+    // the walk ends 3.5 from the swimming target (its goal reached): following, settled, treading water
+    loop.pos = { x: 0, y: -61.2, z: 2.5 };
+    mover.finish({ ok: true });
+    await Promise.resolve();
+    loop.step(3);
+    expect(f.status().state).toBe('following');
+    expect(mover.gotos).toHaveLength(1);
+    expect(loop.command.jump).toBe(true);
+    expect(loop.command.forward).toBe(0);
+    // within the stop distance: close, still treading
+    loop.pos = { x: 0, y: -61.2, z: 3.5 };
+    loop.step(2);
+    expect(f.status().state).toBe('close');
+    expect(loop.command.jump).toBe(true);
+    // bobbing a little past the stop distance stays close in water (no cancelled walk every few ticks)
+    loop.pos = { x: 0, y: -60.2, z: 2.6 };
+    loop.step(2);
+    expect(f.status().state).toBe('close');
+    expect(mover.gotos).toHaveLength(1);
+    // out of the water (on a step 2.5 from the target): the jump key goes
+    loop.pos = { x: 0, y: -61, z: 3.5 };
+    loop.inWater = false;
+    loop.step(2);
+    expect(loop.command.jump).toBe(false);
+    // dry and close: never jumps
+    loop.step(5);
+    expect(loop.command.jump).toBe(false);
+    // the target swims off: the navigator drives (treading ends, no jump left over from it)
+    loop.inWater = true;
+    loop.step(2);
+    expect(loop.command.jump).toBe(true);
+    ents.get(5n)!.pos.z = 12;
+    loop.step(1);
+    expect(mover.nav.busy).toBe(true);
+    expect(f.status().state).toBe('following');
+    f.dispose();
   });
 
   it('finds players by name, ignoring case and formatting codes', () => {

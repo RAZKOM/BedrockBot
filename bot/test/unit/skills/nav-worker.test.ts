@@ -794,4 +794,44 @@ describe('planner worker: a real worker thread', () => {
     }
     client.dispose();
   }, 60_000);
+
+  it('Track W1: plans under water (dive nodes, the air budget) identically in the worker', async () => {
+    // a stone plateau x -8..8, z -8..8 with its top at -50 (feet -49); a pool in it x -2..2, z -2..2, water -58..-50
+    const blocks = (x: number, y: number, z: number): number => {
+      const inPlateau = x >= -8 && x <= 8 && z >= -8 && z <= 8 && y >= -60 && y <= -50;
+      if (inPlateau && x >= -2 && x <= 2 && z >= -2 && z <= 2 && y >= -58) return WATER;
+      if (inPlateau) return STONE;
+      if (y < -61) return STONE;
+      if (y === -61) return GRASS;
+      return AIR;
+    };
+    const F = fixtureWorld(blocks);
+    const client = new PlannerClient(F.world);
+    client.start();
+    await until(() => client.ready, 20_000);
+    const floor = { x: 0, y: -58, z: 0 };
+    const cases: { air?: number; start: Vec3; goal: Vec3 }[] = [
+      { start: floor, goal: { x: 6, y: -49, z: 6 } },
+      { air: 300, start: floor, goal: { x: 6, y: -49, z: 6 } },
+      { air: 25, start: floor, goal: { x: 6, y: -49, z: 6 } },
+      { air: 200, start: { x: 6, y: -49, z: 6 }, goal: { x: -6, y: -49, z: -6 } },
+    ];
+    for (const c of cases) {
+      const air = c.air !== undefined ? { air: c.air } : {};
+      const spec: WorkerPlanOptions = { maxNodes: 100_000, maxMs: 10_000, allowBreak: false, allowPlace: false, allowOpen: false, ...air };
+      const t = findPath(new NavGrid(worldSource(F.world)), c.start, { type: 'block', p: c.goal }, { maxNodes: 100_000, maxMs: 10_000, ...air });
+      const ws = client.search('main', c.start, { type: 'block', p: c.goal }, spec, 0);
+      let w: PathResult | undefined;
+      while (!(w = ws.step())) {
+        if (ws.failed) throw new Error('worker search failed');
+        await sleep(1);
+      }
+      const what = `air ${c.air}: thread ${t.status} ${t.cost.toFixed(2)} worker ${w.status} ${w.cost.toFixed(2)}`;
+      expect(w.status, what).toBe(t.status);
+      expect(Math.abs(w.cost - t.cost), what).toBeLessThanOrEqual(1e-6);
+      expect(w.path.map((n) => `${n.move}@${n.x},${n.y},${n.z}`), what).toEqual(t.path.map((n) => `${n.move}@${n.x},${n.y},${n.z}`));
+      if (c.start === floor) expect(t.path.some((n) => n.move === 'dive'), what).toBe(true);
+    }
+    client.dispose();
+  }, 60_000);
 });

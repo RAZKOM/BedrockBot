@@ -5,8 +5,19 @@ import type { CoarseCost, CoarseMode, Portal, PortalId, PortalOutcome, Volume, V
 
 /** Ticks per block walked (a sprint is 5.6 blocks / s = 3.6 ticks / block; a walk 4.3 / s = 4.7). */
 export const WALK_TICKS = 4;
-/** Ticks per block swum. */
-export const SWIM_FACTOR = 3;
+/**
+ * Ticks per block swum (Track W1, measured on bds-fly: 8.6 on the surface, 10.5 under water across, 8 up a
+ * column or a waterfall; the fine planner's `swim` / `dive` costs). A water volume does not say whether its
+ * way runs on the surface or under it; the fine planner keeps the stretch under water within the air.
+ */
+export const SWIM_TICKS = 10;
+/** The swim price as a factor of WALK_TICKS (kept for readers of the old constant). */
+export const SWIM_FACTOR = SWIM_TICKS / WALK_TICKS;
+/**
+ * Track W1: a walker swims through an opening at least this big (the 1.8-high body: 2 cells high, 1 wide); the
+ * same as walking, for a horizontal opening into or out of water and for one between two water volumes.
+ */
+export const SWIM_CLEARANCE = Object.freeze({ height: 2, width: 1 });
 /** Ticks added per portal crossed (a doorway, a step, a turn). */
 export const PORTAL_TICKS = 10;
 /** Ticks per block through unknown space (walk / mine): high, so a known way of 4 x the length still wins. */
@@ -55,8 +66,13 @@ const dist = (a: { x: number; y: number; z: number }, b: { x: number; y: number;
 /** The ticks of `blocks` inside volume `to` for a walker: swimming is slow, unknown space is expensive. */
 function travelTicks(to: Volume, blocks: number, unknownCost: number): number {
   if (to.kind === 'unknown') return blocks * unknownCost;
-  if (to.kind === 'water') return blocks * WALK_TICKS * SWIM_FACTOR;
+  if (to.kind === 'water') return blocks * SWIM_TICKS; // Track W1
   return blocks * WALK_TICKS;
+}
+
+/** Track W1: an opening the body swims through (SWIM_CLEARANCE). */
+function swimmable(portal: Portal): boolean {
+  return portal.clearance.height >= SWIM_CLEARANCE.height && portal.clearance.width >= SWIM_CLEARANCE.width;
 }
 
 /**
@@ -68,7 +84,11 @@ export function walkable(portal: Portal, from: Volume, to: Volume): boolean {
   if (portal.dug !== undefined) return false;
   if (to.kind === 'sky' && to.floorCells === 0) return false;
   if (to.kind === 'unknown' || from.kind === 'unknown') return true;
-  if (portal.axis !== 'y') return portal.clearance.height >= 2 && portal.clearance.width >= 1 && (portal.floorY !== undefined || from.kind === 'water' || to.kind === 'water');
+  if (portal.axis !== 'y') {
+    // Track W1: into, out of or between water volumes: an opening the body swims through, no floor needed
+    if (from.kind === 'water' || to.kind === 'water') return swimmable(portal);
+    return portal.clearance.height >= 2 && portal.clearance.width >= 1 && portal.floorY !== undefined;
+  }
   const down = portal.a === from.id;
   if (down) return portal.floorY !== undefined || to.kind === 'water';
   if (from.kind === 'water') return to.floorCells > 0 || to.kind === 'water';

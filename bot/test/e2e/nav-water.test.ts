@@ -1,0 +1,264 @@
+// e2e (tag @bds), Track W1 (docs/pathfinding.md "Water (Track W1)", decisions/0070-water-travel.md): walking and
+// following through water on bds-fly (udp 19204; WATER_BDS_PORT / WATER_BDS_CONTAINER move it). The truth pack
+// builds each station of the water course (`truth:water build`: packs/truth/src/water-layout.ts, the same layouts
+// the unit tests plan on) in a private area; the bot walks from each start to its goal with the server's air
+// supply wired into its plans (as the session does), and follows a second client moved through a pool by
+// truth:tp. Per station: completion, time, the air low-point (set_entity_data `air`, 0..300), damage (the
+// lowest health the server reported) and corrections. W1_OUT=<file> writes the summary there as well.
+import { writeFileSync } from 'node:fs';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { Connection } from '../../src/connection/connection.ts';
+import { silentLogger } from '../../src/log.ts';
+import { FollowController } from '../../src/skills/follow/follow.ts';
+import type { NavGoal } from '../../src/skills/nav/goals.ts';
+import type { Vec3 } from '../../src/world/types.ts';
+import { WATER_STATIONS, waterStation, type WaterStationName } from '../../../packs/truth/src/water-layout.ts';
+import { E2E_VERSION, bdsTarget } from './env.ts';
+import { E2E, connectBot, describeCorrections, disconnectBot, fmt, sleep, teleport, type MoveBot } from './move-truth.ts';
+import { privateOrigin } from './nav-worlds.ts';
+
+const PORT = Number(process.env.WATER_BDS_PORT ?? 19204);
+const CONTAINER = process.env.WATER_BDS_CONTAINER ?? 'bds-fly';
+const TARGET = bdsTarget('127.0.0.1', PORT);
+/** Stations along +x, this far apart (a footprint is x -4..4). */
+const SPACING = 12;
+
+interface Built {
+  name: string;
+  origin: Vec3;
+  start: Vec3;
+  deepStart?: Vec3;
+  goal: Vec3;
+  surfaceY: number;
+  ticks: number;
+}
+
+describe.skipIf(!E2E)('@bds nav: water (Track W1, bds-fly)', () => {
+  let bot: MoveBot;
+  const o = { ...privateOrigin(), y: -60 };
+  const summary: string[] = [];
+  const built = new Map<string, Built>();
+  /** The server's air supply for the bot (set_entity_data `air`). */
+  let air: number | undefined;
+  const at = (i: number): Vec3 => ({ x: o.x + i * SPACING, y: o.y, z: o.z });
+  const FOLLOW_AT = WATER_STATIONS.length; // the follow pool after the six stations
+
+  const water = async (sub: 'build' | 'clear', name: WaterStationName, p: Vec3): Promise<Built> => {
+    const r = await bot.truth.cmd<Built>('water', [sub, name, p.x, p.y, p.z], 180_000);
+    if (!r.ok) throw new Error(`truth:water ${sub} ${name}: ${r.reason}`);
+    return r.data;
+  };
+
+  beforeAll(async () => {
+    bot = await connectBot('NavWater', { target: TARGET, container: CONTAINER });
+    bot.conn.on('set_entity_data', (p) => {
+      if (String(p.runtime_entity_id) !== String(bot.world.self.runtimeId)) return;
+      for (const m of (p.metadata ?? []) as { key: string; value: unknown }[]) if (m.key === 'air' && typeof m.value === 'number') air = m.value;
+    });
+    bot.skills.nav.air = () => air; // as the session wires it (chat/commands-portal.ts)
+    await teleport(bot, { x: o.x + 0.5, y: o.y, z: o.z - 1.5 });
+    for (let i = 0; i < WATER_STATIONS.length; i++) {
+      const name = WATER_STATIONS[i]!;
+      const b = await water('build', name, at(i));
+      built.set(name, b);
+      summary.push(`built ${name} at ${fmt(b.origin)} in ${b.ticks} ticks`);
+    }
+    built.set('follow', await water('build', 'pool2', at(FOLLOW_AT)));
+  }, 600_000);
+
+  afterAll(async () => {
+    const text = `[nav-water e2e] area ${o.x},${o.z}\n  ${summary.join('\n  ')}`;
+    console.log(text);
+    if (process.env.W1_OUT) writeFileSync(process.env.W1_OUT, text);
+    try {
+      if (bot) {
+        await teleport(bot, { x: o.x + 0.5, y: o.y, z: o.z - 1.5 });
+        for (let i = 0; i < WATER_STATIONS.length; i++) await water('clear', WATER_STATIONS[i]!, at(i));
+        await water('clear', 'pool2', at(FOLLOW_AT));
+      }
+    } finally {
+      await disconnectBot(bot);
+    }
+  }, 600_000);
+
+  /** Watch the run: the air low-point, the lowest health, the ticks in water and with the head under. */
+  function watch() {
+    let minAir = air ?? 300;
+    let minHealth = bot.world.self.health;
+    let wet = 0;
+    let minFeet = Infinity;
+    const off = bot.loop.onBeforeStep((_t, s) => {
+      if (air !== undefined) minAir = Math.min(minAir, air);
+      minHealth = Math.min(minHealth, bot.world.self.health);
+      if (s.inWater) wet++;
+      minFeet = Math.min(minFeet, s.pos.y);
+    });
+    return {
+      stop: () => {
+        off();
+        return { minAir, minHealth, wet, minFeet };
+      },
+    };
+  }
+
+  /**
+   * The station's water as the bot's world model has it against the layout (its water ops and `flows`): cells
+   * with water the layout does not have (a fill that flowed out) and layout water the world lacks.
+   */
+  function waterCheck(name: WaterStationName, origin: Vec3): { stray: string[]; missing: string[] } {
+    const st = waterStation(name, origin)!;
+    const want = new Set<string>();
+    const key = (x: number, y: number, z: number): string => `${x},${y},${z}`;
+    for (const op of st.ops)
+      for (let y = op.from.y; y <= op.to.y; y++)
+        for (let z = op.from.z; z <= op.to.z; z++)
+          for (let x = op.from.x; x <= op.to.x; x++) {
+            if (op.block === 'water') want.add(key(x, y, z));
+            else want.delete(key(x, y, z));
+          }
+    for (const f of st.flows) want.add(key(f.p.x, f.p.y, f.p.z));
+    const stray: string[] = [];
+    const missing: string[] = [];
+    const { min, max } = st.bounds;
+    for (let y = min.y; y <= max.y; y++)
+      for (let z = min.z; z <= max.z; z++)
+        for (let x = min.x; x <= max.x; x++) {
+          const b = bot.world.blockAt({ x, y, z });
+          const wet = b?.name === 'water' || b?.name === 'flowing_water';
+          const rel = `${x - origin.x},${y - origin.y},${z - origin.z}`;
+          if (wet && !want.has(key(x, y, z))) stray.push(`${rel}${JSON.stringify(b.states)}`);
+          if (!wet && want.has(key(x, y, z))) missing.push(`${rel} ${b?.name ?? 'unloaded'}`);
+        }
+    return { stray, missing };
+  }
+
+  async function station(label: string, from: Vec3, goal: Vec3, navGoal: NavGoal = { type: 'block', p: goal }) {
+    await teleport(bot, from, 0);
+    const c0 = bot.corrections.length;
+    const plan = bot.skills.nav.plan(navGoal);
+    const w = watch();
+    const t0 = performance.now();
+    const res = await bot.skills.goto(navGoal, { timeoutTicks: 1500 });
+    const ms = performance.now() - t0;
+    await bot.loop.waitTicks(10);
+    const m = w.stop();
+    const rep = bot.skills.status().lastGoto!;
+    const got = bot.corrections.slice(c0);
+    const truth = await bot.truth.pos(bot.name);
+    const health = (truth as unknown as { health: number | null }).health;
+    const moves = plan ? plan.path.map((n) => n.move) : [];
+    const count = (k: string): number => moves.filter((x) => x === k).length;
+    const line =
+      `${label}: ${res.ok ? 'ok' : JSON.stringify(res)} in ${rep.ticks} ticks (${(ms / 1000).toFixed(1)} s), ${rep.distance.toFixed(1)} blocks, plan ${plan?.status ?? 'none'} ` +
+      `(swim ${count('swim')}, dive ${count('dive')}, swimOut ${count('swimOut')}), in water ${m.wet} ticks, air low ${m.minAir}, min health ${m.minHealth}, truth health ${health}, ` +
+      `${got.length} correction(s), stuck ${rep.stuck}, end ${fmt(truth.location)}${describeCorrections(got)}`;
+    summary.push(line);
+    return { res, rep, got, m, moves, line, truth, health };
+  }
+
+  const near = (p: Vec3, goal: Vec3): boolean => Math.hypot(p.x - (goal.x + 0.5), p.z - (goal.z + 0.5)) < 1.2 && Math.abs(p.y - goal.y) < 0.6;
+
+  for (const name of WATER_STATIONS) {
+    it(`${name}: from the start to the goal, no damage, air kept`, async () => {
+      const b = built.get(name)!;
+      const r = await station(name, b.start, b.goal);
+      const wc = waterCheck(name, b.origin);
+      summary.push(`  ${name} water vs the layout: ${wc.stray.length} stray ${wc.stray.slice(0, 6).join(' ')}, ${wc.missing.length} missing ${wc.missing.slice(0, 6).join(' ')}`);
+      expect(wc.stray, `${name}: water the layout does not have`).toEqual([]);
+      expect(r.res, r.line).toEqual({ ok: true });
+      expect(near(r.truth.location, b.goal), r.line).toBe(true);
+      expect(r.m.minHealth, r.line).toBe(20);
+      expect(r.m.minAir, r.line).toBeGreaterThan(100);
+      if (name === 'lip') expect(r.moves).toContain('swimOut');
+      if (name === 'column' || name === 'waterfall' || name === 'tunnel') expect(r.moves).toContain('dive');
+    }, 180_000);
+  }
+
+  it('pool6 from its floor (6 under the surface): up and out, never sinking', async () => {
+    const b = built.get('pool6')!;
+    const r = await station('pool6 from the floor', b.deepStart!, b.goal);
+    expect(r.res, r.line).toEqual({ ok: true });
+    expect(near(r.truth.location, b.goal), r.line).toBe(true);
+    expect(r.m.minFeet, r.line).toBeGreaterThan(b.deepStart!.y - 0.3);
+    expect(r.m.minHealth, r.line).toBe(20);
+  }, 180_000);
+
+  it('pool6 from the bank down to a point on its floor (a waypoint under water): done there', async () => {
+    const b = built.get('pool6')!;
+    const p = { x: b.origin.x + 0.5, y: b.origin.y, z: b.origin.z + 12.5 };
+    const r = await station('pool6 bank to the floor', b.start, b.goal, { type: 'near', p, r: 1.5 });
+    expect(r.res, r.line).toEqual({ ok: true });
+    expect(r.moves.at(-1), r.line).toBe('dive');
+    // the goal's node within 1.5 of the point, the body near that node's centre (and the idle sink after the end)
+    expect(Math.hypot(r.truth.location.x - p.x, r.truth.location.y - p.y, r.truth.location.z - p.z), r.line).toBeLessThan(2.4);
+    expect(r.m.minHealth, r.line).toBe(20);
+    expect(r.m.minAir, r.line).toBeGreaterThan(150);
+  }, 180_000);
+
+  it('follows a player through a pool: treads water while close, out the far side, no stall', async () => {
+    const b = built.get('follow')!;
+    const x = b.origin.x + 0.5;
+    const z0 = b.origin.z;
+    const name = `Swim${Math.random().toString(36).slice(2, 8)}`;
+    const conn = new Connection({ version: E2E_VERSION, username: name, logger: silentLogger, reconnect: false });
+    await conn.connect(TARGET);
+    const follow = new FollowController({ loop: bot.loop, mover: bot.skills, entities: () => bot.world.entities });
+    try {
+      const tp = (p: Vec3) => bot.truth.tp(name, p, 0, 0);
+      await teleport(bot, { x, y: o.y, z: z0 + 0.5 }, 0);
+      await tp({ x, y: o.y, z: z0 + 3.5 });
+      const w = watch();
+      const done = follow.follow({ playerName: name });
+      const t0 = performance.now();
+      // across the pool (feet in its top water cell), a block every 250 ms, a stop in the middle, out on the far bank
+      for (let z = 4; z <= 8; z++) {
+        await tp({ x, y: z >= 4 && z <= 12 ? o.y - 1 : o.y, z: z0 + z + 0.5 });
+        await sleep(250);
+      }
+      // the stop in the middle: the bot comes up to the swimmer and treads water there (its lowest feet and air while it waits)
+      await sleep(3000);
+      const waitFrom = bot.loop.state.pos.y;
+      let lowWhileClose = Infinity;
+      const airAtWait = air ?? 300;
+      const offLow = bot.loop.onBeforeStep((_t, s) => {
+        lowWhileClose = Math.min(lowWhileClose, s.pos.y);
+      });
+      await sleep(4000);
+      offLow();
+      const airAfterWait = air ?? 300;
+      const midState = follow.status();
+      for (let z = 9; z <= 15; z++) {
+        await tp({ x, y: z <= 12 ? o.y - 1 : o.y, z: z0 + z + 0.5 });
+        await sleep(250);
+      }
+      const goal = { x, y: o.y, z: z0 + 15.5 };
+      let reached = -1;
+      for (let i = 0; i < 300; i++) {
+        const p = bot.loop.state.pos;
+        if (Math.hypot(p.x - goal.x, p.y - goal.y, p.z - goal.z) < 3.5 && p.y > o.y - 0.4) {
+          reached = performance.now() - t0;
+          break;
+        }
+        await sleep(100);
+      }
+      const st = follow.status();
+      follow.stop();
+      const res = await done;
+      const m = w.stop();
+      const line =
+        `follow through a pool: ${reached >= 0 ? `with the target on the far bank after ${(reached / 1000).toFixed(1)} s` : 'never reached the target'}, follow ${JSON.stringify(res)}, ` +
+        `mid-pool ${midState.state} at ${midState.distance?.toFixed(1)} (feet ${waitFrom.toFixed(2)}, lowest over 4 s ${lowWhileClose.toFixed(2)}, air ${airAtWait} -> ${airAfterWait}), end ${st.state} at ${st.distance?.toFixed(1)}, ` +
+        `in water ${m.wet} ticks, air low ${m.minAir}, min health ${m.minHealth}, end ${fmt(bot.loop.state.pos)}`;
+      summary.push(line);
+      expect(reached, line).toBeGreaterThan(0);
+      expect(m.minHealth, line).toBe(20);
+      // treading water: never down to the pool's floor (feet -62) while waiting by the swimming target, breathing
+      expect(midState.distance!, line).toBeLessThan(4.5);
+      expect(lowWhileClose, line).toBeGreaterThan(o.y - 1.75);
+      expect(airAfterWait, line).toBeGreaterThan(250);
+    } finally {
+      follow.dispose();
+      await conn.disconnectAndFlush('test done');
+    }
+  }, 180_000);
+});

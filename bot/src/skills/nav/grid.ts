@@ -10,6 +10,7 @@ import { PHYSICS } from '../input/physics.ts';
 import type { Box } from '../../world/types.ts';
 import { YES, avoidWalkingInto, canWalkOn, canWalkThroughClass, fullFloor, isClimbable, isStillWater } from './baritone/helper.ts'; // Track BB: the shared rule set
 import { handUsable } from '../interact/use.ts'; // Track BB: iron doors / trapdoors are redstone only (UseSkill refuses them at run time)
+import { EYE, diveWater } from './water.ts'; // Track W1: under water
 
 /** Packs integer block coordinates into one exact double (x, z within +-2^20, y within +-512). */
 export function cellKey(x: number, y: number, z: number): number {
@@ -158,6 +159,8 @@ export class NavGrid {
   private readonly stands = new Map<number, number>();
   /** Track AJ: swim() results (feet or NaN), like `stands`. */
   private readonly swims = new Map<number, number>();
+  /** Track W1: dive() results (feet or NaN), like `swims` (dive reads swim's cells and the head cell). */
+  private readonly dives = new Map<number, number>();
   /** Highest roof block per column, 16 x 16 per chunk (SKY_UNSET = not computed). */
   private readonly sky = new Map<number, Int32Array>();
   private readonly minYOpt: number | undefined;
@@ -203,12 +206,18 @@ export class NavGrid {
       for (let dy = -2; dy <= 0; dy++) this.swims.delete(cellKey(x, y + dy, z));
       for (const [dx, dz] of SIDES) this.swims.delete(cellKey(x + dx, y, z + dz));
     }
+    // Track W1: dive(x, y', z) reads swim(x, y', z) and cell y' + 1
+    if (this.dives.size) {
+      for (let dy = -2; dy <= 0; dy++) this.dives.delete(cellKey(x, y + dy, z));
+      for (const [dx, dz] of SIDES) this.dives.delete(cellKey(x + dx, y, z + dz));
+    }
   }
 
   clear(): void {
     this.cells.clear();
     this.stands.clear();
     this.swims.clear(); // Track AJ
+    this.dives.clear(); // Track W1
     this.sky.clear();
   }
 
@@ -271,6 +280,46 @@ export class NavGrid {
       if (n.liquid === 'lava' || (n.liquid === 'water' && !stillWater(n)) || n.danger) return BLOCKED;
     }
     return y;
+  }
+
+  /**
+   * Track W1: feet height (y) of a body under water in cell (x, y, z) (a dive node): the feet cell holds
+   * water the body moves through (water.ts `diveWater`: a source, flowing or falling water, kelp, seagrass;
+   * no bubble column, no box) and the head cell (y + 1) holds such water or is passable; a cell that is a
+   * surface swim node (`swim`) is not a dive node. The body floats there on the jump and sneak keys (the
+   * follower holds its depth). BLOCKED / UNKNOWN as for `stand`.
+   */
+  dive(x: number, y: number, z: number): number | undefined {
+    const k = cellKey(x, y, z);
+    const hit = this.dives.get(k);
+    if (hit !== undefined) return hit;
+    const f = this.computeDive(x, y, z);
+    if (f !== undefined) this.dives.set(k, f);
+    return f;
+  }
+
+  private computeDive(x: number, y: number, z: number): number | undefined {
+    const c = this.cls(x, y, z);
+    if (!c) return UNKNOWN;
+    if (!diveWater(c)) return BLOCKED;
+    const h = this.cls(x, y + 1, z);
+    if (!h) return UNKNOWN;
+    if (!diveWater(h) && !passable(h)) return BLOCKED;
+    const s = this.swim(x, y, z);
+    if (s === undefined) return UNKNOWN;
+    return Number.isNaN(s) ? y : BLOCKED;
+  }
+
+  /** Track W1: cell (x, y, z) is water a body moves through (water.ts `diveWater`). undefined = not loaded. */
+  water(x: number, y: number, z: number): boolean | undefined {
+    const c = this.cls(x, y, z);
+    return c && diveWater(c);
+  }
+
+  /** Track W1: the eye of a body with its feet at the bottom of cell (x, y, z) is under water (the air runs down there). */
+  submerged(x: number, y: number, z: number): boolean {
+    const c = this.cls(x, y + 1, z);
+    return c?.liquid === 'water' && EYE - 1 < c.liquidHeight;
   }
 
   /**

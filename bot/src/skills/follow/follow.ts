@@ -24,10 +24,10 @@ import { entityFeet } from '../combat/hostiles.ts';
 export type FollowTarget = { runtimeId: bigint } | { playerName: string };
 
 export interface FollowLoop {
-  readonly state: { pos: Vec3; ready: boolean };
+  readonly state: { pos: Vec3; ready: boolean; inWater?: boolean };
   readonly command: Readonly<MoveCommand>;
   setCommand(c: Partial<MoveCommand>): void;
-  onBeforeStep(fn: (tick: bigint, state: { pos: Vec3; ready: boolean }) => void): () => void;
+  onBeforeStep(fn: (tick: bigint, state: { pos: Vec3; ready: boolean; inWater?: boolean }) => void): () => void;
 }
 
 export interface FollowMover {
@@ -92,6 +92,10 @@ interface Active {
   arrived: boolean;
   maxDistance: number;
   failUntil: number;
+  /** Track W1: in water with nothing driving, the jump key held (treading water at the surface instead of sinking). */
+  treading: boolean;
+  /** Track W1: the last tick the body was in water (a bob at the surface leaves the water physics for a few ticks). */
+  wetAt: number;
   resolve: (r: FollowResult) => void;
 }
 
@@ -164,6 +168,8 @@ export class FollowController {
         arrived: false,
         maxDistance: 0,
         failUntil: 0,
+        treading: false,
+        wetAt: -Infinity,
         resolve,
       };
     });
@@ -188,10 +194,28 @@ export class FollowController {
     return 'runtimeId' in t ? ents.get(t.runtimeId) : findPlayer(ents, t.playerName);
   }
 
-  private onTick(s: { pos: Vec3; ready: boolean }): void {
+  private onTick(s: { pos: Vec3; ready: boolean; inWater?: boolean }): void {
     const a = this.active;
     if (!a || !s.ready) return;
+    // Track W1: treading water stops once the body is out of it or the navigator drives again
+    if (a.treading && (s.inWater !== true || this.d.mover.nav.busy)) {
+      a.treading = false;
+      if (!this.d.mover.nav.busy) this.d.loop.setCommand({ jump: false });
+    }
     a.t++;
+    this.track(a, s);
+    // Track W1: in water with nothing driving the body (close to the target, a goal reached while the target drifts
+    // less than replanDistance, a failed plan's pause, at the last known position): tread water. The jump key keeps
+    // the head at the surface; without it the body sank to the bottom while it waited (the Realm 2026-11-06, and
+    // bds-fly: 155 air gone on a pool's floor 3.0 blocks from a swimming target)
+    if (this.active === a && s.inWater === true && !this.d.mover.nav.busy) {
+      a.treading = true;
+      this.d.loop.setCommand({ jump: true, forward: 0, sneak: false, sprint: false });
+    }
+  }
+
+  /** Follow the target one tick: close, re-plan, or go to its last known position. */
+  private track(a: Active, s: { pos: Vec3; ready: boolean; inWater?: boolean }): void {
     const e = this.resolve(a.target);
     const mover = this.d.mover;
     if (e) {
@@ -205,7 +229,13 @@ export class FollowController {
       a.goingToLast = false;
       const d = dist(s.pos, f);
       if (a.arrived) a.maxDistance = Math.max(a.maxDistance, d);
-      if (d <= a.o.stopDistance) {
+      // Track W1: in water a walk in progress is not cut short at the stop distance (it ends on the bank for a
+      // target on land, at the surface for a swimming one: the planner's goal rule), and bobbing at the surface
+      // (up to 0.9 a bob) does not toggle `close` (a cancelled walk every few ticks on bds-fly)
+      if (s.inWater === true) a.wetAt = a.t;
+      const wet = a.t - a.wetAt <= WET_MEMORY;
+      const closeAt = a.o.stopDistance + (wet && a.state === 'close' ? WATER_CLOSE_SLACK : 0);
+      if (d <= closeAt && !(wet && mover.nav.busy && a.state !== 'close')) {
         a.arrived = true;
         if (a.state !== 'close') {
           a.state = 'close';
@@ -223,7 +253,9 @@ export class FollowController {
       // re-plan when the target moved more than replanDistance, or the last walk ended without
       // reaching the goal; a goal reached for this target position (3D distance just over the stop
       // distance while the `near` goal counts node centres) needs no new walk
-      const settled = a.planOk && moved <= a.o.replanDistance;
+      // (Track W1: and the body is still within a block of the stop distance: a target that drifted less than
+      // replanDistance but away, as a swimmer does, is followed again instead of watched from 4.4 blocks for good)
+      const settled = a.planOk && moved <= a.o.replanDistance && d <= a.o.stopDistance + SETTLED_SLACK;
       if (((!mover.nav.busy && !settled) || moved > a.o.replanDistance) && a.t - a.planT >= 5) this.plan(a, f, a.o.stopDistance, d > a.o.sprintDistance);
       return;
     }
@@ -265,6 +297,12 @@ export class FollowController {
 
 /** A move longer than this between two ticks is a teleport. */
 const JUMP = 8;
+/** Track W1: in water `close` holds to the stop distance plus this (the body bobs at the surface). */
+const WATER_CLOSE_SLACK = 1;
+/** Track W1: the body counts as in water this many ticks after it left the water physics (a bob's top). */
+const WET_MEMORY = 10;
+/** Track W1: a reached goal counts as settled while the body is within the stop distance plus this. */
+const SETTLED_SLACK = 1;
 
 function describe(t: FollowTarget, ents: ReadonlyMap<bigint, EntityInfo>): string {
   if ('playerName' in t) return t.playerName;

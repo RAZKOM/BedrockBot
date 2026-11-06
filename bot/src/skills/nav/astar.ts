@@ -18,7 +18,15 @@
 // Track AJ, movement variety (`moves`, docs/pathfinding.md "Movement variety"):
 //   swim     - into still water (walk in, or drop up to 3 onto the surface), between surface cells
 //              (8 neighbours), never under water.
-//   swimOut  - from the surface onto a bank at the water level up to 1 block higher.
+//   swimOut  - from the surface onto a bank at the water level up to 1 block higher; Track W1: from under
+//              water onto a floor beside at the feet level or 1 higher. Never over a 1-block lip (a bank 2
+//              above the top water cell): BDS does not lift a swimming body that high (measured, the model agrees).
+// Track W1, under water (`moves.dive`, docs/pathfinding.md "Water (Track W1)", nav/water.ts):
+//   dive     - into a dive node (NavGrid.dive: the body's cells water, not a surface node): down from the
+//              surface or a dive node (sneak), up a column or a waterfall (jump), across under water (8
+//              neighbours), in from a floor at the feet level or a drop. Up from a dive node onto the
+//              surface is a `swim` move. Each stretch with the head under water stays within the air
+//              budget (PathOptions.air, water.ts airBudget); a partial path never ends under water.
 //   climb    - up / down a ladder or vine column, onto it from its foot, its side or its top.
 //   climbOut - off a climber column onto a floor beside it, from its level up to 1 higher.
 //   parkour  - over a 1-block gap (walking) or a 2-block gap (2-block sprinted run-up behind the
@@ -42,11 +50,12 @@ import { goalTest, levelWeights, type NavGoal, type GoalTest } from './goals.ts'
 import { longDrops, type LongDrop } from '../fall/plan.ts'; // Track BI: long falls
 import type { FallPolicy } from '../fall/policy.ts';
 import { CROSS_BLOCKED, CROSS_CLEAR, CROSS_TOGGLE, VARIETY_CLIMBER, VARIETY_LADDER, VARIETY_TRAPDOOR, VARIETY_WATER, cellKey, type NavGrid } from './grid.ts';
+import { airBudget, diveGoalBudget, underSurface } from './water.ts'; // Track W1
 
 export type { PathCosts } from './costs.ts';
 export { DEFAULT_COSTS } from './costs.ts';
 
-export type MoveKind = 'start' | 'walk' | 'diag' | 'jump' | 'drop' | 'pillar' | 'swim' | 'swimOut' | 'climb' | 'climbOut' | 'parkour' | 'downward' | 'sneak'; // Track AJ: swim .. parkour; Track BC: downward, sneak
+export type MoveKind = 'start' | 'walk' | 'diag' | 'jump' | 'drop' | 'pillar' | 'swim' | 'swimOut' | 'climb' | 'climbOut' | 'parkour' | 'downward' | 'sneak' | 'dive'; // Track AJ: swim .. parkour; Track BC: downward, sneak; Track W1: dive
 
 /** World changes a move needs before (dig, use) or while (place) it is walked. */
 export interface NodeActions {
@@ -100,6 +109,11 @@ export interface MoveSet {
    * it onto a floor / into water, up a ladder through one above (a closed one is opened first: `allowOpen`).
    */
   trapdoor?: boolean;
+  /**
+   * Track W1: under water: down from the surface, through flooded passages, up water columns and waterfalls,
+   * out onto a floor beside (needs `swim`: the surface moves). Within the air budget (PathOptions.air).
+   */
+  dive?: boolean;
 }
 
 export interface PathOptions {
@@ -146,6 +160,14 @@ export interface PathOptions {
    * instead of dropping a terrace onto the crops. Default 0 (off).
    */
   farmlandDropCost?: number;
+  /**
+   * Track W1: the body's air (0..300 ticks; the server's `air`, else the navigator's clock) when the plan
+   * starts. Read only for a start with the head under water: its stretch to air may take (air - 20) / 1.5
+   * ticks (at least 60); a breathing start allows (300 - 110) / 1.5 per stretch (water.ts airBudget). The
+   * stretch counts the moves' own ticks (not `underground` / `underwater` / avoidance prices).
+   * Default: a full supply.
+   */
+  air?: number;
 }
 
 /** Falls up to this height onto farmland never trampled it (measured, docs/farming.md). */
@@ -210,7 +232,10 @@ const M_CLIMB_OUT = 9;
 const M_PARKOUR = 10;
 const M_DOWNWARD = 11; // Track BC
 const M_SNEAK = 12; // Track BC
-const MOVE_CODES: readonly MoveKind[] = ['start', 'walk', 'diag', 'jump', 'drop', 'pillar', 'swim', 'swimOut', 'climb', 'climbOut', 'parkour', 'downward', 'sneak'];
+const M_DIVE = 13; // Track W1
+/** Track W1: a dive goal's way up to air is looked for this many cells over its feet. */
+const RISE_SCAN = 48;
+const MOVE_CODES: readonly MoveKind[] = ['start', 'walk', 'diag', 'jump', 'drop', 'pillar', 'swim', 'swimOut', 'climb', 'climbOut', 'parkour', 'downward', 'sneak', 'dive'];
 /** Node flag: the node stands in a doorway (only cardinal walks leave it). */
 const F_PASSAGE = 1;
 /** Track AJ: node flags: swimming on the surface; climbing (feet in a climber cell, no floor). */
@@ -218,6 +243,8 @@ const F_SWIM = 2;
 const F_CLIMB = 4;
 /** Track BC: the body only fits sneaking (a low ceiling: baritone/moves.ts `sneakFits`); only sneak moves leave it. */
 const F_SNEAK = 8;
+/** Track W1: the body under water in a dive node (NavGrid.dive); only dive moves leave it. */
+const F_DIVE = 16;
 
 /** Binary min-heap of node indices keyed by f. */
 class Heap {
@@ -285,6 +312,8 @@ class Nodes {
   mc = new Float64Array(4096);
   /** Accumulated irreversible-drop penalty (partial path choice). */
   trap = new Float64Array(4096);
+  /** Track W1: planned ticks with the head under water since the last breath (0 at a breathing node). */
+  wet = new Float64Array(4096);
   parent = new Int32Array(4096);
   move = new Uint8Array(4096);
   flags = new Uint8Array(4096);
@@ -303,6 +332,7 @@ class Nodes {
       this.g = grown(this.g, (k) => new Float64Array(k));
       this.mc = grown(this.mc, (k) => new Float64Array(k));
       this.trap = grown(this.trap, (k) => new Float64Array(k));
+      this.wet = grown(this.wet, (k) => new Float64Array(k));
       this.parent = grown(this.parent, (k) => new Int32Array(k));
       this.move = grown(this.move, (k) => new Uint8Array(k));
       this.flags = grown(this.flags, (k) => new Uint8Array(k));
@@ -316,6 +346,7 @@ class Nodes {
     this.g[i] = Infinity;
     this.mc[i] = 0;
     this.trap[i] = 0;
+    this.wet[i] = 0;
     this.parent[i] = -1;
     this.flags[i] = 0;
     this.closed[i] = 0;
@@ -369,6 +400,20 @@ export class PathSearch {
    * under the search layer by layer, because every open floor ahead is one cheap dig away.
    */
   private readonly goalMinY: number;
+  /** Track W1: the most planned ticks with the head under water in one stretch (water.ts airBudget). */
+  private airLimit: number;
+  /**
+   * Track W1: a `near` goal around a point in water (the followed player swimming): a surface swim node within
+   * its radius reaches it (the body treads water there); other goals are reached standing only.
+   */
+  private readonly waterGoal: boolean;
+  /**
+   * Track W1: a `near` goal around a point under the water surface (a waypoint on a pool's floor, a player
+   * diving): a dive node within its radius reaches it too, while the stretch there plus the way straight up to
+   * air fits `diveGoalLimit` (water.ts diveGoalBudget).
+   */
+  private readonly diveGoal: boolean;
+  private diveGoalLimit: number;
 
   constructor(grid: NavGrid, start: { x: number; y: number; z: number }, goal: NavGoal, opts: PathOptions = {}) {
     this.grid = grid;
@@ -381,6 +426,10 @@ export class PathSearch {
     this.breakTicksOf = opts.breakTicks ?? handBreakTicks;
     this.startY = start.y;
     this.goalMinY = goalMinY(goal);
+    this.airLimit = airBudget(opts.air, false); // Track W1 (a start under water: below)
+    this.waterGoal = goal.type === 'near' && this.moveOn('swim') && waterNear(grid, goal.p);
+    this.diveGoal = this.waterGoal && this.diveOn() && goal.type === 'near' && underSurface((x, y, z) => grid.cls(x, y, z), goal.p);
+    this.diveGoalLimit = diveGoalBudget(opts.air, false);
     // Track BC: the break rules and costs every move that digs applies (baritone/moves.ts)
     if (opts.allowBreak) {
       const noBreak = opts.noBreak;
@@ -417,6 +466,18 @@ export class PathSearch {
       if (isFeet(w)) {
         startFeet = w;
         flags = F_SWIM;
+      }
+    }
+    // Track W1: a body under water starts from a dive node (its stretch to air within what air it has left)
+    if (!isFeet(startFeet) && this.diveOn()) {
+      const d = grid.dive(start.x, start.y, start.z);
+      if (isFeet(d)) {
+        startFeet = d;
+        flags = F_DIVE;
+        if (grid.submerged(start.x, start.y, start.z)) {
+          this.airLimit = airBudget(opts.air, true);
+          this.diveGoalLimit = diveGoalBudget(opts.air, true);
+        }
       }
     }
     // Track BC: a body under a low ceiling starts from a sneak node
@@ -489,13 +550,18 @@ export class PathSearch {
       const cy = nodes.y[cur]!;
       const cz = nodes.z[cur]!;
       const f0 = nodes.feet[cur]!;
-      // Track AJ: a goal is never reached swimming or hanging on a ladder (the body stops standing)
-      if ((nodes.flags[cur]! & (F_SWIM | F_CLIMB)) === 0 && this.test.done(cx, cy, cz, f0)) {
+      // Track AJ: a goal is never reached swimming or hanging on a ladder (the body stops standing). Track W1: nor
+      // under water; a `near` goal around a point in water at a surface node (waterGoal), around a point under the
+      // surface at a dive node too (diveGoal) when the air allows the way back up
+      const fl = nodes.flags[cur]!;
+      const reaches = (fl & F_CLIMB) === 0 && ((fl & F_DIVE) !== 0 ? this.diveGoal : (fl & F_SWIM) === 0 || this.waterGoal);
+      if (reaches && this.test.done(cx, cy, cz, f0) && ((fl & F_DIVE) === 0 || nodes.wet[cur]! + this.riseTicks(cx, cy, cz) <= this.diveGoalLimit)) {
         this.found = cur;
         break;
       }
-      // Track BA: h + g / k + trap for Baritone's 7 coefficients (was: the lowest h + trap)
-      this.bests.consider(cur, cx, cy, cz, this.h(cx, cy, cz), nodes.g[cur]!, nodes.trap[cur]!);
+      // Track BA: h + g / k + trap for Baritone's 7 coefficients (was: the lowest h + trap). Track W1: a partial
+      // path never ends with the head under water (the next segment would start its air budget afresh)
+      if (nodes.wet[cur] === 0) this.bests.consider(cur, cx, cy, cz, this.h(cx, cy, cz), nodes.g[cur]!, nodes.trap[cur]!);
       // Track BA: while no best is 5+ blocks from the start (Baritone `failing`), on up to 4 x maxNodes
       if (++this.expanded >= this.maxNodes && (!this.bests.failing || this.expanded >= this.maxNodes * FAILURE_NODES_FACTOR)) {
         this.limited = true;
@@ -559,10 +625,19 @@ export class PathSearch {
     const k = cellKey(x, y, z);
     let i = this.index.get(k);
     if (i !== undefined && nodes.closed[i]) return;
-    let cost = base * grid.factor(x, y, z, feet) + extra + trap;
+    const ticks = base * grid.factor(x, y, z, feet);
+    let cost = ticks + extra + trap;
     if (this.costs.underground > 0 && grid.underground(x, z, feet)) cost += this.costs.underground;
     if (this.opts.cellCost) cost += this.opts.cellCost(x, y, z); // Track S: avoidance
     if (this.opts.farmlandDropCost && nodes.feet[from]! - feet > FARMLAND_SAFE_FALL && grid.cls(x, feet - y > 1e-6 ? y : y - 1, z)?.name === 'farmland') cost += this.opts.farmlandDropCost;
+    // Track W1: the head under water in the new node: the stretch since the last breath (the moves' own ticks, not
+    // the preference prices) stays within the air budget
+    let wet = 0;
+    if ((flags & F_DIVE) !== 0 && grid.submerged(x, y, z)) {
+      cost += this.costs.underwater;
+      wet = nodes.wet[from]! + ticks + extra;
+      if (wet > this.airLimit) return;
+    }
     const g = nodes.g[from]! + cost;
     if (i === undefined) {
       i = nodes.add(x, y, z, feet);
@@ -573,6 +648,7 @@ export class PathSearch {
     nodes.g[i] = g;
     nodes.mc[i] = cost;
     nodes.trap[i] = nodes.trap[from]! + trap;
+    nodes.wet[i] = wet; // Track W1
     nodes.parent[i] = from;
     nodes.move[i] = move;
     nodes.flags[i] = flags;
@@ -588,6 +664,7 @@ export class PathSearch {
     const flags0 = this.nodes.flags[cur]!;
     // Track AJ: swim and climb nodes have their own moves
     if (flags0 & F_SWIM) return this.expandSwim(cur, cx, cy, cz);
+    if (flags0 & F_DIVE) return this.expandDive(cur, cx, cy, cz); // Track W1
     if (flags0 & F_CLIMB) return this.expandClimb(cur, cx, cy, cz, f0);
     if (flags0 & F_SNEAK) return this.expandSneak(cur, cx, cy, cz); // Track BC
     const inPassage = (flags0 & F_PASSAGE) !== 0;
@@ -905,17 +982,127 @@ export class PathSearch {
    */
   private swimEntry(cur: number, nx: number, ny: number, nz: number, cy: number, headCell: number, d: number): void {
     const grid = this.grid;
+    const costs = this.costs;
     const w = grid.swim(nx, ny, nz);
     if (w === undefined) {
       this.sawUnknown = true;
       return;
     }
-    if (!isFeet(w)) return;
-    const room = grid.freeColumn(nx, ny + 1, Math.max(headCell, cy + 1), nz);
-    if (room === undefined) this.sawUnknown = true;
-    if (room !== true) return;
+    if (isFeet(w)) {
+      const room = grid.freeColumn(nx, ny + 1, Math.max(headCell, cy + 1), nz);
+      if (room === undefined) this.sawUnknown = true;
+      if (room !== true) return;
+      this.relax(cur, nx, ny, nz, w, costs.walk + (d > 0 ? (costs.fall[d] ?? 0) : 0), M_SWIM, costs.swimEnter, 0, undefined, F_SWIM);
+      return;
+    }
+    // Track W1: water that is no surface node (a flooded passage, flowing or falling water): a dive node; the
+    // cells the body passes on its way in (above the node up to the head) free or water
+    if (!this.diveOn()) return;
+    const dv = grid.dive(nx, ny, nz);
+    if (dv === undefined) this.sawUnknown = true;
+    if (!isFeet(dv)) return;
+    for (let y = ny + 1; y <= Math.max(headCell, cy + 1); y++) if (!this.waterRoom(nx, y, nz)) return;
+    this.relax(cur, nx, ny, nz, dv, costs.walk + (d > 0 ? (costs.fall[d] ?? 0) : 0), M_DIVE, costs.swimEnter + costs.diveEnter, 0, undefined, F_DIVE);
+  }
+
+  /**
+   * Track W1: planned ticks from a dive node straight up until the head is out of the water (every water cell
+   * over the feet cell at `diveUp`; Infinity when the column ends in anything but air, or is not loaded).
+   */
+  private riseTicks(x: number, y: number, z: number): number {
+    for (let k = 1; k <= RISE_SCAN; k++) {
+      const w = this.grid.water(x, y + k, z);
+      if (w === undefined) return Infinity;
+      if (w) continue;
+      return this.grid.free(x, y + k, z) === true && this.grid.cls(x, y + k, z)?.liquid === undefined ? (k - 1) * this.costs.diveUp : Infinity;
+    }
+    return Infinity;
+  }
+
+  /** Track W1: dive moves are on (they need the surface moves too). */
+  private diveOn(): boolean {
+    return this.moveOn('dive') && this.moveOn('swim');
+  }
+
+  /** Track W1: the body may pass through cell (x, y, z) in or out of the water: passable or water (no box). */
+  private waterRoom(x: number, y: number, z: number): boolean {
+    const f = this.grid.free(x, y, z);
+    if (f === undefined) {
+      this.sawUnknown = true;
+      return false;
+    }
+    return f || this.grid.water(x, y, z) === true;
+  }
+
+  /**
+   * Track W1: moves of a dive node (the body under water, docs/pathfinding.md "Water (Track W1)"): up into the
+   * surface node or the dive node above (jump held), down into the dive node below (sneak), across into the 8
+   * neighbouring water nodes at the same level (diagonals with both side cells water), out onto a floor beside
+   * at the feet level or 1 higher (`swimOut`; the cell over the body water or free for the rise).
+   */
+  private expandDive(cur: number, cx: number, cy: number, cz: number): void {
+    const grid = this.grid;
     const costs = this.costs;
-    this.relax(cur, nx, ny, nz, w, costs.walk + (d > 0 ? (costs.fall[d] ?? 0) : 0), M_SWIM, costs.swimEnter, 0, undefined, F_SWIM);
+    // up
+    const up = grid.swim(cx, cy + 1, cz);
+    if (up === undefined) this.sawUnknown = true;
+    else if (isFeet(up)) this.relax(cur, cx, cy + 1, cz, up, costs.diveUp, M_SWIM, 0, 0, undefined, F_SWIM);
+    else {
+      const d = grid.dive(cx, cy + 1, cz);
+      if (d === undefined) this.sawUnknown = true;
+      else if (isFeet(d)) this.relax(cur, cx, cy + 1, cz, d, costs.diveUp, M_DIVE, 0, 0, undefined, F_DIVE);
+    }
+    // down
+    const down = grid.dive(cx, cy - 1, cz);
+    if (down === undefined) this.sawUnknown = true;
+    else if (isFeet(down)) this.relax(cur, cx, cy - 1, cz, down, costs.diveDown, M_DIVE, 0, 0, undefined, F_DIVE);
+    // across, and out onto a floor beside
+    for (const [dx, dz] of CARDINAL) {
+      const nx = cx + dx;
+      const nz = cz + dz;
+      const kind = this.waterNode(nx, cy, nz);
+      if (kind === F_SWIM) {
+        this.relax(cur, nx, cy, nz, cy, costs.dive, M_SWIM, 0, 0, undefined, F_SWIM);
+        continue;
+      }
+      if (kind === F_DIVE) {
+        this.relax(cur, nx, cy, nz, cy, costs.dive, M_DIVE, 0, 0, undefined, F_DIVE);
+        continue;
+      }
+      for (let ny = cy; ny <= cy + 1; ny++) {
+        const f1 = grid.stand(nx, ny, nz);
+        if (f1 === undefined) {
+          this.sawUnknown = true;
+          break;
+        }
+        if (!isFeet(f1)) continue;
+        if (f1 < cy - FLAT || f1 > cy + 1 + FLAT) break;
+        if (f1 > cy + STEP && !this.waterRoom(cx, cy + 2, cz)) break; // the rise needs the cell over the head
+        if (!this.ladderPass(cx, cy, cz, nx, nz, dx, dz, f1 > cy + STEP)) break;
+        this.relax(cur, nx, ny, nz, f1, costs.swimOut + (f1 > cy + STEP ? costs.diveUp : 0), M_SWIM_OUT);
+        break;
+      }
+    }
+    for (const [dx, dz] of DIAGONAL) {
+      const nx = cx + dx;
+      const nz = cz + dz;
+      const kind = this.waterNode(nx, cy, nz);
+      if (kind === 0 || this.waterNode(nx, cy, cz) === 0 || this.waterNode(cx, cy, nz) === 0) continue;
+      this.relax(cur, nx, cy, nz, cy, costs.dive * Math.SQRT2, kind === F_SWIM ? M_SWIM : M_DIVE, 0, 0, undefined, kind);
+    }
+  }
+
+  /** Track W1: the water node at (x, y, z): F_SWIM (a surface node), F_DIVE (under water), 0 (none or not loaded). */
+  private waterNode(x: number, y: number, z: number): number {
+    const s = this.grid.swim(x, y, z);
+    if (s === undefined) {
+      this.sawUnknown = true;
+      return 0;
+    }
+    if (isFeet(s)) return F_SWIM;
+    const d = this.grid.dive(x, y, z);
+    if (d === undefined) this.sawUnknown = true;
+    return isFeet(d) ? F_DIVE : 0;
   }
 
   /** Track BI: drops deeper than maxDrop into column (nx, nz) (skills/fall/plan.ts), relaxed as drop moves. */
@@ -1055,6 +1242,7 @@ export class PathSearch {
       if (w === undefined) this.sawUnknown = true;
       return isFeet(w);
     };
+    const dive = this.diveOn(); // Track W1
     for (const [dx, dz] of CARDINAL) {
       const nx = cx + dx;
       const nz = cz + dz;
@@ -1062,7 +1250,17 @@ export class PathSearch {
         this.relax(cur, nx, cy, nz, cy, costs.swim, M_SWIM, 0, 0, undefined, F_SWIM);
         continue;
       }
-      // out: a bank from the water level up to 1 block higher
+      // Track W1: on into water at the same level that is no surface node (under a low roof, flowing water)
+      if (dive) {
+        const d = grid.dive(nx, cy, nz);
+        if (d === undefined) this.sawUnknown = true;
+        else if (isFeet(d)) {
+          this.relax(cur, nx, cy, nz, d, costs.dive, M_DIVE, costs.diveEnter, 0, undefined, F_DIVE);
+          continue;
+        }
+      }
+      // out: a bank from the water level up to 1 block higher. Track W1: never over a 1-block lip (a bank 2 above the
+      // top water cell): on BDS 1.26.60 forward + jump against it only bobs the body (docs/pathfinding.md "Water")
       for (let ny = cy; ny <= cy + 1; ny++) {
         const f1 = grid.stand(nx, ny, nz);
         if (f1 === undefined) {
@@ -1077,6 +1275,12 @@ export class PathSearch {
     }
     for (const [dx, dz] of DIAGONAL) {
       if (swimAt(cx + dx, cz + dz) && swimAt(cx + dx, cz) && swimAt(cx, cz + dz)) this.relax(cur, cx + dx, cy, cz + dz, cy, costs.swim * Math.SQRT2, M_SWIM, 0, 0, undefined, F_SWIM);
+    }
+    // Track W1: down under the surface (sneak)
+    if (dive) {
+      const d = grid.dive(cx, cy - 1, cz);
+      if (d === undefined) this.sawUnknown = true;
+      else if (isFeet(d)) this.relax(cur, cx, cy - 1, cz, d, costs.diveDown, M_DIVE, costs.diveEnter, 0, undefined, F_DIVE);
     }
   }
 
@@ -1295,6 +1499,14 @@ function inArea(area: PathOptions['protectedArea'], x: number, y: number, z: num
   return !!area && Math.hypot(x + 0.5 - area.x, y + 0.5 - area.y, z + 0.5 - area.z) <= area.r;
 }
 
+/** Track W1: water in the cell of point p or the one under it (a `near` goal around a swimming player). */
+function waterNear(grid: NavGrid, p: Vec3): boolean {
+  const x = Math.floor(p.x);
+  const y = Math.floor(p.y);
+  const z = Math.floor(p.z);
+  return grid.cls(x, y, z)?.liquid === 'water' || grid.cls(x, y - 1, z)?.liquid === 'water';
+}
+
 function goalMinY(goal: NavGoal): number {
   switch (goal.type) {
     case 'block':
@@ -1347,6 +1559,8 @@ export function locateNode(grid: NavGrid, pos: { x: number; y: number; z: number
   if (prefer === 'climb' && isFeet(grid.climb(bx, y0, bz))) return { x: bx, y: y0, z: bz, feet: y0 };
   if (prefer === 'swim') {
     for (const y of [y0, y0 - 1, y0 + 1]) if (isFeet(grid.swim(bx, y, bz))) return { x: bx, y, z: bz, feet: y };
+    // Track W1: under water (on a pool's floor, mid-depth, in a flooded passage): the dive node of the feet cell
+    for (const y of [y0, y0 + 1, y0 - 1]) if (isFeet(grid.dive(bx, y, bz))) return { x: bx, y, z: bz, feet: y };
   }
   let bestNode: LocatedNode | undefined;
   let bestD = Infinity;

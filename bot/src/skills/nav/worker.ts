@@ -63,6 +63,8 @@ export interface WorkerPlanOptions {
   falls?: PathOptions['falls'];
   /** PathOptions.farmlandDropCost (the farmer's trampling rule). */
   farmlandDropCost?: number;
+  /** Track W1: the air supply at the plan's start (PathOptions.air). */
+  air?: number;
 }
 
 /** What the client reads from the world model (`World` satisfies it). */
@@ -741,6 +743,7 @@ function workerOptions(o: WorkerPlanOptions): PathOptions {
     ...(o.avoidance ? { cellCost: costFunction(o.avoidance.sources, o.avoidance.costs) } : {}),
     ...(o.falls ? { falls: o.falls } : {}), // Track BI
     ...(o.farmlandDropCost ? { farmlandDropCost: o.farmlandDropCost } : {}),
+    ...(o.air !== undefined ? { air: o.air } : {}), // Track W1
   };
 }
 

@@ -422,10 +422,15 @@ export function stepBody(prev: BodyState, cmd: MoveCommand, world: BlockQuery): 
  * (and its jump impulse) apply only while the body box shrunk by 0.4 at the feet and at the head
  * (`waterInset`) reaches into a water cell (whole cells); above that the body moves with air
  * physics. Flow push is not modelled: the planner swims only on still water (nav/grid.ts `swim`).
+ * Track W1, measured on BDS 1.26.60 (bds-fly, docs/pathfinding.md "Water (Track W1)"): the sneak key in
+ * water adds -0.04 a tick the way the jump key adds +0.04 (a descent of about 0.2 a tick: after 8 ticks
+ * from a slow sink the server's velocity was -0.158, the model's -0.158). Under water the flow push is
+ * still not modelled (a waterfall lifts faster than the model: 0.17 a tick against 0.135, a current
+ * drifts the body 0.03 a tick); sprint-swimming is not modelled either.
  */
 export const LIQUID = Object.freeze({
-  water: { accel: 0.02, drag: 0.8, gravity: 0.005, jump: 0.04 },
-  lava: { accel: 0.02, drag: 0.5, gravity: 0.02, jump: 0.04 },
+  water: { accel: 0.02, drag: 0.8, gravity: 0.005, jump: 0.04, sneak: 0.04 },
+  lava: { accel: 0.02, drag: 0.5, gravity: 0.02, jump: 0.04, sneak: 0 },
   climbOut: 0.3,
   /** Track AJ: the water movement test shrinks the body box by this much at the feet and the head. */
   waterInset: 0.4,
@@ -436,11 +441,12 @@ function stepInLiquid(
   cmd: MoveCommand,
   world: BlockQuery,
   height: number,
-  k: { accel: number; drag: number; gravity: number; jump: number },
+  k: { accel: number; drag: number; gravity: number; jump: number; sneak: number },
   prev: BodyState,
 ): StepResult {
   const v = s.vel;
   if (cmd.jump) v.y = f32(v.y + k.jump);
+  if (cmd.sneak && k.sneak > 0) v.y = f32(v.y - k.sneak); // Track W1: the sneak key sinks the body in water
   const mv = moveVectorOf(cmd);
   applyImpulse(v, f32(mv.x * PHYSICS.impulseScale), f32(mv.z * PHYSICS.impulseScale), k.accel, cmd.yaw);
   const m = moveBody(world, s.pos, v, s.onGround, height);
