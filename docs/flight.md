@@ -69,6 +69,13 @@ authoritative. Decision record: [decisions/0042-elytra-flight.md](decisions/0042
 | `bot/src/skills/fly/rocket.ts` | Track F3: `RocketHand`, the rocket plumbing the controller and the route driver share (the item use, the cooldown, the own rockets as a set, the take-back of a use no rocket answered) |
 | `bot/src/skills/fly/brain.ts` (`route`, `routeTakeoff`), `landing.ts` (`preciseGoal` with the route, `ROUTE_HEADROOM`), `chat/commands-fly.ts` (`routeTakeoffFor`, the worker client), `tasks/process/fly.ts` | Track F3: the hand-over to the RouteTracker within ROUTE_HANDOVER, the route takeoff as the takeoff phase, the planner in the worker, `flyRoute` |
 | `bot/test/unit/skills/fly-route-landing.test.ts`; `bot/test/e2e/fly-route-land.test.ts` | Track F3: the goals with cells, the hint and the weight, the plans and the tracker flights on every case, findLanding with the route, whole trips with the hand-over, the takeoffs; the e2e stacks / holes / shaft / room / pocket on bds-fly3 |
+| `bot/src/skills/fly/corridor/coarse-port.ts` | Track F4b: the coarse layer's contract re-exported (`skills/coarse/types.ts`), `CorridorProvider` (what the executor uses of a layer), `StubCorridorProvider` and the builders (`volumeOf`, `portalOf`, `legOf`, `corridorOf`) |
+| `bot/src/skills/fly/corridor/cost.ts` | Track F4b: `FlightCost` (the fly mode's `CoarseCost`), `flightSpace`, `tunnelTicks`, `skyTicks` and the calibration constants |
+| `bot/src/skills/fly/corridor/stretches.ts` | Track F4b: `splitLeg` (a fly leg into sky / underground stretches), `changeCell` (where a stretch lands for the next), `nextWindow` (an underground window: portal boxes, steps, bend points, the tail rule, the chunk cut), `bendPoints` |
+| `bot/src/skills/fly/corridor/drive.ts` | Track F4b: `TrackerChain` (route trackers over a long window, planned in shadow and handed over) and `flyStretch` (the chain on the InputLoop, the rockets through `RocketHand`) |
+| `bot/src/skills/fly/corridor/executor.ts`, `registry.ts` | Track F4b: `CorridorExecutor` (plan, follow the legs, marks, re-plans; `UNKNOWN_FLY_MAX`), the task's provider and `corridorWanted` |
+| `bot/src/tasks/process/corridor.ts`, `bot/src/chat/commands-corridor.ts`, `chat/commands-fly.ts` | Track F4b: `UnderFlyProcess` (one underground window as a `fly` process), `runCorridorTrip` (the executor's ports), the hand-over in `!fly` |
+| `bot/test/unit/skills/fly-corridor.test.ts`, `fly-corridor-world.ts`; `bot/test/e2e/fly-corridor.test.ts` | Track F4b: the costs, the stretches and windows, the chain flown on stepBody, the executor over stub corridors and over the coarse layer's own; the e2e mouth / shaft / blocked / layer / layershaft cases on bds-fly3 |
 
 ## Packets (BDS 1.26.60.6, measured on bds-fly)
 
@@ -1136,6 +1143,7 @@ Rules (all named `// Track AU` in the shared files):
 | `flySiteSearch` | 48 | Track BL: the radius of the takeoff-site search when the takeoff here is refused (0 = off: the walk-out legs) |
 | `flyLandStyle` | auto | Track F1: `flare` lands with the flare only, `brake` with the brake / elevator landing only, `auto` flies the flare and takes the brake for a precision goal (a pillar top, a shaft floor, a cell under a low roof) or when the flare's plans keep missing ("Manoeuvres") |
 | `flyRoute` | auto | Track F3: the route planner lands an exact goal the brake refuses (a slot 2 high, a hole, a 1 x 1 shaft, a pocket) and takes off where the ledge, the jump and the vertical takeoff are all refused; `off` keeps the Track F1 search and chain ("Route landings and takeoffs") |
+| `flyCorridor` | auto | Track F4b: an `!fly <x y z>` farther than 96 blocks to a covered goal (a cave, a chamber: no open sky over it) follows the coarse layer's corridor when there is one: the cruise to a mouth or a shaft, the bores flown where they are 3 high, the rest walked ("Corridor flight"); `off` flies the cruise only |
 
 ## Processes
 
@@ -1969,6 +1977,222 @@ takeoff has no edge on the room's floor, the vertical takeoff's column is open o
 finds the way out through the open side in a millisecond and the flight flies it, lands 247 blocks away and
 takes 0 damage. The room's own landings are Track F1's corridor landings (the brake in run 1, the flare in
 run 3, 0 to 1 go-arounds).
+
+## Corridor flight (Track F4b)
+
+Flight v2, Track F4b, [decisions/0067](decisions/0067-long-range-flight.md) "F4b". The owner's case: the bot at
+0 100 0, the goal at 1000 0 1000, reachable only through a cave entrance part of the way along. The coarse layer
+(Track CB, [coarse.md](coarse.md)) plans a corridor of legs over everything the bot has seen; the flight prices its
+mode on that graph and follows the fly legs: the cruise to the entrance, the bore flown where it is 3 high, the rest
+walked.
+
+```
+!fly 1000 0 1000        far (> 96), covered (no open sky over the goal), a provider, flyCorridor auto
+  -> plan (walk + fly, start walking, end standing)   corridor: fly 307, walk 20
+  -> fly leg: sky stretch  -> the cruise to the cell 2 inside the mouth (or a shaft's floor, or the open
+                              ground where the sky meets a covered volume)
+              under stretch -> windows from standing (route trackers), the chunks waited for between them,
+                              a short window or the tail after a bend walked
+  -> walk leg: the navigator
+  a failure marks its portal failed for its mode and plans again (at most 4); a change flown through is marked ok
+```
+
+### The cost (`corridor/cost.ts`, `FlightCost`)
+
+Every price is in ticks (walking is 4 a block in the layer), calibrated on [flight-envelope.md](flight-envelope.md)
+and the measurements above. Registered once per layer (`setCost('fly', ...)`, `registry.ts`).
+
+| | price |
+|---|---|
+| open sky | 1 / 1.5 a block (the cruise) + 0.67 rockets per 100 blocks x `ROCKET_COST` 20 |
+| a bore 3 x 3 or more | 1 a block + a rocket per 30 blocks; 2 wide x 1.5, 1 wide x 2.5 |
+| 2 high | a glide in or a landing only: at most `GLIDE_IN_MAX` 6 blocks, else Infinity; under 2 Infinity |
+| into a cave from the sky (x / z) | `MOUTH_ENTRY_TICKS` 160 (the brake landing just inside, the takeoff there) |
+| out of a cave into the sky | 30 + a rocket |
+| down a y portal (a shaft, a hole, the open top of a covered volume) | 60 + the drop at the hover's 0.149 a tick |
+| up a y portal | the vertical takeoff: 0.8 a tick, a rocket per 31 |
+| a climb sky to sky | a rocket per 31 blocks of the sky's floor rising |
+| unknown space | 8 a block under y 64, 2.5 between 64 and 192, the sky's price x 1.15 above (high, never Infinity); + 60 at an unknown portal |
+| water, a dig portal (`dug`), a portal the flight failed at | Infinity (the marks are per mode and decay: the walk may still take it) |
+| a portal flown through before (`ok`) | x 0.9 |
+| into flight (`switchCost`) | 0 from fly; a takeoff 60 + a rocket + the landing 100; Infinity in water, in an unknown volume underground or one under 3 high |
+| `ticksPerBlock` (the search's heuristic) | 0.667 (the cruise's speed alone) |
+
+### Stretches and windows (`corridor/stretches.ts`)
+
+`splitLeg` classifies each segment between two waypoints by the layer's volume at the body's height along it
+(`flightSpace`: sky volumes are the cruise's, caves, surface volumes and unknown sections under y 192 the route
+planner's). A change of class is a portal where the stretch before lands so the next starts from standing
+(`changeCell`): into a mouth 2 blocks inside (`MOUTH_IN`), down a y portal on the floor under its centre (a shaft's
+floor; with the layer's own corridors also the open ground of a covered chunk, where its sky meets the band under
+the chunk's highest block), out of a bore just inside the exit. Waypoints are matched to their portals by the
+centre (the layer lists the entry and the exit among the portals, not among the waypoints).
+
+An underground stretch is flown a window at a time from where the body stands (`nextWindow`):
+
+- the portals ahead as waypoint boxes (`portalGoal`: the opening, a cell more each way along its axis), a box every
+  `WINDOW_STEP` 24 along a clear straight, and bend points where the straight line between two anchors leaves the
+  bore (`bendPoints`: a 6-connected BFS through air at the body's height, at most 40 000 cells, pulled tight and
+  recentred in the bore) so the route heuristic never aims through rock;
+- cut at the first portal whose chunk is not loaded (the window lands on the last loaded portal's floor; the next
+  waits up to 15 s for the chunks: the server holds a body at the edge of its loaded chunks, ADR 0055) and at
+  `WINDOW_BLOCKS` 320;
+- the tail rule: when less than `UNDER_TAIL_MIN` 40 blocks follow the last bend, the window lands at least 6 before
+  the bend and the tail is walked (flying out of a bend at cruise speed and landing within a few blocks of it failed
+  4 in 10 offline at the live budget);
+- a window shorter than 24 blocks (`UNDER_FLY_MIN`) is walked; a window that ends short of its landing is flown again
+  from there (at most 2 more times), then the stretch fails.
+
+A window is a chain of route trackers (`drive.ts TrackerChain`): 5 goals each (`CHAIN_WINDOW`), overlapping by 1,
+the next one created when the active one has 2 goals left and ticked in shadow (it holds, fires nothing) until it has
+a plan, then it takes over with the rocket still burning seeded into it; the last tracker plans with Track F1's
+landing library. One tracker over a whole bore gets partial plans past about 100 blocks (the 256-block snapshot,
+the 600 ms budget) and hits the wall; the tracker cannot extend its goals. `flyStretch` runs the chain on the
+InputLoop like `route/live.ts` (`RocketHand` scope `corridor`, the glide from the 2nd airborne input, chunk
+arrivals as world changes, held corrections counted with the chunk-edge note). Each window is its own process
+(`tasks/process/corridor.ts UnderFlyProcess`, `fly`, user; FLIGHT_PRIORITY while the body is in the air): the
+rockets to the hotbar, the elytra on, the window, the ground.
+
+### The executor (`corridor/executor.ts`) and the entry
+
+`CorridorExecutor.run(goal)` plans (modes walk + fly, `startMode` walk, `goalStanding`, `CORRIDOR_PLAN_MS` 4000:
+flight is cheap in all the sky, so a covered goal makes the search exhaust the sky round it first: 3 600 volumes offline,
+7 700 and 2.2 s over the e2e's cold real chunks, where the default 500 ms gave a partial corridor ending in the sky
+over the goal) and follows the legs:
+
+- walk / mine legs: the navigator's own walk (not the fly-wrapped one);
+- fly legs: the stretches; an underground fly leg whose unknown share (sampled every 4 blocks in its underground
+  stretches) is over `UNKNOWN_FLY_MAX` 0.25 is walked instead (`walk (unknown)`);
+- a sky stretch that lands within 64 blocks of its cell (`SKY_WALK_MAX`) walks the rest (along the roof and down the
+  hole, round through the mouth): a cruise from standing that close does not fly (the takeoff, a flare and down on
+  the spot in 14 ticks, no rocket, measured twice on the e2e); one that came down whole farther off (`landed_off`:
+  its go-arounds ran out) is flown once more (`SKY_RETRIES` 1) before the change fails;
+- a failure (no floor known at a change, a cruise that ends far off, a window failed 3 times, a walk that fails)
+  marks its portal `failed` for the mode and plans again from where the body stands (`MAX_REPLANS` 4);
+- a partial corridor is followed to its end and planned again from there.
+
+`!fly <x y z>` hands over when `corridorWanted`: `flyCorridor` not `off`, a provider (the task's registered one,
+else `skills.nav.coarseLayer`), the goal more than `CORRIDOR_MIN` 96 away and covered (`skyTop` at or over the
+goal; unknown counts as covered). The reply is `flying to <goal> along a corridor (...)`, the end `arrived at
+<goal> along a corridor (fly 307, walk 20); 4 rockets, 1 cruise, 1 underground, 3 walks, 0 re-plans, 40.6 s` or
+`fly: the corridor to <goal> failed: <why>`. `!fly stop` ends the trip after the step in progress. The cell
+query of the executor is the live model, else the world cache (`world.cache.blockAt`), so the cell inside a mouth
+at the edge of the loaded chunks is known; the windows are still cut by the live chunks. The chestplate goes back
+on at the end of the trip; between windows the elytra stays on.
+
+### Offline (stepBody; `fly-corridor.test.ts`)
+
+The corridor world (`fly-corridor-world.ts`): the start on the flat ground, a 3 x 3 mouth 150 blocks out, a 140-block
+3 x 3 bore, a bend to +z, 30 more blocks, a 2-high section 12 long, a 9 x 9 x 5 chamber closed but for it (the goal,
+about 290 from the start), optionally a 1 x 1 hole through the bore's roof 60 in. The chain flown on stepBody (the
+burn drawn 9 to 21 ticks, its end told 3 ticks late, node budgets only so the numbers are the same everywhere):
+
+| case | result |
+|---|---|
+| one tracker over a straight bore of 48 / 64 / 80 / 96 blocks | done |
+| one tracker over 128 / 158 blocks | hit (partial plans) |
+| the chain, the bend and a landing 28 after it, minimal library, 2 000 ms | 2 to 3 of 3 seeds |
+| the same, the last tracker with the landing library, 2 000 ms | 6 of 6 |
+| the same at 1 500 ms / 600 ms (the live budget) | 6 of 10 / 4 of 10 (the misses on the outer wall after the bend) |
+| 3 goals per tracker, or a new tracker at 3 / 4 goals left | worse |
+| the bore from inside the mouth with the tail rule (lands before the bend), seeds 1 to 3 | done 9 of 9 goals, 144 / 144 / 153 ticks, 2 rockets, 0 hits, 2 trackers, 10 to 11 plans |
+| a bend with 70 blocks after it, seeds 1 to 3 | done 8 of 8, 130 / 124 / 124 ticks, 2 / 1 / 1 rockets, 0 hits, 2 trackers |
+
+The executor over stub corridors (stub flights that stand on their cell): sky, mouth, bore, walk, walk; the shaft
+drop; the mouth failed and the re-plan through the shaft; a shaft cruise that ran out of go-arounds 35 off walked
+the rest, one 100 off flown again (and the shaft failed after a second); the unknown bore walked; a window failed 3
+times marks its first portal. Over the coarse layer's own corridor on the same world (`terrainSource`): with the hole the corridor
+takes it (fly 320 then walk 18, cost 793 against 1 539 walking, 3 047 volumes, 137 ms), without it the fly leg comes
+down onto the open ground of the mouth's chunk and goes in through the mouth (fly 319, walk 18, cost 871, 3 602
+volumes, 191 ms); the executor flies the cruise there, one window to the last straight portal and walks the rest.
+
+### e2e (`fly-corridor.test.ts`, bds-fly3, BDS 1.26.60.6)
+
+The corridor world built with truth:fill in the run's private area. Seen first: a scripted fly-over (teleports along
+the corridor after the build, every chunk dropped and loaded again) into a fresh world cache on the bot's world
+model; the coarse layer over that cache attached to the navigator as `index.ts` does.
+
+Runs: `mouth` (x 2), `shaft` and `blocked` follow stub corridors (`setCorridorProvider`); `layer` (the roof hole
+closed) and `layershaft` (open) follow the coarse layer's own corridor (no stub registered: `!fly` takes
+`skills.nav.coarseLayer`), each after a plan with modes fly + walk that checks the layer found the way in by itself.
+The final code, two runs (E: area cell 34, F: area cell 67; every case green in both):
+
+| run | arrived | s | rockets | damage | corrections | route re-plans | corridor re-plans | cruises / windows / walks | legs |
+|---|---|---|---|---|---|---|---|---|---|
+| mouth #1 (stub) | yes / yes | 76 / 38.7 | 9 / 4 | 0 / 0 | 11 / 6 | 5 / 18 | 0 / 0 | 1 / 1 / 3 | fly 307, walk 20 |
+| mouth #2 (stub) | yes / yes | 76 / 39.7 | 9 / 4 | 0 / 0 | 9 / 4 | 4 / 11 | 0 / 0 | 1 / 1 / 3, 1 / 1 / 2 | fly 307, walk 20 |
+| shaft (stub) | yes / yes | 60.3 / 42.6 | 6 / 4 | 0 / 0 | 7 / 3 | 8 / 7 | 0 / 0 | 1 / 1 / 2 | fly 308, walk 20 |
+| blocked (stub: the mouth filled, the shaft second) | yes / yes | 41.9 / 41.7 | 5 / 3 | 0 / 0 | 5 / 4 | 8 / 8 | 1 / 1 | 1 / 2 / 2, 1 / 1 / 2 | fly 307, fly 308, walk 20 |
+| layer (the layer's corridor, the hole closed) | yes / yes | 40.8 / 38.7 | 3 / 4 | 0 / 0 | 3 / 5 | 9 / 11 | 0 / 0 | 1 / 1 / 3 | fly 319, walk 18 |
+| layershaft (the layer's corridor, the hole open) | yes / yes | 52.3 / 66.9 | 5 / 8 | 0 / 0 | 4 / 7 | 10 / 8 | 0 / 0 | 1 / 1 / 2 | fly 320, walk 18 |
+
+The layer's plans (fly + walk, 4 s, `CORRIDOR_PLAN_MS`), on five areas (B to F):
+
+| world | found | legs | cost | volumes | ms | the way in | walk only |
+|---|---|---|---|---|---|---|---|
+| the hole closed | yes, 5 of 5 | fly 319, walk 18 | 871 | 7 725 to 8 792 | 2 219 to 3 384 | the mouth chunk's open top (a 16 x 12 y opening onto the ground by the mouth), then x portals along the bore | cost 1 539, 156 volumes, 1 to 115 ms |
+| the hole open | yes, 5 of 5 | fly 320, walk 18 | 793 | 7 211 to 8 185 | 1 941 to 3 063 | the 1 x 1 hole (y portal 4 over the floor) | the same |
+
+The earlier runs on other areas: A (cell 11, the stub runs only, before the main merge), B (cell 138, the layer
+runs only), C (cell 92, the code before the sky stretch's second try), D (cell 168, a second cruise from where the
+first came down, in place of `SKY_WALK_MAX` 64):
+
+| run | arrived | s | rockets | damage | corrections | route re-plans | corridor re-plans | cruises / windows / walks |
+|---|---|---|---|---|---|---|---|---|
+| mouth #1 (stub), A / C / D | yes | 40.6 / 42.9 / 39.7 | 4 / 4 / 5 | 0 | 7 / 7 / 6 | 8 / 3 / 21 | 0 | 1 / 1 / 3, 1 / 1 / 2, 1 / 1 / 2 |
+| mouth #2 (stub), A / C / D | yes | 40.7 / 59.3 / 48.7 | 3 / 7 / 4 | 0 | 6 / 9 / 3 | 1 / 11 / 30 | 0 | 1 / 1 / 2 |
+| shaft (stub), A / C / D | yes / no / no | 53.1 / 64.8 / 43.2 | 7 / 6 / 8 | 4.1 (flyIntoWall) / 0 / 0 | 0 / 8 / 9 | 8 / 0 / 0 | 0 / 1 / 1 | 1 / 1 / 2, 1 / 0 / 0, 2 / 0 / 0 |
+| blocked (stub), A / C / D | yes | 47.2 / 47.9 / 47.6 | 5 / 6 / 5 | 0 | 5 / 6 / 6 | 7 / 10 / 10 | 1 | 1 / 1 / 2 |
+| layer, B / C / D | yes | 38.7 / 42.2 / 38.8 | 3 / 2 / 4 | 0 | 6 / 3 / 4 | 15 / 3 / 13 | 0 | 1 / 1 / 3, 1 / 1 / 3, 1 / 2 / 2 |
+| layershaft, B / C / D | yes | 42.7 / 50.8 / 116 | 3 / 3 / 9 | 0 / 2 (fall) / 0.3 (flyIntoWall) | 5 / 5 / 15 | 7 / 7 / 4 | 0 / 0 / 3 | 1 / 1 / 2, 1 / 1 / 3, 4 / 4 / 4 |
+
+- mouth: the cruise to the cell 2 inside the mouth lands 0.02 to 0.29 from it in 8 cruises of 10 (0 to 1
+  go-around) and ran out of its 4 go-arounds 7 and 21 blocks off in E (walked in: E's 9 rockets and 76 s). The
+  window from there (119 to 120 blocks, 8 goals, cut before the bend) ended `done` 8 of 8 in 3 runs of 10 (D, F, F)
+  and touched down 5 to 25 blocks short of its landing otherwise (6 or 7 of 8 goals); the rest is flown again or
+  walked. 0 damage in every run.
+- shaft: of the 15 cruises to the bore floor under the 1 x 1 hole (shaft, blocked and layershaft runs), 11 land on
+  it (0.00 to 0.03 off where logged, the brake, 1 to 3 go-arounds), 1 on the roof beside the hole (walked in: 2 of
+  fall damage), 3 ran out of their 4 go-arounds 31 to 35 blocks off (on the roof, on the ground beside the bore).
+  C ended there (the stub has no other corridor, the shaft marked failed). D flew the cruise again from there and
+  it does not fly that close: the takeoff, a flare and down on the spot in 14 ticks, 0 rockets, 4 times; D's
+  layershaft then marked the shaft failed, re-planned through the mouth, walked into it and arrived after 3
+  re-plans in 116 s. Hence `SKY_WALK_MAX` 64: a landing that close walks (along the roof and down the hole, or round
+  through the mouth). The window from the shaft (60 to 62 blocks, 4 goals) ends `done` in every run but one (1 of 4,
+  flown again); A's shaft took 4.1 of wall damage in the approach to the hole.
+- blocked: no standable cell inside the filled mouth: the mouth is marked failed and the re-plan goes in through
+  the shaft in every run; 0 damage.
+- layer: the cruise lands on the open ground by the mouth 0.09 to 0.32 from the cell (the flare, 1 rocket, 0
+  go-arounds) in all 5 runs; the window (132 blocks, 10 goals, 3 trackers) through the mouth ended `done` 10 of 10
+  in E and F and `ground` 8 of 10 in B, C and D (B at the window's end with corrections up to 8.2, C and D 24 and 32
+  short, the rest walked or flown again). 0 damage.
+
+### Open points (Track F4b)
+
+- The route tracker has no way to add goals or re-plan to new ones (`route/tracker.ts`, Track F4a's): the chain
+  of trackers works round it, planning in shadow; an `extend(goals)` on the tracker would let one tracker fly a
+  whole stretch.
+- A tracker planned with a reduced start margin re-plans "the corridor ahead is blocked" over and over (up to 30
+  route re-plans in one window, mostly partial plans).
+- A bend at cruise speed with a short landing after it is unreliable at the live 600 ms budget (6 of 10 at
+  1 500 ms offline): the tail rule walks tails under 40 blocks.
+- The windows touch down short of their landing (mouth: 5 to 25 blocks, 6 or 7 of 8 goals); the executor flies
+  again or walks the rest, so the trips arrive, but a window that lands where it was meant to would save the walk.
+- The cruise into the 1 x 1 hole costs 1 to 3 go-arounds and ran out of its 4 in 3 of 15 cruises (31 to 35 off),
+  the cruise to the cell inside the mouth in 2 of 10 (7 and 21 off); A's shaft took 4.1 of wall damage (Track F1 /
+  F3's landing families; the corridor only asks for the cell and walks from up to 64 off).
+- A cruise from standing 30 to 51 blocks from its goal does not fly: the takeoff, a flare and down on the spot in
+  14 ticks with no rocket (FlyProcess / the brain, 4 times in run D). The corridor walks instead; a short hop in
+  the open would need the brain to climb first.
+- A window planned from the open ground by the mouth after a re-plan (D's layershaft) found no start twice (41
+  partial plans in 6 ms, 0 goals) before the next re-plan's window from inside the mouth flew.
+- Each sky stretch swaps to the chestplate after its FlyProcess and back to the elytra for the underground windows.
+- The landing price at a fly-to-walk change belongs to the walk cost's `switchCost` (the layer's 20); FlightCost
+  prices the landing in its own takeoff switch (`LANDING_TICKS` 100).
+- `surface` volumes (open air under the chunk's highest block) are flown as underground (the route planner from
+  standing), so a corridor through low open ground under tall trees is windows, not a cruise.
+- Only an exact `!fly <x y z>` to a covered goal more than 96 away takes the corridor; `!goto` / `!come` keep
+  their own fly-then-walk.
 
 ## Open points
 

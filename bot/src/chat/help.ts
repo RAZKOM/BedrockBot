@@ -82,7 +82,7 @@ export const SETTING_GROUPS: readonly (readonly [string, readonly string[]])[] =
   ['work', ['mineMode', 'mineSeenOnly', 'mineDirect', 'mineTunnelLen', 'mineBranchY', 'exploreRadius', 'useBoneMeal', 'quarryKeepStone', 'toolWearLimit', 'mendAt', 'throwawayMin', 'buildScaffold', 'craftReserve']],
   ['food', ['autoFood', 'foodMin', 'foodLeave', 'autoBreed', 'chorePen', 'foodReserve', 'seedReserve']],
   ['home', ['stashChest', 'stashShulker', 'keepBoxName', 'homeChestRadius', 'homeChestWalk', 'autoUnload', 'compactOnUnload', 'getSuggestsBring']],
-  ['flight', ['autoFly', 'flyMin', 'flyClearance', 'flyCruise', 'flyGoArounds', 'fireworksMin', 'flyTakeoffRun', 'flyRetryBlocks', 'flyMaxClimb', 'flyMargin', 'flyLandSearch', 'flyLandProbes', 'flyHoldS', 'flyHeadroom', 'flyOverhangDepth', 'flySneakLand', 'flyLedgeTakeoff', 'flyVerticalTakeoff', 'glideDown', 'glideDownMinDrop', 'glideDownMinDistance', 'flyHighCruise', 'flyDescent', 'flyLandStyle', 'flyRoute', 'flyRecheckBlocks', 'flyPreferRatio', 'flySiteSearch']],
+  ['flight', ['autoFly', 'flyMin', 'flyClearance', 'flyCruise', 'flyGoArounds', 'fireworksMin', 'flyTakeoffRun', 'flyRetryBlocks', 'flyMaxClimb', 'flyMargin', 'flyLandSearch', 'flyLandProbes', 'flyHoldS', 'flyHeadroom', 'flyOverhangDepth', 'flySneakLand', 'flyLedgeTakeoff', 'flyVerticalTakeoff', 'glideDown', 'glideDownMinDrop', 'glideDownMinDistance', 'flyHighCruise', 'flyDescent', 'flyLandStyle', 'flyRoute', 'flyCorridor', 'flyRecheckBlocks', 'flyPreferRatio', 'flySiteSearch']],
   ['chat', ['nlConfirm', 'chatColor', 'chatLines', 'chatVia', 'lastWelcomed']],
   ['system', ['nudgeInterval', 'eventsDays', 'eventsMaxMb']],
 ];

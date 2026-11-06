@@ -32,6 +32,9 @@ import { survivalKitOf } from './commands-survival.ts';
 import { NETHER, OVERWORLD } from '../world/dimension.ts';
 import type { Containers } from '../world/containers.ts';
 import type { Logger } from '../log.ts';
+import { corridorAirborne, corridorProviderOf, corridorWanted } from '../skills/fly/corridor/registry.ts'; // Track F4b
+import type { StepOutcome } from '../skills/fly/corridor/executor.ts'; // Track F4b
+import { corridorEndLine, runCorridorTrip, stopCorridorTrip, type CorridorWiring } from './commands-corridor.ts'; // Track F4b
 
 export const FLY_COMMANDS = ['fly', 'land'] as const;
 
@@ -299,7 +302,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   });
   // Track BH: the ledge takeoff's step-off is a fall the flight means: Track BI's clutch never arms while a flight runs
   const falls = (mob.skills as { falls?: { intended: () => boolean } } | undefined)?.falls;
-  if (falls) falls.intended = () => controller.active;
+  if (falls) falls.intended = () => controller.active || corridorAirborne(task); // Track F4b: a corridor window in the air
   const kit = survivalKitOf(task);
   const containers = extra.containers;
   const kitOps = new FlightKitOps({
@@ -986,6 +989,47 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     return { error: `fly: no waypoint or player "${what}" (!wp list; a player must be in sight or on the locator bar)` };
   };
 
+  // Track F4b: the corridor trip's ports (chat/commands-corridor.ts): the cruise as `!fly` builds it (an exact cell), the
+  // navigator's own walk, the live model, the route grid and the worker's planner
+  const corridorSky = async (cell: Vec3, label: string): Promise<StepOutcome> => {
+    const from = position();
+    if (!from) return { ok: false, reason: 'position unknown' };
+    const k = readKit(inv, memory());
+    const aim: LandingTarget = { x: cell.x + 0.5, z: cell.z + 0.5, top: cell.y, half: 1 };
+    const tk = await takeoffFor(from, aim, skyHere(from, aim), k.rocketsHotbar || k.rockets);
+    if ('refuse' in tk) return { ok: false, reason: tk.refuse, at: from };
+    const f = await planFlight(from, cell, label, 1, true);
+    Object.assign(f.target, tk);
+    if (controller.active) return { ok: false, reason: 'already flying', at: from };
+    const r = await start(f.target).result;
+    for (let i = 0; i < 40 && Math.hypot(loop.state.vel.x, loop.state.vel.z) > 0.003; i++) await loop.waitTicks(1);
+    const rep = r.report;
+    return { ok: r.ok, ...(r.ok ? {} : { reason: r.reason ?? 'failed' }), at: { ...loop.state.pos }, rockets: rep?.rockets ?? 0, corrections: rep?.corrections ?? 0, held: rep?.held ?? 0 };
+  };
+  const corridorWiring = (): CorridorWiring => ({
+    task,
+    loop,
+    queue: (n, p) => d.conn.queue(n as never, p as never),
+    inventory: inv,
+    hotbar: pve.hotbar,
+    entities: world.entityTracker,
+    memory,
+    kitOps,
+    processes,
+    // the live model, else what the world cache saw (a mouth at the edge of the loaded chunks); the windows are cut by `loaded`
+    solid: (x, y, z) => world.blockAt({ x, y, z })?.solid ?? world.cache?.blockAt(x, y, z)?.solid,
+    loaded: (cx, cz) => typeof world.isLoaded !== 'function' || world.isLoaded(cx, cz),
+    dim,
+    ...((world.chunks as Partial<typeof world.chunks> | undefined)?.onColumnLoaded ? { columnLoaded: (fn: (cx: number, cz: number) => void) => world.chunks.onColumnLoaded(fn) } : {}),
+    grid: routeGrid,
+    plan: routePlanner,
+    flySky: corridorSky,
+    walk: async (cell, label) => {
+      const r = await walk0({ type: 'block', p: cell }, {}, label);
+      return { ok: r.ok, ...(r.ok ? {} : { reason: r.reason ?? 'failed' }), at: { ...loop.state.pos } };
+    },
+    log,
+  });
   const flyDef: Parameters<typeof d.chat.register>[0] = {
     name: 'fly',
     help: '<x y z> | <waypoint> | <player> | home | stop | status | box [<slot>] (fly there with the elytra and land on it; stop: land now)',
@@ -998,11 +1042,12 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       const sub = args[0]?.toLowerCase();
       if (sub === 'stop') {
         const p = current;
+        const trip = stopCorridorTrip(task); // Track F4b: a corridor trip ends after its step in progress
         if (p?.land('stopped')) reply('landing');
         else if (controller.active) {
           controller.landNow('stopped');
           reply('landing');
-        } else reply('fly: not flying');
+        } else reply(trip ? 'fly: the corridor trip stops after this step' : 'fly: not flying');
         return;
       }
       if (sub === 'status') {
@@ -1080,6 +1125,14 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       const distance = hdist(from, goalTarget);
       if (dim() === NETHER && !ceilingClear(from, goalTarget)) {
         reply(`fly: the Nether ceiling is too low along the way to ${t.label} (walk: !goto)`);
+        return;
+      }
+      // Track F4b: a long trip to a covered goal (a cave, a chamber) follows the coarse layer's corridor when the task has one
+      const provider = corridorProviderOf(task, skills.nav.coarseLayer);
+      const top = skyTop(t.goal.x, t.goal.z);
+      if (!t.player && provider && corridorWanted(String(d.settings.get('flyCorridor')), provider, distance, top === undefined || top >= t.goal.y)) {
+        reply(`flying to ${t.label} along a corridor (${Math.round(distance)} blocks; ${kitLine(k)})`);
+        void runCorridorTrip(corridorWiring(), provider, t.goal, t.label).then((r) => reply(corridorEndLine(r, t.label)));
         return;
       }
       // Track AU2: no takeoff under a roof (the owner's indoor flight hit the ceiling three times)
