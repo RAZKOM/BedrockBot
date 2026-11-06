@@ -24,9 +24,10 @@ there, also as an idle chore ("Full boxes out of the chests").
 | `bot/src/skills/home/unloader.ts` | `planUnload`: the decision table, pure; `unloadableStacks` (the chore's trigger) |
 | `bot/src/skills/home/categories.ts` | item categories and label matching (`ores`, `wood`, `food`, `blocks`, `junk`, `tools`) |
 | `bot/src/skills/home/memory.ts` | snapshot -> record, records -> unloader targets, the `!chests` / `!stock` lines |
+| `bot/src/skills/home/stock.ts`, `storage.ts`, `search.ts` | decision 0065: the counting `!stock` and the storage index share; the storage index (every container in every dimension plus the carried items, freshness); the ranked search with its groups and aliases ([storage.md](storage.md)) |
 | `bot/src/skills/home/logistics.ts` | `HomeLogistics`: the scan and unload jobs (walk, open, snapshot, deposit, spare boxes), serialised; Track AS: `withdraw` (walk, open, take, refresh) |
 | `bot/src/skills/home/reach.ts` | Track AN: `chestGoal` (the walk to a container), `probePath` (a bounded, sliced probe plan), `verdict` (path length against `homeChestWalk`), `pathBlocks` |
-| `bot/src/world/cache/chests.ts` | `ChestMemory`: the per-server chest memory, a sidecar of the world cache (`chests.json`); Track AS: `inBoxes` (what the full shulker boxes hold) |
+| `bot/src/world/cache/chests.ts` | `ChestMemory`: the per-server chest memory, a sidecar of the world cache (`chests.json`); Track AS: `inBoxes` (what the full shulker boxes hold); decision 0065: `onChange` (the panel's `storage` topic) and `byDimension` |
 | `bot/src/skills/home/bring.ts` | Track AS: `resolveBringItem` (the word -> item names), `planBring` (carried first, nearest chest, boxes last), `stockOf`, `parseBringArgs`, `itemsText` |
 | `bot/src/tasks/process/bring.ts` | Track AS: `BringProcess` (user: the withdrawal, then the delivery) |
 | `bot/src/chat/commands-bring.ts` | Track AS: `!bring`, `BringController`, the delivery walk (come's logic), the `!get` stock hint |
@@ -64,6 +65,10 @@ there, also as an idle chore ("Full boxes out of the chests").
 | `!chests label x y z <text>` / `none` | `chests: chest 3 -60 2 (wood) labelled`; up to 32 characters |
 | `!boxes` | Track AV: `boxes: 4 spare (1 carried, 3 in chest 1 2 3); carrying 2 bot_loot boxes (1 empty, 1 holding 1728 sand)`; `boxes: no spare empty box known (carried or in the chests I know); no bot_loot box carried` |
 | `!bring <item> [n] [to <player>\|home]` | Track AS: `bringing 64 torches to Steve (from 2 chests)`, then `brought 64 torches (from 2 chests)` ("Bring" below) |
+
+The panel's **Storage** view (decision 0065, [storage.md](storage.md)) searches the same memory across every
+dimension, plus what the bot carries. It counts the way `!stock` does (`skills/home/stock.ts`, shared) and
+sends `!bring <item> <n> [home]` and `!chests scan` from its buttons.
 
 `!unload` and `!chests scan` are user processes (priority 40): `!stop` ends them, flee / guard /
 night pre-empt them and the job runs again from a fresh plan when it resumes. `all` empties the full

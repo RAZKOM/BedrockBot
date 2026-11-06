@@ -32,6 +32,17 @@ export const TEX_PREFIX = '/tex/';
 /** localStorage keys: the view (map / cards), the map's overlays and layer. */
 export const VIEW_KEY = 'bbpanel-view';
 export const MAP_PREFS_KEY = 'bbpanel-map';
+// ---- decision 0065: storage as a database (docs/storage.md) ------------------------------------------
+
+/** The storage topic (state: the summary, deltas on chest memory / inventory changes) and its routes. */
+export const STORAGE_TOPIC = 'storage';
+export const STORAGE_PATH = '/api/storage';
+export const STORAGE_SEARCH_PATH = '/api/storage/search';
+export const STORAGE_CONTAINER_PATH = '/api/storage/container';
+/** The views the page switches between (VIEW_KEY keeps the choice). */
+export const VIEWS = ['map', 'cards', 'storage'] as const;
+export type ViewName = (typeof VIEWS)[number];
+
 /** A destructive menu action stays armed this long after the first tap. */
 export const CONFIRM_MS = 4000;
 /** localStorage keys: the quick buttons, the theme. */
@@ -83,3 +94,5 @@ export type { PanelMarks } from './marks.ts';
 export type { PanelChestRow } from './memory.ts';
 export type { MapJson, MapTileJson, CompactTileJson, SliceTileJson } from '../map/schema.ts';
 export type { MapLiveJson } from '../map/data.ts';
+export type { StorageSummary, StorageOverview, StorageSearchAnswer, StorageChange, StorageRow, StorageContainerAnswer } from './storage.ts';
+export type { StoragePlace } from '../../skills/home/storage.ts';

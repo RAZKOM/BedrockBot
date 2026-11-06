@@ -46,6 +46,8 @@ import { clientModules } from './assets.ts'; // decision 0061: the page's browse
 import { StreamHub, type Topic } from './stream.ts'; // decision 0061: the push channel
 import { PANEL_BUDGETS } from './budgets.ts';
 import { EVENTS_TOPIC, STATE_SAMPLE_MS, STATE_TOPIC } from './shared.ts';
+import { StorageLive } from './storage.ts'; // decision 0065: storage as a database
+import { homeControlOf } from '../../chat/commands-home.ts';
 
 export interface PanelPlan {
   mode: 'off' | 'shared' | 'separate';
@@ -139,7 +141,7 @@ export interface PanelDeps {
   /** The item pictures; default: the minecraft-assets package when it is installed (tests pass their own or null for none). */
   icons?: IconBook | null;
   /** Decision 0061: where the `events` stream topic comes from; default the process's event bus (decision 0059). */
-  events?: Pick<EventBus, 'subscribe'>;
+  events?: Pick<EventBus, 'subscribe'> & Partial<Pick<EventBus, 'query'>>;
   /** Decision 0062: block colours and top-face textures of the map; default the installed package's (null: none). */
   colours?: BlockColours | null;
 }
@@ -164,6 +166,8 @@ export interface Panel {
   readonly stateTopic: Topic;
   /** Decision 0062: the map screen's tiles, overlays and slices (topics `map`, `map-live`; /api/map/*); undefined while the panel is off. */
   readonly map: MapLive | undefined;
+  /** Decision 0065: the storage index's wire (topic `storage`, /api/storage*); undefined while the panel is off. */
+  readonly storage: StorageLive | undefined;
   /** Add a route behind the panel's token (asked after the panel's own, before the health server's); works before or after start(). */
   use(route: HealthRoute): void;
 }
@@ -403,6 +407,29 @@ export function setupPanel(d: PanelDeps): Panel {
   const colours = mapSrc.colours as BlockColours | null | undefined;
   const map = plan.mode === 'off' ? undefined : new MapLive({ hub, builder: new MapBuilder(mapSrc), source: mapSrc, colours, log });
 
+  // ---- decision 0065: storage as a database (docs/storage.md): the same chest memory `!stock` reads, what the bot carries
+  const storage =
+    plan.mode === 'off'
+      ? undefined
+      : new StorageLive({
+          hub,
+          source: {
+            memory: () => homeControlOf(runningTask)?.memory() ?? cache()?.chests,
+            inventory: () => mob?.world.inventory,
+            home: () => {
+              const h = walking.home?.get();
+              return h ? { x: h.x + 0.5, y: h.y, z: h.z + 0.5, dim: 0 } : undefined; // the home point has no dimension: the overworld
+            },
+            bot: () => {
+              const p = runningTask.position();
+              return p ? { ...p, dim: mob?.world.self.dimension ?? 0 } : undefined;
+            },
+            runAs: () => chat.owners.names[0] ?? null, // panelLine: the first owner name, else the console (xuid-only: no position known either)
+          },
+          events: d.events ?? eventBus,
+          log,
+        });
+
   const routes = panelRoutes({
     state,
     run,
@@ -420,7 +447,7 @@ export function setupPanel(d: PanelDeps): Panel {
   // decision 0061: one route list behind the token: the panel's own routes, the stream, whatever other
   // modules add with use() (docs/panel.md "Add a topic"), then the page's modules (/ui/<hash>/...)
   let modulesRoute: HealthRoute | undefined;
-  const routeList: HealthRoute[] = [routes, hub.route(), ...(map ? [map.route()] : [])];
+  const routeList: HealthRoute[] = [routes, hub.route(), ...(map ? [map.route()] : []), ...(storage ? [storage.route()] : [])];
   const allRoutes: HealthRoute = (path, req, res) => {
     for (const r of routeList) if (r(path, req, res)) return true;
     return modulesRoute?.(path, req, res) ?? false;
@@ -436,6 +463,7 @@ export function setupPanel(d: PanelDeps): Panel {
     hub,
     stateTopic,
     map,
+    storage,
     use: (route) => {
       routeList.push(route);
     },
@@ -474,6 +502,7 @@ export function setupPanel(d: PanelDeps): Panel {
       logs.stop();
       hub.close(); // decision 0061: ends every stream
       map?.stop(); // decision 0062
+      storage?.stop(); // decision 0065
       if (pushT) clearTimeout(pushT);
       for (const u of unsubs.splice(0)) u(); // Track AP
       await own?.stop();

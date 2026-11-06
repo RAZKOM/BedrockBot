@@ -60,6 +60,10 @@ export interface ChestMemoryStore {
   near(origin: Vec3, radius: number): ChestRecord[];
   all(): ChestRecord[];
   readonly size: number;
+  /** Decision 0065 (the storage index): every dimension's records; absent on fakes (then only the current one counts). */
+  byDimension?(): { dim: number; records: ChestRecord[] }[];
+  /** Decision 0065: called after every set / delete (the panel's storage topic); returns the unsubscribe. */
+  onChange?(fn: (dim: number, p: Vec3) => void): () => void;
 }
 
 export const CHEST_FILE = 'chests.json';
@@ -85,6 +89,7 @@ export class ChestMemory implements ChestMemoryStore {
   private readonly readOnly: boolean;
   private readonly max: number;
   private writing: Promise<void> | undefined;
+  private readonly listeners = new Set<(dim: number, p: Vec3) => void>(); // decision 0065
   errors = 0;
   lastError: string | undefined;
 
@@ -150,13 +155,41 @@ export class ChestMemory implements ChestMemoryStore {
       m.delete(oldest);
     }
     this.dirty.add(dim);
+    this.changed(dim, r);
   }
 
   delete(p: Vec3): boolean {
     const dim = this.dimension();
     const had = this.records(dim).delete(chestKey(p));
-    if (had) this.dirty.add(dim);
+    if (had) {
+      this.dirty.add(dim);
+      this.changed(dim, p);
+    }
     return had;
+  }
+
+  /** Decision 0065: the storage index reads every dimension (overworld, nether, the end, and any other loaded). */
+  byDimension(): { dim: number; records: ChestRecord[] }[] {
+    const dims = new Set([0, 1, 2, ...this.dims.keys()]);
+    return [...dims].sort((a, b) => a - b).map((dim) => ({ dim, records: [...this.records(dim).values()] }));
+  }
+
+  /** Decision 0065: a listener for every set / delete (the panel's storage topic); a listener that throws is ignored. */
+  onChange(fn: (dim: number, p: Vec3) => void): () => void {
+    this.listeners.add(fn);
+    return () => {
+      this.listeners.delete(fn);
+    };
+  }
+
+  private changed(dim: number, p: Vec3): void {
+    for (const fn of [...this.listeners]) {
+      try {
+        fn(dim, p);
+      } catch {
+        // a listener's problem is its own
+      }
+    }
   }
 
   near(origin: Vec3, radius: number): ChestRecord[] {

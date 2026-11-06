@@ -279,7 +279,7 @@ describe('panel over HTTP', () => {
     expect((await fetch(`${base}/api/jobs`, { headers: auth })).status).toBe(200);
     const s = await openSse(`${base}/api/stream`, auth);
     try {
-      expect((JSON.parse((await s.next('hello')).data) as { topics: string[] }).topics).toEqual(['state', 'events', 'map', 'map-live', 'jobs']); // decision 0062: the map's topics
+      expect((JSON.parse((await s.next('hello')).data) as { topics: string[] }).topics).toEqual(['state', 'events', 'map', 'map-live', 'storage', 'jobs']); // decision 0062: the map's topics; 0065: storage
       interface Lite {
         lite: boolean;
         settings: { key: string; value: string; source: string }[];

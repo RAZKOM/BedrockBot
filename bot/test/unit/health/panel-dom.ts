@@ -242,6 +242,12 @@ export function runPage(html: string, opts: PageOptions = {}): Harness {
     c.dataset.ov = m[1]!;
     return c;
   });
+  // decision 0065: the view switches (every [data-goview] element has an id: the same element getElementById hands out)
+  const goviews = [...html.matchAll(/<\w+[^>]*?\sid="([^"]+)"[^>]*\sdata-goview="([^"]+)"/g)].map((m) => {
+    const b = el(m[1]!);
+    b.dataset.goview = m[2]!;
+    return b;
+  });
   const h = {
     layers,
     overlays,
@@ -264,7 +270,7 @@ export function runPage(html: string, opts: PageOptions = {}): Harness {
   const document = {
     getElementById: el,
     querySelectorAll: (sel: string) =>
-      sel === '#inventory .cell' ? [...cells.values()] : sel === 'button.q' ? quick : sel === '#settings tr[data-row]' ? [...rows.values()] : sel === '#settings tr[data-grp]' ? grps : sel === 'button.mode' ? modeButtons : sel === '[data-layer]' ? layers : sel === '[data-ov]' ? overlays : [],
+      sel === '#inventory .cell' ? [...cells.values()] : sel === 'button.q' ? quick : sel === '#settings tr[data-row]' ? [...rows.values()] : sel === '#settings tr[data-grp]' ? grps : sel === 'button.mode' ? modeButtons : sel === '[data-layer]' ? layers : sel === '[data-ov]' ? overlays : sel === '[data-goview]' ? goviews : [],
     querySelector: (sel: string) => {
       const k = /^\[data-key="([^"]+)"\]:not\(button\)$/.exec(sel)?.[1];
       if (k) return inputs.get(k) ?? null;

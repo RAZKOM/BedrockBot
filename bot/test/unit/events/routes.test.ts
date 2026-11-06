@@ -7,6 +7,7 @@ import { EventBus } from '../../../src/events/bus.ts';
 import { eventRoutes, parseEventQuery } from '../../../src/events/routes.ts';
 import { summarize } from '../../../src/events/summary.ts';
 import type { BotEvent } from '../../../src/events/registry.ts';
+import { onFetchablePort } from '../health/panel-sse.ts';
 
 const T0 = Date.UTC(2026, 10, 5, 12, 0, 0);
 
@@ -32,15 +33,21 @@ describe('event routes', () => {
     bus.emit('life.died', { n: 1, cause: 'death.attack.zombie' });
     bus.emit('job.failed', { job: 'mine', reason: 'no_pickaxe', durationS: 20 });
     const route = eventRoutes(bus, () => T0);
-    server = createServer((req, res) => {
-      const path = new URL(req.url ?? '/', 'http://x').pathname;
-      if (!route(path, req, res)) {
-        res.writeHead(404);
-        res.end();
-      }
-    });
-    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
-    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    // a port fetch() accepts (panel-sse.ts: port 0 can be one of the Fetch standard's bad ports)
+    const got = await onFetchablePort(
+      () =>
+        createServer((req, res) => {
+          const path = new URL(req.url ?? '/', 'http://x').pathname;
+          if (!route(path, req, res)) {
+            res.writeHead(404);
+            res.end();
+          }
+        }),
+      (sv) => new Promise<number>((r) => sv.listen(0, '127.0.0.1', () => r((sv.address() as AddressInfo).port))),
+      (sv) => new Promise((r) => sv.close(r)),
+    );
+    server = got.server;
+    base = `http://127.0.0.1:${got.port}`;
   });
   afterAll(async () => {
     await new Promise((r) => server.close(r));

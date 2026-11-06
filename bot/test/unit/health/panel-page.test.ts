@@ -570,7 +570,7 @@ describe('panel page script: the map screen (decision 0062, fake DOM and canvas)
     expect(h.els.get('sheet-title')!.textContent).toBe('18313 17030: grass_block, y -61');
     const body = h.els.get('sheet-body')!.children.map((c) => c.textContent);
     expect(body).toEqual(['loaded now', 'chest "ores" (y -60)', '  holds 12 coal (2/27 slots)', '  read 60 s ago']);
-    expect(actsOf(h).map((b) => b.dataset.act)).toEqual(['walk', 'wp', 'home', 'shelter', 'dig']);
+    expect(actsOf(h).map((b) => b.dataset.act)).toEqual(['walk', 'wp', 'home', 'shelter', 'dig', 'bring']); // decision 0065: a remembered chest offers Bring...
     act(h, 'walk').fire('click');
     expect(h.els.get('sheet-confirm')!.hidden).toBe(false);
     expect(h.els.get('sheet-cmd')!.textContent).toBe('!goto 18313 -60 17030');

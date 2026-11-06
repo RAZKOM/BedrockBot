@@ -6,16 +6,22 @@
 // (worst-case fixture, `PANEL_MEASURE=1 npx vitest run --project unit test/unit/health/panel-budgets.test.ts`)
 // are in docs/panel.md "Measured"; raise a number only with the reason written there.
 export const PANEL_BUDGETS = {
-  /** GET / : the server-rendered structure, the CSS, the glyphs and the embedded lite state (worst case 108 KB). */
-  html: 120_000,
+  /**
+   * GET / : the server-rendered structure, the CSS, the glyphs and the embedded lite state (worst case 108 KB
+   * before decision 0065). Decision 0065 raised it from 120 000: the storage view's markup, the Bring picker
+   * and their CSS add about 5 KB; 121.6 KB in all (docs/panel.md "Budgets").
+   */
+  html: 128_000,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**
    * All browser modules together, raw (94 KB before decision 0062; 32 KB gzip, fetched once, then
    * cached as immutable). Decision 0062 raised it from 120 000: the map screen (paint, tiles, view,
-   * sheet, actions) replaces the 14.5 KB map card with about 80 KB; 160 KB in all (docs/panel.md "Measured").
+   * sheet, actions) replaces the 14.5 KB map card with about 80 KB; 160 KB in all. Decision 0065 raised it
+   * from 170 000: the storage view, the Bring picker, their action table and the view switch (storage.ts,
+   * bring.ts, storedefs.ts, views.ts) add about 19.6 KB raw (7.1 KB gzip); 184 KB in all (docs/panel.md "Budgets").
    */
-  modules: 170_000,
+  modules: 200_000,
   /** A state snapshot on the stream (= the lite poll; worst case 19.5 KB). */
   snapshot: 24_000,
   /** A state delta on a busy second (a few cells, a log line, chat, the clock, uptime; about 700 bytes). */
@@ -34,4 +40,12 @@ export const PANEL_BUDGETS = {
   mapLiveDelta: 4_000,
   /** Decision 0062: GET /api/map/tiles for a radius 8 window (289 tiles), gzipped: the map screen's first load (39 KB on generated terrain; random worst-case art does not compress and is only measured). */
   mapFetch: 120_000,
+  /** Decision 0065: a `storage` topic snapshot (counts, 7 categories with their top 4, the 5 fullest containers, 8 recent changes; 2.8 KB worst case). */
+  storage: 8_000,
+  /** Decision 0065: a `storage` delta after a deposit (a few totals, a category's top, one recent change; 1.8 KB worst case). */
+  storageDelta: 3_000,
+  /** Decision 0065: one GET /api/storage/search answer (12 items, 8 places each, 5 recent changes each; 23 KB on the 512-container worst case). */
+  storageSearch: 32_000,
+  /** Decision 0065: GET /api/storage with 512 containers in the memory (every container by fullness; 120 KB worst case). */
+  storageFetch: 160_000,
 } as const;

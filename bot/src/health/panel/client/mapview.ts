@@ -6,7 +6,9 @@
 // box, then drag its corners. At the closest zooms each column shows its block's top-face texture
 // (GET /tex/<block>.png; a 404 keeps the colour). The view (map / cards) and the map's switches are kept
 // in this browser (try/catch storage).
-import { MAP_LIVE_TOPIC, MAP_PREFS_KEY, MARKS_REFRESH_MS, VIEW_KEY, type MapLiveJson, type PanelMarks } from '../shared.ts';
+import { MAP_LIVE_TOPIC, MAP_PREFS_KEY, MARKS_REFRESH_MS, type MapLiveJson, type PanelMarks } from '../shared.ts';
+import type { BringOpen } from './bring.ts';
+import type { Views } from './views.ts';
 import { applyDelta, type DeltaOp, type Json } from './delta.ts';
 import { dur, nice, num, type Ctx2D } from './dom.ts';
 import { boxCorners, setupGestures } from './mapinput.ts';
@@ -29,10 +31,19 @@ interface Prefs {
   tex: boolean;
 }
 
-export function setupMapView(page: Page): (s: Lite) => void {
+/** What main.ts gets back: the HUD's render, and decision 0065's Show on map. */
+export interface MapView {
+  render(s: Lite): void;
+  /** Centre on a block and highlight it for a while (follow off); a toast when it is not in the bot's dimension. */
+  focus(x: number, y: number, z: number, dim: number): void;
+}
+
+/** Decision 0065: how long Show on map keeps its highlight. */
+export const HIGHLIGHT_MS = 12_000;
+
+export function setupMapView(page: Page, views: Views, bring?: (o: BringOpen) => void): MapView {
   const { ui } = page;
   const env = ui.env;
-  const root = ui.doc.documentElement;
   const cv = ui.need('mapcv');
   const g: Ctx2D | null = cv.getContext?.('2d') ?? null;
   const dpr = (): number => env.window.devicePixelRatio ?? 1;
@@ -63,6 +74,7 @@ export function setupMapView(page: Page): (s: Lite) => void {
     drawT: 0 as unknown,
     marksT: 0 as unknown,
     sel: null as { x: number; z: number } | null,
+    hl: null as { x: number; z: number; until: number } | null,
     boxMode: false,
     box: null as MapBox | null,
     y: 64,
@@ -74,10 +86,9 @@ export function setupMapView(page: Page): (s: Lite) => void {
     drawSoon();
   });
 
-  // ---- the view switch (map / cards), kept in this browser
-  const setView = (map: boolean): void => {
-    root.dataset.view = map ? 'map' : 'cards'; // the CSS shows one of the two (page.ts VIEW_BOOT set it first)
-    ui.store.set(VIEW_KEY, map ? 'map' : 'cards');
+  // ---- the view switch (views.ts: map / cards / storage, kept in this browser)
+  views.on((v) => {
+    const map = v === 'map';
     V.shown = map;
     tiles.pause(!map);
     if (map) {
@@ -85,9 +96,7 @@ export function setupMapView(page: Page): (s: Lite) => void {
       layout();
       marksTick();
     }
-  };
-  ui.need('view-cards').addEventListener('click', () => setView(false));
-  ui.need('view-map').addEventListener('click', () => setView(true));
+  });
 
   // ---- live overlays: the map-live topic (a snapshot, then deltas), else the polled tiles answer
   let listening = false;
@@ -214,6 +223,15 @@ export function setupMapView(page: Page): (s: Lite) => void {
         g.fillRect(q[0] - 7 * r, q[1] - 7 * r, 14 * r, 14 * r);
       }
     }
+    if (V.hl && Date.now() < V.hl.until) {
+      // decision 0065: Show on map's container, a ring that stays visible at every zoom
+      const q = toScreen(V.hl.x + 0.5, V.hl.z + 0.5);
+      g.strokeStyle = '#5cd6ff';
+      g.lineWidth = 3 * r;
+      g.beginPath();
+      g.arc(q[0], q[1], Math.max(V.scale, 14 * r), 0, Math.PI * 2);
+      g.stroke();
+    }
     if (V.sel) {
       const q = toScreen(V.sel.x, V.sel.z);
       const k = Math.max(V.scale, 6 * r);
@@ -256,7 +274,10 @@ export function setupMapView(page: Page): (s: Lite) => void {
     const elytra = !!inv && (inv.armour.some((a) => a?.name === 'elytra') || inv.slots.some((a) => a?.name === 'elytra'));
     const bot = V.live?.bot ? { x: V.live.bot[0], y: V.live.bot[1], z: V.live.bot[2] } : page.last.self.pos ?? null;
     V.sel = { x: bx, z: bz };
-    sheet.openPoint({ title, lines, ctx: { x: bx, z: bz, y, block, bot, elytra } });
+    // decision 0065: a chest with remembered contents offers Bring... (the picker; !bring picks its own source)
+    const extra = bring && on('chests') ? (V.marks?.chests ?? []).filter((c) => Math.abs(c.x - bx) <= 1 && Math.abs(c.z - bz) <= 1 && c.top?.length).slice(0, 2) : [];
+    const from = (c: (typeof extra)[number]): string => `${nice(c.kind)} ${c.x} ${c.y} ${c.z}`;
+    sheet.openPoint({ title, lines, ctx: { x: bx, z: bz, y, block, bot, elytra }, extra: extra.map((c) => ({ label: extra.length > 1 ? `Bring... (${from(c)})` : 'Bring...', run: () => bring!({ items: (c.top ?? []).map(([n, k]) => ({ name: n, total: k, stack: null })), from: from(c) }) })) });
     drawSoon();
   }
   /** The surface range of the box's columns (the default y range), null when none is known. */
@@ -372,11 +393,22 @@ export function setupMapView(page: Page): (s: Lite) => void {
   });
   if (prefs.layer === 'slice') prefs.layer = 'surface'; // a slice needs a height: start on the surface
   applyLayer();
-  setView(ui.store.get(VIEW_KEY) !== 'cards');
   setFollow(true);
 
+  function focus(x: number, _y: number, z: number, dim: number): void {
+    setFollow(false);
+    V.x = x + 0.5;
+    V.z = z + 0.5;
+    V.centred = true;
+    V.scale = Math.max(V.scale, 6 * dpr());
+    V.hl = { x, z, until: Date.now() + HIGHLIGHT_MS };
+    const here = V.live?.dim ?? 0;
+    if (dim !== here) page.toast(`that container is in another dimension (${dim}); the map shows the bot's (${here})`);
+    if (V.shown) layout();
+  }
+
   /** The HUD from the state (health, food, the job and its ETA). */
-  return (s: Lite): void => {
+  const render = (s: Lite): void => {
     if (!V.centred && s.self.pos && V.follow && !V.live) {
       V.x = s.self.pos.x;
       V.z = s.self.pos.z;
@@ -390,4 +422,5 @@ export function setupMapView(page: Page): (s: Lite) => void {
     const j = s.job;
     ui.text('hud-job', j ? `${nice(j.name)}: ${j.line ?? j.state}${j.etaS != null ? `, eta ${dur(j.etaS)}` : ''}` : 'idle');
   };
+  return { render, focus };
 }

@@ -12,21 +12,17 @@
 // Env: PANEL_E2E_PORT (default a random port in 9940..9949) plus core-truth.ts (CORE_BDS_*).
 // Needs BDS_E2E=1 and bds-core with the truth pack (`node scripts/bds.mjs --profile core up` and `... pack`).
 import { randomInt } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PANEL_BUDGETS } from '../../src/health/panel/budgets.ts';
 import { applyDelta, type DeltaOp, type Json } from '../../src/health/panel/client/delta.ts';
 import { EVENTS_TOPIC, HELLO_EVENT, STATE_TOPIC, type PanelStateLite, type StreamHello } from '../../src/health/panel/shared.ts';
 import { openSse, type SseMessage, type SseStream } from '../unit/health/panel-sse.ts';
-import { PveTruth } from './pve-truth.ts';
-import { centre, clearArea, connectPlayer, CORE_CONTAINER, E2E, FEET_Y, prepareServer, privateArea, sleep, startCli, until, waitOnline, type CoreCli } from './core-truth.ts';
+import type { PveTruth } from './pve-truth.ts';
+import { centre, clearArea, CORE_CONTAINER, CORE_TARGET, E2E, FEET_Y, prepareServer, privateArea, sleep, until, waitOnline, type CoreCli } from './core-truth.ts';
+import { connectObserver, panelClient, panelPort, startPanelCli, type Observer, type PanelCli } from './panel-e2e.ts';
 
-const PORT = Number(process.env.PANEL_E2E_PORT ?? 9940 + randomInt(10));
-const TOKEN = Array.from({ length: 24 }, () => 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'[randomInt(57)]).join('');
-const BASE = `http://127.0.0.1:${PORT}`;
-const AUTH = { authorization: `Bearer ${TOKEN}` };
+const panel = panelClient(panelPort(process.env.PANEL_E2E_PORT, 9940));
+const { port: PORT, token: TOKEN, base: BASE, auth: AUTH } = panel;
 
 type Msg = { snap: PanelStateLite } | { d: DeltaOp[] };
 const parse = (m: SseMessage): Msg => JSON.parse(m.data) as Msg;
@@ -35,9 +31,8 @@ const setting = (s: PanelStateLite, key: string): string | undefined => s.settin
 const count = (s: PanelStateLite, item: string): number => (s.inventory?.slots ?? []).reduce((n, x) => n + (x?.name === item ? x.count : 0), 0);
 
 async function cmd(text: string): Promise<{ status: number; replies: string[] }> {
-  const r = await fetch(`${BASE}/api/cmd`, { method: 'POST', headers: { ...AUTH, 'content-type': 'application/json' }, body: JSON.stringify({ text }) });
-  const body = (await r.json()) as { replies?: string[] };
-  return { status: r.status, replies: body.replies ?? [] };
+  const r = await panel.cmd(text);
+  return { status: r.status, replies: r.body.replies ?? [] };
 }
 
 /** Follow the state topic of a stream: apply every snapshot or delta, until `done` holds (returns the messages it took). */
@@ -58,10 +53,10 @@ describe.skipIf(!E2E)('core: panel push channel and browser modules (decision 00
   const HOME = { x: area.x, y: FEET_Y, z: area.z };
   const measurements: string[] = [];
   const open: SseStream[] = [];
-  let observer: Awaited<ReturnType<typeof connectPlayer>> | undefined;
+  let observer: Observer | undefined;
   let truth: PveTruth | undefined;
   let cli: CoreCli | undefined;
-  let tmp: string | undefined;
+  let run: PanelCli | undefined;
 
   const stream = async (path = '/api/stream', headers: Record<string, string> = {}): Promise<SseStream> => {
     const s = await openSse(`${BASE}${path}`, { ...AUTH, ...headers });
@@ -71,24 +66,17 @@ describe.skipIf(!E2E)('core: panel push channel and browser modules (decision 00
 
   beforeAll(async () => {
     await prepareServer({ time: 'noon' });
-    observer = await connectPlayer(`StreamObs${randomInt(1000, 9999)}`);
-    truth = new PveTruth(observer.conn, CORE_CONTAINER);
+    observer = await connectObserver(`StreamObs${randomInt(1000, 9999)}`, CORE_TARGET, CORE_CONTAINER);
+    truth = observer.truth;
     await truth.tp(observer.name, { x: HOME.x + 0.5, y: FEET_Y, z: HOME.z - 24 + 0.5 }, 0, 0);
     await clearArea(truth, HOME, 8, 4);
-    // the child inherits these: the token, and the world cache and the event store in a temporary
-    // directory, never under the user's config directory
-    tmp = mkdtempSync(join(tmpdir(), 'bot-e2e-panel-stream-'));
-    process.env.BEDROCKBOT_PANEL_TOKEN = TOKEN;
-    process.env.BEDROCKBOT_CACHE_DIR = join(tmp, 'cache');
-    process.env.BEDROCKBOT_EVENTS_DIR = join(tmp, 'events');
-    delete process.env.BEDROCKBOT_CACHE;
-    cli = startCli(['--walk', '--health-port', String(PORT)]);
-    delete process.env.BEDROCKBOT_PANEL_TOKEN;
-    delete process.env.BEDROCKBOT_CACHE_DIR;
-    delete process.env.BEDROCKBOT_EVENTS_DIR;
+    // panel-e2e.ts: the token, the config, the world cache and the event store in a temporary directory,
+    // never under the user's config directory
+    run = startPanelCli(panel, { prefix: 'bot-e2e-panel-stream-', args: ['--walk'], events: true });
+    cli = run.cli;
     await waitOnline(truth, cli.name);
     await truth.tp(cli.name, centre(HOME), 0, 0);
-    await until(async () => ((await fetch(`${BASE}/healthz`).catch(() => undefined))?.status === 200 ? true : undefined), 20_000, 'panel /healthz 200', 250);
+    await panel.healthy();
   }, 90_000);
 
   afterAll(async () => {
@@ -97,7 +85,7 @@ describe.skipIf(!E2E)('core: panel push channel and browser modules (decision 00
     await truth?.cleanup().catch(() => undefined);
     await truth?.clearAround(centre(HOME), 16).catch(() => undefined);
     await observer?.close();
-    if (tmp) rmSync(tmp, { recursive: true, force: true });
+    run?.cleanup();
     console.log(`panel stream e2e (port ${PORT}, area cell ${area.cell}):\n  ${measurements.join('\n  ')}`);
   }, 60_000);
 

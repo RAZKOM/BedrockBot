@@ -5,8 +5,10 @@ import { chestKey, type ChestMemoryStore, type ChestRecord } from '../../world/c
 import type { Vec3 } from '../../world/types.ts';
 import { isShulkerBox, type ContainerSnapshot } from '../container/chest.ts';
 import type { PlanChest } from './unloader.ts';
+import { itemQuery, partnerKeys, stockHits, stockRecords, stockTotals } from './stock.ts'; // decision 0065: shared with the storage index
 
 export { chestKey };
+export { itemMatches, itemQuery, partnerKeys } from './stock.ts';
 
 /** A record from a fresh read (keeps the owner's label of an earlier record). */
 export function recordFrom(p: Vec3, kind: string, snap: ContainerSnapshot, prev: ChestRecord | undefined, now: number, partner?: Vec3): ChestRecord {
@@ -31,13 +33,6 @@ export function recordFrom(p: Vec3, kind: string, snap: ContainerSnapshot, prev:
 /** A record for a container found but not opened yet. */
 export function unreadRecord(p: Vec3, kind: string): ChestRecord {
   return { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), kind, size: 0, free: 0, stacks: 0, contents: {}, room: {}, boxes: { empty: 0, full: 0 }, double: false, readAt: 0 };
-}
-
-/** Positions that are the other half of a remembered double chest (never targets of their own). */
-export function partnerKeys(records: readonly ChestRecord[]): Set<string> {
-  const out = new Set<string>();
-  for (const r of records) if (r.partner) out.add(chestKey(r.partner));
-  return out;
 }
 
 /** The read records as unloader targets (partners and never-read containers left out). */
@@ -142,44 +137,17 @@ export function unreachableLines(records: readonly ChestRecord[], now: number, o
   return lines;
 }
 
-/** Normalised item query: `minecraft:Coal` -> `coal`; `shulker` / `shulkers` / `box` -> any shulker box. */
-export function itemQuery(raw: string): string {
-  const n = raw.toLowerCase().replace(/^minecraft:/, '');
-  if (['shulker', 'shulkers', 'box', 'boxes', 'shulker_box', 'shulker_boxes'].includes(n)) return 'shulker_box';
-  return n;
-}
-
-/** Matches a query: the exact name, its plural, or any shulker box for `shulker_box`. */
-export function itemMatches(query: string, name: string): boolean {
-  if (query === 'shulker_box') return isShulkerBox(name);
-  return name === query || `${name}s` === query || name === query.replace(/es$/, '') || name.replace(/^raw_/, '') === query;
-}
-
-/** `!stock [item]` from memory. */
+/** `!stock [item]` from memory (decision 0065: the counting is stock.ts, shared with the storage index; this only words the reply). */
 export function stockLine(store: Pick<ChestMemoryStore, 'all'>, raw: string | undefined, origin?: Vec3, radius = Infinity): string {
-  const records = store.all().filter((r) => r.readAt > 0 && (!origin || Math.hypot(r.x - origin.x, r.y - origin.y, r.z - origin.z) <= radius));
-  const partners = partnerKeys(records);
-  const list = records.filter((r) => !partners.has(chestKey(r)));
+  const list = stockRecords(store.all(), origin, radius);
   if (list.length === 0) return 'stock: no chest read yet (try !chests scan near home)';
   if (!raw) {
-    const total: Record<string, number> = {};
-    for (const r of list) for (const [k, v] of Object.entries(r.contents)) total[k] = (total[k] ?? 0) + v;
-    for (const r of list) for (const [k, v] of Object.entries(r.inBoxes ?? {})) total[k] = (total[k] ?? 0) + v; // Track AV: boxed items count
-    const what = top(total, 12);
+    const what = top(stockTotals(list), 12);
     return `stock: ${list.length} container${list.length === 1 ? '' : 's'}: ${what || 'all empty'}`;
   }
   const q = itemQuery(raw);
-  const hits: { r: ChestRecord; n: number; empty?: number; boxed: number }[] = [];
-  for (const r of list) {
-    let n = 0;
-    for (const [k, v] of Object.entries(r.contents)) if (itemMatches(q, k)) n += v;
-    // Track AV: what the chest's full boxes hold counts too (`(1728 in boxes)`)
-    let boxed = 0;
-    if (q !== 'shulker_box') for (const [k, v] of Object.entries(r.inBoxes ?? {})) if (itemMatches(q, k)) boxed += v;
-    if (n + boxed > 0) hits.push({ r, n: n + boxed, boxed, ...(q === 'shulker_box' ? { empty: r.boxes.empty } : {}) });
-  }
+  const hits = stockHits(list, q);
   if (hits.length === 0) return `stock: no ${q} in the ${list.length} container${list.length === 1 ? '' : 's'} I know`;
-  hits.sort((a, b) => b.n - a.n);
   const total = hits.reduce((a, h) => a + h.n, 0);
   const parts = hits.map((h) => `${h.n} in ${chestName(h.r)}${h.empty !== undefined ? ` (${h.empty} empty)` : ''}${h.boxed > 0 ? ` (${h.boxed === h.n ? 'all' : h.boxed} in boxes)` : ''}`);
   return `${q}: ${parts.join(', ')}${hits.length > 1 ? ` (${total} in all)` : ''}`;

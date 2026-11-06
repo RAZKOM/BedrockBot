@@ -9,7 +9,10 @@ import { setupCommands } from './commands.ts';
 import { setupInventory } from './inventory.ts';
 import { setupLink } from './link.ts';
 import { setupLogs } from './logs.ts';
+import { setupBring } from './bring.ts';
 import { setupMapView } from './mapview.ts';
+import { setupStorage } from './storage.ts';
+import { setupViews } from './views.ts';
 import { linkView } from './menu.ts';
 import type { Lite, Page } from './page.ts';
 import { setupPopup } from './popup.ts';
@@ -66,8 +69,20 @@ export function start(env: Env): Started {
   const renderCards = setupCards(page);
   const renderLogs = setupLogs(page);
   const renderSettings = setupSettings(page);
-  const renderMap = setupMapView(page); // decision 0062: the map screen
+  // decision 0062 / 0065: the views (map, cards, storage), the map screen, the storage view and its Bring picker
+  const views = setupViews(page);
+  let me: string | null = null;
+  const bring = setupBring(page, () => me);
+  const map = setupMapView(page, views, (o) => {
+    storage.prime(); // "to me" needs the summary's `me`
+    bring.open(o);
+  });
+  const storage = setupStorage(page, views, bring, (x, y, z, dim) => map.focus(x, y, z, dim), (s) => {
+    me = s.me;
+    bring.update();
+  });
   setupTables(page, (cmds) => commands.setHelp(cmds));
+  views.start(); // the remembered view, before the transport exists: its modules' topics go into the first stream
 
   function render(s: Lite): void {
     page.last = s;
@@ -76,7 +91,7 @@ export function start(env: Env): Started {
     renderCards(s);
     renderLogs(s);
     renderSettings(s);
-    renderMap(s);
+    map.render(s);
   }
   let renders = 0;
   const timed = (s: Lite, bytes: number, via: string): void => {

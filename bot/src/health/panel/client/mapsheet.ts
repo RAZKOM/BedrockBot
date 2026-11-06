@@ -13,6 +13,8 @@ export interface PointInfo {
   title: string;
   lines: string[];
   ctx: PointContext;
+  /** Decision 0065: local entries after the actions (a chest's Bring..., which opens its own picker). */
+  extra?: { label: string; run: () => void }[];
 }
 
 export interface Sheet {
@@ -158,6 +160,13 @@ export function setupSheet(page: Page, onClose: () => void): Sheet {
       for (const l of p.lines) body.appendChild(ui.el('div', '', l));
       hideConfirm();
       buttons(page.link.actions ? pointActions(p.ctx) : [], '');
+      for (const x of page.link.actions ? (p.extra ?? []) : []) {
+        const b = ui.el('button', 'act', x.label);
+        b.type = 'button';
+        b.dataset.act = 'bring';
+        b.addEventListener('click', x.run);
+        acts.appendChild(b);
+      }
       if (!page.link.actions) acts.appendChild(ui.el('div', 'note', `${page.link.title}: actions come back when the bot has spawned`));
     },
     openBox(b, surf) {

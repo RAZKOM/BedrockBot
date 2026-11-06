@@ -296,6 +296,16 @@ wire (`/api/map/tiles`, the `map` and `map-live` topics, `/api/map/slice`, `/tex
 and the point and box actions. Every action shows its exact `!command` before Send, and the reply
 appears under it. The guide also has the recipes "add an overlay" and "add a map action".
 
+### Storage view
+
+Decision 0065. The third view beside the map and the cards has its own guide, [storage.md](storage.md).
+It covers the storage index (every remembered container in every dimension plus what the bot carries,
+shared with `!stock`), the search (plurals, groups, aliases, ranking), the wire (`/api/storage`,
+`/api/storage/search`, `/api/storage/container`, the `storage` topic), the view, and the actions:
+`!bring <item> <n> [home]` and `!chests scan`, each shown before Send, plus Show on map and the map chest
+sheet's Bring.... One switch (`client/views.ts`) serves the three views: any `data-goview` element
+switches, and the choice is kept in `bbpanel-view`.
+
 The afk task's waypoints and shelter still reach the map through `map/routes.ts` `liftTaskStatus`,
 which lifts `nav.waypoints` and `night.shelter` into `/map.json` and `map-live`.
 
@@ -537,9 +547,9 @@ page, so a new card raises the piece it lives in. Raise a number only with the r
 
 | Piece | Budget | Worst case (unit fixture) | Live (bds-core e2e) | Enforced by |
 |---|---|---|---|---|
-| `html`: `GET /` (structure, CSS, glyphs, the embedded lite state) | 120 000 | 116 431 (decision 0062: plus the map screen's markup and CSS) | 104.4 KB (bds-cache) | `panel-budgets`, `panel-menu`, `panel-core`, `panel-actions`, `panel-stream`, `panel-map` |
-| `module`: one browser module, raw | 20 000 | 15 605 (`paint.ts`; `mapview.ts` 15 156) | the same | load at startup (refuses), `panel-budgets`, `panel-stream` |
-| `modules`: all modules, raw | 170 000 (120 000 before decision 0062) | 159 909 (52 636 gzip; the map screen about 79 KB of it) | the same | `panel-budgets`, `panel-stream` |
+| `html`: `GET /` (structure, CSS, glyphs, the embedded lite state) | 128 000 (120 000 before decision 0065) | 121 594 (decision 0062: plus the map screen's markup and CSS; decision 0065: plus the storage view, the Bring picker and their CSS, about 5 KB) | 104.4 KB (bds-cache) | `panel-budgets`, `panel-menu`, `panel-core`, `panel-actions`, `panel-stream`, `panel-map` |
+| `module`: one browser module, raw | 20 000 | 17 287 (`mapview.ts`; `paint.ts` 15 605, `storage.ts` 10 149) | the same | load at startup (refuses), `panel-budgets`, `panel-stream` |
+| `modules`: all modules, raw | 200 000 (120 000 before decision 0062, 170 000 before decision 0065) | 184 231 (61 229 gzip; the map screen about 80 KB of it; decision 0065: `storage.ts`, `bring.ts`, `storedefs.ts`, `views.ts` about 19.6 KB, 7.1 KB gzip) | the same | `panel-budgets`, `panel-stream` |
 | `snapshot`: a state snapshot (= the lite poll) | 24 000 | 19 569 | 7.6 to 12.5 KB | `panel-budgets`, `panel-stream`, a log warning once at run time |
 | `delta`: one state delta on a busy second | 4 000 | 682 (14 ops) | 340 to 660 | `panel-budgets`, `panel-stream`, a log warning once at run time |
 | `event`: one message on the `events` topic | 2 000 | - | 242 | `panel-stream`, a log warning once at run time |
@@ -547,6 +557,10 @@ page, so a new card raises the piece it lives in. Raise a number only with the r
 | `mapLive`: a `map-live` snapshot | 24 000 | 13 894 | - | `panel-budgets`, `map-live`, a log warning once |
 | `mapLiveDelta`: a `map-live` delta on a busy second | 4 000 | 1 276 | - | `panel-budgets`, a log warning once |
 | `mapFetch`: `GET /api/map/tiles` r=8, gzipped | 120 000 | 38 904 (smooth overworld; random art 596 004, only printed) | r=4 9.6 to 23.8 KB | `panel-budgets`, `map-live` |
+| `storage`: a `storage` topic snapshot (decision 0065) | 8 000 | 2 785 (512 containers: the summary is bounded) | 793 (bds-home, 2 chests) | `panel-storage`, `panel-storage` e2e, a log warning once |
+| `storageDelta`: a `storage` delta after a deposit | 3 000 | 1 807 | 284 and 448 (a deposit) | `panel-storage`, a log warning once |
+| `storageSearch`: one `GET /api/storage/search` answer | 32 000 | 23 103 (12 items, 8 places each, 512 containers) | 637 ("diamonds", 2 places) | `panel-storage`, `panel-storage` e2e |
+| `storageFetch`: `GET /api/storage` | 160 000 | 120 457 (512 containers, every one by fullness) | 1 037 (2 chests) | `panel-storage` |
 
 To print the worst case:
 `PANEL_MEASURE=1 pnpm --filter bot exec vitest run --project unit test/unit/health/panel-budgets.test.ts`.
@@ -563,6 +577,7 @@ To print the worst case:
 | `GET /api/marks` | Track AR: what the panel's map draws beyond `/map.json`, within 256 blocks of the bot, nearest first, at most 200 each: `{"chests":[{"x":10,"y":-60,"z":4,"kind":"chest","label":"ores","unreachable":false}],"herds":[{"x":5.5,"y":-60,"z":5.5,"n":5,"kind":"cow","penned":true}]}` (empty lists without a world cache) |
 | `GET /api/marks?cx&cz&r` | decision 0062: the same for a window (centre chunk, radius in chunks, at most 16), plus `blocks` from the cache's marks (`{"ore":[[x,y,z,"diamond_ore"]],"spawner":[...],"bed":[...],"station":[...],"farmland":[...],"forest":[[x,y,z,logs]]}`, nearest first, only the kinds present) and chest contents (`top`, `stacks`, `size`, `readAt`); [map.md](map.md) "Wire" |
 | `GET /api/map/tiles?cid&cx&cz&r&pal[&since&win][&live=1]` | decision 0062: the compact tiles of a window (r up to 16), the palette entries from index `pal`, the window registered for the `map` topic; `live=1` adds the overlays ([map.md](map.md) "Wire") |
+| `GET /api/storage`, `/api/storage/search?q=`, `/api/storage/container?x&y&z&dim` | decision 0065: the storage index (the summary with every category and container; a ranked search with every place and its last changes; one container as remembered); the `storage` topic pushes the summary; [storage.md](storage.md) "Wire" |
 | `GET /api/map/slice?y&cx&cz&r&pal` | decision 0062: the Y-slice: the cache class of every cell at y and the block names of loaded columns (r up to 8); 400 without a numeric y |
 | `GET /tex/<block>.png` | decision 0062: the block's 16 x 16 top face from the installed game's art (the same allowlist and cache as `/icons/`), or 404 and the map keeps the colour |
 | `GET /icons/<name>.png` | the item's icon (`image/png`, 16 x 16 or 32 x 32), or 404 `{"error":"no icon for this item"}`; `HEAD` the same without the body; 405 other methods ("Item icons") |
@@ -696,9 +711,10 @@ codes become `***`). The bot account's sign-in tokens (prismarine-auth cache) ar
 | `health/panel/client/boot.ts`, `main.ts`, `page.ts`, `dom.ts` | decision 0061: the entry (the only module reading browser globals); the wiring (`start(env)`: theme, the cards, render, stale marker); the shared `Page` object; the small DOM interfaces and helpers (`makeUi`, `nice`, `dur`, ...) |
 | `health/panel/client/transport.ts`, `delta.ts` | decision 0061: how the state arrives (stream, fallback polling, hidden tab, `on(topic)`); the delta codec (also used by the server) |
 | `health/panel/client/inventory.ts`, `cards.ts`, `logs.ts`, `settings.ts`, `link.ts`, `commands.ts`, `popup.ts`, `tables.ts` | the page's cards, one module each (until decision 0061 the one `client.ts` string; Track AP and AR behaviour unchanged): the cells and their menu; bot, vitals, status, stack, combat, memory, planner, connection, chat; the log and its filter; the settings controls and modes; the offline banner; the command box, quick buttons and palette; toast and menu; Help and the chest list |
-| `health/panel/page.ts` | the page (`renderPanelPage`): structure, CSS (themes, responsive grid), the 41 inventory cells, the status blocks; Track AR: the grouped settings rows, the mode bar, the menu, toast, palette and map markup; decision 0062: the map screen markup and CSS (`mapScreenHtml`), the view switch before the first paint |
+| `health/panel/page.ts` | the page (`renderPanelPage`): structure, CSS (themes, responsive grid), the 41 inventory cells, the status blocks; Track AR: the grouped settings rows, the mode bar, the menu, toast, palette and map markup; decision 0062: the map screen markup and CSS (`mapScreenHtml`), the view switch before the first paint; decision 0065: the storage view and the Bring picker (`storageScreenHtml`, `bringSheetHtml`), three views in `VIEW_BOOT` |
 | `health/panel/client/menu.ts` (re-exported by `health/panel/menu.ts`) | Track AR: the menu model (`cellActions`, `settingActions`, `setCommand`, `settingVisible`, `modeOf`, `modeChanges`, `stackActions`, `paletteMatch`, `offlineOk`, `linkView`, `parseLog`, `logVisible`); a typed module since decision 0061 (it was the `MENU_JS` string): the page imports it, the server and the tests through `menu.ts` |
 | `health/panel/client/paint.ts`, `tiles.ts`, `mapview.ts`, `mapinput.ts`, `maptex.ts`, `overlays.ts`, `mapsheet.ts`, `mapdefs.ts`; `health/map/live.ts` | decision 0062: the map screen (the painting shared with `/map`, the tile store, the view, gestures, textures, overlays, the action sheet, the registries; `MapLive`: the `map` and `map-live` topics, `/api/map/tiles`, `/api/map/slice`); one line each in [map.md](map.md) "Files" |
+| `health/panel/storage.ts`; `client/storage.ts`, `bring.ts`, `storedefs.ts`, `views.ts` | decision 0065: `StorageLive` (the storage routes and topic, the recent changes); the storage view, the Bring picker, the actions as data, the one view switch (map, cards, storage); [storage.md](storage.md) "Files" |
 | `health/panel/marks.ts` | Track AR: `GET /api/marks` (`mapMarks`: chests and herds near the bot); decision 0062: a window (`marksWindow`), chest contents, the block marks (`blockMarks`) |
 | `health/map/routes.ts` | Track AR: `liftTaskStatus` (the afk task's waypoints and shelter into `/map.json`) |
 | `chat/commands-panel.ts` | Track AR: `!select`, `!offhand` (one line in `tasks/registry.ts`) |
@@ -713,6 +729,7 @@ pnpm --filter bot exec vitest run --project unit test/unit/health               
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-core --silent=false     # bds-core (~15 s)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-actions --silent=false  # Track AR, bds-core (~20 s)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-stream --silent=false   # decision 0061, bds-core (~28 s)
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-storage --silent=false  # decision 0065, bds-home (~22 s)
 PANEL_MEASURE=1 pnpm --filter bot exec vitest run --project unit test/unit/health/panel-budgets.test.ts  # print the worst-case budgets
 ```
 
@@ -908,3 +925,29 @@ Two changes to the older tests:
 
 - panel-core's page marker is now `id="mapscreen"`;
 - panel-actions accepts `blocks` in `/api/marks`.
+
+### Measured (decision 0065)
+
+A live run on bds-home, a flat world (2026-11-06, Windows dev machine). `panel-storage` passed three
+runs in a row (ports 9985, 9986 and 9988). The shared helper is `test/e2e/panel-e2e.ts`.
+
+| What | Value |
+|---|---|
+| page | 109.5 KB, 27 modules (184.2 KB raw, 61.2 KB gzip) |
+| `!chests scan` to both chests in `GET /api/storage` | 4.3 s |
+| `GET /api/storage` (2 chests) | 1 037 bytes |
+| search "diamonds" (2 places, one in a shulker box) | 637 bytes |
+| `storage` snapshot | 793 bytes |
+| `!unload` to the deposit on the `storage` topic | 0.9 s, 2 deltas of 284 and 448 bytes |
+| `!bring diamond 2` to the observer (the bot at the player with the diamonds) | 4.5 to 4.7 s |
+
+**The existing panel e2e on bds-home.** These were moved onto the shared helper and pass on
+bds-home:
+
+- `panel-core` (6 tests) and `panel-actions` (8), with `CORE_BDS_PORT=19196
+  CORE_BDS_CONTAINER=bds-home`, ports 9981 and 9982;
+- `panel-stream` (6), port 9983;
+- `panel-map` (7), with `CACHE_BDS_PORT=19196 CACHE_BDS_CONTAINER=bds-home`, port 9984.
+
+`home-chests` and `home-bring` (10 tests) pass too; `!stock` now counts through
+`skills/home/stock.ts`.

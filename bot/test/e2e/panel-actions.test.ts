@@ -13,38 +13,19 @@
 // Env: PANEL_ACTIONS_E2E_PORT (default a random port in 9650..9659) plus core-truth.ts (CORE_BDS_*).
 // Needs BDS_E2E=1 and bds-core with the truth pack (`node scripts/bds.mjs --profile core up` and `... pack`).
 import { randomInt } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { MapJson } from '../../src/health/map/schema.ts';
 import { PANEL_BUDGETS } from '../../src/health/panel/budgets.ts';
 import { pointActions } from '../../src/health/panel/client/mapdefs.ts';
 import { cellActions, settingActions, stackActions, type MenuAction } from '../../src/health/panel/menu.ts';
-import type { PanelState } from '../../src/health/panel/state.ts';
-import { centre, clearArea, connectPlayer, CORE_CONTAINER, E2E, FEET_Y, hdist, prepareServer, privateArea, sleep, startCli, until, waitOnline, type CoreCli } from './core-truth.ts';
-import { PveTruth } from './pve-truth.ts';
+import { centre, clearArea, CORE_CONTAINER, CORE_TARGET, E2E, FEET_Y, hdist, prepareServer, privateArea, sleep, until, waitOnline, type CoreCli } from './core-truth.ts';
+import { connectObserver, panelClient, panelPort, quitPanelCli, startPanelCli, type Observer, type PanelCli } from './panel-e2e.ts';
+import type { PveTruth } from './pve-truth.ts';
 
-const PORT = Number(process.env.PANEL_ACTIONS_E2E_PORT ?? 9650 + randomInt(10));
-const TOKEN = Array.from({ length: 24 }, () => 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'[randomInt(57)]).join('');
-const BASE = `http://127.0.0.1:${PORT}`;
-const AUTH = { authorization: `Bearer ${TOKEN}` };
-
-async function state(): Promise<PanelState> {
-  const r = await fetch(`${BASE}/api/state`, { headers: AUTH });
-  expect(r.status).toBe(200);
-  return (await r.json()) as PanelState;
-}
-
-let lastCmdAt = 0;
-async function cmd(text: string): Promise<{ status: number; ms: number; body: { ok: boolean; command: string; replies: string[]; error?: string } }> {
-  const wait = 220 - (Date.now() - lastCmdAt); // stay well under 5 per second
-  if (wait > 0) await sleep(wait);
-  lastCmdAt = Date.now();
-  const t0 = performance.now();
-  const r = await fetch(`${BASE}/api/cmd`, { method: 'POST', headers: { ...AUTH, 'content-type': 'application/json' }, body: JSON.stringify({ text }) });
-  return { status: r.status, ms: performance.now() - t0, body: (await r.json()) as { ok: boolean; command: string; replies: string[]; error?: string } };
-}
+const panel = panelClient(panelPort(process.env.PANEL_ACTIONS_E2E_PORT, 9650));
+const { port: PORT, base: BASE, auth: AUTH } = panel;
+const state = () => panel.state();
+const cmd = (text: string) => panel.cmd(text);
 
 /** The action `id` of a menu (fails the test when the menu does not offer it). */
 function action(menu: MenuAction[], id: string): MenuAction {
@@ -75,29 +56,24 @@ describe.skipIf(!E2E)('core: control panel actions (Track AR)', () => {
   const area = privateArea();
   const HOME = { x: area.x, y: FEET_Y, z: area.z };
   const measurements: string[] = [];
-  let observer: Awaited<ReturnType<typeof connectPlayer>> | undefined;
+  let observer: Observer | undefined;
   let truth: PveTruth | undefined;
   let cli: CoreCli | undefined;
-  let cacheDir: string | undefined;
+  let run: PanelCli | undefined;
   const inv = async (): Promise<Record<string, number>> => (await truth!.ok<{ counts: Record<string, number> }>('inv', [cli!.name])).counts;
 
   beforeAll(async () => {
     await prepareServer({ time: 'noon' });
-    observer = await connectPlayer(`PanelAct${randomInt(1000, 9999)}`);
-    truth = new PveTruth(observer.conn, CORE_CONTAINER);
+    observer = await connectObserver(`PanelAct${randomInt(1000, 9999)}`, CORE_TARGET, CORE_CONTAINER);
+    truth = observer.truth;
     await truth.tp(observer.name, { x: HOME.x + 0.5, y: FEET_Y, z: HOME.z - 24 + 0.5 }, 0, 0);
     await clearArea(truth, HOME, 14, 4);
-    process.env.BEDROCKBOT_PANEL_TOKEN = TOKEN;
-    cacheDir = mkdtempSync(join(tmpdir(), 'bot-e2e-panel-act-cache-'));
-    writeFileSync(join(cacheDir, 'config.json'), '{}\n'); // decision 0062: the waypoints go to <tmp>/waypoints/, not the user's
-    process.env.BEDROCKBOT_CACHE_DIR = cacheDir; // the map's tiles and markers, never under the user's config directory
-    delete process.env.BEDROCKBOT_CACHE;
-    cli = startCli(['--walk', '--health-port', String(PORT), '--config', join(cacheDir, 'config.json')]);
-    delete process.env.BEDROCKBOT_PANEL_TOKEN;
-    delete process.env.BEDROCKBOT_CACHE_DIR;
+    // panel-e2e.ts: the waypoints go to <tmp>/waypoints/, the map's tiles and markers to <tmp>, never the user's
+    run = startPanelCli(panel, { prefix: 'bot-e2e-panel-act-cache-', args: ['--walk'] });
+    cli = run.cli;
     await waitOnline(truth, cli.name);
     await truth.tp(cli.name, centre(HOME), 0, 0);
-    await until(async () => ((await fetch(`${BASE}/healthz`).catch(() => undefined))?.status === 200 ? true : undefined), 20_000, 'panel /healthz 200', 250);
+    await panel.healthy();
     await truth.ok('clear', [cli.name]);
     await truth.ok('give', [cli.name, 'iron_sword', 1]);
     await truth.ok('give', [cli.name, 'cobblestone', 128]);
@@ -109,16 +85,11 @@ describe.skipIf(!E2E)('core: control panel actions (Track AR)', () => {
   }, 90_000);
 
   afterAll(async () => {
-    if (cli) {
-      await sleep(300);
-      await cmd('!quit').catch(() => undefined);
-      await Promise.race([cli.exit, sleep(10_000)]);
-      cli.kill();
-    }
+    await quitPanelCli(panel, cli);
     await truth?.cleanup().catch(() => undefined);
     await truth?.clearAround(centre(HOME), 40).catch(() => undefined);
     await observer?.close();
-    if (cacheDir) rmSync(cacheDir, { recursive: true, force: true });
+    run?.cleanup();
     console.log(`panel actions e2e (port ${PORT}, area cell ${area.cell}):\n  ${measurements.join('\n  ')}`);
   }, 60_000);
 

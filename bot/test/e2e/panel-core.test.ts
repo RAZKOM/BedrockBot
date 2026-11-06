@@ -13,59 +13,39 @@
 // Needs BDS_E2E=1 and bds-core with the truth pack (`node scripts/bds.mjs --profile core up` and `... pack`).
 import { randomInt } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { PANEL_BUDGETS } from '../../src/health/panel/budgets.ts';
 import { STATUS_BLOCKS } from '../../src/health/panel/page.ts'; // Track AP
-import type { PanelState } from '../../src/health/panel/state.ts';
-import { PveTruth } from './pve-truth.ts';
-import { centre, clearArea, connectPlayer, coreCmd, CORE_CONTAINER, E2E, FEET_Y, hdist, prepareServer, privateArea, sleep, startCli, until, waitOnline, type CoreCli } from './core-truth.ts';
+import type { PveTruth } from './pve-truth.ts';
+import { centre, clearArea, coreCmd, CORE_CONTAINER, CORE_TARGET, E2E, FEET_Y, hdist, prepareServer, privateArea, sleep, until, waitOnline, type CoreCli } from './core-truth.ts';
+import { connectObserver, panelClient, panelPort, startPanelCli, type Observer, type PanelCli } from './panel-e2e.ts';
 
-const PORT = Number(process.env.PANEL_E2E_PORT ?? 9640 + randomInt(10));
-const TOKEN = Array.from({ length: 24 }, () => 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'[randomInt(57)]).join('');
-const BASE = `http://127.0.0.1:${PORT}`;
-const AUTH = { authorization: `Bearer ${TOKEN}` };
-
-async function state(): Promise<PanelState> {
-  const r = await fetch(`${BASE}/api/state`, { headers: AUTH });
-  expect(r.status).toBe(200);
-  return (await r.json()) as PanelState;
-}
-
-async function cmd(text: string): Promise<{ status: number; body: { ok: boolean; command: string; replies: string[]; error?: string } }> {
-  const r = await fetch(`${BASE}/api/cmd`, { method: 'POST', headers: { ...AUTH, 'content-type': 'application/json' }, body: JSON.stringify({ text }) });
-  return { status: r.status, body: (await r.json()) as { ok: boolean; command: string; replies: string[]; error?: string } };
-}
+const panel = panelClient(panelPort(process.env.PANEL_E2E_PORT, 9640));
+const { port: PORT, token: TOKEN, base: BASE, auth: AUTH } = panel;
+const state = () => panel.state();
+const cmd = (text: string, raw = false) => panel.cmd(text, raw);
 
 describe.skipIf(!E2E)('core: LAN control panel (Track AE)', () => {
   const area = privateArea();
   const HOME = { x: area.x, y: FEET_Y, z: area.z };
   const measurements: string[] = [];
-  let observer: Awaited<ReturnType<typeof connectPlayer>> | undefined;
+  let observer: Observer | undefined;
   let truth: PveTruth | undefined;
   let cli: CoreCli | undefined;
-  let cacheDir: string | undefined;
+  let run: PanelCli | undefined;
 
   beforeAll(async () => {
     await prepareServer({ time: 'noon' });
-    observer = await connectPlayer(`PanelObs${randomInt(1000, 9999)}`);
-    truth = new PveTruth(observer.conn, CORE_CONTAINER);
+    observer = await connectObserver(`PanelObs${randomInt(1000, 9999)}`, CORE_TARGET, CORE_CONTAINER);
+    truth = observer.truth;
     await truth.tp(observer.name, { x: HOME.x + 0.5, y: FEET_Y, z: HOME.z - 24 + 0.5 }, 0, 0);
     await clearArea(truth, HOME, 12, 4);
-    // the child inherits these: the token, and a world cache in a temporary directory (Track AP: the memory block), never under the user's config directory;
-    // decision 0062: a config file there too, so `!wp set panel` writes <tmp>/waypoints/, not the user's waypoints
-    process.env.BEDROCKBOT_PANEL_TOKEN = TOKEN;
-    cacheDir = mkdtempSync(join(tmpdir(), 'bot-e2e-panel-cache-'));
-    writeFileSync(join(cacheDir, 'config.json'), '{}\n');
-    process.env.BEDROCKBOT_CACHE_DIR = cacheDir;
-    delete process.env.BEDROCKBOT_CACHE;
-    cli = startCli(['--walk', '--health-port', String(PORT), '--config', join(cacheDir, 'config.json')]);
-    delete process.env.BEDROCKBOT_PANEL_TOKEN;
-    delete process.env.BEDROCKBOT_CACHE_DIR;
+    // panel-e2e.ts: the token, a config file (`!wp set panel` writes <tmp>/waypoints/) and the world cache
+    // (Track AP: the memory block) in a temporary directory, never under the user's config directory
+    run = startPanelCli(panel, { prefix: 'bot-e2e-panel-cache-', args: ['--walk'] });
+    cli = run.cli;
     await waitOnline(truth, cli.name);
     await truth.tp(cli.name, centre(HOME), 0, 0);
-    await until(async () => ((await fetch(`${BASE}/healthz`).catch(() => undefined))?.status === 200 ? true : undefined), 20_000, 'panel /healthz 200', 250);
+    await panel.healthy();
   }, 90_000);
 
   afterAll(async () => {
@@ -73,7 +53,7 @@ describe.skipIf(!E2E)('core: LAN control panel (Track AE)', () => {
     await truth?.cleanup().catch(() => undefined);
     await truth?.clearAround(centre(HOME), 32).catch(() => undefined);
     await observer?.close();
-    if (cacheDir) rmSync(cacheDir, { recursive: true, force: true });
+    run?.cleanup();
     console.log(`panel e2e (port ${PORT}, area cell ${area.cell}):\n  ${measurements.join('\n  ')}`);
   }, 60_000);
 
@@ -255,7 +235,7 @@ describe.skipIf(!E2E)('core: LAN control panel (Track AE)', () => {
     expect(r.body.replies[0]).toBe(`panel: http://127.0.0.1:${PORT}/ (this machine only; panel.host 0.0.0.0 + panel.token for the LAN)`);
     expect(r.body.replies[0]).not.toContain(TOKEN);
     await sleep(1100);
-    const codes = await Promise.all(Array.from({ length: 7 }, () => cmd('!pos').then((x) => x.status)));
+    const codes = await Promise.all(Array.from({ length: 7 }, () => cmd('!pos', true).then((x) => x.status)));
     expect(codes.filter((c) => c === 429).length).toBeGreaterThanOrEqual(2);
     measurements.push(`rate limit: 7 parallel !pos -> ${JSON.stringify(codes)}`);
   });

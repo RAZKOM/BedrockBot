@@ -14,12 +14,8 @@
 // Env: PANEL_MAP_E2E_PORT (default a random port in 9950..9959) plus cache-truth.ts (CACHE_BDS_*).
 // Needs BDS_E2E=1 and bds-cache with the truth pack (`node scripts/bds.mjs --profile cache up` and `... pack`).
 import { randomInt } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { Connection } from '../../src/connection/connection.ts';
 import type { MapSliceAnswer, MapTilesAnswer, MapTopicMessage } from '../../src/health/map/live.ts';
 import { mapDecodeSlice, mapDecodeTile, mapSurfaceAt } from '../../src/health/map/paint.ts';
 import type { CompactTileJson, MapPaletteEntry } from '../../src/health/map/schema.ts';
@@ -33,14 +29,13 @@ import { scanTop } from '../../src/world/cache/surface.ts';
 import { BlockRegistry } from '../../src/world/registry.ts';
 import { openSse, type SseStream } from '../unit/health/panel-sse.ts';
 import { CACHE_CONTAINER, CACHE_HOST, CACHE_PORT, CACHE_TARGET, E2E, hdist, prepareServer, privateArea, sleep, uniqueName } from './cache-truth.ts';
-import { centre, startCli, truthLoaded, until, waitOnline, type CoreCli } from './core-truth.ts';
+import { centre, truthLoaded, until, waitOnline, type CoreCli } from './core-truth.ts';
 import { E2E_VERSION } from './env.ts';
-import { PveTruth } from './pve-truth.ts';
+import { connectObserver, panelClient, panelPort, quitPanelCli, startPanelCli, type Observer, type PanelCli } from './panel-e2e.ts';
+import type { PveTruth } from './pve-truth.ts';
 
-const PORT = Number(process.env.PANEL_MAP_E2E_PORT ?? 9950 + randomInt(10));
-const TOKEN = Array.from({ length: 24 }, () => 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'[randomInt(57)]).join('');
-const BASE = `http://127.0.0.1:${PORT}`;
-const AUTH = { authorization: `Bearer ${TOKEN}` };
+const panel = panelClient(panelPort(process.env.PANEL_MAP_E2E_PORT, 9950));
+const { port: PORT, base: BASE, auth: AUTH } = panel;
 /** The platform: stone at y PY, air above, radius PR around P. */
 const PY = 200;
 const PR = 12;
@@ -62,14 +57,7 @@ function unroll(r: BlocksReply): string[] {
 const idx = (x: number, z: number): number => ((z & 15) << 4) | (x & 15);
 const key = (cx: number, cz: number): string => `${cx},${cz}`;
 
-let lastCmdAt = 0;
-async function cmd(text: string): Promise<{ status: number; body: { ok: boolean; command: string; replies: string[]; error?: string } }> {
-  const wait = 220 - (Date.now() - lastCmdAt);
-  if (wait > 0) await sleep(wait);
-  lastCmdAt = Date.now();
-  const r = await fetch(`${BASE}/api/cmd`, { method: 'POST', headers: { ...AUTH, 'content-type': 'application/json' }, body: JSON.stringify({ text }) });
-  return { status: r.status, body: (await r.json()) as { ok: boolean; command: string; replies: string[]; error?: string } };
-}
+const cmd = (text: string) => panel.cmd(text);
 
 function action(menu: MenuAction[], id: string): MenuAction {
   const a = menu.find((x) => x.id === id);
@@ -106,10 +94,10 @@ describe.skipIf(!E2E)('@bds panel map screen (Track P2, bds-cache)', () => {
   const registry = new BlockRegistry({ version: E2E_VERSION, logger: silentLogger });
   const table = new StateTable(registry);
   const client = new Client();
-  let conn: Connection | undefined;
+  let observer: Observer | undefined;
   let truth: PveTruth | undefined;
   let cli: CoreCli | undefined;
-  let dir: string | undefined;
+  let run: PanelCli | undefined;
   let stream: SseStream | undefined;
   const cid = `e2e${randomInt(1000, 9999)}`;
   /** A height that cuts the natural terrain (one below the median surface of the sampled natural columns). */
@@ -124,26 +112,19 @@ describe.skipIf(!E2E)('@bds panel map screen (Track P2, bds-cache)', () => {
 
   beforeAll(async () => {
     await prepareServer();
-    const name = uniqueName('PanelMap');
-    conn = new Connection({ version: E2E_VERSION, username: name, logger: silentLogger, reconnect: false });
-    await conn.connect(CACHE_TARGET);
-    truth = new PveTruth(conn, CACHE_CONTAINER);
-    await waitOnline(truth, name);
+    observer = await connectObserver(uniqueName('PanelMap'), CACHE_TARGET, CACHE_CONTAINER);
+    truth = observer.truth;
+    const name = observer.name;
     await truth.tp(name, { x: P.x - 10 + 0.5, y: PY + 20, z: P.z - 10 + 0.5 }, 0, 0); // loads the chunks
     await truthLoaded(truth, 'fill', [P.x - PR, PY, P.z - PR, P.x + PR, PY, P.z + PR, 'stone']);
     await truthLoaded(truth, 'fill', [P.x - PR, PY + 1, P.z - PR, P.x + PR, PY + 6, P.z + PR, 'air']);
     await truth.tp(name, { x: P.x - 10 + 0.5, y: PY + 1, z: P.z - 10 + 0.5 }, 0, 0);
-    process.env.BEDROCKBOT_PANEL_TOKEN = TOKEN;
-    dir = mkdtempSync(join(tmpdir(), 'bot-e2e-panel-map-'));
-    writeFileSync(join(dir, 'config.json'), '{}\n'); // the waypoints go to <tmp>/waypoints/
-    process.env.BEDROCKBOT_CACHE_DIR = dir;
-    delete process.env.BEDROCKBOT_CACHE;
-    cli = startCli(['--walk', '--health-port', String(PORT), '--config', join(dir, 'config.json')], uniqueName('PanelMapB'), { host: CACHE_HOST, port: CACHE_PORT });
-    delete process.env.BEDROCKBOT_PANEL_TOKEN;
-    delete process.env.BEDROCKBOT_CACHE_DIR;
+    // panel-e2e.ts: the waypoints go to <tmp>/waypoints/, the world cache to <tmp>
+    run = startPanelCli(panel, { prefix: 'bot-e2e-panel-map-', args: ['--walk'], name: uniqueName('PanelMapB'), target: { host: CACHE_HOST, port: CACHE_PORT } });
+    cli = run.cli;
     await waitOnline(truth, cli.name);
     await truth.tp(cli.name, centre(P), 0, 0);
-    await until(async () => ((await fetch(`${BASE}/healthz`).catch(() => undefined))?.status === 200 ? true : undefined), 20_000, 'panel /healthz 200', 250);
+    await panel.healthy();
     // the platform in the map: the window registered, the bot's chunk summarised
     await until(async () => {
       await fetchTiles();
@@ -153,15 +134,10 @@ describe.skipIf(!E2E)('@bds panel map screen (Track P2, bds-cache)', () => {
 
   afterAll(async () => {
     stream?.close();
-    if (cli) {
-      await sleep(300);
-      await cmd('!quit').catch(() => undefined);
-      await Promise.race([cli.exit, sleep(10_000)]);
-      cli.kill();
-    }
+    await quitPanelCli(panel, cli);
     if (truth) await truthLoaded(truth, 'fill', [P.x - PR, PY, P.z - PR, P.x + PR, PY + 6, P.z + PR, 'air']).catch(() => undefined);
-    await conn?.disconnectAndFlush('test done').catch(() => undefined);
-    if (dir) rmSync(dir, { recursive: true, force: true });
+    await observer?.close().catch(() => undefined);
+    run?.cleanup();
     console.log(`panel map e2e (port ${PORT}, area ${P.x} ${P.z}):\n  ${measurements.join('\n  ')}`);
   }, 60_000);
 

@@ -99,7 +99,7 @@ export function modesData(): { name: string; values: Record<string, string> }[] 
  * (switches from mapdefs.ts, so a new overlay needs no markup), the Y-slice bar and the action sheet.
  */
 function mapScreenHtml(): string {
-  const btn = (id: string, label: string, aria: string, cls = ''): string => `<button type="button" id="${id}"${cls ? ` class="${cls}"` : ''} aria-label="${aria}" title="${aria}">${label}</button>`;
+  const btn = (id: string, label: string, aria: string, cls = '', go = ''): string => `<button type="button" id="${id}"${cls ? ` class="${cls}"` : ''}${go ? ` data-goview="${go}"` : ''} aria-label="${aria}" title="${aria}">${label}</button>`;
   const layers = MAP_LAYERS.map((l) => `<label><input type="radio" name="map-layer" data-layer="${l.id}"${l.id === 'surface' ? ' checked' : ''}> ${esc(l.label)}</label>`).join('');
   const ovs = MAP_OVERLAYS.map((o) => `<label><input type="checkbox" data-ov="${o.id}"${o.on ? ' checked' : ''}><i style="background:${o.colour}"></i>${esc(o.label)}</label>`).join('');
   return `<div id="mapscreen" class="mapscreen">
@@ -109,7 +109,8 @@ function mapScreenHtml(): string {
     <div class="hudrow"><span id="hud-job" class="hudjob">idle</span>${btn('hud-stop', 'Stop', 'stop the current job (!stop)', 'danger')}</div>
   </div>
   <div class="mapctl">
-    ${btn('view-cards', 'Cards', 'show the cards')}
+    ${btn('view-cards', 'Cards', 'show the cards', '', 'cards')}
+    ${btn('view-storage-m', '&#9638;', 'show storage (search the chests)', '', 'storage')}
     ${btn('map-follow', '&#9678;', 'follow the bot (re-centre)', 'on')}
     ${btn('map-zin', '+', 'zoom in')}
     ${btn('map-zout', '&minus;', 'zoom out')}
@@ -134,9 +135,44 @@ function mapScreenHtml(): string {
 </div>`;
 }
 
-const THEME_BOOT = `(function(){var t=null;try{t=localStorage.getItem('${THEME_KEY}')}catch(e){}if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark'}document.documentElement.dataset.theme=t})();`;
+const goBtn = (id: string, label: string, aria: string, cls: string, go = ''): string => `<button type="button" id="${id}" class="${cls}"${go ? ` data-goview="${go}"` : ''} aria-label="${aria}">${label}</button>`;
+
+/**
+ * Decision 0065: the storage view (client/storage.ts; docs/storage.md). A fixed layer like the map screen,
+ * phone first: the search box on top (results as you type), the confirm block for the scan, the freshness
+ * line with Read them now, the base totals by category and the recently changed list.
+ */
+function storageScreenHtml(): string {
+  return `<div id="storage" class="storescreen">
+  <div class="sthead"><b class="grow">Storage</b>${goBtn('st-map', 'Map', 'show the map', 'small', 'map')} ${goBtn('st-cards', 'Cards', 'show the cards', 'small', 'cards')}</div>
+  <input id="st-q" type="search" placeholder="search: diamonds, iron, logs, food, tools..." aria-label="search the storage" maxlength="64" autocapitalize="off" spellcheck="false" autocomplete="off">
+  <div id="st-results" class="stres" aria-live="polite"></div>
+  <div id="st-confirm" class="stconfirm" hidden><pre id="st-cmd"></pre><div>${goBtn('st-send', 'Send', 'send this command', 'primary')} ${goBtn('st-cancel', 'Cancel', 'do not send', '')}</div></div>
+  <pre id="st-reply" class="small muted"></pre>
+  <div class="stsec"><h2>Containers</h2><div id="st-fresh" class="small">-</div><button type="button" id="st-scan" class="small" hidden>Read them now (!chests scan)</button></div>
+  <div class="stsec"><h2>Totals by category</h2><div id="st-cats" class="stcats"></div></div>
+  <div class="stsec"><h2>Recently changed</h2><div id="st-recent"></div></div>
+</div>`;
+}
+
+/** Decision 0065: the Bring picker (client/bring.ts), shared by the storage view and the map's chest sheet. */
+function bringSheetHtml(): string {
+  return `<div id="bring" class="bringsheet" role="dialog" aria-label="bring items" hidden>
+  <div class="sheethead"><b id="bring-title">Bring</b>${goBtn('bring-close', '&times;', 'close', 'small')}</div>
+  <select id="bring-item" aria-label="item" hidden></select>
+  <div id="bring-picks" class="acts"></div>
+  <label class="small">how many <input id="bring-n" type="number" inputmode="numeric" min="1" max="2304"></label>
+  <div class="small"><label><input type="radio" name="bring-to" id="bring-me" checked> <span id="bring-me-l">to me</span></label> <label><input type="radio" name="bring-to" id="bring-home"> home</label></div>
+  <div id="bring-note" class="small muted"></div>
+  <pre id="bring-cmd"></pre>
+  <div>${goBtn('bring-send', 'Send', 'send this command', 'primary')}</div>
+  <pre id="bring-reply" class="small muted"></pre>
+</div>`;
+}
+
+const THEME_BOOT =`(function(){var t=null;try{t=localStorage.getItem('${THEME_KEY}')}catch(e){}if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark'}document.documentElement.dataset.theme=t})();`;
 /** Decision 0062: the view (map / cards) before the first paint, so the page does not flash the other one. */
-const VIEW_BOOT = `(function(){var v=null;try{v=localStorage.getItem('${VIEW_KEY}')}catch(e){}document.documentElement.dataset.view=v==='cards'?'cards':'map'})();`;
+const VIEW_BOOT = `(function(){var v=null;try{v=localStorage.getItem('${VIEW_KEY}')}catch(e){}document.documentElement.dataset.view=(v==='cards'||v==='storage')?v:'map'})();`;
 
 const CSS = `
   :root, [data-theme="dark"] { color-scheme: dark; --bg: #111418; --panel: #1b2027; --line: #2c333d; --text: #d8dee6; --muted: #8a94a3; --accent: #f5c542; --ok: #4ce08a; --warn: #f2b134; --bad: #ff7b72;
@@ -199,6 +235,25 @@ const CSS = `
   /* decision 0062: the map screen (fixed, full screen; the cards stay in the page behind it) */
   [data-view="map"] main { display: none; }
   [data-view="cards"] #mapscreen { display: none; }
+  /* decision 0065: the storage view (fixed like the map) and the Bring picker over any view */
+  [data-view="storage"] main, [data-view="storage"] #mapscreen, [data-view="map"] #storage, [data-view="cards"] #storage, :root:not([data-view]) #storage { display: none; }
+  .storescreen { position: fixed; inset: 0; z-index: 5; overflow-y: auto; background: var(--bg); padding: 10px 12px 40px; display: flex; flex-direction: column; gap: 10px; max-width: 900px; margin: 0 auto; }
+  .sthead { display: flex; gap: 8px; align-items: center; } .sthead b { font-size: 17px; }
+  #st-q { width: 100%; font-size: 16px; padding: 10px 12px; }
+  .stres { display: flex; flex-direction: column; gap: 8px; }
+  .st-item { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 3px; }
+  .st-head { display: flex; align-items: center; gap: 8px; } .st-head b { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .st-head img.ic { width: 28px; height: 28px; image-rendering: pixelated; object-fit: contain; }
+  .st-total { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .st-place { font-size: 13px; overflow-wrap: anywhere; } .st-place button { margin-left: 6px; }
+  .stsec { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+  .stcats { display: flex; flex-direction: column; gap: 4px; } .st-cat { text-align: left; }
+  .stconfirm { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--accent); border-radius: 8px; padding: 8px; }
+  .stconfirm[hidden], .bringsheet[hidden], .bringsheet [hidden], .stsec [hidden] { display: none; }
+  button.primary { border-color: var(--accent); }
+  .bringsheet { position: fixed; z-index: 15; left: 0; right: 0; bottom: 0; max-height: 80%; overflow-y: auto; background: var(--panel); border-top: 1px solid var(--cellline); border-radius: 12px 12px 0 0; padding: 10px 12px 14px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 -4px 20px #0006; }
+  @media (min-width: 760px) { .bringsheet { left: auto; right: 16px; bottom: 16px; width: 380px; border-radius: 10px; border: 1px solid var(--cellline); } }
+  .bringsheet .acts { display: flex; flex-wrap: wrap; gap: 6px; } .bringsheet input[type=number] { width: 96px; } .bringsheet pre { font-size: 13px; }
   .mapscreen { position: fixed; inset: 0; z-index: 5; background: #0b0d10; color: #e6eaf0; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
   .mapscreen canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
   .mapscreen button { background: #1b2027e6; color: #e6eaf0; border-color: #3a4350; min-width: 40px; min-height: 40px; padding: 4px 8px; }
@@ -316,7 +371,7 @@ ${glyphDefs()}
     <h1><span id="dot" class="dot${s.bot.healthy ? ' ok' : ''}"></span><span id="botname">${esc(s.bot.name || 'BedrockBot')}</span></h1>
     <span class="muted"><span id="conn">${esc(s.bot.state)}</span> &middot; <span id="server">${esc(s.bot.server)}</span> &middot; task <span id="task">${esc(s.bot.task)}</span> &middot; <span id="ver">${esc(s.bot.gameVersion)}</span></span>
     <span id="stale" class="stale" hidden>stale</span><span id="err"></span>
-    <span class="grow"></span><button type="button" id="view-map" class="small" aria-label="show the map">Map</button> <button type="button" id="theme" class="small" aria-label="switch theme">light</button>
+    <span class="grow"></span><button type="button" id="view-map" class="small" data-goview="map" aria-label="show the map">Map</button> <button type="button" id="view-storage" class="small" data-goview="storage" aria-label="show storage">Storage</button> <button type="button" id="theme" class="small" aria-label="switch theme">light</button>
   </header>
   <section id="panel-link" class="wide link" role="status" aria-live="polite"${s.link.phase === 'online' ? ' hidden' : ''}><span class="spin" aria-hidden="true"></span><div class="grow"><div class="lt" id="link-title">${esc(s.link.phase)}</div><div id="link-detail" class="small"></div><dl class="kv small" id="link-rows"></dl><div id="link-signin" class="signin" hidden><a id="link-url" target="_blank" rel="noopener noreferrer">open the sign-in page</a><span>code <span id="link-code" class="code"></span></span></div></div></section>
   <section id="panel-inventory" class="inv-card"><h2>Inventory <span id="inv-sum" class="muted small"></span></h2>${inventoryHtml()}<div id="iteminfo" class="iteminfo muted small">tap or right-click a slot: actions and details</div></section>
@@ -379,6 +434,8 @@ ${glyphDefs()}
   </section>
 </main>
 ${mapScreenHtml()}
+${storageScreenHtml()}
+${bringSheetHtml()}
 <div id="menu" class="menu" role="menu" hidden></div>
 <div id="toast" class="toast" role="status" hidden></div>
 <script type="application/json" id="modes-data">${scriptJson(modesData())}</script>
