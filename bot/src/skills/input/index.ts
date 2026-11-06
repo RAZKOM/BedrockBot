@@ -11,7 +11,7 @@ export type {
   GlideEvent,
   SetEntityMotionPacket,
 } from './inputLoop.ts';
-export { PHYSICS, LIQUID, CLIMB, GLIDE, ownEngine, stepBody, moveBody, moveVectorOf, playerBox, solidBoxes, yawSinCos, groundFriction, liquidContact, onClimbable, backOffFromEdge, glideVelocity, lookVector } from './physics.ts'; // Track AJ: CLIMB, onClimbable, backOffFromEdge; Track AU: GLIDE, glideVelocity, lookVector
+export { PHYSICS, LIQUID, CLIMB, GLIDE, ownEngine, stepBody, moveBody, moveVectorOf, playerBox, solidBoxes, yawSinCos, groundFriction, liquidContact, onClimbable, backOffFromEdge, glideVelocity, lookVector, boostTicksExpected, wallImpactDamage, glideFallStep } from './physics.ts'; // Track AJ: CLIMB, onClimbable, backOffFromEdge; Track AU: GLIDE, glideVelocity, lookVector; Track F0: boostTicksExpected, wallImpactDamage, glideFallStep
 export type { Box, MoveResult } from './physics.ts';
 export { buildInputFlags, buildAuthInput, viewDirection, GLIDE_START_FLAGS } from './flags.ts'; // Track AU: GLIDE_START_FLAGS
 export type { FlagContext } from './flags.ts';

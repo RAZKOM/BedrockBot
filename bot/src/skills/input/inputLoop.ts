@@ -18,7 +18,7 @@ import {
   serverStateFromMovePlayer,
   type HistoryEntry,
 } from './history.ts';
-import { GLIDE, PHYSICS, ownEngine } from './physics.ts';
+import { GLIDE, PHYSICS, boostTicksExpected, ownEngine } from './physics.ts';
 import { newSprintTracker, stepSprint } from './sprint.ts';
 import type { BlockQuery, BodyState, MoveCommand, PhysicsEngine, Vec3 } from './types.ts';
 import { IDLE_COMMAND, cloneBody, initialBody } from './types.ts';
@@ -113,6 +113,12 @@ export interface GlideEvent {
   tick: bigint;
   /** Inputs re-simulated without the glide when the server ended one we still predicted. */
   replayed: number;
+  /**
+   * Track F0: no flag at all confirmed the request within GLIDE.confirmTicks (the server refused it:
+   * measured on the first airborne tick of a jump). The model's glide is taken back; while `glide` is
+   * still commanded the next airborne tick asks again.
+   */
+  refused?: true;
 }
 
 export type InputLoopEvent = CorrectionEvent | TeleportEvent | ReadyEvent | MotionEvent | GlideEvent;
@@ -137,7 +143,11 @@ export interface InputLoopState {
   /** The body touched water / lava on the last tick. */
   inWater: boolean;
   inLava: boolean;
-  /** Track AU: the body glides (elytra); boost ticks of a firework rocket left. */
+  /**
+   * Track AU: the body glides (elytra); boost ticks of a firework rocket left. Track F0: the expected
+   * ticks left (`boostTicksExpected`): the loop itself boosts until the rocket's remove_entity, up to
+   * GLIDE.boostMaxTicks, and this is at least 1 for as long as it does.
+   */
   gliding: boolean;
   boostTicks: number;
   /**
@@ -169,6 +179,8 @@ export class InputLoop {
   private sprint = newSprintTracker();
   private cmd: MoveCommand = { ...IDLE_COMMAND };
   private prevCmd: MoveCommand | undefined;
+  /** Track F0: the last input jumped off the ground (a glide request on the next one is refused). */
+  private lastJumped = false;
   private body: BodyState = initialBody({ x: 0, y: 0, z: 0 });
   private history: HistoryEntry[] = [];
   private ready = false;
@@ -249,7 +261,7 @@ export class InputLoop {
       inWater: b.inWater ?? false,
       inLava: b.inLava ?? false,
       gliding: b.gliding ?? false,
-      boostTicks: b.boostTicks ?? 0,
+      boostTicks: boostTicksExpected(b.boostTicks ?? 0),
       prone: this.ownPose.prone && !(b.gliding ?? false) && !(b.inWater ?? false),
       teleports: this.teleports,
       tick: this.lastTick,
@@ -315,26 +327,32 @@ export class InputLoop {
 
   /**
    * Track AU: a firework rocket was used this tick (the item-use transaction goes out in the same
-   * batch): the glide boost runs for `ticks` ticks from the next input on (GLIDE.boostTicks by
-   * default; the rocket's remove_entity ends it early through `endBoost`).
+   * batch): the glide boost runs for `ticks` ticks from the next input on. Track F0: by default the
+   * longest burn measured (GLIDE.boostMaxTicks); the rocket's remove_entity ends it through `endBoost`.
+   * A rocket while one burns extends the boost (the server's union of the two), never shortens it.
    */
-  boost(ticks: number = GLIDE.boostTicks): void {
+  boost(ticks: number = GLIDE.boostMaxTicks): void {
     this.pendingBoost = ticks;
   }
 
   /**
    * Track AU: the server removed the boosting rocket: the boost ended `agoTicks` inputs ago (the
-   * packet's latency; default 3). The inputs since are re-simulated without it.
+   * packet's latency; Track F0: GLIDE.boostEndLag, measured). The inputs since are re-simulated
+   * without it, also when the model's own boost already ran out after that point.
    */
-  endBoost(agoTicks = 3): void {
+  endBoost(agoTicks: number = GLIDE.boostEndLag): void {
     this.pendingBoost = undefined;
-    if ((this.body.boostTicks ?? 0) === 0) return;
     const at = this.lastTick - BigInt(Math.max(0, agoTicks));
     const index = this.history.findIndex((e) => e.tick >= at);
     if (index < 0) {
-      this.body = { ...cloneBody(this.body), boostTicks: 0 };
+      if ((this.body.boostTicks ?? 0) > 0) this.body = { ...cloneBody(this.body), boostTicks: 0 };
       return;
     }
+    // nothing to undo when no input from there on was boosted
+    const boosted = (i: number): boolean => (this.history[i]!.cmd.boostStart ?? (i > 0 ? this.history[i - 1]!.state.boostTicks ?? 0 : 0)) > 0;
+    let any = false;
+    for (let i = index; i < this.history.length && !any; i++) any = boosted(i);
+    if (!any) return;
     const entries = this.history.map((e) => ({ ...e, state: cloneBody(e.state) }));
     for (let i = index; i < entries.length; i++) entries[i]!.cmd = { ...entries[i]!.cmd, boostStart: 0 };
     this.replayFrom(entries, index);
@@ -375,6 +393,7 @@ export class InputLoop {
 
   private onTick(tick: bigint): void {
     if (!this.ready) return;
+    this.glideUnconfirmed();
     if (this.beforeStep.size) {
       const st = this.state;
       for (const fn of [...this.beforeStep]) {
@@ -395,8 +414,14 @@ export class InputLoop {
     const simCmd: MoveCommand = { ...cmd, sprint: stepSprint(this.sprint, cmd, prev, this.canSprint()) };
     // Track AU: the glide only with an elytra on; a rocket used since the last input starts its boost here
     if (cmd.glide && !this.canGlide()) simCmd.glide = false;
+    // Track F0: BDS refuses a glide request on the input right after a ground jump (4 of 4) and takes it
+    // from the next one on: the glide starts an input later then
+    if (cmd.glide && this.lastJumped && prev.gliding !== true) simCmd.glide = false;
     if (this.pendingBoost !== undefined) {
-      simCmd.boostStart = this.pendingBoost;
+      // Track F0: BDS ignores a rocket used on an input the body enters without gliding (no rocket entity,
+      // 4 of 4, also on the input that starts the glide): no boost then
+      if (prev.gliding === true) simCmd.boostStart = Math.max(this.pendingBoost, prev.boostTicks ?? 0);
+      else this.log.debug('input loop: rocket used before the glide; the server ignores it, no boost');
       this.pendingBoost = undefined;
     }
     if (this.skipNext) {
@@ -435,6 +460,7 @@ export class InputLoop {
     this.history.push({ tick, cmd: moving ? simCmd : sentCmd, state: cloneBody(state), simulated });
     if (this.history.length > this.historySize) this.history.splice(0, this.history.length - this.historySize);
     this.prevCmd = sentCmd;
+    this.lastJumped = jumped;
     this.body = state;
     this.lastTick = tick;
     for (const w of [...this.tickWaiters]) {
@@ -471,6 +497,28 @@ export class InputLoop {
     const prone = this.ownPose.crawling || this.ownPose.swimming || (this.ownPose.height !== undefined && this.ownPose.height < 1);
     if (prone !== this.ownPose.prone) this.log.info(`pose: ${prone ? 'prone' : 'standing'} (crawling ${this.ownPose.crawling}, swimming ${this.ownPose.swimming}, box height ${this.ownPose.height?.toFixed(2) ?? '?'})`);
     this.ownPose.prone = prone;
+  }
+
+  /**
+   * Track F0: a glide request the server never confirmed (no `gliding` flag GLIDE.confirmTicks inputs
+   * after it): BDS refused it, so the inputs from the request on are re-simulated without the glide.
+   * Without this the model glided on while the server fell (a correction every few ticks, measured on
+   * a request on the first airborne tick of a jump). `cmd.glide` stays: the next airborne input asks again.
+   */
+  private glideUnconfirmed(): void {
+    const req = this.glideRequestTick;
+    if (req === undefined || !this.body.gliding || this.lastTick - req < BigInt(GLIDE.confirmTicks)) return;
+    this.glideRequestTick = undefined;
+    const index = this.history.findIndex((e) => e.tick >= req);
+    let replayed = 0;
+    if (index >= 0) {
+      const entries = this.history.map((e) => ({ ...e, state: cloneBody(e.state) }));
+      for (let i = index; i < entries.length; i++) entries[i]!.cmd = { ...entries[i]!.cmd, glide: false };
+      replayed = this.replayFrom(entries, index);
+    }
+    this.body = { ...cloneBody(this.body), gliding: false, boostTicks: 0 };
+    this.log.info(`glide request at tick ${req} not confirmed by ${this.lastTick}: refused, replayed ${replayed}`);
+    this.emit({ kind: 'glide', gliding: false, tick: 0n, replayed, refused: true });
   }
 
   /** Track AU: the server's `gliding` flag for the own player. */
