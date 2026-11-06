@@ -28,6 +28,8 @@ export interface MinerSettings {
   mode?: () => string;
   /** Track BD: ticks between re-scans on the way in mode baritone (default MINE_GOAL_UPDATE_TICKS, 40). */
   rescanTicks?: () => number;
+  /** The survival kit's tool rule (worn, set aside for mending). */
+  toolOk?: (item: ItemStack) => boolean;
 }
 
 /** The floor under the feet at `pos` (breakBlocker's `feetFloors`: never dug from under the bot). */
@@ -91,6 +93,7 @@ export function createMinerFor(p: FarmParts, settings: MinerSettings = {}): { mi
     ...(settings.mode ? { mode: settings.mode } : {}), // Track BD
     ...(settings.rescanTicks ? { rescanTicks: settings.rescanTicks } : {}), // Track BD
     belowRule: (q) => shaftHazard(tunnelWorld, q), // Track BD: the shaft hazards under a candidate below the feet
+    ...(settings.toolOk ? { toolOk: settings.toolOk } : {}),
     ...(p.log ? { log: p.log } : {}),
   });
   return { mine, memory };

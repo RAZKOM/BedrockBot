@@ -54,6 +54,11 @@ export const BREED_TARGET = 8;
 export const BREED_RADIUS = 16;
 
 /** Track AF: the `chorePen` setting as a block position, or undefined for `none`. */
+/** Why the chore finds no pen at `chorePen` (status and log). */
+export function noPenLine(setting: string): string {
+  return `no fenced pen at chorePen ${setting} (give a block inside the pen: where the animals stand, or the ground under them; !breed pen here)`;
+}
+
 export function parseChorePen(v: string): Vec3 | undefined {
   const n = v.trim().split(/\s+/).map(Number);
   if (n.length !== 3 || !n.every((x) => Number.isFinite(x))) return undefined;
@@ -61,6 +66,8 @@ export function parseChorePen(v: string): Vec3 | undefined {
 }
 
 export interface FoodDeps {
+  /** Hunger points of the food inside the carried shulker boxes (Supply.carried): counted with the loose food by the chore. */
+  boxedFoodPoints?(): number;
   processes: ProcessManager;
   settings: Pick<RuntimeSettings, 'get'>;
   hunter: Hunter;
@@ -328,7 +335,7 @@ export class FoodChore extends BaseProcess {
     const d = this.d;
     return {
       auto: d.settings.get('autoFood'),
-      points: inventoryFoodPoints(d.inventory.slots),
+      points: inventoryFoodPoints(d.inventory.slots) + (d.boxedFoodPoints?.() ?? 0),
       min: d.settings.get('foodMin'),
       day: d.isDay(),
       users: d.processes.userProcesses().length,
@@ -679,12 +686,19 @@ export class BreedChore extends BaseProcess {
         await d.waitTicks?.(20);
         if (cancelled()) return undefined;
       }
+      // at the pen: only its own animals (a chorePen that finds no fenced pen breeds nothing: it used to feed
+      // whatever stood near the point, wild animals included)
+      const pen = d.chorePen?.();
+      if (!pen) {
+        this.lastWhy = noPenLine(d.settings.get('chorePen'));
+        return { ...NO_BREED, ok: false, reason: 'no_pair' };
+      }
       const p = this.plan(job.pos);
       if (typeof p === 'string') {
         this.lastWhy = p;
         return { ...NO_BREED, ok: false, reason: 'no_pair' };
       }
-      return d.breeder!.breed({ kind: p.kind, pairs: p.pairs, center: job.pos, radius: 16, pen: d.chorePen?.() }, cancelled);
+      return d.breeder!.breed({ kind: p.kind, pairs: p.pairs, center: job.pos, radius: 16, pen }, cancelled);
     };
     void go().then(
       (r) => {

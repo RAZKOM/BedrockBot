@@ -346,11 +346,17 @@ space is short.
 
 | Order | What | Rule |
 |---|---|---|
-| 1 | junk that is no building block (`DROP_FIRST`: rotten flesh, poisonous potatoes, string, spider eyes, snowballs, kelp, seagrass, vines; bones, seeds, flint, feathers and arrows are not in it: bone meal, replanting, crafting) | dropped before a box is filled (a `drop` step), never boxed (unless the job is getting it) |
+| 1 | junk that is no building block (`DROP_FIRST`: rotten flesh, poisonous potatoes, string, spider eyes, snowballs, kelp, seagrass, vines, and the mob drops the bot has no use for, `MOB_JUNK`: arrows, feathers, eggs; bones, seeds and flint are not in it: bone meal, replanting) | dropped before a box is filled (a `drop` step; a drop the keeper refuses as busy is tried once more 10 ticks later), never boxed (unless the job is getting it); the home unload's overflow box never takes them either |
 | 2 | the job's produce (`StashJob.wanted`) | boxed first |
 | 3 | other items of value | boxed next |
 | 4 | filler blocks (the rest of `STASH_JUNK`: cobblestone, dirt, sand, gravel, stone kinds, ...) | boxed last, only when no produce waits |
 | re-pack | a box (named or not) holding stash junk the job does not want while produce waits | the junk taken out stack by stack into a free inventory slot, the produce deposited into each freed slot, the junk dropped right after the box is picked up again; once per box (afterwards it holds no junk, and the order above never boxes junk while produce waits). Needs a second free inventory slot besides the box's: with the inventory completely full there is no re-pack (the keeper's own full-inventory drops raced the takes) |
+
+**Which box** (`boxChoice`): the owner's named (`bot_loot`) box first; then the box that already holds the
+kinds waiting to be packed (`sameKinds`: the produce, else the other items of value, else filler), so part
+stacks are topped up and each box keeps to one kind; then the emptiest. It used to be the emptiest box
+first, which spread every kind over every box (the owner saw a few rotten flesh in each box after long
+mining runs; that junk is dropped first now, and the unload's overflow box no longer takes it).
 
 Reply / log: `re-packed 1 box: dropped 1280 junk, boxed 20 stacks of sand` (also in the stash step line).
 Filler is boxed last rather than dropped first: the get-stash regression (coal wanted, 34 stacks of
@@ -511,7 +517,18 @@ NL (`!do`): the `bring` step (`{"command":"bring","item":"torch","count":64,"to"
 
 The owner noticed that the smart shulker box features were not applied to every feature, building and
 scaffolding included. Decision [0052](decisions/0052-shulker-aware-jobs.md). One layer answers "how many of this
-do I have" and "get me n of it loose" for every job, so no feature hand-rolls box handling:
+do I have" and "get me n of it loose" for every job, so no feature hand-rolls box handling.
+
+Only `!build` used it until the owner pointed out again that the bot knew what its boxes held but never used it
+for food and the like. Now also (through `restockFromBoxes` / `carried`):
+
+| Job | What it takes out of a carried box |
+|---|---|
+| eating (`EatController`, also trip readiness) | no food loose, or only bad food: 16 of the good foods (`BOX_FOODS`: no rotten flesh, raw chicken or golden apples), then eats; never while fighting, in water or off the ground |
+| the food chore | counts the food in the boxes with the loose food (`boxedFoodPoints`): no hunt while the boxes hold enough |
+| `!tunnel`, `!quarry` torches, branch mining | no torch loose at a torch spot: 32 torches (`TORCH_RESTOCK`) |
+| flights (`!fly`, autoFly) | no rockets loose and no fireworks box: 64 rockets from any other carried box (a `bot_loot` or mixed box) before the takeoff; the kit check (`kitReady`) counts them |
+
 
 | Part | What |
 |---|---|

@@ -53,6 +53,9 @@ import type { EntityInfo } from '../../world/types.ts';
 import { chooseTunnel, climbTo, PILLAR_SPARE, planTunnel, runTunnel, type TunnelPlan, type TunnelWorld } from './tunnel.ts'; // Track AQ; Track BK: climbTo
 import { oreKind, veinCentre, veinFrom, veinRadius } from './vein.ts'; // Track AQ
 import { DEFAULT_JUNK } from '../survival/keeper.ts';
+import { classify } from '../terrain/classify.ts';
+import { DIG_SETTLE_TICKS } from '../nav/actions.ts';
+import { durabilityLeft, hasMending } from '../survival/tools.ts';
 
 export type MineState = 'idle' | 'scan' | 'walk' | 'dig' | 'collect' | 'waiting' | 'paused' | 'done' | 'none_left' | 'low_health' | 'no_pickaxe' | 'stopped' | 'failed';
 
@@ -184,6 +187,8 @@ export interface MineSkills {
 }
 
 export interface MineDeps {
+  /** The tool rule (SurvivalKit.toolOk: worn, or a Mending item set aside to be mended): a pickaxe failing it does not count. */
+  toolOk?: (item: ItemStack) => boolean;
   skills: MineSkills;
   memory: OreMemory;
   /** Plan only (Navigator.plan) with the given goto options: the tunnel-length check. */
@@ -280,8 +285,9 @@ export function needsPickaxe(name: string): boolean {
   return blockMining(name)?.harvest?.types.includes('pickaxe') ?? false;
 }
 
-export function hasPickaxe(slots: readonly (ItemStack | null)[]): boolean {
-  return slots.slice(0, 36).some((s) => !!s && s.count > 0 && s.name.endsWith('_pickaxe'));
+/** A pickaxe is carried (`toolOk`: one the Digger may use: not worn out, not set aside for mending). */
+export function hasPickaxe(slots: readonly (ItemStack | null)[], toolOk: (item: ItemStack) => boolean = () => true): boolean {
+  return slots.slice(0, 36).some((s) => !!s && s.count > 0 && s.name.endsWith('_pickaxe') && toolOk(s));
 }
 
 /** Goal: the eye (feet + 1.62) within `r` of the block's centre. */
@@ -298,6 +304,42 @@ const key = (p: Vec3) => `${p.x},${p.y},${p.z}`;
  * every sand block under another one for good, so only the top layer of a sand bed was ever mined.
  */
 const WAITING_SKIPS: ReadonlySet<string> = new Set(['gravity_above', 'gravity_beside', 'unknown', 'unloaded', 'under_feet']);
+/** Half the body's width: the columns a standing body overlaps (the falling-block rule below). */
+const BODY_HALF = 0.3;
+
+/**
+ * The owner's rule against digging under sand or gravel is about not suffocating: a falling block landing in the
+ * bot's own cells. A dig the miner makes from where the body stands (the vein, sand and gravel in bulk) is safe when
+ * no column that can fall when `p` is dug overlaps the body: the column over `p` when a gravity block sits on it, and
+ * the column of an unsupported gravity block beside it. The column then drops into the dug cell, which is dug again
+ * from the same spot. Unknown cells count as unsafe. (The walks still never dig under a falling block: a goal there
+ * would put the body in the column.)
+ */
+export function fallSafe(blockAt: (p: Vec3) => BlockInfo | undefined, p: Vec3, body: Vec3): boolean {
+  const gravity = (q: Vec3): boolean | undefined => {
+    const b = blockAt(q);
+    return b ? classify(b).gravity : undefined;
+  };
+  const cols: [number, number][] = [];
+  const above = gravity({ x: p.x, y: p.y + 1, z: p.z });
+  if (above === undefined) return false;
+  if (above) cols.push([p.x, p.z]);
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+    const q = { x: p.x + dx, y: p.y, z: p.z + dz };
+    const g = gravity(q);
+    if (g === undefined) return false;
+    if (!g) continue;
+    const under = blockAt({ x: q.x, y: q.y - 1, z: q.z });
+    if (!under) return false;
+    if (under.boxes.length === 0) cols.push([q.x, q.z]);
+  }
+  const x0 = Math.floor(body.x - BODY_HALF);
+  const x1 = Math.floor(body.x + BODY_HALF);
+  const z0 = Math.floor(body.z - BODY_HALF);
+  const z1 = Math.floor(body.z + BODY_HALF);
+  return !cols.some(([x, z]) => x >= x0 && x <= x1 && z >= z0 && z <= z1);
+}
+
 export function waitingSkip(why: string): boolean {
   return WAITING_SKIPS.has(why);
 }
@@ -610,8 +652,8 @@ export class MineTask {
       this.exploring = undefined; // Track BD: ore known again
       const target = this.directOn() ? cands[0] : this.pickReachable(cands); // Track AQ: the approach itself probes (walk or tunnel)
       if (!target) continue; // all probed candidates unreachable: the next scan takes the next ones
-      if (needsPickaxe(target.name) && !hasPickaxe(this.d.inventory.slots)) {
-        this.lastError = `no pickaxe for ${target.name}`;
+      if (needsPickaxe(target.name) && !hasPickaxe(this.d.inventory.slots, this.d.toolOk)) {
+        this.lastError = this.pickaxeWhy(target.name);
         return this.end(gen, 'no_pickaxe');
       }
       this.stats.targeted.push({ ...target.p });
@@ -890,12 +932,20 @@ export class MineTask {
   /** Track BD review: the last prune left out an ore of this name because no carried tool harvests it. */
   private noTool: string | undefined;
 
+  /** Why no pickaxe counts: none carried, or the ones carried are worn out or set aside to be mended. */
+  private pickaxeWhy(name: string): string {
+    const all = this.d.inventory.slots.slice(0, 36).filter((s): s is ItemStack => !!s && s.count > 0 && s.name.endsWith('_pickaxe'));
+    if (all.length === 0) return `no pickaxe for ${name}`;
+    const mending = all.find((s) => hasMending(s));
+    return mending ? `the ${mending.name} is set aside to be mended (${durabilityLeft(mending) ?? '?'} uses left; !mend)` : `the pickaxe is worn out (${all.map((s) => `${s.name} ${durabilityLeft(s) ?? '?'} left`).join(', ')})`;
+  }
+
   /** Track BD review: a carried tool (or the hand) harvests the block `name` (dig/breakTime.ts `canHarvest`, the Digger's rule; the Digger's pullTool brings a main-inventory tool into the hotbar). */
   private harvestable(name: string): boolean {
     const b = blockMining(name);
     if (!b?.harvest) return true;
     if (canHarvest(b, null)) return true;
-    return this.d.inventory.slots.slice(0, 36).some((it) => !!it && it.count > 0 && canHarvest(b, toolOf(it.name)));
+    return this.d.inventory.slots.slice(0, 36).some((it) => !!it && it.count > 0 && (this.d.toolOk?.(it) ?? true) && canHarvest(b, toolOf(it.name)));
   }
 
   private pruneNow(pos: Vec3): PruneResult {
@@ -954,8 +1004,8 @@ export class MineTask {
     const feet = cellOf(pos);
     const hi = headingMember(cands, feet);
     const head = cands[hi];
-    if (head?.kind === 'ore' && needsPickaxe(head.name) && !hasPickaxe(this.d.inventory.slots)) {
-      this.lastError = `no pickaxe for ${head.name}`;
+    if (head?.kind === 'ore' && needsPickaxe(head.name) && !hasPickaxe(this.d.inventory.slots, this.d.toolOk)) {
+      this.lastError = this.pickaxeWhy(head.name);
       return 'no_pickaxe';
     }
     if (cands.some((c) => c.p.y < feet.y)) this.surface ??= { ...feet }; // the way back up at the end (returnUp)
@@ -1189,6 +1239,17 @@ export class MineTask {
   }
 
   /**
+   * The rules for a dig the miner makes from where it stands (the vein): the shared break rules, except that a
+   * falling block over the cell or loose beside it is allowed when its column cannot land in the body (`fallSafe`).
+   */
+  private digRule(p: Vec3): string | undefined {
+    const why = this.d.breakRule(p);
+    if (why !== 'gravity_above' && why !== 'gravity_beside') return why;
+    const at = this.d.position();
+    return at && fallSafe(this.d.blockAt, p, at) ? undefined : why;
+  }
+
+  /**
    * Track AQ: the rest of the vein of the block just mined at `t`, from where the bot stands (no re-plan
    * between blocks; a step into the mined cells when the next block is out of reach), while its kind's
    * quota is open; then every drop of the group. False when the block was alone (the caller collects).
@@ -1216,10 +1277,10 @@ export class MineTask {
       remaining = remaining.filter((p) => {
         const b = this.d.blockAt(p);
         if (!b || !this.names.has(b.name)) return false;
-        const why = this.d.breakRule(p);
+        const why = this.digRule(p);
         return !why || waitingSkip(why);
       });
-      const ready = remaining.filter((p) => !this.d.breakRule(p));
+      const ready = remaining.filter((p) => !this.digRule(p));
       if (ready.length === 0) break;
       ready.sort((a, b) => closestDistance(e, a) - closestDistance(e, b));
       const next = ready.find((p) => this.near(p) && this.seen(p));
@@ -1256,7 +1317,9 @@ export class MineTask {
       }
       remaining = remaining.filter((x) => x !== next);
       const b = this.d.blockAt(next);
-      if (!b || !this.names.has(b.name) || this.d.breakRule(next)) continue;
+      if (!b || !this.names.has(b.name) || this.digRule(next)) continue;
+      // sand or gravel over it (the column falls into the dug cell: dug again from here)
+      const column = !!this.d.blockAt({ x: next.x, y: next.y + 1, z: next.z }) && classify(this.d.blockAt({ x: next.x, y: next.y + 1, z: next.z })!).gravity;
       this.state = 'dig';
       const r = await sk.dig(next, { requireHarvest: true });
       if (!this.alive(gen)) break;
@@ -1267,6 +1330,14 @@ export class MineTask {
       this.counted(next, b.name, r.ticks);
       cells.push(next);
       rec.mined++;
+      if (column) {
+        await this.d.waitTicks(DIG_SETTLE_TICKS);
+        if (!this.alive(gen)) break;
+        if (this.names.has(this.d.blockAt(next)?.name ?? '')) {
+          remaining.push(next);
+          rec.size++;
+        }
+      }
       rec.lastMs = this.stats.minedMs.at(-1) ?? rec.lastMs;
       this.vein = { done: rec.mined, size: rec.size };
     }

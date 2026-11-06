@@ -67,7 +67,8 @@ export class FarmProcess extends BaseProcess {
     const s = this.task.stats;
     const c = this.opts.center;
     const state = this.controlled ? this.task.state : this.started ? 'paused' : 'waiting';
-    return { line: `farm r=${this.opts.radius ?? 8} at ${fmtC(c)}: ${s.harvested} harvested, ${s.planted} planted, ${s.boneMealUsed} bone meal, ${s.trips} trips (${state})` };
+    const follow = this.opts.follow ? `, following (${this.task.areas.length} area${this.task.areas.length === 1 ? '' : 's'})` : '';
+    return { line: `farm r=${this.opts.radius ?? 8} at ${fmtC(c)}${follow}: ${s.harvested} harvested, ${s.planted} planted, ${s.boneMealUsed} bone meal, ${s.trips} trips (${state})` };
   }
 }
 

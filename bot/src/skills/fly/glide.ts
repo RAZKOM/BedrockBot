@@ -49,7 +49,7 @@ export interface Ledge {
 /** Track BH: the kit for a glide without rockets: an elytra (worn or carried) with uses left. */
 export function glideKitReady(kit: FlightKit, toolWearLimit: number): { ok: true } | { ok: false; line: string } {
   if (!kit.elytraWorn && kit.elytraSlot < 0) return { ok: false, line: 'no elytra' };
-  if (kit.elytraLeft !== undefined && kit.elytraLeft <= elytraWornLimit(toolWearLimit)) return { ok: false, line: elytraWornLine(kit.elytraLeft) };
+  if (kit.elytraLeft !== undefined && kit.elytraLeft <= elytraWornLimit(toolWearLimit, kit)) return { ok: false, line: elytraWornLine(kit.elytraLeft, kit.elytraMending) };
   return { ok: true };
 }
 

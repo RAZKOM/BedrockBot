@@ -171,8 +171,10 @@ the bot entered, 1.0 s while it left; truth `open_bit` false after every run.
 ## Breeding (Track AF)
 
 `!breed [type] [n]` is a user process (40; `!stop` ends it, guard / flee / night pre-empt it and it goes
-on with the pairs left). Per pair: the nearest ready adult of the kind within 16 blocks, then the ready
-adult nearest to it ("ready": adult, alive, not in love, not fed within the last 5 minutes, the vanilla
+on with the pairs left). Per pair: the nearest ready adult of the kind within 16 blocks that has a
+partner **on the same side of every fence** (both in one pen, or both outside any pen: `samePenPair`; a
+pair split by a fence ate the food, made no baby and was locked out for 5 minutes), then that partner
+nearest to it ("ready": adult, alive, not in love, not fed within the last 5 minutes, the vanilla
 breeding cooldown). Per animal: walk to 1.8 blocks (`near`, 300 ticks), put the food in the hand (the
 selected slot, else a hotbar slot, else pulled from the main inventory by the combat skill's
 `HotbarPuller`), look at the animal (60 % of its height), send the click (Packets), and wait up to 20
@@ -194,8 +196,24 @@ process exists and the food chore is not running, at most once per **10 minutes*
 has fewer than **8 adults**, at least 2 ready ones, and the bot carries 2+ of its food. It walks to the
 pen (a `near` goal of 3 blocks when farther than 8), feeds `min(ready / 2, 8 - adults, food / 2)`
 pairs, and leaves the pen closing the gate. A pen out of view is judged by its herd mark (its penned
-counts). Every check that finds nothing says why in `!food status` (`chorePen ... (cow 8 adults (8
+counts). Every check that finds nothing says why in `!food status` and `!breed status` (`chorePen ... (cow 8 adults (8
 wanted))`, `no wheat for the cows`, `the pen is 260 blocks away (more than 200)`).
+
+**Setting the pen up** (the owner's "it is unclear how it works"):
+
+1. Stand inside the pen and say `!breed pen here` (or `!breed pen x y z`; the feet block inside the pen
+   and the ground block under it, what the debug screen shows, both work: `penNear` tries the given level,
+   one above and one below). The bot checks there is a fenced pen there and answers with its size and
+   animals (`breed: chorePen 120 64 -30, pen 7 x 5 (35 cells), 4 cows + 1 baby`), or why not (`no fenced
+   pen at ...; chorePen not changed`). `!breed pen none` clears it.
+2. `!set autoBreed on`. Carry the food (wheat for cows and sheep ...).
+3. `!breed status`: autoBreed, the pen and its animals now, the chore's last check and last run, and the
+   rules (by day every 10 minutes while a kind has fewer than 8 adults; the food chore may also take that
+   pen down to 2 of a kind).
+
+At the pen the chore only feeds that pen's animals. When `chorePen` finds no fenced pen there (a ground block
+two below, a pen bigger than 25 x 25, a gap in the fence) it feeds nothing and says `no fenced pen at
+chorePen ...`; it used to feed whatever stood near the point, wild animals included.
 
 ## Packets (BDS 1.26.60.6, verified)
 

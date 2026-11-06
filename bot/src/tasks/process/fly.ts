@@ -17,14 +17,14 @@ import type { Vec3 } from '../../connection/types.ts';
 import type { RuntimeSettings } from '../../config/settings.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { FlightController, FlightReport } from '../../skills/fly/controller.ts';
-import { elytraWornLimit, kitLine, kitReady, readKit, SupplyWatch, type FlightKitMemory, type KitInventory } from '../../skills/fly/kit.ts';
+import { elytraWornLimit, kitLine, kitReady, readKit, ROCKET, SupplyWatch, type FlightKitMemory, type KitInventory } from '../../skills/fly/kit.ts';
 import type { FlightKitOps } from '../../skills/fly/kitops.ts';
 import { cruiseHeight, flightSeconds, hdist, takeoffSky, type CellQuery, type LandingTarget } from '../../skills/fly/plan.ts';
 import type { LandingCell, LandingPlan } from '../../skills/fly/landing.ts';
 import { glideOptions, type Ledge } from '../../skills/fly/glide.ts';
 import { HIGH_CRUISE_Y, highCruiseWanted } from '../../skills/fly/terrain.ts'; // Track BL
 import type { SkillResult } from '../../skills/types.ts';
-import { BaseProcess, PRIORITY, type ProcessStatus, type StopReason } from './manager.ts';
+import { BaseProcess, PRIORITY, type ProcessKind, type ProcessStatus, type StopReason } from './manager.ts';
 
 /** The flight in the air outranks flee (100): nothing pre-empts a glide. */
 export const FLIGHT_PRIORITY = PRIORITY.flee + 1;
@@ -112,6 +112,8 @@ export interface FlyDeps {
   /** Track BH: the body is held prone (InputLoopState.prone) and the way out (BotSkills.unprone: break what keeps it from standing). */
   prone?: () => boolean;
   unprone?: () => Promise<{ ok: boolean; dug: string[]; why?: string }>;
+  /** Rockets out of any other carried shulker box (Supply.ensure) when the fireworks box has none; true when some came out. */
+  restock?(item: string, n: number): Promise<boolean>;
   /** The owner's lines (the supply whispers, the kept-kit notes). */
   say(msg: string): void;
   waitTicks(n: number): Promise<void>;
@@ -134,8 +136,9 @@ export interface FlyOutcome {
 }
 
 export class FlyProcess extends BaseProcess {
-  readonly name = 'fly';
-  readonly kind = 'user' as const;
+  readonly name: string;
+  readonly kind: ProcessKind;
+  private readonly prio: number;
   readonly target: FlyTarget;
   readonly result: Promise<FlyOutcome>;
   phase: FlyPhase = 'prepare';
@@ -152,8 +155,15 @@ export class FlyProcess extends BaseProcess {
   /** `adopt`: the flight in the air flies to this trip's target now (false: it lands where it was going first). */
   retargeted = false;
 
-  constructor(target: FlyTarget, deps: FlyDeps) {
+  /**
+   * `as`: the trip home (pve.returnHome through commands-fly) flies as the low-priority home return: named `home`,
+   * kind `auto`, PRIORITY.home, so !stop, a death and a new command drop it as they drop the walk home.
+   */
+  constructor(target: FlyTarget, deps: FlyDeps, as: { name?: string; kind?: ProcessKind; priority?: number } = {}) {
     super();
+    this.name = as.name ?? 'fly';
+    this.kind = as.kind ?? 'user';
+    this.prio = as.priority ?? PRIORITY.user;
     this.target = target;
     this.d = deps;
     this.log = deps.log ?? silentLogger;
@@ -165,7 +175,7 @@ export class FlyProcess extends BaseProcess {
   }
 
   get priority(): number {
-    return PRIORITY.user;
+    return this.prio;
   }
 
   /** Land now (`!fly stop`, `!land`): the trip then finishes its ground work. */
@@ -268,6 +278,14 @@ export class FlyProcess extends BaseProcess {
     const wear = s.get('toolWearLimit');
     let kit = this.kit();
     const glide = this.target.glide === true;
+    const min0 = s.get('fireworksMin');
+    // no rockets loose and no fireworks box: the ones in another carried box come out first
+    if (!glide && kit.rockets < min0 && kit.boxRockets === 0 && this.d.restock) {
+      const ok = await this.d.restock(ROCKET, 64);
+      if (t !== this.token) return;
+      this.notes.push(`rockets out of a carried box: ${ok ? 'yes' : 'none'}`);
+      kit = this.kit();
+    }
     const ready = kitReady(kit, wear);
     // Track BH: a glide down needs no rocket (the elytra's uses are checked the same)
     if (!ready.ok && !(glide && ready.reason === 'no_rockets')) {
@@ -365,7 +383,7 @@ export class FlyProcess extends BaseProcess {
     this.flight = this.d.controller.flyTo(this.target, {
       ...opts,
       fleeHealth: s.get('fleeHealth'),
-      elytraWornAt: elytraWornLimit(wear),
+      elytraWornAt: elytraWornLimit(wear, this.kit()),
       ...(sky?.ok ? { takeoffYaw: this.target.takeoffYaw ?? sky.yaw } : vertical !== undefined && this.target.takeoffYaw !== undefined ? { takeoffYaw: this.target.takeoffYaw } : {}),
     });
     void this.flight.then((r) => {

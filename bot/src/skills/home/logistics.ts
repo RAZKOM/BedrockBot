@@ -53,6 +53,7 @@ import { bringMatches, countOf, extractChoice, halfBox, planBring, wholeOk, type
 import { compactRunner, heldBack, planUnload, unloadableStacks, type UnloadPlan, type UnloadSlot, type UnloadStep } from './unloader.ts';
 import { BOX_SLOTS, carriedBoxes, carriedSpares, isKeptBox, keepNameOf, MAX_BOX_STEPS, MAX_FILL_STEPS, MAX_TIDY_STEPS, namedBoxesWord, placesExactly } from './boxing.ts'; // Track AV
 import { DEFAULT_THROWAWAY_MIN, THROWAWAY_BLOCKS } from '../survival/keeper.ts';
+import { dropFirst } from '../container/stash.ts'; // the junk the stash drops first is never boxed at unload either
 
 /** A container read within this many ms is not read again by a scan. */
 export const READ_FRESH_MS = 10 * 60_000;
@@ -1126,7 +1127,8 @@ export class HomeLogistics {
     // open (supply/boxes.ts putIn). The box chest's slot the box came from is kept for the full box.
     const put = await this.boxes.putIn(
       boxSlot,
-      () => this.plan(all, chestKey(from), { on: false }).overflow.filter((x) => !isShulkerBox(x.name)).map((x) => ({ slot: x.slot, count: x.count, name: x.name })),
+      // (never the junk the stash drops first: rotten flesh, string, arrows ... are no reason to fill a box)
+      () => this.plan(all, chestKey(from), { on: false }).overflow.filter((x) => !isShulkerBox(x.name) && !dropFirst(x.name)).map((x) => ({ slot: x.slot, count: x.count, name: x.name })),
       rep,
       cancelled,
       { onMoved: (r) => this.addMoved(rep, r.moved, `shulker box (into ${chestName(from)})`) },

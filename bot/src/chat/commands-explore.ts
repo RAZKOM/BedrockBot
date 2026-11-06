@@ -19,6 +19,7 @@ import type { CommandDeps } from '../tasks/process/deps.ts';
 import { ExploreProcess } from '../tasks/process/explore.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { splitNow } from '../tasks/process/readiness.ts';
+import { restockFromBoxes } from '../skills/supply/supply.ts';
 
 export const MIN_EXPLORE_RADIUS = 16;
 export const MAX_EXPLORE_RADIUS = 1024;
@@ -94,6 +95,7 @@ export function registerExploreCommands(d: CommandDeps): Explorer | undefined {
     position,
     health: () => world.self.health,
     slots: () => world.inventory.slots,
+    restock: (item, n) => restockFromBoxes(d.task, item, n),
     branchY: () => d.settings.get('mineBranchY'),
     tunnelLen: () => d.settings.get('mineTunnelLen'),
     allowPlace: () => d.settings.get('allowPlace'),

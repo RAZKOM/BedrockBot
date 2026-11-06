@@ -19,6 +19,7 @@ import {
   stairCells,
   stairStep,
   tunnelCells,
+  TORCH_RESTOCK,
   turnLeft,
   turnRight,
   type BranchHost,
@@ -353,6 +354,23 @@ describe('branch mining: BranchRun on a fake world', () => {
     const run = new BranchRun(f.host, fakeTask(['iron_ore']), { x: 0, y: 60, z: 0 }, [1, 0], 'iron', 60);
     await drive(run);
     expect(run.stats.reachedYMs).toBeDefined();
+    expect(run.stats.torches).toBe(2);
+  });
+
+  it('no torch loose: takes torches out of a carried box (once), then places them', async () => {
+    const w = new Voxels(64);
+    const f = fakeHost(w, { x: 0, y: 60, z: 0 }, { allowPlace: () => true, tunnelLen: () => 20 });
+    const slots: (ItemStack | null)[] = [{ name: 'iron_pickaxe', count: 1, networkId: 1, metadata: 0 }];
+    f.setSlots(slots);
+    const asked: [string, number][] = [];
+    f.host.restock = (item, n) => {
+      asked.push([item, n]);
+      slots[1] = { name: 'torch', count: n, networkId: 2, metadata: 0 };
+      return Promise.resolve(true);
+    };
+    const run = new BranchRun(f.host, fakeTask(['iron_ore']), { x: 0, y: 60, z: 0 }, [1, 0], 'iron', 60);
+    await drive(run);
+    expect(asked).toEqual([['torch', TORCH_RESTOCK]]);
     expect(run.stats.torches).toBe(2);
   });
 });

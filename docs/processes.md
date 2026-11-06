@@ -110,6 +110,7 @@ its plan yet; `navRemaining` reads its `active` record read-only (an open issue 
 | `avoidMobRadius` | 4 | 0..32 blocks | placeholder (Track R/S planner cost) |
 | `avoidSpawnerRadius` | 8 | 0..64 blocks | placeholder (Track R/S) |
 | `toolWearLimit` | 10 | 0..2000 uses | placeholder (Track S) |
+| `mendAt` | 10 | % | a Mending tool, weapon, armour piece or elytra at or under this share of its durability is set aside, not used until it breaks; `!mend` (docs/survival.md "Mending"); 0 = off |
 | `throwawayMin` | 16 | 0..2304 blocks | placeholder (Track S) |
 | `useBoneMeal` | on | on/off | placeholder (Track U) |
 | `mineTunnelLen` | 32 | 1..256 blocks | placeholder (mining) |

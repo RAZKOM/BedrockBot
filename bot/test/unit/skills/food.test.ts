@@ -21,9 +21,8 @@ import {
 import { Hunter } from '../../../src/skills/food/hunter.ts';
 import type { FightResult } from '../../../src/skills/combat/combat.ts';
 import type { BlockInfo, ContainerView, EntityInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
-import { COOK_NEAR, FoodController, FoodJob, NOTHING_FOUND_BACKOFF_MS, type FoodDeps } from '../../../src/tasks/process/food.ts';
+import { COOK_NEAR, FoodChore, FoodController, FoodJob, NOTHING_FOUND_BACKOFF_MS, type FoodDeps } from '../../../src/tasks/process/food.ts';
 import { BaseProcess, PRIORITY, ProcessManager, type ProcessStatus } from '../../../src/tasks/process/manager.ts';
-import type { FoodChore } from '../../../src/tasks/process/food.ts';
 import { cookReply, foodReply, isChoreTime } from '../../../src/chat/commands-food.ts';
 
 const item = (name: string, count: number, stackId?: number): ItemStack => ({ name, networkId: 1, count, metadata: 0, ...(stackId !== undefined ? { stackId } : {}) });
@@ -438,6 +437,19 @@ function choreRig(opts: { points?: number; day?: boolean; targets?: number; auto
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
+
+describe('food chore: the food in the carried boxes', () => {
+  it('counts with the loose food: no hunt while the boxes hold enough', () => {
+    // (the rig's chore looked once already at its start, with nothing carried: a fresh chore with the boxes counted)
+    const r = choreRig({ autoFood: false });
+    const pm = new ProcessManager();
+    const chore = pm.add(new FoodChore({ ...r.food.d, processes: pm, settings: (() => { const s = new RuntimeSettings(); s.set('foodLeave', 2); return s; })(), boxedFoodPoints: () => 64 }));
+    expect(chore.check().points).toBe(64); // 8 cooked beef in a box, nothing loose
+    pm.tick();
+    expect(chore.running).toBe(false);
+    expect(pm.active).toBeUndefined();
+  });
+});
 
 describe('food job: cooking and the way home', () => {
   it('the hunt cooks only at a furnace near the bot; the job reports where it started (no walk home from far away)', async () => {

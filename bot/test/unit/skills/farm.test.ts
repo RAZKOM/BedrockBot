@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { Chat, CommandDef } from '../../../src/chat/chat.ts';
 import { DEFAULT_FARM_RADIUS, registerFarmChat, type FarmController } from '../../../src/chat/commands-farm.ts';
 import { CROPS, cropForSeed, fieldCell, growthOf, isMature, scanField } from '../../../src/skills/farm/crops.ts';
-import { FarmTask, eyeAt, floorOf, routeTramples, workInReach, type FarmDeps, type FarmPlan } from '../../../src/skills/farm/farmer.ts';
+import { addArea, FarmTask, FARM_FOLLOW_AREAS, eyeAt, floorOf, routeTramples, workInReach, type FarmDeps, type FarmPlan } from '../../../src/skills/farm/farmer.ts';
 import { blockInfoOf } from '../../../src/skills/terrain/shapes.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 
@@ -226,6 +226,45 @@ function harness(): Harness {
   };
   return h;
 }
+
+describe('FarmTask: following the field', () => {
+  it('a strip 30 long with radius 3: works its way along it (the field beyond the radius comes into view), then ends done', async () => {
+    const h = harness();
+    field(h.w, 0, 0, 30, 1, 'wheat', 7);
+    h.inv.add('wheat_seeds', 2);
+    const f = new FarmTask(h.deps);
+    expect(await f.start({ center: { x: 0.5, y: FEET, z: 0.5 }, radius: 3, follow: true })).toBe('done');
+    expect(f.stats.harvested).toBe(30);
+    expect(f.stats.planted).toBe(30);
+    expect(f.stats.waits).toBe(0);
+    expect(f.areas.length).toBeGreaterThan(1);
+    for (let x = 0; x < 30; x++) expect(h.w.blockAt({ x, y: FEET, z: 0 })).toMatchObject({ name: 'wheat', states: { growth: 0 } });
+  });
+
+  it('empty farmland with no crop known: plants the seed carried most, then ends done when the seeds run out', async () => {
+    const h = harness();
+    field(h.w, 0, 0, 3, 3, null);
+    h.inv.add('potato', 5);
+    h.inv.add('wheat_seeds', 2);
+    const f = new FarmTask(h.deps);
+    expect(await f.start({ center: { x: 1.5, y: FEET, z: 1.5 }, radius: 2, follow: true })).toBe('done');
+    expect(f.stats.planted).toBe(7);
+    expect(h.inv.count('potato')).toBe(0);
+    expect(h.inv.count('wheat_seeds')).toBe(0);
+    const crops = [...h.w.blocks.values()].filter((b) => b.name === 'potatoes' || b.name === 'wheat');
+    expect(crops.filter((b) => b.name === 'potatoes')).toHaveLength(5);
+  });
+
+  it('the scan centres: not near another one, not beyond the range, at most FARM_FOLLOW_AREAS', () => {
+    const start = { x: 0, y: FEET, z: 0 };
+    const areas = [start];
+    expect(addArea(areas, { x: 2, y: FEET, z: 0 }, start, 8, 64)).toBe(false); // within half the radius
+    expect(addArea(areas, { x: 10, y: FEET, z: 0 }, start, 8, 64)).toBe(true);
+    expect(addArea(areas, { x: 70, y: FEET, z: 0 }, start, 8, 64)).toBe(false); // beyond the range
+    for (let i = 0; i < 50; i++) addArea(areas, { x: 20 + i * 5, y: FEET, z: 20 }, start, 8, 1000);
+    expect(areas.length).toBe(FARM_FOLLOW_AREAS);
+  });
+});
 
 describe('FarmTask', () => {
   it('harvests a mature 3 x 3 field from off-field cells and replants every crop', async () => {
