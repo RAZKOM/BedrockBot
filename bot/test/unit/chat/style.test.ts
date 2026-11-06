@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Chat, type CommandDef } from '../../../src/chat/chat.ts';
+import { Chat, KICK_OFF_MS, type CommandDef } from '../../../src/chat/chat.ts';
 import { colorsDemo, registerStyleCommands } from '../../../src/chat/commands-style.ts';
 import { settingGroups, SETTING_GROUPS } from '../../../src/chat/help.ts';
 import { SETTING_DEFS, SETTING_KEYS } from '../../../src/config/settings.ts';
@@ -321,6 +321,35 @@ describe('Chat.say, layout and the rich help', () => {
     beforeEach(() => {
       chat.start();
       via = 'tellraw';
+    });
+
+    it('while slashHold says so (the End credits) a reply goes out as chat, then the route is used again', async () => {
+      let hold = true;
+      chat.slashHold = () => hold;
+      chat.say('in the credits');
+      await flushed();
+      expect(commands()).toHaveLength(0);
+      expect(client.sentOf('text').map((p) => p.message)).toEqual(['in the credits']);
+      hold = false;
+      chat.say('back');
+      await flushed();
+      expect(commands()).toHaveLength(1);
+    });
+
+    it('a kick for a command request turns the route off for KICK_OFF_MS (the reconnect does not loop); other kicks do not', () => {
+      expect(chat.routeStatus().via).toBe('tellraw');
+      client.kick('invalid_command_request_packet');
+      const s = chat.routeStatus();
+      expect(s.via).toBe('chat');
+      expect(s.route).toMatchObject({ state: 'refused', reason: 'invalid_command_request_packet' });
+      expect(s.route.retryInMs).toBeGreaterThan(KICK_OFF_MS - 1000);
+      vi.advanceTimersByTime(KICK_OFF_MS + 1);
+      expect(chat.routeStatus().via).toBe('tellraw');
+    });
+
+    it('an ordinary kick leaves the route alone', () => {
+      client.kick('disconnectionScreen.serverIdConflict');
+      expect(chat.routeStatus().via).toBe('tellraw');
     });
 
     it('sends /tellraw @a with the text as JSON, not a chat packet; special characters survive the JSON', async () => {

@@ -149,6 +149,13 @@ export const FLEE_RANGED = new Set(['skeleton', 'stray', 'bogged', 'pillager', '
 /** A flight ends after this long, or this long without a threat within 16. */
 const FLEE_MAX_MS = 60_000;
 const FLEE_SAFE_MS = 2000;
+/**
+ * Caught: a threat within FLEE_CAUGHT_RANGE (horizontal) that keeps hitting the bot for FLEE_CAUGHT_MS of a
+ * flight ends it `cornered` (guard then defends in place). On the Realm 2026-11-05 a drowned as fast as the
+ * bot by the water kept hitting it through 11 s of running away (7 to 0 health) without a blow back.
+ */
+export const FLEE_CAUGHT_RANGE = 2.5;
+export const FLEE_CAUGHT_MS = 3000;
 
 export class PveController {
   readonly mobs: MobTracker;
@@ -642,7 +649,7 @@ class FleeProcess extends BaseProcess {
   readonly name = 'flee';
   readonly kind = 'auto' as const;
   protected override persistent = true;
-  private ep: { why: 'low' | 'creeper'; from: string; start: Vec3; startAt: number; phase: 'away' | 'home' | 'far'; dest: { to: Vec3; kind: string } | undefined; safeSince: number | undefined; planAt: number; goalKey: string; bites: number; stallUntil: number; cornered: boolean; planNearest: number; panics: number } | undefined;
+  private ep: { why: 'low' | 'creeper'; from: string; start: Vec3; startAt: number; phase: 'away' | 'home' | 'far'; dest: { to: Vec3; kind: string } | undefined; safeSince: number | undefined; planAt: number; goalKey: string; bites: number; stallUntil: number; cornered: boolean; planNearest: number; panics: number; caughtSince: number | undefined } | undefined;
   private plan: { why: 'low' | 'creeper'; threat: EntityInfo } | undefined;
   private cooldownUntil = 0;
   /** The last flight ended cornered (no way away): the cooldown then holds even for a hard trigger. */
@@ -713,7 +720,7 @@ class FleeProcess extends BaseProcess {
       const plan = this.plan;
       if (!plan) return;
       const me = c.position();
-      this.ep = { why: plan.why, from: plan.threat.type, start: { ...me }, startAt: performance.now(), phase: 'away', dest: c.fleeTarget(me), safeSince: undefined, planAt: 0, goalKey: '', bites: 0, stallUntil: 0, cornered: false, planNearest: Infinity, panics: 0 };
+      this.ep = { why: plan.why, from: plan.threat.type, start: { ...me }, startAt: performance.now(), phase: 'away', dest: c.fleeTarget(me), safeSince: undefined, planAt: 0, goalKey: '', bites: 0, stallUntil: 0, cornered: false, planNearest: Infinity, panics: 0, caughtSince: undefined };
       c.stats.flees++;
       c.d.metrics?.inc('pve.flees');
       events.emit('combat.flee', { why: plan.why, from: bareType(plan.threat.type), health: Math.round(c.health() * 10) / 10 }); // decision 0059
@@ -806,6 +813,11 @@ class FleeProcess extends BaseProcess {
       }
     } else {
       ep.safeSince = undefined;
+    }
+    if (fleeCaught(ep, now, nearest, c.mobs.lastHitBy?.at)) {
+      this.cornered = true;
+      this.end(`caught (a threat within ${FLEE_CAUGHT_RANGE} hitting us for ${FLEE_CAUGHT_MS / 1000} s): defending`, 3000);
+      return;
     }
     if (now - ep.startAt > FLEE_MAX_MS) {
       this.end('gave up (60 s)', 2000);
@@ -948,6 +960,19 @@ class FleeProcess extends BaseProcess {
 }
 
 /**
+ * The caught rule (FLEE_CAUGHT_RANGE / FLEE_CAUGHT_MS): updates `ep.caughtSince` with the nearest threat's
+ * distance; true once one has stayed that close for FLEE_CAUGHT_MS and hit the bot within that time.
+ */
+export function fleeCaught(ep: { caughtSince: number | undefined }, now: number, nearest: number, lastHitAt: number | undefined): boolean {
+  if (nearest > FLEE_CAUGHT_RANGE) {
+    ep.caughtSince = undefined;
+    return false;
+  }
+  ep.caughtSince ??= now;
+  return now - ep.caughtSince >= FLEE_CAUGHT_MS && lastHitAt !== undefined && lastHitAt >= ep.caughtSince;
+}
+
+/**
  * Home is clear of the threats: each one's bearing from the bot is more than FLEE_HOME_ANGLE degrees
  * off the bearing to home, or it is farther away than home.
  */
@@ -1024,7 +1049,9 @@ class GuardProcess extends BaseProcess {
       if (!inPlace && !c.d.night?.wantsShelter()) {
         const home = c.d.home();
         const me = c.position();
-        if (home && dist(me, { x: home.x + 0.5, y: home.y, z: home.z + 0.5 }) > 1.5) void c.returnHome('guard', { timeoutTicks: 2400, ifIdle: true });
+        // only a fight in the home area walks back (an idle bot far away now guards itself: it is not sent 1400 blocks home)
+        const hd = home ? dist(me, { x: home.x + 0.5, y: home.y, z: home.z + 0.5 }) : 0;
+        if (home && hd > 1.5 && hd <= c.guardRadius + CHASE_EXTRA) void c.returnHome('guard', { timeoutTicks: 2400, ifIdle: true });
       }
     });
   }

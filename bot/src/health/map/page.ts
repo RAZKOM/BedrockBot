@@ -1,7 +1,10 @@
 // GET /map (PLAN.md task 7.15): a dependency-free page that polls /map.json every second and draws
-// the cached chunks top-down (colour by surface class, shade by height; remembered-only chunks dimmed),
-// the bot (arrow by yaw) and its trail, the planned path and the goal, entities, home, shelter and
-// waypoints. Drag to pan, wheel or +/- to zoom, "follow" re-centres on the bot.
+// the cached chunks top-down (Track PC, decision 0060: each column in its surface block's colour with
+// the in-game map's relief shading, or the class view; remembered-only chunks dimmed), the bot (arrow
+// by yaw) and its trail, the planned path and the goal, entities, home, shelter and waypoints. Drag to
+// pan, wheel or +/- to zoom, "follow" re-centres on the bot. The painting is paint.ts PAINT_JS.
+import { PAINT_JS } from './paint.ts';
+
 export const MAP_PAGE = `<!doctype html>
 <html lang="en">
 <head>
@@ -35,10 +38,13 @@ export const MAP_PAGE = `<!doctype html>
       <label><input type="checkbox" id="follow" checked> follow</label>
       <select id="radius"><option>6</option><option>8</option><option selected>12</option><option>16</option><option>24</option><option>32</option></select> chunks</div>
     <div class="row"><label><input type="checkbox" id="grid"> chunk grid</label> <label><input type="checkbox" id="labels" checked> labels</label></div>
+    <div class="row"><select id="mode"><option value="block" selected>blocks</option><option value="class">classes</option></select> colours
+      <select id="layer"><option value="auto" selected>auto</option><option value="top">top</option><option value="under">under the roof</option></select> layer</div>
     <div id="err" class="row"></div>
     <div id="info"></div>
     <div class="row legend muted" style="margin-top:10px">
-      <div><span style="background:#5f9e3c"></span>solid (shaded by height) <span style="background:#2f6fd0"></span>water <span style="background:#e0531f"></span>avoid</div>
+      <div id="legend-class"><span style="background:#5f9e3c"></span>solid (shaded by height) <span style="background:#2f6fd0"></span>water <span style="background:#e0531f"></span>avoid</div>
+      <div id="legend-block">blocks: the surface block's colour, darker where the column to the north is higher, lighter where lower; water darker with depth. Chunks remembered before block colours: grey / blue / orange by class</div>
       <div><span style="background:#fff"></span>bot <span style="background:#f5c542"></span>path / goal <span style="background:#ff5050"></span>hostile <span style="background:#5cd6ff"></span>player</div>
       <div><span style="background:#b0e57c"></span>passive <span style="background:#ffd27f"></span>item <span style="background:#4ce08a"></span>home <span style="background:#c08cff"></span>shelter / waypoint</div>
       <div>dimmed chunks: remembered (not loaded); outlined: loaded</div>
@@ -56,34 +62,27 @@ export const MAP_PAGE = `<!doctype html>
   const radiusSel = document.getElementById('radius');
   const gridBox = document.getElementById('grid');
   const labelsBox = document.getElementById('labels');
-  const tiles = new Map();          // "cx,cz" -> {t, img}
+  const modeSel = document.getElementById('mode');
+  const layerSel = document.getElementById('layer');
+  const tiles = new Map();          // "cx,cz" -> {t (decoded, paint.ts), img}
   let data = null, since = -1, win = null, scale = 3, view = { x: 0, z: 0 }, hover = null, inFlight = false;
-
-  function b64(s) { const bin = atob(s); const a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a; }
-  function shade(rgb, f) { return rgb.map((v) => Math.max(0, Math.min(255, Math.round(v * f)))); }
-  function colour(cls, y) {
-    if (cls === 2) return shade([47, 111, 208], 0.8 + Math.max(-0.3, Math.min(0.3, (y - 62) / 60)));
-    if (cls === 3) return [224, 83, 31];
-    if (cls === 1) {
-      const t = Math.max(0, Math.min(1, (y + 20) / 200));
-      const base = t < 0.5 ? [70 + 60 * t, 140 - 20 * t, 50] : [110 + 180 * (t - 0.5), 120 + 160 * (t - 0.5), 60 + 380 * (t - 0.5)];
-      return shade(base, 0.75 + 0.5 * (((y % 4) + 4) % 4) / 8);
-    }
-    return [24, 26, 30];
-  }
-  function tileImage(t) {
-    const ys = new Int16Array(b64(t.y).buffer), cs = b64(t.c);
-    const c = document.createElement('canvas'); c.width = 16; c.height = 16;
-    const g = c.getContext('2d'); const img = g.createImageData(16, 16);
-    for (let i = 0; i < 256; i++) {
-      const cls = (cs[i >> 2] >> ((i & 3) * 2)) & 3, y = ys[i];
-      let rgb = y === -32768 ? [24, 26, 30] : colour(cls, y);
-      if (!t.live) rgb = shade(rgb, 0.55);
-      const x = i & 15, z = i >> 4, o = (z * 16 + x) * 4;
-      img.data[o] = rgb[0]; img.data[o + 1] = rgb[1]; img.data[o + 2] = rgb[2]; img.data[o + 3] = 255;
-    }
+${PAINT_JS}
+  function paintTile(entry) {
+    const north = tiles.get(entry.t.cx + ',' + (entry.t.cz - 1));
+    const g = entry.img.getContext('2d'), img = g.createImageData(16, 16);
+    img.data.set(mapPixels(entry.t, modeSel.value, layerSel.value, north ? north.t : null));
     g.putImageData(img, 0, 0);
-    return { t, img: c, ys, cs };
+  }
+  function addTile(raw, palette) {
+    const c = document.createElement('canvas'); c.width = 16; c.height = 16;
+    const entry = { t: mapDecodeTile(raw, palette), img: c };
+    tiles.set(raw.cx + ',' + raw.cz, entry);
+    return entry;
+  }
+  function repaintAll() { for (const e of tiles.values()) paintTile(e); }
+  function syncLegend() {
+    document.getElementById('legend-class').style.display = modeSel.value === 'class' ? '' : 'none';
+    document.getElementById('legend-block').style.display = modeSel.value === 'block' ? '' : 'none';
   }
   function toScreen(x, z) { return [(x - view.x) * scale + cv.width / 2, (z - view.z) * scale + cv.height / 2]; }
   function toWorld(sx, sy) { return [(sx - cv.width / 2) / scale + view.x, (sy - cv.height / 2) / scale + view.z]; }
@@ -166,7 +165,12 @@ export const MAP_PAGE = `<!doctype html>
       const res = await fetch('map.json?' + p.toString(), { cache: 'no-store' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const d = await res.json();
-      for (const t of d.tiles) tiles.set(t.cx + ',' + t.cz, tileImage(t));
+      const fresh = [];
+      for (const t of d.tiles) fresh.push(addTile(t, d.palette || []));
+      // relief needs the row to the north: paint the new tiles and the ones just south of them
+      const again = new Set(fresh);
+      for (const e of fresh) { const s = tiles.get(e.t.cx + ',' + (e.t.cz + 1)); if (s) again.add(s); }
+      for (const e of again) paintTile(e);
       const w0 = d.window;
       for (const [k, v] of tiles) if (v.t.cx < w0.cx0 - 2 || v.t.cx > w0.cx1 + 2 || v.t.cz < w0.cz0 - 2 || v.t.cz > w0.cz1 + 2) tiles.delete(k);
       win = w0; since = d.rev; data = d;
@@ -193,8 +197,8 @@ export const MAP_PAGE = `<!doctype html>
     const [wx, wz] = toWorld((e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr);
     const bx = Math.floor(wx), bz = Math.floor(wz), tile = tiles.get((bx >> 4) + ',' + (bz >> 4));
     if (tile) {
-      const i = ((bz & 15) << 4) | (bx & 15), y = tile.ys[i], cls = (tile.cs[i >> 2] >> ((i & 3) * 2)) & 3;
-      hover = bx + ', ' + bz + ': ' + (y === -32768 ? 'nothing' : ['air', 'solid', 'water', 'avoid'][cls] + ' at y ' + y) + (tile.t.live ? ' (loaded)' : ' (remembered ' + new Date(tile.t.updatedAt).toLocaleString() + ')');
+      const i = ((bz & 15) << 4) | (bx & 15);
+      hover = bx + ', ' + bz + ': ' + mapDescribe(tile.t, layerSel.value, i) + (tile.t.live ? ' (loaded)' : ' (remembered ' + new Date(tile.t.updatedAt).toLocaleString() + ')');
     } else hover = bx + ', ' + bz + ': unknown';
     render();
   });
@@ -204,6 +208,9 @@ export const MAP_PAGE = `<!doctype html>
   radiusSel.onchange = () => { since = -1; win = null; poll(); };
   follow.onchange = () => { since = -1; win = null; poll(); };
   gridBox.onchange = draw; labelsBox.onchange = draw;
+  modeSel.onchange = () => { syncLegend(); repaintAll(); draw(); };
+  layerSel.onchange = () => { repaintAll(); draw(); };
+  syncLegend();
   window.addEventListener('resize', draw);
   render(); poll();
   setInterval(poll, 1000);
