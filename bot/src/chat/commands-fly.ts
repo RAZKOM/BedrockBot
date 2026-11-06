@@ -15,7 +15,7 @@ import { elytraWornLimit, flightKitMemoryOf, kitLine, kitReady, readKit, ROCKET,
 import { restockFromBoxes, supplyOf } from '../skills/supply/supply.ts';
 import { FlightKitOps } from '../skills/fly/kitops.ts';
 import { APPROACH_HEIGHT, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, type CellQuery, type LandingTarget, type SkyCheck } from '../skills/fly/plan.ts';
-import { pathBlocks, probePath } from '../skills/home/reach.ts'; // Track AU2: the walk from a landing cell to the goal
+import { pathBlocks, probeOpenSky, probePath } from '../skills/home/reach.ts'; // Track AU2: the walk from a landing cell to the goal
 import { probeNavOf } from '../skills/combat/pathReach.ts';
 import { findLanding, isHazardName, isLiquidName, stillLandable, WET_ABOVE, type BlockLookup, type LandingPlan, type ProbeOutcome } from '../skills/fly/landing.ts'; // Track BF
 import { TerrainMemo, type TerrainColumn } from '../skills/fly/terrain.ts'; // Track BL
@@ -41,6 +41,13 @@ export const LAND_PROBE_MS = 400;
 export const LAND_BUDGET_MS = 6000;
 /** Track BH: open-sky cells probed per leg of a walk out (each LAND_PROBE_NODES / LAND_PROBE_MS) before the plain `xz` leg. */
 export const LEG_PROBES = 6;
+/**
+ * Track CA: the walk out's first leg is the nearest open sky by walking (`probeOpenSky`), not a cell on
+ * the straight line: from the foot of a mineshaft the line's cell is over the bot's head and the only way
+ * to it is up the shaft and back out (the owner, 2026-11-06). An exit nearer than this (path blocks) is
+ * where the bot already stands: the straight-line legs instead.
+ */
+export const EXIT_MIN_BLOCKS = 4;
 /** Track BH: a glide down is simulated to the end within this many blocks (a farther goal: the flight with rockets, its takeoff simulated). */
 export const GLIDE_SIM_RANGE = 500;
 
@@ -643,7 +650,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * (`landable`): from a tunnel or a house that is the surface, so the walk comes up, not along. None
    * known: a plain `xz` leg `step` blocks along the line (the surface is not loaded or not landable).
    */
-  const openSkyLeg = async (from: Vec3, goalBlock: Vec3, step: number): Promise<{ goal: Goal; tried: string[] }> => {
+  const openSkyLeg = async (from: Vec3, goalBlock: Vec3, step: number): Promise<{ goal: Goal; tried: string[]; exit?: number }> => {
     const total = hdist(from, { x: goalBlock.x + 0.5, z: goalBlock.z + 0.5 });
     const ux = (goalBlock.x + 0.5 - from.x) / total;
     const uz = (goalBlock.z + 0.5 - from.z) / total;
@@ -651,6 +658,12 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     // farm's spawning box, 45 blocks over the platform, and the leg failed at once); at most LEG_PROBES, the nearest first
     const nav = probeNavOf(pve.mover);
     const tried: string[] = [];
+    // Track CA: the nearest open sky the bot can walk to (a mineshaft: its top, wherever that is), when it is not right here
+    if (nav) {
+      const exit = await probeOpenSky(nav, from);
+      if ('at' in exit && exit.blocks >= EXIT_MIN_BLOCKS) return { goal: { type: 'block', p: exit.at }, tried, exit: Math.round(exit.blocks) };
+      if ('why' in exit) tried.push(`surface:${exit.why}`);
+    }
     const seen = new Set<number>();
     for (let i = 4; i <= step; i++) {
       for (const side of [0, 1, -1, 2, -2, 3, -3, 4, -4]) {
@@ -686,8 +699,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       const step = d.settings.get('flyRetryBlocks');
       const total = hdist(from, { x: goalBlock.x + 0.5, z: goalBlock.z + 0.5 });
       if (total <= Math.max(step, d.settings.get('flyMin'))) return walk();
-      const { goal: legGoal, tried } = await openSkyLeg(from, goalBlock, step);
-      log.info(`fly: leg ${leg + 1} to ${legGoal.type === 'block' ? `the open-sky cell ${legGoal.p.x} ${legGoal.p.y} ${legGoal.p.z}` : legGoal.type === 'xz' ? `${legGoal.x} ${legGoal.z} (no ${tried.length ? 'reachable ' : ''}open-sky cell known ahead)` : 'the goal'}${tried.length ? ` (no path to ${tried.join(', ')})` : ''}`);
+      const { goal: legGoal, tried, exit } = await openSkyLeg(from, goalBlock, step);
+      log.info(`fly: leg ${leg + 1} to ${exit !== undefined && legGoal.type === 'block' ? `the nearest open sky by walking ${legGoal.p.x} ${legGoal.p.y} ${legGoal.p.z} (${exit} blocks)` : legGoal.type === 'block' ? `the open-sky cell ${legGoal.p.x} ${legGoal.p.y} ${legGoal.p.z}` : legGoal.type === 'xz' ? `${legGoal.x} ${legGoal.z} (no ${tried.length ? 'reachable ' : ''}open-sky cell known ahead)` : 'the goal'}${tried.length ? ` (no path to ${tried.join(', ')})` : ''}`);
       const r = await legWalk(legGoal);
       if (!r.ok) return r.reason === 'interrupted' ? r : walk();
       const again = await autoFly(goalBlock, label, half, { site: false });

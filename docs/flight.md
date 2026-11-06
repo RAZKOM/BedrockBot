@@ -532,6 +532,17 @@ It tries at most 6 candidates (`LEG_PROBES`), nearest first. If none is found it
 The leg line names the failed probes (`no path to 12 176 -40:exhausted, ...`), so a box top is never
 chosen again.
 
+### The nearest open sky by walking (Track CA)
+
+Before the line's candidates, each leg first asks for the nearest open sky **by path**
+(`probeOpenSky`, skills/home/reach.ts: the `surface` goal, 40 000 nodes / 1500 ms, sliced, no digging, no
+long falls). An exit 4 or more path blocks away is the leg (`fly: leg 1 to the nearest open sky by walking
+x y z (n blocks)`); a nearer one means the bot already stands under the sky, and the line's candidates
+follow as before. The owner's case (2026-11-06): at the foot of a diagonal mineshaft whose top is near
+home, the line's cell was over the bot's head, so the walk climbed the shaft, walked back out over its old
+spot and tried to fly home from there. Now the leg ends at the shaft's top; the next takeoff check finds
+home within `flyMin` and walks. Unit test: `test/unit/skills/open-sky-exit.test.ts`.
+
 ### Prone after a glide
 
 A glide that ends under less than 1.8 blocks of headroom (a canopy, a slab roof, a 1-high gap) leaves the

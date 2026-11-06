@@ -86,3 +86,20 @@ export async function probePath(nav: ProbeNav, goal: NavGoal, from: Vec3, budget
     await yieldLoop();
   }
 }
+
+/** Track CA: budget of the nearest-open-sky probe (`probeOpenSky`): a mineshaft's top can be 100+ path blocks away. */
+export const EXIT_PROBE_NODES = 40_000;
+export const EXIT_PROBE_MS = 1500;
+
+/**
+ * Track CA: the nearest open sky the bot can walk to from `from` (the `surface` goal: sky over the head,
+ * not in a pit), by path, never digging or pillaring and without long falls: the stand cell and its path
+ * length in blocks, or why there is none. From the foot of a mineshaft this is the shaft's top, wherever
+ * the straight line to the goal points (the walk out of commands-fly.ts used to take a cell on that line).
+ */
+export async function probeOpenSky(nav: ProbeNav, from: Vec3, budget: { nodes?: number; ms?: number } = {}): Promise<{ at: Vec3; blocks: number } | { why: string }> {
+  const r = await probePath(nav, { type: 'surface' }, from, { nodes: budget.nodes ?? EXIT_PROBE_NODES, ms: budget.ms ?? EXIT_PROBE_MS, noLongFalls: true });
+  const at = standOf(r);
+  if (!r || !at) return { why: r ? `${r.status}${r.limited ? ', search limit hit' : ''}${r.unknown ? ', touched unloaded world' : ''}` : 'no standable start' };
+  return { at, blocks: pathBlocks(r.path) };
+}
