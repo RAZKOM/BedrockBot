@@ -194,6 +194,7 @@ function harness(): Harness {
     place: (p, o) => {
       const item = String(o?.item);
       h.calls.push(`place ${p.x} ${p.z} ${item}`);
+      if (w.blockAt({ x: p.x, y: p.y - 1, z: p.z }).name !== 'farmland') return Promise.resolve({ ok: false, reason: 'rejected' });
       if (!inv.take(item)) return Promise.resolve({ ok: false, reason: 'no_item' });
       w.set(p, cropForSeed(item)!.block, { growth: 0 });
       return Promise.resolve({ ok: true, ticks: 3 });
@@ -238,6 +239,10 @@ function harness(): Harness {
     click: (p, item) => {
       h.calls.push(`click ${p.x} ${p.z} ${item}`);
       const b = w.blockAt(p);
+      if (item?.endsWith('_hoe') && inv.count(item) > 0 && b.name === 'dirt') {
+        w.set(p, 'farmland', { moisturized_amount: 7 });
+        return Promise.resolve({ ok: true });
+      }
       if (item !== 'bone_meal' || !inv.take('bone_meal')) return Promise.resolve({ ok: false, reason: 'no_item' });
       w.set(p, b.name, { growth: Math.min(7, Number(b.states.growth) + 3) });
       return Promise.resolve({ ok: true });
@@ -393,6 +398,32 @@ describe('FarmTask', () => {
     expect(f.stats.harvested).toBe(1);
     expect(h.w.blockAt({ x: 20, y: FEET, z: 0 }).name).toBe('wheat'); // replanted
     expect(h.w.blockAt({ x: 0, y: FEET, z: 0 }).states.growth).toBe(7); // left alone
+  });
+
+  it('re-tills trampled farmland with a hoe and replants it; without a hoe it is left as dirt', async () => {
+    for (const withHoe of [true, false]) {
+      const h = harness();
+      field(h.w, 0, 0, 3, 1, 'wheat', 7);
+      if (withHoe) h.inv.add('stone_hoe', 1);
+      const dig = h.deps.skills.dig;
+      // the first harvest "tramples" the middle cell (the body landed on it)
+      let once = false;
+      h.deps.skills.dig = async (p, o) => {
+        const r = await dig(p, o);
+        if (!once) {
+          once = true;
+          h.w.set({ x: 1, y: SOIL, z: 0 }, 'dirt');
+          h.w.set({ x: 1, y: FEET, z: 0 }, 'air');
+        }
+        return r;
+      };
+      const f = new FarmTask(h.deps);
+      await f.start({ center: { x: 1.5, y: FEET, z: 0.5 }, radius: 2, follow: true, maxRounds: 8 });
+      expect(f.stats.tilled).toBe(withHoe ? 1 : 0);
+      expect(h.w.blockAt({ x: 1, y: SOIL, z: 0 }).name).toBe(withHoe ? 'farmland' : 'dirt');
+      expect(h.w.blockAt({ x: 1, y: FEET, z: 0 }).name).toBe(withHoe ? 'wheat' : 'air');
+      expect(h.w.blockAt({ x: 0, y: FEET, z: 0 }).name).toBe('wheat');
+    }
   });
 
   it('stop() ends the loop and cancels the skills', async () => {

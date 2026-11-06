@@ -38,7 +38,7 @@ import type { GotoOptions, SkillResult } from '../types.ts';
 import type { ClickResult } from './click.ts';
 import { BONE_MEAL, CROPS, FARMLAND, FARM_ITEMS, SEEDS, fieldCell, posKey, scanField, type CropDef, type FieldCell, type FieldScan } from './crops.ts';
 
-export type FarmState = 'idle' | 'done' | 'scan' | 'walk' | 'harvest' | 'bonemeal' | 'plant' | 'collect' | 'to_chest' | 'deposit' | 'waiting' | 'full' | 'paused' | 'stopped' | 'failed';
+export type FarmState = 'idle' | 'done' | 'scan' | 'walk' | 'harvest' | 'bonemeal' | 'till' | 'plant' | 'collect' | 'to_chest' | 'deposit' | 'waiting' | 'full' | 'paused' | 'stopped' | 'failed';
 
 export interface FarmOptions {
   /** Centre of the field (feet position or block). */
@@ -82,6 +82,8 @@ export interface FarmStats {
   harvested: number;
   harvestedByCrop: Record<string, number>;
   planted: number;
+  /** Trampled farmland (dirt) re-tilled with a hoe. */
+  tilled: number;
   boneMealUsed: number;
   boneMealGrown: number;
   stands: number;
@@ -161,7 +163,12 @@ export const DIG_REACH = 5;
 export const CLICK_REACH = 5;
 export const DIG_SERVER_REACH = 10;
 
-type WorkKind = 'harvest' | 'plant' | 'bonemeal';
+type WorkKind = 'harvest' | 'plant' | 'bonemeal' | 'till';
+
+/** Hoes, any of which re-tills trampled farmland (dirt with air above). */
+export const HOES = ['netherite_hoe', 'diamond_hoe', 'iron_hoe', 'golden_hoe', 'stone_hoe', 'wooden_hoe'] as const;
+/** With a hoe carried a trampled cell is repaired, so a route may fall this far onto farmland (no fall damage up to 3). */
+export const HOE_FALL = 3;
 
 interface Work {
   kind: WorkKind;
@@ -187,7 +194,7 @@ export function eyeAt(x: number, feet: number, z: number): Vec3 {
 /** True when work `w` can be done from `eye` (with `margin` blocks to spare). */
 export function workInReach(eye: Vec3, kind: WorkKind, cell: FieldCell, margin = 0): boolean {
   if (kind === 'harvest') return closestDistance(eye, cell.crop) <= DIG_REACH - margin && serverReachDistance(eye, cell.crop) <= DIG_SERVER_REACH - margin;
-  const b = kind === 'plant' ? cell.soil : cell.crop;
+  const b = kind === 'plant' || kind === 'till' ? cell.soil : cell.crop;
   return closestDistance(eye, b) <= CLICK_REACH - margin && cornerDistance(eye, b) <= SERVER_CLICK_REACH - margin;
 }
 
@@ -293,6 +300,7 @@ export class FarmTask {
     this.opts = opts;
     Object.assign(this.stats, newStats());
     this.stats.startedAt = this.now();
+    this.soils.clear();
     this.cellFails.clear();
     this.standFails.clear();
     this.lastError = undefined;
@@ -434,7 +442,8 @@ export class FarmTask {
       this.state = 'scan';
       this.stats.rounds++;
       const scan = o.follow ? this.scanFollow(areas, radius, o.maxRange ?? FARM_FOLLOW_RANGE) : this.scan(o.center, radius);
-      const work = this.workOf(scan);
+      // farmland seen this run that is dirt now (trampled): re-tilled and replanted when a hoe is carried
+      const work = [...this.workOf(scan), ...(this.hoe() ? this.trampled().map((cell) => ({ kind: 'till' as const, cell })) : [])];
       if (work.length === 0) {
         // anything left on the ground in the field? (following: around the bot, which is where it last worked)
         const dropsAt = o.follow ? (this.d.position() ?? o.center) : o.center;
@@ -449,6 +458,8 @@ export class FarmTask {
           if (c.pickedUp > 0) continue;
         }
         if (o.follow) {
+          const lost = this.trampled().length;
+          if (lost) this.log.warn(`farm: ${lost} trampled farmland left as dirt (no hoe carried)`);
           this.log.info(`farm: nothing left to harvest or plant (${scan.cells.length} farmland in ${areas.length} area${areas.length === 1 ? '' : 's'}, ${scan.growing.length} growing)`);
           return this.end(gen, 'done');
         }
@@ -486,7 +497,7 @@ export class FarmTask {
         continue;
       }
       this.stats.stands++;
-      await this.workHere(gen, scan);
+      await this.workHere(gen, scan, work.filter((w) => w.kind === 'till').map((w) => w.cell));
       // following: where it worked is scanned from now on (the field beyond the start's radius comes into view)
       const at = this.d.position();
       if (o.follow && at) addArea(areas, at, o.center, radius, o.maxRange ?? FARM_FOLLOW_RANGE);
@@ -537,7 +548,10 @@ export class FarmTask {
   private scan(center: Vec3, radius: number): FieldScan {
     const w = this.d.world;
     const scan = scanField((p) => w.blockAt(p), (pred, o) => w.find(pred, o), center, radius, this.memory);
-    for (const c of scan.cells) if (c.kind && c.state !== 'empty') this.memory.set(posKey(c.soil), c.kind);
+    for (const c of scan.cells) {
+      if (c.kind && c.state !== 'empty') this.memory.set(posKey(c.soil), c.kind);
+      this.soils.set(posKey(c.soil), c.soil);
+    }
     return scan;
   }
 
@@ -594,7 +608,7 @@ export class FarmTask {
           if (reach.length === 0) continue;
           const d = pos ? Math.hypot(x + 0.5 - pos.x, feet - pos.y, z + 0.5 - pos.z) : 0;
           // most work in reach, harvests weigh more (they free cells to plant); off the farmland; near the bot
-          const value = reach.reduce((a, w) => a + (w.kind === 'harvest' ? 3 : 2), 0);
+          const value = reach.reduce((a, w) => a + (w.kind === 'harvest' ? 3 : 2), 0); // tills count like plantings
           cands.push({ x, y, z, feet, onFarmland, work: reach, score: -value + (onFarmland ? 4 : 0) + 0.3 * d });
         }
       }
@@ -611,7 +625,8 @@ export class FarmTask {
       const fall = farmlandDrop(p.path, blockAt);
       if (fall > SAFE_FALL) {
         this.stats.trampleRoutesRefused++;
-        if (!terrace && fall <= TERRACE_FALL) terrace = c;
+        // a hoe repairs a trampled cell (re-till + replant): then any fall without damage is fine
+        if (!terrace && fall <= (this.hoe() ? HOE_FALL : TERRACE_FALL)) terrace = c;
         continue;
       }
       return c;
@@ -624,6 +639,27 @@ export class FarmTask {
     if (this.stats.trampleRoutesRefused) this.log.info(`farm: ${Math.min(cands.length, STAND_TRIES)} standing cells refused (routes drop onto farmland or none found)`);
     this.refusedWork = [...tried];
     return undefined;
+  }
+
+  /** Every farmland block seen this run (soil key -> position): one that turns to dirt was trampled. */
+  private readonly soils = new Map<string, Vec3>();
+
+  /** A hoe carried, else undefined. */
+  private hoe(): string | undefined {
+    return HOES.find((h) => this.d.world.inventory.count(h) > 0);
+  }
+
+  /** Farmland seen this run that is dirt with air above now (trampled), not failed too often, as empty cells. */
+  private trampled(): FieldCell[] {
+    const w = this.d.world;
+    const out: FieldCell[] = [];
+    for (const [k, soil] of this.soils) {
+      if (w.blockAt(soil)?.name !== 'dirt' || (this.cellFails.get(k) ?? 0) >= (this.opts?.cellAttempts ?? 3)) continue;
+      const above = w.blockAt({ x: soil.x, y: soil.y + 1, z: soil.z });
+      if (above && above.name !== 'air') continue;
+      out.push({ soil, crop: { x: soil.x, y: soil.y + 1, z: soil.z }, state: 'empty', kind: this.memory.get(k), growth: undefined });
+    }
+    return out;
   }
 
   /** The work the standing cells refused by the last chooseStand() were picked for. */
@@ -643,7 +679,7 @@ export class FarmTask {
   }
 
   /** Everything in reach of where the bot stands: harvest + replant, bone meal, collect, plant. */
-  private async workHere(gen: number, scan: FieldScan): Promise<void> {
+  private async workHere(gen: number, scan: FieldScan, tills: FieldCell[] = []): Promise<void> {
     const w = this.d.world;
     const fresh = (c: FieldCell): FieldCell => fieldCell((p) => w.blockAt(p), c.soil, this.memory.get(posKey(c.soil)) ?? c.kind);
     const byDistance = (cells: FieldCell[]) => {
@@ -690,8 +726,30 @@ export class FarmTask {
         }
       }
     }
+    // 2b. re-till trampled farmland in reach (it is planted below with the rest)
+    const tilled: FieldCell[] = [];
+    for (const c of byDistance(tills)) {
+      const hoe = this.hoe();
+      if (!this.go(gen) || !hoe) break;
+      if (w.blockAt(c.soil)?.name !== 'dirt' || !this.inReachNow('till', c)) continue;
+      this.state = 'till';
+      const r = await this.d.click(c.soil, hoe);
+      if (!this.go(gen)) return;
+      if (!r.ok || w.blockAt(c.soil)?.name !== FARMLAND) {
+        if (!r.ok && r.reason === 'interrupted') return;
+        this.failCell(c);
+        this.log.info(`farm: till ${fmt(c.soil)} with ${hoe}: ${r.ok ? `now ${w.blockAt(c.soil)?.name}` : r.reason}`);
+        continue;
+      }
+      this.stats.tilled++;
+      if (!this.memory.has(posKey(c.soil))) {
+        const k = c.kind ?? this.carriedCrop();
+        if (k) this.memory.set(posKey(c.soil), k);
+      }
+      tilled.push(fresh(c));
+    }
     // 3. replant the harvested cells (and any empty one) in reach
-    if (!(await plantAll([...scan.mature, ...scan.empty, ...scan.growing]))) return;
+    if (!(await plantAll([...scan.mature, ...scan.empty, ...scan.growing, ...tilled]))) return;
     // 4. collect the drops around here
     const here = this.d.position();
     if (here && this.dropsNear(here, 6)) {
@@ -702,7 +760,7 @@ export class FarmTask {
       if (!this.go(gen)) return;
     }
     // 5. plant what is still empty in reach (seeds may have come with the drops)
-    await plantAll([...scan.empty, ...scan.mature, ...scan.growing]);
+    await plantAll([...scan.empty, ...scan.mature, ...scan.growing, ...tilled]);
   }
 
   /** First time each item drop was seen (ms): only fresh drops are still waiting for their pickup delay. */
@@ -869,6 +927,7 @@ function newStats(): FarmStats {
     harvested: 0,
     harvestedByCrop: {},
     planted: 0,
+    tilled: 0,
     boneMealUsed: 0,
     boneMealGrown: 0,
     stands: 0,

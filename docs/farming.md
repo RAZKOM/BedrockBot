@@ -120,6 +120,12 @@ Terraced fields (2026-11-06, a large sloping carrot field on the Realm: rows of 
 - up to `STAND_TRIES` (24) standing cells are planned per round; when every route still falls onto farmland,
   the first whose deepest such fall is at most `TERRACE_FALL` (1.1, one terrace) is taken
   (`stats.terraceSteps`; measured 1 in 4 such falls trample). Deeper falls are never taken;
+- **a hoe repairs trampling** (the owner's call: one broken farmland is no blocker): every farmland block seen
+  in the run is remembered; one that is `dirt` with air above later was trampled and becomes `till` work (the
+  hoe used on its top face, `ItemClicker`), then it is planted with the crop remembered for it
+  (`stats.tilled`). With a hoe carried, the fallback route may fall up to `HOE_FALL` (3, no damage) onto
+  farmland; without one only `TERRACE_FALL`, and the job's end logs the cells left as dirt. A cell trampled
+  after the scan is `blocked` for planting (`fieldCell` checks the soil) until it is tilled;
 - a round with no standing cell sets aside only the work the refused cells were picked for (before, every work
   item of the whole followed field was failed, so three such rounds ended the job `done` after 94 of 1491 cells).
 

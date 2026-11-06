@@ -83,6 +83,9 @@ export function fieldCell(blockAt: (p: Vec3) => BlockInfo | undefined, soil: Vec
     const growth = growthOf(above)!;
     return { soil, crop, state: growth >= kind.mature ? 'mature' : 'growing', kind, growth };
   }
+  const ground = blockAt(soil);
+  // trampled since the scan (dirt now): nothing to plant until it is tilled again
+  if (ground && ground.name !== FARMLAND) return { soil, crop, state: 'blocked', kind: undefined, growth: undefined };
   if (above && AIRLIKE.has(above.name)) return { soil, crop, state: 'empty', kind: remembered, growth: undefined };
   return { soil, crop, state: 'blocked', kind: undefined, growth: undefined };
 }
