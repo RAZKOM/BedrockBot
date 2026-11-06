@@ -33,6 +33,7 @@ import { MOVEMENT_TIMEOUT_TICKS, OFF_PATH_GRACE_TICKS, PATH_WINDOW_AHEAD, PATH_W
 import { corridorState, fineTarget, touches, waypointGoal, type CorridorState } from './corridor.ts'; // Track CB: following a coarse corridor
 import type { CoarseLayer, CoarseMode, CorridorStatus } from '../coarse/types.ts'; // Track CB
 import { AirClock, bodyInWater, headUnderWater } from './water.ts'; // Track W1
+import { trappedWhy, waterDigConditions } from './digout.ts'; // Track W2
 
 /** Track R: goto options of the navigator. `blacklist`: consult and feed the failure blacklist (default: `any` and `getToBlock` goals). */
 export type NavGotoOptions = GotoOptions & { blacklist?: boolean };
@@ -114,6 +115,12 @@ export interface NavigatorOptions {
   /** Track BE: the tool filter the Digger uses (Track S worn tools count as an empty hand), so the planned break times match the dig. */
   toolOk?: () => ((item: { name: string; count: number }) => boolean) | undefined;
   // Track BE end
+  /**
+   * Track W2 (nav/digout.ts): a body in a pool with no swim exit (or a far longer one) digs a step into the lip
+   * and cuts a staircase up a taller bank, under the break rules, on every goto (PathOptions.digOut; needs the
+   * dig action). Default true.
+   */
+  digOut?: boolean;
 }
 
 export type ReplanReason = 'start' | 'correction' | 'block' | 'partial' | 'stuck' | 'timeout' | 'action' | 'retry' | 'ahead' | 'upgrade' | 'off_path' | 'overrun' | 'corridor'; // Track BE: off_path, overrun; Track CB: corridor
@@ -248,6 +255,8 @@ interface ActionRun {
   digs: number;
   /** Track BG2: a failed close was clicked again once. */
   retried?: boolean;
+  /** Track W2: a dig from water waits for the head to come out of the water since this tick. */
+  headSince?: number;
 }
 
 interface DoorToClose {
@@ -329,6 +338,8 @@ interface Active {
 /** GotoOptions.avoidFarmlandDrops: a fall onto farmland costs this many ticks (about a 40-block detour). */
 export const FARMLAND_DROP_COST = 200;
 const DIG_TIMEOUT = 600;
+/** Track W2: ticks a dig from water waits for the head to come out of the water before the step is given up. */
+const DIG_HEAD_WAIT = 40;
 const ACTION_TIMEOUT = 100;
 const DOOR_WAIT = 40;
 /** Track BG: a hatch is closed behind only from a node whose eye (feet + 1.62) is within this of its centre (UseSkill reach: 5 to its closest point). */
@@ -407,6 +418,8 @@ export class Navigator {
   edgeSneak: boolean;
   /** Track BC: Baritone's way with a gravity block over a dug cell (PathOptions.allowGravityAbove; also `path.allowGravityAbove`). Default off: the owner's rule. */
   allowGravityAbove = false;
+  /** Track W2: dig out of water when no swim exit is worth it (NavigatorOptions.digOut), settable. */
+  digOut: boolean;
   /** Track BC: a loaded column's section was re-sent since the last tick: the grid caches are dropped at the top of the next tick. */
   private gridDirty = false;
   /** Track AB: block changes the planner reads (movement signature changed), numbered; worker answers older than a change near their path are dropped. */
@@ -441,6 +454,7 @@ export class Navigator {
     this.overrun = opts.overrun ?? { factor: 1, margin: MOVEMENT_TIMEOUT_TICKS }; // Track BE
     this.cancelDig = opts.cancelDig; // Track BE
     this.toolOk = opts.toolOk; // Track BE
+    this.digOut = opts.digOut ?? true; // Track W2
     // Track BC: a re-sent section of a loaded column may carry changes the grid cached the old way (a chunk re-sent
     // after a teleport, a server-side fill): the caches are dropped once, at the top of the next tick (a section
     // event fires per subchunk of every new column too: those have nothing cached)
@@ -583,6 +597,7 @@ export class Navigator {
       ...(this.fallPolicy ? { falls: this.fallPolicy() } : {}), // Track BI: long falls, read live each plan
       ...(options.avoidFarmlandDrops ? { farmlandDropCost: FARMLAND_DROP_COST } : {}),
       air: this.airNow(), // Track W1: read live each plan (a start under water plans its way up within it)
+      digOut: this.digOut && this.actions.dig !== undefined, // Track W2
     };
   }
 
@@ -882,6 +897,7 @@ export class Navigator {
    * says what each cardinal move out of it found (`explainStart`: the refused rise, the missing head room).
    */
   private noPathWhy(res: PathResult): string {
+    if (res.digOut) return trappedWhy(res.digOut, res.expanded); // Track W2: in water, no swim exit, no step to dig
     const why = `no path (exhaustive search, ${res.expanded} nodes expanded)`;
     const s = res.path[0];
     return res.expanded <= 1 && s ? `${why}: no move from the ${explainStart(this.grid, s)}` : why;
@@ -1280,6 +1296,10 @@ export class Navigator {
     const target = this.corridorTarget(a, start);
     const navGoal = target ? waypointGoal(target.p) : a.planGoal;
     const wp = target?.index;
+    // Track W2: a search from a node of a dig-out staircase on the path so far goes on up the stair
+    const cut = a.pathOpts.digOut ? a.path.find((n) => n.cut && n.x === start.x && n.y === start.y && n.z === start.z)?.cut : undefined;
+    if (cut) a.pathOpts.startCut = cut;
+    else delete a.pathOpts.startCut;
     if (client) {
       const goal = plainGoal(navGoal);
       const spec = goal && this.workerSpec(a, main);
@@ -1400,6 +1420,8 @@ export class Navigator {
       ...(o.falls ? { falls: { ...o.falls } } : {}), // Track BI
       ...(o.farmlandDropCost ? { farmlandDropCost: o.farmlandDropCost } : {}),
       ...(o.air !== undefined ? { air: o.air } : {}), // Track W1
+      ...(o.digOut ? { digOut: true } : {}), // Track W2
+      ...(o.startCut ? { startCut: o.startCut } : {}),
     };
   }
 
@@ -1572,7 +1594,7 @@ export class Navigator {
       // the closest reachable node is where we stand: nothing to do but wait for the world to change
       const lim = `${res.limited ? ', search limit hit' : ''}${res.unknown ? ', touched unloaded world' : ''}`;
       const what = res.reason === 'no_progress' ? 'no partial end 5+ blocks from the start' : 'no node closer to the goal than the start'; // Track BA
-      if (this.fail(a, `no progress possible (${what}; ${res.expanded} expanded${lim})`)) return false;
+      if (this.fail(a, res.digOut && !res.unknown ? trappedWhy(res.digOut, res.expanded) : `no progress possible (${what}; ${res.expanded} expanded${lim})`)) return false; // Track W2
       // recorded for the retry skip: a worker search, or in-thread with no worker at all (not the 40 ms in-thread
       // stand-in while the worker starts: its retry runs in the worker with 50 x the budget)
       const s0 = res.path[0];
@@ -1798,7 +1820,9 @@ export class Navigator {
     // Track BG2: a running use / close owns sneak (UseSkill releases it for the click: sneaking with an item in the
     // hand uses the item, not the trapdoor)
     const useOwnsSneak = run.pending && (run.kind === 'use' || run.kind === 'close');
-    if (!(run.kind === 'place' && run.pending)) this.loop.setCommand(useOwnsSneak ? { forward: 0, strafe: 0, sprint: false, jump: false } : { forward: 0, strafe: 0, sprint: false, sneak: onLadder, jump: false });
+    // Track W2: a dig from water (a step into a lip) treads water: jump while sinking keeps the head out of it
+    const wet = run.kind === 'dig' && bodyInWater(this.cellOf, s);
+    if (!(run.kind === 'place' && run.pending)) this.loop.setCommand(useOwnsSneak ? { forward: 0, strafe: 0, sprint: false, jump: false } : { forward: 0, strafe: 0, sprint: false, sneak: onLadder, jump: wet && s.vel.y < 0 });
     // Track BE: Baritone PathExecutor's movement timeout: the action ran longer than its node's cost + 100 ticks
     // (not while a call is pending: the Digger times out on its own estimate; not when the last dig just succeeded)
     const node = a.path[run.node];
@@ -1844,6 +1868,15 @@ export class Navigator {
           const p = run.current;
           if (p && this.grid.cls(p.x, p.y + 1, p.z)?.gravity) run.settleUntil = a.t + DIG_SETTLE_TICKS;
           run.current = undefined;
+          // Track W2: a step dug out of the water: plan again after every break (water may have flowed into the cut)
+          if (node?.move === 'swimOut') {
+            this.log.debug(`goto: dug ${p ? fmt(p) : '?'} out of the water; re-planning`);
+            a.action = undefined;
+            this.loop.setCommand({ jump: false, pitch: 0 });
+            a.lastProgressTick = a.t;
+            a.replan = 'block';
+            return;
+          }
         }
         if (a.t < run.settleUntil) return;
         const p = run.queue.find((c) => this.grid.free(c.x, c.y, c.z) !== true);
@@ -1864,9 +1897,19 @@ export class Navigator {
           this.actionFailed(a, s, run, 'cell refilled too often');
           return;
         }
+        // Track W2: never start a dig from water with the head under it (the air runs down and the server breaks 5 x
+        // slower again): tread water until it is out, else give up on the step
+        const under = wet && headUnderWater(this.cellOf, s.pos);
+        if (under) {
+          run.headSince ??= a.t;
+          if (a.t - run.headSince > DIG_HEAD_WAIT) this.actionFailed(a, s, run, 'head under water');
+          return;
+        }
+        run.headSince = undefined;
         run.current = p;
         a.report.actions.dig++;
-        this.call(run, this.actions.dig && (() => this.actions.dig!(p)));
+        const opts = wet ? { conditions: waterDigConditions(s, false) } : undefined; // Track W2: the server's in-water break time
+        this.call(run, this.actions.dig && (() => this.actions.dig!(p, opts)));
         return;
       }
       case 'use':

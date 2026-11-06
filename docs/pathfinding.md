@@ -478,7 +478,7 @@ cell holds dive water or is passable and that is no surface swim node. Moves (`a
 
 **Never over a 1-block lip.** A swimming body does not get out onto a bank 2 above the top water cell
 (measured, below); no move is planned there (`swimOut` stays at most 1 above the water cell). A pool whose only
-rim is a lip has no way out without digging or placing a step (not done).
+rim is a lip is left by digging a step into it (Track W2: "Digging out of water (Track W2)" below).
 
 **The air budget.** The planned ticks with the head under water since the last breathing node (`wet`, the
 moves' own ticks, not the preference prices) stay within `airBudget`: from a breathing start (300 - `AIR_KEEP`
@@ -572,9 +572,88 @@ climb through a narrow shaft (search limit) and a 14-block drop (the long-fall p
 harness).
 
 Limits: no flow push model (a waterfall climbs with 1 small correction; no swimming against a current on the
-surface); no sprint-swimming (the swim pose and its 1-high gaps); bubble columns are refused; no way out over a
-1-block lip (needs a dig or a placed step); a start in water at an explicit `plan(goal, from)` is not located
-(`locateNode` without the preference; plan from the body's own position).
+surface); no sprint-swimming (the swim pose and its 1-high gaps); bubble columns are refused; a start in water at
+an explicit `plan(goal, from)` is not located (`locateNode` without the preference; plan from the body's own
+position). Out over a 1-block lip or a taller bank: by digging (below).
+
+### Digging out of water (Track W2)
+
+Decision record: [decisions/0070-water-travel.md](decisions/0070-water-travel.md) "W2: digging out". A swimming
+body cannot climb a bank 2 above the top water cell on BDS (W1, measured), so a pool or a flooded hole whose only
+rim is a lip, or a taller bank, had no way out. The owner's decision: break out, not place. One module says how
+(`nav/digout.ts`); the planner plans it in the same search as every other move, so a swim exit wins whenever it is
+not far longer.
+
+**The step (`digOut`, `swimOut` with breaks).** From a surface swim node (cell level `cy`, the top water cell)
+towards a side with no bank to climb out onto: the block at the water's level beside it (`cy`) must be a full
+floor; the lip (`cy + 1`) and, where it is not free, the block over it (`cy + 2`, the head room) are broken, the
+higher first, and the body climbs out onto the block at the water's level (feet `cy + 1`: the W1 `swimOut`). The
+move is planned from a surface node only (the head out of the water: the air does not run down while the bot
+digs; under water the server breaks 5 x slower again). Its price: `swimOut` + per broken block the break time
+with the best tool x `WATER_DIG_FACTOR` 5 + the dig penalty (`PathCosts.dig`: the `digPenalty` setting, 60 by
+default) + `DIG_OUT_PENALTY` 200 once.
+A grass lip by hand: 14 + 90 + 60 + 200 = 364 ticks, about 40 blocks of swimming: a swim exit up to that much longer
+wins (the unit tests: the W1 `lip` station's step 4 blocks off is taken, a 40-long canal's far step is not).
+
+**The stair.** The step's node and any node a plain `swimOut` reaches start a staircase (`F_CUT`): from them,
+and only from them, a jump with breaks (Baritone MovementAscend, `baritone/moves.ts` `ascend`: the head room over
+the start, the target's two body cells) is planned without `allowBreak`, each new node on the stair too (and a
+plain jump up from one: a stair cut before), up to `DIG_OUT_MAX_STEPS` 8 steps. A stair from a plain `swimOut` pays `DIG_OUT_PENALTY` at its first dug step. No other
+move digs: a walk that may not dig (`allowBreak` off, the default) breaks nothing but its way out of the water
+(`PathNode.cut` carries the step count, so a re-plan from a node of the stair goes on up it: `startCut`; a new
+goto from the stair gets out of the water again first). With `allowBreak` on the ordinary dig moves do the same.
+
+**The rules.** Every broken cell passes the break rules (`breakBlocker`: protected and built blocks, containers,
+beds, doors, inside `protectedArea` (the base around home), a liquid in or next to it, a gravity block above it,
+an unsupported gravity block beside it, the blacklist) and one more: a cell the best tool would take longer than
+`DIG_OUT_MAX_TICKS` 200 ticks to break from the water is refused as "no tool" (stone by hand: 750; no punching
+stone; dirt, grass or sand by hand: 75 to 90, allowed; stone with a wooden pickaxe: 115). Water cannot flow into
+the cut (its cells are above the water's level and none is next to a liquid); the navigator plans again after
+every block it breaks from the water all the same.
+
+**Trapped.** A search from water that finds no way (none, or a partial that goes nowhere) carries the refused
+steps (`PathResult.digOut`: by reason, the first block of each); the goto fails `unreachable` with the reason
+`trapped in water: no swim exit and no step to dig (stone: no tool breaks it in time x 20; 50 nodes expanded)`
+(nav/digout.ts `trappedWhy`; `lastGoto.why`).
+
+**Navigator (`nav/navigator.ts`).** `Navigator.digOut` (`NavigatorOptions.digOut`, default on; needs the dig
+action) sets `PathOptions.digOut` on every plan (also in the worker). A dig action from water treads water (jump
+while sinking: the eye stays out of it), never starts a dig while the head is under (waits up to `DIG_HEAD_WAIT`
+40 ticks for it to come up, then gives the step up), passes the server's break-time modifiers to the Digger
+(`NavActions.dig(p, { conditions })`, `waterDigConditions`: off the ground; else the Digger's timeout at 1.5 x the
+dry ticks ends a dig the server is still running), and plans again after each break.
+
+**Measured (bds-fly, BDS 1.26.60, 2026-11-06).** The probe (the body treading water at the surface beside the
+lip pit's rim, onGround false for every tick, the eye above the water):
+
+| Block, tool | On the ground (the table) | From the water (server) | Table x the off-ground modifier |
+|---|---|---|---|
+| grass by hand | 18 | 90 | 90 |
+| stone, wooden pickaxe | 23 | 113 | 113 (speed / 5: ceil(112.5)) |
+| stone, iron pickaxe | 8 | 38 | 38 |
+| dirt by hand, on the pool floor with the head under water | 15 | 75 | 75 (the in-water modifier, on the ground) |
+
+The e2e (`nav-water.test.ts`, the dig-out pools of `truth:water`, final run):
+
+| Station | Done | Ticks | Blocks broken | In water | Air low | Health | Why |
+|---|---|---|---|---|---|---|---|
+| `lipDirt` (grass lip, by hand) | yes | 147 | 1 | 104 | 300 | 20 | |
+| `lipStone` (stone lip, by hand) | no, trapped at once | 1 | 0 | | 300 | 20 | stone: no tool breaks it in time x 20 |
+| `lipStone` (wooden pickaxe) | yes | 168 | 1 | 125 | 300 | 20 | |
+| `bank3` (a 3-high bank, by hand) | yes | 318 | 6 (the stair) | 163 | 300 | 20 | |
+| `lipBuilt` (stone-brick rim, iron pickaxe) | no, trapped at once | 1 | 0 | | 300 | 20 | stone_bricks: protected or built x 20 |
+
+0 corrections, 0 stuck, no stray water after any run (the bot's world against the layout); two runs within 2
+ticks of each other. The W1 runs in the same suite as before (pool2 and pool6 122, column 101, waterfall 136, lip
+102, tunnel 118, pool6 from its floor 101, the follow on the far bank after 13.0 s). The stations (the W1
+lip pit, 5 x 5, water 2 deep, without its step): `lipDirt` (the ground's grass as the rim), `lipStone` (the pit in a
+stone block 7 x 7 x 3), `bank3` (the pit through a dirt mound 2 high: the bank 3 blocks above the water's top
+cell, the goal on top), `lipBuilt` (a stone-brick rim).
+
+Limits: no dig from under water (a flooded passage with no surface: every cell beside it is next to water, which
+the rules refuse anyway); no step dug at the water's own level (that cell is next to the water); a 2-high sand or
+gravel bank is refused (the gravity rule: the lower block has sand above it); placing a step is not planned (the
+owner's decision).
 
 ## Following a path
 
@@ -1055,7 +1134,8 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/e2e/nav-swim.test.ts` | Track AJ: a 6-wide river (0 corrections, health 20), an 18-block lane (swim ticks per block), a 1-deep ditch |
 | `test/unit/skills/nav-water.test.ts` | Track W1: the water rules (air budget, air clock, in water / head under water, dive nodes, a point under the surface), the sneak physics; the planner over every `truth:water` station (pool2 on the surface only, pool6 from its floor, the column, the waterfall, the lip refused and the step taken, the tunnel's sump and a 20-long one refused, a low-air start, `near` goals in and under water, never under a roof); closed loops over every station (air kept, 0 stuck) |
 | `test/unit/skills/nav-worker.test.ts`, `coarse.test.ts`, `follow.test.ts` (Track W1 cases) | the worker plans under water as the thread does (dive nodes, the air budget); walk corridors through a flooded cave 3 and 2 high, not 1; treading water in follow (settled, close, the bob's hysteresis, out of water, the target swimming off) |
-| `test/e2e/nav-water.test.ts` (bds-fly, `WATER_BDS_PORT` / `WATER_BDS_CONTAINER`) | Track W1: every station from its start, pool6 from its floor and to a point on its floor, a follow behind a second client moved through a pool; completion, ticks, air low-point, damage, corrections, the bot's water against the layout |
+| `test/e2e/nav-water.test.ts` (bds-fly, `WATER_BDS_PORT` / `WATER_BDS_CONTAINER`) | Track W1: every station from its start, pool6 from its floor and to a point on its floor, a follow behind a second client moved through a pool; completion, ticks, air low-point, damage, corrections, the bot's water against the layout; Track W2: the dig-out pools with the inventory set per run (`lipDirt` by hand, `lipStone` by hand: trapped, with a wooden pickaxe: dug, `bank3` by hand, `lipBuilt` with an iron pickaxe: trapped), blocks broken |
+| `test/unit/skills/nav-digout.test.ts` | Track W2: the step into a lip (from the surface only, its price), a stone lip by hand refused (no tool) and dug with a wooden pickaxe, a built rim, the protected area, the gravity rule (a sand lip dug, a 2-high sand bank refused), a near swim exit beats the dig and a far one does not, the stair up `bank3` without `allowBreak` (nothing dug off it, nothing dug from dry ground), the trapped report; closed loops (the dig's break conditions, the re-plan after the break, the stair, the trapped reason); guards (the guide and the decision name the constants with their values, the no-tool threshold between a wooden pickaxe and the hand on stone) |
 | `test/e2e/nav-ladder.test.ts` | Track AJ: a 10-block ladder in a 1 x 1 shaft up and out, back down and out; a vine wall (climb ticks per block) |
 | `test/e2e/nav-parkour.test.ts` | Track AJ: 1-block, 2-block and 2-block-1-lower gaps over a 4-deep pit with water, 20 crossings each (`PARKOUR_RUNS`); a 1-wide bridge with a turn, edge sneaking off / on (`BRIDGE_RUNS`) |
 | `test/unit/skills/fall.test.ts` | Track BI: the measured fall damage model (heights, soft landings, enchantments), the waterloggable table and the clutch target, the live policy, long drops in the planner (a 12-block plateau: none without a policy, the drop with its cost, refused over the budget / with maxDrop 1 / health unknown, Feather Falling, the staircase preferred, hay without a budget, the clutch drop, refused onto a top slab / in the no-water area / over clutchMax), the note on a refused fall, closed loops (the drop walked, the note at health 12, the clutch with a fake server), the scan's planner cost on 300 random paths; review fixes: no plannable drop beyond the budget with a bucket (B1), the clutch pricing and its tie, a ladder column, `acceptsDrop`, the drop re-checked before the step off (health 20 -> 12 on the way: no drop, the note), `shouldClutch` (margin, kill, creative, base, fight), no clutch through ladders / cobwebs / with Slow Falling (B3), the guard bounded when the bucket never empties (H1), finish on an exception and on dispose |
@@ -1123,7 +1203,8 @@ the cross-country layout; default 7), `MOVE_AREA=x,z` (pin a v2 suite's area to 
   over).
 - Swimming, ladders, vines, parkour and edge sneaking: see "Movement variety" (limits there); no
   scaffolding. Under water and up water: see "Water (Track W1)" (limits there: no flow push model, no
-  sprint-swimming, no way out over a 1-block lip, bubble columns refused).
+  sprint-swimming, bubble columns refused); out over a lip or a taller bank by digging only ("Digging out of
+  water (Track W2)": no dig from under water, no placed step).
 - Trapdoors (Track BG): a hatch in the roof layer whose ladder ends under it is down only: on BDS an open
   trapdoor is not climbable, so nobody climbs past it from the ladder top (measured; Track BG2: holding jump and
   forward from the top rung the feet peak at 0.55 below the exit floor, every facing and half). The owner's farm

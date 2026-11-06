@@ -5,6 +5,9 @@
 // supply wired into its plans (as the session does), and follows a second client moved through a pool by
 // truth:tp. Per station: completion, time, the air low-point (set_entity_data `air`, 0..300), damage (the
 // lowest health the server reported) and corrections. W1_OUT=<file> writes the summary there as well.
+// Track W2 (docs/pathfinding.md "Digging out of water (Track W2)"): the dig-out pools (DIG_OUT_STATIONS) with the
+// inventory set per run: out over a dirt lip by hand, a stone lip refused by hand (trapped) and dug with a wooden
+// pickaxe, a stair cut up a 3-high bank, a stone-brick rim refused (trapped); per run the blocks broken as well.
 import { writeFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Connection } from '../../src/connection/connection.ts';
@@ -12,7 +15,7 @@ import { silentLogger } from '../../src/log.ts';
 import { FollowController } from '../../src/skills/follow/follow.ts';
 import type { NavGoal } from '../../src/skills/nav/goals.ts';
 import type { Vec3 } from '../../src/world/types.ts';
-import { WATER_STATIONS, waterStation, type WaterStationName } from '../../../packs/truth/src/water-layout.ts';
+import { DIG_OUT_STATIONS, W1_STATIONS, WATER_STATIONS, waterStation, type WaterStationName } from '../../../packs/truth/src/water-layout.ts';
 import { E2E_VERSION, bdsTarget } from './env.ts';
 import { E2E, connectBot, describeCorrections, disconnectBot, fmt, sleep, teleport, type MoveBot } from './move-truth.ts';
 import { privateOrigin } from './nav-worlds.ts';
@@ -41,7 +44,12 @@ describe.skipIf(!E2E)('@bds nav: water (Track W1, bds-fly)', () => {
   /** The server's air supply for the bot (set_entity_data `air`). */
   let air: number | undefined;
   const at = (i: number): Vec3 => ({ x: o.x + i * SPACING, y: o.y, z: o.z });
-  const FOLLOW_AT = WATER_STATIONS.length; // the follow pool after the six stations
+  const FOLLOW_AT = W1_STATIONS.length; // the follow pool after the six W1 stations
+  /** Track W2: the station index of every station (the dig-out pools after the follow pool). */
+  const indexOf = (name: WaterStationName): number => {
+    const i = (W1_STATIONS as readonly string[]).indexOf(name);
+    return i >= 0 ? i : FOLLOW_AT + 1 + (DIG_OUT_STATIONS as readonly string[]).indexOf(name);
+  };
 
   const water = async (sub: 'build' | 'clear', name: WaterStationName, p: Vec3): Promise<Built> => {
     const r = await bot.truth.cmd<Built>('water', [sub, name, p.x, p.y, p.z], 180_000);
@@ -57,9 +65,8 @@ describe.skipIf(!E2E)('@bds nav: water (Track W1, bds-fly)', () => {
     });
     bot.skills.nav.air = () => air; // as the session wires it (chat/commands-portal.ts)
     await teleport(bot, { x: o.x + 0.5, y: o.y, z: o.z - 1.5 });
-    for (let i = 0; i < WATER_STATIONS.length; i++) {
-      const name = WATER_STATIONS[i]!;
-      const b = await water('build', name, at(i));
+    for (const name of WATER_STATIONS) {
+      const b = await water('build', name, at(indexOf(name)));
       built.set(name, b);
       summary.push(`built ${name} at ${fmt(b.origin)} in ${b.ticks} ticks`);
     }
@@ -73,7 +80,7 @@ describe.skipIf(!E2E)('@bds nav: water (Track W1, bds-fly)', () => {
     try {
       if (bot) {
         await teleport(bot, { x: o.x + 0.5, y: o.y, z: o.z - 1.5 });
-        for (let i = 0; i < WATER_STATIONS.length; i++) await water('clear', WATER_STATIONS[i]!, at(i));
+        for (const name of WATER_STATIONS) await water('clear', name, at(indexOf(name)));
         await water('clear', 'pool2', at(FOLLOW_AT));
       }
     } finally {
@@ -150,7 +157,8 @@ describe.skipIf(!E2E)('@bds nav: water (Track W1, bds-fly)', () => {
     const count = (k: string): number => moves.filter((x) => x === k).length;
     const line =
       `${label}: ${res.ok ? 'ok' : JSON.stringify(res)} in ${rep.ticks} ticks (${(ms / 1000).toFixed(1)} s), ${rep.distance.toFixed(1)} blocks, plan ${plan?.status ?? 'none'} ` +
-      `(swim ${count('swim')}, dive ${count('dive')}, swimOut ${count('swimOut')}), in water ${m.wet} ticks, air low ${m.minAir}, min health ${m.minHealth}, truth health ${health}, ` +
+      `(swim ${count('swim')}, dive ${count('dive')}, swimOut ${count('swimOut')}, dug ${plan ? plan.path.reduce((k, n) => k + (n.act?.dig?.length ?? 0), 0) : 0}), broken ${rep.actions.dig}, ` +
+      `in water ${m.wet} ticks, air low ${m.minAir}, min health ${m.minHealth}, truth health ${health}, ${rep.why ? `why "${rep.why}", ` : ''}` +
       `${got.length} correction(s), stuck ${rep.stuck}, end ${fmt(truth.location)}${describeCorrections(got)}`;
     summary.push(line);
     return { res, rep, got, m, moves, line, truth, health };
@@ -158,7 +166,7 @@ describe.skipIf(!E2E)('@bds nav: water (Track W1, bds-fly)', () => {
 
   const near = (p: Vec3, goal: Vec3): boolean => Math.hypot(p.x - (goal.x + 0.5), p.z - (goal.z + 0.5)) < 1.2 && Math.abs(p.y - goal.y) < 0.6;
 
-  for (const name of WATER_STATIONS) {
+  for (const name of W1_STATIONS) {
     it(`${name}: from the start to the goal, no damage, air kept`, async () => {
       const b = built.get(name)!;
       const r = await station(name, b.start, b.goal);
@@ -173,6 +181,90 @@ describe.skipIf(!E2E)('@bds nav: water (Track W1, bds-fly)', () => {
       if (name === 'column' || name === 'waterfall' || name === 'tunnel') expect(r.moves).toContain('dive');
     }, 180_000);
   }
+
+  // ---- Track W2: digging out of water ---------------------------------------------------------------------
+
+  /** The inventory for a dig-out run: emptied, then `item` in hotbar slot 0 (once the inventory model shows it). */
+  async function kit(item: string | null): Promise<void> {
+    await bot.truth.ok('clear', [bot.name]);
+    if (item) await bot.truth.ok('setslot', [bot.name, 0, item, 1]);
+    for (let i = 0; i < 100; i++) {
+      const slots = bot.world.inventory.slots;
+      if (item ? slots[0]?.name === item : slots.slice(0, 36).every((x) => !x)) break;
+      await sleep(50);
+    }
+    await bot.loop.waitTicks(5);
+  }
+
+  /** The rim cells (the ring beside the pit, one above the water's top cell) that are no longer the station's block. */
+  function rimBroken(b: Built, block: string): string[] {
+    const out = new Set<string>();
+    const { x, y, z } = b.origin;
+    for (let i = -3; i <= 3; i++)
+      for (const [cx, cz] of [[x + i, z + 1], [x + i, z + 7], [x - 3, z + 4 + i], [x + 3, z + 4 + i]] as const) {
+        const n = bot.world.blockAt({ x: cx, y: y - 1, z: cz })?.name;
+        if (n !== block) out.add(`${cx - x},${cz - z} ${n}`);
+      }
+    return [...out];
+  }
+
+  async function digOut(name: WaterStationName, item: string | null) {
+    const b = built.get(name)!;
+    const label = `${name} (${item ?? 'hand'})`;
+    await kit(item);
+    const r = await station(label, b.start, b.goal);
+    const wc = waterCheck(name, b.origin);
+    summary.push(`  ${label} water vs the layout: ${wc.stray.length} stray ${wc.stray.slice(0, 6).join(' ')}, ${wc.missing.length} missing ${wc.missing.slice(0, 6).join(' ')}`);
+    expect(wc.stray, `${name}: water flowed where the layout has none`).toEqual([]);
+    return { ...r, b };
+  }
+
+  it('lipDirt: no swim exit; digs a step into the grass lip by hand while treading water, climbs out, walks to the goal', async () => {
+    const r = await digOut('lipDirt', null);
+    expect(r.res, r.line).toEqual({ ok: true });
+    expect(near(r.truth.location, r.b.goal), r.line).toBe(true);
+    expect(r.rep.actions.dig, r.line).toBe(1);
+    expect(r.rep.actions.failed, r.line).toBe(0);
+    expect(rimBroken(r.b, 'grass_block').length, r.line).toBe(1);
+    expect(r.m.minHealth, r.line).toBe(20);
+    expect(r.m.minAir, r.line).toBeGreaterThan(250);
+  }, 180_000);
+
+  it('lipStone: by hand the stone lip is refused (trapped, nothing broken); with a wooden pickaxe it is dug', async () => {
+    const hand = await digOut('lipStone', null);
+    expect(hand.res, hand.line).toEqual({ ok: false, reason: 'unreachable' });
+    expect(hand.rep.why ?? '', hand.line).toMatch(/^trapped in water: no swim exit and no step to dig \(stone: no tool breaks it in time/);
+    expect(hand.rep.actions.dig, hand.line).toBe(0);
+    expect(rimBroken(hand.b, 'stone'), hand.line).toEqual([]);
+    expect(hand.m.minHealth, hand.line).toBe(20);
+    const wood = await digOut('lipStone', 'wooden_pickaxe');
+    expect(wood.res, wood.line).toEqual({ ok: true });
+    expect(near(wood.truth.location, wood.b.goal), wood.line).toBe(true);
+    expect(wood.rep.actions.dig, wood.line).toBe(1);
+    expect(rimBroken(wood.b, 'stone').length, wood.line).toBe(1);
+    expect(wood.m.minHealth, wood.line).toBe(20);
+    expect(wood.m.minAir, wood.line).toBeGreaterThan(250);
+  }, 300_000);
+
+  it('bank3: cuts a 1-wide stair up the 3-high bank by hand and ends on top', async () => {
+    const r = await digOut('bank3', null);
+    expect(r.res, r.line).toEqual({ ok: true });
+    expect(near(r.truth.location, r.b.goal), r.line).toBe(true);
+    expect(r.rep.actions.dig, r.line).toBeGreaterThanOrEqual(4);
+    expect(r.rep.actions.failed, r.line).toBe(0);
+    expect(r.m.minHealth, r.line).toBe(20);
+    expect(r.m.minAir, r.line).toBeGreaterThan(250);
+  }, 300_000);
+
+  it('lipBuilt: a stone-brick rim is never broken, even with a pickaxe: trapped, reported, no damage', async () => {
+    const r = await digOut('lipBuilt', 'iron_pickaxe');
+    expect(r.res, r.line).toEqual({ ok: false, reason: 'unreachable' });
+    expect(r.rep.why ?? '', r.line).toMatch(/^trapped in water: no swim exit and no step to dig \(stone_bricks: protected or built/);
+    expect(r.rep.actions.dig, r.line).toBe(0);
+    expect(rimBroken(r.b, 'stone_bricks'), r.line).toEqual([]);
+    expect(r.m.minHealth, r.line).toBe(20);
+    expect(r.m.minAir, r.line).toBeGreaterThan(250);
+  }, 180_000);
 
   it('pool6 from its floor (6 under the surface): up and out, never sinking', async () => {
     const b = built.get('pool6')!;

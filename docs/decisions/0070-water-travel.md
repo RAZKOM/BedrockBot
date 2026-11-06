@@ -68,6 +68,54 @@ ground.
   high, a 21-high climb, a 14-block drop).
 - **Not modelled, so not planned or only approximately**: the flow push (swimming against a current on the
   surface, the waterfall's extra lift), sprint-swimming and the swim pose (1-high gaps), bubble columns.
-- **Open**: a way out over a 1-block lip (dig or place a step); an explicit `plan(goal, from)` with `from` in
+- **Open**: a way out over a 1-block lip (dig or place a step: done by digging, W2 below); an explicit `plan(goal, from)` with `from` in
   water finds no start node (`locateNode` without the body's state); the coarse layer cannot tell surface from
   submerged water, so a corridor may lead into a sump the fine planner refuses for air.
+
+## W2: digging out
+
+Date: 2026-11-06. Status: accepted (Track W2). Guide: [../pathfinding.md](../pathfinding.md) "Digging out of
+water (Track W2)". Module: `nav/digout.ts`.
+
+**Context.** W1 left a pool whose only rim is a lip (a bank 2 above the top water cell), or a taller bank, with no
+way out: a swimming body does not climb it on BDS. The owner's decision: break out, not place.
+
+**Decisions.**
+
+1. **The step is a planner move, in the same search** (`PathOptions.digOut`, on for every goto when the dig action
+   is wired: `Navigator.digOut`, default true). From a surface swim node: the lip beside it and the head room over it
+   are broken, the body climbs out onto the block at the water's level (the W1 `swimOut`). Priced as the server
+   breaks from the water (`WATER_DIG_FACTOR` 5: measured, the off-ground modifier) + the dig penalty per block +
+   `DIG_OUT_PENALTY` 200, so a swim exit wins unless it is far longer (about 40 blocks of swimming for a grass lip by
+   hand). Rejected: a fallback goto with `allowBreak` after a failed plan (it would dig anywhere on the route, and
+   could not weigh a far swim exit against a near dig); digging only when `allowBreak` is on (off by default: the
+   bot would stay in the pool).
+2. **A taller bank is cut as a staircase, and nothing else is dug.** The step's node (and a node a plain `swimOut`
+   reaches) starts a stair: from its nodes only, jumps with breaks (`ascend`) are planned without `allowBreak`, up
+   to `DIG_OUT_MAX_STEPS` 8. The stair's step count rides on the path (`PathNode.cut`) so a re-plan on the stair goes
+   on up it.
+3. **The break rules hold, plus a tool limit.** Every cell passes `breakBlocker` (protected and built blocks,
+   containers, beds, the protected area, a liquid beside it, a gravity block above it, the blacklist); a cell the
+   best tool takes longer than `DIG_OUT_MAX_TICKS` 200 to break from the water is refused ("no tool": stone by hand
+   is 750; dirt, grass and sand by hand 75 to 90 are allowed; stone with a wooden pickaxe 115).
+4. **From the surface only, with the air kept.** The step is planned from a surface node (the eye out of the water;
+   from under water the server breaks 5 x slower again and the air runs). The navigator treads water while it
+   digs, starts no dig while the head is under (waits 40 ticks, then gives the step up) and plans again after every
+   break (water that flowed into the cut, a changed rim).
+5. **The Digger is told the conditions.** `NavActions.dig(p, { conditions })`: a dig from water passes the
+   off-ground (and in-water) modifiers so the Digger's expected ticks match the server (without them its timeout,
+   1.5 x the dry ticks, ends a dig the server is still running: grass 27 against 90).
+6. **Trapped is reported.** A search from water that finds no way carries the refused steps by reason
+   (`PathResult.digOut`); the goto's reason says it: `trapped in water: no swim exit and no step to dig (stone: no
+   tool breaks it in time x 20; ...)`.
+
+**Consequences.**
+
+- bds-fly e2e: a grass lip by hand out in 147 ticks (1 block), a stone lip with a wooden pickaxe 168 (1), a 3-high
+  bank by hand 318 (6 blocks, the stair); a stone lip by hand and a stone-brick rim with an iron pickaxe refused at
+  once with the reason; air never under 300, health 20, 0 corrections, no water in any cut.
+- The probe matched the break-time table x 5 exactly for a body treading water (grass 90, stone 113 / 38 with a
+  wooden / iron pickaxe) and the in-water modifier with the head under (dirt 75).
+- **Not done**: a dig from under water (every candidate cell is next to water, which the rules refuse); a step at
+  the water's own level; a 2-high sand or gravel bank (the gravity rule); placing a step; a setting for `digOut`
+  (a navigator field only).

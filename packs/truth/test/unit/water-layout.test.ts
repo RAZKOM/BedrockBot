@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { WATER_STATIONS, waterStation, type WaterStation } from '../../src/water-layout.js';
+import { DIG_OUT_STATIONS, W1_STATIONS, WATER_STATIONS, waterStation, type WaterStation } from '../../src/water-layout.js';
 
 const O = { x: 9600, y: -60, z: 9600 };
 
@@ -15,7 +15,7 @@ function paint(s: WaterStation): (x: number, y: number, z: number) => string {
 }
 
 const inBounds = (p: { x: number; y: number; z: number }, s: WaterStation): boolean => p.x >= s.bounds.min.x && p.x <= s.bounds.max.x + 1 && p.y >= s.bounds.min.y && p.y <= s.bounds.max.y && p.z >= s.bounds.min.z && p.z <= s.bounds.max.z + 1;
-const solid = (b: string): boolean => b === 'stone' || b === 'dirt' || b === 'grass_block';
+const solid = (b: string): boolean => b === 'stone' || b === 'dirt' || b === 'grass_block' || b === 'stone_bricks';
 
 /** Cells reachable by walking (feet + head air, a floor under the feet, a step of 1) from `from`. */
 function walkable(s: WaterStation, from: { x: number; y: number; z: number }): Set<string> {
@@ -62,7 +62,7 @@ describe('water-layout (Track W1): the water course as pure data', () => {
   });
 
   it('the goal is never reached on foot: every station needs the water', () => {
-    for (const name of WATER_STATIONS) {
+    for (const name of W1_STATIONS) {
       const s = waterStation(name, O)!;
       if (name === 'lip') continue; // starts in the water
       const reach = walkable(s, s.start);
@@ -152,5 +152,28 @@ describe('water-layout (Track W1): the water course as pure data', () => {
     }
     for (const z of [O.z + 7, O.z + 11]) expect([b(O.x, O.y - 1, z), b(O.x, O.y, z), b(O.x, O.y + 2, z)]).toEqual(['water', 'air', 'air']);
     expect(b(O.x, O.y + 3, O.z + 9)).toBe('stone');
+  });
+
+  it('Track W2: the dig-out pools have no way out but over the rim: the start in the water, the rim 2 (bank3: 4) above its top cell all round', () => {
+    expect(WATER_STATIONS).toEqual([...W1_STATIONS, ...DIG_OUT_STATIONS]);
+    const rim: Record<(typeof DIG_OUT_STATIONS)[number], string> = { lipDirt: 'grass_block', lipStone: 'stone', bank3: 'grass_block', lipBuilt: 'stone_bricks' };
+    for (const name of DIG_OUT_STATIONS) {
+      const s = waterStation(name, O)!;
+      const b = paint(s);
+      expect(s.surfaceY, name).toBe(O.y - 2);
+      expect(b(Math.floor(s.start.x), s.start.y, Math.floor(s.start.z)), name).toBe('water');
+      // the pit: water 2 deep, air over it up to the rim's top
+      expect([b(O.x, O.y - 3, O.z + 4), b(O.x, O.y - 2, O.z + 4), b(O.x, O.y - 1, O.z + 4)], name).toEqual(['water', 'water', 'air']);
+      const top = name === 'bank3' ? O.y + 1 : O.y - 1;
+      // every rim cell beside the pit: solid from the water's level to the rim's top, nothing to stand on lower
+      for (let i = -2; i <= 2; i++) {
+        for (const [x, z] of [[O.x + i, O.z + 1], [O.x + i, O.z + 7], [O.x - 3, O.z + 4 + i], [O.x + 3, O.z + 4 + i]] as const) {
+          expect(b(x, O.y - 1, z), `${name} ${x - O.x},${z - O.z}`).toBe(rim[name]);
+          for (let y = O.y - 2; y <= top; y++) expect(solid(b(x, y, z)), `${name} ${x - O.x},${y - O.y},${z - O.z}`).toBe(true);
+          expect(b(x, top + 1, z), `${name} ${x - O.x},${z - O.z}`).toBe('air');
+        }
+      }
+      expect(s.goal.y, name).toBe(top + 1);
+    }
   });
 });

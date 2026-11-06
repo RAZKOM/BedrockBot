@@ -21,6 +21,9 @@
 //   swimOut  - from the surface onto a bank at the water level up to 1 block higher; Track W1: from under
 //              water onto a floor beside at the feet level or 1 higher. Never over a 1-block lip (a bank 2
 //              above the top water cell): BDS does not lift a swimming body that high (measured, the model agrees).
+//              Track W2 (`digOut`, nav/digout.ts): from a surface node onto the block at the water's level after
+//              breaking the lip (and the head room over it), then up a taller bank by jumps with breaks (`ascend`)
+//              from the cut's nodes only, even without `allowBreak`; priced so a swim exit wins unless far longer.
 // Track W1, under water (`moves.dive`, docs/pathfinding.md "Water (Track W1)", nav/water.ts):
 //   dive     - into a dive node (NavGrid.dive: the body's cells water, not a surface node): down from the
 //              surface or a dive node (sneak), up a column or a waterfall (jump), across under water (8
@@ -51,6 +54,7 @@ import { longDrops, type LongDrop } from '../fall/plan.ts'; // Track BI: long fa
 import type { FallPolicy } from '../fall/policy.ts';
 import { CROSS_BLOCKED, CROSS_CLEAR, CROSS_TOGGLE, VARIETY_CLIMBER, VARIETY_LADDER, VARIETY_TRAPDOOR, VARIETY_WATER, cellKey, type NavGrid } from './grid.ts';
 import { airBudget, diveGoalBudget, underSurface } from './water.ts'; // Track W1
+import { DIG_OUT_MAX_STEPS, DIG_OUT_PENALTY, DigOutRefusals, digOutStep, type DigOutReport } from './digout.ts'; // Track W2
 
 export type { PathCosts } from './costs.ts';
 export { DEFAULT_COSTS } from './costs.ts';
@@ -83,6 +87,12 @@ export interface PathNode {
    * or 2 blocks) and whether the run-up is sprinted.
    */
   gap?: { x: number; y: number; z: number; length: number; sprint: boolean };
+  /**
+   * Track W2: the node is on a dig-out staircase (PathSearch `F_CUT`): its step count from the water, + CUT_UNPAID
+   * while no step of it has been dug yet (a plain swimOut: the first dug stair step pays DIG_OUT_PENALTY). A re-plan
+   * from it (PathOptions.startCut) goes on up the stair.
+   */
+  cut?: number;
 }
 
 /** Track AJ: the movement-variety moves a search may use (all default true). */
@@ -168,6 +178,14 @@ export interface PathOptions {
    * Default: a full supply.
    */
   air?: number;
+  /**
+   * Track W2 (nav/digout.ts): a way out of water by digging: a step broken into a lip beside a surface swim node,
+   * a staircase cut up a taller bank from there (jumps with breaks from the cut's nodes only), under the break
+   * rules, even without `allowBreak`. Needs a dig action. Default false (the navigator turns it on: `digOut`).
+   */
+  digOut?: boolean;
+  /** Track W2: the start node is on a dig-out staircase (its PathNode.cut in the path walked so far). */
+  startCut?: number;
 }
 
 /** Falls up to this height onto farmland never trampled it (measured, docs/farming.md). */
@@ -198,6 +216,11 @@ export interface PathResult {
    * path to follow).
    */
   reason?: 'no_progress';
+  /**
+   * Track W2: a search from water that did not reach the goal (none, or a partial that went nowhere): the dig-out
+   * steps it refused, by reason (nav/digout.ts `trappedWhy` says it in words). Only with `digOut` on.
+   */
+  digOut?: DigOutReport;
 }
 
 /** Highest feet rise a jump can take (apex of a standing jump is 1.2522). */
@@ -245,6 +268,10 @@ const F_CLIMB = 4;
 const F_SNEAK = 8;
 /** Track W1: the body under water in a dive node (NavGrid.dive); only dive moves leave it. */
 const F_DIVE = 16;
+/** Track W2: a node of a dig-out staircase (nav/digout.ts): jumps with breaks are planned from it without `allowBreak`. */
+const F_CUT = 32;
+/** Track W2: PathNode.cut bit: no step of this staircase is dug yet (entered by a plain swimOut). */
+export const CUT_UNPAID = 0x80;
 
 /** Binary min-heap of node indices keyed by f. */
 class Heap {
@@ -314,6 +341,8 @@ class Nodes {
   trap = new Float64Array(4096);
   /** Track W1: planned ticks with the head under water since the last breath (0 at a breathing node). */
   wet = new Float64Array(4096);
+  /** Track W2: the steps of a dig-out staircase up to the node (0 off the cut). */
+  cut = new Uint8Array(4096);
   parent = new Int32Array(4096);
   move = new Uint8Array(4096);
   flags = new Uint8Array(4096);
@@ -333,6 +362,7 @@ class Nodes {
       this.mc = grown(this.mc, (k) => new Float64Array(k));
       this.trap = grown(this.trap, (k) => new Float64Array(k));
       this.wet = grown(this.wet, (k) => new Float64Array(k));
+      this.cut = grown(this.cut, (k) => new Uint8Array(k));
       this.parent = grown(this.parent, (k) => new Int32Array(k));
       this.move = grown(this.move, (k) => new Uint8Array(k));
       this.flags = grown(this.flags, (k) => new Uint8Array(k));
@@ -347,6 +377,7 @@ class Nodes {
     this.mc[i] = 0;
     this.trap[i] = 0;
     this.wet[i] = 0;
+    this.cut[i] = 0;
     this.parent[i] = -1;
     this.flags[i] = 0;
     this.closed[i] = 0;
@@ -414,6 +445,10 @@ export class PathSearch {
    */
   private readonly diveGoal: boolean;
   private diveGoalLimit: number;
+  /** Track W2: the dig-out steps refused so far (the trapped report); undefined without `digOut`. */
+  private readonly digOutRefused: DigOutRefusals | undefined;
+  /** Track W2: the start is in water (a swim or dive node): a failed search reports the refused dig-out steps. */
+  private startWet = false;
 
   constructor(grid: NavGrid, start: { x: number; y: number; z: number }, goal: NavGoal, opts: PathOptions = {}) {
     this.grid = grid;
@@ -430,8 +465,10 @@ export class PathSearch {
     this.waterGoal = goal.type === 'near' && this.moveOn('swim') && waterNear(grid, goal.p);
     this.diveGoal = this.waterGoal && this.diveOn() && goal.type === 'near' && underSurface((x, y, z) => grid.cls(x, y, z), goal.p);
     this.diveGoalLimit = diveGoalBudget(opts.air, false);
-    // Track BC: the break rules and costs every move that digs applies (baritone/moves.ts)
-    if (opts.allowBreak) {
+    // Track BC: the break rules and costs every move that digs applies (baritone/moves.ts). Track W2: also for the
+    // dig-out moves alone (`digOut` without `allowBreak`)
+    this.digOutRefused = opts.digOut ? new DigOutRefusals() : undefined;
+    if (opts.allowBreak || opts.digOut) {
       const noBreak = opts.noBreak;
       const rules: BreakRules = { protectedBlocks: opts.protectedBlocks, protectedArea: opts.protectedArea, allowGravityAbove: opts.allowGravityAbove ?? false };
       this.breaks = createBreakMoveContext({
@@ -489,10 +526,15 @@ export class PathSearch {
       this.done = { status: 'none', path: [], cost: 0, expanded: 0, ms: performance.now() - t0, unknown: false, limited: false };
       return;
     }
+    this.startWet = (flags & (F_SWIM | F_DIVE)) !== 0; // Track W2
+    // Track W2: a start on a dig-out staircase (the path walked so far said so) goes on up it
+    const startCut = opts.digOut && flags === 0 ? (opts.startCut ?? 0) : 0;
+    if (startCut) flags |= F_CUT;
     const s = this.nodes.add(start.x, start.y, start.z, startFeet);
     this.startNode = s; // Track BA
     this.nodes.g[s] = 0;
     this.nodes.flags[s] = flags;
+    this.nodes.cut[s] = startCut;
     this.index.set(cellKey(start.x, start.y, start.z), s);
     this.open.push(s, this.h(start.x, start.y, start.z));
     this.bests.reset(s, start.x, start.y, start.z, this.h(start.x, start.y, start.z)); // Track BA
@@ -606,6 +648,7 @@ export class PathSearch {
       if (act) node.act = act;
       const gap = nodes.gap[i]; // Track AJ
       if (gap && node.move === 'parkour') node.gap = gap;
+      if (nodes.cut[i]) node.cut = nodes.cut[i]; // Track W2
       path.push(node);
     }
     path.reverse();
@@ -616,10 +659,12 @@ export class PathSearch {
     const status = this.found >= 0 ? 'found' : interim || this.limited || this.sawUnknown ? 'partial' : 'none';
     const res: PathResult = { status, path, cost: nodes.g[end]!, expanded: this.expanded, ms: this.ms, unknown: this.sawUnknown, limited: interim || this.limited };
     if (status === 'partial' && best < 0) res.reason = 'no_progress'; // Track BA
+    // Track W2: from water and nowhere: which dig-out steps the rules refused
+    if (this.digOutRefused && this.startWet && (status === 'none' || res.reason === 'no_progress')) res.digOut = this.digOutRefused.report();
     return res;
   }
 
-  private relax(from: number, x: number, y: number, z: number, feet: number, base: number, move: number, extra = 0, trap = 0, act?: NodeActions, flags = 0): void {
+  private relax(from: number, x: number, y: number, z: number, feet: number, base: number, move: number, extra = 0, trap = 0, act?: NodeActions, flags = 0, cut = 0): void {
     const nodes = this.nodes;
     const grid = this.grid;
     const k = cellKey(x, y, z);
@@ -649,6 +694,7 @@ export class PathSearch {
     nodes.mc[i] = cost;
     nodes.trap[i] = nodes.trap[from]! + trap;
     nodes.wet[i] = wet; // Track W1
+    nodes.cut[i] = cut; // Track W2
     nodes.parent[i] = from;
     nodes.move[i] = move;
     nodes.flags[i] = flags;
@@ -720,7 +766,12 @@ export class PathSearch {
             const room = grid.freeColumn(cx, headCell + 1, apexHead, cz);
             if (room === true) {
               if (this.stepsUp(f0, nx, ny, nz, f1, dx, dz)) this.relax(cur, nx, ny, nz, f1, costs.walk + costs.stairs, M_WALK);
-              else this.relax(cur, nx, ny, nz, f1, costs.jump, M_JUMP);
+              else if ((flags0 & F_CUT) !== 0 && Math.abs(f1 - ny) < FLAT) {
+                // Track W2: up a dig-out staircase cut before (its next step still to dig): the jump stays on the stair
+                const cut = this.nodes.cut[cur]!;
+                if ((cut & ~CUT_UNPAID) < DIG_OUT_MAX_STEPS) this.relax(cur, nx, ny, nz, f1, costs.jump, M_JUMP, 0, 0, undefined, F_CUT, cut + 1);
+                else this.relax(cur, nx, ny, nz, f1, costs.jump, M_JUMP);
+              } else this.relax(cur, nx, ny, nz, f1, costs.jump, M_JUMP);
             } else if (room === undefined) this.sawUnknown = true;
             else if (ny === cy + 1) digFlags[di] = digFlags[di]! | 4; // Track BC: the jump exists but for the start's head room: an ascend with breaks
           }
@@ -808,8 +859,12 @@ export class PathSearch {
       if (holes[di] && !landing) holes[di] = (grid.variety & VARIETY_WATER) !== 0 && grid.cls(nx, cy - costs.maxDrop - 1, nz)?.liquid === 'water' ? 1 : 0;
     }
 
-    // Track BC: the moves that dig (baritone/moves.ts), from a node standing on a full block
-    if (this.breaks && flat) this.digMoves(cur, cx, cy, cz, inPassage);
+    // Track BC: the moves that dig (baritone/moves.ts), from a node standing on a full block. Track W2: without
+    // `allowBreak`, a dig-out staircase's node goes on up by jumps with breaks only
+    if (this.breaks && flat) {
+      if (opts.allowBreak) this.digMoves(cur, cx, cy, cz, inPassage);
+      else if ((flags0 & F_CUT) !== 0 && !inPassage) this.cutMoves(cur, cx, cy, cz);
+    }
 
     if (inPassage) return;
 
@@ -853,7 +908,7 @@ export class PathSearch {
         this.relax(cur, cx, cy + 1, cz, cy + 1, costs.jump, M_PILLAR, costs.place, 0, { place: { p: { x: cx, y: cy, z: cz }, face: 'down' } });
       } else if (room === undefined) {
         this.sawUnknown = true;
-      } else if (this.breaks) {
+      } else if (this.breaks && opts.allowBreak) {
         // Track BC: Baritone MovementPillar: break the cell above the head first
         const m = pillar(this.breaks, cx, cy, cz);
         this.takeUnknown();
@@ -944,6 +999,45 @@ export class PathSearch {
       this.takeUnknown();
       if (m) this.relax(cur, cx, cy - 1, cz, cy - 1, m.base, M_DOWNWARD, m.extra, 0, { dig: m.dig });
     }
+  }
+
+  /**
+   * Track W2 (nav/digout.ts): from a node of a dig-out staircase (`F_CUT`), on up the bank by a jump with breaks
+   * (Baritone MovementAscend, `digAscend`) where the plain jump did not go: the target one up is blocked, or the
+   * jump lacked only the head room over the start. The new node is on the cut too, up to DIG_OUT_MAX_STEPS steps
+   * from the water. No other move digs without `allowBreak`.
+   */
+  private cutMoves(cur: number, cx: number, cy: number, cz: number): void {
+    const cut = this.nodes.cut[cur]!;
+    const steps = cut & ~CUT_UNPAID;
+    if (steps >= DIG_OUT_MAX_STEPS || !this.moveOn('digAscend')) return;
+    const unpaid = (cut & CUT_UNPAID) !== 0 ? DIG_OUT_PENALTY : 0;
+    const b = this.breaks!;
+    const flags = this.digFlags;
+    for (let di = 0; di < 4; di++) {
+      const [dx, dz] = CARDINAL[di]!;
+      const nx = cx + dx;
+      const nz = cz + dz;
+      const blocked = (flags[di]! & 1) !== 0;
+      if (!((blocked && Number.isNaN(this.grid.stand(nx, cy + 1, nz))) || (flags[di]! & 4) !== 0)) continue;
+      if (!this.ladderPass(cx, cy, cz, nx, nz, dx, dz, true)) continue;
+      const a = ascend(b, cx, cy, cz, nx, nz);
+      this.takeUnknown();
+      if (a) this.relax(cur, nx, cy + 1, nz, cy + 1, a.base, M_JUMP, a.extra + unpaid, 0, { dig: a.dig }, F_CUT, steps + 1);
+    }
+  }
+
+  /**
+   * Track W2 (nav/digout.ts `digOutStep`): from surface swim node (cx, cy, cz) out over the lip into column (nx, nz):
+   * the lip and the head room over it broken, the body climbs out onto the block at the water's level (`swimOut`,
+   * feet cy + 1). The new node starts a dig-out staircase (`F_CUT`). A refusal is counted for the trapped report.
+   */
+  private digOut(cur: number, cx: number, cy: number, cz: number, nx: number, nz: number, dx: number, dz: number): void {
+    const b = this.breaks!;
+    const refused = this.digOutRefused!;
+    const step = digOutStep(this.grid, b.mining, cy, nx, nz, (why, c) => refused.add(why, c));
+    if (!step || !this.ladderPass(cx, cy, cz, nx, nz, dx, dz, true)) return;
+    this.relax(cur, nx, cy + 1, nz, cy + 1, this.costs.swimOut, M_SWIM_OUT, step.extra, 0, { dig: step.dig }, F_CUT, 1);
   }
 
   // ---- Track AJ: movement variety (docs/pathfinding.md "Movement variety") -------------------------
@@ -1261,17 +1355,24 @@ export class PathSearch {
       }
       // out: a bank from the water level up to 1 block higher. Track W1: never over a 1-block lip (a bank 2 above the
       // top water cell): on BDS 1.26.60 forward + jump against it only bobs the body (docs/pathfinding.md "Water")
+      let bank = false; // Track W2: a floor to climb out onto (or not loaded): no step to dig
       for (let ny = cy; ny <= cy + 1; ny++) {
         const f1 = grid.stand(nx, ny, nz);
         if (f1 === undefined) {
           this.sawUnknown = true;
+          bank = true;
           break;
         }
         if (isFeet(f1)) {
-          if (f1 >= cy - FLAT && f1 <= cy + 1 + FLAT) this.relax(cur, nx, ny, nz, f1, costs.swimOut, M_SWIM_OUT);
+          // Track W2: the bank's node may start a dig-out staircase (its first dug step pays the dig-out price)
+          const cutting = this.digOutRefused && Math.abs(f1 - ny) < FLAT ? F_CUT : 0;
+          if (f1 >= cy - FLAT && f1 <= cy + 1 + FLAT) this.relax(cur, nx, ny, nz, f1, costs.swimOut, M_SWIM_OUT, 0, 0, undefined, cutting, cutting ? 1 | CUT_UNPAID : 0);
+          bank = true;
           break;
         }
       }
+      // Track W2: no way out here: dig a step into the lip (nav/digout.ts), from the surface only (breathing)
+      if (!bank && this.digOutRefused) this.digOut(cur, cx, cy, cz, nx, nz, dx, dz);
     }
     for (const [dx, dz] of DIAGONAL) {
       if (swimAt(cx + dx, cz + dz) && swimAt(cx + dx, cz) && swimAt(cx, cz + dz)) this.relax(cur, cx + dx, cy, cz + dz, cy, costs.swim * Math.SQRT2, M_SWIM, 0, 0, undefined, F_SWIM);

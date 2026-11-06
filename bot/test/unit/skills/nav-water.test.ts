@@ -6,7 +6,7 @@
 // the e2e suite tests the model against BDS.
 import { writeFileSync } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
-import { WATER_STATIONS, waterStation, type WaterStation, type WaterStationName } from '../../../../packs/truth/src/water-layout.ts';
+import { W1_STATIONS, waterStation, type WaterStation, type WaterStationName } from '../../../../packs/truth/src/water-layout.ts';
 import { BotSkills, type SkillResult } from '../../../src/skills/index.ts';
 import { IDLE_COMMAND, initialBody, stepBody, type MoveCommand } from '../../../src/skills/input/index.ts';
 import { findPath, type PathNode } from '../../../src/skills/nav/astar.ts';
@@ -162,7 +162,7 @@ describe('physics: the sneak key sinks the body in water (Track W1, measured on 
 
 describe('planner: through water (Track W1)', () => {
   it('every station has a way from its start to its goal', () => {
-    for (const name of WATER_STATIONS) {
+    for (const name of W1_STATIONS) {
       const { gen, st } = stationWorld(name);
       const r = findPath(new NavGrid(gen), cell(st.start), goalOf(st), { maxNodes: 20_000 });
       expect(r.status, name).toBe('found');

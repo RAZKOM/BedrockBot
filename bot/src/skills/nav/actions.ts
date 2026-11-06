@@ -10,6 +10,7 @@
 // gravity block above it (only plannable with `allowGravityAbove`) the navigator waits `DIG_SETTLE_TICKS`
 // for the stack to land and digs the cell again until it is free.
 import type { Vec3 } from '../../world/types.ts';
+import type { BreakConditions } from '../dig/breakTime.ts';
 import type { SkillResult } from '../types.ts';
 import { avoidBreaking, type BreakReason, type BreakRuleOptions } from './baritone/helper.ts'; // Track BB
 import type { NavGrid } from './grid.ts';
@@ -17,8 +18,12 @@ import type { NavGrid } from './grid.ts';
 export type NavBlockFace = 'down' | 'up' | 'north' | 'south' | 'west' | 'east';
 
 export interface NavActions {
-  /** Break the block in cell p; resolves when it is gone. */
-  dig?: (p: Vec3) => Promise<SkillResult>;
+  /**
+   * Break the block in cell p; resolves when it is gone. Track W2: `conditions` are the server's break-time
+   * modifiers for the body as it is (a dig from water: off the ground, nav/digout.ts `waterDigConditions`), for the
+   * Digger's expected ticks (DigOptions.conditions).
+   */
+  dig?: (p: Vec3, opts?: { conditions?: BreakConditions }) => Promise<SkillResult>;
   /** Make a throwaway block occupy cell p (click the neighbour across `face`). */
   place?: (p: Vec3, face: NavBlockFace) => Promise<SkillResult>;
   /** Open (toggle) the door / gate / trapdoor at p. */

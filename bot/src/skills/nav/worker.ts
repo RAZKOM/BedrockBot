@@ -65,6 +65,9 @@ export interface WorkerPlanOptions {
   farmlandDropCost?: number;
   /** Track W1: the air supply at the plan's start (PathOptions.air). */
   air?: number;
+  /** Track W2: dig out of water (PathOptions.digOut) and the start's dig-out stair step (PathOptions.startCut). */
+  digOut?: boolean;
+  startCut?: number;
 }
 
 /** What the client reads from the world model (`World` satisfies it). */
@@ -744,6 +747,8 @@ function workerOptions(o: WorkerPlanOptions): PathOptions {
     ...(o.falls ? { falls: o.falls } : {}), // Track BI
     ...(o.farmlandDropCost ? { farmlandDropCost: o.farmlandDropCost } : {}),
     ...(o.air !== undefined ? { air: o.air } : {}), // Track W1
+    ...(o.digOut ? { digOut: true } : {}), // Track W2
+    ...(o.startCut ? { startCut: o.startCut } : {}),
   };
 }
 

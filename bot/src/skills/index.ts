@@ -208,11 +208,12 @@ export class BotSkills implements Skills {
         logger: this.log,
         // the navigator's dig-through move breaks blocks with the Digger directly (not this.dig(), which would cancel the goto)
         actions: {
-          dig: (p) => {
+          dig: (p, o) => {
             // a scaffold walk (a pickup's hard walk) digs natural terrain only, never the owner's builds (decision 0051)
             const name = this.world.blockAt?.(p)?.name;
             if (this.navHook && name && !isNaturalTerrain(name) && !this.scaffold.has(p)) return Promise.resolve({ ok: false as const, reason: 'not_natural' });
-            return (this.digger?.dig(p) ?? Promise.resolve({ ok: false as const, reason: 'no_digger' })).then((r) => {
+            // Track W2: o.conditions, the server's break-time modifiers of a dig from water
+            return (this.digger?.dig(p, o) ?? Promise.resolve({ ok: false as const, reason: 'no_digger' })).then((r) => {
               if (r.ok) this.navHook?.dug(p); // a scaffold walk counts its digs
               return r;
             });
