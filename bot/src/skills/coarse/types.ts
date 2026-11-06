@@ -94,6 +94,13 @@ export interface Portal {
   /** Lowest standable floor y under the opening (feet y), when one is within 3 below it. Undefined: no floor (a shaft, a drop). */
   floorY?: number;
   known: Knowledge;
+  /**
+   * Track CB addition (optional, docs/coarse.md "Dig portals"): a synthetic portal the layer offers to
+   * the `mine` mode only, where two volumes are separated by solid: the number of solid blocks to dig
+   * through (rough, at least 1). Its id ends in `:dig`; `CoarseLayer.portal` does not find it. Absent on
+   * every real opening. Every other mode's cost must return Infinity for it.
+   */
+  dug?: number;
 }
 
 /** The outcome an executor reports for a portal it tried (`CoarseLayer.markPortal`). */
@@ -125,6 +132,13 @@ export interface CoarseCost {
    * `PlanRequest.modeSwitchCost`.
    */
   switchCost?(from: CoarseMode, at: Volume, near?: Portal): number;
+  /**
+   * Track CB addition (optional): the mode's best ticks per block in the open (the search heuristic's
+   * slope: the smallest over the requested modes scales the straight-line distance). Must not be above
+   * the real best, or the corridor is no longer the cheapest. Absent: 0.5 (a fast flight; a weak but safe
+   * estimate for walking, which then expands more nodes).
+   */
+  ticksPerBlock?: number;
 }
 
 /** One stretch of a corridor travelled in one mode. */
