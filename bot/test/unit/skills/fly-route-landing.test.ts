@@ -6,7 +6,7 @@
 // brain on stepBody that hand over to the RouteTracker and land on the cells, and the route takeoff out of the
 // 3-high stack, a hole and a low room.
 import { describe, expect, it } from 'vitest';
-import { findLanding, ROUTE_HEADROOM, stillLandable, type LandingOptions } from '../../../src/skills/fly/landing.ts';
+import { findLanding, ROUTE_FIRST, ROUTE_HEADROOM, stillLandable, type LandingOptions } from '../../../src/skills/fly/landing.ts';
 import { onTarget } from '../../../src/skills/fly/plan.ts';
 import { flyCourse } from '../../../src/skills/fly/route/bench.ts';
 import { gridOf } from '../../../src/skills/fly/route/grid.ts';
@@ -144,16 +144,23 @@ describe('fly: the route planner for landings (Track F3)', () => {
     if (sp.kind === 'goal') expect(sp.target.route).toBeUndefined();
   }, 60_000);
 
-  it('whole trips: the brain cruises in along the bearing, hands over to the tracker and lands on the inner platform of the 2-high stack, 0 hits; the 3-high stack and the room at ground level are still the brake family’s corridor landings (Track F1)', async () => {
+  it('whole trips: the brain cruises in along the bearing, hands over to the tracker and lands on the inner platform of the 2-high stack, 0 hits; under a roof the route is asked first when it comes in on the body’s side (Track F4a ROUTE_FIRST covered, ROUTE_FIRST_OFF), so the room at ground level is a route landing too and the 3-high stack (its route from the far side) stays the brake family’s corridor landing (Track F1)', async () => {
+    expect(ROUTE_FIRST).toBe('covered');
     const lines: string[] = [];
     for (const c of CASES.filter((x) => /stacked|roof 3/.test(x.name))) {
       const w = world(c.boxes);
       const grid = gridOf(w.solid);
-      const plan = await findLanding(c.goal, c.name, { look: w.look, obstacle: (x, y, z) => w.solid.solidAt(x, y, z) === true, probe: () => Promise.resolve({ status: 'found', blocks: 3 }), route: { grid, rockets: 2 } }, { ...OPTS, from: { x: 0.5, z: 0.5 } });
+      const deps = { look: w.look, obstacle: (x: number, y: number, z: number) => w.solid.solidAt(x, y, z) === true, probe: () => Promise.resolve({ status: 'found' as const, blocks: 3 }) };
+      const plan = await findLanding(c.goal, c.name, { ...deps, route: { grid, rockets: 2 } }, { ...OPTS, from: { x: 0.5, z: 0.5 } });
       expect(plan.kind, plan.line).toBe('goal');
       if (plan.kind !== 'goal') throw new Error(plan.line);
-      const routed = c.name.includes('2 high');
+      // (the 3-high stack's route comes in from 0, the far side from the body: the brake's corridor first there)
+      const routed = !c.name.includes('3 high');
       expect(plan.target.route !== undefined, plan.line).toBe(routed);
+      // the brake first: the 2-high stack still only by the route, the 3-high ones by the brake's corridor
+      const brake = await findLanding(c.goal, c.name, { ...deps, route: { grid, rockets: 2, first: false } }, { ...OPTS, from: { x: 0.5, z: 0.5 } });
+      if (brake.kind !== 'goal') throw new Error(brake.line);
+      expect(brake.target.route !== undefined, brake.line).toBe(c.name.includes('2 high'));
       for (const seed of [5, 11]) {
         const r = trip(w, { x: 0.5, y: FEET, z: 0.5 }, plan.target, { seed, route: { grid, plan: (req) => planRoute(req, grid), maxMs: 600 } });
         const line = `${c.name} seed ${seed}: ${r.end.ok ? 'ok' : r.end.reason} at ${r.body.pos.x.toFixed(2)} ${r.body.pos.y.toFixed(2)} ${r.body.pos.z.toFixed(2)}, ${r.end.off.toFixed(2)} off, touchdown vy ${r.lastAir.vy.toFixed(2)} h ${r.lastAir.h.toFixed(2)}, ${r.ticks} ticks, ${r.rockets} rockets, ${r.goArounds} go-arounds, route ${r.stats.routeTicks} ticks (${r.stats.routePlans} plans, ${r.stats.routeReplans} re-plans, max error ${r.stats.routeMaxError.toFixed(2)}), hits ${r.hits}; ${r.notes.filter((n) => n.includes('route landing')).join(' ; ')}`;

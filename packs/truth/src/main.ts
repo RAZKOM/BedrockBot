@@ -56,6 +56,7 @@ import { shieldHandlers } from './shield.js'; // Track AH: truth:stance, blocklo
 import { netherHandlers } from './nether.js'; // Track AT: truth:dimension, dimtp, dblock, dset, dfill, dfind, portal (wave 10)
 import { flyHandlers } from './fly.js'; // Track AU: truth:glide, glidelog, equip, boxdrop (Elytra flight, wave 11)
 import { craftHandlers } from './craft.js'; // Track AW: truth:kit, craftinv, table (crafting, wave 11)
+import { courseHandlers } from './course.js'; // Track F4a: truth:course (the flight benchmark's obstacle courses)
 
 declare const __PACK_VERSION__: string;
 /** QuickJS console (prints to the BDS content log). */
@@ -561,6 +562,7 @@ Object.assign(handlers, shieldHandlers({ overworld })); // Track AH: stance, blo
 Object.assign(handlers, netherHandlers({ getBlock, assertLoaded })); // Track AT: dimensions, portals
 Object.assign(handlers, flyHandlers()); // Track AU: glide, glidelog, equip, boxdrop
 Object.assign(handlers, craftHandlers({ getBlock, assertLoaded, overworld })); // Track AW: kit, craftinv, table
+Object.assign(handlers, courseHandlers({ reply, replyError, overworld })); // Track F4a: course
 
 function blockVolume(a: Vec3, b: Vec3): BlockVolume {
   return new BlockVolume(a, b);

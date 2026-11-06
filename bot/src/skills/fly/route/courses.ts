@@ -5,11 +5,19 @@
 // pack (`fills`, in order: the hull in stone, the bore in air), the start state and the goals (waypoint boxes
 // along the bore, the exit last). The same course flies offline on stepBody (bench.ts) and on bds-fly3
 // (test/e2e/fly-route.test.ts).
+//
+// Track F4a (docs/flight.md "Obstacle course (Track F4a)", decisions/0067): the bore geometry lives in the truth
+// pack's pure course-layout.ts, shared with the obstacle courses the pack builds (`truth:course`); `layoutCourses`
+// turns such a layout into one Course per leg over the same world.
 import type { Vec3 } from '../../../connection/types.ts';
 import { flatWorld } from '../../input/world.ts';
 import type { BlockQuery } from '../../input/types.ts';
-import { yawDir } from '../plan.ts';
-import type { RegionBox, RouteGoal } from './types.ts';
+import { bore, cellKey, courseLayout, type CourseBlock, type CourseLayout, type CourseLeg, type Segment } from '../../../../../packs/truth/src/course-layout.ts';
+import { ROUTE_WEIGHT, landingGoalFor, type LandingRouteSpec } from './landing.ts';
+import type { RegionBox, RouteGoal, RouteRequest } from './types.ts';
+
+export type { Segment } from '../../../../../packs/truth/src/course-layout.ts';
+export { centreline } from '../../../../../packs/truth/src/course-layout.ts';
 
 export interface CourseStart {
   pos: Vec3;
@@ -23,12 +31,12 @@ export interface CourseStart {
 export interface Fill {
   from: Vec3;
   to: Vec3;
-  block: 'stone' | 'air';
+  block: CourseBlock;
 }
 
 export interface Course {
   name: string;
-  kind: 'tunnel' | 'stair' | 'slot' | 'field';
+  kind: 'tunnel' | 'stair' | 'slot' | 'field' | 'course';
   world: BlockQuery;
   fills: Fill[];
   start: CourseStart;
@@ -39,132 +47,16 @@ export interface Course {
   section?: { w: number; h: number };
   /** The cells of the course for the report. */
   cells: number;
+  /** Track F4a: the edge set and the heuristic's weight the leg is flown with (a leg ending in a landing: `landing`, ROUTE_WEIGHT). */
+  library?: RouteRequest['library'];
+  weight?: number;
+  /** Track F4a: the leg goes on from where the previous one ended (an obstacle course's chain). */
+  chained?: boolean;
+  /** Track F4a: a label per goal (the tables' "reached" column). */
+  labels?: string[];
 }
 
-/** A segment of a tunnel's centreline. */
-export type Segment =
-  | { kind: 'straight'; len: number }
-  /** An arc of `radius` turning `deg` degrees (positive = right-hand, as Bedrock yaw grows). */
-  | { kind: 'arc'; radius: number; deg: number }
-  /** A sharp corner: the heading turns `deg` on the spot (the bore is carved square there). */
-  | { kind: 'corner'; deg: number }
-  /** A straight of `len` rising `dy` blocks in all (negative = a drop). */
-  | { kind: 'slope'; len: number; dy: number };
-
-/** A cell key (x and z within +-32768 of 0, y within -512..511). */
-const key = (x: number, y: number, z: number): number => ((x + 32768) & 0xffff) * 0x4000000 + ((y + 512) & 0x3ff) * 0x10000 + ((z + 32768) & 0xffff);
 const FEET = -60;
-const STEP = 0.25;
-
-interface Sample {
-  x: number;
-  y: number;
-  z: number;
-  yaw: number;
-  /** The index of the segment the sample belongs to. */
-  seg: number;
-}
-
-/** Sample the centreline of `segments` from `origin` heading `yaw0` every STEP blocks. */
-export function centreline(origin: Vec3, yaw0: number, segments: readonly Segment[]): Sample[] {
-  const out: Sample[] = [];
-  let x = origin.x;
-  let y = origin.y;
-  let z = origin.z;
-  let yaw = yaw0;
-  out.push({ x, y, z, yaw, seg: 0 });
-  segments.forEach((sg, si) => {
-    if (sg.kind === 'straight' || sg.kind === 'slope') {
-      const n = Math.round(sg.len / STEP);
-      const dy = sg.kind === 'slope' ? sg.dy / n : 0;
-      const d = yawDir(yaw);
-      for (let i = 0; i < n; i++) {
-        x += d.x * STEP;
-        z += d.z * STEP;
-        y += dy;
-        out.push({ x, y, z, yaw, seg: si });
-      }
-    } else if (sg.kind === 'arc') {
-      const n = Math.round((Math.abs(sg.deg) * (Math.PI / 180) * sg.radius) / STEP);
-      const dyaw = sg.deg / n;
-      for (let i = 0; i < n; i++) {
-        yaw += dyaw / 2;
-        const d = yawDir(yaw);
-        x += d.x * STEP;
-        z += d.z * STEP;
-        yaw += dyaw / 2;
-        out.push({ x, y, z, yaw, seg: si });
-      }
-    } else {
-      yaw += sg.deg;
-      out.push({ x, y, z, yaw, seg: si });
-    }
-  });
-  return out;
-}
-
-/** The lateral offsets a bore `w` wide is carved at: every eighth of a block across the width (the band's every cell at any heading, a stair band on a diagonal). */
-function lateral(w: number): number[] {
-  const out: number[] = [];
-  for (let k = -w / 2 + 0.0625; k < w / 2; k += 0.125) out.push(k);
-  return out;
-}
-
-/** The cells a bore of `w` x `h` carves along the samples. */
-function carve(samples: readonly Sample[], w: number, h: number): Map<number, Vec3> {
-  const cells = new Map<number, Vec3>();
-  for (const s of samples) {
-    const d = yawDir(s.yaw);
-    const n = { x: d.z, z: -d.x }; // the perpendicular
-    const y0 = Math.floor(s.y + 1e-6);
-    for (const k of lateral(w)) {
-      const cx = Math.floor(s.x + n.x * k);
-      const cz = Math.floor(s.z + n.z * k);
-      for (let y = y0; y < y0 + h; y++) cells.set(key(cx, y, cz), { x: cx, y, z: cz });
-    }
-  }
-  return cells;
-}
-
-/** Axis-aligned run-length boxes of a cell set (runs along x), for the fills. */
-function runsOf(cells: Iterable<Vec3>, block: 'stone' | 'air'): Fill[] {
-  const sorted = [...cells].sort((a, b) => a.y - b.y || a.z - b.z || a.x - b.x);
-  const out: Fill[] = [];
-  let run: Fill | undefined;
-  for (const c of sorted) {
-    if (run?.to.y === c.y && run.to.z === c.z && run.to.x === c.x - 1) run.to = { ...c };
-    else {
-      run = { from: { ...c }, to: { ...c }, block };
-      out.push(run);
-    }
-  }
-  return out;
-}
-
-/** The bounding box (inclusive cells) of cells. */
-function bbox(cells: Iterable<Vec3>): { min: Vec3; max: Vec3 } {
-  const min = { x: Infinity, y: Infinity, z: Infinity };
-  const max = { x: -Infinity, y: -Infinity, z: -Infinity };
-  for (const c of cells) {
-    min.x = Math.min(min.x, c.x);
-    min.y = Math.min(min.y, c.y);
-    min.z = Math.min(min.z, c.z);
-    max.x = Math.max(max.x, c.x);
-    max.y = Math.max(max.y, c.y);
-    max.z = Math.max(max.z, c.z);
-  }
-  return { min, max };
-}
-
-/** Fill boxes of a solid box, split into slabs of at most 32 768 blocks (the server's fill limit). */
-function slabs(min: Vec3, max: Vec3, block: 'stone' | 'air'): Fill[] {
-  const out: Fill[] = [];
-  const dx = max.x - min.x + 1;
-  const dy = max.y - min.y + 1;
-  const per = Math.max(1, Math.floor(32000 / (dx * dy)));
-  for (let z = min.z; z <= max.z; z += per) out.push({ from: { x: min.x, y: min.y, z }, to: { x: max.x, y: max.y, z: Math.min(max.z, z + per - 1) }, block });
-  return out;
-}
 
 export interface TunnelOptions {
   name: string;
@@ -191,74 +83,28 @@ export interface TunnelOptions {
   approach?: number;
 }
 
-/** A tunnel course: the bore carved through a stone hull, waypoints at the segment ends and the exit. */
+/** A tunnel course: the bore carved through a stone hull, waypoints at the segment ends and the exit (course-layout.ts `bore`). */
 export function tunnel(o: TunnelOptions): Course {
-  // the centreline of an odd bore runs through cell centres, an even one along cell boundaries
-  const snap = (v: number): number => (o.w % 2 ? Math.floor(v) + 0.5 : Math.round(v));
-  const origin0 = { x: snap(o.origin.x), y: o.origin.y, z: snap(o.origin.z) };
-  const shell = o.shell ?? 3;
-  const inner = carve(centreline(origin0, o.yaw, o.segments), o.w, o.h);
-  // the open entrance / exit: a straight before the origin / after the last segment, carved through the shell (the hull is sized by the inner bore)
-  const back = yawDir(o.yaw);
-  const approach = o.approach ?? 0;
-  const origin = approach > 0 ? { x: snap(origin0.x - back.x * approach), y: origin0.y, z: snap(origin0.z - back.z * approach) } : origin0;
-  const segs: Segment[] = [...(approach > 0 ? [{ kind: 'straight', len: approach } as Segment] : []), ...o.segments, ...(o.openExit ? [{ kind: 'straight', len: shell + 2 } as Segment] : [])];
-  const samples = centreline(origin, o.yaw, segs);
-  const bore = approach > 0 || o.openExit ? carve(samples, o.w, o.h) : inner;
-  const bb = bbox(inner.values());
-  const hullMin = { x: bb.min.x - shell, y: bb.min.y - shell, z: bb.min.z - shell };
-  const hullMax = { x: bb.max.x + shell, y: bb.max.y + shell, z: bb.max.z + shell };
+  const b = bore(o);
+  const { min: hullMin, max: hullMax } = b.hull;
   const flat = flatWorld();
   const world: BlockQuery = {
     solidAt(x, y, z) {
-      if (x >= hullMin.x && x <= hullMax.x && y >= hullMin.y && y <= hullMax.y && z >= hullMin.z && z <= hullMax.z) return !bore.has(key(x, y, z));
+      if (x >= hullMin.x && x <= hullMax.x && y >= hullMin.y && y <= hullMax.y && z >= hullMin.z && z <= hullMax.z) return !b.cells.has(cellKey(x, y, z));
       return flat.solidAt(x, y, z);
     },
-  };
-  const fills: Fill[] = [...slabs(hullMin, hullMax, 'stone'), ...runsOf(bore.values(), 'air')];
-  // the waypoints: the bore cells carved within a block of a sample, as a box
-  const boxAt = (i: number): RegionBox => {
-    const near = samples.filter((s, j) => Math.abs(j - i) <= Math.round(1 / STEP) && s.seg === samples[i]!.seg);
-    const b = bbox(carve(near, o.w, o.h).values());
-    return { min: { x: b.min.x, y: b.min.y, z: b.min.z }, max: { x: b.max.x + 1, y: b.max.y + 1, z: b.max.z + 1 } };
-  };
-  const goals: RouteGoal[] = [];
-  const lastOf = (si: number): number => {
-    let last = -1;
-    samples.forEach((s, j) => {
-      if (s.seg === si) last = j;
-    });
-    return last;
-  };
-  const first = approach > 0 ? 1 : 0; // the inner segments' first index in `segs`
-  if (approach > 0) goals.push({ kind: 'waypoint', box: boxAt(lastOf(0)) }); // the entrance
-  if (o.segmentWaypoints ?? true) {
-    for (let si = first; si < first + o.segments.length - 1; si++) {
-      const last = lastOf(si);
-      if (last > 0 && segs[si]!.kind !== 'corner') goals.push({ kind: 'waypoint', box: boxAt(last) });
-    }
-  }
-  goals.push({ kind: 'waypoint', box: boxAt(lastOf(first + o.segments.length - 1) - Math.round(1 / STEP)) }); // the exit
-  const entry = Math.round((o.entry ?? 3) / STEP);
-  const s0 = samples[Math.min(entry, samples.length - 1)]!;
-  const start: CourseStart = {
-    pos: { x: s0.x, y: o.standing ? Math.floor(s0.y + 1e-6) : s0.y + (o.h - 0.6) / 2, z: s0.z },
-    yaw: s0.yaw,
-    speed: o.standing ? 0 : (o.speed ?? 1.2),
-    rockets: o.rockets ?? 8,
-    ...(o.standing ? { standing: true } : {}),
   };
   return {
     name: o.name,
     kind: o.kind ?? 'tunnel',
     world,
-    fills,
-    start,
-    goals,
+    fills: b.ops,
+    start: b.start,
+    goals: b.goals.map((box) => ({ kind: 'waypoint', box })),
     margin: o.margin ?? (o.w >= 3 ? 0.3 : o.w === 2 ? 0.2 : 0.12),
     bounds: { min: hullMin, max: { x: hullMax.x + 1, y: hullMax.y + 1, z: hullMax.z + 1 } },
     section: { w: o.w, h: o.h },
-    cells: bore.size,
+    cells: b.cells.size,
   };
 }
 
@@ -375,7 +221,79 @@ export function shifted(c: Course, d: Vec3): Course {
     world: { solidAt: (x, y, z) => base.solidAt(x - d.x, y - d.y, z - d.z) },
     fills: c.fills.map((f) => ({ ...f, from: mv(f.from), to: mv(f.to) })),
     start: { ...c.start, pos: mv(c.start.pos) },
-    goals: c.goals.map((g) => (g.kind === 'waypoint' ? { kind: 'waypoint', box: { min: mv(g.box.min), max: mv(g.box.max) } } : { ...g, cell: { x: g.cell.x + d.x, z: g.cell.z + d.z }, top: g.top + d.y })),
+    goals: c.goals.map((g) => (g.kind === 'waypoint' ? { kind: 'waypoint', box: { min: mv(g.box.min), max: mv(g.box.max) } } : { ...g, cell: { x: g.cell.x + d.x, z: g.cell.z + d.z }, top: g.top + d.y, ...(g.cells ? { cells: g.cells.map((k) => ({ x: k.x + d.x, z: k.z + d.z })) } : {}), ...(g.via ? { via: { ...g.via, pos: mv(g.via.pos) } } : {}) })),
     bounds: { min: mv(c.bounds.min), max: mv(c.bounds.max) },
   };
+}
+
+// ---------------------------------------------------------------- Track F4a: the obstacle courses
+
+/** The world of a layout: its ops painted in order over the flat world inside its bounds (a voxel box), the flat world outside. */
+export function layoutWorld(l: CourseLayout): BlockQuery {
+  const { min, max } = l.bounds;
+  const sx = max.x - min.x + 1;
+  const sy = max.y - min.y + 1;
+  const sz = max.z - min.z + 1;
+  const flat = flatWorld();
+  const cells = new Uint8Array(sx * sy * sz);
+  const at = (x: number, y: number, z: number): number => ((y - min.y) * sz + (z - min.z)) * sx + (x - min.x);
+  for (let y = min.y; y <= max.y; y++) {
+    if (!flat.solidAt(0, y, 0)) continue;
+    for (let z = min.z; z <= max.z; z++) cells.fill(1, at(min.x, y, z), at(min.x, y, z) + sx);
+  }
+  for (const op of l.ops) {
+    const v = op.block === 'air' ? 0 : 1;
+    const x0 = Math.max(min.x, op.from.x);
+    const x1 = Math.min(max.x, op.to.x);
+    if (x0 > x1) continue;
+    for (let y = Math.max(min.y, op.from.y); y <= Math.min(max.y, op.to.y); y++) {
+      for (let z = Math.max(min.z, op.from.z); z <= Math.min(max.z, op.to.z); z++) cells.fill(v, at(x0, y, z), at(x1, y, z) + 1);
+    }
+  }
+  return {
+    solidAt(x, y, z) {
+      if (x < min.x || x > max.x || y < min.y || y > max.y || z < min.z || z > max.z) return flat.solidAt(x, y, z);
+      return cells[at(x, y, z)] === 1;
+    },
+  };
+}
+
+/** The route goal of a layout's goal (a landing: landing.ts `landingGoalFor` along its bearing, the `via` hint included). */
+export function legGoal(g: CourseLeg['goals'][number]): RouteGoal {
+  if (g.kind === 'box') return { kind: 'waypoint', box: { min: { ...g.min }, max: { ...g.max } } };
+  return landingGoalFor(legSpec(g), g.bearing);
+}
+
+/** The landing spec of a layout's landing goal. */
+export function legSpec(g: Extract<CourseLeg['goals'][number], { kind: 'land' }>): LandingRouteSpec {
+  return { cells: g.cells, top: g.top, ...(g.rim !== undefined ? { rim: g.rim } : {}), ...(g.ceiling !== undefined ? { ceiling: g.ceiling } : {}) };
+}
+
+/** One Course per leg of a layout, all over the layout's world (a leg with a landing is flown with the `landing` edges and ROUTE_WEIGHT, as the brain's route phase). */
+export function layoutCourses(l: CourseLayout, world: BlockQuery = layoutWorld(l)): Course[] {
+  const bounds: RegionBox = { min: { ...l.bounds.min }, max: { x: l.bounds.max.x + 1, y: l.bounds.max.y + 1, z: l.bounds.max.z + 1 } };
+  return l.legs.map((leg) => {
+    const landing = leg.goals.some((g) => g.kind === 'land');
+    return {
+      name: l.legs.length > 1 ? `${l.name}/${leg.name}` : l.name,
+      kind: 'course',
+      world,
+      fills: l.ops,
+      start: { ...leg.start, pos: { ...leg.start.pos } },
+      goals: leg.goals.map(legGoal),
+      margin: leg.margin,
+      bounds,
+      cells: 0,
+      ...(landing ? { library: 'landing' as const, weight: ROUTE_WEIGHT } : {}),
+      chained: leg.chained,
+      labels: leg.goals.map((g) => g.label),
+    };
+  });
+}
+
+/** The obstacle course `name` at `origin` (feet height of the ground; default the flat world's at 0, 0) as Courses, one per leg. */
+export function obstacleCourse(name: string, origin: Vec3 = { x: 0, y: FEET, z: 0 }): Course[] {
+  const l = courseLayout(name, origin);
+  if (!l) throw new Error(`unknown course ${name}`);
+  return layoutCourses(l);
 }

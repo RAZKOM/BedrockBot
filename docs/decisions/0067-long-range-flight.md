@@ -98,3 +98,102 @@ The e2e bores are clean 3 x 3 tubes; real caves are not.
 2. The trip watches the health every tick and stops on a death or under `CORRIDOR_HEALTH_MIN` 12
    (commands-corridor.ts).
 3. No meal, armour or keeper pass while gliding (the survival kit's `inactive` gate, tasks/registry.ts).
+
+## F4a: the obstacle course and the route fixes
+
+Status: accepted (flight v2, Track F4a; builds on [0064](0064-route-landings-and-takeoffs.md), [0058](0058-flight-planner.md),
+[0057](0057-flight-manoeuvres.md) (the manoeuvres and the brake, Track F1) and [0056](0056-flight-envelope.md) (the envelope,
+Track F0)). Server: BDS 1.26.60.6 (`bds-fly2`, udp/19210, FLAT, strict movement, fall damage on). Details and numbers:
+[../flight.md](../flight.md) "Obstacle course (Track F4a)".
+
+### Context
+
+Each flight track measured itself on its own cases: F2's tunnels, F1's brake cases, F3's route landings. Nothing
+flew them all in one place on one score, so a change that helped one could break another unnoticed: F0's
+corrected takeoff model left F2's `fly-route` 3 x 3 tunnel scraping a wall at 1.7 to 1.9 blocks a tick. Three of
+F3's open points were about how a route landing is flown, not whether it is found: the cruise handed over to the
+tracker a rocket's height too high after a circle, the route was asked only after F1's brake simulation failed,
+and the room at ground level ended `roof` once under load.
+
+### Decisions
+
+1. **The course is data, shared by the server build and the offline bench.** `packs/truth/src/course-layout.ts`
+   is a pure module (arithmetic and types only): a layout is the ops that clear the course's volume (air from
+   the ground up, dirt and grass under it, so a rebuild is the same world over anything left before) and build
+   the stations, and the legs to fly (a start, the goals: boxes to pass or a landing spec, the planner's margin,
+   chained or not). `truth:course` build, clear and list (`course.ts`) only execute the ops, in `fillBlocks`
+   calls of at most 32 768 blocks inside a `runJob`, holding a ticking area over each piece. The bot's
+   `route/courses.ts` imports the same module (as `bridge/commands.ts` imports the pack's protocol) and makes the
+   bench's worlds and legs from it (`layoutWorld`, `layoutCourses`, `obstacleCourse`); F2's bore geometry moved
+   into the shared module rather than being written twice.
+2. **The stations and the full course.** Rings at 7, 12, 6, 14 and 8; a slalom of five gates 3 off the line; the
+   3 x 3 S-tunnel; the 45-degree staircase 3 high from standing; a landing on a ledge under a roof 4 over it; the
+   owner's stacked platforms (3 x 3 at y+20 and y+23, the inner one landed through the 2-high slot); a 1 x 1 shaft
+   10 deep. The full course chains a start pad, the stair, the rings, the slalom, the tunnel, the ledge and a
+   finish pad (each leg goes on from the body and the rockets the last one ended with); the stack and the shaft
+   are flown from their hand-over entries. The rings, the slalom and the tunnel flown alone start standing on a
+   1 x 1 pillar (11 or 9 up in front of them): the server cannot start a body in the air at a speed (a
+   teleported body falls, and its glide did not always take), and a body standing still is where the plan was
+   made when the worker answers. The stations the full course flies on to have no pillar in the way (a leg whose
+   predecessor failed starts gliding there). The landings start gliding at the hand-over's entry at 1.0 a tick,
+   the state the brain hands over in: from a pillar there the takeoff 30 up into the stack's slot is another
+   problem (3 of 8 offline), and on the server the bare driver starts them from a fall, so their e2e rows are
+   measured, not gated (the brain's route landings are `fly-route-land`'s).
+3. **The score** (`bench.ts flyLegs`, `scoreOf`): done, clean, ticks, rockets, wall damage, hits, re-plans and
+   the least goals passed, over `COURSE_BURNS` (9, 12, 15, 18 and 21 for every rocket of a run, three random
+   draws). Offline a hit is flown through (`continueOnHit`) and costs F0's `wallImpactDamage`; on the server the
+   damage is the hurt log's and the corrections and re-plans the driver's report.
+4. **The route model follows F0 (fix a).** No rocket on the glide's first input after a jump (`glideFresh`). The
+   tracker flies each candidate on the burn's earliest and latest end as well as its nominal while the end is
+   unknown, adds held candidates with wider turns when the plan's tail hits for one of them and asks once a burn
+   for a plan from there; the search branches a burn already running from its start; a burn past the plan's
+   nominal asks for a re-plan; a rocket the driver held (`fireHeld`) leaves the belief as it was. None of that
+   made the e2e's tunnel safe: no plan robust over 9..21 exists there (20 s and 400 000 nodes did not find one),
+   and the plain plan's snap turns rode on the burn's last nominal ticks. Two rules did: **a rocket may be used
+   once the burn may be over** (`inBurnTail`: past the burn's earliest end, 9 ticks, in the search and the
+   tracker), which F0's union of two lifetimes makes safe, so the plan boosts where it turns instead of hoping
+   the old burn still runs or has ended; and **a rocket on a control the tracker skipped** (the body a tick
+   ahead of the reference) is fired late instead of lost. The rule from the burn's nominal end was flown first:
+   12 of 13 clean offline, but on bds-fly2 both runs drew 19- and 20-tick burns, the belief's nominal moved on
+   past the plan's and the plan's corner rocket was held for it (2.2 and 6.5 of damage); from the earliest end
+   13 of 13 offline with a max error of 0.00, and 0 damage twice on the server. Full stacking (`stackRockets`,
+   any time) made the tunnel clean as well but cost the rings and the S-tunnel their clean runs (more speed in
+   the gates), so it stays off. `BURN.nominal` stays 15 (F0's mean 15.7; 10 flew worse). **The first plan of a
+   gliding body is asked ahead** (`TrackerOptions.lead`, `flyRoute` with the worker: the ticks of `maxMs` and
+   2): it starts where the hold takes the body by the time the worker answers, and the hold flies until then;
+   an air start at 0.3 a tick fell off every first plan before.
+5. **The hand-over comes down onto the glide line first (fix b).** A route target's cruise no longer circles once
+   lined up on the corridor: from APPROACH_DISTANCE + 60 in, the sink still needed to reach the glide line's
+   height at the hand-over decides: the level glide up to 0.15 a block, a steeper glide up to 0.2, S-turns
+   along the corridor line up to about 0.25 (`routeSink`). A lap of a circle sinks 19 to 31, too coarse for the
+   tracker's band (5 to 13 over the cell).
+6. **Covered goals ask the route first, from the body's side (fix c).** `landing.ts ROUTE_FIRST = 'covered'`:
+   under a roof the route planner before F1's brake when the route comes in within `ROUTE_FIRST_OFF` (30
+   degrees) of the body's side, else the brake first and the route after it; under open sky the brake first.
+7. **The corridor's entry and the tangent circle (fix d).** Near the entry the cruise follows the corridor line
+   (`corridorAim`) instead of aiming at the entry point, which a body arriving more than 60 degrees off passed
+   and turned back to; a descent circle tangent to the approach line is left within 7 of its tangent point at
+   1.15 a tick or less (bled at pitch -5); `steerClear` climbs out on a rocket before it ends a flight `roof`.
+8. **No powered flight without a safe plan** (`tracker.ts PLAN_CLEAR_MIN`, after the Realm cave death the corridor
+   hotfix answers). The tracker fires a rocket only on a plan it is tracking whose least clearance is 0.05 or
+   more; a plan made with the request's margin clears by more than that, one under it was asked for from a body
+   already within the margin of a solid. With no plan (the first not back yet, the lead's hold, a blocked partial
+   plan run out, `failed`) no rocket goes, and a held or late rocket is dropped rather than kept for the next
+   plan. With no plan the level hold flies only while it sweeps clear for HORIZON ticks, else the evade rule
+   steers, unpowered. The tracker does not end the flight on this itself: the drivers keep their own ends (the
+   brain's go-around or landing on `failed`, `flyStretch`'s `failed` and tick cap).
+
+### Consequences
+
+- One command builds any course on a server with the truth pack, one bench call scores it offline, and the e2e
+  `fly-course.test.ts` flies the same legs with the bare route driver.
+- Plans spend a rocket on a running burn where they need the boost: the stations cost up to 0.8 of a rocket
+  more each and are clean in every offline run.
+- The brain's route phases fire only with no boost left on the loop (their gate), so a rocket the tracker asks
+  for on a running burn is held there (`fireHeld`) until the loop's own count runs out.
+- Track F4b's corridor windows fly the same `RouteTracker`, so they get the rocket rules too, the refusal on a
+  grazing plan and the clear hold included (a window that takes over with no plan steers clear unpowered); the
+  lead is off unless a driver sets it (only `flyRoute` does).
+- `!goto` / `!come` still never land on a 2-high cell (F3's open point; `commands-fly.ts` is another track's).
+- The full course's chain (the weave leg), a hand-over from farther than about 400 blocks (13.7 to 15 over the
+  cell) and a covered goal approached from the side are the benchmark's open rows (docs/flight.md).

@@ -16,7 +16,7 @@ import { RocketHand, type RocketDeps } from '../rocket.ts';
 import { gridOf, sweep } from './grid.ts';
 import { planRoute } from './search.ts';
 import { RouteTracker, type Planner, type TrackerStats } from './tracker.ts';
-import type { PrimitiveFamily, RouteGoal } from './types.ts';
+import type { PrimitiveFamily, RouteGoal, RouteRequest } from './types.ts';
 
 export interface RouteLiveDeps extends Omit<RocketDeps, 'loop'> {
   loop: FlightLoop;
@@ -32,7 +32,15 @@ export interface RouteLiveOptions {
   maxNodes?: number;
   maxMs?: number;
   stackRockets?: boolean;
+  /**
+   * Track F4a: TrackerOptions.lead. Default: with a worker planner (`planner`), the ticks of `maxMs` and 2 more (the
+   * worker answers that late); in-thread 0 (the answer comes before the next tick).
+   */
+  lead?: number;
   families?: readonly PrimitiveFamily[];
+  /** Track F4a: the edge set and the heuristic's weight of every request (an obstacle course's leg ending in a landing: `landing`, ROUTE_WEIGHT). */
+  library?: RouteRequest['library'];
+  weight?: number;
   /** The flight ends after this many ticks (default 1200). */
   maxTicks?: number;
   note?: (msg: string) => void;
@@ -75,7 +83,10 @@ export function flyRoute(d: RouteLiveDeps, o: RouteLiveOptions): { done: Promise
     maxNodes: o.maxNodes ?? 40_000,
     maxMs: o.maxMs ?? 300,
     ...(o.stackRockets !== undefined ? { stackRockets: o.stackRockets } : {}),
+    lead: o.lead ?? (o.planner ? Math.ceil((o.maxMs ?? 300) / 50) + 2 : 0),
     ...(o.families ? { families: o.families } : {}),
+    ...(o.library !== undefined ? { library: o.library } : {}),
+    ...(o.weight !== undefined ? { weight: o.weight } : {}),
     yaw: loop.command.yaw,
     note: (m) => {
       log.info(m);
@@ -132,7 +143,11 @@ export function flyRoute(d: RouteLiveDeps, o: RouteLiveOptions): { done: Promise
     loop.setCommand({ yaw: c.yaw, pitch: c.pitch, jump: c.jump === true, glide, forward: 0, strafe: 0, sprint: false, sneak: false });
     // (a rocket used before the server's gliding flag does nothing, measured on bds-fly3: the use waits for the flag)
     const firing = c.fire && r.slot >= 0 && hand.canFire(tick) && serverGliding;
-    if (c.fire && !firing && r.slot >= 0) heldFires++;
+    if (c.fire && !firing) {
+      if (r.slot >= 0) heldFires++;
+      // Track F4a: the tracker counted that rocket as burning; it takes back the burn it had and fires again next tick
+      tracker.fireHeld();
+    }
     o.trace?.(tick, { pos: { ...state.pos }, vel: { ...state.vel }, gliding: state.gliding, onGround: state.onGround, boostTicks: state.boostTicks }, { yaw: c.yaw, pitch: c.pitch, fire: firing, ...(c.jump ? { jump: true } : {}) }, out.status);
     if (firing) hand.fire(r.slot, state.pos, tick);
     if (tick >= max) finish?.('timeout');

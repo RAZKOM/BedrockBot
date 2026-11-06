@@ -217,7 +217,8 @@ describe('route tracker on stepBody', () => {
     const o1 = t.tick(b, 1);
     expect(o1.status).toBe('planning');
     expect(o1.control.fire).toBe(false);
-    expect(t.stats.holdTicks).toBe(1);
+    // (Track F4a: the level hold, or the evade rule where the level glide would reach the bore's floor within HORIZON)
+    expect(t.stats.holdTicks + t.stats.evadeTicks).toBe(1);
     resolve!(undefined as never);
     await new Promise((r) => setTimeout(r, 0));
     expect(t.current).toBeDefined();

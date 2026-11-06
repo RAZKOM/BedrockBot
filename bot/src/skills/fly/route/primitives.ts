@@ -63,16 +63,24 @@ export function stepState(s: Readonly<RouteState>, c: RouteControl, stackRockets
     n.pos = { x: f32(s.pos.x + s.vel.x), y: f32(s.pos.y + s.vel.y), z: f32(s.pos.z + s.vel.z) };
     n.vel = { x: f32(s.vel.x * PHYSICS.airInertia), y: f32((s.vel.y - PHYSICS.gravity) * PHYSICS.drag), z: f32(s.vel.z * PHYSICS.airInertia) };
     n.glideIn = s.glideIn - 1;
-    if (n.glideIn === 0) delete n.glideIn;
+    if (n.glideIn === 0) {
+      delete n.glideIn;
+      n.glideFresh = true;
+    }
     return { next: n, fired };
   }
-  if (c.fire && s.rockets > 0 && (s.boost.max === 0 || stackRockets)) {
+  // Track F4a: the glide's first input after a jump (j2) takes no rocket (the server ignores the use; F0, docs/flight-envelope.md
+  // section 8): a rocket works from the input after it, so the model's first boosted tick is the server's
+  const fresh = s.glideFresh === true;
+  if (fresh) delete n.glideFresh;
+  if (c.fire && !fresh && s.rockets > 0 && (s.boost.max === 0 || inBurnTail(s.boost) || stackRockets)) {
     n.boost = freshBurn();
     n.boost.nom = burn;
     n.rockets = s.rockets - 1;
     fired = true;
-    // the burn branches start at the fire, on the nominal body
-    if (branches) {
+    // the burn branches start at the fire, on the nominal body (a rocket in a burn's tail: the branches of that
+    // burn go on, now both boosted: the union)
+    if (branches && !(n.early && n.late)) {
       n.early = { pos: { ...s.pos }, vel: { ...s.vel } };
       n.late = { pos: { ...s.pos }, vel: { ...s.vel } };
     }
@@ -95,6 +103,18 @@ export function stepState(s: Readonly<RouteState>, c: RouteControl, stackRockets
   }
   n.boost = burnTick(n.boost);
   return { next: n, fired };
+}
+
+/**
+ * Track F4a: a burn that may be over (past its earliest end, F0: 9 of 9 to 21 ticks) but may still run. A rocket may
+ * be used there: if the burn still runs, the boost is the union of the two lifetimes (F0's measurement), so the plan
+ * need not wait for the latest end before it boosts again and never rides on a tail it cannot know (the e2e's 3 x 3
+ * tunnel scraped on a snap turn planned on the burn's last nominal ticks, and came to its corner with a long burn still
+ * running and its rocket held). Before the earliest end a rocket stays a waste (full stacking, `stackRockets`, cost
+ * the rings and the slalom their clean runs: more speed in the gates).
+ */
+export function inBurnTail(b: Readonly<RouteState['boost']>): boolean {
+  return b.min === 0 && b.max > 0;
 }
 
 /** The branches are dropped once both are within this of the nominal body (blocks) after the burn. */
@@ -313,14 +333,14 @@ export function settle(g: RouteGoal): Maneuver {
 }
 export const SETTLE_NEAR = 4;
 
-/** The jump takeoff from standing: jump and request the glide, then `pitch` along `yaw` (a rocket on the first gliding tick after the server's delay when `fire`). */
+/** The jump takeoff from standing: jump and request the glide, then `pitch` along `yaw` (a rocket on the first gliding tick that takes one when `fire`: the second, Track F4a). */
 export function takeoff(yaw: number, pitch: number, fire: boolean, ticks = GLIDE_DELAY + 4): Maneuver {
   return {
     name: `takeoff${fire ? 'R' : ''}${pitch ? (pitch > 0 ? '+' : '') + pitch : ''}`,
     family: 'takeoff',
     applies: (s) => !s.gliding,
-    // the rocket on the first tick the glide has taken (no rocket used yet in this edge)
-    control: (s, now, i) => (i === 0 ? { yaw, pitch: 0, fire: false, jump: true, glide: true } : { yaw, pitch, fire: fire && !now.glideIn && now.rockets === s.rockets }),
+    // the rocket as soon as the glide takes one (no rocket used yet in this edge; stepState refuses it on the glide's first tick)
+    control: (s, now, i) => (i === 0 ? { yaw, pitch: 0, fire: false, jump: true, glide: true } : { yaw, pitch, fire: fire && !now.glideIn && !now.glideFresh && now.rockets === s.rockets }),
     ticks: () => ticks,
   };
 }

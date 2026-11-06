@@ -260,6 +260,41 @@ export function climbMomentum(vy: number): number {
  */
 export const SPIRAL_ABOVE = 12;
 export const SPIRAL_UNTIL = 6;
+/**
+ * Track F4a: a route landing is handed over at the glide line's height (the planned entry: 40 out, 9 over the cell; the
+ * tracker lands from 5 to 13 over the cell at 0.65 to 1.3 a tick, from 17 and more not always: docs/flight.md). Lined up
+ * on the corridor, from APPROACH_DISTANCE + 60 in (farther when higher: the surplus over ROUTE_STURN_MAX), the sink still
+ * needed a block of the way to the hand-over decides (routeSink): up to the level glide's (ROUTE_LEVEL_SINK) the cruise
+ * as before; up to ROUTE_SINK_MAX a steeper glide; beyond, S-turns along the corridor line (the path longer by 1 / cos of
+ * the swing, at most ROUTE_STURN_SWING: up to about 0.25 a block, ROUTE_STURN_MAX). No circle: a lap of one sinks 19 to 31 at the speeds it holds
+ * (18 to 24 across; smaller ones bleed the speed to 0.4 to 0.7), too coarse for the hand-over's band, and the generic
+ * circle's exit (6 over the line, its window a lap deep) handed over 15 to 26 over the cell at 150 to 450 blocks.
+ */
+export const ROUTE_LEVEL_SINK = 0.15;
+export const ROUTE_SINK_MAX = 0.2;
+export const ROUTE_STURN_MAX = 0.24;
+/** Track F4a: the sink (a tick) the S-turns fly at (pitch 8 holds about 1 a tick). */
+const ROUTE_STURN_SINK = 0.158;
+const ROUTE_STURN_PITCH = 8;
+/** Track F4a: the S-turns swing at most this far off the bearing in, turning at most this much a tick. */
+const ROUTE_STURN_SWING = 50;
+const ROUTE_STURN_TURN = 6;
+/** Track F4a: the glide's steady sink (a tick) at a pitch at about 1 a tick, straight (physics.ts glideVelocity). */
+const SINK_PITCH: readonly (readonly [number, number])[] = [[0.075, -5], [0.145, 0], [0.165, 10], [0.19, 15], [0.225, 20], [0.27, 25]];
+/** Track F4a: a circle tangent to the approach line is left within this of its tangent point (4 missed it: the pursuit cuts inside), at most this fast (CIRCLE_SPEED + 0.05; a faster body bleeds at pitch -5). */
+const TANGENT_NEAR = 7;
+const CIRCLE_SPEED = 1.1;
+
+/** Track F4a: the pitch of a steady sink `rate` (a tick) from a table of (sink, pitch), interpolated, clamped to its ends. */
+export function pitchForSink(rate: number, table: readonly (readonly [number, number])[]): number {
+  if (rate <= table[0]![0]) return table[0]![1];
+  for (let j = 1; j < table.length; j++) {
+    const [r1, p1] = table[j]!;
+    const [r0, p0] = table[j - 1]!;
+    if (rate <= r1) return Math.round(p0 + ((rate - r0) / (r1 - r0)) * (p1 - p0));
+  }
+  return table[table.length - 1]![1];
+}
 /** Cruise: within this many blocks before the approach distance the speed is bled to APPROACH_SPEED (pitch -6: 1.3 -> 1.0 in 30 ticks). */
 const BLEED_DISTANCE = 40;
 const APPROACH_SPEED = 1.05;
@@ -277,6 +312,15 @@ const STURN_ANGLE = 70;
 const SPIRAL_OUT = [30, 45, 60, 80] as const;
 /** Track BF: an overhang's corridor is entered from this far out along its bearing. */
 export const CORRIDOR_OUT = 64;
+/**
+ * Track F4a: near the corridor's entry (within ENTRY_NEAR of it, or inside it along the bearing from 36 out to the
+ * entry and within ENTRY_BAND of its line) the cruise follows the line, aiming ENTRY_LEAD further in, instead of the
+ * entry point itself: a body arriving more than 60 degrees off the corridor (never lined up) passed the entry, aimed
+ * back at it and bled 1.05 to 0.14 a tick in the U-turn (room3 from the north-west, offline).
+ */
+const ENTRY_NEAR = 12;
+const ENTRY_BAND = 16;
+const ENTRY_LEAD = 24;
 /** Track BF: columns whose top is this far above an overhang cell's floor are the roof the corridor goes under (ignored by its go-around height). */
 const OPEN_ABOVE = 4;
 /** Track BL: the terrain floor is recomputed every this many ticks; a detour heading is held this long; the dive is looked for every DIVE_EVERY ticks. */
@@ -317,6 +361,8 @@ export class FlightBrain {
   private routeGlideTicks = 0;
   /** Track F3: the tick the route takeoff handed over to the climb (the climb's path checks wait for some height). */
   private routeOutAt: number | undefined;
+  /** Track F4a: the side of a route landing's S-turns (+1: swung left of the corridor line's bearing in). */
+  private routeSide: 1 | -1 = 1;
 
   /** Track F3: just out of a route takeoff, low and close to the start: the ground under the feet is no obstacle yet. */
   private routeJustOut(b: FlightBody): boolean {
@@ -768,6 +814,16 @@ export class FlightBrain {
     // go-around or a descent near the target, where low structures are the planner's business (a house wall
     // 4 blocks behind a landing cell ended a flight early on bds-fly)
     if (o.noLanding) return false;
+    // Track F4a: nothing clears unboosted, but a rocket's climb at the climb pitch does: the ground ahead of a low, slow
+    // body under open sky, not a roof (the e2e's room at ground level ended `roof` 48 out on open ground, offline 11 of
+    // 16 trips with F0's burns); under a roof the boosted path hits as well and the flight lands as before
+    if (this.phase !== 'land' && this.fire(i, ctl, 'cruise', this.o.climbPitch)) {
+      ctl.pitch = this.o.climbPitch;
+      this.cruiseFired = false;
+      this.stats.steered++;
+      this.o.note?.(`nothing clears the solid ahead in the ${this.phase} at ${b.pos.x.toFixed(1)} ${b.pos.y.toFixed(1)} ${b.pos.z.toFixed(1)} unboosted (${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} a tick): a rocket climbs out`);
+      return true;
+    }
     ctl.fire = false;
     ctl.pitch = 15;
     this.stats.steered++;
@@ -858,7 +914,8 @@ export class FlightBrain {
     const d = entry ? hdist(b.pos, entry) + CORRIDOR_OUT : dTarget;
     const h = Math.hypot(b.vel.x, b.vel.z);
     const aboveEntry = b.pos.y - (entryTop(this.target) + APPROACH_HEIGHT);
-    const spiralDue = aboveEntry > SPIRAL_ABOVE && d <= APPROACH_DISTANCE + 60 && !this.descentNone;
+    // (Track F4a: a route landing lined up on its corridor sinks to the hand-over by routeSink, never a circle)
+    const spiralDue = !(routed && !entry) && aboveEntry > SPIRAL_ABOVE && d <= APPROACH_DISTANCE + 60 && !this.descentNone;
     // Track BL: far above the entry: the dive descent when its simulation passes (looked for every DIVE_EVERY ticks
     // on the way in, and once more when the circle would begin); a window still ahead keeps the cruise going
     if (!this.descent && !entry && this.diveAllowed(aboveEntry, d) && (spiralDue || this.stats.ticks - this.diveLook >= DIVE_EVERY)) {
@@ -880,7 +937,7 @@ export class FlightBrain {
     // Track BL: a detour heading around terrain no climb clears in time
     const detouring = this.detour !== undefined && this.stats.ticks < this.detour.until;
     if (!detouring) this.detour = undefined;
-    ctl.yaw = turnTowards(i.yaw, detouring ? this.detour!.yaw : yawTo(b.pos, entry ?? this.target));
+    ctl.yaw = turnTowards(i.yaw, detouring ? this.detour!.yaw : yawTo(b.pos, entry ? this.corridorAim(b, entry) : this.target));
     // Track F3: a route landing: the cruise goes on along the bearing to the hand-over, where the route tracker takes
     // the body from its real state; no approach of the landing families
     if (routedNear) {
@@ -948,7 +1005,9 @@ export class FlightBrain {
       }
     }
     if (h < STALL_SPEED + 0.1) ctl.pitch = 15;
-    else if (h < 0.95) ctl.pitch = 8; // slow: a shallow dive recovers the speed without a rocket
+    else if (routed && !entry && !detouring && terrainShort < 0 && d > ROUTE_HANDOVER && d <= Math.max(APPROACH_DISTANCE + 60, ROUTE_HANDOVER + (b.pos.y - glideLine(this.target, ROUTE_HANDOVER)) / ROUTE_STURN_MAX) && this.routeSink(i, ctl, d, h)) {
+      // (Track F4a: onto the hand-over's height: routeSink set the controls)
+    } else if (h < 0.95) ctl.pitch = 8; // slow: a shallow dive recovers the speed without a rocket
     else if (d <= APPROACH_DISTANCE + BLEED_DISTANCE && h > APPROACH_SPEED && terrainShort < 0) ctl.pitch = -6; // before the approach: bleed the speed towards APPROACH_SPEED (the flare's climb grows with its square)
     else if (h > 1.7) ctl.pitch = -3;
     else ctl.pitch = 0;
@@ -956,6 +1015,39 @@ export class FlightBrain {
     // out of rockets and sinking under the slope: the approach from wherever we are (it lands short if it must)
     if (i.rockets <= 0 && b.pos.y < this.target.top + 2 && d > APPROACH_DISTANCE) this.landNow('no_rockets', b);
     return ctl;
+  }
+
+  /** Track F4a: the sink a route landing's body still needs a block of the way to the hand-over, to arrive at the glide line's height there. */
+  private routeNeed(b: FlightBody, d: number): number {
+    return (b.pos.y - glideLine(this.target, ROUTE_HANDOVER)) / Math.max(1, d - ROUTE_HANDOVER);
+  }
+
+  /**
+   * Track F4a: a route landing's way in to the hand-over, onto the glide line's height there (ROUTE_LEVEL_SINK ..): a
+   * steeper glide up to ROUTE_SINK_MAX a block (the pitch of that sink at the body's speed), S-turns along the corridor
+   * line beyond (swung off the bearing in by the angle whose longer path sinks what is needed at ROUTE_STURN_SINK, at
+   * most STURN_ANGLE, STURN_WIDTH each side). False when the level glide sinks enough (the cruise's own pitch flies).
+   */
+  private routeSink(i: BrainInput, ctl: BrainControl, d: number, h: number): boolean {
+    const b = i.body;
+    const t = this.target;
+    const need = this.routeNeed(b, d);
+    if (need <= ROUTE_LEVEL_SINK) return false;
+    const v = Math.max(0.6, h);
+    if (need <= ROUTE_SINK_MAX) {
+      ctl.pitch = h > 1.4 ? 0 : pitchForSink(need * v, SINK_PITCH);
+      return true;
+    }
+    // S-turns: the path longer by 1 / cos(swing) sinks need a block of the way in (at most ROUTE_STURN_SWING off the
+    // bearing: linedUp wants the heading within 60 of it, and a reversal of 2 x 70 at 15 a tick bled 1.04 to 0.64)
+    const swing = Math.min(ROUTE_STURN_SWING, (Math.acos(Math.min(1, ROUTE_STURN_SINK / v / need)) * 180) / Math.PI);
+    const inbound = yawDir(t.route!.bearing + 180);
+    const rel = { x: b.pos.x - t.x, z: b.pos.z - t.z };
+    const lateral = rel.x * inbound.z - rel.z * inbound.x; // positive = to the right of the line in (Bedrock yaw grows to the left)
+    if (Math.abs(lateral) > STURN_WIDTH && Math.sign(lateral) === -this.routeSide) this.routeSide = -this.routeSide as 1 | -1;
+    ctl.yaw = turnTowards(i.yaw, yawTo(b.pos, t) + this.routeSide * swing, ROUTE_STURN_TURN);
+    ctl.pitch = h < 0.9 ? 12 : h > 1.25 ? 0 : ROUTE_STURN_PITCH;
+    return true;
   }
 
   // ---- Track BL: the terrain floor, the high cruise, the avoidance lines, the dive descent ---------------------
@@ -1175,6 +1267,19 @@ export class FlightBrain {
     return { x: this.target.x + d.x * CORRIDOR_OUT, z: this.target.z + d.z * CORRIDOR_OUT };
   }
 
+  /** Track F4a: where the cruise aims on the way to the corridor's `entry` (ENTRY_NEAR, ENTRY_BAND, ENTRY_LEAD). */
+  private corridorAim(b: FlightBody, entry: { x: number; z: number }): { x: number; z: number } {
+    const d = yawDir(this.target.bearing!);
+    const rx = b.pos.x - this.target.x;
+    const rz = b.pos.z - this.target.z;
+    const along = rx * d.x + rz * d.z;
+    const cross = Math.abs(rx * d.z - rz * d.x);
+    const near = hdist(b.pos, entry) < ENTRY_NEAR || (along >= 36 && along < CORRIDOR_OUT && cross <= ENTRY_BAND);
+    if (!near) return entry;
+    const at = Math.max(36 - ENTRY_LEAD, Math.min(CORRIDOR_OUT, along) - ENTRY_LEAD);
+    return { x: this.target.x + d.x * at, z: this.target.z + d.z * at };
+  }
+
   /**
    * Track BF: hold high over a target that is not landable yet (its chunks have not arrived, the
    * landing is being confirmed): a circle of the largest radius that fits the columns at the hold
@@ -1239,10 +1344,12 @@ export class FlightBrain {
       const heading = h > 0.05 ? (Math.atan2(-b.vel.x, b.vel.z) * 180) / Math.PI : i.yaw;
       const headingIn = Math.abs(yawDiff(heading, yawTo(b.pos, aim)));
       // ... and with the speed bled in the circle (under 1.15): a short circle left fast (1.3 to 1.5) handed the
-      // planner a body with too much energy and cost go-arounds on bds-fly (the 300-block flights)
+      // planner a body with too much energy and cost go-arounds on bds-fly (the 300-block flights). Track F4a: the
+      // tangent point within TANGENT_NEAR (the pursuit passed it 5 to 6 off and the circle went on to the forced exit:
+      // the e2e's room at ground level, 6 over the ground and slow, then `roof`)
       const leave =
         dsc.kind !== 'spiral' ||
-        (h <= 1.15 && (dsc.exitAt ? hdist(b.pos, dsc.exitAt) <= 4 && headingIn <= 35 : headingIn <= 45 && hdist(b.pos, aim) >= APPROACH_DISTANCE / 2)) ||
+        (h <= CIRCLE_SPEED + 0.05 && (dsc.exitAt ? hdist(b.pos, dsc.exitAt) <= TANGENT_NEAR && headingIn <= 35 : headingIn <= 45 && hdist(b.pos, aim) >= APPROACH_DISTANCE / 2)) ||
         b.pos.y <= dsc.exitY - 10;
       if (leave) {
         this.descent = undefined;
@@ -1271,6 +1378,9 @@ export class FlightBrain {
     }
     // the emergency descent sinks a little faster (pitch 15: about 0.25 blocks a tick) than the cruise's (8)
     ctl.pitch = h > 1.4 ? 0 : h < STALL_SPEED + 0.1 ? 20 : this.phase === 'land' ? 15 : 8;
+    // Track F4a: a circle tangent to the approach line bleeds its speed to CIRCLE_SPEED for its leave (pitch 8 took the
+    // body to 1.2 to 1.3 in the lap, over the leave's 1.15)
+    if (dsc.kind === 'spiral' && dsc.exitAt && h > CIRCLE_SPEED && h <= 1.4 && this.phase !== 'land') ctl.pitch = -5;
     this.steerClear(i, ctl, { noLanding: true });
     return true;
   }
@@ -1504,7 +1614,7 @@ export class FlightBrain {
       ctl.fire = true;
       this.stats.rockets++;
       this.stats.rocketsBy.land++;
-    }
+    } else if (out.control.fire) this.tracker?.fireHeld(); // Track F4a: the tracker keeps the burn it assumed over (as flyRoute)
     return ctl;
   }
 
@@ -1552,7 +1662,7 @@ export class FlightBrain {
       this.stats.rockets++;
       this.stats.rocketsBy.climb++;
       this.stats.routeTakeoffRockets = (this.stats.routeTakeoffRockets ?? 0) + 1;
-    }
+    } else if (out.control.fire) this.tracker.fireHeld(); // Track F4a: as in the landing above
     return ctl;
   }
 

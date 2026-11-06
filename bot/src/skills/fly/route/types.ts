@@ -46,6 +46,8 @@ export interface RouteState {
    * gliding flag comes GLIDE_DELAY ticks after the jump; a rocket used before it does nothing).
    */
   glideIn?: number;
+  /** Track F4a: the next tick is the glide's first after a jump (the server's j2): a rocket used on it does nothing (F0). */
+  glideFresh?: boolean;
   /** Rockets left in the hand. */
   rockets: number;
   /** Waypoints passed so far (index into `RouteGoal.waypoints`). */

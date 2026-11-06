@@ -201,7 +201,8 @@ export interface SearchOptions {
  * and settles onto every landing goal; `minimal` (default) is F2's whole library.
  */
 export function libraryNamed(req: RouteRequest, edgeTicks: number, takeoffYaws: readonly number[]): Maneuver[] {
-  if (req.library === 'landing') return [...libraryFor(['glide', 'turn', 'rocket'], edgeTicks, [], req.goals), ...(routeLibrary(req.goals) as Maneuver[])];
+  // (Track F4a: a standing start gets F2's jump takeoffs too: a leg from a ledge to a landing, the obstacle course's finish)
+  if (req.library === 'landing') return [...libraryFor(['glide', 'turn', 'rocket', 'takeoff'], edgeTicks, takeoffYaws, req.goals), ...(routeLibrary(req.goals) as Maneuver[])];
   return libraryFor(req.families, edgeTicks, takeoffYaws, req.goals);
 }
 
@@ -214,7 +215,9 @@ export function planRoute(req: RouteRequest, grid: RouteGrid, o: SearchOptions =
   if (req.burnBranches === false) return searchOnce(req, grid, o);
   const t0 = performance.now();
   const robust = searchOnce({ ...req, burnBranches: true }, grid, o);
-  if (robust.complete || robust.rockets === 0) return robust;
+  // (a plan without rockets has no branches, unless a burn already runs from the start: Track F4a)
+  const burning = req.start.boost.max > 0 && req.start.boost.min < req.start.boost.max;
+  if (robust.complete || (robust.rockets === 0 && !burning)) return robust;
   const left = req.maxMs - (performance.now() - t0);
   if (left < 5) return robust;
   const plain = searchOnce({ ...req, burnBranches: false, maxMs: left, maxNodes: Math.max(1, req.maxNodes - robust.nodes) }, grid, o);
@@ -243,7 +246,11 @@ function searchOnce(req: RouteRequest, grid: RouteGrid, o: SearchOptions): Route
   const open = new Heap();
   const closed = new Set<string>();
   const h0 = heuristic(req.start, req);
-  const start: Node = { s: req.start, g: 0, f: weight * h0, h: h0, parent: undefined, edge: undefined, tick: 0 };
+  // Track F4a: a burn already running whose end is unknown (the tracker re-plans mid-burn: its range is [min, max]) is
+  // branched from the start, as a rocket fired in the plan is, so the plan clears for its every end
+  const b0 = req.start.boost;
+  const s0 = ctx.burnBranches && b0.max > 0 && b0.min < b0.max && !req.start.early ? { ...req.start, early: { pos: { ...req.start.pos }, vel: { ...req.start.vel } }, late: { pos: { ...req.start.pos }, vel: { ...req.start.vel } } } : req.start;
+  const start: Node = { s: s0, g: 0, f: weight * h0, h: h0, parent: undefined, edge: undefined, tick: 0 };
   const effort = { nodes: 1, expanded: 0, ms: 0, budget: 'none' as RoutePlan['budget'] };
   if (!Number.isFinite(h0)) {
     effort.ms = performance.now() - t0;
