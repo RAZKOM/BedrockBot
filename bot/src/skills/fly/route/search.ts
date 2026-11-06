@@ -9,6 +9,7 @@
 // beyond the body's energy height (a body without a rocket cannot reach a point above its energy height;
 // infeasible when the rockets in the hand cannot buy it). Budgets in nodes and ms; a partial plan (the node
 // nearest the next goal) when they run out.
+import { routeLibrary } from '../maneuvers-route.ts'; // Track F3: the landing library by name
 import { HEURISTIC_SPEED, edgeOf, libraryFor, replay } from './primitives.ts';
 import { boxClear, type RouteGrid } from './grid.ts';
 import { EDGE_TICKS, RISK_COST, RISK_RANGE, ROCKET_COST, goalPoint, hspeed, type Maneuver, type RouteControl, type RouteEdge, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
@@ -97,8 +98,24 @@ export function heuristic(s: Readonly<RouteState>, req: RouteRequest): number {
   let from = s.pos;
   let top = s.pos.y + energyHeight(s);
   let climb = 0;
+  // Track F3: the slow leg of a landing with a `via` point (down a shaft, into a slot), in ticks
+  let slow = 0;
   for (let i = s.wp; i < req.goals.length; i++) {
-    const p = goalPoint(req.goals[i]!);
+    const g = req.goals[i]!;
+    const p = goalPoint(g);
+    const via = g.kind === 'landing' && g.via && i === req.goals.length - 1 ? g.via : undefined;
+    // (the body is past the via point once it is no farther from the cell than the point is and not above it: inside the shaft, inside the slot)
+    const past = via !== undefined && i === s.wp && Math.hypot(p.x - from.x, p.z - from.z) <= Math.hypot(p.x - via.pos.x, p.z - via.pos.z) + 0.3 && from.y <= via.pos.y + 0.5;
+    if (via && !past) {
+      d += Math.hypot(via.pos.x - from.x, via.pos.y - from.y, via.pos.z - from.z);
+      slow += Math.hypot(p.x - via.pos.x, p.y - via.pos.y, p.z - via.pos.z) / Math.max(0.05, via.speed);
+      if (via.pos.y > top) {
+        climb += via.pos.y - top;
+        top = via.pos.y;
+      }
+      from = via.pos;
+      continue;
+    }
     d += Math.hypot(p.x - from.x, p.y - from.y, p.z - from.z);
     if (p.y > top) {
       climb += p.y - top;
@@ -106,7 +123,7 @@ export function heuristic(s: Readonly<RouteState>, req: RouteRequest): number {
     }
     from = p;
   }
-  let h = d / HEURISTIC_SPEED;
+  let h = d / HEURISTIC_SPEED + slow;
   if (climb > 0) {
     const need = Math.ceil(climb / ROCKET_UP);
     if (need > s.rockets) return Infinity;
@@ -179,6 +196,16 @@ export interface SearchOptions {
 }
 
 /**
+ * Track F3: the edge set a request names (`RouteRequest.library`): `landing` is F2's glides, turns and rockets
+ * (no brake, hover, settle or takeoff of its own) with Track F1's manoeuvres and the brake landing's approaches
+ * and settles onto every landing goal; `minimal` (default) is F2's whole library.
+ */
+export function libraryNamed(req: RouteRequest, edgeTicks: number, takeoffYaws: readonly number[]): Maneuver[] {
+  if (req.library === 'landing') return [...libraryFor(['glide', 'turn', 'rocket'], edgeTicks, [], req.goals), ...(routeLibrary(req.goals) as Maneuver[])];
+  return libraryFor(req.families, edgeTicks, takeoffYaws, req.goals);
+}
+
+/**
  * Plan a route for `req` on `grid`. Deterministic; the budgets end it with the best partial plan. The first
  * search sweeps the burn branches (robust by construction); when it finds no complete plan, a second one
  * without them gets the rest of the budget and its plan says `robust: false`.
@@ -204,7 +231,7 @@ function searchOnce(req: RouteRequest, grid: RouteGrid, o: SearchOptions): Route
   const first = req.goals[0] ? goalPoint(req.goals[0]) : undefined;
   const bearing = first ? (Math.atan2(-(first.x - req.start.pos.x), first.z - req.start.pos.z) * 180) / Math.PI : 0;
   const takeoffYaws = req.start.gliding ? [] : [bearing, bearing + 30, bearing - 30, bearing + 60, bearing - 60, bearing + 90, bearing - 90];
-  const lib = o.library ?? libraryFor(req.families, edgeTicks, takeoffYaws, req.goals);
+  const lib = o.library ?? libraryNamed(req, edgeTicks, takeoffYaws);
   const ctx = { grid, margin: req.margin, goals: req.goals, stackRockets: req.stackRockets === true, burnBranches: req.burnBranches !== false };
   // a body already within the margin of a solid (the tracker re-planning from a grazing state) still gets edges:
   // the first edges keep half its real clearance, the rest of the plan the full margin
@@ -212,10 +239,11 @@ function searchOnce(req: RouteRequest, grid: RouteGrid, o: SearchOptions): Route
   const ctx0 = startMargin < req.margin ? { ...ctx, margin: startMargin } : ctx;
   const rocketCost = req.rocketCost ?? ROCKET_COST;
   const riskCost = req.riskCost ?? RISK_COST;
+  const weight = req.weight ?? 1;
   const open = new Heap();
   const closed = new Set<string>();
   const h0 = heuristic(req.start, req);
-  const start: Node = { s: req.start, g: 0, f: h0, h: h0, parent: undefined, edge: undefined, tick: 0 };
+  const start: Node = { s: req.start, g: 0, f: weight * h0, h: h0, parent: undefined, edge: undefined, tick: 0 };
   const effort = { nodes: 1, expanded: 0, ms: 0, budget: 'none' as RoutePlan['budget'] };
   if (!Number.isFinite(h0)) {
     effort.ms = performance.now() - t0;
@@ -252,7 +280,7 @@ function searchOnce(req: RouteRequest, grid: RouteGrid, o: SearchOptions): Route
       const h = heuristic(e.out, req);
       if (!Number.isFinite(h)) continue;
       const g = n.g + e.ticks + e.rockets * rocketCost + e.risk * riskCost;
-      const child: Node = { s: e.out, g, f: g + h, h, parent: n, edge: e, tick: n.tick + e.ticks };
+      const child: Node = { s: e.out, g, f: g + weight * h, h, parent: n, edge: e, tick: n.tick + e.ticks };
       effort.nodes++;
       if (child.s.wp >= req.goals.length) {
         effort.ms = performance.now() - t0;

@@ -69,16 +69,22 @@ export interface TripOptions {
   maxTicks?: number;
   /** Track F1: the landing family (flyLandStyle). */
   landStyle?: BrainOptions['landStyle'];
+  /** Track F3: the route planner (the route landings' tracker, the route takeoff). */
+  route?: BrainOptions['route'];
+  routeTakeoff?: BrainOptions['routeTakeoff'];
+  takeoffYaw?: number;
+  rockets?: number;
 }
 
 /** The brain flying a whole trip on stepBody to `target` (the offline simulator; fly.test.ts flyTrip generalised). */
 export function trip(w: ReturnType<typeof world>, start: { x: number; y: number; z: number }, target: LandingTarget, o: TripOptions = {}) {
   const notes: string[] = [];
   const cz = cruiseHeight(start, target, w.skyTop, {});
-  const brain = new FlightBrain(target, { cruiseY: cz.y, groundAt: (x, z, fromY) => w.dryGround(x, z, fromY), skyTop: w.skyTop, obstacle: (x, y, z) => w.solid.solidAt(x, y, z) === true, seed: o.seed ?? 5, note: (m) => notes.push(m), ...(o.landStyle ? { landStyle: o.landStyle } : {}) });
+  const brain = new FlightBrain(target, { cruiseY: cz.y, groundAt: (x, z, fromY) => w.dryGround(x, z, fromY), skyTop: w.skyTop, obstacle: (x, y, z) => w.solid.solidAt(x, y, z) === true, seed: o.seed ?? 5, note: (m) => notes.push(m), ...(o.landStyle ? { landStyle: o.landStyle } : {}), ...(o.route ? { route: o.route } : {}), ...(o.routeTakeoff ? { routeTakeoff: o.routeTakeoff } : {}), ...(o.takeoffYaw !== undefined ? { takeoffYaw: o.takeoffYaw } : {}) });
   let body = initialBody(start, true);
   let cmd = { ...IDLE_COMMAND };
-  let rockets = 64;
+  const rockets0 = o.rockets ?? 64;
+  let rockets = rockets0;
   let lastFire = -100;
   let lastAir = { vy: 0, h: 0 };
   let hits = 0;
@@ -99,7 +105,7 @@ export function trip(w: ReturnType<typeof world>, start: { x: number; y: number;
     body = stepBody(body, step, w.solid).state;
     if (body.gliding && Math.hypot(before.x, before.z) > 0.6 && Math.hypot(body.vel.x, body.vel.z) < Math.hypot(before.x, before.z) * 0.3 && body.pos.y > FEET + 0.5) hits++;
     if (body.gliding) minClear = Math.min(minClear, body.pos.y - w.skyTop(Math.floor(body.pos.x), Math.floor(body.pos.z)));
-    if (out.end) return { end: out.end, ticks: t, rockets: 64 - rockets, goArounds: brain.stats.goArounds, reasons: brain.stats.goAroundReasons, lastAir, hits, body, notes, holdTicks: brain.stats.holdTicks, descents: brain.stats.descents, stats: brain.stats, approachTicks: brain.stats.approachTicks };
+    if (out.end) return { end: out.end, ticks: t, rockets: rockets0 - rockets, goArounds: brain.stats.goArounds, reasons: brain.stats.goAroundReasons, lastAir, hits, body, notes, holdTicks: brain.stats.holdTicks, descents: brain.stats.descents, stats: brain.stats, approachTicks: brain.stats.approachTicks };
   }
   throw new Error(`the flight never ended (${brain.phase}, notes ${notes.join(' | ')})`);
 }

@@ -333,10 +333,10 @@ function stub<P>(name: string, note: string): Maneuver<P> {
     maxTicks: () => 0,
   };
 }
-/** The short boost: a hotbar slot switch mid-rocket to cut the burn short (in Java the boost belongs to the rocket entity and survives the switch). */
-export const shortBoost: Maneuver<{ ticks: number; heading: number; pitch: number }> = stub('shortBoost', 'a rocket cut after `ticks` by a hotbar slot switch (the impulse fine-tuned); F0 measures whether BDS ends the boost on a switch');
-/** Stacked rockets: a second rocket before the first one's burn ends (a continuous boost). */
-export const stackedBoost: Maneuver<{ rockets: number; heading: number; pitch: number }> = stub('stackedBoost', 'rockets re-fired before the burn ends (a continuous boost); F0 measures whether boosts stack or just extend');
+/** The short boost: a hotbar slot switch mid-rocket to cut the burn short. Track F0 measured that BDS does NOT cut the boost on a switch (nor fires rockets from the offhand): a no-op kept for the record, it refuses every entry. */
+export const shortBoost: Maneuver<{ ticks: number; heading: number; pitch: number }> = stub('shortBoost', 'a rocket cut after `ticks` by a hotbar slot switch: Track F0 measured that a switch does not cut the boost (docs/flight-envelope.md section 5); never available');
+/** Stacked rockets: a second rocket before the first one's burn ends. Track F0: the boost is the UNION of the lifetimes (no doubling); the continuous boost is sound but no manoeuvre uses it yet. */
+export const stackedBoost: Maneuver<{ rockets: number; heading: number; pitch: number }> = stub('stackedBoost', 'rockets re-fired before the burn ends: Track F0 measured the union of the lifetimes, no stronger push (docs/flight-envelope.md section 4); not flown by a planner yet');
 /** The wall kiss: touch a wall under the impact-damage threshold to stop. */
 export const wallKiss: Maneuver<{ wall: Vec3; maxSpeed: number }> = stub('wallKiss', 'a touch of a wall under the impact threshold as a brake; F0 measures the threshold on BDS');
 /** The rocket brake: a rocket while looking back (a near-instant stop, then a reverse unless the burn is cut: needs the short boost). */

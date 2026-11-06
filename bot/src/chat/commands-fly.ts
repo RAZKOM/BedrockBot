@@ -19,6 +19,9 @@ import { pathBlocks, probePath } from '../skills/home/reach.ts'; // Track AU2: t
 import { probeNavOf } from '../skills/combat/pathReach.ts';
 import { findLanding, isHazardName, isLiquidName, stillLandable, WET_ABOVE, type BlockLookup, type LandingPlan, type ProbeOutcome } from '../skills/fly/landing.ts'; // Track BF
 import { TerrainMemo, type TerrainColumn } from '../skills/fly/terrain.ts'; // Track BL
+import type { RouteGrid } from '../skills/fly/route/grid.ts'; // Track F3
+import { planTakeoffRoute, type TakeoffRoute } from '../skills/fly/route/takeoff.ts'; // Track F3
+import { RoutePlannerClient } from '../skills/fly/route/worker.ts'; // Track F3
 import { preferSite, RECHECK_EVERY_MS, RecheckState, SITE_BUDGET_MS, SITE_PROBES, SITE_SIMS, siteCandidates } from '../skills/fly/sites.ts'; // Track BL
 import type { Goal, GotoOptions, SkillResult } from '../skills/types.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
@@ -182,6 +185,13 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   };
   /** Track BF: the live world model for the landing search (undefined = not loaded; the cache never counts). */
   const look: BlockLookup = (x, y, z) => world.blockAt({ x, y, z });
+  // Track F3 (docs/flight.md "Route landings and takeoffs"): the route planner: the grid over the live model (unknown =
+  // solid, the sky check's rule), the search in the worker (RoutePlannerClient, the 0023 pattern: an in-thread search of
+  // 300 ms stalled the loop 6 ticks on bds-fly3), off with `flyRoute off`
+  const routeGrid: RouteGrid = { solid: (x, y, z) => world.blockAt({ x, y, z })?.solid ?? true };
+  const routeClient = new RoutePlannerClient({ log });
+  const routePlanner = routeClient.plannerOver(routeGrid);
+  const routeOn = (): boolean => String(d.settings.get('flyRoute')) !== 'off';
   /**
    * Track BF (docs/flight.md "Landing v3"): the landing for a walk to `goal` (landing.ts findLanding): only
    * live cells, only dry ground, only a cell with a confirmed walking path (a bounded probe plan from its
@@ -202,7 +212,15 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const plan = await findLanding(
       goal,
       label,
-      { look, obstacle: (x, y, z) => world.blockAt({ x, y, z })?.solid === true, ...(probe ? { probe } : {}), dryGround: (x, z) => landable(x, z), yieldNow: () => new Promise((r) => setImmediate(r)) },
+      {
+        look,
+        obstacle: (x, y, z) => world.blockAt({ x, y, z })?.solid === true,
+        ...(probe ? { probe } : {}),
+        dryGround: (x, z) => landable(x, z),
+        yieldNow: () => new Promise((r) => setImmediate(r)),
+        // Track F3: the route planner for a precision goal the brake cannot land (a slot 2 high, a hole, a 1 x 1 shaft)
+        ...(routeOn() ? { route: { grid: routeGrid, plan: routePlanner, rockets: Math.min(4, Math.max(2, readKit(inv, memory()).rocketsHotbar)) } } : {}),
+      },
       {
         radius: d.settings.get('flyLandSearch'),
         headroom: d.settings.get('flyHeadroom'),
@@ -211,6 +229,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         budgetMs: LAND_BUDGET_MS,
         style: String(d.settings.get('flyLandStyle')) as 'auto' | 'flare' | 'brake', // Track F1: the precision goal, the brake's corridors
         ...(exact !== undefined ? { exact } : {}),
+        ...(position() ? { from: position()! } : {}), // Track F3: a route landing comes in from the body's side
       },
     );
     log.info(`fly: ${plan.line}`);
@@ -321,6 +340,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       unprone: () => (skills as { unprone?: () => Promise<{ ok: boolean; dug: string[]; why?: string }> }).unprone?.() ?? Promise.resolve({ ok: false, dug: [], why: 'no digging' }),
       say: (m) => d.chat.say(m),
       restock: (item, n) => restockFromBoxes(d.task, item, n),
+      ...(routeOn() ? { route: { grid: routeGrid, plan: routePlanner } } : {}), // Track F3
       waitTicks: (n) => loop.waitTicks(n),
       supply,
       log,
@@ -413,17 +433,29 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     return r.top !== undefined && r.yaw !== undefined ? { vertical: r.top, takeoffYaw: r.yaw } : undefined;
   };
   /**
+   * Track F3 (docs/flight.md "Route landings and takeoffs"): the route takeoff (route/takeoff.ts): the air around
+   * the start flooded for the nearest cells under open sky, a plan from standing to one of them searched in the
+   * worker; the last step of the chain before the walk-out legs (out of a hole, a low room, a stack's inner
+   * platform when no ledge is clear). Undefined: no exit, or no plan (the line says).
+   */
+  const routeTakeoffFor = async (from: Vec3, target: LandingTarget, rockets: number, quiet = false): Promise<{ routeTakeoff: TakeoffRoute; takeoffYaw: number } | undefined> => {
+    if (!routeOn()) return undefined;
+    const r = await planTakeoffRoute(routeGrid, from, target, { rockets: Math.min(4, Math.max(1, rockets)) }, routePlanner);
+    if (!quiet) log.info(`fly: route takeoff: ${r.exits} exit${r.exits === 1 ? '' : 's'} under open sky; ${r.tried.length ? r.tried.join('; ') : 'none tried'}`);
+    return r.route ? { routeTakeoff: r.route, takeoffYaw: r.route.yaw } : undefined;
+  };
+  /**
    * Track BH: how this flight takes off: a ledge (ledgeFor), else the jump along the first heading whose
    * simulated climb meets no solid (the sky check's first, then 30 degrees apart: the Realm's takeoff into a
-   * tree canopy, 2026-10-31), else straight up the open column over the bot (verticalFor), else refused with
-   * the line (walk out, or a takeoff site).
+   * tree canopy, 2026-10-31), else straight up the open column over the bot (verticalFor), else (Track F3) a
+   * route out through the planner (routeTakeoffFor), else refused with the line (walk out, or a takeoff site).
    */
-  const takeoffFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number, quiet = false): Promise<{ ledge?: Ledge; takeoffYaw?: number; vertical?: number } | { refuse: string }> => {
+  const takeoffFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number, quiet = false): Promise<{ ledge?: Ledge; takeoffYaw?: number; vertical?: number; routeTakeoff?: TakeoffRoute } | { refuse: string }> => {
     const ledge = await ledgeFor(from, target, sky, rockets, quiet);
     if (ledge) return { ledge };
     if (!sky.ok) {
       // the 3 x 3 or the run blocked leaves the column over the head (a roof right over it: verticalFor says so at once)
-      return (await verticalFor(from, target, rockets, quiet)) ?? { refuse: sky.line };
+      return (await verticalFor(from, target, rockets, quiet)) ?? (await routeTakeoffFor(from, target, rockets, quiet)) ?? { refuse: sky.line };
     }
     const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
     const yaws = [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180].map((o) => sky.yaw + o);
@@ -434,7 +466,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (r.yaw !== undefined) return { takeoffYaw: r.yaw };
     const v = await verticalFor(from, target, rockets, quiet);
     if (v) return v;
-    return { refuse: 'fly: no clear climb from here (the simulated climb meets a solid on every heading: trees, a wall, and none straight up); walk outside first' };
+    const rt = await routeTakeoffFor(from, target, rockets, quiet);
+    if (rt) return rt;
+    return { refuse: 'fly: no clear climb from here (the simulated climb meets a solid on every heading: trees, a wall, none straight up and no route out); walk outside first' };
   };
   /** Track BL: a takeoff site to walk to (sites.ts): the cell, the walk there (blocks of the probed path), the flight from there and its takeoff. */
   interface TakeoffSite {
@@ -838,6 +872,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       delete found.target.ledge;
       delete found.target.takeoffYaw;
       delete found.target.vertical;
+      delete found.target.routeTakeoff;
       Object.assign(found.target, tk);
     }
     return runAuto(found, goal, label, half, rest, legWalk);
@@ -901,6 +936,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   const stop = task.stop.bind(task);
   task.stop = () => {
     controller.dispose();
+    void routeClient.stop(); // Track F3: the route worker
     stop();
   };
 

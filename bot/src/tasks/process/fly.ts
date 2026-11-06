@@ -22,6 +22,8 @@ import type { FlightKitOps } from '../../skills/fly/kitops.ts';
 import { cruiseHeight, flightSeconds, hdist, takeoffSky, type CellQuery, type LandingTarget } from '../../skills/fly/plan.ts';
 import type { LandingCell, LandingPlan } from '../../skills/fly/landing.ts';
 import { glideOptions, type Ledge } from '../../skills/fly/glide.ts';
+import type { BrainOptions } from '../../skills/fly/brain.ts'; // Track F3
+import type { TakeoffRoute } from '../../skills/fly/route/takeoff.ts'; // Track F3
 import { HIGH_CRUISE_Y, highCruiseWanted } from '../../skills/fly/terrain.ts'; // Track BL
 import type { SkillResult } from '../../skills/types.ts';
 import { BaseProcess, PRIORITY, type ProcessKind, type ProcessStatus, type StopReason } from './manager.ts';
@@ -55,6 +57,8 @@ export interface FlyTarget extends LandingTarget {
   takeoffYaw?: number;
   /** The vertical takeoff: straight up this many blocks over the feet, then the climb along `takeoffYaw` (commands-fly takeoffFor, glide.ts verticalTakeoff). */
   vertical?: number;
+  /** Track F3: the route takeoff (route/takeoff.ts): the tracker flies the body out to the exit, then the climb along `takeoffYaw`. */
+  routeTakeoff?: TakeoffRoute;
   /** Track BH, the glide down: no climb (the cruise height is the target's), rockets optional, no refill from the box. */
   glide?: boolean;
 }
@@ -114,6 +118,8 @@ export interface FlyDeps {
   unprone?: () => Promise<{ ok: boolean; dug: string[]; why?: string }>;
   /** Rockets out of any other carried shulker box (Supply.ensure) when the fireworks box has none; true when some came out. */
   restock?(item: string, n: number): Promise<boolean>;
+  /** Track F3: the route planner in flight (the grid over the live model, the worker's search): the route landings and takeoffs; absent (flyRoute off): none. */
+  route?: BrainOptions['route'];
   /** The owner's lines (the supply whispers, the kept-kit notes). */
   say(msg: string): void;
   waitTicks(n: number): Promise<void>;
@@ -363,7 +369,9 @@ export class FlyProcess extends BaseProcess {
     // ledge takeoff was simulated from the edge instead (its corridor, the glide out from under an overhang)
     // (the vertical takeoff was checked from its hand-over height: the column, then the sky check there, then simulated)
     const vertical = ledge ? undefined : this.target.vertical;
-    const sky = ledge || vertical !== undefined ? undefined : takeoffSky(from, this.target, cz.y, s.get('flyTakeoffRun'), this.d.cell);
+    // (Track F3: a route takeoff was planned out of a place the sky check refuses: no check here)
+    const routeTakeoff = ledge || vertical !== undefined || !this.d.route ? undefined : this.target.routeTakeoff;
+    const sky = ledge || vertical !== undefined || routeTakeoff ? undefined : takeoffSky(from, this.target, cz.y, s.get('flyTakeoffRun'), this.d.cell);
     if (sky && !sky.ok) {
       this.log.info(`fly: ${this.target.label}: ${sky.line}`);
       this.end({ ok: false, reason: sky.line });
@@ -373,18 +381,19 @@ export class FlyProcess extends BaseProcess {
     const high = !glide && highCruiseWanted(String(s.get('flyHighCruise')), { distance: this.distance, needed: cz.needed, unknown: cz.unknown });
     const cruiseY = glide && ledge ? this.target.top : high ? Math.max(cz.y, HIGH_CRUISE_Y) : cz.y;
     this.log.info(
-      `fly: to ${this.target.label} (${Math.round(this.distance)} blocks): ${glide ? `a glide down (no climb, ${this.kit().rocketsHotbar} rockets at hand)` : `cruise y ${cruiseY.toFixed(1)}${high ? ' (the high cruise)' : ''} (highest column ${cz.highest ?? '?'}, ${cz.unknown} unknown, the glide needs ${cz.needed.toFixed(0)})`}${ledge ? `, a ledge takeoff from ${ledge.x} ${ledge.feet} ${ledge.z} heading ${Math.round(ledge.yaw)}` : ''}${vertical !== undefined ? `, a vertical takeoff ${vertical} up, then heading ${Math.round(this.target.takeoffYaw ?? 0)}` : ''}; ${kitLine(this.kit())}`,
+      `fly: to ${this.target.label} (${Math.round(this.distance)} blocks): ${glide ? `a glide down (no climb, ${this.kit().rocketsHotbar} rockets at hand)` : `cruise y ${cruiseY.toFixed(1)}${high ? ' (the high cruise)' : ''} (highest column ${cz.highest ?? '?'}, ${cz.unknown} unknown, the glide needs ${cz.needed.toFixed(0)})`}${ledge ? `, a ledge takeoff from ${ledge.x} ${ledge.feet} ${ledge.z} heading ${Math.round(ledge.yaw)}` : ''}${vertical !== undefined ? `, a vertical takeoff ${vertical} up, then heading ${Math.round(this.target.takeoffYaw ?? 0)}` : ''}${routeTakeoff ? `, a route takeoff out to ${routeTakeoff.exit.x} ${routeTakeoff.exit.y} ${routeTakeoff.exit.z} (${routeTakeoff.ticks} ticks, ${routeTakeoff.rockets} rockets planned), then heading ${Math.round(this.target.takeoffYaw ?? routeTakeoff.yaw)}` : ''}${this.target.route ? `, a route landing in from ${Math.round(this.target.route.bearing)}` : ''}; ${kitLine(this.kit())}`,
     );
     this.phase = 'flying';
     // Track BL: the terrain floor, the clearance, the high cruise and the descent mode (a glide down keeps its simulated plan: no floor)
-    const bl = { clearance: s.get('flyClearance'), descent: String(s.get('flyDescent')) as 'auto' | 'dive' | 'spiral', landStyle: String(s.get('flyLandStyle')) as 'auto' | 'flare' | 'brake', ...(high ? { highCruise: true } : {}) }; // Track F1: flyLandStyle
-    const opts = glide && ledge ? { ...glideOptions(this.target, ledge, { margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds') }), terrainFloor: false, descent: bl.descent, landStyle: bl.landStyle } : { cruiseY, margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(ledge ? { ledge: { yaw: ledge.yaw } } : {}), ...(vertical !== undefined ? { vertical: { top: vertical } } : {}), ...bl };
+    // Track F3: the route planner (the route landing's tracker, the route takeoff)
+    const bl = { clearance: s.get('flyClearance'), descent: String(s.get('flyDescent')) as 'auto' | 'dive' | 'spiral', landStyle: String(s.get('flyLandStyle')) as 'auto' | 'flare' | 'brake', ...(high ? { highCruise: true } : {}), ...(this.d.route ? { route: this.d.route } : {}), ...(routeTakeoff ? { routeTakeoff: { goals: routeTakeoff.goals, margin: routeTakeoff.margin, weight: routeTakeoff.weight } } : {}) }; // Track F1: flyLandStyle
+    const opts = glide && ledge ? { ...glideOptions(this.target, ledge, { margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds') }), terrainFloor: false, descent: bl.descent, landStyle: bl.landStyle, ...(this.d.route ? { route: this.d.route } : {}) } : { cruiseY, margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(ledge ? { ledge: { yaw: ledge.yaw } } : {}), ...(vertical !== undefined ? { vertical: { top: vertical } } : {}), ...bl };
 
     this.flight = this.d.controller.flyTo(this.target, {
       ...opts,
       fleeHealth: s.get('fleeHealth'),
       elytraWornAt: elytraWornLimit(wear, this.kit()),
-      ...(sky?.ok ? { takeoffYaw: this.target.takeoffYaw ?? sky.yaw } : vertical !== undefined && this.target.takeoffYaw !== undefined ? { takeoffYaw: this.target.takeoffYaw } : {}),
+      ...(sky?.ok ? { takeoffYaw: this.target.takeoffYaw ?? sky.yaw } : (vertical !== undefined || routeTakeoff) && this.target.takeoffYaw !== undefined ? { takeoffYaw: this.target.takeoffYaw } : routeTakeoff ? { takeoffYaw: routeTakeoff.yaw } : {}),
     });
     void this.flight.then((r) => {
       this.report = r;

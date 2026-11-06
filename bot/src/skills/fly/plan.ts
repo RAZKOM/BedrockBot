@@ -23,6 +23,7 @@
 // search (the flare family below, the brake family of brake.ts).
 import type { Vec3 } from '../../connection/types.ts';
 import { GLIDE, glideVelocity } from '../input/physics.ts';
+import type { RouteHandoff } from './route/landing.ts'; // Track F3 (a type only)
 
 /** A landing target: the block top to stand on (feet y = `top`), its centre and half width in blocks (1 = 3 x 3). */
 export interface LandingTarget {
@@ -67,6 +68,13 @@ export interface LandingTarget {
    * the cost picks, which for such a cell is the brake / elevator landing (brake.ts).
    */
   precise?: boolean;
+  /**
+   * Track F3 (docs/flight.md "Route landings and takeoffs"): a cell the flare and the brake refuse (a cell under
+   * a roof 2 above, a hole, a 1 x 1 shaft) that the route planner found a plan onto from an entry along
+   * `bearing`: the brain flies the cruise to that corridor's entry and hands the last ROUTE_HANDOVER blocks to
+   * the RouteTracker (brain.ts `route`), which lands it from the real state with the planner's edges.
+   */
+  route?: RouteHandoff;
 }
 
 /** Track F1: the height the approach is measured from: the target's top, or the rim around a shaft floor. */

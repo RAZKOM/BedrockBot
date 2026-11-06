@@ -19,8 +19,8 @@ export interface BoostRange {
 }
 
 export const NO_BOOST: Readonly<BoostRange> = Object.freeze({ min: 0, max: 0, nom: 0 });
-/** The burn of one flight-duration-1 rocket, measured on bds-fly: 12 to 18 ticks, nominal 15 (GLIDE.boostTicks). */
-export const BURN: Readonly<{ min: number; max: number; nominal: number }> = Object.freeze({ min: 12, max: 18, nominal: 15 });
+/** The burn of one flight-duration-1 rocket, measured on bds-fly (Track F0, n 175: 9 to 21 ticks, mean 15.7), nominal 15 (GLIDE.boostTicks). */
+export const BURN: Readonly<{ min: number; max: number; nominal: number }> = Object.freeze({ min: 9, max: 21, nominal: 15 });
 /** The boost range right after a rocket is used. */
 export function freshBurn(): BoostRange {
   return { min: BURN.min, max: BURN.max, nom: BURN.nominal };
@@ -91,7 +91,29 @@ export interface RegionBox {
  */
 export type RouteGoal =
   | { kind: 'waypoint'; box: RegionBox }
-  | { kind: 'landing'; cell: { x: number; z: number }; top: number; maxSpeed?: number };
+  | {
+      kind: 'landing';
+      cell: { x: number; z: number };
+      top: number;
+      maxSpeed?: number;
+      /**
+       * Track F3: the other cells of the floor a touchdown may end in (a 3 x 3 platform, a 2 x 2 shaft floor); `cell`
+       * is the one the heuristic measures to and the settle aims at. A contact inside any of them lands.
+       */
+      cells?: readonly { x: number; z: number }[];
+      /**
+       * Track F3: the heuristic's hint for a cell that cannot be reached straight (the floor of a shaft, a cell under
+       * a low roof): the body must pass `pos` first, then covers the way from there at `speed` (the hover's sink down
+       * a shaft, the creep into a slot). Without it the heuristic flies straight at the cell at the boosted speed
+       * and a search for a shaft floor drowns in the open air over it (docs/flight.md "Route landings").
+       */
+      via?: { pos: Vec3; speed: number };
+    };
+
+/** Track F3: the cells of a landing goal (the cell and its `cells`). */
+export function landingCells(g: Extract<RouteGoal, { kind: 'landing' }>): readonly { x: number; z: number }[] {
+  return g.cells?.length ? g.cells : [g.cell];
+}
 
 export interface RouteRequest {
   start: RouteState;
@@ -110,6 +132,12 @@ export interface RouteRequest {
   edgeTicks?: number;
   /** Which primitive families to use (default all; the benchmark's ablations). */
   families?: readonly PrimitiveFamily[];
+  /**
+   * Track F3: the edge set by name, so a request can cross to the worker: `minimal` (default) is F2's library
+   * (primitives.ts libraryFor), `landing` is F2's glides, turns and rockets with Track F1's manoeuvres and the
+   * brake landing's approaches and settles onto every landing goal (maneuvers-route.ts routeLibrary).
+   */
+  library?: 'minimal' | 'landing';
   /** Rockets may be fired while one burns (F0 measures whether they stack; default false: only when none burns for sure). */
   stackRockets?: boolean;
   /**
@@ -120,6 +148,12 @@ export interface RouteRequest {
   burnBranches?: boolean;
   /** The search's seed (tie breaks; the search itself is deterministic). */
   seed?: number;
+  /**
+   * Track F3: the heuristic's weight (f = g + weight x h; default 1). Over 1 the search is greedier towards
+   * the goal and finds a landing's long edges (an approach, a settle of 40 ticks) in far fewer nodes, for a
+   * plan that may be a few ticks longer than the best one.
+   */
+  weight?: number;
 }
 
 export type PrimitiveFamily = 'glide' | 'turn' | 'rocket' | 'brake' | 'hover' | 'takeoff' | 'maneuver';
@@ -207,13 +241,15 @@ export const RISK_RANGE = 1.0;
 export const EDGE_TICKS = 3;
 export const EDGE_MAX_TICKS = 40;
 /**
- * Airborne ticks of plain jump physics before the server's glide takes after a full jump (bds-fly3, run 5 of the
- * e2e: the server starts a glide only once the body FALLS: the jump's rise of 6 ticks, then the request on the first
- * falling tick, confirmed the tick after; the brain's takeoff requests the glide on a falling tick for the same
- * reason). A jump clipped by a ceiling falls at once: CLIPPED_GLIDE_DELAY.
+ * Airborne inputs of plain jump physics before the server's glide takes after a jump. Track F0 measured it on
+ * bds-fly (docs/flight-envelope.md section 8): the input right after the jump's is refused, the glide takes from
+ * the 2nd airborne input on, while the body still rises (F2's "only once the body falls" was a teleport
+ * artefact). The input loop holds a request on the 1st airborne input and asks on the 2nd. A jump clipped by a
+ * 2-high ceiling has only 2 airborne inputs: the body is back on the floor before any glide (no jump takeoff
+ * there; CLIPPED_GLIDE_DELAY keeps the same one input of plain physics so the search finds that out).
  */
-export const GLIDE_DELAY = 7;
-export const CLIPPED_GLIDE_DELAY = 2;
+export const GLIDE_DELAY = 1;
+export const CLIPPED_GLIDE_DELAY = 1;
 
 export function cloneState(s: Readonly<RouteState>): RouteState {
   return { ...s, pos: { ...s.pos }, vel: { ...s.vel }, boost: { ...s.boost } };

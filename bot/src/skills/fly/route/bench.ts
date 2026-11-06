@@ -23,6 +23,9 @@ export interface BenchOptions {
   maxMs?: number;
   stackRockets?: boolean;
   families?: readonly PrimitiveFamily[];
+  /** Track F3: the heuristic's weight and the edge set by name of every request (a route landing's tracker flies with `landing` and ROUTE_WEIGHT). */
+  weight?: number;
+  library?: RouteRequest['library'];
   /** The planner sees only cells within this many blocks of the body (unknown = solid beyond); the tracker is told of "loaded chunks" every 4 blocks of travel. */
   view?: number;
   /** Check the first plan's robustness over the burn range (costs a few ms per rocket). */
@@ -83,6 +86,8 @@ export function flyCourse(course: Course, o: BenchOptions = {}): BenchResult {
     maxMs: o.maxMs ?? 2000,
     ...(o.stackRockets !== undefined ? { stackRockets: o.stackRockets } : {}),
     ...(o.families ? { families: o.families } : {}),
+    ...(o.weight !== undefined ? { weight: o.weight } : {}),
+    ...(o.library !== undefined ? { library: o.library } : {}),
     yaw: course.start.yaw,
     ...(o.note ? { note: o.note } : {}),
   });
@@ -123,11 +128,11 @@ export function flyCourse(course: Course, o: BenchOptions = {}): BenchResult {
       break;
     }
     const c = out.control;
-    // the glide is wanted throughout; after a jump the server starts the glide only once the body falls, a tick after the
-    // request (bds-fly3: the brain's takeoff asks on a falling tick too), so the harness withholds the model's glide until
-    // the second falling tick (stepBody itself would glide from the first airborne tick)
+    // the glide is wanted throughout; after a jump the server refuses the request on the first airborne input and takes it
+    // from the second (Track F0, docs/flight-envelope.md section 8), so the harness withholds the model's glide on the
+    // first airborne step (stepBody itself would glide from it)
     if (body.onGround) falling = 0;
-    else if (body.vel.y < 0) falling++;
+    else falling++;
     const glideNow = body.gliding === true || body.onGround || falling >= 2;
     const cmd: MoveCommand = { ...IDLE_COMMAND, yaw: c.yaw, pitch: c.pitch, jump: c.jump === true, glide: glideNow };
     if (c.fire && rockets > 0) {
