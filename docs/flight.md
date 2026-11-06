@@ -2489,6 +2489,169 @@ first came down, in place of `SKY_WALK_MAX` 64):
 - Only an exact `!fly <x y z>` to a covered goal more than 96 away takes the corridor; `!goto` / `!come` keep
   their own fly-then-walk.
 
+## Real-cave benchmark (Track F5a)
+
+Flight v2, Track F5a, [decisions/0068](decisions/0068-real-cave-benchmark.md). The corridor flight's first real cave
+(the owner's, 2026-11-06) went wrong where the made-up bores of F4b never did. This track turns that cave into a
+benchmark, offline and on a test server, and stops the takeoff from water that failed there. **The cave is private:
+nothing in the repository names it or gives a coordinate of it.** Its data lives in `bot/fixtures-private/cave/`
+(git-ignored; `CAVE_FIXTURE_DIR` points elsewhere), and every test and script that reads it skips without it.
+
+### The fixture (`world/cache/export.ts`, `corridor/cave.ts`)
+
+`export.ts` writes a box of a world cache as one file: the 2-bit classes packed and deflated, the chunks the cache
+never saw listed, the highest solid block of every column of a wider rectangle (`--tops`). It opens the cache
+read-only and writes to stdout, so it runs on the deploy host over ssh from stdin and writes nothing there (the
+command is in the file's header; the host needs the same commit). The owner's cave: a box of 288 x 150 x 227 cells,
+none in an unknown chunk (air 4.33 M, solid 5.38 M, water 94 k, avoid 5 k), 334 kB, exported in 0.46 s. The bot's
+waypoint file goes next to it as `waypoints.json`.
+
+`caveWorld` reads the extract once for every consumer: the route planner's grid, stepBody's block query, the coarse
+layer's chunk source (the chunks wholly inside the box) and the walk navigator's terrain. An unknown chunk is solid;
+outside the box is solid sideways and below and open sky above; avoid is solid; water is water (a source block's
+height). **The cache rounds a partial block up to a full cube**: a slab or a stair step reads as a whole block, so two
+of the owner's steps read 2 and 3 high (cave_start to cave_1, cave_8 to cave_9) and the walk cannot take them.
+
+The routes (`ROUTE_A`, `ROUTE_B`, `TRIP_C`; consecutive waypoints are the legs, each waypoint moved to the nearest
+standable feet cell):
+
+| route | stops | |
+|---|---|---|
+| A | cave_start, cave_1 .. cave_21, cave_end | the whole path, 22 legs of 6 to 43 blocks; cave_2 is under open sky, cave_4 to cave_7 have water floors |
+| B | cave_4, cave_5, cave_shortcut, cave_end | the shortcut, flight only (the coarse layer's walk from cave_5 to cave_shortcut is 160 blocks, the fly 16; no walk at any step height up to 4) |
+| C | home, cave_2, cave_start | the trip in from home: the cruise to the entrance by cave_2 and in (home is outside the box) |
+
+### Offline (`corridor/cave-bench.ts`, `scripts/cave-bench.ts`)
+
+The live code on stepBody: the corridor executor with `underFly` on (`executor`: the coarse layer over the extract,
+the stretches and windows, the TrackerChain, the walks through the walk navigator in a closed loop:
+`test/unit/skills/fly-cave-walk.ts`), each leg as one window from standing (`leg`), the whole route as one window
+(`route`), and the walk-only baseline (`walk`). Every flight over every burn 9 to 21 (its end told 3 ticks late, the
+rocket only with no boost left), two planner budgets (live 600 ms / 40 000 nodes, generous 3 000 ms / 200 000);
+wall touches are flown through and scored with F0's wall damage, water ends the glide. 1 377 jobs on 20 worker
+processes, 36 minutes (the final code, 2026-11-06):
+
+`leg`, route A (done of 13 burns; live / generous; the mean ticks, rockets, damage and partial plans at the live budget):
+
+| leg | done | clean | rockets | damage | partial | other ends (live) |
+|---|---|---|---|---|---|---|
+| cave_start -> cave_1 | 2 / 3 | 1 / 2 | 13.4 | 9.5 | 68 | ground 11 |
+| cave_1 -> cave_2 | 6 / 10 | 4 / 8 | 8.5 | 3.7 | 32 | ground 4, water 3 |
+| cave_2 -> cave_3 | 13 / 11 | 13 / 11 | 6.7 | 0 | 24 | - |
+| cave_3 -> cave_4, cave_4 -> cave_5, cave_5 -> cave_6 | 0 / 0 | 0 / 0 | 1 to 1.5 | 0 to 0.4 | 3 to 5 | water 13 (the glide ends in the water floor) |
+| cave_6 -> cave_7, cave_7 -> cave_8 | 0 / 0 | 0 / 0 | 0 | 0 | 4 to 5 | timeout 13 (standing in water: no glide; refused live now) |
+| cave_8 -> cave_9 | 2 / 2 | 1 / 1 | 7.6 | 114.3 | 52 | ground 10, water 1 |
+| cave_9 -> cave_10 | 0 / 0 | 0 / 0 | 0 | 0 | 41 | failed 13 (no start found) |
+| cave_10 -> cave_11 | 4 / 8 | 1 / 7 | 19.8 | 5.7 | 72 | ground 7, water 2 |
+| cave_11 -> cave_12 | 12 / 13 | 12 / 12 | 2.2 | 0 | 5 | ground 1 |
+| cave_12 -> cave_13 | 8 / 10 | 5 / 10 | 6.9 | 26.8 | 26 | ground 5 |
+| cave_13 -> cave_14 | 10 / 11 | 7 / 7 | 11.1 | 7.4 | 28 | ground 3 |
+| cave_14 -> cave_15 | 3 / 4 | 3 / 3 | 7.6 | 2.0 | 23 | water 7, ground 3 |
+| cave_15 -> cave_16 | 5 / 6 | 5 / 6 | 5.8 | 0.6 | 21 | water 6, ground 2 |
+| cave_16 -> cave_17 | 5 / 9 | 3 / 7 | 9.9 | 5.4 | 39 | ground 8 |
+| cave_17 -> cave_18 | 9 / 11 | 9 / 10 | 8.6 | 8.3 | 29 | ground 4 |
+| cave_18 -> cave_19 | 8 / 12 | 5 / 12 | 10.5 | 20.3 | 37 | ground 5 |
+| cave_19 -> cave_20 | 2 / 3 | 1 / 3 | 22.6 | 3.5 | 90 | ground 11 |
+| cave_20 -> cave_21 | 6 / 9 | 4 / 7 | 10.1 | 1.6 | 34 | ground 7 |
+| cave_21 -> cave_end | 13 / 11 | 12 / 11 | 6.8 | 0.4 | 13 | - |
+
+`leg`, route B: cave_4 -> cave_5 0 / 0 (water 13); **cave_5 -> cave_shortcut 0 / 0, hits in 13 of 13, 18.4 rockets,
+110.6 damage (live; 60.0 generous), 129 partial plans**; cave_shortcut -> cave_end 10 / 11 done but none clean (3.5
+damage). `route` (the whole route as one window): A 0 of 13 both budgets (water after about 110 ticks), B 0 of 13
+(water 13, 8.4 / 14.2 damage).
+
+`executor` (arrived of 13 burns, the same at both budgets but where noted): route A cave_start -> cave_1 5 / 6 (the
+fly 45 window lands short, the walks after it fail at the 2-high step), cave_1 -> cave_2 13 / 13 (one window,
+14.8 rockets, 2.1 damage live, 0.6 generous), cave_2 -> cave_3 0 / 1, cave_3 -> cave_4 0, cave_4 -> cave_5 13
+(walked), cave_5 -> cave_6 0, cave_6 -> cave_7 0, cave_7 -> cave_8 0, cave_8 -> cave_9 10 / 12 (walk fails, a fly 36
+window, walk), cave_9 -> cave_14 13 each (walked), cave_14 -> cave_15 0, cave_15 -> cave_end 13 each (walked).
+Route B: cave_4 -> cave_5 13 (walked), **cave_5 -> cave_shortcut 0 and cave_shortcut -> cave_end 0: the corridor is
+walk legs only and the walks fail; the executor never tries the flight that `leg` mode shows is possible**. Every
+failed leg is fast: five re-plans of the same corridor, each walk refused at once.
+
+`walk` (the navigator alone): route A walks 15 of 22 legs (not cave_start -> cave_1, cave_3 -> cave_4, cave_5 -> cave_6,
+cave_6 -> cave_7, cave_7 -> cave_8, cave_8 -> cave_9, cave_14 -> cave_15), route B 1 of 3.
+
+### On the server (`fly-cave.test.ts`, bds-fly2)
+
+`truth:cave` rebuilds the box on the server (stone over it, then 54 447 boxes of air and water in 299 messages of at
+most 1 800 characters, 535 k characters): the boxes 1.1 s, sent 15.7 s (6 at a time), built 15.9 s (2 pieces under
+ticking areas, 270 ticks), **33 s in all** for 9.8 M cells (26 s the second time: built 10.0 s, 196 ticks). The replica keeps the real heights and is moved in x and z
+by a multiple of 16 (`FLY_CAVE_AT`, default -96000,-96000); home gets a 5 x 5 pad at its real height, the ground
+between it and the box is the flat world's. Seen first: a fly-over of the box's surface (12 teleports) and of the
+flat ground from home to the box into a fresh world cache, the coarse layer over it on the navigator.
+
+Two runs of 2026-11-06 (every run completed both times, 636 / 595 s; a / b where they differ; trip C from a third
+run and the second):
+
+| run | arrived | notes |
+|---|---|---|
+| tripC: `!fly` home -> cave_start, today's behaviour | no (71 / 99 off) | the corridor plan partial (the layer's 4 000 ms search limit: one fly leg of 997 blocks ending 33 from the goal), the cruise to its end, "no landing spot near it with a walking path", landed on dry ground by the entrance, 31.7 s, 0 damage; the walk in not tried. Without the fly-over of the ground between home and the box (the first run) the layer's legs ran 64 to 94 % through unknown space and were walked: 5 re-plans, 0 rockets |
+| walkA: route A walked | 16 of 22 legs | not cave_start -> cave_1, cave_3 -> cave_4, cave_5 -> cave_6, cave_6 -> cave_7, cave_8 -> cave_9, cave_10 -> cave_11 (all `unreachable` at once but cave_6 -> cave_7); 10 to 172 ticks in water on 7 legs; 10 fall damage on cave_14 -> cave_15 |
+| flyA: route A, `underFly` on | 15 / 14 of 22 legs | flown: cave_start -> cave_1 (22.8 s, 1 rocket, 0 damage / 4.1 s, 2 rockets, 3.7 damage; one window), cave_1 -> cave_2 (5.4 / 22.1 s, 1 / 2 rockets, 0 damage), cave_8 -> cave_9 (walk refused, a fly 36 window landing 3 of 4 goals, walk: 0.4 damage / the window hit the walls for 9.2 and the trip stopped on health 10.8 under 12); the other arrivals walked; failed: cave_2 -> cave_3 (fly 18 refused five times), cave_3 -> cave_6 and cave_6 -> cave_7 (walks refused), cave_10 -> cave_11 (walk then fly 22 refused) |
+| flyB: route B, `underFly` on | 0 of 3 legs | every corridor walk legs only (cave_5 -> cave_shortcut: walk + fly 16 to 39, the walk part refused; then no corridor) |
+
+Where the server and the offline walk disagree (cave_7 -> cave_8 and cave_14 -> cave_15 walk on the server only,
+cave_10 -> cave_11 offline only), the difference is the server's water and stand-in blocks against the extract's
+cubes; the legs that fail on both fail the same way (`unreachable` before a step).
+
+### No flight from water (`skills/fly/takeoff-water.ts`)
+
+The Realm, 2026-11-06: a route takeoff planned and flown from a body standing in the cave's water. The local model
+glides there (a body whose feet are less than 0.4 under the surface moves with air physics, `LIQUID.waterInset`),
+the server does not (it ends a glide in water), and the climb fired 20 rockets into a glide that never came; the
+flight ended `no_glide`. Now:
+
+- every takeoff family (the run, the ledge, the vertical, the route takeoff) asks `takeoffWet` first
+  (`commands-fly.ts takeoffFor`): water anywhere from the feet to the head (no inset), or the input loop's own
+  water flag for the body's own cell, refuses with "fly: I am in water: swim up and stand on dry ground first";
+- the flight controller does not start a flight from water (`flyTo` ends `in_water` at once, no rocket);
+- the controller stops firing once `UNANSWERED_ROCKETS` (2) rockets have gone without the server ever confirming
+  the glide; the takeoff ends `no_glide` on its own timeout. `fly-takeoff-water.test.ts` has the cases (19 rockets
+  with the limit lifted: the Realm's bug).
+
+### For the next track (F5b): measuring a change on the cave
+
+1. The fixture: copy it from the owner's machine into `bot/fixtures-private/cave/` (`extract.json`,
+   `waypoints.json`), or export a fresh one with the command in `export.ts`'s header. Never commit it.
+2. Offline: `node scripts/cave-bench.ts --mode leg --route B --burns 9,15,21 --budget live --jobs 16` for a
+   quick look at one route (a minute or two), the whole board with no options (36 minutes on 20 workers), `--legs 1`
+   or `--legs "cave_5 -> cave_shortcut"` for one leg, `--latency 11` for the worker's 9 to 13-tick answer, `--json
+   file` for the raw runs. `fly-cave.test.ts` (unit) is the smoke test.
+3. On the server: `BDS_E2E=1 FLY_BDS_PORT=19210 FLY_BDS_CONTAINER=bds-fly2 FLY_CAVE_REPORT=<file> pnpm --filter bot
+   test:e2e test/e2e/fly-cave.test.ts` (the build is 33 s; `FLY_CAVE_REUSE=1` skips it, `FLY_CAVE_ONLY=flyB`,
+   `FLY_CAVE_LEGS=1` pick runs; vitest drops the console table of a passing run, so read the report file). Keep the
+   report file out of the repository: it holds the replica's coordinates.
+
+### Walk and swim problems (for the navigator's owner)
+
+Seen on this cave; not fixed here (the navigator is not this track's):
+
+- A walk that starts with the body in water: "no standable node" from the start cell; the walk refuses at once.
+- A goal in water is not standable: a `block` goal at a waypoint in water is refused (the bench and the e2e use a
+  `near` goal of 1.5).
+- `unreachable` at once on 6 to 7 legs of route A that the owner walks, two of them a partial block read as a full
+  one (2 and 3 high), the others through water floors and up out of pools (cave_3 -> cave_4, cave_5 -> cave_6,
+  cave_6 -> cave_7).
+- The corridor executor's walk legs fail the same way, and the executor re-plans the same corridor five times in
+  under a second (the failed walk marks nothing the layer avoids next time).
+- The walks that do go through water spend most of their ticks in it (117 to 172 of about 200).
+
+### Open points (Track F5a)
+
+- The executor walks short fly legs (under `UNDER_FLY_MIN` 24) and the walks fail: on route B it never flies the
+  shortcut that `leg` mode flies (cave_shortcut -> cave_end done 10 of 13 as a window). A failed walk should leave
+  the fly leg to the flight.
+- `leg` mode's misses are mostly touchdowns short of the landing (`ground`) and glides into water floors (`water`);
+  cave_5 -> cave_shortcut hits the wall in every run (110 damage at the live budget).
+- The extract rounds partial blocks to full cubes and builds avoid cells (lava, fire, cactus...) as stone.
+- The sky stretch is not benched offline (the executor's `flySky` port stands the body on its cell); trip C's cruise
+  flies over the flat world, not the real terrain between home and the cave.
+- `fly-corridor.test.ts`'s `flyChain` duplicates `flyCaveWindow`; the TrackerChain's stats do not sum `refused`;
+  drive.ts / flyStretch has no water check of its own (stepBody ends the glide, the bench scores it `water`).
+- Files outside this track's own touched for the water guard and the measurement switches: `controller.ts`,
+  `commands-fly.ts` (`takeoffFor`, `FlyControl.corridor`), `commands-corridor.ts`, `registry.ts`.
+
 ## Open points
 
 - Track F1: a corridor approach under a roof at ground level (the roof cases of `fly-brake.test.ts` on the

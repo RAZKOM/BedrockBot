@@ -16,7 +16,7 @@ import type { Planner } from '../skills/fly/route/tracker.ts';
 import type { CorridorProvider } from '../skills/fly/corridor/coarse-port.ts';
 import { flyStretch } from '../skills/fly/corridor/drive.ts';
 import { CorridorExecutor, type CorridorReport, type StepOutcome } from '../skills/fly/corridor/executor.ts';
-import { setCorridorAirborne } from '../skills/fly/corridor/registry.ts';
+import { corridorUnderFly, setCorridorAirborne } from '../skills/fly/corridor/registry.ts';
 import type { Window } from '../skills/fly/corridor/stretches.ts';
 import { UnderFlyProcess } from '../tasks/process/corridor.ts';
 import type { ProcessManager } from '../tasks/process/manager.ts';
@@ -121,7 +121,7 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
     walk: w.walk,
     stopped: () => stopped,
     log: w.log,
-  });
+  }, { ...(corridorUnderFly(w.task) !== undefined ? { underFly: corridorUnderFly(w.task)! } : {}) }); // Track F5a: the cave e2e's measured runs
   void watch();
   try {
     const r = await ex.run(goal, label);

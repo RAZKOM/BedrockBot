@@ -9,6 +9,7 @@
 //                                          course's volume (air from y up, dirt and grass under it) and builds it;
 //                                          x y z is the feet height of the ground at the course's start
 //   course clear name x y z             -> the same without the stations (the flat ground back)
+// (Track F5a: `build` also builds the real-cave replica, cave.ts.)
 import { BlockVolume, system, world, type Dimension } from '@minecraft/server';
 import { TruthError, blockPos, type Vec3 } from './protocol.js';
 import { COURSE_NAMES, chunkPieces, clipOp, courseLayout, opsVolume, type CourseOp } from './course-layout.js';
@@ -25,6 +26,8 @@ type CourseHandler = (args: string[], ctx: { cmd: string; id: string | null; asy
 const FILL_SLAB = 32768;
 /** The job yields after this many blocks filled (a few fillBlocks calls a tick). */
 const BLOCKS_PER_STEP = 65536;
+/** ... or after this many fillBlocks calls. */
+const CALLS_PER_STEP = 256;
 /** The ticking areas of a build are named so (an area left by a build that failed is removed by the next). */
 const AREA_PREFIX = 'truth_course_';
 /** A piece's chunks must load within this many ticks. */
@@ -62,11 +65,14 @@ function runOps(dim: Dimension, ops: readonly CourseOp[]): Promise<void> {
       (function* () {
         try {
           let done = 0;
+          let calls = 0;
           for (const op of ops) {
             for (const n of fillOp(dim, op)) {
               done += n;
-              if (done >= BLOCKS_PER_STEP) {
+              // (Track F5a: a cave build is tens of thousands of small boxes: a step ends after CALLS_PER_STEP calls too)
+              if (done >= BLOCKS_PER_STEP || ++calls >= CALLS_PER_STEP) {
                 done = 0;
+                calls = 0;
                 yield;
               }
             }
@@ -97,8 +103,8 @@ function loadArea(id: string, dim: Dimension, from: Vec3, to: Vec3): Promise<voi
   });
 }
 
-/** Build `ops` over `bounds` piece by piece, each piece under its own ticking area while it is filled. */
-async function build(dim: Dimension, bounds: { min: Vec3; max: Vec3 }, ops: readonly CourseOp[]): Promise<number> {
+/** Build `ops` over `bounds` piece by piece, each piece under its own ticking area while it is filled (Track F5a: cave.ts too). */
+export async function build(dim: Dimension, bounds: { min: Vec3; max: Vec3 }, ops: readonly CourseOp[]): Promise<number> {
   const mgr = world.tickingAreaManager;
   for (const a of mgr.getAllTickingAreas()) if (a.identifier.startsWith(AREA_PREFIX)) mgr.removeTickingArea(a);
   const room = Math.max(1, mgr.maxChunkCount - mgr.chunkCount);

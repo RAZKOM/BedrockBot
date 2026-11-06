@@ -57,6 +57,7 @@ import { netherHandlers } from './nether.js'; // Track AT: truth:dimension, dimt
 import { flyHandlers } from './fly.js'; // Track AU: truth:glide, glidelog, equip, boxdrop (Elytra flight, wave 11)
 import { craftHandlers } from './craft.js'; // Track AW: truth:kit, craftinv, table (crafting, wave 11)
 import { courseHandlers } from './course.js'; // Track F4a: truth:course (the flight benchmark's obstacle courses)
+import { caveHandlers } from './cave.js'; // Track F5a: truth:cave (a real cave rebuilt from the bot's world cache)
 
 declare const __PACK_VERSION__: string;
 /** QuickJS console (prints to the BDS content log). */
@@ -563,6 +564,7 @@ Object.assign(handlers, netherHandlers({ getBlock, assertLoaded })); // Track AT
 Object.assign(handlers, flyHandlers()); // Track AU: glide, glidelog, equip, boxdrop
 Object.assign(handlers, craftHandlers({ getBlock, assertLoaded, overworld })); // Track AW: kit, craftinv, table
 Object.assign(handlers, courseHandlers({ reply, replyError, overworld })); // Track F4a: course
+Object.assign(handlers, caveHandlers({ reply, replyError, overworld })); // Track F5a: cave
 
 function blockVolume(a: Vec3, b: Vec3): BlockVolume {
   return new BlockVolume(a, b);

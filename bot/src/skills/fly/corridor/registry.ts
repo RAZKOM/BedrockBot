@@ -39,6 +39,21 @@ export function corridorProviderOf(task: object, layer?: CorridorProvider): Corr
   return providers.get(task) ?? (layer ? withFlightCost(layer) : undefined);
 }
 
+const underFly = new WeakMap<object, boolean>();
+
+/**
+ * Track F5a: fly the underground stretches of this task's corridor trips (true) or walk them (false); undefined (the
+ * default) leaves the executor's UNDER_FLY. The cave e2e turns it on for its measured runs; nothing else sets it.
+ */
+export function setCorridorUnderFly(task: object, on: boolean | undefined): void {
+  if (on === undefined) underFly.delete(task);
+  else underFly.set(task, on);
+}
+
+export function corridorUnderFly(task: object): boolean | undefined {
+  return underFly.get(task);
+}
+
 /** The corridor trip's "a window is in the air" (the falls clutch stays off while it flies, as for the controller). */
 export function setCorridorAirborne(task: object, fn: () => boolean): void {
   airborne.set(task, fn);

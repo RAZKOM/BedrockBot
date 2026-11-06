@@ -28,6 +28,7 @@ import { FlightBrain, type BrainOptions, type FlightEnd, type FlightEndReason as
 import { hdist, type FlightBody, type LandingTarget } from './plan.ts';
 import { ROCKET_COOLDOWN, RocketHand, type RocketInventory } from './rocket.ts'; // Track F3: the rocket plumbing shared with route/live.ts
 import type { TerrainQuery } from './terrain.ts';
+import { UNANSWERED_ROCKETS, wetAt } from './takeoff-water.ts'; // Track F5a: no flight from water
 
 export { ROCKET_COOLDOWN };
 /** A takeoff that has not started a confirmed glide after this many ticks fails (`no_glide`). */
@@ -99,7 +100,7 @@ export function skyQuery(base: BlockQuery): BlockQuery {
   };
 }
 
-export type FlightEndReason = BrainEndReason | 'no_glide' | 'no_elytra';
+export type FlightEndReason = BrainEndReason | 'no_glide' | 'no_elytra' | 'in_water';
 
 /** Track BF: a landing target for the log (`12.5 64 -3.5 (half 1)`, `... (12 cells, walk, in from 270)`, `... (hold)`). */
 export function describeTarget(t: LandingTarget): string {
@@ -189,6 +190,8 @@ export class FlightController {
   private corrections0 = 0;
   private glideEnds = 0;
   private everGlided = false;
+  /** Track F5a: rockets fired before the server ever confirmed the glide (UNANSWERED_ROCKETS at most). */
+  private unanswered = 0;
   private lastAir: { vy: number; h: number } | undefined;
   private endReason: FlightEndReason | undefined;
   private baseWorld: BlockQuery | undefined;
@@ -254,6 +257,12 @@ export class FlightController {
   flyTo(target: LandingTarget, opts: FlightOptions): Promise<FlightReport> {
     if (this.brain) return Promise.resolve(this.report(false, 'stopped'));
     const { loop } = this.d;
+    // Track F5a: a takeoff from water never glides on the server (the climb fired 20 rockets into it on the Realm)
+    if (!loop.state.gliding && wetAt(loop.world, loop.state) === 'water') {
+      this.log.warn(`flight: not taking off from water at ${loop.state.pos.x.toFixed(1)} ${loop.state.pos.y.toFixed(1)} ${loop.state.pos.z.toFixed(1)}`);
+      this.endReason = 'in_water';
+      return Promise.resolve(this.report(false, 'in_water'));
+    }
     this.target = target;
     const base = loop.world;
     // Track BL: the obstacle sees the live model, and the cache where the live model has nothing (unknown stays air for the physics)
@@ -271,6 +280,7 @@ export class FlightController {
     this.corrections0 = loop.state.corrections;
     this.glideEnds = 0;
     this.everGlided = false;
+    this.unanswered = 0;
     this.lastAir = undefined;
     this.endReason = undefined;
     this.settling = undefined;
@@ -412,7 +422,9 @@ export class FlightController {
       yaw: loop.command.yaw,
       pitch: loop.command.pitch,
       rockets: rockets.count,
-      canFire: this.rockets.canFire(this.tickNo) && rockets.slot >= 0,
+      // (Track F5a: no rocket once UNANSWERED_ROCKETS went without the server ever confirming the glide: in water, the
+      // elytra refused; the takeoff ends `no_glide` on its timeout instead of spending the hotbar)
+      canFire: this.rockets.canFire(this.tickNo) && rockets.slot >= 0 && (this.everGlided || this.unanswered < UNANSWERED_ROCKETS),
       health: this.d.health(),
       elytraLeft: this.d.elytraLeft(),
     });
@@ -422,7 +434,10 @@ export class FlightController {
     if (low && this.d.sneakLanding?.() === true) this.sneaked = true;
     // (Track BH: the ledge takeoff walks to the edge sneaking and steps off: `forward`, `sneak` from the brain)
     loop.setCommand({ yaw: c.yaw, pitch: c.pitch, jump: c.jump, glide: c.glide, forward: c.forward ?? 0, strafe: 0, sprint: false, sneak: (this.sneaked && low) || c.sneak === true });
-    if (c.fire && rockets.slot >= 0) this.rockets.fire(rockets.slot, state.pos, this.tickNo);
+    if (c.fire && rockets.slot >= 0 && (this.everGlided || this.unanswered < UNANSWERED_ROCKETS)) {
+      if (!this.everGlided && ++this.unanswered === UNANSWERED_ROCKETS) this.log.warn(`flight: ${this.unanswered} rockets fired and the server has not confirmed the glide: no more rockets until it does`);
+      this.rockets.fire(rockets.slot, state.pos, this.tickNo);
+    }
     if (out.end) this.settling = { ticks: 0, end: out.end, at: { ...state.pos } };
   }
 

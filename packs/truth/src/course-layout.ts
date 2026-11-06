@@ -21,7 +21,7 @@
 import type { Vec3 } from './protocol.js';
 
 /** The blocks a course is built of (the namespace is minecraft:). */
-export type CourseBlock = 'air' | 'stone' | 'dirt' | 'grass_block' | 'gold_block';
+export type CourseBlock = 'air' | 'stone' | 'dirt' | 'grass_block' | 'gold_block' | 'water'; // (water: Track F5a's cave replica)
 
 export interface CourseOp {
   from: Vec3;

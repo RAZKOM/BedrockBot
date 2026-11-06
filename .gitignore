@@ -21,3 +21,6 @@ bot/logs/
 
 # archives (a stray `git archive` snapshot was committed once)
 *.zip
+
+# Track F5a: private extracts of real worlds (the cave benchmark); never committed
+bot/fixtures-private/

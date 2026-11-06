@@ -33,8 +33,9 @@ import { NETHER, OVERWORLD } from '../world/dimension.ts';
 import type { Containers } from '../world/containers.ts';
 import type { Logger } from '../log.ts';
 import { corridorAirborne, corridorProviderOf, corridorWanted } from '../skills/fly/corridor/registry.ts'; // Track F4b
-import type { StepOutcome } from '../skills/fly/corridor/executor.ts'; // Track F4b
+import type { CorridorReport, StepOutcome } from '../skills/fly/corridor/executor.ts'; // Track F4b
 import { corridorEndLine, runCorridorTrip, stopCorridorTrip, type CorridorWiring } from './commands-corridor.ts'; // Track F4b
+import { takeoffWet } from '../skills/fly/takeoff-water.ts'; // Track F5a
 
 export const FLY_COMMANDS = ['fly', 'land'] as const;
 
@@ -70,6 +71,8 @@ export interface FlyControl {
   start(target: FlyTarget): FlyProcess;
   /** `gliding, 23 rockets` for the panel / status; undefined on the ground without a flight. */
   state(): { gliding: boolean; rockets: number; phase: string | undefined };
+  /** Track F5a: a corridor trip to a feet cell whatever its distance (the cave e2e's legs); undefined without a provider. */
+  corridor(goal: Vec3, label: string): Promise<CorridorReport> | undefined;
 }
 
 const controls = new WeakMap<object, FlyControl>();
@@ -98,6 +101,8 @@ export function flyEndLine(r: FlyOutcome): string {
       return `landed (out of rockets) at ${at}, ${rep?.off?.toFixed(0) ?? '?'} blocks short of ${r.target.label}; ${stats}`;
     case 'no_glide':
       return 'fly: the server did not let me glide (is the elytra on my back?)';
+    case 'in_water':
+      return 'fly: I am in water: swim up and stand on dry ground first';
     case 'lost':
       return `landed (lost) at ${at}; ${stats}`;
     case 'roof':
@@ -373,6 +378,10 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     current: () => current,
     start,
     state: () => ({ gliding: loop.state.gliding, rockets: readKit(inv, memory()).rocketsHotbar, phase: controller.status().phase }),
+    corridor: (goal, label) => {
+      const provider = corridorProviderOf(task, skills.nav.coarseLayer);
+      return provider ? runCorridorTrip(corridorWiring(), provider, goal, label) : undefined;
+    },
   };
   controls.set(task, control);
 
@@ -461,6 +470,17 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * route out through the planner (routeTakeoffFor), else refused with the line (walk out, or a takeoff site).
    */
   const takeoffFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number, quiet = false): Promise<{ ledge?: Ledge; takeoffYaw?: number; vertical?: number; routeTakeoff?: TakeoffRoute } | { refuse: string }> => {
+    // Track F5a: no takeoff of any family from water (the loop's flags count for the body's own cell)
+    const here = loop.state.pos;
+    const self = Math.abs(here.x - from.x) < 0.5 && Math.abs(here.y - from.y) < 0.5 && Math.abs(here.z - from.z) < 0.5;
+    // (a loop without a world, the unit tests' fakes: the flags alone)
+    const lw: Parameters<typeof takeoffWet>[0] | undefined = loop.world;
+    const wq = lw ?? { solidAt: () => false };
+    const wet = takeoffWet(wq, self ? { pos: from, inWater: loop.state.inWater, inLava: loop.state.inLava } : { pos: from });
+    if (wet) {
+      if (!quiet) log.info(`fly: no takeoff at ${from.x.toFixed(1)} ${from.y.toFixed(1)} ${from.z.toFixed(1)}: ${wet.replace(/^fly: /, '')}`);
+      return { refuse: wet };
+    }
     const ledge = await ledgeFor(from, target, sky, rockets, quiet);
     if (ledge) return { ledge };
     if (!sky.ok) {

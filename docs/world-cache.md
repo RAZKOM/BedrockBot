@@ -34,6 +34,7 @@ It is closed (written) on every graceful exit.
 | `world/cache/trees.ts` | `findCachedTrees`, `cachedLookup` |
 | `world/cache/index.ts` | `openWorldCache`, `serverIdFor`, `defaultCacheRoot`, exports |
 | `world/cache/cli.ts` | `node src/world/cache/cli.ts info / checksum / chunk <dir>` (read-only inspection) |
+| `world/cache/export.ts` | Track F5a: `node src/world/cache/export.ts <dir> --box ...`: a box of a cache as one compact file (`extractBox`, `decodeExtract`; read-only, stdout), for the real-cave benchmark ([flight.md](flight.md) "Real-cave benchmark (Track F5a)", decision 0068) |
 | `health/map/schema.ts` | zod schema of `/map.json` |
 | `health/map/data.ts` | `MapBuilder` (the JSON), `parseMapQuery`, status shape helpers |
 | `health/map/page.ts` | the `/map` page (HTML + canvas, no dependencies) |
