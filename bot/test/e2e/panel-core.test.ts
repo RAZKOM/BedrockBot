@@ -16,6 +16,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PANEL_BUDGETS } from '../../src/health/panel/budgets.ts';
 import { STATUS_BLOCKS } from '../../src/health/panel/page.ts'; // Track AP
 import type { PanelState } from '../../src/health/panel/state.ts';
 import { PveTruth } from './pve-truth.ts';
@@ -232,7 +233,7 @@ describe.skipIf(!E2E)('core: LAN control panel (Track AE)', () => {
     for (const id of STATUS_BLOCKS) expect(html).toContain(`id="${id}"`);
     for (const m of ['id="theme"', 'id="stale"', 'id="clock"', 'id="helpbox"', '<symbol id="g-sword"']) expect(html).toContain(m);
     expect(html).not.toMatch(/https?:\/\/(?!127\.0\.0\.1[:/])/); // only the bot's own URL (the log line `control panel: http://127.0.0.1:<port>/`)
-    expect(html.length).toBeLessThan(160_000); // Track AR: 160 KB with the menus, palette and map
+    expect(Buffer.byteLength(html)).toBeLessThan(PANEL_BUDGETS.html); // decision 0061: the page without its script (the modules have their own budgets)
     // !set from the panel shows in the settings block
     const set = await cmd('!set guardRadius 20');
     expect(set.status).toBe(200);

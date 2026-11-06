@@ -1,12 +1,14 @@
 // GET / (Track AE, docs/panel.md): the control panel page. Server-rendered: the structure (the
 // inventory grid's 41 cells, the status blocks, the quick buttons, the settings table) plus the
-// current state as JSON; the inline script (client.ts, Track AP) fills the nodes from that JSON at
-// once and then from /api/state every 2 s. No build step, no external assets: the bot's machine may
-// be offline from the internet (glyphs are inline SVG, fonts are the system's; the item pictures are
-// the panel's own /icons/<name>.png, decision 0046, and a cell keeps its glyph without one). Track AR: the
-// settings by group with switches, Reset and the mode bar, the menu / toast / palette containers and
-// the panel's own map (a canvas the script draws from /map.json while the section is open).
-import { PANEL_SCRIPT } from './client.ts'; // Track AP
+// current state as JSON; the page's browser modules (client/, decision 0061: type-stripped TypeScript
+// served by assets.ts, the entry named in one <script type="module">) fill the nodes from that JSON at
+// once and then from the push channel (/api/stream) or the poll. No build step, no external assets:
+// the bot's machine may be offline from the internet (glyphs are inline SVG, fonts are the system's;
+// the item pictures are the panel's own /icons/<name>.png, decision 0046, and a cell keeps its glyph
+// without one). Track AR: the settings by group with switches, Reset and the mode bar, the menu /
+// toast / palette containers and the panel's own map (a canvas drawn from /map.json while open).
+import { clientModules, ENTRY_MODULE } from './assets.ts'; // decision 0061
+import { THEME_KEY } from './shared.ts';
 import { glyphDefs } from './glyphs.ts'; // Track AP
 import { liteState, type PanelSetting, type PanelState } from './state.ts';
 import { settingGroups } from '../../chat/help.ts'; // Track AR: the settings groups
@@ -109,7 +111,7 @@ function mapHtml(): string {
     <div class="legend small muted">${LEGEND.map(([c, n]) => `<span><i style="background:${c}"></i>${n}</span>`).join('')} <span>right-click or long-press: walk here, home, shelter, waypoint</span></div>`;
 }
 
-const THEME_BOOT = `(function(){var t=null;try{t=localStorage.getItem('bbpanel-theme')}catch(e){}if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark'}document.documentElement.dataset.theme=t})();`;
+const THEME_BOOT = `(function(){var t=null;try{t=localStorage.getItem('${THEME_KEY}')}catch(e){}if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark'}document.documentElement.dataset.theme=t})();`;
 
 const CSS = `
   :root, [data-theme="dark"] { color-scheme: dark; --bg: #111418; --panel: #1b2027; --line: #2c333d; --text: #d8dee6; --muted: #8a94a3; --accent: #f5c542; --ok: #4ce08a; --warn: #f2b134; --bad: #ff7b72;
@@ -233,7 +235,19 @@ const CSS = `
   .menu .note { font-size: 12px; color: var(--warn); padding: 4px 8px; }
 `;
 
-export function renderPanelPage(s: PanelState): string {
+/** Where the page's modules are: the entry and every module to preload (assets.ts ClientModules). */
+export interface PageModules {
+  entry: string;
+  preload: string[];
+}
+
+/** The modules of this process. */
+export function pageModules(): PageModules {
+  const m = clientModules();
+  return { entry: m.url(ENTRY_MODULE), preload: m.urls() };
+}
+
+export function renderPanelPage(s: PanelState, mods: PageModules = pageModules()): string {
   return `<!doctype html>
 <html lang="en" data-theme="dark">
 <head>
@@ -243,6 +257,7 @@ export function renderPanelPage(s: PanelState): string {
 <title>BedrockBot panel</title>
 <script>${THEME_BOOT}</script>
 <style>${CSS}</style>
+${mods.preload.map((u) => `<link rel="modulepreload" href="${esc(u)}">`).join('\n')}
 </head>
 <body data-panel="v${s.v}">
 ${glyphDefs()}
@@ -320,9 +335,7 @@ ${glyphDefs()}
 <div id="toast" class="toast" role="status" hidden></div>
 <script type="application/json" id="modes-data">${scriptJson(modesData())}</script>
 <script type="application/json" id="initial">${scriptJson(liteState(s))}</script>
-<script>
-${PANEL_SCRIPT}
-</script>
+<script type="module" src="${esc(mods.entry)}"></script>
 </body>
 </html>
 `;
