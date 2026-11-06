@@ -168,6 +168,8 @@ interface Harness {
   trampleAt: Set<string>;
   /** How far those routes fall onto the farmland (default 1.0625: one terrace). */
   fall: number;
+  /** Runs after each dig (tests that trample a cell). */
+  afterDig?: () => void;
 }
 
 function harness(): Harness {
@@ -189,6 +191,7 @@ function harness(): Harness {
         inv.add('wheat', 1);
         inv.add('wheat_seeds', 2);
       }
+      h.afterDig?.();
       return Promise.resolve({ ok: true, block: b?.name, ticks: 1 });
     },
     place: (p, o) => {
@@ -405,17 +408,11 @@ describe('FarmTask', () => {
       const h = harness();
       field(h.w, 0, 0, 3, 1, 'wheat', 7);
       if (withHoe) h.inv.add('stone_hoe', 1);
-      const dig = h.deps.skills.dig;
       // the first harvest "tramples" the middle cell (the body landed on it)
-      let once = false;
-      h.deps.skills.dig = async (p, o) => {
-        const r = await dig(p, o);
-        if (!once) {
-          once = true;
-          h.w.set({ x: 1, y: SOIL, z: 0 }, 'dirt');
-          h.w.set({ x: 1, y: FEET, z: 0 }, 'air');
-        }
-        return r;
+      h.afterDig = () => {
+        h.afterDig = undefined;
+        h.w.set({ x: 1, y: SOIL, z: 0 }, 'dirt');
+        h.w.set({ x: 1, y: FEET, z: 0 }, 'air');
       };
       const f = new FarmTask(h.deps);
       await f.start({ center: { x: 1.5, y: FEET, z: 0.5 }, radius: 2, follow: true, maxRounds: 8 });
