@@ -9,8 +9,11 @@
 //
 //   glide playerName                              -> {name, isGliding, isFalling, isOnGround, isFlying,
 //                                                     isSprinting, location, velocity, rotation, health, tick}
-//   glidelog start playerName | stop | read [sinceTick]  -> start: {name}; read: {now, entries: [{tick, x, y, z,
-//                                                     vx, vy, vz, gliding, ground}]} (at most 4000 ticks kept)
+//   glidelog start playerName | stop | read [sinceTick] [untilTick]  -> start: {name}; read: {now, entries: [{tick,
+//                                                     x, y, z, vx, vy, vz, gliding, ground, pitch, yaw, hp, fw}]}
+//                                                     (at most 4000 ticks kept; Track F0: the rotation of the
+//                                                     input the sample follows, the health, the fireworks_rocket
+//                                                     entities within 4 blocks)
 //   equip playerName Head|Chest|Legs|Feet|Offhand typeId|air [amount] [damage] -> {name, slot, typeId}
 //   boxdrop x y z typeId amount [stacks]          -> {at, typeId, stacks}: an undyed shulker box with
 //                                                     `stacks` stacks of `amount` items, dropped at x y z
@@ -45,6 +48,11 @@ interface GlideEntry {
   vz: number;
   gliding: boolean;
   ground: boolean;
+  /** Track F0: the server's rotation of the player (the last input's), its health, the rockets near it. */
+  pitch: number;
+  yaw: number;
+  hp: number | null;
+  fw: number;
 }
 
 const glideLog: GlideEntry[] = [];
@@ -93,7 +101,29 @@ function sample(): void {
     if (!p) return;
     const l = p.location;
     const v = p.getVelocity();
-    glideLog.push({ tick: system.currentTick, x: l.x, y: l.y, z: l.z, vx: v.x, vy: v.y, vz: v.z, gliding: p.isGliding, ground: p.isOnGround });
+    const rot = p.getRotation();
+    const health = p.getComponent(EntityComponentTypes.Health) as EntityHealthComponent | undefined;
+    let fw = 0;
+    try {
+      fw = p.dimension.getEntities({ type: 'minecraft:fireworks_rocket', location: l, maxDistance: 4 }).length;
+    } catch {
+      // an unloaded area
+    }
+    glideLog.push({
+      tick: system.currentTick,
+      x: l.x,
+      y: l.y,
+      z: l.z,
+      vx: v.x,
+      vy: v.y,
+      vz: v.z,
+      gliding: p.isGliding,
+      ground: p.isOnGround,
+      pitch: rot.x,
+      yaw: rot.y,
+      hp: health?.currentValue ?? null,
+      fw,
+    });
     if (glideLog.length > LOG_SIZE) glideLog.splice(0, glideLog.length - LOG_SIZE);
   } catch {
     // the player may be leaving
@@ -122,7 +152,8 @@ export function flyHandlers(): Record<string, FlyHandler> {
         return { stopped: true, entries: glideLog.length };
       }
       const since = args[1] === undefined ? 0 : int(args[1], 'sinceTick');
-      return { now: system.currentTick, name: logName ?? null, entries: glideLog.filter((e) => e.tick >= since) };
+      const until = args[2] === undefined ? Number.MAX_SAFE_INTEGER : int(args[2], 'untilTick');
+      return { now: system.currentTick, name: logName ?? null, entries: glideLog.filter((e) => e.tick >= since && e.tick <= until) };
     },
 
     equip(args) {

@@ -43,6 +43,7 @@ authoritative. Decision record: [decisions/0042-elytra-flight.md](decisions/0042
 | `packs/truth/src/fly.ts` | `truth:glide`, `glidelog`, `equip`, `boxdrop` |
 | `bot/test/unit/skills/fly.test.ts` | the geometry, the planner, whole trips on `stepBody` (the economy, the tree, the roof, the walled platform), the kit rules, the supply lines |
 | `bot/test/e2e/fly-truth.ts`, `fly-glide.test.ts`, `fly-land.test.ts`, `fly-kit.test.ts` | the e2e suites on bds-fly (Track AU) |
+| `bot/test/e2e/fly-envelope*.ts`, `bot/test/unit/skills/flight-envelope.test.ts` | Track F0: the flight-envelope harness and its cases, the model changes it led to ([flight-envelope.md](flight-envelope.md)) |
 | `bot/test/e2e/fly-economy.test.ts`, `fly-roof.test.ts`, `fly-descent.test.ts`, `fly-walk.test.ts` | Track AU2: the rocket economy of 300 / 600 / 1200-block flights, the room and the tree, the 10 + 10 descents, fly then walk (the pit, the house) |
 | `bot/src/skills/fly/landing.ts` | Track BF: `findLanding` (the confirmed-path search), `floorsOf`, the wet / hazard rules, `corridorsOf` / `corridorLands` (overhangs), `stillLandable` |
 | `bot/src/skills/survival/surface.ts`, `bot/src/tasks/process/surface.ts` | Track BF: `headInWater`, `swimUp`; the `surface` process and `shoreNear` |
@@ -95,8 +96,9 @@ v *= (0.99, 0.98, 0.99);  the body is 0.6 high
 Measured against the server (per-tick server samples through `truth:glidelog`, the model stepped
 from the server's state): every tick of a steady glide or a steady boost within 0.002; the boosted
 ticks only match with the boost applied **before** the drag (the Java order is off by 0.01 per tick);
-the rocket (flight duration 1) boosts 12 to 18 ticks (`GLIDE.boostTicks` 15), pulling the speed
-towards 1.7 blocks a tick along the look.
+the rocket (flight duration 1) boosts 9 to 21 ticks (Track F0: n 175, mean 15.7; `GLIDE.boostTicks` 15
+plans, the input loop boosts until the rocket's removal), pulling the speed towards 1.7 blocks a tick
+along the look. The manoeuvres beyond the steady glide: "The flight envelope" below.
 
 | Quantity | Measured | From the formula |
 |---|---|---|
@@ -579,9 +581,10 @@ run along the heading (a roof right over the head closes the column too and refu
 - **Offline** (fly-vertical.test.ts, stepBody): a 3 x 3 clearing and a 1 x 1 shaft in a 20-high forest
   where every jump heading hits: hand-over 22 up with 1 rocket, no drift (under 0.3 blocks), no hit, lands
   300 blocks away.
-- **Not measured on BDS yet**: that the server starts the glide and boosts the rocket with the look
-  straight up as the model does. Until an e2e run has measured it, `!set flyVerticalTakeoff off` takes it
-  out of the chain.
+- **Measured on BDS** (Track F0, [flight-envelope.md](flight-envelope.md) section 6): the server starts the
+  glide with the look straight up and a rocket climbs 31 to 40 blocks in 41 ticks with no drift, every
+  tick as the model has it. The request on the first falling tick after the jump is taken (section 8).
+  `!set flyVerticalTakeoff off` still takes it out of the chain.
 
 ## Terrain-safe cruise, dive descent, takeoff sites (Track BL)
 
@@ -1444,6 +1447,30 @@ Dive against circle, ticks to touchdown, 0 hits, 0 go-arounds:
 - **Changed expectations.** `fly-roof` now accepts the site line, because the room's door and the
   tunnel's stair top are found as takeoff sites (`walking 16 / 23 blocks to take off from ...`).
   `fly-descent` accepts a dive on the open platform.
+
+## The flight envelope (flight v2, Track F0)
+
+What the server does for the manoeuvres of flight v2, measured tick by tick against the model:
+[flight-envelope.md](flight-envelope.md) (ADR [0056](decisions/0056-flight-envelope.md)). In short:
+
+- Yaw snaps of any size, the 180 brake (stops in 8 to 10 ticks over 5 blocks), the hover (the look flipped
+  every tick: within 0.02 of the spot, sinking 0.15), walls, ceilings, a 1 x 1 hole and the start at pitch
+  -90 / +90 all match the model with no correction. The vertical takeoff ("Vertical takeoff" above) is
+  measured now: a rocket straight up climbs 31 to 40 blocks in 41 ticks, no drift.
+- A rocket boosts 9 to 21 ticks; the input loop boosts until its removal (at most 22) and
+  `state.boostTicks` is the expected ticks left. A second rocket extends the boost and pushes no harder.
+  A slot switch does not cut it; offhand rockets do nothing.
+- Wall damage is 10 x the horizontal speed lost minus 3 (`wallImpactDamage`); the fall distance while
+  gliding restarts on every tick with the sink under 0.5 (`glideFallStep`), so a level touchdown is free.
+- A glide request on the first airborne tick of a jump is refused (from the second it is taken, also from
+  a standing jump while it rises); the loop holds such a request one input, and takes a request the server
+  never confirmed back after 10 inputs and asks again. A rocket works from the input after the glide's
+  first (the loop boosts nothing before). Under a 2-high ceiling no jump glides (2 airborne inputs).
+- Slime, powder snow, cobweb, honey, scaffolding, ladders and vines are not in the glide model (a ladder
+  or vine ends the glide and catches the body with no damage).
+
+The harness (`bot/test/e2e/fly-envelope-harness.ts`) flies a scripted per-tick control on bds-fly and
+compares each tick with the model: the place to measure a new manoeuvre before a planner relies on it.
 
 ## A new trip in the air
 

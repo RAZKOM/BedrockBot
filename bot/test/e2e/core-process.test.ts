@@ -1,12 +1,15 @@
 // PLAN.md task 7.8 on bds-core (difficulty normal; Track Q, docs/processes.md): the process manager
 // on the real afk task.
-//   1. a guard fight interrupts a running `!gather` (trees placed with truth:tree); the gather is
-//      paused, resumes on its own afterwards and finishes;
+//   1. a guard fight interrupts a running `!gather` (trees placed with truth:tree outside the base:
+//      findTrees never lists a tree with a log within protectRadius of home, docs/wood.md "Not trees");
+//      the gather is paused, resumes on its own afterwards and finishes;
 //   2. `!goto` with `!status` (the process stack and an ETA, checked against the real arrival), then
 //      `!pause` (the bot stands), `!resume` (walks again), `!stop` (ends it) on a second goto;
 //   3. flee pre-empts a guard fight (health set low mid-fight), and the fight resumes after the flight.
+// Each test leaves guard off and no user process behind (afterEach), so one failure cannot cascade.
 // Needs BDS_E2E=1 and bds-core with the truth pack (`node scripts/bds.mjs --profile core up` and `... pack`).
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import type { Vec3 } from '../../src/connection/types.ts';
 import {
   armWithIronSword,
   centre,
@@ -28,6 +31,8 @@ describe.skipIf(!E2E)('core: process manager (task 7.8)', () => {
   let bot: CoreBot | undefined;
   const area = privateArea();
   const HOME = { x: area.x, y: FEET_Y, z: area.z };
+  /** Where the gather works: west of home, outside the base (protectRadius + 16; set in beforeAll). */
+  let WORK: Vec3 = HOME;
   const measurements: string[] = [];
 
   beforeAll(async () => {
@@ -36,16 +41,40 @@ describe.skipIf(!E2E)('core: process manager (task 7.8)', () => {
     await teleport(bot, centre(HOME));
     await bot.truth.clearAround(centre(HOME), 64);
     await clearArea(bot.truth, HOME, 20, 10);
+    WORK = { x: HOME.x - (bot.settings.get('protectRadius') + 16), y: FEET_Y, z: HOME.z };
+    await teleport(bot, centre(WORK));
+    await bot.truth.clearAround(centre(WORK), 32);
+    await clearArea(bot.truth, WORK, 16, 10);
+    await teleport(bot, centre(HOME));
     await armWithIronSword(bot);
     await bot.truth.ok('give', [bot.name, 'iron_axe', 1]);
     await bot.truth.setHealth(bot.name, 20);
   }, 180_000);
+
+  // one test's failure must not leak into the next: guard off, no user process, held or not, no mobs of
+  // this run, full health and the sword back (2026-11-05: a failed gather left guard on and the
+  // next test's `!stop` reply read "guarding r=16" instead of "idle")
+  afterEach(async () => {
+    const b = bot;
+    if (!b) return;
+    b.pve.setGuard({ on: false });
+    b.processes.unhold();
+    b.processes.stopUser();
+    await b.truth.cleanup().catch(() => undefined);
+    await b.truth.setHealth(b.name, 20).catch(() => undefined);
+    await armWithIronSword(b).catch(() => undefined);
+  }, 30_000);
 
   afterAll(async () => {
     if (bot) {
       await bot.truth.cleanup().catch(() => undefined);
       await bot.truth.clearAround(centre(HOME), 64).catch(() => undefined);
       await clearArea(bot.truth, HOME, 20, 10).catch(() => undefined);
+      if (WORK !== HOME) {
+        await teleport(bot, centre(WORK)).catch(() => undefined);
+        await bot.truth.clearAround(centre(WORK), 32).catch(() => undefined);
+        await clearArea(bot.truth, WORK, 16, 10).catch(() => undefined);
+      }
       await bot.stop();
     }
     console.log(`measurements (area cell ${area.cell}):\n  ${measurements.join('\n  ')}`);
@@ -53,11 +82,14 @@ describe.skipIf(!E2E)('core: process manager (task 7.8)', () => {
 
   it('a guard fight interrupts a running gather; the gather resumes and finishes', async () => {
     const b = bot!;
+    await teleport(b, centre(WORK));
     b.pve.setGuard({ on: true });
     const trees = [
-      { x: HOME.x + 6, z: HOME.z },
-      { x: HOME.x - 5, z: HOME.z + 4 },
+      { x: WORK.x + 6, z: WORK.z },
+      { x: WORK.x - 5, z: WORK.z + 4 },
     ];
+    const protect = b.settings.get('protectRadius');
+    for (const t of trees) expect(hdist({ x: t.x, y: FEET_Y, z: t.z }, HOME), 'tree outside the base').toBeGreaterThan(protect + 8);
     for (const t of trees) await truthLoaded(b.truth, 'tree', [t.x, FEET_Y, t.z, 4, 'oak']);
     // the world model must show the logs before the gather looks for trees
     const w = b.built.mobility!.world;
@@ -97,9 +129,6 @@ describe.skipIf(!E2E)('core: process manager (task 7.8)', () => {
     expect(logs).toBeGreaterThanOrEqual(8);
     expect(b.metrics.snapshot().counters['process.gather.resumed']).toBeGreaterThanOrEqual(1);
     expect(b.processes.userProcesses()).toHaveLength(0);
-    b.pve.setGuard({ on: false });
-    await b.truth.ok('clear', [b.name]);
-    await armWithIronSword(b);
   }, 300_000);
 
   it('!status shows the stack with an ETA; !pause, !resume and !stop during a goto', async () => {

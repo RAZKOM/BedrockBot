@@ -6,8 +6,11 @@
 // useItemTransaction). Packet facts measured on BDS 1.26.60.6 (docs/flight.md "Packets"):
 //
 //   - the rocket's `add_entity` (minecraft:fireworks_rocket) arrives 1 to 3 ticks after the use, at the
-//     body; its `remove_entity` 14 to 20 ticks later ends the boost: `loop.endBoost()` re-simulates the
-//     inputs since without it (the model assumes GLIDE.boostTicks and is cut here)
+//     body; the boost lasts until its `remove_entity` (Track F0: 9 to 21 ticks of burn, the removal 2 to 3
+//     inputs after the last boosted tick; the loop boosts up to GLIDE.boostMaxTicks until told). A second
+//     rocket while one burns extends the boost to the longer of the two (the server's union), so the boost
+//     ends with the removal of the LAST of the own rockets; a use no add_entity answers within
+//     ROCKET_ANSWER_TICKS boosted nothing and is taken back (`loop.endBoost(ticks since the use)`)
 //   - the own `gliding` actor flag confirms the glide (the loop handles it: GlideEvent) and ends it on
 //     ground or water contact; a voluntary stop in the air is ignored by the server
 //   - the glide uses the elytra: the controller never flies without one in the chest slot (`canGlide`)
@@ -46,6 +49,8 @@ const HELD_NOTE_TICKS = 40;
 /** A rocket entity appearing within this many blocks
  of the body right after a use is ours. */
 const ROCKET_NEAR = 4;
+/** Track F0: a rocket use with no add_entity of its rocket within this many ticks boosted nothing (take the boost back). */
+const ROCKET_ANSWER_TICKS = 5;
 
 export interface FlightLoop {
   readonly state: InputLoopState;
@@ -188,7 +193,8 @@ export class FlightController {
   private lastFire = -1000;
   private tickNo = 0;
   private usedAt: number | undefined;
-  private rocketId: bigint | undefined;
+  /** Track F0: the own rockets still burning (the boost ends with the removal of the last). */
+  private rocketIds = new Set<bigint>();
   private corrections0 = 0;
   private glideEnds = 0;
   private everGlided = false;
@@ -271,7 +277,7 @@ export class FlightController {
     this.tickNo = 0;
     this.lastFire = -1000;
     this.usedAt = undefined;
-    this.rocketId = undefined;
+    this.rocketIds.clear();
     this.corrections0 = loop.state.corrections;
     this.glideEnds = 0;
     this.everGlided = false;
@@ -290,7 +296,7 @@ export class FlightController {
           this.tick(state);
         }),
         loop.onEvent((e) => {
-          if (e.kind === 'glide') {
+          if (e.kind === 'glide' && e.refused !== true) {
             if (e.gliding) this.everGlided = true;
             else {
               this.glideEnds++;
@@ -303,10 +309,7 @@ export class FlightController {
           this.onEntityAdd(e);
         }),
         this.d.entities.onRemove((e) => {
-          if (this.rocketId !== undefined && e.uniqueId === this.rocketId) {
-            this.rocketId = undefined;
-            this.d.loop.endBoost();
-          }
+          if (this.rocketIds.delete(e.uniqueId) && this.rocketIds.size === 0 && this.usedAt === undefined) this.d.loop.endBoost();
         }),
       );
       loop.setCommand({ forward: 0, strafe: 0, sprint: false, sneak: false, jump: false });
@@ -429,6 +432,15 @@ export class FlightController {
         return;
       }
     }
+    // Track F0: a use the server never answered with a rocket boosted nothing
+    if (this.usedAt !== undefined && this.tickNo - this.usedAt > ROCKET_ANSWER_TICKS) {
+      const ago = this.tickNo - this.usedAt;
+      this.usedAt = undefined;
+      if (this.rocketIds.size === 0) {
+        loop.endBoost(ago);
+        this.log.info(`flight: the rocket used ${ago} ticks ago never appeared; its boost taken back`);
+      }
+    }
     const rockets = this.rocketsInHotbar();
     const out = brain.step({
       tick: this.tickNo,
@@ -465,7 +477,7 @@ export class FlightController {
     if (e.type !== 'minecraft:fireworks_rocket' || this.usedAt === undefined || this.tickNo - this.usedAt > 10) return;
     const p = this.d.loop.state.pos;
     if (Math.hypot(e.pos.x - p.x, e.pos.y - p.y, e.pos.z - p.z) > ROCKET_NEAR + 2) return;
-    this.rocketId = e.uniqueId;
+    this.rocketIds.add(e.uniqueId);
     this.usedAt = undefined;
   }
 

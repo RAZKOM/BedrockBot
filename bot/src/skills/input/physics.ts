@@ -540,9 +540,11 @@ export function backOffFromEdge(world: BlockQuery, p: Vec3, dx: number, dz: numb
  *   v.xz += (l.xz / cos * h - v.xz) * 0.1                                 (the heading follows the look)
  *   boost (while a rocket lives): v += l * 0.1 + (l * 1.5 - v) * 0.5
  *   v *= (0.99, 0.98, 0.99); move with a 0.6-high box (the server sets boundingbox_height 0.6)
- * Measured: level flight sinks 0.15 to 0.17 blocks/tick, a flight-duration-1 rocket boosts 12 to 18
- * ticks (`boostTicks` 15 is the nominal; the rocket's remove_entity ends it) and pulls the speed
- * towards 1.7 blocks/tick along the look. The glide ends on the ground or in water.
+ * Measured: level flight sinks 0.15 to 0.17 blocks/tick, a flight-duration-1 rocket boosts 9 to 21
+ * ticks (Track F0, docs/flight-envelope.md: n 175, mean 15.7; `boostTicks` 15 is the planning nominal,
+ * the input loop boosts up to `boostMaxTicks` and the rocket's remove_entity ends it) and pulls the
+ * speed towards 1.7 blocks/tick along the look. A second rocket while one burns extends the boost to
+ * the later rocket's end (no stronger push). The glide ends on the ground or in water.
  */
 export const GLIDE = Object.freeze({
   gravity: 0.08,
@@ -558,9 +560,68 @@ export const GLIDE = Object.freeze({
   boostPush: 0.1,
   boostTarget: 1.5,
   boostGain: 0.5,
-  /** Nominal boost ticks of one flight-duration-1 rocket (measured 12 to 18 on bds-fly, median 15; vanilla 10 + random 0..11); the rocket's remove_entity ends it early or late. */
+  /** Nominal boost ticks of one flight-duration-1 rocket for planning (Track F0: measured 9 to 21, mean 15.7, median 16; a little short on purpose). */
   boostTicks: 15,
+  /**
+   * Track F0: the longest measured burn (21, n 175 on BDS 1.26.60) and a tick. The input loop's boost
+   * runs this long unless the rocket's remove_entity cuts it (`InputLoop.endBoost`), so a long burn no
+   * longer ends early in the model (the correction 30 ticks after the rocket carried the missing ticks:
+   * up to 0.6 blocks before, at most 0.041 since).
+   */
+  boostMaxTicks: 22,
+  /**
+   * Track F0: the rocket's remove_entity reaches the client this many inputs after the first unboosted
+   * one on a local BDS (2 in 167 of 215 burns, 3 in 41): `InputLoop.endBoost`'s default.
+   */
+  boostEndLag: 2,
+  /** Track F0: a gliding tick that starts with the vertical speed above this resets the fall distance to 1 (`glideFallStep`). */
+  fallResetVy: -0.5,
+  /**
+   * Track F0: inputs after a glide request with no `gliding` flag from the server before the loop takes
+   * the model's glide back as refused (measured: confirmed 1 input later on a local BDS; the rest is
+   * room for a Realm's latency).
+   */
+  confirmTicks: 10,
 });
+
+/** Track F0: the boost ticks a rocket that still burns after 11, 12, ... 21 ticks gives on average (n 175, rounded). */
+const BOOST_TAIL: readonly number[] = [5, 4, 4, 3, 3, 2, 2, 2, 1, 1, 1];
+
+/**
+ * Track F0: the boost ticks a burning rocket still gives, expected, from the model's ticks left to
+ * `boostMaxTicks` (the input loop's counter): the nominal minus the ticks burnt, and past 10 ticks the
+ * burn's measured tail (`BOOST_TAIL`: after 15 ticks a rocket that still burns gives 2.6 more on
+ * average). At least 1 while the counter runs; 0 when it does not.
+ */
+export function boostTicksExpected(left: number): number {
+  if (left <= 0) return 0;
+  const burnt = GLIDE.boostMaxTicks - left;
+  const tail = burnt > 10 ? BOOST_TAIL[Math.min(burnt - 11, BOOST_TAIL.length - 1)]! : 0;
+  return Math.max(1, Math.min(left, Math.max(GLIDE.boostTicks - burnt, tail)));
+}
+
+/**
+ * Track F0: the damage of a glide into a wall (BDS 1.26.60, `flyIntoWall`, head-on 0.1 to 1.5 blocks a
+ * tick and glancing at 45 / 70 degrees): 10 x the horizontal speed the tick's move lost to the wall,
+ * minus 3 (the vanilla rule). `hBefore`: the horizontal speed the glide step gave (before the
+ * collision clipped it), `hAfter`: what was left. Free under a loss of 0.3; a scrape does not end the
+ * glide, and a ceiling bump costs nothing.
+ */
+export function wallImpactDamage(hBefore: number, hAfter: number): number {
+  return Math.max(0, (hBefore - hAfter) * 10 - 3);
+}
+
+/**
+ * Track F0: the fall distance the server counts while gliding (BDS 1.26.60, dives at pitch 0 / 45 / 80
+ * from 3 to 60 blocks, 15 of 15 touchdowns exact): every gliding tick that starts with the vertical
+ * speed above -0.5 sets it to 1, every tick adds its drop. `vyIn`: the vertical speed entering the
+ * tick, `dy`: the tick's vertical move. Feed it the ticks up to the one BEFORE the landing tick (the
+ * landing tick's clipped move is not counted) and take the damage from fall/damage.ts
+ * `damageForCounted`. A glide that holds its sink under 0.5 a tick lands free from any height.
+ */
+export function glideFallStep(fall: number, vyIn: number, dy: number): number {
+  return (vyIn > GLIDE.fallResetVy ? 1 : fall) + Math.max(0, -dy);
+}
 
 /** Unit look vector in float32 for Bedrock yaw / pitch degrees (pitch +90 = down), with sin / cos(pitch). */
 export function lookVector(yawDeg: number, pitchDeg: number): { x: number; y: number; z: number; cos: number; sin: number } {
