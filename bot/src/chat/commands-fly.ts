@@ -1020,6 +1020,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     solid: (x, y, z) => world.blockAt({ x, y, z })?.solid ?? world.cache?.blockAt(x, y, z)?.solid,
     loaded: (cx, cz) => typeof world.isLoaded !== 'function' || world.isLoaded(cx, cz),
     dim,
+    health: () => world.self.health, // hotfix 2026-11-06: a death or low health ends the trip
     ...((world.chunks as Partial<typeof world.chunks> | undefined)?.onColumnLoaded ? { columnLoaded: (fn: (cx: number, cz: number) => void) => world.chunks.onColumnLoaded(fn) } : {}),
     grid: routeGrid,
     plan: routePlanner,

@@ -32,6 +32,8 @@ export interface CorridorWiring extends Omit<RocketDeps, 'loop' | 'inventory'> {
   solid: (x: number, y: number, z: number) => boolean | undefined;
   loaded: (cx: number, cz: number) => boolean;
   dim: () => number;
+  /** The body's health (hotfix 2026-11-06: the trip ends on a death or below CORRIDOR_HEALTH_MIN). */
+  health?: () => number | undefined;
   columnLoaded?: (fn: (cx: number, cz: number) => void) => () => void;
   /** The route grid over the live model (unknown solid) and the worker's planner over it. */
   grid: RouteGrid;
@@ -42,6 +44,9 @@ export interface CorridorWiring extends Omit<RocketDeps, 'loop' | 'inventory'> {
   walk: (cell: Vec3, label: string) => Promise<StepOutcome>;
   log: Logger;
 }
+
+/** Hotfix 2026-11-06 (a Realm death in a cave): a corridor trip ends when the health falls under this, or on a death. */
+export const CORRIDOR_HEALTH_MIN = 12;
 
 const trips = new WeakMap<object, { stop(): void }>();
 
@@ -63,6 +68,22 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
       under?.stopNow();
     },
   });
+  // hotfix 2026-11-06: watch the health every tick; a death or low health stops the trip (the window in the air lands first)
+  let done = false;
+  let unsafe: string | undefined;
+  const watch = async (): Promise<void> => {
+    while (!done && !stopped) {
+      const h = w.health?.();
+      if (h !== undefined && (h <= 0 || h < CORRIDOR_HEALTH_MIN)) {
+        unsafe = h <= 0 ? 'died' : `health ${h.toFixed(1)} under ${CORRIDOR_HEALTH_MIN}`;
+        w.log.warn(`corridor: stopping the trip (${unsafe})`);
+        stopped = true;
+        under?.stopNow();
+        return;
+      }
+      await w.loop.waitTicks(1);
+    }
+  };
   setCorridorAirborne(w.task, () => under?.phase === 'flying' && (w.loop.state.gliding || !w.loop.state.onGround));
   const flyUnder = async (win: Window, l: string): Promise<StepOutcome> => {
     const p = new UnderFlyProcess(win, l, {
@@ -101,9 +122,12 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
     stopped: () => stopped,
     log: w.log,
   });
+  void watch();
   try {
-    return await ex.run(goal, label);
+    const r = await ex.run(goal, label);
+    return unsafe ? { ...r, ok: false, reason: `stopped: ${unsafe}` } : r;
   } finally {
+    done = true;
     trips.delete(w.task);
     setCorridorAirborne(w.task, () => false);
     // the windows keep the elytra on between them; the walk at the end and whatever follows want the chestplate

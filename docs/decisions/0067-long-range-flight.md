@@ -84,3 +84,17 @@ follow its fly legs.
 - The chestplate goes back on at the end of a trip only; between windows the elytra stays on.
 - The route tracker's missing extend / replan-with-new-goals call is worked round by the chain (Track F4a's
   file; a proposal, not a change).
+
+## Hotfix 2026-11-06: underground stretches walked, trips end on low health or a death
+
+The first Realm trip into a real cave died there (`death.attack.flyIntoWall`). The underground windows flew on
+partial plans at the live planner budget: "corridor ahead is blocked" at clearance 0, a window handed over with no
+plan yet, local-to-server errors up to 5.4 blocks, hits of 6.5 and 2.8. A golden carrot started mid-glide and took the
+hotbar, so a rocket fired nothing. The trip carried on at 6 and at 3 health, and after the respawn it tried again.
+The e2e bores are clean 3 x 3 tubes; real caves are not.
+
+1. `UNDER_FLY = false` (executor.ts): underground stretches are walked. The cruise to the mouth or the shaft is
+   still flown. The windows stay in the code (`underFly: true`) for a cave benchmark first.
+2. The trip watches the health every tick and stops on a death or under `CORRIDOR_HEALTH_MIN` 12
+   (commands-corridor.ts).
+3. No meal, armour or keeper pass while gliding (the survival kit's `inactive` gate, tasks/registry.ts).

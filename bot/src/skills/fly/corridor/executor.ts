@@ -54,6 +54,13 @@ export const CORRIDOR_MODES: readonly CoarseMode[] = ['walk', 'fly'];
  * where the layer's default 500 ms gave a partial corridor ending in the sky over the goal. A trip plans once (and once per re-plan).
  */
 export const CORRIDOR_PLAN_MS = 4000;
+/**
+ * Hotfix 2026-11-06: underground stretches are walked, not flown. On the Realm a window in a real cave flew on
+ * partial plans at the live planner budget ("corridor ahead is blocked", clearance 0, a window handed over with
+ * no plan), hit the walls (6.5, 2.8) and died. The e2e bores are clean 3 x 3 tubes; real caves are not. The
+ * sky stretches (the cruise to a mouth or a shaft) are still flown. Turn back on only with a cave benchmark.
+ */
+export const UNDER_FLY = false;
 /** Sampling step of the unknown share underground (blocks). */
 const SAMPLE_STEP = 4;
 
@@ -127,6 +134,8 @@ export interface ExecutorOptions {
   maxReplans?: number;
   chunkWaitMs?: number;
   planMs?: number;
+  /** Fly the underground stretches in windows (default UNDER_FLY); false walks them. */
+  underFly?: boolean;
 }
 
 type LegResult = { ok: true } | { ok: false; reason: string; mark?: { id: PortalId; mode: CoarseMode }; fatal?: boolean };
@@ -146,7 +155,7 @@ export class CorridorExecutor {
 
   constructor(ports: CorridorPorts, o: ExecutorOptions = {}) {
     this.p = ports;
-    this.o = { modes: o.modes ?? CORRIDOR_MODES, unknownMax: o.unknownMax ?? UNKNOWN_FLY_MAX, maxReplans: o.maxReplans ?? MAX_REPLANS, chunkWaitMs: o.chunkWaitMs ?? CHUNK_WAIT_MS, planMs: o.planMs ?? CORRIDOR_PLAN_MS };
+    this.o = { modes: o.modes ?? CORRIDOR_MODES, unknownMax: o.unknownMax ?? UNKNOWN_FLY_MAX, maxReplans: o.maxReplans ?? MAX_REPLANS, chunkWaitMs: o.chunkWaitMs ?? CHUNK_WAIT_MS, planMs: o.planMs ?? CORRIDOR_PLAN_MS, underFly: o.underFly ?? UNDER_FLY };
     this.log = ports.log ?? silentLogger;
   }
 
@@ -329,7 +338,7 @@ export class CorridorExecutor {
         const ahead = s.portals.filter((p) => !this.p.loaded(Math.floor(p.center.x), Math.floor(p.center.z))).slice(0, 2).map((p) => p.center);
         if (ahead.length && (await this.p.waitLoaded(ahead, this.o.chunkWaitMs))) win = nextWindow(s, pos, { loaded: (x, z) => this.p.loaded(x, z), solid: this.p.solid, endCell: end });
       }
-      if (!win || win.blocks < UNDER_FLY_MIN) {
+      if (!this.o.underFly || !win || win.blocks < UNDER_FLY_MIN) {
         // nothing worth flying (a short stretch, the tail after a bend, nothing loaded): walk to the stretch's end
         const w = await this.walk(end, `walking ${win ? 'the rest' : 'on'} underground to ${fmt(end)}`);
         if (w.ok || near(w.at ?? this.p.position(), end, 1.5)) return { ok: true };

@@ -11,7 +11,7 @@ import { BURN, type RouteGoal } from '../../../src/skills/fly/route/types.ts';
 import { FlightCost, flightSpace, LANDING_TICKS, ROCKET_TICKS, skyTicks, TAKEOFF_TICKS, tunnelTicks } from '../../../src/skills/fly/corridor/cost.ts';
 import { portalOf, volumeOf, type CorridorProvider } from '../../../src/skills/fly/corridor/coarse-port.ts';
 import { TrackerChain, STRETCH_WEIGHT } from '../../../src/skills/fly/corridor/drive.ts';
-import { CorridorExecutor, UNKNOWN_FLY_MAX, type CorridorPorts, type StepOutcome } from '../../../src/skills/fly/corridor/executor.ts';
+import { CorridorExecutor, UNDER_FLY, UNKNOWN_FLY_MAX, type CorridorPorts, type StepOutcome } from '../../../src/skills/fly/corridor/executor.ts';
 import { corridorWanted, CORRIDOR_MIN } from '../../../src/skills/fly/corridor/registry.ts';
 import { changeCell, nextWindow, splitLeg, type Stretch, type Window } from '../../../src/skills/fly/corridor/stretches.ts';
 import type { Vec3 } from '../../../src/world/types.ts';
@@ -214,7 +214,7 @@ interface Call {
  * The executor's ports over the corridor world with stub flights: every flight and walk ends standing on the
  * centre of its cell (a sky cruise 2 rockets, a window 1) unless an override answers for it.
  */
-function fakeTrip(w: CorridorWorld, provider: CorridorProvider, o: { sky?: (cell: Vec3, n: number) => StepOutcome | undefined; under?: (win: Window, n: number) => StepOutcome | undefined } = {}) {
+function fakeTrip(w: CorridorWorld, provider: CorridorProvider, o: { sky?: (cell: Vec3, n: number) => StepOutcome | undefined; under?: (win: Window, n: number) => StepOutcome | undefined; underFly?: boolean } = {}) {
   const centre = (c: Vec3): Vec3 => ({ x: c.x + 0.5, y: c.y, z: c.z + 0.5 });
   let pos = centre(w.start);
   const calls: Call[] = [];
@@ -247,7 +247,8 @@ function fakeTrip(w: CorridorWorld, provider: CorridorProvider, o: { sky?: (cell
     },
     stopped: () => false,
   };
-  return { ports, calls, ex: new CorridorExecutor(ports) };
+  // the window tests fly underground (the executor's own default since the 2026-11-06 hotfix walks it)
+  return { ports, calls, ex: new CorridorExecutor(ports, { underFly: o.underFly ?? true }) };
 }
 
 describe('the corridor executor over stub corridors (executor.ts)', () => {
@@ -272,6 +273,19 @@ describe('the corridor executor over stub corridors (executor.ts)', () => {
     expect([r.plans, r.replans, r.cruises, r.windows, r.walks, r.rockets, r.corrections, r.trackerReplans]).toEqual([1, 0, 1, 1, 2, 3, 3, 1]);
     expect(r.marks).toEqual([{ id: w.mouth.id, mode: 'fly', outcome: 'ok' }]);
     expect(provider.requests[0]).toMatchObject({ modes: ['walk', 'fly'], startMode: 'walk', goalStanding: true, dim: 0 });
+  });
+
+  it('walks the bore by default (hotfix 2026-11-06: no powered flight underground): only the cruise to the mouth is flown', async () => {
+    expect(UNDER_FLY).toBe(false);
+    const w = corridorWorld(origin);
+    const t = fakeTrip(w, w.stub(), { underFly: UNDER_FLY });
+    const r = await t.ex.run(w.goal, 'the chamber');
+    expect(r.ok).toBe(true);
+    expect(t.calls.some((c) => c.kind === 'under')).toBe(false);
+    expect(t.calls[0]!.kind).toBe('sky');
+    expect(t.calls[0]!.label).toContain('mouth');
+    expect(t.calls.slice(1).every((c) => c.kind === 'walk')).toBe(true);
+    expect(r.windows).toBe(0);
   });
 
   it('drops down a shaft: the cruise lands on the bore floor under the roof hole, the bore is flown from there', async () => {
