@@ -12,13 +12,19 @@ import type { StoredTile, TileStore } from './tiles.ts';
 
 /** CSS pixels per block from which the columns show their textures. */
 export const TEX_ZOOM = 10;
-/** Textured tile canvases kept at once (256 x 256 each); past it they are all dropped and made again. */
+/** Textured tile canvases kept at once (256 x 256 each); past it the least recently used one is dropped. */
 const TEX_TILES = 96;
+/** Textured tiles made per frame; the rest show their colours until a later frame (a pan stays smooth). */
+const TEX_BUILDS_PER_FRAME = 3;
 const NAME = /^[a-z0-9_]{1,64}$/;
 
 export interface Textures {
   /** The tile's textured canvas, or null (no layer, no canvas). */
   of(t: StoredTile, mode: PaintMode, pref: LayerPref): El | null;
+  /** Starts a frame: resets the build budget. */
+  frame(): void;
+  /** True when a tile of this frame wanted a texture over the budget (draw again). */
+  pending(): boolean;
   /** Counts for the tests: names asked, loaded, missing. */
   info(): { asked: number; ok: number; missing: number };
 }
@@ -26,7 +32,14 @@ export interface Textures {
 export function setupTextures(page: Page, tiles: TileStore, changed: () => void): Textures {
   const { ui } = page;
   const imgs = new Map<string, { el: El; ok: boolean | null }>();
-  let made = 0;
+  /** Tiles holding a textured canvas, least recently used first. */
+  const built = new Set<StoredTile>();
+  let budget = TEX_BUILDS_PER_FRAME;
+  let wanted = false;
+  const drop = (s: StoredTile): void => {
+    s.tex = undefined;
+    built.delete(s);
+  };
 
   function img(name: string): El | null {
     if (!page.last.icons || !NAME.test(name)) return null;
@@ -35,7 +48,7 @@ export function setupTextures(page: Page, tiles: TileStore, changed: () => void)
       const entry = { el: ui.el('img'), ok: null as boolean | null };
       entry.el.addEventListener('load', () => {
         entry.ok = true;
-        for (const s of tiles.tiles.values()) if (s.names.has(name)) s.tex = undefined;
+        for (const s of tiles.tiles.values()) if (s.names.has(name)) drop(s);
         changed();
       });
       entry.el.addEventListener('error', () => {
@@ -49,13 +62,19 @@ export function setupTextures(page: Page, tiles: TileStore, changed: () => void)
   }
 
   function of(t: StoredTile, mode: PaintMode, pref: LayerPref): El | null {
-    if (t.tex) return t.tex;
+    if (t.tex) {
+      built.delete(t); // most recently used: to the end
+      built.add(t);
+      return t.tex;
+    }
     const L = mapLayerFor(t.dec, pref) === 'under' ? t.dec.under : t.dec.top;
     if (!L) return null;
-    if (made >= TEX_TILES) {
-      for (const s of tiles.tiles.values()) s.tex = undefined;
-      made = 0;
+    if (budget <= 0) {
+      wanted = true;
+      return null;
     }
+    budget--;
+    while (built.size >= TEX_TILES) drop(built.values().next().value!);
     const c = ui.el('canvas');
     c.width = 256;
     c.height = 256;
@@ -88,12 +107,17 @@ export function setupTextures(page: Page, tiles: TileStore, changed: () => void)
       }
     }
     t.tex = c;
-    made++;
+    built.add(t);
     return c;
   }
 
   return {
     of,
+    frame: () => {
+      budget = TEX_BUILDS_PER_FRAME;
+      wanted = false;
+    },
+    pending: () => wanted,
     info: () => {
       let ok = 0;
       let missing = 0;

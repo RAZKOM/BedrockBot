@@ -78,7 +78,8 @@ installed `minecraft-assets` package, the same tints as the map colours). It has
 (`[a-z0-9_]{1,64}`), the same token, and the same caching as `/icons/`: a day for a picture, 5 minutes
 for a 404. Art at higher resolution is scaled to 16 x 16, and an animated texture uses its first
 frame. The page builds one 256 x 256 canvas per tile, with each column's texture shaded and faded like
-its colour. A 404 keeps the colour. The textures are off when the server has no art (`state.icons`
+its colour: at most 3 per frame (the others show their colours until a later frame, so a pan stays
+smooth), 96 kept, the least recently drawn dropped first. A 404 keeps the colour. The textures are off when the server has no art (`state.icons`
 false) or when the owner switched them off. Nothing derived from the art is in git.
 
 ## Wire
@@ -150,7 +151,7 @@ Each overlay has a switch in the layers panel; the switches are built from `mapd
 | `hostiles` | on | `map-live` `ents` of kind hostile | red dots |
 | `passive` | on | `map-live` `ents` of kind passive or neutral, and `/api/marks` herds | green dots; herds as rings (`herd: 5 cow (penned)`) |
 | `items` | off | `map-live` `ents` of kind item | small yellow dots |
-| `ores` | on | `/api/marks` `blocks.ore` (cache marks) | diamonds coloured by ore (diamond cyan, iron tan, gold yellow ...) |
+| `ores` | off | `/api/marks` `blocks.ore` (cache marks) | diamonds coloured by ore (diamond cyan, iron tan, gold yellow ...). Off by default (owner's choice): the marks include ores buried in stone the bot never saw (the server sends whole chunks), so it is x-ray; map prefs version 2 drops an `ores` switch stored by version 1 once |
 | `chests` | on | `/api/marks` `chests` | brown squares; a tap shows what the chest memory knows (`holds 12 coal, 3 iron ingot (2/27 slots)`, `read 3 min ago`) |
 | `spawners` | on | `/api/marks` `blocks.spawner` | crossed squares |
 | `beds` | on | `/api/marks` `blocks.bed` | red squares |

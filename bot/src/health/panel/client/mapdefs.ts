@@ -29,7 +29,7 @@ export const MAP_OVERLAYS: readonly OverlayDef[] = [
   { id: 'hostiles', label: 'hostile mobs', colour: '#ff5050', on: true, source: 'map-live' },
   { id: 'passive', label: 'passive mobs', colour: '#9fcf6a', on: true, source: 'map-live' },
   { id: 'items', label: 'items on the ground', colour: '#ffd27f', on: false, source: 'map-live' },
-  { id: 'ores', label: 'ores', colour: '#7fe3ff', on: true, source: 'marks' },
+  { id: 'ores', label: 'ores', colour: '#7fe3ff', on: false, source: 'marks' },
   { id: 'chests', label: 'chests', colour: '#b5793a', on: true, source: 'marks' },
   { id: 'spawners', label: 'spawners', colour: '#ff3fd2', on: true, source: 'marks' },
   { id: 'beds', label: 'beds', colour: '#e04848', on: true, source: 'marks' },

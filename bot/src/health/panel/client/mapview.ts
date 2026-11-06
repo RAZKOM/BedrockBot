@@ -19,7 +19,11 @@ import type { Lite, Page } from './page.ts';
 import { setupTiles, type StoredTile } from './tiles.ts';
 
 
+/** 2: ore markers off by default (an `ores` switch stored by version 1 is dropped once). */
+const PREFS_V = 2;
+
 interface Prefs {
+  v: number;
   layer: 'surface' | 'class' | 'slice';
   ov: Record<string, boolean>;
   tex: boolean;
@@ -32,11 +36,11 @@ export function setupMapView(page: Page): (s: Lite) => void {
   const cv = ui.need('mapcv');
   const g: Ctx2D | null = cv.getContext?.('2d') ?? null;
   const dpr = (): number => env.window.devicePixelRatio ?? 1;
-  const prefs: Prefs = { layer: 'surface', ov: Object.fromEntries(MAP_OVERLAYS.map((o) => [o.id, o.on])), tex: true };
+  const prefs: Prefs = { v: PREFS_V, layer: 'surface', ov: Object.fromEntries(MAP_OVERLAYS.map((o) => [o.id, o.on])), tex: true };
   try {
     const p = JSON.parse(ui.store.get(MAP_PREFS_KEY) ?? 'null') as Partial<Prefs> | null;
     if (p?.layer === 'class' || p?.layer === 'surface' || p?.layer === 'slice') prefs.layer = p.layer;
-    if (p?.ov) for (const k of Object.keys(prefs.ov)) if (typeof p.ov[k] === 'boolean') prefs.ov[k] = p.ov[k];
+    if (p?.ov) for (const k of Object.keys(prefs.ov)) if (typeof p.ov[k] === 'boolean' && !(k === 'ores' && (p.v ?? 1) < 2)) prefs.ov[k] = p.ov[k];
     if (typeof p?.tex === 'boolean') prefs.tex = p.tex;
   } catch {
     /* a broken entry: the defaults */
@@ -160,10 +164,14 @@ export function setupMapView(page: Page): (s: Lite) => void {
     refreshMarks();
     drawSoon();
   }
+  // A throttle, not a debounce: during a pan the moves keep coming, and a timer reset on each one would
+  // hold the frame back until the finger stops.
   const drawSoon = (): void => {
-    if (!V.shown) return;
-    env.clearTimeout(V.drawT);
-    V.drawT = env.setTimeout(draw, 16);
+    if (!V.shown || V.drawT) return;
+    V.drawT = env.setTimeout(() => {
+      V.drawT = 0;
+      draw();
+    }, 16);
   };
 
   const tex = setupTextures(page, tiles, () => drawSoon());
@@ -181,12 +189,14 @@ export function setupMapView(page: Page): (s: Lite) => void {
     const s = 16 * V.scale;
     const useTex = !slice && prefs.tex && prefs.layer === 'surface' && V.scale / r >= TEX_ZOOM;
     const src = slice ? tiles.slices : tiles.tiles;
+    if (useTex) tex.frame();
     for (const t of src.values()) {
       const p = toScreen(t.dec.cx * 16, t.dec.cz * 16);
       if (p[0] > w || p[1] > h || p[0] + s < 0 || p[1] + s < 0) continue;
       const img = useTex ? (tex.of(t as StoredTile, 'block', 'auto') ?? t.img) : t.img;
       g.drawImage(img, p[0], p[1], s, s);
     }
+    if (useTex && tex.pending()) drawSoon(); // the tiles over this frame's build budget come next frame
     V.list = markers(V.live, V.marks, on);
     drawOverlays(g, { scale: V.scale, dpr: r, toScreen }, V.live, V.list, on, w, h);
     const box = V.box;
