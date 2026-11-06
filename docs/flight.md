@@ -65,6 +65,10 @@ authoritative. Decision record: [decisions/0042-elytra-flight.md](decisions/0042
 | `bot/src/skills/fly/route/tracker.ts`, `worker.ts`, `live.ts` | Track F2: the per-tick tracker (`RouteTracker`), the search in a worker thread (`RoutePlannerClient`, `snapshotFor`), the tracker on the InputLoop (`flyRoute`) |
 | `bot/src/skills/fly/route/courses.ts`, `bench.ts` | Track F2: the course generator (`tunnel`, `field`, `standardCourses`, the fills for the truth pack) and the offline harness (`flyCourse`, `benchLine`) |
 | `bot/test/unit/skills/fly-route.test.ts`; `bot/test/e2e/fly-route.test.ts` | Track F2: the sweep, the primitives against stepBody, the search, the tracker, the worker, the benchmark set; the e2e tunnels on bds-fly3 |
+| `bot/src/skills/fly/route/landing.ts`, `route/takeoff.ts` | Track F3: the route landing (`planLandingRoute`: the entry, the bearings, the `via` hint, the margin of the passage, `RouteHandoff`) and the route takeoff (`exitsFrom`, `planTakeoffRoute`) |
+| `bot/src/skills/fly/rocket.ts` | Track F3: `RocketHand`, the rocket plumbing the controller and the route driver share (the item use, the cooldown, the own rockets as a set, the take-back of a use no rocket answered) |
+| `bot/src/skills/fly/brain.ts` (`route`, `routeTakeoff`), `landing.ts` (`preciseGoal` with the route, `ROUTE_HEADROOM`), `chat/commands-fly.ts` (`routeTakeoffFor`, the worker client), `tasks/process/fly.ts` | Track F3: the hand-over to the RouteTracker within ROUTE_HANDOVER, the route takeoff as the takeoff phase, the planner in the worker, `flyRoute` |
+| `bot/test/unit/skills/fly-route-landing.test.ts`; `bot/test/e2e/fly-route-land.test.ts` | Track F3: the goals with cells, the hint and the weight, the plans and the tracker flights on every case, findLanding with the route, whole trips with the hand-over, the takeoffs; the e2e stacks / holes / shaft / room / pocket on bds-fly3 |
 
 ## Packets (BDS 1.26.60.6, measured on bds-fly)
 
@@ -1120,6 +1124,7 @@ Rules (all named `// Track AU` in the shared files):
 | `flyPreferRatio` | 1.5 | Track BL: walk to a takeoff site and fly when the whole walk would take this many times longer |
 | `flySiteSearch` | 48 | Track BL: the radius of the takeoff-site search when the takeoff here is refused (0 = off: the walk-out legs) |
 | `flyLandStyle` | auto | Track F1: `flare` lands with the flare only, `brake` with the brake / elevator landing only, `auto` flies the flare and takes the brake for a precision goal (a pillar top, a shaft floor, a cell under a low roof) or when the flare's plans keep missing ("Manoeuvres") |
+| `flyRoute` | auto | Track F3: the route planner lands an exact goal the brake refuses (a slot 2 high, a hole, a 1 x 1 shaft, a pocket) and takes off where the ledge, the jump and the vertical takeoff are all refused; `off` keeps the Track F1 search and chain ("Route landings and takeoffs") |
 
 ## Processes
 
@@ -1719,7 +1724,10 @@ server, not a longer guess.
 
 What the rounds measured on the server (the per-tick samples of `truth:glidelog` against the local trace):
 
-- **A glide starts only once the body falls.** After a jump the server's gliding flag comes 7 ticks later
+- **A glide starts only once the body falls** (superseded: Track F0 measured a standing jump's glide from the
+  2nd airborne input, "The flight envelope"; the 7 ticks here were a teleport artefact. Track F3 set the
+  planner's GLIDE_DELAY to 1 and the driver asks from the first airborne tick, which the loop holds one
+  input). After a jump the server's gliding flag comes 7 ticks later
   (the rise of 6 ticks, then the request on the first falling tick, confirmed the tick after: run 5's trace
   `7:a vy 0.42 ... 13:a vy -0.15, 14:G`); the brain's takeoff requests the glide on a falling tick for the
   same reason. The model's loop glides from the first airborne tick when asked, 6 ticks before the server: a
@@ -1742,6 +1750,214 @@ What the rounds measured on the server (the per-tick samples of `truth:glidelog`
   (the partial first plans of the S-bend rows; a distance field through the bore is the open point).
 - **flyIntoWall** at 1.3 to 1.7 blocks a tick through a step's corner costs 4 to 8 damage a touch (the
   staircase rows); the tunnel's one wall touch at low speed cost none. The threshold is Track F0's.
+
+## Route landings and takeoffs (Track F3)
+
+ADR [0064](decisions/0064-route-landings-and-takeoffs.md). The planner of Track F2 in the flight: a cell the
+flare and the brake refuse (Track F1 needs 3 of room over a precision goal) is handed to the route planner,
+which decides whether an entry path exists and, in flight, flies it; and a takeoff nothing else can make is
+searched the same way. The owner's headline case: the inner platform of two 3 x 3 platforms stacked with 2
+blocks of air between them. The gliding box is 0.6 high, the body comes in sideways at the slot's height and
+brakes over the floor; Track F0 measured that a 2-high bore flown in at pitch -10 keeps the glide and at pitch
+0 the box sinks onto the floor, which on a cell is the touchdown (and that no jump glides under such a
+ceiling: the way out is the ledge takeoff, as before).
+
+### What is landable now (`landing.ts preciseGoal`, `route/landing.ts`)
+
+An exact goal (`!fly <x y z>`) that is no plain floor is tried as Track F1 tries it: dry and safe, the brake
+simulated from above along four bearings or along a corridor. When that fails, or the room over the floor is
+only 2 (`ROUTE_HEADROOM`), `planLandingRoute` runs with `flyRoute auto`:
+
+- **The spec**: the floor's cells (the same height, connected, within 1.5; a 3 x 3 platform's nine), the
+  top, a shaft's rim, the ceiling.
+- **The entry** (`routeEntry`): `ROUTE_ENTRY_OUT` (40) blocks out along a bearing, `ROUTE_ENTRY_UP` (9) over the
+  top or the rim, 1.0 a tick heading in: where the cruise's glide line puts the body before an approach
+  (APPROACH_HEIGHT over the entry top at the approach distance, sinking 0.1 a block, bled to about 1.05). A
+  plan from there is the plan the tracker starts near.
+- **The bearings**: the body's side first (`LandingOptions.from`), under a roof the corridors' (`corridorsOf`
+  with the room the roof leaves), else every 45 degrees; at most `ROUTE_TRIES` (6).
+- **The weights**: each bearing at `ROUTE_WEIGHTS` 2 then 1 (`RouteRequest.weight`: f = g + weight x h). The
+  greedy search finds the long landing edges (a 40-tick approach, the settles) in a few hundred nodes where
+  the plain A* drowns in the open air over the cell; the plain A* is kept for what the greedy one misses.
+- **The margin** (`specMargin`): the passage's narrower side: a 1-wide shaft 0.1, a 2-high slot 0.12, a
+  3-high room or a 3-wide pocket 0.2, the open 0.4 (a shaft had been getting the open-air margin and could not
+  be entered at all).
+- **The goal** (`landingGoalFor`): the cell nearest the floor's centre, the other `cells` (a touchdown in any
+  lands; `landsOn`, the tracker's goal check), and the heuristic's **`via`** hint: over the centre at the rim +
+  1 for a shaft (the way down at the hover's sink, 0.149 a tick), beside the room's mouth at the slot's height
+  for a cell under a low roof (the creep in at 0.4). Without it the heuristic flies straight at a floor it
+  cannot reach straight, and the 1 x 1 shaft 10 deep was never found within 60 000 nodes (Track F2's open
+  point); with it and the weight the shaft is found in 87 nodes.
+- **The library** (`RouteRequest.library: 'landing'`, `search.ts libraryNamed`): Track F2's glides, turns and
+  rockets with Track F1's manoeuvres and the brake landing's approaches and settles onto every landing goal
+  (`routeLibrary`), built by name so a request crosses to the worker.
+- **The answer**: the first complete plan. The target becomes a precision goal (`precise`, its `cells`, its
+  `rim`) with `route` (`RouteHandoff`: the bearing, the entry, the goals, the margin, the weight, the plan's
+  ticks, rockets, edges and effort) and the bearing as a Track BF corridor (`bearing`, `ceiling`), so the
+  cruise comes in along it. The log line: `landing for X: the goal itself (0 93 0, a cell under a roof 2
+  above, a route landing in from 180 (65 ticks, 0 rockets; 210 nodes in 5 ms: approach+10/8 hover glide+35
+  hover settle; tried 1 bearing))`. `stillLandable` asks `ROUTE_HEADROOM` of such a cell.
+
+The search runs in the planner worker (`RoutePlannerClient`, the 0023 pattern; `commands-fly.ts` owns one per
+task over a grid of the live model in which an unknown cell is solid). A landable cell costs tens of
+milliseconds; a cell that is not costs up to 6 bearings x 2 weights x 800 ms before the search says so.
+
+### The flight (`brain.ts route`)
+
+The cruise flies as to any corridor target (the corridor entry 64 out along the bearing, the glide line, the
+descent geometry). Two things differ for a target with a `route`: no approach of the landing families is ever
+started, and within `ROUTE_HANDOVER` (44) on the bearing's side (within 60 degrees of it from the cell) the
+brain hands over to a `RouteTracker` (phase `route`) with the planner's edges and the goals of the plan, the
+search in the worker (40 000 nodes, 600 ms), a rocket still burning seeded into the tracker's burn range. The
+tracker plans from the real state (the entry is where it should be, not where it must be), re-plans as the
+body drifts, and the brain passes its controls through, counting its rocket as the landing's. The flight ends
+as any other when the body stands; a touchdown in any of the floor's cells is on target. No plan for 40
+ticks, or no touchdown in `ROUTE_MAX_TICKS` (400): a go-around, whose way back in hands over again; none
+left: the nearest safe ground. On the way in a target under the glide line gets a small top-up at any flying
+speed (the tracker dives off a surplus more easily than it climbs out of a deficit), none within 48.
+
+The log: `route landing: handing over to the route tracker 44 out, 9.2 over the cell at 1.02 a tick (planned in
+from 180: ...)`, the tracker's `route: start: plan 65 ticks ...` lines, and the finish line's `landing route
+(149 ticks on the route tracker, 7 plans, 6 re-plans, max error 0.31)`.
+
+### The route takeoff (`route/takeoff.ts`, `commands-fly.ts takeoffFor`)
+
+The last step of the takeoff chain, after the ledge, the jump on every heading and the vertical takeoff: the
+air around the start is flooded (6-connected through the air cells, up to 6 000 cells within 32 blocks) for
+the cells under `EXIT_OPEN_SKY` (16) of known air at or above the feet (`exitsFrom`, the nearest by the flood
+first), and from standing a plan to a waypoint box 2 to 6 over such a cell is searched (`planTakeoffRoute`: F2's
+takeoff primitives, the margin 0.15, weight 2, at most 3 exits). The brain flies it with the tracker as its
+takeoff phase (`routeTakeoff`): the jump, the glide requested from the first airborne tick (the loop holds it
+one input and asks on the 2nd, which the server takes: Track F0), a rocket from the second gliding tick, then
+the climb along the heading towards the target once the exit is passed (or after `ROUTE_TAKEOFF_MAX_TICKS`,
+200, or with no plan: the climb's path-ahead check does what it can). Under a 2-high ceiling the planner
+refuses at once (`stepState`: a jump clipped to `LOW_CEILING_RISE` never glides), so the owner's inner platform
+is left by the ledge takeoff as before (a small platform). The log: `fly: route takeoff: 2696 exits under open
+sky; 2 93 0 (2 cells away): 5 ticks, 1 rockets, 2 nodes, 1 ms (takeoffR-20)` and the finish line's `route
+takeoff (7 ticks)`.
+
+### Track F0 in the route code
+
+- `BURN` 9 to 21 (the burn branches and the robust check widen with it); `GLIDE_DELAY` 1 (one input of plain
+  physics after the jump; was 7 from a teleport artefact); the driver and the benchmark harness request the
+  glide from the first airborne tick; the tracker re-issues a rocket the body could not use yet on its first
+  gliding tick (`fireLater`); the brain's route takeoff fires from the second gliding tick.
+- `rocket.ts RocketHand` (the controller and the route driver share it): the own rockets are a set and the
+  boost ends with the last removal, never while a newer use waits for its entity; a use with no entity within
+  5 ticks fired nothing and its boost is taken back (`loop.endBoost(ticks since the use)`); the loop's own
+  refusal of a glide request is no glide end.
+- The stubs `shortBoost` and `stackedBoost` stay refused with F0's measurement in their notes (a slot switch
+  does not cut the boost; the boost is the union of the lifetimes).
+
+### Offline (stepBody; `fly-route-landing.test.ts`, the scratch sweeps)
+
+The plans from the entry (40 out, 9 up, 1.0 a tick, the preferred bearing), with weight 2 and the hint, and the
+tracker flying them on stepBody from that entry (3 seeds each, the search in-thread 600 ms / 40 000 nodes):
+
+| Case | Margin | Plan | Nodes / ms | Flown (3 seeds) | Ticks | Max error |
+|---|---|---|---|---|---|---|
+| the stacked platforms, 2 of air (the owner's) | 0.12 | approach+10/8 hover glide+35 hover settle | 210 / 5 | ok, 0 hits | 66 | 0.00 |
+| the stacked platforms, 3 of air | 0.2 | approach+10/8 hover glide+35 settle+20 | 108 / 3 | ok, 0 hits | 64 | 0.00 |
+| a 1 x 1 hole 2 deep | 0.1 | approach+10/4 settle+20 | 76 / 1 | ok, 0 hits | 78 | 0.00 |
+| a 2 x 1 hole 2 deep | 0.1 | approach+10/4 settle glide-20 | 86 / 1 | ok, 0 hits | 83 | 0.00 |
+| the 1 x 1 shaft 10 deep | 0.1 | approach+10/4 settle+20 settle | 87 / 1 | ok, 0 hits | 117 | 0.00 |
+| a cell under a roof 3 above at ground level (a room open on one side) | 0.2 | glideTurn45L glideTurn90R settle (in from 90, the 3rd bearing) | 1 118 / 13 | ok, 0 hits | 69 | 0.00 |
+| a 3 x 3 x 3 pocket in a cliff face 30 high, 10 up | 0.2 | glideTurn45L approach+10/4 settle (in from 135, the 4th bearing) | 610 / 8 | ok, 0 hits | 71 | 0.00 |
+
+What the weight, the hint and the entry did (the same cases from 24 out and 6 up, the first sweep): with
+weight 1 and no hint the shaft and the 2-high stack were not found in 40 000 nodes a bearing; with the hint
+alone the shaft was still missed at weight 1; with weight 2 and the hint every case but the pocket was found
+in 92 to 1 632 nodes, the pocket only at weight 1 (the dive before the turn in: hence `ROUTE_WEIGHTS` 2 then
+1); from the lower entry the tracker stalled in the 2-deep holes on the rim (it entered the 1-wide bore 0.2
+off its centre); from the 40 / 9 entry everything above flies.
+
+Whole trips of the brain from 300 blocks south onto the goal `findLanding` gives (seeds 5 and 11):
+
+| Case | Landing found | Flown | Off | Touchdown vy / h | Ticks | Rockets | Go-arounds | Route ticks (plans / re-plans, max error) |
+|---|---|---|---|---|---|---|---|---|
+| the stacked platforms, 2 of air | a route landing in from 180 | ok, on the goal cell, 0 hits | 1.13 | -0.16 / 0.26 | 543 | 5 | 0 | 149 (8 / 7, 0.05) |
+| the stacked platforms, 3 of air | Track F1's brake, in from 0 under the roof (the route is not asked) | ok, 0 hits | 0.01 | -0.14 / 0.00 | 492 | 4 | 0 | 0 |
+| the room at ground level | Track F1's brake, in from 165 (3 under the roof) | ok, 0 hits | 0.02 / 0.05 | -0.18 / 0.03, -0.11 / 0.33 | 505 / 723 | 4 / 5 | 2 / 4 | 0 |
+
+So the planner is only ever asked for the 2-high slot (and for a hole, a shaft or a pocket when the brake's
+simulation fails, which it does not on the model); the room at ground level, Track F1's open point, is landed
+by the brake's corridor after 2 to 4 go-arounds (the corridor entry still arrives badly). The hand-over state
+is the weak point of the route landing: the cruise arrives a rocket's worth high and the descent circles of a
+corridor target leave the body 25.7 over the cell at 0.64 a tick at 44 out, so the tracker's first plans are
+partial for a few ticks before it comes down (149 ticks on the tracker against 66 from the planned entry).
+
+The route takeoffs on stepBody (the route found, then flown by the tracker from standing, 3 seeds):
+
+| Case | Exits | Plan | Flown | Ticks | Rockets |
+|---|---|---|---|---|---|
+| out of the 3-high stack | 2 696 | takeoffR-20 to the cell beside the platform | ok, 0 hits | 7 | 1 |
+| out of a 1 x 1 hole 2 deep | 5 167 | takeoff glide+0 rocket-60 | ok, 0 hits | 11 | 1 |
+| from under a roof 3 above (the room) | 5 060 | takeoffR-20 out of the open side | ok, 0 hits | 7 | 1 |
+| the inner platform of the 2-high stack | 2 705 | none (the jump never glides: F0) | | | |
+| the floor of the 1 x 1 shaft | 4 956 | none (the jump's box has no margin in the bore; the vertical takeoff is the way out) | | | |
+
+### Measurements (Track F3, bds-fly3, BDS 1.26.60.6)
+
+`fly-route-land.test.ts`, run 1: from the start on the flat (feet -60), `!fly x y z` onto each truth-built cell
+twice (150 to 270 blocks out), then `!fly` back to a cell near the start from inside it (the takeoff out). "how"
+is what landed (the finish line): the route tracker, Track F1's brake or the flare; "off" the truth feet from the
+cell centre once stood; "route" the ticks on the route tracker; the damage from the hurt log (fall damage on).
+
+| Landing | How | On the cell | Off | Damage | Rockets | Corr. | Ticks | Route | Touchdown vy / h | Go-arounds |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **stack2 #1** (the owner's: the inner platform under 2 of air) | **route** | yes | 0.05 | 0 | 1 | 1 | 181 | 63 | -0.162 / 0.130 | 0 |
+| **stack2 #2** | **route** | yes | 0.41 | 0 | 1 | 1 | 194 | 77 | -0.194 / 0.120 | 0 |
+| stack2 out (the takeoff from the inner platform) | ledge takeoff, flare | yes | 0.07 | 0 | 2 | 1 | 327 | | -0.167 / 0.350 | 0 |
+| stack3 #1 (3 of air) | flare (F1's corridor landing, in from 0) | yes | 0.11 | 0 | 2 | 1 | 353 | | -0.109 / 0.319 | 0 |
+| stack3 #2 | flare | yes | 0.11 | 0 | 3 | 2 | 372 | | -0.095 / 0.343 | 0 |
+| stack3 out | ledge takeoff, flare | yes | 0.08 | 0 | 1 | 3 | 395 | | -0.115 / 0.345 | 0 |
+| hole1 #1 (1 x 1, 2 deep) | brake (F1) | yes | 0.02 | 0 | 1 | 1 | 301 | | -0.151 / 0.008 | 0 |
+| hole1 #2 | brake | yes | 0.02 | 0 | 1 | 1 | 301 | | -0.151 / 0.008 | 0 |
+| hole1 out | vertical takeoff (6 up), flare | yes | 0.07 | 0 | 1 | 2 | 306 | | -0.105 / 0.347 | 0 |
+| hole2 #1 (2 x 1, 2 deep) | brake | yes | 0.02 | 0 | 1 | 2 | 320 | | -0.177 / 0.007 | 0 |
+| hole2 #2 | brake | yes | 0.02 | 0 | 2 | 2 | 268 | | -0.191 / 0.011 | 0 |
+| hole2 out | vertical takeoff (6 up), flare | yes | 0.05 | 0 | 1 | 3 | 280 | | -0.103 / 0.339 | 0 |
+| shaft1 #1 (1 x 1, 10 deep) | brake | yes | 0.02 | 0 | 1 | 1 | 263 | | -0.174 / 0.010 | 0 |
+| shaft1 #2 | brake | yes | 0.04 | 0 | 1 | 2 | 330 | | -0.207 / 0.008 | 0 |
+| shaft1 out | vertical takeoff (10 up), flare | yes | 0.12 | 0 | 1 | 1 | 222 | | -0.112 / 0.328 | 0 |
+| room3 #1 (under a roof 3 above at ground level) | brake (F1's corridor) | yes | 0.02 | 0 | 2 | 3 | 401 | | -0.206 / 0.136 | 0 |
+| room3 #2 | brake | yes | 0.09 | 0 | 2 | 2 | 546 | | -0.169 / 0.016 | 1 |
+| room3 out, run 1 | **route takeoff** (out through the open side in 9 ticks, 1 rocket), then `roof` | NO (on the ground 15 out, 0 damage) | | 0 | 1 | 0 | 17 | | | |
+| pocket #1 (3 x 3 x 3 in a cliff face, 10 up) | brake | yes | 0.03 | 0 | 2 | 3 | 352 | | -0.316 / 1.001 | 0 |
+| pocket #2 | brake | yes | 0.02 | 0 | 2 | 4 | 341 | | -0.158 / 0.013 | 0 |
+
+- **The owner's case lands by the route, twice, with 0 damage**: the brain hands over at 44 out, the tracker
+  brings the body down beside the stack and in sideways under the upper platform, the glide ends on the inner
+  floor. 1 rocket (the climb), 1 correction, the touchdown 0.12 to 0.13 a tick sideways and 0.16 to 0.19 down.
+  The second run stood 0.41 from the centre (the slide after a sideways entry is longer than the brake's).
+- **The stack's takeoff is the ledge takeoff** (`a roof 2 up: 16 ledges on 9 cells, heading -180: clear,
+  gliding 9.2 under the edge`), as the F0 rule predicts (no jump glides under 2 of ceiling): 0 damage.
+- **Everything else is Track F1's**: the holes 2 deep, the shaft, the room at ground level and the pocket are
+  landed by the brake family (`preciseGoal` asks it first and it lands), 0.02 to 0.09 off, 0 damage; the holes
+  and the shaft are left by the vertical takeoff (6 and 10 up), the room's 3-high ceiling by the route takeoff.
+  The pocket's first landing touched down at 1.0 a tick sideways (the brake's K took it only 2 ticks before the
+  pocket's back wall) and still stood 0.03 off with 0 damage.
+- **The one failure (room3 out, run 1)**: the route takeoff flew out through the open side in 9 ticks and fired
+  its rocket on the loop's second gliding tick, which on the server is the input that starts the glide (F0: no
+  rocket entity), so the body left the room 2 up at glide speed with no boost; the climb then took over and its
+  path-ahead check, from 2 up at pitch 0, "hit" the ground within 20 ticks on every candidate and ended the
+  flight `roof` on the ground 15 blocks out (0 damage). Two fixes followed: the first rocket from the third
+  gliding tick (`ROUTE_FIRE_GLIDE_TICKS`), and no path-ahead check until the body is 6 over the start after a
+  route takeoff (`ROUTE_OUT_ABOVE`, the window the jump takeoff has by being slow).
+
+The room case flown again after the two fixes (runs 2 and 3 of `FLY_F3_ONLY=room3`, both passed; run 3's rows):
+
+| Landing | How | On the cell | Off | Damage | Rockets | Corr. | Ticks | Touchdown vy / h | Go-arounds |
+|---|---|---|---|---|---|---|---|---|---|
+| room3 #1 | flare (F1's corridor) | yes | 0.05 | 0 | 2 | 4 | 649 | -0.106 / 0.324 | 1 |
+| room3 #2 | flare | yes | 0.03 | 0 | 2 | 3 | 413 | -0.246 / 0.350 | 0 |
+| **room3 out** | **route takeoff** (`5060 exits under open sky; 67624 -60 63474 (4 cells away): 5 ticks, 1 rockets, 2 nodes, 1 ms (takeoffR-20)`; out through the exit after 10 ticks, 1 rocket, max error 0.57), then the climb to y -20.5, a dive descent, the flare | yes | 0.06 | 0 | 1 | 2 | 277 | -0.107 / 0.322 | 0 |
+
+So the route takeoff is measured once on the server, twice over (runs 2 and 3 of the room case): the ledge
+takeoff has no edge on the room's floor, the vertical takeoff's column is open only 2 up, the route planner
+finds the way out through the open side in a millisecond and the flight flies it, lands 247 blocks away and
+takes 0 damage. The room's own landings are Track F1's corridor landings (the brake in run 1, the flare in
+run 3, 0 to 1 go-arounds).
 
 ## Open points
 
@@ -1769,8 +1985,38 @@ What the rounds measured on the server (the per-tick samples of `truth:glidelog`
 - Track F2: the landing goal is flown offline only (a 1 x 1 cell in open air: a brake and the settle), not the
   brake / elevator landings of Track F1 and not on the server; the stacked rockets, the slot switch and the
   impact threshold wait for Track F0's measurements (`stackRockets` is off).
-- Track F2: `flyRoute` is the e2e's entry only; no command, no process, no integration with the FlightBrain
-  (Track F3). The live driver's rocket plumbing duplicates the controller's.
+- Track F2 (closed by Track F3): `flyRoute` was the e2e's entry only and the live driver's rocket plumbing
+  duplicated the controller's; the brain's `route` phase and `rocket.ts` are the integration.
+- Track F3: the hand-over state. The cruise arrives a rocket's worth high and a corridor target's descent
+  circles leave the body 17 to 26 over the cell at 0.6 to 0.7 a tick at 44 out (the trip tables), so the
+  tracker's first plans in flight are partial for a few ticks; the planned entry (40 out, 9 up, 1.0) is where
+  the glide line would put it. A descent that ends on the glide line before the hand-over, or a hand-over
+  farther out with a higher entry, would make the first plan the flown one.
+- Track F3: `!goto` / `!come` onto such a cell keep the walk-landing search (4 of headroom, level neighbours):
+  only an exact `!fly <x y z>` is handed to the route planner. A route landing is never a walk landing.
+- Track F3: the route planner is asked only after the brake's simulation fails (or under 3 of room); a cell
+  the brake lands badly but a route would land well is still the brake's. The 2-deep holes are the brake's
+  (landable in Track F1's way), the route plan for them exists as a fallback.
+- Track F3: the search's cost when a cell is not landable: up to 6 bearings x 2 weights x 800 ms in the worker
+  before `findLanding` says so (a landable one is found on its first bearing in tens of milliseconds).
+- Track F3: no route into a staircase from its flat section (Track F2's benchmark takes off there with the
+  F0 model now; not re-flown on the server here) and no route out of a 1 x 1 shaft (the vertical takeoff is the
+  way out; the jump's box has no margin in the bore).
+- Track F3: Track F0's wall-damage rule (`wallImpactDamage`) and fall-distance rule are not costs in the
+  route search (the margin keeps the box off the walls instead); the continuous boost (the union of the
+  lifetimes) is known but no manoeuvre or edge uses it; `stackRockets` stays off.
+- Track F3, a regression to look at: with the F0 takeoff model in the planner (`GLIDE_DELAY` 1, the glide asked
+  from the first airborne tick) `fly-route`'s 3 x 3 tunnel on bds-fly touched a wall once in each of two runs
+  (1.9 and 1.7 of `flyIntoWall`, 3 local hits, the second run ended `ground` after 3 of 4 goals; the first plan
+  `takeoff glide+35 x3 glide+0 rocket90L-20 ...`, max error 0.98, 2 of 5 plans partial), where Track F2's run 6
+  had 0 damage; the staircase, F2's open point, is clean now (0 hits, 0 damage, 0 corrections, twice, 38
+  ticks, 1 rocket). The server's glide came on the same input as the model's (the trace: `11 air vy 0.33, 12
+  air 0.25, 13 G 0.22` against the server's `15 a 0.42, 17 a 0.33, 18 G 0.22`), so the takeoff matches; what
+  drifts a block before the snap turn into the curve was not analysed (the e2e's trace ends at 40 ticks).
+  `fly-route`'s tunnel gate (0 damage) is red until it is.
+- Track F3: `fly-terrain`'s `site` case now flies out from under its 91 x 86 roof 3 up by the route takeoff
+  instead of walking 28 blocks to a site (the route takeoff comes before the site search in the chain; it
+  arrived with 0 damage); the case accepts either way out.
 - Track F2: on the server the 3-high staircase is climbed but scraped (8 to 13 of flyIntoWall, "Measurements
   (Track F2)"): the takeoff out of its flat section has no complete plan at the margin of 0.15 once the jump
   is modelled as the server flies it (7 ticks of plain jump before the glide). A takeoff primitive measured by

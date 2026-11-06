@@ -77,12 +77,14 @@ describe('route primitives against stepBody', () => {
     // the next tick glides in both
     const r2 = stepBody(r.state, { ...IDLE_COMMAND, jump: true, glide: true }, world);
     expect(r2.state.gliding).toBe(true);
+    // under a 2-high ceiling moveBody clips the rise to 0.2; the planner knows no glide ever starts from such a jump (Track F0:
+    // two airborne inputs, the first refused) and leaves the body standing
     const low = withBoxes(world, [{ from: { x: -2, y: FEET + 2, z: -2 }, to: { x: 2, y: FEET + 2, z: 2 }, solid: true }]);
     const rl = stepBody(initialBody(start, true), { ...IDLE_COMMAND, jump: true, glide: true }, low);
     const sl = stepState(state({ pos: start, gliding: false, vel: { x: 0, y: 0, z: 0 } }), { yaw: 0, pitch: 0, fire: false, jump: true, glide: true }, false, BURN.nominal, gridOf(low)).next;
     expect(rl.state.pos.y).toBeCloseTo(FEET + 0.2, 3);
-    expect(sl.pos.y).toBeCloseTo(rl.state.pos.y, 3);
-    expect(sl.vel.y).toBeCloseTo(rl.state.vel.y, 6);
+    expect(sl.pos.y).toBe(start.y);
+    expect(sl.gliding).toBe(false);
   });
 
   it('an edge sweeps every tick and advances the waypoints it passes; a wall in the way makes none', () => {
@@ -144,7 +146,7 @@ describe('route search', () => {
     expect(p.robust).toBe(true);
     expect(p.states.length).toBe(p.controls.length);
     const rob = checkRobust(start, p, grid, c.margin, c.goals);
-    expect(rob.branches.length).toBe(6 * p.rockets + (p.rockets > 1 ? 2 : 0));
+    expect(rob.branches.length).toBe((BURN.max - BURN.min) * p.rockets + (p.rockets > 1 ? 2 : 0));
     expect(rob.robust).toBe(true);
     const tiny = planRoute({ ...req, maxNodes: 20 }, grid);
     expect(tiny.complete).toBe(false);

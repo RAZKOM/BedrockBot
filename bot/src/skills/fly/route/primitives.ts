@@ -10,7 +10,7 @@
 import type { Vec3 } from '../../../connection/types.ts';
 import { GLIDE, PHYSICS, glideVelocity } from '../../input/physics.ts';
 import { sweep, type RouteGrid } from './grid.ts';
-import { BURN, CLIPPED_GLIDE_DELAY, EDGE_MAX_TICKS, EDGE_TICKS, GLIDE_DELAY, RISK_RANGE, burnTick, cloneState, dist3, freshBurn, headingOf, hspeed, inBox, type Maneuver, type PrimitiveFamily, type RouteControl, type RouteEdge, type RouteGoal, type RouteState } from './types.ts';
+import { BURN, CLIPPED_GLIDE_DELAY, EDGE_MAX_TICKS, EDGE_TICKS, GLIDE_DELAY, RISK_RANGE, burnTick, cloneState, dist3, freshBurn, headingOf, hspeed, inBox, landingCells, type Maneuver, type PrimitiveFamily, type RouteControl, type RouteEdge, type RouteGoal, type RouteState } from './types.ts';
 
 export interface EdgeContext {
   grid: RouteGrid;
@@ -48,6 +48,9 @@ export function stepState(s: Readonly<RouteState>, c: RouteControl, stackRockets
         }
       }
       const clipped = rise < PHYSICS.jumpVelocity;
+      // Track F0: under a 2-high ceiling the jump has only two airborne inputs and the first is refused: no glide
+      // starts from it at all (docs/flight-envelope.md section 8). The body is back on the floor: no takeoff here.
+      if (clipped && rise <= LOW_CEILING_RISE) return { next: n, fired };
       n.pos.y = f32(s.pos.y + rise);
       n.vel = { x: 0, y: Math.fround(((clipped ? 0 : PHYSICS.jumpVelocity) - PHYSICS.gravity) * PHYSICS.drag), z: 0 };
       n.gliding = c.glide === true;
@@ -96,6 +99,8 @@ export function stepState(s: Readonly<RouteState>, c: RouteControl, stackRockets
 
 /** The branches are dropped once both are within this of the nominal body (blocks) after the burn. */
 export const BRANCH_CONVERGED = 0.3;
+/** Track F0: a jump whose rise is clipped to this or less by the ceiling (a 2-high space: 0.2) never glides. */
+export const LOW_CEILING_RISE = 0.25;
 
 /**
  * Re-fly `controls` from `start` on the nominal burn (the per-tick states of a plan; no collision check):
@@ -125,9 +130,9 @@ export function landsOn(g: RouteGoal, from: Vec3, to: Vec3, vel: Vec3): boolean 
   if (g.kind !== 'landing') return false;
   if (!(from.y >= g.top && to.y <= g.top)) return false;
   const f = (from.y - g.top) / Math.max(1e-9, from.y - to.y);
-  const x = from.x + (to.x - from.x) * f;
-  const z = from.z + (to.z - from.z) * f;
-  if (Math.floor(x) !== g.cell.x || Math.floor(z) !== g.cell.z) return false;
+  const x = Math.floor(from.x + (to.x - from.x) * f);
+  const z = Math.floor(from.z + (to.z - from.z) * f);
+  if (!landingCells(g).some((c) => c.x === x && c.z === z)) return false;
   const max = g.maxSpeed ?? 0.3;
   return -vel.y <= max && hspeed(vel) <= max;
 }
@@ -156,7 +161,7 @@ export const LANDING_NEAR = 3;
 /** The grid an edge from `pos` towards `goal` is swept in: a landing goal's floor plane is no obstacle near the cell (plan.ts simulateProfile does the same near the target). */
 export function sweepGridFor(grid: RouteGrid, goal: RouteGoal | undefined, pos: Vec3): RouteGrid {
   if (goal?.kind !== 'landing') return grid;
-  if (Math.hypot(pos.x - (goal.cell.x + 0.5), pos.z - (goal.cell.z + 0.5)) > LANDING_NEAR) return grid;
+  if (!landingCells(goal).some((c) => Math.hypot(pos.x - (c.x + 0.5), pos.z - (c.z + 0.5)) <= LANDING_NEAR)) return grid;
   return floorless(grid, goal.top);
 }
 

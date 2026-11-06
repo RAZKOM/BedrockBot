@@ -15,7 +15,7 @@ import { glideVelocity } from '../../input/physics.ts';
 import { sweep, type RouteGrid } from './grid.ts';
 import { crossesFloor, landsOn, passes, stepState, sweepGridFor } from './primitives.ts';
 import { startMarginFor } from './search.ts';
-import { NO_BOOST, burnTick, freshBurn, headingOf, hspeed, type BoostRange, type PrimitiveFamily, type RouteControl, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
+import { BURN, NO_BOOST, burnTick, freshBurn, headingOf, hspeed, landingCells, type BoostRange, type PrimitiveFamily, type RouteControl, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
 
 /** Ticks of the plan ahead of the body checked against the grid every tick. */
 export const LOOKAHEAD = 20;
@@ -55,6 +55,9 @@ export interface TrackerOptions {
   /** The initial look yaw (a standing body has no heading). */
   yaw?: number;
   note?: (msg: string) => void;
+  /** Track F3: the heuristic's weight and the edge set by name (RouteRequest.weight / .library) of every request. */
+  weight?: number;
+  library?: RouteRequest['library'];
 }
 
 export type TrackerStatus = 'planning' | 'tracking' | 'holding' | 'done' | 'failed';
@@ -112,6 +115,11 @@ export class RouteTracker {
   private planless = 0;
   private failed: string | undefined;
   private lastControl: RouteControl | undefined;
+  /**
+   * Track F3: a rocket the plan asked for on a tick the body was not gliding yet (the server starts a glide a
+   * tick or two after the model: F2's measurement): used on the first gliding tick instead of never.
+   */
+  private fireLater = false;
   readonly stats: TrackerStats = { plans: 0, replans: 0, planMs: 0, partial: 0, fired: 0, corrections: 0, holdTicks: 0, evadeTicks: 0, burnsRead: 0, maxError: 0, ticks: 0 };
 
   private readonly o: TrackerOptions;
@@ -149,6 +157,12 @@ export class RouteTracker {
   rocketEnded(): void {
     this.boost = { ...NO_BOOST };
     this.burnEnded = true;
+  }
+
+  /** Track F3: a rocket of the flight already burns when the tracker takes the body over: `ticks` expected left (the loop's `boostTicks`), up to BURN.max - BURN.nominal more. */
+  seedBoost(ticks: number): void {
+    if (ticks <= 0) return;
+    this.boost = { min: Math.max(1, ticks - 3), max: ticks + (BURN.max - BURN.nominal), nom: ticks };
   }
 
   /**
@@ -207,6 +221,8 @@ export class RouteTracker {
       ...(this.o.rocketCost !== undefined ? { rocketCost: this.o.rocketCost } : {}),
       ...(this.o.riskCost !== undefined ? { riskCost: this.o.riskCost } : {}),
       ...(this.o.edgeTicks !== undefined ? { edgeTicks: this.o.edgeTicks } : {}),
+      ...(this.o.weight !== undefined ? { weight: this.o.weight } : {}),
+      ...(this.o.library !== undefined ? { library: this.o.library } : {}),
     };
     this.pending = true;
     if (this.plan) this.stats.replans++;
@@ -367,7 +383,7 @@ export class RouteTracker {
       const goals = this.o.goals;
       while (this.wp < goals.length) {
         const g = goals[this.wp]!;
-        if (g.kind === 'waypoint' ? passes(g, this.lastPos, b.pos) : b.onGround && Math.floor(b.pos.x) === g.cell.x && Math.floor(b.pos.z) === g.cell.z && Math.abs(b.pos.y - g.top) < 0.6) {
+        if (g.kind === 'waypoint' ? passes(g, this.lastPos, b.pos) : b.onGround && landingCells(g).some((c) => Math.floor(b.pos.x) === c.x && Math.floor(b.pos.z) === c.z) && Math.abs(b.pos.y - g.top) < 0.6) {
           this.wp++;
           // (the plan goes on: its goals are its own list, `planGoals`; only a new request takes the ones left)
           this.o.note?.(`route: goal ${this.wp} of ${goals.length} passed at tick ${now}`);
@@ -431,12 +447,20 @@ export class RouteTracker {
       control = this.hold(b);
       status = this.pending ? 'planning' : 'holding';
     }
-    // the rocket: as the plan says, once per burn (unless rockets stack)
+    // the rocket: as the plan says, once per burn (unless rockets stack); asked for before the glide took, it goes on the first gliding tick
+    if (this.fireLater && b.gliding && b.rockets > 0 && this.boost.max === 0 && !control.fire) {
+      control = { ...control, fire: true };
+      this.fireLater = false;
+    }
     if (control.fire) {
       if (b.rockets > 0 && b.gliding && (this.boost.max === 0 || this.o.stackRockets === true)) {
         this.boost = freshBurn();
         this.stats.fired++;
-      } else control = { ...control, fire: false };
+        this.fireLater = false;
+      } else {
+        if (b.rockets > 0 && !b.gliding) this.fireLater = true;
+        control = { ...control, fire: false };
+      }
     }
     this.boost = burnTick(this.boost);
     this.yaw = control.yaw;

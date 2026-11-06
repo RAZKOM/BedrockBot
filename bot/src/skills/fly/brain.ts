@@ -45,6 +45,7 @@ import {
   glideLine,
   glideMargin,
   hdist,
+  onTarget as onTargetCells,
   pathAhead,
   ROCKET_CRUISE_CLIMB,
   rocketPitchFor,
@@ -65,8 +66,13 @@ import {
 import { BRAKE_BIAS, BrakePlanner } from './brake.ts'; // Track F1
 import { assumedTop, BUILD_TOP, CLIMB_SLOPE, strictObstacle, terrainFloor, type TerrainFloor, type TerrainQuery } from './terrain.ts'; // Track BL
 import { DIVE_END_MAX, DIVE_MIN_ABOVE, DIVE_MIN_ABOVE_FORCED, divePhase, divePitch, planDive, simulateDive, type DivePhase, type DiveProfile } from './dive.ts'; // Track BL
+import type { RouteGrid } from './route/grid.ts'; // Track F3
+import { ROUTE_HANDOVER, ROUTE_PLAN_NODES, ROUTE_TRACK_MS } from './route/landing.ts'; // Track F3
+import { RouteTracker, type Planner } from './route/tracker.ts'; // Track F3
+import type { RouteGoal } from './route/types.ts'; // Track F3
 
-export type FlightPhase = 'takeoff' | 'climb' | 'cruise' | 'approach' | 'goaround' | 'land' | 'done';
+/** Track F3: `route`: the RouteTracker flies the last blocks onto a route landing (docs/flight.md "Route landings and takeoffs"). */
+export type FlightPhase = 'takeoff' | 'climb' | 'cruise' | 'approach' | 'route' | 'goaround' | 'land' | 'done';
 
 export interface BrainInput {
   tick: number;
@@ -155,6 +161,18 @@ export interface BrainOptions {
    * wide), elsewhere only when the flare's plans keep missing (instead of the go-around).
    */
   landStyle?: 'auto' | LandStyle;
+  /**
+   * Track F3 (docs/flight.md "Route landings and takeoffs"): the route planner in flight: the grid (the live
+   * model, unknown = solid), the search (the worker's planner) and its budgets. With it a target that carries
+   * a `route` is landed by the RouteTracker from ROUTE_HANDOVER out, and `routeTakeoff` is flown; without it
+   * such a target is approached by the landing families (which refuse what the route was found for).
+   */
+  route?: { grid: RouteGrid; plan: Planner; maxNodes?: number; maxMs?: number };
+  /**
+   * Track F3: the route takeoff (route/takeoff.ts): the tracker flies the body from standing to the exit
+   * waypoint(s) with `route`'s planner, then the climb goes on along `takeoffYaw`.
+   */
+  routeTakeoff?: { goals: RouteGoal[]; margin: number; weight?: number };
 }
 
 export interface FlightStats {
@@ -190,7 +208,24 @@ export interface FlightStats {
   /** Track F1: approaches the brake took over from a flare whose plans kept missing (each a go-around saved), and ticks flown in the brake's K. */
   brakeRescues: number;
   brakeTicks: number;
+  /** Track F3: ticks the route tracker flew the landing, its plans and re-plans, its largest error from the plan; the route takeoff's ticks and rockets. */
+  routeTicks: number;
+  routePlans: number;
+  routeReplans: number;
+  routeMaxError: number;
+  routeTakeoffTicks?: number;
+  routeTakeoffRockets?: number;
 }
+
+/** Track F3: the route tracker gets this many ticks for a landing before the brain goes around (a hover that never comes down). */
+export const ROUTE_MAX_TICKS = 400;
+/** Track F3: the route takeoff gets this many ticks to reach its exit before the climb takes over anyway. */
+export const ROUTE_TAKEOFF_MAX_TICKS = 200;
+/** Track F3: the route takeoff's first rocket goes on this gliding tick of the loop's at the earliest (the server glides one input later and ignores a rocket on its first gliding input). */
+export const ROUTE_FIRE_GLIDE_TICKS = 3;
+/** Track F3: after a route takeoff the climb's path-ahead checks wait until the body is this far over the start (a low body a block or two up "hits" the ground within 20 ticks at pitch 0), at most ROUTE_OUT_TICKS. */
+export const ROUTE_OUT_ABOVE = 6;
+export const ROUTE_OUT_TICKS = 60;
 
 const CLIMB_PITCH = -38;
 /** Track BH, the ledge takeoff: the dive's pitch after the step off and the speed at which the glide flies (then the usual phases). */
@@ -272,11 +307,21 @@ export class FlightBrain {
   phase: FlightPhase = 'takeoff';
   /** The landing target (Track AU2: `retarget` may move it before the approach). */
   target: LandingTarget;
-  readonly stats: FlightStats = { rockets: 0, rocketsBy: { climb: 0, cruise: 0, goaround: 0, land: 0 }, goArounds: 0, ticks: 0, maxY: -Infinity, approachTicks: 0, descents: [], steered: 0, holdTicks: 0, goAroundReasons: [], avoidances: [], dives: 0, brakeRescues: 0, brakeTicks: 0 };
+  readonly stats: FlightStats = { rockets: 0, rocketsBy: { climb: 0, cruise: 0, goaround: 0, land: 0 }, goArounds: 0, ticks: 0, maxY: -Infinity, approachTicks: 0, descents: [], steered: 0, holdTicks: 0, goAroundReasons: [], avoidances: [], dives: 0, brakeRescues: 0, brakeTicks: 0, routeTicks: 0, routePlans: 0, routeReplans: 0, routeMaxError: 0 };
   // (entryAbove is set by the cruise when it hands over to the approach)
   /** Why the flight is ending early (set by `landNow`), kept for the outcome. */
   private endReason: FlightEndReason | undefined;
-  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral' };
+  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise' | 'route' | 'routeTakeoff'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral' };
+  /** Track F3: the route tracker of the landing (from the hand-over) or of the route takeoff; the gliding ticks in a row of the takeoff. */
+  private tracker: RouteTracker | undefined;
+  private routeGlideTicks = 0;
+  /** Track F3: the tick the route takeoff handed over to the climb (the climb's path checks wait for some height). */
+  private routeOutAt: number | undefined;
+
+  /** Track F3: just out of a route takeoff, low and close to the start: the ground under the feet is no obstacle yet. */
+  private routeJustOut(b: FlightBody): boolean {
+    return this.routeOutAt !== undefined && this.stats.ticks - this.routeOutAt <= ROUTE_OUT_TICKS && this.startY !== undefined && b.pos.y < this.startY + ROUTE_OUT_ABOVE;
+  }
   private jumped = false;
   private requested = false;
   private wasGliding = false;
@@ -286,7 +331,7 @@ export class FlightBrain {
   private outbound = false;
   /** Track AU2 review: the bearing (from the target) the go-around flies out on and comes back along: null = straight away from the target, undefined = not chosen yet. */
   private goaroundBearing: number | null | undefined;
-  private lastChoice: { pitch: number; cost: number; kind: string; phase: string; style: LandStyle } | undefined;
+  private lastChoice: { pitch: number; cost: number; kind: string; phase: string; style: LandStyle | 'route' } | undefined;
   /** The landing planner of the current approach (reset for every new approach). */
   private readonly planner: ApproachPlanner;
   /** Track F1: the brake / elevator landing's planner (reset with the flare's), and the family flown last tick in this approach. */
@@ -349,6 +394,8 @@ export class FlightBrain {
       clearance: opts.clearance ?? 12,
       descentMode: opts.descent ?? 'auto',
       landStyle: opts.landStyle ?? 'auto',
+      route: opts.route,
+      routeTakeoff: opts.routeTakeoff,
     };
     this.planner = new ApproachPlanner(opts.seed ?? 12345, opts.obstacle);
     this.brakePlanner = new BrakePlanner(((opts.seed ?? 12345) * 7 + 3) >>> 0, opts.obstacle);
@@ -414,7 +461,7 @@ export class FlightBrain {
     return this.emergency ?? this.target;
   }
 
-  get lastApproach(): { pitch: number; cost: number; kind: string; phase: string; style: LandStyle } | undefined {
+  get lastApproach(): { pitch: number; cost: number; kind: string; phase: string; style: LandStyle | 'route' } | undefined {
     return this.lastChoice;
   }
 
@@ -422,6 +469,7 @@ export class FlightBrain {
   get descending(): string | undefined {
     if (this.holding && this.target.hold) return 'holding';
     if (this.dive) return 'dive';
+    if (this.phase === 'route') return 'route';
     if (!this.descent) return undefined;
     return this.descent.kind === 'spiral' ? `spiral r${this.descent.fit.radius}` : 'S-turns';
   }
@@ -434,11 +482,14 @@ export class FlightBrain {
   retarget(target: LandingTarget, body?: FlightBody, o: { cruiseY?: number } = {}): boolean {
     if (this.phase === 'land' || this.phase === 'done') return false;
     // in the approach only while there is room to re-plan (the goal's chunks often load just as it begins)
-    if ((this.phase === 'approach' || this.phase === 'goaround') && (!body || hdist(body.pos, this.target) < 15)) return false;
+    if ((this.phase === 'approach' || this.phase === 'goaround' || this.phase === 'route') && (!body || hdist(body.pos, this.target) < 15)) return false;
     // a new trip taken over in the air: the climb goes on to the higher of the two cruise heights (the cruise's rockets cover the distance)
     if (o.cruiseY !== undefined && o.cruiseY > this.o.cruiseY) this.o.cruiseY = o.cruiseY;
     const wasHold = this.target.hold === true;
     this.target = target;
+    // Track F3: a route landing in progress starts over from the cruise (its tracker was for the old cell)
+    if (this.phase === 'route') this.phase = 'cruise';
+    this.tracker = undefined;
     // Track BF: a target that is not landable yet is held over from the cruise (no approach to it)
     if (target.hold && (this.phase === 'approach' || this.phase === 'goaround')) this.phase = 'cruise';
     if (wasHold && !target.hold && this.holding) this.o.note?.(`holding over: the landing is confirmed after ${this.stats.holdTicks} ticks of holding`);
@@ -465,6 +516,7 @@ export class FlightBrain {
     this.emergency = this.emergencyTarget(body, reason === 'roof' ? this.emergencyWithin : undefined);
     this.emergencyWithin = undefined;
     this.resetPlanners();
+    this.tracker = undefined;
     this.dive = undefined;
     this.descent = undefined;
     this.descentNone = false;
@@ -521,6 +573,8 @@ export class FlightBrain {
         return { control: this.cruise(i, ctl) };
       case 'approach':
         return { control: this.approach(i, ctl, this.target) };
+      case 'route':
+        return { control: this.route(i, ctl) };
       case 'goaround':
         return { control: this.goaround(i, ctl) };
       case 'land':
@@ -533,7 +587,8 @@ export class FlightBrain {
   private outcome(b: FlightBody): FlightEnd {
     const t = this.target;
     const off = hdist(b.pos, t);
-    const onTarget = off <= t.half + 0.5 && Math.abs(b.pos.y - t.top) < 1.2;
+    // (Track F3: a precision target with its floor's cells, landed by a route anywhere in them, is on target in any of them)
+    const onTarget = (off <= t.half + 0.5 || (t.precise === true && t.cells !== undefined && onTargetCells(t, b.pos))) && Math.abs(b.pos.y - t.top) < 1.2;
     if (this.endReason) return { ok: false, reason: this.endReason, landedAt: { ...b.pos }, off, onTarget };
     if (onTarget) return { ok: true, landedAt: { ...b.pos }, off, onTarget };
     return { ok: false, reason: 'landed_off', landedAt: { ...b.pos }, off, onTarget };
@@ -549,6 +604,7 @@ export class FlightBrain {
     const b = i.body;
     if (this.o.ledge) return this.ledgeTakeoff(i, ctl, this.o.ledge.yaw);
     if (this.o.vertical) return this.verticalTakeoff(i, ctl, this.o.vertical.top);
+    if (this.o.routeTakeoff && this.o.route) return this.routeTakeoff(i, ctl);
     ctl.yaw = turnTowards(i.yaw, this.climbYaw(b), 30);
     ctl.pitch = 0;
     if (b.gliding) {
@@ -663,8 +719,9 @@ export class FlightBrain {
    */
   private fire(i: BrainInput, ctl: BrainControl, by: keyof FlightStats['rocketsBy'], pitch?: number): boolean {
     if (i.rockets <= 0 || !i.canFire || i.body.boostTicks > 0) return false;
-    // (not for the takeoff's rocket a block off the ground: the slow body's path "hits" the ground under its feet, as in steerClear)
-    const justOff = this.startY !== undefined && i.body.pos.y < this.startY + 2 && Math.hypot(i.body.vel.x, i.body.vel.z) < 0.7;
+    // (not for the takeoff's rocket a block off the ground: the slow body's path "hits" the ground under its feet, as in steerClear;
+    // Track F3: nor just out of a route takeoff)
+    const justOff = (this.startY !== undefined && i.body.pos.y < this.startY + 2 && Math.hypot(i.body.vel.x, i.body.vel.z) < 0.7) || this.routeJustOut(i.body);
     if (pitch !== undefined && !justOff && this.o.obstacle && i.body.gliding && pathAhead({ ...i.body, boostTicks: GLIDE.boostTicks }, ctl.yaw, pitch, LOOKAHEAD_TICKS, this.o.obstacle) !== undefined) {
       this.stats.steered++;
       return false;
@@ -687,8 +744,9 @@ export class FlightBrain {
     if (!obstacle || !i.body.gliding) return false;
     const b = i.body;
     // just off the ground (the takeoff's first ticks, slow and a block up): the ground under the feet is no obstacle;
-    // a slow body (near the stall) cannot be steered: every path sinks, the speed recovery comes first
-    if (Math.hypot(b.vel.x, b.vel.z) < 0.7) return false;
+    // a slow body (near the stall) cannot be steered: every path sinks, the speed recovery comes first;
+    // Track F3: nor just out of a route takeoff (fast but a block or two up, the climb's rocket still to come)
+    if (Math.hypot(b.vel.x, b.vel.z) < 0.7 || this.routeJustOut(b)) return false;
     if (pathAhead(b, ctl.yaw, ctl.pitch, LOOKAHEAD_TICKS, obstacle) === undefined) return false;
     const toTarget = yawDiff(ctl.yaw, yawTo(b.pos, this.target));
     const side: (1 | -1)[] = toTarget >= 0 ? [1, -1] : [-1, 1];
@@ -718,6 +776,7 @@ export class FlightBrain {
       const hit = pathAhead(b, ctl.yaw, 0, 60, obstacle);
       const h = Math.hypot(b.vel.x, b.vel.z);
       this.emergencyWithin = hit !== undefined ? Math.max(6, hit * h - 2) : undefined;
+      this.o.note?.(`nothing clears the solid ahead in the ${this.phase} at ${b.pos.x.toFixed(1)} ${b.pos.y.toFixed(1)} ${b.pos.z.toFixed(1)} (heading ${Math.round(ctl.yaw)}, ${h.toFixed(2)} a tick, ${hdist(b.pos, this.target).toFixed(0)} from the target${hit !== undefined ? `, the straight glide hits in ${hit} ticks` : ''}): landing on the ground before it (roof)`);
       this.landNow('roof', b);
     }
     return true;
@@ -790,8 +849,12 @@ export class FlightBrain {
       if (this.flyDive(i, ctl)) return ctl;
       if (this.phase === 'approach') return this.approach(i, ctl, this.target);
     }
+    // Track F3: a route landing: within ROUTE_HANDOVER on the bearing's side (within 60 degrees of it from the cell) the
+    // tracker takes over (linedUp wants 36 along the bearing, which the hand-over is inside of)
+    const routed = this.target.route !== undefined && this.o.route !== undefined;
+    const routedNear = routed && dTarget <= ROUTE_HANDOVER && Math.abs(yawDiff(this.target.route!.bearing, yawTo(this.target, b.pos))) <= 60;
     // Track BF: an overhang's corridor: first out to its entry, then in along it (the glide line counts the way round)
-    const entry = this.linedUp(b) ? undefined : this.corridorEntry();
+    const entry = routedNear || this.linedUp(b) ? undefined : this.corridorEntry();
     const d = entry ? hdist(b.pos, entry) + CORRIDOR_OUT : dTarget;
     const h = Math.hypot(b.vel.x, b.vel.z);
     const aboveEntry = b.pos.y - (entryTop(this.target) + APPROACH_HEIGHT);
@@ -818,8 +881,17 @@ export class FlightBrain {
     const detouring = this.detour !== undefined && this.stats.ticks < this.detour.until;
     if (!detouring) this.detour = undefined;
     ctl.yaw = turnTowards(i.yaw, detouring ? this.detour!.yaw : yawTo(b.pos, entry ?? this.target));
+    // Track F3: a route landing: the cruise goes on along the bearing to the hand-over, where the route tracker takes
+    // the body from its real state; no approach of the landing families
+    if (routedNear) {
+      this.o.note?.(`route landing: handing over to the route tracker ${d.toFixed(0)} out, ${(b.pos.y - this.target.top).toFixed(1)} over the cell at ${h.toFixed(2)} a tick${b.boostTicks > 0 ? `, a rocket burning (${b.boostTicks} ticks)` : ''} (planned in from ${Math.round(this.target.route!.bearing)}: ${this.target.route!.edges})`);
+      this.phase = 'route';
+      this.tracker = undefined;
+      this.stats.entryAbove ??= aboveEntry;
+      return this.route(i, ctl);
+    }
     // the approach starts at APPROACH_DISTANCE, earlier when high (the planner's dive candidates take about 2.5 blocks per block of height)
-    if (!entry && d <= APPROACH_DISTANCE + Math.min(this.target.bearing !== undefined ? 8 : 40, Math.max(0, aboveEntry - 6) * 2.5)) {
+    if (!routed && !entry && d <= APPROACH_DISTANCE + Math.min(this.target.bearing !== undefined ? 8 : 40, Math.max(0, aboveEntry - 6) * 2.5)) {
       if (this.target.bearing !== undefined) this.o.note?.(`approach along the corridor (in from ${Math.round(this.target.bearing)}) from ${Math.round(d)} blocks out, ${Math.round(aboveEntry + APPROACH_HEIGHT)} above the floor`);
       this.phase = 'approach';
       this.resetPlanners();
@@ -857,13 +929,16 @@ export class FlightBrain {
     // regains its speed and that sink is not a shortfall of height (two needless top-ups at 600 blocks on bds-fly);
     // Track BL: under the terrain floor or the high cruise's floor at any flying speed
     const short = Math.max(terrainShort, highShort);
-    const econ = above < spare - 3 && h >= 1.1;
-    if ((econ || (short > 0 && h >= 0.8)) && i.rockets > 0) {
+    // (Track F3: a route landing is handed over above the cell: under the line on the way in a top-up goes at any flying speed,
+    // a small one (the tracker dives off a surplus more easily than it climbs out of a deficit); none right before the hand-over)
+    const econ = above < spare - 3 && (h >= 1.1 || (routed && h >= 0.8));
+    if ((econ || (short > 0 && h >= 0.8)) && i.rockets > 0 && !(routed && d <= ROUTE_HANDOVER + 4)) {
       // the height this rocket should buy: a whole rocket's worth while the glide ahead can use it, else just enough
       const glideAhead = d - APPROACH_DISTANCE;
       let gain = econ ? (glideAhead > ROCKET_CRUISE_CLIMB * GLIDE_RATIO ? ROCKET_CRUISE_CLIMB : Math.min(ROCKET_CRUISE_CLIMB, Math.max(6, spare + 8 - above))) : 6;
       if (short > 0) gain = Math.max(gain, Math.min(ROCKET_CRUISE_CLIMB, short + 8));
       if (high !== undefined && highShort > 0) gain = ROCKET_CRUISE_CLIMB; // the high cruise: a whole rocket's worth each
+      if (routed && d <= APPROACH_DISTANCE + 20) gain = Math.min(gain, 8);
       this.cruisePitch = steep ? CLIMB_PITCH : rocketPitchFor(gain);
       // the boosted climb at that pitch must be clear for the next 20 ticks (fire checks it; else glide on)
       if (this.fire(i, ctl, 'cruise', this.cruisePitch)) {
@@ -1362,12 +1437,121 @@ export class FlightBrain {
       this.steerClear(i, ctl, { noLanding: true });
       return ctl;
     }
-    // back in: turn towards the target, then the approach again
+    // back in: turn towards the target, then the approach again (Track F3: or the route hand-over again)
     ctl.yaw = turnTowards(i.yaw, yawTo(b.pos, this.target), 12);
     ctl.pitch = b.boostTicks > 0 ? -15 : 0;
-    if (Math.abs(ctl.yaw - yawTo(b.pos, this.target)) < 1 && d <= APPROACH_DISTANCE + 4) {
+    const routed = this.target.route !== undefined && this.o.route !== undefined;
+    if (Math.abs(ctl.yaw - yawTo(b.pos, this.target)) < 1 && d <= (routed ? ROUTE_HANDOVER : APPROACH_DISTANCE + 4)) {
+      if (routed) {
+        this.phase = 'route';
+        this.tracker = undefined;
+        return this.route(i, ctl);
+      }
       this.phase = 'approach';
       return this.approach(i, ctl, this.target);
+    }
+    return ctl;
+  }
+
+  /**
+   * Track F3 (docs/flight.md "Route landings and takeoffs"): the route landing. From the hand-over the
+   * RouteTracker flies the body onto the target's cells from its real state with the planner's edges (Track F1's
+   * manoeuvres and the brake landing's approaches and settles; the search in the worker), re-planning as it
+   * goes; the brain passes its controls through (the rocket counted as the landing's). The flight ends as any
+   * other when the body stands (`outcome`: on the cells, or off). No plan for PLANLESS_MAX ticks, or
+   * ROUTE_MAX_TICKS without a touchdown: a go-around (the hand-over again), else the nearest safe ground.
+   */
+  private route(i: BrainInput, ctl: BrainControl): BrainControl {
+    const b = i.body;
+    const rt = this.target.route;
+    const o = this.o.route;
+    ctl.glide = true;
+    if (!rt || !o) {
+      this.phase = 'approach';
+      return this.approach(i, ctl, this.target);
+    }
+    if (!this.tracker) {
+      this.tracker = new RouteTracker({ grid: o.grid, margin: rt.margin, goals: rt.goals, plan: o.plan, maxNodes: o.maxNodes ?? ROUTE_PLAN_NODES, maxMs: o.maxMs ?? ROUTE_TRACK_MS, yaw: i.yaw, weight: rt.weight, library: 'landing', note: (m) => this.o.note?.(m) });
+      if (b.boostTicks > 0) this.tracker.seedBoost(b.boostTicks);
+    }
+    const out = this.tracker.tick({ pos: b.pos, vel: b.vel, gliding: b.gliding, onGround: b.onGround, rockets: i.rockets }, i.tick);
+    this.stats.routeTicks++;
+    this.stats.routePlans = this.tracker.stats.plans;
+    this.stats.routeReplans = this.tracker.stats.replans;
+    this.stats.routeMaxError = Math.max(this.stats.routeMaxError, this.tracker.stats.maxError);
+    this.lastChoice = { pitch: out.control.pitch, cost: out.error, kind: out.status, phase: 'route', style: 'route' };
+    const d = hdist(b.pos, this.target);
+    if (out.status === 'failed' || this.tracker.stats.ticks > ROUTE_MAX_TICKS) {
+      const line = `the route tracker ${out.status === 'failed' ? 'found no plan' : `flew ${this.tracker.stats.ticks} ticks without a touchdown`} at ${d.toFixed(0)} blocks out, ${(b.pos.y - this.target.top).toFixed(0)} above, ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} blocks a tick (${this.tracker.stats.plans} plans, ${this.tracker.stats.partial} partial)`;
+      this.stats.goAroundReasons.push(line);
+      this.tracker = undefined;
+      if (this.stats.goArounds < this.o.goArounds && i.rockets > 0) {
+        this.o.note?.(`go-around ${this.stats.goArounds + 1}: ${line}`);
+        this.stats.goArounds++;
+        this.phase = 'goaround';
+        this.outbound = true;
+        this.goaroundBearing = undefined;
+        this.resetPlanners();
+        return this.goaround(i, ctl);
+      }
+      this.o.note?.(`no go-around left (${this.stats.goArounds} flown, ${i.rockets} rockets): the nearest safe ground; ${line}`);
+      this.landNow(this.stats.goArounds >= this.o.goArounds ? 'landed_off' : 'no_rockets', b);
+      return this.approach(i, ctl, this.aim);
+    }
+    ctl.yaw = out.control.yaw;
+    ctl.pitch = out.control.pitch;
+    if (out.control.fire && i.canFire && i.rockets > 0 && b.boostTicks === 0) {
+      ctl.fire = true;
+      this.stats.rockets++;
+      this.stats.rocketsBy.land++;
+    }
+    return ctl;
+  }
+
+  /**
+   * Track F3: the route takeoff (route/takeoff.ts): the tracker flies the body from standing (the jump, the
+   * glide requested on the falling tick as the server wants it, a rocket once the glide has taken) through the
+   * exit waypoint, then the usual climb takes over along the takeoff heading. The tracker failing, or
+   * ROUTE_TAKEOFF_MAX_TICKS gone, hands over to the climb as well (its path-ahead check does what it can).
+   */
+  private routeTakeoff(i: BrainInput, ctl: BrainControl): BrainControl {
+    const b = i.body;
+    const rt = this.o.routeTakeoff!;
+    const o = this.o.route!;
+    if (!this.tracker) {
+      this.tracker = new RouteTracker({ grid: o.grid, margin: rt.margin, goals: rt.goals, plan: o.plan, maxNodes: o.maxNodes ?? ROUTE_PLAN_NODES, maxMs: o.maxMs ?? ROUTE_TRACK_MS, yaw: this.climbYaw(b), ...(rt.weight !== undefined ? { weight: rt.weight } : {}), note: (m) => this.o.note?.(m) });
+      this.stats.routeTakeoffTicks = 0;
+      this.stats.routeTakeoffRockets = 0;
+    }
+    const out = this.tracker.tick({ pos: b.pos, vel: b.vel, gliding: b.gliding, onGround: b.onGround, rockets: i.rockets }, i.tick);
+    this.stats.routeTakeoffTicks = (this.stats.routeTakeoffTicks ?? 0) + 1;
+    const ticks = this.tracker.stats.ticks;
+    if (out.done || out.status === 'failed' || ticks > ROUTE_TAKEOFF_MAX_TICKS) {
+      this.o.note?.(`route takeoff: ${out.done ? 'out through the exit' : out.status === 'failed' ? 'no plan' : 'out of time'} after ${ticks} ticks, ${this.stats.routeTakeoffRockets ?? 0} rocket${this.stats.routeTakeoffRockets === 1 ? '' : 's'} (${this.tracker.stats.plans} plans, ${this.tracker.stats.partial} partial, max error ${this.tracker.stats.maxError.toFixed(2)}); the climb turns to heading ${Math.round(this.climbYaw(b))}`);
+      this.tracker = undefined;
+      this.phase = 'climb';
+      this.routeOutAt = this.stats.ticks;
+      ctl.glide = b.gliding || !b.onGround;
+      if (ctl.glide) this.requested = true;
+      return this.climb(i, ctl);
+    }
+    ctl.yaw = out.control.yaw;
+    ctl.pitch = out.control.pitch;
+    ctl.jump = out.control.jump === true && b.onGround;
+    // the glide from the first airborne tick (Track F0: the input loop holds the request on the input after the jump,
+    // which the server refuses, and asks on the 2nd airborne input, which it takes while the body still rises)
+    if (b.gliding || !b.onGround) {
+      this.requested = true;
+      ctl.glide = true;
+    } else ctl.glide = false;
+    // (Track F0: a rocket works only from the input AFTER the glide's first gliding input, and the server's gliding state is
+    // one input behind the loop's prediction: the third gliding tick at the earliest; bds-fly3 wasted the one fired on the second)
+    this.routeGlideTicks = b.gliding ? this.routeGlideTicks + 1 : 0;
+    if (out.control.fire && i.canFire && i.rockets > 0 && b.gliding && this.routeGlideTicks >= ROUTE_FIRE_GLIDE_TICKS && b.boostTicks === 0) {
+      ctl.fire = true;
+      this.stats.rockets++;
+      this.stats.rocketsBy.climb++;
+      this.stats.routeTakeoffRockets = (this.stats.routeTakeoffRockets ?? 0) + 1;
     }
     return ctl;
   }

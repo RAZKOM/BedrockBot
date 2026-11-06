@@ -10,7 +10,8 @@
 //     inputs after the last boosted tick; the loop boosts up to GLIDE.boostMaxTicks until told). A second
 //     rocket while one burns extends the boost to the longer of the two (the server's union), so the boost
 //     ends with the removal of the LAST of the own rockets; a use no add_entity answers within
-//     ROCKET_ANSWER_TICKS boosted nothing and is taken back (`loop.endBoost(ticks since the use)`)
+//     ROCKET_ADD_WITHIN boosted nothing and is taken back (`loop.endBoost(ticks since the use)`). Track F3
+//     lifted this plumbing into rocket.ts RocketHand, shared with the route driver (route/live.ts)
 //   - the own `gliding` actor flag confirms the glide (the loop handles it: GlideEvent) and ends it on
 //     ground or water contact; a voluntary stop in the air is ignored by the server
 //   - the glide uses the elytra: the controller never flies without one in the chest slot (`canGlide`)
@@ -20,20 +21,15 @@
 // health, the elytra's wear).
 import type { Vec3 } from '../../connection/types.ts';
 import { silentLogger, type Logger } from '../../log.ts';
-import type { ItemStack } from '../../world/types.ts';
 import type { EntityInfo } from '../../world/types.ts';
 import type { InputLoopEvent, InputLoopState } from '../input/inputLoop.ts';
 import type { BlockQuery } from '../input/types.ts';
-import { useItemTransaction } from '../survival/eat.ts';
-import { wireItemOf } from '../place/place.ts';
-import { PHYSICS } from '../input/physics.ts';
 import { FlightBrain, type BrainOptions, type FlightEnd, type FlightEndReason as BrainEndReason, type FlightPhase } from './brain.ts';
-import { isRocket } from './kit.ts';
 import { hdist, type FlightBody, type LandingTarget } from './plan.ts';
+import { ROCKET_COOLDOWN, RocketHand, type RocketInventory } from './rocket.ts'; // Track F3: the rocket plumbing shared with route/live.ts
 import type { TerrainQuery } from './terrain.ts';
 
-/** Ticks between two rockets (the item-use transaction must settle; the boost of one rocket lasts 14 to 20). */
-export const ROCKET_COOLDOWN = 4;
+export { ROCKET_COOLDOWN };
 /** A takeoff that has not started a confirmed glide after this many ticks fails (`no_glide`). */
 export const TAKEOFF_TIMEOUT = 120;
 /**
@@ -46,11 +42,6 @@ export const SNEAK_ABOVE = 2.5;
 /** Track BL: a correction this far behind the local body along the heading (blocks) is the server holding it; one note per HELD_NOTE_TICKS. */
 const HELD_ERROR = 2;
 const HELD_NOTE_TICKS = 40;
-/** A rocket entity appearing within this many blocks
- of the body right after a use is ours. */
-const ROCKET_NEAR = 4;
-/** Track F0: a rocket use with no add_entity of its rocket within this many ticks boosted nothing (take the boost back). */
-const ROCKET_ANSWER_TICKS = 5;
 
 export interface FlightLoop {
   readonly state: InputLoopState;
@@ -65,11 +56,7 @@ export interface FlightLoop {
   waitTicks(n: number): Promise<void>;
 }
 
-export interface FlightInventory {
-  readonly slots: readonly (ItemStack | null)[];
-  readonly selected: number;
-  rawItem(window: number, slot: number): unknown;
-}
+export type FlightInventory = RocketInventory;
 
 export interface FlightDeps {
   loop: FlightLoop;
@@ -159,6 +146,12 @@ export interface FlightReport {
   landStyle?: 'flare' | 'brake';
   brakeRescues?: number;
   brakeTicks?: number;
+  /** Track F3: the route tracker flew the landing this many ticks (its plans, re-plans and largest error), and the route takeoff's ticks. */
+  routeTicks?: number;
+  routePlans?: number;
+  routeReplans?: number;
+  routeMaxError?: number;
+  routeTakeoffTicks?: number;
 }
 
 export interface FlightOptions extends Omit<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'terrain'> {
@@ -190,11 +183,9 @@ export class FlightController {
   private resolve: ((r: FlightReport) => void) | undefined;
   /** The promise of the flight that runs (`flight`). */
   private current: Promise<FlightReport> | undefined;
-  private lastFire = -1000;
   private tickNo = 0;
-  private usedAt: number | undefined;
-  /** Track F0: the own rockets still burning (the boost ends with the removal of the last). */
-  private rocketIds = new Set<bigint>();
+  /** Track F3: the rocket hand (rocket.ts): the uses, the cooldown, the rocket entity's life. */
+  private readonly rockets: RocketHand;
   private corrections0 = 0;
   private glideEnds = 0;
   private everGlided = false;
@@ -213,6 +204,7 @@ export class FlightController {
   constructor(deps: FlightDeps) {
     this.d = deps;
     this.log = deps.log ?? silentLogger;
+    this.rockets = new RocketHand({ loop: deps.loop, queue: (n, p) => deps.queue(n, p), inventory: deps.inventory, hotbar: deps.hotbar, entities: deps.entities, ...(deps.log ? { log: deps.log } : {}) });
   }
 
   /** A flight runs (from `flyTo` until the body stands after it). */
@@ -275,9 +267,7 @@ export class FlightController {
     this.held = 0;
     this.heldNoteAt = -1000;
     this.tickNo = 0;
-    this.lastFire = -1000;
-    this.usedAt = undefined;
-    this.rocketIds.clear();
+    this.rockets.reset();
     this.corrections0 = loop.state.corrections;
     this.glideEnds = 0;
     this.everGlided = false;
@@ -296,6 +286,7 @@ export class FlightController {
           this.tick(state);
         }),
         loop.onEvent((e) => {
+          // (Track F0: the loop taking back a request the server never confirmed is no glide end)
           if (e.kind === 'glide' && e.refused !== true) {
             if (e.gliding) this.everGlided = true;
             else {
@@ -305,12 +296,7 @@ export class FlightController {
           }
           if (e.kind === 'correction') this.correctionNote(e.local, e.server, e.error);
         }),
-        this.d.entities.onAdd((e) => {
-          this.onEntityAdd(e);
-        }),
-        this.d.entities.onRemove((e) => {
-          if (this.rocketIds.delete(e.uniqueId) && this.rocketIds.size === 0 && this.usedAt === undefined) this.d.loop.endBoost();
-        }),
+        this.rockets.attach(() => this.tickNo),
       );
       loop.setCommand({ forward: 0, strafe: 0, sprint: false, sneak: false, jump: false });
     });
@@ -342,20 +328,6 @@ export class FlightController {
 
   private body(s: InputLoopState): FlightBody {
     return { pos: s.pos, vel: s.vel, onGround: s.onGround, gliding: s.gliding, boostTicks: s.boostTicks };
-  }
-
-  private rocketsInHotbar(): { count: number; slot: number } {
-    let count = 0;
-    let slot = -1;
-    const slots = this.d.inventory.slots;
-    for (let i = 0; i < 9; i++) {
-      const s = slots[i];
-      if (s && s.count > 0 && isRocket(s.name)) {
-        count += s.count;
-        if (slot < 0 || i === this.d.inventory.selected) slot = i;
-      }
-    }
-    return { count, slot };
   }
 
   /**
@@ -408,6 +380,7 @@ export class FlightController {
     const brain = this.brain;
     if (!brain) return;
     this.tickNo++;
+    this.rockets.tick(this.tickNo);
     this.d.terrain?.tick();
     const { loop } = this.d;
     if (state.gliding) this.lastAir = { vy: state.vel.y, h: Math.hypot(state.vel.x, state.vel.z) };
@@ -432,23 +405,14 @@ export class FlightController {
         return;
       }
     }
-    // Track F0: a use the server never answered with a rocket boosted nothing
-    if (this.usedAt !== undefined && this.tickNo - this.usedAt > ROCKET_ANSWER_TICKS) {
-      const ago = this.tickNo - this.usedAt;
-      this.usedAt = undefined;
-      if (this.rocketIds.size === 0) {
-        loop.endBoost(ago);
-        this.log.info(`flight: the rocket used ${ago} ticks ago never appeared; its boost taken back`);
-      }
-    }
-    const rockets = this.rocketsInHotbar();
+    const rockets = this.rockets.rocketsInHotbar();
     const out = brain.step({
       tick: this.tickNo,
       body: this.body(state),
       yaw: loop.command.yaw,
       pitch: loop.command.pitch,
       rockets: rockets.count,
-      canFire: this.tickNo - this.lastFire >= ROCKET_COOLDOWN && rockets.slot >= 0,
+      canFire: this.rockets.canFire(this.tickNo) && rockets.slot >= 0,
       health: this.d.health(),
       elytraLeft: this.d.elytraLeft(),
     });
@@ -458,27 +422,8 @@ export class FlightController {
     if (low && this.d.sneakLanding?.() === true) this.sneaked = true;
     // (Track BH: the ledge takeoff walks to the edge sneaking and steps off: `forward`, `sneak` from the brain)
     loop.setCommand({ yaw: c.yaw, pitch: c.pitch, jump: c.jump, glide: c.glide, forward: c.forward ?? 0, strafe: 0, sprint: false, sneak: (this.sneaked && low) || c.sneak === true });
-    if (c.fire && rockets.slot >= 0) this.fire(rockets.slot, state.pos);
+    if (c.fire && rockets.slot >= 0) this.rockets.fire(rockets.slot, state.pos, this.tickNo);
     if (out.end) this.settling = { ticks: 0, end: out.end, at: { ...state.pos } };
-  }
-
-  private fire(slot: number, feet: Vec3): void {
-    const { inventory, hotbar } = this.d;
-    if (inventory.selected !== slot) hotbar.select(slot);
-    const held = wireItemOf(inventory.slots[slot], (inventory.rawItem(0, slot) ?? hotbar.rawItem(slot)) as Parameters<typeof wireItemOf>[1]);
-    this.d.queue('inventory_transaction', useItemTransaction({ hotbarSlot: slot, held, eye: { x: feet.x, y: feet.y + PHYSICS.eyeHeight, z: feet.z } }));
-    this.d.loop.boost();
-    this.lastFire = this.tickNo;
-    this.usedAt = this.tickNo;
-    this.log.debug(`flight: rocket from slot ${slot} (${inventory.slots[slot]?.count ?? '?'} there)`);
-  }
-
-  private onEntityAdd(e: EntityInfo): void {
-    if (e.type !== 'minecraft:fireworks_rocket' || this.usedAt === undefined || this.tickNo - this.usedAt > 10) return;
-    const p = this.d.loop.state.pos;
-    if (Math.hypot(e.pos.x - p.x, e.pos.y - p.y, e.pos.z - p.z) > ROCKET_NEAR + 2) return;
-    this.rocketIds.add(e.uniqueId);
-    this.usedAt = undefined;
   }
 
   private report(ok: boolean, reason: FlightEndReason | undefined, end?: FlightEnd): FlightReport {
@@ -508,6 +453,8 @@ export class FlightController {
       ...(b ? { avoidances: [...b.stats.avoidances], dives: b.stats.dives } : {}),
       held: this.held,
       ...(b?.stats.landStyle ? { landStyle: b.stats.landStyle, brakeRescues: b.stats.brakeRescues, brakeTicks: b.stats.brakeTicks } : {}),
+      ...(b?.stats.routeTicks ? { routeTicks: b.stats.routeTicks, routePlans: b.stats.routePlans, routeReplans: b.stats.routeReplans, routeMaxError: b.stats.routeMaxError } : {}),
+      ...(b?.stats.routeTakeoffTicks !== undefined ? { routeTakeoffTicks: b.stats.routeTakeoffTicks } : {}),
     };
   }
 
@@ -533,7 +480,7 @@ export class FlightController {
     this.log.info(
       `flight: ${ok ? 'landed' : `ended (${reason})`} at ${r.landedAt ? `${r.landedAt.x.toFixed(2)} ${r.landedAt.y.toFixed(2)} ${r.landedAt.z.toFixed(2)}` : '?'}` +
         `${r.off !== undefined ? `, ${r.off.toFixed(2)} from the centre` : ''}; ${r.rockets} rockets (${r.rocketsBy.climb} climb, ${r.rocketsBy.cruise} cruise, ${r.rocketsBy.goaround} go-around), ${r.goArounds} go-arounds, ${r.ticks} ticks, ${r.corrections} corrections` +
-        `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}, max y ${r.maxY.toFixed(1)}${r.descents.length ? `, descent ${r.descents.join('; ')}` : ''}${r.steered ? `, steered ${r.steered} ticks` : ''}${r.holdTicks ? `, held ${r.holdTicks} ticks` : ''}${r.slide !== undefined ? `, slide ${r.slide.toFixed(2)}${r.sneak ? ' (sneaking)' : ''}` : ''}${r.ledgeDrop !== undefined ? `, ledge takeoff (gliding ${r.ledgeDrop.toFixed(1)} under the edge)` : ''}${r.avoidances?.length ? `, ${r.avoidances.length} terrain avoidance${r.avoidances.length === 1 ? '' : 's'}` : ''}${r.dives ? `, ${r.dives} dive${r.dives === 1 ? '' : 's'}` : ''}${r.held ? `, held by the server ${r.held} times` : ''}${r.landStyle ? `, landing ${r.landStyle}${r.landStyle === 'brake' ? ` (${r.brakeTicks} ticks braked / station-kept${r.brakeRescues ? `, ${r.brakeRescues} instead of a go-around` : ''})` : ''}` : ''}`,
+        `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}, max y ${r.maxY.toFixed(1)}${r.descents.length ? `, descent ${r.descents.join('; ')}` : ''}${r.steered ? `, steered ${r.steered} ticks` : ''}${r.holdTicks ? `, held ${r.holdTicks} ticks` : ''}${r.slide !== undefined ? `, slide ${r.slide.toFixed(2)}${r.sneak ? ' (sneaking)' : ''}` : ''}${r.ledgeDrop !== undefined ? `, ledge takeoff (gliding ${r.ledgeDrop.toFixed(1)} under the edge)` : ''}${r.avoidances?.length ? `, ${r.avoidances.length} terrain avoidance${r.avoidances.length === 1 ? '' : 's'}` : ''}${r.dives ? `, ${r.dives} dive${r.dives === 1 ? '' : 's'}` : ''}${r.held ? `, held by the server ${r.held} times` : ''}${r.landStyle ? `, landing ${r.landStyle}${r.landStyle === 'brake' ? ` (${r.brakeTicks} ticks braked / station-kept${r.brakeRescues ? `, ${r.brakeRescues} instead of a go-around` : ''})` : ''}` : ''}${r.routeTicks ? `, landing route (${r.routeTicks} ticks on the route tracker, ${r.routePlans} plans, ${r.routeReplans} re-plans, max error ${r.routeMaxError?.toFixed(2)})` : ''}${r.routeTakeoffTicks !== undefined ? `, route takeoff (${r.routeTakeoffTicks} ticks)` : ''}`,
     );
     this.brain = undefined;
     const resolve = this.resolve;

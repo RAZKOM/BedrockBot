@@ -4,39 +4,24 @@
 // command (yaw, pitch, the jump key for a takeoff, the glide wanted throughout) and a rocket is used as the
 // controller does it: the item-use transaction of the firework in the hotbar, `loop.boost()`, the rocket's
 // `remove_entity` ending it (`loop.endBoost()` and the tracker's `rocketEnded`). Corrections the loop replays
-// are passed to the tracker (`noteCorrection`). Used by the e2e (test/e2e/fly-route.test.ts); no command
-// wires it yet (the full integration into the flight comes with Track F3).
-//
-// Duplicated from controller.ts on purpose (the controller's rocket plumbing is private to its flight and
-// this driver must not edit it): `fire`, the rocket entity's add / remove match, `rocketsInHotbar`.
+// are passed to the tracker (`noteCorrection`). Used by the e2e (test/e2e/fly-route.test.ts) as the bare
+// route driver; the flight's own integration is the brain's `route` phase and route takeoff (Track F3,
+// brain.ts). The rocket plumbing is rocket.ts RocketHand, shared with the controller (Track F3 lifted the
+// copy Track F2 left here).
 import type { Vec3 } from '../../../connection/types.ts';
-import { silentLogger, type Logger } from '../../../log.ts';
-import type { EntityInfo, ItemStack } from '../../../world/types.ts';
-import { PHYSICS } from '../../input/physics.ts';
+import { silentLogger } from '../../../log.ts';
 import type { BlockQuery } from '../../input/types.ts';
-import { useItemTransaction } from '../../survival/eat.ts';
-import { wireItemOf } from '../../place/place.ts';
 import type { FlightLoop } from '../controller.ts';
-import { isRocket } from '../kit.ts';
+import { RocketHand, type RocketDeps } from '../rocket.ts';
 import { gridOf, sweep } from './grid.ts';
 import { planRoute } from './search.ts';
 import { RouteTracker, type Planner, type TrackerStats } from './tracker.ts';
 import type { PrimitiveFamily, RouteGoal } from './types.ts';
 
-/** Ticks between two rockets (controller.ts ROCKET_COOLDOWN). */
-const ROCKET_COOLDOWN = 4;
-/** A rocket entity appearing within this many blocks of the body right after a use is ours (controller.ts ROCKET_NEAR + 2). */
-const ROCKET_NEAR = 6;
-
-export interface RouteLiveDeps {
+export interface RouteLiveDeps extends Omit<RocketDeps, 'loop'> {
   loop: FlightLoop;
   /** The block query the route is planned over (unknown cells are solid; the loop's own query, not the cruise's skyQuery). */
   world: BlockQuery;
-  queue(name: string, packet: Record<string, unknown>): void;
-  inventory: { readonly slots: readonly (ItemStack | null)[]; readonly selected: number; rawItem(window: number, slot: number): unknown };
-  hotbar: { select(slot: number): boolean; rawItem(slot: number): unknown };
-  entities: { onAdd(fn: (e: EntityInfo) => void): () => void; onRemove(fn: (e: EntityInfo) => void): () => void };
-  log?: Logger;
 }
 
 export interface RouteLiveOptions {
@@ -98,10 +83,7 @@ export function flyRoute(d: RouteLiveDeps, o: RouteLiveOptions): { done: Promise
     },
   });
   let tick = 0;
-  let lastFire = -100;
-  let usedAt: number | undefined;
-  let rocketId: bigint | number | undefined;
-  let rockets = 0;
+  const hand = new RocketHand({ loop, queue: d.queue, inventory: d.inventory, hotbar: d.hotbar, entities: d.entities, log }, { onEnd: () => tracker.rocketEnded(), scope: 'route' });
   let hits = 0;
   let corrections = 0;
   let maxCorrection = 0;
@@ -114,28 +96,7 @@ export function flyRoute(d: RouteLiveDeps, o: RouteLiveOptions): { done: Promise
   let finish: ((end: RouteLiveEnd) => void) | undefined;
   const max = o.maxTicks ?? 1200;
 
-  const rocketsInHotbar = (): { count: number; slot: number } => {
-    let count = 0;
-    let slot = -1;
-    for (let i = 0; i < 9; i++) {
-      const s = d.inventory.slots[i];
-      if (s && s.count > 0 && isRocket(s.name)) {
-        count += s.count;
-        if (slot < 0 || i === d.inventory.selected) slot = i;
-      }
-    }
-    return { count, slot };
-  };
-  const fire = (slot: number, feet: Vec3): void => {
-    if (d.inventory.selected !== slot) d.hotbar.select(slot);
-    const held = wireItemOf(d.inventory.slots[slot], (d.inventory.rawItem(0, slot) ?? d.hotbar.rawItem(slot)) as Parameters<typeof wireItemOf>[1]);
-    d.queue('inventory_transaction', useItemTransaction({ hotbarSlot: slot, held, eye: { x: feet.x, y: feet.y + PHYSICS.eyeHeight, z: feet.z } }));
-    loop.boost();
-    lastFire = tick;
-    usedAt = tick;
-    rockets++;
-    log.debug(`route: rocket from slot ${slot}`);
-  };
+  const rocketsInHotbar = (): { count: number; slot: number } => hand.rocketsInHotbar();
 
   const offStep = loop.onBeforeStep((_t, state) => {
     tick++;
@@ -163,15 +124,17 @@ export function flyRoute(d: RouteLiveDeps, o: RouteLiveOptions): { done: Promise
       return;
     }
     const c = out.control;
-    // the glide is requested once the body falls (the server starts a glide on a falling tick only, measured on bds-fly3;
-    // the brain's takeoff does the same): a request while the jump rises had the model glide 6 ticks before the server
-    const glide = state.gliding || (!state.onGround && state.vel.y < 0);
+    hand.tick(tick);
+    // the glide is requested from the first airborne tick: the input loop holds the request on the input right after the
+    // jump (the server refuses that one) and asks on the 2nd airborne input, which the server takes (Track F0; F2's
+    // wait for the fall came from a teleport artefact)
+    const glide = state.gliding || !state.onGround;
     loop.setCommand({ yaw: c.yaw, pitch: c.pitch, jump: c.jump === true, glide, forward: 0, strafe: 0, sprint: false, sneak: false });
     // (a rocket used before the server's gliding flag does nothing, measured on bds-fly3: the use waits for the flag)
-    const firing = c.fire && r.slot >= 0 && tick - lastFire >= ROCKET_COOLDOWN && serverGliding;
+    const firing = c.fire && r.slot >= 0 && hand.canFire(tick) && serverGliding;
     if (c.fire && !firing && r.slot >= 0) heldFires++;
     o.trace?.(tick, { pos: { ...state.pos }, vel: { ...state.vel }, gliding: state.gliding, onGround: state.onGround, boostTicks: state.boostTicks }, { yaw: c.yaw, pitch: c.pitch, fire: firing, ...(c.jump ? { jump: true } : {}) }, out.status);
-    if (firing) fire(r.slot, state.pos);
+    if (firing) hand.fire(r.slot, state.pos, tick);
     if (tick >= max) finish?.('timeout');
   });
   const offEvent = loop.onEvent((e) => {
@@ -179,21 +142,9 @@ export function flyRoute(d: RouteLiveDeps, o: RouteLiveOptions): { done: Promise
       corrections++;
       if (e.error !== undefined && e.error > maxCorrection) maxCorrection = e.error;
       tracker.noteCorrection();
-    } else if (e.kind === 'glide') serverGliding = e.gliding;
+    } else if (e.kind === 'glide' && !(e as { refused?: true }).refused) serverGliding = e.gliding;
   });
-  const offAdd = d.entities.onAdd((e) => {
-    if (e.type !== 'minecraft:fireworks_rocket' || usedAt === undefined || tick - usedAt > 10) return;
-    const p = loop.state.pos;
-    if (Math.hypot(e.pos.x - p.x, e.pos.y - p.y, e.pos.z - p.z) > ROCKET_NEAR) return;
-    rocketId = e.uniqueId;
-    usedAt = undefined;
-  });
-  const offRemove = d.entities.onRemove((e) => {
-    if (rocketId === undefined || e.uniqueId !== rocketId) return;
-    rocketId = undefined;
-    loop.endBoost();
-    tracker.rocketEnded();
-  });
+  const offRockets = hand.attach(() => tick);
 
   const done = new Promise<RouteLiveReport>((resolve) => {
     let ended = false;
@@ -202,13 +153,12 @@ export function flyRoute(d: RouteLiveDeps, o: RouteLiveOptions): { done: Promise
       ended = true;
       offStep();
       offEvent();
-      offAdd();
-      offRemove();
+      offRockets();
       loop.setCommand({ jump: false, pitch: 0, forward: 0, strafe: 0 });
       resolve({
         end,
         ticks: tick,
-        rockets,
+        rockets: hand.fired,
         hits,
         corrections,
         maxCorrection,
