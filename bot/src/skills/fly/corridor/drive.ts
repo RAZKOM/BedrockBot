@@ -22,8 +22,10 @@ import type { FlightLoop } from '../controller.ts';
 import { RocketHand, type RocketDeps } from '../rocket.ts';
 import { sweep, type RouteGrid } from '../route/grid.ts';
 import { planRoute } from '../route/search.ts';
-import { RouteTracker, type Planner, type TrackerBody, type TrackerOutput, type TrackerStats } from '../route/tracker.ts';
-import type { RouteGoal, RouteRequest } from '../route/types.ts';
+import { RouteTracker, type Planner, type TrackerBody, type TrackerOutput, type TrackerRules, type TrackerStats } from '../route/tracker.ts';
+import { goalPoint, NO_BOOST, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from '../route/types.ts';
+import type { WindowProof } from './executor.ts';
+import type { Window } from './stretches.ts';
 
 /** Goals per tracker of the chain, and how many goals before the active one's end the next one is made. */
 export const CHAIN_WINDOW = 5;
@@ -55,6 +57,11 @@ export interface ChainOptions {
   yaw: number;
   window?: number;
   ahead?: number;
+  /** Track F5b: the cave style's rules on every tracker of the chain, and the search's risk weight (route/types.ts RISK_COST by default). */
+  rules?: TrackerRules;
+  riskCost?: number;
+  /** Track F5b: the window's plan proven before the takeoff (executor.ts `prove`): the first tracker takes every goal and flies it as its first plan. */
+  firstPlan?: RoutePlan;
   note?: (msg: string) => void;
 }
 
@@ -77,7 +84,7 @@ export class TrackerChain {
 
   constructor(o: ChainOptions) {
     this.o = o;
-    this.activeTo = Math.min(o.goals.length, o.window ?? CHAIN_WINDOW);
+    this.activeTo = o.firstPlan ? o.goals.length : Math.min(o.goals.length, o.window ?? CHAIN_WINDOW);
     this.active = this.make(0, this.activeTo, o.yaw);
   }
 
@@ -87,18 +94,35 @@ export class TrackerChain {
     const last = to >= o.goals.length && from > 0;
     const library = last && o.landLibrary !== undefined ? o.landLibrary : o.library;
     const weight = last && o.landWeight !== undefined ? o.landWeight : o.weight;
+    // Track F5b: the proven plan answers the first tracker's first request (the search is not run twice)
+    let first = from === 0 ? o.firstPlan : undefined;
+    const plan: Planner = (req) => {
+      if (first) {
+        const p = first;
+        first = undefined;
+        return p;
+      }
+      return o.plan(req);
+    };
     return new RouteTracker({
       grid: o.grid,
       margin: o.margin,
       goals: o.goals.slice(from, to),
-      plan: o.plan,
+      plan,
       maxNodes: o.maxNodes ?? STRETCH_PLAN_NODES,
       maxMs: o.maxMs ?? STRETCH_PLAN_MS,
       ...(weight !== undefined ? { weight } : {}),
       ...(library !== undefined ? { library } : {}),
       yaw,
+      ...(o.rules ? { rules: o.rules } : {}),
+      ...(o.riskCost !== undefined ? { riskCost: o.riskCost } : {}),
       ...(o.note ? { note: o.note } : {}),
     });
+  }
+
+  /** Track F5b: the window flying has bailed out (the brake, the sink): no hand-over to the next window. */
+  get bailing(): boolean {
+    return this.active.bailing;
   }
 
   /** Goals of the stretch passed by the body. */
@@ -115,6 +139,9 @@ export class TrackerChain {
     const all = [...this.done, this.active.stats, ...(this.next ? [this.next.t.stats] : [])];
     const s: TrackerStats = { plans: 0, replans: 0, planMs: 0, partial: 0, fired: 0, corrections: 0, holdTicks: 0, evadeTicks: 0, burnsRead: 0, maxError: 0, ticks: 0 };
     for (const t of all) {
+      if (t.refused) s.refused = (s.refused ?? 0) + t.refused;
+      if (t.uncommitted) s.uncommitted = (s.uncommitted ?? 0) + t.uncommitted;
+      if (t.bailTicks) s.bailTicks = (s.bailTicks ?? 0) + t.bailTicks;
       s.plans += t.plans;
       s.replans += t.replans;
       s.planMs += t.planMs;
@@ -158,8 +185,8 @@ export class TrackerChain {
       this.o.note?.(`corridor: window ${this.windows} (goals ${from + 1} to ${to} of ${n}) asked for at tick ${now}`);
     }
     const nx = this.next;
-    if (nx) {
-      const hold = nx.t.tick(b, now); // no plan yet: it holds (no rocket), keeps its goal count true, asks for its plan
+    if (nx && !this.active.bailing) {
+      const hold = nx.t.tick(b, now, true); // no plan yet: it holds (no rocket), keeps its goal count true, asks for its plan
       if (nx.t.current || this.active.reached >= this.activeTo - this.activeFrom) {
         this.done.push(this.active.stats);
         this.active = nx.t;
@@ -186,6 +213,22 @@ export class TrackerChain {
   }
 }
 
+/**
+ * Track F5b: the request that proves a window before its takeoff (executor.ts `prove`): the plan from standing at `from`
+ * (the look towards the first goal) through every goal of the window at the live budget, with the stretch's margin,
+ * weight and edge set; `proofOf` reads the answer.
+ */
+export function windowRequest(w: Pick<Window, 'goals'>, from: Vec3, rockets: number, o: Pick<StretchOptions, 'margin' | 'maxNodes' | 'maxMs' | 'weight' | 'library'>): RouteRequest {
+  const first = w.goals[0] ? goalPoint(w.goals[0]) : { x: from.x, y: from.y, z: from.z + 1 };
+  const yaw = (Math.atan2(-(first.x - from.x), first.z - from.z) * 180) / Math.PI;
+  const start: RouteState = { pos: { x: from.x, y: from.y, z: from.z }, vel: { x: 0, y: 0, z: 0 }, yaw, boost: { ...NO_BOOST }, gliding: false, rockets, wp: 0 };
+  return { start, goals: w.goals, margin: o.margin, maxNodes: o.maxNodes ?? STRETCH_PLAN_NODES, maxMs: o.maxMs ?? STRETCH_PLAN_MS, weight: o.weight ?? STRETCH_WEIGHT, ...(o.library !== undefined ? { library: o.library } : {}) };
+}
+
+export function proofOf(p: RoutePlan): WindowProof {
+  return { complete: p.complete, robust: p.robust, reached: p.reached, ms: p.ms, ...(p.complete ? { plan: p } : {}) };
+}
+
 export interface StretchDeps extends Omit<RocketDeps, 'loop'> {
   loop: FlightLoop;
   /** The cells the stretch is planned over (unknown cells are solid: commands-fly's route grid over the live model). */
@@ -210,6 +253,10 @@ export interface StretchOptions {
   landLibrary?: RouteRequest['library'];
   maxTicks?: number;
   window?: number;
+  /** Track F5b: the cave style's rules on the trackers, the search's risk weight, and the window's plan proven before the takeoff. */
+  rules?: TrackerRules;
+  riskCost?: number;
+  firstPlan?: RoutePlan;
   note?: (msg: string) => void;
 }
 
@@ -217,6 +264,8 @@ export type StretchEnd = 'done' | 'ground' | 'failed' | 'timeout' | 'stopped';
 
 export interface StretchReport {
   end: StretchEnd;
+  /** Track F5b: the flight bailed out (stopped and sank to the floor) before its landing. */
+  bailed: boolean;
   ticks: number;
   rockets: number;
   hits: number;
@@ -248,6 +297,9 @@ export function flyStretch(d: StretchDeps, o: StretchOptions): { done: Promise<S
     landLibrary: o.landLibrary ?? STRETCH_LAND_LIBRARY,
     ...(o.library !== undefined ? { library: o.library } : {}),
     ...(o.window !== undefined ? { window: o.window } : {}),
+    ...(o.rules ? { rules: o.rules } : {}),
+    ...(o.riskCost !== undefined ? { riskCost: o.riskCost } : {}),
+    ...(o.firstPlan ? { firstPlan: o.firstPlan } : {}),
     yaw: loop.command.yaw,
     note: (m) => {
       log.info(m);
@@ -340,6 +392,7 @@ export function flyStretch(d: StretchDeps, o: StretchOptions): { done: Promise<S
       loop.setCommand({ jump: false, pitch: 0, forward: 0, strafe: 0, ...(loop.state.onGround ? { glide: false } : {}) });
       resolve({
         end,
+        bailed: chain.bailing,
         ticks: tick,
         rockets: hand.fired,
         hits,

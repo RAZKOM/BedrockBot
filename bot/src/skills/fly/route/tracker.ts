@@ -17,7 +17,7 @@ import { glideVelocity } from '../../input/physics.ts';
 import { sweep, type RouteGrid } from './grid.ts';
 import { crossesFloor, inBurnTail, landsOn, passes, stepState, sweepGridFor } from './primitives.ts';
 import { startMarginFor } from './search.ts';
-import { BURN, NO_BOOST, burnTick, freshBurn, headingOf, hspeed, landingCells, type BoostRange, type PrimitiveFamily, type RouteControl, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
+import { BURN, NO_BOOST, burnTick, cloneState, freshBurn, headingOf, hspeed, landingCells, type BoostRange, type PrimitiveFamily, type RouteControl, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
 
 /** Ticks of the plan ahead of the body checked against the grid every tick. */
 export const LOOKAHEAD = 20;
@@ -40,6 +40,64 @@ const PLANLESS_MAX = 40;
  * powered is how the bot died in a Realm cave (partial plans at clearance 0, 6.5 and 2.8 of wall damage).
  */
 export const PLAN_CLEAR_MIN = 0.05;
+
+/**
+ * Track F5b (docs/flight.md "Cave flight"): the cave style's rules on the tracker, all off by default (the open-air
+ * drivers and the courses fly as before). A cave is flown in short committed pieces: a rocket only where the plan
+ * is cleared far enough ahead to stop in, never on top of speed, and a body left without a plan stops and comes down
+ * rather than gliding on into what no plan has swept.
+ */
+export interface TrackerRules {
+  /**
+   * The commit horizon (ticks; the 180 brake stops the body in about 10 ticks and 5 blocks): a partial plan is asked
+   * again this far before its end, and a partial plan shorter than it counts as "the planner is not sure" (partialStop).
+   */
+  commitTicks?: number;
+  /**
+   * No rocket on a partial plan whose remainder from the body's index is under `commitTicks`. Measured harmful on the
+   * cave set (a plan's rocket is its turn: refused, the body leaves the plan and hits the wall it was turning from), so
+   * the cave style leaves it off; kept for the record.
+   */
+  refuseUncommitted?: boolean;
+  /** No rocket while the body's horizontal speed is at or over this (blocks a tick). Measured harmful like refuseUncommitted; off in the style. */
+  fireSpeedMax?: number;
+  /**
+   * Bail out after this many consecutive gliding ticks without a plan being tracked (the hold or the evade rule flying):
+   * the 180 brake at the pitch that stays clear longest, then the hover's sink to whatever floor is under the body
+   * (`status` 'bailing'; the driver sees the ground). No more plans are asked for once it begins. Undefined: never.
+   */
+  bailAfter?: number;
+  /**
+   * A planner that is not sure stops the body: a new plan is asked for `commitTicks` before a partial plan's end (not
+   * only when it runs out), and when SHORT_PARTIALS partial plans in a row come back shorter than `commitTicks` for
+   * a gliding body (the search cannot see even the stopping distance ahead), the tracker bails out. The Realm cave's
+   * partial plans ran out into walls at speed, re-planned every few ticks; this lands the body instead.
+   */
+  partialStop?: boolean;
+  /**
+   * Fly complete plans only: a partial answer while a complete plan is being tracked is ignored (the plan was proven
+   * from the takeoff; the horizon's re-optimisation absorbs the drift), and when that complete plan's corridor ahead is
+   * blocked (a chunk loaded, a correction) and the answer is partial, the tracker bails out rather than fly it.
+   */
+  completeOnly?: boolean;
+  /**
+   * A re-plan in flight is asked from the plan's reference state this many ticks ahead of the body (the worker's
+   * latency: 12 ticks for 600 ms), not from the body now: the answer then meets the body where it is, as F4a's `lead`
+   * does for the first plan. Asked from the body now, the answer was for a state 12 ticks old, 15 blocks behind
+   * a body that had meanwhile left the old plan, and the tracker turned round to chase it.
+   */
+  replanLead?: number;
+  /** Bail out when the body is this far off its reference (blocks) and no fresh plan has come: the brake, not a chase. */
+  bailError?: number;
+}
+
+/** Track F5b: the brake's pitches tried at a bail-out (the envelope: -30 holds the height over the 10 ticks, 0 loses 1.2). */
+const BAIL_PITCHES = [-30, -15, 0, 15];
+/** Track F5b: this many partial plans in a row under `commitTicks` long (`partialStop`) bail the body out, when the body has at least SHORT_PARTIAL_SPEED (blocks a tick). */
+export const SHORT_PARTIALS = 2;
+export const SHORT_PARTIAL_SPEED = 0.5;
+/** Under this horizontal speed the bail-out sinks (the hover flip). */
+const BAIL_SLOW = 0.3;
 
 export interface TrackerBody {
   pos: Vec3;
@@ -77,9 +135,11 @@ export interface TrackerOptions {
    * (the e2e's courses started in the air at 0.3 a tick and fell off every first plan).
    */
   lead?: number;
+  /** Track F5b: the cave style's rules (default none: the tracker flies as Track F4a left it). */
+  rules?: TrackerRules;
 }
 
-export type TrackerStatus = 'planning' | 'tracking' | 'holding' | 'done' | 'failed';
+export type TrackerStatus = 'planning' | 'tracking' | 'holding' | 'bailing' | 'done' | 'failed';
 
 export interface TrackerOutput {
   control: RouteControl;
@@ -110,6 +170,12 @@ export interface TrackerStats {
   ticks: number;
   /** Rockets not fired: asked for with no plan being tracked, or on a plan under PLAN_CLEAR_MIN. */
   refused?: number;
+  /** Track F5b (completeOnly): partial answers ignored while a complete plan was flown. */
+  partialIgnored?: number;
+  /** Track F5b: rockets not fired by the cave rules (a partial plan short of the commit horizon, the body over the speed cap). */
+  uncommitted?: number;
+  /** Track F5b: ticks flown by the bail-out (the brake and the sink). */
+  bailTicks?: number;
   /** The first plan's effort. */
   first?: { nodes: number; expanded: number; ms: number; ticks: number; rockets: number; complete: boolean; robust: boolean; clearance: number };
 }
@@ -151,6 +217,17 @@ export class RouteTracker {
   private flownNext = -1;
   /** The plan (null: none) the last refused rocket was noted for (one note each). */
   private refusedFor: RoutePlan | null | undefined;
+  /** Track F5b: consecutive gliding ticks without a plan being tracked, and the bail-out's phase once it began. */
+  private planlessGliding = 0;
+  private bail: 'brake' | 'sink' | undefined;
+  /** The tick of the last `tick` call (a plan adopted between ticks is placed against it). */
+  private now = 0;
+  /** Track F5b: partial plans in a row adopted for a gliding body that were shorter than the commit horizon. */
+  private shortPartials = 0;
+  /** Track F5b (completeOnly): the complete plan being flown is blocked ahead: only a complete answer may replace it, a partial one bails. */
+  private needComplete = false;
+  /** Track F5b (replanLead): a plan asked from ahead that starts later than now: the old plan is flown until its start tick. */
+  private nextPlan: { p: RoutePlan; start: RouteState; goals: RouteGoal[]; wp0: number; at: number } | undefined;
   readonly stats: TrackerStats = { plans: 0, replans: 0, planMs: 0, partial: 0, fired: 0, corrections: 0, holdTicks: 0, evadeTicks: 0, burnsRead: 0, maxError: 0, ticks: 0 };
 
   private readonly o: TrackerOptions;
@@ -171,6 +248,45 @@ export class RouteTracker {
 
   get boostRange(): Readonly<BoostRange> {
     return this.boost;
+  }
+
+  /** Track F5b: the bail-out has begun (the brake, then the sink); the tracker flies nothing else from here. */
+  get bailing(): boolean {
+    return this.bail !== undefined;
+  }
+
+  /**
+   * Track F5b: the bail-out's control. The 180 brake while the body still has speed, at the pitch of BAIL_PITCHES that
+   * sweeps clear (no margin) the longest over the horizon, then the hover flip (the elevator descent, 0.149 a tick)
+   * until the floor.
+   */
+  private bailControl(cur: RouteState, now: number): RouteControl {
+    this.stats.bailTicks = (this.stats.bailTicks ?? 0) + 1;
+    if (this.bail === 'brake' && hspeed(cur.vel) < BAIL_SLOW) this.bail = 'sink';
+    if (this.bail === 'sink') return { yaw: cur.yaw + (now & 1 ? 180 : 0), pitch: 0, fire: false };
+    const h = headingOf(cur.vel, cur.yaw);
+    let best: RouteControl = { yaw: h + 180, pitch: BAIL_PITCHES[0]!, fire: false };
+    let bestScore = -Infinity;
+    for (const pitch of BAIL_PITCHES) {
+      const c: RouteControl = { yaw: h + 180, pitch, fire: false };
+      let s = cur;
+      let score = 0;
+      for (let t = 0; t < HORIZON; t++) {
+        const r = stepState(s, c, false);
+        const sw = sweep(this.o.grid, s.pos, r.next.pos, 0);
+        if (sw.hit) {
+          score -= HORIZON - t;
+          break;
+        }
+        score += sw.clearance;
+        s = r.next;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = c;
+      }
+    }
+    return best;
   }
 
   /** The loop replayed a server correction: the body moved. */
@@ -239,7 +355,7 @@ export class RouteTracker {
   }
 
   private request(b: TrackerBody, now: number, why: string): void {
-    if (this.pending) return;
+    if (this.pending || this.bail) return;
     let start = this.stateOf(b);
     // Track F4a: the first plan of a gliding body from where the hold takes it in `lead` ticks (TrackerOptions.lead)
     const lead = !this.plan && b.gliding ? Math.max(0, this.o.lead ?? 0) : 0;
@@ -247,10 +363,28 @@ export class RouteTracker {
       yaw = headingOf(start.vel, yaw);
       start = stepState(start, { yaw, pitch: 0, fire: false }, false).next;
     }
-    const at = now + lead;
+    let at = now + lead;
+    let wp0 = this.wp;
+    let goals = this.remainingGoals();
+    // Track F5b (replanLead): a re-plan in flight from the plan's reference `replanLead` ticks ahead of the body
+    const rl = this.o.rules?.replanLead ?? 0;
+    if (this.plan && b.gliding && rl > 0 && this.cursor >= 0 && this.cursor < this.plan.states.length - 1) {
+      const p = this.plan;
+      const j = Math.min(p.states.length - 1, this.cursor + rl);
+      const ref = p.states[j]!;
+      let used = 0;
+      for (let k = this.cursor + 1; k <= j; k++) if (p.controls[k]?.fire) used++;
+      wp0 = this.planWp0 + ref.wp;
+      goals = this.o.goals.slice(wp0);
+      if (goals.length === 0) return; // the plan's rest passes every goal: nothing to ask for
+      start = { ...cloneState(ref), rockets: Math.max(0, b.rockets - used), wp: 0 };
+      delete start.early;
+      delete start.late;
+      at = now + (j - this.cursor);
+    }
     const req: RouteRequest = {
       start,
-      goals: this.remainingGoals(),
+      goals,
       margin: this.o.margin,
       maxNodes: this.o.maxNodes,
       maxMs: this.o.maxMs,
@@ -265,27 +399,45 @@ export class RouteTracker {
     this.pending = true;
     if (this.plan) this.stats.replans++;
     this.stats.plans++;
-    const asked = this.wp;
+    const asked = wp0;
     const adopt = (p: RoutePlan): void => {
       this.pending = false;
       this.stats.planMs += p.ms;
       if (!p.complete) this.stats.partial++;
       this.stats.first ??= { nodes: p.nodes, expanded: p.expanded, ms: p.ms, ticks: p.ticks, rockets: p.rockets, complete: p.complete, robust: p.robust, clearance: p.clearance };
       this.o.note?.(`route: ${why}: ${p.complete ? 'plan' : `partial plan (${p.why ?? '?'})`}${p.robust ? '' : ' (not robust)'} ${p.ticks} ticks, ${p.rockets} rockets, clearance ${p.clearance.toFixed(2)}, ${p.expanded} expanded of ${p.nodes} in ${p.ms.toFixed(0)} ms: ${p.edges.map((e) => e.name).join(' ')}`);
-      if (asked !== this.wp) return; // a goal was passed meanwhile: the plan's goals are stale, ask again next tick
+      // a goal was passed meanwhile (the plan's goals are stale, ask again next tick), or the bail-out began; a plan asked
+      // from ahead (replanLead) may start past goals the body has not reached yet
+      if (asked < this.wp || (asked !== this.wp && !rl) || this.bail) return;
       if (p.controls.length === 0) {
         // no edge from the body's state (within the margin of a solid): the evade rule flies, the planner is asked again
         if (!this.plan) this.planless++;
         if (this.planless > PLANLESS_MAX) this.failed = p.why ?? 'no plan';
+        // Track F5b: a standing body whose search emptied its open list (no takeoff fits here) fails at once, not after 40 ticks
+        if (!start.gliding && p.budget === 'none' && this.o.rules) this.failed = p.why ?? 'no takeoff from here';
         return;
       }
       this.planless = 0;
-      this.plan = p;
-      this.planStart = start;
-      this.planGoals = req.goals;
-      this.planWp0 = asked;
-      this.planTick = at;
-      this.cursor = -1;
+      // Track F5b (completeOnly): a complete plan is never replaced by a partial one; blocked ahead, a partial answer bails
+      if (this.o.rules?.completeOnly && !p.complete && this.plan?.complete && b.gliding) {
+        if (this.needComplete) {
+          this.bail = 'brake';
+          this.o.note?.('route: the plan ahead is blocked and the new plan is partial: bailing out (the brake, then the sink to the floor)');
+        } else this.stats.partialIgnored = (this.stats.partialIgnored ?? 0) + 1;
+        return;
+      }
+      this.needComplete = false;
+      // Track F5b: a partial plan for a body gliding with speed shorter than the commit horizon (partialStop counts them; a
+      // slow body near a landing gets short partial settles and is no danger)
+      const commit = this.o.rules?.commitTicks ?? 0;
+      if (start.gliding && hspeed(start.vel) >= SHORT_PARTIAL_SPEED && !p.complete && commit > 0 && p.controls.length < commit) this.shortPartials++;
+      else this.shortPartials = 0;
+      if (rl > 0 && this.plan && at > this.now + 1 && this.cursor < this.plan.states.length - 2) {
+        // Track F5b: asked from ahead and back early: the old plan flies on until the new one's start tick
+        this.nextPlan = { p, start, goals: req.goals, wp0: asked, at };
+        return;
+      }
+      this.adoptNow(p, start, req.goals, asked, at);
     };
     const r = this.o.plan(req);
     if (r instanceof Promise) {
@@ -294,6 +446,17 @@ export class RouteTracker {
         this.o.note?.(`route: the planner failed: ${e instanceof Error ? e.message : String(e)}`);
       });
     } else adopt(r);
+  }
+
+  private adoptNow(p: RoutePlan, start: RouteState, goals: RouteGoal[], wp0: number, at: number): void {
+    this.plan = p;
+    this.planStart = start;
+    this.planGoals = goals;
+    this.planWp0 = wp0;
+    this.planTick = at;
+    this.cursor = -1;
+    this.flownPlan = undefined;
+    this.nextPlan = undefined;
   }
 
   /** The plan's state at index `i` (-1: the state the plan was made from). */
@@ -323,11 +486,29 @@ export class RouteTracker {
     return best;
   }
 
-  /** The plan's corridor over the next LOOKAHEAD ticks from index `i` sweeps clear in the grid now. */
+  /**
+   * The plan's corridor over the next LOOKAHEAD ticks from index `i` sweeps clear in the grid now: a solid that was not
+   * there when the plan was made (a chunk loaded, a block set). Track F5b: swept with the plan's own least clearance when
+   * that is under the margin (a plan from a standing start, or from a body already within the margin of a solid, keeps
+   * less than the margin on its first edges by construction: `startMarginFor`), so a plan is never "blocked" by the
+   * walls it was planned past (F4b's windows re-planned "the corridor ahead is blocked" over and over on such plans).
+   */
   private corridorClear(i: number): boolean {
     const p = this.plan!;
+    // (the cave rules only: the open-air drivers keep Track F4a's check as measured; with the plan's clearance as the margin
+    // the obstacle course's rings and tunnel re-planned less on bds-fly2 and scraped)
+    const cave = this.o.rules !== undefined;
+    const margin = cave ? Math.min(this.o.margin, Math.max(0, p.clearance - 0.02)) : this.o.margin;
     for (let k = i; k < Math.min(p.states.length - 1, i + LOOKAHEAD); k++) {
-      if (sweep(this.o.grid, this.ref(k).pos, this.ref(k + 1).pos, this.o.margin).hit) return false;
+      const a = this.ref(k);
+      if (cave && !a.gliding) continue; // the takeoff tick leaves the floor it stands on
+      // (the landing cell's floor is no obstacle near it, as the search had it: primitives.ts sweepGridFor)
+      const grid = cave ? sweepGridFor(this.o.grid, this.planGoals[a.wp], a.pos) : this.o.grid;
+      if (sweep(grid, a.pos, this.ref(k + 1).pos, margin).hit) {
+        const q = this.ref(k + 1).pos;
+        this.o.note?.(`route: the plan's corridor is blocked at tick ${k + 1} of ${p.states.length} (${q.x.toFixed(1)} ${q.y.toFixed(1)} ${q.z.toFixed(1)}, margin ${margin.toFixed(2)})`);
+        return false;
+      }
     }
     return true;
   }
@@ -361,7 +542,7 @@ export class RouteTracker {
    */
   private horizonCost(cur: RouteState, c0: RouteControl, next: number, margin: number, goals: readonly RouteGoal[], stack: boolean, track: boolean, hold = false): number {
     const p = this.plan!;
-    let s: RouteState = { ...cur, wp: this.wp - this.planWp0 };
+    let s: RouteState = { ...cur, wp: Math.max(0, this.wp - this.planWp0) };
     let cost = 0;
     for (let t = 0; t < HORIZON; t++) {
       const idx = next + t;
@@ -482,9 +663,19 @@ export class RouteTracker {
     this.fireLater = true;
   }
 
-  /** One tick: the control to fly now from the real body. */
-  tick(b: TrackerBody, now: number): TrackerOutput {
+  /**
+   * One tick: the control to fly now from the real body. `shadow` (Track F5b): the tracker is ticked alongside the one
+   * flying (the chain's next window planning ahead): its ticks without a plan are not the body's, so they never bail.
+   */
+  tick(b: TrackerBody, now: number, shadow = false): TrackerOutput {
     this.stats.ticks++;
+    this.now = now;
+    // Track F5b (replanLead): the plan asked from ahead takes over at its start tick, or when the old one is out
+    if (this.nextPlan && !this.bail && (now >= this.nextPlan.at || !this.plan || this.cursor >= this.plan.states.length - 2)) {
+      const n = this.nextPlan;
+      if (n.wp0 >= this.wp) this.adoptNow(n.p, n.start, n.goals, n.wp0, n.at);
+      else this.nextPlan = undefined;
+    }
     this.readBoost(b);
     this.lastVel = { ...b.vel };
     // the goals passed by the real body
@@ -504,6 +695,13 @@ export class RouteTracker {
       const c = { yaw: this.yaw, pitch: 0, fire: false };
       this.lastControl = c;
       return { control: c, status: 'done', done: true, error: 0 };
+    }
+    if (this.bail) {
+      const c = this.bailControl(this.stateOf(b), now);
+      this.yaw = c.yaw;
+      this.lastControl = c;
+      this.boost = burnTick(this.boost);
+      return { control: c, status: 'bailing', done: false, error: 0 };
     }
     if (this.failed) return { control: this.holdClear(b), status: 'failed', done: false, error: 0 };
     let replan: string | undefined;
@@ -537,11 +735,15 @@ export class RouteTracker {
       else if (this.burnEnded && !planBoost && this.boost.nom > 0) again = 'the rocket burns on past the plan';
       else if (out && !p.complete) again = 'the partial plan ran out';
       else if (out) again = 'the plan ran out';
+      // Track F5b: a partial plan is asked again `commitTicks` before its end (the stop at its end is the fallback)
+      else if (this.o.rules?.partialStop && !p.complete && (this.o.rules.commitTicks ?? 0) > 0 && p.states.length - 1 - i <= this.o.rules.commitTicks!) again = 'the partial plan is nearly out';
       this.corrected = false;
       this.changed = false;
       this.burnEnded = false;
       if (again && !replan) {
         replan = again;
+        // Track F5b (completeOnly): a complete plan blocked ahead wants a complete replacement, else the bail-out
+        if (this.o.rules?.completeOnly && p.complete && blocked) this.needComplete = true;
         this.request(b, now, again);
       }
       // a plan adopted just now (an in-thread planner answers at once) starts at its own state: locate again
@@ -581,9 +783,46 @@ export class RouteTracker {
       control = this.holdClear(b);
       status = this.pending ? 'planning' : 'holding';
     }
+    // Track F5b: a body gliding without a plan being tracked for `bailAfter` ticks stops and comes down (the bail-out);
+    // the ticks of a shadow tracker (the chain's next window) are not the body's
+    const rules = this.o.rules;
+    if (!shadow && b.gliding && status !== 'tracking') this.planlessGliding++;
+    else if (status === 'tracking') this.planlessGliding = 0;
+    const planless = rules?.bailAfter !== undefined && this.planlessGliding >= rules.bailAfter && status !== 'tracking';
+    // Track F5b: the planner is not sure (partialStop): SHORT_PARTIALS partial plans in a row under the commit horizon
+    const partialOut = rules?.partialStop === true && this.shortPartials >= SHORT_PARTIALS;
+    // Track F5b: the body far off its reference (bailError): the stop, not a chase of a plan it has left
+    const lost = rules?.bailError !== undefined && status === 'tracking' && error > rules.bailError;
+    if (b.gliding && (planless || partialOut || lost)) {
+      this.bail = 'brake';
+      this.o.note?.(`route: ${planless ? `no plan for ${this.planlessGliding} ticks in the air` : partialOut ? `${this.shortPartials} partial plans in a row under ${rules?.commitTicks} ticks` : `${error.toFixed(1)} blocks off the plan`}: bailing out (the brake, then the sink to the floor)`);
+      const c = this.bailControl(this.stateOf(b), now);
+      this.yaw = c.yaw;
+      this.lastControl = c;
+      this.boost = burnTick(this.boost);
+      return { control: c, status: 'bailing', done: false, ...(replan ? { replan } : {}), error };
+    }
     // no powered flight without a plan being tracked, or on one that grazes a solid (PLAN_CLEAR_MIN): the plan's rocket,
     // a late one and a held one are dropped (the next safe plan fires its own), and the glide bleeds the speed
     const flying = status === 'tracking' ? this.plan : undefined;
+    // Track F5b: the cave rules: a partial plan must be cleared `commitTicks` past the body (room to stop in), and no
+    // rocket on top of speed (`fireSpeedMax`)
+    if (rules && flying && (control.fire || this.fireLater) && flying.clearance >= PLAN_CLEAR_MIN) {
+      const left = flying.states.length - 1 - Math.max(0, this.cursor);
+      const short = rules.refuseUncommitted === true && !flying.complete && (rules.commitTicks ?? 0) > 0 && left < rules.commitTicks!;
+      const fast = rules.fireSpeedMax !== undefined && hspeed(b.vel) >= rules.fireSpeedMax;
+      if (short || fast) {
+        if (control.fire || b.gliding) {
+          this.stats.uncommitted = (this.stats.uncommitted ?? 0) + 1;
+          if (this.refusedFor !== flying) {
+            this.refusedFor = flying;
+            this.o.note?.(`route: no rocket ${short ? `on a partial plan cleared ${left} ticks ahead (under ${rules.commitTicks})` : `at ${hspeed(b.vel).toFixed(2)} a tick (over ${rules.fireSpeedMax})`}: the glide goes on unpowered`);
+          }
+        }
+        control = { ...control, fire: false };
+        this.fireLater = false;
+      }
+    }
     if ((control.fire || this.fireLater) && (flying === undefined || flying.clearance < PLAN_CLEAR_MIN)) {
       if (control.fire || b.gliding) {
         this.stats.refused = (this.stats.refused ?? 0) + 1;

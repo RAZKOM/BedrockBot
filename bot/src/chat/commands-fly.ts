@@ -34,7 +34,10 @@ import type { Containers } from '../world/containers.ts';
 import type { Logger } from '../log.ts';
 import { corridorAirborne, corridorProviderOf, corridorWanted } from '../skills/fly/corridor/registry.ts'; // Track F4b
 import type { CorridorReport, StepOutcome } from '../skills/fly/corridor/executor.ts'; // Track F4b
-import { corridorEndLine, runCorridorTrip, stopCorridorTrip, type CorridorWiring } from './commands-corridor.ts'; // Track F4b
+import { corridorEndLine, runCorridorTrip, stopCorridorTrip, type CorridorWiring, type TripStyle } from './commands-corridor.ts'; // Track F4b
+import { orderedRoute, shortcutRoute, WaypointProvider, type RoutePoint } from '../skills/fly/cave/route.ts'; // Track F5b
+import { proveShortcutInWorker } from '../skills/fly/cave/proof.ts'; // Track F5b
+import { CAVE_STYLE, caveExecutorOptions, caveStretchOptions } from '../skills/fly/cave/style.ts'; // Track F5b
 import { takeoffWet } from '../skills/fly/takeoff-water.ts'; // Track F5a
 
 export const FLY_COMMANDS = ['fly', 'land'] as const;
@@ -380,7 +383,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     state: () => ({ gliding: loop.state.gliding, rockets: readKit(inv, memory()).rocketsHotbar, phase: controller.status().phase }),
     corridor: (goal, label) => {
       const provider = corridorProviderOf(task, skills.nav.coarseLayer);
-      return provider ? runCorridorTrip(corridorWiring(), provider, goal, label) : undefined;
+      return provider ? runCorridorTrip(corridorWiring(), provider, goal, label, tripStyle()) : undefined; // Track F5b: the cave style with flyCave on
     },
   };
   controls.set(task, control);
@@ -1051,9 +1054,95 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     },
     log,
   });
+  // Track F5b: the cave style on a corridor trip when `flyCave on` (powered flight underground, the style's windows and
+  // rules); off: today's trip (the underground stretches walked)
+  const caveOn = (): boolean => String(d.settings.get('flyCave')) === 'on';
+  const tripStyle = (): TripStyle => (caveOn() ? { executor: caveExecutorOptions(true), stretch: (w) => caveStretchOptions(w), prove: { maxMs: CAVE_STYLE.proveMs, maxNodes: CAVE_STYLE.proveNodes } } : { executor: caveExecutorOptions(false) });
+  /** A cell is covered (no open sky over it): the column's top is at or over it; unknown counts as covered. */
+  const coveredCell = (cell: Vec3): boolean => {
+    const top = skyTop(cell.x, cell.z);
+    return top === undefined || top >= cell.y;
+  };
+  /** Track F5b: `!fly via <wp> ...` / `!fly route <prefix> [noshortcut]`: the waypoints as a corridor (skills/fly/cave/route.ts). */
+  const flyRoute = async (args: readonly string[], reply: (s: string) => void): Promise<void> => {
+    const store = waypointStoreOf(task);
+    if (!store) {
+      reply('fly: no waypoints here');
+      return;
+    }
+    const pointOf = (w: { name: string; x: number; y: number | null; z: number }): RoutePoint | undefined => (w.y === null ? undefined : { name: w.name, cell: { x: w.x, y: w.y, z: w.z } });
+    let points: RoutePoint[];
+    let label: string;
+    let shortcut: RoutePoint | undefined;
+    if (args[0] === 'via') {
+      const names = args.slice(1);
+      if (names.length < 1) {
+        reply('usage: !fly via <waypoint> <waypoint> ... (fly them in order; the corridor between them is the plan)');
+        return;
+      }
+      const pts: RoutePoint[] = [];
+      for (const n of names) {
+        const w = store.get(n);
+        const p = w ? pointOf(w) : undefined;
+        if (!p) {
+          reply(w ? `fly: waypoint ${w.name} has no height; set it again where you stand` : `fly: no waypoint "${n}" (!wp list)`);
+          return;
+        }
+        pts.push(p);
+      }
+      points = pts;
+      label = `via ${pts.map((p) => p.name).join(' ')}`;
+    } else {
+      const prefix = args[1];
+      if (!prefix) {
+        reply('usage: !fly route <prefix> [noshortcut] (flies <prefix>_start, <prefix>_1 .. <prefix>_N, <prefix>_end; a <prefix>_shortcut is taken when the planner proves it clean)');
+        return;
+      }
+      const named = store.list().map(pointOf).filter((p): p is RoutePoint => p !== undefined);
+      const route = orderedRoute(prefix, named);
+      if (!route) {
+        reply(`fly: no route ${prefix} (needs ${prefix}_start and ${prefix}_end; !wp list)`);
+        return;
+      }
+      points = route;
+      label = `route ${prefix} (${route.length} waypoints)`;
+      if (!args.slice(2).some((a) => a.toLowerCase() === 'noshortcut')) shortcut = named.find((p) => p.name.toLowerCase() === `${prefix}_shortcut`.toLowerCase());
+    }
+    const k = readKit(inv, memory());
+    const ready = kitReady(k, d.settings.get('toolWearLimit'), supplyOf(d.task)?.carried(ROCKET) ?? 0);
+    if (!ready.ok) {
+      reply(ready.line);
+      return;
+    }
+    if (controller.active) {
+      reply('fly: already flying');
+      return;
+    }
+    const on = caveOn();
+    const w = corridorWiring();
+    if (shortcut) {
+      // the optional waypoint: taken only when the planner proves the stretch through it clean with margin (the worker's search, a generous budget)
+      if (!on) reply(`fly: ${shortcut.name} is skipped (flyCave is off: nothing is flown underground)`);
+      else {
+        const { points: short, branch } = shortcutRoute(points, shortcut);
+        reply(`fly: proving the shortcut ${shortcut.name} from ${branch.name} on the model (a few seconds)`);
+        const proof = await proveShortcutInWorker(w.grid, [branch.cell, shortcut.cell, short[short.length - 1]!.cell], { style: CAVE_STYLE }).catch((e: unknown) => ({ proven: false, windows: 0, lines: [], reason: e instanceof Error ? e.message : String(e) }));
+        for (const line of proof.lines) log.info(`fly: shortcut ${shortcut.name}: ${line}`);
+        if (proof.proven) {
+          points = short;
+          reply(`fly: the shortcut ${shortcut.name} from ${branch.name} is proven clean (${proof.windows} window${proof.windows === 1 ? '' : 's'}): taking it`);
+        } else reply(`fly: the shortcut ${shortcut.name} is not proven (${proof.reason ?? '?'}): flying the full route`);
+      }
+    }
+    const provider = new WaypointProvider(points, { covered: coveredCell, dim: dim() });
+    const last = points[points.length - 1]!;
+    reply(`flying ${label}${on ? ' (cave style)' : ' (flyCave off: walking underground)'}; ${kitLine(k)}`);
+    const r = await runCorridorTrip(w, provider, last.cell, last.name, tripStyle());
+    reply(corridorEndLine(r, last.name));
+  };
   const flyDef: Parameters<typeof d.chat.register>[0] = {
     name: 'fly',
-    help: '<x y z> | <waypoint> | <player> | home | stop | status | box [<slot>] (fly there with the elytra and land on it; stop: land now)',
+    help: '<x y z> | <waypoint> | <player> | home | via <wp> ... | route <prefix> [noshortcut] | stop | status | box [<slot>] (fly there with the elytra and land on it; via / route: fly the waypoints in order, the cave stretches flown with flyCave on; stop: land now)',
     tier: 'more', // Track AU2: come and goto fly on their own; the front door keeps !come
     group: 'go',
     example: '!fly home',
@@ -1100,6 +1189,10 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         }
         m.namedBoxSlot = slot;
         reply(`fly: the fireworks box is the shulker box in slot ${slot} (${inv.slots[slot]?.name ?? 'empty now'})`);
+        return;
+      }
+      if (sub === 'via' || sub === 'route') {
+        void flyRoute(args, reply); // Track F5b
         return;
       }
       const t = targetOf(args, sender.kind === 'player' ? sender.name : undefined);
@@ -1153,7 +1246,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       const top = skyTop(t.goal.x, t.goal.z);
       if (!t.player && provider && corridorWanted(String(d.settings.get('flyCorridor')), provider, distance, top === undefined || top >= t.goal.y)) {
         reply(`flying to ${t.label} along a corridor (${Math.round(distance)} blocks; ${kitLine(k)})`);
-        void runCorridorTrip(corridorWiring(), provider, t.goal, t.label).then((r) => reply(corridorEndLine(r, t.label)));
+        void runCorridorTrip(corridorWiring(), provider, t.goal, t.label, tripStyle()).then((r) => reply(corridorEndLine(r, t.label)));
         return;
       }
       // Track AU2: no takeoff under a roof (the owner's indoor flight hit the ceiling three times)

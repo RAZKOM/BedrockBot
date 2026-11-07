@@ -14,9 +14,10 @@
 // real ones.
 import { silentLogger, type Logger } from '../../../log.ts';
 import type { Vec3 } from '../../../world/types.ts';
+import type { RoutePlan } from '../route/types.ts';
 import type { CoarseMode, Corridor, CorridorLeg, CorridorProvider, PortalId } from './coarse-port.ts';
 import { flightSpace } from './cost.ts';
-import { changeCell, nextWindow, splitLeg, type CellSolid, type Stretch, type Window } from './stretches.ts';
+import { changeCell, nextWindow, splitLeg, standableNear, UNDER_TAIL_MIN, WINDOW_BLOCKS, type CellSolid, type Stretch, type Window } from './stretches.ts';
 
 /** An underground fly leg is walked instead when more than this share of its underground part is unknown space (the layer's unknownFraction for the leg, or the executor's sampling). */
 export const UNKNOWN_FLY_MAX = 0.25;
@@ -77,6 +78,8 @@ export interface StepOutcome {
   /** Corrections that held the body back (ADR 0055's chunk edge). */
   held?: number;
   ticks?: number;
+  /** Track F5b: the window bailed out (stopped and sank to the floor) short of its landing. */
+  bailed?: boolean;
 }
 
 /** What the executor needs of the bot. */
@@ -91,8 +94,10 @@ export interface CorridorPorts {
   waitLoaded(points: readonly Vec3[], timeoutMs: number): Promise<boolean>;
   /** The cruise to an exact feet cell: the takeoff chain, the cruise, the landing families (FlyProcess). */
   flySky(cell: Vec3, label: string): Promise<StepOutcome>;
-  /** One underground window from standing (the elytra on, the chain of trackers; lands on `w.end`). */
-  flyUnder(w: Window, label: string): Promise<StepOutcome>;
+  /** One underground window from standing (the elytra on, the chain of trackers; lands on `w.end`), with its proven plan when there is one. */
+  flyUnder(w: Window, label: string, plan?: RoutePlan): Promise<StepOutcome>;
+  /** Track F5b: the plan from standing for a window at the live budget (ExecutorOptions.prove). */
+  proveWindow?(w: Window): Promise<WindowProof>;
   /** Walk to a feet cell (the navigator). */
   walk(cell: Vec3, label: string): Promise<StepOutcome>;
   /** The trip was stopped (`!stop`, `!fly stop`). */
@@ -124,6 +129,11 @@ export interface CorridorReport {
   corrections: number;
   trackerReplans: number;
   held: number;
+  /** Track F5b: underground windows that bailed out; proofs asked, windows cut back by a partial proof, walks to a first goal no plan reached. */
+  bailouts: number;
+  proofs: number;
+  cuts: number;
+  unproven: number;
   marks: { id: PortalId; mode: CoarseMode; outcome: 'ok' | 'failed' }[];
   seconds: number;
 }
@@ -136,6 +146,35 @@ export interface ExecutorOptions {
   planMs?: number;
   /** Fly the underground stretches in windows (default UNDER_FLY); false walks them. */
   underFly?: boolean;
+  /** Track F5b: the windows' size (blocks, default WINDOW_BLOCKS) and the tail after a bend that is walked (default UNDER_TAIL_MIN): the cave style flies shorter pieces. */
+  windowBlocks?: number;
+  tailMin?: number;
+  /**
+   * Track F5b: prove every window before its takeoff (`CorridorPorts.proveWindow`: a plan from standing at the live
+   * budget). A plan that reaches the landing flies the window; one that reaches some goals cuts the window back to
+   * them (at most PROVE_CUTS times); one that reaches nothing walks to the first goal. Never fly on a partial plan.
+   */
+  prove?: boolean;
+  /** Track F5b: a proof must also be robust to the burn (default true with `prove`); a complete plan that is not counts as unproven. */
+  proveRobust?: boolean;
+}
+
+/** Track F5b: a window is cut back to what its plan reached at most this many times before the rest is walked to the first goal. */
+export const PROVE_CUTS = 3;
+/** Track F5b: an underground stretch whose steps (windows, walks) bring the body no STALL_PROGRESS blocks nearer its end STALL_STEPS times in a row is walked out (one run flew 297 windows between two floors). */
+export const STALL_STEPS = 4;
+export const STALL_PROGRESS = 2;
+
+/** Track F5b: what a proof of a window answers (the plan from standing at the live budget). */
+export interface WindowProof {
+  complete: boolean;
+  /** The plan is robust to the burn by construction (route/search.ts burn branches). */
+  robust: boolean;
+  /** Goals the plan reached. */
+  reached: number;
+  ms: number;
+  /** The plan itself when complete (the window's first tracker flies it; drive.ts `firstPlan`). */
+  plan?: RoutePlan;
 }
 
 type LegResult = { ok: true } | { ok: false; reason: string; mark?: { id: PortalId; mode: CoarseMode }; fatal?: boolean };
@@ -155,7 +194,7 @@ export class CorridorExecutor {
 
   constructor(ports: CorridorPorts, o: ExecutorOptions = {}) {
     this.p = ports;
-    this.o = { modes: o.modes ?? CORRIDOR_MODES, unknownMax: o.unknownMax ?? UNKNOWN_FLY_MAX, maxReplans: o.maxReplans ?? MAX_REPLANS, chunkWaitMs: o.chunkWaitMs ?? CHUNK_WAIT_MS, planMs: o.planMs ?? CORRIDOR_PLAN_MS, underFly: o.underFly ?? UNDER_FLY };
+    this.o = { modes: o.modes ?? CORRIDOR_MODES, unknownMax: o.unknownMax ?? UNKNOWN_FLY_MAX, maxReplans: o.maxReplans ?? MAX_REPLANS, chunkWaitMs: o.chunkWaitMs ?? CHUNK_WAIT_MS, planMs: o.planMs ?? CORRIDOR_PLAN_MS, underFly: o.underFly ?? UNDER_FLY, windowBlocks: o.windowBlocks ?? WINDOW_BLOCKS, tailMin: o.tailMin ?? UNDER_TAIL_MIN, prove: o.prove ?? false, proveRobust: o.proveRobust ?? true };
     this.log = ports.log ?? silentLogger;
   }
 
@@ -168,7 +207,7 @@ export class CorridorExecutor {
   /** Follow corridors to `goal` (a feet cell) until it stands there, the re-plans run out or the trip is stopped. */
   async run(goal: Vec3, label = fmt(goal)): Promise<CorridorReport> {
     const t0 = Date.now();
-    this.r = { ok: false, plans: 0, replans: 0, legs: [], cruises: 0, windows: 0, walks: 0, rockets: 0, corrections: 0, trackerReplans: 0, held: 0, marks: [], seconds: 0 };
+    this.r = { ok: false, plans: 0, replans: 0, legs: [], cruises: 0, windows: 0, walks: 0, rockets: 0, corrections: 0, trackerReplans: 0, held: 0, bailouts: 0, proofs: 0, cuts: 0, unproven: 0, marks: [], seconds: 0 };
     const end = (ok: boolean, reason?: string): CorridorReport => {
       this.r.ok = ok;
       if (reason) this.r.reason = reason;
@@ -214,6 +253,7 @@ export class CorridorExecutor {
     this.r.corrections += s.corrections ?? 0;
     this.r.trackerReplans += s.replans ?? 0;
     this.r.held += s.held ?? 0;
+    if (s.bailed) this.r.bailouts++;
   }
 
   private async walk(cell: Vec3, label: string): Promise<StepOutcome> {
@@ -327,16 +367,33 @@ export class CorridorExecutor {
 
   private async underStretch(s: Stretch, end: Vec3, i: number): Promise<LegResult> {
     let tries = 0;
+    /** Track F5b: walks for want of a proof that made no progress in a row (the next one goes farther). */
+    let stuckWalks = 0;
+    /** Track F5b: the nearest the body has been to the stretch's end, and the steps in a row that came no closer (a stretch that makes no headway is walked out). */
+    let best = Infinity;
+    let stalls = 0;
     for (;;) {
       if (this.p.stopped()) return { ok: false, reason: 'interrupted', fatal: true };
       const pos = this.p.position();
       if (!pos) return { ok: false, reason: 'position unknown', fatal: true };
       if (near(pos, end, 1.5)) return { ok: true };
-      let win = nextWindow(s, pos, { loaded: (x, z) => this.p.loaded(x, z), solid: this.p.solid, endCell: end });
+      const d = dist(pos, { x: end.x + 0.5, y: end.y, z: end.z + 0.5 });
+      if (d < best - STALL_PROGRESS) {
+        best = d;
+        stalls = 0;
+      } else if (++stalls >= STALL_STEPS) {
+        // windows and walks that bring the body no closer (a window that bails out where it took off, a walk to a goal it stands at): walk the rest
+        this.log.info(`corridor: no headway towards ${fmt(end)} in ${stalls} steps: walking the rest`);
+        const w = await this.walk(end, `walking the rest underground to ${fmt(end)} (no headway)`);
+        if (w.ok || near(w.at ?? this.p.position(), end, 1.5)) return { ok: true };
+        return { ok: false, reason: `the walk underground to ${fmt(end)} failed (${w.reason ?? '?'})`, ...(s.portals[0] ? { mark: { id: s.portals[0].id, mode: 'walk' as const } } : {}), ...(w.reason === 'interrupted' ? { fatal: true } : {}) };
+      }
+      const windowOf = (): Window | undefined => nextWindow(s, pos, { loaded: (x, z) => this.p.loaded(x, z), solid: this.p.solid, endCell: end, maxBlocks: this.o.windowBlocks, tailMin: this.o.tailMin });
+      let win = windowOf();
       if (win?.cut && win.blocks < UNDER_FLY_MIN) {
         // the chunks ahead may be on their way: wait, then look again
         const ahead = s.portals.filter((p) => !this.p.loaded(Math.floor(p.center.x), Math.floor(p.center.z))).slice(0, 2).map((p) => p.center);
-        if (ahead.length && (await this.p.waitLoaded(ahead, this.o.chunkWaitMs))) win = nextWindow(s, pos, { loaded: (x, z) => this.p.loaded(x, z), solid: this.p.solid, endCell: end });
+        if (ahead.length && (await this.p.waitLoaded(ahead, this.o.chunkWaitMs))) win = windowOf();
       }
       if (!this.o.underFly || !win || win.blocks < UNDER_FLY_MIN) {
         // nothing worth flying (a short stretch, the tail after a bend, nothing loaded): walk to the stretch's end
@@ -344,9 +401,66 @@ export class CorridorExecutor {
         if (w.ok || near(w.at ?? this.p.position(), end, 1.5)) return { ok: true };
         return { ok: false, reason: `the walk underground to ${fmt(end)} failed (${w.reason ?? '?'})`, ...(s.portals[0] ? { mark: { id: s.portals[0].id, mode: 'walk' as const } } : {}), ...(w.reason === 'interrupted' ? { fatal: true } : {}) };
       }
+      // Track F5b: the window is proven before the takeoff: a complete plan from standing flies it; a partial one cuts the
+      // window back to the goals it reached; one that reaches nothing walks to the window's first goal and looks again
+      let plan: RoutePlan | undefined;
+      if (this.o.prove && this.p.proveWindow) {
+        let proven = false;
+        for (let cut = 0; cut <= PROVE_CUTS && win; cut++) {
+          this.r.proofs++;
+          const pf = await this.p.proveWindow(win);
+          if (pf.complete && (pf.robust || !this.o.proveRobust)) {
+            proven = true;
+            plan = pf.plan;
+            break;
+          }
+          if (pf.complete) {
+            // complete but not robust to the burn: a shorter window may be (the long burn's overshoot has less to hit)
+            this.log.info(`corridor: the plan for the window to ${fmt(win.end)} is complete but not robust to the burn: cut back`);
+            if (win.goals.length <= 2 || cut === PROVE_CUTS) break;
+            const shorter = nextWindow(s, pos, { loaded: (x, z) => this.p.loaded(x, z), solid: this.p.solid, endCell: end, maxBlocks: Math.max(1, (win.goalS[Math.max(0, win.goals.length - 3)] ?? 0) + 0.5), tailMin: this.o.tailMin });
+            if (!shorter || shorter.goals.length >= win.goals.length) break;
+            this.r.cuts++;
+            win = shorter;
+            continue;
+          }
+          if (pf.reached <= 0 || cut === PROVE_CUTS) break;
+          // cut back to the goals the plan reached: the window ends at the last portal or via point among them
+          const shorter = nextWindow(s, pos, { loaded: (x, z) => this.p.loaded(x, z), solid: this.p.solid, endCell: end, maxBlocks: Math.max(1, (win.goalS[pf.reached - 1] ?? 0) + 0.5), tailMin: this.o.tailMin });
+          if (!shorter || shorter.goals.length >= win.goals.length) break;
+          this.log.info(`corridor: the plan for the window to ${fmt(win.end)} reached ${pf.reached} of ${win.goals.length} goals (${pf.ms.toFixed(0)} ms): cut back to ${fmt(shorter.end)} (${Math.round(shorter.blocks)} blocks, ${shorter.goals.length} goals)`);
+          this.r.cuts++;
+          win = shorter;
+        }
+        if (!proven) {
+          // no window from here has a complete plan: walk to the first goal of the window (or the stretch's end) and look again
+          const first = win?.goals[0];
+          const cell = first?.kind === 'waypoint' ? standableNear(this.p.solid, { x: (first.box.min.x + first.box.max.x) / 2, y: first.box.min.y, z: (first.box.min.z + first.box.max.z) / 2 }) : undefined;
+          // a first goal the body already stands at (the window starts on its floor), or no progress twice: the next goal, then the end
+          let to = cell ?? end;
+          if (near(pos, to, 1.5) || stuckWalks >= 1) {
+            const second = win?.goals[1];
+            const next = second?.kind === 'waypoint' ? standableNear(this.p.solid, { x: (second.box.min.x + second.box.max.x) / 2, y: second.box.min.y, z: (second.box.min.z + second.box.max.z) / 2 }) : undefined;
+            to = stuckWalks >= 2 || !next || near(pos, next, 1.5) ? end : next;
+          }
+          stuckWalks = near(pos, to, 1.5) ? stuckWalks + 1 : 0;
+          this.r.unproven++;
+          this.log.info(`corridor: no complete plan from ${fmt(pos)} for a window underground: walking to ${fmt(to)}`);
+          const w = await this.walk(to, `walking underground to ${fmt(to)} (no plan proven)`);
+          if (!(w.ok || near(w.at ?? this.p.position(), to, 1.5))) return { ok: false, reason: `the walk underground to ${fmt(to)} failed (${w.reason ?? '?'})`, ...(s.portals[0] ? { mark: { id: s.portals[0].id, mode: 'walk' as const } } : {}), ...(w.reason === 'interrupted' ? { fatal: true } : {}) };
+          if (to === end) return { ok: true };
+          tries = 0;
+          continue;
+        }
+        if (win.blocks < UNDER_FLY_MIN) {
+          const w = await this.walk(win.end, `walking the short piece underground to ${fmt(win.end)}`);
+          if (!(w.ok || near(w.at ?? this.p.position(), win.end, 1.5))) return { ok: false, reason: `the walk underground to ${fmt(win.end)} failed (${w.reason ?? '?'})`, ...(w.reason === 'interrupted' ? { fatal: true } : {}) };
+          continue;
+        }
+      }
       this.log.info(`corridor: leg ${i + 1}: underground window ${this.r.windows + 1} from ${fmt(pos)} to ${fmt(win.end)} (${Math.round(win.blocks)} blocks, ${win.goals.length} goals, margin ${win.margin}${win.cut ? ', cut' : ''})`);
       this.r.windows++;
-      const f = await this.p.flyUnder(win, `underground to ${fmt(win.end)}`);
+      const f = await this.p.flyUnder(win, `underground to ${fmt(win.end)}`, plan);
       this.add(f);
       if (f.reason === 'interrupted') return { ok: false, reason: 'interrupted', fatal: true };
       const at = f.at ?? this.p.position();

@@ -20,7 +20,7 @@
 // time, rockets, damage (truth hurtlog), corrections, re-plans, corridor plans / windows / walks, ticks in water.
 // Gated: the build, the fly-over and every run completing. The numbers themselves are measured, not gated.
 // Env: FLY_BDS_HOST / FLY_BDS_PORT / FLY_BDS_CONTAINER (fly-truth.ts; run with 19210 / bds-fly2), FLY_CAVE_AT="x,z",
-// FLY_CAVE_REUSE=1, FLY_CAVE_ONLY=tripC,walkA,flyA,flyB, FLY_CAVE_LEGS=3,4 (the legs of A and B by index),
+// FLY_CAVE_REUSE=1, FLY_CAVE_ONLY=tripC,walkA,flyA,flyB, FLY_CAVE_LEGS=3,4 (the legs of A and B by index), FLY_CAVE_STYLE=1 (Track F5b's cave style on the flown runs),
 // FLY_CAVE_LEG_S (the time a run may take, default 180), FLY_CAVE_REPORT=file (the table written there too), FLY_VERBOSE=1.
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -287,6 +287,7 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
     const b = bot!;
     await standAt(b, leg.from);
     setCorridorUnderFly(b.task, true);
+    if (process.env.FLY_CAVE_STYLE === '1') b.settings.set('flyCave', 'on'); // Track F5b: the cave style on the measured runs
     const goal = centre(leg.to);
     const since = await b.truth.now();
     const n0 = b.logs.length;

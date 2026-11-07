@@ -310,6 +310,8 @@ export interface Window {
   height: number;
   margin: number;
   blocks: number;
+  /** Track F5b: the path length from the start to each goal (the landing last), so a window can be cut back to what a plan reached. */
+  goalS: number[];
 }
 
 export interface WindowOptions {
@@ -334,12 +336,40 @@ export const UNDER_TAIL_MIN = 40;
 export const BEND_LAND_BEFORE = 6;
 
 interface Anchor {
-  kind: 'portal' | 'bend' | 'step';
+  kind: 'portal' | 'bend' | 'step' | 'via';
   goal: RouteGoal;
   point: Vec3;
   portal?: Portal;
   /** Path length from the window's start to this anchor. */
   s: number;
+}
+
+/** Track F5b: the waypoint box round a via point (a waypoint of the stretch that is no portal: the owner's `!fly via` hints): 3 x 3 cells, 3 high from its feet. */
+export function viaGoal(c: Vec3): RouteGoal {
+  const x = Math.floor(c.x);
+  const z = Math.floor(c.z);
+  const y = Math.floor(c.y);
+  return { kind: 'waypoint', box: { min: { x: x - 1, y, z: z - 1 }, max: { x: x + 2, y: y + 3, z: z + 2 } } };
+}
+
+/** Track F5b: the standable cell nearest a point (its own cell, then the ring round it at the same feet height, a block up or down), undefined when none. */
+export function standableNear(solid: CellSolid, p: Vec3, reach = 2): Vec3 | undefined {
+  const x0 = Math.floor(p.x);
+  const z0 = Math.floor(p.z);
+  const y0 = Math.floor(p.y + 1e-6);
+  for (let r = 0; r <= reach; r++) {
+    for (let dy = 0; dy <= 2; dy++) {
+      for (const y of dy === 0 ? [y0] : [y0 - dy, y0 + dy]) {
+        for (let dx = -r; dx <= r; dx++) {
+          for (let dz = -r; dz <= r; dz++) {
+            if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+            if (standable(solid, x0 + dx, y, z0 + dz)) return { x: x0 + dx, y, z: z0 + dz };
+          }
+        }
+      }
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -354,13 +384,28 @@ export function nextWindow(s: Stretch, from: Vec3, o: WindowOptions): Window | u
   const max = o.maxBlocks ?? WINDOW_BLOCKS;
   const step = o.step ?? WINDOW_STEP;
   const tailMin = o.tailMin ?? UNDER_TAIL_MIN;
-  // the portals still ahead: the first whose plane the body has not passed along the stretch's direction
-  const ahead: Portal[] = [];
-  let passed = true;
-  for (const p of s.portals) {
-    if (passed && !portalAhead(p, from, s)) continue;
-    passed = false;
-    ahead.push(p);
+  // the stops still ahead, in the stretch's order: its portals (the first whose plane the body has not passed along the
+  // stretch's direction) and, Track F5b, its via points (waypoints that are no portal centre: `!fly via` hints), from the
+  // first one still ahead of the body
+  const ahead: ({ kind: 'portal'; portal: Portal; point: Vec3 } | { kind: 'via'; point: Vec3 })[] = [];
+  {
+    const portalOf = (q: Vec3): Portal | undefined => s.portals.find((p) => p.center.x === q.x && p.center.y === q.y && p.center.z === q.z);
+    const inner = s.points.slice(1, -1);
+    const vias = inner.length > 0 && inner.some((q) => !portalOf(q));
+    const stops = vias ? inner.map((q) => ({ portal: portalOf(q), point: q })) : s.portals.map((p) => ({ portal: p, point: p.center }));
+    const k = vias ? firstAhead(stops.map((q) => q.point), from, s.points[0]) : 0;
+    let passed = true;
+    for (const [i, q] of stops.entries()) {
+      if (q.portal) {
+        if (passed && (!portalAhead(q.portal, from, s) || i < k)) continue;
+        passed = false;
+        ahead.push({ kind: 'portal', portal: q.portal, point: q.portal.center });
+      } else {
+        if (passed && i < k) continue;
+        passed = false;
+        ahead.push({ kind: 'via', point: { x: Math.floor(q.point.x) + 0.5, y: Math.floor(q.point.y), z: Math.floor(q.point.z) + 0.5 } });
+      }
+    }
   }
   const anchors: Anchor[] = [];
   let at = { ...from };
@@ -392,15 +437,16 @@ export function nextWindow(s: Stretch, from: Vec3, o: WindowOptions): Window | u
     total += dist(prev, b);
   };
   let firstPortal = true;
-  for (const p of ahead) {
-    const c = p.center;
-    if (total + dist(at, c) > max || !loadedAt(c) || !loadedAt(p.min) || !loadedAt(p.max)) {
+  for (const q of ahead) {
+    const c = q.point;
+    if (total + dist(at, c) > max || !loadedAt(c) || (q.kind === 'portal' && (!loadedAt(q.portal.min) || !loadedAt(q.portal.max)))) {
       cut = true;
       break;
     }
     between(at, c, firstPortal);
     firstPortal = false;
-    anchors.push({ kind: 'portal', goal: portalGoal(p), point: { ...c }, portal: p, s: total });
+    if (q.kind === 'portal') anchors.push({ kind: 'portal', goal: portalGoal(q.portal), point: { ...c }, portal: q.portal, s: total });
+    else anchors.push({ kind: 'via', goal: viaGoal(c), point: { ...c }, s: total });
     at = { ...c };
   }
   let end: Vec3 | undefined;
@@ -432,10 +478,10 @@ export function nextWindow(s: Stretch, from: Vec3, o: WindowOptions): Window | u
     }
   }
   if (cut) {
-    // land on the floor of the last portal reached (dropping anchors until a portal has a standable floor); its box gives way to the landing
+    // land on the floor of the last portal (or via point) reached (dropping anchors until one has a standable floor); its box gives way to the landing
     while (anchors.length) {
       const a = anchors[anchors.length - 1]!;
-      const c = a.kind === 'portal' && a.portal!.axis !== 'y' ? mouthCell(a.portal!, 1, o.solid, 0) : undefined;
+      const c = a.kind === 'portal' && a.portal!.axis !== 'y' ? mouthCell(a.portal!, 1, o.solid, 0) : a.kind === 'via' ? standableNear(o.solid, a.point) : undefined;
       anchors.pop();
       if (c) {
         end = c;
@@ -455,7 +501,36 @@ export function nextWindow(s: Stretch, from: Vec3, o: WindowOptions): Window | u
   }
   if (!Number.isFinite(width)) width = 3;
   if (!Number.isFinite(height)) height = 3;
-  return { from: { ...from }, goals, end: { ...end! }, cut, portals, width, height, margin: boreMargin(width, height), blocks: endS };
+  return { from: { ...from }, goals, end: { ...end! }, cut, portals, width, height, margin: boreMargin(width, height), blocks: endS, goalS: [...anchors.map((a) => a.s), endS] };
+}
+
+/**
+ * Track F5b: the index of the first of `points` (in order) still ahead of `from`: the one nearest `from` counts as passed
+ * when the body is within 2 blocks of it or beyond it along the line from the point before, else it is still ahead;
+ * every point after the nearest is ahead. `points.length` when all are passed.
+ */
+export function firstAhead(points: readonly Vec3[], from: Vec3, before?: Vec3): number {
+  if (!points.length) return 0;
+  let k = 0;
+  let bd = Infinity;
+  for (const [i, q] of points.entries()) {
+    const d = Math.hypot(q.x - from.x, q.z - from.z);
+    if (d < bd) {
+      bd = d;
+      k = i;
+    }
+  }
+  if (bd <= 2) return k + 1;
+  const q = points[k]!;
+  const prev = k > 0 ? points[k - 1]! : before;
+  if (prev) {
+    const ax = q.x - prev.x;
+    const az = q.z - prev.z;
+    const bx = from.x - q.x;
+    const bz = from.z - q.z;
+    if (ax * bx + az * bz > 0) return k + 1; // past it along the line in
+  }
+  return k;
 }
 
 /** The portal's plane is still ahead of `from` along the stretch (the stretch's direction across the portal). */

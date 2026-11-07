@@ -14,8 +14,9 @@ import type { RocketDeps } from '../skills/fly/rocket.ts';
 import type { RouteGrid } from '../skills/fly/route/grid.ts';
 import type { Planner } from '../skills/fly/route/tracker.ts';
 import type { CorridorProvider } from '../skills/fly/corridor/coarse-port.ts';
-import { flyStretch } from '../skills/fly/corridor/drive.ts';
-import { CorridorExecutor, type CorridorReport, type StepOutcome } from '../skills/fly/corridor/executor.ts';
+import { flyStretch, proofOf, windowRequest, type StretchOptions } from '../skills/fly/corridor/drive.ts';
+import { CorridorExecutor, type CorridorReport, type ExecutorOptions, type StepOutcome, type WindowProof } from '../skills/fly/corridor/executor.ts';
+import type { RoutePlan } from '../skills/fly/route/types.ts';
 import { corridorUnderFly, setCorridorAirborne } from '../skills/fly/corridor/registry.ts';
 import type { Window } from '../skills/fly/corridor/stretches.ts';
 import { UnderFlyProcess } from '../tasks/process/corridor.ts';
@@ -58,8 +59,19 @@ export function stopCorridorTrip(task: object): boolean {
   return true;
 }
 
+/**
+ * Track F5b: what the cave style adds to a trip (skills/fly/cave/style.ts): the executor's windows, each window's stretch
+ * options (the margin, the goals a tracker, the rules), and the proof of a window before its takeoff (the plan from
+ * standing in the route worker at the style's budget).
+ */
+export interface TripStyle {
+  executor?: ExecutorOptions;
+  stretch?: (w: Window) => Partial<StretchOptions>;
+  prove?: { maxMs: number; maxNodes: number };
+}
+
 /** Follow corridors from where the bot stands to `goal` (a feet cell). */
-export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvider, goal: Vec3, label: string): Promise<CorridorReport> {
+export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvider, goal: Vec3, label: string, style: TripStyle = {}): Promise<CorridorReport> {
   let stopped = false;
   let under: UnderFlyProcess | undefined;
   trips.set(w.task, {
@@ -85,12 +97,12 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
     }
   };
   setCorridorAirborne(w.task, () => under?.phase === 'flying' && (w.loop.state.gliding || !w.loop.state.onGround));
-  const flyUnder = async (win: Window, l: string): Promise<StepOutcome> => {
+  const flyUnder = async (win: Window, l: string, plan?: RoutePlan): Promise<StepOutcome> => {
     const p = new UnderFlyProcess(win, l, {
       kitOps: w.kitOps,
       inventory: w.inventory,
       memory: w.memory,
-      fly: (x) => flyStretch({ loop: w.loop, queue: w.queue, inventory: w.inventory, hotbar: w.hotbar, entities: w.entities, grid: w.grid, plan: w.plan, ...(w.columnLoaded ? { columnLoaded: w.columnLoaded } : {}), log: w.log }, { goals: x.goals, margin: x.margin }),
+      fly: (x) => flyStretch({ loop: w.loop, queue: w.queue, inventory: w.inventory, hotbar: w.hotbar, entities: w.entities, grid: w.grid, plan: w.plan, ...(w.columnLoaded ? { columnLoaded: w.columnLoaded } : {}), log: w.log }, { goals: x.goals, margin: x.margin, ...(style.stretch?.(x) ?? {}), ...(plan ? { firstPlan: plan } : {}) }),
       airborne: () => w.loop.state.gliding || !w.loop.state.onGround,
       waitTicks: (n) => w.loop.waitTicks(n),
       log: w.log,
@@ -118,10 +130,23 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
     waitLoaded,
     flySky: w.flySky,
     flyUnder,
+    // Track F5b: the proof of a window before its takeoff: the plan from where the body stands, in the route worker
+    ...(style.prove
+      ? {
+          proveWindow: async (win: Window): Promise<WindowProof> => {
+            const from = { ...w.loop.state.pos };
+            const rockets = readKit(w.inventory, w.memory()).rocketsHotbar || readKit(w.inventory, w.memory()).rockets;
+            const req = windowRequest(win, from, rockets, { margin: style.stretch?.(win).margin ?? win.margin, maxMs: style.prove!.maxMs, maxNodes: style.prove!.maxNodes });
+            const p = await w.plan(req);
+            w.log.info(`corridor: the proof of the window to ${Math.floor(win.end.x)} ${Math.floor(win.end.y)} ${Math.floor(win.end.z)}: ${p.complete ? 'complete' : `partial (${p.why ?? '?'})`} ${p.reached}/${win.goals.length} goals, ${p.ticks} ticks, ${p.rockets} rockets, clearance ${p.clearance.toFixed(2)}, ${p.expanded} expanded in ${p.ms.toFixed(0)} ms`);
+            return proofOf(p);
+          },
+        }
+      : {}),
     walk: w.walk,
     stopped: () => stopped,
     log: w.log,
-  }, { ...(corridorUnderFly(w.task) !== undefined ? { underFly: corridorUnderFly(w.task)! } : {}) }); // Track F5a: the cave e2e's measured runs
+  }, { ...(style.executor ?? {}), ...(corridorUnderFly(w.task) !== undefined ? { underFly: corridorUnderFly(w.task)! } : {}) }); // Track F5b style; Track F5a: the cave e2e's measured runs override
   void watch();
   try {
     const r = await ex.run(goal, label);
@@ -138,6 +163,6 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
 /** The chat line of a finished corridor trip. */
 export function corridorEndLine(r: CorridorReport, label: string): string {
   const legs = r.legs.map((l) => `${l.how} ${l.blocks}`).join(', ');
-  const stats = `${r.rockets} rocket${r.rockets === 1 ? '' : 's'}, ${r.cruises} cruise${r.cruises === 1 ? '' : 's'}, ${r.windows} underground, ${r.walks} walk${r.walks === 1 ? '' : 's'}, ${r.replans} re-plan${r.replans === 1 ? '' : 's'}, ${r.seconds} s`;
+  const stats = `${r.rockets} rocket${r.rockets === 1 ? '' : 's'}, ${r.cruises} cruise${r.cruises === 1 ? '' : 's'}, ${r.windows} underground${r.bailouts ? ` (${r.bailouts} bailed out)` : ''}, ${r.walks} walk${r.walks === 1 ? '' : 's'}, ${r.replans} re-plan${r.replans === 1 ? '' : 's'}, ${r.seconds} s`;
   return r.ok ? `arrived at ${label} along a corridor (${legs}); ${stats}` : `fly: the corridor to ${label} failed: ${r.reason ?? '?'} (${legs || 'no legs'}); ${stats}`;
 }

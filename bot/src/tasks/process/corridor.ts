@@ -112,7 +112,7 @@ export class UnderFlyProcess extends BaseProcess {
       );
       // the body may still glide (a failed window): wait for the ground before handing back
       for (let i = 0; i < 200 && this.d.airborne(); i++) await this.d.waitTicks(1);
-      this.end({ ok: r.end === 'done', ...(r.end === 'done' ? {} : { reason: r.end }), at: r.landedAt, rockets: r.rockets, corrections: r.corrections, replans: r.stats.replans, held: r.held, ticks: r.ticks });
+      this.end({ ok: r.end === 'done', ...(r.end === 'done' ? {} : { reason: r.end }), at: r.landedAt, rockets: r.rockets, corrections: r.corrections, replans: r.stats.replans, held: r.held, ticks: r.ticks, ...(r.bailed ? { bailed: true } : {}) });
     } catch (e) {
       this.end({ ok: false, reason: e instanceof Error ? e.message : String(e) });
     }

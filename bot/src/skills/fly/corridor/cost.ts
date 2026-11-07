@@ -84,6 +84,11 @@ function portalWidth(p: Portal): number {
   return p.axis === 'y' ? Math.min(p.clearance.height, p.clearance.width) : p.clearance.width;
 }
 
+/** Track F5b: a y portal at least POWERED_HEIGHT across both ways: a cave's floor or ceiling crossing a section border (a sloping bore), not a shaft. */
+export function wideFace(p: Portal): boolean {
+  return p.axis === 'y' && Math.min(p.clearance.height, p.clearance.width) >= POWERED_HEIGHT;
+}
+
 /** The ticks for `blocks` underground in a bore `height` high and `width` wide (Infinity: not flyable that far). */
 export function tunnelTicks(blocks: number, height: number, width: number): number {
   if (height < GLIDE_HEIGHT || width < 1) return Infinity;
@@ -145,6 +150,8 @@ export class FlightCost implements CoarseCost {
       // a = the upper volume: from a to b is down the shaft (the brake over it, then the hover's sink inside `to`)
       const down = from.id === p.a || (from.id !== p.b && from.min.y >= to.min.y);
       if (a === 'sky' && b === 'sky') return 0; // a sky volume's floor seen from the next section up
+      // Track F5b: a wide y face between two cave volumes is a sloping bore crossing a section border, no shaft: flown through
+      if (a === 'under' && b === 'under' && wideFace(p)) return 0;
       return down ? SHAFT_ENTRY_TICKS : MOUTH_EXIT_TICKS + ROCKET_TICKS;
     }
     if (portalHeight(p) < GLIDE_HEIGHT || portalWidth(p) < 1) return Infinity;
@@ -163,14 +170,16 @@ export class FlightCost implements CoarseCost {
       return blocks * this.unknownCost;
     }
     if (space === 'sky') return skyTicks(blocks);
-    const shaft = p.axis === 'y' && from.id !== to.id;
+    // (Track F5b: a wide y face between two cave volumes is a sloping bore, priced as travel along it below)
+    const shaft = p.axis === 'y' && from.id !== to.id && !(flightSpace(from) === 'under' && wideFace(p));
     if (shaft && (from.id === p.a || (from.id !== p.b && from.min.y >= to.min.y))) {
-      // down a shaft: the sink to its floor, then (rarely) on along a bore at its foot
+      // down a shaft: the sink to its floor, then (rarely) on along a bore at its foot (Track F5b: at the bore's full height,
+      // `headroom.max`: a cave section's least headroom is a nook of 1, which priced every real cave Infinity)
       const height = to.headroom?.max ?? to.max.y - to.min.y + 1;
       const drop = Math.min(blocks, height);
       const along = Math.max(0, blocks - drop);
       const width = Math.min(portalWidth(p), to.minSpan);
-      return drop / SHAFT_SINK + (along > 0 ? tunnelTicks(along, to.headroom?.min ?? height, width) : 0);
+      return drop / SHAFT_SINK + (along > 0 ? tunnelTicks(along, height, width) : 0);
     }
     if (shaft) {
       // up a shaft: the vertical takeoff
