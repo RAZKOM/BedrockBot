@@ -8,6 +8,9 @@
 // Track W2 (docs/pathfinding.md "Digging out of water (Track W2)"): the dig-out pools (DIG_OUT_STATIONS) with the
 // inventory set per run: out over a dirt lip by hand, a stone lip refused by hand (trapped) and dug with a wooden
 // pickaxe, a stair cut up a 3-high bank, a stone-brick rim refused (trapped); per run the blocks broken as well.
+// Track W3 (docs/pathfinding.md "When the plain walk finds no way (Track W3)"): with the dig way on (as the
+// session's setting digWay has it), a 2-high stone step and a 3-high dirt step dug by hand, a 6-high stone plateau
+// dug down by hand with no fall damage, and a block goal in a 1-deep water floor (W3_STATIONS).
 import { writeFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Connection } from '../../src/connection/connection.ts';
@@ -15,7 +18,7 @@ import { silentLogger } from '../../src/log.ts';
 import { FollowController } from '../../src/skills/follow/follow.ts';
 import type { NavGoal } from '../../src/skills/nav/goals.ts';
 import type { Vec3 } from '../../src/world/types.ts';
-import { DIG_OUT_STATIONS, W1_STATIONS, WATER_STATIONS, waterStation, type WaterStationName } from '../../../packs/truth/src/water-layout.ts';
+import { DIG_OUT_STATIONS, W1_STATIONS, W3_STATIONS, WATER_STATIONS, waterStation, type WaterStationName } from '../../../packs/truth/src/water-layout.ts';
 import { E2E_VERSION, bdsTarget } from './env.ts';
 import { E2E, connectBot, describeCorrections, disconnectBot, fmt, sleep, teleport, type MoveBot } from './move-truth.ts';
 import { privateOrigin } from './nav-worlds.ts';
@@ -48,7 +51,9 @@ describe.skipIf(!E2E)('@bds nav: water (Track W1, bds-fly)', () => {
   /** Track W2: the station index of every station (the dig-out pools after the follow pool). */
   const indexOf = (name: WaterStationName): number => {
     const i = (W1_STATIONS as readonly string[]).indexOf(name);
-    return i >= 0 ? i : FOLLOW_AT + 1 + (DIG_OUT_STATIONS as readonly string[]).indexOf(name);
+    if (i >= 0) return i;
+    const d = (DIG_OUT_STATIONS as readonly string[]).indexOf(name);
+    return d >= 0 ? FOLLOW_AT + 1 + d : FOLLOW_AT + 1 + DIG_OUT_STATIONS.length + (W3_STATIONS as readonly string[]).indexOf(name); // Track W3 after them
   };
 
   const water = async (sub: 'build' | 'clear', name: WaterStationName, p: Vec3): Promise<Built> => {
@@ -352,5 +357,63 @@ describe.skipIf(!E2E)('@bds nav: water (Track W1, bds-fly)', () => {
       follow.dispose();
       await conn.disconnectAndFlush('test done');
     }
+  }, 180_000);
+
+  // ---- Track W3: the dig way, a goal cell in water --------------------------------------------------------
+
+  /** A W3 run: the inventory emptied (by hand, as the flight kit has it), the dig way on as the session has it. */
+  async function w3(name: WaterStationName, digWay = true) {
+    const b = built.get(name)!;
+    await kit(null);
+    bot.skills.nav.digWay = () => digWay;
+    // the planner worker, as the session has it (plannerThreads 1): a dig-way search is bigger than the in-thread 40 ms
+    const detach = bot.skills.nav.attachPlanner(bot.world, { threads: () => 1 });
+    await sleep(1500);
+    try {
+      const r = await station(digWay ? name : `${name} (dig way off)`, b.start, b.goal);
+      return { ...r, b };
+    } finally {
+      bot.skills.nav.digWay = () => false;
+      detach();
+    }
+  }
+
+  it('W3 step2: the dig way off: unreachable, nothing broken; on: one block of the 2-high stone step dug by hand, on top', async () => {
+    const off = await w3('step2', false);
+    expect(off.res, off.line).toEqual({ ok: false, reason: 'unreachable' });
+    expect(off.rep.actions.dig, off.line).toBe(0);
+    const r = await w3('step2');
+    expect(r.res, r.line).toEqual({ ok: true });
+    expect(near(r.truth.location, r.b.goal), r.line).toBe(true);
+    expect(r.rep.actions.dig, r.line).toBe(1);
+    expect(r.rep.actions.failed, r.line).toBe(0);
+    expect(r.m.minHealth, r.line).toBe(20);
+  }, 300_000);
+
+  it('W3 step3: a stair of three blocks cut into the 3-high dirt step by hand, on top', async () => {
+    const r = await w3('step3');
+    expect(r.res, r.line).toEqual({ ok: true });
+    expect(near(r.truth.location, r.b.goal), r.line).toBe(true);
+    expect(r.rep.actions.dig, r.line).toBeGreaterThanOrEqual(3);
+    expect(r.rep.actions.dig, r.line).toBeLessThanOrEqual(12);
+    expect(r.m.minHealth, r.line).toBe(20);
+  }, 300_000);
+
+  it('W3 drop6: off a 6-high stone plateau by digging down by hand, no fall damage', async () => {
+    const r = await w3('drop6');
+    expect(r.res, r.line).toEqual({ ok: true });
+    expect(near(r.truth.location, r.b.goal), r.line).toBe(true);
+    expect(r.rep.actions.dig, r.line).toBeGreaterThanOrEqual(3);
+    expect(r.m.minHealth, r.line).toBe(20);
+    expect(r.health, r.line).toBe(20);
+  }, 300_000);
+
+  it('W3 wetGoal: a block goal in a 1-deep water floor: done in that cell', async () => {
+    const r = await w3('wetGoal');
+    expect(r.res, r.line).toEqual({ ok: true });
+    const c = { x: Math.floor(r.truth.location.x), y: Math.floor(r.truth.location.y + 0.01), z: Math.floor(r.truth.location.z) };
+    expect(c, r.line).toEqual(r.b.goal);
+    expect(r.rep.actions.dig, r.line).toBe(0);
+    expect(r.m.minHealth, r.line).toBe(20);
   }, 180_000);
 });

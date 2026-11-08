@@ -655,6 +655,73 @@ the rules refuse anyway); no step dug at the water's own level (that cell is nex
 gravel bank is refused (the gravity rule: the lower block has sand above it); placing a step is not planned (the
 owner's decision).
 
+### When the plain walk finds no way (Track W3)
+
+Decision record: [decisions/0070-water-travel.md](decisions/0070-water-travel.md) "W3: the dig way". The owner's
+requirement: when the bot does not fly a route through the waypoints they set, it must walk it, every leg, and
+unhurt. The owner's cave rebuilt on bds-fly (Track F5a's replica, the fly-cave e2e `walkA`, 22 legs) walked 21 of
+22 legs on main: one leg had no way (a 3-high step: the world cache reads a stair or slab as a full cube, so the
+replica has a stone cube where the cave has a step), one leg cost 8 HP (a planned 12-block drop, though an 8-block
+dug way existed), and every walk leg of a corridor trip whose waypoint stands on a water floor was refused at once
+(`goal cell ... (water) is not standable`: the corridor executor walks to the waypoint's cell, a `block` goal).
+
+**A goal cell in water.** A `block` goal whose cell holds water (a waypoint set standing in shallow water, or a
+point on a pool's floor) is reached at a surface swim node in that cell, or a dive node in it within the air
+budget (the W1 `diveGoal` rule for a `near` goal under the surface); the navigator no longer refuses it as not
+standable (astar.ts `waterBlockGoal`, navigator.ts `waterGoalCell`).
+
+**The levels (`nav/digway.ts`).** A goto plans in levels, each only after the one before it found no way:
+
+| Level | What it plans | When |
+|---|---|---|
+| 0 | the plain walk (no digging unless the goto allows it); falls only where they do not hurt (the long-fall policy's damage budget held at 0, no clutch) | every goto |
+| 1 | the dig way: the moves that dig (`allowBreak`), natural terrain only, at most `DIG_WAY_MAX_BLOCKS = 12` blocks a goto, each priced `DIG_WAY_PENALTY = 100` ticks on top of its break time and the dig penalty, a block the best tool takes longer than `DIG_WAY_MAX_TICKS = 200` ticks to break on the ground refused; still no fall that hurts (a drop is dug down) | the dig way is on (`digWay`), the dig action is wired, the goto does not dig anyway, the budget is not spent |
+| 2 | the falls that hurt, as the long-fall policy allows them (decision 0057), the dig way still open with a hurt priced `DIG_WAY_HP_COST = 400` ticks a HP | the policy has damage to give (health known, above the margin, no hostile near, not burning) |
+
+"Found no way" is an exhaustive `none`, a main search that went nowhere (`no progress possible`, after the wait for
+unloaded world), or a worker's final plan that says `none`. A level change is not a failure (the goto's failure
+count is untouched) and re-plans at once; the retry skip (the same search from the same node) keys on the level. A
+corridor waypoint with no way is the corridor's failure first (Track CB: the walk falls back to the raw goal), not
+a level change. The natural-terrain test is place/scaffold.ts `isNaturalTerrain` (stone, deepslate, dirt, grass,
+sand, gravel, ores ...; never planks, bricks, glass or anything a player builds); every dug cell also passes the
+break rules (`breakBlocker`: the protected area around home, a liquid in or next to it, a gravity block above it,
+containers, beds, doors, the blacklist). Stone by hand is 150 ticks (7.5 s) a block: allowed; obsidian never. The
+dig-out stair of W2 (`F_CUT`) does not count against the budget (it has its own, `DIG_OUT_MAX_STEPS`).
+
+**Settings.** `Navigator.digWay` (`NavigatorOptions.digWay`, default off in the library) is read at every plan; the
+session wires it to the setting `digWay` (walking group, default on: tasks/registry.ts). With it off a goto goes
+from level 0 to level 2: the long falls of decision 0057 as before, but only when no harmless way exists.
+
+Measured on the owner's cave: see the decision's "W3" addendum (the replica's coordinates stay out of the repo).
+The water course has four W3 stations (`W3_STATIONS`, the bot starts on dry ground, the inventory empty, the dig way
+on as the session has it): `step2` (a stone block 2 high, 7 x 9: the goal on its top, one block dug), `step3` (the
+same block of dirt 3 high: a stair of three blocks cut into its face), `drop6` (the start on a stone plateau 6 high:
+every way down is a 6-block fall, 3 HP; the bot digs down instead), `wetGoal` (a 1-deep water floor, 5 x 9, flush
+with the ground: the goal is a water cell on it).
+
+The e2e (`nav-water.test.ts`, the W3 stations of `truth:water` on bds-fly, BDS 1.26.60, 2026-11-07; by hand, the
+planner worker as the session has it):
+
+| Station | Done | Ticks | Blocks broken | Fall damage | Note |
+|---|---|---|---|---|---|
+| `step2`, the dig way off | no, unreachable | 443 | 0 | 0 | the level-0 search ran to the edge of the loaded world (115 365 nodes) |
+| `step2` | yes | 635 | 1 | 0 | about 20 s of it the level-0 search over the open flat world |
+| `step3` | yes | 544 | 3 (the stair) | 0 | |
+| `drop6` | yes | 1021 | 6 (stone by hand, 7.5 s each) | 0 | the 6-block fall (3 HP) never taken |
+| `wetGoal` | yes | 45 | 0 | 0 | done in the water cell, 25 ticks in water |
+
+0 corrections, 0 stuck, health 20 throughout; the W1 and W2 stations in the same suite as before (pool2 120, column
+101, waterfall 136, lip 100, tunnel 118, lipDirt 145, lipStone with a wooden pickaxe 175, bank3 315, the trapped
+pools refused at once with their reasons). Without the worker (the in-thread 40 ms search) the `step3` dig-way plan
+is cut off: a level change waits for a full search (never on the stand-in's cut-off one while the worker starts).
+
+Limits: the budget is 12 blocks a goto (off a tower 20 high the goto still gets down, digging no more than 12, the
+rest a fall at level 2 when the policy allows it); level 0 must find no way before level 1 is planned, so over open
+ground the dig way waits for a level-0 search that runs to its budget (`step2` above: about 20 s); a long walk whose level-1 plan is partial walks it (a segment towards a far goal) and may dig on
+the way; placing blocks is not part of the dig way (the owner's decision for W2 holds: break out, not place); a
+water floor's flowing water is reached diving (a dive node in the goal cell), never swum against a push the
+physics does not model.
+
 ## Following a path
 
 Per tick, from `InputLoop.onBeforeStep` (the command applies to the same tick):

@@ -119,3 +119,55 @@ way out: a swimming body does not climb it on BDS. The owner's decision: break o
 - **Not done**: a dig from under water (every candidate cell is next to water, which the rules refuse); a step at
   the water's own level; a 2-high sand or gravel bank (the gravity rule); placing a step; a setting for `digOut`
   (a navigator field only).
+
+## W3: the dig way
+
+Date: 2026-11-07. Status: accepted (Track W3). Guide: [../pathfinding.md](../pathfinding.md) "When the plain walk
+finds no way (Track W3)". Module: `nav/digway.ts`.
+
+**Context.** The owner's requirement: when the bot does not fly a route through the waypoints they set, it must
+walk it, every leg, and unhurt. Their cave rebuilt on bds-fly (Track F5a's replica, the fly-cave e2e `walkA`, 22
+legs) walked 21 of 22 on main: one leg had no way at all (a 3-high step where the world cache reads a stair or slab
+as a full cube), one cost 8 HP (a planned 12-block drop beside an 8-block dug way), and every walk leg of a corridor
+trip whose waypoint stands on a water floor (route A's legs 3 to 6 in Track F5b's flyA) was refused at once as "not standable": the corridor
+executor walks to the waypoint's cell, a `block` goal, and a water cell had no standing node.
+
+**Decisions.**
+
+1. **A `block` goal in water is reached in the water** (a surface swim node or a dive node in that cell, the W1
+   air rule for a goal under the surface). The waypoint is where the player stood; it is no longer refused.
+2. **A goto plans in levels, each only after the one before found no way** (an exhaustive `none`, a main search
+   that went nowhere, a worker's final `none`): 0 the plain walk with no fall that hurts (the long-fall policy's
+   budget held at 0); 1 the dig way; 2 the falls that hurt as decision 0057 allows them. A level change is no
+   failure; the retry skip keys on the level; a corridor waypoint's failure goes to the corridor first. Rejected:
+   pricing a hurt higher in one search (a fall stays cheaper than a long dug detour at any sane price: the 12-block
+   drop at 400 a HP cost as much as the 8-block dug way, measured offline); refusing every fall that hurts (decision
+   0057's long falls are the only way down some drops, and the owner's `!set longFalls` stays meaningful).
+3. **The dig way digs natural terrain only, within a budget** (`isNaturalTerrain`; at most `DIG_WAY_MAX_BLOCKS` 12 a
+   goto; `DIG_WAY_PENALTY` 100 a block on top of its break time and the dig penalty, so fewer blocks win; a block the
+   best tool takes longer than `DIG_WAY_MAX_TICKS` 200 to break refused: stone by hand allowed, obsidian never).
+   Every dug cell also passes the break rules (the base around home, liquids beside it, gravity blocks, containers).
+   Rejected: `allowBreak` for the whole goto (it would dig through builds and wherever a dug block is shorter);
+   placing (the owner's decision in W2: break out, not place).
+4. **A setting, default on** (`digWay`, walking group; `Navigator.digWay`, off in the library so the unit tests
+   and other callers keep the plain planner unless they ask). The owner asked for walks that always get there; the
+   dig way is the last thing tried, digs at most 12 natural blocks, and never takes a fall that hurts where a
+   harmless or dug way exists.
+
+**Consequences.**
+
+- The owner's cave on bds-fly (fly-cave e2e `walkA`, three full runs, the replica rebuilt before each, the
+  flight kit's inventory: no pickaxe): 22 of 22 legs arrived in every run, 0 damage in every run (main: 21 of 22, 8
+  HP), about 375 s a run. `cave_8 -> cave_9` digs 3 stone blocks by hand at level 1 (37 s; main: unreachable);
+  `cave_14 -> cave_15` digs 8 (about 109 s; main: the 12-block drop, 8 HP); every other leg is planned at level 0
+  as before, the water legs unchanged (the same ticks in water within 10). Route B walked (`walkB`, two runs): all
+  3 legs, `cave_shortcut -> cave_end` with one block dug (main: no way), `cave_5 -> cave_shortcut` the long way
+  round (604 blocks, 166 s; the shortcut itself is flight only).
+
+- bds-fly e2e (`nav-water`, the W3 stations, by hand): a 2-high stone step (1 block dug), a 3-high dirt step (the
+  stair, 3), a 6-high stone plateau dug down (6 blocks, no fall damage), a goal cell in a 1-deep water floor (done
+  there); with the dig way off the 2-high step is unreachable and nothing is broken.
+- A goto over open ground whose only way is dug waits for the level-0 search to run to its budget first (about 20 s
+  on the flat test world).
+- **Not done**: a goto that already has `allowBreak` gets no budget (it digs as before); placing a step; route B's
+  shortcut (flight only, Track F6).

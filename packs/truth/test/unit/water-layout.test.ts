@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DIG_OUT_STATIONS, W1_STATIONS, WATER_STATIONS, waterStation, type WaterStation } from '../../src/water-layout.js';
+import { DIG_OUT_STATIONS, W1_STATIONS, W3_STATIONS, WATER_STATIONS, waterStation, type WaterStation } from '../../src/water-layout.js';
 
 const O = { x: 9600, y: -60, z: 9600 };
 
@@ -52,9 +52,9 @@ describe('water-layout (Track W1): the water course as pure data', () => {
         expect(inBounds(op.from, s) && inBounds(op.to, s), `${name} ${JSON.stringify(op)}`).toBe(true);
       }
       for (const p of [s.start, s.goal, ...(s.deepStart ? [s.deepStart] : []), ...s.kicks.map((k) => k.p), ...s.flows.map((f) => f.p)]) expect(inBounds(p, s), `${name} ${JSON.stringify(p)}`).toBe(true);
-      // the goal is a dry cell to stand in
+      // the goal is a dry cell to stand in (Track W3 wetGoal: a water cell on a floor)
       const b = paint(s);
-      expect(b(s.goal.x, s.goal.y, s.goal.z), name).toBe('air');
+      expect(b(s.goal.x, s.goal.y, s.goal.z), name).toBe(name === 'wetGoal' ? 'water' : 'air');
       expect(b(s.goal.x, s.goal.y + 1, s.goal.z), name).toBe('air');
       expect(solid(b(s.goal.x, s.goal.y - 1, s.goal.z)), name).toBe(true);
     }
@@ -155,7 +155,7 @@ describe('water-layout (Track W1): the water course as pure data', () => {
   });
 
   it('Track W2: the dig-out pools have no way out but over the rim: the start in the water, the rim 2 (bank3: 4) above its top cell all round', () => {
-    expect(WATER_STATIONS).toEqual([...W1_STATIONS, ...DIG_OUT_STATIONS]);
+    expect(WATER_STATIONS).toEqual([...W1_STATIONS, ...DIG_OUT_STATIONS, ...W3_STATIONS]);
     const rim: Record<(typeof DIG_OUT_STATIONS)[number], string> = { lipDirt: 'grass_block', lipStone: 'stone', bank3: 'grass_block', lipBuilt: 'stone_bricks' };
     for (const name of DIG_OUT_STATIONS) {
       const s = waterStation(name, O)!;
@@ -175,5 +175,22 @@ describe('water-layout (Track W1): the water course as pure data', () => {
       }
       expect(s.goal.y, name).toBe(top + 1);
     }
+  });
+
+  it('Track W3: step2, step3 and drop6 have no walk to the goal (a step of 2 or 3, a 6-block drop); wetGoal is reached on foot to its water', () => {
+    expect([...W3_STATIONS]).toEqual(['step2', 'step3', 'drop6', 'wetGoal']);
+    for (const [name, h] of [['step2', 2], ['step3', 3]] as const) {
+      const s = waterStation(name, O)!;
+      expect(s.goal.y - O.y, name).toBe(h);
+      expect(walkable(s, s.start).has(`${s.goal.x},${s.goal.y},${s.goal.z}`), name).toBe(false);
+    }
+    const d = waterStation('drop6', O)!;
+    expect(d.start.y - d.goal.y).toBe(6);
+    const fromTop = walkable(d, d.start);
+    expect([...fromTop].every((k) => Number(k.split(',')[1]) === O.y + 6)).toBe(true); // no step down: every way off is the drop
+    const w = waterStation('wetGoal', O)!;
+    const b = paint(w);
+    expect([b(w.goal.x, w.goal.y - 1, w.goal.z), b(w.goal.x, w.goal.y, w.goal.z), b(w.goal.x, w.goal.y + 1, w.goal.z)]).toEqual(['dirt', 'water', 'air']);
+    expect(b(O.x, O.y - 1, O.z + 3)).toBe('grass_block'); // flush with the ground
   });
 });

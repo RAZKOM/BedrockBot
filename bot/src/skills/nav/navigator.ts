@@ -34,6 +34,7 @@ import { corridorState, fineTarget, touches, waypointGoal, type CorridorState } 
 import type { CoarseLayer, CoarseMode, CorridorStatus } from '../coarse/types.ts'; // Track CB
 import { AirClock, bodyInWater, headUnderWater } from './water.ts'; // Track W1
 import { trappedWhy, waterDigConditions } from './digout.ts'; // Track W2
+import { DIG_WAY_MAX_BLOCKS, fallsHurt, harmlessFalls, lastResortFalls, type DigWayLevel } from './digway.ts'; // Track W3
 
 /** Track R: goto options of the navigator. `blacklist`: consult and feed the failure blacklist (default: `any` and `getToBlock` goals). */
 export type NavGotoOptions = GotoOptions & { blacklist?: boolean };
@@ -121,6 +122,12 @@ export interface NavigatorOptions {
    * dig action). Default true.
    */
   digOut?: boolean;
+  /**
+   * Track W3 (nav/digway.ts): a goto whose plain search finds no way digs one through natural blocks (at most
+   * DIG_WAY_MAX_BLOCKS a goto) before it takes a fall that hurts. Needs the dig action. Default false (the session
+   * reads the `digWay` setting, default on). Whatever this says, no planned fall hurts while a harmless way exists.
+   */
+  digWay?: boolean;
 }
 
 export type ReplanReason = 'start' | 'correction' | 'block' | 'partial' | 'stuck' | 'timeout' | 'action' | 'retry' | 'ahead' | 'upgrade' | 'off_path' | 'overrun' | 'corridor'; // Track BE: off_path, overrun; Track CB: corridor
@@ -319,7 +326,15 @@ interface Active {
    * The start node (cellKey), world generation and planner (worker / in-thread) of the last plan that went
    * nowhere (no_progress, all loaded, its full budget): not searched again unchanged by the same planner.
    */
-  noProgress: { key: number; gen: number; via: Search['via']; wp: number | undefined } | undefined;
+  noProgress: { key: number; gen: number; via: Search['via']; wp: number | undefined; level: DigWayLevel } | undefined;
+  /**
+   * Track W3 (nav/digway.ts): 0 the plain walk with no fall that hurts; 1 the dig way (natural blocks dug, still no
+   * fall that hurts); 2 the falls that hurt (and the dig way when it is on). A level is planned only after the one
+   * before it found no way.
+   */
+  level: DigWayLevel;
+  /** Track W3: blocks the dig way has dug in this goto. */
+  dug: number;
   /** Track BE: ticks in a row the body was 2 to 3 blocks off the path; the tick of a correction / knock / teleport whose path check is pending. */
   ticksAway: number;
   recheck: number | undefined;
@@ -420,6 +435,8 @@ export class Navigator {
   allowGravityAbove = false;
   /** Track W2: dig out of water when no swim exit is worth it (NavigatorOptions.digOut), settable. */
   digOut: boolean;
+  /** Track W3: the dig way when no plain way exists (NavigatorOptions.digWay), read at every plan; settable (the session: setting `digWay`). */
+  digWay: () => boolean;
   /** Track BC: a loaded column's section was re-sent since the last tick: the grid caches are dropped at the top of the next tick. */
   private gridDirty = false;
   /** Track AB: block changes the planner reads (movement signature changed), numbered; worker answers older than a change near their path are dropped. */
@@ -455,6 +472,8 @@ export class Navigator {
     this.cancelDig = opts.cancelDig; // Track BE
     this.toolOk = opts.toolOk; // Track BE
     this.digOut = opts.digOut ?? true; // Track W2
+    const digWay = opts.digWay ?? false; // Track W3
+    this.digWay = () => digWay;
     // Track BC: a re-sent section of a loaded column may carry changes the grid cached the old way (a chunk re-sent
     // after a teleport, a server-side fill): the caches are dropped once, at the top of the next tick (a section
     // event fires per subchunk of every new column too: those have nothing cached)
@@ -765,6 +784,8 @@ export class Navigator {
         lastPos: undefined,
         why: undefined,
         noProgress: undefined,
+        level: 0, // Track W3
+        dug: 0,
         ticksAway: 0, // Track BE
         recheck: undefined,
         corridor: undefined, // Track CB
@@ -939,6 +960,40 @@ export class Navigator {
     if (bodyInWater(this.cellOf, s)) return 'swim';
     if (!s.onGround && this.grid.climbable(Math.floor(s.pos.x), Math.floor(s.pos.y + 1e-3), Math.floor(s.pos.z))) return 'climb';
     return undefined;
+  }
+
+  // ---- Track W3: the levels and the dig way (nav/digway.ts) -------------------------------------------------------
+
+  /** The dig way is open: on, the dig action is wired, the goto does not dig anyway, its budget is not spent. */
+  private digWayOn(a: Active): boolean {
+    return this.digWay() && this.actions.dig !== undefined && !a.opts.allowBreak && a.dug < DIG_WAY_MAX_BLOCKS;
+  }
+
+  /** The plan options of the goto's level (Active.level). */
+  private applyLevel(a: Active): void {
+    const o = a.pathOpts;
+    const dig = a.level > 0 && this.digWayOn(a);
+    if (dig) {
+      o.allowBreak = true;
+      o.digWay = { left: DIG_WAY_MAX_BLOCKS - a.dug };
+    }
+    if (o.falls) o.falls = a.level < 2 ? harmlessFalls(o.falls) : lastResortFalls(o.falls, dig);
+  }
+
+  /**
+   * The goto's level found no way (`why`): plan the next level that can do more (no failure counted): the dig way
+   * when it is open, then the falls that hurt when the long-fall policy has damage to give. Returns true when it will.
+   */
+  private escalate(a: Active, why: string): boolean {
+    const next: DigWayLevel | undefined = a.level === 0 && this.digWayOn(a) ? 1 : a.level < 2 && fallsHurt(this.fallPolicy?.()) ? 2 : undefined;
+    if (next === undefined) return false;
+    a.level = next;
+    a.noProgress = undefined;
+    a.replan = 'retry';
+    a.waitUntil = a.t + 1;
+    const what = next === 1 ? `digging up to ${DIG_WAY_MAX_BLOCKS - a.dug} natural blocks` : 'a fall that hurts';
+    this.log.info(`goto: no way without ${what} (${why}); planning with it`);
+    return true;
   }
 
   /** A failure that re-plans; retreats to the last safe node first when the body is not safe. Returns true when the goto finished. */
@@ -1422,6 +1477,7 @@ export class Navigator {
       ...(o.air !== undefined ? { air: o.air } : {}), // Track W1
       ...(o.digOut ? { digOut: true } : {}), // Track W2
       ...(o.startCut ? { startCut: o.startCut } : {}),
+      ...(o.digWay ? { digWay: { left: o.digWay.left } } : {}), // Track W3
     };
   }
 
@@ -1457,6 +1513,7 @@ export class Navigator {
     a.lastMain = res.status;
     if (res.status === 'none') {
       a.why = this.noPathWhy(res);
+      if (search.wp === undefined && this.escalate(a, a.why)) return true; // Track W3: the interim path is walked until the re-plan
       a.finish({ ok: false, reason: 'unreachable' });
       return false;
     }
@@ -1509,7 +1566,7 @@ export class Navigator {
     // (never for a goal that moves: a runAway threat read again at every plan)
     const np = a.noProgress;
     const wp = this.corridorTarget(a, start)?.index; // Track CB: the same search means the same goal (a corridor waypoint or the raw goal)
-    if (reason === 'retry' && np?.key === cellKey(start.x, start.y, start.z) && np.gen === this.worldGen && np.via === (this.plannerFor() ? 'worker' : 'thread') && np.wp === wp && !movingGoal(a.planGoal)) {
+    if (reason === 'retry' && np?.key === cellKey(start.x, start.y, start.z) && np.gen === this.worldGen && np.via === (this.plannerFor() ? 'worker' : 'thread') && np.wp === wp && np.level === a.level && !movingGoal(a.planGoal)) {
       this.loop.release();
       this.log.info('goto: no retry: the same search from the same node, nothing changed since it went nowhere');
       a.finish({ ok: false, reason: 'unreachable' });
@@ -1526,7 +1583,7 @@ export class Navigator {
         const c = this.grid.cls(gx, gy, gz);
         if (c?.floor && c.top === 1 && !c.fullCube && this.grid.stand(gx, gy + 1, gz) === gy + 1) {
           a.planGoal = { type: 'block', p: { x: gx, y: gy + 1, z: gz } };
-        } else if (!(a.pathOpts.allowBreak || a.pathOpts.allowPlace) && sneakFits(this.grid, gx, gy, gz) !== true) { // Track BC: a cell the body fits sneaking is a goal
+        } else if (!(a.pathOpts.allowBreak || a.pathOpts.allowPlace) && sneakFits(this.grid, gx, gy, gz) !== true && !waterGoalCell(this.grid, gx, gy, gz)) { // Track BC: a cell the body fits sneaking is a goal; Track W3: a water cell is reached swimming or diving there
           a.why = `goal cell ${gx},${gy},${gz} (${c?.name ?? 'unloaded'}) is not standable`;
           a.finish({ ok: false, reason: 'unreachable' });
           return false;
@@ -1535,6 +1592,7 @@ export class Navigator {
     }
     for (const k of this.blacklist.cells('dig')) a.noBreak.add(k); // Track R: blacklisted action cells
     a.pathOpts = this.planOptions(a.opts, a.noBreak);
+    this.applyLevel(a); // Track W3: no fall that hurts before level 2; the dig way from level 1
     // two failed pillar places in one goto: something systematic (reach, the server refusing); plan without pillaring
     if (a.placeFailures >= 2) a.pathOpts.allowPlace = false;
     const noAction = new Set([...this.blacklist.cells('place'), ...this.blacklist.cells('use'), ...a.noAction]);
@@ -1577,6 +1635,11 @@ export class Navigator {
         return false;
       }
       a.why = res.path.length ? this.noPathWhy(res) : 'the start node is not standable';
+      if (res.path.length && this.escalate(a, a.why)) {
+        // Track W3: the next level before giving up
+        this.loop.release();
+        return false;
+      }
       a.finish({ ok: false, reason: 'unreachable' });
       return false;
     }
@@ -1594,12 +1657,17 @@ export class Navigator {
       // the closest reachable node is where we stand: nothing to do but wait for the world to change
       const lim = `${res.limited ? ', search limit hit' : ''}${res.unknown ? ', touched unloaded world' : ''}`;
       const what = res.reason === 'no_progress' ? 'no partial end 5+ blocks from the start' : 'no node closer to the goal than the start'; // Track BA
-      if (this.fail(a, res.digOut && !res.unknown ? trappedWhy(res.digOut, res.expanded) : `no progress possible (${what}; ${res.expanded} expanded${lim})`)) return false; // Track W2
-      // recorded for the retry skip: a worker search, or in-thread with no worker at all (not the 40 ms in-thread
-      // stand-in while the worker starts: its retry runs in the worker with 50 x the budget)
-      const s0 = res.path[0];
+      const why = res.digOut && !res.unknown ? trappedWhy(res.digOut, res.expanded) : `no progress possible (${what}; ${res.expanded} expanded${lim})`; // Track W2
+      // a worker search, or in-thread with no worker at all (not the 40 ms in-thread stand-in while the worker starts:
+      // its retry runs in the worker with 50 x the budget)
       const full = search.via === 'worker' || !this.planner || this.plannerThreads() <= 0;
-      a.noProgress = s0 && res.reason === 'no_progress' && !res.unknown && full ? { key: cellKey(s0.x, s0.y, s0.z), gen: this.worldGen, via: search.via, wp: search.wp } : undefined;
+      // Track W3: the next level before a failure counts (after the wait for unloaded world; never on the stand-in's
+      // cut-off search: the worker's retry may find the way at this level)
+      if (search.wp === undefined && (full || !res.limited) && this.escalate(a, why)) return false;
+      if (this.fail(a, why)) return false;
+      // recorded for the retry skip (a full search only)
+      const s0 = res.path[0];
+      a.noProgress = s0 && res.reason === 'no_progress' && !res.unknown && full ? { key: cellKey(s0.x, s0.y, s0.z), gen: this.worldGen, via: search.via, wp: search.wp, level: a.level } : undefined;
       a.replan = 'retry';
       a.waitUntil = a.t + 20;
       return false;
@@ -1865,6 +1933,7 @@ export class Navigator {
         // is dug next, so a cell a falling stack refilled (allowGravityAbove) is dug again after it settles
         if (res) {
           run.result = undefined;
+          if (a.pathOpts.digWay && node?.move !== 'swimOut' && node?.cut === undefined) a.dug++; // Track W3: the dig way budget
           const p = run.current;
           if (p && this.grid.cls(p.x, p.y + 1, p.z)?.gravity) run.settleUntil = a.t + DIG_SETTLE_TICKS;
           run.current = undefined;
@@ -2064,6 +2133,14 @@ function knockLanding(p: Vec3, v: Vec3): Vec3 {
   }
   const slide = 0.546 / (1 - 0.546);
   return { x: x + vx * slide, y: p.y, z: z + vz * slide };
+}
+
+/** Track W3: a `block` goal in a water cell is reached swimming at its surface or diving in it (a waypoint on a water floor). */
+function waterGoalCell(grid: NavGrid, x: number, y: number, z: number): boolean {
+  const w = grid.swim(x, y, z);
+  if (w !== undefined && Number.isFinite(w)) return true;
+  const d = grid.dive(x, y, z);
+  return d !== undefined && Number.isFinite(d);
 }
 
 /** Track AB: ends the goto's search (a worker search is cancelled there). */

@@ -128,11 +128,14 @@ describe('goto on built terrain (closed loop)', () => {
     expect(run.minFeet).toBeGreaterThanOrEqual(-60.0001);
   });
 
-  it('refuses a goal in water or behind lava as unreachable', async () => {
+  it('reaches a goal cell in water (Track W3: swimming there); refuses a goal behind lava as unreachable', async () => {
     const gen = flatGen();
     gen.fill({ x: -3, y: -61, z: 3 }, { x: 3, y: -61, z: 7 }, 'water');
     const inWater = await runGoto(gen, { x: 0.5, y: -60, z: 0.5 }, { type: 'block', p: { x: 0, y: -61, z: 5 } });
-    expect(inWater.result).toEqual({ ok: false, reason: 'unreachable' });
+    expect(inWater.result).toEqual({ ok: true }); // Track W3: a waypoint set standing in water (was unreachable before)
+    expect(Math.floor(inWater.pos.x), JSON.stringify(inWater.pos)).toBe(0);
+    expect(Math.floor(inWater.pos.z), JSON.stringify(inWater.pos)).toBe(5);
+    expect(inWater.pos.y).toBeLessThan(-60);
     // an island ringed by lava
     const lava = flatGen({ x: -16, y: -64, z: -16 }, { x: 32, y: 24, z: 32 });
     lava.fill({ x: 4, y: -61, z: 4 }, { x: 10, y: -61, z: 10 }, 'lava');

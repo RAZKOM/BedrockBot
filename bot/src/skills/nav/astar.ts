@@ -55,6 +55,7 @@ import type { FallPolicy } from '../fall/policy.ts';
 import { CROSS_BLOCKED, CROSS_CLEAR, CROSS_TOGGLE, VARIETY_CLIMBER, VARIETY_LADDER, VARIETY_TRAPDOOR, VARIETY_WATER, cellKey, type NavGrid } from './grid.ts';
 import { airBudget, diveGoalBudget, underSurface } from './water.ts'; // Track W1
 import { DIG_OUT_MAX_STEPS, DIG_OUT_PENALTY, DigOutRefusals, digOutStep, type DigOutReport } from './digout.ts'; // Track W2
+import { DIG_WAY_PENALTY, digWayBreakTicks, type DigWay } from './digway.ts'; // Track W3
 
 export type { PathCosts } from './costs.ts';
 export { DEFAULT_COSTS } from './costs.ts';
@@ -186,6 +187,11 @@ export interface PathOptions {
   digOut?: boolean;
   /** Track W2: the start node is on a dig-out staircase (its PathNode.cut in the path walked so far). */
   startCut?: number;
+  /**
+   * Track W3 (nav/digway.ts): the dig way (level 1) of a goto whose plain search found no way: the moves that dig (needs
+   * `allowBreak` too), natural terrain only, at most `left` blocks in this plan, each priced DIG_WAY_PENALTY more.
+   */
+  digWay?: DigWay;
 }
 
 /** Falls up to this height onto farmland never trampled it (measured, docs/farming.md). */
@@ -343,6 +349,8 @@ class Nodes {
   wet = new Float64Array(4096);
   /** Track W2: the steps of a dig-out staircase up to the node (0 off the cut). */
   cut = new Uint8Array(4096);
+  /** Track W3: blocks the dig way (PathOptions.digWay) has dug up to the node. */
+  dug = new Uint8Array(4096);
   parent = new Int32Array(4096);
   move = new Uint8Array(4096);
   flags = new Uint8Array(4096);
@@ -363,6 +371,7 @@ class Nodes {
       this.trap = grown(this.trap, (k) => new Float64Array(k));
       this.wet = grown(this.wet, (k) => new Float64Array(k));
       this.cut = grown(this.cut, (k) => new Uint8Array(k));
+      this.dug = grown(this.dug, (k) => new Uint8Array(k));
       this.parent = grown(this.parent, (k) => new Int32Array(k));
       this.move = grown(this.move, (k) => new Uint8Array(k));
       this.flags = grown(this.flags, (k) => new Uint8Array(k));
@@ -378,6 +387,7 @@ class Nodes {
     this.trap[i] = 0;
     this.wet[i] = 0;
     this.cut[i] = 0;
+    this.dug[i] = 0;
     this.parent[i] = -1;
     this.flags[i] = 0;
     this.closed[i] = 0;
@@ -435,7 +445,8 @@ export class PathSearch {
   private airLimit: number;
   /**
    * Track W1: a `near` goal around a point in water (the followed player swimming): a surface swim node within
-   * its radius reaches it (the body treads water there); other goals are reached standing only.
+   * its radius reaches it (the body treads water there); Track W3: a `block` goal whose cell holds water too (and a
+   * dive node in that cell); other goals are reached standing only.
    */
   private readonly waterGoal: boolean;
   /**
@@ -459,11 +470,13 @@ export class PathSearch {
     this.maxNodes = opts.maxNodes ?? 40_000;
     this.maxMs = opts.maxMs ?? 250;
     this.breakTicksOf = opts.breakTicks ?? handBreakTicks;
+    if (opts.digWay) this.breakTicksOf = digWayBreakTicks(this.breakTicksOf); // Track W3: natural terrain only, no slow blocks
     this.startY = start.y;
     this.goalMinY = goalMinY(goal);
     this.airLimit = airBudget(opts.air, false); // Track W1 (a start under water: below)
-    this.waterGoal = goal.type === 'near' && this.moveOn('swim') && waterNear(grid, goal.p);
-    this.diveGoal = this.waterGoal && this.diveOn() && goal.type === 'near' && underSurface((x, y, z) => grid.cls(x, y, z), goal.p);
+    const blockWet = goal.type === 'block' && waterBlockGoal(grid, goal.p); // Track W3: a waypoint on a water floor
+    this.waterGoal = this.moveOn('swim') && ((goal.type === 'near' && waterNear(grid, goal.p)) || blockWet);
+    this.diveGoal = this.waterGoal && this.diveOn() && (blockWet || (goal.type === 'near' && underSurface((x, y, z) => grid.cls(x, y, z), goal.p)));
     this.diveGoalLimit = diveGoalBudget(opts.air, false);
     // Track BC: the break rules and costs every move that digs applies (baritone/moves.ts). Track W2: also for the
     // dig-out moves alone (`digOut` without `allowBreak`)
@@ -670,6 +683,14 @@ export class PathSearch {
     const k = cellKey(x, y, z);
     let i = this.index.get(k);
     if (i !== undefined && nodes.closed[i]) return;
+    // Track W3: the dig way digs at most its budget of blocks, each priced DIG_WAY_PENALTY more (not the W2 dig-out
+    // steps: they have their own price)
+    let dug = nodes.dug[from]!;
+    if (this.opts.digWay && act?.dig && (flags & F_CUT) === 0) {
+      dug += act.dig.length;
+      if (dug > this.opts.digWay.left) return;
+      extra += DIG_WAY_PENALTY * act.dig.length;
+    }
     const ticks = base * grid.factor(x, y, z, feet);
     let cost = ticks + extra + trap;
     if (this.costs.underground > 0 && grid.underground(x, z, feet)) cost += this.costs.underground;
@@ -695,6 +716,7 @@ export class PathSearch {
     nodes.trap[i] = nodes.trap[from]! + trap;
     nodes.wet[i] = wet; // Track W1
     nodes.cut[i] = cut; // Track W2
+    nodes.dug[i] = dug; // Track W3
     nodes.parent[i] = from;
     nodes.move[i] = move;
     nodes.flags[i] = flags;
@@ -1598,6 +1620,11 @@ export class PathSearch {
 /** Track BD review: the cell (x, y, z) lies inside the base (`protectedArea`, the break rules' same distance test, helper.ts). */
 function inArea(area: PathOptions['protectedArea'], x: number, y: number, z: number): boolean {
   return !!area && Math.hypot(x + 0.5 - area.x, y + 0.5 - area.y, z + 0.5 - area.z) <= area.r;
+}
+
+/** Track W3: the cell of a `block` goal holds water (a waypoint on a water floor or in a pool): reached swimming or diving there. */
+function waterBlockGoal(grid: NavGrid, p: Vec3): boolean {
+  return grid.cls(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z))?.liquid === 'water';
 }
 
 /** Track W1: water in the cell of point p or the one under it (a `near` goal around a swimming player). */

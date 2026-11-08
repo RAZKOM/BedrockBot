@@ -15,12 +15,13 @@
 // the coarse layer over that cache attached to the navigator (index.ts's wiring), FlightCost registered.
 //   tripC  `!fly` from the home pad to cave_start (the entrance by cave_2): today's live behaviour (UNDER_FLY as is)
 //   walkA  route A walked stop to stop (`skills.goto` near each waypoint); a failed leg is teleported over
+//   walkB  route B walked the same way (Track W3: as far as walking goes; the shortcut itself is flight only)
 //   flyA / flyB  every leg of routes A and B as a corridor trip with the underground stretches flown (underFly on)
 // Scored per run (the table goes to the log, docs/flight.md has the measured ones): arrived, the distance left, the
 // time, rockets, damage (truth hurtlog), corrections, re-plans, corridor plans / windows / walks, ticks in water.
 // Gated: the build, the fly-over and every run completing. The numbers themselves are measured, not gated.
 // Env: FLY_BDS_HOST / FLY_BDS_PORT / FLY_BDS_CONTAINER (fly-truth.ts; run with 19210 / bds-fly2), FLY_CAVE_AT="x,z",
-// FLY_CAVE_REUSE=1, FLY_CAVE_ONLY=tripC,walkA,flyA,flyB, FLY_CAVE_LEGS=3,4 (the legs of A and B by index), FLY_CAVE_STYLE=1 (Track F5b's cave style on the flown runs),
+// FLY_CAVE_REUSE=1, FLY_CAVE_ONLY=tripC,walkA,walkB,flyA,flyB, FLY_CAVE_LEGS=3,4 (the legs of A and B by index, walked or flown), FLY_CAVE_STYLE=1 (Track F5b's cave style on the flown runs),
 // FLY_CAVE_LEG_S (the time a run may take, default 180), FLY_CAVE_REPORT=file (the table written there too), FLY_VERBOSE=1.
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -256,17 +257,25 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
     expect(end.length).toBeGreaterThan(0);
   }, 900_000);
 
-  it.skipIf(!want('walkA'))('walk A: route A walked stop to stop (a failed leg teleported over)', async () => {
+  /**
+   * A route walked stop to stop (`skills.goto` near each waypoint); a failed leg, or the leg after one FLY_CAVE_LEGS
+   * skips, starts from its own stop (teleported). Track W3: the legs filter, route B, the nav log of each leg in the notes.
+   */
+  async function walkRoute(run: string, legs: CaveLeg[]): Promise<number> {
     const b = bot!;
     const mob = b.built.mobility!;
-    await standAt(b, legsA[0]!.from);
-    let here = true; // the body is at the leg's start
+    let here = false; // the body is at the leg's start
     let done = 0;
-    for (let i = 0; i < legsA.length; i++) {
-      const leg = legsA[i]!;
+    for (let i = 0; i < legs.length; i++) {
+      const leg = legs[i]!;
+      if (!wantLeg(i)) {
+        here = false;
+        continue;
+      }
       if (!here) await standAt(b, leg.from);
       const goal = centre(leg.to);
       const since = await b.truth.now();
+      const n0 = b.logs.length;
       const w0 = water;
       const t0 = performance.now();
       const r = await mob.skills.goto({ type: 'near', p: goal, r: 1.5 }, { timeoutTicks: Math.round(LEG_MS / 50) });
@@ -276,11 +285,23 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
       const dmg = await b.truth.damageSince(since, b.name);
       const ok = r.ok && off < 2.5;
       here = ok;
-      rows.push({ run: 'walkA', leg: `${i} ${leg.name}`, ok, off, seconds, rockets: 0, damage: dmg.total, corrections: -1, replans: -1, plans: -1, windows: 0, walks: 1, water: water - w0, how: r.ok ? 'walk' : `walk: ${r.reason}${r.note ? ` (${r.note})` : ''}` });
+      rows.push({ run, leg: `${i} ${leg.name}`, ok, off, seconds, rockets: 0, damage: dmg.total, corrections: -1, replans: -1, plans: -1, windows: 0, walks: 1, water: water - w0, how: r.ok ? 'walk' : `walk: ${r.reason}${r.note ? ` (${r.note})` : ''}` });
+      const logs = b.logs.slice(n0).map((l) => l.replace(/^\S+ (info|warn|error) /, ''));
+      notes.push(`${run} ${i} ${leg.name}: ${ok ? 'arrived' : 'failed'}, ${dmg.total} damage\n    ${logs.slice(0, 60).map((l) => l.slice(0, 400)).join('\n    ')}`);
       done++;
     }
-    expect(done).toBe(legsA.length);
+    return done;
+  }
+
+  it.skipIf(!want('walkA'))('walk A: route A walked stop to stop (a failed leg teleported over)', async () => {
+    const done = await walkRoute('walkA', legsA);
+    expect(done).toBe(legsA.filter((_, i) => wantLeg(i)).length);
   }, 7_200_000);
+
+  it.skipIf(!want('walkB'))('walk B: route B walked stop to stop, as far as walking goes (the shortcut is flight only; measured)', async () => {
+    const done = await walkRoute('walkB', legsB);
+    expect(done).toBe(legsB.filter((_, i) => wantLeg(i)).length);
+  }, 1_800_000);
 
   /** One leg as a corridor trip with the underground stretches flown. */
   async function flyLeg(run: string, i: number, leg: CaveLeg): Promise<void> {

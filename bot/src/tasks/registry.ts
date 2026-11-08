@@ -177,6 +177,7 @@ export const afkTask: TaskDefinition = {
         return h && r > 0 ? { x: h.x + 0.5, y: h.y, z: h.z + 0.5, r } : undefined;
       });
       mob.skills.nav.setDigPenalty(() => settings.get('digPenalty'));
+      mob.skills.nav.digWay = () => settings.get('digWay'); // Track W3: a walk with no plain way digs one (natural blocks, never in the base)
       mob.skills.throwawayReserve = () => settings.get('throwawayMin'); // decision 0051: the scaffold lends it only until a block is left behind
       // Track BI: long falls and the water bucket clutch; no clutch water is ever planned inside the base
       mob.skills.falls.settings = () => ({ longFalls: settings.get('longFalls'), fallMargin: settings.get('fallMargin'), clutch: settings.get('clutch'), clutchMaxDrop: settings.get('clutchMaxDrop') });

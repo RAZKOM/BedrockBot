@@ -25,6 +25,15 @@
 //   bank3      the pit in a dirt mound 2 high on the ground: the bank 3 blocks above the water's top cell (a stair cut)
 //   lipBuilt   the lip pit with a stone-brick rim (a built block: never dug; the bot reports it is trapped)
 //
+// Track W3 (docs/pathfinding.md "Water (Track W1)", its W3 part): a walk through waypoints a player set, where the
+// plain walk finds no way (W3_STATIONS; the bot starts on dry ground):
+//   step2      a stone block 2 high (7 x 9): the goal on its top (a step too high to jump: one block dug)
+//   step3      the same block of dirt 3 high (a stair cut into its face: three blocks dug)
+//   drop6      the start on a stone plateau 6 high (7 x 9), the goal on the ground beyond it: every way down is a
+//              6-block fall that hurts (3 HP); the bot digs down instead
+//   wetGoal    a 1-deep water floor (5 x 9) flush with the ground: the goal cell is a water cell on that floor (a
+//              waypoint set standing in shallow water)
+//
 // Water placed by a fill may or may not flow on BDS 1.26.60 (measured: a lone source over air stayed put for 160
 // ticks, a source with a side open to air beside other fresh water flowed out at once), so no station has a water
 // face towards air but at the top of its water: the pools and the column are sources, level, and stay put. The
@@ -75,7 +84,9 @@ export interface WaterStation {
 export const W1_STATIONS = ['pool2', 'pool6', 'column', 'waterfall', 'lip', 'tunnel'] as const;
 /** Track W2: pools with no swim exit, the start in the water (out by a dug step or a stair, or trapped: `lipBuilt`). */
 export const DIG_OUT_STATIONS = ['lipDirt', 'lipStone', 'bank3', 'lipBuilt'] as const;
-export const WATER_STATIONS = [...W1_STATIONS, ...DIG_OUT_STATIONS] as const;
+/** Track W3: a walk with no plain way (dug through or down), and a goal cell in water. */
+export const W3_STATIONS = ['step2', 'step3', 'drop6', 'wetGoal'] as const;
+export const WATER_STATIONS = [...W1_STATIONS, ...DIG_OUT_STATIONS, ...W3_STATIONS] as const;
 export type WaterStationName = (typeof WATER_STATIONS)[number];
 
 const v = (x: number, y: number, z: number): Vec3 => ({ x, y, z });
@@ -173,6 +184,22 @@ export function waterStation(name: string, origin: Vec3): WaterStation | undefin
       surfaceY = y - 2;
       break;
     }
+    case 'step2':
+    case 'step3': {
+      const h = name === 'step2' ? 2 : 3;
+      put(v(x - 3, y, z + 6), v(x + 3, y + h - 1, z + 14), name === 'step2' ? 'stone' : 'dirt');
+      goal = v(x, y + h, z + 10);
+      break;
+    }
+    case 'drop6':
+      put(v(x - 3, y, z), v(x + 3, y + 5, z + 8), 'stone'); // the plateau, its top block at y + 5 (feet y + 6)
+      start = v(x + 0.5, y + 6, z + 4.5);
+      goal = v(x, y, z + 15);
+      break;
+    case 'wetGoal':
+      put(v(x - 2, y - 1, z + 4), v(x + 2, y - 1, z + 12), 'water'); // in place of the grass: the floor is the dirt under it
+      goal = v(x, y - 1, z + 8);
+      break;
     case 'tunnel':
       put(v(x - 2, y - 3, z), v(x + 2, y + 3, z + 19), 'stone'); // the hull
       put(v(x - 1, y, z + 1), v(x + 1, y + 2, z + 6), 'air'); // room A

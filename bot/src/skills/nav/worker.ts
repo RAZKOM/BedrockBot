@@ -68,6 +68,8 @@ export interface WorkerPlanOptions {
   /** Track W2: dig out of water (PathOptions.digOut) and the start's dig-out stair step (PathOptions.startCut). */
   digOut?: boolean;
   startCut?: number;
+  /** Track W3: the dig way budget (PathOptions.digWay). */
+  digWay?: { left: number };
 }
 
 /** What the client reads from the world model (`World` satisfies it). */
@@ -749,6 +751,7 @@ function workerOptions(o: WorkerPlanOptions): PathOptions {
     ...(o.air !== undefined ? { air: o.air } : {}), // Track W1
     ...(o.digOut ? { digOut: true } : {}), // Track W2
     ...(o.startCut ? { startCut: o.startCut } : {}),
+    ...(o.digWay ? { digWay: { left: o.digWay.left } } : {}), // Track W3
   };
 }
 
