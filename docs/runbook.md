@@ -662,6 +662,92 @@ Write the result into PLAN.md fact 8b and this runbook.
 - Whether an established NetherNet session could survive a signalling-service restart (today
   bedrock-protocol ends it; reconnect covers it in about 1 s).
 
+### The Realm as a test server (Track T1)
+
+Decision 0075. With cheats on and the bot an operator, the bot runs test trips again and again by itself: it teleports
+to the start, gives itself its kit back, heals, runs the trip as you would type it, records the run, and after a death
+respawns, re-kits and teleports back. Everything is behind the `testMode` setting (default off); with it off nothing
+changes and no command is ever sent.
+
+**What you turn on, in this order** (Realm settings in your client, as the Realm's owner):
+
+1. **Cheats** ("Activate cheats" in the world settings). Lets operators run commands such as `/tp`, `/give`, `/effect`
+   and `/replaceitem`. **It disables achievements in that world for good**, also for you, also after cheats are off
+   again (the server then reports `achievements_disabled`).
+2. **Make the bot's account an operator** (Realm settings, Members, the bot's account: Operator). Without it every
+   command is refused with `commands.generic.permission.selector`; the bot says "the test harness needs cheats on and
+   the bot op'd" and sends nothing. Taking it away while the bot is online works at once (the server tells the bot).
+3. **keepInventory** (`/gamerule keepinventory true`, or "Keep inventory" in the world settings). Not required (the
+   harness gives the kit back after a death either way), but it keeps the bot's real items (enchanted ones, the
+   fireworks box) and stops a pile of dropped items at every death spot.
+4. In game: `!test op` (the bot probes with `/testfor @s` and says `op: commands work (...)`), then
+   `!set testMode on`, then a short run: `!test goto <x y z> from <x y z>` over 30 blocks of flat ground.
+
+To stop: `!test stop` (ends the run in progress), `!set testMode off`. The bot stays an operator until you change it.
+
+**Commands** (owner only, like every command):
+
+| Command | What it does |
+|---|---|
+| `!test` / `!test status` | `test: testMode on; op: commands work (...); test cave: run 2/5, 1 arrived so far` |
+| `!test op` | probe the rights now |
+| `!test kit` | the kit the runs restore: `test kit (start): diamond_chestplate @chest, elytra, firework_rocket 64, ...` |
+| `!test cavestart [n] [from <x y z \| wp>]` | n runs (default 1, up to 50): /tp to the start (default: where the bot stands now), `!fly cave_start` |
+| `!test cave [n]` | /tp to the `cave_start` waypoint, `!fly cave_end` |
+| `!test route <prefix> [n] [noshortcut]` | /tp to `<prefix>_start`, `!fly route <prefix> [noshortcut]` (docs/flight.md "Cave flight") |
+| `!test goto <x y z \| wp> from <x y z \| wp> [n]` | /tp to the start, `!goto <goal>` (walks, or flies over `flyMin` with `autoFly`) |
+| `!test stop` | end the run in progress (the flight lands first) and start no more |
+
+Cave flight runs need `!set flyCave on` (else the underground is walked; the start line says so). Each run ends at the
+trip's own end line (`arrived at ...`, `landed at ...`, `fly: the corridor to ... failed ...`) once the bot is idle; a
+chat line per run (`test cave 2/5: arrived in 41 s; damage 2.5, flown 82%, 1 bail-out`) and a summary at the end
+(`test cave: 4/5 arrived, 44.2 s a run, damage 6.5, 1 death, flown 79%, 2 bail-outs; ends arrived 4, died 1`).
+
+**Before every run**: `/effect instant_health` and `/effect saturation` if health or food is short; the kit back
+(`/replaceitem` into an empty armour or offhand slot, `/give` for the rest; a worn slot holding something else, such as
+the elytra in place of the chestplate, is never overwritten); a fresh elytra in the slot of one with fewer than
+100 uses; `/tp` to the start, then the wait for the chunks and the ground. **In a run**: `/effect instant_health`
+below 14 health; less than 2 blocks of progress for 60 s ends the run as `stuck` and teleports back; 600 s is a run's
+time limit (these four are constants, `TEST_LIMITS` in skills/test/series.ts: the panel budgets leave no room for
+more setting rows). **After a death** (in testMode): the respawn as always, then the kit back
+and the /tp to the run's start; while a series runs the walk home after the respawn is skipped. Outside a series a
+death gets the kit back only (the walk home goes as before).
+
+**Settings** (`!help settings`, group `test`): `testMode` (off), `testKit` (`start`: what the bot carried when the
+series began, shulker boxes left out; `file`: `tests/kit.json`; or a list such as
+`!set testKit diamond_chestplate @chest, elytra, firework_rocket 64, cooked_beef 32`).
+
+**Files** on the bot's machine, in `tests/` next to `settings.json` (`~/.bedrockbot/tests/` on the Mac,
+`%LOCALAPPDATA%\bedrockbot\tests\` on Windows; env `BEDROCKBOT_TESTS_DIR` overrides): one file per series,
+`<yyyymmdd-hhmmss>-<series>.jsonl`, one JSON line per run (`run`, `of`, `command`, `start`, `goal`, `seconds`,
+`arrived`, `end`: arrived / failed / died / stuck / timeout / stopped / setup / quiet, `reason`, `endDistance`,
+`damage`, `deaths`, `heals`, `pathBlocks`, `flownBlocks`, `flownShare`, `bailouts`, `rockets`, `restore`, the last
+replies) and a `summary` line. `kit.json` (for `testKit file`): `["diamond_chestplate @chest", "elytra",
+"firework_rocket 64"]`. Every command the bot sends and its answer is in the log (`[test] command /tp @s ...: ok
+commands.tp.success.coordinates (82 ms)`); the server's permission values are logged at every spawn (`[test] ops:
+start_game permission operator, commands operator, cheats on, achievements off`).
+
+**Measured on BDS 1.26.60.6** (bds-fly3, allow-cheats on, 2026-11-08; the Realm's values are logged at its next spawn):
+
+| | operator | after a console `deop` (online) |
+|---|---|---|
+| start_game | `permission_level` operator, `enable_commands` true, `achievements_disabled` true; then `set_commands_enabled` true | (no new start_game) |
+| update_abilities | operator / operator (twice at login) | member / normal, within 0.2 s (and operator again on `op`) |
+| available_commands | 82 commands with give, effect, replaceitem, testfor, kill (`tp` is an alias of `teleport`) | (not resent) |
+| `/testfor @s` | 1, `commands.testfor.success` | 0, `commands.generic.permission.selector` |
+| `/tp @s x y z`, `/give`, `/replaceitem`, `/effect`, `/clear` | 1, `commands.tp.success.coordinates`, `commands.give.success`, ... | 0, `commands.generic.permission.selector` |
+| `/me`, `/tellraw` | `/me` comes back as chat, `/tellraw` as a `json_whisper` text; neither sends a command_output | `/me` still works |
+
+Answers come 40 to 110 ms after the request; an unknown command answers `commands.generic.unknown`, bad arguments
+`commands.generic.syntax`. An offline-mode BDS has no per-player permission file (`deop` of a player who is offline
+does not persist; the e2e de-ops the bot while it is online).
+
+**Tests**: `pnpm --filter bot exec vitest run --project unit test-` (op detection, command results, the kit, the
+recovery, the run loop, `!test` on the afk registry) and on bds-fly3
+`BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e test-harness --silent=false` (`T1_BDS_PORT` 19212,
+`T1_BDS_CONTAINER` bds-fly3; about 1 min): op detected, no op refused cleanly (also after a death), `!test goto ... 3`
+with tp and re-kit between the runs, a forced death recovered.
+
 ## Operations
 
 ### Health endpoint and metrics (task 5.4)

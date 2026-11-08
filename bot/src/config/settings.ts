@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { isInside, REPO_ROOT } from '../connection/realm.ts';
 import { silentLogger, type Logger } from '../log.ts';
+import { formatKit, KitError, parseKitText } from '../skills/test/kit.ts'; // Track T1
 
 interface BoolDef {
   kind: 'boolean';
@@ -176,8 +177,27 @@ export const SETTING_DEFS = {
   flyRecheckBlocks: { kind: 'number', default: 24, min: 4, max: 256, integer: true, unit: 'blocks', description: 'flight: a long walk looks for a takeoff again every this many blocks walked (0 checks while the goal is under flyMin)' }, // Track BL
   flyPreferRatio: { kind: 'number', default: 1.5, min: 1, max: 10, description: 'flight: walk to a takeoff site and fly when the whole walk would take this many times longer' }, // Track BL
   flySiteSearch: { kind: 'number', default: 48, min: 0, max: 96, integer: true, unit: 'blocks', description: 'flight: look this far around for a takeoff site to walk to when the takeoff here is refused (0 = never)' }, // Track BL
+  // Track T1: the server as a test bench (docs/runbook.md "The Realm as a test server", ADR 0075)
+  // Two rows only: the panel state budgets (panel-inventory.test.ts) leave no room for more; the run limits are
+  // constants (skills/test/series.ts TEST_LIMITS).
+  testMode: { kind: 'boolean', default: false, description: '!test runs and the recovery after a death; needs cheats on and the bot op\'d (off: no command is sent)' },
+  testKit: { kind: 'text', default: 'start', values: 'start|file|item [n] [@slot], ...', parse: (raw: string) => parseTestKitSetting(raw), description: 'what each test run restores: start (carried at the series start), file (tests/kit.json) or a list' },
 
 } as const satisfies Record<string, SettingDef>;
+
+/** Track T1: `start`, `file` or a kit list (skills/test/kit.ts parseKitText), normalised. */
+export function parseTestKitSetting(raw: string): string {
+  const s = raw.trim().toLowerCase();
+  if (s === '' || s === 'start' || s === 'default') return 'start';
+  if (s === 'file') return 'file';
+  try {
+    const kit = parseKitText(s);
+    if (!kit.length) throw new KitError('empty');
+    return formatKit(kit);
+  } catch (e) {
+    throw new SettingError(`testKit must be start, file or "item [n] [@slot], ..." (${e instanceof Error ? e.message : String(e)}), got "${raw}"`);
+  }
+}
 
 export type SettingKey = keyof typeof SETTING_DEFS;
 export type SettingValue<K extends SettingKey> = (typeof SETTING_DEFS)[K] extends { kind: 'boolean' } ? boolean : (typeof SETTING_DEFS)[K] extends { kind: 'text' } ? string : number; // Track AF: text

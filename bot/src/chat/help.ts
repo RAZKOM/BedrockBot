@@ -85,6 +85,7 @@ export const SETTING_GROUPS: readonly (readonly [string, readonly string[]])[] =
   ['flight', ['autoFly', 'flyMin', 'flyClearance', 'flyCruise', 'flyGoArounds', 'fireworksMin', 'flyTakeoffRun', 'flyRetryBlocks', 'flyMaxClimb', 'flyMargin', 'flyLandSearch', 'flyLandProbes', 'flyHoldS', 'flyHeadroom', 'flyOverhangDepth', 'flySneakLand', 'flyLedgeTakeoff', 'flyVerticalTakeoff', 'glideDown', 'glideDownMinDrop', 'glideDownMinDistance', 'flyHighCruise', 'flyDescent', 'flyLandStyle', 'flyRoute', 'flyCorridor', 'flyCave', 'flyRecheckBlocks', 'flyPreferRatio', 'flySiteSearch']],
   ['chat', ['nlConfirm', 'chatColor', 'chatLines', 'chatVia', 'lastWelcomed']],
   ['system', ['nudgeInterval', 'eventsDays', 'eventsMaxMb']],
+  ['test', ['testMode', 'testKit']], // Track T1 (ADR 0075)
 ];
 
 /** [group, keys] for every setting key that exists (unknown names dropped, the rest in `other`). */

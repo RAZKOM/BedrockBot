@@ -373,7 +373,7 @@ describe('chat style on the afk registry (docs/chat-style.md)', () => {
     for (const n of chat.commandNames()) expect(allText, n).toContain(`!${n}`);
 
     const sets = chat.helpReplies(['settings']);
-    expect(sets.length).toBeLessThanOrEqual(7); // Track BH: four glide / ledge settings took the list to 7 messages
+    expect(sets.length).toBeLessThanOrEqual(8); // Track BH: four glide / ledge settings took the list to 7 messages; Track T1: the test group (testMode, testKit) to 8
     for (const m of sets) expect(wireSize(m)).toBeLessThanOrEqual(MAX_WIRE);
     const setsText = sets.map(strip).join('\n');
     for (const k of Object.keys(SETTING_DEFS)) expect(setsText, k).toContain(`${k} `);

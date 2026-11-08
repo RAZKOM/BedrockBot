@@ -4,7 +4,8 @@
 //
 // Request ids carry a random per-instance tag: truth replies are broadcast to every player on the
 // server, so two clients with plain sequence ids would answer each other's requests.
-import { randomInt, randomUUID } from 'node:crypto';
+import { randomInt } from 'node:crypto';
+import { commandRequestPacket } from '../chat/route.ts';
 import { ReplyParser, textOf, type Reply } from '../../../packs/truth/src/protocol.ts';
 
 export type { Reply };
@@ -68,14 +69,12 @@ export class CommandClient {
     return () => this.eventFns.delete(fn);
   }
 
-  /** Sends a slash command as this player (`command_request`, origin player). */
+  /**
+   * Sends a slash command as this player (`command_request`, origin player; chat/route.ts commandRequestPacket). Fire and
+   * forget: a command whose `command_output` is wanted goes through skills/test/command.ts CommandRunner (Track T1).
+   */
   command(text: string): void {
-    this.conn.queue('command_request', {
-      command: text.startsWith('/') ? text : `/${text}`,
-      origin: { type: 'player', uuid: randomUUID(), request_id: '', player_entity_id: 0n },
-      internal: false,
-      version: 'latest',
-    });
+    this.conn.queue('command_request', commandRequestPacket(text));
   }
 
   /** `/scriptevent <ns:cmd> #<id> args...` and the reply with that id. */

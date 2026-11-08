@@ -27,6 +27,8 @@ import { registerBringCommands } from '../chat/commands-bring.ts'; // Track AS
 import { registerPortalCommands } from '../chat/commands-portal.ts'; // Track AT
 import { registerFlyCommands } from '../chat/commands-fly.ts'; // Track AU
 import { registerCraftCommands } from '../chat/commands-craft.ts'; // Track AW
+import { registerTestCommands } from '../chat/commands-test.ts'; // Track T1
+import { respawnClaimed } from '../skills/test/recovery.ts'; // Track T1
 import { formatChatLine } from '../chat/text.ts';
 import type { RuntimeSettings } from '../config/settings.ts';
 import { settingsFromValues } from '../config/settings.ts';
@@ -255,7 +257,8 @@ export const afkTask: TaskDefinition = {
         } finally {
           settling = false;
         }
-        if (signal.aborted || !home || n.wantsShelter()) return;
+        // Track T1: a test series' recovery takes the bot back to the run's start by /tp instead (skills/test/recovery.ts)
+        if (signal.aborted || !home || n.wantsShelter() || respawnClaimed(task)) return;
         log.info(`returning home to ${home.x} ${home.y} ${home.z} after death ${death?.n ?? '?'}`);
         const r = await p.returnHome('respawn', { timeoutTicks: 6000 });
         log[r.ok ? 'info' : 'warn'](`return home: ${r.ok ? 'arrived' : r.reason}`);
@@ -371,6 +374,7 @@ export const afkTask: TaskDefinition = {
       registerPortalCommands, // Track AT: !nether, !overworld, !portal, the per-dimension rules, the fire escape (docs/nether.md)
       (d) => void registerFlyCommands(d, { containers, logger: ctx.logger('fly') }), // Track AU: !fly, !land, the automatic flight of !come / !goto, the flight kit (docs/flight.md)
       (d) => void registerCraftCommands(d, { containers, logger: ctx.logger('craft') }), // Track AW: !craft, !compact, the compaction step of !unload (after the home logistics; docs/crafting.md)
+      (d) => void registerTestCommands(d, { respawn, logger: ctx.logger('test') }), // Track T1: !test, the op check, the recovery after a death behind testMode (after !fly; docs/runbook.md "The Realm as a test server")
     ];
     for (const register of registrations) register(deps);
     return task;
