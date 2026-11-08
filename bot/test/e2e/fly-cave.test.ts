@@ -17,12 +17,15 @@
 //   walkA  route A walked stop to stop (`skills.goto` near each waypoint); a failed leg is teleported over
 //   walkB  route B walked the same way (Track W3: as far as walking goes; the shortcut itself is flight only)
 //   flyA / flyB  every leg of routes A and B as a corridor trip with the underground stretches flown (underFly on)
+//   flyC   Track F6: cave_start to cave_end as one corridor trip on the layer's own corridor (no waypoints), FLY_CAVE_RUNS times
+//   flyS   Track F6: the shortcut (cave_5, cave_shortcut, cave_end as a waypoint route, flight only), FLY_CAVE_RUNS times,
+//          after the model's proof of it (cave/proof.ts) on the fixture
 // Scored per run (the table goes to the log, docs/flight.md has the measured ones): arrived, the distance left, the
 // time, rockets, damage (truth hurtlog), corrections, re-plans, corridor plans / windows / walks, ticks in water.
 // Gated: the build, the fly-over and every run completing. The numbers themselves are measured, not gated.
 // Env: FLY_BDS_HOST / FLY_BDS_PORT / FLY_BDS_CONTAINER (fly-truth.ts; run with 19210 / bds-fly2), FLY_CAVE_AT="x,z",
-// FLY_CAVE_REUSE=1, FLY_CAVE_ONLY=tripC,walkA,walkB,flyA,flyB, FLY_CAVE_LEGS=3,4 (the legs of A and B by index, walked or flown), FLY_CAVE_STYLE=1 (Track F5b's cave style on the flown runs),
-// FLY_CAVE_LEG_S (the time a run may take, default 180), FLY_CAVE_REPORT=file (the table written there too), FLY_VERBOSE=1.
+// FLY_CAVE_REUSE=1, FLY_CAVE_ONLY=tripC,walkA,walkB,flyA,flyB,flyC,flyS, FLY_CAVE_LEGS=3,4 (the legs of A and B by index, walked or flown), FLY_CAVE_STYLE=1 (the cave style on the flown runs),
+// FLY_CAVE_RUNS (flyC / flyS runs, default 5 / 3), FLY_CAVE_LEG_S (the time a run may take, default 180), FLY_CAVE_REPORT=file (the table written there too), FLY_VERBOSE=1.
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,8 +34,10 @@ import { boxMessages, CAVE_AIR, CAVE_STONE, CAVE_WATER, greedyBoxes } from '../.
 import type { Vec3 } from '../../src/connection/types.ts';
 import { silentLogger } from '../../src/log.ts';
 import { attachCoarseLayer, type CoarseLayerImpl } from '../../src/skills/coarse/index.ts';
+import { proveShortcut } from '../../src/skills/fly/cave/proof.ts'; // Track F6
+import { WaypointProvider, type RoutePoint } from '../../src/skills/fly/cave/route.ts'; // Track F6
 import { caveLegs, caveWorld, loadCaveFixture, ROUTE_A, ROUTE_B, shift, type CaveLeg } from '../../src/skills/fly/corridor/cave.ts';
-import { setCorridorUnderFly } from '../../src/skills/fly/corridor/registry.ts';
+import { setCorridorProvider, setCorridorUnderFly } from '../../src/skills/fly/corridor/registry.ts';
 import { CLS_AIR, CLS_WATER } from '../../src/world/cache/types.ts';
 import { WorldCache } from '../../src/world/cache/cache.ts';
 import { buildPlatform, E2E, giveFlightKit, prepareServer, sleep, startFlyBot, teleport, type FlyBot } from './fly-truth.ts';
@@ -40,6 +45,8 @@ import { buildPlatform, E2E, giveFlightKit, prepareServer, sleep, startFlyBot, t
 const fix = loadCaveFixture();
 const ONLY = new Set((process.env.FLY_CAVE_ONLY ?? '').split(',').filter(Boolean));
 const LEGS = new Set((process.env.FLY_CAVE_LEGS ?? '').split(',').filter(Boolean).map(Number));
+/** Track F6: the runs of flyC and flyS (the brief's bars: 5 of 5 and 3 of 3). */
+const RUNS = process.env.FLY_CAVE_RUNS ? Number(process.env.FLY_CAVE_RUNS) : undefined;
 const LEG_MS = Number(process.env.FLY_CAVE_LEG_S ?? 180) * 1000;
 const REUSE = process.env.FLY_CAVE_REUSE === '1';
 const want = (c: string): boolean => ONLY.size === 0 || ONLY.has(c);
@@ -305,16 +312,21 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
 
   /** One leg as a corridor trip with the underground stretches flown. */
   async function flyLeg(run: string, i: number, leg: CaveLeg): Promise<void> {
+    await flyBetween(run, `${i} ${leg.name}`, leg.from, leg.to);
+  }
+
+  /** Track F6: a corridor trip from `from` to `to` (replica feet cells of the fixture's) with the underground stretches flown, as one row. */
+  async function flyBetween(run: string, name: string, fromCell: Vec3, toCell: Vec3): Promise<void> {
     const b = bot!;
-    await standAt(b, leg.from);
+    await standAt(b, fromCell);
     setCorridorUnderFly(b.task, true);
     if (process.env.FLY_CAVE_STYLE === '1') b.settings.set('flyCave', 'on'); // Track F5b: the cave style on the measured runs
-    const goal = centre(leg.to);
+    const goal = centre(toCell);
     const since = await b.truth.now();
     const n0 = b.logs.length;
     const w0 = water;
     const t0 = performance.now();
-    const trip = b.fly.corridor({ x: goal.x - 0.5, y: goal.y, z: goal.z - 0.5 }, leg.name);
+    const trip = b.fly.corridor({ x: goal.x - 0.5, y: goal.y, z: goal.z - 0.5 }, name);
     if (!trip) throw new Error('no corridor provider: the coarse layer is not attached');
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timedOut = new Promise<undefined>((resolve) => {
@@ -332,7 +344,7 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
     const off = await offFrom(b, goal);
     rows.push({
       run,
-      leg: `${i} ${leg.name}`,
+      leg: name,
       ok: rep?.ok === true && off < 2.5,
       off,
       seconds: rep?.seconds ?? (performance.now() - t0) / 1000,
@@ -346,8 +358,50 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
       water: water - w0,
       how: rep ? `${rep.legs.map((l) => `${l.how}${l.ok ? '' : ' x'}`).join(', ')}${rep.ok ? '' : `; ${rep.reason ?? ''}`}` : `timeout ${LEG_MS / 1000} s`,
     });
-    notes.push(`${run} ${i} ${leg.name}: ${rep ? (rep.ok ? 'arrived' : `gave up: ${rep.reason ?? ''}`) : 'timeout'}\n    ${logs.filter((l) => /^corridor: (plan|leg|underground|window|the window)|flight: (landed|ended)|takeoff|fly: no takeoff/.test(l)).slice(0, 16).map((l) => l.slice(0, 220)).join('\n    ')}`);
+    notes.push(`${run} ${name}: ${rep ? (rep.ok ? 'arrived' : `gave up: ${rep.reason ?? ''}`) : 'timeout'}\n    ${logs.filter((l) => /^corridor: |route: .*bailing|flight: (landed|ended)|takeoff|fly: no takeoff/.test(l)).slice(0, 24).map((l) => l.slice(0, 220)).join('\n    ')}`);
   }
+
+  /** Track F6: a real cell of the fixture is covered (a solid cell of the extract above it). */
+  function coveredReal(cell: Vec3): boolean {
+    if (cell.x < e.box.min.x || cell.x > e.box.max.x || cell.z < e.box.min.z || cell.z > e.box.max.z) return false;
+    for (let y = e.box.max.y; y > cell.y + 1; y--) if (world.solid(Math.floor(cell.x), y, Math.floor(cell.z)) === true) return true;
+    return false;
+  }
+
+  it.skipIf(!want('flyC'))('fly C (Track F6): cave_start to cave_end as one corridor trip on the layer’s corridor, the underground flown (measured)', async () => {
+    const runs = RUNS ?? 5;
+    const end = legsA[legsA.length - 1]!.to;
+    try {
+      for (let i = 0; i < runs; i++) await flyBetween('flyC', `${i} cave_start -> cave_end`, start, end);
+    } finally {
+      setCorridorUnderFly(bot!.task, undefined);
+    }
+    expect(rows.filter((r) => r.run === 'flyC').length).toBe(runs);
+  }, 7_200_000);
+
+  it.skipIf(!want('flyS'))('fly S (Track F6): the shortcut as a waypoint route (cave_5, cave_shortcut, cave_end), proven on the model first (measured)', async () => {
+    const runs = RUNS ?? 3;
+    const stops = ['cave_5', 'cave_shortcut', 'cave_end'].map((n) => {
+      const p = fix!.waypoints.get(n);
+      const cell = p ? world.feetCell(p) : undefined;
+      if (!cell) throw new Error(`no waypoint ${n} with a floor`);
+      return { name: n, cell };
+    });
+    // the model's proof on the fixture (what `!fly route cave` asks before taking the shortcut)
+    const proof = await proveShortcut(world.grid, stops.map((s) => s.cell));
+    notes.push(`flyS: the shortcut ${proof.proven ? 'PROVEN' : `not proven (${proof.reason ?? '?'})`} on the model, ${proof.windows} windows\n    ${proof.lines.join('\n    ')}`);
+    // the route in replica coordinates as the trip's corridor (the executor proves and flies its windows)
+    const pts: RoutePoint[] = stops.map((s) => ({ name: s.name, cell: { x: s.cell.x + d.x, y: s.cell.y, z: s.cell.z + d.z } }));
+    const provider = new WaypointProvider(pts, { covered: (c) => coveredReal({ x: c.x - d.x, y: c.y, z: c.z - d.z }) });
+    setCorridorProvider(bot!.task, provider);
+    try {
+      for (let i = 0; i < runs; i++) await flyBetween('flyS', `${i} cave_5 -> cave_shortcut -> cave_end`, stops[0]!.cell, stops[2]!.cell);
+    } finally {
+      setCorridorProvider(bot!.task, undefined);
+      setCorridorUnderFly(bot!.task, undefined);
+    }
+    expect(rows.filter((r) => r.run === 'flyS').length).toBe(runs);
+  }, 3_600_000);
 
   it.skipIf(!want('flyA'))('fly A: every leg of route A as a corridor trip, the underground stretches flown (measured)', async () => {
     let n = 0;

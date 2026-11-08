@@ -127,10 +127,21 @@ export const LOW_CEILING_RISE = 0.25;
  * the search's unwind and the tracker's reference share it.
  */
 export function replay(start: Readonly<RouteState>, controls: readonly RouteControl[], goals: readonly RouteGoal[], stackRockets: boolean): RouteState[] {
+  return replayBurns(start, controls, goals, [], stackRockets);
+}
+
+/**
+ * Track F6: `replay` with the burn of each rocket given in fire order (`burns[k]` ticks for the k-th rocket the controls
+ * fire; the nominal when absent): the tracker re-times a plan's reference states to the burn it has read off the body
+ * (tracker.ts `retime`), so the body is tracked against where the plan's controls really take it.
+ */
+export function replayBurns(start: Readonly<RouteState>, controls: readonly RouteControl[], goals: readonly RouteGoal[], burns: readonly number[], stackRockets: boolean): RouteState[] {
   const out: RouteState[] = [];
   let s = cloneState(start);
+  let k = 0;
   for (const c of controls) {
-    const { next } = stepState(s, c, stackRockets, BURN.nominal, undefined, false);
+    const { next, fired } = stepState(s, c, stackRockets, c.fire ? (burns[k] ?? BURN.nominal) : BURN.nominal, undefined, false);
+    if (fired) k++;
     const g = goals[next.wp];
     if (g?.kind === 'landing' && landsOn(g, s.pos, next.pos, next.vel)) {
       const f = (s.pos.y - g.top) / Math.max(1e-9, s.pos.y - next.pos.y);

@@ -65,7 +65,9 @@ export interface CaveWorld {
   /** The class of a cell (outside the box: solid sideways and under it, air over it; unknown chunks solid). */
   cls(x: number, y: number, z: number): CellClass;
   grid: RouteGrid;
+  /** The flight's cells (Track F6: water is an obstacle here too) and, `floor`, what a body stands on (the real solids). */
   solid: CellSolid;
+  floor: CellSolid;
   query: BlockQuery;
   coarse: CoarseSource;
   terrain: TerrainSource & { readonly minY: number; readonly maxY: number };
@@ -89,7 +91,10 @@ export function caveWorld(e: CacheExtract): CaveWorld {
     const c = cls(x, y, z);
     return c !== CLS_AIR && c !== CLS_WATER;
   };
-  const grid: RouteGrid = { solid: isSolid };
+  // Track F6: the planner's grid has water as an obstacle too: a glide ends in water (the server's rule, stepBody's `water`
+  // end), so a plan may not fly through a pool, and keeps the margin over its surface (three of six windows of one trip
+  // through the owner's cave ended in its water floors before)
+  const grid: RouteGrid = { solid: (x, y, z) => cls(x, y, z) !== CLS_AIR };
   const query: BlockQuery = {
     solidAt: isSolid,
     liquidAt: (x, y, z) => (cls(x, y, z) === CLS_WATER ? { liquid: 'water', height: WATER_HEIGHT } : null),
@@ -118,7 +123,10 @@ export function caveWorld(e: CacheExtract): CaveWorld {
     maxY: b.max.y + 1,
     blockAt: (x: number, y: number, z: number): BlockInfo | undefined => (x < b.min.x || x > b.max.x || z < b.min.z || z > b.max.z ? undefined : blocks[cls(x, y, z)]),
   };
-  const solid: CellSolid = isSolid;
+  // Track F6: the flight's cells have water as an obstacle (the planner's grid above, the windows' floors and landings),
+  // what a body stands on is the real solid (so a cell over a pool is no landing and a body in a pool no takeoff: ADR 0068)
+  const solid: CellSolid = (x, y, z) => grid.solid(x, y, z);
+  const floor: CellSolid = isSolid;
   const feetCell = (p: Vec3): Vec3 | undefined => {
     const x0 = Math.floor(p.x);
     const y0 = Math.floor(p.y);
@@ -128,14 +136,14 @@ export function caveWorld(e: CacheExtract): CaveWorld {
         for (let dx = -r; dx <= r; dx++) {
           for (let dz = -r; dz <= r; dz++) {
             if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
-            if (standable(solid, x0 + dx, y0 + dy, z0 + dz)) return { x: x0 + dx, y: y0 + dy, z: z0 + dz };
+            if (standable(isSolid, x0 + dx, y0 + dy, z0 + dz)) return { x: x0 + dx, y: y0 + dy, z: z0 + dz };
           }
         }
       }
     }
     return undefined;
   };
-  return { extract: e, cls, grid, solid, query, coarse, terrain, feetCell };
+  return { extract: e, cls, grid, solid, floor, query, coarse, terrain, feetCell };
 }
 
 // ---- the routes ---------------------------------------------------------------------------------------

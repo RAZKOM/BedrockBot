@@ -98,9 +98,13 @@ export function splitLeg(leg: CorridorLeg, classify: (p: Vec3) => FlightSpace | 
   return out;
 }
 
-/** A body can stand with its feet in this cell: solid under it, air at the feet and the head (unknown counts as not). */
-export function standable(solid: CellSolid, x: number, feet: number, z: number): boolean {
-  return solid(x, feet - 1, z) === true && solid(x, feet, z) === false && solid(x, feet + 1, z) === false;
+/**
+ * A body can stand with its feet in this cell: solid under it, air at the feet and the head (unknown counts as not).
+ * Track F6: `solid` is what the flight may not pass (water included: a glide ends in it, a body in it cannot take off,
+ * ADR 0068), `floor` what it may stand on (the real solids; default `solid`): a cell over a pool is no landing.
+ */
+export function standable(solid: CellSolid, x: number, feet: number, z: number, floor: CellSolid = solid): boolean {
+  return floor(x, feet - 1, z) === true && solid(x, feet, z) === false && solid(x, feet + 1, z) === false;
 }
 
 /** The sign along a portal's axis of a move from `from` to `to` (1: towards the higher coordinate). */
@@ -115,7 +119,7 @@ export function axisSign(p: Portal, from: Vec3, to: Vec3): number {
  * of the opening's cross-section there (the centre first), or the opening's own floor cell. Undefined for a y
  * portal or when no cell is standable.
  */
-export function mouthCell(p: Portal, sign: number, solid: CellSolid, depth = MOUTH_IN): Vec3 | undefined {
+export function mouthCell(p: Portal, sign: number, solid: CellSolid, depth = MOUTH_IN, floor: CellSolid = solid): Vec3 | undefined {
   if (p.axis === 'y') return undefined;
   const feet = p.floorY ?? Math.floor(p.center.y);
   const tries: Vec3[] = [];
@@ -133,7 +137,7 @@ export function mouthCell(p: Portal, sign: number, solid: CellSolid, depth = MOU
       for (const dy of [0, 1, -1]) tries.push(p.axis === 'x' ? { x: along, y: feet + dy, z: across } : { x: across, y: feet + dy, z: along });
     }
   }
-  for (const c of tries) if (standable(solid, c.x, c.y, c.z)) return c;
+  for (const c of tries) if (standable(solid, c.x, c.y, c.z, floor)) return c;
   return undefined;
 }
 
@@ -158,14 +162,15 @@ export function shaftFloor(p: Portal, solid: CellSolid, scan = SHAFT_SCAN): numb
  *  - up a shaft: the floor under it.
  * Undefined when the cells are not known.
  */
-export function changeCell(p: Portal, before: Vec3, after: Vec3, into: 'sky' | 'under', solid: CellSolid): Vec3 | undefined {
+export function changeCell(p: Portal, before: Vec3, after: Vec3, into: 'sky' | 'under', solid: CellSolid, floor: CellSolid = solid): Vec3 | undefined {
   if (p.axis === 'y') {
-    const y = shaftFloor(p, solid);
+    // (Track F6: the shaft's floor is a real floor: scanned through water, as before water became an obstacle to `solid`)
+    const y = shaftFloor(p, floor);
     return y === undefined ? undefined : { x: Math.floor(p.center.x), y, z: Math.floor(p.center.z) };
   }
   const sign = axisSign(p, before, after);
   // into the bore: inside is ahead; out of it: inside is behind
-  return mouthCell(p, into === 'under' ? sign : -sign, solid);
+  return mouthCell(p, into === 'under' ? sign : -sign, solid, MOUTH_IN, floor);
 }
 
 /** The waypoint box of a portal crossed in a window: the opening's cells, one cell more each way along its axis (a fast body has a tick end inside). */
@@ -180,11 +185,11 @@ export function portalGoal(p: Portal): RouteGoal {
 export const LANDING_REACH = 2;
 
 /** The landing goal on a feet cell: the cell and the standable cells within LANDING_REACH at the same feet height (a touchdown in any lands). */
-export function landingGoal(cell: Vec3, solid: CellSolid, reach = LANDING_REACH): RouteGoal {
+export function landingGoal(cell: Vec3, solid: CellSolid, reach = LANDING_REACH, floor: CellSolid = solid): RouteGoal {
   const cells: { x: number; z: number }[] = [{ x: cell.x, z: cell.z }];
   for (let dx = -reach; dx <= reach; dx++) {
     for (let dz = -reach; dz <= reach; dz++) {
-      if ((dx || dz) && standable(solid, cell.x + dx, cell.y, cell.z + dz)) cells.push({ x: cell.x + dx, z: cell.z + dz });
+      if ((dx || dz) && standable(solid, cell.x + dx, cell.y, cell.z + dz, floor)) cells.push({ x: cell.x + dx, z: cell.z + dz });
     }
   }
   return { kind: 'landing', cell: { x: cell.x, z: cell.z }, top: cell.y, cells };
@@ -324,6 +329,10 @@ export interface WindowOptions {
   step?: number;
   /** A tail after the stretch's last bend shorter than this is walked: the window lands before the bend (default UNDER_TAIL_MIN). */
   tailMin?: number;
+  /** Track F6: the standable cells within this of the landing cell a touchdown may end in (default LANDING_REACH; the cave style's landing zone is wider). */
+  landReach?: number;
+  /** Track F6: the cells a body may stand on (the real solids; `solid` has water as an obstacle too). Default `solid`. */
+  floor?: CellSolid;
 }
 
 /**
@@ -353,7 +362,7 @@ export function viaGoal(c: Vec3): RouteGoal {
 }
 
 /** Track F5b: the standable cell nearest a point (its own cell, then the ring round it at the same feet height, a block up or down), undefined when none. */
-export function standableNear(solid: CellSolid, p: Vec3, reach = 2): Vec3 | undefined {
+export function standableNear(solid: CellSolid, p: Vec3, reach = 2, floor: CellSolid = solid): Vec3 | undefined {
   const x0 = Math.floor(p.x);
   const z0 = Math.floor(p.z);
   const y0 = Math.floor(p.y + 1e-6);
@@ -363,7 +372,7 @@ export function standableNear(solid: CellSolid, p: Vec3, reach = 2): Vec3 | unde
         for (let dx = -r; dx <= r; dx++) {
           for (let dz = -r; dz <= r; dz++) {
             if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
-            if (standable(solid, x0 + dx, y, z0 + dz)) return { x: x0 + dx, y, z: z0 + dz };
+            if (standable(solid, x0 + dx, y, z0 + dz, floor)) return { x: x0 + dx, y, z: z0 + dz };
           }
         }
       }
@@ -478,10 +487,20 @@ export function nextWindow(s: Stretch, from: Vec3, o: WindowOptions): Window | u
     }
   }
   if (cut) {
-    // land on the floor of the last portal (or via point) reached (dropping anchors until one has a standable floor); its box gives way to the landing
+    // land on the floor of the last portal (or via point) reached (dropping anchors until one has a standable floor); its box gives way to the landing.
+    // Track F6: a y face (a sloping bore across a section border) and a step box land on the standable cell nearest them too: on the
+    // server a long corridor is cut at the loaded chunks, where the last anchors are chunk-border faces, and with no landing among
+    // them the whole stretch was walked (the replica: 0 windows, 361 ticks in water)
     while (anchors.length) {
       const a = anchors[anchors.length - 1]!;
-      const c = a.kind === 'portal' && a.portal!.axis !== 'y' ? mouthCell(a.portal!, 1, o.solid, 0) : a.kind === 'via' ? standableNear(o.solid, a.point) : undefined;
+      const c =
+        a.kind === 'portal'
+          ? a.portal!.axis !== 'y'
+            ? mouthCell(a.portal!, 1, o.solid, 0, o.floor)
+            : standableNear(o.solid, { x: a.point.x, y: a.portal!.floorY ?? a.point.y, z: a.point.z }, 2, o.floor)
+          : a.kind === 'via' || a.kind === 'step'
+            ? standableNear(o.solid, a.point, 2, o.floor)
+            : undefined;
       anchors.pop();
       if (c) {
         end = c;
@@ -491,7 +510,7 @@ export function nextWindow(s: Stretch, from: Vec3, o: WindowOptions): Window | u
     }
     if (!end) return undefined;
   }
-  const goals = [...anchors.map((a) => a.goal), landingGoal(end!, o.solid)];
+  const goals = [...anchors.map((a) => a.goal), landingGoal(end!, o.solid, o.landReach, o.floor)];
   const portals = anchors.filter((a) => a.kind === 'portal').map((a) => a.portal!);
   let width = Infinity;
   let height = Infinity;

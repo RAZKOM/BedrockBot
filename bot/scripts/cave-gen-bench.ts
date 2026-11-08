@@ -40,6 +40,16 @@ const VARIANTS: Record<string, { style: boolean; variant?: Partial<CaveStyle> }>
   speed11: { style: true, variant: { rules: { fireSpeedMax: 1.1 } } },
   blocks64: { style: true, variant: { windowBlocks: 64 } },
   blocks160: { style: true, variant: { windowBlocks: 160 } },
+  // Track F6: the pieces, the field, the re-timed reference, the margin rule, the landing zone, the proof budget
+  f5b: { style: true, variant: { pieces: 0, geodesic: false, landReach: 2, marginExtraFrom: 0, rules: { retime: false } } },
+  nopieces: { style: true, variant: { pieces: 0 } },
+  pieces2: { style: true, variant: { pieces: 2 } },
+  geo: { style: true, variant: { geodesic: true } },
+  noretime: { style: true, variant: { rules: { retime: false } } },
+  margin3: { style: true, variant: { marginExtraFrom: 0 } },
+  reach2: { style: true, variant: { landReach: 2 } },
+  err10: { style: true, variant: { rules: { bailError: 1.0 } } },
+  prove6s: { style: true, variant: { proveMs: 6000, proveNodes: 200_000 } },
 };
 
 interface Job {

@@ -15,7 +15,7 @@
 import type { Vec3 } from '../../../connection/types.ts';
 import { glideVelocity } from '../../input/physics.ts';
 import { sweep, type RouteGrid } from './grid.ts';
-import { crossesFloor, inBurnTail, landsOn, passes, stepState, sweepGridFor } from './primitives.ts';
+import { crossesFloor, inBurnTail, landsOn, passes, replayBurns, stepState, sweepGridFor } from './primitives.ts';
 import { startMarginFor } from './search.ts';
 import { BURN, NO_BOOST, burnTick, cloneState, freshBurn, headingOf, hspeed, landingCells, type BoostRange, type PrimitiveFamily, type RouteControl, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
 
@@ -89,6 +89,13 @@ export interface TrackerRules {
   replanLead?: number;
   /** Bail out when the body is this far off its reference (blocks) and no fresh plan has come: the brake, not a chase. */
   bailError?: number;
+  /**
+   * Track F6: the plan's reference states are re-timed to the burn read off the body (`retime`): a burn that ended early
+   * or runs on past the nominal re-flies the plan's controls with that burn, so the body is tracked against where its
+   * controls really take it instead of a reference it left (F5b's hits: 1 to 1.5 off a proven plan under a burn other than
+   * the plan's nominal, before `bailError` fired).
+   */
+  retime?: boolean;
 }
 
 /** Track F5b: the brake's pitches tried at a bail-out (the envelope: -30 holds the height over the 10 ticks, 0 loses 1.2). */
@@ -137,6 +144,9 @@ export interface TrackerOptions {
   lead?: number;
   /** Track F5b: the cave style's rules (default none: the tracker flies as Track F4a left it). */
   rules?: TrackerRules;
+  /** Track F6: every request's heuristic measures through the air (RouteRequest.geodesic), and the search's pieces (RouteRequest.pieces). */
+  geodesic?: boolean;
+  pieces?: number;
 }
 
 export type TrackerStatus = 'planning' | 'tracking' | 'holding' | 'bailing' | 'done' | 'failed';
@@ -176,6 +186,8 @@ export interface TrackerStats {
   uncommitted?: number;
   /** Track F5b: ticks flown by the bail-out (the brake and the sink). */
   bailTicks?: number;
+  /** Track F6: the plan's reference re-timed to a burn read off the body (`retime`). */
+  retimed?: number;
   /** The first plan's effort. */
   first?: { nodes: number; expanded: number; ms: number; ticks: number; rockets: number; complete: boolean; robust: boolean; clearance: number };
 }
@@ -228,6 +240,12 @@ export class RouteTracker {
   private needComplete = false;
   /** Track F5b (replanLead): a plan asked from ahead that starts later than now: the old plan is flown until its start tick. */
   private nextPlan: { p: RoutePlan; start: RouteState; goals: RouteGoal[]; wp0: number; at: number } | undefined;
+  /** Track F6 (retime): the tick the burning rocket was fired at (the belief's fresh burn), undefined when none burns. */
+  private firedAt: number | undefined;
+  /** Track F6: the plan's controls under the burn read off the body hit at this index (the reference kept nominal), -1 when clear. */
+  private burnHazard = -1;
+  /** Track F6: the belief's nominal ticks left when the last control was flown (the step `readBoost` judges was boosted iff this was over 0). */
+  private nomBefore = 0;
   readonly stats: TrackerStats = { plans: 0, replans: 0, planMs: 0, partial: 0, fired: 0, corrections: 0, holdTicks: 0, evadeTicks: 0, burnsRead: 0, maxError: 0, ticks: 0 };
 
   private readonly o: TrackerOptions;
@@ -302,8 +320,60 @@ export class RouteTracker {
 
   /** The server removed the burning rocket (its end is known now): the plan assumed the nominal burn, so it is asked for again. */
   rocketEnded(): void {
+    // (Track F6: the notice comes about 3 ticks after the end; the body's velocity already told the tracker and re-timed the plan)
     this.boost = { ...NO_BOOST };
     this.burnEnded = true;
+    this.firedAt = undefined;
+  }
+
+  /**
+   * Track F6 (`rules.retime`): the plan's reference states re-flown with the burn read off the body: `burn` ticks for the
+   * rocket fired at `firedAt` (the plan's own rocket at that tick, or the burn the plan started under), every other rocket
+   * nominal. The controls are unchanged; `locate`, the horizon's tracking cost and `replanLead` then read where the plan's
+   * controls take a body under this burn. A rocket fired outside the plan (a hold's late rocket) leaves it alone.
+   */
+  private retime(burn: number, now: number): void {
+    const p = this.plan;
+    const F = this.firedAt;
+    if (!p || F === undefined || !this.planStart || !this.o.rules?.retime) return;
+    const stack = this.o.stackRockets === true;
+    this.burnHazard = -1;
+    let states: RouteState[];
+    if (F >= this.planTick) {
+      // the plan's own rocket, control index F - planTick: the k-th fired
+      const idx = F - this.planTick;
+      if (idx >= p.controls.length || !p.controls[idx]!.fire) return;
+      let k = 0;
+      for (let i = 0; i < idx; i++) if (p.controls[i]!.fire) k++;
+      const burns: number[] = [];
+      burns[k] = burn;
+      states = replayBurns(this.planStart, p.controls, this.planGoals, burns, stack);
+    } else {
+      // the burn was running when the plan started: the ticks of it left at the plan's first control
+      const left = Math.max(0, F + burn - this.planTick);
+      if (left === this.planStart.boost.nom) return;
+      const start: RouteState = { ...cloneState(this.planStart), boost: { ...this.planStart.boost, nom: left } };
+      states = replayBurns(start, p.controls, this.planGoals, [], stack);
+    }
+    if (states.length !== p.states.length) return;
+    // the plan's controls under this burn must still clear the walls ahead: the plan was proven for the burn's extremes
+    // only (the branches), and a burn between them can carry the body into a wall the nominal path misses (tight-107
+    // at burn 12: the re-timed reference ran into the wall 3 ticks on and the body followed it, 12 of damage). A
+    // reference that hits is not adopted: the body keeps the nominal, which is clear, and the hazard asks for a complete
+    // plan or the bail-out (tick: `burnHazard`)
+    // (judged on PLAN_CLEAR_MIN, a collision course, not the margin: the plan keeps the margin at the burn's extremes by construction and a
+    // burn between them grazes it in a clean bore without touching anything)
+    const hit = this.firstBlocked(Math.max(0, this.cursor), states, PLAN_CLEAR_MIN);
+    if (hit >= 0) {
+      this.burnHazard = hit;
+      this.changed = true;
+      this.o.note?.(`route: the plan's controls under a burn of ${burn} ticks hit at tick ${hit + 1} of ${states.length}: the reference stays nominal`);
+      return;
+    }
+    p.states = states;
+    this.changed = true; // (the corridor ahead is checked again on the new reference)
+    this.stats.retimed = (this.stats.retimed ?? 0) + 1;
+    this.o.note?.(`route: the plan's reference re-timed to a burn of ${burn} ticks (fired at tick ${F}, now ${now})`);
   }
 
   /** Track F3: a rocket of the flight already burns when the tracker takes the body over: `ticks` expected left (the loop's `boostTicks`), up to BURN.max - BURN.nominal more. */
@@ -395,6 +465,8 @@ export class RouteTracker {
       ...(this.o.edgeTicks !== undefined ? { edgeTicks: this.o.edgeTicks } : {}),
       ...(this.o.weight !== undefined ? { weight: this.o.weight } : {}),
       ...(this.o.library !== undefined ? { library: this.o.library } : {}),
+      ...(this.o.geodesic ? { geodesic: true } : {}),
+      ...(this.o.pieces !== undefined ? { pieces: this.o.pieces } : {}),
     };
     this.pending = true;
     if (this.plan) this.stats.replans++;
@@ -457,6 +529,7 @@ export class RouteTracker {
     this.cursor = -1;
     this.flownPlan = undefined;
     this.nextPlan = undefined;
+    this.burnHazard = -1;
   }
 
   /** The plan's state at index `i` (-1: the state the plan was made from). */
@@ -494,23 +567,29 @@ export class RouteTracker {
    * walls it was planned past (F4b's windows re-planned "the corridor ahead is blocked" over and over on such plans).
    */
   private corridorClear(i: number): boolean {
+    return this.firstBlocked(i) < 0;
+  }
+
+  /** Track F6: the index of the first state of `states` (the plan's by default) within LOOKAHEAD of `i` whose step hits, -1 when the corridor is clear. */
+  private firstBlocked(i: number, states: readonly RouteState[] = this.plan!.states, marginOverride?: number): number {
     const p = this.plan!;
     // (the cave rules only: the open-air drivers keep Track F4a's check as measured; with the plan's clearance as the margin
     // the obstacle course's rings and tunnel re-planned less on bds-fly2 and scraped)
     const cave = this.o.rules !== undefined;
-    const margin = cave ? Math.min(this.o.margin, Math.max(0, p.clearance - 0.02)) : this.o.margin;
-    for (let k = i; k < Math.min(p.states.length - 1, i + LOOKAHEAD); k++) {
-      const a = this.ref(k);
+    const margin = marginOverride ?? (cave ? Math.min(this.o.margin, Math.max(0, p.clearance - 0.02)) : this.o.margin);
+    const at = (k: number): RouteState => (k < 0 ? this.planStart! : states[Math.min(states.length - 1, k)]!);
+    for (let k = i; k < Math.min(states.length - 1, i + LOOKAHEAD); k++) {
+      const a = at(k);
       if (cave && !a.gliding) continue; // the takeoff tick leaves the floor it stands on
       // (the landing cell's floor is no obstacle near it, as the search had it: primitives.ts sweepGridFor)
       const grid = cave ? sweepGridFor(this.o.grid, this.planGoals[a.wp], a.pos) : this.o.grid;
-      if (sweep(grid, a.pos, this.ref(k + 1).pos, margin).hit) {
-        const q = this.ref(k + 1).pos;
-        this.o.note?.(`route: the plan's corridor is blocked at tick ${k + 1} of ${p.states.length} (${q.x.toFixed(1)} ${q.y.toFixed(1)} ${q.z.toFixed(1)}, margin ${margin.toFixed(2)})`);
-        return false;
+      if (sweep(grid, a.pos, at(k + 1).pos, margin).hit) {
+        const q = at(k + 1).pos;
+        if (states === p.states) this.o.note?.(`route: the plan's corridor is blocked at tick ${k + 1} of ${p.states.length} (${q.x.toFixed(1)} ${q.y.toFixed(1)} ${q.z.toFixed(1)}, margin ${margin.toFixed(2)})`);
+        return k;
       }
     }
-    return true;
+    return -1;
   }
 
   private hold(b: TrackerBody): RouteControl {
@@ -589,7 +668,10 @@ export class RouteTracker {
     const ends = b.max > 0 && b.min < b.max ? [b.min, Math.min(b.max, HORIZON + 1)].filter((e) => e !== b.nom) : [];
     const costOf = (c0: RouteControl, hold: boolean): number => {
       let cost = this.horizonCost(cur, c0, next, margin, goals, stack, true, hold);
-      for (const e of ends) cost += this.horizonCost({ ...cur, boost: { ...b, nom: e } }, c0, next, margin, goals, stack, false, hold);
+      // (Track F6: in a cave the ends are judged on half the margin: a plan robust to the burn by construction keeps the margin at
+      // the extremes, and a tail "hit" at the full margin for an end in between stopped windows that were tracking at 0.00)
+      const endMargin = this.o.rules ? margin * 0.5 : margin;
+      for (const e of ends) cost += this.horizonCost({ ...cur, boost: { ...b, nom: e } }, c0, next, endMargin, goals, stack, false, hold);
       return cost;
     };
     let bestCost = Infinity;
@@ -606,9 +688,14 @@ export class RouteTracker {
       }
     }
     if (ends.length && bestCost >= HIT_PENALTY) {
-      // every candidate followed by the plan hits for some end of the burn: the held ones, with wider turns, and a re-plan
+      // every candidate followed by the plan hits for some end of the burn: the held ones, with wider turns, and a re-plan.
+      // Track F6: not in a cave. There the plan is robust to the burn by construction and the body was on it (error 0.00
+      // for 36 ticks in the owner's cave); the held candidate (a yaw 90 off the heading) took it 1.3 off the plan in one
+      // tick and the window bailed out 2 blocks off. The cave rules keep the plan's own best control and ask for the
+      // complete re-plan (`burnUnsafe`); a burn that does end where the tail hits is met by the re-timed reference and
+      // the bail-out within the commit horizon.
       planSafe = false;
-      for (const dy of HOLD_YAWS) {
+      for (const dy of this.o.rules ? [] : HOLD_YAWS) {
         for (const dp of HOLD_PITCHES) {
           const c0: RouteControl = { ...base, yaw: headingOf(cur.vel, base.yaw) + dy, pitch: dp };
           const cost = costOf(c0, true) + 0.5; // (the plan's tail first among equals)
@@ -629,23 +716,31 @@ export class RouteTracker {
    * the body tells whether the rocket still burns before the server's late notice does. Between the nominal
    * end and the latest one the belief follows the body; a burn that ended early is seen at once.
    */
-  private readBoost(b: TrackerBody): void {
+  private readBoost(b: TrackerBody, now: number): void {
     if (!this.lastVel || !this.lastControl || !b.gliding || this.boost.max === 0) return;
     const c = this.lastControl;
     const on = glideVelocity(this.lastVel, c.yaw, c.pitch, true);
     const off = glideVelocity(this.lastVel, c.yaw, c.pitch, false);
     const dOn = Math.hypot(on.x - b.vel.x, on.y - b.vel.y, on.z - b.vel.z);
     const dOff = Math.hypot(off.x - b.vel.x, off.y - b.vel.y, off.z - b.vel.z);
-    if (dOff < dOn * 0.5 && this.boost.nom > 0) {
-      // the burn ended before the nominal: the body flew a plain glide tick
+    // (Track F6: the step judged was flown with `nomBefore` ticks of the nominal left: boosted iff over 0. Judged on the
+    // belief after its tick, the last nominal tick read as "burns on past the plan" and the next as "ended early": two
+    // re-plans a nominal burn)
+    if (dOff < dOn * 0.5 && this.nomBefore > 0) {
+      // the burn ended before the nominal: the body flew a plain glide tick (Track F6: the step at now - 1 was plain, so the
+      // rocket fired at F burnt now - 1 - F ticks: the plan's reference is re-timed to that)
+      if (this.firedAt !== undefined) this.retime(Math.max(1, now - 1 - this.firedAt), now);
       this.boost = { ...NO_BOOST };
       this.burnEnded = true;
+      this.firedAt = undefined;
       this.stats.burnsRead++;
-    } else if (dOn < dOff * 0.5 && this.boost.nom === 0 && this.boost.max > 0) {
+    } else if (dOn < dOff * 0.5 && this.nomBefore === 0 && this.boost.max > 0) {
       // the burn goes on past the nominal: the plan assumed it over. Track F4a: the belief's nominal moves to the middle
       // of what may be left (an end before it is read at once; one after it is read again), and the re-plan this asks
       // for branches the rest of the range (search.ts)
       this.boost = { ...this.boost, nom: Math.max(1, Math.ceil(this.boost.max / 2)) };
+      // (Track F6: the reference re-timed to the burn so far plus the belief's middle; re-timed again when the end is read)
+      if (this.firedAt !== undefined) this.retime(now - this.firedAt + this.boost.nom, now);
       this.burnEnded = true;
       this.stats.burnsRead++;
     }
@@ -659,6 +754,7 @@ export class RouteTracker {
     if (this.boost.max === 0) return;
     // (a rocket stacked on a running burn: that burn goes on; the belief ticked once since)
     this.boost = burnTick(this.boostBefore);
+    this.firedAt = undefined;
     this.stats.fired = Math.max(0, this.stats.fired - 1);
     this.fireLater = true;
   }
@@ -676,7 +772,7 @@ export class RouteTracker {
       if (n.wp0 >= this.wp) this.adoptNow(n.p, n.start, n.goals, n.wp0, n.at);
       else this.nextPlan = undefined;
     }
-    this.readBoost(b);
+    this.readBoost(b, now);
     this.lastVel = { ...b.vel };
     // the goals passed by the real body
     if (this.lastPos) {
@@ -700,6 +796,7 @@ export class RouteTracker {
       const c = this.bailControl(this.stateOf(b), now);
       this.yaw = c.yaw;
       this.lastControl = c;
+      this.nomBefore = this.boost.nom;
       this.boost = burnTick(this.boost);
       return { control: c, status: 'bailing', done: false, error: 0 };
     }
@@ -723,7 +820,12 @@ export class RouteTracker {
       error = Math.hypot(ref.x - b.pos.x, ref.y - b.pos.y, ref.z - b.pos.z);
       if (error > this.stats.maxError) this.stats.maxError = error;
       const cur = this.stateOf(b);
-      const blocked = (this.changed || (now & 3) === 0) && !this.corridorClear(i);
+      // Track F6: a burn read off the body whose controls would hit ahead (retime) asks for a complete plan as a loaded chunk
+      // would, but never the bail-out on its own: it is an open-loop forecast the horizon corrects (a plan robust to the
+      // burn's extremes grazes the floor of a clean bore for the burns between, flown open loop; closed loop it lands)
+      const blockedAt = this.changed || (now & 3) === 0 ? this.firstBlocked(i) : -1;
+      if (this.burnHazard >= 0 && this.burnHazard < i) this.burnHazard = -1; // (the body is past it)
+      const blocked = blockedAt >= 0 || this.burnHazard >= i;
       const out = i >= p.states.length - 2;
       const planBoost = this.ref(i).boost.nom > 0;
       let again: string | undefined;
@@ -745,6 +847,23 @@ export class RouteTracker {
         // Track F5b (completeOnly): a complete plan blocked ahead wants a complete replacement, else the bail-out
         if (this.o.rules?.completeOnly && p.complete && blocked) this.needComplete = true;
         this.request(b, now, again);
+      }
+      // Track F6: a plan blocked within the commit horizon in a cave: no plan can come back in time (the worker's 12 ticks),
+      // and the horizon's small perturbations cannot steer round a wall in a 3-wide passage: the bail-out now (the brake
+      // stops the body in about 5 blocks). tight-107 at burn 12: the wall 5 ticks ahead, the re-plan asked, 12 of damage.
+      const commit = this.o.rules?.commitTicks ?? 0;
+      // (judged on a collision course, PLAN_CLEAR_MIN, not the margin: a re-timed reference that comes within the margin of the
+      // floor before its settle asked for a plan and must not stop the body for that)
+      const collisionAt = blockedAt >= 0 && blockedAt - i <= commit ? this.firstBlocked(i, p.states, PLAN_CLEAR_MIN) : -1;
+      if (this.o.rules?.completeOnly && collisionAt >= 0 && b.gliding && commit > 0 && collisionAt - i <= commit && this.plan === p) {
+        this.bail = 'brake';
+        this.o.note?.(`route: the plan is blocked ${collisionAt - i} ticks ahead (under the commit horizon of ${commit}): bailing out (the brake, then the sink to the floor)`);
+        const c = this.bailControl(cur, now);
+        this.yaw = c.yaw;
+        this.lastControl = c;
+        this.nomBefore = this.boost.nom;
+        this.boost = burnTick(this.boost);
+        return { control: c, status: 'bailing', done: false, ...(replan ? { replan } : {}), error };
       }
       // a plan adopted just now (an in-thread planner answers at once) starts at its own state: locate again
       const j = this.plan === p ? i : this.locate(b, now);
@@ -771,6 +890,8 @@ export class RouteTracker {
           // Track F4a: a plan from here with the burn's whole range branched (search.ts), once a burn
           this.burnReplanned = true;
           replan = "the plan's tail hits for an end of the burn";
+          // Track F6 (completeOnly): the plan ahead is unsafe for an end of the burn: a partial answer bails, as when blocked
+          if (this.o.rules?.completeOnly && this.plan.complete) this.needComplete = true;
           this.request(b, now, replan);
         }
       }
@@ -799,6 +920,7 @@ export class RouteTracker {
       const c = this.bailControl(this.stateOf(b), now);
       this.yaw = c.yaw;
       this.lastControl = c;
+      this.nomBefore = this.boost.nom;
       this.boost = burnTick(this.boost);
       return { control: c, status: 'bailing', done: false, ...(replan ? { replan } : {}), error };
     }
@@ -843,6 +965,7 @@ export class RouteTracker {
       if (b.rockets > 0 && b.gliding && (mayFire(this.boost) || this.o.stackRockets === true)) {
         this.boostBefore = { ...this.boost };
         this.boost = freshBurn();
+        this.firedAt = now; // Track F6 (retime): the plan's reference follows this rocket's real burn
         this.stats.fired++;
         this.fireLater = false;
         this.burnReplanned = false;
@@ -851,6 +974,7 @@ export class RouteTracker {
         control = { ...control, fire: false };
       }
     }
+    this.nomBefore = this.boost.nom;
     this.boost = burnTick(this.boost);
     this.yaw = control.yaw;
     this.lastControl = control;

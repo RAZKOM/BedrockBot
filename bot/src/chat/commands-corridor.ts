@@ -29,8 +29,10 @@ export interface CorridorWiring extends Omit<RocketDeps, 'loop' | 'inventory'> {
   memory: () => FlightKitMemory;
   kitOps: Pick<FlightKitOps, 'wearElytra' | 'rocketsToHotbar' | 'wearChestplate'>;
   processes: Pick<ProcessManager, 'add'>;
-  /** The live model's cell: true solid, false air, undefined not loaded. */
+  /** The live model's cell: true solid, false air, undefined not loaded (Track F6: water counts as solid: no flight through or into it). */
   solid: (x: number, y: number, z: number) => boolean | undefined;
+  /** Track F6: a cell a body may stand on (the real solids). */
+  floor?: (x: number, y: number, z: number) => boolean | undefined;
   loaded: (cx: number, cz: number) => boolean;
   dim: () => number;
   /** The body's health (hotfix 2026-11-06: the trip ends on a death or below CORRIDOR_HEALTH_MIN). */
@@ -126,6 +128,7 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
     position: () => (w.loop.state.ready === false ? undefined : { ...w.loop.state.pos }),
     dim: w.dim,
     solid: w.solid,
+    ...(w.floor ? { floor: w.floor } : {}),
     loaded: (x, z) => w.loaded(x >> 4, z >> 4),
     waitLoaded,
     flySky: w.flySky,
@@ -136,7 +139,9 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
           proveWindow: async (win: Window): Promise<WindowProof> => {
             const from = { ...w.loop.state.pos };
             const rockets = readKit(w.inventory, w.memory()).rocketsHotbar || readKit(w.inventory, w.memory()).rockets;
-            const req = windowRequest(win, from, rockets, { margin: style.stretch?.(win).margin ?? win.margin, maxMs: style.prove!.maxMs, maxNodes: style.prove!.maxNodes });
+            // (Track F6: the proof prices the risk and measures the way as the window's trackers will: the plan proven is the plan flown)
+            const so = style.stretch?.(win) ?? {};
+            const req = windowRequest(win, from, rockets, { margin: so.margin ?? win.margin, maxMs: style.prove!.maxMs, maxNodes: style.prove!.maxNodes, ...(so.riskCost !== undefined ? { riskCost: so.riskCost } : {}), ...(so.geodesic ? { geodesic: true } : {}), ...(so.pieces !== undefined ? { pieces: so.pieces } : {}) });
             const p = await w.plan(req);
             w.log.info(`corridor: the proof of the window to ${Math.floor(win.end.x)} ${Math.floor(win.end.y)} ${Math.floor(win.end.z)}: ${p.complete ? 'complete' : `partial (${p.why ?? '?'})`} ${p.reached}/${win.goals.length} goals, ${p.ticks} ticks, ${p.rockets} rockets, clearance ${p.clearance.toFixed(2)}, ${p.expanded} expanded in ${p.ms.toFixed(0)} ms`);
             return proofOf(p);

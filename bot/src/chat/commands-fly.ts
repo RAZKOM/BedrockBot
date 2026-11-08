@@ -79,6 +79,8 @@ export interface FlyControl {
 }
 
 const controls = new WeakMap<object, FlyControl>();
+/** Track F6: the liquids the route planner's grid treats as solid (a glide ends in water; lava is lava). */
+const ROUTE_LIQUIDS: ReadonlySet<string> = new Set(['water', 'flowing_water', 'lava', 'flowing_lava']);
 export function flyControlOf(task: object): FlyControl | undefined {
   return controls.get(task);
 }
@@ -206,7 +208,13 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   // Track F3 (docs/flight.md "Route landings and takeoffs"): the route planner: the grid over the live model (unknown =
   // solid, the sky check's rule), the search in the worker (RoutePlannerClient, the 0023 pattern: an in-thread search of
   // 300 ms stalled the loop 6 ticks on bds-fly3), off with `flyRoute off`
-  const routeGrid: RouteGrid = { solid: (x, y, z) => world.blockAt({ x, y, z })?.solid ?? true };
+  // (Track F6: water and lava are obstacles to the planner too: a glide ends in water, so no plan flies through a pool)
+  const routeGrid: RouteGrid = {
+    solid: (x, y, z) => {
+      const b = world.blockAt({ x, y, z });
+      return b ? b.solid || ROUTE_LIQUIDS.has(b.name) : true;
+    },
+  };
   const routeClient = new RoutePlannerClient({ log });
   const routePlanner = routeClient.plannerOver(routeGrid);
   const routeOn = (): boolean => String(d.settings.get('flyRoute')) !== 'off';
@@ -1039,8 +1047,15 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     memory,
     kitOps,
     processes,
-    // the live model, else what the world cache saw (a mouth at the edge of the loaded chunks); the windows are cut by `loaded`
-    solid: (x, y, z) => world.blockAt({ x, y, z })?.solid ?? world.cache?.blockAt(x, y, z)?.solid,
+    // the live model, else what the world cache saw (a mouth at the edge of the loaded chunks); the windows are cut by `loaded`.
+    // Track F6: water is an obstacle to the flight (`solid`: no window through or into a pool), the real solids are its floors
+    solid: (x, y, z) => {
+      const b = world.blockAt({ x, y, z });
+      if (b) return b.solid || ROUTE_LIQUIDS.has(b.name);
+      const c = world.cache?.blockAt(x, y, z);
+      return c ? c.solid || ROUTE_LIQUIDS.has(c.name) : undefined;
+    },
+    floor: (x, y, z) => world.blockAt({ x, y, z })?.solid ?? world.cache?.blockAt(x, y, z)?.solid,
     loaded: (cx, cz) => typeof world.isLoaded !== 'function' || world.isLoaded(cx, cz),
     dim,
     health: () => world.self.health, // hotfix 2026-11-06: a death or low health ends the trip

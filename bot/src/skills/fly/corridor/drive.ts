@@ -62,6 +62,9 @@ export interface ChainOptions {
   riskCost?: number;
   /** Track F5b: the window's plan proven before the takeoff (executor.ts `prove`): the first tracker takes every goal and flies it as its first plan. */
   firstPlan?: RoutePlan;
+  /** Track F6: the requests' heuristic through the air (RouteRequest.geodesic) and the search's pieces (RouteRequest.pieces). */
+  geodesic?: boolean;
+  pieces?: number;
   note?: (msg: string) => void;
 }
 
@@ -116,6 +119,8 @@ export class TrackerChain {
       yaw,
       ...(o.rules ? { rules: o.rules } : {}),
       ...(o.riskCost !== undefined ? { riskCost: o.riskCost } : {}),
+      ...(o.geodesic ? { geodesic: true } : {}),
+      ...(o.pieces !== undefined ? { pieces: o.pieces } : {}),
       ...(o.note ? { note: o.note } : {}),
     });
   }
@@ -161,6 +166,15 @@ export class TrackerChain {
 
   rocketEnded(): void {
     this.active.rocketEnded();
+  }
+
+  /**
+   * Track F6: the rocket the active tracker asked for this tick was not used (the loop's burn still runs, no slot, the
+   * cooldown): its belief drops the fresh burn it assumed (tracker.ts fireHeld). Without this the belief burnt a rocket
+   * the body never had, read the body's plain step as "the burn ended after 1 tick" and re-timed the plan to it.
+   */
+  fireHeld(): void {
+    this.active.fireHeld();
   }
 
   noteCorrection(): void {
@@ -218,15 +232,27 @@ export class TrackerChain {
  * (the look towards the first goal) through every goal of the window at the live budget, with the stretch's margin,
  * weight and edge set; `proofOf` reads the answer.
  */
-export function windowRequest(w: Pick<Window, 'goals'>, from: Vec3, rockets: number, o: Pick<StretchOptions, 'margin' | 'maxNodes' | 'maxMs' | 'weight' | 'library'>): RouteRequest {
+export function windowRequest(w: Pick<Window, 'goals'>, from: Vec3, rockets: number, o: Pick<StretchOptions, 'margin' | 'maxNodes' | 'maxMs' | 'weight' | 'library' | 'riskCost' | 'geodesic' | 'pieces'>): RouteRequest {
   const first = w.goals[0] ? goalPoint(w.goals[0]) : { x: from.x, y: from.y, z: from.z + 1 };
   const yaw = (Math.atan2(-(first.x - from.x), first.z - from.z) * 180) / Math.PI;
   const start: RouteState = { pos: { x: from.x, y: from.y, z: from.z }, vel: { x: 0, y: 0, z: 0 }, yaw, boost: { ...NO_BOOST }, gliding: false, rockets, wp: 0 };
-  return { start, goals: w.goals, margin: o.margin, maxNodes: o.maxNodes ?? STRETCH_PLAN_NODES, maxMs: o.maxMs ?? STRETCH_PLAN_MS, weight: o.weight ?? STRETCH_WEIGHT, ...(o.library !== undefined ? { library: o.library } : {}) };
+  // (Track F6: the proof's search prices the risk, measures the way and runs in pieces as the trackers' do, so the plan proven is the plan flown)
+  return {
+    start,
+    goals: w.goals,
+    margin: o.margin,
+    maxNodes: o.maxNodes ?? STRETCH_PLAN_NODES,
+    maxMs: o.maxMs ?? STRETCH_PLAN_MS,
+    weight: o.weight ?? STRETCH_WEIGHT,
+    ...(o.library !== undefined ? { library: o.library } : {}),
+    ...(o.riskCost !== undefined ? { riskCost: o.riskCost } : {}),
+    ...(o.geodesic ? { geodesic: true } : {}),
+    ...(o.pieces !== undefined ? { pieces: o.pieces } : {}),
+  };
 }
 
 export function proofOf(p: RoutePlan): WindowProof {
-  return { complete: p.complete, robust: p.robust, reached: p.reached, ms: p.ms, ...(p.complete ? { plan: p } : {}) };
+  return { complete: p.complete, robust: p.robust, reached: p.reached, ms: p.ms, clearance: p.clearance, ...(p.complete ? { plan: p } : {}) };
 }
 
 export interface StretchDeps extends Omit<RocketDeps, 'loop'> {
@@ -257,6 +283,9 @@ export interface StretchOptions {
   rules?: TrackerRules;
   riskCost?: number;
   firstPlan?: RoutePlan;
+  /** Track F6: the searches' heuristic through the air (RouteRequest.geodesic) and their pieces (RouteRequest.pieces). */
+  geodesic?: boolean;
+  pieces?: number;
   note?: (msg: string) => void;
 }
 
@@ -300,6 +329,8 @@ export function flyStretch(d: StretchDeps, o: StretchOptions): { done: Promise<S
     ...(o.rules ? { rules: o.rules } : {}),
     ...(o.riskCost !== undefined ? { riskCost: o.riskCost } : {}),
     ...(o.firstPlan ? { firstPlan: o.firstPlan } : {}),
+    ...(o.geodesic ? { geodesic: true } : {}),
+    ...(o.pieces !== undefined ? { pieces: o.pieces } : {}),
     yaw: loop.command.yaw,
     note: (m) => {
       log.info(m);
@@ -350,7 +381,10 @@ export function flyStretch(d: StretchDeps, o: StretchOptions): { done: Promise<S
     // the glide from the first airborne tick (the loop holds the request one input; Track F0 / F3), as live.ts
     const glide = state.gliding || !state.onGround;
     loop.setCommand({ yaw: c.yaw, pitch: c.pitch, jump: c.jump === true, glide, forward: 0, strafe: 0, sprint: false, sneak: false });
-    if (c.fire && r.slot >= 0 && hand.canFire(tick) && serverGliding && state.boostTicks === 0) hand.fire(r.slot, state.pos, tick);
+    if (c.fire) {
+      if (r.slot >= 0 && hand.canFire(tick) && serverGliding && state.boostTicks === 0) hand.fire(r.slot, state.pos, tick);
+      else chain.fireHeld(); // Track F6: the belief must not burn a rocket the body never had
+    }
     if (tick >= max) finish?.('timeout');
   });
   const offEvent = loop.onEvent((e) => {

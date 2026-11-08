@@ -17,7 +17,7 @@ import type { Vec3 } from '../../../world/types.ts';
 import type { RoutePlan } from '../route/types.ts';
 import type { CoarseMode, Corridor, CorridorLeg, CorridorProvider, PortalId } from './coarse-port.ts';
 import { flightSpace } from './cost.ts';
-import { changeCell, nextWindow, splitLeg, standableNear, UNDER_TAIL_MIN, WINDOW_BLOCKS, type CellSolid, type Stretch, type Window } from './stretches.ts';
+import { changeCell, LANDING_REACH, nextWindow, splitLeg, standableNear, UNDER_TAIL_MIN, WINDOW_BLOCKS, type CellSolid, type Stretch, type Window } from './stretches.ts';
 
 /** An underground fly leg is walked instead when more than this share of its underground part is unknown space (the layer's unknownFraction for the leg, or the executor's sampling). */
 export const UNKNOWN_FLY_MAX = 0.25;
@@ -87,8 +87,10 @@ export interface CorridorPorts {
   provider: CorridorProvider;
   position(): Vec3 | undefined;
   dim(): number;
-  /** A cell of the live model: true solid, false air, undefined not loaded. */
+  /** A cell of the live model: true solid, false air, undefined not loaded. Track F6: water counts as solid here (no flight through it, no standing in it). */
   solid: CellSolid;
+  /** Track F6: a cell a body may stand on (the real solids, water not among them); default `solid`. */
+  floor?: CellSolid;
   loaded(x: number, z: number): boolean;
   /** Resolves true once the chunks round every point are loaded, false after `timeoutMs`. */
   waitLoaded(points: readonly Vec3[], timeoutMs: number): Promise<boolean>;
@@ -157,6 +159,14 @@ export interface ExecutorOptions {
   prove?: boolean;
   /** Track F5b: a proof must also be robust to the burn (default true with `prove`); a complete plan that is not counts as unproven. */
   proveRobust?: boolean;
+  /** Track F6: the standable cells within this of a window's landing cell a touchdown may end in (stretches.ts LANDING_REACH by default). */
+  landReach?: number;
+  /**
+   * Track F6: a proof whose plan keeps less than this from a solid (blocks) is no proof: the body stands within the margin of
+   * a wall and the plan grazes it on the way out (a proven plan of clearance 0.09 took 5.2 in the owner's cave); the
+   * executor walks to the window's first goal and proves again from there. Default 0 (any complete plan).
+   */
+  proveClearMin?: number;
 }
 
 /** Track F5b: a window is cut back to what its plan reached at most this many times before the rest is walked to the first goal. */
@@ -173,6 +183,8 @@ export interface WindowProof {
   /** Goals the plan reached. */
   reached: number;
   ms: number;
+  /** Track F6: the plan's least clearance from a solid (blocks). */
+  clearance: number;
   /** The plan itself when complete (the window's first tracker flies it; drive.ts `firstPlan`). */
   plan?: RoutePlan;
 }
@@ -194,8 +206,13 @@ export class CorridorExecutor {
 
   constructor(ports: CorridorPorts, o: ExecutorOptions = {}) {
     this.p = ports;
-    this.o = { modes: o.modes ?? CORRIDOR_MODES, unknownMax: o.unknownMax ?? UNKNOWN_FLY_MAX, maxReplans: o.maxReplans ?? MAX_REPLANS, chunkWaitMs: o.chunkWaitMs ?? CHUNK_WAIT_MS, planMs: o.planMs ?? CORRIDOR_PLAN_MS, underFly: o.underFly ?? UNDER_FLY, windowBlocks: o.windowBlocks ?? WINDOW_BLOCKS, tailMin: o.tailMin ?? UNDER_TAIL_MIN, prove: o.prove ?? false, proveRobust: o.proveRobust ?? true };
+    this.o = { modes: o.modes ?? CORRIDOR_MODES, unknownMax: o.unknownMax ?? UNKNOWN_FLY_MAX, maxReplans: o.maxReplans ?? MAX_REPLANS, chunkWaitMs: o.chunkWaitMs ?? CHUNK_WAIT_MS, planMs: o.planMs ?? CORRIDOR_PLAN_MS, underFly: o.underFly ?? UNDER_FLY, windowBlocks: o.windowBlocks ?? WINDOW_BLOCKS, tailMin: o.tailMin ?? UNDER_TAIL_MIN, prove: o.prove ?? false, proveRobust: o.proveRobust ?? true, landReach: o.landReach ?? LANDING_REACH, proveClearMin: o.proveClearMin ?? 0 };
     this.log = ports.log ?? silentLogger;
+  }
+
+  /** Track F6: the cells a body may stand on (the port's `floor`, else its `solid`). */
+  private get floor(): CellSolid {
+    return this.p.floor ?? this.p.solid;
   }
 
   /** The flight space of a body point (the layer's volume there), undefined for solid or unknown cells. */
@@ -322,10 +339,12 @@ export class CorridorExecutor {
       if (!cell && s.leave && next) {
         const after = next.points[1] ?? next.end;
         const before = s.points[s.points.length - 2] ?? s.points[0]!;
-        cell = changeCell(s.leave, before, after, next.space, this.p.solid);
+        // (Track F6: the dry cells first; none, the cells as Track F5a read them, water and all: a change is better walked to than failed)
+        const changeAt = (): Vec3 | undefined => changeCell(s.leave!, before, after, next.space, this.p.solid, this.floor) ?? (this.p.floor ? changeCell(s.leave!, before, after, next.space, this.floor) : undefined);
+        cell = changeAt();
         if (!cell) {
           await this.p.waitLoaded([s.leave.center, after], this.o.chunkWaitMs);
-          cell = changeCell(s.leave, before, after, next.space, this.p.solid);
+          cell = changeAt();
         }
       }
       if (!cell) return { how: 'fly', res: { ok: false, reason: `no floor known where leg ${i + 1} changes at ${s.leave ? fmt(s.leave.center) : '?'}`, ...(s.leave ? { mark: { id: s.leave.id, mode: 'fly' as const } } : {}) } };
@@ -388,7 +407,8 @@ export class CorridorExecutor {
         if (w.ok || near(w.at ?? this.p.position(), end, 1.5)) return { ok: true };
         return { ok: false, reason: `the walk underground to ${fmt(end)} failed (${w.reason ?? '?'})`, ...(s.portals[0] ? { mark: { id: s.portals[0].id, mode: 'walk' as const } } : {}), ...(w.reason === 'interrupted' ? { fatal: true } : {}) };
       }
-      const windowOf = (): Window | undefined => nextWindow(s, pos, { loaded: (x, z) => this.p.loaded(x, z), solid: this.p.solid, endCell: end, maxBlocks: this.o.windowBlocks, tailMin: this.o.tailMin });
+      const winOpts = { loaded: (x: number, z: number) => this.p.loaded(x, z), solid: this.p.solid, floor: this.floor, endCell: end, tailMin: this.o.tailMin, landReach: this.o.landReach };
+      const windowOf = (): Window | undefined => nextWindow(s, pos, { ...winOpts, maxBlocks: this.o.windowBlocks });
       let win = windowOf();
       if (win?.cut && win.blocks < UNDER_FLY_MIN) {
         // the chunks ahead may be on their way: wait, then look again
@@ -409,6 +429,12 @@ export class CorridorExecutor {
         for (let cut = 0; cut <= PROVE_CUTS && win; cut++) {
           this.r.proofs++;
           const pf = await this.p.proveWindow(win);
+          if (pf.complete && pf.clearance < this.o.proveClearMin) {
+            // Track F6: the plan grazes a solid (the body stands within the margin of a wall): no takeoff from here; the walk
+            // to the first goal moves the body and the proof is asked again from there
+            this.log.info(`corridor: the plan for the window to ${fmt(win.end)} keeps only ${pf.clearance.toFixed(2)} from a solid (under ${this.o.proveClearMin}): no takeoff from here`);
+            break;
+          }
           if (pf.complete && (pf.robust || !this.o.proveRobust)) {
             proven = true;
             plan = pf.plan;
@@ -418,7 +444,7 @@ export class CorridorExecutor {
             // complete but not robust to the burn: a shorter window may be (the long burn's overshoot has less to hit)
             this.log.info(`corridor: the plan for the window to ${fmt(win.end)} is complete but not robust to the burn: cut back`);
             if (win.goals.length <= 2 || cut === PROVE_CUTS) break;
-            const shorter = nextWindow(s, pos, { loaded: (x, z) => this.p.loaded(x, z), solid: this.p.solid, endCell: end, maxBlocks: Math.max(1, (win.goalS[Math.max(0, win.goals.length - 3)] ?? 0) + 0.5), tailMin: this.o.tailMin });
+            const shorter = nextWindow(s, pos, { ...winOpts, maxBlocks: Math.max(1, (win.goalS[Math.max(0, win.goals.length - 3)] ?? 0) + 0.5) });
             if (!shorter || shorter.goals.length >= win.goals.length) break;
             this.r.cuts++;
             win = shorter;
@@ -426,7 +452,7 @@ export class CorridorExecutor {
           }
           if (pf.reached <= 0 || cut === PROVE_CUTS) break;
           // cut back to the goals the plan reached: the window ends at the last portal or via point among them
-          const shorter = nextWindow(s, pos, { loaded: (x, z) => this.p.loaded(x, z), solid: this.p.solid, endCell: end, maxBlocks: Math.max(1, (win.goalS[pf.reached - 1] ?? 0) + 0.5), tailMin: this.o.tailMin });
+          const shorter = nextWindow(s, pos, { ...winOpts, maxBlocks: Math.max(1, (win.goalS[pf.reached - 1] ?? 0) + 0.5) });
           if (!shorter || shorter.goals.length >= win.goals.length) break;
           this.log.info(`corridor: the plan for the window to ${fmt(win.end)} reached ${pf.reached} of ${win.goals.length} goals (${pf.ms.toFixed(0)} ms): cut back to ${fmt(shorter.end)} (${Math.round(shorter.blocks)} blocks, ${shorter.goals.length} goals)`);
           this.r.cuts++;
@@ -435,12 +461,12 @@ export class CorridorExecutor {
         if (!proven) {
           // no window from here has a complete plan: walk to the first goal of the window (or the stretch's end) and look again
           const first = win?.goals[0];
-          const cell = first?.kind === 'waypoint' ? standableNear(this.p.solid, { x: (first.box.min.x + first.box.max.x) / 2, y: first.box.min.y, z: (first.box.min.z + first.box.max.z) / 2 }) : undefined;
+          const cell = first?.kind === 'waypoint' ? standableNear(this.p.solid, { x: (first.box.min.x + first.box.max.x) / 2, y: first.box.min.y, z: (first.box.min.z + first.box.max.z) / 2 }, 2, this.floor) : undefined;
           // a first goal the body already stands at (the window starts on its floor), or no progress twice: the next goal, then the end
           let to = cell ?? end;
           if (near(pos, to, 1.5) || stuckWalks >= 1) {
             const second = win?.goals[1];
-            const next = second?.kind === 'waypoint' ? standableNear(this.p.solid, { x: (second.box.min.x + second.box.max.x) / 2, y: second.box.min.y, z: (second.box.min.z + second.box.max.z) / 2 }) : undefined;
+            const next = second?.kind === 'waypoint' ? standableNear(this.p.solid, { x: (second.box.min.x + second.box.max.x) / 2, y: second.box.min.y, z: (second.box.min.z + second.box.max.z) / 2 }, 2, this.floor) : undefined;
             to = stuckWalks >= 2 || !next || near(pos, next, 1.5) ? end : next;
           }
           stuckWalks = near(pos, to, 1.5) ? stuckWalks + 1 : 0;

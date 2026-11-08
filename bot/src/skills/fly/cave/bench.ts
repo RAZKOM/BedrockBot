@@ -12,7 +12,7 @@ import { CoarseLayerImpl, terrainSource } from '../../coarse/index.ts';
 import { stepBody, wallImpactDamage } from '../../input/physics.ts';
 import { IDLE_COMMAND, initialBody, type BlockQuery, type BodyState, type MoveCommand } from '../../input/types.ts';
 import { FlightCost } from '../corridor/cost.ts';
-import { proofOf, STRETCH_PLAN_MS, STRETCH_PLAN_NODES, STRETCH_WEIGHT, TrackerChain, windowRequest } from '../corridor/drive.ts';
+import { proofOf, STRETCH_PLAN_MS, STRETCH_PLAN_NODES, STRETCH_WEIGHT, TrackerChain, windowRequest, type StretchOptions } from '../corridor/drive.ts';
 import { CorridorExecutor, type CorridorPorts, type CorridorReport, type ExecutorOptions, type StepOutcome } from '../corridor/executor.ts';
 import type { CorridorProvider } from '../corridor/coarse-port.ts';
 import type { CellSolid, Window } from '../corridor/stretches.ts';
@@ -94,9 +94,9 @@ export const latencyTicks = (ms: number): number => Math.ceil(ms / 50);
  * plan comes back `latencyTicks` after it was asked for (`latency`, default true: the body flies on meanwhile), except
  * the proven first plan (`firstPlan`), which is there before the takeoff.
  */
-export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[], margin: number, o: CaveBenchOptions = {}, seed = o.seed ?? 1, firstPlan?: RoutePlan, planGrid: RouteGrid = gridOf(world)): Promise<WindowRun> {
+export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[], margin: number, o: CaveBenchOptions = {}, seed = o.seed ?? 1, firstPlan?: RoutePlan, planGrid: RouteGrid = gridOf(world), height?: number): Promise<WindowRun> {
   const r = rng(seed);
-  const style = (o.style ?? true) ? caveStretchOptions({ margin }, styleOf(o)) : { margin };
+  const style: Partial<StretchOptions> & { margin: number } = (o.style ?? true) ? caveStretchOptions({ margin, ...(height !== undefined ? { height } : {}) }, styleOf(o)) : { margin };
   const req = windowRequest({ goals }, from, 16, { margin: style.margin, maxNodes: o.maxNodes, maxMs: o.maxMs });
   const grid: RouteGrid = gridOfSnapshot(snapshotFor(planGrid, req));
   const yaw = req.start.yaw;
@@ -117,9 +117,11 @@ export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[
     weight: STRETCH_WEIGHT,
     landLibrary: 'landing',
     yaw,
-    ...('window' in style && style.window !== undefined ? { window: style.window } : {}),
-    ...('rules' in style && style.rules ? { rules: style.rules } : {}),
-    ...('riskCost' in style && style.riskCost !== undefined ? { riskCost: style.riskCost } : {}),
+    ...(style.window !== undefined ? { window: style.window } : {}),
+    ...(style.rules ? { rules: style.rules } : {}),
+    ...(style.riskCost !== undefined ? { riskCost: style.riskCost } : {}),
+    ...(style.geodesic ? { geodesic: true } : {}),
+    ...(style.pieces !== undefined ? { pieces: style.pieces } : {}),
     ...(firstPlan ? { firstPlan } : {}),
     ...(o.note ? { note: o.note } : {}),
   });
@@ -165,7 +167,7 @@ export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[
       cmd.boostStart = burn;
       rockets--;
       endsAt.push(t + burn + 3);
-    }
+    } else if (c.fire) chain.fireHeld(); // Track F6: as the live driver (drive.ts): the rocket was not used, the belief drops its burn
     const before = body;
     const step = stepBody(body, cmd, world);
     if (!step.simulated) {
@@ -263,18 +265,21 @@ export interface CaveTrip {
 export interface TripWorld {
   name: string;
   query: BlockQuery;
+  /** The planner's grid and the executor's cells (Track F6: water is an obstacle in both), and the cells a body stands on. */
   grid: RouteGrid;
   solid: CellSolid;
+  floor?: CellSolid;
 }
 
 /** A generated cave as a trip's world. */
 export function tripWorldOf(cave: Cave): TripWorld {
-  return { name: cave.name, query: cave.world, grid: gridOf(cave.world), solid: (x, y, z) => cave.world.solidAt(x, y, z) };
+  const blocked = (x: number, y: number, z: number): boolean => cave.world.solidAt(x, y, z) === true || (cave.world.liquidAt?.(x, y, z) ?? null) !== null;
+  return { name: cave.name, query: cave.world, grid: { solid: blocked }, solid: blocked, floor: (x, y, z) => cave.world.solidAt(x, y, z) };
 }
 
 /** Track F5a's real cave (corridor/cave.ts caveWorld) as a trip's world. */
 export function tripWorldOfCave(world: CaveWorld, name = 'cave'): TripWorld {
-  return { name, query: world.query, grid: world.grid, solid: world.solid };
+  return { name, query: world.query, grid: world.grid, solid: world.solid, floor: world.floor };
 }
 
 /** The layer over a cave's terrain, flight's prices registered. */
@@ -312,6 +317,7 @@ export async function flyTrip(cave: TripWorld, provider: CorridorProvider, start
     position: () => ({ ...pos }),
     dim: () => 0,
     solid: cave.solid,
+    ...(cave.floor ? { floor: cave.floor } : {}),
     loaded: () => true,
     waitLoaded: () => Promise.resolve(true),
     flySky: (cell) => {
@@ -321,14 +327,17 @@ export async function flyTrip(cave: TripWorld, provider: CorridorProvider, start
     },
     proveWindow: (win) => {
       const st = styleOf(o);
-      const req = windowRequest(win, pos, 16, { margin: win.margin + ((o.style ?? true) ? st.marginExtra : 0), maxNodes: st.proveNodes, maxMs: o.maxMs === undefined ? st.proveMs : Math.max(o.maxMs, st.proveMs) });
+      const on = o.style ?? true;
+      // (Track F6: the proof's request prices the risk and measures the way as the window's trackers will)
+      const so = on ? caveStretchOptions(win, st) : { margin: win.margin };
+      const req = windowRequest(win, pos, 16, { ...so, maxNodes: st.proveNodes, maxMs: o.maxMs === undefined ? st.proveMs : Math.max(o.maxMs, st.proveMs) });
       const g = gridOfSnapshot(snapshotFor(cave.grid, req));
       const p = planRoute(req, g);
       o.note?.(`proof: ${p.complete ? 'complete' : `partial (${p.why ?? '?'})`} ${p.reached}/${win.goals.length} goals, ${p.ticks} ticks, ${p.rockets} rockets, clearance ${p.clearance.toFixed(2)}, ${p.expanded} expanded in ${p.ms.toFixed(0)} ms`);
       return Promise.resolve(proofOf(p));
     },
     flyUnder: async (win, _label, plan) => {
-      const r = await flyWindow(cave.query, pos, win.goals, win.margin, o, seed * 97 + ++k, plan, cave.grid);
+      const r = await flyWindow(cave.query, pos, win.goals, win.margin, o, seed * 97 + ++k, plan, cave.grid, win.height);
       windows.push(r);
       o.onWindow?.(win, r);
       if (r.end === 'water') water++;

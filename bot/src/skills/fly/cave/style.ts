@@ -29,6 +29,24 @@ export interface CaveStyle {
   proveRobust: boolean;
   proveMs: number;
   proveNodes: number;
+  /**
+   * Track F6: the searches measure the way through the air (route/field.ts), not the straight line through rock. Measured
+   * off: with the search in pieces the straight line completed the proofs in fewer expansions (docs/flight.md "Tight cave
+   * flight"), and the field's plan touched the wall of a clean 3 x 3 bore at burn 9 where the straight line's did not.
+   */
+  geodesic: boolean;
+  /** Track F6: the searches run in pieces of this many goals, each from the end of the piece before (search.ts planPieces; 0: one search). */
+  pieces: number;
+  /**
+   * Track F6: the standable cells within this of a window's landing cell a touchdown may end in (stretches.ts landingGoal).
+   * Measured at 4: in a 3-wide bore the zone is the whole floor and the plan lands beside the wall (7 scrapes at burn 21
+   * in the clean 3 x 3 bore), so the style keeps LANDING_REACH.
+   */
+  landReach: number;
+  /** Track F6: `marginExtra` is added only in a bore at least this high (a 3-high passage keeps the bore margin: the extra cost the tight proofs). */
+  marginExtraFrom: number;
+  /** Track F6: a proof's plan must keep this much from every solid (executor.ts ExecutorOptions.proveClearMin): a body standing against a wall does not take off there. */
+  proveClearMin: number;
   /** The tracker's rules. */
   rules: TrackerRules;
 }
@@ -48,22 +66,34 @@ export const CAVE_STYLE: Readonly<CaveStyle> = Object.freeze({
   proveRobust: true,
   proveMs: 2000,
   proveNodes: 80_000,
+  geodesic: false,
+  pieces: 3,
+  landReach: 2,
+  marginExtraFrom: 4,
+  proveClearMin: 0.15,
   rules: Object.freeze<TrackerRules>({
     commitTicks: 12,
     bailAfter: 6,
     partialStop: true,
     completeOnly: true,
     replanLead: 12,
-    bailError: 1.5,
+    // Track F6: 1.0 (F5b's 1.5): on the generator set with the proofs completing, 1.5 gave 79 % clean legs and 2 fatal trips, 1.0 gave 84 % and none
+    bailError: 1.0,
+    retime: true,
   }),
 });
 
 /** The executor's options for a cave trip with the style on (`flyCave on`); `off` is today's executor (the windows walked). */
 export function caveExecutorOptions(on: boolean, style: Readonly<CaveStyle> = CAVE_STYLE): ExecutorOptions {
-  return on ? { underFly: true, windowBlocks: style.windowBlocks, tailMin: style.tailMin, prove: style.prove, proveRobust: style.proveRobust } : { underFly: false };
+  return on ? { underFly: true, windowBlocks: style.windowBlocks, tailMin: style.tailMin, prove: style.prove, proveRobust: style.proveRobust, landReach: style.landReach, proveClearMin: style.proveClearMin } : { underFly: false };
 }
 
-/** The stretch options (drive.ts flyStretch) the style adds to a window: the margin, the goals per tracker, the rules, the risk weight. */
-export function caveStretchOptions(w: Pick<Window, 'margin'>, style: Readonly<CaveStyle> = CAVE_STYLE): Pick<StretchOptions, 'margin' | 'window' | 'rules' | 'riskCost'> {
-  return { margin: w.margin + style.marginExtra, window: style.chainWindow, rules: style.rules, riskCost: style.riskCost };
+/** Track F6: the window's margin in the style: the bore's own, plus `marginExtra` where the bore is `marginExtraFrom` high or more. */
+export function caveMargin(w: Pick<Window, 'margin'> & Partial<Pick<Window, 'height'>>, style: Readonly<CaveStyle> = CAVE_STYLE): number {
+  return w.margin + ((w.height ?? Infinity) >= style.marginExtraFrom ? style.marginExtra : 0);
+}
+
+/** The stretch options (drive.ts flyStretch) the style adds to a window: the margin, the goals per tracker, the rules, the risk weight, the search's pieces. */
+export function caveStretchOptions(w: Pick<Window, 'margin'> & Partial<Pick<Window, 'height'>>, style: Readonly<CaveStyle> = CAVE_STYLE): Pick<StretchOptions, 'margin' | 'window' | 'rules' | 'riskCost' | 'geodesic' | 'pieces'> {
+  return { margin: caveMargin(w, style), window: style.chainWindow, rules: style.rules, riskCost: style.riskCost, ...(style.geodesic ? { geodesic: true } : {}), ...(style.pieces > 0 ? { pieces: style.pieces } : {}) };
 }

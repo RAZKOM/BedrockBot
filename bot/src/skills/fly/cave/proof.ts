@@ -8,12 +8,14 @@
 // of the route grid) so the input loop never waits for it.
 import { isMainThread, parentPort, Worker, workerData, type MessagePort } from 'node:worker_threads';
 import type { Vec3 } from '../../../connection/types.ts';
+import { windowRequest } from '../corridor/drive.ts';
 import { boreMargin, nextWindow, type Stretch, type Window } from '../corridor/stretches.ts';
 import type { RouteGrid } from '../route/grid.ts';
+import { planRoute } from '../route/search.ts';
 import { gridOfSnapshot, snapshotGrid, SNAPSHOT_MAX, type GridSnapshot } from '../route/worker.ts';
 import { BURN } from '../route/types.ts';
 import { flyWindow, type WindowRun } from './bench.ts';
-import { CAVE_STYLE, type CaveStyle } from './style.ts';
+import { CAVE_STYLE, caveStretchOptions, type CaveStyle } from './style.ts';
 
 /** The burns a window is proven over: the nominal, the shortest and the longest (F0's range). */
 export const PROOF_BURNS: readonly number[] = [BURN.nominal, BURN.min, BURN.max];
@@ -59,12 +61,22 @@ export async function proveShortcut(grid: RouteGrid, points: readonly Vec3[], o:
   let n = 0;
   for (let guard = 0; guard < 16; guard++) {
     if (dist(from, stretch.end) < 1.5) break;
-    const win: Window | undefined = nextWindow(stretch, from, { loaded: () => true, solid, endCell, maxBlocks: style.windowBlocks, tailMin: 0 });
+    const win: Window | undefined = nextWindow(stretch, from, { loaded: () => true, solid, endCell, maxBlocks: style.windowBlocks, tailMin: 0, landReach: style.landReach });
     if (!win) return { proven: false, windows: n, lines, reason: `no window could be laid out from ${from.x.toFixed(0)} ${from.y.toFixed(0)} ${from.z.toFixed(0)} (no floor known)` };
     n++;
     const margin = Math.max(win.margin, boreMargin(win.width, win.height));
+    // Track F6: the window is proven from standing first, as the executor proves it before a takeoff (the plan in pieces at
+    // the style's budget); the flights then fly that plan over the burns. Before, every proof flight planned in the air
+    // (plans 40 ticks late at 2 s) and the owner's shortcut was never proven although its plan exists
+    const req = windowRequest(win, from, 16, { ...caveStretchOptions(win, style), maxMs: o.maxMs ?? style.proveMs, maxNodes: o.maxNodes ?? style.proveNodes });
+    const plan = planRoute(req, grid);
+    lines.push(`window ${n} (${Math.round(win.blocks)} blocks, ${win.goals.length} goals, margin ${margin.toFixed(2)}): the plan from standing ${plan.complete ? 'complete' : `partial (${plan.why ?? '?'})`} ${plan.reached}/${win.goals.length}, ${plan.ticks} ticks, ${plan.rockets} rockets, clearance ${plan.clearance.toFixed(2)}${plan.robust ? '' : ', not robust'}, ${plan.expanded} expanded in ${plan.ms.toFixed(0)} ms`);
+    // (as the executor proves a window: complete, robust to the burn when the style asks, clear of the walls; a plan that is
+    // not robust flew into the floor of a clean 3 x 3 bore at burn 9 when flown as the first plan)
+    const robustOk = plan.robust || !style.proveRobust;
+    if (!plan.complete || !robustOk || plan.clearance < style.proveClearMin) return { proven: false, windows: n, lines, reason: `window ${n}: ${!plan.complete ? `no complete plan from standing (${plan.reached}/${win.goals.length} goals)` : !robustOk ? 'the plan from standing is not robust to the burn' : `the plan keeps only ${plan.clearance.toFixed(2)} from a solid`}` };
     for (const burn of o.burns ?? PROOF_BURNS) {
-      const r: WindowRun = await flyWindow(world, from, win.goals, margin, { burn, maxMs: o.maxMs ?? PROOF_PLAN_MS, maxNodes: o.maxNodes ?? PROOF_PLAN_NODES, style: true, variant: style });
+      const r: WindowRun = await flyWindow(world, from, win.goals, margin, { burn, maxMs: o.maxMs ?? PROOF_PLAN_MS, maxNodes: o.maxNodes ?? PROOF_PLAN_NODES, style: true, variant: style }, undefined, plan, undefined, win.height);
       // clean: on the landing, or stopped and sunk onto the floor within SHORT_OK of it (a bail-out before the landing is the
       // style's own stop: the rest is walked), touching nothing and keeping the margin in the air
       const short = Math.hypot(r.at.x - (win.end.x + 0.5), r.at.z - (win.end.z + 0.5));

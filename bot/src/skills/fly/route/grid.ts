@@ -14,6 +14,8 @@ import { RISK_RANGE } from './types.ts';
 /** The grid the search reads: `solid` is true for a solid or unknown cell. */
 export interface RouteGrid {
   solid(x: number, y: number, z: number): boolean;
+  /** Track F6: the box the grid knows (a worker's snapshot: everything outside is solid), so a distance field (field.ts) can stay inside it. */
+  bounds?: { min: Vec3; size: Vec3 };
 }
 
 /** A RouteGrid over a BlockQuery: unknown cells are solid (`unknownSolid`, default true). */

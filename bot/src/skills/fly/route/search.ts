@@ -10,9 +10,10 @@
 // infeasible when the rockets in the hand cannot buy it). Budgets in nodes and ms; a partial plan (the node
 // nearest the next goal) when they run out.
 import { routeLibrary } from '../maneuvers-route.ts'; // Track F3: the landing library by name
+import { buildField, fieldDistance, type DistanceField } from './field.ts'; // Track F6: the geodesic heuristic
 import { HEURISTIC_SPEED, edgeOf, libraryFor, replay } from './primitives.ts';
 import { boxClear, type RouteGrid } from './grid.ts';
-import { EDGE_TICKS, RISK_COST, RISK_RANGE, ROCKET_COST, goalPoint, hspeed, type Maneuver, type RouteControl, type RouteEdge, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
+import { EDGE_TICKS, RISK_COST, RISK_RANGE, ROCKET_COST, cloneState, goalPoint, hspeed, type Maneuver, type RouteControl, type RouteEdge, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
 
 /** Blocks of height one rocket can buy at most (straight up: 22 while burning, coasting to 33; at -55 with the momentum 44). */
 export const ROCKET_UP = 45;
@@ -91,8 +92,12 @@ export function latticeKey(s: Readonly<RouteState>): string {
   return `${cx},${cy},${cz},${hb},${sb},${vb},${bb},${Math.min(s.rockets, 8)},${s.wp},${s.gliding ? 1 : 0}`;
 }
 
-/** The heuristic: ticks to the end through the remaining goals, plus the rockets the climb needs; Infinity when the rockets cannot buy it. */
-export function heuristic(s: Readonly<RouteState>, req: RouteRequest): number {
+/**
+ * The heuristic: ticks to the end through the remaining goals, plus the rockets the climb needs; Infinity when the rockets
+ * cannot buy it. Track F6: with a distance `field` the way is measured through the air (the geodesic from the body's cell to
+ * the next goal and on through the rest, field.ts) where the field knows the cell; the straight line elsewhere.
+ */
+export function heuristic(s: Readonly<RouteState>, req: RouteRequest, field?: DistanceField): number {
   if (s.wp >= req.goals.length) return 0;
   let d = 0;
   let from = s.pos;
@@ -100,6 +105,7 @@ export function heuristic(s: Readonly<RouteState>, req: RouteRequest): number {
   let climb = 0;
   // Track F3: the slow leg of a landing with a `via` point (down a shaft, into a slot), in ticks
   let slow = 0;
+  const geo = field ? fieldDistance(field, s.wp, s.pos) : undefined;
   for (let i = s.wp; i < req.goals.length; i++) {
     const g = req.goals[i]!;
     const p = goalPoint(g);
@@ -116,13 +122,15 @@ export function heuristic(s: Readonly<RouteState>, req: RouteRequest): number {
       from = via.pos;
       continue;
     }
-    d += Math.hypot(p.x - from.x, p.y - from.y, p.z - from.z);
+    // (with the field the chained distance is its own; the straight line still prices the climb)
+    if (geo === undefined) d += Math.hypot(p.x - from.x, p.y - from.y, p.z - from.z);
     if (p.y > top) {
       climb += p.y - top;
       top = p.y;
     }
     from = p;
   }
+  if (geo !== undefined) d = geo;
   let h = d / HEURISTIC_SPEED + slow;
   if (climb > 0) {
     const need = Math.ceil(climb / ROCKET_UP);
@@ -193,6 +201,8 @@ export function startMarginFor(grid: RouteGrid, start: Readonly<RouteState>, mar
 export interface SearchOptions {
   /** The library (default libraryFor(req.families); the takeoff yaws come from the first goal's bearing). */
   library?: Maneuver[];
+  /** Track F6: the distance field the heuristic reads (built by planRoute when `req.geodesic`). */
+  field?: DistanceField;
 }
 
 /**
@@ -212,9 +222,19 @@ export function libraryNamed(req: RouteRequest, edgeTicks: number, takeoffYaws: 
  * without them gets the rest of the budget and its plan says `robust: false`.
  */
 export function planRoute(req: RouteRequest, grid: RouteGrid, o: SearchOptions = {}): RoutePlan {
-  if (req.burnBranches === false) return searchOnce(req, grid, o);
   const t0 = performance.now();
-  const robust = searchOnce({ ...req, burnBranches: true }, grid, o);
+  // Track F6: the geodesic field once for both searches (its time counts against the budget: the worker's answer is what the loop waits for)
+  if (req.geodesic && !o.field && req.goals.length > 0) o = { ...o, field: buildField(grid, req.start.pos, req.goals, req.margin) };
+  if (req.pieces !== undefined && req.pieces > 0 && req.goals.length > req.pieces) return planPieces(req, grid, o, t0);
+  return planWhole(req, grid, o, t0);
+}
+
+/** One search through every goal of `req` (the robust pass, then the plain one), the field's time counted. */
+function planWhole(req: RouteRequest, grid: RouteGrid, o: SearchOptions, t0: number): RoutePlan {
+  const fieldMs = o.field?.ms ?? 0;
+  if (req.burnBranches === false) return withFieldMs(searchOnce({ ...req, maxMs: Math.max(1, req.maxMs - fieldMs) }, grid, o), fieldMs);
+  const robust = searchOnce({ ...req, burnBranches: true, maxMs: Math.max(1, req.maxMs - fieldMs) }, grid, o);
+  robust.ms += fieldMs;
   // (a plan without rockets has no branches, unless a burn already runs from the start: Track F4a)
   const burning = req.start.boost.max > 0 && req.start.boost.min < req.start.boost.max;
   if (robust.complete || (robust.rockets === 0 && !burning)) return robust;
@@ -226,6 +246,126 @@ export function planRoute(req: RouteRequest, grid: RouteGrid, o: SearchOptions =
   plain.ms += robust.ms;
   if (!plain.complete && plain.reached <= robust.reached) return robust;
   return plain;
+}
+
+function withFieldMs(p: RoutePlan, ms: number): RoutePlan {
+  p.ms += ms;
+  return p;
+}
+
+/**
+ * Track F6: the search in pieces of `req.pieces` goals, each from the state the piece before ends in, the plans joined
+ * into one. One search through a long window's goals spends its budget on the states far from the end (a 75-block
+ * cave window with 7 goals needed about 100 000 expansions, 30 s, to complete in one search: the lattice holds every
+ * speed and heading of every half-block cell the body may be in); a piece of a few goals completes in a few hundred
+ * to a few thousand. When a piece comes back partial, the piece before it and it are searched together from the end
+ * of the one before that (room to come in slower: a landing right after a fast passage is the usual failure), once;
+ * still partial, the plan joined so far is the partial plan. Every piece's own nodes budget is `req.maxNodes`; the
+ * ms budget is the whole request's.
+ */
+function planPieces(req: RouteRequest, grid: RouteGrid, o: SearchOptions, t0: number): RoutePlan {
+  const n = req.goals.length;
+  const size = req.pieces!;
+  const stack = req.stackRockets === true;
+  const pieces: { plan: RoutePlan; from: number; to: number; start: RouteState }[] = [];
+  let from = 0;
+  let start = req.start;
+  let merged = false;
+  // the field's time and the searches dropped by a back-off are charged to the next piece (the plan's ms is the whole wait)
+  let carried = o.field?.ms ?? 0;
+  for (;;) {
+    if (from >= n) break;
+    const to = Math.min(n, from + (merged ? 2 * size : size));
+    const left = req.maxMs - (performance.now() - t0);
+    const sub: RouteRequest = { ...req, start, goals: req.goals.slice(from, to), maxMs: Math.max(1, left) };
+    delete sub.pieces;
+    const view = o.field ? fieldView(o.field, from, to) : undefined;
+    const p = planWhole(sub, grid, { ...o, ...(view ? { field: view } : {}) }, performance.now());
+    p.ms += carried;
+    carried = 0;
+    if (!p.complete) {
+      // back off once: the piece before this one and this one together, from the state before them
+      const prev = pieces[pieces.length - 1];
+      if (prev && !merged && left > 50) {
+        pieces.pop();
+        carried = prev.plan.ms + p.ms;
+        from = prev.from;
+        start = prev.start;
+        merged = true;
+        continue;
+      }
+      pieces.push({ plan: p, from, to, start });
+      break;
+    }
+    pieces.push({ plan: p, from, to, start });
+    merged = false;
+    from = to;
+    const end = p.states[p.states.length - 1];
+    if (!end) break;
+    start = { ...cloneState(end), wp: 0 };
+    delete start.early;
+    delete start.late;
+  }
+  return joinPlans(req, pieces.map((x) => x.plan), stack);
+}
+
+/** The field of goals `from .. to` of the request (the rest beyond the piece's last goal is a constant, dropped). */
+function fieldView(f: DistanceField, from: number, to: number): DistanceField {
+  const beyond = f.rest[to - 1] ?? 0;
+  return { ...f, dist: f.dist.slice(from, to), rest: f.rest.slice(from, to).map((r) => (r >= 0xffff || beyond >= 0xffff ? r : r - beyond)) };
+}
+
+/** The pieces' plans as one (the states re-flown from the request's start over every control). */
+function joinPlans(req: RouteRequest, plans: readonly RoutePlan[], stackRockets: boolean): RoutePlan {
+  const controls: RouteControl[] = [];
+  const edges: RoutePlan['edges'] = [];
+  let rockets = 0;
+  let cost = 0;
+  let clearance = RISK_RANGE;
+  let nodes = 0;
+  let expanded = 0;
+  let ms = 0;
+  let robust = true;
+  let complete = true;
+  let budget: RoutePlan['budget'] = 'none';
+  let why: string | undefined;
+  for (const p of plans) {
+    for (const e of p.edges) edges.push({ ...e, at: e.at + controls.length });
+    controls.push(...p.controls);
+    rockets += p.rockets;
+    cost += p.cost;
+    clearance = Math.min(clearance, p.clearance);
+    nodes += p.nodes;
+    expanded += p.expanded;
+    ms += p.ms;
+    if (!p.robust) robust = false;
+    if (!p.complete) {
+      complete = false;
+      budget = p.budget;
+      why = p.why;
+    }
+  }
+  const states = replay(req.start, controls, req.goals, stackRockets);
+  const reached = states.length ? states[states.length - 1]!.wp : 0;
+  const last = plans[plans.length - 1];
+  return {
+    controls,
+    states,
+    edges,
+    ticks: controls.length,
+    rockets,
+    cost,
+    clearance,
+    complete: complete && reached >= req.goals.length,
+    reached,
+    robust: edges.length > 0 && robust,
+    ...(last?.robustClearance !== undefined ? { robustClearance: last.robustClearance } : {}),
+    nodes,
+    expanded,
+    ms,
+    budget,
+    ...(why ? { why } : {}),
+  };
 }
 
 function searchOnce(req: RouteRequest, grid: RouteGrid, o: SearchOptions): RoutePlan {
@@ -245,7 +385,7 @@ function searchOnce(req: RouteRequest, grid: RouteGrid, o: SearchOptions): Route
   const weight = req.weight ?? 1;
   const open = new Heap();
   const closed = new Set<string>();
-  const h0 = heuristic(req.start, req);
+  const h0 = heuristic(req.start, req, o.field);
   // Track F4a: a burn already running whose end is unknown (the tracker re-plans mid-burn: its range is [min, max]) is
   // branched from the start, as a rocket fired in the plan is, so the plan clears for its every end
   const b0 = req.start.boost;
@@ -284,7 +424,7 @@ function searchOnce(req: RouteRequest, grid: RouteGrid, o: SearchOptions): Route
     for (const m of lib) {
       const e = edgeOf(m, n.s, n.parent ? ctx : ctx0);
       if (!e) continue;
-      const h = heuristic(e.out, req);
+      const h = heuristic(e.out, req, o.field);
       if (!Number.isFinite(h)) continue;
       const g = n.g + e.ticks + e.rockets * rocketCost + e.risk * riskCost;
       const child: Node = { s: e.out, g, f: g + weight * h, h, parent: n, edge: e, tick: n.tick + e.ticks };

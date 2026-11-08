@@ -156,6 +156,18 @@ export interface RouteRequest {
    * plan that may be a few ticks longer than the best one.
    */
   weight?: number;
+  /**
+   * Track F6: the heuristic measures the way to the goals through the air (field.ts: a distance field over the request's
+   * box from every goal) instead of the straight line, which runs through rock in a winding passage and left the search
+   * partial there. Default false (the open-air drivers and the courses fly as before); the cave style turns it on.
+   */
+  geodesic?: boolean;
+  /**
+   * Track F6: the search in pieces of this many goals, each from the state the piece before ends in, joined into one
+   * plan (search.ts planPieces): a long window's proof completes where one search through every goal ran out of
+   * budget far from the end. Undefined or 0: one search (the default).
+   */
+  pieces?: number;
 }
 
 export type PrimitiveFamily = 'glide' | 'turn' | 'rocket' | 'brake' | 'hover' | 'takeoff' | 'maneuver';

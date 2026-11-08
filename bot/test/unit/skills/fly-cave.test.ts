@@ -54,7 +54,11 @@ describe('the box extract (world/cache/export.ts)', () => {
     expect(w.grid.solid(10, 95, 7)).toBe(false); // over it: the sky
     expect(w.grid.solid(10, 61, 18)).toBe(true); // an unknown chunk
     expect(w.query.liquidAt!(53, 60, 7)).toEqual({ liquid: 'water', height: 8 / 9 });
-    expect(w.grid.solid(53, 60, 7)).toBe(false);
+    // Track F6: water is an obstacle to the flight (the grid and `solid`), not a floor (`floor`)
+    expect(w.grid.solid(53, 60, 7)).toBe(true);
+    expect(w.solid(53, 60, 7)).toBe(true);
+    expect(w.floor(53, 60, 7)).toBe(false);
+    expect(w.floor(10, 59, 7)).toBe(true);
     expect(w.coarse.chunk(1, 0, 0)?.cls(5, 61, 7)).toBe(CLS_AIR); // wholly inside the box
     expect(w.coarse.chunk(1, 0, 0)?.cls(5, 30, 7)).toBe(CLS_SOLID); // under the box: solid
     expect(w.coarse.chunk(0, 1, 0)).toBeUndefined(); // cut by the box and never seen

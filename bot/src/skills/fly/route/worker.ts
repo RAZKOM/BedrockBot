@@ -58,13 +58,15 @@ export function snapshotFor(grid: RouteGrid, req: RouteRequest, pad = SNAPSHOT_P
 /** A RouteGrid over a snapshot (cells outside it are solid). */
 export function gridOfSnapshot(s: GridSnapshot): RouteGrid {
   const { min, size, data } = s;
-  return gridOfCells((x, y, z) => {
+  const g = gridOfCells((x, y, z) => {
     const lx = x - min.x;
     const ly = y - min.y;
     const lz = z - min.z;
     if (lx < 0 || ly < 0 || lz < 0 || lx >= size.x || ly >= size.y || lz >= size.z) return true;
     return data[(ly * size.z + lz) * size.x + lx] === 1;
   });
+  g.bounds = { min: { ...min }, size: { ...size } }; // Track F6: the distance field stays inside the snapshot
+  return g;
 }
 
 interface PlanMessage {

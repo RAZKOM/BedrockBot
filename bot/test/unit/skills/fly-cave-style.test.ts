@@ -292,18 +292,22 @@ describe('a waypoint route as a corridor (cave/route.ts)', () => {
   });
 
   it('proves a shortcut through a straight 3 x 3 bore (flown over the burn range) and refuses one into a 2-high bore', { timeout: 180_000 }, async () => {
-    const [straight] = standardCourses();
-    const grid = gridOf(straight!.world);
-    const s = straight!.start.pos;
-    // the bore runs +z from the start: the stretch from standing 3 in to 34 in
-    const a = { x: s.x, y: F + 1, z: s.z };
-    const b = { x: s.x, y: F + 1, z: s.z + 31 };
-    expect(grid.solid(Math.floor(a.x), F, Math.floor(a.z))).toBe(true);
-    const yes = await proveShortcut(grid, [a, b], { maxMs: 1e9, maxNodes: 40_000 });
+    // Track F6: the proof plans each window from standing first and asks that plan to be robust to the burn; a 31-block bore
+    // has no such plan (a rocket's longest burn carries the body past the landing before it may brake: F2's brake needs the
+    // burn surely over), a 50-block one has. The stretch from standing 3 in to 47 in of a 3 x 3 bore along +z.
+    const world = withBoxes(flatWorld(), [
+      { from: { x: -3, y: F, z: -2 }, to: { x: 3, y: F + 4, z: 52 }, solid: true },
+      { from: { x: -1, y: F, z: 0 }, to: { x: 1, y: F + 2, z: 50 }, solid: false },
+    ]);
+    const grid = gridOf(world);
+    const a = { x: 0.5, y: F, z: 2.5 };
+    const b = { x: 0.5, y: F, z: 47.5 };
+    expect(grid.solid(Math.floor(a.x), F - 1, Math.floor(a.z))).toBe(true);
+    const yes = await proveShortcut(grid, [a, b], { maxMs: 1e9, maxNodes: 80_000 });
     console.log(yes.lines.join('\n'));
     expect(yes.proven, yes.reason ?? yes.lines.join('\n')).toBe(true);
     expect(yes.windows).toBeGreaterThanOrEqual(1);
-    expect(yes.lines.length).toBe(yes.windows * 3);
+    expect(yes.lines.length).toBe(yes.windows * 4); // (Track F6: the plan from standing, then the three burns)
     // a 2-high bore: no jump glides under its ceiling (F0), the flight never leaves the floor
     const low = standardCourses().find((c) => c.name === 'stair45-2high')!;
     const lg = gridOf(low.world);
@@ -349,7 +353,7 @@ describe('the window proven before its takeoff (executor.ts `prove`, Track F5b)'
     };
     return { w, calls, ex: new CorridorExecutor(ports, { underFly: true, prove: true }) };
   }
-  const fake = (complete: boolean, reached: number): WindowProof => ({ complete, robust: true, reached, ms: 1, ...(complete ? { plan: { controls: [], states: [], edges: [], ticks: 0, rockets: 0, cost: 0, clearance: 1, complete: true, reached, robust: true, nodes: 1, expanded: 1, ms: 1, budget: 'none' } } : {}) });
+  const fake = (complete: boolean, reached: number): WindowProof => ({ complete, robust: true, reached, ms: 1, clearance: 1, ...(complete ? { plan: { controls: [], states: [], edges: [], ticks: 0, rockets: 0, cost: 0, clearance: 1, complete: true, reached, robust: true, nodes: 1, expanded: 1, ms: 1, budget: 'none' } } : {}) });
 
   it('a complete proof flies the window with its plan; a partial one cuts the window back to the goals reached', async () => {
     const t = trip((w, n) => (n === 1 ? fake(false, 3) : fake(true, w.goals.length)));
