@@ -251,7 +251,8 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
     const w0 = water;
     const t0 = performance.now();
     await b.command(`!fly ${goal.x - 0.5} ${goal.y} ${goal.z - 0.5}`);
-    const end = await b.reply((s) => s.startsWith('arrived') || s.startsWith('landed') || (s.startsWith('fly: ') && !s.startsWith('fly: flying')), from, 600_000).catch((err: unknown) => `no end line: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`);
+    // Track R1: the trip's own end line (the corridor's arrival or failure, a landing's), not any `fly:` line on the way
+    const end = await b.reply((s) => s.startsWith('arrived') || s.startsWith('landed') || s.startsWith('fly: the corridor to ') || s.startsWith('fly: landed, but'), from, 600_000).catch((err: unknown) => `no end line: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`);
     await b.command('!stop');
     await sleep(1000);
     const logs = b.logs.slice(n0).map((l) => l.replace(/^\S+ (info|warn|error) /, ''));

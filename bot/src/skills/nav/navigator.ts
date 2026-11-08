@@ -35,6 +35,8 @@ import type { CoarseLayer, CoarseMode, CorridorStatus } from '../coarse/types.ts
 import { AirClock, bodyInWater, headUnderWater } from './water.ts'; // Track W1
 import { trappedWhy, waterDigConditions } from './digout.ts'; // Track W2
 import { DIG_WAY_MAX_BLOCKS, fallsHurt, harmlessFalls, lastResortFalls, type DigWayLevel } from './digway.ts'; // Track W3
+import { isNaturalTerrain } from '../place/scaffold.ts'; // Track R1
+import { REACH_RULES, causeTag, causeWords, relaxOptions, rulesOnPath, sealedPocket, type ReachCause, type ReachRule } from './reach.ts'; // Track R1
 
 /** Track R: goto options of the navigator. `blacklist`: consult and feed the failure blacklist (default: `any` and `getToBlock` goals). */
 export type NavGotoOptions = GotoOptions & { blacklist?: boolean };
@@ -237,6 +239,29 @@ interface Search {
   slices: number;
 }
 
+/** Track R1: the "why unreachable" searches of a goto about to give up (nav/reach.ts). */
+interface ExplainRun {
+  /** The options the goto planned with at its last level (the owner's rules). */
+  owner: PathOptions;
+  start: LocatedNode;
+  /** 'all': every rule lifted; 'single': the rules in `queue` lifted one at a time. */
+  stage: 'all' | 'single';
+  /** The rules the running search lifts. */
+  cur: readonly ReachRule[];
+  queue: ReachRule[];
+  /** The rules the path found with every rule lifted breaks (`rulesOnPath`). */
+  used: ReachRule[];
+  search: Search;
+  searches: number;
+  /** The searches run with BIG_SEARCH x the main budget (the one with every rule lifted was cut by its budget). */
+  big: boolean;
+  /** The goal is in unloaded world and the owner's rules closed the loaded world round the body: a way to the frontier is the way. */
+  frontier: boolean;
+}
+
+/** What one "why" search asks (ExplainRun's fields it reads). */
+type ExplainAsk = Pick<ExplainRun, 'owner' | 'start' | 'cur' | 'big' | 'frontier'>;
+
 interface ActionRun {
   kind: 'dig' | 'use' | 'place' | 'close';
   /** Path index of the node the action is for (close: the node the body stopped on). */
@@ -280,6 +305,8 @@ interface Active {
   members: number[] | undefined;
   useBlacklist: boolean;
   lastMain: PathResult['status'] | undefined;
+  /** Track R1: the goto's partial plans led back and forth (no way on in the loaded world, as an exhaustive `none`). */
+  looped: boolean;
   opts: Required<GotoOptions>;
   pathOpts: PathOptions;
   path: PathNode[];
@@ -335,6 +362,25 @@ interface Active {
   level: DigWayLevel;
   /** Track W3: blocks the dig way has dug in this goto. */
   dug: number;
+  /**
+   * Track R1 (nav/reach.ts): the next main plan runs with BIG_SEARCH x the worker's budgets (a search cut by its budget
+   * with no progress is no answer: it is asked again, bigger, before it counts); the (node, level, waypoint) keys
+   * that had their bigger search.
+   */
+  big: boolean;
+  bigTried: Set<string>;
+  /** Track R1: the "why unreachable" searches under way (GotoOptions.explain, nav/reach.ts); `explained` once they ran; `cause` their answer. */
+  explain: ExplainRun | undefined;
+  explained: boolean;
+  cause: ReachCause | undefined;
+  /** Track R1: partial plans this goto walked to a frontier end (PathOptions.frontier). */
+  frontierLegs: number;
+  /** Track R1: the start cells of the partial main plans this goto walked (cell:level): a partial plan that ends on one is a loop. */
+  partialFrom: Set<string>;
+  /** Track R1: ticks this goto waited for chunks on such a loop at unloaded world (never reset: at most `unloadedWaitTicks` a goto). */
+  loopWaited: number;
+  /** Track R1: partial off-path re-plans this goto made from each start cell (cell:level): `OFF_PATH_LOOP` from one cell is a loop. */
+  offPathFrom: Map<string, number>;
   /** Track BE: ticks in a row the body was 2 to 3 blocks off the path; the tick of a correction / knock / teleport whose path check is pending. */
   ticksAway: number;
   recheck: number | undefined;
@@ -365,6 +411,14 @@ const BODY_HEIGHT = 1.8;
 const CORRIDOR_WAIT_TICKS = 12;
 /** Track CB: a corridor is re-planned after a change near it at most this often (ticks). */
 const CORRIDOR_REPLAN_TICKS = 60;
+/** Track R1: the bigger search's budget, x the worker's main budget (2 s, 500 000 nodes: 8 s, 2 000 000). */
+export const BIG_SEARCH = 4;
+/** Track R1: "why unreachable" searches a goto runs at most (every rule lifted, then single rules). */
+export const EXPLAIN_MAX_SEARCHES = 5;
+/** Track R1: frontier legs a goto walks at most (PathOptions.frontier). */
+export const FRONTIER_MAX_LEGS = 6;
+/** Track R1: partial off-path re-plans from one start cell (one level) after which the goto counts it as no progress. */
+export const OFF_PATH_LOOP = 6;
 /** Track CB: failed waypoints before the goto stops asking for corridors (the raw goal as before). */
 const CORRIDOR_MAX_FAILURES = 3;
 
@@ -404,6 +458,8 @@ export class Navigator {
   costsOverride: (() => Partial<NonNullable<PathOptions['costs']>> | undefined) | undefined;
   /** Track BI: the long-fall policy read live each plan (skills/fall: health, armour, the water bucket, settings); undefined = no drops deeper than maxDrop. */
   fallPolicy: (() => PathOptions['falls']) | undefined;
+  /** Track R1: health + absorption now (the "why unreachable" search with the fall rule lifted lets a fall cost all but 1 HP); undefined: 20. */
+  health: (() => number) | undefined;
   /** Track BI: re-plans wait while this is true (a clutch's water and its flow around the landing are not gone yet). */
   holdPlans: (() => boolean) | undefined;
   /**
@@ -518,6 +574,15 @@ export class Navigator {
 
   get busy(): boolean {
     return this.active !== undefined || this.queued !== undefined; // decision 0051: a goto waiting for the dig-down off a scaffold
+  }
+
+  /**
+   * Track R1: a worker search of the goto is under way with nothing new to hand over yet (no result, no interim
+   * answer waiting): the reachability bench (nav/bench) paces its ticks at the server's rate while this holds.
+   */
+  get awaitingWorker(): boolean {
+    const s = this.active?.explain?.search.s ?? this.active?.search?.s; // Track R1: the "why" searches too
+    return s instanceof WorkerSearch && (s.state === 'waiting' || s.state === 'sent') && !s.interimReady;
   }
 
   /** Track W1: the grid's cell classes (water.ts reads them). */
@@ -712,6 +777,7 @@ export class Navigator {
       closeDoors: options.closeDoors ?? false,
       closeTrapdoors: options.closeTrapdoors ?? true, // Track BG
       avoidFarmlandDrops: options.avoidFarmlandDrops ?? false, // the farmer: plan around falls onto farmland
+      explain: options.explain ?? false, // Track R1
     };
     return new Promise((resolve) => {
       const report: GotoReport = {
@@ -744,12 +810,15 @@ export class Navigator {
       };
       this.lastReport = report;
       const noBreak = new Set<number>(this.keptCells); // Track BK: the kept cells
+      // Track R1: never the goal's own floor (a stair dug up a tower took the block the goal stands on: the goal was gone)
+      if (goal.type === 'block') noBreak.add(cellKey(Math.floor(goal.p.x), Math.floor(goal.p.y) - 1, Math.floor(goal.p.z)));
       const a: Active = {
         goal,
         planGoal,
         members,
         useBlacklist,
         lastMain: undefined,
+        looped: false,
         opts,
         pathOpts: this.planOptions(opts, noBreak),
         path: [],
@@ -786,6 +855,15 @@ export class Navigator {
         noProgress: undefined,
         level: 0, // Track W3
         dug: 0,
+        big: false, // Track R1
+        bigTried: new Set(),
+        explain: undefined,
+        explained: false,
+        cause: undefined,
+        frontierLegs: 0,
+        partialFrom: new Set(),
+        loopWaited: 0,
+        offPathFrom: new Map(),
         ticksAway: 0, // Track BE
         recheck: undefined,
         corridor: undefined, // Track CB
@@ -800,6 +878,7 @@ export class Navigator {
           dropSearch(a); // Track AB
           report.result = r;
           if (!r.ok && a.why) report.why = a.why; // Track BH
+          a.explain = undefined; // Track R1
           this.loop.release();
           if (!r.ok && r.reason === 'unreachable' && report.segments === 0) this.log.warn(this.noSegmentLine(a));
           this.settleBlacklist(a, r); // Track R
@@ -929,10 +1008,198 @@ export class Navigator {
     a.report.failures++;
     this.log.info(`goto: failure ${a.report.failures}/${this.maxFailures} (${why})`);
     if (a.report.failures >= this.maxFailures) {
-      a.finish({ ok: false, reason: 'unreachable' });
+      this.giveUp(a);
       return true;
     }
     return false;
+  }
+
+  // ---- Track R1: why a goto is unreachable (nav/reach.ts) ------------------------------------------------------
+
+  /**
+   * The goto found no way and gives up: with `explain` (the `!goto` command), the "why" searches first (the goto ends
+   * when they answered, `stepExplain`), else now; `unreachable` with the cause class and its words when there is one.
+   */
+  private giveUp(a: Active): void {
+    if (a.opts.explain && !a.explained && this.startExplain(a)) return;
+    this.finishUnreachable(a);
+  }
+
+  private finishUnreachable(a: Active): void {
+    const c = a.cause;
+    a.finish(c ? { ok: false, reason: 'unreachable', cause: causeTag(c), note: causeWords(c) } : { ok: false, reason: 'unreachable' });
+  }
+
+  /**
+   * Why a block goal nobody stands in is unreachable: unloaded; an open cell over nothing to stand on (mid-air) is a
+   * block placed under it away (`place`) unless the cell is sealed; anything else (a wall, lava) the world.
+   */
+  private unstandableCause(x: number, y: number, z: number, start: LocatedNode): ReachCause {
+    const c = this.grid.cls(x, y, z);
+    if (!c) return { cls: 'unloaded', rules: [] };
+    if (c.boxes.length === 0 && !c.liquid && !sealedPocket(this.grid, { x, y, z }, start)) return { cls: 'rule', rules: ['place'] };
+    return { cls: 'world', rules: [] };
+  }
+
+  /** Track R1: cell (x, y, z) is a dive node whose water column ends in anything but air (astar `riseTicks` Infinity). */
+  private diveGoalUnderRoof(x: number, y: number, z: number): boolean {
+    if (this.grid.dive(x, y, z) !== y) return false;
+    for (let k = 1; k <= 48; k++) {
+      const w = this.grid.water(x, y + k, z);
+      if (w === undefined) return false;
+      if (w) continue;
+      return !(this.grid.free(x, y + k, z) === true && this.grid.cls(x, y + k, z)?.liquid === undefined);
+    }
+    return false;
+  }
+
+  /** The options the goto's last level plans with: the owner's rules the "why" searches lift. */
+  private ownerOptions(a: Active): PathOptions {
+    const o = this.planOptions(a.opts, a.noBreak);
+    const dig = this.digWayOn(a);
+    if (dig) {
+      o.allowBreak = true;
+      o.digWay = { left: DIG_WAY_MAX_BLOCKS - a.dug };
+    }
+    if (o.falls) o.falls = lastResortFalls(o.falls, dig);
+    return o;
+  }
+
+  /**
+   * Starts the "why" searches; false when the cause needs none (an unloaded goal the body can still head for, a
+   * sealed goal) or none can run (no start node).
+   */
+  private startExplain(a: Active): boolean {
+    a.explained = true;
+    const gp = goalPoint(a.goal);
+    if (gp?.y === undefined) return false;
+    const st = this.loop.state;
+    const start = locateNode(this.grid, st.pos, this.preferNode(st));
+    let frontier = false;
+    if (this.grid.cls(Math.floor(gp.x), Math.floor(gp.y), Math.floor(gp.z)) === undefined) {
+      a.cause = { cls: 'unloaded', rules: [] };
+      // the owner's rules closed the loaded world round the body (an exhaustive search touching no unloaded cell):
+      // not (c), whatever opens the way to the unloaded world is the answer
+      if (!start || (a.lastMain !== 'none' && !a.looped) || a.frontierLegs >= FRONTIER_MAX_LEGS) return false;
+      frontier = true;
+    }
+    if (!start) return false;
+    // a goal under water with no air straight over it (a flooded cave's roof): no plan ends there (a dive goal needs
+    // its way up), whatever rule is lifted
+    if (!frontier && this.diveGoalUnderRoof(Math.floor(gp.x), Math.floor(gp.y), Math.floor(gp.z))) {
+      a.cause = { cls: 'world', rules: [] };
+      return false;
+    }
+    if (!frontier && sealedPocket(this.grid, { x: Math.floor(gp.x), y: Math.floor(gp.y), z: Math.floor(gp.z) }, start)) {
+      a.cause = { cls: 'world', rules: [] }; // the goal is sealed in bedrock (or lava): no search needed
+      return false;
+    }
+    dropSearch(a);
+    a.follower = undefined;
+    a.action = undefined;
+    a.replan = undefined;
+    this.loop.release();
+    const owner = this.ownerOptions(a);
+    const ask = { owner, start, cur: REACH_RULES, big: false, frontier };
+    a.explain = { ...ask, stage: 'all', queue: [], used: [], search: this.explainSearch(a, ask), searches: 1 };
+    this.log.info(`goto: no way under the rules (${a.why ?? 'no path'}); asking why, with every rule lifted${frontier ? ' (towards the unloaded world)' : ''}`);
+    return true;
+  }
+
+  /** The options of a "why" search: `run.cur` lifted, the frontier end when the way to the unloaded world is asked. */
+  private explainOptions(a: Active, run: ExplainAsk): PathOptions {
+    const o = relaxOptions(run.owner, run.cur, { hp: this.health?.(), dug: a.dug });
+    if (run.frontier) o.frontier = true;
+    else delete o.frontier;
+    return o;
+  }
+
+  /**
+   * A "why" search from the run's start to the goto's goal with `run.cur` lifted: in the worker with the main budget
+   * (BIG_SEARCH x when `run.big`) when it can, else in-thread in slices.
+   */
+  private explainSearch(a: Active, run: ExplainAsk): Search {
+    const o = this.explainOptions(a, run);
+    const client = this.plannerFor();
+    const goal = plainGoal(a.planGoal);
+    if (client && goal) {
+      const saved = a.pathOpts;
+      const big = a.big;
+      a.pathOpts = o;
+      a.big = run.big;
+      const spec = this.workerSpec(a, true);
+      a.pathOpts = saved;
+      a.big = big;
+      if (spec) return { s: client.search('main', run.start, goal, spec, this.worldGen), kind: 'main', via: 'worker', reason: 'retry', tick: a.t, slices: 0, goal: a.planGoal };
+    }
+    const b = this.workerBudgets;
+    const k = run.big ? BIG_SEARCH : 1;
+    return { s: new PathSearch(this.grid, run.start, a.planGoal, { ...o, maxNodes: this.pathOpts.maxNodes ?? b.mainNodes * k, maxMs: this.pathOpts.maxMs ?? b.mainMs * k }), kind: 'main', via: 'thread', reason: 'retry', tick: a.t, slices: 0, goal: a.planGoal };
+  }
+
+  /** One tick of the "why" searches: the body holds still; an answer ends the goto with its cause. */
+  private stepExplain(a: Active, s: InputLoopState): void {
+    const run = a.explain!;
+    this.idleBody(s);
+    a.guard.idle();
+    let res = run.search.s.step(this.sliceMs);
+    if (!res && run.search.s instanceof WorkerSearch && run.search.s.failed) {
+      // the worker went away: the same search in-thread
+      const o = this.explainOptions(a, run);
+      const k = run.big ? BIG_SEARCH : 1;
+      run.search = { ...run.search, s: new PathSearch(this.grid, run.start, a.planGoal, { ...o, maxNodes: this.workerBudgets.mainNodes * k, maxMs: this.workerBudgets.mainMs * k }), via: 'thread' };
+      res = run.search.s.step(this.sliceMs);
+    }
+    if (!res) return;
+    this.record(a, res, run.search);
+    a.report.planMs += res.ms;
+    // towards an unloaded goal from a closed loaded world: a way to the frontier is a way
+    const found = res.status === 'found' || (run.frontier && res.frontier === true);
+    const cut = !found && res.limited;
+    this.log.info(`goto: why search (${run.cur.length === REACH_RULES.length ? 'every rule lifted' : `${run.cur.join(' + ')} lifted`}${run.big ? `, ${BIG_SEARCH} x the budget` : ''}): ${found && res.status !== 'found' ? 'a way to the unloaded world' : res.status}${cut ? ' (cut by its budget)' : ''}, ${res.expanded} expanded`);
+    if (run.stage === 'all') {
+      if (cut && !run.big && run.searches < EXPLAIN_MAX_SEARCHES) {
+        // a search cut by its budget is no answer: once more with BIG_SEARCH x the budget (the rest of the run too)
+        run.big = true;
+        run.searches++;
+        run.search = this.explainSearch(a, run);
+        return;
+      }
+      if (!found) {
+        a.cause = { cls: cut ? 'budget' : 'world', rules: [] };
+        this.finishUnreachable(a);
+        return;
+      }
+      run.used = rulesOnPath(this.grid, res.path, run.owner);
+      if (run.used.length === 0) {
+        // the way breaks no rule: the owner's way is open and the goto did not make it (cut searches, a walk that stuck): (d)
+        a.cause = { cls: 'budget', rules: [] };
+        this.finishUnreachable(a);
+        return;
+      }
+      if (run.used.length === 1) {
+        a.cause = { cls: 'rule', rules: run.used };
+        this.finishUnreachable(a);
+        return;
+      }
+      // several rules on that path: each alone, the ones it broke first
+      run.stage = 'single';
+      run.queue = [...run.used, ...REACH_RULES.filter((r) => !run.used.includes(r))];
+    } else if (found) {
+      a.cause = { cls: 'rule', rules: [...run.cur] };
+      this.finishUnreachable(a);
+      return;
+    }
+    const next = run.queue.shift();
+    if (next === undefined || run.searches >= EXPLAIN_MAX_SEARCHES) {
+      // no rule alone opens the way: the ones the open path broke, together
+      a.cause = { cls: 'rule', rules: run.used };
+      this.finishUnreachable(a);
+      return;
+    }
+    run.cur = [next];
+    run.searches++;
+    run.search = this.explainSearch(a, run);
   }
 
   /**
@@ -978,6 +1245,15 @@ export class Navigator {
       o.digWay = { left: DIG_WAY_MAX_BLOCKS - a.dug };
     }
     if (o.falls) o.falls = a.level < 2 ? harmlessFalls(o.falls) : lastResortFalls(o.falls, dig);
+    // Track R1: at the last level, a goal in unloaded world with no partial end worth walking is headed for by the
+    // frontier end (a few legs a goto: the loaded world moves with the body and the next one may lead back)
+    if (this.nextLevel(a) === undefined && a.frontierLegs < FRONTIER_MAX_LEGS) o.frontier = true;
+    else delete o.frontier;
+  }
+
+  /** Track W3: the level after the goto's own, undefined at the last one. */
+  private nextLevel(a: Active): DigWayLevel | undefined {
+    return a.level === 0 && this.digWayOn(a) ? 1 : a.level < 2 && fallsHurt(this.fallPolicy?.()) ? 2 : undefined;
   }
 
   /**
@@ -985,7 +1261,7 @@ export class Navigator {
    * when it is open, then the falls that hurt when the long-fall policy has damage to give. Returns true when it will.
    */
   private escalate(a: Active, why: string): boolean {
-    const next: DigWayLevel | undefined = a.level === 0 && this.digWayOn(a) ? 1 : a.level < 2 && fallsHurt(this.fallPolicy?.()) ? 2 : undefined;
+    const next = this.nextLevel(a);
     if (next === undefined) return false;
     a.level = next;
     a.noProgress = undefined;
@@ -1034,6 +1310,11 @@ export class Navigator {
         a.bestGoalDist = d;
         a.goalProgressTick = a.t;
       }
+    }
+    // Track R1: the "why unreachable" searches run to their answer (a few seconds at most: the timeout waits)
+    if (a.explain) {
+      this.stepExplain(a, s);
+      return;
     }
     if ((gp ? a.t - a.goalProgressTick : a.t) > a.opts.timeoutTicks || a.t > a.opts.timeoutTicks * 20) {
       a.finish({ ok: false, reason: 'timeout' });
@@ -1355,6 +1636,10 @@ export class Navigator {
     const cut = a.pathOpts.digOut ? a.path.find((n) => n.cut && n.x === start.x && n.y === start.y && n.z === start.z)?.cut : undefined;
     if (cut) a.pathOpts.startCut = cut;
     else delete a.pathOpts.startCut;
+    // Track R1: a plan-ahead from the path's end digs what the dig way's budget leaves after the digs still ahead on the
+    // path (the body has not dug them yet: a.dug does not count them; the owner's cave bench dug 14 of 12 that way)
+    const dw = a.pathOpts.digWay;
+    if (dw) dw.left = Math.max(0, DIG_WAY_MAX_BLOCKS - a.dug - (kind === 'ahead' ? this.digsAhead(a) : 0));
     if (client) {
       const goal = plainGoal(navGoal);
       const spec = goal && this.workerSpec(a, main);
@@ -1458,8 +1743,8 @@ export class Navigator {
     const prot = o.protectedBlocks;
     return {
       ...(o.costs ? { costs: { ...o.costs } } : {}),
-      maxNodes: this.pathOpts.maxNodes ?? (main ? b.mainNodes : b.segmentNodes),
-      maxMs: this.pathOpts.maxMs ?? (main ? b.mainMs : b.segmentMs),
+      maxNodes: this.pathOpts.maxNodes ?? (main ? b.mainNodes * (a.big ? BIG_SEARCH : 1) : b.segmentNodes),
+      maxMs: this.pathOpts.maxMs ?? (main ? b.mainMs * (a.big ? BIG_SEARCH : 1) : b.segmentMs),
       allowBreak: o.allowBreak ?? false,
       allowPlace: o.allowPlace ?? false,
       allowOpen: o.allowOpen ?? false,
@@ -1478,6 +1763,8 @@ export class Navigator {
       ...(o.digOut ? { digOut: true } : {}), // Track W2
       ...(o.startCut ? { startCut: o.startCut } : {}),
       ...(o.digWay ? { digWay: { left: o.digWay.left } } : {}), // Track W3
+      ...(o.relax ? { relax: { ...o.relax } } : {}), // Track R1
+      ...(o.frontier ? { frontier: true } : {}),
     };
   }
 
@@ -1514,7 +1801,7 @@ export class Navigator {
     if (res.status === 'none') {
       a.why = this.noPathWhy(res);
       if (search.wp === undefined && this.escalate(a, a.why)) return true; // Track W3: the interim path is walked until the re-plan
-      a.finish({ ok: false, reason: 'unreachable' });
+      this.giveUp(a);
       return false;
     }
     const at = new Map<number, number>();
@@ -1543,6 +1830,17 @@ export class Navigator {
     return { ...a.pathOpts, maxNodes: this.pathOpts.maxNodes ?? this.segmentNodes, maxMs: this.pathOpts.maxMs ?? (main ? this.mainMs : this.segmentMs) };
   }
 
+  /** Track R1: dig way cells still to be dug on the path ahead of the body (its cells not free yet). */
+  private digsAhead(a: Active): number {
+    let n = 0;
+    for (let i = a.passedAbs + 1; i < a.path.length; i++) {
+      const node = a.path[i]!;
+      if (!node.act?.dig || node.move === 'swimOut' || node.cut !== undefined) continue;
+      for (const c of node.act.dig) if (this.grid.free(c.x, c.y, c.z) === false) n++;
+    }
+    return n;
+  }
+
   /** Starts a main search from the body's node. Returns false when the goto finished or must wait. */
   private startMain(a: Active, s: InputLoopState): boolean {
     const reason = a.replan ?? 'retry';
@@ -1569,11 +1867,12 @@ export class Navigator {
     if (reason === 'retry' && np?.key === cellKey(start.x, start.y, start.z) && np.gen === this.worldGen && np.via === (this.plannerFor() ? 'worker' : 'thread') && np.wp === wp && np.level === a.level && !movingGoal(a.planGoal)) {
       this.loop.release();
       this.log.info('goto: no retry: the same search from the same node, nothing changed since it went nowhere');
-      a.finish({ ok: false, reason: 'unreachable' });
+      this.giveUp(a);
       return false;
     }
     if (a.goal.type === 'block') {
       // a block goal nobody can stand in (water, a wall, mid-air) is unreachable, whatever the search says
+      // (Track R1: not a natural block the dig way may open: the dig way's level digs it out, flyC's walk down)
       const g = a.goal.p;
       const gx = Math.floor(g.x);
       const gy = Math.floor(g.y);
@@ -1583,9 +1882,10 @@ export class Navigator {
         const c = this.grid.cls(gx, gy, gz);
         if (c?.floor && c.top === 1 && !c.fullCube && this.grid.stand(gx, gy + 1, gz) === gy + 1) {
           a.planGoal = { type: 'block', p: { x: gx, y: gy + 1, z: gz } };
-        } else if (!(a.pathOpts.allowBreak || a.pathOpts.allowPlace) && sneakFits(this.grid, gx, gy, gz) !== true && !waterGoalCell(this.grid, gx, gy, gz)) { // Track BC: a cell the body fits sneaking is a goal; Track W3: a water cell is reached swimming or diving there
+        } else if (!(a.pathOpts.allowBreak || a.pathOpts.allowPlace) && !(c && c.boxes.length > 0 && isNaturalTerrain(c.name) && this.digWayOn(a)) && sneakFits(this.grid, gx, gy, gz) !== true && !waterGoalCell(this.grid, gx, gy, gz)) { // Track BC: a cell the body fits sneaking is a goal; Track W3: a water cell is reached swimming or diving there
           a.why = `goal cell ${gx},${gy},${gz} (${c?.name ?? 'unloaded'}) is not standable`;
-          a.finish({ ok: false, reason: 'unreachable' });
+          if (a.opts.explain) a.cause = this.unstandableCause(gx, gy, gz, start); // Track R1: no search can stand there
+          this.finishUnreachable(a);
           return false;
         }
       }
@@ -1598,6 +1898,7 @@ export class Navigator {
     const noAction = new Set([...this.blacklist.cells('place'), ...this.blacklist.cells('use'), ...a.noAction]);
     if (noAction.size) a.pathOpts.noAction = noAction;
     a.search = this.newSearch(a, start, 'main', reason); // Track AB: in the worker when it is ready
+    a.big = false; // Track R1: one bigger search per ask
     this.idleBody(s); // Track W1: in water, held at its depth while the plan is searched
     return true;
   }
@@ -1640,12 +1941,44 @@ export class Navigator {
         this.loop.release();
         return false;
       }
-      a.finish({ ok: false, reason: 'unreachable' });
+      this.giveUp(a);
       return false;
     }
     if (res.path.length === 1 && res.status !== 'found') {
       this.loop.release();
-      if (search.wp !== undefined && a.corridor && !(res.unknown && !res.limited)) this.corridorFailed(a, search.wp, res.reason === 'no_progress' ? 'no progress towards it' : 'no node closer to it'); // Track CB
+      // the closest reachable node is where we stand: nothing to do but wait for the world to change
+      const lim = `${res.limited ? ', search limit hit' : ''}${res.unknown ? ', touched unloaded world' : ''}`;
+      const what = res.reason === 'no_progress' ? 'no partial end 5+ blocks from the start' : 'no node closer to the goal than the start'; // Track BA
+      const why = res.digOut && !res.unknown && !res.limited ? trappedWhy(res.digOut, res.expanded) : `no progress possible (${what}; ${res.expanded} expanded${lim})`; // Track W2; Track R1: not "trapped" on a search cut short
+      // a worker search, or in-thread with no worker at all (not the 40 ms in-thread stand-in while the worker starts:
+      // its retry runs in the worker with 50 x the budget)
+      const full = search.via === 'worker' || !this.planner || this.plannerThreads() <= 0;
+      // Track R1: a worker search the budget cut short is no answer: once per node, level and waypoint it is asked
+      // again with BIG_SEARCH x the budget before it may escalate the level, count as a failure or be skipped
+      const s0 = res.path[0];
+      const bigKey = s0 ? `${cellKey(s0.x, s0.y, s0.z)}:${a.level}:${search.wp ?? '-'}` : undefined;
+      if (res.limited && search.via === 'worker' && bigKey !== undefined && !a.bigTried.has(bigKey)) {
+        a.bigTried.add(bigKey);
+        a.big = true;
+        a.replan = 'retry';
+        a.waitUntil = a.t + 1;
+        this.log.info(`goto: the plan was cut by its budget with no progress (${res.expanded} expanded): planning again with ${BIG_SEARCH} x the budget`);
+        return false;
+      }
+      // Track CB: no progress towards a corridor waypoint is the corridor's failure. Track R1: whatever the search
+      // touched (unloaded world lies past the server's view at the edge of every big search: waiting for it never
+      // ended a no-progress search towards a waypoint on a cliff's edge, and the levels never came), unless the
+      // waypoint's own cell is not loaded yet; and no failure counted: the raw goal is planned next, with its levels
+      if (search.wp !== undefined && a.corridor) {
+        const wpCell = a.corridor.wps[search.wp];
+        const wpUnloaded = wpCell !== undefined && this.grid.cls(Math.floor(wpCell.x), Math.floor(wpCell.y), Math.floor(wpCell.z)) === undefined;
+        if (!(wpUnloaded && a.unloadedTicks < this.unloadedWaitTicks)) {
+          this.corridorFailed(a, search.wp, res.reason === 'no_progress' ? 'no progress towards it' : 'no node closer to it');
+          a.replan = 'retry';
+          a.waitUntil = a.t + 1;
+          return false;
+        }
+      }
       if (res.unknown && !res.limited && a.unloadedTicks < this.unloadedWaitTicks) {
         // the segment ends at unloaded world: wait for the chunks
         a.unloadedTicks += 10;
@@ -1654,27 +1987,67 @@ export class Navigator {
         a.waitUntil = a.t + 10;
         return false;
       }
-      // the closest reachable node is where we stand: nothing to do but wait for the world to change
-      const lim = `${res.limited ? ', search limit hit' : ''}${res.unknown ? ', touched unloaded world' : ''}`;
-      const what = res.reason === 'no_progress' ? 'no partial end 5+ blocks from the start' : 'no node closer to the goal than the start'; // Track BA
-      const why = res.digOut && !res.unknown ? trappedWhy(res.digOut, res.expanded) : `no progress possible (${what}; ${res.expanded} expanded${lim})`; // Track W2
-      // a worker search, or in-thread with no worker at all (not the 40 ms in-thread stand-in while the worker starts:
-      // its retry runs in the worker with 50 x the budget)
-      const full = search.via === 'worker' || !this.planner || this.plannerThreads() <= 0;
       // Track W3: the next level before a failure counts (after the wait for unloaded world; never on the stand-in's
       // cut-off search: the worker's retry may find the way at this level)
       if (search.wp === undefined && (full || !res.limited) && this.escalate(a, why)) return false;
       if (this.fail(a, why)) return false;
-      // recorded for the retry skip (a full search only)
-      const s0 = res.path[0];
-      a.noProgress = s0 && res.reason === 'no_progress' && !res.unknown && full ? { key: cellKey(s0.x, s0.y, s0.z), gen: this.worldGen, via: search.via, wp: search.wp, level: a.level } : undefined;
+      // recorded for the retry skip (a full search only; Track R1: a worker search cut by its budget only once it was
+      // asked with BIG_SEARCH x the budget: before that its retry is no repeat)
+      const repeat = !res.limited || search.via !== 'worker' || (bigKey !== undefined && a.bigTried.has(bigKey));
+      a.noProgress = s0 && res.reason === 'no_progress' && !res.unknown && repeat && full ? { key: cellKey(s0.x, s0.y, s0.z), gen: this.worldGen, via: search.via, wp: search.wp, level: a.level } : undefined;
       a.replan = 'retry';
       a.waitUntil = a.t + 20;
       return false;
     }
+    // Track R1: a partial plan that ends where an earlier partial plan of this goto began (the same level) goes
+    // nowhere: from either end the other was the best end of a closed search, and the body walked
+    // between them until the goto's cap (lava:14:10, 1247 blocks). No progress: the corridor's failure, the next
+    // level, or a failure counted
+    if (res.status !== 'found' && res.path.length > 1) {
+      const at = (n: PathNode): string => `${cellKey(n.x, n.y, n.z)}:${a.level}`; // (towards a corridor waypoint or the raw goal alike: they took turns, lava:14:10)
+      // (and the body sent back off the path to the same cell again and again: a dead end whose plan-ahead led back
+      // along the path, the skip-ahead onto the copy coming back, the off-path check, the same plans: hills:20:13
+      // timed out after 240 plans from one cell)
+      const from = at(res.path[0]!);
+      const offs = search.reason === 'off_path' ? (a.offPathFrom.get(from) ?? 0) + 1 : 0;
+      if (offs) a.offPathFrom.set(from, offs);
+      const loop = a.partialFrom.has(at(res.path.at(-1)!)) || offs >= OFF_PATH_LOOP;
+      if (loop && res.unknown && a.loopWaited < this.unloadedWaitTicks) {
+        // the plans end at unloaded world: the chunks may come (nav-v2's strip). Once a goto, never reset by the plans
+        // in between (a goal far in unloaded world kept waiting until the goto's cap, unknown:16:0)
+        this.loop.release();
+        a.loopWaited += 10;
+        a.report.unloadedWait += 10;
+        a.replan = 'retry';
+        a.waitUntil = a.t + 10;
+        return false;
+      }
+      if (loop) {
+        this.loop.release();
+        const why = 'no progress possible (the partial plans lead back and forth between two ends)';
+        a.looped = true;
+        this.log.info(`goto: ${why}`);
+        if (search.wp !== undefined && a.corridor) {
+          this.corridorFailed(a, search.wp, 'no progress towards it (the partial plans loop)');
+          a.replan = 'retry';
+          a.waitUntil = a.t + 1;
+          return false;
+        }
+        if (this.escalate(a, why)) return false;
+        if (this.fail(a, why)) return false;
+        a.replan = 'retry';
+        a.waitUntil = a.t + 20;
+        return false;
+      }
+      a.partialFrom.add(at(res.path[0]!));
+    }
     if (res.path.length > 1) {
       a.unloadedTicks = 0;
       a.noProgress = undefined; // a plan went somewhere: a later failure from the same node is searched again
+      if (res.frontier && !flags.interim) {
+        a.frontierLegs++; // Track R1
+        this.log.info(`goto: no way in the loaded world: heading into the unloaded world towards the goal (frontier leg ${a.frontierLegs}/${FRONTIER_MAX_LEGS}, ${res.path.length} nodes)`);
+      }
     }
     a.path = res.path;
     a.status = search.wp !== undefined && res.status === 'found' ? 'partial' : res.status; // Track CB: a reached waypoint is not the goal: the leg's end plans on
@@ -1704,6 +2077,15 @@ export class Navigator {
     const first = res.path[0];
     const sameStart = !!end && first?.x === end.x && first.y === end.y && first.z === end.z;
     if (res.status === 'none' || res.path.length <= 1 || !sameStart) {
+      a.aheadBlocked = true;
+      return;
+    }
+    // Track R1: a partial segment that ends on a cell the path already went through adds no ground: the plan-ahead
+    // from there led back again (segments ping-ponging between two partial ends, the body held where it stood by the
+    // skip-ahead into each new copy of its node, lava:14:10). The body walks to the end first; the re-plan from there
+    // runs as a main search
+    const tail = res.path.at(-1)!;
+    if (res.status !== 'found' && a.path.some((n) => n.x === tail.x && n.y === tail.y && n.z === tail.z)) {
       a.aheadBlocked = true;
       return;
     }

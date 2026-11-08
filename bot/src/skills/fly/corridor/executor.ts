@@ -17,7 +17,7 @@ import type { Vec3 } from '../../../world/types.ts';
 import type { RoutePlan } from '../route/types.ts';
 import type { CoarseMode, Corridor, CorridorLeg, CorridorProvider, PortalId } from './coarse-port.ts';
 import { flightSpace } from './cost.ts';
-import { changeCell, LANDING_REACH, nextWindow, splitLeg, standableNear, UNDER_TAIL_MIN, WINDOW_BLOCKS, type CellSolid, type Stretch, type Window } from './stretches.ts';
+import { changeCell, LANDING_REACH, nextWindow, splitLeg, standable, standableNear, UNDER_TAIL_MIN, WINDOW_BLOCKS, type CellSolid, type Stretch, type Window } from './stretches.ts';
 
 /** An underground fly leg is walked instead when more than this share of its underground part is unknown space (the layer's unknownFraction for the leg, or the executor's sampling). */
 export const UNKNOWN_FLY_MAX = 0.25;
@@ -242,7 +242,7 @@ export class CorridorExecutor {
       this.r.plans++;
       this.log.info(`corridor: plan ${this.r.plans} to ${label}: ${c.status}, ${c.legs.length} legs (${c.legs.map((l) => `${l.mode} ${Math.round(l.blocks)}`).join(', ')}), ${Math.round(c.blocks)} blocks, ${Math.round(c.unknownFraction * 100)}% unknown${c.reason ? `: ${c.reason}` : ''}`);
       if (c.status === 'none' || c.legs.length === 0) return end(false, c.reason ?? 'no corridor');
-      const r = await this.follow(c);
+      const r = await this.follow(c, goal);
       if (r.ok) {
         if (c.status === 'found') {
           const at = this.p.position();
@@ -280,10 +280,13 @@ export class CorridorExecutor {
     return w;
   }
 
-  private async follow(c: Corridor): Promise<LegResult> {
+  private async follow(c: Corridor, goal: Vec3): Promise<LegResult> {
     for (const [i, leg] of c.legs.entries()) {
       if (this.p.stopped()) return { ok: false, reason: 'interrupted', fatal: true };
-      const r = leg.mode === 'fly' ? await this.flyLeg(leg, i) : await this.walkLeg(leg, i);
+      // Track R1: a partial corridor's last leg ends where the search stopped (a portal face, in the sky over a cave):
+      // the leg lands towards the trip's goal there
+      const towards = c.status !== 'found' && i === c.legs.length - 1 ? goal : undefined;
+      const r = leg.mode === 'fly' ? await this.flyLeg(leg, i, towards) : await this.walkLeg(leg, i);
       this.r.legs.push({ mode: leg.mode, how: r.how, ok: r.res.ok, blocks: Math.round(leg.blocks) });
       if (!r.res.ok) return r.res;
     }
@@ -291,7 +294,10 @@ export class CorridorExecutor {
   }
 
   private async walkLeg(leg: CorridorLeg, i: number): Promise<{ how: string; res: LegResult }> {
-    const to = cellOf(leg.to);
+    // Track R1: the leg's end where a body stands (a portal's cell may be in the rock beside the opening: flyC's walk
+    // down was a goto to a stone cell, unreachable at once)
+    let to = cellOf(leg.to);
+    if (!standable(this.p.solid, to.x, to.y, to.z, this.floor)) to = standableNear(this.p.solid, to, 2, this.floor) ?? to;
     const w = await this.walk(to, `leg ${i + 1} (${leg.mode}) to ${fmt(to)}`);
     if (w.ok || near(w.at ?? this.p.position(), to)) return { how: leg.mode, res: { ok: true } };
     const first = leg.portals[0];
@@ -320,7 +326,7 @@ export class CorridorExecutor {
     return n > 0 ? unknown / n : leg.unknownFraction;
   }
 
-  private async flyLeg(leg: CorridorLeg, i: number): Promise<{ how: string; res: LegResult }> {
+  private async flyLeg(leg: CorridorLeg, i: number, towards?: Vec3): Promise<{ how: string; res: LegResult }> {
     const stretches = splitLeg(leg, this.classify);
     const unknown = this.undergroundUnknown(leg, stretches);
     if (stretches.some((s) => s.space === 'under') && unknown > this.o.unknownMax) {
@@ -329,7 +335,10 @@ export class CorridorExecutor {
       const w = await this.walkLeg(leg, i);
       return { how: 'walk (unknown)', res: w.res };
     }
-    const legEnd = cellOf(leg.to);
+    // Track R1: the leg's end where the body can stand: its own cell, else (the end of a partial corridor, a face in mid-air:
+    // trip C cruised to a cell in the sky and walked at it) the trip's goal, else the standable cell nearest it
+    let legEnd = cellOf(leg.to);
+    if (!standable(this.p.solid, legEnd.x, legEnd.y, legEnd.z, this.floor)) legEnd = towards ?? standableNear(this.p.solid, legEnd, 2, this.floor) ?? legEnd;
     for (const [k, s] of stretches.entries()) {
       if (this.p.stopped()) return { how: 'fly', res: { ok: false, reason: 'interrupted', fatal: true } };
       const last = k === stretches.length - 1;
@@ -370,7 +379,7 @@ export class CorridorExecutor {
       if (near(at, cell, 0.8)) return { ok: true };
       // landed near (a miss, the slide, the go-arounds run out over a small opening): walk the rest
       const off = at ? hd(at, cell) : Infinity;
-      if (at && off <= SKY_WALK_MAX) {
+      if (at && off <= SKY_WALK_MAX && standable(this.p.solid, cell.x, cell.y, cell.z, this.floor)) { // Track R1: never a walk to a cell nobody stands in
         if (off > 4) this.log.info(`corridor: the cruise to ${label} ended at ${fmt(at)}, ${Math.round(off)} blocks from it (${f.reason ?? 'missed'}): walking there`);
         const w = await this.walk(cell, `walking into ${label}`);
         if (w.ok || near(w.at ?? this.p.position(), cell, 1.5)) return { ok: true };
@@ -463,11 +472,14 @@ export class CorridorExecutor {
           const first = win?.goals[0];
           const cell = first?.kind === 'waypoint' ? standableNear(this.p.solid, { x: (first.box.min.x + first.box.max.x) / 2, y: first.box.min.y, z: (first.box.min.z + first.box.max.z) / 2 }, 2, this.floor) : undefined;
           // a first goal the body already stands at (the window starts on its floor), or no progress twice: the next goal, then the end
-          let to = cell ?? end;
+          let to = cell ?? win?.end ?? end; // Track R1: the window's landing before the stretch's end
           if (near(pos, to, 1.5) || stuckWalks >= 1) {
             const second = win?.goals[1];
             const next = second?.kind === 'waypoint' ? standableNear(this.p.solid, { x: (second.box.min.x + second.box.max.x) / 2, y: second.box.min.y, z: (second.box.min.z + second.box.max.z) / 2 }, 2, this.floor) : undefined;
-            to = stuckWalks >= 2 || !next || near(pos, next, 1.5) ? end : next;
+            // (Track R1: with no standable second goal, the window's landing before the stretch's end: a window cut back
+            // to nothing walked to a stretch end 82 blocks on)
+            const land = win && !near(pos, win.end, 1.5) && to !== win.end ? win.end : undefined;
+            to = stuckWalks >= 2 || ((!next || near(pos, next, 1.5)) && !land) ? end : (next && !near(pos, next, 1.5) ? next : land!);
           }
           stuckWalks = near(pos, to, 1.5) ? stuckWalks + 1 : 0;
           this.r.unproven++;

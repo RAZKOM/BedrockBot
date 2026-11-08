@@ -46,7 +46,7 @@ import { breakTicks as tableBreakTicks } from '../dig/breakTime.ts';
 import { PHYSICS } from '../input/physics.ts';
 import { halfTop, type TerrainClass } from '../terrain/classify.ts';
 import type { BreakRules, NavBlockFace } from './actions.ts';
-import { BestSoFar, FAILURE_NODES_FACTOR } from './baritone/bestSoFar.ts'; // Track BA: partial-path selection (ported, LGPL-3.0)
+import { BestSoFar, FAILURE_NODES_FACTOR, MIN_DIST_PATH } from './baritone/bestSoFar.ts'; // Track BA: partial-path selection (ported, LGPL-3.0)
 import { ascend, createBreakMoveContext, descend, downward, pillar, sneakFits, traverse, type BreakMoveContext } from './baritone/moves.ts'; // Track BC: the moves that dig (ported, LGPL-3.0) and sneak-through
 import { DEFAULT_COSTS, dropCost, type PathCosts } from './costs.ts';
 import { goalTest, levelWeights, type NavGoal, type GoalTest } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
@@ -127,6 +127,16 @@ export interface MoveSet {
   dive?: boolean;
 }
 
+/** Track R1: the owner's rules a "why unreachable" search lifts (PathOptions.relax, nav/reach.ts). */
+export interface PathRelax {
+  built?: boolean;
+  liquid?: boolean;
+  gravity?: boolean;
+  slow?: boolean;
+  /** The heuristic's weight (weighted A*: a "why" search asks whether a way exists, not for the best one). Default 1. */
+  weight?: number;
+}
+
 export interface PathOptions {
   /** Track AJ: movement-variety moves (default: all on). */
   moves?: MoveSet;
@@ -191,6 +201,17 @@ export interface PathOptions {
    * Track W3 (nav/digway.ts): the dig way (level 1) of a goto whose plain search found no way: the moves that dig (needs
    * `allowBreak` too), natural terrain only, at most `left` blocks in this plan, each priced DIG_WAY_PENALTY more.
    */
+  /**
+   * Track R1 (nav/reach.ts): the owner's rules a "why unreachable" search lifts (never a plan that is walked):
+   * `built` breaks built blocks (break rules and the dig way's natural-only rule), `liquid` digs beside a liquid,
+   * `gravity` digs under or beside a gravity block, `slow` lifts the dig way's DIG_WAY_MAX_TICKS.
+   */
+  relax?: PathRelax;
+  /**
+   * Track R1: a goal in unloaded world with no partial end worth walking: end at the most promising node that touched
+   * unloaded world instead (the frontier end, PathSearch `frontier`). The navigator sets it at a goto's last level.
+   */
+  frontier?: boolean;
   digWay?: DigWay;
 }
 
@@ -222,6 +243,8 @@ export interface PathResult {
    * path to follow).
    */
   reason?: 'no_progress';
+  /** Track R1: a partial path that ends at the frontier end (PathOptions.frontier). */
+  frontier?: boolean;
   /**
    * Track W2: a search from water that did not reach the goal (none, or a partial that went nowhere): the dig-out
    * steps it refused, by reason (nav/digout.ts `trappedWhy` says it in words). Only with `digOut` on.
@@ -351,6 +374,8 @@ class Nodes {
   cut = new Uint8Array(4096);
   /** Track W3: blocks the dig way (PathOptions.digWay) has dug up to the node. */
   dug = new Uint8Array(4096);
+  /** Track R1: cells dug on the way to the node, every move that digs counted (0: nothing on the way was dug). */
+  digs = new Int32Array(4096);
   parent = new Int32Array(4096);
   move = new Uint8Array(4096);
   flags = new Uint8Array(4096);
@@ -372,6 +397,7 @@ class Nodes {
       this.wet = grown(this.wet, (k) => new Float64Array(k));
       this.cut = grown(this.cut, (k) => new Uint8Array(k));
       this.dug = grown(this.dug, (k) => new Uint8Array(k));
+      this.digs = grown(this.digs, (k) => new Int32Array(k));
       this.parent = grown(this.parent, (k) => new Int32Array(k));
       this.move = grown(this.move, (k) => new Uint8Array(k));
       this.flags = grown(this.flags, (k) => new Uint8Array(k));
@@ -388,6 +414,7 @@ class Nodes {
     this.wet[i] = 0;
     this.cut[i] = 0;
     this.dug[i] = 0;
+    this.digs[i] = 0;
     this.parent[i] = -1;
     this.flags[i] = 0;
     this.closed[i] = 0;
@@ -407,6 +434,8 @@ export class PathSearch {
   readonly grid: NavGrid;
   readonly goal: NavGoal;
   private readonly costs: PathCosts;
+  /** The heuristic's ticks per block (costs.walk, times PathRelax.weight). */
+  private readonly hFactor: number;
   private readonly opts: PathOptions;
   private readonly test: GoalTest;
   private readonly maxNodes: number;
@@ -423,6 +452,14 @@ export class PathSearch {
   private expanded = 0;
   private limited = false;
   private sawUnknown = false;
+  /**
+   * Track R1: the frontier end, for a goal in unloaded world: of the nodes whose moves touched unloaded world, MIN_DIST_PATH+ blocks from the start
+   * and not under water, the one with the lowest g + h (A* with the unloaded world taken as open). The partial end
+   * when no best is worth walking: the body heads into the unloaded world the way that promises most, and plans again
+   * as it loads (was: no progress, and the goto ended at a cliff whose way round lay past the loaded world).
+   */
+  private frontier = -1;
+  private frontierScore = Infinity;
   private ms = 0;
   private done: PathResult | undefined;
   /** Track AJ: the parkour takeoff the next relax() records (set around a parkour relax only). */
@@ -466,11 +503,12 @@ export class PathSearch {
     this.goal = goal;
     this.opts = opts;
     this.costs = { ...DEFAULT_COSTS, ...opts.costs };
+    this.hFactor = this.costs.walk * (opts.relax?.weight ?? 1); // Track R1: weighted for a "why" search
     this.test = goalTest(goal, grid, levelWeights(this.costs)); // Track R: getToBlock / surface read the grid; levels priced by the costs
     this.maxNodes = opts.maxNodes ?? 40_000;
     this.maxMs = opts.maxMs ?? 250;
     this.breakTicksOf = opts.breakTicks ?? handBreakTicks;
-    if (opts.digWay) this.breakTicksOf = digWayBreakTicks(this.breakTicksOf); // Track W3: natural terrain only, no slow blocks
+    if (opts.digWay) this.breakTicksOf = digWayBreakTicks(this.breakTicksOf, opts.relax); // Track W3: natural terrain only, no slow blocks (Track R1: unless relaxed)
     this.startY = start.y;
     this.goalMinY = goalMinY(goal);
     this.airLimit = airBudget(opts.air, false); // Track W1 (a start under water: below)
@@ -483,7 +521,7 @@ export class PathSearch {
     this.digOutRefused = opts.digOut ? new DigOutRefusals() : undefined;
     if (opts.allowBreak || opts.digOut) {
       const noBreak = opts.noBreak;
-      const rules: BreakRules = { protectedBlocks: opts.protectedBlocks, protectedArea: opts.protectedArea, allowGravityAbove: opts.allowGravityAbove ?? false };
+      const rules: BreakRules = { protectedBlocks: opts.protectedBlocks, protectedArea: opts.protectedArea, allowGravityAbove: opts.allowGravityAbove ?? false, ...(opts.relax ? { relax: opts.relax } : {}) };
       this.breaks = createBreakMoveContext({
         grid,
         costs: this.costs,
@@ -569,7 +607,7 @@ export class PathSearch {
   }
 
   private h(x: number, y: number, z: number): number {
-    return this.test.h(x, y, z) * this.costs.walk;
+    return this.test.h(x, y, z) * this.hFactor;
   }
 
   /** Track AJ: the movement-variety move is enabled (PathOptions.moves, default on). */
@@ -622,10 +660,29 @@ export class PathSearch {
         this.limited = true;
         break;
       }
+      const saw = this.sawUnknown;
+      this.sawUnknown = false;
       this.expand(cur, cx, cy, cz, f0);
+      if (this.sawUnknown && this.opts.frontier && nodes.wet[cur] === 0 && cur !== this.startNode) this.considerFrontier(cur, cx, cy, cz);
+      this.sawUnknown ||= saw;
     }
     this.ms += performance.now() - t0;
     return this.finish();
+  }
+
+  /** Track R1: node `i` touched unloaded world: the frontier end when it promises most (see `frontier`). */
+  private considerFrontier(i: number, x: number, y: number, z: number): void {
+    const nodes = this.nodes;
+    const s = this.startNode;
+    const dx = x - nodes.x[s]!;
+    const dy = y - nodes.y[s]!;
+    const dz = z - nodes.z[s]!;
+    if (dx * dx + dy * dy + dz * dz <= MIN_DIST_PATH * MIN_DIST_PATH) return;
+    const score = nodes.g[i]! + this.h(x, y, z) + nodes.trap[i]!;
+    if (score < this.frontierScore) {
+      this.frontierScore = score;
+      this.frontier = i;
+    }
   }
 
   /** Stop now and return the best path so far (partial unless the goal was reached). */
@@ -652,7 +709,13 @@ export class PathSearch {
     const nodes = this.nodes;
     // Track BA: a partial path ends at the first coefficient best 5+ blocks from the start; with none,
     // the start alone (reason no_progress)
-    const best = this.found >= 0 ? this.found : this.bests.best();
+    let best = this.found >= 0 ? this.found : this.bests.best();
+    let viaFrontier = false;
+    // (a "why" search, `relax`, asks whether the unloaded world can be reached at all: the frontier before any best)
+    if (this.found < 0 && (best < 0 || this.opts.relax) && this.frontier >= 0 && goalUnloaded(this.goal, this.grid)) {
+      best = this.frontier; // Track R1: towards an unloaded goal the most promising way
+      viaFrontier = true;
+    }
     const end = best >= 0 ? best : this.startNode;
     const path: PathNode[] = [];
     for (let i = end; i >= 0; i = nodes.parent[i]!) {
@@ -672,9 +735,20 @@ export class PathSearch {
     const status = this.found >= 0 ? 'found' : interim || this.limited || this.sawUnknown ? 'partial' : 'none';
     const res: PathResult = { status, path, cost: nodes.g[end]!, expanded: this.expanded, ms: this.ms, unknown: this.sawUnknown, limited: interim || this.limited };
     if (status === 'partial' && best < 0) res.reason = 'no_progress'; // Track BA
+    if (viaFrontier) res.frontier = true; // Track R1
     // Track W2: from water and nowhere: which dig-out steps the rules refused
     if (this.digOutRefused && this.startWet && (status === 'none' || res.reason === 'no_progress')) res.digOut = this.digOutRefused.report();
     return res;
+  }
+
+  /** Track R1: cell (x, y, z) is dug by a move on the way to node `from` (its own move included). */
+  private dugOnTheWay(from: number, x: number, y: number, z: number): boolean {
+    const nodes = this.nodes;
+    for (let i = from; i >= 0 && nodes.digs[i]! > 0; i = nodes.parent[i]!) {
+      const d = nodes.act[i]?.dig;
+      if (d) for (const c of d) if (c.x === x && c.y === y && c.z === z) return true;
+    }
+    return false;
   }
 
   private relax(from: number, x: number, y: number, z: number, feet: number, base: number, move: number, extra = 0, trap = 0, act?: NodeActions, flags = 0, cut = 0): void {
@@ -689,8 +763,12 @@ export class PathSearch {
     if (this.opts.digWay && act?.dig && (flags & F_CUT) === 0) {
       dug += act.dig.length;
       if (dug > this.opts.digWay.left) return;
-      extra += DIG_WAY_PENALTY * act.dig.length;
+      if (!this.opts.relax) extra += DIG_WAY_PENALTY * act.dig.length; // (Track R1: not in a "why" search: it asks whether, not how well)
     }
+    // Track R1: a cell dug earlier on this path is air when the body gets here: never the floor it stands on (a stair cut
+    // up a 1-wide staircase took a step's top block, then planned to stand on it: three move timeouts, unreachable)
+    const digs = nodes.digs[from]! + (act?.dig?.length ?? 0);
+    if (nodes.digs[from]! > 0 && (flags & (F_SWIM | F_DIVE)) === 0 && this.dugOnTheWay(from, x, Math.floor(feet + 1e-6) - (feet - Math.floor(feet + 1e-6) > FLAT ? 0 : 1), z)) return;
     const ticks = base * grid.factor(x, y, z, feet);
     let cost = ticks + extra + trap;
     if (this.costs.underground > 0 && grid.underground(x, z, feet)) cost += this.costs.underground;
@@ -717,6 +795,7 @@ export class PathSearch {
     nodes.wet[i] = wet; // Track W1
     nodes.cut[i] = cut; // Track W2
     nodes.dug[i] = dug; // Track W3
+    nodes.digs[i] = digs; // Track R1
     nodes.parent[i] = from;
     nodes.move[i] = move;
     nodes.flags[i] = flags;
@@ -1755,4 +1834,20 @@ export function explainStart(grid: NavGrid, n: LocatedNode): string {
     parts.push(`${labels[i]}: ${cells.join(', ')}`);
   });
   return `start ${n.x},${n.y},${n.z} feet ${fmt(n.feet)}: ${parts.join('; ')}`;
+}
+
+/** Track R1: the goal's point lies in unloaded world (the frontier end's condition; goals without one: false). */
+function goalUnloaded(goal: NavGoal, grid: NavGrid): boolean {
+  switch (goal.type) {
+    case 'block':
+    case 'near':
+    case 'getToBlock':
+    case 'twoBlocks':
+    case 'threeBlocks':
+      return grid.cls(Math.floor(goal.p.x), Math.floor(goal.p.y), Math.floor(goal.p.z)) === undefined;
+    case 'xz':
+      return grid.cls(goal.x, grid.source.minY ?? -64, goal.z) === undefined;
+    default:
+      return false;
+  }
 }

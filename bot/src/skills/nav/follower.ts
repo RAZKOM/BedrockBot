@@ -124,12 +124,27 @@ const EDGE_SNEAK = 0.3;
 const SPRINT_AFTER_SNEAK = 10;
 /** Track W1: a final surface node (a `near` goal in water) is reached within this of its centre. */
 const SWIM_ARRIVE = 0.7;
+/**
+ * Track R1: a node with lava (or a hazard) beside the body's cells is passed only this close to its centre, and no
+ * straight-line shortcut leaves it: the body (half width 0.3) stays clear of the next cell, where the usual 0.35
+ * let it cut the corner into the lava (the reachability bench, a cave walk: dead on the turn by a lava cell).
+ */
+const HAZARD_CENTRE = 0.15;
+/**
+ * Track R1: a node beside lava where the path turns is left only this slow (blocks a tick): the body brakes into it and
+ * turns there (the walk's momentum out of a diagonal carried it 0.3 across the next leg into a lava cell, lava:6:0).
+ */
+const HAZARD_TURN_SPEED = 0.05;
+/** Track R1: beside lava the body walks only once it faces the aim this closely (degrees): turned in place first, no arc across the cell's edge. */
+const HAZARD_AIM_ERR = 10;
 /** Track W1: a dive node is reached with the feet from this far below its height ... */
 const DIVE_BELOW = 0.45;
 /** ... to this far above it. */
 const DIVE_ABOVE = 0.55;
 /** Track W1: under water the body sinks (sneak) towards a node lower than this (blocks); nearer, it is held level. */
 const DIVE_SINK = 0.4;
+/** Track R1: under a roof two over a dive node's feet cell, the body's feet within this over the node (1.8 high: 0.2 of room). */
+const DIVE_ROOF_ROOM = 0.19;
 const CORNERS: readonly (readonly [number, number])[] = [
   [-HALF, -HALF],
   [-HALF, HALF],
@@ -258,8 +273,11 @@ export class PathFollower {
         this.index++;
         continue;
       }
-      const centred = Math.hypot(node.x + 0.5 - p.x, node.z + 0.5 - p.z) < 0.35;
-      if (!centred && !this.lineClear(p, this.index + 1)) break;
+      const hazard = this.hazardBeside(node);
+      // Track R1: a turn by lava (at this node or into the next one) is left slow
+      const slow = !this.turnsAt(this.index) || !(hazard || this.hazardNext(this.index)) || Math.hypot(s.vel.x, s.vel.z) < HAZARD_TURN_SPEED;
+      const centred = Math.hypot(node.x + 0.5 - p.x, node.z + 0.5 - p.z) < (hazard ? HAZARD_CENTRE : 0.35) && slow;
+      if (!centred && (hazard || !this.lineClear(p, this.index + 1))) break;
       this.index++;
     }
 
@@ -309,13 +327,18 @@ export class PathFollower {
       for (let j = this.index + 1; j <= Math.min(this.index + 6, last); j++) {
         const n = path[j]!;
         if ((n.move !== 'walk' && n.move !== 'diag') || Math.abs(n.feet - target.feet) > 1e-6) break;
-        if (!this.lineClear(p, j)) break;
+        if (!this.lineClear(p, j) || this.hazardBeside(path[j - 1]!)) break; // (Track R1: no shortcut past a node by lava)
         aim = j;
       }
       // pure pursuit: the nodes before the aim are passed (the straight line to it is clear)
       this.index = aim;
     }
-    const a = path[aim]!;
+    let a = path[aim]!;
+    // Track R1: the straight line to the aim would brush lava (a leg begun past a node by lava the body is not centred
+    // on, the turn's corner cut across the lava cell diagonal to it, lava:20:9): back to that node's centre first
+    const back = path[this.index - 1];
+    if (s.onGround && back && (back.move === 'walk' || back.move === 'diag' || back.move === 'start') && Math.abs(back.feet - p.y) < 1e-3 &&
+      Math.hypot(back.x + 0.5 - p.x, back.z + 0.5 - p.z) > 0.1 && this.sweepsLava(p, a)) a = back;
     const dx = a.x + 0.5 - p.x;
     const dz = a.z + 0.5 - p.z;
     const dAim = Math.hypot(dx, dz);
@@ -326,11 +349,18 @@ export class PathFollower {
     let jump = false;
     let sprint = false;
 
-    if (finalLeg && this.stopAtEnd) {
+    // (Track R1: not on the ledge above a drop: the creep off its edge below stops within `arrive` of the landing's
+    // centre, still standing on the ledge: lava:2:12 held there until the move timed out)
+    if (finalLeg && this.stopAtEnd && !(target.move === 'drop' && s.onGround && p.y > target.feet + 0.5)) {
       // brake: coast the rest
       if (dTarget - speed * GROUND_COAST < 0.12 || dTarget <= this.arrive) forward = 0;
       if (dTarget < 1 && err > 30) forward = 0;
     }
+
+    // Track R1: beside lava, no step while the body does not face the aim (the turn's arc carried it across the cell's edge)
+    if (forward === 1 && err > HAZARD_AIM_ERR && (this.hazardBeside(a) || this.hazardBeside(target))) forward = 0;
+    // Track R1: a turn beside lava: braked into, as at the path's end (turned there once slow)
+    if (!finalLeg && s.onGround && aim === this.index && this.turnsAt(this.index) && (this.hazardBeside(target) || this.hazardNext(this.index)) && dTarget - speed * GROUND_COAST < 0.12) forward = 0;
 
     // (not once the body is up at the target's height: landed off-centre on the step, it walks on)
     if (target.move === 'jump' && s.onGround && err < 25 && p.y < target.feet - 1e-3) {
@@ -339,8 +369,9 @@ export class PathFollower {
 
     if (target.move === 'drop') {
       if (s.onGround) {
-        // creep off the edge
-        if (speed > 0.12 && dTarget < 1.2) forward = 0;
+        // creep off the edge (Track R1: slower into a cell beside lava: the fall's coast carried the body 0.23 past the
+        // landing's centre into the lava beside it, lava:11:10)
+        if (speed > (this.hazardBeside(target) ? HAZARD_TURN_SPEED : 0.12) && dTarget < 1.2) forward = 0;
       } else if (dTarget - speed * AIR_COAST < 0.05) {
         forward = 0;
       }
@@ -354,6 +385,9 @@ export class PathFollower {
     if (sneak) {
       this.sneakTicks++;
     }
+
+    // Track R1: no step that coasts the body into lava: where it would slide to, at the speed it has, touches no lava cell
+    if (forward === 1 && s.onGround && this.coastsIntoLava(p, s.vel)) forward = 0;
 
     // (BDS does not start a sprint right after a sneak: the server walks on while the client would sprint)
     if (this.sprint && this.pressGuard.sinceSneak > SPRINT_AFTER_SNEAK && forward === 1 && s.onGround && err < 15 && this.runLength(p) > 5) sprint = true;
@@ -520,7 +554,17 @@ export class PathFollower {
     if (sameColumn || (inCol && Math.hypot(tx - p.x, tz - p.z) < 0.3)) this.centre(cmd, s, tx, tz, true);
     else this.steer(cmd, tx - p.x, tz - p.z);
     const dy = target.feet - p.y;
-    if (dy > 0.05) cmd.jump = true;
+    // Track R1: a block two over the target's feet cell (a flooded tunnel 2 high under its roof): the floating body's
+    // head would meet it (the body floated 0.27 over the node and stood at the roof's edge until it drowned,
+    // water:12:8): sunk first, no forward until the body fits under it
+    const roof = (this.grid.cls(target.x, target.y + 2, target.z)?.boxes.length ?? 0) > 0;
+    if (roof) {
+      if (dy < -DIVE_ROOF_ROOM && !inCol) {
+        cmd.sneak = true;
+        cmd.forward = 0;
+      }
+      cmd.jump = dy > 0.05; // (never bobbed up into the roof)
+    } else if (dy > 0.05) cmd.jump = true;
     else if (dy < -DIVE_SINK && (cmd.forward === 0 || (inCol && Math.hypot(tx - p.x, tz - p.z) < 0.25))) {
       cmd.sneak = true;
       cmd.forward = 0;
@@ -822,6 +866,63 @@ export class PathFollower {
       if (this.cellCost && this.cellCost(Math.floor(sx), n.y, Math.floor(sz)) > this.skippedCost(j) + 1e-9) return false;
     }
     return true;
+  }
+
+  /** Track R1: the body box where the body would come to rest from `p` at velocity `v` (stepped, forward held a tick) touches lava at its feet or body height. */
+  private coastsIntoLava(p: Vec3, v: Vec3): boolean {
+    const k = 1 + GROUND_COAST;
+    for (const t of [0.5, 1]) {
+      const x = p.x + v.x * k * t;
+      const z = p.z + v.z * k * t;
+      for (let cx = Math.floor(x - HALF); cx <= Math.floor(x + HALF); cx++)
+        for (let cz = Math.floor(z - HALF); cz <= Math.floor(z + HALF); cz++)
+          for (let dy = 0; dy <= 1; dy++) if (this.grid.cls(cx, Math.floor(p.y + 0.01) + dy, cz)?.liquid === 'lava') return true;
+    }
+    return false;
+  }
+
+  /** Track R1: the body box swept along the straight line from `p` to node n's centre touches lava (feet or body height). */
+  private sweepsLava(p: Vec3, n: PathNode): boolean {
+    const ex = n.x + 0.5 - p.x;
+    const ez = n.z + 0.5 - p.z;
+    const steps = Math.ceil(Math.hypot(ex, ez) / 0.1);
+    const fy = Math.floor(p.y + 0.01);
+    for (let i = 1; i <= steps; i++) {
+      const x = p.x + (ex * i) / steps;
+      const z = p.z + (ez * i) / steps;
+      for (let cx = Math.floor(x - HALF); cx <= Math.floor(x + HALF); cx++)
+        for (let cz = Math.floor(z - HALF); cz <= Math.floor(z + HALF); cz++)
+          for (let dy = 0; dy <= 1; dy++) if (this.grid.cls(cx, fy + dy, cz)?.liquid === 'lava') return true;
+    }
+    return false;
+  }
+
+  /** Track R1: the node after i is beside lava (a hazard). */
+  private hazardNext(i: number): boolean {
+    const n = this.path[i + 1];
+    return n !== undefined && this.hazardBeside(n);
+  }
+
+  /** Track R1: the path changes direction at node i (from the node before to the node after, in x and z). */
+  private turnsAt(i: number): boolean {
+    const a = this.path[i - 1];
+    const b = this.path[i]!;
+    const c = this.path[i + 1];
+    if (!a || !c) return false;
+    return Math.sign(b.x - a.x) !== Math.sign(c.x - b.x) || Math.sign(b.z - a.z) !== Math.sign(c.z - b.z);
+  }
+
+  /** Track R1: lava or a hazard in a cell beside (8 around, body height and the floor's level) node n's cells. */
+  private hazardBeside(n: PathNode): boolean {
+    for (let dx = -1; dx <= 1; dx++)
+      for (let dz = -1; dz <= 1; dz++) {
+        if (!dx && !dz) continue;
+        for (let dy = -1; dy <= 1; dy++) {
+          const c = this.grid.cls(n.x + dx, n.y + dy, n.z + dz);
+          if (c && (c.liquid === 'lava' || (c.danger && dy >= 0))) return true;
+        }
+      }
+    return false;
   }
 
   /** Track S: the highest extra cost among the path nodes from the current one to j. */

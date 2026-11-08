@@ -164,7 +164,7 @@ export function registerNavChat(chat: Chat, d: NavChatDeps): void {
         what = `${p.x} ${p.y} ${p.z}`;
       }
       reply(`walking to ${what}${now ? ' now' : ''}`);
-      void walk(goal, { timeoutTicks: GOTO_TICKS }, `walking to ${what}`, now ? { urgent: true } : {}).then((r) => {
+      void walk(goal, { timeoutTicks: GOTO_TICKS, explain: true }, `walking to ${what}`, now ? { urgent: true } : {}).then((r) => {
         if (r.ok) reply(`arrived at ${what}`);
         else if (r.reason !== 'interrupted') reply(`goto: ${r.reason}${r.note ? ` (${r.note})` : ''}`); // Track BI: note
       });

@@ -265,6 +265,7 @@ export class BotSkills implements Skills {
       logger: this.log,
     });
     this.nav.fallPolicy = () => this.falls.policy();
+    this.nav.health = () => this.world.self.health; // Track R1: the "why unreachable" search with the fall rule lifted
     this.nav.holdPlans = () => this.falls.settling;
     this.nav.pauseFollow = () => this.falls.recovering;
     this.nav.dropCheck = (from, to, costs) => this.falls.acceptsDrop(from, to, costs);
@@ -486,7 +487,7 @@ export class BotSkills implements Skills {
       const rep = this.nav.lastReport;
       if (!rep || rep.skipped?.length || rep.plans.length === 0) return r;
       const note = explainFallRefusal(this.nav, this.falls, locateNode(this.nav.grid, this.loop.state.pos), goal, opts);
-      return note ? { ...r, note } : r;
+      return note ? { ...r, note: r.note ? `${r.note}; ${note}` : note } : r; // Track R1: after the cause's words
     } catch (e) {
       this.log.warn(`fall note: ${e instanceof Error ? e.message : String(e)}`);
       return r;

@@ -15,7 +15,7 @@ import { system, world } from '@minecraft/server';
 import { build, loadArea, type CourseDeps } from './course.js';
 import type { CourseOp } from './course-layout.js';
 import { TruthError, blockPos } from './protocol.js';
-import { WATER_STATIONS, waterStation } from './water-layout.js';
+import { ALL_STATIONS, waterStation } from './water-layout.js';
 
 type WaterHandler = (args: string[], ctx: { cmd: string; id: string | null; async: boolean }) => unknown;
 
@@ -31,11 +31,11 @@ export function waterHandlers(deps: CourseDeps): Record<string, WaterHandler> {
   return {
     water(args, ctx) {
       const sub = args[0];
-      if (sub === 'list') return { names: [...WATER_STATIONS] };
+      if (sub === 'list') return { names: [...ALL_STATIONS] }; // Track R1: the reachability stations too
       if (sub !== 'build' && sub !== 'clear') throw new TruthError('bad_args', 'usage: water list | build name x y z | clear name x y z');
       const name = args[1] ?? '';
       const st = waterStation(name, blockPos(args, 2));
-      if (!st) throw new TruthError('bad_args', `unknown water station ${name}`, { names: [...WATER_STATIONS] });
+      if (!st) throw new TruthError('bad_args', `unknown water station ${name}`, { names: [...ALL_STATIONS] });
       const dim = overworld();
       const hr = dim.heightRange;
       if (st.bounds.min.y < hr.min || st.bounds.max.y >= hr.max) throw new TruthError('out_of_bounds', `the station spans y ${st.bounds.min.y}..${st.bounds.max.y}`, { minY: hr.min, maxY: hr.max - 1 });

@@ -34,6 +34,17 @@
 //   wetGoal    a 1-deep water floor (5 x 9) flush with the ground: the goal cell is a water cell on that floor (a
 //              waypoint set standing in shallow water)
 //
+// Track R1 (docs/pathfinding.md "Reachability (Track R1)"): a station for each failure class the reachability bench
+// (bot/scripts/reach-bench.ts) found and fixed, and for the "why unreachable" answers (R1_STATIONS; not in
+// WATER_STATIONS: the water e2e builds those, bot/test/e2e/nav-reach.test.ts these):
+//   lavaRun    a 1-wide grass path through a lava floor (flush with the ground) with two corners: the follower cut a
+//              corner over a lava cell (bench lava:1:12, a death); it centres on the nodes beside a hazard now
+//   tower3     a 2 x 2 stone column 3 high, the goal on its top: the dig way's stair dug the goal's own floor (bench
+//              pits:1:13); the goal's floor is never dug now
+//   vault      a room sealed in bedrock, the goal inside: unreachable, the world closes it (cause `world`)
+//   brickRoom  a closed stone-brick room (walls, roof and a floor 3 deep, the bedrock under it), the goal inside:
+//              unreachable, the owner's rule on built blocks closes it (cause `rule:built`)
+//
 // Water placed by a fill may or may not flow on BDS 1.26.60 (measured: a lone source over air stayed put for 160
 // ticks, a source with a side open to air beside other fresh water flowed out at once), so no station has a water
 // face towards air but at the top of its water: the pools and the column are sources, level, and stay put. The
@@ -42,7 +53,7 @@
 import type { Vec3 } from './protocol.js';
 
 /** The blocks a station is built of (the namespace is minecraft:). */
-export type WaterBlock = 'air' | 'stone' | 'dirt' | 'grass_block' | 'water' | 'stone_bricks';
+export type WaterBlock = 'air' | 'stone' | 'dirt' | 'grass_block' | 'water' | 'stone_bricks' | 'lava' | 'bedrock'; // Track R1: lava, bedrock
 
 export interface WaterOp {
   from: Vec3;
@@ -87,7 +98,11 @@ export const DIG_OUT_STATIONS = ['lipDirt', 'lipStone', 'bank3', 'lipBuilt'] as 
 /** Track W3: a walk with no plain way (dug through or down), and a goal cell in water. */
 export const W3_STATIONS = ['step2', 'step3', 'drop6', 'wetGoal'] as const;
 export const WATER_STATIONS = [...W1_STATIONS, ...DIG_OUT_STATIONS, ...W3_STATIONS] as const;
-export type WaterStationName = (typeof WATER_STATIONS)[number];
+/** Track R1: the reachability stations (built by the same `truth:water build`, walked by the nav-reach e2e). */
+export const R1_STATIONS = ['lavaRun', 'tower3', 'vault', 'brickRoom'] as const;
+/** Every station `truth:water` builds. */
+export const ALL_STATIONS = [...WATER_STATIONS, ...R1_STATIONS] as const;
+export type WaterStationName = (typeof ALL_STATIONS)[number];
 
 const v = (x: number, y: number, z: number): Vec3 => ({ x, y, z });
 
@@ -96,7 +111,7 @@ const FOOT = { x0: -4, x1: 4, z0: -2, z1: 22, up: 12 };
 
 /** The station `name` at `origin` (feet height of the ground), or undefined for an unknown name. */
 export function waterStation(name: string, origin: Vec3): WaterStation | undefined {
-  if (!(WATER_STATIONS as readonly string[]).includes(name)) return undefined;
+  if (!(ALL_STATIONS as readonly string[]).includes(name)) return undefined;
   const o = { x: Math.floor(origin.x), y: Math.floor(origin.y), z: Math.floor(origin.z) };
   const { x, y, z } = o;
   const ops: WaterOp[] = [];
@@ -199,6 +214,30 @@ export function waterStation(name: string, origin: Vec3): WaterStation | undefin
     case 'wetGoal':
       put(v(x - 2, y - 1, z + 4), v(x + 2, y - 1, z + 12), 'water'); // in place of the grass: the floor is the dirt under it
       goal = v(x, y - 1, z + 8);
+      break;
+    case 'lavaRun': {
+      // Track R1: lava in place of the grass (flush, sources, level: it stays put), a path of grass through it:
+      // along x from z + 3 to z + 10, along z + 10 to x + 3, along x + 3 to z + 17; the goal on the grass beyond
+      put(v(x - 3, y - 1, z + 3), v(x + 3, y - 1, z + 17), 'lava');
+      put(v(x, y - 1, z + 3), v(x, y - 1, z + 10), 'grass_block');
+      put(v(x, y - 1, z + 10), v(x + 3, y - 1, z + 10), 'grass_block');
+      put(v(x + 3, y - 1, z + 10), v(x + 3, y - 1, z + 17), 'grass_block');
+      goal = v(x + 3, y, z + 19);
+      break;
+    }
+    case 'tower3':
+      put(v(x, y, z + 8), v(x + 1, y + 2, z + 9), 'stone'); // its top block at y + 2 (feet y + 3)
+      goal = v(x, y + 3, z + 9);
+      break;
+    case 'vault':
+      put(v(x - 2, y, z + 8), v(x + 2, y + 4, z + 12), 'bedrock');
+      put(v(x - 1, y + 1, z + 9), v(x + 1, y + 2, z + 11), 'air'); // the room: its floor the bedrock at y
+      goal = v(x, y + 1, z + 10);
+      break;
+    case 'brickRoom':
+      put(v(x - 2, y - 3, z + 8), v(x + 2, y + 3, z + 12), 'stone_bricks'); // the floor 3 deep down to the bedrock, walls, roof
+      put(v(x - 1, y, z + 9), v(x + 1, y + 2, z + 11), 'air');
+      goal = v(x, y, z + 10);
       break;
     case 'tunnel':
       put(v(x - 2, y - 3, z), v(x + 2, y + 3, z + 19), 'stone'); // the hull

@@ -38,12 +38,15 @@ export interface DigWay {
   left: number;
 }
 
-/** The break times the dig way plans with: natural terrain only, at most DIG_WAY_MAX_TICKS a block. */
-export function digWayBreakTicks(base: (c: TerrainClass) => number): (c: TerrainClass) => number {
+/**
+ * The break times the dig way plans with: natural terrain only, at most DIG_WAY_MAX_TICKS a block. Track R1: a
+ * "why unreachable" search (nav/reach.ts) lifts the natural-only rule (`built`) or the slow-block limit (`slow`).
+ */
+export function digWayBreakTicks(base: (c: TerrainClass) => number, relax?: { built?: boolean; slow?: boolean }): (c: TerrainClass) => number {
   return (c) => {
-    if (!isNaturalTerrain(c.name)) return Infinity;
+    if (!relax?.built && !isNaturalTerrain(c.name)) return Infinity;
     const t = base(c);
-    return t <= DIG_WAY_MAX_TICKS ? t : Infinity;
+    return relax?.slow || t <= DIG_WAY_MAX_TICKS ? t : Infinity;
   };
 }
 

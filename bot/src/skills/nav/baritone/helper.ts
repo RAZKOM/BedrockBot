@@ -35,7 +35,7 @@ import { blockMining } from '../../../data/mining.ts';
 import type { Vec3 } from '../../../world/types.ts';
 import { estimateBreak, type BreakConditions } from '../../dig/breakTime.ts';
 import { chooseTool, type SlotItem, type ToolChoice } from '../../dig/tools.ts';
-import type { TerrainClass } from '../../terrain/classify.ts';
+import { isBuiltBlock, type TerrainClass } from '../../terrain/classify.ts';
 import { CLIMBERS, classAt, type TerrainSource } from '../../terrain/query.ts';
 
 /** Baritone's `Ternary` (pathing/precompute/Ternary.java): a rule that needs the neighbours answers MAYBE. */
@@ -302,6 +302,13 @@ export interface BreakRuleOptions {
    * rule, nothing with a gravity block above it is dug (the planner walks around).
    */
   allowGravityAbove?: boolean;
+  /**
+   * Track R1 (nav/reach.ts): the rules a goto's "why unreachable" search lifts one at a time, never a plan that is
+   * walked. `built`: a player's built block (`isBuiltBlock`) may be broken (containers, beds and spawners never);
+   * `liquid`: a liquid beside the cell is no refusal; `gravity`: neither a gravity block over the cell nor an
+   * unsupported one beside it.
+   */
+  relax?: { built?: boolean; liquid?: boolean; gravity?: boolean };
 }
 
 const NO_RULES: BreakRuleOptions = {};
@@ -340,7 +347,7 @@ export function avoidBreaking(r: CellReader, x: number, y: number, z: number, ru
   if (c.liquid) return 'liquid';
   if (c.unknown) return 'unknown_block';
   if (isUnbreakable(c)) return 'unbreakable';
-  if (c.protect) return 'protected';
+  if (c.protect && !(rules.relax?.built && isBuiltBlock(c.name))) return 'protected';
   if (c.openable) return 'openable';
   const prot = rules.protectedBlocks;
   if (prot && (Array.isArray(prot) ? (prot as readonly string[]).includes(c.name) : (prot as ReadonlySet<string>).has(c.name))) return 'protected';
@@ -352,10 +359,11 @@ export function avoidBreaking(r: CellReader, x: number, y: number, z: number, ru
   for (const [dx, dy, dz] of NEIGHBOURS) {
     const n = r.cls(x + dx, y + dy, z + dz);
     if (!n) return 'unknown';
-    if (n.liquid) return 'next_to_liquid';
+    if (n.liquid && !rules.relax?.liquid) return 'next_to_liquid';
   }
   const above = r.cls(x, y + 1, z);
-  if (above?.gravity && !rules.allowGravityAbove) return 'gravity_above';
+  if (above?.gravity && !rules.allowGravityAbove && !rules.relax?.gravity) return 'gravity_above';
+  if (rules.relax?.gravity) return undefined;
   for (const [dx, dz] of SIDES) {
     const n = r.cls(x + dx, y, z + dz);
     if (!n?.gravity) continue;

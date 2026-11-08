@@ -7,7 +7,14 @@ export type { Goal, DigOptions, DigResult };
 
 export type SkillResult =
   | { ok: true }
-  | { ok: false; reason: 'unreachable' | 'timeout' | 'corrected' | 'interrupted' | 'no_tool' | (string & {}); /** Track BI: why, in words (a refused long fall). */ note?: string };
+  | {
+      ok: false;
+      reason: 'unreachable' | 'timeout' | 'corrected' | 'interrupted' | 'no_tool' | (string & {});
+      /** Track BI: why, in words (a refused long fall). Track R1: an `unreachable` goto with `explain`: its cause in words. */
+      note?: string;
+      /** Track R1 (nav/reach.ts): an `unreachable` goto's cause class: `world`, `rule:<rule>[+<rule>]`, `unloaded`, `budget`. */
+      cause?: string;
+    };
 
 export interface GotoOptions {
   /** Give up with 'timeout' after this many ticks. Default 6000 (5 min). */
@@ -26,6 +33,11 @@ export interface GotoOptions {
   closeTrapdoors?: boolean;
   /** Plan around falls onto farmland (PathOptions.farmlandDropCost: the farmer, a terraced field). Default false. */
   avoidFarmlandDrops?: boolean;
+  /**
+   * Track R1 (nav/reach.ts): before it ends `unreachable`, ask why (a few searches with the owner's rules lifted) and
+   * say it: SkillResult `cause` and `note`. The `!goto` command sets it. Default false.
+   */
+  explain?: boolean;
 }
 
 export interface Skills {

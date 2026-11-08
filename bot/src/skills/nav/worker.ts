@@ -70,6 +70,10 @@ export interface WorkerPlanOptions {
   startCut?: number;
   /** Track W3: the dig way budget (PathOptions.digWay). */
   digWay?: { left: number };
+  /** Track R1: the rules a "why unreachable" search lifts (PathOptions.relax). */
+  relax?: PathOptions['relax'];
+  /** Track R1: the frontier end (PathOptions.frontier). */
+  frontier?: boolean;
 }
 
 /** What the client reads from the world model (`World` satisfies it). */
@@ -271,6 +275,11 @@ export class WorkerSearch {
   step(_sliceMs?: number): PathResult | undefined {
     if (this.state === 'waiting' || this.state === 'sent') this.client.service(this);
     return this.result;
+  }
+
+  /** Track R1: an interim answer arrived and was not taken yet. */
+  get interimReady(): boolean {
+    return this.interim !== undefined;
   }
 
   /** The interim answer of a main plan (once). */
@@ -752,6 +761,8 @@ function workerOptions(o: WorkerPlanOptions): PathOptions {
     ...(o.digOut ? { digOut: true } : {}), // Track W2
     ...(o.startCut ? { startCut: o.startCut } : {}),
     ...(o.digWay ? { digWay: { left: o.digWay.left } } : {}), // Track W3
+    ...(o.relax ? { relax: { ...o.relax } } : {}), // Track R1
+    ...(o.frontier ? { frontier: true } : {}),
   };
 }
 

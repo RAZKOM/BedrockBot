@@ -722,6 +722,188 @@ the way; placing blocks is not part of the dig way (the owner's decision for W2 
 water floor's flowing water is reached diving (a dive node in the goal cell), never swum against a push the
 physics does not model.
 
+## Reachability (Track R1)
+
+Decision record: [decisions/0072-reachability.md](decisions/0072-reachability.md). The promise: `!goto` says
+"unreachable" only when it is, and then says why. Walking, swimming and digging are the guarantee (flight is the
+flight track's). An unreachable answer carries one of four cause classes (SkillResult `cause`, the words in `note`;
+the `!goto` reply is `goto: unreachable (<words>)`):
+
+| Class | `cause` | Meaning | Words |
+|---|---|---|---|
+| (a) | `world` | the world closes the way: no walk, swim or dig gets there even with every owner's rule lifted | `world: no walk, swim or dig gets there` |
+| (b) | `rule:<rule>[+<rule>]` | an owner's rule closes it: lifted alone the way opens (several only together: all named) | `rule <rule>: <what it forbids>` |
+| (c) | `unloaded` | the goal is in unloaded world (the body heads there first: the frontier end below) | `unloaded: the goal is in unloaded world, walk closer` |
+| (d) | `budget` | the searches ran out before they could tell, or a way under the rules exists and the goto did not make it (a walk that stuck): a bug, the bench hunts it | `budget: the searches or the walk ran out before the goal` |
+
+The rules, by the names the bench's oracle uses too:
+
+| Rule | What the owner's rule forbids | Lifted in a "why" search |
+|---|---|---|
+| `protected_area` | digging inside the base sphere (home, `protectRadius`) | no `protectedArea` |
+| `built` | breaking a player's built block; the dig way digs natural terrain only | `PathRelax.built`: the break rules and `digWayBreakTicks` pass built blocks (containers, beds, spawners never) |
+| `liquid` | digging a cell with water or lava beside it | `PathRelax.liquid` |
+| `gravity` | digging under a gravity block or beside an unsupported one | `PathRelax.gravity` |
+| `falls` | a fall that leaves less than `fallMargin` | the policy's budget to health - 1 |
+| `dig_budget` | more than `DIG_WAY_MAX_BLOCKS` 12 blocks a goto, or a block slower than `DIG_WAY_MAX_TICKS` 200 | 4096 blocks, `PathRelax.slow` |
+| `place` | placing a block (a pillar, a bridge): `!goto` never places | `allowPlace` with 64 throwaway blocks |
+
+**How the navigator says why (`nav/reach.ts`, `GotoOptions.explain`, set by `!goto`).** Where a goto would end
+`unreachable` after its searches (the failures run out, the same search from the same node, an exhaustive `none`),
+it first asks why, from where the body stands, towards the goto's own goal (not a corridor waypoint), the body
+holding still:
+
+1. a goal cell in unloaded world: (c) at once, unless the goto's last search was exhaustive (the owner's rules close the
+   loaded world round the body) or its partial plans looped: then the steps below ask for a way to the unloaded world (the frontier end, a "why"
+   search's frontier before its bests); a goal cell nobody can stand in: open, over nothing (mid-air) and not sealed,
+   `rule:place`, else (a), at once (a natural block the dig way may open is no such cell: its level digs it out);
+2. the goal sealed (`sealedPocket`: a flood from the goal cell through everything a body could open, air, water,
+   anything breakable, stops at bedrock and lava within 20000 cells, meets no unloaded cell and not the start): (a);
+3. one search with every rule lifted: none found, exhaustive: (a); cut by its budget: once more with `BIG_SEARCH` 4 x
+   the budget (the rest of the run too), cut again: (d);
+4. found: the rules its path breaks are read off it (`rulesOnPath`: its placed blocks, its falls over the owner's
+   budget, its dug cells against each break rule, its dig count): one rule is the answer;
+5. none read off: the way is open under the rules, (d); several: each alone, those first, then the rest, until one
+   opens the way (named alone); none alone: the ones the path broke, together. At most `EXPLAIN_MAX_SEARCHES` 5 searches a goto.
+
+The "why" searches ask whether a way exists, not how good it is: the heuristic weighted (`EXPLAIN_WEIGHT` 8), the
+dig price and the dig way's penalty off, the worker's main budget each. No plan they find is walked. A goto
+without `explain` (every other caller) ends as before.
+
+**What the bench found, and the fixes** (scripts/reach-bench.ts, below; each class has a station, a unit test or
+both):
+
+| Failure class | Seen as | Cause | Fix |
+|---|---|---|---|
+| a search cut by its budget taken as an answer | ravine and pit pairs unreachable (level 2's fall searches are slow, 25-35 nodes/ms) | a limited no-progress search escalated, counted a failure, recorded "no retry" and said "trapped" like an exhaustive one | asked again once per node, level and waypoint with `BIG_SEARCH` 4 x the budget; a limited worker search records the no-retry only after its bigger search, and never says trapped |
+| the goal's floor dug | a tower top reached by a stair cut through its own top (pits:1:13) | the dig way's stair took the goal's floor block | the goal's floor cell is in `noBreak` (station `tower3`) |
+| standing on a cell the path dug | a 1-wide stair: three move timeouts, unreachable (pits:3:10) | a move's floor was a cell an earlier move of the same path digs | `astar.ts` refuses a move whose floor its own path dug (`dugOnTheWay`; the oracle has the same rule) |
+| a corridor waypoint with no progress | a cliff's edge: the goto waited for chunks past the server's view, the levels never came (long:2:7) | no progress towards a waypoint "touched unloaded world", so it waited | the corridor's failure at once (no failure counted, unless the waypoint's own cell is unloaded), the raw goal with its levels next |
+| a dig budget overspent | 14 blocks dug of 12 (caves:1:8) | a plan-ahead from the path's end got the whole budget left, the digs still ahead on the path not counted | a plan-ahead's budget is what is left after the path's digs still to be done |
+| a lava death | the follower cut a corner over a lava cell (lava:1:12) | the corner tolerance (0.35) let the body cross the cell beside the node | beside a hazard the follower centres to 0.15 on each node and aims no farther (station `lavaRun`) |
+| a turn beside lava | lava:6:0, lava:6:10, lava:7:10 dead once the bench's lava flowed | at a node beside lava the body passed its centre still moving out of a diagonal, or walked on while still turning: the arc crossed into the lava cell | beside lava a turn node is braked into and left below `HAZARD_TURN_SPEED` 0.05 blocks a tick, and no step is taken facing more than `HAZARD_AIM_ERR` 10 degrees off the aim |
+| a drop beside lava | lava:11:10 dead after a drop into a cell beside lava | the fall's coast carried the body past the landing's centre | no forward press when the coast from the body's velocity puts its box in lava; a drop into a cell beside lava creeps off at 0.05 blocks a tick |
+| a corner cut diagonal to lava | lava:20:9 dead at the turn after a segment's end | a new leg began at a node the body was not centred on; the straight line to the next node swept the box over the lava cell diagonal to the turn | when the line from the body to its aim sweeps the body's box through lava, the follower goes back to the leg's node's centre first |
+| a drop held on its ledge | lava:2:12 unreachable after three move timeouts at a 1-block drop beside lava (the slow creep above) | the leg's end brake (within `arrive` of the landing's centre) held the body on the ledge, still standing on it | the end brake waits until the body is off the ledge above a drop |
+| a goal under a flooded cave's roof | water:7:10 `budget` after 22 s of "why" searches cut by their budget | the planner ends a plan at a goal under water only with air straight over it (the way up); the oracle counted the water over it up to the roof and called it reachable | the oracle asks for air over the water column as the planner does; the "why" asks no search for such a goal: (a) at once |
+| partial ends that lead to each other | lava:14:10, lava:14:12 walking (or standing) until the goto's cap: 2000 plans, or 1247 blocks back and forth | from either of two partial ends the other was the best end of a closed search (towards a corridor waypoint and the raw goal in turn); plan-ahead segments ping-ponged and the skip-ahead held the body in each new copy of its node | a plan-ahead segment that ends on a cell the path already went through is refused (the body walks to the end first); a partial main plan that ends where an earlier partial plan of the goto began (the same level) is no progress: the corridor's failure, the next level, or a failure counted |
+| a plan-ahead that comes back over the path | hills:20:13 timed out after 240 plans from the same cell, 1456 blocks walked | the partial end was a dead end; the next segment ran back along the path, then on; the skip-ahead put the body on the copy coming back, the off-path check (its window on that copy) sent it back to the start, and the same three plans came again | `OFF_PATH_LOOP` 6 partial off-path re-plans from one cell (one level) are no progress, as the loop above: the next level (the dig way) arrived in about 2750 ticks. (Splicing the segment in at the cell it comes back over fixed this pair but cost two goals far in unloaded world that arrive by that escalation: rejected) |
+| partial ends at unloaded world taken for a loop | the strip of nav-v2 (chunks that come late) unreachable at once | the partial ends at the edge of the loaded world met the loop check above before the chunks came | a loop whose plan touched unloaded world first waits for the chunks, at most `unloadedWaitTicks` 200 a goto, never reset (reset by the plans in between, a far goal waited until the goto's cap) |
+| a dive under a low roof | water:12:8 drowned at the mouth of a flooded tunnel two high (water, then air under its roof) | the diving body floats 0.27 over the node; its head met the roof and it stood there | under a block two over the target's feet cell the body is sunk to within 0.19 of the node first and never bobbed up (`DIVE_ROOF_ROOM`) |
+| a rule named for a stuck walk | `rule:protected_area` for a goal the owner's way reached (water:8:7) | the search with every rule lifted found a way that broke no rule; the nearest rule was named | no rule on that path: (d) `budget` (the bug is the walk's) |
+| an unloaded goal behind a cliff | no progress at a cliff, the way round past the loaded world (unknown:6:1) | the partial end must be 5+ blocks from the start and closer to the goal | at a goto's last level, for a goal in unloaded world, the frontier end: the node touching unloaded world with the lowest g + h (`PathOptions.frontier`, `FRONTIER_MAX_LEGS` 6 a goto) |
+| a corridor's last face in the sky (trip C) | the cruise ended over a cave mouth and walked at a cell in the air | a partial corridor's last leg handed the cruise its end face | the leg lands towards the trip's goal (or the standable cell nearest the face); never a walk to a cell nobody stands in |
+| a "why" search cut by its budget | long trips answered `budget` (long:1:0, long:1:1) | the search with every rule lifted ran out of nodes under load | once more with `BIG_SEARCH` 4 x the budget before the answer |
+| an unloaded goal from a closed pocket | `unloaded` where no walk or dig of 12 left the cave (caves:2:12) | an unloaded goal answered (c) at once, though the owner's rules closed the loaded world | after an exhaustive last search, the "why" searches ask for a way to the unloaded world (`PathOptions.frontier`, the frontier before the bests) |
+| a mid-air goal | `world` for a goal over open air (caves:3:7) | a goal cell nobody stands in was (a) | open and over nothing, not sealed: `rule:place` |
+| a goal cell in the rock (flyC) | the corridor's walk leg unreachable at once: its end was a stone cell beside the opening | the goal-cell check said "nobody stands there" before the dig way's level; the leg handed over the portal's cell | the dig way's level digs a natural goal cell out; the walk leg ends on the standable cell nearest the portal's |
+| a wide opening's centre over the rim (flyC) | the walk down into a pit ended on its rim | the change cell under a wide y opening was the centre column's floor | the dry floor under the opening nearest the way on (`wideOpeningCell`); an unproven window walks to its landing before the stretch's end |
+
+**The oracle (`nav/bench/oracle.ts`).** An exhaustive search, no time or node limit, written apart from the planner
+(it reads the bench's voxel palette, not the terrain classes): walk, jump, the doors, drops (harmless within 3,
+deeper within the fall budget, into water within 3), parkour over 1 and 2 gaps, swimming on the surface and diving
+within the air (a goal under water only with air straight over its water column, as the planner has it), the dig moves (traverse, ascend, descend) under every break rule, the dig-out of water, and
+pillaring only with `place` lifted. States carry (dug, damage, wet) labels with Pareto dominance; the goal's floor
+is never dug and no move stands on a cell its own path dug. `verdict` runs it under the owner's rules (cumulative
+fall budget 12, 12 digs), then with each rule lifted alone, then all: `reachable`, `rule` (with the rules that open
+it alone) or `world`. It is checked against the planner (unit test nav-reach-oracle: hand cases for each rule and
+class, 80 random pairs plain and 60 that need the rules, the planner with 3 M nodes and the oracle agree on every
+one).
+
+(The bench's own fixes: the closed loop ticks on while the skill's goto is pending (it swims up and retries after a
+goto that ended under water; the loop used to stop with the navigator idle and hang). Its generators left lava cells
+with open air beside them (lava:4:12 died there), and lake water over air that a worm had carved under the lake's
+floor (water:8:7 stuck diving into it). The game keeps neither, so `settleLiquid` lets the lava (3 blocks) and the
+water class's water (7) fall and spread as the server's does, before the pairs are picked.)
+
+**The bench (`scripts/reach-bench.ts`).** Seeded worlds of nine classes (`nav/bench/worlds.ts`): hills and cliffs,
+ravines, worm caves, water (lakes, rivers, flooded caves), lava, builds (houses with and without doors, a fenced
+field, a brick compound and a bedrock vault in a protected base), pits and towers, unknown (goals 100 to 180 blocks
+out, 4 chunks loaded round the body, no coarse layer) and long trips (200 to 330 blocks, the coarse layer). Each pair
+runs the REAL navigator closed loop (`test/unit/skills/reach-sim.ts`: a World fed chunk packets round the body, the
+worker with the live budgets scaled to the owner's M4, 1.25 x this PC, the coarse layer over a world cache, the
+session's dig way, protection, avoidance and fall policy), and is scored against the oracle: arrived, the verdict,
+time, damage, digs, the reply, the cause and whether it agrees. The headline is the false unreachables: pairs the
+oracle reaches under the owner's rules that the navigator gave up on.
+
+    node scripts/reach-bench.ts [--classes hills,caves] [--worlds 18] [--jobs 6] [--speed 1.25] [--out f.jsonl]
+    node scripts/reach-bench.ts --only pits:3:10 --detail      # one pair: the oracle's witness and the nav log
+
+**Stations (packs/truth/src/water-layout.ts `R1_STATIONS`, built by `truth:water build`).** `lavaRun` (a path
+through a lava floor with two corners: walked unhurt), `tower3` (a 2 x 2 stone column 3 high: climbed by the dig
+way, the goal floor kept), `vault` (a room sealed in bedrock: `world`), `brickRoom` (a closed stone-brick room:
+`rule:built`). The same geometry runs in the bench's closed loop (unit test nav-reach-stations) and on bds-fly
+(e2e nav-reach).
+
+**Measured** (this PC, the worker's budgets scaled to the owner's M4 x 1.25, `--jobs 5`; damage in health points of
+20). Before the track (the first bench, 837 pairs, worlds 1 to 7 of each class, the generators before
+`settleLiquid`): 27 false unreachables of 627 reachable pairs (4.3 %), 1 death (lava), cause agreement 0 (no causes).
+
+| class | before: false of reachable | before: deaths |
+|---|---|---|
+| hills | 0 of 93 | 0 |
+| ravine | 4 of 49 | 0 |
+| lava | 1 of 78 | 1 |
+| water | 0 of 72 | 0 |
+| builds | 0 of 66 | 0 |
+| caves | 1 of 62 | 0 |
+| pits | 8 of 48 | 0 |
+| unknown | 1 of 126 | 0 |
+| long | 12 of 33 | 0 |
+
+After (worlds 1 to 20 of every class but long, 2194 pairs, the final code):
+
+| class | pairs | oracle reachable | rule (b) | world (a) | arrived of reachable | false unreachable | deaths | cause agrees |
+|---|---|---|---|---|---|---|---|---|
+| hills | 280 | 258 | 22 | 0 | 257 (99.6 %) | 1 | 0 | 22 of 22 |
+| ravine | 232 | 156 | 76 | 0 | 156 (100 %) | 0 | 0 | 76 of 76 |
+| water | 222 | 220 | 0 | 2 | 220 (100 %) | 0 | 0 | 2 of 2 |
+| lava | 260 | 225 | 35 | 0 | 225 (100 %) | 0 | 0 | 35 of 35 |
+| builds | 260 | 212 | 28 | 20 | 212 (100 %) | 0 | 0 | 48 of 48 |
+| caves | 260 | 176 | 84 | 0 | 175 (99.4 %) | 1 | 0 | 83 of 84 |
+| pits | 320 | 167 | 153 | 0 | 165 (98.8 %) | 2 | 0 | 149 of 149 |
+| unknown | 360 | 360 | 0 | 0 | 358 (99.4 %) | 2 | 0 | - |
+| **all** | 2194 | 1774 | 398 | 22 | 1768 (99.7 %) | **6 (0.27 % of pairs)** | 0 | 415 of 416 (99.8 %) |
+
+Damage on the arrived pairs: 0 on 1664, 1-2 on 12, 3-5 on 27, 6-10 on 53, 11-12 on 16. Everything over 2 is in
+pits, ravines and hills (level 2's falls, within the fall budget; 11-12 in pits and ravines only); lava, water,
+caves and builds stay at 2 or less (3 lava pairs took 1 or 2; the bench does not record the source). Four pairs the navigator reached where the oracle
+says a rule closes them: three dug 21 blocks (W2's dig-out of water is not counted in the dig budget), one dug
+exactly 12 where the oracle needs a 13th (the two count the last stair step differently). The one cause that does not
+agree (caves:5:4) ran to the bench's cap of 6600 ticks without an answer.
+
+The six left, each explained: unknown:6:1 and unknown:18:1 (goals 136 and 156 blocks into unloaded world past cliffs,
+no coarse layer: the walk spends the dig budget or the partial ends lead back; `rule:dig_budget`), caves:6:2 (a goal
+in the loaded world whose only way runs through unloaded world: no frontier end for it, decision 12), pits:17:5 (a
+dig spent before a refused fall; the per-goto dig budget, decision 12), pits:16:11 (the planner finds no 12-dig stair
+up the tower that the oracle finds: the last step's count above), hills:16:1 (the body freezes at the bench world's
+edge, where the physics has no blocks: a bench artefact).
+
+The long class (trips of 200 to 330 blocks along the coarse corridor, worlds 1 to 6, 95 pairs: the oracle needs
+about 4 GB a world, world 1 has 5 pairs only), run apart, four at a time: 35 reachable, 31 arrived, 4 false
+(long:2:5, long:2:11 and long:6:5 `rule:dig_budget` after digs spent on the way; long:3:2 `rule:dig_budget` where the
+oracle's way needs exactly 12 digs). long:6:5 arrives when run alone (the searches' budgets are wall-clock: four
+trips at once plus an e2e cut them short), so the class's number moves with the load. Before: 12 false of 33
+reachable. Its causes agree on 47 of 60 rule pairs (15 before the "why" searches also asked for a way to the unloaded world
+after partial plans that loop: they answered `unloaded`); the rest name
+another rule the loaded world shows (`liquid`, `gravity`, `built`) or ran to the cap, the oracle's answer being the
+dig budget or a place, 200 blocks away in unloaded world. No deaths, no damage.
+
+On bds-fly (e2e, this PC): nav-reach 4 of 4 (`lavaRun` walked unhurt, `tower3` climbed with its top kept, `vault`
+`world`, `brickRoom` `rule:built`); nav-water 17 of 17. fly-cave on the owner's cave replica with `flyCave` off, three runs: trip C arrived 3 of 3
+(0.1 from the goal, 52 to 70 s, no damage); flyC 0 of 9: the flight's underground windows failing (the flight track's,
+one run stopped at health 10.8 after 16.6 damage in flight) and the corridor's walk underground answering
+unreachable at the roof opening (the limit below).
+
+Limits: the bench's worlds are generated, not the owner's; the 'unknown' class has no coarse layer, so a goal far
+past a maze of cliffs can still time out (the body has no memory of where it has been); the explanation costs a few
+seconds of searching before the reply; a rule pair is named by what opens the way alone, which is not always what the
+owner would change. On the owner's cave replica, flyC's walk down from the roof opening does not arrive: the dry
+floor under the opening is a pocket the cave cannot be walked to from. The only walk out of it digs up 6 blocks and
+goes round over the surface: about 500 nodes, exactly 12 digs, most of it outside the loaded world. The goto there
+answers `rule:dig_budget` (the bench's closed loop on the replica's cells). A loaded goal whose only way runs through unloaded world is
+not given the frontier end, which would walk a sealed goal's goto off into the unknown.
+
 ## Following a path
 
 Per tick, from `InputLoop.onBeforeStep` (the command applies to the same tick):

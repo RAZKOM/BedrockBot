@@ -141,6 +141,41 @@ export function mouthCell(p: Portal, sign: number, solid: CellSolid, depth = MOU
   return undefined;
 }
 
+/** Track R1: the opening cells `wideOpeningCell` scans at most (a wider opening: its centre and the cells round it). */
+export const WIDE_OPENING_CELLS = 1024;
+
+/**
+ * Track R1: under a wide y opening, the standable feet cell on the first floor below one of its cells (scanned through
+ * water like `shaftFloor`, a dry standable cell only) nearest `towards`; undefined when none is known.
+ */
+export function wideOpeningCell(p: Portal, towards: Vec3, solid: CellSolid, floor: CellSolid = solid, scan = SHAFT_SCAN): Vec3 | undefined {
+  const y0 = p.min.y;
+  let best: Vec3 | undefined;
+  let bestD = Infinity;
+  let n = 0;
+  for (let x = p.min.x; x <= p.max.x; x++) {
+    for (let z = p.min.z; z <= p.max.z; z++) {
+      if (++n > WIDE_OPENING_CELLS) return best;
+      for (let y = y0; y > y0 - scan; y--) {
+        const f = floor(x, y, z);
+        if (f === undefined) break;
+        if (!f) continue;
+        if (y === y0) break;
+        const feet = y + 1;
+        if (standable(solid, x, feet, z, floor)) {
+          const d = (x + 0.5 - towards.x) ** 2 + (feet - towards.y) ** 2 + (z + 0.5 - towards.z) ** 2;
+          if (d < bestD) {
+            bestD = d;
+            best = { x, y: feet, z };
+          }
+        }
+        break;
+      }
+    }
+  }
+  return best;
+}
+
 /** The feet y of the floor under a y portal's centre column (the first solid below the opening), undefined when none is known within SHAFT_SCAN. */
 export function shaftFloor(p: Portal, solid: CellSolid, scan = SHAFT_SCAN): number | undefined {
   const x = Math.floor(p.center.x);
@@ -164,6 +199,13 @@ export function shaftFloor(p: Portal, solid: CellSolid, scan = SHAFT_SCAN): numb
  */
 export function changeCell(p: Portal, before: Vec3, after: Vec3, into: 'sky' | 'under', solid: CellSolid, floor: CellSolid = solid): Vec3 | undefined {
   if (p.axis === 'y') {
+    // Track R1: a wide opening (a pit's open top, more than a shaft) lands on the dry floor under it nearest the way on:
+    // its centre column may stand over the rim while the way goes on down into the pit (the owner's cave, flyC: the rim
+    // 46 blocks over the pit's floor, and the walk ended on the rim)
+    if (p.clearance.width > 2) {
+      const c = wideOpeningCell(p, after, solid, floor);
+      if (c) return c;
+    }
     // (Track F6: the shaft's floor is a real floor: scanned through water, as before water became an obstacle to `solid`)
     const y = shaftFloor(p, floor);
     return y === undefined ? undefined : { x: Math.floor(p.center.x), y, z: Math.floor(p.center.z) };
