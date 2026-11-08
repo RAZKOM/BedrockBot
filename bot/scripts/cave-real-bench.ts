@@ -26,6 +26,10 @@ const VARIANTS: Record<string, { style: boolean; variant?: Partial<CaveStyle> }>
   on: { style: true },
   off: { style: false },
   rules0: { style: true, variant: { chainWindow: 5, riskCost: 0.5, marginExtra: 0, prove: false, windowBlocks: 320, tailMin: 40, rules: { commitTicks: 0, partialStop: false, bailAfter: undefined, completeOnly: false, replanLead: 0, bailError: undefined } } },
+  // Track F7: the tube controller's variants (the generator bench has the same)
+  notube: { style: true, variant: { rules: { tube: false } } },
+  nobbail: { style: true, variant: { rules: { blockedBail: false } } },
+  err15: { style: true, variant: { rules: { bailError: 1.5 } } },
 };
 
 type Mode = 'corridor' | 'routeA' | 'legsA' | 'routeB' | 'tripC';

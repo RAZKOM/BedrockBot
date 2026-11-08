@@ -300,11 +300,19 @@ function planPieces(req: RouteRequest, grid: RouteGrid, o: SearchOptions, t0: nu
     pieces.push({ plan: p, from, to, start });
     merged = false;
     from = to;
-    const end = p.states[p.states.length - 1];
-    if (!end) break;
+    if (!p.states.length) break;
+    // Track F7: the piece's end state WITH its burn branches (the controls re-flown from the piece's start with the branches
+    // on: primitives.ts stepState keeps `early` / `late` until they have converged back onto the nominal), so the next piece's
+    // edges are swept for the bodies the piece before's rockets may have left behind or ahead. Track F6 dropped them here
+    // (the plan's states are a plain replay), and a joined plan "robust by construction" hit open loop at the burn's own
+    // extremes (tight-107's first window: the first rocket at 9 and at 21 both hit about 20 ticks on, in the piece after).
+    const withBranches = p.rockets > 0 || (start.boost.max > 0 && start.boost.min < start.boost.max) || start.early !== undefined;
+    const end = withBranches ? replay(start, p.controls, sub.goals, stack, true)[p.controls.length - 1]! : p.states[p.states.length - 1]!;
     start = { ...cloneState(end), wp: 0 };
-    delete start.early;
-    delete start.late;
+    if (end.early) start.early = { pos: { ...end.early.pos }, vel: { ...end.early.vel } };
+    else delete start.early;
+    if (end.late) start.late = { pos: { ...end.late.pos }, vel: { ...end.late.vel } };
+    else delete start.late;
   }
   return joinPlans(req, pieces.map((x) => x.plan), stack);
 }

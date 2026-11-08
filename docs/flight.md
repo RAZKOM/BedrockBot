@@ -2907,6 +2907,254 @@ off-by-one fix does (fewer spurious re-plans a nominal burn) and the course is n
   nodes-bound numbers. The M4 is 1.2 to 1.3 times faster than this PC on the same searches, so the live budgets are met
   with room.
 
+## Tight passages (Track F7)
+
+Flight v2, Track F7, [decisions/0073](decisions/0073-tight-passages.md). Track F6 left the tracker losing a proven plan in a 3
+to 4 wide passage under a burn other than the plan's nominal, and nearly every window ending in a bail-out. This track puts
+the tracker's eyes on the body instead of the timetable (the tube controller), lets the bail-out land dry, flies the landing's
+last blocks closed loop, and fixes three things the traces found under the losses: the rockets the plans fire were never fired
+when planned, a re-timing forgot the burns read before, and "robust by construction" was not. `flyCave` stays default **off**.
+
+```
+flyCave on, a cave window (the proof and the windows as F6 left them)
+  -> the body matched to the plan BY POSITION (up to 8 states ahead of the time index, never behind): a burn longer or shorter
+     than the plan's nominal moves the body along the path, not off it
+  -> the horizon tracks the nearest point of the reference path; the candidates hold a yaw or pitch offset over the horizon
+  -> the body's own forecast on the control chosen decides the bail-out: a collision within the commit horizon brakes NOW;
+     wider held offsets are tried first when the plan's own control collides
+  -> a rocket goes when the tracker asks (a burn still running or not, as the plans assume); the burns read are kept per rocket
+  -> near the landing cell, slow: the brake landing's law from the real state (hold the height, creep nose up, flip over the cell)
+  -> a bail-out's sink creeps onto the nearest dry floor within 3 (a body in a pool has no takeoff)
+```
+
+### Files
+
+| File | What |
+|---|---|
+| `bot/src/skills/fly/route/tracker.ts` | `TrackerRules.tube` and `.blockedBail`; `LOCATE_AHEAD`, `TRACK_SLACK`; the held offsets and the wide ones (`WIDE_YAWS`); the forecast (`forecastHit`); `burnsRead`; `NEXT_PLAN_FAR` and `farFrom`; `settleControl` and `settleCell`; `TrackerOptions.floor`, `sinkTarget`, `SINK_REACH`; `TrackerOutput.debug` (the benches' trace) |
+| `bot/src/skills/fly/route/search.ts`, `primitives.ts` | the pieces start from the piece before replayed with the burn branches (`replay(..., branches)`) |
+| `bot/src/skills/fly/corridor/drive.ts` | the rocket fired when the tracker asks (no wait for the running burn's end); `ChainOptions.floor`, `StretchDeps.floor` |
+| `bot/src/skills/fly/cave/style.ts` | `rules.tube` on, `rules.blockedBail` |
+| `bot/src/skills/fly/cave/bench.ts` | `landed` and the tracker's worst tick in the score; rockets fired as the live driver fires them, the burn ended by the last rocket's removal; `latencyTicks` (a fixed latency for reproducible traces); the trace carries the tracker's debug every tick |
+| `bot/src/chat/commands-corridor.ts` | the floor query to the stretch |
+| `bot/scripts/cave-gen-bench.ts` | the variants `notube`, `bbail`, `nobbail`, `err15`, `err20` |
+| `bot/test/unit/skills/fly-cave-tube.test.ts` | the guard tests |
+
+### What was measured first (the owner's cave and the generator set, the bench's trace of every tick)
+
+- **The bail-outs were not at the walls.** In a tight-107 trip all 5 windows bailed out "1.0 to 1.3 off the plan" in the open:
+  a burn read as ended early re-flew the plan with that burn (F6's `retime`); where the re-flown controls hit, the reference stayed
+  nominal and boosted on while the body did not; the error grew 0.05, 0.50, 1.21 in three ticks and the brake began. Where a
+  re-timing was adopted, the next one gave the rockets read before their nominal back (`replayBurns` was given one burn), and the
+  reference jumped 1.5 off a body tracking at 0.00.
+- **The rockets were held.** The search fires a rocket in a burn's tail (F4a: from 9 ticks after the one before) and plans a fresh
+  burn from it; the corridor driver (`drive.ts`) and the bench fired only with `boostTicks` 0, so every such rocket was held
+  until the running burn's end (`fireHeld`), the plan's reference boosted on, the body did not, and the window bailed out "off
+  the plan" (tight-107 at burn 15: 6 ticks of "the plan's tail hits for an end of the burn", one held rocket a tick). The
+  open-air route driver (`route/live.ts`) never had the condition.
+- **"Robust by construction" was not.** The proofs' plans re-flown open loop (`robust.ts flyBranch`) hit at the burn's own
+  extremes: tight-107's first window, the first rocket at 9 and at 21, both hit about 20 ticks on; medium-108's single rocket at
+  10 to 20 hit at 15 to 40 ticks. Two causes: the search in pieces started every piece from a plain replay of the one before
+  (no branches: the states are replayed without them), and even in one search the burns between the branches hit the margin
+  (one search of the same window: 9 and 21 clear, 10 to 16 hit the margin at ticks 16 to 20). The controls are a timetable; a
+  body the burn carried farther takes the bend late.
+- **The landing was replayed, not flown.** The plan's last edges are the brake landing's station-keeping law recorded open
+  loop; the real body, 0.5 to 1.6 off, hovered down beside its cell (the owner's cave: windows that reached their last goal and
+  stopped short, then bailed out "off the plan", or sank into the pool next to the landing cell).
+
+### The tube controller (`tracker.ts`, `rules.tube`)
+
+The pieces, each with what it was put in for (the traces above) and what it did on the traced trips (fixed worker latency of
+12 ticks, the owner's cave corridor at burns 9 / 15 / 21 and tight-107, medium-105 and medium-108 at 12 / 15 / 21):
+
+- **The match by position** (`locate`: up to LOCATE_AHEAD 8 states ahead of the time index, never behind the last match) and
+  **the tracking cost to the path** (the nearest reference point within TRACK_SLACK 3 ticks of the matched one, not the point at
+  the same tick). A body the burn carried farther or less far is matched where it is; the error left is the height a longer
+  burn gained. In the guard test a body on a 21-tick burn against a plan on 15 is 0.8 off at worst with the tube and 1.6 without.
+  A match that could go back a tick made a body sinking beside a descending path match earlier and earlier states (the match
+  never goes back now).
+- **The held offsets**: every yaw / pitch perturbation is tried once on the first tick (F2's) and once held over the whole
+  horizon (a sustained correction). **The wide offsets** (25 to 70 degrees of yaw, 20 of pitch, held) are tried only when the
+  plan's own best control collides within the horizon (F6 kept F4a's held candidates out of the caves because they jumped a
+  body off a plan that was fine; here they are the last resort before the brake).
+- **The forecast bail-out**: the control chosen is re-flown at PLAN_CLEAR_MIN over the horizon (the plan's controls after it, the
+  forecast ending with the plan: the last control repeated sank it through the landing's floor and bailed every window out 8
+  ticks before its cell); a collision within the commit horizon brakes now, at any speed (a slow touch may be a pool: the second
+  window of the owner's corridor sank into one at 0.2 a tick). The reference's own collision course (F6) no longer bails under the
+  tube: a re-timed reference is adopted also where the plan's controls hit (the hazard asks for a complete plan once), and the
+  straight bore of the shortcut proof lands at 21 where F5b stopped 6 short. Every candidate hitting the margin asks for a plan
+  once per plan.
+- **The burn may end now** (`END_FORECAST` 3): while the burn may end (min 0, the nominal running), if NO candidate, the wide ones
+  included, keeps clear of a WALL for 3 ticks without the boost, the brake begins now. A plan's brake flown under the boost (the
+  boost reverses the body in a tick) and a turn at 1.55 a tick met the wall when the burn's last tick was plain, 7 to 11 of damage
+  one tick after a clear forecast (medium-105 at the random burns of seed 8, wide-106 at 18). The floor is not a wall: the plan's
+  dive in a clean 3-high bore sinks to it in 3 ticks without the boost and a nose-up candidate pulls out of it; a first version
+  without the distinction bailed every bore flight out of its dive.
+- **The burns read are kept per rocket** (`burnsRead`) and **a plan asked from ahead is dropped when it starts over 1.5 from the
+  body** (`NEXT_PLAN_FAR`: when it is due, or back late), the reference having moved since; 4.5 and 11 blocks "off the plan" in
+  the open were such adoptions.
+- **`bailError` needs LOST_TICKS 3 ticks over** under the tube: a re-timing moves the reference, not the body, and the horizon
+  converges in a few ticks (route A at 18: 0.43 then 1.15 after a re-timing, bailed, then a 9-block sink into a pit and the rest
+  of the stretch walked).
+- **The landing flown closed loop** (`settleControl`, within SETTLE_LOOP_NEAR 4 of the cell under SETTLE_LOOP_SPEED 0.5, above its
+  top, no burn running): the station keeping at pitch -30 while faster than 0.35 (the height held), the look at the cell nose up
+  (pitch -15: 0.4 a tick for 0.07 of sink) while farther than 0.6, the flip over it. The replayed law left bodies hovering down
+  0.5 to 1.6 beside their cell; the owner's corridor at 15 landed 4 of 6 windows on their cells in the traced trip (0 of 5 before).
+- **The sink onto a dry floor** (`sinkTarget`, `TrackerOptions.floor`): the column under the body when its first solid is a
+  floor, else the nearest column within SINK_REACH 3 whose first solid is a floor no more than 6 down, with air at the body's
+  height and all the way down; the creep is the settle's. The corridor wiring passes the live model's real solids.
+- **`blockedBail`** (F5b's bail-out on a blocked complete plan whose re-plan is partial), a switch measured both ways (the tables).
+
+Two things outside the tracker the traces made necessary: **the rockets fire when the tracker asks** (`drive.ts`, the bench; a
+rocket used while one burns extends the boost to the later end, F0, and the belief's burn ends with the last rocket's removal),
+and **a portal behind the body's progress along the stretch counts as passed** (`stretches.ts progressAlong`, `PROGRESS_FAR`:
+Track R1's file, one rule added): the owner's corridor crosses a z face and comes back to that z about 40 blocks further on, and every
+window laid from the landing there flew 79 blocks back to the face and landed where it took off (windows 2 to 6 of a trip,
+the same cell both times; the flown blocks of a trip exceeded the cave's length).
+
+### Offline, the generator set (`scripts/cave-gen-bench.ts --mode corridor --burns all --ms 100000`)
+
+The layer's corridor, no waypoints, 8 burns a cave, nodes-bound (the ms cap lifted: the numbers do not swing with the load; they
+still differ between runs of the same code by the worker's latency, which is the search's own wall-clock). "the flown caves" are
+the nine the layer's corridor flies (tight-101, medium-102 and tight-104 are walked by the layer itself, 24 trips at 0 damage in
+every row). The rows are stages of the code, each measured on the way; the last is the style as shipped.
+
+| code | caves | arrived | fatal | legs clean | landed | damage a trip | worst hit | trips at 0 | bail-outs | flown / walked a trip |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **main (F6)** | 12 | 96 / 96 | **1** | 202 / 237 (85 %) | 35 / 237 (15 %) | 1.38 | 12.8 | 66 / 96 | 201 | 120 / 86 (58 %) |
+| the tube (position match, held offsets, forecast bail, re-timed reference adopted) | 12 | 96 / 96 | 0 | 207 / 232 (89 %) | 45 / 232 (19 %) | 0.74 | 9.7 | 74 / 96 | 196 | 126 / 93 |
+| + the burns read per rocket, the settle, the dry sink, the wide offsets, `blockedBail` as a switch | 12 | 96 / 96 | 0 | 204 / 228 (89 %) | 36 / 228 (16 %) | 0.82 | 11.2 | 78 / 96 | 192 | 133 / 91 (59 %) |
+| + a plan from ahead dropped only when adopted late (not when back early), the stretch's progress rule, `bailError` over 3 ticks, the burn-may-end check | the flown 9 | 72 / 72 | 0 | 167 / 189 (88 %) | 30 / 189 (16 %) | 0.94 | 10.7 | 54 / 72 | 164 | 145 / 51 (74 %) |
+| the same, `blockedBail` off | the flown 9 | 72 / 72 | 0 | 168 / 187 (90 %) | 34 / 187 (18 %) | 0.94 | 10.7 | 57 / 72 | 155 | 147 / 49 (75 %) |
+| **the style as shipped** (+ the burn-may-end check over 5 ticks, a riser under a dive a wall, `blockedBail` off) | the flown 9 | 72 / 72 | 0 | 194 / 212 (92 %) | 36 / 212 (17 %) | 0.91 | 9.7 | 55 / 72 | 181 | 140 / 53 (73 %) |
+
+Over the whole set the shipped style is 96 of 96 arrived, 0 fatal, 92 % of legs clean (the three walked caves fly none), 79 of
+96 trips at 0 damage, 59 % of the set's blocks flown. Per cave, the shipped style (8 burns each):
+
+| cave | legs clean | landed | damage a trip | worst hit | trips at 0 | bail-outs | flown / walked |
+|---|---|---|---|---|---|---|---|
+| wide-103 | 9 / 11 (82 %) | 1 / 11 | 0.41 | 2.9 | 6 / 8 | 10 | 103 / 80 |
+| medium-105 | 17 / 19 (89 %) | 1 / 19 | 0.51 | 3.7 | 6 / 8 | 18 | 104 / 51 |
+| wide-106 | 25 / 26 (96 %) | 7 / 26 | 0.16 | 1.3 | 7 / 8 | 24 | 155 / 37 |
+| tight-107 | 28 / 30 (93 %) | 5 / 30 | 1.33 | 9.3 | 6 / 8 | 26 | 188 / 46 |
+| medium-108 | 42 / 43 (98 %) | 7 / 43 | 0.76 | 3.9 | 7 / 8 | 36 | 196 / 39 |
+| wide-109 | 21 / 24 (88 %) | 3 / 24 | 1.33 | 5.3 | 5 / 8 | 21 | 114 / 30 |
+| tight-110 | 8 / 8 | 3 / 8 | 0 | 0 | 8 / 8 | 5 | 49 / 106 |
+| medium-111 | 22 / 23 (96 %) | 5 / 23 | 0.06 | 0.5 | 7 / 8 | 18 | 140 / 62 |
+| wide-112 | 22 / 28 (79 %) | 4 / 28 | 3.64 | 9.7 | 3 / 8 | 23 | 208 / 30 |
+| tight-101, medium-102, tight-104 | walked by the layer | | 0 | 0 | 24 / 24 | 0 | 0 / 129 to 177 |
+
+F6's per-cave worst hits on the same caves were 7.5 to 12.8 with two fatal trips at `bailError` 1.5 and 8.1 to 11.1 at 1.0; the
+tight caves 107 and 110 are at 93 and 100 % clean now. The worst tracker tick over the 96 trips: 9.9 ms on this PC.
+
+The hits left, each traced to its tick: **medium-111 10.7, tight-107 8.5 and 11.6, medium-105 11.2, wide-106 6.9** are one
+mechanism: a plan's brake or turn at 1.4 to 1.6 a tick in a 3 to 4 wide passage that relies on the boost's last ticks (the rocket
+brake reverses the body in a tick; a turn under the boost follows the look), with the burn ending 1 to 3 ticks before the plan's
+nominal; the body meets the wall one tick after a clear forecast. The burn-may-end check (no candidate keeps clear of a wall for
+5 ticks without the boost: fly the one that does, else brake) took tight-107's trip of seed 7 from 20.1 (a death) to 11.7 and
+then to 0 on the traced runs, but the mechanism is the plan's: a sharp manoeuvre at full speed next to a wall has no margin for
+the burn's last tick, and only a planner that prices speed by clearance (or refuses rocket edges in tight sections) removes it.
+That is the open point of this track. The bars of 95 % clean legs and a worst hit under 4 are **not met** on the generator set;
+0 fatal, 100 % arrived and the flown share (74 to 78 % of the flown caves' blocks, 58 % of the set's) are.
+
+### Offline, the owner's cave (`scripts/cave-real-bench.ts --mode corridor,routeA --burns all`, 8 burns a row)
+
+The layer's corridor (one fly leg of 186) and route A as hints, nodes-bound (`--ms 100000`) and at the live budget (600 ms in
+flight, 2 s standing); the burns 9, 12, 15, 18, 21 and three random. "landed" are windows that ended on their landing cell;
+"flown share" is flown / (flown + walked) blocks. The runs differ from one another by the worker's latency (the search's own
+wall-clock), so two runs of the same code are shown where there are two.
+
+| run | arrived | legs clean | landed | damage a trip | worst hit | trips at 0 | bail-outs | water | flown / walked | flown share | worst tracker tick |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **corridor, main (F6)**, nodes-bound | 8 / 8 | 30 / 30 | 4 / 30 (13 %) | 0 | 0 | 8 / 8 | 25 | 13 | 179 / 140 | 56 % (the windows flown back and forth included) | - |
+| corridor, **F7**, nodes-bound, run 1 | 8 / 8 | 13 / 13 | 3 / 13 (23 %) | 0 | 0 | 8 / 8 | 11 | 2 | 112 / 90 | 55 % | 4.8 ms |
+| corridor, F7, nodes-bound, run 2 | 8 / 8 | 15 / 16 (94 %) | 3 / 16 (19 %) | 0.53 | 4.2 | 7 / 8 | 13 | 5 | 120 / 89 | 57 % | 6.7 ms |
+| corridor, F7, `blockedBail` off, nodes-bound | 8 / 8 | 14 / 14 | 3 / 14 (21 %) | 0 | 0 | 8 / 8 | 12 | 3 | 121 / 84 | 59 % | 7.0 ms |
+| corridor, F7, `bailError` 1.5, nodes-bound | 8 / 8 | 11 / 11 | 2 / 11 (18 %) | 0 | 0 | 8 / 8 | 10 | 3 | 110 / 82 | 57 % | 6.2 ms |
+| corridor, **the style as shipped**, nodes-bound | 8 / 8 | 18 / 19 (95 %) | 4 / 19 (21 %) | 0.62 | 5.0 | 7 / 8 | 16 | 7 | 142 / 81 | 64 % | 7.8 ms |
+| corridor, F7, **live budget**, run 1 | 8 / 8 | 10 / 10 | 3 / 10 (30 %) | 0 | 0 | 8 / 8 | 8 | 3 | 97 / 96 | 50 % | 4.7 ms |
+| corridor, F7, live budget, run 2 | 8 / 8 | 12 / 12 | 3 / 12 (25 %) | 0 | 0 | 8 / 8 | 10 | 4 | 102 / 95 | 52 % | 9.6 ms |
+| corridor, **the style as shipped**, live budget | 8 / 8 | 13 / 13 | 4 / 13 (31 %) | 0 | 0 | 8 / 8 | 10 | 2 | 107 / 97 | 52 % | 7.6 ms |
+| **route A, main (F6)**, nodes-bound | 8 / 8 | 21 / 22 (95 %) | 0 / 22 | 0.49 | 3.9 | 7 / 8 | 22 | 12 | 84 / 99 | 46 % | - |
+| route A, **F7**, nodes-bound, run 1 | 8 / 8 | 13 / 14 (93 %) | 0 / 14 | 0.38 | 3.0 | 7 / 8 | 14 | 1 | 69 / 102 | 40 % | 8.5 ms |
+| route A, F7, nodes-bound, run 2 | 8 / 8 | 13 / 14 (93 %) | 0 / 14 | 0.38 | 3.0 | 7 / 8 | 13 | 2 | 75 / 100 | 43 % | 11.3 ms |
+| route A, F7, `blockedBail` off | 8 / 8 | 13 / 14 (93 %) | 0 / 14 | 0.38 | 3.0 | 7 / 8 | 14 | 1 | 69 / 102 | 40 % | 8.7 ms |
+| route A, F7, `bailError` 1.5 | 8 / 8 | 16 / 17 (94 %) | 0 / 17 | 0.38 | 3.0 | 7 / 8 | 16 | 3 | 71 / 107 | 40 % | 5.8 ms |
+| route A, **the style as shipped**, nodes-bound | 8 / 8 | 13 / 14 (93 %) | 0 / 14 | 0.38 | 3.0 | 7 / 8 | 13 | 2 | 75 / 99 | 43 % | 9.0 ms |
+| route A, F7, live budget | 8 / 8 | 12 / 13 (92 %) | 1 / 13 (8 %) | 0.38 | 3.0 | 7 / 8 | 12 | 0 | 64 / 103 | 38 % | 11.1 ms |
+| route A, **the style as shipped**, live budget | 8 / 8 | 12 / 13 (92 %) | 0 / 13 | 0.38 | 3.0 | 7 / 8 | 12 | 1 | 66 / 102 | 39 % | 7.3 ms |
+
+What this says. **The damage bars hold on the owner's cave**: the corridor is at 0 damage in 7 of 8 runs of each row (one hit of
+4.2 to 5.0 in one run of six: the second window's turn at 1.4 a tick under a 12-tick burn, the wall 2 ticks after the burn's
+end was read; the same spot every time it hits), route A has one hit of 3.0 in one burn of eight in every row (the same window), never
+fatal. **The flown share does not reach 70 %**, and it is not the tracker that caps it any more: after the first window lands
+on its cell (the cut landing of the first 91 blocks), the proof of the next window is partial (6 of 7 goals, the
+landing after the 16-block climb through the chunk-border faces, F6's known limit), the cut back to the goals reached gives no
+shorter window and the executor's unproven rule walks to the STRETCH'S END (82 blocks) rather than to the next goal; route A's
+first window (42 blocks, the landing its only goal) bails out at 1.0 to 1.2 off, sinks 9 blocks into the pit under it and the
+executor walks the rest of the stretch from there (108 blocks). Both are executor rules (Track R1's: the cut-back and the walk
+target when no proof completes) and are reported to R1. F6's 44 to 50 % was flown back and forth (windows laid from the first
+landing flew 79 blocks back to a portal plane the corridor re-crosses and landed where they took off: 500 blocks flown for a 186
+cave); with the progress rule the flown blocks are honest and the share is what the proofs allow: 50 to 59 % on the corridor,
+38 to 43 % on route A. **Landed windows**: 3 of 10 to 16 on the corridor (0 of 30 to 4 of 30 before), none on route A (its first
+window bails before its cell in every burn). The tracker's own tick costs 5 to 11 ms at worst on this PC (the M4 is faster).
+`blockedBail` off and `bailError` 1.5 change nothing measurable here; the style keeps `blockedBail` on as F5b left it (the
+generator set's table decides).
+
+### On the server (bds-fly2 and bds-fly3, BDS 1.26.60.6, 2026-11-08)
+
+`fly-cave.test.ts` flyA (route A leg by leg as corridor trips, `FLY_CAVE_STYLE=1`), three full runs on bds-fly2, the benches
+running on this PC meanwhile (the route worker shares its CPU):
+
+| run | arrived | damage | windows flown | rockets | ticks in water | time | how the windows ended |
+|---|---|---|---|---|---|---|---|
+| 1 | 22 / 22 | 0 | 2 (legs 0 and 1) | 4 | 1 317 | 380 s | 1.3 off the plan after a correction of 1.26 (the brake, the sink); the forecast's bail at 0.37 a tick 6 ticks before a collision |
+| 2 | 22 / 22 | 0 | 2 | 4 | 2 025 | 330 s | a blocked plan with a partial re-plan (`blockedBail` still on in this run), the sink into the pool and 900 ticks in it before the tick cap; 2.2 off after a correction of 1.21 |
+| 3 | 22 / 22 | 1.0 | 2 | 3 | 1 299 | 274 s | 1.3 off the plan; the forecast's bail 1 tick before a collision at 0.75 a tick (2 local hits, 1.0 of damage) |
+
+Route A on the replica is mostly the layer's walk legs: the corridor planner chooses `walk` for legs 3 to 21 (the pools and the
+climb), so only the first two legs lay windows (45 and 35 blocks), and both bail out before their cell in every run: the body
+left its plan by 1.3 to 2.2 after a server correction of 1.2 to 1.3 (Realm-sized; the bench has none) or, once, the forecast
+stopped it 6 ticks early at 0.37 a tick. Nothing hit hard (1.0 in one of 66 legs), nothing died. Run 2's first window sank into a
+pool and stayed a window for 900 ticks: the live stretch had no end for a glide that ended in water (`drive.ts` ends it now; the
+bench always had). Whether the sink chose a dry cell on the server could not be read off the report.
+
+The regressions, the final code (the two load-sensitive suites were run again with no bench running; the first runs were under
+four to six bench workers):
+
+| suite | server | result |
+|---|---|---|
+| fly-route | bds-fly3 | 3 of 3 green |
+| fly-land | bds-fly2 | 5 of 5 green |
+| fly-corridor | bds-fly3 | **5 of 5 green** quiet; under load 3 of 5 (the coarse layer's 4 s corridor search bound: "search limit hit (4000 ms)", not a flight failure) |
+| fly-course, FLY_AREA 71520,69472 | bds-fly2 | 7 of 8 (rings, the ms budget bound under load); main on the same area: 7 of 8 (the slalom) |
+| fly-course, FLY_AREA 66400,70496 | bds-fly2 | 7 of 8 (rings); main: 7 of 8 (rings) |
+| fly-course, FLY_AREA 63328,66400 | bds-fly2 | **8 of 8 green** quiet; under load 7 of 8 (rings: every plan partial, "the ms budget ran out"); main: 8 of 8 |
+
+The open-air drivers carry no cave rules, so nothing of the tube touches them; the one change they share is `replay`'s optional
+branches (default off) and the search's pieces (the cave style's only).
+
+### Open points (Track F7)
+
+- **The hits left are the plans', at full speed next to a wall**: a brake or a turn at 1.4 to 1.6 a tick in a 3 to 4 wide passage
+  that relies on the boost's last ticks, with the burn ending 1 to 3 ticks early (medium-111 10.7, tight-107 8.5, medium-105
+  11.2, wide-106 6.9). The tracker now flies the candidate that is safe both with and without the boost and brakes when there
+  is none, which halves the hit or removes it on the traced trips, but the margin is the planner's to make: price speed by
+  clearance (or refuse rocket edges in tight sections) so that a burn's last tick is worth half a block, not two. Until then the
+  95 % and under-4 bars of the generator set are not met and `flyCave` stays off.
+- **The flown share of the owner's cave is capped by the proofs and the executor, not the tracker**: after the first window lands
+  the next proof is partial at the landing after the climb (F6's limit), the cut back gives no shorter window and the unproven
+  rule walks to the stretch's end; route A's first window bails before its cell and the walk takes the rest. Both for Track R1
+  (`executor.ts` cut-back and walk target), with the traces in this section.
+- **Server corrections of 1.2 to 1.3 blocks** put the body 1.3 to 2.2 off its plan on bds-fly2 (none in the bench): the
+  `bailError` rule stops the body there. A bench with the Realm's corrections (ADR 0069 measured 0.7 to 0.8 in normal flight) would
+  say whether the three-tick rule should be longer or the correction folded into the reference.
+- **Landed windows** are 15 to 50 % per cave on the set and 20 to 30 % on the owner's corridor: most windows still end in a
+  bail-out, now mostly the forecast's (a plan on a collision course under the burn read) rather than the error's.
+- The bench's trip-level loop (windows laid back to a re-crossed portal plane) is closed by the progress rule in `stretches.ts`;
+  R1 owns the file and may prefer another form of it.
+- GPU work: none; the benches run in minutes on worker threads and the tracker's tick costs 5 to 18 ms at worst on this PC.
+
 ## Real-cave benchmark (Track F5a)
 
 Flight v2, Track F5a, [decisions/0068](decisions/0068-real-cave-benchmark.md). The corridor flight's first real cave

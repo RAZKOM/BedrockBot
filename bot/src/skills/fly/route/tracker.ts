@@ -14,6 +14,7 @@
 // grazes a solid (a Realm cave death flew powered on such plans), so the glide bleeds its speed instead.
 import type { Vec3 } from '../../../connection/types.ts';
 import { glideVelocity } from '../../input/physics.ts';
+import { keepYaw } from '../maneuvers.ts';
 import { sweep, type RouteGrid } from './grid.ts';
 import { crossesFloor, inBurnTail, landsOn, passes, replayBurns, stepState, sweepGridFor } from './primitives.ts';
 import { startMarginFor } from './search.ts';
@@ -27,6 +28,9 @@ export const HORIZON = 8;
 export const REPLAN_ERROR = 1.0;
 const YAW_STEPS = [0, -4, 4, -8, 8, -16, 16];
 const PITCH_STEPS = [0, -6, 6, -12, 12];
+/** Track F7 (tube): the wider offsets, held over the horizon, tried only when the plan's own best control collides. */
+const WIDE_YAWS = [-25, 25, -35, 35, -50, 50, -70, 70];
+const WIDE_PITCHES = [0, -20, 20];
 const HIT_PENALTY = 1000;
 /** Track F4a: the held candidates while the burn's end is unknown and the plan's tail hits for one of its ends (offsets from the heading; pitches). */
 const HOLD_YAWS = [0, -15, 15, -30, 30, -50, 50, -90, 90];
@@ -96,7 +100,28 @@ export interface TrackerRules {
    * the plan's nominal, before `bailError` fired).
    */
   retime?: boolean;
+  /**
+   * Track F7: the tube controller (docs/flight.md "Tight passages"). The body is matched to the plan by POSITION (up to
+   * LOCATE_AHEAD ticks ahead of the time index, never behind the last match: a burn longer or shorter than the plan's
+   * nominal shifts the body along the path, not off it), the horizon's tracking cost is the distance to the nearest point
+   * of the reference path (not the point at the same tick), the candidates hold a yaw or pitch offset over the whole
+   * horizon besides the first tick (a sustained correction), a re-timed reference is adopted also where the plan's
+   * controls would hit (the hazard asks for a plan; the horizon steers), and the body's own forecast decides the
+   * bail-out: when the best control still collides within the commit horizon, the brake begins now (a brake 3 ticks
+   * before a wall halves the hit; the bail at `bailError` came after the drift, at the wall).
+   */
+  tube?: boolean;
+  /**
+   * Track F7: a complete plan whose corridor is blocked ahead (`completeOnly`) and whose re-plan comes back partial bails out
+   * (F5b's rule; default true). With the tube the body's own forecast guards every tick, so the style measures the rule off:
+   * the partial answer is ignored and the body flies on while its forecast is clear.
+   */
+  blockedBail?: boolean;
 }
+
+/** Track F7: the plan states the body may be matched to ahead of the time index (ticks), and the reference points round the matched tick the tracking cost measures to. */
+export const LOCATE_AHEAD = 8;
+export const TRACK_SLACK = 3;
 
 /** Track F5b: the brake's pitches tried at a bail-out (the envelope: -30 holds the height over the 10 ticks, 0 loses 1.2). */
 const BAIL_PITCHES = [-30, -15, 0, 15];
@@ -105,6 +130,35 @@ export const SHORT_PARTIALS = 2;
 export const SHORT_PARTIAL_SPEED = 0.5;
 /** Under this horizontal speed the bail-out sinks (the hover flip). */
 const BAIL_SLOW = 0.3;
+/** Track F7 (tube): ticks in a row over `bailError` before the bail-out. */
+export const LOST_TICKS = 3;
+/** Track F7 (tube): the ticks no candidate may keep clear for, should the burn end now, before the bail-out. */
+export const END_FORECAST = 5;
+/** Track F7 (tube): a plan asked from ahead whose start is farther than this from the body when it is due is dropped (blocks). */
+export const NEXT_PLAN_FAR = 1.5;
+/** Track F7 (tube): the closed-loop settle: within this of the landing cell (blocks, horizontal) and under this speed the tracker flies the station keeping onto the cell itself. */
+export const SETTLE_LOOP_NEAR = 4;
+export const SETTLE_LOOP_SPEED = 0.5;
+/** Track F7: the closed-loop settle's phases: over this speed the brake holds the height (pitch -30), farther than this from the cell the creep looks at it nose up (pitch -15: 0.4 a tick for 0.07 of sink), else the station keeping's flip sinks (0.149). */
+const SETTLE_BRAKE_SPEED = 0.35;
+const SETTLE_CREEP_FROM = 0.6;
+
+/**
+ * Track F7 (tube): the landing's last blocks flown from the real state (brake.ts keepLook's phases, the creep nose up): a
+ * body stopped 1.6 blocks short of its cell at 0.6 over it sank into the pool beside the cell under the station keeping's
+ * flip alone (0.3 a tick at most, 0.149 of sink).
+ */
+export function settleControl(cur: Readonly<RouteState>, at: { x: number; z: number }): RouteControl {
+  const h = hspeed(cur.vel);
+  const d = Math.hypot(at.x - cur.pos.x, at.z - cur.pos.z);
+  if (h > SETTLE_BRAKE_SPEED) return { yaw: keepYaw(cur, at), pitch: -30, fire: false };
+  if (d > SETTLE_CREEP_FROM) return { yaw: (Math.atan2(-(at.x - cur.pos.x), at.z - cur.pos.z) * 180) / Math.PI, pitch: -15, fire: false };
+  return { yaw: keepYaw(cur, at), pitch: 0, fire: false };
+}
+/** Track F7: the sink looks for a dry floor this many cells round the body's column, this far down, and chooses again every SINK_RETARGET ticks. */
+export const SINK_REACH = 3;
+export const SINK_DEPTH = 16;
+const SINK_RETARGET = 8;
 
 export interface TrackerBody {
   pos: Vec3;
@@ -144,6 +198,13 @@ export interface TrackerOptions {
   lead?: number;
   /** Track F5b: the cave style's rules (default none: the tracker flies as Track F4a left it). */
   rules?: TrackerRules;
+  /**
+   * Track F7: a cell the body may stand on (the real solids; the grid has water as solid too). With it the bail-out's sink
+   * creeps onto the nearest dry floor within SINK_REACH (the hover's station keeping, maneuvers.ts keepYaw) instead of
+   * coming down wherever it stopped: on the owner's cave half the bail-outs sank into the pools, and a body in a pool has
+   * no takeoff (ADR 0068), so the next window was walked.
+   */
+  floor?: (x: number, y: number, z: number) => boolean | undefined;
   /** Track F6: every request's heuristic measures through the air (RouteRequest.geodesic), and the search's pieces (RouteRequest.pieces). */
   geodesic?: boolean;
   pieces?: number;
@@ -160,6 +221,25 @@ export interface TrackerOutput {
   replan?: string;
   /** The distance from the reference this tick. */
   error: number;
+  /** Track F7: what the tracker saw this tick (the benches' traces): the reference matched, the plan's own control, the burn believed. */
+  debug?: TrackerDebug;
+}
+
+export interface TrackerDebug {
+  ref: Vec3;
+  /** The plan index matched and the plan's length. */
+  cursor: number;
+  len: number;
+  belief: BoostRange;
+  /** The plan's reference boost at the match (nominal ticks left). */
+  refBoost: number;
+  planned?: RouteControl;
+  complete?: boolean;
+  /** Track F7: the landing flown closed loop this tick. */
+  settle?: boolean;
+  /** The plan's goals (its own list) and where its last state is. */
+  goals?: number;
+  end?: Vec3;
 }
 
 export interface TrackerStats {
@@ -188,6 +268,14 @@ export interface TrackerStats {
   bailTicks?: number;
   /** Track F6: the plan's reference re-timed to a burn read off the body (`retime`). */
   retimed?: number;
+  /** Track F7 (tube): ticks the landing was flown closed loop (the station keeping onto the cell), and plans asked from ahead dropped for starting far from the body. */
+  settleTicks?: number;
+  dropped?: number;
+  /** Track F7 (tube): ticks a wider held offset was flown because the plan's own control collided, and bail-outs for no control keeping clear should the burn end now. */
+  wide?: number;
+  endBails?: number;
+  /** Track F7 (tube): ticks a candidate clear both with and without the boost was flown instead of the plan's best, which met a wall should the burn end now. */
+  endSaves?: number;
   /** The first plan's effort. */
   first?: { nodes: number; expanded: number; ms: number; ticks: number; rockets: number; complete: boolean; robust: boolean; clearance: number };
 }
@@ -232,6 +320,9 @@ export class RouteTracker {
   /** Track F5b: consecutive gliding ticks without a plan being tracked, and the bail-out's phase once it began. */
   private planlessGliding = 0;
   private bail: 'brake' | 'sink' | undefined;
+  /** Track F7: the dry cell the sink creeps onto (undefined: none found, the hover sinks straight down), and when it was chosen. */
+  private sinkAt: { x: number; z: number; dry: boolean } | undefined;
+  private sinkChosen = -1000;
   /** The tick of the last `tick` call (a plan adopted between ticks is placed against it). */
   private now = 0;
   /** Track F5b: partial plans in a row adopted for a gliding body that were shorter than the commit horizon. */
@@ -246,6 +337,22 @@ export class RouteTracker {
   private burnHazard = -1;
   /** Track F6: the belief's nominal ticks left when the last control was flown (the step `readBoost` judges was boosted iff this was over 0). */
   private nomBefore = 0;
+  /** Track F7 (tube): the tick of the horizon the body's own forecast on the control chosen collides at (-1: clear), and whether every candidate hit the margin. */
+  private forecastHit = -1;
+  private forecastUnsafe = false;
+  private forecastReplanned = false;
+  /** Track F7 (tube): the plan under the burn read was asked for once for the current hazard. */
+  private hazardAsked = false;
+  /**
+   * Track F7: the burns read so far for the plan's rockets, in fire order (`retime` re-flies the plan with all of them: before,
+   * each re-timing gave the rockets read earlier their nominal back, and the reference jumped 1.5 off a body tracking at 0.00
+   * when a window's second rocket ended early).
+   */
+  private burnsRead: number[] = [];
+  /** Track F7 (tube): the forecast's collision speed (blocks a tick) on the control chosen, when it collides. */
+  private forecastSpeed = 0;
+  /** Track F7 (tube): ticks in a row the body has been over `bailError` off its reference. */
+  private lostTicks = 0;
   readonly stats: TrackerStats = { plans: 0, replans: 0, planMs: 0, partial: 0, fired: 0, corrections: 0, holdTicks: 0, evadeTicks: 0, burnsRead: 0, maxError: 0, ticks: 0 };
 
   private readonly o: TrackerOptions;
@@ -281,7 +388,23 @@ export class RouteTracker {
   private bailControl(cur: RouteState, now: number): RouteControl {
     this.stats.bailTicks = (this.stats.bailTicks ?? 0) + 1;
     if (this.bail === 'brake' && hspeed(cur.vel) < BAIL_SLOW) this.bail = 'sink';
-    if (this.bail === 'sink') return { yaw: cur.yaw + (now & 1 ? 180 : 0), pitch: 0, fire: false };
+    if (this.bail === 'sink') {
+      // Track F7: onto a dry floor when one is within reach (the station keeping's creep: a look towards the cell while
+      // off it, the flip over it), else the hover's sink where the body is
+      if (this.o.floor && now - this.sinkChosen >= SINK_RETARGET) {
+        this.sinkAt = this.sinkTarget(cur);
+        this.sinkChosen = now;
+        if (this.sinkAt && !this.sinkAt.dry) this.o.note?.('route: the bail-out sinks onto water: no dry floor within reach');
+        else if (this.sinkAt && (Math.abs(this.sinkAt.x + 0.5 - cur.pos.x) > 0.6 || Math.abs(this.sinkAt.z + 0.5 - cur.pos.z) > 0.6)) this.o.note?.(`route: the bail-out creeps onto the dry cell ${this.sinkAt.x} ${this.sinkAt.z}`);
+      }
+      const at = this.sinkAt;
+      if (at?.dry) {
+        const d = Math.hypot(at.x + 0.5 - cur.pos.x, at.z + 0.5 - cur.pos.z);
+        // (the settle's phases: the nose-up creep while off the cell, 0.4 a tick for 0.07 of sink, the flip over it)
+        if (d > 0.25 || hspeed(cur.vel) > 0.08) return settleControl(cur, { x: at.x + 0.5, z: at.z + 0.5 });
+      }
+      return { yaw: cur.yaw + (now & 1 ? 180 : 0), pitch: 0, fire: false };
+    }
     const h = headingOf(cur.vel, cur.yaw);
     let best: RouteControl = { yaw: h + 180, pitch: BAIL_PITCHES[0]!, fire: false };
     let bestScore = -Infinity;
@@ -305,6 +428,59 @@ export class RouteTracker {
       }
     }
     return best;
+  }
+
+  /**
+   * Track F7: the cell the sink aims at: the column under the body when its first solid is a floor (dry), else the nearest
+   * column within SINK_REACH whose first solid under the body's height is a floor, with air at the body's height and all the
+   * way down (the creep must not cross a wall). The body's own column when nothing dry is in reach (`dry` false).
+   */
+  private sinkTarget(cur: RouteState): { x: number; z: number; dry: boolean } | undefined {
+    const floor = this.o.floor;
+    if (!floor) return undefined;
+    const grid = this.o.grid;
+    const cx = Math.floor(cur.pos.x);
+    const cz = Math.floor(cur.pos.z);
+    const feet = Math.floor(cur.pos.y + 1e-6);
+    /** The first solid under `feet` in the column, whether it is dry, or undefined when none within SINK_DEPTH. */
+    const under = (x: number, z: number): { y: number; dry: boolean } | undefined => {
+      for (let y = feet; y >= feet - SINK_DEPTH; y--) {
+        if (grid.solid(x, y, z)) return { y, dry: floor(x, y, z) === true };
+      }
+      return undefined;
+    };
+    const own = under(cx, cz);
+    if (own?.dry) return { x: cx, z: cz, dry: true };
+    let best: { x: number; z: number; d: number } | undefined;
+    for (let dx = -SINK_REACH; dx <= SINK_REACH; dx++) {
+      for (let dz = -SINK_REACH; dz <= SINK_REACH; dz++) {
+        if (!dx && !dz) continue;
+        const x = cx + dx;
+        const z = cz + dz;
+        // room for the box at the body's height, and the way down clear
+        if (grid.solid(x, feet, z) || grid.solid(x, feet + 1, z)) continue;
+        const u = under(x, z);
+        if (!u?.dry) continue;
+        // (a cell no deeper than a short fall under the body: the creep is slow, the sink is not)
+        if (feet - u.y > 6) continue;
+        const d = Math.hypot(x + 0.5 - cur.pos.x, z + 0.5 - cur.pos.z);
+        if (!best || d < best.d) best = { x, z, d };
+      }
+    }
+    if (best) return { x: best.x, z: best.z, dry: true };
+    return own ? { x: cx, z: cz, dry: false } : undefined;
+  }
+
+  /**
+   * Track F7 (tube): the landing cell's centre when the body is to settle onto it closed loop: the next goal is the landing,
+   * no burn may run, the body is slow, above the cell and within SETTLE_LOOP_NEAR of it.
+   */
+  private settleCell(cur: RouteState): { x: number; z: number } | undefined {
+    const g = this.o.goals[this.wp];
+    if (g?.kind !== 'landing' || !cur.gliding || cur.boost.max > 0 || hspeed(cur.vel) >= SETTLE_LOOP_SPEED) return undefined;
+    const at = { x: g.cell.x + 0.5, z: g.cell.z + 0.5 };
+    if (cur.pos.y <= g.top || Math.hypot(cur.pos.x - at.x, cur.pos.z - at.z) > SETTLE_LOOP_NEAR) return undefined;
+    return at;
   }
 
   /** The loop replayed a server correction: the body moved. */
@@ -345,15 +521,14 @@ export class RouteTracker {
       if (idx >= p.controls.length || !p.controls[idx]!.fire) return;
       let k = 0;
       for (let i = 0; i < idx; i++) if (p.controls[i]!.fire) k++;
-      const burns: number[] = [];
-      burns[k] = burn;
-      states = replayBurns(this.planStart, p.controls, this.planGoals, burns, stack);
+      this.burnsRead[k] = burn;
+      states = replayBurns(this.planStart, p.controls, this.planGoals, this.burnsRead, stack);
     } else {
       // the burn was running when the plan started: the ticks of it left at the plan's first control
       const left = Math.max(0, F + burn - this.planTick);
       if (left === this.planStart.boost.nom) return;
       const start: RouteState = { ...cloneState(this.planStart), boost: { ...this.planStart.boost, nom: left } };
-      states = replayBurns(start, p.controls, this.planGoals, [], stack);
+      states = replayBurns(start, p.controls, this.planGoals, this.burnsRead, stack);
     }
     if (states.length !== p.states.length) return;
     // the plan's controls under this burn must still clear the walls ahead: the plan was proven for the burn's extremes
@@ -365,10 +540,17 @@ export class RouteTracker {
     // burn between them grazes it in a clean bore without touching anything)
     const hit = this.firstBlocked(Math.max(0, this.cursor), states, PLAN_CLEAR_MIN);
     if (hit >= 0) {
+      if (this.burnHazard !== hit) this.hazardAsked = false;
       this.burnHazard = hit;
-      this.changed = true;
-      this.o.note?.(`route: the plan's controls under a burn of ${burn} ticks hit at tick ${hit + 1} of ${states.length}: the reference stays nominal`);
-      return;
+      if (!this.o.rules?.tube) {
+        this.changed = true;
+        this.o.note?.(`route: the plan's controls under a burn of ${burn} ticks hit at tick ${hit + 1} of ${states.length}: the reference stays nominal`);
+        return;
+      }
+      // Track F7 (tube): the re-timed reference is where the body is; it is adopted, the hazard asks for a plan (tick) and the
+      // horizon steers round it from the body's real state (kept nominal, the reference ran away from the body and the error
+      // bail stopped the body, in the open, for a wall it was not going to hit: 5 of 5 bail-outs of a tight-107 trip)
+      this.o.note?.(`route: the plan's controls under a burn of ${burn} ticks hit at tick ${hit + 1} of ${states.length}: the reference re-timed, a plan asked`);
     }
     p.states = states;
     this.changed = true; // (the corridor ahead is checked again on the new reference)
@@ -492,7 +674,7 @@ export class RouteTracker {
       this.planless = 0;
       // Track F5b (completeOnly): a complete plan is never replaced by a partial one; blocked ahead, a partial answer bails
       if (this.o.rules?.completeOnly && !p.complete && this.plan?.complete && b.gliding) {
-        if (this.needComplete) {
+        if (this.needComplete && this.o.rules.blockedBail !== false) {
           this.bail = 'brake';
           this.o.note?.('route: the plan ahead is blocked and the new plan is partial: bailing out (the brake, then the sink to the floor)');
         } else this.stats.partialIgnored = (this.stats.partialIgnored ?? 0) + 1;
@@ -507,6 +689,14 @@ export class RouteTracker {
       if (rl > 0 && this.plan && at > this.now + 1 && this.cursor < this.plan.states.length - 2) {
         // Track F5b: asked from ahead and back early: the old plan flies on until the new one's start tick
         this.nextPlan = { p, start, goals: req.goals, wp0: asked, at };
+        return;
+      }
+      // Track F7 (tube): a plan asked from the reference ahead meets the body only where the body still goes (tick: the same
+      // check when it is due); back late, it would be adopted now, 4.5 blocks from a body whose reference was re-timed since
+      // (checked here only when it is adopted now: back early, the body has not reached its start yet)
+      if (this.o.rules?.tube && rl > 0 && this.plan && start.gliding && this.lastPos && this.farFrom(p, start, this.lastPos)) {
+        this.o.note?.(`route: the plan asked from ahead starts over ${NEXT_PLAN_FAR} from the body (the reference moved since): dropped`);
+        this.stats.dropped = (this.stats.dropped ?? 0) + 1;
         return;
       }
       this.adoptNow(p, start, req.goals, asked, at);
@@ -530,6 +720,17 @@ export class RouteTracker {
     this.flownPlan = undefined;
     this.nextPlan = undefined;
     this.burnHazard = -1;
+    this.hazardAsked = false;
+    this.forecastReplanned = false;
+    this.forecastHit = -1;
+    this.burnsRead = [];
+  }
+
+  /** Track F7: the body at `pos` is farther than NEXT_PLAN_FAR from a plan's start and its first states. */
+  private farFrom(p: RoutePlan, start: RouteState, pos: Vec3): boolean {
+    let d = Infinity;
+    for (const q of [start.pos, ...p.states.slice(0, 4).map((x) => x.pos)]) d = Math.min(d, Math.hypot(q.x - pos.x, q.y - pos.y, q.z - pos.z));
+    return d > NEXT_PLAN_FAR;
   }
 
   /** The plan's state at index `i` (-1: the state the plan was made from). */
@@ -544,8 +745,10 @@ export class RouteTracker {
     const expect = now - this.planTick - 1; // states[i] is the body after control i, flown at planTick + i
     // a plan just adopted from a worker answers for a state some ticks old: the body is matched anywhere up to the
     // expected index (the hold flown meanwhile is not the plan's start)
-    const lo = this.cursor === -1 ? -1 : Math.max(-1, Math.min(expect, this.cursor) - 2);
-    const hi = Math.min(p.states.length - 1, Math.max(expect, this.cursor) + 3);
+    const tube = this.o.rules?.tube === true;
+    // (Track F7, tube: the match never goes back: a body sinking beside a descending path matched earlier and earlier states)
+    const lo = this.cursor === -1 ? -1 : Math.max(-1, Math.min(expect, this.cursor) - (tube ? 0 : 2));
+    const hi = Math.min(p.states.length - 1, Math.max(expect, this.cursor) + (tube ? LOCATE_AHEAD : 3));
     let best = Math.max(-1, Math.min(p.states.length - 1, expect));
     let bd = Infinity;
     for (let i = lo; i <= hi; i++) {
@@ -619,28 +822,63 @@ export class RouteTracker {
    * The cost of flying `c0` now and the plan's controls after it for HORIZON ticks from `cur`: the hit penalty, and with
    * `track` the weighted squared distance from the plan's reference path.
    */
-  private horizonCost(cur: RouteState, c0: RouteControl, next: number, margin: number, goals: readonly RouteGoal[], stack: boolean, track: boolean, hold = false): number {
+  private horizonCost(cur: RouteState, c0: RouteControl, next: number, margin: number, goals: readonly RouteGoal[], stack: boolean, track: boolean, hold = false, delta?: { dy: number; dp: number }, out?: { hitAt: number; speed: number; wall?: boolean }, ticks = HORIZON): number {
     const p = this.plan!;
+    const tube = this.o.rules?.tube === true;
     let s: RouteState = { ...cur, wp: Math.max(0, this.wp - this.planWp0) };
     let cost = 0;
-    for (let t = 0; t < HORIZON; t++) {
+    if (out) {
+      out.hitAt = -1;
+      out.speed = 0;
+    }
+    for (let t = 0; t < ticks; t++) {
       const idx = next + t;
-      const c = t === 0 ? c0 : hold ? { ...c0, fire: false } : idx < p.controls.length ? p.controls[idx]! : { ...p.controls[p.controls.length - 1]!, fire: false };
+      // (Track F7: the forecast ends with the plan: past its last control the body is on its landing, or the next plan's; the
+      // last control repeated sank the forecast through the landing's floor and bailed every window out 8 ticks before its cell)
+      if (out && t > 0 && idx >= p.controls.length) break;
+      let c = t === 0 ? c0 : hold ? { ...c0, fire: false } : idx < p.controls.length ? p.controls[idx]! : { ...p.controls[p.controls.length - 1]!, fire: false };
+      // Track F7: the offset held over the horizon (a sustained correction, not a one-tick nudge)
+      if (delta && t > 0) c = { ...c, yaw: c.yaw + delta.dy, pitch: Math.max(-90, Math.min(90, c.pitch + delta.dp)) };
       const r = stepState(s, c, stack, undefined, this.o.grid);
       const g = goals[r.next.wp];
       const crossing = crossesFloor(g, s.pos, r.next.pos);
       const landed = crossing && landsOn(g!, s.pos, r.next.pos, r.next.vel);
-      if ((crossing && !landed) || (!landed && sweep(sweepGridFor(this.o.grid, g, s.pos), s.pos, r.next.pos, margin).hit)) {
+      const swept = !landed && sweep(sweepGridFor(this.o.grid, g, s.pos), s.pos, r.next.pos, margin).hit;
+      if ((crossing && !landed) || swept) {
         cost += HIT_PENALTY * (HORIZON - t);
+        // (the forecast's collision is a solid in the way, not a touchdown beside the landing cell: that is the settle's business)
+        if (out && swept) {
+          out.hitAt = t;
+          out.speed = hspeed(s.vel);
+          // a wall or the floor / a ceiling, in the move's own order (y first, then x and z: moveBody): the vertical leg clear and
+          // the horizontal one hitting is a wall, the riser of a rising floor under a dive included (the body meets it with its
+          // horizontal speed: tight-107's second window, 8.5)
+          out.wall = !sweep(sweepGridFor(this.o.grid, g, s.pos), s.pos, { x: s.pos.x, y: r.next.pos.y, z: s.pos.z }, margin).hit;
+        }
         break;
       }
       if (track) {
-        const ref = p.states[Math.min(p.states.length - 1, idx)]!.pos;
         const w = 1 / (1 + t * 0.25);
-        const dx = r.next.pos.x - ref.x;
-        const dyy = r.next.pos.y - ref.y;
-        const dz = r.next.pos.z - ref.z;
-        cost += w * (dx * dx + dyy * dyy + dz * dz);
+        if (tube) {
+          // Track F7: the distance to the nearest reference point round the tick (the path, not the timetable: a body
+          // slower or faster than the plan's nominal is not pulled along the track, only onto it)
+          let best = Infinity;
+          for (let k = Math.max(0, idx - TRACK_SLACK); k <= Math.min(p.states.length - 1, idx + TRACK_SLACK); k++) {
+            const ref = p.states[k]!.pos;
+            const dx = r.next.pos.x - ref.x;
+            const dyy = r.next.pos.y - ref.y;
+            const dz = r.next.pos.z - ref.z;
+            const d = dx * dx + dyy * dyy + dz * dz;
+            if (d < best) best = d;
+          }
+          cost += w * best;
+        } else {
+          const ref = p.states[Math.min(p.states.length - 1, idx)]!.pos;
+          const dx = r.next.pos.x - ref.x;
+          const dyy = r.next.pos.y - ref.y;
+          const dz = r.next.pos.z - ref.z;
+          cost += w * (dx * dx + dyy * dyy + dz * dz);
+        }
       }
       if (landed) break;
       while (r.next.wp < goals.length && passes(goals[r.next.wp]!, s.pos, r.next.pos)) r.next.wp++;
@@ -666,17 +904,19 @@ export class RouteTracker {
     // its ceiling on one that ran 4 past it.
     const b = cur.boost;
     const ends = b.max > 0 && b.min < b.max ? [b.min, Math.min(b.max, HORIZON + 1)].filter((e) => e !== b.nom) : [];
-    const costOf = (c0: RouteControl, hold: boolean): number => {
-      let cost = this.horizonCost(cur, c0, next, margin, goals, stack, true, hold);
+    const costOf = (c0: RouteControl, hold: boolean, delta?: { dy: number; dp: number }): number => {
+      let cost = this.horizonCost(cur, c0, next, margin, goals, stack, true, hold, delta);
       // (Track F6: in a cave the ends are judged on half the margin: a plan robust to the burn by construction keeps the margin at
       // the extremes, and a tail "hit" at the full margin for an end in between stopped windows that were tracking at 0.00)
       const endMargin = this.o.rules ? margin * 0.5 : margin;
-      for (const e of ends) cost += this.horizonCost({ ...cur, boost: { ...b, nom: e } }, c0, next, endMargin, goals, stack, false, hold);
+      for (const e of ends) cost += this.horizonCost({ ...cur, boost: { ...b, nom: e } }, c0, next, endMargin, goals, stack, false, hold, delta);
       return cost;
     };
     let bestCost = Infinity;
     let best = base;
+    let bestDelta: { dy: number; dp: number } | undefined;
     let planSafe = true;
+    const tube = this.o.rules?.tube === true;
     for (const dy of YAW_STEPS) {
       for (const dp of PITCH_STEPS) {
         const c0: RouteControl = { ...base, yaw: base.yaw + dy, pitch: Math.max(-90, Math.min(90, base.pitch + dp)) };
@@ -684,8 +924,93 @@ export class RouteTracker {
         if (cost < bestCost) {
           bestCost = cost;
           best = c0;
+          bestDelta = undefined;
+        }
+        // Track F7 (tube): the same offset held over the horizon
+        if (tube && (dy !== 0 || dp !== 0)) {
+          const delta = { dy, dp };
+          const held = costOf(c0, false, delta) + Math.abs(dy) * 0.003 + Math.abs(dp) * 0.003;
+          if (held < bestCost) {
+            bestCost = held;
+            best = c0;
+            bestDelta = delta;
+          }
         }
       }
+    }
+    if (tube) {
+      // Track F7: the body's own forecast on the control chosen: a collision (PLAN_CLEAR_MIN, not the margin) within the horizon
+      // is what the bail-out is decided on (tick), and every candidate hitting the margin asks for a plan
+      const fc = { hitAt: -1, speed: 0 };
+      this.horizonCost(cur, best, next, PLAN_CLEAR_MIN, goals, stack, false, false, bestDelta, fc);
+      // The burn may end this tick (min 0, the nominal still running): can ANY candidate keep clear for END_FORECAST ticks without
+      // the boost? A plan's brake or turn flown under the boost (the rocket brake reverses the body in a tick; a turn at 1.55 a
+      // tick) met the wall when the burn's last tick was plain, 7 to 11 of damage one tick after a clear forecast. The same check
+      // on the control chosen alone bailed every straight-bore flight out of its dive (the plan's recorded dive without the boost
+      // sinks to the floor, where a nose-up candidate recovers), so the question is whether some control saves it, not the plan's
+      // (a WALL only: the floor of a 3-high bore 3 ticks under a dive the boost was to pull out of is no wall, and a touch of it
+      // at a glide's angle hurts nothing)
+      if (fc.hitAt < 0 && b.max > 0 && b.min === 0 && b.nom > 0) {
+        const noBoost = { ...cur, boost: { ...b, nom: 0 } };
+        const f0: { hitAt: number; speed: number; wall?: boolean } = { hitAt: -1, speed: 0 };
+        this.horizonCost(noBoost, best, next, PLAN_CLEAR_MIN, goals, stack, false, false, bestDelta, f0, END_FORECAST);
+        if (f0.hitAt >= 0 && f0.wall) {
+          // the control chosen meets a wall should the burn end now: the cheapest candidate that keeps clear both ways is flown
+          // instead (tight-107 at the random burns of seed 7: the plan's brake under the boost, the burn's last tick plain, 11.6)
+          let saveCost = Infinity;
+          let save: RouteControl | undefined;
+          const f1 = { hitAt: -1, speed: 0 };
+          for (const dy of [...YAW_STEPS, ...WIDE_YAWS]) {
+            for (const dp of [...PITCH_STEPS, ...WIDE_PITCHES]) {
+              const c0: RouteControl = { ...base, yaw: base.yaw + dy, pitch: Math.max(-90, Math.min(90, base.pitch + dp)) };
+              const delta = { dy, dp };
+              this.horizonCost(noBoost, c0, next, PLAN_CLEAR_MIN, goals, stack, false, false, delta, f0, END_FORECAST);
+              if (f0.hitAt >= 0 && f0.wall) continue;
+              this.horizonCost(cur, c0, next, PLAN_CLEAR_MIN, goals, stack, false, false, delta, f1);
+              if (f1.hitAt >= 0) continue;
+              const cost = costOf(c0, false, delta);
+              if (cost < saveCost) {
+                saveCost = cost;
+                save = c0;
+              }
+            }
+          }
+          if (save) {
+            best = save;
+            this.stats.endSaves = (this.stats.endSaves ?? 0) + 1;
+          } else {
+            fc.hitAt = Math.max(0, f0.hitAt);
+            fc.speed = hspeed(cur.vel);
+            this.stats.endBails = (this.stats.endBails ?? 0) + 1;
+          }
+        }
+      }
+      if (fc.hitAt >= 0) {
+        // the last resort before the brake: wider offsets held over the horizon (a bend the plan's controls take too late for a
+        // body the burn carried faster), the clearest of those that do not collide (F6 kept these out of a cave because they
+        // jumped the body off a plan that was fine; here they are tried only when the plan's own control collides)
+        let wideCost = Infinity;
+        for (const dy of WIDE_YAWS) {
+          for (const dp of WIDE_PITCHES) {
+            const c0: RouteControl = { ...base, yaw: base.yaw + dy, pitch: Math.max(-90, Math.min(90, base.pitch + dp)) };
+            const delta = { dy, dp };
+            const f2 = { hitAt: -1, speed: 0 };
+            this.horizonCost(cur, c0, next, PLAN_CLEAR_MIN, goals, stack, false, false, delta, f2);
+            if (f2.hitAt >= 0) continue;
+            const cost = costOf(c0, false, delta);
+            if (cost < wideCost) {
+              wideCost = cost;
+              best = c0;
+              fc.hitAt = -1;
+              fc.speed = 0;
+            }
+          }
+        }
+        if (wideCost < Infinity) this.stats.wide = (this.stats.wide ?? 0) + 1;
+      }
+      this.forecastHit = fc.hitAt;
+      this.forecastSpeed = fc.speed;
+      this.forecastUnsafe = bestCost >= HIT_PENALTY;
     }
     if (ends.length && bestCost >= HIT_PENALTY) {
       // every candidate followed by the plan hits for some end of the burn: the held ones, with wider turns, and a re-plan.
@@ -769,7 +1094,15 @@ export class RouteTracker {
     // Track F5b (replanLead): the plan asked from ahead takes over at its start tick, or when the old one is out
     if (this.nextPlan && !this.bail && (now >= this.nextPlan.at || !this.plan || this.cursor >= this.plan.states.length - 2)) {
       const n = this.nextPlan;
-      if (n.wp0 >= this.wp) this.adoptNow(n.p, n.start, n.goals, n.wp0, n.at);
+      // Track F7 (tube): a plan asked from the reference ahead meets the body only if the body is still going there: the
+      // reference may have been re-timed since (a burn read), and a plan adopted 4.5 blocks from its start bailed the body out
+      // "off the plan" in the open. Far from its start, the plan is dropped (the usual reasons ask again)
+      const far = this.o.rules?.tube === true && n.start.gliding && this.farFrom(n.p, n.start, b.pos);
+      if (far) {
+        this.o.note?.(`route: the plan asked from ahead starts over ${NEXT_PLAN_FAR} from the body (the reference moved since): dropped`);
+        this.nextPlan = undefined;
+        this.stats.dropped = (this.stats.dropped ?? 0) + 1;
+      } else if (n.wp0 >= this.wp) this.adoptNow(n.p, n.start, n.goals, n.wp0, n.at);
       else this.nextPlan = undefined;
     }
     this.readBoost(b, now);
@@ -809,6 +1142,7 @@ export class RouteTracker {
     let control: RouteControl;
     let error = 0;
     let status: TrackerStatus = 'planning';
+    let debug: TrackerDebug | undefined;
     if (this.plan && now < this.planTick) {
       // Track F4a: a plan asked ahead (`lead`) starts later: the hold it was made from flies until then
       control = this.holdClear(b);
@@ -823,15 +1157,19 @@ export class RouteTracker {
       // Track F6: a burn read off the body whose controls would hit ahead (retime) asks for a complete plan as a loaded chunk
       // would, but never the bail-out on its own: it is an open-loop forecast the horizon corrects (a plan robust to the
       // burn's extremes grazes the floor of a clean bore for the burns between, flown open loop; closed loop it lands)
+      const tube = this.o.rules?.tube === true;
       const blockedAt = this.changed || (now & 3) === 0 ? this.firstBlocked(i) : -1;
       if (this.burnHazard >= 0 && this.burnHazard < i) this.burnHazard = -1; // (the body is past it)
-      const blocked = blockedAt >= 0 || this.burnHazard >= i;
+      // (Track F7, tube: the hazard under the burn read is a re-plan's reason, not a blocked corridor: the body is tracked on the re-timed reference and its own forecast decides the bail-out)
+      const hazard = this.burnHazard >= i;
+      const blocked = blockedAt >= 0 || (hazard && !tube);
       const out = i >= p.states.length - 2;
       const planBoost = this.ref(i).boost.nom > 0;
       let again: string | undefined;
       if (error > (this.o.replanError ?? REPLAN_ERROR)) again = `off the reference by ${error.toFixed(2)}`;
       else if (this.corrected && error > (this.o.replanError ?? REPLAN_ERROR) / 2) again = `a correction moved the body ${error.toFixed(2)} off`;
       else if (blocked) again = 'the corridor ahead is blocked';
+      else if (tube && hazard && !this.pending && !this.hazardAsked) again = "the plan's controls under the burn read hit ahead";
       else if (this.burnEnded && planBoost && this.boost.nom === 0) again = 'the rocket ended before the plan assumed';
       // Track F4a: a burn past the plan's nominal (F0: 9 to 21 ticks) was never re-planned (F2 asked only for an early end)
       else if (this.burnEnded && !planBoost && this.boost.nom > 0) again = 'the rocket burns on past the plan';
@@ -844,6 +1182,7 @@ export class RouteTracker {
       this.burnEnded = false;
       if (again && !replan) {
         replan = again;
+        if (tube && hazard) this.hazardAsked = true; // (once per hazard: the answer may be "no edge" every tick)
         // Track F5b (completeOnly): a complete plan blocked ahead wants a complete replacement, else the bail-out
         if (this.o.rules?.completeOnly && p.complete && blocked) this.needComplete = true;
         this.request(b, now, again);
@@ -854,7 +1193,8 @@ export class RouteTracker {
       const commit = this.o.rules?.commitTicks ?? 0;
       // (judged on a collision course, PLAN_CLEAR_MIN, not the margin: a re-timed reference that comes within the margin of the
       // floor before its settle asked for a plan and must not stop the body for that)
-      const collisionAt = blockedAt >= 0 && blockedAt - i <= commit ? this.firstBlocked(i, p.states, PLAN_CLEAR_MIN) : -1;
+      // (Track F7, tube: the reference's collision course is the open-loop forecast; the body's own, on the control chosen, decides below)
+      const collisionAt = !tube && blockedAt >= 0 && blockedAt - i <= commit ? this.firstBlocked(i, p.states, PLAN_CLEAR_MIN) : -1;
       if (this.o.rules?.completeOnly && collisionAt >= 0 && b.gliding && commit > 0 && collisionAt - i <= commit && this.plan === p) {
         this.bail = 'brake';
         this.o.note?.(`route: the plan is blocked ${collisionAt - i} ticks ahead (under the commit horizon of ${commit}): bailing out (the brake, then the sink to the floor)`);
@@ -868,10 +1208,42 @@ export class RouteTracker {
       // a plan adopted just now (an in-thread planner answers at once) starts at its own state: locate again
       const j = this.plan === p ? i : this.locate(b, now);
       this.cursor = j;
+      const settleAt = tube ? this.settleCell(cur) : undefined;
       if (blocked && !this.plan.complete && out && this.plan === p) control = this.holdClear(b);
-      else {
+      else if (settleAt) {
+        // Track F7 (tube): the landing flown closed loop: a slow body near its landing cell keeps station over the cell and sinks
+        // (maneuvers.ts keepYaw, the settle's own law from the REAL state), instead of replaying the plan's recorded flips,
+        // which land the plan's body and leave the real one hovering down beside the cell (the owner's cave: windows that
+        // reached their last goal and stopped 0.5 off it, then bailed out "off the plan" into a pool)
+        control = settleControl(cur, settleAt);
+        status = 'tracking';
+        debug = { ref: this.ref(j).pos, cursor: j, len: this.plan.states.length, belief: { ...this.boost }, refBoost: 0, settle: true };
+        this.stats.settleTicks = (this.stats.settleTicks ?? 0) + 1;
+        this.forecastHit = -1;
+        this.forecastUnsafe = false;
+      } else {
         control = this.optimise(cur, j);
         status = 'tracking';
+        // Track F7 (tube): the body's own forecast on the control chosen collides within the commit horizon: the brake now
+        // (at any speed: a slow body's touch costs nothing, but what it touches may be a pool: the owner's cave's second window
+        // sank into one at 0.2 a tick on a re-timed reference; the bail-out's sink looks for a dry floor instead)
+        if (tube && this.forecastHit >= 0 && this.forecastHit < commit && b.gliding && this.plan === p) {
+          this.bail = 'brake';
+          this.o.note?.(`route: the body's forecast on its best control collides ${this.forecastHit + 1} ticks ahead at ${this.forecastSpeed.toFixed(2)} a tick: bailing out (the brake, then the sink to the floor)`);
+          const c = this.bailControl(cur, now);
+          this.yaw = c.yaw;
+          this.lastControl = c;
+          this.nomBefore = this.boost.nom;
+          this.boost = burnTick(this.boost);
+          return { control: c, status: 'bailing', done: false, ...(replan ? { replan } : {}), error };
+        }
+        // Track F7 (tube): every candidate hits the margin within the horizon: a plan from here, once a plan
+        if (tube && this.forecastUnsafe && !this.forecastReplanned && !replan && !this.pending) {
+          this.forecastReplanned = true;
+          replan = "the body's forecast hits the margin ahead";
+          this.request(b, now, replan);
+        }
+        debug = { ref: this.ref(j).pos, cursor: j, len: this.plan.states.length, belief: { ...this.boost }, refBoost: this.ref(j).boost.nom, ...(j + 1 < this.plan.controls.length ? { planned: this.plan.controls[j + 1]! } : {}), complete: this.plan.complete, goals: this.planGoals.length, end: this.plan.states[this.plan.states.length - 1]?.pos ?? this.planStart!.pos };
         // Track F4a: the body matched a state past the next control (it runs a tick ahead of the reference): a rocket
         // the plan fires on a control skipped so is fired now (the e2e's tunnel lost its corner's rocket so)
         const plan = this.plan;
@@ -913,7 +1285,11 @@ export class RouteTracker {
     // Track F5b: the planner is not sure (partialStop): SHORT_PARTIALS partial plans in a row under the commit horizon
     const partialOut = rules?.partialStop === true && this.shortPartials >= SHORT_PARTIALS;
     // Track F5b: the body far off its reference (bailError): the stop, not a chase of a plan it has left
-    const lost = rules?.bailError !== undefined && status === 'tracking' && error > rules.bailError;
+    // (Track F7, tube: the error must stay over `bailError` for LOST_TICKS ticks: a re-timed reference moves the reference, not
+    // the body, and the horizon converges on it in a few ticks; the body's own forecast guards the walls meanwhile)
+    const over = rules?.bailError !== undefined && status === 'tracking' && error > rules.bailError;
+    this.lostTicks = over ? this.lostTicks + 1 : 0;
+    const lost = over && (rules?.tube !== true || this.lostTicks >= LOST_TICKS);
     if (b.gliding && (planless || partialOut || lost)) {
       this.bail = 'brake';
       this.o.note?.(`route: ${planless ? `no plan for ${this.planlessGliding} ticks in the air` : partialOut ? `${this.shortPartials} partial plans in a row under ${rules?.commitTicks} ticks` : `${error.toFixed(1)} blocks off the plan`}: bailing out (the brake, then the sink to the floor)`);
@@ -978,7 +1354,7 @@ export class RouteTracker {
     this.boost = burnTick(this.boost);
     this.yaw = control.yaw;
     this.lastControl = control;
-    return { control, status, done: false, ...(replan ? { replan } : {}), error };
+    return { control, status, done: false, ...(replan ? { replan } : {}), error, ...(debug ? { debug } : {}) };
   }
 }
 

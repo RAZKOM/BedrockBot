@@ -80,6 +80,11 @@ export const CAVE_STYLE: Readonly<CaveStyle> = Object.freeze({
     // Track F6: 1.0 (F5b's 1.5): on the generator set with the proofs completing, 1.5 gave 79 % clean legs and 2 fatal trips, 1.0 gave 84 % and none
     bailError: 1.0,
     retime: true,
+    // Track F7: the tube controller (tracker.ts TrackerRules.tube); F5b's bail-out on a blocked complete plan with a partial re-plan
+    // measured off under it (the generator set, 72 trips each way: 90 % against 88 % of legs clean, 34 against 30 windows landed,
+    // 155 against 164 bail-outs, the same worst hit; the body's own forecast guards the walls)
+    tube: true,
+    blockedBail: false,
   }),
 });
 

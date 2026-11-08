@@ -126,8 +126,8 @@ export const LOW_CEILING_RISE = 0.25;
  * Re-fly `controls` from `start` on the nominal burn (the per-tick states of a plan; no collision check):
  * the search's unwind and the tracker's reference share it.
  */
-export function replay(start: Readonly<RouteState>, controls: readonly RouteControl[], goals: readonly RouteGoal[], stackRockets: boolean): RouteState[] {
-  return replayBurns(start, controls, goals, [], stackRockets);
+export function replay(start: Readonly<RouteState>, controls: readonly RouteControl[], goals: readonly RouteGoal[], stackRockets: boolean, branches = false): RouteState[] {
+  return replayBurns(start, controls, goals, [], stackRockets, branches);
 }
 
 /**
@@ -135,12 +135,13 @@ export function replay(start: Readonly<RouteState>, controls: readonly RouteCont
  * fire; the nominal when absent): the tracker re-times a plan's reference states to the burn it has read off the body
  * (tracker.ts `retime`), so the body is tracked against where the plan's controls really take it.
  */
-export function replayBurns(start: Readonly<RouteState>, controls: readonly RouteControl[], goals: readonly RouteGoal[], burns: readonly number[], stackRockets: boolean): RouteState[] {
+export function replayBurns(start: Readonly<RouteState>, controls: readonly RouteControl[], goals: readonly RouteGoal[], burns: readonly number[], stackRockets: boolean, branches = false): RouteState[] {
   const out: RouteState[] = [];
   let s = cloneState(start);
   let k = 0;
   for (const c of controls) {
-    const { next, fired } = stepState(s, c, stackRockets, c.fire ? (burns[k] ?? BURN.nominal) : BURN.nominal, undefined, false);
+    // (Track F7: `branches` carries the burn branches along the states, for a search in pieces to start its next piece from them)
+    const { next, fired } = stepState(s, c, stackRockets, c.fire ? (burns[k] ?? BURN.nominal) : BURN.nominal, undefined, branches);
     if (fired) k++;
     const g = goals[next.wp];
     if (g?.kind === 'landing' && landsOn(g, s.pos, next.pos, next.vel)) {

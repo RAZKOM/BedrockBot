@@ -50,6 +50,12 @@ const VARIANTS: Record<string, { style: boolean; variant?: Partial<CaveStyle> }>
   reach2: { style: true, variant: { landReach: 2 } },
   err10: { style: true, variant: { rules: { bailError: 1.0 } } },
   prove6s: { style: true, variant: { proveMs: 6000, proveNodes: 200_000 } },
+  // Track F7: the tube controller off (F6's tracker on this code), and its pieces
+  notube: { style: true, variant: { rules: { tube: false } } },
+  bbail: { style: true, variant: { rules: { blockedBail: true } } },
+  nobbail: { style: true, variant: { rules: { blockedBail: false } } },
+  err15: { style: true, variant: { rules: { bailError: 1.5 } } },
+  err20: { style: true, variant: { rules: { bailError: 2.0 } } },
 };
 
 interface Job {

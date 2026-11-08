@@ -403,10 +403,20 @@ export function nextWindow(s: Stretch, from: Vec3, o: WindowOptions): Window | u
     const vias = inner.length > 0 && inner.some((q) => !portalOf(q));
     const stops = vias ? inner.map((q) => ({ portal: portalOf(q), point: q })) : s.portals.map((p) => ({ portal: p, point: p.center }));
     const k = vias ? firstAhead(stops.map((q) => q.point), from, s.points[0]) : 0;
+    // Track F7: a portal whose plane the body is "before" again because the corridor winds back across it is passed all the
+    // same when the body stands farther along the stretch's polyline (the nearest segment): the owner's cave corridor crosses
+    // a z face and comes back to that z about 40 blocks on, and every window laid from the landing there flew back to the face
+    // and landed where it took off (windows 2 to 6 of a trip, 79 blocks each, the same cell both times)
+    // (a portal behind the body's progress by a whole segment or more, and PROGRESS_FAR from its plane: the body standing in
+    // a mouth's portal is judged by the plane, as before)
+    const prog = progressAlong(s.points, from);
+    const pointIndex = (q: Vec3): number => s.points.findIndex((r) => r.x === q.x && r.y === q.y && r.z === q.z);
+    const planeFar = (p: Portal): boolean => Math.abs((p.axis === 'x' ? from.x - p.center.x : p.axis === 'z' ? from.z - p.center.z : from.y - p.center.y)) >= PROGRESS_FAR || Math.hypot(from.x - p.center.x, from.y - p.center.y, from.z - p.center.z) >= 4 * PROGRESS_FAR;
     let passed = true;
     for (const [i, q] of stops.entries()) {
       if (q.portal) {
-        if (passed && (!portalAhead(q.portal, from, s) || i < k)) continue;
+        const pi = pointIndex(q.portal.center);
+        if (passed && (!portalAhead(q.portal, from, s) || i < k || (pi >= 0 && pi < prog && planeFar(q.portal)))) continue;
         passed = false;
         ahead.push({ kind: 'portal', portal: q.portal, point: q.portal.center });
       } else {
@@ -550,6 +560,34 @@ export function firstAhead(points: readonly Vec3[], from: Vec3, before?: Vec3): 
     if (ax * bx + az * bz > 0) return k + 1; // past it along the line in
   }
   return k;
+}
+
+/** Track F7: a portal behind the body's progress along the stretch counts as passed when the body is this far from its plane (blocks), or four times that from its centre. */
+export const PROGRESS_FAR = 4;
+
+/**
+ * Track F7: how far along the polyline `points` the body at `from` stands: the index of the point that starts the segment
+ * nearest to it (the last point when it is nearest the end). Points at or before that index are behind the body.
+ */
+export function progressAlong(points: readonly Vec3[], from: Vec3): number {
+  let best = -1;
+  let bd = Infinity;
+  for (let i = 0; i + 1 < points.length; i++) {
+    const a = points[i]!;
+    const b = points[i + 1]!;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dz = b.z - a.z;
+    const len2 = dx * dx + dy * dy + dz * dz;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((from.x - a.x) * dx + (from.y - a.y) * dy + (from.z - a.z) * dz) / len2)) : 0;
+    const d = Math.hypot(a.x + dx * t - from.x, a.y + dy * t - from.y, a.z + dz * t - from.z);
+    if (d < bd) {
+      bd = d;
+      // past the segment's end: the next point is behind too
+      best = t >= 1 ? i + 1 : i;
+    }
+  }
+  return best;
 }
 
 /** The portal's plane is still ahead of `from` along the stretch (the stretch's direction across the portal). */

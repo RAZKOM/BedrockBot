@@ -104,7 +104,7 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
       kitOps: w.kitOps,
       inventory: w.inventory,
       memory: w.memory,
-      fly: (x) => flyStretch({ loop: w.loop, queue: w.queue, inventory: w.inventory, hotbar: w.hotbar, entities: w.entities, grid: w.grid, plan: w.plan, ...(w.columnLoaded ? { columnLoaded: w.columnLoaded } : {}), log: w.log }, { goals: x.goals, margin: x.margin, ...(style.stretch?.(x) ?? {}), ...(plan ? { firstPlan: plan } : {}) }),
+      fly: (x) => flyStretch({ loop: w.loop, queue: w.queue, inventory: w.inventory, hotbar: w.hotbar, entities: w.entities, grid: w.grid, plan: w.plan, ...(w.columnLoaded ? { columnLoaded: w.columnLoaded } : {}), ...(w.floor ? { floor: w.floor } : {}), log: w.log }, { goals: x.goals, margin: x.margin, ...(style.stretch?.(x) ?? {}), ...(plan ? { firstPlan: plan } : {}) }),
       airborne: () => w.loop.state.gliding || !w.loop.state.onGround,
       waitTicks: (n) => w.loop.waitTicks(n),
       log: w.log,

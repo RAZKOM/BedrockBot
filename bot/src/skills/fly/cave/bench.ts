@@ -22,7 +22,7 @@ import { rng } from '../route/courses.ts';
 import { gridOf, sweep, type RouteGrid } from '../route/grid.ts';
 import { sweepGridFor } from '../route/primitives.ts';
 import { planRoute } from '../route/search.ts';
-import type { Planner } from '../route/tracker.ts';
+import type { Planner, TrackerDebug } from '../route/tracker.ts';
 import { BURN, type RouteGoal, type RoutePlan } from '../route/types.ts';
 import { gridOfSnapshot, snapshotFor } from '../route/worker.ts';
 import { WaypointProvider, type RoutePoint } from './route.ts';
@@ -39,6 +39,8 @@ export interface CaveBenchOptions {
   style?: boolean;
   /** Plans come back with the worker's latency (default true); false answers at once (Track F4a's bench). */
   latency?: boolean;
+  /** Track F7: every plan comes back this many ticks after it was asked for (the traces' reproducible runs); default the search's own ms. */
+  latencyTicks?: number;
   /** A window's tick cap. */
   maxTicks?: number;
   /** The executor's options over the style's (tests). */
@@ -49,7 +51,7 @@ export interface CaveBenchOptions {
   /** The style's numbers overridden (the variants of the tables). */
   variant?: Partial<CaveStyle>;
   /** Every tick of a window: the body before, the control, the body after, the tracker's output, a hit's damage. */
-  trace?: (t: number, before: BodyState, cmd: MoveCommand, after: BodyState, out: { status: string; error: number; replan?: string }, hit: number | undefined) => void;
+  trace?: (t: number, before: BodyState, cmd: MoveCommand, after: BodyState, out: { status: string; error: number; replan?: string; debug?: TrackerDebug }, hit: number | undefined) => void;
 }
 
 /** The style of a run: CAVE_STYLE with the variant's overrides (the rules merged too). */
@@ -83,6 +85,9 @@ export interface WindowRun {
   at: Vec3;
   /** The window's length (blocks) along its goals from the start. */
   blocks: number;
+  /** Track F7: the tracker's time per tick on this machine (ms; the mean and the worst tick), the M4's budget question. */
+  tickMs: number;
+  tickMsMax: number;
 }
 
 /** The ticks a plan of `ms` takes to come back from the worker (the loop ticks on meanwhile: 50 ms a tick). */
@@ -94,7 +99,7 @@ export const latencyTicks = (ms: number): number => Math.ceil(ms / 50);
  * plan comes back `latencyTicks` after it was asked for (`latency`, default true: the body flies on meanwhile), except
  * the proven first plan (`firstPlan`), which is there before the takeoff.
  */
-export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[], margin: number, o: CaveBenchOptions = {}, seed = o.seed ?? 1, firstPlan?: RoutePlan, planGrid: RouteGrid = gridOf(world), height?: number): Promise<WindowRun> {
+export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[], margin: number, o: CaveBenchOptions = {}, seed = o.seed ?? 1, firstPlan?: RoutePlan, planGrid: RouteGrid = gridOf(world), height?: number, floor?: CellSolid): Promise<WindowRun> {
   const r = rng(seed);
   const style: Partial<StretchOptions> & { margin: number } = (o.style ?? true) ? caveStretchOptions({ margin, ...(height !== undefined ? { height } : {}) }, styleOf(o)) : { margin };
   const req = windowRequest({ goals }, from, 16, { margin: style.margin, maxNodes: o.maxNodes, maxMs: o.maxMs });
@@ -102,10 +107,13 @@ export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[
   const yaw = req.start.yaw;
   let t = 1;
   const pending: { at: number; resolve: (p: RoutePlan) => void; plan: RoutePlan }[] = [];
+  let searchMs = 0; // (the in-thread search's time inside a tick, taken out of the tracker's tick time)
   const planner: Planner = (q) => {
+    const s0 = performance.now();
     const p = planRoute(q, grid);
+    searchMs += performance.now() - s0;
     if (o.latency === false) return p;
-    return new Promise<RoutePlan>((resolve) => pending.push({ at: t + latencyTicks(p.ms), resolve, plan: p }));
+    return new Promise<RoutePlan>((resolve) => pending.push({ at: t + (o.latencyTicks ?? latencyTicks(p.ms)), resolve, plan: p }));
   };
   const chain = new TrackerChain({
     grid,
@@ -123,6 +131,7 @@ export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[
     ...(style.geodesic ? { geodesic: true } : {}),
     ...(style.pieces !== undefined ? { pieces: style.pieces } : {}),
     ...(firstPlan ? { firstPlan } : {}),
+    ...(floor ? { floor } : {}),
     ...(o.note ? { note: o.note } : {}),
   });
   let body: BodyState = initialBody({ ...from }, true);
@@ -137,10 +146,15 @@ export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[
   let blocks = 0;
   let last = { ...from };
   const max = o.maxTicks ?? 900;
+  let tickMsSum = 0;
+  let tickMsMax = 0;
+  let tickN = 0;
   for (; t <= max; t++) {
     while (endsAt.length && endsAt[0]! <= t) {
       endsAt.shift();
-      chain.rocketEnded();
+      // (Track F7: as the loop, F0 decision 4: the boost ends with the LAST rocket's removal; an earlier rocket's notice while a
+      // later one still burns is no end)
+      if (!endsAt.length) chain.rocketEnded();
     }
     // the plans whose worker time has passed arrive now (the tracker adopts them in a microtask)
     if (pending.some((p) => p.at <= t)) {
@@ -149,7 +163,13 @@ export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[
       await Promise.resolve();
       await Promise.resolve();
     }
+    const tk0 = performance.now();
+    searchMs = 0;
     const out = chain.tick({ pos: body.pos, vel: body.vel, gliding: body.gliding === true, onGround: body.onGround, rockets, boostTicks: body.boostTicks ?? 0 }, t);
+    const tk = Math.max(0, performance.now() - tk0 - searchMs);
+    tickMsSum += tk;
+    tickN++;
+    if (tk > tickMsMax) tickMsMax = tk;
     if (out.done) {
       end = 'done';
       break;
@@ -162,12 +182,16 @@ export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[
     if (body.onGround) falling = 0;
     else falling++;
     const cmd: MoveCommand = { ...IDLE_COMMAND, yaw: c.yaw, pitch: c.pitch, jump: c.jump === true, glide: body.gliding === true || body.onGround || falling >= 2 };
-    if (c.fire && rockets > 0 && (body.boostTicks ?? 0) === 0) {
+    // Track F7: a rocket goes whenever the tracker asks for one (its belief applies the plan's rule: none before the burn's
+    // earliest end), as the live driver now does (drive.ts). A rocket used while one still burns extends the boost to the
+    // later end (F0: the union of the two lifetimes, no stronger push). Before, the bench and the driver held every rocket
+    // until the running burn's end, which the plans never assumed: the plan's reference boosted on and the body did not.
+    if (c.fire && rockets > 0 && body.gliding === true) {
       const burn = o.burn === undefined || o.burn === 'random' ? BURN.min + Math.floor(r() * (BURN.max - BURN.min + 1)) : o.burn;
-      cmd.boostStart = burn;
+      cmd.boostStart = Math.max(body.boostTicks ?? 0, burn);
       rockets--;
       endsAt.push(t + burn + 3);
-    } else if (c.fire) chain.fireHeld(); // Track F6: as the live driver (drive.ts): the rocket was not used, the belief drops its burn
+    } else if (c.fire) chain.fireHeld(); // Track F6: the rocket was not used (none left, not gliding yet), the belief drops its burn
     const before = body;
     const step = stepBody(body, cmd, world);
     if (!step.simulated) {
@@ -178,6 +202,9 @@ export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[
     blocks += Math.hypot(body.pos.x - last.x, body.pos.z - last.z);
     last = { ...body.pos };
     let hit: number | undefined;
+    // (Track F7: every tick to the trace, the takeoff's too: a window that never glided has rows)
+    const traced = (): void => o.trace?.(t, before, cmd, body, { status: out.status, error: out.error, ...(out.replan ? { replan: out.replan } : {}), ...(out.debug ? { debug: out.debug } : {}) }, hit);
+    if (!before.gliding) traced();
     if (before.gliding) {
       // the least clearance in the air (the landing cell's floor is no obstacle near it: the touchdown sinks through the
       // margin; a bail-out's sink comes down through it too)
@@ -195,7 +222,7 @@ export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[
         hits++;
         hit = 0;
       }
-      o.trace?.(t, before, cmd, body, { status: out.status, error: out.error, ...(out.replan ? { replan: out.replan } : {}) }, hit);
+      traced();
       if (body.inWater) {
         end = 'water';
         break;
@@ -228,6 +255,8 @@ export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[
     bailTicks: s.bailTicks ?? 0,
     at: { ...body.pos },
     blocks,
+    tickMs: tickN ? tickMsSum / tickN : 0,
+    tickMsMax,
   };
 }
 
@@ -239,6 +268,10 @@ export interface CaveTrip {
   /** Windows flown and those with no wall damage; cruises (stubbed); walks and the blocks walked. */
   legs: number;
   legsClean: number;
+  /** Track F7: windows that ended on their landing cell (the chain done), not in a bail-out or on some other floor. */
+  landed: number;
+  /** Track F7: the tracker's worst tick (ms) over the trip's windows. */
+  tickMsMax: number;
   cruises: number;
   walks: number;
   walkedBlocks: number;
@@ -337,7 +370,7 @@ export async function flyTrip(cave: TripWorld, provider: CorridorProvider, start
       return Promise.resolve(proofOf(p));
     },
     flyUnder: async (win, _label, plan) => {
-      const r = await flyWindow(cave.query, pos, win.goals, win.margin, o, seed * 97 + ++k, plan, cave.grid, win.height);
+      const r = await flyWindow(cave.query, pos, win.goals, win.margin, o, seed * 97 + ++k, plan, cave.grid, win.height, cave.floor);
       windows.push(r);
       o.onWindow?.(win, r);
       if (r.end === 'water') water++;
@@ -367,6 +400,8 @@ export async function flyTrip(cave: TripWorld, provider: CorridorProvider, start
     windows,
     legs: windows.length,
     legsClean: windows.filter((w) => w.damage === 0).length,
+    landed: windows.filter((w) => w.end === 'done').length,
+    tickMsMax: windows.reduce((a, w) => Math.max(a, w.tickMsMax), 0),
     cruises,
     walks,
     walkedBlocks,
@@ -411,6 +446,9 @@ export interface CaveScore {
   maxHit: number;
   legs: number;
   legsClean: number;
+  /** Track F7: windows that ended on their landing cell, and the tracker's worst tick (ms) over the set. */
+  landed: number;
+  tickMsMax: number;
   /** Trips per damage band (DAMAGE_BANDS: 0, (0, 1], (1, 3], (3, 6], (6, 10], (10, 20], over 20). */
   bands: number[];
   damage: number;
@@ -441,6 +479,8 @@ export function scoreCaves(trips: readonly CaveTrip[]): CaveScore {
     maxHit: trips.reduce((a, t) => Math.max(a, t.maxHit), 0),
     legs: trips.reduce((a, t) => a + t.legs, 0),
     legsClean: trips.reduce((a, t) => a + t.legsClean, 0),
+    landed: trips.reduce((a, t) => a + (t.landed ?? 0), 0),
+    tickMsMax: trips.reduce((a, t) => Math.max(a, t.tickMsMax ?? 0), 0),
     bands,
     damage: mean((t) => t.damage),
     rockets: mean((t) => t.rockets),
@@ -454,11 +494,11 @@ export function scoreCaves(trips: readonly CaveTrip[]): CaveScore {
 
 export function caveScoreLine(name: string, s: CaveScore): string {
   const pct = (a: number, b: number): string => (b ? `${((100 * a) / b).toFixed(0)}%` : '-');
-  return `${name}: ${s.arrived}/${s.runs} arrived (${pct(s.arrived, s.runs)}), ${s.fatal} fatal, legs ${s.legsClean}/${s.legs} clean (${pct(s.legsClean, s.legs)}), damage mean ${s.damage.toFixed(2)} max hit ${s.maxHit.toFixed(1)}, bands [${s.bands.join(' ')}], ${s.bailouts} bail-outs, ${s.water} water, ${s.rockets.toFixed(1)} rockets, ${s.ticks.toFixed(0)} ticks, flown ${s.flownBlocks.toFixed(0)} walked ${s.walkedBlocks.toFixed(0)} blocks`;
+  return `${name}: ${s.arrived}/${s.runs} arrived (${pct(s.arrived, s.runs)}), ${s.fatal} fatal, legs ${s.legsClean}/${s.legs} clean (${pct(s.legsClean, s.legs)}), landed ${s.landed}/${s.legs} (${pct(s.landed, s.legs)}), damage mean ${s.damage.toFixed(2)} max hit ${s.maxHit.toFixed(1)}, bands [${s.bands.join(' ')}], ${s.bailouts} bail-outs, ${s.water} water, ${s.rockets.toFixed(1)} rockets, ${s.ticks.toFixed(0)} ticks, flown ${s.flownBlocks.toFixed(0)} walked ${s.walkedBlocks.toFixed(0)} blocks, worst tick ${s.tickMsMax.toFixed(1)} ms`;
 }
 
 export function caveTripLine(t: CaveTrip): string {
-  return `${t.name}: ${t.arrived ? 'arrived' : `gave up (${t.reason ?? '?'})`}, ${t.legs} windows (${t.legsClean} clean), ${t.cruises} cruises, ${t.walks} walks (${t.walkedBlocks.toFixed(0)} blocks), flown ${t.flownBlocks.toFixed(0)}, damage ${t.damage.toFixed(1)} (max hit ${t.maxHit.toFixed(1)}, ${t.hits} hits), ${t.bailouts} bail-outs, ${t.water} water, ${t.rockets} rockets, ${t.ticks} ticks, ${t.plans} corridor plans (${t.replans} re), ${t.proofs} proofs (${t.cuts} cut, ${t.unproven} unproven), ${(t.ms / 1000).toFixed(1)} s [${t.corridor}]`;
+  return `${t.name}: ${t.arrived ? 'arrived' : `gave up (${t.reason ?? '?'})`}, ${t.legs} windows (${t.legsClean} clean, ${t.landed} landed), ${t.cruises} cruises, ${t.walks} walks (${t.walkedBlocks.toFixed(0)} blocks), flown ${t.flownBlocks.toFixed(0)}, damage ${t.damage.toFixed(1)} (max hit ${t.maxHit.toFixed(1)}, ${t.hits} hits), ${t.bailouts} bail-outs, ${t.water} water, ${t.rockets} rockets, ${t.ticks} ticks, ${t.plans} corridor plans (${t.replans} re), ${t.proofs} proofs (${t.cuts} cut, ${t.unproven} unproven), ${(t.ms / 1000).toFixed(1)} s [${t.corridor}]`;
 }
 
 /** The burns a cave is scored over: the range's ends and middle, and random draws (as the obstacle course's COURSE_BURNS). */

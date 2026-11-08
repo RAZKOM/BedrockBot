@@ -65,6 +65,8 @@ export interface ChainOptions {
   /** Track F6: the requests' heuristic through the air (RouteRequest.geodesic) and the search's pieces (RouteRequest.pieces). */
   geodesic?: boolean;
   pieces?: number;
+  /** Track F7: the cells a body may stand on (tracker.ts TrackerOptions.floor: the bail-out sinks onto a dry one). */
+  floor?: (x: number, y: number, z: number) => boolean | undefined;
   note?: (msg: string) => void;
 }
 
@@ -121,6 +123,7 @@ export class TrackerChain {
       ...(o.riskCost !== undefined ? { riskCost: o.riskCost } : {}),
       ...(o.geodesic ? { geodesic: true } : {}),
       ...(o.pieces !== undefined ? { pieces: o.pieces } : {}),
+      ...(o.floor ? { floor: o.floor } : {}),
       ...(o.note ? { note: o.note } : {}),
     });
   }
@@ -263,6 +266,8 @@ export interface StretchDeps extends Omit<RocketDeps, 'loop'> {
   plan?: Planner;
   /** Chunk columns arriving (the world's onColumnLoaded); the trackers check their corridors again. */
   columnLoaded?: (fn: (cx: number, cz: number) => void) => () => void;
+  /** Track F7: the cells a body may stand on (the bail-out's dry floor; the live model's real solids). */
+  floor?: (x: number, y: number, z: number) => boolean | undefined;
   log?: Logger;
 }
 
@@ -331,6 +336,7 @@ export function flyStretch(d: StretchDeps, o: StretchOptions): { done: Promise<S
     ...(o.firstPlan ? { firstPlan: o.firstPlan } : {}),
     ...(o.geodesic ? { geodesic: true } : {}),
     ...(o.pieces !== undefined ? { pieces: o.pieces } : {}),
+    ...(d.floor ? { floor: d.floor } : {}),
     yaw: loop.command.yaw,
     note: (m) => {
       log.info(m);
@@ -364,6 +370,13 @@ export function flyStretch(d: StretchDeps, o: StretchOptions): { done: Promise<S
       finish?.(out.done ? 'done' : 'ground');
       return;
     }
+    // Track F7: the glide ended in water (BDS ends it there): the window is over, the executor takes the body from the pool (a
+    // body in water has no takeoff, ADR 0068). Before, a bail-out that sank into a pool on bds-fly2 kept the window alive for
+    // its 900 ticks (45 s in the water, 20 corrections) before the tick cap ended it.
+    if (wasGliding && !state.gliding && state.inWater && chain.reached < chain.goals) {
+      finish?.('ground');
+      return;
+    }
     if (state.gliding && (state.collidedHorizontally || (state.collidedVertically && !state.onGround))) hits++;
     wasGliding = state.gliding;
     const r = hand.rocketsInHotbar();
@@ -382,7 +395,11 @@ export function flyStretch(d: StretchDeps, o: StretchOptions): { done: Promise<S
     const glide = state.gliding || !state.onGround;
     loop.setCommand({ yaw: c.yaw, pitch: c.pitch, jump: c.jump === true, glide, forward: 0, strafe: 0, sprint: false, sneak: false });
     if (c.fire) {
-      if (r.slot >= 0 && hand.canFire(tick) && serverGliding && state.boostTicks === 0) hand.fire(r.slot, state.pos, tick);
+      // Track F7: a rocket goes when the tracker asks for one, a burn still running or not (as route/live.ts fires): the tracker's
+      // belief applies the plans' rule (none before the burn's earliest end, primitives.ts inBurnTail) and the loop extends the
+      // boost to the later end (F0: the union of the two lifetimes). Held until the running burn's end, which the plans never
+      // assumed, the plan's reference boosted on while the body did not, and the window bailed out "off the plan".
+      if (r.slot >= 0 && hand.canFire(tick) && serverGliding) hand.fire(r.slot, state.pos, tick);
       else chain.fireHeld(); // Track F6: the belief must not burn a rocket the body never had
     }
     if (tick >= max) finish?.('timeout');
