@@ -21,7 +21,7 @@ import { classify, type TerrainClass } from '../terrain/classify.ts';
 import type { TerrainSource } from '../terrain/query.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { DEFAULT_THROWAWAY, DIG_REPEATS, DIG_SETTLE_TICKS, type BreakRules, type NavActions } from './actions.ts'; // Track BC: DIG_REPEATS, DIG_SETTLE_TICKS
-import { PathSearch, explainStart, findPath, handBreakTicks, locateNode, type LocatedNode, type PathNode, type PathOptions, type PathResult } from './astar.ts';
+import { PathSearch, explainStart, findPath, goalUnloaded, handBreakTicks, locateNode, type LocatedNode, type PathNode, type PathOptions, type PathResult } from './astar.ts';
 import { DEFAULT_COSTS, TICKS, type PathCosts } from './costs.ts'; // Track BI: DEFAULT_COSTS, PathCosts (dropCheck)
 import { PathFollower, PressGuard, yawTowards } from './follower.ts';
 import { goalTest, type NavGoal } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
@@ -34,7 +34,7 @@ import { corridorState, fineTarget, touches, waypointGoal, type CorridorState } 
 import type { CoarseLayer, CoarseMode, CorridorStatus } from '../coarse/types.ts'; // Track CB
 import { AirClock, bodyInWater, headUnderWater } from './water.ts'; // Track W1
 import { trappedWhy, waterDigConditions } from './digout.ts'; // Track W2
-import { DIG_WAY_MAX_BLOCKS, DIG_WAY_PRICE, fallsHurt, harmlessFalls, lastResortFalls, type DigWayLevel } from './digway.ts'; // Track W3
+import { DIG_WAY_MAX_BLOCKS, DIG_WAY_PRICE, LONG_DIG_PRICE, LONG_DIG_WEIGHT, fallsHurt, harmlessFalls, lastResortFalls, longDigOptions, type DigWayLevel } from './digway.ts'; // Track W3; Track R3: the long dig search
 import { isNaturalTerrain } from '../place/scaffold.ts'; // Track R1
 import { REACH_RULES, causeTag, causeWords, fallOnPath, relaxOptions, rulesOnPath, sealedPocket, type ReachCause, type ReachRule, type RefusedFall } from './reach.ts'; // Track R1; Track R2: fallOnPath
 
@@ -218,6 +218,8 @@ export interface GotoReport {
   skips?: number;
   snaps?: number;
   overruns?: number;
+  /** Track R3: ways the long dig search found and the goto walked (a partial one only towards a corridor waypoint). */
+  longDigPlans?: number;
   /** Track BH: why a failed goto failed (the planner's own words: `no path (exhaustive search, 1708 nodes expanded)`), for the glide-down line. */
   why?: string;
   /** Track BG2: doors / hatches that stayed open behind the body (two close clicks failed; not a goto failure). */
@@ -237,6 +239,10 @@ interface Search {
   reason: ReplanReason;
   tick: number;
   slices: number;
+  /** Track R3: the long dig search (digway.ts LONG_DIG_WEIGHT). */
+  long?: boolean;
+  /** Track R3: the body waits for the final answer (no interim walked: the last two finals did not meet their interim paths, or the long dig search). */
+  noInterim?: boolean;
 }
 
 /** Track R1: the "why unreachable" searches of a goto about to give up (nav/reach.ts). */
@@ -371,6 +377,18 @@ interface Active {
    */
   big: boolean;
   bigTried: Set<string>;
+  /**
+   * Track R3 (digway.ts LONG_DIG_WEIGHT): the next main plan is the long dig search (weighted, digs at their time); the
+   * (node, level, waypoint) keys that had theirs.
+   */
+  long: boolean;
+  longTried: Set<string>;
+  /** Track R3: the next main plan walks no interim answer (two final answers in a row did not meet their interim paths). */
+  noInterim: boolean;
+  /** Track R3: found final answers in a row that did not meet their interim path (from 2: `noInterim`). */
+  unmetFinals: number;
+  /** Track R3: chunk columns (cx * 65536 + cz, low 16 bits) with a block change the goto's own actions made, by tick. */
+  ownChunks: Map<number, number>;
   /** Track R1: the "why unreachable" searches under way (GotoOptions.explain, nav/reach.ts); `explained` once they ran; `cause` their answer. */
   explain: ExplainRun | undefined;
   explained: boolean;
@@ -434,6 +452,20 @@ function midPillar(a: Active): boolean {
   const next = a.path[a.passedAbs + 1];
   return next?.move === 'pillar' || (a.path[a.passedAbs]?.move === 'pillar' && next !== undefined && next.y > a.path[a.passedAbs]!.y);
 }
+
+/** Track R3: the path ahead of the body still has blocks to dig (a dug way under way). */
+function midDig(a: Active): boolean {
+  for (let i = Math.max(0, a.passedAbs + 1); i < a.path.length; i++) if (a.path[i]!.act?.dig?.length) return true;
+  return false;
+}
+
+/** Track R3: a chunk column's key for Active.ownChunks. */
+function chunkColumnKey(cx: number, cz: number): number {
+  return cx * 65536 + (cz & 0xffff);
+}
+
+/** Track R3: a coarse change in a chunk whose own block change is at most this many ticks old is the goto's own. */
+const OWN_CHANGE_TICKS = 2;
 
 /** Track R1: frontier legs a goto walks at most (PathOptions.frontier). */
 export const FRONTIER_MAX_LEGS = 6;
@@ -601,8 +633,10 @@ export class Navigator {
    * answer waiting): the reachability bench (nav/bench) paces its ticks at the server's rate while this holds.
    */
   get awaitingWorker(): boolean {
-    const s = this.active?.explain?.search.s ?? this.active?.search?.s; // Track R1: the "why" searches too
-    return s instanceof WorkerSearch && (s.state === 'waiting' || s.state === 'sent') && !s.interimReady;
+    const search = this.active?.explain?.search ?? this.active?.search; // Track R1: the "why" searches too
+    const s = search?.s;
+    // (Track R3: an interim answer the navigator will not walk is nothing new either)
+    return s instanceof WorkerSearch && (s.state === 'waiting' || s.state === 'sent') && (!s.interimReady || search!.noInterim === true);
   }
 
   /** Track W1: the grid's cell classes (water.ts reads them). */
@@ -734,7 +768,10 @@ export class Navigator {
     const off = layer.onChange((chunks) => {
       const a = this.active;
       if (!a?.corridor || a.corridorPending) return;
-      if (touches(a.corridor, chunks, a.corridor.corridor.dim)) a.corridorDirty = true;
+      // Track R3: not for the goto's own digs (a long dug way changes its chunks at every block: each new corridor
+      // re-planned the walk away from the dug way it was on)
+      const others = chunks.filter((c) => !(a.t - (a.ownChunks.get(chunkColumnKey(c.cx, c.cz)) ?? -Infinity) <= OWN_CHANGE_TICKS));
+      if (touches(a.corridor, others, a.corridor.corridor.dim)) a.corridorDirty = true;
     });
     const c = { layer, minBlocks: opts.minBlocks, off };
     this.coarse = c;
@@ -877,6 +914,11 @@ export class Navigator {
         dug: 0,
         big: false, // Track R1
         bigTried: new Set(),
+        long: false, // Track R3
+        longTried: new Set(),
+        noInterim: false,
+        unmetFinals: 0,
+        ownChunks: new Map(),
         explain: undefined,
         explained: false,
         openWalks: 0,
@@ -976,7 +1018,10 @@ export class Navigator {
     if (before && movementSignature(classify(before)) === movementSignature(classify(after))) return;
     this.noteChange(p); // Track AB
     if (a.search?.kind === 'ahead') dropSearch(a); // restarted on the next tick, on the new blocks
-    if (a.ownCells.has(cellKey(p.x, p.y, p.z))) return;
+    if (a.ownCells.has(cellKey(p.x, p.y, p.z))) {
+      a.ownChunks.set(chunkColumnKey(p.x >> 4, p.z >> 4), a.t); // Track R3: no corridor re-plan for it
+      return;
+    }
     if (!a.path.length || a.status === undefined) return;
     for (let i = Math.max(0, a.passedAbs); i < a.path.length; i++) {
       const n = a.path[i]!;
@@ -1210,9 +1255,12 @@ export class Navigator {
       }
       // Track R2: a goto that digs anyway, whose searches were cut, plans on weighted once before a rule is the answer:
       // the way the rule opens may have a dug twin its searches did not reach (allowPlace off: a stair dug up a ravine's
-      // wall or a tower, where the "why" way pillars)
-      if (a.opts.allowBreak && a.openWalks === 0 && /search limit hit|cut by its budget/.test(a.why ?? '')) {
-        this.walkOpenWay(a);
+      // wall or a tower, where the "why" way pillars). Track R3: and one whose walk stuck (move timeouts): its plans
+      // were ways under the owner's rules, so the rule is no answer yet (lava:1:10: three drops timed out on a dug way,
+      // the "why" way digs beside lava, the owner's way existed)
+      const stuck = /^(move timeout|stuck)$/.test(a.why ?? '');
+      if (a.opts.allowBreak && a.openWalks === 0 && (stuck || /search limit hit|cut by its budget/.test(a.why ?? ''))) {
+        this.walkOpenWay(a, undefined, stuck);
         return;
       }
       if (run.used.length === 1) {
@@ -1248,7 +1296,7 @@ export class Navigator {
    * freely: its digs cost it nothing). The failures start one short of the limit again; the "why" searches may run
    * once more when the goto fails after all.
    */
-  private walkOpenWay(a: Active, path?: PathNode[]): void {
+  private walkOpenWay(a: Active, path?: PathNode[], stuck = false): void {
     a.openWalks++;
     a.openPath = path;
     a.explain = undefined;
@@ -1259,7 +1307,7 @@ export class Navigator {
     a.replan = 'retry';
     a.waitUntil = a.t + 1;
     this.loop.release();
-    this.log.info(path ? `goto: the way the "why" search found breaks no rule (${path.length} nodes): planning on with the searches weighted (open walk ${a.openWalks}/${OPEN_WALKS})` : `goto: the searches were cut: planning on with them weighted before the answer (open walk ${a.openWalks}/${OPEN_WALKS})`);
+    this.log.info(path ? `goto: the way the "why" search found breaks no rule (${path.length} nodes): planning on with the searches weighted (open walk ${a.openWalks}/${OPEN_WALKS})` : `goto: ${stuck ? 'the walk stuck' : 'the searches were cut'}: planning on with them weighted before the answer (open walk ${a.openWalks}/${OPEN_WALKS})`);
   }
 
   /** Track R2: the open way (walkOpenWay) adopted as the goto's path when the weighted search went nowhere. */
@@ -1332,6 +1380,11 @@ export class Navigator {
     if (!this.digWay() || this.actions.dig === undefined) return false;
     if (a.opts.allowBreak) return (this.digPenalty?.() ?? 0) > DIG_WAY_PRICE;
     return a.dug < DIG_WAY_MAX_BLOCKS;
+  }
+
+  /** Track R3: the long dig search can run: the goto digs anyway and the dig action is wired. */
+  private longDigOn(a: Active): boolean {
+    return a.opts.allowBreak && this.actions.dig !== undefined;
   }
 
   /** The plan options of the goto's level (Active.level). */
@@ -1666,6 +1719,7 @@ export class Navigator {
     a.ticksAway = 0;
     a.report.offPath = (a.report.offPath ?? 0) + 1;
     this.log.info(`goto: off the path (${d.toFixed(2)} blocks) at ${fmt(s.pos)}: re-planning`);
+    this.log.debug(`goto: the path there: ${a.path.slice(Math.max(0, a.legFrom + passed - 3), a.legFrom + f.index + 4).map((n) => `${n.move} ${n.x} ${n.feet.toFixed(1)} ${n.z}`).join(', ')} (passed ${a.legFrom + passed}, aim ${a.legFrom + f.index})`); // Track R3
     a.replan ??= 'off_path';
     this.loop.release();
     a.guard.idle();
@@ -1721,7 +1775,7 @@ export class Navigator {
     if (search.kind !== 'main') return true;
     // a main plan in the worker: walk its interim answer (the best partial path after mainMs) while it goes on
     const early = search.s instanceof WorkerSearch ? search.s.takeInterim() : undefined;
-    if (early && early.path.length > 1 && !this.stale(search, early)) {
+    if (early && early.path.length > 1 && !search.noInterim && !this.stale(search, early)) {
       this.planner?.touchCached(early.path);
       if (!this.onMainResult(a, early, search, { interim: true })) {
         dropSearch(a);
@@ -1806,7 +1860,8 @@ export class Navigator {
         a.corridor = st;
         if (!st) return;
         // the plan under way aims at the raw goal (or an old corridor): re-plan towards the corridor
-        if (!a.action && a.replan === undefined && !midPillar(a)) a.replan = 'corridor';
+        // (Track R3: not while the path ahead still digs: the dug way is walked out first, the next plan follows it)
+        if (!a.action && a.replan === undefined && !midPillar(a) && !midDig(a)) a.replan = 'corridor';
       },
       (e: unknown) => {
         if (this.active !== a) return;
@@ -1931,11 +1986,18 @@ export class Navigator {
       a.doors = a.doors.filter((d) => d.closeAt <= k);
       a.actedUpTo = Math.min(a.actedUpTo, k);
       a.report.upgrades = (a.report.upgrades ?? 0) + 1;
+      a.unmetFinals = 0; // Track R3
       if (!a.action) this.startLeg(a, a.follower ? a.legFrom + a.follower.passedIndex : a.passedAbs);
       return true;
     }
     this.log.debug(`goto: the worker's ${res.status} plan does not meet the rest of the interim path; ${res.status === 'found' ? 're-planning from here' : 'walking on'}`);
-    if (res.status === 'found' && !a.action) a.replan ??= 'upgrade';
+    // (Track R3: from the second in a row the re-plan waits for its final answer: its interim, the best partial path
+    // after 40 ms, led the body the other way round again, the final went round the other side, and the two took turns
+    // until the cap, lava:20:5)
+    if (res.status === 'found' && !a.action && a.replan === undefined) {
+      a.replan = 'upgrade';
+      if (++a.unmetFinals >= 2) a.noInterim = true;
+    }
     return true;
   }
 
@@ -2011,8 +2073,19 @@ export class Navigator {
     if (a.placeFailures >= 2) a.pathOpts.allowPlace = false;
     const noAction = new Set([...this.blacklist.cells('place'), ...this.blacklist.cells('use'), ...a.noAction]);
     if (noAction.size) a.pathOpts.noAction = noAction;
+    // Track R3: the long dig search plans this one search with its options; the plan-aheads from its end plan as the
+    // level does (they walk on where the dug way comes out, and dig no more than the level would)
+    const levelOpts = a.pathOpts;
+    if (a.long) a.pathOpts = longDigOptions(levelOpts);
     a.search = this.newSearch(a, start, 'main', reason); // Track AB: in the worker when it is ready
+    // (the long dig search's interim, its best partial path after 40 ms, is not walked: weighted and digging cheaply,
+    // it led the body into a tower's foot, where the level's plans found nothing more, pits:12:10)
+    if (a.long) a.search.long = true;
+    if (a.noInterim || a.long) a.search.noInterim = true;
+    a.noInterim = false;
+    a.pathOpts = levelOpts;
     a.big = false; // Track R1: one bigger search per ask
+    a.long = false; // Track R3: one long dig search per ask
     this.idleBody(s); // Track W1: in water, held at its depth while the plan is searched
     return true;
   }
@@ -2040,6 +2113,15 @@ export class Navigator {
   private onMainResult(a: Active, res: PathResult, search: Search, flags: { interim?: boolean } = {}): boolean {
     this.record(a, res, search, flags);
     a.lastMain = res.status; // Track R
+    // Track R3: the long dig search's partial answer is walked only towards a corridor waypoint (the corridor's next
+    // window re-aims it; on a loaded machine the long trips' crossings came as partial ways of 30 to 50 nodes, and
+    // the waypoints failed without them). Towards the goal itself only a whole way: weighted and digging cheaply,
+    // its partial ends dig into the way, and pits:12:10's dug into the 2 x 2 tower the stair up had to be cut from;
+    // from inside the holes no stair was left (the next plans and the "why" answer: `rule place`)
+    if (search.long && !flags.interim && res.status !== 'found' && res.path.length > 1 && search.wp === undefined) {
+      this.log.info(`goto: the long dig search found no whole way (a partial way of ${res.path.length} nodes, ${res.expanded} expanded): not walked`);
+      res = { ...res, path: res.path.slice(0, 1), reason: 'no_progress' };
+    }
     // Track R2: after an open way (walkOpenWay) the weighted search found nothing to walk: the open way itself
     if (a.openPath && !flags.interim) {
       if ((res.status === 'none' || res.path.length <= 1) && this.adoptOpenWay(a)) return true;
@@ -2082,6 +2164,19 @@ export class Navigator {
         a.replan = 'retry';
         a.waitUntil = a.t + 1;
         this.log.info(`goto: the plan was cut by its budget with no progress (${res.expanded} expanded): planning again with ${BIG_SEARCH} x the budget`);
+        return false;
+      }
+      // Track R3: a goto that digs anyway, whose search and its bigger one were cut with no progress: once per node, level
+      // and waypoint the long dig search (digs priced at their time, the heuristic weighted: a dug way of tens of blocks,
+      // a ravine's walls, is past any search at the level's price) before the corridor fails, the level goes up or a
+      // failure counts. Not towards a goal in unloaded world: that search went nowhere for the unknown, not for a dug
+      // way (R1's frontier legs walk towards it), and the long dig search tunnelled there where a walk existed
+      if (res.limited && search.via === 'worker' && bigKey !== undefined && !search.long && this.longDigOn(a) && !a.longTried.has(bigKey) && !goalUnloaded(search.goal, this.grid)) {
+        a.longTried.add(bigKey);
+        a.long = true;
+        a.replan = 'retry';
+        a.waitUntil = a.t + 1;
+        this.log.info(`goto: the bigger plan was cut with no progress too (${res.expanded} expanded): the long dig search (digs at ${LONG_DIG_PRICE} a block, the heuristic x ${LONG_DIG_WEIGHT})`);
         return false;
       }
       // Track CB: no progress towards a corridor waypoint is the corridor's failure. Track R1: whatever the search
@@ -2163,6 +2258,12 @@ export class Navigator {
     if (res.path.length > 1) {
       a.unloadedTicks = 0;
       a.noProgress = undefined; // a plan went somewhere: a later failure from the same node is searched again
+      if (search.long && !flags.interim) {
+        a.report.longDigPlans = (a.report.longDigPlans ?? 0) + 1; // Track R3
+        let digs = 0;
+        for (const n of res.path) digs += n.act?.dig?.length ?? 0;
+        this.log.info(`goto: the long dig search found ${res.status === 'found' ? 'a way' : 'a partial way'} (${res.path.length} nodes, ${digs} block(s) to dig, ${res.expanded} expanded)${search.wp !== undefined ? ` towards corridor waypoint ${search.wp}` : ''}`);
+      }
       if (res.frontier && !flags.interim) {
         a.frontierLegs++; // Track R1
         this.log.info(`goto: no way in the loaded world: heading into the unloaded world towards the goal (frontier leg ${a.frontierLegs}/${FRONTIER_MAX_LEGS}, ${res.path.length} nodes)`);

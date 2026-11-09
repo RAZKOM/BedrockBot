@@ -174,3 +174,60 @@ Track R2 ran the navigator with the Realm's settings (`allowBreak` and `allowPla
 
 Deferred: a stranded fallback (ways down when every way off a raised end hurts: dig the own pillar, dig a stair); no
 stranded end was measured with the fixes, so it is left until one is.
+
+## R3: long dig ways
+
+Track R3 took on R2's weak part: at the live settings (`allowBreak` on, `allowPlace` off, `digPenalty` 500) 35 of
+the bench's 95 long trips (200 to 330 blocks along the coarse corridor) answered unreachable where the oracle's way
+digs 36 to 57 blocks (docs/pathfinding.md "Long dig ways (Track R3)").
+
+24. **A dug way of tens of blocks gets its own search.** When a goto that digs anyway (`allowBreak`) has a main plan
+    and its BIG_SEARCH retry both cut by the budget with no progress, it runs the long dig search once for that
+    node, level and corridor waypoint, before the corridor fails, the level goes up or a failure counts: the same
+    moves, rules and falls as the level, the heuristic weighted (LONG_DIG_WEIGHT 8) and every dug block priced at
+    its physical time (LONG_DIG_PRICE 12, the planner's own default dig cost: stopping, aiming, the break cooldown;
+    never above the goto's own price). The cause was the search, not a rule: the heuristic prices a block at a
+    walk's 3.6 ticks, so a way that digs pays its dig price in full before the search looks past it, and a ravine's
+    two walls (a stair down and up, 77 blocks) cost the search 648 000 nodes at the dig way's 60 a block where the
+    live 2 s buy about 130 000 on the Mac. Weighted and at 12 a block the same crossing is found in 31 000 nodes
+    (240 ms), 7 blocks more dug (84 against 77). The alternatives measured on that crossing: the weight alone (60 a
+    block, 16 x: 103 000 nodes; 32 x: 22 000 nodes but 89 blocks), the price alone (12 a block, unweighted: 503 000),
+    the price at 0 (16 000 nodes, 96 blocks: every free dig is taken); 12 and 8 together are the knee. Only the plan
+    that went nowhere is searched this way; the plans ahead of it and every plan after it are the level's, so a walk
+    that exists is still walked at the owner's price, and the dug way is the one the goto could not do without.
+    With it 94 of the 95 long pairs arrive (R2: 60); without it the 12 long pairs tried again answered unreachable
+    12 of 12. Three bounds, each from a bench pair it
+    hurt: its interim answer (the best partial path after 40 ms) is not walked, and a partial answer only towards a
+    corridor waypoint, whose next window re-aims it (towards the goal itself, weighted and digging cheaply, its
+    partial ends dig into the way: on pits:12:10 into a 2 x 2 tower whose only way up is a stair cut inside it, and
+    from the holes no stair was left; the planner's nodes do not remember what the way there dug, so a greedy search
+    closes a node it reached the wrong way; with no partial answer at all, on a loaded Mac whose 2 s bought 58 000
+    nodes, 5 long pairs failed their waypoints); and it is not run towards a goal in unloaded world (that search went nowhere for the unknown, not
+    for a dug way; it tunnelled 54 and 132 blocks on two unknown pairs a walk reaches, and caves:10:6 ran to the cap
+    after digging 278).
+25. **A goto's own digs are not news to its corridor.** A block the goto's own action changed no longer marks its
+    corridor dirty (the coarse layer's change report is dropped for a chunk column the goto changed in the last 2
+    ticks), and the walk is not re-planned onto a new corridor while the path ahead still has blocks to dig (as for
+    a pillar, decision 15). On the long walks that dug, every dug block re-planned the corridor, and the new plan
+    from the half-dug stair aimed elsewhere: the 37 long pairs that dug and arrived in R2 too dug 195 blocks at p90
+    then, 105 now, in 26 s at p50 against 61.
+26. **A re-plan after answers that do not meet their interim waits for its own final answer.** From the second found
+    final answer in a row that does not meet the interim path the body walks (a final that meets one, spliced in,
+    starts the count again), the re-plan from where the body stands walks no interim answer (the best partial path
+    after 40 ms) and waits for its final; the bench paces its ticks while it waits. lava:20:5 timed out this way in
+    R2: the interim plans led west round a hill, the final plans east, and the two took turns 30 times until the cap;
+    it arrives now. The first miss re-plans as before (interim walked, the final spliced in), so a goto whose first
+    guess was wrong loses nothing.
+27. **A walk that stuck is no rule's answer yet.** A goto that digs anyway whose last failure was the walk itself (a
+    move timeout, stuck) plans on weighted once before a rule the "why" way breaks is the answer, as one whose
+    searches were cut does (decision 18): its plans were ways under the owner's rules, so the rule the "why" search
+    (every rule lifted) happens to break blocks nothing. lava:1:10 failed this way 1 run in 3 (three drops on a dug
+    way timed out, the "why" way digs beside lava, `rule liquid`; the oracle's way breaks no rule).
+28. **Limits kept.** A stair dug down from open ground is planned only towards a goal below the node (the planner's
+    `digDescend` rule, Track BC): a ravine crossed towards a waypoint at or above the rim is found only when the
+    corridor puts a waypoint lower, as it did on every long pair (19 of the 35 with the goal above the start). A long
+    dig way digs more than the oracle's (p90 2.25 x; the oracle digs at no extra cost): the owner sees it in the dug
+    counts, and it never digs where the level's plan walks. The bench of 2194 pairs at the
+    live settings: 5 false unreachable (0.23 %; R2 6), no death, no stranded end, causes 70 of 71; the long dig
+    search costs an honest unreachable answer about 6 s (47 s at p50 against 41). A death older than R3 is open:
+    lava:7:10 dies at `--speed 0.4` with R2's navigator as with R3's, a turn by lava at the joint of two plan-aheads.

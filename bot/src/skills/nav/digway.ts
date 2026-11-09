@@ -25,6 +25,7 @@
 import type { TerrainClass } from '../terrain/classify.ts';
 import { isNaturalTerrain } from '../place/scaffold.ts';
 import type { FallPolicy } from '../fall/policy.ts';
+import type { PathOptions } from './astar.ts';
 
 /** Blocks the dig way may dig in one goto (all its plans together). */
 export const DIG_WAY_MAX_BLOCKS = 12;
@@ -36,6 +37,23 @@ export const DIG_WAY_MAX_TICKS = 200;
 export const DIG_WAY_PRICE = 60;
 /** Planner ticks per HP a fall costs at level 2 while the dig way is open (a dug way wins unless it is far slower). */
 export const DIG_WAY_HP_COST = 400;
+
+/**
+ * Track R3 (docs/pathfinding.md "Long dig ways (Track R3)"): the long dig search, for a goto that digs anyway
+ * (`allowBreak`) whose plain search and its BIG_SEARCH retry were cut with no progress: a dug way of tens of blocks (a
+ * stair down a ravine's wall and up the other) costs thousands of ticks at any dig price above the break time, and
+ * an A* whose heuristic prices a block at a walk's 3.6 ticks has to expand every node cheaper than that first (the
+ * whole loaded world and every dig into it: 648 000 nodes at 60 a block, 2 s buys about 130 000). Priced at the
+ * physical time of a dig (LONG_DIG_PRICE: the planner's own default, stop, aim, the break cooldown) and the heuristic
+ * weighted (LONG_DIG_WEIGHT), the same crossing is found in about 31 000 nodes, 7 blocks more dug (84 against 77).
+ */
+export const LONG_DIG_WEIGHT = 8;
+export const LONG_DIG_PRICE = 12;
+
+/** Track R3: a level's options as the long dig search plans them (the rest, falls and rules included, unchanged). */
+export function longDigOptions(o: PathOptions): PathOptions {
+  return { ...o, relax: { ...o.relax, weight: Math.max(o.relax?.weight ?? 1, LONG_DIG_WEIGHT) }, costs: { ...o.costs, dig: Math.min(o.costs?.dig ?? LONG_DIG_PRICE, LONG_DIG_PRICE) } };
+}
 
 /** The goto's planning level (see above). */
 export type DigWayLevel = 0 | 1 | 2;

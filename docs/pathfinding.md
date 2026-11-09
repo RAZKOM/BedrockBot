@@ -1093,6 +1093,132 @@ price applies first, and only a goto that would otherwise fail digs at the lower
 and whose "why" way breaks a rule plans on weighted once more before answering (about 20 s more before a rule
 answer); the long class and the incident fixtures are the only walks over a few hundred blocks measured.
 
+### Long dig ways (Track R3)
+
+Track R3 (decisions/0072-reachability.md "R3", decisions 24 to 28) took on R2's weak part: with the live settings
+35 of the 95 long trips answered unreachable, every one a way the oracle digs 36 to 57 blocks (a stair down one wall
+of the bench's ravine, 19 deep, and up the other, or through the escarpment). Their walks went the same way each time:
+the corridor's waypoint across the ravine, the main plan towards it cut by its 2000 ms with no progress, the plan at
+4 x the budget cut too, the waypoint failed; three such and no more corridors, then plans towards a goal in the
+unloaded world, frontier legs, partial plans that lead back and forth, and a "why" answer naming a rule the oracle's
+way avoids or `budget`. The coarse layer could not help: its volume model sees the ravine and the air over the
+surface as one volume, so its mine mode gives no dug portal there.
+
+**Why the searches went nowhere.** The heuristic prices a block at a walk's 3.6 ticks. A way that digs pays its dig
+price in full before the search looks past it, so a crossing whose stair digs 77 blocks has to expand every node
+cheaper than it first: the whole loaded world, and every dig into it. Planner experiments on long:1:2's rim (the
+planner alone on the bench world, from the rim to the far side 4 lower):
+
+| dig price a block | heuristic weight | expanded | blocks dug |
+|---|---|---|---|
+| 500 (the owner's, level 0) | 8 | 659 000 | - |
+| 60 (the dig way's, level 1) | 1 | 648 000 (9 s) | 77 |
+| 60 | 3 | 537 000 | - |
+| 60 | 8 | 312 000 | - |
+| 60 | 16 | 103 000 | - |
+| 60 | 32 | 22 000 | 89 |
+| 30 | 8 | 138 000 | - |
+| 20 | 8 | 70 000 | - |
+| 12 | 1 | 503 000 | - |
+| 12 | 3 | 252 000 | - |
+| 12 | 5 | 102 000 | - |
+| **12** | **8** | **31 000 (240 ms)** | **84** |
+| 0 | 8 | 16 000 | 96 |
+
+The live 2 s buy about 130 000 nodes in the Mac's worker.
+
+**The long dig search** (`digway.ts longDigOptions`, `navigator.ts onMainResult`). When a goto that digs anyway
+(`allowBreak`) has a main plan and its bigger retry both cut with no progress, it plans once more from that node, at
+that level, towards that waypoint, with the heuristic weighted 8 x (`LONG_DIG_WEIGHT`) and every dug block priced at
+12 (`LONG_DIG_PRICE`: the planner's own default dig cost, the time a dig takes beyond its break time; never above the
+goto's own price), the level's moves, rules and falls unchanged, before the corridor fails, the level goes up or a
+failure counts. Only that one plan: the plan-aheads from its end and every later plan are the level's again, so a
+walk that exists is still walked at the owner's price. The log says `the long dig search found a way (N nodes, D
+block(s) to dig, E expanded) towards corridor waypoint K`; the goto's report counts them (`longDigPlans`).
+
+The fixes:
+
+| fix | where |
+|---|---|
+| the long dig search, once a node, level and waypoint, after the bigger plan was cut with no progress too | `digway.ts longDigOptions`, `LONG_DIG_WEIGHT`, `LONG_DIG_PRICE`; `navigator.ts onMainResult`, `startMain` |
+| its interim answer is never walked, and a partial answer only towards a corridor waypoint (the corridor's next window re-aims it; on a loaded Mac the long crossings came as partial ways of 30 to 50 nodes and the waypoints failed without them): towards the goal itself a partial end of a greedy search that digs cheaply digs into the way (pits:12:10: into the 2 x 2 tower whose stair up had to be cut inside it; from the holes no stair was left, `rule place`). The planner's nodes do not remember what the way there dug, so a weighted search can close a node it reached the wrong way | `navigator.ts onMainResult`, `startMain` |
+| not towards a goal in unloaded world: that search went nowhere for the unknown, not for a dug way (R1's frontier legs walk towards it); it tunnelled 54 and 132 blocks on unknown pairs a walk reaches, and caves:10:6 ran to the cap after 278 | `navigator.ts onMainResult`; `astar.ts goalUnloaded` |
+| the goto's own block changes do not mark its corridor dirty (a coarse change in a chunk column the goto changed in the last 2 ticks is its own): every dug block re-planned the corridor, and the new plan from the half-dug stair aimed elsewhere | `navigator.ts attachCoarse`, `onBlock` (`ownChunks`) |
+| no re-plan onto a new corridor while the path ahead still has blocks to dig (as for a pillar) | `navigator.ts midDig` |
+| from the second found final answer in a row that does not meet the interim path, the re-plan walks no interim answer: it waits for its own final, the bench pacing its ticks meanwhile (the first miss re-plans as before) (lava:20:5: the interim plans led west round a hill, the finals east, 30 laps to the cap) | `navigator.ts onUpgradeResult`, `stepSearch`, `awaitingWorker` |
+| a goto that digs anyway whose walk stuck (a move timeout, stuck: the last failure) plans on weighted once before a rule the "why" way breaks is the answer, as one whose searches were cut (lava:1:10, 1 run in 3: three drops on a dug way timed out, then `rule liquid`, where the oracle's way breaks no rule) | `navigator.ts stepExplain`, `walkOpenWay` |
+| an "off the path" re-plan logs the path round the body at debug level (the nodes from 3 before the passed one to 3 after the aim) | `navigator.ts pathChecks` |
+
+**The long class** (worlds 1 to 6, 95 pairs, `--jobs 3`; the Mac, `--speed 1`, the live wall-clock budgets,
+`--config live --place off`):
+
+| run | pairs | oracle reachable | arrived of reachable | false unreachable | deaths | stranded | dug p50 / p90 / max | damage max | wall s p50 / p90 | time |
+|---|---|---|---|---|---|---|---|---|---|---|
+| R2 | 95 | 95 | 60 (63.2 %) | **35** | 0 | 0 | 11 / 179 / 230 (arrived) | 1 | 65 / 102 | 3158 s |
+| **R3** | 95 | 95 | 94 (98.9 %) | **1** | 0 | 0 | 74 / 99 / 120 | 1 | 25 / 48 | 2137 s |
+| R3, the long dig search alone (no bounds yet) | 95 | 95 | 95 (100.0 %) | **0** | 0 | 0 | 79 / 104 / 120 | 4 | 27 / 52 | 2400 s |
+| R3 without the long dig search (R2's first 12 false pairs) | 12 | 12 | 0 | **12** | 0 | 0 | 5 / 13 / 16 | 0 | 85 / 113 | 483 s |
+
+Of the 35 R2 answered unreachable, 34 arrive; they dig 85 blocks at p50 (104 at p90; the oracle's ways 49), in 31 s
+(51 s at p90). The one left, long:2:13, ran to the bench's cap of 6600 ticks: 1119 blocks walked, three of its corridor's
+waypoints failed one after another (a partial dug way towards the first, then
+partial plans that lead back and forth), the frontier legs after them too slow for the cap. The 37 that dug and
+arrived in R2 too dig 70 / 105 at p50 / p90 now against 70 / 195, in 26 s at p50 against 61: the corridor no longer
+re-plans the walk off its own half-dug stair. Damage 1 on one pair. Of the 23 pairs a walk reaches, 10 dig 1 to 6
+blocks (6 in R2, as few blocks). The second row is the long dig search before its three bounds (decision 24: the
+partial answers and the unloaded goal); with them, on a Mac loaded by two benches and the owner's `!test` series at
+once (2 s bought 58 000 nodes instead of 130 000) and no partial answer walked at all, 5 long pairs failed their
+waypoints, which is why a partial answer towards a corridor waypoint is walked. The ablation is the same code with
+the long dig search turned off: the corridor and interim fixes alone arrive at none of the 12 (`budget` 4, `rule
+liquid` 3, `rule place` 2, `unloaded` 1, 2 at the bench's cap).
+
+**The bench** (worlds 1 to 20 of every class but long, 2194 pairs, `--jobs 4`; the Mac, `--speed 1`, the live
+wall-clock budgets, `--config live --place off`; 3596 s):
+
+| class | pairs | oracle reachable | rule (b) | world (a) | arrived of reachable | false unreachable | deaths | stranded | cause agrees | placed / dug p90 | damage max |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| hills | 280 | 280 | 0 | 0 | 279 (99.6 %) | 1 | 0 | 0 | - | 0 / 18 | 1 |
+| ravine | 232 | 232 | 0 | 0 | 232 (100.0 %) | 0 | 0 | 0 | - | 0 / 49 | 2 |
+| water | 222 | 220 | 0 | 2 | 220 (100.0 %) | 0 | 0 | 0 | 1 of 2 | 0 / 0 | 0 |
+| lava | 260 | 260 | 0 | 0 | 260 (100.0 %) | 0 | 0 | 0 | - | 0 / 23 | 0 |
+| builds | 260 | 212 | 28 | 20 | 212 (100.0 %) | 0 | 0 | 0 | 48 of 48 | 0 / 0 | 2 |
+| caves | 260 | 259 | 1 | 0 | 257 (99.2 %) | 2 | 0 | 0 | 1 of 1 | 0 / 103 | 1 |
+| pits | 320 | 295 | 25 | 0 | 294 (99.7 %) | 1 | 0 | 0 | 20 of 20 | 0 / 59 | 8 |
+| unknown | 360 | 360 | 0 | 0 | 359 (99.7 %) | 1 | 0 | 0 | - | 0 / 9 | 0 |
+| **all** | 2194 | 2118 | 54 | 22 | 2113 (99.8 %) | **5 (0.23 % of pairs)** | 0 | 0 | 70 of 71 (98.6 %) | 0 / 38 | 8 |
+| R2 | 2194 | 2118 | 54 | 22 | 2112 (99.7 %) | 6 (0.27 %) | 0 | 0 | 71 of 72 (98.6 %) | 0 / 37 | 8 |
+
+Ticks p50 391, p90 1213. The five: hills:16:1 (R1's bench-edge artefact) and caves:17:11 (`unloaded`, R1's decision
+12) as in R2; pits:2:13 (`rule place`: a 2 x 2 tower 9 high whose only way up is a stair cut inside it; the level's
+searches are cut, the long dig search finds no whole way, the "why" way pillars), unknown:13:17 (`rule place`, as in
+R2; it arrived in 2 of R3's 4 runs of it) and caves:2:12 (`budget`: R2's `unloaded` there, the only way through unloaded
+world). lava:20:5 and lava:1:10 arrive. The cause that does not agree is water:7:9 again. Dug blocks: the p90 over all
+pairs is 38 against R2's 37, from pairs that arrive now and dug nothing then (lava:20:5 23 blocks, caves:2:12 21);
+over the 2116 pairs that arrived in both runs it is 39 in both, and the bench digs 381 blocks fewer in all (22 420
+against 22 801). The long dig search ran on 82 pairs, 72 of them the oracle's rule or world answers (built-up goals,
+the pits' towers): an honest unreachable answer takes 47 s at p50 now against 41 (61 against 53 at p90).
+
+**On a loaded Mac** (the long class and the bench at once, the owner's `!test` series running too: a search's 2 s
+bought about 58 000 nodes instead of 130 000), before the partial answers towards a waypoint were walked: long 90 of
+95, the bench 8 false and one death. The death, lava:7:10, is older than R3: the same pair dies at `--speed 0.4` 3 of
+3 with R2's navigator too (and arrives at 0.7 and above, 2 of 2 at 1). Its path walks east along a lava pool's edge
+and turns south at a node with lava straight ahead, the turn the joint of two plan-aheads; the body comes into the
+turn too fast and its box reaches 0.22 into the lava cell. R1's lava turn rules do not catch it there (not changed here: the
+follower's turn by lava at a plan-ahead joint is an open point).
+
+On bds-fly (e2e, the Mac's bds-fly through the runner, the live budgets): `nav-cave-entry` arrived 3 of 3 (70 s each, no damage, 54
+ticks with the head under water crossing the lake, nothing placed or broken), `nav-pillar` 2 of 2 (the plateau
+climbed, the walled yard `rule:falls`, 3 runs each), `nav-reach` 4 of 4, `nav-water` 17 of 17. The cave entry suite
+reads its private fixture from `NAV_ENTRY_DIR`; without the fixture in the checkout it now skips (it failed to load:
+vitest collects a skipped block, and the block read the missing fixture).
+
+Limits: a stair dug down from open ground is planned only towards a goal below the node (`digDescend`, Track BC), so a
+ravine crossed towards a waypoint at or above its rim is found only when the corridor puts a waypoint lower (it did
+on every long pair, 19 of R2's 35 with the goal above the start); the long dig way digs about twice what the oracle's
+does (p90 2.25 x: the oracle digs at no extra cost, the long dig search at 12 a block and weighted); the coarse layer
+still sees a ravine as open air (its dig portals are not changed here); the follower's corner shortcut that left
+lava:20:5's path at the same corner every lap (the aim running ahead of the passed node) is not changed either.
+
 ## Following a path
 
 Per tick, from `InputLoop.onBeforeStep` (the command applies to the same tick):

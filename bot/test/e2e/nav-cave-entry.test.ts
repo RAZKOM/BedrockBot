@@ -57,14 +57,15 @@ interface Row {
 }
 
 describe.skipIf(!E2E || !fix?.waypoints.has('landing') || !fix.waypoints.has('cave_start'))('@bds nav: the walk into a real cave with the live settings (Track R2, bds-fly)', () => {
-  const e = fix!.extract;
+  if (!fix) return; // (Track R3: vitest collects a skipped block too; without the private fixture it is skipped, not a crash)
+  const e = fix.extract;
   const world = caveWorld(e);
   const at = replicaAt();
   const d: Vec3 = { x: Math.floor(at.x / 16) * 16 - Math.floor(e.box.min.x / 16) * 16, y: 0, z: Math.floor(at.z / 16) * 16 - Math.floor(e.box.min.z / 16) * 16 };
   const min = shift(e.box.min, d);
   const centre = (p: Vec3): Vec3 => ({ x: p.x + d.x + 0.5, y: p.y, z: p.z + d.z + 0.5 });
   const cell = (name: string): Vec3 => {
-    const w = fix!.waypoints.get(name)!;
+    const w = fix.waypoints.get(name)!;
     const f = world.feetCell({ x: Math.floor(w.x), y: Math.floor(w.y), z: Math.floor(w.z) });
     if (!f) throw new Error(`no standable cell at the fixture's ${name}`);
     return f;

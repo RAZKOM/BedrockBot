@@ -1881,7 +1881,7 @@ export function explainStart(grid: NavGrid, n: LocatedNode): string {
 }
 
 /** Track R1: the goal's point lies in unloaded world (the frontier end's condition; goals without one: false). */
-function goalUnloaded(goal: NavGoal, grid: NavGrid): boolean {
+export function goalUnloaded(goal: NavGoal, grid: NavGrid): boolean {
   switch (goal.type) {
     case 'block':
     case 'near':
