@@ -3709,3 +3709,22 @@ Seen on this cave; not fixed here (the navigator is not this track's):
   where. The S-turns are the offline fallback only: no e2e has needed them yet (a circle farther out
   fitted every walled case). `landingNear` ranks by a probe plan only when the goal's chunk is loaded;
   for a far goal the straight distance (plus 3 per block of height) decides.
+
+## Learned paths
+
+`!learn <name> [player]` records a flight the owner flies while the bot watches (skills/fly/learn/recorder.ts,
+chat/commands-learn.ts). The bot keeps what the server sends it about that player: the position and look (move_player,
+about 20 a second), on-ground, and the rockets that appear next to them. The recording ends by itself 8 s after the
+player has flown and then stands still on the ground, at `!learn stop`, or after 10 minutes. `!learn list`,
+`!learn show <name>` and `!learn delete <name>` manage the saved paths.
+
+- **Where the paths live:** `<config dir>/paths/<name>.json` (`BEDROCKBOT_PATHS_DIR` overrides). They hold the owner's
+  coordinates, so they never go into the repository.
+- **What the bot can see:** only players in the chunks around it. Stand the bot near the hard part of the path (a cave
+  mouth, a narrow gap) before flying it: with the bot op'd, `/tp <bot> <you>`. A stretch flown out of view is recorded
+  as a gap and shown in the summary line.
+- **What a path is for:** a demonstration of a line that works, not a script to replay to the block. The flight
+  planner uses a path near its own route as a guide (a reference to steer along, the entry of a cave, where a rocket
+  was fired); the planner and the tracker still decide every tick.
+- **Heights:** a sample's `y` is the eye position less 1.62 (the standing eye height). A gliding body sits lower, so
+  heights in the air are approximate.

@@ -28,6 +28,7 @@ import { registerPortalCommands } from '../chat/commands-portal.ts'; // Track AT
 import { registerFlyCommands } from '../chat/commands-fly.ts'; // Track AU
 import { registerCraftCommands } from '../chat/commands-craft.ts'; // Track AW
 import { registerTestCommands } from '../chat/commands-test.ts'; // Track T1
+import { registerLearnCommands } from '../chat/commands-learn.ts'; // !learn: recorded flight paths
 import { respawnClaimed } from '../skills/test/recovery.ts'; // Track T1
 import { formatChatLine } from '../chat/text.ts';
 import type { RuntimeSettings } from '../config/settings.ts';
@@ -374,6 +375,7 @@ export const afkTask: TaskDefinition = {
       registerPortalCommands, // Track AT: !nether, !overworld, !portal, the per-dimension rules, the fire escape (docs/nether.md)
       (d) => void registerFlyCommands(d, { containers, logger: ctx.logger('fly') }), // Track AU: !fly, !land, the automatic flight of !come / !goto, the flight kit (docs/flight.md)
       (d) => void registerCraftCommands(d, { containers, logger: ctx.logger('craft') }), // Track AW: !craft, !compact, the compaction step of !unload (after the home logistics; docs/crafting.md)
+      (d) => registerLearnCommands(d, { logger: ctx.logger('learn') }), // !learn: the owner flies a path while the bot watches; kept in <config dir>/paths (docs/flight.md "Learned paths")
       (d) => void registerTestCommands(d, { respawn, logger: ctx.logger('test') }), // Track T1: !test, the op check, the recovery after a death behind testMode (after !fly; docs/runbook.md "The Realm as a test server")
     ];
     for (const register of registrations) register(deps);
