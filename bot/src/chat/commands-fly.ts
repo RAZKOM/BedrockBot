@@ -652,7 +652,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   };
   /** After the flight: the walk for the rest (also after a miss or a roof landing), or the flight's failure. */
   const afterFlight = (r: FlyOutcome, walk: () => Promise<SkillResult>): Promise<SkillResult> => {
-    if (r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing' || r.reason?.startsWith('fly: no open sky')) return walk();
+    // no_glide too: the server let no glide start (rockets that fired nothing at the takeoff; the Realm, 2026-11-09, the trip
+    // home ended there 520 blocks short): the walk goes on and looks for another takeoff on the way
+    if (r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing' || r.reason === 'no_glide' || r.reason?.startsWith('fly: no open sky')) return walk();
     if (r.reason === 'interrupted' || r.reason === 'replaced') return Promise.resolve({ ok: false, reason: 'interrupted' });
     return Promise.resolve({ ok: false, reason: flyEndLine(r) });
   };
