@@ -3238,7 +3238,8 @@ coordinator turned it on live the same evening (the owner set keepInventory).
   each boosted for its own burn and swept with the same controls; an edge is taken only when all clear. A rocket used in a
   burn's tail extends each branch's burn to the later end (the union). The pieces carry the mids across their seams and a
   re-plan's start drops them with the extremes. The benches' `nomids` variant is the planner without them. Only the cave style
-  asks for them (`CaveStyle.midBurns`, `RouteRequest.midBurns`); open-air flight plans as before.
+  asks for them (`CaveStyle.midBurns`, `RouteRequest.midBurns`); open-air flight plans as before. **Off by default since
+  2026-11-09**: at the live 2 s budget a proof with them runs 20 to 40 times slower and almost never completes (ADR 0074 addendum).
 
 ### Offline, the generator set (`scripts/cave-gen-bench.ts --mode corridor --burns all --ms 100000`)
 

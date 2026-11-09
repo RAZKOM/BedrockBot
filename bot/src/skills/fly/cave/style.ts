@@ -51,7 +51,8 @@ export interface CaveStyle {
    * Track F8: the searches sweep the burns between the extremes too (route/types.ts MID_BURNS, RouteRequest.midBurns): a plan robust
    * at 9 and 21 hit the margin open loop for the burns in between (F7); with them the generator set is 96 % clean and three times as
    * many windows land on their cell, for about a third less flown. The open-air drivers do without (the plan differs by chance at
-   * a hard spot and a clean 3 x 3 bore landed short on one seed).
+   * a hard spot and a clean 3 x 3 bore landed short on one seed). Default OFF since F8's measurements were node-bound: at the live
+   * wall-clock budget the proofs do not complete (see CAVE_STYLE).
    */
   midBurns: boolean;
   /** The tracker's rules. */
@@ -78,7 +79,7 @@ export const CAVE_STYLE: Readonly<CaveStyle> = Object.freeze({
   landReach: 2,
   marginExtraFrom: 4,
   proveClearMin: 0.15,
-  midBurns: true,
+  midBurns: false, // (off: a window's proof with them runs 20 to 40 x slower, 64-138 expansions a second against 1 600-2 800 on this PC; at the live 2 s budget almost nothing is proven: on the Realm 1 000-1 300 expansions in 2 s, every window walked)
   rules: Object.freeze<TrackerRules>({
     commitTicks: 12,
     bailAfter: 6,

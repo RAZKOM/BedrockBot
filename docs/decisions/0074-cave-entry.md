@@ -87,3 +87,10 @@ fly-corridor 5 of 5, fly-land 5 of 5) are green; fly-course is in the tables.
 - Server corrections of 1.2 to 1.3 (F7's open point): not measured here; the replica's trips showed 5 to 8 corrections a cruise
   and one window bailing 1.4 off after a correction of 0.34.
 - The shortcut: untouched.
+
+
+**Addendum (2026-11-09): the mid burns are OFF by default.** F8's tables were measured node-bound (`--ms 100000`). At the live
+wall-clock budget a window's proof with the mids runs 20 to 40 times slower (the 140-block bore's first window: 64 to 138
+expansions a second against 1 600 to 2 800 without, on this PC; complete in 26 to 47 ms without, partial at 2 s with). On the
+Realm the proofs reached 1 000 to 1 300 expansions in 2 s and every window was walked. `CaveStyle.midBurns` stays as an option;
+the cave style flies as F7 shipped it until the mids are made cheap enough for the live budget.
