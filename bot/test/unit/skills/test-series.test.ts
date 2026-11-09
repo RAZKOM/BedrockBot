@@ -225,3 +225,13 @@ describe('interim fly lines (the Realm, 2026-11-09)', () => {
     expect(TERMINAL.fly.fail.test('fly: the corridor to cave_start failed: x')).toBe(true);
   });
 });
+
+describe('arrival is scored where the trip ended (the Realm, 2026-11-09)', () => {
+  it('a fight right after the arrival that carries the body off the goal does not turn it into a failure', async () => {
+    const bot = new Bot();
+    bot.trips = [[...walk(20, 'arrived at base (20 64 0)'), ...Array.from({ length: 10 }, () => ({ dx: 1 }))]];
+    await new TestSeries(GOTO, bot.ports(), { ...opts, runs: 1 }).run();
+    const r = bot.records[0] as RunRecord;
+    expect(r).toMatchObject({ end: 'arrived', arrived: true, endDistance: 0 });
+  });
+});

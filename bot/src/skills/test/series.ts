@@ -259,6 +259,9 @@ export class TestSeries {
     const term = terminalOf(spec.kind);
     const replies: string[] = [];
     let doneLine: string | undefined;
+    // where the body stood when the trip said it was done: a guard fight right after the arrival may carry it off
+    // the goal before the run settles (the Realm, 2026-11-09: two arrivals scored 5.5 and 21 off after a slime, a skeleton)
+    let doneAt: Vec3 | undefined;
     let failLine: string | undefined;
     let endLineAt: number | undefined;
     let corridorOpen = false;
@@ -271,6 +274,7 @@ export class TestSeries {
       if (CORRIDOR_CLOSE.test(m)) corridorOpen = false;
       if (term.done.test(m)) {
         doneLine = m;
+        doneAt = this.p.position();
         endLineAt = this.p.now();
       } else if (term.fail.test(m)) {
         failLine = m;
@@ -358,7 +362,7 @@ export class TestSeries {
       await this.p.stopTrip();
       await this.p.recovered(); // respawn, kit and /tp back (recovery.ts)
     }
-    const endAt = forced === 'died' ? diedAt : this.p.position();
+    const endAt = forced === 'died' ? diedAt : doneLine !== undefined && failLine === undefined && doneAt ? doneAt : this.p.position();
     // stuck or out of time: back to the start now (the next run would anyway; the last one leaves the bot there too)
     if (forced === 'stuck' || forced === 'timeout') {
       const back = await this.p.restore(spec.start);
