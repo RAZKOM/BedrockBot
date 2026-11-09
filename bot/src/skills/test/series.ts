@@ -359,7 +359,9 @@ export class TestSeries {
       off();
     }
     const seconds = round((this.p.now() - t0) / 1000);
-    if (forced && forced !== 'died') await this.stopTrip();
+    // every run's trip ends before the next starts, also one that ended on its own line (its rest of the trip, a walk on
+    // from a landing, would run on into the next run: the Realm, 2026-11-09)
+    if (forced !== 'died') await this.stopTrip();
     const deaths = this.p.deaths() - deaths0;
     const restore = [...restored.steps];
     const diedAt = last;

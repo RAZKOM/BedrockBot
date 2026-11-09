@@ -26,7 +26,7 @@ import type { CommandDeps } from '../tasks/process/deps.ts';
 import type { RespawnController } from '../tasks/respawn.ts';
 import type { ChatLine } from './text.ts';
 import { flyControlOf } from './commands-fly.ts';
-import { stopCorridorTrip } from './commands-corridor.ts';
+import { corridorTripRunning, stopCorridorTrip } from './commands-corridor.ts';
 import { waypointStoreOf } from './commands-nav.ts';
 
 export const TEST_COMMANDS = ['test'] as const;
@@ -264,8 +264,9 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
   };
 
   const stopTrip = async (): Promise<void> => {
-    stopCorridorTrip(task);
     const fc = flyControlOf(task);
+    fc?.supersede();
+    stopCorridorTrip(task);
     if (fc?.current()?.land('stopped') !== true && fc?.controller.active) fc.controller.landNow('stopped');
     // let a flight in the air come down before its process goes
     for (let i = 0; i < 200 && (loop?.state.gliding ?? false); i++) await new Promise((r) => setTimeout(r, 100));
@@ -304,7 +305,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
         replyFns.add(fn);
         return () => replyFns.delete(fn);
       },
-      busy: () => (d.processes?.userProcesses().length ?? 0) > 0 || (flyControlOf(task)?.controller.active ?? false) || (loop?.state.gliding ?? false),
+      busy: () => (d.processes?.userProcesses().length ?? 0) > 0 || (flyControlOf(task)?.controller.active ?? false) || (loop?.state.gliding ?? false) || corridorTripRunning(task),
       position: () => harnessPorts.position(),
       gliding: () => harnessPorts.gliding(),
       health: () => harnessPorts.health(),

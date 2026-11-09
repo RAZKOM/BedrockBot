@@ -51,14 +51,20 @@ export interface CorridorWiring extends Omit<RocketDeps, 'loop' | 'inventory'> {
 /** Hotfix 2026-11-06 (a Realm death in a cave): a corridor trip ends when the health falls under this, or on a death. */
 export const CORRIDOR_HEALTH_MIN = 12;
 
-const trips = new WeakMap<object, { stop(): void }>();
+const trips = new WeakMap<object, Set<{ stop(): void }>>();
 
-/** `!fly stop` while a corridor trip runs: it ends after the step in progress (a window in the air lands first). */
+/** `!fly stop` while a corridor trip runs: it ends after the step in progress (a window in the air lands first); every trip of
+ * the task, should an older one still be winding down (the Realm, 2026-11-09: a stopped trip's end line came 74 s later) */
 export function stopCorridorTrip(task: object): boolean {
   const t = trips.get(task);
-  if (!t) return false;
-  t.stop();
+  if (!t || t.size === 0) return false;
+  for (const e of t) e.stop();
   return true;
+}
+
+/** A corridor trip of the task has not ended yet (the test harness waits for it between runs). */
+export function corridorTripRunning(task: object): boolean {
+  return (trips.get(task)?.size ?? 0) > 0;
 }
 
 /**
@@ -76,12 +82,17 @@ export interface TripStyle {
 export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvider, goal: Vec3, label: string, style: TripStyle = {}): Promise<CorridorReport> {
   let stopped = false;
   let under: UnderFlyProcess | undefined;
-  trips.set(w.task, {
+  // a new trip supersedes any still running (one body, one trip)
+  stopCorridorTrip(w.task);
+  const entry = {
     stop: () => {
       stopped = true;
       under?.stopNow();
     },
-  });
+  };
+  const mine = trips.get(w.task) ?? new Set<{ stop(): void }>();
+  trips.set(w.task, mine);
+  mine.add(entry);
   // hotfix 2026-11-06: watch the health every tick; a death or low health stops the trip (the window in the air lands first)
   let done = false;
   let unsafe: string | undefined;
@@ -158,7 +169,7 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
     return unsafe ? { ...r, ok: false, reason: `stopped: ${unsafe}` } : r;
   } finally {
     done = true;
-    trips.delete(w.task);
+    mine.delete(entry);
     setCorridorAirborne(w.task, () => false);
     // the windows keep the elytra on between them; the walk at the end and whatever follows want the chestplate
     if (readKit(w.inventory, w.memory()).elytraWorn) await w.kitOps.wearChestplate().catch(() => undefined);

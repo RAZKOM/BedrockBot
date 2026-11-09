@@ -235,3 +235,14 @@ describe('arrival is scored where the trip ended (the Realm, 2026-11-09)', () =>
     expect(r).toMatchObject({ end: 'arrived', arrived: true, endDistance: 0 });
   });
 });
+
+describe('every run stops its trip before the next (the Realm, 2026-11-09)', () => {
+  it('a run that ended on its own fail line still has its trip stopped (its walk on from a landing ran into the next run)', async () => {
+    const bot = new Bot();
+    bot.trips = [walk(5, 'goto: unreachable'), walk(20, 'arrived at base (20 64 0)')];
+    const s = new TestSeries(GOTO, bot.ports(), { ...opts, runs: 2 });
+    await s.run();
+    expect(bot.stops).toBe(2);
+  });
+});
+

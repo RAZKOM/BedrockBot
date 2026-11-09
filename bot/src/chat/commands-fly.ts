@@ -76,6 +76,8 @@ export interface FlyControl {
   start(target: FlyTarget): FlyProcess;
   /** `gliding, 23 rockets` for the panel / status; undefined on the ground without a flight. */
   state(): { gliding: boolean; rockets: number; phase: string | undefined };
+  /** The latest `!fly` chain says nothing more and starts no further step; its corridor trip stops (the test harness, between runs). */
+  supersede(): void;
   /** Track F5a: a corridor trip to a feet cell whatever its distance (the cave e2e's legs); undefined without a provider. */
   corridor(goal: Vec3, label: string): Promise<CorridorReport> | undefined;
 }
@@ -386,12 +388,21 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     });
     return p;
   };
+  // the chain of the latest `!fly` (its flight, the corridor, the rest of the trip); a new `!fly`, `!fly stop` or the test
+  // harness supersedes it: an older chain says nothing more and starts no further step (the Realm, 2026-11-09: a run's
+  // leftover walk ran on into the next runs and its end lines were read as theirs)
+  let flyGen = 0;
+  const supersede = (): void => {
+    flyGen++;
+    stopCorridorTrip(task);
+  };
   const control: FlyControl = {
     controller,
     kitOps,
     supply,
     current: () => current,
     start,
+    supersede,
     state: () => ({ gliding: loop.state.gliding, rockets: readKit(inv, memory()).rocketsHotbar, phase: controller.status().phase }),
     corridor: (goal, label) => {
       const provider = corridorProviderOf(task, skills.nav.coarseLayer);
@@ -816,13 +827,29 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * from there (the takeoff checked again on arrival: refused, the walk goes on, watched); walk out
    * towards the goal in legs (Track AU2, the fallback when no site is worth it).
    */
+  /**
+   * A takeoff that came straight down (the Realm, 2026-11-09: a rocket that fired nothing at tick 8 and the flight over 15
+   * ticks later where it began; the whole trip then went on foot): flown once more from where the body stands.
+   */
+  const retryShort = async (r: FlyOutcome, at: Vec3 | undefined, g: Vec3, label: string, half: number): Promise<FlyOutcome> => {
+    const here = position();
+    if (r.reason !== 'landed_off' || !at || !here) return r;
+    const came = hdist(at, here);
+    if (came > SHORT_FLIGHT || hdist(here, { x: g.x + 0.5, z: g.z + 0.5 }) <= 2 * SHORT_FLIGHT) return r;
+    const again = await autoFly(g, label, half, { site: false, quiet: true });
+    if (again?.kind !== 'fly') return r;
+    log.info(`fly: the flight came down ${Math.round(came)} blocks from its start; flying again`);
+    d.chat.say(`the flight came down ${Math.round(came)} blocks from its start; flying again`);
+    return start(again.target).result;
+  };
   const runAuto = async (f: AutoFly, goal: () => Vec3 | undefined, label: string, half: number, walk: () => Promise<SkillResult>, legWalk: (leg: Goal) => Promise<SkillResult>): Promise<SkillResult> => {
     const g0 = goal();
     if (!g0) return walk();
     if (f.kind === 'walk_out') return walkOut(g0, label, half, f, walk, legWalk);
     if (f.kind === 'fly') {
       sayFlight(f);
-      return afterFlight(await start(f.target).result, walk);
+      const at = position();
+      return afterFlight(await retryShort(await start(f.target).result, at, g0, label, half), walk);
     }
     d.chat.say(f.line);
     const s = f.site;
@@ -833,7 +860,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const again = r.ok ? await autoFly(g, label, half, { site: false }) : undefined;
     if (again?.kind === 'fly') {
       sayFlight(again);
-      return afterFlight(await start(again.target).result, walk);
+      const at = position();
+      return afterFlight(await retryShort(await start(again.target).result, at, g, label, half), walk);
     }
     const here = position();
     if (here) refusedTakeoffs.push({ x: here.x, z: here.z, at: Date.now() });
@@ -1168,10 +1196,17 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     example: '!fly home',
     auto: 'come and goto fly by themselves over flyMin blocks (autoFly), landing on the nearest landable cell and walking the rest; the flight kit (elytra, rockets, the fireworks box) is never dropped, stashed or unloaded',
     run: (ctx) => {
-      const { reply, args, sender } = ctx;
+      const { args, sender } = ctx;
       const sub = args[0]?.toLowerCase();
+      let gen = flyGen;
+      const live = (): boolean => gen === flyGen;
+      const reply = (m: string): void => {
+        if (live()) ctx.reply(m);
+        else log.info(`fly: a superseded trip's line not said: ${m}`);
+      };
       if (sub === 'stop') {
         const p = current;
+        gen = ++flyGen;
         const trip = stopCorridorTrip(task); // Track F4b: a corridor trip ends after its step in progress
         if (p?.land('stopped')) reply('landing');
         else if (controller.active) {
@@ -1220,6 +1255,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         reply(t.error);
         return;
       }
+      // this trip supersedes the one before (its chain says nothing more; its corridor trip stops)
+      gen = ++flyGen;
+      stopCorridorTrip(task);
       // already in the air: the flight takes the new goal there (no landing first); after a landing it could not avoid, `!fly` again from the ground
       if (controller.active && current?.phase === 'flying') {
         void (async () => {
@@ -1267,6 +1305,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       // else the walk. `said`: the corridor's own end line was given
       let said = false;
       const rest = async (): Promise<SkillResult> => {
+        if (!live()) return { ok: false, reason: 'interrupted' };
         const prov = corridorProviderOf(task, skills.nav.coarseLayer);
         const top = skyTop(t.goal.x, t.goal.z);
         if (caveOn() && prov && (top === undefined || top >= t.goal.y)) {
@@ -1318,7 +1357,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         const walking = f.target.cell && f.target.cell.kind !== 'goal' ? `, then walking ${Math.round(hdist(f.target, goalTarget))} blocks` : '';
         reply(`flying to ${t.label} (${Math.round(distance)} blocks, about ${flightSeconds(distance)} s${walking}; ${kitLine(k)})`);
         if (f.said) reply(f.said);
-        const r = await p.result;
+        const r = await retryShort(await p.result, from, t.goal, t.label, t.half);
         if (r.reason === 'interrupted' || r.reason === 'replaced') return;
         reply(flyEndLine(r));
         // on the goal itself (an exact landing that stood on it): nothing to walk. The server's slide goes on after the
@@ -1328,7 +1367,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         const onGoal = r.ok && r.target.cell?.kind === 'goal' && r.report?.onTarget === true && hdist(loop.state.pos, goalTarget) <= 0.8;
         if (onGoal) return;
         const walkable = r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing';
-        if (!walkable) return;
+        if (!walkable || !live()) return;
         const w = t.player ? await come0(t.player) : await rest();
         if (said) return;
         if (w.ok) reply(`walked to ${t.label}`);
@@ -1343,6 +1382,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         void runCorridorTrip(corridorWiring(), provider, t.goal, t.label, tripStyle()).then((r) => {
           // a layer with no corridor at all from here (a start it cannot leave, such as a walled base) is no
           // answer for a flight: the plain flight walks to a takeoff site, flies and lands near the goal, then walks
+          if (!live()) return;
           if (noCorridorAtAll(r)) {
             reply(`no corridor from here (${r.reason ?? 'none'}); flying the plain way`);
             void plain();
@@ -1376,6 +1416,9 @@ export const FLY_APPROACH_HEIGHT = APPROACH_HEIGHT;
  * A corridor trip that ended on its first plan with no corridor at all (the layer's search found none from the start:
  * nothing flown or walked): the fly command flies the plain way instead.
  */
+/** A flight that ended within this many blocks of its start (along the way) came straight down: it is flown again once. */
+export const SHORT_FLIGHT = 50;
+
 export function noCorridorAtAll(r: Pick<CorridorReport, 'ok' | 'reason' | 'legs' | 'cruises' | 'walks' | 'windows'>): boolean {
   return !r.ok && r.legs.length === 0 && r.cruises === 0 && r.walks === 0 && r.windows === 0 && (r.reason ?? '').startsWith('no corridor');
 }
