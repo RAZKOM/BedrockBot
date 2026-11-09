@@ -842,6 +842,16 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     d.chat.say(`the flight came down ${Math.round(came)} blocks from its start; flying again`);
     return start(again.target).result;
   };
+  /**
+   * The walk after a flight that came down short (a roof in the climb out of a cave, a takeoff that fell back): re-checked
+   * for a takeoff on the way like any long walk (the Realm, 2026-11-09: the climb out of the cave hit its roof and the
+   * bot walked all 1072 blocks home); the takeoff it came down from counts as refused.
+   */
+  const watched = (at: Vec3 | undefined, goal: () => Vec3 | undefined, label: string, half: number, walk: () => Promise<SkillResult>, legWalk: (leg: Goal) => Promise<SkillResult>) => (): Promise<SkillResult> => {
+    const here = position();
+    if (at && here && hdist(at, here) <= SHORT_FLIGHT) refusedTakeoffs.push({ x: at.x, z: at.z, at: Date.now() });
+    return watchWalk(goal, label, half, walk, walk, legWalk);
+  };
   const runAuto = async (f: AutoFly, goal: () => Vec3 | undefined, label: string, half: number, walk: () => Promise<SkillResult>, legWalk: (leg: Goal) => Promise<SkillResult>): Promise<SkillResult> => {
     const g0 = goal();
     if (!g0) return walk();
@@ -849,7 +859,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (f.kind === 'fly') {
       sayFlight(f);
       const at = position();
-      return afterFlight(await retryShort(await start(f.target).result, at, g0, label, half), walk);
+      return afterFlight(await retryShort(await start(f.target).result, at, g0, label, half), watched(at, goal, label, half, walk, legWalk));
     }
     d.chat.say(f.line);
     const s = f.site;
@@ -861,7 +871,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (again?.kind === 'fly') {
       sayFlight(again);
       const at = position();
-      return afterFlight(await retryShort(await start(again.target).result, at, g, label, half), walk);
+      return afterFlight(await retryShort(await start(again.target).result, at, g, label, half), watched(at, goal, label, half, walk, legWalk));
     }
     const here = position();
     if (here) refusedTakeoffs.push({ x: here.x, z: here.z, at: Date.now() });

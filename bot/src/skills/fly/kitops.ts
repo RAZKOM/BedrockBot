@@ -83,7 +83,19 @@ export class FlightKitOps {
     if (k.elytraSlot < 0) return { ok: false, reason: 'no elytra in the inventory' };
     const worn = this.d.armour.worn()[1] ?? null;
     const move: ArmourMove = { slot: 1, from: k.elytraSlot, item: 'elytra', replaces: worn?.name ?? null };
-    const ok = await this.d.armour.wear(move);
+    let ok = await this.d.armour.wear(move);
+    if (!ok) {
+      // once more after a moment, from the slots as they are now (the Realm, 2026-11-09: the keeper dropped junk in the same
+      // tick and the server refused the swap with 49)
+      await this.d.waitTicks(10);
+      const k2 = this.kit();
+      if (k2.elytraWorn) ok = true;
+      else if (k2.elytraSlot >= 0) {
+        const worn2 = this.d.armour.worn()[1] ?? null;
+        ok = await this.d.armour.wear({ slot: 1, from: k2.elytraSlot, item: 'elytra', replaces: worn2?.name ?? null });
+      }
+      if (ok) this.log.info('flight kit: the elytra went on at the second try');
+    }
     if (!ok) return { ok: false, reason: 'the elytra could not be put on (item stack request refused)' };
     this.chestplate = worn && armourSlotOf(worn.name) === 1 ? worn.name : undefined;
     this.log.info(`flight kit: wearing the elytra${this.chestplate ? ` (${this.chestplate} off)` : ''}`);
