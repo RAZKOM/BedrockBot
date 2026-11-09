@@ -34,6 +34,7 @@ import { boxesLine, carriedBoxes, keepNameOf, setKeepBoxName } from '../skills/h
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { HomeChore, HomeJobProcess, type HomeJob, type HomeRunner } from '../tasks/process/unload.ts';
+import { respawnClaimed } from '../skills/test/recovery.ts'; // Track T1: no home chore while a test series runs
 import { getControllerOf } from './commands-get.ts';
 import { survivalKitOf } from './commands-survival.ts';
 import { BoxOps } from '../skills/supply/boxes.ts'; // Track BJ
@@ -128,7 +129,8 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     new HomeChore({
       runner,
       atHome: () => logistics.atHome(),
-      idle: () => processes.userProcesses().length === 0,
+      // (not while a !test series runs: between its runs the chore took over a trip started at home on the Realm, 2026-11-09)
+      idle: () => processes.userProcesses().length === 0 && !respawnClaimed(d.task),
       autoUnload: () => d.settings.get('autoUnload'),
       load: () => logistics.load(),
       known: () => logistics.records().filter((r) => r.readAt > 0).length,

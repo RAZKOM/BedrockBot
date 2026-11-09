@@ -109,9 +109,11 @@ export class FlightKitOps {
   }
 
   /** A stack of rockets from the main inventory into a free hotbar slot (when the hotbar has none). */
-  async rocketsToHotbar(): Promise<KitOpResult> {
+  async rocketsToHotbar(below = 1): Promise<KitOpResult> {
     const k = this.kit();
-    if (k.rocketsHotbar > 0 || k.rockets === 0) return { ok: true };
+    // (`below`: top the hotbar up while it holds fewer than this and more are carried: the Realm, 2026-11-09, a flight with 7
+    // in the hotbar and 448 more in the inventory landed out of rockets 16 blocks short)
+    if (k.rocketsHotbar >= below || k.rockets <= k.rocketsHotbar) return { ok: true };
     const slots = this.d.inventory.slots;
     let from = -1;
     for (let i = 9; i < Math.min(36, slots.length); i++) {

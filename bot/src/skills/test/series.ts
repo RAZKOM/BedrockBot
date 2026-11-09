@@ -340,7 +340,12 @@ export class TestSeries {
         if (endLineAt !== undefined) {
           // (a line that reads as the end may be an interim one, the walk after a landing goes on: the cap only ends a run that
           // also stopped making progress; the Realm's run 1 of 3 ended at the cap while it still walked, held up by fights)
-          if (idleFor >= this.o.settleMs || (now - endLineAt > this.o.afterEndMs && now - anchorAt > this.o.stuckMs)) break;
+          const doneFinal = doneLine !== undefined && failLine === undefined;
+          if (idleFor >= this.o.settleMs) break;
+          // a done line is the end even when a fight after it keeps the bot busy (a run went on to its 600 s timeout)
+          if (doneFinal && now - endLineAt > this.o.settleMs * 5) break;
+          // a fail line may be an interim one: the cap ends only a run that also stopped making progress
+          if (!doneFinal && now - endLineAt > this.o.afterEndMs && now - anchorAt > this.o.stuckMs) break;
           continue;
         }
         if (busy && now - anchorAt > this.o.stuckMs) {

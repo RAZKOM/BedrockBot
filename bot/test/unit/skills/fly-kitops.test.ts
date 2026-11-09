@@ -50,3 +50,16 @@ describe('flight kit: rocketsToHotbar', () => {
     expect(r.reason).toContain('inventory is full');
   });
 });
+
+describe('flight kit: rocketsToHotbar tops a low hotbar up (the Realm, 2026-11-09)', () => {
+  it('7 in the hotbar and a stack in the inventory: the stack goes to a free hotbar slot when 32 are wanted', async () => {
+    const h = harness([item('firework_rocket', 7), null, ...Array.from({ length: 7 }, () => item('green_shulker_box')), item('firework_rocket', 64)]);
+    expect(await h.ops.rocketsToHotbar(32)).toEqual({ ok: true });
+    expect(h.moves).toEqual(['9->1 x64']);
+  });
+  it('enough in the hotbar already: nothing moves', async () => {
+    const h = harness([item('firework_rocket', 40), null, ...Array.from({ length: 7 }, () => item('green_shulker_box')), item('firework_rocket', 64)]);
+    expect(await h.ops.rocketsToHotbar(32)).toEqual({ ok: true });
+    expect(h.moves).toEqual([]);
+  });
+});

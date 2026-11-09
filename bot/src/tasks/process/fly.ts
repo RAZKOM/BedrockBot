@@ -319,6 +319,13 @@ export class FlyProcess extends BaseProcess {
       this.notes.push(`refill before: ${r.ok ? `${r.taken} rockets` : (r.reason ?? 'failed')}`);
       kit = this.kit();
     }
+    if (!glide && kit.rocketsHotbar > 0 && kit.rocketsHotbar < min && kit.rockets > kit.rocketsHotbar) {
+      // a stack more from the inventory when the hotbar is low (a failed move is no reason not to fly)
+      const r = await this.d.kitOps.rocketsToHotbar(min);
+      if (t !== this.token) return;
+      this.notes.push(`rockets to the hotbar: ${r.ok ? 'ok' : (r.reason ?? 'failed')}`);
+      kit = this.kit();
+    }
     if (kit.rocketsHotbar === 0 && !glide) {
       const r = await this.d.kitOps.rocketsToHotbar();
       if (t !== this.token) return;
