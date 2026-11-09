@@ -1259,6 +1259,23 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         return;
       }
       // the plain flight (a takeoff, the cruise, the landing, the walk for the rest); also the corridor's fallback below
+      // the rest of the trip after a plain flight's landing: with flyCave on and a covered goal (a cave), the corridor from
+      // the landing (its windows fly underground; the Realm's trips from home flew the plain way, then walked the cave in);
+      // else the walk. `said`: the corridor's own end line was given
+      let said = false;
+      const rest = async (): Promise<SkillResult> => {
+        const prov = corridorProviderOf(task, skills.nav.coarseLayer);
+        const top = skyTop(t.goal.x, t.goal.z);
+        if (caveOn() && prov && (top === undefined || top >= t.goal.y)) {
+          const r = await runCorridorTrip(corridorWiring(), prov, t.goal, t.label, tripStyle());
+          if (!noCorridorAtAll(r)) {
+            said = true;
+            reply(corridorEndLine(r, t.label));
+            return r.ok ? { ok: true } : { ok: false, reason: r.reason ?? 'failed' };
+          }
+        }
+        return walk0({ type: 'block', p: t.goal }, {}, `walking to ${t.label}`);
+      };
       const plain = async (): Promise<void> => {
       const from = position();
       if (!from) {
@@ -1281,7 +1298,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
           // under a roof (indoors at home): the goto's way, a walk to a takeoff site and the flight from there (pve.walk
           // is the flying walk: autoFly, the site, the re-check on the way), the walk for the rest when none is found
           reply(`${tk.refuse.replace(/^fly: /, '').replace(/; walk outside first$/, '')}: walking to a takeoff site for ${t.label}`);
-          const w = await pve.walk({ type: 'block', p: t.goal }, {}, `walking to ${t.label}`);
+          const auto = await autoFly(t.goal, t.label, t.half);
+          const w = auto ? await runAuto(auto, () => t.goal, t.label, t.half, rest, (leg) => walk0(leg, {}, `walking to ${t.label} (to open sky)`)) : await rest();
+          if (said) return;
           if (w.ok) reply(`walked to ${t.label}`);
           else if (w.reason !== 'interrupted') reply(`fly: the trip to ${t.label} failed (${w.reason ?? 'failed'})`);
           return;
@@ -1307,7 +1326,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         if (onGoal) return;
         const walkable = r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing';
         if (!walkable) return;
-        const w = t.player ? await come0(t.player) : await walk0({ type: 'block', p: t.goal }, {}, `walking to ${t.label}`);
+        const w = t.player ? await come0(t.player) : await rest();
+        if (said) return;
         if (w.ok) reply(`walked to ${t.label}`);
         else if (w.reason !== 'interrupted') reply(`fly: landed, but the walk to ${t.label} failed (${w.reason ?? 'failed'})`);
       })();
