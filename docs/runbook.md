@@ -631,8 +631,9 @@ the run then going (fly-land) to nice 20, and the next run waited until the seri
 **The live bot's CPU policy.** The launchd agent (deploy/launchd) has `ProcessType` `Background`: the bot runs at
 priority 4 with background QoS, which on Apple silicon means the efficiency cores and throttling. The same work
 under `taskpolicy -b` against the test runs' nice 10 on the M4: SHA-256 3.5 to 3.8 times slower, a Map-heavy
-JavaScript loop (planner-like) 8 times slower (2100 against 260 ms). Time a planner with `--as-live` to see what the
-live bot gets.
+JavaScript loop (planner-like) 8 times slower (2100 against 260 ms). **Since 2026-11-09 the agent has `ProcessType`
+`Standard`** (the performance cores, priority 31): a reload of the launch agent applies it (`launchctl bootout` then
+`bootstrap` of the plist in ~/Library/LaunchAgents). `--as-live` still times a planner under `taskpolicy -b`, the old policy.
 
 ## Realm join (you do this)
 

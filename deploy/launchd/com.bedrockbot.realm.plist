@@ -51,6 +51,6 @@
   <string>/Users/USER/.bedrockbot/logs/realm-console.log</string>
 
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Standard</string>
 </dict>
 </plist>
