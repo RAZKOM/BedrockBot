@@ -108,8 +108,18 @@ export function fineTarget(st: CorridorState, pos: Vec3): { index: number; p: Ve
     len += d;
     k++;
   }
+  // Track R2: never a waypoint in the air (an opening without a floor, which the mine mode lets be "dug or pillared"):
+  // the fine planner would pillar into the void to touch it (Realm 2026-11-08: 8 blocks up, then the corridor moved on
+  // and the pillar's top was a dead end); the first waypoint on a floor past it, which the fine plan climbs to or not
+  while (k + 1 < st.wps.length && floorless(st, k)) k++;
   if (st.toGoal && k === st.wps.length - 1) return undefined;
   return { index: k, p: st.wps[k]! };
+}
+
+/** Track R2: waypoint `k` stands at a vertical opening without a floor (in the air). */
+export function floorless(st: CorridorState, k: number): boolean {
+  const p = st.portals[k];
+  return p?.axis === 'y' && p.floorY === undefined;
 }
 
 /** The fine goal for a target waypoint. */

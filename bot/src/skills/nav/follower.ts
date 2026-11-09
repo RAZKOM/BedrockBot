@@ -366,6 +366,10 @@ export class PathFollower {
     if (target.move === 'jump' && s.onGround && err < 25 && p.y < target.feet - 1e-3) {
       if (dTarget <= 1.4 || s.collidedHorizontally) jump = true;
     }
+    // Track R2: a jump up into a node beside lava: forward released in the air once the feet are over the step, when the
+    // coast would carry the body past the node's centre (lava:1:6 with allowPlace off: the landing's slide took the body
+    // 0.26 past the centre, into the lava cell beside it)
+    if (target.move === 'jump' && !s.onGround && p.y >= target.feet && dTarget - speed * AIR_COAST < 0.05 && this.hazardBeside(target)) forward = 0;
 
     if (target.move === 'drop') {
       if (s.onGround) {

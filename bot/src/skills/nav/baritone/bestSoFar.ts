@@ -58,13 +58,21 @@ export class BestSoFar {
    */
   failing = true;
 
-  /** The start node (index `i`, cell x y z, heuristic h): every best starts there (Baritone calculate0). */
-  reset(i: number, x: number, y: number, z: number, h: number): void {
+  /**
+   * Track R2 (not Baritone): the start is in water. No best starts there and any node counts however near (the
+   * caller offers only nodes out of the water): a partial path from water ends on the best dry ground, never "no
+   * progress" in the water (Realm 2026-11-08: the plans from a lake's floor never beat the start, the body drowned).
+   */
+  private anyDistance = false;
+
+  /** The start node (index `i`, cell x y z, heuristic h): every best starts there (Baritone calculate0). Track R2: `wet`, see `anyDistance`. */
+  reset(i: number, x: number, y: number, z: number, h: number, wet = false): void {
     this.sx = x;
     this.sy = y;
     this.sz = z;
-    this.node.fill(i);
-    this.score.fill(h);
+    this.anyDistance = wet;
+    this.node.fill(wet ? -1 : i);
+    this.score.fill(wet ? Infinity : h);
     this.distSq.fill(0);
     this.failing = true;
   }
@@ -88,7 +96,7 @@ export class BestSoFar {
         score[k] = s;
         this.node[k] = i;
         this.distSq[k] = d;
-        if (this.failing && d > MIN_DIST_SQ) this.failing = false;
+        if (this.failing && (d > MIN_DIST_SQ || this.anyDistance)) this.failing = false;
       }
     }
   }
@@ -99,7 +107,7 @@ export class BestSoFar {
    */
   best(): number {
     for (let k = 0; k < K; k++) {
-      if (this.node[k]! >= 0 && this.distSq[k]! > MIN_DIST_SQ) return this.node[k]!;
+      if (this.node[k]! >= 0 && (this.distSq[k]! > MIN_DIST_SQ || this.anyDistance)) return this.node[k]!;
     }
     return -1;
   }
@@ -107,7 +115,7 @@ export class BestSoFar {
   /** The coefficient of the best `best()` returns (undefined with none), for logs and tests. */
   coefficient(): number | undefined {
     for (let k = 0; k < K; k++) {
-      if (this.node[k]! >= 0 && this.distSq[k]! > MIN_DIST_SQ) return COEFFICIENTS[k];
+      if (this.node[k]! >= 0 && (this.distSq[k]! > MIN_DIST_SQ || this.anyDistance)) return COEFFICIENTS[k];
     }
     return undefined;
   }

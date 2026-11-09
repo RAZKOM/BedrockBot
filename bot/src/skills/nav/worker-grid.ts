@@ -255,7 +255,8 @@ export class MirrorWorld {
       const r = s.roof[(z & 15) * 16 + (x & 15)]!;
       return r === Y_NONE ? s.y0 - 1 : r;
     }
-    for (let rel = Math.min(col.count, col.sections.length) - 1; rel >= 0; rel--) {
+    // (every section: a block update can build into one at or above `count`, Track R2)
+    for (let rel = col.sections.length - 1; rel >= 0; rel--) {
       const sec = col.sections[rel];
       if (sec === undefined) return undefined;
       if (sec !== null) return (col.minCY + rel) * 16 + 15;

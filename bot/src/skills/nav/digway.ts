@@ -14,6 +14,11 @@
 //   level 2  the falls that hurt, as the long-fall policy allows them (decision 0057), the dig way still open (a
 //            hurt then priced DIG_WAY_HP_COST a HP). Only when the policy has damage to give.
 //
+// Track R2 (decisions/0072-reachability.md "R2"): a goto that digs anyway (`allowBreak`) has a level 1 too when the
+// owner's dig price is above DIG_WAY_PRICE (`digPenalty` 500 on the Realm): its level 0 digs at that price, which
+// puts any dug way of a few blocks past the search's budget (9 blocks = 4500 ticks, the cost of about 1000 blocks of
+// walking: "no progress"); level 1 plans the same moves at DIG_WAY_PRICE, no block budget (the owner allows breaking).
+//
 // Measured on the owner's cave rebuilt on bds-fly (fly-cave e2e walkA, BDS 1.26.60): a 3-high step the world cache
 // reads where a stair or slab stands (cave_8 -> cave_9: the replica's stone cube), a 2-high one (cave_shortcut ->
 // cave_end), and a 12-block drop that cost 8 HP (cave_14 -> cave_15) where an 8-block dug way existed.
@@ -27,6 +32,8 @@ export const DIG_WAY_MAX_BLOCKS = 12;
 export const DIG_WAY_PENALTY = 100;
 /** A block the best tool takes longer than this to break on the ground is refused (stone by hand 150: allowed; obsidian never). */
 export const DIG_WAY_MAX_TICKS = 200;
+/** Track R2: the dig penalty level 1 plans an `allowBreak` goto with when the owner's is higher (the setting's default). */
+export const DIG_WAY_PRICE = 60;
 /** Planner ticks per HP a fall costs at level 2 while the dig way is open (a dug way wins unless it is far slower). */
 export const DIG_WAY_HP_COST = 400;
 

@@ -8,7 +8,7 @@
 //
 // Env: FLY_BDS_HOST (127.0.0.1), FLY_BDS_PORT (19204), FLY_BDS_CONTAINER (bds-fly); game version and
 // transport from env.ts (BOT_VERSION, BDS_TRANSPORT); FLY_AREA="x,z" pins the area; FLY_VERBOSE=1 logs
-// the bot's lines.
+// the bot's lines; FLY_LOG_DEBUG=1 keeps its debug lines in `logs` too.
 import { randomInt } from 'node:crypto';
 import { Chat, parseOwners } from '../../src/chat/chat.ts';
 import { registerBuiltinCommands } from '../../src/chat/commands.ts';
@@ -33,6 +33,7 @@ export const FLY_PORT = Number(process.env.FLY_BDS_PORT ?? 19204);
 export const FLY_CONTAINER = process.env.FLY_BDS_CONTAINER ?? 'bds-fly';
 export const FLY_TARGET: ConnectTarget = bdsTarget(FLY_HOST, FLY_PORT);
 export const VERBOSE = process.env.FLY_VERBOSE === '1';
+const CAPTURE_DEBUG = process.env.FLY_LOG_DEBUG === '1';
 /** Flat world: grass top at y = -61, feet at -60. */
 export const FEET_Y = -60;
 
@@ -160,7 +161,10 @@ function capture(scope: string, into: string[]) {
   };
   return {
     ...base,
-    debug: (m: string) => base.debug(m),
+    debug: (m: string) => {
+      if (CAPTURE_DEBUG) keep('debug')(m); // Track R2: FLY_LOG_DEBUG=1 keeps the debug lines too (the planner's plan lines)
+      base.debug(m);
+    },
     info: (m: string) => {
       keep('info')(m);
       base.info(m);

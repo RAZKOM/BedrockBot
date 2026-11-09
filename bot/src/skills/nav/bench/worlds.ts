@@ -18,7 +18,8 @@ export interface BenchPair {
 }
 
 export interface BenchWorld {
-  cls: WorldClass;
+  /** The generator's class (Track R2: 'fixture' for a real place, nav/bench/fixture.ts). */
+  cls: WorldClass | 'fixture';
   seed: number;
   vox: Vox;
   /** The home point (the protected base's centre) and the protect radius, when the world has a base. */
@@ -378,7 +379,7 @@ const WATER_SPREAD = 7;
  */
 export function settleLiquid(v: Vox, id: number, spread: number): void {
   const q: [number, number, number, number][] = [];
-  for (let y = MIN_Y; y < MIN_Y + HEIGHT; y++) for (let z = 0; z < v.sz; z++) for (let x = 0; x < v.sx; x++) if (v.get(x, y, z) === id) q.push([x, y, z, 0]);
+  for (let y = MIN_Y; y < MIN_Y + v.height; y++) for (let z = 0; z < v.sz; z++) for (let x = 0; x < v.sx; x++) if (v.get(x, y, z) === id) q.push([x, y, z, 0]);
   for (const [x, y, z, d] of q) {
     // (the queue grows as the liquid flows: the iterator reads its length each step)
     if (v.get(x, y - 1, z) === V.air) {
@@ -467,7 +468,7 @@ function house(v: Vox, r: () => number, x0: number, z0: number, w: number, d: nu
 function flatten(v: Vox, x0: number, z0: number, x1: number, z1: number, y: number): void {
   for (let z = z0; z <= z1; z++)
     for (let x = x0; x <= x1; x++) {
-      for (let yy = y; yy < MIN_Y + HEIGHT; yy++) v.set(x, yy, z, V.air);
+      for (let yy = y; yy < MIN_Y + v.height; yy++) v.set(x, yy, z, V.air);
       for (let yy = v.top(x, z) + 1; yy < y; yy++) v.set(x, yy, z, V.dirt);
       v.set(x, y - 1, z, V.grass);
     }

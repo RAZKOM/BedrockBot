@@ -15,7 +15,11 @@
 //   dig       Baritone's traverse / ascend / descend through cells the break rules allow, `digBudget` cells a goto
 //             at most; the dig-out of the water (the lip and the head room over it)
 //   parkour   over a gap of 1 or 2 cells (water or a floor within 3 under it) to a floor at the level or 1 lower
-//   pillar    (only with the place rule relaxed: `!goto` never places) jump and place a block under the feet
+//   pillar    (with the place rule relaxed, or the owner's live settings: allowPlace) jump and place a block under the
+//             feet, the two cells over the head free (the jump's room); with digging the first of them dug
+//   downward  (Track R2: with place and digging, the nav's MovementDownward) dig the block under the feet and drop
+//             into its cell, under the shaft rules: a full block under it, no liquid in it or beside it 1 to 2 below,
+//             no gravity block over the head, never within 2 of the world's floor
 // The break rules: natural terrain only (palette), a break of at most `maxBreakTicks` with the best tool, never
 // in the protected sphere, never the floor of the move, no liquid beside the cell, no gravity block over it or
 // unsupported beside it, no ascend under a gravity block 3 over the start.
@@ -49,6 +53,11 @@ export interface OracleRules {
   airBudget: number;
   /** The hotbar the break times are read with (best tool per block; empty = the hand). */
   tools: readonly string[];
+  /**
+   * Track R2: cells (Vox.index) the bot placed itself in the run (its pillar): dug whatever block they are (the built
+   * and natural-only rules do not hold for them; the liquid, gravity and protection rules do).
+   */
+  own?: ReadonlySet<number>;
 }
 
 export const OWNER_RULES: Readonly<OracleRules> = Object.freeze({
@@ -63,6 +72,34 @@ export const OWNER_RULES: Readonly<OracleRules> = Object.freeze({
   airBudget: (300 - 110) / 1.5,
   tools: [],
 });
+
+/**
+ * Track R2: the owner's live settings (`allowBreak` and `allowPlace` on, as the Realm session has them): the goto
+ * digs at its first level (any block the break rules allow, no dig way budget, no slow-block limit: the dig way is
+ * for a goto that does not dig anyway) and pillars with the throwaway blocks it carries (the bench carries more
+ * than any pillar here needs: the count is not modelled).
+ */
+export const LIVE_RULES: Readonly<OracleRules> = Object.freeze({ ...OWNER_RULES, digBudget: 4096, maxBreakTicks: 100_000, place: true });
+
+/** Track R2: the rule is already lifted in `r` (lifting it again changes nothing: the verdict skips it). */
+export function ruleOff(r: OracleRules, rule: RuleName): boolean {
+  switch (rule) {
+    case 'protected_area':
+      return !r.protect;
+    case 'built':
+      return r.builtBreakable;
+    case 'liquid':
+      return !r.liquidRule;
+    case 'gravity':
+      return !r.gravityRule;
+    case 'falls':
+      return r.fallBudget >= 19;
+    case 'dig_budget':
+      return r.digBudget >= 4096 && r.maxBreakTicks >= 100_000;
+    case 'place':
+      return r.place;
+  }
+}
 
 /** The rules with one relaxed. */
 export function relaxed(r: OracleRules, rule: RuleName): OracleRules {
@@ -234,7 +271,9 @@ class Oracle {
   private breakable(x: number, y: number, z: number, floors: readonly (readonly [number, number, number])[], factor = 1): boolean {
     const id = this.id(x, y, z);
     if (id <= 0 || isLiquid(id) || id === V.bedrock) return false;
-    if (isBuiltVox(id)) {
+    if (this.r.own?.has(this.v.index(x, y, z))) {
+      // Track R2: the bot's own pillar: dug back down whatever it is
+    } else if (isBuiltVox(id)) {
       if (!this.r.builtBreakable) return false;
     } else if (!isNaturalVox(id) && this.r.maxBreakTicks < 100_000) return false; // obsidian: natural to the rules, never in time
     // the goal's floor is never dug (the navigator keeps it: nav/navigator.ts goto)
@@ -425,7 +464,31 @@ class Oracle {
       }
       if (dig) this.digMoves(l, x, y, z, nx, nz);
     }
-    if (this.r.place && this.free(x, y + 2, z)) this.push(l, x, y + 1, z, MODE_LAND, l.dug, l.dmg, 0, 'pillar');
+    // (the navigator places nothing inside the base: astar.ts protectedArea; the cell placed is the feet cell)
+    const pr = this.r.protect;
+    if (this.r.place && !(pr && Math.hypot(x + 0.5 - pr.x, y + 0.5 - pr.y, z + 0.5 - pr.z) <= pr.r)) {
+      // the jump's room: the two cells over the head (navigator: PlaceSkill's head room); with digging the first one dug
+      if (this.free(x, y + 2, z) && this.free(x, y + 3, z)) this.push(l, x, y + 1, z, MODE_LAND, l.dug, l.dmg, 0, 'pillar');
+      else if (dig && this.free(x, y + 3, z) && this.breakable(x, y + 2, z, [[x, y - 1, z]])) this.push(l, x, y + 1, z, MODE_LAND, l.dug + 1, l.dmg, 0, 'pillarDig', [this.v.index(x, y + 2, z)]);
+      if (dig) this.downward(l, x, y, z);
+    }
+  }
+
+  /**
+   * Track R2: MovementDownward: the block under the feet dug, the body drops into its cell (the one move that digs its
+   * own floor), under the shaft rules of mine/tunnel.ts `shaftRule`.
+   */
+  private downward(l: Label, x: number, y: number, z: number): void {
+    const fy = y - 1;
+    if (fy - 1 <= MIN_Y + 1 || !isSolid(this.id(x, fy - 1, z))) return;
+    if (isGravityVox(this.id(x, y + 2, z))) return;
+    for (const dy of [1, 2]) {
+      if (isLiquid(this.id(x, y - dy, z))) return;
+      for (const [dx, dz] of CARD) if (isLiquid(this.id(x + dx, y - dy, z + dz))) return;
+    }
+    if (!this.breakable(x, fy, z, [])) return;
+    // (the dug cell is the move's own floor: never a floor later on the way, `dugOnTheWay`)
+    this.push(l, x, fy, z, MODE_LAND, l.dug + 1, l.dmg, 0, 'downward', [this.v.index(x, fy, z)]);
   }
 
   /**
@@ -573,7 +636,7 @@ export interface Verdict {
  */
 export function verdict(vox: Vox, start: Vec3, goal: Vec3, rules: OracleRules, opts: { margin?: number } = {}): Verdict {
   const t0 = performance.now();
-  const plainRules: OracleRules = { ...rules, digBudget: 0, fallBudget: 0 };
+  const plainRules: OracleRules = { ...rules, digBudget: 0, fallBudget: 0, place: false };
   const p = oracle(vox, start, goal, plainRules);
   let expanded = p.expanded;
   const ms = (): number => +(performance.now() - t0).toFixed(1);
@@ -588,7 +651,7 @@ export function verdict(vox: Vox, start: Vec3, goal: Vec3, rules: OracleRules, o
   if (own.reachable) return { verdict: 'reachable', plain: false, rules: [], dug: own.dug!, dmg: own.dmg!, ...(own.path ? { path: own.path } : {}), expanded, ms: ms() };
   const open: RuleName[] = [];
   for (const n of RULE_NAMES) {
-    if (n === 'protected_area' && !rules.protect) continue;
+    if (ruleOff(rules, n)) continue; // (Track R2: the live settings lift dig_budget and place already)
     const r = oracle(vox, start, goal, relaxed(rules, n), { ...(box ? { box } : {}), witness: false });
     expanded += r.expanded;
     if (r.reachable) open.push(n);

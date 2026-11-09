@@ -904,6 +904,195 @@ goes round over the surface: about 500 nodes, exactly 12 digs, most of it outsid
 answers `rule:dig_budget` (the bench's closed loop on the replica's cells). A loaded goal whose only way runs through unloaded world is
 not given the frontier end, which would walk a sealed goal's goto off into the unknown.
 
+### R2: the owner's live settings (allowBreak, allowPlace, digPenalty 500)
+
+Track R2 (decisions/0072-reachability.md "R2") ran the navigator the way the Realm runs it: `allowBreak` on,
+`allowPlace` off (on until 2026-11-09, both measured), `digPenalty` 500, sprint, a pickaxe, 2 cobblestone and 64 dirt.
+Two live incidents of one evening became private fixtures (`nav/bench/fixture.ts`: a box of the bot's world cache as a bench world, kept out of the
+repository in `bot/fixtures-private/`; nothing of the place is in the repository) and were reproduced in the closed
+loop before anything was changed.
+
+**Incident 1 (the pillar).** A long `!goto` along the coarse corridor pillared 8 blocks straight up (cobblestone, then
+dirt) and answered unreachable from the top. Reproduced to the block: the corridor's mine mode lets a vertical
+opening without a floor be "dug or pillared", so its waypoint was a point in the air; the fine plan pillared up to
+touch it, the bot's own placed blocks marked the corridor dirty, a new corridor arrived mid-pillar and its waypoint
+was unreachable from the top, the opening was marked failed. And with `allowPlace` the searches ran out of budget:
+the pillar moves over every flat node took 65 % of a search's expansions (36 779 of 56 212 on the cave entry), so the
+partial plans were short and poor.
+
+**Incident 2 (the lake).** The walk from a surface landing into a cave failed over and over ("cut by its budget with
+no progress", "no partial end 5+ blocks from the start") and ended with the head under water for 208 ticks. On a
+PC at the bench's default speed the walk arrived; at the live planner's speed that evening (below) it failed exactly
+as live and drowned in the closed loop. Cause: a partial plan ended on the lake's floor, because one cell in the lake is
+passable without liquid (a waterlogged block: the world model does not read the water layer), so the planner thought
+the head there was dry; from the floor, every plan's bests were dry nodes worse than the start, so every plan was
+"no progress" and the body stayed under water.
+
+**Incident 3 (the long walk out of a cave, from the log).** A `!goto` of 644 blocks from under a roof 13 high took the
+corridor in pieces (each search cut at its 500 ms: 81, then 293, then 713 blocks), pillared on its last throwaway block
+(one diorite) and answered `place failed: no_item`, then marked one waypoint's portal failed for `walk` and got it back
+in the next corridor three times ("corridor waypoint N unreachable (no progress towards it)"). The planner counted
+the throwaway blocks only for a dig-down's way back up: any count above 0 allowed every pillar; and the failed mark
+was for the leg's mode while the goto's corridors plan in `walk` and `mine`. The goto walked on (360 blocks in 2500
+ticks) until the owner's next command replaced it.
+
+The fixes, general:
+
+| fix | where |
+|---|---|
+| a passable cell without liquid that has water over it counts as water for the head (`submerged`): water over a free cell would flow into it | `NavGrid.submerged` |
+| a plan from under water ends with the head out of it: the start is no best and any node with the head out counts, however near (not Baritone's 5 blocks) | `BestSoFar.reset(.., wet)`, `PathSearch` |
+| a partial plan never ends standing on a lake's floor with the head under water (a walking node in still water), nor on its own pillar's top | `PathSearch` bests |
+| a pillar is tried only with something other than air within `PILLAR_REACH` (8) levels over the feet in the 3 x 3 columns round it (a wall, a ledge, a ceiling, water, unloaded), or the goal over it; open-ground pillars dropped from 65 % to 19 % of the expansions, cheap through the grid's cached column tops | `PathSearch.pillarLeads` |
+| the corridor never aims the fine planner at a waypoint in the air (a vertical opening without a floor): the first waypoint on a floor past it | `corridor.ts fineTarget`, `floorless` |
+| no corridor re-request and no re-plan onto a new corridor while the body is between its path's pillar moves | `navigator.ts midPillar` |
+| a `falls` cause names the fall: `rule falls: a 20-block fall (16 HP) over the fall budget of 12 HP`, or `..., no fall that hurts now: <why>` | `reach.ts fallOnPath`, `fallWords` |
+| a goto that digs anyway gets a level 1 when its dig price is above the dig way's (`digPenalty` 500): the same moves at 60 a block, no block budget. At 500 a block a dug way of 9 blocks costs as much as 1000 blocks of walking, past any search's budget: "no progress", `budget` | `navigator.ts digWayOn`, `applyLevel`; `digway.ts DIG_WAY_PRICE` |
+| a way the "why" search finds that breaks no rule is walked instead of answering `budget`: the goto plans on with its searches weighted (3 x the heuristic) and digs at the dig way's price, and walks the found way itself when that goes nowhere; twice a goto at most, the failures one short of the limit again | `navigator.ts walkOpenWay`, `adoptOpenWay` |
+| the "why" search's way is walked only from the node nearest the body (the weighted plans moved it: "off the path" at once, caves:2:6); a goto that digs anyway, whose searches were cut, plans on weighted once more before a rule the "why" way breaks is the answer (`allowPlace` off: a stair dug up a ravine's wall where the "why" way pillars, `rule place` before) | `navigator.ts adoptOpenWay`, `stepExplain` |
+| with `allowBreak` the "why" answer no longer counts the dig way's 12-block budget (a goto that digs freely was told `dig_budget`), and a placed block is a rule only past what a goto that places carries | `reach.ts rulesOnPath`, `navigator.ts ownerOptions` |
+| a column's top counts blocks built over the sections the server sent with the chunk (a sky scan started at the highest sent section and missed a build over it: the pillar rule then saw no wall, found on bds-fly) | `terrain/query.ts`, `worker-grid.ts columnTop` |
+| the oracle places no block inside the protected base, as the planner does | `bench/oracle.ts` |
+| the dig way of a goto without `allowBreak` prices its blocks at the dig way's price at most (60, then its own 100 on top), not `digPenalty` + 100: at 600 a block it found nothing (`dig_budget` on 22 of 553 pairs with `allowBreak` off) | `navigator.ts applyLevel` |
+| a path places at most the throwaway blocks the goto carries (counted per node); any count above 0 allowed every pillar before (incident 3: `place failed: no_item`) | `PathSearch.relax`, `PathOptions.throwaway` |
+| a corridor waypoint the fine planner cannot reach has its portal marked failed for every mode the goto's corridors plan in (incident 3: the same waypoint failed three times, crossed again in the other mode) | `navigator.ts corridorFailed` |
+| a jump up into a node beside lava releases forward in the air once over the step when the coast would pass the node's centre (lava:1:6, `allowPlace` off: the landing slid into the lava beside the node, dead) | `follower.ts` |
+
+**Where and at which budget.** Every R2 number below is from the owner's Mac (the live machine, an M4), through
+`scripts/mac-run.mjs`, at `--speed 1`: the live wall-clock budgets as the bot runs them there (2000 ms a search,
+500 ms a corridor), not node-bound and not this repository's PC calibration (`--speed 1.25`, Track R1's tables above).
+The Mac was shared with the live bot and the owner's `!test` series while they ran (load averages up to about 30; the
+runner drops a run to nice 20 during a series), so the walks are, if anything, slower than on a quiet machine. During
+the incidents the live bot itself ran on the Mac's efficiency cores (launchd `ProcessType Background`, until
+2026-11-09): its searches expanded 28 000 to 100 000 nodes in the 2000 ms where the bench at 1.25 on a PC expands about
+140 000, which is why incident 2 reproduced on a PC only at `--speed 0.35`. It runs on the performance cores now.
+
+**The fixtures** (the closed loop, `--fixture incident --repeat 3`, twice with `allowPlace` off, once on; damage in HP
+of 20):
+
+| fixture | `allowPlace` off (live since 2026-11-09), 6 runs | `allowPlace` on, 3 runs |
+|---|---|---|
+| incident 1, from where it stood (`incident-resume`) | 6 of 6 arrived, 4863-5095 ticks, damage 0-1, placed 0, dug 0-1 | 3 of 3 arrived, 4809-5491 ticks, damage 0-2, placed 5-27, dug 0-7 |
+| incident 1, from the start (`incident-base`) | 6 of 6 arrived, 4890-5112 ticks, damage 0-3, placed 0, dug 1 | 3 of 3 arrived, 3798-4280 ticks, damage 0, placed 5-22, dug 0-5 |
+| incident 1, from the slope (`incident-slope`) | 6 of 6 arrived, 4012-5124 ticks, damage 0-3, placed 0, dug 1-2 | 3 of 3 arrived, 3477-3978 ticks, damage 0, placed 6-7, dug 2 |
+| incident 2, the cave entry (`cave-entry`) | 6 of 6 arrived, 1795-1824 ticks, damage 0, placed 0, dug 0 | 3 of 3 arrived, 1993-1998 ticks, damage 0, placed 1, dug 0 |
+
+No end stranded, no death. Before the fixes: incident 1 ended on its pillar's top answering unreachable, incident 2
+drowned at the incident's planner speed (the head under water from the lake's floor until the air ran out). With
+`allowPlace` off the walks take 2 to 3 times the wall time (15 to 53 s against 5 to 21 s: more and longer searches)
+and about the same ticks. Incident 3 has no fixture (its cache box was not kept): the throwaway count has a guard
+test (`nav-r2.test.ts`), the waypoint marks in every mode have none.
+
+**The bench, both configurations** (`node scripts/reach-bench.ts --config live|r1 --speed 1`, worlds 1 to 20 of every
+class but long, `--jobs 4` on the Mac, the stranded check on every end: the body cannot get back to its start without
+a hurting fall while it could from there before the run, its own placed blocks diggable).
+
+The live settings (`--config live --place off`: `allowBreak` on, `allowPlace` off, `digPenalty` 500, sprint; the Mac,
+`--speed 1`, the live wall-clock budgets; 4000 s):
+
+| class | pairs | oracle reachable | rule (b) | world (a) | arrived of reachable | false unreachable | deaths | stranded | cause agrees | placed / dug p90 | damage max |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| hills | 280 | 280 | 0 | 0 | 279 (99.6 %) | 1 | 0 | 0 | - | 0 / 18 | 1 |
+| ravine | 232 | 232 | 0 | 0 | 232 (100.0 %) | 0 | 0 | 0 | - | 0 / 49 | 2 |
+| water | 222 | 220 | 0 | 2 | 220 (100.0 %) | 0 | 0 | 0 | 1 of 2 | 0 / 0 | 0 |
+| lava | 260 | 260 | 0 | 0 | 259 (99.6 %) | 1 | 0 | 0 | - | 0 / 23 | 0 |
+| builds | 260 | 212 | 28 | 20 | 212 (100.0 %) | 0 | 0 | 0 | 48 of 48 | 0 / 0 | 2 |
+| caves | 260 | 259 | 1 | 0 | 257 (99.2 %) | 2 | 0 | 0 | 1 of 1 | 0 / 108 | 1 |
+| pits | 320 | 295 | 25 | 0 | 294 (99.7 %) | 1 | 0 | 0 | 21 of 21 | 0 / 59 | 8 |
+| unknown | 360 | 360 | 0 | 0 | 359 (99.7 %) | 1 | 0 | 0 | - | 0 / 9 | 0 |
+| **all** | 2194 | 2118 | 54 | 22 | 2112 (99.7 %) | **6 (0.27 % of pairs)** | 0 | 0 | 71 of 72 (98.6 %) | 0 / 37 | 8 |
+
+Ticks p50 411, p90 1241. With `allowBreak` almost every pair is reachable (the oracle's rule pairs are built blocks
+and the pillars a goto without `allowPlace` may not build: towers and pit walls). The six: pits:2:13 and unknown:13:17 (`rule place`:
+the "why" way pillars, where the oracle's way digs a stair the searches did not finish), caves:2:12 and caves:17:11
+(`unloaded`: the only way runs through unloaded world, R1's decision 12), hills:16:1 (R1's bench-edge artefact) and
+lava:20:5 (a timeout: the found plans walk a long way round a hill, the body leaves the path at the same corner every
+lap, 30 times, and the interim plans lead back; it arrived twice on a PC at 1.25). The cause that does not agree
+(water:7:9, the oracle's `world`) ran to the cap. In 4 pits pairs the navigator arrived where the oracle said `rule
+place` (it dug a stair round the tower's side, placed nothing). Damage 8 is two pits pairs whose only way is an
+8 HP fall (the oracle's way too). Dug blocks: 30 cave pairs dig 100 or more (the most 291 where the oracle's way digs
+122): the level 1 and the open walks dig what the owner's rules allow, at the dig way's price.
+
+R1's configuration (`--config r1`, every rule as Track R1 measured it; the Mac, `--speed 1`, the live wall-clock
+budgets; 3050 s):
+
+| class | pairs | oracle reachable | rule (b) | world (a) | arrived of reachable | false unreachable | deaths | stranded | cause agrees | placed / dug p90 | damage max |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| hills | 280 | 258 | 22 | 0 | 257 (99.6 %) | 1 | 0 | 0 | 22 of 22 | 0 / 6 | 8 |
+| ravine | 232 | 156 | 76 | 0 | 156 (100.0 %) | 0 | 0 | 0 | 76 of 76 | 0 / 6 | 12 |
+| water | 222 | 220 | 0 | 2 | 220 (100.0 %) | 0 | 0 | 0 | 2 of 2 | 0 / 0 | 1 |
+| lava | 260 | 225 | 35 | 0 | 224 (99.6 %) | 1 | 0 | 0 | 35 of 35 | 0 / 0 | 1 |
+| builds | 260 | 212 | 28 | 20 | 212 (100.0 %) | 0 | 0 | 0 | 48 of 48 | 0 / 0 | 2 |
+| caves | 260 | 176 | 84 | 0 | 175 (99.4 %) | 1 | 0 | 0 | 84 of 84 | 0 / 6 | 1 |
+| pits | 320 | 167 | 153 | 0 | 165 (98.8 %) | 2 | 0 | 0 | 149 of 149 | 0 / 9 | 12 |
+| unknown | 360 | 360 | 0 | 0 | 358 (99.4 %) | 2 | 0 | 0 | - | 0 / 9 | 0 |
+| **all** | 2194 | 1774 | 398 | 22 | 1767 (99.6 %) | **7 (0.32 % of pairs)** | 0 | 0 | 416 of 416 | 0 / 6 | 12 |
+
+Ticks p50 376, p90 1113. The same seven pairs as on a PC at 1.25: R1's six and lava:14:12, a dig way of 8 blocks whose
+partial plans lead back and forth (`dig_budget` from there); it arrives at `--speed 1.6` on a PC and fails at 1.0 and
+1.25, a pair on the edge of the searches' budget rather than a rule the fixes changed (in R1's configuration no pillar
+is tried, and its ends are dry).
+
+**The long class** (trips of 200 to 330 blocks along the coarse corridor, worlds 1 to 6, 95 pairs, `--jobs 3`; the
+Mac, `--speed 1`, the live wall-clock budgets):
+
+| configuration | pairs | oracle reachable | arrived of reachable | false unreachable | deaths | stranded | cause agrees | dug p90 / max | damage max | time |
+|---|---|---|---|---|---|---|---|---|---|---|
+| live (`--place off`) | 95 | 95 | 60 (63.2 %) | **35** | 0 | 0 | - | 168 / 230 | 1 | 3158 s |
+| R1's (`--config r1`) | 95 | 35 | 32 (91.4 %) | **3** | 0 | 0 | 46 of 60 | 10 / 12 | 8 | 5036 s |
+
+R1's configuration matches Track R1's numbers (4 false then: long:2:5, long:2:11 and long:3:2 again, long:6:5
+arrives here; causes 47 of 60 then). With `allowBreak` every long pair is reachable for the oracle; the navigator
+gets 60 of them there and gives up on 35, all of them pairs whose oracle way digs 36 to 57 blocks and takes a fall
+of 11 or 12 HP (the fall budget's edge): `budget`
+17 (the "why" search with every rule lifted found only a way towards the unloaded world), `rule liquid` 6, `rule
+place` 4, `rule built` 4, `rule gravity` 2 (the "why" search from where the walk stood named a rule the oracle's way
+avoids), 2 at the bench's cap. The walks behind them: corridor waypoints the fine planner cannot reach (failed and
+replaced), searches cut by the 2000 ms budget and re-run at 4 x, the dig way and the hurting falls tried, then
+partial plans that lead back and forth. None died and none was stranded. This is where the live settings are weak:
+a dug way with a fall at the budget's edge, over hundreds of blocks, needs more than the fine planner's windows find
+at the live budgets (not measured further here: a follow-up track for long walks that must dig).
+
+**Which settings to run live** (each switch alone, worlds 1 to 5 of every class but long; the Mac, `--speed 1`, the
+live wall-clock budgets):
+
+| settings (`--config live` and) | pairs | oracle reachable | arrived of reachable | false unreachable | deaths | stranded | cause agrees | placed p90 / max | dug p90 / max | damage p90 / max | wall s p50 / p90 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **live**: `allowBreak` on, `allowPlace` off, `digPenalty` 500 (`--place off`) | 553 | 533 | 531 (99.6 %) | 2 (0.36 %) | 0 | 0 | 20 of 20 | 0 / 0 | 42 / 291 | 0 / 8 | 0.3 / 10.8 |
+| `allowPlace` on (live until 2026-11-09) | 553 | 537 | 536 (99.8 %) | 1 (0.18 %) | 0 | 0 | 16 of 16 | 5 / 28 | 10 / 152 | 0 / 0 | 0.1 / 10.3 |
+| `allowPlace` on, `allowBreak` off | 553 | 509 | 508 (99.8 %) | 1 (0.18 %) | 0 | 0 | 44 of 44 | 5 / 28 | 5 / 12 | 0 / 12 | 0.1 / 21.2 |
+| `allowPlace` off, `digPenalty` 60 | 553 | 533 | 529 (99.2 %) | 4 (0.72 %) | 0 | 0 | 19 of 19 | 0 / 0 | 39 / 288 | 0 / 12 | 0.2 / 9.3 |
+| `allowPlace` off, `allowBreak` off | 553 | 441 | 441 (100.0 %) | 0 | 0 | 0 | 111 of 112 | 0 / 0 | 6 / 12 | 0 / 12 | 0.2 / 4.7 |
+| R1's configuration (both off, `digPenalty` 60) | 553 | 441 | 441 (100.0 %) | 0 | 0 | 0 | 112 of 112 | 0 / 0 | 6 / 12 | 0 / 12 | 0.2 / 5.5 |
+
+The false ones: live, pits:2:13 (`rule place`) and caves:2:12 (`unloaded`); `allowPlace` on, caves:2:12;
+`allowBreak` off, pits:5:2 (`rule dig_budget`: the dig way's 12 blocks); `digPenalty` 60, those two of the live row,
+caves:5:10 (`unloaded`) and caves:2:8 (231 blocks dug, at the bench's cap of 6600 ticks). With `allowBreak` off the
+dig way of 12 blocks is all a goto digs: fewer goals are reachable (441 or 509 of 553 against 533 or 537), the falls
+take more (damage to 12 HP) and the walks take longer (the dig way after the plain searches: p90 21 s). Before the dig
+way's price cap (decision 17) `allowBreak` off answered `dig_budget` on 22 of these pairs; now on 1. A `digPenalty` of
+60 gains nothing: the level 1 already digs at 60 a goto that needs it, and the owner's 500 keeps the plain plans off
+digging where a walk exists. `allowPlace` on digs a quarter as much (p90 10 against 42) and takes no fall damage on these
+worlds, but leaves the blocks in the world (5 a goto at p90, 28 at most; up to 27 on the incident fixtures).
+
+On bds-fly (e2e, the Mac's bds-fly through the runner, the live budgets): `nav-cave-entry` (the cave entry walk on a
+replica of the fixture's box, moved by a multiple of 16: the cache's fly-over, the coarse layer, `!goto` with the live
+settings, `allowPlace` off) arrived 3 of 3 (71 s each, no damage, nothing placed or broken, 54 ticks with the head
+under water crossing the lake; one move timeout on the hillside, then on); on a PC with `allowPlace` on it arrived 9
+of 9, and 10 of 12 before the open walks (two runs stuck on a hillside's jumps: three move timeouts, then `budget`).
+`nav-pillar` (`allowPlace` on: only a pillar climbs) 3 of 3 each: the plateau climbed (5 blocks placed, 112 ticks, no
+damage); the walled yard `rule:falls`, naming the 20-block fall (16 HP over the budget of 12 HP), the body back on the
+ground. Before the column-top fix the walled yard answered `budget`: the ring, built over the chunks' sent sections,
+was not in the column tops. `nav-reach` 4 of 4 and `nav-water` 17 of 17 as before.
+
+Limits: a ledge more than 8 levels over open flat ground with nothing in between is not pillared to (a goal there
+is); the stranded fallback (ways down: the own pillar dug, a stair dug) is not added, no stranded end having been
+measured once the corridor stopped aiming into the air; with `allowBreak` the level 1 and the open walks dig what the
+owner's rules allow, many blocks at times (291 on one cave pair of the bench, the 90th percentile 37): the owner's
+price applies first, and only a goto that would otherwise fail digs at the lower one; a goto whose searches were cut
+and whose "why" way breaks a rule plans on weighted once more before answering (about 20 s more before a rule
+answer); the long class and the incident fixtures are the only walks over a few hundred blocks measured.
+
 ## Following a path
 
 Per tick, from `InputLoop.onBeforeStep` (the command applies to the same tick):

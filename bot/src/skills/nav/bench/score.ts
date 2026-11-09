@@ -20,6 +20,8 @@ export interface RunSummary {
   doors: number;
   placed: number;
   endDist: number;
+  /** Track R2: no way back to the start without a hurting fall now, one before the run (undefined: not checked). */
+  stranded?: boolean;
 }
 
 export interface PairRecord {
@@ -34,6 +36,8 @@ export interface PairRecord {
   run: RunSummary;
   /** The unreachable reply's cause class matches the oracle's (undefined when the run arrived or the oracle reaches it). */
   agree?: boolean;
+  /** Track R2: the settings the pair ran with ('r1': no break, no place; 'live': the owner's). */
+  cfg?: string;
 }
 
 /**
@@ -60,8 +64,8 @@ const pct = (a: number[], q: number): number => {
 export function scoreTables(recs: readonly PairRecord[]): string {
   const classes = [...new Set(recs.map((r) => r.cls))];
   const rows: string[] = [];
-  rows.push('| class | pairs | oracle reachable (plain / dig or fall) | rule (b) | world (a) | arrived | arrived of reachable | FALSE UNREACHABLE | nav arrived, oracle not | cause agrees | deaths | damage p50 / p90 / max | ticks p50 / p90 | wall s p50 / p90 |');
-  rows.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+  rows.push('| class | pairs | oracle reachable (plain / dig or fall) | rule (b) | world (a) | arrived | arrived of reachable | FALSE UNREACHABLE | nav arrived, oracle not | cause agrees | deaths | stranded | placed / dug p90 | damage p50 / p90 / max | ticks p50 / p90 | wall s p50 / p90 |');
+  rows.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
   const line = (name: string, rs: readonly PairRecord[]): void => {
     const reach = rs.filter((r) => r.oracle.verdict === 'reachable');
     const plain = reach.filter((r) => r.oracle.plain).length;
@@ -74,12 +78,15 @@ export function scoreTables(recs: readonly PairRecord[]): string {
     const causes = rs.filter((r) => r.agree !== undefined);
     const agree = causes.filter((r) => r.agree).length;
     const deaths = rs.filter((r) => r.run.died).length;
+    const stranded = rs.filter((r) => r.run.stranded).length; // Track R2
+    const placed = rs.map((r) => r.run.placed);
+    const dug = rs.map((r) => r.run.dug);
     const dmg = rs.map((r) => r.run.damage);
     const ticks = rs.filter((r) => r.run.ok).map((r) => r.run.ticks);
     const wall = rs.map((r) => r.run.wallMs / 1000);
     const pc = (n: number, d: number): string => (d ? `${n} (${((100 * n) / d).toFixed(1)} %)` : `${n}`);
     rows.push(
-      `| ${name} | ${rs.length} | ${reach.length} (${plain} / ${reach.length - plain}) | ${rule} | ${world} | ${arrived} | ${pc(arrivedReach, reach.length)} | **${pc(falseU, reach.length)}** | ${navOnly} | ${causes.length ? pc(agree, causes.length) : '-'} | ${deaths} | ${pct(dmg, 0.5)} / ${pct(dmg, 0.9)} / ${Math.max(0, ...dmg)} | ${pct(ticks, 0.5)} / ${pct(ticks, 0.9)} | ${pct(wall, 0.5).toFixed(1)} / ${pct(wall, 0.9).toFixed(1)} |`,
+      `| ${name} | ${rs.length} | ${reach.length} (${plain} / ${reach.length - plain}) | ${rule} | ${world} | ${arrived} | ${pc(arrivedReach, reach.length)} | **${pc(falseU, reach.length)}** | ${navOnly} | ${causes.length ? pc(agree, causes.length) : '-'} | ${deaths} | ${stranded} | ${pct(placed, 0.9)} / ${pct(dug, 0.9)} | ${pct(dmg, 0.5)} / ${pct(dmg, 0.9)} / ${Math.max(0, ...dmg)} | ${pct(ticks, 0.5)} / ${pct(ticks, 0.9)} | ${pct(wall, 0.5).toFixed(1)} / ${pct(wall, 0.9).toFixed(1)} |`,
     );
   };
   for (const c of classes) line(c, recs.filter((r) => r.cls === c));

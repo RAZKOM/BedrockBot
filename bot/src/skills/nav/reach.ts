@@ -35,6 +35,19 @@ export interface ReachCause {
   cls: ReachClass;
   /** (b): the rules named (one, or several that only open the way together). */
   rules: ReachRule[];
+  /** Track R2: with `falls` named: the worst fall of the open way and why the owner's policy refuses it (`fallOnPath`). */
+  fall?: RefusedFall;
+}
+
+/** Track R2: the fall a `falls` cause names: its height, the damage it would do, the policy's budget and the reason it is closed. */
+export interface RefusedFall {
+  blocks: number;
+  /** Damage in HP (after the armour's factor). */
+  damage: number;
+  /** The HP the policy may give to a fall (0 when blocked). */
+  budget: number;
+  /** FallPolicy.blocked: why no fall that hurts is taken now (a hostile near ...). */
+  blocked?: string;
 }
 
 /** The heuristic's weight in a "why" search (weighted A*: is there a way at all, found fast, not the best one). */
@@ -110,14 +123,18 @@ const NEIGHBOURS: readonly (readonly [number, number, number])[] = [...SIDES.map
 export function rulesOnPath(grid: NavGrid, path: readonly PathNode[], owner: PathOptions): ReachRule[] {
   const used = new Set<ReachRule>();
   const budget = owner.falls?.blocked ? 0 : (owner.falls?.hpBudget ?? 0);
-  const left = owner.digWay?.left ?? DIG_WAY_MAX_BLOCKS;
-  const ticks = owner.breakTicks;
+  // Track R2: a goto with allowBreak digs without the dig way's count or its slow-block limit (the planner's break
+  // rules only); the dig way's budget is the dig_budget rule of a goto without it
+  const free = owner.allowBreak === true && !owner.digWay;
+  const left = free ? Infinity : (owner.digWay?.left ?? DIG_WAY_MAX_BLOCKS);
+  const ticks = free ? undefined : owner.breakTicks;
   const area = owner.protectedArea;
   let dug = 0;
+  let placed = 0;
   for (let i = 1; i < path.length; i++) {
     const n = path[i]!;
     const prev = path[i - 1]!;
-    if (n.act?.place || n.move === 'pillar') used.add('place');
+    if (n.act?.place || n.move === 'pillar') placed++;
     const fall = prev.feet - n.feet;
     if (fall > 3 + 1e-6 && grid.cls(n.x, n.y, n.z)?.liquid !== 'water') {
       const floor = grid.cls(n.x, Math.floor(n.feet - 1e-6), n.z);
@@ -138,7 +155,31 @@ export function rulesOnPath(grid: NavGrid, path: readonly PathNode[], owner: Pat
     }
   }
   if (dug > left) used.add('dig_budget');
+  // Track R2: a goto that places blocks places up to the throwaway blocks it carries
+  if (placed > 0 && (!owner.allowPlace || placed > (owner.throwaway ?? 0))) used.add('place');
   return REACH_RULES.filter((r) => used.has(r));
+}
+
+/** Track R2: the worst fall of `path` that the owner's fall policy refuses (more damage than its budget), or undefined. */
+export function fallOnPath(grid: NavGrid, path: readonly PathNode[], owner: PathOptions): RefusedFall | undefined {
+  const budget = owner.falls?.blocked ? 0 : Math.max(0, owner.falls?.hpBudget ?? 0);
+  let worst: RefusedFall | undefined;
+  for (let i = 1; i < path.length; i++) {
+    const n = path[i]!;
+    const fall = path[i - 1]!.feet - n.feet;
+    if (fall <= 3 + 1e-6 || grid.cls(n.x, n.y, n.z)?.liquid === 'water') continue;
+    const floor = grid.cls(n.x, Math.floor(n.feet - 1e-6), n.z);
+    const dmg = fallDamage(fall, floor?.name, owner.falls?.factor ?? 1);
+    if (dmg > budget + 1e-9 && (!worst || dmg > worst.damage)) worst = { blocks: Math.round(fall * 10) / 10, damage: Math.round(dmg * 10) / 10, budget, ...(owner.falls?.blocked ? { blocked: owner.falls.blocked } : {}) };
+  }
+  return worst;
+}
+
+/** Track R2: a refused fall in words (`a 9-block fall (6 HP) over the fall budget of 2 HP`, `..., no fall that hurts now: <reason>`). */
+export function fallWords(f: RefusedFall): string {
+  const what = `a ${f.blocks}-block fall (${f.damage} HP)`;
+  if (f.blocked) return `${what}, no fall that hurts now: ${f.blocked}`;
+  return f.budget > 0 ? `${what} over the fall budget of ${f.budget} HP` : `${what}, no fall that hurts allowed (fallMargin / health)`;
 }
 
 function gravityRefuses(grid: NavGrid, x: number, y: number, z: number): boolean {
@@ -215,6 +256,7 @@ export function causeWords(c: ReachCause): string {
     case 'budget':
       return 'budget: the searches or the walk ran out before the goal';
     case 'rule':
-      return `rule ${c.rules.join(' + ')}: ${c.rules.map((r) => RULE_WORDS[r]).join('; ')}`;
+      // Track R2: a `falls` cause says it falls, and what the fall is
+      return `rule ${c.rules.join(' + ')}: ${c.rules.map((r) => (r === 'falls' && c.fall ? fallWords(c.fall) : RULE_WORDS[r])).join('; ')}`;
   }
 }

@@ -83,22 +83,26 @@ export const isBuiltVox = (id: number): boolean => id === V.cobble || id === V.p
 export const isGravityVox = (id: number): boolean => id === V.sand || id === V.gravel;
 
 export const MIN_Y = -64;
+/** The generated worlds' height (Track R2: a world may be taller, `Vox.height`: the incident fixture's hills). */
 export const HEIGHT = 128;
 
-/** A world of sx x HEIGHT x sz cells from (0, MIN_Y, 0). Outside it: nothing (never loaded, never passable). */
+/** A world of sx x height x sz cells from (0, MIN_Y, 0). Outside it: nothing (never loaded, never passable). */
 export class Vox {
   readonly sx: number;
   readonly sz: number;
+  /** Cells along y from MIN_Y (a multiple of 16; HEIGHT for the generated worlds). */
+  readonly height: number;
   readonly data: Uint8Array;
 
-  constructor(sx: number, sz: number) {
+  constructor(sx: number, sz: number, height = HEIGHT) {
     this.sx = sx;
     this.sz = sz;
-    this.data = new Uint8Array(sx * sz * HEIGHT);
+    this.height = height;
+    this.data = new Uint8Array(sx * sz * height);
   }
 
   inside(x: number, y: number, z: number): boolean {
-    return x >= 0 && z >= 0 && x < this.sx && z < this.sz && y >= MIN_Y && y < MIN_Y + HEIGHT;
+    return x >= 0 && z >= 0 && x < this.sx && z < this.sz && y >= MIN_Y && y < MIN_Y + this.height;
   }
 
   index(x: number, y: number, z: number): number {
@@ -121,7 +125,7 @@ export class Vox {
 
   /** The highest non-air cell of column (x, z) (MIN_Y - 1 when empty or outside). */
   top(x: number, z: number): number {
-    for (let y = MIN_Y + HEIGHT - 1; y >= MIN_Y; y--) {
+    for (let y = MIN_Y + this.height - 1; y >= MIN_Y; y--) {
       const v = this.get(x, y, z);
       if (v > 0) return y;
       if (v < 0) return MIN_Y - 1;
@@ -130,7 +134,7 @@ export class Vox {
   }
 
   clone(): Vox {
-    const v = new Vox(this.sx, this.sz);
+    const v = new Vox(this.sx, this.sz, this.height);
     v.data.set(this.data);
     return v;
   }

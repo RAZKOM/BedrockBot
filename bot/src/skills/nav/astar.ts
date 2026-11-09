@@ -259,6 +259,15 @@ export const HATCH_WATER_FALL = 16;
 const STEP = PHYSICS.stepHeight + 1e-6;
 const FLAT = 1e-6;
 
+/**
+ * Track R2: a pillar-up is tried only with something other than air (a wall, a ledge, a ceiling, water, an
+ * unloaded cell) within this many levels over the feet in the 3 x 3 columns round it: from a pillar in open air
+ * the body can only drop back down where it came from. On the owner's live settings the pillars over every flat
+ * node took 65 % of a search's expansions (Realm 2026-11-08: the cave entry walk cut by its budget, then into a
+ * lake); a ledge higher than this over open flat ground is not climbed.
+ */
+export const PILLAR_REACH = 8;
+
 const CARDINAL: readonly (readonly [number, number])[] = [
   [1, 0],
   [-1, 0],
@@ -350,7 +359,7 @@ class Heap {
   }
 }
 
-function grown<T extends Int32Array | Float64Array | Uint8Array>(a: T, make: (n: number) => T): T {
+function grown<T extends Int32Array | Float64Array | Uint8Array | Uint16Array>(a: T, make: (n: number) => T): T {
   const b = make(a.length * 2);
   b.set(a);
   return b;
@@ -376,6 +385,8 @@ class Nodes {
   dug = new Uint8Array(4096);
   /** Track R1: cells dug on the way to the node, every move that digs counted (0: nothing on the way was dug). */
   digs = new Int32Array(4096);
+  /** Track R2: blocks placed on the way to the node (the pillar's), at most PathOptions.throwaway. */
+  placed = new Uint16Array(4096);
   parent = new Int32Array(4096);
   move = new Uint8Array(4096);
   flags = new Uint8Array(4096);
@@ -398,6 +409,7 @@ class Nodes {
       this.cut = grown(this.cut, (k) => new Uint8Array(k));
       this.dug = grown(this.dug, (k) => new Uint8Array(k));
       this.digs = grown(this.digs, (k) => new Int32Array(k));
+      this.placed = grown(this.placed, (k) => new Uint16Array(k));
       this.parent = grown(this.parent, (k) => new Int32Array(k));
       this.move = grown(this.move, (k) => new Uint8Array(k));
       this.flags = grown(this.flags, (k) => new Uint8Array(k));
@@ -415,6 +427,7 @@ class Nodes {
     this.cut[i] = 0;
     this.dug[i] = 0;
     this.digs[i] = 0;
+    this.placed[i] = 0;
     this.parent[i] = -1;
     this.flags[i] = 0;
     this.closed[i] = 0;
@@ -588,7 +601,9 @@ export class PathSearch {
     this.nodes.cut[s] = startCut;
     this.index.set(cellKey(start.x, start.y, start.z), s);
     this.open.push(s, this.h(start.x, start.y, start.z));
-    this.bests.reset(s, start.x, start.y, start.z, this.h(start.x, start.y, start.z)); // Track BA
+    // Track BA; Track R2: from under water, any node with the head out of it (bestSoFar.ts `anyDistance`)
+    const under = (flags & F_SWIM) === 0 && grid.submerged(start.x, start.y, start.z);
+    this.bests.reset(s, start.x, start.y, start.z, this.h(start.x, start.y, start.z), under);
     this.ms = performance.now() - t0;
   }
 
@@ -654,7 +669,9 @@ export class PathSearch {
       }
       // Track BA: h + g / k + trap for Baritone's 7 coefficients (was: the lowest h + trap). Track W1: a partial
       // path never ends with the head under water (the next segment would start its air budget afresh)
-      if (nodes.wet[cur] === 0) this.bests.consider(cur, cx, cy, cz, this.h(cx, cy, cz), nodes.g[cur]!, nodes.trap[cur]!);
+      // Track R2: nor on its own pillar's top (the next plan from there may find only the way back down, or none), nor
+      // standing on a lake's floor with the head under water (a walking node in still water: no dive node, no air count)
+      if (nodes.wet[cur] === 0 && nodes.move[cur] !== M_PILLAR && ((fl & F_SWIM) !== 0 || !this.grid.submerged(cx, cy, cz))) this.bests.consider(cur, cx, cy, cz, this.h(cx, cy, cz), nodes.g[cur]!, nodes.trap[cur]!);
       // Track BA: while no best is 5+ blocks from the start (Baritone `failing`), on up to 4 x maxNodes
       if (++this.expanded >= this.maxNodes && (!this.bests.failing || this.expanded >= this.maxNodes * FAILURE_NODES_FACTOR)) {
         this.limited = true;
@@ -769,6 +786,10 @@ export class PathSearch {
     // up a 1-wide staircase took a step's top block, then planned to stand on it: three move timeouts, unreachable)
     const digs = nodes.digs[from]! + (act?.dig?.length ?? 0);
     if (nodes.digs[from]! > 0 && (flags & (F_SWIM | F_DIVE)) === 0 && this.dugOnTheWay(from, x, Math.floor(feet + 1e-6) - (feet - Math.floor(feet + 1e-6) > FLAT ? 0 : 1), z)) return;
+    // Track R2: no more blocks placed on a path than the goto carries (a pillar planned with 1 block in the inventory:
+    // "place failed: no_item" on the Realm, 2026-11-09)
+    const placed = nodes.placed[from]! + (act?.place ? 1 : 0);
+    if (act?.place && this.opts.throwaway !== undefined && placed > this.opts.throwaway) return;
     const ticks = base * grid.factor(x, y, z, feet);
     let cost = ticks + extra + trap;
     if (this.costs.underground > 0 && grid.underground(x, z, feet)) cost += this.costs.underground;
@@ -796,6 +817,7 @@ export class PathSearch {
     nodes.cut[i] = cut; // Track W2
     nodes.dug[i] = dug; // Track W3
     nodes.digs[i] = digs; // Track R1
+    nodes.placed[i] = placed; // Track R2
     nodes.parent[i] = from;
     nodes.move[i] = move;
     nodes.flags[i] = flags;
@@ -1001,7 +1023,7 @@ export class PathSearch {
     // Pillar-up: jump and place a block in the feet cell (full-block floors only).
     // Track BD review: no block is placed inside the base either (`protectedArea`, the owner's protectRadius:
     // the break rules only refused digs there; the mine process' composite gotos plan with allowPlace)
-    if (opts.allowPlace && Math.abs(f0 - cy) < FLAT && !opts.noAction?.has(cellKey(cx, cy, cz)) && !inArea(opts.protectedArea, cx, cy, cz)) {
+    if (opts.allowPlace && Math.abs(f0 - cy) < FLAT && !opts.noAction?.has(cellKey(cx, cy, cz)) && !inArea(opts.protectedArea, cx, cy, cz) && this.pillarLeads(cx, cy, cz)) {
       // Track BG2: the jump needs the cell over that free as well (Track O's PlaceSkill refuses with no_headroom
       // otherwise: on the Realm a pillar in a 3-high room under the farm's platform failed twice)
       const room = grid.freeColumn(cx, headCell + 1, headCell + 2, cz);
@@ -1016,6 +1038,28 @@ export class PathSearch {
         if (m) this.relax(cur, cx, cy + 1, cz, cy + 1, m.base, M_PILLAR, m.extra, 0, { dig: m.dig, place: { p: { x: cx, y: cy, z: cz }, face: 'down' } });
       }
     }
+  }
+
+  /** Track R2: anything but free cells within PILLAR_REACH levels over feet cell (x, y, z) in its 3 x 3 columns, or the goal over it (see PILLAR_REACH). */
+  private pillarLeads(x: number, y: number, z: number): boolean {
+    // a goal in the air over (or next to) the column: climbed to
+    const g = this.goal;
+    if (g.type === 'block' || g.type === 'getToBlock' || g.type === 'twoBlocks' || g.type === 'threeBlocks' || g.type === 'near') {
+      const reach = 2 + (g.type === 'near' ? g.r : 0);
+      const dy = g.p.y - y;
+      if (Math.abs(g.p.x - x) <= reach && Math.abs(g.p.z - z) <= reach && dy > 0 && dy <= PILLAR_REACH + reach) return true;
+    }
+    const grid = this.grid;
+    // (the columns' highest roof blocks first, cached by the grid: on open ground nothing is over the feet)
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        const top = grid.skyTop(x + dx, z + dz);
+        if (top === undefined) return true;
+        if (top <= y) continue;
+        for (let dy = dx === 0 && dz === 0 ? 2 : 1; dy <= PILLAR_REACH; dy++) if (grid.free(x + dx, y + dy, z + dz) !== true) return true;
+      }
+    }
+    return false;
   }
 
   /**

@@ -101,3 +101,76 @@ said `goto: unreachable` with no reason, so the owner could not tell a closed wo
 - An unreachable `!goto` takes a few seconds longer: the "why" searches run before the reply.
 - The 'unknown' class has no coarse layer: a goal past a maze of cliffs can still time out (no memory of where the
   body has been). The live session has the world cache and the coarse layer, which the bench's 'long' class runs.
+
+## R2: the owner's live settings
+
+Track R2 ran the navigator with the Realm's settings (`allowBreak` and `allowPlace` on, `digPenalty` 500, sprint; from
+2026-11-09 `allowPlace` off) and two live incidents as private fixtures, a third from its log (docs/pathfinding.md
+"R2: the owner's live settings").
+
+13. **Water over a passable cell is water.** The world model reads no water layer, so a waterlogged block is a free
+    cell in a lake; `submerged` counts the head in it under water when water stands over it. A plan whose start has
+    the head under water ends with the head out: the start is no best, and any such node counts however near
+    (Baritone's 5-block minimum is for dry starts, where a near end is no progress; under water a near end is air).
+    No partial plan ends with the head under water on a walking node or on its own pillar's top.
+14. **A pillar has to lead somewhere.** A pillar move is tried only when something other than air stands within 8
+    levels (`PILLAR_REACH`) over the feet in the 3 x 3 columns round it, or the goal is over it. Pillars over open
+    ground spent two thirds of a search's expansions and starved the rest of the plan; a ledge higher than 8 over
+    open ground is not pillared to (a goal there is). The column tops it reads count every held section: a block
+    update that builds into a section over the ones the chunk was sent with is part of the column.
+15. **The corridor never aims into the air.** A vertical opening the coarse layer gives no floor (mine mode: "dug or
+    pillared") is passed over to the first waypoint on a floor, and no corridor re-request or re-plan onto a new
+    corridor starts while the body is between its path's pillar moves: the incident's pillar was the fine planner
+    climbing to a waypoint in the air, then the corridor changing under it.
+16. **A refused fall is named.** `rule falls` says the fall it refused and why (`a 20-block fall (16 HP) over the fall
+    budget of 12 HP`, or that no fall that hurts is taken now, and the reason). With `allowBreak` the "why" answer does
+    not count the dig way's budget.
+17. **A high dig price is a preference, not a wall.** A goto that digs anyway (`allowBreak`) at a price above
+    DIG_WAY_PRICE (60, the setting's default) gets a level 1: the same moves at 60 a block, no block budget. At 500 a
+    block the searches never reach a dug way of a few blocks (the cost of a thousand blocks of walking) and the live
+    settings answered `budget` on 5 % of the reachable bench pairs (caves and pits). The dig way of a goto that does
+    not dig anyway prices its blocks at DIG_WAY_PRICE at most too (then its own DIG_WAY_PENALTY on top): at 500 + 100
+    a block it went nowhere either (`dig_budget` on 22 of 553 pairs with `allowBreak` off and `digPenalty` 500).
+18. **An open way is walked.** When the "why" search with every rule lifted finds a way that breaks none of the
+    owner's rules, the goto does not answer `budget`: it plans on with the heuristic weighted (3 x) and the dig way's
+    price, and walks the found way itself when that goes nowhere; twice a goto at most (the failures one short of the
+    limit each time), then the answer as before. A stuck walk (three move timeouts) and a cut search both end here.
+    The found way is walked only from where the body stands (from the node nearest it, within a step): the weighted
+    plans move the body, and a way from where it stood was "off the path" at once. A goto that digs anyway, whose
+    searches were cut, also plans on weighted once when the "why" way breaks a rule, before that rule is the answer:
+    with `allowPlace` off the way out of a ravine is a stair dug up its wall, which the plain searches did not reach
+    and the "why" search (every rule lifted) answered with a pillar, `rule place` (ravine:11:11 and 11:12, both
+    arrived weighted, 69 and 70 blocks dug).
+19. **The bench measures the live settings too** (`reach-bench --config live`, `allowPlace` off as on the Realm since
+    2026-11-09, and `--place`, `--break`, `--dig-penalty` alone), with a stranded check on every end, and fixtures cut from the bot's world cache
+    (`nav/bench/fixture.ts`) kept out of the repository. The bench's `--speed` default stays 1.25 (Track R1's M4
+    calibration for a PC); R2's numbers are measured on the owner's Mac at `--speed 1`, the live wall-clock budgets on
+    the live machine (through `scripts/mac-run.mjs`). During the incidents the live bot ran on the Mac's efficiency
+    cores (launchd `ProcessType Background`) and its searches expanded about 0.35 of the bench's; the fixtures were
+    gated at that speed on a PC too.
+20. **No more blocks placed than carried.** A path places at most the throwaway blocks the goto carries
+    (`PathOptions.throwaway`, counted per node like the dug blocks); before, any count above 0 allowed every pillar,
+    and a `!goto home` from a cave on the Realm (2026-11-09) pillared on one block of diorite: `place failed: no_item`.
+21. **A waypoint the fine planner cannot reach is failed in every mode.** Its portal is marked failed for each mode the
+    goto's corridors plan in (`walk`, and `mine` with `allowBreak`), not the leg's alone: the same goto saw the same
+    waypoint unreachable three times, the corridor crossing the portal again in the other mode.
+22. **A jump up beside lava lands without sliding.** Forward is released in the air once the feet are over the step
+    when the coast would carry the body past the node's centre (lava:1:6 with `allowPlace` off: a dug tunnel under a
+    lava pool climbs out by a lava cell; the landing slid 0.26 past the centre into it, dead). Track R1's rules for
+    lava covered walks, turns and drops, not jumps.
+23. **Settings recommended, not set here**: keep the live settings of 2026-11-09, `allowBreak` on, `allowPlace` off,
+    `digPenalty` 500 (measured on the owner's Mac at the live wall-clock budgets, docs/pathfinding.md "Which settings
+    to run live"). On the 2194 bench pairs they give 6 false unreachable (0.27 %), no death, no stranded end, damage
+    8 HP at most (where the only way is that fall), and the incident fixtures arrive 6 of 6 each. `allowPlace` on is
+    safe again after decisions 14, 15 and 20 (the pillar incidents) and measures a little better on worlds 1 to 5 (1
+    false against 2, no fall damage, a quarter of the digging), at the price of the blocks it leaves in the world (5 a
+    goto at p90, 28 at most): the owner's choice of what the bot leaves behind, not a safety question any more.
+    `allowBreak` off is not recommended (fewer goals reachable, 441 or 509 of 553 against 533, the falls take up to
+    12 HP, the walks are slower), nor a `digPenalty` of 60 (4 false of 553: the level 1 already digs at 60 a goto that
+    needs it, and 500 keeps the plain plans walking where a walk exists). Long walks (200 to 330 blocks) are the weak
+    part with `allowBreak` on: 60 of 95 arrive (35 false, against 3 of 35 reachable in R1's configuration), no death,
+    no stranded end; the 35 are ways that dig 36 to 57 blocks and take a fall at the budget's edge. They fail safe (an
+    answer, the body where a walk can go on), so they do not argue against `allowBreak`, but they are the next work.
+
+Deferred: a stranded fallback (ways down when every way off a raised end hurts: dig the own pillar, dig a stair); no
+stranded end was measured with the fixes, so it is left until one is.

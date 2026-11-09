@@ -349,8 +349,14 @@ describe('planner worker: the mirror', () => {
     F.setBlock({ x: 5, y: groundY(5, 5) + 1, z: 5 }, UNKNOWN_RID);
     F.setBlock({ x: 13, y: groundY(13, 11) + 2, z: 11 }, AIR);
     F.setBlock({ x: 1, y: -20, z: 1 }, STONE); // into an all-air section
+    F.setBlock({ x: 3, y: 20, z: 3 }, STONE); // Track R2: over the column's sent sections (a build above the terrain)
     F.sendColumn(1, 1);
     await flush();
+    // Track R2: the column top and the sky scan see the block built over the sent sections (the pillar rule reads them)
+    expect(worldSource(F.world).columnTop?.(3, 3)).toBe(31);
+    expect(mirror.source.columnTop?.(3, 3)).toBe(31);
+    expect(new NavGrid(worldSource(F.world)).skyTop(3, 3)).toBe(20);
+    expect(new NavGrid(mirror.source).skyTop(3, 3)).toBe(20);
     const touched = [{ x: 4, y: g + 1, z: 4 }, { x: 4, y: g + 2, z: 4 }, { x: 5, y: groundY(5, 5) + 1, z: 5 }, { x: 13, y: groundY(13, 11) + 2, z: 11 }, { x: 1, y: -20, z: 1 }];
     for (let z = -6; z <= 6; z++) touched.push({ x: 2, y: groundY(2, z) + 1, z }, { x: 2, y: groundY(2, z) + 2, z });
     compare('after updates', [...cells, ...touched]);

@@ -319,7 +319,11 @@ export class NavGrid {
   /** Track W1: the eye of a body with its feet at the bottom of cell (x, y, z) is under water (the air runs down there). */
   submerged(x: number, y: number, z: number): boolean {
     const c = this.cls(x, y + 1, z);
-    return c?.liquid === 'water' && EYE - 1 < c.liquidHeight;
+    if (c?.liquid === 'water') return EYE - 1 < c.liquidHeight;
+    // Track R2: a passable cell without liquid under water is a waterlogged block (the world model does not read
+    // the water layer, docs/world-model.md "Known gaps"; water over a free cell would flow into it): the head is wet
+    // (Realm 2026-11-08: a partial plan ended on a lake's floor with the head "dry" in such a cell, the body drowned)
+    return c !== undefined && c.liquid === undefined && c.boxes.length === 0 && this.cls(x, y + 2, z)?.liquid === 'water';
   }
 
   /**

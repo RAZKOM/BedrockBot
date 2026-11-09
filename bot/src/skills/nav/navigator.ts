@@ -34,9 +34,9 @@ import { corridorState, fineTarget, touches, waypointGoal, type CorridorState } 
 import type { CoarseLayer, CoarseMode, CorridorStatus } from '../coarse/types.ts'; // Track CB
 import { AirClock, bodyInWater, headUnderWater } from './water.ts'; // Track W1
 import { trappedWhy, waterDigConditions } from './digout.ts'; // Track W2
-import { DIG_WAY_MAX_BLOCKS, fallsHurt, harmlessFalls, lastResortFalls, type DigWayLevel } from './digway.ts'; // Track W3
+import { DIG_WAY_MAX_BLOCKS, DIG_WAY_PRICE, fallsHurt, harmlessFalls, lastResortFalls, type DigWayLevel } from './digway.ts'; // Track W3
 import { isNaturalTerrain } from '../place/scaffold.ts'; // Track R1
-import { REACH_RULES, causeTag, causeWords, relaxOptions, rulesOnPath, sealedPocket, type ReachCause, type ReachRule } from './reach.ts'; // Track R1
+import { REACH_RULES, causeTag, causeWords, fallOnPath, relaxOptions, rulesOnPath, sealedPocket, type ReachCause, type ReachRule, type RefusedFall } from './reach.ts'; // Track R1; Track R2: fallOnPath
 
 /** Track R: goto options of the navigator. `blacklist`: consult and feed the failure blacklist (default: `any` and `getToBlock` goals). */
 export type NavGotoOptions = GotoOptions & { blacklist?: boolean };
@@ -251,6 +251,8 @@ interface ExplainRun {
   queue: ReachRule[];
   /** The rules the path found with every rule lifted breaks (`rulesOnPath`). */
   used: ReachRule[];
+  /** Track R2: the worst fall the owner's policy refuses on a path found with `falls` lifted (`fallOnPath`), for the reply. */
+  fall?: RefusedFall;
   search: Search;
   searches: number;
   /** The searches run with BIG_SEARCH x the main budget (the one with every rule lifted was cut by its budget). */
@@ -372,6 +374,10 @@ interface Active {
   /** Track R1: the "why unreachable" searches under way (GotoOptions.explain, nav/reach.ts); `explained` once they ran; `cause` their answer. */
   explain: ExplainRun | undefined;
   explained: boolean;
+  /** Track R2: ways the "why" search found that break no rule, walked instead of answering `budget` (OPEN_WALKS a goto). */
+  openWalks: number;
+  /** Track R2: the last open way, walked when the weighted search after it goes nowhere (adoptOpenWay). */
+  openPath?: PathNode[];
   cause: ReachCause | undefined;
   /** Track R1: partial plans this goto walked to a frontier end (PathOptions.frontier). */
   frontierLegs: number;
@@ -415,6 +421,20 @@ const CORRIDOR_REPLAN_TICKS = 60;
 export const BIG_SEARCH = 4;
 /** Track R1: "why unreachable" searches a goto runs at most (every rule lifted, then single rules). */
 export const EXPLAIN_MAX_SEARCHES = 5;
+/** Track R2: ways a goto walks that its "why" search found breaking no rule (walkOpenWay). */
+export const OPEN_WALKS = 2;
+/** Track R2: the heuristic's weight of a goto's searches after an open way (walkOpenWay). */
+export const OPEN_WEIGHT = 3;
+/** The coarse modes a goto's corridors plan in (Track CB; Track R2: the modes a failed waypoint's portal is marked for). */
+function corridorModes(o: GotoOptions): CoarseMode[] {
+  return o.allowBreak ? ['walk', 'mine'] : ['walk'];
+}
+/** Track R2: the body is between the pillar moves of its path (the next node is one, or the one it stands on is and more follow). */
+function midPillar(a: Active): boolean {
+  const next = a.path[a.passedAbs + 1];
+  return next?.move === 'pillar' || (a.path[a.passedAbs]?.move === 'pillar' && next !== undefined && next.y > a.path[a.passedAbs]!.y);
+}
+
 /** Track R1: frontier legs a goto walks at most (PathOptions.frontier). */
 export const FRONTIER_MAX_LEGS = 6;
 /** Track R1: partial off-path re-plans from one start cell (one level) after which the goto counts it as no progress. */
@@ -859,6 +879,7 @@ export class Navigator {
         bigTried: new Set(),
         explain: undefined,
         explained: false,
+        openWalks: 0,
         cause: undefined,
         frontierLegs: 0,
         partialFrom: new Set(),
@@ -1027,6 +1048,8 @@ export class Navigator {
 
   private finishUnreachable(a: Active): void {
     const c = a.cause;
+    // Track R2: a `falls` cause names the fall (its height, its damage, the budget or why no fall that hurts is taken)
+    if (c?.cls === 'rule' && c.rules.includes('falls') && !c.fall && a.explain?.fall) c.fall = a.explain.fall;
     a.finish(c ? { ok: false, reason: 'unreachable', cause: causeTag(c), note: causeWords(c) } : { ok: false, reason: 'unreachable' });
   }
 
@@ -1057,7 +1080,7 @@ export class Navigator {
   private ownerOptions(a: Active): PathOptions {
     const o = this.planOptions(a.opts, a.noBreak);
     const dig = this.digWayOn(a);
-    if (dig) {
+    if (dig && !a.opts.allowBreak) {
       o.allowBreak = true;
       o.digWay = { left: DIG_WAY_MAX_BLOCKS - a.dug };
     }
@@ -1171,10 +1194,25 @@ export class Navigator {
         return;
       }
       run.used = rulesOnPath(this.grid, res.path, run.owner);
+      run.fall = fallOnPath(this.grid, res.path, run.owner); // Track R2
       if (run.used.length === 0) {
-        // the way breaks no rule: the owner's way is open and the goto did not make it (cut searches, a walk that stuck): (d)
+        // Track R2: the way breaks no rule: walk it (the goto's own searches price each dug block at the owner's
+        // digPenalty, which puts a dug way of a few blocks past their budget; the "why" search, weighted and without
+        // the dig price, found it in a few hundred nodes). Once or twice a goto; then, or for a way to the unloaded
+        // world, the answer: the owner's way is open and the goto did not make it (cut searches, a walk that stuck): (d)
+        if (res.status === 'found' && res.path.length > 1 && a.openWalks < OPEN_WALKS) {
+          this.walkOpenWay(a, res.path);
+          return;
+        }
         a.cause = { cls: 'budget', rules: [] };
         this.finishUnreachable(a);
+        return;
+      }
+      // Track R2: a goto that digs anyway, whose searches were cut, plans on weighted once before a rule is the answer:
+      // the way the rule opens may have a dug twin its searches did not reach (allowPlace off: a stair dug up a ravine's
+      // wall or a tower, where the "why" way pillars)
+      if (a.opts.allowBreak && a.openWalks === 0 && /search limit hit|cut by its budget/.test(a.why ?? '')) {
+        this.walkOpenWay(a);
         return;
       }
       if (run.used.length === 1) {
@@ -1186,6 +1224,7 @@ export class Navigator {
       run.stage = 'single';
       run.queue = [...run.used, ...REACH_RULES.filter((r) => !run.used.includes(r))];
     } else if (found) {
+      if (run.cur.includes('falls')) run.fall = fallOnPath(this.grid, res.path, run.owner) ?? run.fall; // Track R2
       a.cause = { cls: 'rule', rules: [...run.cur] };
       this.finishUnreachable(a);
       return;
@@ -1200,6 +1239,60 @@ export class Navigator {
     run.cur = [next];
     run.searches++;
     run.search = this.explainSearch(a, run);
+  }
+
+  /**
+   * Track R2: a way the "why" search found breaks none of the owner's rules (stepExplain): the goto plans on, its
+   * searches weighted (OPEN_WEIGHT x the heuristic) and, when it digs anyway, each dug block at DIG_WAY_PRICE, so they
+   * reach a dug way their plain budget did not; the found way itself is walked when that search goes nowhere (it digs
+   * freely: its digs cost it nothing). The failures start one short of the limit again; the "why" searches may run
+   * once more when the goto fails after all.
+   */
+  private walkOpenWay(a: Active, path?: PathNode[]): void {
+    a.openWalks++;
+    a.openPath = path;
+    a.explain = undefined;
+    a.explained = false;
+    a.cause = undefined;
+    a.report.failures = Math.max(0, this.maxFailures - 2);
+    a.noProgress = undefined;
+    a.replan = 'retry';
+    a.waitUntil = a.t + 1;
+    this.loop.release();
+    this.log.info(path ? `goto: the way the "why" search found breaks no rule (${path.length} nodes): planning on with the searches weighted (open walk ${a.openWalks}/${OPEN_WALKS})` : `goto: the searches were cut: planning on with them weighted before the answer (open walk ${a.openWalks}/${OPEN_WALKS})`);
+  }
+
+  /** Track R2: the open way (walkOpenWay) adopted as the goto's path when the weighted search went nowhere. */
+  private adoptOpenWay(a: Active): boolean {
+    const p = a.openPath;
+    a.openPath = undefined;
+    if (!p || p.length < 2) return false;
+    // (only from where the body is: the weighted plans moved it since the "why" search, and a way from where it was
+    // is "off the path" at once, caves:2:6; from the node nearest the body when it stands within a step of one)
+    const pos = this.loop.state.pos;
+    let from = -1;
+    let best = 1.5;
+    for (let i = 0; i < p.length - 1; i++) {
+      const n = p[i]!;
+      const d = Math.hypot(n.x + 0.5 - pos.x, n.z + 0.5 - pos.z);
+      if (d < best && Math.abs(n.feet - pos.y) < 1.1) {
+        best = d;
+        from = i;
+      }
+    }
+    if (from < 0) {
+      this.log.info(`goto: the way the "why" search found starts away from the body; not walked`);
+      return false;
+    }
+    this.log.info(`goto: walking the way the "why" search found (${p.length - from} nodes)`);
+    a.path = from === 0 ? p : [{ ...p[from]!, move: 'start' }, ...p.slice(from + 1)];
+    a.status = 'found';
+    a.aheadBlocked = false;
+    a.doors = [];
+    a.actedUpTo = -1;
+    a.report.segments++;
+    this.startLeg(a, 0);
+    return true;
   }
 
   /**
@@ -1231,18 +1324,34 @@ export class Navigator {
 
   // ---- Track W3: the levels and the dig way (nav/digway.ts) -------------------------------------------------------
 
-  /** The dig way is open: on, the dig action is wired, the goto does not dig anyway, its budget is not spent. */
+  /**
+   * The dig way is open: on, the dig action is wired, and the goto does not dig anyway with its budget not spent, or
+   * (Track R2) it digs anyway at a price above DIG_WAY_PRICE (digway.ts).
+   */
   private digWayOn(a: Active): boolean {
-    return this.digWay() && this.actions.dig !== undefined && !a.opts.allowBreak && a.dug < DIG_WAY_MAX_BLOCKS;
+    if (!this.digWay() || this.actions.dig === undefined) return false;
+    if (a.opts.allowBreak) return (this.digPenalty?.() ?? 0) > DIG_WAY_PRICE;
+    return a.dug < DIG_WAY_MAX_BLOCKS;
   }
 
   /** The plan options of the goto's level (Active.level). */
   private applyLevel(a: Active): void {
     const o = a.pathOpts;
     const dig = a.level > 0 && this.digWayOn(a);
-    if (dig) {
+    if (a.openWalks > 0) {
+      // Track R2: after an open way (walkOpenWay): weighted, and a goto that digs anyway digs at the dig way's price
+      o.relax = { ...o.relax, weight: OPEN_WEIGHT };
+      if (a.opts.allowBreak) o.costs = { ...o.costs, dig: Math.min(o.costs?.dig ?? DIG_WAY_PRICE, DIG_WAY_PRICE) };
+    }
+    if (dig && a.opts.allowBreak) {
+      // Track R2: the goto's own moves at the dig way's price, no block budget (the owner allows breaking)
+      o.costs = { ...o.costs, dig: Math.min(o.costs?.dig ?? DIG_WAY_PRICE, DIG_WAY_PRICE) };
+    } else if (dig) {
       o.allowBreak = true;
       o.digWay = { left: DIG_WAY_MAX_BLOCKS - a.dug };
+      // Track R2: the dig way's blocks at the dig way's price at most (with `digPenalty` 500 and allowPlace on, allowBreak
+      // off, a dug way of 8 blocks at 600 a block went past every search's budget: `dig_budget` on 22 of 553 pairs)
+      o.costs = { ...o.costs, dig: Math.min(o.costs?.dig ?? DIG_WAY_PRICE, DIG_WAY_PRICE) };
     }
     if (o.falls) o.falls = a.level < 2 ? harmlessFalls(o.falls) : lastResortFalls(o.falls, dig);
     // Track R1: at the last level, a goal in unloaded world with no partial end worth walking is headed for by the
@@ -1267,7 +1376,7 @@ export class Navigator {
     a.noProgress = undefined;
     a.replan = 'retry';
     a.waitUntil = a.t + 1;
-    const what = next === 1 ? `digging up to ${DIG_WAY_MAX_BLOCKS - a.dug} natural blocks` : 'a fall that hurts';
+    const what = next === 1 ? (a.opts.allowBreak ? `digging at the dig way's price (${DIG_WAY_PRICE} a block)` : `digging up to ${DIG_WAY_MAX_BLOCKS - a.dug} natural blocks`) : 'a fall that hurts';
     this.log.info(`goto: no way without ${what} (${why}); planning with it`);
     return true;
   }
@@ -1333,7 +1442,9 @@ export class Navigator {
     this.resolveRecheck(a, s); // Track BE: the path check after a correction / knock / teleport (before the re-plan below)
 
     // Track CB: chunks near the corridor changed: ask for a fresh one (throttled); the first plan waits briefly for the corridor
-    if (a.corridorDirty && !a.corridorPending && a.t - a.corridorAt >= CORRIDOR_REPLAN_TICKS) {
+    // Track R2: never in the middle of a pillar (its own blocks are the change; a new corridor's re-plan from the
+    // air aimed elsewhere and left the pillar's top a dead end: Realm 2026-11-08)
+    if (a.corridorDirty && !a.corridorPending && a.t - a.corridorAt >= CORRIDOR_REPLAN_TICKS && !midPillar(a)) {
       a.corridorDirty = false;
       this.requestCorridor(a, 'change');
     }
@@ -1675,7 +1786,7 @@ export class Navigator {
     const pos = this.loop.state.pos;
     if (why === 'start' && Math.hypot(gp.x - pos.x, gp.z - pos.z) < min) return;
     const gy = gp.y ?? (this.grid.source.columnTop?.(Math.floor(gp.x), Math.floor(gp.z)) ?? Math.floor(pos.y)) + 1;
-    const modes: CoarseMode[] = a.opts.allowBreak ? ['walk', 'mine'] : ['walk'];
+    const modes = corridorModes(a.opts);
     const rep = (a.report.corridor ??= { requests: 0, failed: 0, passed: 0 });
     rep.requests++;
     a.corridorPending = true;
@@ -1695,7 +1806,7 @@ export class Navigator {
         a.corridor = st;
         if (!st) return;
         // the plan under way aims at the raw goal (or an old corridor): re-plan towards the corridor
-        if (!a.action && a.replan === undefined) a.replan = 'corridor';
+        if (!a.action && a.replan === undefined && !midPillar(a)) a.replan = 'corridor';
       },
       (e: unknown) => {
         if (this.active !== a) return;
@@ -1711,7 +1822,10 @@ export class Navigator {
     if (!st) return;
     const portal = st.portals[wp];
     const mode = st.modes[wp] ?? 'walk';
-    if (portal) this.coarse?.layer.markPortal(portal.id, mode, 'failed');
+    // Track R2: failed for every mode the goto's corridors plan in, not the leg's alone: the fine planner walks it under
+    // the goto's own rules whatever the mode, and a portal marked for `walk` was crossed in `mine` by the next corridor
+    // (the Realm, 2026-11-09: the same waypoint unreachable three times over)
+    if (portal) for (const m of new Set<CoarseMode>([mode, ...corridorModes(a.opts)])) this.coarse?.layer.markPortal(portal.id, m, 'failed');
     a.corridorFailures++;
     if (a.report.corridor) a.report.corridor.failed++;
     this.log.info(`goto: corridor waypoint ${wp} ${fmt(st.wps[wp]!)} unreachable (${why})${portal ? `; portal ${portal.id} marked failed for ${mode}` : ''}`);
@@ -1919,13 +2033,18 @@ export class Navigator {
       ...flags,
     });
     const tag = flags.interim ? ' interim' : flags.upgrade ? ' final' : '';
-    this.log.debug(`goto: plan (${search.reason}${tag}, ${search.via}) ${res.status}, ${res.path.length} nodes, ${res.expanded} expanded, ${res.ms.toFixed(1)} ms over ${search.slices} tick(s)`);
+    this.log.debug(`goto: plan (${search.reason}${tag}, ${search.via}) ${res.status}, ${res.path.length} nodes, ${res.expanded} expanded, ${res.ms.toFixed(1)} ms over ${search.slices} tick(s)${res.frontier ? ', to the frontier' : ''}${res.unknown ? ', unknown touched' : ''}${res.path.length > 1 ? `, ends ${res.path.slice(-3).map((n) => `${n.move} ${n.x} ${n.feet.toFixed(1)} ${n.z}`).join(', ')}` : ''}`); // Track R2: where it ends
   }
 
   /** Returns false when the goto finished or must wait. */
   private onMainResult(a: Active, res: PathResult, search: Search, flags: { interim?: boolean } = {}): boolean {
     this.record(a, res, search, flags);
     a.lastMain = res.status; // Track R
+    // Track R2: after an open way (walkOpenWay) the weighted search found nothing to walk: the open way itself
+    if (a.openPath && !flags.interim) {
+      if ((res.status === 'none' || res.path.length <= 1) && this.adoptOpenWay(a)) return true;
+      a.openPath = undefined;
+    }
     if (res.status === 'none') {
       // Track CB: a corridor waypoint with no path is the corridor's failure, not the goto's: re-plan towards the raw goal
       if (search.wp !== undefined && a.corridor) {

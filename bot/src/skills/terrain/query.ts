@@ -65,8 +65,8 @@ export function worldSource(world: BlockStore): TerrainSource {
     src.columnTop = (x, z) => {
       const col = column(x >> 4, z >> 4);
       if (!col?.loaded) return world.cache?.columnTop(x, z); // Track T
-      // sections at or above `count` are air; null sections are air; undefined = not received yet
-      for (let rel = Math.min(col.count, col.sections.length) - 1; rel >= 0; rel--) {
+      // null sections are air (those at or above `count` too, until a block update builds into one: Track R2), undefined = not received yet
+      for (let rel = col.sections.length - 1; rel >= 0; rel--) {
         const sec = col.sections[rel];
         if (sec === undefined) return undefined;
         if (sec !== null) return (col.minCY + rel) * 16 + 15;
