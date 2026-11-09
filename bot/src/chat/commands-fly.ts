@@ -1258,19 +1258,18 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         reply(`fly: the Nether ceiling is too low along the way to ${t.label} (walk: !goto)`);
         return;
       }
-      // Track F4b: a long trip to a covered goal (a cave, a chamber) follows the coarse layer's corridor when the task has one
-      const provider = corridorProviderOf(task, skills.nav.coarseLayer);
-      const top = skyTop(t.goal.x, t.goal.z);
-      if (!t.player && provider && corridorWanted(String(d.settings.get('flyCorridor')), provider, distance, top === undefined || top >= t.goal.y)) {
-        reply(`flying to ${t.label} along a corridor (${Math.round(distance)} blocks; ${kitLine(k)})`);
-        void runCorridorTrip(corridorWiring(), provider, t.goal, t.label, tripStyle()).then((r) => reply(corridorEndLine(r, t.label)));
+      // the plain flight (a takeoff, the cruise, the landing, the walk for the rest); also the corridor's fallback below
+      const plain = async (): Promise<void> => {
+      const from = position();
+      if (!from) {
+        reply('fly: position unknown');
         return;
       }
       // Track AU2: no takeoff under a roof (the owner's indoor flight hit the ceiling three times)
       const sky = skyHere(from, goalTarget);
       // Track BF: the same landing as goto / come (exact on the goal when it is landable, else a confirmed cell
       // near it, held high while its ground is not loaded), then the walk for the rest
-      void (async () => {
+      await (async () => {
         // Track BH: a ledge takeoff where the jump is refused (an overhang, a blocked run) or the start is a small platform
         // (and the jump along a heading whose simulated climb is clear: trees, walls)
         const tk = await takeoffFor(from, goalTarget, sky, k.rocketsHotbar || k.rockets);
@@ -1303,6 +1302,23 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         if (w.ok) reply(`walked to ${t.label}`);
         else if (w.reason !== 'interrupted') reply(`fly: landed, but the walk to ${t.label} failed (${w.reason ?? 'failed'})`);
       })();
+      };
+      // Track F4b: a long trip to a covered goal (a cave, a chamber) follows the coarse layer's corridor when the task has one
+      const provider = corridorProviderOf(task, skills.nav.coarseLayer);
+      const top = skyTop(t.goal.x, t.goal.z);
+      if (!t.player && provider && corridorWanted(String(d.settings.get('flyCorridor')), provider, distance, top === undefined || top >= t.goal.y)) {
+        reply(`flying to ${t.label} along a corridor (${Math.round(distance)} blocks; ${kitLine(k)})`);
+        void runCorridorTrip(corridorWiring(), provider, t.goal, t.label, tripStyle()).then((r) => {
+          // a layer with no corridor at all from here (a start it cannot leave, such as a walled base) is no
+          // answer for a flight: the plain flight walks to a takeoff site, flies and lands near the goal, then walks
+          if (noCorridorAtAll(r)) {
+            reply(`fly: no corridor from here (${r.reason ?? 'none'}); flying the plain way`);
+            void plain();
+          } else reply(corridorEndLine(r, t.label));
+        });
+        return;
+      }
+      void plain();
     },
   };
   d.chat.register(flyDef);
@@ -1323,3 +1339,11 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
 
 /** The approach entry height above a target (docs): exported for the status tests. */
 export const FLY_APPROACH_HEIGHT = APPROACH_HEIGHT;
+
+/**
+ * A corridor trip that ended on its first plan with no corridor at all (the layer's search found none from the start:
+ * nothing flown or walked): the fly command flies the plain way instead.
+ */
+export function noCorridorAtAll(r: Pick<CorridorReport, 'ok' | 'reason' | 'legs' | 'cruises' | 'walks' | 'windows'>): boolean {
+  return !r.ok && r.legs.length === 0 && r.cruises === 0 && r.walks === 0 && r.windows === 0 && (r.reason ?? '').startsWith('no corridor');
+}
