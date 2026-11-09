@@ -15,7 +15,7 @@ import type { RouteGrid } from '../skills/fly/route/grid.ts';
 import type { Planner } from '../skills/fly/route/tracker.ts';
 import type { CorridorProvider } from '../skills/fly/corridor/coarse-port.ts';
 import { flyStretch, proofOf, windowRequest, type StretchOptions } from '../skills/fly/corridor/drive.ts';
-import { CorridorExecutor, type CorridorReport, type ExecutorOptions, type StepOutcome, type WindowProof } from '../skills/fly/corridor/executor.ts';
+import { CorridorExecutor, type CorridorReport, type ExecutorOptions, type SkyHint, type StepOutcome, type WindowProof } from '../skills/fly/corridor/executor.ts';
 import type { RoutePlan } from '../skills/fly/route/types.ts';
 import { corridorUnderFly, setCorridorAirborne } from '../skills/fly/corridor/registry.ts';
 import type { Window } from '../skills/fly/corridor/stretches.ts';
@@ -41,8 +41,8 @@ export interface CorridorWiring extends Omit<RocketDeps, 'loop' | 'inventory'> {
   /** The route grid over the live model (unknown solid) and the worker's planner over it. */
   grid: RouteGrid;
   plan: Planner;
-  /** The cruise to an exact feet cell (commands-fly: the takeoff chain, planFlight, a FlyProcess). */
-  flySky: (cell: Vec3, label: string) => Promise<StepOutcome>;
+  /** The cruise to an exact feet cell (commands-fly: the takeoff chain, planFlight, a FlyProcess); Track F8: with the executor's hint (the rim over the cell). */
+  flySky: (cell: Vec3, label: string, hint?: SkyHint) => Promise<StepOutcome>;
   /** Walk to a feet cell (the navigator's own walk, not the fly-wrapped one). */
   walk: (cell: Vec3, label: string) => Promise<StepOutcome>;
   log: Logger;
@@ -141,7 +141,7 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
             const rockets = readKit(w.inventory, w.memory()).rocketsHotbar || readKit(w.inventory, w.memory()).rockets;
             // (Track F6: the proof prices the risk and measures the way as the window's trackers will: the plan proven is the plan flown)
             const so = style.stretch?.(win) ?? {};
-            const req = windowRequest(win, from, rockets, { margin: so.margin ?? win.margin, maxMs: style.prove!.maxMs, maxNodes: style.prove!.maxNodes, ...(so.riskCost !== undefined ? { riskCost: so.riskCost } : {}), ...(so.geodesic ? { geodesic: true } : {}), ...(so.pieces !== undefined ? { pieces: so.pieces } : {}) });
+            const req = windowRequest(win, from, rockets, { margin: so.margin ?? win.margin, maxMs: style.prove!.maxMs, maxNodes: style.prove!.maxNodes, ...(so.riskCost !== undefined ? { riskCost: so.riskCost } : {}), ...(so.geodesic ? { geodesic: true } : {}), ...(so.pieces !== undefined ? { pieces: so.pieces } : {}), ...(so.midBurns ? { midBurns: true } : {}) });
             const p = await w.plan(req);
             w.log.info(`corridor: the proof of the window to ${Math.floor(win.end.x)} ${Math.floor(win.end.y)} ${Math.floor(win.end.z)}: ${p.complete ? 'complete' : `partial (${p.why ?? '?'})`} ${p.reached}/${win.goals.length} goals, ${p.ticks} ticks, ${p.rockets} rockets, clearance ${p.clearance.toFixed(2)}, ${p.expanded} expanded in ${p.ms.toFixed(0)} ms`);
             return proofOf(p);

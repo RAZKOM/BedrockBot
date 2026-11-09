@@ -13,7 +13,7 @@ import { routeLibrary } from '../maneuvers-route.ts'; // Track F3: the landing l
 import { buildField, fieldDistance, type DistanceField } from './field.ts'; // Track F6: the geodesic heuristic
 import { HEURISTIC_SPEED, edgeOf, libraryFor, replay } from './primitives.ts';
 import { boxClear, type RouteGrid } from './grid.ts';
-import { EDGE_TICKS, RISK_COST, RISK_RANGE, ROCKET_COST, cloneState, goalPoint, hspeed, type Maneuver, type RouteControl, type RouteEdge, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
+import { BURN, EDGE_TICKS, MID_BURNS, RISK_COST, RISK_RANGE, ROCKET_COST, cloneState, goalPoint, hspeed, type Maneuver, type RouteControl, type RouteEdge, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
 
 /** Blocks of height one rocket can buy at most (straight up: 22 while burning, coasting to 33; at -55 with the momentum 44). */
 export const ROCKET_UP = 45;
@@ -191,6 +191,11 @@ function unwind(n: Node, req: RouteRequest, effort: { nodes: number; expanded: n
   };
 }
 
+/** Track F8: the ticks left of the burns swept between a running burn's earliest and latest end (MID_BURNS spread over [min, max]). */
+export function midLefts(min: number, max: number): number[] {
+  return MID_BURNS.map((b) => Math.round(min + ((b - BURN.min) / (BURN.max - BURN.min)) * (max - min)));
+}
+
 /** The margin the first edges from `start` keep: the request's, or half the body's real clearance when it is already within the margin of a solid. */
 export function startMarginFor(grid: RouteGrid, start: Readonly<RouteState>, margin: number): number {
   if (!start.gliding) return 0; // a takeoff starts on the floor: the first edges are checked on the bare box
@@ -307,12 +312,13 @@ function planPieces(req: RouteRequest, grid: RouteGrid, o: SearchOptions, t0: nu
     // (the plan's states are a plain replay), and a joined plan "robust by construction" hit open loop at the burn's own
     // extremes (tight-107's first window: the first rocket at 9 and at 21 both hit about 20 ticks on, in the piece after).
     const withBranches = p.rockets > 0 || (start.boost.max > 0 && start.boost.min < start.boost.max) || start.early !== undefined;
-    const end = withBranches ? replay(start, p.controls, sub.goals, stack, true)[p.controls.length - 1]! : p.states[p.states.length - 1]!;
+    const end = withBranches ? replay(start, p.controls, sub.goals, stack, true, req.midBurns === true)[p.controls.length - 1]! : p.states[p.states.length - 1]!;
     start = { ...cloneState(end), wp: 0 };
     if (end.early) start.early = { pos: { ...end.early.pos }, vel: { ...end.early.vel } };
     else delete start.early;
     if (end.late) start.late = { pos: { ...end.late.pos }, vel: { ...end.late.vel } };
     else delete start.late;
+    if (!end.mids) delete start.mids; // (cloneState copied them when there are any: Track F8)
   }
   return joinPlans(req, pieces.map((x) => x.plan), stack);
 }
@@ -383,7 +389,7 @@ function searchOnce(req: RouteRequest, grid: RouteGrid, o: SearchOptions): Route
   const bearing = first ? (Math.atan2(-(first.x - req.start.pos.x), first.z - req.start.pos.z) * 180) / Math.PI : 0;
   const takeoffYaws = req.start.gliding ? [] : [bearing, bearing + 30, bearing - 30, bearing + 60, bearing - 60, bearing + 90, bearing - 90];
   const lib = o.library ?? libraryNamed(req, edgeTicks, takeoffYaws);
-  const ctx = { grid, margin: req.margin, goals: req.goals, stackRockets: req.stackRockets === true, burnBranches: req.burnBranches !== false };
+  const ctx = { grid, margin: req.margin, goals: req.goals, stackRockets: req.stackRockets === true, burnBranches: req.burnBranches !== false, midBurns: req.midBurns === true };
   // a body already within the margin of a solid (the tracker re-planning from a grazing state) still gets edges:
   // the first edges keep half its real clearance, the rest of the plan the full margin
   const startMargin = startMarginFor(grid, req.start, req.margin);
@@ -397,7 +403,8 @@ function searchOnce(req: RouteRequest, grid: RouteGrid, o: SearchOptions): Route
   // Track F4a: a burn already running whose end is unknown (the tracker re-plans mid-burn: its range is [min, max]) is
   // branched from the start, as a rocket fired in the plan is, so the plan clears for its every end
   const b0 = req.start.boost;
-  const s0 = ctx.burnBranches && b0.max > 0 && b0.min < b0.max && !req.start.early ? { ...req.start, early: { pos: { ...req.start.pos }, vel: { ...req.start.vel } }, late: { pos: { ...req.start.pos }, vel: { ...req.start.vel } } } : req.start;
+  // (Track F8: with `midBurns` the burns in between too, their ends spread over the range still open)
+  const s0 = ctx.burnBranches && b0.max > 0 && b0.min < b0.max && !req.start.early ? { ...req.start, early: { pos: { ...req.start.pos }, vel: { ...req.start.vel } }, late: { pos: { ...req.start.pos }, vel: { ...req.start.vel } }, ...(ctx.midBurns ? { mids: midLefts(b0.min, b0.max).map((left) => ({ pos: { ...req.start.pos }, vel: { ...req.start.vel }, left })) } : {}) } : req.start;
   const start: Node = { s: s0, g: 0, f: weight * h0, h: h0, parent: undefined, edge: undefined, tick: 0 };
   const effort = { nodes: 1, expanded: 0, ms: 0, budget: 'none' as RoutePlan['budget'] };
   if (!Number.isFinite(h0)) {

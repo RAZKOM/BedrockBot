@@ -20,9 +20,10 @@ import { WaypointProvider, type RoutePoint } from '../src/skills/fly/cave/route.
 import type { CaveStyle } from '../src/skills/fly/cave/style.ts';
 import { caveLegs, caveWorld, loadCaveFixture, ROUTE_A, ROUTE_B, TRIP_C, type CaveFixture, type CaveWorld } from '../src/skills/fly/corridor/cave.ts';
 import { caveLayer } from '../src/skills/fly/corridor/cave-bench.ts';
+import { SPEED_RULE, SPEED_RULE_DEFAULT, type SpeedRule } from '../src/skills/fly/route/types.ts';
 import type { Vec3 } from '../src/world/types.ts';
 
-const VARIANTS: Record<string, { style: boolean; variant?: Partial<CaveStyle> }> = {
+const VARIANTS: Record<string, { style: boolean; variant?: Partial<CaveStyle>; speed?: SpeedRule }> = {
   on: { style: true },
   off: { style: false },
   rules0: { style: true, variant: { chainWindow: 5, riskCost: 0.5, marginExtra: 0, prove: false, windowBlocks: 320, tailMin: 40, rules: { commitTicks: 0, partialStop: false, bailAfter: undefined, completeOnly: false, replanLead: 0, bailError: undefined } } },
@@ -30,6 +31,10 @@ const VARIANTS: Record<string, { style: boolean; variant?: Partial<CaveStyle> }>
   notube: { style: true, variant: { rules: { tube: false } } },
   nobbail: { style: true, variant: { rules: { blockedBail: false } } },
   err15: { style: true, variant: { rules: { bailError: 1.5 } } },
+  // Track F8: the planner without the burns between the extremes (types.ts MID_BURNS)
+  nomids: { style: true, variant: { midBurns: false } },
+  slow06: { style: true, speed: { clear: 0.6, slow: 0.8, fast: 1.6 } },
+  nospeed: { style: true, speed: { clear: 0, slow: 0.8, fast: 1.6 } },
 };
 
 type Mode = 'corridor' | 'routeA' | 'legsA' | 'routeB' | 'tripC';
@@ -78,6 +83,7 @@ async function runJob(j: Job): Promise<Done> {
   if (!f) throw new Error('no cave fixture');
   const { fix, world } = f;
   const v = VARIANTS[j.style] ?? VARIANTS.on!;
+  Object.assign(SPEED_RULE, v.speed ?? SPEED_RULE_DEFAULT);
   const o: CaveBenchOptions = { seed: j.seed, burn: j.burn, maxMs: j.ms, style: v.style, ...(v.variant ? { variant: v.variant } : {}) };
   const tw = tripWorldOfCave(world, 'the cave');
   const covered = coveredIn(world);

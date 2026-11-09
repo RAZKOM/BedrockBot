@@ -47,6 +47,13 @@ export interface CaveStyle {
   marginExtraFrom: number;
   /** Track F6: a proof's plan must keep this much from every solid (executor.ts ExecutorOptions.proveClearMin): a body standing against a wall does not take off there. */
   proveClearMin: number;
+  /**
+   * Track F8: the searches sweep the burns between the extremes too (route/types.ts MID_BURNS, RouteRequest.midBurns): a plan robust
+   * at 9 and 21 hit the margin open loop for the burns in between (F7); with them the generator set is 96 % clean and three times as
+   * many windows land on their cell, for about a third less flown. The open-air drivers do without (the plan differs by chance at
+   * a hard spot and a clean 3 x 3 bore landed short on one seed).
+   */
+  midBurns: boolean;
   /** The tracker's rules. */
   rules: TrackerRules;
 }
@@ -71,6 +78,7 @@ export const CAVE_STYLE: Readonly<CaveStyle> = Object.freeze({
   landReach: 2,
   marginExtraFrom: 4,
   proveClearMin: 0.15,
+  midBurns: true,
   rules: Object.freeze<TrackerRules>({
     commitTicks: 12,
     bailAfter: 6,
@@ -99,6 +107,6 @@ export function caveMargin(w: Pick<Window, 'margin'> & Partial<Pick<Window, 'hei
 }
 
 /** The stretch options (drive.ts flyStretch) the style adds to a window: the margin, the goals per tracker, the rules, the risk weight, the search's pieces. */
-export function caveStretchOptions(w: Pick<Window, 'margin'> & Partial<Pick<Window, 'height'>>, style: Readonly<CaveStyle> = CAVE_STYLE): Pick<StretchOptions, 'margin' | 'window' | 'rules' | 'riskCost' | 'geodesic' | 'pieces'> {
-  return { margin: caveMargin(w, style), window: style.chainWindow, rules: style.rules, riskCost: style.riskCost, ...(style.geodesic ? { geodesic: true } : {}), ...(style.pieces > 0 ? { pieces: style.pieces } : {}) };
+export function caveStretchOptions(w: Pick<Window, 'margin'> & Partial<Pick<Window, 'height'>>, style: Readonly<CaveStyle> = CAVE_STYLE): Pick<StretchOptions, 'margin' | 'window' | 'rules' | 'riskCost' | 'geodesic' | 'pieces' | 'midBurns'> {
+  return { margin: caveMargin(w, style), window: style.chainWindow, rules: style.rules, riskCost: style.riskCost, ...(style.geodesic ? { geodesic: true } : {}), ...(style.pieces > 0 ? { pieces: style.pieces } : {}), ...(style.midBurns ? { midBurns: true } : {}) };
 }

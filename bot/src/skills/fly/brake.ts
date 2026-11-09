@@ -58,6 +58,13 @@ const BRAKE_STEPS: Record<keyof BrakeProfile, number> = { pitchA1: 5, ticksA1: 4
 export const BRAKE_FAST = 0.35;
 /** The longest brake landing simulated (the approach from 56 out, the brake, an elevator 20 down: about 250). */
 export const BRAKE_MAX_TICKS = 400;
+/** Track F8: the elevator's slowest sink (pitch 0, blocks a tick): the ticks a deeper rim adds to the simulation's horizon. */
+export const ELEVATOR_SINK_MIN = 0.149;
+/** Track F8: the simulation's horizon for a target: BRAKE_MAX_TICKS, plus the sink past 20 down inside a deeper rim (the owner's cave: a pit 46 deep takes about 310 ticks of elevator alone). */
+export function brakeMaxTicks(target: Pick<LandingTarget, 'top' | 'rim'>): number {
+  const depth = target.rim !== undefined ? target.rim - target.top : 0;
+  return BRAKE_MAX_TICKS + Math.max(0, Math.ceil((depth - 20) / ELEVATOR_SINK_MIN));
+}
 /**
  * `flyLandStyle auto`: the brake landing is flown when its plan costs this much less than the flare's
  * (the flare is the measured landing; the brake wins where the flare cannot be soft: a 1 x 1 cell, a shaft).
@@ -130,7 +137,7 @@ export const brakeApproach: Maneuver<{ at: { x: number; z: number }; top: number
  * body under the cell's top beside it (short: in K under the top, in A 2 under it, which no brake climbs
  * back from), or `maxTicks`.
  */
-export function simulateBrake(body: FlightBody, yaw: number, target: LandingTarget, p: BrakeProfile, st: BrakeState = BRAKE_START, maxTicks = BRAKE_MAX_TICKS, obstacle?: Obstacle): Touchdown {
+export function simulateBrake(body: FlightBody, yaw: number, target: LandingTarget, p: BrakeProfile, st: BrakeState = BRAKE_START, maxTicks = brakeMaxTicks(target), obstacle?: Obstacle): Touchdown {
   let bs = st;
   const touch = touchdownCheck(target, obstacle, false);
   const r = glideRollout<Touchdown>(
@@ -175,7 +182,7 @@ export const BRAKE_FAMILY: ProfileFamily<BrakeProfile, BrakeState> = {
   },
   // in K two pitches are left (and the station keeping absorbs the rest): few samples
   samples: (st, good) => (st.phase === 'K' ? { wide: good ? 4 : 12, near: 6, rounds: 2 } : { wide: good ? 20 : 60, near: 24, rounds: 2 }),
-  simulate: (body, yaw, target, p, st, obstacle) => simulateBrake(body, yaw, target, p, st, BRAKE_MAX_TICKS, obstacle),
+  simulate: (body, yaw, target, p, st, obstacle) => simulateBrake(body, yaw, target, p, st, brakeMaxTicks(target), obstacle),
   control: (p, st, body, yaw, target) => brakeControl(p, st, { pos: body.pos, vel: body.vel, yaw }, target),
   phase: (st) => st.phase,
 };

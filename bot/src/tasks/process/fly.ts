@@ -72,13 +72,22 @@ export const LOOK_EVERY = 40;
  * Track BF: the flight target for a landing plan (landing.ts `findLanding`): the goal itself held high
  * while nothing is known or confirmed, else the plan's target with the lines the owner sees.
  */
-export function targetFromPlan(plan: LandingPlan, base: { label: string; goal: Vec3; half: number; exact?: number }): FlyTarget {
+/**
+ * Track F8: what a caller knows of an exact goal that the landing search cannot see (commands-fly's corridor cruise): the
+ * feet height of the rim the body must come down inside (the opening in a cave's roof over the cell). It rides on the
+ * held target too, so the hold circles over the rim and the landing looked for from the air is asked with it.
+ */
+export interface LandingHint {
+  rim?: number;
+}
+
+export function targetFromPlan(plan: LandingPlan, base: { label: string; goal: Vec3; half: number; exact?: number } & LandingHint): FlyTarget {
   const goal = base.goal;
   const common = { label: base.label, goal, ...(base.exact !== undefined ? { exact: base.exact } : {}) };
   switch (plan.kind) {
     case 'unknown':
     case 'none':
-      return { x: goal.x + 0.5, z: goal.z + 0.5, top: goal.y, half: base.half, hold: true, ...common };
+      return { x: goal.x + 0.5, z: goal.z + 0.5, top: goal.y, half: base.half, hold: true, ...(base.rim !== undefined && base.rim > goal.y ? { rim: base.rim } : {}), ...common };
     case 'goal':
       return { ...plan.target, ...common, cell: plan.cell };
     case 'cell':
@@ -108,7 +117,7 @@ export interface FlyDeps {
   /** Track AU2: a cell of the world model (true = solid, false = air, undefined = not loaded) for the sky check over the takeoff. */
   cell: CellQuery;
   /** Track BF, fly then walk: the landing for a goal (landing.ts `findLanding`, commands-fly.ts), for the look in flight. */
-  landing?: (goal: Vec3, label: string, exact: number | undefined) => Promise<LandingPlan>;
+  landing?: (goal: Vec3, label: string, exact: number | undefined, hint?: LandingHint) => Promise<LandingPlan>;
   /** Track BF: the landing cell is still dry, sound and live (re-checked in the descent). */
   cellOk?: (cell: LandingCell) => boolean;
   /** Track BH: walk to a block (the ledge's edge cell) without a process of its own (the navigator; BotSkills.goto). */
@@ -448,18 +457,20 @@ export class FlyProcess extends BaseProcess {
         if (ticks - lastLook < LOOK_EVERY) continue;
         lastLook = ticks;
       }
-      const plan = await find(goal, t.label, t.exact);
+      // (Track F8: a held target's rim, the caller's hint, goes with every look)
+      const hint: LandingHint | undefined = t.hold && t.rim !== undefined ? { rim: t.rim } : undefined;
+      const plan = await find(goal, t.label, t.exact, hint);
       if (this.done || this.phase !== 'flying' || !this.d.controller.active) return;
       if (plan.kind === 'unknown' || plan.kind === 'none') {
         if (++unknown % 5 === 1) this.log.info(`fly: ${plan.line} (${Math.round(c.distance ?? 0)} blocks out, ${c.phase}${c.descending ? `, ${c.descending}` : ''})`);
         if (!t.hold) {
-          const held = targetFromPlan(plan, { label: t.label, goal, half: t.half, ...(t.exact !== undefined ? { exact: t.exact } : {}) });
+          const held = targetFromPlan(plan, { label: t.label, goal, half: t.half, ...(t.exact !== undefined ? { exact: t.exact } : {}), ...(hint ?? {}) });
           if (this.d.controller.retarget(held)) (this as { target: FlyTarget }).target = held;
         }
         continue;
       }
       this.log.info(`fly: ${plan.line}`);
-      const next = targetFromPlan(plan, { label: t.label, goal, half: t.half, ...(t.exact !== undefined ? { exact: t.exact } : {}) });
+      const next = targetFromPlan(plan, { label: t.label, goal, half: t.half, ...(t.exact !== undefined ? { exact: t.exact } : {}), ...(hint ?? {}) });
       if (!t.hold && t.cell && next.cell?.x === t.cell.x && next.cell.z === t.cell.z && next.cell.feet === t.cell.feet) continue; // the same cell
       if (!this.d.controller.retarget(next)) {
         this.log.info(`fly: the landing could not be moved now (${c.phase}, ${Math.round(c.distance ?? 0)} blocks out)`);

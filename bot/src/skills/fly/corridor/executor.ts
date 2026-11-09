@@ -56,6 +56,16 @@ export const CORRIDOR_MODES: readonly CoarseMode[] = ['walk', 'fly'];
  */
 export const CORRIDOR_PLAN_MS = 4000;
 /**
+ * Track F8: a partial corridor is searched again from its end to the goal before anything flies, with this budget, and the two
+ * are joined when the second search arrives (`joinCorridors`). Measured on the replica's world offline: the search from a
+ * surface start 660 blocks from the owner's cave_start ends partial at 4 000 ms, 33 blocks from the goal on the surface by the
+ * entrance (9 300 expansions, 1 500 chunks and 2 800 border portals built: the weighted heuristic cannot see the 60 to 160
+ * ticks of going underground, so the search sweeps the sky round a covered goal and pays for every chunk it sweeps), while from
+ * that end the way in is found in under 200 ms. Before, the trip cruised to the partial end (a surface spot beside the cave, or
+ * the sky over it), landed off and planned again from there (the Realm, 2026-11-08: landed 29 blocks off, then walked).
+ */
+export const CORRIDOR_JOIN_MS = 2500;
+/**
  * Hotfix 2026-11-06: underground stretches are walked, not flown. On the Realm a window in a real cave flew on
  * partial plans at the live planner budget ("corridor ahead is blocked", clearance 0, a window handed over with
  * no plan), hit the walls (6.5, 2.8) and died. The e2e bores are clean 3 x 3 tubes; real caves are not. The
@@ -82,6 +92,15 @@ export interface StepOutcome {
   bailed?: boolean;
 }
 
+/**
+ * Track F8: what the executor knows of a cruise's landing cell. `rim`: the feet height of the rim the body must come down
+ * inside (the plane of the y opening in a cave's roof the corridor goes down through: the landing is the brake over the
+ * opening and the elevator's sink to the floor under it, never a touchdown on the surface beside it).
+ */
+export interface SkyHint {
+  rim?: number;
+}
+
 /** What the executor needs of the bot. */
 export interface CorridorPorts {
   provider: CorridorProvider;
@@ -94,8 +113,8 @@ export interface CorridorPorts {
   loaded(x: number, z: number): boolean;
   /** Resolves true once the chunks round every point are loaded, false after `timeoutMs`. */
   waitLoaded(points: readonly Vec3[], timeoutMs: number): Promise<boolean>;
-  /** The cruise to an exact feet cell: the takeoff chain, the cruise, the landing families (FlyProcess). */
-  flySky(cell: Vec3, label: string): Promise<StepOutcome>;
+  /** The cruise to an exact feet cell: the takeoff chain, the cruise, the landing families (FlyProcess). Track F8: `hint` says what the executor knows of the cell (the rim of the opening it lies under). */
+  flySky(cell: Vec3, label: string, hint?: SkyHint): Promise<StepOutcome>;
   /** One underground window from standing (the elytra on, the chain of trackers; lands on `w.end`), with its proven plan when there is one. */
   flyUnder(w: Window, label: string, plan?: RoutePlan): Promise<StepOutcome>;
   /** Track F5b: the plan from standing for a window at the live budget (ExecutorOptions.prove). */
@@ -136,6 +155,8 @@ export interface CorridorReport {
   proofs: number;
   cuts: number;
   unproven: number;
+  /** Track F8: second searches from a partial corridor's end. */
+  joins: number;
   marks: { id: PortalId; mode: CoarseMode; outcome: 'ok' | 'failed' }[];
   seconds: number;
 }
@@ -146,6 +167,8 @@ export interface ExecutorOptions {
   maxReplans?: number;
   chunkWaitMs?: number;
   planMs?: number;
+  /** Track F8: the budget of the second search from a partial corridor's end (default CORRIDOR_JOIN_MS; 0: none). */
+  joinMs?: number;
   /** Fly the underground stretches in windows (default UNDER_FLY); false walks them. */
   underFly?: boolean;
   /** Track F5b: the windows' size (blocks, default WINDOW_BLOCKS) and the tail after a bend that is walked (default UNDER_TAIL_MIN): the cave style flies shorter pieces. */
@@ -191,6 +214,41 @@ export interface WindowProof {
 
 type LegResult = { ok: true } | { ok: false; reason: string; mark?: { id: PortalId; mode: CoarseMode }; fatal?: boolean };
 
+/**
+ * Track F8: corridor `b` (found, planned from `a`'s partial end) appended to `a`: a last leg of `a` and a first leg of `b` in
+ * the same mode become one leg (the body need not land between them), the totals summed, the status `b`'s. Pure.
+ */
+export function joinCorridors(a: Corridor, b: Corridor): Corridor {
+  const la = a.legs[a.legs.length - 1];
+  const lb = b.legs[0];
+  if (!la || !lb) return a.legs.length ? a : b;
+  let legs: CorridorLeg[];
+  if (la.mode === lb.mode) {
+    const blocks = la.blocks + lb.blocks;
+    const same = (p: Vec3, q: Vec3): boolean => Math.abs(p.x - q.x) < 1e-6 && Math.abs(p.y - q.y) < 1e-6 && Math.abs(p.z - q.z) < 1e-6;
+    const waypoints: Vec3[] = [];
+    for (const w of [...la.waypoints, ...lb.waypoints]) if (!waypoints.length || !same(waypoints[waypoints.length - 1]!, w)) waypoints.push({ ...w });
+    const merged: CorridorLeg = {
+      mode: la.mode,
+      from: { ...la.from },
+      to: { ...lb.to },
+      ...(la.entry ? { entry: la.entry } : {}),
+      ...(lb.exit ? { exit: lb.exit } : {}),
+      portals: [...la.portals, ...lb.portals.filter((p) => !la.portals.some((q) => q.id === p.id))],
+      volumes: [...la.volumes, ...lb.volumes.filter((v, i) => i > 0 || v !== la.volumes[la.volumes.length - 1])],
+      waypoints,
+      blocks,
+      cost: la.cost + lb.cost,
+      unknownFraction: blocks > 0 ? (la.blocks * la.unknownFraction + lb.blocks * lb.unknownFraction) / blocks : 0,
+      minClearance: { height: Math.min(la.minClearance.height, lb.minClearance.height), width: Math.min(la.minClearance.width, lb.minClearance.width) },
+    };
+    legs = [...a.legs.slice(0, -1), merged, ...b.legs.slice(1)];
+  } else legs = [...a.legs, ...b.legs];
+  const blocks = a.blocks + b.blocks;
+  const { reason: _r, ...rest } = a;
+  return { ...rest, status: b.status, legs, blocks, cost: a.cost + b.cost, unknownFraction: blocks > 0 ? (a.blocks * a.unknownFraction + b.blocks * b.unknownFraction) / blocks : 0, expanded: a.expanded + b.expanded, ms: a.ms + b.ms, revision: Math.max(a.revision, b.revision), ...(b.reason ? { reason: b.reason } : {}) };
+}
+
 const dist = (a: Vec3, b: Vec3): number => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const hd = (a: Vec3, b: Vec3): number => Math.hypot(a.x - b.x, a.z - b.z);
 const cellOf = (p: Vec3): Vec3 => ({ x: Math.floor(p.x), y: Math.floor(p.y + 1e-6), z: Math.floor(p.z) });
@@ -206,7 +264,7 @@ export class CorridorExecutor {
 
   constructor(ports: CorridorPorts, o: ExecutorOptions = {}) {
     this.p = ports;
-    this.o = { modes: o.modes ?? CORRIDOR_MODES, unknownMax: o.unknownMax ?? UNKNOWN_FLY_MAX, maxReplans: o.maxReplans ?? MAX_REPLANS, chunkWaitMs: o.chunkWaitMs ?? CHUNK_WAIT_MS, planMs: o.planMs ?? CORRIDOR_PLAN_MS, underFly: o.underFly ?? UNDER_FLY, windowBlocks: o.windowBlocks ?? WINDOW_BLOCKS, tailMin: o.tailMin ?? UNDER_TAIL_MIN, prove: o.prove ?? false, proveRobust: o.proveRobust ?? true, landReach: o.landReach ?? LANDING_REACH, proveClearMin: o.proveClearMin ?? 0 };
+    this.o = { modes: o.modes ?? CORRIDOR_MODES, unknownMax: o.unknownMax ?? UNKNOWN_FLY_MAX, maxReplans: o.maxReplans ?? MAX_REPLANS, chunkWaitMs: o.chunkWaitMs ?? CHUNK_WAIT_MS, planMs: o.planMs ?? CORRIDOR_PLAN_MS, joinMs: o.joinMs ?? CORRIDOR_JOIN_MS, underFly: o.underFly ?? UNDER_FLY, windowBlocks: o.windowBlocks ?? WINDOW_BLOCKS, tailMin: o.tailMin ?? UNDER_TAIL_MIN, prove: o.prove ?? false, proveRobust: o.proveRobust ?? true, landReach: o.landReach ?? LANDING_REACH, proveClearMin: o.proveClearMin ?? 0 };
     this.log = ports.log ?? silentLogger;
   }
 
@@ -224,7 +282,7 @@ export class CorridorExecutor {
   /** Follow corridors to `goal` (a feet cell) until it stands there, the re-plans run out or the trip is stopped. */
   async run(goal: Vec3, label = fmt(goal)): Promise<CorridorReport> {
     const t0 = Date.now();
-    this.r = { ok: false, plans: 0, replans: 0, legs: [], cruises: 0, windows: 0, walks: 0, rockets: 0, corrections: 0, trackerReplans: 0, held: 0, bailouts: 0, proofs: 0, cuts: 0, unproven: 0, marks: [], seconds: 0 };
+    this.r = { ok: false, plans: 0, replans: 0, legs: [], cruises: 0, windows: 0, walks: 0, rockets: 0, corrections: 0, trackerReplans: 0, held: 0, bailouts: 0, proofs: 0, cuts: 0, unproven: 0, joins: 0, marks: [], seconds: 0 };
     const end = (ok: boolean, reason?: string): CorridorReport => {
       this.r.ok = ok;
       if (reason) this.r.reason = reason;
@@ -238,9 +296,20 @@ export class CorridorExecutor {
       if (!start) return end(false, 'position unknown');
       if (near(start, goal, 0.8)) return end(true);
       if (this.r.plans > this.o.maxReplans) return end(false, `no corridor worked after ${this.r.replans} re-plans`);
-      const c = await this.p.provider.plan({ start, goal, dim: this.p.dim(), modes: this.o.modes, startMode: 'walk', goalStanding: true, maxMs: this.o.planMs });
+      let c = await this.p.provider.plan({ start, goal, dim: this.p.dim(), modes: this.o.modes, startMode: 'walk', goalStanding: true, maxMs: this.o.planMs });
       this.r.plans++;
       this.log.info(`corridor: plan ${this.r.plans} to ${label}: ${c.status}, ${c.legs.length} legs (${c.legs.map((l) => `${l.mode} ${Math.round(l.blocks)}`).join(', ')}), ${Math.round(c.blocks)} blocks, ${Math.round(c.unknownFraction * 100)}% unknown${c.reason ? `: ${c.reason}` : ''}`);
+      // Track F8: a partial corridor's end is a good place to search from (the sweep of the sky is behind it): the second
+      // search is asked before anything flies and joined, so the cruise aims at the real change into the cave
+      const last = c.legs[c.legs.length - 1];
+      if (c.status === 'partial' && last && this.o.joinMs > 0 && !this.p.stopped()) {
+        const c2 = await this.p.provider.plan({ start: last.to, goal, dim: this.p.dim(), modes: this.o.modes, startMode: last.mode, goalStanding: true, maxMs: this.o.joinMs });
+        this.r.joins++;
+        if (c2.status === 'found' && c2.legs.length) {
+          c = joinCorridors(c, c2);
+          this.log.info(`corridor: the search from the partial end found the rest (${c2.legs.map((l) => `${l.mode} ${Math.round(l.blocks)}`).join(', ')}, ${c2.ms.toFixed(0)} ms): joined, ${c.legs.length} legs (${c.legs.map((l) => `${l.mode} ${Math.round(l.blocks)}`).join(', ')}), ${Math.round(c.blocks)} blocks`);
+        } else this.log.info(`corridor: the search from the partial end: ${c2.status}${c2.reason ? ` (${c2.reason})` : ''}; following the partial corridor`);
+      }
       if (c.status === 'none' || c.legs.length === 0) return end(false, c.reason ?? 'no corridor');
       const r = await this.follow(c, goal);
       if (r.ok) {
@@ -335,6 +404,9 @@ export class CorridorExecutor {
       const w = await this.walkLeg(leg, i);
       return { how: 'walk (unknown)', res: w.res };
     }
+    // Track F8: the leg's shape in the log (the Realm's corridors are read off it)
+    const shape = stretches.map((s) => `${s.space} ${Math.round(s.points.reduce((a, p, k) => (k ? a + dist(p, s.points[k - 1]!) : 0), 0))}${s.leave ? ` ->${s.leave.axis} ${s.leave.clearance.height}x${s.leave.clearance.width}` : ''}`).join(', ');
+    this.log.info(`corridor: leg ${i + 1} (fly ${Math.round(leg.blocks)}): ${shape}${unknown > 0 ? `, ${Math.round(unknown * 100)}% unknown underground` : ''}`);
     // Track R1: the leg's end where the body can stand: its own cell, else (the end of a partial corridor, a face in mid-air:
     // trip C cruised to a cell in the sky and walked at it) the trip's goal, else the standable cell nearest it
     let legEnd = cellOf(leg.to);
@@ -369,10 +441,14 @@ export class CorridorExecutor {
     // a y opening of 1 or 2 across is a shaft; a wider one is the open top of a covered volume (the ground by a mouth)
     const what = !s.leave ? '' : s.leave.axis !== 'y' ? 'mouth' : s.leave.clearance.width <= 2 ? 'shaft' : 'opening';
     const label = s.leave ? `the ${what} at ${fmt(s.leave.center)}` : fmt(cell);
+    // Track F8: down through a y opening the landing cell lies under the opening's plane: the cruise lands inside it (the brake
+    // over the rim, the elevator down), not on the surface beside it (the Realm, 2026-11-08: landed 29 blocks off the opening
+    // and the walk down failed)
+    const hint: SkyHint | undefined = s.leave?.axis === 'y' && s.leave.min.y >= cell.y + 2 ? { rim: s.leave.min.y } : undefined;
     for (let tries = 0; ; tries++) {
-      this.log.info(`corridor: leg ${i + 1}: the cruise to ${fmt(cell)} (${label})${tries ? `, again (${tries + 1})` : ''}`);
+      this.log.info(`corridor: leg ${i + 1}: the cruise to ${fmt(cell)} (${label}${hint ? `, ${hint.rim! - cell.y} under the rim` : ''})${tries ? `, again (${tries + 1})` : ''}`);
       this.r.cruises++;
-      const f = await this.p.flySky(cell, label);
+      const f = await this.p.flySky(cell, label, hint);
       this.add(f);
       if (f.reason === 'interrupted' || this.p.stopped()) return { ok: false, reason: 'interrupted', fatal: true };
       const at = f.at ?? this.p.position();

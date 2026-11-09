@@ -157,6 +157,15 @@ export interface LandingOptions {
   style?: 'auto' | 'flare' | 'brake';
   /** Track F3: where the flight comes from (the body now): a route landing's bearings are tried from that side first. */
   from?: { x: number; z: number };
+  /**
+   * Track F8: the feet height of the rim the body must come down inside to reach an exact goal (the corridor executor's
+   * opening in a cave's roof: the plane of the y portal the way goes down through). `preciseGoal` scans the rim round a
+   * shaft floor only OPEN_SKY up and only where the walls touch the cell, so the dry floor under a wide, deep opening
+   * (the owner's cave: 46 blocks under the rim, the pit 11 across) read as a precision cell under open sky whose simulated
+   * approach flew into the pit's wall, and the cruise landed on the surface beside it. With the rim given the brake landing
+   * is simulated in over it and the elevator sinks down inside.
+   */
+  rim?: number;
 }
 
 export interface LandingCell {
@@ -377,7 +386,7 @@ function wallTop(look: BlockLookup, x: number, z: number, feet: number, to: numb
  * (corridorsOf with the room the roof leaves). The landing is simulated (BrakePlanner, the world's solids as
  * walls): from above along four bearings, or along the corridors; undefined when nothing lands.
  */
-export async function preciseGoal(view: ColumnView, look: BlockLookup, obstacle: Obstacle, x: number, z: number, f: Floor, o: Pick<LandingOptions, 'maxUnder' | 'from'>, route?: LandingDeps['route']): Promise<{ target: LandingTarget; line: string } | undefined> {
+export async function preciseGoal(view: ColumnView, look: BlockLookup, obstacle: Obstacle, x: number, z: number, f: Floor, o: Pick<LandingOptions, 'maxUnder' | 'from' | 'rim'>, route?: LandingDeps['route']): Promise<{ target: LandingTarget; line: string } | undefined> {
   if (f.wet || f.hazard) return undefined;
   const room = f.ceiling === undefined ? Infinity : f.ceiling - f.feet;
   // Track F3: a room of 2 is legal when the route planner finds a way in (below); without it 3 is the least
@@ -407,9 +416,12 @@ export async function preciseGoal(view: ColumnView, look: BlockLookup, obstacle:
       }
     }
   }
+  // Track F8: a rim the caller knows (the opening in a cave's roof the corridor goes down through): the body comes down inside
+  // it, whatever the walls next to the cell say (a wide pit's floor cell has floor cells, not walls, round it)
+  if (o.rim !== undefined && o.rim >= f.feet + 2 && room > OPEN_SKY) rim = Math.max(Number.isFinite(rim) ? rim : -Infinity, o.rim);
   const shaft = Number.isFinite(rim) && rim >= f.feet + 2;
   const base: LandingTarget = { x: x + 0.5, z: z + 0.5, top: f.feet, half: 0.5, precise: true, ...(cells.size > 1 ? { cells } : {}), ...(shaft ? { rim } : {}) };
-  const what = shaft ? `a shaft floor ${rim - f.feet} deep (${cells.size} cell${cells.size === 1 ? '' : 's'})` : room > OPEN_SKY ? `a precision cell (${cells.size} cell${cells.size === 1 ? '' : 's'} at its height)` : `a cell under a roof ${room} above`;
+  const what = shaft ? `a ${o.rim !== undefined && rim === o.rim ? 'pit' : 'shaft'} floor ${rim - f.feet} deep (${cells.size} cell${cells.size === 1 ? '' : 's'})` : room > OPEN_SKY ? `a precision cell (${cells.size} cell${cells.size === 1 ? '' : 's'} at its height)` : `a cell under a roof ${room} above`;
   const corridors = room > OPEN_SKY ? [] : corridorsOf(look, x, z, f.feet, o.maxUnder, Math.min(4, room)).slice(0, 3);
   // Track F3: the route planner (docs/flight.md "Route landings and takeoffs"): a plan from an entry along some
   // bearing onto the cells (the corridors' bearings first under a roof, every 45 degrees else); the planner's
@@ -567,9 +579,12 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   const gy = Math.floor(goal.y);
   if (deps.look(gx, gy, gz) === undefined) return { kind: 'unknown', line: `landing for ${label}: the goal's ground is not loaded yet` };
   const view = new ColumnView(deps.look, gy);
-  // the goal itself: landable under open sky, dry, level
+  // the goal itself: landable under open sky, dry, level (Track F8: not when the caller says it lies under a rim: the floor of a
+  // wide pit has sky over it and level neighbours, but the flare's approach along the glide line would meet the pit's wall;
+  // the precision landing below comes down inside the rim)
   const own = view.floorNear(gx, gz, gy);
-  if (own && view.kindOf(own, o.headroom) === 'open' && view.sound(gx, gz, own)) {
+  const underRim = own !== undefined && o.rim !== undefined && o.rim >= own.feet + 2;
+  if (own && !underRim && view.kindOf(own, o.headroom) === 'open' && view.sound(gx, gz, own)) {
     const cell: LandingCell = { x: gx, z: gz, feet: own.feet, kind: 'goal' };
     const target: LandingTarget =
       o.exact !== undefined ? { x: gx + 0.5, z: gz + 0.5, top: own.feet, half: o.exact } : walkTarget(cell, cellsAround(view, cell, 'open', walkSlack(0) + 1, o.headroom));

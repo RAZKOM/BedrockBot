@@ -3155,6 +3155,233 @@ branches (default off) and the search's pieces (the cave style's only).
   R1 owns the file and may prefer another form of it.
 - GPU work: none; the benches run in minutes on worker threads and the tracker's tick costs 5 to 18 ms at worst on this PC.
 
+## Cave entry (Track F8)
+
+Flight v2, Track F8, [decisions/0074](decisions/0074-cave-entry.md). The owner (2026-11-08): "What actually has to be done
+to get it to fly into the cave? It once again just failed with `!fly cave_start`." On the Realm the trip's first corridor
+was partial (the 4 000 ms search limit, 32 blocks short), the cruise held over a ground "not loaded yet", landed 29 blocks
+off on the surface beside the cave, and the walk down failed. On the replica no flyC run had arrived. This track makes the
+entry from above: the corridor searched again from its partial end and joined before anything flies, the cruise coming down
+INSIDE a roof opening (the brake over the rim, the elevator to the floor under it), a replica whose surroundings are the
+Realm's and not a mesa on a flat world, and, in the planner, the burns between the extremes swept too (Track F7's open
+point: a plan robust at 9 and 21 hit the margin for the burns in between). `flyCave` stays default **off** in the code; the
+coordinator turned it on live the same evening (the owner set keepInventory).
+
+```
+!fly <covered goal> far off
+  -> the corridor search (4 s); partial -> a second search from its end (2.5 s): joined into one corridor when found
+  -> the sky stretch's cruise to the change cell; down a y opening the executor names the opening's plane as the RIM:
+       the landing search treats the dry floor under it as a pit floor (the brake over the rim, the elevator down),
+       the hold circles over the rim while the floor's chunk is not loaded, never a touchdown on the surface beside it
+  -> the underground windows as Tracks F5b to F7 left them, the planner sweeping the burns 12 and 18 besides 9 and 21
+       (speed by clearance is in the code, measured, off: it needs a wall-only clearance)
+```
+
+### Files
+
+| File | What |
+|---|---|
+| `bot/src/skills/fly/corridor/executor.ts` | `CORRIDOR_JOIN_MS`, `joinCorridors` (the second search from a partial end, joined), `SkyHint` (the rim to the cruise), `CorridorReport.joins` |
+| `bot/src/skills/fly/landing.ts`, `brake.ts` | `LandingOptions.rim` (a pit floor under a rim the caller knows: `preciseGoal`, never the plain goal), `brakeMaxTicks` (the simulation's horizon grows with the depth) |
+| `bot/src/chat/commands-fly.ts`, `commands-corridor.ts`, `tasks/process/fly.ts` | the hint through `corridorSky`, `planFlight`, `landingFor`, `LandingHint`, the held target's `rim`, `watchLanding` |
+| `bot/src/skills/fly/corridor/cave.ts` | `replicaCoarse` (the replica's world for the layer offline), `replicaTerraces` (the real heights round the box from the extract's tops), `REPLICA_SHELL`, `REPLICA_HOME_CHUNKS` |
+| `bot/src/skills/fly/route/types.ts`, `primitives.ts`, `search.ts`, `tracker.ts` | `MID_BURNS`, `RouteState.mids`, `midLefts`; the mids stepped, swept, carried across the pieces, stripped off a re-plan's start; `SPEED_RULE` / `speedCap` (speed by clearance, applied per tick in `edgeOf`; measured, off) |
+| `bot/scripts/cave-entry-probe.ts` | the corridor into the owner's cave from the command line (the fixture or the replica's world, the second search, the legs' shapes; no coordinate printed) |
+| `bot/scripts/cave-gen-bench.ts`, `cave-real-bench.ts` | the variants `nomids`, `nospeed`, `slow06`, `slow04` |
+| `bot/test/e2e/fly-cave.test.ts` | the replica's surroundings (`buildSurroundings`: the shell and the terraces from teleport stops), trip C with the style and FLY_CAVE_RUNS |
+| `bot/test/unit/skills/fly-cave-entry.test.ts` | the guard tests |
+
+### What was measured first (the Realm's log, the fixture, `scripts/cave-entry-probe.ts`)
+
+- **The partial corridor is the heuristic's.** The layer's search prices the sky at 0.8 ticks a block and its heuristic is the
+  straight line at the flight's slope (weighted 1.5); the way underground costs 160 ticks through a mouth, 60 and a sink
+  through an opening and 1.7 a block inside. A covered goal makes every sky node within a few hundred blocks cheaper than
+  the way in, and the sweep pays for every chunk it touches: on the replica's world the search from a surface start 660
+  blocks from cave_start built 1 548 chunks and 2 778 border portals (3.0 of its 4.0 s) for 9 300 expansions and ended on
+  the surface by the entrance, 33 blocks from the goal; with 20 s it built 8 878 chunks and still ended 12 blocks short.
+  From that end the way in is found in 30 to 50 ms (300 to 800 expansions). Underground the corridors are found at once
+  (cave_start to cave_end: one stretch of 186 in 0.3 to 0.5 s). The Realm's log of the owner's trip is the same picture:
+  4 000 ms, 32 blocks short; the second plan after the landing, found in 2 s.
+- **The cruise could not see the pit.** `preciseGoal` scanned the rim round a shaft floor OPEN_SKY (20) up and only where the
+  walls touch the cell; the dry floor under a wide, deep opening (the owner's cave: 46 under the rim, the pit 11 across) has
+  floor cells, not walls, round it and sky above, so the landing search called it a plain open cell (the flare's glide
+  line, into the pit's wall) or a precision cell under open sky whose simulated approach met the wall, and the cruise took
+  the fallback: dry ground beside the cave, 29 blocks off.
+- **The replica was a mesa.** Outside the extract's box bds-fly2 is the flat world 160 blocks below the box's surface. The
+  box's edge slices the cave open (a cliff with the cave's cross-section in it) and the layer's corridor into cave_start
+  went in through that cut face, 33 blocks from the goal, where the fixture (solid outside the box) and the Realm have rock;
+  flyC's corridor left the cave the same way. The offline fixture and the replica disagreed, and neither was the Realm.
+
+### The pieces
+
+- **The second search** (`executor.ts`): a partial corridor's last leg ends where the search stopped; a second search from
+  there to the goal (2 500 ms, the mode of that leg: no takeoff charged) is asked before anything flies, and when it is
+  found the two are joined (`joinCorridors`: a fly leg and a fly leg become one leg, the waypoints and portals in order,
+  the totals summed; different modes are appended). The cruise then aims at the real change into the cave (the mouth cell,
+  the floor under the opening) instead of the partial end. A partial second search leaves the first as it was (the trip
+  re-plans from its end, as before).
+- **The rim** (`SkyHint`, `LandingOptions.rim`): down a y opening whose plane lies 2 or more over the landing cell the executor
+  tells the cruise the opening's plane; the landing search then skips the plain goal, calls the cell a pit floor that deep
+  and simulates the brake landing in over the rim along four bearings (APPROACH_HEIGHT above it, the brake over the cell,
+  the elevator down: `brakeMaxTicks` adds the sink past 20 down to the simulation's horizon); the held target carries the
+  rim too, so the hold circles over the rim and every look from the air is asked with it. Offline (the model, an 11 x 11 pit
+  46 deep, two seeds): the whole trip comes down inside the pit onto the cell by the brake, no hit, no go-around, touchdown
+  under 0.36 a tick.
+- **The replica's surroundings** (`fly-cave.test.ts buildSurroundings`, `cave.ts replicaCoarse`): a stone shell one block
+  thick round the box's sides from the flat ground to the box's top, and the real terrain's heights round it from the
+  extract's column tops (a chunk at a time, its lowest known top; none round home, whose tops are the owner's roofs), sent
+  as fills from a grid of teleport stops 128 blocks apart (a fill wants its chunks loaded). The same world for the layer
+  offline: `scripts/cave-entry-probe.ts --source replica`. With it the corridor from the surface start is partial at 4 s as
+  before (the sweep), the second search finds the way in through the real mouth in 30 ms, and the joined corridor is one
+  fly leg (sky 872, the mouth, under 39) and a walk of 10.
+- **The burns in between** (`MID_BURNS` 12 and 18): a rocket starts four branches (9, 12, 18, 21) next to the nominal body,
+  each boosted for its own burn and swept with the same controls; an edge is taken only when all clear. A rocket used in a
+  burn's tail extends each branch's burn to the later end (the union). The pieces carry the mids across their seams and a
+  re-plan's start drops them with the extremes. The benches' `nomids` variant is the planner without them. Only the cave style
+  asks for them (`CaveStyle.midBurns`, `RouteRequest.midBurns`); open-air flight plans as before.
+
+### Offline, the generator set (`scripts/cave-gen-bench.ts --mode corridor --burns all --ms 100000`)
+
+The layer's corridor, no waypoints, 8 burns a cave, nodes-bound, 4 workers on this PC (the baseline ran while the cave e2e shared
+the CPU, the mids run alone; the trips differ between runs by the worker's latency). `main` is this branch's planner before the
+mids (the executor's entry changes do nothing to the offline trips); `mids` is the style as shipped. "landed" are windows that
+ended on their landing cell; the flown caves are the nine the layer flies (tight-101 and medium-102 are walked by the layer in
+both, tight-110 by the proofs in the mids run).
+
+| planner | arrived | fatal | legs clean | landed | damage a trip | worst hit | trips at 0 | bail-outs | flown / walked a trip | run |
+|---|---|---|---|---|---|---|---|---|---|---|
+| main (the extremes 9 and 21 swept) | 96 / 96 | 0 | 232 / 254 (91 %) | 33 / 254 (13 %) | 1.08 | 10.4 | 75 / 96 | 218 | 121 / 66 | 1 785 s |
+| **mids** (9, 12, 18 and 21 swept) | 96 / 96 | 0 | 146 / 152 (**96 %**) | 64 / 152 (**42 %**) | **0.18** | **8.3** | 91 / 96 | 104 | 86 / 86 | 3 776 s |
+
+Per cave, `mids` (8 burns each):
+
+| cave | legs clean | landed | damage a trip | worst hit | trips at 0 | flown / walked | main's legs clean, worst hit |
+|---|---|---|---|---|---|---|---|
+| wide-103 | 11 / 11 | 4 / 11 | 0 | 0 | 8 / 8 | 40 / 132 | 17 / 19, 2.9 |
+| tight-104 | 11 / 12 | 3 / 12 | 0.06 | 0.5 | 7 / 8 | 113 / 93 | 21 / 22, 1.7 |
+| medium-105 | 10 / 10 | 2 / 10 | 0 | 0 | 8 / 8 | 89 / 68 | 17 / 19, 3.7 |
+| wide-106 | 15 / 16 | 5 / 16 | 1.04 | **8.3** | 7 / 8 | 143 / 18 | 26 / 29, 8.5 |
+| tight-107 | 18 / 18 | 10 / 18 | 0 | 0 | 8 / 8 | 90 / 84 | 27 / 29, 9.3 |
+| medium-108 | 20 / 20 | 14 / 20 | 0 | 0 | 8 / 8 | 145 / 60 | 44 / 45, 3.9 |
+| wide-109 | 16 / 20 | 3 / 20 | 1.07 | 2.9 | 5 / 8 | 101 / 48 | 24 / 27, 5.3 |
+| tight-110 | walked (no window proven) | | 0 | 0 | 8 / 8 | 0 / 151 | 8 / 8, 0 |
+| medium-111 | 20 / 20 | 12 / 20 | 0 | 0 | 8 / 8 | 119 / 71 | 25 / 27, 10.4 |
+| wide-112 | 25 / 25 | 11 / 25 | 0 | 0 | 8 / 8 | 195 / 29 | 23 / 29, 9.7 |
+
+What this says. Sweeping the burns in between is what Track F7's diagnosis asked for: the hits of 9 to 10 in tight-107, medium-111
+and wide-112 are gone, the legs are 96 % clean (the bar is 95), three times as many windows land on their cell (the plans no longer
+rely on a burn's last ticks next to a wall, so the body stays on them to the end) and the damage a trip is a sixth. The price is
+flown distance: a window whose plan needs a rocket near a wall now has no proof and is walked (tight-110 entirely, wide-103 for
+two thirds), 86 blocks a trip flown against 121. One hit of 8.3 remains (wide-106 at a random burn; main took 7.2 and 8.5 there at other
+burns) and wide-109 takes 2.9 twice, so the under-4 bar is **not** met; those two caves are where the speed rule below is measured.
+
+**Speed by clearance** (`types.ts SPEED_RULE`, `primitives.ts edgeOf`): a tick flown with the swept box within `clear` of a solid
+(beyond the margin) may not be faster than `slow` at clearance 0, rising to `fast` at `clear`; a faster tick refuses the edge. The
+variant `slow06` (clear 0.6, slow 0.8, fast 1.6) on the two caves that still hit with the mids, 8 burns each, nodes-bound:
+
+| cave | planner | legs clean | landed | damage a trip | worst hit | trips at 0 | flown / walked |
+|---|---|---|---|---|---|---|---|
+| wide-106 | mids | 15 / 16 (94 %) | 5 / 16 (31 %) | 1.04 | **8.3** | 7 / 8 | 143 / 18 |
+| wide-106 | mids + slow06 | **18 / 18** | **11 / 18 (61 %)** | **0** | **0** | 8 / 8 | 128 / 23 |
+| wide-109 | mids | 16 / 20 (80 %) | 3 / 20 (15 %) | 1.07 | 2.9 | 5 / 8 | 101 / 48 |
+| wide-109 | mids + slow06 | 21 / 25 (84 %) | 8 / 25 (32 %) | 1.33 | 2.9 | 6 / 8 | 113 / 36 |
+
+The rule takes the 8.3 away (the plan no longer turns at 1.5 a tick beside the wall there) and doubles the landed windows, for the
+same flown distance (121 against 122 blocks a trip over the two). On the owner's cave it costs nothing: the corridor 8 / 8 clean at
+0 damage, 88 flown / 96 walked (the mids alone 87 / 86), route A the same 19 / 21 clean with its 4.4. **It ships off all the same**
+(`SPEED_RULE_DEFAULT` clear 0; `SPEED_RULE_MEASURED` is the value above): the sweep's clearance counts floors and ceilings as it
+counts walls, and in a 3-high bore a body just off the floor at the takeoff, or coming down onto its cell, is within 0.6 of a
+solid at glide speed, so the rule refused fly-route's tunnels and the shortcut proof through a straight 3 x 3 bore (the unit
+tests caught it; the owner's cave and the two generator caves are wider than 3 at the spots it mattered). What it needs is a
+wall-only clearance (the horizontal distance to a solid beside the box), which the sweep does not give today; with that it is
+the lever that takes the last big hit away. The whole generator set with the rule on is not run (the mids run alone took 63
+minutes on 4 workers).
+
+### Offline, the owner's cave (`scripts/cave-real-bench.ts --mode corridor,routeA --burns all --ms 100000`)
+
+The layer's corridor (one fly leg of 186) and route A as hints, nodes-bound, 8 burns a row, 4 workers; `mids` is the planner as
+shipped, `nomids` the variant without the burns in between (Track F7's planner on this branch).
+
+| run | arrived | legs clean | landed | damage a trip | worst hit | trips at 0 | bail-outs | water | flown / walked | flown share |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **corridor, mids** | 8 / 8 | 8 / 8 | 4 / 8 (50 %) | **0** | **0** | 8 / 8 | 5 | 0 | 87 / 86 | 50 % |
+| corridor, nomids | 8 / 8 | 18 / 19 (95 %) | 4 / 19 (21 %) | 0.62 | 5.0 | 7 / 8 | 16 | 7 | 142 / 81 | 64 % |
+| (F7's shipped row, "Tight passages": the same numbers; the nodes-bound run is deterministic) | 8 / 8 | 18 / 19 (95 %) | 4 / 19 (21 %) | 0.62 | 5.0 | 7 / 8 | 16 | 7 | 142 / 81 | 64 % |
+| **route A, mids** | 8 / 8 | 19 / 21 (90 %) | 2 / 21 (10 %) | 0.93 | 4.4 | 6 / 8 | 19 | 2 | 99 / 89 | 53 % |
+| route A, nomids | 8 / 8 | 17 / 19 (89 %) | 0 / 19 | 0.91 | 4.3 | 6 / 8 | 18 | 4 | 95 / 120 | 44 % |
+
+The corridor flies clean with the mids (no hit, half its windows landing on their cell, no bail-out into a pool) at a flown share
+of 50 % against 64 % without them: the windows whose plans needed a rocket next to a wall are walked now. Route A's hit of 4.3 to
+4.4 (two burns of eight, the same window, with or without the mids) is not a burn-branch matter: F7 saw 3.0 there. **The 70 % flown
+share and the no-hit-over-3 bars are not met**; the flown share is capped by the proofs (the climb through the chunk-border faces,
+F6's limit) and the walks after a landed window (Track R2's), as F7 found.
+
+### On the server (bds-fly2, BDS 1.26.60.6, 2026-11-08)
+
+`fly-cave.test.ts`, `FLY_CAVE_STYLE=1 FLY_CAVE_RUNS=5`, the replica with its new surroundings (864 terrace chunks and the shell in
+1 597 fills from 23 teleport stops, 373 s; the box itself 30 s). **Trip C** (`!fly` from the home pad, 660 blocks, to cave_start),
+five runs while a 4-worker bench loaded this PC (the route worker shares its CPU):
+
+| run | arrived | off | s | rockets | damage | corrections | the corridor | the way in |
+|---|---|---|---|---|---|---|---|---|
+| 0 | yes | 0.1 | 125 | 7 | 2.7 | 8 | partial (fly 871, walk 20), the second search found walk 40 in 1 ms: joined fly 871 + walk 60 | the cruise to the walk's start held ("only 2 851 of 4 848 columns loaded"), none confirmed, `landed_off` 28 blocks off; the re-plan walked 87 in (54 ticks in water) |
+| 1 | yes | 0.1 | 122 | 7 | 0 | 5 | partial (fly 885), the second search found fly 10 in 0 ms: joined fly 895 | **the opening, 15 under the rim**: "a pit floor 15 deep (2 cells), the brake landing simulated in from 0"; landed 0.02 from the centre, touchdown 0.20 a tick; the last blocks walked |
+| 2 | yes | 0.1 | 122 | 7 | 0 | 7 | the same | the opening: landed 0.01 off, touchdown 0.25 a tick |
+| 3 | yes | 0.1 | 100 | 7 | 0 | 5 | partial (fly 875), the second search found fly 13 + walk 10: joined | the opening: landed 0.01 off, touchdown 0.19 a tick; walk 10 |
+| 4 | yes | 0.2 | 139 | 8 | 0 | 6 | found at once (fly 894) | the opening, 5 under the rim: held over it until its chunk loaded (5 ticks), landed 0.01 off; then one window of 54 flown (proofs partial at 2 s under the load, cut back), bailed out 1.4 off after a correction, 0 hits, the rest walked (140 ticks in water) |
+
+Four of five came down through the roof opening onto the floor under it, by the brake over the rim and the elevator, within 0.02
+of the cell and without a scratch; before this track every run landed on the surface beside the cave. The one that took the
+layer's walk way in landed off because the landing cell's columns were not loaded when the cruise had to choose (the hold's look
+found nothing it could confirm): the second search is right to prefer the opening, and a walk leg's start is still a plain
+walk-landing (Track BF's rules).
+
+**flyC** (cave_start to cave_end on the layer's corridor), five runs with the machine loaded (180 s cap) and five alone (300 s cap):
+
+| runs | arrived | damage | windows flown | what happened |
+|---|---|---|---|---|
+| 5 loaded, 5 quiet | **0 / 10** | 0 | 0 | The replica's layer plans the corridor OUT through the cave's roof opening (`leg 1 (fly 184): under 52 -> y 16x15, sky 49 -> y 16x13, under 84`), where the fixture and the offline replica source plan one underground stretch of 186. The first window's proof (up to the opening, 10 goals) runs out of its 2 s (6 000 to 6 900 expansions, 1 of 3 goals in the first piece) and the body walks to the window's first goal, where every takeoff primitive hits ("the open list emptied", 8 expansions: a pool or a low spot); the cruise out of the cave and down the second opening lands 0.01 from its cell every time (the rim hint: "13 under the rim"), and the last 84 blocks, the cave's pools, are walked and fail `unreachable` until the re-plans run out (8 walks a run). |
+
+The entry from above works on both ways in (the first opening on trip C, the second on flyC); what stops flyC is the walk through
+the pools that follows (Track R2's) and a proof that wants more than 2 s for a climb out through a roof. The layer's choice of
+the sky on the replica, where the offline source has it underground, is not understood: the two sources differ only in what the
+world cache recorded from the fly-over's chunks.
+
+### The regressions (the final code; bds-fly3 for fly-route and fly-corridor, bds-fly2 for the rest)
+
+| suite | result |
+|---|---|
+| fly-route | 3 of 3 green |
+| fly-corridor | 5 of 5 green |
+| fly-land | 5 of 5 green |
+| fly-course, FLY_AREA 71520,69472 | 7 of 8 (the slalom); main on the same area: 8 of 8 (F7's run of main there: 7 of 8, the slalom) |
+| fly-course, FLY_AREA 66400,70496 | 7 of 8 (the rings); main: 7 of 8 (the rings) |
+| fly-course, FLY_AREA 63328,66400 | 7 of 8 (the slalom); main: 8 of 8 |
+
+(The course runs of this branch shared the CPU with the offline benches, as Track F7's did; main's reference runs on bds-fly3 failed
+at the build because that server's truth pack has no `course` command, so they were run on bds-fly2 after this branch's.) The
+open-air drivers carry no cave rules; what they share with the cave style is the planner's branches and the speed rule, which
+only refuse edges.
+
+### Open points (Track F8)
+
+- **flyC does not arrive on the replica** (0 of 10): the replica's layer plans the corridor out through the roof opening and back in
+  through a second one where the fixture's layer (and the offline replica source) stays underground; the two differ only in what
+  the fly-over's world cache recorded. The cruise out and down lands 0.01 off (the rim hint); the walk through the pools that
+  follows fails `unreachable` (Track R2), and the first window's proof (a climb to the opening, 10 goals) wants more than 2 s.
+- **The hits left**: 8.3 once on wide-106 and 2.9 twice on wide-109 with the mids; route A's 4.3 to 4.4 with or without them (the
+  same window every time: not a burn-branch matter and not a speed one; its trace is the next look). The speed rule removes the
+  8.3 but refuses 3-high bores: a wall-only clearance in the sweep is what lets it ship on.
+- **The flown share**: the mids walk what they cannot prove (86 blocks a trip against 121 on the set, 50 % against 64 % on the
+  owner's corridor). The windows lost are those whose plans fired a rocket next to a wall; a slow way through them (the creep, a
+  glide turn) is what the planner lacks.
+- **The first corridor is partial by construction** for a covered goal; the second search fixes the trip, not the search. A
+  heuristic that knows the goal is covered (the cheapest way underground added to h for a sky node) belongs in the layer's
+  search (Track CB's file).
+- **A walk leg's start as the cruise's landing**: run 0 of trip C landed off because the cell's columns were not loaded when the
+  cruise had to choose; the rim hint covers y openings only.
+- **Server corrections** (F7's open point) are not measured here beyond the replica's 5 to 8 a cruise.
+
 ## Real-cave benchmark (Track F5a)
 
 Flight v2, Track F5a, [decisions/0068](decisions/0068-real-cave-benchmark.md). The corridor flight's first real cave

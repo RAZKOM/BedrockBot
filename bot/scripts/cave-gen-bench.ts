@@ -15,9 +15,10 @@ import { fileURLToPath } from 'node:url';
 import { CAVE_BURNS, caveScoreLine, caveTripLine, flyCaveCorridor, flyCaveWaypoints, scoreCaves, type CaveBenchOptions, type CaveTrip } from '../src/skills/fly/cave/bench.ts';
 import type { CaveStyle } from '../src/skills/fly/cave/style.ts';
 import { caveSet } from '../src/skills/fly/route/caves.ts';
+import { SPEED_RULE, SPEED_RULE_DEFAULT, type SpeedRule } from '../src/skills/fly/route/types.ts';
 
 /** The style's variants: `on` is CAVE_STYLE, `off` Track F4b's flight, the rest one change each. */
-const VARIANTS: Record<string, { style: boolean; variant?: Partial<CaveStyle> }> = {
+const VARIANTS: Record<string, { style: boolean; variant?: Partial<CaveStyle>; speed?: SpeedRule }> = {
   on: { style: true },
   off: { style: false },
   rules0: { style: true, variant: { chainWindow: 5, riskCost: 0.5, marginExtra: 0, prove: false, windowBlocks: 320, tailMin: 40, rules: { commitTicks: 0, partialStop: false, bailAfter: undefined, completeOnly: false, replanLead: 0, bailError: undefined } } },
@@ -56,6 +57,12 @@ const VARIANTS: Record<string, { style: boolean; variant?: Partial<CaveStyle> }>
   nobbail: { style: true, variant: { rules: { blockedBail: false } } },
   err15: { style: true, variant: { rules: { bailError: 1.5 } } },
   err20: { style: true, variant: { rules: { bailError: 2.0 } } },
+  // Track F8: the planner without the burns between the extremes (types.ts MID_BURNS; `on` sweeps them)
+  nomids: { style: true, variant: { midBurns: false } },
+  // Track F8: speed by clearance (types.ts SPEED_RULE): within 0.6 of a solid no faster than 0.8 rising to 1.6
+  slow06: { style: true, speed: { clear: 0.6, slow: 0.8, fast: 1.6 } },
+  nospeed: { style: true, speed: { clear: 0, slow: 0.8, fast: 1.6 } },
+  slow04: { style: true, speed: { clear: 0.4, slow: 0.9, fast: 1.6 } },
 };
 
 interface Job {
@@ -73,6 +80,7 @@ type Done = Omit<CaveTrip, 'report' | 'windows'> & { windows: number; job: Job }
 async function runJob(j: Job): Promise<Done> {
   const cave = caveSet()[j.cave]!;
   const v = VARIANTS[j.style] ?? VARIANTS.on!;
+  Object.assign(SPEED_RULE, v.speed ?? SPEED_RULE_DEFAULT); // Track F8: speed by clearance
   const o: CaveBenchOptions = { seed: j.seed, burn: j.burn, maxMs: j.ms, maxNodes: j.nodes, style: v.style, ...(v.variant ? { variant: v.variant } : {}) };
   const t = j.mode === 'corridor' ? await flyCaveCorridor(cave, o) : await flyCaveWaypoints(cave, o);
   const { report: _r, windows, ...rest } = t;

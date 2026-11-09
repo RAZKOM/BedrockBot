@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import type { Vec3 } from '../../../world/types.ts';
 import type { BlockInfo } from '../../../world/types.ts';
 import { CLS_AIR, CLS_SOLID, CLS_WATER, type CellClass } from '../../../world/cache/types.ts';
-import { decodeExtract, type CacheExtract, type CacheExtractFile } from '../../../world/cache/export.ts';
+import { decodeExtract, TOP_NONE, TOP_UNKNOWN, type CacheExtract, type CacheExtractFile } from '../../../world/cache/export.ts';
 import type { BlockQuery } from '../../input/types.ts';
 import type { ChunkCells, CoarseSource } from '../../coarse/source.ts';
 import { blockInfoOf } from '../../terrain/shapes.ts';
@@ -144,6 +144,98 @@ export function caveWorld(e: CacheExtract): CaveWorld {
     return undefined;
   };
   return { extract: e, cls, grid, solid, floor, query, coarse, terrain, feetCell };
+}
+
+/** Track F8: the flat world's feet height outside the replica's box (fly-truth.ts FEET_Y) and the stone shell's thickness round the box's sides. */
+export const REPLICA_FLAT_FEET = -60;
+export const REPLICA_SHELL = 1;
+/** Track F8: no terrace within this many chunks of home (the owner's roofs are column tops there). */
+export const REPLICA_HOME_CHUNKS = 1;
+
+/**
+ * Track F8: the real terrain's heights round the box, a chunk at a time, from the extract's column tops (`--tops`, a wider
+ * rectangle than the box): the chunk's LOWEST known column top (stone up to it is never higher than the real ground), for
+ * the chunks of the rectangle not wholly inside the box; undefined elsewhere (the flat world). On the replica the box
+ * stood as a mesa 160 blocks over the flat world: the cliff round it read as `cave` air to the layer (the chunk-local sky
+ * rule) and the corridor into cave_start ran along it; the Realm's ground continues at the surface's height.
+ */
+export function replicaTerraces(e: CacheExtract, o: { home?: Vec3 } = {}): (cx: number, cz: number) => number | undefined {
+  const r = e.topsRect;
+  const b = e.box;
+  const cache = new Map<string, number | undefined>();
+  // (no terrace in the chunks round home: the tops there are the owner's roofs, and the e2e builds the pad at the real height)
+  const hx = o.home ? Math.floor(o.home.x) >> 4 : undefined;
+  const hz = o.home ? Math.floor(o.home.z) >> 4 : undefined;
+  return (cx, cz) => {
+    if (!r) return undefined;
+    if (hx !== undefined && hz !== undefined && Math.abs(cx - hx) <= REPLICA_HOME_CHUNKS && Math.abs(cz - hz) <= REPLICA_HOME_CHUNKS) return undefined;
+    const k = `${cx},${cz}`;
+    if (cache.has(k)) return cache.get(k);
+    let top: number | undefined;
+    const x0 = cx * 16;
+    const z0 = cz * 16;
+    const insideBox = x0 >= b.min.x && x0 + 15 <= b.max.x && z0 >= b.min.z && z0 + 15 <= b.max.z;
+    if (!insideBox && x0 + 15 >= r.min.x && x0 <= r.max.x && z0 + 15 >= r.min.z && z0 <= r.max.z) {
+      let lowest = Infinity;
+      for (let x = x0; x <= x0 + 15; x++) {
+        for (let z = z0; z <= z0 + 15; z++) {
+          if (x >= b.min.x && x <= b.max.x && z >= b.min.z && z <= b.max.z) continue;
+          const t = e.top(x, z);
+          if (t === undefined || t === TOP_UNKNOWN || t === TOP_NONE) continue;
+          if (t < lowest) lowest = t;
+        }
+      }
+      if (Number.isFinite(lowest)) top = lowest;
+    }
+    cache.set(k, top);
+    return top;
+  };
+}
+
+/**
+ * Track F8: the world as the replica on bds-fly2 has it (fly-cave.test.ts), for the coarse layer offline: the box as the
+ * extract, the flat world's ground outside it (feet at REPLICA_FLAT_FEET), the home pad (5 x 5 at the waypoint's height),
+ * air above everything, every chunk known, and a stone shell REPLICA_SHELL thick round the box's sides from the flat
+ * ground up to the box's top. The shell is what the e2e builds too: without it the box's edge slices the cave open to
+ * the flat world (a cliff with the cave's cross-section in it) and the layer's corridor into cave_start went in through
+ * that cut face, 33 blocks from the goal, where the fixture (solid outside the box) and the Realm have no opening.
+ */
+export function replicaCoarse(world: CaveWorld, o: { home?: Vec3; shell?: number; flatFeet?: number; terraces?: boolean } = {}): CoarseSource {
+  const b = world.extract.box;
+  const shell = o.shell ?? REPLICA_SHELL;
+  const flat = o.flatFeet ?? REPLICA_FLAT_FEET;
+  const home = o.home;
+  const terrace = o.terraces === false ? () => undefined : replicaTerraces(world.extract, home ? { home } : {});
+  const rows = Math.ceil((b.max.y + 1 - OVERWORLD_MIN_Y) / 16) * 16;
+  const cls = (x: number, y: number, z: number): CellClass => {
+    const inX = x >= b.min.x && x <= b.max.x;
+    const inZ = z >= b.min.z && z <= b.max.z;
+    if (inX && inZ && y >= b.min.y && y <= b.max.y) return world.cls(x, y, z);
+    if (y > b.max.y) return CLS_AIR;
+    // the shell: the ring of `shell` cells round the box's footprint, from the flat ground to the box's top
+    if (!(inX && inZ) && x >= b.min.x - shell && x <= b.max.x + shell && z >= b.min.z - shell && z <= b.max.z + shell && y >= flat - 1) return CLS_SOLID;
+    if (inX && inZ) return CLS_SOLID; // under the box
+    if (home && Math.abs(x - home.x) <= 2 && Math.abs(z - home.z) <= 2 && y === home.y - 1) return CLS_SOLID;
+    // the terraces: the real terrain's height round the box, a chunk at a time (its lowest known column top)
+    const t = terrace(x >> 4, z >> 4);
+    if (t !== undefined && y <= t) return CLS_SOLID;
+    return y < flat ? CLS_SOLID : CLS_AIR;
+  };
+  const views = new Map<string, ChunkCells>();
+  return {
+    minY: OVERWORLD_MIN_Y,
+    maxY: OVERWORLD_MAX_Y,
+    chunk(cx, cz, dim) {
+      if (dim !== world.extract.dim) return undefined;
+      const k = `${cx},${cz}`;
+      let v = views.get(k);
+      if (!v) {
+        v = { y0: OVERWORLD_MIN_Y, rows, cls: (x, y, z) => cls(cx * 16 + x, y, cz * 16 + z) };
+        views.set(k, v);
+      }
+      return v;
+    },
+  };
 }
 
 // ---- the routes ---------------------------------------------------------------------------------------

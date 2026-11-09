@@ -36,11 +36,11 @@ import { silentLogger } from '../../src/log.ts';
 import { attachCoarseLayer, type CoarseLayerImpl } from '../../src/skills/coarse/index.ts';
 import { proveShortcut } from '../../src/skills/fly/cave/proof.ts'; // Track F6
 import { WaypointProvider, type RoutePoint } from '../../src/skills/fly/cave/route.ts'; // Track F6
-import { caveLegs, caveWorld, loadCaveFixture, ROUTE_A, ROUTE_B, shift, type CaveLeg } from '../../src/skills/fly/corridor/cave.ts';
+import { caveLegs, caveWorld, loadCaveFixture, REPLICA_SHELL, replicaTerraces, ROUTE_A, ROUTE_B, shift, type CaveLeg } from '../../src/skills/fly/corridor/cave.ts';
 import { setCorridorProvider, setCorridorUnderFly } from '../../src/skills/fly/corridor/registry.ts';
 import { CLS_AIR, CLS_WATER } from '../../src/world/cache/types.ts';
 import { WorldCache } from '../../src/world/cache/cache.ts';
-import { buildPlatform, E2E, giveFlightKit, prepareServer, sleep, startFlyBot, teleport, type FlyBot } from './fly-truth.ts';
+import { buildPlatform, E2E, FEET_Y, giveFlightKit, prepareServer, sleep, startFlyBot, teleport, truthLoaded, type FlyBot } from './fly-truth.ts';
 
 const fix = loadCaveFixture();
 const ONLY = new Set((process.env.FLY_CAVE_ONLY ?? '').split(',').filter(Boolean));
@@ -143,6 +143,96 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
     );
   }
 
+  /**
+   * Track F8: the box's surroundings as the Realm has them, not a mesa on the flat world: a stone shell REPLICA_SHELL thick
+   * round the box's sides (the box's edge slices the cave open: the layer's corridor into cave_start went in through that
+   * cut face, where the fixture and the Realm have rock) and the real terrain's heights round it, a chunk at a time, from
+   * the extract's column tops (`replicaTerraces`: the chunk's lowest known top). Built before the box (the box's own cells
+   * are set after, so a chunk the box cuts may be filled whole here).
+   */
+  async function buildSurroundings(b: FlyBot): Promise<void> {
+    const t0 = performance.now();
+    const LIMIT = 32_768; // blocks a fill command may set
+    const STOP = 128; // the fills are sent from a grid of teleport stops this far apart (a fill wants its chunks loaded: TICK_DISTANCE 10)
+    interface Box {
+      x1: number;
+      y1: number;
+      z1: number;
+      x2: number;
+      y2: number;
+      z2: number;
+    }
+    const jobs: Box[] = [];
+    const pieces = (x1: number, y1: number, z1: number, x2: number, y2: number, z2: number): void => {
+      const area = (x2 - x1 + 1) * (z2 - z1 + 1);
+      const step = Math.max(1, Math.floor(LIMIT / area));
+      for (let y = y1; y <= y2; y += step) jobs.push({ x1, y1: y, z1, x2, y2: Math.min(y2, y + step - 1), z2 });
+    };
+    const y0 = FEET_Y - 1;
+    // the terraces (real chunks of the tops rectangle, shifted to the replica)
+    const terrace = replicaTerraces(e, homeReal ? { home: homeReal } : {});
+    const r = e.topsRect;
+    let terraces = 0;
+    if (r) {
+      for (let cx = r.min.x >> 4; cx <= r.max.x >> 4; cx++) {
+        for (let cz = r.min.z >> 4; cz <= r.max.z >> 4; cz++) {
+          const top = terrace(cx, cz);
+          if (top === undefined || top < y0) continue;
+          pieces(cx * 16 + d.x, y0, cz * 16 + d.z, cx * 16 + 15 + d.x, top, cz * 16 + 15 + d.z);
+          terraces++;
+        }
+      }
+    }
+    // the shell: the ring round the footprint from the flat ground to the box's top, a chunk's length a piece
+    const top = min.y + e.size.y - 1;
+    const s = REPLICA_SHELL;
+    const walls: Box[] = [
+      { x1: min.x - s, y1: y0, z1: min.z - s, x2: min.x - 1, y2: top, z2: min.z + e.size.z - 1 + s },
+      { x1: min.x + e.size.x, y1: y0, z1: min.z - s, x2: min.x + e.size.x - 1 + s, y2: top, z2: min.z + e.size.z - 1 + s },
+      { x1: min.x, y1: y0, z1: min.z - s, x2: min.x + e.size.x - 1, y2: top, z2: min.z - 1 },
+      { x1: min.x, y1: y0, z1: min.z + e.size.z, x2: min.x + e.size.x - 1, y2: top, z2: min.z + e.size.z - 1 + s },
+    ];
+    for (const w of walls) {
+      const alongX = w.x2 - w.x1 > w.z2 - w.z1;
+      const lo = alongX ? w.x1 : w.z1;
+      const hi = alongX ? w.x2 : w.z2;
+      for (let a = lo; a <= hi; a = ((a >> 4) + 1) * 16) {
+        const to = Math.min(hi, ((a >> 4) + 1) * 16 - 1);
+        if (alongX) pieces(a, w.y1, w.z1, to, w.y2, w.z2);
+        else pieces(w.x1, w.y1, a, w.x2, w.y2, to);
+      }
+    }
+    // every job from the stop nearest its centre (the stop's own chunk last: the body stands there while they are sent)
+    const groups = new Map<string, { x: number; z: number; jobs: Box[] }>();
+    for (const j of jobs) {
+      const cx = (j.x1 + j.x2) / 2;
+      const cz = (j.z1 + j.z2) / 2;
+      const sx = Math.round(cx / STOP) * STOP;
+      const sz = Math.round(cz / STOP) * STOP;
+      const k = `${sx},${sz}`;
+      let g = groups.get(k);
+      if (!g) groups.set(k, (g = { x: sx, z: sz, jobs: [] }));
+      g.jobs.push(j);
+    }
+    let fills = 0;
+    for (const g of groups.values()) {
+      const own = (j: Box): boolean => g.x >= j.x1 && g.x <= j.x2 && g.z >= j.z1 && g.z <= j.z2;
+      g.jobs.sort((p, q) => Number(own(p)) - Number(own(q)));
+      await teleport(b, { x: g.x + 0.5, y: FEET_Y, z: g.z + 0.5 });
+      for (const j of g.jobs) {
+        await truthLoaded(b.truth, 'fill', [j.x1, j.y1, j.z1, j.x2, j.y2, j.z2, 'stone'], 60_000);
+        fills++;
+      }
+    }
+    notes.push(`surroundings: ${terraces} terrace chunks at the real heights and the shell round the box in ${fills} fills from ${groups.size} stops, ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+  }
+
+  /** Track F8: the feet height of the replica's ground at a real column outside the box (a terrace, else the flat world). */
+  const groundFeet = (x: number, z: number): number => {
+    const t = replicaTerraces(e, homeReal ? { home: homeReal } : {})(x >> 4, z >> 4);
+    return t !== undefined && t >= FEET_Y - 1 ? t + 1 : FEET_Y;
+  };
+
   /** Teleports over the box's surface (every 96 blocks), so the cache records the replica's chunks, then home. */
   async function flyOver(b: FlyBot): Promise<void> {
     const xs: number[] = [];
@@ -160,14 +250,17 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
         n++;
       }
     }
-    // the flat ground between home and the box (the cruise of trip C; the live bot has seen its own terrain there)
+    // the ground between home and the box (the cruise of trip C; the live bot has seen its own terrain there): Track F8, the
+    // terraces' heights where the real tops are known, the flat world's elsewhere
     let m = 0;
     if (home) {
       const to = centre(start);
       const len = Math.hypot(to.x - home.x, to.z - home.z);
       for (let s = 0; s < len; s += 96) {
         const t = s / len;
-        await teleport(b, { x: Math.floor(home.x + (to.x - home.x) * t) + 0.5, y: -60, z: Math.floor(home.z + (to.z - home.z) * t) + 0.5 });
+        const x = Math.floor(home.x + (to.x - home.x) * t);
+        const z = Math.floor(home.z + (to.z - home.z) * t);
+        await teleport(b, { x: x + 0.5, y: groundFeet(x - d.x, z - d.z), z: z + 0.5 });
         m++;
       }
     }
@@ -188,8 +281,10 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
     const away: Vec3 = home ?? { x: min.x - 400.5, y: -60, z: min.z - 0.5 };
     if (home) await buildPlatform(bot, { x: home.x - 0.5, z: home.z - 0.5 }, home.y, 2, home);
     else await teleport(bot, away);
-    if (!REUSE) await buildReplica(bot);
-    else notes.push('build: reused (FLY_CAVE_REUSE=1)');
+    if (!REUSE) {
+      await buildSurroundings(bot); // Track F8: before the box (a chunk the box cuts is filled whole, the box's cells set after)
+      await buildReplica(bot);
+    } else notes.push('build: reused (FLY_CAVE_REUSE=1)');
     cacheDir = mkdtempSync(join(tmpdir(), 'bb-cave-e2e-'));
     cache = new WorldCache({ dir: cacheDir, flushIntervalMs: 0, logger: silentLogger });
     cache.attach(mob.world);
@@ -236,34 +331,38 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
     await teleport(b, centre(cell));
   }
 
-  it.skipIf(!want('tripC') || !home)("trip C: `!fly` from the home pad to cave_start (the entrance by cave_2), today's live behaviour", async () => {
+  it.skipIf(!want('tripC') || !home)("trip C: `!fly` from the home pad to cave_start (the entrance by cave_2), today's live behaviour (Track F8: FLY_CAVE_STYLE=1 flies in with the cave style, FLY_CAVE_RUNS times)", async () => {
     const b = bot!;
-    setCorridorUnderFly(b.task, undefined);
-    await b.command('!stop');
-    await sleep(500);
-    await teleport(b, home!);
-    await giveFlightKit(b, { rockets: 64 });
-    await teleport(b, home!);
-    const goal = centre(start);
-    const since = await b.truth.now();
-    const n0 = b.logs.length;
-    const from = b.said.length;
-    const w0 = water;
-    const t0 = performance.now();
-    await b.command(`!fly ${goal.x - 0.5} ${goal.y} ${goal.z - 0.5}`);
-    // Track R1: the trip's own end line (the corridor's arrival or failure, a landing's), not any `fly:` line on the way
-    const end = await b.reply((s) => s.startsWith('arrived') || s.startsWith('landed') || s.startsWith('fly: the corridor to ') || s.startsWith('fly: landed, but'), from, 600_000).catch((err: unknown) => `no end line: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`);
-    await b.command('!stop');
-    await sleep(1000);
-    const logs = b.logs.slice(n0).map((l) => l.replace(/^\S+ (info|warn|error) /, ''));
-    const line = logs.find((l) => l.startsWith('corridor: arrived at') || l.startsWith('corridor: gave up on'));
-    const dmg = await b.truth.damageSince(since, b.name);
-    const off = await offFrom(b, goal);
-    const parsed = parseEnd(line);
-    rows.push({ run: 'tripC', leg: 'home -> cave_start', ok: end.startsWith('arrived') && off < 3, off, ...parsed, seconds: parsed.seconds >= 0 ? parsed.seconds : (performance.now() - t0) / 1000, damage: dmg.total, water: water - w0, how: /\(([^)]*)\);/.exec(end)?.[1] ?? '' });
-    notes.push(`tripC: ${end}\n    ${logs.filter((l) => /^corridor: (plan|leg|underground|window)|flight: (landed|ended)|takeoff|fly: no takeoff/.test(l)).slice(0, 30).map((l) => l.slice(0, 260)).join('\n    ')}`);
-    expect(end.length).toBeGreaterThan(0);
-  }, 900_000);
+    const runs = RUNS ?? 1;
+    for (let i = 0; i < runs; i++) {
+      setCorridorUnderFly(b.task, undefined);
+      if (process.env.FLY_CAVE_STYLE === '1') b.settings.set('flyCave', 'on'); // Track F8: the trip in flies underground in the cave style
+      await b.command('!stop');
+      await sleep(500);
+      await teleport(b, home!);
+      await giveFlightKit(b, { rockets: 64 });
+      await teleport(b, home!);
+      const goal = centre(start);
+      const since = await b.truth.now();
+      const n0 = b.logs.length;
+      const from = b.said.length;
+      const w0 = water;
+      const t0 = performance.now();
+      await b.command(`!fly ${goal.x - 0.5} ${goal.y} ${goal.z - 0.5}`);
+      // Track R1: the trip's own end line (the corridor's arrival or failure, a landing's), not any `fly:` line on the way
+      const end = await b.reply((s) => s.startsWith('arrived') || s.startsWith('landed') || s.startsWith('fly: the corridor to ') || s.startsWith('fly: landed, but'), from, 600_000).catch((err: unknown) => `no end line: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`);
+      await b.command('!stop');
+      await sleep(1000);
+      const logs = b.logs.slice(n0).map((l) => l.replace(/^\S+ (info|warn|error) /, ''));
+      const line = logs.find((l) => l.startsWith('corridor: arrived at') || l.startsWith('corridor: gave up on'));
+      const dmg = await b.truth.damageSince(since, b.name);
+      const off = await offFrom(b, goal);
+      const parsed = parseEnd(line);
+      rows.push({ run: 'tripC', leg: `${i} home -> cave_start`, ok: end.startsWith('arrived') && off < 3, off, ...parsed, seconds: parsed.seconds >= 0 ? parsed.seconds : (performance.now() - t0) / 1000, damage: dmg.total, water: water - w0, how: /\(([^)]*)\);/.exec(end)?.[1] ?? '' });
+      notes.push(`tripC ${i}: ${end}\n    ${logs.filter((l) => /^corridor: |flight: (landed|ended|holding)|fly: landing for|takeoff|fly: no takeoff|route: .*bailing/.test(l)).slice(0, 40).map((l) => l.slice(0, 260)).join('\n    ')}`);
+      expect(end.length).toBeGreaterThan(0);
+    }
+  }, 3_600_000);
 
   /**
    * A route walked stop to stop (`skills.goto` near each waypoint); a failed leg, or the leg after one FLY_CAVE_LEGS

@@ -10,7 +10,7 @@
 import type { Vec3 } from '../../../connection/types.ts';
 import { GLIDE, PHYSICS, glideVelocity } from '../../input/physics.ts';
 import { sweep, type RouteGrid } from './grid.ts';
-import { BURN, CLIPPED_GLIDE_DELAY, EDGE_MAX_TICKS, EDGE_TICKS, GLIDE_DELAY, RISK_RANGE, burnTick, cloneState, dist3, freshBurn, headingOf, hspeed, inBox, landingCells, type Maneuver, type PrimitiveFamily, type RouteControl, type RouteEdge, type RouteGoal, type RouteState } from './types.ts';
+import { BURN, CLIPPED_GLIDE_DELAY, EDGE_MAX_TICKS, EDGE_TICKS, GLIDE_DELAY, MID_BURNS, RISK_RANGE, burnTick, cloneState, dist3, freshBurn, headingOf, hspeed, inBox, landingCells, speedCap, type Maneuver, type PrimitiveFamily, type RouteControl, type RouteEdge, type RouteGoal, type RouteState } from './types.ts';
 
 export interface EdgeContext {
   grid: RouteGrid;
@@ -21,6 +21,8 @@ export interface EdgeContext {
   burn?: number;
   /** Sweep the burn branches too (RouteRequest.burnBranches; default true). */
   burnBranches?: boolean;
+  /** Track F8: the burns in between too (RouteRequest.midBurns; default false). */
+  midBurns?: boolean;
 }
 
 /**
@@ -28,7 +30,7 @@ export interface EdgeContext {
  * stepBody's ground branch) and glides from the next tick on; a gliding body follows glideVelocity with the
  * boost while the nominal burn runs. The rocket is counted only when it may be fired.
  */
-export function stepState(s: Readonly<RouteState>, c: RouteControl, stackRockets: boolean, burn = BURN.nominal, grid?: RouteGrid, branches = true): { next: RouteState; fired: boolean } {
+export function stepState(s: Readonly<RouteState>, c: RouteControl, stackRockets: boolean, burn = BURN.nominal, grid?: RouteGrid, branches = true, mids = false): { next: RouteState; fired: boolean } {
   const n = cloneState(s);
   let fired = false;
   n.yaw = c.yaw;
@@ -83,6 +85,10 @@ export function stepState(s: Readonly<RouteState>, c: RouteControl, stackRockets
     if (branches && !(n.early && n.late)) {
       n.early = { pos: { ...s.pos }, vel: { ...s.vel } };
       n.late = { pos: { ...s.pos }, vel: { ...s.vel } };
+      // Track F8: the burns in between too (a rocket in a burn's tail: the union with the branch's burn left)
+      if (mids) n.mids = MID_BURNS.map((b, i) => ({ pos: { ...(s.mids?.[i]?.pos ?? s.pos) }, vel: { ...(s.mids?.[i]?.vel ?? s.vel) }, left: Math.max(s.mids?.[i]?.left ?? 0, b) }));
+    } else if (branches && n.early && n.late && n.mids) {
+      for (const [i, b] of MID_BURNS.entries()) if (n.mids[i]) n.mids[i].left = Math.max(n.mids[i].left, b);
     }
   }
   const boosting = n.boost.nom > 0;
@@ -95,10 +101,17 @@ export function stepState(s: Readonly<RouteState>, c: RouteControl, stackRockets
     const lv = glideVelocity(n.late.vel, c.yaw, c.pitch, n.boost.max > 0);
     n.early = { pos: { x: f32(n.early.pos.x + ev.x), y: f32(n.early.pos.y + ev.y), z: f32(n.early.pos.z + ev.z) }, vel: ev };
     n.late = { pos: { x: f32(n.late.pos.x + lv.x), y: f32(n.late.pos.y + lv.y), z: f32(n.late.pos.z + lv.z) }, vel: lv };
+    if (n.mids) {
+      n.mids = n.mids.map((m) => {
+        const mv = glideVelocity(m.vel, c.yaw, c.pitch, m.left > 0);
+        return { pos: { x: f32(m.pos.x + mv.x), y: f32(m.pos.y + mv.y), z: f32(m.pos.z + mv.z) }, vel: mv, left: Math.max(0, m.left - 1) };
+      });
+    }
     // converged back onto the nominal once the burn is over in every branch
-    if (n.boost.max <= 1 && dist3(n.early.pos, n.pos) < BRANCH_CONVERGED && dist3(n.late.pos, n.pos) < BRANCH_CONVERGED) {
+    if (n.boost.max <= 1 && dist3(n.early.pos, n.pos) < BRANCH_CONVERGED && dist3(n.late.pos, n.pos) < BRANCH_CONVERGED && (n.mids ?? []).every((m) => dist3(m.pos, n.pos) < BRANCH_CONVERGED)) {
       delete n.early;
       delete n.late;
+      delete n.mids;
     }
   }
   n.boost = burnTick(n.boost);
@@ -126,8 +139,8 @@ export const LOW_CEILING_RISE = 0.25;
  * Re-fly `controls` from `start` on the nominal burn (the per-tick states of a plan; no collision check):
  * the search's unwind and the tracker's reference share it.
  */
-export function replay(start: Readonly<RouteState>, controls: readonly RouteControl[], goals: readonly RouteGoal[], stackRockets: boolean, branches = false): RouteState[] {
-  return replayBurns(start, controls, goals, [], stackRockets, branches);
+export function replay(start: Readonly<RouteState>, controls: readonly RouteControl[], goals: readonly RouteGoal[], stackRockets: boolean, branches = false, mids = false): RouteState[] {
+  return replayBurns(start, controls, goals, [], stackRockets, branches, mids);
 }
 
 /**
@@ -135,13 +148,13 @@ export function replay(start: Readonly<RouteState>, controls: readonly RouteCont
  * fire; the nominal when absent): the tracker re-times a plan's reference states to the burn it has read off the body
  * (tracker.ts `retime`), so the body is tracked against where the plan's controls really take it.
  */
-export function replayBurns(start: Readonly<RouteState>, controls: readonly RouteControl[], goals: readonly RouteGoal[], burns: readonly number[], stackRockets: boolean, branches = false): RouteState[] {
+export function replayBurns(start: Readonly<RouteState>, controls: readonly RouteControl[], goals: readonly RouteGoal[], burns: readonly number[], stackRockets: boolean, branches = false, mids = false): RouteState[] {
   const out: RouteState[] = [];
   let s = cloneState(start);
   let k = 0;
   for (const c of controls) {
     // (Track F7: `branches` carries the burn branches along the states, for a search in pieces to start its next piece from them)
-    const { next, fired } = stepState(s, c, stackRockets, c.fire ? (burns[k] ?? BURN.nominal) : BURN.nominal, undefined, branches);
+    const { next, fired } = stepState(s, c, stackRockets, c.fire ? (burns[k] ?? BURN.nominal) : BURN.nominal, undefined, branches, mids);
     if (fired) k++;
     const g = goals[next.wp];
     if (g?.kind === 'landing' && landsOn(g, s.pos, next.pos, next.vel)) {
@@ -214,7 +227,7 @@ export function edgeOf(m: Maneuver, s: Readonly<RouteState>, ctx: EdgeContext): 
   const branches = ctx.burnBranches !== false;
   for (let i = 0; i < ticks; i++) {
     const c = m.control(s, now, i);
-    const { next, fired } = stepState(now, c, ctx.stackRockets, ctx.burn, ctx.grid, branches);
+    const { next, fired } = stepState(now, c, ctx.stackRockets, ctx.burn, ctx.grid, branches, ctx.midBurns === true);
     if (fired) rockets++;
     const g = ctx.goals[next.wp];
     if (g?.kind === 'landing' && now.pos.y >= g.top && next.pos.y < g.top) {
@@ -234,6 +247,8 @@ export function edgeOf(m: Maneuver, s: Readonly<RouteState>, ctx: EdgeContext): 
     if (!landed) {
       if (sw.clearance < clearance) clearance = sw.clearance;
       risk += 1 - sw.clearance / RISK_RANGE;
+      // Track F8: speed by clearance (types.ts SPEED_RULE): too fast this close to a solid, the edge is refused
+      if (now.gliding && hspeed(next.vel) > speedCap(sw.clearance)) return undefined;
       // the burn branches must clear too (the plan is robust to the burn by construction)
       if (next.early && next.late && now.early && now.late) {
         const e = sweep(grid, now.early.pos, next.early.pos, ctx.margin);
@@ -241,6 +256,16 @@ export function edgeOf(m: Maneuver, s: Readonly<RouteState>, ctx: EdgeContext): 
         const l = sweep(grid, now.late.pos, next.late.pos, ctx.margin);
         if (l.hit) return undefined;
         clearance = Math.min(clearance, e.clearance, l.clearance);
+        // Track F8: the burns in between (MID_BURNS), at the same margin
+        if (next.mids && now.mids) {
+          for (const [i, m] of next.mids.entries()) {
+            const from = now.mids[i];
+            if (!from) continue;
+            const sm = sweep(grid, from.pos, m.pos, ctx.margin);
+            if (sm.hit) return undefined;
+            if (sm.clearance < clearance) clearance = sm.clearance;
+          }
+        }
       }
     }
     while (next.wp < ctx.goals.length && passes(ctx.goals[next.wp]!, now.pos, next.pos)) next.wp++;

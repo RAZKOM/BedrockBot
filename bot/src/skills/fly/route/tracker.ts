@@ -208,6 +208,8 @@ export interface TrackerOptions {
   /** Track F6: every request's heuristic measures through the air (RouteRequest.geodesic), and the search's pieces (RouteRequest.pieces). */
   geodesic?: boolean;
   pieces?: number;
+  /** Track F8: the requests sweep the burns between the extremes (RouteRequest.midBurns; the cave style's). */
+  midBurns?: boolean;
 }
 
 export type TrackerStatus = 'planning' | 'tracking' | 'holding' | 'bailing' | 'done' | 'failed';
@@ -632,6 +634,7 @@ export class RouteTracker {
       start = { ...cloneState(ref), rockets: Math.max(0, b.rockets - used), wp: 0 };
       delete start.early;
       delete start.late;
+      delete start.mids; // (Track F8)
       at = now + (j - this.cursor);
     }
     const req: RouteRequest = {
@@ -649,6 +652,7 @@ export class RouteTracker {
       ...(this.o.library !== undefined ? { library: this.o.library } : {}),
       ...(this.o.geodesic ? { geodesic: true } : {}),
       ...(this.o.pieces !== undefined ? { pieces: this.o.pieces } : {}),
+      ...(this.o.midBurns ? { midBurns: true } : {}),
     };
     this.pending = true;
     if (this.plan) this.stats.replans++;

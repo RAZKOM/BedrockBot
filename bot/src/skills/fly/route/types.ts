@@ -60,11 +60,51 @@ export interface RouteState {
    */
   early?: Branch;
   late?: Branch;
+  /**
+   * Track F8: the burns between the extremes (`MID_BURNS`: 12 and 18 of 9 to 21), stepped and swept like `early` and `late`.
+   * Track F7 measured that a plan robust at 9 and 21 hit the margin open loop for the burns in between (one search of a
+   * tight-107 window: 10 to 16 hit at ticks 16 to 20): the controls are a timetable and a body the burn carried a little
+   * farther or less far takes the bend off the nominal path. With the mids swept too, a burn end lies within 3 ticks of a
+   * swept one (about 0.15 of drift at the boost's pull: within the margin). `left`: the ticks the branch's burn still runs.
+   */
+  mids?: MidBranch[];
 }
 
 export interface Branch {
   pos: Vec3;
   vel: Vec3;
+}
+
+export interface MidBranch extends Branch {
+  left: number;
+}
+
+/** Track F8: the burns swept between BURN.min and BURN.max (the extremes are `early` / `late`) when `RouteRequest.midBurns` asks. */
+export const MID_BURNS: readonly number[] = Object.freeze([12, 18]);
+
+/**
+ * Track F8: speed by clearance in the planner (Track F7's open point: the hits left are a brake or a turn at 1.4 to 1.6 a tick
+ * next to a wall, with the burn ending a tick or two early). A tick of an edge flown with the swept box within `clear` of a
+ * solid (beyond the margin) may not be faster than `slow` at clearance 0, rising to `fast` at `clear`; a faster tick refuses
+ * the edge. `clear` 0 is the rule off (the default, SPEED_RULE_DEFAULT). Measured at 0.6 / 0.8 / 1.6 (SPEED_RULE_MEASURED, the
+ * benches' `slow06`): on the two generator caves that still hit with the mid burns swept it took wide-106's hit of 8.3 to 0 and
+ * doubled the windows landing on their cell for the same flown distance, and cost the owner's cave nothing; but the sweep's
+ * clearance counts floors and ceilings, so in a 3-high bore it refused the takeoff and the landing approach (docs/flight.md
+ * "Cave entry"). The benches set it in their worker; the bot never changes it.
+ */
+export interface SpeedRule {
+  clear: number;
+  slow: number;
+  fast: number;
+}
+export const SPEED_RULE_DEFAULT: Readonly<SpeedRule> = Object.freeze({ clear: 0, slow: 0.8, fast: 1.6 });
+/** The rule as measured (`slow06`): clear 0.6, slow 0.8, fast 1.6. Off by default: the sweep's clearance counts floors and ceilings as walls, and in a 3-high bore it refused the takeoff and the landing approach (fly-route's tunnels, the shortcut proof through a 3 x 3 bore). A wall-only clearance is the open point. */
+export const SPEED_RULE_MEASURED: Readonly<SpeedRule> = Object.freeze({ clear: 0.6, slow: 0.8, fast: 1.6 });
+export const SPEED_RULE: SpeedRule = { ...SPEED_RULE_DEFAULT };
+/** The speed a tick may have at `clearance` under the rule (Infinity when the rule is off or the clearance is beyond it). */
+export function speedCap(clearance: number, rule: SpeedRule = SPEED_RULE): number {
+  if (rule.clear <= 0 || clearance >= rule.clear) return Infinity;
+  return rule.slow + (rule.fast - rule.slow) * Math.max(0, clearance) / rule.clear;
 }
 
 /** The controls of one tick (what a vanilla client can do in the air). */
@@ -168,6 +208,13 @@ export interface RouteRequest {
    * budget far from the end. Undefined or 0: one search (the default).
    */
   pieces?: number;
+  /**
+   * Track F8: the burns between the extremes (MID_BURNS) are swept too (`RouteState.mids`). The cave style asks for it (it is
+   * what made the generator set 96 % clean); the open-air drivers do not: a partial plan at a hard spot differs by chance with
+   * them, and fly-corridor's clean 3 x 3 bore landed short on one seed through that (the open-air drivers carry no cave rule,
+   * as Tracks F6 and F7 decided). Default false.
+   */
+  midBurns?: boolean;
 }
 
 export type PrimitiveFamily = 'glide' | 'turn' | 'rocket' | 'brake' | 'hover' | 'takeoff' | 'maneuver';
@@ -266,7 +313,16 @@ export const GLIDE_DELAY = 1;
 export const CLIPPED_GLIDE_DELAY = 1;
 
 export function cloneState(s: Readonly<RouteState>): RouteState {
-  return { ...s, pos: { ...s.pos }, vel: { ...s.vel }, boost: { ...s.boost } };
+  return { ...s, pos: { ...s.pos }, vel: { ...s.vel }, boost: { ...s.boost }, ...(s.mids ? { mids: s.mids.map((m) => ({ pos: { ...m.pos }, vel: { ...m.vel }, left: m.left })) } : {}) };
+}
+
+/** Track F8: the state without its burn branches (a search's start, a piece's end re-flown without them). */
+export function withoutBranches(s: Readonly<RouteState>): RouteState {
+  const n = cloneState(s);
+  delete n.early;
+  delete n.late;
+  delete n.mids;
+  return n;
 }
 
 /** The distance between two feet positions. */

@@ -130,6 +130,7 @@ export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[
     ...(style.riskCost !== undefined ? { riskCost: style.riskCost } : {}),
     ...(style.geodesic ? { geodesic: true } : {}),
     ...(style.pieces !== undefined ? { pieces: style.pieces } : {}),
+    ...(style.midBurns ? { midBurns: true } : {}),
     ...(firstPlan ? { firstPlan } : {}),
     ...(floor ? { floor } : {}),
     ...(o.note ? { note: o.note } : {}),

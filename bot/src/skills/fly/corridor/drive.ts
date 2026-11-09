@@ -65,6 +65,8 @@ export interface ChainOptions {
   /** Track F6: the requests' heuristic through the air (RouteRequest.geodesic) and the search's pieces (RouteRequest.pieces). */
   geodesic?: boolean;
   pieces?: number;
+  /** Track F8: the searches sweep the burns between the extremes (RouteRequest.midBurns). */
+  midBurns?: boolean;
   /** Track F7: the cells a body may stand on (tracker.ts TrackerOptions.floor: the bail-out sinks onto a dry one). */
   floor?: (x: number, y: number, z: number) => boolean | undefined;
   note?: (msg: string) => void;
@@ -123,6 +125,7 @@ export class TrackerChain {
       ...(o.riskCost !== undefined ? { riskCost: o.riskCost } : {}),
       ...(o.geodesic ? { geodesic: true } : {}),
       ...(o.pieces !== undefined ? { pieces: o.pieces } : {}),
+      ...(o.midBurns ? { midBurns: true } : {}),
       ...(o.floor ? { floor: o.floor } : {}),
       ...(o.note ? { note: o.note } : {}),
     });
@@ -235,7 +238,7 @@ export class TrackerChain {
  * (the look towards the first goal) through every goal of the window at the live budget, with the stretch's margin,
  * weight and edge set; `proofOf` reads the answer.
  */
-export function windowRequest(w: Pick<Window, 'goals'>, from: Vec3, rockets: number, o: Pick<StretchOptions, 'margin' | 'maxNodes' | 'maxMs' | 'weight' | 'library' | 'riskCost' | 'geodesic' | 'pieces'>): RouteRequest {
+export function windowRequest(w: Pick<Window, 'goals'>, from: Vec3, rockets: number, o: Pick<StretchOptions, 'margin' | 'maxNodes' | 'maxMs' | 'weight' | 'library' | 'riskCost' | 'geodesic' | 'pieces' | 'midBurns'>): RouteRequest {
   const first = w.goals[0] ? goalPoint(w.goals[0]) : { x: from.x, y: from.y, z: from.z + 1 };
   const yaw = (Math.atan2(-(first.x - from.x), first.z - from.z) * 180) / Math.PI;
   const start: RouteState = { pos: { x: from.x, y: from.y, z: from.z }, vel: { x: 0, y: 0, z: 0 }, yaw, boost: { ...NO_BOOST }, gliding: false, rockets, wp: 0 };
@@ -251,6 +254,7 @@ export function windowRequest(w: Pick<Window, 'goals'>, from: Vec3, rockets: num
     ...(o.riskCost !== undefined ? { riskCost: o.riskCost } : {}),
     ...(o.geodesic ? { geodesic: true } : {}),
     ...(o.pieces !== undefined ? { pieces: o.pieces } : {}),
+    ...(o.midBurns ? { midBurns: true } : {}),
   };
 }
 
@@ -291,6 +295,7 @@ export interface StretchOptions {
   /** Track F6: the searches' heuristic through the air (RouteRequest.geodesic) and their pieces (RouteRequest.pieces). */
   geodesic?: boolean;
   pieces?: number;
+  midBurns?: boolean;
   note?: (msg: string) => void;
 }
 
@@ -336,6 +341,7 @@ export function flyStretch(d: StretchDeps, o: StretchOptions): { done: Promise<S
     ...(o.firstPlan ? { firstPlan: o.firstPlan } : {}),
     ...(o.geodesic ? { geodesic: true } : {}),
     ...(o.pieces !== undefined ? { pieces: o.pieces } : {}),
+    ...(o.midBurns ? { midBurns: true } : {}),
     ...(d.floor ? { floor: d.floor } : {}),
     yaw: loop.command.yaw,
     note: (m) => {

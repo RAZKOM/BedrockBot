@@ -25,7 +25,7 @@ import { RoutePlannerClient } from '../skills/fly/route/worker.ts'; // Track F3
 import { preferSite, RECHECK_EVERY_MS, RecheckState, SITE_BUDGET_MS, SITE_PROBES, SITE_SIMS, siteCandidates } from '../skills/fly/sites.ts'; // Track BL
 import type { Goal, GotoOptions, SkillResult } from '../skills/types.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
-import { FlightProcess, FlyProcess, landingLine, targetFromPlan, type FlyOutcome, type FlyTarget } from '../tasks/process/fly.ts';
+import { FlightProcess, FlyProcess, landingLine, targetFromPlan, type FlyOutcome, type FlyTarget, type LandingHint } from '../tasks/process/fly.ts';
 import { PRIORITY } from '../tasks/process/manager.ts';
 import { waypointStoreOf, waypointGoal } from './commands-nav.ts';
 import { survivalKitOf } from './commands-survival.ts';
@@ -33,7 +33,7 @@ import { NETHER, OVERWORLD } from '../world/dimension.ts';
 import type { Containers } from '../world/containers.ts';
 import type { Logger } from '../log.ts';
 import { corridorAirborne, corridorProviderOf, corridorWanted } from '../skills/fly/corridor/registry.ts'; // Track F4b
-import type { CorridorReport, StepOutcome } from '../skills/fly/corridor/executor.ts'; // Track F4b
+import type { CorridorReport, SkyHint, StepOutcome } from '../skills/fly/corridor/executor.ts'; // Track F4b
 import { corridorEndLine, runCorridorTrip, stopCorridorTrip, type CorridorWiring, type TripStyle } from './commands-corridor.ts'; // Track F4b
 import { orderedRoute, shortcutRoute, WaypointProvider, type RoutePoint } from '../skills/fly/cave/route.ts'; // Track F5b
 import { proveShortcutInWorker } from '../skills/fly/cave/proof.ts'; // Track F5b
@@ -224,7 +224,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * feet, no digging or pillars), overhang cells with a simulated corridor approach; `exact` (the half
    * width) lands on the goal itself when it is landable (`!fly <x y z>`). The compact line goes to the log.
    */
-  const landingFor = async (goal: Vec3, label: string, exact: number | undefined): Promise<LandingPlan> => {
+  const landingFor = async (goal: Vec3, label: string, exact: number | undefined, hint?: LandingHint): Promise<LandingPlan> => {
     const nav = probeNavOf(pve.mover);
     const target = { type: 'near' as const, p: { x: goal.x + 0.5, y: goal.y, z: goal.z + 0.5 }, r: 1.5 };
     const probe = nav
@@ -256,6 +256,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         style: String(d.settings.get('flyLandStyle')) as 'auto' | 'flare' | 'brake', // Track F1: the precision goal, the brake's corridors
         ...(exact !== undefined ? { exact } : {}),
         ...(position() ? { from: position()! } : {}), // Track F3: a route landing comes in from the body's side
+        ...(hint?.rim !== undefined ? { rim: hint.rim } : {}), // Track F8: the opening's rim over a corridor's landing cell
       },
     );
     log.info(`fly: ${plan.line}`);
@@ -585,9 +586,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * Track BF: the flight's target for a goal (the landing plan: the goal itself, a confirmed cell, the
    * nearest dry ground, or the goal held high while its ground is not loaded) and the reply line.
    */
-  const planFlight = async (from: Vec3, goalBlock: Vec3, label: string, half: number, exact: boolean): Promise<{ target: FlyTarget; line: string; said: string | undefined }> => {
-    const plan = await landingFor(goalBlock, label, exact ? half : undefined);
-    const target = targetFromPlan(plan, { label, goal: goalBlock, half, ...(exact ? { exact: half } : {}) });
+  const planFlight = async (from: Vec3, goalBlock: Vec3, label: string, half: number, exact: boolean, hint?: LandingHint): Promise<{ target: FlyTarget; line: string; said: string | undefined }> => {
+    const plan = await landingFor(goalBlock, label, exact ? half : undefined, hint);
+    const target = targetFromPlan(plan, { label, goal: goalBlock, half, ...(exact ? { exact: half } : {}), ...(hint ?? {}) });
     const distance = hdist(from, { x: goalBlock.x + 0.5, z: goalBlock.z + 0.5 });
     const walk = plan.kind === 'cell' || plan.kind === 'fallback' ? plan.walk : 0;
     const line = walk > 0 ? `flying ${Math.round(hdist(from, target))} blocks to ${Math.round(walk)} blocks from ${label}, then walking` : `flying (${Math.round(distance)} blocks; walking would be ~${Math.round(walkMinutes(distance))} min)`;
@@ -1022,14 +1023,15 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
 
   // Track F4b: the corridor trip's ports (chat/commands-corridor.ts): the cruise as `!fly` builds it (an exact cell), the
   // navigator's own walk, the live model, the route grid and the worker's planner
-  const corridorSky = async (cell: Vec3, label: string): Promise<StepOutcome> => {
+  const corridorSky = async (cell: Vec3, label: string, hint?: SkyHint): Promise<StepOutcome> => {
     const from = position();
     if (!from) return { ok: false, reason: 'position unknown' };
     const k = readKit(inv, memory());
-    const aim: LandingTarget = { x: cell.x + 0.5, z: cell.z + 0.5, top: cell.y, half: 1 };
+    // (Track F8: the sky check and the cruise height are measured from the rim over a cell under an opening)
+    const aim: LandingTarget = { x: cell.x + 0.5, z: cell.z + 0.5, top: cell.y, half: 1, ...(hint?.rim !== undefined ? { rim: hint.rim } : {}) };
     const tk = await takeoffFor(from, aim, skyHere(from, aim), k.rocketsHotbar || k.rockets);
     if ('refuse' in tk) return { ok: false, reason: tk.refuse, at: from };
-    const f = await planFlight(from, cell, label, 1, true);
+    const f = await planFlight(from, cell, label, 1, true, hint);
     Object.assign(f.target, tk);
     if (controller.active) return { ok: false, reason: 'already flying', at: from };
     const r = await start(f.target).result;
