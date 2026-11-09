@@ -38,6 +38,8 @@ export interface KitOpsDeps {
   requests: Pick<StackRequests, 'withScreen'>;
   /** world/containers.ts: a predicted move between player slots (under the inventory screen). */
   move(src: { window: number; slot: number }, dst: { window: number; slot: number }, count: number): Promise<{ ok: boolean; reason?: string }>;
+  /** Two player slots exchanged in one request, under the inventory screen (a full inventory: no slot to park in). */
+  swap?(a: number, b: number): Promise<{ ok: boolean; reason?: string }>;
   skills: KitOpsSkills;
   blockAt(p: Vec3): BlockInfo | undefined;
   position(): Vec3 | undefined;
@@ -124,6 +126,17 @@ export class FlightKitOps {
     let to = -1;
     for (let i = 8; i >= 0 && to < 0; i--) if (!slots[i]) to = i;
     const r = await this.d.requests.withScreen(async () => {
+      if (to < 0 && this.d.swap && !slots.slice(9, 36).some((x) => !x)) {
+        // a full inventory (the Realm, 2026-11-09: no slot to park a hotbar item in, every flight refused): the rockets
+        // swap places with the least useful hotbar item instead
+        const t = hotbarTarget({ slots, selected: this.d.inventory.selected ?? -1 }, (it) => (isRocket(it.name) ? 1 : 0), (it) => it.name === 'elytra');
+        if (t && !t.empty) {
+          const other = slots[t.slot]!.name;
+          const w = await this.d.swap(from, t.slot);
+          if (w.ok) this.log.info(`flight kit: swapped the rockets in slot ${from} with the ${other} in hotbar slot ${t.slot} (the inventory is full)`);
+          return w;
+        }
+      }
       if (to < 0) {
         const parked = await this.makeHotbarRoom();
         if (typeof parked === 'string') return { ok: false, reason: parked };

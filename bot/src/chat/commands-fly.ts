@@ -32,6 +32,8 @@ import { survivalKitOf } from './commands-survival.ts';
 import { NETHER, OVERWORLD } from '../world/dimension.ts';
 import type { Containers } from '../world/containers.ts';
 import type { Logger } from '../log.ts';
+import { inventorySlot, type StackRequests } from '../skills/survival/screen.ts';
+import type { ItemStack } from '../world/types.ts';
 import { corridorAirborne, corridorProviderOf, corridorWanted } from '../skills/fly/corridor/registry.ts'; // Track F4b
 import type { CorridorReport, SkyHint, StepOutcome } from '../skills/fly/corridor/executor.ts'; // Track F4b
 import { corridorEndLine, runCorridorTrip, stopCorridorTrip, type CorridorWiring, type TripStyle } from './commands-corridor.ts'; // Track F4b
@@ -327,6 +329,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     armour: kit?.armour ?? { wear: () => Promise.resolve(false), worn: () => [null, null, null, null] },
     requests: kit?.requests ?? { withScreen: (fn) => fn() },
     move: (src, dst, n) => containers?.move(src, dst, n) ?? Promise.resolve({ ok: false, reason: 'no containers' }),
+    ...(kit ? { swap: (a: number, c: number) => swapSlots(kit.requests, inv, a, c) } : {}),
     skills: {
       open: (p) => skills.open(p),
       closeContainer: (v) => skills.closeContainer(v),
@@ -1375,4 +1378,26 @@ export const FLY_APPROACH_HEIGHT = APPROACH_HEIGHT;
  */
 export function noCorridorAtAll(r: Pick<CorridorReport, 'ok' | 'reason' | 'legs' | 'cruises' | 'walks' | 'windows'>): boolean {
   return !r.ok && r.legs.length === 0 && r.cruises === 0 && r.walks === 0 && r.windows === 0 && (r.reason ?? '').startsWith('no corridor');
+}
+
+/**
+ * Two player inventory slots exchanged by one swap item_stack_request (predicted, rolled back when refused); the caller
+ * holds the inventory screen (kitops rocketsToHotbar runs under withScreen, which would wait on itself if nested).
+ */
+export async function swapSlots(
+  requests: Pick<StackRequests, 'send'>,
+  inv: { readonly slots: readonly (ItemStack | null | undefined)[]; setItem(w: number, s: number, it: ItemStack | null): void },
+  a: number,
+  b: number,
+): Promise<{ ok: boolean; reason?: string }> {
+  const A = inv.slots[a];
+  const B = inv.slots[b];
+  if (!A || !B) return { ok: false, reason: 'an empty slot' };
+  inv.setItem(0, a, { ...B });
+  inv.setItem(0, b, { ...A });
+  const res = await requests.send([{ type_id: 'swap', legacy_type_id: 2, source: inventorySlot(a, A.stackId), destination: inventorySlot(b, B.stackId) }]);
+  if (res.status === 'ok' || res.status === 0) return { ok: true };
+  inv.setItem(0, a, A);
+  inv.setItem(0, b, B);
+  return { ok: false, reason: `the swap was refused (${String(res.status)})` };
 }

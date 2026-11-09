@@ -6,7 +6,7 @@ import type { ItemStack } from '../../../src/world/types.ts';
 
 const item = (name: string, count = 1): ItemStack => ({ name, count, networkId: 1, metadata: 0 });
 
-function harness(slots: (ItemStack | null)[]) {
+function harness(slots: (ItemStack | null)[], withSwap = false) {
   const inv: (ItemStack | null)[] = [...slots, ...Array.from({ length: 36 - slots.length }, () => null)];
   const moves: string[] = [];
   const deps = {
@@ -20,6 +20,15 @@ function harness(slots: (ItemStack | null)[]) {
       inv[src.slot] = null;
       return { ok: true };
     },
+    ...(withSwap
+      ? {
+          swap: async (x: number, y: number) => {
+            moves.push(`${x}<->${y}`);
+            [inv[x], inv[y]] = [inv[y]!, inv[x]!];
+            return { ok: true };
+          },
+        }
+      : {}),
     skills: {} as KitOpsDeps['skills'],
     blockAt: () => undefined,
     position: () => undefined,
@@ -48,6 +57,25 @@ describe('flight kit: rocketsToHotbar', () => {
     const r = await h.ops.rocketsToHotbar();
     expect(r.ok).toBe(false);
     expect(r.reason).toContain('inventory is full');
+  });
+});
+
+describe('flight kit: rocketsToHotbar with the inventory full (the Realm, 2026-11-09: every flight refused)', () => {
+  const full = (): (ItemStack | null)[] => [item('netherite_pickaxe'), ...Array.from({ length: 8 }, () => item('green_shulker_box')), item('firework_rocket', 64), ...Array.from({ length: 26 }, () => item('sand', 64))];
+  it('the rockets swap places with the least useful hotbar item', async () => {
+    const h = harness(full(), true);
+    expect(await h.ops.rocketsToHotbar()).toEqual({ ok: true });
+    expect(h.moves).toEqual(['9<->8']);
+    expect(h.inv[8]?.name).toBe('firework_rocket');
+    expect(h.inv[9]?.name).toBe('green_shulker_box');
+    expect(h.inv[0]?.name).toBe('netherite_pickaxe');
+  });
+  it('a free main slot still parks (no swap)', async () => {
+    const s = full();
+    s[20] = null;
+    const h = harness(s, true);
+    expect(await h.ops.rocketsToHotbar()).toEqual({ ok: true });
+    expect(h.moves).toEqual(['8->20 x1', '9->8 x64']);
   });
 });
 
