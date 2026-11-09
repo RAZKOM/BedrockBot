@@ -15,6 +15,10 @@
 //
 // The constants come from the live bot's log (the Realm, 2026-10-30 to 2026-11-09: 131 flights, 36 with a go-around)
 // and from the replica of the owner's cave (bds-fly2); each says where.
+//
+// Track L2: a walk a probe confirmed is priced by the probe's own plan (its path cost in ticks, the surface preference
+// taken out: `probeTicks`), not by its length at one pace; WALK_S_PER_BLOCK prices only walks no probe planned.
+import { TICKS } from '../nav/costs.ts'; // Track L2: the probe's walking pace
 
 /**
  * Seconds a go-around costs: the median time between two go-around decisions on the Realm (91 pairs, 2026-10-30 to
@@ -29,14 +33,32 @@ export const ROCKET_S = 1;
 export const GOAROUND_COST_S = GOAROUND_S + GOAROUND_ROCKETS * ROCKET_S;
 
 /**
- * Seconds a block of a confirmed walk takes (the probe's path blocks, reach.ts pathBlocks): measured on the replica of the
- * owner's cave, the walks after the landings of trip C (docs/flight.md "Landing by time"); the steady sprint is 0.178.
+ * Seconds a block of a walk takes where no probe planned it (the flood's steps, a straight distance; and a confirmed walk
+ * whose probe gave no ticks): measured on the replica of the owner's cave, the walks after the landings of trip C
+ * (docs/flight.md "Landing by time"); the steady sprint is 0.178.
  */
 export const WALK_S_PER_BLOCK = 0.3;
 /** An unconfirmed walk (a probe that ran out, nothing probed) is estimated as its ranking estimate times this ... */
 export const UNKNOWN_DETOUR = 1.5;
 /** ... plus this many seconds for the risk that it does not walk at all (the Realm's hill-top landings over the cave). */
 export const UNKNOWN_RISK_S = 15;
+
+/** Track L2: game ticks a second. */
+export const TICKS_PER_S = 20;
+/**
+ * Track L2 (docs/flight.md "Landing by time", "L2"): the walker's real ticks over the probe's planned ticks (the probe's
+ * path cost without the surface preference, `probeTicks`). Measured on the owner's cave (the private fixture,
+ * `scripts/land-probe-bench.ts`): the navigator in a closed loop over 8 walks between the cave's waypoints (11 to 129
+ * blocks, one partly swimming): real / planned 1.00 to 1.21, median 1.07; the price's error 3 to 12 % (6 % on average)
+ * against 0 to 32 % (14 %) at WALK_S_PER_BLOCK.
+ */
+export const PATH_PACE = 1.07;
+/**
+ * Track L2: the probe plans at the walking pace (reach.ts probePath: sprint off, 4.63 ticks a block on the flat, the
+ * cheapest move per block of straight distance), so no probed walk is shorter in seconds than its straight distance
+ * times this: the landing search's stop rule compares the candidates' lower bounds in seconds by it.
+ */
+export const PATH_MIN_S_PER_BLOCK = Math.min(WALK_S_PER_BLOCK, (PATH_PACE * TICKS.walk) / TICKS_PER_S);
 /**
  * Seconds a block of height costs a landing switched to in the air (the descent circle sinks 0.15 to 0.2 a tick:
  * docs/flight.md "Descent geometry"): beyond SPIRAL_ABOVE over the approach entry the height is lost circling.
@@ -69,12 +91,67 @@ export function goAroundChance(kind: MissKind, previous?: MissKind): number {
 export interface WalkEstimate {
   blocks: number;
   known: boolean;
+  /** Track L2: the probe's planned ticks of a confirmed walk (`probeTicks`); absent: priced by its blocks at WALK_S_PER_BLOCK. */
+  ticks?: number;
 }
 
-/** Seconds of a walk: the confirmed path's blocks, or the estimate times UNKNOWN_DETOUR plus UNKNOWN_RISK_S. */
+/** Track L2: how a walk was priced, for the log: the probe's path, its blocks at the pace, or an unconfirmed estimate. */
+export type WalkPrice = 'path' | 'pace' | 'unknown';
+
+/** Track L2: which price `walkSeconds` gives a walk. */
+export function walkPriceOf(w: WalkEstimate): WalkPrice {
+  return !w.known ? 'unknown' : w.ticks !== undefined && Number.isFinite(w.ticks) ? 'path' : 'pace';
+}
+
+/**
+ * Seconds of a walk: a confirmed one by its probe's planned ticks at TICKS_PER_S times PATH_PACE (Track L2; without ticks
+ * its blocks at WALK_S_PER_BLOCK), an unconfirmed one as the estimate times UNKNOWN_DETOUR at WALK_S_PER_BLOCK plus
+ * UNKNOWN_RISK_S.
+ */
 export function walkSeconds(w: WalkEstimate): number {
   if (w.blocks <= 0 && w.known) return 0;
-  return w.known ? w.blocks * WALK_S_PER_BLOCK : w.blocks * UNKNOWN_DETOUR * WALK_S_PER_BLOCK + UNKNOWN_RISK_S;
+  const by = walkPriceOf(w);
+  if (by === 'path') return (Math.max(0, w.ticks!) / TICKS_PER_S) * PATH_PACE;
+  return by === 'pace' ? w.blocks * WALK_S_PER_BLOCK : w.blocks * UNKNOWN_DETOUR * WALK_S_PER_BLOCK + UNKNOWN_RISK_S;
+}
+
+/** Track L2: a node of a probe's path as `probeTicks` reads it (nav/astar.ts PathNode). */
+export interface ProbeNode {
+  x: number;
+  z: number;
+  feet: number;
+  move: string;
+  /** The move's cost in ticks (the planner's, the preferences included). */
+  cost: number;
+}
+
+/** Track L2: the planner's preference terms in a path's cost that are no time (nav/costs.ts). */
+export interface ProbePreferences {
+  /** Ticks a node with a roof over its head pays (`underground`; 0 when the probe planned without it) ... */
+  underground: number;
+  /** ... where this says the node is under a roof (nav/grid.ts NavGrid.underground). */
+  isUnderground?: (x: number, z: number, feet: number) => boolean;
+  /** Ticks a drop deeper than a jump pays (`irreversibleDrop`) ... */
+  irreversibleDrop: number;
+  /** ... over this many blocks (nav/astar.ts MAX_JUMP_RISE). */
+  jumpRise: number;
+}
+
+/**
+ * Track L2: the probe's planned ticks of a walk: the path's move costs without the preference terms that are no time (the
+ * surface preference per node under a roof, the extra for a drop that cannot be climbed back). What remains is the walk,
+ * the jumps, the drops, the swims and any door at the planner's tick costs.
+ */
+export function probeTicks(path: readonly ProbeNode[], p: ProbePreferences): number {
+  let ticks = 0;
+  for (let i = 1; i < path.length; i++) {
+    const n = path[i]!;
+    let t = n.cost;
+    if (p.underground > 0 && p.isUnderground?.(n.x, n.z, n.feet)) t -= p.underground;
+    if (n.move === 'drop' && path[i - 1]!.feet - n.feet > p.jumpRise + 1e-6) t -= p.irreversibleDrop;
+    ticks += Math.max(0, t);
+  }
+  return ticks;
 }
 
 /** A landing that can be taken now instead of a go-around: what it is (for the line) and its price in seconds. */

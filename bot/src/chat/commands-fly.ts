@@ -17,7 +17,8 @@ import { FlightKitOps } from '../skills/fly/kitops.ts';
 import { APPROACH_HEIGHT, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, type CellQuery, type LandingTarget, type SkyCheck } from '../skills/fly/plan.ts';
 import { pathBlocks, probeOpenSky, probePath } from '../skills/home/reach.ts'; // Track AU2: the walk from a landing cell to the goal
 import { probeNavOf } from '../skills/combat/pathReach.ts';
-import { findLanding, isHazardName, isLiquidName, stillLandable, WET_ABOVE, type BlockLookup, type LandingPlan, type ProbeOutcome } from '../skills/fly/landing.ts'; // Track BF
+import { findLanding, isHazardName, isLiquidName, stillLandable, WET_ABOVE, type BlockLookup, type LandingPlan } from '../skills/fly/landing.ts'; // Track BF
+import { landingProbe } from '../skills/fly/landprobe.ts'; // Track L2: the walk priced by the probe's path
 import { TerrainMemo, type TerrainColumn } from '../skills/fly/terrain.ts'; // Track BL
 import type { RouteGrid } from '../skills/fly/route/grid.ts'; // Track F3
 import { planTakeoffRoute, type TakeoffRoute } from '../skills/fly/route/takeoff.ts'; // Track F3
@@ -48,6 +49,11 @@ export const FLY_COMMANDS = ['fly', 'land'] as const;
 export const LAND_PROBE_NODES = 6000;
 export const LAND_PROBE_MS = 400;
 export const LAND_BUDGET_MS = 6000;
+/**
+ * Track L2: the landing probe plans without the surface preference (landprobe.ts): on the owner's cave its first cells
+ * took 41 000 nodes with it and 17 600 without, the same walk within 1 % of its ticks (docs/flight.md "L2").
+ */
+export const LAND_PROBE_SURFACE = false;
 /** Track BH: open-sky cells probed per leg of a walk out (each LAND_PROBE_NODES / LAND_PROBE_MS) before the plain `xz` leg. */
 export const LEG_PROBES = 6;
 /**
@@ -230,15 +236,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    */
   const landingFor = async (goal: Vec3, label: string, exact: number | undefined, hint?: LandingHint): Promise<LandingPlan> => {
     const nav = probeNavOf(pve.mover);
-    const target = { type: 'near' as const, p: { x: goal.x + 0.5, y: goal.y, z: goal.z + 0.5 }, r: 1.5 };
-    const probe = nav
-      ? async (from: Vec3): Promise<ProbeOutcome> => {
-          const r = await probePath(nav, target, from, { nodes: LAND_PROBE_NODES, ms: LAND_PROBE_MS, noLongFalls: true });
-          if (!r) return { status: 'nostart' };
-          if (r.status === 'found') return { status: 'found', blocks: pathBlocks(r.path) };
-          return r.status === 'none' ? { status: 'none' } : { status: 'limited' };
-        }
-      : undefined;
+    // Track L2: the probe answers with the walk's planned ticks (the walk priced by its path), and takes the longer budget
+    // findLanding asks for the walk flood's first cells
+    const probe = nav ? landingProbe(nav, goal, { budget: { nodes: LAND_PROBE_NODES, ms: LAND_PROBE_MS }, surface: LAND_PROBE_SURFACE }) : undefined;
     const plan = await findLanding(
       goal,
       label,

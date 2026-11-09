@@ -35,9 +35,12 @@
 //     as `alternatives`, each priced in seconds of walk (landprice.ts), for a missed approach to land on instead of
 //     a go-around; a partly loaded window can still answer (`partial`) with the least walk the unloaded part could
 //     offer, for the hold's price
+//   - Track L2: a confirmed walk is priced by the probe's own plan (its ticks, landprice.ts probeTicks), the cells ranked
+//     by that price in seconds; a covered goal's first cells by the walk flood get a longer probe (`LONG_PROBE`), cut to
+//     the search time left, so the owner's cave's cells are confirmed instead of falling back unpriced
 import type { Vec3 } from '../../connection/types.ts';
 import { BrakePlanner } from './brake.ts';
-import { walkSeconds } from './landprice.ts'; // Track L1
+import { PATH_MIN_S_PER_BLOCK, UNKNOWN_DETOUR, UNKNOWN_RISK_S, WALK_S_PER_BLOCK, walkPriceOf, walkSeconds, type WalkPrice } from './landprice.ts'; // Track L1; Track L2: the walk by its path
 import { ApproachPlanner, APPROACH_DISTANCE, APPROACH_HEIGHT, columnKey, entryTop, hdist, yawDiff, yawDir, yawTo, type FlightBody, type LandingTarget, type Obstacle } from './plan.ts';
 import type { RouteGrid } from './route/grid.ts'; // Track F3
 import { planLandingRoute, type LandingRouteSpec } from './route/landing.ts'; // Track F3
@@ -124,14 +127,27 @@ export interface Candidate {
   lb: number;
 }
 
-export type ProbeOutcome = { status: 'found'; blocks: number } | { status: 'none' } | { status: 'limited' } | { status: 'nostart' };
+/**
+ * A probe's answer. Track L2: a found walk carries the probe's planned ticks (landprice.ts probeTicks) when the caller has
+ * them: the walk is then priced by its path, not by its blocks.
+ */
+export type ProbeOutcome = { status: 'found'; blocks: number; ticks?: number } | { status: 'none' } | { status: 'limited' } | { status: 'nostart' };
+
+/** Track L2: the budget of one probe (nodes, and search ms summed over its slices). */
+export interface ProbeBudget {
+  nodes: number;
+  ms: number;
+}
 
 export interface LandingDeps {
   look: BlockLookup;
   /** Solid cells for the approach simulation (the flight's obstacle model; unknown = free). */
   obstacle: Obstacle;
-  /** A bounded walking plan from feet `from` to the goal (no digging, no pillars). Without it nothing is confirmed. */
-  probe?: (from: Vec3) => Promise<ProbeOutcome>;
+  /**
+   * A bounded walking plan from feet `from` to the goal (no digging, no pillars). Without it nothing is confirmed. Track L2:
+   * `budget` asks a longer probe than the caller's own (the walk flood's first cells, `LONG_PROBE`); absent, the caller's.
+   */
+  probe?: (from: Vec3, budget?: ProbeBudget) => Promise<ProbeOutcome>;
   /** Safe dry ground of a column under open sky (feet), the fallback beyond the candidates. */
   dryGround?: (x: number, z: number) => number | undefined;
   /** Let the event loop run (the search is sliced). */
@@ -180,6 +196,11 @@ export interface LandingOptions {
    * confirmed landing on the loaded part, with `unloaded` saying how near the goal the unloaded part comes).
    */
   partial?: boolean;
+  /**
+   * Track L2: the longer probes for a covered goal's first cells by the walk flood (default LONG_PROBE; `count` 0: none).
+   * Each is capped at the search time left (`budgetMs`), so the search's total time is kept.
+   */
+  longProbe?: { count: number } & ProbeBudget;
 }
 
 export interface LandingCell {
@@ -725,6 +746,17 @@ export const ALT_APART = 6;
 export const NO_APPROACH_NEAR = 3;
 
 /**
+ * Track L2 (docs/flight.md "Landing by time", "L2"): the longer probes of a covered goal's first cells by the walk flood:
+ * the caller's probe (commands-fly.ts LAND_PROBE_NODES / LAND_PROBE_MS, 6 000 nodes in 400 ms) ran out on every cell of the
+ * owner's cave, so the landing was a fallback priced as unknown. Measured on the fixture on the test host
+ * (`scripts/land-probe-bench.ts`): the flood's first 8 cells each took 17 400 to 18 700 nodes in 65 to 105 ms without the
+ * surface preference (41 000 to 41 800 nodes, 160 to 430 ms with it); 60 000 nodes leaves 3x room, 1 500 ms 10x.
+ */
+export const LONG_PROBE: Readonly<{ count: number } & ProbeBudget> = Object.freeze({ count: 3, nodes: 60_000, ms: 1500 });
+/** Track L2: a long probe is cut to the search time left; under this many ms left the caller's own probe runs instead. */
+export const LONG_PROBE_MIN_MS = 400;
+
+/**
  * The landing for a walk to `goal` (see the file comment). `label` names the goal in the log line.
  */
 export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, o: LandingOptions): Promise<LandingPlan> {
@@ -778,6 +810,12 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
     corridor?: Corridor;
     status: ProbeOutcome['status'] | 'skip';
   }
+  // Track L2: a confirmed walk's price (by the probe's path when it gave ticks), and its note in the line
+  const priceOf = (r: { blocks: number; ticks?: number }): { walkS: number; by: WalkPrice } => {
+    const w = { blocks: r.blocks, known: true, ...(r.ticks !== undefined ? { ticks: r.ticks } : {}) };
+    return { walkS: walkSeconds(w), by: walkPriceOf(w) };
+  };
+  const priceNote = (s: number, by: WalkPrice): string => `${s.toFixed(1)} s${by === 'path' ? '' : ` ${by}`}`;
   // Track F1: the overhang cells only the brake's simulation lands on (the brain plans the brake there from the start)
   const brakeOnly = new Set<Candidate>();
   const probed: Probed[] = [];
@@ -787,8 +825,13 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   // Track L1: the landable cells found (a confirmed walk and, in the open, a simulated approach), cheapest first
   interface Landable {
     c: Candidate;
-    /** The ranking cost: the walk plus roofPenalty. */
-    blocks: number;
+    /** The probe's path blocks. */
+    walk: number;
+    /** Track L2: the walk's price in seconds (landprice.ts walkSeconds) and how it was priced. */
+    walkS: number;
+    by: WalkPrice;
+    /** The ranking cost in seconds: the walk's price plus roofPenalty at WALK_S_PER_BLOCK. */
+    rankS: number;
     corridor?: Corridor;
     simulated: boolean;
   }
@@ -809,6 +852,8 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
     c: Candidate;
     key: number;
     lb: number;
+    /** Track L2: the flood's steps (a cell the flood reached). */
+    steps?: number;
     corridors?: Corridor[];
   }
   const queue: Entry[] = list.map((c) => ({ c, ...rankOf(c) })).sort((a, b) => a.key - b.key);
@@ -821,16 +866,23 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   const apartOf = (a: Candidate, b: Candidate): boolean => Math.hypot(a.x - b.x, a.z - b.z) >= ALT_APART || Math.abs(a.feet - b.feet) > 2;
   const apart = (c: Candidate): boolean => landable.every((l) => apartOf(l.c, c));
   let alternativesOnly = false;
+  // Track L2: the longer probes for the flood's first cells (a covered goal only)
+  const long = o.longProbe ?? LONG_PROBE;
+  let longProbes = 0;
+  // Track L2: seconds a block of straight distance takes at least: the probe's fastest pace once a probe gave ticks (the
+  // walks are priced by their paths), else the pace the blocks are priced at
+  let lbPace = WALK_S_PER_BLOCK;
   while (queue.length) {
     const e = queue.shift()!;
     const c = e.c;
-    // (a confirmed walk within a tenth, at least 2 blocks, of what any later candidate could do is good enough)
-    if (best && !alternativesOnly && e.lb >= best.blocks - Math.max(2, best.blocks * 0.1)) {
+    // (a confirmed walk within a tenth, at least 2 blocks' worth, of what any later candidate could do is good enough;
+    // Track L2: in seconds)
+    if (best && !alternativesOnly && e.lb * lbPace >= best.rankS - Math.max(2 * WALK_S_PER_BLOCK, best.rankS * 0.1)) {
       if (landable.length > ALTERNATIVES) break;
       alternativesOnly = true;
     }
     if (alternativesOnly && (extraProbes >= ALT_PROBES || landable.length > ALTERNATIVES)) break;
-    if (probes >= o.probes + (alternativesOnly ? ALT_PROBES : 0) || now() - t0 > o.budgetMs) break;
+    if (probes >= o.probes + (alternativesOnly ? ALT_PROBES : 0) || now() - t0 >= o.budgetMs) break;
     if (isDead(c)) continue;
     if (alternativesOnly && (c.kind !== 'open' || !apart(c))) continue;
     if (c.kind === 'open' && nearNoApproach(c)) continue;
@@ -841,7 +893,7 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
       if (roofsLooked % 16 === 0) await yieldNow();
       if (!corridors.length) continue;
       const extra = roofPenalty(corridors[0]);
-      push({ c, key: e.key + extra, lb: e.lb + extra, corridors });
+      push({ c, key: e.key + extra, lb: e.lb + extra, ...(e.steps !== undefined ? { steps: e.steps } : {}), corridors });
       continue;
     }
     if (c.kind === 'roof') {
@@ -865,9 +917,17 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
     if (!deps.probe) break;
     probes++;
     if (alternativesOnly) extraProbes++;
-    const r = await deps.probe({ x: c.x + 0.5, y: c.feet, z: c.z + 0.5 });
+    // Track L2: the flood's first cells get the longer probe, cut to the search time left (the total is kept)
+    const left = o.budgetMs - (now() - t0);
+    const longOne = flood !== undefined && e.steps !== undefined && longProbes < long.count && left >= LONG_PROBE_MIN_MS;
+    if (longOne) longProbes++;
+    const r = await deps.probe({ x: c.x + 0.5, y: c.feet, z: c.z + 0.5 }, longOne ? { nodes: long.nodes, ms: Math.min(long.ms, Math.floor(left)) } : undefined);
     await yieldNow();
+    const tag = longOne ? ' long' : '';
     if (r.status === 'found') {
+      const { walkS, by } = priceOf(r);
+      if (by === 'path') lbPace = PATH_MIN_S_PER_BLOCK;
+      const said = `path ${Math.round(r.blocks)} ${priceNote(walkS, by)}${tag}`;
       // Track L1: an open cell is landable only when the approach from where the flight will come in lands on it
       let simulated = corridor !== undefined;
       if (c.kind === 'open') {
@@ -877,7 +937,7 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
         if (a.tried > 0) await yieldNow();
         if (a.tried > 0 && !a.ok) {
           noApproach.push(c);
-          probed.push({ c, result: `path ${Math.round(r.blocks)}, no approach (${a.kind}${Number.isFinite(a.cost) ? ` ${a.cost.toFixed(0)}` : ''})`, blocks: r.blocks, status: 'skip' });
+          probed.push({ c, result: `${said}, no approach (${a.kind}${Number.isFinite(a.cost) ? ` ${a.cost.toFixed(0)}` : ''})`, blocks: r.blocks, status: 'skip' });
           continue;
         }
         simulated = a.ok;
@@ -885,19 +945,19 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
         if (a.ok && a.style === 'brake') brakeOnly.add(c);
       }
       // an overhang landing counts as a little more walk than an open one (the approach is harder), more the deeper under the roof
-      const cost = r.blocks + roofPenalty(corridor);
-      probed.push({ c, result: `path ${Math.round(r.blocks)}`, blocks: r.blocks, ...(corridor ? { corridor } : {}), status: 'found' });
-      const l: Landable = { c, blocks: cost, ...(corridor ? { corridor } : {}), simulated };
+      const rankS = walkS + roofPenalty(corridor) * WALK_S_PER_BLOCK;
+      probed.push({ c, result: said, blocks: r.blocks, ...(corridor ? { corridor } : {}), status: 'found' });
+      const l: Landable = { c, walk: r.blocks, walkS, by, rankS, ...(corridor ? { corridor } : {}), simulated };
       // (one per neighbourhood: the cheapest of the cells within ALT_APART of each other)
       const near = landable.filter((x) => !apartOf(x.c, c));
-      if (near.every((x) => cost < x.blocks)) {
+      if (near.every((x) => rankS < x.rankS)) {
         for (const x of near) landable.splice(landable.indexOf(x), 1);
         landable.push(l);
-        landable.sort((a, b) => a.blocks - b.blocks);
+        landable.sort((a, b) => a.rankS - b.rankS);
       }
-      if (!best || cost < best.blocks) best = l;
+      if (!best || rankS < best.rankS) best = l;
     } else {
-      probed.push({ c, result: r.status, ...(corridor ? { corridor } : {}), status: r.status });
+      probed.push({ c, result: `${r.status}${tag}`, ...(corridor ? { corridor } : {}), status: r.status });
       if (r.status === 'none') {
         const cols = dead.get(c.feet) ?? new Set<number>();
         for (const k of plateauOf(view, c)) cols.add(k);
@@ -916,18 +976,21 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   // Track L1: a landable cell's target, priced in seconds of walk
   const targetOf = (l: Landable): { cell: LandingCell; walk: number; target: LandingTarget } => {
     const c = l.c;
-    const walk = l.blocks - roofPenalty(l.corridor);
+    const walk = l.walk;
     const cell: LandingCell = { x: c.x, z: c.z, feet: c.feet, kind: c.kind };
     const cells = cellsAround(view, cell, c.kind, walkSlack(walk), o.headroom);
     const extra: Partial<LandingTarget> = {
       ...(l.corridor ? { bearing: l.corridor.bearing, ...(c.ceiling !== undefined ? { ceiling: c.ceiling } : {}) } : {}),
       ...(brakeOnly.has(c) ? { precise: true } : {}),
-      walkS: walkSeconds({ blocks: walk, known: true }),
+      walkS: l.walkS,
       walkKnown: true,
+      walkBy: l.by,
       name: `${fmtCell(cell)}${l.corridor ? ' under a roof' : ''}`,
     };
     return { cell, walk, target: walkTarget(cell, cells, extra) };
   };
+  // Track L2: the line says how each price was made (by the probe's path, or the blocks at WALK_S_PER_BLOCK)
+  const byNote = (by: WalkPrice | undefined): string => (by === 'path' ? 'by its path' : by === 'pace' ? `at ${WALK_S_PER_BLOCK} s a block` : 'unconfirmed');
   if (best) {
     const chosen = targetOf(best);
     const alts = landable
@@ -936,7 +999,7 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
       .map((l) => targetOf(l).target);
     const target: LandingTarget = alts.length ? { ...chosen.target, alternatives: alts } : chosen.target;
     const { cell, walk } = chosen;
-    const altNote = alts.length ? `; alternatives ${alts.map((a) => `${a.name} ${a.walkS!.toFixed(1)} s`).join(', ')}` : '';
+    const altNote = alts.length ? `; alternatives ${alts.map((a) => `${a.name} ${priceNote(a.walkS!, a.walkBy ?? 'pace')}`).join(', ')}` : '';
     const unloaded = partial ? { live, columns, bound } : undefined;
     return {
       kind: 'cell',
@@ -944,7 +1007,7 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
       walk,
       target,
       ...(unloaded ? { unloaded } : {}),
-      line: `${head} -> ${fmtCell(cell)}${best.corridor ? ` under a roof (ceiling ${best.c.ceiling}), in from ${best.corridor.bearing}` : ''}, ${Math.round(walk)} blocks of walk (${target.walkS!.toFixed(1)} s), ${chosen.target.cells?.size ?? 1} cells${altNote}${unloaded ? `; ${live} of ${columns} columns loaded, the nearest unloaded ${bound.toFixed(0)} out` : ''}`,
+      line: `${head} -> ${fmtCell(cell)}${best.corridor ? ` under a roof (ceiling ${best.c.ceiling}), in from ${best.corridor.bearing}` : ''}, ${Math.round(walk)} blocks of walk (${target.walkS!.toFixed(1)} s ${byNote(best.by)}), ${chosen.target.cells?.size ?? 1} cells${altNote}${unloaded ? `; ${live} of ${columns} columns loaded, the nearest unloaded ${bound.toFixed(0)} out` : ''}`,
     };
   }
   // Track L1: a partly loaded window with nothing confirmed says nothing (the hold waits for more of it)
@@ -986,7 +1049,7 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   const cells = pick.kind === 'ground' ? new Set([columnKey(pick.x, pick.z)]) : cellsAround(view, pick, 'open', 2.5, o.headroom);
   const why = deps.probe ? (probed.length ? 'no walking path from any landing cell near it' : 'no landing cell near it') : 'no path check available';
   const walkS = walkSeconds({ blocks: est, known: false });
-  return { kind: 'fallback', cell: pick, walk: est, target: walkTarget(pick, cells, { walkS, walkKnown: false, name: fmtCell(pick) }), why, line: `${head} -> none confirmed: dry ground at ${fmtCell(pick)} (${why}; about ${walkS.toFixed(0)} s of walk)` };
+  return { kind: 'fallback', cell: pick, walk: est, target: walkTarget(pick, cells, { walkS, walkKnown: false, walkBy: 'unknown', name: fmtCell(pick) }), why, line: `${head} -> none confirmed: dry ground at ${fmtCell(pick)} (${why}; about ${walkS.toFixed(0)} s of walk, unconfirmed: ${Math.round(est)} blocks x ${UNKNOWN_DETOUR} + ${UNKNOWN_RISK_S} s)` };
 }
 
 /** The walk from `p` to the goal is still what the plan said: the landing cell is dry, sound and live (re-checked in the descent; Track F1: a precision goal dry, safe and with PRECISE_HEADROOM). */

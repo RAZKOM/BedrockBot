@@ -3687,6 +3687,127 @@ bds-fly2, each suite on the same pinned area before (this branch's checkout befo
 - Files outside the brief's list touched: `tasks/process/fly.ts` (`LandingHint.partial`, the hold's priced look and the stop when
   the brain switched, both in `watchLanding`).
 
+### L2: the walk priced by its path, probes that finish
+
+Track L2, [decisions/0076](decisions/0076-land-by-time.md) (the L2 addendum). Two of L1's open points cost the owner time: every
+walk was priced at one pace (0.3 s a block), and on the owner's cave every probe ran out, so the landing was a fallback priced as
+unknown (1.5 x the flood's steps at 0.3 plus 15 s: a cell 73 flood steps out came to 47.9 s). On the replica (before, this
+track's base): all 16 probes of every search `limited`, in 650 to 1 500 ms in all; the 6 000 nodes ran out, not the 400 ms.
+
+```
+the probe (landprobe.ts landingProbe, over reach.ts probePath)
+  -> found: the path's blocks and its planned ticks (landprice.ts probeTicks: the move costs without the surface preference
+     of 6 ticks a node under a roof and the 30 of a drop deeper than a jump); planned without the surface preference
+     (LAND_PROBE_SURFACE false: whether a walk exists does not depend on it)
+the price (walkSeconds): confirmed with ticks: ticks / 20 x PATH_PACE (1.07); confirmed without: blocks x 0.3; unconfirmed: as L1
+the search (findLanding): the cells ranked by that price in seconds (the roof penalty at 0.3 a block); the stop rule's bound
+  at the probe's fastest pace (PATH_MIN_S_PER_BLOCK 0.248 s a block); a covered goal's first LONG_PROBE.count (3) probes by
+  the walk flood get 60 000 nodes / 1 500 ms, cut to the search's time left (6 s in all, as before)
+the line: each probe `path 113 40.2 s` (`pace` / ` long` when so), the cell `113 blocks of walk (40.2 s by its path)`,
+  `at 0.3 s a block` or, a fallback, `unconfirmed: N blocks x 1.5 + 15 s`
+```
+
+| File | What |
+|---|---|
+| `bot/src/skills/fly/landprice.ts` | `TICKS_PER_S`, `PATH_PACE`, `PATH_MIN_S_PER_BLOCK`, `WalkEstimate.ticks`, `WalkPrice`, `walkPriceOf`, `probeTicks` |
+| `bot/src/skills/fly/landprobe.ts` | `landingProbe` (the probe with its ticks and a budget findLanding may raise), `landingProbeNav` |
+| `bot/src/skills/fly/landing.ts` | `ProbeOutcome.ticks`, `ProbeBudget`, `LandingDeps.probe(from, budget)`, `LandingOptions.longProbe`, `LONG_PROBE`, `LONG_PROBE_MIN_MS`; the ranking in seconds, the long probes, the price notes |
+| `bot/src/skills/fly/plan.ts` | `LandingTarget.walkBy` |
+| `bot/src/chat/commands-fly.ts` | `landingFor` probes with `landingProbe`; `LAND_PROBE_SURFACE` |
+| `bot/scripts/land-probe-bench.ts` | the bench on the private fixture (below) |
+| `bot/test/unit/skills/fly-land-time.test.ts` | the L2 guard tests (the price by the path, the shorter walk by time, the hazard, the long probes and the total time) |
+
+**What the probes need** (the owner's cave, the private fixture, `scripts/land-probe-bench.ts` on the test host, 2026-11-09). The
+flood's first 8 cells (the hill by cave_2, 25 over the goal) probed with 400 000 nodes:
+
+| | nodes | search ms | path | planned ticks | price (PATH_PACE 1.07) | at the old 0.3 s a block |
+|---|---|---|---|---|---|---|
+| with the surface preference | 41 067 to 41 826 | 160 to 432 | 113 to 116 blocks | 752 to 772 | 40.2 to 41.3 s | 33.9 to 34.8 s |
+| without it | 17 385 to 18 731 | 65 to 104 | 116 to 119 blocks | 745 to 766 | 39.9 to 41.0 s | 34.7 to 35.7 s |
+
+Every one of them is a walk (no digging, no pillar); 6 000 nodes confirm none. The whole search (16 probes, the flood, the sims):
+
+| long probes (3, the flood's first) | surface preference on | off |
+|---|---|---|
+| none (6 000 nodes / 400 ms each) | nothing confirmed, 397 ms in probes, 467 ms wall | nothing confirmed, 457 ms, 511 ms |
+| 20 000 nodes / 800 ms | nothing confirmed, 649 ms, 705 ms | confirmed (113 blocks, 39.9 s by its path), 593 ms, 691 ms |
+| 60 000 nodes / 1 500 ms (the default) | confirmed, 859 ms, 967 ms | confirmed, 630 ms, 719 ms |
+| 150 000 nodes / 3 000 ms | confirmed, 872 ms, 962 ms | confirmed, 605 ms, 700 ms |
+
+So: no surface preference in the probe, and 60 000 nodes for the first three (3x the need); offline the search stays under a second on
+the test host (on the replica, with the live bot's loop, 0.94 to 1.87 s: below), far inside its 6 s. The other 13 probes still run out (the same hill, within 6 blocks of each other: no alternative).
+
+**The pace** (`PATH_PACE`): the navigator in a closed loop on the fixture (`caveWalker`), eight walks between the cave's
+waypoints to cave_start and to cave_end, 11 to 129 blocks, one with 208 ticks of swimming: real over planned ticks 1.00, 1.00,
+1.02, 1.03, 1.10, 1.11, 1.13, 1.21, median 1.07. The price's error on those walks: 3 to 12 % (6 % on average) by the path,
+0 to 32 % (14 %) at 0.3 s a block (the old pace priced the cave's walks 17 to 19 % short and the short dry ones up to 32 % long).
+The walks from the hill cells themselves do not finish in the closed loop: the walker (with the surface preference) walks over
+the hill to 43 above the goal and its plans there touch unloaded world (`no progress possible`); on the replica the rest from
+those cells is the corridor's flight, not that walk.
+
+**The evidence log's cells**, the Realm (blocks only; the log has no ticks, so the after column is the measured range of the
+probe's ticks a block, 4.63 on the flat and 6.5 in the owner's cave, at PATH_PACE):
+
+| the walk | L1's price | L2's price |
+|---|---|---|
+| 2 blocks, 6 blocks (the open goals) | 0.6 s, 1.8 s | 0.5 to 0.7 s, 1.5 to 2.1 s |
+| 46 blocks (the valley cell under the hill) | 13.8 s | 11.4 to 16.0 s |
+| 54 to 63 blocks (the probes' paths round the hill) | 16.2 to 18.9 s | 13.4 to 21.9 s |
+| a fallback 73 flood steps out (the "15-block walk" at 47.9 s) | 47.9 s | 47.9 s when it is still unconfirmed; by its path once a long probe confirms it |
+
+**Not done: the flown rest.** After a landing for a covered goal with `flyCave on` the rest is flown through the corridor's
+windows, not walked (on the replica 88 blocks in 10 to 29 s against about 40 s on foot). Pricing it would need the corridor's
+plan (the coarse layer's search and its windows' proofs) for every candidate, seconds each against the probe's 0.1 s; the cheaper
+way is one corridor plan from the walk flood's entrance and a flown share on the cells whose walk passes it. Left open.
+
+### Measured: the replica (L2, bds-fly2 on the test host, the same runs as L1's table)
+
+Trip C as in L1's table (`FLY_CAVE_PLAIN=1 FLY_CAVE_STYLE=1 FLY_CAVE_REUSE=1`, 5 runs), before (this track's base) and after on
+the same replica the same evening, the test host loaded by another track's bench (L1's 69.7 s median was measured on a quieter
+host).
+
+| | arrived | seconds to the goal | go-arounds | the landing | the landing search (wall, live) | held | damage |
+|---|---|---|---|---|---|---|---|
+| before | 4 of 5 | 89.9, 85.7 (the corridor's window: 24 damage, stopped at health 11), 75.2, 64.5, 79.7 (median 79.7) | 0 | 51 off, 25 above: a fallback (`about 56 s of walk`), all 16 probes `limited` | 0.65 to 1.56 s | 52 to 62 ticks | 0, 24, 0.5, 0, 1.9 |
+| after | 5 of 5 | 74.5, 70.6, 74.9, 72.9, 97.2 (33 ticks in the cave's water in the corridor) (median 74.5) | 0 | the same hill cell, confirmed: `115 blocks of walk (39.8 s by its path)`, the three long probes found, the rest `limited` | 0.94 to 1.87 s | 60 to 74 ticks | 0 in every run |
+
+The cell is the same (the walk flood's first, on the hill by the mouth): what changed is that it is confirmed and priced (39.8 s
+by its path, where L1's line priced the fallback `about 56 s of walk`, unconfirmed), and the hold's look now answers from the loaded part; the
+search takes about 0.3 s more at the live wall clock and the hold a few ticks more. The time to the goal is the corridor's rest
+from that cell (the flight is 43 to 48 s in every run); the damage before was the corridor's, not the landing's.
+
+The regressions, bds-fly2, FLY_AREA 62048,62048, the final code (L1's "after" column for comparison):
+
+| suite | L2 | L1 after |
+|---|---|---|
+| fly-walk (walk landings: priced by the path now) | 2 of 2: the pit's landing 3 blocks off (0.62 from its cell), the house's 3 off (0.05), 0 go-arounds, both walked in | 2 of 2: the pit's 5 off (0.38), the house's 3 off (0.26) |
+| fly-land, distance from the centre (truth) | 0.65, 0.06, 0.73, 0.03, 0.12 (3x3 40 up), 0.07 (descend 60), 0.03 (5x5 at 300), 0.05 (wall); all on the platform, 0 go-arounds, 0 damage | 0.08, 0.04, 0.05, 0.79, 0.02, 0.11, 0.10, 0.61 |
+| fly-land `!fly stop` case | fails: no end line within 60 s of the stop | fails the same way (the old failure on this area) |
+
+Exact landings take no price, so fly-land's spread is the noise of the two runs.
+
+### What `!test cavestart 5 from home` on the Realm should show (L2)
+
+- The landing line for cave_start: its first three probes say ` long`, and where L1's line said `none confirmed: dry ground at
+  ... (about N s of walk)` it says `-> <cell>, N blocks of walk (M s by its path)`; the probes after them may still say
+  `limited`. The search's time in the line about 0.3 s more than before (the replica, live: 0.65 to 1.56 s before, 0.94 to
+  1.87 s after), well inside its 6 s.
+- Go-arounds as with L1 (none in the 5 runs of 2026-11-09); a missed approach's `landing price:` line names the target's walk
+  in seconds by its path.
+- The trip's time about as L1's 81.5 s a run: the cell is the same hill by the mouth (the walk flood's first), now confirmed.
+  The hold may land a little sooner where the loaded part has a confirmed cell (the partial answer needs one).
+
+### Open points (Track L2)
+
+- The flown rest after a landing is not priced (above).
+- The walk from the hill cells by cave_2 does not finish in the closed loop on the fixture (the walker takes the hill's top and
+  its plans touch unloaded world); the probe, without the surface preference, finds the walk the walker does not take. For the
+  navigator's owner (Track R3's area): the walker's surface preference over a covered goal.
+- `holdWorth`'s bound (tasks/process/fly.ts) still prices the unloaded part's least walk at 0.3 s a block; the path's fastest
+  pace is 0.248. Not changed (the file is outside this track's list); the hold waits a little less than it could.
+- The forced landing's price (brain.ts, the nearest safe ground) converts the target's walk back to blocks at 0.3 s a block;
+  with the walk now priced by its path that is an approximation (brain.ts is Track F9a's).
+
 ## Open points
 
 - Track F1: a corridor approach under a roof at ground level (the roof cases of `fly-brake.test.ts` on the

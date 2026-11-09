@@ -82,6 +82,8 @@ export interface LandingTarget {
    */
   walkS?: number;
   walkKnown?: boolean;
+  /** Track L2: how `walkS` was made: by the probe's path (`path`), the path's blocks at the pace (`pace`), or unconfirmed (`unknown`). */
+  walkBy?: 'path' | 'pace' | 'unknown';
   /**
    * Track L1: other landings near the goal the landing search confirmed and simulated (each with its own `walkS`), the
    * cheapest first: a missed approach lands on one of them instead of a go-around when the go-around is not worth its

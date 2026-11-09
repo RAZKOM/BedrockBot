@@ -4,8 +4,8 @@
 // it), an open cell whose approach the simulation does not land is not taken (a pit), a hazard is never a landing or an
 // alternative; the brain (brain.ts): a missed approach lands on an alternative instead of going round when that is cheaper.
 import { describe, expect, it } from 'vitest';
-import { approachBearings, approachLands, ColumnView, findLanding, walkFlood, walkTarget, type BlockLookup, type LandingOptions, type ProbeOutcome } from '../../../src/skills/fly/landing.ts';
-import { decideGoAround, GOAROUND_COST_S, GOAROUND_P, GOAROUND_P_REPEAT, goAroundChance, holdWorth, UNKNOWN_RISK_S, WALK_S_PER_BLOCK, walkSeconds } from '../../../src/skills/fly/landprice.ts';
+import { approachBearings, approachLands, ColumnView, findLanding, LONG_PROBE, walkFlood, walkTarget, type BlockLookup, type LandingOptions, type ProbeBudget, type ProbeOutcome } from '../../../src/skills/fly/landing.ts';
+import { decideGoAround, GOAROUND_COST_S, GOAROUND_P, GOAROUND_P_REPEAT, goAroundChance, holdWorth, PATH_MIN_S_PER_BLOCK, PATH_PACE, probeTicks, TICKS_PER_S, UNKNOWN_DETOUR, UNKNOWN_RISK_S, WALK_S_PER_BLOCK, walkPriceOf, walkSeconds } from '../../../src/skills/fly/landprice.ts';
 import { columnKey, onTarget, type LandingTarget } from '../../../src/skills/fly/plan.ts';
 import { FEET, trip, world } from './fly-worlds.ts';
 
@@ -95,7 +95,7 @@ describe('fly: landing by time, the search (Track L1)', () => {
     const plan = await findLanding(goal, 'pillar', { look: w.look, obstacle: w.obstacle, probe }, { ...OPTS, from: { x: -300, z: 0 } });
     expect(plan.kind, plan.line).toBe('cell');
     if (plan.kind !== 'cell') return;
-    expect(plan.line).toMatch(/8 -59 0:path \d+, no approach/);
+    expect(plan.line).toMatch(/8 -59 0:path \d+ [\d.]+ s pace, no approach/);
     expect(plan.cell.x).toBeLessThanOrEqual(-18);
     expect(plan.target.walkS).toBeCloseTo(walkSeconds({ blocks: plan.walk, known: true }));
     expect(plan.target.walkKnown).toBe(true);
@@ -156,6 +156,138 @@ describe('fly: landing by time, the search (Track L1)', () => {
     if (p.kind !== 'cell') return;
     expect(p.unloaded?.bound).toBeCloseTo(4, 0);
     expect(p.line).toMatch(/columns loaded, the nearest unloaded 4 out/);
+  });
+});
+
+describe('fly: landing by time, the walk by its path (Track L2)', () => {
+  it("a probed walk is priced by the probe's planned ticks; the surface preference and the drop's extra are no time", () => {
+    expect(walkSeconds({ blocks: 15, known: true, ticks: 80 })).toBeCloseTo((80 / TICKS_PER_S) * PATH_PACE);
+    expect(walkPriceOf({ blocks: 15, known: true, ticks: 80 })).toBe('path');
+    expect(walkPriceOf({ blocks: 15, known: true })).toBe('pace');
+    expect(walkPriceOf({ blocks: 15, known: false, ticks: 80 })).toBe('unknown');
+    // an unconfirmed walk keeps its detour and its risk, whatever ticks it carries
+    expect(walkSeconds({ blocks: 15, known: false, ticks: 80 })).toBeCloseTo(15 * UNKNOWN_DETOUR * WALK_S_PER_BLOCK + UNKNOWN_RISK_S);
+    // a path: a walk on the flat, two under a roof (each + 6), a drop of 3 (+ 30: no climbing back), a walk
+    const path = [
+      { x: 0, z: 0, feet: 10, move: 'start', cost: 0 },
+      { x: 1, z: 0, feet: 10, move: 'walk', cost: 4.6 },
+      { x: 2, z: 0, feet: 10, move: 'walk', cost: 4.6 + 6 },
+      { x: 3, z: 0, feet: 10, move: 'walk', cost: 4.6 + 6 },
+      { x: 4, z: 0, feet: 7, move: 'drop', cost: 15.6 + 30 },
+      { x: 5, z: 0, feet: 7, move: 'walk', cost: 4.6 },
+    ];
+    const roof = (x: number): boolean => x === 2 || x === 3;
+    expect(probeTicks(path, { underground: 6, isUnderground: (x) => roof(x), irreversibleDrop: 30, jumpRise: 1.25 })).toBeCloseTo(4 * 4.6 + 15.6);
+    // (planned without the surface preference: nothing to take out for it)
+    expect(probeTicks(path.map((n) => ({ ...n, cost: roof(n.x) ? n.cost - 6 : n.cost })), { underground: 0, irreversibleDrop: 30, jumpRise: 1.25 })).toBeCloseTo(4 * 4.6 + 15.6);
+    // the probe's fastest pace bounds every probed walk from below (the search's stop rule)
+    expect(PATH_MIN_S_PER_BLOCK).toBeLessThanOrEqual(WALK_S_PER_BLOCK);
+    expect(PATH_MIN_S_PER_BLOCK).toBeGreaterThan(0.1);
+  });
+
+  // the sea round a pillar (the goal, no landing itself); a dry island west 15 blocks of walk away whose walk is slow (a
+  // swim: many ticks), one east 21 blocks away whose walk is quick: the old pace (blocks x 0.3) took the west one
+  const islands = () =>
+    sea([
+      { from: { x: -18, y: FEET, z: -2 }, to: { x: -14, y: FEET, z: 2 }, solid: true },
+      { from: { x: 18, y: FEET, z: -2 }, to: { x: 22, y: FEET, z: 2 }, solid: true },
+    ]);
+  const islandProbe = (ticksWest: number | undefined, ticksEast: number | undefined) => (from: { x: number; y: number; z: number }): Promise<ProbeOutcome> => {
+    const west = from.x < 0;
+    const blocks = west ? 15 : 21;
+    const ticks = west ? ticksWest : ticksEast;
+    return Promise.resolve({ status: 'found', blocks, ...(ticks !== undefined ? { ticks } : {}) });
+  };
+
+  it('a short confirmed walk beats a long one the old constant preferred; the line says how each was priced', async () => {
+    const w = islands();
+    const goal = { x: 0, y: FEET + 2, z: 0 };
+    const deps = (probe: ReturnType<typeof islandProbe>) => ({ look: w.look, obstacle: w.obstacle, probe });
+    // the old pace (no ticks from the probe): the west island, 15 blocks
+    const old = await findLanding(goal, 'pillar', deps(islandProbe(undefined, undefined)), { ...OPTS, from: { x: 0, z: -300 } });
+    expect(old.kind, old.line).toBe('cell');
+    if (old.kind !== 'cell') return;
+    expect(old.cell.x).toBeLessThan(0);
+    expect(old.target.walkBy).toBe('pace');
+    expect(old.line).toMatch(/blocks of walk \([\d.]+ s at 0\.3 s a block\)/);
+    // by the path: the west walk is a 21 s swim, the east one 5 s: the east island
+    const plan = await findLanding(goal, 'pillar', deps(islandProbe(400, 100)), { ...OPTS, from: { x: 0, z: -300 } });
+    expect(plan.kind, plan.line).toBe('cell');
+    if (plan.kind !== 'cell') return;
+    expect(plan.cell.x, plan.line).toBeGreaterThan(0);
+    expect(plan.target.walkBy).toBe('path');
+    expect(plan.target.walkS).toBeCloseTo((100 / TICKS_PER_S) * PATH_PACE);
+    expect(plan.line).toMatch(/21 blocks of walk \([\d.]+ s by its path\)/);
+    expect(plan.line).toContain(`:path 15 ${((400 / TICKS_PER_S) * PATH_PACE).toFixed(1)} s`);
+    // the west island rides along as an alternative at its own (path) price
+    for (const a of plan.target.alternatives ?? []) {
+      expect(a.walkBy).toBe('path');
+      expect(a.walkS!).toBeGreaterThanOrEqual(plan.target.walkS!);
+    }
+  });
+
+  it('a hazard is never taken, however cheap its walk: lava round the goal, a probe that prices every walk at a tick', async () => {
+    const w = sea([{ from: { x: -40, y: FEET, z: -40 }, to: { x: 40, y: FEET, z: 40 }, solid: true }], [{ from: { x: -9, z: -9 }, to: { x: 9, z: 9 } }]);
+    const goal = { x: 0, y: FEET + 2, z: 0 };
+    const probe = (from: { x: number; z: number }): Promise<ProbeOutcome> => Promise.resolve({ status: 'found', blocks: Math.hypot(from.x, from.z), ticks: 1 });
+    const plan = await findLanding(goal, 'pillar', { look: w.look, obstacle: w.obstacle, probe }, { ...OPTS, from: { x: 300, z: 0 } });
+    expect(plan.kind, plan.line).toBe('cell');
+    if (plan.kind !== 'cell') return;
+    const near = (x: number, z: number): boolean => Math.abs(x) <= 10 && Math.abs(z) <= 10;
+    expect(near(plan.cell.x, plan.cell.z)).toBe(false);
+    for (const a of plan.target.alternatives ?? []) expect(near(Math.floor(a.x), Math.floor(a.z))).toBe(false);
+  });
+
+  // the tunnel of the L1 test: a covered goal (the walk flood ranks its candidates)
+  const tunnel = () => {
+    const w = world([
+      { from: { x: -10, y: FEET, z: -10 }, to: { x: 30, y: FEET + 3, z: 10 }, solid: true },
+      { from: { x: -1, y: FEET, z: -1 }, to: { x: 30, y: FEET + 2, z: 1 }, solid: false },
+    ]);
+    return { look: w.look, obstacle: (x: number, y: number, z: number): boolean => w.solid.solidAt(x, y, z) === true };
+  };
+
+  it("the walk flood's first cells get the longer probe; the search's total time is kept", async () => {
+    const w = tunnel();
+    const goal = { x: 0, y: FEET, z: 0 };
+    // a clock the probes move: each takes the ms it was given (the caller's own 400 when findLanding asks none)
+    let clock = 0;
+    const asked: (ProbeBudget | undefined)[] = [];
+    const probe = (_from: unknown, budget?: ProbeBudget): Promise<ProbeOutcome> => {
+      asked.push(budget);
+      clock += budget?.ms ?? 400;
+      return Promise.resolve({ status: 'limited' });
+    };
+    const budgetMs = 6000;
+    const plan = await findLanding(goal, 'tunnel', { ...w, probe, now: () => clock }, { ...OPTS, budgetMs, from: { x: 300, z: 0 } });
+    expect(plan.kind, plan.line).toBe('fallback');
+    expect(asked.slice(0, LONG_PROBE.count).every((b) => b?.nodes === LONG_PROBE.nodes), plan.line).toBe(true);
+    expect(asked.slice(LONG_PROBE.count).every((b) => b === undefined)).toBe(true);
+    expect(plan.line).toMatch(/:limited long/);
+    // the search stops once its time is spent: no probe starts after budgetMs, so the overrun is at most one probe of the caller's
+    expect(clock).toBeLessThanOrEqual(budgetMs + 400);
+    // a long probe is cut to the time left: with 2 s in all, the first one is given the 2 s, and nothing more is started
+    clock = 0;
+    asked.length = 0;
+    const short = await findLanding(goal, 'tunnel', { ...w, probe, now: () => clock }, { ...OPTS, budgetMs: 2000, longProbe: { count: 3, nodes: 100_000, ms: 5000 }, from: { x: 300, z: 0 } });
+    expect(short.kind).toBe('fallback');
+    expect(asked[0]?.ms).toBe(2000);
+    expect(asked.length).toBe(1);
+    expect(clock).toBeLessThanOrEqual(2000);
+  });
+
+  it('an open goal (no walk flood) keeps the caller\'s probe; count 0 turns the long probes off', async () => {
+    const w = islands();
+    const goal = { x: 0, y: FEET + 2, z: 0 };
+    const asked: (ProbeBudget | undefined)[] = [];
+    const probe = (from: { x: number; y: number; z: number }, budget?: ProbeBudget): Promise<ProbeOutcome> => (asked.push(budget), islandProbe(100, 100)(from));
+    await findLanding(goal, 'pillar', { look: w.look, obstacle: w.obstacle, probe }, { ...OPTS, from: { x: 0, z: -300 } });
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every((b) => b === undefined)).toBe(true);
+    const t = tunnel();
+    asked.length = 0;
+    await findLanding({ x: 0, y: FEET, z: 0 }, 'tunnel', { ...t, probe: (_f, b) => (asked.push(b), Promise.resolve({ status: 'limited' })) }, { ...OPTS, longProbe: { count: 0, nodes: 0, ms: 0 }, from: { x: 300, z: 0 } });
+    expect(asked.every((b) => b === undefined)).toBe(true);
   });
 });
 

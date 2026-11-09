@@ -57,3 +57,28 @@ and every approach from the go-around's height (80 above it, the hill's) ended `
 - `WALK_S_PER_BLOCK` is a constant measured on the replica; the navigator's own path cost would be better (an open point).
 - No new setting: the price's constants are the measurement's; a knob ("how many seconds a go-around must save") can come if the
   owner wants one.
+
+## Addendum: Track L2 (2026-11-09), the walk priced by its path, probes that finish
+
+Context: two of L1's open points. Every confirmed walk was priced at `WALK_S_PER_BLOCK` (0.3 s a block), so a walk through the
+owner's cave (17 to 19 % slower than that) and a short dry one (up to 32 % faster) were priced alike. And on the owner's cave all 16
+probes of every landing search ran out: the 6 000 nodes, not the 400 ms (on the fixture 16 probes took 0.4 to 0.5 s; the replica's whole searches 0.65 to 1.5 s); the first cells
+by the walk flood need 41 000 nodes with the navigator's surface preference and 17 600 without. The landing was a fallback priced
+as unknown. Measured on the private fixture with `scripts/land-probe-bench.ts` on the test host; numbers in
+[../flight.md](../flight.md) "L2".
+
+7. **A confirmed walk is priced by the probe's own plan**: its planned ticks (`landprice.ts probeTicks`: the path's move costs
+   without the surface preference and the irreversible drop's extra, which are no time) at 20 a second times `PATH_PACE` 1.07
+   (the navigator in a closed loop over eight walks on the fixture: real over planned 1.00 to 1.21). A walk without ticks keeps
+   0.3 s a block; an unconfirmed one keeps L1's detour and risk term. The landing search ranks its cells by that price in
+   seconds; its stop rule bounds the remaining candidates at the probe's fastest pace (`PATH_MIN_S_PER_BLOCK`). The landing line
+   says which price each cell got (`by its path`, `at 0.3 s a block`, `unconfirmed`).
+8. **The landing probe plans without the surface preference** (`LAND_PROBE_SURFACE` false, `landprobe.ts`): whether a walk
+   exists does not depend on it, its ticks are taken out of the price anyway, and with it the search expands the open ground
+   round a cave's mouth first (41 000 nodes against 17 600 for the same walk, within 1 % of its ticks).
+9. **A covered goal's first three probes by the walk flood are long** (`LONG_PROBE`: 60 000 nodes, 1 500 ms, about 3x the
+   measured need), each cut to the search's time left; the search keeps its 6 s in all and its 16 probes. On the fixture the
+   whole search with them took 0.7 s on the test host (0.5 s before) and confirmed the hill cell by the cave's mouth.
+10. **The flown rest is not priced.** A corridor plan per candidate costs seconds; left as an open point.
+
+Safety is unchanged (decision 2): the price decides between the same confirmed alternatives and the forced landing's own ground.

@@ -8,8 +8,8 @@ import type { CaveWorld } from '../../../src/skills/fly/corridor/cave.ts';
 import type { BlockInfo, Vec3 } from '../../../src/world/types.ts';
 import { harness } from './fakes.ts';
 
-/** The world BotSkills reads, over the cave's blocks. */
-function caveSkillsWorld(w: CaveWorld) {
+/** The world BotSkills reads, over the cave's blocks (Track L2: also the landing probe bench's navigator, scripts/land-probe-bench.ts). */
+export function caveSkillsWorld(w: CaveWorld) {
   const t = w.terrain;
   const byState = new Map<number, BlockInfo>();
   const blockAt = (x: number, y: number, z: number): BlockInfo | undefined => {
