@@ -261,6 +261,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         ...(exact !== undefined ? { exact } : {}),
         ...(position() ? { from: position()! } : {}), // Track F3: a route landing comes in from the body's side
         ...(hint?.rim !== undefined ? { rim: hint.rim } : {}), // Track F8: the opening's rim over a corridor's landing cell
+        ...(hint?.partial ? { partial: true } : {}), // Track L1: the hold's look answers from the loaded part
       },
     );
     log.info(`fly: ${plan.line}`);

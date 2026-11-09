@@ -21,6 +21,7 @@ import { elytraWornLimit, kitLine, kitReady, readKit, ROCKET, SupplyWatch, type 
 import type { FlightKitOps } from '../../skills/fly/kitops.ts';
 import { cruiseHeight, flightSeconds, hdist, takeoffSky, type CellQuery, type LandingTarget } from '../../skills/fly/plan.ts';
 import type { LandingCell, LandingPlan } from '../../skills/fly/landing.ts';
+import { holdWorth, walkSeconds } from '../../skills/fly/landprice.ts'; // Track L1
 import { glideOptions, type Ledge } from '../../skills/fly/glide.ts';
 import type { BrainOptions } from '../../skills/fly/brain.ts'; // Track F3
 import type { TakeoffRoute } from '../../skills/fly/route/takeoff.ts'; // Track F3
@@ -79,6 +80,11 @@ export const LOOK_EVERY = 40;
  */
 export interface LandingHint {
   rim?: number;
+  /**
+   * Track L1 (docs/flight.md "Landing by time"): the hold's look: a confirmed landing on the loaded part of a partly loaded
+   * window counts (landing.ts `partial`), taken when no unloaded column could save more walk than the next look's wait.
+   */
+  partial?: boolean;
 }
 
 export function targetFromPlan(plan: LandingPlan, base: { label: string; goal: Vec3; half: number; exact?: number } & LandingHint): FlyTarget {
@@ -445,6 +451,8 @@ export class FlyProcess extends BaseProcess {
       const c = this.d.controller.status();
       if (c.phase === 'land' || c.phase === 'done') return;
       const t = this.target;
+      // Track L1: the brain took one of the target's alternatives instead of a go-around: that landing is the flight's now
+      if (!t.hold && c.target !== undefined && c.target !== t) return;
       if (!t.hold) {
         // a chosen cell: re-checked every LOOK_EVERY ticks until the touchdown is near
         if (c.distance !== undefined && c.distance < 6) return;
@@ -465,7 +473,8 @@ export class FlyProcess extends BaseProcess {
         lastLook = ticks;
       }
       // (Track F8: a held target's rim, the caller's hint, goes with every look)
-      const hint: LandingHint | undefined = t.hold && t.rim !== undefined ? { rim: t.rim } : undefined;
+      // (Track L1: and the hold's look answers from the loaded part: `partial`)
+      const hint: LandingHint | undefined = t.hold ? { ...(t.rim !== undefined ? { rim: t.rim } : {}), partial: true } : undefined;
       const plan = await find(goal, t.label, t.exact, hint);
       if (this.done || this.phase !== 'flying' || !this.d.controller.active) return;
       if (plan.kind === 'unknown' || plan.kind === 'none') {
@@ -476,7 +485,12 @@ export class FlyProcess extends BaseProcess {
         }
         continue;
       }
-      this.log.info(`fly: ${plan.line}`);
+      // Track L1: a landing on the loaded part of the window waits for the next look only while an unloaded column could still save more walk than the wait
+      if (plan.kind === 'cell' && plan.unloaded) {
+        const w = holdWorth(plan.target.walkS ?? walkSeconds({ blocks: plan.walk, known: true }), walkSeconds({ blocks: plan.unloaded.bound, known: true }), LOOK_EVERY / 20);
+        this.log.info(`fly: ${plan.line}; ${w.line}`);
+        if (w.wait) continue;
+      } else this.log.info(`fly: ${plan.line}`);
       const next = targetFromPlan(plan, { label: t.label, goal, half: t.half, ...(t.exact !== undefined ? { exact: t.exact } : {}), ...(hint ?? {}) });
       if (!t.hold && t.cell && next.cell?.x === t.cell.x && next.cell.z === t.cell.z && next.cell.feet === t.cell.feet) continue; // the same cell
       if (!this.d.controller.retarget(next)) {

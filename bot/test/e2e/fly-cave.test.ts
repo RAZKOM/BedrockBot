@@ -24,7 +24,7 @@
 // time, rockets, damage (truth hurtlog), corrections, re-plans, corridor plans / windows / walks, ticks in water.
 // Gated: the build, the fly-over and every run completing. The numbers themselves are measured, not gated.
 // Env: FLY_BDS_HOST / FLY_BDS_PORT / FLY_BDS_CONTAINER (fly-truth.ts; run with 19210 / bds-fly2), FLY_CAVE_AT="x,z",
-// FLY_CAVE_REUSE=1, FLY_CAVE_ONLY=tripC,walkA,walkB,flyA,flyB,flyC,flyS, FLY_CAVE_LEGS=3,4 (the legs of A and B by index, walked or flown), FLY_CAVE_STYLE=1 (the cave style on the flown runs),
+// FLY_CAVE_REUSE=1, FLY_CAVE_ONLY=tripC,walkA,walkB,flyA,flyB,flyC,flyS, FLY_CAVE_LEGS=3,4 (the legs of A and B by index, walked or flown), FLY_CAVE_STYLE=1 (the cave style on the flown runs), FLY_CAVE_PLAIN=1 (Track L1: trip C with flyCorridor off, the `!test cavestart` way: go-arounds, the flight and the landing in the table),
 // FLY_CAVE_RUNS (flyC / flyS runs, default 5 / 3), FLY_CAVE_LEG_S (the time a run may take, default 180), FLY_CAVE_REPORT=file (the table written there too), FLY_VERBOSE=1.
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -49,6 +49,8 @@ const LEGS = new Set((process.env.FLY_CAVE_LEGS ?? '').split(',').filter(Boolean
 const RUNS = process.env.FLY_CAVE_RUNS ? Number(process.env.FLY_CAVE_RUNS) : undefined;
 const LEG_MS = Number(process.env.FLY_CAVE_LEG_S ?? 180) * 1000;
 const REUSE = process.env.FLY_CAVE_REUSE === '1';
+/** Track L1: trip C the Realm's way (`!test cavestart`): flyCorridor off, the plain flight, then the rest from the landing. */
+const PLAIN = process.env.FLY_CAVE_PLAIN === '1';
 const want = (c: string): boolean => ONLY.size === 0 || ONLY.has(c);
 const wantLeg = (i: number): boolean => LEGS.size === 0 || LEGS.has(i);
 /** The characters of one `truth:cave part` message (a scriptevent message holds 2048). */
@@ -337,6 +339,9 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
     for (let i = 0; i < runs; i++) {
       setCorridorUnderFly(b.task, undefined);
       if (process.env.FLY_CAVE_STYLE === '1') b.settings.set('flyCave', 'on'); // Track F8: the trip in flies underground in the cave style
+      // Track L1: FLY_CAVE_PLAIN=1 flies the Realm's way (`!test cavestart`: no corridor for the trip, the plain flight to the
+      // goal's landing, then the rest from there: the corridor's windows with flyCave on, else the walk)
+      if (PLAIN) b.settings.set('flyCorridor', 'off');
       await b.command('!stop');
       await sleep(500);
       await teleport(b, home!);
@@ -348,9 +353,20 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
       const from = b.said.length;
       const w0 = water;
       const t0 = performance.now();
+      // Track L1: when the flight ended (its `flight: ended` line), for the flight's share of the trip's time
+      let flightEnd: number | undefined;
+      const watch = setInterval(() => {
+        if (flightEnd === undefined && b.logs.slice(n0).some((l) => /flight: (landed|ended \()/.test(l))) flightEnd = performance.now();
+      }, 100);
       await b.command(`!fly ${goal.x - 0.5} ${goal.y} ${goal.z - 0.5}`);
       // Track R1: the trip's own end line (the corridor's arrival or failure, a landing's), not any `fly:` line on the way
-      const end = await b.reply((s) => s.startsWith('arrived') || s.startsWith('landed') || s.startsWith('fly: the corridor to ') || s.startsWith('fly: landed, but'), from, 600_000).catch((err: unknown) => `no end line: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`);
+      // (Track L1, plain: a landing near the goal is not the end; the walk or the corridor from there is)
+      const endOf = PLAIN
+        ? (s: string) => s.startsWith('arrived') || s.startsWith('walked to') || s.startsWith('fly: the corridor to ') || s.startsWith('fly: landed, but') || s.startsWith('fly: the trip to')
+        : (s: string) => s.startsWith('arrived') || s.startsWith('landed') || s.startsWith('fly: the corridor to ') || s.startsWith('fly: landed, but');
+      const end = await b.reply(endOf, from, 600_000).catch((err: unknown) => `no end line: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`);
+      const tEnd = performance.now();
+      clearInterval(watch);
       await b.command('!stop');
       await sleep(1000);
       const logs = b.logs.slice(n0).map((l) => l.replace(/^\S+ (info|warn|error) /, ''));
@@ -358,8 +374,18 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
       const dmg = await b.truth.damageSince(since, b.name);
       const off = await offFrom(b, goal);
       const parsed = parseEnd(line);
-      rows.push({ run: 'tripC', leg: `${i} home -> cave_start`, ok: end.startsWith('arrived') && off < 3, off, ...parsed, seconds: parsed.seconds >= 0 ? parsed.seconds : (performance.now() - t0) / 1000, damage: dmg.total, water: water - w0, how: /\(([^)]*)\);/.exec(end)?.[1] ?? '' });
-      notes.push(`tripC ${i}: ${end}\n    ${logs.filter((l) => /^corridor: |flight: (landed|ended|holding)|fly: landing for|takeoff|fly: no takeoff|route: .*bailing/.test(l)).slice(0, 40).map((l) => l.slice(0, 260)).join('\n    ')}`);
+      // Track L1: the flight's go-arounds, its landing's distance from the goal and the decisions it priced
+      const ended = logs.find((l) => /^flight: (landed|ended \()/.test(l));
+      const gas = Number(/, (\d+) go-arounds?[ ,]/.exec(ended ?? '')?.[1] ?? -1);
+      const at = /^flight: (?:landed|ended \([^)]*\)) at (-?[\d.]+) (-?[\d.]+) (-?[\d.]+)/.exec(ended ?? '');
+      const landedOff = at ? Math.hypot(Number(at[1]) - goal.x, Number(at[3]) - goal.z) : -1;
+      const landedDy = at ? Number(at[2]) - goal.y : 0;
+      const flightS = flightEnd !== undefined ? (flightEnd - t0) / 1000 : -1;
+      const totalS = (tEnd - t0) / 1000;
+      const ok = (end.startsWith('arrived') || end.startsWith('walked to')) && off < 3;
+      const how = PLAIN ? `GA ${gas}, flight ${flightS.toFixed(0)} s, landed ${landedOff.toFixed(0)} off (dy ${landedDy.toFixed(0)}), total ${totalS.toFixed(0)} s` : (/\(([^)]*)\);/.exec(end)?.[1] ?? '');
+      rows.push({ run: 'tripC', leg: `${i} home -> cave_start`, ok, off, ...parsed, seconds: PLAIN ? totalS : parsed.seconds >= 0 ? parsed.seconds : totalS, damage: dmg.total, water: water - w0, how });
+      notes.push(`tripC ${i}: ${end}\n    ${logs.filter((l) => /^corridor: |flight: (landed|ended|holding|go-around|no go-around|land now|price)|fly: landing for|takeoff|fly: no takeoff|route: .*bailing|walked|fly: landed/.test(l)).slice(0, 40).map((l) => l.slice(0, 300)).join('\n    ')}`);
       expect(end.length).toBeGreaterThan(0);
     }
   }, 3_600_000);

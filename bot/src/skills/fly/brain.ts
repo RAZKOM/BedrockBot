@@ -69,6 +69,7 @@ import { DIVE_END_MAX, DIVE_MIN_ABOVE, DIVE_MIN_ABOVE_FORCED, divePhase, divePit
 import type { RouteGrid } from './route/grid.ts'; // Track F3
 import { ROUTE_HANDOVER, ROUTE_PLAN_NODES, ROUTE_TRACK_MS } from './route/landing.ts'; // Track F3
 import { RouteTracker, type Planner } from './route/tracker.ts'; // Track F3
+import { decideGoAround, SINK_S_PER_BLOCK, WALK_S_PER_BLOCK, walkSeconds, type LandingOffer, type MissKind } from './landprice.ts'; // Track L1
 import type { RouteGoal } from './route/types.ts'; // Track F3
 
 /** Track F3: `route`: the RouteTracker flies the last blocks onto a route landing (docs/flight.md "Route landings and takeoffs"). */
@@ -194,6 +195,8 @@ export interface FlightStats {
   holdTicks: number;
   /** Track BF: why each go-around was flown (one line each). */
   goAroundReasons: string[];
+  /** Track L1: each missed approach's price line (landing now against the go-around, landprice.ts). */
+  landingPrices: string[];
   /** Track BH, a ledge takeoff: ticks of the walk to the edge, and the height the fall took until the glide flew (LEDGE_SPEED). */
   ledgeWalkTicks?: number;
   ledgeDrop?: number;
@@ -351,7 +354,7 @@ export class FlightBrain {
   phase: FlightPhase = 'takeoff';
   /** The landing target (Track AU2: `retarget` may move it before the approach). */
   target: LandingTarget;
-  readonly stats: FlightStats = { rockets: 0, rocketsBy: { climb: 0, cruise: 0, goaround: 0, land: 0 }, goArounds: 0, ticks: 0, maxY: -Infinity, approachTicks: 0, descents: [], steered: 0, holdTicks: 0, goAroundReasons: [], avoidances: [], dives: 0, brakeRescues: 0, brakeTicks: 0, routeTicks: 0, routePlans: 0, routeReplans: 0, routeMaxError: 0 };
+  readonly stats: FlightStats = { rockets: 0, rocketsBy: { climb: 0, cruise: 0, goaround: 0, land: 0 }, goArounds: 0, ticks: 0, maxY: -Infinity, approachTicks: 0, descents: [], steered: 0, holdTicks: 0, goAroundReasons: [], landingPrices: [], avoidances: [], dives: 0, brakeRescues: 0, brakeTicks: 0, routeTicks: 0, routePlans: 0, routeReplans: 0, routeMaxError: 0 };
   // (entryAbove is set by the cruise when it hands over to the approach)
   /** Why the flight is ending early (set by `landNow`), kept for the outcome. */
   private endReason: FlightEndReason | undefined;
@@ -398,6 +401,8 @@ export class FlightBrain {
   private emergencyWithin: number | undefined;
   /** Track AU2: the descent geometry was tried and found nothing at this aim (no second search per approach). */
   private descentNone = false;
+  /** Track L1: how the last missed approach to this target failed (the go-around's chance of landing next time). */
+  private lastMiss: MissKind | undefined;
   /** Track BF: the holding circle over a target that is not landable yet (`LandingTarget.hold`). */
   private holding: { fit: SpiralFit; dir: 1 | -1; y: number } | undefined;
   /** Track BH, the ledge takeoff: ticks walked towards the edge, ticks standing still there, the sneak released, the step taken. */
@@ -546,6 +551,7 @@ export class FlightBrain {
     this.descent = undefined;
     this.descentNone = false;
     this.goaroundY = undefined;
+    this.lastMiss = undefined;
     this.resetPlanners();
     return true;
   }
@@ -1490,7 +1496,28 @@ export class FlightBrain {
           : `hard touchdown ahead (cost ${choice.cost.toFixed(0)}: vy ${td.vel.y.toFixed(2)}, h ${Math.hypot(td.vel.x, td.vel.z).toFixed(2)}, ${td.off.toFixed(1)} from the centre)`;
       const line = `${why} at ${d.toFixed(0)} blocks out, ${(b.pos.y - aim.top).toFixed(0)} above, ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} blocks a tick${aim.walk ? `, a walk landing of ${aim.cells?.size ?? 0} cells` : `, half ${aim.half}`}`;
       this.stats.goAroundReasons.push(line);
-      if (this.stats.goArounds < this.o.goArounds && i.rockets > 0) {
+      // Track L1 (docs/flight.md "Landing by time"): a walk landing prices the go-around against landing now nearby
+      const canGoAround = this.stats.goArounds < this.o.goArounds && i.rockets > 0;
+      if (canGoAround && this.target.walkS !== undefined) {
+        const kind: MissKind = td.kind;
+        const offers = this.landingOffers(b);
+        const ans = decideGoAround({ kind, ...(this.lastMiss !== undefined ? { previous: this.lastMiss } : {}), targetWalkS: this.target.walkS, offers: offers.map((o) => o.offer), canGoAround });
+        this.stats.landingPrices.push(ans.line);
+        this.o.note?.(`landing price: ${ans.line}`);
+        this.lastMiss = kind;
+        const pick = ans.offer !== undefined ? offers[ans.offer] : undefined;
+        if (!ans.goAround && pick) {
+          if (pick.alternative) {
+            this.o.note?.(`land now: the alternative ${pick.offer.what} instead of a go-around; ${line}`);
+            this.switchTarget(pick.alternative);
+            return this.cruise(i, ctl);
+          }
+          this.o.note?.(`land now: the nearest safe ground instead of a go-around; ${line}`);
+          this.landNow('landed_off', b);
+          return this.approach(i, ctl, this.aim);
+        }
+      }
+      if (canGoAround) {
         this.o.note?.(`go-around ${this.stats.goArounds + 1}: ${line}`);
         this.stats.goArounds++;
         this.phase = 'goaround';
@@ -1526,6 +1553,42 @@ export class FlightBrain {
     const h = Math.hypot(b.vel.x, b.vel.z);
     if (h < STALL_SPEED - 0.1 && ctl.pitch < 0 && d > aim.half + 6 && (choice.phase === 'A1' || choice.phase === 'A2')) ctl.pitch = 10;
     return ctl;
+  }
+
+  /**
+   * Track L1: the landings a missed approach may take instead of a go-around, priced (landprice.ts): the target's
+   * alternatives (cells the landing search confirmed and simulated, landing.ts) and the nearest safe ground ahead
+   * (`emergencyTarget`, the forced landing's; its walk unknown: the straight distance to the target's cell, three a
+   * block of height, plus the target's own walk, at the unknown walk's price). Each costs the height it still has to lose.
+   */
+  private landingOffers(b: FlightBody): { offer: LandingOffer; alternative?: LandingTarget }[] {
+    const t = this.target;
+    const down = (top: number): number => Math.max(0, b.pos.y - (top + APPROACH_HEIGHT) - SPIRAL_ABOVE) * SINK_S_PER_BLOCK;
+    const out: { offer: LandingOffer; alternative?: LandingTarget }[] = [];
+    for (const a of t.alternatives ?? []) {
+      if (a.walkS === undefined) continue;
+      out.push({ offer: { what: a.name ?? `${Math.floor(a.x)} ${a.top} ${Math.floor(a.z)}`, walkS: a.walkS, extraS: down(a.top) }, alternative: a });
+    }
+    const e = this.emergencyTarget(b);
+    const blocks = hdist(e, t) + 3 * Math.abs(e.top - t.top) + (t.walkS ?? 0) / WALK_S_PER_BLOCK;
+    out.push({ offer: { what: `the nearest safe ground ${Math.round(hdist(e, t))} blocks from the target`, walkS: walkSeconds({ blocks, known: false }), extraS: down(e.top) } });
+    return out;
+  }
+
+  /** Track L1: fly on to `next` (a target's alternative) from here: the cruise's descent and approach start over for it. */
+  private switchTarget(next: LandingTarget): void {
+    const rest = (this.target.alternatives ?? []).filter((a) => a !== next);
+    this.target = { ...next, ...(rest.length ? { alternatives: rest } : {}) };
+    this.phase = 'cruise';
+    this.tracker = undefined;
+    this.holding = undefined;
+    this.dive = undefined;
+    this.descent = undefined;
+    this.descentNone = false;
+    this.goaroundY = undefined;
+    this.goaroundBearing = undefined;
+    this.lastMiss = undefined;
+    this.resetPlanners();
   }
 
   private goaround(i: BrainInput, ctl: BrainControl): BrainControl {

@@ -27,8 +27,17 @@
 //     floor, an edge, a cell under a roof 3 above): dry and safe, it is the target itself (`precise`, the
 //     shaft's `rim`, its floor's `cells`) when the brake / elevator landing's simulation (brake.ts) lands
 //     on it, from above or along a corridor (`preciseGoal`); `style flare` keeps the Track BF behaviour
+//   - Track L1, landing by time (docs/flight.md "Landing by time", decisions/0076): a covered goal (a cave, a
+//     room) ranks its candidates by a flood of the walk from the goal out (`walkFlood`: the cave mouth's open
+//     ground first, not the hill over it); an open cell is offered only when the approach simulated from where the
+//     flight will come in (over the terrain on that side) lands on it (`approachLands`: the Realm's cave mouth in
+//     a valley under a hill was flown 4 times round before); the cheapest landings beside the chosen one ride on it
+//     as `alternatives`, each priced in seconds of walk (landprice.ts), for a missed approach to land on instead of
+//     a go-around; a partly loaded window can still answer (`partial`) with the least walk the unloaded part could
+//     offer, for the hold's price
 import type { Vec3 } from '../../connection/types.ts';
 import { BrakePlanner } from './brake.ts';
+import { walkSeconds } from './landprice.ts'; // Track L1
 import { ApproachPlanner, APPROACH_DISTANCE, APPROACH_HEIGHT, columnKey, entryTop, hdist, yawDiff, yawDir, yawTo, type FlightBody, type LandingTarget, type Obstacle } from './plan.ts';
 import type { RouteGrid } from './route/grid.ts'; // Track F3
 import { planLandingRoute, type LandingRouteSpec } from './route/landing.ts'; // Track F3
@@ -166,6 +175,11 @@ export interface LandingOptions {
    * is simulated in over it and the elevator sinks down inside.
    */
   rim?: number;
+  /**
+   * Track L1: answer from the loaded columns even when under `liveShare` of the window is live (the hold's look: a
+   * confirmed landing on the loaded part, with `unloaded` saying how near the goal the unloaded part comes).
+   */
+  partial?: boolean;
 }
 
 export interface LandingCell {
@@ -179,10 +193,18 @@ export interface LandingCell {
   route?: boolean;
 }
 
+/** Track L1: a search on a partly loaded window (`LandingOptions.partial`): the live share and the least straight distance from the goal to an unloaded candidate column. */
+export interface Unloaded {
+  live: number;
+  columns: number;
+  /** Blocks: no landing on the unloaded part can walk less than this. */
+  bound: number;
+}
+
 export type LandingPlan =
   | { kind: 'unknown'; line: string }
   | { kind: 'goal'; cell: LandingCell; walk: 0; target: LandingTarget; line: string }
-  | { kind: 'cell'; cell: LandingCell; walk: number; target: LandingTarget; line: string }
+  | { kind: 'cell'; cell: LandingCell; walk: number; target: LandingTarget; line: string; unloaded?: Unloaded }
   | { kind: 'fallback'; cell: LandingCell; walk: number; target: LandingTarget; line: string; why: string }
   | { kind: 'none'; line: string };
 
@@ -536,12 +558,14 @@ export function walkTarget(c: LandingCell, cells: ReadonlySet<number>, extra: Pa
 }
 
 /** The candidate cells within `radius` of the goal (every cell out to 8, every other beyond), and how much of the window is live. */
-export function candidatesNear(view: ColumnView, goal: Vec3, o: Pick<LandingOptions, 'radius' | 'headroom'>): { list: Candidate[]; columns: number; live: number } {
+export function candidatesNear(view: ColumnView, goal: Vec3, o: Pick<LandingOptions, 'radius' | 'headroom'>): { list: Candidate[]; columns: number; live: number; bound: number } {
   const gx = Math.floor(goal.x);
   const gz = Math.floor(goal.z);
   const list: Candidate[] = [];
   let columns = 0;
   let live = 0;
+  // Track L1: the nearest column that is not loaded (no landing there walks less than its straight distance)
+  let bound = Infinity;
   for (let r = 1; r <= o.radius; r++) {
     const step = r > 8 ? 2 : 1;
     for (let dx = -r; dx <= r; dx += step) {
@@ -551,7 +575,10 @@ export function candidatesNear(view: ColumnView, goal: Vec3, o: Pick<LandingOpti
         const x = gx + dx;
         const z = gz + dz;
         const floors = view.floors(x, z);
-        if (!floors) continue;
+        if (!floors) {
+          bound = Math.min(bound, Math.hypot(dx, dz));
+          continue;
+        }
         live++;
         for (const f of floors) {
           if (f.feet > goal.y + 48 || f.feet < goal.y - 32) continue;
@@ -564,8 +591,138 @@ export function candidatesNear(view: ColumnView, goal: Vec3, o: Pick<LandingOpti
     }
   }
   list.sort((a, b) => a.est - b.est);
-  return { list, columns, live };
+  return { list, columns, live, bound };
 }
+
+// ---- Track L1: the walk flood, the approach check, the alternatives ------------------------------------------------
+
+/** Track L1: floors the walk flood visits at most (each reads its four neighbour columns, memoised by the ColumnView). */
+export const FLOOD_MAX = 20000;
+/** Track L1: the flood keeps this many blocks beyond the candidate radius (a walk that bends out round a hill). */
+export const FLOOD_BEYOND = 8;
+/** Track L1: a candidate the flood did not reach ranks behind every one it did, by this many blocks more. */
+export const FLOOD_UNREACHED = 64;
+
+/** Track L1: the walk flood from a goal: the steps of the walk from a floor to the goal (undefined: not reached), and the nearest open-sky floor it reached (the walk's entrance). */
+export interface WalkFlood {
+  steps(x: number, feet: number, z: number): number | undefined;
+  entrance: { x: number; z: number; feet: number; steps: number } | undefined;
+  floors: number;
+}
+
+/**
+ * Track L1 (docs/flight.md "Landing by time"): a breadth-first flood of the walk to the goal over the floors of the live
+ * model (ColumnView: a solid with two free cells over it), backwards from the goal's own floor: a floor walks to its
+ * neighbour (4-way) at the same height, a block up when it has 3 of room to jump in, or down by up to 3 when the column
+ * it drops into is free that high; a floor with a hazard is no way, a wet one is (a swim). A step is a block of walk, so
+ * the flood's steps rank the candidates of a covered goal by their walk, not by the straight line (the hill over a cave
+ * is near in a straight line and far on foot); the probe plan (reach.ts) still confirms the walk. Bounded by FLOOD_MAX
+ * floors and the candidate radius plus FLOOD_BEYOND.
+ */
+export function walkFlood(view: ColumnView, goal: { x: number; z: number; feet: number }, radius: number, max = FLOOD_MAX): WalkFlood {
+  const steps = new Map<number, number>();
+  const key = (x: number, z: number, feet: number): number => columnKey(x, z) * 1024 + (feet - view.yBottom);
+  const reach = radius + FLOOD_BEYOND;
+  const queue: { x: number; z: number; f: Floor; s: number }[] = [];
+  const own = view.floorNear(goal.x, goal.z, goal.feet, 0);
+  let entrance: WalkFlood['entrance'];
+  if (own && !own.hazard) {
+    steps.set(key(goal.x, goal.z, own.feet), 0);
+    queue.push({ x: goal.x, z: goal.z, f: own, s: 0 });
+  }
+  for (let head = 0; head < queue.length && steps.size < max; head++) {
+    const { x, z, f, s } = queue[head]!;
+    if (!entrance && view.kindOf(f, 2) === 'open') entrance = { x, z, feet: f.feet, steps: s };
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      const nx = x + dx;
+      const nz = z + dz;
+      if (Math.abs(nx - goal.x) > reach || Math.abs(nz - goal.z) > reach) continue;
+      for (const n of view.floors(nx, nz) ?? []) {
+        const d = n.feet - f.feet;
+        if (d < -1 || d > 3 || n.hazard) continue;
+        // (backwards: the walker goes from n to f) a block up from n wants room to jump there; a drop from n wants f's column free to n's head
+        if (d === -1 && n.ceiling !== undefined && n.ceiling - n.feet < 3) continue;
+        if (d > 0 && f.ceiling !== undefined && f.ceiling < n.feet + 2) continue;
+        const k = key(nx, nz, n.feet);
+        if (steps.has(k)) continue;
+        steps.set(k, s + 1);
+        queue.push({ x: nx, z: nz, f: n, s: s + 1 });
+      }
+    }
+  }
+  return { steps: (x, feet, z) => steps.get(key(x, z, feet)), entrance, floors: steps.size };
+}
+
+/** Track L1: approach simulations (each a planner's cold start, about 10 ms) one landing search may run for its open cells. */
+export const APPROACH_SIMS = 24;
+
+/**
+ * Track L1: the height a flight comes in over a cell from `bearing`: the approach entry (APPROACH_HEIGHT over the top or the
+ * rim at APPROACH_DISTANCE out), or 3 over the highest floor on that line when the terrain there is higher (the cruise's
+ * terrain floor and the go-around height keep the body over it: the Realm's cave mouth under a hill was flown at 80 over it).
+ */
+export function entryHeight(view: ColumnView, target: LandingTarget, bearing: number): number {
+  const d = yawDir(bearing);
+  let top = entryTop(target) + APPROACH_HEIGHT;
+  for (let s = Math.ceil(target.half) + 2; s <= APPROACH_DISTANCE; s += 2) {
+    const f = view.floors(Math.floor(target.x + d.x * s), Math.floor(target.z + d.z * s))?.[0];
+    if (f && f.feet + 3 > top) top = f.feet + 3;
+  }
+  return top;
+}
+
+/**
+ * Track L1: an open landing's approach, simulated as the flight will fly it (the flight's own planners, the world's solids
+ * as walls): from APPROACH_DISTANCE out at `entryHeight` along the bearings given (the body's side first), the flare and,
+ * unless `style` is flare, the brake; landed under CORRIDOR_COST on the first that does (`style` the family), else not.
+ * `sims` counts the planner runs (at most `budget`).
+ */
+export interface ApproachSim {
+  ok: boolean;
+  bearing?: number;
+  style?: 'flare' | 'brake';
+  cost: number;
+  /** The best simulated touchdown's kind. */
+  kind: string;
+  /** Simulations run (0: the budget was spent before this cell, nothing is known). */
+  tried: number;
+}
+
+export function approachLands(view: ColumnView, target: LandingTarget, bearings: readonly number[], obstacle: Obstacle, style: 'auto' | 'flare' | 'brake', budget: { sims: number; max: number }): ApproachSim {
+  let best: ApproachSim = { ok: false, cost: Infinity, kind: 'none', tried: 0 };
+  let tried = 0;
+  for (const bearing of bearings) {
+    const d = yawDir(bearing);
+    const y = entryHeight(view, target, bearing);
+    for (const family of style === 'auto' ? (['flare', 'brake'] as const) : ([style] as const)) {
+      if (budget.sims >= budget.max) return { ...best, tried };
+      budget.sims++;
+      tried++;
+      const body: FlightBody = { pos: { x: target.x + d.x * APPROACH_DISTANCE, y, z: target.z + d.z * APPROACH_DISTANCE }, vel: { x: -d.x * 1.05, y: -0.1, z: -d.z * 1.05 }, onGround: false, gliding: true, boostTicks: 0 };
+      const c = family === 'flare' ? new ApproachPlanner(7, obstacle).step(body, bearing + 180, target) : new BrakePlanner(7, obstacle).step(body, bearing + 180, target);
+      if (c.touchdown.kind === 'landed' && c.cost < CORRIDOR_COST) return { ok: true, bearing, style: family, cost: c.cost, kind: 'landed', tried };
+      if (c.cost < best.cost) best = { ok: false, cost: c.cost, kind: c.touchdown.kind, tried };
+    }
+  }
+  return { ...best, tried };
+}
+
+/** Track L1: the bearings an open landing's approach is simulated along: the body's side first, then a quarter round each way and the far side. */
+export function approachBearings(target: { x: number; z: number }, from?: { x: number; z: number }): number[] {
+  const first = from && hdist(from, target) > 1 ? yawTo(target, from) : 0;
+  return [first, first + 90, first - 90, first + 180].map((b) => ((b % 360) + 360) % 360);
+}
+
+/** Track L1: a partly loaded window answers the hold's look (`partial`) only with at least this share of it live (else `unknown` at once). */
+export const PARTIAL_MIN_SHARE = 0.5;
+
+/** Track L1: alternatives a landing carries at most (the cheapest landings beside the chosen one), and probes the search may spend on them past its stop. */
+export const ALTERNATIVES = 3;
+export const ALT_PROBES = 2;
+/** Track L1: alternatives lie at least this many blocks apart (else they are one landing). */
+export const ALT_APART = 6;
+/** Track L1: open cells within this many blocks of one whose approach did not land are not tried (the same hollow). */
+export const NO_APPROACH_NEAR = 3;
 
 /**
  * The landing for a walk to `goal` (see the file comment). `label` names the goal in the log line.
@@ -587,7 +744,7 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   if (own && !underRim && view.kindOf(own, o.headroom) === 'open' && view.sound(gx, gz, own)) {
     const cell: LandingCell = { x: gx, z: gz, feet: own.feet, kind: 'goal' };
     const target: LandingTarget =
-      o.exact !== undefined ? { x: gx + 0.5, z: gz + 0.5, top: own.feet, half: o.exact } : walkTarget(cell, cellsAround(view, cell, 'open', walkSlack(0) + 1, o.headroom));
+      o.exact !== undefined ? { x: gx + 0.5, z: gz + 0.5, top: own.feet, half: o.exact } : walkTarget(cell, cellsAround(view, cell, 'open', walkSlack(0) + 1, o.headroom), { walkS: 0, walkKnown: true });
     return { kind: 'goal', cell, walk: 0, target, line: `landing for ${label}: the goal itself (${fmtCell(cell)}, ${o.exact !== undefined ? 'exact' : `${target.cells?.size ?? 1} cells`})` };
   }
   // Track F1: an exact goal that is no plain floor (a pillar top, a shaft floor, an edge, under a low roof): the
@@ -599,9 +756,21 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
       return { kind: 'goal', cell, walk: 0, target: p.target, line: `landing for ${label}: the goal itself (${fmtCell(cell)}, ${p.line})` };
     }
   }
-  const { list, columns, live } = candidatesNear(view, goal, o);
+  const { list, columns, live, bound } = candidatesNear(view, goal, o);
   await yieldNow();
-  if (live < columns * (o.liveShare ?? 0.85)) return { kind: 'unknown', line: `landing for ${label}: only ${live} of ${columns} columns loaded around the goal` };
+  // Track L1: a partly loaded window answers only when asked (the hold's look), and only with a confirmed landing
+  const partial = live < columns * (o.liveShare ?? 0.85);
+  if (partial && (!o.partial || live < columns * PARTIAL_MIN_SHARE)) return { kind: 'unknown', line: `landing for ${label}: only ${live} of ${columns} columns loaded around the goal` };
+  // Track L1: a covered goal (a cave, a room, the floor under a rim) ranks its candidates by the walk flood from its own floor
+  const covered = own !== undefined && !own.hazard && (underRim || view.kindOf(own, 2) !== 'open');
+  const flood = covered ? walkFlood(view, { x: gx, z: gz, feet: own.feet }, o.radius) : undefined;
+  if (flood) await yieldNow();
+  const rankOf = (c: Candidate): { key: number; lb: number; steps?: number } => {
+    const steps = flood?.steps(c.x, c.feet, c.z);
+    if (!flood) return { key: c.est, lb: c.lb };
+    // (the flood walks 4-way, a path cuts the corners: no walk is shorter than the steps over the square root of 2)
+    return steps === undefined ? { key: c.est + FLOOD_UNREACHED, lb: c.lb } : { key: steps, lb: Math.max(c.lb, steps / Math.SQRT2), steps };
+  };
   interface Probed {
     c: Candidate;
     result: string;
@@ -615,8 +784,23 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   // probes that exhausted the space without a path: their whole plateau is skipped (feet -> columns)
   const dead = new Map<number, Set<number>>();
   const isDead = (c: Candidate): boolean => [...dead.entries()].some(([feet, cols]) => feet === c.feet && cols.has(columnKey(c.x, c.z)));
-  let best: { c: Candidate; blocks: number; corridor?: Corridor } | undefined;
+  // Track L1: the landable cells found (a confirmed walk and, in the open, a simulated approach), cheapest first
+  interface Landable {
+    c: Candidate;
+    /** The ranking cost: the walk plus roofPenalty. */
+    blocks: number;
+    corridor?: Corridor;
+    simulated: boolean;
+  }
+  const landable: Landable[] = [];
+  let best: Landable | undefined;
+  // Track L1: open cells whose approach the simulation did not land (the cells round them are skipped too: the same valley)
+  const noApproach: Candidate[] = [];
+  const nearNoApproach = (c: Candidate): boolean => noApproach.some((n) => Math.abs(n.feet - c.feet) <= 1 && Math.hypot(n.x - c.x, n.z - c.z) <= NO_APPROACH_NEAR);
+  const simBudget = { sims: 0, max: APPROACH_SIMS };
+  let unsimulated = 0;
   let probes = 0;
+  let extraProbes = 0;
   let sims = 0;
   let roofsLooked = 0;
   // a queue by the ranking estimate: an overhang cell is re-queued once its corridors are known, with the
@@ -627,19 +811,29 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
     lb: number;
     corridors?: Corridor[];
   }
-  const queue: Entry[] = list.map((c) => ({ c, key: c.est, lb: c.lb }));
+  const queue: Entry[] = list.map((c) => ({ c, ...rankOf(c) })).sort((a, b) => a.key - b.key);
   const push = (e: Entry): void => {
     let i = queue.findIndex((q) => q.key > e.key);
     if (i < 0) i = queue.length;
     queue.splice(i, 0, e);
   };
+  // Track L1: past the stop rule a few more probes look for alternatives (cells ALT_APART from the chosen one and each other)
+  const apartOf = (a: Candidate, b: Candidate): boolean => Math.hypot(a.x - b.x, a.z - b.z) >= ALT_APART || Math.abs(a.feet - b.feet) > 2;
+  const apart = (c: Candidate): boolean => landable.every((l) => apartOf(l.c, c));
+  let alternativesOnly = false;
   while (queue.length) {
     const e = queue.shift()!;
     const c = e.c;
     // (a confirmed walk within a tenth, at least 2 blocks, of what any later candidate could do is good enough)
-    if (best && e.lb >= best.blocks - Math.max(2, best.blocks * 0.1)) break;
-    if (probes >= o.probes || now() - t0 > o.budgetMs) break;
+    if (best && !alternativesOnly && e.lb >= best.blocks - Math.max(2, best.blocks * 0.1)) {
+      if (landable.length > ALTERNATIVES) break;
+      alternativesOnly = true;
+    }
+    if (alternativesOnly && (extraProbes >= ALT_PROBES || landable.length > ALTERNATIVES)) break;
+    if (probes >= o.probes + (alternativesOnly ? ALT_PROBES : 0) || now() - t0 > o.budgetMs) break;
     if (isDead(c)) continue;
+    if (alternativesOnly && (c.kind !== 'open' || !apart(c))) continue;
+    if (c.kind === 'open' && nearNoApproach(c)) continue;
     let corridor: Corridor | undefined;
     if (c.kind === 'roof' && !e.corridors) {
       if (++roofsLooked > MAX_ROOF_CELLS) continue;
@@ -670,13 +864,38 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
     }
     if (!deps.probe) break;
     probes++;
+    if (alternativesOnly) extraProbes++;
     const r = await deps.probe({ x: c.x + 0.5, y: c.feet, z: c.z + 0.5 });
     await yieldNow();
     if (r.status === 'found') {
+      // Track L1: an open cell is landable only when the approach from where the flight will come in lands on it
+      let simulated = corridor !== undefined;
+      if (c.kind === 'open') {
+        const t = walkTarget({ ...c, kind: 'open' }, cellsAround(view, c, 'open', walkSlack(r.blocks), o.headroom));
+        const a = approachLands(view, t, approachBearings(t, o.from), deps.obstacle, o.style ?? 'flare', simBudget);
+        sims += a.tried;
+        if (a.tried > 0) await yieldNow();
+        if (a.tried > 0 && !a.ok) {
+          noApproach.push(c);
+          probed.push({ c, result: `path ${Math.round(r.blocks)}, no approach (${a.kind}${Number.isFinite(a.cost) ? ` ${a.cost.toFixed(0)}` : ''})`, blocks: r.blocks, status: 'skip' });
+          continue;
+        }
+        simulated = a.ok;
+        if (!a.ok) unsimulated++;
+        if (a.ok && a.style === 'brake') brakeOnly.add(c);
+      }
       // an overhang landing counts as a little more walk than an open one (the approach is harder), more the deeper under the roof
       const cost = r.blocks + roofPenalty(corridor);
       probed.push({ c, result: `path ${Math.round(r.blocks)}`, blocks: r.blocks, ...(corridor ? { corridor } : {}), status: 'found' });
-      if (!best || cost < best.blocks) best = { c, blocks: cost, ...(corridor ? { corridor } : {}) };
+      const l: Landable = { c, blocks: cost, ...(corridor ? { corridor } : {}), simulated };
+      // (one per neighbourhood: the cheapest of the cells within ALT_APART of each other)
+      const near = landable.filter((x) => !apartOf(x.c, c));
+      if (near.every((x) => cost < x.blocks)) {
+        for (const x of near) landable.splice(landable.indexOf(x), 1);
+        landable.push(l);
+        landable.sort((a, b) => a.blocks - b.blocks);
+      }
+      if (!best || cost < best.blocks) best = l;
     } else {
       probed.push({ c, result: r.status, ...(corridor ? { corridor } : {}), status: r.status });
       if (r.status === 'none') {
@@ -692,25 +911,57 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
     .slice(0, 10)
     .map((p) => `${fmtCell(p.c)}${p.c.kind === 'roof' ? `/roof${p.corridor ? ` b${p.corridor.bearing}` : ''}` : ''}:${p.result}`)
     .join(', ');
-  const head = `landing for ${label}: ${list.length} candidates (${roofs} under a roof), ${probes} probes, ${sims} approach sims, ${ms} ms${tried ? `: ${tried}` : ''}`;
-  if (best) {
-    const c = best.c;
-    const walk = best.blocks - roofPenalty(best.corridor);
+  const floodNote = flood ? `, walk flood ${flood.floors} floors${flood.entrance ? ` (open sky ${flood.entrance.steps} steps from the goal at ${fmtCell(flood.entrance)})` : ', no open sky reached'}` : '';
+  const head = `landing for ${label}: ${list.length} candidates (${roofs} under a roof), ${probes} probes, ${sims} approach sims${unsimulated ? ` (${unsimulated} approach${unsimulated === 1 ? '' : 'es'} not simulated: budget)` : ''}${floodNote}, ${ms} ms${tried ? `: ${tried}` : ''}`;
+  // Track L1: a landable cell's target, priced in seconds of walk
+  const targetOf = (l: Landable): { cell: LandingCell; walk: number; target: LandingTarget } => {
+    const c = l.c;
+    const walk = l.blocks - roofPenalty(l.corridor);
     const cell: LandingCell = { x: c.x, z: c.z, feet: c.feet, kind: c.kind };
     const cells = cellsAround(view, cell, c.kind, walkSlack(walk), o.headroom);
-    const target = walkTarget(cell, cells, best.corridor ? { bearing: best.corridor.bearing, ...(c.ceiling !== undefined ? { ceiling: c.ceiling } : {}), ...(brakeOnly.has(c) ? { precise: true } : {}) } : {});
-    return { kind: 'cell', cell, walk, target, line: `${head} -> ${fmtCell(cell)}${best.corridor ? ` under a roof (ceiling ${c.ceiling}), in from ${best.corridor.bearing}` : ''}, ${Math.round(walk)} blocks of walk, ${cells.size} cells` };
+    const extra: Partial<LandingTarget> = {
+      ...(l.corridor ? { bearing: l.corridor.bearing, ...(c.ceiling !== undefined ? { ceiling: c.ceiling } : {}) } : {}),
+      ...(brakeOnly.has(c) ? { precise: true } : {}),
+      walkS: walkSeconds({ blocks: walk, known: true }),
+      walkKnown: true,
+      name: `${fmtCell(cell)}${l.corridor ? ' under a roof' : ''}`,
+    };
+    return { cell, walk, target: walkTarget(cell, cells, extra) };
+  };
+  if (best) {
+    const chosen = targetOf(best);
+    const alts = landable
+      .filter((l) => l !== best && l.c.kind === 'open' && l.simulated)
+      .slice(0, ALTERNATIVES)
+      .map((l) => targetOf(l).target);
+    const target: LandingTarget = alts.length ? { ...chosen.target, alternatives: alts } : chosen.target;
+    const { cell, walk } = chosen;
+    const altNote = alts.length ? `; alternatives ${alts.map((a) => `${a.name} ${a.walkS!.toFixed(1)} s`).join(', ')}` : '';
+    const unloaded = partial ? { live, columns, bound } : undefined;
+    return {
+      kind: 'cell',
+      cell,
+      walk,
+      target,
+      ...(unloaded ? { unloaded } : {}),
+      line: `${head} -> ${fmtCell(cell)}${best.corridor ? ` under a roof (ceiling ${best.c.ceiling}), in from ${best.corridor.bearing}` : ''}, ${Math.round(walk)} blocks of walk (${target.walkS!.toFixed(1)} s), ${chosen.target.cells?.size ?? 1} cells${altNote}${unloaded ? `; ${live} of ${columns} columns loaded, the nearest unloaded ${bound.toFixed(0)} out` : ''}`,
+    };
   }
+  // Track L1: a partly loaded window with nothing confirmed says nothing (the hold waits for more of it)
+  if (partial) return { kind: 'unknown', line: `${head} -> nothing confirmed on the loaded part (${live} of ${columns} columns loaded)` };
   // nothing confirmed: the nearest safe dry ground; a probe that ran out of budget before one that proved there is no way
-  const rank = (s: Probed['status'] | undefined): number => (s === 'limited' || s === 'nostart' ? 0 : s === undefined ? 1 : s === 'none' ? 3 : 2);
+  // (Track L1: not a cell whose approach the simulation did not land, while another is known)
+  const rank = (s: Probed['status'] | undefined, c: Candidate): number => (nearNoApproach(c) ? 2.5 : s === 'limited' || s === 'nostart' ? 0 : s === undefined ? 1 : s === 'none' ? 3 : 2);
   const statusOf = new Map(probed.map((p) => [p.c, p.status]));
-  const open = list.filter((c) => c.kind === 'open').sort((a, b) => rank(statusOf.get(a)) - rank(statusOf.get(b)) || a.est - b.est);
+  const open = list.filter((c) => c.kind === 'open').sort((a, b) => rank(statusOf.get(a), a) - rank(statusOf.get(b), b) || rankOf(a).key - rankOf(b).key);
   let pick: LandingCell | undefined;
   let est = 0;
   const first = open[0];
-  if (first && rank(statusOf.get(first)) < 3) {
+  // (Track L1: the walk estimate of a cell the flood reached is its steps)
+  const estOf = (c: Candidate): number => rankOf(c).steps ?? c.est;
+  if (first && rank(statusOf.get(first), first) < 2.5) {
     pick = { x: first.x, z: first.z, feet: first.feet, kind: 'open' };
-    est = first.est;
+    est = estOf(first);
   }
   if (!pick && deps.dryGround) {
     // dry open ground farther out or far below (the candidates keep to 32 under and 48 over the goal)
@@ -729,12 +980,13 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   }
   if (!pick && first) {
     pick = { x: first.x, z: first.z, feet: first.feet, kind: 'open' };
-    est = first.est;
+    est = estOf(first);
   }
   if (!pick) return { kind: 'none', line: `${head} -> no dry ground known near it` };
   const cells = pick.kind === 'ground' ? new Set([columnKey(pick.x, pick.z)]) : cellsAround(view, pick, 'open', 2.5, o.headroom);
   const why = deps.probe ? (probed.length ? 'no walking path from any landing cell near it' : 'no landing cell near it') : 'no path check available';
-  return { kind: 'fallback', cell: pick, walk: est, target: walkTarget(pick, cells), why, line: `${head} -> none confirmed: dry ground at ${fmtCell(pick)} (${why})` };
+  const walkS = walkSeconds({ blocks: est, known: false });
+  return { kind: 'fallback', cell: pick, walk: est, target: walkTarget(pick, cells, { walkS, walkKnown: false, name: fmtCell(pick) }), why, line: `${head} -> none confirmed: dry ground at ${fmtCell(pick)} (${why}; about ${walkS.toFixed(0)} s of walk)` };
 }
 
 /** The walk from `p` to the goal is still what the plan said: the landing cell is dry, sound and live (re-checked in the descent; Track F1: a precision goal dry, safe and with PRECISE_HEADROOM). */

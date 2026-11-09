@@ -75,6 +75,21 @@ export interface LandingTarget {
    * the RouteTracker (brain.ts `route`), which lands it from the real state with the planner's edges.
    */
   route?: RouteHandoff;
+  /**
+   * Track L1 (docs/flight.md "Landing by time"): the price of this landing, the walk from it to the goal in seconds
+   * (landprice.ts walkSeconds: the probe's path where known, else the estimate with its risk; 0 = the goal itself),
+   * and whether a probe confirmed that walk. Absent: an exact landing the caller asked for (nothing else is priced).
+   */
+  walkS?: number;
+  walkKnown?: boolean;
+  /**
+   * Track L1: other landings near the goal the landing search confirmed and simulated (each with its own `walkS`), the
+   * cheapest first: a missed approach lands on one of them instead of a go-around when the go-around is not worth its
+   * time (brain.ts, landprice.ts decideGoAround).
+   */
+  alternatives?: readonly LandingTarget[];
+  /** Track L1: the cell as the log names it (`12 64 -30`). */
+  name?: string;
 }
 
 /** Track F1: the height the approach is measured from: the target's top, or the rim around a shaft floor. */

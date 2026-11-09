@@ -123,6 +123,8 @@ export interface FlightReport {
   /** Track AU2: ticks the path-ahead check steered away from a solid. */
   steered: number;
   goArounds: number;
+  /** Track L1: each missed approach's price line (landing now against the go-around). */
+  landingPrices?: string[];
   ticks: number;
   /** Corrections, glide events and motions seen during the flight (the loop's counters). */
   corrections: number;
@@ -235,6 +237,7 @@ export class FlightController {
       distance: b && this.target ? hdist(pos, this.target) : undefined,
       rockets: b?.stats.rockets ?? 0,
       goArounds: b?.stats.goArounds ?? 0,
+      ...(b?.stats.landingPrices.length ? { landingPrices: [...b.stats.landingPrices] } : {}),
       ticks: b?.stats.ticks ?? 0,
       descending: b?.descending,
     };
@@ -429,6 +432,11 @@ export class FlightController {
       elytraLeft: this.d.elytraLeft(),
     });
     const c = out.control;
+    // Track L1: the brain took one of the target's alternatives instead of a go-around (landprice.ts): the flight's target is that one now
+    if (brain.target !== this.target) {
+      this.target = brain.target;
+      this.log.info(`flight: retargeted to ${describeTarget(brain.target)} (an alternative landing instead of a go-around)`);
+    }
     // Track BF: sneak through the touchdown (docs/flight.md "Sneak at the touchdown")
     const low = this.target !== undefined && state.pos.y - this.target.top < SNEAK_ABOVE && (brain.phase === 'land' || brain.phase === 'approach' || brain.phase === 'done');
     if (low && this.d.sneakLanding?.() === true) this.sneaked = true;
@@ -494,7 +502,7 @@ export class FlightController {
     this.endReason = reason;
     this.log.info(
       `flight: ${ok ? 'landed' : `ended (${reason})`} at ${r.landedAt ? `${r.landedAt.x.toFixed(2)} ${r.landedAt.y.toFixed(2)} ${r.landedAt.z.toFixed(2)}` : '?'}` +
-        `${r.off !== undefined ? `, ${r.off.toFixed(2)} from the centre` : ''}; ${r.rockets} rockets (${r.rocketsBy.climb} climb, ${r.rocketsBy.cruise} cruise, ${r.rocketsBy.goaround} go-around), ${r.goArounds} go-arounds, ${r.ticks} ticks, ${r.corrections} corrections` +
+        `${r.off !== undefined ? `, ${r.off.toFixed(2)} from the centre` : ''}; ${r.rockets} rockets (${r.rocketsBy.climb} climb, ${r.rocketsBy.cruise} cruise, ${r.rocketsBy.goaround} go-around), ${r.goArounds} go-arounds${r.landingPrices?.length ? ` (${r.landingPrices.length} priced)` : ''}, ${r.ticks} ticks, ${r.corrections} corrections` +
         `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}, max y ${r.maxY.toFixed(1)}${r.descents.length ? `, descent ${r.descents.join('; ')}` : ''}${r.steered ? `, steered ${r.steered} ticks` : ''}${r.holdTicks ? `, held ${r.holdTicks} ticks` : ''}${r.slide !== undefined ? `, slide ${r.slide.toFixed(2)}${r.sneak ? ' (sneaking)' : ''}` : ''}${r.ledgeDrop !== undefined ? `, ledge takeoff (gliding ${r.ledgeDrop.toFixed(1)} under the edge)` : ''}${r.avoidances?.length ? `, ${r.avoidances.length} terrain avoidance${r.avoidances.length === 1 ? '' : 's'}` : ''}${r.dives ? `, ${r.dives} dive${r.dives === 1 ? '' : 's'}` : ''}${r.held ? `, held by the server ${r.held} times` : ''}${r.landStyle ? `, landing ${r.landStyle}${r.landStyle === 'brake' ? ` (${r.brakeTicks} ticks braked / station-kept${r.brakeRescues ? `, ${r.brakeRescues} instead of a go-around` : ''})` : ''}` : ''}${r.routeTicks ? `, landing route (${r.routeTicks} ticks on the route tracker, ${r.routePlans} plans, ${r.routeReplans} re-plans, max error ${r.routeMaxError?.toFixed(2)})` : ''}${r.routeTakeoffTicks !== undefined ? `, route takeoff (${r.routeTakeoffTicks} ticks)` : ''}`,
     );
     this.brain = undefined;

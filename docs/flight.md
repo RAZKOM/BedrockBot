@@ -47,7 +47,8 @@ authoritative. Decision record: [decisions/0042-elytra-flight.md](decisions/0042
 | `bot/test/e2e/fly-truth.ts`, `fly-glide.test.ts`, `fly-land.test.ts`, `fly-kit.test.ts` | the e2e suites on bds-fly (Track AU) |
 | `bot/test/e2e/fly-envelope*.ts`, `bot/test/unit/skills/flight-envelope.test.ts` | Track F0: the flight-envelope harness and its cases, the model changes it led to ([flight-envelope.md](flight-envelope.md)) |
 | `bot/test/e2e/fly-economy.test.ts`, `fly-roof.test.ts`, `fly-descent.test.ts`, `fly-walk.test.ts` | Track AU2: the rocket economy of 300 / 600 / 1200-block flights, the room and the tree, the 10 + 10 descents, fly then walk (the pit, the house) |
-| `bot/src/skills/fly/landing.ts` | Track BF: `findLanding` (the confirmed-path search), `floorsOf`, the wet / hazard rules, `corridorsOf` / `corridorLands` (overhangs), `stillLandable` |
+| `bot/src/skills/fly/landing.ts` | Track BF: `findLanding` (the confirmed-path search), `floorsOf`, the wet / hazard rules, `corridorsOf` / `corridorLands` (overhangs), `stillLandable`; Track L1: `walkFlood`, `approachLands`, the alternatives |
+| `bot/src/skills/fly/landprice.ts` | Track L1: the landing's price in seconds (`decideGoAround`, `holdWorth`, the go-around's measured cost; "Landing by time (Track L1)") |
 | `bot/src/skills/survival/surface.ts`, `bot/src/tasks/process/surface.ts` | Track BF: `headInWater`, `swimUp`; the `surface` process and `shoreNear` |
 | `bot/test/unit/skills/fly-landing.test.ts`, `surface.test.ts`; `bot/test/e2e/fly-overhang.test.ts` | Track BF: the farm replica on the model, the big roof, the sea, the hold; the swim up and drowning; the e2e farm / roof / water / seabed / sneak cases |
 | `bot/src/skills/fly/glide.ts` | Track BH: `findLedges`, `smallPlatform`, `simulateFlight` (the whole flight on the live model), `planGlideDown`, `ledgeTakeoff`, `jumpTakeoff`, `glideKitReady` |
@@ -3545,6 +3546,146 @@ Seen on this cave; not fixed here (the navigator is not this track's):
   drive.ts / flyStretch has no water check of its own (stepBody ends the glide, the bench scores it `water`).
 - Files outside this track's own touched for the water guard and the measurement switches: `controller.ts`,
   `commands-fly.ts` (`takeoffFor`, `FlyControl.corridor`), `commands-corridor.ts`, `registry.ts`.
+
+## Landing by time (Track L1)
+
+Flight v2, Track L1, [decisions/0076](decisions/0076-land-by-time.md). The owner (2026-11-09): "It should try to land as close
+as it can but it shouldn't waste a whole 10 s of go-around to save 2 s of walking." On the Realm 34 of 131 flights (all to the
+owner's underground goal, cave_start) flew the four go-arounds `flyGoArounds` allows and then landed on "the nearest safe ground"
+anyway; `!test cavestart` from home took 156 to 161 s a run, about 80 s of it the landing and the walk in. This track decides a
+landing by its time: the walk it leaves against what a go-around costs and is likely to buy.
+
+```
+the landing search (landing.ts findLanding), a goal that is no landing itself
+  covered goal (a roof over its floor, or a rim): the candidates by the walk flood from the goal's floor (walkFlood)
+  each candidate: the probe's walk; an open cell also its approach simulated from where the flight comes in (approachLands)
+  -> the cell, its walk priced in seconds (walkS), and up to 3 alternatives (6 apart, each priced and simulated)
+the approach (brain.ts), a missed approach (approachHopeless) to a walk landing:
+  P (goAroundChance: the miss's kind, the miss before) x (the cheapest landing now - the target's walk)  >  a go-around's cost ?
+     yes: the go-around (as before)
+     no:  an alternative (the cruise and the approach start over for it), or the nearest safe ground (landNow)
+  one line each: "landing price: land now on ... against a go-around (...): saves N s <= 7.3 s: landing now"
+the hold (tasks/process/fly.ts watchLanding): a partly loaded window answers from its loaded part (`partial`);
+  its cell is taken unless an unloaded column could still save more walk than the next look's wait (holdWorth)
+```
+
+An exact landing (`!fly x y z`: no walk price on the target) keeps the go-arounds as before; so does a route landing.
+
+### Files
+
+| File | What |
+|---|---|
+| `bot/src/skills/fly/landprice.ts` | the price: `GOAROUND_S`, `GOAROUND_ROCKETS`, `ROCKET_S`, `GOAROUND_COST_S`, `WALK_S_PER_BLOCK`, `UNKNOWN_DETOUR`, `UNKNOWN_RISK_S`, `SINK_S_PER_BLOCK`, `GOAROUND_P`, `goAroundChance`, `walkSeconds`, `decideGoAround`, `holdWorth` |
+| `bot/src/skills/fly/landing.ts` | `walkFlood`, `entryHeight`, `approachLands`, `approachBearings`, `APPROACH_SIMS`, `ALTERNATIVES`, `ALT_PROBES`, `ALT_APART`, `NO_APPROACH_NEAR`, `PARTIAL_MIN_SHARE`; `LandingOptions.partial`, `Unloaded`; `findLanding` with the flood, the approach check, the alternatives, `walkS` on the targets |
+| `bot/src/skills/fly/plan.ts` | `LandingTarget.walkS`, `walkKnown`, `alternatives`, `name` |
+| `bot/src/skills/fly/brain.ts` | the priced miss in `approach` (`landingOffers`, `switchTarget`, `lastMiss`), `FlightStats.landingPrices` |
+| `bot/src/skills/fly/controller.ts` | the controller's target follows the brain's switch; the report's `landingPrices` and the end line's `(N priced)` |
+| `bot/src/tasks/process/fly.ts`, `bot/src/chat/commands-fly.ts` | `LandingHint.partial`, the hold's priced look in `watchLanding` (and it stops when the brain took an alternative); `landingFor` passes `partial` |
+| `bot/test/unit/skills/fly-land-time.test.ts` | the guard tests (the price, the decision, the flood, the pit, the hazard, the partial window, the brain's switch) |
+| `bot/test/e2e/fly-cave.test.ts` | `FLY_CAVE_PLAIN=1`: trip C the `!test cavestart` way (flyCorridor off), its go-arounds, flight time and landing in the table |
+
+### The price (`landprice.ts`)
+
+| constant | value | source |
+|---|---|---|
+| `GOAROUND_S` | 6.2 s | the Realm's log, 2026-10-30 to 2026-11-09: the median between two go-around decisions (91 pairs, mean 6.9, 2.8 to 13.5); 6.0 from the last one to the forced landing (31 flights) |
+| `GOAROUND_ROCKETS` | 1.13 | the same flights: 152 go-around rockets over 135 go-arounds |
+| `ROCKET_S` | 1 s | a judgement: rockets are plenty, time is what the owner asked about |
+| `GOAROUND_COST_S` | 7.3 s | the sum |
+| `GOAROUND_P` | landed / short / over 0.8, wall 0.19, none 0.05 | the Realm's first go-arounds: `wall` landed after 3 of 16, `none` 0 of 19 (5 % as a floor), `over` 1 of 1; an energy miss is what a go-around fixes (the e2e's go-arounds on bds-fly2 each landed next time) |
+| `GOAROUND_P_REPEAT` | 0.02 | a go-around after one that failed the same way: 1 of 91 landed |
+| `GOAROUND_P_OTHER` | x 0.5 | after one that failed another way: 0 of 19 |
+| `WALK_S_PER_BLOCK` | 0.3 s | between the steady sprint (0.178, `sites.ts WALK_S_PER_BLOCK`) and the walk in the owner's cave (the navigator in a closed loop on the fixture, `caveWalker`: cave_2 to cave_start, 81 steps of the flood in 741 ticks, 0.46 a step, partly swimming); the replica's walk from the hill over the goal (digging, 32 blocks in about 72 s) is no walking pace and is what the unknown walk's risk term stands for |
+| `UNKNOWN_DETOUR`, `UNKNOWN_RISK_S` | 1.5, 15 s | an unconfirmed walk: the estimate (the flood's steps, else the straight distance plus 3 a block of height) times 1.5 plus 15 s for the risk it does not walk (the Realm's hill-top landings over the cave) |
+| `SINK_S_PER_BLOCK` | 0.29 s | the descent circle sinks 0.15 to 0.2 a tick ("Descent geometry"): the height over SPIRAL_ABOVE above an alternative's entry |
+
+The decision (`decideGoAround`): with P the chance the next approach lands, go round when P x (the cheapest offer's walk and
+height - the target's walk) > 7.3 s, else take that offer. The owner's case: 2 s of walk saved at P 0.8 is 1.6 s, no go-around.
+A `wall` miss with the nearest safe ground 60 s of unknown walk away and the target's 14 s: 0.19 x 46 = 8.7 s, one go-around; a
+second `wall` miss: 0.02 x 46 = 0.9 s, landing now. The offers are only the target's alternatives (confirmed, simulated) and the
+forced landing's own `emergencyTarget` (dry, no hazard, level), so nothing less safe than before is ever taken; the forced landing
+merely comes earlier.
+
+### The search
+
+- **The walk flood** (`walkFlood`, a covered goal only: its floor has a roof under OPEN_SKY over it, or a rim): breadth first
+  over the ColumnView's floors (a solid with two free cells over it) from the goal's floor, a step to a 4-neighbour at the same
+  height, a block up (with 3 of room to jump), down by up to 3 (the column free that high), never a hazard floor; at most 20 000
+  floors within the candidate radius plus 8. The candidates go by the flood's steps (one the flood never reached: its estimate
+  plus 64, behind all), the stop rule's lower bound is the steps over the square root of 2 (a path cuts the corners). The line
+  says where the flood first met open sky (the walk's entrance) and how far it is.
+- **The approach check** (`approachLands`): a probed open cell is landable only when the flight's planner lands on its cells
+  (under CORRIDOR_COST) from APPROACH_DISTANCE out along the bearing from the body, a quarter round either way or the far side, at
+  the height the flight comes in there: the approach entry, or 3 over the highest floor on that line (the go-around's height over
+  a hill). The flare, and under `flyLandStyle auto` the brake too (a brake-only cell is planned `precise`). A cell that fails is
+  logged `path N, no approach (kind cost)`, and the open cells within 3 of it (the same hollow) are not tried. At most 24
+  simulations a search; past them a cell is taken without one and the line says so.
+- **The alternatives**: the cheapest landable cells beside the chosen one, 6 or more apart (from it and from each other), each
+  with its own cells, walk price and approach; past the stop rule at most 2 more probes look for them (open cells only).
+- **The fallback** (nothing confirmed) prefers, among the probes that ran out, the cell nearest by the flood, never one within 3 of
+  a cell whose approach did not land while another is known; its walk is the flood's steps, priced as unknown.
+- **The partial window** (`partial`, the hold's look only): with at least half of the window live, a confirmed cell on the loaded
+  part is returned with `unloaded` (the live share and the least straight distance from the goal to an unloaded column).
+
+### Measured: the replica of the owner's cave (bds-fly2, FLY_CAVE_PLAIN=1 FLY_CAVE_STYLE=1, 5 runs each)
+
+Trip C from the home pad (650 blocks) to cave_start, `!fly <cave_start>` with `flyCorridor off` (the plain flight, as the
+Realm's `!test cavestart` flew it), the cave style on (`flyCave on`, the rest after the landing through the corridor's windows).
+Before: this branch's checkout before the landing code changed (the same replica, `FLY_CAVE_REUSE=1`, the same day).
+
+| | go-arounds | seconds to the goal | flight | flown share | landed (from the goal, height) | damage | water ticks |
+|---|---|---|---|---|---|---|---|
+| before, 5 runs | 0, 0, 0, 0, 0 | 117.3, 118.9, 118.1, 119.0, 118.4 (median 118.4) | 877 to 911 ticks (44 to 46 s) | 37 % | 13 off, 15 above (the hill over the goal) | 0 | 54 to 57 |
+| after, 5 runs | 0, 0, 0, 0, 0 | 73.4, 68.9, 69.7, 55.1, 72.0 (median 69.7) | 43 to 49 s | 64 % | 51 off, 25 above (the hill by cave_2, the walk flood's first) | 0 | 0 to 2 |
+
+The replica does not reproduce the Realm's go-arounds (its probes all run out, so both before and after land on a fallback cell
+with a brake landing on the first approach); what changes is the cell. Before, the ranking by the straight line took the hill top
+13 blocks off and 15 over the goal: the corridor from there was one walk leg of 32 blocks through the rock (digging), about 72 s.
+After, the walk flood (10 143 floors, 61 ms on the test host offline) ranks the cells by their walk: the first open sky the flood
+meets is 38 steps from the goal (a crack in the slope, no landing cell), the first candidates are on the hill beside cave_2, 90
+steps; the corridor from there flies the 88 blocks in (one or two underground windows, 10 to 29 s). 49 s saved a trip, 41 %.
+Offline on the fixture (no probe), `findLanding` takes the same cell in 68 ms.
+
+### Measured: the open-ground landings
+
+bds-fly2, each suite on the same pinned area before (this branch's checkout before the change) and after. An exact landing
+(`!fly x y z` onto a landable goal) takes neither the flood nor the approach check nor the price, so these show the noise.
+
+| suite | before | after |
+|---|---|---|
+| fly-land, FLY_AREA 62048,62048: distance from the centre (truth) | 0.04, 0.01, 0.07, 0.78, 0.13 (3x3 40 up), 0.07 (descend 60), 0.13 (5x5 at 300), 0.02 (wall); all on the platform, 0 go-arounds, 0 damage | 0.08, 0.04, 0.05, 0.79, 0.02, 0.11, 0.10, 0.61 (the wall: 0.3 of slide more); all on the platform, 0 go-arounds, 0 damage |
+| fly-land `!fly stop` case | fails: no end line within 60 s of the stop | fails the same way (an old failure on this area, not this track's) |
+| fly-route, FLY_AREA 63072,63072 | 3 of 3 (the sbend's second run ground in both) | 3 of 3 |
+| fly-course, FLY_AREA 63328,66400 | 6 of 8 (rings, slalom) | 8 of 8 |
+| fly-walk, FLY_AREA 62048,62048 (walk landings: priced, flood, approach check) | 2 of 2: the pit's landing 5 blocks off (0.23 from its cell, 315 ticks), the house's 3 off (0.61, 273 ticks), 0 go-arounds, both walked in | 2 of 2: the same cells (0.38, 324 ticks; 0.26, 376 ticks), 0 go-arounds, both walked in |
+
+### What `!test cavestart 5 from home` on the Realm should show
+
+- No run with four go-arounds; most with none, at most one. Where an approach misses, the log has one line before the
+  decision: `landing price: land now on ... against a go-around (7.3 s with 1.13 rockets, P 0.19 to land N s of walk from the
+  goal): saves M s <= 7.3 s: landing now`, then `land now: ...`; a second miss of the same kind is never flown round again.
+- The landing line for cave_start gains `walk flood N floors (open sky 38 steps from the goal at ...)` and `M approach sims`;
+  its first candidates are the ones by walk (beside the cave's mouth by cave_2), not the hill top over the goal. The valley cell
+  the probe confirmed on the Realm (46 blocks of walk) is taken only when its approach simulated from over the hill lands; else
+  the line says `path 46, no approach (wall ...)` and the next cell by walk is taken.
+- With flyCave on, the rest from the landing goes in through the corridor's windows from the mouth side, as on the replica
+  (there 118 s became 70). The Realm's 156 to 161 s a run should drop by the 25 to 30 s of go-arounds and part of the walk in:
+  about 100 to 120 s; the flight itself (the climb, the cruise, the hold) is unchanged.
+
+### Open points (Track L1)
+
+- `WALK_S_PER_BLOCK` is one number for every walk; the navigator's own path cost (ticks, digging included) would price a walk
+  better, and the corridor's flown rest after the landing (as on the replica) is not priced at all: a cell 90 steps away beat
+  one 32 blocks away because the rest from there flies.
+- The replica does not reproduce the Realm's go-arounds (its probes run out on every cell, so the landing is a fallback with a
+  first-approach brake landing); the brain's decision is covered by the unit tests only until the Realm's run.
+- The probe's budget (6 000 nodes, 400 ms) runs out on every cell of the owner's cave from the hill: a longer probe for the
+  flood's first few cells would turn fallbacks into confirmed cells.
+- The route landing's tracker failure still goes round as before (no price); route landings are exact.
+- The approach check simulates from APPROACH_DISTANCE along four bearings; the cruise's real entry (a descent circle over the
+  cell from far higher) can still miss where the simulation landed: that is what the priced miss is for.
+- Files outside the brief's list touched: `tasks/process/fly.ts` (`LandingHint.partial`, the hold's priced look and the stop when
+  the brain switched, both in `watchLanding`).
 
 ## Open points
 
