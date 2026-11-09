@@ -1274,7 +1274,16 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         // (and the jump along a heading whose simulated climb is clear: trees, walls)
         const tk = await takeoffFor(from, goalTarget, sky, k.rocketsHotbar || k.rockets);
         if ('refuse' in tk) {
-          reply(tk.refuse);
+          if (t.player) {
+            reply(tk.refuse);
+            return;
+          }
+          // under a roof (indoors at home): the goto's way, a walk to a takeoff site and the flight from there (pve.walk
+          // is the flying walk: autoFly, the site, the re-check on the way), the walk for the rest when none is found
+          reply(`${tk.refuse.replace(/^fly: /, '').replace(/; walk outside first$/, '')}: walking to a takeoff site for ${t.label}`);
+          const w = await pve.walk({ type: 'block', p: t.goal }, {}, `walking to ${t.label}`);
+          if (w.ok) reply(`walked to ${t.label}`);
+          else if (w.reason !== 'interrupted') reply(`fly: the trip to ${t.label} failed (${w.reason ?? 'failed'})`);
           return;
         }
         const f = await planFlight(from, t.goal, t.label, t.half, true);
@@ -1312,7 +1321,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
           // a layer with no corridor at all from here (a start it cannot leave, such as a walled base) is no
           // answer for a flight: the plain flight walks to a takeoff site, flies and lands near the goal, then walks
           if (noCorridorAtAll(r)) {
-            reply(`fly: no corridor from here (${r.reason ?? 'none'}); flying the plain way`);
+            reply(`no corridor from here (${r.reason ?? 'none'}); flying the plain way`);
             void plain();
           } else reply(corridorEndLine(r, t.label));
         });
