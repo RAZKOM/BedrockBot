@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Vec3 } from '../../../src/connection/types.ts';
 import type { RestoreResult } from '../../../src/skills/test/recovery.ts';
-import { parseTripStats, runLine, summaryLine, TestSeries, type RunRecord, type RunSpec, type SeriesPorts, type SeriesSummary } from '../../../src/skills/test/series.ts';
+import { parseTripStats, runLine, summaryLine, TERMINAL, TestSeries, type RunRecord, type RunSpec, type SeriesPorts, type SeriesSummary } from '../../../src/skills/test/series.ts';
 
 /** One trip: per 100 ms step what the body does; the script ends with replies and the bot idle. */
 interface Step {
@@ -215,5 +215,13 @@ describe('parseTripStats', () => {
     expect(parseTripStats('fly: the corridor to x failed: stopped: died (fly 20); 1 rocket, 1 cruise, 3 underground (2 bailed out), 0 walks, 1 re-plan, 30 s')).toEqual({ bailouts: 2, rockets: 1 });
     expect(parseTripStats('landed at 1 2 3, 0.4 from the aim (home); 3 rockets, 0 go-arounds, 20 s')).toEqual({ rockets: 3 });
     expect(parseTripStats('arrived at base (1 2 3)')).toEqual({});
+  });
+});
+
+describe('interim fly lines (the Realm, 2026-11-09)', () => {
+  it('a landing note before the walk is not the end of a fly run', () => {
+    expect(TERMINAL.fly.fail.test('fly: landing 46 blocks from cave_start, then walking')).toBe(false);
+    expect(TERMINAL.route.fail.test('fly: landing 46 blocks from cave_start, then walking')).toBe(false);
+    expect(TERMINAL.fly.fail.test('fly: the corridor to cave_start failed: x')).toBe(true);
   });
 });

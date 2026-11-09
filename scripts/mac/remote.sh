@@ -92,7 +92,8 @@ build_raknet() {
   say "building raknet-native for $(uname -m) ($RAKNET_FLAGS)"
   cj=$(ls -d "$CO"/node_modules/.pnpm/cmake-js@*/node_modules/cmake-js/bin/cmake-js 2>/dev/null | head -n 1)
   rm -rf "$rn/build"
-  (cd "$rn" && nice -n "$NICE" node "$cj" compile "--CDCMAKE_CXX_FLAGS_RELEASE=$RAKNET_FLAGS" >/dev/null) \
+  # (the real HOME: pip installed cmake under ~/Library/Python, which the sandbox HOME of a run hides)
+  (cd "$rn" && HOME="$REAL_HOME" nice -n "$NICE" node "$cj" compile "--CDCMAKE_CXX_FLAGS_RELEASE=$RAKNET_FLAGS" >/dev/null) \
     || { say "raknet-native did not build (needs cmake): the e2e suites cannot connect"; return 1; }
 }
 

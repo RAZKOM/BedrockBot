@@ -83,8 +83,8 @@ export interface SeriesSummary {
 /** End lines of the trips (the start of a reply). `done` ends a run that reached its end, `fail` one that did not. */
 export const TERMINAL: Readonly<Record<'goto' | 'fly' | 'route', { done: RegExp; fail: RegExp }>> = {
   goto: { done: /^arrived at /, fail: /^(goto: |no waypoint |usage: |waypoint \S+ is in the )/ },
-  fly: { done: /^(landed at |arrived at .+ along a corridor|walked to )/, fail: /^(fly: (?!proving |the shortcut )|landed \(|usage: |elytra worn)/ },
-  route: { done: /^arrived at .+ along a corridor/, fail: /^(fly: (?!proving |the shortcut )|usage: )/ },
+  fly: { done: /^(landed at |arrived at .+ along a corridor|walked to )/, fail: /^(fly: (?!proving |the shortcut |landing )|landed \(|usage: |elytra worn)/ },
+  route: { done: /^arrived at .+ along a corridor/, fail: /^(fly: (?!proving |the shortcut |landing )|usage: )/ },
 };
 
 export function terminalOf(kind: RunKind): { done: RegExp; fail: RegExp } {
@@ -334,7 +334,9 @@ export class TestSeries {
         else idleSince ??= now;
         const idleFor = idleSince === undefined ? 0 : now - idleSince;
         if (endLineAt !== undefined) {
-          if (idleFor >= this.o.settleMs || now - endLineAt > this.o.afterEndMs) break;
+          // (a line that reads as the end may be an interim one, the walk after a landing goes on: the cap only ends a run that
+          // also stopped making progress; the Realm's run 1 of 3 ended at the cap while it still walked, held up by fights)
+          if (idleFor >= this.o.settleMs || (now - endLineAt > this.o.afterEndMs && now - anchorAt > this.o.stuckMs)) break;
           continue;
         }
         if (busy && now - anchorAt > this.o.stuckMs) {
