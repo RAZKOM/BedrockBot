@@ -12,6 +12,7 @@
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { availableParallelism } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { capWorkers } from './workers.ts';
 import { CAVE_BURNS, caveScoreLine, caveTripLine, flyCaveCorridor, flyCaveWaypoints, scoreCaves, type CaveBenchOptions, type CaveTrip } from '../src/skills/fly/cave/bench.ts';
 import type { CaveStyle } from '../src/skills/fly/cave/style.ts';
 import { caveSet } from '../src/skills/fly/route/caves.ts';
@@ -107,7 +108,7 @@ if (!isMainThread) {
   const set = caveSet();
   const only = arg('only', '');
   const caves = only ? only.split(',').map(Number) : Array.from({ length: Math.min(set.length, Number(arg('caves', String(set.length)))) }, (_, i) => i);
-  const workers = Math.max(1, Number(arg('workers', String(Math.min(8, availableParallelism())))));
+  const workers = capWorkers(Number(arg('workers', String(Math.min(8, availableParallelism())))));
   const verbose = process.argv.includes('--verbose');
   const jobs: Job[] = [];
   for (const mode of modes) for (const style of styles) for (const c of caves) burns.forEach((burn, i) => jobs.push({ cave: c, mode, style, burn, seed: 1 + i, ms, nodes }));

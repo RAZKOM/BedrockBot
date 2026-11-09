@@ -14,6 +14,7 @@
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { availableParallelism } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { capWorkers } from './workers.ts';
 import { CAVE_BURNS, caveScoreLine, caveTripLine, flyTrip, scoreCaves, tripWorldOfCave, type CaveBenchOptions, type CaveTrip } from '../src/skills/fly/cave/bench.ts';
 import { proveShortcut } from '../src/skills/fly/cave/proof.ts';
 import { WaypointProvider, type RoutePoint } from '../src/skills/fly/cave/route.ts';
@@ -125,7 +126,7 @@ if (!isMainThread) {
   const styles = arg('style', 'on').split(',');
   const burns = ((b) => (b === 'all' ? CAVE_BURNS : b === 'nominal' ? [15] : b === 'random' ? ['random', 'random', 'random'] : b.split(',').map((s) => (s === 'random' ? 'random' : Number(s)))))(arg('burns', 'all')) as (number | 'random')[];
   const ms = Number(arg('ms', '600'));
-  const workers = Math.max(1, Number(arg('workers', String(Math.min(8, availableParallelism())))));
+  const workers = capWorkers(Number(arg('workers', String(Math.min(8, availableParallelism())))));
   const verbose = process.argv.includes('--verbose');
   if (modes.includes('proofB')) {
     const pts = stops(f.fix, f.world, ['cave_5', 'cave_shortcut', 'cave_end']);

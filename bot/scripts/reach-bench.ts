@@ -10,6 +10,7 @@
 import { fork } from 'node:child_process';
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { capWorkers } from './workers.ts';
 import { OWNER_RULES, verdict, type Verdict } from '../src/skills/nav/bench/oracle.ts';
 import { WORLD_CLASSES, benchWorld, type WorldClass } from '../src/skills/nav/bench/worlds.ts';
 import { causeAgrees, scoreTables, type PairRecord } from '../src/skills/nav/bench/score.ts';
@@ -71,7 +72,7 @@ async function main(): Promise<void> {
   const classes = (arg('classes')?.split(',') ?? [...WORLD_CLASSES]) as WorldClass[];
   const worlds = Number(arg('worlds') ?? 16);
   const seed0 = Number(arg('seed0') ?? 1);
-  const jobsN = Number(arg('jobs') ?? 6);
+  const jobsN = capWorkers(Number(arg('jobs') ?? 6));
   const out = arg('out') ?? 'reach-bench.jsonl';
   const only = arg('only');
   const jobs: Job[] = [];

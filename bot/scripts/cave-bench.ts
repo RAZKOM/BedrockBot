@@ -14,6 +14,7 @@ import { fork } from 'node:child_process';
 import { availableParallelism } from 'node:os';
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { capWorkers } from './workers.ts';
 import { caveLegs, caveWorld, loadCaveFixture, ROUTE_A, ROUTE_B, type CaveFixture, type CaveLeg, type CaveWorld } from '../src/skills/fly/corridor/cave.ts';
 import { CAVE_BUDGETS, CAVE_BURNS, CAVE_SCORE_HEADER, caveGoals, caveScore, caveScoreRow, flyCaveWindow, runCaveExecutor, type CaveBudget, type FlightRun } from '../src/skills/fly/corridor/cave-bench.ts';
 import { caveWalker } from '../test/unit/skills/fly-cave-walk.ts';
@@ -153,7 +154,7 @@ async function main(): Promise<number> {
   const budgets = (arg('budget') ?? 'live,generous').split(',') as CaveBudget[];
   const latency = Number(arg('latency') ?? 0);
   const legSel = arg('legs');
-  const jobsN = Number(arg('jobs') ?? Math.max(1, Math.floor(availableParallelism() / 2)));
+  const jobsN = capWorkers(Number(arg('jobs') ?? Math.max(1, Math.floor(availableParallelism() / 2))));
   const jobs: Job[] = [];
   for (const mode of modes) {
     for (const route of routes) {

@@ -494,6 +494,146 @@ Unit tests of the hardening code: `config`, `health`, `update` (on JSON captured
 sources, `bot/test/unit/fixtures/update/`), `tasks-respawn`, `tasks-night`, `tasks-registry`,
 `afk`, `versionGate` (a fake server advertising another protocol, and `outdated_client`).
 
+### Tests on the Mac (Track I1)
+
+The unit suite, the benches and the e2e suites can run on a second machine, the **test host**, instead of the
+machine you work on: the Mac that also runs the live Realm bot, so the dev machine stays free and planner timings
+are measured on the hardware the live bot has. Anything you can ssh to with Docker works; the defaults fit a Mac.
+`scripts/mac-run.mjs` does it from a checkout or worktree on the dev machine:
+
+```sh
+export BEDROCKBOT_TEST_HOST=<ssh host>         # an alias from ~/.ssh/config; default BEDROCKBOT_DEPLOY_HOST
+node scripts/mac-run.mjs -- pnpm -r test                                    # the unit suite, on the test host
+node scripts/mac-run.mjs -- BDS_E2E=1 pnpm --filter bot test:e2e test/e2e/nav-reach.test.ts --silent=false
+node scripts/mac-run.mjs -- FLY_BDS_PORT=19212 FLY_BDS_CONTAINER=bds-fly3 BDS_E2E=1 pnpm --filter bot test:e2e test/e2e/fly-route.test.ts
+node scripts/mac-run.mjs -- FLY_BDS_PORT=19210 FLY_BDS_CONTAINER=bds-fly2 FLY_CAVE_ONLY=tripC FLY_CAVE_STYLE=1 FLY_CAVE_RUNS=1 BDS_E2E=1 pnpm --filter bot test:e2e test/e2e/fly-cave.test.ts
+node scripts/mac-run.mjs -- pnpm --filter bot exec node scripts/cave-real-bench.ts    # a bench (at most 4 workers)
+node scripts/mac-run.mjs --as-live -- pnpm --filter bot exec node scripts/route-speed-bench.ts   # timed as the live bot gets it
+node scripts/mac-run.mjs --pull bot/reach-bench.jsonl -- pnpm --filter bot exec node scripts/reach-bench.ts   # copy a result back
+node scripts/mac-run.mjs --light -- cat bot/reach-bench.jsonl               # a quick look: no wait, no slot
+node scripts/mac-run.mjs status                # slots, load, the live bot's test series, the containers, the last runs
+```
+
+The exit code is the command's; the output streams back as it comes (stderr stays stderr). Ctrl+C (or a dropped
+connection) ends the command and everything it started on the test host. Judge gates by that exit code, as here.
+
+**What a run does.**
+
+1. **Sync.** The files git sees in the checkout (tracked and untracked, not ignored: no `node_modules`,
+   `docker/data`, `bot/fixtures-private`) are compared by SHA-1 with the copy in
+   `~/bbtest.noindex/checkouts/<name>/` on the test host (`<name>` is the worktree's folder; `--name` overrides), and
+   only changed files go over (a tar stream through ssh); files the checkout no longer has are deleted there, files the
+   tests write are left. A run without changes syncs in about 0.6 s; the first sync of a worktree (16 MB) took 0.9 s.
+   One sync of a checkout at a time (a lock on the host); two runs of the same worktree see the newest files.
+2. **The wait rule.** Before it starts, the run waits (and says so: `mac-run[host]: waiting: ...`) while the live bot
+   runs a `!test` series (its console log, `~/.bedrockbot/logs/realm-console.log`, read only: from the series' kit
+   line or a run's start to its summary line; a series that logged nothing for 12 minutes is over) and while the
+   1-minute load average is above `BEDROCKBOT_TEST_MAX_LOAD` (default 7 of 10 cores). A series that starts during a
+   run lowers the run to nice 20 and says so.
+3. **A slot.** At most `BEDROCKBOT_TEST_SLOTS` (default 2) heavy runs at once on the host, of all worktrees
+   together; a third waits for a slot (`waiting: all 2 slots taken (...)`). A slot whose holder died is freed.
+4. **Install.** `pnpm install --frozen-lockfile` when the copy is new or the lockfile, a `package.json` or a patch
+   changed (`--install` forces it), with its own pnpm store (`~/bbtest.noindex/store`). raknet-native has no
+   prebuild for Apple silicon and is built from source (cmake, as `deploy/update.sh` does), with
+   `-fno-strict-float-cast-overflow`: without it Apple clang 21 compiles RakNet's
+   `CCRakNetSlidingWindow::ShouldSendACKs` (a cast of the double -1 to an unsigned time) to a trap instruction, and
+   every RakNet connection dies with SIGTRAP at its first ACK. A copy built without the flag is rebuilt.
+5. **The command,** in bash, in the copy, at `nice -n 10`, in its own process group, with:
+   `HOME` = `~/bbtest.noindex/homes/<name>` (a sandbox: no run reads or writes the live bot's `~/.bedrockbot`, its
+   config, settings, waypoints or cache); `VITEST_MAX_WORKERS=4` (vitest reads it) and `BEDROCKBOT_MAX_WORKERS=4`
+   (the benches read it through `bot/scripts/workers.ts`, whether the workers came from `--workers` / `--jobs` or the
+   default); `CAVE_FIXTURE_DIR` = `~/bbtest.noindex/private/cave` when that folder is there. Variables set on the dev
+   machine are passed when named with `-e NAME[=value]`, and by themselves for `BDS_E2E`, `BOT_VERSION`,
+   `BDS_TRANSPORT` and the suites' `FLY_*`, `MOVE_*`, `WATER_*`, `REACH_*`, `T1_*`, ... (values with a backslash, i.e.
+   Windows paths, are not); `NAME=value` in front of the command works too. `--as-live` runs the command under
+   `taskpolicy -b`, the CPU policy the live bot has (below).
+
+`~/bbtest.noindex/runs.log` on the host has a line per start and end (name, slot, load, exit code, seconds).
+The folder's name ends in `.noindex` because Spotlight then leaves it alone: indexing a fresh `node_modules` and pnpm
+store under a plain name kept `mds_stores` at 1.2 cores and the load at 15 for minutes.
+
+**Settings** (environment on the dev machine; nothing machine-specific is in the repository):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BEDROCKBOT_TEST_HOST` | `BEDROCKBOT_DEPLOY_HOST` | the ssh host of the test machine |
+| `BEDROCKBOT_TEST_DIR` | `bbtest.noindex` | the test root, relative to its home |
+| `BEDROCKBOT_TEST_NODE` | `.local/node/bin` | the folder with node 24 and corepack's pnpm there (deploy/README.md installs it there) |
+| `BEDROCKBOT_TEST_SLOTS` | 2 | heavy runs at once |
+| `BEDROCKBOT_TEST_MAX_LOAD` | 7 | the 1-minute load average above which a run waits |
+| `BEDROCKBOT_MAX_WORKERS` | 4 | vitest and bench workers of a run |
+
+**The containers on the test host:** bds-fly (udp/19204), bds-fly2 (udp/19210) and bds-fly3 (udp/19212), the dev
+machine's flight servers with the same names, ports and settings (docker/compose.mac.yml), so every suite's defaults
+and its `FLY_BDS_PORT` / `FLY_BDS_CONTAINER` values work unchanged. Their data is in `~/bbtest.noindex/data/<fly|fly2|fly3>`,
+the truth pack deployed from the calling checkout. They restart with Docker Desktop (`unless-stopped`).
+
+```sh
+node scripts/mac-run.mjs bds up            # create / start all three (or: bds up fly2), wait for "Server started.", deploy the truth pack where missing
+node scripts/mac-run.mjs bds pack fly      # redeploy the truth pack from this checkout into bds-fly and restart it
+node scripts/mac-run.mjs bds status        # state, CPU, memory
+node scripts/mac-run.mjs bds tps           # ticks per second of each over 30 s (`time query gametime`)
+node scripts/mac-run.mjs bds restart fly3
+node scripts/mac-run.mjs bds logs fly2
+node scripts/mac-run.mjs bds down          # stop and remove them (the data is kept)
+node scripts/mac-run.mjs private <dev-machine path>/bot/fixtures-private/cave   # the private cave fixture (copied to ~/bbtest.noindex/private/cave, mode 600)
+```
+
+The fly-cave suite builds the cave replica on bds-fly2 on its first run (`FLY_CAVE_REUSE=1` skips the rebuild
+afterwards, as on the dev machine).
+
+**Measured** (2026-11-08/09; Apple M4, 10 cores (4 performance, 6 efficiency), 16 GB; Docker Desktop's VM 10 CPUs,
+7.65 GB; the dev machine's numbers from its logs of the same days):
+
+| BDS under emulation (the image's arm64 variant runs the x86-64 server with box64) | test host |
+|---|---|
+| ticks per second, idle (`bds tps`, 31 s) | 19.98 / 20.00 / 20.01 (bds-fly / fly2 / fly3) |
+| ticks per second while two e2e suites ran | 19.98 / 20.00 / 19.98 |
+| CPU (`docker stats`, share of one core), idle / during a suite | about 9 % each / 5 to 18 % |
+| memory | 1.7 to 2.1 GB each (three of them take 6 of the VM's 7.65 GB) |
+| first start (BDS download included), then the truth pack and a restart | 20.7 s, 12 s |
+| the fly-cave replica build (9.8 M cells, 54 447 boxes) | 47.2 s, of it 31.2 s (312 ticks) building; dev machine 27.3 s (10.7 s, 201 ticks) |
+
+| Suite (exit code 0 on the test host) | test host | dev machine (its logs) |
+|---|---|---|
+| `pnpm -r test` (bot: 205 files, 2 337 tests; 4 workers) | 66.1 s (90.0 s the first time) | 82 to 84 s (198 files, its default workers) |
+| `pnpm lint` | 21 s | |
+| nav-water (17 tests) | 274.4 s | 289.6 s |
+| nav-reach (4) | 108.7 s | 122.3 s |
+| fly-route (3) | 134.8 s | 144.1 s |
+| fly-land (5) | 193.6 s | 187 to 223 s |
+| fly-corridor (5) | 369.0 s | 403.2 s |
+| fly-cave trip C, `FLY_CAVE_STYLE=1`, 1 run (the replica built first; arrived, 125 s, 9 rockets) | 471.5 s | (no like run) |
+
+The six e2e suites ran as three queues at once against two slots: 16 minutes for all of them, the third queue's
+run waiting 131 to 312 s for a slot each time. A sync without changes takes 0.5 to 0.9 s; a fresh copy's
+`pnpm install` 7.9 s plus about 20 s for raknet-native.
+
+**The live bot meanwhile** (`node scripts/mac/live.mjs report`: its tick from `GET /metrics` every 5 s against 20 a
+second, its CPU from `ps`, its log's `max tick` and the nudge lines; the 20 Hz driver skips the ticks of a stall
+over 250 ms, so the shortfall is time lost to stalls):
+
+| Window (UTC) | ticks a second | worst 5 s | its CPU, mean / max | load, mean / max |
+|---|---|---|---|---|
+| earlier that day, before any of this (from the nudges, 204 gaps of 240 s) | 19.79 (lowest 19.28) | | | |
+| test host idle, containers up (03:10 to 03:16) | 19.82 | 13 ticks | 27 % / 41 % | 2.4 / 3.7 |
+| the unit suite (03:04 to 03:06) | 19.83 | 12 | 7 % / 29 % | 3.8 / 4.7 |
+| the six e2e suites, two at a time (03:16 to 03:32) | 19.57 | 64 | 23 % / 147 % | 3.0 / 7.8 |
+| after (03:32 to 03:40) | 19.73 | 12 | 27 % / 40 % | 2.6 / 3.1 |
+| BDS's first start with Spotlight indexing the test folder under its old name (02:57 to 03:04) | 19.18 | 66 | 17 % / 55 % | 10.9 / 15.6 |
+
+In the e2e window the only stalls (27 to 64 ticks per 5 s, 03:29:10 to 03:29:40, the load at 7.8) were a deploy of the
+live bot (deploy/update.sh runs its lint and unit suite on the host, with no cap) and its restart at 03:30:09; outside
+those 40 s the window matches the idle one. The live bot's walks in the window logged `max tick` 6.8 ms at most (90
+walks; 76.7 ms the day before, p99 of all its walks 38.5 ms). A `!test` series the owner started at 03:30:27 lowered
+the run then going (fly-land) to nice 20, and the next run waited until the series ended.
+
+**The live bot's CPU policy.** The launchd agent (deploy/launchd) has `ProcessType` `Background`: the bot runs at
+priority 4 with background QoS, which on Apple silicon means the efficiency cores and throttling. The same work
+under `taskpolicy -b` against the test runs' nice 10 on the M4: SHA-256 3.5 to 3.8 times slower, a Map-heavy
+JavaScript loop (planner-like) 8 times slower (2100 against 260 ms). Time a planner with `--as-live` to see what the
+live bot gets.
+
 ## Realm join (you do this)
 
 PLAN.md tasks 1.6 and 1.7. Agents never run this: it signs in to a Microsoft account and connects

@@ -1,0 +1,66 @@
+# The flight and nav e2e servers on the test host (Track I1, docs/runbook.md "Tests on the Mac (Track I1)"): the same
+# three containers as on the dev machine (docker/compose.fly.yml and the fly2 / fly3 compose files kept outside the
+# repository), same names, ports and settings, so the suites' defaults (127.0.0.1, FLY_BDS_PORT, ...) work unchanged
+# there. Data in $BEDROCKBOT_TEST_DATA/<fly|fly2|fly3> on the test host, never in a checkout. Started by
+#   node scripts/mac-run.mjs bds up        (from the dev machine; scripts/mac/bds.mjs on the host)
+# On Apple silicon the image's arm64 variant runs the x86-64 BDS under emulation (docs/runbook.md has the TPS measured).
+name: bedrockbot-mac
+
+x-bds: &bds
+  image: itzg/minecraft-bedrock-server:2026.10.2
+  stdin_open: true
+  tty: true
+  restart: unless-stopped   # back after a reboot of the test host; `bds down` stops them for good
+
+x-env: &env
+  EULA: "TRUE"
+  VERSION: "1.26.60.6"
+  TRANSPORT: raknet
+  ONLINE_MODE: "false"
+  ALLOW_LIST: "false"
+  PLAYER_IDLE_TIMEOUT: "0"
+  ALLOW_CHEATS: "true"
+  DIFFICULTY: peaceful
+  LEVEL_TYPE: FLAT
+  DEFAULT_PLAYER_PERMISSION_LEVEL: operator
+  TICK_DISTANCE: "10"
+
+services:
+  bds-fly:
+    <<: *bds
+    container_name: bds-fly
+    environment:
+      <<: *env
+      LEVEL_NAME: fly
+      SERVER_NAME: bds-fly
+      SERVER_PORT: "19204"
+    ports:
+      - "19204:19204/udp"
+    volumes:
+      - ${BEDROCKBOT_TEST_DATA:?set BEDROCKBOT_TEST_DATA (scripts/mac/bds.mjs does)}/fly:/data
+
+  bds-fly2:
+    <<: *bds
+    container_name: bds-fly2
+    environment:
+      <<: *env
+      LEVEL_NAME: fly2
+      SERVER_NAME: bds-fly2
+      SERVER_PORT: "19210"
+    ports:
+      - "19210:19210/udp"
+    volumes:
+      - ${BEDROCKBOT_TEST_DATA:?set BEDROCKBOT_TEST_DATA (scripts/mac/bds.mjs does)}/fly2:/data
+
+  bds-fly3:
+    <<: *bds
+    container_name: bds-fly3
+    environment:
+      <<: *env
+      LEVEL_NAME: fly3
+      SERVER_NAME: bds-fly3
+      SERVER_PORT: "19212"
+    ports:
+      - "19212:19212/udp"
+    volumes:
+      - ${BEDROCKBOT_TEST_DATA:?set BEDROCKBOT_TEST_DATA (scripts/mac/bds.mjs does)}/fly3:/data
