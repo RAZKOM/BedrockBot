@@ -17,6 +17,9 @@ target); without walking every command answers `<cmd> needs a task that can walk
 |---|---|
 | `bot/src/skills/combat/hostiles.ts` | `classify(type)` (hostile / neutral / passive / player / item / other), type-name matching (`zombified_piglin` = `zombie_pigman`, `villager` = `villager_v2`), entity feet / box / reach, `MobTracker`: per-mob health, creeper fuse, `target_eid`, hurt and death animations, own health drops and the `lastHitBy` guess |
 | `bot/src/skills/combat/combat.ts` | `CombatController`: `fight(runtimeId, opts)`, `attack(runtimeId)`, `selectWeapon()`, `pullWeapon()`, the attack packet builders, `coverCell` |
+| `bot/src/skills/combat/reflex.ts` | Track M1: the reflex (strikes the hostile that reaches the bot soonest, under every task; never a friend) |
+| `bot/src/skills/survival/seal.ts` | Track M1: the seal-in (a shell of throwaway blocks, or a hole dug under the feet) |
+| `bot/src/skills/test/mobs.ts` | Track M1: `!test mobs` (the gauntlet's sets on the Realm under testMode) |
 | `bot/src/skills/combat/targeting.ts` | Track V: `isThreat`, `nearestHostile`, `pickThreat` (reachability-aware, creepers first), `reachability`, `wantsFlee(threat)`, `afterFight` / `ignoreMsAfter`; Track AH: `inReach` / `pickInReach` (re-targeting), `crowdOf` / `crowded` / `crowdThreat` (crowd rule) |
 | `bot/src/skills/combat/pathReach.ts` | Track AO: `PathReach` (bounded probe plans from the bot to a mob, verdicts cached per mob, `stats`), `mobGoal`, `pathVerdict`, `probeNavOf`; targeting.ts adds `lineOfSight`, `ignoreMob`, `userWalking`, `walkThreat`, `parseWalkRule` |
 | `bot/test/unit/skills/targeting-walls.test.ts`, `bot/test/e2e/pve-walls.test.ts` | Track AO unit tests (fakes and a generated flat world) and e2e on bds-pve (a glass pen, a window, the open, all during a `!goto`) |
@@ -474,6 +477,280 @@ end (`!come now`, `!follow Steve now`, `!kill zombie 3 now`) the command goes, a
 **Far players**: BDS sends a player as an entity only within about 75 blocks of the bot (measured: a
 second client tracked at 70, not at 80, with chunk radius 10 or 16). Beyond that the locator bar
 reports it (see Packets), so `!come` walks to the locator position and then to the tracked player.
+
+## Never die to common mobs (Track M1)
+
+Decision record: [decisions/0079-never-die-to-mobs.md](decisions/0079-never-die-to-mobs.md). The goal: no death to the common
+mobs (zombies and their kinds, skeletons and strays, creepers, spiders, phantoms, drowned, witches, endermen that attacked,
+pillagers, slimes; not the warden), bare-handed as well as in the kit.
+
+### Server rules (measured on bds-pve, BDS 1.26.60, `test/e2e/pve-rules.test.ts`)
+
+| Rule | Measured |
+|---|---|
+| Reach | an attack lands up to 6.2 from the eye to the target's box (6.9 feet to feet); 6.7 misses. The fight strikes at 3.0, the reflex at 3.9 (`REFLEX_REACH`) |
+| Facing | does not matter: hits at 0, 90 and 180 degrees off the view, also walking away |
+| Hurt time | 10 ticks: 4 of 40 every-tick attacks land, 10 ticks apart |
+| Several mobs | 3 different mobs hit in the same tick (3 rounds) |
+| Knockback, by weapon (20 ticks) | along the line from the bot to the mob (0 degrees off), not the view. Fist 1.65 blocks, iron sword 1.62, Knockback I 2.54, Knockback II 4.45 to 4.57; sprinting: fist 2.21, Knockback II 6.31 |
+| Knockback, by mob (fist) | zombie 1.63, husk 1.67, skeleton 1.67, creeper 1.29, spider 1.15, cave spider 1.15, witch 1.67, pillager 1.67, slime 1.69, drowned 1.66, zombie villager 1.67 |
+| A mob's reach | a zombie hits from 1.2 to 1.7 feet to feet |
+| Critical | a falling hit does 1.5 times (iron sword: 2.76 standing, 4.13 falling, against resistance III) |
+| Shield (sneaking) | blocks at 0 and 90 degrees (and 45: 1 of 3 through); not at 135 or 180 |
+| Creeper | the fuse lights at 3.03 to 3.15 feet to feet; fist strikes from 3.9 do not keep it off (2 strikes, lit, 4.1 damage) |
+| Eating | an attack 12 ticks into a bite lands and the bite goes on |
+| Kite | one zombie, a fist, the bot standing still, 20 s: strikes at 3.0, 3.5 or 3.9 gave 16 to 23 strikes and no hit taken |
+
+Round 2 (bds-gaunt, BDS 1.26.60; `pve-rules.test.ts` case `strike`, `test/e2e/gaunt-probe.test.ts`; the truth pack logs
+throws and landings, `combatlog`, and sets effects, `effects`):
+
+| Rule | Measured |
+|---|---|
+| A strike with the shield up | lowers it for about 13 to 16 ticks: a skeleton at 8, the bot sneaking with a shield, 45 s a row: no strikes 8 of 8 arrows blocked; a strike every 20 ticks: hurt 13, 2 and 5 ticks after a strike, blocked 17 to 19 after; every 10 or 4 ticks: every arrow hurt; no shield: 4 of 4 hurt (`SHIELD_DOWN_TICKS` 16) |
+| Witch, throw | from 4 and 8 blocks, none from 12 or 16 (held in place), one every 61 ticks; the potion flies 4 ticks at 4 blocks, 10 to 12 at 8 |
+| Witch, potions | harming 6, the same bare and in netherite (armour does nothing); poison 1 every about 25 ticks for 45 s (it stops at 1 health); slowness 90 s; 2 to 4 throws in 25 s |
+| Witch, dodging | a side step at each throw lands the potion 3.7 blocks off: damage 22 to 11, poison 45 s to 12.6 s; a 2-high wall or a pillar between: 0 throws |
+| Witch, the kill | a netherite sword: 3 hits of 9 in 1.7 s (sprinting 1.6 to 1.7 s, falling hits 2.1 to 2.2 s: 9, 9, 13.5); she drank nothing |
+| Weakness | a fist's 0.9 becomes 0.3 |
+| Skeleton, aim | at where the bot is when it lets go, no lead (off by under 1 block); the arrow flies 3 to 19 ticks |
+| Skeleton, hits | standing: 3 of 5 at 6, 3 of 3 at 10, 1 of 1 at 14; running across at 0.21 a tick: 1 of 5, 1 of 5, 0 of 3, the hits at the turns only; turning when an arrow is let go: 1 of 5, 2 of 5, 1 of 3 |
+| Cover | a 2-high pillar between, or the bot in a 2-deep hole: 0 shots from a held skeleton; a pillager held with slowness shot none (not a measurement of its rule) |
+| Corner | a free skeleton follows round a wall: 3 shots after the bot was behind it, 1 hit |
+
+### The reflex (`skills/combat/reflex.ts`, setting `mobReflex`, off since round 2)
+
+**Why it ships off** (round 2, ADR 0079 decision 15): the bar for it on was the live kit's deaths and damage in `mixed-8` (and
+every other live-kit cell) not worse than the base code at the same number of runs. On the final code, `mixed-8`, 10 runs live
+and 5 with Knockback II (bds-gaunt and bds-pve):
+
+| series | kit | runs | deaths | damage mean (median) | witch's potions | runs her poison landed (10 or more) | other damage | lowest health (median) |
+|---|---|---|---|---|---|---|---|---|
+| base code | live | 10 | 3 | 18.0 (18.1) | 8.4 | 4 | 9.6 | 7.9 |
+| base code | kb2 | 5 | 0 | 15.6 (11.5) | 8.2 | 2 | 7.4 | 13.5 |
+| final, reflex on | live | 10 | 0 | 23.8 (28.6) | 21.7 | 9 | 2.0 | 1.4 |
+| final, reflex on | kb2 | 5 | 1 | 17.7 (15.6) | 14.6 | 4 | 3.1 | 6.4 |
+| final, reflex off (the default) | live | 10 | 1 | 25.4 (27.7) | 18.7 | 9 | 6.8 | 1.5 |
+| final, reflex off (the default) | kb2 | 5 | 0 | 19.8 (23.2) | 14.5 | 4 | 5.3 | 3.5 |
+
+The reflex takes the damage from everything but the witch from about 7 to about 2 a run and had 1 death in 15 against the
+base's 3, but the damage is worse and Knockback II died once: not met, so it ships off. What decides the damage is the witch's
+poison: it takes the health down to 1 whatever else happened, so a run is about 2 or about 25 by whether it landed. Over all
+the round-2 series it landed in about 7 runs of 10 with the reflex on and about 4 of 10 on the base code and with the
+reflex off in round 1; the round-2 witch rule (closing on her) brings it on with the reflex off too (9 of 10 above).
+Every round-2 death with the reflex on was the witch's harming at low health; the one death with it off was a zombie
+catching a bot that ran at 1 health with nothing striking behind it. A strike's lowering of the shield killed nobody: 0 of the 5
+arrows in the died runs came within 16 ticks of a reflex strike. Bare-handed the reflex is what round 1's gains came from (the
+table below, `bare after`); an owner who plays bare-handed can turn it on (`!set mobReflex on`).
+
+Every tick before the step: the hostiles within 3.9 (eye to box) with a line of sight, out of their hurt time and not struck by
+the bot in the last 10 ticks, up to 3 a tick, in this order: a lit creeper, a mob that hit the bot in the last 2 s, then the one
+that reaches the bot soonest (its distance less its reach, over its speed). The strike is the combat skill's `attack` (no turning,
+the keys untouched), so a goto, a mining job, eating or guard's own fight go on. Never in flight.
+
+With the shield up (sneaking, or a threat the shield would face) a strike lowers it for about 16 ticks (measured, above), so
+only what is worth that (`worthTheShield`): a lit creeper within 4.5, or a melee mob 2 ticks or less from reaching the bot and
+outside the shield's 90 degrees (it would hit round it anyway). Never an archer or a witch while the shield is up.
+
+**The idle shield**: with `mobReflex` on, nothing running (no task, no walk, no fight) and a shield in hand, a threat the
+shield can face (an archer drawing on the bot) gets the shield raised and the body turned to it (`shield: raised while idle`);
+it is let down when the threat goes. Two round-2 deaths in `mixed-8` were a bot standing at home at 1 health (the witch's
+poison stops there) with a skeleton shooting at it from 10 and the shield down.
+
+Never struck: a player, a passive mob, iron, snow and copper golems, villagers, a wandering trader, an allay, the warden, the
+creaking, the dragon, the wither. A neutral mob (an enderman, a piglin, a wolf, a bee, ...) only when the server says it targets
+the bot and the hit guess blamed it within 10 s.
+
+Log: `reflex: zombie #12 in reach (2.8 feet, eta 0.4 s): striking` once an engagement, `reflex: zombie #12 down (...)`.
+Metrics: `pve.reflex.hits`, `pve.reflex.kills`; the PvE status (`!status`, the panel) has `reflex: { hits, landed, kills }`.
+
+### The floors (the health rule, `pveFloor` in tasks/pve.ts)
+
+| Floor | When |
+|---|---|
+| fight on | no danger (no flee trigger), or a duel worth it: one melee mob with health for 3 of its hits, or up to 2 archers alone (skeleton, stray, bogged, pillager) with health for 2 arrows, given up after 8 lost in 6 s |
+| eat | every mob 8 or more away, food below 20, something to eat; with no blade in the hotbar also no ranged mob within 16 (an archer or a witch hits from 8 to 15) |
+| back off | the flight on foot (Flee v2) with the reflex striking behind it; with no blade a witch within 16 starts one below 14 health |
+| elytra flee | running failed (caught or cornered within 20 s) or critical (health 4 or less with a melee mob within 3, or 8 or less with a hit in the last 3 s, or with `sealIn` on and the shell possible 14 or less with a hit in the last 3 s and 3 shooters in sight); setting `fleeFly` (off); `!fly home` as the first owner through the chat command, only with an owner, a home and the flight kit ready (`skills/fly/kit.ts`); at most once in 30 s |
+| seal in | as the elytra flee, when it cannot go; setting `sealIn` (off); at most once in 30 s |
+| defend | none of the above: guard defends in place |
+
+**The seal-in** (`skills/survival/seal.ts`): with 10 throwaway blocks, 9 under a ceiling (cobblestone, cobbled deepslate, dirt, netherrack, stone
+and its kinds, planks; never a block that falls, burns, is worth keeping or does something) the four cells round the feet, the
+four round the head, a support beside the roof in the open and the one over the head, the side facing the nearest mob first. Without them, on dirt or grass, the dig-in: the
+3 cells under the feet straight down (each dirt-like, the walls and the floor under them solid: no cave, no liquid), then the
+first cell dug roofed with the dirt it gave. Then it eats and waits until 18 health (5 min at most) and opens the side away from
+the mobs (a dig-in: its roof; the walk out is the next goto's). Log lines `floor: seal in (...)`, `seal: dug in 3 deep, 1
+block(s) placed`, `floor: sealed in (...)`, `floor: opening the shell (...)`.
+
+The seal-in's dig-in in round 1 failed with the body beside the dug column: the first dig opened the cell under the feet but
+the body, standing on its edge (the centring sneaks, and a sneaking body does not walk off an edge), never fell in. Now the
+centring walks (no sneak) when it is to fall into the hole, it tries 3 times, and the next digs take the cell under the feet
+where they are; a body that left the hole ends the dig-in (`the body left the hole`). Out of the cell: only at full health
+(`SEAL_LEAVE_HEALTH` 20) and with no threat within 16 or at day, else at the 5-minute limit.
+
+The surface shell in round 1 never closed: the roof cell over the head touches the head ring only at its edges, so there is no
+face to place it against (8 placed and the roof open in every round-2 run before the fix, one of them 24 damage inside). Now
+in the open a support block goes first on the head ring block of the side facing the nearest mob, then the roof (10 blocks on
+open ground, 9 under a ceiling). The body is put on its cell's middle before the shell (a body 0.4 off the middle overlaps the
+next cell, whose block then will not go in), the cells still open get a second pass after another centring, and a shell left
+open is built again once from where the body is (`floor: the shell is open (...), building it again`). Under 3 shooters or
+more (archers or a witch, in sight within 16) with the shell possible, critical (the seal) comes at 14 health with a hit in the
+last 3 s instead of 8: 10 blocks take about 2 s and round 2's runs sealed at 7, 3 and 2 health. Only with `sealIn` on: with it
+off nothing changes (the run as before).
+
+**The witch, by kit** (round 2): with a blade (`firstTarget` in tasks/pve.ts, passed to targeting) a witch within 12 in the line
+of sight is the first target (score -500, before an archer or a melee mob in place) while the bot has 8 health or more; at any
+health when she is within 8 (her throw range: a run does not get out of it before her next throw, and three round-2 deaths
+ran from her at 6 to 7 blocks with her one hit from dead) or within 2 s of her throw (a splash potion first seen within 2.5 of
+her; her next throw is 61 ticks off); and only while no other melee mob stands within 2 of the line to her beyond 3 blocks from
+the bot. The flight does not start for her then; guard fights her with the approach even when it defends in place (low
+health: an in-place fight, reach 5 and no walk, stood 6 from her and never struck), and a fight with her that ended out of
+range does not leave her ignored for 10 s (she stood at 6 for 5 s throwing; a path verdict still holds). She dies in 1.7 s to a netherite sword and throws once in 3 s, so the throw it
+takes is cheaper than the run (her throws reach across the run, and the poison keeps on). With no blade: the dodge (below) when
+it is on, else the flight below 14 health as in round 1.
+
+**Drops after a fight** (round 2): guard walks to the drops only when no other live hostile is within 16 (the killed one left
+out: it is listed through its death animation). The collect walk took up to 10 s next to a witch at 4.5 and a spider at 2 with
+no fight (a live-kit `mixed-8` death with the reflex off; the base code did the same).
+
+**The potion side step** (with `mobReflex`, `potionStep` in tasks/pve.ts, `potionSideStep` in dodge.ts): a splash or lingering
+potion within 12 whose level motion (from its position the tick before: the client does not keep a projectile's velocity up)
+points at the bot gets a sprint at right angles to it for 12 ticks at most, on safe cells only, the side away from a melee mob
+within 6. It runs on the ground, with no walk and no process but guard (a guard fight's steering is overridden for the 12
+ticks and takes over after). Log `reflex: side step from a potion (7.3 away)`; `reflex.potionSteps` in the PvE status, metric
+`pve.reflex.potionSteps`. Why: with the reflex killing the melee mobs where they stand the bot stood still while she threw, and
+her poison (it takes the health down to 1) landed in 9 of 13 live-kit `mixed-8` runs against 6 of 15 with the reflex off.
+
+**The dodge** (`skills/combat/dodge.ts`, setting `mobDodge`, off): with no blade, no melee mob within 6 and an archer (skeleton,
+stray, bogged, pillager) or a witch within 16 in the line of sight, the flight's first phase is the dodge: the body sprints
+across the line of fire (the sum of the ways away from each shooter, the near ones weighing most, turned 90 degrees), drifting
+out to 10 to 18 from an archer and 13 to 20 from a witch (mostly out inside 6 or with a witch inside 13), and turns round at
+most every 60 ticks and only with nothing in the air towards it (a turn is when the arrows hit). Each tick the next 2.4 blocks
+of the heading must be a floor with room for the body (no drop, no liquid, nothing that hurts): else the other way, else
+straight out, else the ordinary flight. It bites food right after a shot when hungry. It ends when no shooter has a line
+(`out of the line of fire`) or after 60 s.
+
+Counts: `pve.taken.<type>` (hits taken by the attacker's type), `pve.floor.<floor>` (backoff, eat, fly, seal); the PvE
+status has `taken: { zombie: 3, skeleton: 1 }`. One `[pve]` line per decision.
+
+### `!test mobs` (the Realm harness, Track T1)
+
+`!test mobs <set> [n] [<seconds>s]` (testMode on, cheats on, the bot op'd): at least 150 blocks from home, n runs (default 1)
+of the set summoned round the bot (on a ring 7 blocks out, a flying one 10 up) under one name tag (`m1t<hex>`), each run
+until the mobs are dead, the bot dies or the time is up (60 s), then `/kill @e[name=<tag>]` (its own mobs only, also on
+`!test stop`). Sets: each mob alone (`zombie`, `husk`, `baby`, `drowned`, `zvillager`, `skeleton`, `stray`, `creeper`,
+`spider`, `cavespider`, `phantom`, `witch`, `pillager`, `slime`, `enderman`), `zombie4`, `skeleton4`, `creeper4`, `spider4`,
+`phantom4`, `mixed4`, `mixed8`. A good run prints (bds-pve, bare-handed, `test/e2e/pve-testmobs.test.ts`):
+
+```
+test mobs zombie4: 2 runs of 4 mobs (30 s each) from <x y z>, name tag m1tf745ad
+test mobs zombie4 run 1/2: alive, damage 0 (lowest 20), hits none, cleared in 28.7 s, reflex 88, floors none
+test mobs zombie4 run 2/2: alive, damage 0 (lowest 20), hits none, 1 left after 30.2 s, reflex 89, floors none
+test mobs zombie4: 2/2 runs, 0 deaths, cleared 1/2, damage 0/0 (mean 0), clear median 28.7 s, reflex 177, floors none
+```
+
+A bad one says `DIED` in a run line and `1 death` in the summary; the JSONL file in `tests/` has one line per run (the hits by
+type, the floors, the reflex strikes, the lowest health).
+
+### The gauntlet (`test/e2e/gaunt-mobs.test.ts`)
+
+33 cells a kit (31 in round 1), each a fresh spot of flat grass, the bot at full health and food with the kit, guard on
+(radius 16, as on the Realm), the home point on the spot, the mobs summoned on a ring 7 out, 60 s: each mob alone, 2 and 4 of a
+kind, `witch-2`, `mixed-4`, `mixed-8` (zombie, skeleton, creeper, spider, phantom, baby zombie, witch, husk; `mixed-4` and the
+`act-` cells the first 4), `act-<activity>` (a mixed 4 during a goto, a mining job, eating, just after a landing) and `seal-5`
+(4 skeletons and a witch, round 2). Kits: `bare` (no weapon, no armour, 8 bread) on bds-gaunt; `live` (the netherite set, a
+netherite sword, a shield, 16 cooked beef, 32 cobblestone) and `kb2` (the same with Knockback II) on bds-pve; `blocks` (bare
+with 32 cobblestone, the seal-in's cell). Columns: `r1 before` the code at the track's start (`bare`) and round 1's code with
+the reflex off (`live`, `kb2`); `r1 after` round 1's defaults; `final` the defaults of round 2 (the reflex, the dodge, the
+elytra flee and the seal-in off); `bare final, reflex on` the same with `mobReflex` on (one run of the code a few changes
+before the last: the targeting and collect changes do not touch a bot with no blade). Each cell is deaths / damage taken in
+its 60 s, one run a cell; the variance between runs of one cell is large (`mixed-8`: the reflex section above).
+
+| cell | bare r1 before | bare r1 after | bare final (default) | bare final, reflex on | live r1 before | live final | kb2 r1 before | kb2 final |
+|---|---|---|---|---|---|---|---|---|
+| zombie-1 | 0 / 21 | 0 / 6 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0.7 | 0 / 0 | 0 / 0 |
+| husk-1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 3 | 0 / 0 | 0 / 0.7 | 0 / 0 | 0 / 0 |
+| baby-1 | **died** / 27 | 0 / 3 | 0 / 9 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| drowned-1 | **died** / 27 | **died** / 22 | 0 / 11 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| zvillager-1 | 0 / 15 | 0 / 3 | 0 / 3 | 0 / 3 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| skeleton-1 | 0 / 17 | **died** / 28 | 0 / 16 | **died** / 34 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| stray-1 | **died** / 31 | 0 / 16 | 0 / 19 | 0 / 23 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| creeper-1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| spider-1 | 0 / 14 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| cavespider-1 | 0 / 0 | 0 / 0 | 0 / 3 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| phantom-1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| witch-1 | **died** / 29 | **died** / 28 | **died** / 24 | **died** / 30 | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 1 |
+| enderman-1 | **died** / 21 | 0 / 0 | 0 / 0 | 0 / 7 | 0 / 0 | 0 / 0 | 0 / 8 | 0 / 0 |
+| pillager-1 | **died** / 26 | **died** / 26 | **died** / 25 | **died** / 23 | 0 / 0 | 0 / 0 | 0 / 5 | 0 / 0.9 |
+| slime-1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 |
+| zombie-2 | 0 / 3 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| zombie-4 | **died** / 27 | 0 / 0 | 0 / 15 | 0 / 6 | 0 / 18.1 | 0 / 0.7 | 0 / 13.4 | 0 / 0.7 |
+| skeleton-2 | 0 / 32 | **died** / 26 | **died** / 32 | **died** / 27 | 0 / 0.9 | 0 / 0.9 | 0 / 0 | 0 / 0 |
+| skeleton-4 | **died** / 27 | **died** / 22 | **died** / 21 | **died** / 26 | 0 / 6.2 | 0 / 2.1 | 0 / 4.4 | 0 / 4.4 |
+| creeper-2 | 0 / 10.3 | 0 / 0 | 0 / 9.7 | 0 / 0 | 0 / 0.6 | 0 / 0.9 | 0 / 0 | 0 / 0 |
+| creeper-4 | **died** / 20 | 0 / 0 | **died** / 25.7 | 0 / 0 | 0 / 8.1 | 0 / 7.6 | 0 / 0 | 0 / 0 |
+| spider-2 | 0 / 2 | 0 / 0 | 0 / 16 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| spider-4 | 0 / 18 | 0 / 6 | 0 / 16 | 0 / 10 | 0 / 0 | 0 / 0 | 0 / 19.9 | 0 / 0 |
+| phantom-2 | 0 / 6 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1.5 |
+| phantom-4 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 1.5 | 0 / 0 | 0 / 0 | 0 / 0 |
+| mixed-4 | 0 / 0 | 0 / 14 | 0 / 18 | 0 / 14 | 0 / 3.1 | 0 / 2.9 | 0 / 4.5 | 0 / 2.1 |
+| mixed-8 | **died** / 24 | 0 / 7 | **died** / 25 | 0 / 10 | 0 / 32.2 | 0 / 15.2 | 0 / 27.8 | 0 / 6.1 |
+| act-goto | 0 / 23 | 0 / 32 | 0 / 16 | 0 / 31 | 0 / 4.2 | 0 / 0 | 0 / 1.9 | 0 / 0.9 |
+| act-mine | 0 / 13 | 0 / 0 | 0 / 23 | **died** / 30 | 0 / 1.4 | 0 / 0.9 | 0 / 5.4 | 0 / 0.9 |
+| act-eat | 0 / 19 | 0 / 19 | **died** / 28.1 | 0 / 24 | 0 / 4.2 | 0 / 3.6 | 0 / 6.8 | 0 / 6.4 |
+| act-landed | 0 / 7 | 0 / 24 | 0 / 15 | 0 / 13 | 0 / 6.8 | 0 / 0.9 | 0 / 4.7 | 0 / 1.1 |
+| witch-2 | - | - | **died** / 26 | **died** / 25 | - | 0 / 2 | - | 0 / 20 |
+| seal-5 | - | - | **died** / 26 | **died** / 28 | - | 0 / 15.9 | - | **died** / 24.9 |
+| **all** | 10 of 31 / 459 | 6 of 31 / 282 | 9 of 33 / 422 | 8 of 33 / 367 | 0 of 31 / 87 | 0 of 33 / 55 | 0 of 31 / 104 | 1 of 33 / 71 |
+
+Round 2 by kit (one run a cell, the final defaults): `live` 0 deaths in 33, damage 55 (round 1 87 in 31); `kb2` 1 death
+(`seal-5`: 4 skeletons and a witch, a harming potion at 4 health; the other 32 cells 0) against 0 in round 1, damage 71
+against 104; `bare` 9 of 33 against 10 of 31 before the track and 6 of 31 with round 1's defaults (the reflex on: with it on
+again, 8 of 33). The repeats of the witch and the archers cells (below) are the numbers the bars are judged by, not this one
+run a cell.
+
+**Repeats on the final code** (10 runs a cell for the live kit, 5 for `kb2` and bare):
+
+| cell, kit, settings | runs | deaths | damage mean |
+|---|---|---|---|
+| `mixed-8`, live, reflex off (the default) | 10 | 1 | 25.4 |
+| `mixed-8`, live, reflex on | 10 | 0 | 23.8 |
+| `mixed-8`, live, base code | 10 | 3 | 18.0 |
+| `mixed-8`, kb2, reflex off / on / base | 5 / 5 / 5 | 0 / 1 / 0 | 19.8 / 17.7 / 15.6 |
+| `witch-1`, live, reflex off | 10 | 0 | 0 |
+| `witch-2`, live, reflex off | 10 | 0 | 0.8 |
+| `witch-1`, bare, `mobDodge` on | 5 | 0 | |
+| `skeleton-1`, `skeleton-2`, `skeleton-4`, `pillager-1`, `drowned-1`, bare, `mobDodge` on | 5 each | 0 each | |
+| `seal-5`, blocks, `sealIn` on, the mobs removed at 100 s | 3 | 0 | 0 inside the shell |
+| every cell, bare, `mobDodge` on (the rest default) | 2 each, 66 in all | 2 (`enderman-1`, `act-eat`) | 7.8 (516 in all) |
+
+Bare with `mobDodge` on, the whole gauntlet twice: 2 deaths in 66 runs against 9 in 33 with the defaults. The two deaths are
+melee mobs on a fleeing bot: an enderman that teleports next to it (7 a hit, 4 hits), and 3 zombies on a bot that started at
+food 6 (`act-eat`: no sprint at 6 or less, so the zombies keep up with the flight at 2 to 3 blocks).
+
+**Idle nights** (dusk to dawn in the open, natural spawning on, normal difficulty, about 550 s), bare with `mobDodge` on: 2 nights,
+1 death in each (night 1: 73 damage, hits by spiders 9, zombies 7, skeletons 5, a creeper and a slime; night 2: 63 damage,
+skeletons 5, spiders 6, zombies 2, creepers 2, a zombie villager 2); round 1, bare with the defaults: 2 deaths in 1 night, 21 of
+22 hits by skeletons. The archers are no longer the cause; the melee mobs on a bot that runs at low health are.
+
+**Hard difficulty** (`MOBS_HARD=1`, the crowds `zombie-4`, `skeleton-4`, `creeper-4`, `spider-4`, `phantom-4`, `mixed-4`,
+`mixed-8`, one run each, bds-gaunt): bare with the defaults died in 4 of 7 (`zombie-4`, `skeleton-4`, `mixed-4`, `mixed-8`;
+damage 106); bare with `mobDodge` on in 0 of 7 (damage 85); the live kit 0 of 7 (damage 63, lowest health 1.4 under 4
+creepers); Knockback II 1 of 7 (`skeleton-4`, 26 from arrows through the netherite; damage 52). Run on bds-gaunt for every kit.
+
+**Tasks under attack** (`test/e2e/pve-m1.test.ts`, bare, 3 zombies, bds-pve): a 40-block goto arrived in 8.1 s at 20 health;
+`!mine sand 12` ended 12/12 done at 20 health; eating from food 6 reached 20 at 20 health. **Friendly fire**: a second player,
+a villager, a wolf tamed to that player, a cow, an iron golem and an enderman that had not attacked, held within 2.2 of the bot
+for 40 s with 3 zombies coming in: every hit by the bot on the zombies, with the reflex on (the case turns it on).
+
+Where the bar is not met: bare-handed with the defaults (`mobDodge` off) the archers and the witch still kill (`skeleton-2`,
+`skeleton-4`, `pillager-1`, `witch-1`, `witch-2` in the run above); with `mobDodge` on they lived in every repeat, so the
+dodge is the floor that held, and it ships off only because it is steered by hand on flat test ground. A fist does 1 (a
+skeleton has 20 health, a pillager 24, a witch 26 and drinks healing), the hurt time allows 2 strikes a second at best, and an
+arrow is about 4 every 3 s from up to 15 blocks: a lone skeleton needs 10 s of contact at the very least while it backs off.
+The bare dig-in does not save `seal-5` (4 skeletons and a witch): the dig times out or is cancelled when the arrows push the
+body more than 1.5 off the column; the shell of blocks does (3 of 3). The live kit's `mixed-8` stays at about 1 death in 10:
+the witch's poison takes the bot to 1 health in 9 of 10 runs whatever the reflex does.
 
 ## Packets (BDS 1.26.60.6, verified)
 

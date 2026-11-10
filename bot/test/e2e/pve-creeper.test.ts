@@ -46,6 +46,7 @@ describe.skipIf(!E2E)('pve: creeper protocol (Track V)', () => {
   beforeAll(async () => {
     await prepareServer();
     bot = await startPveBot('PveCreep');
+    bot.pve.settings.set('mobReflex', false); // Track M1: these measure the fight, the shield and the crowd rule alone (the reflex strikes on its own)
     await teleport(bot, centre(HOME));
     await bot.truth.clearAround(centre(HOME), 48);
     await armWithIronSword(bot);
@@ -137,6 +138,34 @@ describe.skipIf(!E2E)('pve: creeper protocol (Track V)', () => {
     }
     measurements.push(`duels: ${explosions} explosion(s) in ${RUNS} runs`);
   }, 120_000 * RUNS);
+
+  // Track M1: the duel with the reflex on (the default it ships with): the bot lives, no more than the duels' explosions
+  it('creeper duels with the reflex on (the default): 3 of 3 survived', async () => {
+    const b = bot!;
+    b.pve.settings.set('mobReflex', true);
+    try {
+      for (let i = 0; i < 3; i++) {
+        const p0 = spot(12 + i);
+        await reset(b, p0);
+        const since = await b.truth.now();
+        const deaths0 = b.built.respawn!.deaths;
+        const angle = (i * 2 * Math.PI) / 3 + 0.9;
+        const creeper = await b.truth.summon('creeper', { x: p0.x + 0.5 + 6 * Math.cos(angle), y: FEET_Y, z: p0.z + 0.5 + 6 * Math.sin(angle) });
+        const rid = await tracked(b, creeper);
+        const r = await b.pve.combat.fight(rid, { timeoutTicks: 1200 });
+        await sleep(800);
+        const ex = (await combatlog(b, since)).filter((x) => x.kind === 'explosion' && x.entityId === creeper.entityId);
+        const dmg = botDamage((await b.truth.hurtlog(since)).events, b.name);
+        const line = `duel (reflex on) ${i + 1}: ${r.reason} in ${r.ticks} ticks, explosions ${ex.length}, bot took ${dmg.total} (${JSON.stringify(dmg.byCause)})`;
+        console.log(line);
+        measurements.push(line);
+        expect(b.built.respawn!.deaths).toBe(deaths0);
+        expect(['killed', 'exploded', 'gone']).toContain(r.reason);
+      }
+    } finally {
+      b.pve.settings.set('mobReflex', false);
+    }
+  }, 360_000);
 
   it('below health 10 a creeper is not engaged: creeper_avoided, 8 or more blocks away, wantsFlee', async () => {
     const b = bot!;

@@ -7,6 +7,8 @@
 //   !test cave [n]                                     /tp to cave_start, `!fly cave_end`
 //   !test route <prefix> [n] [noshortcut]              /tp to <prefix>_start, `!fly route <prefix> [noshortcut]`
 //   !test goto <x y z | wp> from <x y z | wp> [n]      /tp to the start, `!goto <goal>`
+//   !test mobs <set> [n] [<s>s]                        Track M1: summon a named set of mobs round the bot (at least 150 blocks
+//                                                      from home), count deaths, damage and time; removes only its own mobs
 //   !test stop                                         end the run in progress and the series
 // Each run restores health, food and the kit and teleports to the start first (skills/test/recovery.ts), runs the trip as
 // the owner's own command and records it (skills/test/series.ts): a chat line per run, a summary, and one JSON line per
@@ -22,6 +24,7 @@ import { formatKit, kitView, parseKitText, snapshotKit, type KitEntry } from '..
 import { NEEDS_OP, OpDetector, type OpSource, type OpStatus } from '../skills/test/ops.ts';
 import { claimRespawn, fmtCell, Harness, Recovery, type HarnessPorts } from '../skills/test/recovery.ts';
 import { summaryLine, TEST_LIMITS, TestSeries, type RunKind, type RunSpec, type SeriesSummary } from '../skills/test/series.ts';
+import { MobSeries, mobSummaryLine, parseMobsArgs, type MobsSpec } from '../skills/test/mobs.ts'; // Track M1
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import type { RespawnController } from '../tasks/respawn.ts';
 import type { ChatLine } from './text.ts';
@@ -50,6 +53,8 @@ export interface TestControl {
   harness: Harness;
   /** The series running, if any. */
   current(): TestSeries | undefined;
+  /** Track M1: the mob series running, if any. */
+  mobs(): MobSeries | undefined;
   /** The last finished series' summary. */
   last(): SeriesSummary | undefined;
   /** Resolves when the series running ends (at once when none). */
@@ -211,6 +216,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
   const harness = new Harness(harnessPorts);
 
   let series: TestSeries | undefined;
+  let mobSeries: MobSeries | undefined; // Track M1
   let seriesDone: Promise<SeriesSummary | undefined> = Promise.resolve(undefined);
   let lastSummary: SeriesSummary | undefined;
   /** The kit of the last series (the death path outside a series restores it too). */
@@ -220,12 +226,12 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
   const recovery = new Recovery({
     enabled,
     ensureOp: () => ops.ensure(),
-    restore: () => harness.restore(series?.spec.start, currentKit(), TEST_LIMITS.elytraMin),
+    restore: () => harness.restore(series?.spec.start ?? (mobSeries ? mobStart : undefined), currentKit(), TEST_LIMITS.elytraMin),
     say: (m) => chat.say(m),
     log,
   });
   const currentKit = (): KitEntry[] | undefined => {
-    if (series) return lastKit;
+    if (series || mobSeries) return lastKit;
     try {
       const k = resolveKit(settings.get('testKit'), () => lastKit ?? [], dir());
       return k.kit;
@@ -239,7 +245,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
   });
   respawn.afterRespawn((_feet, _death, signal) => recovery.onRespawn(signal));
   // while a series runs (testMode on), the recovery's /tp takes the bot back to the run's start: no walk home after the respawn
-  claimRespawn(task, () => enabled() && series !== undefined);
+  claimRespawn(task, () => enabled() && (series !== undefined || mobSeries !== undefined));
 
   // every reply the bot sends while a series runs (the trips' end lines)
   const replyFns = new Set<(m: string) => void>();
@@ -271,6 +277,77 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
     // let a flight in the air come down before its process goes
     for (let i = 0; i < 200 && (loop?.state.gliding ?? false); i++) await new Promise((r) => setTimeout(r, 100));
     d.pve?.stopCommands();
+  };
+
+  // ---- Track M1: !test mobs ----
+  let mobStart: Vec3 | undefined;
+  const startMobs = (spec: MobsSpec, reply: (m: string) => void): void => {
+    const pve = d.pve;
+    if (!pve || !world) {
+      reply(d.needsWalking('test'));
+      return;
+    }
+    let kit: KitEntry[];
+    try {
+      ({ kit } = resolveKit(settings.get('testKit'), () => snapshotKit(kitView(world.inventory)), dir()));
+    } catch (e) {
+      reply(`test: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    lastKit = kit;
+    const folder = dir();
+    const file = folder ? join(folder, recordFileName(`mobs ${spec.set}`)) : undefined;
+    const tag = `m1t${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')}`;
+    const s = new MobSeries(spec, {
+      run: (c) => runner.run(c),
+      restore: (start) => harness.restore(start, kit, TEST_LIMITS.elytraMin),
+      position: () => harnessPorts.position() ?? pve.position(),
+      home: () => task.home?.get(),
+      health: () => harnessPorts.health() ?? pve.health(),
+      deaths: () => respawn.deaths,
+      recovered: () => recovery.settled(),
+      entities: () => world.entities,
+      dead: (rid) => pve.mobs.get(rid)?.dead === true,
+      counters: () => ({ reflex: pve.reflex.totals.hits, taken: pve.taken, floors: pve.floors }),
+      onDamage: (fn) => pve.mobs.onHit((_g, dmg) => fn(dmg)),
+      say: (m) => chat.say(m),
+      write: (rec) => {
+        if (!file) return;
+        try {
+          mkdirSync(dirname(file), { recursive: true });
+          appendFileSync(file, `${JSON.stringify(rec)}\n`, 'utf8');
+        } catch (e) {
+          log.warn(`test: could not write ${file}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      },
+      now: () => Date.now(),
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      log,
+    }, tag);
+    const no = s.refusal();
+    if (no) {
+      reply(no);
+      return;
+    }
+    mobSeries = s;
+    const p0 = harnessPorts.position() ?? pve.position();
+    mobStart = { x: Math.floor(p0.x), y: Math.floor(p0.y + 1e-3), z: Math.floor(p0.z) };
+    reply(`test mobs ${spec.set}: ${spec.runs} run${spec.runs === 1 ? '' : 's'} of ${spec.mobs.length} mob${spec.mobs.length === 1 ? '' : 's'} (${spec.seconds} s each) from ${fmtCell(mobStart)}, name tag ${tag}${file ? `; ${basename(file)}` : ''}`);
+    seriesDone = (async () => {
+      try {
+        const sum = await s.run();
+        const out = mobSummaryLine(sum);
+        log.info(out);
+        chat.say(out);
+        return undefined;
+      } catch (e) {
+        log.error(`test mobs failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+        chat.say(`test mobs failed: ${e instanceof Error ? e.message : String(e)}`);
+        return undefined;
+      } finally {
+        if (mobSeries === s) mobSeries = undefined;
+      }
+    })();
   };
 
   const startSeries = (spec: RunSpec, runs: number, line: ChatLine, reply: (m: string) => void): void => {
@@ -343,14 +420,14 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
 
   chat.register({
     name: 'test',
-    help: '[status | op | kit | stop] | cavestart [n] [from <p>] | cave [n] | route <prefix> [n] [noshortcut] | goto <p> from <p> [n] (repeated test runs with /tp, re-kit and heals between them; needs testMode on, cheats on and the bot op\'d)',
+    help: '[status | op | kit | stop] | cavestart [n] [from <p>] | cave [n] | route <prefix> [n] [noshortcut] | goto <p> from <p> [n] | mobs <set> [n] [<s>s] (repeated test runs with /tp, re-kit and heals between them; needs testMode on, cheats on and the bot op\'d)',
     group: 'control',
     example: '!test goto base from 0 64 0 3',
     auto: 'after a death in testMode: the kit back and /tp to the run start',
     run: ({ args, reply, line }) => {
       const sub = args[0]?.toLowerCase() ?? 'status';
       if (sub === 'status') {
-        const now = series ? series.status() : lastSummary ? `last: ${summaryLine(lastSummary)}` : 'no series yet';
+        const now = mobSeries ? mobSeries.status() : series ? series.status() : lastSummary ? `last: ${summaryLine(lastSummary)}` : 'no series yet';
         reply(`test: testMode ${enabled() ? 'on' : 'off'}; ${opLine(ops.status())}; ${now}`);
         return;
       }
@@ -369,6 +446,11 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
         return;
       }
       if (sub === 'stop') {
+        if (mobSeries) {
+          mobSeries.stop(); // Track M1: its mobs go at once
+          reply(`test: stopping mobs ${mobSeries.spec.set} after run ${mobSeries.current}; its mobs removed`);
+          return;
+        }
         if (!series) {
           reply('test: no series running');
           return;
@@ -385,8 +467,25 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
         reply(d.needsWalking('test'));
         return;
       }
-      if (series) {
-        reply(`test: ${series.status()} (!test stop ends it)`);
+      if (series || mobSeries) {
+        reply(`test: ${(series ?? mobSeries)!.status()} (!test stop ends it)`);
+        return;
+      }
+      if (sub === 'mobs') {
+        const m = parseMobsArgs(args.slice(1));
+        if ('error' in m) {
+          reply(m.error);
+          return;
+        }
+        void (async () => {
+          const op = await ops.ensure();
+          if (op.state !== 'op') {
+            reply(`test: ${op.state === 'unknown' ? `${NEEDS_OP} (${op.line})` : op.line}`);
+            return;
+          }
+          if (series || mobSeries) return;
+          startMobs(m, reply);
+        })();
         return;
       }
       const parsed = parseTestArgs(args, pointOf, () => harnessPorts.position());
@@ -409,6 +508,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
   const stop = task.stop.bind(task);
   task.stop = () => {
     series?.stop();
+    mobSeries?.stop();
     ops.stop();
     runner.dispose();
     stop();
@@ -420,6 +520,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
     recovery,
     harness,
     current: () => series,
+    mobs: () => mobSeries,
     last: () => lastSummary,
     done: () => seriesDone,
     dir,

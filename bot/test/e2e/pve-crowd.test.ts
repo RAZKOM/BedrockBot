@@ -14,7 +14,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { yawTowards } from '../../src/skills/nav/follower.ts';
 import type { Vec3 } from '../../src/world/types.ts';
-import { centre, E2E, FEET_Y, prepareServer, pveCmd, privateArea, sleep, startPveBot, teleport, tracked, until, type MobInfo, type PveBot } from './pve-truth.ts';
+import { botDamage, centre, E2E, FEET_Y, prepareServer, pveCmd, privateArea, sleep, startPveBot, teleport, tracked, until, type MobInfo, type PveBot } from './pve-truth.ts';
 
 const CROWD_RUNS = Number(process.env.PVE_CROWD_RUNS ?? 3);
 const SHIELD_RUNS = Number(process.env.PVE_SHIELD_RUNS ?? 5);
@@ -79,6 +79,7 @@ describe.skipIf(!E2E)('pve: crowd rule and shield (Track AH)', () => {
   beforeAll(async () => {
     await prepareServer();
     bot = await startPveBot('PveCrowd');
+    bot.pve.settings.set('mobReflex', false); // Track M1: these measure the fight, the shield and the crowd rule alone (the reflex strikes on its own)
     await teleport(bot, centre(HOME));
     await bot.truth.clearAround(centre(HOME), 64);
     await bot.truth.ok('clear', [bot.name]);
@@ -131,6 +132,35 @@ describe.skipIf(!E2E)('pve: crowd rule and shield (Track AH)', () => {
     await b.truth.setHealth(b.name, 20);
     await sleep(1000);
   }, 60_000);
+
+  // Track M1: the same crowd with the reflex on (the default it ships with): the bot lives through it
+  it('crowd (reflex on, the default): 4 zombies at health 10 -> the bot lives, the reflex strikes', async () => {
+    const b = bot!;
+    b.pve.settings.set('mobReflex', true);
+    try {
+      const at = await freshSpot(b, 10);
+      b.pve.setGuard({ on: true, radius: 16 });
+      const deaths0 = b.built.respawn!.deaths;
+      const hits0 = b.pve.reflex.totals.hits;
+      const since = await b.truth.now();
+      const c = centre(at);
+      for (const [dx, dz] of [[2.5, 0], [-2, 1], [0, -2.5], [1, 2.5]] as const) await b.truth.summon('zombie', { x: c.x + dx, y: FEET_Y, z: c.z + dz });
+      await sleep(15_000);
+      const dmg = botDamage((await b.truth.hurtlog(since)).events, b.name);
+      const line = `crowd (reflex on): 4 zombies at health 10: ${b.built.respawn!.deaths > deaths0 ? 'DIED' : 'alive'} at ${b.pve.health()}, took ${dmg.total}, reflex strikes ${b.pve.reflex.totals.hits - hits0}, behaviour "${b.pve.behaviour()}"`;
+      console.log(line);
+      measurements.push(line);
+      expect(b.built.respawn!.deaths).toBe(deaths0);
+      expect(b.pve.reflex.totals.hits).toBeGreaterThan(hits0);
+    } finally {
+      b.pve.settings.set('mobReflex', false);
+      b.pve.setGuard({ on: false });
+      b.pve.stop();
+      await b.truth.cleanup();
+      await b.truth.setHealth(b.name, 20);
+      await sleep(1000);
+    }
+  }, 90_000);
 
   it(`crowd: 3 zombies at health 11 in iron armour, rule on vs off (${CROWD_RUNS} runs each): damage per run`, async () => {
     const b = bot!;

@@ -393,6 +393,8 @@ interface Target {
   landedN: number;
   landedSeen: number;
   strikesSince: number;
+  /** Track M1: the mob's hurt count when progress was last seen (a reflex strike, an arrow count too). */
+  hurtsSeen: number;
 }
 
 interface Fight {
@@ -686,6 +688,7 @@ export class CombatController {
       landedN: 0,
       landedSeen: 0,
       strikesSince: 0,
+      hurtsSeen: this.d.mobs.get(e.runtimeId)?.hurts ?? 0,
     };
   }
 
@@ -994,10 +997,12 @@ export class CombatController {
 
     // Track AO: the stall watchdog (no 0.5 blocks closer, no hit landed): a wall, glass or a fence between
     if (f.o.approach && f.o.stallTicks > 0 && !tg.flying && !tg.creeper) {
-      if (tg.progressT < 0 || tg.landedN > tg.landedSeen || reachNow < tg.best - STALL_GAIN) {
+      const hurts = ms?.hurts ?? 0; // Track M1: a hurt from any strike (the reflex hits beyond the fight's reach)
+      if (tg.progressT < 0 || tg.landedN > tg.landedSeen || hurts > tg.hurtsSeen || reachNow < tg.best - STALL_GAIN) {
         tg.progressT = f.t;
         tg.best = reachNow;
         tg.landedSeen = tg.landedN;
+        tg.hurtsSeen = hurts;
         tg.strikesSince = 0;
       } else if (f.t - tg.progressT >= f.o.stallTicks && (reachNow > f.o.reach + 0.3 || tg.strikesSince >= STALL_STRIKES)) {
         this.log.info(`combat: no progress on ${bareType(tg.type)} #${tg.rid} for ${f.t - tg.progressT} ticks (closest ${tg.best.toFixed(1)}, now ${reachNow.toFixed(1)}, ${tg.strikesSince} strike(s) without a hit): unreachable`);

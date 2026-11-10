@@ -11,9 +11,10 @@ export const PANEL_BUDGETS = {
    * before decision 0065). Decision 0065 raised it from 120 000: the storage view's markup, the Bring picker
    * and their CSS add about 5 KB; 121.6 KB in all (docs/panel.md "Budgets"). Track F9c raised it from 128 000: the
    * settings rows added since (each a few hundred bytes, in the markup and in the embedded state) had taken the worst
-   * case to within one row of it, and the `flyLearnedEntry` row took it to 128 663.
+   * case to within one row of it, and the `flyLearnedEntry` row took it to 128 663. Track M1 raised it from 130 000:
+   * the mob group's four rows (mobReflex, fleeFly, sealIn, mobDodge) add 2.4 KB; 131 066 in all.
    */
-  html: 130_000,
+  html: 134_000,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**

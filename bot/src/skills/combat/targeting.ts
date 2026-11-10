@@ -101,6 +101,8 @@ export interface TargetingHost {
   position(): Vec3;
   /** Track AH: the combat skill's switches (`crowdRule` false turns the crowd rule off for both sides). */
   readonly combat?: { readonly crowdRule?: boolean; readonly busy?: boolean; readonly crowdedRecently?: boolean };
+  /** Track M1: this mob goes first (a witch the bot can kill before her next potion, the way to her clear: tasks/pve.ts). */
+  firstTarget?(e: EntityInfo, me: Vec3): boolean;
 }
 
 export interface ThreatPick {
@@ -210,14 +212,23 @@ export function pickThreat(h: TargetingHost, me: Vec3, low: boolean): ThreatPick
     if ((h.ignore.get(e.runtimeId) ?? 0) > now) {
       // Track AO: a mob that hit the bot after it was ignored is reachable after all (not a flying one)
       const note = h.ignoreWhy?.get(e.runtimeId);
-      if (!hitUs || !note || hit.at <= note.at || isFlying(e.type)) continue;
-      h.ignore.delete(e.runtimeId);
-      h.ignoreWhy?.delete(e.runtimeId);
-      h.log.info(`guard: ${bareType(e.type)} #${e.runtimeId} hit us: no longer ignored (was: ${note.reason})`);
+      // Track M1 round 2: a first target (the witch) is not left alone after a fight that ended out of range: she stood
+      // at 6 for 5 s throwing while guard ignored her (a live-kit mixed-8 death); a path verdict still holds
+      const outOfRange = note?.reason === 'fight out_of_range';
+      if (outOfRange && h.firstTarget?.(e, me) === true) {
+        h.ignore.delete(e.runtimeId);
+        h.ignoreWhy?.delete(e.runtimeId);
+      } else if (!hitUs || !note || hit.at <= note.at || isFlying(e.type)) continue;
+      else {
+        h.ignore.delete(e.runtimeId);
+        h.ignoreWhy?.delete(e.runtimeId);
+        h.log.info(`guard: ${bareType(e.type)} #${e.runtimeId} hit us: no longer ignored (was: ${note.reason})`);
+      }
     }
     const f = entityFeet(e);
     const d = dist(f, me);
     const creeper = isCreeper(e.type);
+    const first = !creeper && h.firstTarget?.(e, me) === true; // Track M1: the witch first, also in place (low health)
     let score = d;
     let kind: Candidate['kind'] = 'chase';
     if (creeper && creeperShy) {
@@ -225,7 +236,7 @@ export function pickThreat(h: TargetingHost, me: Vec3, low: boolean): ThreatPick
       if (inPlace || d > CREEPER_AVOID_RANGE) continue;
       score -= 2000;
       kind = 'avoid';
-    } else if (inPlace) {
+    } else if (inPlace && !first) {
       if (reachDistance(eye, e) > REACH_NOW) continue;
       kind = 'inPlace';
     } else {
@@ -244,20 +255,23 @@ export function pickThreat(h: TargetingHost, me: Vec3, low: boolean): ThreatPick
       if (r === 'now' && (!grid || lineOfSight(grid, eye, e))) kind = 'now'; // Track AO: in reach and nothing solid between
     }
     if (creeper && d <= CREEPER_RANK_RANGE) score -= 1000;
+    else if (first) score -= 500; // Track M1: the witch first (after a near creeper)
     if (hitUs) score -= 100;
     else if (h.mobs.targetsUs(e.runtimeId)) score -= 50;
-    cands.push({ e, score, d, kind });
+    cands.push({ e, score, d, kind, first });
   }
   if (cands.length === 0) return undefined;
   cands.sort((a, b) => a.score - b.score);
-  // Track AO: the path rule, best-ranked first; a candidate that fails it is skipped in the same evaluation
+  // Track AO: the path rule, best-ranked first; a candidate that fails it is skipped in the same evaluation. Track M1 round
+  // 2: a first target is fought with the approach even when guard defends in place (low health): an in-place fight (reach 5,
+  // no walk) stood 6 from the witch and never struck while her poison took the health down
   const walking = userWalking(h);
   let waiting = false;
   for (const c of cands) {
-    if (c.kind !== 'chase') return { e: c.e, inPlace };
+    if (c.kind !== 'chase') return { e: c.e, inPlace: inPlace && !c.first };
     if (waiting) continue; // a better candidate's probe runs: only mobs within reach meanwhile
     const g = pathGate(h, c, me, walking);
-    if (g === 'yes') return { e: c.e, inPlace };
+    if (g === 'yes') return { e: c.e, inPlace: inPlace && !c.first };
     if (g === 'pending') waiting = true;
   }
   return undefined;
@@ -269,6 +283,8 @@ interface Candidate {
   score: number;
   d: number;
   kind: 'now' | 'chase' | 'inPlace' | 'avoid';
+  /** Track M1 round 2: the host's first target (the witch). */
+  first?: boolean;
 }
 
 // ---- Track AO: path-reachable targets, restraint while walking ----------------------------------

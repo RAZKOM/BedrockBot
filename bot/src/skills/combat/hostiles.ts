@@ -334,6 +334,8 @@ export interface MobState {
   heldNetworkId?: number;
   /** Track AH: now() of the mob's last `arm_swing` entity_event (a melee attack). */
   lastSwingAt?: number;
+  /** Track M1: the `baby` actor flag (a baby zombie: small and fast). */
+  baby?: boolean;
 }
 
 export interface HitGuess {
@@ -508,6 +510,12 @@ export class MobTracker {
     return at !== undefined && this.now() - at < ms;
   }
 
+  /** Track M1: the mob showed a hurt animation within `ms` (it is in its hurt time: the server takes no other hit). */
+  inHurtTime(rid: bigint, ms = 450): boolean {
+    const at = this.mobs.get(rid)?.lastHurtAt;
+    return at !== undefined && this.now() - at < ms;
+  }
+
   /** Forget mobs no longer tracked by the world model. */
   prune(): void {
     const ents = this.o.entities();
@@ -610,6 +618,7 @@ export class MobTracker {
     for (const m of list) {
       if (m.key === 'flags' && m.value && typeof m.value === 'object') {
         st.ignited = (m.value as { ignited?: boolean }).ignited === true;
+        st.baby = (m.value as { baby?: boolean }).baby === true; // Track M1
       } else if (m.key === 'target_eid') {
         const t = toBig(m.value);
         st.targetUid = t === 0n || t === -1n ? undefined : t;

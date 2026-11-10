@@ -35,14 +35,18 @@ import type { Metrics } from '../connection/metrics.ts';
 import { RuntimeSettings } from '../config/settings.ts';
 import { silentLogger, type Logger } from '../log.ts';
 import { events } from '../events/bus.ts'; // decision 0059: combat.flee
-import { CombatController, type CombatLoop, type CombatMover, type FightOptions, type FightResult } from '../skills/combat/combat.ts';
+import { bladeScore, CombatController, type CombatLoop, type CombatMover, type FightOptions, type FightResult } from '../skills/combat/combat.ts';
 import { bareType, classify, entityFeet, isPlayerEntity, MobTracker, typeMatches } from '../skills/combat/hostiles.ts';
 import * as targeting from '../skills/combat/targeting.ts'; // Track V: reachability-aware targeting, creeper rank
 import { PathReach, probeNavOf } from '../skills/combat/pathReach.ts'; // Track AO: path-reachable guard targets
+import { Reflex } from '../skills/combat/reflex.ts'; // Track M1: the always-on strike layer
+import { dodgeStep, POTION_STEP_TICKS, potionSideStep, type DodgeShooter } from '../skills/combat/dodge.ts'; // Track M1 round 2: across the line of fire
+import { canSealHere, seal, openSide, type SealDeps } from '../skills/survival/seal.ts'; // Track M1: the last floor
 import { FollowController, type FollowLoop, type FollowTarget } from '../skills/follow/follow.ts';
 import type { Goal, NavGoal } from '../skills/nav/goals.ts';
 import type { GotoOptions, SkillResult } from '../skills/types.ts';
 import { headInWater } from '../skills/survival/surface.ts'; // Track BF
+import { chooseFood } from '../skills/survival/eat.ts'; // Track M1: the eat floor
 import { Hotbar } from '../world/hotbar.ts';
 import type { Inventory } from '../world/inventory.ts';
 import type { EntityInfo, PacketSource, Vec3 } from '../world/types.ts';
@@ -87,6 +91,9 @@ export type PveLoop = CombatLoop & FollowLoop & { waitTicks?(n: number): Promise
 /** BotSkills as PvE uses it (`BotSkills` satisfies it). */
 export interface PveSkills extends CombatMover {
   collect(radius: number, timeoutTicks: number): Promise<unknown>;
+  /** Track M1: the seal-in floor places and digs (BotSkills has both). */
+  place?(p: Vec3, opts?: { item?: string | string[]; look?: boolean; jump?: boolean; timeoutTicks?: number }): Promise<{ ok: boolean; reason?: string }>;
+  dig?(p: Vec3): Promise<{ ok: boolean; reason?: string }>;
 }
 
 export interface PveDeps {
@@ -157,6 +164,87 @@ const FLEE_SAFE_MS = 2000;
 export const FLEE_CAUGHT_RANGE = 2.5;
 export const FLEE_CAUGHT_MS = 3000;
 
+// ---- Track M1: the floors (docs/pve.md "Never die to common mobs (Track M1)", ADR 0079) ----
+/** Health at or below this with a melee mob within FLOOR_CRITICAL_RANGE: running is not working; the next floor. */
+export const FLOOR_CRITICAL = 4;
+export const FLOOR_CRITICAL_RANGE = 3;
+/** Health at or below this with a hit taken in the last 3 s (an archer, a witch) is critical too. */
+export const FLOOR_CRITICAL_HIT = 8;
+/** Track M1 round 2: with SEAL_CROWD shooters in sight and the shell possible, critical from this health (hit in the last 3 s). */
+export const FLOOR_CRITICAL_CROWD = 14;
+export const SEAL_CROWD = 3;
+/** A flight that ended caught or cornered this recently (ms) counts as failed (the next floor). */
+export const FLOOR_FAILED_MS = 20_000;
+/** The elytra flee and the seal-in are tried at most once in this long (ms) each. */
+export const FLOOR_RETRY_MS = 30_000;
+/** Sealed in: open up again once the health is back to this and no mob is within 16 or it is day (at most after SEAL_MAX_MS). */
+export const SEAL_LEAVE_HEALTH = 20;
+const SEAL_MAX_MS = 300_000;
+/** A potion's level motion within this angle's cosine of the line to the bot is coming at it (about 50 degrees: she aims where the bot was). */
+const POTION_AIM_COS = 0.65;
+/** Builds of a surface shell before the bot settles in it as it is (the second from where the body is then). */
+const SEAL_TRIES = 2;
+/** Archers a lone duel closes in on (Track M1): running in the open from one keeps the bot in its range. */
+export const DUEL_ARCHERS = new Set(['skeleton', 'stray', 'bogged', 'pillager']);
+/** A duel with a lone archer gives up after this much health lost in 6 s (a melee duel: 4). */
+export const DUEL_ARCHER_LOST = 8;
+/** Archers alone up to this many are a duel (more: run, then the floors). */
+export const DUEL_ARCHERS_MAX = 2;
+/** Below this health a witch within FLEE_SCAN starts a flight (its harming potion is 6 at once). */
+export const WITCH_FLEE_HEALTH = 14;
+/** With a blade at this health or more a witch within WITCH_FIRST_RANGE is fought first (firstTarget). */
+export const WITCH_ENGAGE_HEALTH = 8;
+export const WITCH_FIRST_RANGE = 12;
+/** ... and within this (her throw range) at any health. */
+export const WITCH_CLOSE = 8;
+/** The way to her: no other melee mob within this of the line (blocks), beyond WITCH_WAY_OWN from the bot (the reflex's). */
+export const WITCH_WAY_CLEAR = 2;
+export const WITCH_WAY_OWN = 3;
+/** A splash potion first seen within this of a witch (blocks, her hand at about 1.5 up) is hers. */
+export const WITCH_THROW_NEAR = 2.5;
+/** After her throw the next is 61 ticks (3 s) away: she is fought first at any health within WITCH_FIRST_RANGE for this (ms). */
+export const WITCH_WINDOW_MS = 2000;
+/** The dodge (mobDodge, no blade): shooters within this (and in sight) are dodged; a melee mob within DODGE_MELEE ends it. */
+export const DODGE_RANGE = 16;
+export const DODGE_MELEE = 6;
+
+/** The floors against mobs, in order (the health rule): see `pveFloor`. */
+export type Floor = 'fight' | 'eat' | 'backoff' | 'fly' | 'seal' | 'defend';
+
+export interface FloorInput {
+  /** A flee trigger holds (low health with a hostile near, a creeper at low health, the crowd rule). */
+  danger: boolean;
+  /** One melee mob and the health for 3 more of its hits (fight it instead of running). */
+  canDuel: boolean;
+  /** The nearest threat (blocks, level). */
+  nearest: number;
+  health: number;
+  food: number;
+  hasFood: boolean;
+  /** A flight ended caught or cornered within FLOOR_FAILED_MS. */
+  failed: boolean;
+  /** Health at most FLOOR_CRITICAL with a melee mob within FLOOR_CRITICAL_RANGE, or at most FLOOR_CRITICAL_HIT and hit in the last 3 s. */
+  critical: boolean;
+  /** The elytra flee can go now (setting on, kit ready, a home, not tried within FLOOR_RETRY_MS). */
+  fly: boolean;
+  /** The seal-in can go now (setting on, enough blocks, a placer, not tried within FLOOR_RETRY_MS). */
+  seal: boolean;
+}
+
+/**
+ * The health rule, in order: no danger (or a duel that is worth it): fight on; clear of every mob by FLEE_EAT_CLEAR with
+ * food to eat: eat; else back off (the flight on foot, the reflex striking behind) unless running has failed (caught,
+ * cornered) or the health is critical next to a melee mob; then the elytra flee, then the seal-in, then defend in place.
+ */
+export function pveFloor(i: FloorInput): Floor {
+  if (!i.danger || i.canDuel) return 'fight';
+  if (i.nearest >= FLEE_EAT_CLEAR && i.hasFood && i.food < 20 && i.health < 20) return 'eat';
+  if (!i.failed && !i.critical) return 'backoff';
+  if (i.fly) return 'fly';
+  if (i.seal) return 'seal';
+  return 'defend';
+}
+
 export class PveController {
   readonly mobs: MobTracker;
   readonly combat: CombatController;
@@ -188,6 +276,17 @@ export class PveController {
   private readonly recentHits: { damage: number; at: number }[] = [];
   /** Far players from the locator bar (Track W): `!come` beyond the entity range. */
   readonly locator: PlayerLocator;
+  /** Track M1: strikes every hostile within reach under every activity (the `mobReflex` setting). */
+  readonly reflex: Reflex;
+  /** Track M1: hits taken by mob type (the attacker guess; `unknown` without one), for !pve and the counters. */
+  readonly taken: Record<string, number> = {};
+  /** Track M1: the floors taken (backoff, eat, fly, seal, defend), for the counters. */
+  readonly floors: Record<string, number> = {};
+  /**
+   * Track M1: the elytra flee (wired by chat/commands-pve.ts: `!fly home` as the owner's command, through the flight
+   * skill's own entry point). `ready` says whether it can go now (kit, a home); `go` dispatches it (true when sent).
+   */
+  flyHome: { ready(): boolean; go(): boolean } | undefined;
 
   constructor(deps: PveDeps) {
     this.d = deps;
@@ -224,6 +323,19 @@ export class PveController {
     this.follower = new FollowController({ loop, mover: this.mover, entities: () => world.entities, logger: this.log });
     this.pathReach = new PathReach({ nav: () => probeNavOf(this.mover), log: this.log }); // Track AO
     this.locator = new PlayerLocator(source); // Track W
+    this.reflex = new Reflex({
+      loop,
+      entities: () => world.entities,
+      mobs: this.mobs,
+      attack: (rid, o) => this.combat.attack(rid, o),
+      enabled: () => this.settings.get('mobReflex') && !deps.inactive() && this.processes.active?.name !== 'flight',
+      grid: () => targeting.gridOf(this.mover),
+      world,
+      // raised, or about to be (an archer's shot due, an arrow flying at us): a strike lowers it (reflex.ts SHIELD_DOWN_TICKS)
+      shieldUp: () => this.combat.shield.equipped() && (loop.command.sneak === true || this.combat.shield.threat(loop.state.pos) !== undefined),
+      log: this.log,
+      ...(deps.metrics ? { metrics: deps.metrics } : {}),
+    });
     this.ownManager = deps.processes === undefined;
     this.processes =
       deps.processes ??
@@ -235,6 +347,9 @@ export class PveController {
       });
     this.fleeProcess = this.processes.add(new FleeProcess(this));
     this.guardProcess = this.processes.add(new GuardProcess(this));
+    this.unsubs.push(loop.onBeforeStep(() => this.idleBlock())); // Track M1 round 2: the shield while idle
+    this.unsubs.push(loop.onBeforeStep(() => this.noteWitchThrows())); // Track M1 round 2: the witch's throw window
+    this.unsubs.push(loop.onBeforeStep(() => this.potionStep())); // Track M1 round 2: out from under her potion
     this.unsubs.push(
       this.mobs.onHit((g, damage, cause) => {
         if (cause === 'drowning') {
@@ -244,6 +359,10 @@ export class PveController {
           return;
         }
         if (damage > 0) {
+          // Track M1: hits taken by type (the owner's counters)
+          const k = g ? bareType(g.type) : 'unknown';
+          this.taken[k] = (this.taken[k] ?? 0) + 1;
+          this.d.metrics?.inc(`pve.taken.${k}`);
           // Track W: the duel rule
           this.lastHit = { damage, at: performance.now() };
           this.recentHits.push(this.lastHit);
@@ -260,6 +379,7 @@ export class PveController {
     this.processes.stop(this.guardProcess);
     if (this.ownManager) this.processes.dispose();
     for (const u of this.unsubs.splice(0)) u();
+    this.reflex.dispose();
     this.combat.dispose();
     this.follower.dispose();
     this.mobs.dispose();
@@ -332,6 +452,8 @@ export class PveController {
       follow: this.follower.status(),
       lastHitBy: this.mobs.lastHitBy ? { type: this.mobs.lastHitBy.type, why: this.mobs.lastHitBy.why, runtimeId: String(this.mobs.lastHitBy.runtimeId) } : null,
       stats: { ...this.stats, ...this.combat.totals },
+      reflex: { hits: this.reflex.totals.hits, landed: this.reflex.totals.landed, kills: this.reflex.totals.kills, potionSteps: this.potionSteps }, // Track M1 (potionSteps: round 2)
+      taken: { ...this.taken }, // Track M1
       ignored: this.ignored(), // Track AO
       probes: { ...this.pathReach.stats }, // Track AO
     };
@@ -533,6 +655,15 @@ export class PveController {
     return dest !== undefined && Math.hypot(dest.x + 0.5 - me.x, dest.z + 0.5 - me.z) <= 2 && Math.abs(dest.y - me.y) < 2;
   }
 
+  /** Track M1 round 2: a live threat within r other than `except` (the one just killed: it is listed for its death animation). */
+  otherThreatWithin(me: Vec3, r: number, except: bigint): boolean {
+    for (const e of this.d.world.entities.values()) {
+      if (e.runtimeId === except || !this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      if (dist(entityFeet(e), me) <= r) return true;
+    }
+    return false;
+  }
+
   /** Feet of every threat within r of `me`. */
   threatsNear(me: Vec3, r: number): Vec3[] {
     const out: Vec3[] = [];
@@ -542,6 +673,238 @@ export class PveController {
       if (dist(f, me) <= r) out.push(f);
     }
     return out;
+  }
+
+  /**
+   * Track M1: the distance that counts for "clear to eat": the nearest threat, and 0 while a ranged mob is within
+   * FLEE_SCAN (an archer or a witch hits from 8 to 15: a bite in its range is a free target; the bare gauntlet's
+   * skeletons and witch hit the bot through the eat floor's bites). Only for a bot with no blade: in the kit the bites
+   * are worth an arrow (the live kit's mixed 8 died once with no bite while a witch was near).
+   */
+  eatClearance(me: Vec3, nearest: number): number {
+    if (this.hasBlade()) return nearest;
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || !FLEE_RANGED.has(bareType(e.type))) continue;
+      if (dist(entityFeet(e), me) <= FLEE_SCAN) return 0;
+    }
+    return nearest;
+  }
+
+  private idleBlocking = false;
+  /**
+   * Track M1 round 2: the shield while nothing runs. Two of the live kit's mixed 8 deaths (round 2) were a bot at home at 1
+   * health (the witch's poison stops there), no process running (guard in place does not chase an archer at 10, a flight does
+   * not start at home for a threat farther than 6), shot by a skeleton for 10 s with the shield in the offhand and never
+   * raised (the fight raises it, nothing else did). So with the reflex on, nothing running, nothing walking or fighting: when
+   * an archer's shot is due or an arrow flies at the bot (ShieldController.threat), face it and raise the shield (sneak);
+   * lower it once that is over. The shield blocked 8 of 8 arrows from a skeleton at 8 (pve-rules `strike`).
+   */
+  private potionStepping: { ticks: number; id: bigint } | undefined;
+  private readonly potionsStepped = new Set<bigint>();
+  private potionPos = new Map<bigint, Vec3>();
+  /** Side steps from a witch's potion so far (the PvE status). */
+  potionSteps = 0;
+  /**
+   * Track M1 round 2: out from under a witch's potion. With the reflex killing the melee mobs where they stand, the bot stood
+   * still while she threw: her poison (it takes the health down to 1) landed in 9 of 13 live-kit mixed 8 runs against 6 of 15
+   * with the reflex off (round 2). A side step at each throw puts the potion 3.7 blocks off and halves it (measured). With
+   * `mobReflex` on, on the ground, no walk and no process but guard (a guard fight is overridden for the step), a splash or
+   * lingering potion within 12 (level) whose flight points at the bot gets a sprint at right angles to it, on safe cells only
+   * (dodge.ts potionSideStep), for POTION_STEP_TICKS at most; it stops at once when a walk or another process starts.
+   */
+  private potionStep(): void {
+    const loop = this.d.loop;
+    // a fight's own steering and guard's approach walk run earlier in the tick (the combat skill's and the navigator's
+    // handlers are older), so the step's command wins for its 12 ticks and they take over again after (the navigator
+    // re-plans from where the body is); a walk of any other process keeps the keys (a user's goto is never pushed off)
+    const keysFree = (): boolean => {
+      const p = this.processes.active;
+      return p ? p === this.guardProcess : !this.mover.nav.busy;
+    };
+    const on = this.settings.get('mobReflex') && !this.d.inactive() && loop.state.ready && this.health() > 0;
+    if (this.potionStepping) {
+      const s = this.potionStepping;
+      if (!on || !keysFree() || --s.ticks <= 0 || !this.d.world.entities.has(s.id)) {
+        this.potionStepping = undefined;
+        if (keysFree()) loop.release();
+      }
+      return;
+    }
+    const me = loop.state.pos;
+    // where each potion was last tick: its motion (the entity's own velocity is not kept up for a projectile)
+    const last = this.potionPos;
+    this.potionPos = new Map();
+    for (const e of this.d.world.entities.values()) {
+      const t = bareType(e.type);
+      if (t === 'splash_potion' || t === 'lingering_potion') this.potionPos.set(e.runtimeId, { x: e.pos.x, y: e.pos.y, z: e.pos.z });
+    }
+    if (!on || !loop.state.onGround || !keysFree()) return;
+    for (const e of this.d.world.entities.values()) {
+      const t = bareType(e.type);
+      if ((t !== 'splash_potion' && t !== 'lingering_potion') || this.potionsStepped.has(e.runtimeId)) continue;
+      const prev = last.get(e.runtimeId);
+      const vx = prev ? e.pos.x - prev.x : e.vel.x;
+      const vz = prev ? e.pos.z - prev.z : e.vel.z;
+      // level only: a thrown potion first flies up (in 3D it points at the bot only in its last ticks)
+      const dx = me.x - e.pos.x;
+      const dz = me.z - e.pos.z;
+      const d = Math.hypot(dx, dz);
+      const sp = Math.hypot(vx, vz);
+      if (d > 12 || d < 1 || sp < 0.05 || (vx * dx + vz * dz) / (sp * d) <= POTION_AIM_COS) continue;
+      const vel = { x: vx, y: 0, z: vz };
+      this.potionsStepped.add(e.runtimeId);
+      if (this.potionsStepped.size > 64) this.potionsStepped.clear();
+      const melee = this.nearestOfKind(me, 6, (tt) => tt !== 'witch' && !DUEL_ARCHERS.has(tt));
+      const step = potionSideStep({ me, potion: e.pos, vel, avoid: melee ? entityFeet(melee) : undefined, grid: targeting.gridOf(this.mover) });
+      if (!step) continue;
+      this.potionStepping = { ticks: POTION_STEP_TICKS, id: e.runtimeId };
+      this.potionSteps++;
+      this.d.metrics?.inc('pve.reflex.potionSteps');
+      if (this.idleBlocking) this.idleBlocking = false;
+      loop.setCommand({ yaw: step.yaw, pitch: 0, forward: 1, strafe: 0, sprint: true, jump: false, sneak: false });
+      this.log.info(`reflex: side step from a potion (${d.toFixed(1)} away)`);
+      return;
+    }
+  }
+
+  private idleBlock(): void {
+    if (this.potionStepping) return;
+    const loop = this.d.loop;
+    const idle = this.settings.get('mobReflex') && !this.d.inactive() && loop.state.ready && !this.processes.active && !this.mover.nav.busy && !this.combat.busy && this.health() > 0;
+    const t = idle && this.combat.shield.equipped() ? this.combat.shield.threat(loop.state.pos) : undefined;
+    if (t) {
+      const me = loop.state.pos;
+      loop.setCommand({ yaw: (Math.atan2(-(t.from.x - me.x), t.from.z - me.z) * 180) / Math.PI, pitch: 0, forward: 0, strafe: 0, sprint: false, jump: false, sneak: true });
+      if (!this.idleBlocking) this.log.info(`shield: raised while idle (${t.why === 'arrow' ? 'an arrow coming' : `${t.e ? bareType(t.e.type) : 'an archer'}'s shot due`})`);
+      this.idleBlocking = true;
+    } else if (this.idleBlocking) {
+      this.idleBlocking = false;
+      loop.setCommand({ sneak: false });
+    }
+  }
+
+  /** Track M1: a sword or an axe in the hotbar. */
+  hasBlade(): boolean {
+    return this.d.world.inventory.slots.slice(0, 9).some((it) => !!it && it.count > 0 && bladeScore(it) > 0);
+  }
+
+  /**
+   * Track M1: the witch goes first (guard's rank, targeting.ts firstTarget). Measured on BDS (ADR 0079): her harming potion is
+   * 6 whatever the armour, her poison 1 every 25 ticks for 45 s, a throw every 61 ticks from 8 blocks (none from 12, held in
+   * place), and the netherite sword kills her in 3 hits, 1.7 s from 5 blocks (sprint hits the same, critical hits 2.1 s). So
+   * with a blade, at WITCH_ENGAGE_HEALTH or more (one potion on the way still leaves health), within WITCH_FIRST_RANGE, in
+   * sight, and the way to her clear of other melee mobs (none within WITCH_WAY_CLEAR of the line beyond the bot's own reach).
+   */
+  firstTarget(e: EntityInfo, me: Vec3): boolean {
+    if (bareType(e.type) !== 'witch' || this.mobs.get(e.runtimeId)?.dead || !this.hasBlade()) return false;
+    const f = entityFeet(e);
+    const d = dist(f, me);
+    if (d > WITCH_FIRST_RANGE) return false;
+    // Within WITCH_CLOSE (her throw range) at any health: a run does not get out of her range before her next throw (she
+    // follows; three round-2 mixed-8 deaths ran from her at 6 to 7 blocks and 3 to 7 health, her one hit from dead, and her
+    // harming came from 9 to 11). Farther, at low health, only just after a throw: she cannot throw again for about 3 s
+    if (d > WITCH_CLOSE && this.health() < WITCH_ENGAGE_HEALTH && !this.witchJustThrew(e.runtimeId)) return false;
+    const grid = targeting.gridOf(this.mover);
+    if (grid && !targeting.lineOfSight(grid, { x: me.x, y: me.y + 1.62, z: me.z }, e)) return false;
+    const len = Math.hypot(f.x - me.x, f.z - me.z);
+    if (len < 1e-3) return true;
+    const ux = (f.x - me.x) / len;
+    const uz = (f.z - me.z) / len;
+    for (const o of this.d.world.entities.values()) {
+      if (o.runtimeId === e.runtimeId || !this.isThreat(o) || !targeting.isMelee(o, this.mobs)) continue;
+      const g = entityFeet(o);
+      const rx = g.x - me.x;
+      const rz = g.z - me.z;
+      const along = rx * ux + rz * uz;
+      if (along < 0 || along > len || Math.hypot(rx, rz) <= WITCH_WAY_OWN) continue;
+      if (Math.abs(rx * uz - rz * ux) <= WITCH_WAY_CLEAR) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Track M1 round 2: the archers and witches within DODGE_RANGE with a line on the bot (skills/combat/dodge.ts), when the
+   * dodge is for this bot now: `mobDodge` on, no blade, no melee mob within DODGE_MELEE. Empty otherwise.
+   */
+  dodgeShooters(me: Vec3): DodgeShooter[] {
+    if (!this.settings.get('mobDodge') || this.hasBlade() || this.meleeWithin(me, DODGE_MELEE)) return [];
+    const grid = targeting.gridOf(this.mover);
+    const eye = { x: me.x, y: me.y + 1.62, z: me.z };
+    const out: DodgeShooter[] = [];
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      const t = bareType(e.type);
+      const kind = DUEL_ARCHERS.has(t) ? 'archer' : t === 'witch' ? 'witch' : undefined;
+      if (!kind) continue;
+      const f = entityFeet(e);
+      if (dist(f, me) > DODGE_RANGE) continue;
+      if (grid && !targeting.lineOfSight(grid, eye, e)) continue;
+      out.push({ pos: f, kind });
+    }
+    return out;
+  }
+
+  /** Track M1 round 2: when each witch last threw (performance.now ms), from the splash potions seen next to her. */
+  private readonly witchThrow = new Map<bigint, number>();
+  private readonly potionsSeen = new Set<bigint>();
+  private noteWitchThrows(): void {
+    let potions = 0;
+    for (const p of this.d.world.entities.values()) {
+      const t = bareType(p.type);
+      if (t !== 'splash_potion' && t !== 'lingering_potion') continue;
+      potions++;
+      if (this.potionsSeen.has(p.runtimeId)) continue;
+      this.potionsSeen.add(p.runtimeId);
+      // a new potion: the witch within WITCH_THROW_NEAR of it threw it
+      for (const w of this.d.world.entities.values()) {
+        if (bareType(w.type) !== 'witch') continue;
+        const f = entityFeet(w);
+        if (Math.hypot(f.x - p.pos.x, f.y + 1.5 - p.pos.y, f.z - p.pos.z) <= WITCH_THROW_NEAR) this.witchThrow.set(w.runtimeId, performance.now());
+      }
+    }
+    if (potions === 0 && this.potionsSeen.size > 0) this.potionsSeen.clear();
+    if (this.witchThrow.size > 16) this.witchThrow.clear();
+  }
+
+  /** Track M1 round 2: this witch threw within WITCH_WINDOW_MS (her next throw is 61 ticks after the last). */
+  witchJustThrew(id: bigint): boolean {
+    const at = this.witchThrow.get(id);
+    return at !== undefined && performance.now() - at <= WITCH_WINDOW_MS;
+  }
+
+  /** Track M1 round 2: an arrow or a splash potion in the air towards the bot (within 16, coming at it). */
+  shotInFlight(me: Vec3): { any: boolean; ids: bigint[] } {
+    const ids: bigint[] = [];
+    let any = false;
+    for (const e of this.d.world.entities.values()) {
+      const t = bareType(e.type);
+      if (t !== 'arrow' && t !== 'splash_potion' && t !== 'lingering_potion' && t !== 'thrown_trident') continue;
+      const dx = me.x - e.pos.x;
+      const dy = me.y + 1 - e.pos.y;
+      const dz = me.z - e.pos.z;
+      const d = Math.hypot(dx, dy, dz);
+      if (d > 16) continue;
+      ids.push(e.runtimeId);
+      const v = e.vel;
+      const sp = Math.hypot(v.x, v.y, v.z);
+      if (sp > 0.2 && (v.x * dx + v.y * dy + v.z * dz) / (sp * Math.max(d, 1e-3)) > 0.5) any = true;
+    }
+    return { any, ids };
+  }
+
+  /** Track M1: the nearest threat within r whose bare type passes `kind`. */
+  nearestOfKind(me: Vec3, r: number, kind: (type: string) => boolean): EntityInfo | undefined {
+    let best: EntityInfo | undefined;
+    let bd = r;
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || !kind(bareType(e.type))) continue;
+      const d = dist(entityFeet(e), me);
+      if (d <= bd) {
+        bd = d;
+        best = e;
+      }
+    }
+    return best;
   }
 
   /** A live creeper within FLEE_CREEPER_RANGE. */
@@ -567,11 +930,29 @@ export class PveController {
       if (cr) out = { why: 'creeper', threat: cr };
     }
     out ??= ((t) => (t ? { why: 'low' as const, threat: t } : undefined))(targeting.crowdThreat(this, me)); // Track AH: crowd rule (3+ melee within 4, health < 12), like a creeper
+    // Track M1 round 2: a witch the bot fights first (firstTarget) is not run from at low health (she follows and throws)
+    const witchFirst = !out && this.hasBlade() ? this.nearestOfKind(me, WITCH_FIRST_RANGE, (t) => t === 'witch') : undefined;
+    if (witchFirst && this.firstTarget(witchFirst, me)) return undefined;
     if (!out && this.low() && !this.canDuel(me)) {
       const t = this.nearestHostile(me, FLEE_SCAN);
       if (t) out = { why: 'low', threat: t };
     }
-    if (out && this.atFleeDest(me) && dist(entityFeet(out.threat), me) > 6) return undefined;
+    // Track M1: a witch's harming potion is 6 at once on top of its poison: below WITCH_FLEE_HEALTH a bot with no blade
+    // runs from a witch within FLEE_SCAN (the bare gauntlet's witch killed the bot from 8 health through one flight; with
+    // a sword the fight is better: the live kit's mixed 8 died once running from it through the crowd, ADR 0079)
+    if (!out && h < WITCH_FLEE_HEALTH && !this.hasBlade()) {
+      const w = this.nearestOfKind(me, FLEE_SCAN, (t) => t === 'witch');
+      if (w) out = { why: 'low', threat: w };
+    }
+    if (out && this.atFleeDest(me) && dist(entityFeet(out.threat), me) > 6) out = undefined;
+    // Track M1 round 2: no blade and an archer or a witch with a line on the bot: the dodge (also at home: they shoot there too)
+    if (!out) {
+      const s = this.dodgeShooters(me);
+      if (s.length) {
+        const n = this.nearestOfKind(me, DODGE_RANGE, (t) => DUEL_ARCHERS.has(t) || t === 'witch');
+        if (n) out = { why: 'low', threat: n };
+      }
+    }
     return out;
   }
 
@@ -584,21 +965,30 @@ export class PveController {
   canDuel(me: Vec3): boolean {
     if (!this.guardOn) return false; // nobody fights it
     const now = performance.now();
-    // losing: 4 or more health in the last 6 s (the fight is not going our way, or not happening)
     let lost = 0;
     for (const h of this.recentHits) if (now - h.at < 6000) lost += h.damage;
-    if (lost >= 4) return false;
     let n = 0;
     let ranged = false;
+    let archers = 0;
     for (const e of this.d.world.entities.values()) {
       if (!this.isThreat(e) || dist(entityFeet(e), me) > FLEE_SCAN) continue;
       n++;
-      if (FLEE_RANGED.has(bareType(e.type)) || bareType(e.type) === 'creeper') ranged = true;
+      const t = bareType(e.type);
+      if (DUEL_ARCHERS.has(t)) archers++;
+      else if (FLEE_RANGED.has(t) || t === 'creeper') ranged = true;
       if ((this.ignore.get(e.runtimeId) ?? 0) > now) return false; // guard will not pick it
     }
-    if (n !== 1 || ranged) return false;
+    // Track M1 round 2: a lone archer is closed in on only with a blade (a fist needs about 20 hits; bare, every such duel
+    // in the gauntlet died: the dodge or the flight instead)
+    const archer = archers > 0 && archers === n && this.hasBlade();
+    if (archers > 0 && !archer) ranged = true;
+    if (ranged || n === 0 || n > (archer ? DUEL_ARCHERS_MAX : 1)) return false;
+    // losing: 4 or more health in the last 6 s (the fight is not going our way, or not happening). Track M1: archers
+    // alone (up to two) are closed in on to 8 in 6 s (an arrow is 3 to 5; running in the open keeps the bot in their
+    // range: the bare gauntlet's lone skeleton killed the bot through two flights, ADR 0079)
+    if (lost >= (archer ? DUEL_ARCHER_LOST : 4)) return false;
     const hit = this.lastHit && performance.now() - this.lastHit.at < 60_000 ? this.lastHit.damage : 3;
-    return this.health() > 3 * Math.max(hit, 1);
+    return this.health() > (archer ? 2 : 3) * Math.max(hit, 1);
   }
 
   nearestOfType(type: string): EntityInfo | undefined {
@@ -616,6 +1006,107 @@ export class PveController {
       }
     }
     return best;
+  }
+
+  /** Track M1: count a floor taken (metrics `pve.floor.<name>`). */
+  floorUsed(f: Floor): void {
+    this.floors[f] = (this.floors[f] ?? 0) + 1;
+    this.d.metrics?.inc(`pve.floor.${f}`);
+  }
+
+  /** Track M1: a melee threat within `r` (feet, 3D). */
+  /**
+   * Track M1: the health at most FLOOR_CRITICAL with a melee mob within FLOOR_CRITICAL_RANGE, or at most FLOOR_CRITICAL_HIT
+   * with a hit taken in the last 3 s (an archer that keeps hitting a body that runs in the open): running is not working.
+   */
+  critical(me: Vec3): boolean {
+    const h = this.health();
+    const now = performance.now();
+    const hit = this.recentHits.some((x) => now - x.at < 3000);
+    // Track M1 round 2: under SEAL_CROWD shooters or more the shell has to go up while there is health to build it (9
+    // blocks take about 2 s; round 2's seal-5 cell sealed at 7, 3 and 2 health and two of them died building it). Only
+    // where the shell can go up (sealIn on), so the defaults (run) do not change.
+    if (h <= FLOOR_CRITICAL_CROWD && hit && this.shootersWithin(me, 16) >= SEAL_CROWD && this.canSeal()) return true;
+    if (h > FLOOR_CRITICAL_HIT) return false;
+    if (hit) return true; // still being hit at 8: two arrows from death, a dig-in takes about 3 s
+    return h <= FLOOR_CRITICAL && this.meleeWithin(me, FLOOR_CRITICAL_RANGE);
+  }
+
+  /** Track M1 round 2: archers and witches within r (feet) with a line on the bot. */
+  shootersWithin(me: Vec3, r: number): number {
+    const grid = targeting.gridOf(this.mover);
+    const eye = { x: me.x, y: me.y + 1.62, z: me.z };
+    let n = 0;
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      const t = bareType(e.type);
+      if (!DUEL_ARCHERS.has(t) && t !== 'witch') continue;
+      if (dist(entityFeet(e), me) > r || (grid && !targeting.lineOfSight(grid, eye, e))) continue;
+      n++;
+    }
+    return n;
+  }
+
+  meleeWithin(me: Vec3, r: number): boolean {
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || !targeting.isMelee(e, this.mobs)) continue;
+      if (dist(entityFeet(e), me) <= r) return true;
+    }
+    return false;
+  }
+
+  /** Track M1: something the eat skill would eat now (skills/survival/eat.ts chooseFood). */
+  hasFood(): boolean {
+    return chooseFood(this.d.world.inventory.slots.slice(0, 36), { food: Math.min(this.food(), 19), health: this.health() }) !== undefined;
+  }
+
+  /** Track M1: the seal-in's ports (undefined without a placer). */
+  sealDeps(): SealDeps | undefined {
+    const m = this.mover;
+    if (!m.place || !m.dig) return undefined;
+    const grid = targeting.gridOf(m);
+    return {
+      place: (p, o) => m.place!(p, o),
+      dig: (p) => m.dig!(p),
+      solid: (x, y, z) => {
+        const c = grid?.cls(x, y, z);
+        return c === undefined ? undefined : c.boxes.length > 0 && c.top >= 1;
+      },
+      position: () => this.position(),
+      threats: () => this.threatsNear(this.position(), 16),
+      slots: () => this.d.world.inventory.slots,
+      block: (x, y, z) => this.d.world.blockAt?.({ x, y, z })?.name,
+      settle: (n) => {
+        const loop = this.d.loop;
+        return loop.waitTicks ? loop.waitTicks(n) : new Promise((res) => setTimeout(res, n * 50));
+      },
+      centre: async (cell, o) => {
+        // onto the cell's centre (a body on the cell's edge stands on its neighbour too and never falls in): walking while
+        // farther than 0.5, sneaking the rest (no overshoot); into a dug hole (fall) never sneaking (a sneaking body stops at
+        // the edge). 30 ticks at most (sneaking covers about 0.04 a tick).
+        const loop = this.d.loop;
+        for (let i = 0; i < 30; i++) {
+          const p = this.position();
+          const ax = cell.x + 0.5 - p.x;
+          const az = cell.z + 0.5 - p.z;
+          const d = Math.hypot(ax, az);
+          if (d < 0.15 || (o?.fall && p.y < cell.y + 0.5)) break;
+          loop.setCommand({ yaw: (Math.atan2(-ax, az) * 180) / Math.PI, pitch: 0, forward: 1, strafe: 0, sprint: false, jump: false, sneak: !o?.fall && d < 0.5 });
+          await (loop.waitTicks ? loop.waitTicks(1) : new Promise((res) => setTimeout(res, 50)));
+        }
+        loop.setCommand({ forward: 0, strafe: 0, sprint: false, jump: false, sneak: false });
+        const p = this.position();
+        return Math.hypot(cell.x + 0.5 - p.x, cell.z + 0.5 - p.z) < 0.25;
+      },
+      log: this.log,
+    };
+  }
+
+  /** Track M1: blocks enough for the shell where the bot stands, or ground to dig in (skills/survival/seal.ts). */
+  canSeal(): boolean {
+    if (!this.settings.get('sealIn')) return false;
+    const d = this.sealDeps();
+    return d !== undefined && canSealHere(d);
   }
 
   countFight(r: FightResult): void {
@@ -649,7 +1140,7 @@ class FleeProcess extends BaseProcess {
   readonly name = 'flee';
   readonly kind = 'auto' as const;
   protected override persistent = true;
-  private ep: { why: 'low' | 'creeper'; from: string; start: Vec3; startAt: number; phase: 'away' | 'home' | 'far'; dest: { to: Vec3; kind: string } | undefined; safeSince: number | undefined; planAt: number; goalKey: string; bites: number; stallUntil: number; cornered: boolean; planNearest: number; panics: number; caughtSince: number | undefined } | undefined;
+  private ep: { why: 'low' | 'creeper'; from: string; start: Vec3; startAt: number; phase: 'away' | 'home' | 'far' | 'seal' | 'sealed' | 'dodge'; dest: { to: Vec3; kind: string } | undefined; safeSince: number | undefined; planAt: number; goalKey: string; bites: number; stallUntil: number; cornered: boolean; planNearest: number; panics: number; caughtSince: number | undefined; sealedAt?: number; dugIn?: boolean; seal?: { placed: number; open: number; reason?: string; tries: number; openCells?: Vec3[] }; dodge?: { dir: 1 | -1; sinceFlip: number; seen: Set<bigint>; lastShot: number; t: number; clearSince: number | undefined } } | undefined;
   private plan: { why: 'low' | 'creeper'; threat: EntityInfo } | undefined;
   private cooldownUntil = 0;
   /** The last flight ended cornered (no way away): the cooldown then holds even for a hard trigger. */
@@ -663,6 +1154,12 @@ class FleeProcess extends BaseProcess {
   /** Ticks left of a hand-steered run (the planner could not start). */
   private panic = 0;
   private recoverUntil = 0;
+  /** Track M1: the floors: when a flight last ended caught / cornered, the last elytra flee and seal-in, the floor asked for. */
+  private failedAt = -Infinity;
+  private flyAt = -Infinity;
+  private sealAt = -Infinity;
+  private mode: 'fly' | 'seal' | undefined;
+  private sealing: Promise<void> | undefined;
   private readonly c: PveController;
 
   constructor(c: PveController) {
@@ -672,6 +1169,41 @@ class FleeProcess extends BaseProcess {
 
   get priority(): number {
     return PRIORITY.flee;
+  }
+
+  /** Track M1: the floor now (pveFloor with what the controller knows). */
+  floorFor(me: Vec3, danger: boolean): Floor {
+    const c = this.c;
+    const now = performance.now();
+    const threats = c.threatsNear(me, FLEE_SCAN + 8);
+    const nearest = threats.reduce((m, f) => Math.min(m, Math.hypot(f.x - me.x, f.z - me.z)), Infinity);
+    const failed = now - this.failedAt < FLOOR_FAILED_MS;
+    const critical = c.critical(me);
+    const late = failed || critical; // fly / seal are looked at only then (an inventory scan)
+    const clear = c.eatClearance(me, nearest);
+    return pveFloor({
+      danger,
+      canDuel: c.canDuel(me),
+      nearest: clear,
+      health: c.health(),
+      food: c.food(),
+      hasFood: clear >= FLEE_EAT_CLEAR ? c.hasFood() : false,
+      failed,
+      critical,
+      fly: late && c.settings.get('fleeFly') && now - this.flyAt > FLOOR_RETRY_MS && (c.flyHome?.ready() ?? false),
+      seal: late && now - this.sealAt > FLOOR_RETRY_MS && c.canSeal(),
+    });
+  }
+
+  /** Track M1: the elytra flee: `!fly home` through the flight skill's own command (it takes over at flee + 1). */
+  private flyNow(why: string): void {
+    const c = this.c;
+    this.flyAt = performance.now();
+    c.floorUsed('fly');
+    const sent = c.flyHome?.go() ?? false;
+    c.log.warn(`floor: elytra flee home (${why}, health ${c.health().toFixed(1)})${sent ? '' : ': could not send !fly home'}`);
+    for (const k of c.processes.find('kill')) c.processes.stop(k, 'stopped');
+    c.guardProcess.cancelEpisode();
   }
 
   override wants(): boolean {
@@ -686,6 +1218,16 @@ class FleeProcess extends BaseProcess {
     // with the threat farther off, and after a cornered end, the cooldown holds and guard defends in place;
     // recovery flights always wait it out.
     let r = c.fleeReason(me);
+    // Track M1: running has failed (caught, cornered) or the health is critical next to a melee mob: the elytra flee or the
+    // seal-in when they can go (whatever the cooldown says), else guard defends in place as before
+    if (r && (performance.now() - this.failedAt < FLOOR_FAILED_MS || (c.critical(me)))) {
+      const f = this.floorFor(me, true);
+      if (f === 'fly' || f === 'seal') {
+        this.plan = r;
+        this.mode = f;
+        return true;
+      }
+    }
     const urgent = r !== undefined && !this.cornered && !c.atFleeDest(me) && dist(entityFeet(r.threat), me) <= FLEE_URGENT;
     if (performance.now() < this.cooldownUntil && !urgent) return false;
     if (!r && this.recovering()) {
@@ -720,9 +1262,17 @@ class FleeProcess extends BaseProcess {
       const plan = this.plan;
       if (!plan) return;
       const me = c.position();
-      this.ep = { why: plan.why, from: plan.threat.type, start: { ...me }, startAt: performance.now(), phase: 'away', dest: c.fleeTarget(me), safeSince: undefined, planAt: 0, goalKey: '', bites: 0, stallUntil: 0, cornered: false, planNearest: Infinity, panics: 0, caughtSince: undefined };
+      const mode = this.mode;
+      this.mode = undefined;
+      if (mode === 'fly') {
+        this.flyNow(`${performance.now() - this.failedAt < FLOOR_FAILED_MS ? 'running failed' : 'health critical'} with ${bareType(plan.threat.type)} at ${dist(entityFeet(plan.threat), me).toFixed(1)}`);
+        this.yieldControl();
+        return;
+      }
+      this.ep = { why: plan.why, from: plan.threat.type, start: { ...me }, startAt: performance.now(), phase: mode === 'seal' ? 'seal' : 'away', dest: c.fleeTarget(me), safeSince: undefined, planAt: 0, goalKey: '', bites: 0, stallUntil: 0, cornered: false, planNearest: Infinity, panics: 0, caughtSince: undefined };
       c.stats.flees++;
       c.d.metrics?.inc('pve.flees');
+      c.floorUsed(mode === 'seal' ? 'seal' : 'backoff'); // Track M1
       events.emit('combat.flee', { why: plan.why, from: bareType(plan.threat.type), health: Math.round(c.health() * 10) / 10 }); // decision 0059
       this.cornered = false;
       this.recoverTo = Math.min(20, c.fleeHealth + FLEE_RECOVER);
@@ -735,7 +1285,8 @@ class FleeProcess extends BaseProcess {
       c.guardProcess.cancelEpisode();
       this.holdAutoEat();
       // a threat in reach: sprint away by hand at once (planning takes a moment; a zombie hits every second)
-      if (c.threatsNear(me, 4).length > 0) this.panic = 10;
+      if (mode !== 'seal' && c.threatsNear(me, 4).length > 0) this.panic = 10;
+      if (mode === 'seal') c.log.warn(`floor: seal in (health ${c.health().toFixed(1)}, ${bareType(plan.threat.type)} at ${dist(entityFeet(plan.threat), me).toFixed(1)})`);
     } else if (resumed) {
       c.log.info(`flee: resuming (${this.ep.phase})`);
     }
@@ -745,6 +1296,12 @@ class FleeProcess extends BaseProcess {
   }
 
   tick(): void {
+    const dep = this.ep;
+    if (dep?.phase === 'dodge' && dep.dodge && this.controlled) {
+      this.dodgeTick(dep);
+      if (++this.n % 5 === 0) this.step(this.token);
+      return;
+    }
     if (this.panic > 0) {
       // the planner could not start (knocked into the air, no standable node): run straight away by hand
       const c = this.c;
@@ -771,6 +1328,45 @@ class FleeProcess extends BaseProcess {
     if (++this.n % 5 === 0) this.step(this.token);
   }
 
+  /** Track M1 round 2: one tick of the dodge (skills/combat/dodge.ts): steer across the nearest shooter's line; eat between shots. */
+  private dodgeTick(ep: NonNullable<FleeProcess['ep']>): void {
+    const c = this.c;
+    const dz = ep.dodge!;
+    dz.t++;
+    dz.sinceFlip++;
+    const me = c.position();
+    const shot = c.shotInFlight(me);
+    for (const id of shot.ids) {
+      if (!dz.seen.has(id)) {
+        dz.seen.add(id);
+        dz.lastShot = dz.t;
+      }
+    }
+    if (dz.seen.size > 64) dz.seen = new Set(shot.ids);
+    const step = dodgeStep({ me, shooters: c.dodgeShooters(me), dir: dz.dir, inFlight: shot.any, sinceFlip: dz.sinceFlip, grid: targeting.gridOf(c.mover) });
+    if (!step) {
+      // no safe way across or out (or nobody in sight any more): the ordinary flight plans from here
+      c.d.loop.release();
+      ep.dodge = undefined;
+      ep.phase = 'away';
+      ep.goalKey = '';
+      return;
+    }
+    if (step.flipped) dz.sinceFlip = 0;
+    dz.dir = step.dir;
+    c.d.loop.setCommand({ yaw: step.yaw, pitch: 0, forward: 1, strafe: 0, sprint: true, jump: false, sneak: false });
+    // eat right after a shot (the next one is 40 ticks or more away), with no shot in the air, the nearest shooter 8 or more off
+    const kit = c.kit?.();
+    if (kit && !(kit as { busy?: boolean }).busy && !shot.any && dz.t - dz.lastShot <= 20 && step.d >= 8 && (c.food() < 18 || c.health() < 14) && c.food() < 20 && c.hasFood()) {
+      void kit.eat().then((r) => {
+        if (r.ok && this.ep === ep) {
+          ep.bites++;
+          c.floorUsed('eat');
+        }
+      });
+    }
+  }
+
   private end(why: string, cooldownMs: number): void {
     const ep = this.ep;
     if (!ep) return;
@@ -778,7 +1374,7 @@ class FleeProcess extends BaseProcess {
     this.token++;
     if (this.walking && this.c.mover.nav.busy) this.c.mover.cancel();
     this.walking = false;
-    if (this.panic > 0) {
+    if (this.panic > 0 || ep.phase === 'dodge') {
       this.panic = 0;
       this.c.d.loop.release();
     }
@@ -795,8 +1391,66 @@ class FleeProcess extends BaseProcess {
     if (!ep || t !== this.token || !this.controlled) return;
     const now = performance.now();
     const me = c.position();
+    if (ep.phase === 'seal' || ep.phase === 'sealed') {
+      this.sealStep(ep, t, now, me);
+      return;
+    }
+    // Track M1 round 2: the dodge (no blade, only shooters near): across their line by hand
+    const shooters = c.dodgeShooters(me);
+    if (ep.phase === 'dodge') {
+      if (now - ep.startAt > FLEE_MAX_MS) {
+        this.end('gave up (60 s)', 2000);
+        return;
+      }
+      if (shooters.length > 0) {
+        if (ep.dodge) ep.dodge.clearSince = undefined;
+        return;
+      }
+      const melee = c.meleeWithin(me, DODGE_MELEE);
+      if (ep.dodge && !melee) {
+        ep.dodge.clearSince ??= now;
+        if (now - ep.dodge.clearSince < FLEE_SAFE_MS) return;
+      }
+      c.log.info(`flee: dodge over (${melee ? 'a melee mob near' : 'no shooter in sight'})`);
+      c.d.loop.release();
+      ep.dodge = undefined;
+      ep.phase = 'away';
+      ep.goalKey = '';
+      if (!melee && !c.fleeReason(me)) {
+        this.end('out of the line of fire', 2000);
+        return;
+      }
+    } else if (shooters.length > 0 && ep.phase !== 'home') {
+      if (this.walking && c.mover.nav.busy) c.mover.cancel();
+      this.walking = false;
+      this.panic = 0;
+      ep.phase = 'dodge';
+      ep.dodge = { dir: 1, sinceFlip: 0, seen: new Set(), lastShot: -100, t: 0, clearSince: undefined };
+      c.log.warn(`flee: dodge (${shooters.length} shooter(s) in sight, nearest ${Math.min(...shooters.map((s) => dist(s.pos, me))).toFixed(1)}, health ${c.health().toFixed(1)}): across the line of fire`);
+      return;
+    }
     const threats = c.threatsNear(me, FLEE_SCAN + 8);
     const nearest = threats.reduce((m, f) => Math.min(m, Math.hypot(f.x - me.x, f.z - me.z)), Infinity);
+    // Track M1: running is not working (the health critical next to a melee mob): the next floor when it can go
+    if (c.critical(me)) {
+      const f = this.floorFor(me, true);
+      if (f === 'fly') {
+        this.end('health critical next to a melee mob: the elytra flee', 0);
+        this.flyNow('health critical while running');
+        return;
+      }
+      if (f === 'seal') {
+        c.log.warn(`floor: seal in (health ${c.health().toFixed(1)} while running, a melee mob within ${FLOOR_CRITICAL_RANGE})`);
+        c.floorUsed('seal');
+        if (this.walking && c.mover.nav.busy) c.mover.cancel();
+        this.walking = false;
+        this.panic = 0;
+        c.d.loop.release();
+        ep.phase = 'seal';
+        this.sealStep(ep, t, now, me);
+        return;
+      }
+    }
     // still in danger?
     const reason = c.fleeReason(me);
     this.recoverUntil = Math.max(this.recoverUntil, now + 1000); // a flight in progress keeps the recovery open
@@ -816,6 +1470,7 @@ class FleeProcess extends BaseProcess {
     }
     if (fleeCaught(ep, now, nearest, c.mobs.lastHitBy?.at)) {
       this.cornered = true;
+      this.failedAt = now; // Track M1: the next floor
       this.end(`caught (a threat within ${FLEE_CAUGHT_RANGE} hitting us for ${FLEE_CAUGHT_MS / 1000} s): defending`, 3000);
       return;
     }
@@ -823,7 +1478,7 @@ class FleeProcess extends BaseProcess {
       this.end('gave up (60 s)', 2000);
       return;
     }
-    this.maybeEat(nearest);
+    this.maybeEat(c.eatClearance(me, nearest));
     // choose the leg
     if (!dest && c.atFleeDest(me) && ep.phase === 'home') {
       this.end(`arrived (${nearest === Infinity ? 'no threat near' : `nearest threat ${nearest.toFixed(1)}`})`, 10_000);
@@ -877,6 +1532,7 @@ class FleeProcess extends BaseProcess {
         if (e.phase !== 'home' && c.threatsNear(c.position(), 8).length > 0) {
           if (++e.panics > 3 && c.threatsNear(c.position(), 4).length > 0) {
             this.cornered = true;
+            this.failedAt = performance.now(); // Track M1: the next floor
             this.end('cornered (no way away, a threat within 4): defending', 3000);
             return;
           }
@@ -890,6 +1546,85 @@ class FleeProcess extends BaseProcess {
     });
   }
 
+  /**
+   * Track M1: the seal-in. `seal`: place the shell (skills/survival/seal.ts), standing still; `sealed`: eat to full and
+   * wait until the health is back to SEAL_LEAVE_HEALTH (at most 5 min), then open the side away from the mobs and end.
+   */
+  private sealStep(ep: NonNullable<FleeProcess['ep']>, t: number, now: number, me: Vec3): void {
+    const c = this.c;
+    if (ep.phase === 'seal') {
+      if (this.sealing) return;
+      const deps = c.sealDeps();
+      if (!deps) {
+        this.end('seal: no placer', 3000);
+        return;
+      }
+      this.sealAt = now;
+      // stand still where the shell goes: no walk, no fight moving the body (a debug run on bds-gaunt dug the first two
+      // cells of a dig-in and was 3 blocks off it for the third: guard's fight was still walking)
+      if (c.mover.nav.busy) c.mover.cancel();
+      this.walking = false;
+      this.panic = 0;
+      c.combat.cancel();
+      c.d.loop.setCommand({ forward: 0, strafe: 0, sprint: false, jump: false, sneak: false });
+      const at = { ...me };
+      const off = (): boolean => Math.hypot(c.position().x - at.x, c.position().z - at.z) > 1.5; // knocked off the spot (an arrow moves it about half a block)
+      this.sealing = seal(deps, () => t !== this.token || this.ep !== ep || off()).then(
+        (r) => {
+          this.sealing = undefined;
+          if (t !== this.token || this.ep !== ep) return;
+          const tries = (ep.seal?.tries ?? 0) + 1;
+          ep.seal = { placed: (ep.seal?.placed ?? 0) + r.placed.length, open: r.open, reason: r.reason, tries, openCells: r.openCells };
+          // Track M1 round 2: a surface shell left open (the body knocked off its cell, a cell that would not take a block)
+          // is built again from where the body is, once; an open shell is no shelter from arrows
+          if (!r.ok && !r.dugIn && tries < SEAL_TRIES) {
+            c.log.warn(`floor: the shell is open (${r.open} cell(s)${r.reason ? `, ${r.reason}` : ''}), building it again`);
+            return;
+          }
+          ep.phase = 'sealed';
+          ep.sealedAt = performance.now();
+          ep.dugIn = r.dugIn;
+          c.log.warn(`floor: sealed in (${r.placed.length} placed${r.open ? `, ${r.open} cell(s) open` : ''}${r.reason ? `, ${r.reason}` : ''}), health ${c.health().toFixed(1)}`);
+        },
+        (e: unknown) => {
+          this.sealing = undefined;
+          c.log.warn(`floor: seal failed: ${e instanceof Error ? e.message : String(e)}`);
+          if (this.ep === ep) this.end('seal failed', 3000);
+        },
+      );
+      return;
+    }
+    // sealed: eat (whatever is near: the shell is between), stay still
+    const kit = c.kit?.();
+    if (kit && c.food() < 20 && !(kit as { busy?: boolean }).busy) {
+      void kit.eat().then((r) => {
+        if (r.ok && this.ep === ep) {
+          ep.bites++;
+          c.floorUsed('eat');
+        }
+      });
+    }
+    const at = ep.sealedAt ?? now;
+    // Track M1 round 2: out at full health once no mob is within 16 or it is day (the archers burn), else at SEAL_MAX_MS
+    const tod = c.timeOfDay();
+    const day = tod !== undefined && (tod < 12_500 || tod > 23_500);
+    const clear = c.threatsNear(me, 16).length === 0;
+    if (now - at < SEAL_MAX_MS && (c.health() < SEAL_LEAVE_HEALTH || !(clear || day))) return;
+    if (this.sealing) return;
+    // a dug-in shell opens through its roof (the cell over the head); the walk out is the next goto's
+    const side = ep.dugIn ? [{ x: Math.floor(me.x), y: Math.floor(me.y + 1e-3) + 2, z: Math.floor(me.z) }] : openSide(me, c.threatsNear(me, 16));
+    const deps = c.sealDeps();
+    c.log.info(`floor: opening the shell (health ${c.health().toFixed(1)}, after ${((now - at) / 1000).toFixed(0)} s)`);
+    this.sealing = (async () => {
+      for (const p of side) {
+        if (deps?.solid(p.x, p.y, p.z) === true) await deps.dig(p).catch(() => undefined);
+      }
+    })().finally(() => {
+      this.sealing = undefined;
+      if (this.ep === ep) this.end('unsealed', 2000);
+    });
+  }
+
   /** Eat below health 10 when every hostile is at least 8 blocks away (the kit's eat; one at a time). */
   private maybeEat(nearest: number): void {
     const c = this.c;
@@ -900,7 +1635,10 @@ class FleeProcess extends BaseProcess {
     if (!kit || !ep || !hungry || nearest < FLEE_EAT_CLEAR || c.food() >= 20) return;
     if ((kit as { busy?: boolean }).busy) return;
     void kit.eat().then((r) => {
-      if (r.ok && this.ep === ep) ep.bites++;
+      if (r.ok && this.ep === ep) {
+        ep.bites++;
+        c.floorUsed('eat'); // Track M1
+      }
     });
   }
 
@@ -923,9 +1661,13 @@ class FleeProcess extends BaseProcess {
   protected halt(): void {
     this.gotoId++;
     this.walking = false;
-    if (this.panic > 0) {
+    if (this.panic > 0 || this.ep?.phase === 'dodge') {
       this.panic = 0;
       this.c.d.loop.release();
+    }
+    if (this.ep?.phase === 'dodge') {
+      this.ep.dodge = undefined;
+      this.ep.phase = 'away'; // a resume plans again (the dodge comes back in the next step when it still holds)
     }
     if (this.c.mover.nav.busy) this.c.mover.cancel();
   }
@@ -954,6 +1696,7 @@ class FleeProcess extends BaseProcess {
     const ep = this.ep;
     if (!ep) return { line: 'flee: watching' };
     const left = this.controlled ? navRemaining(this.c.mover.nav, this.c.position()) : undefined;
+    if (ep.phase === 'seal' || ep.phase === 'sealed') return { line: ep.phase === 'seal' ? 'sealing in (mobs)' : 'sealed in, eating and waiting' }; // Track M1
     const where = ep.phase === 'home' && ep.dest ? `to ${ep.dest.kind} ${ep.dest.to.x} ${ep.dest.to.y} ${ep.dest.to.z}` : ep.phase === 'far' ? `away (up to ${FLEE_FAR})` : `away (${FLEE_AWAY})`;
     return { line: `fleeing ${where}${left !== undefined && ep.phase === 'home' ? `, ${Math.round(left)} blocks left` : ''}`, etaS: ep.phase === 'home' ? etaFor(left, this.c.mover.nav.lastReport, true) : undefined };
   }
@@ -1039,7 +1782,9 @@ class GuardProcess extends BaseProcess {
       c.countFight(r);
       targeting.afterFight(c, e, r); // Track V: 10 s for out_of_range, none for creeper_avoided / interrupted; Track AO: 30 s for unreachable, with the reason
       if (r.reason === 'unreachable') c.pathReach.forget(e.runtimeId); // Track AO: probe it afresh after the ignore
-      if (r.ok && !inPlace) {
+      // Track M1 round 2: the drops only with no other hostile within 16 (the collect walk ran 11 s next to a witch at 4.5
+      // and a spider at 2 with no fight, a live-kit mixed-8 death with the reflex off)
+      if (r.ok && !inPlace && !c.otherThreatWithin(c.position(), 16, e.runtimeId)) {
         ep.phase = 'collect';
         await c.mover.collect(c.collectRadius, 200);
         if (t !== this.token) return;

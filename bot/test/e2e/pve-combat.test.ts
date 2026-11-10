@@ -67,6 +67,7 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
   beforeAll(async () => {
     await prepareServer();
     bot = await startPveBot('PveFight');
+    bot.pve.settings.set('mobReflex', false); // Track M1: these measure the fight, the shield and the crowd rule alone (the reflex strikes on its own)
     await teleport(bot, centre(HOME));
     await bot.truth.clearAround(centre(HOME), 48);
     await armWithIronSword(bot);
@@ -115,6 +116,25 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
       expect(res.serverHits).toBeGreaterThanOrEqual(2);
       // every attack packet the server accepted shows in the hurt log; we never swing at nothing in reach
       expect(res.serverHits).toBeLessThanOrEqual(res.r.attacks);
+    }
+    expect(b.built.respawn!.deaths).toBe(deaths0);
+    expect(b.built.respawn!.dead).toBe(false);
+  }, 180_000);
+
+  // Track M1: the same fights with the reflex on (the default it ships with): killed, the bot alive
+  it('kills 3 summoned zombies one after another with the reflex on (the default)', async () => {
+    const b = bot!;
+    const deaths0 = b.built.respawn!.deaths;
+    b.pve.settings.set('mobReflex', true);
+    try {
+      for (let i = 0; i < 3; i++) {
+        await b.truth.setHealth(b.name, 20);
+        const angle = (i * 2 * Math.PI) / 3 + 0.5;
+        const res = await fightOne('zombie', { x: Math.round(6 * Math.cos(angle)), z: Math.round(6 * Math.sin(angle)) });
+        expect(['killed', 'gone']).toContain(res.r.reason);
+      }
+    } finally {
+      b.pve.settings.set('mobReflex', false);
     }
     expect(b.built.respawn!.deaths).toBe(deaths0);
     expect(b.built.respawn!.dead).toBe(false);

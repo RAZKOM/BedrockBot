@@ -837,6 +837,7 @@ To stop: `!test stop` (ends the run in progress), `!set testMode off`. The bot s
 | `!test cave [n]` | /tp to the `cave_start` waypoint, `!fly cave_end` |
 | `!test route <prefix> [n] [noshortcut]` | /tp to `<prefix>_start`, `!fly route <prefix> [noshortcut]` (docs/flight.md "Cave flight") |
 | `!test goto <x y z \| wp> from <x y z \| wp> [n]` | /tp to the start, `!goto <goal>` (walks, or flies over `flyMin` with `autoFly`) |
+| `!test mobs <set> [n] [<s>s]` | Track M1: at least 150 blocks from home, n runs of a mob set summoned round the bot under one name tag, each until they are dead, the bot dies or `<s>` (60) seconds; only its own mobs are removed, at the end and on `!test stop` ([pve.md](pve.md) "`!test mobs`": the sets and what a good run prints) |
 | `!test stop` | end the run in progress (the flight lands first) and start no more |
 
 Cave flight runs need `!set flyCave on` (else the underground is walked; the start line says so). Each run ends at the

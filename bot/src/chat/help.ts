@@ -78,6 +78,7 @@ export interface HelpSettings {
  */
 export const SETTING_GROUPS: readonly (readonly [string, readonly string[]])[] = [
   ['safety', ['fleeHealth', 'guardRadius', 'guardReach', 'guardWhileWalking', 'avoidMobRadius', 'avoidSpawnerRadius', 'protectRadius', 'autoSleep', 'longFalls', 'fallMargin', 'clutch', 'clutchMaxDrop']],
+  ['mobs', ['mobReflex', 'fleeFly', 'sealIn', 'mobDodge']], // Track M1 (docs/pve.md, ADR 0079)
   ['walking', ['allowBreak', 'allowPlace', 'closeDoors', 'closeTrapdoors', 'sprint', 'followDistance', 'plannerThreads', 'digPenalty', 'digWay', 'portalRadius', 'coarseMin']],
   ['work', ['mineMode', 'mineSeenOnly', 'mineDirect', 'mineTunnelLen', 'mineBranchY', 'exploreRadius', 'useBoneMeal', 'quarryKeepStone', 'toolWearLimit', 'mendAt', 'throwawayMin', 'buildScaffold', 'craftReserve']],
   ['food', ['autoFood', 'foodMin', 'foodLeave', 'autoBreed', 'chorePen', 'foodReserve', 'seedReserve']],
