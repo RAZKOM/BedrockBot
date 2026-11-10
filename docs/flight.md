@@ -1149,6 +1149,7 @@ Rules (all named `// Track AU` in the shared files):
 | `flyCorridor` | auto | Track F4b: an `!fly <x y z>` farther than 96 blocks to a covered goal (a cave, a chamber: no open sky over it) follows the coarse layer's corridor when there is one: the cruise to a mouth or a shaft, the bores flown where they are 3 high, the rest walked ("Corridor flight"); `off` flies the cruise only |
 | `flyCave` | off | Track F5b: powered flight underground (a corridor's cave stretches, `!fly via` / `!fly route`) in the cave style: every window proven before its takeoff, a stop and a sink when the plan runs out; `off` walks underground as the 2026-11-06 hotfix left it. It killed the bot once: `on` only after it has passed the cave benchmark ("Cave flight") |
 | `flyCaveExit` | off | Track F9a: with `flyCave` on, a takeoff from under a roof whose exits all have no clear climb flies the way out under the roof to the open sky (a plan through the cave to its mouth, the whole takeoff simulated at five burns before it is taken) instead of walking out. It has flown offline only: `on` after a `!test goto` series on real terrain ("Cave exit") |
+| `flyLearned` | off | Track F9b: with `flyCave` on, a takeoff from under a roof flies out along a path recorded with `!learn` that left the ground within 4 blocks of where the bot stands and comes out under open sky, when the whole takeoff simulated at five burns clears; no such path, or none that clears: the takeoff as without it. It has flown on the replica only: `on` after a `!test goto` series on real terrain ("Learned exits") |
 
 ## Processes
 
@@ -4039,6 +4040,328 @@ Each suite was run with nothing else on the machine.
   batch); with the tracker file as before this track and everything else of this track in place, the course was 8 of 8 four
   times, and the base commit 8 of 8 and 7 of 8 (the slalom). The second correction changes nothing the course's driver executes,
   as far as the code can be read, so the cause is not understood; the file was left alone rather than argued with.
+
+## Learned exits (Track F9b)
+
+Flight v2, Track F9b, [decisions/0078](decisions/0078-learned-exits.md); learned paths as guides, part 1 (the exit). After Track
+F9a the takeoff from inside the owner's cave is refused by its proof and the bot walks 102 blocks to open sky before it flies:
+35 s of the Realm's 90.6 s a run. The owner flies that stretch in 3 to 4 s on one rocket and recorded seven takes of it with
+`!learn`: "It doesn't have to follow me to a tee but it should be able to recognize the flight path (like through the cave
+entrance)."
+
+```
+the route takeoff (commands-fly.ts routeTakeoffFor, route/takeoff.ts planTakeoffRoute), flyCave and flyLearned on:
+ the recordings in <config dir>/paths (learn/store.ts)  ->  their flights (learn/guide.ts guidesOf: a stretch off the ground,
+   12 blocks or more, cut at every gap; a line of points a block apart, the rockets fired on it)
+ matched by geometry, never by name (learn/match.ts matchExits):
+   it left the ground within 4 blocks of the body (3 in height), under a roof, and comes out under open sky
+   the nearest takeoff first, a line that itself grazes a block after those that do not; at most 3 tried
+ each: the PROOF (glide.ts routeTakeoff), the whole takeoff simulated at every burn from 9 to 21 ticks and at two
+   mixes of them, each burn's end seen two ticks late:
+   the follower along the line (learn/follow.ts), out under open sky, then the climb of Track F9a
+   proven: taken, nothing else is tried     refused: one line, the next take
+ none matches, or none proven: the exits and the ways out of Track F9a, as without a recording
+ the flight (brain.ts guideTakeoff): the follower flies the line; out once the body is past the line's first open sky and
+   has open sky over it; then the climb keeps its heading and turns to the goal as the path ahead clears (climbYaw)
+```
+
+### Files
+
+| File | What |
+|---|---|
+| `bot/src/skills/fly/learn/guide.ts` | a recording as its flights: `guidesOf`, `Guide` (points a block apart, their recorded ticks, the rockets, `grounded`, `landed`), `guideNearest`, `guidePoint`, `guideLength`, `guideHead`, `guideTail` |
+| `bot/src/skills/fly/learn/match.ts` | `matchExits` (a way out from where the body stands), `matchEntries` (a way in to a goal under a roof: built for the next track, nothing flies it), `MATCH_NEAR`, `MATCH_UP`, `OPEN_POINTS`, `OUT_AFTER`, `IN_BEFORE` |
+| `bot/src/skills/fly/learn/store.ts` | `PathStore` (the folder's recordings, a file read again only when it changed), `parsePath` |
+| `bot/src/skills/fly/learn/follow.ts` | `GuideFollower`: the body's place on the line, the aim, the look chosen by its glide over the horizon, the rockets; the `FOLLOW_*` numbers |
+| `bot/src/skills/fly/route/takeoff.ts` | `TakeoffRouteOptions.learned`, `learnedRoute`, `LEARNED_TRIES`, `TakeoffRoute.guide`; the learned ways tried before the exits |
+| `bot/src/skills/fly/glide.ts` | `routeTakeoffOptions` carries the guide; `routeTakeoff` proves a learned line at `LEARNED_PROOF_BURNS` (every burn) and `LEARNED_PROOF_MIXES`, each burn's end seen late, the cells it asks remembered for the proof, a hit's place in its line; `simulateFlight`: `burn` by the rocket's number, `endLag`, `SimResult.firstHit` |
+| `bot/src/skills/fly/brain.ts` | `guideTakeoff` (the follower in the tracker's place, the hand-over under open sky, a lost line lands); `BrainOptions.routeTakeoff.guide`; `routeTakeoffEnd` `'off the line'` |
+| `bot/src/chat/commands-fly.ts`, `bot/src/tasks/process/fly.ts` | `routeTakeoffFor` reads the paths, matches them and writes the decision's line; the flight's start line names the learned line |
+| `bot/src/config/settings.ts`, `bot/src/chat/help.ts` | `flyLearned` (default off) |
+| `bot/scripts/cave-exit-probe.ts` | `--paths`, `--takes`, `--learned follow\|waypoints`, `--async`, `--snapshot`, `--at`, `--trace`, `--replica` (the replica's model: the shell, the terraces, the flat world), `--end-lag`, burns as `a/b` (a first rocket of a ticks, b for the later ones); the simulations get the terrain columns (`--no-terrain`: without) |
+| `bot/test/unit/skills/fly-learned-exit.test.ts` | the guard tests: synthetic recordings through synthetic caves |
+| `bot/test/e2e/fly-cave.test.ts` | `tripOut` with `FLY_CAVE_LEARNED=<folder>`: the recordings moved with the replica, `flyLearned` on |
+
+### What was measured first (the fixture, `scripts/cave-exit-probe.ts`, the PC, 2026-11-10)
+
+**Why the searched way out needs four rockets and fails at a burn of 9.** Three things, each measured on the fixture.
+
+- The waypoints. They are cut every 24 cells from the flood's way, and a flood of unit steps knows no slope. Against the owner's
+  seven lines: the first two waypoints lie at the floor, 3 to 6 blocks beside the owner's line and 1 to 4 under it; the third is
+  11 over the second only 9 blocks farther on (a climb of 50 degrees inside the passage) and 5 over the owner's line; the fourth
+  is level with the third. Each is a box of 3 x 3 x 3. The owner climbs 12 to 19 degrees all the way.
+- The rockets. Every goal is its own search (pieces of one goal) that returns the first plan to reach it, and the heuristic
+  counts the way left at the boosted speed with a weight of 2: a rocket's 20 ticks of cost are earned back in about 24 ticks of
+  flight, and a rocket may be fired again from the ninth tick of a burn. The plan fires at ticks 3, 24, 36 and 46, burns 47 of
+  its 57 ticks, flies 80 blocks to get 67 from the start and turns six times by 29 to 87 degrees, left and right in turn.
+- The burn of 9. The third rocket is fired as the body leaves the steep climb with a turn of 45 degrees to make. Ending 6 ticks
+  early it leaves the body 1.7 to 2.0 off its reference, the tracker asks for a new plan seven times in twelve ticks, and the
+  body meets the passage's wall 4 ticks past the third goal, 17 over the start where the owner is 10 to 13 over it.
+- What it is not. The takeoff from standing: the plan's first edge is the jump and a rocket at tick 3 along the bearing of the
+  first waypoint, which is what the owner does. The margin: at 0.2, 0.25 and 0.3 with risk weights of 0.5, 2 and 2 the plans
+  have 4 to 5 rockets and, with the planner a tick late, 12, 12 and 11 of 13 burns come out clean, after up to 165 ticks under
+  the roof. The open point: it turns the plan's last ticks by 87 degrees, but the hit comes two goals before it.
+
+**Why the fixture's probe did not show it.** Track F9a's probe searched in its own thread: an answer comes within the tick that
+asks. The bot's planner is a worker. With every answer a tick late (`--async --snapshot`) the fixture gives the Realm's line for
+line: the same plan (57 ticks, 4 rockets, 6 076 nodes) "clear at the nominal burn; hits a solid 1 time at a burn of 9 ticks:
+refused". Flown anyway at the 13 burns it came out clean at 11 of them, on 3 to 6 rockets, 70 blocks out after 3.0 to 5.2 s;
+at a burn of 11 it ran out its 200 ticks under the roof on 10 rockets in two runs of three and came out after 164 ticks on 9
+in the third (the searches end on wall-clock budgets, so runs differ). In the bot a search of 250 to 600 ms answers 5 to 12
+ticks late, which no simulation that waits for every answer shows.
+
+**The recorded line: as waypoints, or followed.** Both were built and measured on the owner's takes (six of the seven leave the
+ground within 4 blocks of cave_start; the seventh 7 away).
+
+| | the line as waypoints for the search (a 3 x 3 x 3 box every 12 blocks) | the line followed (`learn/follow.ts`) |
+|---|---|---|
+| takes with a takeoff | 3 of 6 (the other three: no plan in 2 s) | 6 of 6 |
+| what is planned | 56 to 71 ticks, 3 to 4 rockets, turns of 45 and 90 degrees between the boxes | nothing: the line itself |
+| burns 9 to 21 flown with no hit, the planner in the thread | 37 of 39 | 78 of 78 |
+| the same with the planner answering a tick late | 37 of 39 | 78 of 78 (it asks no planner) |
+| rockets to the way's end | 2 to 5 in the thread, 2 to 9 a tick late | 1 to 2 |
+| 70 blocks from the start | 3.0 to 4.1 s in the thread, 3.0 to 8.3 s a tick late | 3.2 to 3.5 s |
+| the decision | the search up to its 2 s; 0.2 to 1.7 s to a plan and one simulation | 0.25 s a take at five burns, no search |
+
+(These rows are the follower as first measured against the waypoints: single burns, every burn's end known at once. The proof
+as it shipped is in the next table.)
+
+**The recorded heights are feet heights in the air too.** A recording's `y` is the position the server sends less the standing
+eye height, 1.62, and a gliding body's eye is 1.2 lower than a standing one's: were the position the eye's, every touchdown out
+of a glide would show a step of 1.2 up. The seven in the fourteen recordings show none (the last samples in the air run down to
+the first on the ground at the glide's own sink), so a line's points are where the feet were.
+
+### The pieces
+
+**A recording's flights** (`guide.ts guidesOf`). The samples with one no speed explains dropped (over 80 blocks a second from
+the sample before, where the samples round it agree); every run of samples off the ground of 12 blocks or more is a flight,
+cut where the recorder lost sight (a gap of a second) so that nothing is drawn through what was not seen. It starts at the last
+sample on the ground when that lies within 2 blocks (`grounded`: a takeoff; the sample may be seconds old, a player standing
+still sends nothing, so its time is taken as a tick before the jump's) and ends at the first one after it (`landed`). The line is
+resampled a block apart along the samples, each point with the tick it was passed and each rocket with its tick and place.
+
+**The match** (`match.ts matchExits`). A grounded flight whose first point lies within `MATCH_NEAR` 4 blocks of the body
+horizontally and `MATCH_UP` 3 in height, does not begin under open sky, and has `OPEN_POINTS` 4 points in a row with nothing over
+them up to the cruise height (the route grid's rule: an unknown cell is a roof). The line is kept `OUT_AFTER` 16 blocks past the
+first of those. The recording's name is carried for the log and decides nothing. The matches come the nearest takeoff first;
+`planTakeoffRoute` then puts a take whose own line passes within `FOLLOW_MARGIN` of a block (`follow.ts lineRoom`: the gliding
+box on the line's points from 3 blocks along it to its open sky) after those that keep it. Of the owner's six, the nearest
+(0.2 from cave_start) passes a block beside its start at 0.27 and the next (0.8) keeps 0.88: the next is tried first, and it is
+the one whose simulated flight has 1.4 blocks to the nearest solid under the roof where the nearest take's has 0.7.
+
+**The follower** (`follow.ts GuideFollower`). Each tick: the nearest point of the line ahead of the last place (never behind
+it); an aim on the line as far ahead as the body flies in `FOLLOW_HORIZON` 6 ticks (4 to 12 blocks); 54 looks round the aim
+(yaw 0, 6, 14, 28 and 45 degrees either way, pitch 0, 8 and 18 either way and 30 down), each flown 6 ticks on the glide formula
+with the swept box kept `FOLLOW_MARGIN` 0.3 clear, on the burn the body reports and on the burn ending as early (9 ticks) and as
+late (21) as it can; the look with the least distance to the line over those ticks and no solid met is flown. A body standing
+beside a block keeps half the berth it has, as the search's first edges do. Before the glide it jumps and looks along the line.
+The first rocket is asked for when the body has been off the ground as long as the recording was when it fired (the brain adds
+its own rule: not before the glide's third tick, and the controller's wait for the server's flag); a later recorded rocket at
+its place on the line, unless one burns there; and one more whenever the body is under `FOLLOW_SPEED` 1.0 a tick with more than
+6 blocks of line ahead. The line is lost: 5 blocks off it for 5 ticks; with no glide 30 ticks after the jump; with no block of
+progress along it in 30 ticks (`FOLLOW_STUCK`); and when the best look still ends in a solid within the horizon two ticks
+running. That last test is on the bare box, not the berth (a look that passes within 0.3 of a block is a graze and is flown: the
+owner's line does so beside cave_start; one that meets it is a crash), and then no rocket goes and the body brakes first, the
+look turned round at pitch -20 until it is under 0.25 a tick. A wall put across the passage after the proof (the unit test's)
+is stopped 2 blocks short of on the one rocket; as first built the follower held the body against it on four.
+
+**The takeoff** (`brain.ts guideTakeoff`). The follower flies in the route tracker's place and the rest is the route takeoff's:
+the glide asked from the first tick in the air, the rocket's rules, the counters. Out: past the line's first open point with the
+sky check's 3 x 3 free over the body up to the cruise height, or the line's end. The climb is Track F9a's (the heading kept,
+then turned 4 degrees a tick towards the goal while the path ahead is clear). The recording's own curve past the mouth is not
+flown: it leads where the recorder went. A lost line lands (`roof`), as a way out that loses its plan does.
+
+**The proof** (`glide.ts routeTakeoff`). The same simulation as for every route takeoff, and for a learned line more of it,
+because each costs a twentieth of a second without a search:
+
+- every burn from 9 to 21 (`LEARNED_PROOF_BURNS`, the five first). The five are not the range: on the replica the take nearest
+  cave_start cleared the five and met a solid at a burn of 14 (below), and a line drawn from the flood cleared the five and met
+  a wall at 11;
+- the burns mixed (`LEARNED_PROOF_MIXES`; `simulateFlight`'s `burn` may be a function of the rocket's number): a first rocket of
+  21 ticks with 9 for every later one, the flight with the least energy (after a long burn the follower fires no second rocket
+  under the roof, and the climb's own are short), and 9 with 21 after it;
+- every burn's end seen two ticks late (`endLag`, `GLIDE.boostEndLag`). The input loop boosts until the rocket's remove_entity,
+  which comes two inputs after the burn has ended, so the brain asks for its next rocket that much later than a simulation that
+  knows the end at once: a climb on rockets back to back has a gap after each.
+
+A refusal for a hit or for water says where (`hits a solid 1 time (the first at tick T in the climb, U over the start and D
+blocks from it)`, `ends in water (at tick T in the ...)`). The cells a proof asks are remembered while it runs (three million
+questions for one proof on the owner's cave, of a world that does not change meanwhile). The other route takeoffs' proofs are
+untouched: five burns, no lag, the same lines.
+
+**The decision's line.** `fly: route takeoff: 6 learned ways out from here (15 recorded flights, 6 leaving the ground within 4),
+N exits under open sky; the learned way out along <name> (it left the ground 0.8 from here, 69 blocks to open sky in 52 ticks, 1
+rocket): clear at burns of 15, 9, 21, 12, 18, 10, 11, 13, 14, 16, 17, 19, 20 ticks and of 21 then 9, 9 then 21 (through the exit
+at tick 60, open sky at tick 60, ...) -> out along the learned line <name> to <cell>, then the climb curving to heading H (15
+simulated, T ms)`. In the
+flight: `learned line: rocket 1 asked for 1 blocks along it, 11 ticks off the ground (where the recording fired one)`, and
+`route takeoff: out along the learned line <name> after 60 ticks, 2 rockets (open sky over the body, 68 of 80 blocks along it, at
+most 0.67 off it, steered 3 ticks); the climb keeps this line until the sky is open, then turns to heading H as the path ahead
+clears`.
+
+### Offline, the owner's cave (`scripts/cave-exit-probe.ts --cruise 133 --paths <folder>`, the PC, 2026-11-10)
+
+The probe's simulations now have the terrain columns, as the bot's own have (the simulated climb keeps the terrain floor; Track
+F9a's probe flew without, `--no-terrain`), so the first two columns are measured again here.
+
+| | Track F9a's way out, the planner in the thread | the same, the planner answering a tick late (as the bot's does) | this track: the learned line, each of the six takes |
+|---|---|---|---|
+| the proof | clear at the five burns | "clear at the nominal burn; hits a solid 1 time at a burn of 9 ticks: refused" (the Realm's and the replica's line) | clear at the thirteen burns and the two mixes |
+| burns 9 to 21 flown (13) | 13 of 13 out, no hit | 11 of 13 out with no hit (a hit at 9; at 11 never out: 201 ticks and 10 rockets under the roof, then down) | 13 of 13 out with no hit, and four mixes (21 then 9, 9 then 21, 18 then 9, 20 then 12): 102 of 102 for the six takes, every burn's end seen two ticks late |
+| under the roof | 54 to 73 ticks, 3 to 4 rockets | 56 to 99 ticks and 3 to 6 rockets where it came out | 55 to 62 ticks, 1 to 2 rockets (one where the first burn is a long one) |
+| 70 blocks from the start | 3.0 to 3.9 s, 21 to 27 over the start, on 3 to 5 rockets | 3.0 to 5.2 s where it came out, on 3 to 6 rockets | 3.2 to 3.5 s, 28 to 38 over the start, on 2 to 3 rockets (the way out's, and the climb's first towards the cruise height) |
+| the body off the line | | | at most 0.7 and 1.1 (the two takes begun within a block of cave_start, at its height), 1.5 to 1.8 (the four begun 2 blocks off and 2 up: the join) |
+| the nearest solid | | | under the roof 0.7 blocks from the gliding box for the nearest take, 1.4 for the second (the recorded lines themselves pass 0.3 to 0.9 from a block within their first 7 blocks, beside cave_start, and keep 1.2 to 3.5 of room from 16 blocks on, but for one take that passes the mouth's rim at 0.8); after the hand-over 3.1 to 3.7, at the mouth's rim, and nothing nearer for the 352 ticks simulated; the climb steers for nothing |
+| the decision | 4.8 s | 4.2 s to the refusal | 0.8 s for a take that clears (15 simulations, no search) |
+
+From the four corners of cave_start's cell (0.4 each way from its centre) the same: proven, 52 of 52 single burns out with no
+hit. The owner: 70 blocks out after 3.0 to 3.7 s, 24 to 45 over the start, on one rocket; they level off at 43 to 70 over the
+start where the bot climbs on to its cruise height, which is what its second and third rockets by then are for.
+
+The decision's time elsewhere: 0.5 to 0.6 s for the unit test's cave on the test host (`node scripts/mac-run.mjs -- pnpm --filter bot
+exec vitest run --project unit test/unit/skills/fly-learned-exit.test.ts --silent=false`: 15 simulations; the same on the
+PC), and 1.3 to 1.8 s on the replica's bot, whose cells are the live model's (15 simulations, the take tried first proven; 1.5
+to 2.1 s in the series before, when the nearest take was tried first and refused at its second: 17). The owner's recordings were not taken to the test host, so the fixture's number is the PC's.
+
+### On the server (bds-fly2, the replica, `FLY_CAVE_ONLY=tripOut FLY_CAVE_STYLE=1 FLY_CAVE_REUSE=1`, 2026-11-10)
+
+`FLY_CAVE_LEARNED=<folder>` gives the test the owner's recordings: it moves them as the replica is moved (x and z by a multiple
+of 16, the heights kept), writes them to a temporary folder the bot reads as its paths folder, and turns `flyLearned` on.
+
+| | Track F9a (its own runs, 2026-11-09) | this track, `flyLearned` off (the default) | this track, `FLY_CAVE_LEARNED` (the final code) |
+|---|---|---|---|
+| arrived | 5 of 5 | 5 of 5 | 6 of 6 |
+| seconds to the goal | 71.6 to 73.0 (median 72.3) | 70.6 to 72.3 (median 71.5) | 59.9 to 65.4 (median 63.4) |
+| flights a run | 1 (a vertical takeoff) | 1 (a vertical takeoff) | 1 (the route takeoff along the learned line) |
+| the walk before the takeoff | 32 blocks to open sky | the walk to open sky; the takeoff 11 blocks from cave_start as the crow flies | 0: every run leaves the ground at cave_start |
+| flights ended `roof` | 0 | 0 | 0 |
+| damage | 0 | 0 | 0 |
+| rockets a run | 6 to 8 | 6 to 8 | 6 to 7 |
+| rockets that fired nothing | 0 | 0 | 0 |
+| the route takeoff at cave_start | the hall's exit planned and refused by its proof, 1.7 s | the same: two cells of the opening with no plan, the hall's exit refused by its proof, 1.8 s | 6 learned ways out; the take 0.8 from cave_start tried first (its line has the follower's berth, the nearest take's has not) and proven at the thirteen burns and the two mixes, the simulated climb steering 29 ticks for the shell; 15 simulated, 1.3 to 1.8 s |
+| under the roof | | | the first rocket at tick 9, 6 gliding ticks in (the glide confirmed at tick 4 or 5); out after 58 to 59 ticks on 1 to 2 rockets (the second 54 to 69 blocks along the line, the body at 0.78 to 0.85 a tick; none in one run of the six), at most 0.98 off the line, no steering |
+
+All five series, as the proof grew (the last is the final code):
+
+| the proof | runs | arrived | what flew |
+|---|---|---|---|
+| five burns (as every route takeoff's) | 5 | 4 | the take nearest cave_start, proven. Four runs home in 60.8 to 63.8 s. In the fifth the first burn was a long one (no second rocket under the roof); the takeoff was out as in the others, and the climb then met the replica's shell (below) 6 under its top, 176 blocks from cave_start; the flight ended there and the trip fell from that height: 71 of damage, no arrival |
+| every burn from 9 to 21 | 8 | 8 | that take refused ("clear at the nominal burn; hits a solid 1 time at a burn of 14 ticks"), the next one proven and flown: 59.4 to 67.1 s, 0 damage |
+| every burn, the two mixes, the burn's end seen late | 6 | 6 | the same: 59.5 to 64.3 s, 0 damage |
+| the same proof; the follower gives the line up for a crash ahead; the proof's cells remembered | 6 | 6 | the same take, the nearest refused at its second simulation ("ends in water at a burn of 9 ticks"): 60.9 to 64.7 s, 0 damage; 17 simulations in 1.5 to 2.1 s |
+| the same proof; the takes whose own line has the follower's berth are tried first (the final code, the column above) | 6 | 6 | the take 0.8 from cave_start, tried first and proven, none refused: 59.9 to 65.4 s, 0 damage; 15 simulations in 1.3 to 1.8 s |
+
+**Where the replica is not the Realm, and what that means.** Under the roof it is the Realm's cave as far as anything shows: the
+replica is the fixture's box cell for cell (the fixture has no chunk it does not know), and Track F9a's way-out search returns
+the same plan on the Realm and on the fixture node for node (6 076 nodes), which another passage would not give. The opening
+to the sky that the fixture and the replica have and the Realm's flood did not find (Track F9a) is 15 over cave_start and about
+10 blocks from it on the side away from the line; no take passes it. The difference is beyond the mouth. The replica's box
+stands inside a stone shell one block thick, from the flat world up to the box's top, far over the hill the cave lies under,
+and the flight home crosses it 172 to 190 blocks from cave_start. The Realm has no shell. So the cruise height on the replica
+is the shell's and not the hill's, and the climb after the mouth has a wall to get over that the Realm does not have. Simulated with the terrain floor,
+as the bot flies (the probe, `--replica` against the fixture): on the replica's model the climb steers 21 to 42 ticks for the
+shell and passes its top with 0.4 to 1.1 blocks to spare at every burn; on the fixture, which is the Realm's ground as the cache
+has it, the climb steers for nothing and is never nearer than 3.1 blocks to a solid after the hand-over (the mouth's rim). That
+half block is what the first series' fifth run lost. The replica's bot refuses the take nearest cave_start with one proof or
+another (a solid met at a burn of 14; with the burn's end seen late, water at a burn of 9) where the probe on the replica's
+model proves all six: the bot's model is the live one (the terrain's columns known live, from the cache or not at all, and a
+cell it has not been sent is a wall to the follower), and the probe's is the fixture whole. What it means for the Realm: none of
+this is the cave's or the line's. The Realm's proof flies the real ground beyond the mouth, where the fixture says the climb
+is free, and which take it then proves is the live model's to say; the one tried first is the one the replica flew (0.8 from
+cave_start: the take 0.2 from it grazes a block by itself and now comes after). The decision's line names the take and says
+what a refused one met, and where. What the replica did show: five
+burns are not a proof of a climb with half a block to spare, and a simulation that clears a solid by half a block says "clear"
+as one that clears it by 30 does (the open points).
+
+### The regressions (bds-fly3 for fly-route-land and fly-route, bds-fly2 for the rest; `flyLearned` off)
+
+| suite | result |
+|---|---|
+| fly-route-land (the room's route takeoff, the stack's ledge, the holes' vertical) | 7 of 7 green, twice |
+| fly-route | 3 of 3 green, twice |
+| fly-course, FLY_AREA 71520,69472 | 8 of 8 green with none of this track's other jobs running. A run before it, while this track's probe and unit jobs ran beside it, was 7 of 8: the rings course completed neither of its two runs (1 and 2 of 5 rings). Not run a third time |
+| fly-cave trip C (`FLY_CAVE_STYLE=1`, 5 runs) | 5 of 5 arrived, damage 0: 88.8 to 93.2 s in four, 143.6 s in one (5 walks and 33 ticks in the cave's water on its way in, the case Track L2's table has too; Track F9a's three runs took 81.8 to 98.0 s). The trip takes off from the home pad: none of this track's code runs in it with the setting off |
+| fly-cave tripOut, the setting off | the middle column above: as before this track |
+
+`route/tracker.ts` and `route/search.ts` are untouched.
+
+### What `!test goto home from cave_start 3` on the Realm should show (`flyCave on`, `flyLearned on`)
+
+- At the start of every run, after `fly: vertical takeoff: the column over the start is open only 6 up`: `fly: route takeoff: 6
+  learned ways out from here (15 recorded flights, 6 leaving the ground within 4), 31 exits under open sky; the learned way out
+  along <name> (it left the ground 0.8 from here, 69 blocks to open sky in 52 ticks, 1 rocket, its line 0.88 from the nearest
+  block): clear at burns of 15, 9, 21, 12, 18, 10, 11, 13, 14, 16, 17, 19, 20 ticks and of 21 then 9, 9 then 21 (through the exit
+  at tick 59, open sky at the same tick, the heading from within a few degrees of the goal's at the exit to the target's a tick
+  on) -> out along the learned line <name> to <cell>, then the climb curving to heading H (15 simulated, T ms)`. No
+  takeoff-site search and no `walking out towards home` after it. The counts are the recordings' as they are on 2026-11-10
+  (seven ways out, seven ways in and one of those in two pieces: 15 flights; 6 of them leave the ground within 4 blocks of
+  cave_start); the take is the second nearest, tried first because the nearest grazes a block by itself.
+- `fly: to home (N blocks): cruise y ..., a route takeoff along the learned line <name> out to <cell> (52 ticks, 1 rockets
+  recorded), then the proven climb curving to heading H`.
+- In the flight: `learned line: rocket 1 asked for 1 blocks along it, 8 ticks off the ground (where the recording fired one)`;
+  `the first rocket at tick 9 or a few later, G gliding ticks in: the server's glide confirmed at tick C`; unless the first burn
+  is one of the longest, `learned line: rocket 2 asked for 54 to 70 blocks along it (the body at 0.8 a tick with line ahead)`;
+  then `route takeoff: out along the learned line <name> after 58 to 59 ticks, 1 to 2 rockets (open sky over the body, 70 of 85
+  blocks along it, at most 1.0 off it, steered 0 ticks)` (the replica's numbers, which are the fixture's), `open sky over the
+  body ... 0 ticks after the exit`, `the climb's heading reached the target's`.
+- No `flight: ended (roof)`, no `nothing clears the solid ahead in the climb`, one flight a run.
+- A refusal instead (`...: hits a solid 1 time (the first at tick T in the climb, U over the start and D blocks from it) at a
+  burn of N ticks: refused`, then the next take, or the hall's exit and the walk out as today) means the Realm's cave or the
+  ground beyond its mouth is not the fixture's where that take runs, or the bot stood somewhere else; the line says which burn
+  met what and where. All takes refused: the run is the 90 s one, plus the proofs' time.
+- `route takeoff: the learned line <name> lost after N ticks (...): no climb without the line here, landing` and a flight ended
+  `roof` under the roof: the flight left what its proof flew (a correction, a rocket that fired nothing). The trip then walks on
+  from where it came down.
+- The time. Today 90.6 s a run: 0.5 s of deciding, 35 s of walk to open sky, a flight of 710 to 770 ticks from there (36 to 38 s),
+  14 s of walk at home. With the learned way the walk out goes, the decision takes 1 to 2 s (15 simulations for a take that
+  clears: 1.3 to 1.8 s on the replica's bot) and the flight starts 46 blocks farther from home: expect 55 to 60 s a run, one
+  flight.
+
+### Open points (Track F9b)
+
+- **It has not flown on the Realm.** Offline on the fixture and on the replica (which is built from the fixture) it flies; the
+  Realm has latency, a server's own rocket timing and the real cave. `flyLearned` ships off for that reason.
+- **The proof is a simulation, and "clear" has no margin.** Fifteen flights (every burn, two mixes, the burn's end seen late),
+  no network latency, the model's world. A simulated climb that passes a solid by half a block is "clear": on the replica
+  every proven take's climb passes the shell's top so, and 30 of the 31 flights of the five series got over it (the one that
+  did not flew a take the five-burn proof had passed and every later proof refused). On the fixture nothing is nearer than 3.1
+  blocks after the hand-over. A berth for the climb in the proof (say, nothing within 2 blocks from 20 ticks after the exit) or the jump
+  takeoff's own rule (a climb that had to steer is no first choice) would refuse every take on the replica, for its shell,
+  and none on the fixture; neither is built, because the replica would then show nothing. A rocket that fires nothing in the
+  climb (the Realm has them) is not simulated either.
+- **The line must begin where the bot stands.** A takeoff 5 or more blocks from every recording's start does not use one (the
+  seventh take begins 7 from cave_start); walking to a recorded start, or joining a line part of the way along it, is not built.
+  A recording made from a block two over the floor is flown from the floor beside it (the join costs up to 1.8 off the line and
+  is proven).
+- **Out is where the sky is open, and the recording's curve after that is not used.** On the owner's cave the line points near
+  the goal's heading there by chance. A goal on the other side turns 4 degrees a tick from the exit's line as the path clears
+  (Track F9a's rule), which the proof flies; it may refuse a goal the recorder never flew towards.
+- **By 70 blocks out the bot has fired 2 to 3 rockets where the owner fires one.** One or two get it out (two when the first
+  burn is a short one: the body is then under 1.0 a tick before the mouth); the next is the climb's first towards the cruise
+  height, which lies over where the owner levels off (43 to 70 over the start). The cruise height is the flight's business,
+  not the takeoff's.
+- **Three takes are tried and the first that proves clear is flown.** The order is the nearest takeoff first, with the takes
+  whose own line passes within the follower's berth of a block after the others; it is not the take with the most room in its
+  simulation, and a fourth to sixth take are never tried: each refused take costs up to 15 simulations, about 0.1 s each on
+  the live model.
+- **The way in is not flown.** `matchEntries` finds five of the owner's seven recorded ways in at cave_start (touchdowns 0.4 to
+  2.2 blocks from it; of the other two one ends in the air where the recorder lost sight, and one stands again 6 blocks off): 65 to 76 blocks under the roof after
+  the 24 kept in the open, 86 to 105 ticks, no rocket on them, 1.3 to 1.8 blocks a tick at the last open sky, 0.7 to 1.1 ten
+  blocks before the touchdown and 0.2 at it. Flying one needs what the exit did not: a hand-over from the cruise onto the line's
+  first point at the line's speed and heading (the landing search aims at a cell today, not at a line in the air); the follower
+  holding the recording's speed, which it has in the guide's ticks and does not use (it only knows "too slow: a rocket"; the
+  owner's last climb is the brake); a touchdown on the recorded cell; and a proof that ends in a landing there, where the
+  takeoff's ends in a climb.
+- **The searched way out (`flyCaveExit`) is as Track F9a left it**, and the cause is known now (above). The follower on a line
+  drawn from the flood is the way to mend it: a crude one (the flood's way pulled straight with a block of berth, the corners
+  rounded) was proven at the five burns and flew 12 of 13 burns clean on 1 to 2 rockets, 70 blocks out after 2.9 to 3.0 s, with
+  one hit at a burn of 11. Not in the repository.
+- **The proof of the route tracker's takeoffs waits for every plan.** A simulation cannot know how late the worker answers; the
+  room, the hole and the stack of Track F3 plan once and fly, so they are not touched by it, a way out that re-plans is.
+- **The panel's poll payload is 8 bytes under its bar** (20 092 of 20 100) with the `flyLearned` row: the next setting moves it.
+- **Two loaders.** `chat/commands-learn.ts loadPaths` (the `!learn list` commands) and `learn/store.ts PathStore` (the flight)
+  both read the folder; the store checks every sample and remembers what it read. `commands-learn.ts` was not this track's to
+  change.
 
 ## Open points
 

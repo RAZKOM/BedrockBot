@@ -72,6 +72,8 @@ import { ROUTE_HANDOVER, ROUTE_PLAN_NODES, ROUTE_TRACK_MS } from './route/landin
 import { RouteTracker, type Planner } from './route/tracker.ts'; // Track F3
 import { decideGoAround, SINK_S_PER_BLOCK, WALK_S_PER_BLOCK, walkSeconds, type LandingOffer, type MissKind } from './landprice.ts'; // Track L1
 import type { RouteGoal } from './route/types.ts'; // Track F3
+import { GuideFollower } from './learn/follow.ts'; // Track F9b
+import { guideLength, type Guide } from './learn/guide.ts'; // Track F9b
 
 /** Track F3: `route`: the RouteTracker flies the last blocks onto a route landing (docs/flight.md "Route landings and takeoffs"). */
 export type FlightPhase = 'takeoff' | 'climb' | 'cruise' | 'approach' | 'route' | 'goaround' | 'land' | 'done';
@@ -193,6 +195,13 @@ export interface BrainOptions {
     pieces?: number;
     underRoof?: boolean;
     riskCost?: number;
+    /**
+     * Track F9b (docs/flight.md "Learned exits"): the way out is a recorded flight's line (learn/guide.ts) and the guide
+     * follower flies it in the tracker's place (learn/follow.ts: no plan, no search; `goals` is empty). `open`: the blocks
+     * along the line to its first point under open sky: from there on the takeoff is out as soon as the body has open sky
+     * over it, or at the line's end. A body that loses the line lands, as under `underRoof`.
+     */
+    guide?: { line: Guide; open: number };
   };
 }
 
@@ -239,7 +248,7 @@ export interface FlightStats {
   routeTakeoffTicks?: number;
   routeTakeoffRockets?: number;
   /** Track F9a: how the route takeoff handed over to the climb (`out`: through its last goal), the heading the body left the exit on, the tick it had open sky over it and the tick the climb's heading reached the target's. */
-  routeTakeoffEnd?: 'out' | 'no plan' | 'out of time';
+  routeTakeoffEnd?: 'out' | 'no plan' | 'out of time' | 'off the line';
   routeExitYaw?: number;
   routeSkyAt?: number;
   routeHeadingAt?: number;
@@ -389,6 +398,8 @@ export class FlightBrain {
   /** Track F3: the route tracker of the landing (from the hand-over) or of the route takeoff; the gliding ticks in a row of the takeoff. */
   private tracker: RouteTracker | undefined;
   private routeGlideTicks = 0;
+  /** Track F9b: the follower of a learned way out (the route takeoff along a recorded line). */
+  private follower: GuideFollower | undefined;
   /** Track F3: the tick the route takeoff handed over to the climb (the climb's path checks wait for some height). */
   private routeOutAt: number | undefined;
   /** Track F4a: the side of a route landing's S-turns (+1: swung left of the corridor line's bearing in). */
@@ -605,6 +616,7 @@ export class FlightBrain {
     this.emergencyWithin = undefined;
     this.resetPlanners();
     this.tracker = undefined;
+    this.follower = undefined;
     this.dive = undefined;
     this.descent = undefined;
     this.descentNone = false;
@@ -1763,6 +1775,7 @@ export class FlightBrain {
     const b = i.body;
     const rt = this.o.routeTakeoff!;
     const o = this.o.route!;
+    if (rt.guide) return this.guideTakeoff(i, ctl, rt.guide);
     if (!this.tracker) {
       // (Track F9a: a way out through several goals is searched in pieces. The cave style's rules were measured on the owner's
       // cave and left out: with them 2 of 7 burns came out, the rest bailed out a block off the reference in a passage 14 wide;
@@ -1810,6 +1823,65 @@ export class FlightBrain {
       this.stats.rocketsBy.climb++;
       this.stats.routeTakeoffRockets = (this.stats.routeTakeoffRockets ?? 0) + 1;
     } else if (out.control.fire) this.tracker.fireHeld(); // Track F4a: as in the landing above
+    return ctl;
+  }
+
+  /**
+   * Track F9b (docs/flight.md "Learned exits"; decisions/0078): the route takeoff along a recorded flight's line. The guide
+   * follower (learn/follow.ts) flies the body from standing along the line (the jump, the glide, the first rocket where the
+   * recording fired it and not before the glide takes one, the look that keeps the glide ahead on the line and clear), with no
+   * plan and no search. It is out, and the climb takes over as after any proven route takeoff (the line the body is on kept,
+   * the heading turned to the target as the path ahead clears), once the body is past the line's first point under open sky
+   * and has open sky over it itself, or at the line's end. A body that loses the line under the roof lands; it never goes on
+   * as a climb nobody proved.
+   */
+  private guideTakeoff(i: BrainInput, ctl: BrainControl, guide: { line: Guide; open: number }): BrainControl {
+    const b = i.body;
+    if (!this.follower) {
+      this.follower = new GuideFollower({ grid: this.o.route!.grid, guide: guide.line, note: (m) => this.o.note?.(m) });
+      this.stats.routeTakeoffTicks = 0;
+      this.stats.routeTakeoffRockets = 0;
+    }
+    const f = this.follower;
+    const out = f.tick({ pos: b.pos, vel: b.vel, gliding: b.gliding, onGround: b.onGround, boostTicks: b.boostTicks, rockets: i.rockets }, i.tick);
+    this.stats.routeTakeoffTicks = (this.stats.routeTakeoffTicks ?? 0) + 1;
+    const ticks = f.stats.ticks;
+    const obstacle = this.o.obstacle;
+    const open = b.gliding && out.at >= guide.open && obstacle !== undefined && takeoffSky(b.pos, this.target, this.o.cruiseY, 0, (x, y, z) => obstacle(x, y, z)).ok;
+    if (open || out.status === 'done' || out.status === 'lost' || ticks > ROUTE_TAKEOFF_MAX_TICKS) {
+      const ok = open || out.status === 'done';
+      this.stats.routeTakeoffEnd = ok ? 'out' : out.status === 'lost' ? 'off the line' : 'out of time';
+      this.follower = undefined;
+      const flown = `${out.at.toFixed(0)} of ${guideLength(guide.line).toFixed(0)} blocks along it, at most ${f.stats.maxError.toFixed(2)} off it, steered ${f.stats.steered} ticks${f.stats.blocked ? `, ${f.stats.blocked} ticks with no clear look` : ''}`;
+      if (!ok) {
+        this.o.note?.(`route takeoff: the learned line ${guide.line.path} lost after ${ticks} ticks (${out.why ?? 'out of time'}; ${flown}): no climb without the line here, landing`);
+        this.curving = false;
+        this.landNow('roof', b);
+        return this.landing() ? this.approach(i, ctl, this.aim) : { ...ctl, glide: false };
+      }
+      this.o.note?.(`route takeoff: out along the learned line ${guide.line.path} after ${ticks} ticks, ${this.stats.routeTakeoffRockets ?? 0} rocket${this.stats.routeTakeoffRockets === 1 ? '' : 's'} (${open ? 'open sky over the body' : "the line's end"}, ${flown}); the climb ${this.curving ? `keeps this line until the sky is open, then turns to heading ${Math.round(yawTo(b.pos, this.target))} as the path ahead clears` : `turns to heading ${Math.round(this.climbYaw(b))}`}`);
+      this.phase = 'climb';
+      this.routeOutAt = this.stats.ticks;
+      ctl.glide = b.gliding || !b.onGround;
+      if (ctl.glide) this.requested = true;
+      return this.climb(i, ctl);
+    }
+    ctl.yaw = out.control.yaw;
+    ctl.pitch = out.control.pitch;
+    ctl.jump = out.control.jump === true && b.onGround;
+    // (the glide and the first rocket as in the route takeoff above: the request from the first airborne tick, no rocket
+    // before the glide's third tick)
+    if (b.gliding || !b.onGround) {
+      this.requested = true;
+      ctl.glide = true;
+    } else ctl.glide = false;
+    this.routeGlideTicks = b.gliding ? this.routeGlideTicks + 1 : 0;
+    if (out.control.fire && i.canFire && i.rockets > 0 && b.gliding && this.routeGlideTicks >= ROUTE_FIRE_GLIDE_TICKS && b.boostTicks === 0) {
+      ctl.fire = true;
+      this.stats.rockets++;
+      this.stats.rocketsBy.climb++;
+      this.stats.routeTakeoffRockets = (this.stats.routeTakeoffRockets ?? 0) + 1;
+    }
     return ctl;
   }
 

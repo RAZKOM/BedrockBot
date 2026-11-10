@@ -211,6 +211,10 @@ export interface SimResult {
   unknownHits?: number;
   /** Track F9a: of the hits, the head bumps of the takeoff phase (a ceiling touched while rising, no wall met: it costs the rise, not health). */
   bumps?: number;
+  /** Track F9b: where the first of the hits that is no head bump was: the tick, the phase, the height over the start and the blocks from it (for the proof's line). */
+  firstHit?: { tick: number; phase: string; up: number; out: number };
+  /** Track F9b: and where the body first touched water or lava. */
+  firstWet?: { tick: number; phase: string; up: number; out: number };
   body: BodyState;
   stats: FlightStats;
   /** The phase the simulation stopped in (`until`). */
@@ -233,10 +237,21 @@ export async function simulateFlight(
     maxTicks?: number;
     yaw?: number;
     until?: (brain: FlightBrain, body: BodyState) => boolean;
-    /** Track F9a: the ticks every rocket burns (default the nominal, GLIDE.boostTicks; a takeoff is proven at the burn's extremes too). */
-    burn?: number;
+    /**
+     * Track F9a: the ticks every rocket burns (default the nominal, GLIDE.boostTicks; a takeoff is proven at the burn's extremes too).
+     * Track F9b: or the burn of each rocket by its number (0 first): a long first rocket and short ones after it is a flight
+     * no single burn flies.
+     */
+    burn?: number | ((rocket: number) => number);
     /** Track F9a: asked before every tick: a promise while something the brain waits for is still out (a route plan in the worker), awaited so the simulation's tick is the answer's. */
     wait?: () => Promise<unknown> | undefined;
+    /**
+     * Track F9b: the ticks the brain goes on seeing a burn after it has ended (default 0). The input loop boosts until the
+     * rocket's remove_entity, which reaches it GLIDE.boostEndLag inputs after the first tick without the boost, so the
+     * real brain asks for its next rocket that much later than one that knows the burn's end at once: a climb on rockets
+     * back to back has a gap after every one of them, and gains less than a simulation without the gap says.
+     */
+    endLag?: number;
   } = {},
 ): Promise<SimResult> {
   const world = deps.world;
@@ -248,10 +263,14 @@ export async function simulateFlight(
   // Track F9a: the tick the takeoff phase ended, and the head bumps up to it
   let outAt: number | undefined;
   let bumps = 0;
+  let firstHit: SimResult['firstHit'];
+  let firstWet: SimResult['firstHit'];
   let body = initialBody(start, true);
   let cmd: MoveCommand = { ...IDLE_COMMAND, yaw: s.yaw ?? opts.ledge?.yaw ?? 0 };
   let rockets = s.rockets ?? 0;
   let lastFire = -100;
+  let fired = 0;
+  let lag = 0;
   let hits = 0;
   let wet = false;
   const max = s.maxTicks ?? SIM_MAX_TICKS;
@@ -259,15 +278,21 @@ export async function simulateFlight(
   for (; t <= max; t++) {
     if (t % SIM_YIELD === 0 && deps.yieldNow) await deps.yieldNow();
     for (let w = s.wait?.(); w; w = s.wait?.()) await w;
-    const fb = { pos: body.pos, vel: body.vel, onGround: body.onGround, gliding: body.gliding ?? false, boostTicks: body.boostTicks ?? 0 };
+    // (Track F9b: a burn that has ended is still seen for `endLag` ticks)
+    const burning = body.boostTicks ?? 0;
+    if (burning > 0) lag = s.endLag ?? 0;
+    const seen = burning > 0 ? burning : lag > 0 && body.gliding ? 1 : 0;
+    if (burning === 0 && lag > 0) lag--;
+    const fb = { pos: body.pos, vel: body.vel, onGround: body.onGround, gliding: body.gliding ?? false, boostTicks: seen };
     const out = brain.step({ tick: t, body: fb, yaw: cmd.yaw, pitch: cmd.pitch, rockets, canFire: t - lastFire >= 4, health: 20, elytraLeft: 400 });
-    if (out.end) return { end: out.end, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps };
+    if (out.end) return { end: out.end, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps, ...(firstHit ? { firstHit } : {}), ...(firstWet ? { firstWet } : {}) };
     if (outAt === undefined && brain.phase !== 'takeoff') outAt = t;
     const c = out.control;
     cmd = { ...cmd, yaw: c.yaw, pitch: c.pitch, jump: c.jump, glide: c.glide, forward: c.forward ?? 0, sneak: c.sneak === true, sprint: false };
-    const step: MoveCommand = { ...cmd, ...(c.fire && rockets > 0 ? { boostStart: s.burn ?? GLIDE.boostTicks } : {}) };
+    const step: MoveCommand = { ...cmd, ...(c.fire && rockets > 0 ? { boostStart: typeof s.burn === 'function' ? s.burn(fired) : (s.burn ?? GLIDE.boostTicks) } : {}) };
     if (c.fire && rockets > 0) {
       rockets--;
+      fired++;
       lastFire = t;
     }
     const before = body;
@@ -278,6 +303,7 @@ export async function simulateFlight(
     if (before.gliding && body.pos.y > Math.floor(body.pos.y) + 0.05 && (body.collidedHorizontally || (body.collidedVertically && !body.onGround))) {
       hits++;
       if (!body.collidedHorizontally && (outAt === undefined || t <= outAt + 1)) bumps++;
+      else firstHit ??= { tick: t, phase: brain.phase, up: body.pos.y - start.y, out: hdist(body.pos, start) };
     }
     if (deps.terrain && before.gliding) {
       const c = deps.terrain(Math.floor(body.pos.x), Math.floor(body.pos.z));
@@ -288,10 +314,13 @@ export async function simulateFlight(
         unknownHits++;
       }
     }
-    if (body.inWater || body.inLava || liquidContact(world, body.pos).water || liquidContact(world, body.pos).lava) wet = true;
-    if (s.until?.(brain, body)) return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps };
+    if (body.inWater || body.inLava || liquidContact(world, body.pos).water || liquidContact(world, body.pos).lava) {
+      wet = true;
+      firstWet ??= { tick: t, phase: brain.phase, up: body.pos.y - start.y, out: hdist(body.pos, start) };
+    }
+    if (s.until?.(brain, body)) return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps, ...(firstHit ? { firstHit } : {}), ...(firstWet ? { firstWet } : {}) };
   }
-  return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps };
+  return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps, ...(firstHit ? { firstHit } : {}), ...(firstWet ? { firstWet } : {}) };
 }
 
 /** The simulated landing is on the target: inside a walk landing's cells (else the platform), at its height, dry, no hit, no early end. */
@@ -395,10 +424,46 @@ export async function jumpTakeoff(
 
 /** Track F9a: the burns a route takeoff is proven at besides the nominal: the shortest and the longest a rocket burns (Track F0: 9 to 21 ticks) first, then the two between (route/types.ts MID_BURNS). */
 export const PROOF_BURNS: readonly number[] = Object.freeze([9, 21, 12, 18]);
+/**
+ * Track F9b: a takeoff along a learned line is proven at every burn a rocket can have (9 to 21 ticks; PROOF_BURNS first, so a
+ * refusal comes as soon as it did). Its simulations need no search and cost about a twentieth of a second each, and the burns
+ * between the five do differ: a line drawn from the flood and flown by the same follower cleared the five and met a wall at
+ * a burn of 11 (docs/flight.md "Learned exits").
+ */
+export const LEARNED_PROOF_BURNS: readonly number[] = Object.freeze([...PROOF_BURNS, 10, 11, 13, 14, 16, 17, 19, 20]);
+/**
+ * Track F9b: and with the burns mixed, which no single burn flies: a first rocket of `first` ticks and `rest` for every later
+ * one. The longest first with the shortest after it is the flight with the least energy (the follower fires no second rocket
+ * under the roof after a long burn, and the climb's own are then short); the other way round is the one with the most.
+ */
+export const LEARNED_PROOF_MIXES: readonly (readonly [first: number, rest: number])[] = Object.freeze([Object.freeze([21, 9] as const), Object.freeze([9, 21] as const)]);
 /** Track F9a: searches one proof remembers (the way out is the same at every burn until its first rocket ends). */
 const PROOF_MEMO = 200;
 /** Track F9a: a proven climb's time to the goal is its simulated ticks plus the way left at this speed (blocks a tick: the cruise's). */
 export const PROOF_CRUISE_SPEED = 1.4;
+
+/**
+ * Track F9b: a cell question remembered for one proof, within 2048 blocks of `from` (beyond that, and for anything that is not
+ * a whole cell, the question is asked again). A learned line's simulations ask the same cells over and over (the follower's
+ * looks, the climb's path checks: three million questions for one proof on the owner's cave) and the live model's answer is
+ * not free.
+ */
+function remembered<T>(from: Vec3, cell: (x: number, y: number, z: number) => T): (x: number, y: number, z: number) => T {
+  const ox = Math.floor(from.x) - 2048;
+  const oz = Math.floor(from.z) - 2048;
+  const seen = new Map<number, T>();
+  return (x, y, z) => {
+    const dx = x - ox;
+    const dy = y + 64;
+    const dz = z - oz;
+    if (!Number.isInteger(dx) || !Number.isInteger(dy) || !Number.isInteger(dz) || dx < 0 || dx > 4095 || dz < 0 || dz > 4095 || dy < 0 || dy > 511) return cell(x, y, z);
+    const k = (dx * 4096 + dz) * 512 + dy;
+    if (seen.has(k)) return seen.get(k) as T;
+    const v = cell(x, y, z);
+    seen.set(k, v);
+    return v;
+  };
+}
 
 /** What a route takeoff's proof flies: the brain's own options for it (`BrainOptions.route` / `.routeTakeoff`). */
 export interface RouteTakeoffFlight {
@@ -413,7 +478,7 @@ export interface RouteTakeoffFlight {
  * as the path ahead stays clear (brain.ts climbYaw); a way out through several goals is searched in its pieces and lands
  * when it loses its plan under the roof (`underRoof`).
  */
-export function routeTakeoffOptions(route: Pick<TakeoffRoute, 'goals' | 'margin' | 'weight' | 'pieces' | 'riskCost'>, curve: boolean): NonNullable<BrainOptions['routeTakeoff']> {
+export function routeTakeoffOptions(route: Pick<TakeoffRoute, 'goals' | 'margin' | 'weight' | 'pieces' | 'riskCost' | 'guide'>, curve: boolean): NonNullable<BrainOptions['routeTakeoff']> {
   return {
     goals: route.goals,
     margin: route.margin,
@@ -421,6 +486,8 @@ export function routeTakeoffOptions(route: Pick<TakeoffRoute, 'goals' | 'margin'
     ...(curve ? { curve: true } : {}),
     ...(route.pieces !== undefined ? { pieces: route.pieces, underRoof: true } : {}),
     ...(route.riskCost !== undefined ? { riskCost: route.riskCost } : {}),
+    // Track F9b: a learned way out is flown along its recorded line by the guide follower (and lands when it loses the line)
+    ...(route.guide ? { guide: { line: route.guide.line, open: route.guide.open }, underRoof: true } : {}),
   };
 }
 
@@ -434,7 +501,10 @@ export function routeTakeoffOptions(route: Pick<TakeoffRoute, 'goals' | 'margin'
  * long). `ok` with the tick the body had open sky over it (`out`: the takeoff's own measure, a quick way OUT) and the
  * time to the goal (the nominal flight's simulated ticks plus the way left at the cruise's speed), or the line saying
  * what it met and at which burn. The route's planner may answer later (the worker): the
- * simulation waits for it.
+ * simulation waits for it. Track F9b: a takeoff along a learned line (`flight.takeoff.guide`: the guide follower in the
+ * tracker's place, no planner at all) is proven the same way and with more of it: every burn from 9 to 21
+ * (LEARNED_PROOF_BURNS), two mixes of them (LEARNED_PROOF_MIXES), each burn's end seen GLIDE.boostEndLag ticks late; its
+ * refusal for a hit or for water says where.
  */
 export async function routeTakeoff(
   deps: SimDeps,
@@ -443,7 +513,7 @@ export async function routeTakeoff(
   opts: Omit<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'ledge' | 'takeoffYaw' | 'vertical' | 'route' | 'routeTakeoff'>,
   rockets: number,
   flight: RouteTakeoffFlight,
-  o: { planTicks?: number; burns?: readonly number[] } = {},
+  o: { planTicks?: number; burns?: readonly number[]; endLag?: number } = {},
 ): Promise<{ ok: boolean; ticks?: number; out?: number; line: string; sims: number }> {
   let pending: Promise<unknown> | undefined;
   // the same search is asked once (the burns fly the same way out until their first rocket ends)
@@ -465,16 +535,25 @@ export async function routeTakeoff(
   };
   const yaw = yawTo(from, target);
   const maxTicks = TAKEOFF_SIM_TICKS + (o.planTicks ?? 0);
-  const fly = (burn?: number): Promise<SimResult> =>
-    simulateFlight(deps, from, target, { ...opts, takeoffYaw: yaw, route: { ...flight.route, plan }, routeTakeoff: flight.takeoff }, { rockets, yaw, maxTicks, until: (b) => b.phase === 'approach', wait, ...(burn !== undefined ? { burn } : {}) });
+  // Track F9b: a learned line's simulations see every burn's end as late as the input loop does (GLIDE.boostEndLag), so a climb
+  // on rockets back to back has its gaps
+  const learned = flight.takeoff.guide !== undefined;
+  const endLag = o.endLag ?? (learned ? GLIDE.boostEndLag : undefined);
+  // (and its fifteen simulations ask the same cells of a world that does not change while they run: remembered for the proof)
+  const world = learned ? { ...deps, world: { ...deps.world, solidAt: remembered(from, (x, y, z) => deps.world.solidAt(x, y, z)) } } : deps;
+  const grid = learned ? { ...flight.route.grid, solid: remembered(from, (x, y, z) => flight.route.grid.solid(x, y, z)) } : flight.route.grid;
+  const fly = (burn?: number | ((rocket: number) => number)): Promise<SimResult> =>
+    simulateFlight(world, from, target, { ...opts, takeoffYaw: yaw, route: { ...flight.route, grid, plan }, routeTakeoff: flight.takeoff }, { rockets, yaw, maxTicks, until: (b) => b.phase === 'approach', wait, ...(burn !== undefined ? { burn } : {}), ...(endLag !== undefined ? { endLag } : {}) });
   const verdict = (sim: SimResult): string | undefined => {
     if (sim.stats.routeTakeoffEnd !== 'out') return sim.stats.routeTakeoffEnd ? `the way out ended ${sim.stats.routeTakeoffEnd}` : sim.end ? `down before the exit (${sim.end.ok ? 'landed' : sim.end.reason})` : `still on the way out after ${sim.ticks} ticks`;
     if (sim.unknownHits) return `enters terrain not loaded (${sim.unknownHits} ticks)`;
     // (a head bump on the way out, a ceiling touched while rising and no wall met, is the route plan's business as it was before
     // this track: the room, the hole and the stack of Track F3 take off under their roofs so; every other contact refuses)
     const hits = sim.hits - (sim.bumps ?? 0);
-    if (hits) return `hits a solid ${hits} time${hits === 1 ? '' : 's'}`;
-    if (sim.wet) return 'ends in water';
+    // (Track F9b: a learned line's refusal says where: the Realm's log is all there is to see of it)
+    const where = learned && sim.firstHit ? ` (the first at tick ${sim.firstHit.tick} in the ${sim.firstHit.phase}, ${sim.firstHit.up.toFixed(0)} over the start and ${sim.firstHit.out.toFixed(0)} blocks from it)` : '';
+    if (hits) return `hits a solid ${hits} time${hits === 1 ? '' : 's'}${where}`;
+    if (sim.wet) return `ends in water${learned && sim.firstWet ? ` (at tick ${sim.firstWet.tick} in the ${sim.firstWet.phase}, ${sim.firstWet.up.toFixed(0)} over the start and ${sim.firstWet.out.toFixed(0)} blocks from it)` : ''}`;
     if (sim.end) return landedOn(target, { ...sim, hits }) ? undefined : simWhy(target, { ...sim, hits });
     return sim.phase === 'land' || sim.phase === 'takeoff' ? `${sim.phase} after ${sim.ticks} ticks` : undefined;
   };
@@ -482,15 +561,21 @@ export async function routeTakeoff(
   let sims = 1;
   const why = verdict(sim);
   if (why !== undefined) return { ok: false, line: why, sims };
-  const burns = o.burns ?? PROOF_BURNS;
+  const burns = o.burns ?? (learned ? LEARNED_PROOF_BURNS : PROOF_BURNS);
   for (const burn of burns) {
     const x = verdict(await fly(burn));
     sims++;
     if (x !== undefined) return { ok: false, line: `clear at the nominal burn; ${x} at a burn of ${burn} ticks`, sims };
   }
+  const mixes = learned && !o.burns ? LEARNED_PROOF_MIXES : [];
+  for (const [first, rest] of mixes) {
+    const x = verdict(await fly((rocket) => (rocket === 0 ? first : rest)));
+    sims++;
+    if (x !== undefined) return { ok: false, line: `clear at every single burn; ${x} with a first rocket of ${first} ticks and ${rest} for the later ones`, sims };
+  }
   const s = sim.stats;
   const turned = s.routeHeadingAt !== undefined ? `the heading from ${Math.round(s.routeExitYaw ?? yaw)} at the exit to the target's by tick ${s.routeHeadingAt}` : `the heading ${Math.round(s.routeExitYaw ?? yaw)} from the exit on`;
-  return { ok: true, ticks: sim.ticks + hdist(sim.body.pos, target) / PROOF_CRUISE_SPEED, ...(s.routeSkyAt !== undefined ? { out: s.routeSkyAt } : {}), line: `clear at burns of ${[GLIDE.boostTicks, ...burns].join(', ')} ticks (through the exit at tick ${s.routeTakeoffTicks ?? '?'}, ${s.routeSkyAt !== undefined ? `open sky at tick ${s.routeSkyAt}` : 'no open sky in the simulation'}, ${turned}${s.steered ? `, steered ${s.steered} ticks` : ''})`, sims };
+  return { ok: true, ticks: sim.ticks + hdist(sim.body.pos, target) / PROOF_CRUISE_SPEED, ...(s.routeSkyAt !== undefined ? { out: s.routeSkyAt } : {}), line: `clear at burns of ${[GLIDE.boostTicks, ...burns].join(', ')} ticks${mixes.length ? ` and of ${mixes.map(([a, b]) => `${a} then ${b}`).join(', ')}` : ''} (through the exit at tick ${s.routeTakeoffTicks ?? '?'}, ${s.routeSkyAt !== undefined ? `open sky at tick ${s.routeSkyAt}` : 'no open sky in the simulation'}, ${turned}${s.steered ? `, steered ${s.steered} ticks` : ''})`, sims };
 }
 
 /** The vertical takeoff's straight climb: the lowest and highest hand-over over the start, and the step between the heights tried. */

@@ -17,7 +17,15 @@
 // has a climb that clears, the WAYS OUT are tried (`waysOut`, `TakeoffRouteOptions.far`: the caller asks for them only
 // with `flyCave` on): a flood that stays under the roof, through cells with room round the box, to the cells under the
 // real sky, the plan through waypoints along the flood's way (`wayGoals`), searched in pieces.
+//
+// Track F9b (docs/flight.md "Learned exits (Track F9b)", decisions/0078): before any of that, a recorded flight that left
+// the ground where the body stands and came out under open sky (`TakeoffRouteOptions.learned`: learn/match.ts) is the way
+// out, flown along its own line by the guide follower and proven as every other route takeoff is; the caller passes the
+// recordings only with `flyCave` and `flyLearned` on.
 import type { Vec3 } from '../../../connection/types.ts';
+import { FOLLOW_MARGIN, LINE_ROOM_MAX, lineRoom } from '../learn/follow.ts'; // Track F9b
+import type { Guide } from '../learn/guide.ts'; // Track F9b
+import type { GuideMatch } from '../learn/match.ts'; // Track F9b
 import { yawTo } from '../plan.ts';
 import type { RouteGrid } from './grid.ts';
 import { planRoute } from './search.ts';
@@ -258,6 +266,12 @@ export interface TakeoffRoute {
   proven?: boolean;
   out?: number;
   score?: number;
+  /**
+   * Track F9b (docs/flight.md "Learned exits"): the way out is a recorded flight's line, flown by the guide follower with no
+   * plan (`goals` is empty, `ticks` the recording's own to its first open sky, `rockets` those it fired on the line): the
+   * line, the blocks along it to its first point under open sky, and how far from the body the recording left the ground.
+   */
+  guide?: { line: Guide; open: number; off: number };
 }
 
 /** Track F9a: the proof of a route takeoff's plan: whether what follows it clears, with the time to the goal (ticks), and the line saying what was flown or met. */
@@ -278,6 +292,36 @@ export interface TakeoffRouteOptions {
   /** Track F9a: no new plan or proof once this long has gone (default TAKEOFF_BUDGET_MS). */
   budgetMs?: number;
   now?: () => number;
+  /**
+   * Track F9b: the recorded flights that leave the ground where the body stands and come out under open sky (learn/match.ts
+   * matchExits, the nearest first). Each is tried before anything else, up to LEARNED_TRIES, and only with `prove`: a
+   * recording is a guide, not a licence, and nothing learned is offered unproven. Powered flight under a roof: the caller
+   * passes them only with `flyCave` and `flyLearned` on.
+   */
+  learned?: { matches: readonly GuideMatch[]; tries?: number };
+}
+
+/** Track F9b: the learned ways out proven at most for one takeoff (each proof is up to fifteen simulations, about a twentieth of a second each). */
+export const LEARNED_TRIES = 3;
+
+/** Track F9b: a recorded line as a takeoff route: its exit is the line's first point under open sky, its ticks the recording's own to there. */
+export function learnedRoute(m: GuideMatch, from: Vec3, yaw: number): TakeoffRoute {
+  const g = m.guide;
+  const k = Math.min(g.points.length - 1, Math.round(m.open));
+  const p = g.points[k]!;
+  return {
+    exit: { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), steps: Math.round(m.open), dist: Math.hypot(p.x - from.x, p.y - from.y, p.z - from.z) },
+    goals: [],
+    margin: FOLLOW_MARGIN,
+    weight: TAKEOFF_WEIGHT,
+    yaw,
+    ticks: Math.round(g.ticks[k] ?? 0),
+    rockets: g.rockets.filter((r) => r.at <= m.open).length,
+    edges: `the recorded line ${g.path}`,
+    nodes: 0,
+    ms: 0,
+    guide: { line: g, open: m.open, off: m.off },
+  };
 }
 
 /** Track F9a: the exits to try: the nearest, then those at least `apart` from every one chosen, then (fewer than `tries` such) the nearest in other columns, as before. */
@@ -304,7 +348,7 @@ export function exitsToTry(exits: readonly Exit[], tries: number, apart = EXIT_A
  * breaks a tie: a takeoff from under a roof first gets OUT, then flies to the goal); none proven and `far`: the ways out under the roof (`waysOut`), the first proven. Without `prove` the first
  * exit with a complete plan wins (Track F3). Undefined route: no exit, no plan, or nothing proven; `tried` says why.
  */
-export async function planTakeoffRoute(grid: RouteGrid, from: Vec3, target: { x: number; z: number }, o: TakeoffRouteOptions = {}, plan?: Planner): Promise<{ route: TakeoffRoute | undefined; exits: number; tried: string[]; ways?: number }> {
+export async function planTakeoffRoute(grid: RouteGrid, from: Vec3, target: { x: number; z: number }, o: TakeoffRouteOptions = {}, plan?: Planner): Promise<{ route: TakeoffRoute | undefined; exits: number; tried: string[]; ways?: number; learned?: number }> {
   const exits = exitsFrom(grid, from);
   const tried: string[] = [];
   const now = o.now ?? (() => performance.now());
@@ -353,6 +397,33 @@ export async function planTakeoffRoute(grid: RouteGrid, from: Vec3, target: { x:
     tried.push(`${planned}; the climb after it: ${proof.line}`);
     return { ...route, proven: true, ...(proof.out !== undefined ? { out: proof.out } : {}), ...(proof.ticks !== undefined ? { score: proof.ticks } : {}) };
   };
+  // Track F9b: the learned ways out first: a recorded flight that left the ground here and came out under open sky, flown
+  // along its own line. The first whose whole takeoff proves clear is taken; one that does not (the world changed since, the
+  // line does not suit this body) is refused in a line and the takeoff goes on as it would without a recording.
+  let learned: number | undefined;
+  if (o.learned && o.prove) {
+    learned = 0;
+    // (the nearest takeoff first, but a line that itself passes within the follower's berth of a block comes after those that
+    // do not: of two takes of one way out the one with room is the one to fly; the owner's own nearest take passes a block
+    // beside its start at a quarter of a block)
+    const takes = o.learned.matches.map((m) => ({ m, room: lineRoom(grid, m.guide, m.open) }));
+    takes.sort((a, b) => Number(a.room < FOLLOW_MARGIN) - Number(b.room < FOLLOW_MARGIN) || a.m.off - b.m.off);
+    for (const { m, room } of takes.slice(0, o.learned.tries ?? LEARNED_TRIES)) {
+      if (tried.length && spent()) break;
+      learned++;
+      const route = learnedRoute(m, from, yaw);
+      const g = m.guide;
+      const at = `the learned way out along ${g.path} (it left the ground ${m.off.toFixed(1)} from here, ${m.open.toFixed(0)} blocks to open sky in ${route.ticks} ticks, ${route.rockets} rocket${route.rockets === 1 ? '' : 's'}, its line ${room >= LINE_ROOM_MAX ? `${LINE_ROOM_MAX} or more` : room.toFixed(2)} from the nearest block)`;
+      const proof = await o.prove(route);
+      if (!proof.ok) {
+        tried.push(`${at}: ${proof.line}: refused`);
+        continue;
+      }
+      tried.push(`${at}: ${proof.line}`);
+      return { route: { ...route, proven: true, ...(proof.out !== undefined ? { out: proof.out } : {}), ...(proof.ticks !== undefined ? { score: proof.ticks } : {}) }, exits: exits.length, tried, learned };
+    }
+  }
+  const more = learned !== undefined ? { learned } : {};
   let best: TakeoffRoute | undefined;
   // (an exit beside one whose climb was refused is the same opening: its climb is the same one)
   const refused: Exit[] = [];
@@ -363,13 +434,13 @@ export async function planTakeoffRoute(grid: RouteGrid, from: Vec3, target: { x:
     const r = await attempt(e, [exitGoal(e)], `${e.x} ${e.y} ${e.z} (${e.steps} cells away)`, false);
     if (!r && tried.length > n0 && tried[tried.length - 1]!.endsWith(': refused')) refused.push(e);
     if (!r) continue;
-    if (!o.prove) return { route: r, exits: exits.length, tried };
+    if (!o.prove) return { route: r, exits: exits.length, tried, ...more };
     // the quickest way OUT (open sky over the body), whatever the goal's bearing; the time to the goal only breaks a tie
     const key = (q: TakeoffRoute): [number, number] => [q.out ?? Infinity, q.score ?? Infinity];
     const [a, b] = [key(r), best ? key(best) : [Infinity, Infinity]];
     if (!best || a[0] < b[0]! || (a[0] === b[0] && a[1] < b[1]!)) best = r;
   }
-  if (best || !o.far) return { route: best, exits: exits.length, tried };
+  if (best || !o.far) return { route: best, exits: exits.length, tried, ...more };
   // none of the exits has a climb that clears (or there is none): the ways out under the roof
   const out = waysOut(grid, from, o.far.top, { ...(o.far.radius !== undefined ? { radius: o.far.radius } : {}), ...(o.far.tries !== undefined ? { tries: o.far.tries } : {}) });
   if (!out.ways.length) tried.push(`no way out under the roof to the open sky (a flood of ${out.cells} cells, within ${o.far.radius ?? WAY_RADIUS})`);
@@ -384,8 +455,8 @@ export async function planTakeoffRoute(grid: RouteGrid, from: Vec3, target: { x:
     if (failed.some((q) => Math.hypot(q.x - w.x, q.y - w.y, q.z - w.z) < 2 * WAY_APART)) continue;
     const goals = wayGoals(w, grid);
     const r = await attempt(w, goals, `the way out at ${w.x} ${w.y} ${w.z} (${w.steps} cells under the roof, ${goals.length} goals)`, true);
-    if (r) return { route: r, exits: exits.length, tried, ways: out.ways.length };
+    if (r) return { route: r, exits: exits.length, tried, ways: out.ways.length, ...more };
     failed.push(w);
   }
-  return { route: undefined, exits: exits.length, tried, ways: out.ways.length };
+  return { route: undefined, exits: exits.length, tried, ways: out.ways.length, ...more };
 }
