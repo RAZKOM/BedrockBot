@@ -9,6 +9,7 @@
 //
 //   --mode lines    what the recorded ways in look like: where they stand again, the line kept, its last open sky, the
 //                   speed and the slope along it, the room it keeps
+import { FlightBrain, type FlightEnd, type FlightPhase } from '../src/skills/fly/brain.ts';
 import { caveWorld, loadCaveFixture, REPLICA_FLAT_FEET, replicaCoarse } from '../src/skills/fly/corridor/cave.ts';
 import { simulateFlight, type SimDeps } from '../src/skills/fly/glide.ts';
 import { caseSpeed, chooseTouchdown, ENTRY_AIM_OUT, ENTRY_AIR, ENTRY_BOX, ENTRY_SOLID, ENTRY_WATER, entryAim, entryCases, entryLine, entryState, entryTouchdowns, entryVerdict, flyEntry, guideSpeed, proveEntry, type EntryLine, type EntryWorld } from '../src/skills/fly/learn/entry.ts';
@@ -19,7 +20,8 @@ import { PathStore } from '../src/skills/fly/learn/store.ts';
 import { APPROACH_HEIGHT, cruiseHeight, type LandingTarget } from '../src/skills/fly/plan.ts';
 import { boxClear } from '../src/skills/fly/route/grid.ts';
 import type { TerrainQuery } from '../src/skills/fly/terrain.ts';
-import { GLIDE } from '../src/skills/input/physics.ts';
+import { GLIDE, stepBody } from '../src/skills/input/physics.ts';
+import { IDLE_COMMAND, initialBody, type BodyState } from '../src/skills/input/types.ts';
 import { TOP_NONE, TOP_UNKNOWN } from '../src/world/cache/export.ts';
 import { CLS_AIR, CLS_WATER } from '../src/world/cache/types.ts';
 import type { Vec3 } from '../src/world/types.ts';
@@ -288,5 +290,112 @@ if (mode === 'approach') {
         if (has('notes') || has('trace')) for (const n of notes) console.log(`      ${n.startsWith('#') ? n.slice(1) : relNote(n).slice(0, 300)}`);
       }
     }
+  }
+}
+
+if (mode === 'arrive') {
+  // Track F9d: the end of a long flight as the live server has it: the body already in the cruise towards the goal (a held
+  // target: its ground not loaded yet), high and fast, `--out` blocks from where the entry's line is aimed at, on the bearing
+  // of `--from` (a waypoint of the fixture; default home), and there RETARGETED to the entry, as tasks/process/fly.ts
+  // watchEntry does once the proof is in. `--overs` (the body's height over the goal there), `--sides` (blocks beside that
+  // bearing), `--speeds` (blocks a tick): every combination is one flight. One line a flight: the go-arounds, the windows
+  // missed, the seconds from the retarget to standing.
+  const skyTop = (x: number, z: number, fromY?: number): number | undefined => {
+    for (let y = Math.min(b.max.y, Math.floor(fromY ?? b.max.y)); y >= floorY; y--) if (solidAt(x, y, z)) return y;
+    return undefined;
+  };
+  const groundAt = (x: number, z: number, fromY?: number): number | undefined => {
+    const t = skyTop(x, z, fromY);
+    return t === undefined || grid.solid(x, t + 1, z) ? undefined : t + 1;
+  };
+  const tops = new Map<string, number | undefined>();
+  const terrain: TerrainQuery = (x, z) => {
+    const k = `${x},${z}`;
+    if (!tops.has(k)) tops.set(k, skyTop(x, z));
+    return { top: tops.get(k), src: 'live' };
+  };
+  const noPlan = (): never => {
+    throw new Error('no route planner in this probe');
+  };
+  const nums = (name: string, def: string): number[] => arg(name, def).split(',').map(Number);
+  const out = Number(arg('out', '320'));
+  const fromAt = fix.waypoints.get(arg('from', 'home'));
+  if (!fromAt) throw new Error(`no waypoint ${arg('from', 'home')}`);
+  for (const { name, line } of lines) {
+    const proof = await proveEntry(ew, line);
+    console.log(`${name}: the proof: ${proof.ok ? '' : 'REFUSED: '}${proof.line}`);
+    if (!proof.ok && !has('unproven')) continue;
+    const aim = entryAim(line, { top: (x, z) => skyTop(x, z) });
+    const hold: LandingTarget = { x: to.x, z: to.z, top: goal.y, half: 2, hold: true };
+    const target: LandingTarget = { x: aim.x, z: aim.z, top: aim.y - APPROACH_HEIGHT, half: 2, bearing: aim.bearing, entry: { line, goal: { x: to.x, z: to.z, top: goal.y, half: 2 }, fallback: hold } };
+    const p0 = line.guide.points[0]!;
+    // the unit vector from the aim towards where the flight comes from, and the one to its right
+    const fl = Math.hypot(fromAt.x - aim.x, fromAt.z - aim.z) || 1;
+    const back = { x: (fromAt.x - aim.x) / fl, z: (fromAt.z - aim.z) / fl };
+    const right = { x: -back.z, z: back.x };
+    console.log(`   the line's start ${rel(p0)}, the cruise's aim ${rel({ x: aim.x, y: aim.y, z: aim.z })}; the flight comes ${Math.round(Math.abs(((((Math.atan2(-back.x, back.z) * 180) / Math.PI - aim.bearing + 540) % 360) - 180)))} degrees off the line's bearing; retargeted ${out} blocks from the aim`);
+    let flights = 0;
+    let clean = 0;
+    const secs: number[] = [];
+    for (const over of nums('overs', '99')) {
+      for (const side of nums('sides', '0')) {
+        for (const speed of nums('speeds', '1.5')) {
+          const start: Vec3 = { x: aim.x + back.x * out + right.x * side, y: goal.y + over, z: aim.z + back.z * out + right.z * side };
+          const notes: string[] = [];
+          const brain = new FlightBrain(hold, { cruiseY: goal.y + Number(arg('cruise-over', '79')), margin: 15, goArounds: 4, route: { grid, plan: noPlan }, note: (m) => notes.push(m), groundAt, skyTop: (x, z) => skyTop(x, z), terrain, obstacle: (x, y, z) => solidAt(x, y, z) });
+          brain.phase = 'cruise';
+          const yaw = (Math.atan2(back.x, -back.z) * 180) / Math.PI;
+          let body: BodyState = { ...initialBody(start, false), vel: { x: -back.x * speed, y: -0.1, z: -back.z * speed }, gliding: true };
+          let cmd = { ...IDLE_COMMAND, yaw, pitch: 0 };
+          let rockets = 64;
+          let lastFire = -100;
+          let lag = 0;
+          let hits = 0;
+          let end: FlightEnd | undefined;
+          let t = 1;
+          let unknown = 0;
+          for (; t <= Number(arg('ticks', '3000')); t++) {
+            if (t === 2) brain.retarget(target, { pos: body.pos, vel: body.vel, onGround: body.onGround, gliding: true, boostTicks: body.boostTicks ?? 0 });
+            const burning = body.boostTicks ?? 0;
+            if (burning > 0) lag = GLIDE.boostEndLag;
+            const seen = burning > 0 ? burning : lag > 0 && body.gliding ? 1 : 0;
+            if (burning === 0 && lag > 0) lag--;
+            const o2 = brain.step({ tick: t, body: { pos: body.pos, vel: body.vel, onGround: body.onGround, gliding: body.gliding ?? false, boostTicks: seen }, yaw: cmd.yaw, pitch: cmd.pitch, rockets, canFire: t - lastFire >= 4, health: 20, elytraLeft: 400 });
+            if (o2.end) {
+              end = o2.end;
+              break;
+            }
+            const c = o2.control;
+            cmd = { ...cmd, yaw: c.yaw, pitch: c.pitch, jump: c.jump, glide: c.glide, forward: c.forward ?? 0, sneak: c.sneak === true, sprint: false };
+            const firing = c.fire && rockets > 0;
+            if (firing) {
+              rockets--;
+              lastFire = t;
+            }
+            const r = stepBody(body, { ...cmd, ...(firing ? { boostStart: Number(arg('burn', '15')) } : {}) }, ew.world);
+            if (!r.simulated) break;
+            const was = body;
+            body = r.state;
+            if (was.gliding && body.pos.y > Math.floor(body.pos.y) + 0.05 && (body.collidedHorizontally || (body.collidedVertically && !body.onGround))) hits++;
+            if (skyTop(Math.floor(body.pos.x), Math.floor(body.pos.z)) === undefined) unknown++;
+            if (has('trace') && Math.hypot(body.pos.x - p0.x, body.pos.z - p0.z) < Number(arg('trace-within', '120')) && (brain.phase as FlightPhase) !== 'entry') {
+              const h = Math.hypot(body.vel.x, body.vel.z);
+              notes.push(`#t${t} ${brain.phase}${brain.descending ? ` (${brain.descending})` : ''} ${Math.hypot(body.pos.x - p0.x, body.pos.z - p0.z).toFixed(0)} from the line's start, ${(body.pos.y - p0.y).toFixed(1)} over it, speed ${Math.hypot(h, body.vel.y).toFixed(2)} climb ${((Math.atan2(body.vel.y, h) * 180) / Math.PI).toFixed(0)} look ${cmd.pitch.toFixed(0)} boost ${body.boostTicks ?? 0}`);
+            }
+          }
+          const en = brain.stats.entry;
+          flights++;
+          const ok = end?.ok === true && brain.stats.goArounds === 0 && (en?.misses ?? 0) === 0 && hits === 0;
+          if (ok) clean++;
+          if (end?.ok) secs.push(t / 20);
+          console.log(
+            `   ${over} over the goal, ${side} beside, ${speed} a tick: ${end ? `${end.ok ? 'landed on the goal' : `ended ${end.reason}`} ${Math.hypot(end.landedAt.x - to.x, end.landedAt.z - to.z).toFixed(1)} from it after ${t} ticks (${(t / 20).toFixed(1)} s from the retarget)` : `still ${brain.phase} after ${t} ticks`}; ${brain.stats.goArounds} go-arounds, ${en?.misses ?? 0} windows missed, ${en?.joins ?? 0} joins, ${hits} contacts, ${brain.stats.rockets} rockets${unknown ? `, ${unknown} ticks over columns the fixture does not know` : ''}; ${brain.stats.descents.join('; ') || 'no descent geometry'}`,
+          );
+          if (has('notes') || has('trace')) for (const n of notes) console.log(`      ${n.startsWith('#') ? n.slice(1) : relNote(n).slice(0, 400)}`);
+        }
+      }
+    }
+    secs.sort((x, y) => x - y);
+    console.log(`   ${name}: ${clean} of ${flights} flights stood on the goal with no go-around, no window missed and no contact; ${secs.length ? `${secs[0]!.toFixed(1)} to ${secs[secs.length - 1]!.toFixed(1)} s from the retarget to standing (median ${secs[Math.floor(secs.length / 2)]!.toFixed(1)})` : 'none stood'}`);
   }
 }

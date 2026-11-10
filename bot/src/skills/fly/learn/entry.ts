@@ -792,25 +792,33 @@ export const ENTRY_TOUCH_REACH = 2;
 export const ENTRY_TOUCH_LEVELS = 1;
 export const ENTRY_TOUCH_SCREENS = 6;
 export const ENTRY_TOUCH_PROOFS = 3;
+/** Track F9d: a touchdown cell with this many of its four neighbours standable at its own level is a floor's; with fewer it is a single block's top, a ledge's end or a hole's bottom, tried after the floor cells at its distance. */
+export const ENTRY_TOUCH_FLOOR = 2;
 
 /**
  * The cells a learned entry may touch down on for a goal (feet cells, whole numbers): the goal's own first, then the
  * standable ones round it (a solid under the feet, the feet and the head in air: an unknown or a liquid cell is neither)
- * by their distance beside the goal, the goal's own level before the level under it before the level over it.
+ * by their distance beside the goal; at one distance a cell of a floor (ENTRY_TOUCH_FLOOR or more of the four cells beside
+ * it standable at its level) before a single block's top or the bottom of a hole (Track F9d: the Realm's entries stood on
+ * a single block beside the goal in most runs and slid off it in two of eight), then the goal's own level before the
+ * level under it before the level over it.
  */
 export function entryTouchdowns(cell: EntryCell, goal: Vec3): Vec3[] {
-  const out: { c: Vec3; d: number; dy: number }[] = [];
+  const stands = (x: number, y: number, z: number): boolean => cell(x, y - 1, z) === ENTRY_SOLID && cell(x, y, z) === ENTRY_AIR && cell(x, y + 1, z) === ENTRY_AIR;
+  const out: { c: Vec3; d: number; dy: number; lone: number }[] = [];
   for (let dy = -ENTRY_TOUCH_LEVELS; dy <= ENTRY_TOUCH_LEVELS; dy++) {
     for (let dx = -ENTRY_TOUCH_REACH; dx <= ENTRY_TOUCH_REACH; dx++) {
       for (let dz = -ENTRY_TOUCH_REACH; dz <= ENTRY_TOUCH_REACH; dz++) {
         const d = Math.hypot(dx, dz);
         if (d > ENTRY_TOUCH_REACH || (dx === 0 && dy === 0 && dz === 0)) continue;
         const c = { x: goal.x + dx, y: goal.y + dy, z: goal.z + dz };
-        if (cell(c.x, c.y - 1, c.z) === ENTRY_SOLID && cell(c.x, c.y, c.z) === ENTRY_AIR && cell(c.x, c.y + 1, c.z) === ENTRY_AIR) out.push({ c, d, dy });
+        if (!stands(c.x, c.y, c.z)) continue;
+        const beside = [[1, 0], [-1, 0], [0, 1], [0, -1]].filter(([ex, ez]) => stands(c.x + ex!, c.y, c.z + ez!)).length;
+        out.push({ c, d, dy, lone: beside >= ENTRY_TOUCH_FLOOR ? 0 : 1 });
       }
     }
   }
-  out.sort((a, b) => a.d - b.d || Math.abs(a.dy) - Math.abs(b.dy) || a.dy - b.dy);
+  out.sort((a, b) => a.d - b.d || a.lone - b.lone || Math.abs(a.dy) - Math.abs(b.dy) || a.dy - b.dy);
   return [{ ...goal }, ...out.map((o) => o.c)];
 }
 

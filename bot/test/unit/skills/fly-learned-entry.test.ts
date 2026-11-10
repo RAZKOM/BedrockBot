@@ -32,6 +32,7 @@ import {
   entryJoin,
   entryLine,
   entryState,
+  ENTRY_TOUCH_FLOOR,
   entryTouchdowns,
   entryVerdict,
   entryWorld,
@@ -386,6 +387,22 @@ describe('the whole flight: out of a cruise onto the line, under the roof, stand
     expect(say).toMatch(/learned entry: standing [\d.]+ from the goal along a recording: \d+ ticks after the commit, \d+ from the line's last open sky/);
   }, 120_000);
 
+  it('Track F9d: a flight that comes in along the lead-in 16 to 36 over its start (the band a lap of the circle is too much for and the hand-over too little): the way down brings it onto the line at the first pass, no circle, no go-around', async () => {
+    const r = rig(cave());
+    const line = lineOf(r);
+    const top = line.guide.points[0]!.y;
+    for (const over of [16, 20, 24, 28, 32, 36]) {
+      const { sim, notes, committedOutside } = await fly(r, { x: -420.5, y: FEET, z: 0.5 }, entryTarget(line), { cruiseY: top + over });
+      const say = `${over} over: ${notes.join(' | ')}`;
+      expect(sim.end?.ok, say).toBe(true);
+      expect(sim.stats.entry, say).toMatchObject({ end: 'landed', misses: 0, joins: 1 });
+      expect(sim.stats.goArounds, say).toBe(0);
+      expect(sim.stats.descents.some((d) => d.startsWith('helix')), say).toBe(false);
+      expect(sim.hits, say).toBe(0);
+      expect(committedOutside, say).toBe(false);
+    }
+  }, 240_000);
+
   it('a flight that comes in 120 over the lead-in: down the helix beside its start, onto the line at a pass along it, standing on the goal', async () => {
     const r = rig(cave());
     const line = lineOf(r);
@@ -634,6 +651,44 @@ describe('round 2: the cave changed since the recording: another touchdown besid
     expect(keys).not.toContain('0 0 -1'); // a solid
     for (const c of cells) expect(Math.hypot(c.x - goal.x, c.z - goal.z)).toBeLessThanOrEqual(2);
     for (let i = 2; i < cells.length; i++) expect(Math.hypot(cells[i]!.x, cells[i]!.z)).toBeGreaterThanOrEqual(Math.hypot(cells[i - 1]!.x, cells[i - 1]!.z));
+  });
+
+  it('Track F9d: at one distance a cell of a floor comes before the top of a single block, whatever their levels', () => {
+    // the goal at (0, 1, 0) on a ledge one cell wide; east of it a single block (its top a level over the goal); west of it
+    // a wide floor a level under the goal
+    const cell = (x: number, y: number, z: number): number => {
+      if (x === 1 && z === 0) return y <= 1 ? ENTRY_SOLID : ENTRY_AIR; // the single block
+      if (x === 0 && z === 0) return y <= 0 ? ENTRY_SOLID : ENTRY_AIR; // the goal's ledge
+      if (x >= 2 || Math.abs(z) >= 1) return y <= -2 ? ENTRY_SOLID : ENTRY_AIR; // a drop round them
+      return y <= -1 ? ENTRY_SOLID : ENTRY_AIR; // the floor to the west
+    };
+    const goal = { x: 0, y: 1, z: 0 };
+    const keys = entryTouchdowns(cell, goal).map((c) => `${c.x - goal.x} ${c.y - goal.y} ${c.z - goal.z}`);
+    expect(keys[0]).toBe('0 0 0');
+    // one block beside the goal: the floor's cell (a level under) is not standable from a ledge 2 over it here, so the
+    // candidates at that distance are the block's top alone; at two blocks the floor's cells come first
+    expect(keys).toContain('1 1 0');
+    expect(ENTRY_TOUCH_FLOOR).toBe(2);
+    // a floor a level under the goal, one beside it, against the single block's top a level over it: the floor first
+    const two = (x: number, y: number, z: number): number => {
+      if (x === 1 && z === 0) return y <= 1 ? ENTRY_SOLID : ENTRY_AIR; // the single block east
+      if (x === 0 && z === 0) return y <= 0 ? ENTRY_SOLID : ENTRY_AIR; // the goal's own floor
+      if (x <= -1) return y <= -1 ? ENTRY_SOLID : ENTRY_AIR; // west: a floor a level under, wide
+      return y <= -3 ? ENTRY_SOLID : ENTRY_AIR;
+    };
+    const k2 = entryTouchdowns(two, goal).map((c) => `${c.x - goal.x} ${c.y - goal.y} ${c.z - goal.z}`);
+    expect(k2.indexOf('-1 -1 0')).toBeGreaterThan(0);
+    expect(k2.indexOf('-1 -1 0')).toBeLessThan(k2.indexOf('1 1 0'));
+    // and the other way round in height: a single block's top a level UNDER the goal against a floor a level OVER it
+    const flip = (x: number, y: number, z: number): number => {
+      if (x === -1 && z === 0) return y <= -1 ? ENTRY_SOLID : ENTRY_AIR; // west: a single block, its top a level under
+      if (x === 0 && z === 0) return y <= 0 ? ENTRY_SOLID : ENTRY_AIR;
+      if (x >= 1) return y <= 1 ? ENTRY_SOLID : ENTRY_AIR; // east: a floor a level over, wide
+      return y <= -4 ? ENTRY_SOLID : ENTRY_AIR;
+    };
+    const k3 = entryTouchdowns(flip, goal).map((c) => `${c.x - goal.x} ${c.y - goal.y} ${c.z - goal.z}`);
+    expect(k3.indexOf('1 1 0')).toBeGreaterThan(0);
+    expect(k3.indexOf('1 1 0')).toBeLessThan(k3.indexOf('-1 -1 0'));
   });
 
   it('the cells are tried in turn and the proof decides: one that leaves the body more than 2 from the goal is refused, the next that clears is the take\'s, and the whole flight stands within 2 of the goal on it', async () => {

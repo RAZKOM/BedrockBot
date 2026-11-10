@@ -190,6 +190,8 @@ export class GuideFollower {
   private firstJump = -1;
   /** Track F9c: a way in (no jump, no rocket); the last rocket fired nothing and is to be asked for again; rockets written off so. */
   private readonly entry: FollowEntry | undefined;
+  /** Track F9d: what the notes call the line: a recorded one or a drawn one (learn/draw.ts). */
+  private readonly said: string;
   private refire = false;
   private replaced = false;
   private tapped = false;
@@ -202,6 +204,7 @@ export class GuideFollower {
     this.length = guideLength(o.guide);
     this.note = o.note;
     this.entry = o.entry;
+    this.said = o.guide.drawn ? 'drawn line' : 'learned line';
     if (o.entry?.at !== undefined) this.at = Math.max(0, o.entry.at);
   }
 
@@ -225,7 +228,7 @@ export class GuideFollower {
       this.replaced = true;
       const back = guideNearest(this.g, b.pos, 0, this.at + FOLLOW_AIM_MAX);
       if (back.at < this.at) {
-        this.note?.(`learned line: the body is ${back.at.toFixed(0)} blocks along the line, not ${this.at.toFixed(0)} (a rocket's boost was taken back): followed from there`);
+        this.note?.(`${this.said}: the body is ${back.at.toFixed(0)} blocks along the line, not ${this.at.toFixed(0)} (a rocket's boost was taken back): followed from there`);
         this.at = back.at;
         this.movedAt = back.at;
         this.movedTick = this.stats.ticks;
@@ -274,7 +277,7 @@ export class GuideFollower {
     if (FOLLOW_SWITCH.dud && !boosting && this.wasBoosting && this.sinceFire < FOLLOW_DUD_TICKS) {
       this.refire = true;
       this.duds++;
-      this.note?.(`learned line: rocket ${this.fired} fired nothing (its burn taken back after ${this.sinceFire} ticks, ${this.at.toFixed(0)} blocks along the line at ${speed.toFixed(2)} a tick): asked for again`);
+      this.note?.(`${this.said}: rocket ${this.fired} fired nothing (its burn taken back after ${this.sinceFire} ticks, ${this.at.toFixed(0)} blocks along the line at ${speed.toFixed(2)} a tick): asked for again`);
     }
     this.wasBoosting = boosting;
     while (boosting && this.next < this.g.rockets.length && this.due(this.g.rockets[this.next]!)) this.next++;
@@ -323,7 +326,7 @@ export class GuideFollower {
       if (this.notedFor !== this.fired) {
         this.notedFor = this.fired;
         const r = this.g.rockets[this.next];
-        this.note?.(`learned line: rocket ${this.fired + 1} asked for ${this.at.toFixed(0)} blocks along it, ${this.air} ticks off the ground (${r && this.due(r) ? 'where the recording fired one' : this.refire ? 'the one before fired nothing' : `the body at ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} a tick with line ahead`})`);
+        this.note?.(`${this.said}: rocket ${this.fired + 1} asked for ${this.at.toFixed(0)} blocks along it, ${this.air} ticks off the ground (${r && this.due(r) ? (this.g.drawn ? "the takeoff's" : 'where the recording fired one') : this.refire ? 'the one before fired nothing' : `the body at ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} a tick with line ahead`})`);
       }
     }
     return { control: { yaw: look.yaw, pitch: look.pitch, fire }, status: 'following', at: this.at, error: near.dist, ...(look.crash ? { crash: true } : {}) };

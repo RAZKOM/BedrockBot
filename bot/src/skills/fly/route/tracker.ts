@@ -789,7 +789,13 @@ export class RouteTracker {
       const a = at(k);
       if (cave && !a.gliding) continue; // the takeoff tick leaves the floor it stands on
       // (the landing cell's floor is no obstacle near it, as the search had it: primitives.ts sweepGridFor)
-      const grid = cave ? sweepGridFor(this.o.grid, this.planGoals[a.wp], a.pos) : this.o.grid;
+      // (Track F9d: for a route landing in the open too. Its tracker swept the whole grid, so every landing plan was "blocked"
+      // two ticks before its end by its own touchdown and searched again from the middle of its last manoeuvre, five to
+      // eight times a landing; where one of those searches found nothing (the stacked platforms' slot: plans that pass its
+      // lip with 0.13 to 0.17 of clearance) the tracker fired a rocket and flew round the platform. From hand-overs inside
+      // the band that was 4 of 126 landings of the slot, and 14 of 338 whole flights; with the search's own grid 0 and 0,
+      // and one re-plan a landing instead of six. The margin and the other drivers' check are as they were.)
+      const grid = cave || this.o.library === 'landing' ? sweepGridFor(this.o.grid, this.planGoals[a.wp], a.pos) : this.o.grid;
       if (sweep(grid, a.pos, at(k + 1).pos, margin).hit) {
         const q = at(k + 1).pos;
         if (states === p.states) this.o.note?.(`route: the plan's corridor is blocked at tick ${k + 1} of ${p.states.length} (${q.x.toFixed(1)} ${q.y.toFixed(1)} ${q.z.toFixed(1)}, margin ${margin.toFixed(2)})`);

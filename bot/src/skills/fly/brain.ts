@@ -68,12 +68,12 @@ import { BRAKE_BIAS, BrakePlanner } from './brake.ts'; // Track F1
 import { assumedTop, BUILD_TOP, CLIMB_SLOPE, strictObstacle, terrainFloor, type TerrainFloor, type TerrainQuery } from './terrain.ts'; // Track BL
 import { DIVE_END_MAX, DIVE_MIN_ABOVE, DIVE_MIN_ABOVE_FORCED, divePhase, divePitch, planDive, simulateDive, type DivePhase, type DiveProfile } from './dive.ts'; // Track BL
 import type { RouteGrid } from './route/grid.ts'; // Track F3
-import { ROUTE_HANDOVER, ROUTE_PLAN_NODES, ROUTE_TRACK_MS } from './route/landing.ts'; // Track F3
+import { ROUTE_ENTRY_OUT, ROUTE_ENTRY_UP, ROUTE_HANDOVER, ROUTE_PLAN_NODES, ROUTE_TRACK_MS } from './route/landing.ts'; // Track F3
 import { RouteTracker, type Planner } from './route/tracker.ts'; // Track F3
 import { decideGoAround, SINK_S_PER_BLOCK, WALK_S_PER_BLOCK, walkSeconds, type LandingOffer, type MissKind } from './landprice.ts'; // Track L1
 import type { RouteGoal } from './route/types.ts'; // Track F3
 import { GuideFollower } from './learn/follow.ts'; // Track F9b
-import { guideLength, type Guide } from './learn/guide.ts'; // Track F9b
+import { guideLength, guideSaid, type Guide } from './learn/guide.ts'; // Track F9b
 import { ENTRY_JOIN, EntryFlier, entryJoin } from './learn/entry.ts'; // Track F9c
 
 /** Track F3: `route`: the RouteTracker flies the last blocks onto a route landing (docs/flight.md "Route landings and takeoffs"). */
@@ -219,9 +219,24 @@ export interface BrainOptions {
 export const ENTRY_TRIES = 2;
 /** Track F9c: a body this near the entry's line (blocks, beside or over it) that is past its window has missed it; farther off it is still on its way round. */
 export const ENTRY_PASS_NEAR = 24;
-/** Track F9c: the cruise's dive onto a learned entry's lead-in: this many degrees steeper than the slope still needed, at most this steep. */
-export const ENTRY_DIVE_OVER = 6;
-export const ENTRY_DIVE_MAX = 40;
+/**
+ * Track F9d (docs/flight.md "Drawn lines (Track F9d)", "The entry's first pass"): the cruise's way down onto a learned
+ * entry's lead-in (brain.ts entrySink). A glide's fall a tick depends on its look alone, whatever its speed (the formula:
+ * 0.149 at pitch 0, 0.339 at pitch 30), so the slope a body flies is that fall divided by its speed: a fast body cannot
+ * come down steeply by looking down (it only gets faster: at pitch 20 from 1.5 a tick it sinks 0.13 of a block a block
+ * flown), a slower one can. ENTRY_SINK is the fall at each pitch (measured on the formula, steady within ten ticks). The
+ * way down is the pitch whose fall is the slope still needed at the body's speed, at most ENTRY_SINK_PITCH; where that is
+ * not enough, or the body is over ENTRY_SINK_FAST, the look goes straight back for a tick (as the flier's governor does,
+ * learn/follow.ts: a fifth of the speed, the direction kept), never two ticks running and not under ENTRY_SINK_SLOW. That flies slopes up to ENTRY_SINK_PITCH's fall over ENTRY_SINK_SLOW, 0.38 a block.
+ */
+export const ENTRY_SINK: readonly (readonly [number, number])[] = [[0.149, 0], [0.154, 5], [0.168, 10], [0.192, 15], [0.227, 20], [0.275, 25], [0.339, 30]];
+export const ENTRY_SINK_PITCH = 30;
+export const ENTRY_SINK_FAST = 1.6;
+export const ENTRY_SINK_SLOW = 0.9;
+/** Track F9d: the look of that one tick: level, straight back (1.5 a tick becomes 1.19 and the fall is as it was; 30 up, the flier's governor under a roof, would add 0.06 a tick of rise). */
+export const ENTRY_SINK_TAP = 0;
+/** Track F9d: the way down keeps this far over the flight's terrain floor (blocks); within it the body rides the floor, and no speed is taken off within twice it. */
+export const ENTRY_SINK_FLOOR = 3;
 /** Track F9c: a descent circle over a learned entry's lead-in is flown at this pitch (the cruise's is 8), level again over this speed. */
 export const ENTRY_SPIRAL_PITCH = 30;
 export const ENTRY_SPIRAL_FAST = 1.5;
@@ -245,6 +260,8 @@ export const ENTRY_HELIX_CLEAR = 3;
 export const ENTRY_HELIX_LOW = 4;
 export const ENTRY_HELIX_PAST = 8;
 export const ENTRY_HELIX_FAR = 6;
+/** Track F9d: a body heading within this of the lead-in's own heading (degrees), before its start and within the hand-over's reach beside it, comes in along it: no circle of no whole lap for it (the cruise's way down flies that piece: entrySink). */
+export const ENTRY_HELIX_ALONG = 25;
 /** Track F9c: the blocks along a lead-in for each block a body is over it before the hand-over's test finds it on the line (a lead-in comes down 20 degrees at the most: learn/entry.ts ENTRY_LEAD_SLOPE). */
 export const ENTRY_HELIX_SLOPE = 0.4;
 /**
@@ -357,6 +374,10 @@ export function climbPitchFor(height: number): number {
 export function verticalCoast(vy: number): number {
   return vy > 0 ? (vy * vy) / 0.2 : 0;
 }
+/** Track F9d: the same for a route landing's cruise near its cell (ROUTE_CAP_COAST). */
+export function capCoast(vy: number): number {
+  return vy > 0 ? (vy * vy) / (ROUTE_CAP_COAST.at + ROUTE_CAP_COAST.rise * vy) : 0;
+}
 /** Blocks a body rising at vy still climbs after the boost ends (pitched level: vy decays by about 0.04 per tick). */
 export function climbMomentum(vy: number): number {
   return vy > 0 ? (vy * vy) / 0.08 : 0;
@@ -371,7 +392,8 @@ export const SPIRAL_ABOVE = 12;
 export const SPIRAL_UNTIL = 6;
 /**
  * Track F4a: a route landing is handed over at the glide line's height (the planned entry: 40 out, 9 over the cell; the
- * tracker lands from 5 to 13 over the cell at 0.65 to 1.3 a tick, from 17 and more not always: docs/flight.md). Lined up
+ * tracker lands from 5 to 13 over the cell at 0.65 to 1.3 a tick, from 17 and more not always: docs/flight.md; Track F9d
+ * measured that band state by state and it is narrower, the height and the speed together: ROUTE_HAND_BAND). Lined up
  * on the corridor, from APPROACH_DISTANCE + 60 in (farther when higher: the surplus over ROUTE_STURN_MAX), the sink still
  * needed a block of the way to the hand-over decides (routeSink): up to the level glide's (ROUTE_LEVEL_SINK) the cruise
  * as before; up to ROUTE_SINK_MAX a steeper glide; beyond, S-turns along the corridor line (the path longer by 1 / cos of
@@ -382,6 +404,65 @@ export const SPIRAL_UNTIL = 6;
 export const ROUTE_LEVEL_SINK = 0.15;
 export const ROUTE_SINK_MAX = 0.2;
 export const ROUTE_STURN_MAX = 0.24;
+/**
+ * Track F9d (docs/flight.md "Drawn lines (Track F9d)", "The route landing that arrived too high"): a route landing within
+ * ROUTE_CAP_RANGE of its cell has no room to glide off a climb that tops out high (a level glide sinks a tenth of a block
+ * a block; the S-turns a quarter at most): 150 blocks out the gate's flight was handed over 10 to 27 over the cell,
+ * depending on how long its first two rockets happened to burn, where the tracker lands from 5 to 13. Inside that range
+ * a burning rocket climbs no higher than the hand-over's line (the hand-over's height, ROUTE_HAND_UP over the cell, and a
+ * tenth of a block for every block still to fly to it) and ROUTE_CAP_OVER: the pitch is the one whose climb, were the burn
+ * to end this tick, coasts just that far (`capPitch`), so the height reached does not depend on the burn's length. And a
+ * body over that line takes its speed off by looking back for a tick (ENTRY_SINK_TAP) where the cruise would pull up to
+ * bleed it: a pull-up from 1.55 to 1.05 a tick is 8 blocks of height.
+ */
+export const ROUTE_CAP_RANGE = ROUTE_HANDOVER + 160;
+export const ROUTE_CAP_OVER = 1;
+/**
+ * Track F9d, round 2: what the hand-over is flown to, and what it has to be. Measured on the planner (one search from each
+ * state, straight in on the bearing a block inside ROUTE_HANDOVER, onto the stacked platforms' 2-high slot and onto a cell
+ * under a roof 3 above with walls on three sides): from 8 to 10 over the cell at 0.7 to 1.2 a tick every state has a whole
+ * plan, mostly within 40 expansions (ROUTE_HAND_BAND). Outside it the height and the speed go together: half a block
+ * higher the room has one only at 0.8 a tick and under (a slow body sinks more a block: 0.15 a tick is 0.19 a block at
+ * 0.8 and 0.14 at 1.05), 7 over only from 0.8 to 1.1, 6 over only from 1.0. Round 1 aimed at the glide line's height
+ * (10 over) and a block more and bled the speed to APPROACH_SPEED whatever the height: the room was handed over 10.6 over
+ * at 1.03 a tick, no search from there ended, and the landing took 8 rockets and 277 ticks of partial plans where the
+ * base's took 71. So the height aimed at is the planner's own entry's (ROUTE_HAND_UP), and within ROUTE_CAP_LEVEL of
+ * the hand-over a body that would still arrive over it flies at the speed whose level glide sinks what is left (`handIn`),
+ * never slower than ROUTE_HAND_SLOW.
+ */
+export const ROUTE_HAND_UP = ROUTE_ENTRY_UP + (ROUTE_HANDOVER - ROUTE_ENTRY_OUT) * ROUTE_LEVEL_SINK;
+export const ROUTE_HAND_BAND = { low: 8, high: 10, slow: 0.7, fast: 1.2 } as const;
+/** Track F9d: the fall a tick of that last stretch's glide (a level look, 8 down under 0.95 a tick), the height over the hand-over's that is left alone, the slowest it is flown, and how far over the speed wanted a tick of looking back is due (it takes a fifth). */
+export const ROUTE_HAND_SINK = 0.16;
+export const ROUTE_HAND_OVER = 0.3;
+export const ROUTE_HAND_SLOW = 0.72;
+export const ROUTE_HAND_TAP = 0.1;
+/** Track F9d: what a body sinks over the ROUTE_CAP_LEVEL blocks of that last stretch when it comes off the way down (it leaves it sinking 0.2 to 0.3 a tick: measured 2.7, where a body already level sinks 1.9): the way down ends this far over the hand-over's height. */
+export const ROUTE_HAND_DROP = 2.7;
+/**
+ * Track F9d: the height a body rising at vy still gains on a level look, as that route landing's cruise counts it: the rise
+ * squared over ROUTE_CAP_COAST.at and .rise for every block a tick of rise. Measured on the formula from 1.0 to 1.6 a
+ * tick: 0.3 up a tick coasts 1.7 blocks, 0.6 coasts 6.2, 1.06 coasts 16.4 (the rise squared over 0.052, 0.058 and 0.069);
+ * `climbMomentum`'s 0.08 is a third short of that, which is why this cruise fired top-ups a climb did not need: its first
+ * rocket's momentum had not carried yet. Looking 6 up, the cruise's way of bleeding speed, the same 0.6 a tick coasts 14.8.
+ */
+export const ROUTE_CAP_COAST = { at: 0.05, rise: 0.017 };
+/** Track F9d: within this of the hand-over that cruise fires no top-up while the level glide still brings the body to it ROUTE_CAP_LOW over the cell or more (the planner lands from 6 over it at the speed such a body has, 1.0 and over; a rocket fired 8 blocks before the hand-over was handed over burning, at 1.63 a tick). */
+export const ROUTE_CAP_LATE = 30;
+export const ROUTE_CAP_LOW = 6;
+/** Track F9d: a burn near that hand-over is capped to the line where its coast will have ended: this many blocks on (a rise of 0.5 a tick coasts 20 ticks at 1.3 a tick). */
+export const ROUTE_CAP_AHEAD = 25;
+/**
+ * Track F9d: inside ROUTE_CAP_RANGE a surplus the steeper glide does not sink (over ROUTE_SINK_MAX a block) is flown down
+ * straight, by the way down onto a learned entry's lead-in (entrySink), and no longer by S-turns: they left the body 9
+ * to 14 blocks beside the corridor's line at the hand-over, heading up to 20 degrees off it, and the band was measured
+ * straight in. Not within ROUTE_CAP_LEVEL of the hand-over: a body handed over on the line but sinking 0.28 a tick at
+ * 0.8 found no whole plan and fired a rocket; the band was measured with a body in a level glide. The way down and the
+ * steeper glide aim at where that last stretch begins: its own sink (ROUTE_HAND_DROP) over the hand-over's height.
+ */
+export const ROUTE_CAP_LEVEL = 12;
+/** Track F9d: over the hand-over's line and still rising, that cruise looks this far down (the rise goes a third sooner than on a level look). */
+export const ROUTE_CAP_DOWN = 20;
 /** Track F4a: the sink (a tick) the S-turns fly at (pitch 8 holds about 1 a tick). */
 const ROUTE_STURN_SINK = 0.158;
 const ROUTE_STURN_PITCH = 8;
@@ -475,6 +556,12 @@ export class FlightBrain {
   private helixGround: { line: object; at: number; sides: { centre: { x: number; z: number }; dir: 1 | -1; floor: number | undefined }[] } | undefined;
   /** Track F9c: the climb away from a learned entry's line after it was given up beside it: the heading, the height it ends at, the tick it began. */
   private escape: { yaw: number; until: number; since: number; roof: { x: number; z: number } } | undefined;
+  /** Track F9d: the way down onto a learned entry's lead-in (entrySink): the look before its last tick of looking back, the tick of that, and how many there were. */
+  private sinkLook: { yaw: number; pitch: number } | undefined;
+  private sinkTapAt = -10;
+  private sinkTaps = 0;
+  /** Track F9d: the climb straight up out of a pit (climbUp): where and when it began. */
+  private upSince: { y: number; tick: number } | undefined;
   /** Track F3: the route tracker of the landing (from the hand-over) or of the route takeoff; the gliding ticks in a row of the takeoff. */
   private tracker: RouteTracker | undefined;
   private routeGlideTicks = 0;
@@ -603,7 +690,13 @@ export class FlightBrain {
     // (committed only to a plan that lands: a flare that pulls up into an overshoot may still become a brake)
     const flareCommitted = this.flown === 'flare' && (this.planner.state.phase === 'B' || this.planner.state.phase === 'C') && this.planner.current?.touchdown.kind === 'landed';
     const brakeCommitted = this.flown === 'brake' && this.brakePlanner.state.phase === 'K' && this.brakePlanner.current?.touchdown.kind === 'landed';
-    if (style === 'brake' || (style === 'auto' && brakeCommitted)) return this.flownWith('brake', this.brakePlanner.step(b, look, aim), this.brakePlanner.missing);
+    // Track F9d: a cell under a rim (a shaft's floor, a hole in the ground) is the brake's alone, as plan.ts says of `rim`
+    // ("only the brake / elevator landing comes down inside it"). The flare's plan may say it lands there (its simulated
+    // settle sinks into the hole with a tenth of a block to spare each side) and cost less than the brake's for a tick;
+    // flown, it comes down a third of a block off the centre and stands on the rim (the gate's 1 x 1 hole: `landed_off`
+    // 0.37 from the centre, two blocks over the floor, the same flight on two commits)
+    const sunk = aim.rim !== undefined && aim.rim > aim.top;
+    if (style === 'brake' || (style === 'auto' && (brakeCommitted || sunk))) return this.flownWith('brake', this.brakePlanner.step(b, look, aim), this.brakePlanner.missing);
     const f = this.planner.step(b, yaw, aim);
     if (style === 'flare' || flareCommitted) return this.flownWith('flare', f, this.planner.missing);
     const precise = aim.precise === true || aim.half < 1;
@@ -1097,6 +1190,9 @@ export class FlightBrain {
     const willReach = b.pos.y + climbMomentum(b.vel.y);
     // Track BL: never hand over under the terrain floor ahead (a mountain the cruise height did not know)
     const climbTo = Math.max(this.o.cruiseY, this.terrainNeed(b) ?? -Infinity);
+    // (Track F9d: on its way straight up out of a pit the climb stays that until the path ahead clears, whatever height the
+    // momentum promises: handed to the cruise inside a shaft, the body turned to the goal's heading into its wall)
+    if (this.upSince !== undefined && this.climbUp(i, ctl)) return ctl;
     if (willReach >= climbTo || d <= APPROACH_DISTANCE + 6) {
       // (Track BF: a held target or an overhang's corridor is flown from the cruise, never straight into an approach)
       // (Track BH: nor from far too high: a glide down off a ledge 40 up starts within the approach distance; the cruise's descent geometry first)
@@ -1113,6 +1209,7 @@ export class FlightBrain {
         this.phase = 'cruise';
         return this.cruise(i, ctl);
       }
+      if (this.climbUp(i, ctl)) return ctl;
       ctl.pitch = this.burnPitch;
       this.steerClear(i, ctl);
       return ctl;
@@ -1128,6 +1225,7 @@ export class FlightBrain {
       this.phase = 'cruise';
       return this.cruise(i, ctl);
     }
+    if (this.climbUp(i, ctl)) return ctl;
     // between rockets: keep the speed, pitch up only while it lasts; the next rocket only when the momentum will not carry us there
     ctl.pitch = h < STALL_SPEED + 0.15 ? 10 : h < 0.9 ? -10 : this.o.climbPitch;
     if (this.steerClear(i, ctl)) return ctl;
@@ -1139,6 +1237,37 @@ export class FlightBrain {
   }
 
   /**
+   * Track F9d (docs/flight.md "Drawn lines (Track F9d)"): the climb out of a pit. A way out of a cave may end at the bottom
+   * of a pit or a shaft (the owner: "even if the way out of the cave is straight up as soon as it has open sky above it, it
+   * can then just glide home"): the sky is open straight over the body and every heading has a wall. After a proven route
+   * takeoff, where the path ahead at the climb's pitch meets a solid on the held heading and on the seven others 45 degrees
+   * apart, and the 3 x 3 over the body is open up to the cruise height, the climb looks straight up (VERTICAL_PITCH, as the vertical takeoff does from the
+   * ground) on rockets back to back; the tick that path clears, it climbs on as any other. Without this the path check
+   * turned the body round inside the pit or ended the flight `roof` under open sky. True while its controls are set.
+   */
+  private climbUp(i: BrainInput, ctl: BrainControl): boolean {
+    const b = i.body;
+    const obstacle = this.o.obstacle;
+    if (!this.o.routeTakeoff?.curve || !obstacle || !b.gliding || this.stats.routeSkyAt === undefined) return false;
+    if (pathAhead({ ...b, boostTicks: Math.max(b.boostTicks, 1) }, ctl.yaw, this.burnPitch, LOOKAHEAD_TICKS, obstacle) === undefined) {
+      if (this.upSince !== undefined) this.o.note?.(`route takeoff: up out of the pit: ${(b.pos.y - this.upSince.y).toFixed(0)} blocks straight up in ${this.stats.ticks - this.upSince.tick} ticks, the path ahead on heading ${Math.round(ctl.yaw)} is clear from here`);
+      this.upSince = undefined;
+      return false;
+    }
+    if (!takeoffSky(b.pos, this.target, this.o.cruiseY, 0, (x, y, z) => obstacle(x, y, z)).ok) return false;
+    // (it begins only where every heading has the wall: a cliff across one heading, a hill beside a cave's mouth, is turned
+    // away from as before; once begun it goes on until the held heading is clear)
+    if (this.upSince === undefined && ![45, 90, 135, 180, 225, 270, 315].every((a) => pathAhead({ ...b, boostTicks: Math.max(b.boostTicks, 1) }, ctl.yaw + a, this.burnPitch, LOOKAHEAD_TICKS, obstacle) !== undefined)) return false;
+    if (this.upSince === undefined) {
+      this.upSince = { y: b.pos.y, tick: this.stats.ticks };
+      this.o.note?.(`route takeoff: open sky straight over the body and a solid ahead on heading ${Math.round(ctl.yaw)} at the climb's pitch (a pit): straight up until the path ahead clears`);
+    }
+    ctl.pitch = VERTICAL_PITCH;
+    if (b.boostTicks === 0) this.fire(i, ctl, 'climb');
+    return true;
+  }
+
+  /**
    * The cruise (Track AU2, the energy model of docs/flight.md "Rocket economy"): glide level along the
    * line that reaches the approach entry at GLIDE_RATIO; a rocket only when the projected height (the
    * climb's momentum included) falls under that line plus the margin, pitched up for the height it
@@ -1146,6 +1275,14 @@ export class FlightBrain {
    * over the margin when it is the last). Far too high near the target: the descent geometry.
    */
   private cruise(i: BrainInput, ctl: BrainControl): BrainControl {
+    // (Track F9d: the tick after the way down onto a lead-in looked straight back, the look is the one before it again:
+    // every turn below starts from where the body was looking, not from the look turned round)
+    if (this.sinkLook !== undefined && this.stats.ticks - this.sinkTapAt === 1) {
+      i = { ...i, yaw: this.sinkLook.yaw, pitch: this.sinkLook.pitch };
+      ctl.yaw = i.yaw;
+      ctl.pitch = i.pitch;
+    }
+    this.sinkLook = undefined;
     const b = i.body;
     ctl.glide = true;
     // Track F9c: a learned entry was given up beside its line: up and away from the roof first (entryFallback)
@@ -1262,7 +1399,13 @@ export class FlightBrain {
       return this.approach(i, ctl, this.target);
     }
     const spare = glideMargin(this.o.margin, d);
-    const projected = b.pos.y + climbMomentum(b.vel.y);
+    // Track F9d: a route landing near enough that a climb's overshoot cannot be glided off before the hand-over
+    // (ROUTE_CAP_RANGE), and the height the body should have here to be handed over at the glide line's; its rise still to
+    // come is counted as it is on a level look (ROUTE_CAP_COAST)
+    const capped = routed && !en && !entry && d <= ROUTE_CAP_RANGE;
+    const handY = entryTop(this.target) + ROUTE_HAND_UP;
+    const capLine = handY + Math.max(0, d - ROUTE_HANDOVER) / GLIDE_RATIO;
+    const projected = b.pos.y + (capped ? capCoast(b.vel.y) : climbMomentum(b.vel.y));
     const above = projected - glideLine(this.target, d);
     // Track BL: the terrain floor ahead (the sink line never goes under it) and the high cruise's floor
     const need = this.terrainNeed(b);
@@ -1275,6 +1418,10 @@ export class FlightBrain {
       // every tick and the climb's momentum is lost; the whole burn goes into height, the cap of flyMaxClimb
       // bounds the climb's rockets, not the last one's run-out)
       ctl.pitch = this.cruiseFired ? this.cruisePitch : this.o.climbPitch;
+      // (Track F9d: near a route landing no burn climbs over the hand-over's line, however long it lasts: ROUTE_CAP_RANGE;
+      // not while the terrain ahead asks for the height)
+      // (the line where the coast after the burn will have ended, ROUTE_CAP_AHEAD blocks on: it comes down as the body flies)
+      if (capped && terrainShort <= 0) ctl.pitch = Math.max(ctl.pitch, this.capPitch(b, Math.max(capLine - ROUTE_CAP_AHEAD / GLIDE_RATIO, handY) + ROUTE_CAP_OVER));
       this.trackAvoid(b, terrainShort, i.rockets);
       this.steerClear(i, ctl);
       return ctl;
@@ -1296,7 +1443,9 @@ export class FlightBrain {
     // a small one (the tracker dives off a surplus more easily than it climbs out of a deficit); none right before the hand-over)
     // (Track F9c: on the way onto a learned entry's lead-in at any speed that flies: the line runs along the ground before a
     // roof, and a slow body under it there has nowhere to go but down onto that ground)
-    const econ = above < spare - 3 && (h >= 1.1 || (routed && h >= 0.8) || (en !== undefined && h >= STALL_SPEED));
+    // (Track F9d: near a route landing's hand-over none while the level glide still arrives over the tracker's low end: ROUTE_CAP_LATE)
+    const late = capped && d <= ROUTE_HANDOVER + ROUTE_CAP_LATE && projected - (ROUTE_LEVEL_SINK * Math.max(0, d - ROUTE_HANDOVER)) / Math.max(0.8, h) >= this.target.top + ROUTE_CAP_LOW;
+    const econ = above < spare - 3 && !late && (h >= 1.1 || (routed && h >= 0.8) || (en !== undefined && h >= STALL_SPEED));
     if ((econ || (short > 0 && h >= 0.8)) && i.rockets > 0 && !(routed && d <= ROUTE_HANDOVER + 4)) {
       // the height this rocket should buy: a whole rocket's worth while the glide ahead can use it, else just enough
       const glideAhead = d - APPROACH_DISTANCE;
@@ -1313,10 +1462,33 @@ export class FlightBrain {
       }
     }
     if (h < STALL_SPEED + 0.1) ctl.pitch = 15;
-    else if (routed && !entry && !detouring && terrainShort < 0 && d > ROUTE_HANDOVER && d <= Math.max(APPROACH_DISTANCE + 60, ROUTE_HANDOVER + (b.pos.y - glideLine(this.target, ROUTE_HANDOVER)) / ROUTE_STURN_MAX) && this.routeSink(i, ctl, d, h)) {
+    else if (en && !entry && !detouring && terrainShort < 0 && d > ROUTE_HANDOVER && this.entrySink(i, ctl, d, h, need !== undefined ? b.pos.y - need : Infinity)) {
+      // (Track F9d: onto a learned entry's lead-in, from as far out as the body is lined up on it: entrySink set the controls;
+      // a tick of looking back is flown as it is, with no path check on a look turned round)
+      if (this.sinkTapAt === this.stats.ticks) return ctl;
+    } else if (capped && !detouring && terrainShort < 0 && d > ROUTE_HANDOVER + ROUTE_CAP_LEVEL && this.routeNeed(b, d) > ROUTE_SINK_MAX && this.entrySink(i, ctl, d, h, need !== undefined ? b.pos.y - need : Infinity)) {
+      // (Track F9d: a route landing more over its hand-over's height than the steeper glide sinks (a fifth of a block a
+      // block): the way down of a learned entry's lead-in, straight along the corridor's line, the speed taken off by a tick
+      // of looking back; round 2: for every such surplus, where round 1 left those up to a quarter to the S-turns)
+      if (this.sinkTapAt === this.stats.ticks) return ctl;
+    } else if (!en && routed && !entry && !detouring && terrainShort < 0 && d > ROUTE_HANDOVER + (capped ? ROUTE_CAP_LEVEL : 0) && d <= Math.max(APPROACH_DISTANCE + 60, ROUTE_HANDOVER + (b.pos.y - glideLine(this.target, ROUTE_HANDOVER)) / ROUTE_STURN_MAX) && this.routeSink(i, ctl, d, h)) {
       // (Track F4a: onto the hand-over's height: routeSink set the controls)
+      // (Track F9d: not within ROUTE_CAP_LEVEL of the hand-over: the sink needed a block is the height over the line by the
+      // blocks left, and two blocks over it 11 blocks out read as a quarter of a block a block: S-turns began there and the
+      // body was handed over 6 blocks beside the corridor's line heading 35 degrees off it, which the tracker did not land.
+      // Inside ROUTE_CAP_RANGE this is the steeper glide alone now; the S-turns are flown farther out)
+    } else if (capped && !detouring && terrainShort < 0 && d <= ROUTE_HANDOVER + ROUTE_CAP_LEVEL && this.handIn(ctl, b, d, h)) {
+      // (Track F9d, round 2: the last stretch before a route landing's hand-over, still over its height: handIn set the controls)
+      if (this.sinkTapAt === this.stats.ticks) return ctl;
     } else if (h < 0.95) ctl.pitch = 8; // slow: a shallow dive recovers the speed without a rocket
-    else if (d <= APPROACH_DISTANCE + BLEED_DISTANCE && h > APPROACH_SPEED && terrainShort < 0) ctl.pitch = -6; // before the approach: bleed the speed towards APPROACH_SPEED (the flare's climb grows with its square)
+    else if (capped && terrainShort < 0 && ((projected > capLine + ROUTE_CAP_OVER && b.vel.y > 0.1) || (projected > capLine - ROUTE_CAP_OVER && d <= APPROACH_DISTANCE + BLEED_DISTANCE && h > APPROACH_SPEED))) {
+      // (Track F9d: on the hand-over's line or over it, or about to coast over it: no pull-up to bleed the speed, which
+      // would be more height still. A rise still left over the line goes on a look down (ROUTE_CAP_DOWN); the speed by a
+      // tick of looking back. A body under the line bleeds by the pull-up as before: that height it can use)
+      const pitch = projected > capLine + ROUTE_CAP_OVER && b.vel.y > 0.1 ? ROUTE_CAP_DOWN : 0;
+      if (d <= APPROACH_DISTANCE + BLEED_DISTANCE && h > APPROACH_SPEED && this.sinkTap(ctl, b, pitch)) return ctl;
+      ctl.pitch = pitch;
+    } else if (d <= APPROACH_DISTANCE + BLEED_DISTANCE && h > APPROACH_SPEED && terrainShort < 0) ctl.pitch = -6; // before the approach: bleed the speed towards APPROACH_SPEED (the flare's climb grows with its square)
     else if (h > 1.7) ctl.pitch = -3;
     else ctl.pitch = 0;
     this.steerClear(i, ctl);
@@ -1327,7 +1499,28 @@ export class FlightBrain {
 
   /** Track F4a: the sink a route landing's body still needs a block of the way to the hand-over, to arrive at the glide line's height there. */
   private routeNeed(b: FlightBody, d: number): number {
+    // (Track F9d, round 2: a route landing's own hand-over is ROUTE_HAND_UP over the cell, and the way down ends where the
+    // level stretch before it begins, that stretch's sink over it; a learned entry's lead-in as before)
+    if (this.target.route && !this.target.entry) return (b.pos.y - (entryTop(this.target) + ROUTE_HAND_UP + ROUTE_HAND_DROP)) / Math.max(1, d - ROUTE_HANDOVER - ROUTE_CAP_LEVEL);
     return (b.pos.y - glideLine(this.target, ROUTE_HANDOVER)) / Math.max(1, d - ROUTE_HANDOVER);
+  }
+
+  /**
+   * Track F9d, round 2 (ROUTE_HAND_UP): the last ROUTE_CAP_LEVEL blocks before a route landing's hand-over, for a body the
+   * glide it is in would still hand over more than ROUTE_HAND_OVER over the hand-over's height. It flies at the speed whose
+   * glide sinks what is left over the blocks left (never under ROUTE_HAND_SLOW): a tick of looking back when it is more
+   * than ROUTE_HAND_TAP faster, and the slow glide's look a little down. So a body that comes in high is handed over
+   * slow, which is what the planner lands a high body from, and lower than it would have been. False: the cruise's own rules.
+   */
+  private handIn(ctl: BrainControl, b: FlightBody, d: number, h: number): boolean {
+    const left = d - ROUTE_HANDOVER;
+    const high = b.pos.y - (entryTop(this.target) + ROUTE_HAND_UP);
+    if (left < 2 || high - (ROUTE_HAND_SINK * left) / Math.max(ROUTE_HAND_SLOW, h) <= ROUTE_HAND_OVER) return false;
+    const want = Math.max(ROUTE_HAND_SLOW, (ROUTE_HAND_SINK * left) / high);
+    const pitch = h < 0.95 ? ROUTE_STURN_PITCH : 0;
+    if (h > want + ROUTE_HAND_TAP && h * 0.79 >= ROUTE_HAND_SLOW - 0.05 && this.sinkTap(ctl, b, pitch)) return true;
+    ctl.pitch = pitch;
+    return true;
   }
 
   /**
@@ -1346,15 +1539,7 @@ export class FlightBrain {
       ctl.pitch = h > 1.4 ? 0 : pitchForSink(need * v, SINK_PITCH);
       return true;
     }
-    // Track F9c: onto a learned entry's lead-in the height goes in a dive along the line, not in S-turns: the flier takes the
-    // body from above the line (learn/entry.ts ENTRY_JOIN: the more line is left, the higher) and takes its speed down to the
-    // recording's, where a route landing's tracker wants the body slow and level at its hand-over. The pitch is the slope
-    // still needed and ENTRY_DIVE_OVER more, at most ENTRY_DIVE_MAX (the path ahead is checked as for every cruise pitch)
-    if (t.entry) {
-      ctl.yaw = turnTowards(i.yaw, yawTo(b.pos, t), ROUTE_STURN_TURN);
-      ctl.pitch = Math.min(ENTRY_DIVE_MAX, Math.round((Math.atan(need) * 180) / Math.PI) + ENTRY_DIVE_OVER);
-      return true;
-    }
+    // (Track F9d: a learned entry's lead-in is come down to by entrySink, not here)
     // S-turns: the path longer by 1 / cos(swing) sinks need a block of the way in (at most ROUTE_STURN_SWING off the
     // bearing: linedUp wants the heading within 60 of it, and a reversal of 2 x 70 at 15 a tick bled 1.04 to 0.64)
     const swing = Math.min(ROUTE_STURN_SWING, (Math.acos(Math.min(1, ROUTE_STURN_SINK / v / need)) * 180) / Math.PI);
@@ -1366,6 +1551,78 @@ export class FlightBrain {
     ctl.pitch = h < 0.9 ? 12 : h > 1.25 ? 0 : ROUTE_STURN_PITCH;
     return true;
   }
+
+  /**
+   * Track F9d (docs/flight.md "Drawn lines (Track F9d)", "The entry's first pass"): the cruise's way down onto a learned
+   * entry's lead-in, so that the body comes to the lead-in's start inside what the flier takes there and the first pass is
+   * the hand-over. The plan is the route landing's (the height of the cruise's aim at ROUTE_HANDOVER before it, which for
+   * an entry is a point on the lead-in or the flight's clearance over the ground under it); what differs is where it
+   * begins and how it is flown. It begins as soon as the body is lined up on the lead-in and higher than a level glide
+   * brings down (the Realm's flight was retargeted to its entry 270 blocks before the lead-in, 59 over it, and flew level
+   * for 140 of them: a level glide at 1.5 a tick sinks a tenth of a block a block). And it is flown at the pitch whose
+   * fall a tick is the slope needed at the body's speed (ENTRY_SINK), the speed taken off by a tick of looking straight
+   * back where that pitch would be steeper than ENTRY_SINK_PITCH or the body is over ENTRY_SINK_FAST: looking down alone
+   * makes a fast body faster, not steeper (at pitch 20 to 26 the Realm's body sank 0.14 a block and came to the lead-in at
+   * 1.56 a tick, 27 over its start where the flier takes 22). False when the level glide sinks enough.
+   */
+  private entrySink(i: BrainInput, ctl: BrainControl, d: number, h: number, room: number): boolean {
+    const b = i.body;
+    const level = ENTRY_SINK[0]![0];
+    const slope = this.routeNeed(b, d);
+    let want = slope * h;
+    if (want <= level + 0.005) return false;
+    // (round 2: a lead-in steeper away than the steepest slope flown here is not reached this way at all: the lap beside its
+    // start follows whatever is done, and a body slowed down first only came to that lap later: 2 to 3 s on the replica)
+    if (this.target.entry && slope > FlightBrain.ENTRY_SINK_SLOPE) return false;
+    // The terrain floor ahead (the flight's clearance over every column on the way, a tenth of a block higher for every
+    // block it is still away: terrain.ts) is not sunk under: a body under it fires a rocket and climbs, which on the
+    // fixture took it over the lead-in again and into a lap of the circle. Near the floor the body rides it (the level
+    // glide's own slope at 1.5 a tick, a look 5 up below that) and keeps its speed; the steep part comes when the ground
+    // that set the floor is behind.
+    if (room < ENTRY_SINK_FLOOR) {
+      ctl.pitch = h >= 1.45 ? 0 : -5;
+      return true;
+    }
+    want = Math.min(want, Math.max(level, (room - ENTRY_SINK_FLOOR) / 4));
+    const cap = ENTRY_SINK[ENTRY_SINK.length - 1]![0];
+    const pitch = pitchForSink(Math.min(want, cap), ENTRY_SINK);
+    if ((want > cap || h > ENTRY_SINK_FAST) && h > ENTRY_SINK_SLOW && room > 2 * ENTRY_SINK_FLOOR && this.sinkTap(ctl, b, pitch)) return true;
+    ctl.pitch = pitch;
+    return true;
+  }
+
+  /**
+   * Track F9d: one tick of looking straight back along the velocity (ENTRY_SINK_TAP): a fifth of the speed goes, the
+   * direction stays. Never two ticks running: false when the tick before was one. The look the cruise had
+   * (`ctl.yaw`, and `pitch` for after it) is kept for the next tick's turns.
+   */
+  private sinkTap(ctl: BrainControl, b: FlightBody, pitch: number): boolean {
+    if (this.stats.ticks - this.sinkTapAt <= 1) return false;
+    this.sinkLook = { yaw: ctl.yaw, pitch };
+    this.sinkTapAt = this.stats.ticks;
+    this.sinkTaps++;
+    ctl.yaw = (Math.atan2(-b.vel.x, b.vel.z) * 180) / Math.PI + 180;
+    ctl.pitch = ENTRY_SINK_TAP;
+    return true;
+  }
+
+  /**
+   * Track F9d: the pitch of a burning rocket that is to top out at `cap` whenever its burn ends: the climb whose coast
+   * (capCoast) is the height still missing, so the nearer the body is to `cap` the
+   * flatter it flies, and over it the look goes a little down (a boosted body follows its look).
+   */
+  private capPitch(b: FlightBody, cap: number): number {
+    const left = cap - b.pos.y;
+    if (left <= 0) return Math.min(10, -left * 2);
+    const v = Math.max(0.8, Math.hypot(b.vel.x, b.vel.y, b.vel.z));
+    // (the rise whose coast is `left`: the root of capCoast)
+    const r = ROUTE_CAP_COAST.rise * left;
+    const vy = (r + Math.sqrt(r * r + 4 * ROUTE_CAP_COAST.at * left)) / 2;
+    return -(Math.asin(Math.min(1, vy / v)) * 180) / Math.PI;
+  }
+
+  /** Track F9d: the steepest slope `entrySink` flies (blocks down a block flown): ENTRY_SINK_PITCH's fall at ENTRY_SINK_SLOW. */
+  static readonly ENTRY_SINK_SLOPE = ENTRY_SINK[ENTRY_SINK.length - 1]![0] / ENTRY_SINK_SLOW;
 
   // ---- Track BL: the terrain floor, the high cruise, the avoidance lines, the dive descent ---------------------
 
@@ -2089,18 +2346,20 @@ export class FlightBrain {
     const ticks = f.stats.ticks;
     const obstacle = this.o.obstacle;
     const open = b.gliding && out.at >= guide.open && obstacle !== undefined && takeoffSky(b.pos, this.target, this.o.cruiseY, 0, (x, y, z) => obstacle(x, y, z)).ok;
-    if (open || out.status === 'done' || out.status === 'lost' || ticks > ROUTE_TAKEOFF_MAX_TICKS) {
+    // (Track F9d: a drawn line may be longer than any recorded one: its own ticks and half as many again)
+    const limit = Math.max(ROUTE_TAKEOFF_MAX_TICKS, 60 + 1.5 * (guide.line.ticks[guide.line.ticks.length - 1] ?? 0));
+    if (open || out.status === 'done' || out.status === 'lost' || ticks > limit) {
       const ok = open || out.status === 'done';
       this.stats.routeTakeoffEnd = ok ? 'out' : out.status === 'lost' ? 'off the line' : 'out of time';
       this.follower = undefined;
       const flown = `${out.at.toFixed(0)} of ${guideLength(guide.line).toFixed(0)} blocks along it, at most ${f.stats.maxError.toFixed(2)} off it, steered ${f.stats.steered} ticks${f.stats.blocked ? `, ${f.stats.blocked} ticks with no clear look` : ''}`;
       if (!ok) {
-        this.o.note?.(`route takeoff: the learned line ${guide.line.path} lost after ${ticks} ticks (${out.why ?? 'out of time'}; ${flown}): no climb without the line here, landing`);
+        this.o.note?.(`route takeoff: ${guideSaid(guide.line)} lost after ${ticks} ticks (${out.why ?? 'out of time'}; ${flown}): no climb without the line here, landing`);
         this.curving = false;
         this.landNow('roof', b);
         return this.landing() ? this.approach(i, ctl, this.aim) : { ...ctl, glide: false };
       }
-      this.o.note?.(`route takeoff: out along the learned line ${guide.line.path} after ${ticks} ticks, ${this.stats.routeTakeoffRockets ?? 0} rocket${this.stats.routeTakeoffRockets === 1 ? '' : 's'} (${open ? 'open sky over the body' : "the line's end"}, ${flown}); the climb ${this.curving ? `keeps this line until the sky is open, then turns to heading ${Math.round(yawTo(b.pos, this.target))} as the path ahead clears` : `turns to heading ${Math.round(this.climbYaw(b))}`}`);
+      this.o.note?.(`route takeoff: out along ${guideSaid(guide.line)} after ${ticks} ticks, ${this.stats.routeTakeoffRockets ?? 0} rocket${this.stats.routeTakeoffRockets === 1 ? '' : 's'} (${open ? 'open sky over the body' : "the line's end"}, ${flown}); the climb ${this.curving ? `keeps this line until the sky is open, then turns to heading ${Math.round(yawTo(b.pos, this.target))} as the path ahead clears` : `turns to heading ${Math.round(this.climbYaw(b))}`}`);
       this.phase = 'climb';
       this.routeOutAt = this.stats.ticks;
       ctl.glide = b.gliding || !b.onGround;
@@ -2258,6 +2517,13 @@ export class FlightBrain {
         if (!best || s.floor < best.floor) best = { centre: s.centre, dir: s.dir, floor: s.floor, laps, low };
       }
       if (!best) return false;
+      // Track F9d: no circle without a whole lap for a body that comes in along the lead-in's own bearing: "0 laps and the
+      // rest of one" is then a straight piece, flown at the circle's pitch law (level over ENTRY_SPIRAL_FAST), and the
+      // Realm's flights passed the start on it 20 to 21 over at 1.56 a tick in 7 of 8, too high for the hand-over and too
+      // low for a lap. The cruise's way down (entrySink) flies that piece: its slopes reach what the circle's steepest do
+      // (along it: before its start, within the hand-over's reach beside its axis and heading as it does. A body that comes
+      // to the window from the side is brought round onto the start by the circle's last piece, as before)
+      if (best.laps === 0 && along < 0 && side < ENTRY_JOIN.side && entryJoin(en.line, b).heading <= ENTRY_HELIX_ALONG) return false;
       this.helix = { centre: best.centre, dir: best.dir, passY, laps: best.laps, along: Infinity, off: false, since: this.stats.ticks };
       this.stats.descents.push(`helix r${ENTRY_HELIX_RADIUS} beside the learned entry's lead-in from ${Math.round(b.pos.y - p0.y)} over it`);
       this.o.note?.(`learned entry: ${Math.round(b.pos.y - p0.y)} over the lead-in of ${g.path} where the flier takes at most ${Math.round(allowed)}: down in a circle of ${ENTRY_HELIX_RADIUS} beside its start, ${best.laps} lap${best.laps === 1 ? '' : 's'} and the rest of one, to pass the start ${(ENTRY_HELIX_UNTIL + best.low).toFixed(0)} over it along the line (the ground under the last lap at least ${(passY + best.low - best.floor).toFixed(0)} under the body)`);

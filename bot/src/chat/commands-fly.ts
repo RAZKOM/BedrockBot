@@ -25,7 +25,7 @@ import { planTakeoffRoute, type TakeoffRoute } from '../skills/fly/route/takeoff
 import { RoutePlannerClient } from '../skills/fly/route/worker.ts'; // Track F3
 import { matchEntries, matchExits, MATCH_NEAR } from '../skills/fly/learn/match.ts'; // Track F9b, F9c
 import { chooseTouchdown, ENTRY_AIR, ENTRY_LAVA, ENTRY_SOLID, ENTRY_UNKNOWN, ENTRY_WATER, entryAim, entryTouchdowns, entryWorld, entryWorldSame, guideSpeed, type EntryAsked, type EntryLine, type EntryProof } from '../skills/fly/learn/entry.ts'; // Track F9c
-import { guideLength, guidePoint } from '../skills/fly/learn/guide.ts'; // Track F9c
+import { guideLength, guidePoint, guideSaid } from '../skills/fly/learn/guide.ts'; // Track F9c, F9d
 import { classify } from '../skills/terrain/classify.ts'; // Track F9c: a block's class as the world cache keeps it
 import { cellClassOf } from '../world/cache/classes.ts'; // Track F9c
 import { CLS_AIR, CLS_AVOID, CLS_WATER } from '../world/cache/types.ts'; // Track F9c
@@ -632,10 +632,13 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       sims += r.sims;
       return r;
     };
-    // (the ways out under the roof: powered flight underground, so only with flyCave on, and with its own switch, default off:
-    // it has flown on the fixture offline, never on a server)
+    // Track F9d (docs/flight.md "Drawn lines"): with no recording that proves clear, a way out DRAWN from the flood under the
+    // roof to the open sky, proven and flown as a recorded line is (learn/draw.ts). Powered flight underground with no
+    // recording at all: only with flyCave on, and with its own switch, flyCaveExit, default off. It takes the place of the
+    // searched ways out that switch asked for before (Track F9a's: waypoints for the route tracker, which their own proof
+    // refused in the owner's cave every time); route/takeoff.ts still has them (`far`), nothing in the bot asks
     const top = Math.min(319, Math.ceil(cz.y));
-    const far = String(d.settings.get('flyCave')) === 'on' && d.settings.get('flyCaveExit') ? { top } : undefined;
+    const drawn = String(d.settings.get('flyCave')) === 'on' && d.settings.get('flyCaveExit') ? { top } : undefined;
     // Track F9b (docs/flight.md "Learned exits"): the recorded flights that left the ground where the bot stands and came out
     // under open sky (the paths of `!learn`, matched by where they begin, never by their names) are tried first, each with
     // the same proof. Powered flight under a roof as well: only with flyCave on, and with its own switch (default off)
@@ -647,9 +650,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       };
       learned = matchExits(learnedPaths.all(), from, sky);
     }
-    const r = await planTakeoffRoute(routeGrid, from, target, { rockets: Math.min(4, Math.max(1, rockets)), prove, ...(far ? { far } : {}), ...(learned?.matches.length ? { learned: { matches: learned.matches } } : {}) }, routePlanner);
+    const r = await planTakeoffRoute(routeGrid, from, target, { rockets: Math.min(4, Math.max(1, rockets)), prove, ...(drawn ? { drawn } : {}), ...(learned?.matches.length ? { learned: { matches: learned.matches } } : {}) }, routePlanner);
     const g = r.route?.guide;
-    if (!quiet) log.info(`fly: route takeoff: ${learned ? `${learned.matches.length} learned way${learned.matches.length === 1 ? '' : 's'} out from here (${learned.flights} recorded flight${learned.flights === 1 ? '' : 's'}, ${learned.near} leaving the ground within ${MATCH_NEAR}), ` : ''}${r.exits} exit${r.exits === 1 ? '' : 's'} under open sky${r.ways !== undefined ? `, ${r.ways} way${r.ways === 1 ? '' : 's'} out under the roof` : ''}; ${r.tried.length ? r.tried.join('; ') : 'none tried'}${r.route ? ` -> out ${g ? `along the learned line ${g.line.path} ` : ''}to ${r.route.exit.x} ${r.route.exit.y} ${r.route.exit.z}, then the climb curving to heading ${Math.round(goalYaw)}` : ' -> no route takeoff'} (${sims} simulated, ${Date.now() - t0} ms)`);
+    if (!quiet) log.info(`fly: route takeoff: ${learned ? `${learned.matches.length} learned way${learned.matches.length === 1 ? '' : 's'} out from here (${learned.flights} recorded flight${learned.flights === 1 ? '' : 's'}, ${learned.near} leaving the ground within ${MATCH_NEAR}), ` : ''}${r.drawn ? `${r.drawn.lines} drawn way${r.drawn.lines === 1 ? '' : 's'} out (a flood of ${r.drawn.cells} cells under the roof, ${r.drawn.ways} to the open sky, drawn and rolled in ${Math.round(r.drawn.ms)} ms), ` : ''}${r.exits} exit${r.exits === 1 ? '' : 's'} under open sky${r.ways !== undefined ? `, ${r.ways} way${r.ways === 1 ? '' : 's'} out under the roof` : ''}; ${r.tried.length ? r.tried.join('; ') : 'none tried'}${r.route ? ` -> out ${g ? `along ${guideSaid(g.line)} ` : ''}to ${r.route.exit.x} ${r.route.exit.y} ${r.route.exit.z}, then the climb curving to heading ${Math.round(goalYaw)}` : ' -> no route takeoff'} (${sims} simulated, ${Date.now() - t0} ms)`);
     return r.route ? { routeTakeoff: r.route, takeoffYaw: r.route.yaw } : undefined;
   };
   /**

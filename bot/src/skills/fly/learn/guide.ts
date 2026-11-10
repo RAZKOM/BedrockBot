@@ -35,6 +35,13 @@ export interface Guide {
   /** The flight left the ground at its first point (a takeoff), and stood again at its last (a landing). */
   grounded: boolean;
   landed: boolean;
+  /** Track F9d: the line was not recorded but drawn from the world (learn/draw.ts): for the log's words; it is proven and flown as a recorded one. */
+  drawn?: boolean;
+}
+
+/** Track F9d: a guide as the log names it: `the learned line <name>` (a recording) or `the drawn line <name>` (learn/draw.ts). */
+export function guideSaid(g: Pick<Guide, 'path' | 'drawn'>): string {
+  return `the ${g.drawn ? 'drawn' : 'learned'} line ${g.path}`;
 }
 
 /** The samples without the teleport-like ones (a sample no speed explains, where the samples round it fit each other). */
