@@ -5393,6 +5393,21 @@ A flight to a cell only the route lands (under a roof 2 or 3 above: a slot, a ro
   came to its corridor late (handed over beside the line) or the planner's host is slower than the test host: say which
   line it was.
 
+### On the Realm (2026-11-10, this track's code, the live kit)
+
+- `!test goto home from cave_start 3` with `flyLearned off` and `flyCaveExit on`: 3 of 3 arrived, 57.2 s a run (58, 57,
+  56), damage 0, no bail-out, one flight a run, no `roof` end. The decision line read as predicted: 5 drawn ways out, a
+  flood of 8 823 to 8 865 cells, drawn and rolled in 635 to 651 ms, the whole decision 1.7 s on the Realm's host (18
+  simulated). Out along the drawn line after 48 to 51 ticks, on 1 rocket twice (at most 1.3 off the line) and on 2 once
+  (that flight at most 3.78 off it, in its last blocks). The recorded line gave 57.6 s a run there.
+- `!test cavestart` from home with `flyLearnedEntry on`, two series: 8 of 8 arrived with no window missed and no
+  go-around, damage 0: five runs at 47.9 s a run (47, 54, 44, 51, 44), then three at 43.7 s (45, 44, 43); before this
+  track 51.7 s a run with a go-around in 7 of 8. The 54 s run began with a takeoff that came down again 15 ticks after
+  it left its site, and then flew another take, whose start it passed too high: one more lap of the circle, no
+  go-around. Four of the eight stood on the single block beside the goal; none slid off it.
+- With `flyCaveExit` on, a takeoff inside a closed room (the home: a flood of 260 cells, none to the open sky) finds no
+  drawn way in 5 to 13 ms and walks to its takeoff site as before.
+
 ### What a drawn way in would need (designed, not built)
 
 `entryLine`, `proveEntry` and `EntryFlier` take any `Guide` (Track F9c's note). A drawn entry is the same flood run from
