@@ -22,7 +22,8 @@ fi
 # low priority and 4 workers, so the running bot keeps its ticks during the checks (Track I1: an uncapped run cost it
 # up to 64 ticks in 5 s for 40 s)
 nice -n 10 pnpm --filter bot lint >/dev/null   # eslint + tsc; set -e stops the update on a failure
-VITEST_MAX_WORKERS=4 nice -n 10 pnpm --filter bot test --reporter=dot 2>&1 | grep -E "Tests|failed" | tail -n 2
+# (a failing test's name and its assertion are shown too: a failed update has to say which test stopped it)
+VITEST_MAX_WORKERS=4 nice -n 10 pnpm --filter bot test --reporter=dot 2>&1 | grep -E "FAIL|AssertionError|Tests|failed" | tail -n 12
 case "$(uname -s)" in
   Darwin)
     label="gui/$(id -u)/com.bedrockbot.realm"
