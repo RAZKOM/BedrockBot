@@ -3514,6 +3514,11 @@ flight ended `no_glide`. Now:
 
 1. The fixture: copy it from the owner's machine into `bot/fixtures-private/cave/` (`extract.json`,
    `waypoints.json`), or export a fresh one with the command in `export.ts`'s header. Never commit it.
+   **Before a track that flies recorded paths, export it again**: a recording is flown through the cave as it was when
+   it was made, and a fixture exported before that is another cave (Track F9c proved two takes in a fixture three days
+   older than they were; the Realm refused both). `scripts/cave-learned-entry-probe.ts` and the cave e2e print the
+   fixture's export time against the newest recording first, `WARNING: STALE FIXTURE` when a recording is newer
+   (`learn/fresh.ts`).
 2. Offline: `node scripts/cave-bench.ts --mode leg --route B --burns 9,15,21 --budget live --jobs 16` for a
    quick look at one route (a minute or two), the whole board with no options (36 minutes on 20 workers), `--legs 1`
    or `--legs "cave_5 -> cave_shortcut"` for one leg, `--latency 11` for the worker's 9 to 13-tick answer, `--json
@@ -4379,7 +4384,8 @@ a flight to a goal (tasks/process/fly.ts watchEntry), flyCave and flyLearnedEntr
  each as a LINE (learn/entry.ts entryLine):
    the hand-over WINDOW: 24 blocks of its open air, ending 20 before its last open sky, flown at 0.9 a tick or more
    a LEAD-IN before it: the window's heading and slope drawn straight backwards, up to 40 blocks, through free air only
-   the touchdown: the goal's own cell; the line ends where it comes nearest that
+   the touchdown: the goal's own cell, or where the take does not fly to that the nearest standable cell within 2 blocks
+   of it that it does (round 2, "The cave changes"); the line ends where it comes nearest the touchdown
  each PROVEN (proveEntry): 39 flights from the hand-over to standing, the recording's own state and every extreme of what
    the hand-over allows (3 beside the line, 5 over, 2 under, 0.5 to 1.25 of its speed, 25 degrees off its heading; early,
    in the middle, late); no hit, no water, the line never lost, standing within 2 blocks, coming down under 0.45 a tick
@@ -4402,6 +4408,7 @@ a flight to a goal (tasks/process/fly.ts watchEntry), flyCave and flyLearnedEntr
 | File | What |
 |---|---|
 | `bot/src/skills/fly/learn/entry.ts` | the entry: `entryLine` (window, lead-in, touchdown), `EntryFlier` (the follower, the commit, the touchdown), `entryJoin` / `entryCatch` (the two steps of the hand-over), `flyEntry` / `entrySteps` / `proveEntry` / `entryCases` (the proof), `entryWorld` / `entryWorldSame` (the proof's cells, and the proof against the live world), `entryAim` (where the cruise aims), `EntryHandoff`, the `ENTRY_*` numbers |
+| `bot/src/skills/fly/learn/fresh.ts` | round 2: a fixture's export time against the recordings' (`fixtureFreshness`): the stale-fixture warning of the probe and the cave e2e |
 | `bot/src/skills/fly/learn/follow.ts` | `FollowOptions.entry` (`FollowEntry`: no jump, no rocket, the checked glide ended where the touchdown's brake begins, the speed governor `FOLLOW_TAP_*`, the aim ahead of a body far off the line `FOLLOW_JOIN_AIM`, the wider lost distance while joining), `FollowOutput.crash`; a rocket that fired nothing: `FOLLOW_DUD_TICKS`, the place found again, the rocket asked for again; `FOLLOW_SWITCH` (the probe's) |
 | `bot/src/skills/fly/plan.ts` | `LandingTarget.entry` (a type) |
 | `bot/src/skills/fly/brain.ts` | the phase `entry`; in the cruise: the hand-over to the flier, `entryHelix`, the dive in `routeSink`, the escape; `entry`, `entryMissed`, `entryFallback`, `entryStood`, `confirmEntry`; `FlightStats.entry`; `BrainOptions.entryTries` / `entrySneak`; the `ENTRY_*` numbers of the approach |
@@ -4755,6 +4762,164 @@ off in all of them.
   world (the cell x y z is not what the proof flew))`.
 - A lost line under the roof: `flight: learned entry: the line <take> lost N of M blocks along it (...): no glide without the
   line under a roof, landing`, `flight: ended (roof) at ...`; the corridor or the walk goes on from where it stands.
+
+### The cave changes (Track F9c, round 2)
+
+Round 1 was deployed and tried on the Realm with `flyCave on` and `flyLearnedEntry on`: `!test cavestart 3 from home`
+arrived 3 of 3 in 82.8 s a run with one bail-out each, as without the setting (81.8 s). The entry was refused in every
+run, three takes in the dip as expected and both flyable takes with `hits a solid 1 time ...`, and the fallback flew.
+Nothing was hurt: a refusal is the flight as it was.
+
+**Why.** The fixture round 1 proved on was exported three days before the owner recorded the takes. Between the two the
+cave changed: the bot's own cobblestone from a pillar climb stands one cell off the goal's corner, and a cell at feet
+level directly beside the goal, on the side the line comes in from, is no longer air. Round 1's "39 of 39" was flown in
+a cave that no longer exists; the Realm's refusal was the proof doing its work on the one that does.
+
+**What reproduced.** On a fixture exported from the Realm bot's world cache that morning
+(`CAVE_FIXTURE_DIR=<today's export>`), the probe gives the Realm's line word for word: the same five verdicts, the same
+ticks and blocks along the line.
+
+**What is in the way** (the 39 states of each take to the goal's own cell, today's cave):
+
+| take | clear of 39 | the cases that fail | where |
+|---|---|---|---|
+| A | 36 | mid under; mid over, fast, left; early right | the body creeps along the floor towards the goal, meets the cell beside it at feet level and stands 1.8 short of the goal |
+| B | 38 | late under, slow, left | the same cell, the same place |
+| C, D, E | 0 | all | the dip, 3 to 4 under the goal, as on the old fixture |
+
+The pillar is not what refuses them: it shows as touches in some flights. The flights that still pass end on top of the
+new cell, one block up, or come to the goal over it. What that cell holds is not known: the owner stood in it at whole
+height in two takes, so it was empty or without a collision box when they recorded. The world cache keeps four classes
+(`world/cache/classes.ts cellClassOf`): a cell with any collision box in the bot's shape tables is `solid` (a carpet a
+sixteenth high and a slab as much as a cube; so are a bed, a chest, a lantern, a flower pot, a candle), a cell with none
+is `air` (a torch, a sign, a button, a lever, plants, a pressure plate, a rail; also a ladder and a snow layer, which
+the game does give a box), and the dangerous ones are `avoid`. To tell a carpet from a cube the cache would have to keep
+a cell's height or its box. The proof does not guess: a `solid` cell is a full block.
+
+**What was changed.**
+
+- **The touchdown is chosen, the goal's own cell first** (`learn/entry.ts entryTouchdowns`, `chooseTouchdown`). The
+  candidates are the standable cells within `ENTRY_TOUCH_REACH` 2 blocks beside the goal and one level over or under its
+  floor (a solid under the feet, the feet and the head in air; an unknown or a liquid cell is none), in the order of their
+  distance from the goal, the goal's own level before the level under it before the level over it. For each in turn the
+  take's line is cut where it comes nearest that cell; the recording's own three states are flown first (three
+  simulations refuse a cell), then the whole proof of 39. The first cell that clears is the take's. A take whose own
+  states fly to none of 6 cells in a row is given up; a take gets 3 whole proofs at the most.
+- **Every flight of a proof must also stand within 2 blocks of the goal** (`ENTRY_GOAL`), whichever cell the touchdown is:
+  `stands 2.4 from the goal` refuses a cell as a hit does. The walk for what is left is the one there already.
+- **The full box stays.** With another touchdown both takes clear all 39 states of the box as it was; no smaller box was
+  needed, and none is built.
+- **A refusal says where**: `hits a solid 1 time (the first at tick 70, 134 blocks along the line, x y z from the
+  goal)`: blocks east, up and south of the goal's feet, so the next refusal on the Realm is read in one look. The decision's
+  line names each cell tried (`to the goal's cell: ...; to the cell dx dy dz from it (1.0 beside): clear from 39 entry
+  states ...: standing at most 1.2 from the touchdown and 1.2 from the goal`) and the one flown (`... to the touchdown on
+  the cell dx dy dz from the goal's (1.0 beside it; every flight of the proof stood within 1.2 of the goal)`).
+- **The proof's cases in another order**: the recording's own three states, then the twelve corners that stack the
+  extremes, then the single extremes. A cell that does not hold fails after about 15 simulations where it took up to 37.
+- **The decision takes longer and says so**: 8 to 9 s on the owner's cave (3 s before), in the air, in slices. No new take
+  is begun after `ENTRY_BUDGET_MS` 10 s; one begun before that is finished.
+- **A stale fixture is said first** (`learn/fresh.ts`): the probe and the cave e2e print the fixture's export time against
+  the newest recording, `WARNING: STALE FIXTURE ...` when a recording is newer than the fixture.
+- **The replica's box can be built again by itself** (`FLY_CAVE_REUSE=surroundings`, the surroundings as they stand, every cell of the box set again: 30 s. A whole build over a replica that stands does not work: its fills are sent from stops on the flat ground, which a standing replica has under its terraces, so the bot is put inside stone and the fills' chunks never load; the build now says so at the first such stop. A whole rebuild needs a world without a replica. One part of today's box could not be sent at 1800 characters, `spawn EPERM` on the PC for the same part on each of five attempts; `FLY_CAVE_PART_CHARS=1500` cuts the parts elsewhere and all 359 went).
+
+**Offline, the whole flight** (`--mode approach`, the 13 places and the cruise heights of round 1, rockets of 9 to 21
+ticks; the touchdown the bot chooses):
+
+| fixture | take and its touchdown | flights | standing by the goal | from the goal | first pass, after one go-around | commit to standing | last open sky to standing | contacts on the way in |
+|---|---|---|---|---|---|---|---|---|
+| today's | A, a cell one block beside the goal and a level under its floor | 69 | 69 | 0.8 to 1.2, on the goal's level or a block over it | 60, 9 | 80 to 103 ticks | 52 to 66 ticks (2.6 to 3.3 s) | none |
+| today's | B, the same cell (7 places, rockets of 15 ticks) | 7 | 7 | 0.7 to 1.2 | 5, 2 | 92 to 110 | 60 to 77 | none |
+| round 1's | A, the goal's own cell | 69 | 69 | 0.1 to 0.9 | 60, 9 | 84 to 107 | 55 to 71 | 8 touches in the creep |
+| round 1's | B, the goal's own cell | 7 | 7 | 0.0 | 5, 2 | 101 to 117 | 69 to 79 | 2 touches |
+
+The proofs behind them, all with the box as it was (39 states): on today's fixture take A is refused at the goal's cell
+and at the next cell (a hit each), and clears to the third: every flight within 1.2 of the touchdown and of the goal, 145
+ticks at most from the last open sky (7.3 s), never nearer than 0.39 to a block; 67 simulations, 3.5 s. Take B likewise:
+0.6 and 1.2, 128 ticks, 0.13; 99 simulations, 5.0 s. Takes C, D and E are refused at their own state at every cell (6
+simulations each). The whole decision: about 9 s on the PC. On round 1's fixture both takes clear to the goal's own
+cell, with round 1's numbers: nothing there is worse.
+
+**On the server** (bds-fly2, the replica's box built again from today's export):
+
+| | runs | standing by the goal, no landing outside | bail-outs | from the goal | seconds to the goal | from the last open sky to standing | damage |
+|---|---|---|---|---|---|---|---|
+| the setting off (the Realm's way, `FLY_CAVE_PLAIN=1`) | 3 | 0 of 3: each lands 51 blocks from the goal and 26 over it | 1 to 3 a run | | 68.2 to 71.3 | | 0 |
+| the entry on, before the slip was handled | 12 | 12 of 12 | 0 | 0.8 to 1.1 | 43.9 to 45.8 | 54 to 62 ticks | 0 |
+| the entry on, as shipped | 6 | 6 of 6 | 0 | 0.8 to 1.1 | 43.9 to 46.4 | 55 to 60 ticks in five, 84 in one (4.2 s) | 0 |
+| the round trip, as shipped | 3 | in: 3 of 3 (0.8 to 1.7 from the goal), 44.0 to 46.1 s; out along the learned exit: 3 of 3, 60.4 to 61.8 s | 0 | | | 52 to 57 ticks | 0 |
+| the trip out with `FLY_CAVE_LEARNED` (the learned exit in today's cave) | 5 | 5 of 5 arrived in 61.6 to 65.1 s, each off the ground at cave_start, out under open sky after 59 ticks | | | | | 0 |
+
+Every entry run: one flight, the decision `-> in along <take A> (the most room: 0.38) ... to the touchdown on the cell
+dx dy dz from the goal's (1.0 beside it; every flight of the proof stood within 1.2 of the goal)` after 5.1 to 6.0 s
+(the replica offers take A only: take B's lead-in runs into its shell), then `walked to cave_start`: the trip ends
+within 0.3 of the goal. The body stood on top of the cell beside the goal, a block over the floor, in most runs.
+
+**The slip.** In one round trip of an earlier state the body stood on that single block, slid off it a second later and
+was in the air again. The brain took it for a body far from its landing (an entry's target is the window's end, 90
+blocks away), ended the flight `lost`, and the trip, which walks after a landing but not after `lost`, said nothing
+more: the run timed out standing a block from the goal. Now a body that is in the air again after an entry stood comes
+down where it is (`brain.ts bounce`: `learned entry: in the air again after standing (it slid off what it stood on)`),
+the flight ends as a landing, and the walk for what is left follows an entry that stood whatever the flight was called.
+It happened three times in the 9 runs as shipped; all three ended at the goal.
+
+**The regressions** (each alone, nothing else of this track running):
+
+| gate | exit code | |
+|---|---|---|
+| `fly-route` | 0 | 3 of 3 |
+| `fly-walk` | 0 | 2 of 2 |
+| `fly-land` | 1 | 4 of 5: only `!fly stop in the air`, red on main |
+| `fly-route-land`, first run | 1 | 6 of 7: the route landing between the stacked platforms took 11.3 damage against a wall (686 ticks, one go-around). The flight has no entry: the gate uses no recording and the setting is off |
+| `fly-route-land`, second run | 0 | 7 of 7 |
+| `fly-course` pinned, first run | 1 | 7 of 8: the rings (neither of its two legs through all five) |
+| `fly-course` pinned, second run | 0 | 8 of 8 |
+| `pnpm lint` (the PC) | 0 | |
+| `pnpm -r test` (the Mac) | 0 | 2438 tests passed in `bot` (1 skipped), 28 of them `fly-learned-entry.test.ts` |
+
+The two gates that failed once failed alone, with nothing else of this track running, and passed on the next run. The
+coordinator's comparison of `fly-route-land` between the commit before this track and this track's (three runs each,
+alternating) had 0, 0, 0 against 0, 1, 0.
+
+**Open points of round 2.**
+
+- **It has still not flown on the Realm**: the first series there was refused, and everything since is the fixture and the
+  replica built from it.
+- **The cell beside the goal is not known.** The proof takes it for a full block. If it is lower than that, the bodies
+  that stand "on top of it" will stand lower than the proof says, by less than a block.
+- **Standing on a single block beside the goal** is where most replica runs ended, and three slid off it. A touchdown
+  that weighs a cell's room (how many standable cells round it) would choose the floor first; the order is by distance.
+- **The decision is 8 to 9 s on the owner's cave.** A proof kept from one flight and checked against its cells at the
+  next (the confirmation's own test) would make the later flights of a series instant; it is not built.
+- **The bot's own blocks.** The navigator leaves its pillar where it climbed. What the flight would ask of it: to take a
+  pillar down again where that is cheap, or to keep a list of the blocks it set so they can be taken out later, and not to
+  pillar within a few blocks of a waypoint that has recorded flights. Nothing in the entry depends on that.
+- **`fly-route-land` and `fly-course` fail about one run in three or four by themselves**, on this track's code and on
+  the commit before it. They say little about a change until that is mended.
+
+
+**What the entry does when the cave changes between two flights.** The proof is made at the start of the flight on the
+live model and, where that has nothing, the world cache. If the bot has seen the change, the proof sees it: the goal's
+cell is refused and another cell is tried, or the entry is refused and the flight is the one without a recording. If the
+bot has not seen it (a block set while it was away), the proof passes on the old cells, and the live confirmation finds
+the changed cell before the commit: the entry is given up for the fallback (`the proof does not stand on the live world
+(the cell ... is not what the proof flew)`), and the next flight proves on the cache as it now is. There is no second
+proof in the air: at that point the body is about 5 s from the window and a proof takes 4 s and more.
+
+**What the Realm should show now** (`!test cavestart 3 from home`, `flyCave on`, `flyLearnedEntry on`): the lines of round
+1 with these differences.
+
+- The decision's line, 8 to 10 s after the takeoff: three takes `to the goal's cell: stands ... from the touchdown and ...
+  under it ...; its own state does not fly to N more cells beside the goal either: refused`; the two flyable takes each `to
+  the goal's cell: hits a solid 1 time (the first at tick T, N blocks along the line, x y z from the goal) from <case>; to
+  the cell dx dy dz from it (1.0 beside): hits a solid ...; to the cell dx dy dz from it (1.0 beside): clear from 39 entry
+  states (...): standing at most 1.2 from the touchdown and 1.2 from the goal, ... never nearer than 0.39 to a block`, then
+  `-> in along <take> (the most room: 0.39): ... to the touchdown on the cell dx dy dz from the goal's (1.0 beside it; every
+  flight of the proof stood within 1.2 of the goal) (about 170 simulated, 8 to 10 s; ...)`.
+- `flight: learned entry: standing 0.8 to 1.2 from the goal (1.0 over it)` or with no height: on top of the cell beside
+  the goal, or on the goal's level beside it. Then a walk of a block or two: `walked to cave_start`.
+- If the cell beside the goal is gone by then, the first cell clears and the lines are round 1's.
+- The time is round 1's estimate and a second or two for the walk: 50 to 58 s a run against 82 s. An estimate.
+- The confirmation's timing with no helix is still the one thing the replica cannot show.
 
 ### What a drawn line would need (the next track: no recording)
 

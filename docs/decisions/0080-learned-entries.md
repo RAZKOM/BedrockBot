@@ -121,3 +121,30 @@ not, measured on the cave's fixture before anything was built:
 - The helix and the dive are new ways for the cruise to lose height; they are flown only for a target that carries an
   entry.
 - `flight.md` has what a drawn line (no recording) would need from this code.
+
+## Addendum (round 2, 2026-11-10): the cave is not the cave of the recording
+
+On the Realm the entry was refused in all three runs of its first series, and rightly: the fixture round 1 measured on
+was exported three days before the takes were recorded, and by the day of the series a cell at feet level beside the
+goal, on the side the line comes in from, was no longer air. Both flyable takes creep along the floor into that cell
+on their last two blocks. Details and numbers: [../flight.md](../flight.md) "The cave changes (Track F9c, round 2)".
+
+13. **The touchdown is chosen, not given** (amends decision 3). The goal's own cell first; where the take does not fly to
+    it, the standable cells within 2 blocks beside the goal and one level over or under its floor, nearest first, the
+    goal's own level before the others at the same distance. Each cell: the recording's own three states, then the whole
+    proof; the first that clears is the take's. The proof decides, nothing else: no cell is preferred for what it is.
+14. **Standing within 2 blocks of the goal is part of the proof**, for every one of its flights, whichever cell the
+    touchdown is. The walk covers the rest.
+15. **The box is not made smaller to make a take pass.** What is proven is what may commit, and a smaller box would be a
+    smaller hand-over; it is built when a cave needs it, with the hand-over's own states as its measure. Today's cave
+    does not: both takes clear the whole box to another cell.
+16. **No block is assumed away.** A cell the cache calls solid is a full block to the proof, whatever it may be (the
+    cache's class cannot tell a carpet from a cube), and nothing in the entry depends on a block coming out of a cave.
+17. **A refusal says where** (the first hit's offsets from the goal), and the decision's line names every cell tried.
+18. **A fixture is checked against the recordings before anything is read from it** (`learn/fresh.ts`): the probe and the
+    cave e2e say when a recording is newer than the fixture. A recording is only ever proven in a cave at least as new
+    as itself; on the bot that is the live world and its cache, offline it has to be said.
+
+Consequences: the decision costs 8 to 9 s in the air on the owner's cave (3 s before), since a take may be proven to up
+to three cells; the bot may stand a block or two beside the goal, a level over or under it, and walk the rest; a cave that
+changes again is met by the same choice, and by a refusal when no cell within 2 blocks holds.

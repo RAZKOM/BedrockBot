@@ -262,6 +262,8 @@ export const ENTRY_ESCAPE_UP = 24;
 export const ENTRY_ESCAPE_TICKS = 80;
 /** Track F9c: a landing forced during that climb (no rocket's path clear) takes ground at least this many blocks before the line's last open sky. */
 export const ENTRY_ESCAPE_BEFORE = 4;
+/** Track F9c round 2: an entry that stood and slid off what it stood on comes down on ground within this many blocks. */
+export const ENTRY_SLIP_WITHIN = 6;
 /** Track F9c: an entry's flier has this many ticks from its commit to standing (the proof's flights take 60 to 135); longer is a lost line. */
 export const ENTRY_MAX_TICKS = 300;
 
@@ -773,6 +775,17 @@ export class FlightBrain {
    */
   bounce(body: FlightBody): void {
     if (this.phase !== 'done') return;
+    // Track F9c round 2: a learned entry that stood and is in the air again has slid off what it stood on (a touchdown on a
+    // single block beside the goal, one level over its floor: one replica run in fifteen): down where it is, a block lower.
+    // The flight is still the entry's and is measured against the goal; it is not a flight that lost its way (`lost` ended
+    // the trip without a word and without the walk for what was left).
+    if (this.stats.entry?.end === 'landed') {
+      this.emergency = this.emergencyTarget(body, ENTRY_SLIP_WITHIN);
+      this.resetPlanners();
+      this.phase = 'land';
+      this.o.note?.(`learned entry: in the air again after standing (it slid off what it stood on): down on the ground within ${ENTRY_SLIP_WITHIN} blocks`);
+      return;
+    }
     if (this.endReason === undefined && hdist(body.pos, this.target) <= APPROACH_DISTANCE) {
       this.phase = 'approach';
       this.resetPlanners();

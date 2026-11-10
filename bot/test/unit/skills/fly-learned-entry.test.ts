@@ -7,6 +7,9 @@
 // the fallback: no dive at the mouth); a world that changed since the recording (refused, and a proof made before the
 // change does not stand on the live world); nothing different without an entry; and, for the learned exit of Track
 // F9b, a first rocket that fires nothing (the proof flies it, the follower finds its place again and fires again).
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { SETTING_DEFS } from '../../../src/config/settings.ts';
 import type { Vec3 } from '../../../src/connection/types.ts';
@@ -14,8 +17,10 @@ import type { FlightBrain } from '../../../src/skills/fly/brain.ts';
 import { ENTRY_HELIX_UNTIL, ENTRY_TRIES } from '../../../src/skills/fly/brain.ts';
 import { DUD_SEEN_TICKS, LEARNED_PROOF_BURNS, LEARNED_PROOF_DUDS, LEARNED_PROOF_MIXES, routeTakeoff, routeTakeoffOptions, simulateFlight, type SimDeps } from '../../../src/skills/fly/glide.ts';
 import {
+  chooseTouchdown,
   ENTRY_AIR,
   ENTRY_BOX,
+  ENTRY_GOAL,
   ENTRY_JOIN,
   ENTRY_SOLID,
   ENTRY_TOUCH,
@@ -27,14 +32,17 @@ import {
   entryJoin,
   entryLine,
   entryState,
+  entryTouchdowns,
   entryVerdict,
   entryWorld,
   entryWorldSame,
   flyEntry,
   guideSpeed,
+  offsets,
   proveEntry,
   type EntryLine,
 } from '../../../src/skills/fly/learn/entry.ts';
+import { fixtureExportedAt, fixtureFreshness } from '../../../src/skills/fly/learn/fresh.ts';
 import { FOLLOW_DUD_TICKS, FOLLOW_TAP_OVER, GuideFollower } from '../../../src/skills/fly/learn/follow.ts';
 import { guideLength, guidePoint, guidesOf } from '../../../src/skills/fly/learn/guide.ts';
 import { matchEntries, matchExits, type OpenSky } from '../../../src/skills/fly/learn/match.ts';
@@ -596,5 +604,156 @@ describe('the learned exit and a first rocket that fires nothing (Track F9c, ite
     for (let t = 1; t <= 12; t++) f2.tick(body(12 - t + 1), t);
     expect(f2.tick(body(0), 13).control.fire).toBe(false);
     expect(f2.wasted).toBe(0);
+  });
+});
+
+describe('round 2: the cave changed since the recording: another touchdown beside the goal (learn/entry.ts chooseTouchdown)', () => {
+  const matchOf = (r: ReturnType<typeof rig>, path: LearnedPath) => {
+    const found = matchEntries([path], GOAL_AT, r.sky, { before: 200 });
+    expect(found.matches).toHaveLength(1);
+    return found.matches[0]!;
+  };
+
+  it('the cells a touchdown may be: the goal\'s own first, then the standable ones within 2 of it by distance, its own level before the one under it before the one over it', () => {
+    // a floor at y 0 round a goal at (0, 1, 0); a hole west of it one deeper; a block north of it; water south of it
+    const cell = (x: number, y: number, z: number): number => {
+      if (x === -1 && z === 0) return y <= -1 ? ENTRY_SOLID : ENTRY_AIR; // the hole: its floor a level under the goal's
+      if (x === 0 && z === -1) return y <= 1 ? ENTRY_SOLID : ENTRY_AIR; // a block on the floor: its top a level over
+      if (x === 0 && z === 1 && y === 1) return ENTRY_UNKNOWN; // a cell nobody knows: no touchdown
+      return y <= 0 ? ENTRY_SOLID : ENTRY_AIR;
+    };
+    const goal = { x: 0, y: 1, z: 0 };
+    const cells = entryTouchdowns(cell, goal);
+    const key = (c: Vec3): string => `${c.x - goal.x} ${c.y - goal.y} ${c.z - goal.z}`;
+    expect(key(cells[0]!)).toBe('0 0 0');
+    const keys = cells.map(key);
+    // one block beside the goal: its own level (east), then the level under (the hole), then the level over (the block's top)
+    expect(keys.slice(1, 4)).toEqual(['1 0 0', '-1 -1 0', '0 1 -1']);
+    expect(keys).not.toContain('0 0 1'); // unknown
+    expect(keys).not.toContain('-1 0 0'); // no floor under the feet
+    expect(keys).not.toContain('0 0 -1'); // a solid
+    for (const c of cells) expect(Math.hypot(c.x - goal.x, c.z - goal.z)).toBeLessThanOrEqual(2);
+    for (let i = 2; i < cells.length; i++) expect(Math.hypot(cells[i]!.x, cells[i]!.z)).toBeGreaterThanOrEqual(Math.hypot(cells[i - 1]!.x, cells[i - 1]!.z));
+  });
+
+  it('the cells are tried in turn and the proof decides: one that leaves the body more than 2 from the goal is refused, the next that clears is the take\'s, and the whole flight stands within 2 of the goal on it', async () => {
+    const r = rig(cave());
+    const m = matchOf(r, wayIn());
+    const w = entryWorld(r.cells, GOAL_AT);
+    // a standable cell of the hall 2.8 beside the goal (no touchdown of entryTouchdowns: here to be refused), then the one before the goal on the line
+    const far = { x: GOAL.x + 2, y: GOAL.y, z: GOAL.z + 2 };
+    const near = { x: GOAL.x - 1, y: GOAL.y, z: GOAL.z };
+    const pick = await chooseTouchdown(w, m, GOAL, [far, near]);
+    expect(pick.said).toMatch(/^to the cell 2 0 2 from it \(2\.8 beside\): stands [\d.]+ from the (touchdown|goal) from /);
+    expect(pick.proof?.ok, pick.said).toBe(true);
+    expect(pick.cell).toEqual(near);
+    expect(pick.said).toMatch(/; to the cell -1 0 0 from it \(1\.0 beside\): clear from \d+ entry states .*standing at most [\d.]+ from the touchdown and [\d.]+ from the goal/);
+    expect(pick.proof!.far).toBeLessThanOrEqual(ENTRY_GOAL);
+    expect(pick.proofs).toBe(1);
+    // the line it flies: to that cell, the goal kept beside it
+    const line = pick.line!;
+    expect(line.touchdown).toEqual({ x: near.x + 0.5, y: near.y, z: near.z + 0.5 });
+    expect(line.goal).toEqual(GOAL_AT);
+    // the cells the choice asked are the proof's cells: the live confirmation covers the refused cell's flights too
+    expect(entryWorldSame(w.asked, r.cells).same).toBe('same');
+    // the whole flight along that line: standing beside the goal, within 2 of it
+    const notes: string[] = [];
+    const from = { x: -420.5, y: FEET, z: 30.5 };
+    const sim = await simulateFlight(r.deps, from, entryTarget(line), { cruiseY: cruiseHeight(from, { x: GOAL_AT.x, z: GOAL_AT.z, top: GOAL.y, half: 2 }, r.skyTop, {}).y, route: { grid: r.grid, plan: noPlan }, note: (n) => notes.push(n) }, { rockets: 64, maxTicks: 4000 });
+    const say = notes.join('\n');
+    expect(sim.stats.entry, say).toMatchObject({ end: 'landed', misses: 0 });
+    expect(sim.end, say).toBeDefined();
+    expect(Math.hypot(sim.end!.landedAt.x - GOAL_AT.x, sim.end!.landedAt.z - GOAL_AT.z), say).toBeLessThanOrEqual(ENTRY_GOAL);
+    expect(sim.wet).toBe(false);
+    // the goal's own cell first when it is among the cells and clears: as before round 2, and its line says nothing of another cell
+    const own = await chooseTouchdown(entryWorld(r.cells, GOAL_AT), m, GOAL, entryTouchdowns(r.cells, GOAL));
+    expect(own.cell).toEqual(GOAL);
+    expect(own.said).toMatch(/^to the goal's cell: clear from \d+ entry states/);
+    expect(own.said).not.toMatch(/to the cell|from the goal/);
+    // a take whose own states fly to none of the cells is given up for a few simulations, with no whole proof
+    const nowhere = await chooseTouchdown(entryWorld(r.cells, GOAL_AT), m, GOAL, [far, { x: GOAL.x + 2, y: GOAL.y, z: GOAL.z - 2 }, { x: GOAL.x - 2, y: GOAL.y, z: GOAL.z + 3 }]);
+    expect(nowhere.proof).toBeUndefined();
+    expect(nowhere.cell).toBeUndefined();
+    expect(nowhere.proofs).toBe(0);
+    expect(nowhere.sims).toBeLessThanOrEqual(9);
+    expect(nowhere.said).toMatch(/its own state does not fly to 2 more cells beside the goal either$/);
+  }, 180_000);
+
+  it('an entry that stood and is in the air again (it slid off the single block it stood on) comes down where it is: the flight is not called lost', async () => {
+    const r = rig(cave());
+    const line = lineOf(r);
+    const from = { x: -420.5, y: FEET, z: 30.5 };
+    const notes: string[] = [];
+    let brain: FlightBrain | undefined;
+    const sim = await simulateFlight(r.deps, from, entryTarget(line), { cruiseY: cruiseHeight(from, { x: GOAL_AT.x, z: GOAL_AT.z, top: GOAL.y, half: 2 }, r.skyTop, {}).y, route: { grid: r.grid, plan: noPlan }, note: (n) => notes.push(n) }, {
+      rockets: 64,
+      maxTicks: 4000,
+      until: (b) => {
+        brain = b;
+        return false;
+      },
+    });
+    expect(sim.stats.entry).toMatchObject({ end: 'landed' });
+    expect(brain!.phase).toBe('done');
+    const at = sim.end!.landedAt;
+    brain!.bounce({ pos: { x: at.x, y: at.y + 0.6, z: at.z }, vel: { x: 0, y: -0.2, z: 0 }, gliding: false, onGround: false, boostTicks: 0 });
+    // (before: the cruise again and `landNow('lost')`: the entry's target is the window's end, 90 blocks off, so the brain took
+    // the body for one far from its landing)
+    expect(brain!.phase).toBe('land');
+    expect(notes.join('\n')).toMatch(/learned entry: in the air again after standing/);
+  }, 120_000);
+
+  it('a flight must stand within 2 of the goal whatever its touchdown, and a refusal says where the hit was against the goal', () => {
+    const r = rig(cave());
+    const line = lineOf(r);
+    const f = flyEntry(entryWorld(r.cells, GOAL_AT), line, entryState(line, (line.from + line.to) / 2));
+    expect(entryVerdict(f)).toBeUndefined();
+    expect(f.offGoal).toBeLessThan(1);
+    expect(entryVerdict({ ...f, offGoal: 2.4 })).toBe('stands 2.4 from the goal');
+    expect(entryVerdict({ ...f, dyGoal: -3 })).toBe('stands 0.' + f.offGoal.toFixed(1).slice(2) + ' from the goal and 3.0 under it');
+    expect(entryVerdict({ ...f, hits: 1, firstHit: { tick: 70, at: 134, from: { x: -0.2, y: 1, z: -1.8 } } })).toBe('hits a solid 1 time (the first at tick 70, 134 blocks along the line, -0.2 1.0 -1.8 from the goal)');
+    expect(offsets({ x: 1, y: -1, z: 0.04 })).toBe('1.0 -1.0 0.0');
+  });
+
+  it('the proof flies the recording\'s own three states first, then the corners, then each single extreme: 39 in all', () => {
+    const r = rig(cave());
+    const cases = entryCases(lineOf(r));
+    expect(cases).toHaveLength(39);
+    for (const c of cases.slice(0, 3)) expect([c.side, c.up, c.factor, c.heading]).toEqual([0, 0, 1, 0]);
+    expect(cases.slice(0, 3).map((c) => c.name)).toEqual(['mid on the line', 'early on the line', 'late on the line']);
+    for (const c of cases.slice(3, 15)) expect(c.side !== 0 && c.up !== 0 && c.factor !== 1 && c.heading !== 0, c.name).toBe(true);
+    for (const c of cases.slice(15)) expect([c.side !== 0, c.up !== 0, c.factor !== 1, c.heading !== 0].filter(Boolean), c.name).toHaveLength(1);
+  });
+});
+
+describe('round 2: a fixture older than the recordings flown in it (learn/fresh.ts)', () => {
+  it('stale when a recording is newer than the fixture, and the line says so first; fresh when none is; unknown without a time', () => {
+    const stale = fixtureFreshness('2026-01-01T00:00:00.000Z', ['2025-12-30T00:00:00.000Z', '2026-01-04T00:00:00.000Z']);
+    expect(stale.stale).toBe(true);
+    expect(stale.line).toMatch(/^WARNING: STALE FIXTURE: the fixture was exported 2026-01-01T00:00:00.000Z; the newest of 2 recordings is from 2026-01-04T00:00:00.000Z, 3\.0 days after it \(1 recording newer than the fixture\)/);
+    const hours = fixtureFreshness('2026-01-01T00:00:00.000Z', ['2026-01-01T06:30:00.000Z']);
+    expect(hours.line).toMatch(/6\.5 hours after it/);
+    const fresh = fixtureFreshness('2026-01-05T00:00:00.000Z', ['2026-01-04T00:00:00.000Z']);
+    expect(fresh.stale).toBe(false);
+    expect(fresh.unknown).toBe(false);
+    expect(fresh.line).toMatch(/the fixture is newer than every recording$/);
+    for (const f of [fixtureFreshness(undefined, ['2026-01-04T00:00:00.000Z']), fixtureFreshness('2026-01-05T00:00:00.000Z', []), fixtureFreshness('2026-01-05T00:00:00.000Z', [undefined])]) {
+      expect(f.stale).toBe(false);
+      expect(f.unknown).toBe(true);
+      expect(f.line).toMatch(/cannot be told$/);
+    }
+  });
+
+  it('the export time is read from the fixture folder\'s extract; a folder without one has none', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bb-fresh-'));
+    try {
+      expect(fixtureExportedAt(dir)).toBeUndefined();
+      writeFileSync(join(dir, 'extract.json'), JSON.stringify({ format: 'x', exportedAt: '2026-01-05T00:00:00.000Z' }));
+      expect(fixtureExportedAt(dir)).toBe('2026-01-05T00:00:00.000Z');
+      writeFileSync(join(dir, 'extract.json'), '{ not json');
+      expect(fixtureExportedAt(dir)).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

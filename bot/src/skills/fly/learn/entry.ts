@@ -68,6 +68,8 @@ export const ENTRY_JOIN = Object.freeze({ side: 8, over: 4, dive: 0.35, under: 3
 export const ENTRY_JOIN_LOST = 28;
 /** A proven entry stands within this of the touchdown (blocks), and comes down no faster than this (blocks a tick: under the glide's fall reset, no fall is counted). */
 export const ENTRY_TOUCH = 2;
+/** Round 2: and within this of the goal itself (blocks beside it, and over or under it), whichever cell the touchdown is. */
+export const ENTRY_GOAL = 2;
 export const ENTRY_TOUCH_VY = 0.45;
 export const ENTRY_TOUCH_H = 0.6;
 /** The touchdown's station keeping begins where its brake stops the body within this of the touchdown (blocks), rolled out at most this many ticks. */
@@ -112,6 +114,8 @@ export interface EntryLine {
   touchdown: Vec3;
   recorded: Vec3;
   off: number;
+  /** The goal asked about (feet, its cell's centre) when the touchdown is another cell beside it (Track F9c round 2): a proof's flights must also stand within ENTRY_GOAL of it. */
+  goal?: Vec3;
 }
 
 /** The recorded speed (blocks a tick) at `at` blocks along a guide: over the three blocks either side. */
@@ -133,7 +137,7 @@ export function guideSpeed(g: Pick<Guide, 'points' | 'ticks'>, at: number): numb
  * ENTRY_WINDOW_SPEED or more. `goal`: the touchdown is that point (the goal's own cell: the recording stood again within
  * the match's reach of it) instead of where the recording stood. `grid`: the lead-in is drawn only through free air.
  */
-export function entryLine(m: GuideMatch, o: { goal?: Vec3; grid?: RouteGrid } = {}): EntryLine | string {
+export function entryLine(m: GuideMatch, o: { goal?: Vec3; touchdown?: Vec3; grid?: RouteGrid } = {}): EntryLine | string {
   const g = m.guide;
   const n = g.points.length;
   const to = Math.floor(m.open - ENTRY_WINDOW_END);
@@ -145,7 +149,8 @@ export function entryLine(m: GuideMatch, o: { goal?: Vec3; grid?: RouteGrid } = 
   // comes nearest that point on its last blocks: what a recording does after it is its recorder's own landing (a stall
   // onto a ledge, a step down off it), not a line to fly
   const recorded = g.points[n - 1]!;
-  const touchdown = o.goal ? { ...o.goal } : { ...recorded };
+  // (round 2: or another standable cell beside the goal, `touchdown`: entryTouchdowns)
+  const touchdown = o.touchdown ? { ...o.touchdown } : o.goal ? { ...o.goal } : { ...recorded };
   let end = n - 1;
   let best = Infinity;
   for (let i = Math.max(Math.ceil(m.open) + 1, n - 1 - ENTRY_KEEP_LAST); i < n; i++) {
@@ -184,7 +189,7 @@ export function entryLine(m: GuideMatch, o: { goal?: Vec3; grid?: RouteGrid } = 
     grounded: false,
     landed: true,
   };
-  return { guide, lead: k, open: m.open - from + k, from: k, to: to - from + k, touchdown, recorded: { ...recorded }, off: m.off };
+  return { guide, lead: k, open: m.open - from + k, from: k, to: to - from + k, touchdown, recorded: { ...recorded }, off: m.off, ...(o.goal ? { goal: { ...o.goal } } : {}) };
 }
 
 export interface EntryOutput {
@@ -404,13 +409,17 @@ export interface EntryFlight {
   off: number;
   dy: number;
   offRecorded: number;
+  /** Round 2: where it stands against the goal (the line's `goal`, else its touchdown): blocks beside it and over it. */
+  offGoal: number;
+  dyGoal: number;
   /** The speeds of the last tick in the air (blocks a tick). */
   touch: { vy: number; h: number };
   maxError: number;
   /** The least distance from the gliding box to a solid on the way (capped at 1), before the touchdown's station keeping. */
   room: number;
   keepTicks: number;
-  firstHit?: { tick: number; at: number };
+  /** The first hit: its tick, the blocks along the line, and where the body was against the goal (blocks east, up, south of the goal's feet: the offsets a refusal is read by). */
+  firstHit?: { tick: number; at: number; from: Vec3 };
   /** Why and where the touchdown began; ticks the speed governor looked back. */
   began?: string;
   taps: number;
@@ -440,8 +449,9 @@ export function* entrySteps(w: EntryWorld, line: EntryLine, s0: EntryState, o: {
   const flier = new EntryFlier({ grid: w.grid, line, at: entryPlace(line, s0).at, committed: true });
   let body: BodyState = { ...initialBody(s0.pos, false), vel: { ...s0.vel }, gliding: true, boostTicks: 0 };
   let cmd: MoveCommand = { ...IDLE_COMMAND, yaw: (Math.atan2(-s0.vel.x, s0.vel.z) * 180) / Math.PI, glide: true };
-  const r: EntryFlight = { landed: false, ticks: 0, roofTicks: undefined, hits: 0, bumps: 0, wet: false, end: body.pos, off: Infinity, dy: 0, offRecorded: Infinity, taps: 0, touch: { vy: 0, h: 0 }, maxError: 0, room: 1, keepTicks: 0 };
+  const r: EntryFlight = { landed: false, ticks: 0, roofTicks: undefined, hits: 0, bumps: 0, wet: false, end: body.pos, off: Infinity, dy: 0, offRecorded: Infinity, offGoal: Infinity, dyGoal: 0, taps: 0, touch: { vy: 0, h: 0 }, maxError: 0, room: 1, keepTicks: 0 };
   const max = o.maxTicks ?? ENTRY_MAX_TICKS;
+  const goal = line.goal ?? line.touchdown;
   let lastAir = { vy: s0.vel.y, h: Math.hypot(s0.vel.x, s0.vel.z) };
   for (let t = 1; t <= max; t++) {
     if (t % ENTRY_SLICE === 0) yield undefined;
@@ -474,7 +484,7 @@ export function* entrySteps(w: EntryWorld, line: EntryLine, s0: EntryState, o: {
     if (before.gliding && body.pos.y > Math.floor(body.pos.y) + 0.05 && (body.collidedHorizontally || (body.collidedVertically && !body.onGround))) {
       if (Math.hypot(before.vel.x, before.vel.y, before.vel.z) - Math.hypot(body.vel.x, body.vel.y, body.vel.z) > ENTRY_BUMP) {
         r.hits++;
-        r.firstHit ??= { tick: t, at: out.at };
+        r.firstHit ??= { tick: t, at: out.at, from: { x: body.pos.x - goal.x, y: body.pos.y - goal.y, z: body.pos.z - goal.z } };
       } else r.bumps++;
     }
     if (body.inWater || body.inLava || liquidContact(w.world, body.pos).water || liquidContact(w.world, body.pos).lava) r.wet = true;
@@ -484,6 +494,8 @@ export function* entrySteps(w: EntryWorld, line: EntryLine, s0: EntryState, o: {
   r.off = Math.hypot(body.pos.x - td.x, body.pos.z - td.z);
   r.dy = body.pos.y - td.y;
   r.offRecorded = dist(body.pos, line.recorded);
+  r.offGoal = Math.hypot(body.pos.x - goal.x, body.pos.z - goal.z);
+  r.dyGoal = body.pos.y - goal.y;
   r.touch = lastAir;
   r.keepTicks = flier.keepTicks;
   r.taps = flier.follower.stats.taps;
@@ -492,13 +504,19 @@ export function* entrySteps(w: EntryWorld, line: EntryLine, s0: EntryState, o: {
   return r;
 }
 
+/** Offsets from the goal for a log line: blocks east, up and south of its feet (x y z), a decimal each. */
+export function offsets(p: Vec3): string {
+  return `${p.x.toFixed(1)} ${p.y.toFixed(1)} ${p.z.toFixed(1)}`;
+}
+
 /** Why a flown entry is no proof (undefined: it is one). */
 export function entryVerdict(f: EntryFlight): string | undefined {
-  if (f.hits) return `hits a solid ${f.hits} time${f.hits === 1 ? '' : 's'}${f.firstHit ? ` (the first at tick ${f.firstHit.tick}, ${f.firstHit.at.toFixed(0)} blocks along the line)` : ''}`;
+  if (f.hits) return `hits a solid ${f.hits} time${f.hits === 1 ? '' : 's'}${f.firstHit ? ` (the first at tick ${f.firstHit.tick}, ${f.firstHit.at.toFixed(0)} blocks along the line, ${offsets(f.firstHit.from)} from the goal)` : ''}`;
   if (f.wet) return 'ends in water';
   if (f.lost !== undefined) return `loses the line (${f.lost})`;
   if (!f.landed) return `still in the air after ${f.ticks} ticks`;
   if (f.off > ENTRY_TOUCH || Math.abs(f.dy) > ENTRY_TOUCH) return `stands ${f.off.toFixed(1)} from the touchdown${Math.abs(f.dy) > ENTRY_TOUCH ? ` and ${Math.abs(f.dy).toFixed(1)} ${f.dy > 0 ? 'over' : 'under'} it` : ''}`;
+  if (f.offGoal > ENTRY_GOAL || Math.abs(f.dyGoal) > ENTRY_GOAL) return `stands ${f.offGoal.toFixed(1)} from the goal${Math.abs(f.dyGoal) > ENTRY_GOAL ? ` and ${Math.abs(f.dyGoal).toFixed(1)} ${f.dyGoal > 0 ? 'over' : 'under'} it` : ''}`;
   if (f.touch.vy < -ENTRY_TOUCH_VY) return `comes down at ${(-f.touch.vy).toFixed(2)} a tick`;
   if (f.touch.h > ENTRY_TOUCH_H) return `touches down at ${f.touch.h.toFixed(2)} a tick along the ground`;
   return undefined;
@@ -526,11 +544,21 @@ export function entryCases(line: EntryLine, box: EntryBox = ENTRY_BOX): EntryCas
     ['early', line.from],
     ['late', line.to],
   ];
+  const adder = (where: string, at: number) => (name: string, c: Partial<EntryCase>): void => {
+    out.push({ name: `${where} ${name}`, at, side: 0, up: 0, factor: 1, heading: 0, ...c });
+  };
+  // the recording's own three states first (a take that does not fly from those is refused for three simulations), then
+  // the corners that stack the extremes (where a line that does not hold fails soonest), then each single extreme
+  for (const [where, at] of places) adder(where, at)('on the line', {});
   for (const [where, at] of places) {
-    const add = (name: string, c: Partial<EntryCase>): void => {
-      out.push({ name: `${where} ${name}`, at, side: 0, up: 0, factor: 1, heading: 0, ...c });
-    };
-    add('on the line', {});
+    const add = adder(where, at);
+    for (const side of [box.side, -box.side]) {
+      add(`over, fast, ${side > 0 ? 'right' : 'left'}`, { side, up: box.over, factor: box.fast, heading: side > 0 ? -box.heading : box.heading });
+      add(`under, slow, ${side > 0 ? 'right' : 'left'}`, { side, up: -box.under, factor: box.slow, heading: side > 0 ? box.heading : -box.heading });
+    }
+  }
+  for (const [where, at] of places) {
+    const add = adder(where, at);
     add('right', { side: box.side });
     add('left', { side: -box.side });
     add('over', { up: box.over });
@@ -539,10 +567,6 @@ export function entryCases(line: EntryLine, box: EntryBox = ENTRY_BOX): EntryCas
     add('fast', { factor: box.fast });
     add('heading right', { heading: box.heading });
     add('heading left', { heading: -box.heading });
-    for (const side of [box.side, -box.side]) {
-      add(`over, fast, ${side > 0 ? 'right' : 'left'}`, { side, up: box.over, factor: box.fast, heading: side > 0 ? -box.heading : box.heading });
-      add(`under, slow, ${side > 0 ? 'right' : 'left'}`, { side, up: -box.under, factor: box.slow, heading: side > 0 ? box.heading : -box.heading });
-    }
   }
   return out;
 }
@@ -561,6 +585,8 @@ export interface EntryProof {
   room: number;
   roofTicks: number;
   off: number;
+  /** Round 2: the farthest any flight stood from the goal (blocks beside it). */
+  far: number;
 }
 
 /**
@@ -576,11 +602,12 @@ export async function proveEntry(w: EntryWorld, line: EntryLine, o: { box?: Entr
   let room = 1;
   let roofTicks = 0;
   let off = 0;
+  let far = 0;
   let skipped = 0;
   for (const c of cases) {
     const s0 = entryState(line, c.at, { side: c.side, up: c.up, speed: caseSpeed(line, c, box), heading: c.heading });
     if (boxClear(w.grid, s0.pos, FOLLOW_MARGIN).hit) {
-      if (c.side === 0 && c.up === 0) return { ok: false, line: `the recorded line itself is within ${FOLLOW_MARGIN} of a block in its hand-over window (${c.name})`, sims, room: 0, roofTicks, off };
+      if (c.side === 0 && c.up === 0) return { ok: false, line: `the recorded line itself is within ${FOLLOW_MARGIN} of a block in its hand-over window (${c.name})`, sims, room: 0, roofTicks, off, far };
       skipped++;
       continue;
     }
@@ -598,18 +625,20 @@ export async function proveEntry(w: EntryWorld, line: EntryLine, o: { box?: Entr
     } else f = flyEntry(w, line, s0);
     sims++;
     const why = entryVerdict(f);
-    if (why !== undefined) return { ok: false, line: `${why} from ${c.name} (${describeCase(c)})`, sims, room: Math.min(room, f.room), roofTicks, off };
+    if (why !== undefined) return { ok: false, line: `${why} from ${c.name} (${describeCase(c)})`, sims, room: Math.min(room, f.room), roofTicks, off, far };
     room = Math.min(room, f.room);
     roofTicks = Math.max(roofTicks, f.roofTicks ?? f.ticks);
     off = Math.max(off, f.off);
+    far = Math.max(far, f.offGoal);
   }
   return {
     ok: true,
-    line: `clear from ${sims} entry states (up to ${box.side} beside the line, ${box.over} over and ${box.under} under it, ${box.slow} to ${box.fast} of its speed, ${box.heading} degrees off its heading, early and late${skipped ? `; ${skipped} inside the ground left out` : ''}): standing at most ${off.toFixed(1)} from the touchdown, ${roofTicks} ticks at most from the last open sky, never nearer than ${room >= 1 ? '1 or more' : room.toFixed(2)} to a block`,
+    line: `clear from ${sims} entry states (up to ${box.side} beside the line, ${box.over} over and ${box.under} under it, ${box.slow} to ${box.fast} of its speed, ${box.heading} degrees off its heading, early and late${skipped ? `; ${skipped} inside the ground left out` : ''}): standing at most ${off.toFixed(1)} from the touchdown${line.goal && (line.goal.x !== line.touchdown.x || line.goal.y !== line.touchdown.y || line.goal.z !== line.touchdown.z) ? ` and ${far.toFixed(1)} from the goal` : ''}, ${roofTicks} ticks at most from the last open sky, never nearer than ${room >= 1 ? '1 or more' : room.toFixed(2)} to a block`,
     sims,
     room,
     roofTicks,
     off,
+    far,
   };
 }
 
@@ -748,3 +777,91 @@ export function entryWorldSame(asked: EntryAsked, live: EntryCell): { same: 'sam
 }
 
 const dist = (a: Vec3, b: Vec3): number => Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+
+// ---- the touchdown beside the goal (round 2) ---------------------------------------------------------------------
+
+/**
+ * Round 2 (docs/flight.md "Learned entries", "The cave changes"): the touchdown need not be the goal's own cell. A cave
+ * changes between a recording and a flight (a block set beside the goal closed the last two blocks of both flyable takes
+ * of the owner's cave): the standable cells within ENTRY_TOUCH_REACH of the goal (blocks beside it, cell to cell) and
+ * ENTRY_TOUCH_LEVELS over or under its floor are tried in turn, and the proof decides. A take whose own three states do
+ * not fly to ENTRY_TOUCH_SCREENS cells in a row is given up (the cells behind what closed the goal come first and all
+ * fail: a simulation each); a take gets ENTRY_TOUCH_PROOFS whole proofs at the most.
+ */
+export const ENTRY_TOUCH_REACH = 2;
+export const ENTRY_TOUCH_LEVELS = 1;
+export const ENTRY_TOUCH_SCREENS = 6;
+export const ENTRY_TOUCH_PROOFS = 3;
+
+/**
+ * The cells a learned entry may touch down on for a goal (feet cells, whole numbers): the goal's own first, then the
+ * standable ones round it (a solid under the feet, the feet and the head in air: an unknown or a liquid cell is neither)
+ * by their distance beside the goal, the goal's own level before the level under it before the level over it.
+ */
+export function entryTouchdowns(cell: EntryCell, goal: Vec3): Vec3[] {
+  const out: { c: Vec3; d: number; dy: number }[] = [];
+  for (let dy = -ENTRY_TOUCH_LEVELS; dy <= ENTRY_TOUCH_LEVELS; dy++) {
+    for (let dx = -ENTRY_TOUCH_REACH; dx <= ENTRY_TOUCH_REACH; dx++) {
+      for (let dz = -ENTRY_TOUCH_REACH; dz <= ENTRY_TOUCH_REACH; dz++) {
+        const d = Math.hypot(dx, dz);
+        if (d > ENTRY_TOUCH_REACH || (dx === 0 && dy === 0 && dz === 0)) continue;
+        const c = { x: goal.x + dx, y: goal.y + dy, z: goal.z + dz };
+        if (cell(c.x, c.y - 1, c.z) === ENTRY_SOLID && cell(c.x, c.y, c.z) === ENTRY_AIR && cell(c.x, c.y + 1, c.z) === ENTRY_AIR) out.push({ c, d, dy });
+      }
+    }
+  }
+  out.sort((a, b) => a.d - b.d || Math.abs(a.dy) - Math.abs(b.dy) || a.dy - b.dy);
+  return [{ ...goal }, ...out.map((o) => o.c)];
+}
+
+export interface EntryChoice {
+  /** The line to the first cell whose proof cleared, its proof and that cell; none: the take is refused. */
+  line?: EntryLine;
+  proof?: EntryProof;
+  cell?: Vec3;
+  /** What was tried, cell by cell (offsets from the goal's cell), for the decision's line. */
+  said: string;
+  sims: number;
+  /** Whole proofs flown (a take refused at its own states has none). */
+  proofs: number;
+}
+
+/**
+ * One recorded take against a goal: its line to each touchdown cell of `cells` in turn (entryTouchdowns), the
+ * recording's own three states first (the proof's first three cases: three simulations refuse a cell), then the whole
+ * proof; the first cell that clears is the take's. Every flight of a proof must stand within ENTRY_TOUCH of the touchdown
+ * and within ENTRY_GOAL of the goal.
+ */
+export async function chooseTouchdown(w: EntryWorld, m: GuideMatch, goal: Vec3, cells: readonly Vec3[], o: { yieldNow?: () => Promise<void> } = {}): Promise<EntryChoice> {
+  const centre = { x: goal.x + 0.5, y: goal.y, z: goal.z + 0.5 };
+  const said: string[] = [];
+  let sims = 0;
+  let proofs = 0;
+  let screens = 0;
+  let more = 0;
+  const done = (): string => `${said.join('; ')}${more ? `; its own state does not fly to ${more} more cell${more === 1 ? '' : 's'} beside the goal either` : ''}`;
+  const run = o.yieldNow ? { yieldNow: o.yieldNow } : {};
+  for (const c of cells) {
+    if (proofs >= ENTRY_TOUCH_PROOFS || screens >= ENTRY_TOUCH_SCREENS) break;
+    const own = c.x === goal.x && c.y === goal.y && c.z === goal.z;
+    const line = entryLine(m, { goal: centre, ...(own ? {} : { touchdown: { x: c.x + 0.5, y: c.y, z: c.z + 0.5 } }), grid: w.grid });
+    if (typeof line === 'string') return { said: `no line (${line})`, sims, proofs };
+    const where = own ? "to the goal's cell" : `to the cell ${c.x - goal.x} ${c.y - goal.y} ${c.z - goal.z} from it (${Math.hypot(c.x - goal.x, c.z - goal.z).toFixed(1)} beside)`;
+    const cases = entryCases(line);
+    const screen = await proveEntry(w, line, { ...run, cases: cases.slice(0, 3) });
+    sims += screen.sims;
+    if (!screen.ok) {
+      if (said.length) more++;
+      else said.push(`${where}: ${screen.line}`);
+      screens++;
+      continue;
+    }
+    screens = 0;
+    proofs++;
+    const proof = await proveEntry(w, line, { ...run, cases });
+    sims += proof.sims;
+    said.push(`${where}: ${proof.line}`);
+    if (proof.ok) return { line, proof, cell: { ...c }, said: done(), sims, proofs };
+  }
+  return { said: done(), sims, proofs };
+}

@@ -24,7 +24,7 @@ import type { RouteGrid } from '../skills/fly/route/grid.ts'; // Track F3
 import { planTakeoffRoute, type TakeoffRoute } from '../skills/fly/route/takeoff.ts'; // Track F3
 import { RoutePlannerClient } from '../skills/fly/route/worker.ts'; // Track F3
 import { matchEntries, matchExits, MATCH_NEAR } from '../skills/fly/learn/match.ts'; // Track F9b, F9c
-import { ENTRY_AIR, ENTRY_LAVA, ENTRY_SOLID, ENTRY_UNKNOWN, ENTRY_WATER, entryAim, entryCases, entryLine, entryWorld, entryWorldSame, guideSpeed, proveEntry, type EntryAsked, type EntryLine, type EntryProof } from '../skills/fly/learn/entry.ts'; // Track F9c
+import { chooseTouchdown, ENTRY_AIR, ENTRY_LAVA, ENTRY_SOLID, ENTRY_UNKNOWN, ENTRY_WATER, entryAim, entryTouchdowns, entryWorld, entryWorldSame, guideSpeed, type EntryAsked, type EntryLine, type EntryProof } from '../skills/fly/learn/entry.ts'; // Track F9c
 import { guideLength, guidePoint } from '../skills/fly/learn/guide.ts'; // Track F9c
 import { classify } from '../skills/terrain/classify.ts'; // Track F9c: a block's class as the world cache keeps it
 import { cellClassOf } from '../world/cache/classes.ts'; // Track F9c
@@ -77,12 +77,15 @@ export const GLIDE_SIM_RANGE = 500;
  * Track F9c: a learned entry's recordings are kept this far before their last open sky (blocks: the whole of their open
  * part, which holds the hand-over window), open sky is this many free cells over a cell, at most this many takes are
  * proven for one flight (the nearest touchdowns first; each proof is some forty simulations of about a hundred ticks), and
- * no new proof begins once this long has gone.
+ * no new take is begun once this long has gone. (Round 2: a take may be proven to up to three touchdown cells, so a take
+ * costs up to 5 s and the takes of the owner's cave 8 to 9 s in all; a take begun before the limit is finished, so the
+ * decision can come up to 5 s after it. It is made in the air, in slices, on a cruise of 30 s and more; a flight too
+ * short for it flies without the entry: `comes too late`.)
  */
 export const ENTRY_BEFORE = 200;
 export const ENTRY_SKY = 64;
 export const ENTRY_TAKES = 3;
-export const ENTRY_BUDGET_MS = 8000;
+export const ENTRY_BUDGET_MS = 10_000;
 
 export interface FlyExtra {
   containers?: Containers | undefined;
@@ -341,7 +344,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const centre = { x: goal.x + 0.5, y: goal.y, z: goal.z + 0.5 };
     const tried: string[] = [];
     let sims = 0;
-    let best: { line: EntryLine; proof: EntryProof; asked: EntryAsked; cached: number } | undefined;
+    let best: { line: EntryLine; proof: EntryProof; cell: Vec3; asked: EntryAsked; cached: number } | undefined;
     let proven = 0;
     for (const m of found.matches) {
       if (proven >= ENTRY_TAKES) break;
@@ -359,26 +362,17 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         cached++;
         return c ? entryClass(c) : ENTRY_SOLID;
       }, centre);
-      const line = entryLine(m, { goal: centre, grid: w.grid });
       const at = `${m.guide.path} (it stood again ${m.off.toFixed(1)} from the goal)`;
-      if (typeof line === 'string') {
-        tried.push(`${at}: no line (${line})`);
-        continue;
-      }
-      // (the recording's own three states first: a take that does not fly from those is refused for three simulations, and
-      // the takes after it still get their turn; ENTRY_TAKES is counted in whole proofs)
+      // Round 2: the touchdown is the goal's own cell or, where the take does not fly to that, the nearest standable cell
+      // within 2 blocks of it that it does fly to (learn/entry.ts chooseTouchdown: each cell the recording's own three states
+      // first, then the whole proof; the cells asked through the proof's world, so the live confirmation covers them).
+      // (ENTRY_TAKES is counted in takes that got a whole proof: one refused at its own states costs a few simulations.)
       const yieldNow = (): Promise<void> => new Promise((r) => setImmediate(r));
-      const own = await proveEntry(w, line, { yieldNow, cases: entryCases(line).filter((c) => c.side === 0 && c.up === 0 && c.factor === 1 && c.heading === 0) });
-      sims += own.sims;
-      if (!own.ok) {
-        tried.push(`${at}: ${own.line}: refused`);
-        continue;
-      }
-      proven++;
-      const proof = await proveEntry(w, line, { yieldNow });
-      sims += proof.sims;
-      tried.push(`${at}: ${proof.line}${proof.ok ? '' : ': refused'}`);
-      if (proof.ok && (!best || proof.room > best.proof.room)) best = { line, proof, asked: w.asked, cached };
+      const pick = await chooseTouchdown(w, m, goal, entryTouchdowns((x, y, z) => (w.world.solidAt(x, y, z) ? ENTRY_SOLID : w.grid.solid(x, y, z) ? ENTRY_WATER : ENTRY_AIR), goal), { yieldNow });
+      sims += pick.sims;
+      if (pick.proofs) proven++;
+      tried.push(`${at}: ${pick.said}${pick.proof ? '' : ': refused'}`);
+      if (pick.line && pick.proof && pick.cell && (!best || pick.proof.room > best.proof.room)) best = { line: pick.line, proof: pick.proof, cell: pick.cell, asked: w.asked, cached };
     }
     const head = `fly: learned entry: ${found.matches.length} recorded way${found.matches.length === 1 ? '' : 's'} in to ${label} (${found.flights} recorded flight${found.flights === 1 ? '' : 's'}, ${found.near} standing again within ${MATCH_NEAR} of it); ${tried.join('; ')}`;
     if (!best) {
@@ -389,7 +383,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const aim = entryAim(line, { top: (x, z) => skyTop(x, z), clearance: d.settings.get('flyClearance') });
     const gate = guidePoint(line.guide, line.from).pos;
     const under = guideLength(line.guide) - line.open;
-    log.info(`${head} -> in along ${line.guide.path} (the most room: ${best.proof.room >= 1 ? '1 or more' : best.proof.room.toFixed(2)}): onto its line ${Math.round(Math.hypot(gate.x - centre.x, gate.z - centre.z))} blocks from the goal and ${Math.round(gate.y - centre.y)} over it at about ${guideSpeed(line.guide, line.from).toFixed(1)} a tick, ${Math.round(line.open - line.from)} blocks of open air to its roof, ${Math.round(under)} under it to the touchdown on the goal's cell (${sims} simulated, ${Date.now() - t0} ms${cached ? `; ${cached} cells from the world cache: to be confirmed on the live world before the line is committed to` : ''})`);
+    log.info(`${head} -> in along ${line.guide.path} (the most room: ${best.proof.room >= 1 ? '1 or more' : best.proof.room.toFixed(2)}): onto its line ${Math.round(Math.hypot(gate.x - centre.x, gate.z - centre.z))} blocks from the goal and ${Math.round(gate.y - centre.y)} over it at about ${guideSpeed(line.guide, line.from).toFixed(1)} a tick, ${Math.round(line.open - line.from)} blocks of open air to its roof, ${Math.round(under)} under it to the touchdown on ${best.cell.x === goal.x && best.cell.y === goal.y && best.cell.z === goal.z ? "the goal's cell" : `the cell ${best.cell.x - goal.x} ${best.cell.y - goal.y} ${best.cell.z - goal.z} from the goal's (${Math.hypot(best.cell.x - goal.x, best.cell.z - goal.z).toFixed(1)} beside it; every flight of the proof stood within ${best.proof.far.toFixed(1)} of the goal)`} (${sims} simulated, ${Date.now() - t0} ms${cached ? `; ${cached} cells from the world cache: to be confirmed on the live world before the line is committed to` : ''})`);
     return {
       target: { x: aim.x, z: aim.z, top: Math.round(aim.y) - APPROACH_HEIGHT, half: 2, bearing: aim.bearing, entry: { line, goal: { x: centre.x, z: centre.z, top: goal.y, half: 2 }, ...(cached ? { unconfirmed: true } : {}) } },
       confirm: () => {
@@ -1549,7 +1543,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         for (let i = 0; i < 40 && Math.hypot(loop.state.vel.x, loop.state.vel.z) > 0.003; i++) await loop.waitTicks(1);
         const onGoal = r.ok && r.target.cell?.kind === 'goal' && r.report?.onTarget === true && hdist(loop.state.pos, goalTarget) <= 0.8;
         if (onGoal) return;
-        const walkable = r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing';
+        // (Track F9c round 2: and after a learned entry that stood, however the flight was then called: the body is beside the goal)
+        const walkable = r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing' || r.report?.entry?.end === 'landed';
         if (!walkable || !live()) return;
         const w = t.player ? await come0(t.player) : await rest(r.report?.entry?.end === 'landed');
         if (said) return;

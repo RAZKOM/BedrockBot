@@ -7,7 +7,7 @@
 //
 // The build (`truth:cave`, packs/truth/src/cave.ts): stone over the extract's box, then its air and water as boxes
 // (cave-layout.ts greedyBoxes; every cell of the cache that is not air or water, the unknown chunks too, is stone),
-// sent in parts of at most 1800 characters. FLY_CAVE_REUSE=1 skips it (a replica of the same fixture is still there).
+// sent in parts of at most 1800 characters. FLY_CAVE_REUSE=1 skips it (a replica of the same fixture is still there); FLY_CAVE_REUSE=surroundings builds only the box again (a newer fixture of the same box).
 // The home waypoint (outside the box) gets a 5 x 5 stone pad at its real height; the ground between it and the box is
 // the flat world's, far under it (the real terrain is not built).
 //
@@ -38,6 +38,7 @@ import { silentLogger } from '../../src/log.ts';
 import { attachCoarseLayer, type CoarseLayerImpl } from '../../src/skills/coarse/index.ts';
 import { proveShortcut } from '../../src/skills/fly/cave/proof.ts'; // Track F6
 import { WaypointProvider, type RoutePoint } from '../../src/skills/fly/cave/route.ts'; // Track F6
+import { fixtureExportedAt, fixtureFreshness } from '../../src/skills/fly/learn/fresh.ts';
 import { caveLegs, caveWorld, loadCaveFixture, REPLICA_SHELL, replicaTerraces, ROUTE_A, ROUTE_B, shift, type CaveLeg } from '../../src/skills/fly/corridor/cave.ts';
 import { setCorridorProvider, setCorridorUnderFly } from '../../src/skills/fly/corridor/registry.ts';
 import { PathStore } from '../../src/skills/fly/learn/store.ts'; // Track F9b
@@ -52,6 +53,13 @@ const LEGS = new Set((process.env.FLY_CAVE_LEGS ?? '').split(',').filter(Boolean
 const RUNS = process.env.FLY_CAVE_RUNS ? Number(process.env.FLY_CAVE_RUNS) : undefined;
 const LEG_MS = Number(process.env.FLY_CAVE_LEG_S ?? 180) * 1000;
 const REUSE = process.env.FLY_CAVE_REUSE === '1';
+/**
+ * Track F9c round 2: FLY_CAVE_REUSE=surroundings builds the box again and leaves the shell and the terraces as they stand
+ * (a newer fixture of the same box: the terraces come from the same column tops). A whole build over a replica that
+ * stands does not work: `buildSurroundings` sends its fills from stops on the flat ground, which a standing replica has
+ * under stone (the bot is put inside a terrace, and the fills' chunks are never loaded for it).
+ */
+const BOX_ONLY = process.env.FLY_CAVE_REUSE === 'surroundings';
 /** Track F9b: a folder of `!learn` recordings of the real cave (private, read only): tripOut flies with them (moved with the replica into a temp folder the bot reads) and `flyLearned` on. */
 const LEARNED = process.env.FLY_CAVE_LEARNED;
 /** Track F9c: with FLY_CAVE_LEARNED, trip C flies with `flyLearnedEntry` on (the recorded ways in), and `round` flies in and out. */
@@ -61,7 +69,9 @@ const PLAIN = process.env.FLY_CAVE_PLAIN === '1';
 const want = (c: string): boolean => ONLY.size === 0 || ONLY.has(c);
 const wantLeg = (i: number): boolean => LEGS.size === 0 || LEGS.has(i);
 /** The characters of one `truth:cave part` message (a scriptevent message holds 2048). */
-const PART_CHARS = 1800;
+// (round 2: FLY_CAVE_PART_CHARS cuts the parts elsewhere: on the PC one part of one fixture could never be sent, `spawn EPERM`
+// on every attempt, the same part each run: the command line itself was refused, which only its text can explain)
+const PART_CHARS = Number(process.env.FLY_CAVE_PART_CHARS ?? 1800);
 /** Parts in flight at once. */
 const PART_JOBS = 6;
 
@@ -132,10 +142,23 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
     const parts = boxMessages(boxes, PART_CHARS);
     const tBoxes = performance.now();
     const session = `c${Math.random().toString(36).slice(2, 8)}`;
+    let sendRetries = 0;
     const ok = async (args: (string | number)[], ms: number): Promise<Record<string, unknown>> => {
-      const r = await b.truth.cmd<Record<string, unknown>>('cave', args, ms);
-      if (!r.ok) throw new Error(`truth:cave ${String(args[0])} failed: ${r.reason} ${JSON.stringify(r.data)}`);
-      return r.data;
+      // A command that could not be started at all is sent again (round 2: on the PC `docker exec` failed to start once
+      // in a few hundred, `spawn EPERM`, with nothing wrong with the message; a part sent twice is the same part), and a
+      // failure says which message it was.
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const r = await b.truth.cmd<Record<string, unknown>>('cave', args, ms);
+          if (!r.ok) throw new Error(`truth:cave ${String(args[0])} failed: ${r.reason} ${JSON.stringify(r.data)}`);
+          return r.data;
+        } catch (err) {
+          const why = err instanceof Error ? err.message : String(err);
+          if (!/spawn (EPERM|EAGAIN|EMFILE|EBUSY)/.test(why) || attempt >= 5) throw new Error(`truth:cave ${String(args[0])} ${String(args[2] ?? '')} (${args.map(String).join(' ').length} characters), attempt ${attempt}: ${why}`, { cause: err });
+          sendRetries++;
+          await sleep(200 * attempt);
+        }
+      }
     };
     await ok(['begin', session, min.x, min.y, min.z, e.size.x, e.size.y, e.size.z], 30_000);
     let next = 0;
@@ -148,7 +171,7 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
     const tBuilt = performance.now();
     const s = (a: number, z: number) => ((z - a) / 1000).toFixed(1);
     notes.push(
-      `build: box ${e.size.x} x ${e.size.y} x ${e.size.z} (${e.size.x * e.size.y * e.size.z} cells), ${boxes.length} boxes in ${parts.length} parts (${parts.reduce((n, p) => n + p.length, 0)} characters); boxes ${s(t0, tBoxes)} s, sent ${s(tBoxes, tSent)} s, built ${s(tSent, tBuilt)} s (${String(r.pieces)} pieces, ${String(r.ticks)} ticks), total ${s(t0, tBuilt)} s`,
+      `build: box ${e.size.x} x ${e.size.y} x ${e.size.z} (${e.size.x * e.size.y * e.size.z} cells), ${boxes.length} boxes in ${parts.length} parts (${parts.reduce((n, p) => n + p.length, 0)} characters${sendRetries ? `, ${sendRetries} sent again` : ''}); boxes ${s(t0, tBoxes)} s, sent ${s(tBoxes, tSent)} s, built ${s(tSent, tBuilt)} s (${String(r.pieces)} pieces, ${String(r.ticks)} ticks), total ${s(t0, tBuilt)} s`,
     );
   }
 
@@ -228,6 +251,10 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
       const own = (j: Box): boolean => g.x >= j.x1 && g.x <= j.x2 && g.z >= j.z1 && g.z <= j.z2;
       g.jobs.sort((p, q) => Number(own(p)) - Number(own(q)));
       await teleport(b, { x: g.x + 0.5, y: FEET_Y, z: g.z + 0.5 });
+      // (round 2: a stop inside stone means a replica already stands here: its fills would wait for chunks that never load)
+      const model = b.built.mobility!.loop;
+      await model.waitTicks(10);
+      if (model.world.solidAt(g.x, FEET_Y, g.z) === true || model.world.solidAt(g.x, FEET_Y + 1, g.z) === true) throw new Error(`the build's stop at ${g.x} ${FEET_Y} ${g.z} is inside stone: a replica already stands here. A whole build needs a world without one (its stops are on the flat ground); FLY_CAVE_REUSE=surroundings builds only the box again`);
       for (const j of g.jobs) {
         await truthLoaded(b.truth, 'fill', [j.x1, j.y1, j.z1, j.x2, j.y2, j.z2, 'stone'], 60_000);
         fills++;
@@ -291,7 +318,8 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
     if (home) await buildPlatform(bot, { x: home.x - 0.5, z: home.z - 0.5 }, home.y, 2, home);
     else await teleport(bot, away);
     if (!REUSE) {
-      await buildSurroundings(bot); // Track F8: before the box (a chunk the box cuts is filled whole, the box's cells set after)
+      if (BOX_ONLY) notes.push('build: the surroundings reused, the box built again (FLY_CAVE_REUSE=surroundings)');
+      else await buildSurroundings(bot); // Track F8: before the box (a chunk the box cuts is filled whole, the box's cells set after)
       await buildReplica(bot);
     } else notes.push('build: reused (FLY_CAVE_REUSE=1)');
     cacheDir = mkdtempSync(join(tmpdir(), 'bb-cave-e2e-'));
@@ -349,6 +377,10 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
     const paths0 = process.env.BEDROCKBOT_PATHS_DIR;
     const dir = mkdtempSync(join(tmpdir(), 'bb-cave-paths-'));
     const all = new PathStore(LEARNED).all();
+    // (round 2: a fixture older than the recordings is another cave than the one they were made in: said, and loudly)
+    const fresh = fixtureFreshness(fixtureExportedAt(fix!.dir), all.map((p) => p.recorded));
+    notes.push(`${run}: ${fresh.line}`);
+    if (fresh.stale) console.warn(`[fly-cave e2e] ${fresh.line}`);
     for (const p of all) writeFileSync(join(dir, `${p.name}.json`), JSON.stringify({ ...p, samples: p.samples.map((q) => ({ ...q, x: q.x + d.x, z: q.z + d.z })), rockets: p.rockets.map((q) => ({ ...q, x: q.x + d.x, z: q.z + d.z })) }));
     process.env.BEDROCKBOT_PATHS_DIR = dir;
     notes.push(`${run}: ${all.length} recorded paths moved with the replica`);
@@ -420,7 +452,7 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
       const bails = logs.filter((l) => l.includes('bailing out')).length;
       const how = (PLAIN || (ENTRY && LEARNED) ? `GA ${gas}, flight ${flightS.toFixed(0)} s, landed ${landedOff.toFixed(0)} off (dy ${landedDy.toFixed(0)}), total ${totalS.toFixed(0)} s` : (/\(([^)]*)\);/.exec(end)?.[1] ?? '')) + `, ${flights} flight${flights === 1 ? '' : 's'}, ${bails} bail-outs${entry}`;
       rows.push({ run, leg: `${i} home -> cave_start`, ok, off, ...parsed, seconds: PLAIN || (ENTRY && LEARNED) ? totalS : parsed.seconds >= 0 ? parsed.seconds : totalS, damage: dmg.total, water: water - w0, how });
-      notes.push(`${run} ${i}: ${end}\n    ${logs.filter((l) => /^corridor: |flight: (landed|ended|holding|go-around|no go-around|land now|price|learned entry|retargeted)|fly: (landing for|learned entry|the learned entry)|takeoff|fly: no takeoff|route: .*bailing|walked|fly: landed|the first rocket|recorded way in/.test(l)).slice(0, 48).map((l) => l.slice(0, l.startsWith('fly: learned entry') ? 1800 : 330)).join('\n    ')}`);
+      notes.push(`${run} ${i}: ${end}\n    ${logs.filter((l) => /^corridor: |flight: (landed|ended|holding|go-around|no go-around|land now|price|learned entry|retargeted)|fly: (landing for|learned entry|the learned entry)|takeoff|fly: no takeoff|route: .*bailing|walked|fly: landed|the first rocket|recorded way in/.test(l)).slice(0, 48).map((l) => l.slice(0, l.startsWith('fly: learned entry') ? 4000 : 330)).join('\n    ')}`);
       if (ENTRY && LEARNED && !stood) notes.push(`${run} ${i}, the whole log (${logs.length} lines, the first 160):\n    ${logs.slice(0, 160).map((l) => l.slice(0, 400)).join('\n    ')}`);
       expect(end.length).toBeGreaterThan(0);
     }

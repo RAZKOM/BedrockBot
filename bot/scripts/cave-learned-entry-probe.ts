@@ -11,7 +11,8 @@
 //                   speed and the slope along it, the room it keeps
 import { caveWorld, loadCaveFixture, REPLICA_FLAT_FEET, replicaCoarse } from '../src/skills/fly/corridor/cave.ts';
 import { simulateFlight, type SimDeps } from '../src/skills/fly/glide.ts';
-import { caseSpeed, ENTRY_AIM_OUT, ENTRY_BOX, entryAim, entryCases, entryLine, entryState, entryVerdict, flyEntry, guideSpeed, proveEntry, type EntryLine, type EntryWorld } from '../src/skills/fly/learn/entry.ts';
+import { caseSpeed, chooseTouchdown, ENTRY_AIM_OUT, ENTRY_AIR, ENTRY_BOX, ENTRY_SOLID, ENTRY_WATER, entryAim, entryCases, entryLine, entryState, entryTouchdowns, entryVerdict, flyEntry, guideSpeed, proveEntry, type EntryLine, type EntryWorld } from '../src/skills/fly/learn/entry.ts';
+import { fixtureExportedAt, fixtureFreshness } from '../src/skills/fly/learn/fresh.ts';
 import { guideLength, guidesOf } from '../src/skills/fly/learn/guide.ts';
 import { matchEntries, MATCH_NEAR, type OpenSky } from '../src/skills/fly/learn/match.ts';
 import { PathStore } from '../src/skills/fly/learn/store.ts';
@@ -88,6 +89,8 @@ if (!pathsDir) {
   process.exit(0);
 }
 const paths = new PathStore(pathsDir).all();
+// (round 2: a fixture older than the recordings is another cave than the one they were made in: said first)
+console.log(fixtureFreshness(fixtureExportedAt(fix.dir), paths.map((p) => p.recorded)).line);
 const before = Number(arg('before', '200'));
 const found = matchEntries(paths, to, sky, { before });
 console.log(`${paths.length} recordings, ${found.flights} flights, ${found.near} stand again within ${MATCH_NEAR} of ${arg('to', 'cave_start')}, ${found.matches.length} of those come from under open sky to a place under a roof`);
@@ -125,11 +128,27 @@ if (mode === 'lines') {
   }
 }
 
-/** The entry lines of the matching takes (`--take name` for one). */
+/**
+ * The entry lines of the matching takes (`--take name` for one). `--touch choose` (the default, round 2): the touchdown the
+ * bot would choose (the goal's own cell, else the nearest standable cell within 2 blocks of it whose proof clears:
+ * chooseTouchdown), and the goal's own cell for a take refused everywhere; `--touch goal`: the goal's own cell always;
+ * `--touch recorded`: where the recording stood.
+ */
 const lines: { name: string; line: EntryLine }[] = [];
+const classOf = (x: number, y: number, z: number): number => (solidAt(x, y, z) ? ENTRY_SOLID : grid.solid(x, y, z) ? ENTRY_WATER : ENTRY_AIR);
 for (const m of found.matches) {
   if (has('take') && m.guide.path !== arg('take', '')) continue;
-  const l = entryLine(m, { grid, ...(arg('touch', 'goal') === 'recorded' ? {} : { goal: to }) });
+  const touch = arg('touch', 'choose');
+  if (touch === 'choose') {
+    const t0 = performance.now();
+    const pick = await chooseTouchdown(ew, m, goal, entryTouchdowns(classOf, goal));
+    console.log(`${m.guide.path}: ${pick.said}${pick.proof ? '' : ': refused'} (${pick.sims} simulated, ${(performance.now() - t0).toFixed(0)} ms)`);
+    if (pick.line) {
+      lines.push({ name: m.guide.path, line: pick.line });
+      continue;
+    }
+  }
+  const l = entryLine(m, { grid, ...(touch === 'recorded' ? {} : { goal: to }) });
   if (typeof l === 'string') console.log(`${m.guide.path}: no entry line (${l})`);
   else lines.push({ name: m.guide.path, line: l });
 }
