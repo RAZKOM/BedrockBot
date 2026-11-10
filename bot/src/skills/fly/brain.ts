@@ -74,9 +74,11 @@ import { decideGoAround, SINK_S_PER_BLOCK, WALK_S_PER_BLOCK, walkSeconds, type L
 import type { RouteGoal } from './route/types.ts'; // Track F3
 import { GuideFollower } from './learn/follow.ts'; // Track F9b
 import { guideLength, type Guide } from './learn/guide.ts'; // Track F9b
+import { ENTRY_JOIN, EntryFlier, entryJoin } from './learn/entry.ts'; // Track F9c
 
 /** Track F3: `route`: the RouteTracker flies the last blocks onto a route landing (docs/flight.md "Route landings and takeoffs"). */
-export type FlightPhase = 'takeoff' | 'climb' | 'cruise' | 'approach' | 'route' | 'goaround' | 'land' | 'done';
+/** Track F9c: `entry`: the entry's flier flies a recorded way in under a roof to its touchdown (docs/flight.md "Learned entries (Track F9c)"). */
+export type FlightPhase = 'takeoff' | 'climb' | 'cruise' | 'approach' | 'route' | 'entry' | 'goaround' | 'land' | 'done';
 
 export interface BrainInput {
   tick: number;
@@ -203,7 +205,65 @@ export interface BrainOptions {
      */
     guide?: { line: Guide; open: number };
   };
+  /**
+   * Track F9c (docs/flight.md "Learned entries"): a target that carries a learned entry (`LandingTarget.entry`) is missed
+   * at most this many times (the body past the hand-over window without being inside what the proof flew: a go-around
+   * each) before the flight goes to the entry's fallback, the landing as without a recording (default ENTRY_TRIES).
+   */
+  entryTries?: number;
+  /** Track F9c: hold sneak through an entry's touchdown (the sneak landing's rule, flySneakLand). */
+  entrySneak?: boolean;
 }
+
+/** Track F9c: the hand-over windows a flight may miss before it gives its learned entry up. */
+export const ENTRY_TRIES = 2;
+/** Track F9c: a body this near the entry's line (blocks, beside or over it) that is past its window has missed it; farther off it is still on its way round. */
+export const ENTRY_PASS_NEAR = 24;
+/** Track F9c: the cruise's dive onto a learned entry's lead-in: this many degrees steeper than the slope still needed, at most this steep. */
+export const ENTRY_DIVE_OVER = 6;
+export const ENTRY_DIVE_MAX = 40;
+/** Track F9c: a descent circle over a learned entry's lead-in is flown at this pitch (the cruise's is 8), level again over this speed. */
+export const ENTRY_SPIRAL_PITCH = 30;
+export const ENTRY_SPIRAL_FAST = 1.5;
+/**
+ * Track F9c, the helix down onto a learned entry's lead-in (brain.ts entryHelix): begun within ENTRY_HELIX_NEAR of the
+ * lead-in's start (blocks along the ground), a circle of ENTRY_HELIX_RADIUS, given up after ENTRY_HELIX_TICKS. Its
+ * descent is steered, not left to where the laps happen to end: the body is to pass the lead-in's start ENTRY_HELIX_UNTIL
+ * over it, and every tick the pitch is the one whose sink uses up the height still over that along the circle still to
+ * fly. A glide in a circle this tight cannot sink less than ENTRY_HELIX_SINK.lo of a block for a block flown (level
+ * flight needs a rocket) and is not flown steeper than .hi; `.flat` and `.steep` are what pitch 0 and pitch 30 sink
+ * there (measured in the circle, the pitch between them in proportion). The last lap is flown only over ground at
+ * least ENTRY_HELIX_CLEAR under it, and a body that can no longer reach the start higher than ENTRY_HELIX_LOW under the
+ * height it was to pass at has missed. A lap ends ENTRY_HELIX_PAST blocks beyond the start (the hand-over's test has
+ * its ticks there); a body more than ENTRY_HELIX_FAR outside the circle flies to it along its tangent.
+ */
+export const ENTRY_HELIX_NEAR = 44;
+export const ENTRY_HELIX_RADIUS = 14;
+export const ENTRY_HELIX_UNTIL = 8;
+export const ENTRY_HELIX_SINK = { lo: 0.22, hi: 0.33, flat: 0.19, steep: 0.36 };
+export const ENTRY_HELIX_CLEAR = 3;
+export const ENTRY_HELIX_LOW = 4;
+export const ENTRY_HELIX_PAST = 8;
+export const ENTRY_HELIX_FAR = 6;
+/** Track F9c: the blocks along a lead-in for each block a body is over it before the hand-over's test finds it on the line (a lead-in comes down 20 degrees at the most: learn/entry.ts ENTRY_LEAD_SLOPE). */
+export const ENTRY_HELIX_SLOPE = 0.4;
+/**
+ * Track F9c: a go-around for a learned entry climbs to at least this over the height the helix passes the lead-in's start
+ * at: a lap's worth and some, so that the body comes back with a lap to spend and the helix brings it to the hand-over's
+ * height. (The brain's own go-around height is the hand-over's height and 6: it brought the body back 26 to 27 over the
+ * start where the flier takes 22 and a lap costs 20, and the second pass was missed like the first.)
+ */
+export const ENTRY_HELIX_AGAIN = 34;
+export const ENTRY_HELIX_LOOK = 10;
+export const ENTRY_HELIX_TICKS = 500;
+/** Track F9c: an entry given up with the body within this of its window's end (blocks along the ground) is climbed away from before the flight goes on: back along the line, this many blocks up, for at most this many ticks. */
+export const ENTRY_ESCAPE_NEAR = 120;
+export const ENTRY_ESCAPE_UP = 24;
+export const ENTRY_ESCAPE_TICKS = 80;
+/** Track F9c: a landing forced during that climb (no rocket's path clear) takes ground at least this many blocks before the line's last open sky. */
+export const ENTRY_ESCAPE_BEFORE = 4;
+/** Track F9c: an entry's flier has this many ticks from its commit to standing (the proof's flights take 60 to 135); longer is a lost line. */
+export const ENTRY_MAX_TICKS = 300;
 
 export interface FlightStats {
   rockets: number;
@@ -252,6 +312,14 @@ export interface FlightStats {
   routeExitYaw?: number;
   routeSkyAt?: number;
   routeHeadingAt?: number;
+  /**
+   * Track F9c: the learned entry of this flight: the recording's name, the times the flier took the body on the lead-in
+   * and the windows missed, the tick it committed, how it ended (`landed`: standing after the line; `lost`: the line
+   * given up under the roof, the flight landed; `fallback`: the entry given up before any commit, the landing as without
+   * it) and why, the ticks from the commit and from the line's last open sky to standing, the largest distance off the
+   * line, the governor's ticks.
+   */
+  entry?: { name: string; joins: number; misses: number; committedAt?: number; end?: 'landed' | 'lost' | 'fallback'; why?: string; ticks?: number; roofTicks?: number; maxError?: number; taps?: number };
 }
 
 /** Track F3: the route tracker gets this many ticks for a landing before the brain goes around (a hover that never comes down). */
@@ -394,7 +462,17 @@ export class FlightBrain {
   // (entryAbove is set by the cruise when it hands over to the approach)
   /** Why the flight is ending early (set by `landNow`), kept for the outcome. */
   private endReason: FlightEndReason | undefined;
-  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise' | 'route' | 'routeTakeoff'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral' };
+  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise' | 'route' | 'routeTakeoff' | 'entrySneak'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral'; entryTries: number };
+  /** Track F9c: the flier of a learned entry (from the hand-over on the lead-in), the windows missed so far, and what the live world said of the proof (`confirmEntry`; undefined: nothing yet). */
+  private flier: EntryFlier | undefined;
+  private entryMisses = 0;
+  private entryOk: boolean | undefined;
+  /** Track F9c: the helix down beside a learned entry's lead-in (entryHelix): its centre, its turning sense, the height it passes the lead-in's start at, the whole laps still to fly after this one, how far beyond the start along the line's heading the body was a tick ago, whether its last pass got no hand-over (the circle again, not the line), the tick it began. */
+  private helix: { centre: { x: number; z: number }; dir: 1 | -1; passY: number; laps: number; along: number; off: boolean; since: number } | undefined;
+  /** Track F9c: the ground under the helix's two circles, looked up at most every ENTRY_HELIX_LOOK ticks: for each side the lowest height its last lap may pass the lead-in's start at (undefined: a column under it unknown). */
+  private helixGround: { line: object; at: number; sides: { centre: { x: number; z: number }; dir: 1 | -1; floor: number | undefined }[] } | undefined;
+  /** Track F9c: the climb away from a learned entry's line after it was given up beside it: the heading, the height it ends at, the tick it began. */
+  private escape: { yaw: number; until: number; since: number; roof: { x: number; z: number } } | undefined;
   /** Track F3: the route tracker of the landing (from the hand-over) or of the route takeoff; the gliding ticks in a row of the takeoff. */
   private tracker: RouteTracker | undefined;
   private routeGlideTicks = 0;
@@ -493,6 +571,8 @@ export class FlightBrain {
       landStyle: opts.landStyle ?? 'auto',
       route: opts.route,
       routeTakeoff: opts.routeTakeoff,
+      entryTries: opts.entryTries ?? ENTRY_TRIES,
+      entrySneak: opts.entrySneak,
     };
     this.planner = new ApproachPlanner(opts.seed ?? 12345, opts.obstacle);
     this.brakePlanner = new BrakePlanner(((opts.seed ?? 12345) * 7 + 3) >>> 0, opts.obstacle);
@@ -568,6 +648,7 @@ export class FlightBrain {
     if (this.holding && this.target.hold) return 'holding';
     if (this.dive) return 'dive';
     if (this.phase === 'route') return 'route';
+    if (this.phase === 'entry') return this.flier?.committed ? 'entry' : 'entry (joining)';
     if (!this.descent) return undefined;
     return this.descent.kind === 'spiral' ? `spiral r${this.descent.fit.radius}` : 'S-turns';
   }
@@ -579,6 +660,13 @@ export class FlightBrain {
    */
   retarget(target: LandingTarget, body?: FlightBody, o: { cruiseY?: number } = {}): boolean {
     if (this.phase === 'land' || this.phase === 'done') return false;
+    // Track F9c: a learned entry's flier has the body once it has committed to the line (before that, on the lead-in in the
+    // open, the flight may still be sent elsewhere)
+    if (this.phase === 'entry' && this.flier?.committed) return false;
+    if (this.phase === 'entry') this.phase = 'cruise';
+    this.flier = undefined;
+    this.helix = undefined;
+    this.entryMisses = 0;
     // in the approach only while there is room to re-plan (the goal's chunks often load just as it begins)
     if ((this.phase === 'approach' || this.phase === 'goaround' || this.phase === 'route') && (!body || hdist(body.pos, this.target) < 15)) return false;
     // a new trip taken over in the air: the climb goes on to the higher of the two cruise heights (the cruise's rockets cover the distance)
@@ -617,10 +705,65 @@ export class FlightBrain {
     this.resetPlanners();
     this.tracker = undefined;
     this.follower = undefined;
+    this.flier = undefined;
+    this.helix = undefined;
     this.dive = undefined;
     this.descent = undefined;
     this.descentNone = false;
     this.phase = 'land';
+  }
+
+  /**
+   * Track F9c (docs/flight.md "Learned entries"): what the live world says of a learned entry's proof that was made on the
+   * world cache (learn/entry.ts entryWorldSame): `true`, the live model answers every cell the proof asked as the cache
+   * did, so the proof stands and the flier may commit; `false`, a cell differs: the entry is given up and the flight
+   * goes to its fallback (the landing as without a recording).
+   */
+  confirmEntry(ok: boolean, why?: string, body?: FlightBody): void {
+    this.entryOk = ok;
+    const en = this.target.entry;
+    if (!en) return;
+    if (ok) {
+      if (this.flier) this.flier.confirmed = true;
+      this.o.note?.(`learned entry: the proof of ${en.line.guide.path} stands on the live world${why ? ` (${why})` : ''}`);
+      return;
+    }
+    // (a flier that has committed did so on a confirmed proof: nothing to take back)
+    if (this.flier?.committed) return;
+    this.entryFallback(`the proof does not stand on the live world${why ? ` (${why})` : ''}`, body);
+  }
+
+  /** Track F9c: the learned entry is given up before any commit: the flight goes on to the entry's fallback (the landing as without a recording), or lands on the nearest safe ground when it has none. */
+  private entryFallback(why: string, body?: FlightBody): void {
+    const en = this.target.entry;
+    if (!en) return;
+    if (this.stats.entry) Object.assign(this.stats.entry, { end: 'fallback', why });
+    else this.stats.entry = { name: en.line.guide.path, joins: 0, misses: this.entryMisses, end: 'fallback', why };
+    this.o.note?.(`learned entry: ${en.line.guide.path} given up (${why}): ${en.fallback ? 'the landing as without a recording' : 'no other landing known, the nearest safe ground'}`);
+    this.flier = undefined;
+    this.helix = undefined;
+    if (!en.fallback) {
+      if (body) this.landNow('no_landing', body);
+      return;
+    }
+    const near = body !== undefined && body.gliding && hdist(body.pos, this.target) <= ENTRY_ESCAPE_NEAR;
+    const back = this.target.bearing;
+    this.target = en.fallback;
+    this.phase = 'cruise';
+    this.tracker = undefined;
+    this.holding = undefined;
+    this.dive = undefined;
+    this.descent = undefined;
+    this.descentNone = false;
+    this.goaroundY = undefined;
+    this.goaroundBearing = undefined;
+    this.lastMiss = undefined;
+    this.resetPlanners();
+    // given up beside the line (the window missed): the body is low before a roof, heading at it. It climbs away first,
+    // back along the line it came in on (`escape`: a rocket, the look up), and flies on to the fallback from up there
+    // (`roof`: where the line's open sky ends: a landing forced during the climb away stays before it)
+    const edge = en.line.guide.points[Math.min(en.line.guide.points.length - 1, Math.max(0, Math.round(en.line.open)))]!;
+    if (near && body) this.escape = { yaw: back ?? yawTo(en.fallback, body.pos), until: body.pos.y + ENTRY_ESCAPE_UP, since: this.stats.ticks, roof: { x: edge.x, z: edge.z } };
   }
 
   /**
@@ -659,6 +802,7 @@ export class FlightBrain {
 
     // standing after a glide: the flight is over
     if (this.wasGliding && !b.gliding && b.onGround) {
+      if (this.phase === 'entry') this.entryStood(b);
       this.phase = 'done';
       return { control: { ...ctl, glide: false, pitch: 0 }, end: this.outcome(b) };
     }
@@ -675,6 +819,8 @@ export class FlightBrain {
         return { control: this.approach(i, ctl, this.target) };
       case 'route':
         return { control: this.route(i, ctl) };
+      case 'entry':
+        return { control: this.entry(i, ctl) };
       case 'goaround':
         return { control: this.goaround(i, ctl) };
       case 'land':
@@ -685,7 +831,8 @@ export class FlightBrain {
   }
 
   private outcome(b: FlightBody): FlightEnd {
-    const t = this.target;
+    // (Track F9c: a learned entry ends on its goal; the target's own place is where the cruise came onto the line, in the air)
+    const t: LandingTarget = this.target.entry?.goal ?? this.target;
     const off = hdist(b.pos, t);
     // (Track F3: a precision target with its floor's cells, landed by a route anywhere in them, is on target in any of them)
     const onTarget = (off <= t.half + 0.5 || (t.precise === true && t.cells !== undefined && onTargetCells(t, b.pos))) && Math.abs(b.pos.y - t.top) < 1.2;
@@ -941,7 +1088,8 @@ export class FlightBrain {
       // (Track BF: a held target or an overhang's corridor is flown from the cruise, never straight into an approach)
       // (Track BH: nor from far too high: a glide down off a ledge 40 up starts within the approach distance; the cruise's descent geometry first)
       const high = b.pos.y - (entryTop(this.target) + APPROACH_HEIGHT) > SPIRAL_ABOVE;
-      this.phase = d <= APPROACH_DISTANCE + 6 && !this.target.hold && this.linedUp(b) && !high ? 'approach' : 'cruise';
+      // (Track F9c: nor a learned entry's aim, a point in the air: the cruise brings the body onto its lead-in)
+      this.phase = d <= APPROACH_DISTANCE + 6 && !this.target.hold && !this.target.entry && this.linedUp(b) && !high ? 'approach' : 'cruise';
       return this.phase === 'approach' ? this.approach(i, ctl, this.target) : this.cruise(i, ctl);
     }
     const h = Math.hypot(b.vel.x, b.vel.z);
@@ -987,6 +1135,42 @@ export class FlightBrain {
   private cruise(i: BrainInput, ctl: BrainControl): BrainControl {
     const b = i.body;
     ctl.glide = true;
+    // Track F9c: a learned entry was given up beside its line: up and away from the roof first (entryFallback)
+    if (this.escape) {
+      if (b.pos.y >= this.escape.until || this.stats.ticks - this.escape.since > ENTRY_ESCAPE_TICKS || (i.rockets <= 0 && b.boostTicks === 0)) this.escape = undefined;
+      else {
+        // The rocket on the first of these looks whose boosted path is clear: turning back along the line, or straight
+        // on and up first and the turn under the boost. (Turning back only: a body given up low at the window's end has
+        // the hill the line comes down behind it; the turn's path met it, no rocket was fired, and the path-ahead
+        // check flew the body on towards the roof for 30 ticks: offline it scraped the mouth's lip on its way out.)
+        const turned = turnTowards(i.yaw, this.escape.yaw, 15);
+        const obstacle = this.o.obstacle;
+        const clear = (yaw: number, pitch: number, boost: number): boolean => !obstacle || pathAhead({ ...b, boostTicks: boost }, yaw, pitch, LOOKAHEAD_TICKS, obstacle) === undefined;
+        const looks: (readonly [number, number])[] = [[turned, -30], [i.yaw, -30], [i.yaw, -45], [turned, -45]];
+        if (b.boostTicks > 0) {
+          const w = looks.find(([yaw, pitch]) => clear(yaw, pitch, b.boostTicks)) ?? looks[0]!;
+          ctl.yaw = w[0];
+          ctl.pitch = w[1];
+        } else {
+          const w = i.rockets > 0 && i.canFire ? looks.find(([yaw, pitch]) => clear(yaw, pitch, GLIDE.boostTicks)) : undefined;
+          if (!w && i.rockets > 0 && i.canFire) {
+            // no look climbs out of here (low between the hill behind and the roof ahead): down on the nearest ground
+            // before the line's roof (a `roof` landing's cap: the emergency's own search would take safe ground up to
+            // 60 blocks ahead, which here is the cave's floor), and never on towards the roof waiting for a way to open
+            const before = Math.max(6, hdist(b.pos, this.escape.roof) - ENTRY_ESCAPE_BEFORE);
+            this.escape = undefined;
+            this.o.note?.(`learned entry: no way up and out from where it was given up (a rocket's path meets a block on each of ${looks.length} looks): landing on the nearest ground, within ${before.toFixed(0)} blocks`);
+            this.emergencyWithin = before;
+            this.landNow('roof', b);
+            return this.landing() ? this.approach(i, ctl, this.aim) : { ...ctl, glide: false };
+          }
+          ctl.yaw = w ? w[0] : turned;
+          ctl.pitch = w && this.fire(i, ctl, 'goaround', w[1]) ? w[1] : Math.hypot(b.vel.x, b.vel.z) < 0.9 ? 8 : 0;
+        }
+        this.steerClear(i, ctl, { noLanding: true });
+        return ctl;
+      }
+    }
     const dTarget = hdist(b.pos, this.target);
     // Track BF: not landable yet: hold high over it until the trip retargets (the goal's chunks, the probes)
     if (this.target.hold && dTarget <= APPROACH_DISTANCE + 60) return this.hold(i, ctl);
@@ -997,8 +1181,27 @@ export class FlightBrain {
     }
     // Track F3: a route landing: within ROUTE_HANDOVER on the bearing's side (within 60 degrees of it from the cell) the
     // tracker takes over (linedUp wants 36 along the bearing, which the hand-over is inside of)
-    const routed = this.target.route !== undefined && this.o.route !== undefined;
-    const routedNear = routed && dTarget <= ROUTE_HANDOVER && Math.abs(yawDiff(this.target.route!.bearing, yawTo(this.target, b.pos))) <= 60;
+    // Track F9c (docs/flight.md "Learned entries"): a learned entry is come to as a route landing's hand-over is: out to the
+    // corridor's entry on the lead-in's line, in along it, down to the hand-over's height (routeSink). On the way in the body
+    // is given to the entry's flier as soon as it is on the lead-in (entryJoin: near the line, heading along it); a body that
+    // gets past the hand-over window beside the line without that has missed it (a go-around, or the fallback)
+    const en = this.o.route ? this.target.entry : undefined;
+    if (en) {
+      const j = entryJoin(en.line, b);
+      if (j.ok && b.gliding && b.boostTicks === 0) {
+        this.phase = 'entry';
+        this.flier = undefined;
+        this.helix = undefined;
+        this.stats.entryAbove ??= b.pos.y - (entryTop(this.target) + APPROACH_HEIGHT);
+        return this.entry(i, ctl);
+      }
+      const hx = this.entryHelix(i, ctl, en);
+      if (hx === true) return ctl;
+      if (typeof hx === 'string') return this.entryMissed(i, ctl, hx);
+      if (j.past && Math.abs(j.side) <= ENTRY_PASS_NEAR && Math.abs(j.up) <= ENTRY_PASS_NEAR) return this.entryMissed(i, ctl, `past the hand-over window ${Math.abs(j.side).toFixed(1)} beside the line and ${Math.abs(j.up).toFixed(1)} ${j.up >= 0 ? 'over' : 'under'} it, the heading ${j.heading.toFixed(0)} degrees off its own, ${j.speed.toFixed(2)} a tick: never on the lead-in`);
+    }
+    const routed = (this.target.route !== undefined || en !== undefined) && this.o.route !== undefined;
+    const routedNear = routed && dTarget <= ROUTE_HANDOVER && Math.abs(yawDiff(this.target.route?.bearing ?? this.target.bearing ?? 0, yawTo(this.target, b.pos))) <= 60;
     // Track BF: an overhang's corridor: first out to its entry, then in along it (the glide line counts the way round)
     const entry = routedNear || this.linedUp(b) ? undefined : this.corridorEntry();
     const d = entry ? hdist(b.pos, entry) + CORRIDOR_OUT : dTarget;
@@ -1030,8 +1233,8 @@ export class FlightBrain {
     ctl.yaw = turnTowards(i.yaw, detouring ? this.detour!.yaw : yawTo(b.pos, entry ? this.corridorAim(b, entry) : this.target));
     // Track F3: a route landing: the cruise goes on along the bearing to the hand-over, where the route tracker takes
     // the body from its real state; no approach of the landing families
-    if (routedNear) {
-      this.o.note?.(`route landing: handing over to the route tracker ${d.toFixed(0)} out, ${(b.pos.y - this.target.top).toFixed(1)} over the cell at ${h.toFixed(2)} a tick${b.boostTicks > 0 ? `, a rocket burning (${b.boostTicks} ticks)` : ''} (planned in from ${Math.round(this.target.route!.bearing)}: ${this.target.route!.edges})`);
+    if (routedNear && this.target.route) {
+      this.o.note?.(`route landing: handing over to the route tracker ${d.toFixed(0)} out, ${(b.pos.y - this.target.top).toFixed(1)} over the cell at ${h.toFixed(2)} a tick${b.boostTicks > 0 ? `, a rocket burning (${b.boostTicks} ticks)` : ''} (planned in from ${Math.round(this.target.route.bearing)}: ${this.target.route.edges})`);
       this.phase = 'route';
       this.tracker = undefined;
       this.stats.entryAbove ??= aboveEntry;
@@ -1078,7 +1281,9 @@ export class FlightBrain {
     const short = Math.max(terrainShort, highShort);
     // (Track F3: a route landing is handed over above the cell: under the line on the way in a top-up goes at any flying speed,
     // a small one (the tracker dives off a surplus more easily than it climbs out of a deficit); none right before the hand-over)
-    const econ = above < spare - 3 && (h >= 1.1 || (routed && h >= 0.8));
+    // (Track F9c: on the way onto a learned entry's lead-in at any speed that flies: the line runs along the ground before a
+    // roof, and a slow body under it there has nowhere to go but down onto that ground)
+    const econ = above < spare - 3 && (h >= 1.1 || (routed && h >= 0.8) || (en !== undefined && h >= STALL_SPEED));
     if ((econ || (short > 0 && h >= 0.8)) && i.rockets > 0 && !(routed && d <= ROUTE_HANDOVER + 4)) {
       // the height this rocket should buy: a whole rocket's worth while the glide ahead can use it, else just enough
       const glideAhead = d - APPROACH_DISTANCE;
@@ -1128,10 +1333,19 @@ export class FlightBrain {
       ctl.pitch = h > 1.4 ? 0 : pitchForSink(need * v, SINK_PITCH);
       return true;
     }
+    // Track F9c: onto a learned entry's lead-in the height goes in a dive along the line, not in S-turns: the flier takes the
+    // body from above the line (learn/entry.ts ENTRY_JOIN: the more line is left, the higher) and takes its speed down to the
+    // recording's, where a route landing's tracker wants the body slow and level at its hand-over. The pitch is the slope
+    // still needed and ENTRY_DIVE_OVER more, at most ENTRY_DIVE_MAX (the path ahead is checked as for every cruise pitch)
+    if (t.entry) {
+      ctl.yaw = turnTowards(i.yaw, yawTo(b.pos, t), ROUTE_STURN_TURN);
+      ctl.pitch = Math.min(ENTRY_DIVE_MAX, Math.round((Math.atan(need) * 180) / Math.PI) + ENTRY_DIVE_OVER);
+      return true;
+    }
     // S-turns: the path longer by 1 / cos(swing) sinks need a block of the way in (at most ROUTE_STURN_SWING off the
     // bearing: linedUp wants the heading within 60 of it, and a reversal of 2 x 70 at 15 a tick bled 1.04 to 0.64)
     const swing = Math.min(ROUTE_STURN_SWING, (Math.acos(Math.min(1, ROUTE_STURN_SINK / v / need)) * 180) / Math.PI);
-    const inbound = yawDir(t.route!.bearing + 180);
+    const inbound = yawDir((t.route?.bearing ?? t.bearing ?? 0) + 180); // (Track F9c: a learned entry's line in, as a route landing's corridor)
     const rel = { x: b.pos.x - t.x, z: b.pos.z - t.z };
     const lateral = rel.x * inbound.z - rel.z * inbound.x; // positive = to the right of the line in (Bedrock yaw grows to the left)
     if (Math.abs(lateral) > STURN_WIDTH && Math.sign(lateral) === -this.routeSide) this.routeSide = -this.routeSide as 1 | -1;
@@ -1471,6 +1685,10 @@ export class FlightBrain {
     // Track F4a: a circle tangent to the approach line bleeds its speed to CIRCLE_SPEED for its leave (pitch 8 took the
     // body to 1.2 to 1.3 in the lap, over the leave's 1.15)
     if (dsc.kind === 'spiral' && dsc.exitAt && h > CIRCLE_SPEED && h <= 1.4 && this.phase !== 'land') ctl.pitch = -5;
+    // Track F9c: over a learned entry's lead-in the circle comes down steeply (ENTRY_SPIRAL_PITCH): the flier takes the body
+    // from above the line at any flying speed and slows it itself, and a circle at the cruise's pitch took 35 s for the 110
+    // blocks a flight that had to come in high over the entry had to lose
+    if (this.target.entry && this.phase === 'cruise' && h >= STALL_SPEED + 0.1) ctl.pitch = h > ENTRY_SPIRAL_FAST ? 0 : ENTRY_SPIRAL_PITCH;
     this.steerClear(i, ctl, { noLanding: true });
     return true;
   }
@@ -1686,11 +1904,15 @@ export class FlightBrain {
       if (this.goaroundBearing === undefined) this.goaroundBearing = this.openBearing(away);
       const outAt = this.goaroundBearing === null ? undefined : { x: this.target.x - Math.sin((this.goaroundBearing * Math.PI) / 180) * GOAROUND_OUT, z: this.target.z + Math.cos((this.goaroundBearing * Math.PI) / 180) * GOAROUND_OUT };
       ctl.yaw = turnTowards(i.yaw, outAt ? yawTo(b.pos, outAt) : away, 12);
-      const want = (this.goaroundY ??= this.goaroundHeight());
+      // (Track F9c: for a learned entry no lower than a lap of its helix over the pass: ENTRY_HELIX_AGAIN)
+      const en = this.target.entry;
+      const want = (this.goaroundY ??= Math.max(this.goaroundHeight(), en ? en.line.guide.points[0]!.y + ENTRY_HELIX_UNTIL + ENTRY_HELIX_AGAIN : -Infinity));
       if (b.boostTicks > 0) ctl.pitch = b.pos.y < want ? -30 : -5;
       else if (b.pos.y < want - 2 && this.fire(i, ctl, 'goaround', -30)) ctl.pitch = -30;
       else ctl.pitch = b.pos.y > want + 4 ? 10 : 0;
-      if ((outAt ? hdist(b.pos, outAt) <= 12 || d >= GOAROUND_OUT + 30 : d >= GOAROUND_OUT) && b.pos.y <= want + 6) this.outbound = false;
+      // (Track F9c: a learned entry's go-around turns back in only with that height, while a rocket can still buy it)
+      const short = en !== undefined && b.pos.y < want - 4 && (i.rockets > 0 || b.boostTicks > 0) && d < GOAROUND_OUT + 60;
+      if ((outAt ? hdist(b.pos, outAt) <= 12 || d >= GOAROUND_OUT + 30 : d >= GOAROUND_OUT) && b.pos.y <= want + 6 && !short) this.outbound = false;
       this.steerClear(i, ctl, { noLanding: true });
       return ctl;
     }
@@ -1698,6 +1920,12 @@ export class FlightBrain {
     ctl.yaw = turnTowards(i.yaw, yawTo(b.pos, this.target), 12);
     ctl.pitch = b.boostTicks > 0 ? -15 : 0;
     const routed = this.target.route !== undefined && this.o.route !== undefined;
+    // Track F9c: back in towards a learned entry's line: the cruise has it again as soon as the body has turned in (it comes
+    // onto the lead-in from there; the hand-over is the cruise's)
+    if (this.target.entry && this.o.route && Math.abs(yawDiff(ctl.yaw, yawTo(b.pos, this.target))) < 1) {
+      this.phase = 'cruise';
+      return this.cruise(i, ctl);
+    }
     if (Math.abs(ctl.yaw - yawTo(b.pos, this.target)) < 1 && d <= (routed ? ROUTE_HANDOVER : APPROACH_DISTANCE + 4)) {
       if (routed) {
         this.phase = 'route';
@@ -1883,6 +2111,259 @@ export class FlightBrain {
       this.stats.routeTakeoffRockets = (this.stats.routeTakeoffRockets ?? 0) + 1;
     }
     return ctl;
+  }
+
+  /**
+   * Track F9c (docs/flight.md "Learned entries (Track F9c)"; decisions/0080): the flight's end along a recorded way in. The
+   * entry's flier (learn/entry.ts EntryFlier) has the body from the lead-in on: the guide follower along the line with no
+   * rocket and never faster than the recording, the commit in the hand-over window (the body inside what the proof flew,
+   * the proof standing on the live world), the line under the roof, the brake and the sink onto the touchdown. A window
+   * left uncommitted is a miss (`entryMissed`: a go-around, then the fallback); a line lost after the commit lands on the
+   * nearest ground, as a learned way out that loses its line does: it never goes on as a glide nobody proved.
+   */
+  private entry(i: BrainInput, ctl: BrainControl): BrainControl {
+    const b = i.body;
+    const en = this.target.entry;
+    const o = this.o.route;
+    ctl.glide = true;
+    if (!en || !o) {
+      this.phase = 'cruise';
+      return this.cruise(i, ctl);
+    }
+    if (!this.flier) {
+      const j = entryJoin(en.line, b);
+      this.flier = new EntryFlier({ grid: o.grid, line: en.line, at: j.at, note: (m) => this.o.note?.(m) });
+      this.flier.confirmed = !en.unconfirmed || this.entryOk === true;
+      this.stats.entry = { name: en.line.guide.path, joins: (this.stats.entry?.joins ?? 0) + 1, misses: this.entryMisses };
+      this.o.note?.(`learned entry: onto the line of ${en.line.guide.path} ${j.at < en.line.from ? `${(en.line.from - j.at).toFixed(0)} blocks before its hand-over window (the lead-in)` : `${(j.at - en.line.from).toFixed(0)} blocks into its hand-over window`}, ${(en.line.open - j.at).toFixed(0)} before its roof (${Math.abs(j.side).toFixed(1)} beside the line, ${Math.abs(j.up).toFixed(1)} ${j.up >= 0 ? 'over' : 'under'} it, ${j.speed.toFixed(2)} a tick, the heading ${j.heading.toFixed(0)} degrees off its own)${this.flier.confirmed ? '' : '; the proof waits for the live world'}`);
+    }
+    const f = this.flier;
+    const out = f.tick({ pos: b.pos, vel: b.vel, gliding: b.gliding, onGround: b.onGround, boostTicks: b.boostTicks, rockets: 0 }, { yaw: i.yaw }, i.tick);
+    const st = this.stats.entry!;
+    if (f.committed && st.committedAt === undefined) st.committedAt = this.stats.ticks;
+    if (out.status === 'missed') {
+      this.flier = undefined;
+      return this.entryMissed(i, ctl, out.why ?? 'the window left uncommitted');
+    }
+    const late = f.committed && f.lineTicks + f.keepTicks > ENTRY_MAX_TICKS;
+    if (out.status === 'lost' || late) {
+      const why = late ? `${f.lineTicks + f.keepTicks} ticks after the commit and not standing` : (out.why ?? 'lost');
+      Object.assign(st, { end: 'lost', why, maxError: f.follower.stats.maxError, taps: f.follower.stats.taps });
+      this.o.note?.(`learned entry: the line ${en.line.guide.path} lost ${out.at.toFixed(0)} of ${guideLength(en.line.guide).toFixed(0)} blocks along it (${why}; at most ${f.follower.stats.maxError.toFixed(2)} off it): no glide without the line under a roof, landing`);
+      this.flier = undefined;
+      this.landNow('roof', b);
+      return this.landing() ? this.approach(i, ctl, this.aim) : { ...ctl, glide: false };
+    }
+    ctl.yaw = out.control.yaw;
+    ctl.pitch = out.control.pitch;
+    if (out.status === 'touchdown' && this.o.entrySneak) ctl.sneak = true;
+    this.lastChoice = { pitch: out.control.pitch, cost: out.error, kind: out.status, phase: 'entry', style: 'route' };
+    return ctl;
+  }
+
+  /**
+   * Track F9c: the way down for a flight that comes to a learned entry's lead-in too high for the flier to take it (more
+   * over the line's start than `ENTRY_JOIN` allows there: a cruise that had to cross something high just before it). A
+   * circle of ENTRY_HELIX_RADIUS beside the lead-in's start that touches the line there heading along it: every lap
+   * passes the lead-in's start along the line, and the first pass low enough is the hand-over (the cruise's own test, a
+   * tick later). The descent is steered to that pass: the body is to cross the start ENTRY_HELIX_UNTIL over it. The laps
+   * are counted once, when the helix begins (the fewest whose steepest descent still comes to the start no higher than
+   * the hand-over takes), and each tick the pitch is the one whose sink uses up the height still over the pass along the
+   * blocks still to fly (ENTRY_HELIX_SINK). Where a lap ends is therefore not left to the height the flight happened to
+   * arrive with: a glide cannot fly level, and a lap that began just too high for the hand-over ends 20 blocks lower,
+   * under the line and on the hill it lies along. The last pass is flown along the line; passed with no hand-over, one
+   * more lap when the height still pays for one, else a miss.
+   *
+   * On the side whose ground is lower. No circle on a side where a column under it is unknown, where the ground under
+   * the last lap is within ENTRY_HELIX_CLEAR of it, or from where the body cannot reach the start nearer than
+   * ENTRY_HELIX_LOW under that height (the cruise goes on, misses the window and goes round or falls back).
+   *
+   * True while its controls are set; false: no circle; a string: the circle was given up and why (a miss: the
+   * go-around climbs out along the line on a rocket, to a lap's worth over the pass (ENTRY_HELIX_AGAIN); the body never
+   * glides on low beside the hill).
+   */
+  private entryHelix(i: BrainInput, ctl: BrainControl, en: NonNullable<LandingTarget['entry']>): boolean | string {
+    const b = i.body;
+    const g = en.line.guide;
+    const p0 = g.points[0]!;
+    const h = Math.hypot(b.vel.x, b.vel.z);
+    const sink = ENTRY_HELIX_SINK;
+    // The body against the lead-in's start: `along` the line's heading beyond it and `side` beside it (blocks).
+    const p1 = g.points[Math.min(g.points.length - 1, 4)]!;
+    const len = Math.hypot(p1.x - p0.x, p1.z - p0.z) || 1;
+    const along = ((b.pos.x - p0.x) * (p1.x - p0.x) + (b.pos.z - p0.z) * (p1.z - p0.z)) / len;
+    const side = Math.abs((b.pos.x - p0.x) * (p1.z - p0.z) - (b.pos.z - p0.z) * (p1.x - p0.x)) / len;
+    const beside = hdist(b.pos, p0) < ENTRY_HELIX_RADIUS + 2;
+    // The pass: the body comes by the start along the line's heading. It ends ENTRY_HELIX_PAST blocks beyond the start
+    // (the hand-over's test wants the body on the lead-in, a little past its start); the last pass is flown along the
+    // line itself and ends later the higher the body is (that test finds the body's place on the line in three
+    // dimensions: a body high over a line that comes down is on it only some blocks farther on, ENTRY_HELIX_SLOPE for
+    // each block of height). `off`: the pass is behind the body until it has come round again.
+    const passEnd = (laps: number): number => (laps > 0 ? ENTRY_HELIX_PAST : ENTRY_HELIX_PAST + ENTRY_HELIX_SLOPE * Math.max(0, b.pos.y - p0.y));
+    const onLine = (laps: number, off: boolean): boolean => laps === 0 && !off && along > -ENTRY_HELIX_PAST && along <= passEnd(0) && side < ENTRY_JOIN.side;
+    // The blocks still to fly to the start on this lap (0 in the pass), a whole lap, and for a body still ENTRY_HELIX_FAR
+    // outside the circle the point where its tangent (in the turning sense) touches it: the way there is that straight
+    // piece and the circle from where it touches (`onto`, for the steering).
+    const way = (centre: { x: number; z: number }, dir: 1 | -1, laps: number, off: boolean): { rest: number; lap: number; onto: { x: number; z: number } | undefined } => {
+      const d = hdist(b.pos, centre);
+      const far = d > ENTRY_HELIX_RADIUS + ENTRY_HELIX_FAR;
+      const r = far ? ENTRY_HELIX_RADIUS : Math.min(ENTRY_HELIX_RADIUS + 4, Math.max(ENTRY_HELIX_RADIUS, d));
+      const at = Math.atan2(b.pos.z - centre.z, b.pos.x - centre.x) + (far ? dir * Math.acos(r / d) : 0);
+      const full = 2 * Math.PI;
+      const round = ((((Math.atan2(p0.z - centre.z, p0.x - centre.x) - at) * dir) % full) + full) % full;
+      const onto = far ? { x: centre.x + Math.cos(at) * r, z: centre.z + Math.sin(at) * r } : undefined;
+      if (onLine(laps, off)) return { rest: Math.max(0, -along), lap: full * r, onto };
+      // in the pass and not counted yet: at the start (the angle says a whole lap from the tick the start is behind)
+      if (!off && along > 0 && along <= ENTRY_HELIX_PAST && beside) return { rest: 0, lap: full * r, onto };
+      // (a body coming in along the line a few blocks outside the circle touches it just beyond the start: its way ends
+      // on the straight piece, it has not a lap to fly)
+      return { rest: (far ? Math.sqrt(d * d - r * r) : 0) + (far && !off && round > full - 1.2 ? 0 : round) * r, lap: full * r, onto };
+    };
+    // how far under the pass height the flattest glide comes to the start over that many blocks (0: it reaches it)
+    const lowAt = (over: number, blocks: number): number => Math.min(0, over - sink.lo * blocks);
+    if (!this.helix) {
+      const allowed = ENTRY_JOIN.over + ENTRY_JOIN.dive * en.line.to;
+      if (!b.gliding || b.pos.y - p0.y <= allowed || hdist(b.pos, p0) > ENTRY_HELIX_NEAR) return false;
+      const passY = p0.y + ENTRY_HELIX_UNTIL;
+      const over = b.pos.y - passY;
+      // the most over the pass height a steepest descent may still come to the start with: what the hand-over takes at
+      // the start, less 2 (the join decides; a pass it does not take is a lap more or a miss, below)
+      const high = Math.max(0, allowed - ENTRY_HELIX_UNTIL - 2);
+      let best: { centre: { x: number; z: number }; dir: 1 | -1; floor: number; laps: number; low: number } | undefined;
+      for (const s of this.helixSides(g)) {
+        if (s.floor === undefined) continue;
+        // the laps are counted once, here: the fewest whose steepest descent comes to the start no higher than that
+        let laps = 0;
+        let blocks = 0;
+        for (; laps < 16; laps++) {
+          const w = way(s.centre, s.dir, laps, false);
+          blocks = w.rest + laps * w.lap;
+          if (over - sink.hi * blocks <= high) break;
+        }
+        const low = lowAt(over, blocks);
+        if (low < -ENTRY_HELIX_LOW || passY + low < s.floor + ENTRY_HELIX_CLEAR) continue;
+        if (!best || s.floor < best.floor) best = { centre: s.centre, dir: s.dir, floor: s.floor, laps, low };
+      }
+      if (!best) return false;
+      this.helix = { centre: best.centre, dir: best.dir, passY, laps: best.laps, along: Infinity, off: false, since: this.stats.ticks };
+      this.stats.descents.push(`helix r${ENTRY_HELIX_RADIUS} beside the learned entry's lead-in from ${Math.round(b.pos.y - p0.y)} over it`);
+      this.o.note?.(`learned entry: ${Math.round(b.pos.y - p0.y)} over the lead-in of ${g.path} where the flier takes at most ${Math.round(allowed)}: down in a circle of ${ENTRY_HELIX_RADIUS} beside its start, ${best.laps} lap${best.laps === 1 ? '' : 's'} and the rest of one, to pass the start ${(ENTRY_HELIX_UNTIL + best.low).toFixed(0)} over it along the line (the ground under the last lap at least ${(passY + best.low - best.floor).toFixed(0)} under the body)`);
+    }
+    const hx = this.helix;
+    const over = b.pos.y - hx.passY;
+    // A pass ended: one lap fewer to go; after the last, the start was passed with no hand-over (the body still too
+    // high for it): one more lap when the height still pays for one, else a miss.
+    const end = passEnd(hx.laps);
+    let passed = false;
+    if (hx.along <= end && along > end && (hx.laps > 0 ? beside : side < ENTRY_JOIN.side)) {
+      if (hx.laps > 0) hx.laps--;
+      else passed = true;
+      hx.off = true;
+    } else if (along < -ENTRY_HELIX_PAST) hx.off = false;
+    hx.along = along;
+    const w = way(hx.centre, hx.dir, hx.laps, hx.off);
+    const blocks = w.rest + hx.laps * w.lap;
+    const low = lowAt(over, blocks);
+    const late = this.stats.ticks - hx.since > ENTRY_HELIX_TICKS;
+    if (late || low < -(passed ? ENTRY_HELIX_LOW : ENTRY_HELIX_LOW + 2)) {
+      this.helix = undefined;
+      const comes = ENTRY_HELIX_UNTIL + low;
+      return late ? `${ENTRY_HELIX_TICKS} ticks in the circle beside its lead-in and never handed over` : `the circle beside its lead-in cannot come to the start${passed ? ' again' : ''} high enough: ${Math.abs(comes).toFixed(1)} ${comes >= 0 ? 'over' : 'under'} it at the flattest, ${(-low).toFixed(1)} under where it is to pass (${(b.pos.y - p0.y).toFixed(1)} over the start now${passed ? `, which it has just passed with no hand-over, ${this.joinSaid(en.line, b)}, and a lap costs more than that` : ': it sinks faster than planned'})`;
+    }
+    if (passed) this.o.note?.(`learned entry: the start of ${g.path} passed ${(b.pos.y - p0.y).toFixed(1)} over it with no hand-over (${this.joinSaid(en.line, b)}): one more lap of the circle, to pass it ${(ENTRY_HELIX_UNTIL + low).toFixed(0)} over`);
+    ctl.glide = true;
+    ctl.yaw = onLine(hx.laps, hx.off) ? turnTowards(i.yaw, yawTo(p0, p1), 15) : w.onto ? turnTowards(i.yaw, yawTo(b.pos, w.onto), 15) : circleYaw(i.yaw, b.pos, hx.centre, ENTRY_HELIX_RADIUS, hx.dir);
+    // the pitch for the sink still needed (the height over the pass along the blocks left), between what pitch 0 and
+    // pitch 30 sink in the circle, 5 degrees more at most
+    const need = over / Math.max(12, blocks);
+    const pitch = ((need - sink.flat) / (sink.steep - sink.flat)) * ENTRY_SPIRAL_PITCH;
+    ctl.pitch = h < STALL_SPEED + 0.1 ? 20 : h > ENTRY_SPIRAL_FAST ? 0 : Math.round(Math.max(0, Math.min(ENTRY_SPIRAL_PITCH + 5, pitch)));
+    this.steerClear(i, ctl, { noLanding: true });
+    return true;
+  }
+
+  /**
+   * Track F9c: the two circles of `entryHelix` (one on each side of the lead-in's start, each with the turning sense
+   * whose tangent there is the line's heading) and the ground under each: `floor` is the lowest height the last lap may
+   * pass the start at for the flattest glide (ENTRY_HELIX_SINK.lo for a block flown, so the ground may be higher the
+   * farther before the pass it lies) to be over every column of the ring the body flies in; undefined when one of
+   * those columns is unknown. Looked up again at most every ENTRY_HELIX_LOOK ticks.
+   */
+  /** Track F9c: the body against the hand-over's test on a lead-in, for a log line. */
+  private joinSaid(line: NonNullable<LandingTarget['entry']>['line'], b: FlightBody): string {
+    const j = entryJoin(line, b);
+    return `${Math.abs(j.side).toFixed(1)} beside the line, ${Math.abs(j.up).toFixed(1)} ${j.up >= 0 ? 'over' : 'under'} it ${j.at.toFixed(0)} blocks along it, the heading ${j.heading.toFixed(0)} degrees off its own, ${j.speed.toFixed(2)} a tick`;
+  }
+
+  private helixSides(g: Guide): { centre: { x: number; z: number }; dir: 1 | -1; floor: number | undefined }[] {
+    const hg = this.helixGround;
+    if (hg?.line === g && this.stats.ticks - hg.at < ENTRY_HELIX_LOOK) return hg.sides;
+    const p0 = g.points[0]!;
+    const p1 = g.points[Math.min(g.points.length - 1, 4)]!;
+    const len = Math.hypot(p1.x - p0.x, p1.z - p0.z) || 1;
+    const along = { x: (p1.x - p0.x) / len, z: (p1.z - p0.z) / len };
+    const sides = ([1, -1] as const).map((s) => {
+      const centre = { x: p0.x - along.z * s * ENTRY_HELIX_RADIUS, z: p0.z + along.x * s * ENTRY_HELIX_RADIUS };
+      const at0 = Math.atan2(p0.z - centre.z, p0.x - centre.x);
+      const dir: 1 | -1 = -Math.sin(at0) * along.x + Math.cos(at0) * along.z >= 0 ? 1 : -1;
+      let floor: number | undefined = -Infinity;
+      for (let k = 0; k < 40 && floor !== undefined; k++) {
+        const back = (k / 40) * 2 * Math.PI; // the turn still to fly from this column to the pass
+        const a = at0 - dir * back;
+        for (const r of [ENTRY_HELIX_RADIUS - 2, ENTRY_HELIX_RADIUS, ENTRY_HELIX_RADIUS + 2, ENTRY_HELIX_RADIUS + 4]) {
+          const t = this.o.skyTop?.(Math.floor(centre.x + Math.cos(a) * r), Math.floor(centre.z + Math.sin(a) * r));
+          if (t === undefined) {
+            floor = undefined;
+            break;
+          }
+          floor = Math.max(floor, t + 1 - ENTRY_HELIX_SINK.lo * back * r);
+        }
+      }
+      return { centre, dir, floor };
+    });
+    this.helixGround = { line: g, at: this.stats.ticks, sides };
+    return sides;
+  }
+
+  /** Track F9c: the body stands at the end of a learned entry: the line for the log. */
+  private entryStood(b: FlightBody): void {
+    const en = this.target.entry;
+    const f = this.flier;
+    if (!en || !f) return;
+    const st = (this.stats.entry ??= { name: en.line.guide.path, joins: 1, misses: this.entryMisses });
+    const ticks = f.lineTicks + f.keepTicks;
+    const roofTicks = f.roofAt !== undefined ? f.ticks - f.roofAt : undefined;
+    Object.assign(st, { end: f.committed ? 'landed' : 'lost', ticks, ...(roofTicks !== undefined ? { roofTicks } : {}), maxError: f.follower.stats.maxError, taps: f.follower.stats.taps });
+    const g = en.goal;
+    this.o.note?.(`learned entry: standing ${Math.hypot(b.pos.x - g.x, b.pos.z - g.z).toFixed(1)} from the goal${Math.abs(b.pos.y - g.top) > 0.01 ? ` (${Math.abs(b.pos.y - g.top).toFixed(1)} ${b.pos.y > g.top ? 'over' : 'under'} it)` : ''} along ${en.line.guide.path}: ${f.committed ? `${ticks} ticks after the commit${roofTicks !== undefined ? `, ${roofTicks} from the line's last open sky` : ''} (${f.keepTicks} of them the touchdown)` : 'down before the commit'}, at most ${f.follower.stats.maxError.toFixed(2)} off the line, slowed ${f.follower.stats.taps} ticks`);
+  }
+
+  /**
+   * Track F9c: the hand-over window was missed (the body past it and not inside what the proof flew): a go-around out
+   * along the line and back onto its lead-in while tries and a rocket are left, else the entry is given up for its
+   * fallback. Never a dive at the mouth from where the body is.
+   */
+  private entryMissed(i: BrainInput, ctl: BrainControl, why: string): BrainControl {
+    const b = i.body;
+    const en = this.target.entry!;
+    this.helix = undefined;
+    this.entryMisses++;
+    if (this.stats.entry) this.stats.entry.misses = this.entryMisses;
+    else this.stats.entry = { name: en.line.guide.path, joins: 0, misses: this.entryMisses };
+    const line = `the learned entry ${en.line.guide.path} missed (${why}) at ${hdist(b.pos, this.target).toFixed(0)} blocks from the window's end, ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} blocks a tick`;
+    this.stats.goAroundReasons.push(line);
+    if (this.entryMisses < this.o.entryTries && this.stats.goArounds < this.o.goArounds && i.rockets > 0) {
+      this.o.note?.(`go-around ${this.stats.goArounds + 1}: ${line}; out along its line and onto the lead-in again`);
+      this.stats.goArounds++;
+      this.phase = 'goaround';
+      this.outbound = true;
+      this.goaroundBearing = undefined;
+      this.goaroundY = undefined;
+      this.resetPlanners();
+      return this.goaround(i, ctl);
+    }
+    this.entryFallback(`${line}; ${this.entryMisses} window${this.entryMisses === 1 ? '' : 's'} missed`, b);
+    return this.phase === 'land' ? this.approach(i, ctl, this.aim) : this.cruise(i, ctl);
   }
 
   /**

@@ -24,7 +24,7 @@ import { silentLogger, type Logger } from '../../log.ts';
 import type { EntityInfo } from '../../world/types.ts';
 import type { InputLoopEvent, InputLoopState } from '../input/inputLoop.ts';
 import type { BlockQuery } from '../input/types.ts';
-import { FlightBrain, type BrainOptions, type FlightEnd, type FlightEndReason as BrainEndReason, type FlightPhase } from './brain.ts';
+import { FlightBrain, type BrainOptions, type FlightEnd, type FlightEndReason as BrainEndReason, type FlightPhase, type FlightStats } from './brain.ts';
 import { hdist, type FlightBody, type LandingTarget } from './plan.ts';
 import { ROCKET_COOLDOWN, RocketHand, type RocketInventory } from './rocket.ts'; // Track F3: the rocket plumbing shared with route/live.ts
 import type { TerrainQuery } from './terrain.ts';
@@ -163,6 +163,8 @@ export interface FlightReport {
   routeReplans?: number;
   routeMaxError?: number;
   routeTakeoffTicks?: number;
+  /** Track F9c: the flight's learned entry (brain.ts FlightStats.entry): the recording, the joins and the misses, how it ended. */
+  entry?: FlightStats['entry'];
 }
 
 export interface FlightOptions extends Omit<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'terrain'> {
@@ -351,6 +353,11 @@ export class FlightController {
     return true;
   }
 
+  /** Track F9c: what the live world says of a learned entry's proof made on the world cache (brain.ts confirmEntry). */
+  confirmEntry(ok: boolean, why?: string): void {
+    this.brain?.confirmEntry(ok, why, this.body(this.d.loop.state));
+  }
+
   /** Land now on the nearest safe ground (`!fly stop`, `!land`, health, the elytra): the flight ends `ok: false, reason`. */
   landNow(reason: BrainEndReason = 'stopped'): void {
     if (!this.brain) return;
@@ -459,9 +466,11 @@ export class FlightController {
     });
     const c = out.control;
     // Track L1: the brain took one of the target's alternatives instead of a go-around (landprice.ts): the flight's target is that one now
+    // (Track F9c: or it gave a learned entry up for the entry's fallback, the landing as without a recording)
     if (brain.target !== this.target) {
+      const gaveUp = this.target?.entry?.fallback === brain.target;
       this.target = brain.target;
-      this.log.info(`flight: retargeted to ${describeTarget(brain.target)} (an alternative landing instead of a go-around)`);
+      this.log.info(`flight: retargeted to ${describeTarget(brain.target)} (${gaveUp ? 'the learned entry given up' : 'an alternative landing instead of a go-around'})`);
     }
     // Track BF: sneak through the touchdown (docs/flight.md "Sneak at the touchdown")
     const low = this.target !== undefined && state.pos.y - this.target.top < SNEAK_ABOVE && (brain.phase === 'land' || brain.phase === 'approach' || brain.phase === 'done');
@@ -508,6 +517,7 @@ export class FlightController {
       ...(b?.stats.landStyle ? { landStyle: b.stats.landStyle, brakeRescues: b.stats.brakeRescues, brakeTicks: b.stats.brakeTicks } : {}),
       ...(b?.stats.routeTicks ? { routeTicks: b.stats.routeTicks, routePlans: b.stats.routePlans, routeReplans: b.stats.routeReplans, routeMaxError: b.stats.routeMaxError } : {}),
       ...(b?.stats.routeTakeoffTicks !== undefined ? { routeTakeoffTicks: b.stats.routeTakeoffTicks } : {}),
+      ...(b?.stats.entry ? { entry: { ...b.stats.entry } } : {}),
     };
   }
 
@@ -533,7 +543,7 @@ export class FlightController {
     this.log.info(
       `flight: ${ok ? 'landed' : `ended (${reason})`} at ${r.landedAt ? `${r.landedAt.x.toFixed(2)} ${r.landedAt.y.toFixed(2)} ${r.landedAt.z.toFixed(2)}` : '?'}` +
         `${r.off !== undefined ? `, ${r.off.toFixed(2)} from the centre` : ''}; ${r.rockets} rockets (${r.rocketsBy.climb} climb, ${r.rocketsBy.cruise} cruise, ${r.rocketsBy.goaround} go-around), ${r.goArounds} go-arounds${r.landingPrices?.length ? ` (${r.landingPrices.length} priced)` : ''}, ${r.ticks} ticks, ${r.corrections} corrections` +
-        `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}, max y ${r.maxY.toFixed(1)}${r.descents.length ? `, descent ${r.descents.join('; ')}` : ''}${r.steered ? `, steered ${r.steered} ticks` : ''}${r.holdTicks ? `, held ${r.holdTicks} ticks` : ''}${r.slide !== undefined ? `, slide ${r.slide.toFixed(2)}${r.sneak ? ' (sneaking)' : ''}` : ''}${r.ledgeDrop !== undefined ? `, ledge takeoff (gliding ${r.ledgeDrop.toFixed(1)} under the edge)` : ''}${r.avoidances?.length ? `, ${r.avoidances.length} terrain avoidance${r.avoidances.length === 1 ? '' : 's'}` : ''}${r.dives ? `, ${r.dives} dive${r.dives === 1 ? '' : 's'}` : ''}${r.held ? `, held by the server ${r.held} times` : ''}${r.landStyle ? `, landing ${r.landStyle}${r.landStyle === 'brake' ? ` (${r.brakeTicks} ticks braked / station-kept${r.brakeRescues ? `, ${r.brakeRescues} instead of a go-around` : ''})` : ''}` : ''}${r.routeTicks ? `, landing route (${r.routeTicks} ticks on the route tracker, ${r.routePlans} plans, ${r.routeReplans} re-plans, max error ${r.routeMaxError?.toFixed(2)})` : ''}${r.routeTakeoffTicks !== undefined ? `, route takeoff (${r.routeTakeoffTicks} ticks)` : ''}`,
+        `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}, max y ${r.maxY.toFixed(1)}${r.descents.length ? `, descent ${r.descents.join('; ')}` : ''}${r.steered ? `, steered ${r.steered} ticks` : ''}${r.holdTicks ? `, held ${r.holdTicks} ticks` : ''}${r.slide !== undefined ? `, slide ${r.slide.toFixed(2)}${r.sneak ? ' (sneaking)' : ''}` : ''}${r.ledgeDrop !== undefined ? `, ledge takeoff (gliding ${r.ledgeDrop.toFixed(1)} under the edge)` : ''}${r.avoidances?.length ? `, ${r.avoidances.length} terrain avoidance${r.avoidances.length === 1 ? '' : 's'}` : ''}${r.dives ? `, ${r.dives} dive${r.dives === 1 ? '' : 's'}` : ''}${r.held ? `, held by the server ${r.held} times` : ''}${r.landStyle ? `, landing ${r.landStyle}${r.landStyle === 'brake' ? ` (${r.brakeTicks} ticks braked / station-kept${r.brakeRescues ? `, ${r.brakeRescues} instead of a go-around` : ''})` : ''}` : ''}${r.routeTicks ? `, landing route (${r.routeTicks} ticks on the route tracker, ${r.routePlans} plans, ${r.routeReplans} re-plans, max error ${r.routeMaxError?.toFixed(2)})` : ''}${r.routeTakeoffTicks !== undefined ? `, route takeoff (${r.routeTakeoffTicks} ticks)` : ''}${r.entry ? `, learned entry ${r.entry.name} (${r.entry.end ?? 'not flown'}, ${r.entry.joins} joined, ${r.entry.misses} missed${r.entry.ticks !== undefined ? `, ${r.entry.ticks} ticks from the commit` : ''})` : ''}`,
     );
     this.brain = undefined;
     const resolve = this.resolve;

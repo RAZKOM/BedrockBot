@@ -24,6 +24,7 @@
 import type { Vec3 } from '../../connection/types.ts';
 import { GLIDE, glideVelocity } from '../input/physics.ts';
 import type { RouteHandoff } from './route/landing.ts'; // Track F3 (a type only)
+import type { EntryHandoff } from './learn/entry.ts'; // Track F9c (a type only)
 
 /** A landing target: the block top to stand on (feet y = `top`), its centre and half width in blocks (1 = 3 x 3). */
 export interface LandingTarget {
@@ -75,6 +76,13 @@ export interface LandingTarget {
    * the RouteTracker (brain.ts `route`), which lands it from the real state with the planner's edges.
    */
   route?: RouteHandoff;
+  /**
+   * Track F9c (docs/flight.md "Learned entries (Track F9c)"): the flight ends along a recorded way in to a goal under a
+   * roof (learn/entry.ts). `x`, `z`, `top` and `bearing` are then where the cruise is brought onto the line's lead-in in
+   * the open air, not a place to land: the brain gives the body to the entry's flier there (brain.ts `entry`), which
+   * flies the line under the roof and stands on `entry.goal`.
+   */
+  entry?: EntryHandoff;
   /**
    * Track L1 (docs/flight.md "Landing by time"): the price of this landing, the walk from it to the goal in seconds
    * (landprice.ts walkSeconds: the probe's path where known, else the estimate with its risk; 0 = the goal itself),

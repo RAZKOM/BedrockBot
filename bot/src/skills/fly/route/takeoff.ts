@@ -275,7 +275,7 @@ export interface TakeoffRoute {
 }
 
 /** Track F9a: the proof of a route takeoff's plan: whether what follows it clears, with the time to the goal (ticks), and the line saying what was flown or met. */
-export type TakeoffProof = (route: TakeoffRoute) => Promise<{ ok: boolean; ticks?: number; out?: number; line: string }>;
+export type TakeoffProof = (route: TakeoffRoute) => Promise<{ ok: boolean; ticks?: number; out?: number; line: string; dud?: boolean }>;
 
 export interface TakeoffRouteOptions {
   /** Exits tried at most (default 3). */
@@ -408,6 +408,9 @@ export async function planTakeoffRoute(grid: RouteGrid, from: Vec3, target: { x:
     // beside its start at a quarter of a block)
     const takes = o.learned.matches.map((m) => ({ m, room: lineRoom(grid, m.guide, m.open) }));
     takes.sort((a, b) => Number(a.room < FOLLOW_MARGIN) - Number(b.room < FOLLOW_MARGIN) || a.m.off - b.m.off);
+    // Track F9c: a take that proves clear but would not survive a first rocket that fires nothing (the proof says: `dud`
+    // false) is kept in hand and the next take is tried; it is flown only when none of the takes tried survives one
+    let frail: TakeoffRoute | undefined;
     for (const { m, room } of takes.slice(0, o.learned.tries ?? LEARNED_TRIES)) {
       if (tried.length && spent()) break;
       learned++;
@@ -419,9 +422,16 @@ export async function planTakeoffRoute(grid: RouteGrid, from: Vec3, target: { x:
         tried.push(`${at}: ${proof.line}: refused`);
         continue;
       }
+      const proven: TakeoffRoute = { ...route, proven: true, ...(proof.out !== undefined ? { out: proof.out } : {}), ...(proof.ticks !== undefined ? { score: proof.ticks } : {}) };
+      if (proof.dud === false) {
+        tried.push(`${at}: ${proof.line}: kept for when no other take survives a rocket that fires nothing`);
+        frail ??= proven;
+        continue;
+      }
       tried.push(`${at}: ${proof.line}`);
-      return { route: { ...route, proven: true, ...(proof.out !== undefined ? { out: proof.out } : {}), ...(proof.ticks !== undefined ? { score: proof.ticks } : {}) }, exits: exits.length, tried, learned };
+      return { route: proven, exits: exits.length, tried, learned };
     }
+    if (frail) return { route: frail, exits: exits.length, tried, learned };
   }
   const more = learned !== undefined ? { learned } : {};
   let best: TakeoffRoute | undefined;

@@ -23,13 +23,18 @@ import { TerrainMemo, type TerrainColumn } from '../skills/fly/terrain.ts'; // T
 import type { RouteGrid } from '../skills/fly/route/grid.ts'; // Track F3
 import { planTakeoffRoute, type TakeoffRoute } from '../skills/fly/route/takeoff.ts'; // Track F3
 import { RoutePlannerClient } from '../skills/fly/route/worker.ts'; // Track F3
-import { matchExits, MATCH_NEAR } from '../skills/fly/learn/match.ts'; // Track F9b
+import { matchEntries, matchExits, MATCH_NEAR } from '../skills/fly/learn/match.ts'; // Track F9b, F9c
+import { ENTRY_AIR, ENTRY_LAVA, ENTRY_SOLID, ENTRY_UNKNOWN, ENTRY_WATER, entryAim, entryCases, entryLine, entryWorld, entryWorldSame, guideSpeed, proveEntry, type EntryAsked, type EntryLine, type EntryProof } from '../skills/fly/learn/entry.ts'; // Track F9c
+import { guideLength, guidePoint } from '../skills/fly/learn/guide.ts'; // Track F9c
+import { classify } from '../skills/terrain/classify.ts'; // Track F9c: a block's class as the world cache keeps it
+import { cellClassOf } from '../world/cache/classes.ts'; // Track F9c
+import { CLS_AIR, CLS_AVOID, CLS_WATER } from '../world/cache/types.ts'; // Track F9c
 import { PathStore } from '../skills/fly/learn/store.ts'; // Track F9b
 import { pathsDirOf } from './commands-learn.ts'; // Track F9b: where `!learn` keeps its paths
 import { preferSite, RECHECK_EVERY_MS, RecheckState, SITE_BUDGET_MS, SITE_PROBES, SITE_SIMS, siteCandidates } from '../skills/fly/sites.ts'; // Track BL
 import type { Goal, GotoOptions, SkillResult } from '../skills/types.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
-import { FlightProcess, FlyProcess, landingLine, targetFromPlan, type FlyOutcome, type FlyTarget, type LandingHint } from '../tasks/process/fly.ts';
+import { FlightProcess, FlyProcess, landingLine, targetFromPlan, type EntryOffer, type FlyOutcome, type FlyTarget, type LandingHint } from '../tasks/process/fly.ts';
 import { PRIORITY } from '../tasks/process/manager.ts';
 import { waypointStoreOf, waypointGoal } from './commands-nav.ts';
 import { survivalKitOf } from './commands-survival.ts';
@@ -37,7 +42,7 @@ import { NETHER, OVERWORLD } from '../world/dimension.ts';
 import type { Containers } from '../world/containers.ts';
 import type { Logger } from '../log.ts';
 import { inventorySlot, type StackRequests } from '../skills/survival/screen.ts';
-import type { ItemStack } from '../world/types.ts';
+import type { BlockInfo, ItemStack } from '../world/types.ts';
 import { corridorAirborne, corridorProviderOf, corridorWanted } from '../skills/fly/corridor/registry.ts'; // Track F4b
 import type { CorridorReport, SkyHint, StepOutcome } from '../skills/fly/corridor/executor.ts'; // Track F4b
 import { corridorEndLine, runCorridorTrip, stopCorridorTrip, type CorridorWiring, type TripStyle } from './commands-corridor.ts'; // Track F4b
@@ -68,6 +73,16 @@ export const LEG_PROBES = 6;
 export const EXIT_MIN_BLOCKS = 4;
 /** Track BH: a glide down is simulated to the end within this many blocks (a farther goal: the flight with rockets, its takeoff simulated). */
 export const GLIDE_SIM_RANGE = 500;
+/**
+ * Track F9c: a learned entry's recordings are kept this far before their last open sky (blocks: the whole of their open
+ * part, which holds the hand-over window), open sky is this many free cells over a cell, at most this many takes are
+ * proven for one flight (the nearest touchdowns first; each proof is some forty simulations of about a hundred ticks), and
+ * no new proof begins once this long has gone.
+ */
+export const ENTRY_BEFORE = 200;
+export const ENTRY_SKY = 64;
+export const ENTRY_TAKES = 3;
+export const ENTRY_BUDGET_MS = 8000;
 
 export interface FlyExtra {
   containers?: Containers | undefined;
@@ -274,6 +289,116 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   };
   const cellOk = (c: { x: number; z: number; feet: number }): boolean => stillLandable(look, c, d.settings.get('flyHeadroom'));
 
+  // ---- Track F9c (docs/flight.md "Learned entries (Track F9c)"; decisions/0080): the learned entry ----------------
+  /**
+   * A block as an entry's proof sees it (learn/entry.ts): the world cache's own four classes (world/cache/classes.ts
+   * cellClassOf: air, anything with a collision box, water, and what is never entered: lava, fire, cactus ...), so that
+   * a live block and the cache's stand-in for it are the same cell and a proof made on the cache can be held against the
+   * live world cell by cell.
+   */
+  const entryClasses = new Map<number, number>();
+  const entryClass = (b: BlockInfo): number => {
+    let c = b.stateId >= 0 ? entryClasses.get(b.stateId) : ENTRY_SOLID;
+    if (c === undefined) {
+      const cls = cellClassOf(classify(b));
+      c = cls === CLS_AIR ? ENTRY_AIR : cls === CLS_WATER ? ENTRY_WATER : cls === CLS_AVOID ? ENTRY_LAVA : ENTRY_SOLID;
+      entryClasses.set(b.stateId, c);
+    }
+    return c;
+  };
+  /** The live model's cell for an entry's proof, ENTRY_UNKNOWN where it has none. */
+  const entryLive = (x: number, y: number, z: number): number => {
+    const b = world.blockAt({ x, y, z });
+    return b ? entryClass(b) : ENTRY_UNKNOWN;
+  };
+  /** Powered and unpowered flight under a roof along a recording: with `flyCave` on and its own switch (default off), and the route planner's grid at hand. */
+  const entryOn = (): boolean => String(d.settings.get('flyCave')) === 'on' && d.settings.get('flyLearnedEntry') === true && routeOn();
+  /** Nothing solid, liquid or unknown over the cell up to ENTRY_SKY blocks over it (the live model, else the world cache). */
+  const entrySky = (x: number, y: number, z: number): boolean => {
+    for (let k = y + 1; k <= Math.min(319, y + ENTRY_SKY); k++) {
+      const b = world.blockAt({ x, y: k, z }) ?? world.cache?.blockAt(x, k, z);
+      if (!b || entryClass(b) !== ENTRY_AIR) return false;
+    }
+    return true;
+  };
+  /** The recorded ways in to a goal (matched by where they stand again and the roof over it, never by their names). */
+  const entryMatches = (goal: Vec3): ReturnType<typeof matchEntries> => matchEntries(learnedPaths.all(), { x: goal.x + 0.5, y: goal.y, z: goal.z + 0.5 }, entrySky, { before: ENTRY_BEFORE });
+  /**
+   * The learned entry for a flight to `goal` (a feet cell): the recorded flights that came from under open sky and stood
+   * again by it, each as its line with a lead-in (learn/entry.ts entryLine) and proven from every state the hand-over
+   * allows (proveEntry) on the live model with the world cache where the live model has nothing yet; of those that
+   * clear, the one whose flights kept the most room. One line for the decision. Undefined: none (the setting off, no
+   * recording that ends there, every proof refused): nothing changes for the flight.
+   */
+  const entryFor = async (goal: Vec3, label: string): Promise<EntryOffer | undefined> => {
+    if (!entryOn()) return undefined;
+    const t0 = Date.now();
+    const found = entryMatches(goal);
+    if (!found.matches.length) {
+      if (found.near) log.info(`fly: learned entry: no recorded way in to ${label} (${found.flights} recorded flight${found.flights === 1 ? '' : 's'}, ${found.near} standing again within ${MATCH_NEAR} of it, none of them under a roof after open sky)`);
+      return undefined;
+    }
+    const centre = { x: goal.x + 0.5, y: goal.y, z: goal.z + 0.5 };
+    const tried: string[] = [];
+    let sims = 0;
+    let best: { line: EntryLine; proof: EntryProof; asked: EntryAsked; cached: number } | undefined;
+    let proven = 0;
+    for (const m of found.matches) {
+      if (proven >= ENTRY_TAKES) break;
+      if (tried.length && Date.now() - t0 > ENTRY_BUDGET_MS) {
+        tried.push(`${m.guide.path}: not tried (${Date.now() - t0} ms gone)`);
+        break;
+      }
+      // the proof's world: the live model, the world cache where it has nothing (counted: such a proof is confirmed on the
+      // live world before the body commits to the line), an unknown cell a solid
+      let cached = 0;
+      const w = entryWorld((x, y, z) => {
+        const b = world.blockAt({ x, y, z });
+        if (b) return entryClass(b);
+        const c = world.cache?.blockAt(x, y, z);
+        cached++;
+        return c ? entryClass(c) : ENTRY_SOLID;
+      }, centre);
+      const line = entryLine(m, { goal: centre, grid: w.grid });
+      const at = `${m.guide.path} (it stood again ${m.off.toFixed(1)} from the goal)`;
+      if (typeof line === 'string') {
+        tried.push(`${at}: no line (${line})`);
+        continue;
+      }
+      // (the recording's own three states first: a take that does not fly from those is refused for three simulations, and
+      // the takes after it still get their turn; ENTRY_TAKES is counted in whole proofs)
+      const yieldNow = (): Promise<void> => new Promise((r) => setImmediate(r));
+      const own = await proveEntry(w, line, { yieldNow, cases: entryCases(line).filter((c) => c.side === 0 && c.up === 0 && c.factor === 1 && c.heading === 0) });
+      sims += own.sims;
+      if (!own.ok) {
+        tried.push(`${at}: ${own.line}: refused`);
+        continue;
+      }
+      proven++;
+      const proof = await proveEntry(w, line, { yieldNow });
+      sims += proof.sims;
+      tried.push(`${at}: ${proof.line}${proof.ok ? '' : ': refused'}`);
+      if (proof.ok && (!best || proof.room > best.proof.room)) best = { line, proof, asked: w.asked, cached };
+    }
+    const head = `fly: learned entry: ${found.matches.length} recorded way${found.matches.length === 1 ? '' : 's'} in to ${label} (${found.flights} recorded flight${found.flights === 1 ? '' : 's'}, ${found.near} standing again within ${MATCH_NEAR} of it); ${tried.join('; ')}`;
+    if (!best) {
+      log.info(`${head} -> no learned entry: the landing as without a recording (${sims} simulated, ${Date.now() - t0} ms)`);
+      return undefined;
+    }
+    const { line, asked, cached } = best;
+    const aim = entryAim(line, { top: (x, z) => skyTop(x, z), clearance: d.settings.get('flyClearance') });
+    const gate = guidePoint(line.guide, line.from).pos;
+    const under = guideLength(line.guide) - line.open;
+    log.info(`${head} -> in along ${line.guide.path} (the most room: ${best.proof.room >= 1 ? '1 or more' : best.proof.room.toFixed(2)}): onto its line ${Math.round(Math.hypot(gate.x - centre.x, gate.z - centre.z))} blocks from the goal and ${Math.round(gate.y - centre.y)} over it at about ${guideSpeed(line.guide, line.from).toFixed(1)} a tick, ${Math.round(line.open - line.from)} blocks of open air to its roof, ${Math.round(under)} under it to the touchdown on the goal's cell (${sims} simulated, ${Date.now() - t0} ms${cached ? `; ${cached} cells from the world cache: to be confirmed on the live world before the line is committed to` : ''})`);
+    return {
+      target: { x: aim.x, z: aim.z, top: Math.round(aim.y) - APPROACH_HEIGHT, half: 2, bearing: aim.bearing, entry: { line, goal: { x: centre.x, z: centre.z, top: goal.y, half: 2 }, ...(cached ? { unconfirmed: true } : {}) } },
+      confirm: () => {
+        const r = entryWorldSame(asked, entryLive);
+        return { same: r.same, line: r.same === 'same' ? `${asked.cells.size} cells the same` : r.same === 'changed' ? `the cell ${r.cell?.x} ${r.cell?.y} ${r.cell?.z} is not what the proof flew` : `${r.unknown} of ${asked.cells.size} cells not loaded yet` };
+      },
+    };
+  };
+
   /**
    * Track BL (docs/flight.md "Terrain-safe cruise"): a column's highest solid block and where it came from:
    * the live model when the chunk is loaded (subchunks not received above a solid count as unknown: the
@@ -379,6 +504,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       say: (m) => d.chat.say(m),
       restock: (item, n) => restockFromBoxes(d.task, item, n),
       ...(routeOn() ? { route: { grid: routeGrid, plan: routePlanner } } : {}), // Track F3
+      ...(entryOn() ? { entry: entryFor } : {}), // Track F9c
       waitTicks: (n) => loop.waitTicks(n),
       supply,
       log,
@@ -1359,11 +1485,13 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       // the landing (its windows fly underground; the Realm's trips from home flew the plain way, then walked the cave in);
       // else the walk. `said`: the corridor's own end line was given
       let said = false;
-      const rest = async (): Promise<SkillResult> => {
+      // (Track F9c: `stood`: the flight ended standing along a learned entry, on the goal's cell or a step from it: the walk
+      // for what is left, no corridor from here)
+      const rest = async (stood = false): Promise<SkillResult> => {
         if (!live()) return { ok: false, reason: 'interrupted' };
         const prov = corridorProviderOf(task, skills.nav.coarseLayer);
         const top = skyTop(t.goal.x, t.goal.z);
-        if (caveOn() && prov && (top === undefined || top >= t.goal.y)) {
+        if (!stood && caveOn() && prov && (top === undefined || top >= t.goal.y)) {
           const r = await runCorridorTrip(corridorWiring(), prov, t.goal, t.label, tripStyle());
           if (!noCorridorAtAll(r)) {
             said = true;
@@ -1423,7 +1551,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         if (onGoal) return;
         const walkable = r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing';
         if (!walkable || !live()) return;
-        const w = t.player ? await come0(t.player) : await rest();
+        const w = t.player ? await come0(t.player) : await rest(r.report?.entry?.end === 'landed');
         if (said) return;
         if (w.ok) reply(`walked to ${t.label}`);
         else if (w.reason !== 'interrupted') reply(`fly: landed, but the walk to ${t.label} failed (${w.reason ?? 'failed'})`);
@@ -1432,7 +1560,11 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       // Track F4b: a long trip to a covered goal (a cave, a chamber) follows the coarse layer's corridor when the task has one
       const provider = corridorProviderOf(task, skills.nav.coarseLayer);
       const top = skyTop(t.goal.x, t.goal.z);
-      if (!t.player && provider && corridorWanted(String(d.settings.get('flyCorridor')), provider, distance, top === undefined || top >= t.goal.y)) {
+      // Track F9c: a goal with a recorded way in is flown the plain way (the flight carries the learned entry, proven in the
+      // air; refused, it lands as the plain flight does and the rest goes on from there)
+      const learnedIn = !t.player && entryOn() && entryMatches(t.goal).matches.length > 0;
+      if (learnedIn) log.info(`fly: ${t.label} has a recorded way in: the plain flight, its end along the learned entry when that proves clear`);
+      if (!t.player && !learnedIn && provider && corridorWanted(String(d.settings.get('flyCorridor')), provider, distance, top === undefined || top >= t.goal.y)) {
         reply(`flying to ${t.label} along a corridor (${Math.round(distance)} blocks; ${kitLine(k)})`);
         void runCorridorTrip(corridorWiring(), provider, t.goal, t.label, tripStyle()).then((r) => {
           // a layer with no corridor at all from here (a start it cannot leave, such as a walled base) is no

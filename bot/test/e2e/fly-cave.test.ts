@@ -26,7 +26,7 @@
 // time, rockets, damage (truth hurtlog), corrections, re-plans, corridor plans / windows / walks, ticks in water.
 // Gated: the build, the fly-over and every run completing. The numbers themselves are measured, not gated.
 // Env: FLY_BDS_HOST / FLY_BDS_PORT / FLY_BDS_CONTAINER (fly-truth.ts; run with 19210 / bds-fly2), FLY_CAVE_AT="x,z",
-// FLY_CAVE_REUSE=1, FLY_CAVE_ONLY=tripC,tripOut,walkA,walkB,flyA,flyB,flyC,flyS, FLY_CAVE_EXIT=1 (Track F9a: tripOut with flyCaveExit on, the way out under the roof), FLY_CAVE_LEARNED=<folder> (Track F9b: tripOut with flyLearned on and that folder's `!learn` recordings of the real cave, moved with the replica; private, read only), FLY_CAVE_LEGS=3,4 (the legs of A and B by index, walked or flown), FLY_CAVE_STYLE=1 (the cave style on the flown runs), FLY_CAVE_PLAIN=1 (Track L1: trip C with flyCorridor off, the `!test cavestart` way: go-arounds, the flight and the landing in the table),
+// FLY_CAVE_REUSE=1, FLY_CAVE_ONLY=tripC,tripOut,walkA,walkB,flyA,flyB,flyC,flyS, FLY_CAVE_EXIT=1 (Track F9a: tripOut with flyCaveExit on, the way out under the roof), FLY_CAVE_LEARNED=<folder> (Track F9b: tripOut with flyLearned on and that folder's `!learn` recordings of the real cave, moved with the replica; private, read only), FLY_CAVE_ENTRY=1 (Track F9c, with FLY_CAVE_LEARNED: trip C with flyLearnedEntry on, its end along a recorded way in; and FLY_CAVE_ONLY=round: in along a learned entry, then out from where it stands along a learned exit), FLY_CAVE_LEGS=3,4 (the legs of A and B by index, walked or flown), FLY_CAVE_STYLE=1 (the cave style on the flown runs), FLY_CAVE_PLAIN=1 (Track L1: trip C with flyCorridor off, the `!test cavestart` way: go-arounds, the flight and the landing in the table),
 // FLY_CAVE_RUNS (flyC / flyS runs, default 5 / 3), FLY_CAVE_LEG_S (the time a run may take, default 180), FLY_CAVE_REPORT=file (the table written there too), FLY_VERBOSE=1.
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -54,6 +54,8 @@ const LEG_MS = Number(process.env.FLY_CAVE_LEG_S ?? 180) * 1000;
 const REUSE = process.env.FLY_CAVE_REUSE === '1';
 /** Track F9b: a folder of `!learn` recordings of the real cave (private, read only): tripOut flies with them (moved with the replica into a temp folder the bot reads) and `flyLearned` on. */
 const LEARNED = process.env.FLY_CAVE_LEARNED;
+/** Track F9c: with FLY_CAVE_LEARNED, trip C flies with `flyLearnedEntry` on (the recorded ways in), and `round` flies in and out. */
+const ENTRY = process.env.FLY_CAVE_ENTRY === '1';
 /** Track L1: trip C the Realm's way (`!test cavestart`): flyCorridor off, the plain flight, then the rest from the landing. */
 const PLAIN = process.env.FLY_CAVE_PLAIN === '1';
 const want = (c: string): boolean => ONLY.size === 0 || ONLY.has(c);
@@ -338,12 +340,34 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
     await teleport(b, centre(cell));
   }
 
-  it.skipIf(!want('tripC') || !home)("trip C: `!fly` from the home pad to cave_start (the entrance by cave_2), today's live behaviour (Track F8: FLY_CAVE_STYLE=1 flies in with the cave style, FLY_CAVE_RUNS times)", async () => {
+  /**
+   * Track F9b / F9c: the recorded paths (FLY_CAVE_LEARNED), moved as the replica is (x and z; the heights are the real ones),
+   * in a temporary folder the bot reads as its paths folder; `done` puts the environment back and removes the folder.
+   */
+  function learnedPaths(run: string): { done(): void } | undefined {
+    if (!LEARNED) return undefined;
+    const paths0 = process.env.BEDROCKBOT_PATHS_DIR;
+    const dir = mkdtempSync(join(tmpdir(), 'bb-cave-paths-'));
+    const all = new PathStore(LEARNED).all();
+    for (const p of all) writeFileSync(join(dir, `${p.name}.json`), JSON.stringify({ ...p, samples: p.samples.map((q) => ({ ...q, x: q.x + d.x, z: q.z + d.z })), rockets: p.rockets.map((q) => ({ ...q, x: q.x + d.x, z: q.z + d.z })) }));
+    process.env.BEDROCKBOT_PATHS_DIR = dir;
+    notes.push(`${run}: ${all.length} recorded paths moved with the replica`);
+    return {
+      done: () => {
+        if (paths0 === undefined) delete process.env.BEDROCKBOT_PATHS_DIR;
+        else process.env.BEDROCKBOT_PATHS_DIR = paths0;
+        rmSync(dir, { recursive: true, force: true });
+      },
+    };
+  }
+
+  /** One trip in: `!fly` from the home pad to cave_start (trip C's run; Track F9c: with FLY_CAVE_ENTRY=1 and the recordings, its end along the learned entry). */
+  async function tripIn(run: string, i: number): Promise<void> {
     const b = bot!;
-    const runs = RUNS ?? 1;
-    for (let i = 0; i < runs; i++) {
+    {
       setCorridorUnderFly(b.task, undefined);
       if (process.env.FLY_CAVE_STYLE === '1') b.settings.set('flyCave', 'on'); // Track F8: the trip in flies underground in the cave style
+      b.settings.set('flyLearnedEntry', LEARNED !== undefined && ENTRY); // Track F9c: the recorded ways in (default off)
       // Track L1: FLY_CAVE_PLAIN=1 flies the Realm's way (`!test cavestart`: no corridor for the trip, the plain flight to the
       // goal's landing, then the rest from there: the corridor's windows with flyCave on, else the walk)
       if (PLAIN) b.settings.set('flyCorridor', 'off');
@@ -366,7 +390,8 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
       await b.command(`!fly ${goal.x - 0.5} ${goal.y} ${goal.z - 0.5}`);
       // Track R1: the trip's own end line (the corridor's arrival or failure, a landing's), not any `fly:` line on the way
       // (Track L1, plain: a landing near the goal is not the end; the walk or the corridor from there is)
-      const endOf = PLAIN
+      // (Track F9c: a goal with a recorded way in is flown the plain way too)
+      const endOf = PLAIN || (ENTRY && LEARNED !== undefined)
         ? (s: string) => s.startsWith('arrived') || s.startsWith('walked to') || s.startsWith('fly: the corridor to ') || s.startsWith('fly: landed, but') || s.startsWith('fly: the trip to')
         : (s: string) => s.startsWith('arrived') || s.startsWith('landed') || s.startsWith('fly: the corridor to ') || s.startsWith('fly: landed, but');
       const end = await b.reply(endOf, from, 600_000).catch((err: unknown) => `no end line: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`);
@@ -388,22 +413,41 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
       const flightS = flightEnd !== undefined ? (flightEnd - t0) / 1000 : -1;
       const totalS = (tEnd - t0) / 1000;
       const ok = (end.startsWith('arrived') || end.startsWith('walked to')) && off < 3;
-      const how = PLAIN ? `GA ${gas}, flight ${flightS.toFixed(0)} s, landed ${landedOff.toFixed(0)} off (dy ${landedDy.toFixed(0)}), total ${totalS.toFixed(0)} s` : (/\(([^)]*)\);/.exec(end)?.[1] ?? '');
-      rows.push({ run: 'tripC', leg: `${i} home -> cave_start`, ok, off, ...parsed, seconds: PLAIN ? totalS : parsed.seconds >= 0 ? parsed.seconds : totalS, damage: dmg.total, water: water - w0, how });
-      notes.push(`tripC ${i}: ${end}\n    ${logs.filter((l) => /^corridor: |flight: (landed|ended|holding|go-around|no go-around|land now|price)|fly: landing for|takeoff|fly: no takeoff|route: .*bailing|walked|fly: landed|the first rocket/.test(l)).slice(0, 40).map((l) => l.slice(0, 300)).join('\n    ')}`);
+      // Track F9c: the learned entry's own numbers (the brain's line when the body stands), the flights and the bail-outs
+      const stood = logs.find((l) => l.startsWith('flight: learned entry: standing'));
+      const entry = ENTRY && LEARNED ? `; entry ${stood ? `${/(\d+) ticks after the commit/.exec(stood)?.[1] ?? '?'} ticks from the commit, ${/(\d+) from the line's last open sky/.exec(stood)?.[1] ?? '?'} from the last open sky, ${/standing ([\d.]+) from the goal/.exec(stood)?.[1] ?? '?'} from the goal` : (logs.find((l) => /learned entry: .*(given up|lost)|no learned entry|comes too late|could not be taken/.test(l))?.slice(0, 160) ?? 'not flown')}` : '';
+      const flights = logs.filter((l) => /^flight: (landed|ended \()/.test(l)).length;
+      const bails = logs.filter((l) => l.includes('bailing out')).length;
+      const how = (PLAIN || (ENTRY && LEARNED) ? `GA ${gas}, flight ${flightS.toFixed(0)} s, landed ${landedOff.toFixed(0)} off (dy ${landedDy.toFixed(0)}), total ${totalS.toFixed(0)} s` : (/\(([^)]*)\);/.exec(end)?.[1] ?? '')) + `, ${flights} flight${flights === 1 ? '' : 's'}, ${bails} bail-outs${entry}`;
+      rows.push({ run, leg: `${i} home -> cave_start`, ok, off, ...parsed, seconds: PLAIN || (ENTRY && LEARNED) ? totalS : parsed.seconds >= 0 ? parsed.seconds : totalS, damage: dmg.total, water: water - w0, how });
+      notes.push(`${run} ${i}: ${end}\n    ${logs.filter((l) => /^corridor: |flight: (landed|ended|holding|go-around|no go-around|land now|price|learned entry|retargeted)|fly: (landing for|learned entry|the learned entry)|takeoff|fly: no takeoff|route: .*bailing|walked|fly: landed|the first rocket|recorded way in/.test(l)).slice(0, 48).map((l) => l.slice(0, l.startsWith('fly: learned entry') ? 1800 : 330)).join('\n    ')}`);
+      if (ENTRY && LEARNED && !stood) notes.push(`${run} ${i}, the whole log (${logs.length} lines, the first 160):\n    ${logs.slice(0, 160).map((l) => l.slice(0, 400)).join('\n    ')}`);
       expect(end.length).toBeGreaterThan(0);
+    }
+  }
+
+  it.skipIf(!want('tripC') || !home)("trip C: `!fly` from the home pad to cave_start (the entrance by cave_2), today's live behaviour (Track F8: FLY_CAVE_STYLE=1 flies in with the cave style, FLY_CAVE_RUNS times; Track F9c: FLY_CAVE_LEARNED and FLY_CAVE_ENTRY=1, its end along a recorded way in)", async () => {
+    const runs = RUNS ?? 1;
+    const paths = ENTRY ? learnedPaths('tripC') : undefined;
+    try {
+      for (let i = 0; i < runs; i++) await tripIn('tripC', i);
+    } finally {
+      bot!.settings.set('flyLearnedEntry', false);
+      paths?.done();
     }
   }, 3_600_000);
 
-  it.skipIf(!want('tripOut') || !home)('trip out (Track F9a): `!goto` from cave_start to the home pad, the takeoff from inside the cave (measured, FLY_CAVE_RUNS times)', async () => {
+  /**
+   * The ground beside the line home, as the live bot has seen its own (the fly-over's stops lie on the line itself, 96 apart: a
+   * climb that leaves the cave by its mouth flies some 40 blocks beside it, over columns no stop had loaded, and a takeoff's
+   * proof counts a climb into columns the model does not know as a hit: Track BL). Once a suite.
+   */
+  let seenBeside = false;
+  async function seeBeside(run: string): Promise<void> {
+    if (seenBeside) return;
+    seenBeside = true;
     const b = bot!;
-    const runs = RUNS ?? 5;
     const goal = home!;
-    const what = `${goal.x - 0.5} ${goal.y} ${goal.z - 0.5}`;
-    const break0 = b.settings.get('allowBreak');
-    // the ground beside the line home, as the live bot has seen its own (the fly-over's stops lie on the line itself, 96 apart: a
-    // climb that leaves the cave by its mouth flies some 40 blocks beside it, over columns no stop had loaded, and a takeoff's
-    // proof counts a climb into columns the model does not know as a hit: Track BL)
     {
       const to = centre(start);
       const len = Math.hypot(goal.x - to.x, goal.z - to.z);
@@ -417,21 +461,24 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
           n++;
         }
       }
-      notes.push(`tripOut: ${n} more points seen beside the first 480 blocks of the line home`);
+      notes.push(`${run}: ${n} more points seen beside the first 480 blocks of the line home`);
     }
-    // Track F9b: the recorded paths, moved as the replica is (x and z; the heights are the real ones), where the bot looks for them
-    const paths0 = process.env.BEDROCKBOT_PATHS_DIR;
-    let pathsDir: string | undefined;
-    if (LEARNED) {
-      pathsDir = mkdtempSync(join(tmpdir(), 'bb-cave-paths-'));
-      const all = new PathStore(LEARNED).all();
-      for (const p of all) writeFileSync(join(pathsDir, `${p.name}.json`), JSON.stringify({ ...p, samples: p.samples.map((q) => ({ ...q, x: q.x + d.x, z: q.z + d.z })), rockets: p.rockets.map((q) => ({ ...q, x: q.x + d.x, z: q.z + d.z })) }));
-      process.env.BEDROCKBOT_PATHS_DIR = pathsDir;
-      notes.push(`tripOut: ${all.length} recorded paths moved with the replica, flyLearned on`);
-    }
+  }
+
+  /** One trip out: `!goto` from cave_start to the home pad (tripOut's run). `stand`: the body is put on cave_start first; without it the trip begins where the trip in left it (a round trip). */
+  async function tripBack(run: string, i: number, stand: boolean): Promise<void> {
+    const b = bot!;
+    const goal = home!;
+    const what = `${goal.x - 0.5} ${goal.y} ${goal.z - 0.5}`;
+    const break0 = b.settings.get('allowBreak');
     try {
-      for (let i = 0; i < runs; i++) {
-        await standAt(b, start);
+      {
+        if (stand) await standAt(b, start);
+        else {
+          await b.command('!stop');
+          await sleep(500);
+          await giveFlightKit(b, { rockets: 64 });
+        }
         setCorridorUnderFly(b.task, undefined);
         // the Realm's settings for `!test goto home from cave_start`: autoFly, walks may dig, no pillars, flyCave with FLY_CAVE_STYLE=1
         b.settings.set('autoFly', true);
@@ -478,10 +525,10 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
         const outEnd = outAt >= 0 ? ends[outAt] : undefined;
         const outS = outEnd !== undefined ? (outEnd - t0) / 1000 : -1;
         const totalS = (tEnd - t0) / 1000;
-        rows.push({ run: 'tripOut', leg: `${i} cave_start -> home`, ok: end.startsWith('arrived at') && off < 3, off, seconds: totalS, rockets, damage: dmg.total, corrections: -1, replans: -1, plans: -1, windows: flights.length, walks: -1, water: water - w0, how: `${flights.length} flights (${takeoffs.join(', ')}${logs.some((l) => l.includes('out along the learned line')) ? ', along a learned line' : ''}), the first ${walked === undefined ? '?' : walked.toFixed(0)} blocks from cave_start, ${roofs} roof, ${wasted} rockets fired nothing, the flight home down after ${outS.toFixed(0)} s, total ${totalS.toFixed(0)} s` });
-        notes.push(`tripOut ${i}: ${end}\n    ${logs.filter((l) => /takeoff|^flight: (to |landed|ended|nothing clears|route: (start|the corridor|the plan's corridor)|the rocket used)|^fly: (to |the walk|no takeoff|the takeoff|the flight came|leg )|fired nothing|the first rocket|learned line/.test(l)).slice(0, 60).map((l) => l.slice(0, l.startsWith("fly: route takeoff") ? 1800 : 330)).join('\n    ')}`);
+        rows.push({ run, leg: `${i} cave_start -> home`, ok: end.startsWith('arrived at') && off < 3, off, seconds: totalS, rockets, damage: dmg.total, corrections: -1, replans: -1, plans: -1, windows: flights.length, walks: -1, water: water - w0, how: `${flights.length} flights (${takeoffs.join(', ')}${logs.some((l) => l.includes('out along the learned line')) ? ', along a learned line' : ''}), the first ${walked === undefined ? '?' : walked.toFixed(0)} blocks from cave_start, ${roofs} roof, ${wasted} rockets fired nothing, the flight home down after ${outS.toFixed(0)} s, total ${totalS.toFixed(0)} s` });
+        notes.push(`${run} ${i}: ${end}\n    ${logs.filter((l) => /takeoff|^flight: (to |landed|ended|nothing clears|route: (start|the corridor|the plan's corridor)|the rocket used)|^fly: (to |the walk|no takeoff|the takeoff|the flight came|leg )|fired nothing|the first rocket|learned line/.test(l)).slice(0, 60).map((l) => l.slice(0, l.startsWith("fly: route takeoff") ? 1800 : 330)).join('\n    ')}`);
         // (Track F9b: a run that did not arrive: everything the flight and the trip said, to see where it went wrong)
-        if (!end.startsWith('arrived at')) notes.push(`tripOut ${i}, the whole log (${logs.length} lines, the first 200):\n    ${logs.slice(0, 200).map((l) => l.slice(0, 400)).join('\n    ')}`);
+        if (!end.startsWith('arrived at')) notes.push(`${run} ${i}, the whole log (${logs.length} lines, the first 200):\n    ${logs.slice(0, 200).map((l) => l.slice(0, 400)).join('\n    ')}`);
         expect(end.length).toBeGreaterThan(0);
       }
     } finally {
@@ -489,9 +536,37 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
       b.settings.set('allowBreak', break0);
       b.settings.set('flyCaveExit', false);
       b.settings.set('flyLearned', false);
-      if (paths0 === undefined) delete process.env.BEDROCKBOT_PATHS_DIR;
-      else process.env.BEDROCKBOT_PATHS_DIR = paths0;
-      if (pathsDir) rmSync(pathsDir, { recursive: true, force: true });
+    }
+  }
+
+  it.skipIf(!want('tripOut') || !home)('trip out (Track F9a): `!goto` from cave_start to the home pad, the takeoff from inside the cave (measured, FLY_CAVE_RUNS times)', async () => {
+    const runs = RUNS ?? 5;
+    await seeBeside('tripOut');
+    // Track F9b: the recorded paths, where the bot looks for them (flyLearned on)
+    const paths = learnedPaths('tripOut');
+    try {
+      for (let i = 0; i < runs; i++) await tripBack('tripOut', i, true);
+    } finally {
+      paths?.done();
+    }
+  }, 7_200_000);
+
+  it.skipIf(!ONLY.has('round') || !home)('round trips (Track F9c; FLY_CAVE_ONLY=round with FLY_CAVE_LEARNED and FLY_CAVE_ENTRY=1): in to cave_start along a learned entry, then out again from where it stands along a learned exit (measured, FLY_CAVE_RUNS times)', async () => {
+    const runs = RUNS ?? 3;
+    await seeBeside('round');
+    const paths = learnedPaths('round');
+    try {
+      for (let i = 0; i < runs; i++) {
+        await tripIn('round in', i);
+        bot!.settings.set('flyLearnedEntry', false);
+        // (out from where the trip in left the body when that is cave_start; else from cave_start itself, and the row says so)
+        const off = await offFrom(bot!, centre(start));
+        if (off >= 3) notes.push(`round ${i}: the trip in ended ${off.toFixed(1)} from cave_start: the trip out begins on cave_start`);
+        await tripBack('round out', i, off >= 3);
+      }
+    } finally {
+      bot!.settings.set('flyLearnedEntry', false);
+      paths?.done();
     }
   }, 7_200_000);
 

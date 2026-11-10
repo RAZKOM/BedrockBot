@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { SETTING_DEFS } from '../../../src/config/settings.ts';
 import type { Vec3 } from '../../../src/connection/types.ts';
-import { LEARNED_PROOF_BURNS, LEARNED_PROOF_MIXES, routeTakeoff, routeTakeoffOptions, simulateFlight, type SimDeps } from '../../../src/skills/fly/glide.ts';
+import { LEARNED_PROOF_BURNS, LEARNED_PROOF_DUDS, LEARNED_PROOF_MIXES, routeTakeoff, routeTakeoffOptions, simulateFlight, type SimDeps } from '../../../src/skills/fly/glide.ts';
 import { FOLLOW_MARGIN, FOLLOW_SPEED, GuideFollower, lineRoom } from '../../../src/skills/fly/learn/follow.ts';
 import { guideHead, guideLength, guideNearest, guidePoint, guidesOf, guideTail } from '../../../src/skills/fly/learn/guide.ts';
 import { matchEntries, matchExits, MATCH_NEAR, OUT_AFTER, type OpenSky } from '../../../src/skills/fly/learn/match.ts';
@@ -350,9 +350,10 @@ describe('the follower flies a line (Track F9b, learn/follow.ts)', () => {
     const at = { x: 0.5, y: FEET + 6, z: 30 };
     for (const [speed, want] of [[FOLLOW_SPEED - 0.2, true], [FOLLOW_SPEED + 0.3, false]] as const) {
       const f = new GuideFollower({ grid, guide: g });
-      // (a rocket seen burning first, past the place of the recorded one: the takeoff's)
-      f.tick({ pos: { x: 0.5, y: FEET + 3, z: 20 }, vel: { x: 0, y: 0.1, z: 1.5 }, gliding: true, onGround: false, boostTicks: 9, rockets: 8 }, 1);
-      const out = f.tick({ pos: at, vel: { x: 0, y: 0.1, z: speed }, gliding: true, onGround: false, boostTicks: 0, rockets: 8 }, 2);
+      // (a rocket seen burning first, past the place of the recorded one: the takeoff's; seen as long as the shortest burn
+      // lasts: one that ends sooner fired nothing and is asked for again at any speed, Track F9c)
+      for (let t = 1; t <= 9; t++) f.tick({ pos: { x: 0.5, y: FEET + 3, z: 20 }, vel: { x: 0, y: 0.1, z: 1.5 }, gliding: true, onGround: false, boostTicks: 10 - t, rockets: 8 }, t);
+      const out = f.tick({ pos: at, vel: { x: 0, y: 0.1, z: speed }, gliding: true, onGround: false, boostTicks: 0, rockets: 8 }, 10);
       expect(out.control.fire, `speed ${speed}`).toBe(want);
     }
   });
@@ -376,8 +377,8 @@ describe('the takeoff along a recorded line (Track F9b, route/takeoff.ts learned
     expect(got.route!.goals).toHaveLength(0);
     // one line for the decision: which recording, how far its takeoff lay, what its proof said; and no search at all
     expect(got.tried).toHaveLength(1);
-    expect(said).toMatch(/^the learned way out along the way out \(it left the ground 0\.0 from here, \d+ blocks to open sky in \d+ ticks, 1 rocket, its line 1 or more from the nearest block\): clear at burns of 15, 9, 21, 12, 18, 10, 11, 13, 14, 16, 17, 19, 20 ticks and of 21 then 9, 9 then 21 \(through the exit/);
-    expect(count.sims).toBe(1 + LEARNED_PROOF_BURNS.length + LEARNED_PROOF_MIXES.length);
+    expect(said).toMatch(/^the learned way out along the way out \(it left the ground 0\.0 from here, \d+ blocks to open sky in \d+ ticks, 1 rocket, its line 1 or more from the nearest block\): clear at burns of 15, 9, 21, 12, 18, 10, 11, 13, 14, 16, 17, 19, 20 ticks and of 21 then 9, 9 then 21 and with a first rocket that fires nothing \(the next at 15, 9, 21\) \(through the exit/);
+    expect(count.sims).toBe(1 + LEARNED_PROOF_BURNS.length + LEARNED_PROOF_MIXES.length + LEARNED_PROOF_DUDS.length); // (Track F9c: and a first rocket that fires nothing, three times)
     for (const burn of [undefined, 9, 12, 18, 21]) {
       const { sim, notes, off } = await fly(r, START, cz.y, got.route!, burn);
       const line = `burn ${burn ?? 15}: ${sim.end ? (sim.end.ok ? 'ok' : sim.end.reason) : sim.phase}, ${sim.hits} hits at ${sim.body.pos.x.toFixed(0)} ${sim.body.pos.y.toFixed(0)} ${sim.body.pos.z.toFixed(0)}, ${off.toFixed(2)} off: ${notes.join(' | ')}`;

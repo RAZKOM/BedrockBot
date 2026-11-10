@@ -135,12 +135,34 @@ export interface FlyDeps {
   restock?(item: string, n: number): Promise<boolean>;
   /** Track F3: the route planner in flight (the grid over the live model, the worker's search): the route landings and takeoffs; absent (flyRoute off): none. */
   route?: BrainOptions['route'];
+  /**
+   * Track F9c (docs/flight.md "Learned entries (Track F9c)"): the learned entry for a goal under a roof (commands-fly.ts
+   * entryFor: the recorded ways in matched, the best proven), asked once the flight is in the air; undefined: none (no
+   * recording, the setting off, every proof refused: the landing as before).
+   */
+  entry?: (goal: Vec3, label: string) => Promise<EntryOffer | undefined>;
   /** The owner's lines (the supply whispers, the kept-kit notes). */
   say(msg: string): void;
   waitTicks(n: number): Promise<void>;
   supply?: SupplyWatch;
   log?: Logger;
 }
+
+/** Track F9c: a proven learned entry for a flight's goal. */
+export interface EntryOffer {
+  /** The flight's target for it: where the cruise comes onto the entry's lead-in, and the hand-over (`LandingTarget.entry`, its fallback left to the flight). */
+  target: LandingTarget;
+  /**
+   * The proof against the live world, for a proof that read the world cache: `same` (every cell the proof asked is the
+   * same live: it stands), `changed` (one differs: the entry is given up), `unknown` (some are not loaded yet: ask again).
+   */
+  confirm(): { same: 'same' | 'changed' | 'unknown'; line: string };
+}
+
+/** Track F9c: a learned entry is taken for a flight only while the body is still this far from where it comes onto the line (blocks): nearer, the cruise could not line up on it any more. */
+export const ENTRY_TAKE_MIN = 60;
+/** Track F9c: the live world is asked about an entry's proof every this many ticks. */
+export const ENTRY_CONFIRM_EVERY = 5;
 
 export type FlyPhase = 'prepare' | 'flying' | 'after' | 'done';
 
@@ -408,7 +430,7 @@ export class FlyProcess extends BaseProcess {
     this.phase = 'flying';
     // Track BL: the terrain floor, the clearance, the high cruise and the descent mode (a glide down keeps its simulated plan: no floor)
     // Track F3: the route planner (the route landing's tracker, the route takeoff)
-    const bl = { clearance: s.get('flyClearance'), descent: String(s.get('flyDescent')) as 'auto' | 'dive' | 'spiral', landStyle: String(s.get('flyLandStyle')) as 'auto' | 'flare' | 'brake', ...(high ? { highCruise: true } : {}), ...(this.d.route ? { route: this.d.route } : {}), ...(routeTakeoff ? { routeTakeoff: routeTakeoffOptions(routeTakeoff, routeTakeoff.proven === true) } : {}) }; // Track F1: flyLandStyle; Track F9a: the proven takeoff's own options
+    const bl = { clearance: s.get('flyClearance'), descent: String(s.get('flyDescent')) as 'auto' | 'dive' | 'spiral', landStyle: String(s.get('flyLandStyle')) as 'auto' | 'flare' | 'brake', ...(high ? { highCruise: true } : {}), ...(this.d.route ? { route: this.d.route } : {}), ...(this.d.entry && s.get('flySneakLand') === true ? { entrySneak: true } : {}), ...(routeTakeoff ? { routeTakeoff: routeTakeoffOptions(routeTakeoff, routeTakeoff.proven === true) } : {}) }; // Track F1: flyLandStyle; Track F9a: the proven takeoff's own options
     const opts = glide && ledge ? { ...glideOptions(this.target, ledge, { margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds') }), terrainFloor: false, descent: bl.descent, landStyle: bl.landStyle, ...(this.d.route ? { route: this.d.route } : {}) } : { cruiseY, margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(ledge ? { ledge: { yaw: ledge.yaw } } : {}), ...(vertical !== undefined ? { vertical: { top: vertical } } : {}), ...bl };
 
     this.flight = this.d.controller.flyTo(this.target, {
@@ -425,6 +447,50 @@ export class FlyProcess extends BaseProcess {
       if (this.controlled) void this.advance(this.token);
     });
     if (this.target.goal && this.d.landing) void this.watchLanding(this.target.goal, this.d.landing);
+    if (this.target.goal && this.d.entry && this.d.route && !glide) void this.watchEntry(this.target.goal, this.d.entry);
+  }
+
+  /**
+   * Track F9c (docs/flight.md "Learned entries (Track F9c)"): the flight's end along a recorded way in. Asked once the
+   * flight is in the air (matching and proving take a second or two, and the takeoff does not wait for them): a proven
+   * entry becomes the flight's target while the body is still ENTRY_TAKE_MIN from where it comes onto the line, with the
+   * landing the flight had as the entry's fallback. A proof that read the world cache is then held against the live
+   * world every ENTRY_CONFIRM_EVERY ticks until the cells it asked have all come (`confirm`): the same, and the brain may
+   * commit to the line; one changed, and the entry is given up for its fallback. Not gated on the token, as `watchLanding`.
+   */
+  private async watchEntry(goal: Vec3, find: NonNullable<FlyDeps['entry']>): Promise<void> {
+    const label = this.target.label;
+    const offer = await find(goal, label).catch((e: unknown) => {
+      this.log.warn(`fly: the learned entry for ${label} failed: ${e instanceof Error ? e.message : String(e)}`);
+      return undefined;
+    });
+    if (!offer?.target.entry || this.done || this.phase !== 'flying' || !this.d.controller.active) return;
+    const c = this.d.controller.status();
+    const p = this.d.position();
+    const out = p ? hdist(p, offer.target) : 0;
+    if (c.phase === 'land' || c.phase === 'done' || c.phase === 'approach' || c.phase === 'route' || out < ENTRY_TAKE_MIN) {
+      this.log.info(`fly: the learned entry for ${label} comes too late for this flight (${c.phase ?? '?'}, ${Math.round(out)} blocks from its line): the landing as without it`);
+      return;
+    }
+    const fallback = this.target;
+    const next: FlyTarget = { ...offer.target, entry: { ...offer.target.entry, fallback }, label, goal };
+    if (!this.d.controller.retarget(next)) {
+      this.log.info(`fly: the learned entry for ${label} could not be taken now (${c.phase ?? '?'}): the landing as without it`);
+      return;
+    }
+    (this as { target: FlyTarget }).target = next;
+    if (!next.entry?.unconfirmed) return;
+    for (let asked = 0; ; asked++) {
+      await this.d.waitTicks(ENTRY_CONFIRM_EVERY);
+      if (this.done || this.phase !== 'flying' || !this.d.controller.active || this.d.controller.status().target !== next) return;
+      const r = offer.confirm();
+      if (r.same === 'unknown') {
+        if (asked % 20 === 0) this.log.info(`fly: the learned entry's proof for ${label} waits for the live world: ${r.line}`);
+        continue;
+      }
+      this.d.controller.confirmEntry(r.same === 'same', r.line);
+      return;
+    }
   }
 
   /**
@@ -450,10 +516,19 @@ export class FlyProcess extends BaseProcess {
       if (this.done || this.phase !== 'flying' || !this.d.controller.active) return;
       const c = this.d.controller.status();
       if (c.phase === 'land' || c.phase === 'done') return;
-      const t = this.target;
+      let t = this.target;
+      // Track F9c: the brain gave a learned entry up for its fallback (the landing this flight had before the entry): that is
+      // the flight's target again, and the look for a landing goes on as it did
+      if (t.entry?.fallback !== undefined && c.target === t.entry.fallback) {
+        (this as { target: FlyTarget }).target = t.entry.fallback as FlyTarget;
+        t = this.target;
+        this.log.info(`fly: the learned entry for ${t.label} was given up: the landing as without it${t.hold ? ' (looking for one)' : ''}`);
+      }
       // Track L1: the brain took one of the target's alternatives instead of a go-around: that landing is the flight's now
       if (!t.hold && c.target !== undefined && c.target !== t) return;
       if (!t.hold) {
+        // (Track F9c: a learned entry's target is no cell: nothing to re-check, and the body passes its aim in the air)
+        if (t.entry) continue;
         // a chosen cell: re-checked every LOOK_EVERY ticks until the touchdown is near
         if (c.distance !== undefined && c.distance < 6) return;
         if (!t.cell || !this.d.cellOk || ticks - lastLook < LOOK_EVERY) continue;
@@ -477,6 +552,8 @@ export class FlyProcess extends BaseProcess {
       const hint: LandingHint | undefined = t.hold ? { ...(t.rim !== undefined ? { rim: t.rim } : {}), partial: true } : undefined;
       const plan = await find(goal, t.label, t.exact, hint);
       if (this.done || this.phase !== 'flying' || !this.d.controller.active) return;
+      // (Track F9c: a learned entry became the flight's target while the landing was looked for: that look is void)
+      if (this.target !== t) continue;
       if (plan.kind === 'unknown' || plan.kind === 'none') {
         if (++unknown % 5 === 1) this.log.info(`fly: ${plan.line} (${Math.round(c.distance ?? 0)} blocks out, ${c.phase}${c.descending ? `, ${c.descending}` : ''})`);
         if (!t.hold) {

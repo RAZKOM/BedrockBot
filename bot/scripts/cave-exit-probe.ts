@@ -31,7 +31,7 @@
 // waypoints for the route search and flown by the route tracker.
 import { caveWorld, loadCaveFixture, REPLICA_FLAT_FEET, replicaCoarse } from '../src/skills/fly/corridor/cave.ts';
 import { routeTakeoff, routeTakeoffOptions, simulateFlight, type SimDeps } from '../src/skills/fly/glide.ts';
-import { lineRoom } from '../src/skills/fly/learn/follow.ts';
+import { FOLLOW_SWITCH, lineRoom } from '../src/skills/fly/learn/follow.ts';
 import { guideLength, guideNearest, guidePoint } from '../src/skills/fly/learn/guide.ts';
 import { matchExits, MATCH_NEAR, type GuideMatch, type OpenSky } from '../src/skills/fly/learn/match.ts';
 import { PathStore } from '../src/skills/fly/learn/store.ts';
@@ -57,6 +57,9 @@ if (!fix) {
   console.log('no cave fixture (bot/fixtures-private/cave): nothing to fly');
   process.exit(0);
 }
+// Track F9c: `--dud`: every flight's first rocket fires nothing (the proof flies that case by itself); `--old-dud`: the
+// follower as Track F9b left it, which does not notice (to measure what noticing changed)
+if (has('old-dud')) FOLLOW_SWITCH.dud = false;
 const e = fix.extract;
 const world = caveWorld(e);
 const grid = world.grid;
@@ -171,6 +174,7 @@ async function flyBurns(route: TakeoffRoute, quiet = false): Promise<{ clean: nu
         maxTicks: 400,
         burn,
         ...(endLag !== undefined ? { endLag } : route.guide ? { endLag: GLIDE.boostEndLag } : {}), // (a learned line as its proof flies it: every burn's end seen late)
+        ...(has('dud') ? { dud: (k: number) => k === 0 } : {}), // (Track F9c, --dud: the first rocket fires nothing; the burn is the later ones')
         wait,
         until: (br, body) => {
           if (route.guide && br.phase === 'takeoff' && body.gliding) off = Math.max(off, guideNearest(route.guide.line, body.pos).dist);
