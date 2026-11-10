@@ -38,6 +38,14 @@ export const TAKEOFF_TIMEOUT = 120;
  * server putting it back in the air (a correction after a touchdown the server did not see).
  */
 export const SETTLE_TICKS = 10;
+/**
+ * Track F9a (docs/flight.md "Cave exit", the first rocket): no rocket goes while the server has not confirmed the glide
+ * (its own `gliding` flag for the body: the loop's GlideEvent), in every takeoff. The server ignores a rocket used before
+ * it has taken the glide (Track F0) and the loop only predicts that it has: at a takeoff the rocket then fires nothing and
+ * the body drops back. The wait ends after this many predicted gliding ticks without the flag (a flag that is late by
+ * more than a takeoff's glide can spare: the rocket goes as it did before, and UNANSWERED_ROCKETS still bounds those).
+ */
+export const ROCKET_GLIDE_WAIT = 6;
 /** Track BF: sneak goes on this far above the landing cell in the approach / land phase (FlightDeps.sneakLanding). */
 export const SNEAK_ABOVE = 2.5;
 /** Track BL: a correction this far behind the local body along the heading (blocks) is the server holding it; one note per HELD_NOTE_TICKS. */
@@ -194,6 +202,11 @@ export class FlightController {
   private everGlided = false;
   /** Track F5a: rockets fired before the server ever confirmed the glide (UNANSWERED_ROCKETS at most). */
   private unanswered = 0;
+  /** Track F9a: the server's `gliding` flag says the body glides now (the tick it said so); the loop's gliding ticks in a row; the first rocket's line was written. */
+  private glideOn = false;
+  private glideOnAt: number | undefined;
+  private glidingTicks = 0;
+  private firstRocket = false;
   private lastAir: { vy: number; h: number } | undefined;
   private endReason: FlightEndReason | undefined;
   private baseWorld: BlockQuery | undefined;
@@ -284,6 +297,11 @@ export class FlightController {
     this.glideEnds = 0;
     this.everGlided = false;
     this.unanswered = 0;
+    // (a flight that begins in the air, on a glide the server confirmed before it: no wait)
+    this.glideOn = loop.state.gliding;
+    this.glideOnAt = undefined;
+    this.glidingTicks = 0;
+    this.firstRocket = false;
     this.lastAir = undefined;
     this.endReason = undefined;
     this.settling = undefined;
@@ -299,6 +317,11 @@ export class FlightController {
           this.tick(state);
         }),
         loop.onEvent((e) => {
+          // Track F9a: the server's word on the glide (its flag on, its end, the loop taking back a request never confirmed)
+          if (e.kind === 'glide') {
+            if (e.gliding && !this.glideOn) this.glideOnAt = this.tickNo;
+            this.glideOn = e.gliding;
+          }
           // (Track F0: the loop taking back a request the server never confirmed is no glide end)
           if (e.kind === 'glide' && e.refused !== true) {
             if (e.gliding) this.everGlided = true;
@@ -419,6 +442,9 @@ export class FlightController {
       }
     }
     const rockets = this.rockets.rocketsInHotbar();
+    // Track F9a: a rocket only into a glide the server has confirmed (ROCKET_GLIDE_WAIT)
+    this.glidingTicks = state.gliding ? this.glidingTicks + 1 : 0;
+    const glideSure = this.glideOn || this.glidingTicks > ROCKET_GLIDE_WAIT;
     const out = brain.step({
       tick: this.tickNo,
       body: this.body(state),
@@ -427,7 +453,7 @@ export class FlightController {
       rockets: rockets.count,
       // (Track F5a: no rocket once UNANSWERED_ROCKETS went without the server ever confirming the glide: in water, the
       // elytra refused; the takeoff ends `no_glide` on its timeout instead of spending the hotbar)
-      canFire: this.rockets.canFire(this.tickNo) && rockets.slot >= 0 && (this.everGlided || this.unanswered < UNANSWERED_ROCKETS),
+      canFire: this.rockets.canFire(this.tickNo) && rockets.slot >= 0 && glideSure && (this.everGlided || this.unanswered < UNANSWERED_ROCKETS),
       health: this.d.health(),
       elytraLeft: this.d.elytraLeft(),
     });
@@ -442,7 +468,11 @@ export class FlightController {
     if (low && this.d.sneakLanding?.() === true) this.sneaked = true;
     // (Track BH: the ledge takeoff walks to the edge sneaking and steps off: `forward`, `sneak` from the brain)
     loop.setCommand({ yaw: c.yaw, pitch: c.pitch, jump: c.jump, glide: c.glide, forward: c.forward ?? 0, strafe: 0, sprint: false, sneak: (this.sneaked && low) || c.sneak === true });
-    if (c.fire && rockets.slot >= 0 && (this.everGlided || this.unanswered < UNANSWERED_ROCKETS)) {
+    if (c.fire && rockets.slot >= 0 && glideSure && (this.everGlided || this.unanswered < UNANSWERED_ROCKETS)) {
+      if (!this.firstRocket) {
+        this.firstRocket = true;
+        this.log.info(`flight: the first rocket at tick ${this.tickNo}, ${this.glidingTicks} gliding ticks in: ${this.glideOn ? `the server's glide confirmed${this.glideOnAt !== undefined ? ` at tick ${this.glideOnAt}` : ' before the flight'}` : `the server's glide not confirmed after ${ROCKET_GLIDE_WAIT} gliding ticks, fired without it`}`);
+      }
       if (!this.everGlided && ++this.unanswered === UNANSWERED_ROCKETS) this.log.warn(`flight: ${this.unanswered} rockets fired and the server has not confirmed the glide: no more rockets until it does`);
       this.rockets.fire(rockets.slot, state.pos, this.tickNo);
     }

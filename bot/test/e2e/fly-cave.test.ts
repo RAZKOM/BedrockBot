@@ -14,6 +14,8 @@
 // Seen first, as fly-corridor: a scripted fly-over of the box (teleports onto its surface) into a fresh world cache,
 // the coarse layer over that cache attached to the navigator (index.ts's wiring), FlightCost registered.
 //   tripC  `!fly` from the home pad to cave_start (the entrance by cave_2): today's live behaviour (UNDER_FLY as is)
+//   tripOut  Track F9a: `!goto` from cave_start to the home pad (the Realm's `!test goto home from cave_start`): the takeoff
+//          from inside the cave; flights, `roof` ends, rockets that fired nothing and the seconds in the row's `how`
 //   walkA  route A walked stop to stop (`skills.goto` near each waypoint); a failed leg is teleported over
 //   walkB  route B walked the same way (Track W3: as far as walking goes; the shortcut itself is flight only)
 //   flyA / flyB  every leg of routes A and B as a corridor trip with the underground stretches flown (underFly on)
@@ -24,7 +26,7 @@
 // time, rockets, damage (truth hurtlog), corrections, re-plans, corridor plans / windows / walks, ticks in water.
 // Gated: the build, the fly-over and every run completing. The numbers themselves are measured, not gated.
 // Env: FLY_BDS_HOST / FLY_BDS_PORT / FLY_BDS_CONTAINER (fly-truth.ts; run with 19210 / bds-fly2), FLY_CAVE_AT="x,z",
-// FLY_CAVE_REUSE=1, FLY_CAVE_ONLY=tripC,walkA,walkB,flyA,flyB,flyC,flyS, FLY_CAVE_LEGS=3,4 (the legs of A and B by index, walked or flown), FLY_CAVE_STYLE=1 (the cave style on the flown runs), FLY_CAVE_PLAIN=1 (Track L1: trip C with flyCorridor off, the `!test cavestart` way: go-arounds, the flight and the landing in the table),
+// FLY_CAVE_REUSE=1, FLY_CAVE_ONLY=tripC,tripOut,walkA,walkB,flyA,flyB,flyC,flyS, FLY_CAVE_EXIT=1 (Track F9a: tripOut with flyCaveExit on, the way out under the roof), FLY_CAVE_LEGS=3,4 (the legs of A and B by index, walked or flown), FLY_CAVE_STYLE=1 (the cave style on the flown runs), FLY_CAVE_PLAIN=1 (Track L1: trip C with flyCorridor off, the `!test cavestart` way: go-arounds, the flight and the landing in the table),
 // FLY_CAVE_RUNS (flyC / flyS runs, default 5 / 3), FLY_CAVE_LEG_S (the time a run may take, default 180), FLY_CAVE_REPORT=file (the table written there too), FLY_VERBOSE=1.
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -385,10 +387,85 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
       const ok = (end.startsWith('arrived') || end.startsWith('walked to')) && off < 3;
       const how = PLAIN ? `GA ${gas}, flight ${flightS.toFixed(0)} s, landed ${landedOff.toFixed(0)} off (dy ${landedDy.toFixed(0)}), total ${totalS.toFixed(0)} s` : (/\(([^)]*)\);/.exec(end)?.[1] ?? '');
       rows.push({ run: 'tripC', leg: `${i} home -> cave_start`, ok, off, ...parsed, seconds: PLAIN ? totalS : parsed.seconds >= 0 ? parsed.seconds : totalS, damage: dmg.total, water: water - w0, how });
-      notes.push(`tripC ${i}: ${end}\n    ${logs.filter((l) => /^corridor: |flight: (landed|ended|holding|go-around|no go-around|land now|price)|fly: landing for|takeoff|fly: no takeoff|route: .*bailing|walked|fly: landed/.test(l)).slice(0, 40).map((l) => l.slice(0, 300)).join('\n    ')}`);
+      notes.push(`tripC ${i}: ${end}\n    ${logs.filter((l) => /^corridor: |flight: (landed|ended|holding|go-around|no go-around|land now|price)|fly: landing for|takeoff|fly: no takeoff|route: .*bailing|walked|fly: landed|the first rocket/.test(l)).slice(0, 40).map((l) => l.slice(0, 300)).join('\n    ')}`);
       expect(end.length).toBeGreaterThan(0);
     }
   }, 3_600_000);
+
+  it.skipIf(!want('tripOut') || !home)('trip out (Track F9a): `!goto` from cave_start to the home pad, the takeoff from inside the cave (measured, FLY_CAVE_RUNS times)', async () => {
+    const b = bot!;
+    const runs = RUNS ?? 5;
+    const goal = home!;
+    const what = `${goal.x - 0.5} ${goal.y} ${goal.z - 0.5}`;
+    const break0 = b.settings.get('allowBreak');
+    // the ground beside the line home, as the live bot has seen its own (the fly-over's stops lie on the line itself, 96 apart: a
+    // climb that leaves the cave by its mouth flies some 40 blocks beside it, over columns no stop had loaded, and a takeoff's
+    // proof counts a climb into columns the model does not know as a hit: Track BL)
+    {
+      const to = centre(start);
+      const len = Math.hypot(goal.x - to.x, goal.z - to.z);
+      const u = { x: (goal.x - to.x) / len, z: (goal.z - to.z) / len };
+      let n = 0;
+      for (let s = 32; s <= Math.min(480, len - 64); s += 64) {
+        for (const side of [-64, 64]) {
+          const x = Math.floor(to.x + u.x * s - u.z * side);
+          const z = Math.floor(to.z + u.z * s + u.x * side);
+          await teleport(b, { x: x + 0.5, y: Math.max(groundFeet(x - d.x, z - d.z), e.box.max.y + 2), z: z + 0.5 });
+          n++;
+        }
+      }
+      notes.push(`tripOut: ${n} more points seen beside the first 480 blocks of the line home`);
+    }
+    try {
+      for (let i = 0; i < runs; i++) {
+        await standAt(b, start);
+        setCorridorUnderFly(b.task, undefined);
+        // the Realm's settings for `!test goto home from cave_start`: autoFly, walks may dig, no pillars, flyCave with FLY_CAVE_STYLE=1
+        b.settings.set('autoFly', true);
+        b.settings.set('allowBreak', true);
+        if (process.env.FLY_CAVE_STYLE === '1') b.settings.set('flyCave', 'on');
+        b.settings.set('flyCaveExit', process.env.FLY_CAVE_EXIT === '1'); // the way out under the roof (default off)
+        const since = await b.truth.now();
+        const n0 = b.logs.length;
+        const from = b.said.length;
+        const w0 = water;
+        const t0 = performance.now();
+        // when each flight ended, for the time the takeoff out of the cave took (the first flight that did not end `roof` or short)
+        const ends: number[] = [];
+        const watch = setInterval(() => {
+          const n = b.logs.slice(n0).filter((l) => /flight: (landed|ended \()/.test(l)).length;
+          while (ends.length < n) ends.push(performance.now());
+        }, 100);
+        await b.command(`!goto ${what}`);
+        const end = await b.reply((s) => s.startsWith('arrived at') || s.startsWith('goto:'), from, Math.max(LEG_MS, 420_000)).catch((err: unknown) => `no end line: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`);
+        const tEnd = performance.now();
+        clearInterval(watch);
+        await b.command('!stop');
+        await sleep(1000);
+        b.settings.set('autoFly', false);
+        const logs = b.logs.slice(n0).map((l) => l.replace(/^\S+ (info|warn|error) /, ''));
+        const dmg = await b.truth.damageSince(since, b.name);
+        const off = await offFrom(b, goal);
+        const flights = logs.filter((l) => /^flight: (landed|ended \()/.test(l));
+        const roofs = flights.filter((l) => l.startsWith('flight: ended (roof)')).length;
+        const rockets = flights.reduce((n, l) => n + Number(/; (\d+) rockets \(/.exec(l)?.[1] ?? 0), 0);
+        const wasted = logs.filter((l) => l.includes('fired nothing')).length;
+        const takeoffs = logs.filter((l) => /^fly: to .*(takeoff|then heading|elytra)/.test(l)).map((l) => (/a (route|vertical) takeoff/.exec(l)?.[1] ?? (l.includes('ledge') ? 'ledge' : 'jump')));
+        // the first flight that got out: not `roof`, and it flew more than a takeoff's worth of ticks
+        const outAt = flights.findIndex((l) => !l.startsWith('flight: ended (roof)') && Number(/, (\d+) ticks/.exec(l)?.[1] ?? 0) > 200);
+        const outEnd = outAt >= 0 ? ends[outAt] : undefined;
+        const outS = outEnd !== undefined ? (outEnd - t0) / 1000 : -1;
+        const totalS = (tEnd - t0) / 1000;
+        rows.push({ run: 'tripOut', leg: `${i} cave_start -> home`, ok: end.startsWith('arrived at') && off < 3, off, seconds: totalS, rockets, damage: dmg.total, corrections: -1, replans: -1, plans: -1, windows: flights.length, walks: -1, water: water - w0, how: `${flights.length} flights (${takeoffs.join(', ')}), ${roofs} roof, ${wasted} rockets fired nothing, the flight home down after ${outS.toFixed(0)} s, total ${totalS.toFixed(0)} s` });
+        notes.push(`tripOut ${i}: ${end}\n    ${logs.filter((l) => /takeoff|^flight: (to |landed|ended|nothing clears|route: (start|the corridor|the plan's corridor)|the rocket used)|^fly: (to |the walk|no takeoff|the takeoff|the flight came|leg )|fired nothing|the first rocket/.test(l)).slice(0, 60).map((l) => l.slice(0, l.startsWith("fly: route takeoff") ? 1800 : 330)).join('\n    ')}`);
+        expect(end.length).toBeGreaterThan(0);
+      }
+    } finally {
+      b.settings.set('autoFly', false);
+      b.settings.set('allowBreak', break0);
+      b.settings.set('flyCaveExit', false);
+    }
+  }, 7_200_000);
 
   /**
    * A route walked stop to stop (`skills.goto` near each waypoint); a failed leg, or the leg after one FLY_CAVE_LEGS

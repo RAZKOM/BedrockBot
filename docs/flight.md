@@ -1148,6 +1148,7 @@ Rules (all named `// Track AU` in the shared files):
 | `flyRoute` | auto | Track F3: the route planner lands an exact goal the brake refuses (a slot 2 high, a hole, a 1 x 1 shaft, a pocket) and takes off where the ledge, the jump and the vertical takeoff are all refused; `off` keeps the Track F1 search and chain ("Route landings and takeoffs") |
 | `flyCorridor` | auto | Track F4b: an `!fly <x y z>` farther than 96 blocks to a covered goal (a cave, a chamber: no open sky over it) follows the coarse layer's corridor when there is one: the cruise to a mouth or a shaft, the bores flown where they are 3 high, the rest walked ("Corridor flight"); `off` flies the cruise only |
 | `flyCave` | off | Track F5b: powered flight underground (a corridor's cave stretches, `!fly via` / `!fly route`) in the cave style: every window proven before its takeoff, a stop and a sink when the plan runs out; `off` walks underground as the 2026-11-06 hotfix left it. It killed the bot once: `on` only after it has passed the cave benchmark ("Cave flight") |
+| `flyCaveExit` | off | Track F9a: with `flyCave` on, a takeoff from under a roof whose exits all have no clear climb flies the way out under the roof to the open sky (a plan through the cave to its mouth, the whole takeoff simulated at five burns before it is taken) instead of walking out. It has flown offline only: `on` after a `!test goto` series on real terrain ("Cave exit") |
 
 ## Processes
 
@@ -1844,6 +1845,9 @@ from 180: ...)`, the tracker's `route: start: plan 65 ticks ...` lines, and the 
 (149 ticks on the route tracker, 7 plans, 6 re-plans, max error 0.31)`.
 
 ### The route takeoff (`route/takeoff.ts`, `commands-fly.ts takeoffFor`)
+
+(Track F9a: a plan to an exit is now taken only with a proof of the climb after it, and the climb keeps the exit's line until the
+sky is open: "Cave exit (Track F9a)" below.)
 
 The last step of the takeoff chain, after the ledge, the jump on every heading and the vertical takeoff: the
 air around the start is flooded (6-connected through the air cells, up to 6 000 cells within 32 blocks) for
@@ -3807,6 +3811,234 @@ Exact landings take no price, so fly-land's spread is the noise of the two runs.
   pace is 0.248. Not changed (the file is outside this track's list); the hold waits a little less than it could.
 - The forced landing's price (brain.ts, the nearest safe ground) converts the target's walk back to blocks at 0.3 s a block;
   with the walk now priced by its path that is an approximation (brain.ts is Track F9a's).
+
+## Cave exit (Track F9a)
+
+Flight v2, Track F9a, [decisions/0077](decisions/0077-cave-exit.md). The owner (2026-11-09): "What are we doing wrong that the bot
+can't fly from start to finish? I can do it in the realm." They take off inside their cave, fly out of its mouth and climb away.
+From the same spot the bot hit the roof once or twice on every trip out: the Realm's `!test goto home from cave_start 3` arrived
+3 of 3 in 136 s a run, 20 to 30 s of each lost to it. And the rule they gave for it: "the human nature part is first getting out
+of the cave then flying home, not just flying home from within the cave. It doesn't have to pathfind its way home from underground,
+it has to pathfind its way out from underground and then it can head home."
+
+```
+the takeoff chain (commands-fly.ts takeoffFor): ledge -> jump (simulated) -> vertical (simulated) -> route takeoff -> refused
+the route takeoff (route/takeoff.ts planTakeoffRoute, commands-fly.ts routeTakeoffFor), two phases:
+ 1 OUT (the goal's bearing steers nothing)
+   the exits (a cell with 16 of air over it, the nearest by the flood; those tried lie 8 apart)
+     each: the plan from standing to the exit  ->  the PROOF (glide.ts routeTakeoff)
+       the whole takeoff simulated: the tracker out to the exit, then the brain's climb, 300 ticks past the plan,
+       at burns of 15, 9, 21, 12 and 18 ticks: out through the exit, no solid met, dry, still flying
+     proven: kept, the one that is under open sky soonest wins     refused: one line saying what the climb met
+   none proven, flyCave and flyCaveExit on: the WAYS OUT under the roof (waysOut)
+     a flood that stays under the roof, through cells with room, to the cells under the real sky
+     the plan through a waypoint every 24 cells of the flood's way, the exit and a point in the open, in pieces
+     ->  the same proof
+   the flight (brain.ts): the tracker flies the plan; after the last goal the climb keeps the line the body left it on
+ 2 TO THE GOAL: once the body has open sky over it (the sky check's 3 x 3 up to the cruise height) the heading turns
+   to the goal 4 degrees a tick while the glide of the next 20 ticks on the new heading meets no solid (climbYaw);
+   on the goal's heading the flight is the ordinary one
+```
+
+The jump and the vertical takeoff were always simulated before they were chosen. The route takeoff was not: it proved the way to
+a cell and nothing after it.
+
+### Files
+
+| File | What |
+|---|---|
+| `bot/src/skills/fly/route/takeoff.ts` | `planTakeoffRoute` with `prove`, `far` and `budgetMs`; `exitsToTry`, `EXIT_APART`; `waysOut`, `wayGoals`, `WayOut` (its `open` point), the `WAY_*` and `OPEN_*` numbers; `TakeoffRoute.proven`, `out`, `score`, `pieces`; `TakeoffProof` |
+| `bot/src/skills/fly/glide.ts` | `routeTakeoff` (the proof), `routeTakeoffOptions` (the brain's options, one place for the proof and the flight), `PROOF_BURNS`; `simulateFlight` with `burn` and `wait` (a planner that answers later), `SimResult.bumps` |
+| `bot/src/skills/fly/brain.ts` | `climbYaw`'s two phases after a proven route takeoff (`CURVE_STEP`), `BrainOptions.routeTakeoff.curve`, `pieces`, `underRoof` (a way out that loses its plan lands); `FlightStats.routeTakeoffEnd`, `routeExitYaw`, `routeSkyAt`, `routeHeadingAt` |
+| `bot/src/skills/fly/controller.ts` | `ROCKET_GLIDE_WAIT`: no rocket before the server's `gliding` flag; one line for a flight's first rocket |
+| `bot/src/skills/fly/rocket.ts` | a rocket entity matched where the rocket was used; `ROCKET_LATE`, `RocketHand.late` |
+| `bot/src/chat/commands-fly.ts`, `bot/src/tasks/process/fly.ts` | `routeTakeoffFor` asks for the proof (the flight's own view of the world: the live model, the cache where it has nothing) and writes the decision's line; the flight gets `routeTakeoffOptions` of what was proven |
+| `bot/src/config/settings.ts`, `bot/src/chat/help.ts` | `flyCaveExit` (default off) |
+| `bot/scripts/cave-exit-probe.ts` | the decision and the takeoff flown at every burn on the private fixture, offline (`--unproven`: the takeoff as it was) |
+| `bot/test/unit/skills/fly-cave-exit.test.ts` | the guard tests on synthetic worlds |
+| `bot/test/e2e/fly-cave.test.ts` | `tripOut`: `!goto` from cave_start to the home pad on the replica (`FLY_CAVE_EXIT=1`: with the ways out) |
+
+### What was measured first (the Realm's log, the fixture, the replica, the owner's recordings)
+
+**Why the climb hit.** The route takeoff's "exit under open sky" is a cell with `EXIT_OPEN_SKY` 16 of air over it. From cave_start the
+Realm found 31 of them, all in the cave's hall (the exit it took had exactly 16 of air and rock over that). The plan to it was sound
+(21 ticks, one rocket); the body came out 6 over the exit cell and the climb turned to the goal's heading there, into the hall's wall:
+"nothing clears the solid ahead in the climb (the goal's heading, 1.27 a tick, the straight glide hits in 14 ticks): landing on the ground
+before it (roof)". The flight came down 11 to 18 blocks lower than it began, the walk out from there took 24 to 60 s, and the next
+route takeoff (an "exit" one cell away under the same roof) did the same in one run of three.
+
+Offline on the fixture (`node scripts/cave-exit-probe.ts --unproven --cruise 133`: the first plan taken unproven, the climb turned
+at the exit) the same takeoff is the same line for line: the plan of 21 ticks and 153 nodes, out at tick 23, "nothing clears the
+solid ahead in the climb (the goal's heading, 1.27 a tick, the straight glide hits in 11 ticks)", `roof` at burns of
+9, 15 and 21 ticks.
+
+**The replica does not show it.** On bds-fly2 (`tripOut`, the code before this track, 5 runs) the route takeoff found no plan at all
+and the bot walked out: the fixture has an opening to the sky 35 flood cells from cave_start that the Realm's flood never found (its
+first three exits were three cells of that opening, each a search that ran out its budget), so the hall's exit was never tried. 5 of
+5 arrived in 72 to 75 s, one flight a run, no `roof`. The Realm's failure is reproduced offline on the fixture, not on the replica.
+
+**The second plan at the start.** Every route takeoff logged "the corridor ahead is blocked" a few ticks after its first plan and
+searched the same plan again. Two causes. The tracker's burn hazard is an index, -1 for none, and the body matches index -1 while it
+still stands on the plan's start: `burnHazard >= i` was `-1 >= -1`, so the first tick after a plan came back from the worker was
+"blocked" (an in-thread planner answers within the tick that asks, which hid it from every unit test). And a plan from standing
+beside a wall keeps less than the margin on its first edges by construction (`startMarginFor`) and was then checked against the
+full margin ("the plan's corridor is blocked at tick 1 of 5, margin 0.15"); the cave windows' plans have been checked against their
+own clearance since Track F5b. Explained and left as it is: the second search finds the same plan and costs the takeoff nothing
+it can be seen to lose, and correcting it in the tracker cost the obstacle course its rings (see the open points).
+
+**Rockets that fired nothing.** The Realm's log has seven in the three runs, at ticks 32, 39, 76, 83, 135, 52 and 130 of their
+flights: all in the climb or the cruise, none the first rocket of a takeoff. Waiting for the glide's confirmation cannot remove
+those. What they have in common is speed (1.5 a tick and more): the rocket entity appears where the server's body used the rocket,
+its `add_entity` is read a round trip later, and it was matched within 6 blocks of where the local body is then. On the replica
+(no latency) there are none, before or after.
+
+**The owner's recorded exits** (seven takes of `!learn`, read offline): the rocket 0.3 to 0.5 s after the jump, out along the
+passage climbing 12 to 19 degrees, and no turn at the exit: the heading curves to the goal's over about 35 blocks beyond the mouth
+while the climb steepens to 38 degrees; 70 blocks out after 3.0 to 3.7 s and 24 to 45 over the start, on one rocket. Swept through
+the fixture's world with the gliding box, every take's exit is clear (the only contacts are two takes' landings on the hilltop
+at the end).
+
+### The pieces
+
+**The proof** (`glide.ts routeTakeoff`). `simulateFlight` with the flight's own options (`routeTakeoffOptions`, the same object the
+flight then gets), the route's tracker flying on stepBody and the brain's climb after it, `TAKEOFF_SIM_TICKS` 300 past the plan's
+ticks. The route's planner may be the worker: the simulation waits for each answer (`wait`), and a search already asked is not asked
+again (the way out is the same at every burn until its first rocket ends). A takeoff clears when the tracker came out through its
+last goal, no solid was met, the body stayed dry and is still flying or landed on the target; first at the nominal burn, then with
+every rocket burning 9, 21, 12 and 18 ticks (`PROOF_BURNS`). A head bump on the way out (a ceiling touched while rising, no wall
+met) is not a hit: Track F3's room, hole and stack take off under their roofs so and the server takes no health for it. The
+simulation's world is the flight's view: the live model, and the cache's solids where the live model has nothing; with the live
+model alone the simulated climb flew into a hill only the cache knew and was refused as "terrain not loaded".
+
+**Two phases in the climb** (`brain.ts climbYaw`, for a proven route takeoff). After the last goal the climb keeps the line the body
+leaves it on. Each tick it asks the sky check's 3 x 3 over the body up to the cruise height; from the tick that passes
+(`routeSkyAt`, "open sky over the body") the held heading turns `CURVE_STEP` 4 degrees a tick towards the target whenever the glide
+of the next 20 ticks on the new heading meets no solid, and stays otherwise; on the target's heading the hold is over
+(`routeHeadingAt`). A heading held until a sky check towards the goal passed and then released was built first: at a burn of 11
+ticks the body left the mouth 40 degrees off the held heading, the release turned 15 degrees a tick through headings that met the
+shore's hill, and the flight ended `roof` outside the cave.
+
+**The exits tried** (`exitsToTry`). The nearest, then exits `EXIT_APART` 8 from every one chosen, then (fewer than three such) the
+nearest other columns as before; an exit within 8 of one whose climb was refused is skipped. Of the proven ones the takeoff that is
+under open sky soonest wins; the time to the goal breaks a tie.
+
+**The ways out** (`waysOut`, `wayGoals`; `flyCave` and `flyCaveExit` on). A flood from the start through the air that stays under
+the roof: a cell with no solid over it up to the cruise height is a way out and is not flooded past, so the flood is the cave's
+size (the owner's cave: 8 790 cells in 19 ms on the PC; flooding on through the open sky took 400 000). Past the first three steps a
+cell needs a block of room each side and two of height. A way's plan goes through a 3 x 3 x 3 waypoint every `WAY_STEP` 24 cells of
+the flood's way, the exit's box, and the way's open point (`WayOut.open`: 12 blocks out along the heading, of twelve, with the
+longest run of open sky from the exit), searched in pieces of one goal (`WAY_PIECES`; in one search the same plan was not found in
+4 s). The tracker is the plain one. Measured on the owner's cave at burns 9 to 21: with the cave style's rules 2 of 7 came out and
+5 bailed out a block off the reference in a passage 14 wide; plain, all 7 came out through the mouth with no hit. A way out that loses its plan lands
+(`underRoof`); it does not go on as a climb.
+
+**The first rocket** (`controller.ts ROCKET_GLIDE_WAIT`). `canFire` is false until the loop's GlideEvent says the server glides the
+body, in every takeoff the flight controller flies (the route driver and the corridor's driver already waited). After 6 predicted
+gliding ticks without the flag the rocket goes as before. One line a flight: "the first rocket at tick N, G gliding ticks in: the
+server's glide confirmed at tick C".
+
+**The rocket's entity** (`rocket.ts`). Ours when it appears within 6 of the body now or of where the body used the rocket. A rocket
+entity that comes within `ROCKET_LATE` 20 ticks for a use already written off is logged ("that rocket did fire, the write-off was
+wrong") and counted (`RocketHand.late`), and one that is taken for somebody else's says how far it was from both.
+
+### Offline, the owner's cave (`scripts/cave-exit-probe.ts --cruise 133`, the PC, 2026-11-09)
+
+| | the takeoff as it was (`--unproven`) | this track, `flyCaveExit` off | this track, the way out |
+|---|---|---|---|
+| what is flown | the hall's exit, the climb turned there | nothing: the hall's exit is refused ("roof: down at ..."), the bot walks out | 5 goals, 57 ticks planned, 4 rockets planned |
+| burns 9 to 21 (13) | `roof` at every burn tried (9, 15, 21) | | 13 of 13 out and flying 400 ticks on, no hit |
+| the way out | 23 ticks, 1 rocket | | 54 to 76 ticks, 3 to 4 rockets |
+| 70 blocks from the start | never | | after 3.0 to 4.0 s, 21 to 27 over the start |
+
+The way out's plan at other margins and risk weights (0.2 / 0.5 and 0.25 / 2: other plans through the same cave): 13 of 13 each.
+Without the open point the plans at 0.15 / 0.5, 0.25 / 0.5, 0.25 / 2 and 0.3 / 2 gave 13, 8, 12 and 10 of 13: the losses were
+`roof` ends just outside the mouth, the body leaving it towards the hill beside it. The owner's takes are 70 blocks out after 3.0 to 3.7 s and 24 to 45 over the start on one
+rocket: the same time, lower, on three times the rockets.
+
+The decision's time, the planner in the thread: 4.1 s on the PC and 4.3 s on the Mac (`node scripts/mac-run.mjs -- node
+bot/scripts/cave-exit-probe.ts --cruise 133`), of which 1.6 s are two searches that run out their 800 ms on the fixture's opening
+the Realm does not have, 0.2 s the way's search and the rest the six simulations with the tracker's searches inside them.
+
+### On the server (bds-fly2, the replica, `FLY_CAVE_ONLY=tripOut FLY_CAVE_STYLE=1`, 5 runs each, 2026-11-09)
+
+| | before this track | this track (`flyCaveExit` off, the default) | this track, `FLY_CAVE_EXIT=1` |
+|---|---|---|---|
+| arrived | 5 of 5 | 5 of 5 | 5 of 5 |
+| seconds to the goal | 71.9 to 74.9 (median 72.6) | 71.6 to 73.0 (median 72.3) | 73.3 to 76.5 (median 74.5) |
+| flights a run | 1 (a vertical takeoff after a walk of 32 blocks to open sky) | 1 (the same) | 1 (the same) |
+| flights ended `roof` | 0 | 0 | 0 |
+| damage | 0 | 0 | 0 |
+| rockets a run | 6 to 8 | 6 to 8 | 6 to 8 |
+| rockets that fired nothing | 0 | 0 | 0 |
+| the route takeoff at cave_start | no plan to three cells of one opening (2.4 s), refused | no plan to two cells of that opening, the hall's exit planned and refused by its proof ("roof: down at ..."), 1.7 s | the same, then the way out: 56 ticks, 4 rockets, 5 927 nodes, 80 ms; its proof clear at the nominal burn, one hit at a burn of 9 ticks: refused; 3.9 s |
+
+The replica never had the Realm's `roof` ends (see above), so its trip is the same before and after: the walk out and a vertical
+takeoff. What it shows of this track is the decision: the hall's exit, which the Realm flew into the roof, is planned and refused
+before anything flies, in one line; and the way out is refused there by its proof (the worker's plan on the replica is one tick
+shorter than the offline one and the simulation at a burn of 9 ticks touched something once). Two things had to be right before
+the proof said even that: the first series refused the way out as "enters terrain not loaded" because the simulation saw only the
+live model (the flight's obstacle check also sees the cache); and the fly-over's stops lie on the line home, 96 apart, so `tripOut`
+looks at the ground 64 beside it first.
+
+### The regressions (the final code; bds-fly3 for fly-route-land and fly-route, bds-fly2 for the rest)
+
+| suite | result |
+|---|---|
+| fly-route-land (the room's route takeoff, the stack's ledge, the holes' vertical) | 7 of 7 green |
+| fly-route | 3 of 3 green |
+| fly-course, FLY_AREA 71520,69472 | 8 of 8, twice (the base commit on the same area the same day: 8 of 8 and 7 of 8, the slalom) |
+| fly-cave trip C (`FLY_CAVE_STYLE=1`, one run, three times over the day) | arrived each time: 81.8, 98.0 and 94.1 s; damage 0, 0 and 3.8 |
+| fly-land | 4 of 5: `!fly stop in the air` waits 60 s for a "landed (stopped)" reply that a trip superseded by `!fly stop` no longer says ("a superseded trip's line not said"); the flight itself landed `stopped` 15.6 s after its start. The base commit fails the same case the same way |
+
+Each suite was run with nothing else on the machine.
+
+### What `!test goto home from cave_start 3` on the Realm should show
+
+- At the start of every run `fly: route takeoff: N exits under open sky; <cell> (36 cells away): 21 ticks, 1 rockets, ...; the climb
+  after it: roof: down at ...: refused -> no route takeoff (1 simulated, ...)`, then the takeoff-site search or the walk out, and a
+  takeoff outside whose line is a jump's or vertical's `clear`, or a route takeoff's `the climb after it: clear at burns of 15, 9,
+  21, 12, 18 ticks (through the exit at tick ..., open sky at tick ..., the heading from ... at the exit to the target's by tick
+  ...)`.
+- No `flight: nothing clears the solid ahead in the climb` within a second of `route takeoff: out through the exit`, and no
+  `flight: ended (roof)` 11 to 18 blocks under the start. One flight a run that leaves the ground and arrives.
+- `route: the corridor ahead is blocked` still follows `route: start` once (the same plan again: see the open points).
+- `flight: the first rocket at tick N, G gliding ticks in: the server's glide confirmed at tick C` once a flight.
+- A rocket "fired nothing" line may now be followed by `that rocket did fire, the write-off was wrong`: that is the evidence the
+  matching still loses rockets, and how late their entities come.
+- The time: 136 s a run before. The roof flight, its landing and the walk out of the hollow were 44 to 73 s between the first
+  takeoff and the one that flew home; a walk from cave_start to open sky and a takeoff there is about 40 steps. Expect 95 to 110 s.
+- With `flyCaveExit` on as well: `the way out at <cell> (about 89 cells under the roof, 5 goals): about 57 ticks, 4 rockets; the
+  climb after it: clear at burns of ...`, then `flight: route takeoff: out through the exit after 54 to 76 ticks`, `open sky over
+  the body`, `the climb's heading reached the target's`; or its proof's refusal and the walk out as above. Expect 75 to 85 s where
+  it is proven.
+
+### Open points (Track F9a)
+
+- **The way out has never flown on a server.** Offline it is proven and flies at every burn; on the replica its proof passed at
+  the nominal burn and refused it at 9 ticks (one hit in the simulation, on a plan one tick shorter than the offline one), so the
+  bot walked out. `flyCaveExit` ships off for that reason.
+- **The proof is as good as its simulation.** Five burns, every rocket of a simulation the same; no latency; the model's world.
+  A takeoff can fail where its proof passed, and then ends as before.
+- **Three to four rockets where the owner uses one.** The way's waypoints follow the flood's way along the floor, down to the
+  passage's low point and up again; the owner flies one rising line. Boxes as high as the air over the cell did not change the plan
+  (the same 48 ticks and 4 rockets, the search 650 ms against 200).
+- **The recorded paths are not used.** The planner would take them as a preferred way (the recording's cells in place of the
+  flood's in `wayGoals`) and a heading profile for the climb in place of `climbYaw`'s turn; the proof stays as it is.
+- **The mid-flight rockets that "fire nothing"** are a hypothesis until the Realm's log shows the new lines.
+- **The fixture is not the Realm.** The fixture has an opening to the sky near cave_start that the Realm's flood did not find; the
+  replica, built from it, behaves like the fixture.
+- **The decision takes seconds** (4 s on the fixture): two of them are searches that run out their budget on cells of one opening.
+  An exit beside one that had no plan is still tried, as Track F3 had it (a hole's second cell may plan where its first does not).
+- **Underground to underground** (cave_start to cave_end without going out) is the corridor's business and untouched: its
+  windows are flown by the corridor's own driver, which shares none of this track's changes.
+- **The second plan at the start is explained, not removed: `route/tracker.ts` is as it was.** Two corrections were built (the
+  comparison made `burnHazard >= 0 && burnHazard >= i`, first for every driver, then only for the route takeoff behind an option)
+  and both were taken out again because of fly-course's rings (bds-fly2, FLY_AREA 71520,69472, two runs a course, a course passes
+  when one of them completes). With either correction in the tracker no rings run completed in six whole-course runs (0 of 12),
+  the last four of them alone on the machine (the rings flown alone, three and four runs a batch, did complete one run of each
+  batch); with the tracker file as before this track and everything else of this track in place, the course was 8 of 8 four
+  times, and the base commit 8 of 8 and 7 of 8 (the slalom). The second correction changes nothing the course's driver executes,
+  as far as the code can be read, so the cause is not understood; the file was left alone rather than argued with.
 
 ## Open points
 

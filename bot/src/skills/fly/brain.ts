@@ -52,6 +52,7 @@ import {
   spiralFit,
   SPIRAL_RADII,
   STALL_SPEED,
+  takeoffSky,
   yawDir,
   turnTowards,
   yawDiff,
@@ -173,7 +174,26 @@ export interface BrainOptions {
    * Track F3: the route takeoff (route/takeoff.ts): the tracker flies the body from standing to the exit
    * waypoint(s) with `route`'s planner, then the climb goes on along `takeoffYaw`.
    */
-  routeTakeoff?: { goals: RouteGoal[]; margin: number; weight?: number };
+  routeTakeoff?: {
+    goals: RouteGoal[];
+    margin: number;
+    weight?: number;
+    /**
+     * Track F9a (docs/flight.md "Cave exit"): after the exit the climb keeps the line the body leaves the exit on until it
+     * has open sky over it, then turns to the target only as the path ahead stays clear (`climbYaw`); set for a takeoff that
+     * was proven so (glide.ts routeTakeoff). Without it the climb turns to `takeoffYaw` and, TAKEOFF_HOLD over the start, to
+     * the target, as before.
+     */
+    curve?: boolean;
+    /**
+     * Track F9a: a way out under a roof through several goals: the search in pieces of this many goals; and should the
+     * tracker lose its plan on the way (no plan, out of time), the body lands on the nearest ground instead of going on
+     * as a climb nobody planned (the climb was proven from the exit, not from here).
+     */
+    pieces?: number;
+    underRoof?: boolean;
+    riskCost?: number;
+  };
 }
 
 export interface FlightStats {
@@ -218,6 +238,11 @@ export interface FlightStats {
   routeMaxError: number;
   routeTakeoffTicks?: number;
   routeTakeoffRockets?: number;
+  /** Track F9a: how the route takeoff handed over to the climb (`out`: through its last goal), the heading the body left the exit on, the tick it had open sky over it and the tick the climb's heading reached the target's. */
+  routeTakeoffEnd?: 'out' | 'no plan' | 'out of time';
+  routeExitYaw?: number;
+  routeSkyAt?: number;
+  routeHeadingAt?: number;
 }
 
 /** Track F3: the route tracker gets this many ticks for a landing before the brain goes around (a hover that never comes down). */
@@ -226,6 +251,8 @@ export const ROUTE_MAX_TICKS = 400;
 export const ROUTE_TAKEOFF_MAX_TICKS = 200;
 /** Track F3: the route takeoff's first rocket goes on this gliding tick of the loop's at the earliest (the server glides one input later and ignores a rocket on its first gliding input). */
 export const ROUTE_FIRE_GLIDE_TICKS = 3;
+/** Track F9a: after a proven route takeoff the climb's heading turns at most this much a tick towards the target, while the path ahead stays clear (the owner's recorded exits curve about 60 degrees in 35 blocks, 2 to 3 a tick; the climb's own turn is 15). */
+export const CURVE_STEP = 4;
 /** Track F3: after a route takeoff the climb's path-ahead checks wait until the body is this far over the start (a low body a block or two up "hits" the ground within 20 ticks at pitch 0), at most ROUTE_OUT_TICKS. */
 export const ROUTE_OUT_ABOVE = 6;
 export const ROUTE_OUT_TICKS = 60;
@@ -366,10 +393,18 @@ export class FlightBrain {
   private routeOutAt: number | undefined;
   /** Track F4a: the side of a route landing's S-turns (+1: swung left of the corridor line's bearing in). */
   private routeSide: 1 | -1 = 1;
+  /** Track F9a: the climb after a proven route takeoff still curves from the exit's line to the target's heading; the heading held now and the tick it was last turned. */
+  private curving = false;
+  private heldYaw: number | undefined;
+  private curveAt = -1;
 
   /** Track F3: just out of a route takeoff, low and close to the start: the ground under the feet is no obstacle yet. */
   private routeJustOut(b: FlightBody): boolean {
     return this.routeOutAt !== undefined && this.stats.ticks - this.routeOutAt <= ROUTE_OUT_TICKS && this.startY !== undefined && b.pos.y < this.startY + ROUTE_OUT_ABOVE;
+  }
+  /** The forced landing is being flown (`landNow` took it; from the takeoff phase on the ground it ends the flight instead). */
+  private landing(): boolean {
+    return this.phase === 'land';
   }
   private jumped = false;
   private requested = false;
@@ -450,6 +485,7 @@ export class FlightBrain {
     };
     this.planner = new ApproachPlanner(opts.seed ?? 12345, opts.obstacle);
     this.brakePlanner = new BrakePlanner(((opts.seed ?? 12345) * 7 + 3) >>> 0, opts.obstacle);
+    this.curving = opts.routeTakeoff?.curve === true && opts.route !== undefined && this.o.takeoffYaw !== undefined && !opts.ledge && !opts.vertical;
   }
 
   /** A new approach (a go-around, a retarget, a forced landing, a bounce): both landing planners start over. */
@@ -648,6 +684,42 @@ export class FlightBrain {
 
   /** The heading the takeoff and the early climb hold: the sky check's heading until TAKEOFF_HOLD above the start, else the target's. */
   private climbYaw(b: FlightBody): number {
+    // Track F9a (docs/flight.md "Cave exit"): a takeoff from under a roof is two phases (the owner: "first getting out of the
+    // cave, then flying home"). Out of a proven route takeoff the climb keeps the line the body leaves the exit on, whatever
+    // the target's bearing, until the body has open sky over it (the sky check's 3 x 3 up to the cruise height); only then
+    // does the heading turn to the target, and only as fast as the path ahead stays clear: CURVE_STEP a tick when the glide
+    // of the next LOOKAHEAD_TICKS on the new heading (on the pitch the climb flies) meets no solid, else it stays. The exit
+    // of a cave is not where the cave ends for a climbing body: the Realm's climb turned to the goal's heading at the exit
+    // and met the hill 14 ticks on; the owner's recorded exits hold the exit's line and curve about 60 degrees over the next
+    // 35 blocks while the climb steepens. The whole of it is simulated before the takeoff is offered (glide.ts routeTakeoff).
+    if (this.curving && this.o.takeoffYaw !== undefined) {
+      if (this.phase !== 'climb') return this.o.takeoffYaw;
+      if (this.heldYaw === undefined) {
+        this.heldYaw = Math.hypot(b.vel.x, b.vel.z) > 0.3 ? (Math.atan2(-b.vel.x, b.vel.z) * 180) / Math.PI : this.o.takeoffYaw;
+        this.stats.routeExitYaw = this.heldYaw;
+      }
+      if (this.stats.ticks !== this.curveAt) {
+        this.curveAt = this.stats.ticks;
+        const obstacle = this.o.obstacle;
+        const after = this.stats.ticks - (this.routeOutAt ?? this.stats.ticks);
+        if (this.stats.routeSkyAt === undefined && (!obstacle || takeoffSky(b.pos, this.target, this.o.cruiseY, 0, (x, y, z) => obstacle(x, y, z)).ok)) {
+          this.stats.routeSkyAt = this.stats.ticks;
+          this.o.note?.(`route takeoff: open sky over the body at ${b.pos.x.toFixed(1)} ${b.pos.y.toFixed(1)} ${b.pos.z.toFixed(1)}, ${(b.pos.y - (this.startY ?? b.pos.y)).toFixed(0)} over the start, ${after} ticks after the exit: out; the heading turns from ${Math.round(this.heldYaw)} to the target's as the path ahead clears`);
+        }
+        if (this.stats.routeSkyAt !== undefined) {
+          const want = yawTo(b.pos, this.target);
+          if (Math.abs(yawDiff(this.heldYaw, want)) < 1) {
+            this.curving = false;
+            this.stats.routeHeadingAt = this.stats.ticks;
+            this.o.note?.(`route takeoff: the climb's heading reached the target's (${Math.round(want)}) at ${b.pos.x.toFixed(1)} ${b.pos.y.toFixed(1)} ${b.pos.z.toFixed(1)}, ${(b.pos.y - (this.startY ?? b.pos.y)).toFixed(0)} over the start, ${after} ticks after the exit (it left the exit on ${Math.round(this.stats.routeExitYaw ?? want)}): the flight goes on as any other`);
+            return want;
+          }
+          const next = turnTowards(this.heldYaw, want, CURVE_STEP);
+          if (b.gliding && (!obstacle || pathAhead(b, next, b.boostTicks > 0 ? this.burnPitch : 0, LOOKAHEAD_TICKS, obstacle) === undefined)) this.heldYaw = next;
+        }
+      }
+      return this.heldYaw;
+    }
     if (this.o.takeoffYaw !== undefined && this.startY !== undefined && b.pos.y < this.startY + (this.o.vertical?.top ?? 0) + TAKEOFF_HOLD) return this.o.takeoffYaw;
     return yawTo(b.pos, this.target);
   }
@@ -1692,7 +1764,10 @@ export class FlightBrain {
     const rt = this.o.routeTakeoff!;
     const o = this.o.route!;
     if (!this.tracker) {
-      this.tracker = new RouteTracker({ grid: o.grid, margin: rt.margin, goals: rt.goals, plan: o.plan, maxNodes: o.maxNodes ?? ROUTE_PLAN_NODES, maxMs: o.maxMs ?? ROUTE_TRACK_MS, yaw: this.climbYaw(b), ...(rt.weight !== undefined ? { weight: rt.weight } : {}), note: (m) => this.o.note?.(m) });
+      // (Track F9a: a way out through several goals is searched in pieces. The cave style's rules were measured on the owner's
+      // cave and left out: with them 2 of 7 burns came out, the rest bailed out a block off the reference in a passage 14 wide;
+      // the plain tracker came out on all 7 with no hit)
+      this.tracker = new RouteTracker({ grid: o.grid, margin: rt.margin, goals: rt.goals, plan: o.plan, maxNodes: o.maxNodes ?? ROUTE_PLAN_NODES, maxMs: o.maxMs ?? ROUTE_TRACK_MS, yaw: this.climbYaw(b), ...(rt.weight !== undefined ? { weight: rt.weight } : {}), ...(rt.pieces !== undefined ? { pieces: rt.pieces } : {}), ...(rt.riskCost !== undefined ? { riskCost: rt.riskCost } : {}), note: (m) => this.o.note?.(m) });
       this.stats.routeTakeoffTicks = 0;
       this.stats.routeTakeoffRockets = 0;
     }
@@ -1700,7 +1775,16 @@ export class FlightBrain {
     this.stats.routeTakeoffTicks = (this.stats.routeTakeoffTicks ?? 0) + 1;
     const ticks = this.tracker.stats.ticks;
     if (out.done || out.status === 'failed' || ticks > ROUTE_TAKEOFF_MAX_TICKS) {
-      this.o.note?.(`route takeoff: ${out.done ? 'out through the exit' : out.status === 'failed' ? 'no plan' : 'out of time'} after ${ticks} ticks, ${this.stats.routeTakeoffRockets ?? 0} rocket${this.stats.routeTakeoffRockets === 1 ? '' : 's'} (${this.tracker.stats.plans} plans, ${this.tracker.stats.partial} partial, max error ${this.tracker.stats.maxError.toFixed(2)}); the climb turns to heading ${Math.round(this.climbYaw(b))}`);
+      this.stats.routeTakeoffEnd = out.done ? 'out' : out.status === 'failed' ? 'no plan' : 'out of time';
+      if (!out.done && rt.underRoof) {
+        // Track F9a: a way out under a roof that lost its plan never goes on as a blind climb: down on the nearest ground
+        this.o.note?.(`route takeoff: ${this.stats.routeTakeoffEnd} after ${ticks} ticks under the roof (${this.tracker.stats.plans} plans, ${this.tracker.stats.partial} partial): no climb without a plan here, landing`);
+        this.tracker = undefined;
+        this.curving = false;
+        this.landNow('roof', b);
+        return this.landing() ? this.approach(i, ctl, this.aim) : { ...ctl, glide: false };
+      }
+      this.o.note?.(`route takeoff: ${out.done ? 'out through the exit' : out.status === 'failed' ? 'no plan' : 'out of time'} after ${ticks} ticks, ${this.stats.routeTakeoffRockets ?? 0} rocket${this.stats.routeTakeoffRockets === 1 ? '' : 's'} (${this.tracker.stats.plans} plans, ${this.tracker.stats.partial} partial, max error ${this.tracker.stats.maxError.toFixed(2)}); the climb ${this.curving ? `keeps the exit's line until the sky is open, then turns to heading ${Math.round(yawTo(b.pos, this.target))} as the path ahead clears` : `turns to heading ${Math.round(this.climbYaw(b))}`}`);
       this.tracker = undefined;
       this.phase = 'climb';
       this.routeOutAt = this.stats.ticks;

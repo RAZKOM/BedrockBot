@@ -10,11 +10,11 @@
 // added to the manager here.
 import type { Vec3 } from '../connection/types.ts';
 import { FlightController, skyQuery } from '../skills/fly/controller.ts';
-import { glideKitReady, jumpTakeoff, ledgeTakeoff, planGlideDown, smallPlatform, verticalTakeoff, type Ledge, type SimDeps } from '../skills/fly/glide.ts'; // Track BH
+import { glideKitReady, jumpTakeoff, ledgeTakeoff, planGlideDown, routeTakeoff, routeTakeoffOptions, smallPlatform, verticalTakeoff, type Ledge, type SimDeps } from '../skills/fly/glide.ts'; // Track BH, F9a
 import { elytraWornLimit, flightKitMemoryOf, kitLine, kitReady, readKit, ROCKET, SupplyWatch } from '../skills/fly/kit.ts';
 import { restockFromBoxes, supplyOf } from '../skills/supply/supply.ts';
 import { FlightKitOps } from '../skills/fly/kitops.ts';
-import { APPROACH_HEIGHT, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, type CellQuery, type LandingTarget, type SkyCheck } from '../skills/fly/plan.ts';
+import { APPROACH_HEIGHT, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, yawTo, type CellQuery, type LandingTarget, type SkyCheck } from '../skills/fly/plan.ts';
 import { pathBlocks, probeOpenSky, probePath } from '../skills/home/reach.ts'; // Track AU2: the walk from a landing cell to the goal
 import { probeNavOf } from '../skills/combat/pathReach.ts';
 import { findLanding, isHazardName, isLiquidName, stillLandable, WET_ABOVE, type BlockLookup, type LandingPlan } from '../skills/fly/landing.ts'; // Track BF
@@ -483,11 +483,33 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * the start flooded for the nearest cells under open sky, a plan from standing to one of them searched in the
    * worker; the last step of the chain before the walk-out legs (out of a hole, a low room, a stack's inner
    * platform when no ledge is clear). Undefined: no exit, or no plan (the line says).
+   * Track F9a (docs/flight.md "Cave exit"): a plan is taken only with its proof: the whole takeoff simulated as the jump
+   * and the vertical takeoff are (glide.ts routeTakeoff: the tracker out to the exit, then the climb that keeps the exit's
+   * line and turns to the goal as the path clears, at the nominal burn and its extremes), the proven one with the least time to the goal; with `flyCave`
+   * and `flyCaveExit` on and no exit's climb clearing, the ways out under the roof to the real sky (route/takeoff.ts waysOut).
    */
   const routeTakeoffFor = async (from: Vec3, target: LandingTarget, rockets: number, quiet = false): Promise<{ routeTakeoff: TakeoffRoute; takeoffYaw: number } | undefined> => {
     if (!routeOn()) return undefined;
-    const r = await planTakeoffRoute(routeGrid, from, target, { rockets: Math.min(4, Math.max(1, rockets)) }, routePlanner);
-    if (!quiet) log.info(`fly: route takeoff: ${r.exits} exit${r.exits === 1 ? '' : 's'} under open sky; ${r.tried.length ? r.tried.join('; ') : 'none tried'}`);
+    const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
+    // the proof's world is the flight's own view: the live model, and the world cache's solids where the live model has nothing
+    // (the flight's obstacle check sees those too: controller.ts cachedSolid). With the live model alone the simulated climb
+    // flew into a hill only the cache knew, 100 blocks past the cave's mouth, and the proof refused it as terrain not loaded
+    const base = simDeps(true);
+    const raw: { solidAt(x: number, y: number, z: number): boolean | undefined } | undefined = loop.world;
+    const deps = raw ? { ...base, world: { ...base.world, solidAt: (x: number, y: number, z: number) => raw.solidAt(x, y, z) ?? world.cache?.blockAt(x, y, z)?.solid === true } } : base;
+    const goalYaw = yawTo(from, target);
+    let sims = 0;
+    const t0 = Date.now();
+    const prove = async (route: TakeoffRoute) => {
+      const r = await routeTakeoff(deps, from, target, { cruiseY: cz.y, margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds') }, rockets, { route: { grid: routeGrid, plan: routePlanner }, takeoff: routeTakeoffOptions(route, true) }, { planTicks: route.ticks });
+      sims += r.sims;
+      return r;
+    };
+    // (the ways out under the roof: powered flight underground, so only with flyCave on, and with its own switch, default off:
+    // it has flown on the fixture offline, never on a server)
+    const far = String(d.settings.get('flyCave')) === 'on' && d.settings.get('flyCaveExit') ? { top: Math.min(319, Math.ceil(cz.y)) } : undefined;
+    const r = await planTakeoffRoute(routeGrid, from, target, { rockets: Math.min(4, Math.max(1, rockets)), prove, ...(far ? { far } : {}) }, routePlanner);
+    if (!quiet) log.info(`fly: route takeoff: ${r.exits} exit${r.exits === 1 ? '' : 's'} under open sky${r.ways !== undefined ? `, ${r.ways} way${r.ways === 1 ? '' : 's'} out under the roof` : ''}; ${r.tried.length ? r.tried.join('; ') : 'none tried'}${r.route ? ` -> out to ${r.route.exit.x} ${r.route.exit.y} ${r.route.exit.z}, then the climb curving to heading ${Math.round(goalYaw)}` : ' -> no route takeoff'} (${sims} simulated, ${Date.now() - t0} ms)`);
     return r.route ? { routeTakeoff: r.route, takeoffYaw: r.route.yaw } : undefined;
   };
   /**

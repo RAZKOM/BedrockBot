@@ -22,6 +22,13 @@ import { isRocket } from './kit.ts';
 export const ROCKET_COOLDOWN = 4;
 /** A rocket entity appearing within this many blocks of the body right after a use is ours. */
 export const ROCKET_NEAR = 6;
+/**
+ * Track F9a: a use written off (no entity within ROCKET_ADD_WITHIN) is remembered this many ticks: a rocket entity that
+ * appears by then where the rocket was used is that rocket after all, and is said so in the log (the Realm's log has
+ * rockets that "fired nothing" in the middle of a climb, at 1.5 a tick: the entity appears where the SERVER's body used
+ * the rocket, and by the time its `add_entity` is read the local body is the round trip farther on).
+ */
+export const ROCKET_LATE = 20;
 /** The rocket's `add_entity` comes within this many ticks of the use (Track F0: 1 input in 163 of 242 uses, 2 in 76, 0 in 3); none by then: the use did nothing. */
 export const ROCKET_ADD_WITHIN = 5;
 
@@ -67,8 +74,12 @@ export class RocketHand {
   fired = 0;
   /** Uses that fired nothing (no rocket entity within ROCKET_ADD_WITHIN: a rocket before the glide's first input). */
   wasted = 0;
-  /** The ticks of the uses still waiting for their rocket entity (oldest first). */
-  private pending: number[] = [];
+  /** Track F9a: rocket entities that came for a use already written off (the rocket did fire: the write-off was wrong). */
+  late = 0;
+  /** The uses still waiting for their rocket entity (oldest first): the tick and where the body was. */
+  private pending: { tick: number; at: Vec3 }[] = [];
+  /** Track F9a: the uses written off, for ROCKET_LATE ticks. */
+  private gone: { tick: number; at: Vec3 }[] = [];
   /** The own rockets alive (their unique ids). */
   private readonly live = new Set<bigint | number>();
 
@@ -95,7 +106,9 @@ export class RocketHand {
     this.lastFire = -1000;
     this.fired = 0;
     this.wasted = 0;
+    this.late = 0;
     this.pending = [];
+    this.gone = [];
     this.live.clear();
   }
 
@@ -110,8 +123,11 @@ export class RocketHand {
    * taken back from the loop (the inputs since the use re-simulated without it) and the caller told.
    */
   tick(now: number): void {
-    while (this.pending.length && now - this.pending[0]! > ROCKET_ADD_WITHIN) {
-      const at = this.pending.shift()!;
+    while (this.gone.length && now - this.gone[0]!.tick > ROCKET_LATE) this.gone.shift();
+    while (this.pending.length && now - this.pending[0]!.tick > ROCKET_ADD_WITHIN) {
+      const use = this.pending.shift()!;
+      const at = use.tick;
+      this.gone.push(use);
       this.wasted++;
       this.log.info(`${this.scope}: the rocket used at tick ${at} fired nothing (no rocket entity in ${ROCKET_ADD_WITHIN} ticks): its boost taken back`);
       if (this.live.size === 0 && this.pending.length === 0) {
@@ -129,7 +145,7 @@ export class RocketHand {
     this.d.queue('inventory_transaction', useItemTransaction({ hotbarSlot: slot, held, eye: { x: feet.x, y: feet.y + PHYSICS.eyeHeight, z: feet.z } }));
     this.d.loop.boost();
     this.lastFire = tick;
-    this.pending.push(tick);
+    this.pending.push({ tick, at: { ...feet } });
     this.fired++;
     this.log.debug(`${this.scope}: rocket from slot ${slot} (${inventory.slots[slot]?.count ?? '?'} there)`);
   }
@@ -137,9 +153,26 @@ export class RocketHand {
   /** Watch the rocket entities (the add after a use, the remove that ends the boost) until the returned function is called. `tick` gives the flight's tick now. */
   attach(tick: () => number): () => void {
     const offAdd = this.d.entities.onAdd((e) => {
-      if (e.type !== 'minecraft:fireworks_rocket' || !this.pending.length || tick() - this.pending[0]! > ROCKET_ADD_WITHIN) return;
+      if (e.type !== 'minecraft:fireworks_rocket') return;
       const p = this.d.loop.state.pos;
-      if (Math.hypot(e.pos.x - p.x, e.pos.y - p.y, e.pos.z - p.z) > ROCKET_NEAR) return;
+      const from = (q: Vec3): number => Math.hypot(e.pos.x - q.x, e.pos.y - q.y, e.pos.z - q.z);
+      const use = this.pending[0];
+      if (!use || tick() - use.tick > ROCKET_ADD_WITHIN) {
+        // Track F9a: no use waits for it; one written off a moment ago, used near where it appears: that rocket did fire
+        const late = this.gone.findIndex((g) => from(g.at) <= ROCKET_NEAR);
+        if (late >= 0) {
+          const g = this.gone.splice(late, 1)[0]!;
+          this.late++;
+          this.log.info(`${this.scope}: a rocket entity ${tick() - g.tick} ticks after the use at tick ${g.tick} that was written off, ${from(g.at).toFixed(1)} from where it was used (${from(p).toFixed(1)} from the body now): that rocket did fire, the write-off was wrong`);
+        }
+        return;
+      }
+      // (Track F9a: ours when it appears near the body now, or near where the body used the rocket: the server spawns it at its
+      // own body, and at 1.5 a tick the local body is a round trip of ticks past that when the packet is read)
+      if (from(p) > ROCKET_NEAR && from(use.at) > ROCKET_NEAR) {
+        this.log.info(`${this.scope}: a rocket entity ${from(p).toFixed(1)} from the body and ${from(use.at).toFixed(1)} from where the rocket was used at tick ${use.tick} (${tick() - use.tick} ticks ago): not taken as ours`);
+        return;
+      }
       this.pending.shift();
       this.live.add(e.uniqueId);
     });
