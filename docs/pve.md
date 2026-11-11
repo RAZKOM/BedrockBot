@@ -866,7 +866,28 @@ keepInventory on, mobGriefing off, ground flat (16/16 level), name tag m1t...`. 
 keepInventory is off: a death would drop the kit; not running`), a set with a creeper while mobGriefing is on unless the command ends in `force`, and a ring 7 out
 that is mostly not standable or a slope (`test mobs: the ring 7 blocks round the bot is a slope (its mobs would go downhill):
 a slope (5/16 level, 9 on other levels); find flat open ground`). Ground words: `flat` (16 of 16 points level), `mostly flat`
-(12 or more), `a slope` (most points standable within 8 levels but fewer than 12 level), `rough`, `unknown`.
+(8 or more), `a slope` (most points standable within 8 levels but fewer than 8 level), `rough`, `unknown`.
+
+On the Realm (2026-11-11, this track's code, the live kit, at night with wild phantoms, skeletons, zombies and a creeper
+joining in): the rules read `keepInventory on, mobGriefing on`, so every set with a creeper (`creeper4`, `mixed4`, `mixed8`)
+was left out; two places were refused (`rough`, `a slope`) and a flat one found from the map was taken. `mobReflex` off and on,
+the same sets, deaths / mean damage a run:
+
+| set (runs) | reflex off | reflex on | reflex strikes |
+|---|---|---|---|
+| zombie4 (3) | 0 / 0.5 | 0 / 0.4 | 28 |
+| skeleton4 (3) | 0 / 0.9 | 0 / 1.5 | 20 |
+| spider4 (3) | 0 / 0 | 0 / 0 | 20 |
+| witch (3) | 0 / 0, dead in 3 s | 0 / 0, dead in 3 s | 6 |
+| phantom4 (2) | 0 / 0.6 | 0 / 0 | 0 |
+| pillager (2) | 0 / 0 | 0 / 0 | 4 |
+| **all 16** | **0**, 5.3 in all | **0**, 5.6 in all | 78 |
+
+The reflex struck zombies, skeletons, spiders, phantoms, the witch, pillagers, zombie villagers and a wild creeper (twice), and
+nothing else. "Cleared" is not comparable at night (in one run guard went after a wild skeleton for 36 s while the reflex
+killed the set's zombies in place). What the Realm could not show is the reflex's gain, which is in the mixed crowds with a
+creeper in them. The driver must put the bot back on the flat cell before every set: a set's fight and the drops take it a few
+blocks off, and the next set is refused as a slope.
 
 ### The elytra flee (`fleeFly`, off) measured
 
