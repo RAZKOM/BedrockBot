@@ -16,7 +16,7 @@ import type { BlockQuery, BodyState, CorrectionEvent, InputLoopState, MoveComman
 import { WINDOW_OFFHAND } from '../../src/world/inventory.ts';
 import { wireItemOf } from '../../src/skills/place/place.ts';
 import { useItemTransaction } from '../../src/skills/survival/eat.ts';
-import { FEET_Y, hdist, sleep, type FlyBot } from './fly-truth.ts';
+import { CRAFTED_ROCKETS, craftRockets, FEET_Y, hdist, sleep, type FlyBot } from './fly-truth.ts';
 import type { HurtRecord } from './pve-truth.ts';
 
 /** One tick of a script. */
@@ -163,8 +163,13 @@ export async function runScript(bot: FlyBot, name: string, o: RunOptions): Promi
   await bot.truth.setHealth(bot.name, 20);
   await bot.truth.equip(bot.name, 'Chest', 'elytra');
   if ((o.rockets ?? 64) > 0) {
-    await bot.truth.setslot(bot.name, 0, 'firework_rocket', o.rockets ?? 64);
-    await waitUntil(() => inv.slots[0]?.name === 'firework_rocket' && inv.slots[0]?.count === (o.rockets ?? 64), 5000);
+    if (CRAFTED_ROCKETS) {
+      // (Track F9e round 2: a player's rockets, crafted; kept from run to run while a dozen are left in the hotbar)
+      if (inv.slots.slice(0, 9).reduce((n, x) => n + (x?.name === 'firework_rocket' ? x.count : 0), 0) < 12) await craftRockets(bot, 63);
+    } else {
+      await bot.truth.setslot(bot.name, 0, 'firework_rocket', o.rockets ?? 64);
+      await waitUntil(() => inv.slots[0]?.name === 'firework_rocket' && inv.slots[0]?.count === (o.rockets ?? 64), 5000);
+    }
   }
   await waitUntil(() => inv.window(120)?.slots[1]?.name === 'elytra', 5000);
   if (inv.selected !== 0) hotbar.select(0);

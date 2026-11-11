@@ -56,6 +56,8 @@ export interface ItemStack {
   blockRuntimeId?: number;
   /** Track S: durability used up (the item NBT's `Damage`), when the item has one. */
   damage?: number;
+  /** Track F9e round 2: a firework rocket's flight duration (the item NBT's `Fireworks.Flight`: 1 to 3 for a crafted one), when it has one: its burn is ten ticks longer a step (skills/fly/burn.ts). */
+  flight?: number;
   /** Track BI: enchantments (the item NBT's `ench`: Bedrock ids, protection 0, feather falling 2), when it has any. */
   enchants?: { id: number; lvl: number }[];
 }

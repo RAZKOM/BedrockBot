@@ -92,3 +92,40 @@ block a tick) and the drawing one slope from the first height to the last, press
 - On the replica the drawn way in is refused (its shell's wall stands beside the lead-in) and no way is found past the
   water between cave_3 and cave_8 (the server's water lies where the fixture has air): what flew there is the drawn way
   out and the hops on either side of that water. The long line and the way in are offline results on the fixture.
+
+## Addendum: what the Realm showed (round 2, 2026-11-11)
+
+Round 1 flew on the Realm. The drawn way in flew 3 of 3. The way out of the deep cave and the hop from the cave's first
+waypoint were not found, and five hop flights lost their line and cost health. Details and numbers:
+[../flight.md](../flight.md) "What the Realm showed (Track F9e, round 2)".
+
+What was found. The lost flights were not flown into cells the cache had wrong: the body met a corner the proof knew,
+because it was not where the model had it. Every burn this project had measured (9 to 21 ticks) was of the rocket the
+script API gives the test kit, which has no flight duration; a crafted rocket burns ten ticks longer (21 to 30 measured
+on BDS, n 55). The model's burn ended at 22 ticks and the server's body flew on. With crafted rockets and the old model
+the replica shows the Realm's failure in 5 runs of 5; with the kit's burn 8 flights of 10 arrive. The deep cave's way out
+was not found because the flood stopped at 128 blocks; the hop's flood ran out of cells across the forest floor round
+the cave's mouth, which the fixture's box had cut away. And the probes had not run as the bot runs.
+
+13. **The burn is the burn of the rockets at hand** (`skills/fly/burn.ts`). The item's flight duration is read; the
+    model's boost runs to the rocket's removal, at most that rocket's longest burn; a line carries its burn
+    (`Guide.burn`), and its follower, its roll and its proof fly that range (19 to 31 for a crafted rocket). The plain
+    rocket's numbers are what they were. The flight in the open and the route tracker's plans still think in 9 to 21.
+14. **A line is drawn, proven and flown only through cells of the live model.** An unknown cell is a solid for the
+    proof's body and for the follower. The way is looked for on what was ever seen (the live model, the cache behind
+    it); where it leaves the live model the flight is a piece of it: a hop to a floor under the way, 12 cells short of
+    the first cell the live model does not have, proven like any hop; the trip asks again where it stands. This and
+    not a confirmation running ahead of the body: a piece ends in a touchdown that was proven and needs no new way of
+    flying; a set-down where a confirmation failed has no floor over water.
+15. **The decisions are one module for the bot and the probes** (`learn/under.ts`), and the probe's world is the bot's
+    two layers (`scripts/cave-under-probe.ts`): the fixture as the cache, the chunks within nine of the body as the
+    live model. A number from a probe that runs otherwise is not an acceptance number.
+16. **For the search to a cell a roof is a thick one** (8 solid cells over the cell): a tree's canopy is no cave.
+17. **The way out is looked for 448 blocks far**, on the live grid; where the live model holds none, the cache's way is
+    flown in pieces. A decision under a roof waits up to 3 s for the live model round a body that has just arrived.
+
+Consequences. As the bot, on the wide fixture, with crafted rockets: a way out from 18 of the 19 roofed places (the deep
+ones in one or two pieces); cave_start to cave_end in 3 pieces and back in 4 (22 to 26 s of flight, 4 to 5 s of
+deciding), where round 1 had one line of 548 blocks on the whole fixture; a crafted rocket's least hop is 65 blocks, so
+13 of the 62 pairs fly (21). Cold, nothing is flown. Not solved: two of ten crafted flights of one hop left their line
+in the first burn's climb on the replica (braked, no hit); the rest of the flight stack with crafted rockets.

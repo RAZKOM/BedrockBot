@@ -5977,6 +5977,302 @@ settings' defaults.
 - **Duplication left.** The probes' world set-up is in `cave-probe-world.ts` for the new probe; the three older probes
   keep their own copies. The new unit tests have their own rig, as the drawn and the learned ones.
 
+## What the Realm showed (Track F9e, round 2)
+
+Flight v2, Track F9e round 2, [decisions/0082](decisions/0082-drawn-entries-and-hops.md) (the addendum). Round 1 was
+deployed and flown on the Realm (2026-11-11). The drawn way in flew 3 of 3 (48 to 50 s, no damage) and cave_start's drawn
+way out still flew; the drawn way out of the deep cave found no way, the hop from cave_start found none, and five hop
+flights from cave_end's side lost their line under the roof and cost 2.8 to 5.7 health each. Two numbers of round 1 (18
+of 19 ways out; cave_start to cave_end) were not what the bot did. This round is what was wrong and what changed.
+
+### What the cell 116 blocks along was: a corner the proof knew, and a rocket that burned ten ticks longer than the model
+
+The line was not lost on a cell the cache did not have. Where the first flight was stopped, the server's body stood
+flat against the corner of the passage, at a block both exports of the world cache have as a solid (the one of before
+the series and the one of after it differ in 399 of 9.8 million cells, none of them near any of the places a flight was
+lost). The place was inside the live model when the hop was decided: the flood of the way out from cave_end counted
+12 650 cells on the Realm, which on the fixture is every cell within the flood's own 128 blocks, so the live model
+reached nine chunks or more (the bot asks for ten), and the corner lies well inside that.
+The proof flew the line past that corner with its berth.
+
+What the log shows at every loss is a body that was not where the model had it. The server's correction just before
+moved the model's body 1.1 to 1.3 blocks; six ticks later the two were 3.8 to 7.8 blocks apart, the server's body
+stopped. In the flights that arrived the same pairs of corrections are there (up to 6.1 blocks), and twice the server's
+body stood still in mid air with no wall near it and no damage, 22 ticks after a rocket: the follower asked for its
+next rocket for `the body at 0.24 a tick` and `at 0.10 a tick`.
+
+**The cause is the rocket.** Every burn this project had measured (Track F0: 9 to 21 ticks, n 175) was of the rocket
+the script API gives the test kit, which has no flight duration. A rocket a player crafts has flight duration 1 and
+burns ten ticks longer:
+
+| | burn (ticks) | where from |
+|---|---|---|
+| the script API's rocket (no flight duration) | 9 to 21 | Track F0, BDS, n 175 |
+| a crafted rocket (paper and one gunpowder, flight duration 1) | 21 to 30 measured, mean 25.6 (n 55); taken as 19 to 31 | BDS (bds-fly2), `FLY_ENV=burn FLY_ROCKETS=crafted`, this round |
+| the owner's own recorded takeoffs out of the cave | a rocket's speed (1.55 to 1.7 a tick) held for 22 to 33 ticks in 7 of 7 | the recordings' positions |
+| the bot on the Realm | cave_start's way out on 1 rocket in 5 of 5 flights, where the replica's plain rockets need 2 | the Realm's logs |
+
+The input loop boosts until the rocket's removal, but at most `GLIDE.boostMaxTicks` (22): with a crafted rocket the
+model's burn ended at 22 ticks and the server's body flew on its rocket for up to ten more. Under a burn the velocity
+follows the look; without one a glide turns slowly: in a passage that bends the two bodies part by a block every few
+ticks, and the follower steers the one that is not there. And round 1's speed tap (a tick of looking straight back when
+no rocket burns and the body is over its line's speed) was flown while the server's rocket still burned: under a burn
+that look takes all of the speed, not a fifth: the stops in mid air.
+
+**Reproduced on the replica**, the hop cave_8 to cave_end (323 blocks) with crafted rockets, 5 runs a side:
+
+| | flown whole, standing by the goal | lost the line | damage | seconds |
+|---|---|---|---|---|
+| plain rockets, round 1 (its replica table) | 5 of 5 (0.1 to 0.6 from it) | 0 | 0 | 15.9 to 17.0 |
+| crafted rockets, the bot taking them for plain ones (`FLY_CAVE_PLAIN_BURN=1`: round 1's behaviour) | **0 of 5**: two ended 5.7 and 6.0 from the goal, three lost the line (`no look clears the solid ahead 163 blocks along the line (braked to 0.17 a tick)`, `ended (lost)`), two of those not there in 120 s | 3 | 4.2, 3, 2 in three runs | 11.5 to 33.7 |
+| crafted rockets, the kit's burn (this round), two series | **8 of 10** (0.1 to 0.8 from it), 4 rockets where the plain ones take 6 | 2: off the line 46 and 54 blocks along it in the first burn's climb, braked, down with no hit; the trip went on (a second hop; the walk) | 0 in the flights; 1.3 on one walk through water | 16.4 to 17.7; the two others 51.6 and 57.9 |
+
+Every run of the middle row has `rocket 2 asked for 37 blocks along it, 28 ticks off the ground (the body at 0.24 a
+tick ...)`: the Realm's own line.
+
+### The burn of the rockets at hand (`skills/fly/burn.ts`)
+
+- **The item's flight duration is read** (`world/index.ts`: the NBT's `Fireworks.Flight`, `ItemStack.flight`).
+  `burnRange(flight)`: 9 to 21 and ten more a step; `burnOfHotbar`: from the shortest burn of any rocket in the hotbar
+  to the longest.
+- **The model's burn** (`rocket.ts`): the loop's boost runs until the rocket's removal, at most the longest burn of the
+  rocket used and a tick (32 for a crafted one), not 22.
+- **A line carries its burn** (`Guide.burn`): the recorded, the drawn and the hop lines of a takeoff are made with the
+  kit's burn (`commands-fly.ts kitBurn`, `route/takeoff.ts`), and the follower's looks (the burn ending as early and as
+  late as it can), the roll (the nominal burn) and the proofs (`glide.ts routeTakeoff`, `routeHop`: the nominal burn,
+  every burn of the range, the two mixes, the three after a first rocket that fires nothing: 18 or 19 simulations as
+  before) all fly that range. For the plain rocket the numbers and the order are what they were.
+- **A hop's last rocket** (`hop.ts hopLast`): 73 to 61 blocks before the touchdown for a crafted rocket (its longest
+  burn is 52 blocks of flight) where the plain one has 56 to 44; a line under 65 blocks is walked (48).
+- The decision's line says it: `rockets that burn 19 to 31 (flight duration 1) ticks`.
+
+What is NOT changed: the flight in the open (the climb, the cruise, the landings) and the route tracker's plans
+(`route/types.ts BURN`) still think in 9 to 21. In the open a longer burn is height and speed to spare; a planned route
+landing or takeoff through a narrow place with crafted rockets is flown on a model ten ticks short (the open points).
+
+### As the bot runs (`learn/under.ts`, `scripts/cave-under-probe.ts`)
+
+Round 1's probes ran on the whole fixture with a radius of their own; the bot ran on its live model with the world
+cache behind it, with its own radius and caps. Now the decisions of a flight under a roof are one module
+(`learn/under.ts`: `pickHop`, `pickExitPiece`) that `commands-fly.ts` and the probe both call, and the probe's world is
+the bot's two layers: the fixture is the world CACHE (a chunk it never saw and everything beside its box unknown), the
+LIVE model is the chunks within `--live` chunks of the body (9: what the Realm's flood sizes bound; a body that has just
+arrived had 3), and `--cold` has nothing live at the first decision. The fixture is the wide one (the old box grown 160
+blocks each way: the box's edge is no longer the cave's). A trip is flown to its end: a decision, the proven line at
+every burn of the kit, the body stood where the nominal flight stood, the live model moved there, the next decision.
+Every number below is from that probe with crafted rockets (19 to 31), on the PC.
+
+### No rocket into cells never seen live: pieces
+
+The rule: **a line is drawn, proven and flown only through cells of the live model**; an unknown cell is a solid for the
+proof's body and for the follower alike. The cache says where the way goes on. The way is looked for once, on what was
+ever seen (the live model, the cache behind it); where it lies in the live model it is flown whole; where it leaves the
+live model the flight is a PIECE of it: a hop to a floor under the way, `UNDER_STOP` (12) cells short of the first cell
+the live model does not have, proven from standing to standing like any hop. The body stands, the chunks ahead are
+sent, and the trip asks again at once from where it stands (`runAuto`, at most `PIECES_MAX` 12): hops, standing in
+between, by need.
+
+Why this and not a confirmation running ahead of the body with a set-down where it fails: a piece needs no new way of
+flying and no stopping distance (it ends in a touchdown that was proven, by the flier that lands every hop); a set-down
+"where the line was last confirmed" has no floor under it for the 200 cells of this cave's way that run over water; and
+nothing has to be confirmed in the air, because nothing was proven on the cache. What it costs is the standing: 0.9 to
+2.3 s of deciding a piece. A cell that only the live model has (a block placed since the cache saw the place) is in the
+way's own search when it is inside the live model, and is seen by the next decision when it is beyond it.
+
+- A piece's touchdown (`standNear`): a floor (three of the four cells beside it standable), dry (no water within 2),
+  up to 10 under the way's cell and 2 beside it, free air between.
+- A body that has just arrived (a teleport, a respawn, a reconnect) has no chunks: a decision under a roof first waits
+  for the live model 5 chunks each way round the body, at most 3 s (`commands-fly.ts liveRound`), and says so.
+- The proof's world for a hop is the live model alone now (round 1: the cache's solids where the live model had
+  nothing).
+
+**The block the live layer alone has** (`--hop cave_end,cave_start --block n`: a 3 x 3 x 3 lump set in the live layer
+on the cache's way, n cells along it): at 20 (inside the first burn), 116 (the Realm's place), 200 (a bend, beyond the
+first decision's live model) and 440 (before the last flier's place): the trip arrives every time, in 4 pieces, every
+flight at 13 burns standing within 2 of its cell, 0 hits over 0.15 a tick; the lines go round the lump. A lump across a
+whole passage is no way (the unit test).
+
+### The hop's flood (`draw.ts floodTo`)
+
+From cave_start the flood ended at its cap (150 001 cells) on the Realm with no way found, and the wide fixture does the
+same (150 004). The cause: for the search to a cell, "under a roof" meant any solid over the cell, and on the real
+ground round the mouth every cell under a tree was that: the search ran across the forest floor. A roof is a thick one
+now (`DRAW_ROOF_THICK`: 8 solid cells or more over the cell): cave_start to cave_end is found in 50 529 cells and 0.35
+to 0.6 s. The cap stays 150 000 cells (3.3 s on the PC when it is reached). An aim weight (`aim`) is there for the probe
+and changes little (142 000 cells at 3): not used.
+
+**cave_start to cave_end and back** (warm; the wide fixture; crafted rockets):
+
+| | pieces | blocks flown | flight | deciding in all | every flight at 13 burns |
+|---|---|---|---|---|---|
+| cave_start to cave_end | 3 (91, 131 and 337 blocks of line) | 559 | 22.9 to 24.4 s | 4.2 s (0.9, 1.0, 2.3) | standing within 2 of its cell, 0 hard hits |
+| cave_end to cave_start | 4 (137, 213, 126, 91) | 567 | 22.2 to 26.0 s | 4.7 s (1.1, 1.7, 1.0, 0.8) | the same |
+| either, cold (nothing live) | 0 | | | 0.3 s | the way is found on the cache (466 and 464 cells) and nothing is flown: `the live model ends 0 cells along a way of 466`. The bot waits up to 3 s for its chunks before it decides |
+
+One line of 548 blocks (round 1's headline) is flown only where the whole way lies in the live model, which the nine
+chunks round cave_start do not hold.
+
+**Every pair of the route** (`--pairs cave --skip 1,2,4`, one decision each; a crafted rocket's least line is 65
+blocks): each waypoint to the next 0 of 22 (17 too short: 13 to 49 blocks; 4 with no place to stand at the start; 1
+under 2 of air); to the next but one 2 of 21 (cave_start to cave_2, 78 blocks; cave_2 to cave_4, 67; 14 too short: 27 to
+64); to the one four on 11 of 19 (72 to 131 blocks, 3.4 to 7.7 s; 1 not proven, 2 with no cell to stand in by the
+goal). 13 of 62, where round 1's plain rockets had 21.
+
+### The way out of the deep cave
+
+The Realm's flood stopped at `DRAW_RADIUS` (128 blocks) with every cell of the live model looked at; cave_end's way out
+is 413 blocks of line. Now the drawn way out is looked for as far as `EXIT_RADIUS` (448) through up to 150 000 cells, on
+the live grid as before (so its reach is the live model's); and where the live model holds no way out, the way on the
+cache is flown in pieces (`pickExitPiece`, in `autoFly` when the takeoff is refused under a roof, with `flyCaveExit`).
+
+**As the bot, warm, the wide fixture, crafted rockets** (`--exit all`): the 19 roofed waypoints a body can stand at:
+
+| waypoint | how | open sky after (flight) | deciding in all |
+|---|---|---|---|
+| cave_1, cave_3, cave_start, cave_shortcut | the drawn way out | 0.8 to 2.5 s | 0.3 to 0.7 s |
+| cave_8, cave_10 | the drawn way out | 3.4 to 6.0 s | 1.2 to 1.5 s |
+| cave_11 to cave_16 | one piece, then the drawn way out | 7.2 to 12.0 s | 1.9 to 2.8 s |
+| cave_17 to cave_20 | the drawn way out | 11.3 to 15.3 s | 2.7 to 4.1 s |
+| cave_21, cave_end | two pieces, then the drawn way out | 15.8 to 18.6 s | 3.8 s |
+| cave_9 | none: 2 of air over the start | | |
+
+**18 of 19 out, every flight of every piece at 13 burns clean** (round 1's table: 18 of 19 on the whole fixture at
+radius 400 with plain rockets). No single decision took over 2.3 s; the longest sum is 4.1 s. A decision that runs
+longer than the 6 s budget begins no further proof and the trip walks, as before. **Cold** (cave_start, cave_end,
+cave_10): no way out is flown with nothing live (0.04 to 0.14 s); the bot waits up to 3 s for its chunks first.
+
+### The trip after `no hop` (out, 60 degrees round, into the hillside) and two words
+
+The Realm's trip from cave_start to cave_end with no hop found flew the ordinary way: the route takeoff along the drawn
+way out, then the climb curving to a near goal, and took 4.3 and 6.8 damage right after the exit
+in two of three runs. That is `autoFly` for a goal over `flyMin` with a route takeoff, which the commit before this
+track has line for line (`commands-fly.ts autoFly`, `routeTakeoffFor`; `brain.ts` the climb's curve): this track changed
+which line leaves the cave, not what follows it. Its proof flew that curve at burns of 9 to 21; the Realm's rocket
+burned 19 to 31, so the body came out of the exit faster and turned under a burn the proof never flew. With the kit's
+burn the proof flies the real one. Not built: the cheap rules (hold the exit's line until the body is over the terrain;
+or no flight at all for a goal under a roof that near when no hop is proven): with a hop or a piece found, the trip
+does not take that way; where none is found it still does (the open points).
+
+The wait's line and the landed line of a drawn entry said `learned entry`: they say `drawn entry` now
+(`process/fly.ts`, `controller.ts`, the entry's stats carry the word).
+
+### On the server (the replica, bds-fly2; 2026-11-11)
+
+`FLY_ROCKETS=crafted`: the kit's rockets are crafted by the bot (paper and gunpowder), as a player's are;
+`FLY_CAVE_PLAIN_BURN=1`: the bot takes them for plain ones all the same; `FLY_CAVE_OUT_FROM=<waypoint>`: the trip out
+begins there.
+
+| | runs | arrived | seconds | what flew | damage |
+|---|---|---|---|---|---|
+| **crafted rockets**, cave_8 to cave_end, `flyCaveHop` on (the table above: two series) | 10 | 10 | 16.4 to 17.7 (8 runs); 51.6, 57.9 | 8 flown whole on 4 rockets, standing 0.1 to 0.8 from the goal, the decision 2.1 to 3.1 s; 2 left the line in the first burn, came down with no hit and went on (a second hop; the walk) | 0; 1.3 on one walk |
+| crafted, cave_start to cave_3 | 3 | 3 | 7.6, 9.9, 7.6 | one flight of 92 blocks on 1 rocket (2 with plain ones), standing 0.3, 3.3 and 0.5 from the goal (the second stood in the water beside it) | 0 |
+| crafted, tripOut, `FLY_CAVE_EXIT=1`, no recordings | 3 | 3 | 63.4, 65.9, 66.4 | the drawn way out from cave_start, 5 rockets a trip | 0 |
+| crafted, tripOut from cave_end and from cave_10 | 2 and 2 | 0 and 1 (107.7 s) | 420 s allowed | **the replica's box holds no way out from either**: `0 drawn ways out ...; no way under the roof to the open sky (..., within 448)` and `fly: way out: ... no way under the roof to the open sky in the world cache either`: the server's water closes the pit's bottom where the fixture has air over its water cells. The trips walked; twice the flight after a vertical takeoff came down on the box's rim after 90 ticks and the walk fell down the replica's cliff (the box stands 230 blocks over its flat world) | a death in 2 of the 4 runs (falls on the walk), 3.4 in a third |
+| **plain rockets**, cave_8 to cave_end, `flyCaveHop` on | 3 | 3 | 16.2, 16.6, 17.0 | one flight on 6 rockets, standing 0.0 to 0.9 from the goal (round 1: 15.9 to 17.0) | 0 |
+| plain, tripOut, `FLY_CAVE_EXIT=1`, no recordings | 3 | 3 | 64.3, 65.2, 65.4 | the drawn way out (round 1: 58.6 to 66.6) | 0 |
+| plain, trip C, `FLY_CAVE_LEARNED FLY_CAVE_ENTRY=1` | 3 | 3 | 45.1, 45.2, 45.6 | the recorded entry, no go-around (round 1: 43.6 to 47.0) | 0 |
+| plain, the round trip, `FLY_CAVE_LEARNED FLY_CAVE_ENTRY=1 FLY_CAVE_EXIT=1` | 3 | in 3, out 3 | in 45.0, 45.6, 46.7; out 59.9, 60.5, 63.1 | in: the recorded entry; out: twice the recorded line, once the drawn one; none on foot | 0 |
+
+Not on a server: the pieces (the replica's box holds no trip that needs one: its water cuts the long ways) and the wait
+for the live model. Both are the probe's results above.
+
+### The regressions
+
+**Against round 1's code** (d6ea5fed's `bot/src` and `bot/scripts` beside this tree's, the same flights on both with
+the plain rocket, the old probes on the fixture of 2026-11-11, the outputs compared with the milliseconds taken out):
+the route landings (the stacked platforms to the hand-over at 169 pairs of burns; 9 whole flights of the room 300 out),
+the learned exit from cave_start (its proof and 13 burns), the learned entry's cases, **the drawn exit from cave_start
+(its proof and 13 burns), the drawn exits from cave_end and cave_10 at radius 400, and the drawn entry's 30 arrivals:
+the same output on both, in all seven.** The two hops (cave_8 to cave_end, cave_start to cave_end; proof and 13 burns):
+the same line and the same flights; one number differs, the cells the flood looked at (65 389 before, 50 503 now: the
+thick roof). What changes for the bot with plain rockets and no new setting: a drawn way out is looked for 448 blocks far
+(cave_start's is the nearest and the same; the deep ones are found now); a hop is drawn and proven on the live model
+alone, in pieces where the way leaves it; a decision under a roof waits for the live model of a body that has just
+arrived. With crafted rockets every line under a roof is made, proven and flown with their burn.
+
+The final code, each gate alone, by its exit code (the PC, 2026-11-11; plain rockets, as the gates fly):
+
+| suite | result |
+|---|---|
+| fly-route-land (bds-fly3) | 6 runs in a row, exit 0 six times (7 of 7 each, 450 to 506 s a run) |
+| fly-route (bds-fly3) | exit 0 (3 of 3) |
+| fly-walk (bds-fly2) | 4 runs, exit 0 four times |
+| fly-cave trip C with the recordings, the round trip, tripOut along the drawn line | exit 0 each; the table above (trip C 3 of 3, the round trip in 3 and out 3 flown, tripOut 3 of 3) |
+| `pnpm lint` (the PC) | exit 0 |
+| the unit suite on the test host (`node scripts/mac-run.mjs --name f9e -- pnpm -r test`) | three in a row on this round's code: exit 0, 0, 0 (2 539 passed, 1 skipped, 83 to 85 s); and three more in a row after this page's last edit for the hand-back |
+
+### What the Realm should show
+
+Everything below with the live kit's rockets (crafted: every decision's line names them: `rockets that burn 19 to 31
+(flight duration 1) ticks`; a line without those words means the hotbar's rockets carry no flight duration).
+
+`!test goto home from cave_end 3` (`flyCave on`, `flyCaveExit on`):
+
+- at each start `fly: route takeoff: rockets that burn 19 to 31 ...; 0 drawn ways out (a flood of about 17 000 cells
+  under the roof, 0 to the open sky ...); no way under the roof to the open sky (..., within 448)` and then `fly: way
+  out: about 34 800 cells looked at in about 250 ms; hop 1 (...) -> a piece of it: N blocks of line to a cell N of 350
+  cells along it (the way out: the live model ends N cells along its 350); the trip asks again from there`; or, where
+  the Realm's live model reaches ten chunks, the drawn way out at once (`6 drawn ways out (a flood of about 33 000
+  cells ...)`);
+- one or two flights of 5 to 9 s that end `landed` standing under the roof (`flight: hop: ...`, `drawn entry: standing
+  ...`), each followed at once by the next decision; then `-> out along the drawn line drawn N` and the flight home;
+- 16 to 19 s of flight to open sky and about 4 s of deciding before the flight home: 75 to 90 s a run;
+- no `flight: ended (roof)`; a `lost after N ticks` means a body off its line again: say the ticks and the place.
+
+`!test goto cave_end from cave_start 3` and `!test goto cave_start from cave_end 3` (`flyCaveHop on`, `autoFly on`):
+
+- `fly: hop: to cave_end under the roof (rockets that burn 19 to 31 ...): about 50 500 cells looked at in about 400
+  ms; hop 1 (...): standing within N of the goal at burns of 25, 19, 31, 22, 28, ... -> a piece: 91 blocks of line to a
+  cell 78 of 466 cells along the way (the live model ends 180 cells along a way of 466); the trip asks again from
+  there`; then a second piece (about 130 blocks), then `-> along the drawn line hop 1 to the touchdown 0 0 0 from the
+  goal's cell` (about 340 blocks); the other way four flights (about 140, 210, 125 and 90 blocks);
+- no flood at its cap (`150001 cells`), no flight out over the top;
+- 22 to 26 s of flight and 4 to 5 s of deciding: 30 to 35 s a run, damage 0;
+- on the replica 2 of 10 crafted flights of one hop left their line in the first burn's climb, braked and came down
+  with no hit: a `lost after about 46 ticks (N off the line ...)` and a second hop from where it stood is that.
+
+`!test goto home from cave_start 3` with a cold start (the body teleported in just before):
+
+- `fly: the live model round the body was not loaded (N of 121 chunks missing): waited N ms for it (0 still missing)`,
+  then the route takeoff's line with `12 drawn ways out (... 2 to the open sky ...)` as on a warm start, the same
+  flight, about 57 s a run. `(N still missing)` after 3 000 ms and `0 drawn ways out` again would mean the Realm sends
+  the chunks slower than that: say the numbers.
+
+The live settings: `flyCave on`, `flyCaveExit on` (so today), `flyCaveHop on` for the two hop series; nothing new.
+
+### Unit tests (`fly-under.test.ts`, a synthetic tunnel)
+
+The burn by flight duration, the hotbar's range, the proof's burns (the plain rocket's as they were), the last rocket's
+place for a crafted rocket. A hop decided on two layers: the whole way in the live model (one hop, proven at 25, 19, 31
+...); the live model ending on the way (a piece: standing short of its end, every point of its line in the live model,
+flown at 19 and 31 to standing with no hit; then the rest as one hop once the chunks are there); no live model (nothing
+flown, the line says where it ends); a block only the live model has (across the passage: no way; beside it: the line
+goes round, through no cell of it); where the live model ends and the floor under the way. The flood to a cell with a
+canopy 200 by 200 beside the cave's mouth: found in under 30 000 cells.
+
+### Open points (Track F9e round 2)
+
+- **Nothing of this round has flown on the Realm.** The burn's range for a crafted rocket is 21 to 30 measured on BDS
+  (n 55) and taken as 19 to 31; flight durations 2 and 3 are taken as ten ticks more a step and were not measured.
+- **Two of ten crafted flights of the 323-block hop left their line in the first burn's climb on the replica** (46 and
+  54 blocks along it, 4.6 and 5.6 off it), where the proof's thirteen burns keep within 2. Braked and down with no hit.
+  Not understood: the simulation's follower knows a burn's end two ticks late, the real one three ticks and the round
+  trip late.
+- **The rest of the flight stack thinks in 9 to 21**: the climb, the cruise and the route tracker's plans
+  (`route/types.ts BURN`, read-only for this track). A route landing or a searched route takeoff with crafted rockets
+  is planned and proven on burns ten ticks short. The gates fly the plain rocket (`FLY_ROCKETS=crafted` flies a
+  player's).
+- **The live model's reach is modelled** as the chunks within nine of the body. The Realm's number is nine or more.
+- **A piece ends on a floor.** Over the flooded stretch of this cave a piece has none for 200 cells of the way; with
+  the live model under nine chunks wide the trip would stop before it and walk.
+- **The trip after no hop** still flies out and over to a near goal under a roof (above).
+- **The inventory model has a crafted item without its NBT** until the server sends the slot again (the craft's own
+  answer carries none): the bot would take rockets it crafted itself for plain ones until then. The owner's come out of
+  boxes, with their NBT.
+- **A way out from where the walk after an entry ended** (round 1's open point) is as it was.
+- Round 1's `HOP_TRIES` and `HOP_BUDGET_MS` (`commands-fly.ts`) are `learn/under.ts UNDER_PROOFS` and
+  `UNDER_BUDGET_MS` now (3 lines proven at most, no proof begun after 6 s).
+
 ## Open points
 
 - Track F1: a corridor approach under a roof at ground level (the roof cases of `fly-brake.test.ts` on the

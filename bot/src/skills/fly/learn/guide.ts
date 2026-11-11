@@ -7,6 +7,7 @@
 // A recording is a demonstration, not a script: the follower (`follow.ts`) flies the line's place, not its timetable,
 // and nothing is flown that its simulation has not cleared (glide.ts routeTakeoff).
 import type { Vec3 } from '../../../connection/types.ts';
+import type { BurnRange } from '../burn.ts';
 import { GAP_MS, type LearnedPath, type LearnSample } from './recorder.ts';
 
 /** The guide's points lie this far apart along the line (blocks). */
@@ -51,6 +52,11 @@ export interface Guide {
    * later would still burn at the touchdown's brake).
    */
   hop?: { from: number; to: number };
+  /**
+   * Track F9e round 2: the burn of the rockets the line is to be flown with (burn.ts: a crafted rocket burns ten ticks longer
+   * than the one the script API gives). The follower's looks, the roll and the proof fly this range; none: the plain rocket's.
+   */
+  burn?: BurnRange;
 }
 
 /** Track F9d: a guide as the log names it: `the learned line <name>` (a recording) or `the drawn line <name>` (learn/draw.ts). */

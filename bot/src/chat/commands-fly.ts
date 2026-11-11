@@ -10,8 +10,9 @@
 // added to the manager here.
 import type { Vec3 } from '../connection/types.ts';
 import { FlightController, skyQuery } from '../skills/fly/controller.ts';
-import { glideKitReady, jumpTakeoff, ledgeTakeoff, planGlideDown, routeHop, routeTakeoff, routeTakeoffOptions, smallPlatform, verticalTakeoff, type Ledge, type SimDeps } from '../skills/fly/glide.ts'; // Track BH, F9a
-import { elytraWornLimit, flightKitMemoryOf, kitLine, kitReady, readKit, ROCKET, SupplyWatch } from '../skills/fly/kit.ts';
+import { glideKitReady, jumpTakeoff, ledgeTakeoff, planGlideDown, routeTakeoff, routeTakeoffOptions, smallPlatform, verticalTakeoff, type Ledge, type SimDeps } from '../skills/fly/glide.ts'; // Track BH, F9a
+import { elytraWornLimit, flightKitMemoryOf, isRocket, kitLine, kitReady, readKit, ROCKET, SupplyWatch } from '../skills/fly/kit.ts';
+import { BURN_PLAIN, burnOfHotbar, burnSaid, type BurnRange } from '../skills/fly/burn.ts'; // Track F9e round 2
 import { restockFromBoxes, supplyOf } from '../skills/supply/supply.ts';
 import { FlightKitOps } from '../skills/fly/kitops.ts';
 import { APPROACH_HEIGHT, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, yawTo, type CellQuery, type LandingTarget, type SkyCheck } from '../skills/fly/plan.ts';
@@ -21,7 +22,7 @@ import { findLanding, isHazardName, isLiquidName, stillLandable, WET_ABOVE, type
 import { landingProbe } from '../skills/fly/landprobe.ts'; // Track L2: the walk priced by the probe's path
 import { TerrainMemo, type TerrainColumn } from '../skills/fly/terrain.ts'; // Track BL
 import type { RouteGrid } from '../skills/fly/route/grid.ts'; // Track F3
-import { planTakeoffRoute, TAKEOFF_WEIGHT, type TakeoffRoute } from '../skills/fly/route/takeoff.ts'; // Track F3
+import { planTakeoffRoute, type TakeoffRoute } from '../skills/fly/route/takeoff.ts'; // Track F3
 import { RoutePlannerClient } from '../skills/fly/route/worker.ts'; // Track F3
 import { matchEntries, matchExits, MATCH_NEAR } from '../skills/fly/learn/match.ts'; // Track F9b, F9c
 import { chooseTouchdown, ENTRY_AIR, ENTRY_LAVA, ENTRY_SOLID, ENTRY_UNKNOWN, ENTRY_WATER, entryAim, entryTouchdowns, entryWorld, entryWorldSame, guideSpeed, type EntryAsked, type EntryLine, type EntryProof } from '../skills/fly/learn/entry.ts'; // Track F9c
@@ -30,8 +31,7 @@ import { classify } from '../skills/terrain/classify.ts'; // Track F9c: a block'
 import { cellClassOf } from '../world/cache/classes.ts'; // Track F9c
 import { CLS_AIR, CLS_AVOID, CLS_WATER } from '../world/cache/types.ts'; // Track F9c
 import { chooseDrawnEntry } from '../skills/fly/learn/drawin.ts'; // Track F9e
-import { FOLLOW_MARGIN } from '../skills/fly/learn/follow.ts'; // Track F9e
-import { drawHops } from '../skills/fly/learn/hop.ts'; // Track F9e
+import { EXIT_FLOOD_MAX, EXIT_RADIUS, pickExitPiece, pickHop, hopTarget, type UnderPick, type UnderWorld } from '../skills/fly/learn/under.ts'; // Track F9e round 2
 import { PathStore } from '../skills/fly/learn/store.ts'; // Track F9b
 import { pathsDirOf } from './commands-learn.ts'; // Track F9b: where `!learn` keeps its paths
 import { preferSite, RECHECK_EVERY_MS, RecheckState, SITE_BUDGET_MS, SITE_PROBES, SITE_SIMS, siteCandidates } from '../skills/fly/sites.ts'; // Track BL
@@ -89,9 +89,11 @@ export const ENTRY_BEFORE = 200;
 export const ENTRY_SKY = 64;
 export const ENTRY_TAKES = 3;
 export const ENTRY_BUDGET_MS = 10_000;
-/** Track F9e: the hop lines proven at most for one trip, and no proof begun once this long has gone (ms): the body stands meanwhile. */
-export const HOP_TRIES = 3;
-export const HOP_BUDGET_MS = 6000;
+/** Track F9e round 2: a decision under a roof waits for the live model this many chunks each way round the body, at most this long (ms): a body that has just arrived has none. */
+export const LIVE_WAIT_CHUNKS = 5;
+export const LIVE_WAIT_MS = 3000;
+/** Track F9e round 2: the pieces of a way flown at most for one trip. */
+export const PIECES_MAX = 12;
 /** Track F9e: a hop is asked for a goal farther than this (blocks, straight: a hop's least line, learn/hop.ts HOP_MIN): nearer, the walk is there before a proof is. */
 export const HOP_ASK_MIN = 48;
 
@@ -259,6 +261,15 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   // Track F9b: the paths recorded with `!learn` (<config dir>/paths, read when a takeoff asks and a file has changed)
   const learnedPaths = new PathStore(() => pathsDirOf(d.settings.file));
   const routeOn = (): boolean => String(d.settings.get('flyRoute')) !== 'off';
+  /**
+   * Track F9e round 2: the burn of the rockets in the hotbar (skills/fly/burn.ts): a crafted rocket burns ten ticks longer
+   * than the one the script API gives, and a line under a roof is proven and flown with the burn of the rockets at hand.
+   * Undefined: the plain rocket's (9 to 21), as everything was before.
+   */
+  const kitBurn = (): BurnRange | undefined => {
+    const b = burnOfHotbar(inv.slots, isRocket);
+    return b.min === BURN_PLAIN.min && b.max === BURN_PLAIN.max ? undefined : b;
+  };
   /**
    * Track BF (docs/flight.md "Landing v3"): the landing for a walk to `goal` (landing.ts findLanding): only
    * live cells, only dry ground, only a cell with a confirmed walking path (a bounded probe plan from its
@@ -699,7 +710,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     // searched ways out that switch asked for before (Track F9a's: waypoints for the route tracker, which their own proof
     // refused in the owner's cave every time); route/takeoff.ts still has them (`far`), nothing in the bot asks
     const top = Math.min(319, Math.ceil(cz.y));
-    const drawn = String(d.settings.get('flyCave')) === 'on' && d.settings.get('flyCaveExit') ? { top } : undefined;
+    // (Track F9e round 2: as far as EXIT_RADIUS: the deep cave's way out is 413 blocks of line and the flood stopped at 128.
+    // The grid is the live model's, so the flood's reach is what the server has sent)
+    const drawn = String(d.settings.get('flyCave')) === 'on' && d.settings.get('flyCaveExit') ? { top, radius: EXIT_RADIUS, max: EXIT_FLOOD_MAX } : undefined;
     // Track F9b (docs/flight.md "Learned exits"): the recorded flights that left the ground where the bot stands and came out
     // under open sky (the paths of `!learn`, matched by where they begin, never by their names) are tried first, each with
     // the same proof. Powered flight under a roof as well: only with flyCave on, and with its own switch (default off)
@@ -711,9 +724,10 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       };
       learned = matchExits(learnedPaths.all(), from, sky);
     }
-    const r = await planTakeoffRoute(routeGrid, from, target, { rockets: Math.min(4, Math.max(1, rockets)), prove, ...(drawn ? { drawn } : {}), ...(learned?.matches.length ? { learned: { matches: learned.matches } } : {}) }, routePlanner);
+    const burn = kitBurn();
+    const r = await planTakeoffRoute(routeGrid, from, target, { rockets: Math.min(4, Math.max(1, rockets)), prove, ...(drawn ? { drawn } : {}), ...(learned?.matches.length ? { learned: { matches: learned.matches } } : {}), ...(burn ? { burn } : {}) }, routePlanner);
     const g = r.route?.guide;
-    if (!quiet) log.info(`fly: route takeoff: ${learned ? `${learned.matches.length} learned way${learned.matches.length === 1 ? '' : 's'} out from here (${learned.flights} recorded flight${learned.flights === 1 ? '' : 's'}, ${learned.near} leaving the ground within ${MATCH_NEAR}), ` : ''}${r.drawn ? `${r.drawn.lines} drawn way${r.drawn.lines === 1 ? '' : 's'} out (a flood of ${r.drawn.cells} cells under the roof, ${r.drawn.ways} to the open sky, drawn in ${Math.round(r.drawn.ms)} ms), ` : ''}${r.exits} exit${r.exits === 1 ? '' : 's'} under open sky${r.ways !== undefined ? `, ${r.ways} way${r.ways === 1 ? '' : 's'} out under the roof` : ''}; ${r.tried.length ? r.tried.join('; ') : 'none tried'}${r.route ? ` -> out ${g ? `along ${guideSaid(g.line)} ` : ''}to ${r.route.exit.x} ${r.route.exit.y} ${r.route.exit.z}, then the climb curving to heading ${Math.round(goalYaw)}` : ' -> no route takeoff'} (${sims} simulated, ${Date.now() - t0} ms)`);
+    if (!quiet) log.info(`fly: route takeoff: ${burn ? `rockets that burn ${burnSaid(burn)} ticks; ` : ''}${learned ? `${learned.matches.length} learned way${learned.matches.length === 1 ? '' : 's'} out from here (${learned.flights} recorded flight${learned.flights === 1 ? '' : 's'}, ${learned.near} leaving the ground within ${MATCH_NEAR}), ` : ''}${r.drawn ? `${r.drawn.lines} drawn way${r.drawn.lines === 1 ? '' : 's'} out (a flood of ${r.drawn.cells} cells under the roof, ${r.drawn.ways} to the open sky, drawn in ${Math.round(r.drawn.ms)} ms), ` : ''}${r.exits} exit${r.exits === 1 ? '' : 's'} under open sky${r.ways !== undefined ? `, ${r.ways} way${r.ways === 1 ? '' : 's'} out under the roof` : ''}; ${r.tried.length ? r.tried.join('; ') : 'none tried'}${r.route ? ` -> out ${g ? `along ${guideSaid(g.line)} ` : ''}to ${r.route.exit.x} ${r.route.exit.y} ${r.route.exit.z}, then the climb curving to heading ${Math.round(goalYaw)}` : ' -> no route takeoff'} (${sims} simulated, ${Date.now() - t0} ms)`);
     return r.route ? { routeTakeoff: r.route, takeoffYaw: r.route.yaw } : undefined;
   };
   /** Track F9e: powered flight between two places under one roof along a drawn line: with `flyCave` on and its own switch (default off), and the route planner's grid at hand. */
@@ -726,56 +740,73 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * its route takeoff: the follower flies it, the entry's flier lands it, and there is no climb and no cruise. One line
    * for the decision. Undefined: the start or the goal under open sky, no way, too short a line, nothing proven.
    */
-  const hopFor = async (from: Vec3, goal: Vec3, label: string, half: number, rockets: number, quiet = false): Promise<{ target: FlyTarget; line: string } | undefined> => {
-    const fc = { x: Math.floor(from.x), y: Math.floor(from.y + 1e-6), z: Math.floor(from.z) };
-    if (entrySky(fc.x, fc.y, fc.z) || entrySky(goal.x, goal.y, goal.z)) return undefined;
-    const t0 = Date.now();
-    // the hop's world: the live model, and the world cache where the live model has nothing (a line of some hundred blocks
-    // runs beyond what the server has sent: on the replica the far half of the long line was not loaded and no way was
-    // found). An unknown cell is a solid; water and lava are obstacles. In the air the follower steers by the live model
-    // alone, which has the cells round the body by then: a cell that is not what the cache said is steered round or
-    // braked before, as on every drawn line
-    const cls = (x: number, y: number, z: number): number => {
-      const b = world.blockAt({ x, y, z }) ?? world.cache?.blockAt(x, y, z);
-      return b ? entryClass(b) : ENTRY_SOLID;
-    };
-    const hopGrid: RouteGrid = { solid: (x, y, z) => cls(x, y, z) !== ENTRY_AIR };
-    const d0 = drawHops(hopGrid, from, goal, entryTouchdowns(cls, goal), Math.min(319, Math.max(fc.y, goal.y) + ENTRY_SKY));
-    const drawMs = Date.now() - t0;
-    const head = `fly: hop: to ${label} under the roof: ${d0.cells} cells looked at, ${d0.hops.length} line${d0.hops.length === 1 ? '' : 's'} drawn in ${drawMs} ms`;
-    if (!d0.hops.length) {
-      if (!quiet) log.info(`${head}; ${d0.why ?? d0.tried.join('; ')} -> no hop`);
-      return undefined;
-    }
+  /** Track F9e round 2: the two layers of the bot's world for a flight under a roof (learn/under.ts): the live model, and the world cache behind it. */
+  const underWorld: UnderWorld = {
+    live: (x, y, z) => {
+      const b = world.blockAt({ x, y, z });
+      return b ? entryClass(b) : undefined;
+    },
+    cached: (x, y, z) => {
+      const b = world.cache?.blockAt(x, y, z);
+      return b ? entryClass(b) : undefined;
+    },
+  };
+  /** The simulation's world for a line under a roof: the live model alone, an unknown cell a solid (nothing is proven into cells never seen live). */
+  const liveSim = (): SimDeps => {
     const base = simDeps(true);
     const raw: { solidAt(x: number, y: number, z: number): boolean | undefined } | undefined = loop.world;
-    const deps = raw ? { ...base, world: { ...base.world, solidAt: (x: number, y: number, z: number) => raw.solidAt(x, y, z) ?? world.cache?.blockAt(x, y, z)?.solid === true } } : base;
-    const centre = { x: goal.x + 0.5, z: goal.z + 0.5 };
-    const tried: string[] = [];
-    let sims = 0;
-    let frail: { target: FlyTarget; line: string } | undefined;
-    for (const h of d0.hops.slice(0, HOP_TRIES)) {
-      if (tried.length && Date.now() - t0 > HOP_BUDGET_MS) {
-        tried.push(`${h.guide.path}: not tried (${Date.now() - t0} ms gone)`);
-        break;
-      }
-      const ticks = Math.ceil(h.guide.ticks[h.guide.ticks.length - 1] ?? 0);
-      const route: TakeoffRoute = { exit: { x: h.cell.x, y: h.cell.y, z: h.cell.z, steps: h.steps, dist: Math.hypot(h.cell.x + 0.5 - from.x, h.cell.y - from.y, h.cell.z + 0.5 - from.z) }, goals: [], margin: FOLLOW_MARGIN, weight: TAKEOFF_WEIGHT, yaw: h.guide.yaw, ticks, rockets: 1, edges: `the hop ${h.guide.path}`, nodes: 0, ms: 0, guide: { line: h.guide, open: Infinity, off: 0 }, drawn: { steps: h.steps, berth: h.berth, room: 1 }, hop: { hand: h.hand }, proven: true };
-      const target: FlyTarget = { x: centre.x, z: centre.z, top: goal.y, half, label, goal, entry: { line: h.line, goal: { x: centre.x, z: centre.z, top: goal.y, half: 2 } }, routeTakeoff: route, takeoffYaw: h.guide.yaw };
-      const p = await routeHop(deps, from, target, { cruiseY: from.y + 24, margin: d.settings.get('flyMargin'), goArounds: 0 }, rockets, { route: { grid: hopGrid, plan: routePlanner }, takeoff: routeTakeoffOptions(route, true) }, { planTicks: ticks, yaw: h.guide.yaw });
-      sims += p.sims;
-      const length = Math.round(guideLength(h.guide));
-      tried.push(`${h.guide.path} (${length} blocks of line, ${h.at}, ${Math.round(h.climb)} from its lowest to its highest): ${p.line}${p.ok ? '' : ': refused'}`);
-      if (!p.ok) continue;
-      const offer = { target, line: `flying ${length} blocks under the roof to ${label} along a drawn line (walking would be ~${Math.round(walkMinutes(length))} min)` };
-      // (a hop that a first rocket that fires nothing brings down short of the goal, with no hit, is flown all the same:
-      // the body stands by its start again and the trip asks again; the other lines begin on the same blocks, and
-      // another proof is three seconds of standing. The replica: 6.3 s of deciding for it before this)
-      frail = offer;
-      break;
-    }
-    if (!quiet) log.info(`${head}; ${tried.join('; ')} -> ${frail ? `along ${guideSaid(frail.target.routeTakeoff!.guide!.line)} to the touchdown ${frail.target.routeTakeoff!.exit.x - goal.x} ${frail.target.routeTakeoff!.exit.y - goal.y} ${frail.target.routeTakeoff!.exit.z - goal.z} from the goal's cell` : 'no hop'} (${sims} simulated, ${Date.now() - t0} ms)`);
-    return frail;
+    return raw ? { ...base, world: { ...base.world, solidAt: (x: number, y: number, z: number) => raw.solidAt(x, y, z) ?? true } } : base;
+  };
+  /** A hop's flight target: its line as the entry, the hop as the route takeoff; a piece is labelled as one and its goal is its own cell. */
+  const hopOffer = (pick: UnderPick, goal: Vec3, label: string, half: number): { target: FlyTarget; line: string; piece?: boolean } | undefined => {
+    const h = pick.hop;
+    if (!h) return undefined;
+    const t = hopTarget(h.drawn, h.cell);
+    const target: FlyTarget = { ...t, half: h.piece ? 2 : half, label: h.piece ? `${label} (a piece of the way)` : label, goal: h.piece ? { x: h.cell.x, y: h.cell.y, z: h.cell.z } : goal, routeTakeoff: h.route, takeoffYaw: h.drawn.guide.yaw };
+    return { target, line: `flying ${h.length} blocks under the roof ${h.piece ? `towards ${label}, a piece of the way` : `to ${label}`} along a drawn line (walking would be ~${Math.round(walkMinutes(h.length))} min)`, ...(h.piece ? { piece: true } : {}) };
+  };
+  const underOptions = (from: Vec3, goalY: number, rockets: number) => {
+    const burn = kitBurn();
+    return { rockets, ...(burn ? { burn } : {}), margin: d.settings.get('flyMargin'), top: Math.min(319, Math.max(Math.floor(from.y), goalY) + ENTRY_SKY), plan: routePlanner };
+  };
+  const hopFor = async (from: Vec3, goal: Vec3, label: string, half: number, rockets: number, quiet = false): Promise<{ target: FlyTarget; line: string; piece?: boolean } | undefined> => {
+    const fc = { x: Math.floor(from.x), y: Math.floor(from.y + 1e-6), z: Math.floor(from.z) };
+    if (entrySky(fc.x, fc.y, fc.z) || entrySky(goal.x, goal.y, goal.z)) return undefined;
+    // (Track F9e round 2: the decision is learn/under.ts pickHop, the probes' too: the whole way when it lies in the live
+    // model, else a piece of the way the cache knows, ending standing short of where the live model ends)
+    const burn = kitBurn();
+    const pick = await pickHop(underWorld, liveSim(), from, goal, label, underOptions(from, goal.y, rockets));
+    if (!quiet) log.info(burn ? pick.said.replace('under the roof:', `under the roof (rockets that burn ${burnSaid(burn)} ticks):`) : pick.said);
+    return hopOffer(pick, goal, label, half);
+  };
+  /**
+   * Track F9e round 2: a piece of the way OUT from under a roof, when the route takeoff found none in the live model: a
+   * hop along the way the cache knows to the open sky, as far as the live model goes (learn/under.ts pickExitPiece). The
+   * trip asks again where it stands. With `flyCave` and `flyCaveExit` on, as the drawn way out itself.
+   */
+  const exitPieceFor = async (from: Vec3, label: string, half: number, rockets: number, quiet = false): Promise<{ target: FlyTarget; line: string; piece?: boolean } | undefined> => {
+    if (String(d.settings.get('flyCave')) !== 'on' || !d.settings.get('flyCaveExit') || !routeOn()) return undefined;
+    const fc = { x: Math.floor(from.x), y: Math.floor(from.y + 1e-6), z: Math.floor(from.z) };
+    if (entrySky(fc.x, fc.y, fc.z)) return undefined;
+    const pick = await pickExitPiece(underWorld, liveSim(), from, underOptions(from, fc.y, rockets));
+    if (!quiet) log.info(pick.said);
+    return hopOffer(pick, { x: fc.x, y: fc.y, z: fc.z }, label, half);
+  };
+  /** Track F9e round 2: a body that has just arrived (a teleport, a respawn, a reconnect) has no chunks round it: a decision under a roof waits for them, this many chunks each way, at most this long. */
+  const liveRound = async (from: Vec3): Promise<void> => {
+    if (typeof world.isLoaded !== 'function') return;
+    const cx = Math.floor(from.x) >> 4;
+    const cz = Math.floor(from.z) >> 4;
+    const missing = (): number => {
+      let n = 0;
+      for (let dx = -LIVE_WAIT_CHUNKS; dx <= LIVE_WAIT_CHUNKS; dx++) for (let dz = -LIVE_WAIT_CHUNKS; dz <= LIVE_WAIT_CHUNKS; dz++) if (!world.isLoaded(cx + dx, cz + dz)) n++;
+      return n;
+    };
+    const m0 = missing();
+    if (!m0) return;
+    const t0 = Date.now();
+    while (missing() > 0 && Date.now() - t0 < LIVE_WAIT_MS) await loop.waitTicks(5);
+    log.info(`fly: the live model round the body was not loaded (${m0} of ${(2 * LIVE_WAIT_CHUNKS + 1) ** 2} chunks missing): waited ${Date.now() - t0} ms for it (${missing()} still missing)`);
   };
   /**
    * Track BH: how this flight takes off: a ledge (ledgeFor), else the jump along the first heading whose
@@ -823,7 +854,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     flyDist: number;
     takeoff: { ledge?: Ledge; takeoffYaw?: number };
   }
-  type AutoFly = { kind: 'fly'; target: FlyTarget; line: string; said?: string | undefined } | { kind: 'site'; site: TakeoffSite; line: string } | { kind: 'walk_out'; roof: string };
+  type AutoFly = { kind: 'fly'; target: FlyTarget; line: string; said?: string | undefined; piece?: boolean } | { kind: 'site'; site: TakeoffSite; line: string } | { kind: 'walk_out'; roof: string };
   /** Track BL: the refused takeoffs of this task (sites.ts RecheckState: no new try near one for a while). */
   const refusedTakeoffs: { x: number; z: number; at: number }[] = [];
   /**
@@ -919,6 +950,10 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (dim() !== OVERWORLD && !(dim() === NETHER && ceilingClear(from, goalTarget))) return undefined;
     // Track F9e: from under a roof to a goal under a roof, the hop first: a line drawn through the cave and proven from
     // standing to standing (the owner: underground to underground is tried before getting out). None proven: as before
+    // (Track F9e round 2: under a roof the live model round the body is waited for first: a body that has just arrived has none)
+    const fc0 = { x: Math.floor(from.x), y: Math.floor(from.y + 1e-6), z: Math.floor(from.z) };
+    const roofed = dim() === OVERWORLD && String(d.settings.get('flyCave')) === 'on' && !entrySky(fc0.x, fc0.y, fc0.z);
+    if (roofed) await liveRound(from);
     const hop = hopping ? await hopFor(from, goalBlock, label, half, k.rocketsHotbar || k.rockets, o.quiet) : undefined;
     if (hop) return { kind: 'fly', ...hop };
     if (distance <= d.settings.get('flyMin')) return undefined;
@@ -927,6 +962,10 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     // Track BH: a ledge takeoff where the jump takeoff is refused (an overhang, a blocked run) or the start is a small platform
     const tk = await takeoffFor(from, goalTarget, sky, k.rocketsHotbar || k.rockets, o.quiet);
     if ('refuse' in tk) {
+      // Track F9e round 2: under a roof with no way out in the live model: a piece of the way the cache knows, flown as far
+      // as the live model goes; the trip asks again where it stands
+      const piece = roofed ? await exitPieceFor(from, label, half, k.rocketsHotbar || k.rockets, o.quiet) : undefined;
+      if (piece) return { kind: 'fly', ...piece };
       refusedTakeoffs.push({ x: from.x, z: from.z, at: Date.now() });
       // Track BL: a takeoff site within walking distance (any direction) before the walk out towards the goal
       if (o.site !== false) {
@@ -1150,14 +1189,21 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (at && here && hdist(at, here) <= SHORT_FLIGHT) refusedTakeoffs.push({ x: at.x, z: at.z, at: Date.now() });
     return watchWalk(goal, label, half, walk, walk, legWalk);
   };
-  const runAuto = async (f: AutoFly, goal: () => Vec3 | undefined, label: string, half: number, walk: () => Promise<SkillResult>, legWalk: (leg: Goal) => Promise<SkillResult>): Promise<SkillResult> => {
+  const runAuto = async (f: AutoFly, goal: () => Vec3 | undefined, label: string, half: number, walk: () => Promise<SkillResult>, legWalk: (leg: Goal) => Promise<SkillResult>, pieces = 0): Promise<SkillResult> => {
     const g0 = goal();
     if (!g0) return walk();
     if (f.kind === 'walk_out') return walkOut(g0, label, half, f, walk, legWalk);
     if (f.kind === 'fly') {
       sayFlight(f);
       const at = position();
-      return afterFlight(await retryShort(await start(f.target).result, at, g0, label, half), watched(at, goal, label, half, walk, legWalk));
+      const r = await retryShort(await start(f.target).result, at, g0, label, half);
+      // Track F9e round 2: a piece of a way stood where it was to: the trip asks again at once from there (the next piece, the
+      // rest of the way as one hop, the way out), PIECES_MAX times at most; else the walk, watched, as after any flight
+      if (f.piece && r.ok && pieces < PIECES_MAX) {
+        const again = await autoFly(goal() ?? g0, label, half);
+        if (again) return runAuto(again, goal, label, half, walk, legWalk, pieces + 1);
+      }
+      return afterFlight(r, watched(at, goal, label, half, walk, legWalk));
     }
     d.chat.say(f.line);
     const s = f.site;

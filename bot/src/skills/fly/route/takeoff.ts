@@ -29,6 +29,7 @@
 // caller passes it with `flyCave` and `flyCaveExit` on, where it passed `far` before.
 import type { Vec3 } from '../../../connection/types.ts';
 import { drawWays, rollDraft, type DrawnLine } from '../learn/draw.ts'; // Track F9d, F9e
+import type { BurnRange } from '../burn.ts'; // Track F9e round 2
 import { FOLLOW_MARGIN, LINE_ROOM_MAX, lineRoom } from '../learn/follow.ts'; // Track F9b
 import type { Guide } from '../learn/guide.ts'; // Track F9b
 import type { GuideMatch } from '../learn/match.ts'; // Track F9b
@@ -314,7 +315,9 @@ export interface TakeoffRouteOptions {
    * tried after the recordings and before the exits, up to DRAWN_TRIES, and only with `prove`. Powered flight under a
    * roof with no recording at all: the caller passes it only with `flyCave` and `flyCaveExit` on.
    */
-  drawn?: { top: number; radius?: number; tries?: number };
+  drawn?: { top: number; radius?: number; max?: number; tries?: number };
+  /** Track F9e round 2: the burn of the rockets at hand (burn.ts): the recorded and the drawn lines are proven and flown with it (none: the plain rocket's). */
+  burn?: BurnRange;
 }
 
 /** Track F9d: the drawn ways out proven at most for one takeoff. */
@@ -451,7 +454,7 @@ export async function planTakeoffRoute(grid: RouteGrid, from: Vec3, target: { x:
     for (const { m, room } of takes.slice(0, o.learned.tries ?? LEARNED_TRIES)) {
       if (tried.length && spent()) break;
       learned++;
-      const route = learnedRoute(m, from, yaw);
+      const route = learnedRoute(o.burn ? { ...m, guide: { ...m.guide, burn: o.burn } } : m, from, yaw);
       const g = m.guide;
       const at = `the learned way out along ${g.path} (it left the ground ${m.off.toFixed(1)} from here, ${m.open.toFixed(0)} blocks to open sky in ${route.ticks} ticks, ${route.rockets} rocket${route.rockets === 1 ? '' : 's'}, its line ${room >= LINE_ROOM_MAX ? `${LINE_ROOM_MAX} or more` : room.toFixed(2)} from the nearest block)`;
       const proof = await o.prove(route);
@@ -478,7 +481,7 @@ export async function planTakeoffRoute(grid: RouteGrid, from: Vec3, target: { x:
     const t1 = now();
     // (Track F9e: the lines are drawn at once and rolled one after another, each proven as soon as it rolls: a long line's
     // roll costs as much as one of its proof's simulations, and the first line that clears is flown)
-    const d = drawWays(grid, from, o.drawn.top, o.drawn.radius !== undefined ? { radius: o.drawn.radius } : {});
+    const d = drawWays(grid, from, o.drawn.top, { ...(o.drawn.radius !== undefined ? { radius: o.drawn.radius } : {}), ...(o.drawn.max !== undefined ? { max: o.drawn.max } : {}), ...(o.burn ? { burn: o.burn } : {}) });
     drawn = { lines: d.drafts.length, ways: d.ways, cells: d.cells, ms: now() - t1 };
     if (d.why) tried.push(d.why);
     else if (!d.drafts.length) tried.push(`no drawn way out (${d.tried.slice(0, 2).join('; ')})`);

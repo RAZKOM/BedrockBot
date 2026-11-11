@@ -210,6 +210,8 @@ export class GuideFollower {
   private readonly said: string;
   /** Track F9e: the cells one tick's looks asked (steer): 0 not asked, 1 air, 2 solid. */
   private readonly cube = new Uint8Array(32 * 32 * 32);
+  /** Track F9e round 2: the burn of the rockets at hand (the guide's: burn.ts), for the ends a running burn may have. */
+  private readonly burn: { min: number; max: number };
   private refire = false;
   private replaced = false;
   private tapped = false;
@@ -223,6 +225,7 @@ export class GuideFollower {
     this.note = o.note;
     this.entry = o.entry;
     this.said = o.guide.drawn ? 'drawn line' : 'learned line';
+    this.burn = o.guide.burn ?? BURN;
     if (o.entry?.at !== undefined) this.at = Math.max(0, o.entry.at);
   }
 
@@ -410,9 +413,9 @@ export class GuideFollower {
     // the burns to fly the horizon with: as reported, ending as early as a burn can, running as long as one can
     // (Track F9e, `firing`: a rocket goes on this tick: its burn outlasts the horizon)
     const burns: number[] = [firing ? FOLLOW_HORIZON : Math.min(FOLLOW_HORIZON, b.boostTicks)];
-    if (!firing && (b.boostTicks > 0 || this.sinceFire < BURN.max)) {
-      const early = b.boostTicks > 0 ? Math.max(0, Math.min(FOLLOW_HORIZON, BURN.min - this.sinceFire)) : 0;
-      const late = b.boostTicks > 0 ? Math.max(0, Math.min(FOLLOW_HORIZON, BURN.max - this.sinceFire)) : 0;
+    if (!firing && (b.boostTicks > 0 || this.sinceFire < this.burn.max)) {
+      const early = b.boostTicks > 0 ? Math.max(0, Math.min(FOLLOW_HORIZON, this.burn.min - this.sinceFire)) : 0;
+      const late = b.boostTicks > 0 ? Math.max(0, Math.min(FOLLOW_HORIZON, this.burn.max - this.sinceFire)) : 0;
       for (const n of [early, late]) if (!burns.includes(n)) burns.push(n);
     }
     // (one tick's cells are asked for many times over: remembered for the tick, in coordinates from the body's column so

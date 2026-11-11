@@ -16,6 +16,7 @@ import type { EntityInfo, ItemStack } from '../../world/types.ts';
 import { PHYSICS } from '../input/physics.ts';
 import { wireItemOf } from '../place/place.ts';
 import { useItemTransaction } from '../survival/eat.ts';
+import { burnRange } from './burn.ts';
 import { isRocket } from './kit.ts';
 
 /** Ticks between two rockets (the item-use transaction must settle; the boost of one rocket lasts 12 to 18). */
@@ -143,7 +144,12 @@ export class RocketHand {
     if (inventory.selected !== slot) hotbar.select(slot);
     const held = wireItemOf(inventory.slots[slot], (inventory.rawItem(0, slot) ?? hotbar.rawItem(slot)) as Parameters<typeof wireItemOf>[1]);
     this.d.queue('inventory_transaction', useItemTransaction({ hotbarSlot: slot, held, eye: { x: feet.x, y: feet.y + PHYSICS.eyeHeight, z: feet.z } }));
-    this.d.loop.boost();
+    // (Track F9e round 2: the loop's boost runs until the rocket's removal, at most as long as this rocket can burn: a crafted
+    // one burns ten ticks longer than the one the script API gives, and with the plain rocket's 22 the model stopped while the
+    // server's body flew on)
+    const flight = inventory.slots[slot]?.flight;
+    if (flight) this.d.loop.boost(burnRange(flight).max + 1);
+    else this.d.loop.boost();
     this.lastFire = tick;
     this.pending.push({ tick, at: { ...feet } });
     this.fired++;

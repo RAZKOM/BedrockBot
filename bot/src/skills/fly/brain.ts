@@ -348,7 +348,7 @@ export interface FlightStats {
    * it) and why, the ticks from the commit and from the line's last open sky to standing, the largest distance off the
    * line, the governor's ticks.
    */
-  entry?: { name: string; joins: number; misses: number; committedAt?: number; end?: 'landed' | 'lost' | 'fallback'; why?: string; ticks?: number; roofTicks?: number; maxError?: number; taps?: number };
+  entry?: { name: string; /** Track F9e round 2: what the log calls it: a learned entry, a drawn one (guide.ts entrySaid). */ said?: string; joins: number; misses: number; committedAt?: number; end?: 'landed' | 'lost' | 'fallback'; why?: string; ticks?: number; roofTicks?: number; maxError?: number; taps?: number };
 }
 
 /** Track F3: the route tracker gets this many ticks for a landing before the brain goes around (a hover that never comes down). */
@@ -843,7 +843,7 @@ export class FlightBrain {
     const en = this.target.entry;
     if (!en) return;
     if (this.stats.entry) Object.assign(this.stats.entry, { end: 'fallback', why });
-    else this.stats.entry = { name: en.line.guide.path, joins: 0, misses: this.entryMisses, end: 'fallback', why };
+    else this.stats.entry = { name: en.line.guide.path, said: entrySaid(en.line.guide), joins: 0, misses: this.entryMisses, end: 'fallback', why };
     this.o.note?.(`${entrySaid(en.line.guide)}: ${en.line.guide.path} given up (${why}): ${en.fallback ? 'the landing as without a recording' : 'no other landing known, the nearest safe ground'}`);
     this.flier = undefined;
     this.helix = undefined;
@@ -2381,7 +2381,7 @@ export class FlightBrain {
       this.stats.routeTakeoffEnd = 'out';
       this.follower = undefined;
       this.flier = new EntryFlier({ grid: this.o.route!.grid, line: en.line, at: out.at, committed: true, note: (m) => this.o.note?.(m) });
-      this.stats.entry = { name: en.line.guide.path, joins: 1, misses: 0, committedAt: this.stats.ticks };
+      this.stats.entry = { name: en.line.guide.path, said: entrySaid(en.line.guide), joins: 1, misses: 0, committedAt: this.stats.ticks };
       this.o.note?.(`hop: ${out.at.toFixed(0)} of ${guideLength(guide.line).toFixed(0)} blocks along ${guideSaid(guide.line)} after ${f.stats.ticks} ticks, ${this.stats.routeTakeoffRockets ?? 0} rocket${this.stats.routeTakeoffRockets === 1 ? '' : 's'} (at most ${f.stats.maxError.toFixed(2)} off it, slowed ${f.stats.taps} ticks, ${Math.hypot(b.vel.x, b.vel.y, b.vel.z).toFixed(2)} a tick${b.boostTicks > 0 ? ', a rocket still burning' : ''}): the touchdown's flier has it from here`);
       this.phase = 'entry';
       return this.entry(i, ctl);
@@ -2448,7 +2448,7 @@ export class FlightBrain {
       const j = entryJoin(en.line, b);
       this.flier = new EntryFlier({ grid: o.grid, line: en.line, at: j.at, note: (m) => this.o.note?.(m) });
       this.flier.confirmed = !en.unconfirmed || this.entryOk === true;
-      this.stats.entry = { name: en.line.guide.path, joins: (this.stats.entry?.joins ?? 0) + 1, misses: this.entryMisses };
+      this.stats.entry = { name: en.line.guide.path, said: entrySaid(en.line.guide), joins: (this.stats.entry?.joins ?? 0) + 1, misses: this.entryMisses };
       this.o.note?.(`${entrySaid(en.line.guide)}: onto the line of ${en.line.guide.path} ${j.at < en.line.from ? `${(en.line.from - j.at).toFixed(0)} blocks before its hand-over window (the lead-in)` : `${(j.at - en.line.from).toFixed(0)} blocks into its hand-over window`}, ${(en.line.open - j.at).toFixed(0)} before its roof (${Math.abs(j.side).toFixed(1)} beside the line, ${Math.abs(j.up).toFixed(1)} ${j.up >= 0 ? 'over' : 'under'} it, ${j.speed.toFixed(2)} a tick, the heading ${j.heading.toFixed(0)} degrees off its own)${this.flier.confirmed ? '' : '; the proof waits for the live world'}`);
     }
     const f = this.flier;
@@ -2651,7 +2651,7 @@ export class FlightBrain {
     const en = this.target.entry;
     const f = this.flier;
     if (!en || !f) return;
-    const st = (this.stats.entry ??= { name: en.line.guide.path, joins: 1, misses: this.entryMisses });
+    const st = (this.stats.entry ??= { name: en.line.guide.path, said: entrySaid(en.line.guide), joins: 1, misses: this.entryMisses });
     const ticks = f.lineTicks + f.keepTicks;
     const roofTicks = f.roofAt !== undefined ? f.ticks - f.roofAt : undefined;
     Object.assign(st, { end: f.committed ? 'landed' : 'lost', ticks, ...(roofTicks !== undefined ? { roofTicks } : {}), maxError: f.follower.stats.maxError, taps: f.follower.stats.taps });
@@ -2670,7 +2670,7 @@ export class FlightBrain {
     this.helix = undefined;
     this.entryMisses++;
     if (this.stats.entry) this.stats.entry.misses = this.entryMisses;
-    else this.stats.entry = { name: en.line.guide.path, joins: 0, misses: this.entryMisses };
+    else this.stats.entry = { name: en.line.guide.path, said: entrySaid(en.line.guide), joins: 0, misses: this.entryMisses };
     const line = `the ${entrySaid(en.line.guide)} ${en.line.guide.path} missed (${why}) at ${hdist(b.pos, this.target).toFixed(0)} blocks from the window's end, ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} blocks a tick`;
     this.stats.goAroundReasons.push(line);
     if (this.entryMisses < this.o.entryTries && this.stats.goArounds < this.o.goArounds && i.rockets > 0) {

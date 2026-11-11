@@ -62,7 +62,7 @@ async function hop(fromName: string, from: Vec3, toName: string): Promise<HopRun
   if (!w!.stands(fromCell)) return { proven: false, said: `${head}: no place to stand at the start (no floor under its cell, or no two cells of air)` };
   const cells = entryTouchdowns(classOf, goal);
   const t0 = performance.now();
-  const d = drawHops(grid, from, goal, cells, w!.top, { ...(has('radius') ? { radius: Number(arg('radius', '192')) } : {}), ...(has('max') ? { max: Number(arg('max', '120000')) } : {}) });
+  const d = drawHops(grid, from, goal, cells, w!.top, { ...(has('radius') ? { radius: Number(arg('radius', '192')) } : {}), ...(has('max') ? { max: Number(arg('max', '120000')) } : {}), ...(has('aim') ? { aim: Number(arg('aim', '1')) } : {}) });
   const drawMs = performance.now() - t0;
   if (!d.hops.length) return { proven: false, said: `${head}: NO line (${d.why ?? d.tried.join(' | ')}; ${d.cells} cells looked at, ${drawMs.toFixed(0)} ms)` };
   const target = (h: DrawnHop): LandingTarget => ({ x: goal.x + 0.5, z: goal.z + 0.5, top: goal.y, half: 2, entry: { line: h.line, goal: { x: goal.x + 0.5, z: goal.z + 0.5, top: goal.y, half: 2 } } });

@@ -25,7 +25,7 @@ import { holdWorth, walkSeconds } from '../../skills/fly/landprice.ts'; // Track
 import { glideOptions, routeTakeoffOptions, type Ledge } from '../../skills/fly/glide.ts';
 import type { BrainOptions } from '../../skills/fly/brain.ts'; // Track F3
 import type { TakeoffRoute } from '../../skills/fly/route/takeoff.ts'; // Track F3
-import { guideSaid } from '../../skills/fly/learn/guide.ts'; // Track F9d
+import { entrySaid, guideSaid } from '../../skills/fly/learn/guide.ts'; // Track F9d, F9e
 import { HIGH_CRUISE_Y, highCruiseWanted } from '../../skills/fly/terrain.ts'; // Track BL
 import type { SkillResult } from '../../skills/types.ts';
 import { BaseProcess, PRIORITY, type ProcessKind, type ProcessStatus, type StopReason } from './manager.ts';
@@ -467,17 +467,19 @@ export class FlyProcess extends BaseProcess {
       return undefined;
     });
     if (!offer?.target.entry || this.done || this.phase !== 'flying' || !this.d.controller.active) return;
+    // (Track F9e round 2: a drawn entry is called one in these lines too)
+    const said = entrySaid(offer.target.entry.line.guide);
     const c = this.d.controller.status();
     const p = this.d.position();
     const out = p ? hdist(p, offer.target) : 0;
     if (c.phase === 'land' || c.phase === 'done' || c.phase === 'approach' || c.phase === 'route' || out < ENTRY_TAKE_MIN) {
-      this.log.info(`fly: the learned entry for ${label} comes too late for this flight (${c.phase ?? '?'}, ${Math.round(out)} blocks from its line): the landing as without it`);
+      this.log.info(`fly: the ${said} for ${label} comes too late for this flight (${c.phase ?? '?'}, ${Math.round(out)} blocks from its line): the landing as without it`);
       return;
     }
     const fallback = this.target;
     const next: FlyTarget = { ...offer.target, entry: { ...offer.target.entry, fallback }, label, goal };
     if (!this.d.controller.retarget(next)) {
-      this.log.info(`fly: the learned entry for ${label} could not be taken now (${c.phase ?? '?'}): the landing as without it`);
+      this.log.info(`fly: the ${said} for ${label} could not be taken now (${c.phase ?? '?'}): the landing as without it`);
       return;
     }
     (this as { target: FlyTarget }).target = next;
@@ -487,7 +489,7 @@ export class FlyProcess extends BaseProcess {
       if (this.done || this.phase !== 'flying' || !this.d.controller.active || this.d.controller.status().target !== next) return;
       const r = offer.confirm();
       if (r.same === 'unknown') {
-        if (asked % 20 === 0) this.log.info(`fly: the learned entry's proof for ${label} waits for the live world: ${r.line}`);
+        if (asked % 20 === 0) this.log.info(`fly: the ${said}'s proof for ${label} waits for the live world: ${r.line}`);
         continue;
       }
       this.d.controller.confirmEntry(r.same === 'same', r.line);

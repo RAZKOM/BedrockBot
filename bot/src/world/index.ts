@@ -196,6 +196,9 @@ export class World implements WorldView {
     if (i.block_runtime_id) stack.blockRuntimeId = i.block_runtime_id;
     const damage = (i as { extra?: { nbt?: { nbt?: { value?: { Damage?: { value?: unknown } } } } } }).extra?.nbt?.nbt?.value?.Damage?.value; // Track S: tool / armour wear
     if (typeof damage === 'number') stack.damage = damage;
+    // Track F9e round 2: a firework rocket's flight duration (the item NBT's `Fireworks.Flight`; a rocket the script API gives has none)
+    const flight = (i as { extra?: { nbt?: { nbt?: { value?: { Fireworks?: { value?: { Flight?: { value?: unknown } } } } } } } }).extra?.nbt?.nbt?.value?.Fireworks?.value?.Flight?.value;
+    if (typeof flight === 'number') stack.flight = flight;
     const enchants = itemEnchants(i); // Track BI: Feather Falling / Protection for the fall damage model
     if (enchants) stack.enchants = enchants;
     return stack;

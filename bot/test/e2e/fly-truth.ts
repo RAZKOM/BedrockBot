@@ -10,6 +10,7 @@
 // transport from env.ts (BOT_VERSION, BDS_TRANSPORT); FLY_AREA="x,z" pins the area; FLY_VERBOSE=1 logs
 // the bot's lines; FLY_LOG_DEBUG=1 keeps its debug lines in `logs` too.
 import { randomInt } from 'node:crypto';
+import { appendFileSync } from 'node:fs';
 import { Chat, parseOwners } from '../../src/chat/chat.ts';
 import { registerBuiltinCommands } from '../../src/chat/commands.ts';
 import { flyControlOf, type FlyControl } from '../../src/chat/commands-fly.ts';
@@ -23,6 +24,9 @@ import { buildTaskContext, type BuiltContext } from '../../src/tasks/context.ts'
 import type { ProcessManager } from '../../src/tasks/process/manager.ts';
 import { afkTask, type WalkingTask } from '../../src/tasks/registry.ts';
 import { isShulkerBox, shulkerContents } from '../../src/skills/container/chest.ts';
+import { containersOf, ensureInHotbar } from '../../src/skills/container/hotbar-moves.ts';
+import { wireItemOf } from '../../src/skills/place/place.ts';
+import { useItemTransaction } from '../../src/skills/survival/eat.ts';
 import { bdsTarget, E2E_VERSION } from './env.ts';
 import { PveTruth, type HurtRecord } from './pve-truth.ts';
 import { consoleCommand } from './skills-truth.ts';
@@ -296,6 +300,53 @@ export async function removePlatform(bot: FlyBot, c: { x: number; z: number }, t
 }
 
 /**
+ * Track F9e round 2: FLY_ROCKETS=crafted: the kit's rockets are crafted by the bot from paper and gunpowder, as a player's
+ * are (flight duration 1), where the script API gives a rocket with no flight duration at all, which burns ten ticks
+ * shorter (the Realm's flights of Track F9e: the server's body flew on its rocket after the model's had ended).
+ */
+export const CRAFTED_ROCKETS = process.env.FLY_ROCKETS === 'crafted';
+
+/** At least `n` crafted rockets (a recipe makes 3) into the inventory; they land in the first free slot (the hotbar's first when it is empty). */
+export async function craftRockets(bot: FlyBot, n: number): Promise<void> {
+  const inv = bot.built.mobility!.world.inventory;
+  const batches = Math.ceil(n / 3);
+  await bot.truth.setslot(bot.name, 20, 'paper', batches);
+  await bot.truth.setslot(bot.name, 21, 'gunpowder', batches);
+  await until(() => (inv.slots[20]?.name === 'paper' && inv.slots[21]?.name === 'gunpowder' ? true : undefined), 5000, 'the paper and the gunpowder in the inventory model');
+  const from = bot.said.length;
+  await bot.command(`!craft firework_rocket ${batches * 3}`);
+  const end = await bot.reply((x) => x.startsWith('crafted ') || x.startsWith('craft: '), from, 60_000);
+  if (!end.startsWith('crafted ')) throw new Error(`crafting the rockets: ${end}`);
+  // (the craft's output goes to the main inventory: into the hotbar, as the flight's own refill moves it)
+  const mob = bot.built.mobility!;
+  if (!inv.slots.slice(0, 9).some((x) => x?.name === 'firework_rocket')) {
+    const r = await ensureInHotbar({ hotbar: bot.task.pve!.hotbar, containers: containersOf(mob.skills), inventory: inv, score: (i) => (i.name === 'firework_rocket' ? i.count : 0), select: false, queue: (n, p) => bot.conn.queue(n as never, p as never), runtimeId: () => mob.world.self.runtimeId, waitTicks: (n) => mob.loop.waitTicks(n) });
+    if (!r.ok) throw new Error(`the crafted rockets into the hotbar: ${r.reason}`);
+  }
+  await mob.loop.waitTicks(10);
+  const at = inv.slots.slice(0, 9).findIndex((x) => x?.name === 'firework_rocket');
+  const made = inv.slots[at];
+  // (selected now: a rocket used on the tick its slot is selected is ignored by the server)
+  if (at >= 0 && inv.selected !== at) bot.task.pve!.hotbar.select(at);
+  await mob.loop.waitTicks(5);
+  // (the inventory model has the crafted stack from the craft's own answer, without the item's NBT, and a use with that
+  // item is turned down by the server, which then sends the slot as it is: one use on the ground here, so that the
+  // flight's first rocket is not the one turned down)
+  if (at >= 0 && inv.slots[at]?.flight === undefined) {
+    const feet = mob.loop.state.pos;
+    const held = wireItemOf(inv.slots[at], inv.rawItem(0, at) ?? bot.task.pve!.hotbar.rawItem(at));
+    bot.conn.queue('inventory_transaction' as never, useItemTransaction({ hotbarSlot: at, held, eye: { x: feet.x, y: feet.y + 1.62, z: feet.z } }) as never);
+    await until(() => (inv.slots[at]?.flight !== undefined ? true : undefined), 4000, 'the crafted rockets sent again with their flight duration').catch(() => undefined);
+  }
+  const raw = (inv.rawItem(0, at) ?? bot.task.pve!.hotbar.rawItem(at)) as { count?: number; extra?: { has_nbt?: unknown } } | undefined;
+  const said = `[fly-truth] crafted rockets: ${made?.count ?? 0} in hotbar slot ${at}, flight duration ${inv.slots[at]?.flight ?? 'none read'}; the wire item: count ${raw?.count ?? 'none'}, nbt ${raw?.extra?.has_nbt === undefined ? 'none' : JSON.stringify(raw.extra.has_nbt)}; every stack: ${inv.slots.map((x, i) => (x?.name === 'firework_rocket' ? `${i}:${x.count}` : '')).filter(Boolean).join(' ')}`;
+  console.log(said);
+  // (FLY_KIT_NOTE=<file>: the line kept, with the wire item's NBT: a passing run prints nothing)
+  if (process.env.FLY_KIT_NOTE) appendFileSync(process.env.FLY_KIT_NOTE, `${said}\n  ${JSON.stringify(raw, (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v)).slice(0, 600)}\n`);
+  await until(() => (inv.slots.slice(0, 9).some((x) => x?.name === 'firework_rocket') ? true : undefined), 5000, 'the crafted rockets in the hotbar');
+}
+
+/**
  * The flight kit: the inventory cleared, an elytra in slot 9, an iron chestplate worn, `rockets`
  * firework rockets in hotbar slot 0 and a shulker box holding `boxRockets` rockets (dropped at the
  * feet and picked up: it lands in the first free slot). `elytraDamage`: uses already spent.
@@ -306,7 +357,10 @@ export async function giveFlightKit(bot: FlyBot, o: { rockets?: number; boxRocke
   await truth.setHealth(name, 20);
   await truth.ok('clear', [name]);
   if (o.chestplate ?? true) await truth.equip(name, 'Chest', 'iron_chestplate');
-  if ((o.rockets ?? 64) > 0) await truth.setslot(name, 0, 'firework_rocket', o.rockets ?? 64);
+  if ((o.rockets ?? 64) > 0) {
+    if (CRAFTED_ROCKETS) await craftRockets(bot, o.rockets ?? 64);
+    else await truth.setslot(name, 0, 'firework_rocket', o.rockets ?? 64);
+  }
   await truth.setslot(name, 9, 'elytra', 1, o.elytraDamage ?? 0);
   if (o.boxRockets !== undefined && o.boxRockets > 0) {
     const feet = bot.task.position()!;

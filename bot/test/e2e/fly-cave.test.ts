@@ -45,6 +45,7 @@ import { PathStore } from '../../src/skills/fly/learn/store.ts'; // Track F9b
 import { CLS_AIR, CLS_WATER } from '../../src/world/cache/types.ts';
 import { WorldCache } from '../../src/world/cache/cache.ts';
 import { buildPlatform, E2E, FEET_Y, giveFlightKit, prepareServer, sleep, startFlyBot, teleport, truthLoaded, type FlyBot } from './fly-truth.ts';
+import { BURN_SWITCH } from '../../src/skills/fly/burn.ts';
 
 const fix = loadCaveFixture();
 const ONLY = new Set((process.env.FLY_CAVE_ONLY ?? '').split(',').filter(Boolean));
@@ -66,6 +67,9 @@ const LEARNED = process.env.FLY_CAVE_LEARNED;
 const ENTRY = process.env.FLY_CAVE_ENTRY === '1';
 /** Track F9e: FLY_CAVE_DRAWN_ENTRY=1: trip C and `round` fly with `flyCaveEntry` on (a way in drawn from the world; with no FLY_CAVE_LEARNED there is no recording at all). FLY_CAVE_ONLY=under: cave_start to cave_end by `!goto`, with `flyCaveHop` on unless FLY_CAVE_HOP=0. */
 const DRAWN_IN = process.env.FLY_CAVE_DRAWN_ENTRY === '1';
+// Track F9e round 2: FLY_ROCKETS=crafted (fly-truth.ts): the kit's rockets are a player's (flight duration 1: a burn of 19
+// to 31 ticks). FLY_CAVE_PLAIN_BURN=1: the bot takes them for the plain rocket all the same (9 to 21), as before this round.
+if (process.env.FLY_CAVE_PLAIN_BURN === '1') BURN_SWITCH.kit = false;
 /** A trip in ends along a line (a recorded one, or a drawn one): flown the plain way, its end line the walk's or the arrival's. */
 const ENTERING = (ENTRY && LEARNED !== undefined) || DRAWN_IN;
 /** Track L1: trip C the Realm's way (`!test cavestart`): flyCorridor off, the plain flight, then the rest from the landing. */
@@ -507,11 +511,16 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
   async function tripBack(run: string, i: number, stand: boolean): Promise<void> {
     const b = bot!;
     const goal = home!;
+    // (Track F9e round 2: FLY_CAVE_OUT_FROM=<waypoint>: the trip out begins there instead of on cave_start: the deep cave's ways out)
+    const fromName = process.env.FLY_CAVE_OUT_FROM ?? 'cave_start';
+    const outCell = process.env.FLY_CAVE_OUT_FROM ? world.feetCell(fix!.waypoints.get(fromName)!) : undefined;
+    if (process.env.FLY_CAVE_OUT_FROM && !outCell) throw new Error(`no waypoint ${fromName} with a floor`);
+    const begin = outCell ?? start;
     const what = `${goal.x - 0.5} ${goal.y} ${goal.z - 0.5}`;
     const break0 = b.settings.get('allowBreak');
     try {
       {
-        if (stand) await standAt(b, start);
+        if (stand || outCell) await standAt(b, begin);
         else {
           await b.command('!stop');
           await sleep(500);
@@ -533,7 +542,7 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
         const ends: number[] = [];
         // (Track F9b: and how far from cave_start the first flight left the ground: the walk before the takeoff)
         let walked: number | undefined;
-        const at0 = centre(start);
+        const at0 = centre(begin);
         const watch = setInterval(() => {
           const now = b.logs.slice(n0);
           const n = now.filter((l) => /flight: (landed|ended \()/.test(l)).length;
@@ -563,7 +572,7 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
         const outEnd = outAt >= 0 ? ends[outAt] : undefined;
         const outS = outEnd !== undefined ? (outEnd - t0) / 1000 : -1;
         const totalS = (tEnd - t0) / 1000;
-        rows.push({ run, leg: `${i} cave_start -> home`, ok: end.startsWith('arrived at') && off < 3, off, seconds: totalS, rockets, damage: dmg.total, corrections: -1, replans: -1, plans: -1, windows: flights.length, walks: -1, water: water - w0, how: `${flights.length} flights (${takeoffs.join(', ')}${logs.some((l) => l.includes('out along the learned line')) ? ', along a learned line' : ''}${logs.some((l) => l.includes('out along the drawn line')) ? ', along a drawn line' : ''}), the first ${walked === undefined ? '?' : walked.toFixed(0)} blocks from cave_start, ${roofs} roof, ${wasted} rockets fired nothing, the flight home down after ${outS.toFixed(0)} s, total ${totalS.toFixed(0)} s` });
+        rows.push({ run, leg: `${i} ${fromName} -> home`, ok: end.startsWith('arrived at') && off < 3, off, seconds: totalS, rockets, damage: dmg.total, corrections: -1, replans: -1, plans: -1, windows: flights.length, walks: -1, water: water - w0, how: `${flights.length} flights (${takeoffs.join(', ')}${logs.some((l) => l.includes('out along the learned line')) ? ', along a learned line' : ''}${logs.some((l) => l.includes('out along the drawn line')) ? ', along a drawn line' : ''}), the first ${walked === undefined ? '?' : walked.toFixed(0)} blocks from cave_start, ${roofs} roof, ${wasted} rockets fired nothing, the flight home down after ${outS.toFixed(0)} s, total ${totalS.toFixed(0)} s` });
         notes.push(`${run} ${i}: ${end}\n    ${logs.filter((l) => /takeoff|^flight: (to |landed|ended|nothing clears|route: (start|the corridor|the plan's corridor)|the rocket used)|^fly: (to |the walk|no takeoff|the takeoff|the flight came|leg )|fired nothing|the first rocket|learned line|drawn line|up out of the pit|straight up until/.test(l)).slice(0, 60).map((l) => l.slice(0, l.startsWith("fly: route takeoff") ? 1800 : 330)).join('\n    ')}`);
         // (Track F9b: a run that did not arrive: everything the flight and the trip said, to see where it went wrong)
         if (!end.startsWith('arrived at')) notes.push(`${run} ${i}, the whole log (${logs.length} lines, the first 200):\n    ${logs.slice(0, 200).map((l) => l.slice(0, 400)).join('\n    ')}`);

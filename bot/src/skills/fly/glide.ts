@@ -20,6 +20,7 @@ import { GLIDE } from '../input/physics.ts';
 import { hdist, onTarget, takeoffSky, yawDiff, yawTo, type CellQuery, type LandingTarget } from './plan.ts';
 import { assumedTop, type TerrainQuery } from './terrain.ts'; // Track BL
 import type { TakeoffRoute } from './route/takeoff.ts'; // Track F9a
+import { BURN_PLAIN, proofBurns, proofDuds, proofMixes } from './burn.ts'; // Track F9e round 2
 
 /** The ledge's fall corridor: no solid at the body's height (feet .. head + 1) this many blocks out along the heading, a block either side. */
 export const LEDGE_CORRIDOR = 10;
@@ -592,17 +593,20 @@ export async function routeTakeoff(
     if (sim.end) return landedOn(target, { ...sim, hits }) ? undefined : simWhy(target, { ...sim, hits });
     return sim.phase === 'land' || sim.phase === 'takeoff' ? `${sim.phase} after ${sim.ticks} ticks` : undefined;
   };
-  const sim = await fly();
+  // (Track F9e round 2: a line that carries its rockets' burn (burn.ts: a crafted rocket's is ten ticks longer) is proven with it)
+  const kit = flight.takeoff.guide?.line.burn;
+  const duds = kit ? proofDuds(kit) : LEARNED_PROOF_DUDS;
+  const sim = await fly(kit?.nominal);
   let sims = 1;
   const why = verdict(sim);
   if (why !== undefined) return { ok: false, line: why, sims };
-  const burns = o.burns ?? (learned ? LEARNED_PROOF_BURNS : PROOF_BURNS);
+  const burns = o.burns ?? (kit ? proofBurns(kit) : learned ? LEARNED_PROOF_BURNS : PROOF_BURNS);
   for (const burn of burns) {
     const x = verdict(await fly(burn));
     sims++;
     if (x !== undefined) return { ok: false, line: `clear at the nominal burn; ${x} at a burn of ${burn} ticks`, sims };
   }
-  const mixes = learned && !o.burns ? LEARNED_PROOF_MIXES : [];
+  const mixes = learned && !o.burns ? (kit ? proofMixes(kit) : LEARNED_PROOF_MIXES) : [];
   for (const [first, rest] of mixes) {
     const x = verdict(await fly((rocket) => (rocket === 0 ? first : rest)));
     sims++;
@@ -613,7 +617,7 @@ export async function routeTakeoff(
   // caller flies it only when no other take survives a dud first rocket (route/takeoff.ts planTakeoffRoute)
   let dud: { ok: boolean; line: string } | undefined;
   if (learned && !o.burns) {
-    for (const burn of LEARNED_PROOF_DUDS) {
+    for (const burn of duds) {
       const x = verdict(await fly(burn, true));
       sims++;
       if (x !== undefined) {
@@ -621,11 +625,11 @@ export async function routeTakeoff(
         break;
       }
     }
-    dud ??= { ok: true, line: `and with a first rocket that fires nothing (the next at ${LEARNED_PROOF_DUDS.join(', ')})` };
+    dud ??= { ok: true, line: `and with a first rocket that fires nothing (the next at ${duds.join(', ')})` };
   }
   const s = sim.stats;
   const turned = s.routeHeadingAt !== undefined ? `the heading from ${Math.round(s.routeExitYaw ?? yaw)} at the exit to the target's by tick ${s.routeHeadingAt}` : `the heading ${Math.round(s.routeExitYaw ?? yaw)} from the exit on`;
-  return { ok: true, ticks: sim.ticks + hdist(sim.body.pos, target) / PROOF_CRUISE_SPEED, ...(s.routeSkyAt !== undefined ? { out: s.routeSkyAt } : {}), ...(dud ? { dud: dud.ok } : {}), line: `clear at burns of ${[GLIDE.boostTicks, ...burns].join(', ')} ticks${mixes.length ? ` and of ${mixes.map(([a, b]) => `${a} then ${b}`).join(', ')}` : ''}${dud?.ok ? ` ${dud.line}` : ''}${dud && !dud.ok ? `; ${dud.line}` : ''} (through the exit at tick ${s.routeTakeoffTicks ?? '?'}, ${s.routeSkyAt !== undefined ? `open sky at tick ${s.routeSkyAt}` : 'no open sky in the simulation'}, ${turned}${s.steered ? `, steered ${s.steered} ticks` : ''})`, sims };
+  return { ok: true, ticks: sim.ticks + hdist(sim.body.pos, target) / PROOF_CRUISE_SPEED, ...(s.routeSkyAt !== undefined ? { out: s.routeSkyAt } : {}), ...(dud ? { dud: dud.ok } : {}), line: `clear at burns of ${[kit?.nominal ?? GLIDE.boostTicks, ...burns].join(', ')} ticks${mixes.length ? ` and of ${mixes.map(([a, b]) => `${a} then ${b}`).join(', ')}` : ''}${dud?.ok ? ` ${dud.line}` : ''}${dud && !dud.ok ? `; ${dud.line}` : ''} (through the exit at tick ${s.routeTakeoffTicks ?? '?'}, ${s.routeSkyAt !== undefined ? `open sky at tick ${s.routeSkyAt}` : 'no open sky in the simulation'}, ${turned}${s.steered ? `, steered ${s.steered} ticks` : ''})`, sims };
 }
 
 /** Track F9e: a hop's simulation gives up this many ticks after its line's own (the touchdown's brake and sink). */
@@ -671,16 +675,18 @@ export async function routeHop(
     far = Math.max(far, off);
     return undefined;
   };
-  const sim = await fly();
+  // (Track F9e round 2: with the burn of the rockets the line carries)
+  const kit = flight.takeoff.guide?.line.burn ?? BURN_PLAIN;
+  const sim = await fly(kit.nominal);
   let sims = 1;
   const why = verdict(sim);
   if (why !== undefined) return { ok: false, line: why, sims };
-  for (const burn of LEARNED_PROOF_BURNS) {
+  for (const burn of proofBurns(kit)) {
     const x = verdict(await fly(burn));
     sims++;
     if (x !== undefined) return { ok: false, line: `clear at the nominal burn; ${x} at a burn of ${burn} ticks`, sims };
   }
-  for (const [first, rest] of LEARNED_PROOF_MIXES) {
+  for (const [first, rest] of proofMixes(kit)) {
     const x = verdict(await fly((rocket) => (rocket === 0 ? first : rest)));
     sims++;
     if (x !== undefined) return { ok: false, line: `clear at every single burn; ${x} with a first rocket of ${first} ticks and ${rest} for the later ones`, sims };
@@ -688,7 +694,7 @@ export async function routeHop(
   // (a first rocket that fires nothing: a flight that does not come to the goal then, and comes down with no hard hit and
   // dry, is no refusal: the body stands again short of the goal and the trip goes on from there. It is said: `dud` false)
   let dud: string | undefined;
-  for (const burn of LEARNED_PROOF_DUDS) {
+  for (const burn of proofDuds(kit)) {
     const d = await fly(burn, true);
     const x = verdict(d);
     sims++;
@@ -697,7 +703,7 @@ export async function routeHop(
     dud = `with a first rocket that fires nothing it comes down short of the goal with no hit (${x} at a burn of ${burn} ticks for the one after it)`;
     break;
   }
-  return { ok: true, ticks: sim.ticks, far, sims, ...(dud !== undefined ? { dud: false } : {}), line: `standing within ${far.toFixed(1)} of the goal at burns of ${[GLIDE.boostTicks, ...LEARNED_PROOF_BURNS].join(', ')} ticks and of ${LEARNED_PROOF_MIXES.map(([a, b]) => `${a} then ${b}`).join(', ')}${dud !== undefined ? `; ${dud}` : ` and with a first rocket that fires nothing (the next at ${LEARNED_PROOF_DUDS.join(', ')})`}; ${sim.ticks} ticks at the nominal burn on ${sim.stats.rockets} rocket${sim.stats.rockets === 1 ? '' : 's'}` };
+  return { ok: true, ticks: sim.ticks, far, sims, ...(dud !== undefined ? { dud: false } : {}), line: `standing within ${far.toFixed(1)} of the goal at burns of ${[kit.nominal, ...proofBurns(kit)].join(', ')} ticks and of ${proofMixes(kit).map(([a, b]) => `${a} then ${b}`).join(', ')}${dud !== undefined ? `; ${dud}` : ` and with a first rocket that fires nothing (the next at ${proofDuds(kit).join(', ')})`}; ${sim.ticks} ticks at the nominal burn on ${sim.stats.rockets} rocket${sim.stats.rockets === 1 ? '' : 's'}` };
 }
 
 /** The vertical takeoff's straight climb: the lowest and highest hand-over over the start, and the step between the heights tried. */

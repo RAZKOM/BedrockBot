@@ -25,8 +25,9 @@
 //
 // A hop that is not proven is not flown: the trip goes on as it would without one.
 import type { Vec3 } from '../../../connection/types.ts';
+import { BURN_PLAIN, burnBlocks, type BurnRange } from '../burn.ts';
 import type { RouteGrid } from '../route/grid.ts';
-import { DRAW_BERTHS, DRAW_CAP_MAX, DRAW_HEADROOM, DRAW_LIFT, DRAW_ROCKET_TICK, DRAW_THIN, floodTo, lineSpeeds, pull, rememberedGrid, resample, rise, round } from './draw.ts';
+import { DRAW_BERTHS, DRAW_CAP_MAX, DRAW_HEADROOM, DRAW_LIFT, DRAW_ROCKET_TICK, DRAW_THIN, floodTo, lineSpeeds, pull, rememberedGrid, resample, rise, round, type DrawnWay } from './draw.ts';
 import { ticksOf } from './drawin.ts';
 import { ENTRY_KEEP_LAST, type EntryLine } from './entry.ts';
 import { guideLength, type Guide } from './guide.ts';
@@ -38,6 +39,19 @@ export const HOP_LAST_FROM = 56;
 export const HOP_LAST_TO = 44;
 /** A hop shorter than this (blocks of line) is not flown: its takeoff's rocket would be the last one, and may burn past the touchdown. */
 export const HOP_MIN = HOP_LAST_TO + 4;
+/** The brake's room before the touchdown that the longest burn's flight is kept clear of (blocks), and the room the last rocket's place has. */
+export const HOP_BRAKE_ROOM = 9;
+export const HOP_LAST_ROOM = HOP_LAST_FROM - HOP_LAST_TO;
+
+/**
+ * Track F9e round 2: the last rocket's place and the least line for the rockets at hand (burn.ts): the plain rocket's are
+ * the numbers above (21 ticks: 35 blocks of flight); a crafted one burns up to 31 ticks, 52 blocks, so its last rocket goes
+ * 73 to 61 blocks before the touchdown and a line under 65 is walked.
+ */
+export function hopLast(burn: BurnRange = BURN_PLAIN): { from: number; to: number; min: number } {
+  const to = Math.round(burnBlocks(burn.max)) + HOP_BRAKE_ROOM;
+  return { from: to + HOP_LAST_ROOM, to, min: to + 4 };
+}
 /** The speed on the touchdown (blocks a tick), the last HOP_SLOW blocks coming down to it. */
 export const HOP_END = 0.75;
 export const HOP_SLOW = 12;
@@ -64,7 +78,8 @@ export interface DrawnHop {
  * One hop's line from the flood's way to a touchdown cell, or the words for why it is none. `goal`: the goal's own cell
  * (the proof measures against it; the touchdown may be a cell beside it).
  */
-export function drawHop(grid: RouteGrid, from: Vec3, way: { x: number; y: number; z: number; steps: number; cost: number; way: { x: number; y: number; z: number }[] }, goal: { x: number; y: number; z: number }, berth: number, beside: boolean, name: string): { guide: Guide; line: EntryLine; hand: number; climb: number } | string {
+export function drawHop(grid: RouteGrid, from: Vec3, way: { x: number; y: number; z: number; steps: number; cost: number; way: { x: number; y: number; z: number }[] }, goal: { x: number; y: number; z: number }, berth: number, beside: boolean, name: string, burn?: BurnRange): { guide: Guide; line: EntryLine; hand: number; climb: number } | string {
+  const last = hopLast(burn);
   const sx = Math.floor(from.x);
   const sy = Math.floor(from.y + 1e-6);
   const sz = Math.floor(from.z);
@@ -77,7 +92,7 @@ export function drawHop(grid: RouteGrid, from: Vec3, way: { x: number; y: number
   const points = [{ ...from }, ...line, td];
   const n = points.length;
   const length = guideLength({ points });
-  if (length < HOP_MIN) return `${length.toFixed(0)} blocks of line: too short to fly (a rocket burns up to 35 blocks of flight; under ${HOP_MIN} it is walked)`;
+  if (length < last.min) return `${length.toFixed(0)} blocks of line: too short to fly (a rocket burns up to ${Math.round(burnBlocks((burn ?? BURN_PLAIN).max))} blocks of flight; under ${last.min} it is walked)`;
   const speeds = lineSpeeds(points).map((v, i) => Math.min(v, HOP_END + ((DRAW_CAP_MAX - HOP_END) * Math.min(HOP_SLOW, n - 1 - i)) / HOP_SLOW));
   const p1 = points[Math.min(n - 1, 4)]!;
   let lo = Infinity;
@@ -97,10 +112,35 @@ export function drawHop(grid: RouteGrid, from: Vec3, way: { x: number; y: number
     landed: true,
     drawn: true,
     speeds,
-    hop: { from: Math.max(1, length - HOP_LAST_FROM), to: length - HOP_LAST_TO },
+    hop: { from: Math.max(1, length - last.from), to: length - last.to },
+    ...(burn ? { burn } : {}),
   };
   const centre = { x: goal.x + 0.5, y: goal.y, z: goal.z + 0.5 };
   return { guide, line: { guide, lead: 0, open: 0, from: 0, to: 0, touchdown: td, recorded: { ...td }, off: 0, goal: centre }, hand: length - HOP_HAND, climb: hi - lo };
+}
+
+/**
+ * Track F9e round 2: the hops drawn along one way of cells (the flood's, or a piece of one: learn/under.ts) to a
+ * touchdown cell `c`, with the berths of DRAW_BERTHS that give different lines, the widest first.
+ */
+export function drawHopsOn(g: RouteGrid, from: Vec3, way: DrawnWay, goal: { x: number; y: number; z: number }, c: { x: number; y: number; z: number }, burn?: BurnRange): { hops: DrawnHop[]; tried: string[] } {
+  const hops: DrawnHop[] = [];
+  const tried: string[] = [];
+  const seen: string[] = [];
+  for (const [berth, beside] of DRAW_BERTHS.flatMap((b) => [[b, true], [b, false]] as const)) {
+    const at = `${way.steps} cells of the flood to the cell ${c.x - goal.x} ${c.y - goal.y} ${c.z - goal.z} from the goal's, a berth of ${berth}${beside ? '' : ' over the floor and under the roof'}`;
+    const d = drawHop(g, from, way, goal, berth, beside, `hop ${hops.length + 1}`, burn);
+    if (typeof d === 'string') {
+      tried.push(`${at}: ${d}`);
+      if (/too short|of air over the start/.test(d)) break;
+      continue;
+    }
+    const sig = d.guide.points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)}`).join(';');
+    if (seen.includes(sig)) continue;
+    seen.push(sig);
+    hops.push({ ...d, cell: { x: c.x, y: c.y, z: c.z }, steps: way.steps, berth, at });
+  }
+  return { hops, tried };
 }
 
 /**
@@ -109,36 +149,23 @@ export function drawHop(grid: RouteGrid, from: Vec3, way: { x: number; y: number
  * the berths of DRAW_BERTHS that give different lines, the widest first. `tried` says what the others failed on; `why`
  * when there is nothing at all.
  */
-export function drawHops(grid: RouteGrid, from: Vec3, goal: { x: number; y: number; z: number }, cells: readonly { x: number; y: number; z: number }[], top: number, o: { radius?: number; max?: number; stands?: (c: { x: number; y: number; z: number }) => boolean } = {}): { hops: DrawnHop[]; cells: number; tried: string[]; why?: string } {
+export function drawHops(grid: RouteGrid, from: Vec3, goal: { x: number; y: number; z: number }, cells: readonly { x: number; y: number; z: number }[], top: number, o: { radius?: number; max?: number; stands?: (c: { x: number; y: number; z: number }) => boolean; burn?: BurnRange; aim?: number } = {}): { hops: DrawnHop[]; cells: number; tried: string[]; why?: string } {
   const g = rememberedGrid(grid, from);
   const stands = o.stands ?? ((c: { x: number; y: number; z: number }): boolean => g.solid(c.x, c.y - 1, c.z) && !g.solid(c.x, c.y, c.z) && !g.solid(c.x, c.y + 1, c.z));
   const tried: string[] = [];
   let looked = 0;
   for (const c of cells) {
     if (!stands(c)) continue;
-    const f = floodTo(g, from, c, { radius: o.radius ?? HOP_RADIUS, max: o.max ?? HOP_FLOOD_MAX, top });
+    const f = floodTo(g, from, c, { radius: o.radius ?? HOP_RADIUS, max: o.max ?? HOP_FLOOD_MAX, top, ...(o.aim !== undefined ? { aim: o.aim } : {}) });
     looked += f.cells;
     if (!f.way) {
       tried.push(`no way under the roof to the cell ${c.x - goal.x} ${c.y - goal.y} ${c.z - goal.z} from the goal's (${f.cells} cells looked at)`);
       // (a goal the flood does not reach is not reached by way of the cell beside it either: one flood says so)
       break;
     }
-    const hops: DrawnHop[] = [];
-    const seen: string[] = [];
-    for (const [berth, beside] of DRAW_BERTHS.flatMap((b) => [[b, true], [b, false]] as const)) {
-      const at = `${f.way.steps} cells of the flood to the cell ${c.x - goal.x} ${c.y - goal.y} ${c.z - goal.z} from the goal's, a berth of ${berth}${beside ? '' : ' over the floor and under the roof'}`;
-      const d = drawHop(g, from, f.way, goal, berth, beside, `hop ${hops.length + 1}`);
-      if (typeof d === 'string') {
-        tried.push(`${at}: ${d}`);
-        if (/too short|of air over the start/.test(d)) break;
-        continue;
-      }
-      const sig = d.guide.points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)}`).join(';');
-      if (seen.includes(sig)) continue;
-      seen.push(sig);
-      hops.push({ ...d, cell: { x: c.x, y: c.y, z: c.z }, steps: f.way.steps, berth, at });
-    }
-    return { hops, cells: looked, tried };
+    const on = drawHopsOn(g, from, f.way, goal, c, o.burn);
+    tried.push(...on.tried);
+    return { hops: on.hops, cells: looked, tried };
   }
   return { hops: [], cells: looked, tried, why: tried.length ? tried[tried.length - 1]! : 'no cell a body can stand in within reach of the goal' };
 }
