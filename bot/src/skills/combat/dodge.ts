@@ -30,6 +30,8 @@ export const DODGE_BAND: Readonly<Record<ShooterKind, readonly [number, number]>
 export const DODGE_CLOSE = 6;
 /** Turn round at most this often (ticks) without a reason: keeps the bot near where it was. */
 export const DODGE_FLIP_TICKS = 60;
+/** Track M2: the dodge keeps this much safe ground behind it on the way away from the shooters (an arrow's knockback). */
+export const EDGE_MARGIN = 1.3;
 
 export interface DodgeShooter {
   pos: Vec3;
@@ -141,7 +143,11 @@ export function dodgeStep(i: DodgeInput): DodgeStep | undefined {
   // arrow from 3 blocks flies 2 ticks, too short to step out of its way)
   const witch = i.shooters.some((o) => o.kind === 'witch' && Math.hypot(o.pos.x - i.me.x, o.pos.z - i.me.z) < DODGE_BAND.witch[0]);
   const [lo, hi] = DODGE_BAND[witch ? 'witch' : s.kind];
-  const out = witch || d < DODGE_CLOSE ? 1.5 : d < lo ? 0.6 : d > hi ? -0.3 : 0.25;
+  // Track M2: an edge behind (no safe cell 1.3 out on the way away from them, the way an arrow knocks the body): drift back
+  // in, whatever the band says. On bds-gaunt the dodge stood at a plateau's edge and an arrow put it over (8 blocks, 6 health)
+  const yb = Math.floor(i.me.y + 1e-3);
+  const edgeBehind = !safeCell(i.grid, i.me.x + ux * EDGE_MARGIN, yb, i.me.z + uz * EDGE_MARGIN);
+  const out = edgeBehind ? -0.5 : witch || d < DODGE_CLOSE ? 1.5 : d < lo ? 0.6 : d > hi ? -0.3 : 0.25;
   const heading = (dir: 1 | -1): { x: number; z: number } => {
     const tx = -uz * dir;
     const tz = ux * dir;
@@ -167,7 +173,18 @@ export function dodgeStep(i: DodgeInput): DodgeStep | undefined {
       h = h2;
     } else if (clearAlong(i.grid, i.me, ux, uz)) {
       h = { x: ux, z: uz };
-    } else return undefined;
+    } else {
+      // Track M2: at an edge on the way out (a cliff, a ledge's end, water): straight across with no drift out, this way or
+      // the other, so the bot runs along the edge instead of giving the body to the ordinary flight (on bds-gaunt that
+      // flight took the 8-block drop off a plateau's edge in 3 runs of 3, 6 health each)
+      const along = ([dir, other] as const).map((d) => ({ d, x: -uz * d, z: ux * d })).find((a) => clearAlong(i.grid!, i.me, a.x, a.z));
+      if (!along) return undefined;
+      if (along.d !== dir) {
+        dir = along.d;
+        flipped = !flipped;
+      }
+      h = { x: along.x, z: along.z };
+    }
   }
   return { yaw: yawTowards(h.x, h.z), dir, flipped, d };
 }

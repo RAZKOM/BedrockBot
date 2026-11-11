@@ -67,6 +67,7 @@ function setup(opts: { home?: Vec3; shelter?: Vec3; night?: PveNight; guard?: bo
     inactive: () => false,
     options: { guard: { on: opts.guard ?? false, radius: 16 } },
   });
+  pve.settings.set('mobReflex', false); // the flee as it runs without the reflex (on by default since Track M2)
   const kit = new FakeKit(self);
   pve.kit = () => kit;
   src.emit('start_game', { entity_id: -42n });

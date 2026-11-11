@@ -7,7 +7,7 @@
 // Every 10 ticks (when spawned and alive), one inventory action at a time, in this order:
 //   armour  a better piece is in the inventory (checked after inventory changes and on spawn)
 //   eat     food < 18, or health < 10 and food < 20 (eat.ts), unless fighting (health >= 6), digging,
-//           placing, or walking while not urgent (food >= 6 and health >= 10)
+//           placing, or walking while not urgent (food above 10 and health >= 10; food 6 and up before Track M2)
 //   keeper  throwaway blocks to the hotbar, junk out when full (keeper.ts), not while fighting
 // Hooks it installs: `toolOk` on the Digger and the CombatController (tools.ts), `cellCost` on the
 // Navigator (nav/avoidance.ts). Settings come through an injected getter (`toolWearLimit`,
@@ -117,6 +117,12 @@ export interface SurvivalDeps {
   logger?: Logger;
 }
 
+/** Track M2: the automatic bite counts as urgent (it goes in during a walk) from this food down; a body below 7 cannot sprint. */
+export const EAT_BEFORE_SPRINT_LOST = 10;
+/** Track M2: the automatic bite goes in during a walk (it waits for the walk's end otherwise). */
+export function eatWhileWalking(food: number, health: number): boolean {
+  return food <= EAT_BEFORE_SPRINT_LOST || health < 10;
+}
 const STEP_TICKS = 10;
 const KEEPER_EVERY = 100;
 const HIT_PAUSE_TICKS = 60;
@@ -376,7 +382,9 @@ export class SurvivalKit {
       }
     }
     if (s.autoEat && wantsToEat(self) && this.n >= this.pauseEatUntil) {
-      const urgent = self.food < 6 || self.health < 10;
+      // Track M2: from food 10 down the bite goes in even while walking: below 7 the body cannot sprint (a flight on foot at
+      // food 6 was caught by zombies in the bare idle nights of Track M1)
+      const urgent = eatWhileWalking(self.food, self.health);
       const blocked = (this.fighting() && self.health >= 6) || handsBusy || (sk.nav.busy && !urgent);
       if (!blocked && chooseFood(this.d.world.inventory.slots, self)) {
         void this.exclusive(() => this.eater.eat(), undefined);

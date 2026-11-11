@@ -517,9 +517,10 @@ throws and landings, `combatlog`, and sets effects, `effects`):
 | Cover | a 2-high pillar between, or the bot in a 2-deep hole: 0 shots from a held skeleton; a pillager held with slowness shot none (not a measurement of its rule) |
 | Corner | a free skeleton follows round a wall: 3 shots after the bot was behind it, 1 hit |
 
-### The reflex (`skills/combat/reflex.ts`, setting `mobReflex`, off since round 2)
+### The reflex (`skills/combat/reflex.ts`, setting `mobReflex`, off in round 2, on again since Track M2)
 
-**Why it ships off** (round 2, ADR 0079 decision 15): the bar for it on was the live kit's deaths and damage in `mixed-8` (and
+On by default since Track M2 (ADR 0079 decision 26, the numbers in "Track M2" below). **Why it shipped off in round 2**
+(ADR 0079 decision 15): the bar for it on was the live kit's deaths and damage in `mixed-8` (and
 every other live-kit cell) not worse than the base code at the same number of runs. On the final code, `mixed-8`, 10 runs live
 and 5 with Knockback II (bds-gaunt and bds-pve):
 
@@ -751,6 +752,131 @@ arrow is about 4 every 3 s from up to 15 blocks: a lone skeleton needs 10 s of c
 The bare dig-in does not save `seal-5` (4 skeletons and a witch): the dig times out or is cancelled when the arrows push the
 body more than 1.5 off the column; the shell of blocks does (3 of 3). The live kit's `mixed-8` stays at about 1 death in 10:
 the witch's poison takes the bot to 1 health in 9 of 10 runs whatever the reflex does.
+
+## Track M2: the reflex judged, real ground, `!test mobs` for the Realm
+
+ADR 0079 addendum (decisions 17 to 27). Everything here ran on bds-pve or bds-gaunt (BDS 1.26.60, normal difficulty) unless
+it says offline. `gaunt-mobs.test.ts` gained `MOBS_REPEAT` (n runs a cell), `MOBS_AB=<setting>` (every run once with the
+setting off and once on, alternating), `MOBS_SET=a=true,b=false`, `MOBS_ROW` (one JSON line a run) and `MOBS_TRACE_ALL`.
+
+### The reflex, 30 runs a side
+
+`mixed-8` (zombie, skeleton, creeper, spider, phantom, baby zombie, witch, husk), 60 s, `MOBS_AB=mobReflex`. Damage is the mean
+a run; "witch" is her harming and poison; "potions near" the splash potions that broke within 4 of the bot of those she threw.
+
+| series (code) | kit | side | runs | deaths | damage | witch | other | lowest health (median) | potions near | friendly |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `final3` (before decision 18) | live | off | 30 | 1 | 20.7 | 14.9 | 5.9 | 3.2 | 26 / 72 | 0 |
+| `final3` | live | on | 30 | 0 | 22.4 | 20.5 | 1.9 | 1.3 | 54 / 62 | 0 |
+| `final4` (the final code) | live | off | 30 | 4 | 22.0 | 15.3 | 6.7 | 2.0 | 31 / 72 | 0 |
+| `final4` | live | on | 30 | **0** | **17.0** | 15.5 | 1.5 | 5.1 | 32 / 42 | 0 |
+| bare, `mobDodge` on | bare | off | 30 | 20 | 23.8 | 0 | 23.8 | 0 | - | 0 |
+| bare, `mobDodge` on | bare | on | 30 | **0** | **0.3** | 0 | 0.3 | 20 | - | 0 |
+| bare, `mobDodge` on (the final code) | bare | off | 30 | 17 | 22.0 | 0 | 22.0 | 0 | - | 0 |
+| bare, `mobDodge` on (the final code) | bare | on | 30 | **0** | **1.5** | 0.7 | 0.8 | 20 | 4 / 5 | 0 |
+
+What cost the reflex in `final3` was the witch: with the melee mobs dying in place the bot stood at home and her potions landed
+(54 of 62 against 26 of 72). The potion side step fired 26 times in those 30 runs and did not change it (a 12-tick step is
+3.4 blocks, inside a splash's 4). The way to her had to be clear of melee mobs before she went first, and in `mixed-8` it never
+was. Decision 18: with the reflex on the way need not be clear (the mobs on it are struck in passing). In `final4` she throws 42
+potions in 30 runs against 72, the potion step has nothing left to do (0 steps: it is skipped while guard fights her), and the
+live kit's damage is below the reflex-off side. The bare series ran on the code before decision 18, which does not touch a bot with
+no blade.
+
+**The final gauntlet** (3 runs a cell, 99 runs a column; deaths / mean damage; live on bds-pve, bare on bds-gaunt). `old
+defaults` is the reflex and the dodge off, `defaults` the reflex on (decision 26), `recommended` for a bare-handed bot both on.
+
+| cell | bare, old defaults | bare, defaults | bare, `mobDodge` on, reflex off | bare, recommended | live, reflex off | live, defaults |
+|---|---|---|---|---|---|---|
+| zombie-1 | 1/3 7.3 | 0/3 4.0 | 0/3 4.0 | 0/3 2.0 | 0/3 0 | 0/3 0 |
+| stray-1 | 1/3 21.3 | 1/3 21.7 | 0/3 0 | 0/3 0 | 0/3 0 | 0/3 0 |
+| witch-1 | 3/3 30.3 | 3/3 29.3 | 0/3 17.3 | 0/3 0 | 0/3 0 | 0/3 0 |
+| enderman-1 | 0/3 7.0 | 1/3 21.0 | 2/3 16.3 | 1/3 14.0 | 0/3 0 | 0/3 1.2 |
+| pillager-1 | 3/3 25.3 | 3/3 26.0 | 0/3 3.7 | 0/3 9.0 | 0/3 0 | 0/3 0.2 |
+| zombie-2 | 1/3 17.0 | 0/3 15.0 | 0/3 21.0 | 0/3 11.0 | 0/3 0.7 | 0/3 0 |
+| zombie-4 | 0/3 18.0 | 0/3 6.0 | 1/3 17.0 | 0/3 3.0 | 0/3 1.8 | 0/3 0.5 |
+| skeleton-2 | 2/3 26.7 | 3/3 28.0 | 0/3 2.7 | 0/3 1.7 | 0/3 0.8 | 0/3 0 |
+| skeleton-4 | 3/3 25.7 | 3/3 26.7 | 0/3 5.3 | 0/3 7.0 | 0/3 2.4 | 0/3 1.7 |
+| creeper-4 | 2/3 23.6 | 0/3 0 | 1/3 24.3 | 0/3 0 | 0/3 9.0 | 0/3 0 |
+| witch-2 | 3/3 25.3 | 3/3 28.7 | 0/3 21.3 | 0/3 8.3 | 0/3 1.7 | 0/3 0.7 |
+| seal-5 | 3/3 25.0 | 3/3 24.7 | 0/3 9.0 | 0/3 6.3 | 0/3 11.5 | 0/3 13.2 |
+| mixed-4 | 0/3 10.3 | 1/3 18.3 | 0/3 9.0 | 1/3 12.3 | 0/3 3.3 | 0/3 0.8 |
+| mixed-8 | 3/3 25.3 | 1/3 17.0 | 2/3 27.0 | 0/3 1.3 | 0/3 22.7 | 0/3 22.0 |
+| act-mine | 1/3 20.7 | 0/3 18.7 | 0/3 10.8 | 0/3 9.3 | 0/3 1.2 | 0/3 0.7 |
+| act-eat | 0/3 17.0 | 0/3 12.3 | 2/3 22.0 | 0/3 7.5 | 0/3 4.2 | 0/3 1.0 |
+| act-landed | 0/3 20.0 | 1/3 16.7 | 0/3 4.3 | 0/3 2.7 | 0/3 1.6 | 0/3 0 |
+| the other 16 cells | 0 deaths | 0 deaths | 0 deaths | 0 deaths | 0 deaths | 0 deaths |
+| **all 99** | **26**, 1312 | **23**, 1128 | **8**, 832 | **2**, 371 | **0**, 193 | **0**, 130 |
+
+Friendly hits in all 594 runs: 0. Bare at the defaults the archers and the witch still kill (`skeleton-2`, `skeleton-4`,
+`pillager-1`, `witch-1`, `witch-2`, `seal-5`, 18 of the 23 deaths): the reflex does not reach them and the dodge that does is
+off. The bare columns before `defaults` ran on the code before decision 18, which does not touch a bot with no blade.
+
+### The idle nights
+
+Dusk to dawn in the open, natural spawning, about 550 s.
+
+| kit, settings | nights | deaths | damage | lowest |
+|---|---|---|---|---|
+| bare, defaults | 1 | 1 | 70 | 0 |
+| bare, `mobDodge` and `mobReflex` on (bds-gaunt) | 3 | 0 | 24, 32, 54 | 10, 8, 6 |
+| bare, `mobDodge` and `mobReflex` on (bds-pve) | 2 | 1 | 35, 66 | 3, 1 |
+| bare, `mobDodge` and `mobReflex` on (bds-gaunt, later) | 2 | 3 (2 and 1) | 74, 40 | 3, 4 |
+| bare, `mobReflex` on (the defaults) | 1 | 3 | 102 | 0 |
+| live, `mobReflex` on | 3 | 0 | 1.9, 2.0, 1.6 | 18.1, 18.6, 18.4 |
+
+The bare death at the defaults, tick by tick (the trace in the gauntlet's trace file): guard chased a skeleton 20 blocks across the
+open (arrows 4 and 3), turned on a spider at 10 health, followed it another 20 blocks with the spider staying 2.3 to 3.1 away and
+no strike landing, then fled at 6 health; the spider is faster than the flight and bit 2 a second to death. Bare at the defaults
+nothing strikes the spider while guard walks after it; with the reflex it is struck as it comes in. The bare death with the
+recommended settings (bds-pve, which spawns witches at night): a witch's poison took the bot to 1 health, the dodge kept it
+running 13 from her for 20 s (she follows; a fist does not kill her), and an enderman hit it for 7. The later bds-gaunt nights:
+endermen 3 of the deaths (7 a hit, on a bot fleeing at 5 to 6 health), a zombie with a zombie horse beside it at 8 health,
+skeletons on a bot fleeing at 1 to 4 health, and the witch's poison to 1. Not met: 4 deaths in 7 recommended nights, 3 in the
+one night at the new defaults. A bare-handed bot's floor at night is out of sight (the seal-in or a roof), not a run: every
+night death was a bot running at low health.
+
+### The dodge on real ground (`test/e2e/gaunt-dodge.test.ts`)
+
+Bare, `mobDodge` on, two skeletons, 60 s a run, 3 runs a cell; each cell built round the bot (trees, a slope of 1 in 2, a cliff
+8 high 4 from the bot, a water pool, a lava pool 3 out, a cave mouth, a ledge 5 high).
+
+| cell | deaths | fall damage | burns | in water at the end | notes |
+|---|---|---|---|---|---|
+| trees | 0 | 0 | 0 | no | 0 to 3 damage |
+| cliff | 0 | 6, 5, 6 | 0 | no | over the edge in every run: once while dodging (an arrow's knockback at the edge), twice on the flight's run away |
+| water | 1 of 3 | 6 in 1 | 0 | no | a death to arrows; never stuck in the water |
+| cave | 0 | 6, 6, 13 | 0 | no | once while dodging, twice on the flight (the 13 a drop of 17 on the way home) |
+| lava, slope, ledge | not completed on bds-pve | | | | the spots far out did not load (a harness fault); on bds-gaunt before: lava no burns, slope 0 falls, ledge 0 falls |
+
+Never a step onto a cell not known safe while dodging (`unsafeWhileDodging` 0 in every run). Not met: falls that cost health.
+Two causes: the knockback of an arrow on a body near an edge (the dodge now drifts back in when the cell 1.3 behind is not safe,
+and runs along the edge when straight out is not clear; it did not end them), and the flight's own run away,
+which is nav's walk and takes a hurting fall at its last level. What it would still take: an edge margin of about 2 blocks for
+the dodge (knockback is about 1), and a nav goal option that never takes a fall that costs health (nav is not this track's).
+
+With the live kit, sloped and stepped ground and a ledge (`DODGE_KIT=live`, a witch, a spider or a skeleton below or above the
+bot, 3 runs a cell, bds-pve and bds-gaunt): 18 of 18 cleared, no unreachable verdict, no fall. Before decision 20 the witch on
+a ledge 5 below was written off as unreachable ("closest 6.0, now 8.5") and the spider once.
+
+### `!test mobs` on the Realm
+
+The first line now says the two game rules and the ground: `test mobs zombie4: 2 runs of 4 mobs (30 s each) from <x y z>,
+keepInventory on, mobGriefing off, ground flat (16/16 level), name tag m1t...`. It refuses: keepInventory off or unanswered (`test mobs:
+keepInventory is off: a death would drop the kit; not running`), a set with a creeper while mobGriefing is on unless the command ends in `force`, and a ring 7 out
+that is mostly not standable or a slope (`test mobs: the ring 7 blocks round the bot is a slope (its mobs would go downhill):
+a slope (5/16 level, 9 on other levels); find flat open ground`). Ground words: `flat` (16 of 16 points level), `mostly flat`
+(12 or more), `a slope` (most points standable within 8 levels but fewer than 12 level), `rough`, `unknown`.
+
+### The elytra flee (`fleeFly`, off) measured
+
+`test/e2e/gaunt-fleefly.test.ts`, bare with an elytra and rockets, home 200 out. Before the hand-over (decision 22): 4 of 4
+deaths in a pen with 2 or 4 zombies; `!fly home` was accepted ("vertical takeoff clear") but the flee and guard took the body back
+the next tick. With the hand-over: in a pen with 4 zombies 2 of 3 took off 0.7 s after the ask (health 7 to 4), then the flight
+landed itself ("health low") 3 to 7 s later 18 to 31 blocks away; 1 died with the fly floor never reached. In the open the flee
+outran 4 zombies on foot in 2 of 3 runs; the third flew 200 blocks and stood 0.6 from home. What the flee needs from the flight
+code (not changed here): no low-health landing while the trip is the elytra flee (or land only far from every hostile), a
+takeoff under 1 s from the ask, and a cancel the flee can call.
 
 ## Packets (BDS 1.26.60.6, verified)
 

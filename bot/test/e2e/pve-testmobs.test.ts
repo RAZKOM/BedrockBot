@@ -5,6 +5,8 @@
 import { appendFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Vec3 } from '../../src/world/types.ts';
+import { testControlOf } from '../../src/chat/commands-test.ts';
+import { ruleAnswer } from '../../src/skills/test/mobs.ts';
 import { centre, E2E, FEET_Y, fill, prepareServer, privateArea, pveCmd, sleep, startPveBot, teleport, uniqueName, until, type MobInfo, type PveBot } from './pve-truth.ts';
 
 describe.skipIf(!E2E)('pve: !test mobs (Track M1)', () => {
@@ -39,6 +41,95 @@ describe.skipIf(!E2E)('pve: !test mobs (Track M1)', () => {
     say(b, '!test mobs zombie');
     await until(() => (b.said.slice(n0).some((m) => /test mobs: \d+ blocks from home/.test(m)) ? true : undefined), 15_000, 'the refusal');
   }, 30_000);
+
+  // Track M2: the checks before the first run (skills/test/mobs.ts preflight): the server's answer to /gamerule, the three
+  // refusals, `force`. The rules are put back as they were (read through the bot's own command runner first).
+  const runner = (b: PveBot) => testControlOf(b.task)!.runner;
+  const note = (line: string): void => {
+    console.log(line);
+    if (process.env.TESTMOBS_OUT) appendFileSync(process.env.TESTMOBS_OUT, `${line}\n`);
+  };
+  const reply = async (b: PveBot, body: string, re: RegExp, ms = 20_000): Promise<string> => {
+    const n0 = b.said.length;
+    say(b, body);
+    return until(() => b.said.slice(n0).find((m) => re.test(m)), ms, `a reply matching ${re}`, 200);
+  };
+
+  it('asks the server for keepInventory and mobGriefing; refuses without keepInventory', async () => {
+    const b = bot!;
+    b.task.home!.set({ x: START.x + 400, y: FEET_Y, z: START.z });
+    const ki = await runner(b).run('/gamerule keepinventory');
+    const mg = await runner(b).run('/gamerule mobgriefing');
+    note(`gamerule answers: ${JSON.stringify({ id: ki.messageId, params: ki.params, ok: ki.ok })} ${JSON.stringify({ id: mg.messageId, params: mg.params, ok: mg.ok })}`);
+    expect(ruleAnswer(ki)).toBe(true); // prepareServer sets it
+    expect(ruleAnswer(mg)).toBeTypeOf('boolean');
+    await pveCmd('gamerule', 'keepinventory', 'false');
+    try {
+      const line = await reply(b, '!test mobs zombie', /^test mobs: keepInventory is off/);
+      note(line);
+      expect(line).toContain('mobGriefing');
+    } finally {
+      await pveCmd('gamerule', 'keepinventory', 'true');
+    }
+    expect(testControlOf(b.task)!.mobs()).toBeUndefined();
+  }, 60_000);
+
+  it('refuses a creeper set under mobGriefing unless forced', async () => {
+    const b = bot!;
+    b.task.home!.set({ x: START.x + 400, y: FEET_Y, z: START.z });
+    const was = ruleAnswer(await runner(b).run('/gamerule mobgriefing'));
+    await pveCmd('gamerule', 'mobgriefing', 'true');
+    try {
+      note(await reply(b, '!test mobs creeper', /^test mobs: mobGriefing is on .*"force"/));
+      const start = await reply(b, '!test mobs creeper 1 20s force', /^test mobs creeper: 1 run/);
+      note(start);
+      expect(start).toMatch(/keepInventory on, mobGriefing on, ground flat \(16\/16 level\), force/);
+      await sleep(3000);
+      say(b, '!test stop');
+      await until(() => (testControlOf(b.task)!.mobs() === undefined ? true : undefined), 40_000, 'the series over', 250);
+    } finally {
+      await pveCmd('gamerule', 'mobgriefing', was === false ? 'false' : 'true');
+      await b.truth.cleanup().catch(() => undefined);
+    }
+  }, 90_000);
+
+  it('refuses where the ring of 7 is not standable ground', async () => {
+    const b = bot!;
+    b.task.home!.set({ x: START.x + 400, y: FEET_Y, z: START.z });
+    // stone at the feet and head level from 3 to 10 blocks round the bot (a pit's walls): the ring is inside it
+    const lo = { x: START.x - 10, y: FEET_Y, z: START.z - 10 };
+    const hi = { x: START.x + 10, y: FEET_Y + 1, z: START.z + 10 };
+    await fill(b, lo, hi, 'stone');
+    await fill(b, { x: START.x - 2, y: FEET_Y, z: START.z - 2 }, { x: START.x + 2, y: FEET_Y + 1, z: START.z + 2 }, 'air');
+    try {
+      await sleep(1500); // the bot's map sees the blocks
+      // the walls' top 2 up is ground on another level: the ring reads as a slope (none of it level)
+      const line = await reply(b, '!test mobs zombie', /^test mobs: the ring 7 blocks round the bot is (not standable ground|a slope)/);
+      note(line);
+      expect(line).toMatch(/\(0\/16 level/);
+    } finally {
+      await fill(b, lo, hi, 'air');
+    }
+  }, 60_000);
+
+  it('Track M2: refuses on a hillside and says it is a slope (the Realm: its witch went downhill)', async () => {
+    const b = bot!;
+    b.task.home!.set({ x: START.x + 400, y: FEET_Y, z: START.z });
+    // steps of 1 a block going up towards +z from the bot's level (z 1 to 9 out, 6 high at most) and down towards -z (dug 1 a
+    // block, 3 deep at most: the flat world's bedrock is 4 under the feet)
+    for (let dz = 1; dz <= 9; dz++) await fill(b, { x: START.x - 9, y: FEET_Y, z: START.z + dz }, { x: START.x + 9, y: FEET_Y + Math.min(dz, 6) - 1, z: START.z + dz }, 'stone');
+    for (let dz = 1; dz <= 9; dz++) await fill(b, { x: START.x - 9, y: FEET_Y - Math.min(dz, 3), z: START.z - dz }, { x: START.x + 9, y: FEET_Y - 1, z: START.z - dz }, 'air');
+    try {
+      await sleep(1500);
+      const line = await reply(b, '!test mobs zombie', /^test mobs: the ring 7 blocks round the bot is a slope/);
+      note(line);
+      expect(line).toMatch(/a slope \(\d+\/16 level, \d+ on other levels\)/);
+    } finally {
+      await fill(b, { x: START.x - 9, y: FEET_Y, z: START.z + 1 }, { x: START.x + 9, y: FEET_Y + 6, z: START.z + 9 }, 'air');
+      await fill(b, { x: START.x - 9, y: FEET_Y - 3, z: START.z - 9 }, { x: START.x + 9, y: FEET_Y - 1, z: START.z - 1 }, 'dirt');
+      await fill(b, { x: START.x - 9, y: FEET_Y - 1, z: START.z - 9 }, { x: START.x + 9, y: FEET_Y - 1, z: START.z - 1 }, 'grass_block');
+    }
+  }, 90_000);
 
   it('runs zombie4 twice, removes only its own mobs; !test stop removes them at once', async () => {
     const b = bot!;

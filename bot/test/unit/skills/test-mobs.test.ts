@@ -1,7 +1,7 @@
 // Track M1: `!test mobs` (skills/test/mobs.ts) on fakes: the arguments, the commands it sends (summons with the series' name
 // tag, the removal of that tag only), the refusal near home, a run that clears, a death, and `!test stop` removing the mobs.
 import { describe, expect, it } from 'vitest';
-import { MOB_SETS, MOBS_MIN_HOME, MobSeries, mobRunLine, mobSummaryLine, parseMobsArgs, removeCommand, summonCommand, type MobSeriesPorts } from '../../../src/skills/test/mobs.ts';
+import { groundText, hasCreeper, MOB_SETS, MOBS_MIN_HOME, MobSeries, mobRunLine, mobSummaryLine, parseMobsArgs, preflightRefusal, removeCommand, ringCells, ringGround, ruleAnswer, summonCommand, type MobSeriesPorts, type MobsSpec } from '../../../src/skills/test/mobs.ts';
 import type { EntityInfo, Vec3 } from '../../../src/world/types.ts';
 import { mob } from './pve-fakes.ts';
 
@@ -74,6 +74,86 @@ function fakePorts(o: { home?: Vec3; die?: boolean } = {}) {
   };
   return { ports, sent, lines, recs, ents };
 }
+
+describe('!test mobs before the first run (Track M2)', () => {
+  const answer = (v: string) => ({ ok: true, messageId: 'commands.gamerule.query', params: ['keepinventory', v] });
+  it('reads a game rule from its answer', () => {
+    expect(ruleAnswer(answer('true'))).toBe(true);
+    expect(ruleAnswer(answer('false'))).toBe(false);
+    expect(ruleAnswer({ ok: true, messageId: 'commands.gamerule.query', params: ['keepinventory = true'] })).toBe(true);
+    expect(ruleAnswer({ ok: false, error: 'timeout' })).toBeUndefined();
+    expect(ruleAnswer({ ok: false, messageId: 'commands.generic.permission.selector', params: [] })).toBeUndefined();
+  });
+
+  it('force is a word of the command', () => {
+    expect(parseMobsArgs(['creeper4', '2', 'force'])).toMatchObject({ set: 'creeper4', runs: 2, force: true });
+    expect(parseMobsArgs(['creeper4'])).not.toHaveProperty('force');
+  });
+
+  const flat = { standable: 16, slope: 0, of: 16 };
+  const spec = (set: string, force = false): MobsSpec => ({ ...(parseMobsArgs([set]) as MobsSpec), force });
+  it('refuses with keepInventory off or unknown', () => {
+    expect(preflightRefusal(spec('zombie'), { keepInventory: false, mobGriefing: false, ground: flat })).toMatch(/keepInventory is off/);
+    expect(preflightRefusal(spec('zombie'), { keepInventory: undefined, mobGriefing: false, ground: flat })).toMatch(/keepInventory is unknown/);
+    expect(preflightRefusal(spec('zombie'), { keepInventory: true, mobGriefing: true, ground: flat })).toBeUndefined();
+  });
+
+  it('refuses a creeper set under mobGriefing unless forced', () => {
+    for (const set of ['creeper', 'creeper4', 'mixed4', 'mixed8']) {
+      expect(hasCreeper(spec(set))).toBe(true);
+      expect(preflightRefusal(spec(set), { keepInventory: true, mobGriefing: true, ground: flat })).toMatch(/mobGriefing is on .* "force"/);
+      expect(preflightRefusal(spec(set), { keepInventory: true, mobGriefing: undefined, ground: flat })).toMatch(/mobGriefing is unknown/);
+      expect(preflightRefusal(spec(set, true), { keepInventory: true, mobGriefing: true, ground: flat })).toBeUndefined();
+      expect(preflightRefusal(spec(set), { keepInventory: true, mobGriefing: false, ground: flat })).toBeUndefined();
+    }
+    expect(hasCreeper(spec('skeleton4'))).toBe(false);
+  });
+
+  it('refuses a ring of mostly unstandable ground', () => {
+    const start = { x: 0, y: -60, z: 0 };
+    // a wall on one side (x > 2): the points there are not standable
+    const half = ringGround(start, (x) => x <= 2);
+    expect(half.of).toBe(16);
+    expect(half.standable).toBeGreaterThan(4);
+    expect(half.standable).toBeLessThan(12);
+    expect(preflightRefusal(spec('zombie'), { keepInventory: true, mobGriefing: false, ground: { standable: 7, slope: 0, of: 16 } })).toMatch(/not standable ground: rough \(7\/16 level\)/);
+    expect(preflightRefusal(spec('zombie'), { keepInventory: true, mobGriefing: false, ground: { standable: 8, slope: 0, of: 16 } })).toBeUndefined();
+    expect(preflightRefusal(spec('zombie'), { keepInventory: true, mobGriefing: false, ground: undefined })).toMatch(/not standable/);
+    expect(ringGround(start, () => undefined).standable).toBe(0); // an unknown map is not ground
+    expect(ringCells(start).every((c) => Math.abs(Math.hypot(c.x + 0.5 - 0.5, c.z + 0.5 - 0.5) - 7) < 1)).toBe(true);
+  });
+
+  it('Track M2: a hillside is a slope, said in the first line and refused (its mobs go downhill)', () => {
+    const start = { x: 0, y: -60, z: 0 };
+    // the ground falling 1 a block towards -z: standable at y = -60 + z for |z| small
+    const hill = (x: number, y: number, z: number): boolean => y === -60 + Math.max(-6, Math.min(6, z));
+    const g = ringGround(start, hill);
+    expect(g.standable).toBeLessThan(8);
+    expect(g.slope).toBeGreaterThan(0);
+    expect(groundText(g)).toMatch(/^a slope \(\d+\/16 level, \d+ on other levels\)$/);
+    expect(preflightRefusal(spec('zombie'), { keepInventory: true, mobGriefing: false, ground: g })).toMatch(/is a slope \(its mobs would go downhill\): a slope/);
+    expect(groundText({ standable: 16, slope: 0, of: 16 })).toBe('flat (16/16 level)');
+    expect(groundText({ standable: 12, slope: 3, of: 16 })).toBe('mostly flat (12/16 level, 3 on other levels)');
+    expect(groundText(undefined)).toBe('unknown');
+  });
+
+  it('preflight asks the server and says what it found', async () => {
+    const sent: string[] = [];
+    const ports = { ...fakePorts().ports };
+    ports.run = (cmd: string) => {
+      sent.push(cmd);
+      return Promise.resolve(cmd.includes('keepinventory') ? answer('true') : { ok: true, messageId: 'commands.gamerule.query', params: ['mobgriefing', 'true'] });
+    };
+    ports.standable = () => true;
+    const s = new MobSeries(spec('creeper4'), ports, 'm1tp');
+    const pf = await s.preflight();
+    expect(sent).toEqual(['/gamerule keepinventory', '/gamerule mobgriefing']);
+    expect(pf.line).toBe('keepInventory on, mobGriefing on, ground flat (16/16 level)');
+    expect(pf.refusal).toMatch(/force/);
+    const ok = await new MobSeries(spec('zombie4'), ports, 'm1tp').preflight();
+    expect(ok.refusal).toBeUndefined();
+  });
+});
 
 describe('MobSeries', () => {
   it('refuses closer than 150 blocks to home', () => {

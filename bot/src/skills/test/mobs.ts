@@ -11,6 +11,14 @@
 //   record    one MobRecord per run (a JSONL line), a chat line per run and a summary at the end
 // The series refuses to start closer than MOBS_MIN_HOME (150) blocks to home, and the runs never touch anything but the
 // mobs they summoned.
+// Track M2 (docs/pve.md "Track M2"): before the first run it asks the server for two game rules (`/gamerule keepinventory`,
+// `/gamerule mobgriefing`; the bot is op there) and looks at the ground of the ring, says all three in its first line, and
+// refuses (preflightRefusal): keepInventory off or unread (a death would drop the kit in the owner's world); a set with a
+// creeper while mobGriefing is on or unread (its blast digs the owner's ground) unless the command says `force`; a ring of 7
+// whose points are mostly not standable ground (a mob summoned into a wall suffocates, one over a drop falls, one in water
+// swims: the run would measure the place, not the bot). The ground is said as flat, mostly flat, a slope (points standable
+// only up to 8 levels over or under the bot's: on the Realm's hillside a ring of 7 sent the set downhill) or rough; fewer
+// than half the points level is refused.
 import type { Vec3 } from '../../connection/types.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { EntityInfo } from '../../world/types.ts';
@@ -64,18 +72,25 @@ export interface MobsSpec {
   mobs: readonly MobSpec[];
   runs: number;
   seconds: number;
+  /** Track M2: run a set with a creeper although mobGriefing is on (the command said `force`). */
+  force?: boolean;
 }
 
-/** `!test mobs <set> [n] [<seconds>s]` -> the spec, or an error line. */
+/** `!test mobs <set> [n] [<seconds>s] [force]` -> the spec, or an error line. */
 export function parseMobsArgs(args: readonly string[]): MobsSpec | { error: string } {
-  const usage = `usage: !test mobs <set> [n] [<seconds>s]; sets: ${Object.keys(MOB_SETS).join(' ')}`;
+  const usage = `usage: !test mobs <set> [n] [<seconds>s] [force]; sets: ${Object.keys(MOB_SETS).join(' ')}`;
   const set = args[0]?.toLowerCase();
   if (!set) return { error: usage };
   const mobs = MOB_SETS[set];
   if (!mobs) return { error: `test mobs: no set "${set}" (${Object.keys(MOB_SETS).join(' ')})` };
   let runs = 1;
   let seconds = MOBS_SECONDS;
+  let force = false;
   for (const w of args.slice(1)) {
+    if (w.toLowerCase() === 'force') {
+      force = true;
+      continue;
+    }
     const s = /^(\d+)s$/i.exec(w);
     if (s) {
       seconds = Number(s[1]);
@@ -85,7 +100,106 @@ export function parseMobsArgs(args: readonly string[]): MobsSpec | { error: stri
       if (runs < 1 || runs > MOBS_MAX_RUNS) return { error: `test mobs: runs must be 1..${MOBS_MAX_RUNS}` };
     } else return { error: usage };
   }
-  return { set, mobs, runs, seconds };
+  return { set, mobs, runs, seconds, ...(force ? { force } : {}) };
+}
+
+// ---- Track M2: the checks before a series (for the owner's Realm) ----
+
+/** Points on the ring the ground check looks at. */
+export const RING_POINTS = 16;
+/** At least this share of the ring's points must be standable ground. */
+export const RING_MIN_SHARE = 0.5;
+
+/**
+ * The game rule's value from a `/gamerule <rule>` answer: `true` / `false` as a parameter (BDS 1.26.60: `commands.gamerule.query`
+ * with the parameters [rule, value]) or at the end of one, else in the message id. undefined when there was no answer.
+ */
+export function ruleAnswer(r: { ok: boolean; messageId?: string; params?: readonly string[]; error?: string }): boolean | undefined {
+  if (r.error) return undefined;
+  for (const p of r.params ?? []) {
+    const m = /(?:^|[\s=:])(true|false)\s*$/i.exec(p.trim());
+    if (m) return m[1]!.toLowerCase() === 'true';
+  }
+  const m = /\b(true|false)\b/i.exec(r.messageId ?? '');
+  return m ? m[1]!.toLowerCase() === 'true' : undefined;
+}
+
+/** The ring's points (feet cells at the summons' level), RING_POINTS of them round `start`. */
+export function ringCells(start: Vec3, points = RING_POINTS): Vec3[] {
+  const out: Vec3[] = [];
+  for (let i = 0; i < points; i++) {
+    const a = (2 * Math.PI * i) / points + 0.4;
+    out.push({ x: Math.floor(start.x + 0.5 + RING * Math.cos(a)), y: start.y, z: Math.floor(start.z + 0.5 + RING * Math.sin(a)) });
+  }
+  return out;
+}
+
+/** Levels above and below the bot's the ground check looks at for a ring point that is not standable at the bot's level. */
+export const RING_SLOPE_LEVELS = 8; // steps of 1 a block put the ring's far side 7 under the bot
+
+/** The ring's ground: points standable at the bot's level, points standable only up to RING_SLOPE_LEVELS higher or lower (a slope), of all. */
+export interface RingGround {
+  standable: number;
+  /** Track M2: standable only off the bot's level (a hillside: a mob summoned there goes downhill). */
+  slope: number;
+  of: number;
+}
+
+/**
+ * How many of the ring's points a mob summoned there would stand on at the bot's level, and how many only on another level
+ * (`standable` from the bot's map; unknown counts as not). On the Realm's hillside a ring of 7 scattered the set downhill:
+ * a witch went 6 to 12 blocks under the bot within 5 s.
+ */
+export function ringGround(start: Vec3, standable: (x: number, y: number, z: number) => boolean | undefined, points = RING_POINTS): RingGround {
+  let n = 0;
+  let slope = 0;
+  for (const c of ringCells(start, points)) {
+    if (standable(c.x, c.y, c.z) === true) n++;
+    else {
+      for (let dy = 1; dy <= RING_SLOPE_LEVELS; dy++) {
+        if (standable(c.x, c.y + dy, c.z) === true || standable(c.x, c.y - dy, c.z) === true) {
+          slope++;
+          break;
+        }
+      }
+    }
+  }
+  return { standable: n, slope, of: points };
+}
+
+/** `flat (16/16 level)`, `a slope (7/16 level, 8 on other levels)`, `rough (5/16 level, 2 on other levels)` */
+export function groundText(g: RingGround | undefined): string {
+  if (!g) return 'unknown';
+  const what = g.standable === g.of ? 'flat' : g.standable >= Math.ceil(g.of * RING_MIN_SHARE) ? 'mostly flat' : g.slope >= g.of - g.standable - 2 && g.slope > 0 ? 'a slope' : 'rough';
+  return `${what} (${g.standable}/${g.of} level${g.slope ? `, ${g.slope} on other levels` : ''})`;
+}
+
+export interface MobsPreflight {
+  keepInventory: boolean | undefined;
+  mobGriefing: boolean | undefined;
+  ground: RingGround | undefined;
+}
+
+/** A set with a creeper in it (its blast breaks blocks while mobGriefing is on). */
+export function hasCreeper(spec: Pick<MobsSpec, 'mobs'>): boolean {
+  return spec.mobs.some((m) => bareType(m.type) === 'creeper');
+}
+
+/** `keepInventory on, mobGriefing off, ground flat (16/16 level)` */
+export function preflightText(p: MobsPreflight): string {
+  const v = (b: boolean | undefined): string => (b === undefined ? 'unknown' : b ? 'on' : 'off');
+  return `keepInventory ${v(p.keepInventory)}, mobGriefing ${v(p.mobGriefing)}, ground ${groundText(p.ground)}`;
+}
+
+/** Why the series may not run (the server's rules, the ground), else undefined. See the file comment. */
+export function preflightRefusal(spec: Pick<MobsSpec, 'mobs' | 'force'>, p: MobsPreflight): string | undefined {
+  if (p.keepInventory !== true) return `test mobs: keepInventory is ${p.keepInventory === false ? 'off' : 'unknown (no answer to /gamerule keepinventory)'}: a death would drop the kit; not running`;
+  if (hasCreeper(spec) && p.mobGriefing !== false && !spec.force) return `test mobs: mobGriefing is ${p.mobGriefing ? 'on' : 'unknown'} and the set has a creeper (its blast breaks blocks); add "force" to run it anyway`;
+  if (!p.ground || p.ground.standable < Math.ceil(p.ground.of * RING_MIN_SHARE)) {
+    const slope = groundText(p.ground).startsWith('a slope');
+    return `test mobs: the ring ${RING} blocks round the bot is ${slope ? 'a slope (its mobs would go downhill)' : 'not standable ground'}: ${groundText(p.ground)}; find flat open ground`;
+  }
+  return undefined;
 }
 
 /** The summon command for mob `i` of `n` (relative to the bot: the command runs as it). */
@@ -142,7 +256,9 @@ export interface MobSummary {
 
 export interface MobSeriesPorts {
   /** A slash command as the bot (CommandRunner.run). */
-  run(cmd: string): Promise<{ ok: boolean; messageId?: string; error?: string }>;
+  run(cmd: string): Promise<{ ok: boolean; messageId?: string; params?: readonly string[]; error?: string }>;
+  /** Track M2: a mob summoned with its feet in this cell stands there (a floor under it, room, no liquid); undefined = unknown. */
+  standable?(x: number, y: number, z: number): boolean | undefined;
   restore(start: Vec3): Promise<RestoreResult>;
   position(): Vec3;
   home(): Vec3 | undefined;
@@ -205,6 +321,16 @@ export class MobSeries {
     if (!h) return undefined;
     const d = Math.hypot(h.x + 0.5 - (this.start.x + 0.5), h.z + 0.5 - (this.start.z + 0.5));
     return d < MOBS_MIN_HOME ? `test mobs: ${Math.round(d)} blocks from home; go at least ${MOBS_MIN_HOME} away first` : undefined;
+  }
+
+  /** Track M2: the game rules and the ground before the first run (see the file comment): the start line's part and the refusal. */
+  async preflight(): Promise<{ checks: MobsPreflight; line: string; refusal: string | undefined }> {
+    const keepInventory = ruleAnswer(await this.p.run('/gamerule keepinventory'));
+    const mobGriefing = ruleAnswer(await this.p.run('/gamerule mobgriefing'));
+    const standable = this.p.standable?.bind(this.p);
+    const ground = standable ? ringGround(this.start, standable) : undefined;
+    const checks = { keepInventory, mobGriefing, ground };
+    return { checks, line: preflightText(checks), refusal: preflightRefusal(this.spec, checks) };
   }
 
   stop(): void {

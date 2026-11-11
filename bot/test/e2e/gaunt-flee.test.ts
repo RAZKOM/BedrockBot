@@ -22,6 +22,9 @@ describe.skipIf(!E2E)('gaunt: flee v2 (Track W)', () => {
     await bot.truth.ok('clear', [bot.name]);
     for (const piece of ['iron_helmet', 'iron_chestplate', 'iron_leggings', 'iron_boots']) await bot.truth.give(bot.name, piece, 1);
     await until(() => (bot!.built.mobility!.world.inventory.window(120)?.slots.filter(Boolean).length === 4 ? true : undefined), 15_000, 'iron armour worn');
+    // the flight's route is the case: without the reflex (on by default since Track M2, ADR 0079 decision 26), whose hold of
+    // the ground (decision 23) stands against one zombie at 7 health instead of running
+    bot.pve.settings.set('mobReflex', false);
   }, 120_000);
 
   afterAll(async () => {

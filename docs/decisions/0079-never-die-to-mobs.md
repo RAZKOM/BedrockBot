@@ -35,7 +35,7 @@ the bot's attacker guess skipped players); they are not a mob problem and this t
 
 ## Decisions
 
-1. **The reflex** (`skills/combat/reflex.ts`, setting `mobReflex`, on in round 1, off since round 2: decision 15): every tick, before the step, up to 3 hostiles in reach
+1. **The reflex** (`skills/combat/reflex.ts`, setting `mobReflex`, on in round 1, off in round 2: decision 15, on again: decision 26): every tick, before the step, up to 3 hostiles in reach
    (3.9 eye to box, line of sight, their hurt time over, each not struck by us in the last 10 ticks) get a strike, without
    turning the body or touching the keys (the server does not need the bot to face them). Order: a lit creeper, a mob that hit
    the bot in the last 2 s, then the soonest to reach the bot ((distance - its reach) / its speed). It runs under every task
@@ -101,6 +101,52 @@ the died round-1 and round-2 runs 0 of 5 arrows landed within 16 ticks of a refl
     poison (down to 1 health in 9 of 10 runs either way); the deaths with it on were her harming at low health, the one with it
     off a zombie on a bot running at 1 health. The owner decides whether a bare-handed bot gets it on.
 16. **Guard collects drops only with no other hostile within 16** (the collect walk stood 10 s by a witch and a spider).
+
+## Addendum: Track M2 (2026-11-10)
+
+The numbers are in [../pve.md](../pve.md) "Track M2". 30 runs a side of `mixed-8` for the live kit and for bare hands with
+`mobDodge` on, the whole gauntlet 3 times each way, idle nights, the dodge on built ground (bds-pve and bds-gaunt).
+
+17. **Eat before the sprint is lost**: the survival kit's bite while walking or fleeing comes at food 10 (6 before), and the
+    flee eats from 10 (`EAT_BEFORE_SPRINT_LOST`, `FOOD_SPRINT_EAT`). Below 7 the body cannot sprint and 3 zombies keep up
+    (round 2's `act-eat` death).
+18. **With the reflex on the witch's way need not be clear**: the melee mobs on it are struck in passing. With the rule the
+    reflex killed the ring at home while she threw at a still body (potions within 4 of the bot 54 of 62 against 26 of 72 with
+    it off, her damage 20.5 against 14.9 a run); without it she throws 42 in 30 runs against 72.
+19. **No potion side step while guard fights a witch**: the step turned the body away from her for 12 ticks; it does not get
+    out of a splash's 4 blocks either way.
+20. **A target the bot walks after is not stalled**: the combat watchdog's "no progress in 60 ticks" also resets when the body
+    has moved 1.5 blocks (`STALL_MOVE`), out of reach only and for at most 300 ticks after the last real progress
+    (`STALL_WALK_TICKS`; in reach the strikes without a hit stay the measure). On a slope or a ledge the reach measured from
+    the eye kept its distance while the bot walked round to her and the witch was written off as unreachable while she could
+    still throw. Without the bounds a fight on a zombie the blade could not finish walked on to its 600-tick timeout
+    (`pve-combat` flank, 1 of 20 runs).
+21. **A first target (the witch) is looked for 10 up or down** (`FIRST_MAX_DY`, other mobs 6), and an "unreachable" note on
+    her is tried again after 3 s (`FIRST_RETRY_MS`), not held for the note's whole life.
+22. **The elytra flee hands the body over**: for up to 6 s after `!fly home` is sent (`FLY_HANDOVER_MS`), while a `fly` process
+    runs, the flee and guard do not want the body. Before it the takeoff was accepted and taken back the next tick (4 of 4
+    deaths in a pen).
+23. **Hold the ground with the reflex**: at low health with the reflex on, up to 3 melee mobs within 8 (`HOLD_MAX`), no creeper
+    within the flee's range, no archer or witch in sight within 16 and fewer than 2 melee hits in 3 s, the bot stands and
+    strikes instead of running (a run at low health was what the melee mobs killed).
+24. **The dodge keeps off edges**: when the cell 1.3 behind the line out (`EDGE_MARGIN`) is not known safe it drifts back in,
+    and when straight out is not clear it runs along the line across the shot before it gives up. Not enough on a cliff: an
+    arrow's knockback still put the body over in 1 of 3 runs and the flight's run away (nav, its last level takes hurting
+    falls) in the others. `mobDodge` stays off.
+25. **`!test mobs` asks the server first**: `/gamerule keepinventory` and `/gamerule mobgriefing`, both said in the first line
+    with the ground of the ring 7 out (16 points: level, standable within 8 levels, or not). It refuses with keepInventory off
+    or unanswered, a creeper set while mobGriefing is on unless the command says `force`, and a ring mostly not standable or a
+    slope.
+26. **The reflex is on by default again.** The bar (deaths and damage over 30 runs a side of `mixed-8` not higher with it on,
+    in the live kit and bare, and no friendly fire) is met on the final code: live 0 deaths in 30, damage 17.0 a run, against
+    4 and 22.0 off; bare with `mobDodge` on 0 and 1.5 against 17 and 22.0. The whole gauntlet 3 times each way: live 0 of 99 both
+    ways, damage 130 against 193; bare with `mobDodge` on 2 of 99 against 8, 371 against 832. No friendly hit in those 318
+    runs, in the friendly-fire case (`pve-m1`) or in 3 live nights; one bare night counted 3 hits on something outside the
+    harness's hostile list, its type not recorded (the night line names them now; 5 nights since have none). The idle shield
+    and the potion side step come with it.
+27. **`mobDodge`, `sealIn` and `fleeFly` stay off**: the dodge still falls off a cliff on real ground (decision 24), the bare
+    nights still die (to a witch's poison and endermen), and the elytra flee lands itself at low health next to the mobs
+    (decision 22; the flight code is not this track's).
 
 ## Consequences
 

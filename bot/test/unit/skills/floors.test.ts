@@ -1,10 +1,12 @@
 // Track M1 (docs/pve.md "Never die to common mobs (Track M1)", ADR 0079): the guard tests for the health rule's order
 // (pveFloor) and the seal-in's block choice and cells (skills/survival/seal.ts).
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { RuntimeSettings } from '../../../src/config/settings.ts';
 import { SETTING_GROUPS } from '../../../src/chat/help.ts';
 import { canSealHere, digInCells, openSide, seal, SEAL_BLOCKS, sealCells, sealItems } from '../../../src/skills/survival/seal.ts';
-import { PveController, pveFloor, type FloorInput } from '../../../src/tasks/pve.ts';
+import { EAT_BEFORE_SPRINT_LOST, eatWhileWalking } from '../../../src/skills/survival/index.ts';
+import { FIRST_MAX_DY, FIRST_RETRY_MS } from '../../../src/skills/combat/targeting.ts';
+import { FLY_HANDOVER_MS, FOOD_SPRINT_EAT, HOLD_MAX, holdGround, PveController, pveFloor, type FloorInput, type HoldInput } from '../../../src/tasks/pve.ts';
 import { Inventory } from '../../../src/world/inventory.ts';
 import type { EntityInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 import { FakeLoop, FakeMover, FakeSource, mob } from './pve-fakes.ts';
@@ -256,6 +258,7 @@ describe('the per-mob rules (PveController)', () => {
     const ents = new Map<bigint, EntityInfo>();
     const inventory = new Inventory(() => null, () => 1n);
     const pve = new PveController({ source: src, world: { entities: ents, inventory, self: { runtimeId: 1n, health } }, loop, skills: Object.assign(new FakeMover(), { collect: () => Promise.resolve({ ok: true }) }), home: () => undefined, shelter: () => undefined, inactive: () => false, options: { guard: { on: true, radius: 16 } } });
+    pve.settings.set('mobReflex', false); // each rule without the reflex unless the case turns it on (on by default since Track M2)
     src.emit('start_game', { entity_id: -42n });
     src.emit('set_health', { health });
     const blade = () => inventory.setItem(0, 0, stack('netherite_sword', 1));
@@ -278,6 +281,60 @@ describe('the per-mob rules (PveController)', () => {
     expect(s.pve.canDuel(s.me)).toBe(false);
   });
 
+  it('Track M2: the elytra flee hands the body to the takeoff: guard and the flee stand down while the trip lives, at most FLY_HANDOVER_MS', () => {
+    vi.useFakeTimers({ toFake: ['performance'] });
+    try {
+      const s = setup(7);
+      s.ents.set(7n, mob(7n, 'minecraft:zombie', { x: s.me.x + 1.5, y: s.me.y, z: s.me.z }));
+      const guard = (s.pve as unknown as { guardProcess: { wants(): boolean } }).guardProcess;
+      expect(guard.wants()).toBe(true);
+      s.pve.startFlyHandover();
+      expect(s.pve.flyHandover()).toBe(true); // its first second: the trip may not be listed yet
+      expect(guard.wants()).toBe(false);
+      vi.advanceTimersByTime(1500);
+      expect(s.pve.flyHandover()).toBe(false); // no `fly` process: the send came to nothing
+      // a live trip holds it until FLY_HANDOVER_MS
+      const trip = { name: 'fly', done: false };
+      const pm = (s.pve as unknown as { processes: { find(n: string): unknown[] } }).processes;
+      const find = pm.find.bind(pm);
+      pm.find = (n: string) => (n === 'fly' ? [trip] : find(n));
+      expect(s.pve.flyHandover()).toBe(true);
+      expect(guard.wants()).toBe(false);
+      trip.done = true;
+      expect(s.pve.flyHandover()).toBe(false);
+      trip.done = false;
+      vi.advanceTimersByTime(FLY_HANDOVER_MS);
+      expect(s.pve.flyHandover()).toBe(false);
+      expect(guard.wants()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('Track M2: the witch 8 under the bot (a hillside) is a target; written off as unreachable, fought again after FIRST_RETRY_MS', () => {
+    const s = setup(16);
+    s.blade();
+    const w = mob(8n, 'minecraft:witch', { x: s.me.x + 3, y: s.me.y - 8, z: s.me.z });
+    s.ents.set(8n, w);
+    expect(s.pve.pickThreat(s.me, false)?.e.runtimeId).toBe(8n);
+    // a zombie there is not (MAX_DY)
+    s.ents.delete(8n);
+    s.ents.set(9n, mob(9n, 'minecraft:zombie', { x: s.me.x + 3, y: s.me.y - 8, z: s.me.z }));
+    expect(s.pve.pickThreat(s.me, false)).toBeUndefined();
+    s.ents.delete(9n);
+    s.ents.set(8n, w);
+    // the fight's verdict `unreachable`: ignored for a moment, then fought again
+    const note = (at: number) => {
+      s.pve.ignore.set(8n, performance.now() + 60_000);
+      s.pve.ignoreWhy.set(8n, { reason: 'fight unreachable', at, type: w.type });
+    };
+    note(performance.now() - 1000);
+    expect(s.pve.pickThreat(s.me, false)).toBeUndefined();
+    note(performance.now() - FIRST_RETRY_MS - 100);
+    expect(s.pve.pickThreat(s.me, false)?.e.runtimeId).toBe(8n);
+    expect(FIRST_MAX_DY).toBeGreaterThanOrEqual(8);
+  });
+
   it('the witch first with a blade at 8 health or more, within 12, the way to her clear of other melee mobs', () => {
     const s = setup(12);
     const w = mob(8n, 'minecraft:witch', { x: s.me.x + 7, y: s.me.y, z: s.me.z });
@@ -288,6 +345,10 @@ describe('the per-mob rules (PveController)', () => {
     // a zombie on the way (4.5 out, 1 off the line): not first
     s.ents.set(9n, mob(9n, 'minecraft:zombie', { x: s.me.x + 4.5, y: s.me.y, z: s.me.z + 1 }));
     expect(s.pve.firstTarget(w, s.me)).toBe(false);
+    // Track M2: with the reflex on the zombie on the way is struck in passing: she is first
+    s.pve.settings.set('mobReflex', true);
+    expect(s.pve.firstTarget(w, s.me)).toBe(true);
+    s.pve.settings.set('mobReflex', false);
     // next to the bot it is the reflex's, not on the way
     s.ents.set(9n, mob(9n, 'minecraft:zombie', { x: s.me.x + 1.5, y: s.me.y, z: s.me.z }));
     expect(s.pve.firstTarget(w, s.me)).toBe(true);
@@ -374,7 +435,7 @@ describe('the per-mob rules (PveController)', () => {
     const pve = new PveController({ source: src, world: { entities: ents, inventory, self: { runtimeId: 1n, health: 20 } }, loop, skills: mover, home: () => undefined, shelter: () => undefined, inactive: () => false, options: { guard: { on: false, radius: 16 } } });
     src.emit('start_game', { entity_id: -42n });
     src.emit('set_health', { health: 20 });
-    pve.settings.set('mobReflex', true); // the side step comes with the reflex (off by default)
+    pve.settings.set('mobReflex', true); // the side step comes with the reflex
     // a potion going away from the bot: nothing
     ents.set(30n, mob(30n, 'minecraft:splash_potion', { x: 6.5, y: -58, z: 0.5 }, { vel: { x: 0.5, y: 0, z: 0 } }));
     loop.step();
@@ -401,12 +462,29 @@ describe('the per-mob rules (PveController)', () => {
     expect(pve.potionSteps).toBe(2);
     expect(Math.abs(Math.sin((loop.cmd.yaw * Math.PI) / 180))).toBeGreaterThan(0.99); // along x
     ents.delete(33n);
+    for (let i = 0; i < 13; i++) loop.step();
+    // Track M2: guard fighting the witch: no step (the approach keeps the keys); fighting a zombie: the step as before
+    const pm = (pve as unknown as { processes: object }).processes;
+    const activeOf = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(pm), 'active');
+    Object.defineProperty(pm, 'active', { configurable: true, get: () => pve.guardProcess });
+    let fighting: string | undefined = 'witch';
+    Object.defineProperty(pve.guardProcess, 'fighting', { configurable: true, get: () => fighting });
+    ents.set(34n, mob(34n, 'minecraft:splash_potion', { x: 6.5, y: -58, z: 0.5 }, { vel: { x: -0.5, y: -0.1, z: 0 } }));
     loop.step();
+    expect(pve.potionSteps).toBe(2);
+    ents.delete(34n);
+    fighting = 'zombie';
+    ents.set(35n, mob(35n, 'minecraft:splash_potion', { x: 6.5, y: -58, z: 0.5 }, { vel: { x: -0.5, y: -0.1, z: 0 } }));
+    loop.step();
+    expect(pve.potionSteps).toBe(3);
+    ents.delete(35n);
+    loop.step();
+    if (activeOf) delete (pm as { active?: unknown }).active;
     // the reflex off: nothing
     pve.settings.set('mobReflex', false);
     ents.set(32n, mob(32n, 'minecraft:splash_potion', { x: 6.5, y: -58, z: 0.5 }, { vel: { x: -0.5, y: -0.1, z: 0 } }));
     loop.step();
-    expect(pve.potionSteps).toBe(2);
+    expect(pve.potionSteps).toBe(3);
     pve.dispose();
   });
 
@@ -435,6 +513,51 @@ describe('the per-mob rules (PveController)', () => {
     expect(s.pve.eatClearance(s.me, 10)).toBe(0);
   });
 
+  it('Track M2: holding the ground: with the reflex on, low health and up to 3 melee mobs it stands instead of running', () => {
+    const s = setup(4);
+    s.ents.set(7n, mob(7n, 'minecraft:zombie', { x: s.me.x + 3, y: s.me.y, z: s.me.z }));
+    expect(s.pve.fleeReason(s.me)?.threat.runtimeId).toBe(7n); // the reflex off (the default): the flight as before
+    s.pve.settings.set('mobReflex', true);
+    expect(s.pve.holds(s.me)).toBe(true);
+    expect(s.pve.fleeReason(s.me)).toBeUndefined();
+    // three melee mobs (the reflex strikes 3 a tick): still; a fourth: run
+    s.ents.set(8n, mob(8n, 'minecraft:husk', { x: s.me.x - 3, y: s.me.y, z: s.me.z }));
+    s.ents.set(9n, mob(9n, 'minecraft:spider', { x: s.me.x, y: s.me.y, z: s.me.z + 3 }));
+    expect(s.pve.fleeReason(s.me)).toBeUndefined();
+    s.ents.set(10n, mob(10n, 'minecraft:zombie', { x: s.me.x, y: s.me.y, z: s.me.z - 3 }));
+    expect(s.pve.holds(s.me)).toBe(false);
+    expect(s.pve.fleeReason(s.me)).toBeDefined();
+    s.ents.delete(10n);
+    // a creeper within 8 or a skeleton in sight within 16: a stand does not answer them
+    s.ents.set(11n, mob(11n, 'minecraft:creeper', { x: s.me.x + 6, y: s.me.y, z: s.me.z }));
+    expect(s.pve.holds(s.me)).toBe(false);
+    s.ents.delete(11n);
+    s.ents.set(12n, mob(12n, 'minecraft:skeleton', { x: s.me.x + 12, y: s.me.y, z: s.me.z }));
+    expect(s.pve.holds(s.me)).toBe(false);
+    s.ents.delete(12n);
+    expect(s.pve.holds(s.me)).toBe(true);
+    // two melee hits within 3 s: the fist is not holding them, run
+    const times = (s.pve as unknown as { meleeHitTimes: number[] }).meleeHitTimes;
+    times.push(performance.now() - 500, performance.now() - 100);
+    expect(s.pve.holds(s.me)).toBe(false);
+    expect(s.pve.fleeReason(s.me)).toBeDefined();
+    times.splice(0);
+    times.push(performance.now() - 100);
+    expect(s.pve.holds(s.me)).toBe(true); // one hit (it is why the health is low): stand
+  });
+
+  it('Track M2: holdGround, the pure rule', () => {
+    const h = (o: Partial<HoldInput>) => holdGround({ reflex: true, melee: 1, other: false, meleeHits: 0, ...o });
+    expect(h({})).toBe(true);
+    expect(h({ reflex: false })).toBe(false);
+    expect(h({ melee: 0 })).toBe(false);
+    expect(h({ melee: HOLD_MAX })).toBe(true);
+    expect(h({ melee: HOLD_MAX + 1 })).toBe(false);
+    expect(h({ other: true })).toBe(false);
+    expect(h({ meleeHits: 1 })).toBe(true);
+    expect(h({ meleeHits: 2 })).toBe(false);
+  });
+
   it('a witch within 16 starts a flight below 14 health (above fleeHealth)', () => {
     const s = setup(12);
     s.ents.set(8n, mob(8n, 'minecraft:witch', { x: s.me.x + 10, y: s.me.y, z: s.me.z }));
@@ -446,13 +569,25 @@ describe('the per-mob rules (PveController)', () => {
 });
 
 describe('the Track M1 settings', () => {
-  it('mobReflex, fleeFly, sealIn and mobDodge off by default (the reflex since round 2: ADR 0079 decision 15); each in a help group', () => {
+  it('mobReflex on by default (Track M2: ADR 0079 decision 26), fleeFly, sealIn and mobDodge off; each in a help group', () => {
     const s = new RuntimeSettings();
-    expect(s.get('mobReflex')).toBe(false);
+    expect(s.get('mobReflex')).toBe(true);
     expect(s.get('fleeFly')).toBe(false);
     expect(s.get('sealIn')).toBe(false);
     expect(s.get('mobDodge')).toBe(false);
     const grouped = SETTING_GROUPS.flatMap(([, keys]) => keys);
     for (const k of ['mobReflex', 'fleeFly', 'sealIn', 'mobDodge']) expect(grouped).toContain(k);
+  });
+});
+
+describe('Track M2: eat before the food stops the sprint', () => {
+  it('the automatic bite goes in during a walk from food 10 down (6 before), or below health 10', () => {
+    expect(EAT_BEFORE_SPRINT_LOST).toBeGreaterThanOrEqual(7); // below 7 the body cannot sprint
+    expect(FOOD_SPRINT_EAT).toBe(EAT_BEFORE_SPRINT_LOST);
+    expect(eatWhileWalking(10, 20)).toBe(true);
+    expect(eatWhileWalking(7, 20)).toBe(true);
+    expect(eatWhileWalking(11, 20)).toBe(false);
+    expect(eatWhileWalking(17, 9.5)).toBe(true);
+    expect(eatWhileWalking(17, 10)).toBe(false);
   });
 });

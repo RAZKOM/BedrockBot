@@ -68,9 +68,8 @@ describe.skipIf(!E2E)('pve: Track M1 friendly fire and work under attack', () =>
     await bot.truth.ok('clear', [bot.name]);
     await bot.truth.ok('unequip', [bot.name]);
     await bot.truth.ok('give', [bot.name, 'bread', 16]);
-    // the reflex ships off since round 2 (ADR 0079 decision 15): these cases are about it, so they turn it on
-    expect(bot.pve.settings.get('mobReflex')).toBe(false);
-    bot.pve.settings.set('mobReflex', true);
+    // the reflex is on by default again since Track M2 (ADR 0079 decision 26); these cases are about it
+    expect(bot.pve.settings.get('mobReflex')).toBe(true);
   }, 120_000);
 
   afterAll(async () => {
@@ -149,10 +148,17 @@ describe.skipIf(!E2E)('pve: Track M1 friendly fire and work under attack', () =>
     b.chat.handle({ type: 'chat', source: ownerName, xuid: '', message: body, body, truth: false });
     const jobs = (): number => b.task.processes?.find('mine').length ?? 0;
     await until(() => (jobs() > 0 ? true : undefined), 5000, 'the mine job', 100);
-    await until(() => (jobs() === 0 ? true : undefined), 150_000, 'the mine job end', 250);
-    note(`mine under attack: ${b.said.slice(said0).join(' | ').slice(0, 300)}; health ${b.pve.health()}`);
+    // Track M2: the job's own end (its state) and then its done line, which comes back from the server as chat a moment
+    // after the job ends (twice in Track M1 the line was read before it arrived)
+    const proc = b.task.processes!.find('mine')[0] as unknown as { result: Promise<string>; task: { lastError?: string } };
+    const state = await Promise.race([proc.result, sleep(150_000).then(() => 'still running')]);
+    const ended = Date.now();
+    const lineNow = b.said.slice(said0).some((m) => /^mine sand: \d+\/12/.test(m));
+    const doneLine = await until(() => b.said.slice(said0).find((m) => /^mine sand: \d+\/12/.test(m)), 10_000, 'the done line', 100).catch(() => undefined);
+    note(`mine under attack: ended ${state}${proc.task.lastError ? ` (${proc.task.lastError})` : ''}, line ${doneLine ?? 'NONE'} (${lineNow ? 'there at the end' : `${Date.now() - ended} ms after the end`}); said ${b.said.slice(said0).join(' | ').slice(0, 300)}; health ${b.pve.health()}`);
     expect(b.built.respawn!.deaths).toBe(deaths0);
-    const got = /mine sand: (\d+)\/12/.exec(b.said.slice(said0).join(' | '));
+    expect(state).not.toBe('stopped'); // a fight or a flight must pause the job, never end it
+    const got = /mine sand: (\d+)\/12/.exec(doneLine ?? '');
     expect(Number(got?.[1] ?? 0)).toBeGreaterThanOrEqual(8);
     await b.truth.cleanup();
   }, 200_000);

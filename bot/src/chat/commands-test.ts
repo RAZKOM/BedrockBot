@@ -7,8 +7,11 @@
 //   !test cave [n]                                     /tp to cave_start, `!fly cave_end`
 //   !test route <prefix> [n] [noshortcut]              /tp to <prefix>_start, `!fly route <prefix> [noshortcut]`
 //   !test goto <x y z | wp> from <x y z | wp> [n]      /tp to the start, `!goto <goal>`
-//   !test mobs <set> [n] [<s>s]                        Track M1: summon a named set of mobs round the bot (at least 150 blocks
-//                                                      from home), count deaths, damage and time; removes only its own mobs
+//   !test mobs <set> [n] [<s>s] [force]                Track M1: summon a named set of mobs round the bot (at least 150 blocks
+//                                                      from home), count deaths, damage and time; removes only its own mobs.
+//                                                      Track M2: asks for keepInventory and mobGriefing first and refuses
+//                                                      without keepInventory, a creeper set under mobGriefing (unless force)
+//                                                      and a ring of mostly unstandable ground
 //   !test stop                                         end the run in progress and the series
 // Each run restores health, food and the kit and teleports to the start first (skills/test/recovery.ts), runs the trip as
 // the owner's own command and records it (skills/test/series.ts): a chat line per run, a summary, and one JSON line per
@@ -25,6 +28,8 @@ import { NEEDS_OP, OpDetector, type OpSource, type OpStatus } from '../skills/te
 import { claimRespawn, fmtCell, Harness, Recovery, type HarnessPorts } from '../skills/test/recovery.ts';
 import { summaryLine, TEST_LIMITS, TestSeries, type RunKind, type RunSpec, type SeriesSummary } from '../skills/test/series.ts';
 import { MobSeries, mobSummaryLine, parseMobsArgs, type MobsSpec } from '../skills/test/mobs.ts'; // Track M1
+import { safeCell } from '../skills/combat/dodge.ts'; // Track M2: the ring's ground
+import { gridOf } from '../skills/combat/targeting.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import type { RespawnController } from '../tasks/respawn.ts';
 import type { ChatLine } from './text.ts';
@@ -281,7 +286,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
 
   // ---- Track M1: !test mobs ----
   let mobStart: Vec3 | undefined;
-  const startMobs = (spec: MobsSpec, reply: (m: string) => void): void => {
+  const startMobs = async (spec: MobsSpec, reply: (m: string) => void): Promise<void> => {
     const pve = d.pve;
     if (!pve || !world) {
       reply(d.needsWalking('test'));
@@ -300,6 +305,10 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
     const tag = `m1t${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')}`;
     const s = new MobSeries(spec, {
       run: (c) => runner.run(c),
+      standable: (x, y, z) => {
+        const g = gridOf(pve.mover);
+        return g ? safeCell(g, x + 0.5, y, z + 0.5) : undefined;
+      },
       restore: (start) => harness.restore(start, kit, TEST_LIMITS.elytraMin),
       position: () => harnessPorts.position() ?? pve.position(),
       home: () => task.home?.get(),
@@ -330,9 +339,17 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
       return;
     }
     mobSeries = s;
+    // Track M2: the server's keepInventory and mobGriefing and the ring's ground, said in the first line; a refusal ends it here
+    const pf = await s.preflight();
+    log.info(`test mobs ${spec.set}: ${pf.line}${pf.refusal ? `; refused: ${pf.refusal}` : ''}`);
+    if (pf.refusal) {
+      mobSeries = undefined;
+      reply(`${pf.refusal} (${pf.line})`);
+      return;
+    }
     const p0 = harnessPorts.position() ?? pve.position();
     mobStart = { x: Math.floor(p0.x), y: Math.floor(p0.y + 1e-3), z: Math.floor(p0.z) };
-    reply(`test mobs ${spec.set}: ${spec.runs} run${spec.runs === 1 ? '' : 's'} of ${spec.mobs.length} mob${spec.mobs.length === 1 ? '' : 's'} (${spec.seconds} s each) from ${fmtCell(mobStart)}, name tag ${tag}${file ? `; ${basename(file)}` : ''}`);
+    reply(`test mobs ${spec.set}: ${spec.runs} run${spec.runs === 1 ? '' : 's'} of ${spec.mobs.length} mob${spec.mobs.length === 1 ? '' : 's'} (${spec.seconds} s each) from ${fmtCell(mobStart)}, ${pf.line}${spec.force ? ', force' : ''}, name tag ${tag}${file ? `; ${basename(file)}` : ''}`);
     seriesDone = (async () => {
       try {
         const sum = await s.run();
@@ -420,7 +437,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
 
   chat.register({
     name: 'test',
-    help: '[status | op | kit | stop] | cavestart [n] [from <p>] | cave [n] | route <prefix> [n] [noshortcut] | goto <p> from <p> [n] | mobs <set> [n] [<s>s] (repeated test runs with /tp, re-kit and heals between them; needs testMode on, cheats on and the bot op\'d)',
+    help: '[status | op | kit | stop] | cavestart [n] [from <p>] | cave [n] | route <prefix> [n] [noshortcut] | goto <p> from <p> [n] | mobs <set> [n] [<s>s] [force] (repeated test runs with /tp, re-kit and heals between them; needs testMode on, cheats on and the bot op\'d)',
     group: 'control',
     example: '!test goto base from 0 64 0 3',
     auto: 'after a death in testMode: the kit back and /tp to the run start',
@@ -484,7 +501,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
             return;
           }
           if (series || mobSeries) return;
-          startMobs(m, reply);
+          await startMobs(m, reply);
         })();
         return;
       }

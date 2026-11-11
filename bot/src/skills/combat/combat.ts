@@ -395,6 +395,10 @@ interface Target {
   strikesSince: number;
   /** Track M1: the mob's hurt count when progress was last seen (a reflex strike, an arrow count too). */
   hurtsSeen: number;
+  /** Track M2: where the body was at the last progress (STALL_MOVE). */
+  progressAt?: Vec3;
+  /** Track M2: tick of the last progress that was not a walk (closer, a hit landed, a hurt). */
+  realT?: number;
 }
 
 interface Fight {
@@ -456,6 +460,15 @@ export const STALL_TICKS = 60;
 const STALL_GAIN = 0.5;
 /** Track AO: in reach, this many strikes without a hit landing count as no progress. */
 const STALL_STRIKES = 5;
+/**
+ * Track M2: the body walking this far (level, the navigator's approach) since the last progress counts as progress too, and
+ * the closest distance starts again from where it is. On the Realm's hillside the watchdog wrote off a witch 4.7 under the
+ * bot, two skeletons and a zombie (closest 2.7 to 2.9, now 4.4 to 5.4: knocked back by the blade, or walking away down the
+ * hill) while the approach was walking after them: a closest-ever distance cannot be beaten by a mob that moves off.
+ */
+export const STALL_MOVE = 1.5;
+/** Track M2: a walk counts as progress for at most this long (ticks) after the last real progress. */
+export const STALL_WALK_TICKS = 300;
 
 export class CombatController {
   private readonly d: CombatDeps;
@@ -998,12 +1011,25 @@ export class CombatController {
     // Track AO: the stall watchdog (no 0.5 blocks closer, no hit landed): a wall, glass or a fence between
     if (f.o.approach && f.o.stallTicks > 0 && !tg.flying && !tg.creeper) {
       const hurts = ms?.hurts ?? 0; // Track M1: a hurt from any strike (the reflex hits beyond the fight's reach)
-      if (tg.progressT < 0 || tg.landedN > tg.landedSeen || hurts > tg.hurtsSeen || reachNow < tg.best - STALL_GAIN) {
+      const real = tg.progressT < 0 || tg.landedN > tg.landedSeen || hurts > tg.hurtsSeen || reachNow < tg.best - STALL_GAIN;
+      // Track M2: the walk counts out of reach only (in reach the strikes without a hit are the measure) and for at most
+      // STALL_WALK_TICKS after the last real progress (a zombie the blade cannot finish kept a fight walking to its timeout)
+      const walked =
+        !real &&
+        reachNow > f.o.reach &&
+        tg.progressAt !== undefined &&
+        f.t - (tg.realT ?? tg.progressT) < STALL_WALK_TICKS &&
+        Math.hypot(s.pos.x - tg.progressAt.x, s.pos.z - tg.progressAt.z) >= STALL_MOVE;
+      if (real || walked) {
         tg.progressT = f.t;
+        tg.progressAt = { x: s.pos.x, y: s.pos.y, z: s.pos.z };
         tg.best = reachNow;
-        tg.landedSeen = tg.landedN;
-        tg.hurtsSeen = hurts;
-        tg.strikesSince = 0;
+        if (real) {
+          tg.realT = f.t;
+          tg.landedSeen = tg.landedN;
+          tg.hurtsSeen = hurts;
+          tg.strikesSince = 0;
+        }
       } else if (f.t - tg.progressT >= f.o.stallTicks && (reachNow > f.o.reach + 0.3 || tg.strikesSince >= STALL_STRIKES)) {
         this.log.info(`combat: no progress on ${bareType(tg.type)} #${tg.rid} for ${f.t - tg.progressT} ticks (closest ${tg.best.toFixed(1)}, now ${reachNow.toFixed(1)}, ${tg.strikesSince} strike(s) without a hit): unreachable`);
         this.endTarget(f, 'unreachable');

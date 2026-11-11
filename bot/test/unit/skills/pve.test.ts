@@ -38,6 +38,7 @@ function setup(opts: { home?: Vec3; shelter?: Vec3; night?: PveNight; guard?: bo
     inactive: () => false,
     options: { guard: { on: opts.guard ?? true, radius: 16 } },
   });
+  pve.settings.set('mobReflex', false); // the flee and guard as they run without the reflex (on by default since Track M2)
   src.emit('start_game', { entity_id: -42n });
   src.emit('set_health', { health: 20 });
   return { src, loop, mover, ents, pve };

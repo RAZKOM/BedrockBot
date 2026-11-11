@@ -2,7 +2,7 @@
 // Across the shooter's line (never along it), out of a witch's range, a turn only with no shot in the air, never onto a
 // cell without a floor or into a wall (the other way, else straight out, else no dodge).
 import { describe, expect, it } from 'vitest';
-import { dodgeStep, DODGE_FLIP_TICKS, POTION_STEP_TICKS, potionSideStep, safeCell } from '../../../src/skills/combat/dodge.ts';
+import { dodgeStep, DODGE_FLIP_TICKS, EDGE_MARGIN, POTION_STEP_TICKS, potionSideStep, safeCell } from '../../../src/skills/combat/dodge.ts';
 import type { TerrainClass } from '../../../src/skills/terrain/classify.ts';
 import type { Vec3 } from '../../../src/world/types.ts';
 import { FlatGrid } from './combat-fakes.ts';
@@ -78,6 +78,32 @@ describe('dodgeStep', () => {
     // and a wall behind: nothing safe
     for (let z = -3; z <= 3; z++) g.add(-2, F, z);
     expect(dodgeStep({ me, shooters: sh, dir: 1, inFlight: true, sinceFlip: 0, grid: g })).toBeUndefined();
+  });
+
+  it('Track M2: an edge on the way out (a cliff behind): straight across along the edge, never off it', () => {
+    const sh = [{ pos: { x: 4.5, y: F, z: 0.5 }, kind: 'archer' as const }]; // within DODGE_CLOSE: mostly out (-x)
+    const g = new HoleGrid();
+    for (let z = -6; z <= 6; z++) g.holes.add(`-2,${z}`); // the drop 2 cells behind the bot, along z
+    const s = dodgeStep({ me, shooters: sh, dir: 1, inFlight: true, sinceFlip: 0, grid: g })!;
+    expect(s).toBeDefined();
+    const h = dirOf(s.yaw);
+    expect(Math.abs(h.z)).toBeGreaterThan(0.99); // along the edge, no drift towards it
+    // that side shut too (a wall at z 2): the other way along the edge
+    for (let x = -3; x <= 3; x++) g.add(x, F, Math.sign(h.z) * 2).add(x, F + 1, Math.sign(h.z) * 2);
+    const t = dodgeStep({ me, shooters: sh, dir: s.dir, inFlight: true, sinceFlip: 0, grid: g })!;
+    expect(Math.sign(dirOf(t.yaw).z)).toBe(-Math.sign(h.z));
+    expect(t.dir).toBe(s.dir === 1 ? -1 : 1);
+  });
+
+  it('Track M2: an edge right behind (where an arrow knocks the body): the dodge drifts back in, towards the shooter', () => {
+    const sh = [{ pos: { x: 12.5, y: F, z: 0.5 }, kind: 'archer' as const }];
+    const g = new HoleGrid();
+    for (let z = -6; z <= 6; z++) g.holes.add(`-1,${z}`);
+    const s = dodgeStep({ me, shooters: sh, dir: 1, inFlight: true, sinceFlip: 0, grid: g })!;
+    const h = dirOf(s.yaw);
+    expect(h.x).toBeGreaterThan(0.2); // in, away from the edge
+    expect(Math.abs(h.z)).toBeGreaterThan(0.8); // still across the line
+    expect(EDGE_MARGIN).toBeGreaterThan(1);
   });
 
   it('the potion side step: at right angles to its flight, away from a melee mob, a safe side only', () => {

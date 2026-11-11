@@ -42,6 +42,7 @@ function world(opts: { home?: Vec3; shelter?: Vec3; guard?: boolean; night?: Nig
   const ents = new Map<bigint, EntityInfo>();
   const inventory = new Inventory(() => null, () => 1n);
   const settings = new RuntimeSettings();
+  settings.set('mobReflex', false); // the flee and guard as they run without the reflex (on by default since Track M2)
   const pve = new PveController({
     source: src,
     world: { entities: ents, inventory, self: { runtimeId: 1n, health: 20 } },

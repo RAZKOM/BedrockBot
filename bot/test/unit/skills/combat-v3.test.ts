@@ -5,7 +5,7 @@
 // stack request, shot prediction from `target_eid` and the bow sound, raised while not striking, the
 // creeper's 10 ticks).
 import { describe, expect, it } from 'vitest';
-import { CombatController } from '../../../src/skills/combat/combat.ts';
+import { CombatController, STALL_MOVE, STALL_TICKS, STALL_WALK_TICKS } from '../../../src/skills/combat/combat.ts';
 import { MobTracker } from '../../../src/skills/combat/hostiles.ts';
 import { angleDiff } from '../../../src/skills/nav/follower.ts';
 import { i64, SHOT_PERIOD, shotDue } from '../../../src/skills/combat/shield.ts';
@@ -436,5 +436,59 @@ describe('shield', () => {
     expect(s.loop.cmd).toMatchObject({ forward: 1, sprint: true, sneak: false });
     s.combat.cancel();
     expect((await fight).shieldTicks).toBe(10);
+  });
+});
+
+describe('Track M2: the stall watchdog and a target that moves off', () => {
+  it('a body standing still while the target stays 6 off: unreachable after STALL_TICKS', async () => {
+    const ents = new Map<bigint, EntityInfo>([[7n, mob(7n, 'minecraft:witch', { x: 0, y: -60, z: 6 })]]);
+    const s = setup(ents);
+    let done: { reason: string } | undefined;
+    void s.combat.fight(7n, { timeoutTicks: 400 }).then((r) => (done = r));
+    for (let i = 0; i < 90 && !done; i++) {
+      s.loop.step(1);
+      s.loop.pos = { x: 0, y: -60, z: 0 };
+      await flush();
+    }
+    expect(done?.reason).toBe('unreachable');
+  });
+
+  it(`a body walking after it (the approach) while it keeps its distance: not written off (STALL_MOVE ${STALL_MOVE})`, async () => {
+    const ents = new Map<bigint, EntityInfo>([[7n, mob(7n, 'minecraft:witch', { x: 0, y: -60, z: 6 })]]);
+    const s = setup(ents);
+    let done: { reason: string } | undefined;
+    void s.combat.fight(7n, { timeoutTicks: 400 }).then((r) => (done = r));
+    let z = 0;
+    for (let i = 0; i < 150 && !done; i++) {
+      s.loop.step(1);
+      z += 0.1; // the bot walks on, she goes down the hill as fast
+      s.loop.pos = { x: 0, y: -60, z };
+      ents.get(7n)!.pos = { x: 0, y: -64, z: z + 4 };
+      await flush();
+    }
+    expect(done).toBeUndefined();
+  });
+
+  it(`the walk counts for at most STALL_WALK_TICKS (${STALL_WALK_TICKS}) after the last real progress`, async () => {
+    const ents = new Map<bigint, EntityInfo>([[7n, mob(7n, 'minecraft:witch', { x: 0, y: -60, z: 6 })]]);
+    const s = setup(ents);
+    let done: { reason: string } | undefined;
+    let at = 0;
+    void s.combat.fight(7n, { timeoutTicks: 1000 }).then((r) => {
+      done = r;
+      at = i;
+    });
+    let z = 0;
+    let i = 0;
+    for (; i < 600 && !done; i++) {
+      s.loop.step(1);
+      z += 0.1;
+      s.loop.pos = { x: 0, y: -60, z };
+      ents.get(7n)!.pos = { x: 0, y: -64, z: z + 4 };
+      await flush();
+    }
+    expect(done?.reason).toBe('unreachable');
+    expect(at).toBeGreaterThan(STALL_WALK_TICKS);
+    expect(at).toBeLessThan(STALL_WALK_TICKS + STALL_TICKS + 40);
   });
 });

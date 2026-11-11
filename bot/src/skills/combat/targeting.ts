@@ -53,6 +53,10 @@ export const CREEPER_AVOID_RANGE = 8;
 export const CREEPER_MIN_HEALTH = 10;
 /** Height difference beyond which a mob is never a guard target. */
 export const MAX_DY = 6;
+/** Track M2: a first target (the witch: she throws from 8 whatever the height) is a target this far over or under the bot. */
+export const FIRST_MAX_DY = 10;
+/** Track M2: a first target written off as unreachable by a fight gets another fight this long after (ms). */
+export const FIRST_RETRY_MS = 3000;
 /** How far above a standable cell the mob's feet may be (it stands on a slab, a fence, jumps). */
 export const ABOVE_CELL = 1.5;
 /** Extra chase distance beyond the guard radius (from the bot). */
@@ -158,12 +162,12 @@ export function nearestHostile(h: Pick<TargetingHost, 'mobs' | 'd'>, me: Vec3, r
  * most 1.5 blocks above a cell the planner can stand in, within 6 blocks of height (flying mobs never
  * qualify); false = neither. Without a grid, or where the grid does not know the terrain yet, 'cell'.
  */
-export function reachability(grid: GridLike | undefined, me: Vec3, e: EntityInfo): 'now' | 'cell' | false {
+export function reachability(grid: GridLike | undefined, me: Vec3, e: EntityInfo, maxDy = MAX_DY): 'now' | 'cell' | false {
   const eye = { x: me.x, y: me.y + EYE_HEIGHT, z: me.z };
   if (reachDistance(eye, e) <= REACH_NOW) return 'now';
   if (isFlying(e.type)) return false;
   const f = entityFeet(e);
-  if (Math.abs(f.y - me.y) > MAX_DY) return false;
+  if (Math.abs(f.y - me.y) > maxDy) return false;
   if (!grid) return 'cell';
   // the cells under the mob's box (it may overhang an edge by up to 0.3)
   const xs = new Set([Math.floor(f.x), Math.floor(f.x - 0.3), Math.floor(f.x + 0.3)]);
@@ -215,7 +219,11 @@ export function pickThreat(h: TargetingHost, me: Vec3, low: boolean): ThreatPick
       // Track M1 round 2: a first target (the witch) is not left alone after a fight that ended out of range: she stood
       // at 6 for 5 s throwing while guard ignored her (a live-kit mixed-8 death); a path verdict still holds
       const outOfRange = note?.reason === 'fight out_of_range';
-      if (outOfRange && h.firstTarget?.(e, me) === true) {
+      // Track M2: nor written off as unreachable for long while she can throw at the bot: on the Realm's hillside a witch 4.7
+      // under the bot was ignored for the rest of the run after the stall watchdog's verdict; a first target gets another
+      // fight FIRST_RETRY_MS after it (a wall between her and the bot fails again at once: no walk, no harm)
+      const retry = note?.reason === 'fight unreachable' && now - note.at >= FIRST_RETRY_MS;
+      if ((outOfRange || retry) && h.firstTarget?.(e, me) === true) {
         h.ignore.delete(e.runtimeId);
         h.ignoreWhy?.delete(e.runtimeId);
       } else if (!hitUs || !note || hit.at <= note.at || isFlying(e.type)) continue;
@@ -242,8 +250,8 @@ export function pickThreat(h: TargetingHost, me: Vec3, low: boolean): ThreatPick
     } else {
       // a mob that hit us in the last 10 s is fought whatever the centre (it is next to us, not near home)
       if ((!hitUs && dist(f, center) > radius) || d > radius + CHASE_EXTRA) continue;
-      if (Math.abs(f.y - me.y) > MAX_DY) continue;
-      const r = reachability(grid, me, e);
+      if (Math.abs(f.y - me.y) > (first ? FIRST_MAX_DY : MAX_DY)) continue; // Track M2: FIRST_MAX_DY
+      const r = reachability(grid, me, e, first ? FIRST_MAX_DY : MAX_DY);
       if (!r) {
         if (hitUs && isFlying(e.type)) {
           h.ignore.set(e.runtimeId, now + 10_000);

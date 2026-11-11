@@ -138,7 +138,7 @@ export const SETTING_DEFS = {
   guardReach: { kind: 'number', default: 24, min: 0, max: 64, integer: true, unit: 'path blocks', description: 'guard: a hostile not within reach is fought only when the planner finds a walk to it of at most this length (else ignored for 30 s); 0 = no path check' }, // Track AO
   guardWhileWalking: { kind: 'text', default: 'near', values: 'reach|near|all', parse: (raw: string) => { const v = raw.trim().toLowerCase(); if (v !== 'reach' && v !== 'near' && v !== 'all') throw new SettingError(`guardWhileWalking must be reach, near or all, got "${raw}"`); return v; }, description: 'guard during a walk (come, follow, goto, get, unload, build, ...): reach = only mobs within reach; near = also melee mobs, creepers and archers aiming at me within 6 path blocks; all = as when idle' }, // Track AO
   // Track M1: never die to common mobs (docs/pve.md, ADR 0079)
-  mobReflex: { kind: 'boolean', default: false, description: 'strike hostiles in reach under every activity, without stopping the work (never players, pets, villagers, golems)' },
+  mobReflex: { kind: 'boolean', default: true, description: 'strike hostiles in reach under every activity, without stopping the work (never players, pets, villagers, golems)' },
   fleeFly: { kind: 'boolean', default: false, description: 'a flight from mobs that fails on foot flies home with the elytra (!fly home) when the kit is ready' },
   sealIn: { kind: 'boolean', default: false, description: 'last floor against mobs: no way away, wall itself in with throwaway blocks and eat there' },
   mobDodge: { kind: 'boolean', default: false, description: 'with no sword or axe, run across an archer or witch line of fire instead of away from it (hand-steered, safe cells only)' },

@@ -47,6 +47,7 @@ import type { Goal, NavGoal } from '../skills/nav/goals.ts';
 import type { GotoOptions, SkillResult } from '../skills/types.ts';
 import { headInWater } from '../skills/survival/surface.ts'; // Track BF
 import { chooseFood } from '../skills/survival/eat.ts'; // Track M1: the eat floor
+import { EAT_BEFORE_SPRINT_LOST } from '../skills/survival/index.ts'; // Track M2
 import { Hotbar } from '../world/hotbar.ts';
 import type { Inventory } from '../world/inventory.ts';
 import type { EntityInfo, PacketSource, Vec3 } from '../world/types.ts';
@@ -177,6 +178,8 @@ export const SEAL_CROWD = 3;
 export const FLOOR_FAILED_MS = 20_000;
 /** The elytra flee and the seal-in are tried at most once in this long (ms) each. */
 export const FLOOR_RETRY_MS = 30_000;
+/** Track M2: after the elytra flee is sent, the flee and guard leave the body to the takeoff for this long at most. */
+export const FLY_HANDOVER_MS = 6000;
 /** Sealed in: open up again once the health is back to this and no mob is within 16 or it is day (at most after SEAL_MAX_MS). */
 export const SEAL_LEAVE_HEALTH = 20;
 const SEAL_MAX_MS = 300_000;
@@ -207,6 +210,39 @@ export const WITCH_WINDOW_MS = 2000;
 /** The dodge (mobDodge, no blade): shooters within this (and in sight) are dodged; a melee mob within DODGE_MELEE ends it. */
 export const DODGE_RANGE = 16;
 export const DODGE_MELEE = 6;
+
+// ---- Track M2: hold the ground against what a fist keeps out (docs/pve.md "Track M2") ----
+/** At most this many melee mobs within HOLD_RANGE are held off by the reflex (it strikes 3 a tick, each every 10 ticks). */
+export const HOLD_MAX = 3;
+export const HOLD_RANGE = 8;
+/** Two melee hits within this long (ms) while it holds: the fist is not keeping them out, run. */
+export const HOLD_HITS_MS = 3000;
+/** Eat in a flight from this food down (the survival kit's urgent bite, too): below 7 the body cannot sprint. */
+export const FOOD_SPRINT_EAT = EAT_BEFORE_SPRINT_LOST;
+
+export interface HoldInput {
+  /** The reflex is on and able (mobReflex, on the ground, not flying). */
+  reflex: boolean;
+  /** Melee mobs (not creepers) within HOLD_RANGE. */
+  melee: number;
+  /** A creeper within FLEE_CREEPER_RANGE, or a ranged mob (an archer, a witch) within FLEE_SCAN with a line on the bot. */
+  other: boolean;
+  /** Melee hits taken within HOLD_HITS_MS. */
+  meleeHits: number;
+}
+
+/**
+ * Track M2: stand and let the reflex strike instead of running with the back turned. The bare idle nights of Track M1 and the
+ * bare `mixed-8` runs with the reflex off died the same way: a bot at 1 to 4 health ran 40 blocks with a zombie at 2 to 4
+ * behind it, hit every few seconds, until it was dead (a zombie is as fast as a running bot, and at food 6 or less the bot
+ * cannot sprint). A fist strike every 10 ticks from 3.9 keeps one zombie out of its own reach (pve-rules `kite`: 16 to 23
+ * strikes and no hit in 20 s), and the reflex strikes 3 in a tick. So with the reflex able, up to HOLD_MAX melee mobs near and
+ * nothing that a stand does not answer (a creeper's blast, an archer's or a witch's line), the low-health flight does not
+ * start, and a running one ends; two melee hits within HOLD_HITS_MS say the fist is not holding them, and the bot runs.
+ */
+export function holdGround(i: HoldInput): boolean {
+  return i.reflex && i.melee >= 1 && i.melee <= HOLD_MAX && !i.other && i.meleeHits < 2;
+}
 
 /** The floors against mobs, in order (the health rule): see `pveFloor`. */
 export type Floor = 'fight' | 'eat' | 'backoff' | 'fly' | 'seal' | 'defend';
@@ -274,6 +310,8 @@ export class PveController {
   /** The last hit the bot took (Track W: how many more it can take). */
   lastHit: { damage: number; at: number } | undefined;
   private readonly recentHits: { damage: number; at: number }[] = [];
+  /** Track M2: when the last melee hits came (performance.now ms; the hit guess blamed a melee mob). */
+  private readonly meleeHitTimes: number[] = [];
   /** Far players from the locator bar (Track W): `!come` beyond the entity range. */
   readonly locator: PlayerLocator;
   /** Track M1: strikes every hostile within reach under every activity (the `mobReflex` setting). */
@@ -287,6 +325,29 @@ export class PveController {
    * skill's own entry point). `ready` says whether it can go now (kit, a home); `go` dispatches it (true when sent).
    */
   flyHome: { ready(): boolean; go(): boolean } | undefined;
+  /** Track M2: the elytra flee's hand-over: until then the flee and guard leave the body to the trip's takeoff. */
+  flyHandoverUntil = -Infinity;
+  private flySentAt = -Infinity;
+
+  /** Track M2: the elytra flee was just sent: hold the flee and guard off for FLY_HANDOVER_MS (see FLY_HANDOVER_MS). */
+  startFlyHandover(): void {
+    this.flySentAt = performance.now();
+    this.flyHandoverUntil = this.flySentAt + FLY_HANDOVER_MS;
+  }
+
+  /**
+   * Track M2: the takeoff of the elytra flee has the body. `!fly home` is a user process (`fly`) that needs the body on the
+   * ground to take off; the flee and guard outrank it, and on bds-gaunt they took the body straight back in 4 runs of 4 (a
+   * new flight on foot at the low health, guard defending in place): the takeoff never ran and the bot died in the pen.
+   * True within FLY_HANDOVER_MS of the send while the `fly` process lives (its first second: it may not be listed yet);
+   * once in the air the flight process holds the body above everything anyway.
+   */
+  flyHandover(): boolean {
+    const now = performance.now();
+    if (now >= this.flyHandoverUntil) return false;
+    if (now - this.flySentAt < 1000) return true;
+    return this.processes.find('fly').some((p) => !(p as { done?: boolean }).done);
+  }
 
   constructor(deps: PveDeps) {
     this.d = deps;
@@ -367,6 +428,11 @@ export class PveController {
           this.lastHit = { damage, at: performance.now() };
           this.recentHits.push(this.lastHit);
           if (this.recentHits.length > 20) this.recentHits.shift();
+          const ge = g ? this.d.world.entities.get(g.runtimeId) : undefined;
+          if (ge && targeting.isMelee(ge, this.mobs)) {
+            this.meleeHitTimes.push(this.lastHit.at);
+            if (this.meleeHitTimes.length > 10) this.meleeHitTimes.shift();
+          }
         }
         this.log.info(`pve: took ${damage.toFixed(1)} damage${g ? ` (probably ${bareType(g.type)} #${g.runtimeId}, ${g.why})` : ''}, health ${this.health()}`);
       }),
@@ -739,6 +805,10 @@ export class PveController {
       if (t === 'splash_potion' || t === 'lingering_potion') this.potionPos.set(e.runtimeId, { x: e.pos.x, y: e.pos.y, z: e.pos.z });
     }
     if (!on || !loop.state.onGround || !keysFree()) return;
+    // Track M2: no step while guard fights the witch: the step takes the keys from the approach for 12 ticks a throw and she
+    // lives longer. Live kit, mixed 8, 20 runs a side: potions within 4 of the bot 43 of 48 with the reflex (and the step) on,
+    // 20 of 52 off; the witch's damage 22.7 a run on, 15.0 off
+    if (this.processes.active === this.guardProcess && this.guardProcess.fighting === 'witch') return;
     for (const e of this.d.world.entities.values()) {
       const t = bareType(e.type);
       if ((t !== 'splash_potion' && t !== 'lingering_potion') || this.potionsStepped.has(e.runtimeId)) continue;
@@ -783,6 +853,35 @@ export class PveController {
     }
   }
 
+  /**
+   * Track M2: hold the ground (holdGround): the reflex able, 1 to HOLD_MAX melee mobs within HOLD_RANGE, no creeper within
+   * FLEE_CREEPER_RANGE and no archer or witch within FLEE_SCAN in sight, fewer than 2 melee hits in HOLD_HITS_MS.
+   */
+  /** The reflex is on and able: `mobReflex`, the bot active and in the world, not in a flight. */
+  reflexOn(): boolean {
+    return this.settings.get('mobReflex') && !this.d.inactive() && this.d.loop.state.ready && this.processes.active?.name !== 'flight';
+  }
+
+  holds(me: Vec3): boolean {
+    if (!this.reflexOn()) return false;
+    const grid = targeting.gridOf(this.mover);
+    const eye = { x: me.x, y: me.y + 1.62, z: me.z };
+    let melee = 0;
+    let other = false;
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      const d = dist(entityFeet(e), me);
+      if (bareType(e.type) === 'creeper') {
+        if (d <= FLEE_CREEPER_RANGE) other = true;
+      } else if (targeting.isMelee(e, this.mobs)) {
+        if (d <= HOLD_RANGE) melee++;
+      } else if (d <= FLEE_SCAN && (!grid || targeting.lineOfSight(grid, eye, e))) other = true;
+    }
+    const now = performance.now();
+    const meleeHits = this.meleeHitTimes.filter((t) => now - t < HOLD_HITS_MS).length;
+    return holdGround({ reflex: true, melee, other, meleeHits });
+  }
+
   /** Track M1: a sword or an axe in the hotbar. */
   hasBlade(): boolean {
     return this.d.world.inventory.slots.slice(0, 9).some((it) => !!it && it.count > 0 && bladeScore(it) > 0);
@@ -808,6 +907,10 @@ export class PveController {
     if (grid && !targeting.lineOfSight(grid, { x: me.x, y: me.y + 1.62, z: me.z }, e)) return false;
     const len = Math.hypot(f.x - me.x, f.z - me.z);
     if (len < 1e-3) return true;
+    // Track M2: with the reflex on, the melee mobs on the way are struck in passing, so the way need not be clear. With the
+    // way rule the reflex kept the bot at home killing the ring while she threw at a still body: live mixed-8, 30 runs a side,
+    // potions within 4 of the bot 54 of 62 on against 26 of 72 off, the witch's damage 20.5 against 14.9
+    if (this.reflexOn()) return true;
     const ux = (f.x - me.x) / len;
     const uz = (f.z - me.z) / len;
     for (const o of this.d.world.entities.values()) {
@@ -930,10 +1033,12 @@ export class PveController {
       if (cr) out = { why: 'creeper', threat: cr };
     }
     out ??= ((t) => (t ? { why: 'low' as const, threat: t } : undefined))(targeting.crowdThreat(this, me)); // Track AH: crowd rule (3+ melee within 4, health < 12), like a creeper
+    // Track M2: up to HOLD_MAX melee mobs the reflex keeps out: stand and strike, do not run with the back turned
+    if (out?.why === 'low' && this.holds(me)) out = undefined;
     // Track M1 round 2: a witch the bot fights first (firstTarget) is not run from at low health (she follows and throws)
     const witchFirst = !out && this.hasBlade() ? this.nearestOfKind(me, WITCH_FIRST_RANGE, (t) => t === 'witch') : undefined;
     if (witchFirst && this.firstTarget(witchFirst, me)) return undefined;
-    if (!out && this.low() && !this.canDuel(me)) {
+    if (!out && this.low() && !this.canDuel(me) && !this.holds(me)) {
       const t = this.nearestHostile(me, FLEE_SCAN);
       if (t) out = { why: 'low', threat: t };
     }
@@ -1200,7 +1305,9 @@ class FleeProcess extends BaseProcess {
     const c = this.c;
     this.flyAt = performance.now();
     c.floorUsed('fly');
+    c.startFlyHandover(); // Track M2: before the send (the command may add its process at once)
     const sent = c.flyHome?.go() ?? false;
+    if (!sent) c.flyHandoverUntil = -Infinity;
     c.log.warn(`floor: elytra flee home (${why}, health ${c.health().toFixed(1)})${sent ? '' : ': could not send !fly home'}`);
     for (const k of c.processes.find('kill')) c.processes.stop(k, 'stopped');
     c.guardProcess.cancelEpisode();
@@ -1211,6 +1318,7 @@ class FleeProcess extends BaseProcess {
     this.plan = undefined;
     const c = this.c;
     if (c.d.night?.state === 'going') return false;
+    if (c.flyHandover()) return false; // Track M2: the elytra flee's takeoff has the body
     const me = c.position();
     // A hard trigger (health below fleeHealth, a creeper near at low health) with the threat within 6 blocks,
     // away from home / the shelter, ignores the cooldown after a flight: a zombie that catches up with the bot
@@ -1233,7 +1341,7 @@ class FleeProcess extends BaseProcess {
     if (!r && this.recovering()) {
       // recovering: run from what chases (melee mobs within 12); archers are better closed in on
       const t = c.nearestHostile(me, FLEE_RECOVER_SCAN);
-      if (t && !FLEE_RANGED.has(bareType(t.type)) && !c.canDuel(me) && !(c.atFleeDest(me) && dist(entityFeet(t), me) > 6)) r = { why: 'low', threat: t };
+      if (t && !FLEE_RANGED.has(bareType(t.type)) && !c.canDuel(me) && !c.holds(me) && !(c.atFleeDest(me) && dist(entityFeet(t), me) > 6)) r = { why: 'low', threat: t };
     }
     if (!r) return false;
     this.plan = r;
@@ -1454,7 +1562,7 @@ class FleeProcess extends BaseProcess {
     // still in danger?
     const reason = c.fleeReason(me);
     this.recoverUntil = Math.max(this.recoverUntil, now + 1000); // a flight in progress keeps the recovery open
-    const danger = reason !== undefined || (!c.canDuel(me) && ((c.low() && nearest <= FLEE_SCAN) || (this.recovering() && this.meleeNear(me))));
+    const danger = reason !== undefined || (!c.canDuel(me) && !c.holds(me) && ((c.low() && nearest <= FLEE_SCAN) || (this.recovering() && this.meleeNear(me))));
     ep.dest = c.fleeTarget(me) ?? (ep.dest && c.atFleeDest(me) ? undefined : ep.dest);
     const dest = ep.dest;
     // danger over (2 s): end, unless nothing waits and home is still to reach (then go on, around the threat)
@@ -1631,7 +1739,7 @@ class FleeProcess extends BaseProcess {
     const kit = c.kit?.();
     const ep = this.ep;
     // below 10; or while recovering with food under 18 (no natural regeneration without it: the bot stayed at 12 health for minutes)
-    const hungry = c.health() < FLEE_EAT_BELOW || (this.recovering() && c.food() < 18);
+    const hungry = c.health() < FLEE_EAT_BELOW || (this.recovering() && c.food() < 18) || c.food() <= FOOD_SPRINT_EAT; // Track M2: before the food stops the sprint
     if (!kit || !ep || !hungry || nearest < FLEE_EAT_CLEAR || c.food() >= 20) return;
     if ((kit as { busy?: boolean }).busy) return;
     void kit.eat().then((r) => {
@@ -1755,12 +1863,18 @@ class GuardProcess extends BaseProcess {
     return (this.ep?.inPlace ?? this.pick?.inPlace) ? PRIORITY.defend : PRIORITY.guard;
   }
 
+  /** Track M2: the mob type the guard fight went for (no namespace), undefined when not fighting. */
+  get fighting(): string | undefined {
+    return this.ep?.phase === 'fight' ? bareType(this.ep.type) : undefined;
+  }
+
   override wants(): boolean {
     if (this.ep) return true;
     this.pick = undefined;
     const c = this.c;
     // a kill job fights already (unless !pause holds it)
     if (!c.guard.on || (!c.processes.paused && c.processes.find('kill').length > 0)) return false;
+    if (c.flyHandover()) return false; // Track M2: the elytra flee's takeoff has the body
     c.pathReach.prune(); // Track AO: drop stale probe verdicts
     this.pick = c.pickThreat(c.position(), c.low());
     return this.pick !== undefined;

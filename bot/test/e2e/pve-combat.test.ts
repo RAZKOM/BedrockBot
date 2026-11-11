@@ -421,7 +421,7 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
     const title =
       layout === 'flank'
         ? `two zombies 2 blocks apart, the bot between them: both die, the fight switches; re-targeting vs one target at a time (${RETARGET_RUNS} runs each)`
-        : `a zombie behind the bot while it is sent at one 8 blocks away: re-targeting takes fewer hits than the single target (${RETARGET_RUNS} runs each)`;
+        : `a zombie behind the bot while it is sent at one 8 blocks away: re-targeting switches to it in every run, both die, not more hits beyond noise (${RETARGET_RUNS} runs each)`;
     it(title, async () => {
       const b = bot!;
       b.pve.setGuard({ on: false });
@@ -442,14 +442,17 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
         measurements.push(line);
         expect(b.built.respawn!.deaths).toBe(deaths0);
         if (mode === 'on') expect(r.dead).toBe(2); // the shipped behaviour must finish both; the single-target baseline is a comparison only (it lost one of two in 1 of 5 runs after Track AO's watchdog)
+        // far: what re-targeting guarantees is the switch to the zombie behind, in every run (Track M2: 10 runs each, 11 retargets in 10 runs)
+        if (mode === 'on' && layout === 'far') expect(r.retargets).toBeGreaterThanOrEqual(1);
       }
       const line = `${layout} over ${RETARGET_RUNS} runs each: re-targeting on ${sum.on.hits} hits (${sum.on.damage.toFixed(1)} damage, ${sum.on.retargets} retargets, ${sum.on.ticks} fight ticks), single target ${sum.off.hits} hits (${sum.off.damage.toFixed(1)} damage, ${sum.off.ticks} fight ticks)`;
       console.log(line);
       measurements.push(line);
       expect(sum.on.retargets).toBeGreaterThanOrEqual(1);
-      // flank: no reduction measured (docs/pve.md "Targeting": knockback keeps both zombies off either way); not worse beyond noise
-      if (layout === 'flank') expect(sum.on.hits).toBeLessThanOrEqual(sum.off.hits + RETARGET_RUNS);
-      else expect(sum.on.hits).toBeLessThanOrEqual(sum.off.hits); // Track AO ended both modes at 0 hits: not worse is the bar
+      // flank: no reduction measured (docs/pve.md "Targeting": knockback keeps both zombies off either way); not worse beyond noise.
+      // far: the two sides overlap run by run (Track M2, 10 runs each: on 0 or 1 hit a run, 7 in all; off 1 or 2, 14 in all; Track
+      // M1 saw 7 against 5 over 5), so a sum compared with no margin fails by chance; the bar is the same as flank's
+      expect(sum.on.hits).toBeLessThanOrEqual(sum.off.hits + RETARGET_RUNS);
       await b.truth.cleanup();
       await teleport(b, centre(HOME));
     }, 60_000 * 2 * RETARGET_RUNS);
