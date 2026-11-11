@@ -92,6 +92,8 @@ export const ENTRY_BUDGET_MS = 10_000;
 /** Track F9e round 2: a decision under a roof waits for the live model this many chunks each way round the body, at most this long (ms): a body that has just arrived has none. */
 export const LIVE_WAIT_CHUNKS = 5;
 export const LIVE_WAIT_MS = 3000;
+/** Track F9e round 2: a drawn line is flown only by a body within this many blocks of where it was proven from (`runAuto`). */
+export const DRAWN_START_OFF = 1;
 /** Track F9e round 2: the pieces of a way flown at most for one trip. */
 export const PIECES_MAX = 12;
 /** Track F9e: a hop is asked for a goal farther than this (blocks, straight: a hop's least line, learn/hop.ts HOP_MIN): nearer, the walk is there before a proof is. */
@@ -1194,6 +1196,18 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (!g0) return walk();
     if (f.kind === 'walk_out') return walkOut(g0, label, half, f, walk, legWalk);
     if (f.kind === 'fly') {
+      // Track F9e round 2 (the Realm): a drawn line is proven from where the body stood when the decision began. Another
+      // process may walk the body on while the decision runs (a chore's walk, for the seconds of the live model's wait and
+      // the proofs: 6 blocks on the Realm, and the takeoff found no glide): such a line is not flown from anywhere else. The
+      // walk, watched, asks again from where it gets to
+      const line0 = f.target.routeTakeoff?.guide?.line;
+      const p0 = line0?.drawn ? line0.points[0] : undefined;
+      const here0 = position();
+      const moved = p0 && here0 ? Math.hypot(here0.x - p0.x, here0.y - p0.y, here0.z - p0.z) : 0;
+      if (moved > DRAWN_START_OFF) {
+        log.info(`fly: the body is ${moved.toFixed(1)} blocks from where ${guideSaid(line0!)} was proven (it was walked on while the decision ran): not flown; the walk to ${label} asks again`);
+        return watchWalk(goal, label, half, walk, walk, legWalk);
+      }
       sayFlight(f);
       const at = position();
       const r = await retryShort(await start(f.target).result, at, g0, label, half);
