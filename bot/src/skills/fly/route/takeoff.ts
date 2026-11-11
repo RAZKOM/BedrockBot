@@ -28,7 +28,7 @@
 // recorded one is. It comes after the recordings and before the exits and takes the searched ways out's place: the
 // caller passes it with `flyCave` and `flyCaveExit` on, where it passed `far` before.
 import type { Vec3 } from '../../../connection/types.ts';
-import { drawExits, type DrawnLine } from '../learn/draw.ts'; // Track F9d
+import { drawWays, rollDraft, type DrawnLine } from '../learn/draw.ts'; // Track F9d, F9e
 import { FOLLOW_MARGIN, LINE_ROOM_MAX, lineRoom } from '../learn/follow.ts'; // Track F9b
 import type { Guide } from '../learn/guide.ts'; // Track F9b
 import type { GuideMatch } from '../learn/match.ts'; // Track F9b
@@ -280,6 +280,8 @@ export interface TakeoffRoute {
   guide?: { line: Guide; open: number; off: number };
   /** Track F9d: `guide` is a drawn line (learn/draw.ts): the flood's cells to its exit, the berth it was drawn with and the room its roll kept. */
   drawn?: { steps: number; berth: number; room: number };
+  /** Track F9e: `guide` is a hop's line (learn/hop.ts): where the entry's flier takes the body (blocks along it). The flight's target carries the line as its entry. */
+  hop?: { hand: number };
 }
 
 /** Track F9a: the proof of a route takeoff's plan: whether what follows it clears, with the time to the goal (ticks), and the line saying what was flown or met. */
@@ -474,17 +476,28 @@ export async function planTakeoffRoute(grid: RouteGrid, from: Vec3, target: { x:
   let drawn: { lines: number; ways: number; cells: number; ms: number } | undefined;
   if (o.drawn && o.prove) {
     const t1 = now();
-    const d = drawExits(grid, from, o.drawn.top, o.drawn.radius !== undefined ? { radius: o.drawn.radius } : {});
-    drawn = { lines: d.lines.length, ways: d.ways, cells: d.cells, ms: now() - t1 };
+    // (Track F9e: the lines are drawn at once and rolled one after another, each proven as soon as it rolls: a long line's
+    // roll costs as much as one of its proof's simulations, and the first line that clears is flown)
+    const d = drawWays(grid, from, o.drawn.top, o.drawn.radius !== undefined ? { radius: o.drawn.radius } : {});
+    drawn = { lines: d.drafts.length, ways: d.ways, cells: d.cells, ms: now() - t1 };
     if (d.why) tried.push(d.why);
-    else if (!d.lines.length) tried.push(`no drawn way out (${d.tried.slice(0, 2).join('; ')})`);
+    else if (!d.drafts.length) tried.push(`no drawn way out (${d.tried.slice(0, 2).join('; ')})`);
     let frail: TakeoffRoute | undefined;
-    for (const l of d.lines.slice(0, o.drawn.tries ?? DRAWN_TRIES)) {
-      const at = `the drawn way out ${l.guide.path} (to ${l.exit.x} ${l.exit.y} ${l.exit.z}, ${l.steps} cells of the flood, ${l.open.toFixed(0)} blocks to open sky, rolled in ${l.ticks} ticks on ${l.rockets} rocket${l.rockets === 1 ? '' : 's'}, drawn with a berth of ${l.berth}, its roll ${l.room >= LINE_ROOM_MAX ? `${LINE_ROOM_MAX} or more` : l.room.toFixed(2)} from the nearest block)`;
-      if (tried.length && spent()) {
-        tried.push(`${at}: not tried (${Math.round(now() - t0)} ms gone)`);
+    let proofs = 0;
+    const unflyable: string[] = [];
+    for (const draft of d.drafts) {
+      if (proofs >= (o.drawn.tries ?? DRAWN_TRIES)) break;
+      if ((tried.length || unflyable.length) && spent()) {
+        tried.push(`the drawn way out ${draft.guide.path}: not tried (${Math.round(now() - t0)} ms gone)`);
         break;
       }
+      const l = rollDraft(d.grid, draft, o.drawn.top);
+      if (typeof l === 'string') {
+        unflyable.push(l);
+        continue;
+      }
+      proofs++;
+      const at = `the drawn way out ${l.guide.path} (to ${l.exit.x} ${l.exit.y} ${l.exit.z}, ${l.steps} cells of the flood, ${l.open.toFixed(0)} blocks to open sky, rolled in ${l.ticks} ticks on ${l.rockets} rocket${l.rockets === 1 ? '' : 's'}, drawn with a berth of ${l.berth}, its roll ${l.room >= LINE_ROOM_MAX ? `${LINE_ROOM_MAX} or more` : l.room.toFixed(2)} from the nearest block)`;
       const route = drawnRoute(l, from, yaw);
       const proof = await o.prove(route);
       if (!proof.ok) {
@@ -501,6 +514,8 @@ export async function planTakeoffRoute(grid: RouteGrid, from: Vec3, target: { x:
       return { route: proven, exits: exits.length, tried, ...(learned !== undefined ? { learned } : {}), drawn };
     }
     if (frail) return { route: frail, exits: exits.length, tried, ...(learned !== undefined ? { learned } : {}), drawn };
+    // (the lines no roll could fly are said only when none was flown: two of them)
+    if (d.drafts.length && !proofs) tried.push(`no drawn way out (${[...d.tried, ...unflyable].slice(0, 2).join('; ')})`);
   }
   const more = { ...(learned !== undefined ? { learned } : {}), ...(drawn ? { drawn } : {}) };
   let best: TakeoffRoute | undefined;

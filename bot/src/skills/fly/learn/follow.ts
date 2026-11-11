@@ -157,6 +157,22 @@ export const FOLLOW_TAP_OVER = 1.1;
 export const FOLLOW_TAP_ABS = 0.05;
 export const FOLLOW_TAP_PITCH = -30;
 
+/** Track F9e: the look of the tick that takes speed off a body on a drawn line's way out (straight back, level: the fall is left as it is); the next rocket waits until the body is slower than this much of the least speed the line has for it within this many blocks. */
+export const FOLLOW_CAP_PITCH = 0;
+/** Track F9e: ... and for a body rising this much steeper (radians: 8 degrees) than the line does this many blocks ahead of it, the look of that tick is this far down. */
+export const FOLLOW_CAP_RISE = (8 * Math.PI) / 180;
+export const FOLLOW_CAP_RISE_AHEAD = 4;
+export const FOLLOW_CAP_DOWN = 75;
+export const FOLLOW_CAP_FIRE = 0.9;
+export const FOLLOW_CAP_AHEAD = 12;
+/** Track F9e: no rocket for a body on a drawn line that falls this many blocks over the next FOLLOW_FALL_AHEAD (10 degrees: the glide gains its speed there by itself, and a rocket fired over a line that falls away is a dive), unless it is slower than FOLLOW_FALL_SPEED (blocks a tick: a glide that slow sinks more than it flies). */
+export const FOLLOW_FALL = 1.4;
+export const FOLLOW_FALL_AHEAD = 8;
+export const FOLLOW_FALL_SPEED = 0.55;
+/** Track F9e: in a hop's last rocket's place a body slower than this (blocks a tick: a burn's 1.65 less a little) fires it; a rocket there that fired nothing is asked for again up to this many blocks beyond the place. */
+export const FOLLOW_HOP_SPEED = 1.45;
+export const FOLLOW_HOP_AGAIN = 8;
+
 /** Track F9c: a burn seen to end after fewer ticks than this was no burn: the rocket fired nothing and its boost was taken back (rocket.ts ROCKET_ADD_WITHIN is 5; the shortest real burn is BURN.min and is seen GLIDE.boostEndLag longer). */
 export const FOLLOW_DUD_TICKS = BURN.min - 1;
 /** Track F9c, for the probe only (scripts/cave-exit-probe.ts --old-dud): `dud` false flies the follower as Track F9b left it, a rocket that fired nothing not noticed, to measure what noticing it changed. Nothing in the bot writes it. */
@@ -192,6 +208,8 @@ export class GuideFollower {
   private readonly entry: FollowEntry | undefined;
   /** Track F9d: what the notes call the line: a recorded one or a drawn one (learn/draw.ts). */
   private readonly said: string;
+  /** Track F9e: the cells one tick's looks asked (steer): 0 not asked, 1 air, 2 solid. */
+  private readonly cube = new Uint8Array(32 * 32 * 32);
   private refire = false;
   private replaced = false;
   private tapped = false;
@@ -290,7 +308,7 @@ export class GuideFollower {
       this.movedAt = this.at;
       this.movedTick = this.stats.ticks;
     } else if (this.stats.ticks - this.movedTick > FOLLOW_STUCK) return { control: { yaw, pitch, fire: false }, status: 'lost', at: this.at, error: near.dist, why: `no farther than ${this.at.toFixed(0)} blocks along the line in ${FOLLOW_STUCK} ticks` };
-    const look = this.steer(b, yaw, pitch);
+    let look = this.steer(b, yaw, pitch);
     // every look ends in a solid within the horizon (the world is not the recording's any more): the line is lost now,
     // while there is still room to stop, and no rocket goes into it
     this.crashRun = look.crash ? this.crashRun + 1 : 0;
@@ -303,7 +321,8 @@ export class GuideFollower {
     }
     // Track F9c, a way in's speed governor (FOLLOW_TAP_OVER): faster than the recording was here, the look goes straight back
     // for this tick; the steering has the next one
-    if (this.entry && !look.crash) {
+    // (Track F9e: a hop's body may come to its flier with its last rocket still burning: nothing is taken off under a burn)
+    if (this.entry && !look.crash && !(this.g.hop && boosting)) {
       const recorded = this.entry.speed(this.at);
       if (!this.tapped && recorded > 0 && speed > recorded * FOLLOW_TAP_OVER + FOLLOW_TAP_ABS) {
         this.tapped = true;
@@ -312,14 +331,47 @@ export class GuideFollower {
       }
       this.tapped = false;
     }
+    // Track F9e, a drawn line's speed for the point (`Guide.speeds`): with no rocket burning and the body faster than the
+    // line allows here, the look goes straight back for this tick (level: a fifth of the speed goes, the fall stays, so a
+    // body over a line that falls away comes down onto it); the steering has the next one. Under a burn nothing is taken
+    // off: the velocity follows the look there
+    const caps = this.entry ? undefined : this.g.speeds;
+    if (caps && !boosting && !look.crash) {
+      if (!this.tapped && speed > this.cap(caps, this.at) * FOLLOW_TAP_OVER + FOLLOW_TAP_ABS) {
+        this.tapped = true;
+        this.stats.taps++;
+        // (a body that rises steeper than the line does ahead of it, a burn that ended in a climb before a top, looks back and
+        // DOWN: the level look takes nothing off the rise, and under a look near the vertical gravity has all of it)
+        const rising = Math.atan2(b.vel.y, Math.hypot(b.vel.x, b.vel.z)) - Math.asin(Math.max(-1, Math.min(1, guidePoint(this.g, Math.min(this.length, this.at + FOLLOW_CAP_RISE_AHEAD)).dir.y))) > FOLLOW_CAP_RISE;
+        return { control: { yaw: (Math.atan2(-b.vel.x, b.vel.z) * 180) / Math.PI + 180, pitch: rising ? FOLLOW_CAP_DOWN : FOLLOW_CAP_PITCH, fire: false }, status: 'following', at: this.at, error: near.dist };
+      }
+      this.tapped = false;
+    }
     // the rockets: the recording's where it fired them, and one more when the body is slow with line ahead
     let fire = false;
     if (!this.entry && !boosting && b.rockets > 0 && !look.crash) {
       const r = this.g.rockets[this.next];
-      if (r && this.due(r)) fire = true;
-      else if (this.refire && this.at < this.length - FOLLOW_SPEED_END) fire = true; // Track F9c: the one before fired nothing
-      else if (this.fired > 0 && speed < FOLLOW_SPEED && this.at < this.length - FOLLOW_SPEED_END) fire = true;
+      // (Track F9e: before a slow place of a drawn line the body is let get slower before the next rocket: a burn that ends
+      // there leaves it at a rocket's speed where the line wants less. FOLLOW_CAP_FIRE of the least speed the line has for
+      // the next FOLLOW_CAP_AHEAD blocks, which a rocket's shortest burn covers)
+      const slow = caps ? Math.min(FOLLOW_SPEED, FOLLOW_CAP_FIRE * this.cap(caps, this.at, FOLLOW_CAP_AHEAD)) : FOLLOW_SPEED;
+      // (Track F9e, a hop: no rocket beyond its last rocket's place, and in that place one for any body slower than a
+      // rocket's speed: what flies the rest of the way to the touchdown is that burn's speed, whatever its length)
+      const hop = this.g.hop;
+      const end = hop ? hop.to : this.length - FOLLOW_SPEED_END;
+      if (r && this.due(r)) fire = !hop || this.at <= hop.to;
+      else if (this.refire && this.at < (hop ? hop.to + FOLLOW_HOP_AGAIN : end)) fire = true; // Track F9c: the one before fired nothing
+      else if (hop && this.fired > 0 && this.at >= hop.from && this.at <= hop.to && speed < FOLLOW_HOP_SPEED) fire = true;
+      else if (this.fired > 0 && speed < slow && this.at < end && !(caps && speed > FOLLOW_FALL_SPEED && this.falls())) fire = true;
       // (a recording with no rocket at its start, a glide off a height, is flown as it was: without one)
+    }
+    // Track F9e: a rocket goes on this tick: the look is chosen again for the burn (the first one assumed none: a look
+    // steep enough to bring a glide down onto a falling line is a dive into the floor under a rocket). No clear look with
+    // the burn: no rocket this tick
+    if (fire && caps) {
+      const burning = this.steer(b, yaw, pitch, true);
+      if (burning.crash) fire = false;
+      else look = burning;
     }
     if (fire) {
       this.stats.asked++;
@@ -332,6 +384,19 @@ export class GuideFollower {
     return { control: { yaw: look.yaw, pitch: look.pitch, fire }, status: 'following', at: this.at, error: near.dist, ...(look.crash ? { crash: true } : {}) };
   }
 
+  /** Track F9e: the line falls ahead of the body (FOLLOW_FALL blocks or more over the next FOLLOW_FALL_AHEAD): a glide gains its speed there by itself. */
+  private falls(): boolean {
+    return guidePoint(this.g, this.at).pos.y - guidePoint(this.g, Math.min(this.length, this.at + FOLLOW_FALL_AHEAD)).pos.y >= FOLLOW_FALL;
+  }
+
+  /** Track F9e: a drawn line's speed at a place (blocks a tick), or the least it has from there over the next `ahead` blocks. */
+  private cap(caps: readonly number[], at: number, ahead = 0): number {
+    const i = Math.max(0, Math.min(caps.length - 1, Math.round(at)));
+    let c = caps[i]!;
+    for (let k = i + 1; k <= Math.min(caps.length - 1, i + ahead); k++) c = Math.min(c, caps[k]!);
+    return c;
+  }
+
   /**
    * A recorded rocket is due: at its place on the line; the flight's first one also once the body has been off the ground as
    * long as the recording was when it fired it (a body that has not fired yet does not get along the line to any place).
@@ -341,27 +406,36 @@ export class GuideFollower {
   }
 
   /** The look near the aim whose glide over the horizon stays nearest the line and clear, for every end the burn may have. */
-  private steer(b: FollowBody, yaw: number, pitch: number): { yaw: number; pitch: number; crash: boolean } {
+  private steer(b: FollowBody, yaw: number, pitch: number, firing = false): { yaw: number; pitch: number; crash: boolean } {
     // the burns to fly the horizon with: as reported, ending as early as a burn can, running as long as one can
-    const burns: number[] = [Math.min(FOLLOW_HORIZON, b.boostTicks)];
-    if (b.boostTicks > 0 || this.sinceFire < BURN.max) {
+    // (Track F9e, `firing`: a rocket goes on this tick: its burn outlasts the horizon)
+    const burns: number[] = [firing ? FOLLOW_HORIZON : Math.min(FOLLOW_HORIZON, b.boostTicks)];
+    if (!firing && (b.boostTicks > 0 || this.sinceFire < BURN.max)) {
       const early = b.boostTicks > 0 ? Math.max(0, Math.min(FOLLOW_HORIZON, BURN.min - this.sinceFire)) : 0;
       const late = b.boostTicks > 0 ? Math.max(0, Math.min(FOLLOW_HORIZON, BURN.max - this.sinceFire)) : 0;
       for (const n of [early, late]) if (!burns.includes(n)) burns.push(n);
     }
     // (one tick's cells are asked for many times over: remembered for the tick, in coordinates from the body's column so
     // that a cell's key is a small number)
+    // (Track F9e: in a cube of 32 cells round the body, a byte a cell, which is where a horizon's glides are; a cell beyond
+    // it is asked every time. The answers are the grid's own either way: a map keyed by a number took two fifths of a
+    // proof's time)
     const ox = Math.floor(b.pos.x);
+    const oy = Math.floor(b.pos.y);
     const oz = Math.floor(b.pos.z);
-    const memo = new Map<number, boolean>();
+    const cube = this.cube;
+    cube.fill(0);
     const grid: RouteGrid = {
       solid: (x, y, z) => {
-        const k = (x + 1024) * 4_194_304 + (y + 512) * 2048 + (z + 1024);
-        let s = memo.get(k);
-        if (s === undefined) {
-          s = this.grid.solid(x + ox, y, z + oz);
-          memo.set(k, s);
-        }
+        const cx = x + 16;
+        const cy = y - oy + 16;
+        const cz = z + 16;
+        if (((cx | cy | cz) & ~31) !== 0) return this.grid.solid(x + ox, y, z + oz);
+        const k = (cx << 10) | (cy << 5) | cz;
+        const v = cube[k]!;
+        if (v !== 0) return v === 2;
+        const s = this.grid.solid(x + ox, y, z + oz);
+        cube[k] = s ? 2 : 1;
         return s;
       },
     };

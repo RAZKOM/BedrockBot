@@ -35,7 +35,7 @@ import { holdPitch } from '../maneuvers.ts';
 import type { LandingTarget } from '../plan.ts';
 import { boxClear, sweep, type RouteGrid } from '../route/grid.ts';
 import { FOLLOW_MARGIN, GuideFollower, type FollowBody } from './follow.ts';
-import { guideHead, guideLength, guideNearest, guidePoint, guideTail, type Guide } from './guide.ts';
+import { entrySaid, guideHead, guideLength, guideNearest, guidePoint, guideTail, type Guide } from './guide.ts';
 import type { GuideMatch } from './match.ts';
 
 /** The hand-over window ends this far before the line's last open sky (blocks along it): a body off the line comes onto it in the open, not in the mouth. */
@@ -262,7 +262,7 @@ export class EntryFlier {
           const c = entryCatch(this.line, b, this.box);
           if (c.ok && this.confirmed) {
             this.committed = true;
-            this.note?.(`learned entry: on the line ${this.line.guide.path} ${(this.line.open - c.at).toFixed(0)} blocks before its roof (${Math.abs(c.side).toFixed(1)} beside it, ${Math.abs(c.up).toFixed(1)} ${c.up >= 0 ? 'over' : 'under'} it, ${c.speed.toFixed(2)} a tick where the recording had ${c.recorded.toFixed(2)}, the heading ${c.heading.toFixed(0)} degrees off its own): inside what the proof flew, the follower has it to the touchdown`);
+            this.note?.(`${entrySaid(this.line.guide)}: on the line ${this.line.guide.path} ${(this.line.open - c.at).toFixed(0)} blocks before its roof (${Math.abs(c.side).toFixed(1)} beside it, ${Math.abs(c.up).toFixed(1)} ${c.up >= 0 ? 'over' : 'under'} it, ${c.speed.toFixed(2)} a tick where the recording had ${c.recorded.toFixed(2)}, the heading ${c.heading.toFixed(0)} degrees off its own): inside what the proof flew, the follower has it to the touchdown`);
           } else {
             if (out.at <= this.line.to + 0.5 || this.refused === undefined) this.refused = c.ok ? 'the proof is not confirmed on the live world yet' : c.why;
             if (out.at > this.line.to + 0.5) return { control: { yaw: out.control.yaw, pitch: out.control.pitch }, status: 'missed', at: out.at, error: out.error, why: this.refused ?? 'past the window' };
@@ -281,7 +281,7 @@ export class EntryFlier {
       if (due === undefined) return { control: { yaw: out.control.yaw, pitch: out.control.pitch }, status: 'line', at: out.at, error: out.error };
       this.keeping = true;
       this.began = `${due}, ${Math.hypot(td.x - b.pos.x, td.z - b.pos.z).toFixed(1)} from the touchdown and ${(b.pos.y - td.y).toFixed(1)} over it at ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} a tick`;
-      this.note?.(`learned entry: the touchdown begins (${this.began}), ${this.lineTicks} ticks after the commit`);
+      this.note?.(`${entrySaid(this.line.guide)}: the touchdown begins (${this.began}), ${this.lineTicks} ticks after the commit`);
     }
     this.keepTicks++;
     // the station keeping over the touchdown (brake.ts keepLook: the look back while fast, the creep onto the point, the

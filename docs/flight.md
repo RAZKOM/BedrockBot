@@ -5480,6 +5480,503 @@ needs a width for every point, not three berths for the whole way.
 - **Duplication left.** `cave-drawn-probe.ts` has `cave-exit-probe.ts`'s world set-up a third time; the drawn and the
   learned unit tests each have their rig.
 
+## Drawn lines, the way in and under one roof (Track F9e)
+
+Flight v2, Track F9e, [decisions/0082](decisions/0082-drawn-entries-and-hops.md). After Track F9d the bot flew out of a
+cave along a line nobody recorded from five of the nineteen roofed places of the owner's cave it can stand at, into a
+cave only along a recording, and between two places under one roof not at all. The owner: "fly through caves and land
+underground", "fly from cave_start to cave_end, taking the shortcut if able, else 100% through the waypoints", and "if
+it's pathfinding from underground to another spot underground, I should try to find it without having to get out
+first". This track is the rest of the drawn line: longer ways out, a way in, and a flight that never leaves the roof.
+
+```
+a takeoff under a roof (commands-fly.ts autoFly, routeTakeoffFor), flyCave on:
+ 0 a goal under a roof as well: a HOP (flyCaveHop; learn/hop.ts)                 this track
+     the flood     by cost, aimed at a standable cell by the goal; a hole in the roof over the way is passed, the
+                   open air beyond it is not
+     the line      the taut line between the two heights, pulled and rounded; it ends on the touchdown
+     the flight    the follower from standing (its rockets by speed, a last one 56 to 44 blocks before the touchdown,
+                   none after it), then the entry's flier from 14 blocks before the touchdown: the brake, the sink
+     the PROOF     the whole flight from standing to standing (glide.ts routeHop): every burn from 9 to 21, two mixes,
+                   a first rocket that fires nothing; each stands within 2 of the goal with no hit
+ 1 a recording that left the ground here (flyLearned)                           Track F9b
+ 2 a DRAWN line out (flyCaveExit; learn/draw.ts)                                Track F9d, longer lines this track
+     the heights   the taut line through the passage's bands (taut), a top rounded 40 wide
+     the speeds    for every point (lineSpeeds): a falling line a block a tick, a top by its radius, less before it
+     the follower  takes speed off a body faster than the point allows (a tick of looking back), holds a rocket back
+                   before a slow place and over a line that falls
+ 3 the exits, as before (Track F9a)
+
+a flight to a goal under a roof (commands-fly.ts entryFor), flyCave on:
+ 1 a recording that stood again by the goal (flyLearnedEntry)                   Track F9c
+ 2 a DRAWN line in (flyCaveEntry; learn/drawin.ts)                              this track
+     the flood     from a standable cell by the goal out to the cells under the real sky
+     the line      a way out's, 50 blocks on into the open along the freest heading rising 20 degrees, REVERSED; it comes
+                   down all the way (a climb of more than 1.5 blocks under its roof: refused)
+     the speeds    the line's own, 1.2 a tick in the open, 0.75 on the touchdown; its times are those added up
+     then as a recorded one: the window and the lead-in (entryLine), the proof's 39 states (proveEntry), the flier
+ 3 as before: the landing by the mouth, the walk
+```
+
+### Files
+
+| File | What |
+|---|---|
+| `bot/src/skills/fly/learn/draw.ts` | `taut` (the heights), `DRAW_ROUND_OVER` (a top rounded wide), `lineSpeeds` and the `DRAW_CAP_*` numbers, `floodTo` (the aimed flood to a cell, `DRAW_SKY_NEAR`), `floodOutSteps` (the flood in slices), `drawWays` and `rollDraft` (drawn at once, rolled one by one), `rememberedGrid`; `drawLine`'s tail by options (a way in's) |
+| `bot/src/skills/fly/learn/drawin.ts` | the drawn way in: `drawEntry`, `drawEntries`, `chooseDrawnEntry`, `ticksOf`, the `DRAW_IN_*` numbers |
+| `bot/src/skills/fly/learn/hop.ts` | the hop: `drawHop`, `drawHops`, the `HOP_*` numbers |
+| `bot/src/skills/fly/learn/follow.ts` | a drawn line's speeds: the tick that takes speed off (`FOLLOW_CAP_*`), the rocket held before a slow place and over a falling line (`FOLLOW_FALL*`), the look chosen again for the tick a rocket goes on; a hop's last rocket (`FOLLOW_HOP_*`); one tick's cells in a cube of bytes |
+| `bot/src/skills/fly/learn/guide.ts` | `Guide.speeds`, `Guide.hop`, `entrySaid` |
+| `bot/src/skills/fly/glide.ts` | `routeHop` (the hop's proof), `SimResult.hard` and `HARD_HIT`, `routeTakeoffOptions` passes the hop |
+| `bot/src/skills/fly/brain.ts` | `guideTakeoff`: a hop's hand-over to the entry's flier; `climbUp`: over the pit's rim (`PIT_OUT_*`); the entry's lines say `drawn entry` for a drawn one |
+| `bot/src/skills/fly/route/takeoff.ts` | the drawn lines rolled and proven one after another; `TakeoffRoute.hop` |
+| `bot/src/chat/commands-fly.ts`, `bot/src/tasks/process/fly.ts` | `hopFor` (before any takeoff, in `autoFly`), `drawnEntryFor` (after the recordings, in `entryFor`), the decisions' lines |
+| `bot/src/config/settings.ts`, `bot/src/chat/help.ts` | `flyCaveEntry`, `flyCaveHop` (both default off) |
+| `bot/scripts/cave-drawn-probe.ts` | `--trace <burns>` (every tick of a line at a burn), `--fuzz n` (a burn of its own for every rocket) |
+| `bot/scripts/cave-learned-entry-probe.ts` | `--drawn`: the way in drawn from the world, through the same modes |
+| `bot/scripts/cave-hop-probe.ts`, `cave-probe-world.ts` | the hops on the private fixture: one pair, every pair of a route, a chain; the probes' world in one place |
+| `bot/scripts/drawn-bench.ts` | what a decision costs on a host, on a synthetic cave |
+| `bot/test/unit/skills/fly-drawn-ways.test.ts` | the guard tests |
+| `bot/test/e2e/fly-cave.test.ts` | `FLY_CAVE_DRAWN_ENTRY=1` (trip C and the round trip along a drawn way in), `FLY_CAVE_ONLY=under` (cave_start to cave_end by `!goto`, `FLY_CAVE_HOP=0` for the setting off) |
+
+### What was measured first (the lost lines traced; the fixture of 2026-11-11, `scripts/cave-drawn-probe.ts --trace 9`, the PC)
+
+On the base, the same five waypoints as in Track F9d's table have a proven exit on the new fixture. The three lines the
+brief names, each flown at a burn of 9 with every tick printed:
+
+| from | the line | where and why it is lost |
+|---|---|---|
+| cave_10 | 173 blocks; it falls 31 to 39 degrees from 8 blocks on | at the nominal burn too. The takeoff's rocket ends 14 blocks along it with the body at 1.67 a tick, flying 21 degrees down where the line goes 30 down. Nothing takes speed off: 1.95 a tick 47 blocks along, 2.5 over the line, and where the passage levels out no look within six ticks clears the solid ahead: braked, lost |
+| cave_15 | 300 blocks; 110 blocks along it goes over a sill | the line hugs the floor: 28 degrees up one side, 25 to 46 down the other within 20 blocks. The fourth rocket is asked for at the sill's foot (the body under a block a tick), its 9 ticks end on the top at 1.65 a tick, and the body's path turns down 2 degrees a tick where the line turns 50 in ten blocks: 5.7 over the line 30 blocks on, one contact, lost |
+| cave_end | 437 blocks; the same sill 260 blocks along it | the same: its seventh rocket there, the burn's end on the top, 5.7 off the line 298 blocks along it, lost |
+
+One cause in all three: a line that falls away in front of a body with a rocket's speed. Nothing but gravity bends a
+glide downwards (0.03 to 0.05 a tick a tick), so the curve a body can follow over a top grows with the square of its
+speed; and on a line that falls, a fast body flies flatter than the line whatever it looks at (a glide's fall a tick
+depends on its look alone), and leaves it upwards.
+
+### Longer lines: what changed
+
+- **The heights** (`taut`). Track F9d put every point on one slope from the takeoff's height to the exit's and pressed it
+  into its own passage: where the exit lies under the passage's sill that is the floor's shape. Now each cell of the
+  way has its band of heights as before and the line through the bands is the taut one: straight where they allow,
+  bent only where it touches a floor or a roof. Over the sill: 10 degrees up to it, then down from it, where it was 28
+  up and 46 down. Where nothing is in the way it is the one slope as before (cave_start's line is the same 77 blocks).
+- **A top rounded wide** (`round`, `DRAW_ROUND_OVER`): a corner whose slope falls 5 degrees or more gets a radius of 40
+  where the air allows, the others 8 as before.
+- **A speed for every point** (`lineSpeeds`): 1.7 a tick at the most (a burn's own speed and a little: a dive is flown
+  no faster than a burn); 1.05 on a line that falls steeper than 12 degrees; over a top the root of 0.045 times its
+  radius; round a corner a fifth of its radius; never under 0.8; and before a slow place 0.07 less a block.
+- **The follower** (`follow.ts`, for a line that carries speeds; a recorded line has none and is flown as before). A body
+  with no rocket burning that is faster than its point allows (by a tenth and 0.05) looks straight back for a tick,
+  level: a fifth of its speed goes and its fall stays, so a body over a falling line comes down onto it. A body that
+  rises steeper than the line does 4 blocks ahead of it looks back and 75 degrees down (the level look takes nothing off
+  a rise). Never two ticks running; nothing under a burn (the velocity follows the look there). The next rocket waits
+  until the body is slower than nine tenths of the least speed the line has within 12 blocks; over a line that falls
+  1.4 blocks in the next 8 there is none unless the body is under 0.55 a tick; and the look of the tick a rocket goes on
+  is chosen again with the burn (a look steep enough to bring a glide down onto a falling line is a dive into the floor
+  under a rocket: one contact on the sill before this).
+- **The climb out of the pit** (`brain.ts climbUp`). The deep cave's only opening is the bottom of a pit, and with a
+  burn of its own for every rocket 5 of 40 flights from cave_end and 3 of 40 from cave_shortcut (a proven exit since
+  Track F9d) ended under the pit's rim: "the path ahead is clear" was said on four more ticks of burn, the burn was a
+  short one, and the climb's own pitch met the rim. The way straight up now ends where a line from the body along the
+  held heading, rising 0.3 a block, is free for 20 blocks as well: the same seeds, 60 of 60 from each.
+- **The decision's time.** The lines are drawn at once and rolled and proven one after another, the widest berth first
+  (`drawWays`, `rollDraft`; before, every line was rolled before the first proof). The flood's cells are keyed by a
+  number, a step's cost is looked at once a cell, and the follower's looks of one tick remember their cells in a cube
+  of bytes: two fifths of a proof's time was a map's lookups.
+
+### Offline, the owner's cave: the way out from every waypoint (`scripts/cave-drawn-probe.ts --from all --radius 400 --budget 60000 --fuzz 40`, the recordings withheld, the PC, 2026-11-11)
+
+The 19 roofed waypoints a body can stand at (cave_2 is under open sky; cave_4 to cave_7 have no place to stand). "Burns":
+the proven line flown at each of the 13 burns from 9 to 21, out with no hit. "A burn of its own": 40 more flights, every
+rocket of each burning its own 9 to 21 ticks (seeded), which the proof does not fly.
+
+| waypoint | before (the base, this fixture) | now | the line to open sky | burns | open sky over the body | rockets | a burn of its own for every rocket |
+|---|---|---|---|---|---|---|---|
+| cave_1 | proven | proven | 23 blocks | 13 of 13 | 1.0 to 1.1 s | 1 | 40 of 40 |
+| cave_3 | proven | proven | 13 | 13 of 13 | 0.7 s | 1 | 40 of 40 |
+| cave_start | proven | proven | 60 | 13 of 13 | 2.4 to 2.5 s | 1 to 2 | 40 of 40 |
+| cave_shortcut | proven | proven: into the pit and straight up | 31 | 13 of 13 | 1.1 to 1.3 s | 1 | 40 of 40 |
+| cave_8 | proven | proven | 99 | 13 of 13 | 3.6 to 4.2 s | 2 | 40 of 40 |
+| cave_9 | no: 2 of air over the start | no: the same (a jump takes no glide under 3) | | | | | |
+| cave_10 | no: lost at the nominal burn | proven | 147 | 13 of 13 | 5.7 to 6.1 s | 2 to 3 | 40 of 40 |
+| cave_11 | no line a glide can fly | proven | 173 | 13 of 13 | 6.9 to 7.4 s | 2 to 3 | 40 of 40 |
+| cave_12 | no line a glide can fly | proven | 207 | 13 of 13 | 8.4 to 8.9 s | 2 to 3 | 40 of 40 |
+| cave_13 | no line a glide can fly | proven | 232 | 13 of 13 | 8.8 to 9.6 s | 3 to 4 | 40 of 40 |
+| cave_14 | no line a glide can fly | proven | 252 | 13 of 13 | 9.8 to 10.4 s | 3 to 4 | 40 of 40 |
+| cave_15 | no: lost at a burn of 9 | proven | 273 | 13 of 13 | 10.6 to 11.5 s | 3 to 4 | 40 of 40 |
+| cave_16 | no line a glide can fly | proven | 285 | 13 of 13 | 11.2 to 12.1 s | 4 | 40 of 40 |
+| cave_17 | no: lost at a burn of 9 | proven | 317 | 13 of 13 | 11.9 to 12.8 s | 4 to 6 | 40 of 40 |
+| cave_18 | no line a glide can fly | proven | 343 | 13 of 13 | 12.4 to 14.1 s | 5 to 6 | 40 of 40 |
+| cave_19 | no: lost at a burn of 9 | proven | 367 | 13 of 13 | 13.7 to 15.0 s | 5 to 6 | 40 of 40 |
+| cave_20 | no: lost at a burn of 9 | proven | 389 | 13 of 13 | 14.8 to 15.3 s | 5 to 7 | 40 of 40 |
+| cave_21 | no: lost at a burn of 12 | proven | 403 | 13 of 13 | 15.2 to 16.0 s | 5 to 7 | 39 of 40: at burns of 17, 18, 11 the third burn ends before a bend that climbs, the body 2.4 under the line there, no look clears the wall: braked, one contact at 0.4 a tick, down under the roof |
+| cave_end | no: lost at a burn of 9 | proven | 413 | 13 of 13 | 15.3 to 16.8 s | 5 to 7 | 40 of 40 |
+
+**18 of the 19 have a proven drawn exit** (5 before), cave_end and cave_10 among them; 719 of the 720 flights with a burn
+of its own for every rocket are out with no hit. The waypoint `start` (beside cave_start) is proven as well. The body is
+at most 0.9 to 4.7 off its line.
+
+**The decision's time** (the PC; the flood, the lines, the roll and the proof of the first line that rolls; three runs
+each with nothing else running):
+
+| from | the flood and the lines | in all | before this track |
+|---|---|---|---|
+| cave_start | 0.07 to 0.08 s (8 855 cells, 12 lines) | 0.64 to 0.65 s | 1.6 to 2.2 s (0.7 s the flood, the lines and their rolls) |
+| cave_end | 0.22 s (34 794 cells, 6 lines) | 3.3 to 3.7 s | 2.7 s to its refusal after 2 simulations; a whole proof of that line would have taken 6.4 s (2.3 s the flood, the lines and their rolls) |
+
+The private fixture does not go to the test host. `scripts/drawn-bench.ts` flies the same code on a synthetic cave (six
+halls joined by a winding tunnel) on both hosts: a way out of 599 blocks: the flood and six lines 0.33 to 0.52 s on the PC and 0.29 to 0.32 s on the test host, the proof's 18 simulations 5.6 to 7.5 s and 5.5 to 5.6 s; a hop of 473 blocks: 0.38 to 0.44 s and 0.32 s, its proof 2.8 to 3.8 s and 2.3 s (three runs each; the PC with the replica's server running beside it). So the test host is as fast as the PC or a fifth faster: cave_end's
+decision there takes about 3 to 3.7 s (an estimate), and the long hop's about 3.6 s (an estimate).
+
+**When the budget ends** (`TAKEOFF_BUDGET_MS`, 6 s): no roll and no proof is begun after it; one that runs is finished
+(a proof is 18 simulations; cave_end's take 3 s). The next line is then said as `not tried (N ms gone)`, the exits are
+not tried either, there is no route takeoff, and the trip walks out as it did before.
+
+### A drawn way in (`learn/drawin.ts`, `flyCaveEntry`)
+
+`entryLine`, `proveEntry` and `EntryFlier` take any line (Track F9c's note), so a drawn way in needs only the line:
+
+- **The flood** runs from a standable cell by the goal (the goal's own when a body can stand in it, else the first of
+  `entryTouchdowns`) to the cells under the real sky: the same flood as a way out's, in slices (`floodOutSteps`), because
+  a way in is drawn while the bot flies and the input loop wants its turn.
+- **The line** is drawn outwards as a way out's (the taut heights from a block over the touchdown to the opening, pulled,
+  rounded) and carried on 50 blocks into the open: of the headings that are free that far (a block's berth, open sky
+  over every point) the one whose line lies highest over the ground under it and under the lead-in to come, straight
+  on from the roof winning a tie. It rises 20 degrees away from the roof: at 14 degrees the cruise came to the lead-in's
+  start 28 to 39 over it where the flier takes 26 (the ground under a lead-in sets how low the cruise may be), flew a lap
+  beside it or missed the window twice (cave_1: 13 of 30 arrivals); at 20 the line's start lies 10 higher and no flight
+  of the 60 to cave_start and cave_1 flew a circle at all. Then the points are reversed.
+- **It comes down all the way.** What the line climbs from its roof's edge to the touchdown is added up: more than 1.5
+  blocks (the last blocks' pull-up is less) and it is no way in. A glide climbs only on speed it has, and no rocket is
+  fired near a touchdown under a roof.
+- **The speeds** are the line's own (`lineSpeeds`): 1.2 a tick at the most, 1.05 where it falls steeper than 12 degrees,
+  less before a top or a corner, and 0.75 on the touchdown, the last 10 blocks coming down to it. The line's times are
+  those speeds added up (`ticksOf`): the flier's governor reads its speed for a place off them, as off a recording.
+- **Then it is a recorded entry**: the window is 24 blocks of the line's open part ending 20 before its roof, the
+  lead-in 40 blocks before that, the touchdown one of `entryTouchdowns`, the proof `chooseTouchdown`'s (its own three
+  states, then all 39), the flier `EntryFlier`. The line is drawn on one memory of the world and proven on another:
+  the cells a proof made on the world cache is confirmed by later are the proof's own, not the flood's nine thousand.
+- **The order at a covered goal** (`entryFor`): a recording that matches and proves clear (`flyLearnedEntry`), then the
+  drawn line (`flyCaveEntry`), then as before. At most 3 drawn lines get a whole proof, and none is begun 10 s after the
+  decision began (`ENTRY_BUDGET_MS`, as for the recordings).
+
+**Offline, the fixture** (`scripts/cave-learned-entry-probe.ts --drawn --to <goal> --mode arrive --overs 89,94,99,104,109
+--sides -25,0,25 --speeds 1.4,1.6`, the recordings withheld, the PC, 2026-11-11): Track F9d's 30 arrivals from the
+Realm's side (the body in the cruise, retargeted to the entry 320 blocks from its aim).
+
+| goal | the decision | the line | standing within 2 of the goal | no go-around, no window missed | hits | from the retarget to standing | under the roof |
+|---|---|---|---|---|---|---|---|
+| cave_start | 1.3 s: a flood of 8 855 cells, 9 lines drawn, the second proven (45 simulated: the first stood 3 under the touchdown from its own state) | 52 blocks in the open, 60 under the roof coming down 15 | 30 of 30 (0.3 to 1.0 from it) | 30 of 30, none by way of a circle | 0 | 16.2 to 18.8 s (median 17.2) | 64 to 69 ticks |
+| cave_start along the recording (Track F9d's table, flown again) | | | 30 of 30 | 30 of 30 | 0 | 14.6 to 18.7 s (median 15.5) | |
+| cave_1 | 0.6 s: 8 836 cells, 5 lines, the first proven (39 simulated) | 52 in the open, 22 under the roof coming down 13 | 30 of 30 (0.1 to 1.2) | 30 of 30, none by way of a circle | 0 | 14.1 to 18.6 s (median 15.4) | 28 to 39 ticks |
+| cave_3 | 0.6 s: 3 252 cells, 1 line, proven (42 simulated) | 52 in the open, 12 under the roof coming down 2 | 30 of 30 (0.0 to 0.9) | 30 of 30, every one by the circle beside the lead-in (35 to 45 over its start) | 0 | 17.0 to 23.9 s (median 22.4) | 26 to 28 ticks |
+
+The drawn entry to cave_start takes 1.7 s more than the recorded one at the median and 0.1 s more at the most: the
+recording dives at the mouth 25 to 42 degrees, the drawn line comes down 20 and 14 at a block a tick.
+
+**What is refused** (`--drawn --to <goal> --mode none --radius 400`): at every waypoint of the deep cave (cave_8, cave_10,
+cave_12, cave_15, cave_18, cave_21, cave_end, cave_shortcut asked) the flood's one way to the sky is the bottom of the
+pit, and the line has 2 to 11 blocks under open sky before its roof, or none on any heading, where the hand-over needs
+44: `no drawn way in (... only 9 blocks of the line under open sky before its roof (the hand-over needs 44))`, in 0.2 to
+0.3 s with nothing simulated. A way in there is a way down a pit and then up a passage: a hop from the pit's bottom,
+which has no touchdown a proof stands on (below). A goal whose opening lies under it is refused for its climb (the unit
+test's hall), and a goal with a cliff beside its lead-in for the cruise's height (the replica, below).
+
+### Under one roof: the hop (`learn/hop.ts`, `flyCaveHop`)
+
+**What the cave allows** was measured before the shape was chosen (`scripts/cave-hop-probe.ts`):
+
+- The legs between the owner's waypoints are 13 to 49 blocks of line. A rocket burns 9 to 21 ticks: 15 to 35 blocks of
+  flight that nothing shortens. A line under 48 blocks is therefore not flown at all (below), and 16 of the 22 legs are
+  that; four more start in water and one under 2 of air. **Hops from waypoint to waypoint are not the shape**: of the
+  22 only cave_start to cave_1 is flown.
+- Lines over several waypoints are flown: two apart 9 of 21, four apart 11 of 19 (the rest are too short, start in
+  water or under 2 of air, or end in water).
+- **The line from cave_start to cave_end is proven as one**: 548 blocks through the passage the waypoints mark (it
+  flies over the water of cave_4 to cave_7), never under open sky for more than a hole in the roof.
+
+So the shape is **one line as far as it is proven**, tried from where the body stands to the goal itself. Where it is
+not proven the trip walks as it did, and the walk is watched: every `flyRecheckBlocks` of it the hop is asked again,
+and flown from the place one is proven from.
+
+**The pieces.**
+
+- **The flood** (`floodTo`) is the way out's by cost, aimed at a standable cell by the goal (the cost so far and the
+  straight distance still to go). A cell under the sky is passed where a roofed cell of air lies within 8 of it on one
+  of eight headings (a pit, the stretch before a mouth) and is no way on farther out: without that the search flooded
+  the open air (341 000 cells for one pair) and with it it stays the cave's size. The last three cells before the goal
+  need no room round them, as the first.
+- **The line** (`drawHop`) is the taut line from a block over the start to a block over the touchdown, pulled and rounded
+  as a way out's, then the touchdown itself. It may climb; it climbs on its burns. Its speeds are a way out's, coming
+  down to 0.75 a tick on the touchdown over the last 12 blocks.
+- **The last rocket** (`Guide.hop`, `follow.ts`). Under a burn nothing takes speed off, and a burn that ended where the
+  touchdown's brake begins would push the body back the way it looks. So no rocket is fired later than 44 blocks before
+  the touchdown (the longest burn's 35 blocks of flight and the brake's room), and a body 56 to 44 blocks before it with
+  none burning and under 1.45 a tick fires one: what flies the rest is that burn's speed, whatever its length (after
+  the shortest the body glides 41 blocks, after the longest 21). A line under 48 blocks has no place for it: walked.
+- **Two fliers on one line** (`brain.ts guideTakeoff`, `entry`). The follower flies from standing (the jump, the
+  takeoff's rocket, the rockets by speed) to 14 blocks before the touchdown; there the entry's flier takes the body on
+  the same line, committed at once (what was proven is this very flight: there is no window and no box to be in), and
+  flies the last blocks as an entry's: the governor, the brake over the touchdown, the sink. A rocket still burning at
+  that place burns on and nothing is taken off under it. Open sky over the body is no end of a hop, and there is no
+  climb after it. Losing the line brakes and lands, as on a way out.
+- **The proof** (`glide.ts routeHop`) is the whole flight from standing to standing: the nominal burn, every burn from
+  9 to 21, the two mixes and a first rocket that fires nothing, each burn's end seen two ticks late. Each must stand
+  within 2 of the goal (beside it, and over or under it), dry, with no contact that took more than 0.15 a tick off the
+  body's speed (`HARD_HIT`; flying into a wall costs health from 0.3). A first rocket that fires nothing may bring the
+  body down short of the goal instead, with no hit and dry: that is said in the decision's line and the hop is flown
+  all the same (the body stands by its start again and the trip asks again; the other lines begin on the same blocks,
+  and proving them was three more seconds of standing on the replica).
+- **Where it is asked** (`commands-fly.ts hopFor`, in `autoFly` before any takeoff and before the `flyMin` test):
+  `flyCave on`, `flyCaveHop`, the start and the goal both under a roof, the goal more than 48 blocks off (a hop is
+  measured by its line, not by the straight distance: the two ends of the long line lie nearer each other than
+  `flyMin`). It is drawn and proven on the live model with the world cache behind it (a line of some hundred blocks
+  runs beyond what the server has sent; in the air the follower steers by the live model alone, which has the cells
+  round the body by then). At most 3 lines are proven and none is begun 6 s after the decision began
+  (`HOP_BUDGET_MS`). The flood reaches 320 blocks from the start and 150 000 cells. A watched walk (`watchWalk`) asks
+  again from where it is, and where a hop is found there it is drawn and proven once more from where the walk stopped.
+
+**Offline, the fixture: cave_start to cave_end** (`scripts/cave-hop-probe.ts --from cave_start --to cave_end --each
+--fuzz 60`, the recordings withheld, the PC, 2026-11-11):
+
+| | |
+|---|---|
+| the line | one line of 548 blocks through the passage the waypoints mark (465 cells of the flood), 51 from its lowest point to its highest; never out of the cave |
+| the decision | 4.2 s: 0.9 s the flood (76 832 cells looked at) and 6 lines, 3.3 s the proof's 18 simulations of the first |
+| the proof | standing within 0.9 of the goal at every burn, both mixes and with a first rocket that fires nothing |
+| flown at the 13 burns from 9 to 21 | **13 of 13 standing by cave_end** (0.1 to 0.9 from it), 0 hits of any kind, 19.1 to 21.1 s on 8 to 11 rockets, at most 3.6 off the line; the flier takes the body 362 to 397 ticks after the jump |
+| flown share | all of it: the body leaves the ground on cave_start and stands again on cave_end |
+| a burn of its own for every rocket | 60 of 60 standing within 2 of the goal with no hit |
+| the way back, cave_end to cave_start | proven (the second line; the first met a block at a burn of 9): 545 blocks, 13 of 13, 20.4 to 22.3 s on 7 to 10 rockets, 40 of 40 with a burn of its own for every rocket |
+| against the walk | the same `!goto` with `flyCaveHop` off on the replica: see "On the server" |
+
+**The shortcut is never taken.** cave_shortcut lies beside the bottom of the pit, and cave_end close by and a little
+over it; the air between them is a slot one to three cells wide that rises steeply. A line needs the gliding
+box's width and a berth each side: the flood (three cells wide, two high) does not pass it, and with the room rule
+lifted near the goal the line through it is no line a body keeps its berth on. From cave_shortcut the only proven way to
+cave_end is the long one (397 blocks, round by cave_8 to cave_21). And cave_start to cave_shortcut itself (162 blocks:
+out of the upper cave's mouth, under the open sky for a stretch, down the pit) is refused: every flight of its proof
+ends in the water at the pit's bottom beside the touchdown. So with or without the shortcut's waypoint the flight from
+cave_start to cave_end is the one line through the waypoints' passage.
+
+**Every pair of the route** (`--pairs cave --skip 1,2,4`: each waypoint to the next, to the next but one, and to the one
+four on; 62 pairs; a proven line flown at the 13 burns):
+
+| pairs | proven | flown at 13 burns | why not |
+|---|---|---|---|
+| each waypoint to the next (22) | 1: cave_start to cave_1 (49 blocks) | 13 of 13 standing, 0 hits | 16 too short to fly (13 to 43 blocks of line, under 48); 4 start in water (cave_4 to cave_7: no place to stand); 1 starts under 2 of air (cave_9) |
+| to the next but one (21) | 9: cave_start to cave_2 (78 blocks), cave_1 to cave_3, cave_10 to cave_12, cave_11 to cave_13, cave_12 to cave_14, cave_15 to cave_17, cave_16 to cave_18, cave_17 to cave_19, cave_18 to cave_20 (48 to 64) | 13 of 13 each, 0 hits, 2.4 to 7.9 s on 1 to 2 rockets | 4 too short (27 to 47); 4 start in water; 1 under 2 of air; cave_2 to cave_4 and cave_3 to cave_5 end in the water there; cave_8 to cave_10 (49 blocks up 26) hits a block in the flier's part, 31 blocks from its start |
+| to the one four on (19) | 11: cave_start to cave_4 (131 blocks), cave_8 to cave_12 (109, up 26), cave_10 to cave_14, cave_11 to cave_15, cave_12 to cave_16, cave_13 to cave_17, cave_14 to cave_18, cave_15 to cave_19, cave_16 to cave_20, cave_17 to cave_21, cave_18 to cave_end (72 to 111) | 13 of 13 each, 0 hits, 3.3 to 5.7 s on 1 to 3 rockets | 4 start in water; 1 under 2 of air; cave_1 to cave_5 ends in water; cave_2 to cave_6 and cave_3 to cave_7 have no cell to stand in by the goal |
+| longer | cave_start to cave_8 (234 blocks, 12.3 to 14.4 s), cave_3 to cave_8 (145), cave_8 to cave_end (323, 11.8 to 12.7 s), cave_shortcut to cave_end (397) | 13 of 13 each, 0 hits | |
+
+A hop's decision takes 0.3 to 0.5 s for a line of 50 to 60 blocks and 0.6 to 0.9 s for 100 (the PC). Two of the lines
+(cave_8 to cave_12, cave_8 to cave_end) come down short of the goal with no hit when their first rocket fires nothing
+(the takeoff climbs 45 degrees there): flown all the same.
+
+### On the server
+
+**The replica** (bds-fly2, the PC, 2026-11-11; the box built again from the fixture of 2026-11-11 with
+`FLY_CAVE_REUSE=surroundings FLY_CAVE_PART_CHARS=1500`, then `FLY_CAVE_REUSE=1 FLY_CAVE_STYLE=1`; `FLY_CAVE_REPORT=<file>`
+writes the table):
+
+| | runs | arrived | seconds | what flew | damage |
+|---|---|---|---|---|---|
+| tripOut, `FLY_CAVE_EXIT=1`, no recordings: the drawn line | 3 and 3 (the final code) | 6 of 6 | 59.6, 64.4, 66.6 and 61.8, 59.6, 58.6 | one flight a run from cave_start: the route takeoff along the drawn line, left after 50 to 51 ticks on 2 rockets, at most 2.32 off it, no `roof` end. The decision 1.2 s (3.6 to 3.7 s in Track F9d): 0.1 s the flood (8 569 cells) and 12 lines, the rest one roll and the proof's 18 simulations | 0 |
+| tripOut, `FLY_CAVE_EXIT=1` and `FLY_CAVE_LEARNED` | 3 | 3 | 60.5, 66.3, 61.9 | the recorded line, chosen first; nothing is drawn | 0 |
+| tripOut, both off | 2 | 2 | 114.5, 116.3 | as without them on this fixture: a walk of 12 blocks, a vertical takeoff | 0 |
+| trip C, `FLY_CAVE_DRAWN_ENTRY=1`, no recordings | 3 | 2 | 90.7, 91.9; one not in 600 s | **the drawn entry is refused every run**: `but the ground beside its lead-in keeps the cruise 93 over the line's start (a cliff beside it; over 60 there is no way down onto it): refused`. The replica's shell has a wall at the box's edge, and the only heading out of the mouth with 50 blocks of free air runs within 6 blocks of it; the fixture's own ground there is a hillside (30 of 30 offline). So the flight lands by the mouth and the rest goes on as without it: the same trip with no entry at all (`FLY_CAVE_PLAIN=1`, 4 runs) takes 72.8, 71.7, 87.1 and 74.7 s. The run that did not arrive landed on another cell (23 from the goal, 31 over it) and its walk did not end in the 600 s the test allows | 2.2, 0 and 1 (the windows after the landing) |
+| the same before that test (the line proven, the cruise 100 over it) | 2 | 2 | 138.4, 145.7 | the window missed twice (`never on the lead-in`), a go-around, then the landing as without it | 0 and 6.8 |
+| trip C, `FLY_CAVE_LEARNED FLY_CAVE_ENTRY=1 FLY_CAVE_DRAWN_ENTRY=1` | 6 | 6, standing 0.8 to 1.1 from the goal | 43.6 to 47.0 (median 45.9) | the recorded entry, chosen first: no go-around, 54 to 62 ticks from the last open sky (Track F9d: 45.1 to 46.8 s) | 0 |
+| the round trip, no recordings (`FLY_CAVE_DRAWN_ENTRY=1 FLY_CAVE_EXIT=1`) | 3 | in 3, out 3 | in 75.1, 85.1, 83.7; out 63.6, 63.0, 63.2 | in: the entry refused as above, the landing by the mouth and the rest; out: along the drawn line | 0 |
+| the round trip, `FLY_CAVE_LEARNED FLY_CAVE_ENTRY=1` (no `FLY_CAVE_EXIT`) | 3 | in 3, out 3 | in 45.4, 45.5, 45.6; out 55.7, 112.6, 115.3 | in: the recorded entry. Out: once along the recorded line; twice the three takes tried were refused from where the trip in left the body (`the way out ended off the line`; 1.1, 2.4 and 0.3 from where they left the ground) and it walked out as with the switches off: a recorded line is followed by the same code as before (below), and with no `flyCaveExit` there is no drawn line behind it | 0 |
+| the round trip, `FLY_CAVE_LEARNED FLY_CAVE_ENTRY=1 FLY_CAVE_EXIT=1` (the gate's) | 3 | in 3, out 3 | in 45.3, 45.8, 46.4; out 60.1, 59.8, 115.4 | in: the recorded entry, no go-around, 52 to 59 ticks from the last open sky. Out: twice along the recorded line; once nothing was proven from where the body stood, three recorded takes and three drawn lines (`down before the exit (landed_off)`, `the way out ended off the line`), and it walked 155 blocks to a takeoff site | 0 |
+| under one roof, cave_8 to cave_end, `flyCaveHop` on (`FLY_CAVE_ONLY=under FLY_CAVE_UNDER=cave_8,cave_end`) | 5 | 5, standing 0.1 to 0.6 from the goal | 15.9 to 17.0 | one flight a run, all of the way: a hop of 323 blocks of line, the flier's place after 214 to 231 ticks on 6 rockets. The decision 2.2 to 2.4 s | 0 |
+| the same, `FLY_CAVE_HOP=0` | 2 | 2 | 98.4, 28.1 | the walk: it dug its way in the first run and walked through what it had dug in the second | 0 |
+| under one roof, cave_start to cave_3, `flyCaveHop` on | 5 | 5, standing 0.1 to 0.6 from the goal | 6.8 to 7.6 | a hop of 92 blocks of line, the flier's place after 55 to 68 ticks on 1 to 2 rockets. The decision 0.7 to 0.9 s | 0 |
+| the same, `FLY_CAVE_HOP=0` | 2 | 2 | 48.5, 48.4 | the walk (213 ticks of it in water) | 0 |
+| under one roof, **cave_start to cave_end**, `flyCaveHop` on | 2 (150 s and 600 s allowed) | 0 | | **no hop on the replica**: `no way under the roof to the cell 0 0 0 from the goal's (41 776 cells looked at) -> no hop` in 0.6 s, then the walk as before, which was 43 and 23 blocks from the goal when the runs ended. The flood stops between cave_3 and cave_8 (cave_3 to cave_8 asked alone: the same line): the server's water lies there where the fixture has air over its water cells. In the replica's own model offline (`scripts/cave-hop-probe.ts --replica`) the line is proven as on the fixture, 548 blocks | 3 and 3 |
+
+So on a server: the drawn way out as before (6 of 6); hops of 92 and 323 blocks, 10 of 10: the first 7 times quicker than its walk, the second 6 times quicker
+than a walk that digs its way and 1.7 times quicker than the walk through what was dug; the recordings still chosen first. Not on a server: the drawn way
+in (refused for the replica's wall) and the long line (the replica's water). Both are the fixture's results above.
+
+**Where the walk after an entry ends, the way out is not always proven.** After the entry's landing the trip walks to
+the goal's cell, and that walk ends 0 to 0.3 from the cell's centre. Where it ended 0.3 from it (the first take's
+lift-off 1.1 from the body) every way out was refused from there, the recorded takes (`the way out ended off the line`,
+`down before the exit (landed_off)`) and, in the one such run with `flyCaveExit`, the three drawn lines as well; the trip
+then walks 155 blocks to a takeoff site and takes 113 to 116 s where the line takes 56 to 64. Where it ended 0 to 0.2
+from the centre the first take was clear. Counted over the round trips with the recordings on this replica: **this
+tree 4 of 10** (2 of 3 and 1 of 4 with no `flyCaveExit`, 1 of 3 with it), **the base's code 1 of 7** (598b14bd's bot
+folder flown from a copy beside this one, 3 and 4 runs; the same refusal, 116.4 s); Track F9d's table has none in 6 on
+its replica (the box of the fixture of 2026-11-10). Offline in the replica's model (`scripts/cave-exit-probe.ts --replica
+--paths <dir> --at <dx,dz>`, with and without `--takes`), from the cell's centre and from three places 0.9 to 1.3 beside
+it, the base's code and this tree's give the same output at all four. So this is older than this track and not its
+follower (a recorded line has no speeds); the two rates are not told apart by 17 runs. Nothing steps the body to the
+cell's centre, or to where a take left the ground, before the proof: an open point.
+
+### The regressions
+
+**With this track's settings off nothing changes.** Checked offline, tick for tick: the base's `bot/src` and
+`bot/scripts` (598b14bd) beside this tree's, the same flights on both, the outputs compared (the milliseconds taken
+out). `scripts/route-land-probe.ts` hashes every tick's position: the gate's stacked platforms to the hand-over at 169
+pairs of burns, 25 whole flights of them, 9 of the room 300 out, 3 of the hole; `scripts/cave-exit-probe.ts` with the
+recordings (the learned exit from cave_start: its proof and the 13 burns); `scripts/cave-learned-entry-probe.ts` with
+the recordings (the learned entry's cases, one flight each). **The same output on both, in all six.** A recorded line
+carries no speeds and no hop, and the follower's new branches ask for them; the follower's cube of cells answers what
+the grid answers. What does change without a new setting: every drawn way out (`flyCaveExit`, on live): its heights,
+its speeds, the rockets by them, the climb out of a pit, the order the lines are tried in.
+
+The final code, each gate alone with nothing else of this track running, by its exit code (bds-fly3 for fly-route-land
+and fly-route, bds-fly2 for the rest; the PC, 2026-11-11):
+
+| suite | result |
+|---|---|
+| fly-route-land | 6 runs in a row, exit 0 six times (7 of 7 each, 463 to 497 s a run) |
+| fly-route | exit 0 (3 of 3) |
+| fly-walk | 4 runs, exit 0 four times |
+| fly-land | **exit 1**: 4 of 5; `!fly stop in the air (a ground target 300 blocks out)` timed out waiting for its reply. The base's code flown on the same server right after: exit 1, the same case, 4 of 5 (the case that is red on main) |
+| fly-course, `FLY_AREA=71520,69472` | **exit 0, 1, 1, 1** in 4 runs (the two asked for and two more): 7 of 8 in the three, `rings` each time (neither of its two flights passed all five goals; `ground` after 1 to 3). The base's code on the same server, 3 runs: exit 0, 1, 0, `rings` the same way. The rings are flown by the test's own driver (`route/live.ts`, the tracker, the search, the grid, the rocket hand): none of those files, and nothing they import, is changed by this track |
+| fly-cave trip C with `FLY_CAVE_ENTRY=1` and the recordings | exit 0; 6 of 6 along the recorded entry (the table above) |
+| fly-cave, the round trip with the recordings | exit 0 three times (10 trips): in 10 of 10 along the recorded entry, out 10 of 10 arrived, 6 along the recorded line and 4 on foot ("Where the walk after an entry ends", above) |
+| fly-cave tripOut along the drawn line (`FLY_CAVE_EXIT=1`, no recordings) | exit 0; 6 of 6 (the table above) |
+| `pnpm lint` (the PC) | exit 0 |
+| the unit suite on the test host (`node scripts/mac-run.mjs --name f9e -- pnpm -r test`) | a first run exit 0 (2 531 passed, 1 skipped, 95.5 s); then three in a row: exit 1, 0, 0, the one failure `nav-worker.test.ts > planner worker: a real worker thread > the navigator walks the interim answer, splices in the final one, and plannerThreads 0 plans in-thread` (the walk's timing, not a file of this track); and three more in a row after this page's last edit for the hand-back |
+
+### What the Realm should show
+
+`!test goto home from cave_end 3` (a drawn exit from the deep cave; `flyCave on`, `flyCaveExit on`, both on live;
+`flyLearned` may stay on: no recording leaves the ground there):
+
+- at each start: `fly: route takeoff: ..., 6 drawn ways out (a flood of about 34 800 cells under the roof, 1 to the open
+  sky, drawn in about 250 ms), N exits under open sky; the drawn way out drawn 2 (to <cell>, 349 cells of the flood, 413
+  blocks to open sky, rolled in about 300 ticks on 6 rockets, drawn with a berth of 0.9, its roll 0.3 from the nearest
+  block): clear at burns of 15, 9, 21, 12, 18, 10, 11, 13, 14, 16, 17, 19, 20 ticks and of 21 then 9, 9 then 21 and with
+  a first rocket that fires nothing (the next at 15, 9, 21) (through the exit at tick 310 or so, open sky at the same
+  tick, ...) -> out along the drawn line drawn 2 to <cell>, then the climb curving to heading H (18 simulated, about 3.5
+  s)`. The first line drawn does not roll and is not named. No takeoff-site search, no `walking out`;
+- `fly: to home (N blocks): cruise y ..., a route takeoff along the drawn line drawn 2 out to <cell> (about 300 ticks, 6
+  rockets rolled), then the proven climb curving to heading H`;
+- in the flight: `drawn line: rocket 1 asked for 1 blocks along it ... (the takeoff's)`, then four to six times `drawn
+  line: rocket N asked for ... blocks along it ... (the body at 0.9 to 1.0 a tick with line ahead)`; `route takeoff: out
+  along the drawn line drawn 2 after 306 to 336 ticks, 5 to 7 rockets (open sky over the body, about 418 of 428 blocks
+  along it, at most 2.8 off it, ...)`; `route takeoff: open sky straight over the body and a solid ahead on heading H at
+  the climb's pitch (a pit): straight up until the path ahead clears`; `route takeoff: up out of the pit: 20 to 30 blocks
+  straight up in 14 to 20 ticks, the path ahead on heading H is clear from here`; `the climb's heading reached the
+  target's`;
+- no `flight: ended (roof)`; one flight a run;
+- the time: 15.3 to 16.8 s from the jump to open sky over the body (offline), the decision 3.5 s before it, then the
+  pit and the flight home as from cave_start, which takes 57 s a run there: expect 70 to 80 s a run;
+- a refusal instead (`the drawn way out drawn 2 (...): ... at a burn of N ticks: refused`, then `-> no route takeoff`
+  and the walk out) means the live cave is not the fixture's where the line runs (the bot digs and pillars there);
+  `the drawn way out ...: not tried (N ms gone)` that the host took over 6 s; `route takeoff: the drawn line drawn 2
+  lost after N ticks (...): no climb without the line here, landing` and a flight ended `roof` that the flight left
+  what its proof flew (one flight in seven hundred offline): the trip walks on from there, and takes off again where a
+  line is proven.
+
+`!test cavestart 3 from home` with `flyLearnedEntry off` and `flyCaveEntry on` (`flyCave on`):
+
+- as before up to the takeoff; some seconds into the flight `fly: drawn entry: no recorded way in to cave_start: a
+  flood of about 8 850 cells under the roof from the goal, 2 to the open sky, 9 lines drawn; drawn in 1 (...): to the
+  goal's cell: stands 2.9 from the touchdown and 3.0 under it from mid on the line ...: refused; drawn in 2 (the opening
+  <its offset> from the touchdown (49 cells of the flood), a berth of 0.9 over the floor and under the roof; 52 blocks in
+  the open, 60 under the roof coming down 15): to the goal's cell: clear from 37 entry states (...): standing at most 1.2
+  from the touchdown, ... -> in along the drawn line drawn in 2: onto its line 92 blocks from the goal and 30 over it at
+  about 1.0 a tick, 45 blocks of open air to its roof, 60 under it to the touchdown on the goal's cell (45 simulated, 1.5
+  to 3 s; N cells from the world cache: to be confirmed on the live world before the line is committed to)`;
+- `flight: retargeted to ...`; `flight: drawn entry: the proof of drawn in 2 stands on the live world (N cells the
+  same)`; `flight: drawn entry: onto the line of drawn in 2 N blocks before its hand-over window (the lead-in), ...`;
+  `flight: drawn entry: on the line drawn in 2 45 blocks before its roof (...): inside what the proof flew, the follower
+  has it to the touchdown`; `flight: drawn entry: the touchdown begins (...)`; `flight: drawn entry: standing 0.3 to 1.0
+  from the goal along drawn in 2: about 110 ticks after the commit, 64 to 69 from the line's last open sky ...`; the
+  landed line with `0 go-arounds`; then a walk of a block or none;
+- the time: the recorded entry gives 43.7 to 47.9 s a run; offline the drawn one takes 1.7 s more from the retarget to
+  standing at the median: expect 45 to 50 s a run;
+- `-> no drawn entry: the landing as without it` means every line's proof was refused on the live cave (the reasons
+  are in the line: a block by the goal, `the way in climbs`, `but the ground beside its lead-in keeps the cruise N over
+  the line's start`): the flight lands by the mouth and the rest goes on as before, 80 s or so. `go-around 1: the drawn
+  entry drawn in 2 missed (...)` means the cruise did not come down onto the lead-in (the ground before it is not the
+  fixture's, or the flight came from another side): once is the price of a lap, twice gives the entry up.
+
+`!test goto cave_end from cave_start 3` with `flyCaveHop on` (`flyCave on`, `autoFly on`):
+
+- at each start: `fly: hop: to cave_end under the roof: about 77 000 cells looked at, 6 lines drawn in about 1 s; hop 1
+  (548 blocks of line, 465 cells of the flood to the cell 0 0 0 from the goal's, a berth of 0.9, 51 from its lowest to
+  its highest): standing within 0.9 of the goal at burns of 15, 9, 21, 12, 18, 10, 11, 13, 14, 16, 17, 19, 20 ticks and
+  of 21 then 9, 9 then 21 and with a first rocket that fires nothing (the next at 15, 9, 21); 413 ticks at the nominal
+  burn on 9 rockets -> along the drawn line hop 1 to the touchdown 0 0 0 from the goal's cell (18 simulated, 4 to 5
+  s)`;
+- `fly: to cave_end (N blocks): ..., a hop along the drawn line hop 1 under the roof to a touchdown at <cell> (about 470
+  ticks; no climb, no cruise)`;
+- in the flight: `drawn line: rocket 1 asked for 1 blocks along it ... (the takeoff's)`, seven to ten more by speed;
+  `hop: 534 of 548 blocks along the drawn line hop 1 after 362 to 397 ticks, 8 to 11 rockets (at most 2 to 3.6 off it,
+  slowed N ticks, ...): the touchdown's flier has it from here`; `drawn entry: the touchdown begins (...)`; `drawn entry:
+  standing 0.1 to 0.9 from the goal along hop 1: ...`; `flight: landed ...`; `arrived at ...`;
+- the time: 19.1 to 21.1 s of flight and 4 to 5 s of deciding: 25 to 30 s a run;
+- `-> no hop` (with the reason: `no way under the roof`, `too short to fly`, a refusal at a burn) and the trip goes on
+  as it did; `route takeoff: the drawn line hop 1 lost after N ticks (...)` and `flight: ended (roof)`: the body came
+  down under the roof short of the goal; the trip walks on, and asks for a hop again where it stands when it flies.
+
+The live settings each needs, besides `flyCave on` and `flyRoute` not off (both so today): the first `flyCaveExit on` (so
+today), the second `flyCaveEntry on` with `flyLearnedEntry off` (to see the drawn one; with both on the recording is
+chosen), the third `flyCaveHop on`.
+
+### Unit tests (`fly-drawn-ways.test.ts`, synthetic caves)
+
+The taut line (straight where free, bent at a sill and under a low roof, inside its bands); the speeds (a level line
+the most, a falling line a block a tick, a top the least and less already before it). A tunnel 200 blocks long with
+three bends, the first over a top (a ramp up 24 at 45 degrees, a sill, as steep down the far side, a bend north, a
+bend west): without the speeds the follower loses it at a burn of 9, with them it is flown out at 9, 12, 15, 18 and 21;
+the lines drawn at once and rolled one by one. A drawn entry into a hall through a mouth above it (drawn from the
+touchdown outwards, in the open at least the hand-over's length, no rocket, proven, flown to standing from the window's
+start, middle and end); refused where the hall's only opening lies under it (`climbs`) and where it is sealed. The
+flood to a cell (aimed, and no wandering of the open air for a hall that is not joined); a hop between two halls
+joined by a straight passage (the last rocket's place and the flier's, the proof's 19 simulations, flown at 9, 15 and
+21 to standing by the goal with no hit), by one with a bend, and by one that climbs 14; a way too short to fly; a
+block set across the line after it was drawn (the proof refuses the hop; flown all the same, the follower stops short
+and comes down with no hard hit); a chain of three hops, each drawn and proven from where the last one stood. The
+settings' defaults.
+
+### Open points (Track F9e)
+
+- **Nothing of this track has flown on the Realm.** `flyCaveEntry` and `flyCaveHop` are off there and by default; the
+  longer lines fly under `flyCaveExit`, which is on there, at the next takeoff under a roof.
+- **The proof's burns are one length for all the rockets of a flight, and two mixes.** A line of five to eleven rockets
+  flies with as many lengths. The probes fly that (719 of 720 over the 18 exits, 60 of 60 and 40 of 40 on the long hop
+  and its way back); the proof does not, and six more simulations a line would not find one flight in seven hundred.
+  The one that failed braked and came down under the roof with a contact at 0.4 a tick.
+- **A bend with no rocket burning.** The speeds know a top and a tight corner; a wide bend that climbs, come to under a
+  line's height at a burn's speed, is where the one failure was. And a hop whose last 44 blocks hold a right-angle bend in
+  a passage 9 wide is refused (the unit test's first geometry): the body flies them on the last burn's speed alone.
+- **A hop has a least length** (48 blocks) and a place for its last rocket because nothing shortens a burn. Legs under
+  that are walked; a rocket that could be cut short (the slot switch of the catalogue, unmeasured) would fly them.
+- **The start under 2 of air** (cave_9): no line. A walk of a few cells to a place with 3 of air is not looked for.
+- **The shortcut.** Not taken: its last piece is a slot one to three cells wide, and a touchdown by the pit's bottom ends
+  in its water. A flight down the pit from above (a way in that ends in a climb) is neither a way in nor a hop here.
+- **A way in is refused where the cruise cannot come down to it** (`DRAW_IN_AIM_OVER`): the ground within 6 blocks of the
+  lead-in sets the cruise's height (`entryAim`), and a cliff beside it leaves the body 60 and more over the line's start
+  with no room for a circle. The replica has such a cliff (its shell's wall at the box's edge, beside the
+  mouth); the fixture's own ground there is a hillside. Other headings out of that mouth run along the hillside within
+  3 blocks of the window and their proofs' states start on it: no line on the replica.
+- **The way in's heading is the ground's choice, not the flight's.** A flight that comes from the other side flies
+  round to the lead-in as it does for a recorded one.
+- **The hop is asked by `!goto`** (the automatic flight), and again by a watched walk as it gets on. `!fly <waypoint>` and
+  the corridor trips do not ask it. The asking again has not been seen to find a hop on a server: on the replica the
+  walk from cave_start never came to a place one is proven from in the ten minutes the run had.
+- **With `flyCaveHop` on any two places under one roof more than 48 blocks apart may be flown between**: a base, a hall.
+  It flies only what its proof cleared. Every such walk first asks for a hop, and a watched walk asks again every
+  `flyRecheckBlocks`: a flood of up to 150 000 cells in one piece (0.1 to 1.3 s) each time.
+- **A way out from where the walk after an entry ended** is refused when that is 0.3 from the cell's centre (4 of 10
+  round trips on this replica, 1 of 7 on the base's code; "On the server"): recorded takes and drawn lines alike, and
+  the trip walks out, a minute slower. A step to the cell's centre, or to where a take left the ground, before the
+  proof is not built.
+- **The decision's times are the PC's**; the test host's are an estimate from a synthetic cave (the fixture does not go
+  there). A hop's flood and lines are not sliced: the body stands while they run (0.9 s for the long line).
+- **A drawn way in is drawn in the air**: its flood yields every 1 500 cells; drawing one line (10 to 30 ms) does not.
+- **Duplication left.** The probes' world set-up is in `cave-probe-world.ts` for the new probe; the three older probes
+  keep their own copies. The new unit tests have their own rig, as the drawn and the learned ones.
+
 ## Open points
 
 - Track F1: a corridor approach under a roof at ground level (the roof cases of `fly-brake.test.ts` on the

@@ -9,10 +9,15 @@
 //
 //   --mode lines    what the recorded ways in look like: where they stand again, the line kept, its last open sky, the
 //                   speed and the slope along it, the room it keeps
+//
+// Track F9e, `--drawn`: no recording at all: the way in is DRAWN from the world (learn/drawin.ts), proven as the bot proves
+// it, and flown by the modes below as a recorded one is (`--mode arrive`, `approach`, `catch`, `trace`; `--mode lines`
+// prints the drawn line). `--all`: every drawn line that proves, not the first.
 import { FlightBrain, type FlightEnd, type FlightPhase } from '../src/skills/fly/brain.ts';
 import { caveWorld, loadCaveFixture, REPLICA_FLAT_FEET, replicaCoarse } from '../src/skills/fly/corridor/cave.ts';
 import { simulateFlight, type SimDeps } from '../src/skills/fly/glide.ts';
-import { caseSpeed, chooseTouchdown, ENTRY_AIM_OUT, ENTRY_AIR, ENTRY_BOX, ENTRY_SOLID, ENTRY_WATER, entryAim, entryCases, entryLine, entryState, entryTouchdowns, entryVerdict, flyEntry, guideSpeed, proveEntry, type EntryLine, type EntryWorld } from '../src/skills/fly/learn/entry.ts';
+import { caseSpeed, chooseTouchdown, ENTRY_AIM_OUT, ENTRY_AIR, ENTRY_BOX, ENTRY_BUMP, ENTRY_SOLID, ENTRY_WATER, entryAim, entryCases, entryLine, entryState, entryTouchdowns, entryVerdict, flyEntry, guideSpeed, proveEntry, type EntryLine, type EntryWorld } from '../src/skills/fly/learn/entry.ts';
+import { chooseDrawnEntry, drawEntries } from '../src/skills/fly/learn/drawin.ts';
 import { fixtureExportedAt, fixtureFreshness } from '../src/skills/fly/learn/fresh.ts';
 import { guideLength, guidesOf } from '../src/skills/fly/learn/guide.ts';
 import { matchEntries, MATCH_NEAR, type OpenSky } from '../src/skills/fly/learn/match.ts';
@@ -85,14 +90,15 @@ const sky: OpenSky = (x, y, z) => {
   return true;
 };
 
-const pathsDir = has('paths') ? arg('paths', '') : process.env.BEDROCKBOT_PATHS_DIR;
-if (!pathsDir) {
-  console.log('no recordings (--paths <dir> or BEDROCKBOT_PATHS_DIR)');
+const drawnMode = has('drawn');
+const pathsDir = drawnMode ? undefined : has('paths') ? arg('paths', '') : process.env.BEDROCKBOT_PATHS_DIR;
+if (!pathsDir && !drawnMode) {
+  console.log('no recordings (--paths <dir> or BEDROCKBOT_PATHS_DIR; or --drawn for a line drawn from the world)');
   process.exit(0);
 }
-const paths = new PathStore(pathsDir).all();
+const paths = pathsDir ? new PathStore(pathsDir).all() : [];
 // (round 2: a fixture older than the recordings is another cave than the one they were made in: said first)
-console.log(fixtureFreshness(fixtureExportedAt(fix.dir), paths.map((p) => p.recorded)).line);
+if (!drawnMode) console.log(fixtureFreshness(fixtureExportedAt(fix.dir), paths.map((p) => p.recorded)).line);
 const before = Number(arg('before', '200'));
 const found = matchEntries(paths, to, sky, { before });
 console.log(`${paths.length} recordings, ${found.flights} flights, ${found.near} stand again within ${MATCH_NEAR} of ${arg('to', 'cave_start')}, ${found.matches.length} of those come from under open sky to a place under a roof`);
@@ -153,6 +159,37 @@ for (const m of found.matches) {
   const l = entryLine(m, { grid, ...(touch === 'recorded' ? {} : { goal: to }) });
   if (typeof l === 'string') console.log(`${m.guide.path}: no entry line (${l})`);
   else lines.push({ name: m.guide.path, line: l });
+}
+// Track F9e: the drawn way in (`--drawn`): the bot's own choice (learn/drawin.ts chooseDrawnEntry), or with `--all` every line
+if (drawnMode) {
+  const cells = entryTouchdowns(classOf, goal);
+  const t0 = performance.now();
+  if (has('all') || mode === 'lines') {
+    const start = cells.find((c) => classOf(c.x, c.y - 1, c.z) === ENTRY_SOLID && classOf(c.x, c.y, c.z) === ENTRY_AIR && classOf(c.x, c.y + 1, c.z) === ENTRY_AIR);
+    const d = start ? await drawEntries(grid, { x: start.x + 0.5, y: start.y, z: start.z + 0.5 }, top, has('radius') ? { radius: Number(arg('radius', '128')) } : {}) : undefined;
+    console.log(`drawn: ${d ? `a flood of ${d.cells} cells from the touchdown, ${d.ways} to the open sky, ${d.entries.length} lines drawn in ${(performance.now() - t0).toFixed(0)} ms${d.why ? `; ${d.why}` : ''}${d.tried.length ? `; not drawn: ${d.tried.join(' | ')}` : ''}` : 'no cell to stand in by the goal'}`);
+    for (const en of d?.entries ?? []) {
+      const t1 = performance.now();
+      const pick = await chooseTouchdown(ew, en.match, goal, cells);
+      console.log(`${en.match.guide.path} (${en.at}; ${en.match.open.toFixed(0)} blocks in the open, ${en.under.toFixed(0)} under the roof coming down ${en.drop.toFixed(0)}): ${pick.said}${pick.proof ? '' : ': refused'} (${pick.sims} simulated, ${(performance.now() - t1).toFixed(0)} ms)`);
+      if (pick.line) lines.push({ name: en.match.guide.path, line: pick.line });
+      if (mode === 'lines') {
+        const g = en.match.guide;
+        const rows: string[] = [];
+        for (let i = 0; i < g.points.length; i += Number(arg('every', '6'))) {
+          const a = g.points[Math.max(0, i - 3)]!;
+          const c = g.points[Math.min(g.points.length - 1, i + 3)]!;
+          const q = g.points[i]!;
+          rows.push(`    ${String(i).padStart(3)} ${rel(q).padEnd(22)} tick ${g.ticks[i]!.toFixed(0).padStart(4)} speed ${guideSpeed(g, i).toFixed(2)} yaw ${((Math.atan2(-(c.x - a.x), c.z - a.z) * 180) / Math.PI).toFixed(0).padStart(4)} slope ${((Math.atan2(c.y - a.y, Math.hypot(c.x - a.x, c.z - a.z)) * 180) / Math.PI).toFixed(0).padStart(4)} room ${boxClear(grid, q, 0).clearance.toFixed(2)} ${sky(Math.floor(q.x), Math.floor(q.y), Math.floor(q.z)) ? 'sky' : 'roof'}, the ground within 6 of it ${(() => { let t = -Infinity; for (let dx = -6; dx <= 6; dx += 3) for (let dz = -6; dz <= 6; dz += 3) { for (let y = top; y >= floorY; y--) if (solidAt(Math.floor(q.x) + dx, y, Math.floor(q.z) + dz)) { t = Math.max(t, y); break; } } return (q.y - t - 1).toFixed(0); })()} under it at the least`);
+        }
+        console.log(rows.join('\n'));
+      }
+    }
+  } else {
+    const pick = await chooseDrawnEntry(ew, grid, goal, cells, top, { ...(has('radius') ? { radius: Number(arg('radius', '128')) } : {}), ground: (x, z) => { for (let y = top; y >= floorY; y--) if (solidAt(x, y, z)) return y; return undefined; } });
+    console.log(`drawn: a flood of ${pick.cells} cells from the touchdown, ${pick.ways} to the open sky, ${pick.lines} lines drawn; ${pick.tried.join(' | ')} -> ${pick.line ? `in along ${pick.line.guide.path}` : 'NO drawn way in'} (${pick.sims} simulated, ${(performance.now() - t0).toFixed(0)} ms in all)`);
+    if (pick.line) lines.push({ name: pick.line.guide.path, line: pick.line });
+  }
 }
 const short = (f: ReturnType<typeof flyEntry>): string => {
   const why = entryVerdict(f);
@@ -351,6 +388,8 @@ if (mode === 'arrive') {
           let lastFire = -100;
           let lag = 0;
           let hits = 0;
+          let touches = 0;
+          let lastSky = 0;
           let end: FlightEnd | undefined;
           let t = 1;
           let unknown = 0;
@@ -376,7 +415,14 @@ if (mode === 'arrive') {
             if (!r.simulated) break;
             const was = body;
             body = r.state;
-            if (was.gliding && body.pos.y > Math.floor(body.pos.y) + 0.05 && (body.collidedHorizontally || (body.collidedVertically && !body.onGround))) hits++;
+            // (Track F9e: a contact that takes less than ENTRY_BUMP off the speed is a touch, as the proof counts it: learn/entry.ts)
+            if (was.gliding && body.pos.y > Math.floor(body.pos.y) + 0.05 && (body.collidedHorizontally || (body.collidedVertically && !body.onGround))) {
+              const lost = Math.hypot(was.vel.x, was.vel.y, was.vel.z) - Math.hypot(body.vel.x, body.vel.y, body.vel.z);
+              if (lost > ENTRY_BUMP) hits++;
+              else touches++;
+              notes.push(`#${lost > ENTRY_BUMP ? 'HIT' : 'touch'} at tick ${t} in ${brain.phase} ${rel(body.pos)}, ${Math.hypot(was.vel.x, was.vel.y, was.vel.z).toFixed(2)} a tick before it, ${lost.toFixed(2)} lost`);
+            }
+            if (sky(Math.floor(body.pos.x), Math.floor(body.pos.y), Math.floor(body.pos.z))) lastSky = t;
             if (skyTop(Math.floor(body.pos.x), Math.floor(body.pos.z)) === undefined) unknown++;
             if (has('trace') && Math.hypot(body.pos.x - p0.x, body.pos.z - p0.z) < Number(arg('trace-within', '120')) && (brain.phase as FlightPhase) !== 'entry') {
               const h = Math.hypot(body.vel.x, body.vel.z);
@@ -389,13 +435,13 @@ if (mode === 'arrive') {
           if (ok) clean++;
           if (end?.ok) secs.push(t / 20);
           console.log(
-            `   ${over} over the goal, ${side} beside, ${speed} a tick: ${end ? `${end.ok ? 'landed on the goal' : `ended ${end.reason}`} ${Math.hypot(end.landedAt.x - to.x, end.landedAt.z - to.z).toFixed(1)} from it after ${t} ticks (${(t / 20).toFixed(1)} s from the retarget)` : `still ${brain.phase} after ${t} ticks`}; ${brain.stats.goArounds} go-arounds, ${en?.misses ?? 0} windows missed, ${en?.joins ?? 0} joins, ${hits} contacts, ${brain.stats.rockets} rockets${unknown ? `, ${unknown} ticks over columns the fixture does not know` : ''}; ${brain.stats.descents.join('; ') || 'no descent geometry'}`,
+            `   ${over} over the goal, ${side} beside, ${speed} a tick: ${end ? `${end.ok ? 'landed on the goal' : `ended ${end.reason}`} ${Math.hypot(end.landedAt.x - to.x, end.landedAt.z - to.z).toFixed(1)} from it after ${t} ticks (${(t / 20).toFixed(1)} s from the retarget)` : `still ${brain.phase} after ${t} ticks`}; ${brain.stats.goArounds} go-arounds, ${en?.misses ?? 0} windows missed, ${en?.joins ?? 0} joins, ${hits} hits, ${touches} touches, ${t - lastSky} ticks under the roof, ${brain.stats.rockets} rockets${unknown ? `, ${unknown} ticks over columns the fixture does not know` : ''}; ${brain.stats.descents.join('; ') || 'no descent geometry'}`,
           );
           if (has('notes') || has('trace')) for (const n of notes) console.log(`      ${n.startsWith('#') ? n.slice(1) : relNote(n).slice(0, 400)}`);
         }
       }
     }
     secs.sort((x, y) => x - y);
-    console.log(`   ${name}: ${clean} of ${flights} flights stood on the goal with no go-around, no window missed and no contact; ${secs.length ? `${secs[0]!.toFixed(1)} to ${secs[secs.length - 1]!.toFixed(1)} s from the retarget to standing (median ${secs[Math.floor(secs.length / 2)]!.toFixed(1)})` : 'none stood'}`);
+    console.log(`   ${name}: ${clean} of ${flights} flights stood on the goal with no go-around, no window missed and no hit; ${secs.length ? `${secs[0]!.toFixed(1)} to ${secs[secs.length - 1]!.toFixed(1)} s from the retarget to standing (median ${secs[Math.floor(secs.length / 2)]!.toFixed(1)})` : 'none stood'}`);
   }
 }

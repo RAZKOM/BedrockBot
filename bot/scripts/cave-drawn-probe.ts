@@ -13,7 +13,10 @@
 // The world set-up is scripts/cave-exit-probe.ts's (the fixture's cells in the box, its column tops beside it).
 import { caveWorld, loadCaveFixture } from '../src/skills/fly/corridor/cave.ts';
 import { routeTakeoff, routeTakeoffOptions, simulateFlight, type SimDeps } from '../src/skills/fly/glide.ts';
-import { guideLength, guideNearest } from '../src/skills/fly/learn/guide.ts';
+import { drawExits } from '../src/skills/fly/learn/draw.ts';
+import { guideLength, guideNearest, guidePoint } from '../src/skills/fly/learn/guide.ts';
+import { boxClear } from '../src/skills/fly/route/grid.ts';
+import { drawnRoute } from '../src/skills/fly/route/takeoff.ts';
 import { cruiseHeight, hdist, takeoffSky, type LandingTarget } from '../src/skills/fly/plan.ts';
 import type { TerrainQuery } from '../src/skills/fly/terrain.ts';
 import { planTakeoffRoute, type TakeoffProof } from '../src/skills/fly/route/takeoff.ts';
@@ -79,7 +82,14 @@ const noPlan = (): never => {
 for (const name of names) {
   const start = cellOf(name);
   const from: Vec3 = { x: start.x + 0.5, y: start.y, z: start.z + 0.5 };
-  const rel = (s: string): string => s.replace(/(-?\d+) (-?\d+) (-?\d+)(?=,| \(|:|;|$)/g, (_m, x: string, y: string, z: string) => `[${Number(x) - start.x} ${Number(y) - start.y} ${Number(z) - start.z}]`);
+  // (a line of the bot's has the fixture's coordinates and its distance to the goal: positions made relative to the
+  // waypoint, the distance to the goal left out)
+  const rel = (s: string): string =>
+    s
+      .replace(/(-?\d+\.\d+) (-?\d+\.\d+) (-?\d+\.\d+)/g, (_m, x: string, y: string, z: string) => `[${(Number(x) - from.x).toFixed(1)} ${(Number(y) - from.y).toFixed(1)} ${(Number(z) - from.z).toFixed(1)}]`)
+      .replace(/(-?\d+) (-?\d+) (-?\d+)(?=,| \(|:|;|$)/g, (_m, x: string, y: string, z: string) => `[${Number(x) - start.x} ${Number(y) - start.y} ${Number(z) - start.z}]`)
+      .replace(/(down at \[[^\]]+\]), \d+ blocks from it/g, '$1')
+      .replace(/, \d+ from the target/g, '');
   const stand = grid.solid(start.x, start.y - 1, start.z) && !grid.solid(start.x, start.y, start.z) && !grid.solid(start.x, start.y + 1, start.z);
   if (!stand) {
     console.log(`${name}: no place to stand (the waypoint's cell has no floor under it or no two cells of air: water, a ledge's edge): not flown`);
@@ -93,12 +103,59 @@ for (const name of names) {
     sims += r.sims;
     return r;
   };
+  // Track F9e, `--trace <burn>`: every drawn line that rolls (proven or not) flown once at that burn, the brain's notes and
+  // the last `--last` ticks before the line is left or lost: the place on the line, the distance from it, the speed, the
+  // burn left, the room, and the line's own heading and slope there
+  if (has('trace')) {
+    // (`--trace 14,17,21`: the first rocket 14 ticks, the second 17, every later one the last number)
+    const seq = arg('trace', '9').split(',').map(Number);
+    const burn = seq.length === 1 ? seq[0]! : (r: number): number => seq[Math.min(seq.length - 1, r)]!;
+    const top = Math.min(319, Math.ceil(cruiseY));
+    const d = drawExits(grid, from, top, has('radius') ? { radius: Number(arg('radius', '128')) } : {});
+    console.log(`${name}: ${d.lines.length} lines that roll (${d.tried.map(rel).join(' | ').slice(0, 600) || 'none refused'})`);
+    for (const l of d.lines.slice(0, Number(arg('lines', '2')))) {
+      const route = drawnRoute(l, from, 0);
+      const g = l.guide;
+      const notes: string[] = [];
+      const rows: string[] = [];
+      let sim0: number | undefined;
+      const sim = await simulateFlight(
+        deps,
+        from,
+        target,
+        { ...flight, takeoffYaw: route.yaw, route: { grid, plan: noPlan }, routeTakeoff: routeTakeoffOptions(route, true), note: (m) => notes.push(`t${rows.length}: ${rel(m)}`) },
+        {
+          rockets: 64,
+          yaw: route.yaw,
+          maxTicks: 300 + route.ticks,
+          burn,
+          endLag: GLIDE.boostEndLag,
+          until: (br, body) => {
+            if (br.phase !== 'takeoff') {
+              rows.push(`   t${String(br.stats.ticks).padStart(3)} ${br.phase} [${(body.pos.x - from.x).toFixed(1)} ${(body.pos.y - from.y).toFixed(1)} ${(body.pos.z - from.z).toFixed(1)}] speed ${Math.hypot(body.vel.x, body.vel.y, body.vel.z).toFixed(2)} vy ${body.vel.y.toFixed(2)} boost ${body.boostTicks ?? 0} room ${boxClear(grid, body.pos, 0).clearance.toFixed(2)}${body.collidedHorizontally || body.collidedVertically ? ' CONTACT' : ''}${body.inWater ? ' WATER' : ''}`);
+              return br.phase === 'approach' || br.stats.ticks > (sim0 ?? (sim0 = br.stats.ticks)) + Number(arg('after', '60'));
+            }
+            const n = guideNearest(g, body.pos);
+            const q = guidePoint(g, n.at);
+            const a = guidePoint(g, Math.min(guideLength(g), n.at + 6));
+            const h = Math.hypot(body.vel.x, body.vel.z);
+            rows.push(`   t${String(br.stats.ticks).padStart(3)} at ${n.at.toFixed(1).padStart(6)} off ${n.dist.toFixed(2)} speed ${Math.hypot(h, body.vel.y).toFixed(2)} climb ${((Math.atan2(body.vel.y, h) * 180) / Math.PI).toFixed(0).padStart(3)} boost ${String(body.boostTicks ?? 0).padStart(2)}${g.speeds ? ` cap ${g.speeds[Math.min(g.speeds.length - 1, Math.round(n.at))]!.toFixed(2)}` : ''} room ${boxClear(grid, body.pos, 0).clearance.toFixed(2)} line room ${boxClear(grid, q.pos, 0).clearance.toFixed(2)} line heading ${((Math.atan2(-q.dir.x, q.dir.z) * 180) / Math.PI).toFixed(0).padStart(4)} slope ${((Math.asin(q.dir.y) * 180) / Math.PI).toFixed(0).padStart(3)}, 6 on ${((Math.atan2(-a.dir.x, a.dir.z) * 180) / Math.PI).toFixed(0).padStart(4)}/${((Math.asin(a.dir.y) * 180) / Math.PI).toFixed(0).padStart(3)}${body.collidedHorizontally || body.collidedVertically ? ' CONTACT' : ''}`);
+            return false;
+          },
+        },
+      );
+      console.log(`  ${g.path}: ${guideLength(g).toFixed(0)} blocks, ${l.open.toFixed(0)} to open sky, a berth of ${l.berth}, rolled in ${l.ticks} ticks on ${l.rockets} rockets; at a burn of ${seq.join(',')}: ${sim.end ? `ended ${sim.end.ok ? 'landed' : sim.end.reason}, ` : ''}${sim.stats.routeTakeoffEnd ?? 'not ended'} after ${sim.stats.routeTakeoffTicks ?? '?'} ticks, ${sim.stats.routeTakeoffRockets ?? 0} rockets, ${sim.hits - (sim.bumps ?? 0)} hits`);
+      for (const n of notes) console.log(`     ${n.slice(0, 400)}`);
+      console.log(rows.slice(-Number(arg('last', '40'))).join('\n'));
+    }
+    continue;
+  }
   const t0 = performance.now();
   // (the drawn lines alone: no recording, and the exits and the searched ways out left aside: `tries: 0`)
   const got = await planTakeoffRoute(grid, from, target, { rockets: 4, prove, tries: 0, drawn: { top: Math.min(319, Math.ceil(cruiseY)), ...(has('radius') ? { radius: Number(arg('radius', '128')) } : {}) }, budgetMs: Number(arg('budget', '6000')) }, noPlan);
   const ms = performance.now() - t0;
   const d = got.drawn!;
-  const head = `${name}: a flood of ${d.cells} cells, ${d.ways} to the open sky, ${d.lines} line${d.lines === 1 ? '' : 's'} drawn and rolled in ${d.ms.toFixed(0)} ms`;
+  const head = `${name}: a flood of ${d.cells} cells, ${d.ways} to the open sky, ${d.lines} line${d.lines === 1 ? '' : 's'} drawn in ${d.ms.toFixed(0)} ms`;
   const route = got.route;
   if (!route?.guide) {
     console.log(`${head}; NO proven line (${sims} simulated, ${ms.toFixed(0)} ms in all): ${got.tried.map(rel).join(' | ').slice(0, has('tried') ? 4000 : 700)}`);
@@ -151,6 +208,49 @@ for (const name of names) {
   );
   if (has('tried')) for (const t of got.tried) console.log(`      ${rel(t)}`);
   if (has('each')) console.log(rows.join('\n'));
+  // Track F9e, `--fuzz n`: n more flights of the proven line, every rocket of each burning its own number of ticks (9 to
+  // 21, drawn from a seeded generator: `--seed`), which no proof flies: the proof's burns are one length for all the
+  // rockets of a flight, and two mixes
+  if (has('fuzz')) {
+    let seed = Number(arg('seed', '1')) >>> 0;
+    const rnd = (): number => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    const n = Number(arg('fuzz', '30'));
+    let fine = 0;
+    const bad: string[] = [];
+    const offs: number[] = [];
+    for (let k = 0; k < n; k++) {
+      const burnsOf: number[] = [];
+      const burn = (r: number): number => (burnsOf[r] ??= 9 + Math.floor(rnd() * 13));
+      let off = 0;
+      const sim = await simulateFlight(
+        deps,
+        from,
+        target,
+        { ...flight, takeoffYaw: route.yaw, route: { grid, plan: noPlan }, routeTakeoff: routeTakeoffOptions(route, true) },
+        {
+          rockets: 64,
+          yaw: route.yaw,
+          maxTicks: 300 + route.ticks,
+          burn,
+          endLag: GLIDE.boostEndLag,
+          until: (br, body) => {
+            if (br.phase === 'takeoff' && body.gliding) off = Math.max(off, guideNearest(g, body.pos).dist);
+            return br.phase === 'approach';
+          },
+        },
+      );
+      const s = sim.stats;
+      const hits = sim.hits - (sim.bumps ?? 0);
+      const ok = s.routeTakeoffEnd === 'out' && hits === 0 && !sim.end && !sim.wet;
+      offs.push(off);
+      if (ok) fine++;
+      else bad.push(`burns ${burnsOf.join(',')}: ${sim.end ? `ended ${sim.end.ok ? 'landed' : sim.end.reason}` : (s.routeTakeoffEnd ?? 'not out')}, ${hits} hits${sim.wet ? ', wet' : ''}, after ${s.routeTakeoffTicks ?? '?'} ticks, at most ${off.toFixed(2)} off the line`);
+    }
+    console.log(`      fuzz: ${fine} of ${n} flights with a burn of its own for every rocket out with no hit; at most ${Math.max(...offs).toFixed(2)} off the line${bad.length ? `; NOT CLEAN: ${bad.join(' | ')}` : ''}`);
+  }
   if (has('profile')) {
     const lines: string[] = [];
     for (let i = 0; i < g.points.length; i += 4) {

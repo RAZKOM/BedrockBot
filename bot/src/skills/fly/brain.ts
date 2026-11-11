@@ -73,7 +73,7 @@ import { RouteTracker, type Planner } from './route/tracker.ts'; // Track F3
 import { decideGoAround, SINK_S_PER_BLOCK, WALK_S_PER_BLOCK, walkSeconds, type LandingOffer, type MissKind } from './landprice.ts'; // Track L1
 import type { RouteGoal } from './route/types.ts'; // Track F3
 import { GuideFollower } from './learn/follow.ts'; // Track F9b
-import { guideLength, guideSaid, type Guide } from './learn/guide.ts'; // Track F9b
+import { entrySaid, guideLength, guideSaid, type Guide } from './learn/guide.ts'; // Track F9b
 import { ENTRY_JOIN, EntryFlier, entryJoin } from './learn/entry.ts'; // Track F9c
 
 /** Track F3: `route`: the RouteTracker flies the last blocks onto a route landing (docs/flight.md "Route landings and takeoffs"). */
@@ -204,6 +204,13 @@ export interface BrainOptions {
      * over it, or at the line's end. A body that loses the line lands, as under `underRoof`.
      */
     guide?: { line: Guide; open: number };
+    /**
+     * Track F9e (docs/flight.md "Drawn lines, the way in and under one roof"): the line is a HOP (learn/hop.ts): it ends on a
+     * touchdown under the same roof, not in the open. The follower flies it to `hand` blocks along it; there the entry's
+     * flier takes the body on the same line, committed (the flight's target carries the line as its `entry`), and the
+     * flight ends standing. Open sky over the body is no end of it, and there is no climb after it.
+     */
+    hop?: { hand: number };
   };
   /**
    * Track F9c (docs/flight.md "Learned entries"): a target that carries a learned entry (`LandingTarget.entry`) is missed
@@ -215,6 +222,9 @@ export interface BrainOptions {
   entrySneak?: boolean;
 }
 
+/** Track F9e: the climb straight up out of a pit ends where a line from the body along the held heading, rising this much a block, is free this many blocks (brain.ts climbUp). */
+export const PIT_OUT_RISE = 0.3;
+export const PIT_OUT_RUN = 20;
 /** Track F9c: the hand-over windows a flight may miss before it gives its learned entry up. */
 export const ENTRY_TRIES = 2;
 /** Track F9c: a body this near the entry's line (blocks, beside or over it) that is past its window has missed it; farther off it is still on its way round. */
@@ -820,7 +830,7 @@ export class FlightBrain {
     if (!en) return;
     if (ok) {
       if (this.flier) this.flier.confirmed = true;
-      this.o.note?.(`learned entry: the proof of ${en.line.guide.path} stands on the live world${why ? ` (${why})` : ''}`);
+      this.o.note?.(`${entrySaid(en.line.guide)}: the proof of ${en.line.guide.path} stands on the live world${why ? ` (${why})` : ''}`);
       return;
     }
     // (a flier that has committed did so on a confirmed proof: nothing to take back)
@@ -834,7 +844,7 @@ export class FlightBrain {
     if (!en) return;
     if (this.stats.entry) Object.assign(this.stats.entry, { end: 'fallback', why });
     else this.stats.entry = { name: en.line.guide.path, joins: 0, misses: this.entryMisses, end: 'fallback', why };
-    this.o.note?.(`learned entry: ${en.line.guide.path} given up (${why}): ${en.fallback ? 'the landing as without a recording' : 'no other landing known, the nearest safe ground'}`);
+    this.o.note?.(`${entrySaid(en.line.guide)}: ${en.line.guide.path} given up (${why}): ${en.fallback ? 'the landing as without a recording' : 'no other landing known, the nearest safe ground'}`);
     this.flier = undefined;
     this.helix = undefined;
     if (!en.fallback) {
@@ -1249,7 +1259,25 @@ export class FlightBrain {
     const b = i.body;
     const obstacle = this.o.obstacle;
     if (!this.o.routeTakeoff?.curve || !obstacle || !b.gliding || this.stats.routeSkyAt === undefined) return false;
-    if (pathAhead({ ...b, boostTicks: Math.max(b.boostTicks, 1) }, ctl.yaw, this.burnPitch, LOOKAHEAD_TICKS, obstacle) === undefined) {
+    // (Track F9e: once it has begun, the way up ends only where the body is over the pit's rim on the held heading as well:
+    // a line from it rising PIT_OUT_RISE a block is free for PIT_OUT_RUN blocks, three cells wide and two high. The path
+    // ahead alone is clear for the burn as the brain is told it; a rocket burns 9 to 21 ticks, and where the burn ended
+    // four ticks after "clear" the climb's own pitch met the rim: 5 of 40 flights out of the deep cave with a burn of its
+    // own for every rocket, 3 of 40 out of the pit itself, each a landing under the rim)
+    const over = (): boolean => {
+      const r = (ctl.yaw * Math.PI) / 180;
+      const d = { x: -Math.sin(r), z: Math.cos(r) };
+      for (let s = 1; s <= PIT_OUT_RUN; s++) {
+        const y = Math.floor(b.pos.y + s * PIT_OUT_RISE);
+        for (const lat of [-1, 0, 1]) {
+          const x = Math.floor(b.pos.x + d.x * s - d.z * lat);
+          const z = Math.floor(b.pos.z + d.z * s + d.x * lat);
+          if (obstacle(x, y, z) || obstacle(x, y + 1, z)) return false;
+        }
+      }
+      return true;
+    };
+    if (pathAhead({ ...b, boostTicks: Math.max(b.boostTicks, 1) }, ctl.yaw, this.burnPitch, LOOKAHEAD_TICKS, obstacle) === undefined && (this.upSince === undefined || over())) {
       if (this.upSince !== undefined) this.o.note?.(`route takeoff: up out of the pit: ${(b.pos.y - this.upSince.y).toFixed(0)} blocks straight up in ${this.stats.ticks - this.upSince.tick} ticks, the path ahead on heading ${Math.round(ctl.yaw)} is clear from here`);
       this.upSince = undefined;
       return false;
@@ -2345,11 +2373,25 @@ export class FlightBrain {
     this.stats.routeTakeoffTicks = (this.stats.routeTakeoffTicks ?? 0) + 1;
     const ticks = f.stats.ticks;
     const obstacle = this.o.obstacle;
-    const open = b.gliding && out.at >= guide.open && obstacle !== undefined && takeoffSky(b.pos, this.target, this.o.cruiseY, 0, (x, y, z) => obstacle(x, y, z)).ok;
+    // Track F9e, a hop: at its hand-over place the entry's flier takes the body on the same line, committed: what was
+    // proven is this very flight from standing (glide.ts routeHop), so there is no window and no test of a box
+    const hop = this.o.routeTakeoff?.hop;
+    const en = this.target.entry;
+    if (hop && en && b.gliding && out.status === 'following' && out.at >= hop.hand) {
+      this.stats.routeTakeoffEnd = 'out';
+      this.follower = undefined;
+      this.flier = new EntryFlier({ grid: this.o.route!.grid, line: en.line, at: out.at, committed: true, note: (m) => this.o.note?.(m) });
+      this.stats.entry = { name: en.line.guide.path, joins: 1, misses: 0, committedAt: this.stats.ticks };
+      this.o.note?.(`hop: ${out.at.toFixed(0)} of ${guideLength(guide.line).toFixed(0)} blocks along ${guideSaid(guide.line)} after ${f.stats.ticks} ticks, ${this.stats.routeTakeoffRockets ?? 0} rocket${this.stats.routeTakeoffRockets === 1 ? '' : 's'} (at most ${f.stats.maxError.toFixed(2)} off it, slowed ${f.stats.taps} ticks, ${Math.hypot(b.vel.x, b.vel.y, b.vel.z).toFixed(2)} a tick${b.boostTicks > 0 ? ', a rocket still burning' : ''}): the touchdown's flier has it from here`);
+      this.phase = 'entry';
+      return this.entry(i, ctl);
+    }
+    const open = !hop && b.gliding && out.at >= guide.open && obstacle !== undefined && takeoffSky(b.pos, this.target, this.o.cruiseY, 0, (x, y, z) => obstacle(x, y, z)).ok;
     // (Track F9d: a drawn line may be longer than any recorded one: its own ticks and half as many again)
     const limit = Math.max(ROUTE_TAKEOFF_MAX_TICKS, 60 + 1.5 * (guide.line.ticks[guide.line.ticks.length - 1] ?? 0));
     if (open || out.status === 'done' || out.status === 'lost' || ticks > limit) {
-      const ok = open || out.status === 'done';
+      // (a hop's line ends on the ground: its end reached by the follower is a body that never came to the flier's place)
+      const ok = open || (out.status === 'done' && !hop);
       this.stats.routeTakeoffEnd = ok ? 'out' : out.status === 'lost' ? 'off the line' : 'out of time';
       this.follower = undefined;
       const flown = `${out.at.toFixed(0)} of ${guideLength(guide.line).toFixed(0)} blocks along it, at most ${f.stats.maxError.toFixed(2)} off it, steered ${f.stats.steered} ticks${f.stats.blocked ? `, ${f.stats.blocked} ticks with no clear look` : ''}`;
@@ -2407,7 +2449,7 @@ export class FlightBrain {
       this.flier = new EntryFlier({ grid: o.grid, line: en.line, at: j.at, note: (m) => this.o.note?.(m) });
       this.flier.confirmed = !en.unconfirmed || this.entryOk === true;
       this.stats.entry = { name: en.line.guide.path, joins: (this.stats.entry?.joins ?? 0) + 1, misses: this.entryMisses };
-      this.o.note?.(`learned entry: onto the line of ${en.line.guide.path} ${j.at < en.line.from ? `${(en.line.from - j.at).toFixed(0)} blocks before its hand-over window (the lead-in)` : `${(j.at - en.line.from).toFixed(0)} blocks into its hand-over window`}, ${(en.line.open - j.at).toFixed(0)} before its roof (${Math.abs(j.side).toFixed(1)} beside the line, ${Math.abs(j.up).toFixed(1)} ${j.up >= 0 ? 'over' : 'under'} it, ${j.speed.toFixed(2)} a tick, the heading ${j.heading.toFixed(0)} degrees off its own)${this.flier.confirmed ? '' : '; the proof waits for the live world'}`);
+      this.o.note?.(`${entrySaid(en.line.guide)}: onto the line of ${en.line.guide.path} ${j.at < en.line.from ? `${(en.line.from - j.at).toFixed(0)} blocks before its hand-over window (the lead-in)` : `${(j.at - en.line.from).toFixed(0)} blocks into its hand-over window`}, ${(en.line.open - j.at).toFixed(0)} before its roof (${Math.abs(j.side).toFixed(1)} beside the line, ${Math.abs(j.up).toFixed(1)} ${j.up >= 0 ? 'over' : 'under'} it, ${j.speed.toFixed(2)} a tick, the heading ${j.heading.toFixed(0)} degrees off its own)${this.flier.confirmed ? '' : '; the proof waits for the live world'}`);
     }
     const f = this.flier;
     const out = f.tick({ pos: b.pos, vel: b.vel, gliding: b.gliding, onGround: b.onGround, boostTicks: b.boostTicks, rockets: 0 }, { yaw: i.yaw }, i.tick);
@@ -2421,7 +2463,7 @@ export class FlightBrain {
     if (out.status === 'lost' || late) {
       const why = late ? `${f.lineTicks + f.keepTicks} ticks after the commit and not standing` : (out.why ?? 'lost');
       Object.assign(st, { end: 'lost', why, maxError: f.follower.stats.maxError, taps: f.follower.stats.taps });
-      this.o.note?.(`learned entry: the line ${en.line.guide.path} lost ${out.at.toFixed(0)} of ${guideLength(en.line.guide).toFixed(0)} blocks along it (${why}; at most ${f.follower.stats.maxError.toFixed(2)} off it): no glide without the line under a roof, landing`);
+      this.o.note?.(`${entrySaid(en.line.guide)}: the line ${en.line.guide.path} lost ${out.at.toFixed(0)} of ${guideLength(en.line.guide).toFixed(0)} blocks along it (${why}; at most ${f.follower.stats.maxError.toFixed(2)} off it): no glide without the line under a roof, landing`);
       this.flier = undefined;
       this.landNow('roof', b);
       return this.landing() ? this.approach(i, ctl, this.aim) : { ...ctl, glide: false };
@@ -2526,7 +2568,7 @@ export class FlightBrain {
       if (best.laps === 0 && along < 0 && side < ENTRY_JOIN.side && entryJoin(en.line, b).heading <= ENTRY_HELIX_ALONG) return false;
       this.helix = { centre: best.centre, dir: best.dir, passY, laps: best.laps, along: Infinity, off: false, since: this.stats.ticks };
       this.stats.descents.push(`helix r${ENTRY_HELIX_RADIUS} beside the learned entry's lead-in from ${Math.round(b.pos.y - p0.y)} over it`);
-      this.o.note?.(`learned entry: ${Math.round(b.pos.y - p0.y)} over the lead-in of ${g.path} where the flier takes at most ${Math.round(allowed)}: down in a circle of ${ENTRY_HELIX_RADIUS} beside its start, ${best.laps} lap${best.laps === 1 ? '' : 's'} and the rest of one, to pass the start ${(ENTRY_HELIX_UNTIL + best.low).toFixed(0)} over it along the line (the ground under the last lap at least ${(passY + best.low - best.floor).toFixed(0)} under the body)`);
+      this.o.note?.(`${entrySaid(g)}: ${Math.round(b.pos.y - p0.y)} over the lead-in of ${g.path} where the flier takes at most ${Math.round(allowed)}: down in a circle of ${ENTRY_HELIX_RADIUS} beside its start, ${best.laps} lap${best.laps === 1 ? '' : 's'} and the rest of one, to pass the start ${(ENTRY_HELIX_UNTIL + best.low).toFixed(0)} over it along the line (the ground under the last lap at least ${(passY + best.low - best.floor).toFixed(0)} under the body)`);
     }
     const hx = this.helix;
     const over = b.pos.y - hx.passY;
@@ -2549,7 +2591,7 @@ export class FlightBrain {
       const comes = ENTRY_HELIX_UNTIL + low;
       return late ? `${ENTRY_HELIX_TICKS} ticks in the circle beside its lead-in and never handed over` : `the circle beside its lead-in cannot come to the start${passed ? ' again' : ''} high enough: ${Math.abs(comes).toFixed(1)} ${comes >= 0 ? 'over' : 'under'} it at the flattest, ${(-low).toFixed(1)} under where it is to pass (${(b.pos.y - p0.y).toFixed(1)} over the start now${passed ? `, which it has just passed with no hand-over, ${this.joinSaid(en.line, b)}, and a lap costs more than that` : ': it sinks faster than planned'})`;
     }
-    if (passed) this.o.note?.(`learned entry: the start of ${g.path} passed ${(b.pos.y - p0.y).toFixed(1)} over it with no hand-over (${this.joinSaid(en.line, b)}): one more lap of the circle, to pass it ${(ENTRY_HELIX_UNTIL + low).toFixed(0)} over`);
+    if (passed) this.o.note?.(`${entrySaid(g)}: the start of ${g.path} passed ${(b.pos.y - p0.y).toFixed(1)} over it with no hand-over (${this.joinSaid(en.line, b)}): one more lap of the circle, to pass it ${(ENTRY_HELIX_UNTIL + low).toFixed(0)} over`);
     ctl.glide = true;
     ctl.yaw = onLine(hx.laps, hx.off) ? turnTowards(i.yaw, yawTo(p0, p1), 15) : w.onto ? turnTowards(i.yaw, yawTo(b.pos, w.onto), 15) : circleYaw(i.yaw, b.pos, hx.centre, ENTRY_HELIX_RADIUS, hx.dir);
     // the pitch for the sink still needed (the height over the pass along the blocks left), between what pitch 0 and
@@ -2614,7 +2656,7 @@ export class FlightBrain {
     const roofTicks = f.roofAt !== undefined ? f.ticks - f.roofAt : undefined;
     Object.assign(st, { end: f.committed ? 'landed' : 'lost', ticks, ...(roofTicks !== undefined ? { roofTicks } : {}), maxError: f.follower.stats.maxError, taps: f.follower.stats.taps });
     const g = en.goal;
-    this.o.note?.(`learned entry: standing ${Math.hypot(b.pos.x - g.x, b.pos.z - g.z).toFixed(1)} from the goal${Math.abs(b.pos.y - g.top) > 0.01 ? ` (${Math.abs(b.pos.y - g.top).toFixed(1)} ${b.pos.y > g.top ? 'over' : 'under'} it)` : ''} along ${en.line.guide.path}: ${f.committed ? `${ticks} ticks after the commit${roofTicks !== undefined ? `, ${roofTicks} from the line's last open sky` : ''} (${f.keepTicks} of them the touchdown)` : 'down before the commit'}, at most ${f.follower.stats.maxError.toFixed(2)} off the line, slowed ${f.follower.stats.taps} ticks`);
+    this.o.note?.(`${entrySaid(en.line.guide)}: standing ${Math.hypot(b.pos.x - g.x, b.pos.z - g.z).toFixed(1)} from the goal${Math.abs(b.pos.y - g.top) > 0.01 ? ` (${Math.abs(b.pos.y - g.top).toFixed(1)} ${b.pos.y > g.top ? 'over' : 'under'} it)` : ''} along ${en.line.guide.path}: ${f.committed ? `${ticks} ticks after the commit${roofTicks !== undefined ? `, ${roofTicks} from the line's last open sky` : ''} (${f.keepTicks} of them the touchdown)` : 'down before the commit'}, at most ${f.follower.stats.maxError.toFixed(2)} off the line, slowed ${f.follower.stats.taps} ticks`);
   }
 
   /**
@@ -2629,7 +2671,7 @@ export class FlightBrain {
     this.entryMisses++;
     if (this.stats.entry) this.stats.entry.misses = this.entryMisses;
     else this.stats.entry = { name: en.line.guide.path, joins: 0, misses: this.entryMisses };
-    const line = `the learned entry ${en.line.guide.path} missed (${why}) at ${hdist(b.pos, this.target).toFixed(0)} blocks from the window's end, ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} blocks a tick`;
+    const line = `the ${entrySaid(en.line.guide)} ${en.line.guide.path} missed (${why}) at ${hdist(b.pos, this.target).toFixed(0)} blocks from the window's end, ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} blocks a tick`;
     this.stats.goAroundReasons.push(line);
     if (this.entryMisses < this.o.entryTries && this.stats.goArounds < this.o.goArounds && i.rockets > 0) {
       this.o.note?.(`go-around ${this.stats.goArounds + 1}: ${line}; out along its line and onto the lead-in again`);

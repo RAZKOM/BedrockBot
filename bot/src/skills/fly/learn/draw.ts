@@ -39,6 +39,8 @@ export const DRAW_RADIUS = 128;
 export const DRAW_FLOOD_MAX = 80_000;
 /** The first steps from the start need no room round them (the body stands in its cell and jumps); after them a cell needs DRAW_ROOM cells free each side, two high. */
 export const DRAW_THIN = 3;
+/** Track F9e: a way between two places under one roof passes a cell under the sky only where a roof lies within this many cells of it (`floodTo`). */
+export const DRAW_SKY_NEAR = 8;
 export const DRAW_ROOM = 1;
 /** A step into a cell with a solid within one cell of it (the floor, a wall, the roof) costs this much more a block, one with a solid within two this much. */
 export const DRAW_NEAR_COST = 2.5;
@@ -56,6 +58,9 @@ export const DRAW_SAMPLE = 0.4;
 /** A corner is rounded with this radius where the air allows (a rocket turns a body 90 degrees within 4 blocks, a glide within 6 to 15), down to DRAW_ROUND_MIN of tangent. */
 export const DRAW_ROUND = 8;
 export const DRAW_ROUND_MIN = 0.75;
+/** Track F9e: a corner whose slope falls by this much (radians: 5 degrees) is a top, rounded with this radius where the air allows: nothing but gravity bends a glide downwards (0.03 to 0.05 a tick a tick: at a block a tick a curve of 20 to 30 blocks, at a rocket's speed of 50 and more). */
+export const DRAW_OVER_TURN = (5 * Math.PI) / 180;
+export const DRAW_ROUND_OVER = 40;
 /** The body's first point on the line lies this far over its feet (the jump rises 1.25). */
 export const DRAW_LIFT = 1;
 /** The start needs this many cells of air over the feet for the jump to take a glide (under two the server refuses it: Track F0). */
@@ -96,8 +101,6 @@ export interface DrawnLine {
   rockets: number;
 }
 
-const key = (x: number, y: number, z: number): string => `${x},${y},${z}`;
-
 /** The cells of the box (2r + 1) cubed round a cell that are solid: none. */
 function free(grid: RouteGrid, x: number, y: number, z: number, r: number): boolean {
   for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) if (grid.solid(x + dx, y + dy, z + dz)) return false;
@@ -112,6 +115,52 @@ function free(grid: RouteGrid, x: number, y: number, z: number, r: number): bool
  * other, the cheapest first.
  */
 export function floodOut(grid: RouteGrid, from: Vec3, top: number, o: { radius?: number; max?: number; apart?: number; exits?: number } = {}): { ways: DrawnWay[]; cells: number } {
+  return flood(grid, from, { ...o, top });
+}
+
+/**
+ * Track F9e: the cheapest way from the body's cell through the air to another cell under the same roof (`to`: a feet cell,
+ * the touchdown of a flight that never leaves the cave), by the same steps and costs as `floodOut`. The search is aimed
+ * (the cost so far and the straight distance still to go). A cell under the sky (up to `top`) is passed where a roof lies
+ * within DRAW_SKY_NEAR cells of it on one of eight headings at its height (a hole in the roof over the way, a pit, the
+ * stretch before a mouth: no end of the way), and is no way on farther out than that: the search stays the cave's size
+ * and never floods the open air. The last `thin` cells before `to` (DRAW_THIN) need no room round them, as the first (the
+ * body comes down into its cell there). Undefined way: none within reach.
+ */
+export function floodTo(grid: RouteGrid, from: Vec3, to: { x: number; y: number; z: number }, o: { radius?: number; max?: number; thin?: number; top?: number } = {}): { way: DrawnWay | undefined; cells: number } {
+  const f = flood(grid, from, { ...o, to });
+  return { way: f.ways[0], cells: f.cells };
+}
+
+interface FloodOptions {
+  radius?: number;
+  max?: number;
+  apart?: number;
+  exits?: number;
+  top?: number;
+  to?: { x: number; y: number; z: number };
+  thin?: number;
+}
+
+function flood(grid: RouteGrid, from: Vec3, o: FloodOptions): { ways: DrawnWay[]; cells: number } {
+  const steps = floodSteps(grid, from, o);
+  for (;;) {
+    const r = steps.next();
+    if (r.done) return r.value;
+  }
+}
+
+/** Track F9e: `floodOut` in slices: it yields every DRAW_FLOOD_SLICE cells, so a flood that runs while the bot flies (a way in is drawn in the air) gives the input loop its turn between them. */
+export function floodOutSteps(grid: RouteGrid, from: Vec3, top: number, o: { radius?: number; max?: number; apart?: number; exits?: number } = {}): Generator<undefined, { ways: DrawnWay[]; cells: number }, undefined> {
+  return floodSteps(grid, from, { ...o, top });
+}
+
+/** The cells a flood looks at between two pauses (`floodOutSteps`): a few thousandths of a second of work. */
+export const DRAW_FLOOD_SLICE = 1500;
+
+function* floodSteps(grid: RouteGrid, from: Vec3, o: FloodOptions): Generator<undefined, { ways: DrawnWay[]; cells: number }, undefined> {
+  const top = o.top ?? 319;
+  const to = o.to;
   const radius = o.radius ?? DRAW_RADIUS;
   const max = o.max ?? DRAW_FLOOD_MAX;
   const apart = o.apart ?? DRAW_APART;
@@ -119,10 +168,12 @@ export function floodOut(grid: RouteGrid, from: Vec3, top: number, o: { radius?:
   const sx = Math.floor(from.x);
   const sy = Math.floor(from.y + 1e-6);
   const sz = Math.floor(from.z);
+  // (Track F9e: a cell's key is a number, within 2048 blocks of the start; a text key a cell was most of the flood's time)
+  const key = (x: number, y: number, z: number): number => ((x - sx + 2048) * 4096 + (z - sz + 2048)) * 1024 + (y - sy + 512);
   // the highest solid of a column up to `top` (one scan a column): a cell over it is under the sky
-  const roofs = new Map<string, number>();
+  const roofs = new Map<number, number>();
   const roofOf = (x: number, z: number): number => {
-    const k = `${x},${z}`;
+    const k = (x - sx + 2048) * 4096 + (z - sz + 2048);
     let y = roofs.get(k);
     if (y === undefined) {
       y = Math.floor(top);
@@ -135,22 +186,35 @@ export function floodOut(grid: RouteGrid, from: Vec3, top: number, o: { radius?:
     for (let dx = -DRAW_ROOM; dx <= DRAW_ROOM; dx++) for (let dz = -DRAW_ROOM; dz <= DRAW_ROOM; dz++) for (let dy = 0; dy <= 1; dy++) if (grid.solid(x + dx, y + dy, z + dz)) return false;
     return true;
   };
+  // (a search for a cell: a cell under the sky with no roof within DRAW_SKY_NEAR of it on any of eight headings is the open
+  // air, not a hole over the way)
+  const outdoors = (x: number, y: number, z: number): boolean => {
+    if (y <= roofOf(x, z)) return false;
+    // (a roof: air at this height with a solid over it; a hillside beside the cell is none)
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]] as const) for (let s = 1; s <= DRAW_SKY_NEAR; s++) if (y < roofOf(x + dx * s, z + dz * s) && !grid.solid(x + dx * s, y, z + dz * s)) return false;
+    return true;
+  };
   // the cells: their place, cost so far, steps, parent; a binary heap of (cost, cell)
   const xs: number[] = [sx];
   const ys: number[] = [sy];
   const zs: number[] = [sz];
   const cost: number[] = [0];
+  // (the heap's order: the cost so far, and in a search for a cell the straight distance still to go)
+  const left = (x: number, y: number, z: number): number => (to ? Math.hypot(to.x - x, to.y - y, to.z - z) : 0);
+  const prio: number[] = [left(sx, sy, sz)];
   const steps: number[] = [0];
   const parent: number[] = [-1];
   const done: boolean[] = [false];
-  const index = new Map<string, number>([[key(sx, sy, sz), 0]]);
+  // (what a step into the cell costs more a block, looked at once a cell)
+  const dears: number[] = [0];
+  const index = new Map<number, number>([[key(sx, sy, sz), 0]]);
   const heap: number[] = [0];
   const push = (i: number): void => {
     heap.push(i);
     let k = heap.length - 1;
     while (k > 0) {
       const p = (k - 1) >> 1;
-      if (cost[heap[p]!]! <= cost[heap[k]!]!) break;
+      if (prio[heap[p]!]! <= prio[heap[k]!]!) break;
       [heap[p], heap[k]] = [heap[k]!, heap[p]!];
       k = p;
     }
@@ -165,8 +229,8 @@ export function floodOut(grid: RouteGrid, from: Vec3, top: number, o: { radius?:
         const l = 2 * k + 1;
         const r = l + 1;
         let m = k;
-        if (l < heap.length && cost[heap[l]!]! < cost[heap[m]!]!) m = l;
-        if (r < heap.length && cost[heap[r]!]! < cost[heap[m]!]!) m = r;
+        if (l < heap.length && prio[heap[l]!]! < prio[heap[m]!]!) m = l;
+        if (r < heap.length && prio[heap[r]!]! < prio[heap[m]!]!) m = r;
         if (m === k) break;
         [heap[m], heap[k]] = [heap[k]!, heap[m]!];
         k = m;
@@ -175,14 +239,23 @@ export function floodOut(grid: RouteGrid, from: Vec3, top: number, o: { radius?:
     return head;
   };
   const ways: DrawnWay[] = [];
+  let pops = 0;
   while (heap.length && xs.length < max && ways.length < exits) {
+    if (++pops % DRAW_FLOOD_SLICE === 0) yield undefined;
     const i = pop();
     if (done[i]) continue;
     done[i] = true;
     const x = xs[i]!;
     const y = ys[i]!;
     const z = zs[i]!;
-    if (i > 0 && y > roofOf(x, z)) {
+    if (to) {
+      if (x === to.x && y === to.y && z === to.z) {
+        const way: DrawnWay['way'] = [];
+        for (let k = i; k >= 0; k = parent[k]!) way.push({ x: xs[k]!, y: ys[k]!, z: zs[k]! });
+        ways.push({ x, y, z, steps: steps[i]!, cost: cost[i]!, way: way.reverse() });
+        break;
+      }
+    } else if (i > 0 && y > roofOf(x, z)) {
       if (ways.every((w) => Math.hypot(w.x - x, w.y - y, w.z - z) >= apart)) {
         const way: DrawnWay['way'] = [];
         for (let k = i; k >= 0; k = parent[k]!) way.push({ x: xs[k]!, y: ys[k]!, z: zs[k]! });
@@ -207,17 +280,20 @@ export function floodOut(grid: RouteGrid, from: Vec3, top: number, o: { radius?:
             if (dx !== 0 && grid.solid(nx, y, z)) continue;
             if (dz !== 0 && grid.solid(x, y, nz)) continue;
             if (dy !== 0 && grid.solid(x, ny, z)) continue;
-            if (steps[i]! >= DRAW_THIN && !room(nx, ny, nz)) continue;
+            if (steps[i]! >= DRAW_THIN && !(to && Math.max(Math.abs(nx - to.x), Math.abs(ny - to.y), Math.abs(nz - to.z)) <= (o.thin ?? DRAW_THIN)) && !room(nx, ny, nz)) continue;
+            if (to && outdoors(nx, ny, nz)) continue;
           }
           const len = Math.hypot(dx, dy, dz);
-          const dear = free(grid, nx, ny, nz, 1) ? (free(grid, nx, ny, nz, 2) ? 0 : DRAW_CLOSE_COST) : DRAW_NEAR_COST;
+          const dear = seen !== undefined ? dears[seen]! : free(grid, nx, ny, nz, 1) ? (free(grid, nx, ny, nz, 2) ? 0 : DRAW_CLOSE_COST) : DRAW_NEAR_COST;
           const c = cost[i]! + len * (1 + dear);
           if (seen === undefined) {
             const n = xs.length;
             xs.push(nx);
             ys.push(ny);
             zs.push(nz);
+            dears.push(dear);
             cost.push(c);
+            prio.push(c + left(nx, ny, nz));
             steps.push(steps[i]! + 1);
             parent.push(i);
             done.push(false);
@@ -225,6 +301,7 @@ export function floodOut(grid: RouteGrid, from: Vec3, top: number, o: { radius?:
             push(n);
           } else if (c < cost[seen]! - 1e-9) {
             cost[seen] = c;
+            prio[seen] = c + left(nx, ny, nz);
             steps[seen] = steps[i]! + 1;
             parent[seen] = i;
             push(seen);
@@ -305,7 +382,10 @@ export function round(grid: RouteGrid, pts: readonly Vec3[], berth: number): Vec
     const ua = { x: (v.x - a.x) / la, y: (v.y - a.y) / la, z: (v.z - a.z) / la };
     const ub = { x: (b.x - v.x) / lb, y: (b.y - v.y) / lb, z: (b.z - v.z) / lb };
     const turn = Math.acos(Math.max(-1, Math.min(1, ua.x * ub.x + ua.y * ub.y + ua.z * ub.z)));
-    let d = Math.min(DRAW_ROUND * Math.tan(turn / 2), 0.45 * la, 0.45 * lb);
+    // (Track F9e: a corner the line goes over, its slope falling by DRAW_OVER_TURN or more, is rounded DRAW_ROUND_OVER wide
+    // where the air allows: gravity alone bends a glide downwards, so a body follows a top only on a wide curve)
+    const over = Math.asin(Math.max(-1, Math.min(1, ua.y))) - Math.asin(Math.max(-1, Math.min(1, ub.y))) >= DRAW_OVER_TURN;
+    let d = Math.min((over ? DRAW_ROUND_OVER : DRAW_ROUND) * Math.tan(turn / 2), 0.45 * la, 0.45 * lb);
     let curve: Vec3[] | undefined;
     while (d >= DRAW_ROUND_MIN) {
       const p0 = { x: v.x - ua.x * d, y: v.y - ua.y * d, z: v.z - ua.z * d };
@@ -352,6 +432,69 @@ export function resample(pts: readonly Vec3[]): Vec3[] {
   return out;
 }
 
+/**
+ * Track F9e: the shortest line through a tube of heights: at `xs[k]` (blocks along the way, rising) the height must lie
+ * in [lo[k], hi[k]]; it begins at `y0` (x = 0) and ends at `yEnd` (brought into the last band). The line is straight
+ * wherever the bands let it be and bends only where it touches one (the funnel of a path in a corridor, in one
+ * dimension): at a floor it bends down over it, at a roof up under it.
+ */
+export function taut(xs: readonly number[], lo: readonly number[], hi: readonly number[], y0: number, yEnd: number): number[] {
+  const n = xs.length;
+  const out = new Array<number>(n).fill(y0);
+  if (!n) return out;
+  const lows = [...lo];
+  const highs = [...hi];
+  const end = Math.max(lows[n - 1]!, Math.min(highs[n - 1]!, yEnd));
+  lows[n - 1] = end;
+  highs[n - 1] = end;
+  let apex = -1;
+  let ax = 0;
+  let ay = y0;
+  const fill = (to: number, y: number): void => {
+    const dx = xs[to]! - ax || 1;
+    for (let k = apex + 1; k <= to; k++) out[k] = ay + ((y - ay) * (xs[k]! - ax)) / dx;
+    apex = to;
+    ax = xs[to]!;
+    ay = y;
+  };
+  while (apex < n - 1) {
+    let sLo = -Infinity;
+    let sHi = Infinity;
+    let jLo = -1;
+    let jHi = -1;
+    let bend = -1;
+    let at = 0;
+    for (let k = apex + 1; k < n; k++) {
+      const dx = Math.max(1e-6, xs[k]! - ax);
+      const a = (lows[k]! - ay) / dx;
+      const b = (highs[k]! - ay) / dx;
+      // the band here lies over everything the roofs before it allow: the line bends up under the roof that binds; under
+      // everything the floors allow: it bends down over that floor
+      if (a > sHi + 1e-12 && jHi >= 0) {
+        bend = jHi;
+        at = highs[jHi]!;
+        break;
+      }
+      if (b < sLo - 1e-12 && jLo >= 0) {
+        bend = jLo;
+        at = lows[jLo]!;
+        break;
+      }
+      if (a > sLo) {
+        sLo = a;
+        jLo = k;
+      }
+      if (b < sHi) {
+        sHi = b;
+        jHi = k;
+      }
+    }
+    if (bend >= 0) fill(bend, at);
+    else fill(n - 1, end);
+  }
+  return out;
+}
+
 /** A way's cells are looked at this far down and up for their passage's floor and roof (cells), the heights between tried every DRAW_BAND_STEP. */
 export const DRAW_BAND = 24;
 export const DRAW_BAND_STEP = 0.25;
@@ -368,7 +511,7 @@ export const DRAW_SLOPE = 0.84;
  * the slope when there are several; a place with no such height keeps the follower's berth, or its cell's own height). Then no steeper from point to point than DRAW_SLOPE where those heights allow. The points for
  * `pull`, the way's first cell left out (the body's own).
  */
-export function rise(grid: RouteGrid, way: DrawnWay, y0: number, berth: number, beside = true): Vec3[] {
+export function rise(grid: RouteGrid, way: DrawnWay, y0: number, berth: number, beside = true, o: { end?: number } = {}): Vec3[] {
   const cells = way.way;
   const along: number[] = [0];
   for (let k = 1; k < cells.length; k++) along.push(along[k - 1]! + Math.hypot(cells[k]!.x - cells[k - 1]!.x, cells[k]!.y - cells[k - 1]!.y, cells[k]!.z - cells[k - 1]!.z));
@@ -419,8 +562,13 @@ export function rise(grid: RouteGrid, way: DrawnWay, y0: number, berth: number, 
     hi.push(band ? band[1] : own);
   }
   const n = lo.length;
-  const ys: number[] = [];
-  for (let k = 0; k < n; k++) ys.push(Math.max(lo[k]!, Math.min(hi[k]!, y0 + ((y1 - y0) * along[k + 1]!) / total)));
+  // Track F9e: the heights are the TAUT line through those bands from the takeoff's height to the exit's (`taut`). Where
+  // nothing is in its way that is the one slope as before; where the passage goes over a sill or under a low roof the
+  // line bends there and nowhere else, so it climbs to a sill and comes down from it on two slopes instead of hugging
+  // the floor up one side and down the other (a body at a rocket's speed cannot follow a line that falls away behind a
+  // top: the deep cave's lines were lost there at a short burn). An exit under the start is ended at its own height
+  const last = cells[cells.length - 1]!.y + 0.2;
+  const ys = taut(along.slice(1), lo, hi, y0, o.end ?? (last >= y0 ? y1 : last));
   // no steeper than DRAW_SLOPE from point to point, forwards and backwards; the band has the last word
   const fit = (k: number, prev: number, d: number): void => {
     ys[k] = Math.max(lo[k]!, Math.min(hi[k]!, Math.max(prev - DRAW_SLOPE * d, Math.min(prev + DRAW_SLOPE * d, ys[k]!))));
@@ -485,11 +633,15 @@ const yawOf = (dx: number, dz: number): number => (Math.atan2(-dx, dz) * 180) / 
  * roof on, or (that one blocked within DRAW_OUT_MIN) the heading of twelve with the longest free run, rising DRAW_OUT_RISE
  * a block. Undefined with the reason when the start has no room to jump.
  */
-export function drawLine(grid: RouteGrid, from: Vec3, way: DrawnWay, top: number, berth: number, beside = true): { points: Vec3[]; open: number } | string {
+export function drawLine(grid: RouteGrid, from: Vec3, way: DrawnWay, top: number, berth: number, beside = true, o: { out?: number; rise?: number; min?: number; up?: boolean; headroom?: number; over?: number; lead?: number } = {}): { points: Vec3[]; open: number } | string {
+  // (Track F9e: a way in's line goes on farther into the open and steeper than a way out's, and never straight up: `o`)
+  const outAfter = o.out ?? OUT_AFTER;
+  const outRise = o.rise ?? DRAW_OUT_RISE;
+  const outMin = o.min ?? DRAW_OUT_MIN;
   const sx = Math.floor(from.x);
   const sy = Math.floor(from.y + 1e-6);
   const sz = Math.floor(from.z);
-  for (let k = 1; k < DRAW_HEADROOM; k++) if (grid.solid(sx, sy + k, sz)) return `only ${k} of air over the start (a jump needs ${DRAW_HEADROOM} to take a glide)`;
+  for (let k = 1; k < (o.headroom ?? DRAW_HEADROOM); k++) if (grid.solid(sx, sy + k, sz)) return `only ${k} of air over the start (a jump needs ${DRAW_HEADROOM} to take a glide)`;
   const lifted = { x: from.x, y: from.y + DRAW_LIFT, z: from.z };
   // (the way's first cells are the jump's: the body is over them before it flies, and the line begins beyond them)
   const risen = rise(grid, { ...way, way: [...way.way, ...middle(grid, way, top)] }, lifted.y, berth, beside);
@@ -505,8 +657,8 @@ export function drawLine(grid: RouteGrid, from: Vec3, way: DrawnWay, top: number
     const r = (yaw * Math.PI) / 180;
     const d = { x: -Math.sin(r), z: Math.cos(r) };
     let n = 0;
-    for (let s = 1; s <= OUT_AFTER; s++) {
-      const p = { x: end.x + d.x * s, y: end.y + s * DRAW_OUT_RISE, z: end.z + d.z * s };
+    for (let s = 1; s <= outAfter; s++) {
+      const p = { x: end.x + d.x * s, y: end.y + s * outRise, z: end.z + d.z * s };
       if (boxClear(grid, p, 1).hit || !sky(p)) break;
       n = s;
     }
@@ -515,7 +667,35 @@ export function drawLine(grid: RouteGrid, from: Vec3, way: DrawnWay, top: number
   const h = Math.hypot(end.x - before.x, end.z - before.z);
   let outYaw = h > 0.5 ? yawOf(end.x - before.x, end.z - before.z) : 0;
   let outRun = h > 0.5 ? run(outYaw) : 0;
-  if (outRun < OUT_AFTER) {
+  if (o.over !== undefined) {
+    // Track F9e, a way in: of the headings with the whole run free, the one whose line lies highest over the ground under
+    // it, the lead-in to come included (the cruise comes down onto the line from its clearance over that ground: a line
+    // low over a hillside is come to too high, and a circle beside it costs seconds), counted up to `o.over`; straight
+    // on from the roof wins a tie
+    const over = (yaw: number, n: number): number => {
+      const r = (yaw * Math.PI) / 180;
+      const d = { x: -Math.sin(r), z: Math.cos(r) };
+      let least = o.over!;
+      for (let s = 2; s <= n + (o.lead ?? 0); s += 2) {
+        const p = { x: end.x + d.x * s, y: end.y + s * outRise, z: end.z + d.z * s };
+        let g = Math.floor(p.y) - 1;
+        while (g > p.y - least - 1 && !grid.solid(Math.floor(p.x), g, Math.floor(p.z))) g--;
+        least = Math.min(least, p.y - (g + 1));
+      }
+      return least;
+    };
+    let best = outRun >= outAfter ? over(outYaw, outRun) + 0.01 : -1;
+    for (let k = 0; k < 12; k++) {
+      const n = run(k * 30);
+      if (n < outAfter && n <= outRun) continue;
+      const c = n >= outAfter ? over(k * 30, n) : -1;
+      if (c > best || (best < 0 && n > outRun)) {
+        best = c;
+        outRun = n;
+        outYaw = k * 30;
+      }
+    }
+  } else if (outRun < outAfter) {
     for (let k = 0; k < 12; k++) {
       const n = run(k * 30);
       if (n > outRun) {
@@ -529,16 +709,16 @@ export function drawLine(grid: RouteGrid, from: Vec3, way: DrawnWay, top: number
   // owner: "even if the way out of the cave is straight up"). The line then goes on up the open column when that is
   // freer than any heading; the climb after it goes on straight up until a heading clears (brain.ts climbUp)
   let up = 0;
-  if (outRun < OUT_AFTER) {
-    for (let s = 1; s <= OUT_AFTER; s++) {
+  if (outRun < outAfter && o.up !== false) {
+    for (let s = 1; s <= outAfter; s++) {
       if (boxClear(grid, { x: end.x, y: end.y + s, z: end.z }, DRAW_BERTHS[DRAW_BERTHS.length - 1]!).hit) break;
       up = s;
     }
   }
-  if (up > outRun && up >= DRAW_OUT_MIN) tail.push({ x: end.x, y: end.y + up, z: end.z });
-  else if (outRun >= DRAW_OUT_MIN) {
+  if (up > outRun && up >= outMin) tail.push({ x: end.x, y: end.y + up, z: end.z });
+  else if (outRun >= outMin) {
     const r = (outYaw * Math.PI) / 180;
-    tail.push({ x: end.x - Math.sin(r) * outRun, y: end.y + outRun * DRAW_OUT_RISE, z: end.z + Math.cos(r) * outRun });
+    tail.push({ x: end.x - Math.sin(r) * outRun, y: end.y + outRun * outRise, z: end.z + Math.cos(r) * outRun });
   }
   const line = resample(round(grid, [...pulled, ...tail], Math.min(berth, DRAW_BERTHS[DRAW_BERTHS.length - 1]!)));
   const points = [{ ...from }, ...line];
@@ -552,8 +732,65 @@ export function drawLine(grid: RouteGrid, from: Vec3, way: DrawnWay, top: number
       break;
     }
   }
-  if (open <= 0) return `the line has no ${OPEN_POINTS} blocks of open sky at its end (the exit's air is blocked within ${DRAW_OUT_MIN} blocks on every heading and straight up)`;
+  if (open <= 0) return `the line has no ${OPEN_POINTS} blocks of open sky at its end (the exit's air is blocked within ${outMin} blocks on every heading${o.up === false ? '' : ' and straight up'})`;
   return { points, open: open * GUIDE_STEP };
+}
+
+/**
+ * Track F9e, a speed for every point. The bend at a point is taken over DRAW_CAP_WINDOW blocks either side of it. Over a
+ * top (the slope falling) nothing but gravity bends a glide's path, about DRAW_CAP_OVER of a block a tick a tick, so a
+ * top of radius R is followed no faster than the root of DRAW_CAP_OVER times R; round a corner a glide with no rocket
+ * turns on a radius of about DRAW_CAP_TURN times its speed (Track F0's envelope: 14.5 blocks from 1.5 a tick with the
+ * look 45 degrees off, 6 with it 90 off; the passage is wider than the line and the follower cuts the corner, so the
+ * low end). Never under DRAW_CAP_MIN (a glide slower than that sinks more than it flies) and never over DRAW_CAP_MAX (a
+ * rocket's own speed and a little: a dive is not flown faster than a burn). Before a slow place the speed comes down
+ * DRAW_CAP_SLOW a block (a tick of looking back takes a fifth, every other tick).
+ */
+export const DRAW_CAP_WINDOW = 4;
+export const DRAW_CAP_OVER = 0.045;
+export const DRAW_CAP_TURN = 5;
+export const DRAW_CAP_MIN = 0.8;
+export const DRAW_CAP_MAX = 1.7;
+export const DRAW_CAP_SLOW = 0.07;
+/** Track F9e: a line falling steeper than this (radians: 12 degrees) is flown no faster than DRAW_CAP_DIVE. */
+export const DRAW_CAP_DIVE_SLOPE = (12 * Math.PI) / 180;
+export const DRAW_CAP_DIVE = 1.05;
+
+/** Track F9e: the speed for every point of a line (blocks a tick; see DRAW_CAP_WINDOW). */
+export function lineSpeeds(points: readonly Vec3[]): number[] {
+  const n = points.length;
+  const cap = new Array<number>(n).fill(DRAW_CAP_MAX);
+  const w = DRAW_CAP_WINDOW;
+  for (let i = w; i < n - w; i++) {
+    const a = points[i - w]!;
+    const p = points[i]!;
+    const b = points[i + w]!;
+    const la = dist(a, p);
+    const lb = dist(p, b);
+    if (la < 1e-6 || lb < 1e-6) continue;
+    const span = (la + lb) / 2;
+    const pa = Math.asin(Math.max(-1, Math.min(1, (p.y - a.y) / la)));
+    const pb = Math.asin(Math.max(-1, Math.min(1, (b.y - p.y) / lb)));
+    const over = (pa - pb) / span;
+    // (a piece straight up or down has no heading: no corner there)
+    const ha = Math.hypot(p.x - a.x, p.z - a.z);
+    const hb = Math.hypot(b.x - p.x, b.z - p.z);
+    let turn = 0;
+    if (ha > 0.2 * la && hb > 0.2 * lb) {
+      const d = Math.abs(Math.atan2((p.x - a.x) * (b.z - p.z) - (p.z - a.z) * (b.x - p.x), (p.x - a.x) * (b.x - p.x) + (p.z - a.z) * (b.z - p.z)));
+      turn = (d * Math.cos((pa + pb) / 2)) / span;
+    }
+    let c: number = DRAW_CAP_MAX;
+    // (a line that falls is followed by a glide whose own fall is the line's: the fall a tick depends on the look alone,
+    // 0.34 at 30 degrees down and about 0.5 at 40, so on a slope of 20 to 35 degrees that is a body at about a block a
+    // tick; a faster one flies flatter than the line whatever it looks at, and leaves it upwards)
+    if ((pa + pb) / 2 < -DRAW_CAP_DIVE_SLOPE) c = Math.min(c, DRAW_CAP_DIVE);
+    if (over > 1e-3) c = Math.min(c, Math.sqrt(DRAW_CAP_OVER / over));
+    if (turn > 1e-3) c = Math.min(c, 1 / (DRAW_CAP_TURN * turn));
+    cap[i] = Math.max(DRAW_CAP_MIN, c);
+  }
+  for (let i = n - 2; i >= 0; i--) cap[i] = Math.min(cap[i]!, cap[i + 1]! + DRAW_CAP_SLOW * dist(points[i]!, points[i + 1]!));
+  return cap;
 }
 
 /** No solid in the 3 x 3 columns over a body up to `top` (plan.ts takeoffSky's first test: open sky over the body). */
@@ -646,11 +883,42 @@ export function rollLine(grid: RouteGrid, guide: Guide, open: number, o: { burn?
  * there is nothing at all (no flood to the sky within reach).
  */
 export function drawExits(grid: RouteGrid, from: Vec3, top: number, o: { radius?: number; max?: number; exits?: number; apart?: number } = {}): { lines: DrawnLine[]; cells: number; ways: number; tried: string[]; why?: string } {
-  // (one draw asks the same cells many times over: remembered while it runs)
-  const memo = new Map<string, boolean>();
-  const g: RouteGrid = {
+  const d = drawWays(grid, from, top, o);
+  const tried = [...d.tried];
+  const lines: DrawnLine[] = [];
+  for (const c of d.drafts) {
+    const l = rollDraft(d.grid, c, top);
+    if (typeof l === 'string') tried.push(l);
+    else lines.push(l);
+  }
+  lines.sort((a, b) => a.ticks - b.ticks);
+  lines.forEach((l, i) => (l.guide = { ...l.guide, path: `drawn ${i + 1}` }));
+  return { lines, cells: d.cells, ways: d.ways, tried, ...(d.why !== undefined ? { why: d.why } : {}) };
+}
+
+/** Track F9e: a line drawn and not rolled yet: its guide with the points' own numbers for ticks, and what `DrawnLine` says of it but the roll's. */
+export interface DrawnDraft {
+  guide: Guide;
+  open: number;
+  exit: { x: number; y: number; z: number };
+  steps: number;
+  berth: number;
+  /** The log's words for it (the way's end from the start, its cells, the berth). */
+  at: string;
+}
+
+/** A grid that remembers its answers (one draw, its rolls and its proofs ask the same cells many times over), keyed by a number within 2048 blocks of `from`. */
+export function rememberedGrid(grid: RouteGrid, from: Vec3): RouteGrid {
+  const ox = Math.floor(from.x) - 2048;
+  const oz = Math.floor(from.z) - 2048;
+  const memo = new Map<number, boolean>();
+  return {
     solid: (x, y, z) => {
-      const k = key(x, y, z);
+      const dx = x - ox;
+      const dz = z - oz;
+      const dy = y + 512;
+      if (dx < 0 || dx > 4095 || dz < 0 || dz > 4095 || dy < 0 || dy > 1023) return grid.solid(x, y, z);
+      const k = (dx * 4096 + dz) * 1024 + dy;
       let s = memo.get(k);
       if (s === undefined) {
         s = grid.solid(x, y, z);
@@ -659,10 +927,20 @@ export function drawExits(grid: RouteGrid, from: Vec3, top: number, o: { radius?
       return s;
     },
   };
+}
+
+/**
+ * Track F9e: the first half of `drawExits`: the flood and the lines drawn from it, not rolled (a roll of a long line
+ * costs as much as a proof's simulation; the takeoff rolls and proves them one after another and stops at the first that
+ * clears: route/takeoff.ts). In the order they are tried: the flood's cheapest way first, of its lines the widest berth
+ * first. `grid` is the remembering grid they were drawn on, for the rolls.
+ */
+export function drawWays(grid: RouteGrid, from: Vec3, top: number, o: { radius?: number; max?: number; exits?: number; apart?: number } = {}): { drafts: DrawnDraft[]; grid: RouteGrid; cells: number; ways: number; tried: string[]; why?: string } {
+  const g = rememberedGrid(grid, from);
   const flood = floodOut(g, from, top, o);
   const tried: string[] = [];
-  if (!flood.ways.length) return { lines: [], cells: flood.cells, ways: 0, tried, why: `no way under the roof to the open sky (a flood of ${flood.cells} cells, within ${o.radius ?? DRAW_RADIUS})` };
-  const lines: DrawnLine[] = [];
+  if (!flood.ways.length) return { drafts: [], grid: g, cells: flood.cells, ways: 0, tried, why: `no way under the roof to the open sky (a flood of ${flood.cells} cells, within ${o.radius ?? DRAW_RADIUS})` };
+  const drafts: DrawnDraft[] = [];
   for (const way of flood.ways) {
     const seen: string[] = [];
     let none = false;
@@ -681,16 +959,16 @@ export function drawExits(grid: RouteGrid, from: Vec3, top: number, o: { radius?
       if (seen.includes(sig)) continue;
       seen.push(sig);
       const p1 = drawn.points[Math.min(drawn.points.length - 1, 4)]!;
-      const draft: Guide = { path: `drawn ${lines.length + 1}`, flight: 0, points: drawn.points, ticks: drawn.points.map((_p, i) => i), rockets: [{ tick: DRAW_ROCKET_TICK, at: 1 }], yaw: yawOf(p1.x - from.x, p1.z - from.z), grounded: true, landed: false, drawn: true };
-      const roll = rollLine(g, draft, drawn.open, { top });
-      if (!roll.ok) {
-        tried.push(`${at}: ${guideLength(draft).toFixed(0)} blocks drawn, no line a glide can fly (${roll.why ?? '?'})`);
-        continue;
-      }
-      lines.push({ guide: { ...draft, ticks: roll.ticks }, open: drawn.open, exit: { x: way.x, y: way.y, z: way.z }, steps: way.steps, berth, room: roll.room, ticks: roll.openTick, rockets: roll.rockets.filter((r) => r.at <= drawn.open).length });
+      const guide: Guide = { path: `drawn ${drafts.length + 1}`, flight: 0, points: drawn.points, ticks: drawn.points.map((_p, i) => i), rockets: [{ tick: DRAW_ROCKET_TICK, at: 1 }], yaw: yawOf(p1.x - from.x, p1.z - from.z), grounded: true, landed: false, drawn: true, speeds: lineSpeeds(drawn.points) };
+      drafts.push({ guide, open: drawn.open, exit: { x: way.x, y: way.y, z: way.z }, steps: way.steps, berth, at });
     }
   }
-  lines.sort((a, b) => a.ticks - b.ticks);
-  lines.forEach((l, i) => (l.guide = { ...l.guide, path: `drawn ${i + 1}` }));
-  return { lines, cells: flood.cells, ways: flood.ways.length, tried };
+  return { drafts, grid: g, cells: flood.cells, ways: flood.ways.length, tried };
+}
+
+/** Track F9e: a drawn line rolled (`rollLine` at the nominal burn): the line with the roll's ticks, or the words for why it is no line a glide can fly. */
+export function rollDraft(grid: RouteGrid, d: DrawnDraft, top: number): DrawnLine | string {
+  const roll = rollLine(grid, d.guide, d.open, { top });
+  if (!roll.ok) return `${d.at}: ${guideLength(d.guide).toFixed(0)} blocks drawn, no line a glide can fly (${roll.why ?? '?'})`;
+  return { guide: { ...d.guide, ticks: roll.ticks }, open: d.open, exit: d.exit, steps: d.steps, berth: d.berth, room: roll.room, ticks: roll.openTick, rockets: roll.rockets.filter((r) => r.at <= d.open).length };
 }

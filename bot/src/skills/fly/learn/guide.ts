@@ -37,11 +37,30 @@ export interface Guide {
   landed: boolean;
   /** Track F9d: the line was not recorded but drawn from the world (learn/draw.ts): for the log's words; it is proven and flown as a recorded one. */
   drawn?: boolean;
+  /**
+   * Track F9e: a drawn line's speed for every point (blocks a tick; learn/draw.ts lineSpeeds): the most a glide with no
+   * rocket burning may have there and still follow the line through what comes (a top the line goes over, a tight
+   * corner). The follower takes speed off a faster body (learn/follow.ts) and holds a rocket back before a slow place.
+   * A recorded line has none and is flown as before.
+   */
+  speeds?: number[];
+  /**
+   * Track F9e: the line is a hop between two places under one roof (learn/hop.ts): it ends on a touchdown, not in the open.
+   * `from` and `to` (blocks along it) are where its LAST rocket goes: a body there with none burning and slower than a
+   * rocket's speed fires one, and none is fired beyond `to` (a rocket burns up to 21 ticks, 35 blocks of flight: one fired
+   * later would still burn at the touchdown's brake).
+   */
+  hop?: { from: number; to: number };
 }
 
 /** Track F9d: a guide as the log names it: `the learned line <name>` (a recording) or `the drawn line <name>` (learn/draw.ts). */
 export function guideSaid(g: Pick<Guide, 'path' | 'drawn'>): string {
   return `the ${g.drawn ? 'drawn' : 'learned'} line ${g.path}`;
+}
+
+/** Track F9e: what the log calls a flight's end along a line: a `learned entry` (a recording's) or a `drawn entry` (learn/drawin.ts). */
+export function entrySaid(g: Pick<Guide, 'drawn'>): string {
+  return g.drawn ? 'drawn entry' : 'learned entry';
 }
 
 /** The samples without the teleport-like ones (a sample no speed explains, where the samples round it fit each other). */
