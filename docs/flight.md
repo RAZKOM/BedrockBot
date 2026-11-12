@@ -6250,10 +6250,36 @@ flown, the line says where it ends); a block only the live model has (across the
 goes round, through no cell of it); where the live model ends and the floor under the way. The flood to a cell with a
 canopy 200 by 200 beside the cave's mouth: found in under 30 000 cells.
 
+### On the Realm (2026-11-11 and 12, the live kit)
+
+Every decision's line says `rockets that burn 19 to 31 (flight duration 1) ticks`: the Realm's rockets are crafted ones.
+
+| series | result |
+|---|---|
+| `!test goto home from cave_end 3` (no recordings) | **3 of 3, 79, 79 and 76 s, damage 0** (round 1: 1 of 3 in 204 s). Runs 2 and 3: the live model held the whole way, the drawn way out flown as one line of 413 blocks to open sky (299 and 314 ticks, 5 rockets, at most 2.09 and 2.66 off it), up out of the pit and home. Run 1: 8 chunks still missing after the wait, a piece of 78 blocks proven, and not flown (below); the walk found a takeoff site |
+| `!test goto home from cave_start 3`, `flyLearned off`, a teleport before each | 3 of 3 along the drawn line, 62, 60 and 61 s (55 and 57 s in round 1): out after 47 to 55 ticks on 1 to 2 rockets, at most 2.39 off it. The wait for the live model took 3.2 s in two runs (45 and 46 of 121 chunks missing, 8 still missing at its end) |
+| `!test goto cave_end from cave_start 3`, `flyCaveHop on` | **3 of 3 under the roof, 53, 30 and 32 s, damage 0** (round 1: no hop, out and over the top, 4.3 and 6.8 damage). Two flights a trip: a piece of 298 blocks (the live model ended 267 cells along the way of 466), 2 s of standing, the rest as one hop of 250. In the 53 s run the elytra reached its wear limit after the first piece (219 blocks) and the rest was walked |
+| `!test goto cave_start from cave_end 3`, `flyCaveHop on` | **3 of 3 under the roof, 31, 34 and 33 s, damage 0** (round 1: five lost lines, 6.7 and 8 damage). Once the whole way as one hop of 545 blocks (391 ticks, 6 rockets, at most 1.71 off it); twice a piece of 117 blocks and a hop of 434 |
+| all the hops and pieces of the two series | 10 flights, every one standing 0.06 to 0.94 from its cell, at most 3.75 off its line, no line lost, no damage |
+| `!test cavestart` from home, the recordings on (5 runs) | 5 of 5 along the recorded entry with no go-around, 44 to 53 s, damage 0 |
+| `!test cavestart 3` from home, `flyLearnedEntry off`, `flyCaveEntry on` | 3 of 3 along the drawn entry, 48, 51 and 51 s, damage 0, standing 0.9 to 1.0 from the goal |
+| `!test goto home from cave_start`, the recordings on (5 runs, two of them with `flyCaveEntry on`) | 4 of 5 (58 to 63 s) along the recorded line; in one the flight landed and the walk home was refused by the walking rules with a hostile near (not the flight's). With `flyCaveEntry on` the home's room gives `no drawn entry: the landing as without it` and the flight lands as before |
+
+What the first run from cave_end showed: a chore's walk went on for the 4.5 s the decision took (the wait and the proof),
+the body was 6 blocks on and 4 up when the flight began, the takeoff found no glide in 31 ticks and the line was given
+up with no rocket fired and no damage. Since then a drawn line is not flown by a body more than a block from where it
+was proven (`commands-fly.ts runAuto`, `DRAWN_START_OFF`); the walk, watched, asks again.
+
+The live model on the Realm reaches farther than nine chunks at times (the whole 545 blocks from cave_end once) and
+less at others (a piece of 117 from the same place): the pieces are what makes both arrive. `flyCaveEntry` and
+`flyCaveHop` are on there since.
+
 ### Open points (Track F9e round 2)
 
-- **Nothing of this round has flown on the Realm.** The burn's range for a crafted rocket is 21 to 30 measured on BDS
+- The burn's range for a crafted rocket is 21 to 30 measured on BDS
   (n 55) and taken as 19 to 31; flight durations 2 and 3 are taken as ten ticks more a step and were not measured.
+- **In the open the longer burn is not modelled** (below). On the Realm the climb from home towards cave_start topped
+  at 151 to 196 for the same trip, and the flights that topped over 190 took 51 to 53 s against 44 to 48: not looked into.
 - **Two of ten crafted flights of the 323-block hop left their line in the first burn's climb on the replica** (46 and
   54 blocks along it, 4.6 and 5.6 off it), where the proof's thirteen burns keep within 2. Braked and down with no hit.
   Not understood: the simulation's follower knows a burn's end two ticks late, the real one three ticks and the round
