@@ -1293,6 +1293,13 @@ The mob e2e on the same tree: `pve-m1`, `pve-combat` and `pve-creeper` on bds-pv
 arrived in 8.1 s at 20 health); the gauntlet's live kit on bds-gaunt, 33 cells, one death in the first run (husk-1, by
 suffocation, no mob hit, no goto running), the cell 3 of 3 alive when run again.
 
+**On the Realm** (2026-11-13, deployed with the hold on and `hostileFallHp` 0): ten walks home after a flight
+(`!test goto home from cave_start 5`, twice), nine arrived, the way down from the landing spot costing up to 1.3 HP. No hold
+arose: no hostile came within 16 while a fall was the only way, so the hold has run on the test server only. The
+tenth walk ended for another reason, open: the flight had set the body down on the top of a fence, the goto found
+`no standable node` at the feet three times in two seconds and answered unreachable with no plan and no cause (a body
+standing 1.5 over a fence's block has no start node). Not R4's case: nothing passes there, and the hold is not asked.
+
 ## Following a path
 
 Per tick, from `InputLoop.onBeforeStep` (the command applies to the same tick):

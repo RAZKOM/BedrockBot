@@ -6606,6 +6606,39 @@ none). Measuring them needs that recipe in the crafter, or a crafter block drive
 Only the flights in the open change: the lines under a roof (the way out, the way in, the hops) fly as they do now
 either way.
 
+### On the Realm (2026-11-13, the live kit, five runs a side)
+
+`!test cavestart 5 from home` and `!test goto home from cave_start 5` with `flyKitBurn off`, then both again with it
+on, one after the other the same night. With it on every flight's first line ended `; planned for rockets that burn 19
+to 31 (flight duration 1) ticks`.
+
+| trip | setting | arrived | seconds | the first top over what the climb went for | `max y` apart | rockets | ticks |
+|---|---|---|---|---|---|---|---|
+| home to the cave | off | 5 of 5 | 48, 45, 45, 49, 44 | 21.6, 15.9, 12.6, 55.8, 12.1 | 40.9 | 4 each (20) | 519 to 620 |
+| home to the cave | on | 5 of 5 | 47, 46, 50, 46, 46 | 7.8, 11.8, 10.8, 23.6, 24.9 | 13.9 | 3, 4, 3, 4, 3 (17) | 524 to 604 |
+| the cave to home | off | 5 of 5 | 64, 61, 65, 62, 61 | 14.9, 7.9, 6.5, 9.8, 11.7 | 5.1 | 4 each | 790 to 860 |
+| the cave to home | on | 4 of 5 (the fifth: the walk after the landing, below) | 59, 61, 62, 63 | 14.0, 13.1, 11.6, 12.5, 11.6 | 4.0 | 4 each | 827 to 845 |
+
+No damage in a flight on either side, no go-around, no `roof`.
+
+- **Into the cave the tops are closer together and three rockets fewer are used in five flights; the trip takes the
+  same time** (46.9 s a run against 46.3 s). The one very high flight of the off side (55.8 over, 620 ticks, 49 s) has
+  no like on the on side, but two of its five flights still topped 24 and 25 over what the climb went for, not the 12
+  the test server gave: their terrain top-ups say `gained 35` and `gained 37 blocks`. The slowest run of the on side
+  (50 s, 604 ticks) is one of its lowest: the time of this trip is not the top's alone.
+- **Out of the cave nothing changes** that five runs can show: the same tops, rockets and ticks. A terrain top-up
+  gained 12 to 17 on and 14 to 18 off.
+- So on the real terrain the setting saves some rockets and some height and no time. It stays off on the Realm for
+  now: the short flight to a precise cell is slower with it (above), and a corridor's windows have not flown with it.
+- **The first flight after the restart** (off side, run 1): `the rocket used at tick 9 fired nothing (no rocket entity
+  in 5 ticks): its boost taken back`, the flight came down where it began after 16 ticks and flew again at once (the
+  run arrived in 48 s). The rockets had just been taken from a box.
+- **The landing at home** (both sides, not this track's): every flight home ended `landed_off` 8 to 12 blocks from the
+  goal, five of ten on the top of a fence or a like block (the feet at a half height). The walk from there is a drop
+  of up to 1.3 HP, and once the goto found `no standable node` on the fence's top and answered unreachable
+  (docs/pathfinding.md, Track R4 "On the Realm"). The landing's choice of that spot and a goto's start from a fence's
+  top are both open.
+
 ### Unit tests (`fly-kit-burn.test.ts`, synthetic ground)
 
 The setting is off by default and in the flight group; what the open-air flight is told (nothing with the setting off,
@@ -6618,7 +6651,8 @@ simulation flies the burn it is told and a searched way out is proven at 25, 19,
 
 ### Open points (Track F10)
 
-- **Not flown on the Realm.** The setting is off there and by default.
+- **On the Realm the gain is small** (above: closer tops and fewer rockets into the cave, no time, nothing out of
+  it; five runs a side). The setting is off there and by default.
 - **A short flight to a cell the brake lands is slower told** (above: no dive is found from the lower top). The
   descent chooses between a dive and a circle by the height the body happens to arrive at, and a flight that arrives
   between "low enough to go straight in" and "high enough to dive" circles: on the server every flat flight of 650
