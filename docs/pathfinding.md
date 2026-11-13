@@ -1428,6 +1428,14 @@ The mob gates on the same tree: `pve-m1`, `pve-combat` and `pve-creeper` on bds-
 on bds-gaunt, 33 cells: 0 deaths and 55.3 damage in all; the lowest health was 1.1 in `mixed-8`, 28 of its 29.9 from
 a witch's potions. R4's `nav-hostile-fall` on bds-pve passed 4 of 4.
 
+**On the Realm** (2026-11-13, deployed): eight walks home after a flight (`!test goto home from cave_start`, five with
+`flyLandOver` off so that the flights end on the roofs and fence tops round the landing, three with it on). No walk
+began from a perch and none waited to settle: every body had a node under its footprint, so the perch has run on the
+test server only. Seven arrived. The eighth is Track R4's hold seen there for the first time: the only way down was a
+5.2-block fall (0.4 HP), a hostile stood 15 to 16 blocks away, the goto held its 30 s, the hostile did not leave and
+the answer was unreachable with the wait in it, at full health. `hostileFallHp` (off there) is the setting for that
+case. With `flyLandOver` on the flight stands on the landing's floor and the walk in needs no fall.
+
 ## Following a path
 
 Per tick, from `InputLoop.onBeforeStep` (the command applies to the same tick):
