@@ -65,9 +65,15 @@ export class Hotbar {
     return this.inventory.selected;
   }
 
-  /** The wire item last seen in a hotbar slot (undefined = never reported, i.e. empty). */
+  /**
+   * The wire item of a hotbar slot (undefined = never reported, i.e. empty). Track F12: the Inventory's own wire
+   * item first: it follows the bot's item stack requests (a stack moved, merged or swapped into the slot keeps its
+   * NBT with the response's count and stack id), where this class only hears the server's slot packets and kept
+   * the item that was there before the request (a refill's 8 rockets for the 64 after it, a swap's dirt for the
+   * rockets). The own copy (the server's last packet, or `noteRaw`) when the Inventory has none.
+   */
   rawItem(slot: number): ItemV4 | undefined {
-    return this.raw[slot];
+    return this.inventory.rawItem(WINDOW_INVENTORY, slot) ?? this.raw[slot];
   }
 
   /**
@@ -85,7 +91,7 @@ export class Hotbar {
    */
   select(slot: number): boolean {
     if (!Number.isInteger(slot) || slot < 0 || slot >= HOTBAR_SLOTS) return false;
-    const item = this.raw[slot] ?? AIR;
+    const item = this.rawItem(slot) ?? AIR;
     this.source.queue('mob_equipment', {
       runtime_entity_id: this.runtimeId(),
       item: item.network_id === 0 ? AIR : item,

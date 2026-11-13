@@ -21,7 +21,7 @@
 // on BDS 1.26.60.6. The chest skill sets it per window (`setSlotType`) when it opens one; windows
 // without an entry use the `chestSlotType` option.
 import { silentLogger, type Logger } from '../log.ts';
-import { WINDOW_INVENTORY, windowId, type Inventory } from './inventory.ts';
+import { rawLike, WINDOW_ARMOR, WINDOW_INVENTORY, WINDOW_OFFHAND, windowId, type Inventory } from './inventory.ts';
 import type { ItemV4, WindowIdField } from './packets.ts';
 import type { ItemStack, PacketSource, Vec3 } from './types.ts';
 
@@ -100,7 +100,7 @@ export class Containers {
   private readonly windowSlotTypes = new Map<number, string>();
   private readonly pending = new Map<number, (r: StackResponse) => void>();
   /** Track AG: what each pending request predicted per slot (an ok response refills a slot another request's rollback emptied). */
-  private readonly predicted = new Map<number, { window: number; slot: number; item: ItemStack }[]>();
+  private readonly predicted = new Map<number, { window: number; slot: number; item: ItemStack; raw?: ItemV4 }[]>();
   private readonly openFns = new Set<(c: OpenContainer) => void>();
   private readonly closeFns = new Set<(id: number, byServer: boolean) => void>();
   private readonly unsubs: (() => void)[] = [];
@@ -206,17 +206,23 @@ export class Containers {
     const before = { src: item, dst: target, srcRaw: this.inventory.rawItem(src.window, src.slot), dstRaw: this.inventory.rawItem(dst.window, dst.slot) };
     const left = item.count - count;
     const srcNow = left > 0 ? { ...item, count: left } : null;
-    this.inventory.setItem(src.window, src.slot, srcNow);
+    // Track F12: the wire items follow the stacks (the NBT stays, the count and the stack id are the model's;
+    // the response's counts and ids then rewrite them in apply): the source's rest keeps its own, a merge the
+    // target's, a stack moved or split into an empty slot the source's. Before, only a whole stack moved into
+    // an empty slot kept one (Track AG), and a hotbar stack topped up from a box was used with a wire item
+    // rebuilt from the model, its NBT lost (a firework's `Fireworks`): the server refused the use
+    const srcItemRaw = before.srcRaw ?? this.inventory.rawOfStack(item);
+    const srcRawNow = srcNow && srcItemRaw ? rawLike(srcItemRaw, srcNow) : undefined;
+    this.inventory.setItem(src.window, src.slot, srcNow, srcRawNow);
     const moved: ItemStack = target ? { ...target, count: target.count + count } : { ...item, count };
     if (!target) delete moved.stackId;
-    // Track AG: a whole stack moved into an empty slot keeps its wire item (the NBT: a shulker box's
-    // contents); users of the raw item check that it still matches the model (wireItemOf)
-    const dstRaw = !target && left === 0 ? before.srcRaw : undefined;
+    const base = target ? (before.dstRaw ?? this.inventory.rawOfStack(target)) : srcItemRaw;
+    const dstRaw = base ? rawLike(base, moved) : undefined;
     this.inventory.setItem(dst.window, dst.slot, moved, dstRaw);
 
     this.predicted.set(requestId, [
-      { window: src.window, slot: src.slot, item },
-      { window: dst.window, slot: dst.slot, item: moved },
+      { window: src.window, slot: src.slot, item, ...(srcItemRaw ? { raw: srcItemRaw } : {}) },
+      { window: dst.window, slot: dst.slot, item: moved, ...(dstRaw ? { raw: dstRaw } : {}) },
     ]);
     this.stats.requests++;
     this.source.queue('item_stack_request', { requests: [{ request_id: requestId, actions: [action], custom_names: [], cause: 'chat_public' }] });
@@ -227,7 +233,7 @@ export class Containers {
       const unchanged = (ref: SlotRef, item: ItemStack | null, raw: ItemV4 | undefined) =>
         (this.slotsOf(ref.window)?.[ref.slot] ?? null) === item && this.inventory.rawItem(ref.window, ref.slot) === raw;
       const rollback = () => {
-        if (unchanged(src, srcNow, undefined)) this.inventory.setItem(src.window, src.slot, before.src, before.srcRaw);
+        if (unchanged(src, srcNow, srcRawNow)) this.inventory.setItem(src.window, src.slot, before.src, before.srcRaw);
         if (unchanged(dst, moved, dstRaw)) this.inventory.setItem(dst.window, dst.slot, before.dst, before.dstRaw);
       };
       const timer = setTimeout(() => {
@@ -302,14 +308,17 @@ export class Containers {
         } else if (cur) {
           const next: ItemStack = { ...cur, count: s.count };
           if (s.item_stack_id !== undefined) next.stackId = s.item_stack_id;
-          this.inventory.setItem(window, s.slot, next, this.inventory.rawItem(window, s.slot)); // Track AG: keep the wire item (NBT)
+          // Track AG: keep the wire item (NBT); Track F12: with the server's count and stack id, so a use echoes the stack as it holds it
+          const raw = this.inventory.rawItem(window, s.slot) ?? this.inventory.rawOfStack(cur);
+          this.inventory.setItem(window, s.slot, next, raw ? rawLike(raw, next) : undefined);
         } else if (this.predicted.get(r.request_id)?.find((x) => x.window === window && x.slot === s.slot)) {
           // Track AG: the slot this request filled was emptied meanwhile (another request's rollback): the server says it holds the item
-          const was = this.predicted.get(r.request_id)!.find((x) => x.window === window && x.slot === s.slot)!.item;
-          const next: ItemStack = { ...was, count: s.count };
+          const was = this.predicted.get(r.request_id)!.find((x) => x.window === window && x.slot === s.slot)!;
+          const next: ItemStack = { ...was.item, count: s.count };
           if (s.item_stack_id !== undefined) next.stackId = s.item_stack_id;
-          this.inventory.setItem(window, s.slot, next);
-        } else {
+          this.inventory.setItem(window, s.slot, next, was.raw ? rawLike(was.raw, next) : undefined);
+        } else if (window !== WINDOW_ARMOR && window !== WINDOW_OFFHAND) {
+          // (an armour or offhand slot the requester fills after the response: the server's inventory_slot confirms it, armour.ts)
           this.log.warn(`item_stack_response ${r.request_id}: ${s.count} items in unknown slot ${window}:${s.slot}`);
         }
       }
@@ -318,6 +327,11 @@ export class Containers {
 
   private windowOf(containerId: string | number): number | undefined {
     if (PLAYER_SLOT_TYPES.has(containerId)) return WINDOW_INVENTORY;
+    // Track F12: the armour and offhand containers are their own windows (120, 119), never the open one: the
+    // elytra's swap was applied to slot 1 of the inventory screen's window ("1 items in unknown slot W:1" on
+    // every flight), and with a chest open it would have rewritten the chest's slot 1
+    if (containerId === 'armor' || containerId === 6) return WINDOW_ARMOR;
+    if (containerId === 'offhand' || containerId === 34) return WINDOW_OFFHAND;
     return this._open?.id;
   }
 

@@ -82,8 +82,13 @@ export class Inventory {
   }
 
   /**
-   * Set a slot from the client side (item stack request prediction or response). Clears the raw
-   * wire item unless one is given. Creates the window if needed.
+   * Set a slot from the client side (item stack request prediction or response). Creates the window if
+   * needed. The raw wire item is the one given; without one (Track F12), the last wire item the server
+   * sent for the same stack (its stack network id, the same item) with the count and stack id of `item`
+   * (`rawLike`): a stack moved or swapped by a request is the same stack with the same NBT on the
+   * server, so a use or a selection echoes it whole. Else, for the same item kind staying in the slot
+   * (a count or a stack id the response changed: the crafter's, a merge), the slot's own wire item so
+   * rewritten. Undefined when no such wire item is known (the slot's raw is cleared, as before).
    */
   setItem(window: number, slot: number, item: ItemStack | null, raw?: ItemV4): void {
     let slots = this.windows.get(window);
@@ -92,9 +97,33 @@ export class Inventory {
       this.windows.set(window, slots);
     }
     while (slots.length <= slot) slots.push(null);
+    let r = raw ?? (item ? this.rawOfStack(item) : undefined);
+    if (!r && item) {
+      const own = this.rawsOf(window)[slot];
+      const was = slots[slot];
+      if (own && was && own.network_id === item.networkId && own.metadata === item.metadata && was.networkId === item.networkId) r = rawLike(own, item);
+    }
     slots[slot] = item;
-    this.rawsOf(window)[slot] = raw;
+    this.rawsOf(window)[slot] = r;
+    this.remember(r);
     this.emit(window, slot);
+  }
+
+  /** Track F12: the wire item last seen for `item`'s stack (by stack id), rewritten to `item`'s count; undefined when none is known. */
+  rawOfStack(item: ItemStack): ItemV4 | undefined {
+    if (item.stackId === undefined) return undefined;
+    const seen = this.byStack.get(item.stackId);
+    return seen?.network_id === item.networkId ? rawLike(seen, item) : undefined;
+  }
+
+  /** Track F12: wire items by stack id (the server's stack network ids are never reused), the newest 512. */
+  private readonly byStack = new Map<number, ItemV4>();
+
+  private remember(raw: ItemV4 | undefined): void {
+    if (!raw?.has_stack_id || raw.stack_id === undefined || raw.network_id === 0) return;
+    this.byStack.delete(raw.stack_id);
+    this.byStack.set(raw.stack_id, raw);
+    if (this.byStack.size > 512) this.byStack.delete(this.byStack.keys().next().value!);
   }
 
   /** Forget a container window (container_close). The player inventory (0) is never removed. */
@@ -143,6 +172,7 @@ export class Inventory {
   clear(): void {
     this.windows.clear();
     this.raws.clear();
+    this.byStack.clear();
     this.windows.set(WINDOW_INVENTORY, new Array<ItemStack | null>(INVENTORY_SIZE).fill(null));
   }
 
@@ -162,6 +192,7 @@ export class Inventory {
       p.input.map((i) => this.toItem(i)),
     );
     this.raws.set(id, [...p.input]);
+    for (const r of p.input) this.remember(r); // Track F12
     this.emit(id, undefined);
   }
 
@@ -178,6 +209,7 @@ export class Inventory {
     while (slots.length <= slot) slots.push(null);
     slots[slot] = this.toItem(item);
     this.rawsOf(id)[slot] = item;
+    this.remember(item); // Track F12
     this.emit(id, slot);
   }
 
@@ -212,6 +244,19 @@ export class Inventory {
   private emit(window: number, slot: number | undefined): void {
     for (const fn of [...this.changeFns]) fn(window, slot);
   }
+}
+
+/**
+ * Track F12: the wire item `raw` (its NBT, block runtime id, can-place/destroy lists) as the stack `item` now is:
+ * its count, and its stack id (none when the model has none yet: a split into an empty slot before the
+ * server's item_stack_response names the new stack). A stack the bot's own item stack request moved, merged
+ * or split keeps its NBT on the server; only the count and the stack id change, and the response says both.
+ */
+export function rawLike<T extends ItemV4>(raw: T, item: { count: number; stackId?: number }): T {
+  const out = { ...raw, count: item.count, has_stack_id: item.stackId !== undefined } as T;
+  if (item.stackId !== undefined) out.stack_id = item.stackId;
+  else delete out.stack_id;
+  return out;
 }
 
 /**

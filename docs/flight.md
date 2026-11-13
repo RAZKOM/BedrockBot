@@ -87,7 +87,7 @@ authoritative. Decision record: [decisions/0042-elytra-flight.md](decisions/0042
 | start the glide | `player_auth_input.input_data` with `start_gliding` **and a jump press** (`jump_down`, `jumping`, `want_up`, `jump_current_raw`, `jump_pressed_raw`, `start_jumping`) on an airborne tick with an elytra in the chest slot | the flag alone is ignored, `player_action start_glide` (15) too; with the jump press the server confirms on the next tick |
 | the confirmation | `set_entity_data` of the own player, `flags.gliding = true` (the loop's `GlideEvent`); the truth pack's `player.isGliding` | the request at tick N is confirmed at N + 1 |
 | end of the glide | the server's `flags.gliding = false` on ground or water contact; the client sends `stop_gliding` on that tick | a voluntary `stop_gliding` in the air is **ignored** (the glide goes on; 19 corrections of up to 2 blocks when the model stopped and the server did not): the model only ends a glide on contact |
-| a rocket | `inventory_transaction` `item_use` / `click_air` of the `firework_rocket` in the selected hotbar slot (eat.ts `useItemTransaction`), `mob_equipment` first when another slot is selected | `add_entity` `minecraft:fireworks_rocket` 1 to 3 ticks later at the body; `remove_entity` 12 to 18 ticks after the use; the inventory packets take one rocket |
+| a rocket | `inventory_transaction` `item_use` / `click_air` of the `firework_rocket` in the selected hotbar slot (eat.ts `useItemTransaction`), `mob_equipment` first when another slot is selected | `add_entity` `minecraft:fireworks_rocket` 1 to 3 ticks later at the body; `remove_entity` 12 to 18 ticks after the use; the inventory packets take one rocket (a full `inventory_content` of the player's windows); the `held_item` must be the stack as the server holds it, its NBT included: one without the rockets' `Fireworks` NBT is refused with the same `inventory_content` and no entity (Track F12) |
 | the boost | no `set_entity_motion`: the server applies the boost in its own movement step; the client predicts it (`cmd.boostStart`) | with the boost inside the step before the drag the prediction is within 0.001 per boosted tick; the rocket's random life is the one mismatch (one correction of 0.05 to 0.35 per rocket, repaired by `endBoost` on `remove_entity`) |
 | the elytra on | `item_stack_request` `swap` (with a chestplate on) or `place` into the `armor` container slot 1 under the inventory screen (armour.ts) | `inventory_slot` of window 120 confirms; the loop's `canGlide` reads that slot |
 | corrections | `correct_player_move_prediction` (strict server, threshold 0.001) | level flight 220 ticks: 0; pitch 20 / -20: 29 / 34 corrections all under 0.0001 (the strict server's noise); a 40-degree turn in one tick: 6 of at most 0.004; a whole flight with 3 rockets: 10 to 20, 3 to 5 over 0.05 |
@@ -6992,6 +6992,120 @@ from its edge, a platform over the sea, unknown columns).
 - Seen on the server and not this track's: the landing search answered `no landing cell near it; landing on dry
   ground` for the goal in the passage in 6 flights of 10 (the dry ground it named was the cell at the passage's mouth,
   and the walk from it arrived every time); in the other 4 it confirmed that cell with its walk.
+
+## The first rocket after the kit moved rockets (Track F12)
+
+On the Realm (2026-11-10 to 2026-11-13) the first rocket of a flight fired nothing (`the rocket used at tick N fired
+nothing (no rocket entity in 5 ticks)`) in 6 of 8 flights that followed the kit's own box refill or rocket swap, in 0
+of 68 that followed only a `/give` of rockets and in 0 of 64 with nothing before them. It cost a takeoff that fell back
+after 15 or 16 ticks (`ended (landed_off)`, flown again), a learned line lost after 17 ticks with the body braked to a
+stand (`ended (roof)`), and a drawn line that asked for the rocket again and got out a second late. The cause was the
+bot's model of the slot, not the flight: no setting, on for every use of an item.
+
+### The cause (packets, bds-fly, BDS 1.26.60.6)
+
+A firework rocket carries NBT (`Fireworks {Flight 1, Explosions []}`) when it comes from `/give`, `/replaceitem` or a
+crafting table, as the Realm's do; the truth pack's `setslot` and `boxdrop` make rockets with none, which is why the
+earlier kit tests never showed it. The refill, rockets topped up from a box of 64 into a hotbar stack of 8:
+
+| tick | | |
+|---|---|---|
+| 14 | out `item_stack_request` | `place` 56 from the box's slot 0 (stack 2556) onto hotbar slot 0 (stack 2554) |
+| 16 | in `item_stack_response` | ok: the box's slot 8 (2556), hotbar slot 0 **64 (2554)**. No `inventory_slot` for the hotbar slot |
+| 127 | out `mob_equipment` | slot 0, the item the Hotbar class last heard: 8 rockets, with the NBT |
+| 127 | out `inventory_transaction` `click_air` | `held_item` 64 rockets, stack 2554, **`has_nbt 0`** |
+| 128 | in `inventory_content` | every player window again, the slot as the server holds it: 64, 2554, with the NBT. No rocket entity |
+| 134 | out `click_air` | `held_item` 64, 2554, with the NBT (from that `inventory_content`) |
+| 135 | in `add_entity` `fireworks_rocket` | the second rocket fires |
+
+`RocketHand.fire` sends `wireItemOf(slot, inventory.rawItem(0, slot) ?? hotbar.rawItem(slot))`. After the request the
+Inventory had cleared its wire item for the slot (a prediction always did, Track AG kept one only for a whole stack
+moved into an empty slot) and the Hotbar class still had the 8 from before; `wireItemOf` saw the count differ and
+rebuilt the item from the model, which has no NBT. The server compares the held item with its own, refuses the use,
+and sends the windows again; the next use echoes that and fires. The swap (`flight kit: swapped the rockets in slot
+14 with the dirt in hotbar slot 8`) is the same: the Hotbar class still had the dirt, the Inventory nothing, and the
+use went out as 64 rockets without NBT.
+
+What decides it is the held item's NBT, not the selection: in 1 of the 10 moves below the `mob_equipment` carried
+air (the Hotbar class's copy of an empty slot) while the use carried the NBT, and the rocket fired; in the 40 refills
+and swaps the `mob_equipment` carried the 8 rockets or the dirt and the use had no NBT, and none fired.
+
+**Why 2 refills of 8 on the Realm fired:** anything that makes the server send the slot again between the refill and
+the flight repairs the copy. Measured here: a container opened (the box's own `container_open` came with an
+`inventory_content` of the player's windows), every rocket use that fired (its `inventory_content` with the count one
+less), a refused use. On the Realm a chest the home chore reads, a meal, a death or the test harness's kit after one
+would do it; the log the track had does not show the flights after the two refills that fired, so which it was there
+is not known. A `/give` updates the slot it lands in (a clientbound `inventory_transaction`), and every flight with
+nothing before it used a slot the server had last written: 0 of 132.
+
+### The rule (`world/inventory.ts`, `world/containers.ts`, `world/hotbar.ts`)
+
+After an item stack request of the bot's own, the wire item it keeps for every slot the request touched is the
+server's: the same NBT, the response's count and stack id.
+
+- `Inventory.setItem` without a wire item takes the last one the server sent for the same stack (by its stack id,
+  the same item) with the new count and stack id (`rawLike`); without that, for the same item kind staying in the
+  slot (a count or a stack id the response changed: the crafter's own response, a merge), the slot's own. A swap's
+  two predictions (the kit's `swapSlots`, the survival kit's `toHotbar`, the keeper's, the armour's) therefore keep
+  both stacks' NBT with no change in their code. Why the stack id: the server's stack network ids name one stack and
+  are not reused, and a swap moves stacks with their ids (measured: the response gives each slot the other's id).
+- `Containers.move` predicts the wire items with the stacks: the rest in the source keeps its own, a merge the
+  target's, a stack moved or split into an empty slot the source's (no stack id until the response names it); the
+  response's counts and ids rewrite them; a refusal puts the old ones back.
+- `Hotbar.rawItem` (and with it `select`'s `mob_equipment`) answers the Inventory's wire item first: the class only
+  hears the server's slot packets, and after a request those do not come.
+- A slot only the server wrote is used exactly as it sent it (the same object): a flight with no refill or swap
+  before it sends what it sent before (below).
+
+A fault that cannot be removed would have needed a guard at the takeoff (the drawn line's `asked for again`, Track
+F9d, repaired its flight a second late; the learned line in the second Realm case was lost at 1 block along before
+the second rocket's boost came). The cause is gone, so no guard was added.
+
+### Measured (bds-fly, bds-fly2, bds-fly3, bds-home, BDS 1.26.60.6, 2026-11-13; `fly-first-rocket.test.ts`)
+
+Rockets with the NBT, a flight of 70 blocks from a flat start each run. Before is the tree without the change.
+
+| case | before: first rockets that fired nothing | after |
+|---|---|---|
+| refill: 8 in hotbar slot 0, a box of 64 (`refill ok: took 56`) | **20 of 20** (none with the NBT at the use) | **0 of 20** (20 of 20 with it) |
+| swap: a full inventory, 64 in a main slot (`swapped the rockets ...`) | **20 of 20** | **0 of 20** |
+| move: 64 from a main slot into a free hotbar slot | 0 of 10 | 0 of 10 |
+| control: 64 put in slot 0 by the server, no request | 0 of 10 | 0 of 10 |
+
+The control's rocket uses are the same packets before and after (10 of 10 each: one `click_air` of 64 rockets with the
+NBT, no `mob_equipment`). The move's: the one run that selected the slot sent air before and the rockets after.
+
+**Other first uses, the same case.** A shulker box with contents swapped from a main slot into a full hotbar
+(`swapSlots`) and then placed: before, 10 of 10 placements `rejected` (the click's held item without the box's `Items`
+NBT); after, 10 of 10 placed with the contents kept (`cobblestone 7`). The same holds for any item with NBT the bot
+moves itself: tools and armour with wear (`Damage`), enchanted or named items, crafted rockets. Items with no NBT
+(most blocks, food) were never affected: the item rebuilt from the model is the server's item; the first block placed
+after a withdraw and the first meal after a restock were not run here for that reason.
+
+**The `unknown slot` warning.** `item_stack_response -1000NN: 1 items in unknown slot W:1` on every elytra on and off
+was the response's `armor` container applied to the open window (the inventory screen, which has no slots in the
+model): not this fault, and harmless there, but with a chest open as the screen it would have rewritten the chest's
+slot 1. The armour (`armor`, 6) and offhand (`offhand`, 34) containers are now their own windows (120, 119), and a
+slot there the requester fills after the response (armour.ts's `place`) is not warned about: the server's
+`inventory_slot` confirms it.
+
+Guards: `bot/test/unit/world/stack-raws.test.ts` (the refill's top-up, a split, a refusal, the swap, the crafter's
+count, a server-written slot left as sent, the armour window; 7 of its 9 fail on the tree before the change). e2e:
+`bot/test/e2e/fly-first-rocket.test.ts` (`F12_CASES`, `F12_RUNS`, `F12_BOXSWAP`, `F12_OUT` for the packets).
+
+### Open points (Track F12)
+
+- **Not run on the Realm.** What to look for: after `flight kit: refill ok` or `flight kit: swapped the rockets`, the
+  flight's `the first rocket at tick N` with no `the rocket used at tick N fired nothing`; and no `unknown slot` line.
+- The other rockets written off in a flight (not its first): 71 in the Realm log from 2026-11-06 to 2026-11-09 on
+  older builds (some of which Track F9a found had fired with a late entity) and 1 since 2026-11-10, which its
+  entity 6 ticks after the use showed had fired; the six first rockets above are every other write-off since then. The test servers'
+  flights had none.
+- A stack the crafter makes into an empty slot has no wire item until the server sends one (the client cannot know
+  a crafted item's NBT); a crafted rocket used before any other packet for that slot would be refused once. Not seen
+  here: the bot does not craft rockets on its own.
+- A flight with no rockets at hand and only the box (`fly` with 0 loose rockets) gave no answer on the test server in
+  3 of 3 tries (no line, no packets for 90 s); not this track's and not looked into.
 
 ## Open points
 
