@@ -68,6 +68,14 @@ export interface SimOptions {
   health?: number;
   /** Track R4: Navigator.fallHoldTicks (default FALL_HOLD_TICKS; 0: the behaviour before R4). */
   fallHoldTicks?: number;
+  /** Track R5: the body's feet at the start, exactly (default the pair's start cell's centre, at its y). */
+  startPos?: Vec3;
+  /** Track R5: ticks the body settles before the goto is asked (default 5). */
+  settleTicks?: number;
+  /** Track R5: the navigator's Navigator.settleTicks (default SETTLE_TICKS; 0: the behaviour before R5). */
+  navSettleTicks?: number;
+  /** Track R5: no perch starts (the behaviour before R5: the start is `locateNode`'s or none). */
+  noPerch?: boolean;
 }
 
 /** Track R2: the palette id a placed throwaway block becomes. */
@@ -244,7 +252,7 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
     undo.push([x, y, z, vox.get(x, y, z)]);
     server.setBlock(x, y, z, id);
   };
-  const start = { x: pair.start.x + 0.5, y: pair.start.y, z: pair.start.z + 0.5 };
+  const start = o.startPos ? { ...o.startPos } : { x: pair.start.x + 0.5, y: pair.start.y, z: pair.start.z + 0.5 };
   if (o.preload) server.preloadAll(start);
   server.pump(start, 10_000);
   const { conn, loop } = harness(start);
@@ -327,6 +335,8 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
   skills.falls.protect = () => protect;
   if (o.falls) skills.falls.settings = () => ({ ...DEFAULT_FALL_SETTINGS, ...o.falls });
   if (o.fallHoldTicks !== undefined) skills.nav.fallHoldTicks = o.fallHoldTicks;
+  if (o.navSettleTicks !== undefined) skills.nav.settleTicks = o.navSettleTicks; // Track R5
+  if (o.noPerch) skills.nav.perch = false;
   // the survival layer's avoidance (skills/survival: lava proximity costs, no mobs here)
   const avoidance = new Avoidance({ entities: () => server.world.entities, origin: () => (loop.state.ready ? loop.state.pos : undefined), lavaWorld: server.world });
   skills.nav.cellCost = () => avoidance.costFn();
@@ -338,7 +348,7 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
     if (performance.now() - t0 > 30_000) throw new Error('planner worker did not start');
     await flush();
   }
-  conn.tick(5);
+  conn.tick(o.settleTicks ?? 5);
   let result: SkillResult | undefined;
   const p = skills.goto({ type: 'block', p: pair.goal }, { timeoutTicks: o.timeoutTicks ?? 6000, allowBreak: o.allowBreak ?? false, allowPlace: o.allowPlace ?? false, closeDoors: false, explain: true }).then((r) => (result = r));
   const self = server.world.self as { health: number };

@@ -45,6 +45,7 @@ import type { Vec3 } from '../../world/types.ts';
 import { breakTicks as tableBreakTicks } from '../dig/breakTime.ts';
 import { PHYSICS } from '../input/physics.ts';
 import { halfTop, type TerrainClass } from '../terrain/classify.ts';
+import { boxesAtCell } from '../terrain/query.ts';
 import type { BreakRules, NavBlockFace } from './actions.ts';
 import { BestSoFar, FAILURE_NODES_FACTOR, MIN_DIST_PATH } from './baritone/bestSoFar.ts'; // Track BA: partial-path selection (ported, LGPL-3.0)
 import { ascend, createBreakMoveContext, descend, downward, pillar, sneakFits, traverse, type BreakMoveContext } from './baritone/moves.ts'; // Track BC: the moves that dig (ported, LGPL-3.0) and sneak-through
@@ -213,6 +214,13 @@ export interface PathOptions {
    */
   frontier?: boolean;
   digWay?: DigWay;
+  /**
+   * Track R5: the start is a perch (`locatePerch`): the body stands at this feet height in the start cell on a top the
+   * stand rule has no node for (a fence's, a wall's or a closed gate's 1.5; a top that does not cover the centre). The
+   * start is that node when the cell gives no other and `NavGrid.perch` says the same feet; only walks, jumps, drops
+   * and long drops leave it (no digs, pillars, parkour or sneaks: their rules assume a full floor).
+   */
+  startFeet?: number;
 }
 
 /** Falls up to this height onto farmland never trampled it (measured, docs/farming.md). */
@@ -308,6 +316,8 @@ const F_SNEAK = 8;
 const F_DIVE = 16;
 /** Track W2: a node of a dig-out staircase (nav/digout.ts): jumps with breaks are planned from it without `allowBreak`. */
 const F_CUT = 32;
+/** Track R5: the start node is a perch (PathOptions.startFeet): only walks, jumps, drops and long drops leave it. */
+const F_PERCH = 64;
 /** Track W2: PathNode.cut bit: no step of this staircase is dug yet (entered by a plain swimOut). */
 export const CUT_UNPAID = 0x80;
 
@@ -586,6 +596,14 @@ export class PathSearch {
       startFeet = start.y;
       flags = F_SNEAK;
     }
+    // Track R5: a body on a top the stand rule has no node for (a fence's top): the perch the navigator found
+    if (!isFeet(startFeet) && opts.startFeet !== undefined) {
+      const p = grid.perch(start.x, start.y, start.z);
+      if (isFeet(p) && Math.abs(p - opts.startFeet) < 1e-6) {
+        startFeet = p;
+        flags = F_PERCH;
+      }
+    }
     if (!isFeet(startFeet)) {
       this.done = { status: 'none', path: [], cost: 0, expanded: 0, ms: performance.now() - t0, unknown: false, limited: false };
       return;
@@ -842,7 +860,10 @@ export class PathSearch {
     // Track AJ: movement-variety checks only once the grid has classified water / climbers / ladders at
     // all (NavGrid.variety, read after the cells in question have been looked at, so the answer does not
     // depend on what an earlier search cached)
-    const flat = Math.abs(f0 - cy) < FLAT;
+    // Track R5: a perch is never "flat": the moves that need a full floor under the feet (digs, pillars, parkour,
+    // sneaks, hatches, ladders from the side) do not leave it
+    const perch = (flags0 & F_PERCH) !== 0;
+    const flat = Math.abs(f0 - cy) < FLAT && !perch;
     const holes = this.holes;
     holes.fill(0);
     const digFlags = this.digFlags; // Track BC
@@ -1023,7 +1044,7 @@ export class PathSearch {
     // Pillar-up: jump and place a block in the feet cell (full-block floors only).
     // Track BD review: no block is placed inside the base either (`protectedArea`, the owner's protectRadius:
     // the break rules only refused digs there; the mine process' composite gotos plan with allowPlace)
-    if (opts.allowPlace && Math.abs(f0 - cy) < FLAT && !opts.noAction?.has(cellKey(cx, cy, cz)) && !inArea(opts.protectedArea, cx, cy, cz) && this.pillarLeads(cx, cy, cz)) {
+    if (opts.allowPlace && flat && !opts.noAction?.has(cellKey(cx, cy, cz)) && !inArea(opts.protectedArea, cx, cy, cz) && this.pillarLeads(cx, cy, cz)) {
       // Track BG2: the jump needs the cell over that free as well (Track O's PlaceSkill refuses with no_headroom
       // otherwise: on the Realm a pillar in a 3-high room under the farm's platform failed twice)
       const room = grid.freeColumn(cx, headCell + 1, headCell + 2, cz);
@@ -1795,6 +1816,70 @@ export interface LocatedNode {
   y: number;
   z: number;
   feet: number;
+  /** Track R5: a perch (`locatePerch`): plan from it with PathOptions.startFeet = feet. */
+  perch?: true;
+}
+
+/**
+ * Track R5: how far above a perch's top the feet may be and still be on it (a body that has just landed is at the top
+ * within a tick's fall; the input loop puts a standing body on it exactly).
+ */
+export const PERCH_ABOVE = 0.05;
+
+/**
+ * Track R5: the perch a body with feet `pos` rests on when `locateNode` has no node for it: a column under its footprint
+ * (the 3 x 3 round it) whose top the stand rule does not take (`NavGrid.perch`: a fence's, a wall's or a closed gate's
+ * 1.5, a top that does not cover the centre), with a box of that top under the footprint (fence arms counted from the
+ * neighbours), the feet at it or up to PERCH_ABOVE over it. The column nearest the body's centre; undefined when none.
+ * The node is `perch` and the search starts from it with `startFeet` (only walks, jumps and drops leave it).
+ */
+export function locatePerch(grid: NavGrid, pos: { x: number; y: number; z: number }): LocatedNode | undefined {
+  const y = Math.floor(pos.y + 1e-3);
+  const bx = Math.floor(pos.x);
+  const bz = Math.floor(pos.z);
+  const hw = PHYSICS.width / 2;
+  let best: LocatedNode | undefined;
+  let bestD = Infinity;
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      const x = bx + dx;
+      const z = bz + dz;
+      // the column lies under the footprint
+      if (x + 1 <= pos.x - hw + 1e-6 || x >= pos.x + hw - 1e-6 || z + 1 <= pos.z - hw + 1e-6 || z >= pos.z + hw - 1e-6) continue;
+      const f = grid.perch(x, y, z);
+      if (!isFeet(f) || f > pos.y + 1e-3 || pos.y - f > PERCH_ABOVE) continue;
+      if (!perchUnder(grid, x, y, z, f, pos, hw)) continue;
+      const ddx = Math.max(x - pos.x, 0, pos.x - (x + 1));
+      const ddz = Math.max(z - pos.z, 0, pos.z - (z + 1));
+      const d = Math.hypot(ddx, ddz);
+      if (d < bestD) {
+        bestD = d;
+        best = { x, y, z, feet: f, perch: true };
+      }
+    }
+  }
+  return best;
+}
+
+/** Track R5: a box of cell (x, y - 1, z) or (x, y, z) with its top at `feet` lies under the footprint of a body at `pos`. */
+function perchUnder(grid: NavGrid, x: number, y: number, z: number, feet: number, pos: { x: number; z: number }, hw: number): boolean {
+  for (const cy of [y - 1, y]) {
+    const boxes = boxesAtCell(grid.source, x, cy, z, grid.cls(x, cy, z));
+    if (!boxes) continue;
+    for (const b of boxes) {
+      if (Math.abs(cy + b[4] - feet) > 1e-6) continue;
+      if (x + b[0] < pos.x + hw - 1e-6 && x + b[3] > pos.x - hw + 1e-6 && z + b[2] < pos.z + hw - 1e-6 && z + b[5] > pos.z - hw + 1e-6) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Track R5: the node a walk starts from: `locateNode`'s, else the perch the body rests on (`locatePerch`). A body in
+ * water (`prefer` 'swim') has no perch.
+ */
+export function locateStart(grid: NavGrid, pos: { x: number; y: number; z: number }, prefer?: 'swim' | 'climb'): LocatedNode | undefined {
+  return locateNode(grid, pos, prefer) ?? (prefer === 'swim' ? undefined : locatePerch(grid, pos));
 }
 
 /**

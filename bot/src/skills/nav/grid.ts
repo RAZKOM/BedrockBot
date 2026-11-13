@@ -425,6 +425,49 @@ export class NavGrid {
     return this.computeStand(x, y, z, true);
   }
 
+  /**
+   * Track R5: feet height of a body resting in cell (x, y, z) on a top the stand rule takes for no floor: a box top of
+   * 1 to 1.5 in the cell below (a fence's, a wall's or a closed gate's 1.5; a cauldron's or a composter's rim, whose top
+   * does not cover the centre; magma, a cactus) or a top under 1 in the cell itself that is no floor (it does not cover
+   * the centre, or a hazard: pointed dripstone), or the inside of a bowl in the cell itself (a hopper's funnel). The
+   * cells from the feet to the head are free (as for `stand`); no liquid, climber or
+   * scaffolding in the floor or the feet cell. BLOCKED / UNKNOWN as for `stand`. Never a node the planner walks into:
+   * only a start (PathOptions.startFeet).
+   */
+  perch(x: number, y: number, z: number): number | undefined {
+    const c = this.cls(x, y, z);
+    if (!c) return UNKNOWN;
+    if (isScaffold(c) || c.liquid || isClimber(c)) return BLOCKED;
+    let feet: number;
+    if (c.boxes.length && !isPanel(c)) {
+      if (isPassage(c)) return BLOCKED;
+      if (c.top < 1 - EPS) feet = y + c.top;
+      else {
+        // inside a bowl (a hopper's, a cauldron's, a composter's): the highest box top under 1 over the centre, every
+        // higher box clear of a centred body's footprint (the rim the body steps over on its way out)
+        let f = -1;
+        for (const b of c.boxes) if (b[4] < 1 - EPS && b[0] <= 0.5 && b[3] >= 0.5 && b[2] <= 0.5 && b[5] >= 0.5) f = Math.max(f, b[4]);
+        if (f < 0) return BLOCKED;
+        for (const b of c.boxes) if (b[4] > f + EPS && b[0] < CORRIDOR_HI - EPS && b[3] > CORRIDOR_LO + EPS && b[2] < CORRIDOR_HI - EPS && b[5] > CORRIDOR_LO + EPS) return BLOCKED;
+        feet = y + f;
+      }
+    } else {
+      if (avoidWalkingInto(c)) return BLOCKED;
+      const b = this.cls(x, y - 1, z);
+      if (!b) return UNKNOWN;
+      if (!b.boxes.length || b.liquid || isScaffold(b) || isClimber(b) || isPanel(b)) return BLOCKED;
+      if (b.top < 1 - EPS || b.top > 1.5 + EPS) return BLOCKED;
+      feet = y - 1 + b.top;
+    }
+    const headTop = Math.floor(feet + PHYSICS.height - 1e-6);
+    for (let cy = y + 1; cy <= headTop; cy++) {
+      const h = this.cls(x, cy, z);
+      if (!h) return UNKNOWN;
+      if (!passable(h)) return BLOCKED;
+    }
+    return feet;
+  }
+
   /** The body cells of a node standing at `feet` hold a door or gate. */
   hasPassage(x: number, y: number, feet: number, z: number): boolean {
     const top = Math.floor(feet + PHYSICS.height - 1e-6);

@@ -63,7 +63,8 @@ A node is the cell that contains the feet: feet height in `[y, y + 1)`. The floo
 block in the cell itself (slab 0.5, carpet 0.0625, snow layer, soul sand 0.875, bed 0.5625 ...) or a
 block whose top is exactly 1 in the cell below. The body (0.6 x 1.8) must find every cell from the feet
 up to `feet + 1.8` free (no collision box, no liquid, no hazard). Fences, walls, gates and unknown
-blocks (1.5 high) are obstacles, never floors. Costs are ticks (`DEFAULT_COSTS`):
+blocks (1.5 high) are obstacles, never floors. A body standing on one anyway starts its walk from a perch, a start
+node with no floor of its own (Track R5, "A walk starts from wherever the body stands"). Costs are ticks (`DEFAULT_COSTS`):
 
 | Move | Where | Condition | Cost (ticks) |
 |---|---|---|---|
@@ -1299,6 +1300,133 @@ arose: no hostile came within 16 while a fall was the only way, so the hold has 
 tenth walk ended for another reason, open: the flight had set the body down on the top of a fence, the goto found
 `no standable node` at the feet three times in two seconds and answered unreachable with no plan and no cause (a body
 standing 1.5 over a fence's block has no start node). Not R4's case: nothing passes there, and the hold is not asked.
+
+### A walk starts from wherever the body stands (Track R5)
+
+Decision record: [decisions/0072-reachability.md](decisions/0072-reachability.md) "R5". On the Realm (2026-11-13) a
+flight home set the body down on the top of a fence. The goto logged `no standable node` at the feet three times in
+two seconds and answered `unreachable` with no plan and no cause, a few blocks from its goal. Four other walks that
+began on a fence top the same day started.
+
+**Why one spot failed and the next one did not.** A node is a cell whose floor is a partial block in the cell itself
+or a block with its top at exactly 1 in the cell below. A fence, wall or closed gate (top 1.5) is neither, so the cell
+over it is never a node. `locateNode` looks in the 3 x 3 cells under the body's footprint, at the feet's level and one
+up and one down, for a node whose feet are within 0.6 of the body's. The four walks that started had the body at the
+edge of the post's block, so its footprint overlapped the next column. That column had a node 0.5 below the fence top:
+a block beside the fence, level with the fence's base, so its floor was 1.0 above that base. The walk that failed had
+the body near the middle of a post standing on open ground. Every neighbour floor was 1.5 below the feet, out of reach
+of the 0.6, so there was no start. Where on the post the body lands decides it, and a flight's landing is not that
+precise. In the log, "in air" means only that the feet cell's block is air.
+
+**The perch.** When no node is found, `locatePerch` (astar.ts) looks for a top the body rests on in the same 3 x 3
+columns:
+
+- `NavGrid.perch` gives the height of the top a body stands on in a cell that is not a node. Three cases:
+  - a box in the cell below with its top between 1 and 1.5 (fences, walls, gates, a composter or cauldron rim, magma,
+    cactus, dripstone);
+  - a box in the cell itself with its top under 1 that is not a floor (a hopper's rim, a cauldron's inside);
+  - in a bowl (a box at 1 or higher in the cell), the highest box under 1 covering the centre, if nothing higher stands
+    in the body's corridor (a hopper's funnel).
+
+  In every case the body's head room up to the feet + 1.8 must be free, and liquids, scaffolding and climbers are never
+  a perch.
+- The body must stand on that top: its feet at most `PERCH_ABOVE` (0.05) above it and no lower, and one of the boxes
+  whose top is at that height under the footprint. The boxes come from `boxesAtCell`, so a fence's arms count: a body on
+  the rail between two posts is on a perch.
+- The A* search starts from the perch with `startFeet` (the worker gets it too). Only the planner's own moves leave
+  it: walks (straight, diagonal, through a doorway at its level), jumps, drops and long drops, each checked as from
+  any node at those feet. A perch is never "flat" (`expand`), so none of the moves that need a full floor under the
+  feet starts there: no dig, pillar, parkour, sneak, hatch or climb. No move goes into a perch: it is a start, never a
+  node of the graph.
+
+So every step that leaves a perch is a step the planner already had, under the same rules: the fall policy, the R4 hold
+and the step-off check apply to a drop off a fence as to a drop off a cliff. A perch is used only where `locateNode`
+finds nothing, so every start that worked before is the same start. It is on by default, because it only lets a walk
+begin.
+
+**The settling wait.** A goto asked while the body is still in the air (just set down by a flight, or knocked up) has
+no start until it lands. When no start is found, the body is not on the ground and not in water or lava, the
+navigator waits instead of counting a failure: it looks again every 2 ticks, up to `SETTLE_TICKS` 40 (2 s) a goto. 40
+ticks is the fall time from rest, by the physics model (gravity 0.08, drag 0.98), of about 48 blocks:
+
+| Fall from rest | 1.5 | 3 | 5.5 | 16 | 30 | 48 |
+|---|---|---|---|---|---|---|
+| Ticks to land | 7 | 10 | 13 | 23 | 31 | 40 |
+
+A body still in the air after that, or one on the ground with no start, fails as before. The goto's line says
+`, N plan(s) from a perch` and `, N ticks settling` when either was used, and the start is logged as `goto: starting
+from a perch at x,y,z feet F (on <block>: no standable node there)`.
+
+**Other places a goto ended with no plan because of its start.** These now use the same start (`Navigator.startOf`):
+the "why" search's start, the line drawn when no segment is found, the fall note in the reply (`withFallNote`), and
+`Navigator.plan` from the body. A plan that came back `none` with an empty path is a start the planner did not accept,
+for example when the world changed between the lookup and the search. It used to end the goto at once, or fail a
+corridor waypoint. It now counts a failure and plans again in 10 ticks. Left as they are (`home/reach.ts`, the mine's
+probe and the panic run use `locateNode` and are reported in decision 41): a goal on a fence top is still `not
+standable`.
+
+**Shapes** (`test/unit/skills/nav-r5.test.ts`, the shapes table, 2026-11-13): each block on a grass floor with air
+around it, the body on its top at the centre and at four offsets, before and after.
+
+| Shape | Before | After |
+|---|---|---|
+| fences (oak, spruce, nether brick; posts, rails), walls (cobblestone and the others), fence gates (closed) | no start | perch |
+| cauldron and composter rims, a full composter, magma, cactus, pointed dripstone, hopper (rim and funnel) | no start | perch |
+| panes, bars, chest, stairs, slabs, bed, anvil, lantern, rods, chain, bell, brewing stand, grindstone, stonecutter, lectern, enchanting table, daylight detector, flower pot, cake, soul sand, farmland, snow layers, carpets, honey, mud, decorated pot, candle, dragon egg, conduit, trapdoors | node | the same node |
+| campfire; the inside of an empty cauldron or composter | a node in the next cell (0.31 to 0.44 lower) | the same |
+| sea pickle, scaffolding, ladder, piston arm | no start (nothing to stand on, or a climber) | the same |
+
+249 rows (written to `R5_SHAPES_OUT` when it is set). A full composter's top (0.9375, inside its 1-high rim) is a
+perch at its centre.
+
+**Measured offline** (`nav-r5.test.ts`, the real navigator in the closed loop of the reach bench, 2026-11-13): a fence
+line on a grass floor, the goal 20 blocks off. Each run puts the body at a slightly different spot along the line.
+
+| Case | n | Result | Damage | Time |
+|---|---|---|---|---|
+| before R5 (perch off, no wait), the Realm's spot on a post | 1 | `no standable node` 3 times, unreachable with no plan | 0 | 41 ticks |
+| the control: the same walk from the grass | 10 | arrived 10 of 10 | 0 | 84 ticks |
+| a post's centre | 10 | arrived 10 of 10, a perch start | 0 | 92 to 95 ticks |
+| the rail between two posts | 10 | arrived 10 of 10 | 0 | 94 to 95 |
+| the Realm's spot (the middle of a post) | 10 | arrived 10 of 10 | 0 | 93 to 94 |
+| the edge of a post | 10 | arrived 10 of 10 | 0 | 92 to 93 |
+| the end of the line | 10 | arrived 10 of 10 | 0 | 94 to 95 |
+| landing: 1 over a post, the goto asked at once | 10 | arrived 10 of 10, settled first | 0 | 97 to 101 |
+| landing, before R5 | 1 | unreachable with no plan | 0 | 41 |
+| a fence on a wall of planks 4 high, a stair of planks down | 10 | arrived 10 of 10 by the stair | 0 | 142 to 145 |
+| the same wall with no stair (a 5.5-block drop) | 10 | arrived 10 of 10 | 2 each (the fall) | 106 to 109 |
+| the drop, a zombie 12 blocks off for a while | 10 | arrived 10 of 10, held for it first (R4) | 2 each (the fall) | 178 to 268 |
+| the drop at 8 health | 1 | `unreachable (rule falls: a 5.5-block fall (2 HP), no fall that hurts now: health 8 with margin 8 ...)` | 0 | 6 |
+
+**Measured on bds-pve** (`test/e2e/nav-perch.test.ts`, BDS 1.26.60, 2026-11-13, noon, no mobs): a spruce fence line
+built by the console's `fill` (the server joins the posts north and south: the rows record the connection states), the
+goal on the grass 20 blocks off, the walk through the PvE layer with `explain` as `!goto` has it.
+
+| Case | n | Result | Damage | Time |
+|---|---|---|---|---|
+| before (`Navigator.perch` off, `settleTicks` 0), the middle of a post | 10 | 10 unreachable, `no standable node` 3 times, no plan | 0 | 2.0 to 2.1 s (41 ticks) |
+| a post's centre | 10 | arrived 10 of 10, one plan from a perch | 0 | 4.5 to 4.7 s (91 to 93 ticks) |
+| the rail between two posts | 10 | arrived 10 of 10 | 0 | 4.6 to 4.7 s |
+| the Realm's spot (the middle of a post) | 10 | arrived 10 of 10 | 0 | 4.6 s |
+| the edge of a post (0.01 over its side) | 10 | arrived 10 of 10 | 0 | 4.5 to 4.6 s |
+| the end of the line (joined on one side only) | 10 | arrived 10 of 10 | 0 | 4.6 to 4.7 s |
+| landing: teleported 1 over a post, the walk asked at once | 10 | arrived 10 of 10, 2 to 4 ticks settling first | 0 | 4.6 to 4.8 s |
+| the fence on a wall of planks 4 high, a stair of planks down | 10 | arrived 10 of 10 by the stair | 0 | 7.0 to 7.2 s |
+| the same wall with no stair (a 5.5-block drop) | 10 | arrived 10 of 10, 3 plans from the perch (the levels up to the one that takes the fall) | 2 each (the fall), 0 deaths | 5.2 to 5.4 s |
+
+The same walk from the grass took 84 ticks offline (4.2 s; not run on the server), so a start on a fence costs
+the step down, about 8 ticks.
+
+The reach bench (`--config live --speed 1 --worlds 20`, the owner's Mac, 2026-11-13): 2541 pairs with the long
+class, 6 false unreachable, 0 deaths. On the 2194 pairs of R4's run (no long class), the same 5 false unreachable
+as R4 and no pair with another answer. The sixth, a long pair interrupted at its 6600-tick budget after 107 dug
+blocks, is the same tick for tick on the base before R4. On the 2394 pairs this run shares with that base, the base
+had one more false unreachable and one death: R4's lava pair. One worker ran out of memory (a 6 GB heap) on the
+sixth pair of long world 1, so 13 of that world's 18 pairs did not run. The base run stopped at the same pair, and
+a rerun of that world alone was still on it after 15 minutes.
+The mob gates on the same tree: `pve-m1`, `pve-combat` and `pve-creeper` on bds-pve 20 of 20. The gauntlet's live kit
+on bds-gaunt, 33 cells: 0 deaths and 55.3 damage in all; the lowest health was 1.1 in `mixed-8`, 28 of its 29.9 from
+a witch's potions. R4's `nav-hostile-fall` on bds-pve passed 4 of 4.
 
 ## Following a path
 

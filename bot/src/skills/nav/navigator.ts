@@ -21,7 +21,7 @@ import { classify, type TerrainClass } from '../terrain/classify.ts';
 import type { TerrainSource } from '../terrain/query.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { DEFAULT_THROWAWAY, DIG_REPEATS, DIG_SETTLE_TICKS, type BreakRules, type NavActions } from './actions.ts'; // Track BC: DIG_REPEATS, DIG_SETTLE_TICKS
-import { PathSearch, explainStart, findPath, goalUnloaded, handBreakTicks, locateNode, type LocatedNode, type PathNode, type PathOptions, type PathResult } from './astar.ts';
+import { PathSearch, explainStart, findPath, goalUnloaded, handBreakTicks, locateNode, locateStart, type LocatedNode, type PathNode, type PathOptions, type PathResult } from './astar.ts';
 import { DEFAULT_COSTS, TICKS, type PathCosts } from './costs.ts'; // Track BI: DEFAULT_COSTS, PathCosts (dropCheck)
 import { PathFollower, PressGuard, yawTowards } from './follower.ts';
 import { goalTest, type NavGoal } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
@@ -212,6 +212,10 @@ export interface GotoReport {
   unloadedWait: number;
   /** Track R4: ticks the goto held for a block on its only fall to pass (startHold). */
   held?: number;
+  /** Track R5: main plans started from a perch (a fence's top: astar `locatePerch`). */
+  perchStarts?: number;
+  /** Track R5: ticks waited with no start node while the body was still in the air (SETTLE_TICKS at most). */
+  settleTicks?: number;
   /** Track AB: worker answers spliced into the path being walked, and answers dropped as stale (blocks changed near them). */
   upgrades?: number;
   stale?: number;
@@ -341,6 +345,8 @@ interface Active {
   aimAbs: number;
   lastSafe: LocatedNode | undefined;
   retreat: { until: number } | undefined;
+  /** Track R5: ticks waited with no start node while the body was in the air (SETTLE_TICKS at most a goto). */
+  settled: number;
   noBreak: Set<number>;
   /** Pillar / door cells (cellKey) whose action failed during this goto: not planned again. */
   noAction: Set<number>;
@@ -453,6 +459,15 @@ export const OPEN_WALKS = 2;
 export const FALL_HOLD_TICKS = 600;
 /** Track R4: ticks the block must stay away before the hold ends and the goto plans again (a hostile on the 16-block line). */
 export const FALL_HOLD_CLEAR = 20;
+/**
+ * Track R5: ticks a goto waits at most (in all) with no start node while the body is in the air, before a failure counts:
+ * 2 s, the time the three failures took before. A free fall from rest lands from 1.5 blocks in 7 ticks, from 3 in 10, from
+ * 16 in 23 and from 48 in 40 (physics.ts: gravity 0.08, drag 0.98); a body that is in the air longer than that is in a
+ * fall the FallGuard handles, not settling. The look is repeated every SETTLE_STEP ticks.
+ */
+export const SETTLE_TICKS = 40;
+/** Track R5: ticks between two looks for the start node while the body settles. */
+const SETTLE_STEP = 2;
 /** Track R4: the hold reads the live fall policy every this many ticks. */
 const FALL_HOLD_EVERY = 5;
 
@@ -555,6 +570,10 @@ export class Navigator {
   dropCheck: ((from: PathNode, to: PathNode, costs: PathCosts) => boolean) | undefined;
   /** Track R4: ticks a goto may hold for a block on its only fall to pass (0: never, the behaviour before). */
   fallHoldTicks = FALL_HOLD_TICKS;
+  /** Track R5: ticks a goto waits for an airborne body to settle before "no standable node" counts (0: the behaviour before). */
+  settleTicks = SETTLE_TICKS;
+  /** Track R5: a body on a perch (a fence's top) plans from it (false: the behaviour before, for the tests' before and after). */
+  perch = true;
   private protect: NavigatorOptions['protect'];
   /** Track BK: cells (cellKey) no goto may dig while a job holds them (a quarry's stair treads); every goto's noBreak starts with them. */
   readonly keptCells = new Set<number>();
@@ -827,8 +846,9 @@ export class Navigator {
   /** Plan only (no movement, one search to the end): from the body's current node to the goal. */
   plan(goal: NavGoal, from?: Vec3, options?: GotoOptions): PathResult | undefined {
     const s = this.loop.state;
-    const start = locateNode(this.grid, from ?? s.pos, from ? undefined : this.preferNode(s)); // Track AJ
-    return start && findPath(this.grid, start, goal, this.planOptions(options));
+    // Track AJ; Track R5: from the body, a perch too (a fence's top)
+    const start = from ? locateNode(this.grid, from) : this.startOf(s.pos, this.preferNode(s));
+    return start && findPath(this.grid, start, goal, start.perch ? { ...this.planOptions(options), startFeet: start.feet } : this.planOptions(options));
   }
 
   goto(goal: NavGoal, options: NavGotoOptions = {}): Promise<SkillResult> {
@@ -927,6 +947,7 @@ export class Navigator {
         aimAbs: 0,
         lastSafe: undefined,
         retreat: undefined,
+        settled: 0, // Track R5
         noBreak,
         noAction: new Set(),
         placeFailures: 0,
@@ -981,6 +1002,7 @@ export class Navigator {
             `goto ${JSON.stringify(goal)}: ${r.ok ? 'ok' : r.reason} after ${report.ticks} ticks, ${report.distance.toFixed(1)} blocks, ` +
               `${report.plans.length} plan(s)${report.plans.some((p) => p.via === 'worker') ? ' (worker)' : ''}, ${report.segments} segment(s), ${report.corrections} correction(s), ${report.stuck} stuck, max tick ${report.maxTickMs} ms` +
               `${report.held ? `, held ${report.held} ticks for a fall` : ''}` + // Track R4
+              `${report.perchStarts ? `, ${report.perchStarts} plan(s) from a perch` : ''}${report.settleTicks ? `, ${report.settleTicks} ticks settling` : ''}` + // Track R5
               `${report.reached ? `, reached member ${report.reached.index}` : ''}${skipped.length ? `, skipped ${skipped.join(' ')}` : ''}${report.blacklisted?.length ? `, blacklisted ${report.blacklisted.join(' ')}` : ''}` +
               `${report.corridor ? `, corridor ${report.corridor.status ?? 'pending'} (${report.corridor.requests} request(s), ${report.corridor.passed} waypoint(s) passed, ${report.corridor.failed} failed)` : ''}`, // Track CB
           );
@@ -1082,7 +1104,7 @@ export class Navigator {
         .join(',');
       return st ? `${b.name}[${st}]` : b.name;
     };
-    const start = locateNode(this.grid, p, this.preferNode(s)); // Track W1: the swim / dive node in water
+    const start = this.startOf(p, this.preferNode(s)); // Track W1: the swim / dive node in water; Track R5: a perch
     const plans = a.report.plans.map((r) => `${r.reason}:${r.status}/${r.nodes}n/${r.expanded}e/${r.ms}ms`).join(' ');
     return (
       `goto unreachable without a segment: feet ${fmt(p)}${s.onGround ? '' : ' airborne'}, in ${block(y)}, on ${block(y - 1)}, ` +
@@ -1259,7 +1281,7 @@ export class Navigator {
     const gp = goalPoint(a.goal);
     if (gp?.y === undefined) return false;
     const st = this.loop.state;
-    const start = locateNode(this.grid, st.pos, this.preferNode(st));
+    const start = this.startOf(st.pos, this.preferNode(st)); // Track R5: a perch too
     let frontier = false;
     if (this.grid.cls(Math.floor(gp.x), Math.floor(gp.y), Math.floor(gp.z)) === undefined) {
       a.cause = { cls: 'unloaded', rules: [] };
@@ -1296,6 +1318,8 @@ export class Navigator {
     const o = relaxOptions(run.owner, run.cur, { hp: this.health?.(), dug: a.dug });
     if (run.frontier) o.frontier = true;
     else delete o.frontier;
+    if (run.start.perch) o.startFeet = run.start.feet; // Track R5: from the perch the body is on
+    else delete o.startFeet;
     return o;
   }
 
@@ -1472,6 +1496,14 @@ export class Navigator {
   private idleBody(s: InputLoopState): void {
     if (bodyInWater(this.cellOf, s)) this.loop.setCommand({ forward: 0, strafe: 0, sprint: false, sneak: false, jump: s.vel.y < 0 });
     else this.loop.release();
+  }
+
+  /**
+   * Track R5: the node a plan from feet `pos` starts at: `locateNode`'s, else the perch the body rests on (astar
+   * `locateStart`: a fence's top, which the stand rule has no node for). Not a safe node: `lastSafe` stays locateNode's.
+   */
+  private startOf(pos: Vec3, prefer: 'swim' | 'climb' | undefined): LocatedNode | undefined {
+    return this.perch ? locateStart(this.grid, pos, prefer) : locateNode(this.grid, pos, prefer);
   }
 
   /** Standing on a standable node, on the ground, out of liquids. */
@@ -1916,9 +1948,12 @@ export class Navigator {
   }
 
   /** A main plan (or a plan-ahead from `start`) in the worker when it is ready and the options cross threads, else in-thread. */
-  private newSearch(a: Active, start: { x: number; y: number; z: number }, kind: 'main' | 'ahead', reason: ReplanReason): Search {
+  private newSearch(a: Active, start: { x: number; y: number; z: number; feet?: number; perch?: true }, kind: 'main' | 'ahead', reason: ReplanReason): Search {
     const client = this.plannerFor();
     const main = kind === 'main';
+    // Track R5: a main plan from a perch starts at the body's feet on it (a plan-ahead starts at a path's end: a node)
+    if (start.perch && start.feet !== undefined) a.pathOpts.startFeet = start.feet;
+    else delete a.pathOpts.startFeet;
     // Track CB: towards the corridor's next window when one is followed, else the goto's goal
     const target = this.corridorTarget(a, start);
     const navGoal = target ? waypointGoal(target.p) : a.planGoal;
@@ -2060,6 +2095,7 @@ export class Navigator {
       ...(o.digWay ? { digWay: { left: o.digWay.left } } : {}), // Track W3
       ...(o.relax ? { relax: { ...o.relax } } : {}), // Track R1
       ...(o.frontier ? { frontier: true } : {}),
+      ...(o.startFeet !== undefined ? { startFeet: o.startFeet } : {}), // Track R5: a perch start
     };
   }
 
@@ -2149,9 +2185,21 @@ export class Navigator {
     a.replan = undefined;
     dropSearch(a); // Track AB
     a.follower = undefined;
-    const start = locateNode(this.grid, s.pos, this.preferNode(s)); // Track AJ: swimming / on a ladder; Track W1: under water
+    // Track AJ: swimming / on a ladder; Track W1: under water; Track R5: on a fence's top (a perch)
+    const start = this.startOf(s.pos, this.preferNode(s));
     if (!start) {
       this.idleBody(s); // Track W1
+      // Track R5: a body still in the air (just off a glide, falling onto something) has its node within ticks: wait for
+      // it with no failure, SETTLE_TICKS at most a goto (the Realm, 2026-11-13: three failures 20 ticks apart ended a walk
+      // 0.6 s after a landing)
+      if (!s.onGround && !s.inWater && !s.inLava && a.settled < this.settleTicks) {
+        if (a.settled === 0) this.log.info(`goto: no start node at ${fmt(s.pos)} while the body is in the air: waiting for it to settle (up to ${this.settleTicks} ticks)`);
+        a.settled += SETTLE_STEP;
+        a.report.settleTicks = a.settled;
+        a.replan = reason;
+        a.waitUntil = a.t + SETTLE_STEP;
+        return false;
+      }
       if (this.fail(a, `no standable node at ${fmt(s.pos)}`)) return false;
       a.replan = 'retry';
       a.waitUntil = a.t + 20;
@@ -2203,6 +2251,12 @@ export class Navigator {
     // level does (they walk on where the dug way comes out, and dig no more than the level would)
     const levelOpts = a.pathOpts;
     if (a.long) a.pathOpts = longDigOptions(levelOpts);
+    if (start.perch) {
+      a.report.perchStarts = (a.report.perchStarts ?? 0) + 1;
+      const own = this.grid.cls(start.x, start.y, start.z);
+      const on = own?.boxes.length ? own : this.grid.cls(start.x, start.y - 1, start.z);
+      this.log.info(`goto: starting from a perch at ${start.x},${start.y},${start.z} feet ${+start.feet.toFixed(4)} (on ${on?.name ?? '?'}: no standable node there)`);
+    }
     a.search = this.newSearch(a, start, 'main', reason); // Track AB: in the worker when it is ready
     // (the long dig search's interim, its best partial path after 40 ms, is not walked: weighted and digging cheaply,
     // it led the body into a tower's foot, where the level's plans found nothing more, pits:12:10)
@@ -2253,6 +2307,16 @@ export class Navigator {
       if ((res.status === 'none' || res.path.length <= 1) && this.adoptOpenWay(a)) return true;
       a.openPath = undefined;
     }
+    if (res.status === 'none' && res.path.length === 0) {
+      // Track R5: the search found no start where the navigator found one (the worker's copy of the world a tick behind
+      // the body's chunks, a perch the search's grid reads otherwise): a failure that plans again, never the answer (it
+      // ended the goto at once, or failed a corridor waypoint the body never left for)
+      this.loop.release();
+      if (this.fail(a, 'the start node is not standable in the planner')) return false;
+      a.replan = 'retry';
+      a.waitUntil = a.t + 10;
+      return false;
+    }
     if (res.status === 'none') {
       // Track CB: a corridor waypoint with no path is the corridor's failure, not the goto's: re-plan towards the raw goal
       if (search.wp !== undefined && a.corridor) {
@@ -2262,8 +2326,8 @@ export class Navigator {
         a.waitUntil = a.t + 1;
         return false;
       }
-      a.why = res.path.length ? this.noPathWhy(res) : 'the start node is not standable';
-      if (res.path.length && this.escalate(a, a.why)) {
+      a.why = this.noPathWhy(res);
+      if (this.escalate(a, a.why)) {
         // Track W3: the next level before giving up
         this.loop.release();
         return false;

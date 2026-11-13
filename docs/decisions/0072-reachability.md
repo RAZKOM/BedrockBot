@@ -282,3 +282,52 @@ the drop, and the goto ended `unreachable (rule falls ...)` at 19.7 health, a fe
     a door or pillar cell whose action failed once is not planned again in that goto; an unreachable answer still
     counts towards the goal's blacklist. Where the flight lands (the spot with only a hurting way off) is the flight
     track's.
+
+## R5: a walk starts from wherever the body stands
+
+Track R5 (2026-11-13, docs/pathfinding.md "A walk starts from wherever the body stands (Track R5)"). On the Realm a
+flight set the body down on the top of a fence; the goto found `no standable node` at the feet three times and ended
+`unreachable` with no plan and no cause. Walks that began on other fence tops started only because the body's
+footprint overlapped a column with a node 0.5 lower.
+
+36. **A start where the stand rule has no node: the perch.** A fence, wall or closed gate (top 1.5) is not a floor, and
+    that stays so: no path goes onto one. When `locateNode` finds no node, `locatePerch` takes the top the body rests
+    on: `NavGrid.perch` gives the feet height on a top the stand rule does not take (a box in the cell below with its top
+    from 1 to 1.5; a box in the cell itself with its top under 1 that is not a floor; the highest box under 1 in a
+    bowl). The head room must be free, and liquids, scaffolding and climbers are never a perch. The body must be on it:
+    the feet no lower than the top and at most `PERCH_ABOVE` 0.05 above it, and a box with its top there under the
+    footprint, counting a fence's arms (`boxesAtCell`).
+37. **Only the planner's own moves leave a perch.** The search starts there with `PathOptions.startFeet` (`F_PERCH`;
+    the worker gets it too): walks, diagonals, a doorway at its level, jumps, drops and long drops, each under the rules
+    it has from any node. A perch is never "flat", so no dig, pillar, parkour, sneak, hatch or climb starts there, and
+    no move goes into one. The fall policy, the R4 hold and the step-off check apply to the drop off a fence as to any
+    drop. A perch is tried only when `locateNode` finds nothing, so every start that worked before is unchanged. It is
+    on by default: it only lets a walk begin and adds no step the planner did not have.
+38. **A body in the air settles first.** When there is no start and the body is not on the ground and not in water or
+    lava, the goto waits without counting a failure: it looks again every 2 ticks, up to `SETTLE_TICKS` 40 (2 s) a
+    goto. 40 ticks is a fall from rest of about 48 blocks in the physics model (1.5 blocks in 7 ticks, 5.5 in 13, 16
+    in 23). After that, or for a body on the ground, the goto fails as before.
+39. **The same start everywhere a goto looks for one.** `Navigator.startOf` (the main search, the "why" search, the line
+    drawn when no segment is found, `Navigator.plan`) and `withFallNote` use `locateStart`: `locateNode`, else the perch.
+    A plan that came back `none` with an empty path is a start the planner refused (the world changed between the
+    lookup and the search). It used to end the goto at once, or fail a corridor waypoint; it now counts a failure and
+    plans again in 10 ticks. `safeHere` and the last safe spot stay on `locateNode`: a perch is not a place to stand
+    and wait.
+40. **Measured.** The shapes table (`nav-r5.test.ts`, about 50 blocks at 5 spots each): fences, walls, gates,
+    cauldron and composter rims, magma, cactus, dripstone and the hopper had no start before and have a perch now. The
+    blocks that had a node keep the same node. The real navigator in the bench's closed loop, a fence line and a goal
+    20 blocks off, 10 runs a case: the post, the rail, the Realm's spot, the edge, the end and a landing 1 over a post
+    each arrived 10 of 10 with no damage in 92 to 101 ticks (from the grass: 84); before R5, unreachable with no
+    plan in 41 ticks. The fence on a wall 4 high: by a stair, 10 of 10 with no damage; with no stair, a 5.5-block drop,
+    10 of 10 with the fall's 2 HP; with a zombie near, 10 of 10 after R4's hold; at 8 health, `rule falls` as before.
+    On bds-pve (`nav-perch.test.ts`, a spruce fence line the server joined, 10 runs a case): before R5, 10 of 10
+    unreachable with no plan in 2.0 s; the post, the rail, the Realm's spot, the edge, the end and the landing each
+    arrived 10 of 10 with no damage in 4.5 to 4.8 s; the stair, 10 of 10 in 7.0 to 7.2 s with no damage; the drop,
+    10 of 10 in 5.2 to 5.4 s with the fall's 2 HP. The bench at the live settings on the Mac: 2541 pairs (the long class
+    included), 6 false unreachable, 0 deaths; on R4's 2194 pairs the same 5 as R4, and the sixth (a long pair
+    interrupted at its tick budget) the same on the base before R4. No pair changed its answer.
+41. **Left as they are** (reported, not the same case): a goal on a fence top is still `not standable` (the goal side
+    has no perch); `home/reach.ts` (the flight's landing probe), the mine's probe and the panic run plan from
+    `locateNode`; inside a cauldron or composter `locateNode` takes a neighbour node 0.31 lower, and the rim then needs a
+    jump; the unprone and leaves path keep their own start. Where the flight sets the body down is the flight
+    track's.

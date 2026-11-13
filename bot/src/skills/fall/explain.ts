@@ -18,7 +18,7 @@ const hp = (n: number): string => (Number.isInteger(n) ? String(n) : n.toFixed(1
 export function explainFallRefusal(
   nav: Pick<Navigator, 'planOptions' | 'grid'>,
   guard: Pick<FallGuard, 'policy' | 'settings' | 'damageOf'>,
-  start: { x: number; y: number; z: number } | undefined,
+  start: { x: number; y: number; z: number; feet?: number; perch?: true } | undefined,
   goal: NavGoal,
   opts?: NavGotoOptions,
 ): string | undefined {
@@ -32,7 +32,9 @@ export function explainFallRefusal(
   delete loose.refused; // the drops the step-off check refused are what the note explains
   if (!start) return undefined;
   // a small in-thread budget (review: never block the main thread for long): the note is a courtesy
-  const res = findPath(nav.grid, start, goal, { ...nav.planOptions(opts), falls: loose, maxMs: EXPLAIN_MS, maxNodes: EXPLAIN_NODES });
+  // (Track R5: from the perch the body is on, a fence's top, as the goto planned)
+  const perch = start.perch && start.feet !== undefined ? { startFeet: start.feet } : {};
+  const res = findPath(nav.grid, start, goal, { ...nav.planOptions(opts), falls: loose, maxMs: EXPLAIN_MS, maxNodes: EXPLAIN_NODES, ...perch });
   if (res.status !== 'found') return undefined;
   let worst: { h: number; dmg: number } | undefined;
   for (let i = 1; i < res.path.length; i++) {

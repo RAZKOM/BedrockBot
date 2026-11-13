@@ -46,7 +46,7 @@ import type { SkillResult, Skills } from './types.ts'; // Track R: goto takes Na
 import { surfaceRefusal } from '../world/dimension.ts'; // Track AT
 import { FallGuard, type FallGuardDeps } from './fall/clutch.ts'; // Track BI
 import { explainFallRefusal } from './fall/explain.ts'; // Track BI
-import { locateNode } from './nav/astar.ts'; // Track BI: the start of the explaining plan
+import { locateStart } from './nav/astar.ts'; // Track BI: the start of the explaining plan (Track R5: a perch too)
 import { headInWater, swimUp } from './survival/surface.ts'; // Track BF
 
 export type { Goal, GotoOptions, SkillResult, Skills, DigOptions, DigResult } from './types.ts';
@@ -486,7 +486,7 @@ export class BotSkills implements Skills {
       // not when the blacklist refused the goal / every member (nothing was planned)
       const rep = this.nav.lastReport;
       if (!rep || rep.skipped?.length || rep.plans.length === 0) return r;
-      const note = explainFallRefusal(this.nav, this.falls, locateNode(this.nav.grid, this.loop.state.pos), goal, opts);
+      const note = explainFallRefusal(this.nav, this.falls, locateStart(this.nav.grid, this.loop.state.pos), goal, opts);
       return note ? { ...r, note: r.note ? `${r.note}; ${note}` : note } : r; // Track R1: after the cause's words
     } catch (e) {
       this.log.warn(`fall note: ${e instanceof Error ? e.message : String(e)}`);
