@@ -6933,6 +6933,27 @@ air, a wall 6 behind the cell) fly the same ticks with the track's switch either
 Every landing that is come to from high with roofs, trees or higher ground under its circle is flown this way now,
 not only the one at home: `landing brake` and the `descent circle ... left` line will show on other trips too.
 
+### On the Realm (2026-11-13, the live kit, `!test goto home from cave_start`)
+
+The same evening, on the deployed build, `flyLandOver` off for three runs and on for five.
+
+| `flyLandOver` | arrived | a run | on the landing | from its centre | touchdown down / along | damage |
+|---|---|---|---|---|---|---|
+| off | 3 of 3 | 64, 69, 89 s | 1 of 3 (by the flare, a slide of 0.98) | 0.44; 10.1 and 15.6 | 0.17 to 0.43 / 0.14 to 0.63 | 0 in the landings |
+| on | 5 of 5 | 64, 63, 64, 66, 62 s (63.4) | 5 of 5 (by the brake, 46 to 52 ticks) | 0.01 each | 0.23 to 0.30 / 0.012 to 0.015 | 0 |
+
+- With it on every flight wrote `descent circle r10 left 20 over the landing's floor: what stands under it reaches 12
+  over that floor`, then the retarget to the same landing, and stood about 4.3 s later. 797 to 892 ticks a flight
+  (790 to 860 on the morning's series), 4 rockets each, no go-around, no `landing price`.
+- The walk in started from the landing's floor five times of five: no `no standable node`, no damage.
+- With it off the two flights that ended off the landing now say why (`the glide ended in the approach (flare, its
+  last plan: wall) ...`); one of them had taken the priced `land now` to an alternative first.
+- Not the landing's: the 89 s run's first rocket fired nothing and the takeoff began again (seen on the morning's
+  series too); one takeoff with the setting on began while a chore's walk still moved the body, ended after 3 ticks
+  and was flown again.
+
+`flyLandOver` is on on the Realm.
+
 ### Unit tests (`fly-land-clear.test.ts`, synthetic worlds)
 
 The tops under a circle and inside it; the floor of a circle (nothing over 2 under it: none; roofs under it: 3 over
@@ -6948,8 +6969,8 @@ from its edge, a platform over the sea, unknown columns).
 
 ### Open points (Track F11)
 
-- **Not on the Realm yet.** The brake and the elevator have landed on the test servers (Tracks F1, F8, this one);
-  between the Realm's roofs with the Realm's latency they are what the series above is for.
+- **On the Realm one landing only**, the one at home, 5 of 5 ("On the Realm" above). Other places come to from high
+  over roofs, trees or a slope are flown this way too and have not been watched there.
 - **The landing's centre is the search's cell**: the one with the shortest walk, often at the edge of its floor
   nearest the goal (on the server: one block from a wall 6 high). The elevator comes down there; `rimWithin` keeps it
   over the landing's cells. A centre in the middle of the cells would leave more room; not done.

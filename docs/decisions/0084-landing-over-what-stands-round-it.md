@@ -114,4 +114,5 @@ entry's height along four bearings, which is how a flight that arrives low comes
 - The column tops are the model's. A block the live model does not have under the circle (a chunk that loaded wrong, a
   build since the cache was written where only the cache is known) is still flown into; the end's line now says
   that the body stands over or under the model's top.
-- Not on the Realm yet.
+- On the Realm (2026-11-13): the landing at home 5 of 5 at its centre by the brake with no damage, 63.4 s a run
+  against 62.5 s before; with the setting off 1 of 3. No other landing has been watched there.
