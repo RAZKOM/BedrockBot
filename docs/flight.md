@@ -288,6 +288,12 @@ bds-fly on 2026-10-30** in `fly-economy` with `FLY_ECON_BASELINE=1`; the bds-fly
 
 ## Descent geometry (Track AU2)
 
+> Since Track F11 a circle is never flown lower than 3 over the highest column under it, and a circle round the
+> target that has something more than 2 over the target's floor under it is left higher still and the landing flown
+> in over that ("The flight comes down where it planned to (Track F11)"). The fit below asks only about the height a
+> circle begins at; a circle round the target is in fact always flown to "10 under the exit height" (it is never 28
+> blocks out), which is 6 over the target's floor.
+
 Arriving more than 12 above the approach entry within 116 blocks of the target (a descending
 approach, a terrain-forced cruise, the rockets' quantum), the brain comes down to 6 above the glide
 line before the approach, choosing by the world model's columns (`chooseDescent`, `spiralFit`):
@@ -1151,6 +1157,7 @@ Rules (all named `// Track AU` in the shared files):
 | `flyCaveExit` | off | Track F9a, F9d: with `flyCave` on, a takeoff from under a roof with no recording that proves clear flies out along a line drawn from the cave's own air to the open sky (the flood under the roof, the line a body can fly, the whole takeoff simulated at every burn before it is taken) instead of walking out. Until Track F9d this asked for the searched way out, which its proof refused. `on` after a `!test goto` series on real terrain ("Drawn lines") |
 | `flyLearned` | off | Track F9b: with `flyCave` on, a takeoff from under a roof flies out along a path recorded with `!learn` that left the ground within 4 blocks of where the bot stands and comes out under open sky, when the whole takeoff simulated at five burns clears; no such path, or none that clears: the takeoff as without it. It has flown on the replica only: `on` after a `!test goto` series on real terrain ("Learned exits") |
 | `flyKitBurn` | off | Track F10: the flight in the open (the climb, the cruise's top-ups, the route planner's landings and takeoffs, a corridor's windows, every takeoff's proof) plans with the burn of the rockets in the hotbar (a crafted rocket: 19 to 31 ticks) instead of the plain rocket's 9 to 21: a burning rocket is flown to the height it was fired for and no higher, a top-up buys what the flight can use, the plans branch at the kit's burns. With plain rockets it changes nothing. Off until flown on the Realm ("The open-air flight on the burn of the rockets at hand") |
+| `flyLandOver` | on | Track F11: a descent circle is flown no lower than 3 over the highest column under it; a landing whose circle has roofs, trees or higher ground under it is then flown in over them by the brake and straight down by the elevator; the nearest safe ground of a forced or a priced landing is never a fence, a wall or a pane, nor a roof or a wall's top with a floor beside it. `off`: the circle down to 6 over the landing whatever stands there and the ground rules as before ("The flight comes down where it planned to") |
 
 ## Processes
 
@@ -6669,6 +6676,301 @@ simulation flies the burn it is told and a searched way out is proven at 25, 19,
 - **A corridor's windows with crafted rockets were not flown** with the setting on or off (the cave replica's windows
   need `flyCave` and the corridor; the trips there fly the lines): the kit reaches their trackers and proofs by the
   same state field the tunnels above flew with.
+
+## The flight comes down where it planned to (Track F11)
+
+Flight v2, Track F11, [decisions/0084](decisions/0084-landing-over-what-stands-round-it.md). On the Realm (2026-11-13)
+ten flights home of ten ended `landed_off`: 8 to 12 blocks from the centre of the landing the search had chosen,
+standing 2 to 9 blocks over its floor on the roofs round it. This track is which code put the body there, a descent
+that stays over what stands under it and a landing flown in over that and straight down, what the nearest safe ground
+may be, and a line that says why whenever a flight still ends off its landing. One setting, `flyLandOver` (default
+on). Where nothing stands under the descent circle every flight is tick for tick what it was.
+
+### Files
+
+| File | What |
+|---|---|
+| `bot/src/skills/fly/plan.ts` | `spiralTops` (what stands under a descent circle and inside it), `spiralFloor` and `SPIRAL_CLEAR` (the height a circle is left at the latest), `discTop`; `LandingTarget.rimWithin`, `rimReach`, `RIM_OVER` and the rule in `touchdownCheck` (under the rim only over the landing's own cells); `LAND_SWITCH` (the probes' way to fly the descent as it was) |
+| `bot/src/skills/fly/brain.ts` | `descend`: the circle's floor; `leftOver`: the landing flown as a floor under a rim; `whyOff`: the line of a flight that ends off its landing (`FlightEnd.why`); `BrainOptions.landOver` |
+| `bot/src/skills/fly/ground.ts` | `standsOn` (a block's top as a place to stand, by its collision boxes), `perched` (a top no walk leads down from) |
+| `bot/src/skills/fly/landing.ts` | `Floor.post`: a floor on a fence, a wall, a pane or a post is no landing cell (`CellBlock.boxes`) |
+| `bot/src/chat/commands-fly.ts` | `groundAt`: the two rules of ground.ts for a place to come down on (the takeoff sites ask without them) |
+| `bot/src/skills/fly/controller.ts`, `bot/src/tasks/process/fly.ts` | the end's line carries the why; `retargeted to ... (the same landing, flown in over what stands round it)`; the setting to the brain |
+| `bot/src/skills/fly/glide.ts` | `simulateFlight`'s `airborne`: a flight taken up in the air (the probe) |
+| `bot/src/config/settings.ts`, `bot/src/chat/help.ts` | `flyLandOver` (default on) |
+| `bot/scripts/land-site-probe.ts` | whole arrivals offline over a real place (the world cache's extract of it), from the cruise onto the landing the search chose; `--old` flies the descent as it was |
+| `bot/test/unit/skills/fly-land-clear.test.ts` | the guards (below) |
+| `bot/test/e2e/fly-yard.test.ts` | a yard between roofs and fence lines on the test server, come to from high over it |
+
+### What was measured first
+
+**The Realm's log** (ten `!test goto home` flights, the live kit, crafted rockets). The goal is under a roof. Every
+flight's search chose the same landing, an open floor of 63 cells with a walk of 13 s to the goal, and every flight was
+retargeted to it from a hold over the goal (20 to 43 ticks of holding). Every flight says `descent spiral r10 at 0 out
+from N above` with N 62 to 72, and ended:
+
+| | |
+|---|---|
+| from the landing's centre | 8.0 to 11.7 blocks (ten of ten outside its cells) |
+| over the landing's floor | 2.0 to 9.0: a whole number four times (a block's top), a half five times (a fence's top or a slab's), 0.18 over a whole once (a thin block's) |
+| touchdown | 0.13 to 0.29 a tick down, 0.05 to 0.65 a tick along |
+| the flight's lines | no go-around, no `landing price`, no `land now`, no `roof`: `flight: ended (landed_off)` and nothing else |
+
+**Which code** (read, then flown offline: below).
+
+- `chooseDescent` takes a circle round the target when `spiralFit` finds one: the largest radius 6 to 24 whose columns
+  out to the radius + 4 are lower than `below`, the height the circle begins at less 3. That is the exit height
+  (the approach entry + 6, so 16 over the landing's floor) less 3: **every column whose top is up to 12 over the floor
+  counts as free**. Here one column just outside it is higher than that, so the radius is 10; roofs 5 to 12 over the
+  floor stand under the circle.
+- `descend` leaves a circle (a) heading at the target within 45 degrees and at least 28 blocks out, or (b) 10 under
+  its exit height whatever the heading. On a circle round the target itself the body is its radius out, at most 24,
+  and its heading is along the circle: **(a) can never be met, so every such circle is flown to (b), 6 over the
+  landing's floor.**
+- Between 13 and 6 over the floor nothing looks under the body: `steerClear` looks 20 ticks ahead along the look (a
+  slow body, under 0.7 a tick, is not steered at all, and the circle is flown at 0.65).
+- The server ends a glide the tick the body touches a block's top. The brain's first rule each tick is "standing after
+  a glide: the flight is over"; the outcome of a flight that stands off its target with no reason set is `landed_off`.
+  No rule had fired, so nothing was written. `landNow('landed_off')` (brain.ts, the priced landing and "no go-around
+  left") was not the path: both write a line first.
+- `skyTop` (commands-fly.ts) is the highest block of a column that has a collision box, whatever its shape; the feet
+  height the flight takes from it is that block's y + 1. A fence or a wall stands 0.5 over that, a lower slab 0.5
+  under it, a trapdoor 0.8 under it. The world cache's extract has four classes: a fence is a solid cell.
+- The landing search (`landing.ts approachLands`) simulates the approach from 56 blocks out at the approach entry's
+  height along four bearings. It does not ask how a flight that arrives high comes down.
+- The final leg from the circle in to the centre was never planned from over the roofs: the approach began where the
+  circle was left, 10 out and 6 over the floor, and there the flare's plans and the brake's were both `wall`.
+
+**Offline** (`scripts/land-site-probe.ts --old`; the brain on stepBody over the extract of the place, exported
+2026-11-13; the body starts in the cruise 170 blocks before the goal, the target holds over the goal and becomes the
+landing 20 or 40 ticks into the hold; crafted burns, the brain told nothing; the PC, 2026-11-13). The landing the
+search's own code builds from the extract has the Realm's 63 cells. From the Realm's heading, arriving 60 to 74 over
+the landing:
+
+| n | on the landing's floor | from its centre | over its floor | touchdown down / along | how it ended |
+|---|---|---|---|---|---|
+| 12 | 0 | 9.0 to 10.1 | 5.0 to 8.0 | 0.18 to 0.29 / 0.13 to 0.67 | every one `spiral r10 at 0 out`; 8 in the circle, 4 in the approach just out of it; 4 with damage (up to 2.8, a wall met in the last ticks) |
+
+The Realm's table again: the same circle, the same radius, the same distances and heights, the same touchdown. Two
+ends: in the circle, on a roof 7 to 9 over the floor; or just out of it (6 over the floor, 10 out), where the flare
+and the brake have no plan (`wall`) and the body settles on what is under it within about a second (in the flight
+traced, 20 ticks, the priced `land now` of Track L1 said on the way).
+
+### What changed
+
+- **The circle's floor** (`spiralTops`, `spiralFloor`). When a circle is chosen the highest column under it is
+  looked up (`ring`: the columns within the berth of 4 either side of the radius) and the highest under or inside it
+  (`top`). A circle is left at the latest 3 over `ring` (`SPIRAL_CLEAR.over`), whatever the heading. 3: the body is
+  0.6 high and sinks up to 0.2 a tick, and the tops are the model's (a fence stands 0.5 over its cell).
+- **Round the target, the way in more.** A circle round the target is left 3 + 2.5 + 0.26 x the radius over the
+  higher of `ring` and `top`: 2.5 for the quarter turn in, 0.26 a block for the glide in (0.17 a tick at 0.65 a tick).
+  At radius 10 that is 8.1 over the highest column, at 24 it is 11.7. Only when `ring` is more than 2 over the landing's
+  floor (`SPIRAL_CLEAR.rim`): open ground, or a fence on it, and the circle and the landing are flown as they were.
+- **The landing from there** (`leftOver`). The target gets `rim`, the feet height of the highest column under or
+  inside the circle, and with it the rules a shaft's floor and a pit's have had since Tracks F1 and F8 (`entryTop`): the
+  landing family is the brake / elevator's alone, a go-around's height and way back in are measured from the rim. The
+  brake comes in over what stands round the landing, stops over its centre and goes straight down. One line:
+  `flight: descent circle r10 left 20 over the landing's floor: what stands under it reaches 12 over that floor: in
+  over that (the brake over the landing's centre), then straight down onto the floor`, and the controller's
+  `flight: retargeted to ... (the same landing, flown in over what stands round it)`.
+- **Under the rim only over the landing's own cells** (`rimWithin`, `rimReach`, `RIM_OVER`). The brake's planner takes
+  the cheapest plan the cell model allows, and time is its cost: left to itself it comes in on a slant that passes
+  roofs and fences at its berth of 0.4. A plan that is under the rim + 1.5 farther from the centre than the landing's
+  own cells reach (the distance to the nearest column that is no cell of it, less 0.3; 0.8 at least; an exact landing:
+  its half width less 0.3) is a wall to it. So the body crosses everything 1.5 over the highest of it and sinks only
+  over its own floor.
+- **The nearest safe ground** (`ground.ts`; `groundAt` in commands-fly.ts: the forced landings, the priced "land now",
+  the search's last resort). Two rules more: the top block's collision boxes end no higher than its cell and their
+  top face is at least half a block wide both ways (not a fence, a wall, a gate, a pane, bars, a post); and the top
+  is no perch: where a dry floor lies more than 3 under it within 8 blocks, a flood over the column tops (a block up
+  or up to 3 down a step, 12 blocks each way) must reach a column within 3 of that floor. A roof, a wall's top and a
+  pillar are perches; a hillside and terraces of 3 are not; a platform over the sea is not (no floor in reach). The
+  takeoff sites ask for ground without the two rules (a ledge is a good place to fly from). The landing search's
+  cells get the first rule (`Floor.post`: a floor on a fence is a way for the walk and no cell), whatever the
+  setting says.
+- **The end says why** (`whyOff`). A `landed_off` that no rule called for ends its line with, for example,
+  `; the glide ended in the descent circle (r10 round the landing, flown down to 6 over the floor) 0.5 over the
+  model's top of its column (a fence, a wall or a slab on it, or a block the model does not have), 10.2 from the
+  landing's centre, 5.5 over its floor: the model's highest column under the circle is 12 over the floor and the
+  circle needed this one 3 or more under the body`. In the approach it names the family and its last plan.
+- **`flyLandOver`** (default on). Off: the circle, the landing and the nearest safe ground as before. `flyLandStyle
+  flare` turns the circle's part off too.
+
+### Offline, the place (`scripts/land-site-probe.ts`, the PC, 2026-11-13)
+
+The brain on stepBody over the extract, the body taken up in the cruise 170 blocks out, 60 to 74 over the landing
+(higher where a hill on that heading asks for it: up to 142), the landing as the search builds it (63 cells). `the
+Realm's heading`: 12 flights (three heights, the landing known 20 or 40 ticks into the hold, two seeds). `round the
+compass`: that heading and seven more 45 degrees apart, 6 flights each. Each rocket's burn is drawn from the kit's
+range; `told`: the brain plans with the kit's range (`flyKitBurn`). Before: `--old` (the descent as it was). Damage
+is what the server would count (a wall met in the glide, the fall counted while gliding); a hit is a wall or a
+ceiling met in the air.
+
+| approaches | n | before: on the landing's floor (within 2 of its centre) | before: the others stood | before: flights with damage, hits | after: on the floor within 2 | after: touchdown down / along | after: damage, hits | ticks a flight, before / after |
+|---|---|---|---|---|---|---|---|---|
+| the Realm's heading, crafted | 12 | 0 | 9.0 to 10.1 from the centre, 5 to 8 over the floor | 4 (up to 2.8), 32 | 12 | 0.18 to 0.30 / 0.01 | 0, 0 | 416 / 424 |
+| round the compass, crafted | 48 | 9 (8) | 2.1 to 11.5, 1 to 9 over | 12 (up to 3.0), 83 | 48 | 0.15 to 0.30 / 0.00 to 0.02 | 0, 0 | 492 / 488 |
+| round the compass, plain | 48 | 9 (8) | 7.3 to 11.5, 2 to 9 over | 12 (up to 2.8), 80 | 48 | 0.15 to 0.30 / 0.00 to 0.01 | 0, 0 | 480 / 476 |
+| round the compass, crafted, told | 48 | 10 (9) | 7.3 to 11.5, 2 to 9 over | 11 (up to 2.9), 69 | 48 | 0.15 to 0.30 / 0.00 to 0.01 | 0, 0 | 457 / 452 |
+| round the compass, crafted, the landing known from the start (no hold) | 24 | 4 (4) | 7.5 to 11.1, 2 to 9 over | 6 (up to 2.7), 64 | 24 | 0.15 to 0.30 / 0.01 | 0, 0 | 451 / 446 |
+| 24 other open cells of the place as the landing (every k-th of the search's candidates, the cells round each), the Realm's heading | 24 | 18 (16) | | 2 (up to 2.4), 12 | 23 | 0.09 to 0.30 / 0.00 to 0.35 | 0, 0 | 484 / 446 |
+
+After, every flight onto the Realm's landing stands 0.0 from its centre (the elevator keeps station over it), by the
+brake in all 180, with no go-around and no rocket more. The flights are not longer: the elevator's last blocks take
+the ticks the circle's last laps took.
+
+The one flight of the last row that is not on its landing is the same flight before and after: no circle fits round
+that cell, the circle beside the approach line is left, neither family has a plan from there, and the priced landing
+(`land now`, Track L1) puts the body on flat ground 15 blocks from the cell at its own height, with its line. That
+cell is one the search would not have offered (its approach simulation is not run by the probe's `--sites`). Of the 23
+others, 22 are flown by the brake over what stands round them and one by the flare (nothing over 2 under its circle).
+
+A forced landing is the same code (the circle over the emergency target, `leftOver` for it). On the unit test's
+yard, a flight on its way to a target far beyond it told to land 30 blocks before, 15 before, over and 15 past the
+yard (`!land`): before, the first comes down in the circle on a roof 8 over the ground; after, all four stand on the
+ground the forced landing chose, no hit, in 485 to 555 ticks (before: 471 to 555).
+
+### The cost (the test host, the live bot's CPU policy, 2026-11-13)
+
+`node scripts/mac-run.mjs --name f11 --as-live -- ... node scripts/land-site-probe.ts --headings compass --n 1 --quiet
+--time` (the fixture copied there with `mac-run.mjs private`), 48 flights a run, three runs a side. The wall clock of
+a tick is the brain's step and the body's.
+
+| | a tick on average | the longest tick of a run |
+|---|---|---|
+| before (`--old`) | 0.057 to 0.058 ms | 16.9 to 26.9 ms |
+| after | 0.287 to 0.288 ms | 27.6 to 34.5 ms |
+
+The average is the brake's planner, which now runs for the last 60 to 90 ticks of every landing where the flights
+before ended on a roof within a few ticks of the approach. The longest tick is a planner's first (the flare's before,
+the brake's with a sink of 20 blocks to simulate after); a game tick is 50 ms. The circle's tops are read once when
+the circle is chosen, from the column lookups its fit has just made.
+
+### On the server (bds-fly, BDS 1.26.60.6, `test/e2e/fly-yard.test.ts`, 2026-11-13)
+
+A yard built with the truth pack on the flat world: 14 x 14 of ground, closed all round by a house with a stepped roof
+7 to 10 high, a block 6 high with a part 12 high, real oak fences along the two other sides and in the corners, a
+small building 5 to 7 high inside it and a tower 25 high on the house (so the circle round a landing by the block
+fits at radius 10, as the Realm's). The goal is the end of a passage inside the block, 16 blocks of walk from its
+mouth in the yard: under a roof, so the search's landing is a walk landing of the yard's cells by that mouth (10 or
+14 cells, its centre one block from the block's wall). Every flight starts on a pillar 70 over the yard, 150 blocks
+east of it, with `!fly`, and arrives 70 to 75 over its landing. `near` is an exact landing (half 1) three blocks from
+the block, where a circle of 8 fits round the cell; `mid` one in the middle of the yard, where none fits (the tower is
+9 blocks away) and the flight takes the circle beside the approach line, as it did before the track.
+
+| flights | rockets | n | `flight: landed`, on the yard's floor | from the landing's centre | touchdown down / along | damage | landing | ticks | the walk in |
+|---|---|---|---|---|---|---|---|---|---|
+| `goal`, before (`FLY_YARD_OLD=1`: the circle and the ground rules as they were) | plain | 10 | 1 | 1.4; the other 9: 8.0 to 14.4, seven of them 2 to 4 over the floor | 0.12 to 0.27 / 0.00 to 0.44 | 1 (a fall) in one flight | flare 9, brake 1 (a forced landing's) | 531 to 573 | 1 of 10 |
+| `goal`, the circle as it was, the ground rules on | plain | 10 | 2 (one of them after a go-around) | the other 8: 8.4 to 14.3, at the floor's height outside the yard | | 0 | 8 by the priced `land now` on the nearest safe ground | 529 to 730 | 2 of 10 |
+| `goal` | plain | 20 | 20 | 0.00 to 0.02 | 0.16 to 0.29 / 0.01 | 0 | brake, 58 to 85 ticks of it | 505 to 575 | 20 of 20 |
+| `goal` | crafted | 5 | 5 | 0.01 to 0.02 | 0.18 to 0.28 / 0.01 to 0.02 | 0 | brake, 61 to 99 | 515 to 586 | 5 of 5 |
+| `near` | plain | 20 | 20 | 0.00 to 0.03 | 0.19 to 0.29 / 0.01 to 0.02 | 0 | brake, 56 to 82 | 456 to 504 | |
+| `mid` (the path before the track) | plain | 20 | 20 | 0.00 to 0.03 | 0.17 to 0.27 / 0.01 to 0.02 | 0 | brake (the flare's plans pass over: one rescue each), 46 to 77 | 523 to 568 | |
+
+The plain rows are two runs of 10 a case: bds-fly, and bds-fly3 on the final tree. The `before` row flew on bds-fly3,
+the crafted one on bds-fly, and so did the row under `before` (a run in which `FLY_YARD_OLD=1` still switched the
+circle alone; it now switches the setting off as well).
+
+Before, on the server as on the Realm: every flight `descent spiral r10 at 0 out from 70 to 75 above`, nine of ten
+`landed_off`. One glide ended in the circle and five in the approach just out of it, against the block's wall 2 to 4
+over the ground (`the glide ended in the approach (flare, its last plan: wall) ...`; three of those five had taken
+the priced landing on an alternative across the yard first, which the body, 5 over the floor outside the block, did
+not reach). Three took the priced landing on the nearest safe ground: two came down on the ground outside the yard,
+one against the wall on the way.
+
+Every `goal` and `near` flight of the rows after says `descent spiral r10 at 0 out` (`r8` for `near`) and `descent
+circle r10 left 20 over the landing's floor: what stands under it reaches 12 over that floor: in over that ...`
+(`r8 left 19` or `20`), 1 to 3 corrections a flight, a slide of 0.01 to 0.03 after the touchdown. The row with the
+ground rules on is what `groundAt` alone changes: with the circle as it was the approach still has no plan 10 out and
+6 over the floor, the priced landing takes the nearest safe ground, and that is no longer the roof beside the yard
+but the flat ground outside it.
+
+### The regressions
+
+**Tick for tick.** The base commit's `bot/src`, `bot/scripts` and `bot/test` beside this tree's, the same probes run
+on both, the outputs compared with the milliseconds taken out. 14 cases, every one the same: the route landings (the
+stacked platforms to the hand-over at 169 pairs of burns; whole flights onto the stack, the hole, the room and the
+cliff 300 out); 180 open-air flights of Track F10's probe with plain rockets, 36 with crafted ones untold and 36 told,
+a hash of every tick's position each; and on the private cave fixture of 2026-11-11 the learned exit and its proof,
+the learned entry's arrivals, the drawn exit from cave_start at every burn, the drawn entry's arrivals, and the hop
+cave_8 to cave_end at every burn. The unit suite's three whole trips (open ground from a pillar, a platform in the
+air, a wall 6 behind the cell) fly the same ticks with the track's switch either way.
+
+**The gates** (the final tree, by exit code; plain rockets):
+
+| suite | result |
+|---|---|
+| `pnpm lint` (the PC) | exit 0 |
+| the unit suite, `pnpm -r test`, on the test host (`node scripts/mac-run.mjs --name f11 -- pnpm -r test`) | three in a row on the final tree, exit 0, 0, 0 (2 581 passed, 1 skipped, 161 to 261 s). Nine runs before them, while the host ran another track's benches in its other slot: exit 0 six times and exit 1 three times, each at the walking code's timing tests (`astar.test.ts`'s wall-clock test with `nav-water.test.ts` once, `nav-worker.test.ts` twice); no flight or panel test failed in any run |
+| fly-route-land (bds-fly3), three runs | exit 0 three times (7 of 7 each) |
+| fly-route (bds-fly3), two runs | exit 0 twice (3 of 3 each) |
+| fly-walk (bds-fly2), four runs | exit 0 four times (2 of 2 each) |
+| fly-land | exit 1 on bds-fly and twice on bds-fly2, 4 of 5 each: the 8 landings on their platforms (0.02 to 0.73 off, 0 damage); `!fly stop in the air` waits 60 s for a reply that is not said (the case that is red on main). The base commit's tree flown on bds-fly2 between them: exit 1, the same case, the same message |
+| fly-open (flat 400, flat 650, a hill, 3 flights each) | bds-fly: exit 0; bds-fly2: exit 0 |
+| fly-descent (the circle round a platform in the open, the circle beside the approach line between walls; 10 landings each) | bds-fly: exit 0; bds-fly2: exit 0 |
+| fly-overhang (bds-fly2) | exit 0 (5 of 5) |
+| fly-maneuver (the brake's landings; bds-fly2) | exit 0 (7 of 7) |
+| fly-yard (bds-fly: 30 flights plain, 5 crafted; bds-fly3: 30 plain) | exit 0 three times (the table above) |
+
+### What the Realm should show
+
+`!test goto home from cave_start 5` (the series of 2026-11-13 again; `flyLandOver` is on by default).
+
+- After `flight: retargeted to <the landing> (63 cells, walk)` and `descent spiral r10 at 0 out`, one line
+  `flight: descent circle r10 left N over the landing's floor: what stands under it reaches M over that floor: in over
+  that (the brake over the landing's centre), then straight down onto the floor` (offline N was 20 and M 12), then
+  `flight: retargeted to <the same place> (63 cells, walk) (the same landing, flown in over what stands round it)`.
+- The flight ends `flight: landed at ..., 0.0x from the centre`, at the landing's own height, `touchdown vy` between
+  -0.15 and -0.34 and `h` under 0.05, `landing brake (N ticks braked / station-kept)` with N about 60 to 90. No
+  longer than the flights of 2026-11-13 took to stand on a roof, within a second or two.
+- The walk starts from the landing's floor: no `no standable node`, no damage in its first seconds.
+- A `flight: ended (landed_off)` now ends with `; the glide ended ...`: say that line whole. `0.5 over the model's top`
+  or `under the model's top` in it means a block the column tops do not describe (a fence, a slab, an eave).
+- A go-around in the landing, a `landing price` line, damage in the flight, or a landing that takes more than 10 s
+  from the circle's end: say the lines.
+- To compare: `!set flyLandOver off`, the same series (it should end as on 2026-11-13), `!set flyLandOver on`.
+
+Every landing that is come to from high with roofs, trees or higher ground under its circle is flown this way now,
+not only the one at home: `landing brake` and the `descent circle ... left` line will show on other trips too.
+
+### Unit tests (`fly-land-clear.test.ts`, synthetic worlds)
+
+The tops under a circle and inside it; the floor of a circle (nothing over 2 under it: none; roofs under it: 3 over
+them and the way in; a wall inside it but not under it: none; a circle beside the approach line: 3 over what stands
+under it; `spiralFit` itself unchanged); the reach of a landing's own cells and the wall a plan meets under the rim
+beyond it; whole trips onto a yard between roofs from 70 over it: on the centre, no hit, no go-around, the brake, the
+line said; the same trips with the descent as it was end on the roofs and say where and why; the setting is on by
+default and listed, off or with `flyLandStyle flare` the circle is flown as it was; three flights the track does not
+touch are the same tick for tick with the switch either way; what a body stands on as on a floor (a cube, a slab,
+stairs and a trapdoor; not a fence, a wall, a pane); a floor on a fence is no landing cell and the cells beside it are
+what they were; a perch (a roof, a wall's top, a cliff's edge; not a hillside, terraces of 3, a cliff's top 12 back
+from its edge, a platform over the sea, unknown columns).
+
+### Open points (Track F11)
+
+- **Not on the Realm yet.** The brake and the elevator have landed on the test servers (Tracks F1, F8, this one);
+  between the Realm's roofs with the Realm's latency they are what the series above is for.
+- **The landing's centre is the search's cell**: the one with the shortest walk, often at the edge of its floor
+  nearest the goal (on the server: one block from a wall 6 high). The elevator comes down there; `rimWithin` keeps it
+  over the landing's cells. A centre in the middle of the cells would leave more room; not done.
+- **Hills.** Ground more than 2 over a landing's floor under its circle is "what stands under it" too, so most landings
+  on a slope that are come to from high are the brake's now. Offline on the place's own slopes: 22 of the 23 cells
+  above. The test servers' worlds are flat.
+- **A flight that arrives low** (within 12 of the approach entry's height) comes straight in as before, by the
+  approach the search simulated. Its plans are checked against the cell model alone (a fence is half a block over its
+  cell). Not flown here: the Realm's flights home arrive high.
+- **The S-turns** (no circle fits anywhere) still have only the path check under them; they end 66 blocks out at the
+  exit height.
+- **The column tops are the model's.** The 3 covers a fence's half block and a slab; a block the live model does not
+  have is flown into as before, and the end's line then says the body stands over or under the model's top.
+- **The perch rule looks 8 blocks.** A top in the middle of a roof 20 wide has no lower floor in reach and is still
+  ground to a forced landing.
+- **The offline place has no shapes**: the extract's four classes make a fence a cube. The server test's fences are
+  real ones.
+- **`flyLandStyle flare`** has none of it.
+- Seen on the server and not this track's: the landing search answered `no landing cell near it; landing on dry
+  ground` for the goal in the passage in 6 flights of 10 (the dry ground it named was the cell at the passage's mouth,
+  and the walk from it arrived every time); in the other 4 it confirmed that cell with its walk.
 
 ## Open points
 

@@ -15,7 +15,8 @@ import { elytraWornLimit, flightKitMemoryOf, isRocket, kitLine, kitReady, readKi
 import { burnSaid, kitBurnOf, openBurnOf, type BurnRange } from '../skills/fly/burn.ts'; // Track F9e round 2, Track F10
 import { restockFromBoxes, supplyOf } from '../skills/supply/supply.ts';
 import { FlightKitOps } from '../skills/fly/kitops.ts';
-import { APPROACH_HEIGHT, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, yawTo, type CellQuery, type LandingTarget, type SkyCheck } from '../skills/fly/plan.ts';
+import { APPROACH_HEIGHT, columnKey, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, yawTo, type CellQuery, type LandingTarget, type SkyCheck } from '../skills/fly/plan.ts';
+import { perched, standsOn } from '../skills/fly/ground.ts'; // Track F11
 import { pathBlocks, probeOpenSky, probePath } from '../skills/home/reach.ts'; // Track AU2: the walk from a landing cell to the goal
 import { probeNavOf } from '../skills/combat/pathReach.ts';
 import { findLanding, isHazardName, isLiquidName, stillLandable, WET_ABOVE, type BlockLookup, type LandingPlan } from '../skills/fly/landing.ts'; // Track BF
@@ -213,20 +214,37 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   /**
    * Safe ground for a landing: a known column whose top is a plain solid block with level neighbours (within a block: neither
    * a 1-wide column nor the bottom of a hole); Track BF: and dry (no liquid in the body's cells: the Realm's flight "landed" on
-   * the sea floor under 15 blocks of water, the highest solid of its column).
+   * the sea floor under 15 blocks of water, the highest solid of its column). `perch` false (the takeoff sites' ground: a
+   * ledge is a good place to fly from): without Track F11's two rules for a place to come down on.
    */
-  const groundAt = (x: number, z: number, fromY?: number): number | undefined => {
+  const groundAt = (x: number, z: number, fromY?: number, perch = d.settings.get('flyLandOver') === true): number | undefined => {
     const top = skyTop(x, z, fromY);
     if (top === undefined) return undefined;
     const b = world.blockAt({ x, y: top, z });
     if (b && isHazardName(b.name)) return undefined;
     // Track BH: never a canopy (the Realm, 2026-10-31: a `roof` end on oak leaves left the body prone in the tree): the open ground beyond or under it
     if (b && /leaves|azalea|vine/.test(b.name)) return undefined;
+    // Track F11 (skills/fly/ground.ts): never a block a body does not stand on as on a floor: a fence, a wall, a gate (their
+    // boxes reach half a block over the cell), a pane, bars, a post (the Realm, 2026-11-13: flights that ended on fence tops)
+    if (perch && b && b.boxes.length > 0 && standsOn(b.boxes) !== 'floor') return undefined;
     if (wetAbove(x, z, top)) return undefined;
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
       const t = skyTop(x + dx, z + dz, fromY);
       if (t !== undefined && Math.abs(t - top) > 1) return undefined; // a 1-wide column, or a hole (Track AU2: a goal 3 under the floor is not landed in)
     }
+    // Track F11: nor a perch: a roof, a wall's top, a pillar: a top with a floor in reach under it that no walk leads down to
+    // without a fall that hurts (a stepped roof has level neighbours too)
+    if (!perch) return top + 1;
+    const seen = new Map<number, number | undefined>();
+    const feetAt = (cx: number, cz: number): number | undefined => {
+      const k = columnKey(cx, cz);
+      if (!seen.has(k)) {
+        const t = skyTop(cx, cz, fromY);
+        seen.set(k, t === undefined ? undefined : t + 1);
+      }
+      return seen.get(k);
+    };
+    if (perched(feetAt, x, z, top + 1, (cx, cz) => !wetAbove(cx, cz, feetAt(cx, cz)! - 1))) return undefined;
     return top + 1;
   };
   /** Track AU2: a cell of the world model for the sky check (true = solid, false = air, undefined = not loaded). */
@@ -239,9 +257,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     for (let y = feet; y <= feet + 20; y++) if (cell(x, y, z) === true) return false;
     return true;
   };
-  /** Track AU2: a landable cell: safe ground whose top is the block under `feet` (within a block) with open sky above. */
-  const landable = (x: number, z: number, feet?: number): number | undefined => {
-    const top = groundAt(x, z);
+  /** Track AU2: a landable cell: safe ground whose top is the block under `feet` (within a block) with open sky above. (Track F11: `perch`: as a place to come down on, groundAt's two rules more; the takeoff sites ask without.) */
+  const landable = (x: number, z: number, feet?: number, perch = false): number | undefined => {
+    const top = groundAt(x, z, undefined, perch);
     if (top === undefined) return undefined;
     if (feet !== undefined && Math.abs(top - feet) > 1.5) return undefined;
     return openAbove(x, z, top) ? top : undefined;
@@ -299,7 +317,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         look,
         obstacle: (x, y, z) => world.blockAt({ x, y, z })?.solid === true,
         ...(probe ? { probe } : {}),
-        dryGround: (x, z) => landable(x, z),
+        dryGround: (x, z) => landable(x, z, undefined, d.settings.get('flyLandOver') === true),
         yieldNow: () => new Promise((r) => setImmediate(r)),
         // Track F3: the route planner for a precision goal the brake cannot land (a slot 2 high, a hole, a 1 x 1 shaft)
         ...(routeOn() ? { route: { grid: routeGrid, plan: routePlanner, rockets: Math.min(4, Math.max(2, readKit(inv, memory()).rocketsHotbar)), ...(openBurn() ? { kit: openBurn()! } : {}) } } : {}),

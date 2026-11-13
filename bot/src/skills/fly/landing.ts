@@ -39,7 +39,9 @@
 //     by that price in seconds; a covered goal's first cells by the walk flood get a longer probe (`LONG_PROBE`), cut to
 //     the search time left, so the owner's cave's cells are confirmed instead of falling back unpriced
 import type { Vec3 } from '../../connection/types.ts';
+import type { Box } from '../../world/types.ts';
 import { BrakePlanner } from './brake.ts';
+import { standsOn } from './ground.ts'; // Track F11
 import { PATH_MIN_S_PER_BLOCK, UNKNOWN_DETOUR, UNKNOWN_RISK_S, WALK_S_PER_BLOCK, walkPriceOf, walkSeconds, type WalkPrice } from './landprice.ts'; // Track L1; Track L2: the walk by its path
 import { ApproachPlanner, APPROACH_DISTANCE, APPROACH_HEIGHT, columnKey, entryTop, hdist, yawDiff, yawDir, yawTo, type FlightBody, type LandingTarget, type Obstacle } from './plan.ts';
 import type { RouteGrid } from './route/grid.ts'; // Track F3
@@ -51,6 +53,8 @@ import type { Planner } from './route/tracker.ts'; // Track F3
 export interface CellBlock {
   readonly name: string;
   readonly solid: boolean;
+  /** Track F11: the block's collision boxes where the caller has them (the live model's blocks do): a floor on a fence, a wall, a pane or a post is no landing cell (ground.ts standsOn). */
+  readonly boxes?: readonly Box[];
 }
 /** The live world model: undefined = the cell is not loaded. */
 export type BlockLookup = (x: number, y: number, z: number) => CellBlock | undefined;
@@ -77,6 +81,8 @@ export interface Floor {
   wet: boolean;
   /** The floor block or the cell above it is a hazard. */
   hazard: boolean;
+  /** Track F11: the floor block is nothing a body stands on as on a floor (a fence, a wall, a gate: 1.5 high; a pane, bars, a post): a way for a walk, never a landing cell. */
+  post?: boolean;
 }
 
 /** The floors of column (x, z) from `yTop` down to `yBottom` (live cells only); undefined when the column is not loaded. */
@@ -103,7 +109,9 @@ export function floorsOf(look: BlockLookup, x: number, z: number, yTop: number, 
       const free = (c: CellBlock | undefined) => !c?.solid;
       if (y + 2 <= yTop && free(a1) && free(a2)) {
         const wet = [a1, a2, a3].some((c) => c !== undefined && isLiquidName(c.name));
-        out.push({ feet: y + 1, ceiling, wet, hazard: isHazardName(b.name) || (a1 !== undefined && isHazardName(a1.name)) });
+        // (a solid with no boxes given says nothing of its shape)
+        const post = b.boxes !== undefined && b.boxes.length > 0 && standsOn(b.boxes) !== 'floor';
+        out.push({ feet: y + 1, ceiling, wet, hazard: isHazardName(b.name) || (a1 !== undefined && isHazardName(a1.name)), ...(post ? { post } : {}) });
       }
       ceiling = y;
     }
@@ -280,7 +288,7 @@ export class ColumnView {
 
   /** Dry, no hazard, and level neighbours (each of the four has a floor within a block: neither a 1-wide column nor a hole nor an edge). */
   sound(x: number, z: number, f: Floor): boolean {
-    if (f.wet || f.hazard) return false;
+    if (f.wet || f.hazard || f.post) return false;
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
       const n = this.floorNear(x + dx, z + dz, f.feet);
       if (!n || n.wet || n.hazard) return false;

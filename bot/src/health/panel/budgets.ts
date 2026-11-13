@@ -12,9 +12,10 @@ export const PANEL_BUDGETS = {
    * and their CSS add about 5 KB; 121.6 KB in all (docs/panel.md "Budgets"). Track F9c raised it from 128 000: the
    * settings rows added since (each a few hundred bytes, in the markup and in the embedded state) had taken the worst
    * case to within one row of it, and the `flyLearnedEntry` row took it to 128 663. Track M1 raised it from 130 000:
-   * the mob group's four rows (mobReflex, fleeFly, sealIn, mobDodge) add 2.4 KB; 131 066 in all.
+   * the mob group's four rows (mobReflex, fleeFly, sealIn, mobDodge) add 2.4 KB; 131 066 in all. Track F11 raised it
+   * from 134 000: the rows since had taken it to 133 866, and the `flyLandOver` row (777 bytes) took it to 134 643.
    */
-  html: 134_000,
+  html: 136_000,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**

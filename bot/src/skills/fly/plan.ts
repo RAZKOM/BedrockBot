@@ -64,6 +64,14 @@ export interface LandingTarget {
    */
   rim?: number;
   /**
+   * Track F11: with `rim`, a landing flown in over what stands round it (brain.ts leftOver: roofs, fence lines and trees
+   * under the descent circle): the body is under the rim (plus RIM_OVER) only within this many blocks of the centre, over
+   * the landing's own cells. A plan that sinks under it farther out counts as a wall (`touchdownCheck`), whatever the cell
+   * model says of the way: a fence and a wall stand half a block over their cell, and a plan that grazes one ends the
+   * glide on its top. Absent: the cell model alone decides (a shaft's bore, a pit's: Tracks F1 and F8).
+   */
+  rimWithin?: number;
+  /**
    * Track F1: a precision cell (a pillar top, a shaft floor, a cell before a wall or under a low roof:
    * landing.ts findLanding's exact goal that is not a plain flat floor): flown by the landing family
    * the cost picks, which for such a cell is the brake / elevator landing (brake.ts).
@@ -469,12 +477,101 @@ export function glideRollout<R>(
   return { result: undefined, ticks, done: false, pos, vel, boostTicks: boost, yaw: y, pitch: p, rockets };
 }
 
+/** Track F11: for the probes only (scripts/land-site-probe.ts `--old`): `clear` false flies the descent as it was before the track, to measure what it changed. Nothing in the bot sets it. */
+export const LAND_SWITCH = { clear: true };
+
 /** Radii the descent spiral may use (blocks); the circle's columns must be free this much farther out (the body strays from the circle). */
 export const SPIRAL_RADII = Object.freeze({ min: 6, max: 24, berth: 4 });
 
 export interface SpiralFit {
   centre: { x: number; z: number };
   radius: number;
+}
+
+/**
+ * Track F11 (docs/flight.md "The flight comes down where it planned to"): how low a descent circle is flown. `spiralFit`
+ * asks only that the columns under the circle are lower than the height the circle BEGINS at (the exit height less 3),
+ * and the circle was flown on to 10 under its exit height, which for a circle round the target is 6 over the target's
+ * floor: roofs, fence lines and trees 3 to 11 over the floor under the circle were flown into (the Realm, 2026-11-13: 10
+ * flights of 10 came down on the roofs round the landing they had chosen, 8 to 12 blocks from its centre).
+ *
+ *   over   the circle is never flown lower than this over the highest column under it (the body is 0.6 high and sinks
+ *          0.15 to 0.2 a tick; a fence or a wall stands half a block over its cell, which the column tops do not say)
+ *   turn   a circle round the target is left this much higher still, plus `slope` for every block of its radius: the
+ *   slope  height the way in from the circle to the centre takes (a quarter turn at 0.65 a tick sinks about 2.5, the
+ *          glide in 0.17 a tick at 0.65: 0.26 a block), so that the body comes over the centre still over that column
+ *   rim    columns no higher than this over the target's floor under a circle round it change nothing (open ground, a
+ *          fence on it): the circle is flown down to 6 over the floor and the landing is flown from there as before
+ */
+export const SPIRAL_CLEAR = Object.freeze({ over: 3, turn: 2.5, slope: 0.26, rim: 2 });
+
+/** Track F11: what stands under a descent circle (`ring`: within the berth of it) and under or inside it (`top`), as feet heights; undefined where no column is known. */
+export interface SpiralTops {
+  ring: number | undefined;
+  top: number | undefined;
+}
+
+/** Track F11: the tops under and inside the circle `fit` (plan.ts discTop over the ring the body flies in, and over the whole disc). */
+export function spiralTops(fit: SpiralFit, skyTop: (x: number, z: number) => number | undefined): SpiralTops {
+  return { ring: discTop(fit.centre, fit.radius + SPIRAL_RADII.berth, skyTop, Math.max(0, fit.radius - SPIRAL_RADII.berth)), top: discTop(fit.centre, fit.radius + SPIRAL_RADII.berth, skyTop) };
+}
+
+/** Track F11: a landing flown in over what stands round it keeps the feet this far over the highest of it until it is over its own cells (LandingTarget.rimWithin). */
+export const RIM_OVER = 1.5;
+/** Track F11: the least reach of `rimWithin` (the elevator keeps station within 0.15 of the centre; the body is 0.6 wide). */
+export const RIM_WITHIN_MIN = 0.8;
+
+/**
+ * Track F11: how far from a landing's centre the body may come down under its rim (`LandingTarget.rimWithin`): the
+ * distance to the nearest column that is not one of its cells, less the body's half width; without cells its half width.
+ */
+export function rimReach(target: Pick<LandingTarget, 'x' | 'z' | 'half' | 'cells'>): number {
+  if (!target.cells) return Math.max(RIM_WITHIN_MIN, target.half - 0.3);
+  const cx = Math.floor(target.x);
+  const cz = Math.floor(target.z);
+  const r = Math.ceil(target.half) + 1;
+  let near = target.half + 0.5;
+  for (let dx = -r; dx <= r; dx++) {
+    for (let dz = -r; dz <= r; dz++) {
+      if (target.cells.has(columnKey(cx + dx, cz + dz))) continue;
+      // the nearest point of that column to the centre
+      const px = Math.max(cx + dx, Math.min(target.x, cx + dx + 1));
+      const pz = Math.max(cz + dz, Math.min(target.z, cz + dz + 1));
+      near = Math.min(near, Math.hypot(px - target.x, pz - target.z));
+    }
+  }
+  return Math.max(RIM_WITHIN_MIN, near - 0.3);
+}
+
+/** Track F11: the feet height (the block's y + 1) of the highest known column from `inner` to `radius` blocks from `centre`; undefined when none is known. */
+export function discTop(centre: { x: number; z: number }, radius: number, skyTop: (x: number, z: number) => number | undefined, inner = 0): number | undefined {
+  const cx = Math.floor(centre.x);
+  const cz = Math.floor(centre.z);
+  const r = Math.ceil(radius);
+  let top: number | undefined;
+  for (let dx = -r; dx <= r; dx++) {
+    for (let dz = -r; dz <= r; dz++) {
+      const d = Math.hypot(dx, dz);
+      if (d > radius || d < inner) continue;
+      const t = skyTop(cx + dx, cz + dz);
+      if (t !== undefined && (top === undefined || t + 1 > top)) top = t + 1;
+    }
+  }
+  return top;
+}
+
+/**
+ * Track F11: the height a descent circle of `radius` is left at the latest, whatever the heading. A circle beside the
+ * approach line (`inward` false): `over` over the highest column under it. A circle round the target itself (`inward`:
+ * the body still has to come in from the circle to the centre): when something under it stands more than `rim` over
+ * `floor` (the target's floor, or its rim), `over` over the highest column under or inside it, and the way in higher.
+ * Undefined: nothing known under the circle, or nothing that high (the circle's own rule alone: 10 under its exit).
+ */
+export function spiralFloor(tops: SpiralTops, radius: number, inward: boolean, floor: number): number | undefined {
+  if (tops.ring === undefined) return undefined;
+  if (!inward) return tops.ring + SPIRAL_CLEAR.over;
+  if (tops.ring <= floor + SPIRAL_CLEAR.rim) return undefined;
+  return Math.max(tops.ring, tops.top ?? -Infinity) + SPIRAL_CLEAR.over + SPIRAL_CLEAR.turn + SPIRAL_CLEAR.slope * radius;
 }
 
 /**
@@ -638,7 +735,10 @@ export function touchdownCheck(target: LandingTarget, obstacle: Obstacle | undef
   // platform, a ceiling over an overhang landing still count (before, the whole check stopped there)
   const nearObstacle: Obstacle | undefined = obstacle ? (x, y, z) => y >= target.top && obstacle(x, y, z) : undefined;
   const nearZone = target.half + 0.6 + OBSTACLE_BERTH;
+  // Track F11: a landing flown in over what stands round it: under the rim only over its own cells (LandingTarget.rimWithin)
+  const rimLow = target.rim !== undefined && target.rimWithin !== undefined ? target.rim + RIM_OVER : undefined;
   return ({ t, pos, next: nx, vel }) => {
+    if (rimLow !== undefined && nx.y < rimLow && nx.y > target.top && hdist(nx, target) > target.rimWithin!) return { kind: 'wall', pos: nx, vel, ticks: t, off: hdist(nx, target) };
     // crossing the platform's top plane inside the footprint: touchdown (far from the platform the body
     // just flies on below its top: the approach comes in low on purpose)
     if (pos.y >= target.top && nx.y <= target.top) {

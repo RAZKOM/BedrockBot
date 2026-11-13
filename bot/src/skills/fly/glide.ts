@@ -267,6 +267,11 @@ export async function simulateFlight(
      * (the same inputs with the boost) and a burn; then the real one again, behind where the prediction was.
      */
     dud?: (rocket: number) => boolean;
+    /**
+     * Track F11: the body starts in the air at `start`, gliding with this velocity (a flight taken up on its way in, for
+     * the landing probes: scripts/land-site-probe.ts). Absent: standing at `start`, as every flight before.
+     */
+    airborne?: Vec3;
   } = {},
 ): Promise<SimResult> {
   const world = deps.world;
@@ -281,8 +286,8 @@ export async function simulateFlight(
   let firstHit: SimResult['firstHit'];
   let firstWet: SimResult['firstHit'];
   let hard = 0;
-  let body = initialBody(start, true);
-  let cmd: MoveCommand = { ...IDLE_COMMAND, yaw: s.yaw ?? opts.ledge?.yaw ?? 0 };
+  let body: BodyState = s.airborne ? { ...initialBody(start, false), vel: { ...s.airborne }, gliding: true } : initialBody(start, true);
+  let cmd: MoveCommand = { ...IDLE_COMMAND, yaw: s.yaw ?? opts.ledge?.yaw ?? 0, ...(s.airborne ? { glide: true } : {}) };
   let rockets = s.rockets ?? 0;
   let lastFire = -100;
   let fired = 0;

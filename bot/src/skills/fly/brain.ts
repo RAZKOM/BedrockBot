@@ -47,11 +47,16 @@ import {
   glideLine,
   glideMargin,
   hdist,
+  LAND_SWITCH,
   onTarget as onTargetCells,
   pathAhead,
+  rimReach,
   ROCKET_CRUISE_CLIMB,
   rocketPitchFor,
+  SPIRAL_CLEAR,
   spiralFit,
+  spiralFloor,
+  spiralTops,
   SPIRAL_RADII,
   STALL_SPEED,
   takeoffSky,
@@ -65,6 +70,7 @@ import {
   type LandStyle,
   type Obstacle,
   type SpiralFit,
+  type SpiralTops,
 } from './plan.ts';
 import { BRAKE_BIAS, BrakePlanner } from './brake.ts'; // Track F1
 import { assumedTop, BUILD_TOP, CLIMB_SLOPE, strictObstacle, terrainFloor, type TerrainFloor, type TerrainQuery } from './terrain.ts'; // Track BL
@@ -113,7 +119,15 @@ export type FlightEndReason = 'landed_off' | 'no_rockets' | 'health' | 'elytra_w
 
 export type FlightEnd =
   | { ok: true; landedAt: Vec3; off: number; onTarget: boolean }
-  | { ok: false; reason: FlightEndReason; landedAt: Vec3; off: number; onTarget: boolean };
+  | {
+      ok: false;
+      reason: FlightEndReason;
+      landedAt: Vec3;
+      off: number;
+      onTarget: boolean;
+      /** Track F11: a flight that stands off its landing with no reason of its own (`landed_off`) says where the glide ended, on what, and what it would have needed. */
+      why?: string;
+    };
 
 export interface BrainOptions {
   /** The cruise height (feet y) to climb to and hold (the cap of every climb, the cruise's boosts included). */
@@ -233,6 +247,13 @@ export interface BrainOptions {
    * tracked on that range. Absent: 9 to 21 everywhere, tick for tick as before.
    */
   burn?: BurnRange;
+  /**
+   * Track F11 (docs/flight.md "The flight comes down where it planned to"; decisions/0084; the setting `flyLandOver`,
+   * default on): a descent circle is flown no lower than its floor (plan.ts spiralFloor: over what stands under it), and a
+   * landing whose circle was left for that is flown in over what stands round it, the brake over its centre and the
+   * elevator down (`leftOver`). False: the circle down to 10 under its exit height whatever stands there, as before.
+   */
+  landOver?: boolean;
 }
 
 /**
@@ -575,6 +596,9 @@ type Descent =
       exitY: number;
       /** A circle farther out is tangent to the approach line: it is left at this point, heading in along the line. */
       exitAt?: { x: number; z: number };
+      /** Track F11: what stands under the circle and inside it (plan.ts spiralTops), and the height the circle is left at the latest for it (spiralFloor); no floor: its own rule alone (10 under the exit). */
+      tops?: SpiralTops;
+      floor?: number;
     }
   | { kind: 'sturn'; side: 1 | -1; anchor: { x: number; z: number }; exitY: number };
 
@@ -582,11 +606,13 @@ export class FlightBrain {
   phase: FlightPhase = 'takeoff';
   /** The landing target (Track AU2: `retarget` may move it before the approach). */
   target: LandingTarget;
+  /** Track F11: why the brain last changed `target` by itself when it is not an alternative or an entry's fallback (for the controller's line). */
+  targetWhy: string | undefined;
   readonly stats: FlightStats = { rockets: 0, rocketsBy: { climb: 0, cruise: 0, goaround: 0, land: 0 }, goArounds: 0, ticks: 0, maxY: -Infinity, approachTicks: 0, descents: [], steered: 0, holdTicks: 0, goAroundReasons: [], landingPrices: [], avoidances: [], dives: 0, brakeRescues: 0, brakeTicks: 0, routeTicks: 0, routePlans: 0, routeReplans: 0, routeMaxError: 0 };
   // (entryAbove is set by the cruise when it hands over to the approach)
   /** Why the flight is ending early (set by `landNow`), kept for the outcome. */
   private endReason: FlightEndReason | undefined;
-  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise' | 'route' | 'routeTakeoff' | 'entrySneak' | 'burn'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral'; entryTries: number };
+  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise' | 'route' | 'routeTakeoff' | 'entrySneak' | 'burn'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral'; entryTries: number; landOver: boolean };
   /** Track F9c: the flier of a learned entry (from the hand-over on the lead-in), the windows missed so far, and what the live world said of the proof (`confirmEntry`; undefined: nothing yet). */
   private flier: EntryFlier | undefined;
   private entryMisses = 0;
@@ -709,6 +735,8 @@ export class FlightBrain {
       entryTries: opts.entryTries ?? ENTRY_TRIES,
       entrySneak: opts.entrySneak,
       burn: opts.burn,
+      // (Track F11: not with `flyLandStyle flare`: what the circle is left for is the brake's landing)
+      landOver: opts.landOver !== false && (opts.landStyle ?? 'auto') !== 'flare',
     };
     this.planner = new ApproachPlanner(opts.seed ?? 12345, opts.obstacle);
     this.brakePlanner = new BrakePlanner(((opts.seed ?? 12345) * 7 + 3) >>> 0, opts.obstacle);
@@ -956,8 +984,9 @@ export class FlightBrain {
     // standing after a glide: the flight is over
     if (this.wasGliding && !b.gliding && b.onGround) {
       if (this.phase === 'entry') this.entryStood(b);
+      const was = this.phase;
       this.phase = 'done';
-      return { control: { ...ctl, glide: false, pitch: 0 }, end: this.outcome(b) };
+      return { control: { ...ctl, glide: false, pitch: 0 }, end: this.outcome(b, was) };
     }
     if (b.gliding) this.wasGliding = true;
 
@@ -983,7 +1012,7 @@ export class FlightBrain {
     }
   }
 
-  private outcome(b: FlightBody): FlightEnd {
+  private outcome(b: FlightBody, was?: FlightPhase): FlightEnd {
     // (Track F9c: a learned entry ends on its goal; the target's own place is where the cruise came onto the line, in the air)
     const t: LandingTarget = this.target.entry?.goal ?? this.target;
     const off = hdist(b.pos, t);
@@ -991,7 +1020,53 @@ export class FlightBrain {
     const onTarget = (off <= t.half + 0.5 || (t.precise === true && t.cells !== undefined && onTargetCells(t, b.pos))) && Math.abs(b.pos.y - t.top) < 1.2;
     if (this.endReason) return { ok: false, reason: this.endReason, landedAt: { ...b.pos }, off, onTarget };
     if (onTarget) return { ok: true, landedAt: { ...b.pos }, off, onTarget };
-    return { ok: false, reason: 'landed_off', landedAt: { ...b.pos }, off, onTarget };
+    // (Track F11: the flight stands off its landing and nothing ended it: where the glide ended, on what, what it needed)
+    if (was !== undefined) this.offWhy = this.whyOff(b, t, was);
+    return { ok: false, reason: 'landed_off', landedAt: { ...b.pos }, off, onTarget, ...(this.offWhy ? { why: this.offWhy } : {}) };
+  }
+
+  /** Track F11: the line of a flight that stands off its landing (kept: the outcome is asked again each settling tick). */
+  private offWhy: string | undefined;
+
+  /**
+   * Track F11: a flight that stands off its landing with no reason of its own: the glide ended on contact (the server ends
+   * a glide the tick the body touches a block's top) before the landing was reached. The Realm's ten flights of 2026-11-13
+   * ended this way with nothing in the log to say so. In words: the phase the body was in, what it stands on against the
+   * model's top of that column (a fence, a wall, a slab and a trapdoor stand over or under what the column tops say, and a
+   * ledge under an eave is not the column's top at all), how far from the landing, and what the phase would have needed.
+   */
+  private whyOff(b: FlightBody, t: LandingTarget, was: FlightPhase): string {
+    const up = b.pos.y - t.top;
+    const where = `${hdist(b.pos, t).toFixed(1)} from the landing's centre, ${Math.abs(up) < 0.05 ? "at its floor's height" : `${Math.abs(up).toFixed(1)} ${up > 0 ? 'over' : 'under'} its floor`}`;
+    const col = this.o.skyTop?.(Math.floor(b.pos.x), Math.floor(b.pos.z));
+    const gap = col === undefined ? undefined : b.pos.y - (col + 1);
+    const on =
+      gap === undefined
+        ? 'on a column the model does not know'
+        : Math.abs(gap) < 0.05
+          ? "on its column's top"
+          : gap > 0
+            ? `${gap.toFixed(1)} over the model's top of its column (a fence, a wall or a slab on it, or a block the model does not have)`
+            : `${(-gap).toFixed(1)} under the model's top of its column (a ledge under an eave or an overhang)`;
+    const dsc = this.descent;
+    let when: string;
+    let needed: string;
+    if (dsc?.kind === 'spiral') {
+      const low = Math.max(dsc.exitY - 10, dsc.floor ?? -Infinity);
+      when = `in the descent circle (r${dsc.fit.radius}${dsc.exitAt ? ` ${Math.round(hdist(dsc.exitAt, t))} out` : ' round the landing'}, flown down to ${(low - t.top).toFixed(0)} over the floor)`;
+      needed = dsc.tops?.ring !== undefined ? `the model's highest column under the circle is ${(dsc.tops.ring - t.top).toFixed(0)} over the floor and the circle needed this one ${SPIRAL_CLEAR.over} or more under the body` : 'the circle needed every column under it under the body';
+    } else if (dsc) {
+      when = 'in the S-turns of the descent';
+      needed = 'they needed the ground under them under the body all the way to the approach';
+    } else if (was === 'approach' || was === 'land' || was === 'route') {
+      const c = this.lastChoice;
+      when = `in the ${was === 'land' ? 'forced landing' : was === 'route' ? 'route landing' : 'approach'}${c ? ` (${c.style}, its last plan: ${c.kind})` : ''}`;
+      needed = t.cells ? `the plan needed the touchdown inside the landing's ${t.cells.size} cells` : `the plan needed the touchdown within ${(t.half + 0.5).toFixed(1)} of the centre`;
+    } else {
+      when = `in the ${was}`;
+      needed = 'the path ahead needed to be clear of it (steerClear looks 20 ticks ahead along the look, not under a body that sinks beside its heading)';
+    }
+    return `the glide ended ${when} ${on}, ${where}: ${needed}`;
   }
 
   /** The heading the takeoff and the early climb hold: the sky check's heading until TAKEOFF_HOLD above the start, else the target's. */
@@ -2022,7 +2097,14 @@ export class FlightBrain {
     // 0.15 to 0.2 a tick): with only the 10 blocks under the exit height the body reached them on the far side
     // of a 24-block circle and was forced out anywhere, too low and off the line (bds-fly, the farm: go-around)
     const lapSink = dsc.kind === 'spiral' && dsc.exitAt ? ((2 * Math.PI * dsc.fit.radius) / Math.max(0.8, h)) * 0.18 : 0;
-    if (b.pos.y <= dsc.exitY + Math.max(0, lapSink - 10)) {
+    // Track F11 (docs/flight.md "The flight comes down where it planned to"): the lowest the circle is flown: 10 under its exit
+    // height as before, and never lower than its floor (plan.ts spiralFloor: over what stands under it; for a circle round
+    // the aim the way in to the centre higher). The fit asks only that the columns under the circle are lower than where it
+    // begins, and a circle round the aim has no other leave than the lowest one (it is never 28 out heading in): on the
+    // Realm it was flown down to 6 over the landing's floor through roofs 5 to 10 over it, 10 flights of 10
+    const floor = dsc.kind === 'spiral' ? dsc.floor : undefined;
+    const low = Math.max(dsc.exitY - 10, floor ?? -Infinity);
+    if (b.pos.y <= Math.max(dsc.exitY + Math.max(0, lapSink - 10), low)) {
       // a circle around the aim is left heading at it (within 45 degrees) and at least 28 blocks out; a circle
       // farther out is tangent to the approach line and left at the tangent point heading in along the line
       // (the open side of a walled platform); either way at the latest 10 under the exit height
@@ -2035,8 +2117,9 @@ export class FlightBrain {
       const leave =
         dsc.kind !== 'spiral' ||
         (h <= CIRCLE_SPEED + 0.05 && (dsc.exitAt ? hdist(b.pos, dsc.exitAt) <= TANGENT_NEAR && headingIn <= 35 : headingIn <= 45 && hdist(b.pos, aim) >= APPROACH_DISTANCE / 2)) ||
-        b.pos.y <= dsc.exitY - 10;
+        b.pos.y <= low;
       if (leave) {
+        if (dsc.kind === 'spiral' && floor !== undefined && floor > dsc.exitY - 10 && b.pos.y <= floor) this.leftOver(dsc.fit, dsc.tops, dsc.exitAt === undefined, aim, b);
         this.descent = undefined;
         this.resetPlanners();
         return false;
@@ -2075,6 +2158,31 @@ export class FlightBrain {
   }
 
   /**
+   * Track F11: a descent circle was left at its floor (over what stands under it), not at its own low end. Round the aim
+   * itself that means columns between the circle and the aim stand over the aim's floor: from here the aim is flown as a
+   * floor under a rim (`rim`: the highest of them; plan.ts entryTop), the landing of a shaft's floor and of a pit's
+   * (Tracks F1 and F8): the brake comes in over them and stops over the centre, the elevator goes straight down onto the
+   * floor, and a go-around is flown over them. No second circle this approach.
+   */
+  private leftOver(fit: SpiralFit, tops: SpiralTops | undefined, inward: boolean, aim: LandingTarget, b: FlightBody): void {
+    const ring = tops?.ring ?? aim.top;
+    const top = Math.max(ring, tops?.top ?? -Infinity);
+    this.descentNone = true;
+    const said = `descent circle r${fit.radius} left ${(b.pos.y - aim.top).toFixed(0)} over the landing's floor: what stands under it reaches ${(ring - aim.top).toFixed(0)} over that floor`;
+    if (!inward) {
+      this.o.note?.(`${said}; the approach from here`);
+      return;
+    }
+    const next: LandingTarget = { ...aim, rim: Math.max(top, aim.rim ?? -Infinity), rimWithin: rimReach(aim) };
+    if (aim === this.emergency) this.emergency = next;
+    else if (aim === this.target) {
+      this.target = next;
+      this.targetWhy = 'the same landing, flown in over what stands round it';
+    }
+    this.o.note?.(`${said}${top > ring ? `, what stands inside it ${(top - aim.top).toFixed(0)}` : ''}: in over that (the brake over the landing's centre), then straight down onto the floor`);
+  }
+
+  /**
    * The descent geometry for `aim` from the body's position: a circle around the aim; else a circle
    * farther out, tangent to the approach line at 30 / 45 / 60 / 80 blocks before the aim (its centre a
    * radius beside the line, the largest radius 6 to 24 whose columns are free), left at the tangent
@@ -2108,7 +2216,10 @@ export class FlightBrain {
         const fit = spiralFit(aim, Math.min(b.pos.y, exit0) - 3, skyTop);
         if (fit) {
           const dir: 1 | -1 = Math.abs(yawDiff(heading, tangent(fit.centre, b.pos, 1))) <= Math.abs(yawDiff(heading, tangent(fit.centre, b.pos, -1))) ? 1 : -1;
-          return { kind: 'spiral', fit, dir, exitY: exit0 };
+          // Track F11: the height it is left at for what stands under it and between it and the aim (plan.ts SPIRAL_CLEAR)
+          const tops = LAND_SWITCH.clear && this.o.landOver ? spiralTops(fit, skyTop) : undefined;
+          const floor = tops ? spiralFloor(tops, fit.radius, true, entryTop(aim)) : undefined;
+          return { kind: 'spiral', fit, dir, exitY: exit0, ...(tops ? { tops } : {}), ...(floor !== undefined ? { floor } : {}) };
         }
       }
       // farther out: a circle tangent to the approach line at `out`, its centre a radius to one side
@@ -2122,10 +2233,13 @@ export class FlightBrain {
             const centre = { x: p.x + side * r * -uz, z: p.z + side * r * ux };
             const fit = spiralFit(centre, Math.min(b.pos.y, exitY) - 3, skyTop);
             if (!fit || fit.radius < r) continue;
+            // (Track F11: what stands under this circle, of the radius flown, and the height it is left at for it)
             const circle: SpiralFit = { centre: fit.centre, radius: r };
+            const tops = LAND_SWITCH.clear && this.o.landOver ? spiralTops(circle, skyTop) : undefined;
+            const floor = tops ? spiralFloor(tops, r, false, entryTop(aim)) : undefined;
             // leave the circle at the tangent point heading at the aim: the direction whose tangent there points in
             const dir: 1 | -1 = Math.abs(yawDiff(yawTo(p, aim), tangent(circle.centre, p, 1))) <= Math.abs(yawDiff(yawTo(p, aim), tangent(circle.centre, p, -1))) ? 1 : -1;
-            return { kind: 'spiral', fit: circle, dir, exitY, exitAt: p };
+            return { kind: 'spiral', fit: circle, dir, exitY, exitAt: p, ...(tops ? { tops } : {}), ...(floor !== undefined ? { floor } : {}) };
           }
         }
       }
@@ -2262,6 +2376,7 @@ export class FlightBrain {
   private switchTarget(next: LandingTarget): void {
     const rest = (this.target.alternatives ?? []).filter((a) => a !== next);
     this.target = { ...next, ...(rest.length ? { alternatives: rest } : {}) };
+    this.targetWhy = undefined;
     this.phase = 'cruise';
     this.tracker = undefined;
     this.holding = undefined;
