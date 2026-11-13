@@ -28,6 +28,15 @@ export interface FallPolicy {
   noWater?: { x: number; y: number; z: number; r: number };
   /** Why damaging falls (and clutches) are off, for the reply when a goto fails ("health 9 with margin 8"). */
   blocked?: string;
+  /**
+   * Track R4: `blocked` is a reason that passes by itself within seconds (a hostile near, burning, the health not sent
+   * yet), or `hostileCap` holds the budget down: the budget the policy gives once it has passed. A goto whose only way
+   * is such a fall holds and asks again (nav/navigator.ts `startHold`) instead of ending unreachable. Undefined: the
+   * block does not pass by itself (the health is under the margin: it comes back with food, in minutes).
+   */
+  afterBlock?: number;
+  /** Track R4: a hostile is within FALL_HOSTILE_RADIUS and `hostileFallHp` capped the budget to this (not blocked). */
+  hostileCap?: number;
   /** Review L1: landing cells (nav/grid.ts cellKey) of drops the step-off check refused lately: not planned. */
   refused?: number[];
 }
@@ -36,8 +45,14 @@ export interface FallPolicy {
 export const FALL_HP_COST = 40;
 export const CLUTCH_COST = 40;
 export const FALL_MAX_SCAN = 48;
-/** Hostiles within this distance turn damaging falls and clutches off. */
+/** Hostiles within this distance turn damaging falls and clutches off (Track R4: or cap them, `hostileFallHp`). */
 export const FALL_HOSTILE_RADIUS = 16;
+/**
+ * Track R4: with a hostile near and `hostileFallHp` on, a fall must also leave this much above `fallMargin`: the
+ * hardest single melee hit measured on the bot (an enderman, 7 a hit: docs/pve.md), so one more hit after the landing
+ * still leaves the margin (8 by default, the flee health).
+ */
+export const HOSTILE_FALL_RESERVE = 7;
 
 /** What the live policy reads. */
 export interface FallPolicyInputs {
@@ -62,6 +77,11 @@ export interface FallPolicyInputs {
   waterWorks: boolean;
   /** Setting `clutchMaxDrop`. */
   clutchMax: number;
+  /**
+   * Track R4, setting `hostileFallHp` (0: off, the rule before): HP a planned fall may cost while a hostile is within
+   * FALL_HOSTILE_RADIUS, the health after it at least margin + HOSTILE_FALL_RESERVE; never a clutch then.
+   */
+  hostileFallHp?: number;
   /** Creative / spectator: no fall damage at all. */
   noDamage?: boolean;
   noWater?: FallPolicy['noWater'];
@@ -71,14 +91,30 @@ export interface FallPolicyInputs {
 export function fallPolicy(i: FallPolicyInputs): FallPolicy | undefined {
   if (!i.enabled) return undefined;
   let blocked: string | undefined;
-  if (!i.healthKnown) blocked = 'health unknown';
-  else if (i.burning) blocked = 'on fire';
-  else if (i.hostileDistance <= FALL_HOSTILE_RADIUS) blocked = `a hostile ${Math.round(i.hostileDistance)} blocks away`;
+  // Track R4: the three blocks below pass by themselves within seconds (the server sends the health, the fire goes
+  // out, the hostile leaves or is struck down): `afterBlock` says what the budget is then
+  let passes = false;
+  let hostileCap: number | undefined;
   const budget = i.noDamage ? 1000 : i.health + i.absorption - i.margin;
+  if (!i.healthKnown) {
+    blocked = 'health unknown';
+    passes = true;
+  } else if (i.burning) {
+    blocked = 'on fire';
+    passes = true;
+  } else if (i.hostileDistance <= FALL_HOSTILE_RADIUS) {
+    // Track R4: a fall that costs little against the health at hand stays allowed when `hostileFallHp` says so
+    const cap = i.noDamage ? 0 : Math.min(i.hostileFallHp ?? 0, budget - HOSTILE_FALL_RESERVE);
+    if (cap > 0) hostileCap = cap;
+    else {
+      blocked = `a hostile ${Math.round(i.hostileDistance)} blocks away`;
+      passes = true;
+    }
+  }
   if (!blocked && budget <= 0) blocked = `health ${fmtHp(i.health + i.absorption)} with margin ${i.margin}`;
-  const clutch = !blocked && i.clutchOn && i.bucket && i.waterWorks && !i.noDamage;
+  const clutch = !blocked && hostileCap === undefined && i.clutchOn && i.bucket && i.waterWorks && !i.noDamage;
   return {
-    hpBudget: blocked ? 0 : budget,
+    hpBudget: blocked ? 0 : (hostileCap ?? budget),
     factor: epfFactor(i.epf),
     hpCost: FALL_HP_COST,
     maxScan: FALL_MAX_SCAN,
@@ -87,6 +123,8 @@ export function fallPolicy(i: FallPolicyInputs): FallPolicy | undefined {
     clutchCost: CLUTCH_COST,
     ...(i.noWater ? { noWater: i.noWater } : {}),
     ...(blocked ? { blocked } : {}),
+    ...(((blocked && passes) || hostileCap !== undefined) && budget > 0 ? { afterBlock: budget } : {}),
+    ...(hostileCap !== undefined ? { hostileCap } : {}),
   };
 }
 

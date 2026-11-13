@@ -36,7 +36,7 @@ import { AirClock, bodyInWater, headUnderWater } from './water.ts'; // Track W1
 import { trappedWhy, waterDigConditions } from './digout.ts'; // Track W2
 import { DIG_WAY_MAX_BLOCKS, DIG_WAY_PRICE, LONG_DIG_PRICE, LONG_DIG_WEIGHT, fallsHurt, harmlessFalls, lastResortFalls, longDigOptions, type DigWayLevel } from './digway.ts'; // Track W3; Track R3: the long dig search
 import { isNaturalTerrain } from '../place/scaffold.ts'; // Track R1
-import { REACH_RULES, causeTag, causeWords, fallOnPath, relaxOptions, rulesOnPath, sealedPocket, type ReachCause, type ReachRule, type RefusedFall } from './reach.ts'; // Track R1; Track R2: fallOnPath
+import { REACH_RULES, causeTag, causeWords, fallOnPath, fallWords, relaxOptions, rulesOnPath, sealedPocket, type ReachCause, type ReachRule, type RefusedFall } from './reach.ts'; // Track R1; Track R2: fallOnPath; Track R4: fallWords
 
 /** Track R: goto options of the navigator. `blacklist`: consult and feed the failure blacklist (default: `any` and `getToBlock` goals). */
 export type NavGotoOptions = GotoOptions & { blacklist?: boolean };
@@ -210,6 +210,8 @@ export interface GotoReport {
   retreats: number;
   /** Ticks spent waiting for unloaded chunks. */
   unloadedWait: number;
+  /** Track R4: ticks the goto held for a block on its only fall to pass (startHold). */
+  held?: number;
   /** Track AB: worker answers spliced into the path being walked, and answers dropped as stale (blocks changed near them). */
   upgrades?: number;
   stale?: number;
@@ -397,6 +399,9 @@ interface Active {
   /** Track R2: the last open way, walked when the weighted search after it goes nowhere (adoptOpenWay). */
   openPath?: PathNode[];
   cause: ReachCause | undefined;
+  /** Track R4: the goto holds for a block on its only fall to pass (startHold); `heldTicks` the ticks held so far. */
+  hold: FallHold | undefined;
+  heldTicks: number;
   /** Track R1: partial plans this goto walked to a frontier end (PathOptions.frontier). */
   frontierLegs: number;
   /** Track R1: the start cells of the partial main plans this goto walked (cell:level): a partial plan that ends on one is a loop. */
@@ -441,6 +446,29 @@ export const BIG_SEARCH = 4;
 export const EXPLAIN_MAX_SEARCHES = 5;
 /** Track R2: ways a goto walks that its "why" search found breaking no rule (walkOpenWay). */
 export const OPEN_WALKS = 2;
+/**
+ * Track R4: ticks a goto holds at most (all its holds together) for a block on its only fall to pass (a hostile near,
+ * burning, the health not sent yet, a landing refused lately) before it reports unreachable: 30 s.
+ */
+export const FALL_HOLD_TICKS = 600;
+/** Track R4: ticks the block must stay away before the hold ends and the goto plans again (a hostile on the 16-block line). */
+export const FALL_HOLD_CLEAR = 20;
+/** Track R4: the hold reads the live fall policy every this many ticks. */
+const FALL_HOLD_EVERY = 5;
+
+/** Track R4: a goto holding for a block on its only fall to pass (Navigator.startHold). */
+interface FallHold {
+  /** Tick the hold began and the last tick it may last. */
+  since: number;
+  until: number;
+  /** The cause it would have ended with (rule falls and its fall). */
+  cause: ReachCause;
+  fall: RefusedFall;
+  /** Ticks the block has been away in a row. */
+  clear: number;
+  /** The block it waits for, in words (the first one seen). */
+  why: string;
+}
 /** Track R2: the heuristic's weight of a goto's searches after an open way (walkOpenWay). */
 export const OPEN_WEIGHT = 3;
 /** The coarse modes a goto's corridors plan in (Track CB; Track R2: the modes a failed waypoint's portal is marked for). */
@@ -525,6 +553,8 @@ export class Navigator {
   pauseFollow: (() => boolean) | undefined;
   /** Track BI: a planned drop deeper than 3 still holds (the live fall policy); false stops the body and re-plans. */
   dropCheck: ((from: PathNode, to: PathNode, costs: PathCosts) => boolean) | undefined;
+  /** Track R4: ticks a goto may hold for a block on its only fall to pass (0: never, the behaviour before). */
+  fallHoldTicks = FALL_HOLD_TICKS;
   private protect: NavigatorOptions['protect'];
   /** Track BK: cells (cellKey) no goto may dig while a job holds them (a quarry's stair treads); every goto's noBreak starts with them. */
   readonly keptCells = new Set<number>();
@@ -923,6 +953,8 @@ export class Navigator {
         explained: false,
         openWalks: 0,
         cause: undefined,
+        hold: undefined, // Track R4
+        heldTicks: 0,
         frontierLegs: 0,
         partialFrom: new Set(),
         loopWaited: 0,
@@ -948,6 +980,7 @@ export class Navigator {
           this.log.info(
             `goto ${JSON.stringify(goal)}: ${r.ok ? 'ok' : r.reason} after ${report.ticks} ticks, ${report.distance.toFixed(1)} blocks, ` +
               `${report.plans.length} plan(s)${report.plans.some((p) => p.via === 'worker') ? ' (worker)' : ''}, ${report.segments} segment(s), ${report.corrections} correction(s), ${report.stuck} stuck, max tick ${report.maxTickMs} ms` +
+              `${report.held ? `, held ${report.held} ticks for a fall` : ''}` + // Track R4
               `${report.reached ? `, reached member ${report.reached.index}` : ''}${skipped.length ? `, skipped ${skipped.join(' ')}` : ''}${report.blacklisted?.length ? `, blacklisted ${report.blacklisted.join(' ')}` : ''}` +
               `${report.corridor ? `, corridor ${report.corridor.status ?? 'pending'} (${report.corridor.requests} request(s), ${report.corridor.passed} waypoint(s) passed, ${report.corridor.failed} failed)` : ''}`, // Track CB
           );
@@ -1095,7 +1128,91 @@ export class Navigator {
     const c = a.cause;
     // Track R2: a `falls` cause names the fall (its height, its damage, the budget or why no fall that hurts is taken)
     if (c?.cls === 'rule' && c.rules.includes('falls') && !c.fall && a.explain?.fall) c.fall = a.explain.fall;
-    a.finish(c ? { ok: false, reason: 'unreachable', cause: causeTag(c), note: causeWords(c) } : { ok: false, reason: 'unreachable' });
+    if (c && this.startHold(a, c)) return; // Track R4: the only fall is closed for a moment: hold, then ask again
+    a.finish(c ? { ok: false, reason: 'unreachable', cause: causeTag(c), note: causeWords(c) + this.heldWords(a) } : { ok: false, reason: 'unreachable' });
+  }
+
+  // ---- Track R4: a fall closed for a moment (decisions/0072-reachability.md "R4") ------------------------------
+
+  /**
+   * The cause names one rule, `falls`, and its fall is closed only by something that passes by itself within seconds
+   * (FallPolicy.afterBlock: a hostile near, burning, the health not sent yet; or the step-off check refused its landing
+   * lately, `RefusedFall.lately`), and the fall fits the budget once it has passed: the goto holds where it stands (the
+   * reflex strikes what comes within reach) for at most FALL_HOLD_TICKS a goto, and plans again when the block has
+   * been away FALL_HOLD_CLEAR ticks. True when it holds.
+   */
+  private startHold(a: Active, c: ReachCause): boolean {
+    if (c.cls !== 'rule' || c.rules.length !== 1 || c.rules[0] !== 'falls' || !c.fall) return false;
+    const left = this.fallHoldTicks - a.heldTicks;
+    if (left <= 0) return false;
+    const why = this.holdBlock(c.fall);
+    if (why === undefined) return false;
+    a.explain = undefined;
+    a.follower = undefined;
+    a.action = undefined;
+    a.replan = undefined;
+    this.loop.release();
+    a.hold = { since: a.t, until: a.t + left, cause: c, fall: c.fall, clear: 0, why };
+    this.log.info(`goto: the only way is ${fallWords(c.fall)}; holding up to ${(left / 20).toFixed(0)} s for it to pass (${why})`);
+    return true;
+  }
+
+  /**
+   * What the hold for `f` waits for now, in words; undefined when nothing that passes by itself closes it any more (the
+   * health fell under what the fall needs, the margin closed it, long falls were turned off) or it is open ('').
+   */
+  private holdBlock(f: RefusedFall): string | undefined {
+    const p = this.fallPolicy?.();
+    if (!p) return undefined;
+    if (f.lately && f.cell !== undefined && p.refused?.includes(f.cell)) return 'its landing refused at the step-off lately';
+    return this.passing(p, f);
+  }
+
+  /** The policy's block on fall `f` when it passes by itself and `f` fits the budget then; '' when `f` is open now. */
+  private passing(p: NonNullable<PathOptions['falls']>, f: RefusedFall): string | undefined {
+    if (!p.blocked && f.damage <= Math.max(0, p.hpBudget) + 1e-9) return '';
+    if (p.afterBlock === undefined || f.damage > p.afterBlock + 1e-9) return undefined;
+    return p.blocked ?? `a hostile near (the fall is over its cap of ${+(p.hostileCap ?? 0).toFixed(1)} HP)`;
+  }
+
+  /** One tick of a hold: the body stands; the block gone FALL_HOLD_CLEAR ticks: plan again; past its end: unreachable. */
+  private stepHold(a: Active, s: InputLoopState): void {
+    const h = a.hold!;
+    this.idleBody(s);
+    a.guard.idle();
+    a.lastProgressTick = a.t;
+    a.passTick = a.t;
+    if ((a.t - h.since) % FALL_HOLD_EVERY !== 0 && a.t < h.until) return;
+    const why = this.holdBlock(h.fall);
+    if (why === '') h.clear += FALL_HOLD_EVERY;
+    else h.clear = 0;
+    if (why === '' && h.clear >= FALL_HOLD_CLEAR) {
+      a.heldTicks += a.t - h.since;
+      a.report.held = a.heldTicks;
+      a.hold = undefined;
+      a.explained = false;
+      a.cause = undefined;
+      a.report.failures = 0;
+      a.noProgress = undefined;
+      a.replan = 'retry';
+      a.waitUntil = a.t + 1;
+      // the "why" search showed the fall is the only rule in the way: the level that takes it at once
+      if (a.level < 2 && fallsHurt(this.fallPolicy?.())) a.level = 2;
+      this.log.info(`goto: ${h.why} has passed after ${((a.t - h.since) / 20).toFixed(1)} s; planning again`);
+      return;
+    }
+    if (why === undefined || a.t >= h.until) {
+      a.heldTicks += a.t - h.since;
+      a.report.held = a.heldTicks;
+      a.hold = undefined;
+      this.log.info(`goto: held ${((a.t - h.since) / 20).toFixed(1)} s for ${h.why}; ${why === undefined ? 'it no longer passes by itself' : 'it did not pass'}`);
+      a.finish({ ok: false, reason: 'unreachable', cause: causeTag(h.cause), note: causeWords(h.cause) + this.heldWords(a, h.why) });
+    }
+  }
+
+  /** The hold in the reply (`; held 30 s for a hostile 9 blocks away`), '' when the goto never held. */
+  private heldWords(a: Active, why?: string): string {
+    return a.heldTicks > 0 ? `; held ${Math.round(a.heldTicks / 20)} s${why ? ` for ${why}` : ''}` : '';
   }
 
   /**
@@ -1263,14 +1380,18 @@ export class Navigator {
         this.walkOpenWay(a, undefined, stuck);
         return;
       }
-      if (run.used.length === 1) {
+      // Track R4: falls closed for a moment (a hostile near ...): a way over a fall may stand beside the one this search
+      // took (its digs cost nothing, a fall its HP: a tower of planks is dug through, not dropped from); the fall rule
+      // alone is asked first, so a goto that can hold for it does
+      const passing = run.owner.falls?.afterBlock !== undefined && !run.used.includes('falls');
+      if (run.used.length === 1 && !passing) {
         a.cause = { cls: 'rule', rules: run.used };
         this.finishUnreachable(a);
         return;
       }
       // several rules on that path: each alone, the ones it broke first
       run.stage = 'single';
-      run.queue = [...run.used, ...REACH_RULES.filter((r) => !run.used.includes(r))];
+      run.queue = run.used.length === 1 ? ['falls'] : [...(passing ? (['falls'] as ReachRule[]) : []), ...run.used, ...REACH_RULES.filter((r) => !run.used.includes(r) && !(passing && r === 'falls'))];
     } else if (found) {
       if (run.cur.includes('falls')) run.fall = fallOnPath(this.grid, res.path, run.owner) ?? run.fall; // Track R2
       a.cause = { cls: 'rule', rules: [...run.cur] };
@@ -1476,6 +1597,11 @@ export class Navigator {
     // Track R1: the "why unreachable" searches run to their answer (a few seconds at most: the timeout waits)
     if (a.explain) {
       this.stepExplain(a, s);
+      return;
+    }
+    // Track R4: holding for a block on the only fall to pass (its own bound, FALL_HOLD_TICKS)
+    if (a.hold) {
+      this.stepHold(a, s);
       return;
     }
     if ((gp ? a.t - a.goalProgressTick : a.t) > a.opts.timeoutTicks || a.t > a.opts.timeoutTicks * 20) {

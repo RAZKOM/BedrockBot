@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { silentLogger, type Logger } from '../../../src/log.ts';
 import { attachCoarseLayer } from '../../../src/skills/coarse/index.ts';
 import { breakTicks } from '../../../src/skills/dig/breakTime.ts';
+import { DEFAULT_FALL_SETTINGS, type FallSettings } from '../../../src/skills/fall/clutch.ts';
 import { fallDamage } from '../../../src/skills/fall/damage.ts';
 import { BotSkills } from '../../../src/skills/index.ts';
 import type { NavActions } from '../../../src/skills/nav/actions.ts';
@@ -59,6 +60,14 @@ export interface SimOptions {
   debug?: boolean;
   /** Track R2: the world as the run left it (before it is restored), the body's end, the cells (Vox.index) the run placed. */
   after?: (vox: Vox, end: Vec3, placed: ReadonlySet<number>) => void;
+  /** Track R4: called every tick before the body moves: the "server" may add, move or remove entities (`src.emit`). */
+  onTick?: (tick: number, src: ReplaySource, pos: Readonly<Vec3>) => void;
+  /** Track R4: the fall settings (FallGuard.settings; default the session's defaults). */
+  falls?: Partial<FallSettings>;
+  /** Track R4: the health at the start (default 20). */
+  health?: number;
+  /** Track R4: Navigator.fallHoldTicks (default FALL_HOLD_TICKS; 0: the behaviour before R4). */
+  fallHoldTicks?: number;
 }
 
 /** Track R2: the palette id a placed throwaway block becomes. */
@@ -316,6 +325,8 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
   skills.nav.setProtect(() => protect);
   skills.nav.setDigPenalty(() => o.digPenalty ?? 60);
   skills.falls.protect = () => protect;
+  if (o.falls) skills.falls.settings = () => ({ ...DEFAULT_FALL_SETTINGS, ...o.falls });
+  if (o.fallHoldTicks !== undefined) skills.nav.fallHoldTicks = o.fallHoldTicks;
   // the survival layer's avoidance (skills/survival: lava proximity costs, no mobs here)
   const avoidance = new Avoidance({ entities: () => server.world.entities, origin: () => (loop.state.ready ? loop.state.pos : undefined), lavaWorld: server.world });
   skills.nav.cellCost = () => avoidance.costFn();
@@ -331,7 +342,8 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
   let result: SkillResult | undefined;
   const p = skills.goto({ type: 'block', p: pair.goal }, { timeoutTicks: o.timeoutTicks ?? 6000, allowBreak: o.allowBreak ?? false, allowPlace: o.allowPlace ?? false, closeDoors: false, explain: true }).then((r) => (result = r));
   const self = server.world.self as { health: number };
-  let health = 20;
+  let health = o.health ?? 20;
+  self.health = health;
   let damage = 0;
   let died = false;
   let deathBy: string | undefined;
@@ -352,6 +364,7 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
   const max = (o.timeoutTicks ?? 6000) + 600;
   // (while the skill's goto is pending too: it surfaces and retries after a goto that ended in water, BotSkills.surfaceAndRetry)
   while ((skills.nav.busy || result === undefined) && ticks < max && !died) {
+    o.onTick?.(ticks, server.src, loop.state.pos);
     conn.tick();
     ticks++;
     const s = loop.state;

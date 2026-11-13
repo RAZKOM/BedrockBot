@@ -47,9 +47,11 @@ export interface FallSettings {
   fallMargin: number;
   clutch: boolean;
   clutchMaxDrop: number;
+  /** Track R4: HP a planned fall may cost with a hostile near (0: none, the rule before; policy.ts hostileFallHp). */
+  hostileFallHp?: number;
 }
 
-export const DEFAULT_FALL_SETTINGS: Readonly<FallSettings> = Object.freeze({ longFalls: true, fallMargin: 8, clutch: true, clutchMaxDrop: 40 });
+export const DEFAULT_FALL_SETTINGS: Readonly<FallSettings> = Object.freeze({ longFalls: true, fallMargin: 8, clutch: true, clutchMaxDrop: 40, hostileFallHp: 0 });
 
 /** Eye to the clicked block's min corner at which the clutch clicks (BDS accepts up to 7.19). */
 export const CLUTCH_REACH = 6.5;
@@ -164,6 +166,8 @@ export class FallGuard {
   private pendingDamage = 0;
   /** Review L1: landing cells (cellKey) whose drop the step-off check refused, and until which tick. */
   private readonly refusedDrops = new Map<number, number>();
+  /** Track R4: the refused landings among them refused only because the policy was blocked for a reason that passes. */
+  private readonly passingRefusals = new Set<number>();
   /** Slow Falling on the bot (mob_effect for its own runtime id). */
   private slowFalling = false;
   private effectSource: unknown;
@@ -281,9 +285,16 @@ export class FallGuard {
 
   /** Review B1 / Medium: the planned long drop from `from` into `to` still holds with the live policy (fall/plan.ts acceptsDrop). */
   acceptsDrop(from: { y: number; feet: number }, to: { x: number; y: number; z: number }, costs: PathCosts = DEFAULT_COSTS): boolean {
-    const ok = acceptsDrop(this.d.grid, costs, this.policy(), from, to);
+    const p = this.policy();
+    const ok = acceptsDrop(this.d.grid, costs, p, from, to);
     // review L1: a refused drop stays out of the re-plans for a while (no plan / refuse loop on a borderline budget)
-    if (!ok) this.refusedDrops.set(cellKey(to.x, to.y, to.z), this.ticks + REFUSED_DROP_TICKS);
+    if (!ok) {
+      const k = cellKey(to.x, to.y, to.z);
+      this.refusedDrops.set(k, this.ticks + REFUSED_DROP_TICKS);
+      // Track R4: refused for a block that passes by itself (a hostile came): back in the plans once it has passed
+      if (p?.afterBlock !== undefined) this.passingRefusals.add(k);
+      else this.passingRefusals.delete(k);
+    }
     return ok;
   }
 
@@ -348,7 +359,11 @@ export class FallGuard {
     const st = this.settings();
     const self = this.d.world.self;
     const worn = this.d.world.inventory?.window(120)?.slots ?? [];
-    for (const [k, until] of this.refusedDrops) if (until <= this.ticks) this.refusedDrops.delete(k);
+    for (const [k, until] of this.refusedDrops) {
+      if (until > this.ticks) continue;
+      this.refusedDrops.delete(k);
+      this.passingRefusals.delete(k);
+    }
     const p = fallPolicy({
       enabled: st.longFalls,
       health: self.health - this.pendingDamage, // review M1: a landing whose health packet is still on its way
@@ -362,9 +377,15 @@ export class FallGuard {
       clutchOn: st.clutch,
       waterWorks: waterWorks(this.dimension()),
       clutchMax: st.clutchMaxDrop,
+      hostileFallHp: st.hostileFallHp ?? 0,
       noDamage: this.noDamage(),
       ...(this.protect() ? { noWater: this.protect()! } : {}),
     });
+    // Track R4: the block a landing was refused for has passed: the landing is plannable again at once (not 200 ticks on)
+    if (p && !p.blocked && this.passingRefusals.size) {
+      for (const k of this.passingRefusals) this.refusedDrops.delete(k);
+      this.passingRefusals.clear();
+    }
     if (p && this.refusedDrops.size) p.refused = [...this.refusedDrops.keys()]; // review L1
     return p;
   }

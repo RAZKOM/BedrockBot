@@ -16,7 +16,8 @@
 //   built           a player's built block is never broken; the dig way digs natural terrain only
 //   liquid          nothing with water or lava beside it is dug
 //   gravity         nothing under a gravity block or beside an unsupported one is dug
-//   falls           no fall leaves less than `fallMargin` HP
+//   falls           no fall leaves less than `fallMargin` HP (none that hurts while a hostile is near, burning, the
+//                   health unknown; Track R4: a goto whose only way is such a fall holds for it to pass, navigator.ts startHold)
 //   dig_budget      at most DIG_WAY_MAX_BLOCKS blocks a goto, none slower than DIG_WAY_MAX_TICKS
 //   place           a goto never places a block (no pillar, no bridge)
 import { fallDamage } from '../fall/damage.ts';
@@ -48,6 +49,10 @@ export interface RefusedFall {
   budget: number;
   /** FallPolicy.blocked: why no fall that hurts is taken now (a hostile near ...). */
   blocked?: string;
+  /** Track R4: within the budget, but the step-off check refused its landing lately (FallPolicy.refused: back within 200 ticks). */
+  lately?: boolean;
+  /** Track R4: the fall's landing cell (grid.ts cellKey). */
+  cell?: number;
 }
 
 /** The heuristic's weight in a "why" search (weighted A*: is there a way at all, found fast, not the best one). */
@@ -89,7 +94,8 @@ export function relaxOptions(base: PathOptions, rules: readonly ReachRule[], ctx
         break;
       case 'falls':
         if (o.falls) {
-          const { blocked: _b, ...p } = o.falls;
+          // (Track R4: and the landings the step-off check refused lately: they come back within 200 ticks)
+          const { blocked: _b, afterBlock: _a, hostileCap: _h, refused: _r, ...p } = o.falls;
           o.falls = { ...p, hpBudget: Math.max(p.hpBudget, (ctx.hp ?? 20) - 1) };
         }
         break;
@@ -139,7 +145,7 @@ export function rulesOnPath(grid: NavGrid, path: readonly PathNode[], owner: Pat
     if (fall > 3 + 1e-6 && grid.cls(n.x, n.y, n.z)?.liquid !== 'water') {
       const floor = grid.cls(n.x, Math.floor(n.feet - 1e-6), n.z);
       const dmg = fallDamage(fall, floor?.name, owner.falls?.factor ?? 1);
-      if (dmg > budget + 1e-9) used.add('falls');
+      if (dmg > budget + 1e-9 || (dmg > 0 && refusedLately(owner, n))) used.add('falls'); // Track R4: or its landing refused lately
     }
     for (const d of n.act?.dig ?? []) {
       const c = grid.cls(d.x, d.y, d.z);
@@ -170,15 +176,23 @@ export function fallOnPath(grid: NavGrid, path: readonly PathNode[], owner: Path
     if (fall <= 3 + 1e-6 || grid.cls(n.x, n.y, n.z)?.liquid === 'water') continue;
     const floor = grid.cls(n.x, Math.floor(n.feet - 1e-6), n.z);
     const dmg = fallDamage(fall, floor?.name, owner.falls?.factor ?? 1);
-    if (dmg > budget + 1e-9 && (!worst || dmg > worst.damage)) worst = { blocks: Math.round(fall * 10) / 10, damage: Math.round(dmg * 10) / 10, budget, ...(owner.falls?.blocked ? { blocked: owner.falls.blocked } : {}) };
+    const over = dmg > budget + 1e-9;
+    const lately = !over && dmg > 0 && refusedLately(owner, n); // Track R4
+    if ((over || lately) && (!worst || dmg > worst.damage)) worst = { blocks: Math.round(fall * 10) / 10, damage: Math.round(dmg * 10) / 10, budget, ...(owner.falls?.blocked ? { blocked: owner.falls.blocked } : {}), ...(lately ? { lately } : {}), cell: cellKey(n.x, n.y, n.z) };
   }
   return worst;
+}
+
+/** Track R4: the landing of path node `n` is one the step-off check refused lately (FallPolicy.refused). */
+function refusedLately(owner: PathOptions, n: PathNode): boolean {
+  return owner.falls?.refused?.includes(cellKey(n.x, n.y, n.z)) === true;
 }
 
 /** Track R2: a refused fall in words (`a 9-block fall (6 HP) over the fall budget of 2 HP`, `..., no fall that hurts now: <reason>`). */
 export function fallWords(f: RefusedFall): string {
   const what = `a ${f.blocks}-block fall (${f.damage} HP)`;
   if (f.blocked) return `${what}, no fall that hurts now: ${f.blocked}`;
+  if (f.lately) return `${what}, its landing refused at the step-off lately`; // Track R4
   return f.budget > 0 ? `${what} over the fall budget of ${f.budget} HP` : `${what}, no fall that hurts allowed (fallMargin / health)`;
 }
 

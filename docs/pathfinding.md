@@ -207,7 +207,10 @@ first floor below it takes the cheapest of:
 Never onto slime or a bed (the body bounces), never into water (the follower's swim move holds forward
 through the fall; the FallGuard handles a fall into water anyway), never with `maxDrop` below 3 (the End).
 The policy is off (`hpBudget` 0, no clutch) while the health is unknown, the bot burns, or a hostile is
-within 16 blocks (`blocked`); harmless landings stay allowed. A long drop is a `drop` node; the follower
+within 16 blocks (`blocked`); harmless landings stay allowed. Those three pass by themselves within seconds, and
+the policy says what the budget is once they have (`afterBlock`, Track R4): a goto whose only way is such a fall
+holds for it instead of ending unreachable ("A fall closed for a moment (Track R4)" below). With the setting
+`hostileFallHp` (0, off) a hostile near caps the budget instead of closing it. A long drop is a `drop` node; the follower
 walks it like any drop (creep off the edge, let go of forward in the air), and the FallGuard clutches it by
 its own rule (the planned clutch drop is that reactive clutch). Every tick the body still stands before a
 long drop the navigator asks the live policy again (`Navigator.dropCheck` = `FallGuard.acceptsDrop`, the
@@ -1218,6 +1221,77 @@ on every long pair, 19 of R2's 35 with the goal above the start); the long dig w
 does (p90 2.25 x: the oracle digs at no extra cost, the long dig search at 12 a block and weighted); the coarse layer
 still sees a ravine as open air (its dig portals are not changed here); the follower's corner shortcut that left
 lava:20:5's path at the same corner every lap (the aim running ahead of the passed node) is not changed either.
+
+### A fall closed for a moment (Track R4)
+
+Decision record: [decisions/0072-reachability.md](decisions/0072-reachability.md) "R4". On the Realm (2026-11-12) a
+flight home landed a few blocks off on a spot whose only way on was a 5.2-block drop (0.4 HP with the bot's armour).
+The goto planned the drop at its last level and set off; 1.2 s later a hostile came within 16 blocks, the step-off
+check refused the drop (`the 5.2-block drop ahead is no longer safe`), the re-plan had no fall that hurts to give, and
+the goto ended `unreachable (rule falls: a 5.2-block fall (0.4 HP), no fall that hurts now: a hostile ...)` at 19.7
+health, a few blocks from the goal. The rule that closed it is a moment's: the hostile leaves or is struck down.
+
+**Why the rule is there.** The long-fall policy (decision 0049, Track BI, 2026-10-30) turns every fall that hurts and
+every clutch off while a hostile is within 16 blocks (the flee trigger's radius). No measurement came with that part:
+no e2e, and the unit test checks its words. What it guards against is measured elsewhere: a fall may leave just
+`fallMargin` (8), which is `fleeHealth` (8), and one hit from an enderman (7) or an armed zombie (5.2 through iron,
+docs/pve.md) then puts the bot under the flee line beside the mob; in a fight the FallGuard clutches only a fall that
+would kill (decision 0049, review B4), so a fall planned as a clutch would land at full damage; and Track M2's dodge on
+real ground took falls of 5 to 13 HP in 7 of 12 runs next to skeletons (docs/pve.md "The dodge on real ground"). Those
+are the big falls. A fall of a heart at nearly full health is none of them.
+
+**What a goto does now.**
+
+| Case | What happens |
+|---|---|
+| The "why" answer is `rule falls` alone, the fall closed only by a block that passes by itself (`FallPolicy.afterBlock`: a hostile within 16, burning, the health not sent yet) and the fall fits the budget once it has passed | the goto holds where it stands (the reflex strikes what comes within reach), reads the live policy every 5 ticks, and plans again once the block has been gone 20 ticks (1 s), at the level that takes the fall; at most `FALL_HOLD_TICKS` 600 (30 s) a goto in all, then the answer it would have given, with `; held 30 s for <what>` |
+| The fall's landing was refused by the step-off check in the last 200 ticks (`FallPolicy.refused`, review L1) | named `its landing refused at the step-off lately` (before: the "why" search kept the refusal and could answer `world`); held until it ages out. A refusal made only because of a passing block is dropped when the block passes |
+| The "why" search with every rule lifted took another way (it digs for nothing, a fall costs its HP: through a tower of planks rather than off it) while such a block is on | the fall rule alone is asked first, so the goto holds for the fall instead of answering `rule built` |
+| The block turns into one that does not pass by itself (the health falls under what the fall needs), or the fall needs more than the budget after it | no hold, or the hold ends at once: the answer as before |
+| `hostileFallHp` > 0 (setting, default 0) | with a hostile within 16 the budget is min(`hostileFallHp`, health + absorption - `fallMargin` - 7) instead of 0, never a clutch; at 15 health or less (the defaults) it is closed as before. 7 (`HOSTILE_FALL_RESERVE`) is the hardest single melee hit measured on the bot (an enderman), so one more hit after the landing still leaves the flee line. A fall over the cap holds like a closed one |
+
+Only a goto with `explain` (the `!goto` command, the walk after its flight included) holds: it is the one that
+knows its cause. The PvE layer's and the chores' own walks answer as before. The hold is on by default: it replaces the answer with a wait and then plans under the same
+rules, so no fall is taken that was not allowed before. `hostileFallHp` changes the rule and stays off until it has
+run on the Realm; 2 is the value to try (a 5-block fall unarmoured, about 13 blocks at the armour cap).
+
+**Measured offline** (`test/unit/skills/nav-r4.test.ts`, the real navigator in the closed loop of the reach bench,
+2026-11-12): a tower of planks 5 high on a grass floor (the dig way never digs a built block, so the only way off is
+a 5-block fall, 2 HP), the goal 10 blocks from its edge, a zombie 12 blocks off brought in by the "server" and taken
+away again.
+
+| Case | n | Result | Damage | Time |
+|---|---|---|---|---|
+| no zombie (the control) | 1 | arrived | 2 (the fall) | 85 ticks |
+| before R4 (no hold), the zombie from the start | 1 | `unreachable (rule falls: a 5-block fall (2 HP), no fall that hurts now: a hostile 13 blocks away)` | 0 | 8 ticks |
+| before R4, the zombie while the body walks to the edge (the Realm's sequence: `no longer safe`, re-plan, unreachable) | 1 | unreachable, the same words | 0 | 23 ticks |
+| the zombie from tick 0 to 25 for 40 to 300 ticks | 10 | arrived 10 of 10, 9 held (6 of them refused at the edge first, as on the Realm, 5 in an earlier run: the timing moves it; the tenth stepped off before the zombie came) | 2 each (the fall), 0 deaths | held 40 to 310 ticks, the zombie's stay and up to 0.5 s; 84 to 403 ticks in all |
+| a zombie that stays | 1 | held 600 ticks, then `unreachable (rule falls: ...; held 30 s for a hostile 13 blocks away)` | 0 | 609 ticks |
+| `hostileFallHp` 2, a zombie that stays | 1 | arrived, no hold | 2 | 85 ticks |
+| `hostileFallHp` 2 at 15 health, the zombie for 60 ticks | 1 | held 70 ticks (15 - 8 - 7 leaves nothing to fall with), arrived | 2 | 159 ticks |
+
+**Measured on bds-pve** (`test/e2e/nav-hostile-fall.test.ts`, BDS 1.26.60, 2026-11-12, midnight, the bot with an iron
+sword and no armour, the reflex on): the same tower and goal built on the server, a real zombie summoned on the floor
+8 blocks out (it cannot climb to the bot), the walk through the PvE layer with `explain` as `!goto` has it.
+
+| Case | n | Result | Damage | Time |
+|---|---|---|---|---|
+| before (`Navigator.fallHoldTicks` 0) | 10 | 10 unreachable, `rule falls: a 5-block fall (2 HP), no fall that hurts now: a hostile 12 blocks away` | 0 | |
+| the zombie taken away 2, 4, 6, 8 or 10 s into the walk (twice each) | 10 | arrived 10 of 10 | 2 each (the fall), 0 from the zombie, 0 deaths | 7.1 to 15.1 s (the zombie's time and 5 s); held 55 to 215 ticks |
+| the zombie stays | 10 | 10 unreachable after 30.3 to 30.4 s, `...; held 30 s for a hostile 12 blocks away` | 0 | |
+| `hostileFallHp` 2, the zombie stays | 10 | arrived 10 of 10, no hold | 2 each (the fall), 0 from the zombie | 4.2 s |
+
+A zombie summoned on the tower's top beside the bot (tried once while building the test) never struck it in 30 s and
+the reflex never struck it either: the goto held the 30 s and answered unreachable. A hostile that neither leaves nor
+comes within reach keeps the fall closed for the whole hold; with `hostileFallHp` the bot would have dropped.
+
+The reach bench (no mobs in its worlds; `--config live --speed 1 --worlds 20`, the owner's Mac, 2026-11-12): 2194
+pairs, 5 false unreachable (the five of R3), 0 deaths, damage 8 at most. main the same day on the 2083 pairs both runs
+finished (one of its workers ran out of memory in the long class, stopped there): 6 false, the sixth lava:7:10, R3's
+open death by a lava turn, which arrived in R4's run; no other pair changed its answer or its cause.
+The mob e2e on the same tree: `pve-m1`, `pve-combat` and `pve-creeper` on bds-pve 20 of 20 (the goto under attack
+arrived in 8.1 s at 20 health); the gauntlet's live kit on bds-gaunt, 33 cells, one death in the first run (husk-1, by
+suffocation, no mob hit, no goto running), the cell 3 of 3 alive when run again.
 
 ## Following a path
 
