@@ -12,7 +12,7 @@ import type { Vec3 } from '../connection/types.ts';
 import { FlightController, skyQuery } from '../skills/fly/controller.ts';
 import { glideKitReady, jumpTakeoff, ledgeTakeoff, planGlideDown, routeTakeoff, routeTakeoffOptions, smallPlatform, verticalTakeoff, type Ledge, type SimDeps } from '../skills/fly/glide.ts'; // Track BH, F9a
 import { elytraWornLimit, flightKitMemoryOf, isRocket, kitLine, kitReady, readKit, ROCKET, SupplyWatch } from '../skills/fly/kit.ts';
-import { BURN_PLAIN, burnOfHotbar, burnSaid, type BurnRange } from '../skills/fly/burn.ts'; // Track F9e round 2
+import { burnSaid, kitBurnOf, openBurnOf, type BurnRange } from '../skills/fly/burn.ts'; // Track F9e round 2, Track F10
 import { restockFromBoxes, supplyOf } from '../skills/supply/supply.ts';
 import { FlightKitOps } from '../skills/fly/kitops.ts';
 import { APPROACH_HEIGHT, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, yawTo, type CellQuery, type LandingTarget, type SkyCheck } from '../skills/fly/plan.ts';
@@ -268,9 +268,18 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * than the one the script API gives, and a line under a roof is proven and flown with the burn of the rockets at hand.
    * Undefined: the plain rocket's (9 to 21), as everything was before.
    */
-  const kitBurn = (): BurnRange | undefined => {
-    const b = burnOfHotbar(inv.slots, isRocket);
-    return b.min === BURN_PLAIN.min && b.max === BURN_PLAIN.max ? undefined : b;
+  const kitBurn = (): BurnRange | undefined => kitBurnOf(inv.slots, isRocket);
+  /**
+   * Track F10 (docs/flight.md "The open-air flight on the burn of the rockets at hand"; decisions/0083): the burn the
+   * flight in the open plans with: the kit's with `flyKitBurn` on (default off), else undefined, and then the climb, the
+   * cruise, the route planner's plans and every takeoff's proof think in 9 to 21 as before. The lines under a roof take
+   * the kit's burn whatever this says (`kitBurn`, Track F9e round 2).
+   */
+  const openBurn = (): BurnRange | undefined => openBurnOf(d.settings.get('flyKitBurn') === true, inv.slots, isRocket);
+  /** The brain's options of a takeoff's simulation (the flight's own: tasks/process/fly.ts), for a cruise height. */
+  const simOptions = (cruiseY: number): { cruiseY: number; margin: number; goArounds: number; burn?: BurnRange } => {
+    const burn = openBurn();
+    return { cruiseY, margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds'), ...(burn ? { burn } : {}) };
   };
   /**
    * Track BF (docs/flight.md "Landing v3"): the landing for a walk to `goal` (landing.ts findLanding): only
@@ -293,7 +302,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         dryGround: (x, z) => landable(x, z),
         yieldNow: () => new Promise((r) => setImmediate(r)),
         // Track F3: the route planner for a precision goal the brake cannot land (a slot 2 high, a hole, a 1 x 1 shaft)
-        ...(routeOn() ? { route: { grid: routeGrid, plan: routePlanner, rockets: Math.min(4, Math.max(2, readKit(inv, memory()).rocketsHotbar)) } } : {}),
+        ...(routeOn() ? { route: { grid: routeGrid, plan: routePlanner, rockets: Math.min(4, Math.max(2, readKit(inv, memory()).rocketsHotbar)), ...(openBurn() ? { kit: openBurn()! } : {}) } } : {}),
       },
       {
         radius: d.settings.get('flyLandSearch'),
@@ -573,6 +582,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       restock: (item, n) => restockFromBoxes(d.task, item, n),
       ...(routeOn() ? { route: { grid: routeGrid, plan: routePlanner } } : {}), // Track F3
       ...(entryOn() ? { entry: entryFor } : {}), // Track F9c
+      burn: openBurn, // Track F10
       waitTicks: (n) => loop.waitTicks(n),
       supply,
       log,
@@ -661,7 +671,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (sky.ok && !small) return undefined;
     const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
     const why = sky.ok ? 'a small platform' : sky.ahead === 0 ? `a roof ${sky.above} up` : `the run blocked ${sky.ahead} ahead`;
-    const r = await ledgeTakeoff(simDeps(true), from, target, { cruiseY: cz.y, margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds') }, rockets);
+    const r = await ledgeTakeoff(simDeps(true), from, target, simOptions(cz.y), rockets);
     if (!quiet) log.info(`fly: ledge takeoff (${why}): ${r.line}`);
     return r.ledge;
   };
@@ -673,7 +683,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   const verticalFor = async (from: Vec3, target: LandingTarget, rockets: number, quiet = false): Promise<{ vertical: number; takeoffYaw: number } | undefined> => {
     if (!d.settings.get('flyVerticalTakeoff')) return undefined;
     const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
-    const r = await verticalTakeoff(simDeps(true), from, target, { cruiseY: cz.y, margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds') }, rockets, d.settings.get('flyTakeoffRun'));
+    const r = await verticalTakeoff(simDeps(true), from, target, simOptions(cz.y), rockets, d.settings.get('flyTakeoffRun'));
     if (!quiet) log.info(`fly: vertical takeoff: ${r.line}`);
     return r.top !== undefined && r.yaw !== undefined ? { vertical: r.top, takeoffYaw: r.yaw } : undefined;
   };
@@ -702,7 +712,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     let sims = 0;
     const t0 = Date.now();
     const prove = async (route: TakeoffRoute) => {
-      const r = await routeTakeoff(deps, from, target, { cruiseY: cz.y, margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds') }, rockets, { route: { grid: routeGrid, plan: routePlanner }, takeoff: routeTakeoffOptions(route, true) }, { planTicks: route.ticks });
+      const r = await routeTakeoff(deps, from, target, simOptions(cz.y), rockets, { route: { grid: routeGrid, plan: routePlanner }, takeoff: routeTakeoffOptions(route, true) }, { planTicks: route.ticks });
       sims += r.sims;
       return r;
     };
@@ -727,7 +737,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       learned = matchExits(learnedPaths.all(), from, sky);
     }
     const burn = kitBurn();
-    const r = await planTakeoffRoute(routeGrid, from, target, { rockets: Math.min(4, Math.max(1, rockets)), prove, ...(drawn ? { drawn } : {}), ...(learned?.matches.length ? { learned: { matches: learned.matches } } : {}), ...(burn ? { burn } : {}) }, routePlanner);
+    const r = await planTakeoffRoute(routeGrid, from, target, { rockets: Math.min(4, Math.max(1, rockets)), prove, ...(drawn ? { drawn } : {}), ...(learned?.matches.length ? { learned: { matches: learned.matches } } : {}), ...(burn ? { burn } : {}), ...(openBurn() ? { kit: openBurn()! } : {}) }, routePlanner);
     const g = r.route?.guide;
     if (!quiet) log.info(`fly: route takeoff: ${burn ? `rockets that burn ${burnSaid(burn)} ticks; ` : ''}${learned ? `${learned.matches.length} learned way${learned.matches.length === 1 ? '' : 's'} out from here (${learned.flights} recorded flight${learned.flights === 1 ? '' : 's'}, ${learned.near} leaving the ground within ${MATCH_NEAR}), ` : ''}${r.drawn ? `${r.drawn.lines} drawn way${r.drawn.lines === 1 ? '' : 's'} out (a flood of ${r.drawn.cells} cells under the roof, ${r.drawn.ways} to the open sky, drawn in ${Math.round(r.drawn.ms)} ms), ` : ''}${r.exits} exit${r.exits === 1 ? '' : 's'} under open sky${r.ways !== undefined ? `, ${r.ways} way${r.ways === 1 ? '' : 's'} out under the roof` : ''}; ${r.tried.length ? r.tried.join('; ') : 'none tried'}${r.route ? ` -> out ${g ? `along ${guideSaid(g.line)} ` : ''}to ${r.route.exit.x} ${r.route.exit.y} ${r.route.exit.z}, then the climb curving to heading ${Math.round(goalYaw)}` : ' -> no route takeoff'} (${sims} simulated, ${Date.now() - t0} ms)`);
     return r.route ? { routeTakeoff: r.route, takeoffYaw: r.route.yaw } : undefined;
@@ -837,7 +847,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
     const yaws = [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180].map((o) => sky.yaw + o);
     // Track BL: any heading (the climbing turn back towards the goal is part of the simulation, its corridor checked with unknown-is-not-air)
-    const r = await jumpTakeoff(simDeps(true), from, target, { cruiseY: cz.y, margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds') }, rockets, yaws);
+    const r = await jumpTakeoff(simDeps(true), from, target, simOptions(cz.y), rockets, yaws);
     if (r.yaw !== undefined && r.yaw === sky.yaw) return { takeoffYaw: r.yaw };
     if (!quiet) log.info(`fly: the simulated climb: ${r.line}`);
     if (r.yaw !== undefined) return { takeoffYaw: r.yaw };
@@ -1137,7 +1147,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     let target: FlyTarget | undefined;
     let why: string | undefined;
     if ((plan.kind === 'goal' || plan.kind === 'cell') && dist <= GLIDE_SIM_RANGE) {
-      const g = await planGlideDown(simDeps(), from, plan.target, { minDrop: d.settings.get('glideDownMinDrop'), minDistance: d.settings.get('glideDownMinDistance'), rockets, flight: { margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds') } });
+      const g = await planGlideDown(simDeps(), from, plan.target, { minDrop: d.settings.get('glideDownMinDrop'), minDistance: d.settings.get('glideDownMinDistance'), rockets, flight: { margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds'), ...(openBurn() ? { burn: openBurn()! } : {}) } });
       log.info(`fly: ${g.line}`);
       if (g.ok) target = { ...targetFromPlan(plan, base), ledge: g.ledge, glide: true };
       else why = g.why;
@@ -1487,7 +1497,12 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   // Track F5b: the cave style on a corridor trip when `flyCave on` (powered flight underground, the style's windows and
   // rules); off: today's trip (the underground stretches walked)
   const caveOn = (): boolean => String(d.settings.get('flyCave')) === 'on';
-  const tripStyle = (): TripStyle => (caveOn() ? { executor: caveExecutorOptions(true), stretch: (w) => caveStretchOptions(w), prove: { maxMs: CAVE_STYLE.proveMs, maxNodes: CAVE_STYLE.proveNodes } } : { executor: caveExecutorOptions(false) });
+  const tripStyle = (): TripStyle => {
+    // (Track F10: with `flyKitBurn` the windows' trackers and their proofs plan on the burn of the rockets at hand)
+    const kit = openBurn();
+    if (caveOn()) return { executor: caveExecutorOptions(true), stretch: (w) => (kit ? { ...caveStretchOptions(w), kit } : caveStretchOptions(w)), prove: { maxMs: CAVE_STYLE.proveMs, maxNodes: CAVE_STYLE.proveNodes } };
+    return { executor: caveExecutorOptions(false), ...(kit ? { stretch: () => ({ kit }) } : {}) };
+  };
   /** A cell is covered (no open sky over it): the column's top is at or over it; unknown counts as covered. */
   const coveredCell = (cell: Vec3): boolean => {
     const top = skyTop(cell.x, cell.z);
@@ -1556,7 +1571,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       else {
         const { points: short, branch } = shortcutRoute(points, shortcut);
         reply(`fly: proving the shortcut ${shortcut.name} from ${branch.name} on the model (a few seconds)`);
-        const proof = await proveShortcutInWorker(w.grid, [branch.cell, shortcut.cell, short[short.length - 1]!.cell], { style: CAVE_STYLE }).catch((e: unknown) => ({ proven: false, windows: 0, lines: [], reason: e instanceof Error ? e.message : String(e) }));
+        const proof = await proveShortcutInWorker(w.grid, [branch.cell, shortcut.cell, short[short.length - 1]!.cell], { style: CAVE_STYLE, ...(openBurn() ? { kit: openBurn()! } : {}) }).catch((e: unknown) => ({ proven: false, windows: 0, lines: [], reason: e instanceof Error ? e.message : String(e) }));
         for (const line of proof.lines) log.info(`fly: shortcut ${shortcut.name}: ${line}`);
         if (proof.proven) {
           points = short;

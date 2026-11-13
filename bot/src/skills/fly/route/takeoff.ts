@@ -37,7 +37,7 @@ import { yawTo } from '../plan.ts';
 import type { RouteGrid } from './grid.ts';
 import { planRoute } from './search.ts';
 import type { Planner } from './tracker.ts';
-import { NO_BOOST, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
+import { NO_BOOST, type KitBurn, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
 
 /** The flood fill's reach (cells) and the open sky an exit needs over it (cells of known air). */
 export const EXIT_FLOOD_MAX = 6000;
@@ -136,8 +136,8 @@ export function exitGoal(e: Exit): RouteGoal {
 }
 
 /** The standing start state of a takeoff route. */
-export function takeoffStart(from: Vec3, yaw: number, rockets: number): RouteState {
-  return { pos: { ...from }, vel: { x: 0, y: 0, z: 0 }, yaw, boost: { ...NO_BOOST }, gliding: false, rockets, wp: 0 };
+export function takeoffStart(from: Vec3, yaw: number, rockets: number, kit?: Readonly<KitBurn>): RouteState {
+  return { pos: { ...from }, vel: { x: 0, y: 0, z: 0 }, yaw, boost: { ...NO_BOOST }, gliding: false, rockets, ...(kit ? { kit } : {}), wp: 0 };
 }
 
 export interface WayOut extends Exit {
@@ -318,6 +318,12 @@ export interface TakeoffRouteOptions {
   drawn?: { top: number; radius?: number; max?: number; tries?: number };
   /** Track F9e round 2: the burn of the rockets at hand (burn.ts): the recorded and the drawn lines are proven and flown with it (none: the plain rocket's). */
   burn?: BurnRange;
+  /**
+   * Track F10: the burn the searched ways out are planned with (the exits under open sky, the ways under the roof): the
+   * kit's where the open-air flight plans with it (`flyKitBurn`), else none (the plain rocket's, as before). The proof of
+   * such a plan flies that range too (glide.ts routeTakeoff: `BrainOptions.burn`).
+   */
+  kit?: Readonly<KitBurn>;
 }
 
 /** Track F9d: the drawn ways out proven at most for one takeoff. */
@@ -403,7 +409,7 @@ export async function planTakeoffRoute(grid: RouteGrid, from: Vec3, target: { x:
   /** One candidate: the plan to its goals, then (with `prove`) the proof; the route when it may be flown. */
   const attempt = async (e: Exit, goals: RouteGoal[], at: string, far: boolean): Promise<TakeoffRoute | undefined> => {
     const req: RouteRequest = {
-      start: takeoffStart(from, yaw, far ? (o.far?.rockets ?? WAY_ROCKETS) : (o.rockets ?? 4)),
+      start: takeoffStart(from, yaw, far ? (o.far?.rockets ?? WAY_ROCKETS) : (o.rockets ?? 4), o.kit),
       goals,
       margin: far ? wayMargin : margin,
       ...(far ? { riskCost: wayRisk } : {}),

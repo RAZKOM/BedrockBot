@@ -7,6 +7,11 @@
 //
 //   node scripts/route-land-probe.ts [--case stack2|stack3|hole1|hole2|shaft1|room3|pocket|room|cliff] [--dist 150] [--burns 9,15,21] [--pairs] [--starts 0:0:0,0.3:0.3:20] [--lag 2]
 //        [--trace <burn>/<burn>] [--quiet] [--stop handover] [--nodes 40000] [--ticks 1500] [--seed 5,6] [--live] [--lag 2] [--notes]
+//        [--told 1]
+//
+// Track F10: `--told 1` (or 2, 3): the brain, the landing's plan and its tracker are told the rockets burn as those of that
+// flight duration do (19 to 31 for 1: `flyKitBurn` on with crafted rockets); the burns flown are still `--burns`. Without
+// it nothing is told, as before (the flights of this probe are the same tick for tick as they were).
 //
 // A burn written `a/b` is a first rocket of a ticks and b for the later ones. `--live`: the brain's options as the bot's
 // flight has them (the terrain columns, the clearance and the margin of the settings' defaults, the brain's own seed)
@@ -19,6 +24,7 @@
 // whose cells are `stack2`, `stack3` (40 to the side here), `room` and `cliff`). The last line counts the hand-overs inside the
 // band the planner lands from at once (ROUTE_HAND_BAND: the height over the cell and the speed) and gives their range.
 import { createHash } from 'node:crypto';
+import { burnRange } from '../src/skills/fly/burn.ts';
 import { simulateFlight } from '../src/skills/fly/glide.ts';
 import { findLanding, type LandingOptions } from '../src/skills/fly/landing.ts';
 import { ROUTE_HAND_BAND } from '../src/skills/fly/brain.ts';
@@ -108,6 +114,7 @@ const traceOf = has('trace') ? arg('trace', '') : undefined;
 const stopAtHandover = arg('stop', '') === 'handover';
 const nodes = Number(arg('nodes', '40000'));
 const maxTicks = Number(arg('ticks', '1500'));
+const told = has('told') ? burnRange(Number(arg('told', '1'))) : undefined;
 
 const w = world(c.boxes);
 const grid = gridOf(w.solid);
@@ -120,7 +127,7 @@ const worst = { over: 0, error: 0 };
 const hand = { n: 0, inBand: 0, low: Infinity, high: -Infinity, slow: Infinity, fast: -Infinity, routeTicks: 0, landRockets: 0 };
 for (const [dx, dz, yaw] of starts) {
   const start = { x: 0.5 + dx, y: FEET, z: 0.5 + dz };
-  const plan = await findLanding(c.goal, name, { ...deps, route: { grid, rockets: 2 } }, { ...OPTS, from: { x: start.x, z: start.z } });
+  const plan = await findLanding(c.goal, name, { ...deps, route: { grid, rockets: 2, ...(told ? { kit: told } : {}) } }, { ...OPTS, from: { x: start.x, z: start.z } });
   if (plan.kind !== 'goal') throw new Error(plan.line);
   const target: LandingTarget = plan.target;
   const cz = cruiseHeight(start, target, w.skyTop, {});
@@ -137,7 +144,7 @@ for (const [dx, dz, yaw] of starts) {
       { world: w.solid, groundAt: (x, z, fromY) => w.dryGround(x, z, fromY), skyTop: w.skyTop, ...(live ? { terrain: (x: number, z: number) => ({ top: w.skyTop(x, z), src: 'live' as const }) } : {}) },
       start,
       target,
-      { cruiseY: cz.y, ...(seed !== undefined ? { seed } : {}), ...(live ? { margin: 15, clearance: 12, goArounds: 4, descent: 'auto' as const, landStyle: 'auto' as const } : {}), note: (m) => notes.push(m), route: { grid, plan: (req) => planRoute({ ...req, maxMs: 1e9, maxNodes: Math.min(req.maxNodes, nodes) }, grid), maxMs: 1e9, maxNodes: nodes } },
+      { cruiseY: cz.y, ...(told ? { burn: told } : {}), ...(seed !== undefined ? { seed } : {}), ...(live ? { margin: 15, clearance: 12, goArounds: 4, descent: 'auto' as const, landStyle: 'auto' as const } : {}), note: (m) => notes.push(m), route: { grid, plan: (req) => planRoute({ ...req, maxMs: 1e9, maxNodes: Math.min(req.maxNodes, nodes) }, grid), maxMs: 1e9, maxNodes: nodes } },
       {
         rockets: 64,
         yaw,

@@ -1150,6 +1150,7 @@ Rules (all named `// Track AU` in the shared files):
 | `flyCave` | off | Track F5b: powered flight underground (a corridor's cave stretches, `!fly via` / `!fly route`) in the cave style: every window proven before its takeoff, a stop and a sink when the plan runs out; `off` walks underground as the 2026-11-06 hotfix left it. It killed the bot once: `on` only after it has passed the cave benchmark ("Cave flight") |
 | `flyCaveExit` | off | Track F9a, F9d: with `flyCave` on, a takeoff from under a roof with no recording that proves clear flies out along a line drawn from the cave's own air to the open sky (the flood under the roof, the line a body can fly, the whole takeoff simulated at every burn before it is taken) instead of walking out. Until Track F9d this asked for the searched way out, which its proof refused. `on` after a `!test goto` series on real terrain ("Drawn lines") |
 | `flyLearned` | off | Track F9b: with `flyCave` on, a takeoff from under a roof flies out along a path recorded with `!learn` that left the ground within 4 blocks of where the bot stands and comes out under open sky, when the whole takeoff simulated at five burns clears; no such path, or none that clears: the takeoff as without it. It has flown on the replica only: `on` after a `!test goto` series on real terrain ("Learned exits") |
+| `flyKitBurn` | off | Track F10: the flight in the open (the climb, the cruise's top-ups, the route planner's landings and takeoffs, a corridor's windows, every takeoff's proof) plans with the burn of the rockets in the hotbar (a crafted rocket: 19 to 31 ticks) instead of the plain rocket's 9 to 21: a burning rocket is flown to the height it was fired for and no higher, a top-up buys what the flight can use, the plans branch at the kit's burns. With plain rockets it changes nothing. Off until flown on the Realm ("The open-air flight on the burn of the rockets at hand") |
 
 ## Processes
 
@@ -6280,6 +6281,7 @@ less at others (a piece of 117 from the same place): the pieces are what makes b
   (n 55) and taken as 19 to 31; flight durations 2 and 3 are taken as ten ticks more a step and were not measured.
 - **In the open the longer burn is not modelled** (below). On the Realm the climb from home towards cave_start topped
   at 151 to 196 for the same trip, and the flights that topped over 190 took 51 to 53 s against 44 to 48: not looked into.
+  (Track F10 looked into it: "The open-air flight on the burn of the rockets at hand", the setting `flyKitBurn`.)
 - **Two of ten crafted flights of the 323-block hop left their line in the first burn's climb on the replica** (46 and
   54 blocks along it, 4.6 and 5.6 off it), where the proof's thirteen burns keep within 2. Braked and down with no hit.
   Not understood: the simulation's follower knows a burn's end two ticks late, the real one three ticks and the round
@@ -6287,7 +6289,7 @@ less at others (a piece of 117 from the same place): the pieces are what makes b
 - **The rest of the flight stack thinks in 9 to 21**: the climb, the cruise and the route tracker's plans
   (`route/types.ts BURN`, read-only for this track). A route landing or a searched route takeoff with crafted rockets
   is planned and proven on burns ten ticks short. The gates fly the plain rocket (`FLY_ROCKETS=crafted` flies a
-  player's).
+  player's). (Track F10: with `flyKitBurn` on they take the kit's range.)
 - **The live model's reach is modelled** as the chunks within nine of the body. The Realm's number is nine or more.
 - **A piece ends on a floor.** Over the flooded stretch of this cave a piece has none for 200 cells of the way; with
   the live model under nine chunks wide the trip would stop before it and walk.
@@ -6298,6 +6300,341 @@ less at others (a piece of 117 from the same place): the pieces are what makes b
 - **A way out from where the walk after an entry ended** (round 1's open point) is as it was.
 - Round 1's `HOP_TRIES` and `HOP_BUDGET_MS` (`commands-fly.ts`) are `learn/under.ts UNDER_PROOFS` and
   `UNDER_BUDGET_MS` now (3 lines proven at most, no proof begun after 6 s).
+
+## The open-air flight on the burn of the rockets at hand (Track F10)
+
+Flight v2, Track F10, [decisions/0083](decisions/0083-open-air-kit-burn.md). Track F9e round 2 found that the Realm's
+rockets are crafted ones, which burn 19 to 31 ticks where every number of this page was measured with the test kit's
+9 to 21, and made the lines under a roof fly the kit's burn. The flight in the open still planned with 9 to 21: the
+climb, the cruise, the route planner and its tracker, the proofs of a takeoff without a line. On the Realm
+(2026-11-12, the live kit) the same trip topped 22 to 67 blocks over the cruise height its first line names, by a
+different amount each run, and the runs that topped highest took 5 to 8 s longer. This track is what causes that,
+what in the open-air stack a longer burn carries past its proof, and one setting, `flyKitBurn` (default off), with
+which the open-air stack plans with the burn of the rockets in the hotbar. With plain rockets, or with the setting
+off, every flight is tick for tick what it was.
+
+### Files
+
+| File | What |
+|---|---|
+| `bot/src/skills/fly/burn.ts` | `rocketGain` (the height a rocket buys at a pitch for a burn, flown on the glide formula), `gainPitch`, `wholeGain`, `searchProofBurns`, `kitBurnOf`, `openBurnOf` (what the open-air flight is told) |
+| `bot/src/skills/fly/brain.ts` | `BrainOptions.burn`: a burning rocket capped at the height it was fired for (`KIT_CAP_OVER`, `KIT_USE_OVER`, `terrainNeedWithin`), the top-up's height and pitch, the path check's burn, the trackers' kit; `FlightStats.climbTop` / `climbGoal` |
+| `bot/src/skills/fly/route/types.ts`, `primitives.ts`, `robust.ts`, `search.ts`, `tracker.ts` | `RouteState.kit`: the range a rocket begins with, the branches' burns (`midBurnsOf`), the robust check's range, the replay's nominal, the heuristic's height a rocket; `TrackerOptions.kit` |
+| `bot/src/skills/fly/route/landing.ts`, `takeoff.ts`, `live.ts`, `landing.ts`, `corridor/drive.ts`, `cave/proof.ts`, `cave/bench.ts` | the kit handed to every start state: a route landing's plan, a searched way out, the live driver, a corridor's windows and their proofs, the cave shortcut's proof |
+| `bot/src/skills/fly/glide.ts` | a simulation flies the nominal burn the brain is told; a searched takeoff's proof flies the kit's five burns |
+| `bot/src/chat/commands-fly.ts`, `commands-corridor.ts`, `bot/src/tasks/process/fly.ts` | `openBurn`: the kit with `flyKitBurn` on; one set of options for every takeoff's simulation (`simOptions`); the flight's first line |
+| `bot/src/skills/fly/controller.ts` | the landing's line: `max y N (the climb to N, for N)` |
+| `bot/src/config/settings.ts`, `bot/src/chat/help.ts` | `flyKitBurn` (default off) |
+| `bot/scripts/open-burn-probe.ts` | whole open-air flights offline with each rocket's burn drawn from a kit's range, the brain told or not |
+| `bot/scripts/route-takeoff-probe.ts`, `route-plan-probe.ts`, `route-land-probe.ts` (`--told`) | the searched takeoffs, the route search's cost and the route landings with a kit's burn |
+| `bot/test/unit/skills/fly-kit-burn.test.ts` | the guards (below) |
+| `bot/test/e2e/fly-open.test.ts`, `fly-truth.ts` (`FLY_KIT_BURN=1`), `fly-route.test.ts` (`FLY_ROCKETS=crafted`) | the open-air flight measured on the server; the setting for every flight suite |
+
+### What was measured first
+
+**The Realm's log** (8 trips into the cave and 3 out of it; heights against the cruise height each flight's first
+line names):
+
+| | n | |
+|---|---|---|
+| the flights' tops over the cruise height, the trips in | 8 | 22, 32, 39, 41, 48, 61, 65, 67 |
+| the same, the trips out | 3 | 33, 34, 36 |
+| what the terrain floor asked over the cruise height (`terrain ahead: ... needs y N`) | 19 | 11 to 19 |
+| a top-up the terrain asked for with the body on its floor (the rule buys the shortfall and 8) | 6 | gained 16, 16, 18, 18, 18, 18, one rocket each |
+| the three highest flights | 3 | twice `gained 63` and `64 blocks ..., 2 rockets`, once no terrain line at all |
+
+The first 11 to 19 blocks are not an overshoot: the climb goes for the cruise height or for what the terrain floor
+asks, whichever is higher, and a column 200 blocks ahead asks for its top, the clearance and 20 (the glide on the
+way). That is Track BL's rule and the burn has no part in it. The rest is three things.
+
+**1. The climb's last rocket is flown at the climb pitch for as long as it burns.** The climb hands over to the
+cruise when the body's rise will carry it to within 3 of its goal, the rocket still burning, and the cruise holds the
+climb pitch to the burn's end (`the whole burn goes into height`). A boosted body at the climb pitch rises 1.06 a
+tick: ten ticks more of burn are ten blocks more, and twelve lie between the shortest burn and the longest.
+
+**2. A top-up's pitch is read off a table for 15 ticks of burn** (`plan.ts rocketPitchFor`: 6 at -10, 14 at -20, 24 at
+-30, 31 at -38). The same pitches flown on the glide formula for other burns (`burn.ts rocketGain`; at 15 ticks it
+gives that table):
+
+| burn (ticks) | -10 | -20 | -30 | -38 |
+|---|---|---|---|---|
+| 9 | 4 | 11 | 19 | 25 |
+| 15 | 6 | 14 | 24 | 31 |
+| 19 | 7 | 17 | 27 | 35 |
+| 25 | 9 | 20 | 33 | 42 |
+| 31 | 11 | 24 | 38 | 48 |
+
+Asked for a whole rocket's 31, a crafted rocket gives 35 to 48. Asked for the terrain's 8 to 14, it gave 16 to 18 on
+the Realm and 17 to 18 on the test server (5 of 5 flights over the hill below; plain rockets 11 to 13).
+
+**3. A top-up buys a whole rocket's worth whenever the glide ahead is longer than that height can be glided off**
+(310 blocks), whatever the body is short of. The glide line is the height from which a glide reaches the landing's
+entry, and a glide keeps its height over that line: a body that is a few blocks over it and under its margin, with 400
+blocks and more to go, is bought 31 and arrives that much over the entry, where the descent takes it off again (a dive
+when one proves clear, else a circle). A crafted rocket makes it 35 to 48. This is what the trips into the cave hit:
+the line into the cave is found while the flight is under way and starts some 40 blocks over the goal's cell, the
+flight is retargeted to it some 5 s after the takeoff, the body is then under the new line's margin, and the top-up is
+a whole rocket at the climb pitch. It is not the burn's doing (it costs the plain rocket 20 blocks too) and it is the
+largest part of the highest flights.
+
+Not the cause: the route tracker (it flies the last 44 blocks of a route landing and a route takeoff's first ticks,
+not the climb), the cruise height's margin, the rockets' timing in the climb.
+
+**Reproduced** offline (`scripts/open-burn-probe.ts`: the brain on the physics, each rocket's burn drawn from 19 to
+31 by a seeded generator, a burn's end seen two ticks late as the input loop sees it): 650 blocks over flat ground,
+30 flights, the tops 1 to 34 over the cruise height (plain rockets: 1 to 21); with the target moved up in the air, 24
+to 61. And on the test server with rockets crafted by the bot ("On the server" below): 0 to 29 over on flat ground,
+15 to 27 over a hill.
+
+### What a longer burn carries past its proof
+
+Every proof and clearance test of the open-air stack that assumes 9 to 21, and whether a crafted rocket can carry the
+body past what was proven. "The loop's count": the input loop's boost, which since round 2 runs to the rocket's own
+longest burn and is what the brain is shown as the ticks of burn left. That part was right already.
+
+| what | what it assumes | past its proof with a crafted rocket? |
+|---|---|---|
+| the path ahead, every tick (`steerClear`) | the body as the loop has it and the burn the loop expects still to come | no: the loop's count is the kit's since round 2 |
+| the path ahead before a rocket goes (`brain.ts fire`: the climb's rockets, a top-up, a go-around, the climb away from a line given up) | 20 ticks, the first 15 boosted | by five ticks of boost at the far end of the 20 (about a block of height at the climb pitch); the per-tick check sees the rest. With the setting: the kit's nominal |
+| a go-around's and the hold's rocket | nothing: the pitch goes level when the body is at its height | no |
+| the climb out of a pit (`climbUp`) | the burn the loop expects, and Track F9e's free line past the rim | no |
+| the jump, the ledge and the vertical takeoff's simulation (`glide.ts`), the takeoff sites, a glide down with rockets | one flight at 15 ticks a rocket | yes in principle: the simulated climb is not the flown one (fewer, longer burns, each topping 10 higher). The flown climb is still steered by the per-tick check, and the sky check has the column open to the cruise height. With the setting: flown at the kit's nominal |
+| a searched route takeoff (out of a hole, a room, from under a slab) | planned with branches at 9 and 21, proven at 15, 9, 21, 12, 18 | not in the cells measured: the way out is 6 to 10 ticks, shorter than any burn, and the climb after it is the per-tick check's (3 cells, 13 burns each: 39 of 39 out with no hit, told or not). A way out longer than 19 ticks would be flown on a burn the plan thinks over |
+| a route landing | planned with branches at 9 and 21; the tracker believes a burn over after 21 ticks and stops reading it off the body | not in the cells measured: the landing fires no rocket while the tracker flies (4 cells, 364 flights offline: the same told or not; 7 cells on the server, 20 landings a side on their cells with no damage). A landing that does fire one (after a go-around, a top-up at the hand-over) is tracked on a body the tracker has ten ticks wrong |
+| a rocket burning when the tracker takes the body | the loop's count, six ticks more at the most | no |
+| a corridor's windows underground, the cave style, the shortcut's proof | planned with branches at 9 and 21 (the mids 12 and 18), proven at 15, 9, 21 | **yes**: a window is 20 to 60 ticks of powered flight under a roof with turns, and this is the failure round 2 found for the lines (the body ten ticks of burn from where the plan has it). With the setting: the kit's range. (The Realm's trips under a roof fly the lines; a window flies where a corridor's cave stretch is taken with `flyCave`) |
+| a recorded or drawn line, a hop, an entry | the kit's burn since round 2 | no |
+| the cruise's rocket estimate, the corridor's prices (`corridor/cost.ts`) | 31 blocks of height a rocket | no: a crafted rocket buys more; the price errs to the dear side |
+
+### What changed (with `flyKitBurn` on and rockets that are not the plain ones)
+
+- **A burning rocket is flown to the height it was fired for and no higher, however long it burns** (`brain.ts`,
+  `KIT_CAP_OVER`; Track F9d's `capPitch`, which did this near a route landing, for every flight). The look is the one
+  whose rise, were the burn to end this tick, coasts to that height: the climb pitch while the height is far, flatter
+  as it comes, never down. The rest of a long burn is speed; over 1.7 a tick the cruise turns speed into height as it
+  always did. A rocket the path check fires to climb out over a solid ahead is flown as it was fired.
+- **The height is what the flight can use**: the cruise height; what the terrain will ask over the glide a whole
+  rocket's height covers (`terrainNeedWithin`: 420 blocks for a crafted rocket, where the floor looks 200); what the
+  glide to the target needs with its margin and 8 (`KIT_USE_OVER`: the height the economy's last top-up has always
+  aimed for). The highest of the three, for the climb's last rocket and for every top-up. A whole rocket's worth
+  (`wholeGain`: 42 for a crafted one) is bought by a body that far under what it can use, and by the high cruise.
+- **A top-up's pitch is the one whose shortest burn buys the height** (`gainPitch(gain, kit.min)`); a longer burn is
+  capped.
+- **The path check before a rocket** flies the kit's nominal burn.
+- **The route planner** (`RouteState.kit`): a rocket's range is the kit's wherever a burn begins (the step, the
+  branches at the kit's two ends, the mids three ticks in from each, the robust check, the replay), so the plan's
+  every state carries it and it crosses to the worker with the request. The tracker's states and its belief after its
+  own rocket are the kit's. The start states that get it: a route landing's plan, a searched way out, the tracker of a
+  landing and of a takeoff, a corridor's windows and their proofs, the shortcut's proof.
+- **The proofs**: a takeoff's simulation flies the nominal burn the brain is told (25 for a crafted rocket); a searched
+  way out is proven at 25, 19, 31, 22, 28.
+- **The log**: the flight's first line ends `; planned for rockets that burn 19 to 31 (flight duration 1) ticks`.
+  Every landing's line, setting or not, has the flight's first top and what the climb went for:
+  `max y N (the climb to N, for N)`.
+
+Why the terrain's part: without it a top-up bought the floor's 8, good for 80 blocks of glide, and over a ridge 300
+blocks long it was bought three times (4.0 rockets a flight against 3.4 untold, n 30), where the old model's rocket had
+burnt ten ticks over its plan and carried the body across. With it the ridge costs 3.2 rockets against 3.4.
+
+### Offline (`scripts/open-burn-probe.ts`, crafted burns, 30 flights a case, the PC, 2026-11-12)
+
+The flight's top over its cruise height, the rockets and the ticks a flight (means), the brain untold (`flyKitBurn`
+off) and told. `ridge`: 47 high from 180 to 480 out; `hill`: 47 high from 300 to 360 out; `step`: the goal's side 30
+higher from 400 out on; `far`: flat, and the climb may go only 40 over its start (the cruise is under the glide's
+line and is topped up on the way: the tops are the top-ups').
+
+| case | blocks | untold: top over the cruise | rockets | ticks | told: top over the cruise | rockets | ticks |
+|---|---|---|---|---|---|---|---|
+| flat | 400 | -1 to 31 | 1.60 | 389 | -4 to 13 | 1.60 | 388 |
+| flat | 650 | 1 to 34 | 2.50 | 553 | -2 to 14 | 2.50 | 549 |
+| flat | 1000 | 2 to 33 | 3.60 | 792 | -3 to 16 | 3.60 | 778 |
+| flat | 1500 | 34 to 67 | 5.20 | 1128 | 30 to 46 | 5.20 | 1119 |
+| ridge | 650 | 15 to 34 | 3.40 | 555 | 21 to 32 | 3.20 | 567 |
+| hill | 400 | 29 to 46 | 3.00 | 798 | 28 to 40 | 3.00 | 790 |
+| hill | 650 | 12 to 34 | 3.00 | 532 | 11 to 21 | 3.00 | 525 |
+| step | 400 | -3 to 29 | 2.30 | 397 | -3 to 12 | 2.30 | 394 |
+| step | 650 | -1 to 28 | 3.20 | 562 | -3 to 13 | 3.20 | 556 |
+| step | 1000 | 15 to 47 | 4.40 | 797 | 11 to 29 | 4.40 | 789 |
+| step | 1500 | 60 to 91 | 6.00 | 1131 | 58 to 71 | 6.00 | 1122 |
+| far | 400 | 8 to 39 | 1.60 | 389 | 4 to 13 | 1.60 | 398 |
+| far | 650 | 37 to 70 | 2.50 | 553 | 34 to 48 | 2.50 | 550 |
+| far | 1000 | 69 to 100 | 3.60 | 792 | 64 to 79 | 3.60 | 778 |
+| far | 1500 | 114 to 147 | 5.20 | 1128 | 110 to 126 | 5.20 | 1119 |
+
+(The ridge and the hill at 1000 and 1500 fly as the flat ground does: the cruise height is over them. 19 cases with
+those.) Over the 19 cases, 570 flights a side, every one landed and none met anything: the band of the tops is 14.9
+blocks wide told against 29.8 untold, its upper end 17.3 lower; 3.61 rockets a flight against 3.62; 748 ticks against
+754. Over the ridge at 650 the told flights are 12 ticks slower: one top-up there carries the whole ridge, the body
+arrives over the goal as high as untold, and the difference is the descent.
+
+With a target that moves up in the air (`--retarget 42`: 120 ticks in, the target becomes a point 42 over the ground
+60 blocks before the goal, as a line into a cave takes a flight over; the flight is measured to its approach):
+
+| case | untold: top over the cruise | rockets | ticks | told: top over the cruise | rockets | ticks |
+|---|---|---|---|---|---|---|
+| flat 650 | 24 to 61 | 3.10 | 445 | 32 to 39 | 3.50 | 425 |
+| ridge 650 | 17 to 65 | 3.70 | 434 | 24 to 33 | 3.20 | 440 |
+
+Told, the top-up for the new target is what the glide to it can use and the flights top within 9 of each other;
+untold a whole rocket goes on top. On flat ground told costs 0.4 of a rocket more a flight: untold, the climb's
+overshoot sometimes covered the new target and no top-up was needed.
+
+Plain rockets, nothing told, the same cases for reference: flat 650 tops 1 to 21 over the cruise height on 3.6
+rockets in 555 ticks. Flight durations 2 and 3 with the burns `burn.ts` extrapolates (8 cases, 240 flights a side):
+the band 35 wide untold and 12 told, the same rockets, 645 ticks against 665.
+
+**A short flight to a cell the brake lands** (`scripts/route-land-probe.ts --case hole1`, 150 blocks to a 1 x 1 hole,
+169 pairs of crafted burns) is the case that is slower told: 311 ticks against 241. Untold, a first rocket of 24
+ticks or more tops high enough for the dive descent (104 of 169 flights dive and take 172 to 202 ticks; the rest
+circle and take 312 to 339); told, the top is 3 lower, no flight dives and every one circles (290 to 321). The descent's
+choice is the landing's and was not changed.
+
+### On the server (bds-fly, BDS 1.26.60.6, `test/e2e/fly-open.test.ts`, 2026-11-13)
+
+`FLY_ROCKETS=crafted`: the rockets crafted by the bot (flight duration 1). `FLY_KIT_BURN=1`: `flyKitBurn` on. One bot
+flies `!fly` to a ground cell, 6 runs a case (3 for plain rockets with the setting on), the same area for every
+series. Heights over the start. The cruise height planned is 48.2 for 400 blocks and 76.0 for 650; the hill (47 high
+across the way from 250 to 330 out) is not known at the takeoff: its chunks come in flight and the terrain floor asks
+then. Every flight of every series landed within 1 of its cell with no damage.
+
+| case | rockets, `flyKitBurn` | n | the flight's top over the cruise height | rockets a flight (climb / cruise) | ticks: least to most (mean) | a terrain top-up gained |
+|---|---|---|---|---|---|---|
+| 400 flat | plain, off | 6 | 2.6 to 11.1 | 2.00 (2.00 / 0) | 407 to 499 (463) | |
+| 400 flat | plain, on | 3 | 7.9 to 9.5 | 2.00 (2.00 / 0) | 485 to 490 (487) | |
+| 400 flat | crafted, off | 6 | 1.2 to 28.8 | 1.17 (1.00 / 0.17) | 387 to 627 (461) | |
+| 400 flat | **crafted, on** | 6 | -1.3 to 11.5 | 1.33 (1.17 / 0.17) | 444 to 506 (463) | |
+| 650 flat | plain, off | 6 | 1.9 to 17.8 | 3.33 (3.17 / 0.17) | 572 to 761 (671) | |
+| 650 flat | plain, on | 3 | 1.6 to 17.3 | 3.67 (3.00 / 0.67) | 646 to 759 (720) | |
+| 650 flat | crafted, off | 6 | 0.3 to 26.0 | 2.17 (2.00 / 0.17) | 563 to 823 (664) | |
+| 650 flat | **crafted, on** | 6 | 2.4 to 10.6 | 2.00 (2.00 / 0) | 646 to 714 (673) | |
+| 650, the hill | plain, off | 6 | 9.0 to 21.4 | 4.17 (3.00 / 1.17) | 556 to 816 (641) | 11, 12, 12, 13 |
+| 650, the hill | plain, on | 3 | 10.6 to 21.1 | 4.00 (3.00 / 1.00) | 564 to 782 (642) | 14 |
+| 650, the hill | crafted, off | 6 | 14.8 to 27.2 | 3.00 (2.00 / 1.00) | 545 to 830 (601) | 17, 18, 18, 18, 18 |
+| 650, the hill | **crafted, on** | 6 | 6.5 to 10.0 | 3.33 (2.00 / 1.33) | 539 to 564 (551) | 9, 9, 10, 10, 11, 14 |
+
+With crafted rockets, 18 flights a side:
+
+- **The top**: with the setting on every flight tops within 12 of its cruise height (-1.3 to 11.5); off, 0.3 to
+  28.8, and each case has a flight 26 to 29 over. The first top against what the climb went for (the landing line's
+  `the climb to N, for N`): -1.6 to 11.5 on, 0.3 to 28.8 off.
+- **Rockets**: 40 on against 38 off. Two of the six flights over the hill took a second top-up: their first one (for
+  the glide line) went before the hill's chunks had come, and the hill then asked for its own. Where the terrain is
+  known at the takeoff, as it is on the Realm from the world cache, the first top-up counts it in.
+- **Time**: 562 ticks a flight on against 575 off (the means of the three cases: 463, 673, 551 against 461, 664,
+  601). The slowest flight is 714 ticks on and 830 off: off, the flights that top 26 to 29 over take 627, 823 and 830
+  ticks (a circle from 52 to 55 over the goal). On flat ground 650 blocks out none of the six flights on found a dive
+  (two of six off and two of six with plain rockets did, and took 563 to 607 ticks): the six circle from 29 to 37
+  over the goal in 646 to 714. Which descent is flown decides a trip's time by 5 to 10 s and is the landing's choice.
+- **A terrain top-up** gains 9 to 14 on where it gained 17 to 18 off (the Realm's 16 to 18).
+
+**The route planner on the server with crafted rockets** (the final tree, one series a side; `fly-route.test.ts` on
+bds-fly3: the 3 x 3 tunnel, the 2 x 2 S-bend and the staircase twice each; `fly-route-land.test.ts` on bds-fly2: 7
+cells with 2 landings each and the takeoffs out):
+
+| | `flyKitBurn` off | on |
+|---|---|---|
+| the tunnel | 2 of 2 through in 42 and 43 ticks; the first plan 38 ticks, 406 expanded in 120 ms | 2 of 2 through in 49 and 50 ticks; the first plan 43 ticks, 706 expanded in 212 ms |
+| the staircase | 2 of 2 in 25 and 26 ticks on 2 rockets | 2 of 2 in 24 ticks on 1 rocket |
+| the S-bend | 0 of 2 through: down in the bore after 68 and 166 ticks, the second with 2 local hits and 2.0 damage (`flyIntoWall`) | 0 of 2 through: down in the bore after 111 and 124 ticks, 25 and 6 touches of the bore in the local model, no damage |
+| the route landings and the takeoffs out | 20 of 20 on their cells, no damage | 20 of 20 on their cells, no damage |
+
+With plain rockets the S-bend is flown whole once in two (the gate's run below: 57 ticks, and down after 84). Told,
+the tunnel's plan is longer and its search costs more (the branches run ten ticks longer); the staircase needs one
+rocket. In the hole 2 deep the landings take 322 and 326 ticks on where they take 194 and 207 off (the dive that is
+not found: "Offline" above).
+
+### The regressions
+
+**Tick for tick with plain rockets.** The base commit's `bot/src` and `bot/scripts` beside this tree's, the same
+probes run on both, the outputs compared with the milliseconds taken out. 13 cases,
+every one the same: the route landings (the stacked platforms to the hand-over at 169 pairs of burns; whole flights
+onto the stack, the hole, the room and the cliff 300 out); 180 open-air flights of this track's probe with plain
+rockets and 36 with crafted ones untold, a hash of every tick's position each; and on the private fixture of
+2026-11-11 the learned exit and its proof, the learned entry's cases, the drawn exit from cave_start at every burn,
+the drawn exits from the deep cave at radius 400, the drawn entry's arrivals, and the hop cave_8 to cave_end at every
+burn.
+
+**The gates** (the final tree, by exit code; the PC, plain rockets, the setting off):
+
+| suite | result |
+|---|---|
+| `pnpm lint` (the PC) | exit 0 |
+| the unit suite, `pnpm -r test`, on the test host (`node scripts/mac-run.mjs --name f10 -- pnpm -r test`) | three in a row on the final tree, exit 0, 0, 0 (2 549 passed, 1 skipped, 125 to 126 s). One run before them ended exit 1 with no test failed: a vitest worker died with SIGTRAP inside the walking code's `nav-worker.test.ts` |
+| the unit suite on the PC | exit 1 in four runs of four, each at the walking code's wall-clock test (`astar.test.ts`: 1000 paths, p99 under 50 ms; 62 to 75 ms inside the whole suite on this PC, 14 ms alone), twice with one more walking test beside it. The base commit's tree fails the same test there in two runs of three. The suite's 30 flight files pass there alone (342 tests) |
+| fly-route-land (bds-fly3), six runs in a row, nothing else running | exit 0 six times (7 of 7 each) |
+| fly-route-land, a first series of six beside two other servers' suites and the offline probes | exit 1, 0, 0, 0, 0, 0: run 1 failed at the pocket's second landing (a flare that went around once and came down 2.4 from the cell, 1 damage). The pocket flown 24 times more on this tree and 24 times on the base commit's, at the same time on two servers: 24 of 24 on the cell on each |
+| fly-route (bds-fly3) | exit 0 (3 of 3; the tunnel and the staircase 2 of 2 through, the S-bend once in two) |
+| fly-walk (bds-fly2) | 4 runs, exit 0 four times |
+| fly-cave trip C with the recordings (`FLY_CAVE_LEARNED FLY_CAVE_ENTRY=1`, 3 runs) | exit 0: 3 of 3 along the recorded entry in 45.5 to 46.2 s, no damage |
+| the round trip (`FLY_CAVE_ONLY=round`, `FLY_CAVE_LEARNED FLY_CAVE_ENTRY=1 FLY_CAVE_EXIT=1`, 3 runs) | exit 0: in 3 of 3 (46.1 to 46.9 s); out 3 of 3, twice along the recorded line (63.3 and 65.7 s) and once by a vertical takeoff 12 blocks from where it stood (118.3 s); no damage |
+| tripOut along the drawn line (`FLY_CAVE_EXIT=1`, no recordings, 3 runs) | exit 0: 3 of 3 in 59.3 to 61.6 s, no damage |
+
+The cave trips flew the replica that stands on bds-fly2 with the fixture of 2026-11-10 (`FLY_CAVE_REUSE=1`).
+
+### The cost of the kit's range to the search (the test host, the live bot's CPU policy, the live budgets)
+
+The route search with the kit's range in its start state against the plain one (`scripts/route-plan-probe.ts`: the
+first plan of each of the 23 standard courses at 800 ms and 40 000 nodes): 10 of 23 complete either way, the same
+ten; 620 to 2 780 expansions a second with the plain range and 740 to 2 860 with the kit's; where the plans differ the
+kit's use a rocket fewer (the climb, the staircase). A searched takeoff's decision, its plan and its proof's five
+simulations (`scripts/route-takeoff-probe.ts --ms 800 --nodes 40000`, one run each): 153, 309 and 316 ms told nothing
+and 250, 382 and 416 ms told the kit's burn, for the slab under a cliff, the room and the hole. A route landing's plan
+(`scripts/route-land-probe.ts`): the stack 210 nodes in 26 ms and 32 ms, the room 2 237 nodes in 107 ms and 136 ms.
+
+### Flight durations 2 and 3
+
+Not measured. `burn.ts` still takes ten ticks more a step (29 to 41, 39 to 51). The server lists 16 recipes for a
+rocket and every one has one gunpowder (one for each colour of an optional star); a rocket with two or three is made
+by the game's own firework recipe, which is not among the recipes `crafting_data` lists, and the bot's crafter asks
+for listed recipes only. The script API cannot set a flight duration either (that is why the test kit's rockets have
+none). Measuring them needs that recipe in the crafter, or a crafter block driven by the truth pack.
+
+### What the Realm should show
+
+`!set flyKitBurn on`, then the series as before; `!set flyKitBurn off` and the same series again to compare.
+
+- Every flight's first line ends `; planned for rockets that burn 19 to 31 (flight duration 1) ticks`. Without those
+  words the setting is off or the hotbar's rockets carry no flight duration.
+- `!test cavestart 5 from home`: each landing's line has `max y N (the climb to N, for N)`. The first top should be
+  within 12 of what the climb went for in every run. After `flight: retargeted` there is one top-up; the flight's
+  `max y` should be the same within 10 from run to run (it was 22 to 67 over the cruise height, 45 apart) and at the
+  low end of what it was. No run should take the 51 to 53 s of the highest flights; 3 to 4 rockets a flight as before.
+- `!test goto home from cave_start 5`: `terrain cleared: ... gained N blocks, 1 rockets` with N near 10 for a body
+  that was on its floor (it was 16 to 18); the flight's `max y` under 30 over the cruise height (it was 33 to 36).
+- Anything of `flight: ended`, a `roof`, damage, or more rockets a trip than with the setting off: say the lines.
+
+Only the flights in the open change: the lines under a roof (the way out, the way in, the hops) fly as they do now
+either way.
+
+### Unit tests (`fly-kit-burn.test.ts`, synthetic ground)
+
+The setting is off by default and in the flight group; what the open-air flight is told (nothing with the setting off,
+nothing with plain rockets, the hotbar's range with crafted or mixed ones); what a rocket buys by its burn (the 15-tick
+table, the kit's, the pitch for a gain); the kit in a state: a rocket's range, the branches' burns, the robust check's
+range, with none 9 to 21; the tracker's states and belief; whole flights with crafted burns on flat ground: told, the
+top within 16 of the cruise height in 8 of 8 and on no more rockets, untold over 25 in at least one; a hill across
+the way: no more rockets told; a target moved up in flight: told, the tops within 10 of each other; a takeoff's
+simulation flies the burn it is told and a searched way out is proven at 25, 19, 31, 22, 28.
+
+### Open points (Track F10)
+
+- **Not flown on the Realm.** The setting is off there and by default.
+- **A short flight to a cell the brake lands is slower told** (above: no dive is found from the lower top). The
+  descent chooses between a dive and a circle by the height the body happens to arrive at, and a flight that arrives
+  between "low enough to go straight in" and "high enough to dive" circles: on the server every flat flight of 650
+  blocks arrives there, told or not.
+- **A flight to a goal with a way in is planned to the goal's cell**, and learns of the line's higher start in the
+  air: one top-up a trip that a cruise height planned for the line's start would make part of the climb.
+- **The economy's whole-rocket rule over-buys for the plain rocket too** (20 blocks when the body is near its line
+  with a long glide ahead). Left as it is for plain rockets: the track's rule is tick for tick.
+- **The band's upper end is the cruise's own**: a capped burn leaves the body fast, and over 1.7 a tick the cruise
+  turns the speed into height (up to 6 blocks).
+- **Flight durations 2 and 3** are an extrapolation (above).
+- **The kit is read at the takeoff.** Rockets of another kind taken from a box in flight are planned as the first kind.
+- **`corridor/cost.ts`** still prices a rocket as 31 blocks of height.
+- **A corridor's windows with crafted rockets were not flown** with the setting on or off (the cave replica's windows
+  need `flyCave` and the corridor; the trips there fly the lines): the kit reaches their trackers and proofs by the
+  same state field the tunnels above flew with.
 
 ## Open points
 

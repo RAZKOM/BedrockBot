@@ -44,6 +44,7 @@ import { PATH_MIN_S_PER_BLOCK, UNKNOWN_DETOUR, UNKNOWN_RISK_S, WALK_S_PER_BLOCK,
 import { ApproachPlanner, APPROACH_DISTANCE, APPROACH_HEIGHT, columnKey, entryTop, hdist, yawDiff, yawDir, yawTo, type FlightBody, type LandingTarget, type Obstacle } from './plan.ts';
 import type { RouteGrid } from './route/grid.ts'; // Track F3
 import { planLandingRoute, type LandingRouteSpec } from './route/landing.ts'; // Track F3
+import type { KitBurn } from './route/types.ts'; // Track F10
 import type { Planner } from './route/tracker.ts'; // Track F3
 
 /** A cell of the live world model as the search sees it. */
@@ -160,7 +161,7 @@ export interface LandingDeps {
    * `first` (Track F4a) overrides ROUTE_FIRST: true asks the route before the brake for every precision goal,
    * false only after it.
    */
-  route?: { grid: RouteGrid; plan?: Planner; rockets?: number; first?: boolean };
+  route?: { grid: RouteGrid; plan?: Planner; rockets?: number; first?: boolean; /** Track F10: the burn of the rockets in the hand where it is not the plain one's (route/landing.ts LandingRouteOptions.kit). */ kit?: Readonly<KitBurn> };
 }
 
 export interface LandingOptions {
@@ -474,7 +475,7 @@ export async function preciseGoal(view: ColumnView, look: BlockLookup, obstacle:
     const spec: LandingRouteSpec = { cells: list.map(([cx, cz]) => ({ x: cx, z: cz })), top: f.feet, ...(shaft ? { rim } : {}), ...(f.ceiling !== undefined && room <= OPEN_SKY ? { ceiling: f.ceiling } : {}) };
     // the bearing on the body's side first (the cruise comes in along it: no flight past the cell and back), under a roof the corridors'
     const prefer = corridors.length ? corridors[0]!.bearing : o.from ? yawTo({ x: x + 0.5, z: z + 0.5 }, o.from) : undefined;
-    const r = await planLandingRoute(route.grid, spec, { ...(prefer !== undefined ? { prefer } : {}), ...(route.rockets !== undefined ? { rockets: route.rockets } : {}) }, route.plan);
+    const r = await planLandingRoute(route.grid, spec, { ...(prefer !== undefined ? { prefer } : {}), ...(route.rockets !== undefined ? { rockets: route.rockets } : {}), ...(route.kit ? { kit: route.kit } : {}) }, route.plan);
     if (!r.route) return undefined;
     const t: LandingTarget = { ...base, bearing: r.route.bearing, route: r.route, ...(f.ceiling !== undefined && room <= OPEN_SKY ? { ceiling: f.ceiling } : {}) };
     return { target: t, line: `${what}, a route landing in from ${r.route.bearing} (${r.route.ticks} ticks, ${r.route.rockets} rockets; ${r.route.nodes} nodes in ${r.route.ms.toFixed(0)} ms: ${r.route.edges}; tried ${r.tried.length} bearing${r.tried.length === 1 ? '' : 's'})` };

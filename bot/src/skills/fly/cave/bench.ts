@@ -23,15 +23,17 @@ import { gridOf, sweep, type RouteGrid } from '../route/grid.ts';
 import { sweepGridFor } from '../route/primitives.ts';
 import { planRoute } from '../route/search.ts';
 import type { Planner, TrackerDebug } from '../route/tracker.ts';
-import { BURN, type RouteGoal, type RoutePlan } from '../route/types.ts';
+import { BURN, type KitBurn, type RouteGoal, type RoutePlan } from '../route/types.ts';
 import { gridOfSnapshot, snapshotFor } from '../route/worker.ts';
 import { WaypointProvider, type RoutePoint } from './route.ts';
 import { CAVE_STYLE, caveExecutorOptions, caveStretchOptions, type CaveStyle } from './style.ts';
 
 export interface CaveBenchOptions {
   seed?: number;
-  /** The burn of every rocket: `random` (9..21 from the seed) or a fixed number of ticks. */
+  /** The burn of every rocket: `random` (9..21 from the seed; with `kit`, its range) or a fixed number of ticks. */
   burn?: 'random' | number;
+  /** Track F10: the burn of the rockets in the hand where it is not the plain one's: the window's trackers and its request plan on it (tracker.ts TrackerOptions.kit). */
+  kit?: Readonly<KitBurn>;
   /** The search budget per request (default the live STRETCH_PLAN_MS / STRETCH_PLAN_NODES). */
   maxMs?: number;
   maxNodes?: number;
@@ -102,7 +104,7 @@ export const latencyTicks = (ms: number): number => Math.ceil(ms / 50);
 export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[], margin: number, o: CaveBenchOptions = {}, seed = o.seed ?? 1, firstPlan?: RoutePlan, planGrid: RouteGrid = gridOf(world), height?: number, floor?: CellSolid): Promise<WindowRun> {
   const r = rng(seed);
   const style: Partial<StretchOptions> & { margin: number } = (o.style ?? true) ? caveStretchOptions({ margin, ...(height !== undefined ? { height } : {}) }, styleOf(o)) : { margin };
-  const req = windowRequest({ goals }, from, 16, { margin: style.margin, maxNodes: o.maxNodes, maxMs: o.maxMs });
+  const req = windowRequest({ goals }, from, 16, { margin: style.margin, maxNodes: o.maxNodes, maxMs: o.maxMs, ...(o.kit ? { kit: o.kit } : {}) });
   const grid: RouteGrid = gridOfSnapshot(snapshotFor(planGrid, req));
   const yaw = req.start.yaw;
   let t = 1;
@@ -131,6 +133,7 @@ export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[
     ...(style.geodesic ? { geodesic: true } : {}),
     ...(style.pieces !== undefined ? { pieces: style.pieces } : {}),
     ...(style.midBurns ? { midBurns: true } : {}),
+    ...(o.kit ? { kit: o.kit } : {}),
     ...(firstPlan ? { firstPlan } : {}),
     ...(floor ? { floor } : {}),
     ...(o.note ? { note: o.note } : {}),
@@ -188,7 +191,8 @@ export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[
     // later end (F0: the union of the two lifetimes, no stronger push). Before, the bench and the driver held every rocket
     // until the running burn's end, which the plans never assumed: the plan's reference boosted on and the body did not.
     if (c.fire && rockets > 0 && body.gliding === true) {
-      const burn = o.burn === undefined || o.burn === 'random' ? BURN.min + Math.floor(r() * (BURN.max - BURN.min + 1)) : o.burn;
+      const range = o.kit ?? BURN;
+      const burn = o.burn === undefined || o.burn === 'random' ? range.min + Math.floor(r() * (range.max - range.min + 1)) : o.burn;
       cmd.boostStart = Math.max(body.boostTicks ?? 0, burn);
       rockets--;
       endsAt.push(t + burn + 3);

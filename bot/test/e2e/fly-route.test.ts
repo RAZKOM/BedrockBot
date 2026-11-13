@@ -16,7 +16,8 @@ import { shifted, standardCourses, tunnel, type Course } from '../../src/skills/
 import { flyRoute, type RouteLiveReport } from '../../src/skills/fly/route/live.ts';
 import { inBox } from '../../src/skills/fly/route/types.ts';
 import { RoutePlannerClient } from '../../src/skills/fly/route/worker.ts';
-import { E2E, FEET_Y, prepareServer, privateArea, sleep, startFlyBot, teleport, truthLoaded, until, type FlyBot } from './fly-truth.ts';
+import { kitBurnOf } from '../../src/skills/fly/burn.ts';
+import { craftRockets, CRAFTED_ROCKETS, E2E, FEET_Y, KIT_BURN, prepareServer, privateArea, sleep, startFlyBot, teleport, truthLoaded, until, type FlyBot } from './fly-truth.ts';
 
 const F = FEET_Y;
 const SKIP = new Set((process.env.FLY_ROUTE_SKIP ?? '').split(',').filter(Boolean));
@@ -99,8 +100,10 @@ describe.skipIf(!E2E)('@bds fly: the route planner on the server (Track F2)', ()
     await b.truth.setHealth(b.name, 20);
     await b.truth.ok('clear', [b.name]);
     await b.truth.equip(b.name, 'Chest', 'elytra');
-    await b.truth.setslot(b.name, 0, 'firework_rocket', rockets);
-    await until(() => (inv.slots[0]?.name === 'firework_rocket' ? true : undefined), 10_000, 'the rockets in the inventory model');
+    // (Track F10: FLY_ROCKETS=crafted: a player's rockets, 19 to 31 ticks of burn; fly-truth.ts)
+    if (CRAFTED_ROCKETS) await craftRockets(b, rockets);
+    else await b.truth.setslot(b.name, 0, 'firework_rocket', rockets);
+    await until(() => (inv.slots.slice(0, 9).some((x) => x?.name === 'firework_rocket') ? true : undefined), 10_000, 'the rockets in the inventory model');
     await until(async () => ((await b.truth.chestSlot(b.name))?.typeId.endsWith('elytra') ? true : undefined), 10_000, 'the elytra worn');
     await b.built.mobility!.loop.waitTicks(10);
   }
@@ -147,6 +150,7 @@ describe.skipIf(!E2E)('@bds fly: the route planner on the server (Track F2)', ()
     }
     const since = await b.truth.now();
     await b.truth.ok('glidelog', ['start', b.name]);
+    const kitBurn = kitBurnOf(mob.world.inventory.slots, (n) => n === 'firework_rocket');
     const trace: string[] = [];
     const t0 = Date.now();
     const flight = flyRoute(
@@ -165,6 +169,8 @@ describe.skipIf(!E2E)('@bds fly: the route planner on the server (Track F2)', ()
         maxMs: 600,
         maxNodes: 40_000,
         planner: (grid) => planner.plannerOver(grid),
+        // (Track F10: FLY_KIT_BURN=1: the tracker plans and tracks on the burn of the rockets in the hotbar)
+        ...(KIT_BURN && kitBurn ? { kit: kitBurn } : {}),
         note: (m) => lines.push(m),
         trace: (t, s, k, st) => {
           if (trace.length < 40) trace.push(`${t}: ${s.pos.x.toFixed(2)},${s.pos.y.toFixed(2)},${s.pos.z.toFixed(2)} v ${s.vel.x.toFixed(2)},${s.vel.y.toFixed(2)},${s.vel.z.toFixed(2)} ${s.gliding ? 'G' : s.onGround ? 'ground' : 'air'} b${s.boostTicks} -> ${k.yaw.toFixed(0)}/${k.pitch}${k.fire ? ' FIRE' : ''}${k.jump ? ' JUMP' : ''} ${st}`);

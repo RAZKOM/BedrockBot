@@ -34,9 +34,10 @@ export function flyBranch(start: Readonly<RouteState>, plan: RoutePlan, grid: Ro
   let s = cloneState(start);
   let fired = 0;
   let clearance = RISK_RANGE;
+  const nom = (start.kit ?? BURN).nominal;
   for (let i = 0; i < plan.controls.length; i++) {
     const c = plan.controls[i]!;
-    const burn = c.fire ? (burns[fired] ?? BURN.nominal) : BURN.nominal;
+    const burn = c.fire ? (burns[fired] ?? nom) : nom;
     const r = stepState(s, c, stackRockets, burn);
     if (r.fired) fired++;
     const next = r.next;
@@ -71,18 +72,20 @@ export function checkRobust(start: Readonly<RouteState>, plan: RoutePlan, grid: 
     plan.robust = true;
     return { robust: true, reaches: true, clearance: plan.clearance, branches, fireTicks };
   }
-  const nominal = Array<number>(n).fill(BURN.nominal);
+  // (Track F10: the range is that of the rockets in the hand, `RouteState.kit`; none: the plain rocket's)
+  const kit = start.kit ?? BURN;
+  const nominal = Array<number>(n).fill(kit.nominal);
   for (let i = 0; i < n; i++) {
-    for (let b = BURN.min; b <= BURN.max; b++) {
-      if (b === BURN.nominal) continue;
+    for (let b = kit.min; b <= kit.max; b++) {
+      if (b === kit.nominal) continue;
       const burns = [...nominal];
       burns[i] = b;
       branches.push(flyBranch(start, plan, grid, margin, goals, burns, stackRockets));
     }
   }
   if (n > 1) {
-    branches.push(flyBranch(start, plan, grid, margin, goals, Array<number>(n).fill(BURN.min), stackRockets));
-    branches.push(flyBranch(start, plan, grid, margin, goals, Array<number>(n).fill(BURN.max), stackRockets));
+    branches.push(flyBranch(start, plan, grid, margin, goals, Array<number>(n).fill(kit.min), stackRockets));
+    branches.push(flyBranch(start, plan, grid, margin, goals, Array<number>(n).fill(kit.max), stackRockets));
   }
   const robust = branches.every((b) => !b.hit);
   const reaches = branches.every((b) => b.reached >= plan.reached);

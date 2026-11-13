@@ -20,7 +20,7 @@ import { GLIDE } from '../input/physics.ts';
 import { hdist, onTarget, takeoffSky, yawDiff, yawTo, type CellQuery, type LandingTarget } from './plan.ts';
 import { assumedTop, type TerrainQuery } from './terrain.ts'; // Track BL
 import type { TakeoffRoute } from './route/takeoff.ts'; // Track F9a
-import { BURN_PLAIN, proofBurns, proofDuds, proofMixes } from './burn.ts'; // Track F9e round 2
+import { BURN_PLAIN, proofBurns, proofDuds, proofMixes, searchProofBurns } from './burn.ts'; // Track F9e round 2, Track F10
 
 /** The ledge's fall corridor: no solid at the body's height (feet .. head + 1) this many blocks out along the heading, a block either side. */
 export const LEDGE_CORRIDOR = 10;
@@ -245,7 +245,7 @@ export async function simulateFlight(
     yaw?: number;
     until?: (brain: FlightBrain, body: BodyState) => boolean;
     /**
-     * Track F9a: the ticks every rocket burns (default the nominal, GLIDE.boostTicks; a takeoff is proven at the burn's extremes too).
+     * Track F9a: the ticks every rocket burns (default the nominal: GLIDE.boostTicks, or the nominal of the kit's burn the brain is told, `opts.burn`, Track F10; a takeoff is proven at the burn's extremes too).
      * Track F9b: or the burn of each rocket by its number (0 first): a long first rocket and short ones after it is a flight
      * no single burn flies.
      */
@@ -311,7 +311,7 @@ export async function simulateFlight(
     cmd = { ...cmd, yaw: c.yaw, pitch: c.pitch, jump: c.jump, glide: c.glide, forward: c.forward ?? 0, sneak: c.sneak === true, sprint: false };
     const firing = c.fire && rockets > 0;
     const dud = firing && s.dud?.(fired) === true;
-    const step: MoveCommand = { ...cmd, ...(firing && !dud ? { boostStart: typeof s.burn === 'function' ? s.burn(fired) : (s.burn ?? GLIDE.boostTicks) } : {}) };
+    const step: MoveCommand = { ...cmd, ...(firing && !dud ? { boostStart: typeof s.burn === 'function' ? s.burn(fired) : (s.burn ?? opts.burn?.nominal ?? GLIDE.boostTicks) } : {}) };
     if (firing) {
       rockets--;
       fired++;
@@ -594,13 +594,15 @@ export async function routeTakeoff(
     return sim.phase === 'land' || sim.phase === 'takeoff' ? `${sim.phase} after ${sim.ticks} ticks` : undefined;
   };
   // (Track F9e round 2: a line that carries its rockets' burn (burn.ts: a crafted rocket's is ten ticks longer) is proven with it)
-  const kit = flight.takeoff.guide?.line.burn;
+  // (Track F10: a searched way out is proven with the burn the open-air flight is told, `opts.burn`: its nominal, the two ends
+  // and three ticks in from each, as PROOF_BURNS is for the plain rocket)
+  const kit = flight.takeoff.guide?.line.burn ?? (learned ? undefined : opts.burn);
   const duds = kit ? proofDuds(kit) : LEARNED_PROOF_DUDS;
   const sim = await fly(kit?.nominal);
   let sims = 1;
   const why = verdict(sim);
   if (why !== undefined) return { ok: false, line: why, sims };
-  const burns = o.burns ?? (kit ? proofBurns(kit) : learned ? LEARNED_PROOF_BURNS : PROOF_BURNS);
+  const burns = o.burns ?? (kit ? (learned ? proofBurns(kit) : searchProofBurns(kit)) : learned ? LEARNED_PROOF_BURNS : PROOF_BURNS);
   for (const burn of burns) {
     const x = verdict(await fly(burn));
     sims++;
@@ -772,13 +774,13 @@ export interface GlideDownOptions {
   budgetMs?: number;
   /** Rockets at hand (optional: 0 = a pure glide); the real flight gets the same. */
   rockets?: number;
-  /** The flight's other options (flyMargin, flyGoArounds), the same as the real flight's. */
-  flight?: Pick<BrainOptions, 'margin' | 'goArounds'>;
+  /** The flight's other options (flyMargin, flyGoArounds; Track F10: the burn the open-air flight plans with), the same as the real flight's. */
+  flight?: Pick<BrainOptions, 'margin' | 'goArounds' | 'burn'>;
   now?: () => number;
 }
 
 /** Track BH: the brain options of a glide down from `ledge` to `target` (the simulation and the real flight use the same). */
-export function glideOptions(target: LandingTarget, ledge: Ledge, extra: Pick<BrainOptions, 'margin' | 'goArounds'> = {}): Omit<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop'> {
+export function glideOptions(target: LandingTarget, ledge: Ledge, extra: Pick<BrainOptions, 'margin' | 'goArounds' | 'burn'> = {}): Omit<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop'> {
   return { cruiseY: target.top, ledge: { yaw: ledge.yaw }, ...extra };
 }
 

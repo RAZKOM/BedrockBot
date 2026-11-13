@@ -17,6 +17,8 @@ import { BURN, EDGE_TICKS, MID_BURNS, RISK_COST, RISK_RANGE, ROCKET_COST, cloneS
 
 /** Blocks of height one rocket can buy at most (straight up: 22 while burning, coasting to 33; at -55 with the momentum 44). */
 export const ROCKET_UP = 45;
+/** Track F10: and a tick of burn more is this much more of it (a boosted body rises 1.6 a tick straight up). */
+export const ROCKET_UP_A_TICK = 1.6;
 /** The height a flare converts the horizontal speed into, per (blocks a tick)^2 (from 1.5 b/t a -45 flare gains 24). */
 export const ZOOM_PER_H2 = 11;
 
@@ -133,7 +135,7 @@ export function heuristic(s: Readonly<RouteState>, req: RouteRequest, field?: Di
   if (geo !== undefined) d = geo;
   let h = d / HEURISTIC_SPEED + slow;
   if (climb > 0) {
-    const need = Math.ceil(climb / ROCKET_UP);
+    const need = Math.ceil(climb / (s.kit ? ROCKET_UP + (s.kit.nominal - BURN.nominal) * ROCKET_UP_A_TICK : ROCKET_UP));
     if (need > s.rockets) return Infinity;
     h += need * (req.rocketCost ?? ROCKET_COST);
   }

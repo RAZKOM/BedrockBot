@@ -152,7 +152,7 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
             const rockets = readKit(w.inventory, w.memory()).rocketsHotbar || readKit(w.inventory, w.memory()).rockets;
             // (Track F6: the proof prices the risk and measures the way as the window's trackers will: the plan proven is the plan flown)
             const so = style.stretch?.(win) ?? {};
-            const req = windowRequest(win, from, rockets, { margin: so.margin ?? win.margin, maxMs: style.prove!.maxMs, maxNodes: style.prove!.maxNodes, ...(so.riskCost !== undefined ? { riskCost: so.riskCost } : {}), ...(so.geodesic ? { geodesic: true } : {}), ...(so.pieces !== undefined ? { pieces: so.pieces } : {}), ...(so.midBurns ? { midBurns: true } : {}) });
+            const req = windowRequest(win, from, rockets, { margin: so.margin ?? win.margin, maxMs: style.prove!.maxMs, maxNodes: style.prove!.maxNodes, ...(so.riskCost !== undefined ? { riskCost: so.riskCost } : {}), ...(so.geodesic ? { geodesic: true } : {}), ...(so.pieces !== undefined ? { pieces: so.pieces } : {}), ...(so.midBurns ? { midBurns: true } : {}), ...(so.kit ? { kit: so.kit } : {}) });
             const p = await w.plan(req);
             w.log.info(`corridor: the proof of the window to ${Math.floor(win.end.x)} ${Math.floor(win.end.y)} ${Math.floor(win.end.z)}: ${p.complete ? 'complete' : `partial (${p.why ?? '?'})`} ${p.reached}/${win.goals.length} goals, ${p.ticks} ticks, ${p.rockets} rockets, clearance ${p.clearance.toFixed(2)}, ${p.expanded} expanded in ${p.ms.toFixed(0)} ms`);
             return proofOf(p);

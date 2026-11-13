@@ -16,7 +16,7 @@ import { RocketHand, type RocketDeps } from '../rocket.ts';
 import { gridOf, sweep } from './grid.ts';
 import { planRoute } from './search.ts';
 import { RouteTracker, type Planner, type TrackerStats } from './tracker.ts';
-import type { PrimitiveFamily, RouteGoal, RouteRequest } from './types.ts';
+import type { KitBurn, PrimitiveFamily, RouteGoal, RouteRequest } from './types.ts';
 
 export interface RouteLiveDeps extends Omit<RocketDeps, 'loop'> {
   loop: FlightLoop;
@@ -41,6 +41,8 @@ export interface RouteLiveOptions {
   /** Track F4a: the edge set and the heuristic's weight of every request (an obstacle course's leg ending in a landing: `landing`, ROUTE_WEIGHT). */
   library?: RouteRequest['library'];
   weight?: number;
+  /** Track F10: the burn of the rockets in the hand where it is not the plain one's (tracker.ts TrackerOptions.kit). */
+  kit?: Readonly<KitBurn>;
   /** The flight ends after this many ticks (default 1200). */
   maxTicks?: number;
   note?: (msg: string) => void;
@@ -87,6 +89,7 @@ export function flyRoute(d: RouteLiveDeps, o: RouteLiveOptions): { done: Promise
     ...(o.families ? { families: o.families } : {}),
     ...(o.library !== undefined ? { library: o.library } : {}),
     ...(o.weight !== undefined ? { weight: o.weight } : {}),
+    ...(o.kit ? { kit: o.kit } : {}),
     yaw: loop.command.yaw,
     note: (m) => {
       log.info(m);

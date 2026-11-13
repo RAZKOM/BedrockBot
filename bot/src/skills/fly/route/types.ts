@@ -19,11 +19,21 @@ export interface BoostRange {
 }
 
 export const NO_BOOST: Readonly<BoostRange> = Object.freeze({ min: 0, max: 0, nom: 0 });
-/** The burn of one flight-duration-1 rocket, measured on bds-fly (Track F0, n 175: 9 to 21 ticks, mean 15.7), nominal 15 (GLIDE.boostTicks). */
+/** The burn of the plain rocket (the one the script API gives: no flight duration), measured on bds-fly (Track F0, n 175: 9 to 21 ticks, mean 15.7), nominal 15 (GLIDE.boostTicks). A crafted rocket burns ten ticks longer (skills/fly/burn.ts); where the kit's burn is known a state carries it (`RouteState.kit`, Track F10). */
 export const BURN: Readonly<{ min: number; max: number; nominal: number }> = Object.freeze({ min: 9, max: 21, nominal: 15 });
-/** The boost range right after a rocket is used. */
-export function freshBurn(): BoostRange {
-  return { min: BURN.min, max: BURN.max, nom: BURN.nominal };
+/**
+ * Track F10 (docs/flight.md "The open-air flight on the burn of the rockets at hand"): the burn of the rockets in the hand,
+ * where it is not the plain rocket's (skills/fly/burn.ts: a crafted rocket burns 19 to 31 ticks). The same shape as `BURN`.
+ */
+export interface KitBurn {
+  min: number;
+  max: number;
+  nominal: number;
+}
+/** The boost range right after a rocket is used (`kit`: the burn of the rockets in the hand; none: the plain rocket's). */
+export function freshBurn(kit?: Readonly<KitBurn>): BoostRange {
+  const b = kit ?? BURN;
+  return { min: b.min, max: b.max, nom: b.nominal };
 }
 /** The range one tick later. */
 export function burnTick(b: Readonly<BoostRange>): BoostRange {
@@ -50,6 +60,12 @@ export interface RouteState {
   glideFresh?: boolean;
   /** Rockets left in the hand. */
   rockets: number;
+  /**
+   * Track F10: the burn of those rockets where it is not the plain one's (`BURN`). Every step, branch and check that begins
+   * a burn reads it from the state (primitives.ts stepState, robust.ts), so a request's start carries it to the search, to
+   * the worker and into every state of the plan. Absent: 9 to 21, as before.
+   */
+  kit?: Readonly<KitBurn>;
   /** Waypoints passed so far (index into `RouteGoal.waypoints`). */
   wp: number;
   /**
@@ -81,6 +97,10 @@ export interface MidBranch extends Branch {
 
 /** Track F8: the burns swept between BURN.min and BURN.max (the extremes are `early` / `late`) when `RouteRequest.midBurns` asks. */
 export const MID_BURNS: readonly number[] = Object.freeze([12, 18]);
+/** Track F10: the same for the burn of the rockets in the hand: three ticks in from each end (12 and 18 of 9 to 21; 22 and 28 of 19 to 31). */
+export function midBurnsOf(kit?: Readonly<KitBurn>): readonly number[] {
+  return kit ? [kit.min + (MID_BURNS[0]! - BURN.min), kit.max - (BURN.max - MID_BURNS[1]!)] : MID_BURNS;
+}
 
 /**
  * Track F8: speed by clearance in the planner (Track F7's open point: the hits left are a brake or a turn at 1.4 to 1.6 a tick

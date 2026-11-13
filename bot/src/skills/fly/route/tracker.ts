@@ -18,7 +18,7 @@ import { keepYaw } from '../maneuvers.ts';
 import { sweep, type RouteGrid } from './grid.ts';
 import { crossesFloor, inBurnTail, landsOn, passes, replayBurns, stepState, sweepGridFor } from './primitives.ts';
 import { startMarginFor } from './search.ts';
-import { BURN, NO_BOOST, burnTick, cloneState, freshBurn, headingOf, hspeed, landingCells, type BoostRange, type PrimitiveFamily, type RouteControl, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
+import { BURN, NO_BOOST, burnTick, cloneState, freshBurn, headingOf, hspeed, landingCells, type BoostRange, type KitBurn, type PrimitiveFamily, type RouteControl, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
 
 /** Ticks of the plan ahead of the body checked against the grid every tick. */
 export const LOOKAHEAD = 20;
@@ -210,6 +210,12 @@ export interface TrackerOptions {
   pieces?: number;
   /** Track F8: the requests sweep the burns between the extremes (RouteRequest.midBurns; the cave style's). */
   midBurns?: boolean;
+  /**
+   * Track F10: the burn of the rockets in the hand where it is not the plain one's (skills/fly/burn.ts): the belief after
+   * a rocket of the tracker's own, and every state it makes of the body (`stateOf`: the requests' starts, the horizon's
+   * rollouts), so the plans are searched, branched and checked on that range. Absent: 9 to 21, as before.
+   */
+  kit?: Readonly<KitBurn>;
 }
 
 export type TrackerStatus = 'planning' | 'tracking' | 'holding' | 'bailing' | 'done' | 'failed';
@@ -601,7 +607,7 @@ export class RouteTracker {
 
   /** The route state of the real body now (the remaining goals: wp 0). */
   stateOf(b: TrackerBody): RouteState {
-    return { pos: { ...b.pos }, vel: { ...b.vel }, yaw: this.yaw, boost: { ...this.boost }, gliding: b.gliding, rockets: b.rockets, wp: 0 };
+    return { pos: { ...b.pos }, vel: { ...b.vel }, yaw: this.yaw, boost: { ...this.boost }, gliding: b.gliding, rockets: b.rockets, ...(this.o.kit ? { kit: this.o.kit } : {}), wp: 0 };
   }
 
   private remainingGoals(): RouteGoal[] {
@@ -1350,7 +1356,7 @@ export class RouteTracker {
     if (control.fire) {
       if (b.rockets > 0 && b.gliding && (mayFire(this.boost) || this.o.stackRockets === true)) {
         this.boostBefore = { ...this.boost };
-        this.boost = freshBurn();
+        this.boost = freshBurn(this.o.kit);
         this.firedAt = now; // Track F6 (retime): the plan's reference follows this rocket's real burn
         this.stats.fired++;
         this.fireLater = false;

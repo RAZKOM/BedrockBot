@@ -22,6 +22,7 @@ import type { FlightKitOps } from '../../skills/fly/kitops.ts';
 import { cruiseHeight, flightSeconds, hdist, takeoffSky, type CellQuery, type LandingTarget } from '../../skills/fly/plan.ts';
 import type { LandingCell, LandingPlan } from '../../skills/fly/landing.ts';
 import { holdWorth, walkSeconds } from '../../skills/fly/landprice.ts'; // Track L1
+import { burnSaid, type BurnRange } from '../../skills/fly/burn.ts'; // Track F10
 import { glideOptions, routeTakeoffOptions, type Ledge } from '../../skills/fly/glide.ts';
 import type { BrainOptions } from '../../skills/fly/brain.ts'; // Track F3
 import type { TakeoffRoute } from '../../skills/fly/route/takeoff.ts'; // Track F3
@@ -142,6 +143,12 @@ export interface FlyDeps {
    * recording, the setting off, every proof refused: the landing as before).
    */
   entry?: (goal: Vec3, label: string) => Promise<EntryOffer | undefined>;
+  /**
+   * Track F10 (docs/flight.md "The open-air flight on the burn of the rockets at hand"): the burn the flight in the open
+   * plans with: the kit's where it is not the plain rocket's and `flyKitBurn` is on (commands-fly.ts openBurn), else
+   * undefined (9 to 21, as before). Read when the flight takes off.
+   */
+  burn?: () => BurnRange | undefined;
   /** The owner's lines (the supply whispers, the kept-kit notes). */
   say(msg: string): void;
   waitTicks(n: number): Promise<void>;
@@ -417,6 +424,8 @@ export class FlyProcess extends BaseProcess {
     // (Track F3: a route takeoff was planned out of a place the sky check refuses: no check here)
     const routeTakeoff = ledge || vertical !== undefined || !this.d.route ? undefined : this.target.routeTakeoff;
     const sky = ledge || vertical !== undefined || routeTakeoff ? undefined : takeoffSky(from, this.target, cz.y, s.get('flyTakeoffRun'), this.d.cell);
+    // Track F10: the burn of the rockets at hand, where the flight in the open plans with it
+    const burn = this.d.burn?.();
     if (sky && !sky.ok) {
       this.log.info(`fly: ${this.target.label}: ${sky.line}`);
       this.end({ ok: false, reason: sky.line });
@@ -426,13 +435,13 @@ export class FlyProcess extends BaseProcess {
     const high = !glide && highCruiseWanted(String(s.get('flyHighCruise')), { distance: this.distance, needed: cz.needed, unknown: cz.unknown });
     const cruiseY = glide && ledge ? this.target.top : high ? Math.max(cz.y, HIGH_CRUISE_Y) : cz.y;
     this.log.info(
-      `fly: to ${this.target.label} (${Math.round(this.distance)} blocks): ${glide ? `a glide down (no climb, ${this.kit().rocketsHotbar} rockets at hand)` : `cruise y ${cruiseY.toFixed(1)}${high ? ' (the high cruise)' : ''} (highest column ${cz.highest ?? '?'}, ${cz.unknown} unknown, the glide needs ${cz.needed.toFixed(0)})`}${ledge ? `, a ledge takeoff from ${ledge.x} ${ledge.feet} ${ledge.z} heading ${Math.round(ledge.yaw)}` : ''}${vertical !== undefined ? `, a vertical takeoff ${vertical} up, then heading ${Math.round(this.target.takeoffYaw ?? 0)}` : ''}${routeTakeoff?.hop && routeTakeoff.guide ? `, a hop along ${guideSaid(routeTakeoff.guide.line)} under the roof to a touchdown at ${routeTakeoff.exit.x} ${routeTakeoff.exit.y} ${routeTakeoff.exit.z} (about ${routeTakeoff.ticks} ticks; no climb, no cruise)` : routeTakeoff ? `, a route takeoff ${routeTakeoff.guide ? `along ${guideSaid(routeTakeoff.guide.line)} ` : ''}out to ${routeTakeoff.exit.x} ${routeTakeoff.exit.y} ${routeTakeoff.exit.z} (${routeTakeoff.ticks} ticks, ${routeTakeoff.rockets} rockets ${routeTakeoff.drawn ? 'rolled' : routeTakeoff.guide ? 'recorded' : 'planned'}${routeTakeoff.goals.length > 1 ? `, ${routeTakeoff.goals.length} goals under the roof` : ''}), then ${routeTakeoff.proven ? 'the proven climb curving to ' : ''}heading ${Math.round(this.target.takeoffYaw ?? routeTakeoff.yaw)}` : ''}${this.target.route ? `, a route landing in from ${Math.round(this.target.route.bearing)}` : ''}; ${kitLine(this.kit())}`,
+      `fly: to ${this.target.label} (${Math.round(this.distance)} blocks): ${glide ? `a glide down (no climb, ${this.kit().rocketsHotbar} rockets at hand)` : `cruise y ${cruiseY.toFixed(1)}${high ? ' (the high cruise)' : ''} (highest column ${cz.highest ?? '?'}, ${cz.unknown} unknown, the glide needs ${cz.needed.toFixed(0)})`}${ledge ? `, a ledge takeoff from ${ledge.x} ${ledge.feet} ${ledge.z} heading ${Math.round(ledge.yaw)}` : ''}${vertical !== undefined ? `, a vertical takeoff ${vertical} up, then heading ${Math.round(this.target.takeoffYaw ?? 0)}` : ''}${routeTakeoff?.hop && routeTakeoff.guide ? `, a hop along ${guideSaid(routeTakeoff.guide.line)} under the roof to a touchdown at ${routeTakeoff.exit.x} ${routeTakeoff.exit.y} ${routeTakeoff.exit.z} (about ${routeTakeoff.ticks} ticks; no climb, no cruise)` : routeTakeoff ? `, a route takeoff ${routeTakeoff.guide ? `along ${guideSaid(routeTakeoff.guide.line)} ` : ''}out to ${routeTakeoff.exit.x} ${routeTakeoff.exit.y} ${routeTakeoff.exit.z} (${routeTakeoff.ticks} ticks, ${routeTakeoff.rockets} rockets ${routeTakeoff.drawn ? 'rolled' : routeTakeoff.guide ? 'recorded' : 'planned'}${routeTakeoff.goals.length > 1 ? `, ${routeTakeoff.goals.length} goals under the roof` : ''}), then ${routeTakeoff.proven ? 'the proven climb curving to ' : ''}heading ${Math.round(this.target.takeoffYaw ?? routeTakeoff.yaw)}` : ''}${this.target.route ? `, a route landing in from ${Math.round(this.target.route.bearing)}` : ''}; ${kitLine(this.kit())}${burn ? `; planned for rockets that burn ${burnSaid(burn)} ticks` : ''}`,
     );
     this.phase = 'flying';
     // Track BL: the terrain floor, the clearance, the high cruise and the descent mode (a glide down keeps its simulated plan: no floor)
     // Track F3: the route planner (the route landing's tracker, the route takeoff)
     const bl = { clearance: s.get('flyClearance'), descent: String(s.get('flyDescent')) as 'auto' | 'dive' | 'spiral', landStyle: String(s.get('flyLandStyle')) as 'auto' | 'flare' | 'brake', ...(high ? { highCruise: true } : {}), ...(this.d.route ? { route: this.d.route } : {}), ...(this.d.entry && s.get('flySneakLand') === true ? { entrySneak: true } : {}), ...(routeTakeoff ? { routeTakeoff: routeTakeoffOptions(routeTakeoff, routeTakeoff.proven === true) } : {}) }; // Track F1: flyLandStyle; Track F9a: the proven takeoff's own options
-    const opts = glide && ledge ? { ...glideOptions(this.target, ledge, { margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds') }), terrainFloor: false, descent: bl.descent, landStyle: bl.landStyle, ...(this.d.route ? { route: this.d.route } : {}) } : { cruiseY, margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(ledge ? { ledge: { yaw: ledge.yaw } } : {}), ...(vertical !== undefined ? { vertical: { top: vertical } } : {}), ...bl };
+    const opts = glide && ledge ? { ...glideOptions(this.target, ledge, { margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(burn ? { burn } : {}) }), terrainFloor: false, descent: bl.descent, landStyle: bl.landStyle, ...(this.d.route ? { route: this.d.route } : {}) } : { cruiseY, margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(ledge ? { ledge: { yaw: ledge.yaw } } : {}), ...(vertical !== undefined ? { vertical: { top: vertical } } : {}), ...bl, ...(burn ? { burn } : {}) };
 
     this.flight = this.d.controller.flyTo(this.target, {
       ...opts,

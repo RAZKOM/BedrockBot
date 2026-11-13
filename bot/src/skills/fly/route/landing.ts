@@ -18,7 +18,7 @@ import { yawDir } from '../plan.ts';
 import type { RouteGrid } from './grid.ts';
 import { planRoute } from './search.ts';
 import type { Planner } from './tracker.ts';
-import { NO_BOOST, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
+import { NO_BOOST, type KitBurn, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
 
 /**
  * The entry the route is planned from: this far out along the bearing, this high over the cell's top (or rim), at this
@@ -152,7 +152,7 @@ export function landingGoalFor(spec: LandingRouteSpec, bearing: number): RouteGo
 }
 
 /** The entry state of a route landing along `bearing`: ROUTE_ENTRY_OUT out from the cells' centre, ROUTE_ENTRY_UP over the top (or the rim), heading in. */
-export function routeEntry(spec: LandingRouteSpec, bearing: number, rockets: number): RouteState {
+export function routeEntry(spec: LandingRouteSpec, bearing: number, rockets: number, kit?: Readonly<KitBurn>): RouteState {
   const centre = cellsCentre(spec.cells);
   const d = yawDir(bearing);
   const over = spec.rim !== undefined && spec.rim > spec.top ? spec.rim : spec.top;
@@ -163,6 +163,7 @@ export function routeEntry(spec: LandingRouteSpec, bearing: number, rockets: num
     boost: { ...NO_BOOST },
     gliding: true,
     rockets,
+    ...(kit ? { kit } : {}),
     wp: 0,
   };
 }
@@ -188,6 +189,8 @@ export interface LandingRouteOptions {
   tries?: number;
   /** No `via` hint on the goal (the tests' ablation). */
   noVia?: boolean;
+  /** Track F10: the burn of the rockets in the hand where it is not the plain one's: the plan is searched and branched on it (RouteState.kit). */
+  kit?: Readonly<KitBurn>;
 }
 
 export interface LandingRouteResult {
@@ -214,7 +217,7 @@ export async function planLandingRoute(grid: RouteGrid, spec: LandingRouteSpec, 
   for (const bearing of bearings.slice(0, o.tries ?? ROUTE_TRIES)) {
     const g0 = landingGoalFor(spec, bearing);
     const goals = [o.noVia && g0.kind === 'landing' ? { ...g0, via: undefined } : g0];
-    const start = routeEntry(spec, bearing, o.rockets ?? 2);
+    const start = routeEntry(spec, bearing, o.rockets ?? 2, o.kit);
     for (const weight of weights) {
       const req = landingRequest(start, goals, margin, { ...o, weight });
       let p: RoutePlan;

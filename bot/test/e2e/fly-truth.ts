@@ -194,6 +194,7 @@ export async function startFlyBot(prefix: string, options: Partial<CommonTaskOpt
   const chat = new Chat(conn, { log, owners: parseOwners([]), maxReplies: 50 });
   const common: CommonTaskOptions = { nudgeIntervalS: 240, heartbeat: false, home: undefined, shelter: undefined, walk: true, respawnDelayMs: 1000, ...options };
   const settings = extra.settings ?? new RuntimeSettings();
+  if (KIT_BURN) settings.set('flyKitBurn', true); // Track F10
   const logs: string[] = [];
   const ref: { task?: WalkingTask } = {};
   const built = buildTaskContext({
@@ -305,6 +306,11 @@ export async function removePlatform(bot: FlyBot, c: { x: number; z: number }, t
  * shorter (the Realm's flights of Track F9e: the server's body flew on its rocket after the model's had ended).
  */
 export const CRAFTED_ROCKETS = process.env.FLY_ROCKETS === 'crafted';
+/**
+ * Track F10: FLY_KIT_BURN=1: every flight bot of the e2e runs with `flyKitBurn` on (the flight in the open plans with the
+ * burn of the rockets in its hotbar; with the script API's plain rockets that changes nothing). Default off, as the setting.
+ */
+export const KIT_BURN = process.env.FLY_KIT_BURN === '1';
 
 /** At least `n` crafted rockets (a recipe makes 3) into the inventory; they land in the first free slot (the hotbar's first when it is empty). */
 export async function craftRockets(bot: FlyBot, n: number): Promise<void> {

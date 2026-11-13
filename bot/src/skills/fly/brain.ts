@@ -7,7 +7,9 @@
 //             Track BH, the ledge takeoff (`ledge`): sneak-walk to the edge along its heading, release the
 //             sneak there and step off; the glide is requested as the fall begins and dived (LEDGE_DIVE)
 //             until it flies (LEDGE_SPEED), no rocket needed
-//   climb    rockets back to back, pitched up, until the cruise height; the path ahead is checked
+//   climb    rockets back to back, pitched up, until the cruise height (Track F10: with the kit's burn known,
+//             `BrainOptions.burn`, the last rocket is flown to the height the flight can use and no higher,
+//             however long it burns, and so is every top-up of the cruise); the path ahead is checked
 //             every tick (Track AU2): a solid within 20 ticks of the predicted glide levels the climb
 //             off or turns it, and when nothing clears (a roof) the flight ends on the ground under it
 //   cruise    level towards the target along the glide line (Track AU2, the energy model): a rocket
@@ -72,6 +74,7 @@ import { ROUTE_ENTRY_OUT, ROUTE_ENTRY_UP, ROUTE_HANDOVER, ROUTE_PLAN_NODES, ROUT
 import { RouteTracker, type Planner } from './route/tracker.ts'; // Track F3
 import { decideGoAround, SINK_S_PER_BLOCK, WALK_S_PER_BLOCK, walkSeconds, type LandingOffer, type MissKind } from './landprice.ts'; // Track L1
 import type { RouteGoal } from './route/types.ts'; // Track F3
+import { gainPitch, wholeGain, type BurnRange } from './burn.ts'; // Track F10
 import { GuideFollower } from './learn/follow.ts'; // Track F9b
 import { entrySaid, guideLength, guideSaid, type Guide } from './learn/guide.ts'; // Track F9b
 import { ENTRY_JOIN, EntryFlier, entryJoin } from './learn/entry.ts'; // Track F9c
@@ -220,8 +223,28 @@ export interface BrainOptions {
   entryTries?: number;
   /** Track F9c: hold sneak through an entry's touchdown (the sneak landing's rule, flySneakLand). */
   entrySneak?: boolean;
+  /**
+   * Track F10 (docs/flight.md "The open-air flight on the burn of the rockets at hand"; decisions/0083): the burn of the
+   * rockets at hand where it is not the plain rocket's (burn.ts: a crafted rocket burns 19 to 31 ticks), for the flight in
+   * the open (`flyKitBurn`). With it: a burning rocket of the climb or of a top-up is flown no higher than the height it
+   * was fired for, however long it burns (KIT_CAP_OVER); a top-up's pitch is the one whose shortest burn buys the height
+   * asked, and the height asked is what the glide to the target can use, never a whole rocket's worth for the sake of it;
+   * the path ahead is checked for that burn before a rocket goes; the route tracker's plans are searched, branched and
+   * tracked on that range. Absent: 9 to 21 everywhere, tick for tick as before.
+   */
+  burn?: BurnRange;
 }
 
+/**
+ * Track F10: with the kit's burn known (`BrainOptions.burn`), a burning rocket is flown to this far over the height it was
+ * fired for and no higher (capPitch: the look whose rise, were the burn to end now, coasts to that height; never a look
+ * down). For the climb's last rocket that height is the highest of: the cruise height; what the terrain will ask over the
+ * glide a whole rocket's height covers (terrainNeedWithin); and what the glide to the target can still use: the glide
+ * line, the margin and KIT_USE_OVER, the same the cruise's own top-ups aim for. For a top-up it is the height asked when
+ * it went (those same three, and the terrain floor as it is now and KIT_USE_OVER).
+ */
+export const KIT_CAP_OVER = 1;
+export const KIT_USE_OVER = 8;
 /** Track F9e: the climb straight up out of a pit ends where a line from the body along the held heading, rising this much a block, is free this many blocks (brain.ts climbUp). */
 export const PIT_OUT_RISE = 0.3;
 export const PIT_OUT_RUN = 20;
@@ -301,6 +324,14 @@ export interface FlightStats {
   goArounds: number;
   ticks: number;
   maxY: number;
+  /**
+   * Track F10: the flight's first top, for the log: the body's highest point up to the cruise's first tick with no rocket
+   * burning and no rise left (the climb, and a top-up the cruise fired before the climb's rise had ended), and the height
+   * the climb went for there (the cruise height, or the terrain floor ahead where that is higher). Only for a flight that
+   * fired a climb rocket.
+   */
+  climbTop?: number;
+  climbGoal?: number;
   /** Corrections are the loop's business; the brain counts approach ticks and the pitch range it used. */
   approachTicks: number;
   /** Track AU2: the descent geometry flown (for the log and the tests). */
@@ -555,7 +586,7 @@ export class FlightBrain {
   // (entryAbove is set by the cruise when it hands over to the approach)
   /** Why the flight is ending early (set by `landNow`), kept for the outcome. */
   private endReason: FlightEndReason | undefined;
-  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise' | 'route' | 'routeTakeoff' | 'entrySneak'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral'; entryTries: number };
+  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise' | 'route' | 'routeTakeoff' | 'entrySneak' | 'burn'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral'; entryTries: number };
   /** Track F9c: the flier of a learned entry (from the hand-over on the lead-in), the windows missed so far, and what the live world said of the proof (`confirmEntry`; undefined: nothing yet). */
   private flier: EntryFlier | undefined;
   private entryMisses = 0;
@@ -616,6 +647,11 @@ export class FlightBrain {
   /** Track AU2: the cruise's rocket pitch (chosen for the height it should buy; held while it burns) and whether the burning rocket is the cruise's. */
   private cruisePitch = CLIMB_PITCH;
   private cruiseFired = false;
+  /** Track F10: the height the cruise's burning rocket was fired for (the body's projected height then and the gain asked), and whether the burning rocket is one the path check fired to climb out over a solid ahead (flown as it was fired: no cap). */
+  private cruiseTop = -Infinity;
+  private climbOut = false;
+  /** Track F10: the terrain floor over the glide a whole rocket's height covers (terrainNeedWithin), as it was last looked up. */
+  private farFloor: { need: number | undefined; ahead: number; at: number } | undefined;
   /** Track AU2: the pitch of the climb's burning rocket (the last one is tuned to what is missing). */
   private burnPitch = CLIMB_PITCH;
   /** Track AU2: the go-around's height: the approach entry + 6, or the clearance over the columns around the target (walls). */
@@ -672,6 +708,7 @@ export class FlightBrain {
       routeTakeoff: opts.routeTakeoff,
       entryTries: opts.entryTries ?? ENTRY_TRIES,
       entrySneak: opts.entrySneak,
+      burn: opts.burn,
     };
     this.planner = new ApproachPlanner(opts.seed ?? 12345, opts.obstacle);
     this.brakePlanner = new BrakePlanner(((opts.seed ?? 12345) * 7 + 3) >>> 0, opts.obstacle);
@@ -1121,11 +1158,12 @@ export class FlightBrain {
     // (not for the takeoff's rocket a block off the ground: the slow body's path "hits" the ground under its feet, as in steerClear;
     // Track F3: nor just out of a route takeoff)
     const justOff = (this.startY !== undefined && i.body.pos.y < this.startY + 2 && Math.hypot(i.body.vel.x, i.body.vel.z) < 0.7) || this.routeJustOut(i.body);
-    if (pitch !== undefined && !justOff && this.o.obstacle && i.body.gliding && pathAhead({ ...i.body, boostTicks: GLIDE.boostTicks }, ctl.yaw, pitch, LOOKAHEAD_TICKS, this.o.obstacle) !== undefined) {
+    if (pitch !== undefined && !justOff && this.o.obstacle && i.body.gliding && pathAhead({ ...i.body, boostTicks: this.o.burn?.nominal ?? GLIDE.boostTicks }, ctl.yaw, pitch, LOOKAHEAD_TICKS, this.o.obstacle) !== undefined) {
       this.stats.steered++;
       return false;
     }
     ctl.fire = true;
+    this.climbOut = false; // (Track F10: set again by the path check for the rocket it fires to climb out)
     this.stats.rockets++;
     this.stats.rocketsBy[by]++;
     return true;
@@ -1173,6 +1211,7 @@ export class FlightBrain {
     if (this.phase !== 'land' && this.fire(i, ctl, 'cruise', this.o.climbPitch)) {
       ctl.pitch = this.o.climbPitch;
       this.cruiseFired = false;
+      this.climbOut = true;
       this.stats.steered++;
       this.o.note?.(`nothing clears the solid ahead in the ${this.phase} at ${b.pos.x.toFixed(1)} ${b.pos.y.toFixed(1)} ${b.pos.z.toFixed(1)} unboosted (${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} a tick): a rocket climbs out`);
       return true;
@@ -1330,7 +1369,7 @@ export class FlightBrain {
           ctl.yaw = w[0];
           ctl.pitch = w[1];
         } else {
-          const w = i.rockets > 0 && i.canFire ? looks.find(([yaw, pitch]) => clear(yaw, pitch, GLIDE.boostTicks)) : undefined;
+          const w = i.rockets > 0 && i.canFire ? looks.find(([yaw, pitch]) => clear(yaw, pitch, this.o.burn?.nominal ?? GLIDE.boostTicks)) : undefined;
           if (!w && i.rockets > 0 && i.canFire) {
             // no look climbs out of here (low between the hill behind and the roof ahead): down on the nearest ground
             // before the line's roof (a `roof` landing's cap: the emergency's own search would take safe ground up to
@@ -1440,6 +1479,11 @@ export class FlightBrain {
     const high = this.highFloor(d);
     const terrainShort = need !== undefined ? need - projected : -Infinity;
     const highShort = high !== undefined ? high - projected : -Infinity;
+    // (Track F10: where the climb ended, for the log: read only, no control depends on it)
+    if (this.stats.climbTop === undefined && this.stats.rocketsBy.climb > 0 && b.boostTicks === 0 && b.vel.y <= 0) {
+      this.stats.climbTop = this.stats.maxY;
+      this.stats.climbGoal = Math.max(this.o.cruiseY, need ?? -Infinity, high ?? -Infinity);
+    }
     if (b.boostTicks > 0) {
       // a rocket burning: a top-up of the cruise climbs at the pitch chosen for it, the climb's last rocket at
       // the climb pitch (the boost steers the velocity onto the look: levelled off, a burning rocket halves vy
@@ -1450,11 +1494,20 @@ export class FlightBrain {
       // not while the terrain ahead asks for the height)
       // (the line where the coast after the burn will have ended, ROUTE_CAP_AHEAD blocks on: it comes down as the body flies)
       if (capped && terrainShort <= 0) ctl.pitch = Math.max(ctl.pitch, this.capPitch(b, Math.max(capLine - ROUTE_CAP_AHEAD / GLIDE_RATIO, handY) + ROUTE_CAP_OVER));
+      // (Track F10: with the kit's burn known a rocket climbs to the height it was fired for and no higher, however long it
+      // burns: the rest of a long burn is speed. A top-up's height is the one asked when it went, or the terrain floor's as
+      // it is now; the climb's last rocket's is the climb's goal, what the terrain will ask over the glide a whole rocket's
+      // height covers, or what the glide to the target can use. Not a rocket the path check fired to climb out over a solid ahead)
+      if (this.o.burn && !this.climbOut) {
+        const top = this.cruiseFired ? Math.max(this.cruiseTop, (need ?? -Infinity) + KIT_USE_OVER, high ?? -Infinity) : Math.max(this.o.cruiseY, this.terrainNeedWithin(b, wholeGain(this.o.burn) * GLIDE_RATIO) ?? -Infinity, high ?? -Infinity, glideLine(this.target, d) + spare + KIT_USE_OVER);
+        ctl.pitch = Math.max(ctl.pitch, Math.min(0, this.capPitch(b, top + KIT_CAP_OVER)));
+      }
       this.trackAvoid(b, terrainShort, i.rockets);
       this.steerClear(i, ctl);
       return ctl;
     }
     this.cruiseFired = false;
+    this.climbOut = false;
     if (i.rockets <= 0) this.noRocketTicks++;
     const fl = this.floor;
     // Track BL: steep (the climb a rocket can still make before the column is reached falls short): back-to-back
@@ -1477,11 +1530,24 @@ export class FlightBrain {
     if ((econ || (short > 0 && h >= 0.8)) && i.rockets > 0 && !(routed && d <= ROUTE_HANDOVER + 4)) {
       // the height this rocket should buy: a whole rocket's worth while the glide ahead can use it, else just enough
       const glideAhead = d - APPROACH_DISTANCE;
-      let gain = econ ? (glideAhead > ROCKET_CRUISE_CLIMB * GLIDE_RATIO ? ROCKET_CRUISE_CLIMB : Math.min(ROCKET_CRUISE_CLIMB, Math.max(6, spare + 8 - above))) : 6;
-      if (short > 0) gain = Math.max(gain, Math.min(ROCKET_CRUISE_CLIMB, short + 8));
-      if (high !== undefined && highShort > 0) gain = ROCKET_CRUISE_CLIMB; // the high cruise: a whole rocket's worth each
+      // (Track F10: with the kit's burn known a whole rocket's worth is what such a rocket buys (burn.ts wholeGain: 42 for a
+      // crafted one), and the economy asks for what the glide to the target can use, however long the glide ahead: a body
+      // 4 over its glide line with 440 blocks to go was bought a whole rocket (31; a crafted one gave 47) and arrived that
+      // much over its entry. A body far under its line is still bought a whole one: the height it can use is more than that)
+      const kit = this.o.burn;
+      const whole = kit ? wholeGain(kit) : ROCKET_CRUISE_CLIMB;
+      let gain = econ ? (!kit && glideAhead > whole * GLIDE_RATIO ? whole : Math.min(whole, Math.max(6, spare + 8 - above))) : 6;
+      if (short > 0) gain = Math.max(gain, Math.min(whole, short + 8));
+      // (Track F10: and what the terrain will ask over the glide a whole rocket's height covers, not only over the 200 blocks
+      // the floor looks: over a ridge 300 long a top-up of the floor's 8 was bought three times, each good for 80 blocks of
+      // glide, and a top-up for the glide line 230 blocks before a hill was followed by one for the hill, where the plain
+      // model's rocket had burnt ten ticks over its plan and carried the body across)
+      if (kit) gain = Math.max(gain, Math.min(whole, (this.terrainNeedWithin(b, whole * GLIDE_RATIO) ?? -Infinity) - projected + 8));
+      if (high !== undefined && highShort > 0) gain = whole; // the high cruise: a whole rocket's worth each
       if (routed && d <= APPROACH_DISTANCE + 20) gain = Math.min(gain, 8);
-      this.cruisePitch = steep ? CLIMB_PITCH : rocketPitchFor(gain);
+      // (Track F10: the pitch whose SHORTEST burn buys the gain; a longer one is flown to the gain and no higher: the cap above)
+      this.cruisePitch = steep ? CLIMB_PITCH : kit ? gainPitch(gain, kit.min) : rocketPitchFor(gain);
+      this.cruiseTop = projected + gain;
       // the boosted climb at that pitch must be clear for the next 20 ticks (fire checks it; else glide on)
       if (this.fire(i, ctl, 'cruise', this.cruisePitch)) {
         ctl.pitch = this.cruisePitch;
@@ -1683,6 +1749,23 @@ export class FlightBrain {
     this.floor = terrainFloor(q, b.pos, toward, { clearance: this.o.clearance, stopAt: this.target, ...(seed !== undefined ? { seedTop: seed } : {}) });
     this.floorAt = this.stats.ticks;
     return this.floor.need;
+  }
+
+  /** Track F10: the terrain floor's feet height now over `ahead` blocks of the way (terrainNeed's heading), for a rocket that burns or is about to go; looked up every FLOOR_EVERY ticks. */
+  private terrainNeedWithin(b: FlightBody, ahead: number): number | undefined {
+    const q = this.o.terrain;
+    if (!q) return undefined;
+    if (this.farFloor?.ahead === ahead && this.stats.ticks - this.farFloor.at < FLOOR_EVERY) return this.farFloor.need;
+    const corridor = this.linedUp(b) ? undefined : this.corridorEntry();
+    let toward: { x: number; z: number } = corridor ?? this.target;
+    if (this.detour && this.stats.ticks < this.detour.until) {
+      const dir = yawDir(this.detour.yaw);
+      toward = { x: b.pos.x + dir.x * 200, z: b.pos.z + dir.z * 200 };
+    }
+    const seed = this.seedTop(b);
+    const need = terrainFloor(q, b.pos, toward, { clearance: this.o.clearance, ahead, stopAt: this.target, ...(seed !== undefined ? { seedTop: seed } : {}) }).need;
+    this.farFloor = { need, ahead, at: this.stats.ticks };
+    return need;
   }
 
   /**
@@ -2254,7 +2337,7 @@ export class FlightBrain {
       return this.approach(i, ctl, this.target);
     }
     if (!this.tracker) {
-      this.tracker = new RouteTracker({ grid: o.grid, margin: rt.margin, goals: rt.goals, plan: o.plan, maxNodes: o.maxNodes ?? ROUTE_PLAN_NODES, maxMs: o.maxMs ?? ROUTE_TRACK_MS, yaw: i.yaw, weight: rt.weight, library: 'landing', note: (m) => this.o.note?.(m) });
+      this.tracker = new RouteTracker({ grid: o.grid, margin: rt.margin, goals: rt.goals, plan: o.plan, maxNodes: o.maxNodes ?? ROUTE_PLAN_NODES, maxMs: o.maxMs ?? ROUTE_TRACK_MS, yaw: i.yaw, weight: rt.weight, library: 'landing', ...(this.o.burn ? { kit: this.o.burn } : {}), note: (m) => this.o.note?.(m) });
       if (b.boostTicks > 0) this.tracker.seedBoost(b.boostTicks);
     }
     const out = this.tracker.tick({ pos: b.pos, vel: b.vel, gliding: b.gliding, onGround: b.onGround, rockets: i.rockets }, i.tick);
@@ -2306,7 +2389,7 @@ export class FlightBrain {
       // (Track F9a: a way out through several goals is searched in pieces. The cave style's rules were measured on the owner's
       // cave and left out: with them 2 of 7 burns came out, the rest bailed out a block off the reference in a passage 14 wide;
       // the plain tracker came out on all 7 with no hit)
-      this.tracker = new RouteTracker({ grid: o.grid, margin: rt.margin, goals: rt.goals, plan: o.plan, maxNodes: o.maxNodes ?? ROUTE_PLAN_NODES, maxMs: o.maxMs ?? ROUTE_TRACK_MS, yaw: this.climbYaw(b), ...(rt.weight !== undefined ? { weight: rt.weight } : {}), ...(rt.pieces !== undefined ? { pieces: rt.pieces } : {}), ...(rt.riskCost !== undefined ? { riskCost: rt.riskCost } : {}), note: (m) => this.o.note?.(m) });
+      this.tracker = new RouteTracker({ grid: o.grid, margin: rt.margin, goals: rt.goals, plan: o.plan, maxNodes: o.maxNodes ?? ROUTE_PLAN_NODES, maxMs: o.maxMs ?? ROUTE_TRACK_MS, yaw: this.climbYaw(b), ...(this.o.burn ? { kit: this.o.burn } : {}), ...(rt.weight !== undefined ? { weight: rt.weight } : {}), ...(rt.pieces !== undefined ? { pieces: rt.pieces } : {}), ...(rt.riskCost !== undefined ? { riskCost: rt.riskCost } : {}), note: (m) => this.o.note?.(m) });
       this.stats.routeTakeoffTicks = 0;
       this.stats.routeTakeoffRockets = 0;
     }

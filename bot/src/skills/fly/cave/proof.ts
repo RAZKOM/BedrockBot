@@ -13,7 +13,7 @@ import { boreMargin, nextWindow, type Stretch, type Window } from '../corridor/s
 import type { RouteGrid } from '../route/grid.ts';
 import { planRoute } from '../route/search.ts';
 import { gridOfSnapshot, snapshotGrid, SNAPSHOT_MAX, type GridSnapshot } from '../route/worker.ts';
-import { BURN } from '../route/types.ts';
+import { BURN, type KitBurn } from '../route/types.ts';
 import { flyWindow, type WindowRun } from './bench.ts';
 import { CAVE_STYLE, caveStretchOptions, type CaveStyle } from './style.ts';
 
@@ -40,6 +40,8 @@ export interface ProofOptions {
   burns?: readonly number[];
   maxMs?: number;
   maxNodes?: number;
+  /** Track F10: the burn of the rockets in the hand where it is not the plain one's: the windows are planned on it and flown at its nominal, its shortest and its longest. */
+  kit?: Readonly<KitBurn>;
 }
 
 const centre = (c: Vec3): Vec3 => ({ x: Math.floor(c.x) + 0.5, y: Math.floor(c.y), z: Math.floor(c.z) + 0.5 });
@@ -68,15 +70,15 @@ export async function proveShortcut(grid: RouteGrid, points: readonly Vec3[], o:
     // Track F6: the window is proven from standing first, as the executor proves it before a takeoff (the plan in pieces at
     // the style's budget); the flights then fly that plan over the burns. Before, every proof flight planned in the air
     // (plans 40 ticks late at 2 s) and the owner's shortcut was never proven although its plan exists
-    const req = windowRequest(win, from, 16, { ...caveStretchOptions(win, style), maxMs: o.maxMs ?? style.proveMs, maxNodes: o.maxNodes ?? style.proveNodes });
+    const req = windowRequest(win, from, 16, { ...caveStretchOptions(win, style), maxMs: o.maxMs ?? style.proveMs, maxNodes: o.maxNodes ?? style.proveNodes, ...(o.kit ? { kit: o.kit } : {}) });
     const plan = planRoute(req, grid);
     lines.push(`window ${n} (${Math.round(win.blocks)} blocks, ${win.goals.length} goals, margin ${margin.toFixed(2)}): the plan from standing ${plan.complete ? 'complete' : `partial (${plan.why ?? '?'})`} ${plan.reached}/${win.goals.length}, ${plan.ticks} ticks, ${plan.rockets} rockets, clearance ${plan.clearance.toFixed(2)}${plan.robust ? '' : ', not robust'}, ${plan.expanded} expanded in ${plan.ms.toFixed(0)} ms`);
     // (as the executor proves a window: complete, robust to the burn when the style asks, clear of the walls; a plan that is
     // not robust flew into the floor of a clean 3 x 3 bore at burn 9 when flown as the first plan)
     const robustOk = plan.robust || !style.proveRobust;
     if (!plan.complete || !robustOk || plan.clearance < style.proveClearMin) return { proven: false, windows: n, lines, reason: `window ${n}: ${!plan.complete ? `no complete plan from standing (${plan.reached}/${win.goals.length} goals)` : !robustOk ? 'the plan from standing is not robust to the burn' : `the plan keeps only ${plan.clearance.toFixed(2)} from a solid`}` };
-    for (const burn of o.burns ?? PROOF_BURNS) {
-      const r: WindowRun = await flyWindow(world, from, win.goals, margin, { burn, maxMs: o.maxMs ?? PROOF_PLAN_MS, maxNodes: o.maxNodes ?? PROOF_PLAN_NODES, style: true, variant: style }, undefined, plan, undefined, win.height);
+    for (const burn of o.burns ?? (o.kit ? [o.kit.nominal, o.kit.min, o.kit.max] : PROOF_BURNS)) {
+      const r: WindowRun = await flyWindow(world, from, win.goals, margin, { burn, maxMs: o.maxMs ?? PROOF_PLAN_MS, maxNodes: o.maxNodes ?? PROOF_PLAN_NODES, style: true, variant: style, ...(o.kit ? { kit: o.kit } : {}) }, undefined, plan, undefined, win.height);
       // clean: on the landing, or stopped and sunk onto the floor within SHORT_OK of it (a bail-out before the landing is the
       // style's own stop: the rest is walked), touching nothing and keeping the margin in the air
       const short = Math.hypot(r.at.x - (win.end.x + 0.5), r.at.z - (win.end.z + 0.5));

@@ -10,14 +10,14 @@
 import type { Vec3 } from '../../../connection/types.ts';
 import { GLIDE, PHYSICS, glideVelocity } from '../../input/physics.ts';
 import { sweep, type RouteGrid } from './grid.ts';
-import { BURN, CLIPPED_GLIDE_DELAY, EDGE_MAX_TICKS, EDGE_TICKS, GLIDE_DELAY, MID_BURNS, RISK_RANGE, burnTick, cloneState, dist3, freshBurn, headingOf, hspeed, inBox, landingCells, speedCap, type Maneuver, type PrimitiveFamily, type RouteControl, type RouteEdge, type RouteGoal, type RouteState } from './types.ts';
+import { BURN, CLIPPED_GLIDE_DELAY, EDGE_MAX_TICKS, EDGE_TICKS, GLIDE_DELAY, RISK_RANGE, burnTick, cloneState, dist3, freshBurn, headingOf, hspeed, inBox, landingCells, midBurnsOf, speedCap, type Maneuver, type PrimitiveFamily, type RouteControl, type RouteEdge, type RouteGoal, type RouteState } from './types.ts';
 
 export interface EdgeContext {
   grid: RouteGrid;
   margin: number;
   goals: readonly RouteGoal[];
   stackRockets: boolean;
-  /** The burn the simulation runs with (BURN.nominal; the robust check passes others). */
+  /** The burn the simulation runs with (the nominal of the rockets in the hand, `RouteState.kit`, else BURN.nominal; the robust check passes others). */
   burn?: number;
   /** Sweep the burn branches too (RouteRequest.burnBranches; default true). */
   burnBranches?: boolean;
@@ -30,7 +30,7 @@ export interface EdgeContext {
  * stepBody's ground branch) and glides from the next tick on; a gliding body follows glideVelocity with the
  * boost while the nominal burn runs. The rocket is counted only when it may be fired.
  */
-export function stepState(s: Readonly<RouteState>, c: RouteControl, stackRockets: boolean, burn = BURN.nominal, grid?: RouteGrid, branches = true, mids = false): { next: RouteState; fired: boolean } {
+export function stepState(s: Readonly<RouteState>, c: RouteControl, stackRockets: boolean, burn = (s.kit ?? BURN).nominal, grid?: RouteGrid, branches = true, mids = false): { next: RouteState; fired: boolean } {
   const n = cloneState(s);
   let fired = false;
   n.yaw = c.yaw;
@@ -76,7 +76,7 @@ export function stepState(s: Readonly<RouteState>, c: RouteControl, stackRockets
   const fresh = s.glideFresh === true;
   if (fresh) delete n.glideFresh;
   if (c.fire && !fresh && s.rockets > 0 && (s.boost.max === 0 || inBurnTail(s.boost) || stackRockets)) {
-    n.boost = freshBurn();
+    n.boost = freshBurn(s.kit);
     n.boost.nom = burn;
     n.rockets = s.rockets - 1;
     fired = true;
@@ -86,9 +86,9 @@ export function stepState(s: Readonly<RouteState>, c: RouteControl, stackRockets
       n.early = { pos: { ...s.pos }, vel: { ...s.vel } };
       n.late = { pos: { ...s.pos }, vel: { ...s.vel } };
       // Track F8: the burns in between too (a rocket in a burn's tail: the union with the branch's burn left)
-      if (mids) n.mids = MID_BURNS.map((b, i) => ({ pos: { ...(s.mids?.[i]?.pos ?? s.pos) }, vel: { ...(s.mids?.[i]?.vel ?? s.vel) }, left: Math.max(s.mids?.[i]?.left ?? 0, b) }));
+      if (mids) n.mids = midBurnsOf(s.kit).map((b, i) => ({ pos: { ...(s.mids?.[i]?.pos ?? s.pos) }, vel: { ...(s.mids?.[i]?.vel ?? s.vel) }, left: Math.max(s.mids?.[i]?.left ?? 0, b) }));
     } else if (branches && n.early && n.late && n.mids) {
-      for (const [i, b] of MID_BURNS.entries()) if (n.mids[i]) n.mids[i].left = Math.max(n.mids[i].left, b);
+      for (const [i, b] of midBurnsOf(s.kit).entries()) if (n.mids[i]) n.mids[i].left = Math.max(n.mids[i].left, b);
     }
   }
   const boosting = n.boost.nom > 0;
@@ -152,9 +152,10 @@ export function replayBurns(start: Readonly<RouteState>, controls: readonly Rout
   const out: RouteState[] = [];
   let s = cloneState(start);
   let k = 0;
+  const nominal = (start.kit ?? BURN).nominal;
   for (const c of controls) {
     // (Track F7: `branches` carries the burn branches along the states, for a search in pieces to start its next piece from them)
-    const { next, fired } = stepState(s, c, stackRockets, c.fire ? (burns[k] ?? BURN.nominal) : BURN.nominal, undefined, branches, mids);
+    const { next, fired } = stepState(s, c, stackRockets, c.fire ? (burns[k] ?? nominal) : nominal, undefined, branches, mids);
     if (fired) k++;
     const g = goals[next.wp];
     if (g?.kind === 'landing' && landsOn(g, s.pos, next.pos, next.vel)) {

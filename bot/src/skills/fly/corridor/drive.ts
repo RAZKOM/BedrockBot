@@ -23,7 +23,7 @@ import { RocketHand, type RocketDeps } from '../rocket.ts';
 import { sweep, type RouteGrid } from '../route/grid.ts';
 import { planRoute } from '../route/search.ts';
 import { RouteTracker, type Planner, type TrackerBody, type TrackerOutput, type TrackerRules, type TrackerStats } from '../route/tracker.ts';
-import { goalPoint, NO_BOOST, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from '../route/types.ts';
+import { goalPoint, NO_BOOST, type KitBurn, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from '../route/types.ts';
 import type { WindowProof } from './executor.ts';
 import type { Window } from './stretches.ts';
 
@@ -67,6 +67,8 @@ export interface ChainOptions {
   pieces?: number;
   /** Track F8: the searches sweep the burns between the extremes (RouteRequest.midBurns). */
   midBurns?: boolean;
+  /** Track F10: the burn of the rockets in the hand where it is not the plain one's (tracker.ts TrackerOptions.kit). */
+  kit?: Readonly<KitBurn>;
   /** Track F7: the cells a body may stand on (tracker.ts TrackerOptions.floor: the bail-out sinks onto a dry one). */
   floor?: (x: number, y: number, z: number) => boolean | undefined;
   note?: (msg: string) => void;
@@ -126,6 +128,7 @@ export class TrackerChain {
       ...(o.geodesic ? { geodesic: true } : {}),
       ...(o.pieces !== undefined ? { pieces: o.pieces } : {}),
       ...(o.midBurns ? { midBurns: true } : {}),
+      ...(o.kit ? { kit: o.kit } : {}),
       ...(o.floor ? { floor: o.floor } : {}),
       ...(o.note ? { note: o.note } : {}),
     });
@@ -238,10 +241,10 @@ export class TrackerChain {
  * (the look towards the first goal) through every goal of the window at the live budget, with the stretch's margin,
  * weight and edge set; `proofOf` reads the answer.
  */
-export function windowRequest(w: Pick<Window, 'goals'>, from: Vec3, rockets: number, o: Pick<StretchOptions, 'margin' | 'maxNodes' | 'maxMs' | 'weight' | 'library' | 'riskCost' | 'geodesic' | 'pieces' | 'midBurns'>): RouteRequest {
+export function windowRequest(w: Pick<Window, 'goals'>, from: Vec3, rockets: number, o: Pick<StretchOptions, 'margin' | 'maxNodes' | 'maxMs' | 'weight' | 'library' | 'riskCost' | 'geodesic' | 'pieces' | 'midBurns' | 'kit'>): RouteRequest {
   const first = w.goals[0] ? goalPoint(w.goals[0]) : { x: from.x, y: from.y, z: from.z + 1 };
   const yaw = (Math.atan2(-(first.x - from.x), first.z - from.z) * 180) / Math.PI;
-  const start: RouteState = { pos: { x: from.x, y: from.y, z: from.z }, vel: { x: 0, y: 0, z: 0 }, yaw, boost: { ...NO_BOOST }, gliding: false, rockets, wp: 0 };
+  const start: RouteState = { pos: { x: from.x, y: from.y, z: from.z }, vel: { x: 0, y: 0, z: 0 }, yaw, boost: { ...NO_BOOST }, gliding: false, rockets, ...(o.kit ? { kit: o.kit } : {}), wp: 0 };
   // (Track F6: the proof's search prices the risk, measures the way and runs in pieces as the trackers' do, so the plan proven is the plan flown)
   return {
     start,
@@ -296,6 +299,8 @@ export interface StretchOptions {
   geodesic?: boolean;
   pieces?: number;
   midBurns?: boolean;
+  /** Track F10: the burn of the rockets in the hand where it is not the plain one's: the window's trackers plan and track on it. */
+  kit?: Readonly<KitBurn>;
   note?: (msg: string) => void;
 }
 
@@ -342,6 +347,7 @@ export function flyStretch(d: StretchDeps, o: StretchOptions): { done: Promise<S
     ...(o.geodesic ? { geodesic: true } : {}),
     ...(o.pieces !== undefined ? { pieces: o.pieces } : {}),
     ...(o.midBurns ? { midBurns: true } : {}),
+    ...(o.kit ? { kit: o.kit } : {}),
     ...(d.floor ? { floor: d.floor } : {}),
     yaw: loop.command.yaw,
     note: (m) => {
