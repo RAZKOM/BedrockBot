@@ -7095,8 +7095,11 @@ count, a server-written slot left as sent, the armour window; 7 of its 9 fail on
 
 ### Open points (Track F12)
 
-- **Not run on the Realm.** What to look for: after `flight kit: refill ok` or `flight kit: swapped the rockets`, the
-  flight's `the first rocket at tick N` with no `the rocket used at tick N fired nothing`; and no `unknown slot` line.
+- **On the Realm (2026-11-13, deployed), the refill only.** `fireworksMin` at 64 for the series, so that every flight
+  followed a refill (11 refills of 3 to 16 rockets), five trips each way between home and the cave: 10 of 10 first
+  rockets fired (6 of 8 fired nothing before), 10 of 10 flights landed, no `fired nothing` and no `unknown slot` line
+  in the series, 50.7 and 63.2 s a run. The swap (a full inventory, the rockets outside the hotbar) did not come up
+  there: the test servers only.
 - The other rockets written off in a flight (not its first): 71 in the Realm log from 2026-11-06 to 2026-11-09 on
   older builds (some of which Track F9a found had fired with a late entity) and 1 since 2026-11-10, which its
   entity 6 ticks after the use showed had fired; the six first rockets above are every other write-off since then. The test servers'
