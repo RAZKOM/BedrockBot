@@ -469,5 +469,11 @@ ticks with `allowBreak` on. A player walks up to such a goal.
     traced to the 500 ms corridor limit. The mob gates passed: pve-m1, pve-creeper, nav-hostile-fall and pve-combat,
     and the gauntlet's live kit (33 cells, 0 deaths).
 58. **Left as they are.** `!home go` and the older `!goto` handler of `chat/commands.ts` (`commands-nav.ts` takes the
-    name back from it) pass no `beside`; their files are not this track's. `!test goto`'s 2.5 radius counts an end under a high air cell as not arrived. A low top with a block
-    beside it at its own height has no crouched step onto it, and ends next to it.
+    name back from it) pass no `beside`; their files are not this track's. `!test goto`'s 2.5 radius counts an end
+    under a high air cell as not arrived. A low top with a block beside it at its own height has no crouched step
+    onto it, and ends next to it.
+59. **On the Realm** (2026-11-14, deployed). The fence of decision 50: a walk from its top, the body set 0.5 over
+    it, arrived 3 of 3 (55 blocks, 237 to 239 ticks, the settle wait 4 ticks, one plan from the low perch, 0
+    damage); the cell over it as a goal answered `arrived` next to it with the note after 2 ticks and 1 plan, 3 of 3;
+    the fence block's own cell as a goal ended next to it 2 of 2 after a walk of 51 blocks. R6's gate goal and an
+    ordinary walk home as before. A goal in the air and one with no head room were not run there.

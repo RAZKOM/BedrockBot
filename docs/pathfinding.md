@@ -1780,7 +1780,32 @@ memory (a 6 GB heap) in the long class.
 `pve-combat` 12 of 12 on bds-pve; the gauntlet's live kit on bds-gaunt, 33 cells, 0 deaths, 48.1 damage in all, the
 lowest health 1.3.
 
-**Not run on the Realm yet.**
+**On the merged tree** (the coordinator's reruns, 2026-11-14, with Track F13 merged): `nav-low` with 5 runs a case,
+75 of 75 walks as in the table (the starts 77 to 83 ticks, the goals 66, the kinds 66 to 69, the before cases
+unreachable in 41 ticks and in 1 tick), `nav-perch`, `nav-hostile-fall` and `pve-m1` passed; the unit suite on the
+Mac passed three runs (2 880 tests each), and a fourth failed the worker test's interim timing, a known flake on a
+loaded host.
+
+**On the Realm** (2026-11-14, deployed; the `!test goto` series, which sets the body down, sends `!goto` and counts
+the end). The fence that began Track R5 and stayed open after R6: a spruce fence on a deck under a roof's eave, the
+eave's stairs 1.5 over the fence's top.
+
+- **The start.** The body set 0.5 over the top and a walk home of 55 blocks asked at once, 3 runs: 3 of 3 arrived in
+  237 to 239 ticks (14 s with the series' own steps), 0 damage. The log each time: the settle wait (4 ticks), `starting
+  from a perch ... (on spruce_fence: no standable node there; under 1.8 of head room, the body held crouched)`, the
+  server's pose line with the 1.49 box, one plan from the perch (a second, ordinary one on the way in one run), and
+  no correction but the teleport's own. Before: `no standable node` three times and unreachable after 41 ticks.
+- **The top as a goal.** From the deck one block away, 3 runs: 3 of 3 `arrived at ... (the goal's cell ... (on
+  spruce_fence) cannot be stood on (under 1.8 of head room: a body gets onto it only crouching): stopped 1.8 blocks
+  from it)` after 2 ticks and 1 plan. Before: unreachable after 1248 ticks and 17 plans.
+- **The fence block's own cell as a goal**, from the home, a walk of 51 blocks, 2 runs: 2 of 2 arrived next to it
+  with the note (`inside spruce_fence, no room for a body in it`), 1.02 from the cell, in 184 and 192 ticks, 0 damage.
+- **As before.** R6's goal over a closed gate 2 of 2 next to it with its note (2.04 from it); an ordinary walk home 2
+  of 2; the home's chest probe the same count as before the deploy; no damage in the 12 runs.
+
+Not seen on the Realm: a goal in the air or under a block where the head goes (the test server only), and a low
+perch a flight ended on (flights have landed on the chosen site since `flyLandOver`). One reply of the three in a
+row at the fence was dropped by the chat rate limit, which is older than this track; the log has the line.
 
 ## Following a path
 
