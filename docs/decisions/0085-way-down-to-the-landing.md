@@ -1,6 +1,6 @@
 # 0085: A landing lies under the sky and has a way down to it (flight v2, Track F14)
 
-Date: 2026-11-14. Status: accepted, `flyWayDown` default off until it has flown on real terrain. Builds on
+Date: 2026-11-14. Status: accepted, `flyWayDown` default off; on on the Realm since 2026-11-14 (decision 10). Builds on
 [0047](0047-flight-landing-v3.md) (the landing search: a live, dry, sound cell with a confirmed walk),
 [0057](0057-flight-manoeuvres.md) (the brake / elevator landing, a floor under a rim), [0076](0076-land-by-time.md)
 (the walk flood, the approach simulated before a cell is offered, the priced miss) and
@@ -132,3 +132,18 @@ stands between (`flare wall`), then the nearest safe ground.
   an alternative at the tunnel's mouth and 2 ended off it, 49.8 s a trip; after, 10 of 10 stand on the search's first
   landing with no miss, 39.4 s a trip. An exact landing two blocks from the hill's foot (a rim of 24): 10 of 10.
 - The column tops are the model's, as in 0084.
+
+## Addendum: on the Realm (2026-11-14)
+
+10. **The setting is on on the Realm and stays off by default.** 25 trips with it on, at night, no death: the 15
+    flights to goals under the mountain all stood on the landing the search chose (a cave's mouth, a rim 8 to 36
+    over its floor), 0.00 to 0.01 from its centre; nine of the ten goals took 83 to 126 s a trip against 114 to 247 s;
+    the flights home and the waypoints by the cave's mouth landed as before or by the rim. Off by default because it
+    has flown in one place, and for three things seen there: the search takes 0.6 to 3.0 s a look where it took 0.2 to
+    0.85 s (three looks of about forty 4.7 to 6.4 s), which the hold absorbs; a landing beside something more than 48
+    over its floor is still flown as before (one of the three short flights ended off its landing again, and says
+    why); and the elevator is where a mob reaches the body: two flights were hit 2 and 4 blocks over the floor (0.9
+    and 1.8), pushed off the centre, went round at the rim go-around's chance and landed, which is that chance's
+    first count (2 of 2). A look at hostile mobs in the landing is the next track. One trip took 355 s because its
+    walk from the mouth, taken up again after three fights, left the way the search had probed (860 blocks walked
+    for a path of 112; three repeats 101 to 154 s): the walker's fault, not the landing's.

@@ -1160,7 +1160,7 @@ Rules (all named `// Track AU` in the shared files):
 | `flyLearned` | off | Track F9b: with `flyCave` on, a takeoff from under a roof flies out along a path recorded with `!learn` that left the ground within 4 blocks of where the bot stands and comes out under open sky, when the whole takeoff simulated at five burns clears; no such path, or none that clears: the takeoff as without it. It has flown on the replica only: `on` after a `!test goto` series on real terrain ("Learned exits") |
 | `flyKitBurn` | off | Track F10: the flight in the open (the climb, the cruise's top-ups, the route planner's landings and takeoffs, a corridor's windows, every takeoff's proof) plans with the burn of the rockets in the hotbar (a crafted rocket: 19 to 31 ticks) instead of the plain rocket's 9 to 21: a burning rocket is flown to the height it was fired for and no higher, a top-up buys what the flight can use, the plans branch at the kit's burns. With plain rockets it changes nothing. Off until flown on the Realm ("The open-air flight on the burn of the rockets at hand") |
 | `flyLandOver` | on | Track F11: a descent circle is flown no lower than 3 over the highest column under it; a landing whose circle has roofs, trees or higher ground under it is then flown in over them by the brake and straight down by the elevator; the nearest safe ground of a forced or a priced landing is never a fence, a wall or a pane, nor a roof or a wall's top with a floor beside it. `off`: the circle down to 6 over the landing whatever stands there and the ground rules as before ("The flight comes down where it planned to") |
-| `flyWayDown` | off | Track F14: a landing lies under the open sky (a floor under a roof is no landing however high the roof: a cavern's floor with 21 blocks of room was one) and has a simulated way down; a goal under a roof is searched out to where its walk comes out under the sky, however far; a landing with something standing within 14 blocks of it (more than 2 and at most 48 over its floor) is flown in over that by the brake and straight down by the elevator from the start, and a missed approach whose plan met a wall gets the same before it goes round. `off`: the search and every flight as before. `on` after a `!test goto` series on real terrain ("The way down to the landing") |
+| `flyWayDown` | off | Track F14: a landing lies under the open sky (a floor under a roof is no landing however high the roof: a cavern's floor with 21 blocks of room was one) and has a simulated way down; a goal under a roof is searched out to where its walk comes out under the sky, however far; a landing with something standing within 14 blocks of it (more than 2 and at most 48 over its floor) is flown in over that by the brake and straight down by the elevator from the start, and a missed approach whose plan met a wall gets the same before it goes round. `off`: the search and every flight as before. On the Realm it is on since 2026-11-14 ("The way down to the landing": 15 of 15 flights to goals under a mountain on their landing) |
 
 ## Processes
 
@@ -7630,35 +7630,42 @@ walls 20 high 10 blocks out are the platform's rim now, so the flight circles ro
 from 65 above`) and all 10 landings stand 0.00 to 0.02 from the platform's centre with no damage, by the brake, in 332
 to 347 ticks. The assertion describes the descent with the setting off, where it holds.
 
-### What the Realm should show
+### On the Realm (2026-11-14, deployed, `flyWayDown` on there)
 
-`!set flyWayDown on`, then `!test goto cave_8 from home 1` and the same for `cave_9`, `cave_10`, `cave_11`,
-`cave_14` to `cave_19` (the ten of 2026-11-14), then `portal`, `xp` and `tower` (the three short ones), and
-`cave_start`, `cave_4`, `cave_21`, `cave_end` and `home from cave_start` (flights that landed on their site before).
+`!set flyWayDown on`, then `!test goto <waypoint> from home 1` for the ten deep goals of the sweep, the three short
+flights and four waypoints whose flights had landed on their site, `home from cave_start 3`, and a repeat of two of
+the deep goals (3 and 2 runs): 25 trips, at night, no death.
 
-- The search's line for a deep goal: `walk flood N floors (open sky 50 to 143 steps from the goal at ..., M cells
-  there beyond the window)`, its first cells `path 76 to 167 ... long, in over what stands round it (4 to 9 s down)`,
-  no `not simulated`, and a landing of 9 to 28 cells with 27 to 55 s of walk by its path (offline; on the Realm the
-  window loads as the flight comes in and the first look may answer from the loaded part). The landing is at the
-  cave's mouth: farther from the goal in a straight line than the cell it used to take, nearer by the walk than the
-  mountain's top.
-- Then `flight: way down: what stands within 14 blocks of the landing reaches N over its floor: in over that ...`,
-  `retargeted to ... (the same landing, flown in over what stands round it)`, `descent spiral r10 at 0 out from N
-  above` in the end's line, `descent circle r10 left N over the landing's floor`, and `flight: landed at ..., 0.0x
-  from the centre`, `landing brake`, `touchdown vy` between -0.15 and -0.30. Offline the landing took 7 to 25 s from
-  the retarget.
-- No `landing price`, no `land now`, no go-around in those flights. A `landing price` line with `P 0.90` is a missed
-  approach flown round over a given rim: say the lines round it and how it ended.
-- The walk in from the mouth: 27 to 55 s planned offline; the trip in all should be near what the waypoints by the
-  cave's mouth take (46 to 84 s on 2026-11-14) plus that walk, against 115 to 250 s.
-- The three short ones: `way down:` before the descent where something stands within 14 blocks of the landing, and a
-  landing on the site. Where the first approach still misses: `way down: no approach along the ground (flare wall N
-  from the centre): what stands within M blocks ...` and one go-around.
-- Damage in a flight, a touchdown harder than 0.34 a tick, an elevator that takes more than 15 s, a hold longer than
-  before (the far flood found no mouth in what was loaded: `no open sky reached`), or a search that takes more than a
-  second: say the lines.
-- To compare: `!set flyWayDown off` and the same trips. A flight that then gives its landing up says why at the end
-  of its `land now` line: `the landing lies under a roof 21 over its floor ...`.
+- **The deep goals: 15 of 15 flights stood on the landing the search chose, 0.00 to 0.01 from its centre.** Every
+  search said `walk flood ... (open sky 50 to 106 steps from the goal ..., 64 cells there beyond the window)` and
+  took a cell at a cave's mouth `in over what stands round it`, with a rim 8 to 36 over the floor; the flight said
+  `way down: ...` 9 to 100 blocks out, circled (`descent spiral r10 at 0 out`) where it arrived high, and came down
+  by the brake and the elevator (34 to 151 ticks braked, touchdown vy -0.17 to -0.30). No landing on the mountain's
+  top, no priced `land now`.
+- **The trips.** Nine of the ten took 83 to 126 s where the sweep's took 114 to 247 s (17 to 129 s less). The tenth
+  took 355 s once: its flight landed as the others, and the walk from the mouth was interrupted three times by the
+  mob guard and walked about 860 blocks where the search's probe had found a path of 112; three repeats took 101,
+  110 and 154 s (184 s in the sweep), the longest again with interruptions and a walk of 225 blocks after them. A
+  walk that is taken up again after a fight does not keep to the way it had: the walker's fault, open.
+- **Two go-arounds, both after a mob's hit in the elevator.** A zombie's swing (0.9) and a phantom's (1.8) met the
+  body 4 and 2 blocks over the floor and pushed it 0.8 and 1.0 off the centre; the brake's plan then met the rim
+  (`brake wall, cost 202`), the price said `P 0.90 ... going round`, and both flights landed on the centre 14 to 16 s
+  later. `GOAROUND_P_OVER`'s first count on real terrain: 2 of 2. The elevator is where a flight is in a mob's reach
+  the longest (see the open points).
+- **The three short flights.** One landed on its site (0.17 from the centre, 33 s the trip, 37 s before). One took
+  an alternative 2.9 s of walk from the goal by the price after a `brake short`, and landed on it. The third ended
+  off its landing again, 19 blocks from it: something within 14 blocks of that landing stands 67 over its floor,
+  over the 48 a way straight down may be, so it is flown as before; the `land now` line says so.
+- **Flights that landed before** land as before or by the rim: a learned entry 48 s (48 s before), three waypoints
+  by the cave's mouth 73 to 89 s (77 to 91 s), the flights home 3 of 3 on the centre over a rim of 12, 59 s a run.
+- **The search takes longer there than the bench said**: 0.6 to 3.0 s a look, and three looks of about forty took
+  4.7 to 6.4 s (0.2 to 0.85 s before the track). It runs while the body holds over the goal (holds of 40 to 102
+  ticks), so it costs the trip a second or two, and a look that uses its whole budget five.
+- **Damage**: none in 20 of the 25 trips, 1.8 at the most; in a flight only the two hits above and 0.9 at the
+  touchdown of the flight that ended off its landing.
+
+To compare on any world: `!set flyWayDown off` and the same trips. A flight that then gives its landing up says why
+at the end of its `land now` line (`the landing lies under a roof 21 over its floor ...`).
 
 ### Unit tests (`fly-way-down.test.ts`, synthetic worlds; `chunks.test.ts`)
 
@@ -7679,7 +7686,8 @@ default and listed; `topY`.
 
 ### Open points (Track F14)
 
-- **It has not flown on real terrain.** Offline on one place and on a built hill; `flyWayDown` is off.
+- **Real terrain is one place.** The Realm's cave and home (above); `flyWayDown` is off by default and on there.
+- **A walk taken up again after a fight** left the way it had (above): the walker's, not this track's.
 - **A mouth the hold cannot see.** The far flood reads the live model. A mouth whose columns have not loaded when
   the landing is looked for is not found: the search answers from what it has (a cell on the mountain, or nothing
   yet and the hold goes on to `flyHoldS`). On the Realm the model reached 150 blocks from the body on 2026-11-14 and
@@ -7691,7 +7699,7 @@ default and listed; `topY`.
   the ground may have landed sooner. Not measured against that flare.
 - **A landing at the foot of a cliff over 48** has no rim and is flown as before, by an approach along the ground
   from where the body is. A descent circle placed on the side the search's simulation landed from is not built.
-- **`GOAROUND_P_OVER` has no measurement on the final tree** (no first approach missed).
+- **`GOAROUND_P_OVER` has two flights behind it on the final tree** (the Realm, both after a mob's hit in the elevator, both landed); no first approach has missed for any other reason.
 - **An exact `!fly <x y z>` to a goal under a roof** asks the route planner first (Track F4a), and on the test
   server's hill that took the search's whole 6 s (7.3 s on the base tree, 6.5 to 8.1 s on this one): no probe ran and
   the landing was the last resort's. `!goto` and `!test goto` do not ask it (the `goal` case's searches took 0.2 to
