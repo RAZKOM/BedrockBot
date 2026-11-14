@@ -7229,12 +7229,26 @@ measured; the one `mob_equipment` (run 0) selects slot 0 after the case before i
 item. The unit suite on the test host: four runs, three clean; the first lost a worker to the V8 `SIGTRAP` in
 `nav-r4.test.ts` (a known fault of a loaded host) and was run again.
 
-### What the Realm should show
+On the merged tree (the coordinator's reruns, 2026-11-13): the box alone on the tree before the change 3 of 3 walked
+and a `goto` 3 of 3 refused the climb; with the change the 12 cases passed, the box alone 10 of 10 flew (the takeoff
+5.3 to 6.6 s after the command, on the aim and the box carried again 10 of 10); `fly-kit` 7 of 7, `fly-first-rocket`
+4 of 4, `fly-open` 3 of 3; the unit suite on the test host three clean runs of four (the fourth lost a worker to the
+same V8 fault, in `nav-r5.test.ts`).
 
-A `!fly` to a waypoint with every loose rocket put in a chest first and the box carried: `flying to ...` within a
-second, `flight kit: refill ok: took 64 firework_rocket` in the log, the takeoff about 5 s after the command, the
-landing as usual and the box in the inventory after it (`!fly status`: `box N`). With the bot on a 1 x 1 top or with a
-full inventory: the one-line refusal at once and nothing placed.
+### On the Realm (2026-11-14, deployed)
+
+The box alone: every loose rocket dropped on the floor at the home (465; `!drop firework_rocket`, and the command sent
+0.8 s later so that the walk left them behind: a bot that stands still picks them up again), then `!fly` to the cave's
+waypoint. The home is under a roof, so the command walked to a takeoff site first (decided with 0 loose rockets and the
+box: before this track it would have walked the whole way); there `flight kit: refill ok: took 64 firework_rocket`,
+the elytra on, the first rocket fired, the flight landed 1.00 from the landing's centre and the trip arrived 50 s after
+the command with the box carried (`box` 64 lower). The rockets were picked up again on the way back.
+
+A refill forced round every flight (`fireworksMin` 64, three trips each way with the test harness, the inventory
+full): 6 of 6 arrived, 48.3 s a run out and 63.1 s back (50.7 and 63.2 on Track F12's series), six refills of 4
+rockets each (the room on the rocket stacks, which is all a full inventory leaves), 6 of 6 first rockets fired, no
+box left behind, no damage. Not seen there: the refusals (nothing loose with a full inventory, no cell for the box);
+they have run on the test servers only.
 
 ### Open points (Track F13)
 
