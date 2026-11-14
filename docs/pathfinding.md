@@ -1462,7 +1462,7 @@ for each changed row, both configurations the same unless stated):
 | a fence in a line of fences | unreachable | arrived next to it, 66 to 67 ticks |
 | a fence at a pit's edge, a block beside it (live) | unreachable | arrived on the top, 0 damage |
 | in a cauldron | unreachable: `world` (default), `rule built` (live) | arrived next to it with the note, 0.91 to 1.09 from the inside's centre, 66 to 67 ticks |
-| a column goal (`!goto x z`) over a fence | unreachable after 328 ticks and 27 plans | arrived next to it, 66 to 67 ticks |
+| a column goal (a waypoint with no height) over a fence | unreachable after 328 ticks and 27 plans | arrived next to it, 66 to 67 ticks |
 | the same with a block beside it | unreachable after 324 ticks | arrived on the top, 74 to 78 ticks |
 | a fence in a deck, its four cardinal neighbours fences too (no step onto it) | unreachable: `rule place` (default), `world` after 320 ticks (live) | arrived next to it on the deck, 1.45 to 1.53 from the top's centre, 74 to 77 ticks |
 | a column goal with a fence on a roof 2 over a floor (a node under the fence) | arrived on the floor under the roof, 70 to 71 ticks | the same end and plans in 10 of 10 a configuration; ticks the same within 1, as the same run twice |
@@ -1519,7 +1519,8 @@ cauldron. The walk
 then ends `ok` with a note that says the goal's cell cannot be stood on, why, and how far the body is from the top's
 centre (`GotoReport.perchGoal`: `on` or `beside` and the distance).
 
-**A column goal** (`!goto x z`, a waypoint with no height). A column goal is done at any node of the column, so it is
+**A column goal** (a waypoint with no height such as a world spawn, a walk-out leg of a flight; no chat command
+gives one). A column goal is done at any node of the column, so it is
 changed only when no cell of the column is a node (`stand` or a doorway, from the cell over its top down to the
 world's floor: one pass, once a goto; not decided while part of the column is not loaded). Then the highest cell with
 a box, if it is not a liquid, is looked at as a perch goal: the cell over it (a fence's top), else its own cell (a
@@ -1586,6 +1587,28 @@ cells, 0 deaths, 52.2 damage in all, the lowest health 1.9 in `mixed-8` (28 of i
 `nav-hostile-fall` 4 of 4. `pve-combat` failed one or two of its 12 tests in 3 of 4 runs, the base in 2 of 3 the
 same evening, the two-zombie flank test failing on both, so the server was flaky that evening. The gauntlet had one
 death, creeper-4 by suffocation with no goto running; run again, 5 of 5 alive on this tree and 5 of 5 on the base.
+On the merged tree (with Track F12): the unit suite three times on the test host, `nav-perch`'s goal cases 35 of 35
+with the same numbers, `pve-combat` 12 of 12.
+
+**On the Realm** (2026-11-14, deployed). A goal on the cell over a closed fence gate that stands in a fence line on
+the ground, walked to from the home: 5 of 5 arrived next to it with the note, 2.03 to 2.07 from the top's centre, no
+damage; one walk in 112 ticks and four longer ones in 147 to 152, 1 plan in four and 3 in one. Ordinary walks on the
+same build: home from a roof's deck 2 of 2 (14.1 s a run) and home from the gate 3 of 3 (10.4 s), no damage; the home's chest probe found 90 of 193 containers in reach, as before the change.
+Not seen there: a walk that ends on a top (no perch with a block beside it was tried) and a column goal (none can be
+asked for in chat); both have run offline and on the test server only.
+
+**Found there and open: the fence that began Track R5 is no perch.** It stands on a deck under a roof's eave, and a
+block of the roof is 1.5 over the fence's top. `NavGrid.perch` asks the full 1.8 of head room, as `stand` does, so
+that top is neither a start nor a goal:
+
+- as a start (the body put on the top by the test harness's `/tp`): the server holds the body there in its 1.49-high
+  pose; `no standable node` three times and unreachable after 41 ticks with no plan, as before Track R5. The flights
+  that ended on that fence no longer do (`flyLandOver`), so no trip has met it since;
+- as a goal (the cell over it): it is a goal with no head room, answered as before: the walk went up to the deck and
+  stood one block from the fence, then planned 17 times in 1248 ticks (62 s) and answered unreachable.
+
+Both need a body lower than 1.8 in the model (a start in the low pose and its first move out from under the eave) and
+are left for a track of their own.
 
 ## Following a path
 

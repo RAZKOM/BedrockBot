@@ -2357,7 +2357,7 @@ export class Navigator {
       this.giveUp(a);
       return false;
     }
-    // Track R6: a column goal (`!goto x z`, a waypoint with no height) with no node in any cell of the column and a
+    // Track R6: a column goal (a waypoint with no height, a flight's walk-out leg) with no node in any cell of the column and a
     // perch (a fence's top) as its top: the top as a block goal, onto it or next to it as below (before: unreachable
     // after 27 plans). A column with a node anywhere (a room under a roof with a fence on it, a path under a bridge's
     // rail) keeps the plain column goal: it arrived before at the column's cheapest node and must arrive there still.

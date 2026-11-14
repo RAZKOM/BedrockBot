@@ -85,7 +85,7 @@ interface GoalCase {
   goal: { x: number; y: number; z: number };
   /** After R6: `on` the top, `beside` it (the note), `arrived` (a node, as before), `unreachable`. */
   want: 'on' | 'beside' | 'arrived' | 'unreachable';
-  /** The goto's goal when it is not the cell as a `block` goal (a column: `!goto x z`, a waypoint with no height). */
+  /** The goto's goal when it is not the cell as a `block` goal (a column: a waypoint with no height). */
   column?: true;
 }
 const GX = 20;

@@ -403,4 +403,7 @@ after 28 plans. A column goal over a fence took 27 plans to the same answer.
     suffocation (creeper-4, no goto running) did not come back in 5 runs on either tree.
 50. **Left as they are.** A perch goal with nothing in reach of it (a fence on a tower 3 high) stays unreachable
     (`rule place`; with `allowBreak` on it said `world` before). A goal given as the fence block's own cell is a goal
-    inside a block, as before. The flight's probes are the flight track's.
+    inside a block, as before. The flight's probes are the flight track's. Found on the Realm (2026-11-14) and open:
+    a top with less than 1.8 of head room over it (a fence under a roof's eave, where the server holds the body in
+    its 1.49-high pose) is no perch, neither as a start (decision 36) nor as a goal: the model has no body lower than
+    1.8 at a start.
