@@ -543,6 +543,61 @@ export function rimReach(target: Pick<LandingTarget, 'x' | 'z' | 'half' | 'cells
   return Math.max(RIM_WITHIN_MIN, near - 0.3);
 }
 
+/**
+ * Track F14 (docs/flight.md "The way down to the landing"; decisions/0085; the setting `flyWayDown`): a landing with
+ * something standing round it is flown in over that and straight down from the start, as Track F11 flies one whose
+ * descent circle was left over roofs: the highest column within `reach` blocks of its centre is its rim.
+ *
+ *   reach  the columns that count: a circle of radius 10 round the landing and its berth (SPIRAL_RADII), the circle the
+ *          descent then fits round it (spiralFit needs every column within 10 lower than the rim + 13)
+ *   min    a rim no higher than this over the floor is none (open ground, a fence on it: SPIRAL_CLEAR.rim), and the
+ *          landing is flown as it was
+ *   max    a rim higher than this is no way down (the elevator sinks 0.15 to 0.3 a tick: 48 blocks are 8 to 16 s; the
+ *          deepest flown is 46, the pit of Track F8)
+ *   far    after a missed approach whose best plan met a wall farther out than `reach`, the columns out to that wall
+ *          (and 4) count, at most this far
+ *   circle the descent circle round such a landing is no wider than this (the landing search simulates the way in from a
+ *          circle of this radius: landing.ts overLands), and it is left no lower than the way in from it needs: `wayIn`
+ */
+export const OVER = Object.freeze({ reach: 14, min: SPIRAL_CLEAR.rim, max: 48, far: 44, circle: 10 });
+
+/**
+ * Track F14: the height a descent circle of `radius` round a landing with a rim is left at the latest: over the rim (and
+ * over `top`, the highest column under or inside the circle, where that is higher) by what Track F11 measured for the
+ * way in from a circle to its centre (SPIRAL_CLEAR: 3, the quarter turn's 2.5 and 0.26 a block of the radius). The
+ * circle's own low end (10 under its exit: 6 over the rim) is under that from a radius of 2 on: a body that left a
+ * circle of 24 there met the rim's plane 14 blocks before the centre (the brake's plan `wall`, a go-around).
+ */
+export function wayIn(rim: number, top: number | undefined, radius: number): number {
+  return Math.max(rim, top ?? -Infinity) + SPIRAL_CLEAR.over + SPIRAL_CLEAR.turn + SPIRAL_CLEAR.slope * radius;
+}
+
+/** Track F14: the rim of a landing (see OVER), or why it has none: `unknown` (a column within reach is not known), `roof` (something stands over its own centre), `low` (nothing stands round it), `high` (too high to sink down from); `over`: how high over the floor that is. */
+export type LandingRim = { rim: number; why?: undefined } | { rim?: undefined; why: 'unknown' | 'roof' | 'low' | 'high'; over: number };
+
+export function landingRim(target: Pick<LandingTarget, 'x' | 'z' | 'top'>, skyTop: (x: number, z: number) => number | undefined, reach: number = OVER.reach): LandingRim {
+  const cx = Math.floor(target.x);
+  const cz = Math.floor(target.z);
+  const own = skyTop(cx, cz);
+  if (own === undefined) return { why: 'unknown', over: 0 };
+  // (the landing's own column ends at its floor: a higher top is a roof over it, and nothing comes straight down through that)
+  if (own + 1 > target.top + 0.5) return { why: 'roof', over: own + 1 - target.top };
+  let rim = target.top;
+  const r = Math.ceil(reach);
+  for (let dx = -r; dx <= r; dx++) {
+    for (let dz = -r; dz <= r; dz++) {
+      if (Math.hypot(dx, dz) > reach) continue;
+      const t = skyTop(cx + dx, cz + dz);
+      if (t === undefined) return { why: 'unknown', over: 0 };
+      if (t + 1 > rim) rim = t + 1;
+    }
+  }
+  const over = rim - target.top;
+  if (over <= OVER.min) return { why: 'low', over };
+  if (over > OVER.max) return { why: 'high', over };
+  return { rim };
+}
+
 /** Track F11: the feet height (the block's y + 1) of the highest known column from `inner` to `radius` blocks from `centre`; undefined when none is known. */
 export function discTop(centre: { x: number; z: number }, radius: number, skyTop: (x: number, z: number) => number | undefined, inner = 0): number | undefined {
   const cx = Math.floor(centre.x);

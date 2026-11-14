@@ -447,8 +447,8 @@ export class FlyProcess extends BaseProcess {
     this.phase = 'flying';
     // Track BL: the terrain floor, the clearance, the high cruise and the descent mode (a glide down keeps its simulated plan: no floor)
     // Track F3: the route planner (the route landing's tracker, the route takeoff)
-    const bl = { clearance: s.get('flyClearance'), descent: String(s.get('flyDescent')) as 'auto' | 'dive' | 'spiral', landStyle: String(s.get('flyLandStyle')) as 'auto' | 'flare' | 'brake', ...(high ? { highCruise: true } : {}), ...(s.get('flyLandOver') === false ? { landOver: false } : {}), ...(this.d.route ? { route: this.d.route } : {}), ...(this.d.entry && s.get('flySneakLand') === true ? { entrySneak: true } : {}), ...(routeTakeoff ? { routeTakeoff: routeTakeoffOptions(routeTakeoff, routeTakeoff.proven === true) } : {}) }; // Track F1: flyLandStyle; Track F9a: the proven takeoff's own options
-    const opts = glide && ledge ? { ...glideOptions(this.target, ledge, { margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(burn ? { burn } : {}) }), terrainFloor: false, descent: bl.descent, landStyle: bl.landStyle, ...(bl.landOver === false ? { landOver: false } : {}), ...(this.d.route ? { route: this.d.route } : {}) } : { cruiseY, margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(ledge ? { ledge: { yaw: ledge.yaw } } : {}), ...(vertical !== undefined ? { vertical: { top: vertical } } : {}), ...bl, ...(burn ? { burn } : {}) };
+    const bl = { clearance: s.get('flyClearance'), descent: String(s.get('flyDescent')) as 'auto' | 'dive' | 'spiral', landStyle: String(s.get('flyLandStyle')) as 'auto' | 'flare' | 'brake', ...(high ? { highCruise: true } : {}), ...(s.get('flyLandOver') === false ? { landOver: false } : {}), ...(s.get('flyWayDown') === true ? { wayDown: true } : {}), ...(this.d.route ? { route: this.d.route } : {}), ...(this.d.entry && s.get('flySneakLand') === true ? { entrySneak: true } : {}), ...(routeTakeoff ? { routeTakeoff: routeTakeoffOptions(routeTakeoff, routeTakeoff.proven === true) } : {}) }; // Track F1: flyLandStyle; Track F9a: the proven takeoff's own options
+    const opts = glide && ledge ? { ...glideOptions(this.target, ledge, { margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(burn ? { burn } : {}) }), terrainFloor: false, descent: bl.descent, landStyle: bl.landStyle, ...(bl.landOver === false ? { landOver: false } : {}), ...(bl.wayDown ? { wayDown: true } : {}), ...(this.d.route ? { route: this.d.route } : {}) } : { cruiseY, margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(ledge ? { ledge: { yaw: ledge.yaw } } : {}), ...(vertical !== undefined ? { vertical: { top: vertical } } : {}), ...bl, ...(burn ? { burn } : {}) };
 
     this.flight = this.d.controller.flyTo(this.target, {
       ...opts,
@@ -545,7 +545,8 @@ export class FlyProcess extends BaseProcess {
         this.log.info(`fly: the learned entry for ${t.label} was given up: the landing as without it${t.hold ? ' (looking for one)' : ''}`);
       }
       // Track L1: the brain took one of the target's alternatives instead of a go-around: that landing is the flight's now
-      if (!t.hold && c.target !== undefined && c.target !== t) return;
+      // (Track F14: not when it is the same landing with its rim given, brain.ts lookRim: that cell is re-checked as before)
+      if (!t.hold && c.target !== undefined && c.target !== t && !(this.d.settings.get('flyWayDown') === true && c.target.x === t.x && c.target.z === t.z && c.target.top === t.top)) return;
       if (!t.hold) {
         // (Track F9c: a learned entry's target is no cell: nothing to re-check, and the body passes its aim in the air)
         if (t.entry) continue;

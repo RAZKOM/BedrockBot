@@ -43,7 +43,7 @@ import type { Box } from '../../world/types.ts';
 import { BrakePlanner } from './brake.ts';
 import { standsOn } from './ground.ts'; // Track F11
 import { PATH_MIN_S_PER_BLOCK, UNKNOWN_DETOUR, UNKNOWN_RISK_S, WALK_S_PER_BLOCK, walkPriceOf, walkSeconds, type WalkPrice } from './landprice.ts'; // Track L1; Track L2: the walk by its path
-import { ApproachPlanner, APPROACH_DISTANCE, APPROACH_HEIGHT, columnKey, entryTop, hdist, yawDiff, yawDir, yawTo, type FlightBody, type LandingTarget, type Obstacle } from './plan.ts';
+import { ApproachPlanner, APPROACH_DISTANCE, APPROACH_HEIGHT, columnKey, entryTop, hdist, landingRim, OVER, rimReach, wayIn, yawDiff, yawDir, yawTo, type FlightBody, type LandingTarget, type Obstacle } from './plan.ts';
 import type { RouteGrid } from './route/grid.ts'; // Track F3
 import { planLandingRoute, type LandingRouteSpec } from './route/landing.ts'; // Track F3
 import type { KitBurn } from './route/types.ts'; // Track F10
@@ -122,6 +122,20 @@ export function floorsOf(look: BlockLookup, x: number, z: number, yTop: number, 
   return known ? out : undefined;
 }
 
+/**
+ * Track F14: the lowest solid of column (x, z) from `from` up to the first cell that is not loaded, at the most to `to`
+ * (the highest y of the column that may hold a block, where the caller knows it: LandingDeps.maxY; else the world's top);
+ * undefined: none.
+ */
+export function solidOver(look: BlockLookup, x: number, z: number, from: number, to = 319): number | undefined {
+  for (let y = from; y <= Math.min(319, to); y++) {
+    const b = look(x, y, z);
+    if (b === undefined) return undefined;
+    if (b.solid) return y;
+  }
+  return undefined;
+}
+
 export type CandidateKind = 'open' | 'roof';
 
 export interface Candidate {
@@ -170,6 +184,18 @@ export interface LandingDeps {
    * false only after it.
    */
   route?: { grid: RouteGrid; plan?: Planner; rockets?: number; first?: boolean; /** Track F10: the burn of the rockets in the hand where it is not the plain one's (route/landing.ts LandingRouteOptions.kit). */ kit?: Readonly<KitBurn> };
+  /**
+   * Track F14: the highest solid block of a column (the flight's own column tops: the live model, else the cache), for the
+   * rim of a cell with something standing round it (plan.ts landingRim, as the brain reads it). Absent: the search's own
+   * floors (`viewTops`: a column whose top it cannot see is unknown).
+   */
+  skyTop?: (x: number, z: number) => number | undefined;
+  /**
+   * Track F14: the highest y of a column that may hold a block (the live model: the top of its highest section that is
+   * not all air; world/chunks.ts topY), so that the look for a roof over the search's window ends there. Absent: the look
+   * goes to the first cell that is not loaded, at the most to the world's top.
+   */
+  maxY?: (x: number, z: number) => number | undefined;
 }
 
 export interface LandingOptions {
@@ -210,6 +236,16 @@ export interface LandingOptions {
    * Each is capped at the search time left (`budgetMs`), so the search's total time is kept.
    */
   longProbe?: { count: number } & ProbeBudget;
+  /**
+   * Track F14 (docs/flight.md "The way down to the landing"; decisions/0085; the setting `flyWayDown`): a landing lies
+   * under the sky and has a way down to it. With it: a floor is `open` only with nothing over it to the top of what is
+   * loaded (ColumnView.sky), and a corridor in under a roof ends under such a column; a covered goal's walk flood goes on
+   * to the cave's mouth and the open ground there is a candidate however far it is (FLOOD_FAR); an open cell is offered
+   * only with a simulated way down: in over what stands round it and straight down where something does (`overLands`, as
+   * the brain will fly it), else an approach along one of four bearings; never because the simulations ran out
+   * (APPROACH_SIMS_SKY of them).
+   */
+  sky?: boolean;
 }
 
 export interface LandingCell {
@@ -255,11 +291,24 @@ export class ColumnView {
   readonly yBottom: number;
   lookups = 0;
   private readonly look: BlockLookup;
+  /**
+   * Track F14 (docs/flight.md "The way down to the landing"; decisions/0085; the setting `flyWayDown`): open sky is the
+   * sky. Without it a floor with OPEN_SKY (20) blocks of room over it is `open` whatever stands over that: the floor of
+   * a cavern whose roof is 21 over it, under 50 blocks of mountain, was a landing under the open sky (the Realm,
+   * 2026-11-14: nine flights to goals under a mountain were sent to such floors and came down on the mountain's top).
+   * With it a floor's `ceiling` is looked for to the top of what is loaded in its column, and a floor with any ceiling
+   * is an overhang cell (`roof`: landable only along a corridor that reaches the sky) or nothing.
+   */
+  readonly sky: boolean;
+  /** Track F14: the highest y of a column that may hold a block (LandingDeps.maxY), where the caller knows it. */
+  readonly maxY: ((x: number, z: number) => number | undefined) | undefined;
 
-  constructor(look: BlockLookup, goalY: number) {
+  constructor(look: BlockLookup, goalY: number, o: { sky?: boolean; maxY?: (x: number, z: number) => number | undefined } = {}) {
     this.look = look;
     this.yTop = Math.min(319, Math.floor(goalY) + 72);
     this.yBottom = Math.max(-64, Math.floor(goalY) - 36);
+    this.sky = o.sky === true;
+    this.maxY = o.maxY;
   }
 
   floors(x: number, z: number): Floor[] | undefined {
@@ -268,6 +317,12 @@ export class ColumnView {
     if (hit !== undefined) return hit ?? undefined;
     this.lookups++;
     const f = floorsOf(this.look, x, z, this.yTop, this.yBottom);
+    // Track F14: what stands over the window in this column is a ceiling too (the lowest solid from the window's top up to
+    // the first cell that is not loaded: the sub-chunks over a column's highest block are never sent)
+    if (this.sky && f?.some((fl) => fl.ceiling === undefined)) {
+      const over = solidOver(this.look, x, z, this.yTop + 1, this.maxY?.(x, z));
+      if (over !== undefined) for (const fl of f) fl.ceiling ??= over;
+    }
     this.memo.set(k, f ?? null);
     return f;
   }
@@ -282,7 +337,8 @@ export class ColumnView {
   kindOf(f: Floor, headroom: number): CandidateKind | undefined {
     if (f.ceiling === undefined) return f.feet + OPEN_SKY <= this.yTop ? 'open' : undefined;
     const room = f.ceiling - f.feet;
-    if (room > OPEN_SKY) return 'open';
+    // (Track F14: with `sky` a roof is a roof however high it is)
+    if (room > OPEN_SKY && !this.sky) return 'open';
     return room >= headroom ? 'roof' : undefined;
   }
 
@@ -326,7 +382,7 @@ export interface Corridor {
  * beyond 24 out may be unloaded). Sorted: the shortest stretch under the roof first, bearings 45
  * degrees apart at least.
  */
-export function corridorsOf(look: BlockLookup, x: number, z: number, feet: number, maxUnder: number, free = 4): Corridor[] {
+export function corridorsOf(look: BlockLookup, x: number, z: number, feet: number, maxUnder: number, free = 4, sky = false, maxY?: (x: number, z: number) => number | undefined): Corridor[] {
   const solidOr = (cx: number, y: number, cz: number, unknown: boolean): boolean => {
     const b = look(cx, y, cz);
     return b === undefined ? unknown : b.solid;
@@ -353,6 +409,8 @@ export function corridorsOf(look: BlockLookup, x: number, z: number, feet: numbe
           break;
         }
       }
+      // (Track F14: with `sky` the column a corridor ends under is open to the top of what is loaded, not for 20 blocks)
+      if (open && sky && solidOver(look, c.x, c.z, feet + OPEN_SKY + 1, maxY?.(c.x, c.z)) !== undefined) open = false;
       if (open) openAt = s;
       if (open) break;
     }
@@ -650,9 +708,44 @@ export interface WalkFlood {
  * floors and the candidate radius plus FLOOD_BEYOND.
  */
 export function walkFlood(view: ColumnView, goal: { x: number; z: number; feet: number }, radius: number, max = FLOOD_MAX): WalkFlood {
+  const fl = flooder(view, goal, radius + FLOOD_BEYOND, max);
+  fl.advance(Infinity);
+  return fl.result();
+}
+
+/**
+ * Track F14 (docs/flight.md "The way down to the landing"): how far the walk flood of a covered goal goes when open sky
+ * is the sky (`ColumnView.sky`). A cave's mouth is where its walk first comes out under the sky, and that is as far from
+ * a goal deep in it as the cave is long: on the Realm's cave 36 to 100 blocks in the plane (50 to 143 steps of the flood)
+ * from ten goals, eight of them outside the candidate window of 48. So the flood goes on to `reach` blocks each way and
+ * `max` floors, and stops `more` steps past the first floor under the sky (the ground round the mouth: its landing cells);
+ * the open floors it meets outside the candidate window, at most `cells` of them, are candidates like the window's own.
+ * It runs in slices of `slice` floors with the event loop let in between (a flood of 40 000 floors is 0.2 s).
+ */
+export const FLOOD_FAR = Object.freeze({ reach: 128, max: 60_000, more: 24, cells: 64, slice: 2500 });
+
+/** Track F14: the far flood (see FLOOD_FAR): `open` lists the landing cells under the sky (sound, level) it met outside the window of `radius`, nearest by the walk first. */
+export async function walkFloodFar(view: ColumnView, goal: { x: number; z: number; feet: number }, radius: number, headroom: number, yieldNow: () => Promise<void>): Promise<WalkFlood & { open: { x: number; z: number; feet: number; steps: number }[]; /** The steps of the last floor it visited: a floor it did not reach walks at least this far. */ last: number }> {
+  const open: { x: number; z: number; feet: number; steps: number }[] = [];
+  let first: number | undefined;
+  let last = 0;
+  const fl = flooder(view, goal, Math.max(radius + FLOOD_BEYOND, FLOOD_FAR.reach), FLOOD_FAR.max, (x, z, f, s) => {
+    if (view.kindOf(f, headroom) === 'open') {
+      first ??= s;
+      // (a landing cell: sound and level, as the window's own candidates are)
+      if (Math.max(Math.abs(x - goal.x), Math.abs(z - goal.z)) > radius && open.length < FLOOD_FAR.cells && view.sound(x, z, f) && view.level(x, z, f)) open.push({ x, z, feet: f.feet, steps: s });
+    }
+    last = s;
+    return first !== undefined && s > first + FLOOD_FAR.more;
+  });
+  while (!fl.advance(FLOOD_FAR.slice)) await yieldNow();
+  return { ...fl.result(), open, last };
+}
+
+/** The walk flood's loop (walkFlood's, unchanged), in steps: `advance(n)` visits up to n floors more and says whether it is done; `visit` (Track F14) sees each floor as it is visited and may end the flood. */
+function flooder(view: ColumnView, goal: { x: number; z: number; feet: number }, reach: number, max: number, visit?: (x: number, z: number, f: Floor, steps: number) => boolean): { advance(n: number): boolean; result(): WalkFlood } {
   const steps = new Map<number, number>();
   const key = (x: number, z: number, feet: number): number => columnKey(x, z) * 1024 + (feet - view.yBottom);
-  const reach = radius + FLOOD_BEYOND;
   const queue: { x: number; z: number; f: Floor; s: number }[] = [];
   const own = view.floorNear(goal.x, goal.z, goal.feet, 0);
   let entrance: WalkFlood['entrance'];
@@ -660,27 +753,36 @@ export function walkFlood(view: ColumnView, goal: { x: number; z: number; feet: 
     steps.set(key(goal.x, goal.z, own.feet), 0);
     queue.push({ x: goal.x, z: goal.z, f: own, s: 0 });
   }
-  for (let head = 0; head < queue.length && steps.size < max; head++) {
-    const { x, z, f, s } = queue[head]!;
-    if (!entrance && view.kindOf(f, 2) === 'open') entrance = { x, z, feet: f.feet, steps: s };
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
-      const nx = x + dx;
-      const nz = z + dz;
-      if (Math.abs(nx - goal.x) > reach || Math.abs(nz - goal.z) > reach) continue;
-      for (const n of view.floors(nx, nz) ?? []) {
-        const d = n.feet - f.feet;
-        if (d < -1 || d > 3 || n.hazard) continue;
-        // (backwards: the walker goes from n to f) a block up from n wants room to jump there; a drop from n wants f's column free to n's head
-        if (d === -1 && n.ceiling !== undefined && n.ceiling - n.feet < 3) continue;
-        if (d > 0 && f.ceiling !== undefined && f.ceiling < n.feet + 2) continue;
-        const k = key(nx, nz, n.feet);
-        if (steps.has(k)) continue;
-        steps.set(k, s + 1);
-        queue.push({ x: nx, z: nz, f: n, s: s + 1 });
+  let head = 0;
+  let ended = false;
+  const advance = (n: number): boolean => {
+    for (let k0 = 0; k0 < n && !ended && head < queue.length && steps.size < max; k0++, head++) {
+      const { x, z, f, s } = queue[head]!;
+      if (!entrance && view.kindOf(f, 2) === 'open') entrance = { x, z, feet: f.feet, steps: s };
+      if (visit?.(x, z, f, s)) {
+        ended = true;
+        break;
+      }
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+        const nx = x + dx;
+        const nz = z + dz;
+        if (Math.abs(nx - goal.x) > reach || Math.abs(nz - goal.z) > reach) continue;
+        for (const n1 of view.floors(nx, nz) ?? []) {
+          const d = n1.feet - f.feet;
+          if (d < -1 || d > 3 || n1.hazard) continue;
+          // (backwards: the walker goes from n1 to f) a block up from n1 wants room to jump there; a drop from n1 wants f's column free to n1's head
+          if (d === -1 && n1.ceiling !== undefined && n1.ceiling - n1.feet < 3) continue;
+          if (d > 0 && f.ceiling !== undefined && f.ceiling < n1.feet + 2) continue;
+          const k = key(nx, nz, n1.feet);
+          if (steps.has(k)) continue;
+          steps.set(k, s + 1);
+          queue.push({ x: nx, z: nz, f: n1, s: s + 1 });
+        }
       }
     }
-  }
-  return { steps: (x, feet, z) => steps.get(key(x, z, feet)), entrance, floors: steps.size };
+    return ended || head >= queue.length || steps.size >= max;
+  };
+  return { advance, result: () => ({ steps: (x, feet, z) => steps.get(key(x, z, feet)), entrance, floors: steps.size }) };
 }
 
 /** Track L1: approach simulations (each a planner's cold start, about 10 ms) one landing search may run for its open cells. */
@@ -743,6 +845,62 @@ export function approachBearings(target: { x: number; z: number }, from?: { x: n
   return [first, first + 90, first - 90, first + 180].map((b) => ((b % 360) + 360) % 360);
 }
 
+/**
+ * Track F14: approach simulations a search may run with `sky` (LandingOptions.sky). A cell whose approach does not land
+ * costs eight (four bearings, the flare and the brake), so APPROACH_SIMS (24) was spent on three cells; past the budget a
+ * cell was taken with no simulation at all, and on the Realm that cell was the landing in 9 of the 13 flights that ended
+ * off their site on 2026-11-14 (`N approaches not simulated: budget`). With `sky` a cell is never taken unsimulated, so
+ * the budget is what bounds how many cells are tried: twice as many.
+ */
+export const APPROACH_SIMS_SKY = 48;
+
+/**
+ * Track F14: the way in over what stands round a cell (plan.ts landingRim, brain.ts `lookRim`: the landing of Track F11
+ * from the start): a circle round the cell over the highest column within OVER.reach of it, the brake in over that to the
+ * cell's centre, the elevator straight down. Simulated as the flight will fly it: the body on a circle of OVER.circle at
+ * the height that circle is left at (plan.ts wayIn), the brake's planner with the cell under that rim (`rim`, `rimWithin`),
+ * from up to four sides. `downS` is what the way straight down costs a landing in seconds (the elevator sinks 0.15 to
+ * 0.3 a tick: ELEVATOR_S_PER_BLOCK for every block of the rim over the floor).
+ */
+export const ELEVATOR_S_PER_BLOCK = 0.25;
+
+export interface OverSim {
+  ok: boolean;
+  cost: number;
+  downS: number;
+  tried: number;
+  /** Why not, in words (for the search's line). */
+  why: string;
+}
+
+/** Track F14: does the way in over `rim` land on `target`? At most `budget.max` simulations in all. */
+export function overLands(target: LandingTarget, rim: number, obstacle: Obstacle, budget: { sims: number; max: number }): OverSim {
+  const over: LandingTarget = { ...target, rim, rimWithin: rimReach(target) };
+  const y = wayIn(rim, undefined, OVER.circle);
+  let best = { cost: Infinity, kind: 'none' };
+  let tried = 0;
+  for (const bearing of [0, 90, 180, 270]) {
+    if (budget.sims >= budget.max) break;
+    budget.sims++;
+    tried++;
+    const d = yawDir(bearing);
+    // on the circle, flying along it (the tangent, a quarter turn on from the bearing), at the speed a circle that small holds
+    const body: FlightBody = { pos: { x: target.x + d.x * OVER.circle, y, z: target.z + d.z * OVER.circle }, vel: { x: -d.z * 0.65, y: -0.15, z: d.x * 0.65 }, onGround: false, gliding: true, boostTicks: 0 };
+    const c = new BrakePlanner(7, obstacle).step(body, bearing + 90, over);
+    if (c.touchdown.kind === 'landed' && c.cost < CORRIDOR_COST) return { ok: true, cost: c.cost, downS: (rim - target.top) * ELEVATOR_S_PER_BLOCK, tried, why: '' };
+    if (c.cost < best.cost) best = { cost: c.cost, kind: c.touchdown.kind };
+  }
+  return { ok: false, cost: best.cost, downS: 0, tried, why: tried ? `${best.kind} ${best.cost.toFixed(0)}` : 'budget' };
+}
+
+/** Track F14: the column tops the way in over a cell is read from when the caller gives none (LandingDeps.skyTop): the view's highest floor of a column with nothing over it; a column whose top the view cannot see is unknown. */
+export function viewTops(view: ColumnView): (x: number, z: number) => number | undefined {
+  return (x, z) => {
+    const f = view.floors(x, z)?.[0];
+    return f && f.ceiling === undefined ? f.feet - 1 : undefined;
+  };
+}
+
 /** Track L1: a partly loaded window answers the hold's look (`partial`) only with at least this share of it live (else `unknown` at once). */
 export const PARTIAL_MIN_SHARE = 0.5;
 
@@ -776,7 +934,7 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   const gz = Math.floor(goal.z);
   const gy = Math.floor(goal.y);
   if (deps.look(gx, gy, gz) === undefined) return { kind: 'unknown', line: `landing for ${label}: the goal's ground is not loaded yet` };
-  const view = new ColumnView(deps.look, gy);
+  const view = new ColumnView(deps.look, gy, { sky: o.sky === true, ...(deps.maxY ? { maxY: deps.maxY } : {}) });
   // the goal itself: landable under open sky, dry, level (Track F8: not when the caller says it lies under a rim: the floor of a
   // wide pit has sky over it and level neighbours, but the flare's approach along the glide line would meet the pit's wall;
   // the precision landing below comes down inside the rim)
@@ -804,13 +962,22 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   if (partial && (!o.partial || live < columns * PARTIAL_MIN_SHARE)) return { kind: 'unknown', line: `landing for ${label}: only ${live} of ${columns} columns loaded around the goal` };
   // Track L1: a covered goal (a cave, a room, the floor under a rim) ranks its candidates by the walk flood from its own floor
   const covered = own !== undefined && !own.hazard && (underRim || view.kindOf(own, 2) !== 'open');
-  const flood = covered ? walkFlood(view, { x: gx, z: gz, feet: own.feet }, o.radius) : undefined;
+  // (Track F14: with `sky` the flood goes on to the cave's mouth, and the open ground it meets beyond the window is a candidate)
+  const far = covered && o.sky ? await walkFloodFar(view, { x: gx, z: gz, feet: own.feet }, o.radius, o.headroom, yieldNow) : undefined;
+  const flood = far ?? (covered ? walkFlood(view, { x: gx, z: gz, feet: own.feet }, o.radius) : undefined);
   if (flood) await yieldNow();
+  let farCells = 0;
+  for (const p of far?.open ?? []) {
+    const dy = p.feet - goal.y;
+    list.push({ x: p.x, z: p.z, feet: p.feet, kind: 'open', ceiling: undefined, est: Math.hypot(p.x - gx, p.z - gz) + 3 * Math.abs(dy), lb: Math.hypot(p.x - gx, p.z - gz, dy) });
+    farCells++;
+  }
   const rankOf = (c: Candidate): { key: number; lb: number; steps?: number } => {
     const steps = flood?.steps(c.x, c.feet, c.z);
     if (!flood) return { key: c.est, lb: c.lb };
     // (the flood walks 4-way, a path cuts the corners: no walk is shorter than the steps over the square root of 2)
-    return steps === undefined ? { key: c.est + FLOOD_UNREACHED, lb: c.lb } : { key: steps, lb: Math.max(c.lb, steps / Math.SQRT2), steps };
+    // (Track F14: a cell the far flood did not reach walks farther than every floor it visited, if it walks at all)
+    return steps === undefined ? { key: Math.max(c.est, far?.last ?? 0) + FLOOD_UNREACHED, lb: c.lb } : { key: steps, lb: Math.max(c.lb, steps / Math.SQRT2), steps };
   };
   interface Probed {
     c: Candidate;
@@ -849,7 +1016,29 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   // Track L1: open cells whose approach the simulation did not land (the cells round them are skipped too: the same valley)
   const noApproach: Candidate[] = [];
   const nearNoApproach = (c: Candidate): boolean => noApproach.some((n) => Math.abs(n.feet - c.feet) <= 1 && Math.hypot(n.x - c.x, n.z - c.z) <= NO_APPROACH_NEAR);
-  const simBudget = { sims: 0, max: APPROACH_SIMS };
+  const simBudget = { sims: 0, max: o.sky ? APPROACH_SIMS_SKY : APPROACH_SIMS };
+  // Track F14: the open cells whose way down is in over what stands round them (overLands), with what that costs in seconds
+  const overCells = new Map<Candidate, number>();
+  // (the column tops: the view's own floors, which it has read already; the flight's where the view cannot see a top; one
+  // look a column a search: the cells round one candidate are the cells round the next)
+  const topMemo = new Map<number, number | undefined>();
+  const ownTops = viewTops(view);
+  const tops = (x: number, z: number): number | undefined => {
+    const k = columnKey(x, z);
+    if (!topMemo.has(k)) topMemo.set(k, ownTops(x, z) ?? deps.skyTop?.(x, z));
+    return topMemo.get(k);
+  };
+  // Track F14: a cell's rim (plan.ts landingRim), looked up once, and the seconds its way straight down costs
+  const rims = new Map<Candidate, ReturnType<typeof landingRim>>();
+  const rimOf = (c: Candidate): ReturnType<typeof landingRim> => {
+    let r = rims.get(c);
+    if (!r) rims.set(c, (r = landingRim({ x: c.x + 0.5, z: c.z + 0.5, top: c.feet }, tops)));
+    return r;
+  };
+  const downOf = (c: Candidate): number => {
+    const r = o.sky && c.kind === 'open' ? rimOf(c) : undefined;
+    return r?.rim !== undefined ? (r.rim - c.feet) * ELEVATOR_S_PER_BLOCK : 0;
+  };
   let unsimulated = 0;
   let probes = 0;
   let extraProbes = 0;
@@ -893,12 +1082,16 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
     if (alternativesOnly && (extraProbes >= ALT_PROBES || landable.length > ALTERNATIVES)) break;
     if (probes >= o.probes + (alternativesOnly ? ALT_PROBES : 0) || now() - t0 >= o.budgetMs) break;
     if (isDead(c)) continue;
+    // Track F14: a cell whose walk and way straight down together cannot beat the best so far is not probed (the stop rule
+    // above bounds the walk alone, and a best with a long way down would let every cell within that many more seconds of
+    // walk be probed: 16 probes on a built hill where 4 do)
+    if (best && !alternativesOnly && o.sky && e.lb * lbPace + downOf(c) >= best.rankS - Math.max(2 * WALK_S_PER_BLOCK, best.rankS * 0.1)) continue;
     if (alternativesOnly && (c.kind !== 'open' || !apart(c))) continue;
     if (c.kind === 'open' && nearNoApproach(c)) continue;
     let corridor: Corridor | undefined;
     if (c.kind === 'roof' && !e.corridors) {
       if (++roofsLooked > MAX_ROOF_CELLS) continue;
-      const corridors = corridorsOf(deps.look, c.x, c.z, c.feet, o.maxUnder);
+      const corridors = corridorsOf(deps.look, c.x, c.z, c.feet, o.maxUnder, 4, o.sky === true, deps.maxY);
       if (roofsLooked % 16 === 0) await yieldNow();
       if (!corridors.length) continue;
       const extra = roofPenalty(corridors[0]);
@@ -941,21 +1134,34 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
       let simulated = corridor !== undefined;
       if (c.kind === 'open') {
         const t = walkTarget({ ...c, kind: 'open' }, cellsAround(view, c, 'open', walkSlack(r.blocks), o.headroom));
-        const a = approachLands(view, t, approachBearings(t, o.from), deps.obstacle, o.style ?? 'flare', simBudget);
+        // Track F14: a cell with something standing round it is flown in over that and straight down (plan.ts landingRim, the
+        // brain's own rule): that way is what is simulated for it; open ground, and a cell whose way straight down is too
+        // long, by the approach along the ground as before
+        const rim = o.sky ? rimOf(c) : undefined;
+        const ov = rim?.rim !== undefined ? overLands(t, rim.rim, deps.obstacle, simBudget) : undefined;
+        const a: ApproachSim = ov ? { ok: ov.ok, cost: ov.cost, kind: ov.why, tried: ov.tried } : approachLands(view, t, approachBearings(t, o.from), deps.obstacle, o.style ?? 'flare', simBudget);
         sims += a.tried;
         if (a.tried > 0) await yieldNow();
         if (a.tried > 0 && !a.ok) {
           noApproach.push(c);
-          probed.push({ c, result: `${said}, no approach (${a.kind}${Number.isFinite(a.cost) ? ` ${a.cost.toFixed(0)}` : ''})`, blocks: r.blocks, status: 'skip' });
+          probed.push({ c, result: ov ? `${said}, no way in over what stands round it (${ov.why})` : `${said}, no approach (${a.kind}${Number.isFinite(a.cost) ? ` ${a.cost.toFixed(0)}` : ''})`, blocks: r.blocks, status: 'skip' });
+          continue;
+        }
+        // (Track F14: nor is a cell offered because the simulations ran out: its way down is not known)
+        if (o.sky && a.tried === 0) {
+          unsimulated++;
+          probed.push({ c, result: `${said}, not simulated (budget)`, blocks: r.blocks, status: 'skip' });
           continue;
         }
         simulated = a.ok;
         if (!a.ok) unsimulated++;
         if (a.ok && a.style === 'brake') brakeOnly.add(c);
+        if (ov?.ok) overCells.set(c, ov.downS);
       }
       // an overhang landing counts as a little more walk than an open one (the approach is harder), more the deeper under the roof
-      const rankS = walkS + roofPenalty(corridor) * WALK_S_PER_BLOCK;
-      probed.push({ c, result: said, blocks: r.blocks, ...(corridor ? { corridor } : {}), status: 'found' });
+      // (Track F14: and a way in over what stands round the cell as the seconds its way straight down takes)
+      const rankS = walkS + roofPenalty(corridor) * WALK_S_PER_BLOCK + (overCells.get(c) ?? 0);
+      probed.push({ c, result: `${said}${overCells.has(c) ? `, in over what stands round it (${overCells.get(c)!.toFixed(1)} s down)` : ''}`, blocks: r.blocks, ...(corridor ? { corridor } : {}), status: 'found' });
       const l: Landable = { c, walk: r.blocks, walkS, by, rankS, ...(corridor ? { corridor } : {}), simulated };
       // (one per neighbourhood: the cheapest of the cells within ALT_APART of each other)
       const near = landable.filter((x) => !apartOf(x.c, c));
@@ -980,7 +1186,7 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
     .slice(0, 10)
     .map((p) => `${fmtCell(p.c)}${p.c.kind === 'roof' ? `/roof${p.corridor ? ` b${p.corridor.bearing}` : ''}` : ''}:${p.result}`)
     .join(', ');
-  const floodNote = flood ? `, walk flood ${flood.floors} floors${flood.entrance ? ` (open sky ${flood.entrance.steps} steps from the goal at ${fmtCell(flood.entrance)})` : ', no open sky reached'}` : '';
+  const floodNote = flood ? `, walk flood ${flood.floors} floors${flood.entrance ? ` (open sky ${flood.entrance.steps} steps from the goal at ${fmtCell(flood.entrance)}${farCells ? `, ${farCells} cells there beyond the window` : ''})` : ', no open sky reached'}` : '';
   const head = `landing for ${label}: ${list.length} candidates (${roofs} under a roof), ${probes} probes, ${sims} approach sims${unsimulated ? ` (${unsimulated} approach${unsimulated === 1 ? '' : 'es'} not simulated: budget)` : ''}${floodNote}, ${ms} ms${tried ? `: ${tried}` : ''}`;
   // Track L1: a landable cell's target, priced in seconds of walk
   const targetOf = (l: Landable): { cell: LandingCell; walk: number; target: LandingTarget } => {

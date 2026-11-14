@@ -48,11 +48,15 @@ import {
   glideMargin,
   hdist,
   LAND_SWITCH,
+  landingRim,
   onTarget as onTargetCells,
+  OVER,
   pathAhead,
+  RIM_OVER,
   rimReach,
   ROCKET_CRUISE_CLIMB,
   rocketPitchFor,
+  SINK_RATIO,
   SPIRAL_CLEAR,
   spiralFit,
   spiralFloor,
@@ -60,6 +64,7 @@ import {
   SPIRAL_RADII,
   STALL_SPEED,
   takeoffSky,
+  wayIn,
   yawDir,
   turnTowards,
   yawDiff,
@@ -78,7 +83,7 @@ import { DIVE_END_MAX, DIVE_MIN_ABOVE, DIVE_MIN_ABOVE_FORCED, divePhase, divePit
 import type { RouteGrid } from './route/grid.ts'; // Track F3
 import { ROUTE_ENTRY_OUT, ROUTE_ENTRY_UP, ROUTE_HANDOVER, ROUTE_PLAN_NODES, ROUTE_TRACK_MS } from './route/landing.ts'; // Track F3
 import { RouteTracker, type Planner } from './route/tracker.ts'; // Track F3
-import { decideGoAround, SINK_S_PER_BLOCK, WALK_S_PER_BLOCK, walkSeconds, type LandingOffer, type MissKind } from './landprice.ts'; // Track L1
+import { decideGoAround, GOAROUND_P_OVER, SINK_S_PER_BLOCK, WALK_S_PER_BLOCK, walkSeconds, type LandingOffer, type MissKind } from './landprice.ts'; // Track L1; Track F14: GOAROUND_P_OVER
 import type { RouteGoal } from './route/types.ts'; // Track F3
 import { gainPitch, wholeGain, type BurnRange } from './burn.ts'; // Track F10
 import { GuideFollower } from './learn/follow.ts'; // Track F9b
@@ -254,6 +259,17 @@ export interface BrainOptions {
    * elevator down (`leftOver`). False: the circle down to 10 under its exit height whatever stands there, as before.
    */
   landOver?: boolean;
+  /**
+   * Track F14 (docs/flight.md "The way down to the landing"; decisions/0085; the setting `flyWayDown`, default off): a
+   * landing with something standing round it (plan.ts landingRim: a column within 14 blocks more than 2 over its floor)
+   * is flown in over that and straight down from the start: it gets that column's height as its rim as soon as the
+   * columns round it are known (`lookRim`), so the cruise, the descent circle and a go-around stay over it, the brake
+   * comes in over it to the landing's centre and the elevator sinks onto the floor (Track F11's landing, without a
+   * descent circle having to meet a roof first). And a missed approach whose best plan met a wall farther out gets
+   * the rim of the columns out to that wall before it goes round (`lookRim` with the miss's reach). A circle round
+   * the landing is flown down steeply while it is far over its end (RIM_CIRCLE). Needs `landOver`. False: as before.
+   */
+  wayDown?: boolean;
 }
 
 /**
@@ -367,6 +383,8 @@ export interface FlightStats {
   goAroundReasons: string[];
   /** Track L1: each missed approach's price line (landing now against the go-around, landprice.ts). */
   landingPrices: string[];
+  /** Track F14: rims given to this flight's landings (brain.ts lookRim). */
+  rims?: number;
   /** Track BH, a ledge takeoff: ticks of the walk to the edge, and the height the fall took until the glide flew (LEDGE_SPEED). */
   ledgeWalkTicks?: number;
   ledgeDrop?: number;
@@ -403,6 +421,14 @@ export interface FlightStats {
   entry?: { name: string; /** Track F9e round 2: what the log calls it: a learned entry, a drawn one (guide.ts entrySaid). */ said?: string; joins: number; misses: number; committedAt?: number; end?: 'landed' | 'lost' | 'fallback'; why?: string; ticks?: number; roofTicks?: number; maxError?: number; taps?: number };
 }
 
+/** Track F14: the columns round a landing are looked at for its rim every this many ticks until all of them are known (brain.ts lookRim). */
+export const RIM_LOOK_EVERY = 4;
+/** Track F14: ... from this far out (the descent geometry begins inside it: APPROACH_DISTANCE + 60; the columns round a landing are live well before). */
+export const RIM_LOOK_WITHIN = APPROACH_DISTANCE + 80;
+/** Track F14: a body this much over the height the brake needs on its way in (the rim, RIM_OVER and what a level glide sinks: SINK_RATIO a block out) comes in over a rim given at a missed approach without a go-around. */
+export const RIM_IN_SPARE = 1;
+/** Track F14: the descent circle round the landing, while the body is more than `over` over the height the circle is left at the latest: the look this far down, level again over `fast` (blocks a tick). */
+export const RIM_CIRCLE = Object.freeze({ over: 12, pitch: 25, fast: 1.2 });
 /** Track F3: the route tracker gets this many ticks for a landing before the brain goes around (a hover that never comes down). */
 export const ROUTE_MAX_TICKS = 400;
 /** Track F3: the route takeoff gets this many ticks to reach its exit before the climb takes over anyway. */
@@ -599,6 +625,8 @@ type Descent =
       /** Track F11: what stands under the circle and inside it (plan.ts spiralTops), and the height the circle is left at the latest for it (spiralFloor); no floor: its own rule alone (10 under the exit). */
       tops?: SpiralTops;
       floor?: number;
+      /** Track F14: a circle round the landing itself, with `flyWayDown`: far over the height it is left at it is flown down steeply (RIM_CIRCLE). */
+      steep?: boolean;
     }
   | { kind: 'sturn'; side: 1 | -1; anchor: { x: number; z: number }; exitY: number };
 
@@ -612,7 +640,7 @@ export class FlightBrain {
   // (entryAbove is set by the cruise when it hands over to the approach)
   /** Why the flight is ending early (set by `landNow`), kept for the outcome. */
   private endReason: FlightEndReason | undefined;
-  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise' | 'route' | 'routeTakeoff' | 'entrySneak' | 'burn'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral'; entryTries: number; landOver: boolean };
+  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise' | 'route' | 'routeTakeoff' | 'entrySneak' | 'burn'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral'; entryTries: number; landOver: boolean; wayDown: boolean };
   /** Track F9c: the flier of a learned entry (from the hand-over on the lead-in), the windows missed so far, and what the live world said of the proof (`confirmEntry`; undefined: nothing yet). */
   private flier: EntryFlier | undefined;
   private entryMisses = 0;
@@ -737,6 +765,8 @@ export class FlightBrain {
       burn: opts.burn,
       // (Track F11: not with `flyLandStyle flare`: what the circle is left for is the brake's landing)
       landOver: opts.landOver !== false && (opts.landStyle ?? 'auto') !== 'flare',
+      // (Track F14: the way in over a rim is Track F11's landing: not without it)
+      wayDown: opts.wayDown === true && opts.landOver !== false && (opts.landStyle ?? 'auto') !== 'flare',
     };
     this.planner = new ApproachPlanner(opts.seed ?? 12345, opts.obstacle);
     this.brakePlanner = new BrakePlanner(((opts.seed ?? 12345) * 7 + 3) >>> 0, opts.obstacle);
@@ -752,6 +782,67 @@ export class FlightBrain {
 
   /** Track F1: ticks without a landing plan (the family flown, or the better of the two while both are planned). */
   private missingNow = 0;
+
+  /** Track F14: the target whose rim was last looked for (`lookRim`: once the columns round it are known), the tick of the last look, and the target a rim was given to (its go-around's chance is GOAROUND_P_OVER). */
+  private rimSeen: LandingTarget | undefined;
+  private rimLookAt = -100;
+  private rimGiven: LandingTarget | undefined;
+
+  /**
+   * Track F14 (docs/flight.md "The way down to the landing"): the landing's rim. A landing that is no corridor's, no
+   * route's and no entry's, and has no rim of its own, is looked at once the columns within OVER.reach of it are known
+   * (every RIM_LOOK_EVERY ticks until then): where one of them stands more than OVER.min over its floor, the highest is
+   * its rim from here on (plan.ts landingRim), and with it the rules a shaft's floor has had since Track F1: the glide
+   * line, the descent circle and a go-around are flown over the rim, the landing family is the brake / elevator's alone,
+   * and under the rim the body is only over the landing's own cells (`rimWithin`, Track F11). `reach`: the columns out to
+   * there (a missed approach's wall). True when a rim was given now.
+   */
+  private lookRim(b: FlightBody, reach: number = OVER.reach, said?: string): boolean {
+    const t = this.target;
+    const skyTop = this.o.skyTop;
+    if (!this.o.wayDown || !skyTop || t.hold || t.bearing !== undefined || t.route !== undefined || t.entry !== undefined || t.rim !== undefined) return false;
+    if (reach === OVER.reach && (this.rimSeen === t || this.stats.ticks - this.rimLookAt < RIM_LOOK_EVERY)) return false;
+    this.rimLookAt = this.stats.ticks;
+    const r = landingRim(t, skyTop, reach);
+    if (r.why === 'unknown') return false;
+    this.rimSeen = t;
+    if (r.rim === undefined) return false;
+    const next: LandingTarget = { ...t, rim: r.rim, rimWithin: rimReach(t) };
+    this.target = next;
+    this.rimSeen = next;
+    this.rimGiven = next;
+    this.targetWhy = 'the same landing, flown in over what stands round it';
+    this.stats.rims = (this.stats.rims ?? 0) + 1;
+    this.descent = undefined;
+    this.descentNone = false;
+    this.goaroundY = undefined;
+    this.walled = undefined;
+    this.resetPlanners();
+    this.o.note?.(`way down: ${said ? `${said}: ` : ''}what stands within ${Math.round(reach)} blocks of the landing reaches ${(r.rim - t.top).toFixed(0)} over its floor: in over that (the brake over the landing's centre), then straight down onto the floor; ${(b.pos.y - t.top).toFixed(0)} over the floor now, ${hdist(b.pos, t).toFixed(0)} out`);
+    return true;
+  }
+
+  /**
+   * Track F14: why no flight comes down onto the target from where it is, in words, for the line of a flight that takes
+   * the nearest safe ground instead (the priced landing, no go-around left): a roof over the landing itself (the Realm,
+   * 2026-11-14: nine flights were sent to floors of caverns, 21 or 22 blocks of room over them and 20 to 53 of ground
+   * over that), or what stands round it too high to sink down from. Undefined: neither (the plans' own words say the rest).
+   */
+  private whyNoWay(t: LandingTarget): string | undefined {
+    const skyTop = this.o.skyTop;
+    if (!skyTop || t.hold || t.route !== undefined || t.entry !== undefined) return undefined;
+    const r = landingRim(t, skyTop);
+    if (r.why === 'roof') {
+      // the lowest block over the landing's centre: the roof's underside
+      let under: number | undefined;
+      const cx = Math.floor(t.x);
+      const cz = Math.floor(t.z);
+      for (let y = Math.floor(t.top) + 1; y <= Math.floor(t.top) + r.over && under === undefined; y++) if (this.o.obstacle?.(cx, y, cz)) under = y - t.top;
+      return `the landing lies under a roof${under !== undefined ? ` ${under.toFixed(0)} over its floor` : ''}, the ground over it reaches ${r.over.toFixed(0)} over that floor: no flight comes down onto it${t.bearing === undefined ? ' (a landing needs the open sky over it, or a way in from the side)' : ' but along its corridor'}`;
+    }
+    if (r.why === 'high') return `what stands within ${OVER.reach} blocks of the landing reaches ${r.over.toFixed(0)} over its floor: the way straight down onto it would be that long (${OVER.max} at the most)`;
+    return undefined;
+  }
 
   /**
    * Track F1, the landing family this tick (`landStyle`): `flare` and `brake` plan only their own; `auto`
@@ -1018,7 +1109,8 @@ export class FlightBrain {
     const off = hdist(b.pos, t);
     // (Track F3: a precision target with its floor's cells, landed by a route anywhere in them, is on target in any of them)
     const onTarget = (off <= t.half + 0.5 || (t.precise === true && t.cells !== undefined && onTargetCells(t, b.pos))) && Math.abs(b.pos.y - t.top) < 1.2;
-    if (this.endReason) return { ok: false, reason: this.endReason, landedAt: { ...b.pos }, off, onTarget };
+    // (Track F14: a landing given up for the nearest safe ground says why no flight came down onto it, where the world says so)
+    if (this.endReason) return { ok: false, reason: this.endReason, landedAt: { ...b.pos }, off, onTarget, ...(this.noWay && this.endReason === 'landed_off' ? { why: this.noWay } : {}) };
     if (onTarget) return { ok: true, landedAt: { ...b.pos }, off, onTarget };
     // (Track F11: the flight stands off its landing and nothing ended it: where the glide ended, on what, what it needed)
     if (was !== undefined) this.offWhy = this.whyOff(b, t, was);
@@ -1027,6 +1119,8 @@ export class FlightBrain {
 
   /** Track F11: the line of a flight that stands off its landing (kept: the outcome is asked again each settling tick). */
   private offWhy: string | undefined;
+  /** Track F14: why no flight came down onto the landing a priced or a forced landing gave up (`whyNoWay`). */
+  private noWay: string | undefined;
 
   /**
    * Track F11: a flight that stands off its landing with no reason of its own: the glide ended on contact (the server ends
@@ -1466,6 +1560,8 @@ export class FlightBrain {
     const dTarget = hdist(b.pos, this.target);
     // Track BF: not landable yet: hold high over it until the trip retargets (the goal's chunks, the probes)
     if (this.target.hold && dTarget <= APPROACH_DISTANCE + 60) return this.hold(i, ctl);
+    // Track F14: near the landing: what stands round it is its rim from here on (the columns are known by now)
+    if (this.o.wayDown && dTarget <= RIM_LOOK_WITHIN && !this.dive) this.lookRim(b);
     // Track BL: the dive descent being flown (hands over to the approach, or aborts back into the cruise)
     if (this.dive) {
       if (this.flyDive(i, ctl)) return ctl;
@@ -2146,6 +2242,12 @@ export class FlightBrain {
     }
     // the emergency descent sinks a little faster (pitch 15: about 0.25 blocks a tick) than the cruise's (8)
     ctl.pitch = h > 1.4 ? 0 : h < STALL_SPEED + 0.1 ? 20 : this.phase === 'land' ? 15 : 8;
+    // Track F14: a circle round the landing begins as high as the flight arrived (a hold over a goal under a mountain: 60 to
+    // 100 over the landing's floor), and every column under it is lower than where it ends. More than RIM_CIRCLE.over
+    // over the height it is left at the latest it is flown at RIM_CIRCLE.pitch, no faster than RIM_CIRCLE.fast (the
+    // look's fall is 0.275 a tick at 25 against 0.16 at 8); the last blocks as every circle, so that it is left at the
+    // circle's own speed
+    if (dsc.kind === 'spiral' && dsc.steep && b.pos.y > low + RIM_CIRCLE.over && h >= STALL_SPEED + 0.1) ctl.pitch = h > RIM_CIRCLE.fast ? 0 : RIM_CIRCLE.pitch;
     // Track F4a: a circle tangent to the approach line bleeds its speed to CIRCLE_SPEED for its leave (pitch 8 took the
     // body to 1.2 to 1.3 in the lap, over the leave's 1.15)
     if (dsc.kind === 'spiral' && dsc.exitAt && h > CIRCLE_SPEED && h <= 1.4 && this.phase !== 'land') ctl.pitch = -5;
@@ -2176,6 +2278,9 @@ export class FlightBrain {
     const next: LandingTarget = { ...aim, rim: Math.max(top, aim.rim ?? -Infinity), rimWithin: rimReach(aim) };
     if (aim === this.emergency) this.emergency = next;
     else if (aim === this.target) {
+      // (Track F14: a landing whose rim was given before the circle stays that landing: looked at, and its go-around's chance)
+      if (this.rimSeen === aim) this.rimSeen = next;
+      if (this.rimGiven === aim) this.rimGiven = next;
       this.target = next;
       this.targetWhy = 'the same landing, flown in over what stands round it';
     }
@@ -2213,13 +2318,18 @@ export class FlightBrain {
       // around the aim: the largest circle that fits, turned the way the heading already points
       const exit0 = exitAt(APPROACH_DISTANCE);
       if (b.pos.y > exit0 && !corridor) {
-        const fit = spiralFit(aim, Math.min(b.pos.y, exit0) - 3, skyTop);
-        if (fit) {
+        const fit0 = spiralFit(aim, Math.min(b.pos.y, exit0) - 3, skyTop);
+        if (fit0) {
+          // Track F14: a landing with a rim given to it: the circle its way in was simulated from (OVER.circle at the widest),
+          // left no lower than that way in needs (plan.ts wayIn)
+          const given = this.o.wayDown && aim.rim !== undefined && aim.rimWithin !== undefined;
+          const fit: SpiralFit = given && fit0.radius > OVER.circle ? { centre: fit0.centre, radius: OVER.circle } : fit0;
           const dir: 1 | -1 = Math.abs(yawDiff(heading, tangent(fit.centre, b.pos, 1))) <= Math.abs(yawDiff(heading, tangent(fit.centre, b.pos, -1))) ? 1 : -1;
           // Track F11: the height it is left at for what stands under it and between it and the aim (plan.ts SPIRAL_CLEAR)
           const tops = LAND_SWITCH.clear && this.o.landOver ? spiralTops(fit, skyTop) : undefined;
-          const floor = tops ? spiralFloor(tops, fit.radius, true, entryTop(aim)) : undefined;
-          return { kind: 'spiral', fit, dir, exitY: exit0, ...(tops ? { tops } : {}), ...(floor !== undefined ? { floor } : {}) };
+          const floor0 = tops ? spiralFloor(tops, fit.radius, true, entryTop(aim)) : undefined;
+          const floor = given ? Math.max(floor0 ?? -Infinity, wayIn(entryTop(aim), tops ? Math.max(tops.ring ?? -Infinity, tops.top ?? -Infinity) : undefined, fit.radius)) : floor0;
+          return { kind: 'spiral', fit, dir, exitY: exit0, ...(tops ? { tops } : {}), ...(floor !== undefined ? { floor } : {}), ...(this.o.wayDown ? { steep: true } : {}) };
         }
       }
       // farther out: a circle tangent to the approach line at `out`, its centre a radius to one side
@@ -2251,7 +2361,8 @@ export class FlightBrain {
     return { kind: 'sturn', side: 1, anchor: { x: b.pos.x, z: b.pos.z }, exitY };
   }
 
-  private approach(i: BrainInput, ctl: BrainControl, aim: LandingTarget): BrainControl {
+  private approach(i: BrainInput, ctl: BrainControl, aim0: LandingTarget): BrainControl {
+    let aim = aim0;
     const b = i.body;
     ctl.glide = true;
     this.stats.approachTicks++;
@@ -2265,6 +2376,8 @@ export class FlightBrain {
     if (this.phase === 'land' && (this.descent || (b.pos.y - (entryTop(aim) + APPROACH_HEIGHT) > SPIRAL_ABOVE && !this.descentNone)) && hdist(b.pos, aim) < 40) {
       if (this.descend(i, ctl, aim)) return ctl;
     }
+    // Track F14: a flight that came straight into the approach (a short one, a bounce): the landing's rim, as the cruise looks for it
+    if (this.phase === 'approach' && aim === this.target && this.lookRim(b)) aim = this.target;
     ctl.yaw = approachYaw(i.yaw, b.pos, aim);
     if (b.boostTicks > 0) {
       ctl.pitch = -25;
@@ -2293,12 +2406,26 @@ export class FlightBrain {
           : `hard touchdown ahead (cost ${choice.cost.toFixed(0)}: vy ${td.vel.y.toFixed(2)}, h ${Math.hypot(td.vel.x, td.vel.z).toFixed(2)}, ${td.off.toFixed(1)} from the centre)`;
       const line = `${why} at ${d.toFixed(0)} blocks out, ${(b.pos.y - aim.top).toFixed(0)} above, ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} blocks a tick${aim.walk ? `, a walk landing of ${aim.cells?.size ?? 0} cells` : `, half ${aim.half}`}`;
       this.stats.goAroundReasons.push(line);
+      // Track F14: a plan that met a wall (or none at all) on the way to a landing with no rim: what stands between is the
+      // landing's rim from here on, out to that wall. A body high enough comes in over it at once; else the go-around is
+      // flown over it (its height is measured from the rim) and the body comes back in over it
+      if ((td.kind === 'wall' || td.kind === 'none') && aim === this.target && this.lookRim(b, Math.min(OVER.far, Math.max(OVER.reach, td.off + 4)), `no approach along the ground (${choice.style} ${td.kind} ${td.off.toFixed(0)} from the centre)`)) {
+        const t = this.target;
+        if (b.pos.y >= t.rim! + RIM_OVER + SINK_RATIO * d + RIM_IN_SPARE) {
+          if (b.pos.y - (entryTop(t) + APPROACH_HEIGHT) > SPIRAL_ABOVE) {
+            this.phase = 'cruise';
+            return this.cruise(i, ctl);
+          }
+          return this.approach(i, ctl, t);
+        }
+      }
       // Track L1 (docs/flight.md "Landing by time"): a walk landing prices the go-around against landing now nearby
       const canGoAround = this.stats.goArounds < this.o.goArounds && i.rockets > 0;
       if (canGoAround && this.target.walkS !== undefined) {
         const kind: MissKind = td.kind;
         const offers = this.landingOffers(b);
-        const ans = decideGoAround({ kind, ...(this.lastMiss !== undefined ? { previous: this.lastMiss } : {}), targetWalkS: this.target.walkS, offers: offers.map((o) => o.offer), canGoAround });
+        // (Track F14: a landing with a rim given to it is come back to over what stands round it: that go-around's own chance)
+        const ans = decideGoAround({ kind, ...(this.lastMiss !== undefined ? { previous: this.lastMiss } : {}), targetWalkS: this.target.walkS, offers: offers.map((o) => o.offer), canGoAround, ...(this.rimGiven === this.target ? { chance: GOAROUND_P_OVER } : {}) });
         this.stats.landingPrices.push(ans.line);
         this.o.note?.(`landing price: ${ans.line}`);
         this.lastMiss = kind;
@@ -2309,7 +2436,9 @@ export class FlightBrain {
             this.switchTarget(pick.alternative);
             return this.cruise(i, ctl);
           }
-          this.o.note?.(`land now: the nearest safe ground instead of a go-around; ${line}`);
+          // (Track F14: and why no flight comes down onto the landing, where the world says so)
+          this.noWay = this.whyNoWay(this.target);
+          this.o.note?.(`land now: the nearest safe ground instead of a go-around; ${line}${this.noWay ? `; ${this.noWay}` : ''}`);
           this.landNow('landed_off', b);
           return this.approach(i, ctl, this.aim);
         }
@@ -2341,7 +2470,8 @@ export class FlightBrain {
         return this.cruise(i, ctl);
       }
       // no go-around left: land on the nearest safe ground instead and report
-      this.o.note?.(`no go-around left (${this.stats.goArounds} flown, ${i.rockets} rockets): the nearest safe ground; ${line}`);
+      this.noWay = this.whyNoWay(this.target);
+      this.o.note?.(`no go-around left (${this.stats.goArounds} flown, ${i.rockets} rockets): the nearest safe ground; ${line}${this.noWay ? `; ${this.noWay}` : ''}`);
       this.landNow(this.stats.goArounds >= this.o.goArounds ? 'landed_off' : 'no_rockets', b);
       return this.approach(i, ctl, this.aim);
     }

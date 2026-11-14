@@ -195,6 +195,7 @@ export async function startFlyBot(prefix: string, options: Partial<CommonTaskOpt
   const common: CommonTaskOptions = { nudgeIntervalS: 240, heartbeat: false, home: undefined, shelter: undefined, walk: true, respawnDelayMs: 1000, ...options };
   const settings = extra.settings ?? new RuntimeSettings();
   if (KIT_BURN) settings.set('flyKitBurn', true); // Track F10
+  if (WAY_DOWN) settings.set('flyWayDown', true); // Track F14
   const logs: string[] = [];
   const ref: { task?: WalkingTask } = {};
   const built = buildTaskContext({
@@ -311,6 +312,8 @@ export const CRAFTED_ROCKETS = process.env.FLY_ROCKETS === 'crafted';
  * burn of the rockets in its hotbar; with the script API's plain rockets that changes nothing). Default off, as the setting.
  */
 export const KIT_BURN = process.env.FLY_KIT_BURN === '1';
+/** Track F14: FLY_WAY_DOWN=1 flies every suite of this harness with `flyWayDown` on (off by default, as the bot's). */
+export const WAY_DOWN = process.env.FLY_WAY_DOWN === '1';
 
 /** At least `n` crafted rockets (a recipe makes 3) into the inventory; they land in the first free slot (the hotbar's first when it is empty). */
 export async function craftRockets(bot: FlyBot, n: number): Promise<void> {

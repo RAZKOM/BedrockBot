@@ -81,10 +81,23 @@ export const GOAROUND_P_REPEAT = 0.02;
 /** ... after one that failed another way: half the first chance (0 of 19 landed). */
 export const GOAROUND_P_OTHER = 0.5;
 
-/** The chance the next approach lands after a go-around for a miss of `kind`, the go-around before (if any) having failed as `previous`. */
-export function goAroundChance(kind: MissKind, previous?: MissKind): number {
-  if (previous === undefined) return GOAROUND_P[kind];
-  return previous === kind ? GOAROUND_P_REPEAT : GOAROUND_P[kind] * GOAROUND_P_OTHER;
+/**
+ * Track F14 (docs/flight.md "The way down to the landing"): the chance that the approach after a go-around lands when the
+ * landing has a rim that was given to it (brain.ts lookRim: the go-around is flown over what stands round the landing and
+ * the body comes back in over it, the brake over the centre and the elevator down). GOAROUND_P was measured on go-arounds
+ * that came back along the ground into what the first approach had met. Offline on a real place (the brain on stepBody
+ * over the world cache's extract, `scripts/land-flank-probe.ts`, 2026-11-14), on an earlier state of the track whose
+ * circle was left too low for the way in: 14 flights missed over a given rim and went round, 14 landed on the landing
+ * they went round for. With the circle left where the way in begins no first approach missed (240 flights), nor did
+ * one on the test server: the final tree has no count of its own.
+ */
+export const GOAROUND_P_OVER = 0.9;
+
+/** The chance the next approach lands after a go-around for a miss of `kind`, the go-around before (if any) having failed as `previous`; `first` (Track F14): the chance of a first go-around where it is not GOAROUND_P's. */
+export function goAroundChance(kind: MissKind, previous?: MissKind, first?: number): number {
+  const p = first ?? GOAROUND_P[kind];
+  if (previous === undefined) return p;
+  return previous === kind ? GOAROUND_P_REPEAT : p * GOAROUND_P_OTHER;
 }
 
 /** A walk to the goal as the price sees it: blocks, and whether a probe confirmed them. */
@@ -174,6 +187,8 @@ export interface GoAroundQuestion {
   offers: readonly LandingOffer[];
   /** A go-around is possible at all (one left, a rocket at hand). */
   canGoAround: boolean;
+  /** Track F14: the chance a first go-around lands where it is not GOAROUND_P's (a landing flown back in over its rim: GOAROUND_P_OVER). */
+  chance?: number;
 }
 
 export interface GoAroundAnswer {
@@ -192,7 +207,7 @@ const s1 = (v: number): string => (Number.isFinite(v) ? v.toFixed(1) : 'inf');
  * With nothing to land on now a go-around is flown while one is left (the old rule).
  */
 export function decideGoAround(q: GoAroundQuestion): GoAroundAnswer {
-  const p = goAroundChance(q.kind, q.previous);
+  const p = goAroundChance(q.kind, q.previous, q.chance);
   let best = -1;
   let bestS = Infinity;
   q.offers.forEach((o, i) => {

@@ -233,6 +233,19 @@ export class ChunkStore {
     return l.stateAt(localIndex(x, y, z));
   }
 
+  /**
+   * Track F14 (the landing search's look for a roof: skills/fly/landing.ts solidOver): the highest y of column (x, z)
+   * that may hold a block: the top of its highest section that is not known to be all air. Every cell over it is air;
+   * undefined when the column is not loaded. (Every cell over a loaded column answers "air", so a look up a column to
+   * the world's top is up to 300 reads, and the search does it for every column of its window with an open floor.)
+   */
+  topY(x: number, z: number): number | undefined {
+    const col = this.columns.get(key(x >> 4, z >> 4));
+    if (!col?.loaded) return undefined;
+    for (let i = col.sections.length - 1; i >= 0; i--) if (col.sections[i] !== null) return (col.minCY + i) * 16 + 15;
+    return col.minCY * 16 - 1;
+  }
+
   /** Wire runtime id at a position (for unknown blocks), or undefined when not loaded. */
   runtimeIdAt(x: number, y: number, z: number, layer = 0): number | undefined {
     const col = this.columns.get(key(x >> 4, z >> 4));

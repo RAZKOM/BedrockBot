@@ -5,7 +5,7 @@
 //
 //   node scripts/land-site-probe.ts [--fixture <dir>] [--headings realm|compass|a,b,c] [--kit plain,crafted] [--model plain,kit]
 //        [--n 2] [--dist 170] [--above 72,77,82] [--hold 20,40] [--no-hold] [--old] [--trace <flight>] [--quiet] [--search]
-//        [--sites 24] [--time]
+//        [--sites 24] [--time] [--way-down]
 //
 // The fixture (private, git-ignored: bot/fixtures-private/<name>, or LAND_SITE_FIXTURE_DIR): `extract.json`, and
 // `site.json` with the goal's feet cell, the landing cell the live search chose there (`site`, with its walk in blocks and
@@ -21,6 +21,7 @@
 // the landing search itself is run on the extract (the walk priced by a flood, no navigator) and its answer flown instead
 // of the fixture's site. `--sites n`: n other open cells of the place as the landing, one after the other (every k-th of
 // the search's candidates round the goal, each with the cells round it; no approach simulation chooses among them).
+// `--way-down` (Track F14): the flights with `flyWayDown` on (the landing's rim given before the descent).
 // `--time`: the wall clock a tick took (the brain's step and the body's), mean and longest. A flight's damage is what the
 // server would count (physics.ts wallImpactDamage, glideFallStep). One line a flight; the last line of a block counts them.
 import { existsSync, readFileSync } from 'node:fs';
@@ -227,7 +228,7 @@ async function fly(label: string, heading: number, above: number, hold: number |
     { world: query, groundAt, skyTop: (x, z) => skyTop(x, z), terrain },
     start,
     hold === undefined ? site : held,
-    { cruiseY: start.y, margin: 15, clearance: 12, goArounds: 4, descent: 'auto', landStyle: 'auto', seed, ...(model ? { burn: model } : {}), note: (m: string) => notes.push(m) },
+    { cruiseY: start.y, margin: 15, clearance: 12, goArounds: 4, descent: 'auto', landStyle: 'auto', seed, ...(model ? { burn: model } : {}), ...(has('way-down') ? { wayDown: true } : {}), note: (m: string) => notes.push(m) },
     {
       rockets: 40,
       yaw: heading,

@@ -74,13 +74,15 @@ export interface TripOptions {
   routeTakeoff?: BrainOptions['routeTakeoff'];
   takeoffYaw?: number;
   rockets?: number;
+  /** Track F14: the way down (flyWayDown). */
+  wayDown?: boolean;
 }
 
 /** The brain flying a whole trip on stepBody to `target` (the offline simulator; fly.test.ts flyTrip generalised). */
 export function trip(w: ReturnType<typeof world>, start: { x: number; y: number; z: number }, target: LandingTarget, o: TripOptions = {}) {
   const notes: string[] = [];
   const cz = cruiseHeight(start, target, w.skyTop, {});
-  const brain = new FlightBrain(target, { cruiseY: cz.y, groundAt: (x, z, fromY) => w.dryGround(x, z, fromY), skyTop: w.skyTop, obstacle: (x, y, z) => w.solid.solidAt(x, y, z) === true, seed: o.seed ?? 5, note: (m) => notes.push(m), ...(o.landStyle ? { landStyle: o.landStyle } : {}), ...(o.route ? { route: o.route } : {}), ...(o.routeTakeoff ? { routeTakeoff: o.routeTakeoff } : {}), ...(o.takeoffYaw !== undefined ? { takeoffYaw: o.takeoffYaw } : {}) });
+  const brain = new FlightBrain(target, { cruiseY: cz.y, groundAt: (x, z, fromY) => w.dryGround(x, z, fromY), skyTop: w.skyTop, obstacle: (x, y, z) => w.solid.solidAt(x, y, z) === true, seed: o.seed ?? 5, note: (m) => notes.push(m), ...(o.landStyle ? { landStyle: o.landStyle } : {}), ...(o.route ? { route: o.route } : {}), ...(o.routeTakeoff ? { routeTakeoff: o.routeTakeoff } : {}), ...(o.takeoffYaw !== undefined ? { takeoffYaw: o.takeoffYaw } : {}), ...(o.wayDown ? { wayDown: true } : {}) });
   let body = initialBody(start, true);
   let cmd = { ...IDLE_COMMAND };
   const rockets0 = o.rockets ?? 64;

@@ -286,6 +286,17 @@ describe('BlockUpdates', () => {
     expect(n).toBe(3); // layer-1 changes do not fire onBlockUpdate
   });
 
+  it('topY: the top of the highest section that is not all air, and it follows a block set over it; undefined for a column that is not loaded (Track F14)', () => {
+    const h = loaded();
+    // the flat column: its one section with blocks is y -64 .. -49; the section over it came as all air
+    expect(h.world.chunks.topY(1, 1)).toBe(-49);
+    expect(h.world.blockAt({ x: 1, y: -48, z: 1 })?.name).toBe('air');
+    // a block set in the all-air section 1 (y -48 .. -33) allocates it
+    h.src.emit('update_block', { position: { x: 3, y: -40, z: 4 }, block_runtime_id: STONE, flags: {}, layer: 0 });
+    expect(h.world.chunks.topY(1, 1)).toBe(-33);
+    expect(h.world.chunks.topY(4000, 4000)).toBeUndefined();
+  });
+
   it('ignores updates for columns or sections it does not hold', () => {
     const h = setup();
     h.src.emit('level_chunk', levelChunk(0, 0));

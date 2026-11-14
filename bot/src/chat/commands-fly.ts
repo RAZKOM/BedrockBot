@@ -319,6 +319,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         ...(probe ? { probe } : {}),
         dryGround: (x, z) => landable(x, z, undefined, d.settings.get('flyLandOver') === true),
         yieldNow: () => new Promise((r) => setImmediate(r)),
+        // Track F14: the flight's own column tops, for the rim of a cell with something standing round it
+        ...(d.settings.get('flyWayDown') === true ? { skyTop: (x: number, z: number) => skyTop(x, z), maxY: (x: number, z: number) => (world.chunks as Partial<typeof world.chunks> | undefined)?.topY?.(x, z) } : {}),
         // Track F3: the route planner for a precision goal the brake cannot land (a slot 2 high, a hole, a 1 x 1 shaft)
         ...(routeOn() ? { route: { grid: routeGrid, plan: routePlanner, rockets: Math.min(4, Math.max(2, readKit(inv, memory()).rocketsHotbar)), ...(openBurn() ? { kit: openBurn()! } : {}) } } : {}),
       },
@@ -333,6 +335,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         ...(position() ? { from: position()! } : {}), // Track F3: a route landing comes in from the body's side
         ...(hint?.rim !== undefined ? { rim: hint.rim } : {}), // Track F8: the opening's rim over a corridor's landing cell
         ...(hint?.partial ? { partial: true } : {}), // Track L1: the hold's look answers from the loaded part
+        ...(d.settings.get('flyWayDown') === true ? { sky: true } : {}), // Track F14: open sky is the sky, a way down to every cell, a cave's mouth however far
       },
     );
     log.info(`fly: ${plan.line}`);
