@@ -543,3 +543,13 @@ portal; the other was open air over a lone block left in a dug-out pit.
 68. **Left as they are.** A near end whose searches are all cut by their budget answers in about 15 s on this PC's
     test server, not in a few seconds. A far goal truly cut off keeps its whole ladder. `!home go`, the older `!goto`
     handler and the flight's walks pass no `beside`. `commands-portal.ts` still says `in the the_end` in its own lines.
+69. **On the Realm** (2026-11-14, deployed; six `!test goto` trips, no damage). The portal's cell: decided before the
+    first plan, 1 plan, the answer 2.8 s after the walk began with the note (1.42 blocks off); the trip 31 s against
+    95 s. The cell over the lone block in the pit: every search was cut, so the slow rule of decision 63 ran, and the
+    answer came 15 s after the last move (44 s before): an arrival with the note 3.35 blocks off (`the rest needs a
+    block placed`), the eye within 3.9, where the walk had stood 6 off and said `unreachable`. R7's air cell, two
+    ordinary waypoints, a trip home and a waypoint in the End (`in the End`) as expected. The series scored by the
+    replies; the 207 runs recorded before score the same but the two at the portal (arrived to `short`). Seen there
+    the same day and not R8's: a waypoint in a closed room that is entered by a drop of 4 through its roof was
+    reached, and the goto out of it answered `unreachable (world)` in 4 s (no climb back, no edge to take off from,
+    air outside the walls): a goto places no blocks, so it has no way out of a room a player leaves by a pillar.

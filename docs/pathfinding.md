@@ -1984,6 +1984,29 @@ by its budget keeps the levels.
 `nav-low` (24), `nav-perch` (16), `nav-hostile-fall` (4), `pve-m1` (4), `pve-creeper` (4), `pve-combat` (12) passed,
 and `nav-low`'s `beside` cases again on the final tree.
 
+**On the Realm** (2026-11-14, deployed; `!test goto <waypoint> from home 1`, six trips, no damage, no death):
+
+- **The portal's cell.** The cell was decided before the first plan (`(portal) cannot be stood on (portal: a cell the
+  walk never enters): the walk ends next to it`), walked to with 1 plan in 57 ticks, and answered `arrived at ...
+  (...: stopped 1.42 blocks from it)` 2.8 s after the walk began. The trip took 31 s where it took 95 s (65 s of them
+  searches from 1.1 blocks off, then `unreachable`).
+- **The cell over the lone block in the pit.** Every search was cut by its budget there, so the slow rule ran: the
+  next two levels' searches (the body went from 5.1 to 3.3 blocks off on the first), the bigger and the long dig
+  search, the open walk, then the "why" searches (`place lifted: found, 61 expanded`). The answer came 19.5 s after
+  the first near end, 15 s after the last move: `arrived at ... (the goal's cell ... (air, 3 over the floor) cannot be
+  reached (the rest needs a block placed (a goto places no blocks)): stopped 3.35 blocks from it)`. It is an arrival
+  with the note and not `stopped short` because the node nearest the cell has the eye within 3.9 of it. Before:
+  44 s of searches from the pit's edge 6 blocks off, then `unreachable`.
+- **The others as before.** R7's cell 2 over a floor ended under it with R7's note; two ordinary waypoints and a
+  trip home arrived in their usual times; a waypoint in the End answered `is in the End, not in the overworld`.
+- **The scoring.** The six runs were scored by their replies (`reply` `ok` five times, `fail` once, `replyDistance`
+  set for the three noted arrivals). Replayed over the 207 goto runs recorded there before: 205 score as they did, and
+  the two runs that ended `unreachable` 1.1 blocks from the portal go from arrived to `short`.
+
+To see it on any world: `!goto` a portal block's cell, or a cell in the air over a single block that stands in a hole
+too wide to jump. The log says `no way nearer from here (...), D blocks from the goal's cell` once for every search of
+the near end, then `the answer now`.
+
 ## Following a path
 
 Per tick, from `InputLoop.onBeforeStep` (the command applies to the same tick):
