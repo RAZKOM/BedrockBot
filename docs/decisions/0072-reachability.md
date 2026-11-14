@@ -477,3 +477,69 @@ ticks with `allowBreak` on. A player walks up to such a goal.
     damage); the cell over it as a goal answered `arrived` next to it with the note after 2 ticks and 1 plan, 3 of 3;
     the fence block's own cell as a goal ended next to it 2 of 2 after a walk of 51 blocks. R6's gate goal and an
     ordinary walk home as before. A goal in the air and one with no head room were not run there.
+
+## R8: a `!goto` that stands as near as it gets
+
+Context (docs/pathfinding.md "A `!goto` that stands as near as it gets (Track R8)"). The owner's rule: `!goto` says
+`unreachable` only when the goal is completely closed off; a player sent somewhere goes as near as they can and says
+where they are. In a Realm sweep of 45 `!test goto` trips (2026-11-14), two walks came within 1.1 and 6 blocks of
+their goal, then stood for 65 s and 44 s while the ladder ran, and answered `unreachable`. One goal cell held a nether
+portal; the other was open air over a lone block left in a dug-out pit.
+
+60. **Why they stood.** Both goals were R7 `beside` goals. The portal cell fitted no R7 kind: it has no box (not
+    `solid`), and it is its column's own cell over the frame (not `in the air`). The planner never enters it
+    (`avoidWalkingInto`), so every search failed. For the pit, R7's `in the air` end was the node on the lone block,
+    which no walk reaches. From then on every search started at the same node with the goal under 8 off, and none
+    found a partial end 5 or more blocks away (`MIN_DIST_PATH`): "no progress". The ladder (4 x the budget, the long
+    dig search, two more levels with three searches each, a failure, the "why" searches with their own bigger
+    retries) cannot tell anything new from there except what a search at the last level's options tells at once.
+61. **A cell no move enters is a goal ended next to it** (`BesideKind` `no entry`, with `beside` only). A hazard with
+    no box at the feet, or at the head over an open cell: portal, end portal, end gateway, fire, soul fire, cobweb,
+    berry bush, powder snow, wither rose. Decided before the first plan, `getToBlock` with no face, as a block is
+    walked to. Liquids are not in it: water is a goal (W3) and lava stays unreachable (R7).
+62. **R7's node under an air cell falls back.** When the searches find no way onto it (`besideRing`), the goal becomes
+    next to the cell (one of the 8 columns round it with the cell at the feet or the head), once a goto and only if
+    one of those columns has a node; no failure is counted. An air cell whose own column's node has its feet less
+    than 0.5 under the cell's floor (a path block, farmland) is that node, with no note: the body stands where it was
+    asked.
+63. **A near end** (`nearNoWay`, with `beside` only). A main search from the body's node that finds no progress, the
+    feet within 8 (`NEAR_END`) of the goal cell's floor centre, the body safe (`safeHere`), the cell not lava, not a
+    corridor waypoint's search, and the chunks round the goal loaded. What runs then depends on that search. Not cut
+    by its budget (exhaustive under its options): a bigger budget or the long dig search finds nothing new, only a
+    level with more options can, so one search at the last level, then the answer. Cut by its budget: nothing is
+    proven, so each higher level's own search at the main budget, then the last level's bigger search and long dig
+    search once each, and R3's weighted open walk once, as before. (A first version that jumped to the last level, or
+    to the long dig search, stopped short at the bench's pits:13:11, a goal on a 2 x 2 tower 6 high that the dig
+    way's level climbs by a dug stair within its budget and the falls' level does not.) Dropped: the bigger and long
+    dig searches of the levels below the last, the failures' three rounds and the "why" searches' bigger retries.
+    Each of these searches may end at any node at least 0.25 nearer the cell's centre by the eye (`PathOptions.nearEnd`:
+    out of water, no irreversible drop, no pillar, swim or climb; a partial path cut before its first dig, place or
+    pillar). Then the answer: the "why" searches with no bigger retry and only the rules the open way broke, each at a
+    quarter of the main budget. 8 is about the farthest a body stands from a goal it can see and still be "at" it;
+    farther, a bigger search from the same node can find a way round a wall that the first did not reach the end of.
+    So the far case keeps its ladder.
+64. **What the answer says** (`finishShort`). The eye within 3.9 of the cell's centre (`NEAR_REACH`, R7's reach): `ok`,
+    `arrived at X (the goal's cell ... cannot be reached (why): stopped D blocks from it)`. Farther: a failure,
+    `stopped short (D blocks from the goal's cell ...: why)`. It is not `unreachable`, because the place was not
+    reached but the goal was not closed off either; a caller (and `!test goto`) must still see it as not arrived. The
+    why is what the rest of the way needs (a block placed, a fall over the budget, a built block broken), or that
+    nothing gets nearer, the world is not loaded, or the budget ran out. `GotoReport.short` and `nearTicks` record it.
+65. **On by default, no setting.** It changes only when a `!goto` answers and what it says. The moves, the hazards, the
+    fall budget and the edge rule are the same; the body ends where a search under the same rules walked it, and
+    `safeHere` holds there. `Navigator.nearEnds = false` gives the behaviour before, for the tests.
+66. **`!test goto` counts the reply.** A goto run is arrived only with an `arrived at` reply and the feet within 2.5,
+    or a note that says how far it stopped. A failure reply within 2.5, or `stopped short` at any distance, is the end
+    `short`, shown in the summary line. The record adds `reply` and `replyDistance`; no field is renamed.
+67. **Measured** (2026-11-14). Offline on the Mac at the live budgets, 10 runs a row, both configurations: the portal's
+    cell next to it with the note in 69 to 70 ticks, 1 plan (before: `rule place` in 1 tick, or `world` after 355 to
+    362 with 29 plans); the pit `stopped short` 6.1 from the cell, the answer 12 to 17 ticks after the last move
+    (before: unreachable, 284 to 390 ticks still). On bds-pve, 10 a case: the portal 66 to 67 ticks (before 1 tick, or
+    38.6 s with `allowBreak`); the pit `stopped short` 5.1 to 5.8 s after the last move, and 16.7 s with `allowBreak`
+    on, where every search is cut (before 15 to 17 s and 29 to 31 s). 0 damage, no death. The reach bench at the live
+    settings with `beside` against without (2541 pairs): 2465 at the goal against 2464, 26 more within reach with the
+    note, 21 stopped short, 0 deaths, 0 stranded, max damage 8, 3 false answers against 6. One pair lost (pits:3:9,
+    which the oracle calls `rule place`) had no near end in its log. R5's and R6's rows the same but for ticks off by
+    1 (the base against itself the same); R7's the same but four rows that R8 moved on purpose.
+68. **Left as they are.** A near end whose searches are all cut by their budget answers in about 15 s on this PC's
+    test server, not in a few seconds. A far goal truly cut off keeps its whole ladder. `!home go`, the older `!goto`
+    handler and the flight's walks pass no `beside`. `commands-portal.ts` still says `in the the_end` in its own lines.

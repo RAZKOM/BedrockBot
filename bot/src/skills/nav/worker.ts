@@ -74,6 +74,8 @@ export interface WorkerPlanOptions {
   relax?: PathOptions['relax'];
   /** Track R1: the frontier end (PathOptions.frontier). */
   frontier?: boolean;
+  /** Track R8: the near end's point (PathOptions.nearEnd). */
+  nearEnd?: { x: number; y: number; z: number };
   /** Track R5: the start is a perch at this feet height (PathOptions.startFeet). */
   startFeet?: number;
   /** Track R6: the last move may go onto the goal's perch (PathOptions.perchGoal). */
@@ -767,6 +769,7 @@ function workerOptions(o: WorkerPlanOptions): PathOptions {
     ...(o.digWay ? { digWay: { left: o.digWay.left } } : {}), // Track W3
     ...(o.relax ? { relax: { ...o.relax } } : {}), // Track R1
     ...(o.frontier ? { frontier: true } : {}),
+    ...(o.nearEnd ? { nearEnd: { ...o.nearEnd } } : {}), // Track R8
     ...(o.startFeet !== undefined ? { startFeet: o.startFeet } : {}), // Track R5
     ...(o.perchGoal ? { perchGoal: true } : {}), // Track R6
   };

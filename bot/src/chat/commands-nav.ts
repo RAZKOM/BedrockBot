@@ -44,6 +44,11 @@ export interface NavChatDeps {
 
 const fmtW = (w: Pick<Waypoint, 'x' | 'y' | 'z'>): string => `${w.x} ${w.y ?? '?'} ${w.z}`;
 
+/** Track R8: a dimension in a sentence (`the overworld`, `the Nether`, `the End`; dimensionName's `the_end` read "in the the_end"). */
+export function dimensionWords(d: number | undefined): string {
+  return d === 0 ? 'the overworld' : d === 1 ? 'the Nether' : d === 2 ? 'the End' : `dimension ${dimensionName(d)}`;
+}
+
 /** The goal for a waypoint: its feet block, or its column when the height is unknown. */
 export function waypointGoal(w: Pick<Waypoint, 'x' | 'y' | 'z'>): NavGoal {
   return w.y === null ? { type: 'xz', x: w.x, z: w.z } : { type: 'block', p: { x: w.x, y: w.y, z: w.z } };
@@ -149,7 +154,7 @@ export function registerNavChat(chat: Chat, d: NavChatDeps): void {
           return;
         }
         if (waypointDimension(w.name) !== dim) {
-          reply(`waypoint ${w.name} is in the ${dimensionName(waypointDimension(w.name))}, not in the ${dimensionName(dim)} (${dim === 0 ? '!overworld' : '!overworld first'})`);
+          reply(`waypoint ${w.name} is in ${dimensionWords(waypointDimension(w.name))}, not in ${dimensionWords(dim)} (${dim === 0 ? '!overworld' : '!overworld first'})`);
           return;
         }
         goal = waypointGoal(w);

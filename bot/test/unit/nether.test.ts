@@ -417,7 +417,7 @@ describe('the afk registry in another dimension (chat/commands-portal.ts)', () =
       b.command('!top');
       expect(b.said.at(-1)).toMatch(/^top: there is no surface in the Nether/);
       b.command('!goto home');
-      expect(b.said.at(-1)).toBe('waypoint home is in the overworld, not in the nether (!overworld first)');
+      expect(b.said.at(-1)).toBe('waypoint home is in the overworld, not in the Nether (!overworld first)');
       b.command('!wp set base 1 70 2');
       expect(b.said.at(-1)).toBe('waypoint nether_base set to 1 70 2');
       b.command('!wp set home');

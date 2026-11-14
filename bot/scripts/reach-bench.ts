@@ -14,7 +14,7 @@
 // (nav/bench/fixture.ts, bot/fixtures-private/<name>) instead of the generated worlds, `--repeat n` times.
 //
 //   node scripts/reach-bench.ts [--classes hills,caves] [--worlds 16] [--seed0 1] [--jobs 6] [--speed 1.25]
-//                               [--config r1|live] [--place on|off] [--break on|off] [--dig-penalty n] [--out results.jsonl] [--only cls:seed[:pair][,...]] [--log] [--detail]
+//                               [--config r1|live] [--place on|off] [--break on|off] [--dig-penalty n] [--out results.jsonl] [--only cls:seed[:pair][,...]] [--log] [--detail] [--beside]
 //   node scripts/reach-bench.ts --fixture incident [--pairs cave-entry,...] [--repeat 3] [--config live] [--detail]
 import { fork } from 'node:child_process';
 import { appendFileSync, writeFileSync } from 'node:fs';
@@ -61,7 +61,8 @@ function switches(cfg: Config): { place: boolean; brk: boolean; digPenalty: numb
 
 function simFor(cfg: Config): Partial<SimOptions> {
   const s = switches(cfg);
-  return { allowBreak: s.brk, allowPlace: s.place, digPenalty: s.digPenalty, ...(s.place ? { blocks: LIVE_BLOCKS } : {}) };
+  // (Track R8: `--beside` gives every goto `beside`, as the `!goto` command does: its near ends run on the whole bench)
+  return { allowBreak: s.brk, allowPlace: s.place, digPenalty: s.digPenalty, ...(s.place ? { blocks: LIVE_BLOCKS } : {}), ...(process.argv.includes('--beside') ? { gotoOpts: { beside: true } } : {}) };
 }
 
 function rulesFor(cfg: Config, bw: BenchWorld): OracleRules {

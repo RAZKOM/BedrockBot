@@ -42,6 +42,10 @@ export const V = {
   /** Track R7: an eave's block: spruce stairs, the bottom half and the top half (upside down). No generator uses them. */
   stairBottom: 31,
   stairTop: 32,
+  /** Track R8: a nether portal's block and a cobweb (cells no move enters), a path block (its top 0.9375). No generator uses them. */
+  portal: 33,
+  path: 34,
+  web: 35,
 } as const;
 export type VoxId = (typeof V)[keyof typeof V];
 
@@ -85,6 +89,9 @@ export const VOX_BLOCKS: readonly (readonly [string, Record<string, unknown>])[]
   ['composter', { composter_fill_level: 0 }],
   ['spruce_stairs', { upside_down_bit: 0, weirdo_direction: 0 }],
   ['spruce_stairs', { upside_down_bit: 1, weirdo_direction: 0 }],
+  ['portal', { portal_axis: 'x' }],
+  ['grass_path', {}],
+  ['web', {}],
 ];
 
 export const isDoor = (id: number): boolean => id >= V.doorXLo && id <= V.doorZHiOpen;

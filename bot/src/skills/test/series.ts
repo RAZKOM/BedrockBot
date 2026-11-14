@@ -6,7 +6,9 @@
 //               TEST_LIMITS.healBelow, a death, no progress for TEST_LIMITS.stuckMs (stuck), the time limit, `!test stop`
 //   the end     the trip's own end line (TERMINAL below) and then the bot idle for SETTLE_MS (no user process, not gliding,
 //               no corridor trip open); without an end line, idle for QUIET_MS; arrived = the feet within ARRIVE_RADIUS of
-//               the goal cell when there is one
+//               the goal cell when there is one; Track R8: a `goto` run only when its reply says so (`arrived at`, no failure
+//               line) and its feet are within ARRIVE_RADIUS or the reply's note says how far it stopped; a failure reply
+//               with the body within ARRIVE_RADIUS, or `goto: stopped short`, is its own end, `short`
 //   record      one RunRecord per run (a JSONL line), a short chat line per run and a summary at the end
 // A death ends the run (`died`) and waits for the recovery (recovery.ts) before the next one; stuck and timeout stop the
 // trip and /tp back to the start. The series knows nothing of flight internals: the bail-outs and rockets come from the
@@ -30,7 +32,8 @@ export interface RunSpec {
   command: string;
 }
 
-export type RunEnd = 'arrived' | 'failed' | 'died' | 'stuck' | 'timeout' | 'stopped' | 'setup' | 'quiet';
+/** Track R8: `short`, a `goto` run whose reply is a failure (`unreachable`, `stopped short`) with the body near the goal. */
+export type RunEnd = 'arrived' | 'failed' | 'died' | 'stuck' | 'timeout' | 'stopped' | 'setup' | 'quiet' | 'short';
 
 export interface RunRecord {
   type: 'run';
@@ -62,6 +65,10 @@ export interface RunRecord {
   restore: string[];
   /** The bot's replies during the run (the last 12). */
   replies: string[];
+  /** Track R8: what the trip's reply said: `ok` (a done line and no failure line), `fail` (a failure line), null (none). */
+  reply?: 'ok' | 'fail' | null;
+  /** Track R8: the distance (blocks) the reply says the walk stopped from the goal's cell (R6 to R8 notes), else null. */
+  replyDistance?: number | null;
 }
 
 export interface SeriesSummary {
@@ -71,6 +78,8 @@ export interface SeriesSummary {
   runs: number;
   planned: number;
   arrived: number;
+  /** Track R8: runs that ended `short`. */
+  short: number;
   meanSeconds: number;
   damage: number;
   deaths: number;
@@ -82,7 +91,7 @@ export interface SeriesSummary {
 
 /** End lines of the trips (the start of a reply). `done` ends a run that reached its end, `fail` one that did not. */
 export const TERMINAL: Readonly<Record<'goto' | 'fly' | 'route', { done: RegExp; fail: RegExp }>> = {
-  goto: { done: /^arrived at /, fail: /^(goto: |no waypoint |usage: |waypoint \S+ is in the )/ },
+  goto: { done: /^arrived at /, fail: /^(goto: |no waypoint |usage: |waypoint \S+ is in (the )?)/ },
   fly: { done: /^(landed at |arrived at .+ along a corridor|walked to )/, fail: /^(fly: (?!proving |the shortcut |landing )|landed \(|usage: |elytra worn)/ },
   route: { done: /^arrived at .+ along a corridor/, fail: /^(fly: (?!proving |the shortcut |landing )|usage: )/ },
 };
@@ -121,6 +130,16 @@ export const QUIET_MS = 15_000;
 export const PROGRESS_BLOCKS = 2;
 /** Feet within this distance (blocks) of the goal cell's centre: arrived. */
 export const ARRIVE_RADIUS = 2.5;
+/** Track R8: an `arrived at` reply whose note says where the walk stopped (R6, R7, R8: next to, under or in reach of the goal's cell). */
+export const NOTED_ARRIVAL = /stopped [\d.]+ blocks from it\)$/;
+/** Track R8: the navigator's reply for a walk that ended short of its goal (navigator.ts finishShort). */
+export const STOPPED_SHORT = /^goto: stopped short\b/;
+
+/** Track R8: the distance a reply says the walk stopped from the goal's cell (`stopped 2.1 blocks from it`, `stopped short (6.1 blocks from`), else null. */
+export function replyDistance(line: string | undefined): number | null {
+  const m = line ? /stopped (?:short \()?([\d.]+) blocks from/.exec(line) : null;
+  return m ? Number(m[1]) : null;
+}
 /** After stopping a trip, wait this long at most for it to land and end. */
 export const STOP_WAIT_MS = 20_000;
 
@@ -185,6 +204,7 @@ export function summarize(spec: RunSpec, planned: number, records: readonly RunR
     runs: n,
     planned,
     arrived: records.filter((r) => r.arrived).length,
+    short: records.filter((r) => r.end === 'short').length,
     meanSeconds: n ? round(sum((r) => r.seconds) / n) : 0,
     damage: round(sum((r) => r.damage)),
     deaths: sum((r) => r.deaths),
@@ -198,7 +218,7 @@ export function summarize(spec: RunSpec, planned: number, records: readonly RunR
 /** `test cave: 2/3 arrived, 41 s a run, damage 6.5, 1 death, flown 78%, 2 bail-outs; ends arrived 2, died 1` */
 export function summaryLine(s: SeriesSummary): string {
   const ends = Object.entries(s.ends).map(([k, v]) => `${k} ${v}`).join(', ');
-  const head = `test ${s.series}: ${s.arrived}/${s.runs} arrived${s.runs < s.planned ? ` (${s.runs} of ${s.planned} runs${s.stopped ? ', stopped' : ''})` : ''}`;
+  const head = `test ${s.series}: ${s.arrived}/${s.runs} arrived${s.short ? `, ${s.short} short` : ''}${s.runs < s.planned ? ` (${s.runs} of ${s.planned} runs${s.stopped ? ', stopped' : ''})` : ''}`;
   return `${head}, ${s.meanSeconds} s a run, damage ${s.damage}, ${s.deaths} death${s.deaths === 1 ? '' : 's'}, flown ${Math.round(s.meanFlownShare * 100)}%, ${s.bailouts} bail-out${s.bailouts === 1 ? '' : 's'}; ends ${ends || 'none'}`;
 }
 
@@ -377,8 +397,18 @@ export class TestSeries {
     }
     const goal = spec.goal ? centre(spec.goal) : undefined;
     const endDistance = goal && endAt && forced !== 'died' ? round(dist3(endAt, goal), 2) : null;
-    const arrived = forced === undefined && (endDistance !== null ? endDistance <= ARRIVE_RADIUS : doneLine !== undefined && failLine === undefined);
-    const end: RunEnd = forced ?? (arrived ? 'arrived' : failLine || doneLine ? 'failed' : 'quiet');
+    const doneFinal = doneLine !== undefined && failLine === undefined;
+    // Track R8: a goto is arrived only when its reply says so (the Realm, 2026-11-14: `goto: unreachable` 1.1 from a
+    // portal's cell was counted arrived); a noted arrival (next to, under or in reach of the cell) at any distance
+    const arrived =
+      forced === undefined &&
+      (spec.kind === 'goto'
+        ? doneFinal && (endDistance === null || endDistance <= ARRIVE_RADIUS || NOTED_ARRIVAL.test(doneLine ?? ''))
+        : endDistance !== null
+          ? endDistance <= ARRIVE_RADIUS
+          : doneFinal);
+    const short = forced === undefined && !arrived && spec.kind === 'goto' && failLine !== undefined && (STOPPED_SHORT.test(failLine) || (endDistance !== null && endDistance <= ARRIVE_RADIUS));
+    const end: RunEnd = forced ?? (arrived ? 'arrived' : short ? 'short' : failLine || doneLine ? 'failed' : 'quiet');
     const endLine = failLine ?? doneLine;
     const stats = parseTripStats(endLine ?? '');
     const reason = forced ? `${forcedWhy}${endLine ? ` (last: ${endLine})` : ''}` : (endLine ?? replies[replies.length - 1] ?? 'no reply');
@@ -400,6 +430,8 @@ export class TestSeries {
       rockets: stats.rockets ?? null,
       restore,
       replies: [...replies],
+      reply: failLine !== undefined ? 'fail' : doneLine !== undefined ? 'ok' : null,
+      replyDistance: replyDistance(endLine),
     };
   }
 

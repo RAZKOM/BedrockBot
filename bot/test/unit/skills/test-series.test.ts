@@ -236,6 +236,42 @@ describe('arrival is scored where the trip ended (the Realm, 2026-11-09)', () =>
   });
 });
 
+describe('a goto is arrived only when its reply says so (Track R8, the Realm 2026-11-14)', () => {
+  const run = async (trip: Step[]): Promise<{ r: RunRecord; sum: SeriesSummary }> => {
+    const bot = new Bot();
+    bot.trips = [trip];
+    const sum = await new TestSeries(GOTO, bot.ports(), { ...opts, runs: 1 }).run();
+    return { r: bot.records[0] as RunRecord, sum };
+  };
+
+  it('`goto: unreachable` with the feet 1 from the goal cell is short, not arrived', async () => {
+    const { r, sum } = await run(walk(19, 'goto: unreachable (rule place)'));
+    expect(r).toMatchObject({ end: 'short', arrived: false, endDistance: 1, reply: 'fail', replyDistance: null });
+    expect(sum).toMatchObject({ arrived: 0, short: 1, ends: { short: 1 } });
+    expect(summaryLine(sum)).toMatch(/^test goto base: 0\/1 arrived, 1 short, /);
+  });
+
+  it('`goto: stopped short` is short at any distance, with the distance it says', async () => {
+    const { r, sum } = await run(walk(14, "goto: stopped short (6.1 blocks from the goal's cell 20,64,0 (air): the rest needs a block placed)"));
+    expect(r).toMatchObject({ end: 'short', arrived: false, endDistance: 6, reply: 'fail', replyDistance: 6.1 });
+    expect(sum.short).toBe(1);
+  });
+
+  it('a noted arrival (next to, under or in reach of the cell) is arrived beyond ARRIVE_RADIUS; a plain one there is not', async () => {
+    const noted = await run(walk(17, "arrived at 20 64 0 (the goal's cell 20,64,0 (portal) cannot be reached (a cell the walk never enters): stopped 3.4 blocks from it)"));
+    expect(noted.r).toMatchObject({ end: 'arrived', arrived: true, endDistance: 3, reply: 'ok', replyDistance: 3.4 });
+    expect(summaryLine(noted.sum)).not.toContain('short');
+    const plain = await run(walk(17, 'arrived at 20 64 0'));
+    expect(plain.r).toMatchObject({ end: 'failed', arrived: false, endDistance: 3, reply: 'ok' });
+  });
+
+  it('a far failure stays failed; other kinds keep the distance rule', async () => {
+    expect((await run(walk(10, 'goto: unreachable'))).r).toMatchObject({ end: 'failed', arrived: false });
+    expect(TERMINAL.goto.fail.test('waypoint w is in the Nether (!nether first)')).toBe(true);
+    expect(TERMINAL.goto.fail.test('waypoint w is in the_nether')).toBe(true);
+  });
+});
+
 describe('every run stops its trip before the next (the Realm, 2026-11-09)', () => {
   it('a run that ended on its own fail line still has its trip stopped (its walk on from a landing ran into the next run)', async () => {
     const bot = new Bot();

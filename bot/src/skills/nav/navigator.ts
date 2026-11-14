@@ -42,10 +42,55 @@ import { REACH_RULES, causeTag, causeWords, fallOnPath, fallWords, relaxOptions,
 /** Track R: goto options of the navigator. `blacklist`: consult and feed the failure blacklist (default: `any` and `getToBlock` goals). */
 export type NavGotoOptions = GotoOptions & { blacklist?: boolean };
 
-/** Track R7: why a `block` goal's cell cannot be stood on, when the walk ends next to it (GotoOptions.beside). */
-export type BesideKind = 'solid' | 'no head room' | 'in the air';
+/**
+ * Track R7: why a `block` goal's cell cannot be stood on, when the walk ends next to it (GotoOptions.beside). Track R8:
+ * `no entry`, a cell no move ever enters (a portal, fire, a cobweb, a berry bush, powder snow: a hazard with no box).
+ */
+export type BesideKind = 'solid' | 'no head room' | 'in the air' | 'no entry';
 /** Track R7: an open goal cell is ended under (its own column's node) when that node is at most this many cells below it (the eye 3.9 from the cell's centre at 5: in reach). */
 export const BESIDE_AIR_MAX = 5;
+/**
+ * Track R8: a `beside` goto whose search from where the body stands goes nowhere with the feet within this of the goal
+ * cell's floor centre ends there soon (Navigator.nearNoWay), with a truthful answer (finishShort), not after the ladder.
+ */
+export const NEAR_END = 8;
+/** Track R8: an end short of the goal's cell with the eye within this of the cell's centre is in reach of it: `ok` with a note (R7's air rule: 5 over a floor). */
+export const NEAR_REACH = 3.9;
+/** Track R8: a near end's single-rule "why" searches run with this share of the main budget (they only name the rule). */
+const NEAR_SINGLE = 0.25;
+/** Track R8: an open goal cell whose own column's node has its feet less than this under the cell's floor is that node's cell (a path block's top 0.94). */
+const BESIDE_LOW_TOP = 0.5;
+
+/** Track R8: a cell no move enters: a hazard with no box (portal, end portal, end gateway, fire, cobweb, berry bush, powder snow, wither rose); liquids are not. */
+function noEntry(c: TerrainClass): boolean {
+  return c.boxes.length === 0 && !c.liquid && c.danger;
+}
+
+/** Track R8: the rule a near end's way on would break, as what it needs (`a block placed (a goto places no blocks)`). */
+const NEED_WORDS: Readonly<Record<ReachRule, string>> = {
+  protected_area: 'digging in the base (protectRadius)',
+  built: 'a built block broken (no breaking built blocks)',
+  liquid: 'digging beside water or lava',
+  gravity: 'digging under sand or gravel',
+  falls: 'a fall below fallMargin',
+  dig_budget: `more than ${DIG_WAY_MAX_BLOCKS} dug blocks or a slow one`,
+  place: 'a block placed (a goto places no blocks)',
+};
+
+/** Track R8: why a near end stopped, in words: what the rest of the way needs, or that nothing gets nearer. */
+export function shortWhy(c: ReachCause | undefined, fallback?: string): string {
+  if (!c) return fallback ?? 'no way nearer';
+  switch (c.cls) {
+    case 'rule':
+      return `the rest needs ${c.rules.map((r) => (r === 'falls' && c.fall ? fallWords(c.fall) : NEED_WORDS[r])).join(' and ')}`;
+    case 'world':
+      return 'no walk, swim or dig gets nearer';
+    case 'unloaded':
+      return 'the world past here is not loaded';
+    case 'budget':
+      return 'no way nearer found within the searches\' budget';
+  }
+}
 
 /** What the navigator needs from the world model. `World` + `worldSource()` provide it. */
 export interface NavWorld {
@@ -234,6 +279,13 @@ export interface GotoReport {
    * room`, `in the air`), what is in the cell, and the distance from the body's feet to the cell's floor centre at the end.
    */
   beside?: { kind: BesideKind; what: string; dist?: number };
+  /**
+   * Track R8: a `beside` goto that ended short of the goal's cell (finishShort): the feet's distance from the cell's floor
+   * centre, the eye's from its centre, `within` (the eye within NEAR_REACH: an `ok` with a note), and why it stopped.
+   */
+  short?: { dist: number; eye: number; within: boolean; why: string };
+  /** Track R8: the ticks from the first near end (nearNoWay: the body stood where no search got it nearer) to the answer. */
+  nearTicks?: number;
   /** Track AB: worker answers spliced into the path being walked, and answers dropped as stale (blocks changed near them). */
   upgrades?: number;
   stale?: number;
@@ -267,6 +319,8 @@ interface Search {
   long?: boolean;
   /** Track R3: the body waits for the final answer (no interim walked: the last two finals did not meet their interim paths, or the long dig search). */
   noInterim?: boolean;
+  /** Track R8: a near end's search (PathOptions.nearEnd). */
+  near?: boolean;
 }
 
 /** Track R1: the "why unreachable" searches of a goto about to give up (nav/reach.ts). */
@@ -289,10 +343,12 @@ interface ExplainRun {
   big: boolean;
   /** The goal is in unloaded world and the owner's rules closed the loaded world round the body: a way to the frontier is the way. */
   frontier: boolean;
+  /** Track R8: a near end's single-rule search: NEAR_SINGLE x the main budget. */
+  small?: boolean;
 }
 
 /** What one "why" search asks (ExplainRun's fields it reads). */
-type ExplainAsk = Pick<ExplainRun, 'owner' | 'start' | 'cur' | 'big' | 'frontier'>;
+type ExplainAsk = Pick<ExplainRun, 'owner' | 'start' | 'cur' | 'big' | 'frontier' | 'small'>;
 
 interface ActionRun {
   kind: 'dig' | 'use' | 'place' | 'close';
@@ -374,7 +430,16 @@ interface Active {
    * Track R7: the `block` goal's cell cannot be stood on and the walk ends next to it (GotoOptions.beside), looked at once
    * before the first plan (null: not such a goal, or the goto has no `beside`; undefined: not looked at yet).
    */
-  beside?: { x: number; y: number; z: number; kind: BesideKind; what: string; why: string } | null;
+  beside?: { x: number; y: number; z: number; kind: BesideKind; what: string; why: string; ring?: true } | null;
+  /**
+   * Track R8 (nearNoWay): the tick a search from where the body stands first went nowhere near the goal's cell; from then
+   * on no bigger search, one search with the last level's options, then the answer.
+   */
+  near?: number;
+  /** Track R8: the next main plan is the near end's search (PathOptions.nearEnd at the last level). */
+  nearSearch?: boolean;
+  /** Track R8: the main budget's share of the next worker search (a near end's single-rule "why" searches). */
+  scale?: number;
   noBreak: Set<number>;
   /** Pillar / door cells (cellKey) whose action failed during this goto: not planned again. */
   noAction: Set<number>;
@@ -624,6 +689,12 @@ export class Navigator {
    * such a top as a goal ends next to it (false: the behaviour before, for the tests).
    */
   lowPerch = true;
+  /**
+   * Track R8: a `beside` goto ends near its goal soon with a truthful answer (nearNoWay, finishShort), a cell no move enters
+   * ends next to it, R7's node under an air cell falls back to next to it, a cell over a top just under its floor is that
+   * top's node (false: the behaviour before, for the tests).
+   */
+  nearEnds = true;
   private protect: NavigatorOptions['protect'];
   /** Track BK: cells (cellKey) no goto may dig while a job holds them (a quarry's stair treads); every goto's noBreak starts with them. */
   readonly keptCells = new Set<number>();
@@ -1206,6 +1277,7 @@ export class Navigator {
     // Track R2: a `falls` cause names the fall (its height, its damage, the budget or why no fall that hurts is taken)
     if (c?.cls === 'rule' && c.rules.includes('falls') && !c.fall && a.explain?.fall) c.fall = a.explain.fall;
     if (c && this.startHold(a, c)) return; // Track R4: the only fall is closed for a moment: hold, then ask again
+    if (this.finishShort(a, c)) return; // Track R8: a `beside` goto near its goal: where it stopped and why
     a.finish(c ? { ok: false, reason: 'unreachable', cause: causeTag(c), note: causeWords(c) + this.heldWords(a) } : { ok: false, reason: 'unreachable' });
   }
 
@@ -1425,7 +1497,16 @@ export class Navigator {
     let why: string;
     let what = c.name;
     let goal: NavGoal;
-    if (c.boxes.length > 0) {
+    // Track R8: a cell no move enters (NavGrid's stand and crossing refuse every hazard with no box: avoidWalkingInto),
+    // at the feet or where the head goes: next to it, as a block is walked to (before: the walk stood a block from a
+    // portal's cell and searched for a minute)
+    const shut = !this.nearEnds ? undefined : noEntry(c) ? c : c.boxes.length === 0 && noEntry(head) ? head : undefined;
+    if (shut) {
+      kind = 'no entry';
+      what = shut.name;
+      why = `${shut.name}: a cell the walk never enters`;
+      goal = { type: 'getToBlock', p, face: false };
+    } else if (c.boxes.length > 0) {
       if (isNaturalTerrain(c.name) && (a.opts.allowBreak || this.digWayOn(a))) {
         a.beside = null; // dug into, as before
         return;
@@ -1447,11 +1528,13 @@ export class Navigator {
         return;
       }
       let node: number | undefined;
+      let feet = 0;
       for (let y = gy - 1; y >= gy - BESIDE_AIR_MAX; y--) {
         const f = this.grid.stand(gx, y, gz);
         if (f === undefined) return; // asked again once loaded
         if (!Number.isNaN(f)) {
           node = y;
+          feet = f;
           what = `air, ${+(gy - f).toFixed(2)} over the floor`;
           break;
         }
@@ -1459,6 +1542,15 @@ export class Navigator {
       }
       if (node === undefined) {
         a.beside = null;
+        return;
+      }
+      if (this.nearEnds && gy - feet < BESIDE_LOW_TOP) {
+        // Track R8: a top just under the cell's floor (a path block's 0.94, farmland, soul sand, a chest): the body on it
+        // stands where it was asked, its feet under half a block below the cell (the stairs rule's other side): that node,
+        // no note (before: `in the air: the walk ends under it: stopped 0.07 blocks from it`)
+        a.beside = null;
+        a.planGoal = { type: 'block', p: { x: gx, y: node, z: gz } };
+        this.log.info(`goto: the goal's cell ${gx},${gy},${gz} is over ${this.grid.cls(gx, node, gz)?.name ?? '?'} (feet ${+feet.toFixed(4)}): its node`);
         return;
       }
       kind = 'in the air';
@@ -1480,6 +1572,145 @@ export class Navigator {
     const note = `the goal's cell ${b.x},${b.y},${b.z} (${b.what}) cannot be stood on (${b.why}): stopped ${dist} blocks from it`;
     this.log.info(`goto: ${note}`);
     return note;
+  }
+
+  // ---- Track R8: a `!goto` that stands as near as it gets (decisions/0072-reachability.md "R8") -------------------
+
+  /**
+   * The goal cell of a `beside` block goto, with the feet's distance from its floor centre and the eye's from its
+   * centre, when the feet are within NEAR_END of it and the body stands safely (safeHere: on the ground on a node, out
+   * of liquids); undefined otherwise. Not for a lava cell (R7: a walk is never sent up to lava to end there).
+   */
+  private nearGoal(a: Active): { x: number; y: number; z: number; dist: number; eye: number } | undefined {
+    if (!this.nearEnds || !a.opts.beside || a.goal.type !== 'block') return undefined;
+    const x = Math.floor(a.goal.p.x);
+    const y = Math.floor(a.goal.p.y);
+    const z = Math.floor(a.goal.p.z);
+    const c = this.grid.cls(x, y, z);
+    if (!c || c.liquid === 'lava') return undefined;
+    const s = this.loop.state;
+    const p = s.pos;
+    const dist = Math.hypot(p.x - (x + 0.5), p.y - y, p.z - (z + 0.5));
+    if (dist > NEAR_END || !this.safeHere(s)) return undefined;
+    return { x, y, z, dist, eye: Math.hypot(p.x - (x + 0.5), p.y + EYE - (y + 0.5), p.z - (z + 0.5)) };
+  }
+
+  /** The chunk columns round a block goal's cell (its own and the 8 beside it, at the cell's height) are loaded. */
+  private loadedRound(a: Active): boolean {
+    if (a.goal.type !== 'block') return false;
+    const { x, y, z } = a.goal.p;
+    for (const dx of [-16, 0, 16]) for (const dz of [-16, 0, 16]) if (this.grid.cls(Math.floor(x) + dx, Math.floor(y), Math.floor(z) + dz) === undefined) return false;
+    return true;
+  }
+
+  /** The goto's last level (Active.level): the one after which nextLevel has none. */
+  private lastLevel(a: Active): DigWayLevel {
+    const saved = a.level;
+    for (let n = this.nextLevel(a); n !== undefined; n = this.nextLevel(a)) a.level = n;
+    const last = a.level;
+    a.level = saved;
+    return last;
+  }
+
+  /**
+   * R7's `in the air` end (the node under the cell) was no way: next to the cell instead (getToBlock, no face: one of the 8
+   * columns round it with the cell at the feet or the head, in reach) when one of those columns has a node at all; once
+   * a goto, no failure counted. True when it switched.
+   */
+  private besideRing(a: Active, why: string): boolean {
+    const b = a.beside;
+    if (!this.nearEnds || b?.kind !== 'in the air' || b.ring) return false;
+    let any = false;
+    for (let dx = -1; dx <= 1 && !any; dx++)
+      for (let dz = -1; dz <= 1 && !any; dz++) {
+        if (dx === 0 && dz === 0) continue;
+        for (const y of [b.y, b.y - 1]) {
+          const f = this.grid.stand(b.x + dx, y, b.z + dz);
+          if (f !== undefined && !Number.isNaN(f)) any = true;
+        }
+      }
+    b.ring = true;
+    if (!any) return false;
+    b.why = 'in the air: the walk ends next to it';
+    a.planGoal = { type: 'getToBlock', p: { x: b.x, y: b.y, z: b.z }, face: false };
+    a.noProgress = undefined;
+    a.partialFrom.clear();
+    a.offPathFrom.clear();
+    this.log.info(`goto: no way onto the node under ${b.x},${b.y},${b.z} (${why}): the walk ends next to the cell`);
+    return true;
+  }
+
+  /**
+   * A full main search from where the body stands went nowhere (no partial end 5+ blocks off) with the feet within
+   * NEAR_END of a `beside` goal's cell (nearGoal). The walk is as near as its searches get it. R6's way onto a perch and
+   * R7's node under an air cell switch to next to it first. Then what can still say something new from this node:
+   * - the search was exhaustive (not cut by its budget): a bigger budget or the long dig search finds nothing it did not,
+   *   only the levels can; one search at the last level (the dig way, the falls that hurt), then the answer;
+   * - it was cut by its budget: no proof either way; each level above this one with its own search (as the ladder, the
+   *   level's search at the main budget: a 2 x 2 tower's stair is found at the dig way's level and missed at the falls'
+   *   within the same budget), then at the last level the ladder's bigger and long dig searches once, then the answer.
+   * Skipped either way: the bigger and long dig searches at every level but the last, the failures' rounds and the
+   * "why" searches' bigger retries. The answer is giveUp (the "why" searches, then finishShort). True when it handled the
+   * result; false when the ladder's own retry below (`retry`: the bigger or the long dig search) is to run.
+   */
+  private nearNoWay(a: Active, why: string, limited = false, retry?: () => boolean): boolean {
+    const n = this.nearGoal(a);
+    if (!n) return false;
+    this.loop.release();
+    a.why = why;
+    if (this.perchBeside(a, why) || this.besideRing(a, why)) {
+      a.replan = 'retry';
+      a.waitUntil = a.t + 1;
+      return true;
+    }
+    a.near ??= a.t;
+    const last = this.lastLevel(a);
+    const next = limited ? this.nextLevel(a) : a.level !== last ? last : undefined;
+    if (next !== undefined) {
+      a.level = next;
+      a.long = false;
+      a.nearSearch = true;
+      a.noProgress = undefined;
+      a.replan = 'retry';
+      a.waitUntil = a.t + 1;
+      this.log.info(`goto: no way nearer from here (${why}), ${n.dist.toFixed(1)} blocks from the goal's cell: ${limited ? 'the next' : 'the last'} level's search (level ${next}) to the goal or the node nearest it${limited ? '' : ', then the answer'}`);
+      return true;
+    }
+    if (limited && retry?.()) {
+      a.nearSearch = true; // the ladder's bigger or long dig search at the last level, towards the node nearest the goal too
+      return false;
+    }
+    this.log.info(`goto: no way nearer from here (${why}), ${n.dist.toFixed(1)} blocks from the goal's cell: the answer now`);
+    this.giveUp(a);
+    return true;
+  }
+
+  /**
+   * A `beside` goto that ends without a way to its goal while the body stands near it (nearGoal): within reach of the
+   * cell (the eye within NEAR_REACH of its centre) `ok` with a note, farther a failure `stopped short`; both say how far
+   * the body stopped and why (the "why" searches' cause). True when it finished the goto.
+   */
+  private finishShort(a: Active, c: ReachCause | undefined): boolean {
+    const n = this.nearGoal(a);
+    if (!n) return false;
+    const dist = +n.dist.toFixed(2);
+    const eye = +n.eye.toFixed(2);
+    const within = n.eye <= NEAR_REACH + 1e-9;
+    const why = shortWhy(c, a.why);
+    const what = a.beside?.what ?? (a.perchGoal ? `on ${a.perchGoal.on}` : (this.grid.cls(n.x, n.y, n.z)?.name ?? '?'));
+    a.report.short = { dist, eye, within, why };
+    if (a.near !== undefined) a.report.nearTicks = a.t - a.near;
+    const cell = `the goal's cell ${n.x},${n.y},${n.z} (${what})`;
+    if (within) {
+      const note = `${cell} cannot be reached (${why}): stopped ${dist} blocks from it`;
+      this.log.info(`goto: ${note}`);
+      a.finish({ ok: true, note });
+      return true;
+    }
+    const note = `${dist.toFixed(1)} blocks from ${cell}: ${why}`;
+    this.log.info(`goto: stopped short, ${note}`);
+    a.finish({ ok: false, reason: 'stopped short', ...(c ? { cause: causeTag(c) } : {}), note: note + this.heldWords(a) });
+    return true;
   }
 
   /**
@@ -1581,13 +1812,15 @@ export class Navigator {
       const big = a.big;
       a.pathOpts = o;
       a.big = run.big;
+      if (run.small) a.scale = NEAR_SINGLE; // Track R8
       const spec = this.workerSpec(a, true);
       a.pathOpts = saved;
       a.big = big;
+      a.scale = undefined;
       if (spec) return { s: client.search('main', run.start, goal, spec, this.worldGen), kind: 'main', via: 'worker', reason: 'retry', tick: a.t, slices: 0, goal: a.planGoal };
     }
     const b = this.workerBudgets;
-    const k = run.big ? BIG_SEARCH : 1;
+    const k = (run.big ? BIG_SEARCH : 1) * (run.small ? NEAR_SINGLE : 1);
     return { s: new PathSearch(this.grid, run.start, a.planGoal, { ...o, maxNodes: this.pathOpts.maxNodes ?? b.mainNodes * k, maxMs: this.pathOpts.maxMs ?? b.mainMs * k }), kind: 'main', via: 'thread', reason: 'retry', tick: a.t, slices: 0, goal: a.planGoal };
   }
 
@@ -1600,7 +1833,7 @@ export class Navigator {
     if (!res && run.search.s instanceof WorkerSearch && run.search.s.failed) {
       // the worker went away: the same search in-thread
       const o = this.explainOptions(a, run);
-      const k = run.big ? BIG_SEARCH : 1;
+      const k = (run.big ? BIG_SEARCH : 1) * (run.small ? NEAR_SINGLE : 1);
       run.search = { ...run.search, s: new PathSearch(this.grid, run.start, a.planGoal, { ...o, maxNodes: this.workerBudgets.mainNodes * k, maxMs: this.workerBudgets.mainMs * k }), via: 'thread' };
       res = run.search.s.step(this.sliceMs);
     }
@@ -1612,7 +1845,8 @@ export class Navigator {
     const cut = !found && res.limited;
     this.log.info(`goto: why search (${run.cur.length === REACH_RULES.length ? 'every rule lifted' : `${run.cur.join(' + ')} lifted`}${run.big ? `, ${BIG_SEARCH} x the budget` : ''}): ${found && res.status !== 'found' ? 'a way to the unloaded world' : res.status}${cut ? ' (cut by its budget)' : ''}, ${res.expanded} expanded`);
     if (run.stage === 'all') {
-      if (cut && !run.big && run.searches < EXPLAIN_MAX_SEARCHES) {
+      // (Track R8: not at a near end: the answer comes now, a cut search is the budget's answer)
+      if (cut && !run.big && run.searches < EXPLAIN_MAX_SEARCHES && a.near === undefined) {
         // a search cut by its budget is no answer: once more with BIG_SEARCH x the budget (the rest of the run too)
         run.big = true;
         run.searches++;
@@ -1644,6 +1878,8 @@ export class Navigator {
       // wall or a tower, where the "why" way pillars). Track R3: and one whose walk stuck (move timeouts): its plans
       // were ways under the owner's rules, so the rule is no answer yet (lava:1:10: three drops timed out on a dug way,
       // the "why" way digs beside lava, the owner's way existed)
+      // (Track R8: at a near end too: from a node where every search was cut, the weighted open way is what found the
+      // stair up the bench's pits:3:9 tower)
       const stuck = /^(move timeout|stuck)$/.test(a.why ?? '');
       if (a.opts.allowBreak && a.openWalks === 0 && (stuck || /search limit hit|cut by its budget/.test(a.why ?? ''))) {
         this.walkOpenWay(a, undefined, stuck);
@@ -1661,6 +1897,11 @@ export class Navigator {
       // several rules on that path: each alone, the ones it broke first
       run.stage = 'single';
       run.queue = run.used.length === 1 ? ['falls'] : [...(passing ? (['falls'] as ReachRule[]) : []), ...run.used, ...REACH_RULES.filter((r) => !run.used.includes(r) && !(passing && r === 'falls'))];
+      // Track R8: at a near end only the rules the open way broke, each with NEAR_SINGLE x the budget (they only name it)
+      if (a.near !== undefined) {
+        run.queue = run.queue.filter((r) => run.used.includes(r) || (passing && r === 'falls'));
+        run.small = true;
+      }
     } else if (found) {
       if (run.cur.includes('falls')) run.fall = fallOnPath(this.grid, res.path, run.owner) ?? run.fall; // Track R2
       a.cause = { cls: 'rule', rules: [...run.cur] };
@@ -2321,8 +2562,8 @@ export class Navigator {
     const prot = o.protectedBlocks;
     return {
       ...(o.costs ? { costs: { ...o.costs } } : {}),
-      maxNodes: this.pathOpts.maxNodes ?? (main ? b.mainNodes * (a.big ? BIG_SEARCH : 1) : b.segmentNodes),
-      maxMs: this.pathOpts.maxMs ?? (main ? b.mainMs * (a.big ? BIG_SEARCH : 1) : b.segmentMs),
+      maxNodes: this.pathOpts.maxNodes ?? (main ? Math.round(b.mainNodes * (a.big ? BIG_SEARCH : 1) * (a.scale ?? 1)) : b.segmentNodes),
+      maxMs: this.pathOpts.maxMs ?? (main ? Math.round(b.mainMs * (a.big ? BIG_SEARCH : 1) * (a.scale ?? 1)) : b.segmentMs),
       allowBreak: o.allowBreak ?? false,
       allowPlace: o.allowPlace ?? false,
       allowOpen: o.allowOpen ?? false,
@@ -2343,6 +2584,7 @@ export class Navigator {
       ...(o.digWay ? { digWay: { left: o.digWay.left } } : {}), // Track W3
       ...(o.relax ? { relax: { ...o.relax } } : {}), // Track R1
       ...(o.frontier ? { frontier: true } : {}),
+      ...(o.nearEnd ? { nearEnd: { x: o.nearEnd.x, y: o.nearEnd.y, z: o.nearEnd.z } } : {}), // Track R8: a near end's search
       ...(o.startFeet !== undefined ? { startFeet: o.startFeet } : {}), // Track R5: a perch start
       ...(o.perchGoal ? { perchGoal: true } : {}), // Track R6: onto the goal's perch
     };
@@ -2509,8 +2751,8 @@ export class Navigator {
         if (!stairs && a.opts.beside && a.beside === undefined) this.lookBeside(a, gx, gy, gz);
         if (stairs) {
           a.planGoal = { type: 'block', p: { x: gx, y: gy + 1, z: gz } };
-        } else if (a.beside) {
-          // (Track R7: the walk ends next to it)
+        } else if (a.beside || a.planGoal !== a.goal) {
+          // (Track R7: the walk ends next to it; Track R8: or on the node just under the cell, a path block's top)
         } else if (!(a.pathOpts.allowBreak || a.pathOpts.allowPlace) && !(c && c.boxes.length > 0 && isNaturalTerrain(c.name) && this.digWayOn(a)) && sneakFits(this.grid, gx, gy, gz) !== true && !waterGoalCell(this.grid, gx, gy, gz)) { // Track BC: a cell the body fits sneaking is a goal; Track W3: a water cell is reached swimming or diving there
           a.why = `goal cell ${gx},${gy},${gz} (${c?.name ?? 'unloaded'}) is not standable`;
           if (a.opts.explain) a.cause = this.unstandableCause(gx, gy, gz, start); // Track R1: no search can stand there
@@ -2531,6 +2773,9 @@ export class Navigator {
     // level does (they walk on where the dug way comes out, and dig no more than the level would)
     const levelOpts = a.pathOpts;
     if (a.long) a.pathOpts = longDigOptions(levelOpts);
+    const nearSearch = a.nearSearch === true; // Track R8: a partial end at any distance (the node nearest the goal)
+    a.nearSearch = false;
+    if (nearSearch && a.goal.type === 'block') a.pathOpts = { ...a.pathOpts, nearEnd: { x: Math.floor(a.goal.p.x) + 0.5, y: Math.floor(a.goal.p.y) + 0.5, z: Math.floor(a.goal.p.z) + 0.5 } };
     if (start.perch) {
       a.report.perchStarts = (a.report.perchStarts ?? 0) + 1;
       const own = this.grid.cls(start.x, start.y, start.z);
@@ -2542,6 +2787,7 @@ export class Navigator {
     // (the long dig search's interim, its best partial path after 40 ms, is not walked: weighted and digging cheaply,
     // it led the body into a tower's foot, where the level's plans found nothing more, pits:12:10)
     if (a.long) a.search.long = true;
+    if (nearSearch) a.search.near = true;
     if (a.noInterim || a.long) a.search.noInterim = true;
     a.noInterim = false;
     a.pathOpts = levelOpts;
@@ -2579,7 +2825,8 @@ export class Navigator {
     // the waypoints failed without them). Towards the goal itself only a whole way: weighted and digging cheaply,
     // its partial ends dig into the way, and pits:12:10's dug into the 2 x 2 tower the stair up had to be cut from;
     // from inside the holes no stair was left (the next plans and the "why" answer: `rule place`)
-    if (search.long && !flags.interim && res.status !== 'found' && res.path.length > 1 && search.wp === undefined) {
+    // (Track R8: a near end's partial way that digs nothing is walked: it is the walk to the node nearest the goal)
+    if (search.long && !flags.interim && res.status !== 'found' && res.path.length > 1 && search.wp === undefined && !(search.near && !res.path.some((p) => p.act?.dig?.length))) {
       this.log.info(`goto: the long dig search found no whole way (a partial way of ${res.path.length} nodes, ${res.expanded} expanded): not walked`);
       res = { ...res, path: res.path.slice(0, 1), reason: 'no_progress' };
     }
@@ -2608,8 +2855,8 @@ export class Navigator {
         return false;
       }
       a.why = this.noPathWhy(res);
-      if (this.perchBeside(a, a.why)) {
-        // Track R6: no way onto the goal's top: beside it, at the same level
+      if (this.perchBeside(a, a.why) || this.besideRing(a, a.why)) {
+        // Track R6: no way onto the goal's top: beside it, at the same level (Track R8: or next to an air cell)
         this.loop.release();
         a.replan = 'retry';
         a.waitUntil = a.t + 1;
@@ -2636,6 +2883,13 @@ export class Navigator {
       // again with BIG_SEARCH x the budget before it may escalate the level, count as a failure or be skipped
       const s0 = res.path[0];
       const bigKey = s0 ? `${cellKey(s0.x, s0.y, s0.z)}:${a.level}:${search.wp ?? '-'}` : undefined;
+      // Track R8: a `beside` goto standing near its goal's cell: no ladder of bigger searches from here (nearNoWay). Not
+      // towards a corridor waypoint, not on the stand-in's cut search, not while the chunks round the goal may still come
+      // (unloaded world farther off is no reason to wait: a way through it is a detour of the view distance for a goal 8 off)
+      // A search the budget cut is no proof: at the last level its bigger search and the long dig search still run, once
+      // for the node (the bench's 2 x 2 towers: the stair up is found by one of them), then the answer
+      const retry = (): boolean => res.limited && search.via === 'worker' && bigKey !== undefined && (!a.bigTried.has(bigKey) || (!search.long && this.longDigOn(a) && !a.longTried.has(bigKey) && !goalUnloaded(search.goal, this.grid)));
+      if (search.wp === undefined && full && !(res.unknown && !res.limited && a.unloadedTicks < this.unloadedWaitTicks && !this.loadedRound(a)) && this.nearNoWay(a, why, res.limited, retry)) return false;
       if (res.limited && search.via === 'worker' && bigKey !== undefined && !a.bigTried.has(bigKey)) {
         a.bigTried.add(bigKey);
         a.big = true;
@@ -2730,6 +2984,7 @@ export class Navigator {
           a.waitUntil = a.t + 1;
           return false;
         }
+        if (this.nearNoWay(a, why)) return false; // Track R8
         if (this.perchBeside(a, why)) {
           a.replan = 'retry'; // Track R6
           a.waitUntil = a.t + 1;

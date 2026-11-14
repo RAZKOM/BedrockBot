@@ -86,7 +86,12 @@ export interface SimOptions {
   noLow?: boolean;
   /** Track R7: more goto options (the `!goto` command's `beside`, a caller's own). */
   gotoOpts?: Partial<NavGotoOptions>;
+  /** Track R8: no near ends (Navigator.nearEnds false: the behaviour before R8). */
+  noNear?: boolean;
 }
+
+/** Track R8: `REACH_SIM_BESIDE=1` gives every goto of the closed loop `beside`, as `!goto` passes it (the bench's `--beside`, the ladder's tests run with it). */
+const ENV_BESIDE = process.env.REACH_SIM_BESIDE === '1';
 
 /** Track R2: the palette id a placed throwaway block becomes. */
 const placedVox = (name: string): number => (name === 'cobblestone' ? V.cobble : name === 'stone' ? V.stone : V.dirt);
@@ -117,6 +122,10 @@ export interface PairRun {
   /** Track R7: main plans from a perch, from a low perch (GotoReport.perchStarts, lowStarts). */
   perchStarts?: number;
   lowStarts?: number;
+  /** Track R8: ticks from the body's last move (more than 0.01 in a tick) to the end of the goto; GotoReport.short and nearTicks. */
+  stillTicks?: number;
+  short?: { dist: number; eye: number; within: boolean; why: string };
+  nearTicks?: number;
   corridor?: string;
   /** Track R2: the end is stranded (scripts/reach-bench.ts: no way back to the start without a hurting fall, one before). */
   stranded?: boolean;
@@ -352,6 +361,7 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
   if (o.noPerch) skills.nav.perch = false;
   if (o.noPerchGoal) skills.nav.perchGoals = false; // Track R6
   if (o.noLow) skills.nav.lowPerch = false; // Track R7
+  if (o.noNear) skills.nav.nearEnds = false; // Track R8
   // the survival layer's avoidance (skills/survival: lava proximity costs, no mobs here)
   const avoidance = new Avoidance({ entities: () => server.world.entities, origin: () => (loop.state.ready ? loop.state.pos : undefined), lavaWorld: server.world });
   skills.nav.cellCost = () => avoidance.costFn();
@@ -365,7 +375,7 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
   }
   conn.tick(o.settleTicks ?? 5);
   let result: SkillResult | undefined;
-  const p = skills.goto(o.goal ?? { type: 'block', p: pair.goal }, { timeoutTicks: o.timeoutTicks ?? 6000, allowBreak: o.allowBreak ?? false, allowPlace: o.allowPlace ?? false, closeDoors: false, explain: true, ...(o.gotoOpts ?? {}) }).then((r) => (result = r));
+  const p = skills.goto(o.goal ?? { type: 'block', p: pair.goal }, { timeoutTicks: o.timeoutTicks ?? 6000, allowBreak: o.allowBreak ?? false, allowPlace: o.allowPlace ?? false, closeDoors: false, explain: true, ...(ENV_BESIDE ? { beside: true } : {}), ...(o.gotoOpts ?? {}) }).then((r) => (result = r));
   const self = server.world.self as { health: number };
   let health = o.health ?? 20;
   self.health = health;
@@ -375,6 +385,8 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
   let peak = loop.state.pos.y;
   let air = 300;
   let ticks = 0;
+  let lastMove = 0; // Track R8
+  let prev = { ...loop.state.pos };
   const wall0 = performance.now();
   const hurt = (hp: number, by: string): void => {
     if (hp <= 0) return;
@@ -394,6 +406,8 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
     ticks++;
     const s = loop.state;
     server.pump(s.pos, o.columnsPerTick ?? 8);
+    if (skills.nav.busy && Math.hypot(s.pos.x - prev.x, s.pos.y - prev.y, s.pos.z - prev.z) > 0.01) lastMove = ticks;
+    prev = { ...s.pos };
     // damage: falls (from the highest point since the last ground or water contact), lava, drowning
     if (s.inWater || s.inLava) peak = s.pos.y;
     else if (s.onGround) {
@@ -448,6 +462,9 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
     failures: rep?.failures ?? 0,
     ...(rep?.perchStarts ? { perchStarts: rep.perchStarts } : {}),
     ...(rep?.lowStarts ? { lowStarts: rep.lowStarts } : {}),
+    stillTicks: ticks - lastMove, // Track R8
+    ...(rep?.short ? { short: rep.short } : {}),
+    ...(rep?.nearTicks !== undefined ? { nearTicks: rep.nearTicks } : {}),
     ...(rep?.corridor ? { corridor: `${rep.corridor.status ?? 'pending'} ${rep.corridor.requests}req ${rep.corridor.passed}passed ${rep.corridor.failed}failed` } : {}),
     log,
   };

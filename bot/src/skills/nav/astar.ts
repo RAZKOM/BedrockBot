@@ -213,6 +213,13 @@ export interface PathOptions {
    * unloaded world instead (the frontier end, PathSearch `frontier`). The navigator sets it at a goto's last level.
    */
   frontier?: boolean;
+  /**
+   * Track R8: the navigator's near end (its goal within NEAR_END of the body): a search that does not reach the goal ends
+   * at the node whose eye (feet + 1.62) is nearest this point (the goal cell's centre), at any distance from the start,
+   * not at the partial-path bests (Baritone's 5 blocks off the start at least; the goal's heuristic, flat over the levels
+   * it accepts, is no measure of how near). The start when no node is nearer by NEAR_GAIN.
+   */
+  nearEnd?: Vec3;
   digWay?: DigWay;
   /**
    * Track R5: the start is a perch (`locatePerch`): the body stands at this feet height in the start cell on a top the
@@ -269,6 +276,10 @@ export interface PathResult {
 
 /** Highest feet rise a jump can take (apex of a standing jump is 1.2522). */
 export const MAX_JUMP_RISE = 1.25;
+/** Track R8: a near end's node must have its eye this much nearer the point (PathOptions.nearEnd) than the start's. */
+export const NEAR_GAIN = 0.25;
+/** Track R8: the eye over the feet (dig/look.ts EYE_HEIGHT) for the near end's distance. */
+const NEAR_EYE = 1.62;
 /** Track BG: deepest fall (blocks below the feet) through a hatch into still water (Baritone's MovementFall takes any height). */
 export const HATCH_WATER_FALL = 16;
 const STEP = PHYSICS.stepHeight + 1e-6;
@@ -496,6 +507,9 @@ export class PathSearch {
    */
   private frontier = -1;
   private frontierScore = Infinity;
+  /** Track R8 (PathOptions.nearEnd): the expanded node whose eye is nearest the point, and that distance (the start's less NEAR_GAIN to begin with). */
+  private nearNode = -1;
+  private nearDist = Infinity;
   private ms = 0;
   private done: PathResult | undefined;
   /** Track AJ: the parkour takeoff the next relax() records (set around a parkour relax only). */
@@ -649,6 +663,7 @@ export class PathSearch {
     // Track BA; Track R2: from under water, any node with the head out of it (bestSoFar.ts `anyDistance`)
     const under = (flags & F_SWIM) === 0 && grid.submerged(start.x, start.y, start.z);
     this.bests.reset(s, start.x, start.y, start.z, this.h(start.x, start.y, start.z), under);
+    if (opts.nearEnd) this.nearDist = this.eyeDist(opts.nearEnd, start.x, startFeet, start.z) - NEAR_GAIN; // Track R8
     this.ms = performance.now() - t0;
   }
 
@@ -717,6 +732,16 @@ export class PathSearch {
       // Track R2: nor on its own pillar's top (the next plan from there may find only the way back down, or none), nor
       // standing on a lake's floor with the head under water (a walking node in still water: no dive node, no air count)
       if (nodes.wet[cur] === 0 && nodes.move[cur] !== M_PILLAR && ((fl & F_SWIM) !== 0 || !this.grid.submerged(cx, cy, cz))) this.bests.consider(cur, cx, cy, cz, this.h(cx, cy, cz), nodes.g[cur]!, nodes.trap[cur]!);
+      // Track R8: a near end's candidate: standing (not swimming, diving, climbing, on its pillar), dry, and no drop on the
+      // way it cannot climb back (`trap`: a fall higher than a jump; a fall that hurts is one)
+      const near = this.opts.nearEnd;
+      if (near && nodes.wet[cur] === 0 && nodes.trap[cur] === 0 && nodes.move[cur] !== M_PILLAR && (fl & (F_SWIM | F_DIVE | F_CLIMB)) === 0 && !this.grid.submerged(cx, cy, cz)) {
+        const d = this.eyeDist(near, cx, f0, cz);
+        if (d < this.nearDist - 1e-9) {
+          this.nearDist = d;
+          this.nearNode = cur;
+        }
+      }
       // Track BA: while no best is 5+ blocks from the start (Baritone `failing`), on up to 4 x maxNodes
       if (++this.expanded >= this.maxNodes && (!this.bests.failing || this.expanded >= this.maxNodes * FAILURE_NODES_FACTOR)) {
         this.limited = true;
@@ -771,7 +796,7 @@ export class PathSearch {
     const nodes = this.nodes;
     // Track BA: a partial path ends at the first coefficient best 5+ blocks from the start; with none,
     // the start alone (reason no_progress)
-    let best = this.found >= 0 ? this.found : this.bests.best();
+    let best = this.found >= 0 ? this.found : this.opts.nearEnd ? this.nearNode : this.bests.best(); // Track R8: the node nearest the point
     let viaFrontier = false;
     // (a "why" search, `relax`, asks whether the unloaded world can be reached at all: the frontier before any best)
     if (this.found < 0 && (best < 0 || this.opts.relax) && this.frontier >= 0 && goalUnloaded(this.goal, this.grid)) {
@@ -794,13 +819,25 @@ export class PathSearch {
     path[0]!.cost = 0;
     delete path[0]!.act;
     delete path[0]!.gap;
-    const status = this.found >= 0 ? 'found' : interim || this.limited || this.sawUnknown ? 'partial' : 'none';
+    if (this.found < 0 && this.opts.nearEnd) {
+      // Track R8: a near end walks: it digs and places nothing on its way to the node nearest the goal (the walk ends
+      // before the first node with a dig or a place)
+      const cut = path.findIndex((n, i) => i > 0 && ((n.act?.dig?.length ?? 0) > 0 || n.act?.place !== undefined || n.move === 'pillar'));
+      if (cut > 0) path.length = cut;
+    }
+    // (Track R8: a near end's exhaustive search that found a node nearer the goal than the start walks to it)
+    const status = this.found >= 0 ? 'found' : interim || this.limited || this.sawUnknown || (this.opts.nearEnd !== undefined && path.length > 1) ? 'partial' : 'none';
     const res: PathResult = { status, path, cost: nodes.g[end]!, expanded: this.expanded, ms: this.ms, unknown: this.sawUnknown, limited: interim || this.limited };
     if (status === 'partial' && best < 0) res.reason = 'no_progress'; // Track BA
     if (viaFrontier) res.frontier = true; // Track R1
     // Track W2: from water and nowhere: which dig-out steps the rules refused
     if (this.digOutRefused && this.startWet && (status === 'none' || res.reason === 'no_progress')) res.digOut = this.digOutRefused.report();
     return res;
+  }
+
+  /** Track R8: from the eye of a body standing at feet `feet` in column (x, z) to point `p`. */
+  private eyeDist(p: Vec3, x: number, feet: number, z: number): number {
+    return Math.hypot(x + 0.5 - p.x, feet + NEAR_EYE - p.y, z + 0.5 - p.z);
   }
 
   /** Track R1: cell (x, y, z) is dug by a move on the way to node `from` (its own move included). */
