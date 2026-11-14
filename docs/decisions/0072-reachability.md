@@ -407,3 +407,67 @@ after 28 plans. A column goal over a fence took 27 plans to the same answer.
     a top with less than 1.8 of head room over it (a fence under a roof's eave, where the server holds the body in
     its 1.49-high pose) is no perch, neither as a start (decision 36) nor as a goal: the model has no body lower than
     1.8 at a start.
+
+## R7: a body held low, and a goal nobody stands in
+
+Context (docs/pathfinding.md "A walk that starts or ends where the body is held low (Track R7)"). The fence of decision
+50: on the Realm a walk from its top found no standable node three times and ended unreachable after 41 ticks with no
+plan. As a goal, the cell over it took 17 plans in 1248 ticks to the same answer. Apart from perches, a `block` goal
+inside a block, under a block where the head goes, or in the air answered `unreachable`, in 1 tick or after about 330
+ticks with `allowBreak` on. A player walks up to such a goal.
+
+51. **What failed on the Realm.** `NavGrid.perch` asks 1.8 of head room, and the eave leaves 1.5. The log's "in air"
+    is the feet cell's block name. The body was on the ground: no line says `airborne`. The first failure came 0.5
+    over the top, where the teleport's answer said the body was on the ground, so R5's settle wait (which needs
+    `!onGround`) did not run.
+52. **The held-low pose, as the server does it.** On bds-pve, under such an eave, the server holds the body at 1.49
+    with the `sneaking` flag and no sneak key. The body moves at the sneak speed with no edge back-off, and stands
+    again once the standing box is clear. `physics.ts heldLow` models it: the 1.49 box, the sneak speed, no sprint and
+    no back-off when the 1.8 box meets a block and the 1.49 box does not. `BodyState.low` marks it, and `sneaking`
+    stays false, so nothing is sent. The 1.8 model drew 1 or 2 corrections a run there; this one drew none in the
+    four eaves probed, with or without the key.
+53. **A low perch is a start only.** `NavGrid.lowPerch` is a top that is no perch only for the head room, with
+    1.49 to 1.8 over it. `locateStart` gives it (`F_PERCH | F_LOW`). From it the planner plans cardinal walks off and
+    drops, with the crouched head clear in the neighbour column. It plans no step up, diagonal, doorway, climb,
+    parkour or pillar, since each would need the full height before the body stands. The settle wait also waits for
+    a body whose crouched box rests on nothing (`physics.ts restsOn`), the case of the teleport's answer.
+    `Navigator.lowPerch` is on, with no setting: it only lets a walk begin where it could not. `false` gives the
+    behaviour before, for the tests.
+54. **The same top as a goal ends next to it.** A low top is a perch goal never entered (`low: true`): a body gets
+    onto it only crouching, and the planner has no such move. R6's `perchRing` ends the walk next to it, and the
+    note says why. A sneak node under a low ceiling (Track BC) was a start and a goal already, and the crawl pose
+    (0.6) is the unprone path's. Neither changed.
+55. **A goal nobody stands in ends next to it, for `!goto` only.** `GotoOptions.beside` (default false) makes
+    `Navigator.lookBeside` decide before the first plan, once:
+    - a built block, a fence or a wall block's own cell, or a natural block with no dig to open it: next to it
+      (`getToBlock`, a face asked for a full cube only);
+    - a floor with a block where the head goes: next to it, unless that block is natural and `allowBreak` is on;
+    - open air with its own column's node 1 to 5 under it: under it, on that node, within reach. With `allowPlace` on,
+      the pillar's search as before.
+    The answer is `ok` with a note: the cell, what is in it, why, and how far the body stopped. `GotoReport.beside`
+    records it. A natural block the goto may dig is dug into, as before, because the body then stands in the cell
+    itself. Water was a goal already (W3). Lava, open air with no floor within 5, and R6's perch with nothing in reach
+    stay `unreachable`: nothing in reach can be stood on, or ending at lava's edge is the hazard rules' call, not the
+    goal's.
+56. **Why an option.** Of the callers that give a `block` goal, seven act on being in the cell and would be misled by
+    `ok` next to it: the branch miner's pickups (in `branch.ts` and `commands-explore.ts`), the miner's `intoHole`, the
+    branch layout's `standOn`, the tunnel's steps, the quarry's stair climb (each digs after a failed walk), and the
+    portal's step in (steered by hand from the walk's end). Only `!goto` sets it, for coordinates and waypoints alike,
+    and through it the `!test goto` series. The series counts an end within 2.5 of the goal cell's floor centre:
+    beside a block that is arrived, and under a cell 3 to 5 up it is not. The flight's glide down follows only a
+    failed walk, so it takes no glide after an `ok` beside the cell. R6's perch answer stays for every caller: none of
+    the strict callers gives a cell over a fence.
+57. **Measured** (2026-11-14). On bds-pve, from the fence's top under a planks eave, a bottom stair eave and a top
+    stair eave, at the centre and two offsets: 90 of 90 walks arrived, in 77 to 81 ticks (3.8 to 4.0 s), 1 plan, 0
+    corrections, 0 damage. Before, 10 of 10 were unreachable in 41 ticks with no plan. Set 0.5 over the top with the
+    walk started at once, 10 of 10 arrived. A goal over that fence ended next to it with the note 20 of 20 (before:
+    `rule place` in 1 tick). With `beside`, a block of planks, planks where the head goes and a cell 2 over the grass
+    ended next to it or under it 30 of 30 in 66 to 69 ticks; without it, 30 of 30 were unreachable in 1 tick.
+    Offline, in both configurations, 240 of 240 starts and 80 of 80 goals came out the same.
+    R5's 249 shape rows are byte for byte the same. R6's 396 rows differ only by 1 tick in 29 rows. The reach bench
+    at the live settings gave 2541 pairs, 0 deaths and 8 false unreachable (R6's count); two long pairs swapped,
+    traced to the 500 ms corridor limit. The mob gates passed: pve-m1, pve-creeper, nav-hostile-fall and pve-combat,
+    and the gauntlet's live kit (33 cells, 0 deaths).
+58. **Left as they are.** `!home go` and the older `!goto` handler of `chat/commands.ts` (`commands-nav.ts` takes the
+    name back from it) pass no `beside`; their files are not this track's. `!test goto`'s 2.5 radius counts an end under a high air cell as not arrived. A low top with a block
+    beside it at its own height has no crouched step onto it, and ends next to it.

@@ -18,6 +18,7 @@ import { BotSkills } from '../../../src/skills/index.ts';
 import type { NavActions } from '../../../src/skills/nav/actions.ts';
 import { Avoidance } from '../../../src/skills/nav/avoidance.ts';
 import type { NavGoal } from '../../../src/skills/nav/goals.ts';
+import type { NavGotoOptions } from '../../../src/skills/nav/navigator.ts';
 import type { BenchPair, BenchWorld } from '../../../src/skills/nav/bench/worlds.ts';
 import { MIN_Y, V, VOX_BLOCKS, isDoor, isDoorLower, isGravityVox, toggledDoor, type Vox } from '../../../src/skills/nav/bench/vox.ts';
 import type { SkillResult } from '../../../src/skills/types.ts';
@@ -81,6 +82,10 @@ export interface SimOptions {
   noPerchGoal?: boolean;
   /** Track R6: the goto's goal (default the pair's goal cell as a `block` goal). */
   goal?: NavGoal;
+  /** Track R7: no low perches, neither as a start nor as a goal (Navigator.lowPerch false: the behaviour before R7). */
+  noLow?: boolean;
+  /** Track R7: more goto options (the `!goto` command's `beside`, a caller's own). */
+  gotoOpts?: Partial<NavGotoOptions>;
 }
 
 /** Track R2: the palette id a placed throwaway block becomes. */
@@ -109,6 +114,9 @@ export interface PairRun {
   endDist: number;
   plans: number;
   failures: number;
+  /** Track R7: main plans from a perch, from a low perch (GotoReport.perchStarts, lowStarts). */
+  perchStarts?: number;
+  lowStarts?: number;
   corridor?: string;
   /** Track R2: the end is stranded (scripts/reach-bench.ts: no way back to the start without a hurting fall, one before). */
   stranded?: boolean;
@@ -343,6 +351,7 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
   if (o.navSettleTicks !== undefined) skills.nav.settleTicks = o.navSettleTicks; // Track R5
   if (o.noPerch) skills.nav.perch = false;
   if (o.noPerchGoal) skills.nav.perchGoals = false; // Track R6
+  if (o.noLow) skills.nav.lowPerch = false; // Track R7
   // the survival layer's avoidance (skills/survival: lava proximity costs, no mobs here)
   const avoidance = new Avoidance({ entities: () => server.world.entities, origin: () => (loop.state.ready ? loop.state.pos : undefined), lavaWorld: server.world });
   skills.nav.cellCost = () => avoidance.costFn();
@@ -356,7 +365,7 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
   }
   conn.tick(o.settleTicks ?? 5);
   let result: SkillResult | undefined;
-  const p = skills.goto(o.goal ?? { type: 'block', p: pair.goal }, { timeoutTicks: o.timeoutTicks ?? 6000, allowBreak: o.allowBreak ?? false, allowPlace: o.allowPlace ?? false, closeDoors: false, explain: true }).then((r) => (result = r));
+  const p = skills.goto(o.goal ?? { type: 'block', p: pair.goal }, { timeoutTicks: o.timeoutTicks ?? 6000, allowBreak: o.allowBreak ?? false, allowPlace: o.allowPlace ?? false, closeDoors: false, explain: true, ...(o.gotoOpts ?? {}) }).then((r) => (result = r));
   const self = server.world.self as { health: number };
   let health = o.health ?? 20;
   self.health = health;
@@ -437,6 +446,8 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
     endDist: +Math.hypot(end.x - (pair.goal.x + 0.5), end.z - (pair.goal.z + 0.5)).toFixed(2),
     plans: rep?.plans.length ?? 0,
     failures: rep?.failures ?? 0,
+    ...(rep?.perchStarts ? { perchStarts: rep.perchStarts } : {}),
+    ...(rep?.lowStarts ? { lowStarts: rep.lowStarts } : {}),
     ...(rep?.corridor ? { corridor: `${rep.corridor.status ?? 'pending'} ${rep.corridor.requests}req ${rep.corridor.passed}passed ${rep.corridor.failed}failed` } : {}),
     log,
   };

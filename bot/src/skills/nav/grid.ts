@@ -433,8 +433,10 @@ export class NavGrid {
    * cells from the feet to the head are free (as for `stand`); no liquid, climber or
    * scaffolding in the floor or the feet cell. BLOCKED / UNKNOWN as for `stand`. Never a node the planner walks into:
    * only a start (PathOptions.startFeet).
+   * Track R7: `height` the body's height the head room is asked for: 1.8 standing (the default), `PHYSICS.sneakHeight`
+   * 1.49 for a body the server holds crouched there (`lowPerch`).
    */
-  perch(x: number, y: number, z: number): number | undefined {
+  perch(x: number, y: number, z: number, height: number = PHYSICS.height): number | undefined {
     const c = this.cls(x, y, z);
     if (!c) return UNKNOWN;
     if (isScaffold(c) || c.liquid || isClimber(c)) return BLOCKED;
@@ -459,13 +461,26 @@ export class NavGrid {
       if (b.top < 1 - EPS || b.top > 1.5 + EPS) return BLOCKED;
       feet = y - 1 + b.top;
     }
-    const headTop = Math.floor(feet + PHYSICS.height - 1e-6);
+    const headTop = Math.floor(feet + height - 1e-6);
     for (let cy = y + 1; cy <= headTop; cy++) {
       const h = this.cls(x, cy, z);
       if (!h) return UNKNOWN;
       if (!passable(h)) return BLOCKED;
     }
     return feet;
+  }
+
+  /**
+   * Track R7: feet height of a body resting on a perch (`perch`) where the head room is under 1.8 and at least the
+   * crouched box's 1.49 (a fence's top under a roof's eave 1.5 over it): BDS holds a body there crouched, its box 1.49
+   * high, with no sneak key (physics.ts `heldLow`). BLOCKED where `perch` gives a feet height (the head room is free:
+   * no low perch) or none fits; UNKNOWN as for `stand`. Only a start (PathOptions.startFeet), as a perch is.
+   */
+  lowPerch(x: number, y: number, z: number): number | undefined {
+    const full = this.perch(x, y, z);
+    if (full === undefined) return UNKNOWN;
+    if (!Number.isNaN(full)) return BLOCKED;
+    return this.perch(x, y, z, PHYSICS.sneakHeight);
   }
 
   /** The body cells of a node standing at `feet` hold a door or gate. */

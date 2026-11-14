@@ -17,6 +17,7 @@ import type { BlockInfo, Vec3 } from '../../world/types.ts';
 import { breakTicksWith } from './baritone/helper.ts'; // Track BB: the shared break-time lookup
 import { sneakFits } from './baritone/moves.ts'; // Track BC: a goal cell the body fits sneaking
 import type { InputLoop, InputLoopState } from '../input/inputLoop.ts';
+import { restsOn } from '../input/physics.ts'; // Track R7: a body the teleport's answer calls grounded that rests on nothing
 import { classify, type TerrainClass } from '../terrain/classify.ts';
 import type { TerrainSource } from '../terrain/query.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
@@ -40,6 +41,11 @@ import { REACH_RULES, causeTag, causeWords, fallOnPath, fallWords, relaxOptions,
 
 /** Track R: goto options of the navigator. `blacklist`: consult and feed the failure blacklist (default: `any` and `getToBlock` goals). */
 export type NavGotoOptions = GotoOptions & { blacklist?: boolean };
+
+/** Track R7: why a `block` goal's cell cannot be stood on, when the walk ends next to it (GotoOptions.beside). */
+export type BesideKind = 'solid' | 'no head room' | 'in the air';
+/** Track R7: an open goal cell is ended under (its own column's node) when that node is at most this many cells below it (the eye 3.9 from the cell's centre at 5: in reach). */
+export const BESIDE_AIR_MAX = 5;
 
 /** What the navigator needs from the world model. `World` + `worldSource()` provide it. */
 export interface NavWorld {
@@ -216,11 +222,18 @@ export interface GotoReport {
   perchStarts?: number;
   /** Track R5: ticks waited with no start node while the body was still in the air (SETTLE_TICKS at most). */
   settleTicks?: number;
+  /** Track R7: of `perchStarts`, those from a low perch (NavGrid.lowPerch: the body held crouched under an eave). */
+  lowStarts?: number;
   /**
    * Track R6: the goal's cell is a perch (a fence's top): `on` the walk ended on it, `beside` next to it (`perchRing`: no
    * way onto it), with the distance from the body's feet to the top's centre at the end.
    */
   perchGoal?: { end: 'on' | 'beside'; on: string; dist?: number };
+  /**
+   * Track R7: a `block` goal nobody stands in, walked to next to it (GotoOptions.beside): the kind (`solid`, `no head
+   * room`, `in the air`), what is in the cell, and the distance from the body's feet to the cell's floor centre at the end.
+   */
+  beside?: { kind: BesideKind; what: string; dist?: number };
   /** Track AB: worker answers spliced into the path being walked, and answers dropped as stale (blocks changed near them). */
   upgrades?: number;
   stale?: number;
@@ -356,7 +369,12 @@ interface Active {
    * Track R6: the `block` goal's cell is a perch (a fence's top: astar `perchGoal`), looked at once at the first plan
    * (null: it is not). `ring`: the walk ends next to it (`perchRing`), no step or jump onto it being there or found.
    */
-  perchGoal?: { x: number; y: number; z: number; feet: number; on: string; enter: boolean; ring: boolean; block: Vec3 } | null;
+  perchGoal?: { x: number; y: number; z: number; feet: number; on: string; enter: boolean; ring: boolean; block: Vec3; low?: true } | null;
+  /**
+   * Track R7: the `block` goal's cell cannot be stood on and the walk ends next to it (GotoOptions.beside), looked at once
+   * before the first plan (null: not such a goal, or the goto has no `beside`; undefined: not looked at yet).
+   */
+  beside?: { x: number; y: number; z: number; kind: BesideKind; what: string; why: string } | null;
   noBreak: Set<number>;
   /** Pillar / door cells (cellKey) whose action failed during this goto: not planned again. */
   noAction: Set<number>;
@@ -601,6 +619,11 @@ export class Navigator {
   perch = true;
   /** Track R6: a goal on a perch (a fence's top) is walked onto or next to (false: the behaviour before, for the tests). */
   perchGoals = true;
+  /**
+   * Track R7: a body held crouched on a top under less than 1.8 of head room (a fence under an eave) plans from it, and
+   * such a top as a goal ends next to it (false: the behaviour before, for the tests).
+   */
+  lowPerch = true;
   private protect: NavigatorOptions['protect'];
   /** Track BK: cells (cellKey) no goto may dig while a job holds them (a quarry's stair treads); every goto's noBreak starts with them. */
   readonly keptCells = new Set<number>();
@@ -913,6 +936,7 @@ export class Navigator {
       closeTrapdoors: options.closeTrapdoors ?? true, // Track BG
       avoidFarmlandDrops: options.avoidFarmlandDrops ?? false, // the farmer: plan around falls onto farmland
       explain: options.explain ?? false, // Track R1
+      beside: options.beside ?? false, // Track R7
     };
     return new Promise((resolve) => {
       const report: GotoReport = {
@@ -1278,7 +1302,7 @@ export class Navigator {
    */
   private lookPerchGoal(a: Active, gx: number, gy: number, gz: number, column = false): void {
     if (this.grid.cls(gx, gy, gz) === undefined || this.grid.cls(gx, gy - 1, gz) === undefined) return; // asked again once loaded
-    const pg = this.perchGoals ? perchGoal(this.grid, gx, gy, gz) : undefined;
+    const pg = this.perchGoals ? perchGoal(this.grid, gx, gy, gz, this.lowPerch) : undefined; // Track R7: a low top too
     if (!pg) {
       a.perchGoal = null;
       return;
@@ -1293,12 +1317,12 @@ export class Navigator {
         }
       }
     }
-    a.perchGoal = { x: gx, y: gy, z: gz, feet: pg.feet, on: pg.on, enter: pg.enter, ring: !from, block: pg.block };
+    a.perchGoal = { x: gx, y: gy, z: gz, feet: pg.feet, on: pg.on, enter: pg.enter, ring: !from, block: pg.block, ...(pg.low ? { low: true as const } : {}) };
     if (from && column) a.planGoal = { type: 'block', p: { x: gx, y: gy, z: gz } }; // (the column's top: PathOptions.perchGoal takes a block goal)
     if (from) this.log.info(`goto: the goal ${gx},${gy},${gz} is on ${pg.on} (feet ${+pg.feet.toFixed(4)}), no node: planned onto it by a step or a jump from beside it`);
     else {
       a.planGoal = perchRing(a.perchGoal);
-      this.log.info(`goto: the goal ${gx},${gy},${gz} is on ${pg.on} (feet ${+pg.feet.toFixed(4)}), no node${pg.enter ? ' and no block beside it to step or jump onto it from' : ' and no move goes onto it'}: the walk ends next to it`);
+      this.log.info(`goto: the goal ${gx},${gy},${gz} is on ${pg.on} (feet ${+pg.feet.toFixed(4)}), no node${pg.low ? ' and under 1.8 of head room (a body is held crouched there)' : pg.enter ? ' and no block beside it to step or jump onto it from' : ' and no move goes onto it'}: the walk ends next to it`);
     }
   }
 
@@ -1364,8 +1388,96 @@ export class Navigator {
       this.log.info(`goto: on ${pg.on} at ${pg.x},${pg.y},${pg.z}, ${dist} from its centre`);
       return undefined;
     }
-    const why = pg.enter ? 'no step or jump leads onto it' : 'no move goes onto it';
+    const why = pg.low ? 'under 1.8 of head room: a body gets onto it only crouching' : pg.enter ? 'no step or jump leads onto it' : 'no move goes onto it'; // Track R7
     const note = `the goal's cell ${pg.x},${pg.y},${pg.z} (on ${pg.on}) cannot be stood on (${why}): stopped ${dist} blocks from it`;
+    this.log.info(`goto: ${note}`);
+    return note;
+  }
+
+  /**
+   * Track R7: a `block` goal whose cell cannot be stood on, for a goto with `beside` (the `!goto` command): looked at once
+   * before the first plan, when the cell and its neighbours above and below are loaded. A player walks up to it, so the
+   * walk ends next to it with a note, at once, where before it ended `unreachable` (in 1 tick with no plan, or after
+   * about 330 ticks and 28 plans with allowBreak on):
+   * - a solid that is not natural terrain, or natural with no dig to open it (allowBreak off and the dig way off): next to
+   *   it (getToBlock: the 8 columns round it with the cell at the feet or the head, in reach, a face turned to the eye
+   *   when it is a full cube; a fence, a wall or a pane has no face to ask for). A natural block the goto may dig is dug
+   *   into as before (the body then stands in the cell itself, which is what was asked);
+   * - an open cell on a floor with a block where the head goes (no head room): next to it, unless that block is natural
+   *   and allowBreak is on (dug out as before);
+   * - an open cell with its own column's node at most BESIDE_AIR_MAX under it and nothing between: under it (the eye 3.9
+   *   at most from the cell's centre, in reach). With allowPlace on the pillar's search as before;
+   * - nothing else changes: a cell the body fits sneaking (Track BC) and water (Track W3) were goals already; lava stays
+   *   unreachable (a body is never walked up to a lava cell to end there: the survival layer's hazard rules decide how near
+   *   lava a walk goes, not the goal); a perch is Track R6's; open air with no floor within 5 under it stays unreachable.
+   */
+  private lookBeside(a: Active, gx: number, gy: number, gz: number): void {
+    const c = this.grid.cls(gx, gy, gz);
+    const head = this.grid.cls(gx, gy + 1, gz);
+    const under = this.grid.cls(gx, gy - 1, gz);
+    if (!c || !head || !under) return; // asked again once loaded
+    if (c.liquid || sneakFits(this.grid, gx, gy, gz) === true || waterGoalCell(this.grid, gx, gy, gz)) {
+      a.beside = null;
+      return;
+    }
+    const p = { x: gx, y: gy, z: gz };
+    let kind: BesideKind;
+    let why: string;
+    let what = c.name;
+    let goal: NavGoal;
+    if (c.boxes.length > 0) {
+      if (isNaturalTerrain(c.name) && (a.opts.allowBreak || this.digWayOn(a))) {
+        a.beside = null; // dug into, as before
+        return;
+      }
+      kind = 'solid';
+      why = c.fullCube ? `inside ${c.name}` : `inside ${c.name}, no room for a body in it`;
+      goal = c.fullCube ? { type: 'getToBlock', p } : { type: 'getToBlock', p, face: false };
+    } else if (head.boxes.length > 0 && !head.liquid && under.boxes.length > 0) {
+      if (a.opts.allowBreak && isNaturalTerrain(head.name)) {
+        a.beside = null; // its head block dug out, as before
+        return;
+      }
+      kind = 'no head room';
+      why = `no head room: ${head.name} over it`;
+      goal = { type: 'getToBlock', p, face: false };
+    } else {
+      if (a.opts.allowPlace) {
+        a.beside = null; // the pillar's search, as before
+        return;
+      }
+      let node: number | undefined;
+      for (let y = gy - 1; y >= gy - BESIDE_AIR_MAX; y--) {
+        const f = this.grid.stand(gx, y, gz);
+        if (f === undefined) return; // asked again once loaded
+        if (!Number.isNaN(f)) {
+          node = y;
+          what = `air, ${+(gy - f).toFixed(2)} over the floor`;
+          break;
+        }
+        if ((this.grid.cls(gx, y, gz)?.boxes.length ?? 1) > 0) break; // a block under it that is no floor to stand on
+      }
+      if (node === undefined) {
+        a.beside = null;
+        return;
+      }
+      kind = 'in the air';
+      why = 'in the air: the walk ends under it';
+      goal = { type: 'block', p: { x: gx, y: node, z: gz } };
+    }
+    a.beside = { x: gx, y: gy, z: gz, kind, what, why };
+    a.planGoal = goal;
+    this.log.info(`goto: the goal's cell ${gx},${gy},${gz} (${what}) cannot be stood on (${why}): the walk ends ${kind === 'in the air' ? 'under' : 'next to'} it`);
+  }
+
+  /** Track R7: the end of a walk next to a goal nobody stands in: the report's `beside` and the reply's note. */
+  private besideArrival(a: Active): string | undefined {
+    const b = a.beside;
+    if (!b) return undefined;
+    const p = this.loop.state.pos;
+    const dist = +Math.hypot(p.x - (b.x + 0.5), p.y - b.y, p.z - (b.z + 0.5)).toFixed(2);
+    a.report.beside = { kind: b.kind, what: b.what, dist };
+    const note = `the goal's cell ${b.x},${b.y},${b.z} (${b.what}) cannot be stood on (${b.why}): stopped ${dist} blocks from it`;
     this.log.info(`goto: ${note}`);
     return note;
   }
@@ -1636,7 +1748,7 @@ export class Navigator {
    * `locateStart`: a fence's top, which the stand rule has no node for). Not a safe node: `lastSafe` stays locateNode's.
    */
   private startOf(pos: Vec3, prefer: 'swim' | 'climb' | undefined): LocatedNode | undefined {
-    return this.perch ? locateStart(this.grid, pos, prefer) : locateNode(this.grid, pos, prefer);
+    return this.perch ? locateStart(this.grid, pos, prefer, this.lowPerch) : locateNode(this.grid, pos, prefer);
   }
 
   /**
@@ -2329,7 +2441,10 @@ export class Navigator {
       // Track R5: a body still in the air (just off a glide, falling onto something) has its node within ticks: wait for
       // it with no failure, SETTLE_TICKS at most a goto (the Realm, 2026-11-13: three failures 20 ticks apart ended a walk
       // 0.6 s after a landing)
-      if (!s.onGround && !s.inWater && !s.inLava && a.settled < this.settleTicks) {
+      // Track R7: also a body the state calls grounded with nothing under its feet (the server's teleport answer says
+      // "on the ground" for a body set 0.5 over a fence's top; the Realm, 2026-11-14: a failure counted there)
+      const airborne = !s.onGround || (this.lowPerch && restsOn(this.loop.world, s.pos) === false);
+      if (airborne && !s.inWater && !s.inLava && a.settled < this.settleTicks) {
         if (a.settled === 0) this.log.info(`goto: no start node at ${fmt(s.pos)} while the body is in the air: waiting for it to settle (up to ${this.settleTicks} ticks)`);
         a.settled += SETTLE_STEP;
         a.report.settleTicks = a.settled;
@@ -2389,8 +2504,13 @@ export class Navigator {
       if (!a.perchGoal && Number.isNaN(this.grid.stand(gx, gy, gz)) && Number.isNaN(this.grid.standThrough(gx, gy, gz))) {
         // feet on a stairs block's low half (y + 0.5) floor to the stairs cell: the node is the one above
         const c = this.grid.cls(gx, gy, gz);
-        if (c?.floor && c.top === 1 && !c.fullCube && this.grid.stand(gx, gy + 1, gz) === gy + 1) {
+        const stairs = c?.floor && c.top === 1 && !c.fullCube && this.grid.stand(gx, gy + 1, gz) === gy + 1;
+        // Track R7: next to it (planGoal set) when a player could walk up to it: decided before the first plan, no failure counted
+        if (!stairs && a.opts.beside && a.beside === undefined) this.lookBeside(a, gx, gy, gz);
+        if (stairs) {
           a.planGoal = { type: 'block', p: { x: gx, y: gy + 1, z: gz } };
+        } else if (a.beside) {
+          // (Track R7: the walk ends next to it)
         } else if (!(a.pathOpts.allowBreak || a.pathOpts.allowPlace) && !(c && c.boxes.length > 0 && isNaturalTerrain(c.name) && this.digWayOn(a)) && sneakFits(this.grid, gx, gy, gz) !== true && !waterGoalCell(this.grid, gx, gy, gz)) { // Track BC: a cell the body fits sneaking is a goal; Track W3: a water cell is reached swimming or diving there
           a.why = `goal cell ${gx},${gy},${gz} (${c?.name ?? 'unloaded'}) is not standable`;
           if (a.opts.explain) a.cause = this.unstandableCause(gx, gy, gz, start); // Track R1: no search can stand there
@@ -2415,7 +2535,8 @@ export class Navigator {
       a.report.perchStarts = (a.report.perchStarts ?? 0) + 1;
       const own = this.grid.cls(start.x, start.y, start.z);
       const on = own?.boxes.length ? own : this.grid.cls(start.x, start.y - 1, start.z);
-      this.log.info(`goto: starting from a perch at ${start.x},${start.y},${start.z} feet ${+start.feet.toFixed(4)} (on ${on?.name ?? '?'}: no standable node there)`);
+      if (start.low) a.report.lowStarts = (a.report.lowStarts ?? 0) + 1; // Track R7
+      this.log.info(`goto: starting from a perch at ${start.x},${start.y},${start.z} feet ${+start.feet.toFixed(4)} (on ${on?.name ?? '?'}: no standable node there${start.low ? '; under 1.8 of head room, the body held crouched' : ''})`);
     }
     a.search = this.newSearch(a, start, 'main', reason); // Track AB: in the worker when it is ready
     // (the long dig search's interim, its best partial path after 40 ms, is not walked: weighted and digging cheaply,
@@ -2748,7 +2869,7 @@ export class Navigator {
         a.replan ??= 'partial';
         return;
       }
-      const note = this.perchArrival(a); // Track R6: beside a goal on a top no move goes onto
+      const note = this.perchArrival(a) ?? this.besideArrival(a); // Track R6: beside a goal on a top no move goes onto; Track R7: a cell nobody stands in
       a.finish(note ? { ok: true, note } : { ok: true });
       return;
     }

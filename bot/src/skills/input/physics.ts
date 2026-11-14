@@ -328,9 +328,13 @@ export function stepBody(prev: BodyState, cmd: MoveCommand, world: BlockQuery): 
     s.jumpTicks = 0;
   }
   s.sneaking = cmd.sneak;
-  s.sprinting = cmd.sprint && cmd.forward > 0 && !cmd.sneak;
+  // Track R7: held crouched where the body cannot stand (a fence's top under an eave 1.5 over it), as BDS 1.26.60 does:
+  // the 1.49 box and the sneak speed with no sneak key, and no edge rule (that comes with the key only)
+  const low = !cmd.sneak && !prev.gliding && heldLow(world, prev.pos);
+  s.low = low ? true : undefined;
+  s.sprinting = cmd.sprint && cmd.forward > 0 && !cmd.sneak && !low;
 
-  const height = s.sneaking ? PHYSICS.sneakHeight : PHYSICS.height;
+  const height = s.sneaking || low ? PHYSICS.sneakHeight : PHYSICS.height;
   // Track AJ: water moves the body only when the box shrunk by 0.4 at both ends is in it (BDS 1.26.60)
   const touch = liquidContact(world, s.pos, height);
   const wet = touch.water ? { water: liquidContact(world, s.pos, height, LIQUID.waterInset).water, lava: touch.lava } : touch;
@@ -361,7 +365,7 @@ export function stepBody(prev: BodyState, cmd: MoveCommand, world: BlockQuery): 
     accel = s.sprinting ? PHYSICS.airSprintAcceleration : PHYSICS.airAcceleration;
   }
   // Track AJ: BDS scales the move by the sneak factor also on the first tick after the sneak key is released
-  const mv = moveVectorOf(!cmd.sneak && prev.sneaking ? { ...cmd, sneak: true } : cmd);
+  const mv = moveVectorOf(!cmd.sneak && (prev.sneaking || low || prev.low === true) ? { ...cmd, sneak: true } : cmd); // Track R7: held low as sneaking
   applyImpulse(v, f32(mv.x * PHYSICS.impulseScale), f32(mv.z * PHYSICS.impulseScale), accel, cmd.yaw);
 
   let jumped = false;
@@ -471,6 +475,33 @@ function stepInLiquid(
     if (boxes && !boxes.some((o) => overlaps(o, moved, contactEpsilon(s.pos))) && !anyLiquid(world, moved)) v.y = f32(LIQUID.climbOut);
   }
   return { state: s, jumped: false, simulated: true };
+}
+
+/**
+ * Track R7: the standing box at feet `p` meets a block and the crouched one (`sneakHeight` 1.49) does not: the server
+ * holds such a body crouched with no sneak key (measured on BDS 1.26.60, bds-pve, a fence's top under a block 1.5 over
+ * it: `boundingbox_height` 1.49 and the `sneaking` actor flag, the sneak speed, and no stop at the top's edge without
+ * the key; standing again, 1.8, once the standing box is clear). False when a cell around is unknown.
+ */
+export function heldLow(world: BlockQuery, p: Vec3): boolean {
+  const stand = playerBox(p, PHYSICS.height);
+  const boxes = solidBoxes(world, stand);
+  if (!boxes?.some((o) => overlaps(o, stand))) return false;
+  const low = playerBox(p, PHYSICS.sneakHeight);
+  return !boxes.some((o) => overlaps(o, low));
+}
+
+/**
+ * Track R7: a box top lies right under the feet at `p` (within 0.001 under the footprint): the body rests on something.
+ * The server's teleport answer says "on the ground" for a body set down 0.5 over a fence's top (the Realm,
+ * 2026-11-14), and the input loop keeps that flag until the next move; this asks the blocks. undefined when unknown.
+ */
+export function restsOn(world: BlockQuery, p: Vec3): boolean | undefined {
+  const box = playerBox(p, PHYSICS.sneakHeight);
+  const region = sweepBox(box, 0, -0.01, 0);
+  const boxes = solidBoxes(world, region);
+  if (!boxes) return undefined;
+  return clipAll(boxes, box, 1, -1e-3) !== -1e-3;
 }
 
 /** Track AJ: some cell the box overlaps holds a liquid (whole cells; unknown cells count as liquid). */

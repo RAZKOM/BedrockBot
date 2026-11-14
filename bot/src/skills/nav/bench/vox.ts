@@ -39,6 +39,9 @@ export const V = {
   slabTop: 28,
   slabBottom: 29,
   composter: 30,
+  /** Track R7: an eave's block: spruce stairs, the bottom half and the top half (upside down). No generator uses them. */
+  stairBottom: 31,
+  stairTop: 32,
 } as const;
 export type VoxId = (typeof V)[keyof typeof V];
 
@@ -80,6 +83,8 @@ export const VOX_BLOCKS: readonly (readonly [string, Record<string, unknown>])[]
   ['smooth_stone_slab', { 'minecraft:vertical_half': 'top' }],
   ['smooth_stone_slab', { 'minecraft:vertical_half': 'bottom' }],
   ['composter', { composter_fill_level: 0 }],
+  ['spruce_stairs', { upside_down_bit: 0, weirdo_direction: 0 }],
+  ['spruce_stairs', { upside_down_bit: 1, weirdo_direction: 0 }],
 ];
 
 export const isDoor = (id: number): boolean => id >= V.doorXLo && id <= V.doorZHiOpen;
@@ -95,7 +100,7 @@ export const isLiquid = (id: number): boolean => id === V.water || id === V.lava
 /** Natural terrain (the dig way's blocks: place/scaffold.ts NATURAL), in this palette. */
 export const isNaturalVox = (id: number): boolean => id === V.stone || id === V.dirt || id === V.grass || id === V.sand || id === V.gravel || id === V.deepslate;
 /** Built blocks (never dug: terrain/classify.ts isBuiltBlock), in this palette. */
-export const isBuiltVox = (id: number): boolean => id === V.cobble || id === V.planks || id === V.bricks || id === V.glass || id === V.fence || id === V.fenceNS || isDoor(id) || (id >= V.wall && id <= V.composter);
+export const isBuiltVox = (id: number): boolean => id === V.cobble || id === V.planks || id === V.bricks || id === V.glass || id === V.fence || id === V.fenceNS || isDoor(id) || (id >= V.wall && id <= V.stairTop);
 export const isGravityVox = (id: number): boolean => id === V.sand || id === V.gravel;
 
 export const MIN_Y = -64;

@@ -164,7 +164,8 @@ export function registerNavChat(chat: Chat, d: NavChatDeps): void {
         what = `${p.x} ${p.y} ${p.z}`;
       }
       reply(`walking to ${what}${now ? ' now' : ''}`);
-      void walk(goal, { timeoutTicks: GOTO_TICKS, explain: true }, `walking to ${what}`, now ? { urgent: true } : {}).then((r) => {
+      // Track R7: `beside`: a cell nobody stands in (inside a block, no head room, in the air) ends next to it with a note
+      void walk(goal, { timeoutTicks: GOTO_TICKS, explain: true, beside: true }, `walking to ${what}`, now ? { urgent: true } : {}).then((r) => {
         if (r.ok) reply(`arrived at ${what}${r.note ? ` (${r.note})` : ''}`); // Track R6: beside a top no move goes onto
         else if (r.reason !== 'interrupted') reply(`goto: ${r.reason}${r.note ? ` (${r.note})` : ''}`); // Track BI: note
       });

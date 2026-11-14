@@ -325,6 +325,12 @@ const F_DIVE = 16;
 const F_CUT = 32;
 /** Track R5: the start node is a perch (PathOptions.startFeet): only walks, jumps, drops and long drops leave it. */
 const F_PERCH = 64;
+/**
+ * Track R7: the start perch is a low one (NavGrid.lowPerch: under 1.8 of head room, the body held crouched in its 1.49
+ * box): only walks level with it or down and drops leave it, each with the crouched box's head room in the cells it
+ * passes (no jump, no step up, no diagonal, no doorway).
+ */
+const F_LOW = 128;
 /** Track W2: PathNode.cut bit: no step of this staircase is dug yet (entered by a plain swimOut). */
 export const CUT_UNPAID = 0x80;
 
@@ -616,6 +622,13 @@ export class PathSearch {
       if (isFeet(p) && Math.abs(p - opts.startFeet) < 1e-6) {
         startFeet = p;
         flags = F_PERCH;
+      } else if (!isFeet(p)) {
+        // Track R7: a top under less than 1.8 of head room, the body held crouched on it (NavGrid.lowPerch)
+        const l = grid.lowPerch(start.x, start.y, start.z);
+        if (isFeet(l) && Math.abs(l - opts.startFeet) < 1e-6) {
+          startFeet = l;
+          flags = F_PERCH | F_LOW;
+        }
       }
     }
     if (!isFeet(startFeet)) {
@@ -869,7 +882,9 @@ export class PathSearch {
     if (flags0 & F_CLIMB) return this.expandClimb(cur, cx, cy, cz, f0);
     if (flags0 & F_SNEAK) return this.expandSneak(cur, cx, cy, cz); // Track BC
     const inPassage = (flags0 & F_PASSAGE) !== 0;
-    const headCell = Math.floor(f0 + PHYSICS.height - 1e-6);
+    // Track R7: a low perch's body is the crouched box: the cells a move off it passes are asked to that height
+    const low = (flags0 & F_LOW) !== 0;
+    const headCell = Math.floor(f0 + (low ? PHYSICS.sneakHeight : PHYSICS.height) - 1e-6);
     const diag = costs.walk * Math.SQRT2;
     // Track AJ: movement-variety checks only once the grid has classified water / climbers / ladders at
     // all (NavGrid.variety, read after the cells in question have been looked at, so the answer does not
@@ -906,10 +921,19 @@ export class PathSearch {
           const gp = this.goalPerch;
           if (gp && !inPassage && !perch && nx === gp.x && ny === gp.y && nz === gp.z) this.enterPerch(cur, cx, cy, cz, f0, headCell, gp, dx, dz);
           // Track AX: a doorway at the feet level, or one cell up from a partial floor (a step of <= 0.5625)
-          if ((ny === cy || (ny === cy + 1 && !flat)) && this.doorway(cur, cx, cy, cz, f0, nx, ny, nz, axis)) took = true;
+          if (!low && (ny === cy || (ny === cy + 1 && !flat)) && this.doorway(cur, cx, cy, cz, f0, nx, ny, nz, axis)) took = true;
           continue;
         }
         const rise = f1 - f0;
+        // Track R7: off a low perch nothing goes up (a step or a jump lifts the crouched head into what is over it)
+        if (low && rise > 1e-6) {
+          took = true;
+          continue;
+        }
+        if (low && grid.freeColumn(nx, cy, headCell, nz) !== true) {
+          took = true; // (the crouched box passes the cells over the target's floor at the perch's height)
+          continue;
+        }
         if (rise <= STEP) {
           if (inPassage && !this.crossOut(cx, cy, cz, f0, axis)) {
             took = true;
@@ -1027,7 +1051,7 @@ export class PathSearch {
       else if ((flags0 & F_CUT) !== 0 && !inPassage) this.cutMoves(cur, cx, cy, cz);
     }
 
-    if (inPassage) return;
+    if (inPassage || low) return; // (Track R7: no diagonal, climb, parkour or pillar off a low perch)
 
     for (const [dx, dz] of DIAGONAL) {
       const nx = cx + dx;
@@ -1854,6 +1878,8 @@ export interface LocatedNode {
   feet: number;
   /** Track R5: a perch (`locatePerch`): plan from it with PathOptions.startFeet = feet. */
   perch?: true;
+  /** Track R7: a low perch (NavGrid.lowPerch: the head room under 1.8, the body held crouched there). */
+  low?: true;
 }
 
 /**
@@ -1869,30 +1895,34 @@ export const PERCH_ABOVE = 0.05;
  * neighbours), the feet at it or up to PERCH_ABOVE over it. The column nearest the body's centre; undefined when none.
  * The node is `perch` and the search starts from it with `startFeet` (only walks, jumps and drops leave it).
  */
-export function locatePerch(grid: NavGrid, pos: { x: number; y: number; z: number }): LocatedNode | undefined {
+export function locatePerch(grid: NavGrid, pos: { x: number; y: number; z: number }, low = false): LocatedNode | undefined {
   const y = Math.floor(pos.y + 1e-3);
   const bx = Math.floor(pos.x);
   const bz = Math.floor(pos.z);
   const hw = PHYSICS.width / 2;
   let best: LocatedNode | undefined;
   let bestD = Infinity;
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dz = -1; dz <= 1; dz++) {
-      const x = bx + dx;
-      const z = bz + dz;
-      // the column lies under the footprint
-      if (x + 1 <= pos.x - hw + 1e-6 || x >= pos.x + hw - 1e-6 || z + 1 <= pos.z - hw + 1e-6 || z >= pos.z + hw - 1e-6) continue;
-      const f = grid.perch(x, y, z);
-      if (!isFeet(f) || f > pos.y + 1e-3 || pos.y - f > PERCH_ABOVE) continue;
-      if (!perchUnder(grid, x, y, z, f, pos, hw)) continue;
-      const ddx = Math.max(x - pos.x, 0, pos.x - (x + 1));
-      const ddz = Math.max(z - pos.z, 0, pos.z - (z + 1));
-      const d = Math.hypot(ddx, ddz);
-      if (d < bestD) {
-        bestD = d;
-        best = { x, y, z, feet: f, perch: true };
+  // Track R7: a top under less than 1.8 of head room (the body held crouched there) only when no top has the full room
+  for (const lowPass of low ? [false, true] : [false]) {
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        const x = bx + dx;
+        const z = bz + dz;
+        // the column lies under the footprint
+        if (x + 1 <= pos.x - hw + 1e-6 || x >= pos.x + hw - 1e-6 || z + 1 <= pos.z - hw + 1e-6 || z >= pos.z + hw - 1e-6) continue;
+        const f = lowPass ? grid.lowPerch(x, y, z) : grid.perch(x, y, z);
+        if (!isFeet(f) || f > pos.y + 1e-3 || pos.y - f > PERCH_ABOVE) continue;
+        if (!perchUnder(grid, x, y, z, f, pos, hw)) continue;
+        const ddx = Math.max(x - pos.x, 0, pos.x - (x + 1));
+        const ddz = Math.max(z - pos.z, 0, pos.z - (z + 1));
+        const d = Math.hypot(ddx, ddz);
+        if (d < bestD) {
+          bestD = d;
+          best = lowPass ? { x, y, z, feet: f, perch: true, low: true } : { x, y, z, feet: f, perch: true };
+        }
       }
     }
+    if (best) return best;
   }
   return best;
 }
@@ -1925,15 +1955,28 @@ export interface PerchGoal {
   on: string;
   /** Its cell: the goal's cell (a top in the cell itself: a cauldron's inside) or the one under it (a fence). */
   block: { x: number; y: number; z: number };
+  /** Track R7: a low perch (under 1.8 of head room over the top: NavGrid.lowPerch); never entered. */
+  low?: true;
 }
 
 /**
  * Track R6: goal cell (x, y, z) is no node (no stand, no doorway) and is a perch (NavGrid.perch: a fence's top, a
  * cauldron's inside); undefined otherwise. `enter` says whether a path may end on it (PerchGoal.enter).
  */
-export function perchGoal(grid: NavGrid, x: number, y: number, z: number): PerchGoal | undefined {
+export function perchGoal(grid: NavGrid, x: number, y: number, z: number, low = false): PerchGoal | undefined {
   if (isFeet(grid.stand(x, y, z)) || isFeet(grid.standThrough(x, y, z))) return undefined;
   const feet = grid.perch(x, y, z);
+  if (!isFeet(feet) && low) {
+    // Track R7: a top under less than 1.8 of head room (a fence under an eave): never stood on (a body gets onto it only
+    // crouching, a move the planner does not have), ended next to
+    const l = grid.lowPerch(x, y, z);
+    if (!isFeet(l)) return undefined;
+    const own = grid.cls(x, y, z);
+    const inOwn = !!own && own.boxes.length > 0;
+    const sup = inOwn ? own : grid.cls(x, y - 1, z);
+    if (!sup) return undefined;
+    return { feet: l, enter: false, on: sup.name, block: { x, y: inOwn ? y : y - 1, z }, low: true };
+  }
   if (!isFeet(feet)) return undefined;
   const own = grid.cls(x, y, z);
   const inOwn = !!own && own.boxes.length > 0;
@@ -1952,8 +1995,8 @@ export function perchGoal(grid: NavGrid, x: number, y: number, z: number): Perch
  * Track R5: the node a walk starts from: `locateNode`'s, else the perch the body rests on (`locatePerch`). A body in
  * water (`prefer` 'swim') has no perch.
  */
-export function locateStart(grid: NavGrid, pos: { x: number; y: number; z: number }, prefer?: 'swim' | 'climb'): LocatedNode | undefined {
-  return locateNode(grid, pos, prefer) ?? (prefer === 'swim' ? undefined : locatePerch(grid, pos));
+export function locateStart(grid: NavGrid, pos: { x: number; y: number; z: number }, prefer?: 'swim' | 'climb', low = true): LocatedNode | undefined {
+  return locateNode(grid, pos, prefer) ?? (prefer === 'swim' ? undefined : locatePerch(grid, pos, low)); // Track R7: `low` false: no low perch (the behaviour before)
 }
 
 /**

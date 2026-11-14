@@ -84,6 +84,12 @@ export interface BodyState {
   gliding?: boolean;
   /** Track AU: firework boost ticks left (0 = none). */
   boostTicks?: number;
+  /**
+   * Track R7: the body was held crouched on the last tick with no sneak key (physics.ts `heldLow`: the standing box
+   * meets a block where the crouched one does not; BDS sets the `sneaking` actor flag and the 1.49 box itself). Not the
+   * sneak key: `sneaking` stays false, so no start_sneaking is sent and the sneak edge rule does not apply.
+   */
+  low?: boolean;
 }
 
 export interface StepResult {

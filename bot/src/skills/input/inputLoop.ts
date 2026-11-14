@@ -156,6 +156,12 @@ export interface InputLoopState {
    * than 1.8 of headroom leaves the body there (skills/fly/prone.ts digs it free).
    */
   prone?: boolean;
+  /**
+   * Track R7: the own box height the server last sent (`boundingbox_height`: 1.8 standing, 1.49 crouched, 0.6 crawling
+   * or gliding); undefined before the first. A body held crouched where it cannot stand (under 1.8 of head room) reads
+   * 1.49 with no sneak key.
+   */
+  poseHeight?: number;
   teleports: number;
   /** Tick of the last input sent. */
   tick: bigint;
@@ -263,6 +269,7 @@ export class InputLoop {
       gliding: b.gliding ?? false,
       boostTicks: boostTicksExpected(b.boostTicks ?? 0),
       prone: this.ownPose.prone && !(b.gliding ?? false) && !(b.inWater ?? false),
+      ...(this.ownPose.height !== undefined ? { poseHeight: this.ownPose.height } : {}),
       teleports: this.teleports,
       tick: this.lastTick,
       ready: this.ready,

@@ -42,6 +42,14 @@ export interface GotoOptions {
    * say it: SkillResult `cause` and `note`. The `!goto` command sets it. Default false.
    */
   explain?: boolean;
+  /**
+   * Track R7 (docs/pathfinding.md "A block goal nobody stands in"): a `block` goal whose cell cannot be stood on (inside a
+   * built block or a fence, no head room, open air up to 5 over a floor) ends `ok` next to it (under it for the air),
+   * with a `note` saying so, instead of `unreachable`. Only for walks whose caller only wants to get there (`!goto`, its
+   * waypoints, the `!test goto` series through it); a caller that acts on being in the cell (a pickup in a hole, a
+   * tunnel's next step) leaves it off. Default false.
+   */
+  beside?: boolean;
 }
 
 export interface Skills {
