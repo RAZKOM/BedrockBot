@@ -186,6 +186,23 @@ export function kitReady(kit: FlightKit, toolWearLimit: number, otherRockets = 0
   return { ok: true };
 }
 
+/**
+ * Track F13 (docs/flight.md "A flight from the box alone (Track F13)"): the rockets a takeoff, a hop or a route is
+ * simulated with before the flight starts. The loose rockets (the hotbar's, else the inventory's) when there are any:
+ * a flight with loose rockets is decided as before, on fewer rockets than it may have after a refill, which only ever
+ * makes the check stricter. With none loose, the rockets the flight will have once FlyProcess.prepare has refilled the
+ * hotbar: up to a stack from the fireworks box, else from the other carried boxes (`otherRockets`, Supply.carried).
+ * Before, a kit of the box alone was simulated with 0 rockets: every takeoff fell short ("it needs a rocket"), the
+ * command said there was no clear climb and walked the whole way, and the refill that would have given it rockets was
+ * never reached.
+ */
+export function rocketsForFlight(kit: Pick<FlightKit, 'rockets' | 'rocketsHotbar' | 'boxRockets'>, otherRockets = 0): number {
+  const loose = kit.rocketsHotbar || kit.rockets;
+  if (loose > 0) return loose;
+  if (kit.boxRockets > 0) return Math.min(64, kit.boxRockets);
+  return Math.min(64, Math.max(0, otherRockets));
+}
+
 /** `elytra 410/432, 23 rockets (16 in the hotbar), box 64` for status lines. */
 export function kitLine(kit: FlightKit): string {
   const el = kit.elytraWorn || kit.elytraSlot >= 0 ? `elytra ${kit.elytraLeft ?? '?'}/${elytraMax()}${kit.elytraWorn ? ' (on)' : ''}` : 'no elytra';

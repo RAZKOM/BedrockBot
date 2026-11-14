@@ -18,7 +18,7 @@ import type { RuntimeSettings } from '../../config/settings.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { FlightController, FlightReport } from '../../skills/fly/controller.ts';
 import { elytraWornLimit, kitLine, kitReady, readKit, ROCKET, SupplyWatch, type FlightKitMemory, type KitInventory } from '../../skills/fly/kit.ts';
-import type { FlightKitOps } from '../../skills/fly/kitops.ts';
+import { boxLeftLine, refillEndLine, type FlightKitOps } from '../../skills/fly/kitops.ts';
 import { cruiseHeight, flightSeconds, hdist, takeoffSky, type CellQuery, type LandingTarget } from '../../skills/fly/plan.ts';
 import type { LandingCell, LandingPlan } from '../../skills/fly/landing.ts';
 import { holdWorth, walkSeconds } from '../../skills/fly/landprice.ts'; // Track L1
@@ -349,11 +349,18 @@ export class FlyProcess extends BaseProcess {
       if (kit.rocketsHotbar === 0 && kit.rockets > 0) await this.d.kitOps.rocketsToHotbar();
       if (t !== this.token) return;
       kit = this.kit();
-    } else if (kit.rocketsHotbar < min && kit.boxRockets > 0) {
+    } else if ((kit.rocketsHotbar < min || kit.rockets === 0) && kit.boxRockets > 0) {
+      // (Track F13: and whenever nothing is loose, whatever fireworksMin says: the flight was decided on the box's rockets)
       const r = await this.d.kitOps.refillFromBox(() => t === this.token);
       if (t !== this.token) return;
       this.notes.push(`refill before: ${r.ok ? `${r.taken} rockets` : (r.reason ?? 'failed')}`);
       kit = this.kit();
+      const line = refillEndLine(r, kit.rockets);
+      if (line) {
+        this.log.info(`fly: ${this.target.label}: ${line}`);
+        this.end({ ok: false, reason: line });
+        return;
+      }
     }
     if (!glide && kit.rocketsHotbar > 0 && kit.rocketsHotbar < min && kit.rockets > kit.rocketsHotbar) {
       // a stack more from the inventory when the hotbar is low (a failed move is no reason not to fly)
@@ -617,6 +624,8 @@ export class FlyProcess extends BaseProcess {
       if (t !== this.token) return;
       this.notes.push(`refill after: ${f.ok ? `${f.taken} rockets` : (f.reason ?? 'failed')}`);
       kit = this.kit();
+      // (Track F13: a box the refill could not pick up again is said, with where it stands)
+      if (f.where && !f.pickedUp) this.d.say(boxLeftLine(f));
     }
     for (const line of (this.d.supply ?? new SupplyWatch()).check(kit, min, s.get('toolWearLimit'))) this.d.say(line);
     if (r.ok) this.end({ ok: true });

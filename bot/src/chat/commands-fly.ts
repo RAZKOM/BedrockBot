@@ -11,10 +11,10 @@
 import type { Vec3 } from '../connection/types.ts';
 import { FlightController, skyQuery } from '../skills/fly/controller.ts';
 import { glideKitReady, jumpTakeoff, ledgeTakeoff, planGlideDown, routeTakeoff, routeTakeoffOptions, smallPlatform, verticalTakeoff, type Ledge, type SimDeps } from '../skills/fly/glide.ts'; // Track BH, F9a
-import { elytraWornLimit, flightKitMemoryOf, isRocket, kitLine, kitReady, readKit, ROCKET, SupplyWatch } from '../skills/fly/kit.ts';
+import { elytraWornLimit, flightKitMemoryOf, isRocket, kitLine, kitReady, readKit, ROCKET, rocketsForFlight, SupplyWatch } from '../skills/fly/kit.ts';
 import { burnSaid, kitBurnOf, openBurnOf, type BurnRange } from '../skills/fly/burn.ts'; // Track F9e round 2, Track F10
 import { restockFromBoxes, supplyOf } from '../skills/supply/supply.ts';
-import { FlightKitOps } from '../skills/fly/kitops.ts';
+import { FlightKitOps, refillEndLine } from '../skills/fly/kitops.ts';
 import { APPROACH_HEIGHT, columnKey, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, yawTo, type CellQuery, type LandingTarget, type SkyCheck } from '../skills/fly/plan.ts';
 import { perched, standsOn } from '../skills/fly/ground.ts'; // Track F11
 import { pathBlocks, probeOpenSky, probePath } from '../skills/home/reach.ts'; // Track AU2: the walk from a landing cell to the goal
@@ -573,6 +573,14 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     log,
   });
   const supply = new SupplyWatch();
+  /** Track F13: the rockets a takeoff, a hop or a route is simulated with: the loose ones, else what the refill before the takeoff gives (kit.ts rocketsForFlight). */
+  const flightRockets = (k: ReturnType<typeof readKit>): number => rocketsForFlight(k, supplyOf(d.task)?.carried(ROCKET) ?? 0);
+  /** Track F13: nothing loose and the box needed: why its refill cannot be made where the body stands (the line), else undefined. */
+  const refillRefusal = (k: ReturnType<typeof readKit>): string | undefined => {
+    if (k.rockets > 0 || k.boxRockets <= 0) return undefined;
+    const why = kitOps.refillCheck();
+    return why ? refillEndLine({ ok: false, taken: 0, pickedUp: false, reason: why }, 0) : undefined;
+  };
   processes.add(new FlightProcess(controller));
   let current: FlyProcess | undefined;
   /**
@@ -984,26 +992,32 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const fc0 = { x: Math.floor(from.x), y: Math.floor(from.y + 1e-6), z: Math.floor(from.z) };
     const roofed = dim() === OVERWORLD && String(d.settings.get('flyCave')) === 'on' && !entrySky(fc0.x, fc0.y, fc0.z);
     if (roofed) await liveRound(from);
-    const hop = hopping ? await hopFor(from, goalBlock, label, half, k.rocketsHotbar || k.rockets, o.quiet) : undefined;
+    const hop = hopping ? await hopFor(from, goalBlock, label, half, flightRockets(k), o.quiet) : undefined;
     if (hop) return { kind: 'fly', ...hop };
     if (distance <= d.settings.get('flyMin')) return undefined;
     // the sky first (cheap); the landing cell (up to six probe plans) only when a takeoff is possible at all
     const sky = skyHere(from, goalTarget);
     // Track BH: a ledge takeoff where the jump takeoff is refused (an overhang, a blocked run) or the start is a small platform
-    const tk = await takeoffFor(from, goalTarget, sky, k.rocketsHotbar || k.rockets, o.quiet);
+    const tk = await takeoffFor(from, goalTarget, sky, flightRockets(k), o.quiet);
     if ('refuse' in tk) {
       // Track F9e round 2: under a roof with no way out in the live model: a piece of the way the cache knows, flown as far
       // as the live model goes; the trip asks again where it stands
-      const piece = roofed ? await exitPieceFor(from, label, half, k.rocketsHotbar || k.rockets, o.quiet) : undefined;
+      const piece = roofed ? await exitPieceFor(from, label, half, flightRockets(k), o.quiet) : undefined;
       if (piece) return { kind: 'fly', ...piece };
       refusedTakeoffs.push({ x: from.x, z: from.z, at: Date.now() });
       // Track BL: a takeoff site within walking distance (any direction) before the walk out towards the goal
       if (o.site !== false) {
-        const s = await takeoffSite(from, goalTarget, k.rocketsHotbar || k.rockets);
+        const s = await takeoffSite(from, goalTarget, flightRockets(k));
         log.info(`fly: the takeoff here is refused (${tk.refuse.replace(/^fly: /, '').replace(/; walk outside first$/, '')}); the takeoff-site search: ${s.line}`);
         if (s.site) return { kind: 'site', site: s.site, line: `walking ${Math.round(s.site.walk)} blocks to take off from ${s.site.x} ${s.site.feet} ${s.site.z}, then flying (${Math.round(distance)} blocks; walking would be ~${Math.round(walkMinutes(distance))} min)` };
       }
       return { kind: 'walk_out', roof: tk.refuse };
+    }
+    // Track F13: nothing loose and the box's refill cannot be made here: no flight (the walk, as for a kit that is not ready)
+    const noRefill = refillRefusal(k);
+    if (noRefill) {
+      if (!o.quiet) log.info(`fly: no automatic flight to ${label}: ${noRefill.replace(/^fly: /, '')}`);
+      return undefined;
     }
     // Track BF: the landing (a cell of the live model with a confirmed walk, or the goal held high until its ground loads)
     const f = await planFlight(from, goalBlock, label, half, false);
@@ -1159,7 +1173,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     }
     const navWhy = (pve.mover as { nav?: { lastReport?: { why?: string } } }).nav?.lastReport?.why;
     log.info(`fly: the walk to ${label} ended ${r.ok ? "ok" : r.reason}${navWhy ? ` (${navWhy})` : ''}; the goal is ${drop.toFixed(0)} below and ${dist.toFixed(0)} away: looking for a glide down (${kitLine(k)})`);
-    const rockets = k.rocketsHotbar || k.rockets;
+    const rockets = k.rocketsHotbar || k.rockets; // a glide down refills nothing (FlyProcess.prepare)
     const plan = await landingFor(goalBlock, label, undefined);
     const base = { label, goal: goalBlock, half };
     let target: FlyTarget | undefined;
@@ -1171,11 +1185,11 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       else why = g.why;
     } else if (plan.kind === 'fallback' || plan.kind === 'none') {
       why = `no landing near it with a walking path (${plan.kind === 'fallback' ? plan.why : 'no dry ground known'})`;
-    } else if (kitReady(k, wear).ok && rockets > 0) {
+    } else if (kitReady(k, wear).ok && flightRockets(k) > 0) {
       // far (or its ground not loaded): a flight with rockets, the landing held until its ground loads, the takeoff simulated
       const t0 = targetFromPlan(plan, base);
       const sky = skyHere(from, t0);
-      const tk = await takeoffFor(from, t0, sky, rockets);
+      const tk = await takeoffFor(from, t0, sky, flightRockets(k)); // (Track F13: a powered flight refills first)
       if (!('refuse' in tk)) target = { ...t0, ...tk };
       else why = `no takeoff from here (${tk.refuse.replace(/^fly: /, '').replace(/; walk outside first$/, '')}; no ledge with a clear fall)`;
     } else {
@@ -1341,7 +1355,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (found.kind === 'fly' && found.target.routeTakeoff?.hop) {
       // Track F9e: a hop begins where the body stands: drawn and proven again from where the walk stopped
       const k = readKit(inv, memory());
-      const again = hopOn() ? await hopFor(here, g, label, half, k.rocketsHotbar || k.rockets) : undefined;
+      const again = hopOn() ? await hopFor(here, g, label, half, flightRockets(k)) : undefined;
       if (!again) {
         state.refused(here, Date.now());
         log.info('fly: no hop from where the walk stopped; walking on');
@@ -1352,7 +1366,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (found.kind === 'fly') {
       // the takeoff again from where the walk stopped (it walked on while the landing was searched)
       const k = readKit(inv, memory());
-      const tk = await takeoffFor(here, found.target, skyHere(here, found.target), k.rocketsHotbar || k.rockets);
+      const tk = await takeoffFor(here, found.target, skyHere(here, found.target), flightRockets(k));
       if ('refuse' in tk) {
         state.refused(here, Date.now());
         log.info(`fly: no takeoff where the walk stopped (${tk.refuse}); walking on`);
@@ -1470,7 +1484,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const k = readKit(inv, memory());
     // (Track F8: the sky check and the cruise height are measured from the rim over a cell under an opening)
     const aim: LandingTarget = { x: cell.x + 0.5, z: cell.z + 0.5, top: cell.y, half: 1, ...(hint?.rim !== undefined ? { rim: hint.rim } : {}) };
-    const tk = await takeoffFor(from, aim, skyHere(from, aim), k.rocketsHotbar || k.rockets);
+    const tk = await takeoffFor(from, aim, skyHere(from, aim), flightRockets(k));
     if ('refuse' in tk) return { ok: false, reason: tk.refuse, at: from };
     const f = await planFlight(from, cell, label, 1, true, hint);
     Object.assign(f.target, tk);
@@ -1748,7 +1762,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       await (async () => {
         // Track BH: a ledge takeoff where the jump is refused (an overhang, a blocked run) or the start is a small platform
         // (and the jump along a heading whose simulated climb is clear: trees, walls)
-        const tk = await takeoffFor(from, goalTarget, sky, k.rocketsHotbar || k.rockets);
+        const tk = await takeoffFor(from, goalTarget, sky, flightRockets(k));
         if ('refuse' in tk) {
           if (t.player) {
             reply(tk.refuse);
@@ -1762,6 +1776,12 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
           if (said) return;
           if (w.ok) reply(`walked to ${t.label}`);
           else if (w.reason !== 'interrupted') reply(`fly: the trip to ${t.label} failed (${w.reason ?? 'failed'})`);
+          return;
+        }
+        // Track F13: nothing loose and the box's refill cannot be made here: the reason, not `flying to` and then the refusal
+        const noRefill = refillRefusal(k);
+        if (noRefill) {
+          reply(noRefill);
           return;
         }
         const f = await planFlight(from, t.goal, t.label, t.half, true);

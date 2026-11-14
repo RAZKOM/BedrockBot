@@ -59,6 +59,55 @@ export interface RefillResult extends KitOpResult {
   /** The box came back into the inventory. */
   pickedUp: boolean;
   where?: Vec3;
+  /** Track F13: the box placed and not carried again: still standing (the break failed) or dropped (not picked up). */
+  left?: 'standing' | 'dropped';
+}
+
+/**
+ * Track F13: the rockets a refill may take with the box at `boxSlot` placed: the room on the rocket stacks plus a stack
+ * for each free slot other than the box's own, so that the box always has a slot to come back into (`take` merges
+ * first, then fills free slots; with this many it leaves one of them free).
+ */
+export function refillRoom(slots: readonly (ItemStack | null)[], boxSlot: number): number {
+  let room = 0;
+  for (let i = 0; i < Math.min(36, slots.length); i++) {
+    if (i === boxSlot) continue;
+    const s = slots[i];
+    if (!s || s.count <= 0) room += 64;
+    else if (isRocket(s.name)) room += Math.max(0, 64 - s.count);
+  }
+  return room;
+}
+
+/**
+ * Track F13 (docs/flight.md "A flight from the box alone (Track F13)"): the line for a fireworks box the refill did not
+ * carry again, with where it is, so that the owner knows the kit is on the ground (a flight never leaves it behind).
+ */
+export function boxLeftLine(r: Pick<RefillResult, 'where' | 'left' | 'reason'>): string {
+  const at = r.where ? `${r.where.x} ${r.where.y} ${r.where.z}` : '?';
+  const why = r.reason ? ` (${r.reason.replace(/ \(left at [^)]*\)$/, '')})` : '';
+  return r.left === 'standing'
+    ? `fly: the fireworks box is still standing at ${at}${why}; break it and give it back to me, or !fly again next to it`
+    : `fly: the fireworks box lies on the ground near ${at}${why}; walk me over it (!goto ${at}) or give it back to me`;
+}
+
+/**
+ * Track F13: after the refill before a takeoff, the line that ends the flight, or undefined to fly on. A box not carried
+ * again ends it (boxLeftLine: no flight away from the kit); so does a hotbar still without a rocket, with the refill's
+ * own reason and what the owner can do.
+ */
+export function refillEndLine(r: RefillResult, rocketsNow: number): string | undefined {
+  if (r.where && !r.pickedUp) return boxLeftLine(r);
+  if (rocketsNow > 0) return undefined;
+  const why = r.reason ?? 'no rockets taken out';
+  const fix = /^no free cell|^place:/.test(why)
+    ? 'stand where the box can be set down beside me (a free cell with a solid floor), or give me loose rockets'
+    : why.includes('inventory is full')
+      ? 'make room (one free slot besides the box), or give me loose rockets'
+      : why.includes('empty')
+        ? 'give me rockets (drop them or !bring firework_rocket 64)'
+        : 'give me loose rockets, or !fly again';
+  return `fly: no rockets at hand and the refill from the fireworks box failed (${why}); ${fix}`;
 }
 
 export class FlightKitOps {
@@ -181,6 +230,23 @@ export class FlightKitOps {
   }
 
   /**
+   * Track F13: why a refill from where the body stands cannot be made, before anything is placed (the command asks it
+   * before a flight that needs the box, so that it refuses with the reason instead of starting): no box, an empty box,
+   * no free cell with a solid floor beside the body, or no slot for the rockets that leaves one for the box (with every
+   * other slot full the rockets went into the slot the box had left and the box stayed on the ground: bds-fly2,
+   * 2026-11-13). Undefined: it can be tried.
+   */
+  refillCheck(): string | undefined {
+    const k = this.kit();
+    if (k.boxSlot < 0) return 'no fireworks box';
+    if (k.boxRockets <= 0) return 'the fireworks box is empty';
+    const feet = this.d.position();
+    if (!feet || boxSpots((q) => this.d.blockAt(q), feet).length === 0) return 'no free cell next to me for the box';
+    if (refillRoom(this.d.inventory.slots, k.boxSlot) <= 0) return 'the inventory is full: no slot for the rockets that leaves one for the box';
+    return undefined;
+  }
+
+  /**
    * Refill the hotbar from the fireworks box: place it, take rockets until the hotbar holds a stack
    * (or the box is empty), pick it up again. `alive()` false (a pre-emption) stops between steps; the
    * box is always broken and picked up when it was placed.
@@ -188,31 +254,32 @@ export class FlightKitOps {
   async refillFromBox(alive: () => boolean = () => true): Promise<RefillResult> {
     const k = this.kit();
     const none: RefillResult = { ok: false, taken: 0, pickedUp: false };
-    if (k.boxSlot < 0) return { ...none, reason: 'no fireworks box' };
-    if (k.boxRockets <= 0) return { ...none, reason: 'the fireworks box is empty' };
-    const feet = this.d.position();
-    const spots = feet ? boxSpots((q) => this.d.blockAt(q), feet) : [];
-    if (spots.length === 0) return { ...none, reason: 'no free cell next to me for the box' };
+    const blocked = this.refillCheck();
+    if (blocked) return { ...none, reason: blocked };
+    const spots = boxSpots((q) => this.d.blockAt(q), this.d.position()!);
+    const room = refillRoom(this.d.inventory.slots, k.boxSlot);
     const item = this.d.inventory.slots[k.boxSlot]?.name ?? 'undyed_shulker_box';
     const sk = this.d.skills;
     let at: Vec3 | undefined;
     let reason: string | undefined;
     for (const p of spots.slice(0, 3)) {
       const r = await sk.place(p, { face: 'up', item });
-      if (!alive()) return { ...none, reason: 'interrupted' };
       if (r.ok) {
         at = p;
         break;
       }
       reason = `place: ${r.reason ?? 'failed'}`;
+      if (!alive()) return { ...none, reason: 'interrupted' };
     }
     if (!at) return { ...none, ...(reason ? { reason } : {}) };
+    // (Track F13: a pre-emption after the box went down still breaks it and picks it up below; before, it returned here
+    // and left the box on the ground)
     const out: RefillResult = { ok: false, taken: 0, pickedUp: false, where: at };
     await this.d.waitTicks(2);
-    const o = await sk.open(at);
+    const o = alive() ? await sk.open(at) : ({ ok: false, reason: 'interrupted' } as const);
     if (alive() && o.ok) {
       const hotbarFree = [0, 1, 2, 3, 4, 5, 6, 7, 8].filter((i) => !this.d.inventory.slots[i]);
-      let want = 64 - this.kit().rocketsHotbar;
+      let want = Math.min(64 - this.kit().rocketsHotbar, room);
       const view = o.view;
       for (let slot = 0; slot < 27 && want > 0 && alive(); slot++) {
         const s = this.d.inventory.window(view.id)?.slots[slot];
@@ -231,7 +298,9 @@ export class FlightKitOps {
     const before = this.boxesCarried();
     const dug = await sk.dig(at);
     if (!dug.ok) {
-      out.reason = `break: ${dug.reason ?? 'failed'} (the box is still at ${at.x} ${at.y} ${at.z})`;
+      out.reason = `break: ${dug.reason ?? 'failed'}`;
+      out.left = 'standing';
+      this.log.info(`flight kit: refill failed: took ${out.taken} ${ROCKET} (${out.reason}; the box is still at ${at.x} ${at.y} ${at.z})`);
       return out;
     }
     for (const radius of [4, 6]) {
@@ -239,7 +308,10 @@ export class FlightKitOps {
       if (this.boxesCarried() > before) break;
     }
     out.pickedUp = this.boxesCarried() > before;
-    if (!out.pickedUp) out.reason = `the box was not picked up again (left at ${at.x} ${at.y} ${at.z})`;
+    if (!out.pickedUp) {
+      out.reason = `${out.reason ? `${out.reason}; ` : ''}the box was broken but not picked up again (left at ${at.x} ${at.y} ${at.z})`;
+      out.left = 'dropped';
+    }
     out.ok = out.taken > 0 && out.pickedUp;
     this.log.info(`flight kit: refill ${out.ok ? 'ok' : 'failed'}: took ${out.taken} ${ROCKET}${out.reason ? ` (${out.reason})` : ''}`);
     return out;

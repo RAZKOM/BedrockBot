@@ -1113,7 +1113,9 @@ Rules (all named `// Track AU` in the shared files):
   closed, broken (the Digger) and picked up again; before a flight and after a landing, never in the
   air; rockets left in the main inventory move into the hotbar, and a full hotbar first parks its least
   useful item (a block or shulker box before food before a tool; never the elytra) in a free main slot
-  (before, `no free hotbar slot for the rockets` refused a hotbar of tools and shulker boxes);
+  (before, `no free hotbar slot for the rockets` refused a hotbar of tools and shulker boxes); with no loose
+  rockets the takeoff is decided on what the refill will give, the refill always runs, and a refill that fails or
+  leaves the box on the ground ends the flight with a line that says so ("A flight from the box alone (Track F13)");
 - the supply lines, once per count: `fireworks low: 9 rockets left and the box is empty; give me more
   (drop them or !bring fireworks_rocket 64)` when the box is empty and the rockets under
   `fireworksMin`; `elytra worn: 25 uses left; I will not fly until it is mended or replaced` at or
@@ -7108,7 +7110,151 @@ count, a server-written slot left as sent, the armour window; 7 of its 9 fail on
   a crafted item's NBT); a crafted rocket used before any other packet for that slot would be refused once. Not seen
   here: the bot does not craft rockets on its own.
 - A flight with no rockets at hand and only the box (`fly` with 0 loose rockets) gave no answer on the test server in
-  3 of 3 tries (no line, no packets for 90 s); not this track's and not looked into.
+  3 of 3 tries (no line, no packets for 90 s); not this track's and not looked into. (Track F13, below: the command
+  answered in under a second and walked; the run waited for lines it never says and recorded no movement packets.)
+
+## A flight from the box alone (Track F13)
+
+`!fly` with no loose rockets and the fireworks box carried walked the whole way instead of flying, with a line that
+blamed the terrain. The command decided the takeoff before the refill that would have given it rockets. No setting:
+the fix changes what the command decides on the ground and what it says, nothing in the air.
+
+### What was measured first (bds-fly2, BDS 1.26.60.6, `test/e2e/fly-box-only.test.ts`, 2026-11-13)
+
+Rockets with the NBT (the box filled by `/replaceitem`, as on the Realm), a goal 70 blocks away on the flat. Before is
+the tree without the change. Times are from the command.
+
+| case | before |
+|---|---|
+| the box alone, in the hotbar (n 4) | 0.6 to 0.7 s: `no clear climb from here (the simulated climb meets a solid on every heading: trees, a wall, none straight up and no route out): walking to a takeoff site for ...`; then walked, 13.8 to 14.0 s: `walked to ...`. No takeoff |
+| the box alone, in a main slot | the same, 0.6 s and 13.9 s |
+| the box alone, the hotbar full | the same, 0.6 s and 13.9 s |
+| the box alone, every slot full | the same, 0.6 s and 13.9 s |
+| the box alone, one main slot free | the same, 0.6 s and 13.8 s |
+| the box alone, the elytra worn | the same, 0.6 s and 13.8 s |
+| the box alone, a roof 2 over the head | 0.2 s: `no open sky here (roof at y ..., 2 blocks up): walking to a takeoff site ...`; walked out, 29.2 s |
+| the box alone, on a 1 x 1 column top 12 up (no cell for the box) | 0.3 s: `flying to ... 0 rockets (0 in the hotbar), box 64`, at once `fly: no firework rockets at hand` |
+| 1 loose rocket and the box | 0.3 s `flying to ...`; refill 63, takeoff 5.4 s, landed 13.9 s |
+| 1 loose, on the column top | 0.2 s `flying to ...`; no refill (no cell), the step off with the one rocket, landed 20.7 s |
+| no box, nothing loose | 0.2 s: `fly: no firework rockets (give me some, or a shulker box of them)` and the `fireworks low` line |
+| the box alone, `!goto` 250 blocks | 0.3 s `walking to ...`; 3.8 s `fly: no clear climb from here (...); walking towards ... and taking off outside` (the site search: 10 takeoffs simulated, none clear); walked |
+
+The log of every box-alone case on open ground: `the simulated climb: heading 0: short of the landing (it needs a
+rocket) ...` on all 12 headings, `vertical takeoff: no rockets for a straight climb`, `route takeoff: ... refused`, then
+the site search with the same 0. The takeoff, the vertical takeoff, the route takeoff, the site search, the hop and
+the exit piece were all given `rocketsHotbar || rockets` of the kit as it was before the flight: 0. The refill is the
+FlyProcess's first step (`prepare`), after the command has chosen how to take off, so it was never reached; the walk
+went on. `!goto` and `!come` over `flyMin` decide the same way (`autoFly`) and walked too.
+
+**Why Track F12 saw silence.** Its run waited for a line starting `landed` or `fly: `; the refusal above has its
+`fly: ` taken off (it says what the bot does next) and the walk ends with `walked to`. It recorded the item and stack
+packets only, and a walk sends none. With the same filters every box-alone case on open ground above gives nothing
+for 90 s. No step hung: the event loop and the input loop ran throughout (289 `player_auth_input` in a box-alone run
+before the change).
+
+### The rules (`fly/kit.ts rocketsForFlight`, `commands-fly.ts`, `tasks/process/fly.ts`, `fly/kitops.ts`)
+
+- The rockets a takeoff, a hop, an exit piece, a site search or a route is simulated with are the loose ones when
+  there are any, else what the refill before the takeoff gives: up to a stack from the fireworks box, else from the
+  other carried boxes. With loose rockets nothing changes: a flight is decided on no more rockets than it will
+  have, which only makes the check stricter, and the flights with loose rockets send the same packets as before. The
+  glide down keeps the loose count (it refills nothing).
+- With nothing loose the refill runs whatever `fireworksMin` says (the flight was decided on the box's rockets).
+- The refill takes only the rockets that leave a slot for the box to come back into (`refillRoom`: the room on the
+  rocket stacks and a stack for each free slot other than the box's own), and none when nothing fits. With every
+  other slot full the rockets went into the slot the box had left and the box stayed on the ground (found here, once
+  the box-alone flight reached its refill; before, it never did).
+- With nothing loose and a refill that cannot be made where the body stands (`refillCheck`: no box, an empty box, no
+  free cell with a solid floor beside the body, no slot as above), `!fly` answers with the reason at once instead of
+  `flying to ...`; `!goto` and `!come` walk, as for a kit that is not ready, with the reason in the log.
+- A refill that leaves the hotbar without a rocket ends the flight with one line that names the refill's reason and
+  what the owner can do: `fly: no rockets at hand and the refill from the fireworks box failed (no free cell next to
+  me for the box); stand where the box can be set down beside me (a free cell with a solid floor), or give me loose
+  rockets`; for a full inventory `...; make room (one free slot besides the box), or give me loose rockets`. Before,
+  the line was `fly: no firework rockets at hand`, right after `flying to ...` had named a box of 64.
+- A box the refill did not carry again ends the flight, rockets or not, with where it is: `fly: the fireworks box is
+  still standing at X Y Z (break: ...); break it and give it back to me, or !fly again next to it`, or `fly: the
+  fireworks box lies on the ground near X Y Z (...); walk me over it (!goto X Y Z) or give it back to me`. The same
+  line is said after a landing's refill. Before, the flight took off and the box stayed behind, said only in the log.
+- A pre-emption after the box went down no longer returns before the break: the box is not opened, and is broken and
+  picked up as after any other refill. Before, the refill returned `interrupted` with the box standing.
+
+Every kit step waits a bounded number of ticks: the place, the open (40), each take (`Containers.move`, 3 s), the
+close (20), the break, the pickup (100 at 4 blocks, then 100 at 6), the elytra (`StackRequests.send`, 40; the screen
+20), the rocket moves (3 s each). None waits on a packet with no end; a lost connection stops the ticks, which is the
+reconnect's business, not the kit's.
+
+### On the server (bds-fly2 and bds-fly3, BDS 1.26.60.6, `test/e2e/fly-box-only.test.ts`, 2026-11-13)
+
+The final code, the same cases. Times from the command: the first line, the takeoff (the body gliding), the end.
+
+| case | after |
+|---|---|
+| the box alone, in the hotbar (n 10, bds-fly2) | **10 of 10 flew**: `flying to ...` at 0.18 to 0.28 s, `refill ok: took 64`, takeoff 5.3 to 6.2 s, landed on the aim (0.0 off) 13.4 to 15.6 s, the box carried again 10 of 10 |
+| the box alone, in a main slot | 0.25 s, takeoff 6.7 s, landed 15.6 s |
+| the box alone, the hotbar full | 0.28 s, takeoff 5.8 s, landed 15.4 s |
+| the box alone, every slot full | 0.21 s: `fly: no rockets at hand and the refill from the fireworks box failed (the inventory is full: no slot for the rockets that leaves one for the box); make room (one free slot besides the box), or give me loose rockets`; nothing placed |
+| the box alone, one main slot free | 0.28 s, takeoff 5.4 s, landed 15.0 s, the box back |
+| the box alone, the elytra worn | 0.28 s, takeoff 5.0 s, landed 13.7 s |
+| the box alone, a roof 2 over the head | 0.28 s: the same walk as before, 29.2 s (no takeoff here, no site worth it for 70 blocks) |
+| the box alone, on the column top | 0.26 s: `fly: no rockets at hand and the refill from the fireworks box failed (no free cell next to me for the box); stand where the box can be set down beside me ...`; nothing placed |
+| 1 loose rocket and the box | 0.25 s, refill 63, takeoff 6.6 s, landed 15.9 s (as before) |
+| 1 loose, on the column top | 0.29 s, the step off with the one rocket (no refill, no cell), landed 20.2 s 0.2 from the aim, `walked to` 20.8 s (as before) |
+| no box, nothing loose | 0.28 s, the refusal as before |
+| the box alone, `!goto` 250 blocks (n 3, bds-fly2) | `flying (250 blocks; ...)` at 0.32 to 0.38 s, takeoff 5.4 to 5.6 s, `arrived at` 20.1 to 20.6 s |
+
+In a run of the change before the room rule (bds-fly2, the same day), the full inventory's refill put the 64 rockets into the
+slot the box had left and the box was left on the ground (`fly: the fireworks box lies on the ground near ...`, said
+at 4.2 s): the reason for `refillRoom`. Each box-alone flight used one rocket.
+
+The flights with loose rockets and no refill send the same rocket uses as before: `fly-first-rocket`'s control case
+(64 put in slot 0 by the server) below in "The regressions (Track F13)".
+
+### Unit tests (`fly-box-only.test.ts`)
+
+`rocketsForFlight` for loose, boxed and other-box kits; the jump takeoff on the flat falling short with 0 rockets and
+clearing with the box's 64 (the cause, offline); a source guard that no takeoff, hop, exit piece or site search in
+`commands-fly.ts` is given the loose count; the refill's end lines; `refillRoom` and `refillCheck` (a full inventory
+and a 1 x 1 column top refused before anything is placed, one free slot enough); the refill picking the box up after
+a pre-emption, a failed break and a missed pickup said as such; `FlyProcess.prepare` ending with the refill's line,
+refusing to leave a box behind, and refilling with nothing loose at `fireworksMin` 0.
+
+### The regressions (Track F13)
+
+Each gate alone, by its exit code, the final code, 2026-11-13: `fly-kit` (bds-fly) 7 of 7, `fly-first-rocket`
+(bds-fly2, `F12_EXPECT_CLEAN=1`) 4 of 4 cases, 12 of 12 first rockets fired, `fly-open` (bds-fly) 3 of 3,
+`fly-route-land` (bds-fly3) 7 of 7, `home-shulker` (bds-home) 1 of 1. `fly-first-rocket`'s control case (64 put in
+slot 0 by the server, no refill): each first use one `click_air` of 64 rockets with the NBT in slot 0, as Track F12
+measured; the one `mob_equipment` (run 0) selects slot 0 after the case before it left slot 8 selected, with the same
+item. The unit suite on the test host: four runs, three clean; the first lost a worker to the V8 `SIGTRAP` in
+`nav-r4.test.ts` (a known fault of a loaded host) and was run again.
+
+### What the Realm should show
+
+A `!fly` to a waypoint with every loose rocket put in a chest first and the box carried: `flying to ...` within a
+second, `flight kit: refill ok: took 64 firework_rocket` in the log, the takeoff about 5 s after the command, the
+landing as usual and the box in the inventory after it (`!fly status`: `box N`). With the bot on a 1 x 1 top or with a
+full inventory: the one-line refusal at once and nothing placed.
+
+### Open points (Track F13)
+
+- The corridor's windows under a roof (`flyCave` on, off by default) have no refill (`CorridorProcess.prepare` moves
+  rockets into the hotbar and puts the elytra on, nothing more), and their proof (`commands-corridor.ts proveWindow`)
+  is given the loose count. With the box alone such a window ends `no rockets in the hotbar (no rockets)`: an answer,
+  not a silence. Not changed: a refill under a roof in the middle of a corridor trip asks where the box may be set
+  down underground, which is the cave tracks' decision. Not run here.
+- A crafted item has no wire item with its NBT until the server sends the slot (Track F12's open point): a rocket the
+  bot crafts and uses at once is turned down once (`fly-truth.ts craftRockets` uses one on the ground for that
+  reason). Not the same fault as Track F12's (there the NBT was in hand and dropped; here the client never had it) and
+  not small (the bot would have to build the item's NBT itself): not changed, not measured here. The bot does not
+  craft rockets on its own.
+- A takeoff decided on the box's 64 that then gets fewer from a partial refill (a `take` refused half-way) flies on
+  what it has; the takeoff's own simulation uses at most the first few rockets, so this is not expected to matter, and
+  it was not seen.
+- `!goto` and `!come` with the box alone and no refill possible walk with the reason in the log only, as for any kit
+  that is not ready.
+
+## Open points
 
 ## Open points
 
