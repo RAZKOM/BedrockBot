@@ -76,6 +76,8 @@ export interface WorkerPlanOptions {
   frontier?: boolean;
   /** Track R5: the start is a perch at this feet height (PathOptions.startFeet). */
   startFeet?: number;
+  /** Track R6: the last move may go onto the goal's perch (PathOptions.perchGoal). */
+  perchGoal?: boolean;
 }
 
 /** What the client reads from the world model (`World` satisfies it). */
@@ -766,6 +768,7 @@ function workerOptions(o: WorkerPlanOptions): PathOptions {
     ...(o.relax ? { relax: { ...o.relax } } : {}), // Track R1
     ...(o.frontier ? { frontier: true } : {}),
     ...(o.startFeet !== undefined ? { startFeet: o.startFeet } : {}), // Track R5
+    ...(o.perchGoal ? { perchGoal: true } : {}), // Track R6
   };
 }
 

@@ -133,7 +133,8 @@ export class PathReach {
     this.busy = rid;
     const from = { ...me };
     const mob = { ...feet };
-    const probe = this.d.probe ?? ((n: ProbeNav, g: NavGoal, f: Vec3) => probePath(n, g, f, { nodes: PROBE_NODES, ms: PROBE_MS }));
+    // (Track R6: `from` is the bot's own feet: on a fence's top the probe starts from that perch, as the approach's goto does)
+    const probe = this.d.probe ?? ((n: ProbeNav, g: NavGoal, f: Vec3) => probePath(n, g, f, { nodes: PROBE_NODES, ms: PROBE_MS, body: true }));
     void probe(nav, mobGoal(mob), from)
       .then((r) => {
         let verdict: PathVerdict | undefined;

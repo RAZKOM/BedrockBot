@@ -676,6 +676,12 @@ export class MineTask {
       const plan = probe(eyeGoal(t.p), { allowBreak: true });
       this.stats.probes++;
       this.stats.probeMs += performance.now() - t0;
+      // Track R6: no start where the body is (still in the air, swimming): the probe says nothing about the ore, so it is
+      // not marked unreachable; taken when no other leads anywhere, and the goto (which waits for the body to settle) decides
+      if (!plan) {
+        doubtful ??= t;
+        continue;
+      }
       if (!noProgress(plan)) return t;
       // no progress within the probe's budget: unreachable for sure when the search was not cut short;
       // otherwise only doubtful (the full plan decides), taken when no other candidate leads anywhere

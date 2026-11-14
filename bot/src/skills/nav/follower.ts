@@ -370,6 +370,11 @@ export class PathFollower {
     // coast would carry the body past the node's centre (lava:1:6 with allowPlace off: the landing's slide took the body
     // 0.26 past the centre, into the lava cell beside it)
     if (target.move === 'jump' && !s.onGround && p.y >= target.feet && dTarget - speed * AIR_COAST < 0.05 && this.hazardBeside(target)) forward = 0;
+    // Track R6: inside a bowl (an empty cauldron's or composter's floor, its own rim 1 over the cell's base) and pressed
+    // against the rim: the rim is a jump, not a step. The start there is the node beside it (locateNode takes the floor
+    // 0.31 lower next door), so the move out is planned as a walk; without the jump it timed out three times and the
+    // goto ended unreachable from a cauldron's centre (nav-r6.test.ts)
+    if (!jump && forward === 1 && s.onGround && s.collidedHorizontally && this.inBowl(p)) jump = true;
 
     if (target.move === 'drop') {
       if (s.onGround) {
@@ -409,6 +414,20 @@ export class PathFollower {
     let j = i;
     while (j + 1 < path.length && path[j + 1]!.move === 'climb' && path[j + 1]!.x === path[i]!.x && path[j + 1]!.z === path[i]!.z) j++;
     return j;
+  }
+
+  /**
+   * Track R6: the feet rest on the floor inside a bowl of their own cell (NavGrid.perch of the cell, its boxes reaching
+   * 1: a cauldron's or a composter's rim round it), within 0.05.
+   */
+  private inBowl(p: Vec3): boolean {
+    const x = Math.floor(p.x);
+    const y = Math.floor(p.y + 1e-3);
+    const z = Math.floor(p.z);
+    const c = this.grid.cls(x, y, z);
+    if (!c || c.boxes.length === 0 || c.top < 1 - 1e-6) return false;
+    const f = this.grid.perch(x, y, z);
+    return f !== undefined && Number.isFinite(f) && Math.abs(p.y - f) < 0.05;
   }
 
   /** The body is in node n's column at its height (a standing node at the foot: on the ground). */

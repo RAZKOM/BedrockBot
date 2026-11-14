@@ -17,6 +17,7 @@ import { fallDamage } from '../../../src/skills/fall/damage.ts';
 import { BotSkills } from '../../../src/skills/index.ts';
 import type { NavActions } from '../../../src/skills/nav/actions.ts';
 import { Avoidance } from '../../../src/skills/nav/avoidance.ts';
+import type { NavGoal } from '../../../src/skills/nav/goals.ts';
 import type { BenchPair, BenchWorld } from '../../../src/skills/nav/bench/worlds.ts';
 import { MIN_Y, V, VOX_BLOCKS, isDoor, isDoorLower, isGravityVox, toggledDoor, type Vox } from '../../../src/skills/nav/bench/vox.ts';
 import type { SkillResult } from '../../../src/skills/types.ts';
@@ -76,6 +77,10 @@ export interface SimOptions {
   navSettleTicks?: number;
   /** Track R5: no perch starts (the behaviour before R5: the start is `locateNode`'s or none). */
   noPerch?: boolean;
+  /** Track R6: no perch goals (the behaviour before R6: a goal on a fence's top is `not standable`). */
+  noPerchGoal?: boolean;
+  /** Track R6: the goto's goal (default the pair's goal cell as a `block` goal). */
+  goal?: NavGoal;
 }
 
 /** Track R2: the palette id a placed throwaway block becomes. */
@@ -337,6 +342,7 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
   if (o.fallHoldTicks !== undefined) skills.nav.fallHoldTicks = o.fallHoldTicks;
   if (o.navSettleTicks !== undefined) skills.nav.settleTicks = o.navSettleTicks; // Track R5
   if (o.noPerch) skills.nav.perch = false;
+  if (o.noPerchGoal) skills.nav.perchGoals = false; // Track R6
   // the survival layer's avoidance (skills/survival: lava proximity costs, no mobs here)
   const avoidance = new Avoidance({ entities: () => server.world.entities, origin: () => (loop.state.ready ? loop.state.pos : undefined), lavaWorld: server.world });
   skills.nav.cellCost = () => avoidance.costFn();
@@ -350,7 +356,7 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
   }
   conn.tick(o.settleTicks ?? 5);
   let result: SkillResult | undefined;
-  const p = skills.goto({ type: 'block', p: pair.goal }, { timeoutTicks: o.timeoutTicks ?? 6000, allowBreak: o.allowBreak ?? false, allowPlace: o.allowPlace ?? false, closeDoors: false, explain: true }).then((r) => (result = r));
+  const p = skills.goto(o.goal ?? { type: 'block', p: pair.goal }, { timeoutTicks: o.timeoutTicks ?? 6000, allowBreak: o.allowBreak ?? false, allowPlace: o.allowPlace ?? false, closeDoors: false, explain: true }).then((r) => (result = r));
   const self = server.world.self as { health: number };
   let health = o.health ?? 20;
   self.health = health;
@@ -415,7 +421,7 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
   const end = loop.state.pos;
   const run: PairRun = {
     ok: r.ok && !died,
-    ...(r.ok ? {} : { reason: r.reason, ...(r.note ? { note: r.note } : {}) }),
+    ...(r.ok ? (r.note ? { note: r.note } : {}) : { reason: r.reason, ...(r.note ? { note: r.note } : {}) }), // (Track R6: an arrival's note)
     ...(rep?.why ? { why: rep.why } : {}),
     ...(!r.ok && (r as { cause?: string }).cause ? { cause: (r as { cause?: string }).cause } : {}),
     reply: r.ok ? 'arrived' : `goto: ${r.reason}${r.note ? ` (${r.note})` : ''}`,

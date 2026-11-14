@@ -8,6 +8,9 @@
 //   landing  teleported 1 block over a post and the walk asked at once (the body is still falling onto it)
 //   stair    the fence on a wall of planks 4 high, a stair of planks down beside it: the stair, no damage
 //   drop     the same wall with no stair: the 5.5-block drop under the fall rules, its damage only
+// Track R6 (docs/pathfinding.md "A goal on a top the stand rule has no node for (Track R6)"): the walk from the grass to
+// a goal on a fence's, a wall's or a closed gate's top 20 blocks off: next to it with the note, or onto it from a block
+// beside it (the goal cases below).
 // R5_RUNS runs a case (default 10), R5_CASES a comma list (default all), R5_OUT a JSONL of the rows. Needs BDS_E2E=1 and
 // bds-pve with the truth pack.
 import { appendFileSync } from 'node:fs';
@@ -18,7 +21,12 @@ import { botDamage, centre, E2E, FEET_Y, fill, hdist, prepareServer, privateArea
 
 const RUNS = Number(process.env.R5_RUNS ?? 10);
 const CASES = (process.env.R5_CASES ?? 'before,post,rail,realm,edge,end,landing,stair,drop').split(',').map((s) => s.trim());
-const OUT = process.env.R5_OUT;
+const OUT = process.env.R5_OUT ?? process.env.R6_OUT;
+// Track R6: the goal cases (R6_CASES, default all): goal-before (perch goals off: unreachable), goal-fence, goal-wall,
+// goal-gate (next to it, arrived with the note), goal-fence-step, goal-wall-step, goal-gate-step (onto it from a block of
+// planks beside it). Set R5_CASES to '' to run these alone.
+const GOAL_CASES_ALL = ['goal-before', 'goal-fence', 'goal-wall', 'goal-gate', 'goal-fence-step', 'goal-wall-step', 'goal-gate-step'];
+const GOAL_CASES = (process.env.R6_CASES ?? GOAL_CASES_ALL.join(',')).split(',').map((s) => s.trim());
 
 function note(row: Record<string, unknown>): void {
   console.log(JSON.stringify(row));
@@ -132,6 +140,88 @@ describe.skipIf(!E2E)('nav: Track R5 a walk that starts on a fence top', () => {
     };
     note(row);
     return row;
+  }
+
+  /**
+   * Track R6: a goal on a top: the post (`block`: spruce_fence, cobblestone_wall, fence_gate, a closed gate) 20 blocks
+   * east of the body on the grass, the goal the cell over it; with `step` a block of planks beside it on the body's side.
+   */
+  async function goalRun(kind: string, k: number): Promise<Record<string, unknown> & { ok: boolean; died: boolean; note?: string; y: number; fromTop: number; damage: number }> {
+    const b = bot!;
+    const nav = b.built.mobility!.skills.nav;
+    nav.perch = true;
+    nav.settleTicks = SETTLE_TICKS;
+    nav.perchGoals = kind !== 'goal-before';
+    const block = kind.includes('wall') ? 'cobblestone_wall' : kind.includes('gate') ? 'fence_gate' : 'spruce_fence';
+    const i = next++;
+    const x0 = area.x + 40 * (i % 6) - 100;
+    const z0 = area.z + 40 * Math.floor(i / 6) - 100;
+    await teleport(b, centre({ x: x0 - 3, y: FEET_Y, z: z0 }));
+    await fill(b, { x: x0 - 8, y: FEET_Y - 1, z: z0 - 8 }, { x: x0 + 28, y: FEET_Y - 1, z: z0 + 8 }, 'grass_block');
+    await fill(b, { x: x0 - 8, y: FEET_Y, z: z0 - 8 }, { x: x0 + 28, y: FEET_Y + 8, z: z0 + 8 }, 'air');
+    const post = { x: x0 + 20, y: FEET_Y, z: z0 };
+    await pveCmd('fill', `${post.x}`, `${post.y}`, `${post.z}`, `${post.x}`, `${post.y}`, `${post.z}`, block);
+    if (kind.endsWith('-step')) await fill(b, { x: post.x - 1, y: FEET_Y, z: post.z }, { x: post.x - 1, y: FEET_Y, z: post.z }, 'oak_planks');
+    await sleep(300);
+    await b.truth.clearAround({ x: x0, y: FEET_Y, z: z0 }, 48);
+    await b.truth.setHealth(b.name, 20);
+    await b.truth.ok('setfood', [b.name, 20, 5]);
+    const j = RUNS > 1 ? -0.08 + (0.16 * k) / (RUNS - 1) : 0;
+    await teleport(b, { x: x0 + 0.5 + j, y: FEET_Y, z: z0 + 0.5 - j });
+    const goal = { x: post.x, y: FEET_Y + 1, z: post.z };
+    const w = b.built.mobility!.world;
+    const got = w.blockAt(post);
+    const deaths0 = b.built.respawn!.deaths;
+    const since = await b.truth.now();
+    const t0 = Date.now();
+    const r = await b.pve.walk({ type: 'block', p: goal }, { explain: true }, 'r6 walk');
+    const s = (Date.now() - t0) / 1000;
+    await sleep(500);
+    const dmg = botDamage((await b.truth.hurtlog(since, b.name)).events, b.name);
+    const rep = nav.lastReport;
+    const end = b.task.position()!;
+    const row = {
+      case: kind,
+      run: k,
+      block: got ? `${got.name}${Object.keys(got.states).length ? JSON.stringify(got.states) : ''}` : 'unloaded',
+      ok: r.ok,
+      ...(r.note ? { note: r.note } : {}),
+      ...(r.ok ? {} : { reason: r.reason }),
+      s: +s.toFixed(1),
+      ticks: rep?.ticks ?? 0,
+      plans: rep?.plans.length ?? 0,
+      failures: rep?.failures ?? 0,
+      perchGoal: rep?.perchGoal ? `${rep.perchGoal.end} ${rep.perchGoal.dist ?? ''}` : '',
+      end: `${(end.x - post.x).toFixed(2)},${(end.y - FEET_Y).toFixed(3)},${(end.z - post.z).toFixed(2)}`,
+      y: +(end.y - FEET_Y).toFixed(3),
+      fromTop: +Math.hypot(end.x - (post.x + 0.5), end.y - (FEET_Y + 1.5), end.z - (post.z + 0.5)).toFixed(2),
+      damage: dmg.total,
+      died: b.built.respawn!.deaths !== deaths0,
+    };
+    note(row);
+    return row;
+  }
+
+  for (const kind of GOAL_CASES_ALL) {
+    it.skipIf(!GOAL_CASES.includes(kind))(`${kind}: ${RUNS} runs`, async () => {
+      for (let k = 0; k < RUNS; k++) {
+        const r = await goalRun(kind, k);
+        expect(r.died).toBe(false);
+        expect(r.damage).toBe(0);
+        if (kind === 'goal-before') {
+          expect(r.ok).toBe(false);
+          continue;
+        }
+        expect(r.ok, String(r.note ?? r.reason)).toBe(true);
+        if (kind.endsWith('-step')) {
+          expect(r.y).toBeCloseTo(1.5, 2); // on the top
+          expect(r.fromTop).toBeLessThan(0.45);
+        } else {
+          expect(r.note).toMatch(/cannot be stood on \(no step or jump leads onto it\): stopped/);
+          expect(r.fromTop).toBeLessThan(2.3);
+        }
+      }
+    }, RUNS * 120_000);
   }
 
   for (const kind of ['before', 'post', 'rail', 'realm', 'edge', 'end', 'landing', 'stair', 'drop']) {

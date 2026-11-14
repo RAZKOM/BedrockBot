@@ -8,7 +8,7 @@
 // floor sweep, and the `mineDirect` setting.
 import type { FarmParts } from '../farm/index.ts';
 import { breakBlocker, DEFAULT_THROWAWAY } from '../nav/actions.ts';
-import { findPath, locateNode } from '../nav/astar.ts';
+import { findPath, locateStart } from '../nav/astar.ts';
 import { probePath } from '../home/reach.ts';
 import type { ItemStack, Vec3 } from '../../world/types.ts';
 import { MineTask } from './miner.ts';
@@ -70,11 +70,13 @@ export function createMinerFor(p: FarmParts, settings: MinerSettings = {}): { mi
     skills,
     memory,
     plan: (goal, opts) => nav.plan(goal, undefined, opts),
+    // Track R6: both probes plan from the body's own feet: a body on a top the stand rule has no node for (a fence's)
+    // starts from that perch, as its goto does (Track R5); before, every candidate was marked unreachable from there
     probe: (goal, opts) => {
-      const start = locateNode(nav.grid, loop.state.pos);
-      return start ? findPath(nav.grid, start, goal, { ...nav.planOptions(opts), maxNodes: PROBE_NODES, maxMs: PROBE_MS }) : undefined;
+      const start = locateStart(nav.grid, loop.state.pos);
+      return start ? findPath(nav.grid, start, goal, { ...nav.planOptions(opts), maxNodes: PROBE_NODES, maxMs: PROBE_MS, ...(start.perch ? { startFeet: start.feet } : {}) }) : undefined;
     },
-    walkProbe: (goal) => probePath(nav, goal, loop.state.pos), // Track AQ
+    walkProbe: (goal) => probePath(nav, goal, loop.state.pos, { body: true }), // Track AQ
     tunnelWorld, // Track AQ
     throwaways: () => throwawayCount(world.inventory.slots), // Track AQ
     entities: () => world.entities, // Track AQ

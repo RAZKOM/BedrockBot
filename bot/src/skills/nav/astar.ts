@@ -221,6 +221,13 @@ export interface PathOptions {
    * and long drops leave it (no digs, pillars, parkour or sneaks: their rules assume a full floor).
    */
   startFeet?: number;
+  /**
+   * Track R6: a `block` goal whose cell is a perch the body can be put on (`perchGoal` with `enter`: a fence's, a
+   * wall's or a closed gate's top) is reached by one more move into it, from a cardinal neighbour node whose feet are
+   * at most MAX_JUMP_RISE lower and no higher (a step up of up to STEP, else a jump with its head room): the last
+   * move of a path, never a node anything leaves. No drop goes into it. The navigator sets it for such a goal.
+   */
+  perchGoal?: boolean;
 }
 
 /** Falls up to this height onto farmland never trampled it (measured, docs/farming.md). */
@@ -520,6 +527,8 @@ export class PathSearch {
   private readonly digOutRefused: DigOutRefusals | undefined;
   /** Track W2: the start is in water (a swim or dive node): a failed search reports the refused dig-out steps. */
   private startWet = false;
+  /** Track R6: the goal's perch the last move may enter (PathOptions.perchGoal), when it has one that may be entered. */
+  private readonly goalPerch: { x: number; y: number; z: number; feet: number } | undefined;
 
   constructor(grid: NavGrid, start: { x: number; y: number; z: number }, goal: NavGoal, opts: PathOptions = {}) {
     this.grid = grid;
@@ -534,6 +543,11 @@ export class PathSearch {
     if (opts.digWay) this.breakTicksOf = digWayBreakTicks(this.breakTicksOf, opts.relax); // Track W3: natural terrain only, no slow blocks (Track R1: unless relaxed)
     this.startY = start.y;
     this.goalMinY = goalMinY(goal);
+    if (opts.perchGoal && goal.type === 'block') {
+      const gp = { x: Math.floor(goal.p.x), y: Math.floor(goal.p.y), z: Math.floor(goal.p.z) };
+      const pg = perchGoal(grid, gp.x, gp.y, gp.z);
+      this.goalPerch = pg?.enter ? { ...gp, feet: pg.feet } : undefined;
+    }
     this.airLimit = airBudget(opts.air, false); // Track W1 (a start under water: below)
     const blockWet = goal.type === 'block' && waterBlockGoal(grid, goal.p); // Track W3: a waypoint on a water floor
     this.waterGoal = this.moveOn('swim') && ((goal.type === 'near' && waterNear(grid, goal.p)) || blockWet);
@@ -888,6 +902,9 @@ export class PathSearch {
         }
         if (Number.isNaN(f1)) {
           if (ny === cy) levelBlocked = true;
+          // Track R6: onto the goal's perch (a fence's top), the path's last move
+          const gp = this.goalPerch;
+          if (gp && !inPassage && !perch && nx === gp.x && ny === gp.y && nz === gp.z) this.enterPerch(cur, cx, cy, cz, f0, headCell, gp, dx, dz);
           // Track AX: a doorway at the feet level, or one cell up from a partial floor (a step of <= 0.5625)
           if ((ny === cy || (ny === cy + 1 && !flat)) && this.doorway(cur, cx, cy, cz, f0, nx, ny, nz, axis)) took = true;
           continue;
@@ -1218,6 +1235,25 @@ export class PathSearch {
    * by a ladder's thin box in either column. Asked right before a relax, once the cells involved have
    * been classified (so NavGrid.variety is current); `high`: a rise, the body also passes cy + 2.
    */
+  /**
+   * Track R6: the move from node `cur` onto the goal's perch `gp` in the cardinal neighbour (dx, dz): a step (a rise of
+   * 0 to STEP: from a block beside it level with the top or up to a step lower) or a jump (a rise up to MAX_JUMP_RISE, the
+   * head room over the start free), never down onto it (that is a drop: the fall rules and the step-off check are not
+   * asked for a perch). The node is F_PERCH: the goal, nothing leaves it.
+   */
+  private enterPerch(cur: number, cx: number, cy: number, cz: number, f0: number, headCell: number, gp: { x: number; y: number; z: number; feet: number }, dx: number, dz: number): void {
+    const rise = gp.feet - f0;
+    if (rise < -1e-6 || rise > MAX_JUMP_RISE + 1e-6) return;
+    if (!this.ladderPass(cx, cy, cz, gp.x, gp.z, dx, dz, rise > FLAT)) return;
+    if (rise <= STEP) {
+      this.relax(cur, gp.x, gp.y, gp.z, gp.feet, this.costs.walk, M_WALK, 0, 0, undefined, F_PERCH);
+      return;
+    }
+    const room = this.grid.freeColumn(cx, headCell + 1, Math.floor(gp.feet + PHYSICS.height - 1e-6), cz);
+    if (room === undefined) this.sawUnknown = true;
+    else if (room) this.relax(cur, gp.x, gp.y, gp.z, gp.feet, this.costs.jump, M_JUMP, 0, 0, undefined, F_PERCH);
+  }
+
   private ladderPass(cx: number, cy: number, cz: number, nx: number, nz: number, dx: number, dz: number, high: boolean): boolean {
     if (high) this.grid.cls(cx, cy + 2, cz);
     if ((this.grid.variety & VARIETY_LADDER) === 0) return true;
@@ -1872,6 +1908,44 @@ function perchUnder(grid: NavGrid, x: number, y: number, z: number, feet: number
     }
   }
   return false;
+}
+
+/** Track R6: a goal cell that is a perch (`perchGoal`). */
+export interface PerchGoal {
+  /** The feet height on the top (NavGrid.perch). */
+  feet: number;
+  /**
+   * The last move of a path may go onto it (PathOptions.perchGoal): the top is a box in the cell below standing over 1
+   * (a fence's, a wall's or a closed gate's 1.5), no hazard, covering a centred body's footprint. Not a rim round a
+   * hollow (a cauldron's, a composter's: a centred body drops inside), nor a top in the cell itself (a hopper's, the
+   * inside of a bowl: the rim is in the way of a step), nor magma, a cactus or dripstone.
+   */
+  enter: boolean;
+  /** The block the top belongs to. */
+  on: string;
+  /** Its cell: the goal's cell (a top in the cell itself: a cauldron's inside) or the one under it (a fence). */
+  block: { x: number; y: number; z: number };
+}
+
+/**
+ * Track R6: goal cell (x, y, z) is no node (no stand, no doorway) and is a perch (NavGrid.perch: a fence's top, a
+ * cauldron's inside); undefined otherwise. `enter` says whether a path may end on it (PerchGoal.enter).
+ */
+export function perchGoal(grid: NavGrid, x: number, y: number, z: number): PerchGoal | undefined {
+  if (isFeet(grid.stand(x, y, z)) || isFeet(grid.standThrough(x, y, z))) return undefined;
+  const feet = grid.perch(x, y, z);
+  if (!isFeet(feet)) return undefined;
+  const own = grid.cls(x, y, z);
+  const inOwn = !!own && own.boxes.length > 0;
+  const sup = inOwn ? own : grid.cls(x, y - 1, z);
+  if (!sup) return undefined;
+  let enter = false;
+  if (!inOwn && !sup.danger && feet > y + 1e-6) {
+    const hw = PHYSICS.width / 2;
+    const boxes = boxesAtCell(grid.source, x, y - 1, z, sup) ?? [];
+    enter = boxes.some((b) => Math.abs(y - 1 + b[4] - feet) < 1e-6 && b[0] < 0.5 + hw - 1e-6 && b[3] > 0.5 - hw + 1e-6 && b[2] < 0.5 + hw - 1e-6 && b[5] > 0.5 - hw + 1e-6);
+  }
+  return { feet, enter, on: sup.name, block: { x, y: inOwn ? y : y - 1, z } };
 }
 
 /**

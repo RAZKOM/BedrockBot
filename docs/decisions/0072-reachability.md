@@ -331,3 +331,76 @@ footprint overlapped a column with a node 0.5 lower.
     `locateNode`; inside a cauldron or composter `locateNode` takes a neighbour node 0.31 lower, and the rim then needs a
     jump; the unprone and leaves path keep their own start. Where the flight sets the body down is the flight
     track's.
+
+## R6: a goal on a top the stand rule has no node for
+
+Track R6 (2026-11-13, docs/pathfinding.md "A goal on a top the stand rule has no node for (Track R6)"). The owner's
+rule: `!goto` answers `unreachable` only when the goal is closed off. After R5 a goal on a fence, wall or closed gate
+top was still `not standable`: `unreachable (rule place)` in 1 tick, or with `allowBreak` on `unreachable (world)`
+after 28 plans. A column goal over a fence took 27 plans to the same answer.
+
+42. **A goal on a perch.** A goal cell that is no node and is a perch (decision 36's `NavGrid.perch`) is a perch goal
+    (`astar.ts perchGoal`). It may be stood on (`enter`) when its top is a box in the cell below standing over 1 (a
+    fence, a wall, a closed gate), no hazard, covering a centred body's footprint. A rim round a hollow (a cauldron, a
+    composter), a top in the goal's own cell (a hopper), magma, a cactus and dripstone are perch goals that are never
+    stood on.
+43. **Onto it by a step or a jump up, never a drop.** `PathOptions.perchGoal` adds the path's last move: from a
+    cardinal neighbour node onto the goal's top, a rise of 0 to `MAX_JUMP_RISE` (a walk up to a step, else a jump with
+    the head room free). A move down onto a perch is a drop, and the fall rules, R4's hold and the step-off check
+    have no answer for a perch, so none is planned. The move ends the path: nothing leaves the goal's top and no other
+    perch becomes a node. Every other step is the planner's own under the same rules.
+44. **Else next to it, arrived, with a note.** When no neighbour node is 0 to 1.25 under the top (looked at before
+    the first plan), or the way onto it fails (no plan, no progress, a loop, a move that does not take: once, with no
+    failure counted), the walk ends next to it: a `getToBlock` goal, as a dig is walked to, on the goal's own cell
+    with no face for a fence, a wall or a gate (a side cell at the post's level or a level higher: a post in a deck),
+    on the block for a top inside its own block (a cauldron). On the post's block a side cell over it is never done,
+    and a post in a deck had no end. A radius round the top was tried and rejected: one wide enough for a fence's
+    corner took a column two blocks from a cauldron. The switch happens on any failure of the goto, also a move
+    timeout far from the goal: the cost is that such a walk ends next to the top where a retry might have reached
+    it; it never ends unreachable for it, since every way onto the top passes a cell next to it. The result is `ok` with a `note` (a new optional field of `SkillResult`'s ok branch) that
+    says the goal's cell cannot be stood on, why, and how far the body ended from the top; `!goto` puts it in the reply,
+    and `GotoReport.perchGoal` records `on` or `beside` with the distance.
+45. **A column goal** (`xz`) is looked at the same way only when no cell of the column is a node (one pass down the
+    column, once a goto, not decided while part of it is unloaded): on the cell over the column's highest box (a
+    fence) or its own cell (a cauldron's inside). A column goal is done at any node of the column, so a column with a
+    node under a fence top (a room under a roof, a path under a bridge's rail) keeps the plain goal and the node it
+    arrived at before.
+46. **On by default, no setting.** It only changes how a walk ends: onto the goal by a step or a jump up, or next to
+    it. `Navigator.perchGoals = false` gives the behaviour before, for the tests.
+47. **Starting inside a bowl.** In an empty cauldron or composter the start is a neighbour node 0.31 lower (decision
+    41) and the first move needs a jump over the rim; the follower walked into the rim and the goto ended unreachable
+    after three move timeouts. The follower now jumps when, on the ground, pushing forward and blocked sideways, its
+    feet are on a bowl's inside (`follower.ts inBowl`). It is a jump the path's move already asks for at the rim.
+48. **The callers' starts.** A caller asking with the body's own position takes `locateStart`; one asking about a cell
+    it considers keeps `locateNode`. Changed: `probePath` takes `{ body: true }` (the mine's walk probe and the guard's
+    reach probe pass it), the mine's straight probe uses `locateStart`, and the miner no longer marks an ore unreachable
+    when its probe had no start (the probe says nothing then). Kept, with a comment: `Navigator.plan` with an explicit
+    `from` (a named cell, no caller passes one), `safeHere` and the last safe spot (retreat targets). Not the same
+    case: the landing probe and the flight's site probes (landing cells; the flight's files, not changed here), the
+    panic run (it walks through `mover.goto`, which has the perch since R5), the unprone path (a floor with no head
+    room: it digs and plans again through the navigator).
+49. **Measured** (`nav-r6.test.ts`, the real navigator in the bench's closed loop, the goal 15 blocks off, both the
+    default and the live settings, 10 runs a changed case): a fence, a wall and a closed gate goal arrived next to them
+    10 of 10 in 66 to 67 ticks (before: unreachable in 1 tick, or after 333 with `allowBreak` on); with a block beside
+    them, on the top 10 of 10 in 74 to 78 ticks, 0.01 to 0.17 from its centre; a fence with a slab beside it by a jump
+    in 78 to 80; a cauldron next to it in 66 to 67; a column goal over a fence next to it in 66 to 67 (before: 328
+    ticks and unreachable); no damage, no death. The kinds that are not perches (inside a solid, in the air, no head
+    room, a slab's upper half) answer as before. A fence in a deck with fences on its four sides arrived next to it
+    on the deck 10 of 10 in 74 to 77 ticks (on the post's block as the goal: unreachable after 316 ticks). A column
+    goal with a fence on a roof over a floor arrived on the floor with the same end and plans as before, 10 of 10 in
+    both configurations (the first column rule: unreachable after 321 ticks). R5's 249 shape rows are byte for byte the same on the base and on
+    this tree. On bds-pve (`nav-perch.test.ts` goal cases, one post on the grass, the goal 20 blocks off, 10 runs a
+    case): before, 10 of 10 unreachable (`rule place`) in 1 tick; a spruce fence, a cobblestone wall and a closed gate
+    each arrived next to the post 10 of 10 in 4.1 to 4.2 s with the note; with a block of planks beside it, on the top
+    10 of 10 in 4.5 to 4.7 s, 0.00 to 0.17 from its centre; no damage. R5's own cases on the same tree gave R5's
+    numbers. The bench at the live settings on the Mac: 2541 pairs, 0 deaths, R5's six pairs the same with the same
+    causes; one more, caves:5:10, `unloaded` under load (three unit suites on the host), arrived 3 of 3 run alone
+    there and on the PC on this tree and the base; no other pair changed its answer. The mob gates no worse: pve-m1,
+    pve-combat, pve-creeper 20 of 20, nav-hostile-fall 4 of 4, the gauntlet's live kit 33 cells with no death. On
+    the final tree (decisions 44 and 45 as written) the bench gave 0 deaths again. caves:5:10 is `unloaded` on the base too
+    when its whole world runs. Three long pairs moved with the load (500 ms corridor searches); long:7:16 arrived
+    when run alone. pve-combat was flaky that evening on this tree and on the base alike, and the gauntlet's one
+    suffocation (creeper-4, no goto running) did not come back in 5 runs on either tree.
+50. **Left as they are.** A perch goal with nothing in reach of it (a fence on a tower 3 high) stays unreachable
+    (`rule place`; with `allowBreak` on it said `world` before). A goal given as the fence block's own cell is a goal
+    inside a block, as before. The flight's probes are the flight track's.

@@ -6,7 +6,11 @@ import type { Goal } from './nav/goals.ts';
 export type { Goal, DigOptions, DigResult };
 
 export type SkillResult =
-  | { ok: true }
+  | {
+      ok: true;
+      /** Track R6: arrived, with something to say (the goal's cell is a top no move goes onto: where the walk stopped). */
+      note?: string;
+    }
   | {
       ok: false;
       reason: 'unreachable' | 'timeout' | 'corrected' | 'interrupted' | 'no_tool' | (string & {});

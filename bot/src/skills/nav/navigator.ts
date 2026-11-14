@@ -21,7 +21,7 @@ import { classify, type TerrainClass } from '../terrain/classify.ts';
 import type { TerrainSource } from '../terrain/query.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { DEFAULT_THROWAWAY, DIG_REPEATS, DIG_SETTLE_TICKS, type BreakRules, type NavActions } from './actions.ts'; // Track BC: DIG_REPEATS, DIG_SETTLE_TICKS
-import { PathSearch, explainStart, findPath, goalUnloaded, handBreakTicks, locateNode, locateStart, type LocatedNode, type PathNode, type PathOptions, type PathResult } from './astar.ts';
+import { MAX_JUMP_RISE, PathSearch, explainStart, findPath, goalUnloaded, handBreakTicks, locateNode, locateStart, perchGoal, type LocatedNode, type PathNode, type PathOptions, type PathResult } from './astar.ts';
 import { DEFAULT_COSTS, TICKS, type PathCosts } from './costs.ts'; // Track BI: DEFAULT_COSTS, PathCosts (dropCheck)
 import { PathFollower, PressGuard, yawTowards } from './follower.ts';
 import { goalTest, type NavGoal } from './goals.ts'; // Track R: NavGoal (task 7.10 goal types)
@@ -216,6 +216,11 @@ export interface GotoReport {
   perchStarts?: number;
   /** Track R5: ticks waited with no start node while the body was still in the air (SETTLE_TICKS at most). */
   settleTicks?: number;
+  /**
+   * Track R6: the goal's cell is a perch (a fence's top): `on` the walk ended on it, `beside` next to it (`perchRing`: no
+   * way onto it), with the distance from the body's feet to the top's centre at the end.
+   */
+  perchGoal?: { end: 'on' | 'beside'; on: string; dist?: number };
   /** Track AB: worker answers spliced into the path being walked, and answers dropped as stale (blocks changed near them). */
   upgrades?: number;
   stale?: number;
@@ -347,6 +352,11 @@ interface Active {
   retreat: { until: number } | undefined;
   /** Track R5: ticks waited with no start node while the body was in the air (SETTLE_TICKS at most a goto). */
   settled: number;
+  /**
+   * Track R6: the `block` goal's cell is a perch (a fence's top: astar `perchGoal`), looked at once at the first plan
+   * (null: it is not). `ring`: the walk ends next to it (`perchRing`), no step or jump onto it being there or found.
+   */
+  perchGoal?: { x: number; y: number; z: number; feet: number; on: string; enter: boolean; ring: boolean; block: Vec3 } | null;
   noBreak: Set<number>;
   /** Pillar / door cells (cellKey) whose action failed during this goto: not planned again. */
   noAction: Set<number>;
@@ -486,6 +496,21 @@ interface FallHold {
 }
 /** Track R2: the heuristic's weight of a goto's searches after an open way (walkOpenWay). */
 export const OPEN_WEIGHT = 3;
+/**
+ * Track R6: the goal a walk to a perch goal ends at when no move goes onto it: next to it, as a dig or a chest is
+ * walked to (getToBlock: one of the 8 columns round it with the block at the feet or the head, in
+ * reach, a face of it turned to the eye). Not a radius: a cauldron's inside is 0.31 over the floor, and a radius that
+ * takes a fence's corner (2.06 from its top) took a column two blocks from the cauldron.
+ */
+function perchRing(pg: { x: number; y: number; z: number; block: Vec3 }): NavGoal {
+  // a top in the goal's own cell (a cauldron's inside): next to that block. A top over the block below (a fence's):
+  // next to the goal's cell, the air over the fence, with no face asked (it has none). That takes a side cell at the
+  // fence's level (the ground beside a post) and one at the goal's level (a deck the post stands in: on the block's
+  // own goal, a side cell over the block is never done, and a walk switched there by a failure had no end at all)
+  if (pg.block.y === pg.y) return { type: 'getToBlock', p: { ...pg.block } };
+  return { type: 'getToBlock', p: { x: pg.x, y: pg.y, z: pg.z }, face: false };
+}
+
 /** The coarse modes a goto's corridors plan in (Track CB; Track R2: the modes a failed waypoint's portal is marked for). */
 function corridorModes(o: GotoOptions): CoarseMode[] {
   return o.allowBreak ? ['walk', 'mine'] : ['walk'];
@@ -574,6 +599,8 @@ export class Navigator {
   settleTicks = SETTLE_TICKS;
   /** Track R5: a body on a perch (a fence's top) plans from it (false: the behaviour before, for the tests' before and after). */
   perch = true;
+  /** Track R6: a goal on a perch (a fence's top) is walked onto or next to (false: the behaviour before, for the tests). */
+  perchGoals = true;
   private protect: NavigatorOptions['protect'];
   /** Track BK: cells (cellKey) no goto may dig while a job holds them (a quarry's stair treads); every goto's noBreak starts with them. */
   readonly keptCells = new Set<number>();
@@ -846,7 +873,8 @@ export class Navigator {
   /** Plan only (no movement, one search to the end): from the body's current node to the goal. */
   plan(goal: NavGoal, from?: Vec3, options?: GotoOptions): PathResult | undefined {
     const s = this.loop.state;
-    // Track AJ; Track R5: from the body, a perch too (a fence's top)
+    // Track AJ; Track R5: from the body, a perch too (a fence's top). Track R6: an explicit `from` is a cell the caller
+    // names, not where a body stands: locateNode only (no caller in the bot passes one: the farm and the mine plan from the body)
     const start = from ? locateNode(this.grid, from) : this.startOf(s.pos, this.preferNode(s));
     return start && findPath(this.grid, start, goal, start.perch ? { ...this.planOptions(options), startFeet: start.feet } : this.planOptions(options));
   }
@@ -1126,6 +1154,9 @@ export class Navigator {
 
   private fail(a: Active, why: string): boolean {
     a.why = why;
+    // Track R6: the way onto the goal's perch failed (the step or the jump did not take, no plan reaches it): beside it
+    // instead, no failure counted (the caller plans again)
+    if (this.perchBeside(a, why)) return false;
     a.report.failures++;
     this.log.info(`goto: failure ${a.report.failures}/${this.maxFailures} (${why})`);
     if (a.report.failures >= this.maxFailures) {
@@ -1235,6 +1266,108 @@ export class Navigator {
   /** The hold in the reply (`; held 30 s for a hostile 9 blocks away`), '' when the goto never held. */
   private heldWords(a: Active, why?: string): string {
     return a.heldTicks > 0 ? `; held ${Math.round(a.heldTicks / 20)} s${why ? ` for ${why}` : ''}` : '';
+  }
+
+  // ---- Track R6: a goal on a top the stand rule has no node for (decisions/0072-reachability.md "R6") ------------
+
+  /**
+   * Looks once (when the goal's cell and the one under it are loaded) whether the `block` goal's cell is a perch
+   * (astar `perchGoal`: a fence's, a wall's or a closed gate's top; the inside of a cauldron). When it is and a step or
+   * a jump onto it may start beside it (a cardinal neighbour node no higher than its top and at most MAX_JUMP_RISE
+   * under it), the search may end on it (PathOptions.perchGoal); else the walk ends beside it (`perchRing`).
+   */
+  private lookPerchGoal(a: Active, gx: number, gy: number, gz: number, column = false): void {
+    if (this.grid.cls(gx, gy, gz) === undefined || this.grid.cls(gx, gy - 1, gz) === undefined) return; // asked again once loaded
+    const pg = this.perchGoals ? perchGoal(this.grid, gx, gy, gz) : undefined;
+    if (!pg) {
+      a.perchGoal = null;
+      return;
+    }
+    let from = false;
+    if (pg.enter) {
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+        for (const y of [gy, gy - 1]) {
+          let f = this.grid.stand(gx + dx, y, gz + dz);
+          if (f !== undefined && Number.isNaN(f)) f = this.grid.standThrough(gx + dx, y, gz + dz);
+          if (f !== undefined && !Number.isNaN(f) && pg.feet - f >= -1e-6 && pg.feet - f <= MAX_JUMP_RISE + 1e-6) from = true;
+        }
+      }
+    }
+    a.perchGoal = { x: gx, y: gy, z: gz, feet: pg.feet, on: pg.on, enter: pg.enter, ring: !from, block: pg.block };
+    if (from && column) a.planGoal = { type: 'block', p: { x: gx, y: gy, z: gz } }; // (the column's top: PathOptions.perchGoal takes a block goal)
+    if (from) this.log.info(`goto: the goal ${gx},${gy},${gz} is on ${pg.on} (feet ${+pg.feet.toFixed(4)}), no node: planned onto it by a step or a jump from beside it`);
+    else {
+      a.planGoal = perchRing(a.perchGoal);
+      this.log.info(`goto: the goal ${gx},${gy},${gz} is on ${pg.on} (feet ${+pg.feet.toFixed(4)}), no node${pg.enter ? ' and no block beside it to step or jump onto it from' : ' and no move goes onto it'}: the walk ends next to it`);
+    }
+  }
+
+  /**
+   * Track R6: the highest cell of column (x, z) holding a box (not a liquid); null when the column has none or its top is
+   * a liquid, undefined while some of it is not loaded.
+   */
+  private columnTopCell(x: number, z: number): number | null | undefined {
+    const src = this.grid.source;
+    const start = src.columnTop ? src.columnTop(x, z) : (src.maxY ?? 319);
+    if (start === undefined) return undefined;
+    const minY = src.minY ?? -64;
+    for (let y = start; y >= minY; y--) {
+      const c = this.grid.cls(x, y, z);
+      if (!c) return undefined;
+      if (c.liquid) return null;
+      if (c.boxes.length > 0) return y;
+    }
+    return null;
+  }
+
+  /**
+   * Track R6: whether some cell of column (x, z) is a node (stand or a doorway), from the cell over its top down to the
+   * world's floor: one pass, once a goto. Undefined while a cell of it is not loaded (not decided yet).
+   */
+  private columnHasNode(x: number, z: number): boolean | undefined {
+    const src = this.grid.source;
+    const top = src.columnTop ? src.columnTop(x, z) : (src.maxY ?? 319);
+    if (top === undefined) return undefined;
+    const minY = src.minY ?? -64;
+    for (let y = top + 1; y >= minY; y--) {
+      const f = this.grid.stand(x, y, z);
+      if (f === undefined) return undefined;
+      if (!Number.isNaN(f)) return true;
+      const t = this.grid.standThrough(x, y, z);
+      if (t === undefined) return undefined;
+      if (!Number.isNaN(t)) return true;
+    }
+    return false;
+  }
+
+  /** Track R6: no way onto the goal's perch: the walk ends beside it from now on, no failure counted. True when it switched. */
+  private perchBeside(a: Active, why: string): boolean {
+    const pg = a.perchGoal;
+    if (!pg || pg.ring) return false;
+    pg.ring = true;
+    a.planGoal = perchRing(pg);
+    a.noProgress = undefined;
+    a.partialFrom.clear();
+    a.offPathFrom.clear();
+    this.log.info(`goto: no way onto ${pg.on} at ${pg.x},${pg.y},${pg.z} (${why}): the walk ends next to it`);
+    return true;
+  }
+
+  /** Track R6: the end of a walk to a perch goal: the report's `perchGoal` and, beside it, the reply's note. */
+  private perchArrival(a: Active): string | undefined {
+    const pg = a.perchGoal;
+    if (!pg) return undefined;
+    const p = this.loop.state.pos;
+    const dist = +Math.hypot(p.x - (pg.x + 0.5), p.y - pg.feet, p.z - (pg.z + 0.5)).toFixed(2);
+    a.report.perchGoal = { end: pg.ring ? 'beside' : 'on', on: pg.on, dist };
+    if (!pg.ring) {
+      this.log.info(`goto: on ${pg.on} at ${pg.x},${pg.y},${pg.z}, ${dist} from its centre`);
+      return undefined;
+    }
+    const why = pg.enter ? 'no step or jump leads onto it' : 'no move goes onto it';
+    const note = `the goal's cell ${pg.x},${pg.y},${pg.z} (on ${pg.on}) cannot be stood on (${why}): stopped ${dist} blocks from it`;
+    this.log.info(`goto: ${note}`);
+    return note;
   }
 
   /**
@@ -1506,7 +1639,10 @@ export class Navigator {
     return this.perch ? locateStart(this.grid, pos, prefer) : locateNode(this.grid, pos, prefer);
   }
 
-  /** Standing on a standable node, on the ground, out of liquids. */
+  /**
+   * Standing on a standable node, on the ground, out of liquids. Track R6: locateNode only, never the perch: the safe
+   * node is where a retreat walks back to, and no move goes into a perch (decision 39).
+   */
   private safeHere(s: InputLoopState): LocatedNode | undefined {
     if (!s.onGround || s.inWater || s.inLava) return undefined;
     return locateNode(this.grid, s.pos);
@@ -1641,7 +1777,7 @@ export class Navigator {
       return;
     }
     if (s.onGround && !s.inWater && !s.inLava && !a.action) {
-      const here = locateNode(this.grid, s.pos);
+      const here = locateNode(this.grid, s.pos); // (Track R6: the retreat's target: a node, never a perch, as safeHere)
       if (here) a.lastSafe = here;
     }
 
@@ -2096,6 +2232,7 @@ export class Navigator {
       ...(o.relax ? { relax: { ...o.relax } } : {}), // Track R1
       ...(o.frontier ? { frontier: true } : {}),
       ...(o.startFeet !== undefined ? { startFeet: o.startFeet } : {}), // Track R5: a perch start
+      ...(o.perchGoal ? { perchGoal: true } : {}), // Track R6: onto the goal's perch
     };
   }
 
@@ -2220,6 +2357,26 @@ export class Navigator {
       this.giveUp(a);
       return false;
     }
+    // Track R6: a column goal (`!goto x z`, a waypoint with no height) with no node in any cell of the column and a
+    // perch (a fence's top) as its top: the top as a block goal, onto it or next to it as below (before: unreachable
+    // after 27 plans). A column with a node anywhere (a room under a roof with a fence on it, a path under a bridge's
+    // rail) keeps the plain column goal: it arrived before at the column's cheapest node and must arrive there still.
+    if (a.goal.type === 'xz' && a.perchGoal === undefined) {
+      const gx = Math.floor(a.goal.x);
+      const gz = Math.floor(a.goal.z);
+      const top = this.columnTopCell(gx, gz);
+      const node = top === undefined ? undefined : this.columnHasNode(gx, gz);
+      if (top === null || node === true) a.perchGoal = null;
+      else if (top !== undefined && node === false) {
+        // the cell over the top block (a fence's 1.5), else the top block's own cell (a cauldron's inside)
+        this.lookPerchGoal(a, gx, top + 1, gz, true);
+        if (a.perchGoal === null) {
+          a.perchGoal = undefined;
+          this.lookPerchGoal(a, gx, top, gz, true);
+        }
+      }
+      // (still undefined: part of the column is not loaded yet; asked again at the next plan, the goal left as it is)
+    }
     if (a.goal.type === 'block') {
       // a block goal nobody can stand in (water, a wall, mid-air) is unreachable, whatever the search says
       // (Track R1: not a natural block the dig way may open: the dig way's level digs it out, flyC's walk down)
@@ -2227,7 +2384,9 @@ export class Navigator {
       const gx = Math.floor(g.x);
       const gy = Math.floor(g.y);
       const gz = Math.floor(g.z);
-      if (Number.isNaN(this.grid.stand(gx, gy, gz)) && Number.isNaN(this.grid.standThrough(gx, gy, gz))) {
+      // Track R6: a goal on a top the stand rule has no node for (a fence's): onto it by a step or a jump, else beside it
+      if (a.perchGoal === undefined) this.lookPerchGoal(a, gx, gy, gz);
+      if (!a.perchGoal && Number.isNaN(this.grid.stand(gx, gy, gz)) && Number.isNaN(this.grid.standThrough(gx, gy, gz))) {
         // feet on a stairs block's low half (y + 0.5) floor to the stairs cell: the node is the one above
         const c = this.grid.cls(gx, gy, gz);
         if (c?.floor && c.top === 1 && !c.fullCube && this.grid.stand(gx, gy + 1, gz) === gy + 1) {
@@ -2242,6 +2401,7 @@ export class Navigator {
     }
     for (const k of this.blacklist.cells('dig')) a.noBreak.add(k); // Track R: blacklisted action cells
     a.pathOpts = this.planOptions(a.opts, a.noBreak);
+    if (a.perchGoal && !a.perchGoal.ring) a.pathOpts.perchGoal = true; // Track R6: the last move onto the goal's top
     this.applyLevel(a); // Track W3: no fall that hurts before level 2; the dig way from level 1
     // two failed pillar places in one goto: something systematic (reach, the server refusing); plan without pillaring
     if (a.placeFailures >= 2) a.pathOpts.allowPlace = false;
@@ -2327,6 +2487,13 @@ export class Navigator {
         return false;
       }
       a.why = this.noPathWhy(res);
+      if (this.perchBeside(a, a.why)) {
+        // Track R6: no way onto the goal's top: beside it, at the same level
+        this.loop.release();
+        a.replan = 'retry';
+        a.waitUntil = a.t + 1;
+        return false;
+      }
       if (this.escalate(a, a.why)) {
         // Track W3: the next level before giving up
         this.loop.release();
@@ -2393,6 +2560,11 @@ export class Navigator {
       }
       // Track W3: the next level before a failure counts (after the wait for unloaded world; never on the stand-in's
       // cut-off search: the worker's retry may find the way at this level)
+      if (search.wp === undefined && (full || !res.limited) && this.perchBeside(a, why)) {
+        a.replan = 'retry'; // Track R6: no way onto the goal's top: beside it, at the same level
+        a.waitUntil = a.t + 1;
+        return false;
+      }
       if (search.wp === undefined && (full || !res.limited) && this.escalate(a, why)) return false;
       if (this.fail(a, why)) return false;
       // recorded for the retry skip (a full search only; Track R1: a worker search cut by its budget only once it was
@@ -2434,6 +2606,11 @@ export class Navigator {
         if (search.wp !== undefined && a.corridor) {
           this.corridorFailed(a, search.wp, 'no progress towards it (the partial plans loop)');
           a.replan = 'retry';
+          a.waitUntil = a.t + 1;
+          return false;
+        }
+        if (this.perchBeside(a, why)) {
+          a.replan = 'retry'; // Track R6
           a.waitUntil = a.t + 1;
           return false;
         }
@@ -2571,7 +2748,8 @@ export class Navigator {
         a.replan ??= 'partial';
         return;
       }
-      a.finish({ ok: true });
+      const note = this.perchArrival(a); // Track R6: beside a goal on a top no move goes onto
+      a.finish(note ? { ok: true, note } : { ok: true });
       return;
     }
     // the end of a partial segment: wait for the plan-ahead (or the worker's final answer), else re-plan from here

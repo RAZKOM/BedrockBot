@@ -8,7 +8,7 @@
 // base), and use the same goal as the walk to a container (`chestGoal`): within reach 4, no face rule, from any of
 // the 8 columns around it with the feet up to 3 blocks below it (stacked chests, shelves, pillars).
 import type { Vec3 } from '../../world/types.ts';
-import { locateNode, PathSearch, type PathNode, type PathOptions, type PathResult } from '../nav/astar.ts';
+import { locateNode, locateStart, PathSearch, type PathNode, type PathOptions, type PathResult } from '../nav/astar.ts';
 import type { NavGoal } from '../nav/goals.ts';
 import type { NavGrid } from '../nav/grid.ts';
 import type { GotoOptions } from '../types.ts';
@@ -73,11 +73,18 @@ const yieldLoop = (): Promise<void> => new Promise((r) => setImmediate(r));
  * One bounded probe plan from `from` (feet) to `goal`, sliced; undefined when `from` is no standable
  * node (then nothing can be said about any container). `noLongFalls` (Track BH): without Track BI's
  * planned long drops (a flight's landing must be walkable without fall damage).
+ *
+ * Track R6: `body` (the caller's `from` is the body's own feet, where it stands now: the mine's walk probe, the
+ * guard's probe to a mob): a body resting on a top the stand rule has no node for (a fence's) starts from that perch
+ * (astar `locateStart`), as the goto it stands for does (Track R5). Without it (the default) `from` is a cell the
+ * caller only considers (a landing cell of the flight's site search, home's floor): `locateNode` only, so a fence's
+ * top is never taken for a floor to walk from (Track F11: a floor on a fence, a wall or a post is no landing cell).
  */
-export async function probePath(nav: ProbeNav, goal: NavGoal, from: Vec3, budget: { nodes?: number; ms?: number; noLongFalls?: boolean } = {}): Promise<PathResult | undefined> {
-  const start = locateNode(nav.grid, from);
+export async function probePath(nav: ProbeNav, goal: NavGoal, from: Vec3, budget: { nodes?: number; ms?: number; noLongFalls?: boolean; body?: boolean } = {}): Promise<PathResult | undefined> {
+  const start = budget.body ? locateStart(nav.grid, from) : locateNode(nav.grid, from);
   if (!start) return undefined;
   const opts: PathOptions = { ...nav.planOptions({ allowBreak: false, allowPlace: false, sprint: false }), maxNodes: budget.nodes ?? PROBE_NODES, maxMs: budget.ms ?? PROBE_MS };
+  if (start.perch) opts.startFeet = start.feet; // Track R6: from the perch the body is on
   if (budget.noLongFalls) delete opts.falls;
   const search = new PathSearch(nav.grid, start, goal, opts);
   for (;;) {
