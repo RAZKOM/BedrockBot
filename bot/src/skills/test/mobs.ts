@@ -19,10 +19,15 @@
 // swims: the run would measure the place, not the bot). The ground is said as flat, mostly flat, a slope (points standable
 // only up to 8 levels over or under the bot's: on the Realm's hillside a ring of 7 sent the set downhill) or rough; fewer
 // than half the points level is refused.
+// Track T2 (bare.ts): the word `bare` runs the series with no blade in the hotbar (the floors for a bot without one, the
+// elytra flee first, run although the kit carries a sword): the blades move into free main-inventory slots before the
+// first run (too few free slots: refused), pulls into the hotbar pass them over until the end, a blade the kit's restore
+// gave into the hotbar goes out again after each restore, and they go back to their hotbar slots however the series ends.
 import type { Vec3 } from '../../connection/types.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { EntityInfo } from '../../world/types.ts';
 import { bareType } from '../combat/hostiles.ts';
+import { BARE_IDLE_MS, BareHold, hotbarBlades, stowedText, type BarePorts, type Stowed } from './bare.ts'; // Track T2
 import { fmtCell, type RestoreResult } from './recovery.ts';
 
 /** The series never runs closer than this to home (blocks, level). */
@@ -74,11 +79,13 @@ export interface MobsSpec {
   seconds: number;
   /** Track M2: run a set with a creeper although mobGriefing is on (the command said `force`). */
   force?: boolean;
+  /** Track T2: no blade in the hotbar for the series (the command said `bare`; bare.ts). */
+  bare?: boolean;
 }
 
-/** `!test mobs <set> [n] [<seconds>s] [force]` -> the spec, or an error line. */
+/** `!test mobs <set> [n] [<seconds>s] [force] [bare]` -> the spec, or an error line. */
 export function parseMobsArgs(args: readonly string[]): MobsSpec | { error: string } {
-  const usage = `usage: !test mobs <set> [n] [<seconds>s] [force]; sets: ${Object.keys(MOB_SETS).join(' ')}`;
+  const usage = `usage: !test mobs <set> [n] [<seconds>s] [force] [bare]; sets: ${Object.keys(MOB_SETS).join(' ')}`;
   const set = args[0]?.toLowerCase();
   if (!set) return { error: usage };
   const mobs = MOB_SETS[set];
@@ -86,9 +93,14 @@ export function parseMobsArgs(args: readonly string[]): MobsSpec | { error: stri
   let runs = 1;
   let seconds = MOBS_SECONDS;
   let force = false;
+  let bare = false;
   for (const w of args.slice(1)) {
     if (w.toLowerCase() === 'force') {
       force = true;
+      continue;
+    }
+    if (w.toLowerCase() === 'bare') {
+      bare = true;
       continue;
     }
     const s = /^(\d+)s$/i.exec(w);
@@ -100,7 +112,7 @@ export function parseMobsArgs(args: readonly string[]): MobsSpec | { error: stri
       if (runs < 1 || runs > MOBS_MAX_RUNS) return { error: `test mobs: runs must be 1..${MOBS_MAX_RUNS}` };
     } else return { error: usage };
   }
-  return { set, mobs, runs, seconds, ...(force ? { force } : {}) };
+  return { set, mobs, runs, seconds, ...(force ? { force } : {}), ...(bare ? { bare } : {}) };
 }
 
 // ---- Track M2: the checks before a series (for the owner's Realm) ----
@@ -237,6 +249,12 @@ export interface MobRecord {
   floors: Record<string, number>;
   end: 'cleared' | 'died' | 'timeout' | 'stopped' | 'setup';
   reason: string;
+  /** Track T2: the series is `bare` (no blade in the hotbar). */
+  bare?: boolean;
+  /** Track T2: the blades out of the hotbar during this run (`netherite_sword 0 -> 27`), the stow and any keep so far. */
+  stowed?: string[];
+  /** Track T2: a blade in the hotbar at the run's start although the series is bare (none could be moved out). */
+  bladeInHotbar?: boolean;
 }
 
 export interface MobSummary {
@@ -252,6 +270,10 @@ export interface MobSummary {
   reflexHits: number;
   floors: Record<string, number>;
   stopped: boolean;
+  /** Track T2: the series was `bare`: what was stowed and where it went back to. */
+  bare?: boolean;
+  stowed?: string[];
+  restored?: string[];
 }
 
 export interface MobSeriesPorts {
@@ -276,6 +298,8 @@ export interface MobSeriesPorts {
   write(rec: object): void;
   now(): number;
   sleep(ms: number): Promise<void>;
+  /** Track T2: the inventory moves and the hold of a `bare` series (bare.ts); a bare series without them is refused. */
+  bare?: BarePorts;
   log?: Logger;
 }
 
@@ -289,12 +313,12 @@ const fmtCounts = (c: Readonly<Record<string, number>>): string => Object.entrie
 
 /** One chat line per run. */
 export function mobRunLine(r: MobRecord): string {
-  return `test mobs ${r.set} run ${r.run}/${r.of}: ${r.died ? 'DIED' : 'alive'}, damage ${r.damage} (lowest ${r.lowest}), hits ${fmtCounts(r.hits)}, ${r.cleared ? `cleared in ${r.clearSeconds} s` : `${r.left} left after ${r.seconds} s${r.end === 'stopped' ? ' (stopped)' : ''}`}, reflex ${r.reflexHits}, floors ${fmtCounts(r.floors)}`;
+  return `test mobs ${r.set} run ${r.run}/${r.of}: ${r.died ? 'DIED' : 'alive'}, damage ${r.damage} (lowest ${r.lowest}), hits ${fmtCounts(r.hits)}, ${r.cleared ? `cleared in ${r.clearSeconds} s` : `${r.left} left after ${r.seconds} s${r.end === 'stopped' ? ' (stopped)' : ''}`}, reflex ${r.reflexHits}, floors ${fmtCounts(r.floors)}${r.bare ? `, bare${r.bladeInHotbar ? ' (a blade still in the hotbar)' : ''}` : ''}`;
 }
 
 /** The summary line. */
 export function mobSummaryLine(s: MobSummary): string {
-  return `test mobs ${s.set}: ${s.runs}/${s.planned} runs${s.stopped ? ' (stopped)' : ''}, ${s.deaths} death${s.deaths === 1 ? '' : 's'}, cleared ${s.cleared}/${s.runs}, damage ${s.damage.join('/') || '-'} (mean ${s.meanDamage}), clear median ${s.medianClear ?? '-'} s, reflex ${s.reflexHits}, floors ${fmtCounts(s.floors)}`;
+  return `test mobs ${s.set}: ${s.runs}/${s.planned} runs${s.stopped ? ' (stopped)' : ''}, ${s.deaths} death${s.deaths === 1 ? '' : 's'}, cleared ${s.cleared}/${s.runs}, damage ${s.damage.join('/') || '-'} (mean ${s.meanDamage}), clear median ${s.medianClear ?? '-'} s, reflex ${s.reflexHits}, floors ${fmtCounts(s.floors)}${s.bare ? `, bare: ${s.stowed?.length ? s.stowed.join(', ') : 'no blade in the hotbar'}${s.restored?.length ? `; ${s.restored.join(', ')}` : ''}` : ''}`;
 }
 
 export class MobSeries {
@@ -305,6 +329,10 @@ export class MobSeries {
   private readonly p: MobSeriesPorts;
   private readonly log: Logger;
   private readonly start: Vec3;
+  /** Track T2: the bare series' stow and hold (bare.ts), undefined without `bare`. */
+  readonly bare: BareHold | undefined;
+  /** Track T2: every blade stowed in this series (for the records and the summary). */
+  private readonly stowedAll: Stowed[] = [];
 
   constructor(spec: MobsSpec, ports: MobSeriesPorts, tag: string) {
     this.spec = spec;
@@ -313,6 +341,21 @@ export class MobSeries {
     this.log = ports.log ?? silentLogger;
     const s = ports.position();
     this.start = { x: Math.floor(s.x), y: Math.floor(s.y + 1e-3), z: Math.floor(s.z) };
+    this.bare = spec.bare && ports.bare ? new BareHold({ ...ports.bare, log: ports.bare.log ?? this.log }) : undefined;
+  }
+
+  /**
+   * Track T2: for a `bare` series, the blades out of the hotbar and the hold on (bare.ts), before the start line; the
+   * refusal line (too few free slots, a move refused, no inventory moves here), else undefined with what was stowed.
+   * `run()` puts them back however it ends. Without `bare` nothing is touched.
+   */
+  async stowBlades(): Promise<{ refusal?: string; stowed: string }> {
+    if (!this.spec.bare) return { stowed: '' };
+    if (!this.bare) return { refusal: 'test mobs: bare: no inventory moves here', stowed: '' };
+    const r = await this.bare.stow();
+    if (!r.ok) return { refusal: r.reason, stowed: '' };
+    this.stowedAll.push(...r.stowed);
+    return { stowed: stowedText(r.stowed) };
   }
 
   /** Why the series may not run here (closer than MOBS_MIN_HOME to home), else undefined. */
@@ -340,11 +383,32 @@ export class MobSeries {
   }
 
   status(): string {
-    return `test mobs ${this.spec.set}: run ${this.current}/${this.spec.runs} from ${fmtCell(this.start)}`;
+    return `test mobs ${this.spec.set}${this.spec.bare ? ' bare' : ''}: run ${this.current}/${this.spec.runs} from ${fmtCell(this.start)}`;
+  }
+
+  /** Track T2: the stowed blades back (after a death's recovery: the moves need the living body). */
+  private async unstow(): Promise<string[] | undefined> {
+    if (!this.bare) return undefined;
+    await this.p.recovered();
+    await this.untilIdle();
+    return (await this.bare.restore()).notes;
+  }
+
+  /** Track T2: a bare series' elytra flee still in the air: wait for it to come down (at most BARE_IDLE_MS). */
+  private async untilIdle(): Promise<void> {
+    const ports = this.p.bare;
+    if (!this.bare || !ports?.idle) return;
+    const idle = (): boolean => ports.idle?.() ?? true;
+    const t0 = this.p.now();
+    if (idle()) return;
+    this.log.info('test mobs: bare: waiting for the flight to come down');
+    while (!idle() && this.p.now() - t0 < BARE_IDLE_MS) await this.p.sleep(POLL_MS);
   }
 
   async run(): Promise<MobSummary> {
     const recs: MobRecord[] = [];
+    let restored: string[] | undefined;
+    let failed = false;
     try {
       for (let i = 1; i <= this.spec.runs && !this.stopped; i++) {
         this.current = i;
@@ -356,8 +420,18 @@ export class MobSeries {
         this.p.say(line);
         if (r.died) await this.p.recovered();
       }
+    } catch (e) {
+      failed = true;
+      throw e;
     } finally {
       await this.p.run(removeCommand(this.tag));
+      try {
+        restored = await this.unstow();
+      } catch (e) {
+        restored = [`the blades not put back: ${e instanceof Error ? e.message : String(e)}`];
+      }
+      // a series ended by an error has no summary: the restore is said on its own
+      if (failed && restored?.length) this.p.say(`test mobs ${this.spec.set}: bare: ${restored.join(', ')}`);
     }
     const clears = recs.filter((r) => r.clearSeconds !== null).map((r) => r.clearSeconds!).sort((a, b) => a - b);
     const floors: Record<string, number> = {};
@@ -375,6 +449,7 @@ export class MobSeries {
       reflexHits: recs.reduce((s, r) => s + r.reflexHits, 0),
       floors,
       stopped: this.stopped,
+      ...(this.spec.bare ? { bare: true, stowed: this.stowedAll.map((s) => stowedText([s])), restored: restored ?? [] } : {}),
     };
     this.p.write(sum);
     return sum;
@@ -383,16 +458,32 @@ export class MobSeries {
   private async one(i: number): Promise<MobRecord> {
     const p = this.p;
     const startedAt = new Date(p.now()).toISOString();
-    const base = { type: 'mobs' as const, set: this.spec.set, run: i, of: this.spec.runs, start: this.start, startedAt };
+    const base0 = { type: 'mobs' as const, set: this.spec.set, run: i, of: this.spec.runs, start: this.start, startedAt };
+    let base: typeof base0 & Pick<MobRecord, 'bare' | 'stowed' | 'bladeInHotbar'> = base0;
+    const bareFields = (): void => {
+      if (!this.spec.bare) return;
+      const left = this.p.bare ? hotbarBlades(this.p.bare.slots()).length > 0 : false;
+      base = { ...base0, bare: true, stowed: this.stowedAll.map((s) => stowedText([s])), ...(left ? { bladeInHotbar: true } : {}) };
+    };
+    bareFields();
     const blank = (end: MobRecord['end'], reason: string): MobRecord => ({ ...base, seconds: 0, died: false, damage: 0, lowest: p.health(), hits: {}, summoned: 0, left: 0, cleared: false, clearSeconds: null, reflexHits: 0, floors: {}, end, reason });
+    await this.untilIdle(); // Track T2: the run before's elytra flee down first (no /tp in the air)
     const rest = await p.restore(this.start);
     if (!rest.ok) return blank('setup', `restore: ${rest.why ?? '?'}`);
+    // Track T2: the kit's restore may have given a blade into the hotbar (the first free slot): out with it too
+    if (this.bare) {
+      this.stowedAll.push(...(await this.bare.keep()));
+      bareFields();
+    }
     const why = this.refusal();
     if (why) {
       this.stopped = true;
       return blank('setup', why);
     }
-    const c0 = p.counters();
+    // copies: the PvE controller hands out its live counters (`pve.taken`, `pve.floors`), which the run's end would read
+    // again as the same objects (bds-pve 2026-11-15: an elytra flee in a run said `floors none` until this was a copy)
+    const cn = p.counters();
+    const c0 = { reflex: cn.reflex, taken: { ...cn.taken }, floors: { ...cn.floors } };
     const deaths0 = p.deaths();
     const before = new Set(p.entities().keys());
     const types = new Set(this.spec.mobs.map((m) => m.type));

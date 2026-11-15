@@ -284,6 +284,24 @@ export class SurvivalKit {
     return this.queued(() => this.toHotbar(slot), undefined);
   }
 
+  /**
+   * Track T2 (`!test mobs ... bare`): a whole stack from one player slot (0..35) into an empty one, with the inventory screen
+   * open (the predicted `place` move of world/containers.ts, which keeps the item's own data: enchantments stay). Waits out
+   * a keeper pass or a meal like `hotbar`.
+   */
+  moveSlot(from: number, to: number): Promise<{ ok: boolean; reason?: string }> {
+    return this.queued(async () => {
+      const inv = this.d.world.inventory;
+      const it = inv.slots[from];
+      if (!it || it.count <= 0) return { ok: false, reason: `slot ${from} is empty` };
+      if (inv.slots[to]) return { ok: false, reason: `slot ${to} is not empty` };
+      const r = await this.requests.withScreen(() => this.d.containers.move({ window: 0, slot: from }, { window: 0, slot: to }, it.count));
+      if (!r.ok) return { ok: false, reason: 'reason' in r && r.reason ? r.reason : 'refused' };
+      for (const s of [from, to]) if (s < 9) this.d.hotbar.noteRaw?.(s, wireItemOf(inv.slots[s], undefined));
+      return { ok: true };
+    }, { ok: false, reason: 'busy' });
+  }
+
   /** `!drop all`: the worn armour and the offhand too. */
   dropWorn(): Promise<{ dropped: string[]; refused: string[] }> {
     return this.exclusive(() => this.keeper.dropWorn(), { dropped: [], refused: ['busy'] });

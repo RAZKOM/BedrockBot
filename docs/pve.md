@@ -20,6 +20,7 @@ target); without walking every command answers `<cmd> needs a task that can walk
 | `bot/src/skills/combat/reflex.ts` | Track M1: the reflex (strikes the hostile that reaches the bot soonest, under every task; never a friend) |
 | `bot/src/skills/survival/seal.ts` | Track M1: the seal-in (a shell of throwaway blocks, or a hole dug under the feet) |
 | `bot/src/skills/test/mobs.ts` | Track M1: `!test mobs` (the gauntlet's sets on the Realm under testMode) |
+| `bot/src/skills/test/bare.ts` | Track T2: `!test mobs ... bare` (the hotbar's blades stowed for the series and put back) |
 | `bot/src/skills/fly/flee.ts`, `bot/src/chat/commands-fly.ts` (`flee`, `fleeReady`, `cancelFlee`) | Track M3: the elytra flee as a flight mode (the numbers and the pure choices; the flight itself) |
 | `bot/src/skills/fly/landmobs.ts` | Track M3: a landing's look at hostile mobs (docs/flight.md) |
 | `bot/src/skills/combat/targeting.ts` | Track V: `isThreat`, `nearestHostile`, `pickThreat` (reachability-aware, creepers first), `reachability`, `wantsFlee(threat)`, `afterFight` / `ignoreMsAfter`; Track AH: `inReach` / `pickInReach` (re-targeting), `crowdOf` / `crowded` / `crowdThreat` (crowd rule) |
@@ -640,7 +641,8 @@ status has `taken: { zombie: 3, skeleton: 1 }`. One `[pve]` line per decision.
 
 ### `!test mobs` (the Realm harness, Track T1)
 
-`!test mobs <set> [n] [<seconds>s]` (testMode on, cheats on, the bot op'd): at least 150 blocks from home, n runs (default 1)
+`!test mobs <set> [n] [<seconds>s] [force] [bare]` (testMode on, cheats on, the bot op'd; the words after the set in any
+order): at least 150 blocks from home, n runs (default 1)
 of the set summoned round the bot (on a ring 7 blocks out, a flying one 10 up) under one name tag (`m1t<hex>`), each run
 until the mobs are dead, the bot dies or the time is up (60 s), then `/kill @e[name=<tag>]` (its own mobs only, also on
 `!test stop`). Sets: each mob alone (`zombie`, `husk`, `baby`, `drowned`, `zvillager`, `skeleton`, `stray`, `creeper`,
@@ -656,6 +658,44 @@ test mobs zombie4: 2/2 runs, 0 deaths, cleared 1/2, damage 0/0 (mean 0), clear m
 
 A bad one says `DIED` in a run line and `1 death` in the summary; the JSONL file in `tests/` has one line per run (the hits by
 type, the floors, the reflex strikes, the lowest health).
+
+The hits and floors of a run are the difference of the PvE counters at its start and its end. Until Track T2 the start was
+read as the live counter objects themselves, so every run said `hits none` and `floors none` whatever happened (the
+reflex's count, a number, was right). Records written before that carry no hits and no floors.
+
+#### `bare` (Track T2)
+
+With the word `bare` the series is fought with no blade (a sword or an axe) in the hotbar, so the floors meant for a bot
+without one run on a world where the kit carries a sword: the elytra flee comes first at every flee trigger (with a blade
+it comes only from 6 health down), and the dodge may step (with `mobDodge` on). `skills/test/bare.ts`:
+
+- **Stow**: before the first run every blade in hotbar slots 0..8 moves into a free main-inventory slot, one whole-stack
+  move each through the survival kit's inventory screen (`SurvivalKit.moveSlot`, the containers' predicted `place` move).
+  Nothing is destroyed or given: the item keeps its enchantments and wear. Too few free main-inventory slots: the series is
+  refused (`test mobs: bare needs 2 free inventory slots for ..., 1 free; make room first`) and nothing moves.
+- **Hold**: until the series ends the hotbar puller (`HotbarPuller.hold`) passes blades over. It is the one road from the
+  main inventory into the hotbar for the fight's weapon pull, the Digger's axe pull and a breeding pull; without the hold the
+  first fight would bring the sword straight back. Selecting a weapon only looks at the hotbar, so it finds none.
+- **Keep**: after each run's restore a blade that came into the hotbar since (a `/give` of the kit lands in the first free
+  slot, a pickup) moves out too.
+- **Restore**: however the series ends (finished, `!test stop`, a death, an error) each blade goes back to the hotbar slot it
+  came from, after a death's recovery and once a flight in the air has come down (the inventory screen is not opened in the
+  air). A slot taken meanwhile has its item parked in a free main slot first; with no free slot the blade goes into another
+  empty hotbar slot, and the line says so. The hold ends in any case. keepInventory is required for every series, so a death
+  keeps the slots; a blade that moved is looked for by its name in the main inventory.
+
+What is not a blade still counts for the fight: a pickaxe, shovel, hoe, trident or mace in the hotbar is still the weapon the
+fight selects (better than a fist), only not one for the guard's `hasBlade()`. The offhand is not looked at. The first line
+says `bare (netherite_sword 0 -> 10)` (and `fleeFly is off` when it is), each run line ends `, bare`, the summary
+`, bare: netherite_sword 0 -> 10; netherite_sword back in slot 0`; the records gain `bare`, `stowed` (and `bladeInHotbar`
+when a blade could not be moved out before a run), the summary `bare`, `stowed`, `restored`. A series without the word
+moves nothing.
+
+On bds-pve (`test/e2e/pve-testmobs.test.ts`, the sword in slot 0, rockets and bread in the hotbar, the elytra in the main
+inventory, `fleeFly` and the guard on, `skeleton4 1 bare 40s`): the sword was out of the hotbar at every one of 172 looks
+while the run went, the elytra flee was asked once and flew (landed 96 blocks off after 7 s, one rocket), and the sword was
+back in slot 0 with its enchantment after the summary. The run said `cleared in 7.6 s` although the bot had flown off: the
+harness counts a mob it no longer sees as gone, and a flight of 96 blocks takes it out of view.
 
 ### The gauntlet (`test/e2e/gaunt-mobs.test.ts`)
 
@@ -1037,7 +1077,10 @@ three times, a witch three times, four zombies twice, a pillager twice. No death
 run, every set cleared (3 to 33 s), and the flee was not asked once (`floors none`): with a blade it comes only from
 6 health down or once running has failed, and no run came near that. So the Realm shows that the setting does not
 disturb a fight the kit wins; it does not show a flee. A flee there needs a run without a blade in the hotbar, which
-`!test mobs` cannot arrange yet. The setting is off again on the Realm until one has flown there.
+`!test mobs ... bare` (Track T2) now arranges. The setting is off again on the Realm until one has flown there. (These runs'
+`floors none` came from the counter bug that Track T2 fixed, see "`!test mobs`" above, so the records prove nothing.
+The bot's own log of the 10 runs does: it has no `floor: elytra flee (...)` line and no flee process started, so the
+flee was indeed not asked.)
 
 ## Packets (BDS 1.26.60.6, verified)
 

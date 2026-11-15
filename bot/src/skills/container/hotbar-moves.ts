@@ -257,17 +257,28 @@ export class HotbarPuller {
   private readonly failedUntil = new Map<string, number>();
   private readonly running = new Map<string, Promise<EnsureResult>>();
   readonly stats = { pulls: 0, moved: 0, failed: 0 };
+  /**
+   * Items kept out of the hotbar for now: never a candidate of any pull (the weapon, a dig tool, a breeding item). Track T2:
+   * `!test mobs ... bare` holds the blades it stowed in the main inventory, so the fight's weapon pull does not bring them back.
+   */
+  hold: ((item: ItemStack) => boolean) | undefined;
 
   constructor(d: HotbarPullerDeps) {
     this.d = d;
     this.now = d.now ?? (() => performance.now());
   }
 
+  private toolOk(): (item: ItemStack) => boolean {
+    const ok = this.d.toolOk();
+    const hold = this.hold;
+    return hold ? (it) => ok(it) && !hold(it) : ok;
+  }
+
   /** True when the main inventory holds a better candidate than the hotbar (and the job may be tried). */
   wants(job: string, score: (item: ItemStack) => number): boolean {
     const inv = this.d.inventory();
     if (!inv || (this.failedUntil.get(job) ?? 0) > this.now()) return false;
-    const ok = this.d.toolOk();
+    const ok = this.toolOk();
     const m = bestSlot(inv.slots, HOTBAR, SLOTS, score, ok);
     if (!m) return false;
     const h = bestSlot(inv.slots, 0, HOTBAR, score, ok);
@@ -285,7 +296,7 @@ export class HotbarPuller {
       containers: this.d.containers(),
       inventory: inv,
       score,
-      toolOk: this.d.toolOk(),
+      toolOk: this.toolOk(),
       queue: this.d.queue,
       runtimeId: this.d.runtimeId,
       waitTicks: this.d.waitTicks,

@@ -176,6 +176,22 @@ describe('MobSeries', () => {
     expect(mobSummaryLine(sum)).toMatch(/^test mobs zombie4: 2\/2 runs, 0 deaths, cleared 2\/2, damage 2.5\/0 \(mean 1.3\), clear median 5 s/);
   });
 
+  it('the hits and floors of a run from the live counters (the PvE controller hands out the same objects)', async () => {
+    const f = fakePorts();
+    const live = { reflex: 0, taken: { zombie: 2 } as Record<string, number>, floors: { backoff: 1 } as Record<string, number> };
+    f.ports.counters = () => live;
+    const ports0 = { ...f.ports };
+    f.ports.sleep = async (ms) => {
+      await ports0.sleep(ms);
+      live.floors.fly = 1;
+      live.taken.skeleton = 3;
+    };
+    const s = new MobSeries(parseMobsArgs(['skeleton']) as never, f.ports, 'm1tk');
+    await s.run();
+    expect(f.recs[0]).toMatchObject({ floors: { fly: 1 }, hits: { skeleton: 3 } });
+    expect(mobRunLine(f.recs[0] as never)).toMatch(/hits skeleton 3, .*floors fly 1$/);
+  });
+
   it('a death ends the run `died`; stop removes the mobs at once', async () => {
     const f = fakePorts({ die: true });
     const s = new MobSeries(parseMobsArgs(['skeleton']) as never, f.ports, 'm1td');

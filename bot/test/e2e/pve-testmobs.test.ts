@@ -1,7 +1,9 @@
 // Track M1: `!test mobs` (skills/test/mobs.ts, chat/commands-test.ts) on bds-pve (cheats on, every player an operator): the
 // series refuses near home, runs `zombie4` twice (summons with its name tag, a line per run, the summary), removes only its
 // own mobs (a cow and a zombie it did not summon, next to it, are still there), and `!test stop` removes its mobs at once.
-// Needs BDS_E2E=1 and bds-pve with the truth pack. About 2 min.
+// Track T2: a `bare` series with `fleeFly` on and the flight kit: no blade in the hotbar while it runs, the elytra flee
+// asked (the run line's floors say `fly`), the sword back in its slot with its enchantment after.
+// Needs BDS_E2E=1 and bds-pve with the truth pack (PVE_VERBOSE=1 shows the bot's log: `floor: elytra flee (no blade ...)`). About 3 min.
 import { appendFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Vec3 } from '../../src/world/types.ts';
@@ -174,4 +176,80 @@ describe.skipIf(!E2E)('pve: !test mobs (Track M1)', () => {
     expect(zombies).toEqual([]);
     expect((await b.truth.entity(other.entityId)).valid).not.toBe(false);
   }, 240_000);
+
+  // Track T2: `bare` (skills/test/bare.ts). The kit of the Realm in short: a sword in hotbar slot 0, rockets and bread in
+  // the hotbar, the elytra in the main inventory; `fleeFly` on, guard on. The series moves the sword out of the hotbar, the
+  // guard sees no blade (pve.hasBlade() false at every look while the run goes) and asks for the elytra flee; after the
+  // summary the sword is in slot 0 again, the same item (its enchantment kept). TESTMOBS_BARE_SET (skeleton4) and
+  // TESTMOBS_BARE_RUNS (1) change the set and the runs.
+  it('Track T2: bare: no blade in the hotbar, the elytra flee asked, the sword back in its slot', async () => {
+    const b = bot!;
+    const set = process.env.TESTMOBS_BARE_SET ?? 'skeleton4';
+    const runs = Number(process.env.TESTMOBS_BARE_RUNS ?? 1);
+    b.task.home!.set({ x: START.x + 400, y: FEET_Y, z: START.z });
+    await teleport(b, centre(START));
+    await b.truth.clearAround(centre(START), 40);
+    await b.truth.ok('clear', [b.name]);
+    await b.truth.ok('unequip', [b.name]).catch(() => undefined);
+    await b.truth.ok('setslot', [b.name, 0, 'netherite_sword', 1]);
+    await b.truth.ok('setslot', [b.name, 1, 'firework_rocket', 64]);
+    await b.truth.ok('setslot', [b.name, 2, 'bread', 8]);
+    await b.truth.ok('setslot', [b.name, 9, 'elytra', 1]);
+    await pveCmd('enchant', b.name, 'sharpness', '2').catch(() => undefined); // the held sword (slot 0 is selected)
+    const inv = b.built.mobility!.world.inventory;
+    await until(() => (inv.slots[0]?.name === 'netherite_sword' && inv.slots[9]?.name === 'elytra' && inv.slots[1]?.name === 'firework_rocket' ? true : undefined), 10_000, 'the kit in the model');
+    await sleep(1000);
+    const enchants0 = JSON.stringify(inv.slots[0]?.enchants ?? []);
+    note(`bare: the sword before: ${inv.slots[0]?.name} enchants ${enchants0}`);
+    b.pve.settings.set('fleeFly', true);
+    b.pve.setGuard({ on: true, radius: 16 });
+    const fly0 = b.metrics.snapshot().counters['pve.floor.fly'] ?? 0;
+    const n0 = b.said.length;
+    let looks = 0;
+    let blade = 0;
+    let glided = false;
+    let running = false;
+    let seen = n0;
+    let lastRunSaid = false;
+    const loop = b.built.mobility!.loop as unknown as { onBeforeStep(fn: () => void): () => void; state: { gliding: boolean } };
+    const off = loop.onBeforeStep(() => {
+      if (loop.state.gliding) glided = true;
+      if (!running || lastRunSaid) return;
+      // (the blades go back right after the last run's line: a look after it is not a look during the series)
+      for (; seen < b.said.length; seen++) if (b.said[seen]!.startsWith(`test mobs ${set} run ${runs}/${runs}: `)) lastRunSaid = true;
+      if (lastRunSaid) return;
+      looks++;
+      if (b.pve.hasBlade()) blade++;
+    });
+    try {
+      say(b, `!test mobs ${set} ${runs} bare 40s`);
+      const start = await until(() => b.said.slice(n0).find((m) => m.startsWith(`test mobs ${set}: ${runs} run`) || m.startsWith('test mobs: ') || m.startsWith('test: ')), 30_000, 'the start line', 200);
+      note(start);
+      expect(start).toMatch(/, bare \(netherite_sword 0 -> \d+\)/);
+      running = true;
+      // the run lines end the watch (the restore of the blades comes after the last one)
+      await until(() => (b.said.slice(n0).filter((m) => new RegExp(`^test mobs ${set} run \\d+/${runs}: `).test(m)).length >= runs ? true : undefined), runs * 200_000, 'the run lines', 500);
+      running = false;
+      const sum = await until(() => b.said.slice(n0).find((m) => new RegExp(`^test mobs ${set}: \\d+/${runs} runs`).test(m)), 200_000, 'the summary', 500);
+      const lines = b.said.slice(n0).filter((m) => m.startsWith('test mobs'));
+      for (const l of lines) note(l);
+      const asked = (b.metrics.snapshot().counters['pve.floor.fly'] ?? 0) - fly0;
+      note(`bare: looks ${looks}, a blade seen ${blade}, elytra flee asked ${asked}, glided ${glided}, last flee: ${b.pve.lastFleeFlight?.line ?? '-'}`);
+      expect(looks).toBeGreaterThan(20);
+      expect(blade).toBe(0);
+      expect(asked).toBeGreaterThan(0);
+      expect(lines.filter((m) => /^test mobs \S+ run \d+\/\d+: .*, bare(?: |$)/.test(m))).toHaveLength(runs);
+      expect(lines.some((m) => /^test mobs \S+ run \d+\/\d+: .*floors [^,]*\bfly \d/.test(m))).toBe(true);
+      expect(sum).toMatch(/, bare: netherite_sword 0 -> \d+; netherite_sword back in slot 0$/);
+      expect(inv.slots[0]?.name).toBe('netherite_sword');
+      expect(JSON.stringify(inv.slots[0]?.enchants ?? [])).toBe(enchants0);
+      expect(b.pve.combat.puller.hold).toBeUndefined();
+      expect(testControlOf(b.task)!.mobs()).toBeUndefined();
+    } finally {
+      off();
+      b.pve.setGuard({ on: false });
+      b.pve.settings.set('fleeFly', false);
+      await b.truth.cleanup().catch(() => undefined);
+    }
+  }, 600_000);
 });

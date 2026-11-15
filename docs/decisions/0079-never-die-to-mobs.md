@@ -171,3 +171,16 @@ The numbers are in [../pve.md](../pve.md) "Track M2". 30 runs a side of `mixed-8
   under a roof, a seal in lava's reach). The owner turns them on after a try.
 - Open: a falling hit (1.5 times) is not used; knockback by the line could push a mob off a ledge on purpose; a sprint strike
   (more knockback) needs the keys, which the reflex does not touch.
+
+## Addendum: Track T2 (2026-11-15)
+
+28. **`!test mobs ... bare` stows the blades, it does not destroy them.** The kit on a test world carries a sword, so the
+    floors for a bot without one (the elytra flee first, the dodge) never run there. With the word `bare` the hotbar's swords
+    and axes move into free main-inventory slots before the first run (the survival kit's inventory screen and the
+    containers' predicted move: the item keeps its enchantments and wear), the hotbar puller passes blades over until the
+    end (`HotbarPuller.hold`, the one road from the main inventory into the hotbar, so the fight's weapon pull cannot undo
+    it), a blade the kit's restore gave into the hotbar moves out after each restore, and every blade goes back to its slot
+    however the series ends, after a death's recovery and once a flight has come down. Too few free slots refuse the series
+    before anything moves. `/clear` and `/give` were not used: a given item has no enchantments on Bedrock.
+29. **A run's hits and floors are copies of the counters at its start.** The series read the PvE controller's live counter
+    objects at the start and again at the end, so every run said `hits none, floors none`; records before this carry neither.

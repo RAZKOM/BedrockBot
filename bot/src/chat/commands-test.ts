@@ -7,11 +7,13 @@
 //   !test cave [n]                                     /tp to cave_start, `!fly cave_end`
 //   !test route <prefix> [n] [noshortcut]              /tp to <prefix>_start, `!fly route <prefix> [noshortcut]`
 //   !test goto <x y z | wp> from <x y z | wp> [n]      /tp to the start, `!goto <goal>`
-//   !test mobs <set> [n] [<s>s] [force]                Track M1: summon a named set of mobs round the bot (at least 150 blocks
+//   !test mobs <set> [n] [<s>s] [force] [bare]         Track M1: summon a named set of mobs round the bot (at least 150 blocks
 //                                                      from home), count deaths, damage and time; removes only its own mobs.
 //                                                      Track M2: asks for keepInventory and mobGriefing first and refuses
 //                                                      without keepInventory, a creeper set under mobGriefing (unless force)
-//                                                      and a ring of mostly unstandable ground
+//                                                      and a ring of mostly unstandable ground. Track T2: `bare` moves the
+//                                                      hotbar's blades into the main inventory for the series and back after
+//                                                      (skills/test/bare.ts)
 //   !test stop                                         end the run in progress and the series
 // Each run restores health, food and the kit and teleports to the start first (skills/test/recovery.ts), runs the trip as
 // the owner's own command and records it (skills/test/series.ts): a chat line per run, a summary, and one JSON line per
@@ -36,6 +38,8 @@ import type { ChatLine } from './text.ts';
 import { flyControlOf } from './commands-fly.ts';
 import { corridorTripRunning, stopCorridorTrip } from './commands-corridor.ts';
 import { waypointStoreOf } from './commands-nav.ts';
+import { survivalKitOf } from './commands-survival.ts'; // Track T2: the bare series' moves
+import { isBlade } from '../skills/test/bare.ts';
 
 export const TEST_COMMANDS = ['test'] as const;
 /** At most this many runs in one series. */
@@ -331,6 +335,24 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
       },
       now: () => Date.now(),
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      // Track T2: the survival kit's slot move (its inventory screen, the containers' predicted move) and the combat
+      // skill's hotbar puller, whose hold keeps the stowed blades out of the fight's weapon pull until the series ends
+      ...(survivalKitOf(task)
+        ? {
+            bare: {
+              slots: () => world.inventory.slots,
+              move: (from: number, to: number) => survivalKitOf(task)?.moveSlot(from, to) ?? Promise.resolve({ ok: false, reason: 'no survival kit' }),
+              hold: (on: boolean) => {
+                pve.combat.puller.hold = on ? isBlade : undefined;
+              },
+              idle: () => {
+                const fc = flyControlOf(task);
+                return !(loop?.state.gliding ?? false) && !(fc?.controller.active ?? false) && !(fc?.fleeing() ?? false);
+              },
+              log,
+            },
+          }
+        : {}),
       log,
     }, tag);
     const no = s.refusal();
@@ -347,9 +369,17 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
       reply(`${pf.refusal} (${pf.line})`);
       return;
     }
+    // Track T2: `bare`: the blades out of the hotbar now (refused with too few free slots); run() puts them back
+    const bare = await s.stowBlades();
+    if (bare.refusal) {
+      mobSeries = undefined;
+      log.info(`test mobs ${spec.set}: refused: ${bare.refusal}`);
+      reply(bare.refusal);
+      return;
+    }
     const p0 = harnessPorts.position() ?? pve.position();
     mobStart = { x: Math.floor(p0.x), y: Math.floor(p0.y + 1e-3), z: Math.floor(p0.z) };
-    reply(`test mobs ${spec.set}: ${spec.runs} run${spec.runs === 1 ? '' : 's'} of ${spec.mobs.length} mob${spec.mobs.length === 1 ? '' : 's'} (${spec.seconds} s each) from ${fmtCell(mobStart)}, ${pf.line}${spec.force ? ', force' : ''}, name tag ${tag}${file ? `; ${basename(file)}` : ''}`);
+    reply(`test mobs ${spec.set}: ${spec.runs} run${spec.runs === 1 ? '' : 's'} of ${spec.mobs.length} mob${spec.mobs.length === 1 ? '' : 's'} (${spec.seconds} s each) from ${fmtCell(mobStart)}, ${pf.line}${spec.force ? ', force' : ''}${spec.bare ? `, bare (${bare.stowed}${settings.get('fleeFly') ? '' : '; fleeFly is off'})` : ''}, name tag ${tag}${file ? `; ${basename(file)}` : ''}`);
     seriesDone = (async () => {
       try {
         const sum = await s.run();
@@ -437,7 +467,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
 
   chat.register({
     name: 'test',
-    help: '[status | op | kit | stop] | cavestart [n] [from <p>] | cave [n] | route <prefix> [n] [noshortcut] | goto <p> from <p> [n] | mobs <set> [n] [<s>s] [force] (repeated test runs with /tp, re-kit and heals between them; needs testMode on, cheats on and the bot op\'d)',
+    help: '[status | op | kit | stop] | cavestart [n] [from <p>] | cave [n] | route <prefix> [n] [noshortcut] | goto <p> from <p> [n] | mobs <set> [n] [<s>s] [force] [bare] (repeated test runs with /tp, re-kit and heals between them; needs testMode on, cheats on and the bot op\'d)',
     group: 'control',
     example: '!test goto base from 0 64 0 3',
     auto: 'after a death in testMode: the kit back and /tp to the run start',
