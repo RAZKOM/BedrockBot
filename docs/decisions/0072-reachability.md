@@ -550,6 +550,14 @@ portal; the other was open air over a lone block left in a dug-out pit.
     block placed`), the eye within 3.9, where the walk had stood 6 off and said `unreachable`. R7's air cell, two
     ordinary waypoints, a trip home and a waypoint in the End (`in the End`) as expected. The series scored by the
     replies; the 207 runs recorded before score the same but the two at the portal (arrived to `short`). Seen there
-    the same day and not R8's: a waypoint in a closed room that is entered by a drop of 4 through its roof was
-    reached, and the goto out of it answered `unreachable (world)` in 4 s (no climb back, no edge to take off from,
-    air outside the walls): a goto places no blocks, so it has no way out of a room a player leaves by a pillar.
+    the same day and not R8's: a waypoint in a room of a building high in the air, entered and left by a ladder
+    with a hatch at its top, was reached, and the trip home from inside it answered `unreachable (world)` in 4 s.
+    First read as a room with no way out; that was wrong (corrected 2026-11-15 by probes there). The walk planner
+    leaves the room (a goto from inside to the roof: 41 ticks up the ladder and through the hatch), and a trip
+    home that starts on the roof flies (a ledge takeoff from the roof's edge under a wider roof 19 over it, 122 s,
+    no damage). What found nothing was the flight's takeoff search: a ledge is looked for only on the floor the
+    body stands on (the room's 11 cells: no edge), its flood under the roof does not climb a ladder (25 cells,
+    none to the open sky), and its takeoff sites are columns' tops under the open sky (none within 48: the
+    building stands under the wider roof). It then walked for home, which no walk reaches from a building in the
+    air, and the reply was that walk's. Open, and the flight's: a ledge on a floor the walk reaches is a takeoff
+    site.
