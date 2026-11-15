@@ -2328,6 +2328,16 @@ The trade: a handed way is the probe's, and the probe plans with no hostile cost
 that the walk's own plan would have gone round. The guard (`mobReflex`) deals with a hostile that comes close, and the
 resumed walk goes on along the way.
 
+**On the Realm** (2026-11-15, deployed; 10 night trips to the five goals, the guard fighting on the way). Nine walks
+were handed the probe's way (76 to 166 blocks; the tenth landing had no probe of its own cell and planned as before).
+All arrived; none turned back to its landing and none wandered. Eight of the ten walks were interrupted by the guard
+at least once: each went on along its way from the node the body stood on (`walking the handed way from node k`,
+`walking the resumed way`), and once, 3.9 blocks off it, a rejoin of 8 nodes (3 ms) took the body back. The end lines' blocks, which count the body's motion, read 1.29 to 1.42 of the
+probe's (1.26 to 1.37 is the unit alone; the rest is the fights). The trips took what they took before or less (76 to
+120 s to four of the goals; 117 and 148 s to the fifth, the longer one with a landing moved for a creeper and a second
+flight to another mouth). How to see it on any world: the log's `walk: from the landing cell along the landing
+probe's way (N nodes, B blocks)`, one `goto: plan (...)` line a plan, and `walking the resumed way` after a fight.
+
 ## Long trips: the coarse layer (Track CB, decision 0066)
 
 A goto whose goal is farther than `coarseMin` (96 blocks, straight line; 0 = off) first asks the coarse layer

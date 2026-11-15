@@ -89,6 +89,9 @@ live walking settings and the worker's budgets):
   and the guard deals with one that comes close.
 - The search beside the way costs what the goto's own first search cost before, and it runs while the body walks. A
   rejoin is a search of some tens of nodes.
+- On the Realm (2026-11-15, deployed): 10 night trips to the five goals, nine walks handed the probe's way, all
+  arrived, no turn back and no wander; eight walks interrupted by the guard went on along their way (one rejoin of
+  8 nodes from 3.9 blocks off).
 - Not done:
   - a way from anything but the landing probe (a learned path, a corridor's) is not handed;
   - a hostile does not make a kept way give way.
