@@ -36,6 +36,7 @@ import { EXIT_FLOOD_MAX, EXIT_RADIUS, pickExitPiece, pickHop, hopTarget, type Un
 import { PathStore } from '../skills/fly/learn/store.ts'; // Track F9b
 import { pathsDirOf } from './commands-learn.ts'; // Track F9b: where `!learn` keeps its paths
 import { preferSite, RECHECK_EVERY_MS, RecheckState, SITE_BUDGET_MS, SITE_PROBES, SITE_SIMS, siteCandidates } from '../skills/fly/sites.ts'; // Track BL
+import { searchFloors } from '../skills/fly/floors.ts'; // Track F15
 import type { Goal, GotoOptions, SkillResult } from '../skills/types.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { FlightProcess, FlyProcess, landingLine, targetFromPlan, type EntryOffer, type FlyOutcome, type FlyTarget, type LandingHint } from '../tasks/process/fly.ts';
@@ -173,6 +174,41 @@ export function flyEndLine(r: FlyOutcome): string {
     default:
       return r.reason?.startsWith('fly: ') ? r.reason : `fly: ${r.reason ?? 'failed'}`;
   }
+}
+
+/**
+ * Track F15 (docs/flight.md "A landing where the body stands is not flown"): a landing within LAND_HERE_H blocks of the
+ * body by the plane and less than LAND_HERE_DY levels above or below it is where the body stands: a flight there cannot
+ * bring it nearer the goal than the walk does. The walk to such a cell is a few seconds (8 blocks at the sprint's 0.18 s
+ * a block: 1.4 s, plus the stairs of up to 11 levels); a takeoff, a climb and a landing back onto it cost 15 to 22 s and 2
+ * rockets on the Realm (2026-11-15, 2 trips of 12) and a go-around for want of a plan at 1 block out. 12 levels is what
+ * makes a glide down a cliff a real flight: the least drop the ledge takeoff and the glide down take (LEDGE_MIN_DROP),
+ * a fall no walk takes without hurt; a landing that far above or below stays a flight.
+ */
+/** Track F15: a floor search that led to a floor is not asked again within this many blocks, for this long (the refused takeoffs' memory). */
+export const FLOOR_ONCE_R = 16;
+export const FLOOR_ONCE_MS = 5 * 60_000;
+export const LAND_HERE_H = 8;
+export const LAND_HERE_DY = 12;
+export function landingHere(from: Vec3, landing: { x: number; z: number; top: number }): boolean {
+  return hdist(from, landing) <= LAND_HERE_H && Math.abs(landing.top - from.y) < LAND_HERE_DY;
+}
+
+/**
+ * Track F15 (docs/flight.md "Takeoff from a floor the walk reaches"): the end of a trip that could take off neither where
+ * it stood (`roof`, the takeoff's refusal) nor from a floor the walk reaches (`floors`, floors.ts searchFloors' words) and
+ * whose walk found no way (`unreachable`, no progress, no path): the reply's note says the three, the takeoffs first. Any
+ * other end (arrived, a flight, a timeout, interrupted) is returned as it is.
+ */
+export function noTakeoffNote(r: SkillResult, roof: string, floors: string): SkillResult {
+  if (r.ok) return r;
+  const reason = r.reason;
+  if (reason !== 'unreachable' && !/no progress|no path/.test(reason)) return r;
+  // (a reply is 256 characters: the roof in two words, the walk's own words last)
+  const plain = roof.replace(/^fly: /, '').replace(/; walk outside first$/, '');
+  const m = /^no open sky here \(roof at y -?\d+, (\d+) blocks? up\)$/.exec(plain);
+  const here = m ? `a roof ${m[1]} up` : plain;
+  return { ...r, note: `no takeoff here (${here}) or from any floor the walk reaches (${floors}); the walk: ${r.note ?? reason}` };
 }
 
 export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyControl | undefined {
@@ -735,7 +771,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * is a small platform; its takeoff simulated with the flight's options and rockets. Undefined: none (or
    * not wanted: the jump takeoff is fine).
    */
-  const ledgeFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number, quiet = false): Promise<Ledge | undefined> => {
+  const ledgeFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number, quiet = false, said?: string[]): Promise<Ledge | undefined> => {
     if (!d.settings.get('flyLedgeTakeoff')) return undefined;
     const small = smallPlatform(cell, from);
     if (sky.ok && !small) return undefined;
@@ -743,6 +779,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const why = sky.ok ? 'a small platform' : sky.ahead === 0 ? `a roof ${sky.above} up` : `the run blocked ${sky.ahead} ahead`;
     const r = await ledgeTakeoff(simDeps(true), from, target, simOptions(cz.y), rockets);
     if (!quiet) log.info(`fly: ledge takeoff (${why}): ${r.line}`);
+    if (!r.ledge) said?.push(r.line); // Track F15: why a floor's ledge takeoff failed, for the floor search's line
     return r.ledge;
   };
   /**
@@ -896,7 +933,10 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * tree canopy, 2026-10-31), else straight up the open column over the bot (verticalFor), else (Track F3) a
    * route out through the planner (routeTakeoffFor), else refused with the line (walk out, or a takeoff site).
    */
-  const takeoffFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number, quiet = false): Promise<{ ledge?: Ledge; takeoffYaw?: number; vertical?: number; routeTakeoff?: TakeoffRoute } | { refuse: string }> => {
+  const takeoffFor = async (from: Vec3, target: LandingTarget, sky: SkyCheck, rockets: number, quiet = false, o: { route?: boolean; said?: string[] } = {}): Promise<{ ledge?: Ledge; takeoffYaw?: number; vertical?: number; routeTakeoff?: TakeoffRoute } | { refuse: string }> => {
+    // (Track F15: `route` false: no route takeoff (the floor search's takeoffs, kept within its budget; the takeoff on arrival
+    // there is the whole chain again); `said`: why the ledge takeoff failed, for the floor search's words)
+    const routeFor = (): ReturnType<typeof routeTakeoffFor> => (o.route === false ? Promise.resolve(undefined) : routeTakeoffFor(from, target, rockets, quiet));
     // Track F5a: no takeoff of any family from water (the loop's flags count for the body's own cell)
     const here = loop.state.pos;
     const self = Math.abs(here.x - from.x) < 0.5 && Math.abs(here.y - from.y) < 0.5 && Math.abs(here.z - from.z) < 0.5;
@@ -908,11 +948,11 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       if (!quiet) log.info(`fly: no takeoff at ${from.x.toFixed(1)} ${from.y.toFixed(1)} ${from.z.toFixed(1)}: ${wet.replace(/^fly: /, '')}`);
       return { refuse: wet };
     }
-    const ledge = await ledgeFor(from, target, sky, rockets, quiet);
+    const ledge = await ledgeFor(from, target, sky, rockets, quiet, o.said);
     if (ledge) return { ledge };
     if (!sky.ok) {
       // the 3 x 3 or the run blocked leaves the column over the head (a roof right over it: verticalFor says so at once)
-      return (await verticalFor(from, target, rockets, quiet)) ?? (await routeTakeoffFor(from, target, rockets, quiet)) ?? { refuse: sky.line };
+      return (await verticalFor(from, target, rockets, quiet)) ?? (await routeFor()) ?? { refuse: sky.line };
     }
     const cz = cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
     const yaws = [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180].map((o) => sky.yaw + o);
@@ -923,7 +963,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (r.yaw !== undefined) return { takeoffYaw: r.yaw };
     const v = await verticalFor(from, target, rockets, quiet);
     if (v) return v;
-    const rt = await routeTakeoffFor(from, target, rockets, quiet);
+    const rt = await routeFor();
     if (rt) return rt;
     return { refuse: 'fly: no clear climb from here (the simulated climb meets a solid on every heading: trees, a wall, none straight up and no route out); walk outside first' };
   };
@@ -935,6 +975,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     walk: number;
     flyDist: number;
     takeoff: { ledge?: Ledge; takeoffYaw?: number };
+    /** Track F15: a floor the walk reaches (floors.ts), not an open-sky cell: its cells and edge cells. */
+    floor?: { cells: number; edges: number };
   }
   type AutoFly = { kind: 'fly'; target: FlyTarget; line: string; said?: string | undefined; piece?: boolean } | { kind: 'site'; site: TakeoffSite; line: string } | { kind: 'walk_out'; roof: string };
   /** Track BL: the refused takeoffs of this task (sites.ts RecheckState: no new try near one for a while). */
@@ -996,6 +1038,40 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       return { site, line: `${cands.length} open-sky cells within ${radius}, ${sims} takeoffs simulated, ${probes} walks probed in ${Date.now() - t0} ms: ${name} (${Math.round(walk)} blocks walk, ${tk.ledge ? `a ledge heading ${Math.round(tk.ledge.yaw)}` : `heading ${Math.round(tk.takeoffYaw ?? 0)}`})${notes.length ? `; ${notes.join(', ')}` : ''}` };
     }
     return { line: `${cands.length} open-sky cells within ${radius}, ${sims} takeoffs simulated, ${probes} walks probed in ${Date.now() - t0} ms: none worth it${notes.length ? ` (${notes.join(', ')})` : ''}` };
+  };
+  /**
+   * Track F15 (docs/flight.md "Takeoff from a floor the walk reaches"): the trip's last try, once the walk out has found no
+   * way and no glide down was found either: a floor the walk reaches (up a ladder, through a hatch, a door, a stair) with a
+   * ledge whose takeoff clears (floors.ts searchFloors, its own bounds). None: `said` says why, for the owner.
+   */
+  const floorSite = async (from: Vec3, goalTarget: FlyTarget, rockets: number): Promise<{ site?: TakeoffSite; line: string; said?: string }> => {
+    const nav = probeNavOf(pve.mover);
+    if (!nav) return { line: 'no probe planner', said: 'no probe planner' };
+    const total = hdist(from, goalTarget);
+    const ratio = d.settings.get('flyPreferRatio');
+    const fl = await searchFloors<TakeoffSite['takeoff']>(
+      {
+        q: cell,
+        probe: (goal, at, b) => probePath(nav, goal, at, { ...b, noLongFalls: true, body: true }),
+        takeoff: async (at) => {
+          const said: string[] = [];
+          const tk = await takeoffFor(at, goalTarget, skyHere(at, goalTarget), rockets, true, { route: false, said });
+          if ('refuse' in tk) return { ok: false, why: `${tk.refuse.replace(/^fly: /, '').replace(/; walk outside first$/, '')}${said.length ? `; ${said.join('; ')}` : ''}` };
+          return { ok: true, takeoff: tk, how: tk.ledge ? `a ledge heading ${Math.round(tk.ledge.yaw)}` : tk.vertical !== undefined ? `straight up ${tk.vertical}, then heading ${Math.round(tk.takeoffYaw ?? 0)}` : `the jump heading ${Math.round(tk.takeoffYaw ?? 0)}` };
+        },
+        worth: (walk, at) => preferSite(total, walk, hdist(at, goalTarget), ratio),
+        now: () => Date.now(),
+        yieldNow: () => new Promise((r) => setImmediate(r)),
+      },
+      from,
+    );
+    if (fl.site) {
+      const f = fl.site;
+      const tk = f.takeoff;
+      const site: TakeoffSite = { x: f.x, feet: f.feet, z: f.z, walk: f.walk, flyDist: hdist({ x: f.x + 0.5, z: f.z + 0.5 }, goalTarget), takeoff: tk, floor: { cells: f.cells, edges: f.edges } };
+      return { site, line: fl.line };
+    }
+    return { line: fl.line, said: fl.said ?? fl.line };
   };
   /**
    * Track BF: the flight's target for a goal (the landing plan: the goal itself, a confirmed cell, the
@@ -1065,6 +1141,15 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     }
     // Track BF: the landing (a cell of the live model with a confirmed walk, or the goal held high until its ground loads)
     const f = await planFlight(from, goalBlock, label, half, false);
+    // Track F15 (docs/flight.md "A landing where the body stands is not flown"): the landing found is where the body already
+    // stands (the Realm, 2026-11-15: the walk's re-check out from under a roof 1 block from the cell it had just landed on, a
+    // flight "(1 blocks)" round on 2 rockets back onto it): no flight; the spot counts as a refused takeoff, so the re-check
+    // does not ask again there
+    if (landingHere(from, f.target)) {
+      refusedTakeoffs.push({ x: from.x, z: from.z, at: Date.now() });
+      log.info(`fly: no flight to ${label}: its landing ${fmt(f.target)} is ${hdist(from, f.target).toFixed(1)} blocks from the body by the plane and ${(f.target.top - from.y).toFixed(0)} by height (within ${LAND_HERE_H} and ${LAND_HERE_DY}): walking`);
+      return undefined;
+    }
     Object.assign(f.target, tk);
     return { kind: 'fly', ...f };
   };
@@ -1307,7 +1392,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     }
     d.chat.say(f.line);
     const s = f.site;
-    log.info(`fly: walking ${Math.round(s.walk)} blocks to the takeoff site ${s.x} ${s.feet} ${s.z}, then flying ${Math.round(s.flyDist)} blocks to ${label}`);
+    log.info(`fly: walking ${Math.round(s.walk)} blocks to the takeoff site ${s.x} ${s.feet} ${s.z}${s.floor ? ` (a floor the walk reaches: ${s.floor.cells} cells, ${s.floor.edges} on an edge)` : ''}, then flying ${Math.round(s.flyDist)} blocks to ${label}`);
     const r = await legWalk({ type: 'block', p: { x: s.x, y: s.feet, z: s.z } });
     if (!r.ok && r.reason === 'interrupted') return r;
     const g = goal() ?? g0;
@@ -1424,6 +1509,45 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     }
     return runAuto(found, goal, label, half, rest, legWalk);
   };
+  /** Track F15: where a floor search led to a floor and the trip did not arrive (FLOOR_ONCE_R blocks, FLOOR_ONCE_MS): not asked again there. */
+  const floorTried: { x: number; z: number; at: number }[] = [];
+  /**
+   * Track F15 (docs/flight.md "Takeoff from a floor the walk reaches"): the trip had no takeoff where it stood, the walk out
+   * found no way (`unreachable`, no progress, no path) and no glide down was found: the floors the walk reaches from where
+   * the body stands now are searched (floorSite). A floor found: walked to and taken off from by the `site` path, as any
+   * takeoff site. None: the reply's note says all three, the takeoffs first (noTakeoffNote). Once a place: a floor search
+   * that led to a floor from which the trip did not arrive is not asked again within FLOOR_ONCE_R blocks for FLOOR_ONCE_MS,
+   * so a trip cannot go round between a floor and a failing walk (a trip that arrived leaves no mark). Any other end of the walk is returned as it is: every trip that flies or walks today is untouched.
+   */
+  const floorFallback = async (r: SkillResult, roof: string, goalBlock: Vec3, label: string, half: number, walk: () => Promise<SkillResult>, legWalk: (leg: Goal) => Promise<SkillResult>): Promise<SkillResult> => {
+    if (!noWay(r) || !d.settings.get('autoFly')) return r;
+    const from = position();
+    if (!from || controller.active || dim() !== OVERWORLD) return r;
+    const busy = processes.active?.name;
+    if (busy === 'flee' || busy === 'guard' || busy === 'fire' || busy === 'surface' || pve.combat.target) return r;
+    const k = readKit(inv, memory());
+    const boxed = supplyOf(d.task)?.carried(ROCKET) ?? 0;
+    if (!kitReady(k, d.settings.get('toolWearLimit'), boxed).ok) return r;
+    if (k.rockets < d.settings.get('fireworksMin') && k.boxRockets === 0 && boxed === 0) return r;
+    const now = Date.now();
+    const tried = floorTried.find((p) => now - p.at < FLOOR_ONCE_MS && hdist(from, p) <= FLOOR_ONCE_R);
+    if (tried) {
+      log.info(`fly: the walk to ${label} found no way; a floor the walk reaches was tried from here ${Math.round((now - tried.at) / 1000)} s ago: not again`);
+      return noTakeoffNote(r, roof, `one was tried from here ${Math.round((now - tried.at) / 1000)} s ago`);
+    }
+    const goalTarget: FlyTarget = { x: goalBlock.x + 0.5, z: goalBlock.z + 0.5, top: goalBlock.y, half, label };
+    const s = await floorSite(from, goalTarget, flightRockets(k));
+    log.info(`fly: the walk to ${label} ended ${r.ok ? 'ok' : r.reason} and no glide down was found; the floors the walk reaches from ${fmt(from)}: ${s.line}`);
+    if (!s.site) return noTakeoffNote(r, roof, s.said ?? s.line);
+    const mark = { x: from.x, z: from.z, at: now };
+    floorTried.push(mark);
+    const distance = hdist(from, goalTarget);
+    const site = s.site;
+    const end = await runAuto({ kind: 'site', site, line: `walking ${Math.round(site.walk)} blocks to take off from ${site.x} ${site.feet} ${site.z}, then flying (${Math.round(distance)} blocks; walking would be ~${Math.round(walkMinutes(distance))} min)` }, () => goalBlock, label, half, walk, legWalk);
+    // arrived: the floor did its work and a later trip from here may take it again; any other end is remembered
+    if (end.ok) floorTried.splice(floorTried.indexOf(mark), 1);
+    return end;
+  };
   const walk0 = pve.walk.bind(pve);
   pve.walk = async (goal: Goal, opts: GotoOptions = {}, label?: string): Promise<SkillResult> => {
     if (goal.type !== 'block') return walk0(goal, opts, label);
@@ -1437,7 +1561,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const f = await autoFly(goal.p, name, 1);
     // Track BL: a walk that does not fly looks for a takeoff again on the way
     if (!f) return watchWalk(() => goal.p, name, 1, plain, plain, legWalk).then((r) => glideFallback(r, goal.p, name, 1, plain));
-    return runAuto(f, () => goal.p, name, 1, f.kind === 'walk_out' ? walkOrGlide : plain, legWalk);
+    const r = await runAuto(f, () => goal.p, name, 1, f.kind === 'walk_out' ? walkOrGlide : plain, legWalk);
+    // Track F15: the walk out found no way and no glide down was found: a floor the walk reaches, last
+    return f.kind === 'walk_out' ? floorFallback(r, f.roof, goal.p, name, 1, plain, legWalk) : r;
   };
   // ---- Track M3: the elytra flee (docs/pve.md "The elytra flee"; decisions/0086) ----------------------------------
   /** The head room over the body: no loaded solid from the head up to FLEE_FLY.headroom over the feet (the cheap look; the takeoff's simulation decides). */

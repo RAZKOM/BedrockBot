@@ -57,6 +57,7 @@ authoritative. Decision record: [decisions/0042-elytra-flight.md](decisions/0042
 | `bot/src/skills/fly/terrain.ts` | Track BL: `terrainFloor` (the floor ahead, unknown is not air), `assumedTop`, `strictObstacle`, `highCruiseWanted`, `TerrainMemo` |
 | `bot/src/skills/fly/dive.ts` | Track BL: `planDive` / `simulateDive` (the dive descent, simulated whole before it is flown) |
 | `bot/src/skills/fly/sites.ts` | Track BL: `siteCandidates`, `preferSite`, `RecheckState` (the takeoff-site search and the walk re-check) |
+| `bot/src/skills/fly/floors.ts`; `bot/test/unit/skills/fly-floors.test.ts`, `floor-building.ts`; `bot/test/e2e/fly-floors.test.ts`; `bot/scripts/floor-search-bench.ts` | Track F15: `ledgeFloors`, `edgeCell`, `searchFloors` (a takeoff from a floor the walk reaches); `commands-fly.ts floorFallback` (the search as the trip's last try), `noTakeoffNote` (the reply when none is found), `landingHere` (no flight onto the cell the body stands on); the made-up building offline, on the server and in the bench |
 | `bot/test/unit/skills/fly-terrain.test.ts`, `fly-trip.ts`; `bot/test/e2e/fly-terrain.test.ts` | Track BL: the floor, the ridges / tower / unknown / cache-only trips, the dive against the circle, the site ranking and the re-check; the e2e wall / tower / ridge / dive / site / nosite / recheck cases |
 | `bot/src/skills/fly/maneuvers.ts` | Track F1: the manoeuvre library (`Maneuver`, `runManeuver`, `runChain`, the swept cells), the turn geometry (`turnRate`, `turnOffsetFor`, `turnRadius`), the station keeping (`keepYaw`), the stubs |
 | `bot/src/skills/fly/brake.ts` | Track F1: the brake / elevator landing family (`BRAKE_FAMILY`, `simulateBrake`, `brakeControl`, `BrakePlanner`); its K and the whole landing as library manoeuvres (`settleOnto`, `brakeApproach`) |
@@ -694,7 +695,100 @@ site to walk to:
    wins. The owner hears `walking 27 blocks to take off from X Y Z, then flying (420 blocks; walking would
    be ~1 min)`. On arrival the takeoff is checked again: refused, the owner is told and the walk goes on,
    watched.
-5. **No site:** the Track AU2 walk-out legs, unchanged, as the fallback.
+5. **No site:** the Track AU2 walk-out legs, unchanged, as the fallback. When that walk and the glide down find no way,
+   the floors the walk reaches with a ledge (Track F15, the next section).
+
+### Takeoff from a floor the walk reaches (Track F15)
+
+ADR [0087](decisions/0087-takeoff-from-a-floor-the-walk-reaches.md). A room in a building in the air is often left by
+a ladder and a hatch onto its roof, and the roof has edges over deep air. The walk planner climbs the ladder and opens
+the hatch; the flight did not look there. The ledge takeoff looks only at the floor the body stands on, the route
+takeoff's flood is the air a body flies through (it climbs no ladder), and the open-sky sites are column tops under the
+open sky within 12 levels. With all three refused the trip walked out towards the goal, which no walk reaches from a
+building in the air, and the reply was the walk's failure.
+
+> The Realm, 2026-11-14: a room of 11 standable cells, 3 high, about 2 260 blocks from home and 74 over it, its roof a
+> platform of about 71 cells under a wider roof 19 over it. `!goto home` from the room: `unreachable` after 4 s. From
+> the roof the next day: a ledge takeoff (`28 ledges on 71 cells ... clear`) and home in 122 s, no damage.
+
+**The order.** It is the trip's last try, after everything that flies or walks today: the takeoff here is refused, the
+open-sky sites give nothing, the walk-out legs end with no way on (`unreachable`, no progress, no path), and the glide
+down finds nothing either (where the log says `the walk to X ended unreachable ...: looking for a glide down`). Only
+then does `commands-fly.ts floorFallback` run `floors.ts searchFloors`, from where the body stands then (the walk out
+may have moved it). Why last: a trip that flies today, the walk out that finds open sky on its way included, must fly
+the same way. Run before the walk out (the first version), the search took a roof under the open sky that the walk out
+also finds, and that trip took off 1.7 s later by a step off the edge in place of the jump, cruised higher and came
+down by the spiral more often (arrivals at a median of 45.8 s against 21.0 s). Last, it costs the failed walk out, about
+1 s in the made-up building (the walk's planner proves the room closed in a few ticks). **Once a place:** a search that
+led to a floor from which the trip did not arrive is not asked again within 16 blocks for 5 minutes (`FLOOR_ONCE_R`,
+`FLOOR_ONCE_MS`), so a trip cannot go round between a floor and a failing walk; the reply then says a floor was tried
+from here. A trip that arrived leaves no mark: the next trip from the same room takes the floor again (a first version
+marked every place, and nine of ten trips from the room in a row answered `one was tried from here`).
+
+1. **The scan** (`ledgeFloors`). The standable cells within 24 blocks (`FLOOR_RADIUS`), from 16 levels under the feet to
+   32 over them, each column read once from the top down. An **edge cell** (`edgeCell`) has a side or a corner (both
+   sides open for a corner) onto a cell with the feet, the head and the floor level open and 12 or more blocks of drop
+   under it: `findLedges`' own test, so a floor that passes is one the ledge takeoff can use. The cells are joined into
+   floors (one height, side by side); the start's own floor is left out (its ledges were just tried). Each floor is
+   stood for by its edge cell nearest the feet; the 48 nearest floors are kept.
+2. **The walk.** One planner probe to all the floors at once (an `any` goal of their cells; no digging, no placing, no
+   long falls; 20 000 nodes, 1 s): the floor the walk reaches most cheaply comes first, whatever the walk climbs. Its
+   walk must pass the site rule (`preferSite`, `flyPreferRatio`). Within 24 blocks the flight from any floor differs by
+   at most 48 blocks of a trip worth flying, so the walk's cost ranks them.
+3. **The takeoff there** is simulated with the flight's own chain (`takeoffFor`: a ledge when the sky check refuses or
+   the floor is small, else the jump on every heading, else straight up), the rockets the flight will have, without the
+   route takeoff (its plans and proofs would not fit the budget; on arrival the whole chain is asked again).
+4. **The next floor.** Refused, that floor is dropped from the goal and the probe runs again: at most 4 probes, 4
+   takeoffs, 3 s in all (`FLOOR_PROBES`, `FLOOR_SIMS`, `FLOOR_BUDGET_MS`), the scan yielding every 256 columns.
+5. **The site.** The first that clears is walked to by the takeoff sites' own path (`walking 13 blocks to take off from
+   X Y Z, then flying ...`); the takeoff is decided again on arrival (refused there: said, and the walk goes on, watched).
+6. **None.** The walk's failure stands, and the reply's note says all of it, the takeoffs first
+   (`commands-fly.ts noTakeoffNote`, within the 256 characters of a reply):
+   `goto: unreachable (no takeoff here (a roof 3 up) or from any floor the walk reaches (none of 2 with an edge within
+   24, all it reaches is 12 cells); the walk: world: no walk, swim or dig gets there)`. The floors' words are one of: no
+   floor within 24 has an edge with 12 blocks of fall; the walk reaches none of them (with the size of all it reaches
+   when the probe searched it all); or how many were reached and why the first one's takeoff failed. The log line has
+   the whole search.
+
+Not done: the route takeoff's flood does not climb what the walk climbs. It is the air a flying body passes through;
+the walk and then a takeoff is what the floor search composes, and one probe and one takeoff found the building's roof.
+
+Measured with a made-up building of the same shape (`fly-floors.test.ts`; the room 3 high, a ladder in its wall to a
+hatch in the ceiling, the roof a platform 9 x 8 with edges over 60 blocks of air, the goal 300 blocks out on the
+ground), 10 trips a case on a test server, before and after, the seconds from the command:
+
+| case | before | after |
+| --- | --- | --- |
+| roof under a wider roof 19 over it | 0 of 10: `unreachable` in 1.0 s | 10 of 10 flown: the walk out fails and the search starts at 0.9 to 1.0 s, takeoff (a ledge) 8.8 to 9.1 s, arrived 29 to 64 s (median 61.5) |
+| roof under the open sky | 10 of 10 flown (the walk out's nearest open sky found the roof, the jump), takeoff 4.3 to 4.4 s, arrived 20.3 to 38.0 s (median 21.0) | the same: no floor search, the jump, takeoff 4.2 to 4.4 s, arrived 20.7 to 38.1 s (median 21.4) |
+| no ladder | 0 of 10: `unreachable (world: ...)` in 1.0 s | 0 of 10: `unreachable (no takeoff here (a roof 3 up) or from any floor the walk reaches (none of 2 with an edge within 24, all it reaches is 12 cells); the walk: ...)` in 1.0 s |
+| the room 7 over the ground (11 of fall from the roof) | 0 of 10: `unreachable (world: ...)` in 1.1 s | 0 of 10: the same note (`none of 1 ...`) in 1.1 s |
+
+No damage in any trip. The arrivals' spread under both roofs is the descent at the goal (a dive or the spiral, 3 to 4
+of 10 by the spiral under the open sky, before and after). Offline every flight from
+the platform lands on the goal at 10 burns from 9 to 21 ticks, no hit. The search alone (the bench,
+`scripts/floor-search-bench.ts`, 20 runs a case on the test host): the building 11 to 29 ms, no ladder 2 to 3 ms, a
+stair with four refused floors (the bound: 4 probes, 4 takeoffs) 7 to 11 ms, open hills with no edge 2 to 3 ms.
+
+### A landing where the body stands is not flown (Track F15)
+
+ADR [0087](decisions/0087-takeoff-from-a-floor-the-walk-reaches.md) decision 10. A trip that has landed near its goal
+(at a cave's mouth, say) walks the rest; its re-check on the walk fires once the body is out from under a roof, and the
+landing search can then find the cell the body has just landed on. The flight took off, found no landing plan 1 block
+out (the brake has no room), went round and came down on the same cell.
+
+> The Realm, 2026-11-15: 2 trips of 12; 5 to 8 s into the walk from the cave mouth a flight `to <goal> (1 blocks)`, a
+> go-around on 2 rockets, the same cell 15 to 22 s later; one was shot by a skeleton on the way (5.4).
+
+`autoFly` asks every landing it would fly to (`commands-fly.ts landingHere`): within 8 blocks of the body by the plane
+(`LAND_HERE_H`) and less than 12 levels above or below its feet (`LAND_HERE_DY`), the landing is where the body stands
+and no flight is started, on the first decision as on the re-check. The spot is remembered as a refused takeoff (16
+blocks, 5 minutes), so the re-check does not plan again there; the log says `fly: no flight to <goal>: its landing ... is
+1.4 blocks from the body by the plane and 0 by height (within 8 and 12): walking`. Why these numbers: 8 blocks walk in
+about 1.4 s at the sprint against 15 to 22 s and 2 rockets for the flight; 12 levels is `LEDGE_MIN_DROP`, the least drop
+the ledge takeoff and the glide down take and a fall no walk takes without hurt, so a glide down a cliff a few blocks
+out by the plane stays a flight. Not done: the landing's own walk to the goal is not compared with the body's (one more
+probe on every trip); a landing 9 or more blocks off that is no nearer the goal than the body is still flown.
 
 ### Flight re-check on long walks
 
