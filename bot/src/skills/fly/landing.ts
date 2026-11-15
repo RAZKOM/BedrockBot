@@ -42,6 +42,7 @@ import type { Vec3 } from '../../connection/types.ts';
 import type { Box } from '../../world/types.ts';
 import { BrakePlanner } from './brake.ts';
 import { standsOn } from './ground.ts'; // Track F11
+import { LAND_MOBS } from './landmobs.ts'; // Track M3
 import { PATH_MIN_S_PER_BLOCK, UNKNOWN_DETOUR, UNKNOWN_RISK_S, WALK_S_PER_BLOCK, walkPriceOf, walkSeconds, type WalkPrice } from './landprice.ts'; // Track L1; Track L2: the walk by its path
 import { ApproachPlanner, APPROACH_DISTANCE, APPROACH_HEIGHT, columnKey, entryTop, hdist, landingRim, OVER, rimReach, wayIn, yawDiff, yawDir, yawTo, type FlightBody, type LandingTarget, type Obstacle } from './plan.ts';
 import type { RouteGrid } from './route/grid.ts'; // Track F3
@@ -196,6 +197,12 @@ export interface LandingDeps {
    * goes to the first cell that is not loaded, at the most to the world's top.
    */
   maxY?: (x: number, z: number) => number | undefined;
+  /**
+   * Track M3 (docs/flight.md "The landing looks at hostile mobs"): a cell against the hostiles known (landmobs.ts
+   * cellPrice): refused (a creeper inside its refusal range: the line says why), or the seconds they cost, added to the
+   * cell's rank. Absent (the setting off, or nothing hostile known near the goal): the search as it was.
+   */
+  mobs?: (cell: { x: number; z: number; feet: number }) => { refuse?: string; priceS: number; note?: string };
 }
 
 export interface LandingOptions {
@@ -940,7 +947,11 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   // the precision landing below comes down inside the rim)
   const own = view.floorNear(gx, gz, gy);
   const underRim = own !== undefined && o.rim !== undefined && o.rim >= own.feet + 2;
-  if (own && !underRim && view.kindOf(own, o.headroom) === 'open' && view.sound(gx, gz, own)) {
+  // Track M3: the goal's own cell with a creeper inside its refusal range is no landing: the cells round it are searched
+  const ownMobs = own && deps.mobs ? deps.mobs({ x: gx, z: gz, feet: own.feet }) : undefined;
+  // (and with hostiles on it that cost LAND_MOBS.relookS or more, a zombie on the cell: the cells beside it are priced against it)
+  const ownTaken = ownMobs !== undefined && (ownMobs.refuse !== undefined || ownMobs.priceS >= LAND_MOBS.relookS);
+  if (own && !underRim && !ownTaken && view.kindOf(own, o.headroom) === 'open' && view.sound(gx, gz, own)) {
     const cell: LandingCell = { x: gx, z: gz, feet: own.feet, kind: 'goal' };
     const target: LandingTarget =
       o.exact !== undefined ? { x: gx + 0.5, z: gz + 0.5, top: own.feet, half: o.exact } : walkTarget(cell, cellsAround(view, cell, 'open', walkSlack(0) + 1, o.headroom), { walkS: 0, walkKnown: true });
@@ -948,7 +959,7 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   }
   // Track F1: an exact goal that is no plain floor (a pillar top, a shaft floor, an edge, under a low roof): the
   // brake / elevator landing onto it when its simulation lands (flyLandStyle flare: the Track BF search below)
-  if (o.exact !== undefined && own && o.style !== 'flare') {
+  if (o.exact !== undefined && own && o.style !== 'flare' && !ownTaken) {
     const p = await preciseGoal(view, deps.look, deps.obstacle, gx, gz, own, o, deps.route);
     if (p) {
       const cell: LandingCell = { x: gx, z: gz, feet: own.feet, kind: 'goal', precise: true, ...(p.target.route ? { route: true } : {}) };
@@ -1039,6 +1050,15 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
     const r = o.sky && c.kind === 'open' ? rimOf(c) : undefined;
     return r?.rim !== undefined ? (r.rim - c.feet) * ELEVATOR_S_PER_BLOCK : 0;
   };
+  // Track M3: the hostiles' answer for a cell (once a cell), the cells refused for them
+  const mobMemo = new Map<Candidate, ReturnType<NonNullable<LandingDeps['mobs']>>>();
+  const mobsOf = (c: Candidate): ReturnType<NonNullable<LandingDeps['mobs']>> | undefined => {
+    if (!deps.mobs) return undefined;
+    let m = mobMemo.get(c);
+    if (!m) mobMemo.set(c, (m = deps.mobs(c)));
+    return m;
+  };
+  let mobRefused = 0;
   let unsimulated = 0;
   let probes = 0;
   let extraProbes = 0;
@@ -1053,8 +1073,18 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
     /** Track L2: the flood's steps (a cell the flood reached). */
     steps?: number;
     corridors?: Corridor[];
+    /** Track M3: the seconds the hostiles round the cell cost (0 without any): part of what the cell can cost at the least. */
+    mobS: number;
   }
-  const queue: Entry[] = list.map((c) => ({ c, ...rankOf(c) })).sort((a, b) => a.key - b.key);
+  // (Track M3: a priced cell is looked at as late as a cell that many seconds of walk farther out: the cells a creeper
+  // will walk to come after the ones beyond its sight, within the same probes)
+  const queue: Entry[] = list
+    .map((c) => {
+      const mobS = mobsOf(c)?.priceS ?? 0;
+      const r = rankOf(c);
+      return { c, ...r, key: r.key + (Number.isFinite(mobS) ? mobS / WALK_S_PER_BLOCK : 0), mobS: Number.isFinite(mobS) ? mobS : 0 };
+    })
+    .sort((a, b) => a.key - b.key);
   const push = (e: Entry): void => {
     let i = queue.findIndex((q) => q.key > e.key);
     if (i < 0) i = queue.length;
@@ -1075,7 +1105,7 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
     const c = e.c;
     // (a confirmed walk within a tenth, at least 2 blocks' worth, of what any later candidate could do is good enough;
     // Track L2: in seconds)
-    if (best && !alternativesOnly && e.lb * lbPace >= best.rankS - Math.max(2 * WALK_S_PER_BLOCK, best.rankS * 0.1)) {
+    if (best && !alternativesOnly && e.lb * lbPace + e.mobS >= best.rankS - Math.max(2 * WALK_S_PER_BLOCK, best.rankS * 0.1)) {
       if (landable.length > ALTERNATIVES) break;
       alternativesOnly = true;
     }
@@ -1085,8 +1115,14 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
     // Track F14: a cell whose walk and way straight down together cannot beat the best so far is not probed (the stop rule
     // above bounds the walk alone, and a best with a long way down would let every cell within that many more seconds of
     // walk be probed: 16 probes on a built hill where 4 do)
-    if (best && !alternativesOnly && o.sky && e.lb * lbPace + downOf(c) >= best.rankS - Math.max(2 * WALK_S_PER_BLOCK, best.rankS * 0.1)) continue;
+    if (best && !alternativesOnly && o.sky && e.lb * lbPace + downOf(c) + e.mobS >= best.rankS - Math.max(2 * WALK_S_PER_BLOCK, best.rankS * 0.1)) continue;
     if (alternativesOnly && (c.kind !== 'open' || !apart(c))) continue;
+    // Track M3: no landing inside a creeper's refusal range (no probe spent on it)
+    const mob = mobsOf(c);
+    if (mob?.refuse) {
+      if (mobRefused++ < 3) probed.push({ c, result: mob.refuse, status: 'skip' });
+      continue;
+    }
     if (c.kind === 'open' && nearNoApproach(c)) continue;
     let corridor: Corridor | undefined;
     if (c.kind === 'roof' && !e.corridors) {
@@ -1095,7 +1131,7 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
       if (roofsLooked % 16 === 0) await yieldNow();
       if (!corridors.length) continue;
       const extra = roofPenalty(corridors[0]);
-      push({ c, key: e.key + extra, lb: e.lb + extra, ...(e.steps !== undefined ? { steps: e.steps } : {}), corridors });
+      push({ c, key: e.key + extra, lb: e.lb + extra, ...(e.steps !== undefined ? { steps: e.steps } : {}), corridors, mobS: e.mobS });
       continue;
     }
     if (c.kind === 'roof') {
@@ -1160,8 +1196,9 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
       }
       // an overhang landing counts as a little more walk than an open one (the approach is harder), more the deeper under the roof
       // (Track F14: and a way in over what stands round the cell as the seconds its way straight down takes)
-      const rankS = walkS + roofPenalty(corridor) * WALK_S_PER_BLOCK + (overCells.get(c) ?? 0);
-      probed.push({ c, result: `${said}${overCells.has(c) ? `, in over what stands round it (${overCells.get(c)!.toFixed(1)} s down)` : ''}`, blocks: r.blocks, ...(corridor ? { corridor } : {}), status: 'found' });
+      // (Track M3: and the seconds the hostiles round it cost)
+      const rankS = walkS + roofPenalty(corridor) * WALK_S_PER_BLOCK + (overCells.get(c) ?? 0) + (mob?.priceS ?? 0);
+      probed.push({ c, result: `${said}${overCells.has(c) ? `, in over what stands round it (${overCells.get(c)!.toFixed(1)} s down)` : ''}${mob?.priceS ? `, hostiles ${mob.priceS.toFixed(1)} s (${mob.note ?? ''})` : ''}`, blocks: r.blocks, ...(corridor ? { corridor } : {}), status: 'found' });
       const l: Landable = { c, walk: r.blocks, walkS, by, rankS, ...(corridor ? { corridor } : {}), simulated };
       // (one per neighbourhood: the cheapest of the cells within ALT_APART of each other)
       const near = landable.filter((x) => !apartOf(x.c, c));
@@ -1187,7 +1224,8 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
     .map((p) => `${fmtCell(p.c)}${p.c.kind === 'roof' ? `/roof${p.corridor ? ` b${p.corridor.bearing}` : ''}` : ''}:${p.result}`)
     .join(', ');
   const floodNote = flood ? `, walk flood ${flood.floors} floors${flood.entrance ? ` (open sky ${flood.entrance.steps} steps from the goal at ${fmtCell(flood.entrance)}${farCells ? `, ${farCells} cells there beyond the window` : ''})` : ', no open sky reached'}` : '';
-  const head = `landing for ${label}: ${list.length} candidates (${roofs} under a roof), ${probes} probes, ${sims} approach sims${unsimulated ? ` (${unsimulated} approach${unsimulated === 1 ? '' : 'es'} not simulated: budget)` : ''}${floodNote}, ${ms} ms${tried ? `: ${tried}` : ''}`;
+  const mobNote = mobRefused ? `, ${mobRefused} cells refused for a creeper` : '';
+  const head = `landing for ${label}: ${list.length} candidates (${roofs} under a roof)${mobNote}, ${probes} probes, ${sims} approach sims${unsimulated ? ` (${unsimulated} approach${unsimulated === 1 ? '' : 'es'} not simulated: budget)` : ''}${floodNote}, ${ms} ms${tried ? `: ${tried}` : ''}`;
   // Track L1: a landable cell's target, priced in seconds of walk
   const targetOf = (l: Landable): { cell: LandingCell; walk: number; target: LandingTarget } => {
     const c = l.c;
@@ -1231,7 +1269,7 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
   // (Track L1: not a cell whose approach the simulation did not land, while another is known)
   const rank = (s: Probed['status'] | undefined, c: Candidate): number => (nearNoApproach(c) ? 2.5 : s === 'limited' || s === 'nostart' ? 0 : s === undefined ? 1 : s === 'none' ? 3 : 2);
   const statusOf = new Map(probed.map((p) => [p.c, p.status]));
-  const open = list.filter((c) => c.kind === 'open').sort((a, b) => rank(statusOf.get(a), a) - rank(statusOf.get(b), b) || rankOf(a).key - rankOf(b).key);
+  const open = list.filter((c) => c.kind === 'open' && !mobsOf(c)?.refuse).sort((a, b) => rank(statusOf.get(a), a) - rank(statusOf.get(b), b) || rankOf(a).key - rankOf(b).key);
   let pick: LandingCell | undefined;
   let est = 0;
   const first = open[0];
@@ -1249,6 +1287,7 @@ export async function findLanding(goal: Vec3, label: string, deps: LandingDeps, 
           if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
           const feet = deps.dryGround(gx + dx, gz + dz);
           if (feet === undefined) continue;
+          if (deps.mobs?.({ x: gx + dx, z: gz + dz, feet }).refuse) continue; // Track M3
           pick = { x: gx + dx, z: gz + dz, feet, kind: 'ground' };
           est = Math.hypot(dx, dz) + 3 * Math.abs(feet - gy);
           break;

@@ -196,6 +196,7 @@ export async function startFlyBot(prefix: string, options: Partial<CommonTaskOpt
   const settings = extra.settings ?? new RuntimeSettings();
   if (KIT_BURN) settings.set('flyKitBurn', true); // Track F10
   if (WAY_DOWN) settings.set('flyWayDown', true); // Track F14
+  if (LAND_MOBS_ON) settings.set('flyLandMobs', true); // Track M3
   const logs: string[] = [];
   const ref: { task?: WalkingTask } = {};
   const built = buildTaskContext({
@@ -314,6 +315,8 @@ export const CRAFTED_ROCKETS = process.env.FLY_ROCKETS === 'crafted';
 export const KIT_BURN = process.env.FLY_KIT_BURN === '1';
 /** Track F14: FLY_WAY_DOWN=1 flies every suite of this harness with `flyWayDown` on (off by default, as the bot's). */
 export const WAY_DOWN = process.env.FLY_WAY_DOWN === '1';
+/** Track M3: FLY_LAND_MOBS=1 flies every suite of this harness with `flyLandMobs` on (off by default, as the bot's): on a server with no mobs every flight must be what it is with it off. */
+export const LAND_MOBS_ON = process.env.FLY_LAND_MOBS === '1';
 
 /** At least `n` crafted rockets (a recipe makes 3) into the inventory; they land in the first free slot (the hotbar's first when it is empty). */
 export async function craftRockets(bot: FlyBot, n: number): Promise<void> {

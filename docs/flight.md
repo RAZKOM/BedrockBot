@@ -1161,6 +1161,7 @@ Rules (all named `// Track AU` in the shared files):
 | `flyKitBurn` | off | Track F10: the flight in the open (the climb, the cruise's top-ups, the route planner's landings and takeoffs, a corridor's windows, every takeoff's proof) plans with the burn of the rockets in the hotbar (a crafted rocket: 19 to 31 ticks) instead of the plain rocket's 9 to 21: a burning rocket is flown to the height it was fired for and no higher, a top-up buys what the flight can use, the plans branch at the kit's burns. With plain rockets it changes nothing. Off until flown on the Realm ("The open-air flight on the burn of the rockets at hand") |
 | `flyLandOver` | on | Track F11: a descent circle is flown no lower than 3 over the highest column under it; a landing whose circle has roofs, trees or higher ground under it is then flown in over them by the brake and straight down by the elevator; the nearest safe ground of a forced or a priced landing is never a fence, a wall or a pane, nor a roof or a wall's top with a floor beside it. `off`: the circle down to 6 over the landing whatever stands there and the ground rules as before ("The flight comes down where it planned to") |
 | `flyWayDown` | off | Track F14: a landing lies under the open sky (a floor under a roof is no landing however high the roof: a cavern's floor with 21 blocks of room was one) and has a simulated way down; a goal under a roof is searched out to where its walk comes out under the sky, however far; a landing with something standing within 14 blocks of it (more than 2 and at most 48 over its floor) is flown in over that by the brake and straight down by the elevator from the start, and a missed approach whose plan met a wall gets the same before it goes round. `off`: the search and every flight as before. On the Realm it is on since 2026-11-14 ("The way down to the landing": 15 of 15 flights to goals under a mountain on their landing) |
+| `flyLandMobs` | off | Track M3: the landing looks at hostile mobs: no landing cell within 12 blocks of a creeper, cells near other hostiles cost seconds (a zombie on the cell 6 s, an archer within 8 4 s), the chosen cell is asked again every 10 ticks of the flight, a creeper that is or will be within its blast range (7) of the touchdown moves the landing and the body goes round to it, and the reflex strikes what is in reach while the body sinks in the elevator. With nothing hostile known near the landing every flight is what it is with it off |
 
 ## Processes
 
@@ -7705,11 +7706,306 @@ default and listed; `topY`.
   the landing was the last resort's. `!goto` and `!test goto` do not ask it (the `goal` case's searches took 0.2 to
   0.7 s). Seen, not changed.
 - **`candidatesNear` still scans the whole window** for a covered goal whose landing the flood finds outside it.
-- **Hostile mobs at the touchdown** are not looked at (the sweep's creeper: 7.4 damage 4 ticks after a touchdown
-  that had braked over it for 85 ticks). Where a look would belong: the search (`findLanding`'s candidates know
-  blocks only), the brake's station keeping over the cell (`brain.ts approach`, `brake.ts`: the brain's options carry
-  cells, column tops and ground, no entity), and the hand-back to the mob guard, which does not run while the
-  `flight` process holds control (`tasks/pve.ts`).
+- **Hostile mobs at the touchdown** were not looked at (the sweep's creeper: 7.4 damage 4 ticks after a touchdown
+  that had braked over it for 85 ticks). Track M3 gave the search, the flight and the brain a look at them: "The landing
+  looks at hostile mobs (Track M3)" below (`flyLandMobs`, default off).
+
+## The landing looks at hostile mobs (Track M3)
+
+Track M3, [decisions/0086](decisions/0086-landing-looks-at-mobs.md). A flight's last seconds are the ones in which
+the body cannot defend itself: the brake and the elevator hold it nearly still over one cell for 2 to 8 s, the mob
+guard is paused under the flight, and a body that sinks a fifth of a block a tick cannot step aside. On the Realm
+(2026-11-14, about 70 night trips) a flight braked 85 ticks over a landing cell with a creeper standing on it and was
+blown up 4 ticks after the guard had the body back (7.4 through netherite, a crater), and two of 15 landings by the
+elevator were hit 2 and 4 blocks over the floor by a zombie and a phantom, pushed 0.8 to 1.0 off the centre and sent
+round again (14 to 16 s). Neither the landing search nor the brain knew anything about entities. This track gives
+both a look at the hostiles, and lets the reflex strike while the body comes down. One setting, `flyLandMobs`
+(default off). With it off, and with it on where nothing hostile is known near the landing, every flight is tick for
+tick what it was.
+
+```
+what the flight knows (the world's entity tracker and the mob tracker: nothing is paused under a flight)
+  which                       every entity the server sends: its type, where its feet are as of its last move, a
+                              creeper's lit fuse (`ignited`), whether it targets the bot (`target_eid`), its death
+  how far out                 the server sends entities of the chunks it simulates round the body: hostiles at a
+                              landing were first known 61.7 to 79.3 blocks out (level), mostly 62 to 64: four chunks
+  how fresh                   a mob that stands sends nothing and is where it was; one that walks is moved a few
+                              times a second; one out of range is removed
+the landing search (landing.ts findLanding), with flyLandMobs on and a hostile known within 48 + flyLandSearch
+  a creeper within 12         of a cell (feet to feet, in 3D): no landing. Its blast range is 7; it walks 5 blocks
+                              in the 2.5 s the shortest elevator takes
+  a creeper within 16         it follows a player it sees that far: the cell costs 10 s, running out at 24
+  a melee mob                 on the cell: 6 s, running out 10 blocks off; an archer or a witch within 8: 4 s,
+                              running out at 16; on another level (8 blocks over or under): nothing; flying mobs:
+                              nothing (they are tied to no cell); the sum is capped at 20 s
+  the order                   a priced cell is looked at as late as a cell that many seconds of walk farther out
+  the goal itself             gives way to the cells round it when it is refused or costs 5 s or more
+the flight on its way (tasks/process/fly.ts watchLanding)
+  every 10 ticks              the chosen cell is asked again: a creeper within 12 of it, or (twice a flight at the
+                              most) hostiles that cost 5 s or more: the landing is searched again and the flight
+                              retargeted (possible until the approach is 15 blocks from the cell)
+the last seconds (brain.ts mobLook: every tick of the approach, the brake and the elevator)
+  a creeper within 7          of where the feet will come down, now or by the touchdown at the pace it has closed
+                              over the last 5 ticks: the landing is moved to ground clear of every creeper known (an
+                              alternative of the search 20 blocks from them, else the nearest safe ground 20, else
+                              12 from them, within 40) and the body goes round to it on a rocket; twice a flight at
+                              the most
+  under 1.5 over the floor    it lands (a rocket from there is flown into the ground); the guard has the creeper
+  a forced landing            (`!land`, the elytra's wear): its ground is chosen 12 from every creeper, and moved
+                              while the glide still reaches clear ground; no rocket is spent on it
+  other hostiles              move no landing: they are struck
+the hand (tasks/pve.ts, skills/combat/reflex.ts)
+  the reflex under a flight   strikes while the body is within 8 blocks over its landing and no faster than 0.35 a
+                              tick (the brake's station keeping, the elevator), and through the 10 ticks the flight
+                              holds the body after the touchdown; from 5.5 (eye to box) instead of 3.9; with a blade
+                              in the hotbar the blade is in the hand for those seconds
+```
+
+### What was measured first
+
+The three Realm landings (the private logs of the sweep and of Track F14's series):
+
+- **The creeper.** The flight's line: `landing brake (85 ticks braked / station-kept)`, `0.00 from the centre`. 50 ms
+  after the `landed` line the guard picked the creeper and the reflex struck it at 0.6; the explosion came 4 ticks
+  later. A fuse burns 31 ticks from where it lights (within about 3 blocks, docs/pve.md "Creepers"): it lit while the
+  body was still sinking, about 1.3 s before the hand-back. The flight holds the body for 10 ticks after the
+  touchdown (`SETTLE_TICKS`: the server may still lift it), so the guard came back with 4 ticks of the fuse left.
+- **The zombie and the phantom.** Both hits came in the elevator, the feet 2 and 4 blocks over the floor. A zombie
+  reaches up: its swing lands on a body whose feet are 2 to 3 blocks over its own. The hit pushed the body 0.8 to 1.0
+  off the centre, under the rim of what stood round the landing outside the landing's own cells, so the brake had no
+  plan left (`brake wall, cost 202`) and the priced go-around was flown.
+
+On the test server (bds-gaunt, BDS 1.26.60.6, `test/e2e/gaunt-landmobs.test.ts`; no armour, so the damage shows)
+the same landings came back with the setting off: see the table below, `look off`.
+
+**A strike under a flight is taken by the server.** The reflex's strikes while the body sank in the elevator showed
+a hurt on the mob (13 of 31 in the series below). What a strike from above does not do is push the mob
+aside: the knockback goes along the line from the body to the mob, which over a mob points down. In the first
+trials (the reflex's ground reach of 3.9, the rocket in the hand) a zombie under the elevator was struck once, 6
+ticks before its swing, and hit all the same (3 damage, and the go-around). Hence the two rules for a zombie: the
+landing is moved beside it (the search's price and the re-look), and where it comes all the same the strikes begin at
+5.5 with the blade, where a falling hit is a critical one.
+
+### Why these rules
+
+- **Away from a creeper, not at it.** A glide cannot hover: the elevator sinks 0.149 a tick at the least, so a body
+  cannot wait a few blocks up for a creeper to leave. A strike does not keep a creeper off (a fist from 3.9: 2
+  strikes, lit, 4.1 damage, docs/pve.md "Server rules"), and a body within 3 blocks lights the fuse. What is left is
+  distance. On the ground a creeper is the guard's (25 duels of 25 without damage, docs/pve.md); what must not happen
+  is a body in its blast range while the flight holds it.
+- **12 for the search, 7 for the brain.** The search decides 5 to 20 s before the touchdown and the creeper walks
+  (0.1 a tick): its refusal has the blast range and the walk of the shortest elevator in it, and the cells a creeper
+  will walk to (within the 16 it follows) cost 10 s, about what the go-around it would cause costs. The brain looks
+  every tick and knows the time left: it uses the blast range itself, counted at the touchdown.
+- **The late look is the one that counts.** A flight of more than 64 blocks is planned before any mob at its landing
+  is known. The chosen cell is therefore asked again every 10 ticks, from the moment the server sends the mobs:
+  61.7 to 79.3 blocks out, 2 to 3 s of cruise before the body is over the landing and 8 s or more before it is down.
+- **The reflex only in the elevator.** A strike knocks a mob along the line from the body. For a body that flies in
+  at half a block a tick (a flare) that is its own path: offline a zombie on the cell hit 10 flare landings of 10
+  with strikes in the air and 7 of 10 without. So the reflex strikes under a flight only where the body is nearly
+  still, and from the touchdown tick on (not 10 ticks later).
+- **Nothing where there is nothing.** Every rule starts from the list of hostiles known near the landing. An empty
+  list changes no search (the hook is not given to it), no control of the brain (the look returns before it keeps
+  anything) and no strike; the unit tests fly the same trips with the look absent and with an empty list and compare
+  every tick's outcome.
+
+### Files
+
+| File | What |
+|---|---|
+| `bot/src/skills/fly/landmobs.ts` | the rules, pure: `landMobsNear` (the hostiles near a place from the entity tracker and the mob tracker), `cellPrice` / `cellRefusal` (a cell against them), `touchdownThreat` (the creeper that will be in its blast range at the touchdown), `clearGround` / `clearOfCreepers`, `LAND_MOBS` (the numbers) |
+| `bot/src/skills/fly/landing.ts` | `LandingDeps.mobs`: a refused cell is no candidate, a priced one ranks later and looks later; the goal's own cell gives way |
+| `bot/src/skills/fly/brain.ts` | `BrainOptions.landMobs`, `mobLook` (the look in the approach and the elevator), `clearLanding`, the forced landing's ground clear of creepers (`emergencyTarget`); `FlightStats.mobRounds`, `mobNotes` |
+| `bot/src/skills/fly/controller.ts` | `touchingDown` (`STRIKE_ABOVE` 8, `STRIKE_SPEED` 0.35, the settle); the report's `mobRounds` and the `landed` line |
+| `bot/src/tasks/process/fly.ts` | `FlyDeps.mobs`; the chosen cell asked every 10 ticks (`MOB_LOOK_EVERY`), the brain given the look |
+| `bot/src/tasks/pve.ts`, `bot/src/skills/combat/reflex.ts` | `PveController.flightStrike` and `FLIGHT_STRIKE_REACH` (5.5): the reflex under a flight; `ReflexDeps.reach` |
+| `bot/src/chat/commands-fly.ts` | the hostiles to the search, the trip and the brain; the blade into the hand while the body comes down |
+| `bot/src/config/settings.ts`, `bot/src/chat/help.ts` | `flyLandMobs` (default off) |
+| `bot/test/unit/skills/fly-land-mobs.test.ts`, `fly-mobs-sim.ts` | the guards (below) and the offline trips with scripted hostiles (`M3_BENCH=1`: the table) |
+| `bot/test/e2e/gaunt-landmobs.test.ts` | the landings with mobs on a mob test server |
+
+### Offline (`fly-land-mobs.test.ts`, `M3_BENCH=1`; the brain on the physics engine, 10 seeds a row, the test host, 2026-11-14)
+
+A flight of 150 blocks from 70 up to a cell on flat ground (`open`: the flare) and to a yard between roofs (`yard`:
+the brake over them and the elevator), with scripted hostiles that follow the server's measured rules
+(`fly-mobs-sim.ts`: what they are is in its header) and the trip's own late look. The body has no armour and stands
+where it landed for 3 s after the touchdown; nothing but the reflex defends it, so the damage is the landing's.
+
+| ground | case | look | n | touchdowns inside a creeper's blast range | flights hurt | damage a flight | explosions | seconds to the touchdown | landings moved (the late look / the brain's round) | from the first cell at the end | strikes in the air |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| open | creeper on the cell | off | 10 | 10 | 10 | 8.6 | 10 | 8.5 | 0 / 0 | 0.6 | 0 |
+| open | creeper on the cell | on | 10 | 0 | 0 | 0 | 0 | 8.8 | 10 / 0 | 24.1 | 0 |
+| open | creeper 3 beside it | off | 10 | 10 | 10 | 3.9 | 10 | 8.5 | 0 / 0 | 0.6 | 0 |
+| open | creeper 3 beside it | on | 10 | 0 | 0 | 0 | 0 | 8.5 | 10 / 0 | 21.2 | 0 |
+| open | zombie on the cell | off | 10 | 0 | 10 | 3 | 0 | 8.5 | 0 / 0 | 0.6 | 0 |
+| open | zombie on the cell | on | 10 | 0 | 0 | 0 | 0 | 7.8 | 10 / 0 | 9.7 | 0 |
+| open | zombie on the cell, a blade | off | 10 | 0 | 10 | 3 | 0 | 8.5 | 0 / 0 | 0.6 | 0 |
+| open | zombie on the cell, a blade | on | 10 | 0 | 0 | 0 | 0 | 7.8 | 10 / 0 | 9.7 | 0 |
+| open | skeleton 10 off | off | 10 | 0 | 10 | 4 | 0 | 8.5 | 0 / 0 | 0.6 | 0 |
+| open | skeleton 10 off | on | 10 | 0 | 10 | 4 | 0 | 8.5 | 0 / 0 | 0.6 | 0 |
+| open | phantom overhead | off | 10 | 0 | 3 | 0.6 | 0 | 8.5 | 0 / 0 | 0.6 | 0 |
+| open | phantom overhead | on | 10 | 0 | 3 | 0.6 | 0 | 8.5 | 0 / 0 | 0.6 | 0 |
+| open | no mob | off | 10 | 0 | 0 | 0 | 0 | 8.5 | 0 / 0 | 0.6 | 0 |
+| open | no mob | on | 10 | 0 | 0 | 0 | 0 | 8.5 | 0 / 0 | 0.6 | 0 |
+| yard | creeper on the cell | off | 10 | 10 | 10 | 22.7 | 10 | 25.2 | 0 / 0 | 0 | 0 |
+| yard | creeper on the cell | on | 10 | 0 | 0 | 0 | 0 | 27.9 | 10 / 0 | 23.8 | 0 |
+| yard | creeper 3 beside it | off | 10 | 10 | 10 | 23.3 | 10 | 25.2 | 0 / 0 | 0 | 0 |
+| yard | creeper 3 beside it | on | 10 | 0 | 0 | 0 | 0 | 25.3 | 10 / 0 | 21 | 0 |
+| yard | zombie on the cell | off | 10 | 0 | 10 | 6 | 0 | 25.2 | 0 / 0 | 0 | 0 |
+| yard | zombie on the cell | on | 10 | 0 | 0 | 0 | 0 | 24.8 | 10 / 0 | 10 | 17 |
+| yard | zombie on the cell, a blade | off | 10 | 0 | 10 | 6 | 0 | 25.2 | 0 / 0 | 0 | 0 |
+| yard | zombie on the cell, a blade | on | 10 | 0 | 0 | 0 | 0 | 24.8 | 10 / 0 | 10 | 17 |
+| yard | skeleton 10 off | off | 10 | 0 | 10 | 4 | 0 | 25.2 | 0 / 0 | 0 | 0 |
+| yard | skeleton 10 off | on | 10 | 0 | 10 | 4 | 0 | 25.2 | 0 / 0 | 0 | 0 |
+| yard | phantom overhead | off | 10 | 0 | 10 | 2 | 0 | 25.2 | 0 / 0 | 0 | 0 |
+| yard | phantom overhead | on | 10 | 0 | 10 | 2 | 0 | 25.2 | 0 / 0 | 0 | 0 |
+| yard | no mob | off | 10 | 0 | 0 | 0 | 0 | 25.2 | 0 / 0 | 0 | 0 |
+| yard | no mob | on | 10 | 0 | 0 | 0 | 0 | 25.2 | 0 / 0 | 0 | 0 |
+
+Without a mob the flights are the same tick for tick (the last two rows of each ground). A skeleton 10 blocks off and
+a phantom overhead move no landing and their damage is unchanged: a skeleton's cell price is under what the walk
+back to the goal costs, and the goal is where the walk ends anyway.
+
+### On the server (`test/e2e/gaunt-landmobs.test.ts`, bds-gaunt, BDS 1.26.60.6, 2026-11-14)
+
+`!fly <x y z>` over 120 blocks of flat ground to a cell with 8 pillars 5 high on a ring 6 blocks out (so that the
+landing is the brake and the elevator, as most Realm landings are with `flyWayDown` on), at night; the bot with no
+armour, a netherite sword, guard on (radius 16), the reflex as it ships. The case's mobs are summoned at the cell
+while the bot is 120 blocks away (a ticking area keeps the place alive; the mobs wander a little before the flight
+arrives). One case more, for the brain's own look: a creeper summoned 4 blocks from the landing once the flight is in
+its approach 14 blocks out, too late for the search and for the trip's look. 10 flights a case and side, the sides
+alternating. `damage at the landing`: the server's hurt log up to 2 s
+after the flight ended; `after`: the next 15 s (the walk back to the goal, with the guard).
+
+| case | look | n | touchdowns inside a creeper's blast range (nearest creeper at the touchdown) | flights hurt at the landing | damage at the landing: mean (largest) | deaths | damage in the 15 s after | seconds to the touchdown: mean (range) | from the cell at the touchdown: mean (largest) | reflex strikes under the flight (landed) | go-arounds / rounds for a creeper |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| a creeper on the cell | off | 10 | 10 (1.1 to 5.9) | 4 | 6.5 (24.8) | 2 | 0 | 11.9 (11.3 to 12.6) | 0 (0) | 5 (0) | 0 / 0 |
+| a creeper on the cell | on | 10 | 0 (24 to 31.6) | 0 | 0 (0) | 0 | 0 | 12.6 (11.7 to 14.5) | 22.9 (24) | 0 (0) | 0 / 0 |
+| a creeper 3 beside it | off | 10 | 9 (0.9 to 9.4) | 5 | 9.6 (25.4) | 3 | 0 | 12 (11.4 to 12.5) | 0 (0) | 3 (0) | 0 / 0 |
+| a creeper 3 beside it | on | 10 | 0 (24 to 31.4) | 0 | 0 (0) | 0 | 0 | 12.4 (11.6 to 13.8) | 20.6 (21) | 0 (0) | 0 / 0 |
+| a creeper that appears 4 from the landing in the approach | off | 10 | 10 (1.1 to 2) | 10 | 17.4 (24.3) | 2 | 0 | 11.8 (11.2 to 12.2) | 0 (0) | 7 (0) | 0 / 0 |
+| a creeper that appears 4 from the landing in the approach | on | 10 | 0 (16.2 to 22.9) | 0 | 0 (0) | 0 | 0 | 30.9 (24.6 to 35.3) | 16.7 (22.8) | 0 (0) | 9 / 11 |
+| a zombie on the cell | off | 10 | 0 | 8 | 4.2 (9) | 0 | 0 | 28.8 (11.3 to 70.5) | 2.8 (28.1) | 2 (0) | 13 / 0 |
+| a zombie on the cell | on | 10 | 0 | 0 | 0 (0) | 0 | 0 | 11.4 (7.7 to 12.1) | 6.7 (10) | 22 (8) | 0 / 0 |
+| a skeleton 10 off | off | 10 | 0 | 6 | 3.4 (13) | 0 | 1 | 11.9 (11 to 12.5) | 0 (0) | 1 (0) | 2 / 0 |
+| a skeleton 10 off | on | 10 | 0 | 4 | 1.8 (7) | 0 | 0 | 11.9 (11.1 to 12.4) | 0 (0) | 6 (2) | 0 / 0 |
+| a phantom 12 over it | off | 10 | 0 | 2 | 1.2 (6) | 0 | 0 | 13.5 (10.9 to 29.3) | 0 (0) | 1 (0) | 1 / 0 |
+| a phantom 12 over it | on | 10 | 0 | 0 | 0 (0) | 0 | 0 | 12 (11 to 12.4) | 0 (0) | 3 (3) | 0 / 0 |
+| no mob | off | 10 | 0 | 0 | 0 (0) | 0 | 0 | 11.8 (11.1 to 12.3) | 0 (0) | 0 (0) | 0 / 0 |
+| no mob | on | 10 | 0 | 0 | 0 (0) | 0 | 0 | 12.1 (11.6 to 12.4) | 0 (0) | 0 (0) | 0 / 0 |
+
+What the rows say:
+
+- **A creeper on the cell or 3 beside it, the look off**: 19 of 20 flights touched down inside its blast range (the
+  creeper 0.9 to 5.9 from the feet; it had wandered 9.4 off once), 9 were blown up (mean damage over all 20 flights 8,
+  up to 25.4) and 5 died. The Realm's landing, without the armour.
+- **The look on**: the creeper was first known 62 to 79 blocks out, in the cruise; the cell was refused at the trip's
+  next look (`fly: the landing cell ... has a creeper 0 off (60 blocks out, cruise): looking again`), the search
+  answered in about 160 ms with a cell 20 to 24 blocks from the first (`320 cells refused for a creeper`), and the
+  flight was retargeted to it before the descent began: no go-around, 0.4 to 0.7 s more. No flight of 20 touched down
+  within 24 of the creeper and none was hurt. The walk back to the goal met the creeper on the ground, where the
+  guard and the reflex have the body: no damage in the 15 s after.
+- **A creeper that appears in the approach, the look off**: 10 of 10 in its blast range (1.1 to 2 off), all 10 blown
+  up (17.4 a flight, 2 deaths). **The look on**: the brain's own look moved the landing every time (`landing look: a
+  creeper 4.0 from the touchdown, the body 12.0 over the floor: the landing moved to ... (16 blocks on, clear of every
+  creeper known), going round to it (round 1)`): 11 rounds in 10 flights, and 9 ordinary go-arounds on the way to the
+  moved landing (it lay beside the pillars: the first approach to it met them). 0 of 10 inside the blast range (16
+  to 23 off at the touchdown), no damage, 31 s to the touchdown against 12: a creeper nobody could have known of
+  costs about 19 s and a rocket or two.
+- **A zombie on the cell, the look off**: 8 of 10 flights were hit in the elevator (4.2 a flight, up to 9), and the
+  hit sent the flight round: 13 go-arounds in 10 flights, 28.8 s to the touchdown on average and 70.5 at the worst
+  (one flight gave the landing up and came down 28 blocks off). The Realm's two elevator hits.
+- **The look on**: the cell was searched again once the zombie was known (`hostiles that cost 6 s (1 melee)`) and
+  the landing moved 10 blocks beside it (where the zombie had wandered off the cell by then, the cell was kept): no
+  flight was hit, none went round, 11.4 s to the touchdown. The reflex struck 22 times under those flights and the
+  server showed a hurt for 8 (a strike inside the mob's hurt time shows none).
+- **A skeleton 10 off**: 6 and 4 flights of 10 were shot (3.4 and 1.8 a flight): the look does not change it, and is
+  not meant to. **A phantom overhead**: 2 flights of 10 hit with the look off (one of them sent round), none with it
+  on (3 strikes under the flight, 3 landed); 10 flights are too few to call that a difference.
+- **No mob**: 11.8 and 12.1 s to the touchdown (11.1 to 12.3 and 11.6 to 12.4), every flight on the cell's centre.
+  The side with the look on is the second flight of each pair; offline the two are the same tick for tick.
+
+### The cost
+
+- **Every tick of the approach**: the hostiles near the landing are read from the entity tracker and the creepers
+  among them checked: 64.3 microseconds with 200 entities tracked and 202.2 with 800 (the test host under the live
+  bot's CPU policy, `M3_TIMING=1`, 2026-11-14), against a tick of 50 ms. With no hostile near it ends there.
+- **The search**: a cell's price is 3.78 microseconds; a search with hostiles took 157 to 165 ms on the test
+  server where the same search without them answers `the goal itself` at once (it probes cells instead of taking the
+  goal).
+- **A flight**: seconds added per landing, the server series: a creeper on the cell +0.7 s; a creeper 3 beside it +0.4 s; a creeper that appears 4 from the landing in the approach +19.2 s; a zombie on the cell -17.4 s; a skeleton 10 off -0.0 s; a phantom 12 over it -1.5 s; no mob +0.3 s (the look on against off, means of 10).
+
+### The regressions
+
+**Tick for tick.** With the setting off nothing reads the hostiles: the search is not given the hook, the brain has
+no `landMobs`, the reflex's hook answers no. With it on and nothing hostile near, `fly-land-mobs.test.ts` flies the
+same trips (open ground and the yard) with the look absent, with an empty list and with a zombie, a skeleton and a
+phantom at the landing, and compares the ticks, the rockets, the end, the body's place, every note and every counter.
+On the test servers, which have no mobs, the flight suites were flown with the setting on as well (`FLY_LAND_MOBS=1`).
+
+**The gates** (the final tree, by exit code; 2026-11-14):
+
+| suite | result |
+|---|---|
+| `pnpm lint` (the PC) | exit 0 |
+| the unit suite, `pnpm -r test`, on the test host (`node scripts/mac-run.mjs --name m3 -- pnpm -r test`) | three runs: exit 0 each (2956 passed, 2 skipped; 157 s each) |
+| fly-route-land (bds-fly3) | exit 0 (7 of 7) |
+| fly-open (bds-fly2) | exit 0 (3 of 3) |
+| fly-overhang (bds-fly2) | exit 0 (5 of 5) |
+| fly-descent (bds-fly2) | exit 0 (2 of 2) |
+| fly-flank, `FLY_WAY_DOWN=1` (bds-fly3) | exit 0 (2 of 2) |
+| fly-overhang, `FLY_WAY_DOWN=1` (bds-fly2) | exit 0 (5 of 5) |
+| fly-descent, `FLY_WAY_DOWN=1` (bds-fly2) | exit 1 (1 of 2); failed: `10 landings with 20-high walls 10 blocks out on three sides: no circle around the platform` (red on main with the setting on: Track F14's table) |
+| fly-route-land, `FLY_WAY_DOWN=1` (bds-fly3) | exit 0 (7 of 7) |
+| fly-open, `FLY_WAY_DOWN=1` (bds-fly2) | exit 0 (3 of 3) |
+| fly-flank, fly-open, fly-overhang, fly-route-land with `FLY_WAY_DOWN=1 FLY_LAND_MOBS=1` | fly-flank exit 0 (2 of 2), fly-open exit 0 (3 of 3), fly-overhang exit 0 (5 of 5); fly-route-land exit 1 (6 of 7: the flare of one flight out came down 4.7 from its cell's centre), run again exit 0 (7 of 7) |
+| pve-m1, pve-creeper, pve-combat, nav-hostile-fall (bds-pve) | exit 0 each (4 of 4, 4 of 4, 12 of 12, 4 of 4) |
+| gaunt-landmobs (bds-gaunt; it asserts that no flight with the look on touches down inside a creeper's blast range) | exit 0 (140 flights) |
+
+One run is not in the table: fly-route-land with `FLY_WAY_DOWN=1` failed 4 of 7 on a first try while five e2e suites
+ran on the PC at once (its flights out were still in the air when the test read them); alone on its server it passes.
+
+### Unit tests (`fly-land-mobs.test.ts`)
+
+- what counts as a hostile for a landing, and the list from the two trackers (the dead, the far and a player left
+  out);
+- a cell's refusal and price: a creeper inside 12 in 3D, the price out to 24, melee and shooters by distance, another
+  level, the cap; nothing hostile: no price;
+- the touchdown look: a creeper inside 7, one that will be there at the pace it closes, one that targets the bot and
+  has not been seen walking yet; ground clear of the creepers on the nearest ring, on the side away from a second one;
+- the search: a creeper on the goal moves the landing 12 or more from it (an exact goal too) and the line says so; a
+  zombie on the goal moves it beside it; a skeleton 10 off does not;
+- the brain: with nothing hostile known, and with a zombie, a skeleton and a phantom at the landing, the flight is
+  what it is without the look, tick for tick (open ground and the yard); a creeper on the landing moves it and the
+  body goes round, no touchdown inside 7; a creeper 12 off that stands changes nothing; no rocket left: the landing
+  as planned, with a line;
+- whole trips with scripted hostiles, the look off and on: a creeper on and beside the cell (off: in its blast range
+  every time; on: never, no explosion), a zombie on the cell, no mob (identical);
+- the reflex under a flight (`flee-fly.test.ts`): only while the flight says the body is coming down, from 5.5.
+
+### Open points (Track M3)
+
+- **The brain's own round costs a go-around or two** (the series above: 19 s): the creeper that made it
+  necessary follows the body, and the landing it is moved to may itself need a second approach. It is the price of a
+  creeper nobody could have known of; the search and the trip's look take every creeper that is known in time,
+  without a rocket.
+- **A landing that is no cell**: the end of a learned or drawn entry under a roof, a hop's touchdown and a route
+  landing flown by the route tracker are not looked at by the brain (its look is in the approach of the landing
+  families). The search's refusal covers a route landing's cell; an entry's touchdown has no look at all.
+- **A zombie that comes to the moved landing as well** is struck from 5.5 with what is in the hand. With a blade two
+  falling strikes kill it before it can reach up; a fist's strike from above neither kills it nor pushes it aside,
+  and it hits once. The series above had the blade and no zombie reached the moved landing in time, so this is
+  reasoned from the server's rules, not measured.
+- **Shooters** move no landing and are not struck from the air: a skeleton 10 blocks off shot the landing body as
+  before. A flight whose goal is in an archer's range ends in that range whatever cell it takes.
+- **A creeper nobody has seen**: one that comes round a corner inside the last 1.5 blocks of the elevator is the
+  guard's, with the 10 ticks of the settle in between; the reflex strikes it in those ticks, which does not stop a fuse.
+- **The reach of 5.5 under a flight** was chosen from the server's measured limit (6.2) and one zombie's swing; it
+  has not been tried against a spider or a baby zombie.
+- **Open ground on the server**: the server series is the yard (the elevator). The flare onto open ground has the
+  offline rows and a first server series of 11 flights that was stopped (a creeper on the cell: the look on landed 22
+  to 24 from the cell each time; the look off came down 0.2 to 0.4 from the cell with the creeper 3 to 14 off).
+- **The Realm**: not flown there. `flyLandMobs` is off by default.
 
 ## Open points
 

@@ -18,6 +18,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { appendFileSync } from 'node:fs';
 import type { Vec3 } from '../../src/connection/types.ts';
+import { flyControlOf } from '../../src/chat/commands-fly.ts';
 import { centre, E2E, FEET_Y, fill, gauntCmd, prepareServer, privateArea, sleep, startGauntBot, teleport, uniqueName, until, type GauntBot, type HurtRecord } from './gaunt-truth.ts';
 
 const KITS = (process.env.MOBS_KITS ?? 'bare,live,kb2').split(',').map((s) => s.trim()).filter(Boolean);
@@ -38,6 +39,8 @@ const REPEAT = Math.max(1, Number(process.env.MOBS_REPEAT ?? 1));
 const AB = process.env.MOBS_AB;
 /** Track M2: the spots' row (40 blocks a row), so that a second run on the same server keeps its distance from the first. */
 const ROW = Number(process.env.MOBS_ROW ?? 0);
+/** Track M3: every kit also carries the flight kit (an elytra in the inventory, 64 rockets), for the elytra flee (`MOBS_SET=fleeFly=true` or `MOBS_AB=fleeFly`). */
+const ELYTRA = process.env.MOBS_ELYTRA === '1';
 
 interface MobSpec {
   type: string;
@@ -89,6 +92,8 @@ function cells(): Cell[] {
 }
 
 interface CellResult {
+  /** Track M3: the elytra flee in this cell: the times the floor was asked, how its flights ended, the last one's line, how far from the spot the bot stood at the cell's end. */
+  fleeFly?: { asked: number; landed: number; ended: number; refused: number; last: string | null; fromSpot: number };
   label: string;
   /** The A/B setting's value in this run (MOBS_AB), and the repeat's index. */
   ab?: string;
@@ -168,6 +173,11 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     await t.ok('clear', [b.name]);
     await t.ok('unequip', [b.name]);
     await gauntCmd('replaceitem', 'entity', b.name, 'slot.weapon.offhand', '0', 'air');
+    if (ELYTRA) {
+      // (the rockets first: the hotbar's first slot; the elytra into the main inventory, worn by the flee itself)
+      await t.give(b.name, 'firework_rocket', 64);
+      await t.ok('setslot', [b.name, 30, 'elytra', 1]);
+    }
     if (kit === 'bare' || kit === 'blocks') {
       await t.give(b.name, 'bread', 8);
       if (kit === 'blocks') await t.give(b.name, 'cobblestone', 32); // the seal-in's kit: bare with blocks for the shell
@@ -220,6 +230,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     const reflex0 = reflexHits(b);
     const potion0 = potionSteps(b);
     const floors0 = floorCounts(b);
+    const fly0 = fleeFlyCounts(b);
     const since = await b.truth.now();
     // the mine cell lays its sand first (a 2-deep line of 12 east of the bot)
     if (cell.activity === 'mine') await fill(b, { x: c.x - 0.5 + 2, y: FEET_Y - 1, z: c.z - 0.5 }, { x: c.x - 0.5 + 13, y: FEET_Y - 1, z: c.z - 0.5 }, 'sand');
@@ -406,7 +417,21 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
           }
         : {}),
     };
+    // Track M3: the elytra flee of this cell (asked, how it ended), and a flight still in the air brought down before the next
+    const fly1 = fleeFlyCounts(b);
+    const asked = (floorCounts(b).fly ?? 0) - (floors0.fly ?? 0);
+    if (asked > 0 || fly1.landed + fly1.ended + fly1.refused > fly0.landed + fly0.ended + fly0.refused) {
+      const me = b.pve.position();
+      res.fleeFly = { asked, landed: fly1.landed - fly0.landed, ended: fly1.ended - fly0.ended, refused: fly1.refused - fly0.refused, last: b.pve.lastFleeFlight?.line ?? null, fromSpot: r1(Math.hypot(me.x - c.x, me.z - c.z)) };
+    }
     b.pve.setGuard({ on: false });
+    const control = flyControlOf(b.task);
+    if (control && (control.fleeing() || control.controller.active)) {
+      control.cancelFlee();
+      control.supersede();
+      if (control.controller.active) control.controller.landNow('stopped');
+      await until(() => (!control.controller.active && !control.fleeing() ? true : undefined), 60_000, 'the flight down').catch(() => undefined);
+    }
     b.pve.stop();
     await b.truth.cleanup();
     if (died) await until(() => (!b.built.respawn!.dead ? true : undefined), 30_000, 'respawned').catch(() => undefined);
@@ -415,7 +440,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
   }
 
   const fmtRow = (r: CellResult): string =>
-    `${r.label}${r.ab ? ` [${r.ab}]` : ''}${r.rep !== undefined && REPEAT > 1 ? ` #${r.rep + 1}` : ''} ${r.kit} ${r.cell}${r.hard ? ' (hard)' : ''}: ${r.died ? 'DIED' : 'alive'} after ${r.seconds} s, damage ${r.damage} (${r.perMinute}/min, lowest ${r.minHealth}), hits ${Object.entries(r.hitsByType).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}, ${r.cleared ? `cleared in ${r.clearS} s` : `${r.left} left`}, reflex ${r.reflexHits}${r.potions ? `, potions ${r.potionsNear}/${r.potions} near (steps ${r.potionSteps})` : ''}, floors ${Object.entries(r.floors).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}${r.activity !== 'idle' ? `, ${r.activity}: ${r.activityDone}` : ''}${r.friendly ? `, FRIENDLY ${r.friendly}` : ''}${r.seal ? `, sealed at ${r.seal.sealedS} s${r.seal.dugIn ? ' (dug in)' : ''} health ${r.seal.healthIn} -> ${r.seal.healthMax}, ${r.seal.bites} bites, ${r.seal.damageInside} damage inside, ${r.seal.outS !== null ? `out at ${r.seal.outS} s` : 'still in'}` : ''}`;
+    `${r.label}${r.ab ? ` [${r.ab}]` : ''}${r.rep !== undefined && REPEAT > 1 ? ` #${r.rep + 1}` : ''} ${r.kit} ${r.cell}${r.hard ? ' (hard)' : ''}: ${r.died ? 'DIED' : 'alive'} after ${r.seconds} s, damage ${r.damage} (${r.perMinute}/min, lowest ${r.minHealth}), hits ${Object.entries(r.hitsByType).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}, ${r.cleared ? `cleared in ${r.clearS} s` : `${r.left} left`}, reflex ${r.reflexHits}${r.potions ? `, potions ${r.potionsNear}/${r.potions} near (steps ${r.potionSteps})` : ''}, floors ${Object.entries(r.floors).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}${r.activity !== 'idle' ? `, ${r.activity}: ${r.activityDone}` : ''}${r.friendly ? `, FRIENDLY ${r.friendly}` : ''}${r.seal ? `, sealed at ${r.seal.sealedS} s${r.seal.dugIn ? ' (dug in)' : ''} health ${r.seal.healthIn} -> ${r.seal.healthMax}, ${r.seal.bites} bites, ${r.seal.damageInside} damage inside, ${r.seal.outS !== null ? `out at ${r.seal.outS} s` : 'still in'}` : ''}${r.fleeFly ? `, elytra flee asked ${r.fleeFly.asked} (${r.fleeFly.landed} landed, ${r.fleeFly.ended} ended otherwise, ${r.fleeFly.refused} refused), ${r.fleeFly.fromSpot} from the spot at the end${r.fleeFly.last ? `: ${r.fleeFly.last.slice(0, 160)}` : ''}` : ''}`;
 
   beforeAll(async () => {
     await prepareServer({ time: 'midnight' });
@@ -538,6 +563,12 @@ function potionSteps(b: GauntBot): number {
 }
 
 /** The floor counters (`pve.floor.*` metrics) and flights. */
+/** Track M3: the elytra flees so far: landed, ended otherwise after a takeoff, refused before one (tasks/pve.ts flyNow's counters). */
+function fleeFlyCounts(b: GauntBot): { landed: number; ended: number; refused: number } {
+  const c = b.metrics.snapshot().counters;
+  return { landed: c['pve.fleefly.landed'] ?? 0, ended: c['pve.fleefly.ended'] ?? 0, refused: c['pve.fleefly.refused'] ?? 0 };
+}
+
 function floorCounts(b: GauntBot): Record<string, number> {
   const c = b.metrics.snapshot().counters;
   const out: Record<string, number> = {};

@@ -54,6 +54,8 @@ import { orderedRoute, shortcutRoute, WaypointProvider, type RoutePoint } from '
 import { proveShortcutInWorker } from '../skills/fly/cave/proof.ts'; // Track F5b
 import { CAVE_STYLE, caveExecutorOptions, caveStretchOptions } from '../skills/fly/cave/style.ts'; // Track F5b
 import { takeoffWet } from '../skills/fly/takeoff-water.ts'; // Track F5a
+import { cellPrice, LAND_MOBS, landMobsNear, landMobsSaid, type LandMob } from '../skills/fly/landmobs.ts'; // Track M3
+import { FLEE_FLY, fleeAway, fleeBearings, fleeHeadings, fleeHomeClear, type FleeFlight } from '../skills/fly/flee.ts'; // Track M3
 
 export const FLY_COMMANDS = ['fly', 'land'] as const;
 
@@ -120,6 +122,16 @@ export interface FlyControl {
   supersede(): void;
   /** Track F5a: a corridor trip to a feet cell whatever its distance (the cave e2e's legs); undefined without a provider. */
   corridor(goal: Vec3, label: string): Promise<CorridorReport> | undefined;
+  /**
+   * Track M3 (docs/pve.md "The elytra flee"): the elytra flee as a flight mode. `fleeReady`: undefined when a flee can
+   * take off where the body stands now, else why not (cheap: asked by the guard every look). `flee`: take off and land on
+   * safe ground far from the hostiles; resolves when the body stands again, or at once when no takeoff was made.
+   * `cancelFlee`: a flee on the ground is dropped, one in the air lands on the nearest safe ground; true when there was one.
+   */
+  fleeReady(): string | undefined;
+  flee(why: string): Promise<FleeFlight>;
+  cancelFlee(): boolean;
+  fleeing(): boolean;
 }
 
 const controls = new WeakMap<object, FlyControl>();
@@ -266,6 +278,13 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   };
   /** Track BF: the live world model for the landing search (undefined = not loaded; the cache never counts). */
   const look: BlockLookup = (x, y, z) => world.blockAt({ x, y, z });
+  // Track M3 (docs/flight.md "The landing looks at hostile mobs"): the hostiles the server has sent, as the landing reads
+  // them (landmobs.ts): for the search, for the chosen cell's re-check and for the brain's look in the approach. On with
+  // `flyLandMobs`, and in every elytra flee
+  const landMobs = (near: { x: number; z: number }): readonly LandMob[] => landMobsNear(world.entities.values(), pve.mobs, near);
+  const mobsOn = (): boolean => d.settings.get('flyLandMobs') === true || fleeTrip !== undefined;
+  /** Track M3: the elytra flee in progress (from the ask until its flight has ended), if any. */
+  let fleeTrip: { p?: FlyProcess; cancelled: boolean } | undefined;
   // Track F3 (docs/flight.md "Route landings and takeoffs"): the route planner: the grid over the live model (unknown =
   // solid, the sky check's rule), the search in the worker (RoutePlannerClient, the 0023 pattern: an in-thread search of
   // 300 ms stalled the loop 6 ticks on bds-fly3), off with `flyRoute off`
@@ -307,6 +326,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    */
   const landingFor = async (goal: Vec3, label: string, exact: number | undefined, hint?: LandingHint): Promise<LandingPlan> => {
     const nav = probeNavOf(pve.mover);
+    // Track M3: the hostiles known round the goal, read once a search (none known: the search as it was)
+    const hostiles = mobsOn() ? landMobsNear(world.entities.values(), pve.mobs, { x: goal.x + 0.5, z: goal.z + 0.5 }, d.settings.get('flyLandSearch') + LAND_MOBS.scan) : [];
     // Track L2: the probe answers with the walk's planned ticks (the walk priced by its path), and takes the longer budget
     // findLanding asks for the walk flood's first cells
     const probe = nav ? landingProbe(nav, goal, { budget: { nodes: LAND_PROBE_NODES, ms: LAND_PROBE_MS }, surface: LAND_PROBE_SURFACE }) : undefined;
@@ -318,6 +339,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         obstacle: (x, y, z) => world.blockAt({ x, y, z })?.solid === true,
         ...(probe ? { probe } : {}),
         dryGround: (x, z) => landable(x, z, undefined, d.settings.get('flyLandOver') === true),
+        ...(hostiles.length ? { mobs: (c: { x: number; z: number; feet: number }) => cellPrice(c, hostiles) } : {}),
         yieldNow: () => new Promise((r) => setImmediate(r)),
         // Track F14: the flight's own column tops, for the rim of a cell with something standing round it
         ...(d.settings.get('flyWayDown') === true ? { skyTop: (x: number, z: number) => skyTop(x, z), maxY: (x: number, z: number) => (world.chunks as Partial<typeof world.chunks> | undefined)?.topY?.(x, z) } : {}),
@@ -338,7 +360,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         ...(d.settings.get('flyWayDown') === true ? { sky: true } : {}), // Track F14: open sky is the sky, a way down to every cell, a cave's mouth however far
       },
     );
-    log.info(`fly: ${plan.line}`);
+    log.info(`fly: ${plan.line}${hostiles.length ? `; hostiles known round it: ${landMobsSaid(hostiles, { x: goal.x + 0.5, y: goal.y, z: goal.z + 0.5 })}` : ''}`);
     return plan;
   };
   const cellOk = (c: { x: number; z: number; feet: number }): boolean => stillLandable(look, c, d.settings.get('flyHeadroom'));
@@ -590,7 +612,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * `adopt`: take over the flight in the air for this target (FlyProcess.adopt) instead of a takeoff; the trip before it hands over.
    * `home`: the trip home (the returnHome wrapper below): the FlyProcess runs as the home return (`home`, auto, PRIORITY.home).
    */
-  const start = (target: FlyTarget, o: { adopt?: { cruiseY?: number }; home?: boolean } = {}): FlyProcess => {
+  const start = (target: FlyTarget, o: { adopt?: { cruiseY?: number }; home?: boolean; flee?: boolean } = {}): FlyProcess => {
     if (!o.adopt) terrain.clear(); // Track BL: a flight reads the columns afresh (a taken-over flight keeps what it read)
 
     const p = new FlyProcess(target, {
@@ -612,10 +634,12 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       ...(routeOn() ? { route: { grid: routeGrid, plan: routePlanner } } : {}), // Track F3
       ...(entryOn() ? { entry: entryFor } : {}), // Track F9c
       burn: openBurn, // Track F10
+      mobs: landMobs, // Track M3
       waitTicks: (n) => loop.waitTicks(n),
       supply,
       log,
-    }, o.home ? { name: 'home', kind: 'auto', priority: PRIORITY.home } : {});
+      // (Track M3: an elytra flee holds the body from the ask on: over the flight on foot and the guard, under the flight in the air)
+    }, o.home ? { name: 'home', kind: 'auto', priority: PRIORITY.home } : o.flee ? { name: 'fleefly', kind: 'auto', priority: PRIORITY.flee + 0.5, flee: true } : {});
     if (o.adopt) {
       current?.handOver(); // replaced below without landing: the flight is this trip's now
       p.adopt(o.adopt.cruiseY);
@@ -647,8 +671,25 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       const provider = corridorProviderOf(task, skills.nav.coarseLayer);
       return provider ? runCorridorTrip(corridorWiring(), provider, goal, label, tripStyle()) : undefined; // Track F5b: the cave style with flyCave on
     },
+    fleeReady: () => fleeReady(),
+    flee: (why) => flee(why),
+    cancelFlee: () => cancelFlee(),
+    fleeing: () => fleeTrip !== undefined,
   };
   controls.set(task, control);
+  // Track M3: the reflex strikes under a flight while the body comes down onto its landing and through the settle
+  // (with a blade in the hotbar it is in the hand for those seconds when a hostile is within reach of them: a rocket, if the
+  // flight needs one after all, takes the hand back by itself: rocket.ts fire)
+  let bladeOut = false;
+  pve.flightStrike = () => {
+    const on = mobsOn() && controller.touchingDown();
+    if (!on) bladeOut = false;
+    else if (!bladeOut && pve.hasBlade() && landMobsNear(world.entities.values(), pve.mobs, loop.state.pos, 8).length > 0) {
+      bladeOut = true;
+      pve.combat.selectWeapon();
+    }
+    return on;
+  };
 
   // ---- the automatic flight: !come and !goto over flyMin ----------------------------------------
   const dim = (): number => world.self.dimension;
@@ -1398,6 +1439,124 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (!f) return watchWalk(() => goal.p, name, 1, plain, plain, legWalk).then((r) => glideFallback(r, goal.p, name, 1, plain));
     return runAuto(f, () => goal.p, name, 1, f.kind === 'walk_out' ? walkOrGlide : plain, legWalk);
   };
+  // ---- Track M3: the elytra flee (docs/pve.md "The elytra flee"; decisions/0086) ----------------------------------
+  /** The head room over the body: no loaded solid from the head up to FLEE_FLY.headroom over the feet (the cheap look; the takeoff's simulation decides). */
+  const fleeRoof = (from: Vec3): number | undefined => {
+    const x = Math.floor(from.x);
+    const z = Math.floor(from.z);
+    const y0 = Math.floor(from.y + 1e-6);
+    for (let y = y0 + 2; y <= y0 + FLEE_FLY.headroom; y++) if (cell(x, y, z) === true) return y - y0;
+    return undefined;
+  };
+  /**
+   * Why a flee cannot take off where the body stands (undefined: it can): a flight already in the air, another dimension,
+   * the kit (the elytra, FLEE_FLY.rockets loose rockets: the fireworks box is not opened in a flee), water, a roof.
+   */
+  const fleeReady = (): string | undefined => {
+    if (fleeTrip) return 'a flee is on its way';
+    if (controller.active) return 'a flight is in the air';
+    if (dim() !== OVERWORLD) return 'not in the overworld';
+    const from = position();
+    if (!from) return 'position unknown';
+    const k = readKit(inv, memory());
+    const ready = kitReady(k, d.settings.get('toolWearLimit'));
+    if (!ready.ok) return ready.line.replace(/^fly: /, '');
+    if (k.rockets < FLEE_FLY.rockets) return `${k.rockets} rockets at hand (a flee needs ${FLEE_FLY.rockets})`;
+    if (loop.state.inWater || loop.state.inLava) return 'in water';
+    const roof = fleeRoof(from);
+    if (roof !== undefined) return `a roof ${roof} over the feet (a takeoff needs ${FLEE_FLY.headroom} open)`;
+    return undefined;
+  };
+  /**
+   * The flee's destination: home when it lies FLEE_FLY.homeMin to homeMax away, no hostile round the body stands on the
+   * way to it (flee.ts fleeHomeClear) and none is known within FLEE_FLY.safe of it; else a point FLEE_FLY.far away, on the bearing away from the hostiles first and then round from
+   * it (flee.ts fleeBearings), the first whose column is not known to be water or lava. Its ground is found in flight (the
+   * landing search with the look at hostiles), so the takeoff waits for nothing.
+   */
+  const fleeGoal = (from: Vec3, mobs: readonly LandMob[]): { goal: Vec3; label: string; yaw: number } => {
+    const away = fleeAway(from, mobs, loop.command.yaw);
+    const h = task.home?.get();
+    if (h) {
+      const dHome = hdist(from, h);
+      if (dHome >= FLEE_FLY.homeMin && dHome <= FLEE_FLY.homeMax && fleeHomeClear(from, h, mobs) && landMobsNear(world.entities.values(), pve.mobs, h, FLEE_FLY.safe).length === 0) return { goal: { x: Math.floor(h.x), y: Math.floor(h.y), z: Math.floor(h.z) }, label: 'home', yaw: away };
+    }
+    for (const yaw of fleeBearings(away)) {
+      const x = Math.floor(from.x - Math.sin((yaw * Math.PI) / 180) * FLEE_FLY.far);
+      const z = Math.floor(from.z + Math.cos((yaw * Math.PI) / 180) * FLEE_FLY.far);
+      const top = skyTop(x, z);
+      if (top !== undefined && (wetAbove(x, z, top) || isHazardName(world.blockAt({ x, y: top, z })?.name ?? ''))) continue;
+      return { goal: { x, y: top !== undefined ? top + 1 : Math.floor(from.y), z }, label: 'safe ground', yaw: away };
+    }
+    return { goal: { x: Math.floor(from.x - Math.sin((away * Math.PI) / 180) * FLEE_FLY.far), y: Math.floor(from.y), z: Math.floor(from.z + Math.cos((away * Math.PI) / 180) * FLEE_FLY.far) }, label: 'safe ground', yaw: away };
+  };
+  /**
+   * The elytra flee: a real flight, asked for by the guard (tasks/pve.ts). What a player does: jump, open the wings, a
+   * rocket. The takeoff is the jump along the first heading away from the hostiles whose simulated climb is clear (flee.ts
+   * fleeHeadings), else straight up the column over the body, else along any heading; none: no flee (a roof, a canopy), and
+   * the other floors stay in charge. The flight never lands for low health, its landing is searched with the look at
+   * hostiles, and it places no block. Resolves with what happened.
+   */
+  const flee = async (why: string): Promise<FleeFlight> => {
+    const t0 = Date.now();
+    const no = (reason: string): FleeFlight => ({ ok: false, flew: false, reason, line: `no elytra flee: ${reason}`, seconds: (Date.now() - t0) / 1000 });
+    const not = fleeReady();
+    if (not) return no(not);
+    const from = position()!;
+    const trip: NonNullable<typeof fleeTrip> = { cancelled: false };
+    fleeTrip = trip;
+    try {
+      const mobs = landMobsNear(world.entities.values(), pve.mobs, from, FLEE_FLY.scan);
+      const g = fleeGoal(from, mobs);
+      const goalTarget: FlyTarget = { x: g.goal.x + 0.5, z: g.goal.z + 0.5, top: g.goal.y, half: 2, label: g.label };
+      const k = readKit(inv, memory());
+      const cz = cruiseHeight(from, goalTarget, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') });
+      const sky = skyHere(from, goalTarget);
+      let tk: { takeoffYaw?: number; vertical?: number } | undefined;
+      if (sky.ok) {
+        const r = await jumpTakeoff(simDeps(true), from, goalTarget, simOptions(cz.y), k.rockets, fleeHeadings(g.yaw, 90));
+        if (r.yaw !== undefined) tk = { takeoffYaw: r.yaw };
+      }
+      tk ??= await verticalFor(from, goalTarget, k.rockets, true);
+      if (!tk && sky.ok) {
+        const r = await jumpTakeoff(simDeps(true), from, goalTarget, simOptions(cz.y), k.rockets, fleeHeadings(g.yaw + 180, 60));
+        if (r.yaw !== undefined) tk = { takeoffYaw: r.yaw };
+      }
+      if (!tk) return no(sky.ok ? 'no clear climb from here on any heading, none straight up' : sky.line.replace(/^fly: /, ''));
+      if (trip.cancelled) return no('cancelled before the takeoff');
+      if (controller.active) return no('a flight is in the air');
+      // the goal held high: its landing is looked for from the air (tasks/process/fly.ts watchLanding), so the takeoff waits for no search
+      const target: FlyTarget = { ...goalTarget, hold: true, goal: g.goal, ...tk };
+      supersede();
+      const p = start(target, { flee: true });
+      trip.p = p;
+      log.warn(`fly: elytra flee (${why}): ${tk.vertical !== undefined ? `straight up ${tk.vertical}, then heading ${Math.round(tk.takeoffYaw ?? 0)}` : `a jump heading ${Math.round(tk.takeoffYaw ?? 0)}`} to ${g.label} ${g.goal.x} ${g.goal.y} ${g.goal.z} (${Math.round(hdist(from, goalTarget))} blocks; ${landMobsSaid(mobs, from) ?? 'no hostile known'}; ${Date.now() - t0} ms to the takeoff's start)`);
+      const r = await p.result;
+      const at = r.report?.landedAt ?? position();
+      const flew = r.report !== undefined && r.report.ticks > 0 && r.report.reason !== 'no_glide' && r.report.reason !== 'no_elytra' && r.report.reason !== 'in_water';
+      const landed = flew && (r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing' || r.reason === 'stopped' || r.reason === 'no_rockets');
+      const near = at ? landMobsNear(world.entities.values(), pve.mobs, at, FLEE_FLY.scan) : [];
+      const nearest = at ? near.reduce((m, h) => Math.min(m, Math.hypot(h.x - at.x, h.z - at.z)), Infinity) : Infinity;
+      const line = flew
+        ? `elytra flee: ${landed ? 'landed' : `ended (${r.reason ?? '?'})`}${at ? ` at ${Math.floor(at.x)} ${Math.floor(at.y)} ${Math.floor(at.z)}, ${Math.round(hdist(from, at))} blocks from where it began` : ''} after ${r.seconds} s, ${r.report?.rockets ?? 0} rockets; ${Number.isFinite(nearest) ? `the nearest hostile ${nearest.toFixed(0)} off` : 'no hostile known near'}`
+        : `no elytra flee: ${r.reason ?? 'the takeoff failed'}`;
+      log.warn(`fly: ${line}`);
+      return { ok: landed, flew, ...(landed ? {} : { reason: r.reason ?? 'failed' }), line, seconds: (Date.now() - t0) / 1000, ...(at ? { landedAt: { ...at } } : {}), ...(flew ? { moved: at ? hdist(from, at) : 0, rockets: r.report?.rockets ?? 0, nearest } : {}) };
+    } catch (e) {
+      return no(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (fleeTrip === trip) fleeTrip = undefined;
+    }
+  };
+  /** Cancel the elytra flee: before the takeoff it is dropped; in the air it lands on the nearest safe ground (clear of creepers). */
+  const cancelFlee = (): boolean => {
+    const trip = fleeTrip;
+    if (!trip) return false;
+    trip.cancelled = true;
+    const p = trip.p;
+    if (p && !p.land('stopped') && !p.done) processes.stop(p, 'stopped');
+    return true;
+  };
+
   // the trips home the bot makes by itself (dawn, respawn, after a guard fight, after a food or branch mining job): they
   // fly too, over flyMin, as the low-priority home return (the owner: far from home it walked the whole way back)
   const returnHome0 = pve.returnHome.bind(pve);

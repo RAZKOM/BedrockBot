@@ -208,6 +208,8 @@ export interface ReflexDeps {
   attack: (rid: bigint, opts: { reach: number }) => boolean;
   /** On (the `mobReflex` setting) and able (alive, spawned, not flying). */
   enabled: () => boolean;
+  /** Track M3: the eye-to-box distance it strikes at now (default REFLEX_REACH; farther while a flight comes down onto its landing). */
+  reach?: () => number;
   grid?: () => GridLike | undefined;
   world?: object;
   /** The shield is raised (sneaking with a shield in the offhand): only strike what is worth lowering it (worthTheShield). */
@@ -256,10 +258,12 @@ export class Reflex {
     const s = this.d.loop.state;
     if (!s.ready || !this.d.enabled()) return;
     const now = performance.now();
+    const reach = this.d.reach?.() ?? REFLEX_REACH;
     const picks = reflexPicks({
       entities: this.d.entities().values(),
       mobs: this.d.mobs,
       me: s.pos,
+      reach,
       grid: this.d.grid?.(),
       world: this.d.world,
       struck: this.struck,
@@ -270,7 +274,7 @@ export class Reflex {
     let n = 0;
     for (const c of picks) {
       if (n >= MAX_PER_TICK) break;
-      if (!this.d.attack(c.e.runtimeId, { reach: REFLEX_REACH + 0.05 })) continue;
+      if (!this.d.attack(c.e.runtimeId, { reach: reach + 0.05 })) continue;
       n++;
       const rid = c.e.runtimeId;
       const type = bareType(c.e.type);

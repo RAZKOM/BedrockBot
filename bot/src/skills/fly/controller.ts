@@ -49,6 +49,16 @@ export const SETTLE_TICKS = 10;
 export const ROCKET_GLIDE_WAIT = 6;
 /** Track BF: sneak goes on this far above the landing cell in the approach / land phase (FlightDeps.sneakLanding). */
 export const SNEAK_ABOVE = 2.5;
+/**
+ * Track M3 (docs/flight.md "The landing looks at hostile mobs"): the reflex may strike under a flight while the body is
+ * coming down onto its landing: within this many blocks over the landing's top and no faster than STRIKE_SPEED (the
+ * brake's station keeping and the elevator: brake.ts BRAKE_FAST), and through the settle after the touchdown. Not in a
+ * flare's run in: a strike knocks the mob 1.3 to 1.7 blocks along the line from the body, which for a body flying in
+ * at half a block a tick is its own path (offline a zombie on the cell hit 10 flare landings of 10 that way, 7 of 10
+ * with no strike in the air).
+ */
+export const STRIKE_ABOVE = 8;
+export const STRIKE_SPEED = 0.35;
 /** Track BL: a correction this far behind the local body along the heading (blocks) is the server holding it; one note per HELD_NOTE_TICKS. */
 const HELD_ERROR = 2;
 const HELD_NOTE_TICKS = 40;
@@ -171,6 +181,9 @@ export interface FlightReport {
   routeTakeoffTicks?: number;
   /** Track F9c: the flight's learned entry (brain.ts FlightStats.entry): the recording, the joins and the misses, how it ended. */
   entry?: FlightStats['entry'];
+  /** Track M3: the times the landing was moved off a creeper (each a go-around to the moved landing), and the look's lines. */
+  mobRounds?: number;
+  mobNotes?: string[];
 }
 
 export interface FlightOptions extends Omit<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'terrain'> {
@@ -246,6 +259,21 @@ export class FlightController {
   /** In the air (gliding) right now. */
   get airborne(): boolean {
     return this.active && (this.d.loop.state.gliding || !this.d.loop.state.onGround);
+  }
+
+  /**
+   * Track M3: the body is coming down onto its landing or has just touched it (the approach or a forced landing, within
+   * STRIKE_ABOVE of the landing's top and slower than STRIKE_SPEED; the settle after the touchdown): the seconds in which
+   * a mob in reach can be struck and the flight has nothing else for the hand to do.
+   */
+  touchingDown(): boolean {
+    const b = this.brain;
+    if (!b) return false;
+    if (this.settling) return true;
+    if (b.phase !== 'approach' && b.phase !== 'land' && b.phase !== 'done') return false;
+    const s = this.d.loop.state;
+    const aim = b.aim;
+    return s.pos.y - aim.top < STRIKE_ABOVE && Math.hypot(s.vel.x, s.vel.z) < STRIKE_SPEED;
   }
 
   status(): FlightStatus {
@@ -528,6 +556,8 @@ export class FlightController {
       ...(b?.stats.routeTicks ? { routeTicks: b.stats.routeTicks, routePlans: b.stats.routePlans, routeReplans: b.stats.routeReplans, routeMaxError: b.stats.routeMaxError } : {}),
       ...(b?.stats.routeTakeoffTicks !== undefined ? { routeTakeoffTicks: b.stats.routeTakeoffTicks } : {}),
       ...(b?.stats.entry ? { entry: { ...b.stats.entry } } : {}),
+      ...(b?.stats.mobRounds ? { mobRounds: b.stats.mobRounds } : {}),
+      ...(b?.stats.mobNotes?.length ? { mobNotes: [...b.stats.mobNotes] } : {}),
     };
   }
 
@@ -552,7 +582,7 @@ export class FlightController {
     this.endReason = reason;
     this.log.info(
       `flight: ${ok ? 'landed' : `ended (${reason})`} at ${r.landedAt ? `${r.landedAt.x.toFixed(2)} ${r.landedAt.y.toFixed(2)} ${r.landedAt.z.toFixed(2)}` : '?'}` +
-        `${r.off !== undefined ? `, ${r.off.toFixed(2)} from the centre` : ''}; ${r.rockets} rockets (${r.rocketsBy.climb} climb, ${r.rocketsBy.cruise} cruise, ${r.rocketsBy.goaround} go-around), ${r.goArounds} go-arounds${r.landingPrices?.length ? ` (${r.landingPrices.length} priced)` : ''}, ${r.ticks} ticks, ${r.corrections} corrections` +
+        `${r.off !== undefined ? `, ${r.off.toFixed(2)} from the centre` : ''}; ${r.rockets} rockets (${r.rocketsBy.climb} climb, ${r.rocketsBy.cruise} cruise, ${r.rocketsBy.goaround} go-around), ${r.goArounds} go-arounds${r.landingPrices?.length ? ` (${r.landingPrices.length} priced)` : ''}${r.mobRounds ? `, ${r.mobRounds} round${r.mobRounds === 1 ? '' : 's'} for a creeper at the landing` : ''}, ${r.ticks} ticks, ${r.corrections} corrections` +
         `${r.touchdown ? `, touchdown vy ${r.touchdown.vy.toFixed(3)} h ${r.touchdown.h.toFixed(3)}` : ''}, max y ${r.maxY.toFixed(1)}${r.climbTop !== undefined && r.climbGoal !== undefined ? ` (the climb to ${r.climbTop.toFixed(1)}, for ${r.climbGoal.toFixed(1)})` : ''}${r.descents.length ? `, descent ${r.descents.join('; ')}` : ''}${r.steered ? `, steered ${r.steered} ticks` : ''}${r.holdTicks ? `, held ${r.holdTicks} ticks` : ''}${r.slide !== undefined ? `, slide ${r.slide.toFixed(2)}${r.sneak ? ' (sneaking)' : ''}` : ''}${r.ledgeDrop !== undefined ? `, ledge takeoff (gliding ${r.ledgeDrop.toFixed(1)} under the edge)` : ''}${r.avoidances?.length ? `, ${r.avoidances.length} terrain avoidance${r.avoidances.length === 1 ? '' : 's'}` : ''}${r.dives ? `, ${r.dives} dive${r.dives === 1 ? '' : 's'}` : ''}${r.held ? `, held by the server ${r.held} times` : ''}${r.landStyle ? `, landing ${r.landStyle}${r.landStyle === 'brake' ? ` (${r.brakeTicks} ticks braked / station-kept${r.brakeRescues ? `, ${r.brakeRescues} instead of a go-around` : ''})` : ''}` : ''}${r.routeTicks ? `, landing route (${r.routeTicks} ticks on the route tracker, ${r.routePlans} plans, ${r.routeReplans} re-plans, max error ${r.routeMaxError?.toFixed(2)})` : ''}${r.routeTakeoffTicks !== undefined ? `, route takeoff (${r.routeTakeoffTicks} ticks)` : ''}${r.entry ? `, ${r.entry.said ?? 'learned entry'} ${r.entry.name} (${r.entry.end ?? 'not flown'}, ${r.entry.joins} joined, ${r.entry.misses} missed${r.entry.ticks !== undefined ? `, ${r.entry.ticks} ticks from the commit` : ''})` : ''}${r.why ? `; ${r.why}` : ''}`,
     );
     this.brain = undefined;

@@ -20,6 +20,8 @@ target); without walking every command answers `<cmd> needs a task that can walk
 | `bot/src/skills/combat/reflex.ts` | Track M1: the reflex (strikes the hostile that reaches the bot soonest, under every task; never a friend) |
 | `bot/src/skills/survival/seal.ts` | Track M1: the seal-in (a shell of throwaway blocks, or a hole dug under the feet) |
 | `bot/src/skills/test/mobs.ts` | Track M1: `!test mobs` (the gauntlet's sets on the Realm under testMode) |
+| `bot/src/skills/fly/flee.ts`, `bot/src/chat/commands-fly.ts` (`flee`, `fleeReady`, `cancelFlee`) | Track M3: the elytra flee as a flight mode (the numbers and the pure choices; the flight itself) |
+| `bot/src/skills/fly/landmobs.ts` | Track M3: a landing's look at hostile mobs (docs/flight.md) |
 | `bot/src/skills/combat/targeting.ts` | Track V: `isThreat`, `nearestHostile`, `pickThreat` (reachability-aware, creepers first), `reachability`, `wantsFlee(threat)`, `afterFight` / `ignoreMsAfter`; Track AH: `inReach` / `pickInReach` (re-targeting), `crowdOf` / `crowded` / `crowdThreat` (crowd rule) |
 | `bot/src/skills/combat/pathReach.ts` | Track AO: `PathReach` (bounded probe plans from the bot to a mob, verdicts cached per mob, `stats`), `mobGoal`, `pathVerdict`, `probeNavOf`; targeting.ts adds `lineOfSight`, `ignoreMob`, `userWalking`, `walkThreat`, `parseWalkRule` |
 | `bot/test/unit/skills/targeting-walls.test.ts`, `bot/test/e2e/pve-walls.test.ts` | Track AO unit tests (fakes and a generated flat world) and e2e on bds-pve (a glass pen, a window, the open, all during a `!goto`) |
@@ -546,7 +548,9 @@ table below, `bare after`); an owner who plays bare-handed can turn it on (`!set
 Every tick before the step: the hostiles within 3.9 (eye to box) with a line of sight, out of their hurt time and not struck by
 the bot in the last 10 ticks, up to 3 a tick, in this order: a lit creeper, a mob that hit the bot in the last 2 s, then the one
 that reaches the bot soonest (its distance less its reach, over its speed). The strike is the combat skill's `attack` (no turning,
-the keys untouched), so a goto, a mining job, eating or guard's own fight go on. Never in flight.
+the keys untouched), so a goto, a mining job, eating or guard's own fight go on. Under a flight only while the body comes
+down onto its landing, with `flyLandMobs` on or in an elytra flee (docs/flight.md "The landing looks at hostile mobs
+(Track M3)": from 5.5 there, the blade in the hand).
 
 With the shield up (sneaking, or a threat the shield would face) a strike lowers it for about 16 ticks (measured, above), so
 only what is worth that (`worthTheShield`): a lit creeper within 4.5, or a melee mob 2 ticks or less from reaching the bot and
@@ -571,7 +575,7 @@ Metrics: `pve.reflex.hits`, `pve.reflex.kills`; the PvE status (`!status`, the p
 | fight on | no danger (no flee trigger), or a duel worth it: one melee mob with health for 3 of its hits, or up to 2 archers alone (skeleton, stray, bogged, pillager) with health for 2 arrows, given up after 8 lost in 6 s |
 | eat | every mob 8 or more away, food below 20, something to eat; with no blade in the hotbar also no ranged mob within 16 (an archer or a witch hits from 8 to 15) |
 | back off | the flight on foot (Flee v2) with the reflex striking behind it; with no blade a witch within 16 starts one below 14 health |
-| elytra flee | running failed (caught or cornered within 20 s) or critical (health 4 or less with a melee mob within 3, or 8 or less with a hit in the last 3 s, or with `sealIn` on and the shell possible 14 or less with a hit in the last 3 s and 3 shooters in sight); setting `fleeFly` (off); `!fly home` as the first owner through the chat command, only with an owner, a home and the flight kit ready (`skills/fly/kit.ts`); at most once in 30 s |
+| elytra flee | setting `fleeFly` (off), where a takeoff can be made (the elytra and 3 loose rockets, the column over the body open 8 up, the overworld; "Track M3: the elytra flee as a flight mode" below). With no blade in the hotbar: at every flee trigger, before the flight on foot, and below 14 health with an archer or a witch in sight. With a blade: from 6 health down, and once running has failed (caught or cornered within 20 s) or the health is critical (4 or less with a melee mob within 3, or 8 or less with a hit in the last 3 s, or with `sealIn` on and the shell possible 14 or less with a hit in the last 3 s and 3 shooters in sight). A real flight: jump, wings, a rocket, 96 blocks away from the hostiles (home when that is 48 to 400 blocks off and clear), landing with the look at hostile mobs; at most once in 30 s |
 | seal in | as the elytra flee, when it cannot go; setting `sealIn` (off); at most once in 30 s |
 | defend | none of the above: guard defends in place |
 
@@ -891,6 +895,9 @@ blocks off, and the next set is refused as a slope.
 
 ### The elytra flee (`fleeFly`, off) measured
 
+(What Track M2 measured with the flee as `!fly home`. Track M3 made it a flight mode of its own: "Track M3: the elytra flee as
+a flight mode" below.)
+
 `test/e2e/gaunt-fleefly.test.ts`, bare with an elytra and rockets, home 200 out. Before the hand-over (decision 22): 4 of 4
 deaths in a pen with 2 or 4 zombies; `!fly home` was accepted ("vertical takeoff clear") but the flee and guard took the body back
 the next tick. With the hand-over: in a pen with 4 zombies 2 of 3 took off 0.7 s after the ask (health 7 to 4), then the flight
@@ -898,6 +905,130 @@ landed itself ("health low") 3 to 7 s later 18 to 31 blocks away; 1 died with th
 outran 4 zombies on foot in 2 of 3 runs; the third flew 200 blocks and stood 0.6 from home. What the flee needs from the flight
 code (not changed here): no low-health landing while the trip is the elytra flee (or land only far from every hostile), a
 takeoff under 1 s from the ask, and a cancel the flee can call.
+
+## Track M3: the elytra flee as a flight mode
+
+Decision record: [decisions/0086-landing-looks-at-mobs.md](decisions/0086-landing-looks-at-mobs.md) (decisions 9 to
+14; the landing's look at hostile mobs, decisions 1 to 8, is in [flight.md](flight.md) "The landing looks at hostile
+mobs (Track M3)"). The setting is still `fleeFly`, still off by default.
+
+What a player does when the mobs are too many: jump, open the wings, a rocket, and come down somewhere else. Until
+this track the floor was `!fly home` typed for the owner once the flight on foot had failed. It needed a home, it
+planned a trip like any other before it moved (the landing search first), the flight landed itself as soon as the
+health was under `fleeHealth` (which is when it was asked), and the guard could not tell whether anything had come of
+it (Track M2: 4 deaths in 4 before the hand-over, then 2 takeoffs of 3 that came down 18 to 31 blocks away among the
+mobs). Now the flee is a flight of its own kind:
+
+| | |
+|---|---|
+| The entry point | `flyControlOf(task).flee(why)` (`chat/commands-fly.ts`), asked by the flee process through `PveController.fleeFlight`. It resolves with what happened: `flew` (a takeoff was made), `ok` (the body stands again after a flight), where, how far, how many rockets, the nearest hostile known there. `fleeReady()` says whether a takeoff can be made where the body stands and why not; `cancelFlee()` drops it on the ground and lands it in the air (the owner's `!stop`, `!fly stop` and `!land` do the same) |
+| What it needs | the elytra (in the inventory or on the back, not worn out), 3 loose rockets (a jump takeoff fires 1 to 3; a go-around at the landing 1 or 2; the fireworks box is not opened in a flee), the overworld, no water round the body, and the column over it open 8 blocks up. Under a roof there is no flee: `fleeReady` says `a roof 3 over the feet` and the other floors stay in charge |
+| The takeoff | the jump, the wings on the jump's fall, a rocket once the server has the glide: along the first heading within 90 degrees of the way away from the hostiles (the sum of the ways away from each, the near ones weighing most) whose simulated climb is clear; else straight up the column over the body; else along any heading that is clear. It starts from the ground and from rest: a body in the middle of a walk's jump or a knockback is waited for, a second at the most (a flee asked in a sprint jump started its glide a fifth of a block over the ground along the walk's heading and ended 4 blocks on) |
+| Where to | home, when it lies 48 to 400 blocks away, no hostile round the body stands on the way to it (every one more than 60 degrees off its bearing: a mob that followed the body away from home stands between the two, and a flight home over it only turns it round) and none is known within 24 of it; else a point 96 blocks away on the bearing away from the hostiles (30, 60 and 90 degrees either side when that column is water or lava). The ground there is found from the air by the landing search with the look at hostile mobs, whatever `flyLandMobs` says: never within 12 of a creeper, beside what else is hostile; the brain's look and the reflex in the elevator as in any flight with the look |
+| What it never does | land because the health is low (a flight's rule: `fleeHealth` is passed as 0), place a block (no refill from the box before or after), or go on if the takeoff's simulation is not clear |
+| The body | the flee's trip is a process above the flight on foot (`fleefly`, auto, `PRIORITY.flee + 0.5`): from the ask to the end of the flight the flight on foot and the guard do not ask for the body (`flyHandover`). A walk home that waits its turn is dropped when the flee is asked: it would walk the body straight back (a flee that landed 96 blocks off at 7 health was walked home within 13 s, to the witch, and died there) |
+| After it | the recovery rule of the flight on foot holds from the landing on (no fight below `fleeHealth` + 6 for a minute); the flee is not asked again for 30 s |
+
+### When the guard asks for it
+
+The floors (the table in "Never die to common mobs (Track M1)") with `fleeFly` on and a takeoff possible:
+
+- **No blade in the hotbar**: at every flee trigger, before the flight on foot. A fist does not end a fight, and every
+  bare-handed death of Tracks M1 and M2 was a body running on foot at low health. And earlier against what a fist
+  does not reach: an archer or a witch with a line on the bot starts it below 14 health (`FLY_SHOOTER_HEALTH`, the
+  number the flight on foot already uses for a witch): the takeoff takes half a second to a second, and at 8 health
+  with two skeletons shooting that is one arrow too late.
+- **With a blade**: the flight on foot first (a blade wins most fights, and the takeoff costs the chestplate for the
+  flight); the elytra flee from 6 health down (`FLY_FIRST_HEALTH`), and as before once running has failed (caught,
+  cornered) or the health is critical.
+- **Where it cannot go** (a roof, fewer than 3 rockets, a flight in the air, asked within the last 30 s): the floors
+  as they were: the flight on foot, the seal-in, the stand.
+
+A flee that made no takeoff answers at once (`no elytra flee: no clear climb from here on any heading, none straight
+up`), and the flight on foot goes on in the same look.
+
+### Measured (bds-pve and bds-gaunt, BDS 1.26.60.6, 2026-11-14; `test/e2e/gaunt-mobs.test.ts` with `MOBS_ELYTRA=1 MOBS_AB=fleeFly`)
+
+The gauntlet's cells where a bare-handed bot died before (the table in "Track M2"), each kit carrying an elytra and
+64 rockets, `fleeFly` off and on alternating, 60 s a run, the home on the spot; 10 runs a side for the five cells that
+killed most, 5 a side for the rest and for the live kit.
+
+| kit | cell | `fleeFly` | n | deaths | damage a run | lowest health (median) | runs the flee was asked in | its flights: landed / ended otherwise / refused | from the spot at the end (median, flee runs) |
+|---|---|---|---|---|---|---|---|---|---|
+| bare | act-landed | off | 5 | 1 | 19 | 7 | 0 | 0 / 0 / 0 | - |
+| bare | act-landed | on | 5 | 0 | 10 | 13 | 5 | 5 / 0 / 0 | 105.1 |
+| bare | enderman-1 | off | 5 | 1 | 12.6 | 13 | 0 | 0 / 0 / 0 | - |
+| bare | enderman-1 | on | 5 | 0 | 8.4 | 13 | 1 | 0 / 0 / 0 | 101.5 |
+| bare | mixed-4 | off | 5 | 1 | 18 | 5 | 0 | 0 / 0 / 0 | - |
+| bare | mixed-4 | on | 5 | 0 | 11.4 | 11 | 5 | 5 / 0 / 0 | 91.8 |
+| bare | mixed-8 | off | 10 | 0 | 12.8 | 12 | 0 | 0 / 0 / 0 | - |
+| bare | mixed-8 | on | 10 | 0 | 12.8 | 12 | 9 | 9 / 0 / 0 | 109.4 |
+| bare | pillager-1 | off | 10 | 10 | 25.3 | 0 | 0 | 0 / 0 / 0 | - |
+| bare | pillager-1 | on | 10 | 0 | 19.6 | 7 | 10 | 19 / 0 / 0 | 210 |
+| bare | seal-5 | off | 5 | 4 | 25.8 | 0 | 0 | 0 / 0 / 0 | - |
+| bare | seal-5 | on | 5 | 0 | 18.2 | 9 | 5 | 6 / 0 / 0 | 108.2 |
+| bare | skeleton-2 | off | 10 | 9 | 26.2 | 0 | 0 | 0 / 0 / 0 | - |
+| bare | skeleton-2 | on | 10 | 0 | 9 | 12 | 10 | 10 / 0 / 0 | 78.5 |
+| bare | skeleton-4 | off | 10 | 9 | 27.5 | 0 | 0 | 0 / 0 / 0 | - |
+| bare | skeleton-4 | on | 10 | 0 | 9.1 | 12 | 10 | 10 / 0 / 0 | 92.9 |
+| bare | stray-1 | off | 5 | 1 | 18.6 | 6 | 0 | 0 / 0 / 0 | - |
+| bare | stray-1 | on | 5 | 0 | 8 | 12 | 5 | 4 / 0 / 0 | 77.5 |
+| bare | witch-1 | off | 10 | 10 | 25.9 | 0 | 0 | 0 / 0 / 0 | - |
+| bare | witch-1 | on | 10 | 0 | 29 | 1 | 10 | 10 / 0 / 0 | 71.9 |
+| bare | witch-2 | off | 5 | 5 | 27.8 | 0 | 0 | 0 / 0 / 0 | - |
+| bare | witch-2 | on | 5 | 0 | 28.8 | 1 | 5 | 6 / 0 / 0 | 71.4 |
+| bare | zombie-1 | off | 5 | 0 | 6.2 | 17 | 0 | 0 / 0 / 0 | - |
+| bare | zombie-1 | on | 5 | 0 | 3.6 | 17 | 0 | 0 / 0 / 0 | - |
+| bare | zombie-2 | off | 5 | 0 | 13.2 | 12 | 0 | 0 / 0 / 0 | - |
+| bare | zombie-2 | on | 5 | 1 | 15 | 7 | 1 | 1 / 0 / 0 | 97.6 |
+| live | mixed-8 | off | 5 | 0 | 21.8 | 1.1 | 0 | 0 / 0 / 0 | - |
+| live | mixed-8 | on | 5 | 0 | 27.5 | 1.3 | 1 | 1 / 0 / 0 | 98 |
+| live | seal-5 | off | 5 | 0 | 13.4 | 12 | 0 | 0 / 0 / 0 | - |
+| live | seal-5 | on | 5 | 0 | 12.6 | 11.1 | 0 | 0 / 0 / 0 | - |
+| **bare, all** | | off | 90 | **51** | | | | | |
+| **bare, all** | | on | 90 | **1** | | | | | |
+| **live, all** | | off | 10 | **0** | | | | | |
+| **live, all** | | on | 10 | **0** | | | | | |
+
+What the rows say:
+
+- **Bare-handed, the flee off: 51 deaths in 90 runs; on: 1 in 90.** The cells that killed a bare-handed bot are the
+  ones a fist does not answer: a witch (10 of 10, and 5 of 5 with two), a pillager (10 of 10), two and four skeletons
+  (9 of 10 each), four skeletons and a witch (4 of 5). With the flee on, none of those 50 runs died.
+- **How a flee goes**: asked at the first flee trigger (a witch's potion at 11 health, an archer in sight below 14),
+  the flight's first tick about half a second later (the elytra put on; then the jump and the first rocket once the
+  server has the glide), 96 blocks away after 6 to 8 s on 1 rocket, landed by the brake with no hostile known near.
+  87 flees were asked in the 90 runs with the flee on; 85 had landed when their run ended, 2 were still in the air,
+  none was refused and none ended otherwise.
+- **A pillager follows** (it sees 64 blocks): 19 flees in 10 runs, the second one from where the first had landed.
+  The first series of this cell flew the second flee home, 68 to 116 blocks back the way the pillager had come, and
+  one run of 10 died there with the pillager 23 blocks from the landing; since then home is a destination only when
+  no hostile round the body stands on the way to it (0 deaths in 10, the body 210 blocks from the spot at the end).
+- **A witch's poison lands anyway**: the damage with the flee on is as high as without (29 against 26 to 28) and the
+  health goes to 1, because the poison of the potion that started the flee runs for 45 s. It stops at 1; what killed
+  before was her next potion, which a body 96 blocks away does not get.
+- **The one death with the flee on** (`zombie-2`, 1 run of 5; 0 of 5 with it off): two zombies, 27 damage in 5 hits
+  (an armed one), the flight on foot and no flee asked in that run. Why the flee was not asked was not found (the
+  run had no trace); the floors that ran are the ones that run with the setting off, and the other four runs of the
+  cell asked for the flee once.
+- **The other cells**: `mixed-8` and `zombie-1` no death either way; `mixed-4`, `enderman-1`, `stray-1` and
+  `act-landed` 1 of 5 each with the flee off, 0 of 5 with it on.
+- **The live kit** (the netherite set, a sword, a shield): 0 deaths in 10 either way. With a blade the flee comes
+  from 6 health down: it was asked once in 10 runs (`mixed-8`, the witch's poison) and landed.
+
+Still lost where the sky is not open: everything above happened on open ground. Under a roof `fleeReady` says no and
+the floors are Track M2's.
+
+### Without rockets, and under a roof
+
+- **Fewer than 3 rockets**: no flee. A glide needs height to begin with: from flat ground a jump gives 1.25 blocks,
+  which is a glide of about 12 blocks at walking pace and no gain over running. From a ledge 12 or more over the
+  ground the flight code can glide down without a rocket (`glideDown`, docs/flight.md "Glide down"): about 10 blocks
+  out for every block of height. That is not wired into the flee: it would need a ledge search under attack and has
+  not been tried. A bare-handed bot with an elytra and no rockets has the flight on foot, the dodge and the seal-in.
+- **Under a roof or in a cave**: no flee (the column over the body must be open 8 up, and the takeoff's simulation
+  clear). What is still lost there is what was lost before this track: bare-handed against archers and a witch with
+  `mobDodge` off, and a bot at low health with a melee mob as fast as it is.
 
 ## Packets (BDS 1.26.60.6, verified)
 

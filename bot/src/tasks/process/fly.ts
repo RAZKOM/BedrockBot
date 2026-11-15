@@ -27,6 +27,7 @@ import { glideOptions, routeTakeoffOptions, type Ledge } from '../../skills/fly/
 import type { BrainOptions } from '../../skills/fly/brain.ts'; // Track F3
 import type { TakeoffRoute } from '../../skills/fly/route/takeoff.ts'; // Track F3
 import { entrySaid, guideSaid } from '../../skills/fly/learn/guide.ts'; // Track F9d, F9e
+import { cellPrice, LAND_MOBS, type LandMob } from '../../skills/fly/landmobs.ts'; // Track M3
 import { HIGH_CRUISE_Y, highCruiseWanted } from '../../skills/fly/terrain.ts'; // Track BL
 import type { SkillResult } from '../../skills/types.ts';
 import { BaseProcess, PRIORITY, type ProcessKind, type ProcessStatus, type StopReason } from './manager.ts';
@@ -70,6 +71,8 @@ export interface FlyTarget extends LandingTarget {
 export const RETARGET_WITHIN = 160;
 /** Track BF: the landing search runs at most every this many ticks while the target holds. */
 export const LOOK_EVERY = 40;
+/** Track M3: a landing cell refused for a creeper is searched again at most every this many ticks (the cell itself is asked every 10). */
+export const MOB_LOOK_EVERY = 20;
 
 /**
  * Track BF: the flight target for a landing plan (landing.ts `findLanding`): the goal itself held high
@@ -149,6 +152,13 @@ export interface FlyDeps {
    * undefined (9 to 21, as before). Read when the flight takes off.
    */
   burn?: () => BurnRange | undefined;
+  /**
+   * Track M3 (docs/flight.md "The landing looks at hostile mobs"): the hostiles known round a place (landmobs.ts
+   * landMobsNear over the world's entities). With `flyLandMobs` on (and in every elytra flee) the chosen landing cell is
+   * asked against them every 10 ticks of the flight and searched again when a creeper stands inside its refusal range,
+   * and the brain looks at them in the approach and the elevator. Absent, or the setting off: no look.
+   */
+  mobs?: (near: { x: number; z: number }) => readonly LandMob[];
   /** The owner's lines (the supply whispers, the kept-kit notes). */
   say(msg: string): void;
   waitTicks(n: number): Promise<void>;
@@ -205,16 +215,22 @@ export class FlyProcess extends BaseProcess {
   private handedOver = false;
   /** `adopt`: the flight in the air flies to this trip's target now (false: it lands where it was going first). */
   retargeted = false;
+  /**
+   * Track M3 (docs/pve.md "The elytra flee"): this trip is the elytra flee. It never lands for low health (the health is
+   * why it flies), looks at the hostiles round its landing whatever `flyLandMobs` says, and places no fireworks box.
+   */
+  readonly flee: boolean;
 
   /**
    * `as`: the trip home (pve.returnHome through commands-fly) flies as the low-priority home return: named `home`,
    * kind `auto`, PRIORITY.home, so !stop, a death and a new command drop it as they drop the walk home.
    */
-  constructor(target: FlyTarget, deps: FlyDeps, as: { name?: string; kind?: ProcessKind; priority?: number } = {}) {
+  constructor(target: FlyTarget, deps: FlyDeps, as: { name?: string; kind?: ProcessKind; priority?: number; flee?: boolean } = {}) {
     super();
     this.name = as.name ?? 'fly';
     this.kind = as.kind ?? 'user';
     this.prio = as.priority ?? PRIORITY.user;
+    this.flee = as.flee === true;
     this.target = target;
     this.d = deps;
     this.log = deps.log ?? silentLogger;
@@ -314,6 +330,11 @@ export class FlyProcess extends BaseProcess {
     return readKit(this.d.inventory, this.d.memory());
   }
 
+  /** Track M3: this flight looks at the hostiles round its landing (the setting, or an elytra flee). */
+  private mobsOn(): boolean {
+    return this.d.mobs !== undefined && (this.flee || this.d.settings.get('flyLandMobs') === true);
+  }
+
   private async advance(t: number): Promise<void> {
     try {
       if (this.phase === 'prepare') await this.prepare(t);
@@ -331,7 +352,7 @@ export class FlyProcess extends BaseProcess {
     const glide = this.target.glide === true;
     const min0 = s.get('fireworksMin');
     // no rockets loose and no fireworks box: the ones in another carried box come out first
-    if (!glide && kit.rockets < min0 && kit.boxRockets === 0 && this.d.restock) {
+    if (!glide && !this.flee && kit.rockets < min0 && kit.boxRockets === 0 && this.d.restock) {
       const ok = await this.d.restock(ROCKET, 64);
       if (t !== this.token) return;
       this.notes.push(`rockets out of a carried box: ${ok ? 'yes' : 'none'}`);
@@ -349,7 +370,7 @@ export class FlyProcess extends BaseProcess {
       if (kit.rocketsHotbar === 0 && kit.rockets > 0) await this.d.kitOps.rocketsToHotbar();
       if (t !== this.token) return;
       kit = this.kit();
-    } else if ((kit.rocketsHotbar < min || kit.rockets === 0) && kit.boxRockets > 0) {
+    } else if ((kit.rocketsHotbar < min || kit.rockets === 0) && kit.boxRockets > 0 && !this.flee) {
       // (Track F13: and whenever nothing is loose, whatever fireworksMin says: the flight was decided on the box's rockets)
       const r = await this.d.kitOps.refillFromBox(() => t === this.token);
       if (t !== this.token) return;
@@ -450,9 +471,14 @@ export class FlyProcess extends BaseProcess {
     const bl = { clearance: s.get('flyClearance'), descent: String(s.get('flyDescent')) as 'auto' | 'dive' | 'spiral', landStyle: String(s.get('flyLandStyle')) as 'auto' | 'flare' | 'brake', ...(high ? { highCruise: true } : {}), ...(s.get('flyLandOver') === false ? { landOver: false } : {}), ...(s.get('flyWayDown') === true ? { wayDown: true } : {}), ...(this.d.route ? { route: this.d.route } : {}), ...(this.d.entry && s.get('flySneakLand') === true ? { entrySneak: true } : {}), ...(routeTakeoff ? { routeTakeoff: routeTakeoffOptions(routeTakeoff, routeTakeoff.proven === true) } : {}) }; // Track F1: flyLandStyle; Track F9a: the proven takeoff's own options
     const opts = glide && ledge ? { ...glideOptions(this.target, ledge, { margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(burn ? { burn } : {}) }), terrainFloor: false, descent: bl.descent, landStyle: bl.landStyle, ...(bl.landOver === false ? { landOver: false } : {}), ...(bl.wayDown ? { wayDown: true } : {}), ...(this.d.route ? { route: this.d.route } : {}) } : { cruiseY, margin: s.get('flyMargin'), goArounds: s.get('flyGoArounds'), ...(ledge ? { ledge: { yaw: ledge.yaw } } : {}), ...(vertical !== undefined ? { vertical: { top: vertical } } : {}), ...bl, ...(burn ? { burn } : {}) };
 
+    const mobs = this.mobsOn() ? this.d.mobs : undefined;
     this.flight = this.d.controller.flyTo(this.target, {
       ...opts,
-      fleeHealth: s.get('fleeHealth'),
+      // (Track M3: an elytra flee is flown at low health: it lands where it is safe, not where the health says)
+      fleeHealth: this.flee ? 0 : s.get('fleeHealth'),
+      // (Track M3: and it is asked for in the middle of whatever the body was doing: the jump from the ground, from rest)
+      ...(this.flee ? { fromGround: true } : {}),
+      ...(mobs ? { landMobs: mobs } : {}),
       elytraWornAt: elytraWornLimit(wear, this.kit()),
       ...(sky?.ok ? { takeoffYaw: this.target.takeoffYaw ?? sky.yaw } : (vertical !== undefined || routeTakeoff) && this.target.takeoffYaw !== undefined ? { takeoffYaw: this.target.takeoffYaw } : routeTakeoff ? { takeoffYaw: routeTakeoff.yaw } : {}),
     });
@@ -527,6 +553,8 @@ export class FlyProcess extends BaseProcess {
     // (its token moves on) until the landing, like the flight's own `.then` above
     let ticks = 0;
     let lastLook = -Infinity;
+    let lastMobLook = -Infinity;
+    let mobMoves = 0;
     let holdSince: number | undefined;
     let unknown = 0;
     const holdTicks = this.d.settings.get('flyHoldS') * 20;
@@ -552,10 +580,22 @@ export class FlyProcess extends BaseProcess {
         if (t.entry) continue;
         // a chosen cell: re-checked every LOOK_EVERY ticks until the touchdown is near
         if (c.distance !== undefined && c.distance < 6) return;
-        if (!t.cell || !this.d.cellOk || ticks - lastLook < LOOK_EVERY) continue;
-        lastLook = ticks;
-        if (this.d.cellOk(t.cell)) continue;
-        this.log.info(`fly: the landing cell ${t.cell.x} ${t.cell.feet} ${t.cell.z} is no longer landable (${Math.round(c.distance ?? 0)} blocks out): looking again`);
+        if (!t.cell) continue;
+        // Track M3: the hostiles at the chosen cell, at every look (they move, and they are known only near the body)
+        // (a creeper inside its refusal range: always; other hostiles that cost LAND_MOBS.relookS or more: LAND_MOBS.relooks times)
+        const price = this.mobsOn() && ticks - lastMobLook >= MOB_LOOK_EVERY ? cellPrice(t.cell, this.d.mobs!(t)) : undefined;
+        const mobWhy = price?.refuse ?? (price && price.priceS >= LAND_MOBS.relookS && mobMoves < LAND_MOBS.relooks ? `hostiles that cost ${price.priceS.toFixed(0)} s (${price.note ?? ''})` : undefined);
+        if (mobWhy) {
+          if (!price?.refuse) mobMoves++;
+          lastMobLook = ticks;
+          lastLook = ticks;
+          this.log.info(`fly: the landing cell ${t.cell.x} ${t.cell.feet} ${t.cell.z} has ${mobWhy} (${Math.round(c.distance ?? 0)} blocks out, ${c.phase ?? '?'}): looking again`);
+        } else {
+          if (!this.d.cellOk || ticks - lastLook < LOOK_EVERY) continue;
+          lastLook = ticks;
+          if (this.d.cellOk(t.cell)) continue;
+          this.log.info(`fly: the landing cell ${t.cell.x} ${t.cell.feet} ${t.cell.z} is no longer landable (${Math.round(c.distance ?? 0)} blocks out): looking again`);
+        }
       } else {
         if (c.distance === undefined || c.distance > RETARGET_WITHIN) continue;
         if (c.descending === 'holding') holdSince ??= ticks;
@@ -620,7 +660,7 @@ export class FlyProcess extends BaseProcess {
     if (!c.ok) this.notes.push(c.reason ?? 'chestplate not put back');
     let kit = this.kit();
     const min = s.get('fireworksMin');
-    if (kit.rocketsHotbar < min && kit.boxRockets > 0 && r.ok) {
+    if (kit.rocketsHotbar < min && kit.boxRockets > 0 && r.ok && !this.flee) {
       const f = await this.d.kitOps.refillFromBox(() => t === this.token);
       if (t !== this.token) return;
       this.notes.push(`refill after: ${f.ok ? `${f.taken} rockets` : (f.reason ?? 'failed')}`);

@@ -14,8 +14,10 @@ export const PANEL_BUDGETS = {
    * case to within one row of it, and the `flyLearnedEntry` row took it to 128 663. Track M1 raised it from 130 000:
    * the mob group's four rows (mobReflex, fleeFly, sealIn, mobDodge) add 2.4 KB; 131 066 in all. Track F11 raised it
    * from 134 000: the rows since had taken it to 133 866, and the `flyLandOver` row (777 bytes) took it to 134 643.
+   * Track M3 raised it from 136 000: the rows since had taken it to 135 390, and the `flyLandMobs` row with the longer
+   * `fleeFly` description (866 bytes) took it to 136 256.
    */
-  html: 136_000,
+  html: 137_000,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**

@@ -1,12 +1,12 @@
 // Track M1 (docs/pve.md "Never die to common mobs (Track M1)", ADR 0079): the guard tests for the health rule's order
 // (pveFloor) and the seal-in's block choice and cells (skills/survival/seal.ts).
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { RuntimeSettings } from '../../../src/config/settings.ts';
 import { SETTING_GROUPS } from '../../../src/chat/help.ts';
 import { canSealHere, digInCells, openSide, seal, SEAL_BLOCKS, sealCells, sealItems } from '../../../src/skills/survival/seal.ts';
 import { EAT_BEFORE_SPRINT_LOST, eatWhileWalking } from '../../../src/skills/survival/index.ts';
 import { FIRST_MAX_DY, FIRST_RETRY_MS } from '../../../src/skills/combat/targeting.ts';
-import { FLY_HANDOVER_MS, FOOD_SPRINT_EAT, HOLD_MAX, holdGround, PveController, pveFloor, type FloorInput, type HoldInput } from '../../../src/tasks/pve.ts';
+import { FOOD_SPRINT_EAT, HOLD_MAX, holdGround, PveController, pveFloor, type FloorInput, type HoldInput } from '../../../src/tasks/pve.ts';
 import { Inventory } from '../../../src/world/inventory.ts';
 import type { EntityInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 import { FakeLoop, FakeMover, FakeSource, mob } from './pve-fakes.ts';
@@ -281,34 +281,27 @@ describe('the per-mob rules (PveController)', () => {
     expect(s.pve.canDuel(s.me)).toBe(false);
   });
 
-  it('Track M2: the elytra flee hands the body to the takeoff: guard and the flee stand down while the trip lives, at most FLY_HANDOVER_MS', () => {
-    vi.useFakeTimers({ toFake: ['performance'] });
-    try {
-      const s = setup(7);
-      s.ents.set(7n, mob(7n, 'minecraft:zombie', { x: s.me.x + 1.5, y: s.me.y, z: s.me.z }));
-      const guard = (s.pve as unknown as { guardProcess: { wants(): boolean } }).guardProcess;
-      expect(guard.wants()).toBe(true);
-      s.pve.startFlyHandover();
-      expect(s.pve.flyHandover()).toBe(true); // its first second: the trip may not be listed yet
-      expect(guard.wants()).toBe(false);
-      vi.advanceTimersByTime(1500);
-      expect(s.pve.flyHandover()).toBe(false); // no `fly` process: the send came to nothing
-      // a live trip holds it until FLY_HANDOVER_MS
-      const trip = { name: 'fly', done: false };
-      const pm = (s.pve as unknown as { processes: { find(n: string): unknown[] } }).processes;
-      const find = pm.find.bind(pm);
-      pm.find = (n: string) => (n === 'fly' ? [trip] : find(n));
-      expect(s.pve.flyHandover()).toBe(true);
-      expect(guard.wants()).toBe(false);
-      trip.done = true;
-      expect(s.pve.flyHandover()).toBe(false);
-      trip.done = false;
-      vi.advanceTimersByTime(FLY_HANDOVER_MS);
-      expect(s.pve.flyHandover()).toBe(false);
-      expect(guard.wants()).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
+  it('the elytra flee has the body from the ask until its flight has ended: guard and the flee stand down (Track M2; Track M3: the trip says so itself)', () => {
+    const s = setup(7);
+    s.ents.set(7n, mob(7n, 'minecraft:zombie', { x: s.me.x + 1.5, y: s.me.y, z: s.me.z }));
+    const guard = (s.pve as unknown as { guardProcess: { wants(): boolean } }).guardProcess;
+    const flee = (s.pve as unknown as { fleeProcess: { wants(): boolean } }).fleeProcess;
+    expect(guard.wants()).toBe(true);
+    expect(flee.wants()).toBe(true);
+    let active = false;
+    s.pve.fleeFlight = { ready: () => true, go: () => Promise.resolve({ ok: true, flew: true, line: '' }), cancel: () => false, active: () => active };
+    expect(s.pve.flyHandover()).toBe(false);
+    active = true;
+    expect(s.pve.flyHandover()).toBe(true);
+    expect(guard.wants()).toBe(false);
+    expect(flee.wants()).toBe(false);
+    active = false;
+    // asked and not answered yet (the flight's entry point is async)
+    s.pve.flyAsked = true;
+    expect(s.pve.flyHandover()).toBe(true);
+    expect(guard.wants()).toBe(false);
+    s.pve.flyAsked = false;
+    expect(guard.wants()).toBe(true);
   });
 
   it('Track M2: the witch 8 under the bot (a hillside) is a target; written off as unreachable, fought again after FIRST_RETRY_MS', () => {

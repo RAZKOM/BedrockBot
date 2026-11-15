@@ -89,6 +89,7 @@ import { gainPitch, wholeGain, type BurnRange } from './burn.ts'; // Track F10
 import { GuideFollower } from './learn/follow.ts'; // Track F9b
 import { entrySaid, guideLength, guideSaid, type Guide } from './learn/guide.ts'; // Track F9b
 import { ENTRY_JOIN, EntryFlier, entryJoin } from './learn/entry.ts'; // Track F9c
+import { clearGround, clearOfCreepers, LAND_MOBS, touchdownThreat, type CreeperTrack, type LandMob } from './landmobs.ts'; // Track M3
 
 /** Track F3: `route`: the RouteTracker flies the last blocks onto a route landing (docs/flight.md "Route landings and takeoffs"). */
 /** Track F9c: `entry`: the entry's flier flies a recorded way in under a roof to its touchdown (docs/flight.md "Learned entries (Track F9c)"). */
@@ -270,6 +271,23 @@ export interface BrainOptions {
    * the landing is flown down steeply while it is far over its end (RIM_CIRCLE). Needs `landOver`. False: as before.
    */
   wayDown?: boolean;
+  /**
+   * Track M3 (docs/flight.md "The landing looks at hostile mobs"; decisions/0086; the setting `flyLandMobs`, default off):
+   * the hostiles known round a place (landmobs.ts `landMobsNear`), asked every tick of the approach and the elevator. A
+   * creeper that is, or by the touchdown will be, inside its blast range of where the feet come down moves the landing to
+   * ground clear of every creeper (one of the target's alternatives, else the nearest safe ground that far from them) and
+   * the body goes round to it on a rocket, at most LAND_MOBS.rounds times; a forced landing's ground is chosen clear of
+   * them too. With nothing hostile known the flight is tick for tick what it is without this. Absent: no look.
+   */
+  landMobs?: (near: { x: number; z: number }) => readonly LandMob[];
+  /**
+   * Track M3 (docs/pve.md "The elytra flee"): the jump takeoff is made from the ground and from rest. A flight asked for
+   * while the body is in the air or moving (the elytra flee, asked in the middle of a walk's jump or a knockback) waits,
+   * FROM_GROUND_WAIT ticks at the most, until the body stands and has slowed under FROM_GROUND_SPEED, and jumps then. On
+   * bds-pve a flee asked in a sprint jump started its glide a fifth of a block over the ground at 0.83 a tick along the
+   * walk's heading: the path ahead met the ground and the flight ended 4 blocks on. Absent: the takeoff as it was.
+   */
+  fromGround?: boolean;
 }
 
 /**
@@ -280,6 +298,9 @@ export interface BrainOptions {
  * line, the margin and KIT_USE_OVER, the same the cruise's own top-ups aim for. For a top-up it is the height asked when
  * it went (those same three, and the terrain floor as it is now and KIT_USE_OVER).
  */
+/** Track M3: a takeoff `fromGround` waits at most this many ticks for a body that stands, slower than FROM_GROUND_SPEED (blocks a tick, level). */
+export const FROM_GROUND_WAIT = 20;
+export const FROM_GROUND_SPEED = 0.15;
 export const KIT_CAP_OVER = 1;
 export const KIT_USE_OVER = 8;
 /** Track F9e: the climb straight up out of a pit ends where a line from the body along the held heading, rising this much a block, is free this many blocks (brain.ts climbUp). */
@@ -385,6 +406,9 @@ export interface FlightStats {
   landingPrices: string[];
   /** Track F14: rims given to this flight's landings (brain.ts lookRim). */
   rims?: number;
+  /** Track M3: the times the landing was moved off a creeper and the body went round to it, and the lines of the look (brain.ts mobLook). */
+  mobRounds?: number;
+  mobNotes?: string[];
   /** Track BH, a ledge takeoff: ticks of the walk to the edge, and the height the fall took until the glide flew (LEDGE_SPEED). */
   ledgeWalkTicks?: number;
   ledgeDrop?: number;
@@ -640,7 +664,7 @@ export class FlightBrain {
   // (entryAbove is set by the cruise when it hands over to the approach)
   /** Why the flight is ending early (set by `landNow`), kept for the outcome. */
   private endReason: FlightEndReason | undefined;
-  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise' | 'route' | 'routeTakeoff' | 'entrySneak' | 'burn'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral'; entryTries: number; landOver: boolean; wayDown: boolean };
+  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise' | 'route' | 'routeTakeoff' | 'entrySneak' | 'burn' | 'landMobs' | 'fromGround'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral'; entryTries: number; landOver: boolean; wayDown: boolean };
   /** Track F9c: the flier of a learned entry (from the hand-over on the lead-in), the windows missed so far, and what the live world said of the proof (`confirmEntry`; undefined: nothing yet). */
   private flier: EntryFlier | undefined;
   private entryMisses = 0;
@@ -763,6 +787,8 @@ export class FlightBrain {
       entryTries: opts.entryTries ?? ENTRY_TRIES,
       entrySneak: opts.entrySneak,
       burn: opts.burn,
+      landMobs: opts.landMobs,
+      fromGround: opts.fromGround,
       // (Track F11: not with `flyLandStyle flare`: what the circle is left for is the brake's landing)
       landOver: opts.landOver !== false && (opts.landStyle ?? 'auto') !== 'flare',
       // (Track F14: the way in over a rim is Track F11's landing: not without it)
@@ -1215,6 +1241,11 @@ export class FlightBrain {
     if (b.gliding) {
       this.phase = 'climb';
       return this.climb(i, ctl);
+    }
+    // Track M3: from the ground and from rest (the elytra flee): a body in the air or still moving is waited for
+    if (this.o.fromGround && !this.jumped && this.groundWait < FROM_GROUND_WAIT && (!b.onGround || Math.hypot(b.vel.x, b.vel.z) > FROM_GROUND_SPEED)) {
+      this.groundWait++;
+      return ctl;
     }
     if (b.onGround && !this.jumped) {
       this.jumped = true;
@@ -2361,11 +2392,106 @@ export class FlightBrain {
     return { kind: 'sturn', side: 1, anchor: { x: b.pos.x, z: b.pos.z }, exitY };
   }
 
+  /** Track M3: ticks the takeoff has waited for the body to stand and slow down (`fromGround`). */
+  private groundWait = 0;
+  /** Track M3: where each creeper was a few ticks ago (landmobs.ts touchdownThreat), and the creeper the look's last line was about (one line a threat, not one a tick). */
+  private readonly mobTrack: CreeperTrack = new Map();
+  private mobSaid: bigint | undefined;
+
+  /** Track M3: one line of the look at the hostiles (the log, and the flight's stats). */
+  private mobNote(line: string): void {
+    (this.stats.mobNotes ??= []).push(line);
+    this.o.note?.(line);
+  }
+
+  /**
+   * Track M3: a landing clear of every creeper known: the cheapest of the target's alternatives that lies LAND_MOBS.clear
+   * from them, else the nearest safe ground to the landing given up that does (landmobs.ts clearGround: `clear`, else
+   * `clearMin`). Undefined: none known.
+   */
+  private clearLanding(b: FlightBody, mobs: readonly LandMob[], aim: LandingTarget): LandingTarget | undefined {
+    const alts = (this.target.alternatives ?? []).filter((a) => clearOfCreepers({ x: a.x, y: a.top, z: a.z }, mobs, LAND_MOBS.clear)).sort((p, q) => (p.walkS ?? Infinity) - (q.walkS ?? Infinity));
+    if (alts[0]) return alts[0];
+    const ground = this.o.groundAt;
+    if (!ground) return undefined;
+    const fromY = Math.max(b.pos.y, aim.top) + 12;
+    const g = clearGround({ x: aim.x, z: aim.z, top: aim.top }, mobs, (x, z) => ground(x, z, fromY));
+    if (!g) return undefined;
+    const blocks = hdist(g, aim) + 3 * Math.abs(g.top - aim.top);
+    return { x: g.x, z: g.z, top: g.top, half: 3, walkS: (aim.walkS ?? 0) + walkSeconds({ blocks, known: false }), walkKnown: false, name: `${Math.floor(g.x)} ${g.top} ${Math.floor(g.z)}` };
+  }
+
+  /**
+   * Track M3 (docs/flight.md "The landing looks at hostile mobs"): the look at the hostiles round the touchdown, every
+   * tick of the approach, the brake and the elevator. Nothing hostile known: nothing (no state kept, no control touched).
+   * A creeper inside its blast range of where the feet will come down, now or by the touchdown at the pace it closes
+   * (landmobs.ts touchdownThreat): the landing is moved to ground clear of every creeper (`clearLanding`) and the body
+   * goes round to it (a rocket, the go-around's way out and back in), LAND_MOBS.rounds times at the most. A body already
+   * within LAND_MOBS.commit of the floor lands (a rocket from there is flown into the ground; the guard and the reflex are
+   * at work at the touchdown). A forced landing (health, `!land`) has no go-around: its ground is moved while the body
+   * still has the height to glide there. Returns the controls of the tick it went round on, else undefined.
+   */
+  private mobLook(i: BrainInput, ctl: BrainControl, aim: LandingTarget): BrainControl | undefined {
+    const mobs = this.o.landMobs!(aim);
+    if (mobs.length === 0) {
+      if (this.mobTrack.size) this.mobTrack.clear();
+      return undefined;
+    }
+    const b = i.body;
+    const up = b.pos.y - aim.top;
+    const d = hdist(b.pos, aim);
+    const ticksLeft = Math.max(d / Math.max(0.35, Math.hypot(b.vel.x, b.vel.z)), Math.max(0, up) / LAND_MOBS.sink);
+    const threat = touchdownThreat(mobs, { x: aim.x, y: aim.top, z: aim.z }, ticksLeft, this.stats.ticks, this.mobTrack);
+    if (!threat) return undefined;
+    const said = `a creeper ${threat.d.toFixed(1)} from the touchdown${threat.atTouchdown < threat.d - 0.5 ? ` (${threat.atTouchdown.toFixed(1)} by the time the feet are down, closing ${threat.closing.toFixed(2)} a tick)` : ''}${threat.mob.lit ? ', its fuse lit' : ''}, the body ${up.toFixed(1)} over the floor`;
+    const once = (line: string): undefined => {
+      if (this.mobSaid !== threat.mob.id) this.mobNote(line);
+      this.mobSaid = threat.mob.id;
+      return undefined;
+    };
+    if (up < LAND_MOBS.commit && d < aim.half + 2) return once(`landing look: ${said}: too low to go round, landing (the guard has it at the touchdown)`);
+    const next = this.clearLanding(b, mobs, aim);
+    if (!next) return once(`landing look: ${said}: no ground clear of the creepers known within ${LAND_MOBS.moveWithin} blocks, landing as planned`);
+    const name = next.name ?? `${Math.floor(next.x)} ${next.top} ${Math.floor(next.z)}`;
+    if (this.phase === 'land') {
+      // a forced landing: no rocket is spent on it; the ground is moved while the glide still reaches it
+      if (up < hdist(b.pos, next) / 3 + 2) return once(`landing look: ${said}: a forced landing too low to reach clear ground, landing`);
+      this.mobNote(`landing look: ${said}: the forced landing moved to ${name}`);
+      this.emergency = next;
+      this.mobSaid = undefined;
+      this.resetPlanners();
+      this.descent = undefined;
+      this.descentNone = false;
+      return undefined;
+    }
+    const rounds = this.stats.mobRounds ?? 0;
+    if (rounds >= LAND_MOBS.rounds || i.rockets <= 0) return once(`landing look: ${said}: ${i.rockets <= 0 ? 'no rocket to go round on' : `${rounds} rounds flown for creepers`}, landing as planned`);
+    this.stats.mobRounds = rounds + 1;
+    this.mobNote(`landing look: ${said}: the landing moved to ${name} (${hdist(next, aim).toFixed(0)} blocks on, clear of every creeper known), going round to it (round ${rounds + 1})`);
+    this.switchTarget(next);
+    // (the alternatives it keeps are those clear of the creepers too: a missed approach must not land back among them)
+    const keep = (this.target.alternatives ?? []).filter((a) => clearOfCreepers({ x: a.x, y: a.top, z: a.z }, mobs, LAND_MOBS.clearMin));
+    const { alternatives: _dropped, ...bare } = this.target;
+    this.target = keep.length ? { ...bare, alternatives: keep } : bare;
+    this.targetWhy = 'moved off a creeper at the landing';
+    this.mobSaid = undefined;
+    this.mobTrack.clear();
+    this.phase = 'goaround';
+    this.outbound = true;
+    return this.goaround(i, ctl);
+  }
+
   private approach(i: BrainInput, ctl: BrainControl, aim0: LandingTarget): BrainControl {
     let aim = aim0;
     const b = i.body;
     ctl.glide = true;
     this.stats.approachTicks++;
+    // Track M3: the hostiles round the touchdown (nothing known: nothing done)
+    if (this.o.landMobs && b.gliding) {
+      const round = this.mobLook(i, ctl, aim);
+      if (round) return round;
+      if (this.phase === 'land') aim = this.aim;
+    }
     // a rocket still burning when the landing was ordered: stop the climb (the momentum of a climb is vy^2 / 0.08 blocks)
     if (this.phase === 'land' && b.boostTicks > 0) {
       ctl.yaw = approachYaw(i.yaw, b.pos, aim);
@@ -3098,11 +3224,15 @@ export class FlightBrain {
         // not above us; low enough for a straight approach (the glide slope), else the spiral over it takes the height
         if (drop < 0) continue;
         if (within === undefined && dist < Math.min(drop, SPIRAL_ABOVE + APPROACH_HEIGHT) * 1.3) continue;
+        if (creepers && !clearOfCreepers({ x: Math.floor(x) + 0.5, y: top, z: Math.floor(z) + 0.5 }, mobs, LAND_MOBS.clearMin)) continue;
         return { x: Math.floor(x) + 0.5, z: Math.floor(z) + 0.5, top, half: 4 };
       }
       return undefined;
     };
     const dists = within !== undefined ? [6, 8, 10, 13, 16, 20, 24] : [10, 16, 24, 32, 45, 60];
+    // Track M3: a forced landing comes down clear of the creepers known (none known: every ground as before)
+    const mobs = this.o.landMobs?.(b.pos) ?? [];
+    const creepers = mobs.some((m) => m.kind === 'creeper');
     // ahead first, then round to behind (Track AU2 review: over a void the nearest known ground may lie back the way we came)
     for (const off of [0, 45, -45, 90, -90, 135, -135, 180]) {
       const best = along(yaw + off, dists);

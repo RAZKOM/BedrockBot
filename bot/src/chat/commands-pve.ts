@@ -22,7 +22,7 @@ import { SleepController, SLEEP_FROM, SLEEP_UNTIL } from '../skills/survival/sle
 import { NightProcess, type NightBedEvent } from '../tasks/process/night.ts';
 import { splitNow, type TripCheck } from '../tasks/process/readiness.ts';
 import type { Vec3 } from '../connection/types.ts';
-import { flightKitMemoryOf, kitReady, readKit } from '../skills/fly/kit.ts'; // Track M1: the elytra flee (read only)
+import { flyControlOf, type FlyControl } from './commands-fly.ts'; // Track M3: the elytra flee's entry point
 
 export interface PveCommandDeps {
   follow(name: string, o?: { urgent?: boolean }): string;
@@ -81,19 +81,16 @@ export function registerPveCommandsFor(d: CommandDeps): void {
     const task = d.task as typeof d.task | undefined;
     // the kit is built by registerSurvivalCommands after this registration: look it up when needed
     if (task) p.kit = () => survivalKitOf(task);
-    // Track M1: the elytra flee floor (setting fleeFly, default off): `!fly home` as the owner's own command, the flight
-    // skill's entry point; ready only with a home, the flight kit (elytra, rockets) and an owner to send it as
+    // Track M3: the elytra flee floor (setting fleeFly, default off): the flight's own entry point (commands-fly.ts
+    // `flee`, registered after this: looked up when asked). Ready where a takeoff can be made: the elytra and the rockets
+    // at hand, open sky over the body, no flight in the air
     if (task) {
-      const owner = d.chat.owners.names[0] ?? '';
-      const xuid = d.chat.owners.xuids[0] ?? '';
-      p.flyHome = {
-        ready: () => (owner !== '' || xuid !== '') && task.home?.get() !== undefined && kitReady(readKit(world.inventory, flightKitMemoryOf(task)), d.settings.get('toolWearLimit')).ok,
-        go: () => {
-          if (owner === '' && xuid === '') return false;
-          const body = `${d.chat.prefix}fly home`;
-          d.chat.handle({ type: 'chat', source: owner, xuid, message: body, body, truth: false });
-          return true;
-        },
+      const fly = (): FlyControl | undefined => flyControlOf(task);
+      p.fleeFlight = {
+        ready: () => fly()?.fleeReady() === undefined && fly() !== undefined,
+        go: (why) => fly()?.flee(why) ?? Promise.resolve({ ok: false, flew: false, reason: 'no flight skill', line: 'no elytra flee: no flight skill' }),
+        cancel: () => fly()?.cancelFlee() ?? false,
+        active: () => fly()?.fleeing() ?? false,
       };
     }
     const night = d.processes?.find('night').find((x): x is NightProcess => x instanceof NightProcess);

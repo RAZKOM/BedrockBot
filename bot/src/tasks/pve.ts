@@ -39,7 +39,7 @@ import { bladeScore, CombatController, type CombatLoop, type CombatMover, type F
 import { bareType, classify, entityFeet, isPlayerEntity, MobTracker, typeMatches } from '../skills/combat/hostiles.ts';
 import * as targeting from '../skills/combat/targeting.ts'; // Track V: reachability-aware targeting, creeper rank
 import { PathReach, probeNavOf } from '../skills/combat/pathReach.ts'; // Track AO: path-reachable guard targets
-import { Reflex } from '../skills/combat/reflex.ts'; // Track M1: the always-on strike layer
+import { Reflex, REFLEX_REACH } from '../skills/combat/reflex.ts'; // Track M1: the always-on strike layer
 import { dodgeStep, POTION_STEP_TICKS, potionSideStep, type DodgeShooter } from '../skills/combat/dodge.ts'; // Track M1 round 2: across the line of fire
 import { canSealHere, seal, openSide, type SealDeps } from '../skills/survival/seal.ts'; // Track M1: the last floor
 import { FollowController, type FollowLoop, type FollowTarget } from '../skills/follow/follow.ts';
@@ -178,8 +178,24 @@ export const SEAL_CROWD = 3;
 export const FLOOR_FAILED_MS = 20_000;
 /** The elytra flee and the seal-in are tried at most once in this long (ms) each. */
 export const FLOOR_RETRY_MS = 30_000;
-/** Track M2: after the elytra flee is sent, the flee and guard leave the body to the takeoff for this long at most. */
-export const FLY_HANDOVER_MS = 6000;
+/**
+ * Track M3: with `fleeFly` on and a takeoff possible, the elytra flee is the first answer to a flee trigger with no blade
+ * in the hotbar (a fist does not end a fight: every bare-handed death of Tracks M1 and M2 was a bot running on foot at
+ * low health), and with a blade once the health is at most this (the flight on foot first: a blade wins most fights, and
+ * a takeoff costs the chestplate for the flight).
+ */
+export const FLY_FIRST_HEALTH = 6;
+/**
+ * Track M3 (docs/flight.md "The landing looks at hostile mobs"): the reflex's reach (eye to box) while a flight comes down
+ * onto its landing. The server takes a hit up to 6.2 (docs/pve.md "Server rules"); on the ground the reflex strikes at 3.9
+ * because a strike there pushes the mob away. A body that sinks onto a mob pushes nothing aside (the knockback goes along
+ * the line from the body, here straight down): what counts is the strikes that land before the mob can reach up, and a
+ * zombie hit a body whose feet were 2 to 3 blocks over its own. From 5.5 a body sinking a fifth of a block a tick strikes
+ * twice before that.
+ */
+export const FLIGHT_STRIKE_REACH = 5.5;
+/** Track M3: with no blade and the elytra flee able, a shooter in sight within FLEE_SCAN starts it below this health (as WITCH_FLEE_HEALTH for the flight on foot). */
+export const FLY_SHOOTER_HEALTH = 14;
 /** Sealed in: open up again once the health is back to this and no mob is within 16 or it is day (at most after SEAL_MAX_MS). */
 export const SEAL_LEAVE_HEALTH = 20;
 const SEAL_MAX_MS = 300_000;
@@ -261,8 +277,10 @@ export interface FloorInput {
   failed: boolean;
   /** Health at most FLOOR_CRITICAL with a melee mob within FLOOR_CRITICAL_RANGE, or at most FLOOR_CRITICAL_HIT and hit in the last 3 s. */
   critical: boolean;
-  /** The elytra flee can go now (setting on, kit ready, a home, not tried within FLOOR_RETRY_MS). */
+  /** The elytra flee can go now (setting on, the kit at hand, open sky over the body, not tried within FLOOR_RETRY_MS). */
   fly: boolean;
+  /** Track M3: the elytra flee comes before the flight on foot (no blade in the hotbar, or the health at most FLY_FIRST_HEALTH). */
+  flyFirst?: boolean;
   /** The seal-in can go now (setting on, enough blocks, a placer, not tried within FLOOR_RETRY_MS). */
   seal: boolean;
 }
@@ -271,14 +289,26 @@ export interface FloorInput {
  * The health rule, in order: no danger (or a duel that is worth it): fight on; clear of every mob by FLEE_EAT_CLEAR with
  * food to eat: eat; else back off (the flight on foot, the reflex striking behind) unless running has failed (caught,
  * cornered) or the health is critical next to a melee mob; then the elytra flee, then the seal-in, then defend in place.
+ * Track M3: where the elytra flee can go and `flyFirst` holds, it comes before the flight on foot.
  */
 export function pveFloor(i: FloorInput): Floor {
   if (!i.danger || i.canDuel) return 'fight';
   if (i.nearest >= FLEE_EAT_CLEAR && i.hasFood && i.food < 20 && i.health < 20) return 'eat';
+  if (i.fly && i.flyFirst) return 'fly';
   if (!i.failed && !i.critical) return 'backoff';
   if (i.fly) return 'fly';
   if (i.seal) return 'seal';
   return 'defend';
+}
+
+/** Track M3: what an elytra flee came to, as the guard reads it (skills/fly/flee.ts FleeFlight). */
+export interface FleeFlightResult {
+  /** The body stands on ground again after a flight. */
+  ok: boolean;
+  /** A takeoff was made. */
+  flew: boolean;
+  reason?: string;
+  line: string;
 }
 
 export class PveController {
@@ -321,32 +351,31 @@ export class PveController {
   /** Track M1: the floors taken (backoff, eat, fly, seal, defend), for the counters. */
   readonly floors: Record<string, number> = {};
   /**
-   * Track M1: the elytra flee (wired by chat/commands-pve.ts: `!fly home` as the owner's command, through the flight
-   * skill's own entry point). `ready` says whether it can go now (kit, a home); `go` dispatches it (true when sent).
+   * Track M3 (docs/pve.md "The elytra flee"): the elytra flee as a flight mode, wired by chat/commands-pve.ts from the
+   * flight's own entry point (chat/commands-fly.ts `flee`). `ready`: a flee can take off where the body stands now (the
+   * elytra and the rockets at hand, open sky over it, no flight in the air); `go`: take off and land on safe ground far
+   * from the hostiles, resolving with what happened (at once when no takeoff was made); `cancel`: drop it on the ground,
+   * land it in the air; `active`: from the ask until its flight has ended.
    */
-  flyHome: { ready(): boolean; go(): boolean } | undefined;
-  /** Track M2: the elytra flee's hand-over: until then the flee and guard leave the body to the trip's takeoff. */
-  flyHandoverUntil = -Infinity;
-  private flySentAt = -Infinity;
-
-  /** Track M2: the elytra flee was just sent: hold the flee and guard off for FLY_HANDOVER_MS (see FLY_HANDOVER_MS). */
-  startFlyHandover(): void {
-    this.flySentAt = performance.now();
-    this.flyHandoverUntil = this.flySentAt + FLY_HANDOVER_MS;
-  }
+  fleeFlight: { ready(): boolean; go(why: string): Promise<FleeFlightResult>; cancel(): boolean; active(): boolean } | undefined;
+  /** Track M3: what the last elytra flee came to (the status, the tests). */
+  lastFleeFlight: FleeFlightResult | undefined;
+  /** Track M3: an elytra flee was asked for and has not answered yet. */
+  flyAsked = false;
+  /**
+   * Track M3 (docs/flight.md "The landing looks at hostile mobs"): the reflex may strike under a flight right now (the
+   * body is coming down onto its landing, or settling on it; wired by chat/commands-fly.ts with `flyLandMobs` on).
+   */
+  flightStrike: (() => boolean) | undefined;
 
   /**
-   * Track M2: the takeoff of the elytra flee has the body. `!fly home` is a user process (`fly`) that needs the body on the
-   * ground to take off; the flee and guard outrank it, and on bds-gaunt they took the body straight back in 4 runs of 4 (a
-   * new flight on foot at the low health, guard defending in place): the takeoff never ran and the bot died in the pen.
-   * True within FLY_HANDOVER_MS of the send while the `fly` process lives (its first second: it may not be listed yet);
-   * once in the air the flight process holds the body above everything anyway.
+   * The elytra flee has the body: from the ask until its flight has ended. Track M2 found why this is needed: the flee
+   * and guard outrank a trip on the ground and took the body straight back in 4 runs of 4 on bds-gaunt, and the takeoff
+   * never ran. Since Track M3 the flee's trip holds the body itself (a process over the flight on foot); this keeps the
+   * flight on foot and guard from asking for it meanwhile.
    */
   flyHandover(): boolean {
-    const now = performance.now();
-    if (now >= this.flyHandoverUntil) return false;
-    if (now - this.flySentAt < 1000) return true;
-    return this.processes.find('fly').some((p) => !(p as { done?: boolean }).done);
+    return this.flyAsked || this.fleeFlight?.active() === true;
   }
 
   constructor(deps: PveDeps) {
@@ -389,7 +418,9 @@ export class PveController {
       entities: () => world.entities,
       mobs: this.mobs,
       attack: (rid, o) => this.combat.attack(rid, o),
-      enabled: () => this.settings.get('mobReflex') && !deps.inactive() && this.processes.active?.name !== 'flight',
+      // (Track M3: under a flight only while the body comes down onto its landing: flightStrike; from farther there)
+      enabled: () => this.settings.get('mobReflex') && !deps.inactive() && (this.processes.active?.name !== 'flight' || this.flightStrike?.() === true),
+      reach: () => (this.processes.active?.name === 'flight' ? FLIGHT_STRIKE_REACH : REFLEX_REACH),
       grid: () => targeting.gridOf(this.mover),
       world,
       // raised, or about to be (an archer's shot due, an arrow flying at us): a strike lowers it (reflex.ts SHIELD_DOWN_TICKS)
@@ -559,6 +590,7 @@ export class PveController {
 
   /** `!stop`: every command and what it pre-empted, plus a pending home return; guard, flee and night keep running. */
   stopCommands(): string {
+    this.fleeFlight?.cancel(); // Track M3: the owner's !stop ends an elytra flee too (in the air it lands)
     const lines = this.processes.stopUser(['home']);
     return lines.length ? lines.join(', ') : this.behaviour();
   }
@@ -1050,6 +1082,13 @@ export class PveController {
       if (w) out = { why: 'low', threat: w };
     }
     if (out && this.atFleeDest(me) && dist(entityFeet(out.threat), me) > 6) out = undefined;
+    // Track M3: with the elytra flee able and no blade, an archer or a witch with a line on the bot is fled from the air
+    // below FLY_SHOOTER_HEALTH: a fist does not reach them, a run in the open stays in their range, and the takeoff takes
+    // up to a second, which at fleeHealth is one arrow too late with two of them shooting (also at home: they shoot there too)
+    if (!out && h < FLY_SHOOTER_HEALTH && !this.hasBlade() && this.settings.get('fleeFly') && this.fleeFlight?.ready() === true && this.shootersWithin(me, FLEE_SCAN) >= 1) {
+      const n = this.nearestOfKind(me, FLEE_SCAN, (t) => DUEL_ARCHERS.has(t) || t === 'witch');
+      if (n) out = { why: 'low', threat: n };
+    }
     // Track M1 round 2: no blade and an archer or a witch with a line on the bot: the dodge (also at home: they shoot there too)
     if (!out) {
       const s = this.dodgeShooters(me);
@@ -1284,8 +1323,10 @@ class FleeProcess extends BaseProcess {
     const nearest = threats.reduce((m, f) => Math.min(m, Math.hypot(f.x - me.x, f.z - me.z)), Infinity);
     const failed = now - this.failedAt < FLOOR_FAILED_MS;
     const critical = c.critical(me);
-    const late = failed || critical; // fly / seal are looked at only then (an inventory scan)
+    const late = failed || critical; // the seal-in is looked at only then (an inventory scan)
     const clear = c.eatClearance(me, nearest);
+    // Track M3: the elytra flee, asked whenever there is danger (the kit and the sky over the body: a hotbar scan and a column)
+    const fly = danger && c.settings.get('fleeFly') && now - this.flyAt > FLOOR_RETRY_MS && (c.fleeFlight?.ready() ?? false);
     return pveFloor({
       danger,
       canDuel: c.canDuel(me),
@@ -1295,22 +1336,44 @@ class FleeProcess extends BaseProcess {
       hasFood: clear >= FLEE_EAT_CLEAR ? c.hasFood() : false,
       failed,
       critical,
-      fly: late && c.settings.get('fleeFly') && now - this.flyAt > FLOOR_RETRY_MS && (c.flyHome?.ready() ?? false),
+      fly,
+      flyFirst: fly && (!c.hasBlade() || c.health() <= FLY_FIRST_HEALTH),
       seal: late && now - this.sealAt > FLOOR_RETRY_MS && c.canSeal(),
     });
   }
 
-  /** Track M1: the elytra flee: `!fly home` through the flight skill's own command (it takes over at flee + 1). */
+  /**
+   * Track M3: the elytra flee, through the flight's own entry point (chat/commands-fly.ts `flee`). Its trip holds the body
+   * from here until the flight has ended (flyHandover); a flee that made no takeoff answers at once and the other floors
+   * go on (it is not asked again for FLOOR_RETRY_MS).
+   */
   private flyNow(why: string): void {
     const c = this.c;
     this.flyAt = performance.now();
     c.floorUsed('fly');
-    c.startFlyHandover(); // Track M2: before the send (the command may add its process at once)
-    const sent = c.flyHome?.go() ?? false;
-    if (!sent) c.flyHandoverUntil = -Infinity;
-    c.log.warn(`floor: elytra flee home (${why}, health ${c.health().toFixed(1)})${sent ? '' : ': could not send !fly home'}`);
+    c.log.warn(`floor: elytra flee (${why}, health ${c.health().toFixed(1)})`);
     for (const k of c.processes.find('kill')) c.processes.stop(k, 'stopped');
+    // a walk home that waits its turn is dropped: it would take the body straight back to what it flies from (on bds-pve a
+    // flee that landed 96 blocks off at 7 health was walked home by it within 13 s, to the witch, and died there)
+    for (const h of c.processes.find('home')) c.processes.stop(h, 'dropped');
     c.guardProcess.cancelEpisode();
+    const flight = c.fleeFlight;
+    if (!flight) return;
+    c.flyAsked = true;
+    void flight
+      .go(why)
+      .catch((e: unknown): FleeFlightResult => ({ ok: false, flew: false, reason: e instanceof Error ? e.message : String(e), line: `no elytra flee: ${e instanceof Error ? e.message : String(e)}` }))
+      .then((r) => {
+        c.flyAsked = false;
+        c.lastFleeFlight = r;
+        c.d.metrics?.inc(r.flew ? (r.ok ? 'pve.fleefly.landed' : 'pve.fleefly.ended') : 'pve.fleefly.refused');
+        c.log.warn(`floor: ${r.line}`);
+        if (r.flew) {
+          // down somewhere else: the flight on foot's recovery rule holds from here (no fight below fleeHealth + 6)
+          this.recoverTo = Math.min(20, c.fleeHealth + FLEE_RECOVER);
+          this.recoverUntil = performance.now() + FLEE_RECOVER_MS;
+        }
+      });
   }
 
   override wants(): boolean {
@@ -1328,7 +1391,8 @@ class FleeProcess extends BaseProcess {
     let r = c.fleeReason(me);
     // Track M1: running has failed (caught, cornered) or the health is critical next to a melee mob: the elytra flee or the
     // seal-in when they can go (whatever the cooldown says), else guard defends in place as before
-    if (r && (performance.now() - this.failedAt < FLOOR_FAILED_MS || (c.critical(me)))) {
+    // (Track M3: with `fleeFly` on the floor is asked at every flee trigger: the elytra flee may come before the run)
+    if (r && (performance.now() - this.failedAt < FLOOR_FAILED_MS || c.critical(me) || c.settings.get('fleeFly'))) {
       const f = this.floorFor(me, true);
       if (f === 'fly' || f === 'seal') {
         this.plan = r;
@@ -1373,7 +1437,7 @@ class FleeProcess extends BaseProcess {
       const mode = this.mode;
       this.mode = undefined;
       if (mode === 'fly') {
-        this.flyNow(`${performance.now() - this.failedAt < FLOOR_FAILED_MS ? 'running failed' : 'health critical'} with ${bareType(plan.threat.type)} at ${dist(entityFeet(plan.threat), me).toFixed(1)}`);
+        this.flyNow(`${performance.now() - this.failedAt < FLOOR_FAILED_MS ? 'running failed' : c.critical(me) ? 'health critical' : !c.hasBlade() ? 'no blade' : 'health low'} with ${bareType(plan.threat.type)} at ${dist(entityFeet(plan.threat), me).toFixed(1)}`);
         this.yieldControl();
         return;
       }
@@ -1544,7 +1608,10 @@ class FleeProcess extends BaseProcess {
       const f = this.floorFor(me, true);
       if (f === 'fly') {
         this.end('health critical next to a melee mob: the elytra flee', 0);
-        this.flyNow('health critical while running');
+        // (Track M3: ending the episode lets the manager ask the floors again at once, and that look asks for the flee
+        // itself: on bds-pve every flee from a running episode was asked twice in the same tick, the second answered
+        // `a flee is on its way`)
+        if (!c.flyHandover()) this.flyNow('health critical while running');
         return;
       }
       if (f === 'seal') {
