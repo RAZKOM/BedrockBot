@@ -140,3 +140,31 @@ the room and the tree, the 10 + 10 descents, the pit and the house. Open: the sk
 loaded cells (a far cruise height above the loaded subchunks refuses a takeoff in the open: the
 message says where); the S-turns are the offline fallback only; a landing cell is ranked by a probe
 plan only when the goal's chunk is loaded.
+
+## Addendum (Track F16, 2026-11-15): a corridor window under a roof refills from the box
+
+Decision 5 put the refill from the fireworks box on the ground before a takeoff and after a landing; Track F13
+(docs/flight.md "A flight from the box alone (Track F13)", no record of its own) made the takeoff count what the refill
+gives. Neither reached the corridor's windows under a roof (`flyCave`): a window was proven on its loose rockets only
+and never refilled. With nothing loose and a stocked box every proof failed ("the goal is above what the rockets in
+the hand can buy") and the trip walked the whole cave (the corridor e2e, 3 of 3 trips, 0 windows flown); with a few
+loose rockets the windows flew until the hand was empty, then walked. The open point F13 left ("where the box may be
+set down underground") is decided here:
+
+12. **A window refills when its hand is low, on a cell that keeps the box.** A window whose loose rockets are fewer than
+    `WINDOW_ROCKETS_SURE` (8, twice the most a cave window has planned or fired: 4) and whose refill can be made where
+    the body stands is proven on what the hotbar will hold after the refill (`rocketsForWindow`, F13's rule carried to
+    a low hand), and refills before its takeoff when the loose rockets are fewer than its plan fires plus
+    `WINDOW_ROCKET_RESERVE` (2: the re-plans in the air). With 8 or more loose nothing is looked at, so such a trip is
+    the trip it was. Under a roof the box goes only on a free cell (F13's: empty, the lid free, a full top) whose four
+    sides hold the dropped item (a solid or a floor at its height: no ledge), with no water or lava beside it or over
+    the lid, no sand or gravel over the lid, and a way for the body to the item (a side cell; a corner through a free
+    side cell; two out through a free cell with a floor). With none, or a full inventory, or a hostile within 8
+    (`REFILL_MOB_REACH`: the refill stands still about 2 s with the box down, the eat floor's distance), nothing is
+    placed and the trip says why once: with nothing loose the window is not proven and the executor walks to its first
+    goal and tries again from there, with some loose the window flies on them. A box not carried again ends the trip
+    with where it is (F13's line). No setting: the change only acts where the windows could not fly before.
+
+Consequences: docs/flight.md "A window under a roof refills from the box (Track F16)": the before and after on the
+corridor e2e (n 10 a case) and offline (n 10 a case). Open: the guard pausing the window during the refill leaves the
+refill to break and pick up the box under the guard (F13's rule), not tried with mobs; the Realm has not run it.

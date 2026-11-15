@@ -5,25 +5,36 @@
 // holds the cruise's flight), so nothing pre-empts a body gliding through a bore; on the ground it is a user
 // command again. The elytra stays on after the window (the next window takes off again; the corridor trip
 // puts the chestplate back on at its end, chat/commands-corridor.ts).
+// Track F16 (docs/flight.md "A window under a roof refills from the box (Track F16)"): a window the trip says must refill
+// (`refill`: its loose rockets fewer than its proof needs) refills from the fireworks box first, on a cell the cave rules
+// allow (kitops.ts caveBoxSpots), never with a hostile in reach, and never flies away from a box it did not carry again.
 import { silentLogger, type Logger } from '../../log.ts';
 import { BaseProcess, PRIORITY, type ProcessStatus, type StopReason } from './manager.ts';
 import { FLIGHT_PRIORITY } from './fly.ts';
 import { readKit, type FlightKitMemory, type KitInventory } from '../../skills/fly/kit.ts';
-import type { FlightKitOps } from '../../skills/fly/kitops.ts';
+import { boxLeftLine, type FlightKitOps, type RefillResult } from '../../skills/fly/kitops.ts';
 import type { StretchReport } from '../../skills/fly/corridor/drive.ts';
 import type { StepOutcome } from '../../skills/fly/corridor/executor.ts';
 import type { Window } from '../../skills/fly/corridor/stretches.ts';
 
 export interface UnderFlyDeps {
-  kitOps: Pick<FlightKitOps, 'wearElytra' | 'rocketsToHotbar'>;
+  kitOps: Pick<FlightKitOps, 'wearElytra' | 'rocketsToHotbar'> & Partial<Pick<FlightKitOps, 'refillFromBox'>>;
   inventory: KitInventory;
   memory(): FlightKitMemory;
   /** Fly the window from standing (flyStretch bound to the loop, the worker's planner). */
   fly(w: Window): { done: Promise<StretchReport>; stop(): void };
   /** The body is in the air (gliding or not on the ground). */
   airborne(): boolean;
+  /** Track F16: a hostile in reach of a refill (the line that names it), else undefined. */
+  hostile?(): string | undefined;
   waitTicks(n: number): Promise<void>;
   log?: Logger;
+}
+
+/** Track F16: what the window's process is told besides its window. */
+export interface UnderFlyOptions {
+  /** Refill from the fireworks box before the takeoff (the trip decided it: commands-corridor.ts). */
+  refill?: boolean;
 }
 
 export class UnderFlyProcess extends BaseProcess {
@@ -38,12 +49,20 @@ export class UnderFlyProcess extends BaseProcess {
   private readonly log: Logger;
   private flight: { done: Promise<StretchReport>; stop(): void } | undefined;
   report: StretchReport | undefined;
+  /** Track F16: the refill before the takeoff, once (a pause and a resume do not refill again). */
+  private refill: boolean;
+  refilled: RefillResult | undefined;
+  /** Track F16: the line of a fireworks box the refill did not carry again (the trip ends on it). */
+  boxLeft: string | undefined;
+  private refilling = false;
+  private stoppedFor: StopReason | undefined;
 
-  constructor(w: Window, label: string, deps: UnderFlyDeps) {
+  constructor(w: Window, label: string, deps: UnderFlyDeps, o: UnderFlyOptions = {}) {
     super();
     this.w = w;
     this.label = label;
     this.d = deps;
+    this.refill = o.refill === true;
     this.log = deps.log ?? silentLogger;
     this.result = new Promise((r) => {
       this.resolve = r;
@@ -74,7 +93,9 @@ export class UnderFlyProcess extends BaseProcess {
 
   protected override onStopped(reason: StopReason): void {
     this.flight?.stop();
-    if (this.phase !== 'flying') this.resolve({ ok: false, reason: reason === 'replaced' ? 'replaced' : 'interrupted' });
+    // (Track F16: a stop while the box is down answers once the refill has broken and picked it up again, with the box's line if it was not)
+    if (this.refilling) this.stoppedFor = reason;
+    else if (this.phase !== 'flying') this.resolve({ ok: false, reason: reason === 'replaced' ? 'replaced' : 'interrupted' });
   }
 
   private kit() {
@@ -89,10 +110,34 @@ export class UnderFlyProcess extends BaseProcess {
 
   private async prepare(t: number): Promise<void> {
     try {
+      if (this.refill && this.d.kitOps.refillFromBox) {
+        this.refill = false;
+        // Track F16: never start the 2 s of standing still with the box down and a window open with a hostile in reach: the
+        // window ends instead and the trip proves it again from here (counting only the loose rockets while the hostile is near)
+        const mob = this.d.hostile?.();
+        if (mob) {
+          this.log.info(`corridor: window ${this.label}: no refill from the fireworks box with ${mob}`);
+          return this.end({ ok: false, reason: `no refill with ${mob}` });
+        }
+        this.refilling = true;
+        const r = await this.d.kitOps.refillFromBox(() => t === this.token, { under: true }).finally(() => {
+          this.refilling = false;
+        });
+        this.refilled = r;
+        this.log.info(`corridor: window ${this.label}: refill ${r.ok ? `ok: took ${r.taken}` : `failed (${r.reason ?? '?'})`}${r.where ? ` (the box at ${r.where.x} ${r.where.y} ${r.where.z}${r.pickedUp ? ', carried again' : ''})` : ''}`);
+        if (r.where && !r.pickedUp) {
+          // (whether or not the window was paused or stopped meanwhile: no flight away from the kit)
+          this.boxLeft = boxLeftLine(r);
+          return this.end({ ok: false, reason: this.boxLeft });
+        }
+        if (this.stoppedFor) return this.end({ ok: false, reason: this.stoppedFor === 'replaced' ? 'replaced' : 'interrupted' });
+        if (t !== this.token) return;
+      }
       if (this.kit().rocketsHotbar === 0) {
         const r = await this.d.kitOps.rocketsToHotbar();
         if (t !== this.token) return;
-        if (!r.ok && this.kit().rocketsHotbar === 0) return this.end({ ok: false, reason: `no rockets in the hotbar (${r.reason ?? '?'})` });
+        const refill = this.refilled && !this.refilled.ok ? `; the refill from the fireworks box failed: ${this.refilled.reason ?? '?'}` : '';
+        if (!r.ok && this.kit().rocketsHotbar === 0) return this.end({ ok: false, reason: `no rockets in the hotbar (${r.reason ?? '?'}${refill})` });
       }
       if (!this.kit().elytraWorn) {
         const w = await this.d.kitOps.wearElytra();

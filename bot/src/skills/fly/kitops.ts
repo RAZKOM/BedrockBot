@@ -110,6 +110,71 @@ export function refillEndLine(r: RefillResult, rocketsNow: number): string | und
   return `fly: no rockets at hand and the refill from the fireworks box failed (${why}); ${fix}`;
 }
 
+/** Blocks that fall when nothing holds them up (terrain/classify.ts GRAVITY_NAMES and the concrete powders). */
+const FALLS = new Set(['sand', 'red_sand', 'gravel', 'suspicious_sand', 'suspicious_gravel', 'anvil', 'chipped_anvil', 'damaged_anvil', 'dragon_egg', 'scaffolding', 'pointed_dripstone']);
+const fallsDown = (name: string): boolean => FALLS.has(name) || name.endsWith('concrete_powder');
+const liquidBlock = (b: BlockInfo | undefined): boolean => !!b && (b.name.includes('water') || b.name.includes('lava'));
+/** A cell a body walks through: loaded, no collision box, no liquid. */
+const passable = (b: BlockInfo | undefined): boolean => !!b && b.name !== 'unknown' && b.boxes.length === 0 && !liquidBlock(b);
+const SIDES: readonly (readonly [number, number])[] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+
+/**
+ * Track F16 (docs/flight.md "A window under a roof refills from the box (Track F16)"): why the free cell `p` beside the
+ * feet cell `f` (a `boxSpots` cell: empty, the lid free, a full top under it) is no place for the box under a roof, else
+ * undefined. The box is broken there and its item drops into the cell with a little speed: every side of the cell must
+ * hold the item (a solid, or a floor at the cell's height; an open side over a drop is a ledge the item can slide off),
+ * no water or lava beside it or over the lid (flowing water carries the item off, lava burns it), and no block over the
+ * lid that falls into the cell once the box is gone (sand, gravel: a cave's ceiling holds them unsupported). And the body
+ * must get to the item: a side cell is reached from where it stands, a corner cell through a free side cell, a cell two
+ * out through the free cell between them with a floor.
+ */
+export function unsafeBoxCell(blockAt: (p: Vec3) => BlockInfo | undefined, f: Vec3, p: Vec3): string | undefined {
+  for (const [dx, dz] of SIDES) {
+    const n = { x: p.x + dx, y: p.y, z: p.z + dz };
+    const b = blockAt(n);
+    const under = blockAt({ ...n, y: n.y - 1 });
+    if (!b || !under || b.name === 'unknown' || under.name === 'unknown') return 'a cell beside it is not loaded';
+    if (liquidBlock(b) || liquidBlock(under)) return 'water or lava beside it';
+    if (!b.solid && !under.solid) return 'a ledge beside it';
+  }
+  const over = blockAt({ ...p, y: p.y + 2 });
+  if (!over || over.name === 'unknown') return 'the cell over it is not loaded';
+  if (liquidBlock(over)) return 'water or lava over it';
+  if (fallsDown(over.name)) return `${over.name} over it`;
+  const dx = p.x - f.x;
+  const dz = p.z - f.z;
+  const open = (x: number, z: number): boolean => passable(blockAt({ x, y: f.y, z })) && passable(blockAt({ x, y: f.y + 1, z }));
+  if (Math.abs(dx) + Math.abs(dz) === 1) return undefined;
+  if (Math.abs(dx) === 1 && Math.abs(dz) === 1) return open(f.x + dx, f.z) || open(f.x, f.z + dz) ? undefined : 'no way to it from where I stand';
+  const mx = f.x + Math.sign(dx);
+  const mz = f.z + Math.sign(dz);
+  return open(mx, mz) && blockAt({ x: mx, y: f.y - 1, z: mz })?.solid === true ? undefined : 'no way to it from where I stand';
+}
+
+/**
+ * Track F16: the cells beside the feet the box may be set down on under a roof (the corridor's windows): the free cells
+ * of `boxSpots` that `unsafeBoxCell` passes, nearest first; with none, why (the free cells' first reason).
+ */
+export function caveBoxSpots(blockAt: (p: Vec3) => BlockInfo | undefined, feet: Vec3): { spots: Vec3[]; why?: string } {
+  const free = boxSpots(blockAt, feet);
+  if (free.length === 0) return { spots: [], why: 'no free cell next to me for the box' };
+  const f = { x: Math.floor(feet.x), y: Math.floor(feet.y + 1e-6), z: Math.floor(feet.z) };
+  const spots: Vec3[] = [];
+  let first: string | undefined;
+  for (const p of free) {
+    const why = unsafeBoxCell(blockAt, f, p);
+    if (why === undefined) spots.push(p);
+    else first ??= `${why} (${p.x - f.x} ${p.z - f.z})`;
+  }
+  return spots.length ? { spots } : { spots, why: `no cell next to me where the box and its drop are safe (${first ?? '?'})` };
+}
+
+/** Track F16: where the refill may set the box down: beside the body in the open (F13), under a roof the stricter cells. */
+export interface RefillWhere {
+  /** The corridor's windows under a roof: `caveBoxSpots` instead of `boxSpots`. */
+  under?: boolean;
+}
+
 export class FlightKitOps {
   private readonly d: KitOpsDeps;
   private readonly log: Logger;
@@ -236,14 +301,25 @@ export class FlightKitOps {
    * other slot full the rockets went into the slot the box had left and the box stayed on the ground: bds-fly2,
    * 2026-11-13). Undefined: it can be tried.
    */
-  refillCheck(): string | undefined {
+  refillCheck(o: RefillWhere = {}): string | undefined {
     const k = this.kit();
     if (k.boxSlot < 0) return 'no fireworks box';
     if (k.boxRockets <= 0) return 'the fireworks box is empty';
     const feet = this.d.position();
-    if (!feet || boxSpots((q) => this.d.blockAt(q), feet).length === 0) return 'no free cell next to me for the box';
+    if (!feet) return 'no free cell next to me for the box';
+    if (o.under) {
+      // Track F16: under a roof the cell must also keep the box's drop and be reached by the body
+      const c = caveBoxSpots((q) => this.d.blockAt(q), feet);
+      if (c.spots.length === 0) return c.why ?? 'no free cell next to me for the box';
+    } else if (boxSpots((q) => this.d.blockAt(q), feet).length === 0) return 'no free cell next to me for the box';
     if (refillRoom(this.d.inventory.slots, k.boxSlot) <= 0) return 'the inventory is full: no slot for the rockets that leaves one for the box';
     return undefined;
+  }
+
+  /** The cells the refill tries for the box, nearest first. */
+  private spots(o: RefillWhere): Vec3[] {
+    const feet = this.d.position()!;
+    return o.under ? caveBoxSpots((q) => this.d.blockAt(q), feet).spots : boxSpots((q) => this.d.blockAt(q), feet);
   }
 
   /**
@@ -251,12 +327,12 @@ export class FlightKitOps {
    * (or the box is empty), pick it up again. `alive()` false (a pre-emption) stops between steps; the
    * box is always broken and picked up when it was placed.
    */
-  async refillFromBox(alive: () => boolean = () => true): Promise<RefillResult> {
+  async refillFromBox(alive: () => boolean = () => true, where: RefillWhere = {}): Promise<RefillResult> {
     const k = this.kit();
     const none: RefillResult = { ok: false, taken: 0, pickedUp: false };
-    const blocked = this.refillCheck();
+    const blocked = this.refillCheck(where);
     if (blocked) return { ...none, reason: blocked };
-    const spots = boxSpots((q) => this.d.blockAt(q), this.d.position()!);
+    const spots = this.spots(where);
     const room = refillRoom(this.d.inventory.slots, k.boxSlot);
     const item = this.d.inventory.slots[k.boxSlot]?.name ?? 'undyed_shulker_box';
     const sk = this.d.skills;

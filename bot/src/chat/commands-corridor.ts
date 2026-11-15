@@ -5,10 +5,15 @@
 // FlyProcess built as `!fly` builds it, passed in by commands-fly), the underground windows (UnderFlyProcess on
 // the chain of trackers, the worker's planner), the walk (the navigator's unwrapped walk), the live model's
 // cells and chunks. The chestplate goes back on at the end.
+// Track F16 (docs/flight.md "A window under a roof refills from the box (Track F16)"): a window whose loose rockets are
+// low is proven on what the refill from the fireworks box will give (kit.ts rocketsForWindow) when the refill can be made
+// where the body stands under a roof (kitops.ts refillCheck `under`, no hostile in reach), and refills before it flies
+// when its loose rockets are fewer than its plan fires plus a reserve (kit.ts windowRefillWanted). With nothing loose and
+// no refill possible here the window is not proven (the executor walks to its first goal and tries again from there).
 import type { Vec3 } from '../connection/types.ts';
 import type { Logger } from '../log.ts';
 import type { FlightLoop } from '../skills/fly/controller.ts';
-import { readKit, type FlightKitMemory, type KitInventory } from '../skills/fly/kit.ts';
+import { readKit, rocketsForWindow, WINDOW_ROCKETS_SURE, windowRefillWanted, type FlightKitMemory, type KitInventory } from '../skills/fly/kit.ts';
 import type { FlightKitOps } from '../skills/fly/kitops.ts';
 import type { RocketDeps } from '../skills/fly/rocket.ts';
 import type { RouteGrid } from '../skills/fly/route/grid.ts';
@@ -27,7 +32,11 @@ export interface CorridorWiring extends Omit<RocketDeps, 'loop' | 'inventory'> {
   loop: FlightLoop & { readonly state: { ready?: boolean } };
   inventory: KitInventory & RocketDeps['inventory'];
   memory: () => FlightKitMemory;
-  kitOps: Pick<FlightKitOps, 'wearElytra' | 'rocketsToHotbar' | 'wearChestplate'>;
+  kitOps: Pick<FlightKitOps, 'wearElytra' | 'rocketsToHotbar' | 'wearChestplate'> & Partial<Pick<FlightKitOps, 'refillFromBox' | 'refillCheck'>>;
+  /** Track F16: a hostile within REFILL_MOB_REACH of the body (the line that names it), else undefined. */
+  hostile?: () => string | undefined;
+  /** Track F16: a line to the owner (a refill refused under a roof, a box left behind). */
+  say?: (msg: string) => void;
   processes: Pick<ProcessManager, 'add'>;
   /** The live model's cell: true solid, false air, undefined not loaded (Track F6: water counts as solid: no flight through or into it). */
   solid: (x: number, y: number, z: number) => boolean | undefined;
@@ -46,6 +55,20 @@ export interface CorridorWiring extends Omit<RocketDeps, 'loop' | 'inventory'> {
   /** Walk to a feet cell (the navigator's own walk, not the fly-wrapped one). */
   walk: (cell: Vec3, label: string) => Promise<StepOutcome>;
   log: Logger;
+}
+
+/**
+ * Track F16: no refill from the fireworks box with a hostile this near (blocks, feet to feet): the refill stands still about
+ * 2 s with the box down and a window open, the time a zombie walks 4 or 5 blocks; the same 8 the eat floor keeps from every
+ * mob before a bite (docs/pve.md "The floors").
+ */
+export const REFILL_MOB_REACH = 8;
+
+/** Track F16: the refill's refusal under a roof, said once a trip for each reason. */
+export function windowRefillLine(why: string, loose: number): string {
+  return loose > 0
+    ? `fly: ${loose} rocket${loose === 1 ? '' : 's'} at hand and the refill from the fireworks box cannot be made here (${why}); flying the windows on them and trying again further on`
+    : `fly: no rockets at hand and the refill from the fireworks box cannot be made here (${why}); walking on underground and trying again further on`;
 }
 
 /** Hotfix 2026-11-06 (a Realm death in a cave): a corridor trip ends when the health falls under this, or on a death. */
@@ -110,20 +133,48 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
     }
   };
   setCorridorAirborne(w.task, () => under?.phase === 'flying' && (w.loop.state.gliding || !w.loop.state.onGround));
+  // Track F16: the refill a window's proof decided on (the next flyUnder takes it), the lines said, a box left behind
+  let refillNext: boolean | undefined;
+  let boxLine: string | undefined;
+  const said = new Set<string>();
+  const refusal = (why: string, loose: number): void => {
+    const line = windowRefillLine(why, loose);
+    w.log.info(`corridor: ${line}`);
+    if (said.has(why)) return;
+    said.add(why);
+    w.say?.(line);
+  };
+  /** Track F16: why no refill can be made where the body stands (the box, the cell, the room, a hostile), else undefined. */
+  const refillBlocked = (): string | undefined => (w.kitOps.refillCheck ? (w.kitOps.refillCheck({ under: true }) ?? w.hostile?.()) : 'no refill here');
   const flyUnder = async (win: Window, l: string, plan?: RoutePlan): Promise<StepOutcome> => {
+    // Track F16: the proof's decision; with no proof (the style's proof off), the loose rockets under WINDOW_ROCKETS_SURE
+    let refill = refillNext ?? false;
+    if (refillNext === undefined) {
+      const k = readKit(w.inventory, w.memory());
+      refill = k.boxRockets > 0 && windowRefillWanted(k.rocketsHotbar || k.rockets) && refillBlocked() === undefined;
+    }
+    refillNext = undefined;
     const p = new UnderFlyProcess(win, l, {
       kitOps: w.kitOps,
       inventory: w.inventory,
       memory: w.memory,
       fly: (x) => flyStretch({ loop: w.loop, queue: w.queue, inventory: w.inventory, hotbar: w.hotbar, entities: w.entities, grid: w.grid, plan: w.plan, ...(w.columnLoaded ? { columnLoaded: w.columnLoaded } : {}), ...(w.floor ? { floor: w.floor } : {}), log: w.log }, { goals: x.goals, margin: x.margin, ...(style.stretch?.(x) ?? {}), ...(plan ? { firstPlan: plan } : {}) }),
       airborne: () => w.loop.state.gliding || !w.loop.state.onGround,
+      ...(w.hostile ? { hostile: w.hostile } : {}),
       waitTicks: (n) => w.loop.waitTicks(n),
       log: w.log,
-    });
+    }, { refill });
     under = p;
     w.processes.add(p);
     const r = await p.result;
     under = undefined;
+    if (p.boxLeft) {
+      // Track F16: the box was not carried again: the trip ends here, with where it is (never on away from the kit)
+      boxLine = p.boxLeft;
+      w.log.warn(`corridor: stopping the trip (${boxLine})`);
+      w.say?.(boxLine);
+      stopped = true;
+    }
     return { ...r, at: r.at ?? { ...w.loop.state.pos } };
   };
   const waitLoaded = async (points: readonly Vec3[], timeoutMs: number): Promise<boolean> => {
@@ -149,12 +200,27 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
       ? {
           proveWindow: async (win: Window): Promise<WindowProof> => {
             const from = { ...w.loop.state.pos };
-            const rockets = readKit(w.inventory, w.memory()).rocketsHotbar || readKit(w.inventory, w.memory()).rockets;
+            const k = readKit(w.inventory, w.memory());
+            const loose = k.rocketsHotbar || k.rockets;
+            // Track F16: a low hand with a stocked box: proven on what the refill will give when it can be made here
+            let refillable = false;
+            refillNext = false;
+            if (loose < WINDOW_ROCKETS_SURE && k.boxRockets > 0) {
+              const why = refillBlocked();
+              if (why === undefined) refillable = true;
+              else {
+                refusal(why, loose);
+                // nothing to fly on: no plan (the executor walks to the window's first goal and tries again from there)
+                if (loose === 0) return { complete: false, robust: false, reached: 0, ms: 0, clearance: 0 };
+              }
+            }
+            const rockets = rocketsForWindow(k, refillable);
             // (Track F6: the proof prices the risk and measures the way as the window's trackers will: the plan proven is the plan flown)
             const so = style.stretch?.(win) ?? {};
             const req = windowRequest(win, from, rockets, { margin: so.margin ?? win.margin, maxMs: style.prove!.maxMs, maxNodes: style.prove!.maxNodes, ...(so.riskCost !== undefined ? { riskCost: so.riskCost } : {}), ...(so.geodesic ? { geodesic: true } : {}), ...(so.pieces !== undefined ? { pieces: so.pieces } : {}), ...(so.midBurns ? { midBurns: true } : {}), ...(so.kit ? { kit: so.kit } : {}) });
             const p = await w.plan(req);
-            w.log.info(`corridor: the proof of the window to ${Math.floor(win.end.x)} ${Math.floor(win.end.y)} ${Math.floor(win.end.z)}: ${p.complete ? 'complete' : `partial (${p.why ?? '?'})`} ${p.reached}/${win.goals.length} goals, ${p.ticks} ticks, ${p.rockets} rockets, clearance ${p.clearance.toFixed(2)}, ${p.expanded} expanded in ${p.ms.toFixed(0)} ms`);
+            refillNext = refillable && windowRefillWanted(loose, p.rockets);
+            w.log.info(`corridor: the proof of the window to ${Math.floor(win.end.x)} ${Math.floor(win.end.y)} ${Math.floor(win.end.z)}: ${p.complete ? 'complete' : `partial (${p.why ?? '?'})`} ${p.reached}/${win.goals.length} goals, ${p.ticks} ticks, ${p.rockets} rockets, clearance ${p.clearance.toFixed(2)}, ${p.expanded} expanded in ${p.ms.toFixed(0)} ms${refillable ? ` (on ${rockets} rockets: ${loose} loose and the refill from the fireworks box${refillNext ? ', refilling before the takeoff' : ', no refill needed'})` : ''}`);
             return proofOf(p);
           },
         }
@@ -166,7 +232,7 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
   void watch();
   try {
     const r = await ex.run(goal, label);
-    return unsafe ? { ...r, ok: false, reason: `stopped: ${unsafe}` } : r;
+    return unsafe ? { ...r, ok: false, reason: `stopped: ${unsafe}` } : boxLine ? { ...r, ok: false, reason: boxLine.replace(/^fly: /, '') } : r;
   } finally {
     done = true;
     mine.delete(entry);

@@ -7369,7 +7369,9 @@ they have run on the test servers only.
   rockets into the hotbar and puts the elytra on, nothing more), and their proof (`commands-corridor.ts proveWindow`)
   is given the loose count. With the box alone such a window ends `no rockets in the hotbar (no rockets)`: an answer,
   not a silence. Not changed: a refill under a roof in the middle of a corridor trip asks where the box may be set
-  down underground, which is the cave tracks' decision. Not run here.
+  down underground, which is the cave tracks' decision. Not run here. **Done in Track F16** ("A window under a roof
+  refills from the box (Track F16)" below): measured, the window did not end that way: its proof on 0 rockets failed
+  and every window was walked; now a low hand refills before the window, on a cell the cave rules allow.
 - A crafted item has no wire item with its NBT until the server sends the slot (Track F12's open point): a rocket the
   bot crafts and uses at once is turned down once (`fly-truth.ts craftRockets` uses one on the ground for that
   reason). Not the same fault as Track F12's (there the NBT was in hand and dropped; here the client never had it) and
@@ -8149,6 +8151,129 @@ the takeoff track).
   to 24 from the cell each time; the look off came down 0.2 to 0.4 from the cell with the creeper 3 to 14 off).
 - **The Realm**: 12 trips ("On the Realm" above), one round for a creeper; a creeper standing on the chosen cell
   did not occur there. `flyLandMobs` is off by default and on on the Realm since 2026-11-15.
+
+## A window under a roof refills from the box (Track F16)
+
+Flight v2, Track F16, [decisions/0042](decisions/0042-elytra-flight.md) addendum (Track F16; F13 had no record of its
+own and decision 5 of 0042 owns the refill). The corridor's windows under a roof (`flyCave`) had no refill: the window's
+proof was given the loose rockets and its process (`CorridorProcess`, `tasks/process/corridor.ts`) moved rockets into
+the hotbar and put the elytra on, nothing more. No setting: the change acts only where a window had too few rockets to
+fly before, and a trip with 8 or more loose rockets at every window is decided and flown as before.
+
+### When it happens
+
+An open-air flight refills to a stack before its takeoff when the hotbar holds fewer than `fireworksMin` (32 on the
+Realm), so a corridor trip that starts with a cruise reaches its first window with 30 to 64 loose. A window fires 1 to 4
+(the Realm's cave logs: n 8; its proofs planned 1 to 4, n 11), so a trip of a few windows does not run low. The case is
+a trip that starts under the roof with few or no loose rockets: after a death (the kit given back, or a box alone), after
+loose rockets were dropped or stashed, after a refused open-air refill (a full inventory: F13's refusal leaves the loose
+ones as they were), or a long underground trip of many windows with no cruise between. Expected rarely with the live
+kit (the bot carries hundreds loose); every time after a test series that gives the box alone.
+
+### Before (the corridor e2e, bds-fly3, BDS 1.26.60.6, `test/e2e/fly-cave-refill.test.ts`, 2026-11-15)
+
+The corridor world of `fly-corridor` (a 3 x 3 bore 140 long, a bend, 30 more, a 2-high section and a closed chamber),
+`flyCave on`, `fireworksMin` 32, the body put 3 blocks inside the mouth, `!fly` to the chamber (about 175 blocks).
+
+| case (n 3 each) | before |
+|---|---|
+| nothing loose, the box of 64 | 3 of 3 arrived by walking, 40.4 to 41.1 s, 0 windows, 12 walks: every proof was planned on 0 rockets and ended `partial (the goal is above what the rockets in the hand can buy)`, the executor walked to each window's first goal. Not the `no rockets in the hotbar` that F13's open point expected: the proof never let such a window take off |
+| 3 loose (no refill on main whatever the box holds) | 3 of 3 arrived, 39.2 to 49.9 s, 1 to 2 windows flown on them (each bailed out short), then the rest walked once the hand was empty |
+| nothing loose, no full top beside the body | as the first row (40.9 to 41.0 s, walked) |
+| nothing loose, every other slot full | as the first row (40.7 to 41.0 s, walked) |
+
+### The rules (`fly/kit.ts`, `fly/kitops.ts`, `tasks/process/corridor.ts`, `chat/commands-corridor.ts`)
+
+- **When the refill is looked at.** A window whose loose rockets (the hotbar's, else the inventory's) are fewer than
+  `WINDOW_ROCKETS_SURE` (8) and whose fireworks box holds rockets. With 8 or more nothing is looked at: the proof gets the
+  loose count and the window flies as before. 8 is twice the most a cave window has planned or fired with loose
+  rockets (4, above); a window that would need more than its hand is bailed out by its own tracker, never flown dry.
+- **What the proof counts.** When the refill can be made where the body stands, the proof is planned on what the hotbar
+  will hold after it (`rocketsForWindow`: up to a stack from the box), F13's rule (`rocketsForFlight`) carried over to a
+  hand that is low rather than empty. A window is decided on the rockets it will have.
+- **When it refills.** After the proof, when the loose rockets are fewer than the plan fires plus
+  `WINDOW_ROCKET_RESERVE` (2: the trackers plan again in the air and may fire more than the proof). A hand of 3 with a
+  plan of 1 flies on its 3.
+- **Where the box goes under a roof** (`caveBoxSpots`, `unsafeBoxCell`). A free cell beside the body as in the open
+  (empty, the lid free, a full top under it), and also: every side of the cell holds the dropped item (a solid, or a
+  floor at the cell's height: an open side over a drop is a ledge the item can slide off when the box is broken); no
+  water or lava beside it or over the lid (flowing water carries the item off, lava burns it); no sand, gravel or other
+  falling block over the lid (a cave's ceiling holds them unsupported, and one falls into the cell once the box is
+  gone); and a way for the body to the item: a side cell is next to the feet, a corner cell needs a free side cell, a
+  cell two out a free cell with a floor between. The open-air refill keeps F13's cells.
+- **No cell, no room, a hostile.** Checked before anything is placed (`refillCheck({ under: true })`, the full
+  inventory's F13 refusal unchanged, and no hostile within `REFILL_MOB_REACH` 8). The trip says why once a trip for each
+  reason: `fly: no rockets at hand and the refill from the fireworks box cannot be made here (no free cell next to me for
+  the box); walking on underground and trying again further on`, or with some loose `fly: 3 rockets at hand and the
+  refill ... cannot be made here (...); flying the windows on them and trying again further on`. With nothing loose the
+  window is not proven and the executor walks to its first goal and asks again from there (a cell 16 blocks on is
+  usually fine); with some loose the window is proven on them, as before.
+- **A box not carried again** ends the trip with F13's line (`fly: the fireworks box lies on the ground near X Y Z ...`)
+  and the trip's end line: no window flies away from the kit. A stop while the box is down answers once it is broken
+  and picked up.
+- **Hostile mobs.** The refill stands still about 2 s with the box down and a window open. It is not started with a
+  hostile within 8 (feet to feet; the distance the eat floor keeps from every mob before a bite, docs/pve.md "The
+  floors"): the window ends `no refill with a zombie 5.0 blocks away` and the trip proves it again from where it
+  stands, counting only the loose rockets while the hostile is near (none loose: it walks on). Meanwhile the reflex
+  (`mobReflex`, on live) strikes whatever comes within 3.9 every tick, as under every task. The guard (priority 60, a
+  fight; 85 defend; 100 flee) pre-empts the window (a user process, 40): the refill then takes nothing more, closes the
+  box, breaks it and picks it up (F13's rule); the window resumes after the fight without refilling again.
+
+### After (the same suite, bds-fly3 and bds-fly2, 2026-11-15, the final code)
+
+| case (n 10 each) | after |
+|---|---|
+| nothing loose, the box of 64 | **10 of 10 arrived with windows flown**: 2 to 5 windows a trip (before 0), one refill each (`refill ok: took 64`, the box carried again 10 of 10), 3 to 14 rockets fired, 40.9 to 70.3 s (median 54.8) |
+| 3 loose and the box | 10 of 10 arrived, 2 to 4 windows, one refill each (61 or 62 taken, when a proof planned 2 or more), 44.5 to 92.7 s (median 63.0) |
+| nothing loose, no full top beside the body | 10 of 10: the refusal line at the start, nothing placed there, the walk to the window's first goal, the refill there 10 of 10, then 1 to 4 windows; 43.1 to 85.5 s (median 58.2) |
+| nothing loose, every other slot full | 10 of 10: F13's reason in the refusal line (`the inventory is full: no slot for the rockets that leaves one for the box`), nothing placed, the bore walked as before, 42.1 to 43.1 s |
+
+Over the 40 runs: 0 boxes left behind, the rockets counted 40 of 40 (loose + in the box + fired = before), damage 0 in
+39 and 1.5 once (a window's wall touch, the nothing-loose case). The trips are slower than the walk on this bore: every
+window of it bails out short of its landing (the cave style's tracker, 1 to 3 of 6 goals reached, before as after: the
+3-loose trips on main bailed out 5 of 5) and the rest is walked, and a proof planned on 64 rockets reaches its budget
+more often than one on 3 (partial plans of 5 to 7 rockets where the loose ones gave plans of 1 or 2). That is the cave
+flight on a clean bore, not the refill; the refill itself is about 4 s of standing (F13's 5.3 to 6.6 s from the command
+to the takeoff).
+
+### Offline (`test/unit/skills/fly-cave-refill.test.ts`, n 10 a case)
+
+The same corridor world offline: the real executor, `runCorridorTrip`, the real `FlightKitOps` over a fake inventory
+and the world's blocks, a stub planner that needs 1 to 3 rockets a window and a stub flight that fires them (fewer in the
+hotbar: it bails out where it took off), the start 3 to 12 blocks inside the mouth. "Before" is the trip with main's kit
+ops (no `refillCheck`, no `refillFromBox`: the proof on the loose count, no refill).
+
+| case | before | after |
+|---|---|---|
+| nothing loose, the box | 10 of 10 walked, 0 windows, 9 to 10 unproven windows walked | 10 of 10 two windows flown, one refill each, no window flown short of rockets |
+| need + 2 loose, the box | 7 of 10 flew both windows on the loose ones, 3 (a need of 3) flew one and walked the rest | 10 of 10 both windows, the first on the loose ones, the second after a refill |
+| no cell where it starts | walked, 0 windows | the refusal, the walk to the first goal, the refill there, the windows flown |
+| a full inventory | walked | the refusal, nothing placed, walked |
+| 64 loose | | no refill, no check, no line; the windows, the walks, the rockets and each takeoff's place the same as before (10 of 10) |
+
+Every run: the box carried again, the rockets counted.
+
+### Unit tests (`fly-cave-refill.test.ts`)
+
+`rocketsForWindow` and `windowRefillWanted` (8 or more loose: the loose count and no refill whatever the plan); the cave
+cells (a ledge, water and lava beside, water over the lid, gravel and concrete powder over the lid, a corner cell
+behind two walls and a cell two out without a way, F13's reason with no free cell at all, the first unsafe cell's
+reason); `refillCheck({ under: true })` refusing a ridge the open-air check allows, and a full inventory's F13 reason;
+`UnderFlyProcess` with no refill asked making the same calls as before, refilling with the box placed and picked up,
+starting no refill with a hostile in reach, ending on a box not picked up; the offline trip series above; the lines
+under 256 bytes; a source guard that the window's proof is given `rocketsForWindow`.
+
+### Open points (Track F16)
+
+- **The Realm** has not run it. A trip from cave_start with the box alone (every loose rocket dropped) is the case.
+- **A hostile during the refill** has not been run with mobs (the test servers are peaceful): the rules above are the
+  code's, the guard's pre-emption during the refill is F13's (the box broken and picked up under the guard).
+- **The bore's windows bail out** on the corridor e2e with `flyCave on` (before and after alike): the trips that now fly
+  are slower than the walk there. Not this track's; the cave tracks measure the windows on the owner's cave.
+- **A proof on 64 rockets** is partial more often than one on a low hand (the search keeps the rocket branches open):
+  measured on the bore, not on a real cave.
+- **A refill that takes fewer than the proof counted** (a `take` refused half-way) flies on what it has and the trackers
+  bail out when short, as F13's partial refill.
 
 ## Open points
 

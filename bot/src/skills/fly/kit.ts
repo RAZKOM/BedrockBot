@@ -203,6 +203,44 @@ export function rocketsForFlight(kit: Pick<FlightKit, 'rockets' | 'rocketsHotbar
   return Math.min(64, Math.max(0, otherRockets));
 }
 
+/**
+ * Track F16 (docs/flight.md "A window under a roof refills from the box (Track F16)"): a corridor window under a roof
+ * with this many loose rockets or more is proven and flown on them, as before the track (no refill is looked at): twice
+ * the most seen. The Realm's cave logs: proofs planned 1 to 4 rockets (n 11), windows fired 2 to 4 (n 8); the corridor
+ * e2e's bore 0 to 2 and 1 to 2. A window that needs more than the hand holds is bailed out by its own tracker (a partial
+ * plan, the sink to the floor), never flown dry.
+ */
+export const WINDOW_ROCKETS_SURE = 8;
+/**
+ * Track F16: the rockets a window keeps over what its proof's plan fires before it flies without a refill: the trackers
+ * plan again in the air (a shorter burn than planned, a correction) and may fire one more than the proof each time; two
+ * covers the re-plans of the windows measured (1 to 4 a window) without a refill for every low hand.
+ */
+export const WINDOW_ROCKET_RESERVE = 2;
+
+/**
+ * Track F16: the rockets a corridor window under a roof is proven with. The loose ones (as before) when there are
+ * WINDOW_ROCKETS_SURE or more or no refill can be made where the body stands; else what the hotbar holds after the
+ * refill (up to a stack from the fireworks box), the F13 rule (`rocketsForFlight`) carried over to a hand that is low
+ * rather than empty: a window is decided on the rockets it will have.
+ */
+export function rocketsForWindow(kit: Pick<FlightKit, 'rockets' | 'rocketsHotbar' | 'boxRockets'>, refill: boolean): number {
+  const loose = kit.rocketsHotbar || kit.rockets;
+  if (loose >= WINDOW_ROCKETS_SURE || !refill || kit.boxRockets <= 0) return loose;
+  return Math.max(loose, Math.min(64, kit.rocketsHotbar + kit.boxRockets));
+}
+
+/**
+ * Track F16: a window refills before it flies when its loose rockets are fewer than its proof's plan fires plus
+ * WINDOW_ROCKET_RESERVE (and fewer than WINDOW_ROCKETS_SURE: with that many nothing changes). `planRockets` undefined
+ * (no proof): the loose ones under WINDOW_ROCKETS_SURE.
+ */
+export function windowRefillWanted(loose: number, planRockets?: number): boolean {
+  if (loose >= WINDOW_ROCKETS_SURE) return false;
+  if (planRockets === undefined) return true;
+  return loose < planRockets + WINDOW_ROCKET_RESERVE;
+}
+
 /** `elytra 410/432, 23 rockets (16 in the hotbar), box 64` for status lines. */
 export function kitLine(kit: FlightKit): string {
   const el = kit.elytraWorn || kit.elytraSlot >= 0 ? `elytra ${kit.elytraLeft ?? '?'}/${elytraMax()}${kit.elytraWorn ? ' (on)' : ''}` : 'no elytra';

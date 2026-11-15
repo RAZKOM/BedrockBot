@@ -50,7 +50,7 @@ import { inventorySlot, type StackRequests } from '../skills/survival/screen.ts'
 import type { BlockInfo, ItemStack } from '../world/types.ts';
 import { corridorAirborne, corridorProviderOf, corridorWanted } from '../skills/fly/corridor/registry.ts'; // Track F4b
 import type { CorridorReport, SkyHint, StepOutcome } from '../skills/fly/corridor/executor.ts'; // Track F4b
-import { corridorEndLine, runCorridorTrip, stopCorridorTrip, type CorridorWiring, type TripStyle } from './commands-corridor.ts'; // Track F4b
+import { corridorEndLine, REFILL_MOB_REACH, runCorridorTrip, stopCorridorTrip, type CorridorWiring, type TripStyle } from './commands-corridor.ts'; // Track F4b
 import { orderedRoute, shortcutRoute, WaypointProvider, type RoutePoint } from '../skills/fly/cave/route.ts'; // Track F5b
 import { proveShortcutInWorker } from '../skills/fly/cave/proof.ts'; // Track F5b
 import { CAVE_STYLE, caveExecutorOptions, caveStretchOptions } from '../skills/fly/cave/style.ts'; // Track F5b
@@ -1792,6 +1792,13 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     memory,
     kitOps,
     processes,
+    // Track F16: no refill under a roof with a hostile this near (feet to feet), and the refill's lines to the owner
+    hostile: () => {
+      const at = loop.state.pos;
+      const m = landMobsNear(world.entities.values(), pve.mobs, at, REFILL_MOB_REACH).map((x) => ({ x, d: Math.hypot(x.x - at.x, x.y - at.y, x.z - at.z) })).filter((x) => x.d <= REFILL_MOB_REACH).sort((a, b) => a.d - b.d)[0];
+      return m ? `a ${m.x.type} ${m.d.toFixed(1)} blocks away` : undefined;
+    },
+    say: (m) => d.chat.say(m),
     // the live model, else what the world cache saw (a mouth at the edge of the loaded chunks); the windows are cut by `loaded`.
     // Track F6: water is an obstacle to the flight (`solid`: no window through or into a pool), the real solids are its floors
     solid: (x, y, z) => {
