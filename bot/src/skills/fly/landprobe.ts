@@ -10,7 +10,7 @@
 import type { Vec3 } from '../../world/types.ts';
 import { pathBlocks, probePath, type ProbeNav } from '../home/reach.ts';
 import { DEFAULT_COSTS } from '../nav/costs.ts';
-import { MAX_JUMP_RISE } from '../nav/astar.ts';
+import { MAX_JUMP_RISE, type PathNode } from '../nav/astar.ts';
 import type { ProbeBudget, ProbeOutcome } from './landing.ts';
 import { probeTicks } from './landprice.ts';
 
@@ -21,6 +21,8 @@ export interface LandingProbeOptions {
   surface?: boolean;
   /** Called after each probe with what it cost (the bench's and the log's numbers). */
   onProbe?: (s: { from: Vec3; budget: ProbeBudget; outcome: ProbeOutcome; expanded: number; ms: number; wallMs: number; cost: number }) => void;
+  /** Track W2: each found path, with the cell it starts from (the flight hands the chosen landing's path to the walk after it). */
+  onPath?: (path: PathNode[], from: Vec3) => void;
 }
 
 /** The navigator as the probe plans with it: `surface: false` sets the surface preference to 0 for this plan only. */
@@ -49,6 +51,7 @@ export function landingProbe(nav: ProbeNav, goal: Vec3, o: LandingProbeOptions):
       const costs = { ...DEFAULT_COSTS, ...planNav.planOptions({ allowBreak: false, allowPlace: false, sprint: false }).costs };
       const ticks = probeTicks(r.path, { underground: costs.underground, isUnderground: (x, z, feet) => nav.grid.underground(x, z, feet), irreversibleDrop: costs.irreversibleDrop, jumpRise: MAX_JUMP_RISE });
       outcome = { status: 'found', blocks: pathBlocks(r.path), ticks };
+      o.onPath?.(r.path, from);
     } else outcome = r.status === 'none' ? { status: 'none' } : { status: 'limited' };
     o.onProbe?.({ from, budget: b, outcome, expanded: r?.expanded ?? 0, ms: r?.ms ?? 0, wallMs: performance.now() - t0, cost: r?.cost ?? 0 });
     return outcome;

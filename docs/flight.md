@@ -807,6 +807,34 @@ probe on every trip); a landing 9 or more blocks off that is no nearer the goal 
 Realm since (2026-11-15, 5 trips to such goals): no flight of that kind, and the rule was not needed either: no walk
 came back out to its landing, so the Realm has not yet shown the refusal line.
 
+### The walk after a landing takes the probe's way (Track W2 way)
+
+ADR [0088](decisions/0088-a-walk-keeps-to-its-way.md); the navigator's side is in docs/pathfinding.md "A walk keeps to
+its way". The landing search prices each candidate landing by the probe of its walk to the goal (L2 above). That probe
+has found the whole walk, and the trip used to throw it away and plan the walk again.
+
+How the way is handed over:
+
+- Every path a probe finds is kept with its goal and the time it was found (`commands-fly.ts landingFor`, the probe's
+  `onPath`; the newest `FOUND_WAYS_KEPT` 32).
+- When the trip's walk to the goal starts (the `pve.walk` wrapper's `plain`) from where one of those paths starts, it
+  is handed to the goto as `GotoOptions.way`. That needs the same goal, a path found within the last 10 minutes
+  (`FOUND_WAY_MS` 600000), and its first node within 1 block by the plane and 0.6 by height of the feet.
+- The log says `walk: from the landing cell along the landing probe's way (N nodes, B blocks)`, then the navigator's
+  `goto: walking the handed way from node 0 of n`.
+- The navigator walks the way and keeps it unless its own search finds a way clearly shorter (20 % and 8 blocks). After
+  a fight it goes on along it. A walk from anywhere else plans as before.
+
+Why: with hostiles round the way, the walk's own first search ran out of its budget. Its partial plans then went down
+side passages and came back (the cave of the Realm's turn backs, offline, two zombies on the way: 2.3 times the probe's
+blocks on two goals and 36 turns back in 20 walks). With the way handed: 1.007 to 1.018 of the probe's blocks, and no turn back.
+
+How long the walk takes, on the five goals, against the walk's own plan:
+
+- the same, or 0.5 to 5.3 s longer, with nothing in the way;
+- 44 to 48 s shorter in the walks where hostiles sent it down a side passage (one goal in every run, another in 2 of
+  10).
+
 ### Flight re-check on long walks
 
 A `!goto` / `!come` that walks (the kit not ready, too few rockets, no site worth it) is watched once a

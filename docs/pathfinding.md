@@ -2151,6 +2151,183 @@ slices), segments, corrections, motions, stuck and move timeouts, failures, dist
 `maxTickMs` (longest tick in the navigator, planning included), `planMs`, action counts, retreats and
 ticks waited for unloaded chunks.
 
+### A walk keeps to its way (Track W2 way, decision 0088)
+
+Decision [0088](decisions/0088-a-walk-keeps-to-its-way.md); `nav/way.ts`, `Navigator.keepWay`, `onRejoinResult`,
+`onKeepResult`. (Not the water dig-out, which is also called Track W2 above: this one is "W2 way".) A goto that knows a
+whole way walks it to the end. It does not plan partial ways and change its mind. A re-plan from a new position does
+not turn the body round onto another way unless that way is clearly shorter. A goto taken up again after the guard
+goes on along the way it was on.
+
+**Why.** On the Realm (2026-11-14 and 15, 17 walks from a flight's landing at a cave's mouth to five goals deep in a
+cave under a mountain), the landing search's probe had found the whole walk, 76 to 166 blocks of path. The walk
+planned its own, and three things went wrong:
+
+- The end lines said 141 to 214 blocks for probed paths of 112 to 167.
+- Twice the walk turned back to its landing.
+- Once it wandered for 355 s where three repeats took 101 to 154 s.
+
+The closed loop over a world-cache extract of the same cave (the reach bench's, `walk-way-bench.ts`, the live
+settings and budgets) explains each of the three:
+
+- **Farther is mostly another unit.** The goto's end line counts every tick's 3D motion: the stair steps up and down,
+  the sway round the corners. The probe counts the polyline of its node centres. Offline, with nothing in the way, the
+  walk's own path was 0.93 to 0.99 of the probe's, in the probe's unit. Its motion was 1.26 to 1.37 of it, which is the
+  Realm's 1.25 to 1.28. The plan-by-plan line below now prints the blocks of each plan's path in the probe's unit.
+- **The turn back and the wander come from hostiles round the way.** Their costs (`avoidance.ts`) pushed the walk's
+  first full search past its budget (2.5 s). It ended partial, 14 nodes out. The plan-ahead from there had its smaller
+  budget. It took the best partial end it had, 160 nodes down a side passage, and the next plan came back. With one
+  zombie on the probed way at 0.3 and one at 0.6 of it, walking towards the body:
+  - cave_8: 342 blocks of path for a probed 149, in every run;
+  - cave_19: 314 for 134, in 2 runs of 10 (the search's budget decides);
+  - 36 turns back in 12 of those 20 runs.
+
+  The probe plans with no hostile costs, so it had the whole way.
+- **The dive that timed out.** See the dive item under the rules below.
+
+**The rules.**
+
+- **A handed way** (`GotoOptions.way`): the flight's walk after a landing hands the goto the landing probe's path
+  (docs/flight.md "The walk after a landing takes the probe's way").
+  - When the body stands on one of its nodes, the goto walks it from that node with no search. On a node means the
+    feet are within `WAY_ON_H` 1 by the plane (its cell, or the centre of the next) and `WAY_ON_V` 0.6 by height (its
+    level, Track BE's skip-ahead number). Not a level off: a body 1 block over a node that is left by a drop of 3
+    falls 4 and is hurt. With 1.1 here, a walk resumed beside its way on the cave took 1 HP in every run.
+  - When the body is off the way but within `REJOIN_MAX` 8 blocks of it, a rejoin search runs in-thread. Its goal is
+    any node of the way from the nearest one plus the distance, rounded up, to `WAY_AHEAD` 48 nodes past the last node
+    passed. Its budget is `REJOIN_NODES` 6000 nodes and `REJOIN_MS` 120 ms. The way is walked on from the node it
+    reaches.
+  - Farther off, or when a node of the way can no longer be stood on (`wayBroken`: a block placed on it, a floor
+    dug out), the goto plans afresh, as before.
+
+  A handed way that is a partial path takes the walk's own plan from the way's end.
+- **The search beside the way.** Once a handed or resumed way is taken at the start, the goto's ordinary search runs
+  beside it, as the final answer runs beside a worker's interim answer.
+  - Its plan replaces the way only when it is clearly shorter: shorter in blocks of path than the way's rest by
+    `KEEP_MARGIN` 0.2 of it, and by at least `KEEP_MIN_BLOCKS` 8 blocks. It must also have no more actions (digs,
+    opens) than the way.
+  - When it is clearly shorter, it is spliced in where the two meet. If they do not meet, the goto re-plans from where
+    the body is.
+  - Why 20 %: the walk's own plans and the probe's differ by 3 to 8 % in blocks on the same ground. The probe plans
+    with no surface preference and no long falls, and the walk's own plans change from search to search with their
+    budget. 20 % is over twice that, so the two never take turns.
+  - Why 8 blocks: on a short way, 20 % is a few blocks. The moves' own costs (a diagonal against two straights, a drop
+    against a stair) make that either way.
+- **Resumed.** An interrupted goto that was walking a kept way (handed or its own) remembers the rest of it for
+  `RESUME_KEEP_MS` 180000 ms (3 minutes: a guard fight, a meal). The goto that `GotoProcess` asks again with `resume`
+  after a pre-emption takes it as a handed way, for the same goal only. An arrival forgets it.
+- **Dropped.** Any other re-plan drops the kept way and plans afresh, as before: a block changed on it, a move timed
+  out, an action failed, the body stuck.
+- **Its own way.** A goto's own plan that reaches the goal is kept too. After a correction or off_path it is walked on
+  only when the body stands on one of its nodes, within `WAY_BACK` 4 nodes behind the last node passed to `WAY_AHEAD`
+  48 ahead. Off it, the goto plans afresh, as before. A rejoin there makes a kink that the follower's pure pursuit cuts
+  across, and that made a second off_path in the open (the nav-offpath shove case).
+- **No corridor at the start under a handed way.** The coarse layer's corridor is asked only once the handed way is
+  dropped. Its windows would cut the whole way into near goals.
+- **One line a plan.** For a walk to a place (`block`, `xz`), every plan is one INFO line, for example
+  `goto: plan (start, final) found, 104 nodes, 139.3 blocks, 47588 expanded, 1386 ms, ends ...`. The reason and the
+  tag in brackets are one of `interim`, `final`, `ahead`, `rejoin`, `beside the way` or `the way`. The decisions are
+  lines of their own:
+  - `walking the handed way from node i of n`;
+  - `rejoining it (nodes a to b of n)`;
+  - `back onto its way at node j`;
+  - `the fresh plan F blocks against the way's K ...: walking on along the way`;
+  - `... clearly shorter, taken from there`;
+  - `off its way by more than 8 blocks ... planning afresh`.
+- **A drop beside lava.** The follower creeps off a 1-block drop with lava beside it, at 0.05 a tick, with forward
+  presses spaced by the double-tap guard. That takes about 60 ticks, and the move timeout (2 x the estimate + 10) was
+  34. The move timed out, and the retreat turned the body back onto the step it had left. `DROP_CREEP_TICKS` 30 is now
+  added to the move's estimate when the follower will creep into it (`Follower.creepsInto`). That makes it 94 ticks
+  for a drop of 12.
+- **The dive off a rim.** A body on dry ground at a pool's rim, over a `dive` node, sneaked (the sink rule for a body
+  more than `DIVE_SINK` above the node). A sneaking body never steps off an edge, so the move timed out three times
+  (the Realm, 2026-11-14: `dive, est 8.0 ticks, timed out after 27 ticks`, from a spot the guard had left the body on).
+  On dry ground the sink rule is skipped: the body walks off the rim and sinks once wet.
+
+**Measured** (the closed loop over the cave's extract, this PC, 2026-11-15, 10 runs per goal and case, every run
+arrived, no damage; blocks of path walked against the probe's, in the probe's unit, p50 / max):
+
+| case | cave_17 | cave_16 | cave_19 | cave_8 | cave_9 | turns back |
+|---|---|---|---|---|---|---|
+| before, nothing in the way | 0.966 | 0.986 | 0.985 | 0.933 | 0.983 | 0 |
+| before, two zombies on the way | 1.099 | 1.064 | 1.015 / 2.352 | 2.292 | 1.019 | 36 in 12 runs |
+| after, the probe's way handed | 1.018 | 1.013 | 1.010 | 1.007 | 1.009 | 0 |
+| after, two zombies on the way | 1.018 | 1.013 | 1.010 | 1.007 | 1.009 | 0 |
+| after, no way handed (a plain `!goto`) | 0.966 | 0.986 | 0.985 | 0.933 | 0.983 | 0 |
+| before, the walk interrupted and resumed | 0.979 | 0.985 | 0.985 | (not interrupted) | 0.984 | 0 |
+| after, the walk interrupted and resumed | 1.031 | 1.012 | 1.010 | (not interrupted) | 0.991 | 0 |
+
+The interrupted walk: a zombie 5 blocks beside the probed way at 0.3 of it. Once the body is within 8 blocks of it,
+the goto is cancelled. The body walks to the zombie, stands 40 ticks, the zombie is gone, and the goto is asked again
+with `resume`. On cave_8 no standable cell lies 5 off the way there, so that walk was not interrupted. After the
+resume, the walk rejoined its way in 4 to 6 nodes (a search of 6 to 34 nodes, 0.6 to 7.5 ms on this PC). No damage. Before
+`WAY_ON_V` was 0.6, the resumed walk took 1 HP in every run (the level-off case above).
+
+- Seconds, before against after, nothing in the way:
+  - cave_17: 30.3 against 31.0;
+  - cave_16: 40.8 against 41.3;
+  - cave_19: 48.1 against 51.5;
+  - cave_8: 52.6 against 57.9;
+  - cave_9: 57.6 against 62.3.
+
+  The probe's way is a little slower. It takes no long falls: on cave_8 it is a stair of drops beside lava, against
+  the walk's own fall. It was not clearly longer, so it was kept.
+- With the zombies, before against after:
+  - cave_8: 106 s against 57.9 s;
+  - cave_19: 53.4 s (95.4 in the 2 runs that went down the side passage) against 51.0 s.
+- Plans a walk, after: 2 or 3, which are the way, the search beside it, and on cave_9 a plan-ahead from the way's
+  partial end. Before: 2 to 4, and 4 to 6 with the zombies.
+- A plain `!goto` (no way handed) walks tick for tick as before.
+
+On a server (`test/e2e/nav-way.test.ts`, the cave's extract rebuilt round the five walks, a box of 171 x 198 x 162,
+this PC, 2026-11-15, 10 runs a goal and side, every run arrived, no damage, no turn back):
+
+| side | cave_17 | cave_16 | cave_19 | cave_8 | cave_9 |
+|---|---|---|---|---|---|
+| before: blocks against the probe's / s | 0.966 / 28.3 | 0.986 / 40.6 | 0.988 / 47.0 | 0.941 / 51.3 | 0.991 / 56.7 |
+| after: blocks against the probe's / s | 1.018 / 32.1 | 1.013 / 42.3 | 1.010 / 48.3 | 1.007 / 54.9 | 1.008 / 58.6 |
+
+The probes found the same paths as offline (to 0.1 blocks), so the rebuilt cave is the extract's.
+
+The same walks interrupted on the server (`NAV_WAY_GUARD=1`, 10 runs a goal and side), every run arrived, no damage,
+no turn back:
+
+- At 0.3 of the way the goto is cancelled, the body walks to a cell 5 off the way and stands 40 ticks, and the goto
+  is asked again with `resume`. bds-cache is peaceful, so the guard's fight is stood in for. On cave_8 there is no
+  such cell, so that walk was not interrupted.
+- Before: 0.986 to 1.031 of the probe.
+- After: 1.008 to 1.074. Every resumed walk took its way up again: it stood on the way, or rejoined it a few nodes on.
+- After took 0 to 3.9 s longer than before. A fresh plan from the side cell is a little shorter than going back onto
+  the way, but not by 20 %, so the way is kept.
+
+On the test host under the live bot's CPU policy (`--as-live`, `--speed 1`, 2026-11-15, the same cases, 10 runs
+each), the picture was the same:
+
+- After: 1.007 to 1.031 of the probe's blocks, interrupted or not, with no turn back and no damage.
+- Before, with the zombies, the walk went down the side passage on cave_19 in every run: 2.39 of the probe, with 30
+  turns back in 10 runs. On cave_8 it took 0.98.
+- The search beside the way took 0.46 to 2.0 s in the worker, while the body walked. That is what the walk's own
+  first search cost before (0.5 to 2.0 s).
+- A rejoin took 2 to 33 ms in-thread.
+- 7 of 262 probes ran out of their budget in a job's first, cold run. Then no way is handed, and the walk plans as
+  before.
+
+The reach bench at the live settings (`--config live --place off --speed 1`, worlds 1 to 10 of every class, the test
+host, 2026-11-15), main against this change, pair by pair:
+
+- 1262 pairs each. 1260 had the same outcome and the same damage.
+- Ticks over the 1221 pairs both arrived at: +0.54 %.
+- caves:1:0 arrived with 1 HP of damage, against 0 on main. Main does the same on this PC in 2 of 3 reruns.
+- lava:7:10 arrived, where main died. Main arrives on this PC in 2 of 2 reruns.
+- Both are the wall-clock budgets' run-to-run spread, not this change.
+- False unreachable: 2 against 3. Deaths: 0 against 1.
+- One bench worker ran out of its 6 GB heap in both runs. On this PC main's worker reaches 6.1 GB on long:1 too, so
+  it is the bench's and not this change's; no pair was lost to it.
+
+The trade: a handed way is the probe's, and the probe plans with no hostile costs. The body walks it past a hostile
+that the walk's own plan would have gone round. The guard (`mobReflex`) deals with a hostile that comes close, and the
+resumed walk goes on along the way.
+
 ## Long trips: the coarse layer (Track CB, decision 0066)
 
 A goto whose goal is farther than `coarseMin` (96 blocks, straight line; 0 = off) first asks the coarse layer
@@ -2474,6 +2651,8 @@ fence-arm shapes only run in the unit tests until the registry knows those state
 | `test/unit/skills/nav-digmoves.test.ts` | Track BC: per dig move the break set and order, the cost against the rule set, the refusals (water beside, a gravity block above with and without `allowGravityAbove`, the protected area, a built block, the floor under the feet, a falling block over a head-room cell, the shaft rules: liquid / dripstone below, gravity over the head, the world floor, no floor below, the throwaway budget), the `moves` switches, the goal-below gate; sneak-through (a top-slab ceiling: 8 sneak nodes at `sneakWalk`, a carpet under it closes the lane, a goal and a start under the ceiling); closed loops with fake actions (dig-down x 2, a descend-dig into the shaft column then dig-downs, ascend with head-room breaks, descend with a break, pillar under a lid, the sneak passage with the 1.49 sneak box); a dig-heavy goto with the worker-sized budget keeps every tick under 100 ms |
 | `test/e2e/nav-digmoves.test.ts` | Track BC, bds-bari, planner worker attached: a tunnel through a roofed dirt hill, a shaft down to a cave beside a lava pocket, a cliff under a lintel, a goal 8 blocks inside stone, a gravel-topped barrier (refused, then dug with `allowGravityAbove`), a 1.5-high passage under top slabs crossed sneaking; each with the "before" plan (dig-through only) |
 | `test/unit/skills/nav-offpath.test.ts` | Track BE: the ported executor rules (constants, distance from the path, states, overrun, nodeAt / skipAhead); closed loops: a 3.2-block shove re-plans within 2 ticks, 1.5 and a 2.5 that comes back do not, a body held 2.5 off re-plans after the grace, a push forward along a zigzag skips ahead, a teleport onto a later node snaps (main re-plans), a teleport off the path re-plans, knocks on / off the leg, in a parkour run-up and into water (no later than main), an overrun between two digs, a dig timeout cancelling the digger, 20 hilly goals with no off-path re-plans |
+| `test/unit/skills/nav-way.test.ts` | Track W2 way: the helpers (blocks, a node on the way and its window, the nearest node, a broken node, "clearly shorter", the found ways' lookup); closed loops through a wall with gaps: a handed way walked with no search and kept against a fresh plan that is not clearly shorter, replaced by one that is, not walked from a far start or with a node built over, rejoined after a teleport 4 to 6 off, the own way after a teleport planned afresh, beyond `REJOIN_MAX` planned afresh, a resume after a cancel (on or rejoined, through the same gap); the plan INFO line; the dive off a pool's rim (no sneak, in the water within 20 ticks) and in water (still sneaks); the creep into a drop beside lava; guards (the guide and the decision name the constants with their values, no place of the owner's world) |
+| `test/e2e/nav-way.test.ts` (any server with the truth pack's `cave` command, `FLY_BDS_PORT` / `FLY_BDS_CONTAINER`) | Track W2 way: a private world-cache extract of a cave rebuilt (skipped without it), the landing probe from the cave's mouth, then the goto to each goal before (no kept way) and after (the probe's way handed), `NAV_WAY_GUARD=1` with the walk interrupted at 0.3 of the way and resumed; blocks walked against the probe, turns back, plans, seconds, damage |
 | `test/unit/skills/nav-heuristic.test.ts` | Track BE: heuristic weights 1 / 1.5 / 3.563 on 20 dig-heavy queries (measurement; `NAV_HEURISTIC_BENCH=1`) |
 | `test/e2e/nav-offpath.test.ts` | Track BE: truth tp 3 blocks sideways off a 30-block lane, and forward onto a later node of a zigzag, checks off (main) and on |
 | `test/unit/skills/nav-worker.test.ts` | Track AB: the worker's mirror vs the main grid on 200 random cells (loaded, after block updates and a re-sent column, cached after an unload); 20 random start / goal pairs in a real worker thread vs in-thread (same status, cost, expansions); the navigator walking an interim answer and splicing in the final one; a crash logged once, its search failed, the worker restarted |

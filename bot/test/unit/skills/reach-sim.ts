@@ -88,6 +88,17 @@ export interface SimOptions {
   gotoOpts?: Partial<NavGotoOptions>;
   /** Track R8: no near ends (Navigator.nearEnds false: the behaviour before R8). */
   noNear?: boolean;
+  /** Track W2 way: no handed, kept or resumed ways (Navigator.keepWays false: the behaviour before). */
+  noWay?: boolean;
+  /** Track W2: called once the planner is ready, before the goto (a landing's probe from the start, a way handed to the goto). */
+  before?: (skills: BotSkills) => Promise<Partial<NavGotoOptions> | void>;
+  /**
+   * Track W2 way: something else takes the body (the guard): asked every tick while the goto walks; a detour returned
+   * cancels the goto, runs (the ticks go on), and the goto is asked again with `resume` (GotoProcess's resume). Once a run.
+   */
+  interrupt?: (tick: number, skills: BotSkills, pos: Readonly<Vec3>) => (() => Promise<unknown>) | undefined;
+  /** Track W2 way: the options of the goto asked again after the detour (default `{ resume: true }`). */
+  resumeOpts?: Partial<NavGotoOptions>;
 }
 
 /** Track R8: `REACH_SIM_BESIDE=1` gives every goto of the closed loop `beside`, as `!goto` passes it (the bench's `--beside`, the ladder's tests run with it). */
@@ -362,6 +373,7 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
   if (o.noPerchGoal) skills.nav.perchGoals = false; // Track R6
   if (o.noLow) skills.nav.lowPerch = false; // Track R7
   if (o.noNear) skills.nav.nearEnds = false; // Track R8
+  if (o.noWay) skills.nav.keepWays = false; // Track W2 way
   // the survival layer's avoidance (skills/survival: lava proximity costs, no mobs here)
   const avoidance = new Avoidance({ entities: () => server.world.entities, origin: () => (loop.state.ready ? loop.state.pos : undefined), lavaWorld: server.world });
   skills.nav.cellCost = () => avoidance.costFn();
@@ -374,8 +386,20 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
     await flush();
   }
   conn.tick(o.settleTicks ?? 5);
+  const extra = (await o.before?.(skills)) ?? {};
   let result: SkillResult | undefined;
-  const p = skills.goto(o.goal ?? { type: 'block', p: pair.goal }, { timeoutTicks: o.timeoutTicks ?? 6000, allowBreak: o.allowBreak ?? false, allowPlace: o.allowPlace ?? false, closeDoors: false, explain: true, ...(ENV_BESIDE ? { beside: true } : {}), ...(o.gotoOpts ?? {}) }).then((r) => (result = r));
+  const gotoOpts: NavGotoOptions = { timeoutTicks: o.timeoutTicks ?? 6000, allowBreak: o.allowBreak ?? false, allowPlace: o.allowPlace ?? false, closeDoors: false, explain: true, ...(ENV_BESIDE ? { beside: true } : {}), ...(o.gotoOpts ?? {}), ...extra };
+  // Track W2 way: a goto's answer counts only while it is the run's goto (an interrupted one answers `interrupted`)
+  let gen = 0;
+  const startGoto = (opts: NavGotoOptions): Promise<unknown> => {
+    const g = ++gen;
+    return skills.goto(o.goal ?? { type: 'block', p: pair.goal }, opts).then((r) => {
+      if (g === gen) result = r;
+    });
+  };
+  let p = startGoto(gotoOpts);
+  let detour: Promise<unknown> | undefined;
+  let interrupted = false;
   const self = server.world.self as { health: number };
   let health = o.health ?? 20;
   self.health = health;
@@ -400,8 +424,19 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
   };
   const max = (o.timeoutTicks ?? 6000) + 600;
   // (while the skill's goto is pending too: it surfaces and retries after a goto that ended in water, BotSkills.surfaceAndRetry)
-  while ((skills.nav.busy || result === undefined) && ticks < max && !died) {
+  while ((skills.nav.busy || result === undefined || detour !== undefined) && ticks < max && !died) {
     o.onTick?.(ticks, server.src, loop.state.pos);
+    const d = !interrupted && result === undefined && skills.nav.busy ? o.interrupt?.(ticks, skills, loop.state.pos) : undefined;
+    if (d) {
+      interrupted = true;
+      gen++;
+      skills.cancel();
+      const run = d().then(() => {
+        detour = undefined;
+        p = startGoto({ ...gotoOpts, ...(o.resumeOpts ?? { resume: true }) });
+      });
+      detour = run;
+    }
     conn.tick();
     ticks++;
     const s = loop.state;

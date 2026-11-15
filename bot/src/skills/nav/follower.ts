@@ -577,6 +577,12 @@ export class PathFollower {
     if (sameColumn || (inCol && Math.hypot(tx - p.x, tz - p.z) < 0.3)) this.centre(cmd, s, tx, tz, true);
     else this.steer(cmd, tx - p.x, tz - p.z);
     const dy = target.feet - p.y;
+    // Track W2 way: standing on the ground out of the water over a dive node below (the guard left the body on the rim of
+    // the pool, its box 0.03 over the edge of the block beside; the plan from there dives): no sneak (a sneaking body
+    // never steps off an edge: the move timed out three times, 27 ticks each, on the Realm), the walk to the column's
+    // centre above takes it off the rim into the water
+    const wet = s.inWater === true || this.grid.cls(Math.floor(p.x), Math.floor(p.y + 0.01), Math.floor(p.z))?.liquid === 'water';
+    if (s.onGround && !wet && dy < -DIVE_SINK) return cmd;
     // Track R1: a block two over the target's feet cell (a flooded tunnel 2 high under its roof): the floating body's
     // head would meet it (the body floated 0.27 over the node and stood at the roof's edge until it drowned,
     // water:12:8): sunk first, no forward until the body fits under it
@@ -936,6 +942,15 @@ export class PathFollower {
   }
 
   /** Track R1: lava or a hazard in a cell beside (8 around, body height and the floor's level) node n's cells. */
+  /**
+   * Track W2 way: the move into `n` is a drop the body creeps off at HAZARD_TURN_SPEED (lava or a hazard beside the
+   * landing): one forward press each DOUBLE_TAP_GUARD + 1 ticks, about 0.02 blocks a tick (the cave fixture: 0.62 blocks
+   * in 33 ticks). The navigator's move timeout counts it (DROP_CREEP_TICKS).
+   */
+  creepsInto(n: PathNode): boolean {
+    return n.move === 'drop' && this.hazardBeside(n);
+  }
+
   private hazardBeside(n: PathNode): boolean {
     for (let dx = -1; dx <= 1; dx++)
       for (let dz = -1; dz <= 1; dz++) {

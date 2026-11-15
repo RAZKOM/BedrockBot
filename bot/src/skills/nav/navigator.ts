@@ -35,6 +35,7 @@ import { corridorState, fineTarget, touches, waypointGoal, type CorridorState } 
 import type { CoarseLayer, CoarseMode, CorridorStatus } from '../coarse/types.ts'; // Track CB
 import { AirClock, bodyInWater, headUnderWater } from './water.ts'; // Track W1
 import { trappedWhy, waterDigConditions } from './digout.ts'; // Track W2
+import { RESUME_KEEP_MS, REJOIN_MAX, REJOIN_MS, REJOIN_NODES, WAY_AHEAD, WAY_BACK, clearlyShorter, nearestOnWay, nodeOnWay, wayActions, wayBlocks, wayBroken, wayFrom } from './way.ts'; // Track W2 way
 import { DIG_WAY_MAX_BLOCKS, DIG_WAY_PRICE, LONG_DIG_PRICE, LONG_DIG_WEIGHT, fallsHurt, harmlessFalls, lastResortFalls, longDigOptions, type DigWayLevel } from './digway.ts'; // Track W3; Track R3: the long dig search
 import { isNaturalTerrain } from '../place/scaffold.ts'; // Track R1
 import { REACH_RULES, causeTag, causeWords, fallOnPath, fallWords, relaxOptions, rulesOnPath, sealedPocket, type ReachCause, type ReachRule, type RefusedFall } from './reach.ts'; // Track R1; Track R2: fallOnPath; Track R4: fallWords
@@ -223,6 +224,14 @@ export interface PlanRecord {
   noProgress?: boolean;
   /** The search touched unloaded world. */
   unknown?: boolean;
+  /**
+   * Track W2 way: no search, the kept way walked on from the node the body stands on (`on`), or a rejoin search's way
+   * back onto it (`rejoin`). `kept` on a fresh plan searched beside a kept way: `way` the way stayed, `fresh` it replaced it.
+   */
+  way?: 'on' | 'rejoin';
+  kept?: 'way' | 'fresh';
+  /** Track W2 way: blocks of the path this plan left the goto walking (the plan line's number). */
+  blocks?: number;
 }
 
 /** What happened during one goto (for tests, metrics and logs). */
@@ -321,6 +330,21 @@ interface Search {
   noInterim?: boolean;
   /** Track R8: a near end's search (PathOptions.nearEnd). */
   near?: boolean;
+  /** Track W2 way: a rejoin search back onto a kept way (any of its nodes `lo` to `hi`); its way and the kept way's rest are walked. */
+  rejoin?: { way: KeptWay; lo: number; hi: number };
+  /** Track W2 way: a fresh plan searched while a kept way is walked: it replaces the way only when clearly shorter (way.ts clearlyShorter). */
+  keep?: true;
+}
+
+/** Track W2 way: where the kept way came from. */
+type WaySource = 'handed' | 'resumed' | 'own';
+
+/** Track W2 way: a whole way kept (the path, whether it ends at the goal, where it came from, the node to look from). */
+interface KeptWay {
+  path: PathNode[];
+  whole: boolean;
+  source: WaySource;
+  from: number;
 }
 
 /** Track R1: the "why unreachable" searches of a goto about to give up (nav/reach.ts). */
@@ -395,7 +419,7 @@ interface Active {
   lastMain: PathResult['status'] | undefined;
   /** Track R1: the goto's partial plans led back and forth (no way on in the loaded world, as an exhaustive `none`). */
   looped: boolean;
-  opts: Required<GotoOptions>;
+  opts: Required<Omit<GotoOptions, 'way' | 'resume'>>;
   pathOpts: PathOptions;
   path: PathNode[];
   status: PathResult['status'] | undefined;
@@ -520,6 +544,13 @@ interface Active {
   corridorDirty: boolean;
   /** Track CB: waypoints the fine planner failed to reach; past CORRIDOR_MAX_FAILURES no corridor is asked for again. */
   corridorFailures: number;
+  /**
+   * Track W2 way (way.ts): `a.path` is a whole way kept (it ends at the goal, or is a handed way that ends near it): a
+   * re-plan after a correction or off the path walks on along it or rejoins it. Undefined: the path is a partial plan.
+   */
+  way: { whole: boolean; source: WaySource } | undefined;
+  /** Track W2 way: a handed way (GotoOptions.way, or a resume's kept way) the first plan looks at. */
+  handed: KeptWay | undefined;
   report: GotoReport;
   finish: (r: SkillResult) => void;
 }
@@ -539,6 +570,13 @@ const BODY_HEIGHT = 1.8;
 const CORRIDOR_WAIT_TICKS = 12;
 /** Track CB: a corridor is re-planned after a change near it at most this often (ticks). */
 const CORRIDOR_REPLAN_TICKS = 60;
+/**
+ * Track W2 way: ticks a drop into a node beside lava adds to its move's estimate for the move timeout: the follower creeps
+ * off that edge at 0.05 a tick with one forward press every 8 ticks (follower.ts creepsInto), up to 1.2 blocks, about 60
+ * ticks, and the timeout (2 x the estimate + 10) gave the 1-block drop 34: it timed out while the body was going over
+ * the edge, and the retreat took it back up (the cave fixture, the landing probe's way down a stair of drops by lava).
+ */
+export const DROP_CREEP_TICKS = 30;
 /** Track R1: the bigger search's budget, x the worker's main budget (2 s, 500 000 nodes: 8 s, 2 000 000). */
 export const BIG_SEARCH = 4;
 /** Track R1: "why unreachable" searches a goto runs at most (every rule lifted, then single rules). */
@@ -655,6 +693,8 @@ export class Navigator {
   private coarse: { layer: CoarseLayer; minBlocks: () => number; off: () => void } | undefined;
   /** Report of the last goto (also while it runs). */
   lastReport: GotoReport | undefined;
+  /** Track W2 way: the way the last interrupted goto was walking (its goal as JSON), for its resume (GotoOptions.resume). */
+  private lastWay: { goal: string; path: PathNode[]; whole: boolean; at: number } | undefined;
   /** Track S: the `cellCost` option, settable after construction (the survival kit installs avoidance). */
   cellCost: NavigatorOptions['cellCost'];
   /** Track AT: planner cost overrides read live each plan (the End: `maxDrop` 1, no irreversible drops; world/dimension.ts). */
@@ -695,6 +735,8 @@ export class Navigator {
    * top's node (false: the behaviour before, for the tests).
    */
   nearEnds = true;
+  /** Track W2 way (nav/way.ts): a handed way is walked, a kept way rejoined, a resume walks on along its way (false: the behaviour before, for the bench). */
+  keepWays = true;
   private protect: NavigatorOptions['protect'];
   /** Track BK: cells (cellKey) no goto may dig while a job holds them (a quarry's stair treads); every goto's noBreak starts with them. */
   readonly keptCells = new Set<number>();
@@ -997,7 +1039,7 @@ export class Navigator {
       if (k !== undefined && this.blacklist.has(k)) skipped.push(k);
     }
     const nothingLeft = members ? members.length === 0 : skipped.length > 0;
-    const opts: Required<GotoOptions> = {
+    const opts: Required<Omit<GotoOptions, 'way' | 'resume'>> = {
       timeoutTicks: options.timeoutTicks ?? 6000,
       replanOnCorrection: options.replanOnCorrection ?? true,
       sprint: options.sprint ?? true,
@@ -1110,6 +1152,8 @@ export class Navigator {
         corridorAt: 0,
         corridorDirty: false,
         corridorFailures: 0,
+        way: undefined, // Track W2 way
+        handed: this.keepWays ? this.handedWay(goal, options) : undefined,
         report,
         finish: (r) => {
           if (this.active !== a) return;
@@ -1121,6 +1165,7 @@ export class Navigator {
           this.loop.release();
           if (!r.ok && r.reason === 'unreachable' && report.segments === 0) this.log.warn(this.noSegmentLine(a));
           this.settleBlacklist(a, r); // Track R
+          this.rememberWay(a, r); // Track W2 way
           this.log.info(
             `goto ${JSON.stringify(goal)}: ${r.ok ? 'ok' : r.reason} after ${report.ticks} ticks, ${report.distance.toFixed(1)} blocks, ` +
               `${report.plans.length} plan(s)${report.plans.some((p) => p.via === 'worker') ? ' (worker)' : ''}, ${report.segments} segment(s), ${report.corrections} correction(s), ${report.stuck} stuck, max tick ${report.maxTickMs} ms` +
@@ -1134,7 +1179,7 @@ export class Navigator {
       };
       this.active = a;
       if (nothingLeft) a.finish({ ok: false, reason: members && skipped.length === 0 ? 'unreachable' : 'blacklisted' }); // Track R
-      else this.requestCorridor(a, 'start'); // Track CB
+      else if (!a.handed) this.requestCorridor(a, 'start'); // Track CB (Track W2 way: not while a handed way may be walked)
     });
   }
 
@@ -1966,12 +2011,235 @@ export class Navigator {
     this.log.info(`goto: walking the way the "why" search found (${p.length - from} nodes)`);
     a.path = from === 0 ? p : [{ ...p[from]!, move: 'start' }, ...p.slice(from + 1)];
     a.status = 'found';
+    a.way = undefined; // Track W2 way
     a.aheadBlocked = false;
     a.doors = [];
     a.actedUpTo = -1;
     a.report.segments++;
     this.startLeg(a, 0);
     return true;
+  }
+
+  // ---- Track W2 way: a walk keeps to its way (nav/way.ts; docs/pathfinding.md "A walk keeps to its way") ------------
+
+  /** A walk to a place (a `block` or an `xz` goal): its plans are logged at INFO. */
+  private walkGoal(a: Active): boolean {
+    return a.goal.type === 'block' || a.goal.type === 'xz';
+  }
+
+  /** The way the first plan looks at: a resume's kept way to the same goal (RESUME_KEEP_MS at most), else GotoOptions.way. */
+  private handedWay(goal: NavGoal, o: NavGotoOptions): KeptWay | undefined {
+    const last = this.lastWay;
+    if (o.resume && last?.goal === JSON.stringify(goal) && Date.now() - last.at <= RESUME_KEEP_MS) {
+      this.lastWay = undefined;
+      return { path: last.path, whole: last.whole, source: 'resumed', from: 0 };
+    }
+    const w = o.way;
+    if (!w || w.length < 2) return undefined;
+    const end = w[w.length - 1]!;
+    return { path: [...w], whole: goalTest(goal, this.grid).done(end.x, end.y, end.z, end.feet), source: 'handed', from: 0 };
+  }
+
+  /** A goto interrupted while it walked a kept way leaves it for its resume; an arrival forgets it. */
+  private rememberWay(a: Active, r: SkillResult): void {
+    const goal = JSON.stringify(a.goal);
+    if (r.ok) {
+      if (this.lastWay?.goal === goal) this.lastWay = undefined;
+      return;
+    }
+    if (r.reason !== 'interrupted' || !a.way || a.path.length - 1 - Math.max(0, a.passedAbs) < 1) return;
+    this.lastWay = { goal, path: wayFrom(a.path, Math.max(0, a.passedAbs)), whole: a.way.whole, at: Date.now() };
+  }
+
+  /**
+   * The first plan with a handed way, or a re-plan after a correction or a step off the path while a kept way is walked:
+   * the way is walked on from the node the body stands on (no search), or rejoined a few nodes on (a small search to any
+   * of them); the body far off it (REJOIN_MAX), a node of it no longer standable, any other re-plan (a block changed on
+   * it, a move timed out, an action failed, the body stuck): the way is dropped and the goto plans afresh. Returns true
+   * when the way was taken (walked or its rejoin search started).
+   */
+  private keepWay(a: Active, s: InputLoopState, start: LocatedNode, reason: ReplanReason): boolean {
+    let k: KeptWay | undefined;
+    if (!this.keepWays) {
+      a.way = undefined;
+      return false;
+    }
+    if (a.handed) {
+      k = a.handed;
+      a.handed = undefined;
+    } else if (a.way && (reason === 'correction' || reason === 'off_path')) {
+      k = { path: a.path, whole: a.way.whole, source: a.way.source, from: Math.max(0, a.passedAbs) };
+    }
+    if (a.way && !k && reason !== 'start') this.log.debug(`goto: the way kept is dropped (a ${reason} re-plan)`);
+    a.way = undefined;
+    if (!k || a.big || a.long || a.nearSearch || a.corridor) return this.wayDropped(a, k);
+    // a handed way is looked at whole (a resume finds the body anywhere along it); the goto's own from the node last passed
+    const all = k.source !== 'own';
+    const lo = all ? 0 : Math.max(0, k.from - WAY_BACK);
+    const hi = Math.min(k.path.length - 2, all ? k.path.length - 2 : k.from + WAY_AHEAD);
+    if (hi < lo) return this.wayDropped(a, k);
+    // the node the body stands on: the start node itself when the way has it, else the nearest within WAY_ON_H / WAY_ON_V
+    let on = -1;
+    for (let i = lo; i <= hi; i++) {
+      const n = k.path[i]!;
+      if (n.x === start.x && n.y === start.y && n.z === start.z) on = i;
+    }
+    if (on < 0) on = nodeOnWay(k.path, s.pos, lo, hi);
+    // (the goto's own way is rejoined only from a node of it: a body off it plans afresh, as before. In the open a fresh plan
+    // from where the body is takes the straight line on, and a rejoin's kink made the pure pursuit cut across it and go off
+    // the path a second time; the turn back this guards against comes from handed ways left by the guard)
+    if (on < 0 && k.source === 'own') return this.wayDropped(a, k);
+    const near = on >= 0 ? undefined : nearestOnWay(k.path, s.pos, all ? lo : k.from, hi);
+    const from = on >= 0 ? on : near?.i;
+    if (from === undefined) {
+      this.log.info(`goto: off its way by more than ${REJOIN_MAX} blocks at ${fmt(s.pos)}: planning afresh`);
+      return this.wayDropped(a, k);
+    }
+    const broken = wayBroken(this.grid, k.path, from);
+    if (broken >= 0) {
+      const n = k.path[broken]!;
+      this.log.info(`goto: node ${broken} of its way (${n.move} ${n.x} ${n.feet.toFixed(1)} ${n.z}) can no longer be stood on: planning afresh`);
+      return this.wayDropped(a, k);
+    }
+    if (on >= 0) {
+      const path = wayFrom(k.path, on);
+      a.report.plans.push({ reason, tick: a.t, status: k.whole ? 'found' : 'partial', nodes: path.length, expanded: 0, ms: 0, slices: 0, way: 'on', blocks: +wayBlocks(path).toFixed(1) });
+      this.log.info(`goto: walking ${k.source === 'own' ? 'on along its way' : `the ${k.source} way`} from node ${on} of ${k.path.length - 1} (${reason}): ${path.length} nodes, ${wayBlocks(path).toFixed(1)} blocks${k.whole ? '' : ', to its end near the goal'}`);
+      this.walkPath(a, path, k.whole ? 'found' : 'partial');
+      a.way = { whole: k.whole, source: k.source };
+      if (k.source !== 'own' && reason === 'start') this.startKeep(a, path[0]!, reason);
+      return true;
+    }
+    // off it by up to REJOIN_MAX: a small search back onto it, to any of its nodes from the nearest on
+    // (joined from as many nodes on as the body is off it: from the nearest node itself the way back is square to the way, and
+    // the pure pursuit cut the corner across it; a member farther on is still reached through the nearer ones when that is cheaper)
+    const rlo = Math.min(k.path.length - 1, near!.i + Math.ceil(near!.d));
+    const rhi = Math.min(k.path.length - 1, rlo + WAY_AHEAD);
+    const goal: NavGoal = { type: 'any', goals: k.path.slice(rlo, rhi + 1).map((n) => ({ type: 'block' as const, p: { x: n.x, y: n.y, z: n.z } })) };
+    const o: PathOptions = { ...a.pathOpts, maxNodes: REJOIN_NODES, maxMs: REJOIN_MS };
+    delete o.frontier;
+    delete o.nearEnd;
+    delete o.perchGoal;
+    if (start.perch && start.feet !== undefined) o.startFeet = start.feet;
+    else delete o.startFeet;
+    delete o.startCut;
+    this.log.info(`goto: ${near!.d.toFixed(1)} blocks off its way at ${fmt(s.pos)} (${reason}): rejoining it (nodes ${rlo} to ${rhi} of ${k.path.length - 1})`);
+    a.search = { s: new PathSearch(this.grid, start, goal, o), kind: 'main', via: 'thread', reason, tick: a.t, slices: 0, goal, rejoin: { way: k, lo: rlo, hi: rhi } };
+    this.idleBody(s);
+    return true;
+  }
+
+  /** No way kept: the goto plans afresh (and asks for the corridor a handed way had made it skip). Returns false. */
+  private wayDropped(a: Active, k: KeptWay | undefined): false {
+    if (k && k.source !== 'own' && !a.report.corridor) this.requestCorridor(a, 'start');
+    return false;
+  }
+
+  /** The rejoin search's answer: its way and the kept way's rest after the node it reached; none: the goto plans afresh. */
+  private onRejoinResult(a: Active, res: PathResult, search: Search): boolean {
+    this.record(a, res, search, { way: 'rejoin' });
+    const r = search.rejoin!;
+    const end = res.path.at(-1);
+    let j = -1;
+    if (res.status === 'found' && end) {
+      for (let i = r.lo; i <= r.hi && i < r.way.path.length; i++) {
+        const n = r.way.path[i]!;
+        if (n.x === end.x && n.y === end.y && n.z === end.z) j = i;
+      }
+    }
+    if (j < 0) {
+      this.log.info(`goto: no way back onto its way (${res.status}, ${res.expanded} expanded): planning afresh`);
+      this.wayDropped(a, r.way);
+      a.replan = search.reason;
+      a.waitUntil = a.t;
+      this.loop.release();
+      return false;
+    }
+    const path = res.path.concat(r.way.path.slice(j + 1));
+    this.log.info(`goto: back onto its way at node ${j} by ${res.path.length} nodes (${wayBlocks(res.path).toFixed(1)} blocks): ${path.length} nodes, ${wayBlocks(path).toFixed(1)} blocks`);
+    this.walkPath(a, path, r.way.whole ? 'found' : 'partial');
+    a.way = { whole: r.way.whole, source: r.way.source };
+    if (r.way.source !== 'own' && search.reason === 'start') this.startKeep(a, path[0]!, search.reason);
+    return true;
+  }
+
+  /** A fresh plan from where the body took a handed way, searched while it walks the way (onKeepResult compares them). */
+  private startKeep(a: Active, start: PathNode, reason: ReplanReason): void {
+    const search = this.newSearch(a, start, 'main', reason);
+    search.kind = 'upgrade';
+    search.keep = true;
+    search.noInterim = true;
+    a.search = search;
+  }
+
+  /**
+   * The fresh plan searched beside a handed way: it replaces the way only when it reaches the goal and is clearly shorter
+   * (way.ts clearlyShorter) with no more digs, places or doors; from where the two meet (spliced there), or, when they do
+   * not meet, counting the walk back to where the fresh plan starts (a re-plan from where the body is). Else the way is
+   * walked on; a way that ends near the goal takes the fresh plan's last steps from its end when the fresh plan passes it.
+   */
+  private onKeepResult(a: Active, res: PathResult, search: Search): void {
+    this.record(a, res, search, { upgrade: true });
+    const rec = a.report.plans[a.report.plans.length - 1]!;
+    if (!a.way) return; // the way was dropped meanwhile: the walk planned afresh
+    rec.kept = 'way';
+    if (res.status !== 'found' || res.path.length < 2) {
+      this.log.info(`goto: the fresh plan beside the way is ${res.status} (${res.expanded} expanded): walking on along the way`);
+      return;
+    }
+    const gp = goalPoint(a.goal);
+    const last = a.path[a.path.length - 1]!;
+    const toGoal = a.way.whole || !gp ? 0 : Math.hypot(gp.x - (last.x + 0.5), gp.y === undefined ? 0 : gp.y - last.feet, gp.z - (last.z + 0.5));
+    const at = new Map<number, number>();
+    res.path.forEach((n, j) => at.set(cellKey(n.x, n.y, n.z), j));
+    const from = a.action ? a.action.node : Math.max(0, a.passedAbs);
+    let k = -1;
+    let j = -1;
+    for (let i = from; i < a.path.length; i++) {
+      const n = a.path[i]!;
+      const m = at.get(cellKey(n.x, n.y, n.z));
+      if (m !== undefined) {
+        k = i;
+        j = m;
+        break;
+      }
+    }
+    // they meet: the rests from there; they do not: the fresh plan from where it starts plus the walk back to it
+    const keptRest = (k >= 0 ? wayBlocks(a.path, k) : wayBlocks(a.path, from)) + toGoal;
+    const fresh = k >= 0 ? wayBlocks(res.path, j) : wayBlocks(a.path, 0, from) + wayBlocks(res.path);
+    const fewer = k >= 0 ? wayActions(res.path, j) <= wayActions(a.path, k) : wayActions(res.path) <= wayActions(a.path, from);
+    const verdict = `the fresh plan ${fresh.toFixed(1)} blocks against the way's ${keptRest.toFixed(1)}${k >= 0 ? ` from node ${k}, where they meet` : ', which it does not meet'}`;
+    if (clearlyShorter(fresh, keptRest) && fewer) {
+      rec.kept = 'fresh';
+      if (k >= 0) {
+        a.path = a.path.slice(0, k + 1).concat(res.path.slice(j + 1));
+        a.status = 'found';
+        a.aheadBlocked = false;
+        a.doors = a.doors.filter((d) => d.closeAt <= k);
+        a.actedUpTo = Math.min(a.actedUpTo, k);
+        a.report.upgrades = (a.report.upgrades ?? 0) + 1;
+        a.way = { whole: true, source: 'own' };
+        if (!a.action) this.startLeg(a, a.follower ? a.legFrom + a.follower.passedIndex : a.passedAbs);
+        this.log.info(`goto: ${verdict}: the fresh plan is clearly shorter, taken from there`);
+      } else {
+        a.way = undefined;
+        if (!a.action && a.replan === undefined) a.replan = 'upgrade';
+        this.log.info(`goto: ${verdict}: the fresh plan is clearly shorter, re-planning from here`);
+      }
+      return;
+    }
+    this.log.info(`goto: ${verdict}: walking on along the way`);
+    // a way that ends near the goal: the fresh plan's last steps from the way's end, when it passes there
+    if (!a.way.whole) {
+      const e = at.get(cellKey(last.x, last.y, last.z));
+      if (e !== undefined && e < res.path.length - 1) {
+        const oldLast = a.path.length - 1;
+        a.path = a.path.concat(res.path.slice(e + 1));
+        a.status = 'found';
+        a.way = { whole: true, source: a.way.source };
+        if (a.legTo === oldLast && !a.action) this.startLeg(a, a.follower ? a.legFrom + a.follower.passedIndex : oldLast);
+      }
+    }
   }
 
   /**
@@ -2239,7 +2507,7 @@ export class Navigator {
     }
     if (passed + 1 <= a.legTo) {
       let est = 0;
-      for (let i = passed + 1; i <= aim; i++) est += a.path[i]!.cost;
+      for (let i = passed + 1; i <= aim; i++) est += a.path[i]!.cost + (f.creepsInto(a.path[i]!) ? DROP_CREEP_TICKS : 0); // Track W2 way: the creep off a drop beside lava
       if (a.t - a.passTick > this.moveTimeout.factor * est + this.moveTimeout.margin) {
         a.report.stuck++;
         a.report.moveTimeouts++;
@@ -2410,8 +2678,12 @@ export class Navigator {
         this.planner?.touchCached(res.path);
       }
       a.report.planMs += res.ms;
-      if (search.kind === 'main') {
+      if (search.rejoin) {
+        if (!this.onRejoinResult(a, res, search)) return false; // Track W2 way
+      } else if (search.kind === 'main') {
         if (!this.onMainResult(a, res, search)) return false;
+      } else if (search.keep) {
+        this.onKeepResult(a, res, search); // Track W2 way
       } else if (search.kind === 'upgrade') {
         if (!this.onUpgradeResult(a, res, search)) return false;
       } else {
@@ -2419,7 +2691,7 @@ export class Navigator {
       }
       return true;
     }
-    if (search.kind !== 'main') return true;
+    if (search.kind !== 'main' || search.rejoin) return true;
     // a main plan in the worker: walk its interim answer (the best partial path after mainMs) while it goes on
     const early = search.s instanceof WorkerSearch ? search.s.takeInterim() : undefined;
     if (early && early.path.length > 1 && !search.noInterim && !this.stale(search, early)) {
@@ -2640,6 +2912,7 @@ export class Navigator {
       a.actedUpTo = Math.min(a.actedUpTo, k);
       a.report.upgrades = (a.report.upgrades ?? 0) + 1;
       a.unmetFinals = 0; // Track R3
+      a.way = res.status === 'found' && search.wp === undefined ? { whole: true, source: 'own' } : undefined; // Track W2 way
       if (!a.action) this.startLeg(a, a.follower ? a.legFrom + a.follower.passedIndex : a.passedAbs);
       return true;
     }
@@ -2769,6 +3042,8 @@ export class Navigator {
     if (a.placeFailures >= 2) a.pathOpts.allowPlace = false;
     const noAction = new Set([...this.blacklist.cells('place'), ...this.blacklist.cells('use'), ...a.noAction]);
     if (noAction.size) a.pathOpts.noAction = noAction;
+    // Track W2 way: a handed way, or the kept way after a correction or a step off it: walked on, or rejoined, with no fresh plan
+    if (this.keepWay(a, s, start, reason)) return true;
     // Track R3: the long dig search plans this one search with its options; the plan-aheads from its end plan as the
     // level does (they walk on where the dug way comes out, and dig no more than the level would)
     const levelOpts = a.pathOpts;
@@ -2797,7 +3072,7 @@ export class Navigator {
     return true;
   }
 
-  private record(a: Active, res: PathResult, search: Search, flags: { interim?: boolean; upgrade?: boolean } = {}): void {
+  private record(a: Active, res: PathResult, search: Search, flags: { interim?: boolean; upgrade?: boolean; way?: 'rejoin' } = {}): void {
     a.report.plans.push({
       reason: search.reason,
       tick: search.tick,
@@ -2811,9 +3086,13 @@ export class Navigator {
       ...(res.reason === 'no_progress' ? { noProgress: true } : {}),
       ...(res.unknown ? { unknown: true } : {}),
       ...flags,
+      blocks: +wayBlocks(res.path).toFixed(1), // Track W2 way
     });
-    const tag = flags.interim ? ' interim' : flags.upgrade ? ' final' : '';
-    this.log.debug(`goto: plan (${search.reason}${tag}, ${search.via}) ${res.status}, ${res.path.length} nodes, ${res.expanded} expanded, ${res.ms.toFixed(1)} ms over ${search.slices} tick(s)${res.frontier ? ', to the frontier' : ''}${res.unknown ? ', unknown touched' : ''}${res.path.length > 1 ? `, ends ${res.path.slice(-3).map((n) => `${n.move} ${n.x} ${n.feet.toFixed(1)} ${n.z}`).join(', ')}` : ''}`); // Track R2: where it ends
+    const tag = flags.interim ? ' interim' : flags.upgrade ? (search.keep ? ' beside the way' : ' final') : search.rejoin ? ' rejoin' : search.kind === 'ahead' ? ' ahead' : '';
+    // Track W2 way: one line a plan at INFO for a walk to a place (a `block` or `xz` goal: the walks a Realm series asks
+    // about), with the blocks of its path; the other goals' plans (a follow, a pickup, a flee) stay at debug
+    const line = this.walkGoal(a) ? this.log.info.bind(this.log) : this.log.debug.bind(this.log);
+    line(`goto: plan (${search.reason}${tag}, ${search.via}) ${res.status}, ${res.path.length} nodes, ${wayBlocks(res.path).toFixed(1)} blocks, ${res.expanded} expanded, ${res.ms.toFixed(1)} ms over ${search.slices} tick(s)${res.frontier ? ', to the frontier' : ''}${res.unknown ? ', unknown touched' : ''}${res.path.length > 1 ? `, ends ${res.path.slice(-3).map((n) => `${n.move} ${n.x} ${n.feet.toFixed(1)} ${n.z}`).join(', ')}` : ''}`); // Track R2: where it ends
   }
 
   /** Returns false when the goto finished or must wait. */
@@ -3012,8 +3291,16 @@ export class Navigator {
         this.log.info(`goto: no way in the loaded world: heading into the unloaded world towards the goal (frontier leg ${a.frontierLegs}/${FRONTIER_MAX_LEGS}, ${res.path.length} nodes)`);
       }
     }
-    a.path = res.path;
-    a.status = search.wp !== undefined && res.status === 'found' ? 'partial' : res.status; // Track CB: a reached waypoint is not the goal: the leg's end plans on
+    this.walkPath(a, res.path, search.wp !== undefined && res.status === 'found' ? 'partial' : res.status); // Track CB: a reached waypoint is not the goal: the leg's end plans on
+    // Track W2 way: a plan that reaches the goal is the way kept (a correction or a step off it walks on along it)
+    a.way = res.status === 'found' && search.wp === undefined && !flags.interim ? { whole: true, source: 'own' } : undefined;
+    return true;
+  }
+
+  /** The goto walks the path from its start (a plan's answer, a kept way): the doors and hatches it closes behind, the first leg. */
+  private walkPath(a: Active, path: PathNode[], status: PathResult['status']): void {
+    a.path = path;
+    a.status = status;
     a.aheadBlocked = false;
     a.doors = [];
     // Track BG: a hatch this goto opened is closed behind on the new path as well. Track BG2: after the LAST node
@@ -3022,8 +3309,8 @@ export class Navigator {
     for (const h of a.hatches) {
       if (!this.grid.cls(h.x, h.y, h.z)?.open) continue;
       let last = 0;
-      for (let i = 0; i < res.path.length; i++) {
-        const n = res.path[i]!;
+      for (let i = 0; i < path.length; i++) {
+        const n = path[i]!;
         if (n.x === h.x && n.z === h.z && n.feet < h.y + 1 && n.feet + BODY_HEIGHT > h.y) last = i;
       }
       this.scheduleHatchClose(a, h, last);
@@ -3031,7 +3318,6 @@ export class Navigator {
     a.actedUpTo = -1;
     a.report.segments++;
     this.startLeg(a, 0);
-    return true;
   }
 
   private onAheadResult(a: Active, res: PathResult, search: Search): void {
@@ -3055,6 +3341,7 @@ export class Navigator {
     const oldLast = a.path.length - 1;
     a.path = a.path.concat(res.path.slice(1));
     a.status = search.wp !== undefined && res.status === 'found' ? 'partial' : res.status; // Track CB
+    a.way = a.status === 'found' ? { whole: true, source: 'own' } : undefined; // Track W2 way
     a.report.segments++;
     // the leg that ran to the old end now runs on into the new segment
     if (a.legTo === oldLast && !a.action) {

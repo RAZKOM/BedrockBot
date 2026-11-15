@@ -37,6 +37,7 @@ import { PathStore } from '../skills/fly/learn/store.ts'; // Track F9b
 import { pathsDirOf } from './commands-learn.ts'; // Track F9b: where `!learn` keeps its paths
 import { preferSite, RECHECK_EVERY_MS, RecheckState, SITE_BUDGET_MS, SITE_PROBES, SITE_SIMS, siteCandidates } from '../skills/fly/sites.ts'; // Track BL
 import { searchFloors } from '../skills/fly/floors.ts'; // Track F15
+import { wayFromHere, type FoundWay } from '../skills/nav/way.ts'; // Track W2 way: the landing probe's way handed to the walk
 import type { Goal, GotoOptions, SkillResult } from '../skills/types.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { FlightProcess, FlyProcess, landingLine, targetFromPlan, type EntryOffer, type FlyOutcome, type FlyTarget, type LandingHint } from '../tasks/process/fly.ts';
@@ -69,6 +70,8 @@ export const LAND_BUDGET_MS = 6000;
  * took 41 000 nodes with it and 17 600 without, the same walk within 1 % of its ticks (docs/flight.md "L2").
  */
 export const LAND_PROBE_SURFACE = false;
+/** Track W2 way: the landing probes' whole ways kept for the walk after the landing (a search probes up to six cells, its flood a few more). */
+export const FOUND_WAYS_KEPT = 32;
 /** Track BH: open-sky cells probed per leg of a walk out (each LAND_PROBE_NODES / LAND_PROBE_MS) before the plain `xz` leg. */
 export const LEG_PROBES = 6;
 /**
@@ -354,6 +357,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const burn = openBurn();
     return { cruiseY, margin: d.settings.get('flyMargin'), goArounds: d.settings.get('flyGoArounds'), ...(burn ? { burn } : {}) };
   };
+  /** Track W2 way (docs/flight.md "The walk after a landing takes the probe's way"): the whole ways the landing probes found, the newest last. */
+  const foundWays: FoundWay[] = [];
   /**
    * Track BF (docs/flight.md "Landing v3"): the landing for a walk to `goal` (landing.ts findLanding): only
    * live cells, only dry ground, only a cell with a confirmed walking path (a bounded probe plan from its
@@ -366,7 +371,11 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const hostiles = mobsOn() ? landMobsNear(world.entities.values(), pve.mobs, { x: goal.x + 0.5, z: goal.z + 0.5 }, d.settings.get('flyLandSearch') + LAND_MOBS.scan) : [];
     // Track L2: the probe answers with the walk's planned ticks (the walk priced by its path), and takes the longer budget
     // findLanding asks for the walk flood's first cells
-    const probe = nav ? landingProbe(nav, goal, { budget: { nodes: LAND_PROBE_NODES, ms: LAND_PROBE_MS }, surface: LAND_PROBE_SURFACE }) : undefined;
+    const onPath = (path: FoundWay['path']): void => {
+      foundWays.push({ path, goal: { ...goal }, at: Date.now() });
+      if (foundWays.length > FOUND_WAYS_KEPT) foundWays.splice(0, foundWays.length - FOUND_WAYS_KEPT);
+    };
+    const probe = nav ? landingProbe(nav, goal, { budget: { nodes: LAND_PROBE_NODES, ms: LAND_PROBE_MS }, surface: LAND_PROBE_SURFACE, onPath }) : undefined;
     const plan = await findLanding(
       goal,
       label,
@@ -1552,7 +1561,14 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   pve.walk = async (goal: Goal, opts: GotoOptions = {}, label?: string): Promise<SkillResult> => {
     if (goal.type !== 'block') return walk0(goal, opts, label);
     const name = label?.replace(/^walking (to )?/, '') ?? fmt(goal.p);
-    const plain = () => walk0(goal, opts, label);
+    // Track W2 way: a walk that starts where a landing probe of this trip's goal started (the cell the flight landed on)
+    // walks the probe's whole way (GotoOptions.way), read when the walk starts
+    const plain = () => {
+      const at = position();
+      const way = at && !opts.way ? wayFromHere(foundWays, at, goal.p, Date.now()) : undefined;
+      if (way) log.info(`walk: from the landing cell along the landing probe's way (${way.length} nodes, ${pathBlocks(way).toFixed(1)} blocks)`);
+      return walk0(goal, way ? { ...opts, way } : opts, label);
+    };
     // Track BH: the walk, and a glide down when it finds no way to a goal far below
     const walkOrGlide = async (): Promise<SkillResult> => glideFallback(await plain(), goal.p, name, 1, plain);
     const legWalk = (leg: Goal) => walk0(leg, opts, `walking to ${name} (to open sky)`);

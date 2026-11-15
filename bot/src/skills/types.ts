@@ -2,6 +2,7 @@
 import type { ContainerView, ItemStack, Vec3 } from '../world/types.ts';
 import type { DigOptions, DigResult } from './dig/digger.ts';
 import type { Goal } from './nav/goals.ts';
+import type { PathNode } from './nav/astar.ts';
 
 export type { Goal, DigOptions, DigResult };
 
@@ -50,6 +51,18 @@ export interface GotoOptions {
    * tunnel's next step) leaves it off. Default false.
    */
   beside?: boolean;
+  /**
+   * Track W2 way (docs/pathfinding.md "A walk keeps to its way"): a whole walk found just before by a plan of the same
+   * kind (the landing probe's path from the cell a flight landed on): the goto walks it from the node the body stands on
+   * instead of planning, and keeps to it. Not walked when the body stands on none of its first nodes (and is not within
+   * a few blocks of one to rejoin it) or a node of it is no longer standable: the goto plans as before. Default none.
+   */
+  way?: readonly PathNode[];
+  /**
+   * Track W2 way: the walk is taken up again after something else had the body (GotoProcess's resume after the guard): the
+   * way the interrupted goto to the same goal was walking is walked on, as a handed `way`. Default false.
+   */
+  resume?: boolean;
 }
 
 export interface Skills {

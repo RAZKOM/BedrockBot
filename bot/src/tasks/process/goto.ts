@@ -148,7 +148,9 @@ export class GotoProcess extends BaseProcess {
       this.end({ ok: true });
       return;
     }
-    void this.o.mover.goto(g, this.o.opts).then(
+    // Track W2 way (docs/pathfinding.md "A walk keeps to its way"): taken up again after a pre-emption, the walk goes on
+    // along the way it was on (the navigator kept it), not along whatever a fresh plan from here finds
+    void this.o.mover.goto(g, resumed ? { ...this.o.opts, resume: true } : this.o.opts).then(
       (r) => {
         if (t === this.token) this.end(r);
       },
