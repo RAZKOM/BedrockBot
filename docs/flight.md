@@ -7983,6 +7983,37 @@ ran on the PC at once (its flights out were still in the air when the test read 
   every time; on: never, no explosion), a zombie on the cell, no mob (identical);
 - the reflex under a flight (`flee-fly.test.ts`): only while the flight says the body is coming down, from 5.5.
 
+### On the Realm (2026-11-15)
+
+`flyLandMobs` on there (with `flyWayDown` and `flyLandOver`), the live kit, a night with zombies, skeletons, creepers
+and phantoms about: 12 trips of 500 to 575 blocks to six goals under a mountain, each landing at a cave's mouth by the
+brake and the elevator. All 12 arrived, no death; the 14 landings of those trips (two trips landed twice, below) stood
+0.00 to 0.02 from their cell's centre.
+
+- **The search** saw the hostiles it was given (`hostiles known round it: 2 creepers (nearest 62), 2 melee, 2
+  shooting`) and priced cells (`hostiles 1.7 s (a creeper 23 off)`); no cell had to be refused.
+- **The brain's look** moved one landing: a creeper 10.5 from the touchdown and closing 0.07 a tick (3.3 by the time
+  the feet would have been down), the body 14.3 over the floor. The landing went 8 blocks on, clear of every creeper
+  known; the body went round on one rocket and stood on the new centre 19.6 s later. No creeper went off at a
+  landing and none did damage.
+- **The reflex** struck at the touchdown tick (a phantom 1.8 off, 50 ms after the landing).
+- **Damage**: 7.8 over the 12 trips, none of it a creeper's or a melee mob's at a landing: a phantom's swing 15 over
+  the floor (1.8; the brake lost its plan and the flight went round, as in Track F14's series) and skeletons' arrows
+  (5.4 once, 0.3 three times).
+- **Seconds**: the trips with nothing in their way took what they took the day before with the setting off (82 s
+  against 83, 106 against 109, 109 against 117, 111 against 126 to four of the goals); the round for the creeper made
+  one trip 101 s.
+
+How to see it on any world: `!set flyLandMobs on`, a `!goto` over `flyMin` at night; the log's `landing for ...` line
+ends with what was known and names what a cell cost, `flight: landing look: ...` is the brain's round, and the
+`flight: landed` line counts the rounds.
+
+Not this track's, seen in the same series (2 of 12 trips): the body landed, walked off, was back beside its landing
+cell within 8 s, and the walk's re-check (`out from under the roof`) started a flight to a landing 1 block away. It
+had no plan from there, went round on 2 rockets and landed on the same cell 15 to 22 s later; one was shot during that
+takeoff (the 5.4 above). The takeoff decision has no rule against a flight to where the body stands (open; given to
+the takeoff track).
+
 ### Open points (Track M3)
 
 - **The brain's own round costs a go-around or two** (the series above: 19 s): the creeper that made it
@@ -8005,7 +8036,8 @@ ran on the PC at once (its flights out were still in the air when the test read 
 - **Open ground on the server**: the server series is the yard (the elevator). The flare onto open ground has the
   offline rows and a first server series of 11 flights that was stopped (a creeper on the cell: the look on landed 22
   to 24 from the cell each time; the look off came down 0.2 to 0.4 from the cell with the creeper 3 to 14 off).
-- **The Realm**: not flown there. `flyLandMobs` is off by default.
+- **The Realm**: 12 trips ("On the Realm" above), one round for a creeper; a creeper standing on the chosen cell
+  did not occur there. `flyLandMobs` is off by default and on on the Realm since 2026-11-15.
 
 ## Open points
 

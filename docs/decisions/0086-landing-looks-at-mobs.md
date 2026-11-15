@@ -88,6 +88,14 @@ asked), the takeoff waited for a whole trip's planning, and the guard got no ans
     hotbar**, and against an archer or a witch in sight from 14 health down; with a blade from 6 health down, and as
     before once running has failed or the health is critical. Where it cannot go, the floors as they were.
 14. **`fleeFly` stays off by default** until it has run on the Realm.
+15. **On the Realm** (2026-11-15, deployed). `flyLandMobs` on, 12 night trips to goals under a mountain: all arrived,
+    no death, every landing on its cell's centre; the brain moved one landing for a creeper that was closing on the
+    touchdown (8 blocks on, one rocket, 19.6 s) and no creeper went off at a landing; damage 7.8 in all, a phantom's
+    swing in the elevator and skeletons' arrows. The setting stays on there. `fleeFly` on with the live kit, 10
+    `!test mobs` runs (skeletons, a witch, zombies, a pillager): no death, damage 1.6 at the most, the flee never
+    asked, as decision 13 says for a kit with a blade. A flee has not flown on the Realm: the setting is off there
+    again until a run without a blade can be arranged. Seen in the trips and not this record's: a flight started by
+    the walk's re-check to a landing 1 block from the body (2 of 12 trips, 15 to 22 s and 2 rockets each).
 
 ## Rejected
 

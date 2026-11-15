@@ -1030,6 +1030,15 @@ the floors are Track M2's.
   clear). What is still lost there is what was lost before this track: bare-handed against archers and a witch with
   `mobDodge` off, and a bot at low health with a melee mob as fast as it is.
 
+### On the Realm (2026-11-15)
+
+`fleeFly` on, the live kit (netherite, a sword, a shield), flat open ground at night, `!test mobs`: four skeletons
+three times, a witch three times, four zombies twice, a pillager twice. No death in the 10 runs, damage 0 to 1.6 a
+run, every set cleared (3 to 33 s), and the flee was not asked once (`floors none`): with a blade it comes only from
+6 health down or once running has failed, and no run came near that. So the Realm shows that the setting does not
+disturb a fight the kit wins; it does not show a flee. A flee there needs a run without a blade in the hotbar, which
+`!test mobs` cannot arrange yet. The setting is off again on the Realm until one has flown there.
+
 ## Packets (BDS 1.26.60.6, verified)
 
 - **Locator bar** (Track W, `tasks/process/locator.ts`): for every other player the server sends
