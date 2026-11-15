@@ -1077,10 +1077,33 @@ three times, a witch three times, four zombies twice, a pillager twice. No death
 run, every set cleared (3 to 33 s), and the flee was not asked once (`floors none`): with a blade it comes only from
 6 health down or once running has failed, and no run came near that. So the Realm shows that the setting does not
 disturb a fight the kit wins; it does not show a flee. A flee there needs a run without a blade in the hotbar, which
-`!test mobs ... bare` (Track T2) now arranges. The setting is off again on the Realm until one has flown there. (These runs'
+`!test mobs ... bare` (Track T2) now arranges. (These runs'
 `floors none` came from the counter bug that Track T2 fixed, see "`!test mobs`" above, so the records prove nothing.
 The bot's own log of the 10 runs does: it has no `floor: elytra flee (...)` line and no flee process started, so the
 flee was indeed not asked.)
+
+The creeper and mixed sets, the same day and kit with `fleeFly` off (`force`, mobGriefing on): a creeper three times,
+four creepers three times, the mixed four twice, the mixed eight twice. No death; no damage but in the mixed eight
+(6.1 and 6.8, most of it a witch's poison); 15 creepers killed and none went off.
+
+**The flee flown there** (the same day, `fleeFly` on, `bare`: the sword out of the hotbar; the netherite armour on, and
+the fight took the pickaxe from the hotbar, so not bare hands). Four skeletons (3 runs) and a witch (3 runs) never came
+to a flee trigger: 0.6 to 1.3 damage a run, the witch dead in 3 s. The mixed eight, 5 runs: 6.5 to 10.2 damage a run,
+the lowest health 13.3 to 17.4, no death, and one flee, asked when a witch stood 5.9 off at 13.8 health (the rule for
+a shooter in sight below 14 with no blade). Four more runs of the mixed eight with `fleeHealth` raised to 19, so that
+any hit is a flee trigger, gave two more. The three flees:
+
+| asked for | the takeoff began | flew | landed |
+| --- | --- | --- | --- |
+| a witch 5.9 off, health 13.8 (2 creepers, 5 melee, 8 shooting, 1 flying known within 32) | 59 ms after the ask | 96 blocks in 9 s, 1 rocket | no hostile known near |
+| a creeper 3.5 off, health 18.9 (6 creepers, 10 melee, 4 shooting, 1 flying) | 60 ms | 96 blocks in 10 s, 1 rocket | no hostile known near |
+| a zombie 2.7 off, health 18.9 (6 creepers, 8 melee, 5 shooting, 2 flying) | 1.2 s | 96 blocks in 8 s, 1 rocket | a wild hostile 12 off |
+
+None was refused and none ended in a death; each landed by the brake and the elevator on ground the search chose from
+the air. So the flee works on real ground; what the Realm has not shown is a flee that mattered (the armour kept every
+run far from death). `fleeFly` is on on the Realm since. Seen in the same runs: with a full inventory the stowed sword
+could not go back to its slot (a mob's drop had taken it) and stayed in the main inventory until a later fight pulled
+it (open, Track T2's follow-up).
 
 ## Packets (BDS 1.26.60.6, verified)
 

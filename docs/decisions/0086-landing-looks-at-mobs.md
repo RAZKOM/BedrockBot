@@ -96,6 +96,12 @@ asked), the takeoff waited for a whole trip's planning, and the guard got no ans
     asked, as decision 13 says for a kit with a blade. A flee has not flown on the Realm: the setting is off there
     again until a run without a blade can be arranged. Seen in the trips and not this record's: a flight started by
     the walk's re-check to a landing 1 block from the body (2 of 12 trips, 15 to 22 s and 2 rockets each).
+16. **The flee flown on the Realm** (2026-11-15, `!test mobs ... bare`, the sword out of the hotbar, the armour on).
+    Three flees were asked (one by the shooter rule at 13.8 health, two with `fleeHealth` raised to 19 to make any hit
+    a trigger), with 14 to 21 hostiles known within 32 blocks: none refused, the takeoff begun 59 ms, 60 ms and 1.2 s
+    after the ask, 96 blocks flown in 8 to 10 s on one rocket each, each landed by the brake and the elevator, no
+    death. `fleeFly` is on on the Realm since; it stays off by default. Not shown there: a flee that saved the bot (the
+    armour kept every run far from death).
 
 ## Rejected
 
