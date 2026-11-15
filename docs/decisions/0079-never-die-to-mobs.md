@@ -184,3 +184,11 @@ The numbers are in [../pve.md](../pve.md) "Track M2". 30 runs a side of `mixed-8
     before anything moves. `/clear` and `/give` were not used: a given item has no enchantments on Bedrock.
 29. **A run's hits and floors are copies of the counters at its start.** The series read the PvE controller's live counter
     objects at the start and again at the end, so every run said `hits none, floors none`; records before this carry neither.
+30. **`bare` exchanges when the inventory is full** (Track T2, from the Realm). A kit that fights mobs picks up their drops
+    and the server puts a pickup into the first empty slot, the hotbar first, so at a series' end the blade's hotbar slot
+    is usually taken and the inventory often full: the restore left the sword in the main inventory. The restore now
+    exchanges the blade with whatever holds its slot, one `swap` stack request under the inventory screen
+    (`SurvivalKit.swapSlots`, the request the survival kit already used for a box into a full hotbar), predicted with each
+    stack's own wire item: nothing is dropped, nothing needs a free slot. The stow uses the same exchange with a main stack
+    the fight would not select as a weapon (`weaponScore` 0), so `bare` no longer needs a free slot; it is refused only when
+    every main stack is a weapon. The pickup's slot is not the bot's to choose, so it is not steered.

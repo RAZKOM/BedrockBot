@@ -181,9 +181,13 @@ describe.skipIf(!E2E)('pve: !test mobs (Track M1)', () => {
   // the hotbar, the elytra in the main inventory; `fleeFly` on, guard on. The series moves the sword out of the hotbar, the
   // guard sees no blade (pve.hasBlade() false at every look while the run goes) and asks for the elytra flee; after the
   // summary the sword is in slot 0 again, the same item (its enchantment kept). TESTMOBS_BARE_SET (skeleton4) and
-  // TESTMOBS_BARE_RUNS (1) change the set and the runs.
-  it('Track T2: bare: no blade in the hotbar, the elytra flee asked, the sword back in its slot', async () => {
+  // TESTMOBS_BARE_RUNS (1) change the set and the runs. The second case fills every other slot with cobblestone first (the
+  // Realm's inventory after a series of drops): the stow and the restore exchange places with a stack (no free slot needed).
+  let lastBare = 0;
+  const bareCase = async (full: boolean): Promise<void> => {
     const b = bot!;
+    // the guard asks for the elytra flee at most every 30 s (tasks/pve.ts FLOOR_RETRY_MS): a case right after the other waits
+    if (lastBare) await sleep(Math.max(0, 32_000 - (Date.now() - lastBare)));
     const set = process.env.TESTMOBS_BARE_SET ?? 'skeleton4';
     const runs = Number(process.env.TESTMOBS_BARE_RUNS ?? 1);
     b.task.home!.set({ x: START.x + 400, y: FEET_Y, z: START.z });
@@ -195,11 +199,15 @@ describe.skipIf(!E2E)('pve: !test mobs (Track M1)', () => {
     await b.truth.ok('setslot', [b.name, 1, 'firework_rocket', 64]);
     await b.truth.ok('setslot', [b.name, 2, 'bread', 8]);
     await b.truth.ok('setslot', [b.name, 9, 'elytra', 1]);
+    if (full) for (const i of [3, 4, 5, 6, 7, 8, ...Array.from({ length: 26 }, (_, k) => 10 + k)]) await b.truth.ok('setslot', [b.name, i, 'cobblestone', 64]);
+    b.pve.hotbar.select(0); // the enchant goes on the held item
+    await sleep(500);
     await pveCmd('enchant', b.name, 'sharpness', '2').catch(() => undefined); // the held sword (slot 0 is selected)
     const inv = b.built.mobility!.world.inventory;
-    await until(() => (inv.slots[0]?.name === 'netherite_sword' && inv.slots[9]?.name === 'elytra' && inv.slots[1]?.name === 'firework_rocket' ? true : undefined), 10_000, 'the kit in the model');
+    await until(() => (inv.slots[0]?.name === 'netherite_sword' && inv.slots[9]?.name === 'elytra' && inv.slots[1]?.name === 'firework_rocket' && (!full || inv.slots.slice(0, 36).every((x) => !!x)) ? true : undefined), 15_000, 'the kit in the model');
     await sleep(1000);
     const enchants0 = JSON.stringify(inv.slots[0]?.enchants ?? []);
+    expect(enchants0).not.toBe('[]');
     note(`bare: the sword before: ${inv.slots[0]?.name} enchants ${enchants0}`);
     b.pve.settings.set('fleeFly', true);
     b.pve.setGuard({ on: true, radius: 16 });
@@ -225,7 +233,7 @@ describe.skipIf(!E2E)('pve: !test mobs (Track M1)', () => {
       say(b, `!test mobs ${set} ${runs} bare 40s`);
       const start = await until(() => b.said.slice(n0).find((m) => m.startsWith(`test mobs ${set}: ${runs} run`) || m.startsWith('test mobs: ') || m.startsWith('test: ')), 30_000, 'the start line', 200);
       note(start);
-      expect(start).toMatch(/, bare \(netherite_sword 0 -> \d+\)/);
+      expect(start).toMatch(full ? /, bare \(netherite_sword 0 <-> \d+ \(cobblestone\)\)/ : /, bare \(netherite_sword 0 -> \d+\)/);
       running = true;
       // the run lines end the watch (the restore of the blades comes after the last one)
       await until(() => (b.said.slice(n0).filter((m) => new RegExp(`^test mobs ${set} run \\d+/${runs}: `).test(m)).length >= runs ? true : undefined), runs * 200_000, 'the run lines', 500);
@@ -240,7 +248,9 @@ describe.skipIf(!E2E)('pve: !test mobs (Track M1)', () => {
       expect(asked).toBeGreaterThan(0);
       expect(lines.filter((m) => /^test mobs \S+ run \d+\/\d+: .*, bare(?: |$)/.test(m))).toHaveLength(runs);
       expect(lines.some((m) => /^test mobs \S+ run \d+\/\d+: .*floors [^,]*\bfly \d/.test(m))).toBe(true);
-      expect(sum).toMatch(/, bare: netherite_sword 0 -> \d+; netherite_sword back in slot 0$/);
+      expect(sum).toMatch(full ? /, bare: netherite_sword 0 <-> \d+ \(cobblestone\); netherite_sword back in slot 0 \(exchanged with \w+, now in slot \d+\)$/ : /, bare: netherite_sword 0 -> \d+; netherite_sword back in slot 0$/);
+      // nothing dropped (the elytra may be worn now: the flee put it on)
+      if (full) expect(inv.slots.slice(0, 36).reduce((n, x) => n + (x?.name === 'cobblestone' ? x.count : 0), 0)).toBe(32 * 64);
       expect(inv.slots[0]?.name).toBe('netherite_sword');
       expect(JSON.stringify(inv.slots[0]?.enchants ?? [])).toBe(enchants0);
       expect(b.pve.combat.puller.hold).toBeUndefined();
@@ -250,6 +260,9 @@ describe.skipIf(!E2E)('pve: !test mobs (Track M1)', () => {
       b.pve.setGuard({ on: false });
       b.pve.settings.set('fleeFly', false);
       await b.truth.cleanup().catch(() => undefined);
+      lastBare = Date.now();
     }
-  }, 600_000);
+  };
+  it('Track T2: bare: no blade in the hotbar, the elytra flee asked, the sword back in its slot', () => bareCase(false), 600_000);
+  it('Track T2: bare with a full inventory: the stow and the restore exchange, the sword back in its slot', () => bareCase(true), 600_000);
 });

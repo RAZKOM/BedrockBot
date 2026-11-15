@@ -68,7 +68,7 @@ export interface SurvivalWorld extends SpawnerWorld {
     readonly selected: number;
     window(id: number): { slots: readonly (ItemStack | null)[] } | undefined;
     rawItem(window: number, slot: number): ItemV4 | undefined;
-    setItem(window: number, slot: number, item: ItemStack | null): void;
+    setItem(window: number, slot: number, item: ItemStack | null, raw?: ItemV4): void;
     freeSlots(): number[];
     onChange(fn: (window: number, slot: number | undefined) => void): () => void;
   };
@@ -298,6 +298,34 @@ export class SurvivalKit {
       const r = await this.requests.withScreen(() => this.d.containers.move({ window: 0, slot: from }, { window: 0, slot: to }, it.count));
       if (!r.ok) return { ok: false, reason: 'reason' in r && r.reason ? r.reason : 'refused' };
       for (const s of [from, to]) if (s < 9) this.d.hotbar.noteRaw?.(s, wireItemOf(inv.slots[s], undefined));
+      return { ok: true };
+    }, { ok: false, reason: 'busy' });
+  }
+
+  /**
+   * Track T2: two player slots' stacks (0..35) exchanged by one `swap` item_stack_request with the inventory screen open,
+   * the request `hotbar` uses to bring a box into a full hotbar. Predicted with each stack's own wire item (its NBT: the
+   * enchantments stay) and rolled back when refused. Nothing is dropped or needs a free slot.
+   */
+  swapSlots(a: number, b: number): Promise<{ ok: boolean; reason?: string }> {
+    return this.queued(async () => {
+      const inv = this.d.world.inventory;
+      const A = inv.slots[a];
+      const B = inv.slots[b];
+      if (!A || A.count <= 0 || !B || B.count <= 0) return { ok: false, reason: 'an empty slot' };
+      const rawA = inv.rawItem(0, a);
+      const rawB = inv.rawItem(0, b);
+      const r = await this.requests.withScreen(async () => {
+        inv.setItem(0, a, { ...B }, rawB);
+        inv.setItem(0, b, { ...A }, rawA);
+        const res = await this.requests.send([{ type_id: 'swap', legacy_type_id: 2, source: inventorySlot(a, A.stackId), destination: inventorySlot(b, B.stackId) }]);
+        if (res.status === 'ok' || res.status === 0) return { ok: true };
+        inv.setItem(0, a, A, rawA);
+        inv.setItem(0, b, B, rawB);
+        return { ok: false, reason: `the swap was refused (${String(res.status)})` };
+      });
+      if (!r.ok) return { ok: false, reason: 'reason' in r && r.reason ? r.reason : 'refused' };
+      for (const s of [a, b]) if (s < 9) this.d.hotbar.noteRaw?.(s, wireItemOf(inv.slots[s], undefined));
       return { ok: true };
     }, { ok: false, reason: 'busy' });
   }

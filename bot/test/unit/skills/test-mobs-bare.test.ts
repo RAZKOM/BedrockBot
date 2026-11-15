@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { bladeScore } from '../../../src/skills/combat/combat.ts';
 import { HotbarPuller } from '../../../src/skills/container/hotbar-moves.ts';
-import { BareHold, hotbarBlades, isBlade, planStow, stowedText, type BarePorts } from '../../../src/skills/test/bare.ts';
+import { BareHold, hotbarBlades, isBlade, planStow, stowedText, swapCandidates, type BarePorts } from '../../../src/skills/test/bare.ts';
 import { MobSeries, mobRunLine, mobSummaryLine, parseMobsArgs, type MobRecord, type MobSeriesPorts, type MobSummary, type MobsSpec } from '../../../src/skills/test/mobs.ts';
 import type { EntityInfo, ItemStack } from '../../../src/world/types.ts';
 import { mob } from './pve-fakes.ts';
@@ -24,7 +24,8 @@ function inventory(extra: Record<number, ItemStack> = {}, full = false): (ItemSt
   return s;
 }
 
-function bareFake(slots: (ItemStack | null)[]) {
+/** The survival kit's moves on a fake inventory; `swap` adds its exchange (SurvivalKit.swapSlots), refused into an empty slot. */
+function bareFake(slots: (ItemStack | null)[], swap = false) {
   const moves: string[] = [];
   const holds: boolean[] = [];
   let held = false;
@@ -37,6 +38,18 @@ function bareFake(slots: (ItemStack | null)[]) {
       slots[from] = null;
       return Promise.resolve({ ok: true });
     },
+    ...(swap
+      ? {
+          swap: (a: number, c: number) => {
+            moves.push(`${a}<->${c}`);
+            if (!slots[a] || !slots[c]) return Promise.resolve({ ok: false, reason: 'an empty slot' });
+            const t = slots[a];
+            slots[a] = slots[c]!;
+            slots[c] = t;
+            return Promise.resolve({ ok: true });
+          },
+        }
+      : {}),
     hold: (on) => {
       held = on;
       holds.push(on);
@@ -45,8 +58,8 @@ function bareFake(slots: (ItemStack | null)[]) {
   return { ports, moves, holds, held: () => held };
 }
 
-function seriesPorts(slots: (ItemStack | null)[], o: { die?: boolean; throwAt?: number; give?: { at: number; slot: number; item: ItemStack }; stopAt?: () => void; flying?: [number, number] } = {}) {
-  const b = bareFake(slots);
+function seriesPorts(slots: (ItemStack | null)[], o: { die?: boolean; throwAt?: number; give?: { at: number; slot: number; item: ItemStack }; stopAt?: () => void; flying?: [number, number]; swap?: boolean } = {}) {
+  const b = bareFake(slots, o.swap);
   const ents = new Map<bigint, EntityInfo>();
   const dead = new Set<bigint>();
   const sent: string[] = [];
@@ -307,6 +320,95 @@ describe('MobSeries bare: the stow and the restore', () => {
     const { bare: _none, ...ports } = f.ports;
     const s = new MobSeries(spec('zombie', 'bare'), ports, 'm1ti');
     expect((await s.stowBlades()).refusal).toBe('test mobs: bare: no inventory moves here');
+  });
+});
+
+describe('a full inventory: the exchange (SurvivalKit.swapSlots)', () => {
+  /** The kit inventory with every main slot full: cobblestone, bread, a pickaxe, an iron sword (a blade) and arrows. */
+  const full = (): (ItemStack | null)[] => {
+    const s = inventory({}, true);
+    s[10] = item('iron_pickaxe');
+    s[11] = item('bread', 16);
+    s[12] = item('iron_sword');
+    return s;
+  };
+
+  it('the restore exchanges the blade with the stack of 64 a pickup put in its slot: nothing needs a free slot', async () => {
+    const slots = inventory();
+    const b = bareFake(slots, true);
+    const h = new BareHold(b.ports);
+    await h.stow(); // sword 0 -> 10, axe 3 -> 11
+    const sword = slots[10];
+    // the series' drops fill every free slot, a stack of 64 gunpowder into hotbar slot 0
+    slots[0] = item('gunpowder', 64);
+    for (let i = 12; i < 36; i++) slots[i] ??= item('bone', 64);
+    slots[3] = item('arrow', 64);
+    const r = await h.restore();
+    expect(r).toEqual({ ok: true, notes: ['netherite_sword back in slot 0 (exchanged with gunpowder, now in slot 10)', 'diamond_axe back in slot 3 (exchanged with arrow, now in slot 11)'] });
+    expect(slots[0]).toBe(sword); // the same stack (enchantments and all)
+    expect(slots[10]).toMatchObject({ name: 'gunpowder', count: 64 }); // nothing dropped
+    expect(slots[11]).toMatchObject({ name: 'arrow', count: 64 });
+    expect(b.moves.slice(-2)).toEqual(['10<->0', '11<->3']);
+    expect(b.held()).toBe(false);
+  });
+
+  it('the blade moved by a pull meanwhile (into another hotbar slot): exchanged back into its own', async () => {
+    const slots = inventory();
+    const b = bareFake(slots, true);
+    const h = new BareHold(b.ports);
+    await h.stow();
+    // a weapon pull (the hold off by hand) took the sword into slot 5; slot 0 now holds gunpowder
+    slots[5] = slots[10]!;
+    slots[10] = null;
+    slots[0] = item('gunpowder', 64);
+    const r = await h.restore();
+    expect(r.notes[0]).toBe('netherite_sword back in slot 0 (exchanged with gunpowder, now in slot 5)');
+    expect(slots[0]?.name).toBe('netherite_sword');
+    expect(slots[5]?.name).toBe('gunpowder');
+    // and one already back in its own slot is left alone
+    const s2 = inventory();
+    const h2 = new BareHold(bareFake(s2, true).ports);
+    await h2.stow();
+    s2[0] = s2[10]!;
+    s2[10] = null;
+    expect((await h2.restore()).notes[0]).toBe('netherite_sword back in slot 0');
+  });
+
+  it('the stow with a full inventory exchanges with a stack the fight would not use (never a tool, never a blade)', async () => {
+    const slots = full();
+    expect(swapCandidates(slots)).not.toContain(10); // the pickaxe: a weapon the fight would select
+    expect(swapCandidates(slots)).not.toContain(12); // a blade
+    expect(swapCandidates(slots).slice(0, 2)).toEqual([13, 14]); // blocks first, then food
+    expect(swapCandidates(slots)).toContain(11);
+    const b = bareFake(slots, true);
+    const h = new BareHold(b.ports);
+    const r = await h.stow();
+    expect(r).toEqual({ ok: true, stowed: [{ item: 'netherite_sword', from: 0, to: 13, swapped: 'cobblestone' }, { item: 'diamond_axe', from: 3, to: 14, swapped: 'cobblestone' }] });
+    expect(hotbarBlades(slots)).toEqual([]);
+    expect(stowedText(r.ok ? r.stowed : [])).toBe('netherite_sword 0 <-> 13 (cobblestone), diamond_axe 3 <-> 14 (cobblestone)');
+    await h.restore();
+    expect(hotbarNames(slots)[0]).toBe('netherite_sword');
+    expect(hotbarNames(slots)[3]).toBe('diamond_axe');
+    expect(slots[13]?.name).toBe('cobblestone');
+  });
+
+  it('the stow is still refused when every main stack is a weapon (or there is no exchange)', () => {
+    const s = inventory({}, true);
+    for (let i = 10; i < 36; i++) s[i] = item(i % 2 ? 'iron_pickaxe' : 'stone_sword');
+    s[9] = item('trident');
+    expect(planStow(s, true)).toEqual({ error: 'test mobs: bare needs 2 inventory slots free or holding something that is no weapon for netherite_sword in slot 0, diamond_axe in slot 3, 0 there; make room first' });
+    expect(planStow(full(), false)).toHaveProperty('error');
+  });
+
+  it('a bare series on a full inventory: stowed by the exchange, back in its slot at the end', async () => {
+    const slots = full();
+    const f = seriesPorts(slots, { swap: true });
+    const s = new MobSeries(spec('zombie', 'bare'), f.ports, 'm1tl');
+    expect(await s.stowBlades()).toEqual({ stowed: 'netherite_sword 0 <-> 13 (cobblestone), diamond_axe 3 <-> 14 (cobblestone)' });
+    const sum = await s.run();
+    expect(f.seen.every((x) => !x.blade)).toBe(true);
+    expect(sum.restored).toEqual(['netherite_sword back in slot 0 (exchanged with cobblestone, now in slot 13)', 'diamond_axe back in slot 3 (exchanged with cobblestone, now in slot 14)']);
+    expect(hotbarNames(slots)[0]).toBe('netherite_sword');
   });
 });
 

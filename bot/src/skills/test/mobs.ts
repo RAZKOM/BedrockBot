@@ -20,9 +20,10 @@
 // only up to 8 levels over or under the bot's: on the Realm's hillside a ring of 7 sent the set downhill) or rough; fewer
 // than half the points level is refused.
 // Track T2 (bare.ts): the word `bare` runs the series with no blade in the hotbar (the floors for a bot without one, the
-// elytra flee first, run although the kit carries a sword): the blades move into free main-inventory slots before the
-// first run (too few free slots: refused), pulls into the hotbar pass them over until the end, a blade the kit's restore
-// gave into the hotbar goes out again after each restore, and they go back to their hotbar slots however the series ends.
+// elytra flee first, run although the kit carries a sword): the blades move into the main inventory before the first run
+// (a free slot, else in exchange with a stack that is no weapon; refused only when there is neither), pulls into the hotbar
+// pass them over until the end, a blade the kit's restore gave into the hotbar goes out again after each restore, and they
+// go back to their hotbar slots however the series ends (in exchange with whatever took the slot).
 import type { Vec3 } from '../../connection/types.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { EntityInfo } from '../../world/types.ts';
@@ -346,7 +347,7 @@ export class MobSeries {
 
   /**
    * Track T2: for a `bare` series, the blades out of the hotbar and the hold on (bare.ts), before the start line; the
-   * refusal line (too few free slots, a move refused, no inventory moves here), else undefined with what was stowed.
+   * refusal line (no slot for a blade, a move refused, no inventory moves here), else undefined with what was stowed.
    * `run()` puts them back however it ends. Without `bare` nothing is touched.
    */
   async stowBlades(): Promise<{ refusal?: string; stowed: string }> {

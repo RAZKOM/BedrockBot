@@ -671,8 +671,13 @@ it comes only from 6 health down), and the dodge may step (with `mobDodge` on). 
 
 - **Stow**: before the first run every blade in hotbar slots 0..8 moves into a free main-inventory slot, one whole-stack
   move each through the survival kit's inventory screen (`SurvivalKit.moveSlot`, the containers' predicted `place` move).
-  Nothing is destroyed or given: the item keeps its enchantments and wear. Too few free main-inventory slots: the series is
-  refused (`test mobs: bare needs 2 free inventory slots for ..., 1 free; make room first`) and nothing moves.
+  Nothing is destroyed or given: the item keeps its enchantments and wear. With no free slot left the blade exchanges places
+  with a main-inventory stack the fight would not take as a weapon (`weaponScore` 0: a block first, then food, then the rest;
+  never a pickaxe, shovel, hoe, trident, mace or another blade), one `swap` stack request (`SurvivalKit.swapSlots`, the
+  request the survival kit already used to bring a box into a full hotbar), so `bare` needs no free slot: the first line says
+  `netherite_sword 0 <-> 13 (cobblestone)`. Only when every main-inventory stack is a weapon is the series refused
+  (`test mobs: bare needs 1 inventory slot free or holding something that is no weapon ...; make room first`), and then
+  nothing moves. The exchanged stack sits in the blade's hotbar slot for the series; the restore swaps it back.
 - **Hold**: until the series ends the hotbar puller (`HotbarPuller.hold`) passes blades over. It is the one road from the
   main inventory into the hotbar for the fight's weapon pull, the Digger's axe pull and a breeding pull; without the hold the
   first fight would bring the sword straight back. Selecting a weapon only looks at the hotbar, so it finds none.
@@ -680,9 +685,15 @@ it comes only from 6 health down), and the dodge may step (with `mobDodge` on). 
   slot, a pickup) moves out too.
 - **Restore**: however the series ends (finished, `!test stop`, a death, an error) each blade goes back to the hotbar slot it
   came from, after a death's recovery and once a flight in the air has come down (the inventory screen is not opened in the
-  air). A slot taken meanwhile has its item parked in a free main slot first; with no free slot the blade goes into another
-  empty hotbar slot, and the line says so. The hold ends in any case. keepInventory is required for every series, so a death
-  keeps the slots; a blade that moved is looked for by its name in the main inventory.
+  air). A slot taken meanwhile exchanges with the blade (the same `swap` request): the occupant goes into the slot the blade
+  comes from, whole, and nothing needs a free slot (`netherite_sword back in slot 8 (exchanged with gunpowder, now in slot
+  10)`). A slot is taken that way as a rule, not by chance: a kit that fights mobs picks up their drops, and the server puts
+  a pickup on the first stack it fits on, else in the first empty slot, the hotbar first; the bot does not choose that slot,
+  and keeping the slot filled with a placeholder would cost a stack and still fail for a drop of the placeholder's kind, so
+  the exchange at the end is the answer. On the Realm (2026-11-15) a full inventory left the sword in the main inventory
+  (`stays in slot 10 (slot 8 holds gunpowder, no free slot)`) until a later fight's weapon pull, before the exchange. A
+  blade a pull moved meanwhile is looked for by its name in the main inventory, then in the hotbar, and exchanged into its
+  own slot from there. The hold ends in any case. keepInventory is required for every series, so a death keeps the slots.
 
 What is not a blade still counts for the fight: a pickaxe, shovel, hoe, trident or mace in the hotbar is still the weapon the
 fight selects (better than a fist), only not one for the guard's `hasBlade()`. The offhand is not looked at. The first line
@@ -696,6 +707,11 @@ inventory, `fleeFly` and the guard on, `skeleton4 1 bare 40s`): the sword was ou
 while the run went, the elytra flee was asked once and flew (landed 96 blocks off after 7 s, one rocket), and the sword was
 back in slot 0 with its enchantment after the summary. The run said `cleared in 7.6 s` although the bot had flown off: the
 harness counts a mob it no longer sees as gone, and a flight of 96 blocks takes it out of view.
+
+With every other slot full of cobblestone (the second case of the same file: no free slot at the stow or the restore) the
+stow said `netherite_sword 0 <-> 10 (cobblestone)`, the flee was asked and flew as before, and the summary said
+`netherite_sword back in slot 0 (exchanged with cobblestone, now in slot 10)`, the enchantment kept and every stack of
+cobblestone still there.
 
 ### The gauntlet (`test/e2e/gaunt-mobs.test.ts`)
 

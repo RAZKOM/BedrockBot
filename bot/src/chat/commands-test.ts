@@ -342,6 +342,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
             bare: {
               slots: () => world.inventory.slots,
               move: (from: number, to: number) => survivalKitOf(task)?.moveSlot(from, to) ?? Promise.resolve({ ok: false, reason: 'no survival kit' }),
+              swap: (a: number, b: number) => survivalKitOf(task)?.swapSlots(a, b) ?? Promise.resolve({ ok: false, reason: 'no survival kit' }),
               hold: (on: boolean) => {
                 pve.combat.puller.hold = on ? isBlade : undefined;
               },
@@ -369,7 +370,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
       reply(`${pf.refusal} (${pf.line})`);
       return;
     }
-    // Track T2: `bare`: the blades out of the hotbar now (refused with too few free slots); run() puts them back
+    // Track T2: `bare`: the blades out of the hotbar now (refused when no slot can take a blade); run() puts them back
     const bare = await s.stowBlades();
     if (bare.refusal) {
       mobSeries = undefined;
