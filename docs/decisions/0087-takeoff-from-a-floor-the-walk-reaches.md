@@ -120,3 +120,9 @@ Reproduced offline and on a test server with a made-up building of the same shap
 - Not covered: a floor whose only takeoff is the route takeoff (left out of the search); a floor beyond 24 blocks or
   more than 16 under / 32 over the feet; a floor reached only by a hurting fall or by digging; a ledge shorter than 12
   blocks of fall.
+- **On the Realm** (2026-11-15, deployed): the trip home from inside the room that began this record flew 2 of 2 (131 s
+  and 128 s; `unreachable` after 4 s before). The search began 3.0 and 4.8 s after the command, took 92 to 126 ms (10
+  floors with an edge within 24 blocks, one probe, the room's roof reached 7 blocks of walk and 4 levels up, one
+  takeoff), and the body was gliding 11.2 and 12.8 s after the command. Five ordinary trips out of a closed room at
+  home flew as before with no floor search. Decision 10's refusal has not been seen there yet: no walk came back out to
+  its landing in those trips.

@@ -770,6 +770,21 @@ the platform lands on the goal at 10 burns from 9 to 21 ticks, no hit. The searc
 `scripts/floor-search-bench.ts`, 20 runs a case on the test host): the building 11 to 29 ms, no ladder 2 to 3 ms, a
 stair with four refused floors (the bound: 4 probes, 4 takeoffs) 7 to 11 ms, open hills with no edge 2 to 3 ms.
 
+**On the Realm** (2026-11-15, the room that began this track, the goal about 2 260 blocks away and 74 below): the
+trip home from inside the room flew 2 of 2 (before: `unreachable` after 4 s). The walk out and the glide down had
+failed 3.0 and 4.8 s after the command (1.5 s after the takeoff where it stood was refused), and the search took 92
+to 126 ms: 10
+floors with an edge within 24 blocks (966 standable cells, 62 on an edge), one walk probe, the room's roof reached 7
+blocks of walk and 4 levels up (71 cells, 27 on an edge), one takeoff simulated. The body climbed the ladder through
+the hatch, walked to the edge and was gliding 11.2 and 12.8 s after the command; the trips took 131 s and 128 s (122 s when
+started on the roof by hand), damage 0.5 once at the first rocket (its cause not known) and none the second time.
+Five ordinary trips from a closed room at home to goals under a mountain flew as before, with no floor search in
+their logs.
+
+How to see it on any world: `!goto` a far goal from a room whose only way out is a ladder, a stair or a door onto a
+floor with a drop of 12 or more under an edge; the log's `the floors the walk reaches from ...` line has the whole
+search, and `walking N blocks to the takeoff site ... (a floor the walk reaches: ...)` the choice.
+
 ### A landing where the body stands is not flown (Track F15)
 
 ADR [0087](decisions/0087-takeoff-from-a-floor-the-walk-reaches.md) decision 10. A trip that has landed near its goal
@@ -788,7 +803,9 @@ blocks, 5 minutes), so the re-check does not plan again there; the log says `fly
 about 1.4 s at the sprint against 15 to 22 s and 2 rockets for the flight; 12 levels is `LEDGE_MIN_DROP`, the least drop
 the ledge takeoff and the glide down take and a fall no walk takes without hurt, so a glide down a cliff a few blocks
 out by the plane stays a flight. Not done: the landing's own walk to the goal is not compared with the body's (one more
-probe on every trip); a landing 9 or more blocks off that is no nearer the goal than the body is still flown.
+probe on every trip); a landing 9 or more blocks off that is no nearer the goal than the body is still flown. On the
+Realm since (2026-11-15, 5 trips to such goals): no flight of that kind, and the rule was not needed either: no walk
+came back out to its landing, so the Realm has not yet shown the refusal line.
 
 ### Flight re-check on long walks
 
