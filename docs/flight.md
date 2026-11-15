@@ -8265,7 +8265,9 @@ under 256 bytes; a source guard that the window's proof is given `rocketsForWind
 
 ### Open points (Track F16)
 
-- **The Realm** has not run it. A trip from cave_start with the box alone (every loose rocket dropped) is the case.
+- **The Realm** has not run the refill: a trip that starts underground with the box alone (every loose rocket dropped) is
+  the case. What ran there with the change deployed (2026-11-15): six trips between two places under one roof with the
+  usual kit (33 or more loose), 30 to 56 s (30 to 53 s before), no refill looked at and no line of it in the log.
 - **A hostile during the refill** has not been run with mobs (the test servers are peaceful): the rules above are the
   code's, the guard's pre-emption during the refill is F13's (the box broken and picked up under the guard).
 - **The bore's windows bail out** on the corridor e2e with `flyCave on` (before and after alike): the trips that now fly

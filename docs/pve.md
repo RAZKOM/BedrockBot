@@ -1139,8 +1139,11 @@ any hit is a flee trigger, gave two more. The three flees:
 None was refused and none ended in a death; each landed by the brake and the elevator on ground the search chose from
 the air. So the flee works on real ground; what the Realm has not shown is a flee that mattered (the armour kept every
 run far from death). `fleeFly` is on on the Realm since. Seen in the same runs: with a full inventory the stowed sword
-could not go back to its slot (a mob's drop had taken it) and stayed in the main inventory until a later fight pulled
-it (open, Track T2's follow-up).
+could not go back to its slot (a mob's drop had taken it) and stayed in the main inventory, and for the next hour no
+fight could pull it back either (the hotbar puller needed a free slot: "Weapon pull" above). Both are fixed by Track
+T2's follow-ups (the exchange). On the Realm the same evening, after them: a bare series of three runs ended
+`netherite_sword back in slot 8 (exchanged with spider_eye, now in slot 34)`, and the next fight was fought with the
+sword.
 
 ## Packets (BDS 1.26.60.6, verified)
 
