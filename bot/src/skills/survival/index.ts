@@ -107,7 +107,7 @@ export interface SurvivalDeps {
   containers: SurvivalContainers;
   source: Pick<PacketSource, 'on' | 'queue'>;
   /** The PvE combat controller (fight state, weapon choice hook). */
-  combat?: { readonly busy: boolean; readonly target: { runtimeId: bigint } | undefined; toolOk: (item: ItemStack) => boolean };
+  combat?: { readonly busy: boolean; readonly target: { runtimeId: bigint } | undefined; toolOk: (item: ItemStack) => boolean; readonly puller?: { swap: ((a: number, b: number) => Promise<{ ok: boolean; reason?: string }>) | undefined } };
   /** Dead or not spawned: do nothing. */
   inactive?: () => boolean;
   /** Settings getter (a settings registry); unknown keys fall back to the defaults. */
@@ -218,6 +218,7 @@ export class SurvivalKit {
     });
     deps.skills.nav.cellCost = () => this.avoidance.costFn();
     if (deps.combat) deps.combat.toolOk = this.toolOk;
+    if (deps.combat?.puller) deps.combat.puller.swap = this.exchange; // a pull into a full hotbar with no free slot exchanges (hotbar-moves.ts)
     this.installDiggerHook();
     this.unsubs.push(
       world.inventory.onChange((window) => {
@@ -309,26 +310,33 @@ export class SurvivalKit {
    */
   swapSlots(a: number, b: number): Promise<{ ok: boolean; reason?: string }> {
     return this.queued(async () => {
-      const inv = this.d.world.inventory;
-      const A = inv.slots[a];
-      const B = inv.slots[b];
-      if (!A || A.count <= 0 || !B || B.count <= 0) return { ok: false, reason: 'an empty slot' };
-      const rawA = inv.rawItem(0, a);
-      const rawB = inv.rawItem(0, b);
-      const r = await this.requests.withScreen(async () => {
-        inv.setItem(0, a, { ...B }, rawB);
-        inv.setItem(0, b, { ...A }, rawA);
-        const res = await this.requests.send([{ type_id: 'swap', legacy_type_id: 2, source: inventorySlot(a, A.stackId), destination: inventorySlot(b, B.stackId) }]);
-        if (res.status === 'ok' || res.status === 0) return { ok: true };
-        inv.setItem(0, a, A, rawA);
-        inv.setItem(0, b, B, rawB);
-        return { ok: false, reason: `the swap was refused (${String(res.status)})` };
-      });
-      if (!r.ok) return { ok: false, reason: 'reason' in r && r.reason ? r.reason : 'refused' };
-      for (const s of [a, b]) if (s < 9) this.d.hotbar.noteRaw?.(s, wireItemOf(inv.slots[s], undefined));
-      return { ok: true };
+      const r = await this.requests.withScreen(() => this.exchange(a, b));
+      return r.ok ? { ok: true } : { ok: false, reason: 'reason' in r && r.reason ? r.reason : 'refused' };
     }, { ok: false, reason: 'busy' });
   }
+
+  /**
+   * The exchange of `swapSlots` itself, for a caller that holds the inventory screen (the hotbar puller's full-inventory
+   * pull, hotbar-moves.ts): the `swap` request, predicted with each stack's wire item, rolled back when refused.
+   */
+  readonly exchange = async (a: number, b: number): Promise<{ ok: boolean; reason?: string }> => {
+    const inv = this.d.world.inventory;
+    const A = inv.slots[a];
+    const B = inv.slots[b];
+    if (!A || A.count <= 0 || !B || B.count <= 0) return { ok: false, reason: 'an empty slot' };
+    const rawA = inv.rawItem(0, a);
+    const rawB = inv.rawItem(0, b);
+    inv.setItem(0, a, { ...B }, rawB);
+    inv.setItem(0, b, { ...A }, rawA);
+    const res = await this.requests.send([{ type_id: 'swap', legacy_type_id: 2, source: inventorySlot(a, A.stackId), destination: inventorySlot(b, B.stackId) }]);
+    if (res.status !== 'ok' && res.status !== 0) {
+      inv.setItem(0, a, A, rawA);
+      inv.setItem(0, b, B, rawB);
+      return { ok: false, reason: `the swap was refused (${String(res.status)})` };
+    }
+    for (const s of [a, b]) if (s < 9) this.d.hotbar.noteRaw?.(s, wireItemOf(inv.slots[s], undefined));
+    return { ok: true };
+  };
 
   /** `!drop all`: the worn armour and the offhand too. */
   dropWorn(): Promise<{ dropped: string[]; refused: string[] }> {

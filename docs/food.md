@@ -177,7 +177,7 @@ pair split by a fence ate the food, made no baby and was locked out for 5 minute
 nearest to it ("ready": adult, alive, not in love, not fed within the last 5 minutes, the vanilla
 breeding cooldown). Per animal: walk to 1.8 blocks (`near`, 300 ticks), put the food in the hand (the
 selected slot, else a hotbar slot, else pulled from the main inventory by the combat skill's
-`HotbarPuller`), look at the animal (60 % of its height), send the click (Packets), and wait up to 20
+`HotbarPuller`; with a full inventory it exchanges, docs/pve.md "Weapon pull"), look at the animal (60 % of its height), send the click (Packets), and wait up to 20
 ticks for the item count to drop or the `inlove` flag; up to 3 tries per animal. Then stand clear
 (inside a pen: walk out and close the gate; else 4 blocks from the pair) and wait up to 10 s for
 babies near the pairs. Fed animals are remembered for 5 minutes: never fed again, and the hunt spares

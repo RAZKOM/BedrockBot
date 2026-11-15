@@ -13,7 +13,12 @@
 // requests of the connection share one request-id counter; nothing here creates a second Containers.
 // A full hotbar: the least useful hotbar item (no durability, not food, not `keep`) is parked in a free
 // main-inventory slot first, then the wanted item takes its hotbar slot (two `place` requests in one
-// screen). With no free main-inventory slot either the pull fails with `no_space`.
+// screen). With no free main-inventory slot either the two stacks exchange places by one `swap` request
+// (`swap`, the survival kit's `exchange`: predicted with each stack's wire item, rolled back when refused),
+// so a full inventory, the usual state of a bot that fights mobs, still gets its sword into the hotbar
+// (the Realm 2026-11-15: 36 of 36 slots, every fight with the pickaxe and a pull that never came). Without
+// `swap` the pull fails with `no_space`. A failed pull says so in the log (HotbarPuller, once a minute a job
+// and reason).
 import { silentLogger, type Logger } from '../../log.ts';
 import { blockMining, toolOf } from '../../data/mining.ts';
 import type { ItemV4 } from '../../world/packets.ts';
@@ -69,6 +74,11 @@ export interface EnsureInHotbarArgs {
   select?: boolean;
   /** Hotbar items that may not be parked in the main inventory to make room. Default: none protected beyond the rules. */
   keep?: (item: ItemStack) => boolean;
+  /**
+   * Two player slots exchanged by one request, the screen held by the caller (SurvivalKit.exchange). Used only with a full
+   * hotbar and no free main-inventory slot; undefined: `no_space` then, as before.
+   */
+  swap?: (a: number, b: number) => Promise<{ ok: boolean; reason?: string }>;
   /** Packet queue (the `interact open_inventory`). */
   queue: (name: string, params: Record<string, unknown>) => void;
   /** Own runtime id (target of `interact open_inventory`). */
@@ -80,7 +90,7 @@ export interface EnsureInHotbarArgs {
 }
 
 export type EnsureResult =
-  | { ok: true; slot: number; item: string; moved: boolean; from?: number; parked?: number }
+  | { ok: true; slot: number; item: string; moved: boolean; from?: number; parked?: number; exchanged?: boolean }
   | { ok: false; reason: 'none' | 'no_containers' | 'no_space' | 'move_failed' | 'no_inventory_window' };
 
 /** The best slot by `score` in [from, to); ties go to `prefer`, then the lowest slot. */
@@ -188,11 +198,18 @@ export async function ensureInHotbar(a: EnsureInHotbarArgs): Promise<EnsureResul
     if (!src) return { ok: false, reason: 'none' } as const;
     const target = hotbarTarget(inv, a.score, a.keep);
     if (!target) return { ok: false, reason: 'no_space' } as const;
-    const park = target.empty ? undefined : freeMainSlot(inv, src.slot);
-    if (!target.empty && park === undefined) return { ok: false, reason: 'no_space' } as const;
+    const park0 = target.empty ? undefined : freeMainSlot(inv, src.slot);
+    // no free main slot: the hotbar item goes where the wanted one was, in one exchange
+    const exchange = !target.empty && park0 === undefined && a.swap !== undefined;
+    if (!target.empty && park0 === undefined && !exchange) return { ok: false, reason: 'no_space' } as const;
+    const park = exchange ? src.slot : park0;
     const item = inv.slots[src.slot]!;
     const parked = target.empty ? undefined : inv.slots[target.slot]!;
     const r = await withScreen(a, c, async () => {
+      if (exchange) {
+        const w = await a.swap!(src.slot, target.slot);
+        return w.ok ? { ok: true as const } : { ok: false as const, reason: `exchange ${w.reason ?? 'refused'}` };
+      }
       if (parked && park !== undefined) {
         const p = await c.move({ window: 0, slot: target.slot }, { window: 0, slot: park }, parked.count);
         if (!p.ok) return { ok: false as const, reason: `park ${p.reason ?? 'failed'}` };
@@ -205,9 +222,9 @@ export async function ensureInHotbar(a: EnsureInHotbarArgs): Promise<EnsureResul
       return { ok: false, reason: 'reason' in r && r.reason === 'no_inventory_window' ? 'no_inventory_window' : 'move_failed' } as const;
     }
     a.hotbar?.noteRaw?.(target.slot, wireItemOf(inv.slots[target.slot], undefined));
-    log.info(`hotbar: ${item.name} moved from slot ${src.slot} to ${target.slot}${parked ? ` (${parked.name} parked in ${park})` : ''}${a.label ? ` for ${a.label}` : ''}`);
+    log.info(`hotbar: ${item.name} moved from slot ${src.slot} to ${target.slot}${parked ? ` (${parked.name} ${exchange ? 'exchanged into' : 'parked in'} ${park})` : ''}${a.label ? ` for ${a.label}` : ''}`);
     if (a.select !== false && target.slot !== inv.selected) a.hotbar?.select(target.slot);
-    return { ok: true, slot: target.slot, item: item.name, moved: true, from: src.slot, ...(park !== undefined ? { parked: park } : {}) } as const;
+    return { ok: true, slot: target.slot, item: item.name, moved: true, from: src.slot, ...(park !== undefined ? { parked: park } : {}), ...(exchange ? { exchanged: true } : {}) } as const;
   });
 }
 
@@ -245,6 +262,24 @@ export interface HotbarPullerDeps {
 
 /** After a failed pull the same job is not tried again for this long (ms). */
 export const PULL_RETRY_MS = 10_000;
+/** A failed pull is said in the log at most once this long (ms) for the same job and reason. */
+export const PULL_LOG_MS = 60_000;
+
+/** Why a pull failed, for the log. */
+export function pullFailText(reason: Exclude<EnsureResult, { ok: true }>['reason']): string {
+  switch (reason) {
+    case 'no_space':
+      return 'no hotbar slot it may give up, and no exchange';
+    case 'no_containers':
+      return 'no inventory moves here';
+    case 'no_inventory_window':
+      return 'the inventory screen did not open';
+    case 'move_failed':
+      return 'the server refused the move';
+    case 'none':
+      return 'nothing to pull';
+  }
+}
 
 /**
  * `ensureInHotbar` with a memory: `pull(job, score)` returns undefined (synchronously) when nothing in
@@ -262,6 +297,13 @@ export class HotbarPuller {
    * `!test mobs ... bare` holds the blades it stowed in the main inventory, so the fight's weapon pull does not bring them back.
    */
   hold: ((item: ItemStack) => boolean) | undefined;
+  /**
+   * Two player slots exchanged by one request under the screen the pull holds (SurvivalKit.exchange, set by the survival
+   * kit): a pull into a full hotbar with no free main-inventory slot exchanges the wanted item with the hotbar item it
+   * would have parked. Undefined: such a pull fails `no_space`.
+   */
+  swap: ((a: number, b: number) => Promise<{ ok: boolean; reason?: string }>) | undefined;
+  private readonly logged = new Map<string, number>();
 
   constructor(d: HotbarPullerDeps) {
     this.d = d;
@@ -301,6 +343,7 @@ export class HotbarPuller {
       runtimeId: this.d.runtimeId,
       waitTicks: this.d.waitTicks,
       label: job,
+      ...(this.swap ? { swap: this.swap } : {}),
       ...(opts.select !== undefined ? { select: opts.select } : {}),
       ...(opts.keep ? { keep: opts.keep } : {}),
       ...(this.d.logger ? { logger: this.d.logger } : {}),
@@ -310,6 +353,12 @@ export class HotbarPuller {
         if (!r.ok) {
           this.stats.failed++;
           this.failedUntil.set(job, this.now() + PULL_RETRY_MS);
+          // once a minute a job and reason: a fight with the wrong weapon is visible, a fight a tick is not a line a tick
+          const key = `${job}|${r.reason}`;
+          if (r.reason !== 'none' && (this.logged.get(key) ?? -Infinity) + PULL_LOG_MS <= this.now()) {
+            this.logged.set(key, this.now());
+            (this.d.logger ?? silentLogger).warn(`hotbar: the pull for ${job} failed: ${r.reason} (${pullFailText(r.reason)}); it goes on with what the hotbar holds`);
+          }
         }
         return r;
       })

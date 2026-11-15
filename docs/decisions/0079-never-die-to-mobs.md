@@ -192,3 +192,10 @@ The numbers are in [../pve.md](../pve.md) "Track M2". 30 runs a side of `mixed-8
     stack's own wire item: nothing is dropped, nothing needs a free slot. The stow uses the same exchange with a main stack
     the fight would not select as a weapon (`weaponScore` 0), so `bare` no longer needs a free slot; it is refused only when
     every main stack is a weapon. The pickup's slot is not the bot's to choose, so it is not steered.
+31. **The hotbar puller exchanges with a full inventory** (Track T2 follow-up, from the Realm). No ADR owned the puller (Track
+    V's weapon pull is described in pve.md only), so this addendum records it. With a full hotbar and no free main slot the
+    pull failed `no_space` without a word, and a bot whose inventory was full of drops fought every fight after with a tool
+    or a fist. Now the wanted item and the hotbar item the pull would have parked exchange places in one `swap` request (the
+    survival kit's `exchange`, the request `swapSlots` and the kit's `toHotbar` send), with the same choice of the item given
+    up, for every job of the puller: the fight's weapon, the Digger's tool, a breeding item. A failed pull is said in the log
+    once a minute a job and reason, so a fight with the wrong weapon is visible.

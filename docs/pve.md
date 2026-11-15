@@ -29,7 +29,7 @@ target); without walking every command answers `<cmd> needs a task that can walk
 | `bot/src/skills/combat/shield.ts` | Track AH: `ShieldController`: shield into the offhand, archer shot prediction (`threat`, `shotDue`), the offhand item stack request |
 | `packs/truth/src/shield.ts` | Track AH: truth commands `stance` (isSneaking, offhand item and durability) and `blocklog` (mob melee swings and projectiles reaching a player, with the stance and the shield's durability) |
 | `bot/test/unit/skills/combat-v3.test.ts`, `bot/test/e2e/pve-crowd.test.ts` | Track AH unit tests on fakes; e2e (crowd rule, shield) on bds-pve; the re-targeting e2e is in `pve-combat.test.ts` |
-| `bot/src/skills/container/hotbar-moves.ts` | Track V: `ensureInHotbar` (main inventory -> hotbar through the task's Containers), `HotbarPuller` (failure memory, the Digger's `pullTool` hook), `digToolScore` |
+| `bot/src/skills/container/hotbar-moves.ts` | Track V: `ensureInHotbar` (main inventory -> hotbar through the task's Containers), `HotbarPuller` (failure memory, the Digger's `pullTool` hook; with a full inventory the exchange `swap` and a failure line once a minute), `digToolScore` |
 | `bot/src/skills/follow/follow.ts` | `FollowController`: `follow({ runtimeId } \| { playerName })`, `come(playerName)`, `stop()` |
 | `bot/src/tasks/pve.ts` | `PveController`: guard, flee, follow, come, kill, a resumable goto, behaviour line, options |
 | `bot/src/chat/commands-pve.ts` | `!follow` `!come` `!stop` `!guard` `!kill` (with `now`), `!sleep`; wires the survival kit, the sleep controller and the night yield (Track W) |
@@ -44,7 +44,7 @@ target); without walking every command answers `<cmd> needs a task that can walk
 | `packs/truth/src/combat.ts` | Track V: truth commands `combatlog` (melee hits with the held item, creeper triggers, explosions, projectile hits on players) and `held` |
 | `docker/compose.pve.yml` | `bds-pve`, udp/19144, flat, difficulty normal |
 | `bot/test/unit/skills/{combat,follow,pve}.test.ts`, `pve-fakes.ts` | unit tests on fakes |
-| `bot/test/unit/skills/{targeting,combat-survive,hotbar-moves}.test.ts`, `combat-fakes.ts` | Track V unit tests on fakes |
+| `bot/test/unit/skills/{targeting,combat-survive,hotbar-moves,hotbar-moves-full}.test.ts`, `combat-fakes.ts` | Track V unit tests on fakes (`-full`: the puller with a full inventory) |
 | `bot/test/e2e/pve-{combat,follow,night,creeper}.test.ts`, `pve-truth.ts` | e2e on bds-pve |
 
 ## Using it
@@ -395,12 +395,33 @@ requests -> `container_close`; another open window is waited for up to 40 ticks)
 task's request-id counter. Items failing the Track S `toolOk` predicate (`toolWearLimit`) are never
 candidates. `HotbarPuller` adds a 10 s memory of failures per job.
 
+**A full inventory** (Track T2 follow-up): with no free main-inventory slot to park the hotbar item in, the wanted item and
+that hotbar item exchange places in one `swap` stack request (`HotbarPuller.swap`, the survival kit's `exchange`, set by the
+kit when it starts; predicted with each stack's own wire item, rolled back when refused, under the screen the pull holds).
+The hotbar item given up is chosen as for parking, so a weapon pull never gives up another blade, a dig pull never another
+tool for that block, and `keep` items stay. A bot that fights mobs fills its inventory with their drops, so this is the usual
+state, not a corner: with every slot taken the pull failed `no_space` without a word, and every fight after went on with
+whatever the hotbar held (a tool or a fist) while the sword sat in the main inventory. Without the exchange (no survival kit) the pull still fails `no_space`.
+A failed pull now says so, once a minute a job and reason: `hotbar: the pull for weapon failed: no_space (...); it goes on
+with what the hotbar holds`. On bds-pve (`test/e2e/pve-combat.test.ts`, every slot full, the sword in slot 20, one zombie):
+`iron_sword moved from slot 20 to 8 (cobblestone exchanged into 20)`, every hit with the sword, no item lost.
+
+Other moves between slots with a full inventory: the survival kit's `toHotbar` (the food a meal needs, the stash's box)
+swaps with a hotbar slot by itself and needs no free slot; the flight kit's `rocketsToHotbar` swaps when the inventory is
+full; the keeper's stocking swaps with junk. PlaceSkill's `selectItem` (`hotbarRoom`) and the farm's
+click (`farm/click.ts`, the same `hotbarRoom`) still need a free main slot for a full hotbar and fail `move_failed`; the
+blocks they place are usually in the hotbar already (the keeper keeps them there), so they are left as they are. The
+storage's `freeHotbarSlot` needs two free slots by design (one for a box).
+
 - Combat: no sword or axe in the hotbar -> the best sword / axe of the main inventory is moved in and
   selected; the approach goes on meanwhile and strikes wait for it (at most 40 ticks).
   `FightResult.pulled`, `totals.pulls`.
 - Digger: `Digger.pullTool` (installed by the combat controller every 20 ticks, like Track S's
   `toolOk`) moves a pickaxe / axe / shovel that breaks the block faster (or at all) than anything in
   the hotbar before the tool choice; the dig then picks it.
+- Breeding (`skills/food/breed.ts`, docs/food.md): the food an animal takes is pulled the same way (`breed <kind>`).
+
+All three get the exchange with a full inventory when the survival kit runs, and the failure line.
 
 ### Ranged mobs
 

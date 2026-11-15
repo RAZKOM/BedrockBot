@@ -278,6 +278,45 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
     expect(held.typeId).toBe('minecraft:iron_sword');
   }, 120_000);
 
+  // Track T2 follow-up: the same with every slot full (a bot that fights mobs fills its inventory with their drops): no free
+  // slot to park a hotbar item in, so the sword and the hotbar's least useful stack exchange places in one request
+  // (skills/container/hotbar-moves.ts, the survival kit's exchange). Before, this pull failed `no_space` without a word and
+  // the fight went on with whatever the hotbar held.
+  it('a sword only in the main inventory, every slot full: exchanged into the hotbar before the first strike, nothing dropped', async () => {
+    const b = bot!;
+    await b.truth.setHealth(b.name, 20);
+    await teleport(b, centre(HOME));
+    await b.truth.clearAround(centre(HOME), 48);
+    await b.truth.ok('clear', [b.name]);
+    await b.truth.ok('setslot', [b.name, 0, 'cooked_beef', 5]);
+    for (let i = 1; i < 36; i++) if (i !== 20) await b.truth.ok('setslot', [b.name, i, 'cobblestone', 64]);
+    await b.truth.ok('setslot', [b.name, 20, 'iron_sword', 1]);
+    const inv = b.built.mobility!.world.inventory;
+    await until(() => (inv.slots[20]?.name === 'iron_sword' && inv.slots.slice(0, 36).every((s) => !!s && s.count > 0) ? true : undefined), 10_000, 'every slot full, the sword in slot 20');
+    const cobble = (): number => inv.slots.slice(0, 36).reduce((n, s) => n + (s?.name === 'cobblestone' ? s.count : 0), 0);
+    const cobble0 = cobble();
+    const since = await b.truth.now();
+    const mob = await b.truth.summon('zombie', { x: HOME.x + 0.5 + 6, y: FEET_Y, z: HOME.z + 0.5 });
+    const rid = await tracked(b, mob);
+    const t0 = Date.now();
+    const r = await b.pve.combat.fight(rid, { timeoutTicks: 1200 });
+    await sleep(500);
+    const hits = (await combatlog(b, since)).filter((h) => h.kind === 'hit' && h.player === b.name && h.entityId === mob.entityId);
+    const held = await b.truth.ok<{ selectedSlot: number; typeId: string | null }>('held', [b.name]);
+    const line = `weapon pull (full inventory): ${r.reason} in ${r.ticks} ticks (${Date.now() - t0} ms), pulled ${String(r.pulled)}, weapon ${r.weapon}, server hits held ${hits.map((h) => `${h.item}@${h.selectedSlot}`).join(', ')}, held after ${held.typeId} in slot ${held.selectedSlot}, sword in slot ${inv.slots.findIndex((s) => s?.name === 'iron_sword')}, slot 20 ${inv.slots[20]?.name ?? 'empty'}, cobblestone ${cobble0} -> ${cobble()}`;
+    console.log(line);
+    measurements.push(line);
+    if (process.env.PVE_COMBAT_OUT) (await import('node:fs')).appendFileSync(process.env.PVE_COMBAT_OUT, `${line}\n`);
+    expect(r.reason).toBe('killed');
+    expect(r.pulled).toBe(true);
+    expect(hits.length).toBeGreaterThanOrEqual(2);
+    expect(hits.every((h) => h.item === 'minecraft:iron_sword')).toBe(true);
+    expect(held.typeId).toBe('minecraft:iron_sword');
+    expect(inv.slots[20]?.name).toBe('cobblestone'); // the stack given up went where the sword was
+    expect(cobble()).toBe(cobble0);
+    await armWithIronSword(b); // the cases after this one start from the sword alone
+  }, 120_000);
+
   it('guard: a summoned phantom is not chased; a zombie walking up meanwhile is killed', async () => {
     const b = bot!;
     await b.truth.setHealth(b.name, 20);
