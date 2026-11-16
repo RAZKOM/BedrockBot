@@ -228,6 +228,28 @@ export function removeCommand(tag: string): string {
   return `/kill @e[name=${tag}]`;
 }
 
+/** Track M4: asks the server how many of the series' mobs are still there (the same selector as the removal). */
+export function countCommand(tag: string): string {
+  return `/testfor @e[name=${tag}]`;
+}
+
+/** Track M4: the server asked for the set's mobs at most this often (ms) while the bot sees none of them. */
+export const COUNT_EVERY_MS = 2000;
+
+/**
+ * Track M4: the number of the series' mobs the server found from a `/testfor @e[name=<tag>]` answer: the success count (else
+ * the names in the first parameter), 0 for "no target matched", undefined with no answer or another refusal (no rights).
+ */
+export function testforCount(r: { ok: boolean; successCount?: number; messageId?: string; params?: readonly string[]; error?: string }): number | undefined {
+  if (r.error) return undefined;
+  if (r.ok) {
+    if (typeof r.successCount === 'number' && r.successCount > 0) return r.successCount;
+    const names = (r.params?.[0] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    return Math.max(1, names.length);
+  }
+  return /notarget|nomatch|no.?target/i.test(r.messageId ?? '') ? 0 : undefined;
+}
+
 export interface MobRecord {
   type: 'mobs';
   set: string;
@@ -256,6 +278,13 @@ export interface MobRecord {
   stowed?: string[];
   /** Track T2: a blade in the hotbar at the run's start although the series is bare (none could be moved out). */
   bladeInHotbar?: boolean;
+  /**
+   * Track M4: mobs of the set the bot no longer saw (gone from its entity list without a death seen) that the server still
+   * had (`/testfor`) at the run's end: they are not counted as cleared. Undefined when none vanished.
+   */
+  outOfSight?: number;
+  /** Track M4: how the clear was judged: `seen` (every mob's death seen), `server` (`/testfor` found none), `unconfirmed` (no answer). */
+  clearedBy?: 'seen' | 'server' | 'unconfirmed';
 }
 
 export interface MobSummary {
@@ -279,7 +308,7 @@ export interface MobSummary {
 
 export interface MobSeriesPorts {
   /** A slash command as the bot (CommandRunner.run). */
-  run(cmd: string): Promise<{ ok: boolean; messageId?: string; params?: readonly string[]; error?: string }>;
+  run(cmd: string): Promise<{ ok: boolean; successCount?: number; messageId?: string; params?: readonly string[]; error?: string }>;
   /** Track M2: a mob summoned with its feet in this cell stands there (a floor under it, room, no liquid); undefined = unknown. */
   standable?(x: number, y: number, z: number): boolean | undefined;
   restore(start: Vec3): Promise<RestoreResult>;
@@ -314,7 +343,7 @@ const fmtCounts = (c: Readonly<Record<string, number>>): string => Object.entrie
 
 /** One chat line per run. */
 export function mobRunLine(r: MobRecord): string {
-  return `test mobs ${r.set} run ${r.run}/${r.of}: ${r.died ? 'DIED' : 'alive'}, damage ${r.damage} (lowest ${r.lowest}), hits ${fmtCounts(r.hits)}, ${r.cleared ? `cleared in ${r.clearSeconds} s` : `${r.left} left after ${r.seconds} s${r.end === 'stopped' ? ' (stopped)' : ''}`}, reflex ${r.reflexHits}, floors ${fmtCounts(r.floors)}${r.bare ? `, bare${r.bladeInHotbar ? ' (a blade still in the hotbar)' : ''}` : ''}`;
+  return `test mobs ${r.set} run ${r.run}/${r.of}: ${r.died ? 'DIED' : 'alive'}, damage ${r.damage} (lowest ${r.lowest}), hits ${fmtCounts(r.hits)}, ${r.cleared ? `cleared in ${r.clearSeconds} s${r.clearedBy === 'server' ? ' (the server has none)' : r.clearedBy === 'unconfirmed' ? ' (none in sight, the server did not answer)' : ''}` : `${r.left} left after ${r.seconds} s${r.outOfSight ? ` (${r.outOfSight} out of sight)` : ''}${r.end === 'stopped' ? ' (stopped)' : ''}`}, reflex ${r.reflexHits}, floors ${fmtCounts(r.floors)}${r.bare ? `, bare${r.bladeInHotbar ? ' (a blade still in the hotbar)' : ''}` : ''}`;
 }
 
 /** The summary line. */
@@ -501,6 +530,13 @@ export class MobSeries {
       const t0 = p.now();
       // the summoned mobs: new entities of the set's types within 16 blocks of the start, seen in the first 3 s
       const ours = new Set<bigint>();
+      // Track M4: the mobs whose death the bot saw; one that left the entity list without it may only be out of sight (an
+      // elytra flee of 96 blocks takes every mob out of view, and the run said `cleared` with all of them alive)
+      const deadSeen = new Set<bigint>();
+      const vanished = (): number => [...ours].filter((rid) => !deadSeen.has(rid) && !p.entities().has(rid)).length;
+      let askedAt = -Infinity;
+      let serverLeft: number | undefined;
+      let clearedBy: MobRecord['clearedBy'];
       let clearS: number | null = null;
       let end: MobRecord['end'] = 'timeout';
       for (;;) {
@@ -513,6 +549,7 @@ export class MobSeries {
             if (Math.hypot(e.pos.x - (this.start.x + 0.5), e.pos.z - (this.start.z + 0.5)) <= 16) ours.add(rid);
           }
         }
+        for (const rid of ours) if (p.entities().has(rid) && p.dead(rid)) deadSeen.add(rid);
         if (p.deaths() > deaths0) {
           end = 'died';
           break;
@@ -523,14 +560,30 @@ export class MobSeries {
         }
         const alive = [...ours].filter((rid) => p.entities().has(rid) && !p.dead(rid)).length;
         if (now - t0 >= 3000 && alive === 0) {
-          clearS = r1((now - t0) / 1000);
-          end = 'cleared';
-          break;
-        }
+          if (vanished() === 0) {
+            clearedBy = 'seen';
+          } else if (now - askedAt >= COUNT_EVERY_MS) {
+            askedAt = now;
+            const r = await p.run(countCommand(this.tag));
+            serverLeft = testforCount(r);
+            // a rate-limited ask is asked again; no answer at all clears as before, said as unconfirmed
+            if (serverLeft === undefined && r.error !== 'rate_limited') clearedBy = 'unconfirmed';
+            else if (serverLeft === 0) clearedBy = 'server';
+          }
+          if (clearedBy) {
+            clearS = r1((now - t0) / 1000);
+            end = 'cleared';
+            break;
+          }
+        } else serverLeft = undefined;
         if (now - t0 >= this.spec.seconds * 1000) break;
       }
       const seconds = r1((p.now() - t0) / 1000);
-      const left = [...ours].filter((rid) => p.entities().has(rid) && !p.dead(rid)).length;
+      const seen = [...ours].filter((rid) => p.entities().has(rid) && !p.dead(rid)).length;
+      // mobs out of sight at the end: the server's count when it was asked for this (a timeout with none in sight asks once more)
+      if (end === 'timeout' && seen === 0 && vanished() > 0 && serverLeft === undefined) serverLeft = testforCount(await p.run(countCommand(this.tag)));
+      const outOfSight = end !== 'cleared' && seen === 0 && serverLeft !== undefined && serverLeft > 0 ? serverLeft : undefined;
+      const left = Math.max(seen, outOfSight ?? 0);
       await p.run(removeCommand(this.tag));
       const c1 = p.counters();
       return {
@@ -547,7 +600,9 @@ export class MobSeries {
         reflexHits: c1.reflex - c0.reflex,
         floors: diff(c1.floors, c0.floors),
         end,
-        reason: end === 'cleared' ? `cleared in ${clearS} s` : end === 'died' ? 'died' : end === 'stopped' ? 'stopped' : `${left} left after ${seconds} s`,
+        reason: end === 'cleared' ? `cleared in ${clearS} s` : end === 'died' ? 'died' : end === 'stopped' ? 'stopped' : `${left} left after ${seconds} s${outOfSight ? ' (out of sight)' : ''}`,
+        ...(outOfSight ? { outOfSight } : {}),
+        ...(clearedBy && clearedBy !== 'seen' ? { clearedBy } : {}),
       };
     } finally {
       off();

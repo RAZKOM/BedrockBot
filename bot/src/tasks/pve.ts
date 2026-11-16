@@ -36,7 +36,7 @@ import { RuntimeSettings } from '../config/settings.ts';
 import { silentLogger, type Logger } from '../log.ts';
 import { events } from '../events/bus.ts'; // decision 0059: combat.flee
 import { bladeScore, CombatController, type CombatLoop, type CombatMover, type FightOptions, type FightResult } from '../skills/combat/combat.ts';
-import { bareType, classify, entityFeet, isPlayerEntity, MobTracker, typeMatches } from '../skills/combat/hostiles.ts';
+import { bareType, classify, entityFeet, isPlayerEntity, MobTracker, poisonLeft, typeMatches } from '../skills/combat/hostiles.ts';
 import * as targeting from '../skills/combat/targeting.ts'; // Track V: reachability-aware targeting, creeper rank
 import { PathReach, probeNavOf } from '../skills/combat/pathReach.ts'; // Track AO: path-reachable guard targets
 import { Reflex, REFLEX_REACH } from '../skills/combat/reflex.ts'; // Track M1: the always-on strike layer
@@ -260,6 +260,100 @@ export function holdGround(i: HoldInput): boolean {
   return i.reflex && i.melee >= 1 && i.melee <= HOLD_MAX && !i.other && i.meleeHits < 2;
 }
 
+// ---- Track M4: early-game kits (docs/pve.md "Track M4", ADR 0079 addendum) ----
+/**
+ * Track M4: the rules of this track, each a switch the gauntlet can turn off to measure it (test/e2e/gaunt-mobs.test.ts
+ * MOBS_RULES, MOBS_AB_RULE). Not settings: they only change choices the guard and the flight on foot already make.
+ */
+export interface PveRules {
+  /** A leg of the flight on foot is kept FLEE_LEG_HOLD_MS, and left for `away` only with a threat inside FLEE_AWAY - FLEE_LEG_BAND (fleeLeg). */
+  legHold: boolean;
+  /** With a blade at low health near home, archers alone are closed in on instead of stood in front of (archerDuelTarget). */
+  archerDuel: boolean;
+  /** The away and far legs run FLEE_LONG farther than they need, so the walk sprints (fleeRadius). */
+  fleeLong: boolean;
+  /**
+   * The bot's own poison (mob_effect): a tick of it is not a mob's hit (MobTracker `poison` cause: no attacker guess, no
+   * duel input), and low health and the duel's margin count the health the poison will leave (healthAfterPoison).
+   */
+  poison: boolean;
+  /** Home is no place to flee to while an archer or a witch stands within SHOOTER_HOME of it (fleeLeg `homeShot`). */
+  shooterHome: boolean;
+}
+export const PVE_RULES_DEFAULT: Readonly<PveRules> = { legHold: true, archerDuel: true, fleeLong: true, poison: true, shooterHome: true };
+/** Track M4: an archer or a witch this close to home (blocks, level) keeps the flight on foot from going home. */
+export const SHOOTER_HOME = 16;
+/**
+ * Track M4: the extra length of an away or far leg (blocks). The walk sprints only while more than 8 blocks of straight path
+ * are left (follower.ts runLength: 5 plus the 3 it keeps to stop in), and a leg was about as long as that: in the traces of
+ * the early-kit screen the flight on foot had the sprint in 13 % of its away ticks and 0 % of its far ticks and covered
+ * 0.18 to 0.20 blocks a tick, under a walk's 0.216 (a sprint is 0.281).
+ */
+export const FLEE_LONG = 8;
+
+/** The radius of a runAway leg of the flight on foot: away FLEE_AWAY + 4; far nearest + 6 within [FLEE_AWAY + 4, FLEE_FAR]; `long` FLEE_LONG more. */
+export function fleeRadius(phase: 'away' | 'far', nearest: number, long: boolean): number {
+  const base = phase === 'far' ? Math.min(FLEE_FAR, Math.max(FLEE_AWAY + 4, nearest + 6)) : FLEE_AWAY + 4;
+  return long ? Math.min(FLEE_FAR, base + FLEE_LONG) : base;
+}
+/** Track M4: the archer duel at home holds within this of home (blocks, level): the duel's own walk takes it this far out. */
+export const ARCHER_DUEL_HOME = 16;
+/**
+ * Track M4: no archer duel at this health or under (after the poison): an arrow is 3 to 5 with no armour. With the duel at
+ * any health and the poison rule on, the stone kit's `seal-5` fought two skeletons at 2 to 5 health and died in 4 of 5.
+ */
+export const ARCHER_DUEL_MIN = 5;
+/** Track M4: a new leg of the flight on foot holds this long (ms) unless a threat comes within FLEE_URGENT. */
+export const FLEE_LEG_HOLD_MS = 2000;
+/** Track M4: home or far is left for away only when the nearest threat is this much inside FLEE_AWAY. */
+export const FLEE_LEG_BAND = 3;
+
+export type FleeLeg = 'away' | 'home' | 'far';
+export interface FleeLegInput {
+  phase: FleeLeg | 'seal' | 'sealed' | 'dodge';
+  /** A shelter or home to go to. */
+  dest: boolean;
+  /** The nearest threat (blocks, level; Infinity with none). */
+  nearest: number;
+  /** Home lies clear of the threats (homeClear), or the flight was cornered, or the danger is over (2 s). */
+  homeOk: boolean;
+  /** Run FLEE_FAR from the start with the nearest threat FLEE_AWAY off: home around the threat. */
+  farEnough: boolean;
+  /** Since the current leg began (ms). */
+  sinceLeg: number;
+  /** How long `homeOk` has held without a break (ms; undefined: not known, no wait). */
+  homeOkMs?: number;
+  /** Track M4 (`shooterHome`): an archer or a witch within SHOOTER_HOME of home: no home leg, not even far enough out. */
+  homeShot?: boolean;
+  /** The legHold rule (PveRules). */
+  hold: boolean;
+}
+
+/**
+ * The leg of the flight on foot. Without `hold` the rule of Track W: home once FLEE_AWAY clear and home clear (or cornered,
+ * or safe), else far once FLEE_AWAY clear, else away. Track M4 (`hold`): on the gauntlet a bot at 1 to 3 health (a witch's
+ * poison stops at 1) changed leg every 10 to 20 ticks while a husk walked after it at 10 to 12 and a skeleton came in and out
+ * of view at 15; every change is a new walk, and a new walk stops the body, so it ran at a walk and the next arrow killed it
+ * (iron and no-kit `mixed-8`). So a leg holds FLEE_LEG_HOLD_MS unless a threat comes within FLEE_URGENT, and home or far
+ * goes back to away only with the nearest threat inside FLEE_AWAY - FLEE_LEG_BAND (far when home is not clear then).
+ */
+export function fleeLeg(i: FleeLegInput): FleeLeg {
+  if (i.homeShot) i = { ...i, homeOk: false, farEnough: false };
+  let base: FleeLeg;
+  if (i.dest && (i.nearest >= FLEE_AWAY || i.phase === 'home') && i.homeOk) base = 'home';
+  else if (i.nearest >= FLEE_AWAY || i.phase === 'far') base = 'far';
+  else base = 'away';
+  if (base === 'far' && i.dest && i.farEnough && i.nearest >= FLEE_AWAY) base = 'home';
+  if (!i.hold || base === i.phase || (i.phase !== 'away' && i.phase !== 'home' && i.phase !== 'far')) return base;
+  // never on towards a home that is no longer clear: out to far (or away with the threat close)
+  const notHome: FleeLeg = i.nearest >= FLEE_AWAY - FLEE_LEG_BAND ? 'far' : 'away';
+  if (i.sinceLeg < FLEE_LEG_HOLD_MS && i.nearest > FLEE_URGENT) return i.phase === 'home' && !i.homeOk ? notHome : i.phase;
+  // home again only once it has stayed clear for the hold (a skeleton at the edge of view made it clear every other look)
+  if (base === 'home' && i.phase !== 'home' && (i.homeOkMs ?? Infinity) < FLEE_LEG_HOLD_MS) return i.phase;
+  if (base === 'away' && i.nearest >= FLEE_AWAY - FLEE_LEG_BAND) return i.phase === 'home' && !i.homeOk ? 'far' : i.phase;
+  return base;
+}
+
 /** The floors against mobs, in order (the health rule): see `pveFloor`. */
 export type Floor = 'fight' | 'eat' | 'backoff' | 'fly' | 'seal' | 'defend';
 
@@ -350,6 +444,8 @@ export class PveController {
   readonly taken: Record<string, number> = {};
   /** Track M1: the floors taken (backoff, eat, fly, seal, defend), for the counters. */
   readonly floors: Record<string, number> = {};
+  /** Track M4: this track's rules (PveRules), all on; the gauntlet turns one off to measure it. */
+  readonly rules: PveRules = { ...PVE_RULES_DEFAULT };
   /**
    * Track M3 (docs/pve.md "The elytra flee"): the elytra flee as a flight mode, wired by chat/commands-pve.ts from the
    * flight's own entry point (chat/commands-fly.ts `flee`). `ready`: a flee can take off where the body stands now (the
@@ -397,6 +493,7 @@ export class PveController {
       selfRuntimeId: () => world.self.runtimeId,
       selfPos: () => (loop.state.ready ? loop.state.pos : undefined),
       headInWater: () => world.blockAt !== undefined && loop.state.ready && headInWater((p) => world.blockAt!(p), loop.state.pos),
+      poisonCause: () => this.rules.poison, // Track M4
     });
     this.hotbar = new Hotbar(source, { inventory: world.inventory, runtimeId: () => world.self.runtimeId });
     this.combat = new CombatController({
@@ -448,6 +545,14 @@ export class PveController {
           // Track BF: not a fight (no duel rule, no flee from a mob); the air came from the server's `air` value when it sent one
           const air = this.mobs.selfAir;
           this.log.info(`pve: took ${damage.toFixed(1)} damage (drowning: head under water${air !== undefined ? `, air ${air}` : ''}), health ${this.health()}`);
+          return;
+        }
+        if (cause === 'poison') {
+          // Track M4: not a hit by a mob: no duel input (a tick of 1 made 2 x the last hit 2, and the duel went on at 3
+          // health), counted apart
+          this.taken.poison = (this.taken.poison ?? 0) + 1;
+          this.d.metrics?.inc('pve.taken.poison');
+          this.log.info(`pve: took ${damage.toFixed(1)} damage (poison, ${(((this.mobs.selfPoison?.until ?? 0) - performance.now()) / 1000).toFixed(0)} s left), health ${this.health()}, ${this.healthAfterPoison()} once it ends`);
           return;
         }
         if (damage > 0) {
@@ -717,10 +822,25 @@ export class PveController {
 
   // ---- rules -----------------------------------------------------------------------------------
 
-  /** Low health: below fleeHealth (and alive). */
+  /**
+   * Low health: below fleeHealth (and alive). The health itself, not what the poison will leave (Track M4): with the poison
+   * counted here and a witch fled from at home, the stone kit fled from the witch who poisoned it in 4 of 5 `mixed-8` runs
+   * (1 of 5 before), she walked after it at 12 to 15, and her harming killed it at 1 health 100 blocks out in 2 of 5 (0 of 5
+   * before). The poison stops at 1; the duel's margin still counts it (canDuel).
+   */
   low(): boolean {
+    return this.health() > 0 && this.health() < this.fleeHealth;
+  }
+
+  /**
+   * Track M4 (`poison`): the health once the poison on the bot has done what it still will (it stops at 1); the health
+   * itself without poison or with the rule off. On the gauntlet a witch's potion took the stone kit from 16 to 1 in 20 s
+   * while it fought on (the duel rule judged 9 health enough for two skeletons), and the next arrow killed it.
+   */
+  healthAfterPoison(): number {
     const h = this.health();
-    return h > 0 && h < this.fleeHealth;
+    if (!this.rules.poison) return h;
+    return h - poisonLeft(this.mobs.selfPoison, performance.now(), h);
   }
 
   nearestHostile(me: Vec3, r: number): EntityInfo | undefined { return targeting.nearestHostile(this, me, r); } // Track V: skills/combat/targeting.ts
@@ -751,6 +871,40 @@ export class PveController {
   atFleeDest(me: Vec3): boolean {
     const dest = this.d.shelter() ?? this.d.home();
     return dest !== undefined && Math.hypot(dest.x + 0.5 - me.x, dest.z + 0.5 - me.z) <= 2 && Math.abs(dest.y - me.y) < 2;
+  }
+
+  /**
+   * Track M4 (`archerDuel`): the archer to close in on instead of standing still at home, if any. With a blade, below
+   * fleeHealth, within ARCHER_DUEL_HOME of home (no shelter: a shelter's walls stop arrows), only archers within FLEE_SCAN
+   * (DUEL_ARCHERS_MAX at most, no melee mob, no creeper, no witch) and one of them with a line on the bot. The case: the stone
+   * kit's `skeleton-4` at night killed three and stood at home at 6 to 7 health while the last one shot it dead from 10 to 15
+   * (no flee: the threat was farther than 6 from home; no duel: 2 x the last hit was more than the health; guard in place at
+   * low health does not walk to an archer). Standing still in an archer's line is the one choice that is sure to lose.
+   */
+  archerDuelTarget(me: Vec3): EntityInfo | undefined {
+    if (!this.rules.archerDuel || !this.low() || !this.hasBlade() || this.d.shelter()) return undefined;
+    // not with one arrow left (or the poison's 1): then the flight on foot, which `shooterHome` keeps from home
+    if (this.healthAfterPoison() <= ARCHER_DUEL_MIN) return undefined;
+    const home = this.d.home();
+    if (!home || Math.hypot(home.x + 0.5 - me.x, home.z + 0.5 - me.z) > ARCHER_DUEL_HOME) return undefined;
+    const grid = targeting.gridOf(this.mover);
+    const eye = { x: me.x, y: me.y + 1.62, z: me.z };
+    let best: EntityInfo | undefined;
+    let bd = Infinity;
+    let archers = 0;
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      const d = dist(entityFeet(e), me);
+      if (d > FLEE_SCAN) continue;
+      if (!DUEL_ARCHERS.has(bareType(e.type))) return undefined; // anything else near: the floors as they were
+      if (++archers > DUEL_ARCHERS_MAX) return undefined;
+      if (grid && !targeting.lineOfSight(grid, eye, e)) continue;
+      if (d < bd) {
+        bd = d;
+        best = e;
+      }
+    }
+    return best;
   }
 
   /** Track M1 round 2: a live threat within r other than `except` (the one just killed: it is listed for its death animation). */
@@ -927,6 +1081,8 @@ export class PveController {
    * sight, and the way to her clear of other melee mobs (none within WITCH_WAY_CLEAR of the line beyond the bot's own reach).
    */
   firstTarget(e: EntityInfo, me: Vec3): boolean {
+    // Track M4: the archer at home is fought with the approach, also at low health (archerDuelTarget)
+    if (DUEL_ARCHERS.has(bareType(e.type))) return this.rules.archerDuel && this.archerDuelTarget(me)?.runtimeId === e.runtimeId;
     if (bareType(e.type) !== 'witch' || this.mobs.get(e.runtimeId)?.dead || !this.hasBlade()) return false;
     const f = entityFeet(e);
     const d = dist(f, me);
@@ -1081,7 +1237,9 @@ export class PveController {
       const w = this.nearestOfKind(me, FLEE_SCAN, (t) => t === 'witch');
       if (w) out = { why: 'low', threat: w };
     }
-    if (out && this.atFleeDest(me) && dist(entityFeet(out.threat), me) > 6) out = undefined;
+    // (Track M4, `shooterHome`: not from an archer with a line on the bot: it shoots at home too. Not for a witch: she walks
+    // after a bot that runs, and guard at home kills her, Track M2)
+    if (out && this.atFleeDest(me) && dist(entityFeet(out.threat), me) > 6 && !(this.rules.shooterHome && this.shootersWithin(me, FLEE_SCAN, false) > 0)) out = undefined;
     // Track M3: with the elytra flee able and no blade, an archer or a witch with a line on the bot is fled from the air
     // below FLY_SHOOTER_HEALTH: a fist does not reach them, a run in the open stays in their range, and the takeoff takes
     // up to a second, which at fleeHealth is one arrow too late with two of them shooting (also at home: they shoot there too)
@@ -1108,6 +1266,7 @@ export class PveController {
    */
   canDuel(me: Vec3): boolean {
     if (!this.guardOn) return false; // nobody fights it
+    if (this.archerDuelTarget(me)) return true; // Track M4: at home the archer is closed in on whatever the health
     const now = performance.now();
     let lost = 0;
     for (const h of this.recentHits) if (now - h.at < 6000) lost += h.damage;
@@ -1132,7 +1291,7 @@ export class PveController {
     // range: the bare gauntlet's lone skeleton killed the bot through two flights, ADR 0079)
     if (lost >= (archer ? DUEL_ARCHER_LOST : 4)) return false;
     const hit = this.lastHit && performance.now() - this.lastHit.at < 60_000 ? this.lastHit.damage : 3;
-    return this.health() > (archer ? 2 : 3) * Math.max(hit, 1);
+    return this.healthAfterPoison() > (archer ? 2 : 3) * Math.max(hit, 1); // Track M4: what the poison will leave
   }
 
   nearestOfType(type: string): EntityInfo | undefined {
@@ -1176,15 +1335,31 @@ export class PveController {
     return h <= FLOOR_CRITICAL && this.meleeWithin(me, FLOOR_CRITICAL_RANGE);
   }
 
-  /** Track M1 round 2: archers and witches within r (feet) with a line on the bot. */
-  shootersWithin(me: Vec3, r: number): number {
+  /**
+   * Track M4 (`shooterHome`): a live archer or witch within r of `p` (level), seen or not. In 17 of 26 deaths of the stone
+   * kit's `seal-5` the flight on foot had a leg home in its last 10 s, at 1 to 6 health: home was "clear" by the angle rule
+   * (no threat nearer than home in its direction) while the skeletons stood 12 to 15 from it, beside it or beyond it.
+   */
+  shooterNear(p: Vec3, r: number): boolean {
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      const t = bareType(e.type);
+      if (!DUEL_ARCHERS.has(t) && t !== 'witch') continue;
+      const f = entityFeet(e);
+      if (Math.hypot(f.x - (p.x + 0.5), f.z - (p.z + 0.5)) <= r) return true;
+    }
+    return false;
+  }
+
+  /** Track M1 round 2: archers and witches within r (feet) with a line on the bot (Track M4: `witches` false, archers only). */
+  shootersWithin(me: Vec3, r: number, witches = true): number {
     const grid = targeting.gridOf(this.mover);
     const eye = { x: me.x, y: me.y + 1.62, z: me.z };
     let n = 0;
     for (const e of this.d.world.entities.values()) {
       if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
       const t = bareType(e.type);
-      if (!DUEL_ARCHERS.has(t) && t !== 'witch') continue;
+      if (!DUEL_ARCHERS.has(t) && !(witches && t === 'witch')) continue;
       if (dist(entityFeet(e), me) > r || (grid && !targeting.lineOfSight(grid, eye, e))) continue;
       n++;
     }
@@ -1284,7 +1459,7 @@ class FleeProcess extends BaseProcess {
   readonly name = 'flee';
   readonly kind = 'auto' as const;
   protected override persistent = true;
-  private ep: { why: 'low' | 'creeper'; from: string; start: Vec3; startAt: number; phase: 'away' | 'home' | 'far' | 'seal' | 'sealed' | 'dodge'; dest: { to: Vec3; kind: string } | undefined; safeSince: number | undefined; planAt: number; goalKey: string; bites: number; stallUntil: number; cornered: boolean; planNearest: number; panics: number; caughtSince: number | undefined; sealedAt?: number; dugIn?: boolean; seal?: { placed: number; open: number; reason?: string; tries: number; openCells?: Vec3[] }; dodge?: { dir: 1 | -1; sinceFlip: number; seen: Set<bigint>; lastShot: number; t: number; clearSince: number | undefined } } | undefined;
+  private ep: { why: 'low' | 'creeper'; from: string; start: Vec3; startAt: number; phase: 'away' | 'home' | 'far' | 'seal' | 'sealed' | 'dodge'; dest: { to: Vec3; kind: string } | undefined; safeSince: number | undefined; planAt: number; goalKey: string; bites: number; stallUntil: number; cornered: boolean; planNearest: number; panics: number; caughtSince: number | undefined; legAt?: number; homeOkAt?: number; homeShotSaid?: boolean; sealedAt?: number; dugIn?: boolean; seal?: { placed: number; open: number; reason?: string; tries: number; openCells?: Vec3[] }; dodge?: { dir: 1 | -1; sinceFlip: number; seen: Set<bigint>; lastShot: number; t: number; clearSince: number | undefined } } | undefined;
   private plan: { why: 'low' | 'creeper'; threat: EntityInfo } | undefined;
   private cooldownUntil = 0;
   /** The last flight ended cornered (no way away): the cooldown then holds even for a hard trigger. */
@@ -1662,11 +1837,26 @@ class FleeProcess extends BaseProcess {
     // home when clear; also when there is no farther place to run to (cornered: the planner's mob
     // avoidance takes the way around), or when the danger is over and nothing else waits
     const safeNow = ep.safeSince !== undefined && now - ep.safeSince >= FLEE_SAFE_MS;
-    let phase: 'away' | 'home' | 'far';
-    if (dest && (nearest >= FLEE_AWAY || ep.phase === 'home') && (homeClear(me, dest.to, threats) || ep.cornered || safeNow)) phase = 'home';
-    else if (nearest >= FLEE_AWAY || ep.phase === 'far') phase = 'far';
-    else phase = 'away';
-    if (phase === 'far' && dest && dist(ep.start, me) >= FLEE_FAR && nearest >= FLEE_AWAY) phase = 'home'; // far enough: home around the threat
+    // the leg (fleeLeg; Track M4: held against flapping)
+    const homeOk = dest !== undefined && (homeClear(me, dest.to, threats) || ep.cornered || safeNow);
+    if (!homeOk) ep.homeOkAt = undefined;
+    else ep.homeOkAt ??= now;
+    const phase = fleeLeg({
+      phase: ep.phase,
+      dest: dest !== undefined,
+      nearest,
+      homeOk,
+      farEnough: dist(ep.start, me) >= FLEE_FAR, // far enough: home around the threat
+      sinceLeg: now - (ep.legAt ?? 0),
+      homeOkMs: ep.homeOkAt === undefined ? 0 : now - ep.homeOkAt,
+      hold: c.rules.legHold,
+      homeShot: dest !== undefined && c.rules.shooterHome && c.shooterNear(dest.to, SHOOTER_HOME),
+    });
+    if (phase !== ep.phase) ep.legAt = now;
+    if (c.rules.shooterHome && dest && !ep.homeShotSaid && c.shooterNear(dest.to, SHOOTER_HOME)) {
+      ep.homeShotSaid = true; // Track M4: said once an episode
+      c.log.info(`flee: an archer or a witch within ${SHOOTER_HOME} of ${dest.kind}: not running there while it stays`);
+    }
     if (phase !== ep.phase) c.log.info(`flee: ${ep.phase} -> ${phase}${phase === 'home' && dest ? ` (${dest.kind} clear)` : ''}, nearest threat ${nearest === Infinity ? '-' : nearest.toFixed(1)}`);
     ep.phase = phase;
     // (re)plan: a new leg, the last walk ended, or (checked every 2 s while running away) the nearest
@@ -1687,7 +1877,7 @@ class FleeProcess extends BaseProcess {
     const goal: NavGoal =
       phase === 'home' && dest
         ? { type: 'block', p: dest.to }
-        : { type: 'runAway', from: () => c.threatsNear(c.position(), FLEE_SCAN + 8), r: phase === 'far' ? Math.min(FLEE_FAR, Math.max(FLEE_AWAY + 4, nearest + 6)) : FLEE_AWAY + 4 };
+        : { type: 'runAway', from: () => c.threatsNear(c.position(), FLEE_SCAN + 8), r: fleeRadius(phase === 'far' ? 'far' : 'away', nearest, c.rules.fleeLong) };
     const id = ++this.gotoId;
     this.walking = true;
     void c.mover.goto(goal as Goal, { timeoutTicks: 1200, sprint: true }).then((r) => {
@@ -1956,7 +2146,8 @@ class GuardProcess extends BaseProcess {
     this.ep = ep;
     c.stats.guardTriggers++;
     c.d.metrics?.inc('pve.guard');
-    c.log.info(`guard: ${bareType(e.type)} #${e.runtimeId} ${inPlace ? 'within reach (defending in place)' : `within ${c.guardRadius} blocks`}, fighting`);
+    const archerAtHome = c.low() && c.archerDuelTarget(c.position())?.runtimeId === e.runtimeId; // Track M4
+    c.log.info(`guard: ${bareType(e.type)} #${e.runtimeId} ${inPlace ? 'within reach (defending in place)' : `within ${c.guardRadius} blocks`}, fighting${archerAtHome ? ` (the archer at home, health ${c.health().toFixed(1)}: not standing in its line)` : ''}`);
     const opts: FightOptions = inPlace ? { approach: false, maxRange: 5, outOfRangeTicks: 20, timeoutTicks: 600 } : { maxRange: c.guardRadius + CHASE_EXTRA };
     void c.combat.fight(e.runtimeId, opts).then(async (r) => {
       if (t !== this.token) return;

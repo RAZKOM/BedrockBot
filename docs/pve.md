@@ -727,7 +727,8 @@ On bds-pve (`test/e2e/pve-testmobs.test.ts`, the sword in slot 0, rockets and br
 inventory, `fleeFly` and the guard on, `skeleton4 1 bare 40s`): the sword was out of the hotbar at every one of 172 looks
 while the run went, the elytra flee was asked once and flew (landed 96 blocks off after 7 s, one rocket), and the sword was
 back in slot 0 with its enchantment after the summary. The run said `cleared in 7.6 s` although the bot had flown off: the
-harness counts a mob it no longer sees as gone, and a flight of 96 blocks takes it out of view.
+harness counted a mob it no longer saw as gone, and a flight of 96 blocks takes it out of view. Since Track M4 it asks the
+server before it clears a run with a mob out of sight ("The harness: a mob out of sight is not cleared" below).
 
 With every other slot full of cobblestone (the second case of the same file: no free slot at the stow or the restore) the
 stow said `netherite_sword 0 <-> 10 (cobblestone)`, the flee was asked and flew as before, and the summary said
@@ -1144,6 +1145,195 @@ fight could pull it back either (the hotbar puller needed a free slot: "Weapon p
 T2's follow-ups (the exchange). On the Realm the same evening, after them: a bare series of three runs ended
 `netherite_sword back in slot 8 (exchanged with spider_eye, now in slot 34)`, and the next fight was fought with the
 sword.
+
+## Track M4: early-game kits
+
+Decision record: [decisions/0079-never-die-to-mobs.md](decisions/0079-never-die-to-mobs.md) "Addendum: Track M4"
+(decisions 32 to 38). Everything here ran on bds-pve and bds-gaunt (BDS 1.26.60, normal difficulty) on 2026-11-16 with
+the gauntlet (`test/e2e/gaunt-mobs.test.ts`) unless it says otherwise.
+
+Tracks M1 to M3 measured two kits: bare hands and the owner's netherite set. A bot early in a world has neither: it has
+stone tools, then iron, and often nothing but food after a death. The gauntlet has three more kits for that, each with
+16 bread and no elytra:
+
+| kit | what it carries |
+|---|---|
+| `none` | nothing but the bread |
+| `stone` | a stone sword, pickaxe, axe and shovel; no armour, no shield |
+| `iron` | an iron sword, the iron set, a shield, a stone pickaxe and shovel |
+
+`MOBS_TIME=day` runs a cell at noon instead of midnight (summoned undead have no helmet and burn).
+
+### The screen (one run a cell, the code before this track)
+
+Deaths / runs and the mean damage a run.
+
+| cell | iron day | iron night | none day | none night | stone day | stone night |
+|---|---|---|---|---|---|---|
+| zombie-1 | 0/1 0 | 0/1 0 | 0/1 17 | 0/1 3 | 0/1 0 | 0/1 0 |
+| husk-1 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 3 | 0/1 0 | 0/1 0 |
+| baby-1 | 0/1 0 | 0/1 0 | 0/1 8 | 0/1 3 | 0/1 0 | 0/1 0 |
+| drowned-1 | 0/1 0 | 0/1 0 | 0/1 18 | 0/1 0 | 0/1 0 | 0/1 0 |
+| zvillager-1 | 0/1 0 | 0/1 0 | 0/1 16 | 0/1 3 | 0/1 0 | 0/1 0 |
+| skeleton-1 | 0/1 0 | 0/1 0 | 0/1 15 | 0/1 17 | 0/1 0 | 0/1 0 |
+| stray-1 | 0/1 0 | 0/1 0 | 0/1 16 | 0/1 17 | 0/1 0 | 0/1 0 |
+| creeper-1 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 |
+| spider-1 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 |
+| cavespider-1 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 |
+| phantom-1 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 |
+| witch-1 | 0/1 0 | 0/1 0 | **1**/1 26 | **1**/1 23 | 0/1 0 | 0/1 0 |
+| enderman-1 | 0/1 0 | 0/1 0 | 0/1 7 | 0/1 0 | 0/1 0 | 0/1 0 |
+| pillager-1 | 0/1 1.9 | 0/1 1.4 | **1**/1 24 | **1**/1 24 | 0/1 4 | 0/1 7 |
+| slime-1 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 |
+| zombie-2 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 4 | 0/1 0 |
+| zombie-4 | 0/1 0 | 0/1 0 | 0/1 3 | 0/1 0 | 0/1 4 | 0/1 3 |
+| skeleton-2 | 0/1 1.9 | 0/1 1.9 | 0/1 19 | **1**/1 33 | 0/1 8 | 0/1 3 |
+| skeleton-4 | 0/1 3.3 | 0/1 3.8 | **1**/1 24 | **1**/1 25 | 0/1 8 | **1**/1 33 |
+| creeper-2 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 |
+| creeper-4 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 |
+| spider-2 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 2 | 0/1 0 |
+| spider-4 | 0/1 0 | 0/1 0.9 | 0/1 0 | 0/1 20 | 0/1 0 | 0/1 0 |
+| phantom-2 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 |
+| phantom-4 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 | 0/1 0 |
+| witch-2 | 0/1 2 | 0/1 1 | **1**/1 28 | 0/1 29 | 0/1 1 | 0/1 2 |
+| seal-5 | 0/1 9.8 | 0/1 13.8 | 0/1 33 | 0/1 0 | **1**/1 23 | **1**/1 28 |
+| mixed-4 | 0/1 1.9 | 0/1 0 | 0/1 10 | **1**/1 26 | 0/1 0 | 0/1 8 |
+| mixed-8 | 0/1 15.9 | **1**/1 27.9 | 0/1 12 | **1**/1 29 | 0/1 3 | 0/1 13 |
+| act-goto | 0/1 0 | 0/1 0 | 0/1 9 | 0/1 27 | 0/1 8 | 0/1 10 |
+| act-mine | 0/1 1.9 | 0/1 1.9 | 0/1 11 | 0/1 11 | 0/1 7 | 0/1 0 |
+| act-eat | 0/1 3.8 | 0/1 5.2 | 0/1 4 | 0/1 17 | 0/1 12 | 0/1 11 |
+| act-landed | 0/1 2.4 | 0/1 0 | 0/1 15 | 0/1 14 | 0/1 5 | 0/1 0 |
+| **all** | **0** of 33, 1.4 a run | **1** of 33, 1.8 a run | **4** of 33, 9.5 a run | **6** of 33, 9.8 a run | **1** of 33, 2.7 a run | **2** of 33, 3.6 a run |
+
+The weapon kits kill one mob of any kind in 2 to 4 s. What kills them is a crowd of archers with a witch (`seal-5`: four
+skeletons and a witch), four skeletons, and the witch's poison in `mixed-8`. The `none` kit dies where bare hands died before
+(the archers, the pillager, the witch: a fist does not reach them, Track M2), and takes 15 to 18 from one zombie or drowned by
+day.
+
+### What killed (the traces)
+
+Each death's last 10 s, tick by tick (`MOBS_TRACE`), on both sides of the first A/B series:
+
+- **Standing at home in an archer's line.** The stone kit's `skeleton-4` killed three and stood at home at 6 to 7 health
+  while the fourth shot it dead from 10 to 15. No flee: at home a flee starts only for a threat within 6 (Track W). No duel:
+  the duel with an archer wants more than twice the last hit (an arrow of 3 or 4 without armour). Guard at low health
+  defends in place and does not walk to an archer. So nothing ran.
+- **The flight on foot went home, into the skeletons.** In 17 of 26 stone-kit `seal-5` deaths the flight on foot had a leg
+  home in its last 10 s, at 1 to 6 health. Home counts as clear when no threat stands nearer than it in its direction (the
+  angle rule, Track W); the skeletons stood 12 to 15 from home beside it or beyond it, so home was "clear" and in their range.
+- **A tick of poison read as a hit of 1.** The witch's poison takes the health down by 1 every 25 ticks to 1. Each tick
+  came to the guard as a hit, blamed on the nearest skeleton (the attacker guess takes a ranged mob within 20), and became
+  the duel's "last hit": twice 1 is 2, so the duel went on at 3 health and the next arrow killed. Seen in the stone kit's
+  `seal-5` and the iron kit's `mixed-8`.
+- **The legs of the flight changed every second.** The iron kit's `mixed-8` death: the poison at 1 health, a husk 10 to 12
+  behind and a skeleton coming in and out of view at 15; the flight switched between `far` and `home` every 10 to 20 ticks,
+  each switch a new walk, each new walk stops the body for a moment, and it never sprinted.
+- **The flight on foot walks.** Over every flee tick in the screen's traces the body had the sprint in 13 % of the `away`
+  ticks, 32 % of `home` and 0 % of `far`, and covered 0.18 to 0.20 blocks a tick, under a walk's 0.216 (a sprint is
+  0.281). The walk sprints only while more than 8 blocks of straight path are left (5, plus 3 it keeps to stop in), and a
+  leg of the flight is about that long.
+
+### The rules (`PveController.rules`)
+
+Five rules, each a choice the guard or the flight on foot already makes, so each is a switch of the controller, not a
+setting (`PveRules`, on by default; the gauntlet turns them off with `MOBS_RULES` or flips them with `MOBS_AB_RULE`):
+
+| rule | what it does | why |
+|---|---|---|
+| `archerDuel` | With a blade, below `fleeHealth`, within 16 of home (no shelter), only archers within 16 (2 at most; no melee mob, creeper or witch) and one with a line on the bot: that archer is a duel (`canDuel`) and guard's first target, fought with the approach, not in place (`archerDuelTarget`). Not at 5 health or under (after the poison, below) | standing still in an archer's line is the one choice that is sure to lose; at 5 or under one arrow ends it and the flight on foot is the better bet |
+| `poison` | The bot's own poison (`mob_effect`, effect 19) is tracked (`MobTracker.selfPoison`). A drop of 1 while poisoned is the poison: no attacker guess, not the duel's last hit, counted as `pve.taken.poison`. The duel's margin and the archer duel's floor count the health the poison will leave (`healthAfterPoison`: one every 25 ticks at level I, 12 at II, until it ends, never below 1); low health (the flee) stays the health itself | the poison stops at 1 whatever the armour; a duel judged on 9 health was a duel at 1. Counted in low health too, the bot ran from the witch who poisoned it and she followed (below) |
+| `shooterHome` | Home is no place to flee to while an archer or a witch stands within 16 of it (`shooterNear`), seen or not: no `home` leg, not even after `FLEE_FAR` out. At home, an archer with a line on the bot is fled from at low health, whatever its distance (not a witch) | archers shoot at home too; the angle rule is for melee mobs that walk after the bot. A witch walks after a bot that runs, and guard at home kills her (Track M2) |
+| `legHold` | A leg of the flight on foot holds 2 s (`FLEE_LEG_HOLD_MS`) unless a threat comes within `FLEE_URGENT` (6); `home` or `far` goes back to `away` only with the nearest threat inside `FLEE_AWAY` - 3; `home` again only once home has stayed clear for 2 s; never on towards a home no longer clear (`fleeLeg`) | each change of leg is a new walk, and a new walk stops the body |
+| `fleeLong` | The `away` and `far` legs run 8 blocks farther than they need (`FLEE_LONG`, `fleeRadius`) | a longer leg is a walk long enough to sprint, and fewer new walks |
+
+### Before and after (10 runs a side)
+
+Every row below ran as an A/B series on one server: the five rules off, then on, alternating, 5 runs a side a chunk, two
+chunks (`MOBS_AB_RULE=legHold,archerDuel,fleeLong,poison,shooterHome`). The `off` side is the code before this track.
+
+| kit, time | cell | off: deaths, damage a run | on: deaths, damage a run |
+|---|---|---|---|
+| stone, night | `skeleton-4` | **8** of 10, 22.2 | **0** of 10, 18.8 |
+| stone, night | `seal-5` | **10** of 10, 24.1 | **2** of 10, 25.3 |
+| stone, night | `mixed-8` | **6** of 10, 26.5 | **1** of 10, 16.1 |
+| stone, night | `act-goto` | 0 of 3, 6.0 | 0 of 3, 1.3 |
+| stone, night | `act-eat` | 0 of 3, 10.3 | 0 of 3, 11.3 |
+| stone, day | `seal-5` | **6** of 10, 21.5 | **1** of 10, 15.3 |
+| iron, night | `mixed-8` | 0 of 10, 21.9 | 0 of 10, 27.1 |
+| iron, night | `seal-5` | **7** of 10, 22.4 | **3** of 10, 19.4 |
+| none, night | `witch-1` | **9** of 10, 25.1 | **2** of 10, 28.1 |
+| none, night | `skeleton-4` | **7** of 10, 24.6 | **3** of 10, 22.9 |
+| none, night | `pillager-1` | **10** of 10, 26.6 | **6** of 10, 27.2 |
+| live, night | `mixed-8` | 0 of 10, 26.8 | 0 of 10, 21.7 |
+
+The live kit (the netherite set) with the rules on, every cell once by night: 0 deaths in 33, 1.4 damage a run (Track
+M2's final code, its defaults: 0 of 99, 1.3 a run). The iron kit's `mixed-8` damage is the witch's poison landing or not
+(29 to 30 in the runs it landed, 1.4 to 4.7 in the others; 7 of 10 off, 9 of 10 on), not a floor: no flee in 8 of 10 runs
+either side. Its off side in the series before the last change (below) died 3 times in 10.
+
+How the rules came in, each measured as it came (the same A/B, 5 or 10 runs a side, the stone kit by night unless it says
+otherwise; the `off` side is the code before this track each time):
+
+| step | rows | off | on |
+|---|---|---|---|
+| `legHold`, `archerDuel` | `skeleton-4`; `seal-5` (10 a side) | 5 of 10; 10 of 10 | 3 of 10; 7 of 10 |
+| and `fleeLong` | `skeleton-4`; `seal-5` (5 a side) | 5 of 5; 5 of 5 | 2 of 5; 2 of 5 |
+| `fleeLong` alone, the other two on | `skeleton-4` (5 a side) | 2 of 5 | 1 of 5 |
+| the three | iron `mixed-8` (5 a side) | 0 of 5 | 1 of 5: poisoned to 1.2, then a duel with a skeleton at 2 to 4 (the poison tick read as a hit) |
+| `poison`, `shooterHome` (first form), the three on | `seal-5` (10 a side) | 9 of 10 | 5 of 10 |
+| all five, the duel's floor of 5, low health counting the poison, the at-home flee from witches too | `seal-5`; `skeleton-4`; iron `mixed-8`; stone `mixed-8` (10, 10, 10, 5 a side) | 10; 6; 3; 0 | 5; 1; 0; **2 of 5** |
+| the last change: low health the health itself, the at-home flee from archers only | the table above | | |
+
+The step before the last made the stone kit's `mixed-8` worse: poisoned, its low health counted 1, so it fled from the
+witch who poisoned it in 4 of 5 runs (1 of 5 off); she walked after it at 12 to 15 blocks and her harming killed it at 1
+health 100 and 150 blocks out. The flee is now judged on the health itself, and only an archer is fled from at home.
+
+### Tried and not taken
+
+- **The approach to an archer sprinting** (`archerSprint`, a nav option to sprint to the path's end). In the stone kit's
+  traces guard walked after a skeleton at 4 to 8 for seconds: the approach is a path of 2 to 6 blocks, under the 8 a sprint
+  needs. With the sprint the approach was quicker but a sprint's strike knocks the skeleton farther back: `skeleton-4`,
+  5 runs a side, the fights cleared in 17.6 s against 15.1, damage 20.6 against 14.6, 1 death against 0. Removed.
+
+**`sealIn` with the rules** (A/B of the seal alone, `legHold` and `archerDuel` on, the stone kit's `seal-5` by night, 5
+a side): 4 deaths of 5 off, 2 of 5 on, and both runs in which it sealed lived. It places blocks, so it stays off by
+default (decision 27); this is the measured case for turning it on with an early kit, n 5, on flat ground only.
+
+### The harness: a mob out of sight is not cleared
+
+`!test mobs` cleared a run when it saw none of its mobs for 3 s (`bare` series, Track T2: `cleared in 7.6 s` after a flee
+of 96 blocks). Now, with a mob gone from view without its death seen, it asks the server: `/testfor @e[name=<tag>]`, at
+most every 2 s (`COUNT_EVERY_MS`), answered by the command's success count (0 = none: cleared, `clearedBy: server`). A count
+above 0 keeps the run going; at the end the run says `N left after T s (N out of sight)`. No answer clears it as before,
+with `(none in sight, the server did not answer)` in the line (`clearedBy: unconfirmed`); a rate-limited ask is asked again.
+The gauntlet never had the fault (it reads the server's entity list).
+
+### Not met
+
+- **The bar (no death under every activity) is not met for the early kits.** On the final code the stone kit still died
+  2 in 10 in `seal-5` by night, 1 in 10 in `mixed-8` and in `seal-5` by day; the iron kit 3 in 10 in `seal-5`; the `none`
+  kit 2 to 6 in 10 against one witch, four skeletons or one pillager. The remaining deaths: the witch's harming (6, which
+  armour does not reduce) while guard fights her at 6 or 7 health with skeletons shooting (the iron kit, 2 of 3); arrows
+  while the poison holds the bot at 1 to 4 (the archer duel's floor leaves it to the flight on foot, which archers
+  outrange); a witch who walks after a far flight and throws harming at 1 health 150 blocks out; once a home leg that ran
+  past a skeleton 5 to 10 off. A bot with no blade has no answer to archers in the open but distance; the seal-in is the
+  measured one (above) and it ships off. Open: keeping out of a witch's throw at 6 health or under.
+- **Not run on the Realm.** The early kits cannot be set up there (no cheats: no stone or iron items given, the worn armour
+  cannot be taken off), so `!test mobs` has no kit option; its `bare` stows the blades only.
+- The rows are flat grass, guard radius 16, home on the spot; cliffs, caves and water are not in them.
+
+### On the Realm
+
+The rules are on with the update; no setting changes. With the netherite set a run seldom reaches low health, so the
+Realm shows the rules' log lines, not their effect on deaths. By night, near home, `fleeHealth` as it is:
+
+- `!test mobs skeleton4 5 bare` and `!test mobs witch 5 bare`: look for `pve: took 1.0 damage (poison, N s left), health
+  H, A once it ends` (a poison tick, not a hit: the run's `hits` no longer name a skeleton for it), `flee: an archer or a
+  witch within 16 of home: not running there while it stays`, and, after the run, `N left after T s (N out of sight)` or
+  `cleared` (the server was asked, not only the bot's view).
+- `!test mobs mixed8 5`: the same lines, and `guard: skeleton #N within 16 blocks, fighting (the archer at home, health
+  H: not standing in its line)` when only archers are left at low health. Deaths and the lowest health are the bar: no
+  death, and the series' damage a run not above the last `mixed8` series.
 
 ## Packets (BDS 1.26.60.6, verified)
 

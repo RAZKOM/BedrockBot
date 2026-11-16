@@ -8,9 +8,14 @@
 // (`gauntlet:`), and one JSON line per cell to MOBS_OUT when set.
 //
 // Kits (MOBS_KITS, default bare,live,kb2): `bare` no weapon, no armour, 8 bread; `live` the netherite set, a netherite sword,
-// a shield, 16 cooked beef, 32 cobblestone; `kb2` the live kit with Knockback II on the sword.
+// a shield, 16 cooked beef, 32 cobblestone; `kb2` the live kit with Knockback II on the sword. Track M4, the early-game kits
+// (16 bread each, no elytra): `none` nothing else; `stone` a stone sword, pickaxe, axe and shovel, no armour, no shield;
+// `iron` an iron sword, the iron set, a shield, a stone pickaxe and shovel.
 // Cells (MOBS_CELLS: a comma list of names or prefixes, default all): `<mob>-1` one mob; `<mob>-2`, `<mob>-4` crowds of one
 // type; `mixed-4`, `mixed-8`; `act-<activity>` a mixed crowd of 4 during goto / mine / eat / landed. MOBS_HARD=1 runs at hard.
+// Track M4: MOBS_TIME=day runs at noon (the undead burn: no helmet on them), else midnight. The rules are on by default;
+// MOBS_RULES=legHold=false,... sets PveController.rules for the run (all five false: the code before Track M4);
+// MOBS_AB_RULE=<rule>[,<rule>...] flips them all off / on between the repeats.
 // The idle night (MOBS_NIGHT=1): natural spawning and the daylight cycle on from dusk to dawn (12 000 ticks, about 10 min),
 // the bot idle in the open at its home point, each kit once.
 // Never asserts the bars (it is the measurement); asserts only that the harness itself worked (every cell ran). About
@@ -37,10 +42,15 @@ const SETTINGS = (process.env.MOBS_SET ?? '').split(',').map((s) => s.trim()).fi
 const REPEAT = Math.max(1, Number(process.env.MOBS_REPEAT ?? 1));
 /** Track M2: a boolean setting flipped off / on between the repeats of a cell (off first), so both sides run on the same server, spots and order. */
 const AB = process.env.MOBS_AB;
+/** Track M4: a rule of PveController.rules flipped off / on between the repeats (as MOBS_AB for a setting), and rules set for the whole run (`legHold=true,...`). */
+const AB_RULE = process.env.MOBS_AB_RULE;
+const RULES = (process.env.MOBS_RULES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 /** Track M2: the spots' row (40 blocks a row), so that a second run on the same server keeps its distance from the first. */
 const ROW = Number(process.env.MOBS_ROW ?? 0);
 /** Track M3: every kit also carries the flight kit (an elytra in the inventory, 64 rockets), for the elytra flee (`MOBS_SET=fleeFly=true` or `MOBS_AB=fleeFly`). */
 const ELYTRA = process.env.MOBS_ELYTRA === '1';
+/** Track M4: the clock frozen at `noon` (day: the undead burn in the sun) or `midnight` (the default). */
+const TIME = process.env.MOBS_TIME === 'day' || process.env.MOBS_TIME === 'noon' ? 'noon' : 'midnight';
 
 interface MobSpec {
   type: string;
@@ -102,6 +112,8 @@ interface CellResult {
   cell: string;
   activity: string;
   hard: boolean;
+  /** Track M4: `noon` or `midnight`. */
+  time: string;
   seconds: number;
   died: boolean;
   damage: number;
@@ -139,7 +151,7 @@ function traceRow(b: GauntBot, c: Vec3, tk: bigint, t0: number): TraceRow {
   const loop = b.built.mobility!.loop as unknown as { command: { sneak?: boolean; sprint?: boolean } };
   const me = b.pve.position();
   const near = [...b.built.mobility!.world.entities.values()]
-    .filter((e) => !e.type.includes('player') && !e.type.includes('item') && !e.type.includes('xp_orb'))
+    .filter((e) => !e.type.includes('player') && !e.type.includes('item') && !e.type.includes('xp_orb') && !e.type.includes('arrow'))
     .map((e) => ({ t: e.type.replace('minecraft:', ''), d: Math.hypot(e.pos.x - me.x, e.pos.z - me.z) }))
     .filter((e) => e.d < 16)
     .sort((a, b2) => a.d - b2.d)
@@ -183,12 +195,31 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       if (kit === 'blocks') await t.give(b.name, 'cobblestone', 32); // the seal-in's kit: bare with blocks for the shell
       return;
     }
-    if (kit === 'kb2') await t.ok('givekb', [b.name, 'netherite_sword', 2, 0]);
-    else await t.give(b.name, 'netherite_sword', 1);
-    for (const piece of ['netherite_helmet', 'netherite_chestplate', 'netherite_leggings', 'netherite_boots']) await t.give(b.name, piece, 1);
-    await t.give(b.name, 'cooked_beef', 16);
-    await t.give(b.name, 'cobblestone', 32);
-    await t.give(b.name, 'shield', 1);
+    // Track M4: the early-game kits. `none` nothing but bread; `stone` a stone sword and stone tools, no armour, no shield;
+    // `iron` an iron sword, the iron set and a shield (and stone tools). Bread in all three, no elytra (unless MOBS_ELYTRA).
+    if (kit === 'none') {
+      await t.give(b.name, 'bread', 16);
+      return;
+    }
+    if (kit === 'stone') {
+      for (const item of ['stone_sword', 'stone_pickaxe', 'stone_axe', 'stone_shovel']) await t.give(b.name, item, 1);
+      await t.give(b.name, 'bread', 16);
+      return;
+    }
+    if (kit === 'iron') {
+      await t.give(b.name, 'iron_sword', 1);
+      for (const piece of ['iron_helmet', 'iron_chestplate', 'iron_leggings', 'iron_boots']) await t.give(b.name, piece, 1);
+      for (const item of ['stone_pickaxe', 'stone_shovel']) await t.give(b.name, item, 1);
+      await t.give(b.name, 'bread', 16);
+      await t.give(b.name, 'shield', 1);
+    } else {
+      if (kit === 'kb2') await t.ok('givekb', [b.name, 'netherite_sword', 2, 0]);
+      else await t.give(b.name, 'netherite_sword', 1);
+      for (const piece of ['netherite_helmet', 'netherite_chestplate', 'netherite_leggings', 'netherite_boots']) await t.give(b.name, piece, 1);
+      await t.give(b.name, 'cooked_beef', 16);
+      await t.give(b.name, 'cobblestone', 32);
+      await t.give(b.name, 'shield', 1);
+    }
     await until(
       async () => {
         const eq = (await t.ok<{ equipment: Record<string, { typeId: string } | undefined> }>('durability', [b.name])).equipment;
@@ -196,7 +227,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
         return eq.Head && eq.Chest && eq.Legs && eq.Feet && st.offhand?.typeId === 'minecraft:shield' ? true : undefined;
       },
       30_000,
-      'netherite worn and the shield in the offhand',
+      'the armour worn and the shield in the offhand',
       500,
     );
   }
@@ -382,6 +413,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       cell: cell.name,
       activity: cell.activity,
       hard: HARD,
+      time: TIME,
       seconds,
       died,
       damage,
@@ -440,15 +472,19 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
   }
 
   const fmtRow = (r: CellResult): string =>
-    `${r.label}${r.ab ? ` [${r.ab}]` : ''}${r.rep !== undefined && REPEAT > 1 ? ` #${r.rep + 1}` : ''} ${r.kit} ${r.cell}${r.hard ? ' (hard)' : ''}: ${r.died ? 'DIED' : 'alive'} after ${r.seconds} s, damage ${r.damage} (${r.perMinute}/min, lowest ${r.minHealth}), hits ${Object.entries(r.hitsByType).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}, ${r.cleared ? `cleared in ${r.clearS} s` : `${r.left} left`}, reflex ${r.reflexHits}${r.potions ? `, potions ${r.potionsNear}/${r.potions} near (steps ${r.potionSteps})` : ''}, floors ${Object.entries(r.floors).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}${r.activity !== 'idle' ? `, ${r.activity}: ${r.activityDone}` : ''}${r.friendly ? `, FRIENDLY ${r.friendly}` : ''}${r.seal ? `, sealed at ${r.seal.sealedS} s${r.seal.dugIn ? ' (dug in)' : ''} health ${r.seal.healthIn} -> ${r.seal.healthMax}, ${r.seal.bites} bites, ${r.seal.damageInside} damage inside, ${r.seal.outS !== null ? `out at ${r.seal.outS} s` : 'still in'}` : ''}${r.fleeFly ? `, elytra flee asked ${r.fleeFly.asked} (${r.fleeFly.landed} landed, ${r.fleeFly.ended} ended otherwise, ${r.fleeFly.refused} refused), ${r.fleeFly.fromSpot} from the spot at the end${r.fleeFly.last ? `: ${r.fleeFly.last.slice(0, 160)}` : ''}` : ''}`;
+    `${r.label}${r.ab ? ` [${r.ab}]` : ''}${r.rep !== undefined && REPEAT > 1 ? ` #${r.rep + 1}` : ''} ${r.kit} ${r.cell}${r.hard ? ' (hard)' : ''}${r.time === 'noon' ? ' (day)' : ''}: ${r.died ? 'DIED' : 'alive'} after ${r.seconds} s, damage ${r.damage} (${r.perMinute}/min, lowest ${r.minHealth}), hits ${Object.entries(r.hitsByType).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}, ${r.cleared ? `cleared in ${r.clearS} s` : `${r.left} left`}, reflex ${r.reflexHits}${r.potions ? `, potions ${r.potionsNear}/${r.potions} near (steps ${r.potionSteps})` : ''}, floors ${Object.entries(r.floors).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}${r.activity !== 'idle' ? `, ${r.activity}: ${r.activityDone}` : ''}${r.friendly ? `, FRIENDLY ${r.friendly}` : ''}${r.seal ? `, sealed at ${r.seal.sealedS} s${r.seal.dugIn ? ' (dug in)' : ''} health ${r.seal.healthIn} -> ${r.seal.healthMax}, ${r.seal.bites} bites, ${r.seal.damageInside} damage inside, ${r.seal.outS !== null ? `out at ${r.seal.outS} s` : 'still in'}` : ''}${r.fleeFly ? `, elytra flee asked ${r.fleeFly.asked} (${r.fleeFly.landed} landed, ${r.fleeFly.ended} ended otherwise, ${r.fleeFly.refused} refused), ${r.fleeFly.fromSpot} from the spot at the end${r.fleeFly.last ? `: ${r.fleeFly.last.slice(0, 160)}` : ''}` : ''}`;
 
   beforeAll(async () => {
-    await prepareServer({ time: 'midnight' });
+    await prepareServer({ time: TIME });
     if (HARD) await gauntCmd('difficulty', 'hard');
     bot = await startGauntBot('GtMobs', {}, { owners: [ownerName], values: { guard: '16' } });
     for (const kv of SETTINGS) {
       const [k, v] = kv.split('=');
       if (k && v !== undefined) bot.pve.settings.set(k as never, v);
+    }
+    for (const kv of RULES) {
+      const [k, v] = kv.split('=');
+      if (k && k in bot.pve.rules) (bot.pve.rules as unknown as Record<string, boolean>)[k] = v !== 'false';
     }
     await teleport(bot, centre({ x: area.x - 1000, y: FEET_Y, z: area.z - 1000 }));
   }, 120_000);
@@ -468,14 +504,15 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     it(`kit ${kit}: ${cells().length} cells`, async () => {
       const b = bot!;
       let ran = 0;
-      const sides = AB ? 2 : 1;
+      const sides = AB || AB_RULE ? 2 : 1;
       for (const cell of cells()) {
         for (let rep = 0; rep < REPEAT * sides; rep++) {
-          const side = AB ? (rep % 2 === 0 ? 'off' : 'on') : undefined;
+          const side = AB || AB_RULE ? (rep % 2 === 0 ? 'off' : 'on') : undefined;
           if (AB) b.pve.settings.set(AB as never, side === 'on' ? 'true' : 'false');
+          if (AB_RULE) for (const k of AB_RULE.split(',')) (b.pve.rules as unknown as Record<string, boolean>)[k.trim()] = side === 'on';
           await setKit(b, kit);
           const r = await runCell(b, kit, cell);
-          if (side) r.ab = `${AB}=${side}`;
+          if (side) r.ab = `${AB ?? AB_RULE}=${side}`;
           if (REPEAT > 1) r.rep = Math.floor(rep / sides);
           results.push(r);
           ran++;
@@ -484,7 +521,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
         }
       }
       expect(ran).toBe(cells().length * REPEAT * sides);
-    }, cells().length * REPEAT * (AB ? 2 : 1) * (SECONDS + 90) * 1000);
+    }, cells().length * REPEAT * (AB || AB_RULE ? 2 : 1) * (SECONDS + 90) * 1000);
   }
 
   it.skipIf(!NIGHT)('the idle night: dusk to dawn in the open, each kit', async () => {

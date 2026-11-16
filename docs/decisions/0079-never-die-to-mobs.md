@@ -199,3 +199,46 @@ The numbers are in [../pve.md](../pve.md) "Track M2". 30 runs a side of `mixed-8
     survival kit's `exchange`, the request `swapSlots` and the kit's `toHotbar` send), with the same choice of the item given
     up, for every job of the puller: the fight's weapon, the Digger's tool, a breeding item. A failed pull is said in the log
     once a minute a job and reason, so a fight with the wrong weapon is visible.
+
+## Addendum: Track M4 (2026-11-16)
+
+The numbers are in [../pve.md](../pve.md) "Track M4: early-game kits". The gauntlet gained three kits a bot has early in a
+world (`none`: food only; `stone`: stone tools, no armour; `iron`: the iron set, an iron sword, a shield) and a day time
+(`MOBS_TIME=day`). One run a cell of each kit by day and by night (198 runs), then A/B series of 10 runs a side on the rows
+that killed, on bds-pve and bds-gaunt.
+
+32. **Five rules, each on by default, kept as switches of the controller** (`PveController.rules`, `PVE_RULES_DEFAULT`), not
+    settings: each changes a choice the guard or the flight on foot already makes (whom to fight, which leg to run, how far a
+    leg runs), none places or digs a block or moves the body in a way it did not move before. They are switches so that the
+    gauntlet can measure each (`MOBS_RULES`, `MOBS_AB_RULE`). The bar for a rule that only changes choices (no row worse
+    with the live kit) is met: the live kit's `mixed-8` 0 deaths in 10 either way (damage 26.8 off, 21.7 on), every cell
+    once with them on 0 of 33 (1.4 a run); no row of the early kits has more deaths with them on (pve.md's table).
+33. **`archerDuel`: with a blade, archers alone near home are closed in on.** At low health with a blade, within 16 of home
+    (`ARCHER_DUEL_HOME`), no shelter, only archers within the flee's scan (2 at most, no melee mob, creeper or witch) and one
+    in sight: that archer is a duel and guard's first target, fought with the approach. Before, the bot stood at home in the
+    archer's line: no flee (at home only for a threat within 6, Track W), no duel (twice the last arrow was more than the
+    health), and guard in place does not walk. Not at 5 health or under (`ARCHER_DUEL_MIN`, after the poison): with the duel
+    at any health the stone kit's `seal-5` fought two skeletons at 2 to 5 and died in 4 of 5.
+34. **`poison`: the bot's own poison is the poison, not a hit.** `MobTracker` reads the bot's `mob_effect` (effect 19) and a
+    drop of 1 while poisoned gets the cause `poison`: no attacker guess, no last hit for the duel, its own counter. The
+    duel's margin and the archer duel's floor count the health the poison will leave (`healthAfterPoison`). Before, each
+    tick was blamed on a ranged mob within 20 and became the duel's last hit of 1, so the bot dueled a skeleton at 3 health.
+    Low health (the flee) stays the health itself: counted with the poison, the stone kit fled from the witch who poisoned it
+    in 4 of 5 `mixed-8` runs, she walked after it, and her harming killed it at 1 health 100 blocks out in 2 of 5 (0 of 5
+    before). The poison alone stops at 1.
+35. **`shooterHome`: home is no refuge while an archer or a witch stands within 16 of it** (`SHOOTER_HOME`, seen or not),
+    and at home an archer with a line on the bot is fled from at low health whatever its distance (not a witch: she walks
+    after a bot that runs, and guard at home kills her, decision 18). Home's
+    clearance is an angle rule (Track W), made for mobs that walk after the bot; archers 12 to 15 from home beside it made it
+    "clear" and in range. In 17 of 26 stone-kit `seal-5` deaths the flight had a leg home in its last 10 s.
+36. **`legHold`: a leg of the flight on foot holds 2 s** (`FLEE_LEG_HOLD_MS`) unless a threat comes within 6; `away` comes
+    back only with the nearest threat inside 9 (`FLEE_LEG_BAND`); `home` again only once home has stayed clear 2 s. Each
+    change of leg is a new walk and a new walk stops the body; the iron kit's `mixed-8` death changed leg every 0.5 to 1 s.
+37. **`fleeLong`: the `away` and `far` legs run 8 farther** (`FLEE_LONG`, up to `FLEE_FAR`). The walk sprints only with more
+    than 8 blocks of straight path left, and a leg of 16 is about that: over the screen's flee ticks the body sprinted in 13 %
+    of the `away` ticks and none of the `far` ones.
+38. **Not taken: the approach to an archer sprinting** (5 runs a side of the stone kit's `skeleton-4`: 1 death against 0,
+    damage 20.6 against 14.6; a sprint's strike knocks the skeleton back out of reach). **`sealIn` stays off**; with the
+    rules on it saved the stone kit's `seal-5` in the runs where it sealed, measured in pve.md. **`!test mobs` has no kit
+    option**: a Realm without cheats cannot give stone or iron items or take the worn armour off, so the early kits are
+    measured on test servers only; on the Realm `bare` is the nearest.

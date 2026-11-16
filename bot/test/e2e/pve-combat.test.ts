@@ -22,6 +22,7 @@ import {
   connectPlayer,
   E2E,
   FEET_Y,
+  fill,
   fmt,
   hdist,
   prepareServer,
@@ -417,6 +418,14 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
     await b.truth.cleanup();
     await b.truth.clearAround(centre(at), 16);
     await teleport(b, centre(at));
+    // the cells are shared by every bds-pve suite: blocks left at the spot (a seal-in's walls) suffocated the bot
+    // (2026-11-16: `death.attack.inWall` in 2 of 5 runs, counted as zombie hits); the floor is laid again (as pve-crowd
+    // does) and the air above it cleared first
+    const lo = { x: at.x - 11, z: at.z - 4 };
+    const hi = { x: at.x + 11, z: at.z + 4 };
+    await fill(b, { ...lo, y: FEET_Y - 4 }, { ...hi, y: FEET_Y - 2 }, 'dirt');
+    await fill(b, { ...lo, y: FEET_Y - 1 }, { ...hi, y: FEET_Y - 1 }, 'grass_block');
+    await fill(b, { ...lo, y: FEET_Y }, { ...hi, y: FEET_Y + 4 }, 'air');
     await b.truth.setHealth(b.name, 20);
     await until(() => (b.pve.health() >= 20 ? true : undefined), 5_000, 'health 20');
     const since = await b.truth.now();

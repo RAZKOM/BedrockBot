@@ -17,7 +17,7 @@ import { NightSafety, WorldClock } from '../../src/tasks/night.ts';
 import type { CommandDeps } from '../../src/tasks/process/deps.ts';
 import { AfkGather } from '../../src/tasks/process/gather.ts';
 import { NightProcess } from '../../src/tasks/process/night.ts';
-import { PveController } from '../../src/tasks/pve.ts';
+import { FLEE_LONG, PveController } from '../../src/tasks/pve.ts';
 import { afkTask, type WalkingTask } from '../../src/tasks/registry.ts';
 import { RespawnController } from '../../src/tasks/respawn.ts';
 import { Inventory } from '../../src/world/inventory.ts';
@@ -181,6 +181,7 @@ describe('afk processes', () => {
 
   it('flee pre-empts a guard fight; afterwards the bot only defends in place while the health is low', async () => {
     const s = world({ home: { x: 0, y: -60, z: 0 }, shelter: { x: -12, y: -60, z: 0 } });
+    s.pve.rules.legHold = false; // Track W's legs (Track M4's hold: early-kit.test.ts)
     s.ents.set(7n, mob(7n, 'minecraft:zombie', { x: 0.5, y: -60, z: 6.5 }));
     s.loop.step(1);
     expect(s.pve.behaviour()).toBe('fighting zombie');
@@ -188,7 +189,7 @@ describe('afk processes', () => {
     s.loop.step(1);
     expect(s.pve.behaviour()).toBe('fleeing');
     // flee v2 (Track W): away from the zombie first, then the shelter once 12 clear and not behind it
-    expect(s.mover.gotos.at(-1)).toMatchObject({ goal: { type: 'runAway', r: 16 }, sprint: true });
+    expect(s.mover.gotos.at(-1)).toMatchObject({ goal: { type: 'runAway', r: 16 + FLEE_LONG }, sprint: true });
     expect(s.pve.combat.busy).toBe(false);
     s.loop.pos = { x: -2, y: -60, z: -6 };
     s.loop.step(5);

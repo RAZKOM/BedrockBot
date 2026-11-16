@@ -366,11 +366,31 @@ export interface MobTrackerOptions {
   selfPos: () => Vec3 | undefined;
   /** Track BF: the bot's eyes are in a water cell (skills/survival/surface.ts headInWater); drowning attribution. */
   headInWater?: () => boolean;
+  /** Track M4: a drop of 1 while the bot is poisoned is the poison (cause `poison`, no attacker guess). Default off. */
+  poisonCause?: () => boolean;
   now?: () => number;
 }
 
-/** Track BF: why a health drop came without a mob guess. */
-export type HitCause = 'drowning';
+/** Track BF: why a health drop came without a mob guess. Track M4: `poison`, a tick of the bot's own poison (MobTrackerOptions.poisonCause). */
+export type HitCause = 'drowning' | 'poison';
+
+/** Track M4: Bedrock's effect id of Poison (mob_effect effect_id). */
+export const POISON_EFFECT = 19;
+/** Track M4: ticks between two poison damages at level I (amplifier 0); II every 12 (Minecraft's 25 >> amplifier). */
+export const POISON_TICKS = 25;
+
+/** Track M4: the poison on the bot (mob_effect): its level (amplifier) and when it ends (now() ms). */
+export interface SelfPoison {
+  amplifier: number;
+  until: number;
+}
+
+/** Track M4: the damage a poison still does: one every 25 >> amplifier ticks until it ends; it stops at 1 health. */
+export function poisonLeft(p: SelfPoison | undefined, now: number, health: number): number {
+  if (!p || now >= p.until) return 0;
+  const every = Math.max(1, POISON_TICKS >> Math.max(0, p.amplifier));
+  return Math.max(0, Math.min(health - 1, Math.floor((p.until - now) / 50 / every)));
+}
 
 /** Bedrock's full air supply (set_entity_data `air`, ticks; 15 s). */
 export const MAX_AIR = 300;
@@ -406,6 +426,8 @@ export class MobTracker {
   selfHealth: number | undefined;
   /** Track BF: own air supply (set_entity_data `air`, 0..300 ticks), undefined until the server sends it. */
   selfAir: number | undefined;
+  /** Track M4: the poison on the bot (mob_effect for its own runtime id), undefined with none. */
+  selfPoison: SelfPoison | undefined;
   lastHitBy: HitGuess | undefined;
   /** Track AH: per mob, now() of the last own health drop attributed to it (the guess). */
   readonly hitAt = new Map<bigint, number>();
@@ -473,10 +495,17 @@ export class MobTracker {
       source.on('remove_entity', () => {
         this.prune();
       }),
+      // Track M4: the bot's own poison (a witch's potion: 1 every 25 ticks for up to 45 s, never below 1 health)
+      source.on('mob_effect', (p) => {
+        if (p.runtime_entity_id === undefined || toBig(p.runtime_entity_id) !== this.o.selfRuntimeId() || p.effect_id !== POISON_EFFECT) return;
+        if (p.event_id === 'remove' || p.event_id === 3) this.selfPoison = undefined;
+        else this.selfPoison = { amplifier: typeof p.amplifier === 'number' ? p.amplifier : 0, until: this.now() + (typeof p.duration === 'number' ? p.duration : 0) * 50 };
+      }),
       source.on('respawn', (p) => {
         if (p.state === 1) {
           this.selfHealth = undefined;
           this.selfAir = undefined;
+          this.selfPoison = undefined;
         }
       }),
     );
@@ -573,7 +602,9 @@ export class MobTracker {
       const damage = prev - h;
       this.lastDamageAt = this.now();
       const raw = this.guessAttacker(damage);
-      const cause = this.drowning(raw) ? 'drowning' : undefined;
+      // Track M4: a drop of 1 (at most the level's tick) while poisoned is the poison, not the mob the guess would blame
+      const poisoned = this.o.poisonCause?.() === true && this.selfPoison !== undefined && this.now() < this.selfPoison.until + 1000 && damage <= 1 + 1e-6;
+      const cause = this.drowning(raw) ? 'drowning' : poisoned ? 'poison' : undefined;
       const guess = cause ? undefined : raw;
       if (guess) {
         this.lastHitBy = guess;

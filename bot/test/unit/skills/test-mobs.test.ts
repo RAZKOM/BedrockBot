@@ -1,7 +1,7 @@
 // Track M1: `!test mobs` (skills/test/mobs.ts) on fakes: the arguments, the commands it sends (summons with the series' name
 // tag, the removal of that tag only), the refusal near home, a run that clears, a death, and `!test stop` removing the mobs.
 import { describe, expect, it } from 'vitest';
-import { groundText, hasCreeper, MOB_SETS, MOBS_MIN_HOME, MobSeries, mobRunLine, mobSummaryLine, parseMobsArgs, preflightRefusal, removeCommand, ringCells, ringGround, ruleAnswer, summonCommand, type MobSeriesPorts, type MobsSpec } from '../../../src/skills/test/mobs.ts';
+import { COUNT_EVERY_MS, countCommand, groundText, hasCreeper, testforCount, MOB_SETS, MOBS_MIN_HOME, MobSeries, mobRunLine, mobSummaryLine, parseMobsArgs, preflightRefusal, removeCommand, ringCells, ringGround, ruleAnswer, summonCommand, type MobSeriesPorts, type MobsSpec } from '../../../src/skills/test/mobs.ts';
 import type { EntityInfo, Vec3 } from '../../../src/world/types.ts';
 import { mob } from './pve-fakes.ts';
 
@@ -190,6 +190,61 @@ describe('MobSeries', () => {
     await s.run();
     expect(f.recs[0]).toMatchObject({ floors: { fly: 1 }, hits: { skeleton: 3 } });
     expect(mobRunLine(f.recs[0] as never)).toMatch(/hits skeleton 3, .*floors fly 1$/);
+  });
+
+  it('Track M4: a mob that left the bot\'s view is not cleared while the server still has it', async () => {
+    expect(countCommand('m1tz')).toBe('/testfor @e[name=m1tz]');
+    expect(testforCount({ ok: true, successCount: 3, messageId: 'commands.testfor.success', params: ['Zombie, Zombie, Zombie'] })).toBe(3);
+    expect(testforCount({ ok: true, messageId: 'commands.testfor.success', params: ['m1tz, m1tz'] })).toBe(2);
+    expect(testforCount({ ok: false, messageId: 'commands.generic.noTargetMatch', params: [] })).toBe(0);
+    expect(testforCount({ ok: false, error: 'timeout' })).toBeUndefined();
+    expect(testforCount({ ok: false, messageId: 'commands.generic.permission.selector' })).toBeUndefined();
+    // the bot flies off at 2 s: every summoned mob leaves its entity list alive; the server keeps them all
+    const f = fakePorts();
+    const run0 = f.ports.run.bind(f.ports);
+    let onServer = 0;
+    f.ports.run = (cmd) => {
+      if (cmd.startsWith('/summon')) onServer++;
+      if (cmd.startsWith('/kill')) onServer = 0;
+      if (cmd.startsWith('/testfor')) {
+        f.sent.push(cmd);
+        return Promise.resolve(onServer > 0 ? { ok: true, successCount: onServer, messageId: 'commands.testfor.success', params: [] } : { ok: false, messageId: 'commands.generic.noTargetMatch', params: [] });
+      }
+      return run0(cmd);
+    };
+    const sleep0 = f.ports.sleep.bind(f.ports);
+    let t = 0;
+    f.ports.sleep = async (ms) => {
+      await sleep0(ms);
+      t += ms;
+      if (t >= 2000) for (const k of [...f.ents.keys()]) if (k >= 100n) f.ents.delete(k); // out of view (not dead)
+    };
+    const s = new MobSeries(parseMobsArgs(['zombie4', '20s']) as never, f.ports, 'm1tz');
+    await s.run();
+    const rec = f.recs[0] as { cleared: boolean; left: number; outOfSight?: number; end: string };
+    expect(rec).toMatchObject({ cleared: false, left: 4, outOfSight: 4, end: 'timeout' });
+    expect(f.lines[0]).toMatch(/4 left after 2\d(\.\d)? s \(4 out of sight\)/);
+    // asked at most every COUNT_EVERY_MS while none was in sight (20 s: about 9 asks), not every poll
+    const asks = f.sent.filter((c) => c.startsWith('/testfor')).length;
+    expect(asks).toBeGreaterThanOrEqual(5);
+    expect(asks).toBeLessThanOrEqual(20_000 / COUNT_EVERY_MS + 1);
+  });
+
+  it('Track M4: mobs gone from view that the server no longer has are cleared (by the server)', async () => {
+    const f = fakePorts();
+    const run0 = f.ports.run.bind(f.ports);
+    f.ports.run = (cmd) => (cmd.startsWith('/testfor') ? Promise.resolve({ ok: false, messageId: 'commands.generic.noTargetMatch', params: [] }) : run0(cmd));
+    const sleep0 = f.ports.sleep.bind(f.ports);
+    let t = 0;
+    f.ports.sleep = async (ms) => {
+      await sleep0(ms);
+      t += ms;
+      if (t >= 2000) for (const k of [...f.ents.keys()]) if (k >= 100n) f.ents.delete(k);
+    };
+    const s = new MobSeries(parseMobsArgs(['zombie4']) as never, f.ports, 'm1ty');
+    await s.run();
+    expect(f.recs[0]).toMatchObject({ cleared: true, clearedBy: 'server', left: 0 });
+    expect(f.lines[0]).toContain('(the server has none)');
   });
 
   it('a death ends the run `died`; stop removes the mobs at once', async () => {

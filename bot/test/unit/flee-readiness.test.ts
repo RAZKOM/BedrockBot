@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import type { CommandDef } from '../../src/chat/chat.ts';
 import { registerPveCommands, type PveCommandDeps } from '../../src/chat/commands-pve.ts';
 import { checkTrip, hasChestplate, longTrip, needsPrep, prepareTrip, splitNow, type TripKit } from '../../src/tasks/process/readiness.ts';
-import { homeClear, PveController, type PveNight } from '../../src/tasks/pve.ts';
+import { FLEE_LONG, homeClear, PveController, type PveNight } from '../../src/tasks/pve.ts';
 import { Inventory } from '../../src/world/inventory.ts';
 import type { EntityInfo, ItemStack, Vec3 } from '../../src/world/types.ts';
 import { FakeLoop, FakeMover, FakeSource, mob } from './skills/pve-fakes.ts';
@@ -108,7 +108,7 @@ describe('flee v2', () => {
     s.src.emit('set_health', { health: 9 });
     s.loop.step(1);
     expect(s.pve.behaviour()).toBe('fleeing');
-    expect(s.mover.gotos.at(-1)!.goal).toMatchObject({ type: 'runAway', r: 16 });
+    expect(s.mover.gotos.at(-1)!.goal).toMatchObject({ type: 'runAway', r: 16 + FLEE_LONG }); // Track M4: FLEE_LONG more
   });
 
   it('eats while fleeing only when 8 clear of every hostile; holds the kit auto-eat during the flight', async () => {
