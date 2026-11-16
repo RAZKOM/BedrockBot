@@ -304,6 +304,58 @@ export class BoxOps {
   }
 
   /**
+   * Track T3 follow-up 2 (`!test inv restore`): place the box of `slot`, take out at most `want` of each item (by name),
+   * the box's last slots first (what a deposit added sits in the slots that were free; the box's own stacks keep theirs),
+   * keeping two inventory slots free as takeOut does, break it and pick it up: what was taken, the box's slot after, and
+   * why it stopped (undefined: all of `want` taken).
+   */
+  async takeBack(slot: number, want: Readonly<Record<string, number>>, tally: BoxTally, cancelled: () => boolean): Promise<{ taken: Record<string, number>; slot?: number; why?: string }> {
+    const taken: Record<string, number> = {};
+    const named = this.namedAt(slot);
+    const id = this.identity(slot);
+    const s = await this.exact(slot, cancelled);
+    if (typeof s === 'string') {
+      const at = this.locate(id, slot);
+      return { taken, ...(at !== undefined ? { slot: at } : {}), why: s };
+    }
+    const placed = await this.place(s, cancelled);
+    if ('reason' in placed) return { taken, ...(placed.slot !== undefined ? { slot: placed.slot } : {}), why: placed.reason };
+    const left = (n: string) => (want[n] ?? 0) - (taken[n] ?? 0);
+    let why: string | undefined;
+    const o = await this.openPlaced(placed.at);
+    if (o.ok) {
+      try {
+        for (let i = o.view.slots.length - 1; i >= 0; i--) {
+          if (cancelled()) break;
+          const st = o.view.slots[i];
+          if (!st || left(st.name) <= 0) continue;
+          const count = Math.min(st.count, left(st.name));
+          if (this.freeSlots().length - this.slotsFor({ ...st, count }, this.d.inventory.rawItem?.(o.view.id, i)) < 2) {
+            why = 'no room in the inventory';
+            continue;
+          }
+          const t = await this.d.skills.take(o.view, i, count);
+          if (t.moved > 0) {
+            taken[st.name] = (taken[st.name] ?? 0) + t.moved;
+            tally.requests++;
+          }
+          if (!t.ok && t.reason !== 'inventory_full') {
+            why = `take: ${t.reason ?? 'failed'}`;
+            break;
+          }
+        }
+      } finally {
+        await this.d.skills.closeContainer(o.view);
+      }
+    } else why = `open: ${o.reason}`;
+    const back = await this.cleanUp(placed.at, cancelled, named);
+    if (typeof back === 'string') return { taken, why: back };
+    if (cancelled()) why = 'interrupted';
+    if (!why && Object.keys(want).some((n) => left(n) > 0)) why = 'not all found in the box';
+    return { taken, slot: back, ...(why ? { why } : {}) };
+  }
+
+  /**
    * Place the box of `slot` (where the place skill picks it) next to the bot, deposit `moves(view)` in up to 3 passes
    * (an empty list ends them), close, break it and pick it up again, also after a cancel (never left standing): the
    * items moved, the box's slot after the pickup (or why it did not come back), and why the box did not open.

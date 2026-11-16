@@ -303,4 +303,18 @@ describe('second review (75220ea): owed boxes, retries, far boxes, short clean-u
     expect(ops.leftBoxes).toHaveLength(1);
     expect(said[0]).toMatch(/^left a shulker box on the ground at /);
   });
+
+  it('Track T3 follow-up 2: takeBack takes only `want` of each item, the last box slots first, and picks the box up again', async () => {
+    // the box held 2 stacks of dirt and 1 of coal; a preset's 3 stacks of cobblestone and 10 dirt went in after them
+    const h = fakeHome({ containers: {}, inv: [item('undyed_shulker_box', 1)], invRaws: [nbt([...stacks('dirt', 2), { name: 'coal', count: 20 }, ...stacks('cobblestone', 3), { name: 'dirt', count: 10 }])] });
+    const ops = new BoxOps({ state: h.logistics.boxes.state, skills: h.logistics.skillsForBoxes(), inventory: h.inventory, blockAt: h.blockAt, position: h.position, keepName: () => 'bot_loot', selectHotbar: h.select });
+    const r = await ops.takeBack(0, { cobblestone: 192, dirt: 10 }, { requests: 0 }, never);
+    expect(r.taken).toEqual({ cobblestone: 192, dirt: 10 });
+    expect(r.why).toBeUndefined();
+    const box = h.inv.findIndex((x) => x && isShulkerBox(x.name));
+    expect(r.slot).toBe(box);
+    expect(shulkerContents(h.invRaws[box])).toEqual({ dirt: 128, coal: 20 });
+    expect(carriedBoxes(h)).toBe(1);
+    expect(ops.standing.size).toBe(0);
+  });
 });

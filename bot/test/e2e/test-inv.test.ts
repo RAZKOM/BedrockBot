@@ -262,7 +262,8 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
       const after = truthSlots(t2);
       const off = after.flatMap((g, i) => (g === before[i] ? [] : [`${i}: was ${before[i]}, now ${g}`]));
       note(`${preset}: after the restore, slots not as before: ${off.join('; ') || 'none'}; boxes changed ${JSON.stringify(countsDiff(boxed0, boxed(b)))}; carried changed ${JSON.stringify(countsDiff(counts0, carriedCounts(inv(b))))}`);
-      if (/moved from slot \d+ to \d+/.test(restored)) {
+      if (/moved from slot \d+ to \d+|took back out of the boxes/.test(restored)) {
+        // (Track T3 follow-up 2: the take-back places the box and picks it up again, into the first free slot: the same)
         // Track V1c: the rocket step picked the fireworks box up into a lower slot (one its own moves had freed); the restore never
         // overwrites a kept box, so the stack saved there is given into a free slot: the same stacks, two slots swapped
         const sorted = (x: string[]) => [...x.slice(0, 36)].sort();
@@ -273,17 +274,14 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
       expect(Object.entries(countsDiff(counts0, carriedCounts(inv(b)))).filter(([k]) => !k.startsWith('boxed:'))).toEqual([]);
       expect(modelSlots(b)).toEqual(after.slice(0, 36));
       const boxDiff = countsDiff(boxed0, boxed(b));
+      // Track T3 follow-up 2: what the room chore boxed of the preset is taken back out: every box holds what it held
+      expect(boxDiff).toEqual({});
       if (preset === 'rockets') {
         // Track V1c: rockets went into the box (before: none, every deposit onto a partial stack of other NBT refused)
-        expect(boxDiff.firework_rocket ?? 0).toBeGreaterThan(0);
+        expect(b.logs.slice(logFrom).some((l) => /inventory: .*firework_rocket into the fireworks box/.test(l))).toBe(true);
+        expect(restored).toMatch(/took back out of the boxes firework_rocket \d+/);
         expect(b.logs.slice(logFrom).filter((l) => /deposit \d+ firework_rocket .*: error/.test(l))).toEqual([]);
-        for (const [k, v] of Object.entries(boxDiff)) expect([k, v > 0]).toEqual(['firework_rocket', true]);
-      } else if (preset === 'early' && fullHotbar && Object.keys(boxDiff).length > 0) {
-        // Track V1c: the box step boxed loot into the plain box from the main inventory (before: `the box is not in the hotbar`).
-        // Track T3 follow-up: the food now stays, so the pass may free enough by its drops alone and box nothing
-        // (`the box is not in the hotbar` is still checked below either way)
-        for (const v of Object.values(boxDiff)) expect(v).toBeGreaterThan(0);
-      } else expect(boxDiff).toEqual({});
+      }
       // Track V1c: the owner's empty named box is still empty and still named
       const owner = inv(b).slots.slice(0, 36).findIndex((s, i) => !!s && isShulkerBox(s.name) && itemDisplayName(inv(b).rawItem(0, i)) === 'owner_stuff');
       expect(owner).toBeGreaterThanOrEqual(0);
@@ -341,6 +339,64 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
     await until(() => b.said.slice(from).find((x) => new RegExp(`^test inv ${preset}: \\d+ -> \\d+ free`).test(x)), 240_000, 'the preset done');
   }
   const foodPoints = (b: HomeBot) => inventoryFoodPoints(inv(b).slots);
+
+  it("a carried bot_loot box (the full preset): the room chore boxes the preset's items; the restore takes them back out, the box holds what it held", async () => {
+    const b = bot!;
+    await teleport(b, centre(at));
+    await b.truth.clearAround(centre(at), 12).catch(() => undefined);
+    if (testControlOf(b.task)!.inv.saved()) await ask(b, '!test inv restore', RESTORED, 300_000).catch(() => undefined);
+    await ownerInventory(b);
+    // the bot's own loot box, holding 12 bone already (dropped by the truth pack, picked up, named bot_loot)
+    const feet = b.task.position()!;
+    const drop = { x: Math.floor(feet.x) - 1, y: Math.floor(feet.y), z: Math.floor(feet.z) };
+    const boneBox = () => {
+      const k = inv(b).slots.slice(0, 36).findIndex((s, i) => !!s && isShulkerBox(s.name) && shulkerContents(inv(b).rawItem(0, i)).bone === 12);
+      return k >= 0 ? k : undefined;
+    };
+    await b.truth.ok('boxmix', [drop.x, drop.y, drop.z, 'bone', 12, 1]);
+    await sleep(1200);
+    if (boneBox() === undefined) await b.built.mobility!.skills.collect(4, 160, { origin: centre(drop), filter: (it) => isShulkerBox(it.name) });
+    const k = await until(boneBox, 10_000, 'the bone box in the inventory');
+    await b.truth.ok('nameinv', [b.name, k, 'bot_loot']);
+    const loot = await until(() => {
+      const i = inv(b).slots.slice(0, 36).findIndex((s, j) => !!s && isShulkerBox(s.name) && itemDisplayName(inv(b).rawItem(0, j)) === 'bot_loot');
+      return i >= 0 ? i : undefined;
+    }, 10_000, 'the box named bot_loot');
+    const lootBefore = shulkerContents(inv(b).rawItem(0, loot));
+    const boxed0 = boxed(b);
+    const counts0 = carriedCounts(inv(b));
+    note(`loot box: slot ${loot} holds ${JSON.stringify(lootBefore)}`);
+    // the stone stays carried (dropStone 0: never dropped), so the room pass boxes it
+    const dropStone0 = b.settings.get('dropStone');
+    b.settings.set('dropStone', '0');
+    const logFrom = b.logs.length;
+    try {
+      const sayFrom = b.said.length;
+      const first = await ask(b, '!test inv full', /^test inv \w+: (saved|nothing|not now|stopped)/, 60_000);
+      expect(first).toMatch(/saved/);
+      await until(() => b.said.slice(sayFrom).find((x) => /^test inv full: \d+ -> \d+ free/.test(x)), 240_000, 'the preset done');
+      const pass = await until(() => b.logs.slice(logFrom).find((l) => /inventory: \d+ -> \d+ slots free in/.test(l)), 90_000, 'a room pass');
+      note(`loot box: ${pass.replace(/^\S+ \w+ /, '')}`);
+      const gained = countsDiff(boxed0, boxed(b));
+      note(`loot box: the boxes gained ${JSON.stringify(gained)}`);
+      expect(Object.values(gained).some((v) => v > 0)).toBe(true); // the room chore boxed some of the preset
+      await testControlOf(b.task)!.runner.run('/kill @e[type=item,r=24]', { pace: true });
+      const restored = await ask(b, '!test inv restore sweep', RESTORED, 300_000);
+      note(`loot box: ${restored}`);
+      expect(restored).toMatch(/took back out of the boxes /);
+      expect(restored).not.toMatch(/still in the boxes/);
+      await sleep(1500);
+      const now = inv(b).slots.slice(0, 36).findIndex((s, j) => !!s && isShulkerBox(s.name) && itemDisplayName(inv(b).rawItem(0, j)) === 'bot_loot');
+      expect(now).toBeGreaterThanOrEqual(0);
+      note(`loot box: after the restore slot ${now} holds ${JSON.stringify(shulkerContents(inv(b).rawItem(0, now)))}; boxes changed ${JSON.stringify(countsDiff(boxed0, boxed(b)))}; carried changed ${JSON.stringify(countsDiff(counts0, carriedCounts(inv(b))))}`);
+      expect(shulkerContents(inv(b).rawItem(0, now))).toEqual(lootBefore);
+      expect(countsDiff(boxed0, boxed(b))).toEqual({});
+      expect(Object.entries(countsDiff(counts0, carriedCounts(inv(b)))).filter(([x]) => !x.startsWith('boxed:'))).toEqual([]);
+      expect(testControlOf(b.task)!.inv.saved()).toBeUndefined();
+    } finally {
+      b.settings.set('dropStone', String(dropStone0));
+    }
+  }, 900_000);
 
   it('the food chore asking to run while a save waits: the restore goes first, on its own, and the food is back', async () => {
     const b = bot!;

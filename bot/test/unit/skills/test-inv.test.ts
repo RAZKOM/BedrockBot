@@ -29,6 +29,7 @@ import { silentLogger } from '../../../src/log.ts';
 import type { ItemStack } from '../../../src/world/types.ts';
 import { wireSize } from '../../../src/chat/style.ts';
 import { inventoryFoodPoints } from '../../../src/skills/food/finder.ts';
+import { shulkerContents } from '../../../src/skills/container/chest.ts';
 
 // ---- wire items as the server sends them -----------------------------------------------------------------------------
 
@@ -398,6 +399,54 @@ describe('InvTest against a fake server', () => {
     };
     return { s, t, said, order, say, passes, file: () => file, held: () => held, logs, announced, clock };
   };
+
+  it('Track T3 follow-up 2: the preset items the room chore boxed come back out (only what the box gained); the box holds what it held', async () => {
+    const s = liveLike();
+    const boxes0 = { 10: shulkerContents(s.cells[10]!.raw), 11: shulkerContents(s.cells[11]!.raw) };
+    const asked: { slot: number; want: Record<string, number> }[] = [];
+    // the fake unbox: take `want` out of the box's NBT into the first free slots (as the box's take would)
+    const unbox = (slot: number, want: Readonly<Record<string, number>>) => {
+      asked.push({ slot, want: { ...want } });
+      const c = shulkerContents(s.cells[slot]!.raw);
+      const taken: Record<string, number> = {};
+      for (const [k, v] of Object.entries(want)) {
+        let n = Math.min(v, c[k] ?? 0);
+        c[k] = (c[k] ?? 0) - n;
+        taken[k] = n;
+        while (n > 0) {
+          const i = s.cells.findIndex((x) => !x);
+          const m = Math.min(64, n);
+          s.put(i, k, m);
+          n -= m;
+        }
+      }
+      const items = Object.entries(c).flatMap(([k, v]) => Array.from({ length: Math.ceil(v / 64) }, (_, j) => ({ Name: k, Count: Math.min(64, v - j * 64) }))).filter((x) => x.Count > 0);
+      s.cells[slot] = { ...s.cells[slot]!, raw: slot === 11 ? namedRaw('bot_loot', items) : boxRaw(items) };
+      return Promise.resolve({ taken });
+    };
+    const { t, said, say } = setup(s, { unbox });
+    await t.start('early', say);
+    // the room chore boxed 192 cobblestone and 20 coal into bot_loot, 64 rockets into the fireworks box
+    s.cells[11] = { ...s.cells[11]!, raw: namedRaw('bot_loot', [{ Name: 'bone', Count: 12 }, { Name: 'cobblestone', Count: 64 }, { Name: 'cobblestone', Count: 64 }, { Name: 'cobblestone', Count: 64 }, { Name: 'coal', Count: 20 }]) };
+    s.cells[10] = { ...s.cells[10]!, raw: boxRaw([{ Name: 'firework_rocket', Count: 64 }, { Name: 'firework_rocket', Count: 64 }, { Name: 'firework_rocket', Count: 64 }]) };
+    await t.restore(say);
+    expect(asked.map((a) => a.want)).toEqual([{ firework_rocket: 64 }, { cobblestone: 192, coal: 20 }]);
+    expect(shulkerContents(s.cells[10].raw)).toEqual(boxes0[10]);
+    expect(shulkerContents(s.cells[11].raw)).toEqual(boxes0[11]);
+    expect(restoreMismatches(t.saved() ?? snapshotInv(liveLike()), s)).toEqual([]);
+    expect(said.at(-1)).toMatch(/^test inv restore: .*took back out of the boxes cobblestone 192, firework_rocket 64, coal 20/);
+    expect(said.at(-1)).not.toMatch(/the boxes hold/);
+    expect(t.saved()).toBeUndefined();
+  });
+
+  it('Track T3 follow-up 2: without the unbox port (or nothing taken) the boxed items stay and are said', async () => {
+    const s = liveLike();
+    const { t, said, say } = setup(s, { unbox: () => Promise.resolve({ taken: {}, why: 'no free cell for the box next to the bot' }) });
+    await t.start('early', say);
+    s.cells[11] = { ...s.cells[11]!, raw: namedRaw('bot_loot', [{ Name: 'bone', Count: 12 }, { Name: 'coal', Count: 20 }]) };
+    await t.restore(say);
+    expect(said.at(-1)).toMatch(/took back out of the boxes nothing; still in the boxes coal 20 \(no free cell for the box next to the bot\)/);
+  });
 
   it('says what stays before the first slot is cleared, fills, saves to the file; the restore gives it back and removes the file', async () => {
     const { s, t, said, order, say, file, held } = setup();

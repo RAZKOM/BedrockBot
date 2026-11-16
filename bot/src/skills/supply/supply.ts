@@ -159,6 +159,11 @@ export class Supply {
     return this.serial(() => this.d.ops.recover(cancelled));
   }
 
+  /** Track T3 follow-up 2: BoxOps.takeBack under the serial lock (`!test inv restore` takes a preset's boxed items back). */
+  unbox(slot: number, want: Readonly<Record<string, number>>, cancelled: () => boolean = () => false): Promise<{ taken: Record<string, number>; slot?: number; why?: string }> {
+    return this.serial(() => this.d.ops.takeBack(slot, want, { requests: 0 }, cancelled));
+  }
+
   /** Make `n` of `names` loose (see the file comment). */
   async ensure(names: Names, n: number, opts: EnsureOptions = {}): Promise<EnsureResult> {
     const ns = list(names);

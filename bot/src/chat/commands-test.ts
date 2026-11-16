@@ -46,6 +46,7 @@ import { survivalKitOf } from './commands-survival.ts'; // Track T2: the bare se
 import { isBlade } from '../skills/test/bare.ts';
 import { INV_SAVE_FILE, InvTest, parseInvArgs, type InvSnapshot } from '../skills/test/inv.ts'; // Track T3
 import { setSaveGuard } from '../skills/test/guard.ts'; // Track T3 follow-up
+import { supplyOf } from '../skills/supply/supply.ts'; // Track T3 follow-up 2
 import { BaseProcess, PRIORITY, type ProcessKind } from '../tasks/process/manager.ts';
 import { homeControlOf } from './commands-home.ts';
 import { readKit } from '../skills/fly/kit.ts';
@@ -404,6 +405,12 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
       if (!enabled()) return 'testMode is off (!set testMode on)';
       const op = await ops.ensure();
       return op.state === 'op' ? undefined : op.line;
+    },
+    // Track T3 follow-up 2: the preset's boxed items back out (the Supply's BoxOps: the room chore's place, open, pick up)
+    unbox: async (slot, want) => {
+      const s = supplyOf(task);
+      if (!s) return { taken: {}, why: 'no supply layer (the home task is not loaded)' };
+      return s.unbox(slot, want);
     },
     log,
   });

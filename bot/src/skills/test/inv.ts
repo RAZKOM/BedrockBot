@@ -459,6 +459,29 @@ export function planRestore(snap: InvSnapshot, now: InvSource): RestorePlan {
   return { commands, notes };
 }
 
+/**
+ * Track T3 follow-up 2: what the boxes of the save hold beyond what they held at the save, per box carried now (its slot
+ * now: claimKept's claim): the preset's items the room chore boxed. Only the counts the box gained, by item name; an
+ * item the box held as much of or more at the save is never in it. Boxes not in the save (picked up meanwhile) are left.
+ */
+export function boxedExcess(snap: InvSnapshot, now: InvSource): { slot: number; want: Record<string, number> }[] {
+  const { claimed } = claimKept(snap, now);
+  const out: { slot: number; want: Record<string, number> }[] = [];
+  for (const s of snap.slots) {
+    if (!s?.boxed) continue;
+    const at = claimed.get(s.slot);
+    if (at === undefined) continue;
+    const c = shulkerContents(rawAt(now, at));
+    const want: Record<string, number> = {};
+    for (const [k, v] of Object.entries(c)) {
+      const more = v - (s.boxed[k] ?? 0);
+      if (more > 0) want[k] = more;
+    }
+    if (Object.keys(want).length) out.push({ slot: at, want });
+  }
+  return out;
+}
+
 /** The restorable slots that do not match the save now (after a restore: should be none but the noted ones). */
 export function restoreMismatches(snap: InvSnapshot, now: InvSource): string[] {
   const out: string[] = [];
@@ -513,6 +536,12 @@ export interface InvTestPorts {
   /** Before a restore of the bot's own: why no command can go now (testMode off, not an operator); undefined: it can. */
   canCommand?(): Promise<string | undefined>;
   sleep?(ms: number): Promise<void>;
+  /**
+   * Track T3 follow-up 2: take at most `want` (by item name) out of the carried box of `slot` (placed next to the bot as
+   * the room chore places it, opened, closed, picked up again): what was taken and why it stopped. Without it the boxed
+   * items stay (a note).
+   */
+  unbox?(slot: number, want: Readonly<Record<string, number>>): Promise<{ taken: Record<string, number>; why?: string }>;
   /** How long a save may wait before the bot restores it on its own (ms; INV_SAVE_LIMIT_MS). */
   limitMs?: number;
   /** How long a restore waits out a fight (ms; RESTORE_WAIT_MS). */
@@ -787,6 +816,51 @@ export class InvTest {
    * goes; a chore below the owner's commands is paused by its hold; a series, a flight or the owner's command refuses it.
    * `own`: the bot's own restore (the time limit, the food chore).
    */
+  /**
+   * Track T3 follow-up 2: take what the boxes gained since the save (boxedExcess: the preset's items the room chore
+   * boxed) back out, box by box, then put every slot as saved by a second plan; up to 3 rounds (a full inventory takes
+   * part of it a round). `rounds` 0: nothing was boxed. `line`: what came out; `notes`: the second plan's.
+   */
+  private async takeBoxedBack(snap: InvSnapshot): Promise<{ rounds: number; commands: number; line?: string; notes: string[]; failed?: string }> {
+    const taken: Record<string, number> = {};
+    const why = new Set<string>();
+    let rounds = 0;
+    let commands = 0;
+    let notes: string[] = [];
+    for (let round = 0; round < 3; round++) {
+      const todo = boxedExcess(snap, this.p.inventory());
+      if (todo.length === 0) break;
+      if (!this.p.unbox) {
+        if (round === 0) return { rounds: 0, commands: 0, notes: [] };
+        break;
+      }
+      rounds++;
+      let got = 0;
+      for (const t of todo) {
+        // the slot may have changed with the box before (a box comes back into the first free slot)
+        const now = boxedExcess(snap, this.p.inventory()).find((x) => x.slot === t.slot) ?? t;
+        const r = await this.p.unbox(now.slot, now.want);
+        for (const [k, v] of Object.entries(r.taken)) {
+          taken[k] = (taken[k] ?? 0) + v;
+          got += v;
+        }
+        this.log.info(`test inv restore: the box of slot ${now.slot}: took ${countsLine(r.taken) || 'nothing'} of ${countsLine(now.want)}${r.why ? ` (${r.why})` : ''}`);
+        if (r.why) why.add(r.why);
+      }
+      await this.p.settle();
+      const plan = planRestore(snap, this.p.inventory());
+      notes = plan.notes;
+      const s = await this.send(plan.commands);
+      commands += plan.commands.length;
+      if (s.failed) return { rounds, commands, notes, failed: s.failed, ...(got ? { line: `took back out of the boxes ${countsLine(taken)}` } : {}) };
+      if (got === 0) break;
+    }
+    const left = boxedExcess(snap, this.p.inventory());
+    const leftLine = left.length ? `; still in the boxes ${left.map((x) => countsLine(x.want)).join(', ')}${why.size ? ` (${[...why].join(', ')})` : ''}` : '';
+    const line = Object.keys(taken).length || leftLine ? `took back out of the boxes ${countsLine(taken) || 'nothing'}${leftLine}` : undefined;
+    return { rounds, commands, notes: notes.filter((n) => !n.startsWith('the boxes hold') || left.length > 0), ...(line ? { line } : {}) };
+  }
+
   async restore(say: (m: string) => void, opts: { sweep?: boolean; own?: boolean } = {}): Promise<void> {
     if (this.running) return this.refuse(say, 'test inv: a preset or a restore is going out');
     if (this.queued !== undefined) return this.refuse(say, `test inv restore: a restore already waits for ${this.queued} to end`);
@@ -825,16 +899,29 @@ export class InvTest {
       this.log.info(`test inv restore: before: ${free0} free; carried ${countsLine(before)}; ${plan.commands.length} commands${plan.notes.length ? `; ${plan.notes.join('; ')}` : ''}`);
       const t0 = this.now();
       const r = await this.send(commands, new Set([SWEEP]));
+      let nCommands = plan.commands.length;
+      let notes0 = plan.notes;
+      let failed = r.failed;
+      // Track T3 follow-up 2: the preset's items the room chore boxed come back out of the boxes (after the commands: they
+      // freed the slots the items go to), then a second plan puts every slot as saved (the items taken out go by /replaceitem)
+      if (!failed) {
+        const u = await this.takeBoxedBack(snap);
+        if (u.rounds > 0) {
+          nCommands += u.commands;
+          failed = u.failed;
+          notes0 = [...plan.notes.filter((n) => n.startsWith('no sweep')), ...(u.line ? [u.line] : []), ...u.notes];
+        }
+      }
       const inv = this.p.inventory();
       const after = carriedCounts(inv);
       const off = restoreMismatches(snap, inv);
       const secs = ((this.now() - t0) / 1000).toFixed(1);
-      this.log.info(`test inv restore: after: ${freeOf(inv)} free (${r.sent} of ${commands.length} commands, ${secs} s); carried ${countsLine(after)}${off.length ? `; not as saved: ${off.join('; ')}` : ''}${r.failed ? `; stopped: ${r.failed}` : ''}`);
-      if (r.failed) return say(fitLine(`test inv restore: stopped after ${r.sent} of ${commands.length} commands: ${r.failed}; the save is kept (!test inv restore again)`));
+      this.log.info(`test inv restore: after: ${freeOf(inv)} free (${nCommands} commands, ${secs} s); carried ${countsLine(after)}${off.length ? `; not as saved: ${off.join('; ')}` : ''}${failed ? `; stopped: ${failed}` : ''}`);
+      if (failed) return say(fitLine(`test inv restore: stopped after ${r.sent} of ${commands.length} commands: ${failed}; the save is kept (!test inv restore again)`));
       this.active = undefined;
       this.persist(undefined);
-      const notes = [...plan.notes, ...off];
-      say(fitLine(`test inv restore: ${free0} -> ${freeOf(inv)} free in ${secs} s (${plan.commands.length} commands); ${notes.length ? notes.join('; ') : 'every slot as saved'}`));
+      const notes = [...notes0, ...off];
+      say(fitLine(`test inv restore: ${free0} -> ${freeOf(inv)} free in ${secs} s (${nCommands} commands); ${notes.length ? notes.join('; ') : 'every slot as saved'}`));
     });
   }
 

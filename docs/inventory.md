@@ -24,6 +24,7 @@ same 36 slots with stone and mob drops in an hour of mining.
 | `bot/src/skills/place/place.ts`, `bot/src/skills/farm/click.ts` | `hotbarRoom(..., exchange)`, the fetch into a full inventory |
 | `bot/src/chat/commands-home.ts` | the wiring (what the chore reads and the skills it drives) |
 | `bot/src/skills/test/inv.ts`, `bot/src/chat/commands-test.ts` | Track T3: `!test inv` (`keptReason`, `isKeptFood`, `snapshotInv`, `presetStacks`, `planPreset`, `planRestore`, `protectedSlots`, `InvTest`: `restore`'s wait, `tick`, `restoreFirst`, `waiting`; `INV_SAVE_LIMIT_MS`, `RESTORE_WAIT_MS`) |
+| `bot/src/skills/supply/boxes.ts`, `bot/src/skills/supply/supply.ts` | Track T3 follow-up 2: `BoxOps.takeBack`, `Supply.unbox` (the restore takes a preset's boxed items back out; `boxedExcess` in inv.ts says what) |
 | `bot/src/skills/test/guard.ts` | Track T3 follow-up: `SaveGuard`, `heldBySave`: what the home chore, the logistics, the stash step and the food chore ask while a save waits |
 
 ## Why a slot stays taken
@@ -289,9 +290,20 @@ The restore:
   the preset's cobblestone moved onto the owner's restored 16 between two commands; with the empties first no saved
   partial stack ever sits beside a preset's stack of its own item;
 - `sweep` is left out (and said) while a kept item of the save is not carried: it may lie on the ground;
-- what the room chore put into a box stays there (a command cannot take it out) and is said:
-  `the boxes hold firework_rocket +294 (a command cannot take it out)`; kept items moved or gone and changed worn
-  pieces are said too;
+- what the room chore put into a box of the save is taken back out (Track T3 follow-up 2). A command can neither give
+  nor clear a box's contents, and on the Realm (2026-11-16) the preset's boxed items (798 cobblestone, 82 coal, 74 raw
+  copper, 46 raw iron and more in the bot's bot_loot boxes) stayed after the restore, and the next unload at home put
+  55 stacks of them into 23 of the owner's containers. So after the commands the restore places each box that gained
+  items where the room chore places it (`BoxOps.takeBack`, the Supply's box ops under the logistics' lock), takes out
+  exactly what the box gained since the save, by item name (`boxedExcess`: an item the box held as much of before is
+  never touched), the box's last slots first (a deposit fills the free slots after the box's own stacks), breaks it,
+  picks it up, and a second plan puts every slot as saved (the items taken out go by `/replaceitem`: nothing is
+  dropped). Up to 3 rounds when the inventory has no room for all of it at once. Said:
+  `took back out of the boxes andesite 128, ... ; still in the boxes coal 20 (no free cell for the box next to the bot)`
+  when something stayed. The box comes back into the first free slot, not always its own (on bds-farm, 2026-11-16: a
+  bot_loot box of 12 bone took 14 kinds of the `full` preset, 829 items, and held 12 bone again after a 48 s restore,
+  in slot 30 instead of 12). A box's items of the same name but other NBT (crafted rockets beside the preset's) are
+  told apart only by that order. Kept items moved or gone and changed worn pieces are said too;
 - one line before and after in the log; a refused command stops it and keeps the save.
 
 ### While a save waits
@@ -370,7 +382,9 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e test-inv --silent=fals
   the owner's tool swapped with the preset's, the status line's bytes); "While a save waits": no preset takes the food
   below what was carried (each preset, food in the hotbar too) and the restore is exact after the bot ate, refusals
   said at once and logged, a restore that waits out a fight and one whose wait runs out, the time limit (and a save
-  from a file), `restoreFirst` for the food chore, the held lines once a save. `home-logistics`, `stash`, `food` and
+  from a file), `restoreFirst` for the food chore, the held lines once a save; the boxed items taken back out (only
+  what each box gained) and the line when they cannot be. `supply-recovery`: `takeBack` takes only what is asked, the
+  box's last slots first, and picks the box up again. `home-logistics`, `stash`, `food` and
   `test-commands`: the home chore, the deposits, the stash step and the food chore under a waiting save, and the
   guard on the afk registry.
 - `test-inv` (e2e, bds-home, by the bot's own commands): each preset on an owner's inventory (worn netherite, an
@@ -380,4 +394,6 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e test-inv --silent=fals
   (each one INFO line). Then: the food chore asking to run while a save waits (the food cleared by a command: the
   restore goes first, on its own, the food is back, no hunt), a restore during a fight (two zombies summoned at
   difficulty easy: it waits, then runs), the time limit (shortened to 20 s), an unload due at home (the chests
-  unchanged for 25 s, `!unload` refused).
+  unchanged for 25 s, `!unload` refused), a carried bot_loot box holding 12 bone under the `full` preset with
+  `dropStone 0` (the room pass boxes the preset's items into it; after the restore it holds 12 bone again and every
+  carried count is as saved). Every preset case checks the boxes hold what they held.
