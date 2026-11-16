@@ -71,6 +71,15 @@ keeps it under 36 (it drops filler beyond 16 with no chest and no box); idle, no
    item). With no exchange, or one refused, they say why in the log, once a minute an item and reason.
 10. **Not known, left:** items the owner gave in the last minutes. The bot cannot tell a gift from a pickup; the rules
     above drop only junk and, with `dropStone`, stone beyond 64 of a kind.
+11. **Spare boxes go back on their own** (follow-up after the first deploy: at home the live bot freed 5 slots by its
+    room pass and kept its five empty boxes, because 5 free and 6 stacks meet neither unload bar; the owner's
+    complaint was the boxes). With nothing to unload, the home chore runs a `spares` job whenever it is idle at home
+    with `autoUnload` on, whatever the free slots: the empty unnamed boxes beyond the stash step's one go into the
+    chest of spares (a read chest holding an empty box or labelled for boxes, with a free slot), nothing else moves.
+    It reuses the unload's deposit trip (`planUnload(..., { spares: true })`, `HomeLogistics.returnSpares`). A job
+    that moved no box or left one waits 10 minutes. With no chest of spares, or only full ones, the boxes stay and the
+    chore says so once in the log and chat (again only after a chest with room was known in between): a box put into
+    some other chest would mix the spares with the stock, and the owner may not want them there.
 
 ## Consequences
 
@@ -81,6 +90,9 @@ Measured on bds-home, the inventories set by truth (docs/inventory.md "Measured"
 - An early-game inventory: from 0 to 2 free (the keeper's drop at 36 of 36) to 10 in each of 5 runs: a merge and 434
   cobblestone dropped, 64 kept; 8 more stacks given, 2 -> 10 again; nothing of worth lost.
 - At home the same live inventory unloads at 0 free (7 stacks, under the old bar of 8) and 4 spare boxes go back.
+- At home with 5 free (the live bot after its first pass) the spares job puts 4 boxes into the chest of spares and
+  nothing else, 5 -> 9 free in 7 to 8 s, 5 of 5 (main e372ee3d: nothing in 60 s); with no chest of spares the boxes
+  stay and one line says why.
 - A placement or a farm click with 36 of 36 and the item in the main inventory works (the kit's exchange); before it
   failed with nothing in the log.
 - A box step sets a box down next to the bot (not on a ledge, beside water or lava, or under sand or gravel: the flight

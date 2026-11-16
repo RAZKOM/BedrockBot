@@ -12,7 +12,10 @@
 //                                             (Track V1: or fewer than ROOM_FLOOR (4) slots are free and
 //                                             something is unloadable, a spare empty box included), or
 //                                             when a `!get` job just ended at home (its reply then says
-//                                             what went where); then, with nothing to unload, a tidy job
+//                                             what went where); Track V1 follow-up: with nothing to unload,
+//                                             the spare empty boxes beyond the stash step's one into the
+//                                             chest of spares (the `spares` job, whatever the free slots;
+//                                             with no chest of spares they stay, said once); then a tidy job
 //                                             when a home chest holds 27 full stacks' worth of one item
 //                                             loose and a spare is known (docs/home.md "Full boxes out of
 //                                             the chests"; at most every TIDY_BACKOFF_MS when it boxed nothing)
@@ -37,13 +40,34 @@ export function unloadWanted(load: { stacks: number; fullBoxes: number; spares?:
 export const UNLOAD_BACKOFF_MS = 5 * 60_000;
 /** After a tidy job that boxed nothing (or failed), the chore waits this long before the next one (ms). */
 export const TIDY_BACKOFF_MS = 10 * 60_000;
+/** Track V1 follow-up: after a spares job that left a box or moved none (or failed), the next one waits this long (ms). */
+export const SPARES_BACKOFF_MS = 10 * 60_000;
+
+/**
+ * Track V1 follow-up (ADR 0090 decision 11): the spares job is due when spare empty boxes are carried (all but the stash
+ * step's one: `load.spares`) and a chest of spares with room is known, whatever the free slots. The owner: the bot
+ * "is carrying shulkers at all times"; at home with 5 free and 6 stacks neither unload bar is met and the five empty
+ * boxes stayed.
+ */
+export function sparesWanted(load: { spares?: number }, chest: 'room' | 'full' | 'none' | undefined): boolean {
+  return (load.spares ?? 0) > 0 && chest === 'room';
+}
+
+/** Track V1 follow-up: the line said once when spare boxes stay for want of a chest of spares (undefined: none to say). */
+export function sparesKeptLine(spares: number, chest: 'room' | 'full' | 'none' | undefined): string | undefined {
+  if (spares <= 0 || chest === undefined || chest === 'room') return undefined;
+  const boxes = `${spares} spare shulker box${spares === 1 ? '' : 'es'}`;
+  return chest === 'full'
+    ? `home chore: I keep ${boxes}: the chest of spares at home is full`
+    : `home chore: I keep ${boxes}: I know no chest of spares at home (a chest holding an empty shulker box, or one labelled boxes or shulkers; then !chests scan)`;
+}
 /** After a scan that failed for some containers, the chore does not retry them for this long (ms). */
 export const SCAN_BACKOFF_MS = 2 * 60_000;
 /** The chore looks at its triggers at most this often (ms). */
 const CHECK_MS = 1000;
 
-export type HomeJob = { kind: 'unload'; all?: boolean } | { kind: 'scan'; force?: boolean; retry?: boolean; only?: { x: number; y: number; z: number }[] } | { kind: 'tidy' }; // Track AN: retry
-export type HomeJobResult = { kind: 'unload'; report: UnloadReport } | { kind: 'scan'; report: ScanReport } | { kind: 'tidy'; report: UnloadReport };
+export type HomeJob = { kind: 'unload'; all?: boolean } | { kind: 'scan'; force?: boolean; retry?: boolean; only?: { x: number; y: number; z: number }[] } | { kind: 'tidy' } | { kind: 'spares' }; // Track AN: retry; Track V1 follow-up: spares
+export type HomeJobResult = { kind: 'unload'; report: UnloadReport } | { kind: 'scan'; report: ScanReport } | { kind: 'tidy'; report: UnloadReport } | { kind: 'spares'; report: UnloadReport };
 
 /** What the processes drive (HomeLogistics satisfies it; unit tests fake it). */
 export interface HomeRunner {
@@ -51,6 +75,8 @@ export interface HomeRunner {
   scan(cancelled: () => boolean, opts?: { force?: boolean; retry?: boolean; only?: { x: number; y: number; z: number }[] }): Promise<ScanReport>;
   /** The home chests' own full boxes' worth into spares (tidy steps only). */
   tidy?(cancelled: () => boolean): Promise<UnloadReport>;
+  /** Track V1 follow-up: the spare empty boxes beyond the stash step's one into the chest of spares, nothing else. */
+  returnSpares?(cancelled: () => boolean): Promise<UnloadReport>;
   /** Cancel the running skill (goto, dig, ...). */
   cancel(): void;
 }
@@ -58,6 +84,7 @@ export interface HomeRunner {
 function runJob(r: HomeRunner, job: HomeJob, cancelled: () => boolean): Promise<HomeJobResult> {
   if (job.kind === 'unload') return r.unload(cancelled, { all: job.all ?? false }).then((report) => ({ kind: 'unload', report }));
   if (job.kind === 'tidy') return (r.tidy ? r.tidy(cancelled) : Promise.reject(new Error('no tidy'))).then((report) => ({ kind: 'tidy', report }));
+  if (job.kind === 'spares') return (r.returnSpares ? r.returnSpares(cancelled) : Promise.reject(new Error('no spares job'))).then((report) => ({ kind: 'spares', report }));
   return r.scan(cancelled, { ...(job.force ? { force: true } : {}), ...(job.retry ? { retry: true } : {}), ...(job.only ? { only: job.only } : {}) }).then((report) => ({ kind: 'scan', report }));
 }
 
@@ -133,6 +160,10 @@ export interface HomeChoreDeps {
   known(): number;
   /** A tidy job is due (a home chest holds a full box's worth of one item loose, a spare is known). */
   tidyDue?(): boolean;
+  /** Track V1 follow-up: the chest of spares known at home (`room`: one with a free slot). */
+  spareChest?(): 'room' | 'full' | 'none';
+  /** Track V1 follow-up: a line for the owner (the spare boxes kept for want of a chest of spares, once). */
+  say?(line: string): void;
   /** A `!get` job ended (since the last call): true once per job. */
   getEnded?(): boolean;
   /** The report of an unload run for a `!get` job (the line goes to chat). */
@@ -159,8 +190,11 @@ export class HomeChore extends BaseProcess {
   private unloadAfter = 0;
   private tidyAfter = 0;
   private scanAfter = 0;
+  private sparesAfter = 0;
+  /** The kept-spares line said last (said again only after a chest of spares with room was known meanwhile). */
+  private sparesSaid: string | undefined;
   last: HomeJobResult | undefined;
-  readonly stats = { scans: 0, unloads: 0, getUnloads: 0, tidies: 0 };
+  readonly stats = { scans: 0, unloads: 0, getUnloads: 0, tidies: 0, spares: 0 };
 
   constructor(d: HomeChoreDeps) {
     super();
@@ -216,6 +250,21 @@ export class HomeChore extends BaseProcess {
     this.getWaiting = false;
     if (t < this.unloadAfter) return undefined;
     if (unloadWanted(load)) return { kind: 'unload' };
+    // Track V1 follow-up: the spare boxes go back whatever the free slots; with no chest of spares they stay, said once
+    if (this.d.runner.returnSpares && (load.spares ?? 0) > 0) {
+      const chest = this.d.spareChest?.();
+      if (sparesWanted(load, chest)) {
+        this.sparesSaid = undefined;
+        if (t >= this.sparesAfter) return { kind: 'spares' };
+      } else {
+        const line = sparesKeptLine(load.spares ?? 0, chest);
+        if (line && this.sparesSaid === undefined) {
+          this.sparesSaid = line;
+          this.d.log?.info(line);
+          this.d.say?.(line);
+        }
+      }
+    }
     if (t >= this.tidyAfter && this.d.runner.tidy && this.d.tidyDue?.()) return { kind: 'tidy' };
     return undefined;
   }
@@ -225,10 +274,13 @@ export class HomeChore extends BaseProcess {
    * No side effects: the same conditions as `next` without the scans and the `!get` hand-over.
    */
   unloadDue(): boolean {
-    if (this.running && this.job?.kind === 'unload') return true;
+    if (this.running && (this.job?.kind === 'unload' || this.job?.kind === 'spares')) return true;
     const d = this.d;
     if (!d.atHome() || !d.idle() || !d.autoUnload() || d.known() === 0 || this.now() < this.unloadAfter) return false;
-    return unloadWanted(d.load());
+    const load = d.load();
+    if (unloadWanted(load)) return true;
+    // Track V1 follow-up: the spares job frees slots too (the room chore waits for it)
+    return !!d.runner.returnSpares && this.now() >= this.sparesAfter && sparesWanted(load, d.spareChest?.());
   }
 
   protected run(tok: number): void {
@@ -266,6 +318,11 @@ export class HomeChore extends BaseProcess {
       this.stats.tidies++;
       const rep = r?.kind === 'tidy' ? r.report : undefined;
       if (!rep || !rep.ok || !rep.boxed?.length) this.tidyAfter = t + TIDY_BACKOFF_MS;
+    } else if (job.kind === 'spares') {
+      this.stats.spares++;
+      const rep = r?.kind === 'spares' ? r.report : undefined;
+      // a job that moved no box, or left one, is not repeated at once (the memory may say room a chest no longer has)
+      if (!rep || !rep.ok || rep.moved.length === 0 || rep.left.length > 0) this.sparesAfter = t + SPARES_BACKOFF_MS;
     } else {
       this.stats.unloads++;
       if (forGet) {
@@ -294,11 +351,13 @@ export class HomeChore extends BaseProcess {
   }
 
   behaviour(): string {
-    return this.job?.kind === 'unload' ? 'unloading at home' : this.job?.kind === 'tidy' ? 'boxing full stacks in the chests at home' : 'reading the chests at home';
+    const k = this.job?.kind;
+    return k === 'unload' ? 'unloading at home' : k === 'tidy' ? 'boxing full stacks in the chests at home' : k === 'spares' ? 'putting the spare shulker boxes away at home' : 'reading the chests at home';
   }
 
   status(): ProcessStatus {
     const j = this.job;
-    return { line: `home chore: ${j ? (j.kind === 'unload' ? 'unloading' : j.kind === 'tidy' ? 'boxing full stacks in the chests' : `reading ${j.only ? j.only.length : 'all'} containers`) : 'idle'}` };
+    const what = !j ? 'idle' : j.kind === 'unload' ? 'unloading' : j.kind === 'tidy' ? 'boxing full stacks in the chests' : j.kind === 'spares' ? 'putting the spare shulker boxes away' : `reading ${j.only ? j.only.length : 'all'} containers`;
+    return { line: `home chore: ${what}` };
   }
 }

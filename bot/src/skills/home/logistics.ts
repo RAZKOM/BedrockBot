@@ -50,7 +50,7 @@ import { chestNeighbours, findContainers, isHomeContainer, visitOrder, visitOrde
 import { chestName, fmtPos, partnerKeys, planChests, recordFrom, unreadRecord } from './memory.ts';
 import { chestGoal, standOf, verdict } from './reach.ts';
 import { bringMatches, countOf, extractChoice, halfBox, planBring, wholeOk, type BringItem } from './bring.ts'; // Track AS; Track BJ: halves, extracts
-import { compactRunner, heldBack, planUnload, unloadableStacks, type UnloadPlan, type UnloadSlot, type UnloadStep } from './unloader.ts';
+import { compactRunner, heldBack, planUnload, spareChestState, unloadableStacks, type UnloadPlan, type UnloadSlot, type UnloadStep } from './unloader.ts';
 import { BOX_SLOTS, carriedBoxes, carriedSpares, isKeptBox, keepNameOf, MAX_BOX_STEPS, MAX_FILL_STEPS, MAX_TIDY_STEPS, namedBoxesWord, placesExactly } from './boxing.ts'; // Track AV
 import { DEFAULT_THROWAWAY_MIN, THROWAWAY_BLOCKS } from '../survival/keeper.ts';
 import { dropFirst } from '../container/stash.ts'; // the junk the stash drops first is never boxed at unload either
@@ -381,7 +381,7 @@ export class HomeLogistics {
   }
 
   /** The unload plan now; `reserve`: one free slot of that chest is kept (for a full box that goes back there). */
-  plan(all = false, reserve?: string, box: { on?: boolean; fill?: boolean; tidy?: boolean; skip?: ReadonlySet<string>; skipFill?: ReadonlySet<string>; hold?: ReadonlySet<string> } = {}): UnloadPlan {
+  plan(all = false, reserve?: string, box: { on?: boolean; fill?: boolean; tidy?: boolean; spares?: boolean; skip?: ReadonlySet<string>; skipFill?: ReadonlySet<string>; hold?: ReadonlySet<string> } = {}): UnloadPlan {
     const p = this.d.position();
     const chests = planChests(this.records()).map((c) => (c.key === reserve ? { ...c, free: Math.max(0, c.free - 1) } : c));
     const r = this.reserve();
@@ -392,6 +392,7 @@ export class HomeLogistics {
       boxing: box.on ?? true, // Track AV
       filling: box.fill ?? box.on ?? true,
       ...(box.tidy ? { tidy: true } : {}),
+      ...(box.spares ? { spares: true } : {}), // Track V1 follow-up: the spares job
       ...(box.skip ? { noBox: box.skip } : {}),
       ...(box.skipFill ? { noFill: box.skipFill } : {}),
       ...(box.hold?.size ? { hold: box.hold } : {}),
@@ -521,6 +522,19 @@ export class HomeLogistics {
   /** The idle chore's tidy job: the home chests' own full boxes' worth into spares (tidy steps only). */
   tidy(cancelled: () => boolean): Promise<UnloadReport> {
     return this.serial(() => this.doTidy(cancelled));
+  }
+
+  /**
+   * Track V1 follow-up (ADR 0090 decision 11): the idle chore's spares job: the empty unnamed boxes carried beyond the
+   * stash step's one go into the chest of spares; nothing else is moved.
+   */
+  returnSpares(cancelled: () => boolean): Promise<UnloadReport> {
+    return this.serial(() => this.doReturnSpares(cancelled));
+  }
+
+  /** Track V1 follow-up: the chest of spares known at home (unloader.ts spareChestState). */
+  spareChest(): 'room' | 'full' | 'none' {
+    return spareChestState(planChests(this.records()), this.d.position()).state;
   }
 
   /** Track BJ: of `item`, what the unload holds back (the throwaway reserve, the food and seed reserve; unloader.ts heldBack). */
@@ -1052,15 +1066,54 @@ export class HomeLogistics {
     }
   }
 
+  /** The spares job (see `returnSpares`): one trip a chest of spares while spares are left and one takes them. */
+  private async doReturnSpares(cancelled: () => boolean): Promise<UnloadReport> {
+    const t0 = this.now();
+    const r0 = this.requests();
+    const rep: UnloadReport = { ok: false, moved: [], kept: [], left: [], boxes: 0, emptied: 0, chests: 0, requests: 0, shared: 0, ms: 0, boxed: [], filled: [], emptiedNamed: 0, namedKept: 0, blocked: [] };
+    const finish = (reason?: string): UnloadReport => {
+      const plan = this.plan(false, undefined, { on: false, spares: true });
+      rep.kept = plan.kept.filter((k) => k.why === 'stash_box'); // (the rest of the inventory was never this job's)
+      rep.left = [];
+      for (const o of plan.overflow) {
+        const l = rep.left.find((x) => x.name === o.name);
+        if (l) l.count += o.count;
+        else rep.left.push({ name: o.name, count: o.count });
+      }
+      rep.ok = reason === undefined;
+      if (reason) rep.reason = reason;
+      rep.shared = this.requests() - r0;
+      rep.ms = this.now() - t0;
+      this.log.info(`unload (spare boxes): ${unloadLine(rep)} (${rep.requests} requests, ${rep.shared} on the shared Containers, ${(rep.ms / 1000).toFixed(1)} s)`);
+      return rep;
+    };
+    if (!this.d.home()) return finish('no_home');
+    if (this.records().filter((r) => r.readAt > 0).length === 0) return finish('no_chests');
+    const failed = new Set<string>();
+    for (let round = 0; round < 8; round++) {
+      if (cancelled()) return finish('interrupted');
+      const plan = this.plan(false, undefined, { on: false, spares: true });
+      const targets = new Map<string, Vec3>();
+      for (const m of plan.moves) if (!failed.has(m.to)) targets.set(m.to, planChests(this.records()).find((c) => c.key === m.to)!.pos);
+      if (targets.size === 0) break;
+      const here = this.d.position() ?? centre(this.d.home()!);
+      const [next] = visitOrder([...targets].map(([key, p]) => ({ key, p })), here);
+      const r = await this.depositAt(next!.p, rep, cancelled, false, undefined, undefined, true);
+      if (r === 'interrupted') return finish('interrupted');
+      if (r !== 'ok') failed.add(next!.key);
+    }
+    return finish();
+  }
+
   /** One chest trip: walk, open (refresh), plan for this chest with what it holds, deposit, refresh, close. */
-  private async depositAt(p: Vec3, rep: UnloadReport, cancelled: () => boolean, all: boolean, skip?: ReadonlySet<string>, hold?: ReadonlySet<string>): Promise<string> {
+  private async depositAt(p: Vec3, rep: UnloadReport, cancelled: () => boolean, all: boolean, skip?: ReadonlySet<string>, hold?: ReadonlySet<string>, spares = false): Promise<string> {
     const rec = this.d.memory().get(p);
     const v = await this.visit(p, rec?.kind ?? 'chest', cancelled);
     if (!v.ok) return v.reason;
     rep.chests++;
     try {
       const key = chestKey(p);
-      const plan = this.plan(all, undefined, { on: false, ...(skip ? { skip } : {}), ...(hold ? { hold } : {}) });
+      const plan = this.plan(all, undefined, { on: false, ...(spares ? { spares: true } : {}), ...(skip ? { skip } : {}), ...(hold ? { hold } : {}) });
       const moves = plan.moves.filter((m) => m.to === key).map((m) => ({ slot: m.slot, count: m.count, name: m.name }));
       if (moves.length === 0) return 'nothing_fits';
       const r = await this.d.skills.depositSlots(v.view, moves);

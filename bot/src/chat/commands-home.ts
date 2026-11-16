@@ -129,6 +129,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     unload: (c, o) => logistics.unload(c, o),
     scan: (c, o) => logistics.scan(c, o),
     tidy: (c) => logistics.tidy(c),
+    returnSpares: (c) => logistics.returnSpares(c), // Track V1 follow-up: the spares job
     cancel: () => mob.skills.cancel(),
   };
   // the !get job the chore has seen end (once per job)
@@ -143,6 +144,8 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
       load: () => logistics.load(),
       known: () => logistics.records().filter((r) => r.readAt > 0).length,
       tidyDue: () => logistics.tidyDue(),
+      spareChest: () => logistics.spareChest(), // Track V1 follow-up
+      say: (line) => d.chat.say(line),
       getEnded: () => {
         const job = getControllerOf(d.task)?.job;
         if (!job || job === seenJob || !job.process?.done) return false;

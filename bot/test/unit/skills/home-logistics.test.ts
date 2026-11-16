@@ -12,7 +12,7 @@ import type { Vec3 } from '../../../src/world/types.ts';
 import type { PathResult } from '../../../src/skills/nav/astar.ts';
 import { ProcessManager } from '../../../src/tasks/process/manager.ts';
 import { displayOf, fakeHome, item, namedBox, nbt } from './home-fakes.ts'; // Track BJ: shared with supply.test.ts
-import { AUTO_UNLOAD_STACKS, TIDY_BACKOFF_MS, HomeChore, HomeJobProcess, type HomeChoreDeps, type HomeRunner } from '../../../src/tasks/process/unload.ts';
+import { AUTO_UNLOAD_STACKS, SPARES_BACKOFF_MS, TIDY_BACKOFF_MS, HomeChore, HomeJobProcess, sparesKeptLine, sparesWanted, type HomeChoreDeps, type HomeRunner } from '../../../src/tasks/process/unload.ts';
 
 const never = () => false;
 
@@ -263,10 +263,18 @@ function fakeRunner() {
   let release: (() => void) | undefined;
   const scanRep = (): ScanReport => ({ ok: true, found: 1, read: [], fresh: 0, forgotten: 0, failed: [], requests: 0, ms: 1, pending: runner.nextPending.splice(0) });
   const unloadRep = (moved = 1): UnloadReport => ({ ok: true, moved: moved ? [{ name: 'coal', count: 64, to: 'chest 1 2 3' }] : [], kept: [], left: [], boxes: 0, emptied: 0, chests: 1, requests: 1, shared: 1, ms: 1 });
-  const runner: HomeRunner & { calls: string[]; finish(): void; nextPending: Vec3[]; tidyBoxed: number } = {
+  const runner: HomeRunner & { calls: string[]; finish(): void; nextPending: Vec3[]; tidyBoxed: number; sparesMoved: number } = {
     calls,
     nextPending: [],
     tidyBoxed: 0,
+    sparesMoved: 4,
+    // Track V1 follow-up: the spares job
+    returnSpares: (c) => {
+      calls.push('spares');
+      return new Promise((r) => {
+        release = () => r(c() ? { ...unloadRep(0), ok: false, reason: 'interrupted' } : { ...unloadRep(0), moved: runner.sparesMoved ? [{ name: 'green_shulker_box', count: runner.sparesMoved, to: 'chest 4 5 6' }] : [] });
+      });
+    },
     tidy: (c) => {
       calls.push('tidy');
       return new Promise((r) => {
@@ -964,6 +972,107 @@ describe('home processes', () => {
     pm.tick();
     expect(h.runner.calls).toEqual(['scan', 'unload', 'unload']);
     expect(h.c.unloadDue()).toBe(false);
+  });
+
+  // Track V1 follow-up (ADR 0090 decision 11): on the Realm the bot at home with 5 free and 6 stacks kept its 5 empty boxes
+  it('HomeChore, Track V1 follow-up: spare boxes go back whatever the free slots, with a chest of spares; a job that moved none waits', async () => {
+    const room = { free: 5, spares: 4, stacks: 6 };
+    const chest: 'room' | 'full' | 'none' = 'room';
+    const said: string[] = [];
+    const h = chore({ load: () => ({ stacks: room.stacks, fullBoxes: 0, free: room.free, spares: room.spares }), spareChest: () => chest, say: (l) => said.push(l) });
+    h.c.sessionScan = false;
+    const pm = new ProcessManager();
+    pm.add(h.c);
+    expect(h.c.unloadDue()).toBe(true); // the room chore waits for it
+    h.advance(2000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['spares']); // not an unload: 6 stacks and 5 free meet neither bar
+    expect(h.c.status().line).toBe('home chore: putting the spare shulker boxes away');
+    room.spares = 0;
+    h.runner.finish();
+    await tick();
+    expect(h.c.stats.spares).toBe(1);
+    h.advance(2000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['spares']); // none left
+    // two more spares (a refill emptied a box); the job moves none (the chest was full after all): it waits
+    room.spares = 2;
+    h.runner.sparesMoved = 0;
+    h.advance(2000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['spares', 'spares']);
+    h.runner.finish();
+    await tick();
+    h.advance(SPARES_BACKOFF_MS - 1000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['spares', 'spares']);
+    expect(h.c.unloadDue()).toBe(false);
+    h.advance(2000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['spares', 'spares', 'spares']);
+    h.runner.finish();
+    await tick();
+    // away from home, with a user process, or with autoUnload off: never
+    h.runner.sparesMoved = 4;
+    h.advance(SPARES_BACKOFF_MS + 1000);
+    for (const k of ['atHome', 'idle', 'auto'] as const) {
+      h.state[k] = false;
+      h.advance(2000);
+      pm.tick();
+      h.state[k] = true;
+    }
+    expect(h.runner.calls).toEqual(['spares', 'spares', 'spares']);
+    expect(said).toEqual([]);
+  });
+
+  it('HomeChore, Track V1 follow-up: no chest of spares: the boxes stay and it says so once; a chest of spares later takes them', async () => {
+    const room = { free: 5, spares: 4, stacks: 0 };
+    let chest: 'room' | 'full' | 'none' = 'none';
+    const said: string[] = [];
+    const logged: string[] = [];
+    const h = chore({ load: () => ({ stacks: room.stacks, fullBoxes: 0, free: room.free, spares: room.spares }), spareChest: () => chest, say: (l) => said.push(l), log: { info: (m) => logged.push(m) } });
+    h.c.sessionScan = false;
+    const pm = new ProcessManager();
+    pm.add(h.c);
+    for (let i = 0; i < 20; i++) {
+      h.advance(2000);
+      pm.tick();
+    }
+    expect(h.runner.calls).toEqual([]);
+    expect(h.c.unloadDue()).toBe(false);
+    expect(said).toEqual(['home chore: I keep 4 spare shulker boxes: I know no chest of spares at home (a chest holding an empty shulker box, or one labelled boxes or shulkers; then !chests scan)']);
+    expect(logged.filter((l) => l.includes('I keep'))).toHaveLength(1);
+    // the full chest of spares says nothing new while the first line stands (once)
+    chest = 'full';
+    h.advance(2000);
+    pm.tick();
+    expect(said).toHaveLength(1);
+    // the owner adds room: the boxes go
+    chest = 'room';
+    h.advance(2000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['spares']);
+    h.runner.finish();
+    await tick();
+    // later full again with new spares: said again (once)
+    chest = 'full';
+    h.advance(2000);
+    pm.tick();
+    h.advance(2000);
+    pm.tick();
+    expect(said).toEqual([said[0], 'home chore: I keep 4 spare shulker boxes: the chest of spares at home is full']);
+  });
+
+  it('sparesWanted and sparesKeptLine', () => {
+    expect(sparesWanted({ spares: 1 }, 'room')).toBe(true);
+    expect(sparesWanted({ spares: 0 }, 'room')).toBe(false);
+    expect(sparesWanted({}, 'room')).toBe(false);
+    expect(sparesWanted({ spares: 3 }, 'full')).toBe(false);
+    expect(sparesWanted({ spares: 3 }, 'none')).toBe(false);
+    expect(sparesWanted({ spares: 3 }, undefined)).toBe(false);
+    expect(sparesKeptLine(1, 'none')).toContain('I keep 1 spare shulker box:');
+    expect(sparesKeptLine(2, 'room')).toBeUndefined();
+    expect(sparesKeptLine(0, 'none')).toBeUndefined();
   });
 
   it('HomeChore: with nothing to unload, a tidy job when one is due; after one that boxed nothing it waits', async () => {

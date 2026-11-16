@@ -168,6 +168,12 @@ export interface PlanOptions {
   noBox?: ReadonlySet<string>;
   /** Tidy steps only (no fill or box steps for the bot's items): the chests' own full boxes' worth (default false). */
   tidy?: boolean;
+  /**
+   * Track V1 follow-up (ADR 0090 decision 11): the spares job. Only the empty unnamed boxes beyond the stash step's one
+   * move, and only into a chest of spares with room (`spareChestState`); everything else is kept (`kept`). A spare with
+   * no such chest is overflow (kept by the bot).
+   */
+  spares?: boolean;
   /** Tidy steps at most (default MAX_TIDY_STEPS). */
   maxTidySteps?: number;
   /** Kinds held back this round (a fill put off until the other items are away): kept, not unloaded. */
@@ -423,6 +429,7 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
   const spareSlots = slots.filter((s) => isShulkerBox(s.name) && !s.named && !s.flightKit && !s.unknown && (s.boxUsed ?? 0) === 0 && s.count > 0).sort((a, b) => a.slot - b.slot);
   const carriedSpares = (boxKept ? spareSlots : spareSlots.slice(1)).map((s) => s.slot);
   const usedSpares = new Set<number>();
+  if (opts.spares) return planSpares(slots, sims, spareSlots, boxKept, plan, keep, move, opts.origin);
   if (!opts.tidy && (opts.filling ?? opts.boxing ?? true)) planFillSteps(slots, sims, movable, carriedSpares, usedSpares, plan, opts, maxOf);
   if (opts.tidy) planTidySteps(sims, carriedSpares, usedSpares, plan, opts, maxOf);
   else if (opts.boxing ?? true) planBoxSteps(slots, sims, movable, carriedSpares, usedSpares, plan, opts, maxOf);
@@ -643,6 +650,58 @@ function planFillSteps(slots: readonly UnloadSlot[], sims: SimChest[], movable: 
 /** A chest that holds the spare boxes (or is labelled for boxes): never tidied, its room is the spares'. */
 function isSpareChest(c: PlanChest): boolean {
   return c.boxes.empty > 0 || /\b(shulkers?|boxes|box|spares?)\b/i.test(c.label ?? '');
+}
+
+/**
+ * Track V1 follow-up: the chest of spares the spares job may use: a read chest (not a box block) that holds an empty
+ * shulker box or is labelled for boxes. `room`: one has a free slot (`key`: the one holding the most empty boxes, then
+ * the nearest); `full`: there is one, none with a free slot; `none`: no such chest.
+ */
+export function spareChestState(chests: readonly PlanChest[], origin?: Vec3): { state: 'room' | 'full' | 'none'; key?: string } {
+  const all = chests.filter((c) => !isShulkerBox(c.kind) && isSpareChest(c));
+  if (all.length === 0) return { state: 'none' };
+  const open = all.filter((c) => c.free > 0).sort((a, b) => b.boxes.empty - a.boxes.empty || dist(a, origin) - dist(b, origin));
+  return open[0] ? { state: 'room', key: open[0].key } : { state: 'full' };
+}
+
+/**
+ * The spares job's plan (`opts.spares`): of the empty unnamed boxes carried, the stash step's one is kept (none when a
+ * named box serves it) and the rest go to the chest of spares, one slot each, while it has room; the rest of the
+ * inventory is kept as it is.
+ */
+function planSpares(
+  slots: readonly UnloadSlot[],
+  sims: SimChest[],
+  spareSlots: readonly UnloadSlot[],
+  boxKept: boolean,
+  plan: UnloadPlan,
+  keep: (name: string, count: number, why: KeepReason) => void,
+  move: (slot: number, name: string, count: number, to: string, rule: Rule) => void,
+  origin: Vec3 | undefined,
+): UnloadPlan {
+  const spare = new Set(spareSlots.map((x) => x.slot));
+  for (const s of slots) if (s.count > 0 && !spare.has(s.slot)) keep(s.name, s.count, 'kept');
+  let kept = boxKept;
+  for (const s of spareSlots) {
+    if (!kept) {
+      kept = true;
+      keep(s.name, 1, 'stash_box');
+      continue;
+    }
+    const target = sims
+      .filter((x) => !isShulkerBox(x.c.kind) && isSpareChest(x.c) && x.free > 0)
+      .sort((a, b) => b.empties - a.empties || dist(a.c, origin) - dist(b.c, origin))[0];
+    if (!target) {
+      plan.overflow.push({ slot: s.slot, name: s.name, count: 1 });
+      continue;
+    }
+    target.free--;
+    target.boxes++;
+    target.empties++;
+    target.contents[s.name] = (target.contents[s.name] ?? 0) + 1;
+    move(s.slot, s.name, 1, target.c.key, 'boxes');
+  }
+  return plan;
 }
 
 /**

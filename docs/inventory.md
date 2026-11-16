@@ -15,8 +15,9 @@ same 36 slots with stone and mob drops in an hour of mining.
 |---|---|
 | `bot/src/skills/inventory/room.ts` | `planRoom` (pure), `roomSlotsOf`, `stackKey`, `roomAskLine`, `ROOM_FLOOR` 4, `ROOM_TARGET` 6, `ROCKETS_LOOSE` 128, `STONE_LIKE`, `KEEP_LOOSE`, `ROOM_COMPACT` |
 | `bot/src/tasks/process/room.ts` | `RoomChore`: the idle chore that runs the plan one step at a time |
-| `bot/src/tasks/process/unload.ts` | `unloadWanted`: the home chore's trigger, the free slots counted; `HomeChore.unloadDue` |
-| `bot/src/skills/home/unloader.ts` | `unloadableStacks` also counts the spare empty boxes and the free slots |
+| `bot/src/tasks/process/unload.ts` | `unloadWanted`: the home chore's trigger, the free slots counted; `HomeChore.unloadDue`; `sparesWanted`, `sparesKeptLine`, the `spares` job |
+| `bot/src/skills/home/unloader.ts` | `unloadableStacks` also counts the spare empty boxes and the free slots; `planUnload(..., { spares })`, `spareChestState` |
+| `bot/src/skills/home/logistics.ts` | `HomeLogistics.returnSpares` (the spares job's trips), `spareChest` |
 | `bot/src/skills/supply/supply.ts` | `Supply.putInto`: a carried box placed, the stacks put in, the box picked up again |
 | `bot/src/skills/survival/index.ts` | `SurvivalKit.merge`; the kit registers its `exchange` |
 | `bot/src/skills/container/exchange.ts` | the exchange by inventory model, `RateLimit` (once a minute a key) |
@@ -95,6 +96,30 @@ shulker box (as before), and now also with fewer than 4 free slots and anything 
 box (the unload keeps one for the stash step and sends the rest to the chest of spares). With 4 or more free, or nothing
 to unload, the old bars alone. The room chore waits while an unload runs or is due (`HomeChore.unloadDue`).
 
+### Spare boxes go back on their own
+
+The first deploy showed the gap: at home the live bot's room pass moved 320 rockets into the fireworks box (0 -> 5 free)
+and then kept its five empty boxes, because with 5 free and 6 stacks neither unload bar was met. Now, with nothing to
+unload, the home chore runs a small `spares` job whenever it is idle at home with `autoUnload` on, whatever the free
+slots:
+
+- what goes: the empty unnamed boxes carried beyond the stash step's one (none is held back when a `bot_loot` box
+  serves the stash step), the same count the unload sends back (`load().spares`);
+- where: the chest of spares only, a read chest (not a box block) that holds an empty shulker box or is labelled
+  boxes, box, shulkers or spares, with a free slot (`spareChestState`; the one with the most empty boxes first);
+- nothing else moves: not the loot, not a box that holds anything, not the fireworks box, not a box it cannot read
+  (`planUnload(..., { spares: true })`, `HomeLogistics.returnSpares`);
+- a job that moved no box or left one (the memory said room a chest no longer has) waits 10 minutes
+  (`SPARES_BACKOFF_MS`);
+- with no chest of spares, or only full ones, the boxes stay and the chore says so once, in the log and in chat:
+  `home chore: I keep 4 spare shulker boxes: I know no chest of spares at home (a chest holding an empty shulker box,
+  or one labelled boxes or shulkers; then !chests scan)` (or `... the chest of spares at home is full`). It says it
+  again only after a chest of spares with room was known in between.
+
+The log line is `unload (spare boxes): unloaded: 4 green_shulker_box -> chest 1 2 3; kept 1 green_shulker_box`. The
+room chore waits for the job (`unloadDue`). A full unload (the bars above) still sends spares back as before, and with no
+chest of spares it still puts them into the emptiest chest, which then is one.
+
 ## When
 
 The chore (`room`, auto, priority 30 like the other chores) wants control only when all of these hold:
@@ -166,6 +191,8 @@ released and the chore left alone), 2026-11-15, on a PC:
 | Early game away from home: stone tools, torches, bread, coal, raw iron and copper, flint, logs, lapis, 498 cobblestone in 9 stacks, deepslate, dirt, gravel, andesite, diorite, granite, tuff, rotten flesh, string | 5 | 2 free after 45 s: the keeper dropped the rotten flesh and string at 36 of 36 (`keeper: stocked 0, dropped 7`) and nothing more; the next two new kinds fill it again | from 0 to 2 free (the keeper's drop) to 10 in 5.0 to 5.2 s (the pass 1.6 to 1.7 s): a merge of 20 cobblestone and 434 cobblestone dropped (64 kept); then 8 more stacks of cobblestone given: 2 -> 10 free in 1.3 to 1.4 s, 512 dropped; no tool, food, ore, coal, torch, log, flint, bone or lapis lost |
 | The place skill and the farm click with 36 of 36, the item in the main inventory (the hotbar 9 kinds no job wants, the main inventory dirt) | 5 a skill, before and after | main's code: `move_failed`, nothing in the log (not run on main; this track's code with the exchange taken away: `move_failed` and `no hotbar slot for cobblestone (slot 20): the inventory is full (36 of 36) and no exchange is wired`, in runs 1, 3 and 5: once a minute) | placed and clicked in 5 of 5 each: `cobblestone moved from slot 20 to 8 (bone exchanged into 20: the inventory is full)`, `stone_hoe moved from slot 20 to 7 (brick exchanged into 20: ...)`; nothing lost (one cobblestone placed) |
 | The live inventory at home with chests and a chest of spares | 5 | 7 unloadable stacks, under the bar of 8, and no full box: no unload in 60 s, 0 free | the slot trigger in 5 of 5: 10 stacks into 2 containers and 4 spare boxes back to the chest of spares (one kept), 0 -> 11 free in 9 to 10 s; the kit, the rockets, the food and the reserves stay, every item counted in the chests |
+| The same at home after the room pass (the live bot after the first deploy): 5 free, 7 unloadable stacks, no full box, 5 empty boxes; spares job (decision 11) | 5, before and after | main e372ee3d, 5 runs: nothing in 60 s, 5 free, the 5 boxes carried, no unload or room line | the spares job in 5 of 5: 4 boxes into the chest of spares (one kept for the stash step), 5 -> 9 free in 7 to 8 s (the trip 1.5 to 1.9 s); nothing else left the inventory or reached a chest, no unload and no room pass |
+| The same with no chest of spares (no chest holds an empty box, none is labelled for boxes) | 1 | - | the boxes stay (nothing moved in 15 s more) and one line in chat and the log: `home chore: I keep 4 spare shulker boxes: I know no chest of spares at home (...)` |
 
 The first three cases run with every item counted: what left the inventory is in the fireworks box, in a carried box
 or, for junk and stone only, on the ground.
@@ -183,6 +210,10 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e home-room --silent=fal
 - `room-chore`: the chore against fakes: the quiet, one step at a time, the log and chat lines, a pre-emption, the box
   it filled taking the next loot, the backoffs, the ask line.
 - `fetch-full` and `place-skill`: the farm click and the place skill with 36 of 36, before (no exchange) and after.
+- `home-unloader` and `home-logistics` (the spares job): the plan moves only the spare boxes and only into a chest of
+  spares; the chore runs it at 5 free, backs off after one that moved none, keeps the boxes and says so once with no
+  chest of spares.
 - `home-room` (e2e, bds-home, the inventories set slot by slot by truth): the live inventory away from home; the early
   game away from home, then stacks of cobblestone given until 2 are free; the place and click faults before and after;
-  the live inventory at home with chests and a chest of spares.
+  the live inventory at home with chests and a chest of spares; the same at home with 5 free (the spare boxes go back,
+  nothing else moves); at home with no chest of spares (the boxes stay, one line).

@@ -52,6 +52,12 @@ const LATE: Slot[] = [
   ['apple', 5], ['cooked_beef', 7], ['bone', 12], ['bone', 7], ['redstone', 17], ['stick', 2], ['wheat_seeds', 4], ['grass_block', 1], ['bread', 3],
 ];
 
+/**
+ * Track V1 follow-up: the live inventory at home after the room chore's pass (the Realm, 2026-11-15: 0 -> 5 free): two
+ * stacks of rockets loose (the rest in the fireworks box), 5 free, the 5 empty boxes still carried.
+ */
+const LATE5: Slot[] = LATE.map((x, i): Slot => (i >= 12 && i <= 16 ? ['air', 0] : x));
+
 /** Stone tools after an hour of mining: 36 of 36. */
 const EARLY: Slot[] = [
   ['stone_pickaxe', 1], ['stone_axe', 1], ['stone_shovel', 1], ['stone_sword', 1], ['torch', 23], ['cobblestone', 64], ['bread', 6], ['crafting_table', 1], ['coal', 41],
@@ -291,8 +297,9 @@ describe.skipIf(!E2E)('@bds home: room in the inventory (Track V1)', () => {
     }
   }, 900_000);
 
-  it('at home with chests and a chest of spares: below 4 free the unload starts (6 stacks), the spare boxes go back', async () => {
-    const b = bot!;
+  /** The home (built once): the chests of home-truth's layout, read by a scan. */
+  async function homeReady(b: HomeBot): Promise<HomeLayout> {
+    if (layout) return layout;
     const hold0 = held(b);
     await b.truth.ok('clear', [b.name]);
     await until(() => (inv(b).slots.slice(0, 36).every((x) => !x) ? true : undefined), 10_000, 'an empty inventory');
@@ -304,7 +311,29 @@ describe.skipIf(!E2E)('@bds home: room in the inventory (Track V1)', () => {
     const from0 = b.said.length;
     await b.command('!chests scan');
     notes.push(`home scan: ${await b.reply((s) => /^chests: \d+ within /.test(s), from0, 120_000)}`);
-    const L = layout;
+    return layout;
+  }
+
+  /** The chests as buildHome left them (the unload's targets emptied, 3 empty boxes in the chest of spares), read again. */
+  async function resetChests(b: HomeBot, L: HomeLayout, spares = 3): Promise<void> {
+    for (const p of [L.empty, L.coal, L.wood, L.barrel]) await truthLoaded(b.truth, 'container', [p.x, p.y, p.z, 'clear']).catch(() => undefined);
+    await b.truth.chestPut(L.coal, 'coal', 20);
+    await b.truth.chestPut(L.coal, 'iron_ingot', 10);
+    await b.truth.chestPut(L.wood, 'oak_log', 32);
+    await b.truth.chestPut(L.barrel, 'dirt', 5);
+    await truthLoaded(b.truth, 'container', [L.boxes.x, L.boxes.y, L.boxes.z, 'clear']);
+    if (spares > 0) await b.truth.chestPut(L.boxes, 'undyed_shulker_box', 1, spares);
+    const fromClear = b.said.length;
+    await b.command('!chests clear');
+    await b.reply(() => true, fromClear, 10_000).catch(() => undefined);
+    const fromScan = b.said.length;
+    await b.command('!chests scan');
+    await b.reply((x) => /^chests: \d+ within /.test(x), fromScan, 120_000);
+  }
+
+  it('at home with chests and a chest of spares: below 4 free the unload starts (6 stacks), the spare boxes go back', async () => {
+    const b = bot!;
+    const L = await homeReady(b);
     const chests = [L.coal, L.wood, L.empty, L.boxes, L.barrel];
     const stored = async (): Promise<Record<string, number>> => {
       const out: Record<string, number> = {};
@@ -347,20 +376,71 @@ describe.skipIf(!E2E)('@bds home: room in the inventory (Track V1)', () => {
       for (const [k, v] of Object.entries(chestsAfter)) all1[k] = (all1[k] ?? 0) + v;
       expect(diff(all0, all1)).toEqual({});
       for (const k of ['netherite_sword', 'elytra', 'cobblestone', 'firework_rocket']) expect(after[k]).toBe(before[k]);
-      // empty the chests again for the next run (the unload's targets)
-      for (const p of [L.empty, L.coal, L.wood, L.barrel]) await truthLoaded(b.truth, 'container', [p.x, p.y, p.z, 'clear']).catch(() => undefined);
-      await b.truth.chestPut(L.coal, 'coal', 20);
-      await b.truth.chestPut(L.coal, 'iron_ingot', 10);
-      await b.truth.chestPut(L.wood, 'oak_log', 32);
-      await b.truth.chestPut(L.barrel, 'dirt', 5);
-      await truthLoaded(b.truth, 'container', [L.boxes.x, L.boxes.y, L.boxes.z, 'clear']);
-      await b.truth.chestPut(L.boxes, 'undyed_shulker_box', 1, 3);
-      const fromClear = b.said.length;
-      await b.command('!chests clear');
-      await b.reply(() => true, fromClear, 10_000).catch(() => undefined);
-      const fromScan = b.said.length;
-      await b.command('!chests scan');
-      await b.reply((x) => /^chests: \d+ within /.test(x), fromScan, 120_000);
+      await resetChests(b, L); // the unload's targets empty again for the next run
     }
   }, 1_800_000);
+
+  // Track V1 follow-up (ADR 0090 decision 11): on the Realm the live bot at home freed 5 slots by its room pass and then
+  // kept its 5 empty boxes (5 free and 6 stacks meet neither unload bar). Now the spare boxes go back on their own.
+  it('at home with 5 free (the live inventory after its pass): the spare boxes go back to the chest of spares, nothing else moves', async () => {
+    const b = bot!;
+    const L = await homeReady(b);
+    const stored = async (): Promise<Record<string, number>> => {
+      const out: Record<string, number> = {};
+      for (const p of [L.coal, L.wood, L.empty, L.boxes, L.barrel]) for (const [k, v] of Object.entries((await b.truth.box(p)).counts)) out[k] = (out[k] ?? 0) + v;
+      return out;
+    };
+    for (let run = 1; run <= RUNS; run++) {
+      const hold = held(b);
+      await teleport(b, centre(L.home));
+      await fill(b, LATE5, 165);
+      await sleep(500);
+      const before = carried(b);
+      const chestsBefore = await stored();
+      const f0 = free(b);
+      const load = b.home.logistics.load();
+      const t0 = Date.now();
+      const fromLogs = b.logs.length;
+      b.processes.stop(hold);
+      const line = await until(() => b.logs.slice(fromLogs).find((l) => l.includes('unload (spare boxes): ')), 60_000, 'the spares job');
+      await until(() => (!b.home.logistics.busy && b.processes.active === undefined ? true : undefined), 60_000, 'the spares job done');
+      await sleep(4000); // anything else the chores would do meanwhile
+      const s = (Date.now() - t0) / 1000;
+      const after = carried(b);
+      const chestsAfter = await stored();
+      const f1 = free(b);
+      const others = b.logs.slice(fromLogs).filter((l) => /(unload: unloaded|inventory: \d+ -> )/.test(l)).length; // a full unload or a room pass
+      notes.push(`spares ${run}: load ${JSON.stringify(load)}; ${f0} -> ${f1} free in ${s.toFixed(0)} s; carried changed ${JSON.stringify(diff(before, after))}; chests changed ${JSON.stringify(diff(chestsBefore, chestsAfter))}; other unloads or passes ${others}; ${line.replace(/^\S+ \w+ /, '')}`);
+      expect(f0).toBe(5);
+      expect(load.stacks).toBeLessThanOrEqual(8);
+      expect(load.spares).toBe(4);
+      expect(diff(before, after)).toEqual({ green_shulker_box: -4 }); // the boxes, nothing else
+      expect(diff(chestsBefore, chestsAfter)).toEqual({ green_shulker_box: 4 });
+      expect(f1).toBe(9);
+      expect(others).toBe(0);
+      await resetChests(b, L);
+    }
+  }, 1_800_000);
+
+  it('at home with no chest of spares: the spare boxes stay and the bot says so once', async () => {
+    const b = bot!;
+    const L = await homeReady(b);
+    await resetChests(b, L, 0); // no chest holds an empty box, none is labelled for boxes
+    const hold = held(b);
+    await teleport(b, centre(L.home));
+    await fill(b, LATE5, 165);
+    await sleep(500);
+    const before = carried(b);
+    const fromSaid = b.said.length;
+    b.processes.stop(hold);
+    const kept = await until(() => b.said.slice(fromSaid).find((l) => l.includes('spare shulker box')), 30_000, 'the kept-spares line');
+    await sleep(15_000); // more chore checks: said once, nothing moved
+    const after = carried(b);
+    const lines = b.said.slice(fromSaid).filter((l) => l.includes('spare shulker box'));
+    notes.push(`no chest of spares: ${lines.length} line(s): ${kept}; carried changed ${JSON.stringify(diff(before, after))}`);
+    expect(kept).toContain('I keep 4 spare shulker boxes: I know no chest of spares at home');
+    expect(lines).toHaveLength(1);
+    expect(diff(before, after)).toEqual({});
+    await resetChests(b, L);
+  }, 600_000);
 });

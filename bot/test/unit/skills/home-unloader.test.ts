@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import { categoryOf, labelCategory, labelMatches } from '../../../src/skills/home/categories.ts';
 import { chestsLine, itemMatches, itemQuery, kindsLine, kindWord, planChests, recordFrom, stockLine, unreachableLines, unreadRecord } from '../../../src/skills/home/memory.ts';
-import { gearKept, planUnload, reserveByKind, unloadableStacks, type PlanChest, type UnloadSlot } from '../../../src/skills/home/unloader.ts';
+import { gearKept, planUnload, reserveByKind, spareChestState, unloadableStacks, type PlanChest, type UnloadSlot } from '../../../src/skills/home/unloader.ts';
 import { snapshotOf } from '../../../src/skills/container/chest.ts';
 import { ChestMemory } from '../../../src/world/cache/chests.ts';
 
@@ -133,6 +133,80 @@ describe('unloader: the decision table', () => {
 
   it('unloadableStacks counts the stacks the chore looks at (reserve and kept items left out) and full boxes', () => {
     expect(unloadableStacks([s(0, 'cobblestone', 16), s(1, 'coal'), s(2, 'bread'), s(3, 'undyed_shulker_box', 1, 4)])).toEqual({ stacks: 1, fullBoxes: 1, spares: 0, free: 32 }); // Track V1: spares, free
+  });
+});
+
+// Track V1 follow-up (ADR 0090 decision 11): the spares job's plan and the chest of spares
+describe('unloader: the spares job (planUnload spares)', () => {
+  /** The live inventory at home after the room chore's pass: the kit, two stacks of rockets, the fireworks box, 5 empty boxes, loot. */
+  const live = (): UnloadSlot[] => [
+    s(0, 'netherite_sword', 1),
+    s(1, 'netherite_pickaxe', 1),
+    s(2, 'firework_rocket', 64),
+    s(3, 'cooked_beef', 31),
+    s(4, 'bow', 1),
+    s(5, 'cobblestone', 16),
+    s(6, 'arrow', 15),
+    s(7, 'firework_rocket', 64),
+    { slot: 17, name: 'undyed_shulker_box', count: 1, boxUsed: 17, flightKit: true, boxItems: { firework_rocket: 459 } },
+    s(18, 'green_shulker_box', 1),
+    s(19, 'green_shulker_box', 1),
+    s(20, 'green_shulker_box', 1),
+    s(21, 'green_shulker_box', 1),
+    s(22, 'green_shulker_box', 1),
+    { slot: 23, name: 'blue_shulker_box', count: 1, boxUsed: 27, boxItems: { sand: 1728 } },
+    { slot: 24, name: 'red_shulker_box', count: 1, named: true },
+    { slot: 25, name: 'white_shulker_box', count: 1, unknown: true },
+    s(29, 'bone', 19),
+    s(30, 'redstone', 17),
+  ];
+
+  it('only the empty unnamed boxes move, into the chest holding empty boxes; with a named box carried none is held back for the stash', () => {
+    const spares = chest({ key: 'spares', boxes: { empty: 3, full: 0 }, free: 24 });
+    const coal = chest({ key: 'coal', contents: { bone: 10, redstone: 5 }, free: 20 });
+    const p = planUnload(live(), [coal, spares], { spares: true });
+    // the named box (slot 24) serves the stash step: all five green boxes go
+    expect(p.moves).toEqual([18, 19, 20, 21, 22].map((slot) => ({ slot, name: 'green_shulker_box', count: 1, to: 'spares', rule: 'boxes' })));
+    expect(p.overflow).toEqual([]);
+    expect(p.steps).toEqual([]);
+    expect(p.kept.some((k) => k.name === 'bone' && k.why === 'kept')).toBe(true); // the loot stays: not this job's
+    expect(p.kept.some((k) => k.name === 'blue_shulker_box')).toBe(true); // a box holding sand stays
+    expect(p.kept.some((k) => k.name === 'undyed_shulker_box')).toBe(true); // the fireworks box stays
+    expect(p.kept.some((k) => k.name === 'white_shulker_box')).toBe(true); // an unread box stays
+    // without the named box: the first spare is the stash step's, four go
+    const noNamed = live().filter((x) => x.slot !== 24);
+    const q = planUnload(noNamed, [coal, spares], { spares: true });
+    expect(q.moves.map((m) => m.slot)).toEqual([19, 20, 21, 22]);
+    expect(q.kept.filter((k) => k.why === 'stash_box')).toEqual([{ name: 'green_shulker_box', count: 1, why: 'stash_box' }]);
+    // the count the chore looks at is the same four
+    expect(unloadableStacks(noNamed).spares).toBe(4);
+  });
+
+  it('no chest of spares: the spares are overflow (kept), never put into another chest; a full one takes what fits', () => {
+    const coal = chest({ key: 'coal', contents: { coal: 10 }, free: 20 });
+    const slots = live().filter((x) => x.slot !== 24);
+    const p = planUnload(slots, [coal], { spares: true });
+    expect(p.moves).toEqual([]);
+    expect(p.overflow.map((o) => o.slot)).toEqual([19, 20, 21, 22]);
+    const two = chest({ key: 'spares', boxes: { empty: 25, full: 0 }, free: 2 });
+    const q = planUnload(slots, [coal, two], { spares: true });
+    expect(q.moves.map((m) => `${m.slot}->${m.to}`)).toEqual(['19->spares', '20->spares']);
+    expect(q.overflow.map((o) => o.slot)).toEqual([21, 22]);
+    // a chest labelled for boxes is a chest of spares too, before it holds one
+    const labelled = chest({ key: 'shulkers', label: 'shulkers' });
+    expect(planUnload(slots, [coal, labelled], { spares: true }).moves.map((m) => m.to)).toEqual(['shulkers', 'shulkers', 'shulkers', 'shulkers']);
+  });
+
+  it('spareChestState: room (the one with the most empty boxes), full, none; a box block or a plain chest is none', () => {
+    const plain = chest({ key: 'plain', contents: { coal: 64 } });
+    const block = chest({ key: 'block', kind: 'green_shulker_box', boxes: { empty: 1, full: 0 } });
+    expect(spareChestState([plain, block])).toEqual({ state: 'none' });
+    const full = chest({ key: 'full', boxes: { empty: 27, full: 0 }, free: 0 });
+    expect(spareChestState([plain, full])).toEqual({ state: 'full' });
+    const few = chest({ key: 'few', boxes: { empty: 1, full: 0 }, free: 20 });
+    const many = chest({ key: 'many', boxes: { empty: 5, full: 0 }, free: 10 });
+    expect(spareChestState([plain, full, few, many])).toEqual({ state: 'room', key: 'many' });
+    expect(spareChestState([chest({ key: 'lab', label: 'spare boxes' })])).toEqual({ state: 'room', key: 'lab' });
   });
 });
 
