@@ -1,6 +1,6 @@
 # 0091: Windows beside the walk (Track F17)
 
-Date: 2026-11-15 (addendum: Track F18, 2026-11-16). Status: accepted; behind the setting `flyCaveWindows`, default
+Date: 2026-11-15 (addenda: Track F18 and Track F19, 2026-11-16). Status: accepted; behind the setting `flyCaveWindows`, default
 off (decision 9). Builds on
 [0067](0067-long-range-flight.md) (the corridor executor), [0069](0069-cave-flight.md) (the cave style's windows under
 a roof), [0082](0082-drawn-entries-and-hops.md) (the hop and the walk's re-check) and
@@ -191,3 +191,41 @@ Consequences:
     made-up caves);
   - a server replica of the owner's cave with windows (the live rule is unchanged but for its words; the Realm series
     is the live evidence).
+
+## Addendum (Track F19, 2026-11-16): windows that do not start under a full burn
+
+Track F18 named four ways a window in the owner's tall passage might land: a glide with no rocket, a rocket fired
+later, a tracker that trusts the plan at the end of the burn, and a proof cache. Track F19 measured each on the fixture
+at every burn, closed loop, and on F17's made-up caves. Details and numbers: [../flight.md](../flight.md) "Windows that
+do not start under a full burn (Track F19)".
+
+- One crafted rocket from a standing takeoff carries the body 30 to 50 blocks before its burn ends (plain: 13 to 33),
+  and 6.4 more to a stop. The passage's windows are 25 to 44 blocks.
+- A glide: 108 windows, none complete (no height to trade from a standing start on the level; the one drop is 1 wide).
+- A rocket fired later (the search's edges refused once the landing's stage begins under a burn or fires in it): no
+  crafted proof completes on the fixture (12 of 22 do without the rule, all burning into the landing); one plain one,
+  flown at every burn, landed once and hit once (7.6). On the made-up caves the walk is the same run for run.
+- The plan trusted through the end-of-burn check and the burn's re-plans (a scratch switch): crafted, 13 of 36 landed
+  at the plan's own burns against 11, 0 of 120 between them against 2, 7 wall hits against 6; plain alike. From the
+  burn's end an unpowered plan exists for 1 to 4 of 13 burns.
+- A cache: live, each proof is flown once; nothing to copy.
+
+15. **No window in the tall passage, and nothing new in the walk.** None of the four lands reliably, so `wayWalk` is
+    unchanged and `flyCaveWindows` keeps its default. The bar for taking one was F17's gate with every burn of the
+    crafted range landed or bailed out unhurt; nothing came near it.
+16. **The landing searched unpowered is a bench switch** (`RouteRequest.landUnpowered`, default off; with
+    `ChainOptions.rockets` for a glide window and `WayWindowOptions.minBlocks` / `passMin`). Nothing in the bot sets
+    them (guard test). They are what `scripts/way-burn-probe.ts` and `way-window-bench.ts --late` measure with.
+17. **The end-of-burn check stays as it is.** Trusting the plan through it gained 2 of 36 landings at the plan's burns
+    (crafted) and lost 2 landings and gained a wall hit between them; the switch is not kept, since it turns a safety
+    check off.
+18. **No proof cache.** The bench's start cache replays a proof that stalled at its ms budget for every seed (one run
+    of the crafted hook cave read 31.0 s p50 against 23.5 on two reruns): such a case is run twice.
+
+Consequences:
+
+- Offline on the fixture and on the made-up caves (the PC, n 10 a case, both kits): main and this tree the same run
+  for run.
+- What would fly the passage: about 50 blocks of straight line before the landing's stage (the passage gives at most
+  44 of window), or a plan that holds every burn between the ends at the live budget (Track F18: none at 2 s, 1 of 9
+  at 30 s).

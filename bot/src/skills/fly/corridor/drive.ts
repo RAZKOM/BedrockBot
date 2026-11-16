@@ -71,6 +71,10 @@ export interface ChainOptions {
   kit?: Readonly<KitBurn>;
   /** Track F7: the cells a body may stand on (tracker.ts TrackerOptions.floor: the bail-out sinks onto a dry one). */
   floor?: (x: number, y: number, z: number) => boolean | undefined;
+  /** Track F19: every tracker's landing stage begins unpowered (RouteRequest.landUnpowered). */
+  landUnpowered?: boolean;
+  /** Track F19: the rockets the trackers plan with at most (0: a glide window, no rocket in any of its plans). */
+  rockets?: number;
   note?: (msg: string) => void;
 }
 
@@ -130,6 +134,7 @@ export class TrackerChain {
       ...(o.midBurns ? { midBurns: true } : {}),
       ...(o.kit ? { kit: o.kit } : {}),
       ...(o.floor ? { floor: o.floor } : {}),
+      ...(o.landUnpowered ? { landUnpowered: true } : {}),
       ...(o.note ? { note: o.note } : {}),
     });
   }
@@ -197,7 +202,9 @@ export class TrackerChain {
   }
 
   /** One tick: the control to fly now. */
-  tick(b: ChainBody, now: number): TrackerOutput {
+  tick(body: ChainBody, now: number): TrackerOutput {
+    // (Track F19: a glide window's trackers see no rocket in the hand, so no plan of theirs fires one)
+    const b = this.o.rockets !== undefined && body.rockets > this.o.rockets ? { ...body, rockets: this.o.rockets } : body;
     const n = this.o.goals.length;
     // the next window, made CHAIN_AHEAD goals before the active one's end (it overlaps by one goal)
     if (!this.next && this.activeTo < n && this.activeTo - this.reached <= (this.o.ahead ?? CHAIN_AHEAD)) {
@@ -241,10 +248,10 @@ export class TrackerChain {
  * (the look towards the first goal) through every goal of the window at the live budget, with the stretch's margin,
  * weight and edge set; `proofOf` reads the answer.
  */
-export function windowRequest(w: Pick<Window, 'goals'>, from: Vec3, rockets: number, o: Pick<StretchOptions, 'margin' | 'maxNodes' | 'maxMs' | 'weight' | 'library' | 'riskCost' | 'geodesic' | 'pieces' | 'midBurns' | 'kit'>): RouteRequest {
+export function windowRequest(w: Pick<Window, 'goals'>, from: Vec3, rockets: number, o: Pick<StretchOptions, 'margin' | 'maxNodes' | 'maxMs' | 'weight' | 'library' | 'riskCost' | 'geodesic' | 'pieces' | 'midBurns' | 'kit' | 'landUnpowered' | 'rockets'>): RouteRequest {
   const first = w.goals[0] ? goalPoint(w.goals[0]) : { x: from.x, y: from.y, z: from.z + 1 };
   const yaw = (Math.atan2(-(first.x - from.x), first.z - from.z) * 180) / Math.PI;
-  const start: RouteState = { pos: { x: from.x, y: from.y, z: from.z }, vel: { x: 0, y: 0, z: 0 }, yaw, boost: { ...NO_BOOST }, gliding: false, rockets, ...(o.kit ? { kit: o.kit } : {}), wp: 0 };
+  const start: RouteState = { pos: { x: from.x, y: from.y, z: from.z }, vel: { x: 0, y: 0, z: 0 }, yaw, boost: { ...NO_BOOST }, gliding: false, rockets: o.rockets !== undefined ? Math.min(rockets, o.rockets) : rockets, ...(o.kit ? { kit: o.kit } : {}), wp: 0 };
   // (Track F6: the proof's search prices the risk, measures the way and runs in pieces as the trackers' do, so the plan proven is the plan flown)
   return {
     start,
@@ -258,6 +265,7 @@ export function windowRequest(w: Pick<Window, 'goals'>, from: Vec3, rockets: num
     ...(o.geodesic ? { geodesic: true } : {}),
     ...(o.pieces !== undefined ? { pieces: o.pieces } : {}),
     ...(o.midBurns ? { midBurns: true } : {}),
+    ...(o.landUnpowered ? { landUnpowered: true } : {}),
   };
 }
 
@@ -301,6 +309,9 @@ export interface StretchOptions {
   midBurns?: boolean;
   /** Track F10: the burn of the rockets in the hand where it is not the plain one's: the window's trackers plan and track on it. */
   kit?: Readonly<KitBurn>;
+  /** Track F19: the window's plans begin their landing unpowered (RouteRequest.landUnpowered), and the rockets they may plan with at most (0: a glide window). */
+  landUnpowered?: boolean;
+  rockets?: number;
   note?: (msg: string) => void;
 }
 
@@ -349,6 +360,8 @@ export function flyStretch(d: StretchDeps, o: StretchOptions): { done: Promise<S
     ...(o.midBurns ? { midBurns: true } : {}),
     ...(o.kit ? { kit: o.kit } : {}),
     ...(d.floor ? { floor: d.floor } : {}),
+    ...(o.landUnpowered ? { landUnpowered: true } : {}),
+    ...(o.rockets !== undefined ? { rockets: o.rockets } : {}),
     yaw: loop.command.yaw,
     note: (m) => {
       log.info(m);

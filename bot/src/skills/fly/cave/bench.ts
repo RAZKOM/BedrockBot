@@ -53,6 +53,9 @@ export interface CaveBenchOptions {
   onWindow?: (w: Window, r: WindowRun) => void;
   /** The style's numbers overridden (the variants of the tables). */
   variant?: Partial<CaveStyle>;
+  /** Track F19: the window's trackers plan their landing unpowered (drive.ts ChainOptions.landUnpowered), and the rockets they plan with at most (ChainOptions.rockets; 0: a glide window). */
+  landUnpowered?: boolean;
+  rockets?: number;
   /** Every tick of a window: the body before, the control, the body after, the tracker's output, a hit's damage. */
   trace?: (t: number, before: BodyState, cmd: MoveCommand, after: BodyState, out: { status: string; error: number; replan?: string; debug?: TrackerDebug }, hit: number | undefined) => void;
 }
@@ -137,6 +140,8 @@ export async function flyWindow(world: BlockQuery, from: Vec3, goals: RouteGoal[
     ...(o.kit ? { kit: o.kit } : {}),
     ...(firstPlan ? { firstPlan } : {}),
     ...(floor ? { floor } : {}),
+    ...(o.landUnpowered ? { landUnpowered: true } : {}),
+    ...(o.rockets !== undefined ? { rockets: o.rockets } : {}),
     ...(o.note ? { note: o.note } : {}),
   });
   let body: BodyState = initialBody({ ...from }, true);

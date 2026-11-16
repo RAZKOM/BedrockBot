@@ -402,7 +402,7 @@ function searchOnce(req: RouteRequest, grid: RouteGrid, o: SearchOptions): Route
   const bearing = first ? (Math.atan2(-(first.x - req.start.pos.x), first.z - req.start.pos.z) * 180) / Math.PI : 0;
   const takeoffYaws = req.start.gliding ? [] : [bearing, bearing + 30, bearing - 30, bearing + 60, bearing - 60, bearing + 90, bearing - 90];
   const lib = o.library ?? libraryNamed(req, edgeTicks, takeoffYaws);
-  const ctx = { grid, margin: req.margin, goals: req.goals, stackRockets: req.stackRockets === true, burnBranches: req.burnBranches !== false, midBurns: req.midBurns === true };
+  const ctx = { grid, margin: req.margin, goals: req.goals, stackRockets: req.stackRockets === true, burnBranches: req.burnBranches !== false, midBurns: req.midBurns === true, ...(req.landUnpowered ? { landUnpowered: true } : {}) };
   // a body already within the margin of a solid (the tracker re-planning from a grazing state) still gets edges:
   // the first edges keep half its real clearance, the rest of the plan the full margin
   const startMargin = startMarginFor(grid, req.start, req.margin);

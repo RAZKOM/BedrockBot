@@ -8747,6 +8747,178 @@ its floor, `from`, `until`) and the bench's `burnsHold` (its branches, a margin 
 - **The Realm**: the same trips; the `fly: the window from` lines now carry the landing's reason and the clearance after
   the takeoff.
 
+## Windows that do not start under a full burn (Track F19)
+
+Flight v2, Track F19, [decisions/0091](decisions/0091-windows-beside-the-walk.md) (second addendum). Track F18 left
+the owner's tall passage walked: its windows fire their one rocket in the takeoff and are as long as the burn. This
+track measured the four ways out it named: a glide window with no rocket, a rocket fired later so that the burn is out
+before the landing, a tracker that trusts the plan at the end of the burn, and a proof cache. None lands reliably in
+the passage, so nothing changed in what the bot flies: `flyCaveWindows` and its default are as they were, and the walk
+along the passage is still the faster and the safe way. What was added are the benches' switches the measures took
+(below, "What was kept").
+
+### What one rocket carries
+
+The physics engine's body from a standing takeoff (the jump, the rocket at pitch -20 on the third tick, then level, no
+walls; `stepState`): it runs at about 1.67 blocks a tick for as long as the rocket burns, and the 180 brake after the
+burn takes 11 ticks and 6.4 blocks more.
+
+| rocket | burn (ticks) | blocks to the burn's end | to a stop |
+|---|---|---|---|
+| crafted | 19 / 25 / 31 | 30.0 / 40.0 / 50.0 | 36.4 / 46.4 / 56.4 |
+| plain | 9 / 15 / 21 | 13.3 / 23.3 / 33.3 | 19.7 / 29.7 / 39.7 |
+
+A window whose landing begins with every crafted burn out needs about 50 blocks of straight line before its landing's
+stage and 57 to its stop. The tall passage runs 44 to 53 blocks of way between its 2-high ends, and the windows laid in
+it are 25 to 44 blocks (cut at a turn over `WAY_TURN_MAX` and at the low ends). F17's hook cave, whose windows are 52
+to 70 blocks, lands them with every burn out.
+
+### The probe (`scripts/way-burn-probe.ts`)
+
+Every window the scout could lay along each of the fixture's five ways (from every second or third node with
+`WAY_HEAD_MIN` of head room, at least `--min` blocks, each start and end once), proven at the live budget (2 s, 80 000
+nodes) as the variant asks, and each proof that passes the variant's rule (or, with `--fly-all`, every complete robust
+one) flown by the windows' trackers on the physics engine (`cave/bench.ts flyWindow`, `refClear` on) at every burn of
+the kit's range: 13 flights a window. The PC, 2026-11-16.
+
+### A glide window (no rocket)
+
+The proofs searched with no rocket in the hand (`windowRequest` and the chain's `rockets` 0), windows of 12 blocks and
+up from every second node: 108 windows, 0 complete. 57 refuse at once with `the goal is above what the rockets in the
+hand can buy` (a standing body on a level floor has no height to trade for distance: the jump gives about 1.2), and 51
+end in `no route: ... every primitive from every reached state hits` in 3 to 20 ms. The one stretch that drops (20
+blocks of line, 14 down, on three of the ways) is 1 wide (its margin 0.12): no glide there even at a margin of 0; the
+proof with rockets there has no route either at its margin, and at a margin of 0 one completes 0.03 from the wall.
+
+### A rocket fired later (`RouteRequest.landUnpowered`)
+
+The search refuses every edge that fires a rocket once the landing's stage has begun (past the last via point) or
+enters that stage with a burn that may still run (`route/primitives.ts edgeOf`; the same test `wayLandsUnpowered` makes
+on a plan). The windows' trackers re-plan with the same rule. On the fixture (windows of 24 blocks and up from every
+third node: 22 windows on four ways, the fifth lays none):
+
+| kit | the live proofs: complete, proven | with the rule: complete, proven | the rule's complete ones flown at every burn |
+|---|---|---|---|
+| crafted | 12, 0 (each burns into its landing) | 0, 0 | none to fly |
+| plain | 12, 0 (each burns into its landing) | 1, 0 (not robust) | 13 flights: 1 landed, 1 hit (7.6) |
+
+The rest run out of the 2 s budget 0 goals in; at 10 s, 0 of 2 goals (30 720 expanded). The windows' via point lies
+14 to 16 ticks of flight from the takeoff, under the shortest crafted burn, and nothing reaches it from a standing
+start on the level without a rocket: fired at the takeoff the rocket burns past it, and later there is no flight to
+fire it from. On F17's made-up caves the rule lets the probe
+prove a few more windows (crafted: the hook cave's centre line 5 to 8 of 26, its side rows 5 to 7 of 25, the corridor
+world 27 to 28 of 41; plain 9 to 9, 9 to 10, 29 to 29; flown at every burn none hit, against one of 0.5 without), but
+the walk with the scout is the same run for run with it and without (`way-window-bench.ts --late`, n 10 a case, both
+kits, the three walks): the windows the scout lays there are 52 to 70 blocks, and their proofs land unpowered already.
+
+### The end of the burn (the tracker)
+
+Traced at the nominal burn (crafted 25, a 29.9-block window, its plan `takeoffR-45 glide+35 rocket45L-20 ...
+brake180-20`), the body is on the plan (0.00 off) for 25 ticks, where the plan's landing turns the body round under the
+burning rocket (a brake on the boost). The tracker's check of a burn that may end this tick flies another control
+there, the body is 0.48 off the plan a tick later and 1.4 off at tick 34, and the window bails out unhurt about 3.5
+blocks short of its landing. A re-plan from a reference 12 ticks ahead comes back as a 6-tick brake that the body is
+not on.
+
+Measured with a scratch switch (not kept: it switches a safety check off) that flies a complete plan on through every
+re-plan the burn and the margin would ask for and keeps the plan's control where the end check would fly another, the
+fixture's 12 complete live windows a kit at every burn:
+
+| kit | at the burns the plan was proven at (its ends and nominal) | at the burns between |
+|---|---|---|
+| crafted, as the bot flies | 11 of 36 landed, none hit | 2 of 120 landed, 6 hit (4.8 at the most) |
+| crafted, the plan trusted | 13 of 36 landed, none hit | 0 of 120 landed, 7 hit (6.0) |
+| plain, as the bot flies | 10 of 36 landed, none hit | 9 of 120 landed, 14 hit (7.8) |
+| plain, the plan trusted | 15 of 36 landed, none hit | 10 of 120 landed, 17 hit (7.5) |
+
+A plan proven at its burns is not flown onto its landing even at those burns, and between them the trusted plan's
+brake comes at the wrong time and meets the wall. Nor does a plan from the end of the burn save it: from the plan's
+state 2 ticks after each crafted burn's end (the notice's lag), an unpowered plan to the window's landing or to any
+standable node of the way within 30 nodes ahead (300 ms each) exists for 4 of the 13 burns on one window and 1 of 13
+on another (Track F18: 3 or 4 of 13 at 5 s).
+
+### A proof cache
+
+Live, the scout proves each window once and the chain's first tracker flies it once: no proof is handed out twice, so
+a cache has nothing to copy yet (Track F18's rule for one stands). The bench's cache of a start's proof across a case's
+seeds has another side: a proof that runs out of its ms budget is the machine's of that moment. On one run of main's
+bench the crafted hook cave's proof from one start stalled (64 expanded in 2 033 ms, where the same search finishes in
+well under a second) and the cache replayed that partial in 9 of 10 seeds: p50 31.0 s against 23.5 s on two reruns,
+main's and this tree's. A case near the budget is run twice.
+
+### What was kept (the benches only; nothing in the bot sets them)
+
+- `RouteRequest.landUnpowered` (route/types.ts, the search's edges; `TrackerOptions`, `ChainOptions`,
+  `StretchOptions`, `windowRequest` and `cave/bench.ts` pass it on).
+- `ChainOptions.rockets` and `windowRequest`'s `rockets`: the rockets a window's plans may count on at most (0: a glide
+  window).
+- `WayWindowOptions.minBlocks` (the shortest window laid, default `UNDER_FLY_MIN`) and `passMin` (the head room a
+  window's stretch runs on through, default `WAY_HEAD_MIN`).
+- `scripts/way-burn-probe.ts` (`--variants live,glide,late`, `--min`, `--every`, `--fly-all`, `--rule takeoff`), and
+  `way-window-bench.ts --late`.
+
+A guard test holds that the walk, the corridor's windows and the cave style set none of them.
+
+### Offline, before and after (`scripts/way-window-bench.ts`, the PC, n 10 a case, 2026-11-16)
+
+| walk | kit | main | this tree |
+|---|---|---|---|
+| the owner's cave, five goals | either | 30.8 to 62.4 s, no window, no damage | the same, run for run |
+| the corridor world | crafted / plain | 36.6 / 36.5 s p50 | 36.6 / 36.5 |
+| the hook cave's centre line | crafted / plain | 23.5 / 21.6 (one run 31.0, above) | 23.5 / 21.6 |
+| its side rows | crafted / plain | 30.5 / 30.4 | 30.5 / 30.4 |
+
+No damage in any case. With the switches off, the search, the trackers and the scout fly as on main: every case above
+reads the same run for run.
+
+### The cost (the planner at the live budgets)
+
+On the test host under the live bot's CPU policy (`mac-run.mjs --as-live`, one bench worker, n 10 a case, this tree,
+2026-11-16):
+
+| walk | kit | proofs a walk | p50 | at the 2 s budget | the walk, p50 |
+|---|---|---|---|---|---|
+| the hook cave's centre line | crafted / plain | 6.1 / 4.0 | 2.0 s / 44 ms | 36 of 61 / 9 of 40 | 31.0 / 21.7 s |
+| its side rows | crafted / plain | 7.0 / 7.0 | 2.0 s / 43 ms | 40 of 70 / 20 of 70 | 30.5 / 30.4 s |
+| the corridor world | crafted / plain | 4.0 / 4.4 | 2.0 s / 0.5 s | 27 of 40 / 9 of 44 | 36.6 / 36.5 s |
+
+Track F18 measured main the same way: the hook cave 6.1 proofs a walk and 36 of 61 at the budget, the corridor world
+4.1 and 29 of 41. On the test host the crafted hook cave reads 31.0 s on both runs here (31.1 on main's, Track F18):
+the proof from the start that stalled once on the PC does not finish inside 2 s on that CPU. Off, the switches cost
+the search one comparison an edge tick.
+
+### The regressions
+
+The final tree, each suite by its exit code, on the PC's test servers (BDS 1.26.60.6, 2026-11-16), passed:
+
+- `fly-cave-way` on bds-fly (1 test; its refusals read `clearance 0.42 at the takeoff, 0.43 after it, but a rocket
+  still burns where its landing begins`, Track F18's words);
+- `fly-corridor` on bds-fly3 (5);
+- `fly-cave-refill` on bds-fly (4);
+- `fly-cave` on bds-fly2 (8, 2 skipped without the recordings; the standing replica, `FLY_CAVE_REUSE=surroundings`).
+
+The unit suite passed on the PC and three runs of three on the test host (3 154 each).
+
+### Unit tests (`fly-cave-way.test.ts`, Track F19)
+
+The landing's rule in the search (a via within the burn's carry: the plan without it burns into its landing, with it
+no plan enters the stage under a burn and none completes; a via past the burn's latest end: complete and unpowered
+either way; a re-plan already in the stage under a burn keeps its edges and fires nothing; a request with no landing
+has no rule), the rockets cap and the rule through `windowRequest` and `TrackerChain`, `minBlocks` and `passMin` (the
+defaults lay what they did, a shorter minimum lays more, a lower head room runs on through the 2-high section), and the
+guard that the bot sets none of them.
+
+### Open points (Track F19)
+
+- **The tall passage is walked, and with these rockets that is right.** A window there must either fly about 50 blocks
+  of straight line before its landing (the passage gives at most 44 of window), or land under the burn, braking on the
+  rocket, with a plan that holds every burn between the ends: Track F18 found none at the 2 s budget and 1 of 9 at
+  30 s. A search an order of magnitude faster at that, or a passage of 57 blocks or more, is what would fly it.
+- **The hop within 48 of the goal** (Track F17) and windows on other caves with longer straight stretches are where a
+  window beside the walk can save time; neither was looked at here.
+- **The bench's start cache** replays a stalled proof for every seed; a bench that proved a budget-bound start again
+  each seed would not (not changed here: main's numbers are compared on the same bench).
+
 ## Open points
 
 ## Open points

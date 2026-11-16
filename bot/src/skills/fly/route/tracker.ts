@@ -227,6 +227,8 @@ export interface TrackerOptions {
    * rollouts), so the plans are searched, branched and checked on that range. Absent: 9 to 21, as before.
    */
   kit?: Readonly<KitBurn>;
+  /** Track F19: every request's landing stage begins unpowered (RouteRequest.landUnpowered: the window's proof was made so, and its re-plans keep it). */
+  landUnpowered?: boolean;
 }
 
 export type TrackerStatus = 'planning' | 'tracking' | 'holding' | 'bailing' | 'done' | 'failed';
@@ -686,6 +688,7 @@ export class RouteTracker {
       ...(this.o.geodesic ? { geodesic: true } : {}),
       ...(this.o.pieces !== undefined ? { pieces: this.o.pieces } : {}),
       ...(this.o.midBurns ? { midBurns: true } : {}),
+      ...(this.o.landUnpowered ? { landUnpowered: true } : {}),
     };
     this.pending = true;
     if (this.plan) this.stats.replans++;

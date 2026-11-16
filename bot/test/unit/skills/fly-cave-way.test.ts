@@ -1,7 +1,9 @@
 // Track F17 (docs/flight.md "Windows beside the walk (Track F17)", decisions/0091): the guard tests of the windows beside a
 // walk along a handed way (skills/fly/cave/waywin.ts) and of the tracker's rule they fly with (route/tracker.ts
 // TrackerRules.refClear): the window laid from the way, the head room cut, the proof's rule, the gate, the scout, the
-// hostiles, the stretch options, and a reference inside a solid that is no reason to bail out.
+// hostiles, the stretch options, and a reference inside a solid that is no reason to bail out. Track F19 (docs/flight.md
+// "Windows that do not start under a full burn (Track F19)"): the measures of the tall passage's windows, none of them
+// set by the bot.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -9,7 +11,8 @@ import { SETTING_DEFS } from '../../../src/config/settings.ts';
 import { flatWorld, withBoxes } from '../../../src/skills/input/world.ts';
 import { CAVE_STYLE } from '../../../src/skills/fly/cave/style.ts';
 import { UNDER_FLY_MIN } from '../../../src/skills/fly/corridor/executor.ts';
-import { boreMargin } from '../../../src/skills/fly/corridor/stretches.ts';
+import { boreMargin, landingGoal } from '../../../src/skills/fly/corridor/stretches.ts';
+import { TrackerChain, windowRequest } from '../../../src/skills/fly/corridor/drive.ts';
 import {
   headRoom,
   nodeFeet,
@@ -364,6 +367,102 @@ describe('the reason a window is refused, and the clearance after the takeoff (T
     const wide = burnsHold(standing, p, hall, [...goals, ...goals], 3.5);
     expect(wide.ok).toBe(false);
     expect(wide.why).toMatch(/comes within 3\.50 of a solid/);
+  });
+});
+
+describe('the measures of Track F19: a landing searched unpowered, a glide window, shorter windows (bench only)', () => {
+  // a hall 6 wide and 8 high: the body standing at its near end, a via box across it, a landing on its floor further on
+  const hallSolid = (x: number, y: number, z: number): boolean => y < 0 || y >= 8 || x < -2 || x >= 4 || z < -3 || z > 60;
+  const hall = gridOfCells(hallSolid);
+  const standing: RouteState = { pos: { x: 0.5, y: 0, z: 0.5 }, vel: { x: 0, y: 0, z: 0 }, yaw: 0, boost: { ...NO_BOOST }, gliding: false, rockets: 4, wp: 0 };
+  const hallGoals = (via: number, land: number): RouteGoal[] => [{ kind: 'waypoint', box: { min: { x: -1, y: 1, z: via }, max: { x: 3, y: 6, z: via + 2 } } }, landingGoal({ x: 0, y: 0, z: land }, hallSolid, 2)];
+  /** The rule on a plan: no rocket fired once the landing's stage begins, and the stage entered with every burn out. */
+  const keepsRule = (p: RoutePlan, goals: number): boolean => {
+    const at = p.states.findIndex((s) => s.wp >= goals - 1);
+    if (at < 0) return true;
+    return p.states[at]!.boost.max <= 0 && p.controls.every((c, i) => !c.fire || p.states[i + 1] === undefined || p.states[i + 1]!.wp < goals - 1);
+  };
+
+  it('a via within the burn\'s carry: the plan burns into the landing; with landUnpowered no edge enters the landing\'s stage under a burn (route/primitives.ts edgeOf)', () => {
+    // (a plain rocket from a standing takeoff carries the body 13 to 33 blocks: the via at 20 is passed under the burn)
+    const goals = hallGoals(20, 45);
+    const live = planRoute({ start: standing, goals, margin: 0.3, maxNodes: 20_000, maxMs: 10_000 }, hall);
+    expect(live.complete).toBe(true);
+    expect(wayLandsUnpowered(live, 2)).toBe(false);
+    const late = planRoute({ start: standing, goals, margin: 0.3, maxNodes: 20_000, maxMs: 10_000, landUnpowered: true }, hall);
+    expect(late.complete).toBe(false);
+    expect(keepsRule(late, 2)).toBe(true);
+  });
+
+  it('a via past the burn\'s latest end: the plan with the rule is complete and lands unpowered, as the plan without it', () => {
+    const goals = hallGoals(34, 50);
+    const live = planRoute({ start: standing, goals, margin: 0.3, maxNodes: 60_000, maxMs: 10_000 }, hall);
+    const late = planRoute({ start: standing, goals, margin: 0.3, maxNodes: 60_000, maxMs: 10_000, landUnpowered: true }, hall);
+    expect(live.complete).toBe(true);
+    expect(late.complete).toBe(true);
+    expect(wayLandsUnpowered(late, 2)).toBe(true);
+    expect(keepsRule(late, 2)).toBe(true);
+  });
+
+  it('a re-plan that starts in the landing\'s stage under a burn keeps its edges, none of them firing; a request without a landing has no rule', () => {
+    const burning: RouteState = { pos: { x: 0.5, y: 3, z: 30.5 }, vel: { x: 0, y: 0, z: 1.2 }, yaw: 0, boost: { min: 2, max: 5, nom: 3 }, gliding: true, rockets: 4, wp: 0 };
+    const p = planRoute({ start: burning, goals: [landingGoal({ x: 0, y: 0, z: 45 }, hallSolid, 2)], margin: 0.3, maxNodes: 20_000, maxMs: 10_000, landUnpowered: true }, hall);
+    expect(p.ticks).toBeGreaterThan(0);
+    expect(p.controls.some((c) => c.fire)).toBe(false);
+    const via = planRoute({ start: standing, goals: [hallGoals(20, 45)[0]!], margin: 0.3, maxNodes: 20_000, maxMs: 10_000, landUnpowered: true }, hall);
+    expect(via.complete).toBe(true);
+    expect(via.rockets).toBeGreaterThan(0);
+  });
+
+  it('a window\'s request and its chain plan with the rockets capped (0: a glide window) and the rule passed on (corridor/drive.ts)', () => {
+    const win = { goals: hallGoals(34, 50) };
+    const from = { x: 0.5, y: 0, z: 0.5 };
+    const plain = windowRequest(win, from, 64, { margin: 0.3, maxMs: 1, maxNodes: 1 });
+    expect(plain.start.rockets).toBe(64);
+    expect(plain.landUnpowered).toBeUndefined();
+    const glide = windowRequest(win, from, 64, { margin: 0.3, maxMs: 1, maxNodes: 1, rockets: 0, landUnpowered: true });
+    expect(glide.start.rockets).toBe(0);
+    expect(glide.landUnpowered).toBe(true);
+    expect(windowRequest(win, from, 3, { margin: 0.3, maxMs: 1, maxNodes: 1, rockets: 5 }).start.rockets).toBe(3);
+    const asked: RouteRequest[] = [];
+    const chainOf = (o: { rockets?: number; landUnpowered?: boolean }): TrackerChain => new TrackerChain({ grid: hall, margin: 0.3, goals: win.goals, yaw: 0, plan: (req) => (asked.push(req), new Promise<RoutePlan>(() => undefined)), ...o });
+    const body = { pos: { x: 0.5, y: 0, z: 0.5 }, vel: { x: 0, y: 0, z: 0 }, gliding: false, onGround: true, rockets: 10, boostTicks: 0 };
+    chainOf({ rockets: 0, landUnpowered: true }).tick(body, 0);
+    expect(asked[0]!.start.rockets).toBe(0);
+    expect(asked[0]!.landUnpowered).toBe(true);
+    chainOf({}).tick(body, 0);
+    expect(asked[1]!.start.rockets).toBe(10);
+    expect(asked[1]!.landUnpowered).toBeUndefined();
+  });
+
+  it('lays shorter windows (minBlocks) and runs a stretch on through lower head room (passMin) only when asked: the defaults lay what they did', () => {
+    const lowAt = way.findIndex((n) => headRoom(solid, { x: n.x, y: n.feet, z: n.z }) < WAY_HEAD_MIN);
+    let short = 0;
+    let shortDefault = 0;
+    let through = 0;
+    for (let i = 0; i < way.length; i++) {
+      const ww = wayWindow(way, i, opts);
+      expect(wayWindow(way, i, { ...opts, minBlocks: UNDER_FLY_MIN, passMin: WAY_HEAD_MIN })).toEqual(ww);
+      if (ww) shortDefault++;
+      const s = wayWindow(way, i, { ...opts, minBlocks: 8 });
+      if (s) {
+        short++;
+        expect(s.win.blocks).toBeGreaterThanOrEqual(8);
+      }
+      if (i < lowAt && (wayWindow(way, i, { ...opts, passMin: 2 })?.land ?? -1) >= lowAt) through++;
+    }
+    expect(short).toBeGreaterThan(shortDefault);
+    expect(through).toBeGreaterThan(0);
+  });
+
+  it('none of it is set by the bot: the walk, the corridor\'s windows and the style fly as Track F18 left them', () => {
+    for (const f of ['../../../src/chat/commands-fly.ts', '../../../src/chat/commands-corridor.ts', '../../../src/skills/fly/cave/waywin.ts', '../../../src/skills/fly/cave/style.ts', '../../../src/skills/fly/corridor/executor.ts']) {
+      const src = readFileSync(fileURLToPath(new URL(f, import.meta.url)), 'utf8');
+      expect(src, f).not.toMatch(/landUnpowered|minBlocks:|passMin:/);
+    }
+    const so = wayStretchOptions({ margin: 0.3, height: 3 }, { min: 19, max: 31, nominal: 25 });
+    expect('landUnpowered' in so).toBe(false);
+    expect('rockets' in so).toBe(false);
   });
 });
 

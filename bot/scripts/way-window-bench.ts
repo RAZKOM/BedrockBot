@@ -10,7 +10,7 @@
 //   node scripts/way-window-bench.ts --fixture <name> [--pairs a,b] [--seeds 10] [--kit crafted,plain] [--workers 5]
 //                                    [--out f.jsonl] [--verbose] [--trace] [--corridor | --hook [--inner]] [--pace 1.22]
 //                                    [--refclear on|off] [--clear margin|corridor|takeoff|burns] [--burn-margin m]
-//                                    [--mids] [--prove-ms 2000] [--turn-max 60]
+//                                    [--mids] [--prove-ms 2000] [--turn-max 60] [--late]
 //
 // `--corridor`: a made-up cave instead (test/unit/skills/fly-corridor-world.ts: the 3 x 3 bore, the bend, the 2-high
 // section, the chamber), the way the walk's own straight line through it from 3 blocks inside the mouth. `--hook`: the
@@ -23,7 +23,10 @@
 // proves robust to the burns between the ends too; `--prove-ms` the proof's budget (waywin.ts WAY_PROVE_MS) with the
 // scout's lead half a second over it; `--turn-max` the most a window's way may turn (WAY_TURN_MAX; 180: no cut at a bend).
 // Each window is flown on a copy of its proof (the tracker re-times the plan it flies, and the proof is flown again on
-// the next seed: before Track F18 the seeds after the first flew a reference re-timed to an earlier seed's burn).
+// the next seed: before Track F18 the seeds after the first flew a reference re-timed to an earlier seed's burn). A
+// start's proof is made once for every seed: one that ran out of its ms budget is the machine's of that moment (Track
+// F19: a stall of 2 s in one run moved the crafted hook cave's p50 from 23.5 to 31.0 s), so a case near the budget is
+// run twice. Track F19: `--late` proves and re-plans with the landing searched unpowered (RouteRequest.landUnpowered).
 import { isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { startWorker } from '../src/threads.ts';
 import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
@@ -151,6 +154,8 @@ interface Job {
   proveMs: number;
   /** The most a window's way may turn (degrees; WAY_TURN_MAX). */
   turnMax?: number;
+  /** Track F19: the proofs and the windows' trackers search their landing unpowered (RouteRequest.landUnpowered); `--late`. */
+  late?: boolean;
 }
 
 interface WindowRow {
@@ -217,7 +222,7 @@ async function runJob(j: Job): Promise<RunRow[]> {
     const hit = proofs.get(w.start);
     if (hit) return hit;
     const so = caveStretchOptions(w.win);
-    const req = windowRequest(w.win, w.from, loose, { margin: so.margin, maxMs: j.proveMs, maxNodes: WAY_PROVE_NODES, riskCost: so.riskCost, ...(so.pieces !== undefined ? { pieces: so.pieces } : {}), ...(kit ? { kit } : {}), ...(has('mids') ? { midBurns: true } : {}) });
+    const req = windowRequest(w.win, w.from, loose, { margin: so.margin, maxMs: j.proveMs, maxNodes: WAY_PROVE_NODES, riskCost: so.riskCost, ...(so.pieces !== undefined ? { pieces: so.pieces } : {}), ...(kit ? { kit } : {}), ...(has('mids') ? { midBurns: true } : {}), ...(j.late ? { landUnpowered: true } : {}) });
     const g = gridOfSnapshot(snapshotFor(grid, req));
     const p = planRoute(req, g);
     proofs.set(w.start, p);
@@ -283,7 +288,7 @@ async function runJob(j: Job): Promise<RunRow[]> {
       }
       // taken: the walk to its start, the stop, the window
       t += arrive;
-      const o: CaveBenchOptions = { seed: seed * 131 + ++k, burn: 'random', ...(kit ? { kit } : {}), ...(j.refClear ? { variant: { rules: { refClear: true } } } : {}), ...(has('trace') ? { note: (m: string) => notes.push(`      ${m}`) } : {}) };
+      const o: CaveBenchOptions = { seed: seed * 131 + ++k, burn: 'random', ...(kit ? { kit } : {}), ...(j.refClear ? { variant: { rules: { refClear: true } } } : {}), ...(j.late ? { landUnpowered: true } : {}), ...(has('trace') ? { note: (m: string) => notes.push(`      ${m}`) } : {}) };
       // (a copy: the tracker changes the plan it flies, and the proof is flown again on the next seed)
       const r = await flyWindow(query, w.from, w.win.goals, w.win.margin, o, o.seed, structuredClone(p), grid, w.win.height, floor);
       t += r.ticks / 20 + WAY_OVER_S;
@@ -341,7 +346,7 @@ if (!isMainThread) {
   const rule = arg('clear', 'margin')!;
   const clearRule = rule === 'corridor' || rule === 'takeoff' || rule === 'burns' ? rule : 'margin';
   const proveMs = Number(arg('prove-ms', String(WAY_PROVE_MS)));
-  for (const tag of tags) for (const kit of kits) jobs.push({ tag, seeds, kit, pace, corridor, hook, inner: hook && has('inner'), fixture, refClear, clearRule, proveMs, ...(arg('turn-max') ? { turnMax: Number(arg('turn-max')) } : {}), ...(arg('burn-margin') ? { burnMargin: Number(arg('burn-margin')) } : {}) });
+  for (const tag of tags) for (const kit of kits) jobs.push({ tag, seeds, kit, pace, corridor, hook, inner: hook && has('inner'), fixture, refClear, clearRule, proveMs, ...(arg('turn-max') ? { turnMax: Number(arg('turn-max')) } : {}), ...(arg('burn-margin') ? { burnMargin: Number(arg('burn-margin')) } : {}), ...(has('late') ? { late: true } : {}) });
   const out = arg('out');
   if (out) writeFileSync(out, '');
   const all: RunRow[] = [];

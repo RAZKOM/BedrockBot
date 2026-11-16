@@ -23,6 +23,8 @@ export interface EdgeContext {
   burnBranches?: boolean;
   /** Track F8: the burns in between too (RouteRequest.midBurns; default false). */
   midBurns?: boolean;
+  /** Track F19: the landing's stage begins unpowered (RouteRequest.landUnpowered; default false). */
+  landUnpowered?: boolean;
 }
 
 /**
@@ -226,6 +228,9 @@ export function edgeOf(m: Maneuver, s: Readonly<RouteState>, ctx: EdgeContext): 
   let risk = 0;
   let landed = false;
   const branches = ctx.burnBranches !== false;
+  // Track F19 (RouteRequest.landUnpowered): the index of the landing goal whose stage must begin with the burn out (-1: no rule)
+  const lastGoal = ctx.goals.length - 1;
+  const unpowered = ctx.landUnpowered === true && ctx.goals[lastGoal]?.kind === 'landing' ? lastGoal : -1;
   for (let i = 0; i < ticks; i++) {
     const c = m.control(s, now, i);
     const { next, fired } = stepState(now, c, ctx.stackRockets, ctx.burn, ctx.grid, branches, ctx.midBurns === true);
@@ -270,6 +275,8 @@ export function edgeOf(m: Maneuver, s: Readonly<RouteState>, ctx: EdgeContext): 
       }
     }
     while (next.wp < ctx.goals.length && passes(ctx.goals[next.wp]!, now.pos, next.pos)) next.wp++;
+    // Track F19: no burn into the landing's stage, and no rocket in it (a start already in it under a burn keeps its plain edges)
+    if (unpowered >= 0 && ((fired && next.wp >= unpowered) || (now.wp < unpowered && next.wp >= unpowered && next.boost.max > 0))) return undefined;
     controls.push({ ...c, fire: fired });
     path.push({ ...next.pos });
     now = next;

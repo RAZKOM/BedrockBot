@@ -235,6 +235,14 @@ export interface RouteRequest {
    * as Tracks F6 and F7 decided). Default false.
    */
   midBurns?: boolean;
+  /**
+   * Track F19: when the last goal is a landing, its stage (from the tick the last waypoint before it is passed) begins with
+   * no burn left that may still run (`boost.max` 0) and fires no rocket: an edge that enters the stage under a burn, or fires
+   * in it, is refused (primitives.ts edgeOf). The search then fires its rockets early enough, or not at all, for the burn's
+   * latest end to come before the landing (cave/waywin.ts wayLandsUnpowered is the same test on a plan). A start already in
+   * the stage under a burn (a re-plan) keeps its edges that fire nothing. Default false.
+   */
+  landUnpowered?: boolean;
 }
 
 export type PrimitiveFamily = 'glide' | 'turn' | 'rocket' | 'brake' | 'hover' | 'takeoff' | 'maneuver';

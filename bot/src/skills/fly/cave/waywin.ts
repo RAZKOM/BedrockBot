@@ -237,6 +237,10 @@ export interface WayWindowOptions {
   leadS?: number;
   /** The most the window's way may turn (degrees; WAY_TURN_MAX). */
   turnMax?: number;
+  /** Track F19: the shortest window laid (blocks; default UNDER_FLY_MIN). */
+  minBlocks?: number;
+  /** Track F19: the least head room over the feet a window's stretch runs on through (default WAY_HEAD_MIN; its start keeps WAY_HEAD_MIN). */
+  passMin?: number;
 }
 
 export interface WayWindow {
@@ -269,7 +273,7 @@ export function wayWindow(way: readonly WayNode[], start: number, o: WayWindowOp
   // (the stretch runs up to twice the window's blocks of way, and ends before the first node with less head room than
   // WAY_HEAD_MIN: a low stretch is the walk's, the window lands before it and a window after it starts beyond it)
   let to = start;
-  while (to + 1 < way.length && along[to + 1]! - along[start]! <= 2 * max && headRoom(o.solid, nodeCell(way[to + 1]!)) >= WAY_HEAD_MIN) to++;
+  while (to + 1 < way.length && along[to + 1]! - along[start]! <= 2 * max && headRoom(o.solid, nodeCell(way[to + 1]!)) >= (o.passMin ?? WAY_HEAD_MIN)) to++;
   // (a way that winds back past its start, or turns more than WAY_TURN_MAX off its first heading, ends before it does:
   // wayWindsBack, wayTurns)
   for (let guard = 0; guard < 8; guard++) {
@@ -291,7 +295,7 @@ export function wayWindow(way: readonly WayNode[], start: number, o: WayWindowOp
   });
   const stretch: Stretch = { space: 'under', points, portals: [], end: points[points.length - 1]! };
   const w = nextWindow(stretch, from, { loaded: o.loaded, solid: o.solid, endCell: e, maxBlocks: max, tailMin: o.tailMin ?? CAVE_STYLE.tailMin, landReach: o.landReach ?? CAVE_STYLE.landReach, ...(o.floor ? { floor: o.floor } : {}) });
-  if (!w || w.blocks < UNDER_FLY_MIN) return undefined;
+  if (!w || w.blocks < (o.minBlocks ?? UNDER_FLY_MIN)) return undefined;
   // the landing's node: the way's node nearest the window's end, after the start
   let land: number | undefined;
   let bd = 2.5;
