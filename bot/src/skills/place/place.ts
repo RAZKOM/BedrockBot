@@ -24,6 +24,7 @@ import type { Inventory } from '../../world/inventory.ts';
 import type { ItemV4 } from '../../world/packets.ts';
 import type { BlockInfo, ItemStack, PacketSource, Vec3 } from '../../world/types.ts';
 import { clickBlockTransaction } from '../container/chest.ts';
+import { exchangeFor, RateLimit } from '../container/exchange.ts'; // Track V1: a fetch into a full inventory exchanges
 import { EYE_HEIGHT, lookAngles, type Face } from '../dig/look.ts';
 import type { BlockQuery } from '../input/types.ts';
 import { maxDurability } from '../survival/tools.ts';
@@ -262,12 +263,14 @@ export function isBlockItem(i: ItemStack | null | undefined): i is ItemStack {
  * Where an item from main-inventory slot `src` goes in the hotbar: an empty hotbar slot (`dst`), else
  * the least useful hotbar item (no durability before tools and weapons, the selected slot last, never
  * one that `wanted` accepts) parked first in a free main slot (`park`, never `src`). undefined = no room.
+ * Track V1: with no free main slot and `exchange` allowed, the same hotbar item and the wanted one change
+ * places (`exchange: true`: one `swap` request, the kit's exchange; nothing needs a free slot).
  */
-export function hotbarRoom(slots: readonly (ItemStack | null)[], selected: number, src: number, wanted: (i: ItemStack) => boolean): { dst: number; park?: number } | undefined {
+export function hotbarRoom(slots: readonly (ItemStack | null)[], selected: number, src: number, wanted: (i: ItemStack) => boolean, exchange = false): { dst: number; park?: number; exchange?: true } | undefined {
   for (let s = 0; s < 9; s++) if (!slots[s]) return { dst: s };
   let park = -1;
   for (let s = 9; s < 36 && park < 0; s++) if (!slots[s] && s !== src) park = s;
-  if (park < 0) return undefined;
+  if (park < 0 && !exchange) return undefined;
   let best: { slot: number; rank: number } | undefined;
   for (let s = 8; s >= 0; s--) {
     const it = slots[s]!;
@@ -275,7 +278,16 @@ export function hotbarRoom(slots: readonly (ItemStack | null)[], selected: numbe
     const rank = (maxDurability(it.name) !== undefined ? 20 : 0) + (s === selected ? 5 : 0);
     if (!best || rank < best.rank) best = { slot: s, rank };
   }
-  return best ? { dst: best.slot, park } : undefined;
+  if (!best) return undefined;
+  return park >= 0 ? { dst: best.slot, park } : { dst: best.slot, exchange: true };
+}
+
+/** Track V1: why a fetch into the hotbar found no room (the log line, once a minute a skill and reason). */
+export function noRoomText(slots: readonly (ItemStack | null)[], exchange: boolean): string {
+  const fullBar = slots.slice(0, 9).every((s) => !!s);
+  const fullMain = slots.slice(9, 36).every((s) => !!s) && slots.length >= 36;
+  if (fullBar && fullMain) return exchange ? 'the hotbar holds only items it may not give up' : 'the inventory is full (36 of 36) and no exchange is wired';
+  return 'the hotbar holds only items it may not give up';
 }
 
 /** The wire item to echo for a model slot: the server's own if it still matches, else built from the model. */
@@ -308,6 +320,8 @@ export class PlaceSkill {
   private cancelled = false;
   private epoch = 0;
   private current: Promise<PlaceResult> | undefined;
+  /** Track V1: a failed fetch into the hotbar is said once a minute per item and reason. */
+  private readonly fetchLog = new RateLimit();
 
   constructor(deps: PlaceDeps) {
     this.d = deps;
@@ -532,13 +546,19 @@ export class PlaceSkill {
       const mover = this.d.containers;
       if (!mover) return { ok: false, reason: 'no_item' };
       // a full hotbar: park its least useful item in a free main slot first (a Realm farm: the carrots
-      // picked up landed in the main inventory behind a full hotbar and every planting failed)
-      const room = hotbarRoom(inv.slots, inv.selected, src, (i) => fits(i));
-      if (!room) return { ok: false, reason: 'move_failed' };
-      const dst = room.dst;
+      // picked up landed in the main inventory behind a full hotbar and every planting failed); Track V1: with
+      // no free main slot either, the two exchange places (the survival kit's exchange), as the puller does
+      const swap = exchangeFor(inv);
+      const room = hotbarRoom(inv.slots, inv.selected, src, (i) => fits(i), swap !== undefined);
       const stack = inv.slots[src]!;
-      const parked = room.park !== undefined ? inv.slots[dst]! : undefined;
+      if (!room) {
+        if (this.fetchLog.ok(`room|${stack.name}`)) this.log.warn(`place: no hotbar slot for ${stack.name} (slot ${src}): ${noRoomText(inv.slots, swap !== undefined)}`);
+        return { ok: false, reason: 'move_failed' };
+      }
+      const dst = room.dst;
+      const parked = room.park !== undefined || room.exchange ? inv.slots[dst]! : undefined;
       const r = await this.withInventoryOpen(async () => {
+        if (room.exchange && swap) return swap(src, dst);
         if (parked && room.park !== undefined) {
           const pr = await mover.move({ window: 0, slot: dst }, { window: 0, slot: room.park }, parked.count);
           if (!pr.ok) return pr;
@@ -546,9 +566,10 @@ export class PlaceSkill {
         return mover.move({ window: 0, slot: src }, { window: 0, slot: dst }, stack.count);
       });
       if (!r.ok) {
-        this.log.warn(`place: moving ${stack.name} ${src} -> ${dst} failed: ${r.reason}`);
+        if (this.fetchLog.ok(`move|${stack.name}|${r.reason ?? ''}`)) this.log.warn(`place: moving ${stack.name} ${src} -> ${dst}${room.exchange ? ' (exchange)' : ''} failed: ${r.reason}`);
         return { ok: false, reason: 'move_failed' };
       }
+      if (room.exchange && parked) this.log.info(`place: ${stack.name} moved from slot ${src} to ${dst} (${parked.name} exchanged into ${src}: the inventory is full)`);
       this.d.hotbar?.noteRaw?.(dst, wireItemOf(inv.slots[dst], undefined));
       slot = dst;
     }

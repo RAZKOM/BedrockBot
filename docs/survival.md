@@ -56,7 +56,7 @@ then `kit.overrides`, then the defaults:
 | `avoidMobRadius` | 4 | planner penalty radius around hostile mobs (0 = off) |
 | `avoidSpawnerRadius` | 8 | planner penalty radius around spawners (0 = off) |
 | `throwaway` | cobblestone, dirt, cobbled_deepslate, netherrack | |
-| `junk` | rotten_flesh, poisonous_potato, string, spider_eye | dropped when the inventory is full |
+| `junk` | rotten_flesh, poisonous_potato, string, spider_eye | dropped when the inventory is full; Track V1: also by the room chore when idle away from the home chests with fewer than 4 free slots ([inventory.md](inventory.md)) |
 | `autoEat`, `autoArmour`, `autoKeep` | true | the automatic rules (the commands work regardless) |
 
 ## Commands (owner only)

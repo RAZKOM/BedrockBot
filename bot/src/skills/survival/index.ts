@@ -17,6 +17,7 @@ import type { ItemV4 } from '../../world/packets.ts';
 import type { EntityInfo, ItemStack, PacketSource, Vec3 } from '../../world/types.ts';
 import { Avoidance, DEFAULT_AVOID_MOB_RADIUS, DEFAULT_AVOID_SPAWNER_RADIUS, SpawnerIndex, type SpawnerWorld } from '../nav/avoidance.ts';
 import { wireItemOf } from '../place/place.ts';
+import { exchangeFor, setExchange } from '../container/exchange.ts'; // Track V1
 import { ARMOUR_SLOT_NAMES, ArmourController, type EquipResult, type WearResult } from './armour.ts';
 import { chooseFood, EatController, wantsToEat, type EatResult } from './eat.ts';
 import { DEFAULT_JUNK, DEFAULT_THROWAWAY_MIN, hotbarThrowaway, InventoryKeeper, pickHotbarVictim, THROWAWAY_BLOCKS, type DropResult } from './keeper.ts';
@@ -219,6 +220,7 @@ export class SurvivalKit {
     deps.skills.nav.cellCost = () => this.avoidance.costFn();
     if (deps.combat) deps.combat.toolOk = this.toolOk;
     if (deps.combat?.puller) deps.combat.puller.swap = this.exchange; // a pull into a full hotbar with no free slot exchanges (hotbar-moves.ts)
+    setExchange(world.inventory, this.exchange); // Track V1: the place skill's and the farm click's fetch into a full inventory (container/exchange.ts)
     this.installDiggerHook();
     this.unsubs.push(
       world.inventory.onChange((window) => {
@@ -236,6 +238,7 @@ export class SurvivalKit {
   }
 
   dispose(): void {
+    if (exchangeFor(this.d.world.inventory) === this.exchange) setExchange(this.d.world.inventory, undefined);
     for (const u of this.unsubs.splice(0)) u();
     this.eater.cancel();
     this.requests.dispose();
@@ -299,6 +302,26 @@ export class SurvivalKit {
       const r = await this.requests.withScreen(() => this.d.containers.move({ window: 0, slot: from }, { window: 0, slot: to }, it.count));
       if (!r.ok) return { ok: false, reason: 'reason' in r && r.reason ? r.reason : 'refused' };
       for (const s of [from, to]) if (s < 9) this.d.hotbar.noteRaw?.(s, wireItemOf(inv.slots[s], undefined));
+      return { ok: true };
+    }, { ok: false, reason: 'busy' });
+  }
+
+  /**
+   * Track V1 (the room chore's merge): `count` items of the stack in player slot `from` onto the partial stack of the same
+   * item in slot `to` (0..35), with the inventory screen open (the predicted `place` move of world/containers.ts: the
+   * target keeps its own wire item). Waits out a keeper pass or a meal like `hotbar`.
+   */
+  merge(from: number, to: number, count: number): Promise<{ ok: boolean; reason?: string }> {
+    return this.queued(async () => {
+      const inv = this.d.world.inventory;
+      const a = inv.slots[from];
+      const b = inv.slots[to];
+      if (!a || a.count <= 0) return { ok: false, reason: `slot ${from} is empty` };
+      if (b?.name !== a.name || b.metadata !== a.metadata) return { ok: false, reason: `slot ${to} holds no ${a.name}` };
+      const n = Math.min(count, a.count);
+      const r = await this.requests.withScreen(() => this.d.containers.move({ window: 0, slot: from }, { window: 0, slot: to }, n));
+      if (!r.ok) return { ok: false, reason: 'reason' in r && r.reason ? r.reason : 'refused' };
+      for (const s of [from, to]) if (s < 9) this.d.hotbar.noteRaw?.(s, wireItemOf(inv.slots[s], inv.rawItem(0, s)));
       return { ok: true };
     }, { ok: false, reason: 'busy' });
   }

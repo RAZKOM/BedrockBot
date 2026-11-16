@@ -13,8 +13,9 @@ import type { Inventory } from '../../world/inventory.ts';
 import type { ItemV4 } from '../../world/packets.ts';
 import type { BlockInfo, PacketSource, Vec3 } from '../../world/types.ts';
 import { clickBlockTransaction } from '../container/chest.ts';
+import { exchangeFor, RateLimit } from '../container/exchange.ts'; // Track V1
 import { blockCenter, EYE_HEIGHT, lookAngles, type Face } from '../dig/look.ts';
-import { closestDistance, cornerDistance, DEFAULT_CLICK_REACH, hotbarRoom, SERVER_CLICK_REACH, wireItemOf } from '../place/place.ts';
+import { closestDistance, cornerDistance, DEFAULT_CLICK_REACH, hotbarRoom, noRoomText, SERVER_CLICK_REACH, wireItemOf } from '../place/place.ts';
 import type { SkillResult } from '../types.ts';
 
 export type ClickReason = 'not_ready' | 'unloaded' | 'no_item' | 'no_hotbar' | 'move_failed' | 'out_of_reach' | 'rejected' | 'timeout' | 'interrupted' | 'busy';
@@ -86,6 +87,8 @@ export class ItemClicker {
   private readonly log: Logger;
   private running = false;
   private cancelled = false;
+  /** Track V1: a failed fetch into the hotbar is said once a minute per item and reason. */
+  private readonly fetchLog = new RateLimit();
 
   constructor(deps: ClickDeps) {
     this.d = deps;
@@ -190,21 +193,31 @@ export class ItemClicker {
       let src = -1;
       for (let s = 9; s < 36 && src < 0; s++) if (fits(s)) src = s;
       if (src < 0) return { ok: false, reason: 'no_item' };
-      // a full hotbar: park its least useful item first (place.ts hotbarRoom)
-      const room = hotbarRoom(inv.slots, inv.selected, src, (i) => i.name === item);
+      // a full hotbar: park its least useful item first (place.ts hotbarRoom); Track V1: with no free main slot
+      // either, the two exchange places (the survival kit's exchange), as the puller does
+      const swap = exchangeFor(inv);
+      const room = hotbarRoom(inv.slots, inv.selected, src, (i) => i.name === item, swap !== undefined);
       const mover = this.d.containers;
-      if (!room || !mover) return { ok: false, reason: 'move_failed' };
+      if (!room || !mover) {
+        if (this.fetchLog.ok(`room|${item}`)) this.log.warn(`click: no hotbar slot for ${item} (slot ${src}): ${mover ? noRoomText(inv.slots, swap !== undefined) : 'no inventory moves here'}`);
+        return { ok: false, reason: 'move_failed' };
+      }
       const dst = room.dst;
       const n = inv.slots[src]!.count;
-      const parked = room.park !== undefined ? inv.slots[dst]! : undefined;
+      const parked = room.park !== undefined || room.exchange ? inv.slots[dst]! : undefined;
       const r = await this.withInventoryOpen(mover, async () => {
+        if (room.exchange && swap) return swap(src, dst);
         if (parked && room.park !== undefined) {
           const pr = await mover.move({ window: 0, slot: dst }, { window: 0, slot: room.park }, parked.count);
           if (!pr.ok) return pr;
         }
         return mover.move({ window: 0, slot: src }, { window: 0, slot: dst }, n);
       });
-      if (!r.ok) return { ok: false, reason: 'move_failed' };
+      if (!r.ok) {
+        if (this.fetchLog.ok(`move|${item}|${r.reason ?? ''}`)) this.log.warn(`click: moving ${item} ${src} -> ${dst}${room.exchange ? ' (exchange)' : ''} failed: ${r.reason ?? 'refused'}`);
+        return { ok: false, reason: 'move_failed' };
+      }
+      if (room.exchange && parked) this.log.info(`click: ${item} moved from slot ${src} to ${dst} (${parked.name} exchanged into ${src}: the inventory is full)`);
       this.d.hotbar?.noteRaw?.(dst, wireItemOf(inv.slots[dst], undefined));
       slot = dst;
     }

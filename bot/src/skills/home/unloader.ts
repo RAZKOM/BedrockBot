@@ -485,12 +485,19 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
   return plan;
 }
 
-/** Stacks of unloadable items carried (the autoUnload trigger counts these) and full shulker boxes. */
-export function unloadableStacks(slots: readonly UnloadSlot[], opts: Pick<PlanOptions, 'reserve' | 'throwaway' | 'foodReserve' | 'seedReserve'> = {}): { stacks: number; fullBoxes: number } {
+/**
+ * Stacks of unloadable items carried (the autoUnload trigger counts these) and full shulker boxes. Track V1: `spares`, the
+ * empty unnamed boxes the unload sends back to the chest of spares (all but the stash step's one), and `free`, the free
+ * inventory slots (the chore's slot trigger: tasks/process/unload.ts).
+ */
+export function unloadableStacks(slots: readonly UnloadSlot[], opts: Pick<PlanOptions, 'reserve' | 'throwaway' | 'foodReserve' | 'seedReserve'> = {}): { stacks: number; fullBoxes: number; spares: number; free: number } {
   const plan = planUnload(slots, [], { ...opts, keepBox: true, boxing: false });
   const stacks = new Set(plan.overflow.filter((o) => !isShulkerBox(o.name)).map((o) => o.slot)).size;
   const fullBoxes = slots.filter((s) => isShulkerBox(s.name) && (s.boxUsed ?? 0) > 0 && !s.flightKit).length; // Track AV: not the fireworks box
-  return { stacks, fullBoxes };
+  const bySlot = new Map(slots.map((s) => [s.slot, s]));
+  const spares = plan.overflow.filter((o) => isShulkerBox(o.name) && (bySlot.get(o.slot)?.boxUsed ?? 0) === 0).length;
+  const free = 36 - new Set(slots.filter((s) => s.count > 0 && s.slot >= 0 && s.slot < 36).map((s) => s.slot)).size;
+  return { stacks, fullBoxes, spares, free };
 }
 
 /** Track AV: the slots a box takes when `items` are split into stacks of `max`. */

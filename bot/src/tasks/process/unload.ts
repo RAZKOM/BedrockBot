@@ -8,17 +8,31 @@
 //                                             home: the first scan of the session, containers that
 //                                             appeared within homeChestRadius (read them), and with
 //                                             `autoUnload` on an unload when more than 8 stacks of
-//                                             unloadable items or a full shulker box are carried, or
+//                                             unloadable items or a full shulker box are carried
+//                                             (Track V1: or fewer than ROOM_FLOOR (4) slots are free and
+//                                             something is unloadable, a spare empty box included), or
 //                                             when a `!get` job just ended at home (its reply then says
 //                                             what went where); then, with nothing to unload, a tidy job
 //                                             when a home chest holds 27 full stacks' worth of one item
 //                                             loose and a spare is known (docs/home.md "Full boxes out of
 //                                             the chests"; at most every TIDY_BACKOFF_MS when it boxed nothing)
 import type { ScanReport, UnloadReport } from '../../skills/home/logistics.ts';
+import { ROOM_FLOOR } from '../../skills/inventory/room.ts';
 import { BaseProcess, PRIORITY, type ProcessKind, type ProcessStatus, type StopReason } from './manager.ts';
 
 /** The chore unloads above this many stacks of unloadable items (or with any full shulker box). */
 export const AUTO_UNLOAD_STACKS = 8;
+
+/**
+ * Track V1 (ADR 0090): the unload's trigger. More than AUTO_UNLOAD_STACKS stacks or a full box, as before; and, so that a
+ * bot whose kept items fill the inventory (the kit, food, rockets: the Realm bot sat at 36 of 36 with 6 stacks of loot
+ * and 5 spare empty boxes, under both bars) unloads too, fewer than ROOM_FLOOR free slots with anything to unload: a
+ * stack, a full box or a spare empty box (all but the stash step's one go back to the chest of spares).
+ */
+export function unloadWanted(load: { stacks: number; fullBoxes: number; spares?: number; free?: number }): boolean {
+  if (load.stacks > AUTO_UNLOAD_STACKS || load.fullBoxes > 0) return true;
+  return load.free !== undefined && load.free < ROOM_FLOOR && load.stacks + (load.spares ?? 0) > 0;
+}
 /** After an unload that left items (or failed), the chore waits this long before trying again (ms). */
 export const UNLOAD_BACKOFF_MS = 5 * 60_000;
 /** After a tidy job that boxed nothing (or failed), the chore waits this long before the next one (ms). */
@@ -113,8 +127,8 @@ export interface HomeChoreDeps {
   /** No user process is there (running, paused or held). */
   idle(): boolean;
   autoUnload(): boolean;
-  /** Unloadable stacks carried and full shulker boxes. */
-  load(): { stacks: number; fullBoxes: number };
+  /** Unloadable stacks carried and full shulker boxes; Track V1: the spare empty boxes and the free slots (optional). */
+  load(): { stacks: number; fullBoxes: number; spares?: number; free?: number };
   /** Read containers remembered around home. */
   known(): number;
   /** A tidy job is due (a home chest holds a full box's worth of one item loose, a spare is known). */
@@ -201,9 +215,20 @@ export class HomeChore extends BaseProcess {
     }
     this.getWaiting = false;
     if (t < this.unloadAfter) return undefined;
-    if (load.stacks > AUTO_UNLOAD_STACKS || load.fullBoxes > 0) return { kind: 'unload' };
+    if (unloadWanted(load)) return { kind: 'unload' };
     if (t >= this.tidyAfter && this.d.runner.tidy && this.d.tidyDue?.()) return { kind: 'tidy' };
     return undefined;
+  }
+
+  /**
+   * Track V1: an unload runs or would start now (the room chore, tasks/process/room.ts, leaves the room at home to it).
+   * No side effects: the same conditions as `next` without the scans and the `!get` hand-over.
+   */
+  unloadDue(): boolean {
+    if (this.running && this.job?.kind === 'unload') return true;
+    const d = this.d;
+    if (!d.atHome() || !d.idle() || !d.autoUnload() || d.known() === 0 || this.now() < this.unloadAfter) return false;
+    return unloadWanted(d.load());
   }
 
   protected run(tok: number): void {

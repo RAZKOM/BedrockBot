@@ -36,6 +36,7 @@ control gets it).
 | 60 | `guard` fight | auto | guard on and a hostile within `guardRadius` of home (of the bot while a command runs); not while a kill job exists | fight cancelled (the episode ends) | a new target is picked |
 | 40 | `fly` (Track AU; AU2: the sky check before the jump, `fly: no open sky here (roof at y 72, 3 blocks up); walk outside first`) | user | the ground work of a flight: the refill from the fireworks box, the elytra on, the takeoff; the landing's chestplate swap and refill | the ground step is cancelled (the flight itself is the `flight` process above) | the ground step runs again |
 | 40 | `goto` `follow` `come` `kill` `gather` | user | until done or stopped | navigator / follower / fight cancelled, gather paused (`GatherWoodTask.pause`) | goto planned again, follow restarted, come re-aimed, kill looks for its next target, gather goes on from find-tree |
+| 30 | `room` chore (Track V1, docs/inventory.md) | auto | idle (no user process, nothing else in control for 3 s, no hostile within 12) with fewer than 4 free inventory slots and a step to take: a merge, the junk, rockets into the fireworks box, loot into a carried box, compaction, stone beyond `dropStone`; at home it waits while the home chore's unload is due | the step's skill is cancelled, the pass ends | a new pass after the next quiet |
 | 30 | `food` chore (Track X, docs/food.md) | auto | by day, with no user process, while the food carried is below `foodMin` and a target is in range | the hunt or the cooking is cancelled, the job remembers its progress | continues the job; backs off 10 min after an empty attempt |
 | 20 | `home` | auto | requested (after a guard fight with nothing else queued, at dawn, after a respawn) and not yet home | navigator cancelled | planned again |
 | - | idle | | nothing wants control: the bot stands; the keepalive nudge runs | | |
@@ -146,7 +147,8 @@ its plan yet; `navRemaining` reads its `active` record read-only (an open issue 
 | `exploreRadius` | 128 | number | `!explore` without a radius: the area walked around home (16..1024) |
 | `plannerThreads` | 1 | 0..1 threads | every walk: 1 plans paths in a worker thread (bigger budgets, the tick never waits for the planner), 0 on the main thread (docs/pathfinding.md "Compute", decision 0023) |
 | `stashChest` | none | `x y z` / none | the stash step of `!get` and the jobs: the chest a full inventory is emptied into; none = the job chest, a carried shulker box, then dropping junk (docs/get.md) |
-| `stashShulker` | on | on/off | the stash step: place a carried shulker box, fill it, break it and pick it up when the inventory is full (docs/get.md) |
+| `stashShulker` | on | on/off | the stash step: place a carried shulker box, fill it, break it and pick it up when the inventory is full (docs/get.md); Track V1: off, the room chore sets no box down for loot either |
+| `dropStone` | 64 | 0..2304 blocks | the room chore (Track V1, docs/inventory.md): idle away from the home chests with fewer than 4 free slots and nothing cheaper left, of each stone-like block this many are kept and the rest dropped; never what a `!get` of the last hour was getting; 0 = never |
 | `autoBreed` | off | on/off | the breeding chore: breed the animals of `chorePen` every 10 min while it holds fewer than 8 adults of a kind (docs/food.md) |
 | `chorePen` | none | `x y z` / none | the breeding chore and the food chore: a block inside the fenced pen whose animals they may use; none = no pen (docs/food.md) |
 

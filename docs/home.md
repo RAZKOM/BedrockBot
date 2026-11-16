@@ -399,7 +399,8 @@ the container's fresh snapshot.
 | Process | Kind, priority | Wants control |
 |---|---|---|
 | `unload`, `chests` (`HomeJobProcess`) | user, 40 | until the job ends |
-| `home-chore` (`HomeChore`) | auto, 30 (chore) | within 8 blocks of home (4 vertical) and no user process: the session scan, appeared containers; with `autoUnload` on and at least one read container: more than 8 stacks of unloadable items or any full shulker box (an unload that left items or failed waits 5 minutes), or a `!get` job that just ended at home (anything unloadable; the line `unloaded: ...` goes to chat after the job's reply); wave 12: nothing to unload and a tidy step due: the `tidy` job (one that boxed nothing waits 10 minutes) |
+| `home-chore` (`HomeChore`) | auto, 30 (chore) | within 8 blocks of home (4 vertical) and no user process: the session scan, appeared containers; with `autoUnload` on and at least one read container: more than 8 stacks of unloadable items or any full shulker box, or (Track V1) fewer than 4 free slots with anything to unload, a spare empty box included (an unload that left items or failed waits 5 minutes), or a `!get` job that just ended at home (anything unloadable; the line `unloaded: ...` goes to chat after the job's reply); wave 12: nothing to unload and a tidy step due: the `tidy` job (one that boxed nothing waits 10 minutes) |
+| `room` (`RoomChore`, Track V1) | auto, 30 (chore) | idle with fewer than 4 free slots and nothing else in control for 3 s: merges split stacks and moves rockets beyond two stacks into the fireworks box; away from the home chests also the junk, loot into a carried box, compaction and stone beyond `dropStone`; at home it waits while an unload is due ([inventory.md](inventory.md)) |
 
 Both jobs run one after the other on one `HomeLogistics` (a pre-empted job finishes its current step
 before the next starts). All container traffic goes through the task's one Containers: `requests` in
@@ -643,6 +644,10 @@ the end.
   `!bring dirt 1000` (the box whole, the loose dirt stays), `!bring sand 10` (taken out, the box back in B);
   `!build` with a carried box of cobblestone 14 blocks out of the home radius (the refill, the box off the
   footprint); `!unload` of a farm haul (the crop surplus goes, the reserve stays).
+- `home-room` (Track V1, [inventory.md](inventory.md)): inventories set slot by slot by truth (`setslot`, the fireworks
+  box by `boxdrop`) under a held user process; the room chore away from home (the late-game and the early-game
+  inventory), the place and click faults with 36 of 36, and the home chore's slot trigger at home with a chest of
+  spares; `ROOM_RUNS` runs a case (default 5).
 
 ### Truth commands (`packs/truth/src/home.ts`)
 

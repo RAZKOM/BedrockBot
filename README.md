@@ -44,7 +44,7 @@ The Realm: docs/runbook.md "Realm join (you do this)".
 | AFK on the Realm | 24 h stays verified, auto-reconnect, keepalive nudges, auto-respawn, home point, night shelter, health endpoint, update notifier; runs as a service on a macOS or Linux server (`deploy/`) | `bot/src/tasks/afk.ts`, docs/runbook.md "Operations" |
 | Movement | own Bedrock physics, A* with tick costs, surface preference, doors, dig-through and pillar-up moves, long falls within a health budget (measured Bedrock fall damage) and the water bucket clutch (also when it falls by accident), goals (nearest of, adjacent to, Y level, run away, surface), waypoints, blacklist of failed goals | `bot/src/skills/nav/`, `bot/src/skills/fall/`, docs/pathfinding.md, docs/movement.md, docs/waypoints.md |
 | PvE | guard radius, fights with sword and knockback, creeper evasion, flee when hurt, follow / come / kill; all behaviours run on a process manager with priorities (flee > night > guard > your command > home) | `bot/src/tasks/pve.ts`, docs/pve.md, docs/processes.md |
-| Survival | eats, wears the best armour, spares worn tools, keeps throwaway blocks, drops junk, avoids mobs and spawners when planning | `bot/src/skills/survival/`, docs/survival.md |
+| Survival | eats, wears the best armour, spares worn tools, keeps throwaway blocks, drops junk, avoids mobs and spawners when planning; keeps 4 inventory slots free when idle (merges stacks, puts spare rockets into their box and loot into a carried box, drops junk and surplus stone) | `bot/src/skills/survival/`, `bot/src/skills/inventory/`, docs/survival.md, docs/inventory.md |
 | World | chunks, block updates, entities, inventory; a persistent per-server cache the planner and finders use beyond the loaded area; `/map` on the health port | `bot/src/world/`, docs/world-model.md, docs/world-cache.md |
 | History | typed events (connections, deaths, fights, jobs and why they failed, items, chests, low resources, commands) kept per day across restarts; `/api/events` and an 8-hour summary on the panel | `bot/src/events/`, docs/events.md |
 | Work | wood gathering (tall and 2 x 2 trees from a temporary pillar it digs away again), farming (harvest, replant, bone meal, chest), legit mining of ore it has seen; pickups on ledges and in holes with a bounded dig / place walk | docs/wood.md, docs/farming.md, docs/mining.md |
@@ -173,7 +173,7 @@ BedrockBot/
   fixtures/                  recorded packet captures per game version (1.26.51, 1.26.60)
   worlds/                    test structures
   spikes/                    throwaway feasibility experiments, never imported
-  docs/                      runbook, pathfinding, processes, pve, survival, waypoints, world-cache, farming, mining, natural-language, rl, decisions/ (ADRs)
+  docs/                      runbook, pathfinding, processes, pve, survival, inventory, waypoints, world-cache, farming, mining, natural-language, rl, decisions/ (ADRs)
 ```
 
 ## Tests

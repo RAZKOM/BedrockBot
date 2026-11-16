@@ -372,10 +372,12 @@ export class HomeLogistics {
     return { ...(Number.isFinite(f) && f >= 0 ? { foodReserve: f } : {}), ...(Number.isFinite(s) && s >= 0 ? { seedReserve: s } : {}) };
   }
 
-  /** What the autoUnload chore looks at: unloadable stacks carried and full boxes. */
-  load(): { stacks: number; fullBoxes: number } {
+  /** What the autoUnload chore looks at: unloadable stacks carried and full boxes; Track V1: the spare empty boxes and the free slots. */
+  load(): { stacks: number; fullBoxes: number; spares: number; free: number } {
     const r = this.reserve();
-    return unloadableStacks(this.slots(), { ...(r !== undefined ? { reserve: r } : {}), ...this.crops() });
+    const l = unloadableStacks(this.slots(), { ...(r !== undefined ? { reserve: r } : {}), ...this.crops() });
+    // (the free slots of the inventory itself: `slots()` leaves out a box owed to a chest)
+    return { ...l, free: this.d.inventory.slots.slice(0, 36).filter((s) => !s || s.count <= 0).length + Math.max(0, 36 - this.d.inventory.slots.length) };
   }
 
   /** The unload plan now; `reserve`: one free slot of that chest is kept (for a full box that goes back there). */

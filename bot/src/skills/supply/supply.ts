@@ -251,6 +251,24 @@ export class Supply {
     return { stowed };
   }
 
+  /**
+   * Track V1 (the room chore, tasks/process/room.ts): put the stacks `moves()` names into the carried box of `slot` (any
+   * box, the fireworks box included: the rockets beyond two stacks go there), under the serial lock after the recovery of
+   * a box left behind; `moves` is asked again for each deposit pass (the box's own slot and a hotbar exchange move stacks).
+   * The items moved, and why it stopped short (the box not placed, not opened, not carried again).
+   */
+  putInto(slot: number, moves: () => { slot: number; count: number; name?: string }[], opts: Pick<EnsureOptions, 'cancelled' | 'avoid'> = {}): Promise<{ moved: number; reason?: string }> {
+    const cancelled = opts.cancelled ?? (() => false);
+    return this.serial(async () => {
+      if (this.d.ops.pending) await this.d.ops.recover(cancelled);
+      if (cancelled()) return { moved: 0, reason: 'interrupted' };
+      const r = await this.d.ops.putIn(slot, () => moves(), { requests: 0 }, cancelled, opts.avoid ? { avoid: opts.avoid } : {});
+      if ('reason' in r) return { moved: 0, reason: r.reason };
+      if (typeof r.back === 'string') return { moved: r.moved, reason: r.back };
+      return { moved: r.moved, ...(r.open ? { reason: `open: ${r.open}` } : {}) };
+    });
+  }
+
   /** The throwaway blocks for scaffolding and pillaring: at least `min` loose, out of the carried boxes. */
   topUpThrowaway(min: number, opts: EnsureOptions = {}): Promise<EnsureResult> {
     return this.ensure(THROWAWAY_BLOCKS, min, opts);

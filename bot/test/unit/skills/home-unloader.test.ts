@@ -132,7 +132,7 @@ describe('unloader: the decision table', () => {
   });
 
   it('unloadableStacks counts the stacks the chore looks at (reserve and kept items left out) and full boxes', () => {
-    expect(unloadableStacks([s(0, 'cobblestone', 16), s(1, 'coal'), s(2, 'bread'), s(3, 'undyed_shulker_box', 1, 4)])).toEqual({ stacks: 1, fullBoxes: 1 });
+    expect(unloadableStacks([s(0, 'cobblestone', 16), s(1, 'coal'), s(2, 'bread'), s(3, 'undyed_shulker_box', 1, 4)])).toEqual({ stacks: 1, fullBoxes: 1, spares: 0, free: 32 }); // Track V1: spares, free
   });
 });
 

@@ -928,6 +928,44 @@ describe('home processes', () => {
     expect(h.runner.calls).toEqual(['scan', 'unload']);
   });
 
+  it('HomeChore, Track V1: fewer than 4 slots free with anything to unload (a spare empty box counts) unloads too; unloadDue says so first', async () => {
+    const room = { free: 10, spares: 0, stacks: 0 };
+    const h = chore({ load: () => ({ stacks: room.stacks, fullBoxes: 0, free: room.free, spares: room.spares }) });
+    const pm = new ProcessManager();
+    pm.add(h.c);
+    h.advance(2000);
+    pm.tick();
+    h.runner.finish(); // the session scan
+    await tick();
+    room.stacks = 3;
+    h.advance(2000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['scan']); // 3 stacks, 10 free: as before
+    expect(h.c.unloadDue()).toBe(false);
+    room.free = 3;
+    expect(h.c.unloadDue()).toBe(true);
+    h.advance(2000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['scan', 'unload']);
+    expect(h.c.unloadDue()).toBe(true); // running
+    h.runner.finish();
+    await tick();
+    // nothing to unload but two spare boxes: they go back to the chest of spares
+    room.stacks = 0;
+    room.spares = 2;
+    h.advance(6 * 60_000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['scan', 'unload', 'unload']);
+    h.runner.finish();
+    await tick();
+    // 3 free with nothing to unload: no unload (the room chore asks the owner instead)
+    room.spares = 0;
+    h.advance(6 * 60_000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['scan', 'unload', 'unload']);
+    expect(h.c.unloadDue()).toBe(false);
+  });
+
   it('HomeChore: with nothing to unload, a tidy job when one is due; after one that boxed nothing it waits', async () => {
     let due = true;
     const h = chore({ tidyDue: () => due });

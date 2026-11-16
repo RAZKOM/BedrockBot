@@ -39,6 +39,14 @@ import { getControllerOf } from './commands-get.ts';
 import { survivalKitOf } from './commands-survival.ts';
 import { BoxOps } from '../skills/supply/boxes.ts'; // Track BJ
 import { setSupply, Supply } from '../skills/supply/supply.ts'; // Track BJ
+import { classify } from '../skills/combat/hostiles.ts'; // Track V1: the room chore
+import { TABLE_REACH } from '../skills/craft/crafter.ts';
+import { readKit } from '../skills/fly/kit.ts';
+import { unsafeBoxCell } from '../skills/fly/kitops.ts';
+import { compactRunner } from '../skills/home/unloader.ts';
+import { roomAskLine, roomSlotsOf } from '../skills/inventory/room.ts';
+import { DEFAULT_JUNK } from '../skills/survival/keeper.ts';
+import { ROOM_MOB_RANGE, RoomChore } from '../tasks/process/room.ts';
 
 export const HOME_COMMANDS = ['unload', 'stock', 'chests', 'boxes'] as const; // Track AV: boxes
 
@@ -163,10 +171,12 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     else if (memory().delete(p)) log.info(`chests: ${before?.name ?? 'container'} at ${fmtPos(p)} is gone, forgotten`);
   });
   const offSpawn = d.conn.onSpawn(() => chore.newSession());
+  const offs: (() => void)[] = []; // Track V1: the room chore's inventory hook
   const stop = d.task.stop.bind(d.task);
   d.task.stop = () => {
     offBlocks();
     offSpawn();
+    for (const off of offs.splice(0)) off();
     stop();
   };
 
@@ -190,11 +200,95 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     label: 'supply',
     notify: (line: string) => d.chat.say(line),
   });
-  setSupply(d.task, new Supply({ ops, inventory: world.inventory, keepName: () => logistics.keepName(), records: () => logistics.records(), withdraw: (c, req) => logistics.withdraw(c, req), owed: () => logistics.owedSlots(), serial: (fn) => logistics.exclusive(fn), log }));
+  const supply = new Supply({ ops, inventory: world.inventory, keepName: () => logistics.keepName(), records: () => logistics.records(), withdraw: (c, req) => logistics.withdraw(c, req), owed: () => logistics.owedSlots(), serial: (fn) => logistics.exclusive(fn), log });
+  setSupply(d.task, supply);
+
+  // Track V1 (ADR 0090, docs/inventory.md): the room chore keeps 4 inventory slots free when idle (tasks/process/room.ts)
+  const kit = () => survivalKitOf(d.task);
+  const numberSetting = (k: 'throwawayMin' | 'foodReserve' | 'seedReserve' | 'dropStone'): number | undefined => {
+    const v = Number(d.settings.get(k));
+    return Number.isFinite(v) && v >= 0 ? v : undefined;
+  };
+  const hostileNear = (): boolean => {
+    const at = mob.position();
+    if (!at) return false;
+    for (const e of world.entities.values()) if (classify(e.type) === 'hostile' && Math.hypot(e.pos.x - at.x, e.pos.y - at.y, e.pos.z - at.z) <= ROOM_MOB_RANGE) return true;
+    return false;
+  };
+  const tableNear = (): boolean => {
+    const at = mob.position();
+    if (!at) return false;
+    const eye = { x: at.x, y: at.y + 1.62, z: at.z };
+    for (let dx = -5; dx <= 5; dx++)
+      for (let dy = -2; dy <= 3; dy++)
+        for (let dz = -5; dz <= 5; dz++) {
+          const p = { x: Math.floor(at.x) + dx, y: Math.floor(at.y) + dy, z: Math.floor(at.z) + dz };
+          if (world.blockAt(p)?.name !== 'crafting_table') continue;
+          const gap = (e: number, lo: number) => Math.max(lo - e, 0, e - (lo + 1));
+          if (Math.hypot(gap(eye.x, p.x), gap(eye.y, p.y), gap(eye.z, p.z)) <= TABLE_REACH) return true;
+        }
+    return false;
+  };
+  // what a `!get` of the last hour was getting is never dropped as stone (mining stone gives cobblestone)
+  const getProduce = (): Set<string> => {
+    const job = getControllerOf(d.task)?.job;
+    if (!job || Date.now() - job.startedAt > 60 * 60_000) return new Set();
+    const n = job.item.item;
+    return new Set([n, ...(n === 'stone' ? ['cobblestone'] : n === 'deepslate' ? ['cobbled_deepslate'] : [])]);
+  };
+  let invChanged = Date.now();
+  offs.push(world.inventory.onChange(() => (invChanged = Date.now())));
+  const atHomeWithChests = (): boolean => !!home() && logistics.atHome() && d.settings.get('autoUnload') && logistics.records().some((r) => r.readAt > 0);
+  const room: RoomChore = new RoomChore({
+    slots: () => roomSlotsOf(world.inventory, { keepName: logistics.keepName(), owed: logistics.owedSlots() }),
+    options: () => {
+      const k = readKit(world.inventory);
+      const reserve = numberSetting('throwawayMin');
+      const food = numberSetting('foodReserve');
+      const seeds = numberSetting('seedReserve');
+      return {
+        junk: kit()?.settings().junk ?? DEFAULT_JUNK,
+        ...(k.boxSlot >= 0 ? { kitBox: k.boxSlot } : {}),
+        home: atHomeWithChests(),
+        stoneKeep: numberSetting('dropStone') ?? 0,
+        protect: getProduce(),
+        table: !!compactRunner && tableNear(),
+        boxing: d.settings.get('stashShulker'),
+        ...(reserve !== undefined ? { reserve } : {}),
+        ...(food !== undefined ? { foodReserve: food } : {}),
+        ...(seeds !== undefined ? { seedReserve: seeds } : {}),
+        worn: (kit()?.armour.worn() ?? []).flatMap((x) => (x ? [x.name] : [])),
+      };
+    },
+    // the owner's commands and trips first (a user process, held or paused, keeps it off); not while a test series runs
+    idle: () => processes.userProcesses().length === 0 && !respawnClaimed(d.task),
+    busy: () => {
+      const a = processes.active;
+      // (a skill a command runs with no process of its own, `!drop` or `!place`, counts too: skills.status().busy)
+      return (a !== undefined && a !== room) || (kit()?.busy ?? false) || (stashFor(processes)?.busy ?? false) || logistics.busy || mob.skills.status().busy || hostileNear();
+    },
+    homeFirst: () => chore.unloadDue(),
+    changedAt: () => invChanged,
+    merge: (from, to, count) => kit()?.merge(from, to, count) ?? Promise.resolve({ ok: false, reason: 'no survival kit' }),
+    drop: (name, count) => kit()?.drop(name, count) ?? Promise.resolve({ ok: false, dropped: 0, reason: 'no survival kit' }),
+    // the box goes down only on a cell that keeps its drop (no ledge, no water or lava, nothing falls in: kitops.ts unsafeBoxCell)
+    putIn: (box, moves, cancelled) => {
+      const at = mob.position();
+      const f = at ? { x: Math.floor(at.x), y: Math.floor(at.y + 1e-6), z: Math.floor(at.z) } : undefined;
+      const avoid = (p: Vec3): boolean => !!f && p.y === f.y && unsafeBoxCell((q) => world.blockAt(q), f, p) !== undefined;
+      return supply.putInto(box, moves, { cancelled, avoid });
+    },
+    compact: async (item, count, cancelled) => (compactRunner ? compactRunner([{ kind: item, count }], cancelled) : undefined),
+    cancel: () => mob.skills.cancel(),
+    say: (line) => d.chat.say(line),
+    ask: (plan) => roomAskLine(plan, { home: !!home(), chests: logistics.records().some((r) => r.readAt > 0), radius: d.settings.get('homeChestRadius'), atHome: logistics.atHome() }),
+    log,
+  });
+  processes.add(room); // (after the construction: the manager asks wants() at once, and busy() reads `room`)
 
   d.chat.register({
     name: 'unload',
-    tier: 'front', group: 'home', example: '!unload', auto: 'the autoUnload chore: idle at home with more than 8 stacks to put away or a full shulker box', // Track AM tiers (merge)
+    tier: 'front', group: 'home', example: '!unload', auto: 'the autoUnload chore: idle at home with more than 8 stacks to put away, a full shulker box, or under 4 free slots', // Track AM tiers (merge)
     help: '[all] (put my stuff into the chests at home)',
     run: ({ args, reply }) => {
       const a = (args[0] ?? '').toLowerCase();

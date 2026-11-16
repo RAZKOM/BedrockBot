@@ -21,6 +21,8 @@ import {
 import { cellInBody, cornerDistance, isInteractive, PlaceSkill, predictBlock, wireItemOf, type PlaceDeps } from '../../../src/skills/place/place.ts';
 import { blockInfoOf } from '../../../src/skills/terrain/shapes.ts';
 import { Inventory } from '../../../src/world/inventory.ts';
+import { setExchange } from '../../../src/skills/container/exchange.ts';
+import type { Logger } from '../../../src/log.ts';
 import type { ItemV4 } from '../../../src/world/packets.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 
@@ -97,7 +99,7 @@ class FakeLoop {
   }
 }
 
-function setup(slots: (ItemV4 | undefined)[] = [v4(4, 10, 1)], opts: { containers?: boolean } = {}): Env {
+function setup(slots: (ItemV4 | undefined)[] = [v4(4, 10, 1)], opts: { containers?: boolean; logger?: Logger } = {}): Env {
   const blocks = new Map<string, BlockInfo>();
   // floor at y = -1 for x, z in -8..8
   for (let x = -8; x <= 8; x++) for (let z = -8; z <= 8; z++) blocks.set(key({ x, y: -1, z }), STONE);
@@ -192,6 +194,7 @@ function setup(slots: (ItemV4 | undefined)[] = [v4(4, 10, 1)], opts: { container
     hotbar,
     ...(opts.containers === false ? {} : { containers }),
     runtimeId: () => 7n,
+    ...(opts.logger ? { logger: opts.logger } : {}),
   };
   return { skill: new PlaceSkill(deps), sent, blocks, inv, loop, server, selected };
 }
@@ -390,6 +393,39 @@ describe('PlaceSkill', () => {
     // without containers there is no way to fetch it
     const n = setup(slots, { containers: false });
     expect(await n.skill.place({ x: 2, y: 0, z: 0 }, { item: 'cobblestone' })).toMatchObject({ ok: false, reason: 'no_item' });
+  });
+
+  it('Track V1: a full inventory (36 of 36): before, move_failed said once a minute; after, the kit\'s exchange brings the block in', async () => {
+    // sticks in the hotbar, dirt in the main inventory, the cobblestone in slot 20: no slot to park a stick in
+    const slots: (ItemV4 | undefined)[] = Array.from({ length: 36 }, (_, i) => (i < 9 ? v4(280, 1, i + 1) : v4(3, 64, 100 + i)));
+    slots[20] = v4(4, 5, 50);
+    const warns: string[] = [];
+    const infos: string[] = [];
+    const logger: Logger = { debug() {}, info: (m) => infos.push(m), warn: (m) => warns.push(m), error() {} };
+    const before = setup(slots, { logger });
+    expect(await before.skill.place({ x: 2, y: 0, z: 0 }, { item: 'cobblestone' })).toMatchObject({ ok: false, reason: 'move_failed' });
+    expect(await before.skill.place({ x: 2, y: 0, z: 0 }, { item: 'cobblestone' })).toMatchObject({ ok: false, reason: 'move_failed' });
+    expect(warns).toEqual(['place: no hotbar slot for cobblestone (slot 20): the inventory is full (36 of 36) and no exchange is wired']);
+    expect(before.sent).toEqual([]);
+    const e = setup(slots, { logger });
+    const swaps: string[] = [];
+    setExchange(e.inv, (a, b) => {
+      swaps.push(`${a}<->${b}${e.sent.at(-1)?.name === 'interact' ? ' with the screen' : ''}`);
+      const x = e.inv.slots[a] ?? null;
+      e.inv.setItem(0, a, e.inv.slots[b] ?? null);
+      e.inv.setItem(0, b, x);
+      return Promise.resolve({ ok: true });
+    });
+    try {
+      const r = await e.skill.place({ x: 2, y: 0, z: 0 }, { item: 'cobblestone' });
+      expect(r).toMatchObject({ ok: true, slot: 8, item: 'cobblestone' });
+      expect(swaps).toEqual(['20<->8 with the screen']);
+      expect(e.inv.slots[20]?.name).toBe('stick');
+      expect(infos).toContain('place: cobblestone moved from slot 20 to 8 (stick exchanged into 20: the inventory is full)');
+      expect(data(clicks(e)[0]!)).toMatchObject({ hotbar_slot: 8, held_item: { network_id: 4 } });
+    } finally {
+      setExchange(e.inv, undefined);
+    }
   });
 
   it('cancel ends a running placement with interrupted; the next one then starts', async () => {
