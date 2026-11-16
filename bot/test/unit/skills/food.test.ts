@@ -451,6 +451,26 @@ describe('food chore: the food in the carried boxes', () => {
   });
 });
 
+describe('food chore, Track T3 follow-up: a !test inv save waiting', () => {
+  it('asks for the restore first and does not start; once the guard answers false (restored, or no restore can run) it hunts as before', () => {
+    const r = choreRig({ autoFood: false });
+    const pm = new ProcessManager();
+    const asked: string[] = [];
+    let saveWaits = true;
+    const chore = pm.add(new FoodChore({ ...r.food.d, processes: pm, settings: (() => { const s = new RuntimeSettings(); s.set('foodLeave', 0); return s; })(), restoreFirst: (why) => (asked.push(why), saveWaits) }));
+    pm.tick();
+    expect(asked).toEqual(['the food chore: 0 food points carried (< 10)']);
+    expect(chore.running).toBe(false);
+    expect(pm.active).toBeUndefined();
+    expect(chore.stats.started).toBe(0);
+    saveWaits = false; // the restore ran (or cannot run: food is never held)
+    r.advance(2000);
+    pm.tick();
+    expect(chore.running).toBe(true);
+    expect(pm.active).toBe(chore);
+  });
+});
+
 describe('food job: cooking and the way home', () => {
   it('the hunt cooks only at a furnace near the bot; the job reports where it started (no walk home from far away)', async () => {
     const r = choreRig({ targets: 2 });

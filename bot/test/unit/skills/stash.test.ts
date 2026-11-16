@@ -34,6 +34,8 @@ interface Opts {
   toHotbar?: boolean;
   /** Give the stash the break rules (a dig turns the cell into air); undefined from it: may dig. */
   breakBlocker?: (p: Vec3) => string | undefined;
+  /** Track T3 follow-up: why the stash is held (a !test inv save waits). */
+  held?: () => string | undefined;
 }
 
 function harness(o: Opts) {
@@ -158,6 +160,7 @@ function harness(o: Opts) {
       selected = slot;
     },
     ...(o.breakBlocker ? { breakBlocker: o.breakBlocker } : {}),
+    ...(o.held ? { held: o.held } : {}),
     ...(o.toHotbar
       ? {
           // SurvivalKit.toHotbar: an empty hotbar slot, else the slot pickHotbarVictim names
@@ -179,6 +182,18 @@ function harness(o: Opts) {
 const full = (extra: (ItemStack | null)[] = [], fill = 'cobblestone') => [...extra, ...Array.from({ length: 36 - extra.length }, () => item(fill))];
 
 describe('stash step', () => {
+  it('Track T3 follow-up: held while a !test inv save waits: nothing placed, deposited or dropped, the job is told full; free again after', async () => {
+    let held: string | undefined = 'a !test inv full save from 09:30:31 UTC waits for its restore';
+    const h = harness({ slots: full([item('netherite_pickaxe', 1), item('green_shulker_box', 1)]), settings: { stashChest: '5 0 5' }, held: () => held });
+    expect(await h.stash.ifFull({ label: 'mine' })).toBe(false);
+    expect(h.calls).toEqual([]);
+    expect(h.dropped).toEqual([]);
+    expect(h.stash.attempts).toHaveLength(0);
+    held = undefined;
+    await h.stash.ifFull({ label: 'mine' });
+    expect(h.calls.length).toBeGreaterThan(0);
+  });
+
   it('a 1-wide mine shaft: digs a cell beside the feet for the box (break rules allow it), fills it, picks it up', async () => {
     const shaft: Record<string, BlockInfo> = {};
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1], [2, 0], [-2, 0], [0, 2], [0, -2]]) for (const y of [0, 1]) shaft[`${dx},${y},${dz}`] = STONE;

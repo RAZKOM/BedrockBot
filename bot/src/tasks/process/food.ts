@@ -95,6 +95,12 @@ export interface FoodDeps {
   /** Track AF: the entity tracker and the pen of a mob (the breeding chore counts the pen's adults). */
   entities?: () => ReadonlyMap<bigint, EntityInfo>;
   penOf?(e: EntityInfo): Pen | undefined;
+  /**
+   * Track T3 follow-up (skills/test/guard.ts SaveGuard.restoreFirst): the chore is about to start; true when a `!test inv`
+   * save waits and its restore runs first (the saved inventory has the food: the chore asks again after it). The hunt
+   * would leave the spot and walk home with the preset's items (the Realm, 2026-11-16).
+   */
+  restoreFirst?(why: string): boolean;
 }
 
 /** Track AF: may the hunt take penned animals of `pen`? `!food n pen` takes any pen, else only the chorePen pen. */
@@ -350,6 +356,8 @@ export class FoodChore extends BaseProcess {
     this.lastCheck = now;
     const c = this.check();
     if (!c.auto || !c.day || c.users > 0 || c.points >= c.min) return false;
+    // Track T3 follow-up: a preset's inventory goes back before the chore leaves (the food is in the saved inventory)
+    if (this.d.restoreFirst?.(`the food chore: ${c.points} food points carried (< ${c.min})`)) return false;
     const center = this.d.position();
     const leave = this.d.settings.get('foodLeave');
     const inRange = this.d.hunter.peek({ center, radius: FOOD_RADIUS, leave: () => leave, penAllowed: penRule(this.d, false) });

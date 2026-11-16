@@ -35,6 +35,7 @@ import type { CommandDeps } from '../tasks/process/deps.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { HomeChore, HomeJobProcess, type HomeJob, type HomeRunner } from '../tasks/process/unload.ts';
 import { respawnClaimed } from '../skills/test/recovery.ts'; // Track T1: no home chore while a test series runs
+import { heldBySave } from '../skills/test/guard.ts'; // Track T3 follow-up: no unload while a !test inv save waits
 import { getControllerOf } from './commands-get.ts';
 import { survivalKitOf } from './commands-survival.ts';
 import { BoxOps } from '../skills/supply/boxes.ts'; // Track BJ
@@ -125,6 +126,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     ...(d.pve ? { selectHotbar: (slot: number) => void d.pve!.hotbar.select(slot) } : {}),
     probe: (goal, from) => probePath(mob.skills.nav, goal, from), // Track AN: walking distance
     notify: (line) => d.chat.say(line), // Track BJ: where a box was left
+    held: () => heldBySave(d.task, 'the deposits into the chests at home'), // Track T3 follow-up
     log,
   });
   const runner: HomeRunner = {
@@ -147,6 +149,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
       known: () => logistics.records().filter((r) => r.readAt > 0).length,
       tidyDue: () => logistics.tidyDue(),
       spareChest: () => logistics.spareChest(), // Track V1 follow-up
+      held: () => heldBySave(d.task, "the home chore's unload, spares and tidy jobs"), // Track T3 follow-up
       say: (line) => d.chat.say(line),
       getEnded: () => {
         const job = getControllerOf(d.task)?.job;
@@ -308,6 +311,12 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
       if (!home()) return reply('unload: no home set (!home set)');
       const known = logistics.records().filter((r) => r.readAt > 0).length;
       if (known === 0) return reply('unload: I know no chest near home yet (!chests scan)');
+      // Track T3 follow-up: a preset's made-up items never go into the chests
+      const held = heldBySave(d.task, '!unload');
+      if (held) {
+        log.info(`unload: refused: ${held}`);
+        return reply(`unload: not now: ${held} (!test inv restore first)`);
+      }
       const load = logistics.load();
       reply(`unloading ${load.stacks} stack${load.stacks === 1 ? '' : 's'}${load.fullBoxes ? ` and ${load.fullBoxes} full shulker box${load.fullBoxes === 1 ? '' : 'es'}` : ''} into ${known} known container${known === 1 ? '' : 's'}${processes.paused ? ' (held: !resume)' : ''}`);
       const p = start({ kind: 'unload', all: a === 'all' });

@@ -18,7 +18,9 @@
 //                                             with no chest of spares they stay, said once); then a tidy job
 //                                             when a home chest holds 27 full stacks' worth of one item
 //                                             loose and a spare is known (docs/home.md "Full boxes out of
-//                                             the chests"; at most every TIDY_BACKOFF_MS when it boxed nothing)
+//                                             the chests"; at most every TIDY_BACKOFF_MS when it boxed nothing);
+//                                             Track T3 follow-up: none of the jobs that move items while a `!test inv`
+//                                             save waits for its restore (`held`; scans still run)
 import type { ScanReport, UnloadReport } from '../../skills/home/logistics.ts';
 import { ROOM_FLOOR } from '../../skills/inventory/room.ts';
 import { BaseProcess, PRIORITY, type ProcessKind, type ProcessStatus, type StopReason } from './manager.ts';
@@ -166,6 +168,11 @@ export interface HomeChoreDeps {
   say?(line: string): void;
   /** A `!get` job ended (since the last call): true once per job. */
   getEnded?(): boolean;
+  /**
+   * Track T3 follow-up (skills/test/guard.ts): why the jobs that move items (unload, spares, tidy) wait now: a `!test inv`
+   * save waits for its restore, and the preset's made-up items must not reach the owner's chests. Scans still run.
+   */
+  held?(): string | undefined;
   /** The report of an unload run for a `!get` job (the line goes to chat). */
   onGetUnload?(r: UnloadReport): void;
   now?: () => number;
@@ -242,6 +249,10 @@ export class HomeChore extends BaseProcess {
       this.getWaiting = false;
       return undefined;
     }
+    if (d.held?.() !== undefined) {
+      this.getWaiting = false; // a !get job's unload too: the preset's items are no loot
+      return undefined;
+    }
     const load = d.load();
     if (this.getWaiting && (load.stacks > 0 || load.fullBoxes > 0)) {
       this.forGet = true;
@@ -276,7 +287,7 @@ export class HomeChore extends BaseProcess {
   unloadDue(): boolean {
     if (this.running && (this.job?.kind === 'unload' || this.job?.kind === 'spares')) return true;
     const d = this.d;
-    if (!d.atHome() || !d.idle() || !d.autoUnload() || d.known() === 0 || this.now() < this.unloadAfter) return false;
+    if (!d.atHome() || !d.idle() || !d.autoUnload() || d.known() === 0 || this.now() < this.unloadAfter || d.held?.() !== undefined) return false;
     const load = d.load();
     if (unloadWanted(load)) return true;
     // Track V1 follow-up: the spares job frees slots too (the room chore waits for it)

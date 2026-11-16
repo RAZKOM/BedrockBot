@@ -106,6 +106,12 @@ export interface HomeDeps {
   notify?(line: string): void;
   /** Track AN: a bounded probe plan (reach.ts probePath) from `from` to `goal`; undefined: `from` is no standable node. Without it scans use the radius only. */
   probe?(goal: NavGoal, from: Vec3): Promise<PathResult | undefined>;
+  /**
+   * Track T3 follow-up (skills/test/guard.ts): why nothing may be put into the chests now (a `!test inv` save waits for
+   * its restore: the inventory holds a preset's made-up items). The unload, the tidy and the spares jobs then end at once
+   * with that reason, whoever started them (the chore, `!unload`, a `!get`'s unload).
+   */
+  held?(): string | undefined;
   log?: Logger;
   now?: () => number;
 }
@@ -516,12 +522,20 @@ export class HomeLogistics {
 
   /** Unload at home (see the file comment). */
   unload(cancelled: () => boolean, opts: { all?: boolean } = {}): Promise<UnloadReport> {
-    return this.serial(() => this.doUnload(cancelled, opts));
+    return this.heldReport('unload') ?? this.serial(() => this.doUnload(cancelled, opts));
+  }
+
+  /** Track T3 follow-up: a report that moved nothing, when a `!test inv` save waits (HomeDeps.held). */
+  private heldReport(job: string): Promise<UnloadReport> | undefined {
+    const why = this.d.held?.();
+    if (why === undefined) return undefined;
+    this.log.info(`home: ${job} held: ${why}`);
+    return Promise.resolve({ ok: false, reason: `held: ${why}`, moved: [], kept: [], left: [], boxes: 0, emptied: 0, chests: 0, requests: 0, shared: 0, ms: 0 });
   }
 
   /** The idle chore's tidy job: the home chests' own full boxes' worth into spares (tidy steps only). */
   tidy(cancelled: () => boolean): Promise<UnloadReport> {
-    return this.serial(() => this.doTidy(cancelled));
+    return this.heldReport('tidy') ?? this.serial(() => this.doTidy(cancelled));
   }
 
   /**
@@ -529,7 +543,7 @@ export class HomeLogistics {
    * stash step's one go into the chest of spares; nothing else is moved.
    */
   returnSpares(cancelled: () => boolean): Promise<UnloadReport> {
-    return this.serial(() => this.doReturnSpares(cancelled));
+    return this.heldReport('spares') ?? this.serial(() => this.doReturnSpares(cancelled));
   }
 
   /** Track V1 follow-up: the chest of spares known at home (unloader.ts spareChestState). */

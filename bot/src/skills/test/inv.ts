@@ -25,6 +25,7 @@ import { wireSize } from '../../chat/style.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import { isShulkerBox, shulkerContents } from '../container/chest.ts';
 import { maxDurability } from '../survival/tools.ts';
+import { foodInfo } from '../survival/eat.ts';
 import { resultText, type CommandResult } from './command.ts';
 import { inventorySlotName, WORN_SLOTS, type WornSlot } from './kit.ts';
 
@@ -282,11 +283,24 @@ export function presetStacks(preset: InvPreset, free: readonly number[]): { stac
 const spec = (item: string, count: number, metadata = 0): string => `${item} ${count}${metadata ? ` ${metadata}` : ''}`;
 export const replaceCommand = (slot: number, what: string, mode?: 'keep'): string => `/replaceitem entity @s ${inventorySlotName(slot)}${mode ? ` ${mode}` : ''} ${what}`;
 
+/**
+ * Track T3 follow-up: food the bot eats stays in its slot through a preset (still restorable: the restore puts its saved
+ * count back). On the Realm (2026-11-16) `fullbar` cleared every food slot and gave none: 19 s later the food chore
+ * started (nothing to eat), the bot walked home for food and the home chore unloaded the preset into the owner's chests.
+ * A preset never takes the food below what the bot carried, so the food chore has no reason to start.
+ */
+export function isKeptFood(name: string): boolean {
+  const f = foodInfo(name);
+  return !!f && !f.bad;
+}
+
 export interface PresetPlan {
   preset: InvPreset;
-  /** The slots cleared or filled (empty or restorable at the save). */
+  /** The slots cleared or filled (empty or restorable at the save, not food). */
   free: number[];
   kept: SavedSlot[];
+  /** The food left in place (restorable: the restore gives its count back). */
+  fed: SavedSlot[];
   stacks: PresetSlot[];
   notFit: number;
   /** One command a slot: the preset's stack (`keep` into an empty slot, so a pickup meanwhile is not overwritten) or air. */
@@ -297,12 +311,13 @@ export interface PresetPlan {
 
 export function planPreset(snap: InvSnapshot, preset: InvPreset): PresetPlan {
   const kept = snap.slots.filter((s): s is SavedSlot => !!s && s.kept !== undefined);
-  const free = snap.slots.flatMap((s, i) => (s?.kept === undefined ? [i] : []));
+  const fed = snap.slots.filter((s): s is SavedSlot => !!s && s.kept === undefined && isKeptFood(s.name));
+  const free = snap.slots.flatMap((s, i) => (s?.kept === undefined && !(s && isKeptFood(s.name)) ? [i] : []));
   const { stacks, notFit } = presetStacks(preset, free);
   const by = new Map(stacks.map((s) => [s.slot, s]));
   const commands: { slot: number; command: string }[] = [];
   const expect: Record<string, number> = {};
-  for (const k of kept) expect[k.name] = (expect[k.name] ?? 0) + k.count;
+  for (const k of [...kept, ...fed]) expect[k.name] = (expect[k.name] ?? 0) + k.count;
   for (const i of free) {
     const p = by.get(i);
     const had = snap.slots[i];
@@ -311,7 +326,7 @@ export function planPreset(snap: InvSnapshot, preset: InvPreset): PresetPlan {
       expect[p.item] = (expect[p.item] ?? 0) + p.count;
     } else if (had) commands.push({ slot: i, command: replaceCommand(i, 'air') });
   }
-  return { preset, free, kept, stacks, notFit, commands, expect };
+  return { preset, free, kept, fed, stacks, notFit, commands, expect };
 }
 
 /**
@@ -393,6 +408,7 @@ export function planRestore(snap: InvSnapshot, now: InvSource): RestorePlan {
   // Track V1c: the /give commands go last: /give takes the first empty slot, which a later /replaceitem could clear
   // (a box the room chore picked up into a lower slot: its displaced stack was given and then overwritten)
   const gives: string[] = [];
+  const sets: string[] = [];
   const notes: string[] = [];
   const { protect, claimed } = claimKept(snap, now);
   for (let i = 0; i < 36; i++) {
@@ -412,8 +428,13 @@ export function planRestore(snap: InvSnapshot, now: InvSource): RestorePlan {
       continue;
     }
     if (sameAsSaved(cur, raw, saved)) continue;
-    commands.push(replaceCommand(i, saved ? spec(saved.name, saved.count, saved.metadata) : 'air'));
+    if (saved) sets.push(replaceCommand(i, spec(saved.name, saved.count, saved.metadata)));
+    else commands.push(replaceCommand(i, 'air'));
   }
+  // Track T3 follow-up: the slots to empty go first, then the saved stacks: a saved partial stack never sits beside a
+  // preset's stack of the same item while the restore runs (on bds-farm, 2026-11-16, 3 of 8 `full` runs ended with
+  // 48 of a preset's cobblestone on the owner's restored 16, moved there between two commands)
+  commands.push(...sets);
   commands.push(...gives);
   // the kept items: in their slot, moved, or gone
   for (const s of snap.slots) {
@@ -480,9 +501,42 @@ export interface InvTestPorts {
   load(): InvSnapshot | undefined;
   /** Wait for the server's slot updates to reach the model. */
   settle(): Promise<void>;
+  /**
+   * Track T3 follow-up: why a restore cannot go now. `wait`: the restore waits for it to end (a fight, the guard, the flee,
+   * the night shelter, a room pass: what keeps the bot safe is never cut short), else it is refused (a series, a flight,
+   * the owner's command). A chore below the owner's commands (the food chore, the home return) is no reason: the restore's
+   * hold takes control from it. Without it: busy(), refused.
+   */
+  restoreBlock?(): { line: string; wait: boolean } | undefined;
+  /** Lines of a restore nobody asked for (the time limit's, the food chore's): chat. Without it: the log only. */
+  announce?(m: string): void;
+  /** Before a restore of the bot's own: why no command can go now (testMode off, not an operator); undefined: it can. */
+  canCommand?(): Promise<string | undefined>;
+  sleep?(ms: number): Promise<void>;
+  /** How long a save may wait before the bot restores it on its own (ms; INV_SAVE_LIMIT_MS). */
+  limitMs?: number;
+  /** How long a restore waits out a fight (ms; RESTORE_WAIT_MS). */
+  waitMs?: number;
   log?: Logger;
   now?: () => number;
 }
+
+/**
+ * Track T3 follow-up: a save waits at most this long, then the bot restores it on its own, so a forgotten preset never
+ * stays (and never holds the unload for good). A fill takes 5 to 9 s and a room pass 2 to 9 s (docs/inventory.md), and
+ * the Realm series of 2026-11-16 waited 25 s before its restore; ten minutes leaves time to read `!test inv status` and
+ * to try a skill by hand.
+ */
+export const INV_SAVE_LIMIT_MS = 10 * 60_000;
+/**
+ * A restore asked while the bot fights (or flees, or shelters) waits this long for the guard to hand back, then says so
+ * and keeps the save: long enough for a fight with a few mobs, short enough that the owner hears back.
+ */
+export const RESTORE_WAIT_MS = 3 * 60_000;
+/** After a restore of its own that could not run, the next one waits this long (ms), so the food chore is not held by it. */
+export const AUTO_RETRY_MS = 60_000;
+/** How often a waiting restore looks again (ms). */
+const WAIT_POLL_MS = 500;
 
 interface Active {
   snap: InvSnapshot;
@@ -505,30 +559,129 @@ export class InvTest {
   private readonly now: () => number;
   private active: Active | undefined;
   private running = false;
+  /** The file's save (read once: every write goes through `persist`); null: none. */
+  private loaded: InvSnapshot | null | undefined;
+  /** What a restore waits for (a fight); undefined: none waits. */
+  private queued: string | undefined;
+  /** Why the restore of the bot's own (the time limit, the food chore) runs; undefined: none. */
+  private auto: string | undefined;
+  /** No restore of its own before this time (one could not run a moment ago). */
+  private autoAfter = 0;
+  /** The movers logged as held for this save (one line each). */
+  private readonly told = new Set<string>();
+  private readonly sleep: (ms: number) => Promise<void>;
+  /** How long a save may wait before the bot restores it on its own (ms; the e2e shortens it). */
+  limitMs: number;
 
   constructor(p: InvTestPorts) {
     this.p = p;
+    this.limitMs = p.limitMs ?? INV_SAVE_LIMIT_MS;
     this.log = p.log ?? silentLogger;
     this.now = p.now ?? Date.now;
+    this.sleep = (ms) => (p.sleep ? p.sleep(ms) : new Promise((r) => setTimeout(r, ms)));
   }
 
   /** The save waiting for a restore (this session's, else the file's). */
   saved(): InvSnapshot | undefined {
-    return this.active?.snap ?? this.p.load();
+    if (this.active) return this.active.snap;
+    if (this.loaded === undefined) this.loaded = this.p.load() ?? null;
+    return this.loaded ?? undefined;
   }
 
   get preset(): InvPreset | undefined {
-    return this.active?.preset ?? this.p.load()?.preset;
+    return this.saved()?.preset;
   }
 
   get busy(): boolean {
     return this.running;
   }
 
+  /** A restore waits (for a fight to end) or runs. */
+  get restoring(): boolean {
+    return this.queued !== undefined || this.auto !== undefined;
+  }
+
+  private persist(snap: InvSnapshot | undefined): string | undefined {
+    this.loaded = snap ?? null;
+    this.told.clear();
+    return this.p.persist(snap);
+  }
+
+  /** A refusal: said and one INFO line with its reason (the Realm's were silent in the log, 2026-11-16). */
+  private refuse(say: (m: string) => void, line: string): void {
+    this.log.info(`test inv: refused: ${line}`);
+    say(line);
+  }
+
   private refusal(): string | undefined {
     if (this.running) return 'test inv: a preset or a restore is going out';
     const b = this.p.busy();
     return b ? `test inv: not now: ${b}` : undefined;
+  }
+
+  private block(): { line: string; wait: boolean } | undefined {
+    if (this.p.restoreBlock) return this.p.restoreBlock();
+    const b = this.p.busy();
+    return b ? { line: b, wait: false } : undefined;
+  }
+
+  /**
+   * Track T3 follow-up (skills/test/guard.ts): the line naming the save that waits, undefined when none; `who` is logged
+   * once a save as held.
+   */
+  waiting(who?: string): string | undefined {
+    const s = this.saved();
+    if (!s) return undefined;
+    const line = `a !test inv${s.preset ? ` ${s.preset}` : ''} save from ${s.at.slice(11, 19)} UTC waits for its restore`;
+    if (who && !this.told.has(who)) {
+      this.told.add(who);
+      this.log.info(`test inv: ${who} held until the restore (${line})`);
+    }
+    return line;
+  }
+
+  /**
+   * A chore that would leave the spot asks to run (the food chore): the restore runs first, on its own. True: the chore
+   * waits (a restore runs or waits for a fight); false: no save, or a restore of its own failed within AUTO_RETRY_MS (the
+   * chore goes on: food is never held).
+   */
+  restoreFirst(why: string): boolean {
+    if (!this.saved()) return false;
+    if (this.running || this.restoring) return true;
+    if (this.now() < this.autoAfter) return false;
+    this.restoreOnMyOwn(`restore first: ${why}`);
+    return true;
+  }
+
+  /** Track T3 follow-up: call every few seconds; past the time limit the save is restored on its own. */
+  tick(): void {
+    const snap = this.saved();
+    if (!snap || this.running || this.restoring || this.now() < this.autoAfter) return;
+    const since = this.active?.since ?? Date.parse(snap.at);
+    const age = this.now() - since;
+    const limit = this.limitMs;
+    if (!(age >= limit)) return;
+    this.restoreOnMyOwn(`the save waited ${ago(age)}, the limit is ${ago(limit)}`);
+  }
+
+  private restoreOnMyOwn(why: string): void {
+    this.auto = why;
+    const say = (m: string): void => this.p.announce?.(m);
+    this.log.info(`test inv: restoring on my own (${why})`);
+    say(fitLine(`test inv: restoring the saved inventory on my own (${why})`));
+    // after the caller's turn (the food chore asks from the manager's arbitration; the restore adds its hold process)
+    queueMicrotask(() => {
+      void (async () => {
+        const no = await this.p.canCommand?.();
+        if (no) return this.refuse(say, `test inv: no restore of my own: ${no}`);
+        await this.restore(say, { own: true });
+      })()
+        .catch((e: unknown) => this.log.warn(`test inv: the restore of my own failed: ${e instanceof Error ? e.message : String(e)}`))
+        .finally(() => {
+          this.auto = undefined;
+          if (this.saved()) this.autoAfter = this.now() + AUTO_RETRY_MS;
+        });
+    });
   }
 
   /**
@@ -560,7 +713,7 @@ export class InvTest {
     this.running = true;
     try {
       const release = await this.p.hold();
-      if (typeof release === 'string') return say(`test inv: not now: ${release}`);
+      if (typeof release === 'string') return this.refuse(say, `test inv: not now: ${release}`);
       try {
         await fn();
       } finally {
@@ -576,9 +729,9 @@ export class InvTest {
    */
   async start(preset: InvPreset, say: (m: string) => void): Promise<void> {
     const no = this.refusal();
-    if (no) return say(no);
+    if (no) return this.refuse(say, no);
     const waiting = this.saved();
-    if (waiting) return say(`test inv: the inventory saved ${waiting.preset ? `for ${waiting.preset} ` : ''}at ${waiting.at.slice(11, 19)} is not back yet: !test inv restore first`);
+    if (waiting) return this.refuse(say, `test inv: the inventory saved ${waiting.preset ? `for ${waiting.preset} ` : ''}at ${waiting.at.slice(11, 19)} is not back yet: !test inv restore first`);
     return this.held(say, async () => {
       const inv = this.p.inventory();
       const snap = snapshotInv(inv, new Date(this.now()));
@@ -596,18 +749,21 @@ export class InvTest {
           continue;
         }
         const n = r.ok && r.messageId === 'commands.clear.testing' ? Number(r.params[1]) : r.messageId === 'commands.clear.failure.no.items' ? 0 : NaN;
-        if (!Number.isFinite(n)) return say(`test inv: nothing cleared: the count of ${name} failed (${resultText(r)})`);
-        if (n !== model) return say(`test inv: nothing cleared: the server counts ${n} ${name}, my inventory ${model}; try again in a moment`);
+        if (!Number.isFinite(n)) return this.refuse(say, `test inv: nothing cleared: the count of ${name} failed (${resultText(r)})`);
+        if (n !== model) return this.refuse(say, `test inv: nothing cleared: the server counts ${n} ${name}, my inventory ${model}; try again in a moment`);
       }
       for (const s of snap.slots) if (s && s.kept === undefined && notCommand.includes(s.name)) s.kept = 'not a command item';
       const plan = planPreset(snap, preset);
-      const file = this.p.persist(snap);
+      const file = this.persist(snap);
+      this.autoAfter = 0;
       const kept = plan.kept.map((k) => `${k.name}${k.kept === 'gear' || k.kept === 'box' || k.kept === 'elytra' ? '' : ` (${k.kept})`}`);
       const box = this.p.fireworksBox();
       const rocketNote = preset === 'rockets' && box < 0 ? '; no fireworks box carried: the rockets stay loose' : '';
       const free0 = freeOf(inv);
-      this.log.info(`test inv ${preset}: before: ${free0} free; carried ${countsLine(all)}; kept in place ${plan.kept.length}: ${kept.join(', ') || 'none'}${file ? `; saved to ${file}` : '; saved in memory only'}`);
-      say(fitLine(`test inv ${preset}: saved${file ? '' : ' (memory only)'}; ${plan.free.length} slots cleared and given back exactly by !test inv restore, ${plan.kept.length} stay in place (${kept.join(', ') || 'none'}); what goes into a box stays there${plan.notFit ? `; ${plan.notFit} stacks do not fit` : ''}${rocketNote}`));
+      const fed = plan.fed.length ? `; the food stays (${plan.fed.length} stack${plan.fed.length === 1 ? '' : 's'})` : '';
+      const limit = ago(this.limitMs);
+      this.log.info(`test inv ${preset}: before: ${free0} free; carried ${countsLine(all)}; kept in place ${plan.kept.length}: ${kept.join(', ') || 'none'}; food in place ${plan.fed.length}${file ? `; saved to ${file}` : '; saved in memory only'}; restored on my own after ${limit}`);
+      say(fitLine(`test inv ${preset}: saved${file ? '' : ' (memory only)'}; ${plan.free.length} slots cleared and given back exactly by !test inv restore, ${plan.kept.length} stay in place (${kept.join(', ') || 'none'})${fed}; what goes into a box stays there${plan.notFit ? `; ${plan.notFit} stacks do not fit` : ''}${rocketNote}; no unload until the restore (on my own after ${limit})`));
       const t0 = this.now();
       const r = await this.send(plan.commands.map((c) => c.command));
       const after = carriedCounts(this.p.inventory());
@@ -616,7 +772,7 @@ export class InvTest {
       const skipped = r.skipped.length ? `; ${r.skipped.length} slot${r.skipped.length === 1 ? '' : 's'} taken meanwhile, not filled (${r.skipped.join(', ')})` : '';
       this.log.info(`test inv ${preset}: after: ${free1} free (${r.sent} of ${plan.commands.length} commands, ${secs} s); carried ${countsLine(after)}${skipped}${r.failed ? `; stopped: ${r.failed}` : ''}`);
       if (r.failed && r.sent === 0) {
-        this.p.persist(undefined); // nothing changed: nothing to restore
+        this.persist(undefined); // nothing changed: nothing to restore
         return say(fitLine(`test inv ${preset}: nothing cleared: ${r.failed}`));
       }
       this.active = { snap, preset, since: this.now(), seen: new Set(this.p.passes()), after, freeAfter: free1 };
@@ -625,12 +781,38 @@ export class InvTest {
     });
   }
 
-  /** Put the save back. `sweep`: remove the items on the ground within 8 first (what the chore dropped). */
-  async restore(say: (m: string) => void, opts: { sweep?: boolean } = {}): Promise<void> {
-    const no = this.refusal();
-    if (no) return say(no);
+  /**
+   * Put the save back. `sweep`: remove the items on the ground within 8 first (what the chore dropped). Track T3 follow-up:
+   * during a fight (the guard, the flee, the night shelter, a room pass) it waits up to RESTORE_WAIT_MS and says so, then
+   * goes; a chore below the owner's commands is paused by its hold; a series, a flight or the owner's command refuses it.
+   * `own`: the bot's own restore (the time limit, the food chore).
+   */
+  async restore(say: (m: string) => void, opts: { sweep?: boolean; own?: boolean } = {}): Promise<void> {
+    if (this.running) return this.refuse(say, 'test inv: a preset or a restore is going out');
+    if (this.queued !== undefined) return this.refuse(say, `test inv restore: a restore already waits for ${this.queued} to end`);
+    if (this.auto !== undefined && !opts.own) return this.refuse(say, `test inv restore: I am restoring on my own already (${this.auto})`);
+    if (!this.saved()) return this.refuse(say, 'test inv: nothing saved to restore');
+    let b = this.block();
+    if (b && !b.wait) return this.refuse(say, `test inv: not now: ${b.line}`);
+    if (b) {
+      const waitMs = this.p.waitMs ?? RESTORE_WAIT_MS;
+      const t0 = this.now();
+      this.queued = b.line;
+      this.log.info(`test inv restore: waiting for ${b.line} to end (at most ${ago(waitMs)})`);
+      say(`test inv restore: waiting for ${b.line} to end (at most ${ago(waitMs)}), then the restore`);
+      try {
+        while (b?.wait && this.now() - t0 < waitMs) {
+          await this.sleep(WAIT_POLL_MS);
+          b = this.block();
+        }
+      } finally {
+        this.queued = undefined;
+      }
+      if (b) return this.refuse(say, b.wait ? `test inv restore: ${b.line} still after ${ago(this.now() - t0)}; the save is kept (!test inv restore again)` : `test inv: not now: ${b.line}`);
+      this.log.info(`test inv restore: ${ago(this.now() - t0)} waited, restoring`);
+    }
     const snap = this.saved();
-    if (!snap) return say('test inv: nothing saved to restore');
+    if (!snap) return this.refuse(say, 'test inv: nothing saved to restore');
     return this.held(say, async () => {
       const before = carriedCounts(this.p.inventory());
       const free0 = freeOf(this.p.inventory());
@@ -650,7 +832,7 @@ export class InvTest {
       this.log.info(`test inv restore: after: ${freeOf(inv)} free (${r.sent} of ${commands.length} commands, ${secs} s); carried ${countsLine(after)}${off.length ? `; not as saved: ${off.join('; ')}` : ''}${r.failed ? `; stopped: ${r.failed}` : ''}`);
       if (r.failed) return say(fitLine(`test inv restore: stopped after ${r.sent} of ${commands.length} commands: ${r.failed}; the save is kept (!test inv restore again)`));
       this.active = undefined;
-      this.p.persist(undefined);
+      this.persist(undefined);
       const notes = [...plan.notes, ...off];
       say(fitLine(`test inv restore: ${free0} -> ${freeOf(inv)} free in ${secs} s (${plan.commands.length} commands); ${notes.length ? notes.join('; ') : 'every slot as saved'}`));
     });
@@ -660,15 +842,17 @@ export class InvTest {
   status(): string {
     const a = this.active;
     if (!a) {
-      const f = this.p.load();
+      const f = this.saved();
       return f ? `test inv: an inventory saved at ${f.at.slice(0, 19).replace('T', ' ')} UTC${f.preset ? ` (${f.preset})` : ''} waits: !test inv restore` : 'test inv: no preset on';
     }
+    const left = Math.max(0, this.limitMs - (this.now() - a.since));
+    const restoring = this.queued !== undefined ? `; the restore waits for ${this.queued}` : this.auto !== undefined ? '; restoring on my own' : `; restored on my own in ${ago(left)}`;
     const inv = this.p.inventory();
     const passes = this.p.passes().filter((x) => !a.seen.has(x));
     const steps = passes.flatMap((x) => x.steps.map((s) => `${s.ok ? '' : 'failed: '}${s.line.replace(/^inventory: /, '')}`));
     const d = countsDiff(a.after, carriedCounts(inv));
     const passLine = passes.length ? `room chore ${passes.length} pass${passes.length === 1 ? '' : 'es'} (${passes.map((x) => `${x.freeBefore} -> ${x.freeAfter} in ${(x.ms / 1000).toFixed(1)} s`).join(', ')}): ${steps.join('; ') || 'no step'}` : 'no room chore pass yet';
-    return fitLine(`test inv ${a.preset} (${ago(this.now() - a.since)}): ${a.freeAfter} -> ${freeOf(inv)} free; ${passLine}; changed ${countsLine(d, 8, true)}`);
+    return fitLine(`test inv ${a.preset} (${ago(this.now() - a.since)}): ${a.freeAfter} -> ${freeOf(inv)} free${restoring}; ${passLine}; changed ${countsLine(d, 8, true)}`);
   }
 }
 

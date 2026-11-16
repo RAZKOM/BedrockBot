@@ -19,10 +19,16 @@ import {
   SWEEP,
   type InvSnapshot,
   type InvSource,
+  type InvTestPorts,
   type PassLike,
+  INV_SAVE_LIMIT_MS,
+  RESTORE_WAIT_MS,
+  AUTO_RETRY_MS,
 } from '../../../src/skills/test/inv.ts';
+import { silentLogger } from '../../../src/log.ts';
 import type { ItemStack } from '../../../src/world/types.ts';
 import { wireSize } from '../../../src/chat/style.ts';
+import { inventoryFoodPoints } from '../../../src/skills/food/finder.ts';
 
 // ---- wire items as the server sends them -----------------------------------------------------------------------------
 
@@ -201,13 +207,34 @@ describe('the plans', () => {
     const snap = snapshotInv(s);
     const plan = planPreset(snap, 'full');
     const kept = new Set([0, 1, 4, 9, 10, 11, 12]);
-    expect(plan.free).toHaveLength(29);
+    const food = new Set([3, 13]); // Track T3 follow-up: the cooked beef and the bread stay where they are
+    expect(plan.free).toHaveLength(27);
+    expect(plan.fed.map((f) => f.slot)).toEqual([3, 13]);
     for (const c of plan.commands) {
-      expect(kept.has(c.slot)).toBe(false);
+      expect(kept.has(c.slot) || food.has(c.slot)).toBe(false);
       const empty = !snap.slots[c.slot];
       expect(c.command.includes(' keep ')).toBe(empty);
     }
-    expect(plan.commands).toHaveLength(29);
+    expect(plan.commands).toHaveLength(27);
+  });
+
+  it('Track T3 follow-up: no preset takes the food below what the bot carried (fullbar gave none on the Realm), and the restore is still exact', async () => {
+    for (const p of INV_PRESETS) {
+      const s = liveLike();
+      s.put(8, 'golden_carrot', 20); // food in the hotbar too (fullbar fills the hotbar with odds)
+      s.put(30, 'rotten_flesh', 4); // bad food: no food the bot eats, cleared as before
+      const before = inventoryFoodPoints(s.slots);
+      const snap = snapshotInv(s);
+      const plan = planPreset(snap, p);
+      expect(plan.fed.map((f) => f.name)).toEqual(['cooked_beef', 'golden_carrot', 'bread']);
+      for (const c of plan.commands) expect((await s.run(c.command)).ok).toBe(true);
+      expect([p, inventoryFoodPoints(s.slots) >= before]).toEqual([p, true]);
+      for (const k of [3, 8, 13]) expect(s.cells[k]?.name).toBe(snap.slots[k]!.name);
+      // the bot eats meanwhile: the restore gives the saved count back
+      s.cells[3] = { ...s.cells[3]!, count: 20 };
+      for (const c of planRestore(snap, s).commands) await s.run(c);
+      expect(restoreMismatches(snap, s)).toEqual([]);
+    }
   });
 
   it('the restore of an untouched preset puts every restorable slot back; nothing on the kept ones', async () => {
@@ -224,6 +251,11 @@ describe('the plans', () => {
     expect(r.commands.every((c) => /slot\.(hotbar|inventory) /.test(c))).toBe(true);
     // the potion's metadata comes back as data
     expect(r.commands.some((c) => c.endsWith('potion 1 5'))).toBe(true);
+    // Track T3 follow-up: every slot to empty before any saved stack (no saved partial stack beside a preset's stack of its item)
+    const lastAir = r.commands.map((c) => c.endsWith(' air')).lastIndexOf(true);
+    const firstSet = r.commands.findIndex((c) => !c.endsWith(' air'));
+    expect(lastAir).toBeGreaterThanOrEqual(0);
+    expect(lastAir).toBeLessThan(firstSet);
   });
 
   it('what the chore did: a kept sword moved onto a cleared slot is never overwritten; rockets boxed are a note', async () => {
@@ -317,14 +349,29 @@ describe('the plans', () => {
   });
 });
 
+const flushAll = async (): Promise<void> => {
+  for (let i = 0; i < 50; i++) await new Promise((r) => setTimeout(r, 0));
+};
+
 describe('InvTest against a fake server', () => {
-  const setup = (s = liveLike(), over: { busy?: () => string | undefined; passes?: PassLike[]; hold?: () => Promise<string> } = {}) => {
+  const setup = (s = liveLike(), over: Partial<Omit<InvTestPorts, 'passes'>> & { passes?: PassLike[] } = {}) => {
     let file: InvSnapshot | undefined;
     const said: string[] = [];
     const order: string[] = [];
-    const passes: PassLike[] = over.passes ?? [];
+    const { passes: passes0, ...ports } = over;
+    const passes: PassLike[] = passes0 ?? [];
     let held = 0;
+    const logs: string[] = [];
+    const announced: string[] = [];
+    const clock = { t: Date.parse('2026-11-16T09:30:00Z') };
     const t = new InvTest({
+      now: () => clock.t,
+      sleep: (ms) => {
+        clock.t += ms;
+        return Promise.resolve();
+      },
+      log: { ...silentLogger, info: (m: string) => void logs.push(m), warn: (m: string) => void logs.push(`warn ${m}`) },
+      announce: (m) => void announced.push(m),
       run: async (c) => {
         order.push(`cmd ${c.split(' ')[0]}`);
         return s.run(c);
@@ -343,19 +390,20 @@ describe('InvTest against a fake server', () => {
       },
       load: () => file,
       settle: () => Promise.resolve(),
+      ...ports,
     });
     const say = (m: string) => {
       said.push(m);
       order.push(`say ${m.slice(0, 30)}`);
     };
-    return { s, t, said, order, say, passes, file: () => file, held: () => held };
+    return { s, t, said, order, say, passes, file: () => file, held: () => held, logs, announced, clock };
   };
 
   it('says what stays before the first slot is cleared, fills, saves to the file; the restore gives it back and removes the file', async () => {
     const { s, t, said, order, say, file, held } = setup();
     const before = carriedCounts(s);
     await t.start('full', say);
-    expect(said[0]).toMatch(/^test inv full: saved; 29 slots cleared and given back exactly by !test inv restore, 7 stay in place \(netherite_sword \(enchanted\), stone_pickaxe, firework_rocket \(rocket flight 3\), elytra, green_shulker_box, undyed_shulker_box \(box "bot_loot"\), green_shulker_box\)/);
+    expect(said[0]).toMatch(/^test inv full: saved; 27 slots cleared and given back exactly by !test inv restore, 7 stay in place \(netherite_sword \(enchanted\), stone_pickaxe, firework_rocket \(rocket flight 3\), elytra, green_shulker_box, undyed_shulker_box \(box "bot_loot"\), green_shulker_box\); the food stays \(2 stacks\)/);
     const firstReplace = order.findIndex((o) => o === 'cmd /replaceitem');
     const firstSay = order.findIndex((o) => o.startsWith('say '));
     expect(firstSay).toBeLessThan(firstReplace);
@@ -375,12 +423,144 @@ describe('InvTest against a fake server', () => {
     expect(said[4]).toBe('test inv: nothing saved to restore');
   });
 
-  it('refuses while something runs; nothing is sent', async () => {
-    const { s, t, said, say } = setup(liveLike(), { busy: () => 'a flight runs' });
-    await t.start('early', say);
+  it('refuses while something runs; nothing is sent; every refusal is said at once and is one INFO line with its reason', async () => {
+    let busy: string | undefined = 'a flight runs';
+    const { s, t, said, say, logs } = setup(liveLike(), { busy: () => busy });
+    void t.start('early', say);
+    expect(said).toEqual(['test inv: not now: a flight runs']); // synchronous: the panel's command route sees it
     await t.restore(say);
-    expect(said).toEqual(['test inv: not now: a flight runs', 'test inv: not now: a flight runs']);
+    expect(said[1]).toBe('test inv: nothing saved to restore');
+    busy = undefined;
+    await t.start('early', say);
+    s.sent.length = 0;
+    busy = 'a flight runs';
+    void t.restore(say);
+    expect(said.at(-1)).toBe('test inv: not now: a flight runs');
+    busy = undefined;
+    await t.start('full', say);
+    expect(said.at(-1)).toMatch(/is not back yet: !test inv restore first/);
     expect(s.sent).toEqual([]);
+    expect(logs.filter((l) => l.startsWith('test inv: refused: '))).toEqual([
+      'test inv: refused: test inv: not now: a flight runs',
+      'test inv: refused: test inv: nothing saved to restore',
+      'test inv: refused: test inv: not now: a flight runs',
+      expect.stringMatching(/^test inv: refused: test inv: the inventory saved for early at .* is not back yet/),
+    ]);
+  });
+
+  it('Track T3 follow-up: a restore during a fight waits for the guard to hand back (said at once), then runs; a second restore meanwhile is refused', async () => {
+    let fight = 0;
+    const { s, t, said, say, file } = setup(liveLike(), { restoreBlock: () => (fight > 0 ? (fight--, { line: 'the fight', wait: true }) : undefined) });
+    await t.start('early', say);
+    fight = 6; // three seconds of polls
+    const p = t.restore(say);
+    expect(said.at(-1)).toBe('test inv restore: waiting for the fight to end (at most 3 min), then the restore');
+    expect(t.restoring).toBe(true);
+    await t.restore(say);
+    expect(said.at(-1)).toBe('test inv restore: a restore already waits for the fight to end');
+    await p;
+    expect(said.at(-1)).toMatch(/^test inv restore: 0 -> \d+ free in .*every slot as saved/);
+    expect(file()).toBeUndefined();
+    expect(restoreMismatches(snapshotInv(liveLike()), s)).toEqual([]);
+  });
+
+  it('Track T3 follow-up: the wait is bounded: still fighting after RESTORE_WAIT_MS, it says so and keeps the save; nothing sent', async () => {
+    const { s, t, said, say, file, clock } = setup(liveLike(), { restoreBlock: () => ({ line: 'guard', wait: true }) });
+    await t.start('split', say); // (the block is the restore's: a preset reads busy())
+    s.sent.length = 0;
+    const t0 = clock.t;
+    await t.restore(say);
+    expect(clock.t - t0).toBeGreaterThanOrEqual(RESTORE_WAIT_MS);
+    expect(said.at(-1)).toBe('test inv restore: guard still after 3 min; the save is kept (!test inv restore again)');
+    expect(s.sent).toEqual([]);
+    expect(file()).toBeDefined();
+    expect(t.restoring).toBe(false);
+  });
+
+  it('Track T3 follow-up: a refusing block (a series, a flight, the owner\'s command) is not waited for', async () => {
+    const { t, said, say } = setup(liveLike(), { restoreBlock: () => ({ line: 'goto runs (!stop)', wait: false }) });
+    await t.start('split', say);
+    await t.restore(say);
+    expect(said.at(-1)).toBe('test inv: not now: goto runs (!stop)');
+  });
+
+  it('Track T3 follow-up: past the time limit the save is restored on its own, said in chat; a failed one waits AUTO_RETRY_MS', async () => {
+    let no: string | undefined = 'testMode is off (!set testMode on)';
+    const { t, say, file, clock, announced, logs } = setup(liveLike(), { canCommand: () => Promise.resolve(no) });
+    await t.start('rockets', say);
+    t.tick();
+    expect(announced).toEqual([]);
+    clock.t += INV_SAVE_LIMIT_MS;
+    t.tick();
+    expect(announced[0]).toBe('test inv: restoring the saved inventory on my own (the save waited 10 min, the limit is 10 min)');
+    await flushAll();
+    expect(announced[1]).toBe('test inv: no restore of my own: testMode is off (!set testMode on)');
+    expect(file()).toBeDefined();
+    t.tick(); // within AUTO_RETRY_MS: not again
+    expect(announced).toHaveLength(2);
+    no = undefined;
+    clock.t += AUTO_RETRY_MS;
+    t.tick();
+    await flushAll();
+    expect(announced.at(-1)).toMatch(/^test inv restore: 0 -> \d+ free in /);
+    expect(file()).toBeUndefined();
+    expect(logs.some((l) => l.startsWith('test inv: restoring on my own (the save waited'))).toBe(true);
+  });
+
+  it('Track T3 follow-up: a save from a file (a restart) counts from its time; the restore of its own takes it back', async () => {
+    const a = setup(liveLike());
+    await a.t.start('full', a.say);
+    const saved = a.file()!;
+    const b = setup(a.s, { load: () => saved, persist: () => 'inv-saved.json' });
+    b.clock.t = Date.parse(saved.at) + INV_SAVE_LIMIT_MS - 1000;
+    b.t.tick();
+    expect(b.announced).toEqual([]);
+    b.clock.t += 1000;
+    b.t.tick();
+    await flushAll();
+    expect(b.announced.at(-1)).toMatch(/^test inv restore: 0 -> 23 free in .*every slot as saved/);
+    expect(b.t.saved()).toBeUndefined();
+  });
+
+  it('Track T3 follow-up: restoreFirst (the food chore): no save false; a save: true and the restore runs on its own; true while it runs; false after', async () => {
+    const { t, say, announced, file } = setup(liveLike());
+    expect(t.restoreFirst('the food chore: 0 food points carried (< 10)')).toBe(false);
+    await t.start('fullbar', say);
+    expect(t.restoreFirst('the food chore: 0 food points carried (< 10)')).toBe(true);
+    expect(announced[0]).toBe('test inv: restoring the saved inventory on my own (restore first: the food chore: 0 food points carried (< 10))');
+    expect(t.restoreFirst('the food chore: 0 food points carried (< 10)')).toBe(true); // it runs: still wait
+    expect(announced).toHaveLength(1);
+    await flushAll();
+    expect(announced.at(-1)).toMatch(/^test inv restore: 0 -> 23 free/);
+    expect(file()).toBeUndefined();
+    expect(t.restoreFirst('the food chore: 0 food points carried (< 10)')).toBe(false);
+  });
+
+  it('Track T3 follow-up: restoreFirst after a restore of its own failed a moment ago: false (the food chore goes on: food is never held)', async () => {
+    const { t, say, clock } = setup(liveLike(), { canCommand: () => Promise.resolve('not an operator') });
+    await t.start('early', say);
+    expect(t.restoreFirst('food')).toBe(true);
+    await flushAll();
+    expect(t.saved()).toBeDefined();
+    expect(t.restoreFirst('food')).toBe(false);
+    clock.t += AUTO_RETRY_MS;
+    expect(t.restoreFirst('food')).toBe(true);
+  });
+
+  it('Track T3 follow-up: waiting() names the save while one waits, logs each mover once a save', async () => {
+    const { t, say, logs } = setup(liveLike());
+    expect(t.waiting('the home chore')).toBeUndefined();
+    await t.start('early', say);
+    const line = t.waiting('the home chore');
+    expect(line).toBe('a !test inv early save from 09:30:00 UTC waits for its restore');
+    t.waiting('the home chore');
+    t.waiting('the stash step');
+    expect(logs.filter((l) => l.includes(' held until the restore '))).toEqual([
+      `test inv: the home chore held until the restore (${line})`,
+      `test inv: the stash step held until the restore (${line})`,
+    ]);
+    await t.restore(say);
+    expect(t.waiting('the home chore')).toBeUndefined();
   });
 
   it('the hold cannot be had (something keeps control): nothing is sent, nothing saved', async () => {
@@ -463,7 +643,7 @@ describe('InvTest against a fake server', () => {
     const { s, t, say } = setup(liveLike(), { passes });
     expect(t.status()).toBe('test inv: no preset on');
     await t.start('split', say);
-    expect(t.status()).toMatch(/^test inv split \(\d+ s\): 0 -> 0 free; no room chore pass yet; changed nothing$/);
+    expect(t.status()).toMatch(/^test inv split \(\d+ s\): 0 -> 0 free; restored on my own in 10 min; no room chore pass yet; changed nothing$/);
     passes.push({ freeBefore: 0, freeAfter: 8, ms: 4100, steps: [{ ok: true, line: 'inventory: merged 30 cobblestone (slot 20 -> 19)' }, { ok: true, line: 'inventory: dropped 434 cobblestone (dropStone 64)' }] });
     s.cells[30] = null;
     const line = t.status();

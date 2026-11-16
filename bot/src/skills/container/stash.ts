@@ -173,6 +173,12 @@ export interface StashDeps {
   toHotbar?(slot: number): Promise<number | undefined>;
   /** Wait ticks (a busy drop is tried again after a moment). */
   waitTicks?(n: number): Promise<void>;
+  /**
+   * Track T3 follow-up (skills/test/guard.ts): why no stash step may run now (a `!test inv` save waits: the full inventory
+   * is a preset's, and its made-up items must not reach a chest or a box). ifFull() then answers false: the job ends
+   * `inventory full` instead of stashing.
+   */
+  held?(): string | undefined;
   now?: () => number;
 }
 
@@ -348,6 +354,11 @@ export class Stash {
   ifFull(job: StashJob = {}): Promise<boolean> {
     if (!this.needed()) return Promise.resolve(true);
     if (this.running) return this.running;
+    const held = this.d.held?.();
+    if (held !== undefined) {
+      this.log.info(`stash (${job.label ?? 'job'}): held: ${held}; the inventory stays full`);
+      return Promise.resolve(false);
+    }
     const p = this.attempt(job).finally(() => {
       this.running = undefined;
     });

@@ -27,6 +27,7 @@ import { Cooker, type CookContainers, type CookResult } from '../skills/food/coo
 import { Hunter } from '../skills/food/hunter.ts';
 import { FOODS } from '../skills/survival/eat.ts';
 import { supplyOf } from '../skills/supply/supply.ts';
+import { saveGuardOf } from '../skills/test/guard.ts'; // Track T3 follow-up
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { BREED_PERIOD_MS, BREED_RADIUS, BREED_TARGET, COOK_NEAR, DEFAULT_FOOD_ITEMS, FOOD_RADIUS, FoodController, HOME_RETURN_NEAR, noPenLine, parseChorePen, type FoodJobResult } from '../tasks/process/food.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
@@ -179,6 +180,7 @@ export function registerFoodCommands(d: CommandDeps, extra: FoodCommandExtra = {
     herds, // Track AF
     chorePen,
     waitTicks: (n) => mobility.loop.waitTicks(n),
+    restoreFirst: (why) => saveGuardOf(d.task)?.restoreFirst(why) ?? false, // Track T3 follow-up
     breeder,
     entities: () => world.entities,
     penOf,

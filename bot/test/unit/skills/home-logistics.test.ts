@@ -936,6 +936,39 @@ describe('home processes', () => {
     expect(h.runner.calls).toEqual(['scan', 'unload']);
   });
 
+  it('HomeChore, Track T3 follow-up: while a !test inv save waits no unload, spares or tidy job starts and unloadDue is false; scans still run', async () => {
+    let held: string | undefined = 'a !test inv fullbar save from 09:30:31 UTC waits for its restore';
+    const room = { free: 0, spares: 2, stacks: 30 };
+    const h = chore({ load: () => ({ stacks: room.stacks, fullBoxes: 1, free: room.free, spares: room.spares }), held: () => held, tidyDue: () => true, spareChest: () => 'room' });
+    const pm = new ProcessManager();
+    pm.add(h.c);
+    h.advance(2000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['scan']); // the session scan reads chests, it moves nothing
+    h.runner.finish();
+    await tick();
+    for (let i = 0; i < 5; i++) {
+      h.advance(2000);
+      pm.tick();
+    }
+    expect(h.runner.calls).toEqual(['scan']);
+    expect(h.c.unloadDue()).toBe(false); // the room chore at home does not wait for an unload that will not come
+    held = undefined;
+    expect(h.c.unloadDue()).toBe(true);
+    h.advance(2000);
+    pm.tick();
+    expect(h.runner.calls).toEqual(['scan', 'unload']);
+  });
+
+  it('HomeLogistics, Track T3 follow-up: unload, tidy and spares end at once with the reason while a save waits; nothing walked or moved', async () => {
+    const f = fakeHome({ containers: { '5,0,0': { kind: 'chest' } }, inv: [item('coal', 64), item('oak_log', 64)], held: () => 'a !test inv early save from 09:30:31 UTC waits for its restore' });
+    const u = await f.logistics.unload(() => false);
+    expect(u).toMatchObject({ ok: false, reason: 'held: a !test inv early save from 09:30:31 UTC waits for its restore', moved: [] });
+    expect((await f.logistics.tidy(() => false)).reason).toMatch(/^held: /);
+    expect((await f.logistics.returnSpares(() => false)).reason).toMatch(/^held: /);
+    expect(f.calls).toEqual([]);
+  });
+
   it('HomeChore, Track V1: fewer than 4 slots free with anything to unload (a spare empty box counts) unloads too; unloadDue says so first', async () => {
     const room = { free: 10, spares: 0, stacks: 0 };
     const h = chore({ load: () => ({ stacks: room.stacks, fullBoxes: 0, free: room.free, spares: room.spares }) });

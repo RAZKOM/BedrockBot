@@ -8,7 +8,10 @@
 //   2. the room chore acts on its own (a pass line, or for fullbar the place skill's exchange), `!test inv status` says so
 //   3. `!test inv restore sweep`: every slot as it was (typeId and count by truth, the worn pieces too), the model agrees,
 //      the boxes' contents changed only by what the chore boxed (the rockets preset)
-// Then the refusals: a user process running, a second preset before the restore.
+// Then the refusals: a user process running, a second preset before the restore (each one INFO line).
+// Track T3 follow-up, a waiting save never leaks the preset: the food chore asking to run (the restore goes first, on its
+// own), a restore asked during a fight (zombies summoned, difficulty easy for the case: it waits, then runs), the time
+// limit (shortened to 20 s: restored on its own), an unload due at home (chests unchanged for 25 s, `!unload` refused).
 // Env: HOME_BDS_PORT / HOME_BDS_CONTAINER (default bds-home on 19196), HOME_VERBOSE=1, T3_OUT (a file for the notes),
 // T3_PRESETS=early,rockets (a subset).
 import { appendFileSync, mkdtempSync, rmSync } from 'node:fs';
@@ -21,7 +24,9 @@ import { itemDisplayName } from '../../src/world/inventory.ts';
 import { carriedCounts, countsDiff, INV_PRESETS, planPreset } from '../../src/skills/test/inv.ts';
 import { testControlOf } from '../../src/chat/commands-test.ts';
 import { BaseProcess, PRIORITY, type ProcessKind } from '../../src/tasks/process/manager.ts';
-import { clearAreaHome, E2E, FEET_Y, prepareServer, privateArea, sleep, startHomeBot, teleport, until, type HomeBot } from './home-truth.ts';
+import { inventoryFoodPoints } from '../../src/skills/food/finder.ts';
+import { foodControllerOf } from '../../src/chat/commands-food.ts';
+import { buildHome, clearAreaHome, E2E, FEET_Y, homeCmd, prepareServer, privateArea, removeHome, sleep, startHomeBot, teleport, until, type HomeBot, type HomeLayout } from './home-truth.ts';
 
 const TESTS_DIR = mkdtempSync(join(tmpdir(), 'bedrockbot-t3-'));
 process.env.BEDROCKBOT_TESTS_DIR = TESTS_DIR;
@@ -58,12 +63,15 @@ interface TruthInv {
   equipment: Record<string, { typeId: string; amount: number }>;
 }
 const bare = (s: string) => s.replace(/^minecraft:/, '');
+/** The restore's end line, or a refusal (Track T3 follow-up: the first line `started` or `waiting for ...` is not it). */
+const RESTORED = /^test inv (restore: (\d+ -> \d+ free|stopped|.* still after)|: )/;
 
 describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () => {
   const area = privateArea();
   const at = { x: area.x + 60, y: FEET_Y, z: area.z };
   const notes: string[] = [];
   let bot: HomeBot | undefined;
+  let homeLayout: HomeLayout | undefined; // Track T3 follow-up: the unload case's home
   const note = (s: string) => {
     notes.push(s);
     if (process.env.T3_OUT) appendFileSync(process.env.T3_OUT, `${s}\n`);
@@ -129,7 +137,7 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
     const hotbar = (b.built.mobility!.skills as unknown as { parts: { hotbar?: { select(slot: number): boolean } } }).parts.hotbar;
     hotbar?.select(0);
     await b.built.mobility!.loop.waitTicks(4);
-    const e = await run.run('/enchant @s sharpness 3');
+    const e = await run.run('/enchant @s sharpness 3', { pace: true });
     note(`/enchant: ${e.ok} ${e.messageId}`);
     await sleep(1000);
   }
@@ -153,6 +161,7 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
     if (bot) {
       await bot.truth.clearAround(centre(at), 24).catch(() => undefined);
       await clearAreaHome(bot.truth, at, 10, 5).catch(() => undefined);
+      if (homeLayout) await removeHome(bot, homeLayout, { x: area.x, z: area.z }).catch(() => undefined);
       await bot.stop();
     }
     rmSync(TESTS_DIR, { recursive: true, force: true });
@@ -207,7 +216,10 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
       const t1 = await truthInv(b);
       const snap = testControlOf(b.task)!.inv.saved()!;
       const plan = planPreset(snap, preset);
-      const want: string[] = before.slice(0, 36).map((s, i) => (snap.slots[i]?.kept !== undefined ? s : '-'));
+      // Track T3 follow-up: the kept slots and the food stay as they were
+      const fedSlots = new Set(plan.fed.map((f) => f.slot));
+      const want: string[] = before.slice(0, 36).map((s, i) => (snap.slots[i]?.kept !== undefined || fedSlots.has(i) ? s : '-'));
+      expect(plan.fed.length).toBeGreaterThan(0); // the owner's food: beef, bread, golden carrots
       for (const st of plan.stacks) want[st.slot] = `${st.item} x${st.count}`;
       const got = truthSlots(t1).slice(0, 36);
       // the keeper drops the junk at 36 of 36 (rotten flesh, string): those slots may be empty by now
@@ -233,8 +245,17 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
       note(`${preset}: ${status}`);
       if (preset !== 'fullbar') expect(status).toMatch(/room chore \d+ pass/);
       // 3. the restore
-      const restored = await ask(b, '!test inv restore sweep', /^test inv (restore|:)/, 240_000);
+      note(`${preset}: before the restore ${truthSlots(await truthInv(b)).slice(0, 36).map((s, i) => `${i}:${s}`).join(' ')}`);
+      // the keeper's dropped stone may lie past the sweep's 8 (2 of 4 runs of `full` here: 48 cobblestone picked up onto the
+      // restored 16 during the restore): gone first, so the check below is the restore's alone
+      const me = b.built.mobility!.world.self.pos;
+      const far = [...b.built.mobility!.world.entities.values()].filter((e) => e.type.includes('item') && Math.hypot(e.pos.x - me.x, e.pos.z - me.z) > 8).length;
+      note(`${preset}: items on the ground past 8: ${far}`);
+      await testControlOf(b.task)!.runner.run('/kill @e[type=item,r=24]', { pace: true });
+      const restoreLogFrom = b.logs.length;
+      const restored = await ask(b, '!test inv restore sweep', RESTORED, 240_000);
       note(`${preset}: ${restored}`);
+      note(`${preset}: moves during the restore: ${b.logs.slice(restoreLogFrom).filter((l) => /merged|moved|inventory:|room|exchange|process/.test(l)).map((l) => l.replace(/^\S+ /, '')).join(' | ') || 'none'}`);
       expect(restored).toMatch(/^test inv restore: \d+ -> \d+ free/);
       await sleep(1500);
       const t2 = await truthInv(b);
@@ -257,9 +278,10 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
         expect(boxDiff.firework_rocket ?? 0).toBeGreaterThan(0);
         expect(b.logs.slice(logFrom).filter((l) => /deposit \d+ firework_rocket .*: error/.test(l))).toEqual([]);
         for (const [k, v] of Object.entries(boxDiff)) expect([k, v > 0]).toEqual(['firework_rocket', true]);
-      } else if (preset === 'early' && fullHotbar) {
-        // Track V1c: the box step boxed loot into the plain box from the main inventory (before: `the box is not in the hotbar`)
-        expect(Object.values(boxDiff).some((v) => v > 0)).toBe(true);
+      } else if (preset === 'early' && fullHotbar && Object.keys(boxDiff).length > 0) {
+        // Track V1c: the box step boxed loot into the plain box from the main inventory (before: `the box is not in the hotbar`).
+        // Track T3 follow-up: the food now stays, so the pass may free enough by its drops alone and box nothing
+        // (`the box is not in the hotbar` is still checked below either way)
         for (const v of Object.values(boxDiff)) expect(v).toBeGreaterThan(0);
       } else expect(boxDiff).toEqual({});
       // Track V1c: the owner's empty named box is still empty and still named
@@ -295,7 +317,159 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
     const second = await ask(b, '!test inv full', /^test inv: /, 20_000);
     note(`second preset: ${second}`);
     expect(second).toMatch(/is not back yet: !test inv restore first/);
-    const r = await ask(b, '!test inv restore sweep', /^test inv restore: /, 240_000);
+    const r = await ask(b, '!test inv restore sweep', RESTORED, 240_000);
     note(`restore: ${r}`);
+    // Track T3 follow-up: every refusal is one INFO line with its reason
+    const refused = b.logs.filter((l) => l.includes('test inv: refused: '));
+    note(`refusal log lines: ${refused.length}`);
+    expect(refused.some((l) => l.includes('not now: hold runs (!stop)'))).toBe(true);
+    expect(refused.some((l) => l.includes('is not back yet'))).toBe(true);
   }, 600_000);
+
+  // ---- Track T3 follow-up: a waiting save never leaks the preset -----------------------------------------------------
+
+  /** A preset on the owner's inventory; resolves when it is done. */
+  async function presetOn(b: HomeBot, preset: string): Promise<void> {
+    // a case that failed may have left its save: restore it first (else this preset is refused and the cases cascade)
+    if (testControlOf(b.task)!.inv.saved()) {
+      const r = await ask(b, '!test inv restore', RESTORED, 300_000).catch((e: unknown) => String(e));
+      note(`(a save left by an earlier case restored first: ${r})`);
+    }
+    await ownerInventory(b);
+    const from = b.said.length;
+    await b.command(`!test inv ${preset}`);
+    await until(() => b.said.slice(from).find((x) => new RegExp(`^test inv ${preset}: \\d+ -> \\d+ free`).test(x)), 240_000, 'the preset done');
+  }
+  const foodPoints = (b: HomeBot) => inventoryFoodPoints(inv(b).slots);
+
+  it('the food chore asking to run while a save waits: the restore goes first, on its own, and the food is back', async () => {
+    const b = bot!;
+    await teleport(b, centre(at));
+    // autoFood on only once the preset is in place (ownerInventory empties the inventory first: a hunt could start)
+    b.settings.set('autoFood', 'off');
+    await presetOn(b, 'fullbar');
+    b.settings.set('autoFood', 'on');
+    const fed = foodPoints(b);
+    note(`food: after fullbar ${fed} food points (the food stays)`);
+    expect(fed).toBeGreaterThanOrEqual(10);
+    // the bot "ate" its food: clear it (the food chore wants to run below foodMin 10)
+    const run = testControlOf(b.task)!.runner;
+    const from = b.said.length;
+    const logFrom = b.logs.length;
+    // (the chore found nothing to hunt while ownerInventory had the inventory empty: its 10 min backoff goes)
+    const chore = foodControllerOf(b.task)!.chore;
+    chore.nextTry = -Infinity;
+    const cleared: string[] = [];
+    for (const f of ['cooked_beef', 'bread', 'golden_carrot']) {
+      const s = await run.run(`/clear @s ${f}`, { pace: true });
+      cleared.push(`${f} ${s.ok ? 'ok' : 'failed'} ${s.messageId}`);
+    }
+    note(`food: cleared ${cleared.join(', ')}`);
+    await until(() => (foodPoints(b) < 10 ? true : undefined), 15_000, `the food gone from the model (${foodPoints(b)} points)`);
+    const own = await until(() => b.said.slice(from).find((x) => x.startsWith('test inv: restoring the saved inventory on my own')), 30_000, 'the restore of its own').catch((e: unknown) => {
+      note(`food: no restore of its own: chore ${JSON.stringify(chore.check())}; active ${b.processes.active?.name ?? 'none'}; logs ${b.logs.slice(logFrom).filter((l) => /food|test inv/.test(l)).join(' | ')}`);
+      throw e;
+    });
+    note(`food: ${own}`);
+    expect(own).toMatch(/restore first: the food chore: 0 food points carried \(< 10\)/);
+    const done = await until(() => b.said.slice(from).find((x) => /^test inv restore: \d+ -> \d+ free/.test(x)), 120_000, 'the restore');
+    note(`food: ${done}`);
+    await sleep(1500);
+    expect(foodPoints(b)).toBe(fed);
+    expect(testControlOf(b.task)!.inv.saved()).toBeUndefined();
+    // the food chore never started a hunt with the preset's items
+    expect(b.logs.slice(logFrom).filter((l) => /food chore: .* hunting/.test(l) || l.includes('process: food started'))).toEqual([]);
+  }, 600_000);
+
+  it('a restore during a fight waits for the guard to hand back (said at once), then runs', async () => {
+    const b = bot!;
+    await teleport(b, centre(at));
+    await presetOn(b, 'split');
+    await homeCmd('difficulty', 'easy');
+    const run = testControlOf(b.task)!.runner;
+    const guard0 = b.task.pve!.guard.on;
+    b.task.pve!.setGuard({ on: true }); // (the e2e bot starts with the guard off)
+    try {
+      await sleep(1000);
+      for (const dx of [5, 6]) {
+        const s = await run.run(`/summon zombie ~${dx} ~ ~ 0 0 minecraft:entity_spawned`, { pace: true });
+        note(`fight: summon ${s.ok ? 'ok' : 'failed'} ${s.messageId}`);
+      }
+      await sleep(1000);
+      const zombies = [...b.built.mobility!.world.entities.values()].filter((e) => e.type.includes('zombie')).length;
+      note(`fight: ${zombies} zombie(s) seen; guard ${b.task.pve?.guard.on ? 'on' : 'off'}; active ${b.processes.active?.name ?? 'none'}`);
+      await until(() => (b.task.pve?.combat.busy || b.processes.active?.name === 'guard' ? true : undefined), 20_000, 'the guard fights');
+      const from = b.said.length;
+      await b.command('!test inv restore sweep');
+      const first = await b.reply((x) => /^test inv (restore|:)/.test(x), from, 10_000);
+      note(`fight: first reply ${first}`);
+      expect(first).toMatch(/^test inv restore: waiting for .* to end \(at most 3 min\), then the restore/);
+      const done = await b.reply((x) => RESTORED.test(x) && !x.startsWith('test inv restore: waiting'), from, 240_000);
+      note(`fight: ${done}`);
+      expect(done).toMatch(/^test inv restore: \d+ -> \d+ free/);
+      const waited = b.logs.find((l) => /test inv restore: .* waited, restoring/.test(l));
+      note(`fight: ${waited?.replace(/^\S+ \w+ /, '') ?? 'no wait line'}`);
+      expect(testControlOf(b.task)!.inv.saved()).toBeUndefined();
+    } finally {
+      b.task.pve!.setGuard({ on: guard0 });
+      await homeCmd('difficulty', 'peaceful');
+      await run.run('/kill @e[type=zombie,r=32]', { pace: true }).catch(() => undefined);
+    }
+  }, 600_000);
+
+  it('the time limit: a forgotten save is restored on its own', async () => {
+    const b = bot!;
+    await teleport(b, centre(at));
+    const t = testControlOf(b.task)!.inv;
+    const limit0 = t.limitMs;
+    t.limitMs = 20_000;
+    try {
+      const t0 = Date.now();
+      await presetOn(b, 'early');
+      const from = b.said.length - 1; // the preset's end line is the last one: the restore of its own comes after it
+      const own = await until(() => b.said.slice(from).find((x) => x.startsWith('test inv: restoring the saved inventory on my own')), 60_000, 'the restore of its own');
+      const done = await until(() => b.said.slice(from).find((x) => /^test inv restore: \d+ -> \d+ free/.test(x)), 120_000, 'the restore');
+      note(`time limit: ${own} | ${done} (${((Date.now() - t0) / 1000).toFixed(0)} s after the preset was asked)`);
+      expect(own).toMatch(/the save waited \d+ s, the limit is 20 s/);
+      expect(t.saved()).toBeUndefined();
+    } finally {
+      t.limitMs = limit0;
+    }
+  }, 600_000);
+
+  it('an unload due at home while a save waits: nothing reaches the chests until the restore', async () => {
+    const b = bot!;
+    const c = { x: area.x, z: area.z };
+    homeLayout = await buildHome(b, c);
+    const L = homeLayout;
+    b.task.home!.set(L.home);
+    b.settings.set('autoUnload', 'on');
+    await teleport(b, centre(L.home));
+    const from = b.said.length;
+    await b.command('!chests scan');
+    note(`unload: ${await b.reply((s) => /^chests: \d+ within /.test(s), from, 120_000)}`);
+    const chests = [L.coal, L.wood, L.empty, L.boxes, L.barrel];
+    const stored = async (): Promise<Record<string, number>> => {
+      const out: Record<string, number> = {};
+      for (const p of chests) for (const [k, v] of Object.entries((await b.truth.box(p)).counts)) out[k] = (out[k] ?? 0) + v;
+      return out;
+    };
+    await presetOn(b, 'full'); // 0 free at home: the unload's trigger (fewer than 4 free with stacks to unload)
+    const s0 = await stored();
+    const logFrom = b.logs.length;
+    await sleep(25_000); // the Realm's wait before its restore
+    const s1 = await stored();
+    const held = b.logs.slice(logFrom).filter((l) => /held until the restore|home: unload held/.test(l));
+    const unloads = b.logs.slice(logFrom).filter((l) => /home chore: (unload|spares|tidy) done|unloaded: /.test(l));
+    note(`unload: chests changed while the save waited ${JSON.stringify(countsDiff(s0, s1))}; ${held.length} held line(s); unloads ${unloads.length}`);
+    expect(countsDiff(s0, s1)).toEqual({});
+    expect(unloads).toEqual([]);
+    // !unload by hand is refused too
+    const no = await ask(b, '!unload', /^unload/, 10_000);
+    note(`unload: ${no}`);
+    expect(no).toMatch(/^unload: not now: a !test inv full save from .* waits for its restore/);
+    const r = await ask(b, '!test inv restore sweep', RESTORED, 240_000);
+    note(`unload: ${r}`);
+    expect(r).toMatch(/^test inv restore: \d+ -> \d+ free/);
+  }, 900_000);
 });

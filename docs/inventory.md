@@ -23,7 +23,8 @@ same 36 slots with stone and mob drops in an hour of mining.
 | `bot/src/skills/container/exchange.ts` | the exchange by inventory model, `RateLimit` (once a minute a key) |
 | `bot/src/skills/place/place.ts`, `bot/src/skills/farm/click.ts` | `hotbarRoom(..., exchange)`, the fetch into a full inventory |
 | `bot/src/chat/commands-home.ts` | the wiring (what the chore reads and the skills it drives) |
-| `bot/src/skills/test/inv.ts`, `bot/src/chat/commands-test.ts` | Track T3: `!test inv` (`keptReason`, `snapshotInv`, `presetStacks`, `planPreset`, `planRestore`, `protectedSlots`, `InvTest`) |
+| `bot/src/skills/test/inv.ts`, `bot/src/chat/commands-test.ts` | Track T3: `!test inv` (`keptReason`, `isKeptFood`, `snapshotInv`, `presetStacks`, `planPreset`, `planRestore`, `protectedSlots`, `InvTest`: `restore`'s wait, `tick`, `restoreFirst`, `waiting`; `INV_SAVE_LIMIT_MS`, `RESTORE_WAIT_MS`) |
+| `bot/src/skills/test/guard.ts` | Track T3 follow-up: `SaveGuard`, `heldBySave`: what the home chore, the logistics, the stash step and the food chore ask while a save waits |
 
 ## Why a slot stays taken
 
@@ -237,13 +238,18 @@ is an operator (a backup of the Realm, a test server), the bot can set its own i
 How it goes:
 
 1. Refused while a trip, a flight, a fight, a test series, another process in control (a room pass: try again in a
-   moment) or a skill runs, and while an earlier save waits for its restore.
+   moment) or a skill runs, and while an earlier save waits for its restore. The first reply comes before the command
+   returns (the panel's command box shows only what is said meanwhile), and every refusal is one INFO line with its
+   reason (`test inv: refused: ...`).
 2. The save: every slot with its NBT, the boxes' contents and the worn pieces, in memory and in `<tests dir>/inv-saved.json`
    (a restart keeps it; the restore removes it).
 3. The server's count of every item it will clear (`/clear @s <item> -1 0` counts without clearing) must match the
    inventory model, else nothing is cleared. A name the server does not know stays in place.
 4. The reply says what stays in place before anything is cleared:
-   `test inv early: saved; 23 slots cleared and given back exactly by !test inv restore, 5 stay in place (...)`.
+   `test inv early: saved; 23 slots cleared and given back exactly by !test inv restore, 5 stay in place (...); the
+   food stays (3 stacks); ...`. The food the bot eats (not rotten flesh and the other bad kinds) is not cleared: it
+   stays in its slot and the restore puts its saved count back, so a preset never takes the food below what the bot
+   carried (see "While a save waits" for why).
 5. One `/replaceitem` a slot (`keep` into an empty one, so a pickup meanwhile is not overwritten), under a do-nothing
    user process (taken before the save, released after the last command) so no chore moves items meanwhile; the
    commands paced under the harness's 60 a minute (a preset is about 8 counts and 30 slots in 5 to 9 s; a restore within
@@ -278,16 +284,58 @@ The restore:
   empty slot, and a later `/replaceitem ... air` could clear it; the rockets preset's box came back into a lower slot
   its own moves had freed, so the stack saved there was given and then lost). Such a restore holds the same stacks
   with the box and that stack in each other's slots;
+- the slots to empty go before the saved stacks (Track T3 follow-up): with the food in place a preset's stacks can sit
+  beside the slot a saved partial stack goes back to, and on bds-farm (2026-11-16) 3 of 8 `full` runs ended with 48 of
+  the preset's cobblestone moved onto the owner's restored 16 between two commands; with the empties first no saved
+  partial stack ever sits beside a preset's stack of its own item;
 - `sweep` is left out (and said) while a kept item of the save is not carried: it may lie on the ground;
 - what the room chore put into a box stays there (a command cannot take it out) and is said:
   `the boxes hold firework_rocket +294 (a command cannot take it out)`; kept items moved or gone and changed worn
   pieces are said too;
 - one line before and after in the log; a refused command stops it and keeps the save.
 
+### While a save waits
+
+A preset fills the inventory with made-up items. Until the restore they must not leave the bot for the owner's chests,
+and the bot must stay as safe as it was. On the Realm (2026-11-16) a series ran `fullbar`, which cleared the food and
+gave none: 19 s later the food chore started (nothing to eat), the bot walked home for food, and the home chore
+unloaded 55 stacks of the preset (coal, glass, logs, planks, raw metals, leather, wheat, paper) into 23 of the owner's
+containers. Eight `!test inv restore` in 11 minutes were refused (another process in control), and neither the panel
+nor the log showed it. The rules since (one module the movers ask, `bot/src/skills/test/guard.ts`):
+
+| What | While a save waits | Why |
+|---|---|---|
+| the home chore's unload, spares and tidy jobs, the unload after a `!get` | held until the restore (no job starts; the scans still run, they move nothing) | the incident; held, not restored first: every preset leaves fewer than 4 free, the unload's own trigger, so restoring first would end every preset at home within a second |
+| `!unload` | refused: `unload: not now: a !test inv full save from 09:30:31 UTC waits for its restore (!test inv restore first)` | the same items |
+| the logistics' deposits (unload, tidy, spares, whoever starts them) | end at once, `held: ...`, nothing walked or moved | a second lock behind the first: no caller is missed |
+| the stash step (a `!mine`, `!quarry`, `!gather`, `!get` filling up) | held: the job ends `inventory full` | its chest step puts the job's stacks into the owner's chest |
+| the food chore | the restore runs first, on its own, then the chore goes on as before | it hunts away from the spot and walks home; the saved inventory has the food. Food is never held: when no restore can run (testMode off, not an operator, one failed in the last minute) the chore goes as before |
+| the guard, the flee, the reflex, the eater, the night shelter | never held | a fight is never held |
+| the room chore | runs (at home too: it no longer waits for an unload that will not come) | that is what a preset tests |
+
+A walk home after a full quarry still goes (it keeps the bot out of the pit): nothing is unloaded there until the
+restore.
+
+**The food stays.** The presets leave the food the bot eats in place (above), so the food chore has no reason to
+start in the first place; gear (the weapon and the armour) stayed in place already.
+
+**A restore during a fight waits.** `!test inv restore` while the guard fights (or the flee, the night shelter, a room
+pass) says `test inv restore: waiting for the fight to end (at most 3 min), then the restore` at once and runs when the
+guard hands back; after 3 minutes (`RESTORE_WAIT_MS`: long enough for a fight with a few mobs, short enough that the
+owner hears back) it says `... still after 3 min; the save is kept`. A chore below the owner's commands (the food
+chore, the home return) is no reason to wait: the restore's hold takes control from it. A series, a flight or the
+owner's own command still refuses it.
+
+**The time limit.** A save waits at most 10 minutes (`INV_SAVE_LIMIT_MS`; a fill takes 5 to 9 s, a room pass 2 to 9 s,
+and the Realm series waited 25 s before its restore), then the bot restores it on its own and says so in chat:
+`test inv: restoring the saved inventory on my own (the save waited 10 min, the limit is 10 min)`. A save from before
+a restart counts from its own time. With testMode off nothing is sent: the log says once that the save waits and the
+unload with it. `!test inv status` says when: `restored on my own in 7 min`.
+
 ### Testing V1 on a world with cheats
 
     !set testMode on
-    !test inv full        (away from home: the stone step; at home: the unload)
+    !test inv full        (away from home: the stone step; at home the unload waits for the restore)
     !test inv status      (a few seconds later: `room chore 1 pass (0 -> 6 in ... s): ...`)
     !test inv restore sweep
 
@@ -319,8 +367,17 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e test-inv --silent=fals
   nothing else moves); at home with no chest of spares (the boxes stay, one line).
 - `test-inv` (unit): what stays in place, the presets, the preset and restore plans, the runner against a fake server
   (the order of the reply and the first clear, a count the server disagrees on, a refused command, a pickup meanwhile,
-  the owner's tool swapped with the preset's, the status line's bytes).
+  the owner's tool swapped with the preset's, the status line's bytes); "While a save waits": no preset takes the food
+  below what was carried (each preset, food in the hotbar too) and the restore is exact after the bot ate, refusals
+  said at once and logged, a restore that waits out a fight and one whose wait runs out, the time limit (and a save
+  from a file), `restoreFirst` for the food chore, the held lines once a save. `home-logistics`, `stash`, `food` and
+  `test-commands`: the home chore, the deposits, the stash step and the food chore under a waiting save, and the
+  guard on the afk registry.
 - `test-inv` (e2e, bds-home, by the bot's own commands): each preset on an owner's inventory (worn netherite, an
   enchanted sword, a pickaxe, the elytra, a fireworks box, a named box, loose rockets, food): the kept slots and the
   preset's stacks by the server's own inventory read, a room pass (fullbar: the place skill's exchange), the status,
-  the restore with every slot and count as before; a refusal while a user process runs and a second preset refused.
+  the restore with every slot and count as before; a refusal while a user process runs and a second preset refused
+  (each one INFO line). Then: the food chore asking to run while a save waits (the food cleared by a command: the
+  restore goes first, on its own, the food is back, no hunt), a restore during a fight (two zombies summoned at
+  difficulty easy: it waits, then runs), the time limit (shortened to 20 s), an unload due at home (the chests
+  unchanged for 25 s, `!unload` refused).

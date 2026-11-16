@@ -9,6 +9,7 @@ import { settingGroups } from '../../../src/chat/help.ts';
 import type { ChatLine } from '../../../src/chat/text.ts';
 import type { Vec3 } from '../../../src/connection/types.ts';
 import { respawnClaimed } from '../../../src/skills/test/recovery.ts';
+import { heldBySave, saveGuardOf } from '../../../src/skills/test/guard.ts';
 import { afkChat } from './afk-chat.ts';
 
 const WP: Record<string, Vec3> = { cave_start: { x: 10, y: 40, z: 10 }, cave_end: { x: 90, y: 30, z: 12 }, r1_start: { x: 1, y: 2, z: 3 }, r1_end: { x: 4, y: 5, z: 6 }, base: { x: 7, y: 64, z: 8 } };
@@ -103,10 +104,21 @@ describe('!test on the afk registry', () => {
     expect(said[3]).toMatch(/^usage: !test inv full \| early/);
     settings.set('testMode', 'on');
     chat.handle(consoleLine('!test inv full'));
+    // Track T3 follow-up: a first reply before the handler returns (the panel takes the replies said meanwhile)
+    expect(said[4]).toBe('test inv full: started (the operator check first); the plan line follows in chat');
     await new Promise((r) => setTimeout(r, 20));
-    expect(said[4]).toMatch(/^test: the test harness needs cheats on and the bot op'd/); // not spawned: no op
+    expect(said[5]).toMatch(/^test: the test harness needs cheats on and the bot op'd/); // not spawned: no op
     expect(testControlOf(task)!.runner.counts.sent).toBe(0);
     expect(testControlOf(task)!.inv.saved()).toBeUndefined();
+  });
+
+  it('Track T3 follow-up: the afk registry sets the save guard the movers read; nothing waits without a save; no restore first with testMode off', () => {
+    const { task } = setup();
+    const g = saveGuardOf(task);
+    expect(g).toBeDefined();
+    expect(g!.waiting('the home chore')).toBeUndefined();
+    expect(heldBySave(task, 'the stash step')).toBeUndefined();
+    expect(g!.restoreFirst('the food chore')).toBe(false);
   });
 
   it('testMode on, not spawned: the probe cannot run, so nothing starts', async () => {

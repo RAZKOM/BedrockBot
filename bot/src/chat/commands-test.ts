@@ -45,6 +45,7 @@ import { waypointStoreOf } from './commands-nav.ts';
 import { survivalKitOf } from './commands-survival.ts'; // Track T2: the bare series' moves
 import { isBlade } from '../skills/test/bare.ts';
 import { INV_SAVE_FILE, InvTest, parseInvArgs, type InvSnapshot } from '../skills/test/inv.ts'; // Track T3
+import { setSaveGuard } from '../skills/test/guard.ts'; // Track T3 follow-up
 import { BaseProcess, PRIORITY, type ProcessKind } from '../tasks/process/manager.ts';
 import { homeControlOf } from './commands-home.ts';
 import { readKit } from '../skills/fly/kit.ts';
@@ -54,6 +55,8 @@ export const TEST_COMMANDS = ['test'] as const;
 export const MAX_RUNS = 50;
 /** The kit file in the tests folder (testKit `file`). */
 export const KIT_FILE = 'kit.json';
+/** Track T3 follow-up: how often the save's time limit is looked at (ms). */
+const INV_TICK_MS = 5000;
 
 export interface TestExtra {
   respawn: RespawnController;
@@ -379,8 +382,53 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
       await new Promise((r) => setTimeout(r, 800));
       await loop?.waitTicks(4);
     },
+    // Track T3 follow-up: a restore waits out what keeps the bot safe, takes control from a chore below the owner's
+    // commands, and is refused by the owner's own work (a series, a flight, a command)
+    restoreBlock: () => {
+      if (series || mobSeries) return { line: 'a test series runs (!test stop)', wait: false };
+      const fc = flyControlOf(task);
+      if ((loop?.state.gliding ?? false) || (fc?.controller.active ?? false) || corridorTripRunning(task)) {
+        return (fc?.fleeing() ?? false) ? { line: 'the flee flight', wait: true } : { line: 'a flight runs', wait: false };
+      }
+      const user = d.processes?.userProcesses().find((p) => p.name !== 'test inv');
+      if (user) return { line: `${user.name} runs (!stop)`, wait: false };
+      if (d.pve?.combat.busy) return { line: 'the fight', wait: true };
+      const a = d.processes?.active;
+      if (a && a.priority > PRIORITY.user) return { line: `${a.name}`, wait: true }; // flee, guard, night shelter
+      if (a?.name === 'room') return { line: 'the room pass', wait: true };
+      if (!a && d.mobility?.skills.status().busy) return { line: 'a skill', wait: true };
+      return undefined; // a chore below the owner's commands: the hold pauses it
+    },
+    announce: (m) => chat.say(m),
+    canCommand: async () => {
+      if (!enabled()) return 'testMode is off (!set testMode on)';
+      const op = await ops.ensure();
+      return op.state === 'op' ? undefined : op.line;
+    },
     log,
   });
+  // Track T3 follow-up (skills/test/guard.ts): the movers of items ask here while a save waits
+  setSaveGuard(task, {
+    waiting: (who) => inv.waiting(who),
+    // the food chore: the restore first (the saved inventory has the food), unless no command can go (then it goes on)
+    restoreFirst: (why) => enabled() && ops.status().state !== 'not_op' && inv.restoreFirst(why),
+  });
+  let offWarned = false;
+  const invTick = setInterval(() => {
+    try {
+      if (!inv.saved()) return;
+      if (!enabled()) {
+        if (!offWarned) log.warn(`test inv: ${inv.waiting()} but testMode is off: no restore of my own (!set testMode on, then !test inv restore); the unload waits for it`);
+        offWarned = true;
+        return;
+      }
+      offWarned = false;
+      inv.tick();
+    } catch (e) {
+      log.warn(`test inv: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, INV_TICK_MS);
+  invTick.unref();
 
   // ---- Track M1: !test mobs ----
   let mobStart: Vec3 | undefined;
@@ -606,17 +654,35 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
         const a = parseInvArgs(args.slice(1));
         if ('error' in a) return reply(a.error);
         if (a.kind === 'status') return reply(inv.status());
-        if (!enabled()) return reply(`test: testMode is off (!set testMode on; ${NEEDS_OP})`);
-        if (!loop || !d.processes || !world) return reply(d.needsWalking('test'));
-        void (async () => {
-          const op = await ops.ensure();
-          if (op.state !== 'op') return reply(`test: ${op.state === 'unknown' ? `${NEEDS_OP} (${op.line})` : op.line}`);
-          if (a.kind === 'restore') await inv.restore(reply, { sweep: a.sweep });
-          else await inv.start(a.preset, reply);
-        })().catch((e: unknown) => {
+        // Track T3 follow-up: every refusal is one INFO line with its reason, and the first reply is said before this
+        // handler returns (the panel's command route takes the replies said meanwhile: the Realm's refusals came after an
+        // await and the panel showed `replies: []`)
+        const refuse = (m: string): void => {
+          log.info(`test inv: refused: ${m}`);
+          reply(m);
+        };
+        if (!enabled()) return refuse(`test: testMode is off (!set testMode on; ${NEEDS_OP})`);
+        if (!loop || !d.processes || !world) return refuse(d.needsWalking('test'));
+        let said = false;
+        const say = (m: string): void => {
+          said = true;
+          reply(m);
+        };
+        const what = a.kind === 'restore' ? 'restore' : a.preset;
+        const go = async (): Promise<void> => {
+          if (ops.status().state !== 'op') {
+            const op = await ops.ensure();
+            if (op.state !== 'op') return refuse(`test: ${op.state === 'unknown' ? `${NEEDS_OP} (${op.line})` : op.line}`);
+          }
+          if (a.kind === 'restore') await inv.restore(say, { sweep: a.sweep });
+          else await inv.start(a.preset, say);
+        };
+        // the checks that need no command run now (InvTest's refusals are synchronous up to its first await)
+        void go().catch((e: unknown) => {
           log.error(`test inv failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
           reply(`test inv failed: ${e instanceof Error ? e.message : String(e)}`);
         });
+        if (!said) reply(`test inv ${what}: started${ops.status().state === 'op' ? '' : ' (the operator check first)'}; ${a.kind === 'restore' ? 'the result follows' : 'the plan line follows'} in chat`);
         return;
       }
       if (!enabled()) {
@@ -671,6 +737,8 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
 
   const stop = task.stop.bind(task);
   task.stop = () => {
+    clearInterval(invTick);
+    setSaveGuard(task, undefined);
     series?.stop();
     mobSeries?.stop();
     ops.stop();
