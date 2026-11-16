@@ -11,7 +11,7 @@
 import type { Vec3 } from '../connection/types.ts';
 import { FlightController, skyQuery } from '../skills/fly/controller.ts';
 import { glideKitReady, jumpTakeoff, ledgeTakeoff, planGlideDown, routeTakeoff, routeTakeoffOptions, smallPlatform, verticalTakeoff, type Ledge, type SimDeps } from '../skills/fly/glide.ts'; // Track BH, F9a
-import { elytraWornLimit, flightKitMemoryOf, isRocket, kitLine, kitReady, readKit, ROCKET, rocketsForFlight, SupplyWatch } from '../skills/fly/kit.ts';
+import { elytraWornLimit, flightKitMemoryOf, isRocket, kitLine, kitReady, readKit, ROCKET, rocketsForFlight, rocketsForWindow, SupplyWatch } from '../skills/fly/kit.ts';
 import { burnSaid, kitBurnOf, openBurnOf, type BurnRange } from '../skills/fly/burn.ts'; // Track F9e round 2, Track F10
 import { restockFromBoxes, supplyOf } from '../skills/supply/supply.ts';
 import { FlightKitOps, refillEndLine } from '../skills/fly/kitops.ts';
@@ -51,7 +51,13 @@ import { inventorySlot, type StackRequests } from '../skills/survival/screen.ts'
 import type { BlockInfo, ItemStack } from '../world/types.ts';
 import { corridorAirborne, corridorProviderOf, corridorWanted } from '../skills/fly/corridor/registry.ts'; // Track F4b
 import type { CorridorReport, SkyHint, StepOutcome } from '../skills/fly/corridor/executor.ts'; // Track F4b
-import { corridorEndLine, REFILL_MOB_REACH, runCorridorTrip, stopCorridorTrip, type CorridorWiring, type TripStyle } from './commands-corridor.ts'; // Track F4b
+import { CORRIDOR_HEALTH_MIN, corridorEndLine, flyWayWindow, REFILL_MOB_REACH, runCorridorTrip, stopCorridorTrip, type CorridorWiring, type TripStyle } from './commands-corridor.ts'; // Track F4b
+import { nodeFeet, wayAt, wayGate, wayMobs, wayPrice, wayProven, WayScout, wayStretchOptions, WAY_ARM_NEAR, WAY_NEAR, WAY_OVER_S, WAY_PROVE_MS, WAY_PROVE_NODES, WAY_START_OFF, WAY_TICK_MS, type WayWindow } from '../skills/fly/cave/waywin.ts'; // Track F17
+import { windowRequest } from '../skills/fly/corridor/drive.ts'; // Track F17
+import { PATH_PACE } from '../skills/fly/landprice.ts'; // Track F17
+import type { RoutePlan } from '../skills/fly/route/types.ts'; // Track F17
+import type { PathNode } from '../skills/nav/astar.ts'; // Track F17
+import { DEFAULT_COSTS } from '../skills/nav/costs.ts'; // Track F17
 import { orderedRoute, shortcutRoute, WaypointProvider, type RoutePoint } from '../skills/fly/cave/route.ts'; // Track F5b
 import { proveShortcutInWorker } from '../skills/fly/cave/proof.ts'; // Track F5b
 import { CAVE_STYLE, caveExecutorOptions, caveStretchOptions } from '../skills/fly/cave/style.ts'; // Track F5b
@@ -1558,6 +1564,153 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     return end;
   };
   const walk0 = pve.walk.bind(pve);
+  // ---- Track F17: windows beside the walk (docs/flight.md "Windows beside the walk (Track F17)"; decisions/0091) ----------
+  /** Track F17: `flyCaveWindows` (with `flyCave on` and the route planner): a walk along a handed way flies the stretches a proven window is faster on. */
+  const wayWindowsOn = (): boolean => caveOn() && d.settings.get('flyCaveWindows') === true && routeOn();
+  /** Track F17: the proof of a way's window from `from` in the route worker, on the rockets at hand and their burn (as the hop plans). */
+  const proveWayWindow = async (w: WayWindow, from: Vec3): Promise<{ plan: RoutePlan; loose: number; stretch: ReturnType<typeof wayStretchOptions> }> => {
+    // (a window beside the walk refills nothing: it is proven on the rockets at hand, kit.ts rocketsForWindow)
+    const loose = rocketsForWindow(readKit(inv, memory()), false);
+    const kit = kitBurn();
+    const stretch = wayStretchOptions(w.win, kit);
+    const req = windowRequest(w.win, from, loose, { margin: stretch.margin ?? w.win.margin, maxMs: WAY_PROVE_MS, maxNodes: WAY_PROVE_NODES, ...(stretch.riskCost !== undefined ? { riskCost: stretch.riskCost } : {}), ...(stretch.pieces !== undefined ? { pieces: stretch.pieces } : {}), ...(kit ? { kit } : {}) });
+    return { plan: await routePlanner(req), loose, stretch };
+  };
+  const cellLine = (p: { x: number; y: number; z: number }): string => `${Math.floor(p.x)} ${Math.floor(p.y + 1e-6)} ${Math.floor(p.z)}`;
+  /**
+   * Track F17: the walk along a handed way (W2) with a scout beside it (skills/fly/cave/waywin.ts WayScout): a window a few
+   * seconds ahead of the body is proven in the route worker while the body walks; a proof that keeps the window's margin
+   * (wayProven) and whose flight with its overhead and the landing's hostiles beats the walk's price (wayGate) arms it; the
+   * body on its start, standing, the walk is stopped, the window proven again from where the body stands when it stopped
+   * more than WAY_START_OFF off, and flown (commands-corridor.ts flyWayWindow); the walk then goes on along the same way
+   * from the node the body stands on. Nothing is done while another process (the guard, a flee, a fight) has the body or a
+   * flight is in the air, with a hostile within WAY_MOB_REACH, without a ready kit, after WAY_BAILS_MAX bail-outs, or once
+   * the health is under CORRIDOR_HEALTH_MIN. A proof that fails or does not pay costs the worker's time, never the walk's.
+   */
+  const wayWalk = async (goal: Goal, opts: GotoOptions, label: string | undefined, way: readonly PathNode[]): Promise<SkillResult> => {
+    const name = label?.replace(/^walking (to )?/, '') ?? 'the goal';
+    // (the walk priced as the landing search priced it: the probe's ticks at PATH_PACE)
+    const drop = probeNavOf(pve.mover)?.planOptions({ allowBreak: false, allowPlace: false, sprint: false }).costs?.irreversibleDrop ?? DEFAULT_COSTS.irreversibleDrop;
+    const price = wayPrice(way, drop, PATH_PACE);
+    const wiring = corridorWiring();
+    const scout = new WayScout(way, { solid: wiring.solid, ...(wiring.floor ? { floor: wiring.floor } : {}), loaded: (x, z) => wiring.loaded(x >> 4, z >> 4), price });
+    let windows = 0;
+    let landed = 0;
+    let unsafe = false;
+    for (;;) {
+      const res = walk0(goal, { ...opts, way }, label);
+      const proc = processes.active;
+      if (!proc || unsafe) return res;
+      let node = (() => {
+        const p = position();
+        return p ? (wayAt(way, p, 0, 8) ?? 0) : 0;
+      })();
+      let proving = false;
+      let done = false;
+      let armed: { w: WayWindow; plan: RoutePlan; stretch: ReturnType<typeof wayStretchOptions>; line: string } | undefined;
+      let stopFor: typeof armed;
+      const mobsAt = (p: Vec3): readonly LandMob[] => landMobsNear(world.entities.values(), pve.mobs, p, LAND_MOBS.scan);
+      const timer = setInterval(() => {
+        if (done || stopFor) return;
+        const p = position();
+        if (!p || processes.active !== proc || controller.active || pve.combat.target) return;
+        const at = wayAt(way, p, Math.max(0, node - 4));
+        if (at !== undefined && at > node) node = at;
+        if (armed) {
+          const s = nodeFeet(way[armed.w.start]!);
+          if (hdist(p, s) <= WAY_ARM_NEAR && Math.abs(p.y - s.y) < 0.6 && safeStop()) {
+            stopFor = armed;
+            armed = undefined;
+            processes.stop(proc, 'replaced');
+          } else if (node > armed.w.start + 1 && hdist(p, s) > WAY_NEAR) {
+            log.info(`fly: the window from ${cellLine(s)} was passed by (the walk is ${(scout.along[node]! - scout.along[armed.w.start]!).toFixed(0)} blocks past its start); walking on`);
+            armed = undefined;
+          }
+          return;
+        }
+        if (proving) return;
+        const k = readKit(inv, memory());
+        if (!kitReady(k, d.settings.get('toolWearLimit')).ok || rocketsForWindow(k, false) === 0) return;
+        const w = scout.next(node);
+        if (!w) return;
+        proving = true;
+        const from = w.from;
+        void proveWayWindow(w, from)
+          .then(({ plan, loose, stretch }) => {
+            if (done) return;
+            const along = `${scout.along[w.start]!.toFixed(0)} blocks along the way, ${w.win.blocks.toFixed(0)} blocks to ${cellLine(w.win.end)}`;
+            const pr = wayProven(plan, w.win);
+            if (!pr.ok) return log.info(`fly: the window from ${cellLine(from)} (${along}): ${pr.why}${!plan.complete && plan.why ? ` (${plan.why})` : ''} (${plan.expanded} expanded in ${plan.ms.toFixed(0)} ms); walked`);
+            if (node >= w.start) return log.info(`fly: the window from ${cellLine(from)} (${along}) was proven after the walk passed its start (${plan.ms.toFixed(0)} ms); walked`);
+            const here = position() ?? from;
+            const m = wayMobs(here, { x: w.win.end.x, z: w.win.end.z, feet: w.win.end.y }, mobsAt(here), mobsOn());
+            if (m.refuse) return log.info(`fly: the window from ${cellLine(from)} (${along}): ${m.refuse}; walked`);
+            const g = wayGate({ walkS: price(w.start, w.land), flyS: plan.ticks / 20, rockets: plan.rockets, loose, overS: WAY_OVER_S + m.priceS });
+            log.info(`fly: the window from ${cellLine(from)} (${along}, ${plan.ticks} ticks, ${plan.rockets} rockets, ${pr.why}${m.note ? `, the landing: ${m.note}` : ''}): ${g.line}`);
+            if (g.take) armed = { w, plan, stretch, line: g.line };
+          })
+          .catch((e: unknown) => log.warn(`fly: the window's proof failed: ${e instanceof Error ? e.message : String(e)}`))
+          .finally(() => {
+            proving = false;
+          });
+      }, WAY_TICK_MS);
+      (timer as { unref?: () => void }).unref?.();
+      const r = await res;
+      done = true;
+      clearInterval(timer);
+      const go = stopFor;
+      if (!go || r.ok) return r;
+      // stopped for the window: standing still first
+      const settle = async (): Promise<void> => {
+        for (let i = 0; i < 20 && Math.hypot(loop.state.vel.x, loop.state.vel.z) > 0.003; i++) await loop.waitTicks(1);
+      };
+      await settle();
+      const start = go.w.from;
+      // (the takeoff is the passage's middle by the node, wayMiddle: a step across to it first)
+      const at0 = position();
+      if (at0 && hdist(at0, start) > WAY_START_OFF) {
+        const step = await walk0({ type: 'block', p: { x: Math.floor(start.x), y: Math.floor(start.y + 1e-6), z: Math.floor(start.z) } }, {}, `walking to the window's takeoff`);
+        if (!step.ok && /^(stopped|interrupted|replaced)$/.test(step.reason ?? '')) return { ok: false, reason: 'interrupted' };
+        await settle();
+      }
+      const here = position();
+      if (!here) return r;
+      let plan = go.plan;
+      let stretch = go.stretch;
+      let from = start;
+      const off = Math.hypot(here.x - start.x, here.y - start.y, here.z - start.z);
+      if (off > WAY_START_OFF) {
+        // (the plan was proven from the takeoff cell's middle: from here it is proven again, its seconds counted against the window)
+        const again = await proveWayWindow(go.w, { ...here });
+        const pr = wayProven(again.plan, go.w.win);
+        const m = wayMobs(here, { x: go.w.win.end.x, z: go.w.win.end.z, feet: go.w.win.end.y }, mobsAt(here), mobsOn());
+        const g = wayGate({ walkS: price(go.w.start, go.w.land), flyS: again.plan.ticks / 20, proofS: again.plan.ms / 1000, rockets: again.plan.rockets, loose: again.loose, overS: WAY_OVER_S + m.priceS });
+        if (!pr.ok || m.refuse || !g.take) {
+          log.info(`fly: the walk to ${name} stopped ${off.toFixed(1)} off the window's start; proven again from there: ${!pr.ok ? pr.why : m.refuse ?? g.line}; walking on`);
+          continue;
+        }
+        plan = again.plan;
+        stretch = again.stretch;
+        from = { ...here };
+      }
+      const m = wayMobs(here, { x: go.w.win.end.x, z: go.w.win.end.z, feet: go.w.win.end.y }, mobsAt(here), mobsOn());
+      if (m.refuse) {
+        log.info(`fly: the walk to ${name} stopped for a window: ${m.refuse}; walking on`);
+        continue;
+      }
+      log.info(`fly: the walk to ${name} stopped at ${cellLine(here)} for a window under the roof to ${cellLine(go.w.win.end)} (${go.w.win.blocks.toFixed(0)} blocks, ${go.w.win.goals.length} goals, ${go.w.win.width} x ${go.w.win.height}, margin ${go.w.win.margin}; ${go.line})`);
+      const out = await flyWayWindow(wiring, go.w.win, `to ${cellLine(go.w.win.end)}`, plan, from, stretch);
+      windows++;
+      if (out.ok) landed++;
+      else scout.bailed();
+      log.info(`fly: window ${windows} of the walk to ${name} ${out.ok ? 'landed' : `ended (${out.reason ?? '?'}${out.bailed ? ', bailed out' : ''})`} at ${cellLine(out.at ?? loop.state.pos)}, ${out.rockets ?? 0} rockets; ${landed} of ${windows} landed`);
+      const h = world.self.health;
+      if (h !== undefined && (h <= 0 || h < CORRIDOR_HEALTH_MIN)) unsafe = true;
+      if (h !== undefined && h <= 0) return { ok: false, reason: 'died' };
+      // (the owner's !stop, a death's drop: the trip ends; the guard's pause does not end a window, it waits)
+      if (!out.ok && /^(stopped|interrupted|replaced)$/.test(out.reason ?? '')) return { ok: false, reason: 'interrupted' };
+    }
+  };
   pve.walk = async (goal: Goal, opts: GotoOptions = {}, label?: string): Promise<SkillResult> => {
     if (goal.type !== 'block') return walk0(goal, opts, label);
     const name = label?.replace(/^walking (to )?/, '') ?? fmt(goal.p);
@@ -1567,6 +1720,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       const at = position();
       const way = at && !opts.way ? wayFromHere(foundWays, at, goal.p, Date.now()) : undefined;
       if (way) log.info(`walk: from the landing cell along the landing probe's way (${way.length} nodes, ${pathBlocks(way).toFixed(1)} blocks)`);
+      // Track F17: with `flyCaveWindows` the stretches of the way a proven window is faster on are flown
+      if (way && wayWindowsOn()) return wayWalk(goal, opts, label, way);
       return walk0(goal, way ? { ...opts, way } : opts, label);
     };
     // Track BH: the walk, and a glide down when it finds no way to a goal far below

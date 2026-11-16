@@ -15,6 +15,8 @@
 // arrived: the bot waits LIVE_WAIT_MS for its chunks first). `--flight n`: the rockets' flight duration (default 1, a
 // crafted rocket: 19 to 31 ticks; 0: the script API's, 9 to 21). `--block a,b`: a solid set in the LIVE layer only (a
 // 3 x 3 x 3 lump) on the cache's way, that many cells along it, before the first decision. `--tried`: every refusal.
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { burnRange, burnSaid, proofBurns } from '../src/skills/fly/burn.ts';
 import { caveWorld, loadCaveFixture } from '../src/skills/fly/corridor/cave.ts';
 import { routeTakeoff, routeTakeoffOptions, simulateFlight, type SimDeps } from '../src/skills/fly/glide.ts';
@@ -102,6 +104,13 @@ const noPlan = (): never => {
 };
 
 const cellOf = (name: string): Vec3 => {
+  // (Track F17: `landing:<tag>`: the start cell of a pair in the fixture's fixture.json, a flight's landing at a cave's mouth)
+  if (name.startsWith('landing:')) {
+    const pairs = (JSON.parse(readFileSync(join(fix.dir, 'fixture.json'), 'utf8')) as { pairs?: { start: Vec3; tag: string }[] }).pairs ?? [];
+    const q = pairs.find((x) => x.tag === name.slice('landing:'.length));
+    if (!q) throw new Error(`no pair ${name}`);
+    return { x: Math.floor(q.start.x), y: Math.floor(q.start.y + 1e-6), z: Math.floor(q.start.z) };
+  }
   const p = fix.waypoints.get(name);
   if (!p) throw new Error(`no waypoint ${name}`);
   return cw.feetCell(p) ?? { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) };
@@ -272,6 +281,48 @@ if (has('exit')) {
   const mid = [...fix.waypoints.keys()].filter((n) => new RegExp(`^${prefix}_\\d+$`).test(n) && inBox(cellOf(n))).sort((x, y) => x.localeCompare(y, undefined, { numeric: true }));
   const route = [`${prefix}_start`, ...mid, `${prefix}_end`];
   for (const skip of arg('skip', '1').split(',').map(Number)) for (let i = 0; i + skip < route.length; i++) console.log((await hopTrip(route[i]!, route[i + skip]!, true)).split('\n').slice(0, has('tried') ? 99 : 2).join('\n'));
+} else if (has('along')) {
+  // Track F17: the hop asked as the walk's re-check asks it: from the cells of a walk from the start to the goal (a flood
+  // over the standable cells, steps of 1 up or down), every `--along` blocks of it once under the roof, one decision each
+  const [a = 'cave_start', c = 'cave_end'] = arg('hop', 'cave_start,cave_end').split(',');
+  const start = cellOf(a);
+  const goal = cellOf(c);
+  const key = (p: Vec3): string => `${p.x},${p.y},${p.z}`;
+  const prev = new Map<string, Vec3 | null>([[key(start), null]]);
+  const queue: Vec3[] = [start];
+  for (let i = 0; i < queue.length && !prev.has(key(goal)) && queue.length < 400_000; i++) {
+    const p = queue[i]!;
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      for (const dy of [0, 1, -1, -2, -3]) {
+        const q = { x: p.x + dx, y: p.y + dy, z: p.z + dz };
+        if (prev.has(key(q)) || !stands(q)) continue;
+        // (up: head room over the start; down: the column over the lower cell clear)
+        if (dy > 0 && seenSolid(p.x, p.y + 2, p.z)) continue;
+        if (dy < 0 && [...Array(-dy).keys()].some((k) => seenSolid(q.x, q.y + 2 + k, q.z))) continue;
+        prev.set(key(q), p);
+        queue.push(q);
+        break;
+      }
+    }
+  }
+  const path: Vec3[] = [];
+  for (let p: Vec3 | null | undefined = prev.has(key(goal)) ? goal : undefined; p; p = prev.get(key(p))) path.unshift(p);
+  if (!path.length) console.log(`${a} -> ${c}: no walk found over the standable cells`);
+  const step = Number(arg('along', '24'));
+  let next = 0;
+  let blocks = 0;
+  for (let i = 0; i < path.length; i++) {
+    if (i > 0) blocks += Math.hypot(path[i]!.x - path[i - 1]!.x, path[i]!.y - path[i - 1]!.y, path[i]!.z - path[i - 1]!.z);
+    const p = path[i]!;
+    if (blocks < next || !roofed(p)) continue;
+    next = blocks + step;
+    const from = feet(p);
+    stand(from);
+    const t0 = performance.now();
+    const pick = await pickHop(w, liveSim, from, goal, c, options(from, goal.y));
+    const left = path.length - 1 - i;
+    console.log(`   ${blocks.toFixed(0)} blocks walked (${left} cells left): ${pick.hop ? `${pick.hop.piece ? 'a PIECE' : 'the WHOLE way'}: ${pick.hop.length} blocks of line, ${pick.sims} simulated` : 'NO hop'} in ${(performance.now() - t0).toFixed(0)} ms; ${rel(pick.tried.join(' | '), from).slice(0, has('tried') ? 3000 : 600)}`);
+  }
 } else {
   const [a = 'cave_start', c = 'cave_end'] = arg('hop', 'cave_start,cave_end').split(',');
   console.log(await hopTrip(a, c));

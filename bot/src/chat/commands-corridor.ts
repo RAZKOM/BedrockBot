@@ -10,6 +10,8 @@
 // where the body stands under a roof (kitops.ts refillCheck `under`, no hostile in reach), and refills before it flies
 // when its loose rockets are fewer than its plan fires plus a reserve (kit.ts windowRefillWanted). With nothing loose and
 // no refill possible here the window is not proven (the executor walks to its first goal and tries again from there).
+// Track F17 (docs/flight.md "Windows beside the walk (Track F17)", ADR 0091): `flyWayWindow` flies one window under a
+// roof beside a `!goto`'s walk (commands-fly.ts wayWalk) on the same ports, with no corridor and no refill.
 import type { Vec3 } from '../connection/types.ts';
 import type { Logger } from '../log.ts';
 import type { FlightLoop } from '../skills/fly/controller.ts';
@@ -238,6 +240,57 @@ export async function runCorridorTrip(w: CorridorWiring, provider: CorridorProvi
     mine.delete(entry);
     setCorridorAirborne(w.task, () => false);
     // the windows keep the elytra on between them; the walk at the end and whatever follows want the chestplate
+    if (readKit(w.inventory, w.memory()).elytraWorn) await w.kitOps.wearChestplate().catch(() => undefined);
+  }
+}
+
+/** Track F17: a body this far (blocks) from where its window was proven at the takeoff flies without that plan (its first tracker plans from the body). */
+export const WAY_PLAN_OFF = 0.5;
+
+/**
+ * Track F17 (docs/flight.md "Windows beside the walk (Track F17)"): one window under a roof beside a walk, from where the
+ * body stands, on the plan proven from there (the first tracker flies it): the elytra on, the rockets into the hotbar, no
+ * refill (a window that would need one is walked: waywin.ts wayGate keeps a reserve), the flight, the touchdown. The
+ * fall watch takes the window's air as intended; a death or the health under CORRIDOR_HEALTH_MIN ends it as it ends a
+ * corridor trip (the window in the air lands first). The chestplate goes back on before the walk goes on.
+ */
+export async function flyWayWindow(w: CorridorWiring, win: Window, label: string, plan: RoutePlan, from: Vec3, stretch: Partial<StretchOptions>): Promise<StepOutcome> {
+  let done = false;
+  const p = new UnderFlyProcess(win, label, {
+    kitOps: w.kitOps,
+    inventory: w.inventory,
+    memory: w.memory,
+    fly: (x) => {
+      // (the plan proven from `from`: a body moved off it meanwhile, by the guard's fight before the takeoff, plans from where it stands)
+      const at = w.loop.state.pos;
+      const off = Math.hypot(at.x - from.x, at.y - from.y, at.z - from.z);
+      if (off > WAY_PLAN_OFF) w.log.info(`fly: the window's start moved ${off.toFixed(1)} off its proof before the takeoff: planned again from where the body stands`);
+      return flyStretch({ loop: w.loop, queue: w.queue, inventory: w.inventory, hotbar: w.hotbar, entities: w.entities, grid: w.grid, plan: w.plan, ...(w.columnLoaded ? { columnLoaded: w.columnLoaded } : {}), ...(w.floor ? { floor: w.floor } : {}), log: w.log }, { goals: x.goals, margin: x.margin, ...stretch, ...(off > WAY_PLAN_OFF ? {} : { firstPlan: plan }) });
+    },
+    airborne: () => w.loop.state.gliding || !w.loop.state.onGround,
+    waitTicks: (n) => w.loop.waitTicks(n),
+    log: w.log,
+  });
+  setCorridorAirborne(w.task, () => p.phase === 'flying' && (w.loop.state.gliding || !w.loop.state.onGround));
+  const watch = async (): Promise<void> => {
+    while (!done) {
+      const h = w.health?.();
+      if (h !== undefined && (h <= 0 || h < CORRIDOR_HEALTH_MIN)) {
+        w.log.warn(`fly: stopping the window (${h <= 0 ? 'died' : `health ${h.toFixed(1)} under ${CORRIDOR_HEALTH_MIN}`})`);
+        p.stopNow();
+        return;
+      }
+      await w.loop.waitTicks(1);
+    }
+  };
+  void watch();
+  try {
+    w.processes.add(p);
+    const r = await p.result;
+    return { ...r, at: r.at ?? { ...w.loop.state.pos } };
+  } finally {
+    done = true;
+    setCorridorAirborne(w.task, () => false);
     if (readKit(w.inventory, w.memory()).elytraWorn) await w.kitOps.wearChestplate().catch(() => undefined);
   }
 }

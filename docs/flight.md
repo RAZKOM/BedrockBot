@@ -1301,6 +1301,7 @@ Rules (all named `// Track AU` in the shared files):
 | `flyLandOver` | on | Track F11: a descent circle is flown no lower than 3 over the highest column under it; a landing whose circle has roofs, trees or higher ground under it is then flown in over them by the brake and straight down by the elevator; the nearest safe ground of a forced or a priced landing is never a fence, a wall or a pane, nor a roof or a wall's top with a floor beside it. `off`: the circle down to 6 over the landing whatever stands there and the ground rules as before ("The flight comes down where it planned to") |
 | `flyWayDown` | off | Track F14: a landing lies under the open sky (a floor under a roof is no landing however high the roof: a cavern's floor with 21 blocks of room was one) and has a simulated way down; a goal under a roof is searched out to where its walk comes out under the sky, however far; a landing with something standing within 14 blocks of it (more than 2 and at most 48 over its floor) is flown in over that by the brake and straight down by the elevator from the start, and a missed approach whose plan met a wall gets the same before it goes round. `off`: the search and every flight as before. On the Realm it is on since 2026-11-14 ("The way down to the landing": 15 of 15 flights to goals under a mountain on their landing) |
 | `flyLandMobs` | off | Track M3: the landing looks at hostile mobs: no landing cell within 12 blocks of a creeper, cells near other hostiles cost seconds (a zombie on the cell 6 s, an archer within 8 4 s), the chosen cell is asked again every 10 ticks of the flight, a creeper that is or will be within its blast range (7) of the touchdown moves the landing and the body goes round to it, and the reflex strikes what is in reach while the body sinks in the elevator. With nothing hostile known near the landing every flight is what it is with it off |
+| `flyCaveWindows` | off | Track F17: with `flyCave on` and the route planner, a walk from a landing along the landing probe's way (Track W2) proves windows under the roof a few seconds ahead of the body while it walks and flies one where its proof keeps the passage's margin all the way and lands with its burn out, and its flight saves at least 4 s and 35 % of the walk; a window takes off and lands in the passage's middle, ends before a bend of more than 60 degrees and before head room under 3; the walk then goes on along its way. `off`: the walk as before. Off until run on the Realm ("Windows beside the walk (Track F17)") |
 
 ## Processes
 
@@ -8299,11 +8300,265 @@ under 256 bytes; a source guard that the window's proof is given `rocketsForWind
 - **A hostile during the refill** has not been run with mobs (the test servers are peaceful): the rules above are the
   code's, the guard's pre-emption during the refill is F13's (the box broken and picked up under the guard).
 - **The bore's windows bail out** on the corridor e2e with `flyCave on` (before and after alike): the trips that now fly
-  are slower than the walk there. Not this track's; the cave tracks measure the windows on the owner's cave.
+  are slower than the walk there. Not this track's; the cave tracks measure the windows on the owner's cave. Track F17
+  found why (below, "Why the bore's windows bail out": a reference re-timed into the floor, re-plans asked from inside
+  a solid, the bend's forecast) and fixed the first two for the windows beside a walk (`TrackerRules.refClear`: the
+  bore's first window landed on 7 of 8 burns offline against 2 and 3 of 8 in two runs without). `!fly`'s corridor
+  windows do not take the rule (no gain over the generator's caves, more damage in one); the bend is open.
 - **A proof on 64 rockets** is partial more often than one on a low hand (the search keeps the rocket branches open):
   measured on the bore, not on a real cave.
 - **A refill that takes fewer than the proof counted** (a `take` refused half-way) flies on what it has and the trackers
   bail out when short, as F13's partial refill.
+
+## Windows beside the walk (Track F17)
+
+Flight v2, Track F17, [decisions/0091](decisions/0091-windows-beside-the-walk.md). The setting `flyCaveWindows`
+(default off; it needs `flyCave on` and the route planner) lets the walk from a landing along the landing probe's way
+(Track W2, above "The walk after a landing takes the probe's way") fly the stretches under a roof where a window proven
+beside the walk is faster than walking them. With the setting off nothing changes: the walk is handed the way and
+walks it, as before. The tracker's rule the windows fly with (`TrackerRules.refClear`) is new and only these windows
+take it.
+
+### Why the cave part was walked
+
+A `!goto` from the open to a goal deep in a cave flies to the cave's mouth (the landing search's long probe), lands,
+and walks the rest along the probe's way, 76 to 166 blocks of path on the owner's cave (five goals). Nothing after the
+landing asked for a window:
+
+- **The corridor executor serves `!fly` only.** Its windows under a roof (`flyCave`, Track F5b) are flown on a
+  `!fly` trip along a coarse corridor; a `!goto`'s walk never reaches them.
+- **The walk's re-check asks for a hop alone.** A walk is watched (Track BL, F9e) only while the goal is more than 48
+  blocks away in a straight line (with the hop on), and only when the walk starts more than 72 away (48 and a
+  `flyRecheckBlocks` of 24). The five landings were 38 to 78 blocks from their goals in a straight line: three were
+  never watched. On the owner's cave offline (`cave-under-probe.ts --along`, the hop asked every 25 blocks of the way):
+  from the first 56 blocks `no way under the roof`; two goals have a whole hop 82 and 107 blocks in (201 to 248 blocks
+  of line, about 1.6 s of proof), where the goal is 24 to 43 blocks off in a straight line and the re-check no longer
+  asks; the rest `too short to fly (under 65 it is walked)`. Three goals have no hop anywhere.
+- **The passage.** Along the five ways (`way-profile.ts`): 4 or 5 nodes under open sky at the mouth, then a passage 2
+  or 3 high over the feet (24 to 33 nodes of the way), then a tall passage 5 or more high and wide (22 to 86 nodes),
+  with 30 to 50 blocks of drop from the landing to the goal.
+
+What the corridor flight would do on that rest (`cave-rest-bench.ts`, the executor with the cave style from each
+landing cell, the burn 15, n 1 a goal): 2 to 18 proofs a trip, 2 to 11 of them unproven at the 2 s budget, one window
+flown a trip on four goals (49 to 90 blocks; two landed, two bailed out), 3 to 13 walks between them, 1.8 to 15.8 s of
+proofs standing. Stop and go: no faster than the walk.
+
+### Each kind of stretch
+
+| stretch | `!fly` (the corridor's windows) | `!goto` before | `!goto` with `flyCaveWindows` |
+|---|---|---|---|
+| a 3 x 3 bore (the corridor world, the hook cave) | flown; the first window bails out short on 5 or 6 of 8 burns, the window into the bend on 8 of 8 (below) | never asked | flown, landing before a bend: the corridor world 11 and 12 windows in 10 trips, 6 (crafted rockets) and 10 (plain) on their landing; the hook cave 14 and 20, 12 and 18; none hurt |
+| a bend (90 degrees and more: the corridor world's, the hook cave's) | as above | never asked | a window lands before it and the next starts beyond it (`wayTurns`) |
+| a way along a passage's side row (the probe's, on the server) | n/a | never asked | taken off, aimed and landed in the passage's middle (`wayMiddle`): from the side row every proof hit |
+| a passage 2 or 3 high over the feet (the owner's, after the mouth) | no takeoff | never asked | no takeoff: every proof from a node 2 high came back `every primitive from every reached state hits` in under 20 ms; no window starts where the head room is under 3 (`WAY_HEAD_MIN`) |
+| a tall wide passage (the owner's, 5 or more) | proofs partial at the 2 s budget, or flown and bailed out | never asked | the proven windows came within 0.20 to 0.28 of the walls (the margin is 0.30); taken by the corridor's rule they bail out (47 of 50, damage up to 5.0): not taken (`wayProven`), walked |
+| a chamber behind a low section (the corridor world) | walked (the low section) | walked | walked: a window ends before a node with less head room than 3 |
+| a slope down (the owner's: 30 to 50 blocks of drop) | as the tall passage | never asked | as the tall passage |
+| a shaft down from the sky (the corridor world's roof hole) | flown down (Track F4b) | the flight's own landing | unchanged |
+
+### Why the bore's windows bail out (the corridor e2e's trip offline, `bore-bench.ts`, 8 burns)
+
+The corridor world's straight bore is clean ground; its windows bail out for the tracker's reasons, not the planner's:
+
+- **A reference re-timed into the floor.** A plan is searched robust to the burn's two ends (the cave style sweeps no
+  burn between: 20 to 40 times slower). The tracker re-times its reference to the burn it reads off the body; for a
+  burn between the ends that reference runs into the bore's floor or roof. The body, clear of it, is then more than
+  `bailError` (1.0) off it for 3 ticks and bails out `1.1 blocks off the plan`, on clean ground.
+- **A re-plan from a reference inside a solid.** A plan asked from ahead (`replanLead` 12) starts on that reference: its
+  search has no edge at all (`1 expanded of 1`), every re-plan of the window comes back so.
+- **The bend.** The window into the bend flies at 1.5 to 1.6 a tick; the body's forecast on its best control collides
+  8 ticks ahead and the brake begins (every burn). Its controller steers towards the reference, which for a burn
+  between lies in the wall.
+
+The rule (`TrackerRules.refClear`, on for the windows beside the walk only):
+
+- a reference that lies within `PLAN_CLEAR_MIN` (0.05) of a solid is no sign of a body lost: the `off the plan`
+  bail-out does not count those ticks;
+- a re-plan asked from ahead whose reference there lies within 0.05 of a solid is asked from the body's own forecast
+  there (the plan's controls flown from the body's state for the lead, each step clear of solids); when that forecast
+  meets a solid too, the request is as before.
+
+On the bore (8 burns, the executor from 3 blocks inside the mouth): the first window landed on 2 and 3 of 8 burns
+without the rule (two runs), 7 of 8 with it; 7 and 8 of 8 trips arrived; no damage either way. The bend window bails out as before (it is the controller's
+steer, not the rule's). Over the generator's twelve caves (`cave-gen-bench.ts --style on,refclear`, 96 trips a side,
+`!fly`'s corridor windows) the rule landed as many windows (43 and 44 of 242 and 249) and one wide cave took more damage
+with it in two runs of two (means 0.39 and 0.10 without, 1.29 and 2.79 with, n 8): the cave style itself does not take
+it.
+
+### The rules (`fly/cave/waywin.ts`, `chat/commands-fly.ts wayWalk`, `chat/commands-corridor.ts flyWayWindow`)
+
+- **When.** `flyCaveWindows` on, `flyCave on`, the route planner on, and the walk handed a whole way (W2: it starts on
+  the cell a flight landed on with a probe's path to the same goal). A walk with no way handed is what it was.
+- **The scout.** Every 250 ms (`WAY_TICK_MS`) while the walk has the body (no fight, no flee, no flight), the kit
+  ready and a rocket at hand, it takes the first node of the way at least 2.5 s of walk ahead of the body
+  (`WAY_LEAD_S`: the proof's 2 s and the stop) and at least 6 blocks past the last start tried, and lays a window from
+  it along the way (`wayWindow`): the way pulled tight into via points, the cave style's corridor window (at most 96
+  blocks), its landing on a standable node of the way. A window that could not pay even flown at 22 blocks a second is
+  not proven. At most 24 proofs a walk and 2 windows that bail out.
+- **Where a window runs.** No window starts on a node with less than 3 of head room over the feet (`WAY_HEAD_MIN`), and
+  its stretch ends before the first such node. It ends before its way winds back past its start (`wayWindsBack`: the
+  corridor window takes the via point nearest the body by the plane as the first still ahead, and on a way that comes
+  back past its start a wall away a window from the way in took its first goal in the way back, across 8 blocks of
+  stone, every proof of it hitting). It ends before the way turns more than 60 degrees off its first heading
+  (`wayTurns`, `WAY_TURN_MAX`): a window lands before a bend and the next one starts beyond it.
+- **The middle of the passage.** The walk's own path keeps to no middle: on the test server the probe's way through a
+  3 x 3 bore ran along its side row, where the body standing in its cell is 0.2 from the wall, inside the margin of
+  0.3, and every proof from it came back `every primitive from every reached state hits` at its 13th node. The
+  takeoff, every via point and the stretch's end are taken in the middle of the passage by their nodes (`wayMiddle`:
+  of the node's cell and its 8 neighbours that are dry floor with 3 of head room, the one whose nearest wall at the
+  body's height is farthest, the nearest the node on a tie; a corner one only past an open side); the walk steps
+  across to the takeoff cell when it stops.
+- **The margin** is the passage's (`boreMargin` of the least head room and the least width across the way, measured
+  across it: a 3 x 3 bore is 3 wide, not the 5 it is along a diagonal).
+- **The proof** runs in the route worker while the body walks (`WAY_PROVE_MS`, the cave style's budget, 2 s and 80 000
+  nodes; the rockets at hand and their burn, as the hop plans). It is taken only when it is complete, robust to the
+  burn, keeps the window's margin all the way (`wayProven`; the corridor's proofs ask 0.15), and its landing stage
+  begins with every burn out (`wayLandsUnpowered`: a bail-out cannot stop a burning rocket). The numbers above and
+  below are why. A budget of 5 s took no more windows offline (below): the lead grows with it and the starts it
+  passes by are the windows that paid.
+- **The gate** (`wayGate`). The walk's price is the probe's ticks of that stretch at `PATH_PACE` (the landing search's
+  price; the closed-loop walk measured 1.18 to 1.25 times the probe's seconds, so the gate is a little against the
+  window). The window's cost is the plan's ticks, `WAY_OVER_S` (2 s: the stop, the elytra on, the touchdown's settle,
+  the chestplate, the walk's new start), a proof from where the body stopped when it stopped more than 0.3 off the
+  start, and with `flyLandMobs` what the hostiles round the landing cost (landmobs.ts `cellPrice`). Taken when it saves
+  at least 4 s and 35 % of the walk's price (`WAY_SAVE_MIN_S`, `WAY_SAVE_SHARE`), with 2 rockets left after the plan's
+  (no refill under a roof here). A window that bails out stands where it stopped and the walk goes on from there: it
+  loses its own seconds at most; the margins keep the expected saving over zero for bail-outs up to about 3 in 10.
+- **The stop and the takeoff.** The body on the start node (within 0.8 by the plane, standing, dry, no ladder: Track
+  BL's safe stop), the walk is stopped; the body stands still and steps across to the takeoff cell when it is not the
+  node's own; a body more than 0.3 off the takeoff has the window proven again from where it stands (and the gate asked
+  again with that proof's seconds). No window with a hostile within 8 of the body (`WAY_MOB_REACH`), or with
+  `flyLandMobs` a creeper within 12 of the landing. The window is flown as a corridor window (`UnderFlyProcess`, the
+  proven plan to the first tracker, the cave style's rules with `refClear`); a body moved more than 0.5 off the
+  proof's start before the takeoff (a fight in between) plans from where it stands.
+  The chestplate goes back on; the walk goes on along the same way from the node the body stands on (W2's rejoin).
+- **Safety.** No takeoff where the cave style says none (the takeoff edges of the cave library, the window's own
+  margin); a window in the air is above the guard and the flee and lands; the guard has a hostile otherwise (the scout
+  does nothing while it has the body). A death or the health under 12 ends the window as it ends a corridor trip and
+  no window is armed after it. `!stop` ends the walk.
+- **The log.** `fly: the window from X Y Z (B blocks along the way, N blocks to X Y Z, T ticks, R rockets, clearance C):
+  the walk 14.2 s, the window 4.2 s (...): saves 10.0 s` or, not taken, `fly: the window from X Y Z (...): partial, 4
+  of 5 goals (the ms budget ran out 4 of 5 goals in) (5312 expanded in 2002 ms); walked` (or `not robust to the burn`,
+  `clearance 0.21, under the window's margin 0.30`, `but a rocket still burns where its landing begins`); then `fly:
+  the walk to G stopped at X Y Z for a window under the roof to X Y Z (...)` and `fly: window 1 of the walk to G
+  landed at X Y Z, 1 rockets; 1 of 1 landed` (or `ended (ground, bailed out) at ...`).
+
+### Offline (`scripts/way-window-bench.ts`, n 10 a case)
+
+The walk from each landing cell along the probe's way, the scout proving windows ahead of the body at the live budget
+(each proof's wall-clock counted as walk), a window taken flown on the physics engine (`cave/bench.ts flyWindow`: the
+chain of trackers, the worker's latency, each rocket's burn drawn), the walk priced at the closed-loop pace (1.22 times
+the probe's seconds), 64 rockets at hand. "Before" is the walk alone. A case's 10 runs draw their own burns for every
+flight; the proof from a start is made once a case and shared by its runs (whether a proof comes back within its 2 s
+is one sample a start: the PC and the test host differ there). The made-up caves: the corridor world (a 3 x 3
+bore, a bend, a 2-high section, a chamber; the way its centre line) and the hook cave of the e2e
+(`fly-cave-way-world.ts`: a 2-high passage in, a 3 x 3 bore, a bend, 14 blocks across, a bend back, a 3 x 3 bore to a
+chamber; the way its centre line, or its inner side rows as the server's probe walked it). On the test host under the
+live bot's CPU policy (`mac-run.mjs --as-live`, one bench worker):
+
+| case | before (s) | after p50 (min to max) | windows (on their landing) | damage |
+|---|---|---|---|---|
+| the corridor world, crafted rockets (19 to 31) | 51.3 | 36.9 (30.1 to 40.4) | 11 (6) | 0 |
+| the corridor world, plain rockets (9 to 21) | 51.3 | 36.6 (28.2 to 36.7) | 12 (10) | 0 |
+| the hook cave's centre line, crafted | 44.1 | 32.2 (23.4 to 35.2) | 14 (12) | 0 |
+| the hook cave's centre line, plain | 44.1 | 21.8 (21.1 to 28.1) | 20 (18) | 0 |
+| the hook cave's side rows, crafted | 42.9 | 32.7 (31.8 to 42.9) | 6 (5) | 0 |
+| the hook cave's side rows, plain | 42.9 | 30.4 (30.1 to 36.8) | 10 (8) | 0 |
+
+On the PC (two bench workers) the same within a second but the hook's centre line with crafted rockets (27.6 against
+32.2: on the test host the proofs run out of their 2 s more often). The owner's cave (the PC, five goals, either kit,
+10 runs each): 30.8 to 62.4 s before, the same after, no window taken: its tall passage's proven windows keep 0.20 to
+0.28 of its walls. Taken by the corridor's proof rule (0.15, `--clear corridor`): 50 windows on three goals, 5 on
+their landing, 47 bailed out, damage up to 5.0 (crafted rockets), the runs 0 to 20 % faster for all that: the margin
+rule walks them. Without `refClear` the windows beside the walk fly the same now that they land before a bend (the
+corridor world: 6 and 10 on their landing either way); it is the bore's `!fly` windows below that it helps.
+
+How the rules came to be, on the same benches (the PC, n 10 a kit):
+
+- **The landing unpowered** (`wayLandsUnpowered`): on the hook cave before it, plain rockets, 6 of 10 windows bailed
+  out, 3 into the wall (1.1 to 2.9 of damage; the test host: 2.4 and 2.9), every one with a burn left at its landing
+  stage; with it, none hurt.
+- **The bend** (`wayTurns`; the trip's p50 at 60 / 120 / 180 degrees): the hook's side rows, crafted 32.7 / 42.9 /
+  42.9, plain 30.4 / 42.9 / 33.1; the corridor world, crafted 36.6 / 36.2 / 36.2, plain 36.6 / 26.1 / 26.1 (its one
+  bend of 90 degrees flown in 13 of 19 windows). 60 for the crafted rockets the Realm flies on; the plain kit loses
+  about 10 s of the corridor world's 51 by it.
+- **The middle** (`wayMiddle`): on the hook's side rows before it, every proof from a side-row cell came back `every
+  primitive from every reached state hits` (no window); with the takeoff alone in the middle the crafted kit's proofs
+  came back not robust; with the via points and the end too, as the table.
+- **The proof's budget**: 5 s against 2 s took no more windows (the side rows: plain 8 of 10 on their landing either
+  way, crafted 1 window against 5).
+
+### On the server (`test/e2e/fly-cave-way.test.ts`)
+
+The hook cave built on the test server (bds-fly, BDS 1.26.60.6, 2026-11-15) in a private area, seen by a scripted
+fly-over first; `!goto` to the chamber's centre from the flat ground 230 blocks off, the live flight settings (`flyCave
+on`, the drawn entry and the hop, `flyLandMobs`, `flyWayDown`, `flyLandOver`). Every trip flies over the mesa, lands at
+the mouth 0.01 to 0.02 from its cell and walks the probe's way (153 nodes, 152 blocks).
+
+| rockets | side | arrived (in the chamber) | seconds p50 (min to max) | windows (on their landing) | damage |
+|---|---|---|---|---|---|
+| plain | off | 3 of 3 | 45.8 (45.1 to 49.0) | 0 | 0 |
+| plain | on | 3 of 3 | 39.5 (39.4 to 41.7) | 3 (3) | 0 |
+| crafted (`FLY_ROCKETS=crafted`) | off | 3 of 3 | 45.8 (45.3 to 46.3) | 0 | 0 |
+| crafted | on | 3 of 3 | 39.6 (39.4 to 40.0) | 3 (3) | 0 |
+
+On every `on` trip 6 or 7 windows were proven; the one taken starts 23 blocks along the way in the 3 x 3 bore and
+lands 64 blocks on, before its far bend (`the walk 15.6 s, the window 4.8 s (2.8 s of flight, 2.0 s more): saves 10.9
+s`), flown in 53 to 58 ticks on 1 rocket. The others came back partial at the 2 s budget, not robust, or with a burn
+left at their landing, and were walked. Plain rockets again on the final tree, beside another e2e on the PC: off 47.8
+(45.6 to 47.9), on 40.1 (39.5 to 41.9), 3 of 3 windows on their landing, no damage. Five more `on` trips with plain rockets on the same code before its last
+tidying: 3 windows on their landing, 2 ended on the floor 1 or 2 goals in (a rocket burning past the plan, `the body's
+forecast on its best control collides 5 ticks ahead at 1.49 a tick: bailing out`), no damage, the trips 41.5 to 43.1 s.
+The rules came from these runs: before `wayMiddle` every proof from the probe's way (the bore's side row) hit at its
+13th node and no window was taken (45.4 s); with the middle and windows still running round the far bend, the proofs
+of the long windows ran out of their 2 s 3 to 5 goals in (46.4 and 47.9 s), and the one taken once ran round the bend
+and ended on the floor at its corner; with `wayTurns` the windows end before that bend, as the table.
+
+### The cost
+
+No planning is added before a takeoff from the open (the scout runs after the landing). A proof runs in the route
+worker while the body walks, at most 24 a walk. On the test host under the live bot's CPU policy (10 walks a case): the
+corridor world 4.4 to 4.9 proofs a walk, p50 129 to 209 ms, at most 2.08 s; the hook cave 4 to 9.5 a walk, p50 72 ms
+(plain rockets) to 2.0 s (crafted: most run out of their budget), at most 2.13 s; on the PC the owner's cave 3 to 4 a
+walk on four goals (none on the fifth), p50 149 ms to 2.0 s. The rule's checks in the tracker are one box test a tick
+and a forecast of at most 12 steps a re-plan from ahead: over the generator's twelve caves the worst tick of a trip
+was 5.4 to 9.4 ms with it and 5.5 to 24.8 ms without (96 trips a side; the 24.8 one tick of one cave), so it costs
+nothing that shows.
+
+### Unit tests (`fly-cave-way.test.ts`)
+
+The window from a way (on the way, at least `UNDER_FLY_MIN`, the bore's margin), the head-room cut (no start in the
+2-high section, a window before it lands before it), the width across the way, the wind-back cut on the hook cave
+(`wayWindsBack`), the middle (`wayMiddle`: a side-row way's takeoff, via boxes and end on the middle row), the bend
+(`wayTurns`: no corridor window goes round its bend), `wayAt`, `wayPrice` (a deep drop's preference no time),
+`wayProven` (partial, not robust, under the margin, a narrow window's own margin, a burn left at the landing:
+`wayLandsUnpowered`), `wayGate` (the minimum, the share, the reserve, the landing's hostiles), `wayWorthProving`,
+`wayMobs` (a hostile by the body, a creeper by the landing with and without the look, a melee mob's price),
+`wayStretchOptions` (the cave style's rules with `refClear`, the kit), the setting off by default and the one place
+the scout is entered, the scout (the lead, the retry, the bail-outs, the proofs, a short way), and the tracker's rule
+(a body 1.4 off a reference inside a floor bails out without it and flies on with it; a reference in clear air still
+bails out with it).
+
+### Open points (Track F17)
+
+- **The owner's cave is walked.** Its tall passage's windows are proven within the margin of its walls and bail out.
+  What would make them fly is the planner's and the tracker's: a plan robust to the burns between (midBurns: on two
+  goals, 2 of 2 of one goal's windows landed with it, the other's proofs ran out of their 2 s), and a controller that
+  does not steer towards a reference inside a solid.
+- **The bend.** A fast window into a bend bails out on its forecast (above); the windows beside the walk land before
+  a bend of more than 60 degrees and walk it (the corridor world's plain kit loses about 10 s by it).
+- **Bail-outs on the server.** On the hook cave a straight window ended on the floor 1 or 2 goals in on 2 of 11
+  takeoffs with plain rockets (0 of 3 crafted) (a rocket burning past the plan, the forecast colliding: the brake, then the sink); none
+  hurt, and those trips were still faster than the walk. The proof is robust to the burn's two ends only.
+- **The proof's budget.** In a 3 x 3 bore an 80-block window's proof often runs out of its 2 s 3 to 5 goals in with
+  crafted rockets; a longer budget did not help (above).
+- **The Realm** has not run it. With the setting on, cave goals from the open by day and by night: the `fly: the
+  window from` lines say what was proven and why it was walked, `fly: window N of the walk` what was flown and how it
+  ended. On the owner's cave as it was recorded no window is expected (its tall passage's proofs keep 0.20 to 0.28 of
+  its walls), and the trip is the walk it was.
+- **Hostiles on the way** were not run on a server with mobs: the rules are unit tests.
+- **The hop** is not asked within 48 blocks of the goal: two of the owner's goals have a whole hop there that is not
+  flown (a hop of 201 to 248 blocks of line for 32 to 73 cells of walk). Not changed.
 
 ## Open points
 

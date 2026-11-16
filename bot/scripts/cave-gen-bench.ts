@@ -65,6 +65,8 @@ const VARIANTS: Record<string, { style: boolean; variant?: Partial<CaveStyle>; s
   slow06: { style: true, speed: { clear: 0.6, slow: 0.8, fast: 1.6 } },
   nospeed: { style: true, speed: { clear: 0, slow: 0.8, fast: 1.6 } },
   slow04: { style: true, speed: { clear: 0.4, slow: 0.9, fast: 1.6 } },
+  // Track F17: a reference inside a solid's reach is no reference (tracker.ts TrackerRules.refClear)
+  refclear: { style: true, variant: { rules: { refClear: true } } },
 };
 
 interface Job {

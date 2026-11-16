@@ -15,7 +15,7 @@
 import type { Vec3 } from '../../../connection/types.ts';
 import { glideVelocity } from '../../input/physics.ts';
 import { keepYaw } from '../maneuvers.ts';
-import { sweep, type RouteGrid } from './grid.ts';
+import { boxClear, sweep, type RouteGrid } from './grid.ts';
 import { crossesFloor, inBurnTail, landsOn, passes, replayBurns, stepState, sweepGridFor } from './primitives.ts';
 import { startMarginFor } from './search.ts';
 import { BURN, NO_BOOST, burnTick, cloneState, freshBurn, headingOf, hspeed, landingCells, type BoostRange, type KitBurn, type PrimitiveFamily, type RouteControl, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from './types.ts';
@@ -117,6 +117,17 @@ export interface TrackerRules {
    * the partial answer is ignored and the body flies on while its forecast is clear.
    */
   blockedBail?: boolean;
+  /**
+   * Track F17 (docs/flight.md "Windows beside the walk (Track F17)"): a re-plan asked from ahead (`replanLead`) is asked from
+   * the body's own forecast when the plan's reference there is no state a body can be in. A reference re-timed to a burn
+   * shorter or longer than the plan's nominal runs into the floor or the roof of a bore (the plans are robust to the burn's
+   * extremes, not to the burns between); the search from it had no edge at all ("1 expanded of 1"), every re-plan of the
+   * window came back so, and the body, unable to follow a reference inside the floor, bailed out "off the plan" or on its
+   * forecast over clean ground (the corridor world's straight bore: 4 of 8 first windows). The forecast is the plan's
+   * controls flown from the body's real state for the lead (what the horizon flies when nothing corrects it); when that
+   * too meets a solid the request is made from the body now. Off: as before.
+   */
+  refClear?: boolean;
 }
 
 /** Track F7: the plan states the body may be matched to ahead of the time index (ticks), and the reference points round the matched tick the tracking cost measures to. */
@@ -286,6 +297,8 @@ export interface TrackerStats {
   endSaves?: number;
   /** The first plan's effort. */
   first?: { nodes: number; expanded: number; ms: number; ticks: number; rockets: number; complete: boolean; robust: boolean; clearance: number };
+  /** Track F17 (refClear): re-plans asked from the body's forecast instead of a reference inside a solid's reach. */
+  leadForecasts?: number;
 }
 
 export class RouteTracker {
@@ -361,6 +374,8 @@ export class RouteTracker {
   private forecastSpeed = 0;
   /** Track F7 (tube): ticks in a row the body has been over `bailError` off its reference. */
   private lostTicks = 0;
+  /** Track F17 (refClear): the reference matched this tick lies within PLAN_CLEAR_MIN of a solid. */
+  private refSolid = false;
   readonly stats: TrackerStats = { plans: 0, replans: 0, planMs: 0, partial: 0, fired: 0, corrections: 0, holdTicks: 0, evadeTicks: 0, burnsRead: 0, maxError: 0, ticks: 0 };
 
   private readonly o: TrackerOptions;
@@ -642,6 +657,18 @@ export class RouteTracker {
       delete start.late;
       delete start.mids; // (Track F8)
       at = now + (j - this.cursor);
+      // Track F17 (refClear): a reference ahead inside a solid's reach is no start: the body's own forecast instead (when that
+      // meets a solid too, the request is as before: a plan asked from the body now comes back 12 ticks late and is dropped)
+      if (this.o.rules?.refClear && boxClear(this.o.grid, ref.pos, 0).clearance < PLAN_CLEAR_MIN) {
+        const f = this.forecastFrom(this.stateOf(b), this.cursor + 1, j - this.cursor);
+        if (f && f.wp < this.o.goals.length) {
+          wp0 = f.wp;
+          goals = this.o.goals.slice(wp0);
+          start = { ...f.state, rockets: Math.max(0, b.rockets - used), wp: 0 };
+          this.stats.leadForecasts = (this.stats.leadForecasts ?? 0) + 1;
+          this.o.note?.(`route: the reference ${j - this.cursor} ticks ahead is within ${PLAN_CLEAR_MIN} of a solid: the plan asked from the body's forecast there`);
+        }
+      }
     }
     const req: RouteRequest = {
       start,
@@ -734,6 +761,33 @@ export class RouteTracker {
     this.forecastReplanned = false;
     this.forecastHit = -1;
     this.burnsRead = [];
+  }
+
+  /**
+   * Track F17 (refClear): the body's forecast `ticks` on: the plan's controls from index `idx` flown from `cur` (the state of
+   * the real body), each step swept at PLAN_CLEAR_MIN; the state reached and the goal it is due at next (an index of the
+   * tracker's goals), or undefined when a step meets a solid or the plan's controls run out first.
+   */
+  private forecastFrom(cur: RouteState, idx: number, ticks: number): { state: RouteState; wp: number } | undefined {
+    const p = this.plan;
+    if (!p) return undefined;
+    const goals = this.planGoals;
+    const stack = this.o.stackRockets === true;
+    let s: RouteState = { ...cur, wp: Math.max(0, this.wp - this.planWp0) };
+    for (let t = 0; t < ticks; t++) {
+      const c = p.controls[idx + t];
+      if (!c) return undefined;
+      const r = stepState(s, c, stack, undefined, this.o.grid);
+      const g = goals[r.next.wp];
+      if (sweep(sweepGridFor(this.o.grid, g, s.pos), s.pos, r.next.pos, PLAN_CLEAR_MIN).hit) return undefined;
+      while (r.next.wp < goals.length && passes(goals[r.next.wp]!, s.pos, r.next.pos)) r.next.wp++;
+      s = r.next;
+    }
+    const out = cloneState(s);
+    delete out.early;
+    delete out.late;
+    delete out.mids;
+    return { state: { ...out, wp: 0 }, wp: this.planWp0 + s.wp };
   }
 
   /** Track F7: the body at `pos` is farther than NEXT_PLAN_FAR from a plan's start and its first states. */
@@ -1169,6 +1223,9 @@ export class RouteTracker {
       const ref = this.ref(i).pos;
       error = Math.hypot(ref.x - b.pos.x, ref.y - b.pos.y, ref.z - b.pos.z);
       if (error > this.stats.maxError) this.stats.maxError = error;
+      // Track F17 (refClear): the matched reference lies within PLAN_CLEAR_MIN of a solid (re-timed into a floor or a roof): the
+      // body cannot be there, so its distance from it is no sign of a body lost (the bail-out below)
+      this.refSolid = this.o.rules?.refClear === true && boxClear(this.o.grid, ref, 0).clearance < PLAN_CLEAR_MIN;
       const cur = this.stateOf(b);
       // Track F6: a burn read off the body whose controls would hit ahead (retime) asks for a complete plan as a loaded chunk
       // would, but never the bail-out on its own: it is an open-loop forecast the horizon corrects (a plan robust to the
@@ -1303,7 +1360,7 @@ export class RouteTracker {
     // Track F5b: the body far off its reference (bailError): the stop, not a chase of a plan it has left
     // (Track F7, tube: the error must stay over `bailError` for LOST_TICKS ticks: a re-timed reference moves the reference, not
     // the body, and the horizon converges on it in a few ticks; the body's own forecast guards the walls meanwhile)
-    const over = rules?.bailError !== undefined && status === 'tracking' && error > rules.bailError;
+    const over = rules?.bailError !== undefined && status === 'tracking' && error > rules.bailError && !this.refSolid;
     this.lostTicks = over ? this.lostTicks + 1 : 0;
     const lost = over && (rules?.tube !== true || this.lostTicks >= LOST_TICKS);
     if (b.gliding && (planless || partialOut || lost)) {
