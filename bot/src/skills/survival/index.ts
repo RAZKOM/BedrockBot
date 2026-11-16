@@ -18,6 +18,7 @@ import type { EntityInfo, ItemStack, PacketSource, Vec3 } from '../../world/type
 import { Avoidance, DEFAULT_AVOID_MOB_RADIUS, DEFAULT_AVOID_SPAWNER_RADIUS, SpawnerIndex, type SpawnerWorld } from '../nav/avoidance.ts';
 import { wireItemOf } from '../place/place.ts';
 import { exchangeFor, setExchange } from '../container/exchange.ts'; // Track V1
+import { setThrown, thrownFor, ThrownItems } from '../inventory/thrown.ts'; // Track V1 follow-up 3
 import { ARMOUR_SLOT_NAMES, ArmourController, type EquipResult, type WearResult } from './armour.ts';
 import { chooseFood, EatController, wantsToEat, type EatResult } from './eat.ts';
 import { DEFAULT_JUNK, DEFAULT_THROWAWAY_MIN, hotbarThrowaway, InventoryKeeper, pickHotbarVictim, THROWAWAY_BLOCKS, type DropResult } from './keeper.ts';
@@ -82,6 +83,8 @@ export interface SurvivalWorld extends SpawnerWorld {
   };
   readonly self: { readonly food: number; readonly health: number; readonly runtimeId: bigint };
   readonly entities: ReadonlyMap<bigint, EntityInfo>;
+  /** Track V1 follow-up 3: the entity adds (the bot's own throws are matched to its drops: skills/inventory/thrown.ts). */
+  readonly entityTracker?: { onAdd(fn: (e: EntityInfo) => void): () => void };
 }
 
 /** BotSkills as the kit uses it. */
@@ -169,6 +172,8 @@ export class SurvivalKit {
   private op: Promise<unknown> | undefined;
   private lastHealth: number | undefined;
   private pauseEatUntil = 0;
+  /** Track V1 follow-up 3: the item actors the bot threw (undefined without an entity tracker). */
+  thrown: ThrownItems | undefined;
   readonly stats = { passes: 0 };
 
   constructor(deps: SurvivalDeps) {
@@ -212,8 +217,16 @@ export class SurvivalKit {
         return { throwawayMin: s.throwawayMin, throwaway: s.throwaway, junk: s.junk };
       },
       noteHotbar: (slot) => hotbar.noteRaw?.(slot, wireItemOf(world.inventory.slots[slot], undefined)),
+      thrown: () => this.thrown,
       logger: this.log,
     });
+    // Track V1 follow-up 3: the bot's own throws, skipped by every collect (skills/inventory/thrown.ts)
+    if (world.entityTracker) {
+      const t = new ThrownItems({ position: () => (loop.state.ready ? loop.state.pos : undefined) });
+      this.thrown = t;
+      setThrown(world.inventory, t);
+      this.unsubs.push(world.entityTracker.onAdd((e) => t.added(e)));
+    }
     this.spawners = new SpawnerIndex(world, () => (loop.state.ready ? loop.state.pos : undefined));
     this.avoidance = new Avoidance({
       entities: () => world.entities,
@@ -249,6 +262,7 @@ export class SurvivalKit {
 
   dispose(): void {
     if (exchangeFor(this.d.world.inventory) === this.exchange) setExchange(this.d.world.inventory, undefined);
+    if (this.thrown && thrownFor(this.d.world.inventory) === this.thrown) setThrown(this.d.world.inventory, undefined);
     for (const u of this.unsubs.splice(0)) u();
     this.eater.cancel();
     this.requests.dispose();

@@ -13,6 +13,9 @@
 // about the caller's own timeout in all. Never for saplings, sticks, apples or seeds (not worth a pillar). The
 // blocks that walk placed are scaffold (`deps.scaffold`, BotSkills.scaffold): dug again after the pickup
 // (place/scaffold.ts), unless removing them would strand the bot (then they stay and the log says so).
+//
+// The bot's own throws (`ignore`, Track V1 follow-up 3: skills/inventory/thrown.ts) are never walked to: a collect after
+// a fight picked up the stone the room chore had just dropped.
 import { silentLogger, type Logger } from '../../log.ts';
 import type { EntityInfo, ItemStack, Vec3 } from '../../world/types.ts';
 import { maxStackOf } from '../container/chest.ts';
@@ -39,6 +42,8 @@ export interface CollectDeps {
   scaffold?: ScaffoldRecord;
   /** Dig the recorded scaffold again (BotSkills.clearScaffold). */
   clearScaffold?: (record: ScaffoldRecord) => Promise<ClearResult>;
+  /** Track V1 follow-up 3: item actors never walked to (the bot's own throws: skills/inventory/thrown.ts). */
+  ignore?: (runtimeId: bigint) => boolean;
 }
 
 export interface CollectOptions {
@@ -140,6 +145,7 @@ export async function collectItems(radius: number, timeoutTicks: number, deps: C
         e.type === ITEM &&
         e.item !== undefined &&
         !skip.has(e.runtimeId) &&
+        !deps.ignore?.(e.runtimeId) &&
         (!opts.filter || opts.filter(e.item)) &&
         Math.hypot(e.pos.x - origin.x, e.pos.y - origin.y, e.pos.z - origin.z) <= radius,
     );

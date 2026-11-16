@@ -23,6 +23,7 @@ same 36 slots with stone and mob drops in an hour of mining.
 | `bot/src/skills/container/exchange.ts` | the exchange by inventory model, `RateLimit` (once a minute a key) |
 | `bot/src/skills/place/place.ts`, `bot/src/skills/farm/click.ts` | `hotbarRoom(..., exchange)`, the fetch into a full inventory |
 | `bot/src/chat/commands-home.ts` | the wiring (what the chore reads and the skills it drives) |
+| `bot/src/skills/inventory/thrown.ts` | `ThrownItems` (the bot's own throws by entity id, `thrownFor`), `throwDirection`, `throwAway` (a drop stays dropped) |
 | `bot/src/skills/test/inv.ts`, `bot/src/chat/commands-test.ts` | Track T3: `!test inv` (`keptReason`, `isKeptFood`, `snapshotInv`, `presetStacks`, `planPreset`, `planRestore`, `protectedSlots`, `InvTest`: `restore`'s wait, `tick`, `restoreFirst`, `waiting`; `INV_SAVE_LIMIT_MS`, `RESTORE_WAIT_MS`) |
 | `bot/src/skills/supply/boxes.ts`, `bot/src/skills/supply/supply.ts` | Track T3 follow-up 2: `BoxOps.takeBack`, `Supply.unbox` (the restore takes a preset's boxed items back out; `boxedExcess` in inv.ts says what) |
 | `bot/src/skills/test/guard.ts` | Track T3 follow-up: `SaveGuard`, `heldBySave`: what the home chore, the logistics, the stash step and the food chore ask while a save waits |
@@ -191,6 +192,41 @@ the hotbar puller has used since Track T2 follow-up 2):
 With no exchange (no survival kit), or a refused move, the reason goes to the log once a minute per item and reason:
 
     place: no hotbar slot for cobblestone (slot 20): the inventory is full (36 of 36) and no exchange is wired
+
+## A drop stays dropped
+
+Bedrock hands an item to a player whose box (grown by about 1 block sideways) touches it once its pickup delay (about
+2 s) has run out; the bot cannot refuse it. A stack dropped at the feet of a bot that stands still comes back, and a
+collect walks to anything in reach. On the Realm the stone step dropped 434 cobblestone three times in 12 s. Two rules
+(`bot/src/skills/inventory/thrown.ts`, ADR 0090 decision 13):
+
+- **The collector skips the bot's own throws.** The keeper announces every drop request before it goes out
+  (`ThrownItems.expect`); an item actor of that item that spawns at the body (within 1.5 blocks sideways, from 0.5
+  below to 2.5 above the feet) within 2 s is the throw, and every collect (a fight's sweep, a job's, a box pickup)
+  skips its runtime id for 5 minutes, an item's despawn time. A zombie's rotten flesh beside the bot's own is a new
+  entity and is picked up.
+- **The body walks away** (the junk and stone steps, `throwAway`): it faces a direction with no block within 3 cells at
+  the feet and the head (the throw does not bounce back off a wall; nothing unloaded), the opposite one free too if it
+  can, looks a little above the horizon, drops, and walks at least 4 blocks from any of its stacks that landed within 3.
+  One log line says it (measured): `inventory: threw 434 cobblestone: 7 items seen thrown, walked out of reach: ok`.
+
+The keeper's own junk drop at 36 of 36 runs during jobs too and does not move the body; the collector rule holds there.
+
+Measured on bds-home (`test-inv` e2e, the early preset away from home, 2026-11-16, one run each): the stone step
+dropped 434 cobblestone once (7 stacks seen thrown, the walk out of reach ok); 60 s idle after it: no drop again, 10 free
+before and after, 64 cobblestone carried, the 7 stacks still on the ground. Then a zombie summoned beside the bot and
+killed by the guard: its collect `gained {"rotten_flesh":2}`, the 7 stacks left lying, no drop again. On main's code the
+same run: the idle part held too (BDS did not hand the stacks back to a bot standing still; on the Realm it did), but
+the fight's collect took back all 434 cobblestone (`gained {"cobblestone":434,"string":2,"rotten_flesh":5}`) and the
+room chore dropped twice more.
+
+The box step's check that the right box was placed counts the boxes carried by what they are (name, custom name,
+contents), wherever they lie: an exchange that gives the fireworks box the plain box's old slot, a resync or a keeper
+move between the place and the check no longer reads as a wrong box (ADR 0090 decision 14). The `test-inv` e2e case
+with the Realm's hotbar (tools in every slot but the fireworks box's) brings the plain box in by exchanging it with the
+fireworks box and fills it (`2 -> 21 slots free`, the fireworks box's 165 rockets kept). That case passed on main's code
+too: BDS did not reproduce the Realm's false verdict, which the unit test reproduces by another box moving during the
+place.
 
 ## Settings
 
@@ -396,4 +432,8 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e test-inv --silent=fals
   difficulty easy: it waits, then runs), the time limit (shortened to 20 s), an unload due at home (the chests
   unchanged for 25 s, `!unload` refused), a carried bot_loot box holding 12 bone under the `full` preset with
   `dropStone 0` (the room pass boxes the preset's items into it; after the restore it holds 12 bone again and every
-  carried count is as saved). Every preset case checks the boxes hold what they held.
+  carried count is as saved). Every preset case checks the boxes hold what they held;
+  and (follow-up 3) the Realm's hotbar (the box exchanged with the fireworks box, `T3_PRESETS=v1d` runs only those
+  cases) and the early preset's drop left lying 60 s idle and through a fight's collect.
+- `thrown`, `collect` (the bot's own throws), `survival` (every drop announced) and `supply` (the box census): a drop
+  stays dropped, and the box is followed through an exchange.

@@ -121,6 +121,74 @@ describe('Track V1c: the box in the main inventory with the hotbar full (the roo
     expect(h.boxes.size).toBe(0);
   });
 
+  describe('Track V1 follow-up 3: the box followed through the exchange (the Realm 2026-11-16: the fireworks box exchanged into the box\'s old slot)', () => {
+    /** The Realm's layout: a full hotbar whose only slot to give is the fireworks box (red, hotbar 2), the empty box in 18, loot in 20 and 21. */
+    const realm = () => {
+      const inv: ({ name: string; count: number } | null)[] = Array.from({ length: 36 }, () => null);
+      for (let i = 0; i < 9; i++) inv[i] = item(['netherite_sword', 'netherite_pickaxe', 'red_shulker_box', 'firework_rocket', 'elytra', 'netherite_axe', 'netherite_shovel', 'bow', 'firework_rocket'][i]!, 1);
+      inv[18] = item('green_shulker_box', 1);
+      inv[20] = item('bone', 64);
+      inv[21] = item('bone', 30);
+      for (let i = 9; i < 36; i++) if (!inv[i] && i !== 30) inv[i] = item('stick', 1);
+      return inv;
+    };
+    const rocketsBox = nbt([{ name: 'firework_rocket', count: 64 }]);
+    /** The kit's exchange: the box into hotbar 2, the fireworks box into the box's old slot. */
+    const exchange = (h: ReturnType<typeof fakeHome>) => (slot: number) => {
+      const [a, ra] = [h.inv[slot], h.invRaws[slot]];
+      h.inv[slot] = h.inv[2]!;
+      h.invRaws[slot] = h.invRaws[2];
+      h.inv[2] = a!;
+      h.invRaws[2] = ra;
+      return Promise.resolve(2);
+    };
+    const bones = (h: ReturnType<typeof fakeHome>) => () => [20, 21].filter((i) => h.inv[i]?.name === 'bone').map((i) => ({ slot: i, count: h.inv[i]!.count, name: 'bone' }));
+    const setUp = () => {
+      const h = fakeHome({ containers: {}, inv: realm() as never, invRaws: Object.assign([], { 2: rocketsBox }) });
+      return { h, s: opsOn(h, exchange(h)) };
+    };
+
+    it('another box moved while the box was placed (a resync, a keeper move): still the right box, the loot boxed', async () => {
+      const { h, s } = setUp();
+      // the server's inventory renumbered after the place: the fireworks box now in slot 30 (its raw a fresh object)
+      h.fail.onPlaced = () => {
+        h.inv[30] = h.inv[18]!;
+        h.invRaws[30] = JSON.parse(JSON.stringify(h.invRaws[18])) as unknown;
+        h.inv[18] = null;
+        h.invRaws[18] = undefined;
+      };
+      const r = await s.putInto(18, bones(h));
+      expect(r.reason).toBeUndefined();
+      expect(r.moved).toBe(94);
+      expect(shulkerContents(h.invRaws[h.inv.findIndex((x) => x?.name === 'green_shulker_box')])).toEqual({ bone: 94 });
+      expect(shulkerContents(h.invRaws[h.inv.findIndex((x) => x?.name === 'red_shulker_box')])).toEqual({ firework_rocket: 64 });
+    });
+
+    it('the exchange alone: the box placed from hotbar 2, the fireworks box untouched in 18', async () => {
+      const { h, s } = setUp();
+      const r = await s.putInto(18, bones(h));
+      expect(r).toEqual({ moved: 94 });
+      expect(h.inv[18]?.name).toBe('red_shulker_box');
+    });
+
+    it('the fireworks box placed instead (the server took another slot): judged the wrong box and picked up again', async () => {
+      const { h, s } = setUp();
+      h.fail.onPlaced = (key) => {
+        // what was placed is the red box: green back where it was, red gone from 18
+        const b = h.boxes.get(key)!;
+        b.kind = 'red_shulker_box';
+        h.inv[2] = item('green_shulker_box', 1);
+        h.invRaws[2] = nbt([]);
+        h.inv[18] = null;
+        h.invRaws[18] = undefined;
+      };
+      const r = await s.putInto(18, bones(h));
+      expect(r.moved).toBe(0);
+      expect(r.reason).toMatch(/^placed another box than the one wanted \(picked it up again\)/);
+      expect(r.reason).toContain('red_shulker_box');
+    });
+  });
+
   it('the wiring asks the kit for its reason (commands-home.ts: hotbarWhy, not the bare fallback)', () => {
     const src = readFileSync(new URL('../../../src/chat/commands-home.ts', import.meta.url), 'utf8');
     expect(src).toMatch(/toHotbar: async \(slot\) => \{[\s\S]{0,300}hotbarWhy\(slot\)/);

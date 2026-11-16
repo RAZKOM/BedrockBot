@@ -46,6 +46,7 @@ import { readKit } from '../skills/fly/kit.ts';
 import { unsafeBoxCell } from '../skills/fly/kitops.ts';
 import { compactRunner } from '../skills/home/unloader.ts';
 import { roomAskLine, roomSlotsOf } from '../skills/inventory/room.ts';
+import { throwAway } from '../skills/inventory/thrown.ts'; // Track V1 follow-up 3
 import { DEFAULT_JUNK } from '../skills/survival/keeper.ts';
 import { ROOM_MOB_RANGE, RoomChore } from '../tasks/process/room.ts';
 
@@ -284,7 +285,27 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     homeFirst: () => chore.unloadDue(),
     changedAt: () => invChanged,
     merge: (from, to, count) => kit()?.merge(from, to, count) ?? Promise.resolve({ ok: false, reason: 'no survival kit' }),
-    drop: (name, count) => kit()?.drop(name, count) ?? Promise.resolve({ ok: false, dropped: 0, reason: 'no survival kit' }),
+    // Track V1 follow-up 3: thrown towards a free direction and walked away from (skills/inventory/thrown.ts), so the
+    // stacks are not handed back when their pickup delay ends (the Realm 2026-11-16: 434 cobblestone dropped 3 times in 12 s)
+    drop: async (name, count) => {
+      const k = kit();
+      if (!k) return { ok: false, dropped: 0, reason: 'no survival kit' };
+      const r = await throwAway({
+        position: () => mob.position(),
+        solidAt: (p) => {
+          const b = world.blockAt(p);
+          return b && b.name !== 'unknown' ? b.boxes.length > 0 : undefined;
+        },
+        lookAt: (p) => mob.skills.lookAt(p),
+        waitTicks: (n) => mob.loop.waitTicks(n),
+        drop: () => k.drop(name, count),
+        thrown: () => k.thrown,
+        entities: () => world.entities,
+        goto: (g, o) => mob.skills.goto(g, o),
+      });
+      if (r.dropped > 0) log.info(`inventory: threw ${r.dropped} ${name}: ${r.seen} item${r.seen === 1 ? '' : 's'} seen thrown${r.away ? `, walked out of reach: ${r.away}` : ''}`);
+      return r;
+    },
     // the box goes down only on a cell that keeps its drop (no ledge, no water or lava, nothing falls in: kitops.ts unsafeBoxCell)
     putIn: (box, moves, cancelled) => {
       const at = mob.position();

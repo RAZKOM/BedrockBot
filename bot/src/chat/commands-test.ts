@@ -241,7 +241,9 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
     queue: (name: string, params: Record<string, unknown>) => conn.queue(name, params),
   };
   const runner = new CommandRunner(source, { log });
-  const ops = new OpDetector(source, { run: (c) => runner.run(c), log });
+  // the probe waits for room at the minute's command limit: a probe due again (PROBE_TTL_MS) right after a preset's 27
+  // commands failed `rate_limited` and refused the restore as `needs cheats on and the bot op'd` (e2e test-inv, 2026-11-16)
+  const ops = new OpDetector(source, { run: (c) => runner.run(c, { pace: true }), log });
   ops.start();
   const respawn = extra.respawn;
   const loop = d.mobility?.loop;

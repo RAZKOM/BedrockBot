@@ -94,6 +94,28 @@ keeps it under 36 (it drops filler beyond 16 with no chest and no box); idle, no
     rule plus no snow layer or fire. Not reproduced on BDS: on bds-home a full hotbar brought the box in every time, so
     the Realm cause is left to the next run's reason line.
 
+13. **A drop stays dropped** (Track V1 follow-up 3). On the Realm the stone step dropped 434 cobblestone three times in
+    12 s: the bot stood still, the stacks lay at its feet, and the server handed them back once their pickup delay
+    (about 2 s) ran out; a fight's `collect r=8` walks to the bot's own throwaways too. Bedrock picks items up on the
+    server side when the player's box touches them, so the bot cannot refuse a pickup it stands in. Two rules
+    (`skills/inventory/thrown.ts`): every drop request of the keeper (`!drop`, the junk and stone steps, the stash
+    step's filler, the junk at 36 of 36) is announced first, and an item actor of that item spawned at the body within
+    2 s is the throw; every collect skips those runtime ids for 5 minutes (an item's despawn time). By entity id, so a
+    zombie's rotten flesh next to the bot's own is still picked up. And the junk and stone steps throw towards a
+    direction with no block within 3 cells at the feet and the head, looking a little up, and walk at least 4 blocks
+    away from what landed within 3 (`throwAway`). The keeper's own junk drop at 36 of 36 does not move the body (it runs
+    during jobs; the collector rule still holds there).
+14. **The box is followed by what it is, not by its slot** (Track V1 follow-up 3). Same session: the plain box in slot
+    18 was brought into hotbar 2 by an exchange whose victim was the fireworks box (the only hotbar slot to give), the
+    right box was placed, and the step judged it `placed another box than the one wanted`. The place check compared
+    each other box's slot and name before and after the place; any move of another box in between (the fireworks box
+    now in 18, a resync after the lost packet that renumbers the slots, a keeper move) read as a wrong placement. Now
+    the check is a census of the boxes carried by identity (name, custom name, contents; never the stack id, which a
+    resync renumbers), wherever they lie: every other box must still be carried, and the wanted one gone or still
+    there (its slot update not in yet). A real wrong placement says which box went (`gone from the inventory:
+    red_shulker_box 1 -> 0`). The exact Realm event between the exchange and the check is not known (the log has no
+    line for it); the next one is named in the reason.
+
 ## Consequences
 
 Measured on bds-home, the inventories set by truth (docs/inventory.md "Measured" has the table):
@@ -110,4 +132,11 @@ Measured on bds-home, the inventories set by truth (docs/inventory.md "Measured"
   failed with nothing in the log.
 - A box step sets a box down next to the bot (not on a ledge, beside water or lava, or under sand or gravel: the flight
   kit's `unsafeBoxCell`) and picks it up again; no step with a hostile near.
+- A drop stays dropped (decision 13; bds-home, the early preset, one run each): 434 cobblestone dropped once, 60 s idle
+  with no drop again and 10 free throughout, then a fight whose collect took the zombie's 2 rotten flesh and left the 7
+  thrown stacks. Main's code in the same run: the fight's collect took the 434 cobblestone back and the chore dropped
+  twice more; the idle part held on BDS on main too (the Realm's pickup at the feet was not reproduced).
+- The box followed through an exchange (decision 14): the Realm's hotbar on bds-home, the plain box exchanged with the
+  fireworks box and filled, 165 rockets kept; also on main (not reproduced on BDS; the unit test moves another box
+  during the place and fails on main).
 - Not done: no chest is crafted; owner gifts are not known; the panel shows no room state; no run on the Realm.

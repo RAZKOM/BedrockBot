@@ -2,6 +2,7 @@
 // detection, unreachable items, filter, cancel and timeout.
 import { describe, expect, it } from 'vitest';
 import { collectItems, type CollectDeps } from '../../../src/skills/collect/collect.ts';
+import { THROWN_KEEP_MS, ThrownItems } from '../../../src/skills/inventory/thrown.ts';
 import type { Goal, NavGoal } from '../../../src/skills/nav/goals.ts';
 import { Inventory } from '../../../src/world/inventory.ts';
 import type { ItemV4 } from '../../../src/world/packets.ts';
@@ -115,6 +116,34 @@ describe('collectItems', () => {
     const t = fake({ pickup: false });
     for (let i = 1n; i < 30n; i++) t.entities.set(i, item(i, 'oak_log', 1, { x: Number(i) * 0.2, y: -59.875, z: 0 }));
     expect(await collectItems(8, 100, t.deps, { attemptsPerItem: 99 })).toMatchObject({ ok: false, reason: 'timeout' });
+  });
+});
+
+describe('collectItems: the bot\'s own throws (Track V1 follow-up 3)', () => {
+  it('a collect after a fight walks to the zombie\'s drop and a dig\'s, never to the dirt the bot just threw', async () => {
+    const f = fake();
+    let t = 0;
+    const thrown = new ThrownItems({ position: () => f.state.pos, now: () => t });
+    f.deps.ignore = (id) => thrown.has(id);
+    // the room chore drops 64 dirt: announced, then the item actor spawns at the body (eye height)
+    thrown.expect('dirt', 64);
+    const own = item(5n, 'dirt', 64, { x: 0.6, y: -58.4, z: 0.5 });
+    f.entities.set(5n, own);
+    thrown.added(own);
+    own.pos = { x: -3.4, y: -59.875, z: 0.5 }; // where it landed
+    // 3 s later: a dig's dirt next to the bot, a zombie killed 4 blocks out drops a log
+    t = 3000;
+    const dug = item(7n, 'dirt', 1, { x: 2.5, y: -59.875, z: 0.5 });
+    f.entities.set(7n, dug);
+    thrown.added(dug);
+    f.entities.set(6n, item(6n, 'oak_log', 1, { x: 4.5, y: -59.875, z: 2.5 }));
+    const r = await collectItems(8, 400, f.deps);
+    expect(r).toMatchObject({ ok: true, gained: { dirt: 1, oak_log: 1 } });
+    expect(f.entities.has(5n)).toBe(true);
+    expect(f.gotos.some((g) => g.type === 'near' && g.p.x < 0)).toBe(false);
+    // after THROWN_KEEP_MS it is an item like any other
+    t = 3000 + THROWN_KEEP_MS;
+    expect(thrown.has(5n)).toBe(false);
   });
 });
 

@@ -37,6 +37,7 @@ import { PlaceSkill, type PlaceOptions, type PlaceResult } from './place/place.t
 import { clearScaffold, isNaturalTerrain, LATE_PLACE_TICKS, onScaffold, recordPlaced, ScaffoldRecord, type ClearResult } from './place/scaffold.ts';
 import { HOSTILE_TYPES, bareType } from './combat/hostiles.ts';
 import { DEFAULT_THROWAWAY_MIN } from './survival/keeper.ts';
+import { thrownFor } from './inventory/thrown.ts'; // Track V1 follow-up 3
 import { estimateBreak } from './dig/breakTime.ts';
 import { blockMining, toolOf } from '../data/mining.ts';
 import type { GotoOptions } from './types.ts';
@@ -586,6 +587,7 @@ export class BotSkills implements Skills {
           hardTried: this.hardTried,
           scaffold: this.scaffold,
           clearScaffold: () => this.clearScaffold(cancelled),
+          ignore: (id) => thrownFor(inventory)?.has(id) ?? false, // Track V1 follow-up 3: the bot's own throws
         },
         opts,
       );

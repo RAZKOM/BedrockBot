@@ -156,6 +156,8 @@ export interface KeeperDeps {
   settings: () => KeeperSettings;
   /** A hotbar slot changed client side (Hotbar.noteRaw: the wire item is rebuilt from the model). */
   noteHotbar?: (slot: number) => void;
+  /** Track V1 follow-up 3: every drop request is announced first (skills/inventory/thrown.ts: the collector skips the throw). */
+  thrown?: () => { expect(name: string, count: number): void } | undefined;
   logger?: Logger;
 }
 
@@ -262,6 +264,7 @@ export class InventoryKeeper {
         for (const w of pieces) {
           const it = this.d.inventory.window?.(w.window)?.slots[w.slot];
           if (!it || it.count <= 0) continue;
+          this.d.thrown?.()?.expect(it.name, it.count);
           const r = await this.d.requests.send([{ type_id: 'drop', legacy_type_id: 3, count: it.count, source: slotInfo(w.container, w.reqSlot, it.stackId), randomly: false }]);
           if (isOk(r)) {
             out.dropped.push(it.name);
@@ -283,6 +286,7 @@ export class InventoryKeeper {
   private async dropSlot(slot: number, count: number): Promise<boolean> {
     const it = this.d.inventory.slots[slot];
     if (!it || count <= 0) return false;
+    this.d.thrown?.()?.expect(it.name, Math.min(count, it.count)); // Track V1 follow-up 3: before the request (the item actor may come first)
     const r = await this.d.requests.send([{ type_id: 'drop', legacy_type_id: 3, count: Math.min(count, it.count), source: inventorySlot(slot, it.stackId), randomly: false }]);
     if (!isOk(r)) {
       this.log.warn(`keeper: drop ${count} ${it.name} from slot ${slot} refused (${String(r.status)})`);

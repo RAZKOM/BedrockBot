@@ -574,6 +574,27 @@ describe('inventory keeper', () => {
     expect(pickHotbarVictim(hotbar({ 0: item('cooked_beef') }), 0, DEFAULT_JUNK)).toBe(-1);
   });
 
+  it('Track V1 follow-up 3: every drop request is announced to the thrown items first (the collector skips the throw)', async () => {
+    const src = new FakeSource();
+    const loop = new TickLoop();
+    const { containers } = fakeScreen(src);
+    const inv = new FakeInv(slots36({ 2: item('rotten_flesh', 10), 15: item('cobblestone', 64), 16: item('cobblestone', 40) }));
+    const requests = new StackRequests({ source: src, containers, loop, runtimeId: () => 1n });
+    answerRequests(src, loop);
+    const told: string[] = [];
+    const keeper = new InventoryKeeper({
+      inventory: inv,
+      requests,
+      mover: { move: () => Promise.resolve({ ok: true }) },
+      settings: () => keepSettings,
+      thrown: () => ({ expect: (name: string, count: number) => told.push(`${name} ${count} after ${src.sent.filter((p) => p.name === 'item_stack_request').length}`) }),
+    });
+    await keeper.drop('cobblestone', 70);
+    await keeper.drop('rotten_flesh');
+    // before each request (the item actor may arrive before the response)
+    expect(told).toEqual(['cobblestone 40 after 0', 'cobblestone 30 after 1', 'rotten_flesh 10 after 2']);
+  });
+
   it('drop(name, n) sends drop requests (main inventory first) inside the inventory screen', async () => {
     const src = new FakeSource();
     const loop = new TickLoop();

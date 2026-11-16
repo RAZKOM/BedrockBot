@@ -498,7 +498,8 @@ export class BoxOps {
 
   /**
    * Place the box of `slot` next to the bot (`slot` selected when in the hotbar; `placesExactly` must hold), never on a
-   * cell `avoid` names (nor under one: the lid). A different box placed (the model moved meanwhile) is broken and picked up again.
+   * cell `avoid` names (nor under one: the lid). A different box placed (the model moved meanwhile) is broken and picked up again;
+   * which box went is told by the census of the boxes carried (`wrongBox`), not by their slots.
    */
   async place(slot: number, cancelled: () => boolean, avoid?: (p: Vec3) => boolean): Promise<{ at: Vec3 } | { reason: string; slot?: number }> {
     const inv = this.d.inventory.slots;
@@ -506,10 +507,10 @@ export class BoxOps {
     if (!name || !isShulkerBox(name)) return { reason: `no box in slot ${slot}` };
     if (!placesExactly(inv, slot)) return { reason: 'the box is not in the hotbar (another box of that colour would be placed)', slot };
     if (slot < 9) this.d.selectHotbar?.(slot);
-    const others = new Map<number, string>();
-    inv.slice(0, 36).forEach((x, i) => {
-      if (i !== slot && x && isShulkerBox(x.name)) others.set(i, x.name);
-    });
+    // Track V1 follow-up 3: the boxes by what they are (name, custom name, contents), not by slot: an exchange, a keeper
+    // move or a resync may move another box meanwhile (the Realm 2026-11-16 judged the right box placed the wrong one)
+    const want = this.identity(slot);
+    const before = this.boxCensus();
     const feet = this.d.position();
     const spots = (feet ? boxSpots((q) => this.d.blockAt(q), feet) : []).filter((p) => !avoid || (!avoid(p) && !avoid({ ...p, y: p.y + 1 })));
     let at: Vec3 | undefined;
@@ -531,11 +532,52 @@ export class BoxOps {
       if (typeof back === 'string') this.sayLeft(at);
       return { reason: 'interrupted', ...(typeof back === 'number' ? { slot: back } : {}) };
     }
-    const now = this.d.inventory.slots;
-    if ([...others].some(([i, n]) => now[i]?.name !== n)) {
+    const wrong = wrongBox(before, this.boxCensus(), want, name);
+    if (wrong) {
+      this.log.warn(`${this.label}: placed another box than the ${name} wanted at ${fmtPos(at)}: ${wrong}`);
       await this.breakAndPickUp(at, () => false);
-      return { reason: cancelled() ? 'interrupted' : 'placed another box than the one wanted (picked it up again)' };
+      return { reason: cancelled() ? 'interrupted' : `placed another box than the one wanted (picked it up again): ${wrong}` };
     }
     return { at };
   }
+
+  /** The boxes carried by identity (name, custom name, contents): how many of each. */
+  private boxCensus(): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const i of this.boxKeys()) {
+      const id = this.identity(i);
+      out.set(id, (out.get(id) ?? 0) + 1);
+    }
+    return out;
+  }
+}
+
+/**
+ * Track V1 follow-up 3: was another box placed than the one wanted? The census of the carried boxes before and after the
+ * place (by identity, BoxOps.identity), wherever they lie: every box but the wanted one is still carried, and the wanted
+ * one is gone or (the server's slot update not in yet) still there. The change when another box went, else undefined.
+ */
+export function wrongBox(before: ReadonlyMap<string, number>, after: ReadonlyMap<string, number>, want: string, wantName: string): string | undefined {
+  const nameOf = (id: string) => id.slice(0, id.indexOf('|'));
+  const byName = (m: ReadonlyMap<string, number>) => {
+    const out = new Map<string, number>();
+    for (const [id, n] of m) out.set(nameOf(id), (out.get(nameOf(id)) ?? 0) + n);
+    return out;
+  };
+  // by name first (a box whose contents the model lost still counts as itself)
+  const nb = byName(before);
+  const na = byName(after);
+  const lost: string[] = [];
+  for (const [n, c] of nb) {
+    const a = na.get(n) ?? 0;
+    if (a < c - (n === wantName ? 1 : 0)) lost.push(`${n} ${c} -> ${a}`);
+  }
+  if (lost.length > 0) return `gone from the inventory: ${lost.join(', ')}`;
+  // a box of the same colour: the one gone must be the wanted one
+  for (const [id, c] of before) {
+    if (id === want || nameOf(id) !== wantName) continue;
+    const a = after.get(id) ?? 0;
+    if (a < c && (after.get(want) ?? 0) >= (before.get(want) ?? 0)) return `the other ${wantName} (${id.split('|').slice(1).join(' ') || 'empty'}) is gone, the wanted one still carried`;
+  }
+  return undefined;
 }

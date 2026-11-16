@@ -27,6 +27,8 @@ import { BaseProcess, PRIORITY, type ProcessKind } from '../../src/tasks/process
 import { inventoryFoodPoints } from '../../src/skills/food/finder.ts';
 import { foodControllerOf } from '../../src/chat/commands-food.ts';
 import { buildHome, clearAreaHome, E2E, FEET_Y, homeCmd, prepareServer, privateArea, removeHome, sleep, startHomeBot, teleport, until, type HomeBot, type HomeLayout } from './home-truth.ts';
+import { survivalKitOf } from '../../src/chat/commands-survival.ts';
+import { DEFAULT_JUNK, pickHotbarVictim } from '../../src/skills/survival/keeper.ts';
 
 const TESTS_DIR = mkdtempSync(join(tmpdir(), 'bedrockbot-t3-'));
 process.env.BEDROCKBOT_TESTS_DIR = TESTS_DIR;
@@ -120,7 +122,7 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
     }, 10_000, 'the empty box in the inventory');
     await b.truth.ok('nameinv', [b.name, empty, 'owner_stuff']);
     await until(() => (itemDisplayName(inv(b).rawItem(0, empty)) === 'owner_stuff' ? true : undefined), 10_000, 'the box named owner_stuff');
-    if (layout === OWNER_FULL_HOTBAR) {
+    if (layout !== OWNER) {
       // and a plain empty box (the Realm bot's spares): the loot box of the early preset's box step
       await b.truth.ok('give', [b.name, 'undyed_shulker_box', 1]);
       await until(() => (inv(b).slots.slice(0, 36).filter((s, i) => !!s && isShulkerBox(s.name) && itemDisplayName(inv(b).rawItem(0, i)) === undefined).length === 1 ? true : undefined), 10_000, 'the plain box');
@@ -298,6 +300,121 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
       expect(testControlOf(b.task)!.inv.saved()).toBeUndefined();
     }, 900_000);
   }
+
+  // ---- Track V1 follow-up 3: a drop stays dropped; the box followed through an exchange --------------------------------
+  /**
+   * The Realm's hotbar (2026-11-16): tools in every slot but one, which the fireworks box takes (moved there after the
+   * gifts), so the exchange that brings the plain box in gives the fireworks box the plain box's old slot.
+   */
+  const OWNER_REALM_HOTBAR: Slot[] = [
+    ['netherite_sword', 1], ['netherite_pickaxe', 1], ['cooked_beef', 24], ['iron_axe', 1], ['iron_shovel', 1], ['bow', 1], ['iron_hoe', 1], ['shears', 1], ['flint_and_steel', 1],
+    ['elytra', 1], ['firework_rocket', 64], ['bone', 7], ['air', 0], ['redstone', 17], ['air', 0], ['wheat_seeds', 4], ['firework_rocket', 38], ['bread', 12], ['cobblestone', 16], ['golden_carrot', 20],
+  ];
+  const ROOM_DROP = /inventory: dropped \d+ \w+ \((dropStone \d+|junk)\)/;
+  const roomDrops = (b: HomeBot, from: number) => b.logs.slice(from).filter((l) => ROOM_DROP.test(l));
+  const loose = (b: HomeBot, name: string) => inv(b).slots.slice(0, 36).reduce((a, s) => a + (s?.name === name ? s.count : 0), 0);
+  const freeNow = (b: HomeBot) => inv(b).slots.slice(0, 36).filter((s) => !s || s.count <= 0).length;
+  const itemsNear = (b: HomeBot, name: string, r = 16) => {
+    const at = b.task.position()!;
+    return [...b.built.mobility!.world.entities.values()].filter((e) => e.type === 'minecraft:item' && e.item?.name === name && Math.hypot(e.pos.x - at.x, e.pos.z - at.z) <= r);
+  };
+
+  it.skipIf(!!only && !only.includes('v1d'))('early with the Realm hotbar: the box exchanged with the fireworks box is placed and filled, the fireworks box untouched', async () => {
+    const b = bot!;
+    await teleport(b, centre(at));
+    await b.truth.clearAround(centre(at), 16).catch(() => undefined);
+    if (testControlOf(b.task)!.inv.saved()) await ask(b, '!test inv restore', RESTORED, 300_000).catch(() => undefined);
+    await ownerInventory(b, OWNER_REALM_HOTBAR);
+    const fw = inv(b).slots.slice(0, 36).findIndex((s, i) => !!s && isShulkerBox(s.name) && !!shulkerContents(inv(b).rawItem(0, i)).firework_rocket);
+    expect(fw).toBeGreaterThanOrEqual(9);
+    const sw = await survivalKitOf(b.task)!.swapSlots(fw, 2);
+    expect(sw.ok).toBe(true);
+    await sleep(1000);
+    expect(inv(b).slots.slice(0, 9).every((s) => !!s)).toBe(true);
+    expect(pickHotbarVictim(inv(b).slots, inv(b).selected, DEFAULT_JUNK)).toBe(2); // the only slot to give is the fireworks box
+    const rockets0 = shulkerContents(inv(b).rawItem(0, 2)).firework_rocket;
+    const logFrom = b.logs.length;
+    const sayFrom = b.said.length;
+    expect(await ask(b, '!test inv early', /^test inv \w+: (saved|nothing|not now|stopped)/, 60_000)).toMatch(/saved/);
+    try {
+      await until(() => b.said.slice(sayFrom).find((x) => /^test inv early: (\d+ -> \d+ free|stopped)/.test(x)), 240_000, 'the preset done');
+      const pass = await until(() => b.logs.slice(logFrom).find((l) => /inventory: \d+ -> \d+ slots free in/.test(l)), 120_000, 'a room pass');
+      note(`realm hotbar: ${pass.replace(/^\S+ \w+ /, '')}`);
+      const ex = b.logs.slice(logFrom).filter((l) => /hotbar: \w+ moved from slot \d+ to 2 \(\w+ exchanged into \d+\)/.test(l));
+      note(`realm hotbar: exchange ${ex.map((l) => l.replace(/^\S+ \w+ /, '')).join(' | ') || 'none'}`);
+      expect(ex.length).toBeGreaterThan(0);
+      expect(pass).toMatch(/boxed \d+ /);
+      expect(b.logs.slice(logFrom).filter((l) => l.includes('placed another box'))).toEqual([]);
+      // the fireworks box kept its rockets wherever it lies now
+      const fwNow = inv(b).slots.slice(0, 36).findIndex((s, i) => !!s && isShulkerBox(s.name) && !!shulkerContents(inv(b).rawItem(0, i)).firework_rocket);
+      note(`realm hotbar: the fireworks box in slot ${fwNow}, ${shulkerContents(inv(b).rawItem(0, fwNow)).firework_rocket} rockets (before ${rockets0})`);
+      expect(shulkerContents(inv(b).rawItem(0, fwNow)).firework_rocket).toBe(rockets0);
+    } finally {
+      note(`realm hotbar: ${await ask(b, '!test inv restore sweep', RESTORED, 240_000)}`);
+    }
+  }, 900_000);
+
+  it.skipIf(!!only && !only.includes('v1d'))('early: the stone dropped stays dropped: 60 s idle, then a fight whose collect takes the zombie\'s drop and leaves the thrown stone', async () => {
+    const b = bot!;
+    await teleport(b, centre(at));
+    await b.truth.clearAround(centre(at), 16).catch(() => undefined);
+    if (testControlOf(b.task)!.inv.saved()) await ask(b, '!test inv restore', RESTORED, 300_000).catch(() => undefined);
+    await ownerInventory(b, OWNER);
+    const logFrom = b.logs.length;
+    const sayFrom = b.said.length;
+    expect(await ask(b, '!test inv early', /^test inv \w+: (saved|nothing|not now|stopped)/, 60_000)).toMatch(/saved/);
+    try {
+    await until(() => b.said.slice(sayFrom).find((x) => /^test inv early: (\d+ -> \d+ free|stopped)/.test(x)), 240_000, 'the preset done');
+    const pass = await until(() => b.logs.slice(logFrom).find((l) => /inventory: \d+ -> \d+ slots free in/.test(l)), 120_000, 'a room pass');
+    note(`drop: ${pass.replace(/^\S+ \w+ /, '')}`);
+    await sleep(2000);
+    const thrownLines = b.logs.slice(logFrom).filter((l) => l.includes('inventory: threw '));
+    note(`drop: ${thrownLines.map((l) => l.replace(/^\S+ \w+ /, '')).join(' | ') || 'no throw line'}`);
+    const drops = roomDrops(b, logFrom).length;
+    expect(drops).toBeGreaterThan(0);
+    // 1. idle 60 s: no drop again, the free slots stay, the stacks still on the ground
+    const free1 = freeNow(b);
+    const stone0 = loose(b, 'cobblestone');
+    const lying0 = itemsNear(b, 'cobblestone').length;
+    await sleep(60_000);
+    const free2 = freeNow(b);
+    const stone1 = loose(b, 'cobblestone');
+    const lying1 = itemsNear(b, 'cobblestone');
+    note(`drop: idle 60 s: room drops ${drops} -> ${roomDrops(b, logFrom).length}, passes ${b.logs.slice(logFrom).filter((l) => /inventory: \d+ -> \d+ slots free in/.test(l)).length}, free ${free1} -> ${free2}, cobblestone carried ${stone0} -> ${stone1}, cobblestone stacks lying ${lying0} -> ${lying1.length}`);
+    expect(roomDrops(b, logFrom).length).toBe(drops);
+    expect(free2).toBeGreaterThanOrEqual(free1);
+    expect(stone1).toBe(stone0);
+    expect(lying1.length).toBeGreaterThan(0);
+    // 2. a fight right after
+    // the zombie on the far side of the bot from the stacks it threw
+    const me = b.task.position()!;
+    const cx = lying1.reduce((a, e) => a + e.pos.x, 0) / lying1.length;
+    const cz = lying1.reduce((a, e) => a + e.pos.z, 0) / lying1.length;
+    const d = Math.hypot(me.x - cx, me.z - cz) || 1;
+    const z = { x: Math.floor(me.x + ((me.x - cx) / d) * 6), y: FEET_Y, z: Math.floor(me.z + ((me.z - cz) / d) * 6) };
+    const fightFrom = b.logs.length;
+    b.task.pve!.setGuard({ on: true });
+    try {
+      await homeCmd('difficulty', 'easy');
+      await homeCmd('summon', 'zombie', String(z.x), String(z.y), String(z.z));
+      const col = await until(() => b.logs.slice(fightFrom).find((l) => l.includes('collect r=8: ')), 90_000, 'the fight\'s collect');
+      note(`fight: ${col.replace(/^\S+ \w+ /, '')}`);
+      await sleep(5000);
+      const stone2 = loose(b, 'cobblestone');
+      const lying2 = itemsNear(b, 'cobblestone');
+      note(`fight: cobblestone carried ${stone1} -> ${stone2}, stacks lying ${lying1.length} -> ${lying2.length}, room drops ${drops} -> ${roomDrops(b, logFrom).length}`);
+      expect(col).not.toMatch(/"cobblestone"/);
+      expect(stone2).toBe(stone1);
+      expect(roomDrops(b, logFrom).length).toBe(drops);
+    } finally {
+      await homeCmd('difficulty', 'peaceful').catch(() => undefined);
+      await homeCmd('kill', '@e[type=zombie]').catch(() => undefined);
+      b.task.pve!.setGuard({ on: false });
+    }
+    } finally {
+      note(`drop: ${await ask(b, '!test inv restore sweep', RESTORED, 240_000)}`);
+    }
+  }, 900_000);
 
   it('refusals: a user process runs; a second preset before the restore', async () => {
     const b = bot!;
