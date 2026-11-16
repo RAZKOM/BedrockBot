@@ -91,6 +91,24 @@ describe('!test on the afk registry', () => {
     expect(ctl.current()).toBeUndefined();
   });
 
+  it('Track T3: !test inv: status answers with testMode off, a preset and a restore are refused, nothing sent', async () => {
+    const { chat, task, said, settings } = setup();
+    chat.handle(consoleLine('!test inv status'));
+    chat.handle(consoleLine('!test inv early'));
+    chat.handle(consoleLine('!test inv restore'));
+    chat.handle(consoleLine('!test inv huge'));
+    expect(said[0]).toBe('test inv: no preset on');
+    expect(said[1]).toMatch(/^test: testMode is off/);
+    expect(said[2]).toMatch(/^test: testMode is off/);
+    expect(said[3]).toMatch(/^usage: !test inv full \| early/);
+    settings.set('testMode', 'on');
+    chat.handle(consoleLine('!test inv full'));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(said[4]).toMatch(/^test: the test harness needs cheats on and the bot op'd/); // not spawned: no op
+    expect(testControlOf(task)!.runner.counts.sent).toBe(0);
+    expect(testControlOf(task)!.inv.saved()).toBeUndefined();
+  });
+
   it('testMode on, not spawned: the probe cannot run, so nothing starts', async () => {
     const { chat, task, said, settings } = setup();
     settings.set('testMode', 'on');

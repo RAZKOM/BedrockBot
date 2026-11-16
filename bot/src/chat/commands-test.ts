@@ -14,13 +14,17 @@
 //                                                      and a ring of mostly unstandable ground. Track T2: `bare` moves the
 //                                                      hotbar's blades into the main inventory for the series and back after
 //                                                      (skills/test/bare.ts)
+//   !test inv <full|early|split|rockets|fullbar>       Track T3: save the inventory, clear the slots a command gives back
+//                                                      exactly (gear, the elytra, boxes and items with NBT stay in place)
+//                                                      and fill them with a preset for the room chore (skills/test/inv.ts)
+//   !test inv restore [sweep] | status                 the saved inventory back; what the room chore did since
 //   !test stop                                         end the run in progress and the series
 // Each run restores health, food and the kit and teleports to the start first (skills/test/recovery.ts), runs the trip as
 // the owner's own command and records it (skills/test/series.ts): a chat line per run, a summary, and one JSON line per
 // run in <config dir>/tests/<time>-<series>.jsonl. With testMode on, a death is recovered (respawn, kit, /tp back to the
 // run's start) and the afk task's walk home after the respawn is skipped while a series runs.
 // testMode off: `!test` only answers, no command is ever sent and the respawn goes as before.
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { Vec3 } from '../connection/types.ts';
 import type { Logger } from '../log.ts';
@@ -40,6 +44,10 @@ import { corridorTripRunning, stopCorridorTrip } from './commands-corridor.ts';
 import { waypointStoreOf } from './commands-nav.ts';
 import { survivalKitOf } from './commands-survival.ts'; // Track T2: the bare series' moves
 import { isBlade } from '../skills/test/bare.ts';
+import { INV_SAVE_FILE, InvTest, parseInvArgs, type InvSnapshot } from '../skills/test/inv.ts'; // Track T3
+import { BaseProcess, PRIORITY, type ProcessKind } from '../tasks/process/manager.ts';
+import { homeControlOf } from './commands-home.ts';
+import { readKit } from '../skills/fly/kit.ts';
 
 export const TEST_COMMANDS = ['test'] as const;
 /** At most this many runs in one series. */
@@ -70,6 +78,33 @@ export interface TestControl {
   done(): Promise<SeriesSummary | undefined>;
   /** The tests folder in use, if any. */
   dir(): string | undefined;
+  /** Track T3: the inventory presets. */
+  inv: InvTest;
+}
+
+/** Track T3: a user process that does nothing, so no chore moves items while the preset's or the restore's commands go out. */
+class InvHold extends BaseProcess {
+  readonly name = 'test inv';
+  readonly kind: ProcessKind = 'user';
+  get priority(): number {
+    return PRIORITY.user;
+  }
+  protected run(): void {}
+  protected halt(): void {}
+  status() {
+    return { line: 'test inv: the commands go out' };
+  }
+}
+
+/** Track T3: a save file read back (undefined when missing or not one). */
+export function readInvSave(file: string): InvSnapshot | undefined {
+  if (!existsSync(file)) return undefined;
+  try {
+    const v = JSON.parse(readFileSync(file, 'utf8')) as InvSnapshot;
+    return v?.version === 1 && Array.isArray(v.slots) && v.slots.length === 36 ? v : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const controls = new WeakMap<object, TestControl>();
@@ -187,7 +222,7 @@ export function parseTestArgs(
     const target = goalWords.length === 1 ? goalWords[0]! : `${goal.x} ${goal.y} ${goal.z}`;
     return { spec: spec('goto', `goto ${target}`, from, `goto ${target}`, goal), runs: n };
   }
-  return { error: 'usage: !test [status | op | kit | stop] | cavestart [n] [from <p>] | cave [n] | route <prefix> [n] [noshortcut] | goto <p> from <p> [n]' };
+  return { error: 'usage: !test [status | op | kit | stop] | cavestart [n] [from <p>] | cave [n] | route <prefix> [n] [noshortcut] | goto <p> from <p> [n] | inv <preset | restore | status>' };
 }
 
 export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestControl {
@@ -287,6 +322,65 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
     for (let i = 0; i < 200 && (loop?.state.gliding ?? false); i++) await new Promise((r) => setTimeout(r, 100));
     d.pve?.stopCommands();
   };
+
+  // ---- Track T3: !test inv ----
+  const invFile = (): string | undefined => {
+    const f = dir();
+    return f ? join(f, INV_SAVE_FILE) : undefined;
+  };
+  const inv = new InvTest({
+    run: (c) => runner.run(c, { pace: true }),
+    inventory: () => world?.inventory ?? { slots: [] },
+    busy: () => {
+      if (series || mobSeries) return `a test series runs (!test stop)`;
+      const fc = flyControlOf(task);
+      if ((loop?.state.gliding ?? false) || (fc?.controller.active ?? false) || corridorTripRunning(task)) return 'a flight runs';
+      const user = d.processes?.userProcesses()[0];
+      if (user) return `${user.name} runs (!stop)`;
+      if (d.pve?.combat.busy) return 'a fight runs';
+      const a = d.processes?.active;
+      if (a) return `${a.name} has control${a.name === 'room' ? ' (a room pass: try again in a moment)' : ''}`;
+      if (d.mobility?.skills.status().busy) return 'a skill runs';
+      return undefined;
+    },
+    hold: async () => {
+      const pm = d.processes;
+      if (!pm) return 'no process manager';
+      const h = pm.add(new InvHold());
+      for (let i = 0; i < 50 && pm.active !== h; i++) await new Promise((r) => setTimeout(r, 100));
+      if (pm.active !== h) {
+        const other = pm.active?.name ?? 'something';
+        pm.stop(h);
+        return `${other} keeps control`;
+      }
+      return () => void pm.stop(h);
+    },
+    fireworksBox: () => (world ? readKit(world.inventory).boxSlot : -1),
+    passes: () => homeControlOf(task)?.room?.passes ?? [],
+    persist: (snap) => {
+      const f = invFile();
+      if (!f) return undefined;
+      try {
+        if (snap) {
+          mkdirSync(dirname(f), { recursive: true });
+          writeFileSync(f, `${JSON.stringify(snap)}\n`, 'utf8');
+        } else rmSync(f, { force: true });
+        return basename(f);
+      } catch (e) {
+        log.warn(`test inv: could not write ${f}: ${e instanceof Error ? e.message : String(e)}`);
+        return undefined;
+      }
+    },
+    load: () => {
+      const f = invFile();
+      return f ? readInvSave(f) : undefined;
+    },
+    settle: async () => {
+      await new Promise((r) => setTimeout(r, 800));
+      await loop?.waitTicks(4);
+    },
+    log,
+  });
 
   // ---- Track M1: !test mobs ----
   let mobStart: Vec3 | undefined;
@@ -468,7 +562,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
 
   chat.register({
     name: 'test',
-    help: '[status | op | kit | stop] | cavestart [n] [from <p>] | cave [n] | route <prefix> [n] [noshortcut] | goto <p> from <p> [n] | mobs <set> [n] [<s>s] [force] [bare] (repeated test runs with /tp, re-kit and heals between them; needs testMode on, cheats on and the bot op\'d)',
+    help: '[status | op | kit | stop] | cavestart [n] [from <p>] | cave [n] | route <prefix> [n] [noshortcut] | goto <p> from <p> [n] | mobs <set> [n] [<s>s] [force] [bare] | inv <full|early|split|rockets|fullbar|restore|status> (repeated test runs with /tp, re-kit and heals between them; needs testMode on, cheats on and the bot op\'d)',
     group: 'control',
     example: '!test goto base from 0 64 0 3',
     auto: 'after a death in testMode: the kit back and /tp to the run start',
@@ -476,7 +570,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
       const sub = args[0]?.toLowerCase() ?? 'status';
       if (sub === 'status') {
         const now = mobSeries ? mobSeries.status() : series ? series.status() : lastSummary ? `last: ${summaryLine(lastSummary)}` : 'no series yet';
-        reply(`test: testMode ${enabled() ? 'on' : 'off'}; ${opLine(ops.status())}; ${now}`);
+        reply(`test: testMode ${enabled() ? 'on' : 'off'}; ${opLine(ops.status())}; ${now}${inv.preset ? `; inv preset ${inv.preset} on (!test inv restore)` : ''}`);
         return;
       }
       if (sub === 'op') {
@@ -507,12 +601,34 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
         reply(`test: stopping ${series.spec.name} after run ${series.current}`);
         return;
       }
+      if (sub === 'inv') {
+        // Track T3: status answers always; a preset or a restore needs testMode, the walking task and the bot op'd
+        const a = parseInvArgs(args.slice(1));
+        if ('error' in a) return reply(a.error);
+        if (a.kind === 'status') return reply(inv.status());
+        if (!enabled()) return reply(`test: testMode is off (!set testMode on; ${NEEDS_OP})`);
+        if (!loop || !d.processes || !world) return reply(d.needsWalking('test'));
+        void (async () => {
+          const op = await ops.ensure();
+          if (op.state !== 'op') return reply(`test: ${op.state === 'unknown' ? `${NEEDS_OP} (${op.line})` : op.line}`);
+          if (a.kind === 'restore') await inv.restore(reply, { sweep: a.sweep });
+          else await inv.start(a.preset, reply);
+        })().catch((e: unknown) => {
+          log.error(`test inv failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+          reply(`test inv failed: ${e instanceof Error ? e.message : String(e)}`);
+        });
+        return;
+      }
       if (!enabled()) {
         reply(`test: testMode is off (!set testMode on; ${NEEDS_OP})`);
         return;
       }
       if (!loop || !d.processes || !world) {
         reply(d.needsWalking('test'));
+        return;
+      }
+      if (inv.busy) {
+        reply('test: an inventory preset is going out (!test inv status)');
         return;
       }
       if (series || mobSeries) {
@@ -572,6 +688,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
     last: () => lastSummary,
     done: () => seriesDone,
     dir,
+    inv,
   };
   controls.set(task, control);
   return control;

@@ -149,13 +149,18 @@ export class CommandRunner {
   }
 
   /** Send `command` (with or without the slash) after the ones before it; resolves with the answer, never rejects. */
-  run(command: string, opts: { timeoutMs?: number } = {}): Promise<CommandResult> {
-    const next = this.chain.then(() => this.runNow(command, opts.timeoutMs ?? this.timeoutMs));
+  /**
+   * Send `command` (with or without the slash) after the ones before it; resolves with the answer, never rejects.
+   * `pace` (Track T3, the inventory presets' 30 to 70 commands): at the minute's limit wait for room instead of
+   * failing with `rate_limited`.
+   */
+  run(command: string, opts: { timeoutMs?: number; pace?: boolean } = {}): Promise<CommandResult> {
+    const next = this.chain.then(() => this.runNow(command, opts.timeoutMs ?? this.timeoutMs, opts.pace ?? false));
     this.chain = next.catch(() => undefined);
     return next;
   }
 
-  private async runNow(command0: string, timeoutMs: number): Promise<CommandResult> {
+  private async runNow(command0: string, timeoutMs: number, pace = false): Promise<CommandResult> {
     const command = command0.startsWith('/') ? command0 : `/${command0}`;
     const fail = (error: CommandError, ms = 0): CommandResult => {
       this.counts.errors++;
@@ -168,8 +173,15 @@ export class CommandRunner {
     if (this.conn.state !== 'spawned') return fail('not_spawned');
     const wait = this.lastSent + this.gapMs - this.now();
     if (wait > 0) await this.sleep(wait);
-    const t = this.now();
+    let t = this.now();
     while (this.sentAt.length > 0 && t - this.sentAt[0]! > 60_000) this.sentAt.shift();
+    // (a loop: a timer may fire a millisecond early)
+    for (let i = 0; pace && this.sentAt.length >= this.maxPerMinute && i < 100; i++) {
+      await this.sleep(Math.max(5, this.sentAt[0]! + 60_005 - t));
+      if (this.disposed) return fail('stopped');
+      t = this.now();
+      while (this.sentAt.length > 0 && t - this.sentAt[0]! > 60_000) this.sentAt.shift();
+    }
     if (this.sentAt.length >= this.maxPerMinute) return fail('rate_limited');
     const packet = this.makeUuid ? commandRequestPacket(command, this.makeUuid()) : commandRequestPacket(command);
     const uuid = packet.origin.uuid;

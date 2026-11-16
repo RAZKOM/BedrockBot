@@ -62,6 +62,8 @@ export interface HomeControl {
   memory(): ChestMemoryStore;
   /** Start a job as a user process; the reply line when it ends. */
   start(job: HomeJob): HomeJobProcess;
+  /** Track T3: the room chore (`!test inv status` reads its passes). */
+  room?: RoomChore;
 }
 
 const controls = new WeakMap<object, HomeControl>();
@@ -287,6 +289,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     ask: (plan) => roomAskLine(plan, { home: !!home(), chests: logistics.records().some((r) => r.readAt > 0), radius: d.settings.get('homeChestRadius'), atHome: logistics.atHome() }),
     log,
   });
+  control.room = room; // Track T3
   processes.add(room); // (after the construction: the manager asks wants() at once, and busy() reads `room`)
 
   d.chat.register({

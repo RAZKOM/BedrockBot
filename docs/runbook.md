@@ -868,6 +868,8 @@ To stop: `!test stop` (ends the run in progress), `!set testMode off`. The bot s
 | `!test route <prefix> [n] [noshortcut]` | /tp to `<prefix>_start`, `!fly route <prefix> [noshortcut]` (docs/flight.md "Cave flight") |
 | `!test goto <x y z \| wp> from <x y z \| wp> [n]` | /tp to the start, `!goto <goal>` (walks, or flies over `flyMin` with `autoFly`) |
 | `!test mobs <set> [n] [<s>s] [force] [bare]` | Track M1: at least 150 blocks from home, n runs of a mob set summoned round the bot under one name tag, each until they are dead, the bot dies or `<s>` (60) seconds; only its own mobs are removed, at the end and on `!test stop`. `force`: a creeper set under mobGriefing; `bare` (Track T2): the hotbar's swords and axes move into the main inventory for the series (a free slot, else in exchange with a stack that is no weapon) and back to their slots at its end (in exchange with whatever took the slot), so the floors for a bot without a blade (the elytra flee first) run ([pve.md](pve.md) "`!test mobs`": the sets and what a good run prints) |
+| `!test inv <full \| early \| split \| rockets \| fullbar>` | Track T3: save the inventory, clear the slots a command can give back exactly and fill them with a preset, so the room chore of Track V1 can be watched; gear, the elytra, boxes and items with NBT stay in place ([inventory.md](inventory.md) "Test presets") |
+| `!test inv restore [sweep]` / `!test inv status` | the saved inventory back (`sweep`: the items on the ground within 8 first); what the room chore did since the preset |
 | `!test stop` | end the run in progress (the flight lands first) and start no more |
 
 Cave flight runs need `!set flyCave on` (else the underground is walked; the start line says so). Each run ends at the

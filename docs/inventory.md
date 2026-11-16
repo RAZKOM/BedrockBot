@@ -23,6 +23,7 @@ same 36 slots with stone and mob drops in an hour of mining.
 | `bot/src/skills/container/exchange.ts` | the exchange by inventory model, `RateLimit` (once a minute a key) |
 | `bot/src/skills/place/place.ts`, `bot/src/skills/farm/click.ts` | `hotbarRoom(..., exchange)`, the fetch into a full inventory |
 | `bot/src/chat/commands-home.ts` | the wiring (what the chore reads and the skills it drives) |
+| `bot/src/skills/test/inv.ts`, `bot/src/chat/commands-test.ts` | Track T3: `!test inv` (`keptReason`, `snapshotInv`, `presetStacks`, `planPreset`, `planRestore`, `protectedSlots`, `InvTest`) |
 
 ## Why a slot stays taken
 
@@ -197,11 +198,87 @@ released and the chore left alone), 2026-11-15, on a PC:
 The first three cases run with every item counted: what left the inventory is in the fireworks box, in a carried box
 or, for junk and stone only, on the ground.
 
+## Test presets on a server with cheats (Track T3)
+
+The cases above were set up by the truth pack, which only a test server has. On any world with cheats on where the bot
+is an operator (a backup of the Realm, a test server), the bot can set its own inventory by slash commands:
+`!test inv <preset>` (owner only, `testMode` on, the op check of `!test`; `bot/src/skills/test/inv.ts`).
+
+| Command | What |
+|---|---|
+| `!test inv full` | every free slot: food, drops and odds in partial stacks, then full stacks of stone-like blocks: 36 of 36 |
+| `!test inv early` | stone tools, torches, bread, a crafting table, coal, raw iron and copper, flint, bones, logs, lapis, rotten flesh, string and 19 stacks of cobblestone, cobbled deepslate, dirt, gravel, andesite, diorite, granite, tuff (36 stacks; the first ones if fewer slots are free) |
+| `!test inv split` | the same kinds in split stacks (the merge step) |
+| `!test inv rockets` | 422 loose rockets in 7 stacks beside the fireworks box, the other slots full stacks the chore neither drops nor merges; without a fireworks box the reply says the rockets stay loose |
+| `!test inv fullbar` | the hotbar nine kinds no job asks for, the main inventory full stacks with 32 cobblestone among them only: the place and farm exchange at 36 of 36 |
+| `!test inv status` | what the room chore did since: its passes and their `inventory: ...` steps, the free slots, the counts changed |
+| `!test inv restore [sweep]` | the saved inventory back; `sweep` first removes the items on the ground within 8 blocks (`/kill @e[type=item,r=8]`: the stone and junk the chore dropped, and anything else lying there) |
+
+How it goes:
+
+1. Refused while a trip, a flight, a fight, a test series, another process in control (a room pass: try again in a
+   moment) or a skill runs, and while an earlier save waits for its restore.
+2. The save: every slot with its NBT, the boxes' contents and the worn pieces, in memory and in `<tests dir>/inv-saved.json`
+   (a restart keeps it; the restore removes it).
+3. The server's count of every item it will clear (`/clear @s <item> -1 0` counts without clearing) must match the
+   inventory model, else nothing is cleared. A name the server does not know stays in place.
+4. The reply says what stays in place before anything is cleared:
+   `test inv early: saved; 23 slots cleared and given back exactly by !test inv restore, 5 stay in place (...)`.
+5. One `/replaceitem` a slot (`keep` into an empty one, so a pickup meanwhile is not overwritten), under a do-nothing
+   user process (taken before the save, released after the last command) so no chore moves items meanwhile; the
+   commands paced under the harness's 60 a minute (a preset is about 8 counts and 30 slots in 5 to 9 s; a restore within
+   the same minute waits up to 45 s for the limit). The log has a
+   `test inv <preset>: before: ...` and an `after: ...` line with the free slots and every count.
+6. Then the room chore acts on its own as it would (3 s of quiet, fewer than 4 free).
+
+### What the commands can give back
+
+Measured on BDS 1.26.60 (bds-home), by the bot's own `command_request`:
+
+| Item | A command gives it back? | So |
+|---|---|---|
+| a plain item (no NBT): food, blocks, drops | yes: name, count, metadata as the data value (a potion's kind) | cleared and restored |
+| a firework rocket of duration 1 | yes: `/replaceitem` gives `Fireworks {Flight 1, no explosions}` | cleared and restored |
+| a crafted rocket of duration 2 or 3, one with explosions | no | stays in place |
+| durability (a tool, armour, the elytra) | yes: the data value is the `Damage` | stays in place anyway: gear, the elytra and the owner's tools are never cleared |
+| enchantments | no (`/enchant` works on the held item only, up to the enchantment's level) | stays in place |
+| a custom name, any other NBT (maps, books, banners) | no | stays in place |
+| a shulker box | an empty unnamed one only, never its contents | every box stays in place |
+| the worn pieces, the offhand | (not touched) | never touched |
+
+The restore:
+
+- a slot that held a restorable stack or nothing gets it back by `/replaceitem` (or `air`);
+- a slot holding a kept item now (the hotbar puller moved the sword there) is never overwritten: its saved stack comes
+  by `/give`. Each kept item of the save claims one slot (by name and NBT without the wear: a new tool has no NBT, the
+  same tool after one dig has `{Damage: 1}`), its own with the same wear first, then any slot worn as much or more, so
+  the preset's new stone pickaxe goes and the owner's worn one stays; gear of a kind no preset gives, boxes, elytras,
+  enchanted or named items that were not in the save stay too: a restore only ever overwrites restorable stacks and
+  the presets' own stone tools;
+- `sweep` is left out (and said) while a kept item of the save is not carried: it may lie on the ground;
+- what the room chore put into a box stays there (a command cannot take it out) and is said:
+  `the boxes hold firework_rocket +294 (a command cannot take it out)`; kept items moved or gone and changed worn
+  pieces are said too;
+- one line before and after in the log; a refused command stops it and keeps the save.
+
+### Testing V1 on a world with cheats
+
+    !set testMode on
+    !test inv full        (away from home: the stone step; at home: the unload)
+    !test inv status      (a few seconds later: `room chore 1 pass (0 -> 6 in ... s): ...`)
+    !test inv restore sweep
+
+`early` and `split` show the junk, the merges and the stone step, `rockets` the fireworks box, `fullbar` the exchange
+(a job right after it that needs an item from the main inventory, such as a build of cobblestone: the log line
+`cobblestone moved from slot 20 to 8 (... exchanged ...)`).
+
 ## Tests
 
 ```sh
 pnpm --filter bot exec vitest run --project unit inventory-room room-chore fetch-full place-skill home-logistics home-unloader
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e home-room --silent=false   # bds-home; ROOM_RUNS (default 5)
+pnpm --filter bot exec vitest run --project unit test-inv test-commands
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e test-inv --silent=false    # bds-home; T3_OUT=<file> for the notes
 ```
 
 - `inventory-room`: the plan over made-up slots: the live inventory (36 of 36 with three split stacks; without them,
@@ -217,3 +294,10 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e home-room --silent=fal
   game away from home, then stacks of cobblestone given until 2 are free; the place and click faults before and after;
   the live inventory at home with chests and a chest of spares; the same at home with 5 free (the spare boxes go back,
   nothing else moves); at home with no chest of spares (the boxes stay, one line).
+- `test-inv` (unit): what stays in place, the presets, the preset and restore plans, the runner against a fake server
+  (the order of the reply and the first clear, a count the server disagrees on, a refused command, a pickup meanwhile,
+  the owner's tool swapped with the preset's, the status line's bytes).
+- `test-inv` (e2e, bds-home, by the bot's own commands): each preset on an owner's inventory (worn netherite, an
+  enchanted sword, a pickaxe, the elytra, a fireworks box, a named box, loose rockets, food): the kept slots and the
+  preset's stacks by the server's own inventory read, a room pass (fullbar: the place skill's exchange), the status,
+  the restore with every slot and count as before; a refusal while a user process runs and a second preset refused.

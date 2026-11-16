@@ -113,4 +113,28 @@ describe('CommandRunner', () => {
     expect(await r.run('/testfor @s')).toMatchObject({ error: 'not_spawned' });
     expect(c.sent).toHaveLength(2);
   });
-});
+  it('Track T3: pace waits at the minute limit instead of failing, even when a timer fires early', async () => {
+    vi.useRealTimers(); // the answer timeouts (10 ms) run for real; the pacing sleep is the fake below
+    const c = new FakeConn();
+    let clock = 0;
+    let n = 0;
+    const r = new CommandRunner(c, {
+      uuid: () => `p${++n}`,
+      maxPerMinute: 2,
+      gapMs: 0,
+      timeoutMs: 10,
+      now: () => clock,
+      sleep: (ms) => {
+        clock += Math.max(0, ms - 3); // a timer 3 ms early
+        return Promise.resolve();
+      },
+    });
+    const a = await r.run('/a', { pace: true });
+    const b = await r.run('/b', { pace: true });
+    expect([a.error, b.error]).toEqual(['timeout', 'timeout']); // nobody answers: sent, then timed out
+    const d = await r.run('/c');
+    expect(d.error).toBe('rate_limited'); // without pace: refused
+    const e = await r.run('/d', { pace: true });
+    expect(e.error).toBe('timeout'); // with pace: waited for room, sent
+    expect(c.sent).toHaveLength(3);
+  });});
