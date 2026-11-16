@@ -6,8 +6,9 @@
 // landing 31 blocks on in a clean 3 x 3 bore came back partial at 4 s, while the chain flies it every time.
 // The live command runs the proof in a worker (`proveShortcutInWorker`, this file as the Worker over a snapshot
 // of the route grid) so the input loop never waits for it.
-import { isMainThread, parentPort, Worker, workerData, type MessagePort } from 'node:worker_threads';
+import { isMainThread, parentPort, workerData, type MessagePort } from 'node:worker_threads';
 import type { Vec3 } from '../../../connection/types.ts';
+import { startWorker } from '../../../threads.ts'; // decision 0089: the wasm code GC guard
 import { windowRequest } from '../corridor/drive.ts';
 import { boreMargin, nextWindow, type Stretch, type Window } from '../corridor/stretches.ts';
 import type { RouteGrid } from '../route/grid.ts';
@@ -115,7 +116,7 @@ export function proveShortcutInWorker(grid: RouteGrid, points: readonly Vec3[], 
   if (Math.max(size.x, size.y, size.z) > SNAPSHOT_MAX) return Promise.resolve({ proven: false, windows: 0, lines: [], reason: `the stretch spans more than ${SNAPSHOT_MAX} blocks: too long for one proof` });
   const snap = snapshotGrid(grid, min, size);
   return new Promise<ShortcutProof>((resolve, reject) => {
-    const w = new Worker(new URL(import.meta.url), { workerData: { bedrockbotProof: true }, name: 'cave-proof' });
+    const w = startWorker(new URL(import.meta.url), { workerData: { bedrockbotProof: true }, name: 'cave-proof' });
     w.once('message', (m: ShortcutProof) => {
       resolve(m);
       void w.terminate();

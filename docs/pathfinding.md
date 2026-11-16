@@ -2431,6 +2431,33 @@ count in the worker thread as in-thread (20 / 20); 200 random cells per stage (l
 updates and a re-sent column, cached) had identical blocks, classes, `stand`, `standThrough`,
 `crossing`, `skyTop` and `columnTop`.
 
+### Worker threads and V8's wasm code GC (Track I1)
+
+[decisions/0089](decisions/0089-worker-threads-without-wasm-code-gc.md). Every Worker the bot starts (the planner,
+the route worker, the cave proof, the cave benches) goes through `startWorker` in `bot/src/threads.ts`, never
+`new Worker` (a unit test, `threads.test.ts`, looks for it in `src` and `scripts`). On Node 24 (V8 13.x) it first
+turns V8's wasm code GC off for the process (`--no-wasm-code-gc` through `v8.setFlagsFromString`, once).
+
+Why: a worker runs WebAssembly while it loads its sources, because Node strips the types of each `.ts` file with
+amaro (swc compiled to wasm): a worker on the planner's file compiles 759 wasm functions, one on a `.js` file none.
+Node 24's V8 shares the wasm-to-JS import wrappers between all threads of the process. When a worker ends, its
+wrappers die; the code GC frees them on one thread while another thread, tiering a wrapper up as it strips its own
+sources, frees the same wrapper again, and V8 aborts the process (SIGTRAP, `# Check failed: end > addr.` or
+`jit_page_->allocations_.erase(addr) == 1`, the stack through `Runtime_TierUpWasmToJSWrapper` and
+`WasmImportWrapperCache::Free`). V8 fixed it in 9b8ca54d5a; Node 22 and Node 25+ do not abort; Node 24 has no
+release with the backport yet (nodejs/node#66366, #66376). With the code GC off nothing frees a wrapper under another
+thread. The unit tests hit it most: the closed-loop simulator (`reach-sim.ts`) starts and ends a planner worker for
+every walk. On the test host (2026-11-15) the navigator files lost a worker in 3 of 16 runs with the guard off (all
+three in `nav-r7`) and in 0 of 40 with it. The live bot keeps its planner, but ends a worker when a `!fly route`
+shortcut proof is done (the route worker may be starting then), when `plannerThreads` goes to 0 and back, after a
+crash and when the task stops: the same race, rarer.
+
+What it costs (test host): dead wasm code stays allocated until its module goes (about 2 MB more after 20 workers);
+a planner worker's start and end takes about 5 ms more (95 against 91 ms, +5 %); the searches are JavaScript and do
+not change (the reach bench at the live settings: 161 of 161 pairs the same, ticks -0.06 %). Remove the guard when
+Node 24 ships the backport (`wasmCodeGcRaces` in `threads.ts`). `BEDROCKBOT_WASM_CODE_GC=on` leaves V8's default, to
+measure the race.
+
 ## Goals
 
 `Goal` (PLAN.md 4.3: block, near, xz) is what older callers switch over; `NavGoal` adds the task 7.10

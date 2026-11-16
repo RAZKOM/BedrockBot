@@ -9,7 +9,8 @@
 // below: one number changed at a time), over CAVE_BURNS (every rocket 9 / 12 / 15 / 18 / 21 ticks, then three
 // random draws) at the planner budget given, in worker threads (one trip per job). Prints a line per trip and
 // the score per (mode, style) and per cave.
-import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
+import { isMainThread, parentPort, workerData } from 'node:worker_threads';
+import { startWorker } from '../src/threads.ts'; // decision 0089: the wasm code GC guard
 import { availableParallelism } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { capWorkers } from './workers.ts';
@@ -123,7 +124,7 @@ if (!isMainThread) {
     chunks.filter((c) => c.length).map(
       (c) =>
         new Promise<void>((resolve, reject) => {
-          const w = new Worker(file, { workerData: c });
+          const w = startWorker(file, { workerData: c });
           w.on('message', (m: Done | 'end') => {
             if (m === 'end') {
               resolve();

@@ -630,6 +630,34 @@ those 40 s the window matches the idle one. The live bot's walks in the window l
 walks; 76.7 ms the day before, p99 of all its walks 38.5 ms). A `!test` series the owner started at 03:30:27 lowered
 the run then going (fly-land) to nice 20, and the next run waited until the series ended.
 
+**A lost worker with no failed test** ([decisions/0089](decisions/0089-worker-threads-without-wasm-code-gc.md)).
+Until 2026-11-15 the unit suite on the test host ended with exit 1 about one run in four although every test passed:
+`# Check failed: end > addr.`, then `Worker exited unexpectedly with signal SIGTRAP ... while running test file
+.../nav-r7.test.ts` (or `nav-r6`). That is V8's wasm code GC racing a worker that ends (Node 24 only; the bot's
+workers now start through `bot/src/threads.ts`, which turns that GC off), not a test. The deploy's test run needs no
+special case for it. Two tools measure it, and `BEDROCKBOT_WASM_CODE_GC=on` brings the race back to compare:
+
+```sh
+node scripts/mac-run.mjs -- bash scripts/mac/vitest-loop.sh 780 nav-r nav-worker        # vitest again and again for 780 s: clean / lost / failed runs
+node scripts/mac-run.mjs -- BEDROCKBOT_WASM_CODE_GC=on bash scripts/mac/vitest-loop.sh 780 nav-r nav-worker
+node scripts/mac-run.mjs -- 'cd bot && node scripts/worker-churn.ts --procs 400 --cycles 40 --alive 2 --guard'   # planner workers started and ended in many processes
+```
+
+Measured on the test host (2026-11-15, 4 vitest workers):
+
+| Run | guard off (`BEDROCKBOT_WASM_CODE_GC=on`) | guard on |
+|---|---|---|
+| the navigator files (nav-r2 to r8, the three reach files, nav-worker: 11 files, about 110 s), load 6 to 10 | 3 of 16 runs lost a worker, all in nav-r7 | 0 of 40 |
+| nav-r7 alone (111 tests, about 93 s), load 1.7 to 4 | 0 of 9 | 0 of 9 |
+| the whole unit suite (240 files, about 160 s) | (the deploys: 3 of 5 first tries) | 0 of 18 lost; 16 exit 0, 2 failed by the nav-worker timing test below |
+| `worker-churn.ts`, 40 planner workers a process, 2 at a time | 5 aborts in 1 769 processes | 0 in 476 |
+
+Load makes it likelier: nav-r7 alone on a quiet host did not abort in 9 runs; with ten other files beside it and the
+host's load at 6 to 10 it aborted in 3 of 16. The nav-worker
+test "the navigator walks the interim answer, splices in the final one ..." fails on its own now and then on the test
+host whichever the guard (3 of 16 navigator runs with it off, 2 of 40 and 2 of 18 suite runs with it on): a timing
+test, not a lost worker.
+
 **The live bot's CPU policy.** The launchd agent (deploy/launchd) has `ProcessType` `Background`: the bot runs at
 priority 4 with background QoS, which on Apple silicon means the efficiency cores and throttling. The same work
 under `taskpolicy -b` against the test runs' nice 10 on the M4: SHA-256 3.5 to 3.8 times slower, a Map-heavy

@@ -6,9 +6,10 @@
 // dense snapshot of the box around the start and the goals (`snapshotFor`: one byte per cell, 1 = solid or
 // unknown; cells outside the box are solid), transferred, not copied. The tracker keeps flying its old plan
 // (or holds) until the answer arrives (tracker.ts).
-import { isMainThread, parentPort, Worker, workerData, type MessagePort } from 'node:worker_threads';
+import { isMainThread, parentPort, workerData, type MessagePort, type Worker } from 'node:worker_threads';
 import type { Vec3 } from '../../../connection/types.ts';
 import { silentLogger, type Logger } from '../../../log.ts';
+import { startWorker } from '../../../threads.ts'; // decision 0089: the wasm code GC guard
 import { gridOfCells, type RouteGrid } from './grid.ts';
 import { planRoute } from './search.ts';
 import { goalPoint, type RoutePlan, type RouteRequest } from './types.ts';
@@ -92,7 +93,7 @@ export class RoutePlannerClient {
 
   constructor(o: { spawn?: () => Worker; log?: Logger } = {}) {
     this.log = o.log ?? silentLogger;
-    this.spawn = o.spawn ?? (() => new Worker(new URL(import.meta.url), { workerData: { bedrockbotRoute: true }, name: 'route' }));
+    this.spawn = o.spawn ?? (() => startWorker(new URL(import.meta.url), { workerData: { bedrockbotRoute: true }, name: 'route' }));
   }
 
   private ensure(): Worker {

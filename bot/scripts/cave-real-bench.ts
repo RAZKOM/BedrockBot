@@ -11,7 +11,8 @@
 //   routeB    cave_4, cave_5, cave_shortcut, cave_end as hints
 //   tripC     home, cave_2, cave_start (the sky part is a stub cruise)
 //   proofB    the shortcut proof (cave/proof.ts) from cave_5 through cave_shortcut to cave_end
-import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
+import { isMainThread, parentPort, workerData } from 'node:worker_threads';
+import { startWorker } from '../src/threads.ts'; // decision 0089: the wasm code GC guard
 import { availableParallelism } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { capWorkers } from './workers.ts';
@@ -156,7 +157,7 @@ if (!isMainThread) {
     chunks.filter((c) => c.length).map(
       (c) =>
         new Promise<void>((resolve, reject) => {
-          const w = new Worker(file, { workerData: c });
+          const w = startWorker(file, { workerData: c });
           w.on('message', (m: Done | 'end') => {
             if (m === 'end') {
               resolve();

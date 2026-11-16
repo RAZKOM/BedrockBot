@@ -14,8 +14,9 @@
 // The navigator falls back to the in-thread planner while the worker is not ready (start-up, the
 // initial snapshot of the loaded columns, a restart after a crash) and for options the worker cannot
 // rebuild (a custom breakTicks or cellCost function).
-import { isMainThread, parentPort, Worker, workerData, type MessagePort } from 'node:worker_threads';
+import { isMainThread, parentPort, workerData, type MessagePort } from 'node:worker_threads';
 import { silentLogger, type Logger } from '../../log.ts';
+import { startWorker } from '../../threads.ts'; // decision 0089: the wasm code GC guard
 import type { BlockInfo, Vec3 } from '../../world/types.ts';
 import { breakTicksWith } from './baritone/helper.ts'; // Track BB: the shared break-time lookup
 import { PathSearch, handBreakTicks, type PathOptions, type PathResult } from './astar.ts';
@@ -368,7 +369,7 @@ export class PlannerClient {
   constructor(world: PlannerWorld, opts: { logger?: Logger; spawn?: () => PlannerWorker } = {}) {
     this.world = world;
     this.log = opts.logger ?? silentLogger;
-    this.spawnWorker = opts.spawn ?? (() => new Worker(new URL(import.meta.url), { workerData: { bedrockbotPlanner: true }, name: 'planner' }));
+    this.spawnWorker = opts.spawn ?? (() => startWorker(new URL(import.meta.url), { workerData: { bedrockbotPlanner: true }, name: 'planner' }));
   }
 
   /** The worker runs and has the initial snapshot. */
