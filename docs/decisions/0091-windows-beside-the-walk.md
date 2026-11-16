@@ -122,4 +122,10 @@ walk the rest: 76 to 166 blocks of path on five goals, 31 to 62 s of walk (offli
   - a straight window can still end on the floor short of its landing when a rocket burns past the plan (the proof is
     robust to the burn's two ends only); it does not hurt and the walk goes on;
   - the hop is not asked within 48 blocks of the goal (two of the owner's goals have a whole hop there);
-  - not run on the Realm; hostiles on the way not run on a server with mobs (the rules are unit tests).
+  - hostiles on the way not run on a server with mobs (the rules are unit tests).
+- **On the Realm** (2026-11-16, `flyCaveWindows` on, five goals deep in a cave from the open, 2 trips each, crafted
+  rockets): 10 of 10 arrived, no death, damage 0.9 at the most, no window flown, as offline; the trips took what the walk
+  took before (74 to 112 s). The 30 proofs refused there: 12 for a clearance of 0.20 under the margin of 0.30 (109 to
+  562 ms each), 12 partial with the node budget run out (1.2 to 1.4 s), 4 with a rocket still burning where the landing
+  begins, 2 with no route at all. A goal's second trip proved the same windows again with the same expansions. The
+  setting stays on there; it stays off by default.
