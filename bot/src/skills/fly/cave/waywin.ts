@@ -383,13 +383,24 @@ export function wayGate(g: WayGateInput): { take: boolean; line: string; saveS: 
  * cave, windows whose plans entered the landing at 1.5 a tick with a burn left (plain rockets, 5 to 7 fired) bailed out in
  * the chamber 6 of 10 times, 3 of them into its wall (1.1 to 2.9); every window that landed on the corridor world entered
  * its landing with the burn out (0.9 to 1.4 a tick).
+ *
+ * Track F18: the landing's rule is judged before the clearance, and the reason gives the clearance after the takeoff where
+ * it differs (RoutePlan.flightClearance); which proofs fly is unchanged. A standing start's takeoff edge is swept on the bare
+ * box (search.ts startMarginFor): the body standing in its cell is 0.2 from a wall beside it at its feet or head height and
+ * 0.28 from one at a corner, so on an uneven cave floor `clearance 0.20` is the takeoff's, not the flight's. On the owner's
+ * cave's tall passage every complete proof (both kits, offline 2026-11-16, the same searches as on the Realm) kept 0.41 to
+ * 0.65 after its takeoff and entered its landing with the rocket still burning: the landing's rule is what refuses them,
+ * and flown anyway they bail out (docs/flight.md, Track F18). Judging the margin after the takeoff alone was measured and
+ * not taken: on the hook cave it took more windows with the crafted kit and lost on its inner way; the owner's cave was
+ * unchanged.
  */
-export function wayProven(p: Pick<RoutePlan, 'complete' | 'robust' | 'clearance' | 'reached' | 'states'>, win: Pick<Window, 'margin' | 'goals'>): { ok: boolean; why: string } {
+export function wayProven(p: Pick<RoutePlan, 'complete' | 'robust' | 'clearance' | 'reached' | 'states'> & Partial<Pick<RoutePlan, 'flightClearance'>>, win: Pick<Window, 'margin' | 'goals'>): { ok: boolean; why: string } {
   const need = Math.max(CAVE_STYLE.proveClearMin, win.margin);
   if (!p.complete) return { ok: false, why: `partial, ${p.reached} of ${win.goals.length} goals` };
   if (!p.robust) return { ok: false, why: 'not robust to the burn' };
-  if (p.clearance < need - 1e-9) return { ok: false, why: `clearance ${p.clearance.toFixed(2)}, under the window's margin ${need.toFixed(2)}` };
-  if (!wayLandsUnpowered(p, win.goals.length)) return { ok: false, why: `clearance ${p.clearance.toFixed(2)}, but a rocket still burns where its landing begins` };
+  const clr = p.flightClearance !== undefined && p.flightClearance > p.clearance + 0.005 ? `clearance ${p.clearance.toFixed(2)} at the takeoff, ${p.flightClearance.toFixed(2)} after it` : `clearance ${p.clearance.toFixed(2)}`;
+  if (!wayLandsUnpowered(p, win.goals.length)) return { ok: false, why: `${clr}, but a rocket still burns where its landing begins` };
+  if (p.clearance < need - 1e-9) return { ok: false, why: `${clr}, under the window's margin ${need.toFixed(2)}` };
   return { ok: true, why: `clearance ${p.clearance.toFixed(2)}` };
 }
 

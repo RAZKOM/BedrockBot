@@ -196,8 +196,8 @@ export function passes(g: RouteGoal, from: Vec3, to: Vec3): boolean {
 
 const f32 = Math.fround;
 
-/** The grid without the cells at or under `floorY` (the floor a takeoff leaves). */
-function floorless(grid: RouteGrid, floorY: number): RouteGrid {
+/** The grid without the cells under `floorY` (the floor a takeoff leaves). */
+export function floorless(grid: RouteGrid, floorY: number): RouteGrid {
   return { solid: (x, y, z) => y >= floorY && grid.solid(x, y, z) };
 }
 

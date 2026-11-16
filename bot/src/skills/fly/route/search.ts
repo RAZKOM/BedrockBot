@@ -163,9 +163,16 @@ function unwind(n: Node, req: RouteRequest, effort: { nodes: number; expanded: n
   const edges: RoutePlan['edges'] = [];
   let rockets = 0;
   let clearance = RISK_RANGE;
+  // (Track F18: a standing start's first edge, swept on the bare box, left out)
+  let flight = RISK_RANGE;
+  let flown = 0;
   let robust = true;
   for (const c of chain) {
     if (!c.edge) continue;
+    if (edges.length > 0 || req.start.gliding) {
+      flight = Math.min(flight, c.edge.clearance);
+      flown++;
+    }
     edges.push({ name: c.edge.name, at: controls.length, ticks: c.edge.ticks });
     rockets += c.edge.rockets;
     if (c.edge.clearance < clearance) clearance = c.edge.clearance;
@@ -182,6 +189,7 @@ function unwind(n: Node, req: RouteRequest, effort: { nodes: number; expanded: n
     rockets,
     cost: n.g,
     clearance,
+    flightClearance: flown ? Math.max(clearance, flight) : clearance,
     complete,
     reached: n.s.wp,
     robust: edges.length > 0 && robust,
@@ -338,6 +346,7 @@ function joinPlans(req: RouteRequest, plans: readonly RoutePlan[], stackRockets:
   let rockets = 0;
   let cost = 0;
   let clearance = RISK_RANGE;
+  let flight = RISK_RANGE;
   let nodes = 0;
   let expanded = 0;
   let ms = 0;
@@ -351,6 +360,7 @@ function joinPlans(req: RouteRequest, plans: readonly RoutePlan[], stackRockets:
     rockets += p.rockets;
     cost += p.cost;
     clearance = Math.min(clearance, p.clearance);
+    flight = Math.min(flight, p.flightClearance ?? p.clearance);
     nodes += p.nodes;
     expanded += p.expanded;
     ms += p.ms;
@@ -372,6 +382,7 @@ function joinPlans(req: RouteRequest, plans: readonly RoutePlan[], stackRockets:
     rockets,
     cost,
     clearance,
+    flightClearance: Math.max(clearance, flight),
     complete: complete && reached >= req.goals.length,
     reached,
     robust: edges.length > 0 && robust,

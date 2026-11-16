@@ -21,9 +21,10 @@ import type { Cave } from '../route/caves.ts';
 import { rng } from '../route/courses.ts';
 import { gridOf, sweep, type RouteGrid } from '../route/grid.ts';
 import { sweepGridFor } from '../route/primitives.ts';
+import { flyBranch } from '../route/robust.ts';
 import { planRoute } from '../route/search.ts';
 import type { Planner, TrackerDebug } from '../route/tracker.ts';
-import { BURN, type KitBurn, type RouteGoal, type RoutePlan } from '../route/types.ts';
+import { BURN, RISK_RANGE, type KitBurn, type RouteGoal, type RoutePlan, type RouteState } from '../route/types.ts';
 import { gridOfSnapshot, snapshotFor } from '../route/worker.ts';
 import { WaypointProvider, type RoutePoint } from './route.ts';
 import { CAVE_STYLE, caveExecutorOptions, caveStretchOptions, type CaveStyle } from './style.ts';
@@ -508,3 +509,62 @@ export function caveTripLine(t: CaveTrip): string {
 
 /** The burns a cave is scored over: the range's ends and middle, and random draws (as the obstacle course's COURSE_BURNS). */
 export const CAVE_BURNS: readonly (number | 'random')[] = [BURN.min, 12, BURN.nominal, 18, BURN.max, 'random', 'random', 'random'];
+
+/** The plan's ticks of its takeoff: a standing start's first edge, which the search sweeps on the bare box (search.ts startMarginFor); 0 for a start in the air. */
+export function takeoffTicks(start: Pick<RouteState, 'gliding'>, p: Pick<RoutePlan, 'edges' | 'ticks'>): number {
+  if (start.gliding) return 0;
+  return p.edges[1]?.at ?? p.ticks;
+}
+
+export interface BurnsCheck {
+  ok: boolean;
+  /** The least clearance after the takeoff over the nominal and every branch flown (0 when one fails). */
+  clearance: number;
+  /** The branches flown (the nominal among them) and those that failed. */
+  branches: number;
+  failed: number;
+  why: string;
+}
+
+/**
+ * Track F18 (a measure, no live rule; scripts/way-window-bench.ts `--clear burns`): a plan's controls flown open loop at
+ * every burn of the kit's range, one rocket varied at a time with the others on the nominal (and every rocket on the
+ * shortest and on the longest when it fires more than one, as robust.ts checkRobust's branches), the nominal too, up to
+ * where its landing's stage begins (from there the burn is out, waywin.ts wayLandsUnpowered, and the tracker brings the
+ * body down). It holds when every branch gets there past every via point with its burn out and keeps `margin` after the
+ * takeoff (the takeoff edge counts only for a hit). On F17's made-up caves it refuses every window, the ones the tracker
+ * lands too (a burn near an end comes within 0 of the bore's wall open loop, where the tracker steers clear): open loop
+ * says little of the closed loop there (docs/flight.md, Track F18).
+ */
+export function burnsHold(start: Readonly<RouteState>, p: RoutePlan, grid: RouteGrid, goals: readonly RouteGoal[], margin: number, stackRockets = false): BurnsCheck {
+  const from = takeoffTicks(start, p);
+  const until = Math.max(0, goals.length - 1);
+  const kit = start.kit ?? BURN;
+  const n = p.controls.reduce((k, c) => k + (c.fire ? 1 : 0), 0);
+  const sets: number[][] = [Array<number>(n).fill(kit.nominal)];
+  for (let i = 0; i < n; i++) {
+    for (let b = kit.min; b <= kit.max; b++) {
+      if (b === kit.nominal) continue;
+      const burns = Array<number>(n).fill(kit.nominal);
+      burns[i] = b;
+      sets.push(burns);
+    }
+  }
+  if (n > 1) sets.push(Array<number>(n).fill(kit.min), Array<number>(n).fill(kit.max));
+  let clearance = RISK_RANGE;
+  let failed = 0;
+  let first: string | undefined;
+  for (const burns of sets) {
+    const r = flyBranch(start, p, grid, margin, goals, burns, stackRockets, { from, until });
+    clearance = Math.min(clearance, r.clearance);
+    if (!r.hit && r.reached >= until && !r.burning) continue;
+    failed++;
+    if (first) continue;
+    const at = r.hitAt ?? 0;
+    const edge = p.edges.filter((e) => e.at < Math.max(1, at)).pop()?.name ?? '?';
+    const which = n > 1 && new Set(burns).size === 1 ? `every rocket at ${burns[0]} ticks` : `a burn of ${burns.find((b) => b !== kit.nominal) ?? kit.nominal} ticks`;
+    first = r.hit ? `${which} comes within ${margin.toFixed(2)} of a solid at tick ${at} (${edge})` : r.reached < until ? `${which} passes ${r.reached} of the ${until} via points` : `${which} still burns where the landing begins`;
+  }
+  if (failed) return { ok: false, clearance: 0, branches: sets.length, failed, why: `${first}; ${failed} of ${sets.length} burns fail` };
+  return { ok: true, clearance, branches: sets.length, failed: 0, why: `every burn of ${kit.min} to ${kit.max} ticks holds, clearance ${clearance.toFixed(2)} after the takeoff` };
+}

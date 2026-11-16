@@ -294,6 +294,12 @@ export interface RoutePlan {
   cost: number;
   /** The least clearance along the plan (blocks, capped at RISK_RANGE). */
   clearance: number;
+  /**
+   * Track F18: the least clearance after a standing start's takeoff edge (the edge the search sweeps on the bare box,
+   * search.ts startMarginFor; the standing body is 0.2 from a wall beside it on an uneven floor); the plan's clearance
+   * for a start in the air. For the log and the window's rule's reason (cave/waywin.ts wayProven).
+   */
+  flightClearance?: number;
   /** All goals reached (else the plan is the best partial: the node nearest the next goal). */
   complete: boolean;
   /** Waypoints reached by the plan. */

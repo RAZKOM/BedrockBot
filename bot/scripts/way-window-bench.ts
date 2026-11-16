@@ -9,26 +9,31 @@
 //
 //   node scripts/way-window-bench.ts --fixture <name> [--pairs a,b] [--seeds 10] [--kit crafted,plain] [--workers 5]
 //                                    [--out f.jsonl] [--verbose] [--trace] [--corridor | --hook [--inner]] [--pace 1.22]
-//                                    [--refclear on|off] [--clear margin|corridor] [--mids] [--prove-ms 2000]
-//                                    [--turn-max 60]
+//                                    [--refclear on|off] [--clear margin|corridor|takeoff|burns] [--burn-margin m]
+//                                    [--mids] [--prove-ms 2000] [--turn-max 60]
 //
 // `--corridor`: a made-up cave instead (test/unit/skills/fly-corridor-world.ts: the 3 x 3 bore, the bend, the 2-high
 // section, the chamber), the way the walk's own straight line through it from 3 blocks inside the mouth. `--hook`: the
 // e2e's cave (test/unit/skills/fly-cave-way-world.ts), its centre line from the cell before the mouth (`--inner`: along
 // its inner side rows, the e2e probe's way). `--refclear off`
 // flies the windows without TrackerRules.refClear; `--clear corridor` takes a proof by the corridor's rule (complete,
-// robust, clearance 0.15) instead of wayProven's; `--mids` proves robust to the burns between the ends too; `--prove-ms`
-// the proof's budget (waywin.ts WAY_PROVE_MS) with the scout's lead half a second over it; `--turn-max` the most a
-// window's way may turn (WAY_TURN_MAX; 180: no cut at a bend).
+// robust, clearance 0.15) instead of wayProven's; Track F18: `--clear takeoff` wayProven's with the margin judged after
+// the takeoff edge (RoutePlan.flightClearance), `--clear burns` wayProven's with the margin judged by cave/bench.ts
+// burnsHold (every burn of the kit's range open loop, `--burn-margin` its margin, default the window's); `--mids`
+// proves robust to the burns between the ends too; `--prove-ms` the proof's budget (waywin.ts WAY_PROVE_MS) with the
+// scout's lead half a second over it; `--turn-max` the most a window's way may turn (WAY_TURN_MAX; 180: no cut at a bend).
+// Each window is flown on a copy of its proof (the tracker re-times the plan it flies, and the proof is flown again on
+// the next seed: before Track F18 the seeds after the first flew a reference re-timed to an earlier seed's burn).
 import { isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { startWorker } from '../src/threads.ts';
 import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { capWorkers } from './workers.ts';
 import { burnRange } from '../src/skills/fly/burn.ts';
-import { flyWindow, type CaveBenchOptions } from '../src/skills/fly/cave/bench.ts';
+import { burnsHold, flyWindow, type BurnsCheck, type CaveBenchOptions } from '../src/skills/fly/cave/bench.ts';
 import { caveStretchOptions, CAVE_STYLE } from '../src/skills/fly/cave/style.ts';
 import { wayAt, wayGate, wayProven, WayScout, WAY_OVER_S, WAY_PROVE_MS, WAY_PROVE_NODES, type WayNode, type WayWindow } from '../src/skills/fly/cave/waywin.ts';
+import { RISK_RANGE } from '../src/skills/fly/route/types.ts';
 import { caveWorld, loadCaveFixture } from '../src/skills/fly/corridor/cave.ts';
 import { windowRequest } from '../src/skills/fly/corridor/drive.ts';
 import { PATH_PACE } from '../src/skills/fly/landprice.ts';
@@ -134,8 +139,14 @@ interface Job {
   fixture?: string;
   /** The windows' trackers with TrackerRules.refClear (the setting's flight). */
   refClear: boolean;
-  /** The proof rule: `margin` waywin.ts wayProven (the setting's), `corridor` the corridor's (CAVE_STYLE proveClearMin). */
-  clearRule: 'margin' | 'corridor';
+  /**
+   * The proof rule: `margin` waywin.ts wayProven (the setting's), `corridor` the corridor's (CAVE_STYLE proveClearMin),
+   * Track F18: `takeoff` wayProven with the clearance judged after the takeoff edge (RoutePlan.flightClearance), `burns`
+   * wayProven with the clearance after the takeoff over every burn of the kit's range (cave/bench.ts burnsHold).
+   */
+  clearRule: 'margin' | 'corridor' | 'takeoff' | 'burns';
+  /** The margin the `takeoff` and `burns` rules ask after the takeoff (default the window's). */
+  burnMargin?: number;
   /** The proof's budget (ms; WAY_PROVE_MS) and the scout's lead with it. */
   proveMs: number;
   /** The most a window's way may turn (degrees; WAY_TURN_MAX). */
@@ -201,14 +212,28 @@ async function runJob(j: Job): Promise<RunRow[]> {
   const gateS = at(PATH_PACE);
   const kit: Readonly<KitBurn> | undefined = j.kit === 'crafted' ? burnRange(1) : undefined;
   const proofs = new Map<number, RoutePlan>();
+  const burnChecks = new Map<number, BurnsCheck>();
   const prove = (w: WayWindow, loose: number): RoutePlan => {
     const hit = proofs.get(w.start);
     if (hit) return hit;
     const so = caveStretchOptions(w.win);
     const req = windowRequest(w.win, w.from, loose, { margin: so.margin, maxMs: j.proveMs, maxNodes: WAY_PROVE_NODES, riskCost: so.riskCost, ...(so.pieces !== undefined ? { pieces: so.pieces } : {}), ...(kit ? { kit } : {}), ...(has('mids') ? { midBurns: true } : {}) });
-    const p = planRoute(req, gridOfSnapshot(snapshotFor(grid, req)));
+    const g = gridOfSnapshot(snapshotFor(grid, req));
+    const p = planRoute(req, g);
     proofs.set(w.start, p);
+    if (p.complete && p.robust && j.clearRule === 'burns') burnChecks.set(w.start, burnsHold(req.start, p, g, req.goals, j.burnMargin ?? w.win.margin));
     return p;
+  };
+  /** The proof rule of the job (see Job.clearRule). */
+  const proven = (w: WayWindow, p: RoutePlan): { ok: boolean; why: string } => {
+    if (j.clearRule === 'corridor') return { ok: p.complete && p.robust && p.clearance >= CAVE_STYLE.proveClearMin, why: `clearance ${p.clearance.toFixed(2)}` };
+    if (j.clearRule === 'margin') return wayProven(p, w.win);
+    // (`takeoff`: the margin after the takeoff edge; `burns`: the search's proof and the landing unpowered, the margin by burnsHold)
+    if (j.clearRule === 'takeoff') return wayProven({ ...p, clearance: p.flightClearance ?? p.clearance }, { ...w.win, margin: j.burnMargin ?? w.win.margin });
+    const base = wayProven({ ...p, clearance: RISK_RANGE }, w.win);
+    if (!base.ok) return base;
+    const c = burnChecks.get(w.start);
+    return c ? { ok: c.ok, why: c.why } : { ok: false, why: 'no burn check' };
   };
   const rows: RunRow[] = [];
   const total = walkS(0, way.length - 1);
@@ -235,9 +260,10 @@ async function runJob(j: Job): Promise<RunRow[]> {
         return m;
       };
       // (--clear corridor: the corridor's own proof rule, CAVE_STYLE proveClearMin; the setting's: wayProven, the window's margin)
-      const ok = j.clearRule === 'corridor' ? p.complete && p.robust && p.clearance >= CAVE_STYLE.proveClearMin : wayProven(p, w.win).ok;
+      const pv = proven(w, p);
+      const ok = pv.ok;
       if (ok) row.provenComplete++;
-      if (p.complete && p.robust && !ok) notes.push(`proof from ${scout.along[w.start]!.toFixed(0)}: ${wayProven(p, w.win).why}: walked`);
+      if (p.complete && p.robust && !ok) notes.push(`proof from ${scout.along[w.start]!.toFixed(0)}: ${pv.why}: walked`);
       if (proofS > arrive) {
         row.passed++;
         notes.push(`proof from ${scout.along[w.start]!.toFixed(0)} came back after the body passed it (${p.ms.toFixed(0)} ms, ${arrive.toFixed(1)} s of walk)`);
@@ -249,7 +275,7 @@ async function runJob(j: Job): Promise<RunRow[]> {
       const g = ok ? wayGate({ walkS: gateS(w.start, w.land), flyS: p.ticks / 20, rockets: p.rockets, loose }) : undefined;
       if (!g?.take) {
         if (ok) row.gated++;
-        notes.push(`window from ${scout.along[w.start]!.toFixed(0)} (${w.win.blocks.toFixed(0)} blocks, ${w.win.width}x${w.win.height}, margin ${w.win.margin}): ${ok ? g!.line : `${p.complete ? 'complete' : `partial (${p.why ?? '?'})`} ${p.reached}/${w.win.goals.length} goals${p.robust ? '' : ', not robust'}, clearance ${p.clearance.toFixed(2)}, ${p.expanded} expanded in ${p.ms.toFixed(0)} ms`}`);
+        notes.push(`window from ${scout.along[w.start]!.toFixed(0)} (${w.win.blocks.toFixed(0)} blocks, ${w.win.width}x${w.win.height}, margin ${w.win.margin}): ${ok ? g!.line : `${p.complete ? 'complete' : `partial (${p.why ?? '?'})`} ${p.reached}/${w.win.goals.length} goals${p.robust ? '' : ', not robust'}, clearance ${p.clearance.toFixed(2)} (${(p.flightClearance ?? p.clearance).toFixed(2)} after the takeoff), ${p.expanded} expanded in ${p.ms.toFixed(0)} ms`}`);
         const m = walkedTo(proofS);
         t += walkS(i, m);
         i = m;
@@ -258,7 +284,8 @@ async function runJob(j: Job): Promise<RunRow[]> {
       // taken: the walk to its start, the stop, the window
       t += arrive;
       const o: CaveBenchOptions = { seed: seed * 131 + ++k, burn: 'random', ...(kit ? { kit } : {}), ...(j.refClear ? { variant: { rules: { refClear: true } } } : {}), ...(has('trace') ? { note: (m: string) => notes.push(`      ${m}`) } : {}) };
-      const r = await flyWindow(query, w.from, w.win.goals, w.win.margin, o, o.seed, p, grid, w.win.height, floor);
+      // (a copy: the tracker changes the plan it flies, and the proof is flown again on the next seed)
+      const r = await flyWindow(query, w.from, w.win.goals, w.win.margin, o, o.seed, structuredClone(p), grid, w.win.height, floor);
       t += r.ticks / 20 + WAY_OVER_S;
       loose -= r.rockets;
       row.rockets += r.rockets;
@@ -311,9 +338,10 @@ if (!isMainThread) {
   const pace = Number(arg('pace', '1.22'));
   const jobs: Job[] = [];
   const refClear = arg('refclear', 'on') === 'on';
-  const clearRule = arg('clear', 'margin') === 'corridor' ? 'corridor' : 'margin';
+  const rule = arg('clear', 'margin')!;
+  const clearRule = rule === 'corridor' || rule === 'takeoff' || rule === 'burns' ? rule : 'margin';
   const proveMs = Number(arg('prove-ms', String(WAY_PROVE_MS)));
-  for (const tag of tags) for (const kit of kits) jobs.push({ tag, seeds, kit, pace, corridor, hook, inner: hook && has('inner'), fixture, refClear, clearRule, proveMs, ...(arg('turn-max') ? { turnMax: Number(arg('turn-max')) } : {}) });
+  for (const tag of tags) for (const kit of kits) jobs.push({ tag, seeds, kit, pace, corridor, hook, inner: hook && has('inner'), fixture, refClear, clearRule, proveMs, ...(arg('turn-max') ? { turnMax: Number(arg('turn-max')) } : {}), ...(arg('burn-margin') ? { burnMargin: Number(arg('burn-margin')) } : {}) });
   const out = arg('out');
   if (out) writeFileSync(out, '');
   const all: RunRow[] = [];

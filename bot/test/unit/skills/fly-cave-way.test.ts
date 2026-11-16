@@ -43,8 +43,11 @@ import {
 } from '../../../src/skills/fly/cave/waywin.ts';
 import { gridOfCells } from '../../../src/skills/fly/route/grid.ts';
 import { replay } from '../../../src/skills/fly/route/primitives.ts';
+import { flyBranch } from '../../../src/skills/fly/route/robust.ts';
+import { planRoute } from '../../../src/skills/fly/route/search.ts';
 import { RouteTracker } from '../../../src/skills/fly/route/tracker.ts';
-import { NO_BOOST, type RouteControl, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from '../../../src/skills/fly/route/types.ts';
+import { burnsHold, takeoffTicks } from '../../../src/skills/fly/cave/bench.ts';
+import { BURN, NO_BOOST, type RouteControl, type RouteGoal, type RoutePlan, type RouteRequest, type RouteState } from '../../../src/skills/fly/route/types.ts';
 import type { LandMob } from '../../../src/skills/fly/landmobs.ts';
 import { PATH_PACE } from '../../../src/skills/fly/landprice.ts';
 import { corridorWorld, LOW } from './fly-corridor-world.ts';
@@ -293,6 +296,74 @@ describe('the rules of a window beside the walk (Track F17)', () => {
     expect(wayStretchOptions({ margin: 0.3 }).kit).toBeUndefined();
     // (the cave style itself is as it was: the corridor's `!fly` windows do not take it)
     expect(CAVE_STYLE.rules.refClear).toBeUndefined();
+  });
+});
+
+describe('the reason a window is refused, and the clearance after the takeoff (Track F18)', () => {
+  const win = { margin: 0.3, goals: [{}, {}, {}] as RouteGoal[] };
+  const st = (wp: number, left: number): RouteState => ({ pos: { x: 0, y: 0, z: 0 }, vel: { x: 0, y: 0, z: 1.2 }, yaw: 0, boost: { min: 0, max: left, nom: left }, gliding: true, rockets: 3, wp });
+  const burning = [st(0, 15), st(1, 6), st(2, 4), st(3, 0)];
+  type Proof = Pick<RoutePlan, 'complete' | 'robust' | 'clearance' | 'reached' | 'states'> & Partial<Pick<RoutePlan, 'flightClearance'>>;
+  const plan = (o: Partial<Proof>): Proof => ({ complete: true, robust: true, clearance: 0.32, reached: 3, states: [st(0, 15), st(1, 0), st(2, 0), st(3, 0)], ...o });
+
+  it('judges the landing before the clearance and names the clearance after the takeoff; which proofs fly is unchanged', () => {
+    // the owner's cave's case: the takeoff 0.20 from a wall beside it, the flight 0.45 clear, the rocket burning into the landing
+    expect(wayProven(plan({ clearance: 0.2, flightClearance: 0.45, states: burning }), win)).toEqual({ ok: false, why: 'clearance 0.20 at the takeoff, 0.45 after it, but a rocket still burns where its landing begins' });
+    expect(wayProven(plan({ clearance: 0.2, flightClearance: 0.45 }), win)).toEqual({ ok: false, why: "clearance 0.20 at the takeoff, 0.45 after it, under the window's margin 0.30" });
+    expect(wayProven(plan({ clearance: 0.2, flightClearance: 0.2 }), win).why).toBe("clearance 0.20, under the window's margin 0.30");
+    expect(wayProven(plan({ clearance: 0.2 }), win).why).toBe("clearance 0.20, under the window's margin 0.30");
+    expect(wayProven(plan({ flightClearance: 0.6 }), win)).toEqual({ ok: true, why: 'clearance 0.32' });
+    // the margin is still the whole plan's, the takeoff's included, and the landing begins unpowered
+    for (const clearance of [0.2, 0.28, 0.3, 0.45]) {
+      for (const flightClearance of [undefined, 0.45, 0.8]) {
+        for (const states of [burning, undefined]) {
+          const p = plan({ clearance, ...(flightClearance !== undefined ? { flightClearance } : {}), ...(states ? { states } : {}) });
+          expect(wayProven(p, win).ok, `${clearance} ${flightClearance} ${states ? 'burning' : 'out'}`).toBe(clearance >= 0.3 && !states);
+        }
+      }
+    }
+  });
+
+  // a hall 6 wide and 8 high, the body standing in the cell by its left wall: its box 0.2 from the wall
+  const hall = gridOfCells((x, y, z) => y < 0 || y >= 8 || x < -2 || x >= 4 || z < -3);
+  const goals: RouteGoal[] = [{ kind: 'waypoint', box: { min: { x: -1, y: 1, z: 22 }, max: { x: 3, y: 5, z: 24 } } }];
+  const standing: RouteState = { pos: { x: -1.5, y: 0, z: 0.5 }, vel: { x: 0, y: 0, z: 0 }, yaw: 0, boost: { ...NO_BOOST }, gliding: false, rockets: 4, wp: 0 };
+  const req = (start: RouteState): RouteRequest => ({ start, goals, margin: 0.3, maxNodes: 60_000, maxMs: 10_000 });
+  const p = planRoute(req(standing), hall);
+
+  it('a standing start\'s plan carries the clearance after its takeoff edge, which the search sweeps on the bare box', () => {
+    expect(p.complete).toBe(true);
+    expect(p.clearance).toBeLessThan(0.25);
+    expect(p.flightClearance!).toBeGreaterThanOrEqual(0.3);
+    expect(takeoffTicks(standing, p)).toBe(p.edges[1]?.at ?? p.ticks);
+    // from the air nothing is left out
+    const air = planRoute(req({ ...standing, pos: { x: 1, y: 3, z: 0.5 }, vel: { x: 0, y: 0, z: 1.2 }, gliding: true }), hall);
+    expect(air.flightClearance).toBe(air.clearance);
+    expect(takeoffTicks({ gliding: true }, air)).toBe(0);
+  });
+
+  it('a branch flown open loop sweeps the takeoff\'s jump tick without the floor it leaves, and ends at the goal asked (robust.ts flyBranch)', () => {
+    // (before Track F18 a standing start's every branch hit its own floor on the first tick)
+    expect(flyBranch(standing, p, hall, 0, goals, [], false).hit).toBe(false);
+    // at the margin the takeoff beside the wall is within it; left out, the flight keeps it
+    expect(flyBranch(standing, p, hall, 0.3, goals, [], false).hit).toBe(true);
+    const flown = flyBranch(standing, p, hall, 0.3, goals, [], false, { from: takeoffTicks(standing, p) });
+    expect(flown.hit).toBe(false);
+    expect(flown.clearance).toBeGreaterThanOrEqual(0.3);
+    expect(flown.reached).toBe(1);
+    expect(flyBranch(standing, p, hall, 0.3, goals, [], false, { until: 0 })).toMatchObject({ hit: false, reached: 0 });
+  });
+
+  it('the bench\'s every-burn check flies the nominal and each burn of the range (cave/bench.ts burnsHold)', () => {
+    const fired = p.controls.filter((c) => c.fire).length;
+    const span = BURN.max - BURN.min;
+    const c = burnsHold(standing, p, hall, goals, 0.3);
+    expect(c.branches).toBe(1 + fired * span + (fired > 1 ? 2 : 0));
+    // (a window of one goal is all landing: nothing before it to check)
+    expect(c.ok).toBe(true);
+    const wide = burnsHold(standing, p, hall, [...goals, ...goals], 3.5);
+    expect(wide.ok).toBe(false);
+    expect(wide.why).toMatch(/comes within 3\.50 of a solid/);
   });
 });
 

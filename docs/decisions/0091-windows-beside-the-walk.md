@@ -1,6 +1,7 @@
 # 0091: Windows beside the walk (Track F17)
 
-Date: 2026-11-15. Status: accepted; behind the setting `flyCaveWindows`, default off (decision 9). Builds on
+Date: 2026-11-15 (addendum: Track F18, 2026-11-16). Status: accepted; behind the setting `flyCaveWindows`, default
+off (decision 9). Builds on
 [0067](0067-long-range-flight.md) (the corridor executor), [0069](0069-cave-flight.md) (the cave style's windows under
 a roof), [0082](0082-drawn-entries-and-hops.md) (the hop and the walk's re-check) and
 [0088](0088-a-walk-keeps-to-its-way.md) (the walk after a landing keeps the landing probe's way). It is a new record,
@@ -129,3 +130,64 @@ walk the rest: 76 to 166 blocks of path on five goals, 31 to 62 s of walk (offli
   562 ms each), 12 partial with the node budget run out (1.2 to 1.4 s), 4 with a rocket still burning where the landing
   begins, 2 with no route at all. A goal's second trip proved the same windows again with the same expansions. The
   setting stays on there; it stays off by default.
+
+## Addendum (Track F18, 2026-11-16): the owner's tall passage
+
+On the Realm with the setting on (five cave goals twice each from home, crafted rockets) every trip arrived, no
+window flew, and 30 proofs were refused: 12 `clearance 0.20, under the window's margin 0.30`, 12 partial at the nodes
+budget, 4 `a rocket still burns where its landing begins`, 2 `no route`. Track F18 asked what holds those windows.
+Details and numbers: [../flight.md](../flight.md) "The owner's tall passage (Track F18)".
+
+- The 0.20 is the standing takeoff's: a standing start's first edge is swept on the bare box (the body stands where it
+  stands), and a body in its cell is 0.2 from a wall beside it and 0.28 from a corner. After the takeoff the same
+  proofs keep 0.41 to 0.65.
+- Every complete proof there also enters its landing's stage with its one rocket still burning (windows of 25 to 38
+  blocks, the rocket fired in the takeoff, a crafted burn of 19 to 31 ticks or a plain one of 9 to 21), so decision 3's
+  landing rule refuses them all.
+- Flown at every crafted burn regardless (5 windows, 13 burns each), 3 of 65 landed and 3 hit a wall (up to 6.6).
+
+10. **The reason names what refuses a window, the takeoff apart** (`wayProven`). The landing's rule is judged before
+    the margin. The clearance after the takeoff (`RoutePlan.flightClearance`, the search's edges after a standing
+    start's first, joined over pieces) is named where it differs. Which proofs fly is unchanged (guard test over every
+    combination). A refusal said only one of two reasons, and the one said was the takeoff's, so the cave looked like
+    a margin problem when it is a burn problem.
+11. **The margin stays the whole plan's, takeoff included.** Judging the margin after the takeoff was measured:
+    - the owner's cave unchanged (the landing's rule);
+    - the corridor world unchanged;
+    - the hook cave's centre line faster (crafted 31.1 to 26.6 s p50, with 6 of 18 windows bailed out);
+    - its side rows slower with crafted rockets (30.5 to 32.6 s), no damage.
+
+    The result was mixed for the kit the Realm flies, so it is not taken.
+12. **No plan robust to every burn is asked for.** What was tried:
+    - midBurns: no proof completes at the 2 s budget, 1 of 9 at 30 s, and that one landed at the nominal burn only; on
+      the test host at the live budgets the hook cave lost every window;
+    - plans from each burn's end: 3 or 4 of 13 ends have one, even at 5 s;
+    - every burn open loop: it refuses the made-up caves' windows too, where the tracker lands 10 to 19 a case.
+
+    The tall passage's windows are about as long as one crafted burn. What would fly them is a window that does not
+    start under a full burn (open point), not a margin.
+13. **The bench flies a copy of each proof.** The tracker re-times the plan it flies in place. The bench shared a
+    start's proof between a case's runs, so each later run flew an earlier run's re-timed reference. Live, a proof is
+    flown once (the chain's first tracker). A future proof cache must hand out copies.
+14. **`flyBranch` sweeps a takeoff's jump tick without its floor**, as the search does (bench use only).
+
+No setting is added; `flyCaveWindows` and its default are unchanged.
+
+Consequences:
+
+- Offline, the owner's cave (n 10 a kit, either kit), before and after the same: 30.8 to 62.4 s, no window, no damage.
+- F17's made-up caves on this bench and main's (n 10 a kit) are within a window a case. The crafted hook cave flies
+  fewer windows on the fixed bench (12 against 15) with fewer bail-outs (3 against 7).
+- The 2 to 3 high passage: no window is possible under `WAY_HEAD_MIN`, so it stays 3. The way's stretches with 3 of
+  head room outside the tall passage save at most 0.8 to 6.5 s, and those worth more than the 4 s gate have lines of 13
+  to 23 blocks, under `UNDER_FLY_MIN` 24.
+- Regressions on the final tree passed:
+  - the e2e `fly-cave-way`, `fly-corridor`, `fly-cave-refill` and `fly-cave`;
+  - the unit suite on the test host, three runs of three.
+- Not done:
+  - a window that lands in the tall passage;
+  - a glide window under 24 blocks;
+  - the tracker's end check at the nominal burn (2 of 5 land with it, 4 of 5 without, on one window; no change on the
+    made-up caves);
+  - a server replica of the owner's cave with windows (the live rule is unchanged but for its words; the Realm series
+    is the live evidence).
