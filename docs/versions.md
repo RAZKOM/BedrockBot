@@ -158,6 +158,19 @@ Measured with an injected parse failure of the swap's response (e2e `read-errors
 swap was "refused (timeout)" after 2.2 s and the model still disagreed with the server 6 s later. With it, the swap was
 ok in 473 ms (RakNet) and 303 ms (NetherNet), and the model matched the server 657 ms and 499 ms after the request.
 
+**The packet, decoded** (the Realm capture of 2026-11-16, 79 bytes). The slot field `filtered_custom_name` of
+item_stack_response is an optional string: a bool, then the string when the bool is 1. minecraft-data (3.117.0 and
+3.119.0 alike) reads it as a plain string. A Realm filters item names, so for a named item it sends `01` and the
+filtered name; the plain-string reader took the `01` as a length of 1 and lost its place. BDS sends a single `00`
+(absent), which a plain string reads the same way as an empty one, so a test server never shows it. The swap of two
+named boxes is that case (`bot_fireworks` and `bot_loot`); rocket deposits carry no name and were read. The fix is one
+line of the protocol data, `["option", "string"]`, in `patches/minecraft-data@3.117.0.patch`, and
+`tools/bump-version/make-patch.mjs` applies it to every version it builds (`localFixes`) until upstream reads the field
+that way. The unit test `bot/test/unit/item-stack-response-names.test.ts` parses the Realm's bytes and the BDS shape
+and writes both back byte for byte. The same Realm session answered the resync's `inventory_mismatch` in 86 and
+103 ms, and the swap was judged done from the server's inventory. The Realm reports `*` as the `game_version` of
+start_game, so `serverVersion` tells nothing there.
+
 ## Default flipped to 1.26.60 (2026-10-28)
 
 Applied as one change set from the list below (kept as the template for the next bump). Gates, in

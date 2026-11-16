@@ -42,3 +42,16 @@ with their NBT, both boxes named, the Realm's slots. That made 34 swaps, all rea
   itself is wrong when the server did the swap.
 - Rejected: a setting for the resync. Nothing is gained by turning it off. The e2e's before case switches it off in
   code (`InventoryResync.enabled`).
+
+## Addendum (2026-11-16): the Realm packet decoded
+
+The capture caught the packet on the first Realm swap after the deploy: item_stack_response, 79 bytes, answering the
+swap of two named boxes. Its slot field `filtered_custom_name` is an optional string (a bool, then the string), not a
+plain string as minecraft-data has it; a Realm sends `01` and the filtered name for a named item, BDS a single `00`,
+which both readings take as nothing.
+
+- The field becomes `["option", "string"]` in the minecraft-data patch, and `make-patch.mjs` applies it to every
+  version it builds until upstream has it (a regenerated patch would otherwise lose it). It is data, not a
+  bedrock-protocol patch: every packet that reads that type is fixed at once.
+- The Realm answered `inventory_mismatch` (86 and 103 ms), so the resync works there as on BDS.
+- The Realm sends `*` as start_game's `game_version`.

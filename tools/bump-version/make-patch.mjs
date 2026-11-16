@@ -35,6 +35,29 @@ function parseArgs (argv) {
   return a
 }
 
+// Fixes of the protocol data that upstream does not have yet (playbook section 3, "(live)" row). Each one is kept in
+// every regenerated patch until upstream ships it; drop an entry when the bump's own data already reads that way.
+// - item_stack_response's slot `filtered_custom_name` is an optional string (a bool before it): a Realm sends
+//   01 + the filtered name for a named item, BDS a single 00 (ADR 0092, the Realm capture of 2026-11-16).
+function localFixes (target, ver, log) {
+  const rel = `minecraft-data/data/bedrock/${ver}/protocol.json`
+  const file = join(target, rel)
+  if (!existsSync(file)) return []
+  const proto = JSON.parse(readFileSync(file, 'utf8'))
+  let fixed = 0
+  const walk = (node) => {
+    if (Array.isArray(node)) { node.forEach(walk); return }
+    if (node === null || typeof node !== 'object') return
+    if (node.name === 'filtered_custom_name' && node.type === 'string') { node.type = ['option', 'string']; fixed++ }
+    Object.values(node).forEach(walk)
+  }
+  walk(proto.types?.ItemStackResponses)
+  if (fixed === 0) return []
+  writeFileSync(file, JSON.stringify(proto, null, 2))
+  log(`  local fix: item_stack_response filtered_custom_name -> option string (${fixed})`)
+  return [rel]
+}
+
 async function main () {
   const a = parseArgs(process.argv.slice(2))
   if (a.help || a._.length === 0) {
@@ -58,6 +81,7 @@ async function main () {
       const dl = await downloadBump(ver, a.ref, work, a.fromDir)
       const r = await applyBump({ target: after, ver, ref: a.ref, dl, replaceCommon: a.replaceCommon, log })
       r.changed.forEach(c => changed.add(c))
+      localFixes(after, ver, log).forEach(c => changed.add(c))
       log(`  self-check ${JSON.stringify(selfCheck(after, ver))}`)
     }
     const files = [...changed].sort()

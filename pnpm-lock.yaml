@@ -167,7 +167,7 @@ overrides:
 
 patchedDependencies:
   bedrock-protocol: 312465660051d9d02f229b78038e057237cd70b6d4ba0f29630a9f4341d2e0d7
-  minecraft-data@3.117.0: fb525936e506c279a49dc41bea3d1ecdbb0370d3d0082e47ee3b0c1a9d8e5f45
+  minecraft-data@3.117.0: f6769c512f608c8ad64a6c5c1e19a03ca12b1d6ad9ffd06b80c6197fc0d0912f
 
 importers:
 
@@ -180,7 +180,7 @@ importers:
         version: https://codeload.github.com/PrismarineJS/bedrock-protocol/tar.gz/c9e1fbf21dc6abde8d89920996575791b79e66cf(patch_hash=312465660051d9d02f229b78038e057237cd70b6d4ba0f29630a9f4341d2e0d7)
       minecraft-data:
         specifier: 3.117.0
-        version: 3.117.0(patch_hash=fb525936e506c279a49dc41bea3d1ecdbb0370d3d0082e47ee3b0c1a9d8e5f45)
+        version: 3.117.0(patch_hash=f6769c512f608c8ad64a6c5c1e19a03ca12b1d6ad9ffd06b80c6197fc0d0912f)
       pngjs:
         specifier: 7.0.0
         version: 7.0.0
@@ -254,7 +254,7 @@ importers:
         version: 3.60.1(patch_hash=312465660051d9d02f229b78038e057237cd70b6d4ba0f29630a9f4341d2e0d7)
       minecraft-data:
         specifier: 3.117.0
-        version: 3.117.0(patch_hash=fb525936e506c279a49dc41bea3d1ecdbb0370d3d0082e47ee3b0c1a9d8e5f45)
+        version: 3.117.0(patch_hash=f6769c512f608c8ad64a6c5c1e19a03ca12b1d6ad9ffd06b80c6197fc0d0912f)
       prismarine-chunk:
         specifier: 1.41.0
         version: 1.41.0
@@ -2882,7 +2882,7 @@ snapshots:
       json-bigint: 1.0.0
       jsonwebtoken: 9.0.3
       jsp-raknet: 2.2.0
-      minecraft-data: 3.117.0(patch_hash=fb525936e506c279a49dc41bea3d1ecdbb0370d3d0082e47ee3b0c1a9d8e5f45)
+      minecraft-data: 3.117.0(patch_hash=f6769c512f608c8ad64a6c5c1e19a03ca12b1d6ad9ffd06b80c6197fc0d0912f)
       minecraft-folder-path: 1.2.0
       nethernet: 1.1.2
       prismarine-auth: 3.1.1
@@ -2908,7 +2908,7 @@ snapshots:
       json-bigint: 1.0.0
       jsonwebtoken: 9.0.3
       jsp-raknet: 2.2.0
-      minecraft-data: 3.117.0(patch_hash=fb525936e506c279a49dc41bea3d1ecdbb0370d3d0082e47ee3b0c1a9d8e5f45)
+      minecraft-data: 3.117.0(patch_hash=f6769c512f608c8ad64a6c5c1e19a03ca12b1d6ad9ffd06b80c6197fc0d0912f)
       minecraft-folder-path: 1.2.0
       nethernet: 1.1.2
       prismarine-auth: 3.1.1
@@ -3788,7 +3788,7 @@ snapshots:
   minecraft-assets@1.19.0:
     optional: true
 
-  minecraft-data@3.117.0(patch_hash=fb525936e506c279a49dc41bea3d1ecdbb0370d3d0082e47ee3b0c1a9d8e5f45): {}
+  minecraft-data@3.117.0(patch_hash=f6769c512f608c8ad64a6c5c1e19a03ca12b1d6ad9ffd06b80c6197fc0d0912f): {}
 
   minecraft-folder-path@1.2.0: {}
 
@@ -3945,7 +3945,7 @@ snapshots:
 
   prismarine-block@1.23.0:
     dependencies:
-      minecraft-data: 3.117.0(patch_hash=fb525936e506c279a49dc41bea3d1ecdbb0370d3d0082e47ee3b0c1a9d8e5f45)
+      minecraft-data: 3.117.0(patch_hash=f6769c512f608c8ad64a6c5c1e19a03ca12b1d6ad9ffd06b80c6197fc0d0912f)
       prismarine-biome: 1.4.0(prismarine-registry@1.12.0)
       prismarine-chat: 1.13.0
       prismarine-item: 1.18.0
@@ -3995,7 +3995,7 @@ snapshots:
 
   prismarine-registry@1.12.0:
     dependencies:
-      minecraft-data: 3.117.0(patch_hash=fb525936e506c279a49dc41bea3d1ecdbb0370d3d0082e47ee3b0c1a9d8e5f45)
+      minecraft-data: 3.117.0(patch_hash=f6769c512f608c8ad64a6c5c1e19a03ca12b1d6ad9ffd06b80c6197fc0d0912f)
       prismarine-block: 1.23.0
       prismarine-nbt: 2.8.0
 
