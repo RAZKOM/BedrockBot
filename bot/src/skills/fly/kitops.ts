@@ -14,7 +14,7 @@
 import type { Vec3 } from '../../connection/types.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { BlockInfo, ContainerView, ItemStack } from '../../world/types.ts';
-import { isShulkerBox } from '../container/chest.ts';
+import { isShulkerBox, stacksOnto } from '../container/chest.ts';
 import { hotbarTarget } from '../container/hotbar-moves.ts';
 import { boxSpots } from '../container/stash.ts';
 import type { ArmourController, ArmourMove } from '../survival/armour.ts';
@@ -66,15 +66,16 @@ export interface RefillResult extends KitOpResult {
 /**
  * Track F13: the rockets a refill may take with the box at `boxSlot` placed: the room on the rocket stacks plus a stack
  * for each free slot other than the box's own, so that the box always has a slot to come back into (`take` merges
- * first, then fills free slots; with this many it leaves one of them free).
+ * first, then fills free slots; with this many it leaves one of them free). Track V1c: `onto(i)` false for a rocket stack
+ * the box's rockets do not merge onto (other wire NBT: Flight 1 and Flight 2), which then has no room.
  */
-export function refillRoom(slots: readonly (ItemStack | null)[], boxSlot: number): number {
+export function refillRoom(slots: readonly (ItemStack | null)[], boxSlot: number, onto: (slot: number) => boolean = () => true): number {
   let room = 0;
   for (let i = 0; i < Math.min(36, slots.length); i++) {
     if (i === boxSlot) continue;
     const s = slots[i];
     if (!s || s.count <= 0) room += 64;
-    else if (isRocket(s.name)) room += Math.max(0, 64 - s.count);
+    else if (isRocket(s.name) && onto(i)) room += Math.max(0, 64 - s.count);
   }
   return room;
 }
@@ -357,10 +358,18 @@ export class FlightKitOps {
       const hotbarFree = [0, 1, 2, 3, 4, 5, 6, 7, 8].filter((i) => !this.d.inventory.slots[i]);
       let want = Math.min(64 - this.kit().rocketsHotbar, room);
       const view = o.view;
+      let crowded = false;
       for (let slot = 0; slot < 27 && want > 0 && alive(); slot++) {
         const s = this.d.inventory.window(view.id)?.slots[slot];
         if (!s || s.count <= 0 || !isRocket(s.name)) continue;
-        const r = await sk.take(view, slot, Math.min(want, s.count), hotbarFree);
+        // Track V1c: the room for this stack's rockets (a loose stack of other NBT takes none: one slot stays for the box)
+        const inv = this.d.inventory;
+        const fit = refillRoom(inv.slots, k.boxSlot, (i) => stacksOnto(s, inv.rawItem?.(view.id, slot), inv.slots[i], inv.rawItem?.(0, i)) !== false);
+        if (fit <= 0) {
+          crowded = true;
+          continue;
+        }
+        const r = await sk.take(view, slot, Math.min(want, s.count, fit), hotbarFree);
         out.taken += r.moved;
         want -= r.moved;
         if (!r.ok) {
@@ -368,6 +377,7 @@ export class FlightKitOps {
           break;
         }
       }
+      if (crowded && out.taken === 0 && !out.reason) out.reason = "no slot for the box's rockets that leaves one for the box (the loose rockets are of another kind)";
       await sk.closeContainer(view);
     } else if (!o.ok) out.reason = `open: ${o.reason}`;
     // break the box and pick it up again, whatever happened (never leave the kit behind)

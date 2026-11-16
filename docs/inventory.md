@@ -90,6 +90,26 @@ Supply box.
 The chore remembers the boxes it filled by what they hold (`boxPrint`) and fills one of them before an empty one, so
 the loot of a session goes into one box rather than one box a pass.
 
+Track V1c: an empty box with a custom name other than `keepBoxName` (`labelled`: the owner's `owner_stuff`) is never a
+loot box; a name says someone means it for something. And every move onto a partial stack (the deposits into a box or
+chest, the takes out of one, the refill from the fireworks box) needs the same wire NBT as the stack it tops up
+(`container/chest.ts stacksOnto`, the merge step's `stackKey`): the server refuses to merge rockets of another flight,
+enchanted books, named items or potions (error 55), so such a stack goes into an empty slot instead, and a box of
+partial Flight 1 stacks with no empty slot is full for Flight 2 rockets. The refill counts no room on a loose stack its
+box's rockets do not merge onto, so the box's own slot still stays free for it.
+
+A box in the main inventory with the hotbar full (the usual state of a full inventory) is brought in by the survival
+kit (`SurvivalKit.hotbarWhy`: an empty hotbar slot, else the least useful hotbar stack exchanged with it by the kit's
+`exchange`, each stack's wire item kept); when it does not come in, the step says why (`the box is not in the hotbar:
+the survival kit stayed busy ...`, `... the swap ... failed (...)`) instead of the bare line the Realm showed. A box
+just set down that gets no `container_open` is clicked once more, and the log names the block over its lid.
+
+The cell over the lid (`container/stash.ts lidOpen`, every box cell: the room chore, the Supply, the stash step, the
+flight kit's open-air and cave refills), measured on BDS 1.26.60 (`test/e2e/box-lid.test.ts`): a box opens under air,
+short grass, a fern, a flower, a vine or a cobweb, and stays shut under anything with a collision box however thin (a
+carpet, a slab, glass, leaves, stone). The rule is the box cell's own (air or a replaceable plant, no collision box, no
+liquid) and never a snow layer or fire; a shaft's carved cell digs such a lid first.
+
 ## The home chore
 
 `unloadWanted(load)`: the home chore unloads when idle at home with more than 8 stacks of unloadable items or a full
@@ -254,7 +274,10 @@ The restore:
   same tool after one dig has `{Damage: 1}`), its own with the same wear first, then any slot worn as much or more, so
   the preset's new stone pickaxe goes and the owner's worn one stays; gear of a kind no preset gives, boxes, elytras,
   enchanted or named items that were not in the save stay too: a restore only ever overwrites restorable stacks and
-  the presets' own stone tools;
+  the presets' own stone tools. The `/give` commands run after every `/replaceitem` (Track V1c: `/give` takes the first
+  empty slot, and a later `/replaceitem ... air` could clear it; the rockets preset's box came back into a lower slot
+  its own moves had freed, so the stack saved there was given and then lost). Such a restore holds the same stacks
+  with the box and that stack in each other's slots;
 - `sweep` is left out (and said) while a kept item of the save is not carried: it may lie on the ground;
 - what the room chore put into a box stays there (a command cannot take it out) and is said:
   `the boxes hold firework_rocket +294 (a command cannot take it out)`; kept items moved or gone and changed worn

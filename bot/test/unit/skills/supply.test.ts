@@ -3,6 +3,7 @@
 // the cells to avoid, just what is missing taken out, the box picked up; the home route through `!bring`'s
 // withdrawal), stow (the surplus back into a carried box), the throwaway top-up; and `!bring`'s extract (a few
 // items out of a box in a chest: the box goes back).
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { resolveBringItem } from '../../../src/skills/home/bring.ts';
 import { BoxOps } from '../../../src/skills/supply/boxes.ts';
@@ -63,6 +64,67 @@ describe('supply: carried boxes', () => {
     expect(s.carried('cobblestone')).toBe(112);
     const box = h.inv.findIndex((x) => x?.name === 'undyed_shulker_box');
     expect(shulkerContents(h.invRaws[box])).toEqual({ cobblestone: 112 });
+  });
+});
+
+describe('Track V1c: the box in the main inventory with the hotbar full (the room chore\'s box and rocket steps)', () => {
+  /** Nine hotbar stacks, the box in slot 12, cobblestone in 13 and 14. */
+  const layout = () => {
+    const inv: ({ name: string; count: number } | null)[] = Array.from({ length: 36 }, () => null);
+    for (let i = 0; i < 9; i++) inv[i] = item(['bread', 'torch', 'stick', 'bone', 'arrow', 'feather', 'paper', 'leather', 'flint'][i]!, 5);
+    inv[12] = item('undyed_shulker_box', 1);
+    inv[13] = item('cobblestone', 64);
+    inv[14] = item('cobblestone', 64);
+    return inv;
+  };
+  const opsOn = (h: ReturnType<typeof fakeHome>, toHotbar?: (slot: number) => Promise<number | string>) =>
+    new Supply({ ops: new BoxOps({ skills: h.logistics.skillsForBoxes(), inventory: h.inventory, blockAt: h.blockAt, position: h.position, keepName: () => 'bot_loot', selectHotbar: h.select, label: 'supply', ...(toHotbar ? { toHotbar } : {}) }), inventory: h.inventory, keepName: () => 'bot_loot' });
+
+  it('the box is brought into the hotbar by the kit\'s exchange, then placed and filled', async () => {
+    const h = fakeHome({ containers: {}, inv: layout() as never });
+    const asked: number[] = [];
+    const s = opsOn(h, (slot) => {
+      asked.push(slot);
+      // the kit's exchange: the box into hotbar slot 8, the flint into its slot
+      const box = h.inv[slot]!;
+      h.inv[slot] = h.inv[8]!;
+      h.inv[8] = box;
+      h.invRaws[8] = h.invRaws[slot];
+      h.invRaws[slot] = undefined;
+      return Promise.resolve(8);
+    });
+    const r = await s.putInto(12, () => [13, 14].filter((i) => h.inv[i]?.name === 'cobblestone').map((i) => ({ slot: i, count: 64, name: 'cobblestone' })));
+    expect(asked).toEqual([12]);
+    expect(r).toMatchObject({ moved: 128 });
+    expect(r.reason).toBeUndefined();
+    expect(h.calls.some((c) => c.startsWith('place'))).toBe(true);
+  });
+
+  it('the kit\'s reason when the box does not come in (the Realm said only `the box is not in the hotbar`)', async () => {
+    const h = fakeHome({ containers: {}, inv: layout() as never });
+    const s = opsOn(h, () => Promise.resolve('the box is not in the hotbar: the survival kit stayed busy (a keeper pass, a meal or the armour)'));
+    const r = await s.putInto(12, () => [{ slot: 13, count: 64, name: 'cobblestone' }]);
+    expect(r.moved).toBe(0);
+    expect(r.reason).toBe('the box is not in the hotbar: the survival kit stayed busy (a keeper pass, a meal or the armour)');
+    expect(h.calls.some((c) => c.startsWith('place'))).toBe(false);
+  });
+
+  it('a box that gets no container_open on the first click is clicked once more (the Realm fullbar case)', async () => {
+    const h = fakeHome({ containers: {}, inv: [item('undyed_shulker_box', 1), item('cobblestone', 64)] });
+    const base = h.logistics.skillsForBoxes();
+    let opens = 0;
+    const skills = { ...base, open: (p: { x: number; y: number; z: number }) => (++opens === 1 ? Promise.resolve({ ok: false as const, reason: 'timeout' }) : base.open(p)) };
+    const s = new Supply({ ops: new BoxOps({ skills, inventory: h.inventory, blockAt: h.blockAt, position: h.position, keepName: () => 'bot_loot', selectHotbar: h.select, label: 'supply' }), inventory: h.inventory, keepName: () => 'bot_loot' });
+    const r = await s.putInto(0, () => (h.inv[1]?.name === 'cobblestone' ? [{ slot: 1, count: 64, name: 'cobblestone' }] : []));
+    expect(opens).toBe(2);
+    expect(r).toMatchObject({ moved: 64 });
+    expect(h.boxes.size).toBe(0);
+  });
+
+  it('the wiring asks the kit for its reason (commands-home.ts: hotbarWhy, not the bare fallback)', () => {
+    const src = readFileSync(new URL('../../../src/chat/commands-home.ts', import.meta.url), 'utf8');
+    expect(src).toMatch(/toHotbar: async \(slot\) => \{[\s\S]{0,300}hotbarWhy\(slot\)/);
+    expect(src).not.toMatch(/hotbar\(slot\)\) \?\? 'the box is not in the hotbar'/);
   });
 });
 

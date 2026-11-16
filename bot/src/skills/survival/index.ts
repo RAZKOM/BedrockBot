@@ -179,7 +179,10 @@ export class SurvivalKit {
       self: world.self,
       hotbar,
       source,
-      toHotbar: (slot) => this.toHotbar(slot),
+      toHotbar: async (slot) => {
+        const r = await this.toHotbar(slot);
+        return typeof r === 'number' ? r : undefined;
+      },
       fromBoxes: async (names, n) => {
         const s = deps.supply?.();
         if (!s || s.carried(names) <= 0) return false;
@@ -285,7 +288,23 @@ export class SurvivalKit {
 
   /** Move a main-inventory stack into the hotbar (the stash step's box); its hotbar slot, undefined when busy or refused. */
   hotbar(slot: number): Promise<number | undefined> {
-    return this.queued(() => this.toHotbar(slot), undefined);
+    return this.queued(async () => {
+      const r = await this.toHotbar(slot);
+      return typeof r === 'number' ? r : undefined;
+    }, undefined);
+  }
+
+  /**
+   * Track V1c: `hotbar` with the reason when the stack did not come in (the room chore's and the Supply's box: the Realm
+   * said only `the box is not in the hotbar`): its hotbar slot, or why not. A busy kit is waited out once more.
+   */
+  async hotbarWhy(slot: number): Promise<number | string> {
+    const busy = 'the survival kit stayed busy (a keeper pass, a meal or the armour)';
+    for (let i = 0; i < 2; i++) {
+      const r = await this.queued(() => this.toHotbar(slot), busy);
+      if (r !== busy) return r;
+    }
+    return busy;
   }
 
   /**
@@ -476,10 +495,11 @@ export class SurvivalKit {
   }
 
   /** Move a main-inventory stack into the hotbar (an empty slot) with the inventory screen open. */
-  private async toHotbar(slot: number): Promise<number | undefined> {
+  private async toHotbar(slot: number): Promise<number | string> {
     const inv = this.d.world.inventory;
     const it = inv.slots[slot];
-    if (!it) return undefined;
+    if (!it) return `slot ${slot} is empty`;
+    if (slot < 9) return slot;
     let dst = -1;
     for (let i = 0; i < 9 && dst < 0; i++) if (!inv.slots[i]) dst = i;
     if (dst < 0) {
@@ -487,32 +507,26 @@ export class SurvivalKit {
       dst = pickHotbarVictim(inv.slots, inv.selected, this.settings().junk);
       if (dst < 0) {
         this.log.warn(`hotbar: no slot to swap ${it.name} (slot ${slot}) into: every hotbar slot is a tool or the selected one`);
-        return undefined;
+        return 'every hotbar slot is a tool or the selected one (no slot to swap the box into)';
       }
       const other = inv.slots[dst]!;
-      const r = await this.requests.withScreen(async () => {
-        inv.setItem(0, slot, { ...other });
-        inv.setItem(0, dst, { ...it });
-        const res = await this.requests.send([
-          { type_id: 'swap', legacy_type_id: 2, source: inventorySlot(slot, it.stackId), destination: inventorySlot(dst, other.stackId) },
-        ]);
-        if (res.status === 'ok' || res.status === 0) return true;
-        inv.setItem(0, slot, it);
-        inv.setItem(0, dst, other);
-        return false;
-      });
-      if (r !== true) {
-        this.log.warn(`hotbar: swapping ${it.name} (slot ${slot}) with ${other.name} (hotbar slot ${dst}) was refused`);
-        return undefined;
+      // Track V1c: the kit's exchange (each stack's wire item kept: the box's contents stay known; rolled back when refused)
+      const r = await this.requests.withScreen(() => this.exchange(slot, dst));
+      if (!r.ok) {
+        const why = 'reason' in r && r.reason ? r.reason : 'refused';
+        this.log.warn(`hotbar: swapping ${it.name} (slot ${slot}) with ${other.name} (hotbar slot ${dst}) failed: ${why}`);
+        return `the swap with the ${other.name} in hotbar slot ${dst} failed (${why})`;
       }
+      this.log.info(`hotbar: ${it.name} moved from slot ${slot} to ${dst} (${other.name} exchanged into ${slot})`);
+      return dst;
     } else {
       const r = await this.requests.withScreen(() => this.d.containers.move({ window: 0, slot }, { window: 0, slot: dst }, it.count));
       if (!r.ok) {
         this.log.warn(`hotbar: moving ${it.name} (slot ${slot}) into hotbar slot ${dst} failed: ${r.reason ?? 'refused'}`);
-        return undefined;
+        return `the move into hotbar slot ${dst} failed (${r.reason ?? 'refused'})`;
       }
     }
-    this.d.hotbar.noteRaw?.(dst, wireItemOf(inv.slots[dst], undefined));
+    this.d.hotbar.noteRaw?.(dst, wireItemOf(inv.slots[dst], inv.rawItem(0, dst)));
     return dst;
   }
 }

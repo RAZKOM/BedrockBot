@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseSettingValue, RuntimeSettings, describeSetting } from '../../../src/config/settings.ts';
 import { CONTAINER_BLOCKS } from '../../../src/skills/container/chest.ts';
-import { boxSpots, carveSpots, depositable, isShulkerBox, MIN_FREE_SLOTS, parseChest, Stash, stepLine, withSlotType, type StashSkills, isStashJunk, junkDropCount, shulkerSlotsUsed } from '../../../src/skills/container/stash.ts';
+import { boxSpots, carveSpots, depositable, lidOpen, isShulkerBox, MIN_FREE_SLOTS, parseChest, Stash, stepLine, withSlotType, type StashSkills, isStashJunk, junkDropCount, shulkerSlotsUsed } from '../../../src/skills/container/stash.ts';
 import { DEFAULT_JUNK, pickHotbarVictim } from '../../../src/skills/survival/keeper.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 
@@ -372,6 +372,32 @@ describe('stash helpers', () => {
     expect(edge[0]).toEqual({ x: 0, y: 0, z: 1 });
     // a chest below is no support (a click on it opens it)
     expect(boxSpots(world({ '1,-1,0': { ...STONE, name: 'chest' } }), at)[0]).toEqual({ x: -1, y: 0, z: 0 });
+  });
+
+  it('Track V1c: the lid cell as BDS measured it: shut under any collision box (a carpet, a slab), open under a plant; never a snow layer, a torch or fire', () => {
+    const at = { x: 0.5, y: 0, z: 0.5 };
+    const plant = (name: string): BlockInfo => ({ ...AIR, name });
+    const thin = (name: string, top: number): BlockInfo => ({ ...STONE, name, solid: false, boxes: [[0, 0, 0, 1, top, 1]] });
+    for (const lid of [plant('snow_layer'), plant('torch'), plant('fire'), thin('white_carpet', 0.0625), thin('oak_slab', 0.5), { ...STONE, name: 'glass' }]) {
+      const w = world({ '1,1,0': lid });
+      expect(boxSpots(w, at), lid.name).not.toContainEqual({ x: 1, y: 0, z: 0 });
+      expect(boxSpots(w, at)[0], lid.name).toEqual({ x: -1, y: 0, z: 0 });
+      expect(lidOpen(lid), lid.name).toBe(false);
+    }
+    for (const lid of ['air', 'cave_air', 'short_grass', 'fern', 'vine']) {
+      expect(lidOpen(plant(lid)), lid).toBe(true);
+      expect(boxSpots(world({ '1,1,0': plant(lid) }), at)[0], lid).toEqual({ x: 1, y: 0, z: 0 });
+    }
+    expect(lidOpen(undefined)).toBe(false);
+    expect(lidOpen({ ...AIR, name: 'water' })).toBe(false);
+    // a grass plant in the cell itself is still fine (the box replaces it)
+    expect(boxSpots(world({ '1,0,0': plant('short_grass') }), at)[0]).toEqual({ x: 1, y: 0, z: 0 });
+    // a shaft side whose lid cell holds a plant: the plant is dug first
+    const shaft: Record<string, BlockInfo> = {};
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1], [2, 0], [-2, 0], [0, 2], [0, -2]]) for (const y of [0, 1]) shaft[`${dx},${y},${dz}`] = STONE;
+    shaft['1,0,0'] = AIR;
+    shaft['1,1,0'] = plant('snow_layer');
+    expect(carveSpots(world(shaft), at, () => undefined)[0]).toEqual({ p: { x: 1, y: 0, z: 0 }, dig: [{ x: 1, y: 1, z: 0 }] });
   });
 
   it('carve cells for the box in a 1-wide shaft: the 4 sides, lid cell first, the break rules refuse', () => {

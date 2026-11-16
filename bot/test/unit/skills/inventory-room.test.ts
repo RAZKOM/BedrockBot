@@ -344,6 +344,15 @@ describe('planRoom: boxes', () => {
     expect(kinds(p)).toEqual(['merge']); // 3 -> 4 free: at the floor, the box waits
   });
 
+  it('Track V1c: never an empty box with someone\'s name on it (the owner\'s owner_stuff); an empty unnamed one still', () => {
+    const s = inv([['diamond', 5], ['white_shulker_box', 1, { boxUsed: 0, labelled: true }], ...filler(34)]);
+    const p = planRoom(s, o);
+    expect(p.steps.some((x) => x.kind === 'box')).toBe(false);
+    expect(p.short?.some((x) => x.startsWith('no carried box'))).toBe(true);
+    const t = inv([['diamond', 5], ['white_shulker_box', 1, { boxUsed: 0, labelled: true }], ['black_shulker_box', 1, { boxUsed: 0 }], ...filler(33)]);
+    expect(planRoom(t, o).steps.find((x) => x.kind === 'box')).toMatchObject({ box: 2 });
+  });
+
   it('the box takes no more stacks than it has room for', () => {
     const s = inv([['white_shulker_box', 1, { boxUsed: 25, boxItems: { coal: 1600 }, named: true }], ...Array.from({ length: 35 }, (_, i): Spec => [['diamond', 'emerald', 'gold_ingot', 'iron_ingot', 'copper_ingot'][i % 5]!, 1 + i, { key: `k${i}` }])]);
     const b = planRoom(s, o).steps.find((x) => x.kind === 'box');
@@ -403,6 +412,36 @@ describe('roomSlotsOf and the merge key', () => {
       { slot: 2, name: 'white_shulker_box', count: 1, boxUsed: 0, owed: true },
       { slot: 3, name: 'black_shulker_box', count: 1, boxUsed: 0, unknown: true },
     ]);
+  });
+
+  it('Track V1c: a box with a custom name other than keepBoxName is labelled, a bot_loot box named, an unnamed one neither', () => {
+    const named = (n: string) => ({ extra: { has_nbt: 1, nbt: { nbt: { value: { display: { value: { Name: { value: n } } } } } } } });
+    const slots = [{ name: 'white_shulker_box', count: 1 }, { name: 'red_shulker_box', count: 1 }, { name: 'blue_shulker_box', count: 1 }, { name: 'stick', count: 3 }];
+    const raws: Record<number, unknown> = { 0: named('owner_stuff'), 1: named('§6Bot_Loot'), 2: { extra: { has_nbt: 0 } }, 3: named('wand') };
+    const r = roomSlotsOf({ slots, rawItem: (_w, s) => raws[s] });
+    expect(r[0]).toMatchObject({ labelled: true });
+    expect(r[0]!.named).toBeUndefined();
+    expect(r[1]).toMatchObject({ named: true });
+    expect(r[1]!.labelled).toBeUndefined();
+    expect(r[2]!.named ?? r[2]!.labelled).toBeUndefined();
+    expect(r[3]!.labelled).toBeUndefined(); // only boxes
+    // with another keepBoxName, a bot_loot box is someone's box
+    expect(roomSlotsOf({ slots, rawItem: (_w, s) => raws[s] }, { keepName: 'owner_stuff' })[1]).toMatchObject({ labelled: true });
+  });
+});
+
+describe('Track V1c: the rocket step\'s room with rockets of other NBT in the box', () => {
+  it('a fireworks box with 3 stacks of Flight 1 and 24 free slots takes 24 stacks of Flight 2 (none counted onto the Flight 1 stacks)', () => {
+    const f2 = 'firework_rocket|0|{"Flight":2}';
+    const s = inv([
+      ['undyed_shulker_box', 1, { boxUsed: 3, boxItems: { firework_rocket: 192 }, flightKit: true }],
+      ...Array.from({ length: 28 }, (): Spec => ['firework_rocket', 64, { key: f2 }]),
+      ...Array.from({ length: 7 }, (_, i): Spec => [`dummy_${i}`, 1]),
+    ]);
+    const p = planRoom(s, { kitBox: 0, maxStack: (n) => (n.startsWith('dummy') || n.endsWith('shulker_box') ? 1 : 64) });
+    const r = p.steps.find((x) => x.kind === 'rockets');
+    expect(r?.kind === 'rockets' && r.moves.length).toBe(24);
+    expect(r?.kind === 'rockets' && r.count).toBe(24 * 64);
   });
 });
 

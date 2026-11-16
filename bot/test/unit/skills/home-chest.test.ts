@@ -3,13 +3,13 @@
 // chest `container`), snapshot (double chest, shulker boxes by NBT), depositSlots and take, against a
 // fake packet source that answers like BDS 1.26.60.6.
 import { describe, expect, it } from 'vitest';
-import { ChestSkill, CONTAINER_BLOCKS, isShulkerBox, shulkerContents, shulkerSlotsUsed, slotTypeForBlock, snapshotOf } from '../../../src/skills/container/chest.ts';
+import { ChestSkill, CONTAINER_BLOCKS, isShulkerBox, shulkerContents, shulkerSlotsUsed, slotTypeForBlock, snapshotOf, stacksOnto } from '../../../src/skills/container/chest.ts';
 import { Containers, type StackResponse } from '../../../src/world/containers.ts';
 import { Inventory } from '../../../src/world/inventory.ts';
 import type { ItemV4 } from '../../../src/world/packets.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 
-const NAMES: Record<number, string> = { 17: 'oak_log', 3: 'dirt', 263: 'coal', 900: 'undyed_shulker_box' };
+const NAMES: Record<number, string> = { 17: 'oak_log', 3: 'dirt', 263: 'coal', 401: 'firework_rocket', 900: 'undyed_shulker_box' };
 const toItem = (i: ItemV4): ItemStack | null =>
   i.network_id === 0 ? null : { name: NAMES[i.network_id] ?? `unknown:${i.network_id}`, networkId: i.network_id, count: i.count, metadata: i.metadata, ...(i.stack_id !== undefined ? { stackId: i.stack_id } : {}) };
 const v4 = (id: number, count: number, stackId?: number, nbtItems?: unknown[]): ItemV4 => {
@@ -38,8 +38,15 @@ class FakeSource {
   }
 }
 
-/** A container block `block` at POS with `items` (27 or 54 slots); the fake server refuses requests whose container_id is not `accept`. */
-function setup(block: string, items: ItemV4[] = [], size = 27, accept = slotTypeForBlock(block)) {
+/** A firework rocket's wire item with its NBT (`Fireworks.Flight`: crafted rockets of another flight never stack, error 55). */
+const rocket = (count: number, flight: number, stackId?: number): ItemV4 =>
+  Object.assign(v4(401, count, stackId), { extra: { has_nbt: 1, nbt: { name: '', nbt: { type: 'compound', value: { Fireworks: { type: 'compound', value: { Flight: { type: 'byte', value: flight }, Explosions: { type: 'list', value: { type: 'end', value: [] } } } } } } } } });
+
+/**
+ * A container block `block` at POS with `items` (27 or 54 slots); the fake server refuses requests whose container_id is
+ * not `accept`, and with error 55 a move `refuse` names (a merge of stacks whose NBT differs, as BDS does).
+ */
+function setup(block: string, items: ItemV4[] = [], size = 27, accept = slotTypeForBlock(block), refuse?: (invSlot: number, winSlot: number, toWindow: boolean) => boolean) {
   const src = new FakeSource();
   const inv = new Inventory(toItem, () => 1n);
   const ctr = new Containers(src, inv);
@@ -70,6 +77,10 @@ function setup(block: string, items: ItemV4[] = [], size = 27, accept = slotType
         }
         const invSlot = toWindow ? a.source.slot : a.destination.slot;
         const winSlot = toWindow ? a.destination.slot : a.source.slot;
+        if (refuse?.(invSlot, winSlot, toWindow)) {
+          src.receive('item_stack_response', { responses: [{ status: 55, request_id: r.request_id }] });
+          return;
+        }
         const resp: StackResponse = {
           status: 'ok',
           request_id: r.request_id,
@@ -218,5 +229,70 @@ describe('snapshot, depositSlots, take (Track AG)', () => {
     expect(s.inv.slots[5]?.name).toBe('undyed_shulker_box');
     expect(s.inv.window(3)!.slots[1]).toBeNull();
     expect(await s.skill.take(o.view, 1)).toMatchObject({ ok: false, reason: 'empty_source' });
+  });
+});
+
+describe('a merge onto a partial stack needs the same wire NBT (Track V1c)', () => {
+  // the rockets preset on bds-home: `deposit 9 firework_rocket 10 -> 2:0: error` three times, then 0 into the box
+
+  it('stacksOnto: the same item and NBT true, another flight false, no wire item unknown', () => {
+    const one = { name: 'firework_rocket', metadata: 0 };
+    expect(stacksOnto(one, rocket(5, 1), one, rocket(9, 1))).toBe(true);
+    expect(stacksOnto(one, rocket(5, 1), one, rocket(9, 2))).toBe(false);
+    expect(stacksOnto(one, rocket(5, 1), one, undefined)).toBeUndefined();
+    expect(stacksOnto(one, rocket(5, 1), { name: 'coal', metadata: 0 }, v4(263, 1))).toBe(false);
+    expect(stacksOnto({ name: 'coal', metadata: 0 }, v4(263, 1), { name: 'coal', metadata: 0 }, v4(263, 30))).toBe(true);
+  });
+
+  it('depositSlots: Flight 1 rockets never onto the box\'s partial Flight 2 stack; into an empty slot, no error', async () => {
+    // the server: a move onto window slot 0 (the Flight 2 stack) is refused
+    const s = setup('undyed_shulker_box', [rocket(40, 2, 7)], 27, 'shulker', (_inv, win, toWindow) => toWindow && win === 0);
+    s.inv.handleInventorySlot({ window_id: 0, slot: 5, item: rocket(20, 1, 30) });
+    const o = await s.skill.open(POS);
+    if (!o.ok) throw new Error(o.reason);
+    const r = await s.skill.depositSlots(o.view, [{ slot: 5, count: 20, name: 'firework_rocket' }]);
+    expect(r).toMatchObject({ ok: true, total: 20, errors: 0, requests: 1 });
+    expect(s.inv.window(3)!.slots[0]?.count).toBe(40); // the Flight 2 stack untouched
+    expect(s.inv.window(3)!.slots[1]?.count).toBe(20);
+    expect(s.inv.slots[5]).toBeNull();
+  });
+
+  it('depositSlots: the same NBT still tops up the partial stack first', async () => {
+    const s = setup('undyed_shulker_box', [rocket(40, 1, 7)], 27, 'shulker');
+    s.inv.handleInventorySlot({ window_id: 0, slot: 5, item: rocket(20, 1, 30) });
+    const o = await s.skill.open(POS);
+    if (!o.ok) throw new Error(o.reason);
+    const r = await s.skill.depositSlots(o.view, [{ slot: 5, count: 20 }]);
+    expect(r).toMatchObject({ ok: true, total: 20, errors: 0, requests: 1 });
+    expect(s.inv.window(3)!.slots[0]?.count).toBe(60);
+  });
+
+  it('depositSlots: a box of partial Flight 2 stacks and no empty slot is full for Flight 1 (no request the server refuses)', async () => {
+    const s = setup('undyed_shulker_box', Array.from({ length: 27 }, (_, i) => rocket(40, 2, 7 + i)), 27, 'shulker', () => true);
+    s.inv.handleInventorySlot({ window_id: 0, slot: 5, item: rocket(20, 1, 60) });
+    const o = await s.skill.open(POS);
+    if (!o.ok) throw new Error(o.reason);
+    const r = await s.skill.depositSlots(o.view, [{ slot: 5, count: 20 }]);
+    expect(r).toMatchObject({ ok: false, reason: 'container_full', total: 0, requests: 0, errors: 0 });
+  });
+
+  it('deposit (by filter): the same rule', async () => {
+    const s = setup('chest', [rocket(40, 2, 7)], 27, 'container', (_inv, win, toWindow) => toWindow && win === 0);
+    s.inv.handleInventorySlot({ window_id: 0, slot: 5, item: rocket(20, 3, 30) });
+    const o = await s.skill.open(POS);
+    if (!o.ok) throw new Error(o.reason);
+    const r = await s.skill.deposit(o.view, (i) => i.name === 'firework_rocket');
+    expect(r).toMatchObject({ ok: true, total: 20, errors: 0 });
+    expect(s.inv.window(3)!.slots[1]?.count).toBe(20);
+  });
+
+  it('take: a box\'s Flight 2 rockets never onto a loose Flight 1 stack; into an empty slot', async () => {
+    const s = setup('undyed_shulker_box', [rocket(30, 2, 7)], 27, 'shulker', (inv, _win, toWindow) => !toWindow && inv === 5);
+    s.inv.handleInventorySlot({ window_id: 0, slot: 5, item: rocket(20, 1, 30) });
+    const o = await s.skill.open(POS);
+    if (!o.ok) throw new Error(o.reason);
+    const t = await s.skill.take(o.view, 0);
+    expect(t).toEqual({ ok: true, moved: 30, to: 3 });
+    expect(s.inv.slots[5]?.count).toBe(20);
   });
 });

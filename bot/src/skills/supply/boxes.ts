@@ -29,7 +29,7 @@
 import { silentLogger, type Logger } from '../../log.ts';
 import type { BlockInfo, ContainerView, Vec3 } from '../../world/types.ts';
 import type { CollectOptions, CollectResult } from '../collect/collect.ts';
-import { isShulkerBox, maxStackOf, shulkerContents, shulkerSlotsUsed, type DepositResult, type OpenResult } from '../container/chest.ts';
+import { isShulkerBox, maxStackOf, shulkerContents, shulkerSlotsUsed, stacksOnto, type DepositResult, type OpenResult } from '../container/chest.ts';
 import { boxSpots } from '../container/stash.ts';
 import type { DigOptions, DigResult } from '../dig/digger.ts';
 import { isKeptBox, placesExactly } from '../home/boxing.ts';
@@ -211,14 +211,18 @@ export class BoxOps {
     return isKeptBox(this.d.inventory.slots[i]?.name ?? '', this.d.inventory.rawItem?.(0, i), this.d.keepName());
   }
 
-  /** New inventory slots that taking the stack `st` out of a window uses: none for what tops up partial stacks of the same item (a shulker box never stacks). */
-  slotsFor(st: { name: string; count: number; metadata?: number }): number {
+  /**
+   * New inventory slots that taking the stack `st` out of a window uses: none for what tops up partial stacks of the same
+   * item (a shulker box never stacks). Track V1c: a partial stack with other wire NBT than `raw` (`st`'s wire item) has
+   * no room for it (a Flight 2 rocket never tops up a Flight 1 stack); one whose NBT is not known still counts.
+   */
+  slotsFor(st: { name: string; count: number; metadata?: number }, raw?: unknown): number {
     const max = maxStackOf(st.name);
     let room = 0;
     if (!isShulkerBox(st.name)) {
-      for (const s of this.d.inventory.slots.slice(0, 36)) {
-        if (s?.name === st.name && s.metadata === st.metadata && s.count < max) room += max - s.count;
-      }
+      this.d.inventory.slots.slice(0, 36).forEach((s, i) => {
+        if (s && s.count < max && stacksOnto(st, raw, s, this.d.inventory.rawItem?.(0, i)) !== false) room += max - s.count;
+      });
     }
     return Math.ceil(Math.max(0, st.count - room) / max);
   }
@@ -266,7 +270,7 @@ export class BoxOps {
     }
     let left = 0;
     let got = 0;
-    const o = await this.d.skills.open(placed.at);
+    const o = await this.openPlaced(placed.at);
     if (o.ok) {
       try {
         for (let i = 0; i < o.view.slots.length; i++) {
@@ -276,7 +280,7 @@ export class BoxOps {
           if (only && (!(typeof only.item === 'string' ? st.name === only.item : only.item(st.name)) || got >= only.want)) continue;
           const count = only ? Math.min(st.count, only.want - got) : undefined;
           // two slots stay free (see the file comment)
-          if (this.freeSlots().length - this.slotsFor(count === undefined ? st : { ...st, count }) < 2) {
+          if (this.freeSlots().length - this.slotsFor(count === undefined ? st : { ...st, count }, this.d.inventory.rawItem?.(o.view.id, i)) < 2) {
             left++;
             continue;
           }
@@ -311,7 +315,7 @@ export class BoxOps {
     const placed = await this.place(s, cancelled, opts.avoid);
     if ('reason' in placed) return placed;
     let moved = 0;
-    const o = await this.d.skills.open(placed.at);
+    const o = await this.openPlaced(placed.at);
     if (o.ok) {
       try {
         for (let pass = 0; pass < 3; pass++) {
@@ -423,6 +427,21 @@ export class BoxOps {
     const got = [...this.boxKeys()].find((i) => !keys.has(i) && (named === undefined || this.namedAt(i) === named));
     if (got === undefined) this.sayLeft(at);
     return got ?? back;
+  }
+
+  /**
+   * Track V1c: open the box just placed at `at`; one more click when the first gets no container_open (the Realm
+   * 2026-11-16: placed, `no container_open`, the cell's lid free in the model as far as the log shows), and the block
+   * over the lid in the log line when neither opens it (a block with a collision box there keeps a box shut:
+   * container/stash.ts lidOpen).
+   */
+  private async openPlaced(at: Vec3): Promise<OpenResult> {
+    const first = await this.d.skills.open(at);
+    if (first.ok || first.reason !== 'timeout') return first;
+    const again = await this.d.skills.open(at);
+    const lid = this.d.blockAt({ ...at, y: at.y + 1 });
+    this.log.warn(`${this.label}: the box at ${fmtPos(at)} did not open on the first click (${again.ok ? 'opened on the second' : `nor the second: ${again.reason}`}; over the lid: ${lid?.name ?? 'not loaded'}${lid && lid.boxes.length > 0 ? ' with a collision box' : ''})`);
+    return again;
   }
 
   /**

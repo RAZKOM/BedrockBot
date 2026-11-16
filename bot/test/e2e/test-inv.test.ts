@@ -16,7 +16,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Vec3 } from '../../src/connection/types.ts';
-import { isShulkerBox, shulkerContents } from '../../src/skills/container/chest.ts';
+import { isShulkerBox, shulkerContents, shulkerSlotsUsed, stackKey } from '../../src/skills/container/chest.ts';
+import { itemDisplayName } from '../../src/world/inventory.ts';
 import { carriedCounts, countsDiff, INV_PRESETS, planPreset } from '../../src/skills/test/inv.ts';
 import { testControlOf } from '../../src/chat/commands-test.ts';
 import { BaseProcess, PRIORITY, type ProcessKind } from '../../src/tasks/process/manager.ts';
@@ -45,6 +46,12 @@ const OWNER: Slot[] = [
   ['netherite_sword', 1], ['netherite_pickaxe', 1], ['firework_rocket', 64], ['cooked_beef', 24], ['bread', 12], ['air', 0], ['cobblestone', 16], ['air', 0], ['golden_carrot', 20],
   ['elytra', 1], ['firework_rocket', 38], ['bone', 7], ['air', 0], ['redstone', 17], ['air', 0], ['wheat_seeds', 4], ['air', 0], ['air', 0],
 ];
+/**
+ * Track V1c: the Realm's layout for the rockets and early presets: the hotbar full (the boxes come into the main
+ * inventory), so the box and rocket steps bring the box into a full hotbar first.
+ */
+const OWNER_FULL_HOTBAR: Slot[] = OWNER.map((s, i): Slot => (i === 5 ? ['torch', 16] : i === 7 ? ['oak_planks', 20] : s));
+const FULL_HOTBAR_PRESETS = new Set(['rockets', 'early']);
 
 interface TruthInv {
   slots: ({ slot: number; typeId: string; amount: number } | null)[];
@@ -84,11 +91,11 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
     return b.reply((s) => match.test(s), from, ms);
   };
 
-  async function ownerInventory(b: HomeBot): Promise<void> {
+  async function ownerInventory(b: HomeBot, layout: Slot[] = OWNER): Promise<void> {
     await b.truth.ok('clear', [b.name]);
     await until(() => (inv(b).slots.slice(0, 36).every((s) => !s) ? true : undefined), 10_000, 'an empty inventory');
-    for (let i = 0; i < OWNER.length; i++) {
-      const [item, n] = OWNER[i]!;
+    for (let i = 0; i < layout.length; i++) {
+      const [item, n] = layout[i]!;
       if (item !== 'air') await b.truth.ok('setslot', [b.name, i, item, n]);
     }
     const feet = b.task.position()!;
@@ -97,13 +104,25 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
       const k = inv(b).slots.slice(0, 36).findIndex((s, i) => !!s && isShulkerBox(s.name) && shulkerContents(inv(b).rawItem(0, i))[item]);
       return k >= 0 ? k : undefined;
     };
-    // the owner's named box of sand (a box holding anything else: the room chore never fills it), then the fireworks box
-    for (const [item, amount, stacks] of [['sand', 64, 1], ['firework_rocket', 55, 3]] as const) {
+    // Track V1c: the owner's empty box with a name of its own (not bot_loot): the room chore never fills it
+    await b.truth.ok('give', [b.name, 'undyed_shulker_box', 1]);
+    const empty = await until(() => {
+      const k = inv(b).slots.slice(0, 36).findIndex((s, i) => !!s && isShulkerBox(s.name) && inv(b).rawItem(0, i) !== undefined && shulkerSlotsUsed(inv(b).rawItem(0, i)) === 0);
+      return k >= 0 ? k : undefined;
+    }, 10_000, 'the empty box in the inventory');
+    await b.truth.ok('nameinv', [b.name, empty, 'owner_stuff']);
+    await until(() => (itemDisplayName(inv(b).rawItem(0, empty)) === 'owner_stuff' ? true : undefined), 10_000, 'the box named owner_stuff');
+    if (layout === OWNER_FULL_HOTBAR) {
+      // and a plain empty box (the Realm bot's spares): the loot box of the early preset's box step
+      await b.truth.ok('give', [b.name, 'undyed_shulker_box', 1]);
+      await until(() => (inv(b).slots.slice(0, 36).filter((s, i) => !!s && isShulkerBox(s.name) && itemDisplayName(inv(b).rawItem(0, i)) === undefined).length === 1 ? true : undefined), 10_000, 'the plain box');
+    }
+    // then the fireworks box (rockets put in by the truth pack: their NBT differs from the preset's /replaceitem ones)
+    for (const [item, amount, stacks] of [['firework_rocket', 55, 3]] as const) {
       await b.truth.ok('boxdrop', [box.x, box.y, box.z, item, amount, stacks]);
       await sleep(1200);
       if (boxWith(item)() === undefined) await b.built.mobility!.skills.collect(4, 160, { origin: centre(box), filter: (it) => isShulkerBox(it.name) });
-      const k = await until(boxWith(item), 10_000, `the box of ${item} in the inventory`);
-      if (item === 'sand') await b.truth.ok('nameinv', [b.name, k, 'owner_stuff']);
+      await until(boxWith(item), 10_000, `the box of ${item} in the inventory`);
     }
     // the sword in the held slot (0) gets an enchantment (the kept "enchanted" case)
     const run = testControlOf(b.task)!.runner;
@@ -146,7 +165,16 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
       const b = bot!;
       await teleport(b, centre(at));
       await b.truth.clearAround(centre(at), 12).catch(() => undefined);
-      await ownerInventory(b);
+      const fullHotbar = FULL_HOTBAR_PRESETS.has(preset);
+      await ownerInventory(b, fullHotbar ? OWNER_FULL_HOTBAR : OWNER);
+      if (fullHotbar) {
+        // the boxes in the main inventory, the hotbar full
+        expect(inv(b).slots.slice(0, 9).every((s) => !!s)).toBe(true);
+        expect(inv(b).slots.slice(9, 36).filter((s) => !!s && isShulkerBox(s.name))).toHaveLength(3);
+      }
+      // Track V1c: a block with a collision box over the lid of the nearest box cell (it keeps a box shut): never chosen
+      const lid = { x: at.x + 1, y: FEET_Y + 1, z: at.z };
+      if (preset === 'rockets') await b.truth.ok('set', [lid.x, lid.y, lid.z, 'glass']);
       const t0 = await truthInv(b);
       const before = truthSlots(t0);
       const boxed0 = boxed(b);
@@ -161,6 +189,21 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
       const doneLine = await until(() => b.said.slice(sayFrom).find((x) => new RegExp(`^test inv ${preset}: (\\d+ -> \\d+ free|stopped)`).test(x)), 240_000, 'the preset done');
       note(`${preset}: ${doneLine}`);
       expect(doneLine).toMatch(/ -> [0-2] free in /); // every preset fills every free slot (the keeper may drop the junk at 36 of 36 at once)
+      if (preset === 'rockets') {
+        // Track V1c: the loose rockets' NBT (the preset's /replaceitem, the truth pack's setslot) and the box's rockets'
+        const loose = new Set<string>();
+        let inBox = '';
+        inv(b).slots.slice(0, 36).forEach((s, i) => {
+          const raw = inv(b).rawItem(0, i);
+          if (s?.name === 'firework_rocket') loose.add(stackKey(s.name, s.metadata, raw) ?? '?');
+          if (s && isShulkerBox(s.name) && shulkerContents(raw).firework_rocket) {
+            const list = (raw as { extra?: { nbt?: { nbt?: { value?: { Items?: { value?: { value?: Record<string, unknown>[] } } } } } } }).extra?.nbt?.nbt?.value?.Items?.value?.value ?? [];
+            const { Count: _c, Slot: _s, ...rest } = list[0] ?? {};
+            inBox = JSON.stringify(rest, (_k, x: unknown) => (typeof x === 'bigint' ? `${x}n` : x));
+          }
+        });
+        note(`rockets: loose stack keys ${[...loose].join(' | ')}; the box's first rocket entry ${inBox}`);
+      }
       const t1 = await truthInv(b);
       const snap = testControlOf(b.task)!.inv.saved()!;
       const plan = planPreset(snap, preset);
@@ -198,11 +241,40 @@ describe.skipIf(!E2E)('@bds test inv: presets and the restore (Track T3)', () =>
       const after = truthSlots(t2);
       const off = after.flatMap((g, i) => (g === before[i] ? [] : [`${i}: was ${before[i]}, now ${g}`]));
       note(`${preset}: after the restore, slots not as before: ${off.join('; ') || 'none'}; boxes changed ${JSON.stringify(countsDiff(boxed0, boxed(b)))}; carried changed ${JSON.stringify(countsDiff(counts0, carriedCounts(inv(b))))}`);
-      expect(off).toEqual([]);
+      if (/moved from slot \d+ to \d+/.test(restored)) {
+        // Track V1c: the rocket step picked the fireworks box up into a lower slot (one its own moves had freed); the restore never
+        // overwrites a kept box, so the stack saved there is given into a free slot: the same stacks, two slots swapped
+        const sorted = (x: string[]) => [...x.slice(0, 36)].sort();
+        expect(sorted(after)).toEqual(sorted(before));
+        expect(after.slice(36)).toEqual(before.slice(36));
+        expect(off.length).toBeLessThanOrEqual(3);
+      } else expect(off).toEqual([]);
+      expect(Object.entries(countsDiff(counts0, carriedCounts(inv(b)))).filter(([k]) => !k.startsWith('boxed:'))).toEqual([]);
       expect(modelSlots(b)).toEqual(after.slice(0, 36));
       const boxDiff = countsDiff(boxed0, boxed(b));
-      if (preset === 'rockets') for (const [k, v] of Object.entries(boxDiff)) expect([k, v > 0]).toEqual(['firework_rocket', true]);
-      else expect(boxDiff).toEqual({});
+      if (preset === 'rockets') {
+        // Track V1c: rockets went into the box (before: none, every deposit onto a partial stack of other NBT refused)
+        expect(boxDiff.firework_rocket ?? 0).toBeGreaterThan(0);
+        expect(b.logs.slice(logFrom).filter((l) => /deposit \d+ firework_rocket .*: error/.test(l))).toEqual([]);
+        for (const [k, v] of Object.entries(boxDiff)) expect([k, v > 0]).toEqual(['firework_rocket', true]);
+      } else if (preset === 'early' && fullHotbar) {
+        // Track V1c: the box step boxed loot into the plain box from the main inventory (before: `the box is not in the hotbar`)
+        expect(Object.values(boxDiff).some((v) => v > 0)).toBe(true);
+        for (const v of Object.values(boxDiff)) expect(v).toBeGreaterThan(0);
+      } else expect(boxDiff).toEqual({});
+      // Track V1c: the owner's empty named box is still empty and still named
+      const owner = inv(b).slots.slice(0, 36).findIndex((s, i) => !!s && isShulkerBox(s.name) && itemDisplayName(inv(b).rawItem(0, i)) === 'owner_stuff');
+      expect(owner).toBeGreaterThanOrEqual(0);
+      expect(shulkerSlotsUsed(inv(b).rawItem(0, owner))).toBe(0);
+      const told = b.logs.slice(logFrom).filter((l) => /inventory: .*(boxed|into the fireworks box)/.test(l));
+      note(`${preset}: room lines ${told.map((l) => l.replace(/^\S+ \w+ /, '')).join(' | ') || 'none'}`);
+      expect(b.logs.slice(logFrom).filter((l) => /inventory: .*\((the box is not in the hotbar|open: )/.test(l))).toEqual([]);
+      if (preset === 'rockets') {
+        const placed = b.logs.slice(logFrom).filter((l) => /place \(-?\d+, -?\d+, -?\d+\) \w*shulker_box/.test(l));
+        note(`rockets: box placements ${placed.map((l) => l.replace(/^\S+ \w+ /, '')).join(' | ') || 'none'}`);
+        expect(placed.some((l) => l.includes(`place (${lid.x}, ${FEET_Y}, ${lid.z})`))).toBe(false);
+        await b.truth.ok('set', [lid.x, lid.y, lid.z, 'air']).catch(() => undefined);
+      }
       expect(testControlOf(b.task)!.inv.saved()).toBeUndefined();
     }, 900_000);
   }

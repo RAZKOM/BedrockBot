@@ -390,6 +390,9 @@ const sameAsSaved = (s: ItemStack | null | undefined, raw: unknown, saved: Saved
  */
 export function planRestore(snap: InvSnapshot, now: InvSource): RestorePlan {
   const commands: string[] = [];
+  // Track V1c: the /give commands go last: /give takes the first empty slot, which a later /replaceitem could clear
+  // (a box the room chore picked up into a lower slot: its displaced stack was given and then overwritten)
+  const gives: string[] = [];
   const notes: string[] = [];
   const { protect, claimed } = claimKept(snap, now);
   for (let i = 0; i < 36; i++) {
@@ -403,7 +406,7 @@ export function planRestore(snap: InvSnapshot, now: InvSource): RestorePlan {
     if (live(cur) && protect.has(i)) {
       const curKept = keptReason(cur, raw) ?? 'kept';
       if (saved) {
-        commands.push(`/give @s ${spec(saved.name, saved.count, saved.metadata)}`);
+        gives.push(`/give @s ${spec(saved.name, saved.count, saved.metadata)}`);
         notes.push(`slot ${i} holds ${cur.name} (${curKept}): ${saved.count} ${saved.name} given by /give`);
       }
       continue;
@@ -411,6 +414,7 @@ export function planRestore(snap: InvSnapshot, now: InvSource): RestorePlan {
     if (sameAsSaved(cur, raw, saved)) continue;
     commands.push(replaceCommand(i, saved ? spec(saved.name, saved.count, saved.metadata) : 'air'));
   }
+  commands.push(...gives);
   // the kept items: in their slot, moved, or gone
   for (const s of snap.slots) {
     if (s?.kept === undefined) continue;

@@ -28,6 +28,8 @@ function inventory(o: { loose?: number; box?: number; boxSlot?: number } = {}) {
   if (o.loose) slots[0] = item('firework_rocket', o.loose);
   const at = o.boxSlot ?? 1;
   const raws = new Map<number, unknown>();
+  /** The placed box's window (5): its wire items (none by default). */
+  const windowRaws = new Map<number, unknown>();
   if (o.box !== undefined) {
     slots[at] = item('undyed_shulker_box');
     raws.set(at, boxRaw({ firework_rocket: o.box }));
@@ -35,7 +37,9 @@ function inventory(o: { loose?: number; box?: number; boxSlot?: number } = {}) {
   return {
     slots,
     selected: 0,
-    rawItem: (_w: number, i: number) => raws.get(i),
+    raws,
+    windowRaws,
+    rawItem: (w: number, i: number) => (w === 5 ? windowRaws : raws).get(i),
     window: (id: number) => (id === 5 ? { slots: [item('firework_rocket', 64)] } : undefined),
     freeSlots: () => slots.map((s, i) => (s ? -1 : i)).filter((i) => i >= 0),
   };
@@ -207,6 +211,24 @@ describe('the refill never leaves the box behind (kitops.ts refillFromBox)', () 
     const h = refillRig({ fill: [...Array(36).keys()].filter((i) => i !== 1 && i !== 9 && i !== 20) });
     await h.ops.refillFromBox();
     expect(h.steps).toEqual(['place', 'open', 'take 64', 'close', 'dig', 'collect']);
+  });
+  it('Track V1c: the box\'s rockets of another NBT than the loose stack: no room on it, so the box\'s slot stays free (before: 24 taken into the box\'s slot)', async () => {
+    const rocketRaw = (flight: number) => ({ extra: { has_nbt: 1, nbt: { nbt: { value: { Fireworks: { value: { Flight: { value: flight } } } } } } } });
+    const h = refillRig({ fill: [...Array(36).keys()].filter((i) => i !== 0 && i !== 1 && i !== 9) });
+    h.inv.slots[0] = item('firework_rocket', 40);
+    h.inv.raws.set(0, rocketRaw(1));
+    h.inv.windowRaws.set(0, rocketRaw(2));
+    expect(refillRoom(h.inv.slots, 1)).toBe(24); // the check before: the loose stack's room
+    await h.ops.refillFromBox();
+    expect(h.steps).toEqual(['place', 'open', 'close', 'dig', 'collect']);
+    // the same flight: the 24 on top of the loose stack
+    const g = refillRig({ fill: [...Array(36).keys()].filter((i) => i !== 0 && i !== 1 && i !== 9) });
+    g.inv.slots[0] = item('firework_rocket', 40);
+    g.inv.raws.set(0, rocketRaw(2));
+    g.inv.windowRaws.set(0, rocketRaw(2));
+    await g.ops.refillFromBox();
+    expect(g.steps).toEqual(['place', 'open', 'take 24', 'close', 'dig', 'collect']);
+    expect(refillRoom(g.inv.slots, 1, (i) => i !== 0)).toBe(0);
   });
   it('the room the refill may fill (refillRoom): the rocket stacks\' room plus a stack a free slot, the box\'s own slot not counted', () => {
     const slots: (ItemStack | null)[] = Array.from({ length: 36 }, () => item('dirt', 16));

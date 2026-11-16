@@ -80,6 +80,19 @@ keeps it under 36 (it drops filler beyond 16 with no chest and no box); idle, no
     that moved no box or left one waits 10 minutes. With no chest of spares, or only full ones, the boxes stay and the
     chore says so once in the log and chat (again only after a chest with room was known in between): a box put into
     some other chest would mix the spares with the stock, and the owner may not want them there.
+12. **A merge needs the same wire NBT, and a named box is the owner's** (Track V1c, found by the test presets of
+    Track T3). The deposits picked the first partial stack of the same name and metadata, so rockets of another
+    flight (or explosions) were sent onto it and refused with error 55; three refusals ended the rocket step with 0
+    moved. Every partial-stack choice in the chest skill (deposit, depositSlots, take), the Supply's slot count and the
+    refill's room now use the merge step's `stackKey` through `stacksOnto`: the same key first, else an empty slot,
+    else a stack whose wire item is not known (the old rule). The loot step took any empty box, a box named by the
+    owner for something else included; an empty box with a custom name other than `keepBoxName` is never a candidate.
+    On the Realm the box and rocket steps then failed with `the box is not in the hotbar` (the box in the main
+    inventory, the hotbar full) and a box set down once did not open. The kit's move into the hotbar now uses its
+    `exchange` and returns why it failed; a box that does not open is clicked once more and the block over its lid is
+    logged. The lid rule was measured on BDS (open under plants, shut under any collision box) and is the box cell's
+    rule plus no snow layer or fire. Not reproduced on BDS: on bds-home a full hotbar brought the box in every time, so
+    the Realm cause is left to the next run's reason line.
 
 ## Consequences
 

@@ -79,6 +79,62 @@ export function shulkerContents(raw: unknown): Record<string, number> {
   return out;
 }
 
+/** BigInt-safe JSON (the wire NBT holds longs). */
+function json(v: unknown): string {
+  return JSON.stringify(v ?? null, (_k, x: unknown) => (typeof x === 'bigint' ? `${x}n` : x));
+}
+
+/**
+ * The merge key of a stack: its name, metadata and the wire item's NBT (a crafted rocket's flight, an enchantment, a
+ * custom name: stacks that differ there never stack on the server). Undefined without a wire item. Track V1's room plan
+ * merge key, here since Track V1c so the deposits and the takes compare stacks the same way.
+ */
+export function stackKey(name: string, metadata: number, raw: unknown): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const extra = (raw as { extra?: { has_nbt?: unknown; nbt?: unknown } }).extra;
+  const bare = name.startsWith('minecraft:') ? name.slice(10) : name;
+  return `${bare}|${metadata}|${extra?.has_nbt ? json(extra.nbt) : '-'}`;
+}
+
+/**
+ * Track V1c: may the stack `item` (its wire item `raw`) go onto the stack `onto` (its wire item `ontoRaw`)? The server
+ * merges only stacks of the same name, metadata and NBT (item_stack_response error 55 otherwise: a crafted rocket of
+ * another flight, an enchanted book, a named item, a potion). true: the same `stackKey`; false: another item or another
+ * NBT; undefined: the same name and metadata, but a wire item not known.
+ */
+export function stacksOnto(item: { name: string; metadata?: number }, raw: unknown, onto: { name: string; metadata?: number } | null | undefined, ontoRaw: unknown): boolean | undefined {
+  if (onto?.name !== item.name || (onto.metadata ?? 0) !== (item.metadata ?? 0)) return false;
+  const a = stackKey(item.name, item.metadata ?? 0, raw);
+  const b = stackKey(onto.name, onto.metadata ?? 0, ontoRaw);
+  if (a === undefined || b === undefined) return undefined;
+  return a === b;
+}
+
+/**
+ * Track V1c: the partial stacks of `slots` (the first `limit`) that `item` may top up: `sure` the first one with the same
+ * wire NBT (`stacksOnto` true), `maybe` the first of the same item whose wire item is not known; -1 for none. A caller
+ * takes `sure`, else an empty slot, else `maybe` (what a deposit did before: a merge the server may refuse).
+ */
+export function partialFor(
+  slots: readonly (ItemStack | null)[],
+  item: ItemStack,
+  raw: unknown,
+  rawAt: (slot: number) => unknown,
+  max: number,
+  limit = slots.length,
+  skip?: (s: ItemStack, i: number) => boolean,
+): { sure: number; maybe: number } {
+  const out = { sure: -1, maybe: -1 };
+  for (let i = 0; i < Math.min(limit, slots.length) && out.sure < 0; i++) {
+    const s = slots[i];
+    if (!s || s.count >= max || skip?.(s, i)) continue;
+    const ok = stacksOnto(item, raw, s, rawAt(i));
+    if (ok === true) out.sure = i;
+    else if (ok === undefined && out.maybe < 0) out.maybe = i;
+  }
+  return out;
+}
+
 /** A container window read into counts (Track AG). */
 export interface ContainerSnapshot {
   /** Slots of the window (27; a double chest 54). */
@@ -318,8 +374,11 @@ export class ChestSkill {
         if (!item || !filter(item)) break;
         const chest = world.inventory.window(window)?.slots ?? [];
         const max = maxStackOf(item.name);
-        let dst = chest.findIndex((s) => s !== null && s.name === item.name && s.metadata === item.metadata && s.count < max);
+        // Track V1c: onto a partial stack with the same wire NBT, else an empty slot, else one whose NBT is not known
+        const p = partialFor(chest, item, world.inventory.rawItem(0, slot), (i) => world.inventory.rawItem(window, i), max);
+        let dst = p.sure;
         if (dst < 0) dst = chest.findIndex((s) => s === null);
+        if (dst < 0) dst = p.maybe;
         if (dst < 0) return { ok: false, reason: 'container_full', ...report };
         const room = max - (chest[dst]?.count ?? 0);
         const n = Math.min(item.count, room);
@@ -364,8 +423,12 @@ export class ChestSkill {
         if (!item || item.count <= 0 || (m.name !== undefined && item.name !== m.name)) break;
         const chest = world.inventory.window(window)?.slots ?? [];
         const max = maxStackOf(item.name);
-        let dst = chest.findIndex((s) => s !== null && s.name === item.name && s.metadata === item.metadata && s.count < max && !isShulkerBox(s.name));
+        // Track V1c: onto a partial stack with the same wire NBT (a Flight 2 rocket never onto a Flight 1 stack: error 55),
+        // else an empty slot, else one whose NBT is not known
+        const p = partialFor(chest, item, world.inventory.rawItem(0, m.slot), (i) => world.inventory.rawItem(window, i), max, chest.length, (s) => isShulkerBox(s.name));
+        let dst = p.sure;
         if (dst < 0) dst = chest.findIndex((s) => s === null);
+        if (dst < 0) dst = p.maybe;
         if (dst < 0) return { ok: false, reason: 'container_full', ...report };
         const n = Math.min(left, item.count, max - (chest[dst]?.count ?? 0));
         report.requests++;
@@ -400,9 +463,12 @@ export class ChestSkill {
     let to: number | undefined;
     while (want > 0) {
       const inv = world.inventory.slots;
-      let dst = isShulkerBox(item.name) ? -1 : inv.findIndex((s, i) => i < 36 && s !== null && s.name === item.name && s.metadata === item.metadata && s.count < max);
+      // Track V1c: onto a partial stack with the same wire NBT, else an empty slot, else one whose NBT is not known
+      const p = isShulkerBox(item.name) ? { sure: -1, maybe: -1 } : partialFor(inv, item, world.inventory.rawItem(window, slot), (i) => world.inventory.rawItem(0, i), max, 36);
+      let dst = p.sure;
       if (dst < 0) dst = prefer.find((i) => !inv[i]) ?? -1;
       if (dst < 0) dst = inv.findIndex((s, i) => i < 36 && !s);
+      if (dst < 0) dst = p.maybe;
       if (dst < 0) return { ok: moved > 0, reason: 'inventory_full', moved, ...(to !== undefined ? { to } : {}) };
       const n = Math.min(want, max - (inv[dst]?.count ?? 0));
       const r = await containers.move({ window, slot }, { window: 0, slot: dst }, n);

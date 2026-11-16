@@ -200,7 +200,13 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     position: () => mob.position(),
     keepName: () => logistics.keepName(),
     ...(d.pve ? { selectHotbar: (slot: number) => void d.pve!.hotbar.select(slot) } : {}),
-    toHotbar: async (slot) => (await survivalKitOf(d.task)?.hotbar(slot)) ?? 'the box is not in the hotbar',
+    // Track V1c: the kit's reason when the box does not come in (the Realm said only `the box is not in the hotbar`)
+    toHotbar: async (slot) => {
+      const k = survivalKitOf(d.task);
+      if (!k) return 'the box is not in the hotbar (no survival kit to move it)';
+      const r = await k.hotbarWhy(slot);
+      return typeof r === 'number' ? r : `the box is not in the hotbar: ${r}`;
+    },
     log,
     label: 'supply',
     notify: (line: string) => d.chat.say(line),

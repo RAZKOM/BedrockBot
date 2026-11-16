@@ -33,7 +33,8 @@
 // empty boxes (tasks/process/unload.ts: the chore's trigger counts free slots too); the plan there merges and moves
 // rockets only. Nothing here drops the gear, the flight kit, food, the reserves, a box or anything outside the junk
 // list, except the stone kinds the owner turned `dropStone` on for.
-import { isShulkerBox, maxStackOf, shulkerContents, shulkerSlotsUsed } from '../container/chest.ts';
+import { isShulkerBox, maxStackOf, shulkerContents, shulkerSlotsUsed, stackKey } from '../container/chest.ts';
+import { itemDisplayName } from '../../world/inventory.ts';
 import { isFireworksBox, isRocket, ROCKET } from '../fly/kit.ts';
 import { isKeptBox } from '../home/boxing.ts';
 import { planUnload, type UnloadSlot } from '../home/unloader.ts';
@@ -67,6 +68,8 @@ export interface RoomSlot extends UnloadSlot {
   key?: string;
   /** A box owed to a chest (an extract's box not back yet): never a box target. */
   owed?: boolean;
+  /** Track V1c: a box with a custom name other than `keepBoxName` (the owner's `owner_stuff`): never a box target, even empty. */
+  labelled?: boolean;
 }
 
 export interface RoomOptions {
@@ -233,7 +236,8 @@ export function planRoom(slots: readonly RoomSlot[], opts: RoomOptions = {}): Ro
     const loot = lootSlots(slots, inv, opts, junk);
     if (loot.length > 0) {
       const own = (s: RoomSlot): boolean => (s.boxUsed ?? 0) > 0 && !!opts.ownBoxes?.has(boxPrint(s.boxItems));
-      const boxes = slots.filter((s) => isShulkerBox(s.name) && inv.has(s.slot) && !s.flightKit && !s.unknown && !s.owed && s.slot !== opts.kitBox && (s.boxUsed ?? 0) < BOX_SLOTS && (!!s.named || (s.boxUsed ?? 0) === 0 || own(s)));
+      // Track V1c: an empty box with someone's name on it (not `keepBoxName`) is the owner's, never loot's
+      const boxes = slots.filter((s) => isShulkerBox(s.name) && inv.has(s.slot) && !s.flightKit && !s.unknown && !s.owed && !s.labelled && s.slot !== opts.kitBox && (s.boxUsed ?? 0) < BOX_SLOTS && (!!s.named || (s.boxUsed ?? 0) === 0 || own(s)));
       // a bot_loot box first, then one this chore filled before, then an empty one
       const rank = (s: RoomSlot): number => (s.named ? 0 : own(s) ? 1 : 2);
       const box = boxes.sort((a, b) => rank(a) - rank(b) || (a.boxUsed ?? 0) - (b.boxUsed ?? 0) || a.slot - b.slot)[0];
@@ -386,7 +390,7 @@ export function roomSlotsOf(inv: RoomInventory, opts: { keepName?: string; owed?
       ...(box ? { boxUsed: used } : {}),
       ...(box && used > 0 ? { boxItems: shulkerContents(raw) } : {}),
       ...(isFireworksBox(s.name, raw) ? { flightKit: true } : {}),
-      ...(isKeptBox(s.name, raw, opts.keepName) ? { named: true } : {}),
+      ...(isKeptBox(s.name, raw, opts.keepName) ? { named: true } : box && itemDisplayName(raw) !== undefined ? { labelled: true } : {}),
       ...(box && raw === undefined ? { unknown: true } : {}),
       ...(opts.owed?.has(i) ? { owed: true } : {}),
     });
@@ -402,17 +406,5 @@ export function boxPrint(items: Readonly<Record<string, number>> | undefined): s
     .join(',');
 }
 
-/** BigInt-safe JSON (the wire NBT holds longs). */
-function json(v: unknown): string {
-  return JSON.stringify(v ?? null, (_k, x: unknown) => (typeof x === 'bigint' ? `${x}n` : x));
-}
-
-/**
- * The merge key of a stack: its name, metadata and the wire item's NBT (a crafted rocket's flight, an enchantment, a
- * custom name: stacks that differ there never stack on the server). Undefined without a wire item.
- */
-export function stackKey(name: string, metadata: number, raw: unknown): string | undefined {
-  if (raw === undefined || raw === null) return undefined;
-  const extra = (raw as { extra?: { has_nbt?: unknown; nbt?: unknown } }).extra;
-  return `${bare(name)}|${metadata}|${extra?.has_nbt ? json(extra.nbt) : '-'}`;
-}
+/** The merge key of a stack (container/chest.ts since Track V1c: the deposits compare stacks the same way). */
+export { stackKey };

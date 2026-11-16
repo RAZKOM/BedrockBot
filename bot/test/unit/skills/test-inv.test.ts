@@ -251,6 +251,23 @@ describe('the plans', () => {
     expect(total.netherite_sword).toBe(1);
   });
 
+  it('Track V1c: a box the room chore picked up into a lower slot: the displaced stack is given after every /replaceitem (before: it landed on a slot cleared next)', async () => {
+    const s = liveLike();
+    const snap = snapshotInv(s);
+    for (const c of planPreset(snap, 'rockets').commands) await s.run(c.command);
+    // the box step: the plain box (slot 12) set down, filled, picked up into slot 3 (the beef's slot, freed by a stack it
+    // took); slot 5 freed by the rockets it took
+    s.cells[3] = s.cells[12]!;
+    s.cells[12] = null;
+    s.cells[5] = null;
+    const r = planRestore(snap, s);
+    const give = r.commands.findIndex((c) => c.startsWith('/give'));
+    expect(give).toBeGreaterThanOrEqual(0);
+    expect(r.commands.slice(give).every((c) => c.startsWith('/give'))).toBe(true);
+    for (const c of r.commands) await s.run(c);
+    expect(carriedCounts(s).cooked_beef).toBe(24);
+  });
+
   it('the preset\'s stone tools go; the owner\'s worn stone pickaxe swapped with the preset\'s new one stays', async () => {
     const s = liveLike();
     const snap = snapshotInv(s);

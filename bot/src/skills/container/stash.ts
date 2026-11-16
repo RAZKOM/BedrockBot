@@ -254,13 +254,26 @@ const RING: readonly (readonly [number, number])[] = [
   [0, -2],
 ];
 
-/** Free cells next to the feet for a shulker box: empty with empty space above (the lid), a full solid top below, not in the body. */
+/** Over the lid, never: no measurement for them (a snow layer and a torch pop off a box), and fire burns the drop. */
+const LID_NEVER: ReadonlySet<string> = new Set(['snow_layer', 'fire', 'soul_fire']);
+
+/**
+ * Track V1c: may a shulker box set down facing up open with `b` over its lid? Measured on BDS 1.26.60
+ * (test/e2e/box-lid.test.ts): it opens under air, short grass, a fern, a flower, a vine or a cobweb (no collision box),
+ * and stays shut under a carpet, a slab, glass, leaves or stone (any collision box, however thin). The rule: an empty
+ * cell as a box cell is (air or a replaceable plant, no collision box, no liquid), never a snow layer or fire.
+ */
+export function lidOpen(b: BlockInfo | undefined): boolean {
+  return empty(b) && !LID_NEVER.has(b!.name);
+}
+
+/** Free cells next to the feet for a shulker box: empty with the lid cell free (`lidOpen`), a full solid top below, not in the body. */
 export function boxSpots(blockAt: (p: Vec3) => BlockInfo | undefined, feet: Vec3): Vec3[] {
   const f = { x: Math.floor(feet.x), y: Math.floor(feet.y + 1e-6), z: Math.floor(feet.z) };
   const out: { p: Vec3; d: number }[] = [];
   for (const [dx, dz] of RING) {
     const p = { x: f.x + dx, y: f.y, z: f.z + dz };
-    if (!empty(blockAt(p)) || !empty(blockAt({ ...p, y: p.y + 1 })) || !fullTop(blockAt({ ...p, y: p.y - 1 }))) continue;
+    if (!empty(blockAt(p)) || !lidOpen(blockAt({ ...p, y: p.y + 1 })) || !fullTop(blockAt({ ...p, y: p.y - 1 }))) continue;
     // the body (0.6 wide) must not reach into the cell
     if (feet.x + 0.3 > p.x && feet.x - 0.3 < p.x + 1 && feet.z + 0.3 > p.z && feet.z - 0.3 < p.z + 1) continue;
     out.push({ p, d: Math.hypot(p.x + 0.5 - feet.x, p.z + 0.5 - feet.z) });
@@ -270,7 +283,7 @@ export function boxSpots(blockAt: (p: Vec3) => BlockInfo | undefined, feet: Vec3
 
 /**
  * Cells beside the feet a box fits in once dug (no free cell: a 1-wide mine shaft): the cell and the one above
- * (the lid) each empty or breakable (`blocker` answers why not, the miner's break rules), at least one solid,
+ * (the lid: air, `lidOpen`) each empty or breakable (`blocker` answers why not, the miner's break rules), at least one to dig,
  * a full solid top below, not in the body; nearest first, the 4 sides only (in reach of the dig).
  */
 export function carveSpots(blockAt: (p: Vec3) => BlockInfo | undefined, feet: Vec3, blocker: (p: Vec3) => string | undefined): { p: Vec3; dig: Vec3[] }[] {
@@ -283,7 +296,8 @@ export function carveSpots(blockAt: (p: Vec3) => BlockInfo | undefined, feet: Ve
     const dig: Vec3[] = [];
     let ok = true;
     for (const q of [{ ...p, y: p.y + 1 }, p]) {
-      if (empty(blockAt(q))) continue;
+      // Track V1c: the lid cell must be air (lidOpen), so a plant or a snow layer there is dug too
+      if (q.y === p.y + 1 ? lidOpen(blockAt(q)) : empty(blockAt(q))) continue;
       if (blocker(q) !== undefined) {
         ok = false;
         break;
