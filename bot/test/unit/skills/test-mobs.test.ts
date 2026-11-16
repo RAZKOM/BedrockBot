@@ -253,6 +253,19 @@ describe('MobSeries', () => {
     const sum = await s.run();
     expect(sum.deaths).toBe(1);
     expect(mobRunLine(f.recs[0] as never)).toContain('DIED');
+    // Track M5: the run line names the death's cause, and one no mob caused says so
+    const h = fakePorts({ die: true });
+    let cause = 'health_zero';
+    h.ports.deathCause = () => cause;
+    const sleepH = h.ports.sleep.bind(h.ports);
+    h.ports.sleep = async (ms) => {
+      await sleepH(ms);
+      if (h.recs.length === 0 && cause === 'health_zero') cause = 'death.attack.arrow'; // the message a moment after the health 0
+    };
+    await new MobSeries(parseMobsArgs(['skeleton']) as never, h.ports, 'm1tc').run();
+    expect(h.recs[0]).toMatchObject({ died: true, deathCause: 'death.attack.arrow' });
+    expect(h.lines[0]).toMatch(/^test mobs skeleton run 1\/1: DIED \(death\.attack\.arrow\), damage/);
+    expect(mobRunLine({ ...h.recs[0]!, deathCause: 'death.attack.inWall' } as never)).toContain('DIED (death.attack.inWall: not a mob)');
     const g = fakePorts();
     const s2 = new MobSeries(parseMobsArgs(['skeleton', '3']) as never, g.ports, 'm1ts');
     s2.stop();

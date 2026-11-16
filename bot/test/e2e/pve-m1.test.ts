@@ -10,7 +10,7 @@
 import { appendFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Vec3 } from '../../src/world/types.ts';
-import { centre, connectPlayer, E2E, FEET_Y, fill, prepareServer, privateArea, sleep, startPveBot, teleport, tracked, uniqueName, until, type PveBot } from './pve-truth.ts';
+import { centre, cleanSpot, connectPlayer, E2E, FEET_Y, fill, prepareServer, privateArea, sleep, startPveBot, teleport, tracked, uniqueName, until, type PveBot } from './pve-truth.ts';
 
 /** A result line: the console, and M1_OUT when set (vitest may hold console output). */
 function note(line: string): void {
@@ -45,7 +45,7 @@ describe.skipIf(!E2E)('pve: Track M1 friendly fire and work under attack', () =>
     await teleport(b, c);
     await fill(b, { x: at.x - 20, y: FEET_Y - 1, z: at.z - 20 }, { x: at.x + 50, y: FEET_Y - 1, z: at.z + 20 }, 'grass_block');
     await fill(b, { x: at.x - 20, y: FEET_Y, z: at.z - 20 }, { x: at.x + 50, y: FEET_Y + 5, z: at.z + 20 }, 'air');
-    await b.truth.clearAround(c, 60);
+    await cleanSpot(b, c, { r: 20, up: 5, entities: 60 }); // Track M5: the layers under the spot too, and its cells read back
     b.task.home?.set(at);
     await b.truth.setHealth(b.name, 20);
     await b.truth.ok('setfood', [b.name, 20, 5]);

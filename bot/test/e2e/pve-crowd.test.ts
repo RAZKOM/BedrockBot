@@ -14,7 +14,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { yawTowards } from '../../src/skills/nav/follower.ts';
 import type { Vec3 } from '../../src/world/types.ts';
-import { botDamage, centre, E2E, FEET_Y, prepareServer, pveCmd, privateArea, sleep, startPveBot, teleport, tracked, until, type MobInfo, type PveBot } from './pve-truth.ts';
+import { botDamage, centre, cleanSpot, E2E, FEET_Y, prepareServer, pveCmd, privateArea, sleep, startPveBot, teleport, tracked, until, type MobInfo, type PveBot } from './pve-truth.ts';
 
 const CROWD_RUNS = Number(process.env.PVE_CROWD_RUNS ?? 3);
 const SHIELD_RUNS = Number(process.env.PVE_SHIELD_RUNS ?? 5);
@@ -54,8 +54,8 @@ describe.skipIf(!E2E)('pve: crowd rule and shield (Track AH)', () => {
   async function freshSpot(b: PveBot, health = 20): Promise<Vec3> {
     const at = nextSpot();
     await b.truth.cleanup();
-    await b.truth.clearAround(centre(at), 24);
     await teleport(b, centre(at));
+    await cleanSpot(b, at, { r: 12, entities: 24 }); // Track M5: clean ground whatever earlier runs left
     b.task.home!.set(at);
     await b.truth.ok('setfood', [b.name, 20, 5]);
     await b.truth.setHealth(b.name, health);
@@ -81,7 +81,7 @@ describe.skipIf(!E2E)('pve: crowd rule and shield (Track AH)', () => {
     bot = await startPveBot('PveCrowd');
     bot.pve.settings.set('mobReflex', false); // Track M1: these measure the fight, the shield and the crowd rule alone (the reflex strikes on its own)
     await teleport(bot, centre(HOME));
-    await bot.truth.clearAround(centre(HOME), 64);
+    await cleanSpot(bot, HOME, { r: 12, entities: 64 });
     await bot.truth.ok('clear', [bot.name]);
     await bot.truth.ok('unequip', [bot.name]);
     await bot.truth.ok('give', [bot.name, 'iron_sword', 1]);

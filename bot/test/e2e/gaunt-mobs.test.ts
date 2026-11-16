@@ -25,6 +25,7 @@ import { appendFileSync } from 'node:fs';
 import type { Vec3 } from '../../src/connection/types.ts';
 import { flyControlOf } from '../../src/chat/commands-fly.ts';
 import { centre, E2E, FEET_Y, fill, gauntCmd, prepareServer, privateArea, sleep, startGauntBot, teleport, uniqueName, until, type GauntBot, type HurtRecord } from './gaunt-truth.ts';
+import { blockDamage, cleanSpot, harnessDeaths } from './pve-truth.ts';
 
 const KITS = (process.env.MOBS_KITS ?? 'bare,live,kb2').split(',').map((s) => s.trim()).filter(Boolean);
 const CELL_FILTER = (process.env.MOBS_CELLS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -37,6 +38,8 @@ const LABEL = process.env.MOBS_LABEL ?? 'run';
 const TRACE = process.env.MOBS_TRACE; // a JSON line per death: the last 10 s by tick (state) and the server's hurt log
 const SEAL_TRACE = (process.env.MOBS_SET ?? '').includes('sealIn=true'); // keep 2 min of trace and dump it when a seal-in was tried
 const TRACE_ALL = process.env.MOBS_TRACE_ALL === '1'; // Track M2: the whole run's trace for every run, not only a death's last 10 s
+/** Track M5: the ticks a death's trace keeps (default 200: its last 10 s). */
+const TRACE_TICKS = Number(process.env.MOBS_TRACE_TICKS ?? 200);
 const SETTINGS = (process.env.MOBS_SET ?? '').split(',').map((s) => s.trim()).filter(Boolean); // key=value pairs applied at the start
 /** Track M2: each cell this many times in a row (the fair trials: 30 runs a side). */
 const REPEAT = Math.max(1, Number(process.env.MOBS_REPEAT ?? 1));
@@ -51,6 +54,8 @@ const ROW = Number(process.env.MOBS_ROW ?? 0);
 const ELYTRA = process.env.MOBS_ELYTRA === '1';
 /** Track M4: the clock frozen at `noon` (day: the undead burn in the sun) or `midnight` (the default). */
 const TIME = process.env.MOBS_TIME === 'day' || process.env.MOBS_TIME === 'noon' ? 'noon' : 'midnight';
+/** Track M5: a run the harness spoiled is run again this many times before it stands (marked) in the table. */
+const HARNESS_RETRIES = Number(process.env.MOBS_HARNESS_RETRIES ?? 2);
 
 interface MobSpec {
   type: string;
@@ -116,6 +121,13 @@ interface CellResult {
   time: string;
   seconds: number;
   died: boolean;
+  /** Track M5: the death messages of the run's deaths (`death.attack.mob`, `death.attack.inWall`, ...). */
+  deathCauses?: string[];
+  /**
+   * Track M5: the run measured the harness, not the bot: a death no mob caused (a block in its cells, the ground) or damage
+   * from blocks (suffocation). Such a run is no row's run: it is run again (MOBS_HARNESS_RETRIES, default 2) and kept apart.
+   */
+  harness?: string;
   damage: number;
   perMinute: number;
   hitsByType: Record<string, number>;
@@ -169,6 +181,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
   const ownerName = uniqueName('GmbOwner');
   const area = privateArea();
   const results: CellResult[] = [];
+  const harnessRuns: CellResult[] = [];
   let spot = 0;
   const nextSpot = (): Vec3 => {
     const i = spot++;
@@ -236,11 +249,9 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     const at = nextSpot();
     const c = centre(at);
     await teleport(b, c);
-    // repair the ground (a creeper may have cratered a neighbour spot) and clear the air
-    await fill(b, { x: at.x - 14, y: FEET_Y - 3, z: at.z - 14 }, { x: at.x + 14, y: FEET_Y - 2, z: at.z + 14 }, 'dirt');
-    await fill(b, { x: at.x - 14, y: FEET_Y - 1, z: at.z - 14 }, { x: at.x + 14, y: FEET_Y - 1, z: at.z + 14 }, 'grass_block');
-    await fill(b, { x: at.x - 14, y: FEET_Y, z: at.z - 14 }, { x: at.x + 14, y: FEET_Y + 6, z: at.z + 14 }, 'air');
-    await b.truth.clearAround(c, 40);
+    // repair the ground (a creeper may have cratered a neighbour spot, an earlier run's seal-in left its walls) and clear the
+    // air; Track M5: the spot's cells are read back and a dirty one refused
+    await cleanSpot(b, c, { r: 14, up: 6, entities: 40 });
     b.task.home!.set(at);
     await b.truth.ok('cleareffects', [b.name]).catch(() => undefined); // a witch's poison from the cell before
     await b.truth.setFood(b.name, 20, 5);
@@ -287,7 +298,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     const offTrace = TRACE
       ? loop.onBeforeStep((tk) => {
           ring.push(traceRow(b, c, tk, t0));
-          if (ring.length > (SEAL_TRACE || TRACE_ALL ? 2400 : 220)) ring.shift();
+          if (ring.length > (SEAL_TRACE || TRACE_ALL ? 2400 : TRACE_TICKS + 20)) ring.shift();
         })
       : () => undefined;
     // Track M2: the witch's potions as the bot saw them: each splash potion's last place before it went, against the bot's feet
@@ -394,10 +405,15 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       damageByType[k] = r1((damageByType[k] ?? 0) + h.damage);
       damageByCause[h.cause] = r1((damageByCause[h.cause] ?? 0) + h.damage);
     }
+    // Track M5: a death no mob caused, or any damage from blocks, is the harness's (the spot was not clean), not the row's
+    const deathCauses = b.built.respawn!.history.filter((d) => d.n > deaths0).map((d) => d.cause);
+    const notMob = died ? harnessDeaths(b, deaths0, hurt) : [];
+    const fromBlocks = blockDamage(hurt, b.name);
+    const harness = notMob.length ? `died of ${notMob.join(', ')}` : fromBlocks > 0 ? `${fromBlocks} damage from blocks` : undefined;
     const sealTried = (floorCounts(b).seal ?? 0) > (floors0.seal ?? 0);
     if ((died || TRACE_ALL || (SEAL_TRACE && sealTried)) && TRACE) {
       const lastTick = mine.length ? Math.max(...mine.map((h) => h.tick)) : 0;
-      const hits = mine.filter((h) => h.tick >= lastTick - (SEAL_TRACE || TRACE_ALL ? 2400 : 200)).map((h) => ({ tick: h.tick - lastTick, damage: h.damage, cause: h.cause, by: (h.damagerType ?? '-').replace('minecraft:', ''), after: h.healthAfter }));
+      const hits = mine.filter((h) => h.tick >= lastTick - (SEAL_TRACE || TRACE_ALL ? 2400 : TRACE_TICKS)).map((h) => ({ tick: h.tick - lastTick, damage: h.damage, cause: h.cause, by: (h.damagerType ?? '-').replace('minecraft:', ''), after: h.healthAfter }));
       const byBot = hurt.filter((h) => h.damagerName === b.name && h.tick >= lastTick - 200).map((h) => ({ tick: h.tick - lastTick, victim: h.victimType.replace('minecraft:', ''), damage: h.damage }));
       appendFileSync(TRACE, `${JSON.stringify({ label: LABEL, ab: AB ? `${AB}=${String(b.pve.settings.get(AB as never))}` : undefined, kit, cell: cell.name, died, since, rows: ring, hits, byBot, allHits: SEAL_TRACE || TRACE_ALL ? mine.map((h) => ({ tick: h.tick - since, damage: h.damage, cause: h.cause, by: (h.damagerType ?? '-').replace('minecraft:', '') })) : undefined })}\n`, 'utf8');
     }
@@ -416,6 +432,8 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       time: TIME,
       seconds,
       died,
+      ...(deathCauses.length ? { deathCauses } : {}),
+      ...(harness ? { harness } : {}),
       damage,
       perMinute: r1((damage * 60) / Math.max(1, seconds)),
       hitsByType,
@@ -472,7 +490,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
   }
 
   const fmtRow = (r: CellResult): string =>
-    `${r.label}${r.ab ? ` [${r.ab}]` : ''}${r.rep !== undefined && REPEAT > 1 ? ` #${r.rep + 1}` : ''} ${r.kit} ${r.cell}${r.hard ? ' (hard)' : ''}${r.time === 'noon' ? ' (day)' : ''}: ${r.died ? 'DIED' : 'alive'} after ${r.seconds} s, damage ${r.damage} (${r.perMinute}/min, lowest ${r.minHealth}), hits ${Object.entries(r.hitsByType).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}, ${r.cleared ? `cleared in ${r.clearS} s` : `${r.left} left`}, reflex ${r.reflexHits}${r.potions ? `, potions ${r.potionsNear}/${r.potions} near (steps ${r.potionSteps})` : ''}, floors ${Object.entries(r.floors).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}${r.activity !== 'idle' ? `, ${r.activity}: ${r.activityDone}` : ''}${r.friendly ? `, FRIENDLY ${r.friendly}` : ''}${r.seal ? `, sealed at ${r.seal.sealedS} s${r.seal.dugIn ? ' (dug in)' : ''} health ${r.seal.healthIn} -> ${r.seal.healthMax}, ${r.seal.bites} bites, ${r.seal.damageInside} damage inside, ${r.seal.outS !== null ? `out at ${r.seal.outS} s` : 'still in'}` : ''}${r.fleeFly ? `, elytra flee asked ${r.fleeFly.asked} (${r.fleeFly.landed} landed, ${r.fleeFly.ended} ended otherwise, ${r.fleeFly.refused} refused), ${r.fleeFly.fromSpot} from the spot at the end${r.fleeFly.last ? `: ${r.fleeFly.last.slice(0, 160)}` : ''}` : ''}`;
+    `${r.label}${r.ab ? ` [${r.ab}]` : ''}${r.rep !== undefined && REPEAT > 1 ? ` #${r.rep + 1}` : ''} ${r.kit} ${r.cell}${r.hard ? ' (hard)' : ''}${r.time === 'noon' ? ' (day)' : ''}: ${r.harness ? `HARNESS FAILURE (${r.harness}), not counted; ` : ''}${r.died ? `DIED${r.deathCauses?.length ? ` (${r.deathCauses.join(', ')})` : ''}` : 'alive'} after ${r.seconds} s, damage ${r.damage} (${r.perMinute}/min, lowest ${r.minHealth}), hits ${Object.entries(r.hitsByType).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}, ${r.cleared ? `cleared in ${r.clearS} s` : `${r.left} left`}, reflex ${r.reflexHits}${r.potions ? `, potions ${r.potionsNear}/${r.potions} near (steps ${r.potionSteps})` : ''}, floors ${Object.entries(r.floors).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}${r.activity !== 'idle' ? `, ${r.activity}: ${r.activityDone}` : ''}${r.friendly ? `, FRIENDLY ${r.friendly}` : ''}${r.seal ? `, sealed at ${r.seal.sealedS} s${r.seal.dugIn ? ' (dug in)' : ''} health ${r.seal.healthIn} -> ${r.seal.healthMax}, ${r.seal.bites} bites, ${r.seal.damageInside} damage inside, ${r.seal.outS !== null ? `out at ${r.seal.outS} s` : 'still in'}` : ''}${r.fleeFly ? `, elytra flee asked ${r.fleeFly.asked} (${r.fleeFly.landed} landed, ${r.fleeFly.ended} ended otherwise, ${r.fleeFly.refused} refused), ${r.fleeFly.fromSpot} from the spot at the end${r.fleeFly.last ? `: ${r.fleeFly.last.slice(0, 160)}` : ''}` : ''}`;
 
   beforeAll(async () => {
     await prepareServer({ time: TIME });
@@ -498,6 +516,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       await bot.stop();
     }
     console.log(`gauntlet:\n  ${results.map(fmtRow).join('\n  ')}`);
+    console.log(`gauntlet harness failures: ${harnessRuns.length}${harnessRuns.length ? `\n  ${harnessRuns.map(fmtRow).join('\n  ')}` : ''}`);
   });
 
   for (const kit of KITS) {
@@ -510,14 +529,20 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
           const side = AB || AB_RULE ? (rep % 2 === 0 ? 'off' : 'on') : undefined;
           if (AB) b.pve.settings.set(AB as never, side === 'on' ? 'true' : 'false');
           if (AB_RULE) for (const k of AB_RULE.split(',')) (b.pve.rules as unknown as Record<string, boolean>)[k.trim()] = side === 'on';
-          await setKit(b, kit);
-          const r = await runCell(b, kit, cell);
-          if (side) r.ab = `${AB ?? AB_RULE}=${side}`;
-          if (REPEAT > 1) r.rep = Math.floor(rep / sides);
-          results.push(r);
+          // Track M5: a run the harness spoiled (a death no mob caused, damage from blocks) is written apart and run again
+          for (let tries = 0; ; tries++) {
+            await setKit(b, kit);
+            const r = await runCell(b, kit, cell);
+            if (side) r.ab = `${AB ?? AB_RULE}=${side}`;
+            if (REPEAT > 1) r.rep = Math.floor(rep / sides);
+            console.log(fmtRow(r));
+            if (OUT) appendFileSync(OUT, `${JSON.stringify(r)}\n`, 'utf8');
+            if (r.harness) harnessRuns.push(r);
+            if (r.harness && tries < HARNESS_RETRIES) continue;
+            results.push(r);
+            break;
+          }
           ran++;
-          console.log(fmtRow(r));
-          if (OUT) appendFileSync(OUT, `${JSON.stringify(r)}\n`, 'utf8');
         }
       }
       expect(ran).toBe(cells().length * REPEAT * sides);

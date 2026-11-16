@@ -1335,6 +1335,168 @@ Realm shows the rules' log lines, not their effect on deaths. By night, near hom
   H: not standing in its line)` when only archers are left at low health. Deaths and the lowest health are the bar: no
   death, and the series' damage a run not above the last `mixed8` series.
 
+## Track M5: witches and arrows under poison
+
+Decision record: [decisions/0079-never-die-to-mobs.md](decisions/0079-never-die-to-mobs.md) "Addendum: Track M5"
+(decisions 39 to 44). Everything here ran on bds-pve and bds-gaunt (BDS 1.26.60, normal difficulty) on 2026-11-16 with
+the gauntlet (`test/e2e/gaunt-mobs.test.ts`, the kits of Track M4) unless it says otherwise.
+
+### Clean cells first (the harness)
+
+The 64 cells of a server's private area are shared by every pve suite and every run, and blocks a run leaves (a seal-in's
+shell, a pen, a build of a crashed case) are where the next run stands. Track M4's pve-combat deaths were all
+`death.attack.inWall`, counted as zombie hits. Now:
+
+- **Every case starts on clean ground** (`cleanSpot` in `test/e2e/pve-truth.ts`): the flat world's layers are laid under a
+  square round the spot (dirt 2, grass 1, the bedrock under them untouched), the air over it is cleared, the entities near it
+  are removed, and the spot's cells are read back from the server (feet and head round the spot must be air and the floor
+  grass, or the case fails as a harness error). Every pve suite (combat, creeper, crowd, events, follow, m1, m4, m5, night,
+  rules, testmobs, walls) and the gauntlet's spots call it. A spot that was not clean is said in the log
+  (`clean spot X Y Z: it was not clean (...)`, and to `PVE_CLEAN_LOG`): on 2026-11-16, 10 spots, one with oak planks at feet
+  and head (a seal-in's wall), four filled with stone to head height.
+- **A death no mob caused is a harness failure, never a row's death** (`skills/test/death.ts`): the death message's key
+  says it (`death.attack.inWall`, `fall`, `outOfWorld`, ...), and with no message (`health_zero`) the killing hit's cause in
+  the server's hurt log. The gauntlet runs such a run again (up to 2 times) and counts it apart (`harness: N`); a pve case
+  fails with the cause (`expectAlive`). `!test mobs` names the cause of a death in its run line (`DIED (death.attack.arrow)`,
+  `(<cause>: not a mob)`).
+- **A case's leftover flight is stopped**: pve-combat's two-zombie runs went on with the flight on foot the previous run had
+  started (its zombies took the bot under 14), which walked the bot 90 blocks home after the next teleport, and the next
+  run's zombies were never in view (`timed out waiting for tracked`); each run now stops it first.
+
+Proof: pve-combat four runs (13 cases each), pve-testmobs two runs (8 of 8 each), 21 gauntlet logs: no `inWall` or
+suffocation anywhere, 0 harness reruns in the gauntlet. The pve-combat runs that failed failed on non-harness cases (the
+leftover flight above, once; a kit bite in the weapon-pull case, fixed with full food).
+
+### The rows that still killed (the code of Track M4)
+
+10 runs a side; deaths, mean damage a run, the median of each run's lowest health.
+
+| kit, time | cell | deaths | damage | lowest (median) |
+|---|---|---|---|---|
+| stone, night | `seal-5` | **4** of 10 | 25.4 | 1 |
+| stone, night | `mixed-8` | **3** of 10 | 28.5 | 1 |
+| stone, night | `witch-2` | 0 of 10 | 3.7 | 19 |
+| iron, night | `seal-5` | 0 of 10 | 19.0 | 8.6 |
+| none, night | `witch-1` | **2** of 10 | 23.2 | 1 |
+| none, night | `witch-2` | **2** of 10 | 21.8 | 1 |
+| none, night | `skeleton-4` | **2** of 10 | 21.4 | 5 |
+
+The `off` sides of the A/B series below are the same code; with them the stone kit's `seal-5` died 8 times in 30 and its
+`mixed-8` 4 times in 30.
+
+### What killed (the traces)
+
+- **The way home ran past the archer.** At 1 to 2 health (the poison stops at 1) the bot stood 30 to 50 blocks out with
+  nothing within 16 for 2 s, so the flight counted the danger as over and home as clear, and walked home; the skeleton that
+  had followed it out stood beside that way and shot it at 11 to 15. All three stone `mixed-8` deaths, two of four stone
+  `seal-5` deaths, one of the two `none` `skeleton-4` deaths, one `none` `witch-1` death. M4's `shooterHome` looks at home only (within 16
+  of it); these archers were 20 to 40 from home.
+- **A bite in the witch's reach.** A bot with no blade fled the witch at 1 to 2 health, poisoned, with her walking after it
+  at 13 to 16 (her throw reaches about 10); each bite slows the body for 1.6 s (an item in use), she came to 10 to 12 and her
+  harming killed it (both `none` `witch-2` deaths). A bite heals nothing while the poison holds the health at 1.
+- **The witch first with archers shooting.** With a stone sword at home at 7 to 10 health, guard fought the witch first
+  (Track M1's rule: within 8 at any health) while two skeletons 8 to 12 off shot; her harming (6) took it to 1 to 4 and the
+  next arrow killed it (two of four stone `seal-5` deaths). A stone or iron sword needs 5 or more hits on her, a netherite
+  one 3 (1.7 s).
+- **Out of the server's range is not gone.** bds-pve sends a skeleton 24, 40 and 56 blocks off and not one 72, 88 or 104
+  off (pve-m5 `range`). A bot 53 out at 1 health had no entity for the skeleton standing at home, so even the rules above
+  could not see it.
+
+### The rules (`PveController.rules`, on by default)
+
+| rule | what it does | why |
+|---|---|---|
+| `shooterWay` | Below `fleeHealth`, no `home` leg while a live archer or witch stands within 16 (`SHOOTER_WAY`) of the way from the bot to home, seen or not, behind the bot excepted (`shooterOnWay`); the bot stays out (`far`) until the health is back. Archers and witches the server stopped sending 48 or more off (`SHOOTER_LOST_FAR`) are kept at their last place for 60 s (`SHOOTER_MEMORY_MS`, `rememberedShooters`); one lost nearer is taken for dead | the angle rule (Track W) and `shooterHome` see only what stands nearer than home in its direction or at home; an archer that followed the bot out stands beside the way |
+| `poisonBite` | In the flight on foot, no bite while the bot is poisoned and an archer or a witch is within 24 (`FLEE_SCAN` + 8), unless the food is down to `FOOD_SPRINT_EAT` (`biteHeld`) | a bite slows the body and heals nothing under the poison; she follows at 13 to 16 and throws from 10 |
+| `witchCrowd` | At 10 health or under (`WITCH_CROWD_HEALTH`: her harming 6 and an arrow 4), with an archer with a line on the bot within 16 and no sword better than iron (`WITCH_CROWD_BLADE`, a diamond sword's score), the witch is not the first target (`firstTarget`); the floors decide as for any mob | one throw and one arrow are the health, and a stone or iron sword does not kill her before her next throw |
+
+Lines in the log: `flee: an archer or a witch within 16 of the way to home: staying out at health H`, `flee: no bite while
+poisoned with an archer or a witch within 24 (health H, food F)` (once a flight each), `guard: the witch is not first at
+health H with an archer shooting (...)` (at most every 30 s). The poison tick's line now rounds the health to one decimal.
+
+### Each rule on its rows (5 runs a side a chunk, the other rules as they were then)
+
+Deaths, mean damage a run, the median of each run's lowest health.
+
+| rule | kit, cell | off | on |
+|---|---|---|---|
+| `shooterWay` (no memory yet) | stone `mixed-8` | 1 of 10, 21.8, 1.5 | **0** of 10, 24.6, 1 |
+| `shooterWay` (no memory yet) | stone `seal-5` | 3 of 10, 24.7, 1 | **0** of 10, 24.9, 1 |
+| `shooterWay` | none `pillager-1` | 6 of 10, 27.9, 0 | 5 of 10, 27.8, 0.5 |
+| `shooterWay` (again) | none `pillager-1` | 6 of 10, 25.9, 0 | 4 of 10, 25.0, 1 |
+| `poisonBite` (`shooterWay` on) | none `witch-2` | 0 of 10, 27.4, 1; 24 bites | 0 of 10, **15.7**, 3.5; 3 bites |
+| `witchCrowd` (the others on) | stone `seal-5` | 1 of 10, 29.1, 1 | 1 of 10, 28.8, 1 |
+| `witchCrowd` (the others on) | iron `seal-5` | 1 of 10, 22.6, 1.6 | **0** of 10, **15.0**, 8.9 |
+
+On the live kit's `mixed-8` an early form of `witchCrowd` (any blade) took the lowest health's median from 5.3 to 1.4 in 5
+runs a side; it now leaves diamond and netherite swords alone.
+
+### Before and after (all three rules, 10 runs a side)
+
+`MOBS_AB_RULE=shooterWay,poisonBite,witchCrowd`: the three off (Track M4's code) then on, alternating, 5 a side a chunk,
+one chunk on each server.
+
+Deaths, mean damage a run, the median of each run's lowest health. Every row Track M4 changed is here.
+
+| kit, time | cell | off (Track M4) | on (Track M5) |
+|---|---|---|---|
+| live, night | `mixed-8` | 0 of 10, 22.4, 1.6 | 0 of 10, 26.0, 1.3 |
+| stone, night | `mixed-8` | 0 of 10, 24.5, 1 | 0 of 10, 24.8, 1 |
+| stone, night | `seal-5` | **1** of 10, 25.5, 1 | **1** of 10, 24.0, 1 |
+| stone, day | `seal-5` | **2** of 10, 19.9, 1.5 | 0 of 10, 19.2, 4.5 |
+| iron, night | `seal-5` | **1** of 10, 20.4, 1.9 | 0 of 10, 15.6, 12.9 |
+| iron, night | `mixed-8` | **1** of 10, 22.5, 1.5 | 0 of 10, 17.9, 1.9 |
+| none, night | `witch-1` | **4** of 10, 30.1, 1 | 0 of 10, 16.4, 1 |
+| none, night | `skeleton-4` | **4** of 10, 21.0, 3.5 | 0 of 10, 20.0, 5 |
+| none, night | `pillager-1` | **7** of 12, 27.7, 0 | **10** of 11, 27.5, 0 |
+| none, night | `mixed-8` | 0 of 10, 14.9, 11 | 0 of 10, 14.4, 9.5 |
+| stone, night | `act-goto` | 0 of 4, 2.0, 18 | 0 of 4, 4.5, 16 |
+| stone, night | `act-eat` | 0 of 4, 14.5, 7.5 | 0 of 4, 12.0, 10.5 |
+| stone, night | `skeleton-4` | 0 of 10, 16.8, 7.5 | 0 of 10, 18.7, 4 |
+
+Every run of this table and the per-rule table: 0 harness reruns (no death by a block, the ground or the void).
+
+- **The live kit** died in none of 20; its damage went up 22.4 to 26.0 and the lowest health's median down 1.6 to 1.3.
+  The runs that took the most on either side are the ones the witch's poison landed in (its 1 point a second down to 1,
+  then an arrow). `witchCrowd` leaves a netherite sword alone, and the other two act only in a flight below `fleeHealth`,
+  which most of the live kit's runs never start; the difference is read as where the poison landed, not as a rule.
+- **`pillager-1` with no kit** is the same either way: the 12 and 11 above with the two `shooterWay` series of the per-rule
+  table make 19 deaths in 32 off and 19 in 31 on. No poison and no witch there, so `shooterWay` is the only rule that can
+  act. Track M4 measured 6 in 10 with its rules on.
+
+### Not met
+
+- **A crossbow with no blade and no armour.** `none` `pillager-1` dies in about 6 runs in 10. The pillager follows the
+  flight on foot at 9 to 16 and hits 4 at a time; every death's last 10 s are the `far` leg with the pillager in line of
+  sight. Running does not outpace it and the bot has nothing to fight it with; what would help (cover, a block between,
+  a pillar) places blocks, so it is not a choice of leg and is not in this track.
+- **The fight at home against 3 archers and a witch.** The stone kit's one night `seal-5` death on the `on` side was a
+  fight at home at 8 to 13 health with three skeletons and a witch: one throw (6) and one arrow (4) are more than the
+  margin over `fleeHealth` 8. A flight floor that counts the archers in sight would be a choice; it was not measured.
+- **A fight among several archers above `fleeHealth`.** In one `none` `skeleton-4` death of the `before` rows guard
+  fought a skeleton at 13 health with three more 4 to 15 off; two arrows took 9 to 0 in under a second. A floor that counts
+  the archers in sight is the same open choice as above.
+- **The lowest health stays at 1** in many rows on both sides: the poison holds the health at 1 and the rules keep the bot
+  alive there, they do not keep it higher.
+- **Activities.** Only `act-goto` and `act-eat` with the stone kit were run again (4 runs a side, no death on either
+  side); the other activities of Track M4 were not.
+- **The Realm.** No early kit can be given there, so the rules' effect on deaths is measured on the test servers only;
+  the Realm recipe below checks that they act and that the live kit's series stay clean.
+
+### On the Realm
+
+The rules are on with the update; no setting changes. The Realm has no cheats, so no early kit can be given; with the
+netherite set a run seldom reaches the health where the rules act, so `bare` (the blades stowed) is the nearest and the
+Realm shows the rules' lines rather than their effect on deaths. By night, near home, `fleeHealth` as it is:
+
+- `!test mobs witch 5 bare`: look for `flee: no bite while poisoned with an archer or a witch within 24 (...)` and, when
+  the flight is far out, `flee: an archer or a witch within 16 of the way to home: staying out at health H`; the run's lowest
+  health and damage against the last `witch 5 bare` series (Track M4 on the Realm: 5 of 5 alive, damage up to 9).
+- `!test mobs skeleton4 5 bare`: the way line when a flight ends far out; every run alive.
+- `!test mobs mixed8 5`: the live kit; no death, and no line of `witchCrowd` (the netherite sword is exempt).
+- A death in any series now says its cause in the run line (`DIED (death.attack.arrow)`); one marked `not a mob` is the
+  ground or a block, not the rules.
+
 ## Packets (BDS 1.26.60.6, verified)
 
 - **Locator bar** (Track W, `tasks/process/locator.ts`): for every other player the server sends
@@ -1430,6 +1592,13 @@ BDS_E2E=1 BDS_PVE_NIGHT=1 pnpm --filter bot exec vitest run --project e2e pve   
   every fight starts with the zombie within reach), (c) a zombie in the open walking up (fought and
   killed, then arrives). Prints the probe costs. `PVE_WALLS_OLD=1` runs it with `guardReach 0` and
   `guardWhileWalking all` for comparison (measurements only). About 45 s.
+- `pve-m5` (Track M5): how far the server sends a skeleton (24 to 104 along x; 24 must be sent); `shooterWay` off and on
+  at 3 health 40 from home with a zombie 13 to the side and a skeleton beside the way (off: the bot comes within 20 of
+  home; on: never within 28 of home nor 16 of the skeleton); `poisonBite` (`biteHeld` false, true once the server's
+  poison is on the bot with a witch 20 off, false with the rule off, false once the poison is cleared). Each side ends with
+  full health and no flight running. About 70 s. Unit: `m5-rules` (the way's geometry, the memory, `witchCrowd` with
+  and without a netherite sword, `biteHeld`), `test-death` (which death is a mob's). Every pve suite starts each case on
+  a clean spot (`cleanSpot`, pve-truth).
 - `pve-follow`: a pig with slowness 255 teleported 3 blocks every 2 s for 102 blocks; a second client
   (a real offline player, an owner) types `!come`, `!follow`, `!status`, `!stop`; leaving view (a
   400-block teleport) -> last known position -> waiting -> resumed.

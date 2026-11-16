@@ -242,3 +242,38 @@ that killed, on bds-pve and bds-gaunt.
     rules on it saved the stone kit's `seal-5` in the runs where it sealed, measured in pve.md. **`!test mobs` has no kit
     option**: a Realm without cheats cannot give stone or iron items or take the worn armour off, so the early kits are
     measured on test servers only; on the Realm `bare` is the nearest.
+
+## Addendum: Track M5 (2026-11-16)
+
+The numbers are in [../pve.md](../pve.md) "Track M5: witches and arrows under poison". The rows that still killed on
+Track M4's code were measured again (10 runs a side), the deaths' last 10 s read tick by tick, and each fix A/B'd on its
+rows and on the live kit's and the stone kit's `mixed-8`, on bds-pve and bds-gaunt.
+
+39. **Test cells are cleaned before a case, and a death no mob caused is a harness failure.** Every pve suite and the
+    gauntlet lay the ground under their spot, clear the air and the entities, and read the spot back (`cleanSpot`); a
+    death whose message or killing hit is a block, the ground or the void (`skills/test/death.ts`) fails the case or is
+    run again in the gauntlet, never counted as a row's death. Track M4's pve-combat deaths were all `death.attack.inWall`
+    in other runs' blocks; with the cleaning, 10 dirty spots were found and laid again and no case met a block death.
+40. **`shooterWay`: at low health the way home has to be clear of archers and witches too**, not only home: no `home` leg
+    while one stands within 16 of the line from the bot to home (behind the bot excepted), seen or not, and the danger
+    being over no longer makes home clear on its own then. A switch of the controller like decisions 32 to 37 (a choice of
+    leg only). The case: a poisoned bot at 1 to 2 health far out with nothing within 16 walked home past the skeleton that
+    had followed it out (every stone-kit `mixed-8` death, half the stone `seal-5` deaths on Track M4's code).
+41. **Archers and witches out of the server's range are remembered**: one the server stops sending 48 blocks or more from
+    the bot is kept at its last place for 60 s for `shooterWay`; one lost nearer is taken for killed. bds-pve sends entities
+    to about 56 blocks and not from 72; a bot waiting 53 out had no entity for the skeleton at home.
+42. **`poisonBite`: no bite in the flight on foot while poisoned with an archer or a witch within 24**, unless the food is
+    down to the sprint's floor. A bite slows the body for 1.6 s and heals nothing while the poison holds the health at 1;
+    the witch follows a fleeing bot at 13 to 16 and throws from about 10. `none` `witch-2`: damage 27.4 to 15.7 a run, the
+    lowest health's median 1 to 3.5, 10 runs a side.
+43. **`witchCrowd`: with a stone or iron sword, the witch is not the first target at 10 health or under while an archer
+    shoots** (her harming 6 and one arrow 4). Track M1's witch-first rule stands for diamond and netherite swords, which
+    kill her in 3 hits: an early form for every blade took the live kit's lowest-health median from 5.3 to 1.4 (5 a side).
+    Iron `seal-5`: 1 death in 10 to 0, damage 22.6 to 15.0, lowest median 1.6 to 8.9; stone `seal-5` unchanged (1 in 10
+    either way).
+44. **All three ship on**: choice-only, and no row is worse in deaths. Off and on, 10 runs a side: stone `seal-5` by day
+    2 to 0, iron `seal-5` 1 to 0, iron `mixed-8` 1 to 0, no kit `witch-1` 4 to 0, `skeleton-4` 4 to 0; stone `seal-5` by
+    night 1 and 1; the live kit's `mixed-8` 0 and 0 (damage 22.4 to 26.0, the poison's luck: `witchCrowd` leaves its
+    sword alone). No kit `pillager-1` dies in about 6 in 10 either way (19 of 32 off, 19 of 31 on, three series). Not done:
+    anything that places or digs or moves the body in a new way (cover from archers, a longer or faster run from a
+    following witch); see pve.md "Not met".

@@ -12,6 +12,7 @@ import {
   hdist,
   prepareServer,
   privateArea,
+  cleanSpot,
   sleep,
   startPveBot,
   teleport,
@@ -33,7 +34,7 @@ describe.skipIf(!E2E)('pve: follow and come (tasks 7.5, 7.6)', () => {
     await prepareServer({ time: 'noon' });
     bot = await startPveBot('PveFollow', {}, { owners: [ownerName] });
     await teleport(bot, centre(START));
-    await bot.truth.clearAround(centre(START), 48);
+    await cleanSpot(bot, START, { r: 12, entities: 48 }); // Track M5: clean ground whatever earlier runs left
   }, 120_000);
 
   afterAll(async () => {

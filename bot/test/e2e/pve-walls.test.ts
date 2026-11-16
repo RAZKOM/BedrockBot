@@ -18,7 +18,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { EYE_HEIGHT } from '../../src/skills/combat/combat.ts';
 import { reachDistance } from '../../src/skills/combat/hostiles.ts';
 import type { Vec3 } from '../../src/world/types.ts';
-import { centre, E2E, FEET_Y, fill, hdist, prepareServer, privateArea, pveCmd, sleep, startPveBot, teleport, tracked, until, type MobInfo, type PveBot } from './pve-truth.ts';
+import { centre, cleanSpot, E2E, FEET_Y, fill, hdist, prepareServer, privateArea, pveCmd, sleep, startPveBot, teleport, tracked, until, type MobInfo, type PveBot } from './pve-truth.ts';
 
 const OLD = process.env.PVE_WALLS_OLD === '1';
 
@@ -43,7 +43,7 @@ describe.skipIf(!E2E)('pve: guard and walls on the way (Track AO)', () => {
       b.pve.settings.set('guardWhileWalking', 'all');
     }
     await teleport(b, centre(HOME));
-    await b.truth.clearAround(centre(HOME), 128);
+    await cleanSpot(b, HOME, { r: 8, entities: 128 });
     await b.truth.ok('clear', [b.name]);
     await b.truth.ok('unequip', [b.name]);
     await b.truth.ok('give', [b.name, 'iron_sword', 1]);
@@ -85,9 +85,10 @@ describe.skipIf(!E2E)('pve: guard and walls on the way (Track AO)', () => {
   async function freshStart(b: PveBot): Promise<Vec3> {
     const at = nextSpot();
     await b.truth.cleanup();
-    await b.truth.clearAround(centre(at), 40);
     b.pve.stop();
     await teleport(b, centre(at));
+    // Track M5: the route (30 along +x) and the pens' side laid and cleared, whatever earlier runs left
+    await cleanSpot(b, { x: at.x + 15, z: at.z }, { rx: 22, rz: 10, entities: 40 });
     b.task.home!.set(undefined);
     await b.truth.ok('setfood', [b.name, 20, 5]);
     await b.truth.setHealth(b.name, 20);

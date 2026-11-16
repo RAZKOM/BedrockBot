@@ -8,7 +8,7 @@
 // PVE_VERBOSE=1, PVE_CREEPER_RUNS (5).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Vec3 } from '../../src/world/types.ts';
-import { armWithIronSword, botDamage, centre, E2E, FEET_Y, fill, fmt, hdist, prepareServer, privateArea, sleep, startPveBot, teleport, tracked, until, type PveBot } from './pve-truth.ts';
+import { armWithIronSword, botDamage, centre, cleanSpot, E2E, FEET_Y, fill, fmt, hdist, prepareServer, privateArea, sleep, startPveBot, teleport, tracked, until, type PveBot } from './pve-truth.ts';
 
 interface CombatRecord {
   tick: number;
@@ -48,7 +48,7 @@ describe.skipIf(!E2E)('pve: creeper protocol (Track V)', () => {
     bot = await startPveBot('PveCreep');
     bot.pve.settings.set('mobReflex', false); // Track M1: these measure the fight, the shield and the crowd rule alone (the reflex strikes on its own)
     await teleport(bot, centre(HOME));
-    await bot.truth.clearAround(centre(HOME), 48);
+    await cleanSpot(bot, HOME, { r: 12, entities: 48 }); // Track M5: clean ground whatever earlier runs left
     await armWithIronSword(bot);
     await bot.truth.ok('unequip', [bot.name]);
     await bot.truth.setHealth(bot.name, 20);
@@ -72,9 +72,9 @@ describe.skipIf(!E2E)('pve: creeper protocol (Track V)', () => {
   /** Back to full health at a fresh spot, nothing around. */
   async function reset(b: PveBot, at: Vec3): Promise<void> {
     await b.truth.cleanup();
-    await b.truth.clearAround(centre(at), 32);
     await until(() => (b.built.respawn!.dead ? undefined : true), 30_000, 'alive');
     await teleport(b, centre(at));
+    await cleanSpot(b, at, { r: 12, entities: 32 }); // Track M5
     await b.truth.setHealth(b.name, 20);
     await until(() => (b.pve.health() >= 20 ? true : undefined), 5_000, 'health 20 in the model');
   }

@@ -28,6 +28,7 @@ import type { Vec3 } from '../../connection/types.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { EntityInfo } from '../../world/types.ts';
 import { bareType } from '../combat/hostiles.ts';
+import { mobDeath } from './death.ts';
 import { BARE_IDLE_MS, BareHold, hotbarBlades, stowedText, type BarePorts, type Stowed } from './bare.ts'; // Track T2
 import { fmtCell, type RestoreResult } from './recovery.ts';
 
@@ -259,6 +260,8 @@ export interface MobRecord {
   startedAt: string;
   seconds: number;
   died: boolean;
+  /** Track M5: the death message's key of a run that died (`death.attack.mob`, `death.attack.arrow`, `death.attack.inWall`). */
+  deathCause?: string;
   damage: number;
   lowest: number;
   /** Hits taken by mob type (the bot's attacker guess). */
@@ -316,6 +319,8 @@ export interface MobSeriesPorts {
   home(): Vec3 | undefined;
   health(): number;
   deaths(): number;
+  /** Track M5: the last death's message key (tasks/respawn.ts `lastDeath.cause`). */
+  deathCause?(): string | undefined;
   /** Resolves once a death's recovery is over. */
   recovered(): Promise<void>;
   entities(): ReadonlyMap<bigint, EntityInfo>;
@@ -343,7 +348,7 @@ const fmtCounts = (c: Readonly<Record<string, number>>): string => Object.entrie
 
 /** One chat line per run. */
 export function mobRunLine(r: MobRecord): string {
-  return `test mobs ${r.set} run ${r.run}/${r.of}: ${r.died ? 'DIED' : 'alive'}, damage ${r.damage} (lowest ${r.lowest}), hits ${fmtCounts(r.hits)}, ${r.cleared ? `cleared in ${r.clearSeconds} s${r.clearedBy === 'server' ? ' (the server has none)' : r.clearedBy === 'unconfirmed' ? ' (none in sight, the server did not answer)' : ''}` : `${r.left} left after ${r.seconds} s${r.outOfSight ? ` (${r.outOfSight} out of sight)` : ''}${r.end === 'stopped' ? ' (stopped)' : ''}`}, reflex ${r.reflexHits}, floors ${fmtCounts(r.floors)}${r.bare ? `, bare${r.bladeInHotbar ? ' (a blade still in the hotbar)' : ''}` : ''}`;
+  return `test mobs ${r.set} run ${r.run}/${r.of}: ${r.died ? `DIED${r.deathCause ? ` (${r.deathCause}${mobDeath(r.deathCause) ? '' : ': not a mob'})` : ''}` : 'alive'}, damage ${r.damage} (lowest ${r.lowest}), hits ${fmtCounts(r.hits)}, ${r.cleared ? `cleared in ${r.clearSeconds} s${r.clearedBy === 'server' ? ' (the server has none)' : r.clearedBy === 'unconfirmed' ? ' (none in sight, the server did not answer)' : ''}` : `${r.left} left after ${r.seconds} s${r.outOfSight ? ` (${r.outOfSight} out of sight)` : ''}${r.end === 'stopped' ? ' (stopped)' : ''}`}, reflex ${r.reflexHits}, floors ${fmtCounts(r.floors)}${r.bare ? `, bare${r.bladeInHotbar ? ' (a blade still in the hotbar)' : ''}` : ''}`;
 }
 
 /** The summary line. */
@@ -586,10 +591,17 @@ export class MobSeries {
       const left = Math.max(seen, outOfSight ?? 0);
       await p.run(removeCommand(this.tag));
       const c1 = p.counters();
+      // the death message can come a moment after the health 0 that ended the run
+      let deathCause = end === 'died' ? p.deathCause?.() : undefined;
+      for (let i = 0; p.deathCause && end === 'died' && i < 5 && (deathCause === undefined || deathCause === 'health_zero' || deathCause === 'unknown'); i++) {
+        await p.sleep(200);
+        deathCause = p.deathCause();
+      }
       return {
         ...base,
         seconds,
         died: end === 'died',
+        ...(deathCause ? { deathCause } : {}),
         damage: r1(damage),
         lowest: r1(lowest),
         hits: diff(c1.taken, c0.taken),

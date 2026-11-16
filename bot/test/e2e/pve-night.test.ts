@@ -5,7 +5,7 @@
 // Needs BDS_E2E=1 and bds-pve with the truth pack. Takes about 6 minutes; run it with
 // BDS_PVE_NIGHT=1 (opt-in since the wave-5 gate).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { armWithIronSword, botDamage, botHits, centre, E2E, FEET_Y, hdist, prepareServer, privateArea, pveCmd, sleep, startPveBot, teleport, type PveBot } from './pve-truth.ts';
+import { armWithIronSword, botDamage, botHits, centre, cleanSpot, E2E, FEET_Y, hdist, prepareServer, privateArea, pveCmd, sleep, startPveBot, teleport, type PveBot } from './pve-truth.ts';
 
 const NIGHT = process.env.BDS_PVE_NIGHT === '1'; // opt-in: in the wave-5 full gate (2026-10-29) the bot died once in a zombie crowd under machine load (no armour, no food yet, PLAN 7.11)
 const TICKS = Number(process.env.BDS_PVE_NIGHT_TICKS ?? 6000);
@@ -21,7 +21,7 @@ describe.skipIf(!E2E || !NIGHT)('pve: a night at home with guard on (task 7.4)',
     await prepareServer({ time: 'noon' });
     bot = await startPveBot('PveNight', { home: HOME });
     await teleport(bot, centre(HOME));
-    await bot.truth.clearAround(centre(HOME), 64);
+    await cleanSpot(bot, HOME, { r: 20, entities: 64 }); // Track M5: clean ground whatever earlier runs left
     await armWithIronSword(bot);
     await bot.truth.setHealth(bot.name, 20);
     bot.pve.setGuard({ on: true, radius: 16 });

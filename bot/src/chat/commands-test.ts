@@ -469,6 +469,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
       home: () => task.home?.get(),
       health: () => harnessPorts.health() ?? pve.health(),
       deaths: () => respawn.deaths,
+      deathCause: () => respawn.lastDeath?.cause,
       recovered: () => recovery.settled(),
       entities: () => world.entities,
       dead: (rid) => pve.mobs.get(rid)?.dead === true,

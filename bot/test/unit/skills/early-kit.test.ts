@@ -14,7 +14,7 @@ const allOff = (pve: PveController): void => {
 
 it('the rules are on by default', () => {
   expect(Object.values(PVE_RULES_DEFAULT).every((v) => v)).toBe(true);
-  expect(Object.keys(PVE_RULES_DEFAULT).sort()).toEqual(['archerDuel', 'fleeLong', 'legHold', 'poison', 'shooterHome']);
+  expect(Object.keys(PVE_RULES_DEFAULT).sort()).toEqual(['archerDuel', 'fleeLong', 'legHold', 'poison', 'poisonBite', 'shooterHome', 'shooterWay', 'witchCrowd']); // Track M5: + shooterWay, poisonBite, witchCrowd (m5-rules.test.ts)
 });
 
 describe('the archer at home (archerDuel)', () => {

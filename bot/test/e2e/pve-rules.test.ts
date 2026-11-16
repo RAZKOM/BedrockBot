@@ -18,7 +18,7 @@ import { reachDistance } from '../../src/skills/combat/hostiles.ts';
 import { EYE_HEIGHT } from '../../src/skills/combat/combat.ts';
 import { yawTowards } from '../../src/skills/nav/follower.ts';
 import type { Vec3 } from '../../src/world/types.ts';
-import { centre, E2E, FEET_Y, prepareServer, privateArea, sleep, startPveBot, teleport, tracked, until, type MobInfo, type PveBot } from './pve-truth.ts';
+import { centre, cleanSpot, E2E, FEET_Y, prepareServer, privateArea, sleep, startPveBot, teleport, tracked, until, type MobInfo, type PveBot } from './pve-truth.ts';
 
 interface MeleeRecord {
   tick: number;
@@ -69,8 +69,8 @@ describe.skipIf(!E2E)('pve: the server rules for melee (Track M1)', () => {
   async function fresh(b: PveBot): Promise<Vec3> {
     const at = nextSpot();
     await b.truth.cleanup();
-    await b.truth.clearAround(centre(at), 24);
     await teleport(b, centre(at));
+    await cleanSpot(b, at, { r: 10, entities: 24 }); // Track M5: clean ground whatever earlier runs left
     await b.truth.setHealth(b.name, 20);
     await b.truth.ok('setfood', [b.name, 20, 5]);
     return centre(at);
@@ -101,7 +101,7 @@ describe.skipIf(!E2E)('pve: the server rules for melee (Track M1)', () => {
     await prepareServer();
     bot = await startPveBot('PveRules');
     await teleport(bot, centre(HOME));
-    await bot.truth.clearAround(centre(HOME), 96);
+    await cleanSpot(bot, HOME, { r: 10, entities: 96 });
     await bot.truth.ok('clear', [bot.name]);
     await bot.truth.ok('unequip', [bot.name]);
     bot.pve.setGuard({ on: false });

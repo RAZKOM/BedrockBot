@@ -8,7 +8,7 @@
 import { appendFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Vec3 } from '../../src/world/types.ts';
-import { centre, E2E, FEET_Y, fill, hdist, prepareServer, privateArea, sleep, startPveBot, teleport, tracked, uniqueName, until, type PveBot } from './pve-truth.ts';
+import { centre, cleanSpot, E2E, FEET_Y, hdist, prepareServer, privateArea, sleep, startPveBot, teleport, tracked, uniqueName, until, type PveBot } from './pve-truth.ts';
 
 function note(line: string): void {
   console.log(line);
@@ -29,9 +29,7 @@ describe.skipIf(!E2E)('pve: Track M4 early-kit rules', () => {
     const at = nextSpot();
     const c = centre(at);
     await teleport(b, c);
-    await fill(b, { x: at.x - 24, y: FEET_Y - 1, z: at.z - 24 }, { x: at.x + 24, y: FEET_Y - 1, z: at.z + 24 }, 'grass_block');
-    await fill(b, { x: at.x - 24, y: FEET_Y, z: at.z - 24 }, { x: at.x + 24, y: FEET_Y + 5, z: at.z + 24 }, 'air');
-    await b.truth.clearAround(c, 60);
+    await cleanSpot(b, c, { r: 24, up: 5, entities: 60 }); // Track M5: clean ground whatever earlier runs left
     await b.truth.ok('cleareffects', [b.name]).catch(() => undefined);
     b.task.home?.set(at);
     await b.truth.setHealth(b.name, 20);

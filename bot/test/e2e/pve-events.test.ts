@@ -17,7 +17,7 @@ import type { BotEvent } from '../../src/events/registry.ts';
 import type { EventSummary } from '../../src/events/summary.ts';
 import { serverIdFor } from '../../src/world/cache/index.ts';
 import { startCli, waitOnline, type CoreCli } from './core-truth.ts';
-import { centre, connectPlayer, E2E, FEET_Y, prepareServer, privateArea, PVE_CONTAINER, PVE_HOST, PVE_PORT, PveTruth, pveCmd, uniqueName, until } from './pve-truth.ts';
+import { centre, cleanSpot, connectPlayer, E2E, FEET_Y, prepareServer, privateArea, PVE_CONTAINER, PVE_HOST, PVE_PORT, PveTruth, pveCmd, uniqueName, until } from './pve-truth.ts';
 
 const PORT = Number(process.env.EVENTS_E2E_PORT ?? 9920 + randomInt(10));
 const TOKEN = Array.from({ length: 24 }, () => 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'[randomInt(57)]).join('');
@@ -72,7 +72,7 @@ describe.skipIf(!E2E)('pve: event history (decision 0059)', () => {
     cacheDir = mkdtempSync(join(tmpdir(), 'bot-e2e-events-cache-'));
     cli = await start(uniqueName('EvBot'));
     await truth.tp(cli.name, centre(HOME), 0, 0);
-    await truth.clearAround(centre(HOME), 32);
+    await cleanSpot({ truth }, HOME, { r: 12, entities: 32 }); // Track M5: clean ground whatever earlier runs left
   }, 120_000);
 
   afterAll(async () => {

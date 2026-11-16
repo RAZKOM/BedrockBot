@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Vec3 } from '../../src/world/types.ts';
 import { testControlOf } from '../../src/chat/commands-test.ts';
 import { ruleAnswer } from '../../src/skills/test/mobs.ts';
-import { centre, E2E, FEET_Y, fill, prepareServer, privateArea, pveCmd, sleep, startPveBot, teleport, uniqueName, until, type MobInfo, type PveBot } from './pve-truth.ts';
+import { centre, cleanSpot, deathLine, E2E, FEET_Y, fill, prepareServer, privateArea, pveCmd, sleep, startPveBot, teleport, uniqueName, until, type MobInfo, type PveBot } from './pve-truth.ts';
 
 describe.skipIf(!E2E)('pve: !test mobs (Track M1)', () => {
   let bot: PveBot | undefined;
@@ -22,14 +22,16 @@ describe.skipIf(!E2E)('pve: !test mobs (Track M1)', () => {
     await prepareServer({ time: 'midnight' });
     bot = await startPveBot('PveTm', {}, { owners: [ownerName] });
     await teleport(bot, centre(START));
-    await fill(bot, { x: START.x - 20, y: FEET_Y - 1, z: START.z - 20 }, { x: START.x + 20, y: FEET_Y - 1, z: START.z + 20 }, 'grass_block');
-    await fill(bot, { x: START.x - 20, y: FEET_Y, z: START.z - 20 }, { x: START.x + 20, y: FEET_Y + 5, z: START.z + 20 }, 'air');
-    await bot.truth.clearAround(centre(START), 40);
+    await cleanSpot(bot, START, { r: 20, entities: 40 }); // Track M5: clean ground whatever earlier runs left
     bot.pve.settings.set('testMode', true);
   }, 120_000);
 
   afterAll(async () => {
     if (bot) {
+      const line = deathLine(bot);
+      console.log(line);
+      if (process.env.TESTMOBS_OUT) appendFileSync(process.env.TESTMOBS_OUT, `${line}
+`);
       await bot.truth.cleanup().catch(() => undefined);
       await bot.truth.clearAround(centre(START), 40).catch(() => undefined);
       await bot.stop();
@@ -192,7 +194,7 @@ describe.skipIf(!E2E)('pve: !test mobs (Track M1)', () => {
     const runs = Number(process.env.TESTMOBS_BARE_RUNS ?? 1);
     b.task.home!.set({ x: START.x + 400, y: FEET_Y, z: START.z });
     await teleport(b, centre(START));
-    await b.truth.clearAround(centre(START), 40);
+    await cleanSpot(b, START, { r: 20, entities: 40 });
     await b.truth.ok('clear', [b.name]);
     await b.truth.ok('unequip', [b.name]).catch(() => undefined);
     await b.truth.ok('setslot', [b.name, 0, 'netherite_sword', 1]);

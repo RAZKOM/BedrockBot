@@ -279,8 +279,47 @@ export interface PveRules {
   poison: boolean;
   /** Home is no place to flee to while an archer or a witch stands within SHOOTER_HOME of it (fleeLeg `homeShot`). */
   shooterHome: boolean;
+  /**
+   * Track M5: at low health the way home has to be clear of archers and witches too, not only home (shooterOnWay): no live
+   * one within SHOOTER_WAY of the line from the bot to home, seen or not. The danger being over (nothing within FLEE_SCAN
+   * for 2 s) no longer makes home clear on its own then.
+   */
+  shooterWay: boolean;
+  /**
+   * Track M5: no bite in the flight on foot while the bot is poisoned and a witch or an archer is within FLEE_SCAN + 8, seen
+   * or not (poisonBite), unless the food is down to FOOD_SPRINT_EAT. A bite slows the body for 1.6 s and heals nothing while
+   * the poison holds the health down.
+   */
+  poisonBite: boolean;
+  /**
+   * Track M5: the witch is not the first target at WITCH_CROWD_HEALTH or under while an archer with a line on the bot is
+   * within FLEE_SCAN (firstTarget): her harming (6) and one arrow (4) are the health. The floors decide as for any mob.
+   */
+  witchCrowd: boolean;
 }
-export const PVE_RULES_DEFAULT: Readonly<PveRules> = { legHold: true, archerDuel: true, fleeLong: true, poison: true, shooterHome: true };
+export const PVE_RULES_DEFAULT: Readonly<PveRules> = { legHold: true, archerDuel: true, fleeLong: true, poison: true, shooterHome: true, shooterWay: true, poisonBite: true, witchCrowd: true };
+/** Track M5 (`witchCrowd`): at this health or under, a witch with an archer shooting is not fought first (harming 6 + an arrow 4). */
+export const WITCH_CROWD_HEALTH = 10;
+/** Track M5 (`witchCrowd`): only with a blade below this score (combat.ts bladeScore: a diamond sword's): stone and iron. */
+export const WITCH_CROWD_BLADE = 207;
+/** Track M5 (`shooterWay`): an archer or a witch this close to the way home (blocks, level) keeps a bot at low health from it: a skeleton's range. */
+export const SHOOTER_WAY = 16;
+/**
+ * Track M5: an archer or a witch the server stopped sending this far from the bot or more (blocks) is out of range, not
+ * dead: remembered. bds-pve sent skeletons 24, 40 and 56 off and not 72, 88 or 104 (pve-m5 `range`, 2026-11-16).
+ */
+export const SHOOTER_LOST_FAR = 48;
+/** Track M5: how long such an archer or witch is remembered at its last place (ms). */
+export const SHOOTER_MEMORY_MS = 60_000;
+
+/** Track M5: the level distance from `p` to the segment a-b (blocks). */
+export function segmentDistance(p: { x: number; z: number }, a: { x: number; z: number }, b: { x: number; z: number }): number {
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  const len2 = dx * dx + dz * dz;
+  const t = len2 < 1e-9 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / len2));
+  return Math.hypot(p.x - (a.x + t * dx), p.z - (a.z + t * dz));
+}
 /** Track M4: an archer or a witch this close to home (blocks, level) keeps the flight on foot from going home. */
 export const SHOOTER_HOME = 16;
 /**
@@ -544,7 +583,7 @@ export class PveController {
         if (cause === 'drowning') {
           // Track BF: not a fight (no duel rule, no flee from a mob); the air came from the server's `air` value when it sent one
           const air = this.mobs.selfAir;
-          this.log.info(`pve: took ${damage.toFixed(1)} damage (drowning: head under water${air !== undefined ? `, air ${air}` : ''}), health ${this.health()}`);
+          this.log.info(`pve: took ${damage.toFixed(1)} damage (drowning: head under water${air !== undefined ? `, air ${air}` : ''}), health ${this.health().toFixed(1)}`);
           return;
         }
         if (cause === 'poison') {
@@ -552,7 +591,7 @@ export class PveController {
           // health), counted apart
           this.taken.poison = (this.taken.poison ?? 0) + 1;
           this.d.metrics?.inc('pve.taken.poison');
-          this.log.info(`pve: took ${damage.toFixed(1)} damage (poison, ${(((this.mobs.selfPoison?.until ?? 0) - performance.now()) / 1000).toFixed(0)} s left), health ${this.health()}, ${this.healthAfterPoison()} once it ends`);
+          this.log.info(`pve: took ${damage.toFixed(1)} damage (poison, ${(((this.mobs.selfPoison?.until ?? 0) - performance.now()) / 1000).toFixed(0)} s left), health ${this.health().toFixed(1)}, ${this.healthAfterPoison().toFixed(1)} once it ends`);
           return;
         }
         if (damage > 0) {
@@ -570,7 +609,7 @@ export class PveController {
             if (this.meleeHitTimes.length > 10) this.meleeHitTimes.shift();
           }
         }
-        this.log.info(`pve: took ${damage.toFixed(1)} damage${g ? ` (probably ${bareType(g.type)} #${g.runtimeId}, ${g.why})` : ''}, health ${this.health()}`);
+        this.log.info(`pve: took ${damage.toFixed(1)} damage${g ? ` (probably ${bareType(g.type)} #${g.runtimeId}, ${g.why})` : ''}, health ${this.health().toFixed(1)}`);
       }),
     );
   }
@@ -1073,6 +1112,16 @@ export class PveController {
     return this.d.world.inventory.slots.slice(0, 9).some((it) => !!it && it.count > 0 && bladeScore(it) > 0);
   }
 
+  /** Track M5 (`witchCrowd`): when its line was last said (at most every 30 s). */
+  private crowdSaidAt = -Infinity;
+
+  /** Track M5: the best blade's score in the hotbar (combat.ts bladeScore; 0 with none). */
+  bestBlade(): number {
+    let best = 0;
+    for (const it of this.d.world.inventory.slots.slice(0, 9)) if (it && it.count > 0) best = Math.max(best, bladeScore(it));
+    return best;
+  }
+
   /**
    * Track M1: the witch goes first (guard's rank, targeting.ts firstTarget). Measured on BDS (ADR 0079): her harming potion is
    * 6 whatever the armour, her poison 1 every 25 ticks for 45 s, a throw every 61 ticks from 8 blocks (none from 12, held in
@@ -1087,6 +1136,18 @@ export class PveController {
     const f = entityFeet(e);
     const d = dist(f, me);
     if (d > WITCH_FIRST_RANGE) return false;
+    // Track M5 (`witchCrowd`): not with an archer shooting and one throw and one arrow from dead. In the stone kit's seal-5
+    // deaths at home (2 of 4 on main, 2026-11-16) guard fought her at 7 to 10 health with two skeletons at 8 to 12 in sight;
+    // her harming took it to 1 to 4 and the next arrow killed it
+    // (a diamond or netherite sword kills her in 3 hits, under 2 s: on the live kit's mixed-8 the rule took the lowest
+    // health's median from 5.3 to 1.4, 5 runs a side)
+    if (this.rules.witchCrowd && this.health() <= WITCH_CROWD_HEALTH && this.bestBlade() < WITCH_CROWD_BLADE && this.shootersWithin(me, FLEE_SCAN, false) > 0) {
+      if (performance.now() - this.crowdSaidAt > 30_000) {
+        this.crowdSaidAt = performance.now();
+        this.log.info(`guard: the witch is not first at health ${this.health().toFixed(1)} with an archer shooting (her harming and one arrow are the health)`);
+      }
+      return false;
+    }
     // Within WITCH_CLOSE (her throw range) at any health: a run does not get out of her range before her next throw (she
     // follows; three round-2 mixed-8 deaths ran from her at 6 to 7 blocks and 3 to 7 health, her one hit from dead, and her
     // harming came from 9 to 11). Farther, at low health, only just after a throw: she cannot throw again for about 3 s
@@ -1155,6 +1216,42 @@ export class PveController {
     }
     if (potions === 0 && this.potionsSeen.size > 0) this.potionsSeen.clear();
     if (this.witchThrow.size > 16) this.witchThrow.clear();
+    if (++this.shooterTick % 10 === 0) this.noteShooters();
+  }
+
+  /**
+   * Track M5 (`shooterWay`): the archers and witches the server stopped sending while they stood SHOOTER_LOST_FAR or more
+   * from the bot (out of the range it sends entities in, not killed: a kill is near), kept SHOOTER_MEMORY_MS at their last
+   * place. In a stone-kit `seal-5` death the bot waited 53 blocks out at 1 health, then walked home into a skeleton it had
+   * no entity for (2026-11-16).
+   */
+  private readonly shooterSeen = new Map<bigint, { pos: Vec3; at: number; dist: number }>();
+  private shooterTick = 0;
+  private noteShooters(): void {
+    const now = performance.now();
+    const me = this.position();
+    for (const e of this.d.world.entities.values()) {
+      const t = bareType(e.type);
+      if (!DUEL_ARCHERS.has(t) && t !== 'witch') continue;
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) {
+        this.shooterSeen.delete(e.runtimeId);
+        continue;
+      }
+      const f = entityFeet(e);
+      this.shooterSeen.set(e.runtimeId, { pos: { ...f }, at: now, dist: dist(f, me) });
+    }
+    for (const [id, r] of this.shooterSeen) {
+      if (this.d.world.entities.has(id)) continue;
+      if (r.dist < SHOOTER_LOST_FAR || now - r.at > SHOOTER_MEMORY_MS) this.shooterSeen.delete(id);
+    }
+  }
+
+  /** Track M5: where the archers and witches out of the server's range were last (shooterSeen). */
+  rememberedShooters(): Vec3[] {
+    const out: Vec3[] = [];
+    const now = performance.now();
+    for (const [id, r] of this.shooterSeen) if (!this.d.world.entities.has(id) && now - r.at <= SHOOTER_MEMORY_MS) out.push(r.pos);
+    return out;
   }
 
   /** Track M1 round 2: this witch threw within WITCH_WINDOW_MS (her next throw is 61 ticks after the last). */
@@ -1351,6 +1448,43 @@ export class PveController {
     return false;
   }
 
+  /**
+   * Track M5 (`shooterWay`): a live archer or witch within r (level) of the way from `me` to the block `to`, seen or not.
+   * In the stone kit's night `mixed-8` and `seal-5` deaths the bot stood at 1 to 2 health 30 to 50 blocks out, poisoned,
+   * with nothing within 16; the danger was over, so home counted as clear, and each leg home walked back into the
+   * skeleton that had followed it out (seen again at 11 to 15, the next arrow the last).
+   */
+  shooterOnWay(me: Vec3, to: Vec3, r: number): boolean {
+    const b = { x: to.x + 0.5, z: to.z + 0.5 };
+    // behind the bot (away from home): the way home runs from it, not past it
+    const onWay = (f: Vec3): boolean => (f.x - me.x) * (b.x - me.x) + (f.z - me.z) * (b.z - me.z) >= 0 && segmentDistance(f, me, b) <= r;
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      const t = bareType(e.type);
+      if (!DUEL_ARCHERS.has(t) && t !== 'witch') continue;
+      if (onWay(entityFeet(e))) return true;
+    }
+    return this.rememberedShooters().some(onWay); // and the ones out of the server's range
+  }
+
+  /**
+   * Track M5 (`poisonBite`): the flight on foot holds its bites. On the gauntlet a bot with no blade fled a witch at 1 to 2
+   * health, poisoned, with her walking after it at 13 to 16; each bite slowed the body (an item in use) and she came to 10 to
+   * 12 and threw (both witch deaths of `none` witch-2, 2026-11-16: `eating` in the last 3 s before the harming).
+   */
+  biteHeld(me: Vec3): boolean {
+    if (!this.rules.poisonBite || this.food() <= FOOD_SPRINT_EAT) return false;
+    const p = this.mobs.selfPoison;
+    if (!p || performance.now() >= p.until) return false;
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      const t = bareType(e.type);
+      if (!DUEL_ARCHERS.has(t) && t !== 'witch') continue;
+      if (dist(entityFeet(e), me) <= FLEE_SCAN + 8) return true;
+    }
+    return false;
+  }
+
   /** Track M1 round 2: archers and witches within r (feet) with a line on the bot (Track M4: `witches` false, archers only). */
   shootersWithin(me: Vec3, r: number, witches = true): number {
     const grid = targeting.gridOf(this.mover);
@@ -1459,7 +1593,7 @@ class FleeProcess extends BaseProcess {
   readonly name = 'flee';
   readonly kind = 'auto' as const;
   protected override persistent = true;
-  private ep: { why: 'low' | 'creeper'; from: string; start: Vec3; startAt: number; phase: 'away' | 'home' | 'far' | 'seal' | 'sealed' | 'dodge'; dest: { to: Vec3; kind: string } | undefined; safeSince: number | undefined; planAt: number; goalKey: string; bites: number; stallUntil: number; cornered: boolean; planNearest: number; panics: number; caughtSince: number | undefined; legAt?: number; homeOkAt?: number; homeShotSaid?: boolean; sealedAt?: number; dugIn?: boolean; seal?: { placed: number; open: number; reason?: string; tries: number; openCells?: Vec3[] }; dodge?: { dir: 1 | -1; sinceFlip: number; seen: Set<bigint>; lastShot: number; t: number; clearSince: number | undefined } } | undefined;
+  private ep: { why: 'low' | 'creeper'; from: string; start: Vec3; startAt: number; phase: 'away' | 'home' | 'far' | 'seal' | 'sealed' | 'dodge'; dest: { to: Vec3; kind: string } | undefined; safeSince: number | undefined; planAt: number; goalKey: string; bites: number; stallUntil: number; cornered: boolean; planNearest: number; panics: number; caughtSince: number | undefined; legAt?: number; homeOkAt?: number; homeShotSaid?: boolean; wayShotSaid?: boolean; biteHeldSaid?: boolean; sealedAt?: number; dugIn?: boolean; seal?: { placed: number; open: number; reason?: string; tries: number; openCells?: Vec3[] }; dodge?: { dir: 1 | -1; sinceFlip: number; seen: Set<bigint>; lastShot: number; t: number; clearSince: number | undefined } } | undefined;
   private plan: { why: 'low' | 'creeper'; threat: EntityInfo } | undefined;
   private cooldownUntil = 0;
   /** The last flight ended cornered (no way away): the cooldown then holds even for a hard trigger. */
@@ -1841,6 +1975,12 @@ class FleeProcess extends BaseProcess {
     const homeOk = dest !== undefined && (homeClear(me, dest.to, threats) || ep.cornered || safeNow);
     if (!homeOk) ep.homeOkAt = undefined;
     else ep.homeOkAt ??= now;
+    // Track M5 (`shooterWay`): at low health not home past an archer or a witch, seen or not
+    const wayShot = dest !== undefined && c.rules.shooterWay && c.low() && c.shooterOnWay(me, dest.to, SHOOTER_WAY);
+    if (wayShot && !ep.wayShotSaid) {
+      ep.wayShotSaid = true; // said once an episode
+      c.log.info(`flee: an archer or a witch within ${SHOOTER_WAY} of the way to ${dest.kind}: staying out at health ${c.health().toFixed(1)}`);
+    }
     const phase = fleeLeg({
       phase: ep.phase,
       dest: dest !== undefined,
@@ -1850,7 +1990,7 @@ class FleeProcess extends BaseProcess {
       sinceLeg: now - (ep.legAt ?? 0),
       homeOkMs: ep.homeOkAt === undefined ? 0 : now - ep.homeOkAt,
       hold: c.rules.legHold,
-      homeShot: dest !== undefined && c.rules.shooterHome && c.shooterNear(dest.to, SHOOTER_HOME),
+      homeShot: (dest !== undefined && c.rules.shooterHome && c.shooterNear(dest.to, SHOOTER_HOME)) || wayShot,
     });
     if (phase !== ep.phase) ep.legAt = now;
     if (c.rules.shooterHome && dest && !ep.homeShotSaid && c.shooterNear(dest.to, SHOOTER_HOME)) {
@@ -1999,6 +2139,12 @@ class FleeProcess extends BaseProcess {
     const hungry = c.health() < FLEE_EAT_BELOW || (this.recovering() && c.food() < 18) || c.food() <= FOOD_SPRINT_EAT; // Track M2: before the food stops the sprint
     if (!kit || !ep || !hungry || nearest < FLEE_EAT_CLEAR || c.food() >= 20) return;
     if ((kit as { busy?: boolean }).busy) return;
+    if (c.biteHeld(c.position())) {
+      // Track M5 (`poisonBite`), said once an episode
+      if (!ep.biteHeldSaid) c.log.info(`flee: no bite while poisoned with an archer or a witch within ${FLEE_SCAN + 8} (health ${c.health().toFixed(1)}, food ${c.food()})`);
+      ep.biteHeldSaid = true;
+      return;
+    }
     void kit.eat().then((r) => {
       if (r.ok && this.ep === ep) {
         ep.bites++;

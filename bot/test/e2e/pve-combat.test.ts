@@ -19,11 +19,14 @@ import {
   botDamage,
   botHits,
   centre,
+  cleanSpot,
   connectPlayer,
+  deathLine,
+  expectAlive,
   E2E,
   FEET_Y,
-  fill,
   fmt,
+  harnessDeaths,
   hdist,
   prepareServer,
   privateArea,
@@ -70,18 +73,22 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
     bot = await startPveBot('PveFight');
     bot.pve.settings.set('mobReflex', false); // Track M1: these measure the fight, the shield and the crowd rule alone (the reflex strikes on its own)
     await teleport(bot, centre(HOME));
-    await bot.truth.clearAround(centre(HOME), 48);
+    // Track M5: the cells are shared by every bds-pve suite and run: the home spot is laid and cleared first (blocks left there
+    // suffocated the bot in every case of one run)
+    await cleanSpot(bot, HOME, { r: 18, entities: 48 });
     await armWithIronSword(bot);
     await bot.truth.setHealth(bot.name, 20);
   }, 120_000);
 
   afterAll(async () => {
     if (bot) {
+      measurements.push(deathLine(bot)); // Track M5: every death with its cause, the ones no mob caused marked
       await bot.truth.cleanup().catch(() => undefined);
       await bot.truth.clearAround(centre(HOME), 48).catch(() => undefined);
       await bot.stop();
     }
     console.log(`measurements:\n  ${measurements.join('\n  ')}`);
+    if (process.env.PVE_COMBAT_OUT) (await import('node:fs')).appendFileSync(process.env.PVE_COMBAT_OUT, `${measurements.join('\n')}\n`);
   });
 
   /** Summon, fight to the end, and check the result against the server's hurt log. */
@@ -118,7 +125,7 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
       // every attack packet the server accepted shows in the hurt log; we never swing at nothing in reach
       expect(res.serverHits).toBeLessThanOrEqual(res.r.attacks);
     }
-    expect(b.built.respawn!.deaths).toBe(deaths0);
+    expectAlive(b, deaths0, '3 zombies');
     expect(b.built.respawn!.dead).toBe(false);
   }, 180_000);
 
@@ -137,7 +144,7 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
     } finally {
       b.pve.settings.set('mobReflex', false);
     }
-    expect(b.built.respawn!.deaths).toBe(deaths0);
+    expectAlive(b, deaths0, '3 zombies with the reflex');
     expect(b.built.respawn!.dead).toBe(false);
   }, 180_000);
 
@@ -254,6 +261,8 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
   it('a sword only in the main inventory is moved into the hotbar before the first strike', async () => {
     const b = bot!;
     await b.truth.setHealth(b.name, 20);
+    // full food: the survival kit's own bite selects the beef after the fight and the held-after check read it (Track M5 runs)
+    await b.truth.ok('setfood', [b.name, 20, 5]);
     await teleport(b, centre(HOME));
     await b.truth.ok('clear', [b.name]);
     await b.truth.ok('setslot', [b.name, 0, 'cooked_beef', 5]);
@@ -286,6 +295,7 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
   it('a sword only in the main inventory, every slot full: exchanged into the hotbar before the first strike, nothing dropped', async () => {
     const b = bot!;
     await b.truth.setHealth(b.name, 20);
+    await b.truth.ok('setfood', [b.name, 20, 5]); // (as above: no bite of the kit's own after the fight)
     await teleport(b, centre(HOME));
     await b.truth.clearAround(centre(HOME), 48);
     await b.truth.ok('clear', [b.name]);
@@ -378,8 +388,8 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
     for (let i = 0; i < SKELETON_RUNS; i++) {
       const at = { x: HOME.x + 40 * ((i % 3) - 1), y: FEET_Y, z: HOME.z + 40 };
       await b.truth.cleanup();
-      await b.truth.clearAround(centre(at), 32);
       await teleport(b, centre(at));
+      await cleanSpot(b, at, { r: 16, entities: 32 });
       await b.truth.setHealth(b.name, 20);
       await until(() => (b.pve.health() >= 20 ? true : undefined), 5_000, 'health 20');
       const deaths0 = b.built.respawn!.deaths;
@@ -397,7 +407,7 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
       const line = `skeleton ${i + 1}: ${r.reason} in ${r.ticks} ticks, ${r.attacks} attacks, arrow hits counted ${r.arrowHits}, server projectile hits ${proj.length}, bot took ${dmg.total} (${JSON.stringify(dmg.byCause)}), health after ${b.pve.health()}`;
       console.log(line);
       measurements.push(line);
-      expect(b.built.respawn!.deaths).toBe(deaths0);
+      expectAlive(b, deaths0, `skeleton duel ${i + 1}`);
       expect(r.reason).toBe('killed');
     }
     measurements.push(`skeletons: arrow hits counted ${arrowsBot}, server projectile hits ${arrowsServer}`);
@@ -416,18 +426,15 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
   async function zombiePair(b: PveBot, at: Vec3, mode: 'on' | 'off', layout: 'flank' | 'far'): Promise<{ dead: number; hits: number; damage: number; retargets: number; ticks: number; fights: number; ms: number }> {
     await b.truth.ok('give', [b.name, 'iron_sword', 1]); // a fresh sword per run: the suite wears one out (2026-10-30: run 5 fought with cooked beef)
     await b.truth.cleanup();
-    await b.truth.clearAround(centre(at), 16);
     await teleport(b, centre(at));
     // the cells are shared by every bds-pve suite: blocks left at the spot (a seal-in's walls) suffocated the bot
-    // (2026-11-16: `death.attack.inWall` in 2 of 5 runs, counted as zombie hits); the floor is laid again (as pve-crowd
-    // does) and the air above it cleared first
-    const lo = { x: at.x - 11, z: at.z - 4 };
-    const hi = { x: at.x + 11, z: at.z + 4 };
-    await fill(b, { ...lo, y: FEET_Y - 4 }, { ...hi, y: FEET_Y - 2 }, 'dirt');
-    await fill(b, { ...lo, y: FEET_Y - 1 }, { ...hi, y: FEET_Y - 1 }, 'grass_block');
-    await fill(b, { ...lo, y: FEET_Y }, { ...hi, y: FEET_Y + 4 }, 'air');
+    // (2026-11-16: `death.attack.inWall` in 2 of 5 runs, counted as zombie hits); Track M5: cleanSpot for every case
+    await cleanSpot(b, at, { r: 12, entities: 16 });
     await b.truth.setHealth(b.name, 20);
     await until(() => (b.pve.health() >= 20 ? true : undefined), 5_000, 'health 20');
+    // Track M5: a flight on foot the last run started (its zombies took the bot under 14) still walked home 90 blocks away
+    // after the teleport, and the next run's zombies were never in view (`timed out waiting for tracked`, 2026-11-16)
+    b.pve.stop();
     const since = await b.truth.now();
     const c = centre(at);
     // flank: 2 blocks apart, the bot between them (one in front, one behind)
@@ -488,7 +495,15 @@ describe.skipIf(!E2E)('pve: combat, guard, flee (task 7.4)', () => {
         const line = `${layout}, re-targeting ${mode}, run ${Math.floor(i / 2) + 1}: ${r.dead}/2 dead in ${r.fights} fight(s), ${r.ticks} ticks (${r.ms} ms), ${r.retargets} retarget(s), bot hit ${r.hits} times (${r.damage} damage)`;
         console.log(line);
         measurements.push(line);
-        expect(b.built.respawn!.deaths).toBe(deaths0);
+        // the shipped behaviour (re-targeting on) must not die; the single-target baseline is a comparison only, and a
+        // mob's kill there is a measurement (a summoned zombie may carry a weapon: 24 damage in 5 hits on 2026-11-16),
+        // while a harness death fails either side
+        if (mode === 'on' || harnessDeaths(b, deaths0).length) expectAlive(b, deaths0, `${layout} run ${i + 1}`);
+        else if (b.built.respawn!.deaths !== deaths0) {
+          const died = `${layout}, re-targeting off, run ${Math.floor(i / 2) + 1}: the bot died (${deathLine(b)}): the baseline's measurement`;
+          console.log(died);
+          measurements.push(died);
+        }
         if (mode === 'on') expect(r.dead).toBe(2); // the shipped behaviour must finish both; the single-target baseline is a comparison only (it lost one of two in 1 of 5 runs after Track AO's watchdog)
         // far: what re-targeting guarantees is the switch to the zombie behind, in every run (Track M2: 10 runs each, 11 retargets in 10 runs)
         if (mode === 'on' && layout === 'far') expect(r.retargets).toBeGreaterThanOrEqual(1);
