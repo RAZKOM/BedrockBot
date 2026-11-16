@@ -25,6 +25,7 @@ import { BlockUpdates } from './updates.ts';
 import type { CachedTerrain, FoundPos } from './cache/types.ts'; // Track T
 import { DimensionWatcher } from './dimension.ts'; // Track AT
 import { CreditsWatcher } from './credits.ts';
+import { InventoryResync } from './resync.ts'; // Track P1
 
 export const EYE_HEIGHT = 1.62;
 
@@ -83,6 +84,9 @@ export class World implements WorldView {
       selfRuntimeId: () => this.self.runtimeId,
     });
     this.inventory = new Inventory(toItem, () => this.self.runtimeId);
+    // Track P1: a lost inventory packet asks the server for the whole inventory (world/resync.ts)
+    this.resync = new InventoryResync({ source, inventory: this.inventory, logger: this.log });
+    if (source.onReadError) this.unsubs.push(source.onReadError((f) => this.resync.lost(f)));
     // Track AT: answers the server's dimension_change_ack (else BDS ignores the movement), reports changes; before subscribe() so 'start' sees the old dimension
     this.dimensions = new DimensionWatcher(source, { selfRuntimeId: () => this.self.runtimeId, dimension: () => this.self.dimension, loadedColumns: () => this.chunks.loadedCount, logger: this.log });
     // the End exit portal's credits: answered at once, else the server parks the bot in the portal (world/credits.ts)
@@ -92,6 +96,9 @@ export class World implements WorldView {
 
   /** Track AT: dimension changes (world/dimension.ts). */
   readonly dimensions: DimensionWatcher;
+
+  /** Track P1: the inventory resync after a lost packet (world/resync.ts). */
+  readonly resync: InventoryResync;
 
   /** The end credits (world/credits.ts): `showing` while the server has not moved the bot out of the exit portal. */
   readonly credits: CreditsWatcher;
@@ -179,6 +186,7 @@ export class World implements WorldView {
   dispose(): void {
     for (const u of this.unsubs.splice(0)) u();
     this.dimensions.dispose(); // Track AT
+    this.resync.dispose(); // Track P1
     this.credits.dispose();
   }
 

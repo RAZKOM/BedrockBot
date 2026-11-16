@@ -5,7 +5,8 @@ import bedrock from 'bedrock-protocol';
 import type { ClientOptions } from 'bedrock-protocol';
 import { backoffDelay, defaultBackoff, type BackoffPolicy } from './backoff.ts';
 import type { PacketRecorder } from './recorder.ts';
-import type { PacketSerializer } from './protocol.ts';
+import { packetNames, type PacketSerializer } from './protocol.ts';
+import { ReadErrorCapture, readFailureLine, tapReads, type ReadFailure, type TappableClient } from './readErrors.ts';
 import { buildRealmClientOptions, realmLabel, validateRealmTarget, type DeviceCodePrompt } from './realm.ts';
 import { checkVersion } from './versionGate.ts';
 import type {
@@ -39,6 +40,13 @@ export interface ProtocolClient {
   serializer?: PacketSerializer;
   /** Read by bedrock-protocol when it sends request_chunk_radius (500 ms after resource_packs_info). */
   viewDistance?: number;
+  /** Track P1: bedrock-protocol's packet parse entry and batch hooks, wrapped to keep an unreadable packet's bytes. */
+  readPacket?: TappableClient['readPacket'];
+  handle?: TappableClient['handle'];
+  onDecryptedPacket?: TappableClient['onDecryptedPacket'];
+  encryptionEnabled?: boolean;
+  batchHeader?: number | null;
+  features?: TappableClient['features'];
 }
 
 export interface ServerInfo {
@@ -80,6 +88,11 @@ export interface ConnectionOptions {
   username: string;
   logger?: Logger;
   recorder?: PacketRecorder;
+  /**
+   * Track P1: where the bytes of a packet that fails to parse go (readErrors.ts). Default: a capture without a
+   * directory (the failure is told and counted, nothing written); the CLI gives it `<logDir>/read-errors`.
+   */
+  readErrors?: ReadErrorCapture;
   /** true/false or a partial policy; default enabled with 1 s base, x2, 60 s cap, 20 % jitter. */
   reconnect?: boolean | Partial<ReconnectPolicy>;
   /** Close and retry when spawn has not happened within this many ms. Default 30 000. */
@@ -164,6 +177,8 @@ export class Connection {
   readonly version: string;
   readonly username: string;
   readonly recorder: PacketRecorder | undefined;
+  /** Track P1: the unreadable packets (bytes, counts). */
+  readonly readErrors: ReadErrorCapture;
   private readonly log: Logger;
   private readonly reconnectPolicy: ReconnectPolicy;
   private readonly spawnTimeoutMs: number;
@@ -182,6 +197,8 @@ export class Connection {
   /** The Microsoft device-code prompt of the current attempt (Realm), until it spawns or the session ends. */
   private _signIn: { prompt: DeviceCodePrompt; at: number } | undefined;
   private _gameVersion: string;
+  /** start_game's game_version of the last session (Track P1). */
+  serverVersion: string | undefined;
   private _runtimeId = 0n;
   private _tick = 0n;
   private _spawnPosition: Vec3 | undefined;
@@ -210,12 +227,14 @@ export class Connection {
   private readonly tickHandlers = new Set<(tick: bigint) => void>();
   private readonly spawnHandlers = new Set<() => void>();
   private readonly closeHandlers = new Set<(info: CloseInfo) => void>();
+  private readonly readErrorHandlers = new Set<(f: ReadFailure) => void>();
 
   constructor(opts: ConnectionOptions) {
     this.version = opts.version;
     this.username = opts.username;
     this._gameVersion = opts.version;
     this.recorder = opts.recorder;
+    this.readErrors = opts.readErrors ?? new ReadErrorCapture();
     this.log = opts.logger ?? createLogger('info', 'connection');
     const r = typeof opts.reconnect === 'object' ? opts.reconnect : { enabled: opts.reconnect ?? true };
     this.reconnectPolicy = { ...defaultBackoff, enabled: true, maxAttempts: Infinity, ...r };
@@ -377,6 +396,17 @@ export class Connection {
     };
   }
 
+  /**
+   * Track P1: called for every packet of the current session that bedrock-protocol could not parse (after the WARN
+   * line and the capture). The packet's effect never reached the model: a listener resyncs what it may have changed.
+   */
+  onReadError(fn: (f: ReadFailure) => void): () => void {
+    this.readErrorHandlers.add(fn);
+    return () => {
+      this.readErrorHandlers.delete(fn);
+    };
+  }
+
   /** Called whenever a session ends, with the reason and whether a reconnect is scheduled. */
   onClose(fn: (info: CloseInfo) => void): () => void {
     this.closeHandlers.add(fn);
@@ -532,7 +562,10 @@ export class Connection {
       origQueue(name, params);
     };
 
+    // Track P1: an `error` emitted while readPacket parses is that packet's parse failure (readErrors.ts)
+    const tap = tapReads(client);
     client.on('packet', (des: { data: { name: string; params: unknown }; fullBuffer?: Buffer; buffer?: Buffer }) => {
+      tap.parsed();
       if (!current()) return;
       rec?.record('in', des.data.name, des.data.params, this._tick, des.fullBuffer ?? des.buffer);
     });
@@ -540,6 +573,11 @@ export class Connection {
     // Spawn handshake (spike C): without it the server ignores all player input.
     client.on('start_game', (p: InboundPackets['start_game']) => {
       this._runtimeId = BigInt(p.runtime_entity_id);
+      // Track P1: the server's own version (a Realm may run a newer patch than the protocol data's), kept in a capture
+      if (current() && p.game_version) {
+        if (p.game_version !== this.serverVersion) this.log.info(`server game version ${p.game_version}`);
+        this.serverVersion = p.game_version;
+      }
     });
     client.on('respawn', (p: RespawnPacket) => {
       if (p.state !== 1) return;
@@ -568,6 +606,14 @@ export class Connection {
       this.log.warn(reason);
     });
     client.on('error', (e: Error) => {
+      const packet = tap.reading;
+      if (packet) {
+        // Track P1: not the session's end reason (bedrock-protocol drops the packet and reads on); before, the first
+        // read error was taken as the reason of a close that came minutes later for another cause
+        tap.parsed();
+        if (current()) this.onReadFailure(packet, e, session, tap.batch());
+        return;
+      }
       const reason = `error: ${errorMessage(e)}`;
       if (!this.lastReason.has(session)) this.lastReason.set(session, { reason, kind: 'error' });
       this.log.warn(reason);
@@ -579,6 +625,28 @@ export class Connection {
     // User packet handlers.
     for (const name of this.packetHandlers.keys()) this.attachName(client, name, session);
     this.attachedNames = new Set(this.packetHandlers.keys());
+  }
+
+  /** Track P1: one packet could not be parsed: keep its bytes, say so in one WARN line, tell the listeners. */
+  private onReadFailure(packet: Buffer, e: unknown, session: number, batch: Buffer | undefined): void {
+    const t = this.target;
+    const transport = t === undefined ? undefined : t.kind === 'realm' ? 'nethernet' : t.transport;
+    let f: ReadFailure;
+    try {
+      f = this.readErrors.capture(packet, e, { gameVersion: this._gameVersion, ...(this.serverVersion ? { serverVersion: this.serverVersion } : {}), ...(transport ? { transport } : {}), session, tick: this._tick, ...(batch ? { batch } : {}) }, packetNames(this.version));
+    } catch (err) {
+      this.log.warn(`unreadable packet (${packet.length} bytes): ${errorMessage(e)}; the capture failed: ${errorMessage(err)}`);
+      return;
+    }
+    this.log.warn(readFailureLine(f));
+    this.recorder?.record('meta', 'read_error', { id: f.id, name: f.name, length: f.length, error: f.error, file: f.file }, this._tick);
+    for (const fn of [...this.readErrorHandlers]) {
+      try {
+        fn(f);
+      } catch (err) {
+        this.log.error(`read error handler threw: ${errorMessage(err)}`);
+      }
+    }
   }
 
   private attachName(client: ProtocolClient, name: string, session: number): void {

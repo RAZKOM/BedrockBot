@@ -21,7 +21,8 @@ import { exchangeFor, setExchange } from '../container/exchange.ts'; // Track V1
 import { ARMOUR_SLOT_NAMES, ArmourController, type EquipResult, type WearResult } from './armour.ts';
 import { chooseFood, EatController, wantsToEat, type EatResult } from './eat.ts';
 import { DEFAULT_JUNK, DEFAULT_THROWAWAY_MIN, hotbarThrowaway, InventoryKeeper, pickHotbarVictim, THROWAWAY_BLOCKS, type DropResult } from './keeper.ts';
-import { inventorySlot, StackRequests, type ScreenContainers } from './screen.ts';
+import { inventorySlot, StackRequests, sureInventory, type ScreenContainers } from './screen.ts';
+import { RESYNC_WAIT_MS } from '../../world/resync.ts'; // Track P1
 import { DEFAULT_MEND_AT, DEFAULT_TOOL_WEAR_LIMIT, durabilityLeft, makeToolOk, maxDurability } from './tools.ts';
 
 export * from './armour.ts';
@@ -72,6 +73,12 @@ export interface SurvivalWorld extends SpawnerWorld {
     setItem(window: number, slot: number, item: ItemStack | null, raw?: ItemV4): void;
     freeSlots(): number[];
     onChange(fn: (window: number, slot: number | undefined) => void): () => void;
+    /** Track P1 (world/inventory.ts): the model's sureness after a lost packet; absent in some test doubles. */
+    readonly unsure?: string | undefined;
+    readonly lostPackets?: number;
+    readonly contentGeneration?: number;
+    requestResync?(reason: string): void;
+    whenSure?(timeoutMs: number): Promise<boolean>;
   };
   readonly self: { readonly food: number; readonly health: number; readonly runtimeId: bigint };
   readonly entities: ReadonlyMap<bigint, EntityInfo>;
@@ -172,7 +179,7 @@ export class SurvivalKit {
       () => this.settings().toolWearLimit,
       () => this.settings().mendAt,
     );
-    this.requests = new StackRequests({ source, containers, loop, runtimeId: () => world.self.runtimeId });
+    this.requests = new StackRequests({ source, containers, loop, runtimeId: () => world.self.runtimeId, ...sureInventory(world.inventory) }); // Track P1
     this.eater = new EatController({
       loop,
       inventory: world.inventory,
@@ -368,9 +375,27 @@ export class SurvivalKit {
     if (!A || A.count <= 0 || !B || B.count <= 0) return { ok: false, reason: 'an empty slot' };
     const rawA = inv.rawItem(0, a);
     const rawB = inv.rawItem(0, b);
-    inv.setItem(0, a, { ...B }, rawB);
-    inv.setItem(0, b, { ...A }, rawA);
+    const predA = { ...B };
+    const predB = { ...A };
+    inv.setItem(0, a, predA, rawB);
+    inv.setItem(0, b, predB, rawA);
     const res = await this.requests.send([{ type_id: 'swap', legacy_type_id: 2, source: inventorySlot(a, A.stackId), destination: inventorySlot(b, B.stackId) }]);
+    if ('lost' in res && res.lost) {
+      // Track P1 (world/resync.ts): no response, and a packet was lost meanwhile (on the Realm the response itself): the
+      // server's own inventory says whether the swap was done; no rollback over it
+      const sure = (await inv.whenSure?.(RESYNC_WAIT_MS)) ?? false;
+      const at = (s: number) => inv.slots[s] ?? null;
+      if (sure && sameStack(at(a), B) && sameStack(at(b), A)) {
+        this.log.info(`hotbar: the swap of slots ${a} and ${b} got no response (a packet was lost); the server's inventory shows it done`);
+        for (const s of [a, b]) if (s < 9) this.d.hotbar.noteRaw?.(s, wireItemOf(inv.slots[s], inv.rawItem(0, s)));
+        return { ok: true };
+      }
+      if (!sure && at(a) === predA && at(b) === predB) {
+        inv.setItem(0, a, A, rawA);
+        inv.setItem(0, b, B, rawB);
+      }
+      return { ok: false, reason: sure ? 'no response (a packet was lost); the server did not swap' : 'no response (a packet was lost) and no inventory from the server' };
+    }
     if (res.status !== 'ok' && res.status !== 0) {
       inv.setItem(0, a, A, rawA);
       inv.setItem(0, b, B, rawB);
@@ -529,4 +554,11 @@ export class SurvivalKit {
     this.d.hotbar.noteRaw?.(dst, wireItemOf(inv.slots[dst], inv.rawItem(0, dst)));
     return dst;
   }
+}
+
+/** Track P1: the same stack (name, count, and the stack id when both have one): a swap moves the stacks with their ids. */
+export function sameStack(x: ItemStack | null, y: ItemStack | null): boolean {
+  if (!x || !y) return x === y;
+  if (x.name !== y.name || x.count !== y.count) return false;
+  return x.stackId === undefined || y.stackId === undefined || x.stackId === y.stackId;
 }

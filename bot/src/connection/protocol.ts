@@ -50,6 +50,28 @@ export function createSerializer(version: string): PacketSerializer {
   return serializer.createSerializer(version);
 }
 
+const packetNameCache = new Map<string, ReadonlyMap<number, string>>();
+
+/**
+ * Track P1: packet id -> name for a game version (the `name` mapper of minecraft-data's `mcpe_packet`, the table
+ * bedrock-protocol parses with). Empty when the version has no data.
+ */
+export function packetNames(version: string): ReadonlyMap<number, string> {
+  const hit = packetNameCache.get(version);
+  if (hit) return hit;
+  const out = new Map<number, string>();
+  try {
+    const bedrockMd = createRequire(require.resolve('bedrock-protocol'))('minecraft-data') as (v: string) => { protocol?: { types?: Record<string, unknown> } } | undefined;
+    const t = bedrockMd(`bedrock_${version}`)?.protocol?.types?.mcpe_packet as [string, { name: string; type: [string, { mappings?: Record<string, string> }] }[]] | undefined;
+    const mappings = t?.[1]?.find((f) => f.name === 'name')?.type?.[1]?.mappings ?? {};
+    for (const [k, v] of Object.entries(mappings)) out.set(Number(k), v);
+  } catch {
+    // no data for this version: ids stay unnamed
+  }
+  packetNameCache.set(version, out);
+  return out;
+}
+
 // prismarine-auth is bedrock-protocol's dependency (not ours): resolve it from bedrock-protocol so
 // the title ids always match the auth code that uses them.
 const bedrockRequire = createRequire(require.resolve('bedrock-protocol'));

@@ -9,7 +9,18 @@
 // from -1) never reaches in practice, so its pending map and ours never answer each other.
 // Containers.handleResponses still applies every ok response to the model (counts of hotbar /
 // inventory slots); the armour window itself is updated by the server's inventory_slot.
+import type { Inventory } from '../../world/inventory.ts';
 import type { PacketSource } from '../../world/types.ts';
+
+/** Track P1: ticks a request waits for an unsure model to be resynced before it is sent anyway (3 s). */
+export const SURE_WAIT_TICKS = 60;
+
+/** A request that got no response; lost: a packet was lost meanwhile (perhaps the response itself, world/resync.ts). */
+export interface NoResponse {
+  status: 'timeout';
+  request_id: number;
+  lost?: true;
+}
 
 export interface StackResponseLike {
   status: 'ok' | 'error' | number;
@@ -29,6 +40,16 @@ export interface ScreenDeps {
   containers: ScreenContainers;
   loop: { waitTicks(n: number): Promise<void> };
   runtimeId: () => bigint;
+  /** Track P1: the inventory model's sureness after a lost packet (world/inventory.ts, world/resync.ts). */
+  inventory?: SureInventory;
+}
+
+/** Track P1: what StackRequests reads of the inventory model (world/inventory.ts Inventory). */
+export type SureInventory = Pick<Inventory, 'unsure' | 'lostPackets' | 'contentGeneration' | 'requestResync'>;
+
+/** { inventory } for ScreenDeps when the model has the Track P1 members (a test double may not). */
+export function sureInventory(inv: Partial<SureInventory>): { inventory?: SureInventory } {
+  return typeof inv.requestResync === 'function' && typeof inv.lostPackets === 'number' && typeof inv.contentGeneration === 'number' ? { inventory: inv as SureInventory } : {};
 }
 
 export interface SlotInfo {
@@ -72,17 +93,33 @@ export class StackRequests {
   }
 
   /** Send one request (its actions) and wait for the response (status 'timeout' after `timeoutTicks`). */
-  async send(actions: Record<string, unknown>[], timeoutTicks = 40): Promise<StackResponseLike | { status: 'timeout'; request_id: number }> {
+  async send(actions: Record<string, unknown>[], timeoutTicks = 40): Promise<StackResponseLike | NoResponse> {
+    const inv = this.d.inventory;
+    // Track P1: a request built on a model that may be stale waits for the server's inventory first (3 s at most)
+    for (let i = 0; i < SURE_WAIT_TICKS && inv?.unsure !== undefined; i++) await this.d.loop.waitTicks(1);
     const id = this.next;
     this.next -= 2;
     let got: StackResponseLike | undefined;
     this.pending.set(id, (r) => {
       got = r;
     });
+    const lost0 = inv?.lostPackets ?? 0;
+    let genAtLoss: number | undefined;
     this.d.source.queue('item_stack_request', { requests: [{ request_id: id, actions, custom_names: [], cause: 'chat_public' }] });
-    for (let i = 0; i < timeoutTicks && !got; i++) await this.d.loop.waitTicks(1);
+    for (let i = 0; i < timeoutTicks && !got; i++) {
+      await this.d.loop.waitTicks(1);
+      if (!inv || got) continue;
+      // Track P1: a packet was lost and the server's whole inventory has come since: the model is the server's now, no
+      // need to wait out the timeout for a response that may have been the lost packet
+      if (genAtLoss === undefined && inv.lostPackets !== lost0) genAtLoss = inv.contentGeneration;
+      if (genAtLoss !== undefined && inv.contentGeneration > genAtLoss && inv.unsure === undefined) break;
+    }
     this.pending.delete(id);
-    return got ?? { status: 'timeout', request_id: id };
+    if (got) return got;
+    const lost = inv !== undefined && inv.lostPackets !== lost0;
+    // Track P1: the caller rolls its prediction back on this answer; the server's inventory then undoes a wrong rollback
+    if (lost) void this.d.loop.waitTicks(1).then(() => inv.requestResync('a request got no response after a lost packet'));
+    return lost ? { status: 'timeout', request_id: id, lost: true } : { status: 'timeout', request_id: id };
   }
 
   /**

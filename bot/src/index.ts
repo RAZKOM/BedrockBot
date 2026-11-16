@@ -20,6 +20,7 @@ import { HealthServer } from './connection/health.ts';
 import { Metrics } from './connection/metrics.ts';
 import { defaultProfilesFolder, isInside, REPO_ROOT } from './connection/realm.ts';
 import { PacketRecorder } from './connection/recorder.ts';
+import { ReadErrorCapture } from './connection/readErrors.ts'; // Track P1
 import { createLogger, type Logger } from './log.ts';
 import type { RunningTask } from './tasks/base.ts';
 import { buildTaskContext } from './tasks/context.ts';
@@ -242,6 +243,8 @@ async function main(argv: string[]): Promise<number> {
     username,
     logger: log,
     recorder,
+    // Track P1: the bytes of a packet that fails to parse (docs/versions.md "Packets the bot cannot read")
+    readErrors: new ReadErrorCapture({ dir: join(settings.logDir, 'read-errors') }),
     reconnect: settings.reconnect,
   });
   const metrics = new Metrics();

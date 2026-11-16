@@ -51,6 +51,60 @@ export class Inventory {
     this.windows.set(WINDOW_INVENTORY, new Array<ItemStack | null>(INVENTORY_SIZE).fill(null));
   }
 
+  // ---- Track P1: an unreadable packet leaves the model unsure until the server's full inventory comes back ----------
+  private _unsure: string | undefined;
+  private readonly sureFns = new Set<() => void>();
+  /** Inventory packets lost to a parse failure (counted by `markLost`). */
+  lostPackets = 0;
+  /** Full contents of the player inventory (window 0 inventory_content) received so far: a resync bumps it. */
+  contentGeneration = 0;
+  /** Asks the server for the whole inventory (world/resync.ts sets it: an inventory_mismatch transaction). */
+  resyncer: ((reason: string) => void) | undefined;
+
+  /** Why the model may differ from the server's inventory (a packet it never read), undefined when it is sure. */
+  get unsure(): string | undefined {
+    return this._unsure;
+  }
+
+  /** An inventory packet could not be read: the model is unsure until the next full inventory_content. */
+  markLost(reason: string): void {
+    this.lostPackets++;
+    this.markUnsure(reason);
+  }
+
+  /** The model may differ from the server's (until the next full inventory_content). */
+  markUnsure(reason: string): void {
+    this._unsure = reason;
+  }
+
+  /** Mark unsure and ask the server for the whole inventory (no-op without a resyncer). */
+  requestResync(reason: string): void {
+    this._unsure ??= reason;
+    this.resyncer?.(reason);
+  }
+
+  /** Give up waiting (the server never answered): the model is used as it is. */
+  clearUnsure(): void {
+    if (this._unsure === undefined) return;
+    this._unsure = undefined;
+    for (const fn of [...this.sureFns]) fn();
+  }
+
+  /** Resolves true once the model is sure (at once when it is), false after `timeoutMs`. */
+  whenSure(timeoutMs: number): Promise<boolean> {
+    if (this._unsure === undefined) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const done = (ok: boolean) => {
+        clearTimeout(timer);
+        this.sureFns.delete(fn);
+        resolve(ok);
+      };
+      const fn = () => done(true);
+      const timer = setTimeout(() => done(this._unsure === undefined), timeoutMs);
+      this.sureFns.add(fn);
+    });
+  }
+
   /** Player inventory slots (0..8 hotbar, 9..35 main). */
   get slots(): readonly (ItemStack | null)[] {
     return this.windows.get(WINDOW_INVENTORY) ?? [];
@@ -193,6 +247,11 @@ export class Inventory {
     );
     this.raws.set(id, [...p.input]);
     for (const r of p.input) this.remember(r); // Track F12
+    if (id === WINDOW_INVENTORY) {
+      // Track P1: the server's whole inventory: what a lost packet changed is in it
+      this.contentGeneration++;
+      this.clearUnsure();
+    }
     this.emit(id, undefined);
   }
 

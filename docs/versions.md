@@ -99,6 +99,65 @@ movement and chat numbers match RakNet). Reconnect across `docker restart` works
   works on NetherNet too.
 - Discovery uses UDP 7551 on the host; only one NetherNet BDS per host is reachable that way.
 
+## Packets the bot cannot read
+
+Track P1 ([decision 0092](decisions/0092-packets-the-bot-cannot-read.md)). bedrock-protocol drops a packet it cannot
+parse: `Client.readPacket` catches the error, emits `error` and reads on. Nothing else learns what the packet said, and
+before this track nothing kept its bytes. The log showed only `Read error for undefined : Missing characters in
+string, found size is 69 expected size was 241`, with no packet name. On a Realm (2026-11-16, three cases) the error
+came 0 to 160 ms after the bot asked to swap two shulker boxes. 2 s later (StackRequests' 40-tick timeout) the swap was
+"refused (timeout)". That timing points at the swap's own item_stack_response. The survival kit then rolled back a swap
+the server had done, and its model of the inventory stayed wrong. Rocket deposits in the same sessions worked.
+
+**The capture** (`bot/src/connection/readErrors.ts`, on by default, no setting). The Connection wraps the client's
+`readPacket` and `handle` / `onDecryptedPacket`, so on an `error` it knows whether a parse was running and which bytes
+were being parsed. For a failed parse it:
+
+- writes one JSON file to `<logDir>/read-errors/read-error-<time>-<n>-<name>.json`. The file holds the packet id (the
+  low 10 bits of the first varint), its name from minecraft-data, its length, the error and its stack, the bytes
+  (base64), the game version, start_game's `game_version` (`serverVersion`: a live server may run a newer patch than
+  the protocol data), the transport, the session and the tick. It also holds the batch the packet came in: each
+  packet's declared length, the failed one's index, how many bytes the batch was short, and the batch itself up to
+  512 KiB.
+- caps the files at 20 and at 4 MiB in total, counting files that earlier runs left. When the size cap would be
+  passed, the batch is dropped first. The login packet is never written (it carries the account's chain).
+- logs one WARN line: `unreadable packet 148 item_stack_response (51 bytes): <error>; bytes saved to <file>`.
+- leaves the session's end reason alone. Before, the first read error became the end reason of a close that came
+  minutes later for another cause ("connection lost (error: Read error ...)").
+
+**What the test servers do.** None of these reproduced it: BDS 1.26.60.6 over RakNet, 1.26.60.6 and 1.26.63.1 over
+NetherNet (WebRTC, as on a Realm), and the Realm's boxes rebuilt with a structure (a box named `bot_loot` of mixed loot
+with enchanted and damaged gear, a box of rockets of Flight 1 to 3 with explosions, two boxes both named, the third
+case's slots: main 17 and hotbar 3). Across 34 swaps on 2026-11-16 every response was read and every swap was
+answered. BDS answers a swap of two boxes in 39 to 51 bytes. The Realm's error needs at least 70 bytes left in the
+packet, so the Realm sent something longer or shaped differently. The protocol data is the same in minecraft-data
+3.117.0 (patched) and 3.119.0, and bedrock-protocol 3.61.0 changes nothing in this packet, so a version bump is not
+the fix. The decode waits for a Realm capture.
+
+**The resync after a lost packet** (`bot/src/world/resync.ts`, always on). When a packet is lost, the model may hold a
+slot the server changed. The rules:
+
+1. A lost packet that can change the inventory marks the model *unsure*. These are item_stack_response,
+   inventory_content / _slot / _transaction, player_hotbar, mob_equipment, mob_armor_equipment, container_open / _close,
+   update_equipment, and any id without a name. The bot then asks the server for the whole inventory with an
+   `inventory_mismatch` inventory transaction, the vanilla client's own request. BDS answers within one tick with
+   inventory_content for the inventory, armour, offhand and ui windows and a player_hotbar (90 ms on RakNet, 64 ms on
+   NetherNet).
+2. The next full inventory_content of window 0 makes the model sure again. Until then StackRequests and Containers wait
+   for it (up to 3 s) before they build a request, because a request built on a stale slot is refused or moves the
+   wrong stack.
+3. A request that ended without its response after a loss ends `lost` as soon as the server's inventory is back,
+   without waiting for the 40-tick timeout. The kit's exchange then judges by that inventory: a swap the server did is
+   done (`hotbar: the swap of slots a and b got no response (a packet was lost); the server's inventory shows it done`).
+   Other callers roll back as before, and the inventory is asked for again one tick later, so the server's own content
+   undoes a wrong rollback.
+4. If no inventory comes in 3 s, the bot asks again, at most 3 times. After that the model is used as it is (WARN),
+   so a server that never answers cannot block the inventory for good.
+
+Measured with an injected parse failure of the swap's response (e2e `read-errors`, 2026-11-16). Without the rule, the
+swap was "refused (timeout)" after 2.2 s and the model still disagreed with the server 6 s later. With it, the swap was
+ok in 473 ms (RakNet) and 303 ms (NetherNet), and the model matched the server 657 ms and 499 ms after the request.
+
 ## Default flipped to 1.26.60 (2026-10-28)
 
 Applied as one change set from the list below (kept as the template for the next bump). Gates, in

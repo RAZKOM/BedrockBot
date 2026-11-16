@@ -185,6 +185,12 @@ export class Containers {
    * response or a timeout the prediction is rolled back.
    */
   move(src: SlotRef, dst: SlotRef, count: number, timeoutMs = 3000): Promise<MoveResult> {
+    // Track P1 (world/resync.ts): never built on a model that may be stale: the server's inventory first (3 s at most)
+    if (this.inventory.unsure !== undefined) return this.inventory.whenSure(3000).then(() => this.moveNow(src, dst, count, timeoutMs));
+    return this.moveNow(src, dst, count, timeoutMs);
+  }
+
+  private moveNow(src: SlotRef, dst: SlotRef, count: number, timeoutMs: number): Promise<MoveResult> {
     const from = this.slotsOf(src.window);
     const to = this.slotsOf(dst.window);
     if (!from || !to) return Promise.resolve({ ok: false, reason: 'no_window' });
@@ -225,6 +231,7 @@ export class Containers {
       { window: dst.window, slot: dst.slot, item: moved, ...(dstRaw ? { raw: dstRaw } : {}) },
     ]);
     this.stats.requests++;
+    const lost0 = this.inventory.lostPackets;
     this.source.queue('item_stack_request', { requests: [{ request_id: requestId, actions: [action], custom_names: [], cause: 'chat_public' }] });
     this.log.debug(`item_stack_request ${requestId}: place ${count} ${item.name} ${fmtRef(src)} -> ${fmtRef(dst)}`);
     return new Promise((resolve) => {
@@ -240,6 +247,8 @@ export class Containers {
         this.pending.delete(requestId);
         this.predicted.delete(requestId); // Track AG
         rollback();
+        // Track P1: perhaps the response was the lost packet: the server's inventory undoes a wrong rollback
+        if (this.inventory.lostPackets !== lost0) this.inventory.requestResync('a request got no response after a lost packet');
         resolve({ ok: false, reason: 'timeout', requestId });
       }, timeoutMs);
       this.pending.set(requestId, (r) => {

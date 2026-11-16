@@ -118,6 +118,8 @@ export interface PacketSource {
   on(name: string, fn: (p: Record<string, unknown>) => void): () => void;
   queue(name: string, params: Record<string, unknown>): void;
   onTick?(fn: (tick: bigint) => void): () => void;
+  /** Track P1: packets that could not be parsed (Connection.onReadError). */
+  onReadError?(fn: (f: { id?: number | undefined; name?: string | undefined }) => void): () => void;
 }
 
 export interface WorldView {
