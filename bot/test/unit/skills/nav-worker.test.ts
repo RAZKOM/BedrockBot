@@ -9,13 +9,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { silentLogger } from '../../../src/log.ts';
+import { startWorker } from '../../../src/threads.ts';
 import { BotSkills } from '../../../src/skills/index.ts';
 import { breakBlocker } from '../../../src/skills/nav/actions.ts';
 import { findPath, handBreakTicks, type PathResult } from '../../../src/skills/nav/astar.ts';
 import { avoidWalkingInto, breakTicksWith, canWalkOn, canWalkThroughClass, getMiningDurationTicks } from '../../../src/skills/nav/baritone/helper.ts'; // Track BB; Track BC: breakTicksWith
 import { goalTest, type NavGoal } from '../../../src/skills/nav/goals.ts'; // Track BD
 import { NavGrid } from '../../../src/skills/nav/grid.ts';
-import { PlannerClient, corridor, type PlannerWorker, type WorkerPlanOptions } from '../../../src/skills/nav/worker.ts';
+import { PlannerClient, corridor, type PlannerWorker, type WorkerPlanOptions, type WorkerSearch } from '../../../src/skills/nav/worker.ts';
 import { MirrorWorld, type MirrorOp } from '../../../src/skills/nav/worker-grid.ts';
 import { classify } from '../../../src/skills/terrain/classify.ts';
 import { worldSource } from '../../../src/skills/terrain/query.ts';
@@ -228,6 +229,58 @@ function fakeWorker(mirror: MirrorWorld, o: { crashAfterReady?: boolean } = {}):
     },
     terminate() {},
   };
+}
+
+/**
+ * Track I2: a real planner worker (the file the client spawns) with the order of a main plan's answers fixed: its final
+ * answer is held back until the navigator took the interim one and ticked once with it (`release()`, called after each
+ * tick), and while the navigator walks an interim answer whose final one has not come the test does not tick
+ * (`waiting()`): the final is spliced in one tick after the interim. Without it the order is the machine's: on a loaded
+ * host the interim and the final came in the same turn of the main thread (the navigator then walks the final alone,
+ * no interim), or the final came after the body had walked past where the two part (no splice: a re-plan, twice in a
+ * row, then no interim: Track R3), and the test failed about 1 suite run in 9 on the loaded test host.
+ */
+function gatedPlanner(world: ConstructorParameters<typeof PlannerClient>[0]): { client: PlannerClient; release: () => void; waiting: () => boolean } {
+  const held: { id: number; m: unknown; fn: (v: unknown) => void; ticks: number }[] = [];
+  const interimSeen = new Set<number>();
+  const resultSeen = new Set<number>();
+  const searches = new Map<number, WorkerSearch>();
+  const spawn = (): PlannerWorker => {
+    const w = startWorker(new URL('../../../src/skills/nav/worker.ts', import.meta.url), { workerData: { bedrockbotPlanner: true }, name: 'planner' });
+    return {
+      postMessage: (m) => w.postMessage(m),
+      on: (ev, fn) => {
+        if (ev !== 'message') return w.on(ev, fn);
+        return w.on('message', (m: { t: string; id: number }) => {
+          if (m.t === 'interim') interimSeen.add(m.id);
+          if (m.t === 'result' || m.t === 'error') resultSeen.add(m.id);
+          // (a worker posts a search's interim before its result: a result with no interim before it has none coming)
+          if (m.t === 'result' && interimSeen.has(m.id)) held.push({ id: m.id, m, fn, ticks: 0 });
+          else fn(m);
+        });
+      },
+      terminate: () => w.terminate(),
+      unref: () => w.unref(),
+    };
+  };
+  const client = new PlannerClient(world, { spawn });
+  const search = client.search.bind(client);
+  client.search = (...args) => {
+    const s = search(...args);
+    searches.set(s.id, s);
+    return s;
+  };
+  const release = (): void => {
+    for (const h of [...held]) {
+      // the interim taken (and a tick walked with it), or not taken in 20 ticks (not walkable: the final is the answer)
+      if (searches.get(h.id)?.interimReady && ++h.ticks < 20) continue;
+      held.splice(held.indexOf(h), 1);
+      h.fn(h.m);
+    }
+  };
+  // an interim answer taken (the navigator walks it) whose search is still out in the worker
+  const waiting = (): boolean => [...interimSeen].some((id) => !resultSeen.has(id) && searches.get(id)?.state === 'sent' && !searches.get(id)!.interimReady);
+  return { client, release, waiting };
 }
 
 async function until(fn: () => boolean, ms = 10_000): Promise<void> {
@@ -665,16 +718,26 @@ describe('planner worker: a real worker thread', () => {
     const runs: { threads: number; ok: boolean; plans: string; upgrades: number; ticks: number }[] = [];
     for (const threads of [1, 0]) {
       const h = harness({ x: -40.5, y: -60, z: 0.5 });
-      // mainMs 2: the interim answer comes after 2 ms of search, long before the final one
+      // mainMs 2: the interim answer comes after 2 ms of search, before the final one; the final one is handed over only
+      // after the navigator took the interim and walked a tick with it (gatedPlanner: the order by construction)
       const skills = new BotSkills({ loop: h.loop, world: F.world, mainMs: 2 });
       skills.nav.attachPlanner(F.world, { threads: () => threads });
-      if (threads) await until(() => skills.nav.planner!.ready, 20_000);
+      const gate = threads ? gatedPlanner(F.world) : undefined;
+      if (gate) {
+        skills.nav.planner!.dispose();
+        skills.nav.planner = gate.client;
+        gate.client.start();
+        await until(() => gate.client.ready, 20_000);
+      }
       h.conn.tick(3);
       let result: { ok: boolean } | undefined;
       void skills.goto({ type: 'block', p: { x: 40, y: -60, z: 0 } }, { timeoutTicks: 3000 }).then((r) => (result = r));
       let t = 0;
       while (skills.nav.busy && t < 3000) {
         h.conn.tick();
+        gate?.release();
+        for (let w = 0; gate?.waiting() && w < 10_000; w++) await sleep(1);
+        gate?.release();
         await sleep(t % 4 === 0 ? 1 : 0);
         t++;
       }
