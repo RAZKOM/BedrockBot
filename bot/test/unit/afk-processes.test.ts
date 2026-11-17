@@ -206,6 +206,44 @@ describe('afk processes', () => {
     expect(s.pve.stats.flees).toBe(1);
   });
 
+  // core-process e2e case 3 failed from Track M2 on (f6e44f7e) because it ran with the reflex on: this is that case's
+  // process-level twin with the reflex on, the rule's own choice (ADR 0079 decision 23)
+  it('with the reflex on, one zombie in reach at low health: guard keeps the body (the hold); a second melee hit within 3 s and flee pre-empts the fight', () => {
+    const s = world({ home: { x: 0, y: -60, z: 0 } });
+    s.pve.rules.legHold = false;
+    s.settings.set('mobReflex', true);
+    s.ents.set(7n, mob(7n, 'minecraft:zombie', { x: 0.5, y: -60, z: 3.5 }));
+    s.loop.step(1);
+    expect(s.pve.behaviour()).toBe('fighting zombie');
+    s.src.emit('set_health', { health: 5 }); // the drop is laid on the zombie 3 off: one melee hit
+    s.loop.step(5);
+    expect(s.pve.low()).toBe(true);
+    expect(s.pve.holds(s.loop.state.pos)).toBe(true);
+    expect(s.pve.fleeReason(s.loop.state.pos)).toBeUndefined();
+    expect(s.pve.behaviour()).toBe('fighting zombie');
+    expect(s.pm.stack().map((e) => `${e.name}:${e.state}`)).toEqual(['guard:active']);
+    expect(s.pve.stats.flees).toBe(0);
+    s.src.emit('set_health', { health: 4 }); // two melee hits within HOLD_HITS_MS: the stand is not keeping it out
+    s.loop.step(1);
+    expect(s.pve.holds(s.loop.state.pos)).toBe(false);
+    expect(s.pve.behaviour()).toBe('fleeing');
+    expect(s.pm.stack().map((e) => `${e.name}:${e.state}`)).toEqual(['flee:active', 'guard:paused']);
+    expect(s.pve.stats.flees).toBe(1);
+  });
+
+  it('the same fight with the reflex off: health 5 starts the flight at once (the flight on foot as before Track M2)', () => {
+    const s = world({ home: { x: 0, y: -60, z: 0 } });
+    s.pve.rules.legHold = false;
+    s.ents.set(7n, mob(7n, 'minecraft:zombie', { x: 0.5, y: -60, z: 3.5 }));
+    s.loop.step(1);
+    expect(s.pve.behaviour()).toBe('fighting zombie');
+    s.src.emit('set_health', { health: 5 });
+    s.loop.step(1);
+    expect(s.pve.holds(s.loop.state.pos)).toBe(false);
+    expect(s.pve.behaviour()).toBe('fleeing');
+    expect(s.pve.stats.flees).toBe(1);
+  });
+
   it('guardRadius changes the guard live', () => {
     const s = world({ home: { x: 0, y: -60, z: 0 } });
     s.ents.set(7n, mob(7n, 'minecraft:zombie', { x: 0.5, y: -60, z: 12.5 }));

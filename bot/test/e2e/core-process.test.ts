@@ -5,8 +5,11 @@
 //      the gather is paused, resumes on its own afterwards and finishes;
 //   2. `!goto` with `!status` (the process stack and an ETA, checked against the real arrival), then
 //      `!pause` (the bot stands), `!resume` (walks again), `!stop` (ends it) on a second goto;
-//   3. flee pre-empts a guard fight (health set low mid-fight), and the fight resumes after the flight.
-// Each test leaves guard off and no user process behind (afterEach), so one failure cannot cascade.
+//   3. flee pre-empts a guard fight (health set low mid-fight), and the fight resumes after the flight; with `mobReflex`
+//      off, the flight on foot as it runs without the reflex;
+//   4. the same fight with the reflex on (the default): Track M2's hold (ADR 0079 decision 23) keeps the bot standing at
+//      low health with the one zombie in reach, and two melee hits within 3 s start the flight after all.
+// Each test leaves guard off, no user process behind and the reflex on (afterEach), so one failure cannot cascade.
 // Needs BDS_E2E=1 and bds-core with the truth pack (`node scripts/bds.mjs --profile core up` and `... pack`).
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { Vec3 } from '../../src/connection/types.ts';
@@ -26,6 +29,9 @@ import {
   until,
   type CoreBot,
 } from './core-truth.ts';
+
+/** How long case 4 watches the hold at low health: under HOLD_HITS_MS (3 s), so the next drop is a second hit within it. */
+const HOLD_WATCH_MS = 2000;
 
 describe.skipIf(!E2E)('core: process manager (task 7.8)', () => {
   let bot: CoreBot | undefined;
@@ -58,6 +64,7 @@ describe.skipIf(!E2E)('core: process manager (task 7.8)', () => {
     const b = bot;
     if (!b) return;
     b.pve.setGuard({ on: false });
+    b.pve.settings.set('mobReflex', true);
     b.processes.unhold();
     b.processes.stopUser();
     await b.truth.cleanup().catch(() => undefined);
@@ -202,6 +209,10 @@ describe.skipIf(!E2E)('core: process manager (task 7.8)', () => {
 
   it('flee pre-empts a guard fight; the fight resumes after the flight', async () => {
     const b = bot!;
+    // the flight on foot without the reflex: with it on, one zombie in reach at low health is stood against, not run from
+    // (Track M2, holdGround; the next test). This case is about the process stack, so it takes the setting's other side,
+    // as afk-processes and gaunt-flee do (afterEach turns it on again)
+    b.pve.settings.set('mobReflex', false);
     await b.truth.setHealth(b.name, 20);
     const start = { x: HOME.x + 12, y: FEET_Y, z: HOME.z };
     await teleport(b, centre(start));
@@ -257,5 +268,66 @@ describe.skipIf(!E2E)('core: process manager (task 7.8)', () => {
     b.pve.setGuard({ on: false });
     await b.truth.cleanup();
   }, 150_000);
+
+  it('with the reflex on, one zombie in reach at low health: the ground is held; two melee hits within 3 s and the bot runs', async () => {
+    const b = bot!;
+    expect(b.pve.settings.get('mobReflex')).toBe(true); // the default (ADR 0079 decision 26)
+    await b.truth.setHealth(b.name, 20);
+    const start = { x: HOME.x + 12, y: FEET_Y, z: HOME.z };
+    await teleport(b, centre(start));
+    b.pve.setGuard({ on: false });
+    // the zombie of the case before: slow, harmless, immune for 16 s
+    const mob = await b.truth.summon('zombie', { x: start.x + 0.5, y: FEET_Y, z: start.z + 4.5 });
+    await b.truth.effect(mob.entityId, 'slowness', 120, 255);
+    await b.truth.effect(mob.entityId, 'weakness', 120, 255);
+    await b.truth.effect(mob.entityId, 'resistance', 16, 4);
+    b.pve.setGuard({ on: true, radius: 16 });
+    await until(() => (b.pve.behaviour().startsWith('fighting zombie') ? true : undefined), 10_000, 'guard fight', 50);
+    await sleep(1000);
+    const started0 = b.metrics.snapshot().counters['process.flee.started'] ?? 0;
+    // health 5 (fleeHealth 8), one melee hit (the drop is laid on the zombie in reach): the bot holds the ground
+    await b.truth.setHealth(b.name, 5);
+    const held: string[] = [];
+    const tLow = Date.now();
+    let holdsSeen = false;
+    while (Date.now() - tLow < HOLD_WATCH_MS) {
+      const s = `${b.pve.behaviour()} [${b.processes.stack().map((e) => `${e.name}:${e.state}`).join(' ')}]`;
+      if (!held.includes(s)) held.push(s);
+      if (b.pve.health() < 8 && b.pve.holds(b.pve.position())) holdsSeen = true;
+      expect(b.pve.behaviour(), `held: ${held.join(' | ')}`).not.toBe('fleeing');
+      await sleep(20);
+    }
+    expect(holdsSeen, `held: ${held.join(' | ')}`).toBe(true);
+    expect(b.processes.stack()[0]?.name).toBe('guard');
+    expect(b.metrics.snapshot().counters['process.flee.started'] ?? 0).toBe(started0);
+    // a second melee hit within 3 s of the first: the fist (here the blade) is not keeping it out, run (holdGround)
+    const tHit = Date.now();
+    await b.truth.setHealth(b.name, 4);
+    await until(() => (b.pve.behaviour() === 'fleeing' ? true : undefined), 5_000, 'fleeing after the second hit', 20).catch((e: unknown) => {
+      throw new Error(`${String(e)}; held: ${held.join(' | ')}; now ${b.pve.behaviour()}, health ${b.pve.health()}`);
+    });
+    const fleeMs = Date.now() - tHit;
+    const fleeStack = b.processes.stack().map((e) => `${e.name}:${e.state}`);
+    expect(fleeStack[0]).toBe('flee:active');
+    expect(b.metrics.snapshot().counters['process.flee.started'] ?? 0).toBe(started0 + 1);
+    // away from the zombie: past the hold's 8 blocks, where the stand no longer applies
+    const away = await until(
+      async () => {
+        const [me, z] = await Promise.all([b.truth.pos(b.name), b.truth.entity(mob.entityId)]);
+        const d = z.valid === false ? Infinity : hdist(me.location, z.location);
+        return d > 8 ? d : undefined;
+      },
+      15_000,
+      'more than 8 from the zombie',
+      250,
+    );
+    const line =
+      `hold vs flee (reflex on): held ${HOLD_WATCH_MS / 1000} s at health 5 with the zombie in reach (${held.join(' | ')}); ` +
+      `"fleeing" ${fleeMs} ms after the second hit (stack ${fleeStack.join(' ')}); ${away === Infinity ? 'zombie gone' : `${away.toFixed(1)} blocks from it`}`;
+    console.log(line);
+    measurements.push(line);
+    b.pve.setGuard({ on: false });
+    await b.truth.cleanup();
+  }, 90_000);
 });
 

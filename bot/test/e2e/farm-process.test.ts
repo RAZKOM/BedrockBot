@@ -1,6 +1,6 @@
 // e2e (tag @bds), Track Z (PLAN.md 7.13 + 7.8; docs/farming.md "As a process") on bds-core
 // (difficulty normal, truth pack with truth:field / truth:crops):
-//   `!farm 3` on a 5 x 5 mature wheat field is a user process of the real afk task; a zombie summoned
+//   `!farm 3 wait` on a 5 x 5 mature wheat field is a user process of the real afk task; a zombie summoned
 //   7 blocks from the bot makes guard pre-empt it (stack guard:active farm:paused, the farmer paused),
 //   the farm resumes once the zombie is dead and finishes the field (25 harvested and replanted,
 //   truth: 25 farmland, 25 wheat); `!status` shows it in the stack; `!pause` / `!resume` hold and
@@ -60,9 +60,11 @@ describe.skipIf(!E2E)('core: !farm as a process (Track Z)', () => {
     expect(hdist(b.task.position()!, centre(at))).toBeLessThan(0.5);
     let n = b.said.length;
     const t0 = Date.now();
-    await b.command('!farm 3');
+    // `wait`: the mode that stays and re-scans (since 2026-11-03 a plain `!farm` follows the field and ends `done` when
+    // nothing is left, which would leave no process for !pause / !resume / !stop below)
+    await b.command('!farm 3 wait');
     // on farmland the feet are at -60.0625: the block is -61
-    expect(await b.reply((s) => s.startsWith('farming'), n)).toMatch(new RegExp(`^farming r=3 around ${at.x} -6[01] ${at.z}$`));
+    expect(await b.reply((s) => s.startsWith('farming'), n)).toMatch(new RegExp(`^farming r=3 around ${at.x} -6[01] ${at.z}, waiting for crops$`));
     const proc = () => b.processes.find('farm')[0] as FarmProcess | undefined;
     const farm: FarmTask = (await until(() => proc(), 5_000, 'farm process')).task;
     await until(() => (farm.stats.harvested >= 4 ? true : undefined), 60_000, 'first harvests', 100);

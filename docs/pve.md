@@ -1021,6 +1021,11 @@ The floors (the table in "Never die to common mobs (Track M1)") with `fleeFly` o
   cornered) or the health is critical.
 - **Where it cannot go** (a roof, fewer than 3 rockets, a flight in the air, asked within the last 30 s): the floors
   as they were: the flight on foot, the seal-in, the stand.
+- **Only at a flee trigger**: the floors are asked when the flight on foot would start. With the reflex on, Track M2's
+  hold (`holdGround`: 1 to 3 melee mobs within 8, no creeper near, no archer or witch in sight, fewer than 2 melee hits
+  in 3 s) takes the low-health trigger away, so against melee mobs alone neither the flight on foot nor the elytra flee
+  starts, at any health, until the second melee hit within 3 s. Then both are asked as above (the e2e `core-process`
+  hold case, the unit `afk-processes` twin).
 
 A flee that made no takeoff answers at once (`no elytra flee: no clear climb from here on any heading, none straight
 up`), and the flight on foot goes on in the same look.

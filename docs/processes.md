@@ -216,9 +216,13 @@ the CLI runs use a temporary log dir and settings file (deleted afterwards).
   the first log: the stack is `guard:active gather:paused`, then the gather resumes and finishes with
   8 logs (truth:inv); a 40-block `!goto` with `!status` (stack line and ETA, compared with the real
   arrival); a second `!goto` with `!pause` (still for 2 s), `!status` (`[held]`), `!resume` (moving
-  again), `!stop` (the `!stop` reply names the walk; the walk itself stays quiet); flee: a guard fight against an immune, slowed,
-  weakened zombie, health set to 5: `fleeing` and home, health 20: the fight resumes and kills it once
-  its resistance ends.
+  again), `!stop` (the `!stop` reply names the walk; the walk itself stays quiet); flee, with `mobReflex`
+  off: a guard fight against an immune, slowed, weakened zombie, health set to 5: `fleeing` and home,
+  health 20: the fight resumes and kills it once its resistance ends; the hold, with the reflex on (the
+  default): the same fight at health 5 stays `guard:active` for 2 s with no flight (one zombie in reach is
+  stood against, docs/pve.md "Track M2"), and a second drop within 3 s (two melee hits) starts the flight.
+  The flee case ran with the reflex on from Track M2 until it was split this way, and failed there: the
+  hold is the rule's choice for that setup, not a fault of the manager.
 - `core-settings`: `--guard 1` exits 2 with one stderr line; `!set guardRadius 8` leaves a zombie 12
   blocks from home alone for 5 s, `!set guardRadius 16` makes the bot fight it; CLI run 1 with
   `--settings <tmp>` takes `!set guardRadius 8` (written to the file) and quits, CLI run 2 with the same
@@ -233,7 +237,8 @@ From the two gate runs (`core` suites, 6/6 green each, 108 s per run) plus the e
 | Guard pre-empts a gather (zombie 7 blocks from the bot after 4 of 8 logs) | `fighting zombie` 61 to 122 ms after the summon; stack `guard:active gather:paused`; zombie dead after 3.2 to 4.0 s; gather resumed 3.3 to 12.2 s after the summon (the fight's drop pickup runs up to 10 s first); done with 8 logs (truth:inv) after 13.7 to 23.4 s in total, 0 corrections |
 | `!goto` 40 blocks, `!status` 1.7 to 1.8 s after the command | `[active] walking to ..., 31-32 blocks left, eta 6 s`; arrived 6.5 s after the `!status` (chat round trip included) |
 | `!pause` / `!resume` / `!stop` during a goto | 0.00 blocks moved in 2 s while held (`[held]` in the stack); 12.0 to 12.3 blocks in the 2 s after `!resume`; 0.00 blocks in 2 s after `!stop`, 34 blocks short of the goal; only the `stopped (was walking to ...)` reply, no `goto:` line (an interrupted walk stays quiet, like `!come`) |
-| Flee pre-empts a guard fight (health set to 5 mid-fight) | `fleeing` 229 to 247 ms later, stack `flee:active guard:paused`; home 12 blocks away after 2.9 to 3.0 s; with health 20 again the fight restarted after 124 to 184 ms; 0 damage taken |
+| Flee pre-empts a guard fight (health set to 5 mid-fight) | `fleeing` 229 to 247 ms later, stack `flee:active guard:paused`; home 12 blocks away after 2.9 to 3.0 s; with health 20 again the fight restarted after 124 to 184 ms; 0 damage taken. Since Track M2 with `mobReflex` off for this case (2026-11-17, BDS 1.26.60: `fleeing` 174 to 324 ms later, home after 5.2 to 5.5 s, the fight again 121 to 184 ms after health 20, 0 damage taken; 5 runs) |
+| The hold, the same fight with the reflex on (2026-11-17, 5 runs) | no flight for the 2 s watched at health 5, stack `guard:active`; a second drop (health 4) within 3 s: `fleeing` 185 to 533 ms later, stack `flee:active guard:paused`, 8.6 to 10.5 blocks from the zombie |
 | `!set guardRadius 8` live | a zombie 12 blocks from home left alone for 5 s; `!set guardRadius 16` -> fighting 230 to 276 ms after the console command |
 | Restart of the bot process | `!set` answered in 230 to 354 ms and written to settings.json; the second process read 8, ignored a zombie at 12 blocks for 5 s and fought one at 5 blocks 506 to 537 ms after the summon |
 | `--guard 1` | exit 2, stderr exactly `error: guard radius must be 2..64, got 1` |
