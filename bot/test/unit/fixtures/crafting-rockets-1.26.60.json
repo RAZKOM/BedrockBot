@@ -1,0 +1,242 @@
+{
+ "note": "Track R9: the paper and firework rocket recipes (the plain one and one with a firework star) of the BDS 1.26.60.6 crafting_data in fixtures/1.26.60/login-idle.jsonl.gz; items maps network ids to names",
+ "items": {
+  "331": "gunpowder",
+  "388": "sugar_cane",
+  "389": "paper",
+  "529": "firework_rocket"
+ },
+ "shaped_recipes": [
+  {
+   "recipe_id": "minecraft:paper",
+   "width": 3,
+   "height": 1,
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:sugar_cane",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:sugar_cane",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:sugar_cane",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 389,
+     "count": 3,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": 0,
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "064fa89e-f8ba-ff56-3854-f6e826510fb4",
+   "block": "crafting_table",
+   "priority": 0,
+   "assume_symmetry": true,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:sugar_cane",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 4357
+  }
+ ],
+ "shapeless_recipes": [
+  {
+   "recipe_id": "paper_sulphur_charge_0_recipeId",
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:paper",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:gunpowder",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:firework_star:0",
+     "metadata": 0,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 529,
+     "count": 3,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": true,
+      "nbt": {
+       "version": 1,
+       "nbt": {
+        "type": "compound",
+        "name": "",
+        "value": {
+         "Fireworks": {
+          "type": "compound",
+          "value": {
+           "Explosions": {
+            "type": "list",
+            "value": {
+             "type": "compound",
+             "value": [
+              {
+               "FireworkColor": {
+                "type": "byteArray",
+                "value": [
+                 0
+                ]
+               },
+               "FireworkFade": {
+                "type": "byteArray",
+                "value": []
+               },
+               "FireworkFlicker": {
+                "type": "byte",
+                "value": 0
+               },
+               "FireworkTrail": {
+                "type": "byte",
+                "value": 0
+               },
+               "FireworkType": {
+                "type": "byte",
+                "value": 0
+               }
+              }
+             ]
+            }
+           },
+           "Flight": {
+            "type": "byte",
+            "value": 1
+           }
+          }
+         }
+        }
+       }
+      },
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "5d469f57-eb86-17ee-9b9b-53a824fc20a7",
+   "block": "crafting_table",
+   "priority": 50,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": []
+   },
+   "network_id": 2813
+  },
+  {
+   "recipe_id": "paper_sulphur_recipeId",
+   "input": [
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:paper",
+     "metadata": 32767,
+     "count": 1
+    },
+    {
+     "type": "valid",
+     "descriptor_type": "name",
+     "name": "minecraft:gunpowder",
+     "metadata": 32767,
+     "count": 1
+    }
+   ],
+   "output": [
+    {
+     "network_id": 529,
+     "count": 3,
+     "metadata": 0,
+     "block_runtime_id": 0,
+     "extra": {
+      "has_nbt": true,
+      "nbt": {
+       "version": 1,
+       "nbt": {
+        "type": "compound",
+        "name": "",
+        "value": {
+         "Fireworks": {
+          "type": "compound",
+          "value": {
+           "Explosions": {
+            "type": "list",
+            "value": {
+             "type": "end",
+             "value": []
+            }
+           },
+           "Flight": {
+            "type": "byte",
+            "value": 1
+           }
+          }
+         }
+        }
+       }
+      },
+      "can_place_on": [],
+      "can_destroy": []
+     }
+    }
+   ],
+   "uuid": "05414025-6dc5-aa02-f45e-b4c7aeb7df97",
+   "block": "crafting_table",
+   "priority": 50,
+   "unlocking_requirement": {
+    "context": "none",
+    "ingredients": [
+     {
+      "type": "valid",
+      "descriptor_type": "name",
+      "name": "minecraft:gunpowder",
+      "metadata": 32767,
+      "count": 1
+     }
+    ]
+   },
+   "network_id": 2773
+  }
+ ],
+ "clear_recipes": false
+}

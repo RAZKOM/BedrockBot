@@ -4,7 +4,7 @@
 //                   bucket crafted from 3 iron ingots with none anywhere (milkCraft); the reply says what it got
 //   !milk status    the counts (carried, in the boxes, at home), the mobs near, the chore, what the next pass would do
 // Also wired here: the milk chore (autoMilk, default off; tasks/process/milk.ts), the trip readiness's milk step
-// (tasks/pve.ts tripStock: before a long trip, milk out of the boxes and the chests at home) and the `!status` part
+// (tasks/pve.ts tripStocks: before a long trip, milk out of the boxes and the chests at home) and the `!status` part
 // (`milk 1/2 (1 empty bucket)`). Registered by the afk task after the home logistics and the crafter (tasks/registry.ts).
 import type { Vec3 } from '../connection/types.ts';
 import { classify, entityFeet } from '../skills/combat/hostiles.ts';
@@ -16,6 +16,7 @@ import { supplyOf } from '../skills/supply/supply.ts';
 import { heldBySave } from '../skills/test/guard.ts';
 import { respawnClaimed } from '../skills/test/recovery.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
+import type { TripStock } from '../tasks/process/readiness.ts';
 import { MilkController, milkReply } from '../tasks/process/milk.ts';
 import { craftControlOf } from './commands-craft.ts';
 import { foodControllerOf, foodExtrasOf, isChoreTime } from './commands-food.ts';
@@ -151,17 +152,19 @@ export function registerMilkCommands(d: CommandDeps, extra: MilkCommandExtra = {
   });
   controllers.set(task, controller);
   // the trip readiness (tasks/pve.ts TripPrep): milk out of the boxes and the chests at home before a long trip
-  pve.tripStock = {
+  const tripStock: TripStock = {
+    name: 'milk',
     needed: () => controller.tripNeeded(),
     run: async (alive) => {
       await controller.tripRun(alive);
     },
   };
+  pve.addTripStock(tripStock); // Track R9: one of the readiness's stock steps (the rockets' is the other)
   const stop = task.stop.bind(task);
   task.stop = () => {
     controller.dispose();
     ownBabies?.dispose();
-    if (pve.tripStock) pve.tripStock = undefined;
+    pve.removeTripStock(tripStock);
     stop();
   };
 

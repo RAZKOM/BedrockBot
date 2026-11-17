@@ -492,6 +492,12 @@ the chat reply `coming to Steve (eating first)`, `following Steve (eating first)
 (eating first)`. The check runs at every (re)start of the process, so a come interrupted by a fight
 eats again before going on. Goals without a place (`!top`) never prepare.
 
+**Stock steps** (`PveController.addTripStock`, run in the order added after the armour and the eating): Track K1's
+`milk` phase (below, "Milk on hand") and Track R9's `rockets` phase (docs/flight.md "Rockets on hand": before a trip
+that may fly, rockets crafted from the paper and gunpowder carried, loose or in the carried boxes, when fewer than the
+flight needs are carried; never the chests at home, never a walk). Each step is asked with the trip's goal; a step
+with nothing to do is skipped.
+
 **Night rule**: at night (time of day 12542 to 23459, the sleep window) without a chestplate (worn, or
 in the inventory to put on) `!come`, `!follow` and `!kill` beyond 16 blocks are refused:
 `come: it is night and I have no chestplate; add "now" to go anyway (!come now)`. With `now` at the

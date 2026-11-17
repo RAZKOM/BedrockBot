@@ -102,6 +102,8 @@ export interface RoomOptions {
   seedReserve?: number;
   /** Track K1: the milk kept (`milkKeep`) and the empty buckets that refill it. */
   milkKeep?: number;
+  /** Track R9: the rockets kept (`fireworksKeep`): the paper, gunpowder and sugar cane of one craft round stay. */
+  fireworksKeep?: number;
   worn?: readonly string[];
   maxStack?: (name: string) => number;
 }
@@ -311,6 +313,7 @@ function lootSlots(slots: readonly RoomSlot[], inv: ReadonlyMap<number, Sim>, op
     ...(opts.foodReserve !== undefined ? { foodReserve: opts.foodReserve } : {}),
     ...(opts.seedReserve !== undefined ? { seedReserve: opts.seedReserve } : {}),
     ...(opts.milkKeep !== undefined ? { milkKeep: opts.milkKeep } : {}),
+    ...(opts.fireworksKeep !== undefined ? { fireworksKeep: opts.fireworksKeep } : {}),
     ...(opts.worn ? { worn: opts.worn } : {}),
   });
   const out: Sim[] = [];

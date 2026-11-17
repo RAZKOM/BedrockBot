@@ -54,7 +54,7 @@ import { armourScore, WINDOW_ARMOR } from '../skills/survival/armour.ts';
 import type { EntityInfo, PacketSource, Vec3 } from '../world/types.ts';
 import { etaFor, GotoProcess, navRemaining, settingsMover, type GotoProcessOptions, type ProcessMover } from './process/goto.ts';
 import { BaseProcess, PRIORITY, ProcessManager, type ProcessStatus, type StopReason } from './process/manager.ts';
-import { checkTrip, longTrip, needsPrep, prepareTrip, type PrepPhase, type TripCheck, type TripKit } from './process/readiness.ts'; // Track W
+import { checkTrip, longTrip, needsPrep, prepareTrip, type PrepPhase, type TripCheck, type TripKit, type TripStock } from './process/readiness.ts'; // Track W
 import { PlayerLocator } from './process/locator.ts'; // Track W
 
 export interface GuardSettings {
@@ -526,10 +526,11 @@ export class PveController {
   /** The survival kit (eat, equip) for flee eating and trip readiness; wired by chat/commands-pve.ts (Track W). */
   kit: (() => TripKit | undefined) | undefined;
   /**
-   * Track K1 (chat/commands-milk.ts, ADR 0096): milk on hand before a long trip: the milk buckets missing to `milkKeep` out
-   * of the carried boxes, and out of the chests at home when the bot is there (no cow, no craft: those are `!milk`'s).
+   * The stock steps of the trip readiness, in order (`addTripStock`): Track K1 (chat/commands-milk.ts, ADR 0096) the milk
+   * buckets missing to `milkKeep` out of the carried boxes and (at home) the home chests; Track R9 (chat/commands-rockets.ts,
+   * ADR 0097) rockets crafted from what is carried before a long trip that may fly. `needed(to)`: the trip's goal, if known.
    */
-  tripStock: { needed(): boolean; run(alive: () => boolean): Promise<void> } | undefined;
+  readonly tripStocks: TripStock[] = [];
   /** The last hit the bot took (Track W: how many more it can take). */
   lastHit: { damage: number; at: number } | undefined;
   private readonly recentHits: { damage: number; at: number }[] = [];
@@ -876,11 +877,24 @@ export class PveController {
   /** Food or health is below 14 and the kit is there to fix it. */
   prepNeeded(to: Vec3 | undefined): boolean {
     if (!longTrip(this.position(), to)) return false;
-    return (this.kit?.() !== undefined && needsPrep({ food: this.food(), health: this.health() })) || (this.tripStock?.needed() ?? false); // Track K1: milk
+    return (this.kit?.() !== undefined && needsPrep({ food: this.food(), health: this.health() })) || this.tripStocks.some((s) => s.needed(to)); // Track K1: milk; Track R9: rockets
   }
 
-  /** Eat to full and put on armour (see readiness.ts), then the milk (Track K1); resolves at once when there is nothing to do. */
-  async prepare(alive: () => boolean, phase: (p: PrepPhase) => void): Promise<void> {
+  /** Add a stock step to the trip readiness (Track K1 milk, Track R9 rockets); `removeTripStock` takes it out again. */
+  addTripStock(s: TripStock): void {
+    if (!this.tripStocks.includes(s)) this.tripStocks.push(s);
+  }
+
+  removeTripStock(s: TripStock): void {
+    const i = this.tripStocks.indexOf(s);
+    if (i >= 0) this.tripStocks.splice(i, 1);
+  }
+
+  /**
+   * Eat to full and put on armour (see readiness.ts), then the stock steps (Track K1 milk, Track R9 rockets; `to`: the
+   * trip's goal); resolves at once when there is nothing to do.
+   */
+  async prepare(alive: () => boolean, phase: (p: PrepPhase) => void, to?: Vec3): Promise<void> {
     const kit = this.kit?.();
     if (kit && needsPrep({ food: this.food(), health: this.health() })) {
       const self = { food: this.food(), health: this.health() };
@@ -889,10 +903,10 @@ export class PveController {
       const r = await prepareTrip(kit, self, { alive, phase, wait: (n) => (loop.waitTicks ? loop.waitTicks(n) : new Promise((res) => setTimeout(res, n * 50))) });
       this.log.info(`trip: prepared (${r.bites} bites, food ${r.foodBefore} -> ${r.foodAfter}${r.equipped.length ? `, wearing ${r.equipped.join(', ')}` : ''}; ${r.stop})`);
     }
-    // Track K1: the milk buckets missing to milkKeep, out of the carried boxes and the chests at home
-    const stock = this.tripStock;
-    if (stock && alive() && stock.needed()) {
-      phase('milk');
+    // Track K1: the milk buckets missing to milkKeep, out of the carried boxes and the chests at home; Track R9: rockets
+    for (const stock of [...this.tripStocks]) {
+      if (!alive() || !stock.needed(to)) continue;
+      phase(stock.name);
       await stock.run(alive);
     }
   }
@@ -2624,9 +2638,13 @@ class TripPrep {
     this.runs++;
     this.phase = 'eating';
     void this.c
-      .prepare(alive, (p) => {
-        this.phase = p;
-      })
+      .prepare(
+        alive,
+        (p) => {
+          this.phase = p;
+        },
+        to,
+      )
       .catch((e: unknown) => {
         this.c.log.warn(`trip: preparing failed: ${e instanceof Error ? e.message : String(e)}`);
       })

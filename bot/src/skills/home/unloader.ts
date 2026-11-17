@@ -46,7 +46,12 @@
 // Track K1 (ADR 0096, docs/pve.md "Milk on hand"): `milkKeep` (default 2) milk buckets stay (milkReserve, keep reason
 // `milk_reserve`), and with fewer than that carried, the empty buckets that would refill the rest; further milk and
 // empty buckets are unloaded like loot, so the unload and the milk stock never undo each other.
+//
+// Track R9 (ADR 0097, docs/flight.md "Rockets on hand"): the rockets are kept whole already (keepOnDropItems); of the
+// materials one craft round to `fireworksKeep` (default 64) stays (materialsReserve, keep reason `rocket_reserve`):
+// ceil(keep / 3) paper and gunpowder, and sugar cane for the paper that round lacks; the rest is unloaded like loot.
 import { keepOnDropItems } from '../../chat/commands-survival.ts';
+import { materialsReserve } from '../fly/rockets.ts'; // Track R9
 import { DEFAULT_THROWAWAY_MIN, THROWAWAY_BLOCKS } from '../survival/keeper.ts';
 import { isShulkerBox, maxStackOf } from '../container/chest.ts';
 import type { Vec3 } from '../../world/types.ts';
@@ -101,7 +106,7 @@ export interface UnloadMove {
   rule: Rule;
 }
 
-export type KeepReason = 'kept' | 'reserve' | 'stash_box' | 'flight_kit' | 'named_box' | 'unknown_box' | 'food_reserve' | 'milk_reserve'; // Track AU: flight_kit; Track AV: named_box; Track BJ: food_reserve; Track K1: milk_reserve
+export type KeepReason = 'kept' | 'reserve' | 'stash_box' | 'flight_kit' | 'named_box' | 'unknown_box' | 'food_reserve' | 'milk_reserve' | 'rocket_reserve'; // Track AU: flight_kit; Track AV: named_box; Track BJ: food_reserve; Track K1: milk_reserve; Track R9: rocket_reserve
 
 /**
  * Track AV: a step that makes room before the deposits.
@@ -196,6 +201,8 @@ export interface PlanOptions {
   seedReserve?: number;
   /** Track K1: milk buckets kept (`milkKeep`, default DEFAULT_MILK_KEEP) and the empty buckets that refill the rest (`milkReserve`). */
   milkKeep?: number;
+  /** Track R9: the rockets kept (`fireworksKeep`, default 64): the paper, gunpowder and sugar cane of one craft round kept (`materialsReserve`). */
+  fireworksKeep?: number;
 }
 
 /** Track BJ: crops that are food too: kept only within the food reserve (see the file comment). */
@@ -344,14 +351,16 @@ export function reserveByKind(slots: readonly UnloadSlot[], reserve = DEFAULT_TH
  * (`cropReserve`); `all` sums them. The one rule for the planner and the logistics' box and fill steps (they must not pack
  * what the plan keeps).
  */
-export function heldBack(slots: readonly UnloadSlot[], opts: Pick<PlanOptions, 'reserve' | 'throwaway' | 'foodReserve' | 'seedReserve' | 'milkKeep'> = {}): { throwaway: Map<string, number>; crops: Map<string, number>; milk: Map<string, number>; all: Map<string, number> } {
+export function heldBack(slots: readonly UnloadSlot[], opts: Pick<PlanOptions, 'reserve' | 'throwaway' | 'foodReserve' | 'seedReserve' | 'milkKeep' | 'fireworksKeep'> = {}): { throwaway: Map<string, number>; crops: Map<string, number>; milk: Map<string, number>; rockets: Map<string, number>; all: Map<string, number> } {
   const throwaway = reserveByKind(slots, opts.reserve ?? DEFAULT_THROWAWAY_MIN, opts.throwaway ?? THROWAWAY_BLOCKS);
   const crops = cropReserve(slots, opts.foodReserve, opts.seedReserve);
   const milk = milkReserve(slots, opts.milkKeep); // Track K1
+  const rockets = materialsReserve(slots, opts.fireworksKeep); // Track R9: paper, gunpowder, sugar cane for one craft round
   const all = new Map(throwaway);
   for (const [k, v] of crops) all.set(k, (all.get(k) ?? 0) + v);
   for (const [k, v] of milk) all.set(k, (all.get(k) ?? 0) + v);
-  return { throwaway, crops, milk, all };
+  for (const [k, v] of rockets) all.set(k, (all.get(k) ?? 0) + v);
+  return { throwaway, crops, milk, rockets, all };
 }
 
 function capacity(s: SimChest, name: string, max: number): number {
@@ -466,6 +475,17 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
     }
     if (r - hold > 0) keep(kind, r - hold, 'milk_reserve');
   }
+  // Track R9: the rocket materials of one craft round to fireworksKeep, held back the same way
+  for (const [kind, r] of held.rockets) {
+    let hold = r;
+    for (const s of [...slots].filter((x) => bareName(x.name) === kind).sort((a, b) => b.slot - a.slot)) {
+      if (hold <= 0) break;
+      const h = Math.min(hold, movable.get(s.slot) ?? s.count);
+      movable.set(s.slot, (movable.get(s.slot) ?? s.count) - h);
+      hold -= h;
+    }
+    if (r - hold > 0) keep(kind, r - hold, 'rocket_reserve');
+  }
 
   // Track AV: a named box carried serves the stash step: no unnamed box is held back for it
   let boxKept = !(opts.keepBox ?? true) || slots.some((s) => s.named && !s.flightKit && s.count > 0);
@@ -540,7 +560,7 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
  * empty unnamed boxes the unload sends back to the chest of spares (all but the stash step's one), and `free`, the free
  * inventory slots (the chore's slot trigger: tasks/process/unload.ts).
  */
-export function unloadableStacks(slots: readonly UnloadSlot[], opts: Pick<PlanOptions, 'reserve' | 'throwaway' | 'foodReserve' | 'seedReserve' | 'milkKeep'> = {}): { stacks: number; fullBoxes: number; spares: number; free: number } {
+export function unloadableStacks(slots: readonly UnloadSlot[], opts: Pick<PlanOptions, 'reserve' | 'throwaway' | 'foodReserve' | 'seedReserve' | 'milkKeep' | 'fireworksKeep'> = {}): { stacks: number; fullBoxes: number; spares: number; free: number } {
   const plan = planUnload(slots, [], { ...opts, keepBox: true, boxing: false });
   const stacks = new Set(plan.overflow.filter((o) => !isShulkerBox(o.name)).map((o) => o.slot)).size;
   const fullBoxes = slots.filter((s) => isShulkerBox(s.name) && (s.boxUsed ?? 0) > 0 && !s.flightKit).length; // Track AV: not the fireworks box

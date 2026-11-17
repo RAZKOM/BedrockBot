@@ -54,6 +54,8 @@ export interface PanelState {
     flight: string | null;
     /** Track K1: `1 of 2 milk buckets, 1 empty` (chat/commands-milk.ts); null without the milk commands or with milkKeep 0 and no milk. */
     milk: string | null;
+    /** Track R9: `40 of 64 (10 loose, 30 in the box), 0 gunpowder, 0 paper` (chat/commands-rockets.ts); null without the rockets commands. */
+    rockets: string | null;
     /** Track AP: from level_event start / stop rain / thunder; null until one arrived. */
     weather: 'clear' | 'rain' | 'thunder' | null;
     /** Track AP: the world's day number (absolute time / 24000). */
@@ -215,6 +217,8 @@ export interface PanelStateSource {
   flight?: () => { gliding: boolean; rockets: number; phase: string | undefined } | undefined;
   /** Track K1: the milk on hand (MilkController.panelLine). */
   milk?: () => string | undefined;
+  /** Track R9: the rockets on hand (RocketsController.panelLine). */
+  rockets?: () => string | undefined;
   weather?: () => 'clear' | 'rain' | 'thunder' | undefined;
   day?: () => number | undefined;
   deaths?: () => { deaths: number; lastDeath?: { cause: string; ts: string; messages: string[] } | undefined } | undefined;
@@ -309,6 +313,7 @@ export function buildPanelState(src: PanelStateSource, now = Date.now()): PanelS
       saturation: opt(src.saturation),
       flight: (() => { const f = safe(() => src.flight?.(), undefined); return f ? `${f.gliding ? 'gliding' : f.phase ? `flight: ${f.phase}` : 'on the ground'}, ${f.rockets} rocket${f.rockets === 1 ? '' : 's'}` : null; })(), // Track AU
       milk: opt(src.milk), // Track K1
+      rockets: opt(src.rockets), // Track R9
       weather: opt(src.weather),
       day: opt(src.day),
       deaths: typeof deaths?.deaths === 'number' ? deaths.deaths : null,

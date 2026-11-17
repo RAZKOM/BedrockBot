@@ -11,7 +11,7 @@
 //   and no hostile within MILK_THREAT, with fewer than `milkKeep` milk buckets: the same pass around home. An attempt that
 //   gained nothing (no cow near, no bucket and no iron) waits 10 minutes; one that gained milk 30 s. After it the home
 //   return walks home.
-// - The trip readiness (tasks/pve.ts tripStock, wired by chat/commands-milk.ts): before a long trip, the same pass with no
+// - The trip readiness (tasks/pve.ts tripStocks, wired by chat/commands-milk.ts): before a long trip, the same pass with no
 //   cows and no craft (milk out of the boxes, and out of the chests when at home).
 import type { Vec3 } from '../../connection/types.ts';
 import type { RuntimeSettings } from '../../config/settings.ts';

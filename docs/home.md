@@ -161,6 +161,11 @@ Milk (Track K1, decision [0096](decisions/0096-milk-on-hand.md), docs/pve.md "Mi
 milk buckets stay, and with fewer carried, the empty buckets that would refill the rest (`milk_reserve` in the kept
 list). Further milk buckets and empty buckets are unloaded like loot; at 0 all of them go.
 
+Rocket materials (Track R9, decision [0097](decisions/0097-rockets-on-hand.md), docs/flight.md "Rockets on hand"): the
+rockets stay whole as before (the flight kit); of the materials one craft round to `fireworksKeep` (default 64) from
+nothing stays: ceil(keep / 3) paper and gunpowder (22 each for 64), and sugar cane, a multiple of 3, for the paper of
+that round not carried (`rocket_reserve` in the kept list). The rest is unloaded like loot; at 0 all of it goes.
+
 Never unloaded: food (other than the crops above), totems, ender chests, and of the gear (anything with durability or armour) only the
 best of each class (`gearKept`: each armour slot with the worn armour counted, each tool kind by tier,
 shield, shears, elytra ...; spares of that rank stay). Worse pieces and the gear the bot has no skill for
@@ -539,6 +544,7 @@ for food and the like. Now also (through `restockFromBoxes` / `carried`):
 | `!tunnel`, `!quarry` torches, branch mining | no torch loose at a torch spot: 32 torches (`TORCH_RESTOCK`) |
 | flights (`!fly`, autoFly) | no rockets loose and no fireworks box: 64 rockets from any other carried box (a `bot_loot` or mixed box) before the takeoff; the kit check (`kitReady`) counts them |
 | milk (Track K1, docs/pve.md "Milk on hand": the readiness of a long trip, `!milk`, the milk chore) | fewer than `milkKeep` (2) milk buckets loose: the missing ones out of a carried box, then (at home only) out of the home chests through the withdrawal; `!milk` and the chore also take empty buckets the same way for the cows. `!unload` and the room chore keep `milkKeep` milk buckets and the empty buckets that refill the rest (keep reason `milk_reserve`); further milk and empty buckets are unloaded like loot |
+| rockets (Track R9, docs/flight.md "Rockets on hand": `!rockets`, the rockets chore, the readiness of a long trip that may fly) | fewer than `fireworksKeep` (64) rockets in all carried places: rockets out of the home chests (at home only), then paper and gunpowder loose, out of a carried box, then (at home only) out of the home chests through the withdrawal, and sugar cane the same way when the paper is short and a crafting table is carried or near; the readiness of a trip takes only from the inventory and the carried boxes. `!unload` and the room chore keep the materials of one craft round (keep reason `rocket_reserve`) |
 
 
 | Part | What |

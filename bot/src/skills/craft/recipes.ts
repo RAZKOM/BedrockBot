@@ -27,6 +27,14 @@ export interface RecipeOutput {
   networkId: number;
   metadata: number;
   blockRuntimeId: number;
+  /**
+   * Track R9: the output's wire extra data when it carries NBT (a crafted firework rocket's `Fireworks`: BDS 1.26.60 sends
+   * `{Explosions: [], Flight: 1}` with paper_sulphur_recipeId). The crafter writes it onto the slot it crafts into, so
+   * the model has the item's NBT before the server ever sends the slot.
+   */
+  extra?: unknown;
+  /** Track R9: a firework rocket output's flight duration (the NBT's `Fireworks.Flight`). */
+  flight?: number;
 }
 
 export interface Recipe {
@@ -57,6 +65,13 @@ interface WireItem {
   count: number;
   metadata: number;
   block_runtime_id: number;
+  extra?: { has_nbt?: unknown; nbt?: { nbt?: { value?: { Fireworks?: { value?: { Flight?: { value?: unknown } } } } } } };
+}
+
+/** Track R9: the wire extra data has NBT (`has_nbt` decodes as true, 'true' or 0xffff). */
+function hasNbt(extra: WireItem['extra']): boolean {
+  const h = extra?.has_nbt;
+  return (h === true || h === 'true' || h === 0xffff) && extra?.nbt !== undefined;
 }
 interface WireShaped {
   recipe_id: string;
@@ -205,7 +220,15 @@ export class RecipeIndex {
   }
 
   private outputs(items: WireItem[]): RecipeOutput[] {
-    return items.map((o) => ({ name: this.itemName(o.network_id) ?? `unknown:${o.network_id}`, count: o.count, networkId: o.network_id, metadata: o.metadata, blockRuntimeId: o.block_runtime_id }));
+    return items.map((o) => {
+      const out: RecipeOutput = { name: this.itemName(o.network_id) ?? `unknown:${o.network_id}`, count: o.count, networkId: o.network_id, metadata: o.metadata, blockRuntimeId: o.block_runtime_id };
+      if (hasNbt(o.extra)) {
+        out.extra = o.extra; // Track R9
+        const flight = o.extra?.nbt?.nbt?.value?.Fireworks?.value?.Flight?.value;
+        if (typeof flight === 'number') out.flight = flight;
+      }
+      return out;
+    });
   }
 
   private add(r: Recipe): void {
@@ -238,6 +261,8 @@ export interface PlanOptions {
   reserve?: (name: string) => number;
   /** Max stack per grid cell / output. Default 64. */
   maxStack?: (name: string) => number;
+  /** Track R9: only recipes this accepts (the rocket stock's paper + one gunpowder: skills/fly/rockets.ts). */
+  recipe?: (r: Recipe) => boolean;
 }
 
 export interface CraftCell {
@@ -348,6 +373,7 @@ export function planCraft(index: Pick<RecipeIndex, 'byOutput'>, item: string, n:
   const pool = usablePool(slots, opts);
   const plans = index
     .byOutput(item)
+    .filter((r) => opts.recipe?.(r) ?? true)
     .map((r) => planRecipe(r, n, pool, opts))
     .filter((p): p is CraftPlan => p !== undefined);
   plans.sort((a, b) => b.crafts - a.crafts || Number(a.table) - Number(b.table) || a.recipe.priority - b.recipe.priority || a.cells.length - b.cells.length);

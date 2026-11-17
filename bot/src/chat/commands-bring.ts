@@ -220,7 +220,7 @@ export function registerBringCommands(d: CommandDeps, extra: BringExtra = {}): B
       let feet = pve.playerFeet(name);
       if (!feet) return goHome(cancelled, `${name} is not online, so I took them home`);
       // trip readiness (come's rule): a long trip with food or health below 14 eats first
-      if (pve.prepNeeded(feet)) await pve.prepare(() => !cancelled(), () => undefined);
+      if (pve.prepNeeded(feet)) await pve.prepare(() => !cancelled(), () => undefined, feet);
       if (cancelled()) return interrupted('player');
       for (let leg = 0; leg < 5; leg++) {
         if (pve.trackedPlayerFeet(name)) {

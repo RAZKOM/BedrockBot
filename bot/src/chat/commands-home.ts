@@ -220,7 +220,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
 
   // Track V1 (ADR 0090, docs/inventory.md): the room chore keeps 4 inventory slots free when idle (tasks/process/room.ts)
   const kit = () => survivalKitOf(d.task);
-  const numberSetting = (k: 'throwawayMin' | 'foodReserve' | 'seedReserve' | 'dropStone' | 'milkKeep'): number | undefined => {
+  const numberSetting = (k: 'throwawayMin' | 'foodReserve' | 'seedReserve' | 'dropStone' | 'milkKeep' | 'fireworksKeep'): number | undefined => {
     const v = Number(d.settings.get(k));
     return Number.isFinite(v) && v >= 0 ? v : undefined;
   };
@@ -262,6 +262,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
       const food = numberSetting('foodReserve');
       const seeds = numberSetting('seedReserve');
       const milk = numberSetting('milkKeep'); // Track K1
+      const rockets = numberSetting('fireworksKeep'); // Track R9: the rocket materials of one craft round
       return {
         junk: kit()?.settings().junk ?? DEFAULT_JUNK,
         ...(k.boxSlot >= 0 ? { kitBox: k.boxSlot } : {}),
@@ -274,6 +275,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
         ...(food !== undefined ? { foodReserve: food } : {}),
         ...(seeds !== undefined ? { seedReserve: seeds } : {}),
         ...(milk !== undefined ? { milkKeep: milk } : {}),
+        ...(rockets !== undefined ? { fireworksKeep: rockets } : {}),
         worn: (kit()?.armour.worn() ?? []).flatMap((x) => (x ? [x.name] : [])),
       };
     },

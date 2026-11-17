@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CommandDef } from '../../src/chat/chat.ts';
 import { registerPveCommands, type PveCommandDeps } from '../../src/chat/commands-pve.ts';
-import { checkTrip, hasChestplate, longTrip, needsPrep, prepareTrip, splitNow, type TripKit } from '../../src/tasks/process/readiness.ts';
+import { checkTrip, hasChestplate, longTrip, needsPrep, prepareTrip, splitNow, type TripKit, type TripStock } from '../../src/tasks/process/readiness.ts';
 import { FLEE_LONG, homeClear, PveController, type PveNight } from '../../src/tasks/pve.ts';
 import { Inventory } from '../../src/world/inventory.ts';
 import type { EntityInfo, ItemStack, Vec3 } from '../../src/world/types.ts';
@@ -312,5 +312,42 @@ describe('!come / !follow / !kill with readiness', () => {
     expect(c.run('follow', ['Alex', 'now'])).toEqual(['following Alex']);
     expect(calls).toEqual(['come Steve ', 'follow Alex ', 'kill zombie 2 ', 'come Steve urgent', 'follow Alex urgent']);
     expect(c.run('sleep', [])).toEqual(['sleep needs a task that can walk (start with --walk, --home or --target realm)']);
+  });
+});
+
+describe('the trip readiness stock steps (Track K1 milk, Track R9 rockets)', () => {
+  it('each step is asked with the trip goal and runs in the order added, with its own phase; a removed step is gone', async () => {
+    const s = setup();
+    const asked: (Vec3 | undefined)[] = [];
+    const ran: string[] = [];
+    const step = (name: 'milk' | 'rockets', need: (to: Vec3 | undefined) => boolean): TripStock => ({
+      name,
+      needed: (to) => {
+        asked.push(to);
+        return need(to);
+      },
+      run: async () => {
+        await Promise.resolve();
+        ran.push(name);
+      },
+    });
+    const milk = step('milk', () => false);
+    const rockets = step('rockets', (to) => !!to && Math.abs(to.x) > 100);
+    s.pve.addTripStock(milk);
+    s.pve.addTripStock(rockets);
+    s.pve.addTripStock(rockets); // once only
+    expect(s.pve.tripStocks.map((x) => x.name)).toEqual(['milk', 'rockets']);
+    const near = { x: 50, y: -60, z: 0 };
+    const far = { x: 300, y: -60, z: 0 };
+    expect(s.pve.prepNeeded(near)).toBe(false);
+    expect(s.pve.prepNeeded(far)).toBe(true);
+    expect(asked).toContainEqual(far);
+    const phases: string[] = [];
+    await s.pve.prepare(() => true, (p) => phases.push(p), far);
+    expect(ran).toEqual(['rockets']);
+    expect(phases).toEqual(['rockets']);
+    s.pve.removeTripStock(rockets);
+    expect(s.pve.prepNeeded(far)).toBe(false);
+    expect(s.pve.tripStocks.map((x) => x.name)).toEqual(['milk']);
   });
 });

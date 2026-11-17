@@ -11,9 +11,16 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { Crafter, CRAFT_RECIPE_WIRE_TYPE, craftLine, destinationSlot, type CrafterDeps } from '../../../src/skills/craft/crafter.ts';
 import { gridSlots, RecipeIndex, type CraftingDataPacket } from '../../../src/skills/craft/recipes.ts';
+import { isPlainRocketRecipe, recipeFlight } from '../../../src/skills/fly/rockets.ts';
+import type { ItemV4 } from '../../../src/world/packets.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 
 const fixture = JSON.parse(readFileSync(new URL('../fixtures/crafting-data-1.26.60.json', import.meta.url), 'utf8')) as CraftingDataPacket & { items: Record<string, string> };
+// Track R9: the paper and rocket recipes of the same server (the plain rocket, one with a firework star, paper from cane)
+const rocketFixture = JSON.parse(readFileSync(new URL('../fixtures/crafting-rockets-1.26.60.json', import.meta.url), 'utf8')) as CraftingDataPacket & { items: Record<string, string> };
+fixture.shaped_recipes!.push(...rocketFixture.shaped_recipes!);
+fixture.shapeless_recipes!.push(...rocketFixture.shapeless_recipes!);
+Object.assign(fixture.items, rocketFixture.items);
 const recipes = new RecipeIndex((id) => fixture.items[String(id)]);
 recipes.handle(fixture);
 
@@ -268,14 +275,19 @@ function harness(initial: (ItemStack | null)[], o: Opts = {}) {
       }
     },
   };
+  const raws = new Map<number, ItemV4 | undefined>(); // Track R9: the wire items of the player slots (the crafter writes a crafted rocket's)
   const inventory = {
     get slots() {
       return slots;
     },
     selected: 0,
     window: (id: number) => (id === 0 ? { slots } : windows.has(id) ? { slots: windows.get(id)! } : undefined),
-    setItem: (window: number, slot: number, it: ItemStack | null) => {
+    rawItem: (window: number, slot: number) => (window === 0 ? raws.get(slot) : undefined),
+    setItem: (window: number, slot: number, it: ItemStack | null, raw?: ItemV4) => {
       if (window === 0) {
+        // (as the Inventory: a slot keeps its own wire item while the same item kind stays, rewritten to the new count)
+        const own = raws.get(slot);
+        raws.set(slot, raw ?? (it && own?.network_id === it.networkId ? { ...own, count: it.count } : undefined));
         slots[slot] = it;
         return;
       }
@@ -364,7 +376,7 @@ function harness(initial: (ItemStack | null)[], o: Opts = {}) {
   };
   const cancelled = () => (o.cancelAfterBatches !== undefined ? requests().filter((r) => r.actions.some((a) => a.type_id === 'craft_recipe')).length >= o.cancelAfterBatches : false);
   const kinds = () => requests().map((q) => q.actions.map((a) => `${a.type_id}${a.source?.slot_type.container_id === 'crafting_input' && a.type_id === 'place' ? '<' : ''}`).join(','));
-  return { crafter, server, sent, requests, modelCounts, skillCalls, noted, cancelled, blockAt, blocks, windows, kinds, loop };
+  return { crafter, server, sent, requests, modelCounts, skillCalls, noted, cancelled, blockAt, blocks, windows, kinds, loop, raws };
 }
 
 /** The invariants every run must keep: nothing destroyed at close, the model equal to the server, no window left. */
@@ -631,5 +643,41 @@ describe('Crafter on a fake server', () => {
     expect(h.server.counts()).toEqual({ oak_log: 16, oak_planks: 64 });
     clean(h);
     expect(h.sent.at(-1)!.name).toBe('container_close');
+  });
+
+  // Track R9 (ADR 0097): the rocket stock's craft
+  const plainRocket = { recipe: (r: Parameters<typeof isPlainRocketRecipe>[0]) => isPlainRocketRecipe(r) && recipeFlight(r) === 1 };
+
+  it('rockets: 1 paper + 1 gunpowder -> 3 in the 2 x 2 grid (paper_sulphur_recipeId); the slot carries the recipe output NBT (flight 1) before the server sends it', async () => {
+    const h = harness([item('paper', 4, 1), item('gunpowder', 4, 2)]);
+    const r = await h.crafter.craft('firework_rocket', 12, () => false, plainRocket);
+    expect(r).toMatchObject({ ok: true, crafted: 12, used: { paper: 4, gunpowder: 4 }, batches: 1 });
+    expect(r.table).toBeUndefined();
+    expect(h.requests()[1]!.actions[0]).toMatchObject({ type_id: 'craft_recipe', recipe_network_id: 2773, times_crafted: 4 });
+    clean(h);
+    const at = h.server.slots.findIndex((x) => x?.name === 'firework_rocket');
+    expect(h.crafter.plan('firework_rocket', 3, plainRocket)?.table).toBe(false);
+    const model = h.modelCounts();
+    expect(model.firework_rocket).toBe(12);
+    const slot = (h as { raws: Map<number, ItemV4 | undefined> }).raws.get(at);
+    expect(slot?.count).toBe(12);
+    expect(JSON.stringify((slot as { extra?: unknown } | undefined)?.extra)).toContain('"Flight":{"type":"byte","value":1}');
+  });
+
+  it('rockets: a stack of rockets of another flight (the plain ones of the script API) is not merged into; the crafted ones get a slot of their own', async () => {
+    const plain = item('firework_rocket', 10, 1);
+    const h = harness([plain, item('paper', 1, 2), item('gunpowder', 1, 3)]);
+    const r = await h.crafter.craft('firework_rocket', 3, () => false, plainRocket);
+    expect(r.crafted).toBe(3);
+    const rows = h.server.slots.map((x, i) => (x?.name === 'firework_rocket' ? `${i}:${x.count}` : '')).filter(Boolean);
+    expect(rows).toEqual(['0:10', '9:3']);
+    expect(h.crafter.plan('firework_rocket', 3)).toBeDefined();
+  });
+
+  it('rockets: the plain recipe is picked over the firework star one, and paper from sugar cane needs a table (3 in a row)', async () => {
+    const h = harness([item('paper', 2, 1), item('gunpowder', 2, 2), item('firework_star', 2, 3)]);
+    expect(h.crafter.plan('firework_rocket', 3, plainRocket)?.recipe.networkId).toBe(2773);
+    const cane = harness([item('sugar_cane', 6, 1)]);
+    expect(cane.crafter.plan('paper', 6)).toMatchObject({ table: true, crafts: 2, outputPer: 3 });
   });
 });

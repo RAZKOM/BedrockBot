@@ -42,7 +42,7 @@ import type { PlaceOptions, PlaceResult } from '../place/place.ts';
 import { wireItemOf } from '../place/place.ts';
 import { isBuiltBlock } from '../terrain/classify.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
-import { gridSlots, OUTPUT_CONTAINER, OUTPUT_SLOT, planCraft, usedText, type CraftPlan, type PlanOptions, type RecipeIndex } from './recipes.ts';
+import { gridSlots, OUTPUT_CONTAINER, OUTPUT_SLOT, planCraft, usedText, type CraftPlan, type PlanOptions, type Recipe, type RecipeIndex } from './recipes.ts';
 
 /**
  * BDS 1.26 ItemStackRequestActionType value of CraftRecipe (the second header byte, see the file comment).
@@ -199,6 +199,11 @@ export interface CrafterDeps {
   now?: () => number;
 }
 
+/** Track R9: which recipes a craft may use (undefined: any). */
+export interface CraftPick {
+  recipe?: (r: Recipe) => boolean;
+}
+
 export type CraftReason = 'done' | 'no_recipe' | 'missing' | 'no_table' | 'open_failed' | 'request_failed' | 'inventory_full' | 'interrupted' | 'not_ready' | 'busy' | 'table_left';
 
 export interface CraftResult {
@@ -243,12 +248,16 @@ export function craftLine(r: CraftResult): string {
   return parts.join('; ');
 }
 
-/** The output slot after a fill that empties `emptied` slots: a matching stack with room, else an empty slot (main inventory first). */
-export function destinationSlot(slots: readonly (ItemStack | null)[], name: string, metadata: number, count: number, emptied: ReadonlySet<number> = new Set(), maxStack = maxStackOf): number | undefined {
+/**
+ * The output slot after a fill that empties `emptied` slots: a matching stack with room, else an empty slot (main inventory
+ * first). Track R9: `flight` is the output's flight duration (a crafted rocket's 1): a stack of rockets with another one, or
+ * with none known, is not the same item (the server refuses the merge: their NBT differs).
+ */
+export function destinationSlot(slots: readonly (ItemStack | null)[], name: string, metadata: number, count: number, emptied: ReadonlySet<number> = new Set(), maxStack = maxStackOf, flight?: number): number | undefined {
   const max = maxStack(name);
   for (let i = 0; i < 36; i++) {
     const s = slots[i];
-    if (!emptied.has(i) && s?.name === name && s.metadata === metadata && s.count + count <= max) return i;
+    if (!emptied.has(i) && s?.name === name && s.metadata === metadata && s.flight === flight && s.count + count <= max) return i;
   }
   for (let i = 9; i < 36; i++) if (!slots[i] || emptied.has(i)) return i;
   for (let i = 0; i < 9; i++) if (!slots[i] || emptied.has(i)) return i;
@@ -284,20 +293,24 @@ export class Crafter {
     return this.running;
   }
 
-  private planOpts(): PlanOptions {
+  private planOpts(pick?: CraftPick): PlanOptions {
     const o: PlanOptions = { maxStack: maxStackOf };
     if (this.d.keep) o.keep = this.d.keep;
     if (this.d.reserve) o.reserve = this.d.reserve;
+    if (pick?.recipe) o.recipe = pick.recipe;
     return o;
   }
 
-  /** The plan `craft` would follow now (no packets). */
-  plan(item: string, n: number): CraftPlan | undefined {
-    return planCraft(this.d.recipes, item, n, this.d.world.inventory.slots, this.planOpts());
+  /** The plan `craft` would follow now (no packets). `pick.recipe`: only the recipes it accepts (Track R9). */
+  plan(item: string, n: number, pick?: CraftPick): CraftPlan | undefined {
+    return planCraft(this.d.recipes, item, n, this.d.world.inventory.slots, this.planOpts(pick));
   }
 
-  /** Make `n` of `item` (as many as the inventory allows), batch by batch; `cancelled` is checked between batches. */
-  async craft(item: string, n: number, cancelled: () => boolean = () => false): Promise<CraftResult> {
+  /**
+   * Make `n` of `item` (as many as the inventory allows), batch by batch; `cancelled` is checked between batches.
+   * `pick.recipe` (Track R9): only the recipes it accepts (the rocket stock crafts paper + one gunpowder, never a star's).
+   */
+  async craft(item: string, n: number, cancelled: () => boolean = () => false, pick?: CraftPick): Promise<CraftResult> {
     const t0 = this.now();
     const res: CraftResult = { ok: false, reason: 'done', item, wanted: n, crafted: 0, used: {}, batches: 0, requests: 0, ms: 0 };
     const r0 = this.req.stats.sent;
@@ -311,7 +324,7 @@ export class Crafter {
     };
     if (this.running && !this.nested) return done('busy');
     if (!this.d.loop.state.ready) return done('not_ready');
-    const first = this.plan(item, n);
+    const first = this.plan(item, n, pick);
     if (!first) return done('no_recipe');
     res.item = first.item;
     if (first.shortfall) res.shortfall = first.shortfall;
@@ -343,7 +356,7 @@ export class Crafter {
         const window = await this.open(tableAt);
         if (window === undefined) return done('open_failed');
         try {
-          const r = await this.batches(window, item, n, res, cancelled);
+          const r = await this.batches(window, item, n, res, cancelled, pick);
           return done(r);
         } finally {
           await this.giveBack(window, res, true);
@@ -369,11 +382,11 @@ export class Crafter {
 
   // ---- batches -----------------------------------------------------------------------------------------
 
-  private async batches(window: number, item: string, n: number, res: CraftResult, cancelled: () => boolean): Promise<CraftReason> {
+  private async batches(window: number, item: string, n: number, res: CraftResult, cancelled: () => boolean, pick?: CraftPick): Promise<CraftReason> {
     let retried = false;
     while (res.crafted < n) {
       if (cancelled()) return 'interrupted';
-      const plan = this.plan(item, n - res.crafted);
+      const plan = this.plan(item, n - res.crafted, pick);
       if (!plan) return 'no_recipe';
       if (plan.shortfall && !res.shortfall) res.shortfall = plan.shortfall; // the first plan's numbers (before anything was consumed)
       if (plan.crafts <= 0) return res.crafted > 0 ? 'done' : 'missing';
@@ -449,7 +462,7 @@ export class Crafter {
           left -= k;
         }
       }
-      if (destinationSlot(inv.slots, out.name, out.metadata, made, emptied) === undefined) return { ok: false, reason: 'inventory_full' };
+      if (destinationSlot(inv.slots, out.name, out.metadata, made, emptied, maxStackOf, out.flight) === undefined) return { ok: false, reason: 'inventory_full' };
     }
     // fill
     for (let round = 0; round < 12 && [...need.values()].some((x) => x.left > 0); round++) {
@@ -493,7 +506,7 @@ export class Crafter {
       for (const p of predicted) this.noteHotbar(p.slot);
     }
     // craft
-    const dst = destinationSlot(inv.slots, out.name, out.metadata, made);
+    const dst = destinationSlot(inv.slots, out.name, out.metadata, made, new Set(), maxStackOf, out.flight);
     if (dst === undefined) return { ok: false, reason: 'inventory_full' };
     const dstBefore = inv.slots[dst] ?? null;
     const dstRaw = inv.rawItem?.(0, dst);
@@ -503,8 +516,12 @@ export class Crafter {
     actions.push({ type_id: 'place', legacy_type_id: 1, count: made, source: slotInfo(OUTPUT_CONTAINER, OUTPUT_SLOT, id), destination: playerSlotInfo(dst, dstBefore?.stackId) });
     const predictedOut: ItemStack = dstBefore ? { ...dstBefore, count: dstBefore.count + made } : { name: out.name, networkId: out.networkId, count: made, metadata: out.metadata, blockRuntimeId: out.blockRuntimeId };
     if (!dstBefore) delete predictedOut.stackId;
+    // Track R9: an output with NBT (a crafted rocket's Fireworks) goes into an empty slot with the recipe's wire item, so
+    // the model knows its flight duration and a use echoes the item whole before the server ever sends the slot
+    const outRaw = !dstBefore && out.extra !== undefined ? ({ network_id: out.networkId, count: made, metadata: out.metadata, has_stack_id: false, block_runtime_id: out.blockRuntimeId, extra: out.extra } as unknown as ItemV4) : undefined;
+    if (!dstBefore && out.flight !== undefined) predictedOut.flight = out.flight;
     const gridBeforeCraft = new Map(gridItems);
-    inv.setItem(0, dst, predictedOut);
+    inv.setItem(0, dst, predictedOut, outRaw);
     for (const gslot of gridItems.keys()) inv.setItem(window, gslot, null);
     gridItems.clear();
     const r = await this.req.send(actions, 60, (late) => {
@@ -600,7 +617,7 @@ export class Crafter {
   }
 
   private noteHotbar(slot: number): void {
-    if (slot < 9) this.d.hotbar?.noteRaw?.(slot, wireItemOf(this.d.world.inventory.slots[slot], undefined));
+    if (slot < 9) this.d.hotbar?.noteRaw?.(slot, wireItemOf(this.d.world.inventory.slots[slot], this.d.world.inventory.rawItem?.(0, slot))); // Track R9: the slot's wire item (a crafted rocket's NBT)
   }
 
   /** The grid cells the model shows as filled. */

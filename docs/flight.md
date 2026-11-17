@@ -287,6 +287,70 @@ bds-fly on 2026-10-30** in `fly-economy` with `FLY_ECON_BASELINE=1`; the bds-fly
 | 150 to the 3x3 at 40 up | 3 to 5 (table above) | 3 | 3 / 0 / 0 |
 | 300 to a 5x5 at 20 up | 2 to 4 | 3 | 3 / 0 / 0 |
 
+## Rockets on hand (Track R9)
+
+The rocket economy above spends rockets; this keeps them coming. Decision record:
+[decisions/0097-rockets-on-hand.md](decisions/0097-rockets-on-hand.md). Code: `skills/fly/rockets.ts` (the rules),
+`tasks/process/rockets.ts` (the job, `!rockets`, the chore, the readiness pass), `chat/commands-rockets.ts` (the wiring).
+
+- **The target, `fireworksKeep` (default 64, 0 to 640, 0 = off).** Rockets are counted once in every carried place: loose
+  (hotbar and main slots), the fireworks box, the other carried boxes (the flight takes those out before a takeoff).
+  `fireworksMin` is not changed: it stays the hotbar's refill line before a flight and after a landing, and the refill is
+  the flight's own.
+- **The recipe.** The server's own `crafting_data` decides: BDS 1.26.60.6 sends one firework rocket recipe without a
+  firework star, `paper_sulphur_recipeId`, shapeless, 1 paper and 1 gunpowder for 3 rockets, so it fits the inventory's
+  2 x 2 grid (no table); its output's NBT is `Fireworks {Explosions: [], Flight: 1}`. The 20 recipes with a star are never
+  used (`rocketRecipe`). Paper is shaped, 3 sugar cane in a row (3 x 1) for 3 paper: it needs a crafting table. Flight
+  durations 2 and 3 exist only as the game's multi recipes, which the recipe index does not keep.
+- **The duration: 1.** The only one the recipe gives, and the measurement agrees (400 blocks over flat ground,
+  `fly-open` flat400, 3 flights a side, `flyKitBurn` off as on the live bot): the script API's plain rockets 2 rockets a
+  flight (2 in the climb), 499 to 515 ticks; crafted rockets of duration 1, 1, 1 and 2 rockets (1 in the climb; the third
+  flight topped 28 over its cruise and took a cruise rocket), 441, 441 and 620 ticks. Every flight within 0.7 of its cell,
+  no damage. One crafted rocket climbs as far as two plain ones; a longer burn is not needed.
+- **The flight knows what it carries.** The flight reads a rocket's duration from the item (`ItemStack.flight`, the NBT's
+  `Fireworks.Flight`; "The burn of the rockets at hand"). A stack the crafter made had no wire item until the server sent
+  the slot, so it read as a plain rocket and its first use echoed an item without NBT (refused once: Track F12's open
+  point). Now the crafter writes the recipe output's wire extra data onto the slot it crafts into (`RecipeOutput.extra`),
+  so the model has the NBT at once, and a crafted stack never lands on a stack of another flight duration (the server
+  refuses that merge; `destinationSlot`). On bds-fly3 (`FLY_ROCKETS=crafted`, the kit crafted by `!craft` and flown
+  without the harness's earlier "use once on the ground"): the model read flight duration 1 with the NBT on the wire
+  item straight after the craft, the first rocket fired at tick 10 in 3 of 3 flights (no `fired nothing`), all 3 landed
+  within 0.11 of their cell with no damage (1 or 2 rockets, 380 to 651 ticks).
+- **The stock rule (`planRockets`), the cheapest source first:** rockets out of the chests at home (at home only); then
+  crafts, ceil(missing / 3) of them: gunpowder and paper loose, out of the carried boxes (Supply.ensure), out of the home
+  chests (at home); paper from sugar cane only when there is not enough paper and a crafting table is carried or near.
+  Gunpowder is never farmed: with none anywhere the plan, `!rockets` and `!rockets status` say so (`rockets: 0 of 64
+  carried; 64 short: no gunpowder (carried, in the boxes or at home)`), and `!status` in short (`rockets 0/64 (no
+  gunpowder)`).
+- **Where the rockets go.** The chore and `!rockets` put the crafted rockets into the fireworks box when one is carried
+  (any room it has; a box of rockets only, so it stays the fireworks box); with no fireworks box they stay loose. The
+  room chore's rule (loose rockets beyond two stacks into the box) is unchanged.
+- **Where it runs.** `!rockets [n] | status` (a user process, priority 40); the rockets chore (auto, priority 30,
+  `autoRockets`, default off): by day, idle, within 16 blocks of home, no hostile within 16, under the target with a
+  step to take; 30 s after a pass that gained rockets, 10 minutes after one that did not; it walks home after. The
+  trip readiness (docs/pve.md "Trip readiness"): before a long trip that may fly (`autoFly` on, an elytra above its worn
+  limit, farther than `flyMin`) with fewer rockets than the flight's need (twice the energy model's estimate for the way
+  out, never under `fireworksMin`, at most `fireworksKeep`) and the materials for one craft carried: a `rockets` phase
+  crafts from what is carried (loose and in the carried boxes; never the chests at home, never a walk to storage) and
+  leaves the rockets loose for the flight.
+- **The unload keeps one craft round.** `!unload` and the room chore's box step keep the rockets (the flight kit, as
+  before) and the materials for one round to `fireworksKeep` from nothing: ceil(keep / 3) paper and gunpowder (22 each
+  for 64), and sugar cane (a multiple of 3) for the paper of that round not carried (keep reason `rocket_reserve`); the
+  rest is stored like loot.
+- **Shown.** `!status` has a `rockets N/K (...)` part while `fireworksKeep` is over 0 or rockets are carried; the web
+  panel's vitals a `rockets` row (`40 of 64 (12 loose, 28 in the box), 10 gunpowder, 4 paper`).
+
+Measured on bds-home (`test/e2e/home-rockets.test.ts`, 3 runs, 3 of 3 each):
+
+| case | set-up | result |
+|---|---|---|
+| the chore | 20 paper and 20 gunpowder in the home chest, a fireworks box of 4 carried, `autoRockets` on | both taken out of the chest, 60 rockets crafted in one batch in the inventory's grid (0.4 s, 2 requests) and put into the box: 64 in the box, none loose, the chest empty; 7.0 to 8.6 s from the setting to `rockets chore: done` |
+| from sugar cane | 6 sugar cane and 2 gunpowder in the home chest, a crafting table near, no paper | `!rockets 6`: 3 cane and 2 gunpowder taken, 3 paper made at the table, 6 rockets crafted, the model's stack flight duration 1; 1 paper left, 3 cane left in the chest; 3.2 s |
+| no gunpowder | 30 paper in the home chest | `!rockets` at once: `rockets: 0 of 64 carried; 64 short: no gunpowder (carried, in the boxes or at home)`; `!status` has `rockets 0/64 (no gunpowder)`; no process started |
+
+The flight on crafted rockets again on the final code (`fly-open` flat400, `FLY_ROCKETS=crafted`, bds-fly3): 3 of 3
+landed 0.02 to 0.07 off their cell, no damage, 1, 2 and 1 rockets, 385 to 634 ticks, no `fired nothing`.
+
 ## Descent geometry (Track AU2)
 
 > Since Track F11 a circle is never flown lower than 3 over the highest column under it, and a circle round the
@@ -7250,7 +7314,8 @@ count, a server-written slot left as sent, the armour window; 7 of its 9 fail on
   flights had none.
 - A stack the crafter makes into an empty slot has no wire item until the server sends one (the client cannot know
   a crafted item's NBT); a crafted rocket used before any other packet for that slot would be refused once. Not seen
-  here: the bot does not craft rockets on its own.
+  here: the bot does not craft rockets on its own. (Track R9: it does now, and the crafter writes the recipe output's
+  NBT onto the slot, which the server's recipe list carries: "Rockets on hand (Track R9)".)
 - A flight with no rockets at hand and only the box (`fly` with 0 loose rockets) gave no answer on the test server in
   3 of 3 tries (no line, no packets for 90 s); not this track's and not looked into. (Track F13, below: the command
   answered in under a second and walked; the run waited for lines it never says and recorded no movement packets.)
