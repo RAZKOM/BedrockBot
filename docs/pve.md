@@ -1556,7 +1556,7 @@ Deaths, mean damage a run, the median of each run's lowest health.
 
 | kit, time | cell | off (Track M5) | on (Track M6) |
 |---|---|---|---|
-| none, night | `pillager-1` | **8** of 10, 23.9, 0 | 0 of 10, 2.9, 20 |
+| none, night | `pillager-1` | **8** of 10, 23.9, 0 | 0 of 10, 14.3, 11 (Track M8) |
 | none, night | `skeleton-4` | **1** of 10, 19.6, 4.5 | 0 of 10, 2.7, 16.5 |
 | none, night | `mixed-8` | 0 of 10, 16.8, 7 | 0 of 10, 0.3, 20 |
 | stone, night | `seal-5` | 0 of 10, 29.0, 1 | 0 of 10, 25.2, 1 |
@@ -1567,13 +1567,16 @@ Deaths, mean damage a run, the median of each run's lowest health.
 
 Every run of this table: 0 harness reruns. The no-kit rows, stone `seal-5` and half of stone `mixed-8` ran before two
 later details of `volley` (the armour term, which is 0 with no armour, and the cap of 6 on a blamed hit); the other rows
-ran on the final code.
+ran on the final code. The `pillager-1` row's `on` side is Track M8's measurement on the gauntlet as it is now (every run
+started at rest on its spot); this table first gave 2.9 and 20 there, measured while a run that came after an `off`
+run's death started with the bot walking off its spot, out of the pillager's reach (8 of those 10 runs; Track M8). The
+same applies to one `on` run of no-kit `skeleton-4` (0 damage after the one death off; the other 9 took 3.0 a run).
 
-- **No kit.** With `bareArcher` the bot runs from the first archer in sight at full health and the bolts that reach it
-  are the odd one at the edge of their reach: `pillager-1` 8 deaths in 10 to none, damage 23.9 to 2.9 a run. The other
-  mobs of `mixed-8` do not catch a bot that runs from 20 health. One more `pillager-1` chunk on the final code (both
-  rules): 4 deaths in 5 off, 0 in 4 on, damage 2.8 a run on (the last run stopped on a truth-pack timeout, a harness
-  error).
+- **No kit.** With `bareArcher` the bot runs from the first archer in sight at full health and the pillager follows it
+  the whole minute, a bolt from 8 to 9.9 blocks about every 18 s: `pillager-1` 8 deaths in 10 to none, damage 23.9 to
+  14.3 a run (Track M8). The other mobs of `mixed-8` do not catch a bot that runs from 20 health. One more
+  `pillager-1` chunk on the final code (both rules): 4 deaths in 5 off, 0 in 4 on (its `on` damage, 2.8 a run, has the
+  same fault: 3 of the 4 came after a death; the last run stopped on a truth-pack timeout, a harness error).
 - **The Realm's kit with the blades stowed** (`pve-testmobs`, the `bare` cases: a netherite sword moved out of the
   hotbar, the elytra, rockets, `fleeFly` on; `!test mobs skeleton4 1 bare 40s`): with `bareArcher` the bot ran on foot
   from the start, damage 0, lowest health 20, in both cases, and the elytra flee was not asked (it is below 14). Those
@@ -1755,8 +1758,8 @@ chunk with both rules as one A/B (`MOBS_AB_RULE=witchRush,milkCure`, 2 buckets, 
   `skeleton-4` 4.3, 16 and 4.8, 16; `mixed-8` 0 and 0; stone `seal-5` 17.3, 1 and 21.5, 1; `mixed-8` 27.8, 1 and 26.2,
   1; `skeleton-4` 8.5, 12 and 5.7, 12; iron `seal-5` 18.1, 8.6 and 19.7, 1.5. The two sides run the same code for these
   kits, so their differences are the spread of 10 runs. The no-kit `pillager-1` damage is higher than Track M6's table
-  (2.9 a run) on both sides, and also with the code before this track (8 runs: 14.1 a run, no death), so it is not this
-  track's change.
+  first gave (2.9 a run) on both sides, and also with the code before this track (8 runs: 14.1 a run, no death): the
+  2.9 was the harness's (Track M8), and 13 to 14 is what the bot takes.
 
 ### What the bot should carry
 
@@ -1907,6 +1910,86 @@ Both rules are on with the update; no setting changes. By night, near home, the 
   twice, and answers `milk: 2 milk buckets carried (2 from a cow)`. A take that gets less answers `... short of 2:
   buckets out of the chests at home: <why>` and logs `milk: buckets out of the chests at home: got N of 2 (<why>)`;
   further from home the reply ends `out of reach: I am N blocks from home (they count within M)`.
+
+## Track M8: a run starts at rest
+
+Everything here ran on bds-pve and bds-gaunt (both BDS 1.26.60.6, normal difficulty; the containers date from
+2026-10-30 and were not recreated, so the compose files' 1.26.65.1 had not taken effect for Tracks M6 and M7 either)
+on 2026-11-17 with the gauntlet, no kit, `pillager-1`, by night, whole-run traces (`MOBS_TRACE_ALL=1`). No change to
+the bot.
+
+### What moved the no-kit `pillager-1` number
+
+Track M6's table gave 2.9 damage a run with `bareArcher` on; Track M7 measured 13 to 14 on the same cell, also with the
+code M6 merged. Run again, with every run following a run that lived (`bareArcher` on, no A/B):
+
+| code | runs | deaths | damage a run | lowest median |
+|---|---|---|---|---|
+| Track M6's change on its own base (before the stack move of Track U1) | 5 | 0 | 11.2 | 14 |
+| Track M6 as merged | 10 | 0 | 11.5 | 13 |
+| the code after Track K2 | 10 | 0 | 13.8 | 10 |
+
+The bot's code and the servers gave the same number; the order of the runs did not. In an A/B series the runs of the
+two sides alternate on one bot, and after a death the respawn's return home (`afterRespawn` in `tasks/registry.ts`)
+walks to the home point of the run that died, the spot before, 40 blocks along the row. It starts once the chunks are in
+after the respawn, while the harness sets up the next run, and the harness stopped processes only at a run's end. The
+next run's mobs were summoned with the bot 8.6 to 11.4 blocks off its spot (median 9.8), still walking away under the
+`home` process, and the pillager first in sight at 16 (median 15.9 against 7.0 from rest). The flight on foot then
+started at the edge of the scan and the pillager did not close in.
+
+The same A/B on the code after Track K2 with the gauntlet as it was, 10 runs a side over both servers: off 8 deaths,
+25.4, 0; on 0 deaths, 3.3, 20, with 7 of 10 `on` runs taking no damage. Track M6's table gave 8 deaths, 23.9, 0 and 0
+deaths, 2.9, 20. By the run before:
+
+| `on` runs | old gauntlet: runs | bolts a run | damage a run | Track M6's rows: runs | damage a run |
+|---|---|---|---|---|---|
+| after an `off` run that died | 8 | 0.3 | 0.9 (7 with none) | 8 | 1.8 (6 with none) |
+| after an `off` run that lived | 2 | 3.5 | 13.0 | 2 | 7.5 |
+
+Track M7's early-kit rows ran `MOBS_AB_RULE=witchRush,milkCure`, where both sides are the same code for a bot with no
+kit; its no-kit runs never died, so no run there started off its spot. In the old gauntlet's series a few other runs
+also started away from rest (the run before's flight still going, once 39 blocks off); the start rule below catches
+those too.
+
+### The flight with no blade, from rest (the traces)
+
+The 25 runs above, `bareArcher` on, each after a run that lived: the flight starts at 20 health within a tick of the
+summon with the pillager at 7.0. It runs `away` for about 24 ticks (sprinting 79 % of them) and then the `far` leg for
+the rest of the minute: 184 to 263 blocks, then `flee: gave up (60 s)` in every run. The pillager follows the whole way
+at a median 11.5; 82 bolts landed, all on the `far` leg, all from 8.0 to 9.9 blocks, one every 358 ticks (about 18 s),
+3 or 4 each: 3.3 a run, 12.4 damage, no death. The body sprints on 33 % of the `far` leg's ticks.
+
+### The gauntlet now (`test/e2e/gaunt-mobs.test.ts`)
+
+- After a death (in a run, or after its end while the harness cleans up) the harness waits for the respawn's return
+  home and stops it; before each run's setup and after it, every process is stopped until none runs.
+- Before the mobs are summoned the bot must stand within 1 of its spot with no process running; else the run is a
+  harness run (`not at rest at the start (D from the spot, P running)`), run again and kept apart like a block's death.
+  Before the wait for a death in the cleanup it caught one run in 21 (12.6 off its spot, after a death that came just
+  past a run's 60 s); the final series had none.
+- Each row names the server it ran on (`server`: the container, the BDS build its image was created with, the version
+  the server advertised), and the log has `gauntlet server: <container> <build> (pong <version>), image <image>`.
+
+### The row again (10 runs a side)
+
+`MOBS_AB_RULE=bareArcher`, off then on, 5 a side a chunk, one chunk on each server, the gauntlet as it is now:
+
+| kit, time | cell | off | on |
+|---|---|---|---|
+| none, night | `pillager-1` | **6** of 10, 27.4, 0 | 0 of 10, 14.3, 11 |
+
+Every run started on its spot with nothing running and the pillager at 7.0. The 6 `on` runs right after a death took
+14.5 a run, the 4 after a run that lived 14.0. With the first version of the start rule (no wait for a death in the
+cleanup; the run it caught was run again): off 6 of 10, 27.7, 0; on 0 of 10, 11.7, 12.5.
+
+### Not met
+
+- **The run does not shake the pillager.** It follows for the whole 60 s and about 250 blocks and lands a bolt every
+  18 s; at the end of the flight (`gave up`) guard takes it up again with a fist. A run of more than a minute is not measured,
+  nor any way to break its line (ground, cover, a door).
+- **Other rows of Tracks M4 to M6.** Only the runs that came right after a death were started off their spot. Of
+  Track M6's table only the two rows above had such runs; the A/B rows of Tracks M4 and M5 with deaths on both sides were
+  not run again, so their sides may be off by the same fault in either direction.
 
 ## Packets (BDS 1.26.60.6, verified)
 

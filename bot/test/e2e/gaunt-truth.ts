@@ -7,6 +7,7 @@
 //
 // Env: GAUNT_BDS_HOST (127.0.0.1), GAUNT_BDS_PORT (19188), GAUNT_BDS_CONTAINER (bds-gaunt); game version
 // and transport from env.ts; GAUNT_VERBOSE=1 logs the bot's lines.
+import { execFile } from 'node:child_process';
 import { randomInt } from 'node:crypto';
 import { Chat, chatPacket, parseOwners } from '../../src/chat/chat.ts';
 import { registerBuiltinCommands } from '../../src/chat/commands.ts';
@@ -41,6 +42,26 @@ export function privateArea(): { x: number; z: number; cell: number } {
 
 export function gauntCmd(...words: string[]): Promise<void> {
   return consoleCommand(GAUNT_CONTAINER, ...words);
+}
+
+/**
+ * Track M8: what a measurement ran on: the container, its image and the BDS build it was created with (its VERSION;
+ * `?` when docker cannot tell). A row carries it, so a change of server shows in the rows, not only in their numbers.
+ */
+export function serverBuild(container = GAUNT_CONTAINER): Promise<{ container: string; image: string; build: string }> {
+  return new Promise((resolve) => {
+    execFile('docker', ['inspect', '--format', '{{.Config.Image}}|{{json .Config.Env}}', container], (err, stdout) => {
+      if (err) return resolve({ container, image: '?', build: '?' });
+      const [image, env] = stdout.trim().split('|', 2);
+      let build = '?';
+      try {
+        build = (JSON.parse(env ?? '[]') as string[]).find((e) => e.startsWith('VERSION='))?.slice('VERSION='.length) ?? '?';
+      } catch {
+        // (left `?`)
+      }
+      resolve({ container, image: image ?? '?', build });
+    });
+  });
 }
 
 /** Normal difficulty, frozen clock, no weather, no natural spawns, keep inventory. */

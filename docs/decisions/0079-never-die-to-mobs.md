@@ -291,7 +291,9 @@ tick by tick over whole runs, each rule A/B'd at 10 runs a side on its rows and 
     A fist chase stood 2 to 5 blocks in front of the pillager, a bolt (4) every 47 ticks, 20 to 9 health in about 7 s,
     and the flight on foot started at 5 to 7 with the fourth bolt; once running, the bolts that landed came from 8.3 to
     9.6 blocks about every 26 s. The run was right and late. No kit `pillager-1`: 8 deaths in 10 to 0, damage 23.9 to
-    2.9 a run. A choice of when the flight starts, like decisions 32 to 44.
+    14.3 a run (Track M8: first given as 2.9, a harness fault that started 8 of the 10 `on` runs off their spot after
+    the `off` run's death; run from rest, the pillager follows the whole minute and a bolt lands about every 18 s).
+    A choice of when the flight starts, like decisions 32 to 44.
 46. **It does not move the elytra flee up.** At 14 health or over (`FLY_SHOOTER_HEALTH`) the flight `bareArcher` starts
     stays on foot; Track M3's rule for shooters (the elytra flee below 14 with no blade) and every floor below 14 choose
     as before. A takeoff costs rockets, which a world without cheats has to craft.

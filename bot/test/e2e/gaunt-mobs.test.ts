@@ -21,11 +21,15 @@
 // the bot idle in the open at its home point, each kit once.
 // Never asserts the bars (it is the measurement); asserts only that the harness itself worked (every cell ran). About
 // 25 min a kit for the full set.
+// Track M8: every run starts from rest. After a death the respawn's return home (to the run before's spot) is waited for
+// and stopped, and before the mobs are summoned no process may run and the bot must stand on its spot; else the run is a
+// harness run (rerun, kept apart). Each row names the server it ran on (`server`: the container, its image's BDS build,
+// the version the server advertised).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { appendFileSync } from 'node:fs';
 import type { Vec3 } from '../../src/connection/types.ts';
 import { flyControlOf } from '../../src/chat/commands-fly.ts';
-import { centre, E2E, FEET_Y, fill, gauntCmd, prepareServer, privateArea, sleep, startGauntBot, teleport, uniqueName, until, type GauntBot, type HurtRecord } from './gaunt-truth.ts';
+import { centre, E2E, FEET_Y, fill, gauntCmd, GAUNT_CONTAINER, prepareServer, privateArea, serverBuild, sleep, startGauntBot, teleport, uniqueName, until, type GauntBot, type HurtRecord } from './gaunt-truth.ts';
 import { blockDamage, cleanSpot, harnessDeaths } from './pve-truth.ts';
 
 const KITS = (process.env.MOBS_KITS ?? 'bare,live,kb2').split(',').map((s) => s.trim()).filter(Boolean);
@@ -119,6 +123,8 @@ interface CellResult {
   /** Track M3: the elytra flee in this cell: the times the floor was asked, how its flights ended, the last one's line, how far from the spot the bot stood at the cell's end. */
   fleeFly?: { asked: number; landed: number; ended: number; refused: number; last: string | null; fromSpot: number };
   label: string;
+  /** Track M8: the server the run ran on (`bds-pve 1.26.60.6 (pong 1.26.60)`). */
+  server?: string;
   /** The A/B setting's value in this run (MOBS_AB), and the repeat's index. */
   ab?: string;
   rep?: number;
@@ -198,6 +204,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
   const area = privateArea();
   const results: CellResult[] = [];
   const harnessRuns: CellResult[] = [];
+  let server = ''; // Track M8: `<container> <BDS build> (pong <version>)`, set once connected
   let spot = 0;
   const nextSpot = (): Vec3 => {
     const i = spot++;
@@ -263,9 +270,37 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     );
   }
 
+  /**
+   * Track M8: nothing left running from the run before (a respawn's return home walks to that run's spot: started during
+   * the next run's setup it took the bot 11 blocks off its spot, out of the pillager's reach, before the mobs came).
+   */
+  async function settle(b: GauntBot): Promise<void> {
+    for (const t0 = Date.now(); Date.now() - t0 < 5_000; ) {
+      b.pve.stop();
+      if (!b.task.processes?.active) return;
+      await sleep(100);
+    }
+  }
+
+  /**
+   * Track M8: after a death (in a run, or after its end while the harness cleaned up) the respawn's return home starts once
+   * the chunks are in, up to 10 s after the respawn: wait for it and stop it before the next run is set up.
+   */
+  let deathsSettled = 0;
+  async function respawned(b: GauntBot): Promise<void> {
+    const r = b.built.respawn!;
+    if (!r.dead && r.deaths <= deathsSettled) return;
+    await until(() => (!r.dead ? true : undefined), 30_000, 'respawned').catch(() => undefined);
+    await until(() => ((b.task.processes?.find('home').length ?? 0) > 0 ? true : undefined), 12_000, 'the return home', 100).catch(() => undefined);
+    await settle(b);
+    deathsSettled = r.deaths;
+  }
+
   async function freshSpot(b: GauntBot): Promise<Vec3> {
     const at = nextSpot();
     const c = centre(at);
+    await respawned(b);
+    await settle(b);
     await teleport(b, c);
     // repair the ground (a creeper may have cratered a neighbour spot, an earlier run's seal-in left its walls) and clear the
     // air; Track M5: the spot's cells are read back and a dirty one refused
@@ -280,6 +315,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       if (ok) break;
       if (i >= 3) throw new Error(`health ${b.pve.health()} after 4 sets`);
     }
+    await settle(b);
     return c;
   }
 
@@ -301,6 +337,11 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       // the bot drops in from 3 blocks up right as the mobs appear (the walk after a landing)
       await b.truth.tp(b.name, { x: c.x, y: FEET_Y + 3, z: c.z }, 0, 0);
     }
+    // Track M8: the run starts from rest on its spot (the landed cell drops in from 3 up by design)
+    const me0 = b.pve.position();
+    const off0 = Math.hypot(me0.x - c.x, me0.z - c.z);
+    const proc0 = b.task.processes?.active?.name;
+    const notAtStart = off0 > 1 || proc0 !== undefined ? `not at rest at the start (${r1(off0)} from the spot${proc0 ? `, ${proc0} running` : ''})` : undefined;
     const ids: string[] = [];
     const n = cell.mobs.length;
     for (let i = 0; i < n; i++) {
@@ -433,7 +474,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     const deathCauses = b.built.respawn!.history.filter((d) => d.n > deaths0).map((d) => d.cause);
     const notMob = died ? harnessDeaths(b, deaths0, hurt) : [];
     const fromBlocks = blockDamage(hurt, b.name);
-    const harness = notMob.length ? `died of ${notMob.join(', ')}` : fromBlocks > 0 ? `${fromBlocks} damage from blocks` : undefined;
+    const harness = notAtStart ?? (notMob.length ? `died of ${notMob.join(', ')}` : fromBlocks > 0 ? `${fromBlocks} damage from blocks` : undefined);
     const sealTried = (floorCounts(b).seal ?? 0) > (floors0.seal ?? 0);
     if ((died || TRACE_ALL || (SEAL_TRACE && sealTried)) && TRACE) {
       const lastTick = mine.length ? Math.max(...mine.map((h) => h.tick)) : 0;
@@ -449,6 +490,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     for (const h of friendlyHits) friendlyOn[`${h.victimType.replace('minecraft:', '')}${h.victimName ? ` "${h.victimName}"` : ''}`] = (friendlyOn[`${h.victimType.replace('minecraft:', '')}${h.victimName ? ` "${h.victimName}"` : ''}`] ?? 0) + 1;
     const res: CellResult = {
       label: LABEL,
+      ...(server ? { server } : {}),
       kit,
       cell: cell.name,
       activity: cell.activity,
@@ -512,8 +554,8 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     }
     b.pve.stop();
     await b.truth.cleanup();
-    if (died) await until(() => (!b.built.respawn!.dead ? true : undefined), 30_000, 'respawned').catch(() => undefined);
     await sleep(500);
+    await respawned(b);
     return res;
   }
 
@@ -524,6 +566,9 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     await prepareServer({ time: TIME });
     if (HARD) await gauntCmd('difficulty', 'hard');
     bot = await startGauntBot('GtMobs', {}, { owners: [ownerName], values: { guard: '16' } });
+    const sv = await serverBuild(GAUNT_CONTAINER);
+    server = `${sv.container} ${sv.build} (pong ${bot.conn.gameVersion})`;
+    console.log(`gauntlet server: ${server}, image ${sv.image}`);
     for (const kv of SETTINGS) {
       const [k, v] = kv.split('=');
       if (k && v !== undefined) bot.pve.settings.set(k as never, v);
