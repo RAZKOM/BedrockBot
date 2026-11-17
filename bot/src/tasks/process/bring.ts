@@ -48,6 +48,7 @@ export function mergeWithdraw(a: WithdrawReport | undefined, b: WithdrawReport):
   for (const [k, v] of Object.entries(b.taken)) taken[k] = (taken[k] ?? 0) + v;
   return {
     ...b,
+    ...(a.room && !b.room ? { room: a.room } : {}), // Track K3: the room an interrupted run made
     taken,
     from: [...new Set([...a.from, ...b.from])],
     boxes: [...a.boxes, ...b.boxes],

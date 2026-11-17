@@ -14,6 +14,10 @@
 //                on BDS 1.26.60 by the e2e home-milk: one empty bucket less, one milk bucket more within 2 to 3
 //                ticks). A cow gives milk again at once (no cooldown in vanilla), so one cow fills every bucket.
 //                A hostile within MILK_THREAT ends it (`hostile`): guard and flee take over as for any chore.
+//   Track K3 (ADR 0096 decision 13): cows farther out. MilkSightings remembers the milkable adults that went out of
+//                view (where they were, MILK_SEEN_MS); farChoice picks the nearest within a range (`milkRange`) in view
+//                or seen; beyond MILK_RADIUS the Milker walks there first (walkFar: the normal walk, its time from the
+//                distance, stopped by a hostile within MILK_THREAT or the night), at most MILK_FAR_WALKS walks a run.
 import { silentLogger, type Logger } from '../../log.ts';
 import type { BlockInfo, EntityInfo, ItemStack, Vec3 } from '../../world/types.ts';
 import { bareType, entityFeet, entitySize, isPlayerEntity } from '../combat/hostiles.ts';
@@ -37,6 +41,17 @@ export const MILK_REACH = 3;
 export const MILK_IGNORE_MS = 30_000;
 /** A hostile this near ends the milking (guard and flee own the fight). */
 export const MILK_THREAT = 16;
+/** Track K3: `milkRange` at most (blocks, horizontal; the setting's max). */
+export const MILK_RANGE_MAX = 96;
+/** Track K3: a mob farther than MILK_RADIUS is looked for at most this many blocks above or below the centre (terrain, not a cave). */
+export const MILK_FAR_DY = 16;
+/** Track K3: a mob seen and gone out of view is remembered where it was this long (ms). */
+export const MILK_SEEN_MS = 30 * 60_000;
+/** Track K3: the far walk's time budget (ticks per block of straight line, and at least). */
+export const MILK_WALK_TICKS_PER_BLOCK = 20;
+export const MILK_WALK_MIN_TICKS = 300;
+/** Track K3: far walks per run at most (a mob that keeps walking off, sightings that were empty). */
+export const MILK_FAR_WALKS = 4;
 
 const bare = (n: string): string => (n.startsWith('minecraft:') ? n.slice(10) : n);
 
@@ -99,28 +114,12 @@ export interface MilkPlan {
   short?: string;
 }
 
-/** Track K2: the chests at home count as a source this many blocks beyond `homeChestRadius` (across) from home ... */
-export const MILK_HOME_EXTRA = 8;
-/** ... and this many blocks above or below it. */
-export const MILK_HOME_DY = 16;
-
 /**
- * Track K2 (ADR 0096 addendum): are the chests at home in reach of `!milk`, the chore and the trip readiness? The home
- * logistics' own "at home" (8 blocks across, 4 up or down) left them out for a bot idle in its shelter, a room or a floor
- * away from the home point, so `!milk` took nothing next to 213 buckets. The withdrawal walks to the chests itself
- * (`!bring` does it from anywhere); this only bounds the walk: within `chestRadius` + MILK_HOME_EXTRA of home across
- * (the containers are found within `chestRadius` of it) and MILK_HOME_DY up or down. `why` says why not.
+ * Track K2 (ADR 0096 addendum): are the chests at home in reach of `!milk`, the chore and the trip readiness (`!milk`
+ * took nothing next to 213 buckets with the bot outside the logistics' 8 blocks)? Track K3: the rule lives with the home
+ * logistics (home/reach.ts), whose withdrawal makes room first by the same rule.
  */
-export function homeChestReach(home: Vec3 | undefined, feet: Vec3 | undefined, chestRadius: number): { inReach: boolean; why?: string } {
-  if (!home) return { inReach: false, why: 'no home set' };
-  if (!feet) return { inReach: false, why: 'my position is unknown' };
-  const reach = Math.max(0, chestRadius) + MILK_HOME_EXTRA;
-  const across = Math.hypot(feet.x - (home.x + 0.5), feet.z - (home.z + 0.5));
-  if (across > reach) return { inReach: false, why: `I am ${Math.round(across)} blocks from home (they count within ${reach})` };
-  const dy = feet.y - home.y;
-  if (Math.abs(dy) > MILK_HOME_DY) return { inReach: false, why: `I am ${Math.round(Math.abs(dy))} blocks ${dy > 0 ? 'above' : 'below'} home (they count within ${MILK_HOME_DY} up or down)` };
-  return { inReach: true };
-}
+export { HOME_REACH_DY as MILK_HOME_DY, HOME_REACH_EXTRA as MILK_HOME_EXTRA, homeChestReach } from '../home/reach.ts';
 
 /** The early game's bucket: craft one, or why not. */
 export function craftChoice(i: Pick<MilkStockInput, 'craft' | 'iron' | 'table'> & { anyBucket: boolean }): { craft: true } | { craft: false; why: string } {
@@ -205,6 +204,8 @@ export interface MilkTargetQuery {
   /** Left alone for now (did not give milk, or could not be reached). */
   ignored?(rid: bigint): boolean;
   blockAt?: (p: Vec3) => BlockInfo | undefined;
+  /** Track K3: blocks above or below the centre (default MILK_DY; a far look: MILK_FAR_DY). */
+  dy?: number;
 }
 
 /** The refill choice (see the file comment): the mobs to milk, nearest to the bot first. */
@@ -215,11 +216,100 @@ export function milkTargets(entities: Iterable<EntityInfo>, q: MilkTargetQuery):
     const rid = e.runtimeId;
     if (q.isBaby(rid) || q.isDead?.(rid) || q.ignored?.(rid)) continue;
     const f = entityFeet(e);
-    if (Math.hypot(f.x - q.center.x, f.z - q.center.z) > q.radius || Math.abs(f.y - q.center.y) > MILK_DY) continue;
+    if (Math.hypot(f.x - q.center.x, f.z - q.center.z) > q.radius || Math.abs(f.y - q.center.y) > (q.dy ?? MILK_DY)) continue;
     if (q.blockAt && wetCell(q.blockAt, f)) continue;
     out.push({ e, d: Math.hypot(f.x - q.me.x, f.y - q.me.y, f.z - q.me.z) });
   }
   return out.sort((a, b) => a.d - b.d).map((x) => x.e);
+}
+
+/** Track K3: a milkable mob seen and gone out of view: where it was last, when. */
+export interface MilkSighting {
+  rid: bigint;
+  kind: string;
+  feet: Vec3;
+  /** ms (the sightings' clock). */
+  at: number;
+}
+
+/**
+ * Track K3 (ADR 0096 decision 13): the milkable adults the bot has seen, by where they were when they went out of view
+ * (the server removes an entity beyond its view range; a cow grazes within a few blocks of where it was). Kept
+ * MILK_SEEN_MS; a mob back in view is the live entity again; one gone dead, or not there when the bot came, is forgotten.
+ */
+export class MilkSightings {
+  private readonly seen = new Map<bigint, MilkSighting>();
+  private readonly now: () => number;
+
+  constructor(now: () => number = () => performance.now()) {
+    this.now = now;
+  }
+
+  /** An entity went out of view: remembered when it is a milkable adult (`baby`, `dead`: what the trackers knew then). */
+  gone(e: EntityInfo, baby: boolean, dead: boolean): void {
+    const kind = milkKindOf(e.type);
+    if (!kind || isPlayerEntity(e) || baby || dead) return;
+    this.seen.set(e.runtimeId, { rid: e.runtimeId, kind, feet: entityFeet(e), at: this.now() });
+  }
+
+  forget(rid: bigint): void {
+    this.seen.delete(rid);
+  }
+
+  /** The sightings still fresh and not in view now (`live`: the tracked entities). */
+  list(live: ReadonlyMap<bigint, unknown>): MilkSighting[] {
+    const t = this.now();
+    const out: MilkSighting[] = [];
+    for (const [rid, s] of this.seen) {
+      if (t - s.at > MILK_SEEN_MS) this.seen.delete(rid);
+      else if (!live.has(rid)) out.push(s);
+    }
+    return out;
+  }
+
+  get size(): number {
+    return this.seen.size;
+  }
+}
+
+/** Track K3: one candidate of the range choice (a mob in view, or a sighting). */
+export interface FarCandidate {
+  rid: bigint;
+  kind: string;
+  feet: Vec3;
+  /** Horizontal distance from the centre. */
+  d: number;
+  /** In view now (false: a sighting, `ago` ms old). */
+  live: boolean;
+  ago?: number;
+}
+
+/**
+ * Track K3 (ADR 0096 decision 13): the range choice of `!milk far` (and the chore with `milkRange` raised): the nearest
+ * milkable adult within `range` of the centre (horizontal; at most MILK_FAR_DY up or down), in view or seen there
+ * within MILK_SEEN_MS, not standing in water or lava (a mob in view), not ignored; `nearest` is the nearest one known at
+ * any distance (the reply names it when none is within the range).
+ */
+export function farChoice(live: Iterable<EntityInfo>, sightings: readonly MilkSighting[], q: MilkTargetQuery & { now: number }): { target?: FarCandidate; nearest?: FarCandidate } {
+  const all: FarCandidate[] = [];
+  const dy = q.dy ?? MILK_FAR_DY;
+  for (const e of milkTargets(live, { ...q, radius: Infinity, dy: Infinity })) {
+    const f = entityFeet(e);
+    all.push({ rid: e.runtimeId, kind: milkKindOf(e.type)!, feet: f, d: Math.hypot(f.x - q.center.x, f.z - q.center.z), live: true });
+  }
+  for (const s of sightings) {
+    if (q.ignored?.(s.rid) || q.isDead?.(s.rid)) continue;
+    all.push({ rid: s.rid, kind: s.kind, feet: s.feet, d: Math.hypot(s.feet.x - q.center.x, s.feet.z - q.center.z), live: false, ago: Math.max(0, q.now - s.at) });
+  }
+  all.sort((a, b) => a.d - b.d || Number(b.live) - Number(a.live));
+  const target = all.find((c) => c.d <= q.radius && Math.abs(c.feet.y - q.center.y) <= dy);
+  return { ...(target ? { target } : {}), ...(all[0] ? { nearest: all[0] } : {}) };
+}
+
+/** `a cow 80 blocks away` / `a goat 52 blocks away (seen 3 min ago)`. */
+export function candidateLine(c: FarCandidate): string {
+  const ago = c.live || c.ago === undefined ? '' : ` (seen ${c.ago < 60_000 ? `${Math.max(1, Math.round(c.ago / 1000))} s` : `${Math.round(c.ago / 60_000)} min`} ago)`;
+  return `a ${c.kind} ${Math.round(c.d)} blocks away${ago}`;
 }
 
 /** The click on a mob with the bucket (the same packet as the feeding: a right click on a mob, `interact`). */
@@ -244,6 +334,10 @@ export interface MilkerDeps {
   closeGates?(pen: Pen, cancelled: () => boolean): Promise<number>;
   /** A hostile near (its name and distance), or undefined. */
   threat?(): string | undefined;
+  /** Track K3: day (a walk beyond MILK_RADIUS runs by day only); without it, always day. */
+  isDay?(): boolean;
+  /** Track K3: stop the running walk (the hostile or night watch of a far walk). */
+  stopWalk?(): void;
   log?: Logger;
   now?: () => number;
 }
@@ -253,9 +347,14 @@ export interface MilkOptions {
   radius: number;
   /** Milk buckets wanted (at most the empty buckets carried). */
   want: number;
+  /**
+   * Track K3: `!milk far`: the mobs seen within `radius` count too (MilkSightings: walked to where they were), the
+   * vertical limit is MILK_FAR_DY, and the nearest known one is named when none is within the radius.
+   */
+  far?: boolean;
 }
 
-export type MilkReason = 'done' | 'no_bucket' | 'no_mob' | 'hostile' | 'refused' | 'interrupted';
+export type MilkReason = 'done' | 'no_bucket' | 'no_mob' | 'hostile' | 'refused' | 'interrupted' | 'night' | 'walk_failed';
 
 export interface MilkResult {
   ok: boolean;
@@ -267,6 +366,12 @@ export interface MilkResult {
   refused: number;
   /** The hostile that ended it. */
   threat?: string;
+  /** Track K3: the farthest walk beyond MILK_RADIUS this run made (to a mob in view or to where one was seen). */
+  walked?: FarCandidate;
+  /** Track K3: with none within the radius, the nearest one known (`!milk far`'s reply names it). */
+  nearest?: FarCandidate;
+  /** Track K3: why a far walk ended short (`walk_failed`). */
+  walkWhy?: string;
   ms: number;
 }
 
@@ -289,11 +394,14 @@ export class Milker {
   current: { kind: string; runtimeId: bigint } | undefined;
   /** Track K2: the pens of the mobs this run went to (by id): left and closed at the end. */
   private readonly pens = new Map<string, Pen>();
+  /** Track K3: the milkable adults seen and gone out of view (commands-milk.ts feeds it from the entity tracker). */
+  readonly sightings: MilkSightings;
 
   constructor(d: MilkerDeps) {
     this.d = d;
     this.log = d.log ?? silentLogger;
     this.now = d.now ?? (() => performance.now());
+    this.sightings = new MilkSightings(this.now);
   }
 
   ignored(rid: bigint): boolean {
@@ -301,10 +409,9 @@ export class Milker {
     return t !== undefined && this.now() < t;
   }
 
-  /** The mobs `milk` would go to now (the refill choice), nearest first. */
-  targets(center: Vec3, radius: number): EntityInfo[] {
+  private query(center: Vec3, radius: number, dy?: number): MilkTargetQuery {
     const d = this.d;
-    return milkTargets(d.entities().values(), {
+    return {
       center,
       radius,
       me: d.loop.state.pos,
@@ -312,7 +419,61 @@ export class Milker {
       isDead: (r) => d.isDead?.(r) ?? false,
       ignored: (r) => this.ignored(r),
       ...(d.blockAt ? { blockAt: (p: Vec3) => d.blockAt!(p) } : {}),
+      ...(dy !== undefined ? { dy } : {}),
+    };
+  }
+
+  /** The mobs `milk` would go to now (the refill choice), nearest first; beyond MILK_RADIUS (Track K3) up to MILK_FAR_DY up or down. */
+  targets(center: Vec3, radius: number): EntityInfo[] {
+    const near = milkTargets(this.d.entities().values(), this.query(center, Math.min(radius, MILK_RADIUS)));
+    if (radius <= MILK_RADIUS || near.length > 0) return near;
+    return milkTargets(this.d.entities().values(), this.query(center, radius, MILK_FAR_DY));
+  }
+
+  /** Track K3: the range choice (farChoice) around `center`: in view and seen. */
+  farChoice(center: Vec3, radius: number): { target?: FarCandidate; nearest?: FarCandidate } {
+    const live = this.d.entities();
+    return farChoice(live.values(), this.sightings.list(live), { ...this.query(center, radius, MILK_FAR_DY), now: this.now() });
+  }
+
+  /**
+   * Track K3: the walk to a mob beyond MILK_RADIUS (or to where one was seen): the normal walk and its safety rules
+   * (closeDoors), its time from the distance, watched every 5 ticks for a hostile within MILK_THREAT and for the night,
+   * either of which stops it.
+   */
+  private async walkFar(c: FarCandidate, cancelled: () => boolean): Promise<{ r: 'arrived' | 'hostile' | 'night' | 'failed' | 'interrupted'; why?: string }> {
+    const d = this.d;
+    const me = d.loop.state.pos;
+    const dist = Math.hypot(c.feet.x - me.x, c.feet.z - me.z);
+    const timeoutTicks = Math.max(MILK_WALK_MIN_TICKS, Math.ceil(dist * MILK_WALK_TICKS_PER_BLOCK));
+    this.log.info(`milk: walking to ${candidateLine({ ...c, d: dist })} (${timeoutTicks} ticks at most)`);
+    let settled = false;
+    let stop: { r: 'hostile' | 'night'; why: string } | undefined;
+    const walk = d.mover.goto({ type: 'near', p: { x: c.feet.x, y: Math.floor(c.feet.y), z: c.feet.z }, r: 3 }, { timeoutTicks, closeDoors: true }).finally(() => {
+      settled = true;
     });
+    while (!settled) {
+      await d.loop.waitTicks(5);
+      if (settled) break;
+      if (cancelled()) {
+        d.stopWalk?.();
+        break;
+      }
+      const t = d.threat?.();
+      if (t) stop = { r: 'hostile', why: t };
+      else if (d.isDay && !d.isDay()) stop = { r: 'night', why: 'night fell' };
+      if (stop) {
+        d.stopWalk?.();
+        break;
+      }
+    }
+    const r = await walk;
+    if (cancelled()) return { r: 'interrupted' };
+    if (stop) return stop;
+    const left = Math.hypot(c.feet.x - d.loop.state.pos.x, c.feet.z - d.loop.state.pos.z);
+    this.log.info(`milk: the walk to the ${c.kind} ended ${r.ok ? 'there' : `(${r.reason ?? 'failed'})`}, ${left.toFixed(1)} blocks from it`);
+    if (!r.ok && left > MILK_RADIUS / 2) return { r: 'failed', why: r.reason ?? 'failed' };
+    return { r: 'arrived' };
   }
 
   async milk(o: MilkOptions, cancelled: () => boolean): Promise<MilkResult> {
@@ -327,9 +488,13 @@ export class Milker {
       res.reason = reason;
       res.ok = res.milked > 0 && (reason === 'done' || res.milked >= o.want);
       res.ms = this.now() - t0;
-      this.log.info(`milk: ${res.milked} of ${o.want} milked (${kindsLine(res.kinds)}; ${reason}${res.threat ? `: ${res.threat}` : ''}) in ${short(res.ms)}`);
+      this.log.info(`milk: ${res.milked} of ${o.want} milked (${kindsLine(res.kinds)}; ${reason}${res.threat ? `: ${res.threat}` : ''}${res.walked ? `; walked to ${candidateLine(res.walked)}` : ''}) in ${short(res.ms)}`);
       return res;
     };
+    // Track K3: the sightings walked to in this run (not there: forgotten; never twice), the far walks made
+    const tried = new Set<bigint>();
+    let walks = 0;
+    const noMore = (): MilkReason => (res.milked > 0 ? 'done' : res.walkWhy ? 'walk_failed' : res.refused > 0 ? 'refused' : 'no_mob');
     while (res.milked < o.want) {
       if (cancelled()) return finish('interrupted');
       const threat = this.d.threat?.();
@@ -339,7 +504,58 @@ export class Milker {
       }
       if (bucketCounts(this.d.inventory.slots).empty <= 0) return finish(res.milked > 0 ? 'done' : 'no_bucket');
       const target = this.targets(o.center, o.radius)[0];
-      if (!target) return finish(res.milked > 0 ? 'done' : res.refused > 0 ? 'refused' : 'no_mob');
+      // Track K3: none in view within the radius: where one was seen (`!milk far`)
+      if (!target && o.far) {
+        const ch = this.farChoice(o.center, o.radius);
+        const seen = ch.target && !ch.target.live && !tried.has(ch.target.rid) ? ch.target : undefined;
+        if (!seen) {
+          if (res.milked === 0 && ch.nearest && !ch.target) res.nearest = ch.nearest;
+          return finish(noMore());
+        }
+        if (walks++ >= MILK_FAR_WALKS) return finish(noMore());
+        tried.add(seen.rid);
+        if (this.d.isDay && !this.d.isDay()) return finish('night');
+        const w = await this.walkFar(seen, cancelled);
+        if (w.r === 'interrupted') return finish('interrupted');
+        if (w.r === 'hostile' || w.r === 'night') {
+          if (w.r === 'hostile') res.threat = w.why!;
+          return finish(w.r);
+        }
+        if (!res.walked || seen.d > res.walked.d) res.walked = seen;
+        if (w.r === 'failed') {
+          res.walkWhy = w.why!;
+          this.ignoredUntil.set(seen.rid, this.now() + MILK_IGNORE_MS);
+          continue;
+        }
+        // there: the mob is in view again (the live target next round), or it is gone from there
+        if (!this.d.entities().has(seen.rid)) {
+          this.sightings.forget(seen.rid);
+          this.log.info(`milk: no ${seen.kind} where one was seen`);
+        }
+        continue;
+      }
+      if (!target) return finish(noMore());
+      // Track K3: a mob in view beyond MILK_RADIUS: the far walk first (watched for hostiles and the night)
+      const tf = entityFeet(target);
+      const me = this.d.loop.state.pos;
+      const away = Math.hypot(tf.x - me.x, tf.z - me.z);
+      if (away > MILK_RADIUS) {
+        if (this.d.isDay && !this.d.isDay()) return finish('night');
+        if (walks++ >= MILK_FAR_WALKS) return finish(noMore());
+        const c: FarCandidate = { rid: target.runtimeId, kind: milkKindOf(target.type) ?? bareType(target.type), feet: tf, d: Math.hypot(tf.x - o.center.x, tf.z - o.center.z), live: true };
+        const w = await this.walkFar(c, cancelled);
+        if (w.r === 'interrupted') return finish('interrupted');
+        if (w.r === 'hostile' || w.r === 'night') {
+          if (w.r === 'hostile') res.threat = w.why!;
+          return finish(w.r);
+        }
+        if (!res.walked || c.d > res.walked.d) res.walked = c;
+        if (w.r === 'failed') {
+          res.walkWhy = w.why!;
+          this.ignoredUntil.set(target.runtimeId, this.now() + MILK_IGNORE_MS);
+        }
+        continue; // the target again from nearer (it may have moved)
+      }
       const kind = milkKindOf(target.type) ?? bareType(target.type);
       const r = await this.milkOne(target, kind, cancelled);
       if (r === 'interrupted') return finish('interrupted');

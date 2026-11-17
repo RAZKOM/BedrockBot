@@ -34,8 +34,8 @@ import { maxStackOf } from '../container/chest.ts';
 import type { ChestRecord } from '../../world/cache/chests.ts';
 import type { Vec3 } from '../../world/types.ts';
 import { BOX_SLOTS, carriedBoxes, type CarriedBox } from '../home/boxing.ts';
-import { stockOf, type BringItem } from '../home/bring.ts';
-import type { WithdrawReport } from '../home/logistics.ts';
+import { stockOf } from '../home/bring.ts';
+import { roomLine, type WithdrawReport, type WithdrawRequest } from '../home/logistics.ts';
 import { THROWAWAY_BLOCKS } from '../survival/keeper.ts';
 import type { BoxOps } from './boxes.ts';
 
@@ -49,7 +49,7 @@ export interface SupplyDeps {
   /** The chest memory around home (HomeLogistics.records); without it `available` counts no home stock. */
   records?(): ChestRecord[];
   /** The home route (HomeLogistics.withdraw); without it `ensure` never fetches from home. */
-  withdraw?(cancelled: () => boolean, req: { item: BringItem; want: number }): Promise<WithdrawReport>;
+  withdraw?(cancelled: () => boolean, req: WithdrawRequest): Promise<WithdrawReport>;
   /** Carried boxes owed to a chest (HomeLogistics.owedSlots: an extract's box not back yet): never a source or a stow target. */
   owed?(): Set<number>;
   /** The home logistics' serial lock (HomeLogistics.exclusive); without it the box work runs at once. */
@@ -72,6 +72,11 @@ export interface EnsureOptions {
   avoid?: (p: Vec3) => boolean;
   /** Fetch what the carried boxes lack from the chests at home (walks there). Default false. */
   home?: boolean;
+  /**
+   * Track K3: free inventory slots the job needs after a take from home (the crafted rockets, the milk a bucket stack
+   * turns into): with no room for the take and these, the withdrawal unloads that many stacks at home first.
+   */
+  spare?: number;
 }
 
 export interface EnsureResult {
@@ -82,6 +87,8 @@ export interface EnsureResult {
   fromBoxes: number;
   fromHome: number;
   reason?: string;
+  /** Track K3: the room the home route made first (logistics.ts roomLine: `made room: unloaded 1 stack (64 andesite)`). */
+  room?: string;
 }
 
 /** Item names as given (a word, or several kinds that count alike: the throwaway blocks). */
@@ -175,11 +182,15 @@ export class Supply {
     }
     if (res.loose < n && opts.home && this.d.withdraw) {
       const before = res.loose;
-      const w = await this.d.withdraw(cancelled, { item: { word: ns[0] ?? '', names: ns, boxes: false }, want: n });
+      const w = await this.d.withdraw(cancelled, { item: { word: ns[0] ?? '', names: ns, boxes: false }, want: n, ...(opts.spare ? { spare: opts.spare } : {}) });
       res.loose = this.loose(ns);
       res.fromHome = Math.max(0, res.loose - before);
-      // Track K2: a withdrawal that ended "done" with fewer (the chests held fewer than remembered) says so too
-      if (!w.ok || res.loose < n) res.reason = w.reason ?? (res.fromHome > 0 ? `the chests at home gave ${res.fromHome} of ${n - before}` : 'the chests at home gave none (fewer there than remembered)');
+      const room = roomLine(w);
+      if (room) res.room = room;
+      // Track K2: a withdrawal that ended "done" with fewer (the chests held fewer than remembered) says so too;
+      // Track K3: a full inventory in words, with why no room was made
+      const why = w.reason === 'inventory_full' ? `my inventory is full${w.room?.why ? ` (${w.room.unloaded > 0 ? 'room made short: ' : 'no room made: '}${w.room.why})` : ''}` : w.reason;
+      if (!w.ok || res.loose < n) res.reason = why ?? (res.fromHome > 0 ? `the chests at home gave ${res.fromHome} of ${n - before}` : 'the chests at home gave none (fewer there than remembered)');
     }
     res.ok = res.loose >= n;
     if (res.ok) delete res.reason;

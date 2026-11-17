@@ -797,3 +797,76 @@ function planTidySteps(sims: SimChest[], carriedSpares: number[], usedSpares: Se
     }
   }
 }
+
+/** Track K3 (ADR 0096 decision 12): which stacks a take with no room unloads first, and how short that leaves it. */
+export interface RoomChoice {
+  /** Inventory slots that go (each one emptied whole by its move). */
+  slots: number[];
+  /** The plan's moves of those slots, by chest in visit order. */
+  moves: UnloadMove[];
+  /** Free slots still missing after these moves (0: the take fits). */
+  short: number;
+}
+
+/**
+ * Track K3 (ADR 0096 decision 12, docs/home.md "Room for a take"): the room a take from the home chests needs, by the
+ * unloader's own rules. `plan` is an unload plan without box or fill steps (`planUnload(..., { boxing: false })`): what it
+ * keeps (the keep reasons: the kit, the gear, the reserves, milk_reserve, rocket_reserve) never goes. Of what it moves,
+ * only a slot moved whole into one chest frees a slot (a stack whose reserve stays does not), never a shulker box (an
+ * unload of loot: the carried boxes stay), never an item of `protect` (the take's own item). The fewest chests first: the
+ * chest taking the most such slots, then the next; in a chest, the main inventory before the hotbar, the last slot
+ * first. At most `need` slots.
+ */
+export function roomChoice(slots: readonly UnloadSlot[], plan: UnloadPlan, need: number, opts: { protect?: readonly string[] } = {}): RoomChoice {
+  const want = Math.max(0, Math.floor(need));
+  const protect = new Set((opts.protect ?? []).map(bareName));
+  const bySlot = new Map(slots.map((s) => [s.slot, s]));
+  const movesOf = new Map<number, UnloadMove[]>();
+  for (const m of plan.moves) movesOf.set(m.slot, [...(movesOf.get(m.slot) ?? []), m]);
+  // the slots one chest takes whole, by chest
+  const byChest = new Map<string, number[]>();
+  for (const [slot, ms] of movesOf) {
+    const s = bySlot.get(slot);
+    if (!s || s.count <= 0 || isShulkerBox(s.name) || protect.has(bareName(s.name))) continue;
+    if (ms.length !== 1 || ms[0]!.count < s.count) continue;
+    byChest.set(ms[0]!.to, [...(byChest.get(ms[0]!.to) ?? []), slot]);
+  }
+  const order = [...byChest.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+  const out: RoomChoice = { slots: [], moves: [], short: 0 };
+  for (const [, list] of order) {
+    if (out.slots.length >= want) break;
+    for (const slot of [...list].sort((a, b) => Number(a < 9) - Number(b < 9) || b - a)) {
+      if (out.slots.length >= want) break;
+      out.slots.push(slot);
+      out.moves.push(movesOf.get(slot)![0]!);
+    }
+  }
+  out.short = Math.max(0, want - out.slots.length);
+  return out;
+}
+
+/**
+ * Track K3: the free inventory slots a take of `want` items of `names` needs: what the carried partial stacks of them
+ * cannot hold, in stacks of the first name's size (a milk bucket stacks to 1, an empty bucket to 16), plus `spare` (slots
+ * the job needs after the take: the crafted rockets' stack, the milk buckets a bucket stack turns into). Whole boxes need
+ * a slot each (`boxes`); a take out of a box placed next to the bot needs three to start and keeps two free (boxes.ts
+ * takeOut).
+ */
+export function slotsForTake(
+  inv: readonly ({ name: string; count: number } | null | undefined)[],
+  names: readonly string[],
+  want: number,
+  o: { mode?: 'loose' | 'box' | 'extract'; spare?: number; boxes?: number; maxOf?: (name: string) => number } = {},
+): number {
+  const maxOf = o.maxOf ?? maxStackOf;
+  const ns = new Set(names.map(bareName));
+  const max = Math.max(1, maxOf(bareName(names[0] ?? '')));
+  let partial = 0;
+  for (let i = 0; i < Math.min(36, inv.length); i++) {
+    const s = inv[i];
+    if (s && s.count > 0 && ns.has(bareName(s.name))) partial += Math.max(0, maxOf(bareName(s.name)) - s.count);
+  }
+  const stacks = Math.ceil(Math.max(0, want - partial) / max);
+  const base = o.mode === 'box' ? Math.max(1, o.boxes ?? 1) : o.mode === 'extract' ? Math.max(3, stacks + 2) : stacks;
+  return base + Math.max(0, Math.floor(o.spare ?? 0));
+}

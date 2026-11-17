@@ -497,6 +497,39 @@ without them the box comes whole. The memory follows every take at once: counts 
 box taken out leaves the box counts and `inBoxes`; `!stock` shows it right away and the next scan
 refreshes it anyway.
 
+### Room for a take (Track K3)
+
+Decision [0096](decisions/0096-milk-on-hand.md) point 12. A take with no free slot for what it wants used to end
+`inventory_full` at the chest with nothing taken; a bot home from a long job with every slot full could not take two
+buckets out of a chest holding hundreds. The withdrawal now makes the room first, in one place, so every caller gets it:
+`!bring`, `Supply.ensure`'s home route (the milk, the rockets and their materials), the trip readiness.
+
+1. **The slots the take needs** (`slotsForTake`, unloader.ts): the stacks of the item beyond what the carried partial
+   stacks of it hold (in the first name's stack size: a milk bucket 1, an empty bucket 16), one per whole box, three to
+   start a take out of a box; plus `spare`, the slots the caller's job needs after the take (`WithdrawRequest.spare`,
+   `EnsureOptions.spare`): one for the crafted rockets after a take of paper or gunpowder, two after sugar cane (the
+   paper, then the rockets), k - 1 after a take of empty buckets (a stack of k buckets turns into k milk buckets; the last
+   fills in place).
+2. **Before each chest trip**, with fewer free slots than that, and in reach of home (`homeChestReach`, home/reach.ts:
+   within `homeChestRadius` + 8 across and 16 up or down, or `atHome`): the missing number of stacks is unloaded first.
+   After a take that still ran full (a stack that did not merge) once more; two room steps per withdrawal at most.
+3. **Which stacks go** (`roomChoice`, unloader.ts, pure): those an unload plan without box or fill steps moves whole
+   into one chest. So nothing the unloader keeps goes (the kit, gear and food, the throwaway, crop and seed reserves,
+   `milk_reserve` and `rocket_reserve`, the fireworks box, `bot_loot` boxes); a stack whose reserve stays frees no slot and stays;
+   no shulker box goes (an unload of loot, never of the carried boxes); the take's own item never goes. The chest taking
+   the most such slots first (the fewest trips), the main inventory before the hotbar, the last slot first; only as
+   many as needed.
+4. **No room made** when nothing qualifies (`nothing to unload (what I carry is kept, or no chest has room for it)`), when
+   a `!test inv` save holds the chests (`held: ...`), or out of reach of home (`not at home: I am 60 blocks from home
+   (they count within 24)`): the take then runs as before and ends `inventory_full`; the reply gives that reason.
+
+The log: `withdraw: no room for 2 stacks: unloading 2 first`, then `withdraw: made room: unloaded 2 stacks (64 tuff, 64
+calcite) into 1 container in 3.1 s; 2 free`. The report (`WithdrawReport.room`) carries the slots needed, the stacks
+unloaded and where, and why none (or too few) were; `roomLine` words it for the replies: `!bring` (`brought 2 buckets
+home (from 1 chest; made room: unloaded 1 stack (64 andesite))`), `!milk` and `!rockets` (`...; made room: unloaded 2
+stacks (64 tuff, 64 calcite)`). `Supply.ensure` says a full inventory in words: `my inventory is full (no room made:
+...)`.
+
 ### The delivery
 
 `!come`'s walk: the tracked player (the follower's `come`, within 2 blocks), else the locator bar's

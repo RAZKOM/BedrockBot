@@ -316,9 +316,11 @@ The rocket economy above spends rockets; this keeps them coming. Decision record
   without the harness's earlier "use once on the ground"): the model read flight duration 1 with the NBT on the wire
   item straight after the craft, the first rocket fired at tick 10 in 3 of 3 flights (no `fired nothing`), all 3 landed
   within 0.11 of their cell with no damage (1 or 2 rockets, 380 to 651 ticks).
-- **The stock rule (`planRockets`), the cheapest source first:** rockets out of the chests at home (at home only); then
+- **The stock rule (`planRockets`), the cheapest source first:** rockets out of the chests at home (in reach of home:
+  Track K3 widened it from the home logistics' 8 blocks to the milk's `homeChestRadius` + 8 across and 16 up or down,
+  docs/home.md "Room for a take", which also unloads loot first when every slot is full); then
   crafts, ceil(missing / 3) of them: gunpowder and paper loose, out of the carried boxes (Supply.ensure), out of the home
-  chests (at home); paper from sugar cane only when there is not enough paper and a crafting table is carried or near.
+  chests (in reach); paper from sugar cane only when there is not enough paper and a crafting table is carried or near.
   Gunpowder is never farmed: with none anywhere the plan, `!rockets` and `!rockets status` say so (`rockets: 0 of 64
   carried; 64 short: no gunpowder (carried, in the boxes or at home)`), and `!status` in short (`rockets 0/64 (no
   gunpowder)`).

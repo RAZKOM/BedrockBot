@@ -316,4 +316,177 @@ describe.skipIf(!E2E)('@bds home: milk on hand (Track K1)', () => {
       await forget(b);
     }
   }, 240_000);
+
+  // Track K3 (the Realm's case: home with a full inventory after test series): every slot holds a stack of loot
+  async function fillInventory(b: HomeBot): Promise<void> {
+    const loot = ['andesite', 'granite', 'diorite', 'tuff', 'calcite', 'cobbled_deepslate'];
+    const inv = b.built.mobility!.world.inventory;
+    for (let i = 0; i < 36; i++) await b.truth.ok('give', [b.name, loot[i % loot.length]!, 64]);
+    await until(() => (inv.slots.slice(0, 36).every((s) => !!s && s.count > 0) ? true : undefined), 15_000, 'a full inventory in the model');
+    await sleep(300);
+  }
+
+  it('Track K3: a full inventory at home, 16 buckets in the chest: `!bring bucket 2 home` unloads a stack first and takes 2 (3 of 3)', async () => {
+    const b = bot!;
+    const results: string[] = [];
+    try {
+      for (let trial = 1; trial <= 3; trial++) {
+        await bucketsAtHome(b, 16);
+        await teleport(b, centre(L.home));
+        await fillInventory(b);
+        const from = b.said.length;
+        const logs0 = b.logs.length;
+        const t0 = Date.now();
+        await b.command('!bring bucket 2 home');
+        const end = await b.reply((s) => /^(brought|bring:) /.test(s), from, 120_000);
+        const lines = b.logs.slice(logs0).filter((l) => / (withdraw|bring): /.test(l)).map((l) => l.replace(/^\S+ info /, ''));
+        note(`bring full #${trial}: "${end}" after ${((Date.now() - t0) / 1000).toFixed(1)} s; ${lines.join(' | ')}`);
+        expect(lines).toContain('withdraw: no room for 1 stack: unloading 1 first');
+        expect(end).toMatch(/^brought 2 buckets home \(from 1 chest; made room: unloaded 1 stack \(64 [a-z_]+\)\)$/);
+        await until(async () => ((await counts(b)).empty === 2 ? true : undefined), 10_000, 'truth: 2 empty buckets');
+        expect((await b.truth.box(L.chest)).counts.bucket ?? 0).toBe(14);
+        await until(() => (b.processes.userProcesses().length === 0 ? true : undefined), 60_000, 'the bring over');
+        results.push(`#${trial} ok`);
+        await forget(b);
+      }
+    } finally {
+      note(`bring with a full inventory: ${results.length} of 3 (${results.join(', ')})`);
+      await forget(b);
+    }
+  }, 600_000);
+
+  it('Track K3: a full inventory at home, 16 buckets in the chest, cows near: `!milk` makes room, takes 2 and fills both (3 of 3)', async () => {
+    const b = bot!;
+    const results: string[] = [];
+    try {
+      for (let trial = 1; trial <= 3; trial++) {
+        await bucketsAtHome(b, 16);
+        await teleport(b, centre(L.home));
+        await fillInventory(b);
+        const from = b.said.length;
+        const logs0 = b.logs.length;
+        const t0 = Date.now();
+        await b.command('!milk');
+        const start = await b.reply((s) => s.startsWith('milk: '), from);
+        const end = await b.reply((s) => s.startsWith('milk: ') && s !== start, from, 150_000);
+        const lines = b.logs.slice(logs0).filter((l) => / (milk|bring|withdraw): /.test(l)).map((l) => l.replace(/^\S+ info /, ''));
+        note(`milk full #${trial}: "${end}" after ${((Date.now() - t0) / 1000).toFixed(1)} s; ${lines.join(' | ')}`);
+        // 2 buckets in one stack: 1 slot for the take, 1 for the first milk bucket (the last fills in place)
+        expect(lines).toContain('withdraw: no room for 2 stacks: unloading 2 first');
+        expect(end).toMatch(/^milk: 2 milk buckets carried \(2 from a cow\); made room: unloaded 2 stacks \(.+\)$/);
+        await until(async () => ((await counts(b)).milk === 2 ? true : undefined), 5_000, 'truth: 2 milk buckets');
+        expect(await counts(b)).toMatchObject({ milk: 2, empty: 0 });
+        expect((await b.truth.box(L.chest)).counts.bucket ?? 0).toBe(14);
+        expect(await gateClosed(b)).toBe(true);
+        results.push(`#${trial} ok`);
+        await forget(b);
+      }
+    } finally {
+      note(`milk with a full inventory: ${results.length} of 3 (${results.join(', ')})`);
+      await forget(b);
+    }
+  }, 600_000);
+});
+
+// Track K3: cows farther out. Its own area: home at the centre, no pen, one adult cow 50 blocks east held in place
+// (slowness), milkRange 64; `!milk far` with 2 empty buckets walks there by the normal walk, fills both and walks home.
+describe.skipIf(!E2E)('@bds home: milk farther out (Track K3)', () => {
+  const area = privateArea();
+  const c = area;
+  const notes: string[] = [];
+  let bot: HomeBot | undefined;
+  const home = { x: c.x, y: F, z: c.z };
+  const cowAt = { x: c.x + 50, y: F, z: c.z };
+
+  async function cowNear(b: HomeBot): Promise<number> {
+    const r = await b.truth.ok<{ mobs: { typeId: string; baby: boolean }[] }>('herd', [cowAt.x + 0.5, F, cowAt.z + 0.5, 8]);
+    return r.mobs.filter((m) => m.typeId === 'minecraft:cow' && !m.baby).length;
+  }
+  async function placeCow(b: HomeBot): Promise<void> {
+    await homeCmd('kill', `@e[type=cow,x=${cowAt.x},y=${F},z=${cowAt.z},r=30]`).catch(() => undefined);
+    await homeCmd('summon', 'cow', String(cowAt.x + 0.5), String(F), String(cowAt.z + 0.5), '0', '0', 'minecraft:ageable_grow_up');
+    await until(async () => ((await cowNear(b)) >= 1 ? true : undefined), 10_000, 'an adult cow 50 blocks east');
+    await homeCmd('effect', `@e[type=cow,x=${cowAt.x},y=${F},z=${cowAt.z},r=8]`, 'slowness', '600', '255', 'true');
+  }
+
+  beforeAll(async () => {
+    await prepareServer();
+    const settings = new RuntimeSettings();
+    settings.applyStartup('autoFood', false);
+    settings.applyStartup('autoUnload', false);
+    const b = await startHomeBot('MilkFar', {}, { settings });
+    bot = b;
+    await teleport(b, centre(home));
+    await b.truth.clearAround(centre(home), 64);
+    await clearAreaHome(b.truth, c, 24, 6);
+    await clearAreaHome(b.truth, { x: c.x + 40, z: c.z }, 24, 6);
+    b.task.home!.set(home);
+    b.settings.set('milkRange', 64);
+  }, 240_000);
+
+  afterAll(async () => {
+    if (bot) {
+      await homeCmd('kill', `@e[type=cow,x=${cowAt.x},y=${F},z=${cowAt.z},r=30]`).catch(() => undefined);
+      await bot.truth.clearAround(centre(home), 64).catch(() => undefined);
+      await bot.stop();
+    }
+    console.log(`[home-milk far e2e] area cell ${area.cell} (${area.x}, ${area.z})\n  ${notes.join('\n  ')}`);
+  }, 120_000);
+
+  it('`!milk far` with milkRange 64: walks 50 blocks to the cow, fills 2 buckets and walks home (3 of 3)', async () => {
+    const b = bot!;
+    const results: string[] = [];
+    try {
+      for (let trial = 1; trial <= 3; trial++) {
+        await teleport(b, centre(home));
+        await b.truth.ok('clear', [b.name]);
+        await until(() => (b.built.mobility!.world.inventory.slots.slice(0, 36).every((s) => !s) ? true : undefined), 10_000, 'an empty inventory');
+        await placeCow(b);
+        const inv = b.built.mobility!.world.inventory;
+        await b.truth.ok('give', [b.name, 'bucket', 2]);
+        await until(() => (inv.count('bucket') >= 2 ? true : undefined), 10_000, '2 buckets in the model');
+        const seen = [...b.built.mobility!.world.entities.values()].filter((e) => e.type === 'minecraft:cow').map((e) => hdist(e.pos, centre(home)).toFixed(0));
+        const from = b.said.length;
+        const logs0 = b.logs.length;
+        const t0 = Date.now();
+        await b.command('!milk far');
+        const start = await b.reply((s) => s.startsWith('milk: '), from);
+        const end = await b.reply((s) => s.startsWith('milk: ') && s !== start, from, 180_000);
+        const s = (Date.now() - t0) / 1000;
+        const lines = b.logs.slice(logs0).filter((l) => l.includes(' milk: ')).map((l) => l.replace(/^\S+ info /, ''));
+        const back = hdist(b.task.position()!, centre(home));
+        notes.push(`far #${trial}: cows in view at ${seen.join(', ') || 'none'} blocks; "${start}" -> "${end}" after ${s.toFixed(1)} s, ${back.toFixed(1)} blocks from home; ${lines.join(' | ')}`);
+        expect(start).toMatch(/; the nearest within 64: a cow \d+ blocks away/);
+        expect(end).toMatch(/^milk: 2 milk buckets carried \(2 from a cow\); went to a cow \d+ blocks away; walked home$/);
+        await until(async () => ((await b.truth.counts(b.name)).milk_bucket === 2 ? true : undefined), 5_000, 'truth: 2 milk buckets');
+        expect(back).toBeLessThan(3);
+        results.push(`#${trial} ${s.toFixed(0)} s`);
+      }
+    } finally {
+      notes.push(`far: ${results.length} of 3 (${results.join(', ')})`);
+    }
+  }, 900_000);
+
+  it('`!milk far` with no cow within milkRange: the reply names the nearest one known', async () => {
+    const b = bot!;
+    await teleport(b, centre(home));
+    await placeCow(b);
+    b.settings.set('milkRange', 30);
+    try {
+      await b.truth.ok('clear', [b.name]);
+      await b.truth.ok('give', [b.name, 'bucket', 1]);
+      await until(() => (b.built.mobility!.world.inventory.count('bucket') >= 1 ? true : undefined), 10_000, 'a bucket in the model');
+      const from = b.said.length;
+      await b.command('!milk far');
+      const start = await b.reply((s) => s.startsWith('milk: '), from);
+      const end = await b.reply((s) => s.startsWith('milk: ') && s !== start, from, 60_000);
+      notes.push(`none within 30: "${start}" -> "${end}"`);
+      expect(start).toMatch(/; none known within 30 \(the nearest I know: a cow \d+ blocks away/);
+      // `!milk` wants milkKeep (2) with 1 bucket carried
+      expect(end).toMatch(/2 short of 2: no cow, mooshroom or goat known within 30 blocks \(the nearest I know: a cow \d+ blocks away/);
+      expect(hdist(b.task.position()!, centre(home))).toBeLessThan(1.5);
+    } finally {
+      b.settings.set('milkRange', 64);
+    }
+  }, 120_000);
 });

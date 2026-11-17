@@ -20,6 +20,29 @@ export const PROBE_MS = 300;
 /** One slice of a probe (ms); the event loop runs between slices. */
 export const PROBE_SLICE_MS = 8;
 
+/** Track K2: the chests at home count as in reach this many blocks beyond `homeChestRadius` (across) from home ... */
+export const HOME_REACH_EXTRA = 8;
+/** ... and this many blocks above or below it. */
+export const HOME_REACH_DY = 16;
+
+/**
+ * Track K2 (ADR 0096 addendum): are the chests at home in reach of the bot (`!milk`, the chore, the trip readiness; Track
+ * K3: the room a take makes first)? The home logistics' own "at home" (8 blocks across, 4 up or down) left them out for
+ * a bot idle in its shelter, a room or a floor away from the home point. The withdrawal walks to the chests itself
+ * (`!bring` does it from anywhere); this only bounds the walk: within `chestRadius` + HOME_REACH_EXTRA of home across (the
+ * containers are found within `chestRadius` of it) and HOME_REACH_DY up or down. `why` says why not.
+ */
+export function homeChestReach(home: Vec3 | undefined, feet: Vec3 | undefined, chestRadius: number): { inReach: boolean; why?: string } {
+  if (!home) return { inReach: false, why: 'no home set' };
+  if (!feet) return { inReach: false, why: 'my position is unknown' };
+  const reach = Math.max(0, chestRadius) + HOME_REACH_EXTRA;
+  const across = Math.hypot(feet.x - (home.x + 0.5), feet.z - (home.z + 0.5));
+  if (across > reach) return { inReach: false, why: `I am ${Math.round(across)} blocks from home (they count within ${reach})` };
+  const dy = feet.y - home.y;
+  if (Math.abs(dy) > HOME_REACH_DY) return { inReach: false, why: `I am ${Math.round(Math.abs(dy))} blocks ${dy > 0 ? 'above' : 'below'} home (they count within ${HOME_REACH_DY} up or down)` };
+  return { inReach: true };
+}
+
 /** The walk to a container: within reach 4, no face rule, feet at most 3 blocks below it in a side column. */
 export function chestGoal(p: Vec3): NavGoal {
   // face: false (main's rule for every container goal): a chest inside a stack or a wall of chests has no face turned to any stand cell

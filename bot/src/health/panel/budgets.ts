@@ -19,8 +19,9 @@ export const PANEL_BUDGETS = {
    * to 136 990, and the `flyCaveWindows` row (709 bytes) took it to 137 699. Track K1 raised it from 138 500: the
    * `milkKeep`, `autoMilk` and `milkCraft` rows and the milk vitals row (1 829 bytes) took it to 139 528. Track R9 raised it
    * from 140 000: the `fireworksKeep` and `autoRockets` rows and the rockets vitals row (1 467 bytes) took it to 140 995.
+   * Track K3 raised it from 141 500: the `milkRange` row (710 bytes) took it to 141 705.
    */
-  html: 141_500,
+  html: 142_500,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**

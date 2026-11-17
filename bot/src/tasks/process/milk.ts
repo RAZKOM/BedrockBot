@@ -13,10 +13,13 @@
 //   return walks home.
 // - The trip readiness (tasks/pve.ts tripStocks, wired by chat/commands-milk.ts): before a long trip, the same pass with no
 //   cows and no craft (milk out of the boxes, and out of the chests when at home).
+// - Track K3: `!milk far` (a MilkProcess with `far`): the mobs within `milkRange` of the bot, in view or seen, walked to by
+//   day, and home again after a far walk (`goHome`); the chore looks within `milkRange` of home (default 24: as before).
+//   A take from the chests at home with a full inventory makes room there first (logistics.ts withdraw); the reply says it.
 import type { Vec3 } from '../../connection/types.ts';
 import type { RuntimeSettings } from '../../config/settings.ts';
 import { silentLogger, type Logger } from '../../log.ts';
-import { BUCKET, bucketCounts, kindsLine, MILK, MILK_RADIUS, planMilk, type MilkReason, type MilkResult, type MilkStep, type MilkStockInput } from '../../skills/food/milk.ts';
+import { BUCKET, bucketCounts, candidateLine, kindsLine, MILK, MILK_RADIUS, MILK_RANGE_MAX, planMilk, type FarCandidate, type MilkResult, type MilkStep, type MilkStockInput } from '../../skills/food/milk.ts';
 import type { EntityInfo, ItemStack } from '../../world/types.ts';
 import { BaseProcess, PRIORITY, type ProcessManager, type ProcessStatus, type StopReason } from './manager.ts';
 
@@ -35,8 +38,8 @@ export interface MilkSource {
   input(keep: number): MilkStockInput;
   /** n more of `item` loose out of the carried boxes; how many came and why fewer. */
   fromBoxes(item: string, n: number, cancelled: () => boolean): Promise<{ got: number; why?: string | undefined }>;
-  /** n more of `item` loose out of the carried boxes, then the chests at home (walks there). */
-  fromHome(item: string, n: number, cancelled: () => boolean): Promise<{ got: number; why?: string | undefined }>;
+  /** n more of `item` loose out of the carried boxes, then the chests at home (walks there); `room`: the room made there first (Track K3). */
+  fromHome(item: string, n: number, cancelled: () => boolean): Promise<{ got: number; why?: string | undefined; room?: string | undefined }>;
   /** One bucket from 3 iron ingots at a crafting table (the crafter's reply line). */
   craft(cancelled: () => boolean): Promise<{ ok: boolean; line: string }>;
 }
@@ -44,7 +47,13 @@ export interface MilkSource {
 export interface MilkDeps {
   processes: ProcessManager;
   settings: Pick<RuntimeSettings, 'get'>;
-  milker: { milk(o: { center: Vec3; radius: number; want: number }, cancelled: () => boolean): Promise<MilkResult>; targets(center: Vec3, radius: number): EntityInfo[]; readonly current?: { kind: string } | undefined };
+  milker: {
+    milk(o: { center: Vec3; radius: number; want: number; far?: boolean }, cancelled: () => boolean): Promise<MilkResult>;
+    targets(center: Vec3, radius: number): EntityInfo[];
+    /** Track K3: the range choice (in view and seen); without it `!milk far` looks at the mobs in view only. */
+    farChoice?(center: Vec3, radius: number): { target?: FarCandidate; nearest?: FarCandidate };
+    readonly current?: { kind: string } | undefined;
+  };
   source: MilkSource;
   /** Feet. */
   position(): Vec3;
@@ -58,6 +67,8 @@ export interface MilkDeps {
   cancel(): void;
   /** After a chore's attempt: walk home when nothing is queued. */
   afterJob?(): void;
+  /** Track K3: after `!milk far` walked out: the walk home (the normal walk); why it ended short. */
+  goHome?(cancelled: () => boolean): Promise<{ ok: boolean; reason?: string | undefined }>;
   /** The chore may start (not while a `!test` series or a `!test inv` save holds the bot); default true. */
   idle?(): boolean;
   log?: Logger;
@@ -81,6 +92,11 @@ export interface MilkReport {
   short?: string;
   /** Track K2: the first step that got less than it wanted and why (`buckets out of the chests at home: ...`); the reply says it before `short`. */
   failed?: string;
+  /** Track K3: the room a take from the chests at home made first (`made room: unloaded 1 stack (64 andesite)`). */
+  room?: string;
+  /** Track K3: the far walk (`a cow 50 blocks away`) and how the walk home ended (`walked home`, `the walk home: timeout`). */
+  walked?: string;
+  home?: string;
   /** The milker ended on a hostile, or the pass was interrupted. */
   reason: 'done' | 'short' | 'hostile' | 'interrupted';
 }
@@ -93,17 +109,38 @@ export interface MilkJobOptions {
   /** Where the mobs are looked for (the bot for `!milk`, home for the chore) and how far. */
   center: () => Vec3;
   radius: number;
+  /** Track K3: `!milk far`: the mobs seen count too, the nearest known one is named, and the bot walks home after a far walk. */
+  far?: boolean;
 }
 
-const MILK_WHY: Readonly<Partial<Record<MilkReason, string>>> = {
-  no_bucket: 'no empty bucket left',
-  no_mob: `no cow, mooshroom or goat within ${MILK_RADIUS} blocks`,
-  refused: 'the mobs near gave no milk',
-};
+/** Track K3: why the milker milked fewer, in words (the radius of the job). */
+function milkWhy(r: MilkResult, radius: number, far: boolean): string | undefined {
+  switch (r.reason) {
+    case 'no_bucket':
+      return 'no empty bucket left';
+    case 'no_mob':
+      if (!far) return `no cow, mooshroom or goat within ${radius} blocks`;
+      return `no cow, mooshroom or goat known within ${radius} blocks (${r.nearest ? `the nearest I know: ${candidateLine(r.nearest)}` : 'none seen'})`;
+    case 'refused':
+      return 'the mobs near gave no milk';
+    case 'night':
+      return 'night fell (a walk beyond 24 blocks runs by day)';
+    case 'walk_failed':
+      return `the walk to the mob failed (${r.walkWhy ?? 'failed'})`;
+    default:
+      return undefined;
+  }
+}
 
 /** `2 bucket from the chests at home`, `2 at the cows`, `a bucket crafted` (the logs). */
 function stepLine(s: MilkStep): string {
   return s.kind === 'cows' ? `${s.n} at the cows` : s.kind === 'craft' ? 'a bucket crafted' : `${s.n} ${s.item} from ${s.kind === 'boxes' ? 'a carried box' : 'the chests at home'}`;
+}
+
+/** Track K3: the `milkRange` setting (default 24 = MILK_RADIUS), clamped to MILK_RADIUS..MILK_RANGE_MAX. */
+export function milkRange(settings: Pick<RuntimeSettings, 'get'>): number {
+  const r = Number(settings.get('milkRange'));
+  return Number.isFinite(r) ? Math.max(MILK_RADIUS, Math.min(MILK_RANGE_MAX, Math.round(r))) : MILK_RADIUS;
 }
 
 /** One pass of the stock rule (see the file comment). */
@@ -136,7 +173,11 @@ export class MilkJob {
       if (cancelled()) return end('interrupted');
       if (step.kind === 'boxes' || step.kind === 'home') {
         this.phase = `${step.item === MILK ? 'milk' : 'buckets'} out of ${step.kind === 'boxes' ? 'a carried box' : 'the chests at home'}`;
-        const r = step.kind === 'boxes' ? await d.source.fromBoxes(step.item, step.n, cancelled) : await d.source.fromHome(step.item, step.n, cancelled);
+        const r: { got: number; why?: string | undefined; room?: string | undefined } = step.kind === 'boxes' ? await d.source.fromBoxes(step.item, step.n, cancelled) : await d.source.fromHome(step.item, step.n, cancelled);
+        if (r.room) {
+          d.log?.info(`milk: ${this.phase}: ${r.room}`);
+          rep.room = rep.room ? `${rep.room}; ${r.room}` : r.room;
+        }
         if (step.item === MILK) {
           if (step.kind === 'boxes') rep.fromBoxes += r.got;
           else rep.fromHome += r.got;
@@ -166,17 +207,33 @@ export class MilkJob {
       const want = Math.min(c.empty, Math.max(0, o.keep - c.milk));
       if (want <= 0) continue;
       this.phase = 'milking';
-      const r = await d.milker.milk({ center: o.center(), radius: o.radius, want }, cancelled);
+      const r = await d.milker.milk({ center: o.center(), radius: o.radius, want, ...(o.far ? { far: true } : {}) }, cancelled);
       rep.milked += r.milked;
       for (const [k, v] of Object.entries(r.kinds)) rep.kinds[k] = (rep.kinds[k] ?? 0) + v;
+      if (r.walked) rep.walked = candidateLine(r.walked);
       if (r.reason === 'interrupted') return end('interrupted');
       if (r.reason === 'hostile') {
         rep.short = `stopped for ${r.threat ?? 'a hostile'}`;
+        await this.walkHome(d, rep, cancelled);
         return end('hostile');
       }
-      if (r.milked < want) rep.short = MILK_WHY[r.reason] ?? rep.short ?? r.reason;
+      if (r.milked < want) rep.short = milkWhy(r, o.radius, !!o.far) ?? rep.short ?? r.reason;
     }
+    await this.walkHome(d, rep, cancelled);
     return end();
+  }
+
+  /** Track K3: `!milk far` walked out: home again (the normal walk), when a home is set and the bot is away from it. */
+  private async walkHome(d: MilkDeps, rep: MilkReport, cancelled: () => boolean): Promise<void> {
+    if (!this.opts.far || !rep.walked || !d.goHome || cancelled()) return;
+    const h = d.home();
+    const me = d.position();
+    if (!h || Math.hypot(me.x - (h.x + 0.5), me.z - (h.z + 0.5)) <= MILK_HOME) return;
+    this.phase = 'walking home';
+    const r = await d.goHome(cancelled);
+    if (cancelled()) return;
+    rep.home = r.ok ? 'walked home' : `the walk home ended: ${r.reason ?? 'failed'}`;
+    d.log?.info(`milk: ${rep.home}`);
   }
 
   line(): string {
@@ -198,6 +255,8 @@ export function milkReply(r: MilkReport): string {
   const why = r.failed ?? r.short; // Track K2: what failed first, before what the plan expected
   if (r.after < r.keep) tail.push(`${r.keep - r.after} short of ${r.keep}${why ? `: ${why}` : ''}`);
   if (r.empty > 0) tail.push(`${r.empty} empty bucket${r.empty === 1 ? '' : 's'} left`);
+  if (r.room) tail.push(r.room); // Track K3: the stacks unloaded at home for the take
+  if (r.walked) tail.push(`went to ${r.walked}${r.home ? `; ${r.home}` : ''}`); // Track K3: `!milk far`
   return `${head}${what}${tail.length ? `; ${tail.join('; ')}` : ''}`;
 }
 
@@ -330,8 +389,10 @@ export class MilkChore extends BaseProcess {
     const plan = planMilk(d.source.input(keep), { cows: true });
     if (plan.steps.length === 0) return skip(plan.short ?? 'nothing to do');
     const storage = plan.steps.some((s) => s.kind !== 'cows');
-    if (!storage && d.milker.targets(home, MILK_RADIUS).length === 0) return skip(`no cow, mooshroom or goat within ${MILK_RADIUS} blocks of home`);
-    this.job = new MilkJob({ keep, cows: true, center: () => home, radius: MILK_RADIUS });
+    // Track K3: within milkRange of home (default 24, MILK_RADIUS: as before)
+    const range = milkRange(d.settings);
+    if (!storage && d.milker.targets(home, range).length === 0) return skip(`no cow, mooshroom or goat within ${range} blocks of home`);
+    this.job = new MilkJob({ keep, cows: true, center: () => home, radius: range });
     this.stats.started++;
     this.lastWhy = '';
     d.log?.info(`milk chore: ${bucketCounts(d.inventory.slots).milk} of ${keep} milk buckets carried: ${plan.steps.map(stepLine).join(', ')}`);
@@ -409,13 +470,24 @@ export class MilkController {
     return this.d.settings.get('milkKeep');
   }
 
-  /** `!milk [n]`: n milk buckets carried (default: milkKeep, or every empty bucket carried when that is more). */
-  milk(n?: number): MilkProcess {
+  /**
+   * `!milk [n]`: n milk buckets carried (default: milkKeep, or every empty bucket carried when that is more). Track K3:
+   * `far`: the mobs within milkRange, in view or seen, walked to by day, and the walk home after.
+   */
+  milk(n?: number, far = false): MilkProcess {
     this.chore.drop();
     const c = bucketCounts(this.d.inventory.slots);
     const keep = n ?? Math.max(this.keep(), c.milk + c.empty);
-    this.log.info(`milk: ${c.milk} milk and ${c.empty} empty buckets carried, ${keep} wanted`);
-    return this.d.processes.add(new MilkProcess(this.d, { keep, cows: true, center: () => this.d.position(), radius: MILK_RADIUS }));
+    const radius = far ? milkRange(this.d.settings) : MILK_RADIUS;
+    this.log.info(`milk: ${c.milk} milk and ${c.empty} empty buckets carried, ${keep} wanted${far ? ` (far: within ${radius})` : ''}`);
+    return this.d.processes.add(new MilkProcess(this.d, { keep, cows: true, center: () => this.d.position(), radius, ...(far ? { far: true } : {}) }));
+  }
+
+  /** Track K3: `!milk far`'s look before it starts: the mob it would go to, or the nearest known one (or none). */
+  farLook(): { range: number; target?: FarCandidate; nearest?: FarCandidate } {
+    const range = milkRange(this.d.settings);
+    const ch = this.d.milker.farChoice?.(this.d.position(), range) ?? {};
+    return { range, ...ch };
   }
 
   /** Before a long trip: milk is missing to milkKeep and the carried boxes (or the chests at home, when there) hold some. */
@@ -466,10 +538,13 @@ export class MilkController {
     const near = d.milker.targets(d.position(), MILK_RADIUS).length;
     const ch = this.chore;
     const waitS = Math.max(0, Math.ceil((ch.nextTry - (d.now ?? (() => performance.now()))()) / 1000));
+    // Track K3: with milkRange raised, what `!milk far` would go to
+    const look = this.farLook();
+    const far = look.range > MILK_RADIUS ? `; milkRange ${look.range}: ${look.target ? `next ${candidateLine(look.target)}` : look.nearest ? `none within, the nearest ${candidateLine(look.nearest)}` : 'none seen'}` : '';
     const parts = [
       `milk: ${i.milk} of ${keep} carried, ${i.empty} empty bucket${i.empty === 1 ? '' : 's'}`,
       `in carried boxes ${i.boxedMilk} milk, ${i.boxedEmpty} buckets; at home ${i.homeMilk} milk, ${i.homeEmpty} buckets`,
-      `${near} cow${near === 1 ? '' : 's'} (or mooshrooms, goats) within ${MILK_RADIUS}`,
+      `${near} cow${near === 1 ? '' : 's'} (or mooshrooms, goats) within ${MILK_RADIUS}${far}`,
       `autoMilk ${d.settings.get('autoMilk') ? 'on' : 'off'}${ch.running ? ', running' : waitS > 0 ? `, next look in ${waitS} s` : ''}${ch.lastWhy ? ` (${ch.lastWhy})` : ''}`,
       `milkCraft ${d.settings.get('milkCraft') ? 'on' : 'off'}`,
     ];

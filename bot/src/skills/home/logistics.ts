@@ -29,7 +29,10 @@
 //   withdraw Track AS (`!bring`, bring.ts): plan from the memory and the inventory, walk to the nearest
 //            chest of the plan (the scan's stand cell), open it, take the item's stacks (or, when the
 //            loose stacks are not enough, whole shulker boxes holding it), refresh its memory, close;
-//            plan again; repeat until carried or no chest is left.
+//            plan again; repeat until carried or no chest is left. Track K3 (ADR 0096 decision 12): a take with no
+//            free slot for what it wants (and the `spare` slots its job needs after it) makes room first when the
+//            bot is in reach of home (homeChestReach): the stacks the take needs only, unloaded by the unloader's
+//            own rules (roomChoice: loot, never the kit, the reserves or a carried box), then the take.
 //
 // Every chest trip refreshes that chest's record. All container traffic goes through the task's one
 // Containers (`shared` counts its item_stack_requests while a job ran; `requests` the job's own).
@@ -48,9 +51,9 @@ import type { PlaceOptions, PlaceResult } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { chestNeighbours, findContainers, isHomeContainer, visitOrder, visitOrderBanded, type DiscoveryWorld } from './discovery.ts';
 import { chestName, fmtPos, partnerKeys, planChests, recordFrom, unreadRecord } from './memory.ts';
-import { chestGoal, standOf, verdict } from './reach.ts';
+import { chestGoal, homeChestReach, standOf, verdict } from './reach.ts';
 import { bringMatches, countOf, extractChoice, halfBox, planBring, wholeOk, type BringItem } from './bring.ts'; // Track AS; Track BJ: halves, extracts
-import { compactRunner, heldBack, planUnload, spareChestState, unloadableStacks, type UnloadPlan, type UnloadSlot, type UnloadStep } from './unloader.ts';
+import { compactRunner, heldBack, planUnload, roomChoice, slotsForTake, spareChestState, unloadableStacks, type UnloadPlan, type UnloadSlot, type UnloadStep } from './unloader.ts';
 import { BOX_SLOTS, carriedBoxes, carriedSpares, isKeptBox, keepNameOf, MAX_BOX_STEPS, MAX_FILL_STEPS, MAX_TIDY_STEPS, namedBoxesWord, placesExactly } from './boxing.ts'; // Track AV
 import { DEFAULT_THROWAWAY_MIN, THROWAWAY_BLOCKS } from '../survival/keeper.ts';
 import { dropFirst } from '../container/stash.ts'; // the junk the stash drops first is never boxed at unload either
@@ -214,6 +217,12 @@ export interface WithdrawReport {
   extracted?: { items: number; from: string; back: boolean }[];
   /** Track BJ: owed boxes that could not go back (see UnloadReport.notes). */
   notes?: string[];
+  /**
+   * Track K3 (ADR 0096 decision 12): the room made first, at home, for a take with no free slot: the slots the take
+   * needed (`need`, the most asked for in one go), the stacks unloaded and where, and why no (or too little) room was
+   * made (`why`: nothing to unload, out of reach of home, a `!test inv` save holding the chests).
+   */
+  room?: { need: number; unloaded: number; moved: UnloadedLine[]; why?: string };
   /** Matching items carried after the job (top-level inventory). */
   carried: number;
   /** Chest trips. */
@@ -236,6 +245,35 @@ interface Debt {
 
 /** Track BJ: put-back attempts of a debt before it is given up (the reply says so). */
 export const MAX_DEBT_TRIES = 3;
+/** Track K3: room-making unloads per withdrawal at most (one before a take, one more after a take that still ran full). */
+export const MAX_ROOM_TRIES = 2;
+
+/** Track K3: a withdrawal's request: `spare` free slots are wanted after the take too (the crafted rockets, the milk). */
+export interface WithdrawRequest {
+  item: BringItem;
+  want: number;
+  spare?: number;
+}
+
+/** `1 stack` / `3 stacks`. */
+const stacksText = (n: number): string => `${n} stack${n === 1 ? '' : 's'}`;
+/** `64 andesite, 64 granite` (an unload's moved lines, by item). */
+function movedText(moved: readonly UnloadedLine[]): string {
+  const by = new Map<string, number>();
+  for (const m of moved) by.set(m.name, (by.get(m.name) ?? 0) + m.count);
+  return [...by].map(([k, v]) => `${v} ${k}`).join(', ');
+}
+
+/**
+ * Track K3: the reply words of a withdrawal's room step: `made room: unloaded 1 stack (64 andesite)`, or why none was made
+ * (`no room made: ...`); undefined when no room was asked for.
+ */
+export function roomLine(w: Pick<WithdrawReport, 'room'>): string | undefined {
+  const r = w.room;
+  if (!r) return undefined;
+  if (r.unloaded > 0) return `made room: unloaded ${stacksText(r.unloaded)}${r.moved.length ? ` (${movedText(r.moved)})` : ''}${r.why ? `; ${r.why}` : ''}`;
+  return `no room made${r.why ? `: ${r.why}` : ''}`;
+}
 
 const centre = (p: Vec3): Vec3 => ({ x: p.x + 0.5, y: p.y, z: p.z + 0.5 });
 const hdist = (a: Vec3, b: Vec3): number => Math.hypot(a.x - b.x, a.z - b.z);
@@ -565,8 +603,65 @@ export class HomeLogistics {
   }
 
   /** Track AS: take `want` of the item out of the chests at home (see the file comment); what is carried counts first. */
-  withdraw(cancelled: () => boolean, req: { item: BringItem; want: number }): Promise<WithdrawReport> {
+  withdraw(cancelled: () => boolean, req: WithdrawRequest): Promise<WithdrawReport> {
     return this.serial(() => this.doWithdraw(cancelled, req));
+  }
+
+  /** Track K2/K3: the chests at home are in reach (home/reach.ts homeChestReach, or `atHome`); `why` says why not. */
+  inReach(): { inReach: boolean; why?: string } {
+    if (this.atHome()) return { inReach: true };
+    return homeChestReach(this.d.home(), this.d.position(), this.radius());
+  }
+
+  /**
+   * Track K3 (ADR 0096 decision 12, docs/home.md "Room for a take"): a take at home needs `need` more free slots: unload
+   * that many stacks first by the unloader's rules (unloader.ts roomChoice: loot only, never what the plan keeps, never a
+   * carried box, never the take's own item), one chest trip per target chest. Runs inside the withdrawal's serial lock.
+   */
+  private async roomFor(need: number, protect: readonly string[], rep: WithdrawReport, cancelled: () => boolean): Promise<'interrupted' | undefined> {
+    const room = (rep.room ??= { need: 0, unloaded: 0, moved: [] });
+    room.need = Math.max(room.need, need);
+    delete room.why;
+    const held = this.d.held?.();
+    if (held !== undefined) {
+      room.why = `held: ${held}`;
+      this.log.info(`withdraw: no room for ${stacksText(need)}: nothing unloaded (${room.why})`);
+      return undefined;
+    }
+    const reach = this.inReach();
+    if (!reach.inReach) {
+      room.why = `not at home: ${reach.why ?? 'out of reach'}`;
+      this.log.info(`withdraw: no room for ${stacksText(need)}: nothing unloaded (${room.why})`);
+      return undefined;
+    }
+    const choice = roomChoice(this.slots(), this.plan(false, undefined, { on: false }), need, { protect });
+    if (choice.slots.length === 0) {
+      room.why = 'nothing to unload (what I carry is kept, or no chest has room for it)';
+      this.log.info(`withdraw: no room for ${stacksText(need)}: ${room.why}`);
+      return undefined;
+    }
+    this.log.info(`withdraw: no room for ${stacksText(need)}: unloading ${choice.slots.length} first${choice.short > 0 ? ` (${choice.short} short: the rest is kept or fits no chest)` : ''}`);
+    const t0 = this.now();
+    const free0 = this.boxes.freeSlots().length;
+    const ur: UnloadReport = { ok: true, moved: [], kept: [], left: [], boxes: 0, emptied: 0, chests: 0, requests: 0, shared: 0, ms: 0 };
+    const only = new Set(choice.slots);
+    const keys = [...new Set(choice.moves.map((m) => m.to))];
+    for (const key of keys) {
+      if (cancelled()) return 'interrupted';
+      const target = planChests(this.records()).find((c) => c.key === key);
+      if (!target) continue;
+      const r = await this.depositAt(target.pos, ur, cancelled, false, undefined, undefined, false, only);
+      if (r === 'interrupted') return 'interrupted';
+      if (r !== 'ok') this.log.info(`withdraw: making room at ${target.kind} ${fmtPos(target.pos)}: ${r}`);
+    }
+    rep.chests += ur.chests;
+    rep.requests += ur.requests;
+    room.moved.push(...ur.moved);
+    const freed = Math.max(0, this.boxes.freeSlots().length - free0);
+    room.unloaded += freed;
+    if (freed < need) room.why = `${need - freed} slot${need - freed === 1 ? '' : 's'} short (${choice.short > 0 ? 'the rest is kept or fits no chest' : 'a chest took less'})`;
+    this.log.info(`withdraw: made room: unloaded ${stacksText(freed)}${ur.moved.length ? ` (${movedText(ur.moved)})` : ''} into ${ur.chests} container${ur.chests === 1 ? '' : 's'} in ${((this.now() - t0) / 1000).toFixed(1)} s; ${this.boxes.freeSlots().length} free`);
+    return undefined;
   }
 
   /** Track AS: matching items in the inventory (slots 0..35). */
@@ -580,7 +675,7 @@ export class HomeLogistics {
     return n;
   }
 
-  private async doWithdraw(cancelled: () => boolean, req: { item: BringItem; want: number }): Promise<WithdrawReport> {
+  private async doWithdraw(cancelled: () => boolean, req: WithdrawRequest): Promise<WithdrawReport> {
     const t0 = this.now();
     const rep: WithdrawReport = { ok: false, taken: {}, from: [], boxes: [], carried: 0, chests: 0, requests: 0, ms: 0 };
     const finish = (reason?: string): WithdrawReport => {
@@ -599,14 +694,22 @@ export class HomeLogistics {
     }
     const failed = new Set<string>();
     let boxItems = 0;
+    let roomTries = 0;
     for (let round = 0; round < 24; round++) {
       if (cancelled()) return finish('interrupted');
       const plan = planBring(this.records(), req.item, req.want, this.carried(req.item) + boxItems, this.d.position());
       if (plan.need <= 0) break;
-      const mode = (x: { box: boolean; extract?: true }): string => (x.extract ? 'extract' : x.box ? 'box' : 'loose');
+      const mode = (x: { box: boolean; extract?: true }): 'extract' | 'box' | 'loose' => (x.extract ? 'extract' : x.box ? 'box' : 'loose');
       const next = plan.sources.find((x) => !failed.has(`${x.key}:${mode(x)}`));
       if (!next) break;
       const tag = `${next.key}:${mode(next)}`;
+      // Track K3: no free slot for this take (and the spare the job needs after it): make room at home first
+      const slotsNeeded = (): number => slotsForTake(this.d.inventory.slots, req.item.boxes ? ['shulker_box'] : req.item.names, Math.min(plan.need, next.take), { mode: mode(next), spare: req.spare ?? 0, ...(next.boxes !== undefined ? { boxes: next.boxes } : {}) });
+      const short = slotsNeeded() - this.boxes.freeSlots().length;
+      if (short > 0 && roomTries < MAX_ROOM_TRIES) {
+        roomTries++;
+        if ((await this.roomFor(short, req.item.boxes ? [] : req.item.names, rep, cancelled)) === 'interrupted') return finish('interrupted');
+      }
       const v = await this.visit(next.pos, next.kind, cancelled);
       if (!v.ok) {
         if (v.reason === 'interrupted') return finish('interrupted');
@@ -713,7 +816,18 @@ export class HomeLogistics {
         if (e.got === 0 && this.boxes.freeSlots().length < 3) full = true;
       }
       if (cancelled()) return finish('interrupted');
-      if (full) return finish('inventory_full');
+      if (full) {
+        // Track K3: the take ran out of room (the estimate before it was short): make room once more and go on
+        const rest = Math.max(0, req.want - this.carried(req.item) - boxItems);
+        if (rest <= 0) continue;
+        if (roomTries >= MAX_ROOM_TRIES) return finish('inventory_full');
+        roomTries++;
+        const before = rep.room?.unloaded ?? 0;
+        const need = Math.max(1, slotsForTake(this.d.inventory.slots, req.item.boxes ? ['shulker_box'] : req.item.names, rest, { mode: mode(next), spare: req.spare ?? 0 }) - this.boxes.freeSlots().length);
+        if ((await this.roomFor(need, req.item.boxes ? [] : req.item.names, rep, cancelled)) === 'interrupted') return finish('interrupted');
+        if ((rep.room?.unloaded ?? 0) <= before) return finish('inventory_full');
+        continue;
+      }
       if (got === 0) failed.add(tag); // it held less than remembered: the refreshed memory sends the next round elsewhere
     }
     return finish();
@@ -1122,7 +1236,7 @@ export class HomeLogistics {
   }
 
   /** One chest trip: walk, open (refresh), plan for this chest with what it holds, deposit, refresh, close. */
-  private async depositAt(p: Vec3, rep: UnloadReport, cancelled: () => boolean, all: boolean, skip?: ReadonlySet<string>, hold?: ReadonlySet<string>, spares = false): Promise<string> {
+  private async depositAt(p: Vec3, rep: UnloadReport, cancelled: () => boolean, all: boolean, skip?: ReadonlySet<string>, hold?: ReadonlySet<string>, spares = false, only?: ReadonlySet<number>): Promise<string> {
     const rec = this.d.memory().get(p);
     const v = await this.visit(p, rec?.kind ?? 'chest', cancelled);
     if (!v.ok) return v.reason;
@@ -1130,7 +1244,8 @@ export class HomeLogistics {
     try {
       const key = chestKey(p);
       const plan = this.plan(all, undefined, { on: false, ...(spares ? { spares: true } : {}), ...(skip ? { skip } : {}), ...(hold ? { hold } : {}) });
-      const moves = plan.moves.filter((m) => m.to === key).map((m) => ({ slot: m.slot, count: m.count, name: m.name }));
+      // Track K3: a room step deposits only the stacks it chose (`only`)
+      const moves = plan.moves.filter((m) => m.to === key && (!only || only.has(m.slot))).map((m) => ({ slot: m.slot, count: m.count, name: m.name }));
       if (moves.length === 0) return 'nothing_fits';
       const r = await this.d.skills.depositSlots(v.view, moves);
       rep.requests += r.requests;

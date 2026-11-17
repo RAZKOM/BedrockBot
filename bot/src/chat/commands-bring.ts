@@ -26,7 +26,7 @@ import type { RuntimeSettings } from '../config/settings.ts';
 import type { Logger } from '../log.ts';
 import type { ChestRecord } from '../world/cache/chests.ts';
 import { bringMatches, defaultCount, itemsText, parseBringArgs, planBring, resolveBringItem, stockOf, type BringItem } from '../skills/home/bring.ts';
-import type { WithdrawReport } from '../skills/home/logistics.ts';
+import { roomLine, type WithdrawReport } from '../skills/home/logistics.ts';
 import type { Lookup } from '../skills/items/catalog.ts';
 import { BringProcess, type BringJob, type BringResult, type BringRunner, type DeliverResult } from '../tasks/process/bring.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
@@ -79,6 +79,8 @@ export function endLine(job: BringJob, r: BringResult | undefined): string {
   const loose = Math.min(w.carried, Math.max(0, job.want - boxItems));
   if (!r.deliver) {
     if (w.reason === 'no_home') return 'bring: no home set (!home set)';
+    // Track K3: nothing taken for want of room (not at home, nothing to unload): say so, not "held less"
+    if (w.reason === 'inventory_full') return `bring: took no ${word}: my inventory is full${w.room?.why ? ` (no room made: ${w.room.why})` : ''}`;
     return `bring: found no ${word}: the chests held less than remembered (!chests scan reads them again; !get ${word} makes new ones)`;
   }
   const what: string[] = [];
@@ -93,6 +95,8 @@ export function endLine(job: BringJob, r: BringResult | undefined): string {
   // Track BJ: items taken out of a box next to the bot, the box put back
   for (const e of w.extracted ?? []) if (e.items > 0 || !e.back) notes.push(`${e.items} taken out of a shulker box from ${e.from}${e.back ? ', the box went back' : '; the box goes back to that chest later'}`);
   if (w.notes?.length) notes.push(...w.notes); // Track BJ: an earlier box not back yet
+  const room = roomLine(w); // Track K3: the stacks unloaded at home first, or why none were
+  if (room) notes.push(room);
   if (w.reason === 'inventory_full') notes.push('my inventory is full');
   const d = r.deliver;
   if (!d.ok) return `bring: carrying ${text} but could not get to ${'player' in job.to ? job.to.player : 'home'}: ${d.reason ?? 'failed'}`;

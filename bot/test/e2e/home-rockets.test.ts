@@ -171,4 +171,40 @@ describe.skipIf(!E2E)('@bds home: rockets on hand (Track R9)', () => {
     await sleep(500);
     expect(b.processes.userProcesses().length).toBe(0);
   }, 120_000);
+
+  it('Track K3: a full inventory at home, 2 paper and 2 gunpowder in the chest: `!rockets 6` makes room first and crafts 6 (3 of 3)', async () => {
+    const b = bot!;
+    const loot = ['andesite', 'granite', 'diorite', 'tuff', 'calcite', 'cobbled_deepslate'];
+    const inv = b.built.mobility!.world.inventory;
+    const results: string[] = [];
+    try {
+      for (let trial = 1; trial <= 3; trial++) {
+        await reset(b);
+        await b.truth.chestPut(L.chest, 'paper', 2, 1);
+        await b.truth.chestPut(L.chest, 'gunpowder', 2, 1);
+        await scan(b);
+        for (let i = 0; i < 36; i++) await b.truth.ok('give', [b.name, loot[i % loot.length]!, 64]);
+        await until(() => (inv.slots.slice(0, 36).every((s) => !!s && s.count > 0) ? true : undefined), 15_000, 'a full inventory in the model');
+        await sleep(300);
+        const from = b.said.length;
+        const logs0 = b.logs.length;
+        const t0 = Date.now();
+        await b.command('!rockets 6');
+        const start = await b.reply((x) => x.startsWith('rockets: '), from);
+        const end = await b.reply((x) => x.startsWith('rockets: ') && x !== start, from, 150_000);
+        const lines = b.logs.slice(logs0).filter((l) => / (rockets|withdraw|bring|craft firework_rocket)/.test(l)).map((l) => l.replace(/^\S+ info /, ''));
+        note(`full #${trial}: "${end}" after ${((Date.now() - t0) / 1000).toFixed(1)} s; ${lines.join(' | ')}`);
+        // each material: its stack and one slot for the crafted rockets
+        expect(lines.some((l) => l.startsWith("withdraw: no room for 2 stacks: unloading 2 first"))).toBe(true);
+        expect(end).toMatch(/^rockets: 6 carried \(6 crafted, (2 gunpowder, 2 paper|2 paper, 2 gunpowder) fetched\); made room: unloaded 2 stacks \(.+\)/);
+        const n = await counts(b);
+        expect(n.firework_rocket ?? 0).toBe(6);
+        expect(n.paper ?? 0).toBe(0);
+        expect(n.gunpowder ?? 0).toBe(0);
+        results.push(`#${trial} ok`);
+      }
+    } finally {
+      note(`rockets with a full inventory: ${results.length} of 3 (${results.join(', ')})`);
+    }
+  }, 600_000);
 });

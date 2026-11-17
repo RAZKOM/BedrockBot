@@ -92,3 +92,50 @@ of 2: 2 more: 213 buckets in the chests at home, taken there`, and the bot did n
 Consequences: on the test server the bot by the pen took 2 buckets out of the home chest and filled both in 6.5 to 13.0 s (3 of 3);
 a chest emptied behind the memory gave the reason above; 40 blocks away nothing walked and the reply said why. The
 trip readiness may now walk to the home chests from up to `homeChestRadius` + 8 blocks away before a trip.
+
+## Addendum: Track K3 (2026-11-17), room for a take, cows farther out
+
+On the Realm the bot came home with every slot full. `!milk` planned `2 bucket from the chests at home, 2 at the cows`,
+and the withdrawal ended at the chest with `bring: withdraw ended (inventory_full): took nothing from 0 containers in 1
+trips`: no free slot for the buckets. After an `!unload` the take worked, and then no cow stood within 24 blocks
+(`MILK_RADIUS`): `milk: 0 of 2 milked (none; ...)`.
+
+12. **A take at home makes its own room** (`HomeLogistics.withdraw`, skills/home/logistics.ts; the rules
+    `slotsForTake` and `roomChoice` in skills/home/unloader.ts; docs/home.md "Room for a take"). Before each chest trip,
+    with fewer free slots than the take needs (its stacks beyond the carried partial stacks, one per whole box, three to
+    take out of a box, plus the caller's `spare`), and in reach of home (decision 9's `homeChestReach`, now in
+    skills/home/reach.ts), the missing number of stacks is unloaded into the home chests first, then the take runs;
+    after a take that still ran full, once more. Only stacks an unload plan (no box or fill steps) moves whole into one
+    chest are chosen: what the unloader keeps (the kit, gear, food, the reserves, `milk_reserve`, `rocket_reserve`) and
+    the carried shulker boxes never go, nor the take's own item; the chest that takes the most first, the main inventory
+    before the hotbar. One rule for every caller of the withdrawal: `!bring`, `Supply.ensure`'s home route (the milk,
+    the rockets and their materials, the trip readiness). The spare slots: k - 1 after k empty buckets (a stack of
+    buckets becomes single milk buckets), one after paper or gunpowder (the crafted rockets), two after sugar cane. Out
+    of reach, held by a `!test inv` save, or with nothing to unload, no room is made and the reason is given (`my
+    inventory is full (no room made: not at home: I am 60 blocks from home (they count within 24))`). The log:
+    `withdraw: no room for 2 stacks: unloading 2 first`, `withdraw: made room: unloaded 2 stacks (64 tuff, 64 calcite)
+    into 1 container in 1.2 s; 2 free`; the replies of `!bring`, `!milk` and `!rockets` end `made room: unloaded N
+    stack(s) (...)`. `!rockets` and the rockets chore now use the same reach as the milk (within `homeChestRadius` + 8
+    of home, 16 up or down) where Track R9 used `atHome`.
+13. **Cows farther out** (`!milk far [n]`, setting `milkRange`, default 24, 24 to 96 blocks). The bot remembers the
+    milkable adults that go out of its entity view (`MilkSightings`: where they were, for 30 minutes; fed from the
+    entity tracker's removals). `!milk far` picks the nearest adult cow, mooshroom or goat within `milkRange` of the bot,
+    in view or seen (16 up or down beyond 24), walks there by the normal walk with its safety rules (a time limit of 20
+    ticks a block, at least 300), milks there as before (24 blocks, 4 up or down, around the bot) and walks home after.
+    The walk runs by day only: at night `!milk far` refuses, and night falling or a hostile within 16 stops the walk at
+    once, as a hostile stops the milking. A sighting found empty on arrival is forgotten; at most 4 walks a job. With
+    none known within the range the reply says so and names the nearest known one (`2 short of 2: no cow, mooshroom or
+    goat known within 30 blocks (the nearest I know: a cow 49 blocks away)`); the start reply names the target (`the
+    nearest within 64: a cow 50 blocks away`). Plain `!milk` stays at 24. The chore looks within `milkRange` of home, so
+    with the default nothing changes; raised, the chore walks farther by day. No new way of moving the body: the walk
+    is the existing navigation to a farther goal.
+
+Consequences, measured in e2e on test servers (BDS 1.26.60, flat, peaceful, by day, 3 of 3 runs each): a full inventory
+(36 stacks of stone kinds) at home, 16 buckets in the chest: `!bring bucket 2 home` unloaded 1 stack in 1.1 to 1.2 s and
+took 2 (2.0 to 2.2 s in all); `!milk` unloaded 2 stacks, took 2 buckets and filled both in 10.7 to 11.5 s; `!rockets 6`
+with 2 paper and 2 gunpowder in the chest unloaded 2 stacks before the gunpowder and 1 before the paper and crafted 6 in
+3.6 to 3.7 s. A cow 50 blocks out, `milkRange 64`: `!milk far` walked there (the walk ended 2.8 to 2.9 blocks from it),
+filled 2, and was back on the home point 19.6 to 20.4 s after the command. With `milkRange 30` the reply named the cow
+49 blocks away and the bot did not move. Not covered: anything on the Realm; mooshrooms and goats; a sighting beyond
+the entity view walked to (the e2e cow 50 blocks out stayed in view); broken ground, water or a hostile on the far walk
+(the hostile and night stops by unit tests only); the chore with a raised range; a take that needs a box's worth of room.

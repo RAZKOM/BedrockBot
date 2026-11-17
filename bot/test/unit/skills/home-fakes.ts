@@ -28,7 +28,7 @@ export interface Box {
 }
 
 /** A fake home: containers by position, an inventory, skills that act on them. */
-export function fakeHome(o: { containers: Record<string, { kind: string; items?: (ItemStack | null)[]; raws?: unknown[]; size?: number }>; inv: (ItemStack | null)[]; invRaws?: unknown[]; home?: Vec3; probe?: HomeDeps['probe']; now?: () => number; gotoFail?: Set<string>; held?: HomeDeps['held'] }) {
+export function fakeHome(o: { containers: Record<string, { kind: string; items?: (ItemStack | null)[]; raws?: unknown[]; size?: number }>; inv: (ItemStack | null)[]; invRaws?: unknown[]; home?: Vec3; probe?: HomeDeps['probe']; now?: () => number; gotoFail?: Set<string>; held?: HomeDeps['held']; log?: HomeDeps['log']; stay?: boolean }) {
   const boxes = new Map<string, Box>();
   for (const [k, c] of Object.entries(o.containers)) {
     const size = c.size ?? 27;
@@ -77,7 +77,7 @@ export function fakeHome(o: { containers: Record<string, { kind: string; items?:
       }
       const p = (g as { p: Vec3 }).p;
       if (o.gotoFail?.has(chestKey(p))) return { ok: false, reason: 'unreachable' };
-      pos = { x: p.x + 1, y: 0, z: p.z };
+      if (!o.stay) pos = { x: p.x + 1, y: 0, z: p.z }; // Track K3: `stay`: the bot stays where it is (out of reach of home)
       return { ok: true };
     },
     open: async (p) => {
@@ -214,6 +214,7 @@ export function fakeHome(o: { containers: Record<string, { kind: string; items?:
     now: o.now ?? (() => 1_000_000),
     ...(o.probe ? { probe: o.probe } : {}),
     ...(o.held ? { held: o.held } : {}),
+    ...(o.log ? { log: o.log } : {}),
   });
   return {
     logistics,

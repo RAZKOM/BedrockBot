@@ -39,8 +39,8 @@ export interface RocketSource {
   counts(): RocketCounts;
   /** n more of `item` loose out of the carried boxes; how many came and why fewer. */
   fromBoxes(item: RocketItem, n: number, cancelled: () => boolean): Promise<{ got: number; why?: string | undefined }>;
-  /** n more of `item` loose out of the carried boxes, then the chests at home (walks there). */
-  fromHome(item: RocketItem, n: number, cancelled: () => boolean): Promise<{ got: number; why?: string | undefined }>;
+  /** n more of `item` loose out of the carried boxes, then the chests at home (walks there); `room`: the room made there first (Track K3). */
+  fromHome(item: RocketItem, n: number, cancelled: () => boolean): Promise<{ got: number; why?: string | undefined; room?: string | undefined }>;
   /** Craft n of paper (at a table) or rockets (the recipe of 1 paper and 1 gunpowder); the items made and the crafter's line. */
   craft(item: typeof PAPER | typeof ROCKET, n: number, cancelled: () => boolean): Promise<{ made: number; line: string }>;
   /** Up to n loose rockets of the main slots into the fireworks box (none carried, or no room: moved 0 and why). */
@@ -88,6 +88,8 @@ export interface RocketReport {
   stowed: number;
   /** Why it stopped short of `keep`. */
   short?: string;
+  /** Track K3: the room the takes from the chests at home made first. */
+  room?: string;
   reason: 'done' | 'short' | 'interrupted';
 }
 
@@ -133,7 +135,11 @@ export class RocketJob {
       if (cancelled()) return end('interrupted');
       if (step.kind === 'boxes' || step.kind === 'home') {
         this.phase = `${step.item} out of ${step.kind === 'boxes' ? 'a carried box' : 'the chests at home'}`;
-        const r = step.kind === 'boxes' ? await d.source.fromBoxes(step.item, step.n, cancelled) : await d.source.fromHome(step.item, step.n, cancelled);
+        const r: { got: number; why?: string | undefined; room?: string | undefined } = step.kind === 'boxes' ? await d.source.fromBoxes(step.item, step.n, cancelled) : await d.source.fromHome(step.item, step.n, cancelled);
+        if (r.room) {
+          d.log?.info(`rockets: ${this.phase}: ${r.room}`);
+          rep.room = rep.room ? `${rep.room}; ${r.room}` : r.room;
+        }
         if (step.item === ROCKET) rep.fromHome += r.got;
         else if (r.got > 0) rep.fetched[step.item] = (rep.fetched[step.item] ?? 0) + r.got;
         if (r.got < step.n && r.why) rep.short ??= `${step.item}: ${r.why}`;
@@ -180,6 +186,7 @@ export function rocketsReply(r: RocketReport): string {
   const tail: string[] = [];
   if (r.reason === 'interrupted') tail.push('stopped');
   if (r.after < r.keep) tail.push(`${r.keep - r.after} short of ${r.keep}${r.short ? `: ${r.short.replace(/^\d+ short: /, '')}` : ''}`);
+  if (r.room) tail.push(r.room); // Track K3: the stacks unloaded at home for the takes
   return `${head}${what}${tail.length ? `; ${tail.join('; ')}` : ''}`;
 }
 

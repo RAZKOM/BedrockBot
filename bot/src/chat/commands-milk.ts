@@ -2,6 +2,8 @@
 //   !milk [n]       fill every empty bucket carried at the cows, mooshrooms and goats within 24 blocks, and stock up to
 //                   milkKeep (or n) milk buckets: out of the carried boxes, the chests at home when the bot is there, a
 //                   bucket crafted from 3 iron ingots with none anywhere (milkCraft); the reply says what it got
+//   !milk far [n]   Track K3: the same with the mobs within milkRange (default 24, up to 96) of the bot, in view or seen
+//                   (the sightings are fed here from the entity tracker's removals), walked to by day, then home
 //   !milk status    the counts (carried, in the boxes, at home), the mobs near, the chore, what the next pass would do
 // Also wired here: the milk chore (autoMilk, default off; tasks/process/milk.ts), the trip readiness's milk step
 // (tasks/pve.ts tripStocks: before a long trip, milk out of the boxes and the chests at home) and the `!status` part
@@ -9,7 +11,7 @@
 import type { Vec3 } from '../connection/types.ts';
 import { classify, entityFeet } from '../skills/combat/hostiles.ts';
 import { BabyTracker } from '../skills/food/finder.ts';
-import { BUCKET, bucketCounts, homeChestReach, MILK, MILK_RADIUS, MILK_THREAT, Milker, type MilkStockInput } from '../skills/food/milk.ts';
+import { BUCKET, bucketCounts, candidateLine, homeChestReach, MILK, MILK_RADIUS, MILK_THREAT, Milker, type MilkStockInput } from '../skills/food/milk.ts';
 import { closePenGates, leavePen, PenDetector, type Pen } from '../skills/food/pen.ts';
 import { craftLine } from '../skills/craft/crafter.ts';
 import { supplyOf } from '../skills/supply/supply.ts';
@@ -91,15 +93,24 @@ export function registerMilkCommands(d: CommandDeps, extra: MilkCommandExtra = {
     leavePen: (pen, cancelled) => leavePen(penMove, pen, cancelled),
     closeGates: (pen, cancelled) => closePenGates(penMove, pen, cancelled),
     threat,
+    isDay: () => isChoreTime(extra.clock?.time), // Track K3: a walk beyond 24 blocks runs by day
+    stopWalk: () => {
+      if (pve.mover.nav.busy) pve.mover.cancel();
+    },
     log,
   });
+  // Track K3: the milkable adults seen, where they were when they went out of view (`!milk far`)
+  const offGone = world.entityTracker.onRemove((e) => milker.sightings.gone(e, babies.isBaby(e.runtimeId), isDead(e.runtimeId)));
   const loose = (name: string): number => world.inventory.slots.slice(0, 36).reduce((a, s) => a + (s?.name.replace(/^minecraft:/, '') === name ? s.count : 0), 0);
-  const take = async (item: string, n: number, cancelled: () => boolean, home: boolean): Promise<{ got: number; why?: string | undefined }> => {
+  const take = async (item: string, n: number, cancelled: () => boolean, home: boolean): Promise<{ got: number; why?: string | undefined; room?: string | undefined }> => {
     const s = supplyOf(task);
     if (!s) return { got: 0, why: 'no supply layer' };
     const before = s.loose(item);
-    const r = await s.ensure(item, before + n, { cancelled, home });
-    return { got: Math.max(0, r.loose - before), why: r.reason };
+    // Track K3: a stack of k empty buckets turns into k milk buckets, k - 1 of them in new slots: a take from home with no
+    // room for that unloads the stacks first (the withdrawal's room step)
+    const spare = home && item === BUCKET ? Math.max(0, bucketCounts(world.inventory.slots).empty + n - 1) : 0;
+    const r = await s.ensure(item, before + n, { cancelled, home, ...(spare > 0 ? { spare } : {}) });
+    return { got: Math.max(0, r.loose - before), why: r.reason, ...(r.room ? { room: r.room } : {}) };
   };
   const controller = new MilkController({
     processes,
@@ -152,6 +163,14 @@ export function registerMilkCommands(d: CommandDeps, extra: MilkCommandExtra = {
     afterJob: () => {
       if (task.home?.get()) void pve.returnHome('milk', { ifIdle: true, timeoutTicks: 6000 });
     },
+    // Track K3: the walk home inside the milk process (pve.returnHome queues the low-priority home process, which never
+    // runs while this user process holds control: the job would wait on itself)
+    goHome: async () => {
+      const h = task.home?.get();
+      if (!h) return { ok: false, reason: 'no home set' };
+      const r = await pve.mover.goto({ type: 'block', p: h }, { timeoutTicks: 6000, closeDoors: true });
+      return r.ok ? { ok: true } : { ok: false, reason: r.reason };
+    },
     log,
   });
   controllers.set(task, controller);
@@ -167,6 +186,7 @@ export function registerMilkCommands(d: CommandDeps, extra: MilkCommandExtra = {
   const stop = task.stop.bind(task);
   task.stop = () => {
     controller.dispose();
+    offGone();
     ownBabies?.dispose();
     pve.removeTripStock(tripStock);
     stop();
@@ -174,19 +194,22 @@ export function registerMilkCommands(d: CommandDeps, extra: MilkCommandExtra = {
 
   d.chat.register({
     name: 'milk',
-    help: `[n] | status (fill the empty buckets I carry at a cow, mooshroom or goat within ${MILK_RADIUS} blocks and keep milkKeep milk buckets: out of my boxes, the chests at home, a bucket crafted from 3 iron ingots; milk is drunk against a witch's poison)`,
+    help: `[far] [n] | status (fill the empty buckets I carry at a cow, mooshroom or goat within ${MILK_RADIUS} blocks, far: within milkRange by day, then home; keep milkKeep milk buckets: out of my boxes, the chests at home, a bucket crafted from 3 iron ingots; milk is drunk against a witch's poison)`,
     group: 'work',
     example: '!milk',
     auto: `a long trip first takes the milk buckets missing to milkKeep out of my boxes and the chests at home; with autoMilk on it also fills them at the cows within ${MILK_RADIUS} of home by day`,
     run: ({ reply, args }) => {
-      const a = args[0]?.toLowerCase() ?? '';
-      if (a === 'status') {
+      const words = args.map((x) => x.toLowerCase());
+      if (words[0] === 'status') {
         reply(controller.statusLine());
         return;
       }
-      const n = a === '' ? undefined : Number(a);
-      if (n !== undefined && (!Number.isInteger(n) || n < 1 || n > MAX_MILK)) {
-        reply(`usage: !milk [n 1..${MAX_MILK}] | status`);
+      // Track K3: `!milk far [n]` (or `!milk n far`): the mobs within milkRange, seen or in view, by day
+      const far = words.includes('far');
+      const rest = words.filter((x) => x !== 'far');
+      const n = rest.length === 0 ? undefined : Number(rest[0]);
+      if (rest.length > 1 || (n !== undefined && (!Number.isInteger(n) || n < 1 || n > MAX_MILK))) {
+        reply(`usage: !milk [far] [n 1..${MAX_MILK}] | status`);
         return;
       }
       const c = bucketCounts(world.inventory.slots);
@@ -195,8 +218,17 @@ export function registerMilkCommands(d: CommandDeps, extra: MilkCommandExtra = {
         reply(`milk: ${c.milk} milk bucket${c.milk === 1 ? '' : 's'} carried already (milkKeep ${controller.keep()})`);
         return;
       }
-      reply(`milk: ${c.milk} of ${want} carried, ${c.empty} empty bucket${c.empty === 1 ? '' : 's'}; getting ${want - c.milk}${processes.paused ? ' (held: !resume)' : ''}`);
-      void controller.milk(want).result.then((r) => reply(milkReply(r)));
+      let where = '';
+      if (far) {
+        if (!isChoreTime(extra.clock?.time)) {
+          reply('milk: !milk far walks by day only (it is night)');
+          return;
+        }
+        const look = controller.farLook();
+        where = look.target ? `; the nearest within ${look.range}: ${candidateLine(look.target)}` : `; none known within ${look.range}${look.nearest ? ` (the nearest I know: ${candidateLine(look.nearest)})` : ''}`;
+      }
+      reply(`milk: ${c.milk} of ${want} carried, ${c.empty} empty bucket${c.empty === 1 ? '' : 's'}; getting ${want - c.milk}${where}${processes.paused ? ' (held: !resume)' : ''}`);
+      void controller.milk(want, far).result.then((r) => reply(milkReply(r)));
     },
   });
   return controller;

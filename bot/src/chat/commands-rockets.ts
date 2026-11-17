@@ -69,12 +69,15 @@ export function registerRocketCommands(d: CommandDeps, extra: RocketCommandExtra
     }
     return best ? `a ${best.name} ${best.d.toFixed(0)} blocks away` : undefined;
   };
-  const take = async (item: RocketItem, n: number, cancelled: () => boolean, home: boolean): Promise<{ got: number; why?: string | undefined }> => {
+  const take = async (item: RocketItem, n: number, cancelled: () => boolean, home: boolean): Promise<{ got: number; why?: string | undefined; room?: string | undefined }> => {
     const s = supplyOf(task);
     if (!s) return { got: 0, why: 'no supply layer' };
     const before = s.loose(item);
-    const r = await s.ensure(item, before + n, { cancelled, home });
-    return { got: Math.max(0, r.loose - before), why: r.reason };
+    // Track K3: a material taken from home is crafted next: one free slot for the crafted stack (two for sugar cane: the
+    // paper, then the rockets), made at home first with the take's room when the inventory is full
+    const spare = !home || item === ROCKET ? 0 : item === CANE ? 2 : 1;
+    const r = await s.ensure(item, before + n, { cancelled, home, ...(spare > 0 ? { spare } : {}) });
+    return { got: Math.max(0, r.loose - before), why: r.reason, ...(r.room ? { room: r.room } : {}) };
   };
   const counts = () => {
     const k = kit();
@@ -99,7 +102,7 @@ export function registerRocketCommands(d: CommandDeps, extra: RocketCommandExtra
           paper: stock(PAPER, m.paper),
           gunpowder: stock(GUNPOWDER, m.gunpowder),
           cane: stock(CANE, m.cane),
-          atHome: homeControlOf(task)?.logistics.atHome() ?? false,
+          atHome: homeControlOf(task)?.logistics.inReach().inReach ?? false, // Track K3: the chests at home in reach (homeChestReach), as for the milk
           table: inv.slots.slice(0, 36).some((x) => x?.name === 'crafting_table' && x.count > 0) || (cc?.crafter.tablesAround().length ?? 0) > 0,
           recipe: !!cc && rocketRecipe(cc.recipes.byOutput(ROCKET)) !== undefined,
         };

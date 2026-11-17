@@ -1852,10 +1852,38 @@ the home chest, nothing carried, the bot by the pen 11.7 blocks from the home po
 | the take fails | the chest emptied behind the memory | `... 2 short of 2: buckets out of the chests at home: the chests at home gave none (fewer there than remembered)` |
 | out of reach | the same chest, the bot 40 blocks from home | `... out of reach: I am 40 blocks from home (they count within 24)`; the bot did not move |
 
+**A full inventory** (Track K3, decision 12; docs/home.md "Room for a take"). A take from the home chests with no
+free slot for it unloads the stacks it needs first, by the unloader's rules (loot only: the kit, the reserves,
+`milk_reserve` and the carried boxes stay), then takes; for empty buckets it leaves room for the milk buckets they turn
+into. The reply ends `made room: unloaded 2 stacks (64 andesite, 64 granite)`; out of reach of home nothing is unloaded
+and the reason says so.
+
+**Cows farther out** (Track K3, decision 13). `!milk far [n]` looks for an adult cow, mooshroom or goat within
+`milkRange` (default 24, up to 96) of the bot, in view or seen in the last 30 minutes (the bot remembers where the
+milkable adults were when they went out of view), walks there by the normal walk, milks and walks home. By day only:
+at night it refuses, and night falling or a hostile within 16 stops the walk. The start reply names the target (`the
+nearest within 64: a cow 50 blocks away`); with none known it names the nearest one it knows (`2 short of 2: no cow,
+mooshroom or goat known within 30 blocks (the nearest I know: a cow 49 blocks away)`). The end reply says where it
+went (`milk: 2 milk buckets carried (2 from a cow); went to a cow 50 blocks away; walked home`). Plain `!milk` keeps 24;
+the chore looks within `milkRange` of home, so the default changes nothing.
+
+Measured (e2e `home-milk` and `home-rockets`, bds-farm and bds-cache, the same setup, 2026-11-17, 3 of 3 runs each; the
+full inventory is 36 stacks of six stone kinds):
+
+| case | what | result (3 runs) |
+|---|---|---|
+| `!bring bucket 2 home`, full | 16 buckets in the home chest | `withdraw: no room for 1 stack: unloading 1 first`, 1 stack unloaded in 1.1 to 1.2 s, 2 buckets taken; `brought 2 buckets home (from 1 chest; made room: unloaded 1 stack (64 granite))` 2.0 to 2.2 s after the command |
+| `!milk`, full | the same chest, cows in the pen | 2 stacks unloaded (one for the buckets, one for the milk), 2 buckets taken and filled: `milk: 2 milk buckets carried (2 from a cow); made room: unloaded 2 stacks (...)` in 10.7 to 11.5 s; the gate closed |
+| `!rockets 6`, full | 2 paper and 2 gunpowder in the home chest | 2 stacks unloaded before the gunpowder, 1 before the paper, 6 crafted: `rockets: 6 carried (6 crafted, 2 gunpowder, 2 paper fetched); made room: ...` in 3.6 to 3.7 s |
+| `!milk far`, `milkRange 64` | 2 empty buckets, a cow 50 blocks from home, the bot on the home point | the walk ended 2.8 to 2.9 blocks from the cow; both filled; on the home point again 19.6 to 20.4 s after the command |
+| `!milk far`, `milkRange 30` | the same cow 49 blocks away | the reply names it as the nearest known; the bot did not move |
+
 **Not proven.** Mooshrooms and goats (the same click; only cows ran); milking on broken ground, near water, or with a
 hostile near (bds-home is peaceful: the hostile stop is covered by unit tests only); the chore on the Realm; a
 crafting table placed from the inventory for the craft (one stood next to home); the home chests' reach on a base with
-floors (the 16 up or down was not run: the e2e world is flat) or from a shelter.
+floors (the 16 up or down was not run: the e2e world is flat) or from a shelter. Track K3: a walk to a cow seen out of
+view (the e2e cow 50 blocks out stayed in view); the far walk on broken ground, near water or with a hostile (the
+hostile and night stops by unit tests only); the chore with `milkRange` raised.
 
 ### Tried and not taken
 
@@ -1910,6 +1938,16 @@ Both rules are on with the update; no setting changes. By night, near home, the 
   twice, and answers `milk: 2 milk buckets carried (2 from a cow)`. A take that gets less answers `... short of 2:
   buckets out of the chests at home: <why>` and logs `milk: buckets out of the chests at home: got N of 2 (<why>)`;
   further from home the reply ends `out of reach: I am N blocks from home (they count within M)`.
+- A full inventory at home (Track K3): with every slot full and buckets in a home chest, `!milk` (no `!unload` first)
+  logs `withdraw: no room for 2 stacks: unloading 2 first`, `withdraw: made room: unloaded 2 stacks (...) into 1
+  container in T s; 2 free`, then the take and the milking; the reply ends `made room: unloaded 2 stacks (...)`. The same
+  for `!bring bucket 2 home` (1 stack) and `!rockets` with paper and gunpowder at home. The stacks unloaded are loot only:
+  no sword, armour, food, rockets or shulker box leaves.
+- Cows farther out (Track K3): by day, `!set milkRange 64`, then `!milk far` near home: the start reply names `the
+  nearest within 64: a cow N blocks away` (or `none known within 64 (the nearest I know: ...)`), the log `milk: walking
+  to a cow N blocks away (T ticks at most)`, `milk: the walk to the cow ended there, D blocks from it`, the milking, `milk:
+  walked home`; the reply ends `went to a cow N blocks away; walked home`. At night `!milk far` answers `milk: !milk far
+  walks by day only (it is night)`. `!set milkRange 24` puts it back.
 
 ## Track M8: a run starts at rest
 
