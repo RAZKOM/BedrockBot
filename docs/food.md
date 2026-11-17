@@ -33,6 +33,7 @@ with bedrock-protocol `c9e1fbf2` / minecraft-data 3.117.0 + the 1.26.60 patch on
 | `bot/src/world/cache/herds.ts` | Track AF: `HerdMarks` (the herd mark store, `herds.json` beside the region files; `WorldCache.herds`) |
 | `bot/src/tasks/process/food.ts` | Track AF additions: walks to remembered herds in `FoodJob`, `BreedProcess` (user), `BreedChore` (auto, `PRIORITY.chore`), `parseChorePen` |
 | `bot/test/unit/skills/food-v2.test.ts` | Track AF: 20 unit tests on fakes |
+| `bot/src/skills/food/milk.ts`, `bot/src/tasks/process/milk.ts`, `bot/src/chat/commands-milk.ts` | Track K1 (docs/pve.md "Milk on hand", ADR 0096): `!milk`, the milk chore, the stock rule; the click on the cow is `feedTransaction` with an empty bucket held |
 | `bot/test/e2e/food-herds.test.ts`, `food-breed.test.ts` | Track AF: e2e on bds-food |
 
 Shared files touched (one or two lines each, marked `// Track X`): `tasks/registry.ts` (one import,

@@ -16,8 +16,8 @@
 //   rockets   loose rockets beyond ROCKETS_LOOSE (two stacks: no trip burns that many) into the fireworks box, whole
 //             stacks from the main inventory first; the box stays rockets only, so it stays the fireworks box
 //   box       only below the floor (a box is set down and picked up again): what the unload would put away (its plan
-//             with no chest: not the gear, the food and seed reserves, the throwaway reserve, the flight kit, the
-//             boxes) into a carried box that has room: a bot_loot box first, then one this chore filled before, then
+//             with no chest: not the gear, the food and seed reserves, the throwaway reserve, the milk reserve, the
+//             flight kit, the boxes) into a carried box that has room: a bot_loot box first, then one this chore filled before, then
 //             an empty unnamed one (never the fireworks box, a box the bot cannot read, one owed to a chest, nor a box
 //             holding other things: the owner's box of sand stays a box of sand); never the items a skill takes
 //             loose (KEEP_LOOSE); never at home with chests, and never with `stashShulker` off
@@ -100,6 +100,8 @@ export interface RoomOptions {
   reserve?: number;
   foodReserve?: number;
   seedReserve?: number;
+  /** Track K1: the milk kept (`milkKeep`) and the empty buckets that refill it. */
+  milkKeep?: number;
   worn?: readonly string[];
   maxStack?: (name: string) => number;
 }
@@ -308,6 +310,7 @@ function lootSlots(slots: readonly RoomSlot[], inv: ReadonlyMap<number, Sim>, op
     ...(opts.reserve !== undefined ? { reserve: opts.reserve } : {}),
     ...(opts.foodReserve !== undefined ? { foodReserve: opts.foodReserve } : {}),
     ...(opts.seedReserve !== undefined ? { seedReserve: opts.seedReserve } : {}),
+    ...(opts.milkKeep !== undefined ? { milkKeep: opts.milkKeep } : {}),
     ...(opts.worn ? { worn: opts.worn } : {}),
   });
   const out: Sim[] = [];

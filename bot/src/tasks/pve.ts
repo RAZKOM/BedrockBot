@@ -525,6 +525,11 @@ export class PveController {
   readonly stats = { fights: 0, kills: 0, flees: 0, guardTriggers: 0 };
   /** The survival kit (eat, equip) for flee eating and trip readiness; wired by chat/commands-pve.ts (Track W). */
   kit: (() => TripKit | undefined) | undefined;
+  /**
+   * Track K1 (chat/commands-milk.ts, ADR 0096): milk on hand before a long trip: the milk buckets missing to `milkKeep` out
+   * of the carried boxes, and out of the chests at home when the bot is there (no cow, no craft: those are `!milk`'s).
+   */
+  tripStock: { needed(): boolean; run(alive: () => boolean): Promise<void> } | undefined;
   /** The last hit the bot took (Track W: how many more it can take). */
   lastHit: { damage: number; at: number } | undefined;
   private readonly recentHits: { damage: number; at: number }[] = [];
@@ -870,18 +875,26 @@ export class PveController {
 
   /** Food or health is below 14 and the kit is there to fix it. */
   prepNeeded(to: Vec3 | undefined): boolean {
-    return this.kit?.() !== undefined && longTrip(this.position(), to) && needsPrep({ food: this.food(), health: this.health() });
+    if (!longTrip(this.position(), to)) return false;
+    return (this.kit?.() !== undefined && needsPrep({ food: this.food(), health: this.health() })) || (this.tripStock?.needed() ?? false); // Track K1: milk
   }
 
-  /** Eat to full and put on armour (see readiness.ts); resolves at once when there is nothing to do. */
+  /** Eat to full and put on armour (see readiness.ts), then the milk (Track K1); resolves at once when there is nothing to do. */
   async prepare(alive: () => boolean, phase: (p: PrepPhase) => void): Promise<void> {
     const kit = this.kit?.();
-    if (!kit) return;
-    const self = { food: this.food(), health: this.health() };
-    Object.defineProperties(self, { food: { get: () => this.food() }, health: { get: () => this.health() } });
-    const loop = this.d.loop;
-    const r = await prepareTrip(kit, self, { alive, phase, wait: (n) => (loop.waitTicks ? loop.waitTicks(n) : new Promise((res) => setTimeout(res, n * 50))) });
-    this.log.info(`trip: prepared (${r.bites} bites, food ${r.foodBefore} -> ${r.foodAfter}${r.equipped.length ? `, wearing ${r.equipped.join(', ')}` : ''}; ${r.stop})`);
+    if (kit && needsPrep({ food: this.food(), health: this.health() })) {
+      const self = { food: this.food(), health: this.health() };
+      Object.defineProperties(self, { food: { get: () => this.food() }, health: { get: () => this.health() } });
+      const loop = this.d.loop;
+      const r = await prepareTrip(kit, self, { alive, phase, wait: (n) => (loop.waitTicks ? loop.waitTicks(n) : new Promise((res) => setTimeout(res, n * 50))) });
+      this.log.info(`trip: prepared (${r.bites} bites, food ${r.foodBefore} -> ${r.foodAfter}${r.equipped.length ? `, wearing ${r.equipped.join(', ')}` : ''}; ${r.stop})`);
+    }
+    // Track K1: the milk buckets missing to milkKeep, out of the carried boxes and the chests at home
+    const stock = this.tripStock;
+    if (stock && alive() && stock.needed()) {
+      phase('milk');
+      await stock.run(alive);
+    }
   }
 
   /** A goto process (not added) with this controller's mover and position. */

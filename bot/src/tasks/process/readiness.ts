@@ -83,7 +83,8 @@ export function checkTrip(a: { cmd: string; self: TripSelf; timeOfDay: number | 
   return { prep: needsPrep(a.self) };
 }
 
-export type PrepPhase = 'armour' | 'eating';
+/** `milk` (Track K1): the milk buckets missing to `milkKeep`, out of the carried boxes and the chests at home (tasks/pve.ts tripStock). */
+export type PrepPhase = 'armour' | 'eating' | 'milk';
 
 export interface PrepResult {
   bites: number;

@@ -157,6 +157,10 @@ beetroot, melon slice, sweet berries, glow berries) are no longer kept whole: a 
 seeds, beetroot seeds, carrot, potato ...) `seedReserve` (default 32) stays. Both show as `food_reserve` in the kept
 list; at 0 every crop and seed goes. The autoUnload trigger counts the crop stacks beyond the reserve.
 
+Milk (Track K1, decision [0096](decisions/0096-milk-on-hand.md), docs/pve.md "Milk on hand"): `milkKeep` (default 2)
+milk buckets stay, and with fewer carried, the empty buckets that would refill the rest (`milk_reserve` in the kept
+list). Further milk buckets and empty buckets are unloaded like loot; at 0 all of them go.
+
 Never unloaded: food (other than the crops above), totems, ender chests, and of the gear (anything with durability or armour) only the
 best of each class (`gearKept`: each armour slot with the worn armour counted, each tool kind by tier,
 shield, shears, elytra ...; spares of that rank stay). Worse pieces and the gear the bot has no skill for
@@ -534,6 +538,7 @@ for food and the like. Now also (through `restockFromBoxes` / `carried`):
 | the food chore | counts the food in the boxes with the loose food (`boxedFoodPoints`): no hunt while the boxes hold enough |
 | `!tunnel`, `!quarry` torches, branch mining | no torch loose at a torch spot: 32 torches (`TORCH_RESTOCK`) |
 | flights (`!fly`, autoFly) | no rockets loose and no fireworks box: 64 rockets from any other carried box (a `bot_loot` or mixed box) before the takeoff; the kit check (`kitReady`) counts them |
+| milk (Track K1, docs/pve.md "Milk on hand": the readiness of a long trip, `!milk`, the milk chore) | fewer than `milkKeep` (2) milk buckets loose: the missing ones out of a carried box, then (at home only) out of the home chests through the withdrawal; `!milk` and the chore also take empty buckets the same way for the cows. `!unload` and the room chore keep `milkKeep` milk buckets and the empty buckets that refill the rest (keep reason `milk_reserve`); further milk and empty buckets are unloaded like loot |
 
 
 | Part | What |

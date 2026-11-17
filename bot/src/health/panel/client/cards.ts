@@ -49,6 +49,7 @@ export function setupCards(page: Page): (s: Lite) => void {
     }
     text('v-weather', v.weather ?? 'unknown');
     text('v-flight', v.flight ?? '-');
+    text('v-milk', v.milk ?? '-'); // Track K1
     text('v-deaths', v.deaths == null ? '-' : String(v.deaths));
     text('v-lastdeath', v.lastDeath ? `${v.lastDeath.cause}${v.lastDeath.messages.length ? ` (${v.lastDeath.messages.join(', ')})` : ''}, ${new Date(v.lastDeath.ts).toLocaleTimeString()}` : 'none');
   }

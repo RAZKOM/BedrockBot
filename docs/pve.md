@@ -1754,15 +1754,73 @@ chunk with both rules as one A/B (`MOBS_AB_RULE=witchRush,milkCure`, 2 buckets, 
 
 ### What the bot should carry
 
-The rush works with what the live kit has. The cure needs milk, and the bot never gets milk by itself: it does not milk
-cows (a bucket used on a cow) and nothing takes milk out of a box for it. With `milkCure` on, the milk it carries is
-used; one bucket clears one poisoning and leaves an empty bucket, which a cow fills again. Two buckets in the main
+The rush works with what the live kit has. The cure needs milk; since Track K1 the bot keeps `milkKeep` (2) milk buckets
+on hand by itself (below, "Milk on hand"). With `milkCure` on, the milk it carries is used; one bucket clears one poisoning and leaves an empty bucket, which a cow fills again. Two buckets in the main
 inventory cover two poisonings that come apart (in `witch-2` both witches were dead before the drink and one bucket did
 for both). A milk bucket does not stack, so each takes a slot. The owner decides; the gauntlet's milk rows gave the kit
 two (`MOBS_MILK=2`) and never used more than one a run.
 
 A golden apple was not tried: the eater keeps it for under 6 health (`precious`), and its regeneration II for 5 s
 (believed, not measured on Bedrock here) gives back about 4 against the poison's 18.
+
+### Milk on hand (Track K1)
+
+Decision record: [decisions/0096-milk-on-hand.md](decisions/0096-milk-on-hand.md). Code: `skills/food/milk.ts` (the
+rules and the `Milker`), `tasks/process/milk.ts` (the job, `!milk`, the chore, the controller), `chat/commands-milk.ts`.
+
+**The stock.** `milkKeep` (default 2, 0 to 9; 0 turns it all off) is the number of milk buckets the bot keeps. The
+missing ones come from the cheapest source first:
+
+1. milk out of the carried shulker boxes;
+2. milk out of the home chests, only while the bot is at home (the withdrawal of `!bring`);
+3. empty buckets (loose, then out of the boxes, then out of the home chests at home) filled at an adult cow, mooshroom
+   or goat;
+4. with no bucket anywhere (carried, boxed, in the home chests) and `milkCraft` on (the default): one bucket crafted
+   from 3 iron ingots at a crafting table that is carried or near, then filled. One at most, while the bot has no
+   bucket at all: the ingots have other uses. With no iron nothing is done, and the status says so.
+
+Who uses which source:
+
+| who | sources | when |
+|---|---|---|
+| the readiness of a long trip (over 16 blocks: `!goto`, `!come`, `!follow`, `!kill`, `!explore`, `!bring`) | 1 and 2 only: no walk to a cow and no craft before a trip | the `milk` phase after the armour and the eating (`preparing: milk`); log `trip: milk: ...` |
+| `!milk [n]` (a user process, priority 40) | all four, to `n` (default the larger of `milkKeep` and the buckets carried) | at any time; the reply says what it got and what was short |
+| the milk chore (`autoMilk`, **off** by default; chore priority 30) | all four | by day, idle, within 16 blocks of home, no hostile within 16, under `milkKeep` and a step to take; again 30 s after a job that gained milk, 10 min after one that did not or when no mob is near home; walks home after |
+
+**Milking.** Only adult mobs within 24 blocks (`MILK_RADIUS`) of the centre (home for the chore, the bot for `!milk`),
+4 up or down, on dry ground (no water or lava at or under their feet), nearest first. The walk is the usual navigation
+with its safety rules (doors and gates closed behind). Inside a pen the gates are closed behind the bot and it leaves
+the pen at the end. A hostile within 16 ends the job at once (`milk: ... (a zombie 7 blocks away)`); guard and flee
+pre-empt it like any process. A mob that does not fill the bucket in 3 clicks is left alone for 30 s.
+
+**The click** (BDS 1.26.60, verified by truth on bds-home): `interact` `{ action_id: 'mouse_over_entity',
+target_entity_id }`, then `inventory_transaction` `item_use_on_entity` with `action_type: 'interact'`, the hotbar slot
+of the empty bucket and the bucket as `held_item`: the breeder's `feedTransaction` with a bucket. The server turns a
+single bucket into a milk bucket in that slot; from a stack, one bucket goes and the milk bucket lands in a free slot.
+The milk was in the model 2 to 3 ticks after the click (12 clicks); one cow filled three buckets in a row.
+
+**The unload.** `!unload` and the room chore keep `milkKeep` milk buckets and, with fewer carried, the empty buckets
+that would refill the rest (keep reason `milk_reserve`). Further milk and empty buckets are stored like loot, so the
+empty buckets the drinks leave do not pile up and the unload never undoes the stock.
+
+**Shown.** `!status` has `milk N/K (...)` (the empty buckets carried and, when nothing can be done, why: `milk 0/2 (no
+bucket and no iron (3 iron ingots make one))`, `milk 1/2 (1 more need a bucket)`); `!milk status` gives the same with
+the chore's state; the web panel's vitals have a `milk` row (`1 of 2 milk buckets, 1 empty (refilling)`).
+
+**Measured** (e2e `home-milk` on bds-home, BDS 1.26.60, flat, peaceful, 2026-11-17, 3 of 3 runs, 4 of 4 cases each;
+a 7 x 7 pen 6 blocks from home with two adult cows, a chest 3 blocks from home):
+
+| case | what | result (3 runs) |
+|---|---|---|
+| `!milk`, 3 empty buckets | the bot walks into the pen, fills all three, closes the gate behind it | 3 milk buckets and 0 empty (truth) in 7.6 to 10.0 s; the gate closed; both cows alive |
+| the trip readiness | 2 milk buckets in the home chest, nothing carried, a 20-block `!goto` | `trip: milk: 2 milk buckets carried (2 from the chests at home)`, then the walk; at the goal 5.4 s after the command; the chest empty |
+| the refill | 2 milk buckets carried, `autoMilk` on, the server poisons the bot for 30 s | `milkCure` drank 2.2 to 2.6 s after the poison; the chore filled the empty bucket at the cows: 2 milk buckets again 7.6 to 8.5 s after the poison |
+| the early game | nothing carried | `!status` `milk 0/2 (no bucket and no iron (3 iron ingots make one))`; `!milk` did nothing and said so |
+| | then 3 iron ingots, a crafting table next to home | `milk: 1 milk bucket carried (a bucket crafted from 3 iron ingots, 1 from a cow); 1 short of 2: 1 more need a bucket`; the iron gone; `!status` `milk 1/2 (1 more need a bucket)` |
+
+**Not proven.** Mooshrooms and goats (the same click; only cows ran); milking on broken ground, near water, or with a
+hostile near (bds-home is peaceful: the hostile stop is covered by unit tests only); the chore on the Realm; a
+crafting table placed from the inventory for the craft (one stood next to home).
 
 ### Tried and not taken
 
@@ -1805,6 +1863,12 @@ Both rules are on with the update; no setting changes. By night, near home, the 
   rush against 1.7 before).
 - With a milk bucket given by the owner (`milkCure`): after a poisoning, `pve: drinking milk against the poison (...)`
   then `pve: milk drunk: the poison is gone`, once the witch is dead and no mob is within 8. Without milk no such line.
+- Milk on hand (Track K1): with empty buckets and a cow, mooshroom or goat within 24 blocks, `!milk` answers `milk: 0
+  of 2 carried, 2 empty buckets; getting 2`, then `milk: 2 milk buckets carried (2 from a cow)`; the log has `milk: cow
+  #N milked (T ticks)` per bucket. `!status` and `!milk status` show `milk N/2 (...)`. With milk in a carried box or a
+  home chest, a `!goto` of more than 16 blocks logs `trip: milk: 2 milk buckets carried (...)` before the walk. With
+  `!set autoMilk on`, after a drink by day near home: `milk chore: 1 of 2 milk buckets carried: 1 at the cows`, then
+  `milk chore: done, milk: 2 milk buckets carried (1 from a cow)`.
 
 ## Packets (BDS 1.26.60.6, verified)
 

@@ -27,6 +27,7 @@ import { registerBringCommands } from '../chat/commands-bring.ts'; // Track AS
 import { registerPortalCommands } from '../chat/commands-portal.ts'; // Track AT
 import { registerFlyCommands } from '../chat/commands-fly.ts'; // Track AU
 import { registerCraftCommands } from '../chat/commands-craft.ts'; // Track AW
+import { milkStatusOf, registerMilkCommands } from '../chat/commands-milk.ts'; // Track K1
 import { registerTestCommands } from '../chat/commands-test.ts'; // Track T1
 import { registerLearnCommands } from '../chat/commands-learn.ts'; // !learn: recorded flight paths
 import { respawnClaimed } from '../skills/test/recovery.ts'; // Track T1
@@ -299,7 +300,10 @@ export const afkTask: TaskDefinition = {
         settings: settings.snapshot(),
       }),
       position: () => mob?.position() ?? afk.feet,
-      statusLine: () => ({ task: 'afk', ...(pve ? { behaviour: pve.behaviour() } : {}), nudges: afk.nudges, corrections: afk.corrections, deaths: respawn.deaths }),
+      statusLine: () => {
+        const milk = milkStatusOf(task); // Track K1: `milk 1/2 (1 empty bucket)`
+        return { task: 'afk', ...(pve ? { behaviour: pve.behaviour() } : {}), ...(milk ? { milk } : {}), nudges: afk.nudges, corrections: afk.corrections, deaths: respawn.deaths };
+      },
       alive: () => !respawn.dead,
       settings,
     };
@@ -375,6 +379,7 @@ export const afkTask: TaskDefinition = {
       registerPortalCommands, // Track AT: !nether, !overworld, !portal, the per-dimension rules, the fire escape (docs/nether.md)
       (d) => void registerFlyCommands(d, { containers, logger: ctx.logger('fly') }), // Track AU: !fly, !land, the automatic flight of !come / !goto, the flight kit (docs/flight.md)
       (d) => void registerCraftCommands(d, { containers, logger: ctx.logger('craft') }), // Track AW: !craft, !compact, the compaction step of !unload (after the home logistics; docs/crafting.md)
+      (d) => void registerMilkCommands(d, { clock }), // Track K1: !milk, the milk chore (autoMilk), the trip readiness's milk (after the food commands, the home logistics and the crafter; ADR 0096)
       (d) => registerLearnCommands(d, { logger: ctx.logger('learn') }), // !learn: the owner flies a path while the bot watches; kept in <config dir>/paths (docs/flight.md "Learned paths")
       (d) => void registerTestCommands(d, { respawn, logger: ctx.logger('test') }), // Track T1: !test, the op check, the recovery after a death behind testMode (after !fly; docs/runbook.md "The Realm as a test server")
     ];

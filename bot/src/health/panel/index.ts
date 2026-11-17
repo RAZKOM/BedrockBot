@@ -24,6 +24,7 @@ import type { RunningTask } from '../../tasks/base.ts';
 import type { BuiltContext } from '../../tasks/context.ts';
 import type { WalkingTask } from '../../tasks/registry.ts';
 import { flyControlOf } from '../../chat/commands-fly.ts'; // Track AU
+import { milkControllerOf } from '../../chat/commands-milk.ts'; // Track K1
 import type { ChatLine } from '../../chat/text.ts';
 import type { WorldCache } from '../../world/cache/cache.ts';
 import { mapRoutes, mapSource, type HealthRoute } from '../map/routes.ts';
@@ -275,6 +276,7 @@ export function setupPanel(d: PanelDeps): Panel {
       icons: () => icons !== null,
       saturation: () => saturation,
       flight: () => flyControlOf(runningTask)?.state(), // Track AU
+      milk: () => milkControllerOf(runningTask)?.panelLine(), // Track K1
       weather: () => (weatherKnown ? (thunder ? 'thunder' : rain ? 'rain' : 'clear') : undefined),
       day: () => {
         const t = clock?.time;

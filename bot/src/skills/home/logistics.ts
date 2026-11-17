@@ -371,11 +371,12 @@ export class HomeLogistics {
     return Number.isFinite(r) && r >= 0 ? r : undefined;
   }
 
-  /** Track BJ: the food and seed reserves (`foodReserve`, `seedReserve`). */
-  private crops(): { foodReserve?: number; seedReserve?: number } {
+  /** Track BJ: the food and seed reserves (`foodReserve`, `seedReserve`); Track K1: the milk kept (`milkKeep`). */
+  private crops(): { foodReserve?: number; seedReserve?: number; milkKeep?: number } {
     const f = Number(this.d.settings.get('foodReserve'));
     const s = Number(this.d.settings.get('seedReserve'));
-    return { ...(Number.isFinite(f) && f >= 0 ? { foodReserve: f } : {}), ...(Number.isFinite(s) && s >= 0 ? { seedReserve: s } : {}) };
+    const m = Number(this.d.settings.get('milkKeep'));
+    return { ...(Number.isFinite(f) && f >= 0 ? { foodReserve: f } : {}), ...(Number.isFinite(s) && s >= 0 ? { seedReserve: s } : {}), ...(Number.isFinite(m) && m >= 0 ? { milkKeep: m } : {}) };
   }
 
   /** What the autoUnload chore looks at: unloadable stacks carried and full boxes; Track V1: the spare empty boxes and the free slots. */

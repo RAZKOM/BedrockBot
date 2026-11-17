@@ -42,6 +42,10 @@
 // ...) is still never unloaded and counts first; the crops fill what it leaves, the best (nutrition + saturation)
 // first; their surplus is unloaded like loot. Of each item the farm replants (wheat_seeds, beetroot_seeds, carrot,
 // potato; farm/crops.ts SEEDS) `seedReserve` (default 32) stays for `!farm`; the rest of the seeds goes too.
+//
+// Track K1 (ADR 0096, docs/pve.md "Milk on hand"): `milkKeep` (default 2) milk buckets stay (milkReserve, keep reason
+// `milk_reserve`), and with fewer than that carried, the empty buckets that would refill the rest; further milk and
+// empty buckets are unloaded like loot, so the unload and the milk stock never undo each other.
 import { keepOnDropItems } from '../../chat/commands-survival.ts';
 import { DEFAULT_THROWAWAY_MIN, THROWAWAY_BLOCKS } from '../survival/keeper.ts';
 import { isShulkerBox, maxStackOf } from '../container/chest.ts';
@@ -97,7 +101,7 @@ export interface UnloadMove {
   rule: Rule;
 }
 
-export type KeepReason = 'kept' | 'reserve' | 'stash_box' | 'flight_kit' | 'named_box' | 'unknown_box' | 'food_reserve'; // Track AU: flight_kit; Track AV: named_box; Track BJ: food_reserve
+export type KeepReason = 'kept' | 'reserve' | 'stash_box' | 'flight_kit' | 'named_box' | 'unknown_box' | 'food_reserve' | 'milk_reserve'; // Track AU: flight_kit; Track AV: named_box; Track BJ: food_reserve; Track K1: milk_reserve
 
 /**
  * Track AV: a step that makes room before the deposits.
@@ -190,12 +194,38 @@ export interface PlanOptions {
   foodReserve?: number;
   /** Track BJ: of each seed the farm replants, this many kept (default DEFAULT_SEED_RESERVE). */
   seedReserve?: number;
+  /** Track K1: milk buckets kept (`milkKeep`, default DEFAULT_MILK_KEEP) and the empty buckets that refill the rest (`milkReserve`). */
+  milkKeep?: number;
 }
 
 /** Track BJ: crops that are food too: kept only within the food reserve (see the file comment). */
 export const CROP_FOODS: ReadonlySet<string> = new Set(['carrot', 'potato', 'beetroot', 'melon_slice', 'sweet_berries', 'glow_berries']);
 export const DEFAULT_FOOD_RESERVE = 64;
 export const DEFAULT_SEED_RESERVE = 32;
+/** Track K1 (ADR 0096): milk buckets kept on hand by default (`milkKeep`). */
+export const DEFAULT_MILK_KEEP = 2;
+
+/**
+ * Track K1 (ADR 0096): what stays of the milk: `keep` milk buckets, and empty buckets for the milk missing to `keep` (a cow
+ * refills them; `!milk`, autoMilk). The rest is unloaded like loot. A milk bucket does not stack; empty buckets stack to 16.
+ */
+export function milkReserve(slots: readonly { name: string; count: number }[], keep = DEFAULT_MILK_KEEP): Map<string, number> {
+  let milk = 0;
+  let empty = 0;
+  for (const s of slots) {
+    const n = bareName(s.name);
+    if (s.count <= 0) continue;
+    if (n === 'milk_bucket') milk += s.count;
+    else if (n === 'bucket') empty += s.count;
+  }
+  const out = new Map<string, number>();
+  const k = Math.max(0, Math.floor(keep));
+  const m = Math.min(milk, k);
+  if (m > 0) out.set('milk_bucket', m);
+  const e = Math.min(empty, k - m);
+  if (e > 0) out.set('bucket', e);
+  return out;
+}
 
 const bareName = (n: string): string => (n.startsWith('minecraft:') ? n.slice(10) : n);
 
@@ -314,12 +344,14 @@ export function reserveByKind(slots: readonly UnloadSlot[], reserve = DEFAULT_TH
  * (`cropReserve`); `all` sums them. The one rule for the planner and the logistics' box and fill steps (they must not pack
  * what the plan keeps).
  */
-export function heldBack(slots: readonly UnloadSlot[], opts: Pick<PlanOptions, 'reserve' | 'throwaway' | 'foodReserve' | 'seedReserve'> = {}): { throwaway: Map<string, number>; crops: Map<string, number>; all: Map<string, number> } {
+export function heldBack(slots: readonly UnloadSlot[], opts: Pick<PlanOptions, 'reserve' | 'throwaway' | 'foodReserve' | 'seedReserve' | 'milkKeep'> = {}): { throwaway: Map<string, number>; crops: Map<string, number>; milk: Map<string, number>; all: Map<string, number> } {
   const throwaway = reserveByKind(slots, opts.reserve ?? DEFAULT_THROWAWAY_MIN, opts.throwaway ?? THROWAWAY_BLOCKS);
   const crops = cropReserve(slots, opts.foodReserve, opts.seedReserve);
+  const milk = milkReserve(slots, opts.milkKeep); // Track K1
   const all = new Map(throwaway);
   for (const [k, v] of crops) all.set(k, (all.get(k) ?? 0) + v);
-  return { throwaway, crops, all };
+  for (const [k, v] of milk) all.set(k, (all.get(k) ?? 0) + v);
+  return { throwaway, crops, milk, all };
 }
 
 function capacity(s: SimChest, name: string, max: number): number {
@@ -423,6 +455,17 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
     }
     if (r - hold > 0) keep(kind, r - hold, 'food_reserve');
   }
+  // Track K1: the milk on hand and the empty buckets that refill it, held back the same way
+  for (const [kind, r] of held.milk) {
+    let hold = r;
+    for (const s of [...slots].filter((x) => bareName(x.name) === kind).sort((a, b) => b.slot - a.slot)) {
+      if (hold <= 0) break;
+      const h = Math.min(hold, movable.get(s.slot) ?? s.count);
+      movable.set(s.slot, (movable.get(s.slot) ?? s.count) - h);
+      hold -= h;
+    }
+    if (r - hold > 0) keep(kind, r - hold, 'milk_reserve');
+  }
 
   // Track AV: a named box carried serves the stash step: no unnamed box is held back for it
   let boxKept = !(opts.keepBox ?? true) || slots.some((s) => s.named && !s.flightKit && s.count > 0);
@@ -497,7 +540,7 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
  * empty unnamed boxes the unload sends back to the chest of spares (all but the stash step's one), and `free`, the free
  * inventory slots (the chore's slot trigger: tasks/process/unload.ts).
  */
-export function unloadableStacks(slots: readonly UnloadSlot[], opts: Pick<PlanOptions, 'reserve' | 'throwaway' | 'foodReserve' | 'seedReserve'> = {}): { stacks: number; fullBoxes: number; spares: number; free: number } {
+export function unloadableStacks(slots: readonly UnloadSlot[], opts: Pick<PlanOptions, 'reserve' | 'throwaway' | 'foodReserve' | 'seedReserve' | 'milkKeep'> = {}): { stacks: number; fullBoxes: number; spares: number; free: number } {
   const plan = planUnload(slots, [], { ...opts, keepBox: true, boxing: false });
   const stacks = new Set(plan.overflow.filter((o) => !isShulkerBox(o.name)).map((o) => o.slot)).size;
   const fullBoxes = slots.filter((s) => isShulkerBox(s.name) && (s.boxUsed ?? 0) > 0 && !s.flightKit).length; // Track AV: not the fireworks box
