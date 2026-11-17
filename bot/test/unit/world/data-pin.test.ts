@@ -1,14 +1,17 @@
-// Guard (Track U1, docs/versions.md "1.26.65 and the npm releases"): the block and item tables the world model was
-// measured on. Every key the bot loads from minecraft-data (the version shims' registryVersion, the collision shapes,
-// the mining table, stack sizes, item names) resolves to minecraft-data's bedrock 1.26.30 data as shipped up to
-// 3.118.0. minecraft-data 3.119.0 regenerated the bedrock block and item data (1.26.60: 1480 blocks, 23 960 states,
-// 2080 items; obsidian hardness 50 -> 35, ladder bounding box `block` -> `empty`, new item ids) and changed the
-// 1.26.30 files as well, so a dependency bump that brings it in changes state ids, shapes, dig times and stack sizes
-// at once. This test fails on such a bump: moving to new block data is its own change, with the nav, flight and dig
-// e2e suites run again, and these fingerprints updated in the same change.
+// Guard (Track U1, moved to new data by Track U2, decision 0094): the block and item tables the world model was
+// measured on. Every module reads minecraft-data's block and item data through one key (data/blockData.ts: the
+// world registry's state ids, the collision shapes, the mining table, stack sizes, item names), and that key resolves
+// to minecraft-data 3.119.0's regenerated bedrock 1.26.60 data (1480 blocks, 23 960 states, 2080 items; materials
+// from bedrock/1.26.51), measured against BDS 1.26.65.1 (docs/versions.md "minecraft-data 3.119.0"). A dependency
+// bump that changes these tables changes state ids, shapes, dig times and stack sizes at once, so this test fails on
+// it: moving to new block data is its own change. Diff the bot's view (bot/scripts/data-view.ts dump before and after,
+// then diff), measure it on BDS (e2e data-truth and dig), run the nav and flight suites again, and update these
+// fingerprints in the same change.
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
+import { BLOCK_DATA_KEY, BLOCK_DATA_VERSION, NEWER_ITEM_STACKS } from '../../../src/data/blockData.ts';
+import { maxStackOf } from '../../../src/skills/container/chest.ts';
 import { REGISTRY_VERSION } from '../../../src/skills/home/search.ts';
 import { SHAPES_DATA_VERSION } from '../../../src/skills/terrain/shapes.ts';
 import { SHIMS } from '../../../src/world/version-shims/index.ts';
@@ -26,23 +29,28 @@ const minecraftData = require('minecraft-data') as (v: string) => Md | null;
 
 const fingerprint = (x: unknown) => createHash('sha256').update(JSON.stringify(x)).digest('hex').slice(0, 16);
 
-/** minecraft-data bedrock 1.26.30 (3.117.0 to 3.118.0): 1356 blocks, 16 913 states, 1933 items. */
+/** minecraft-data 3.119.0 bedrock 1.26.60: 1480 blocks, 23 960 states, 2080 items. */
 const MEASURED = {
-  counts: [1356, 16913, 1933],
-  blocks: '8540470469adc76e',
-  blockStates: '0469f10d9356f9bc',
-  items: 'a4bf07c0d54b5c2a',
-  shapes: 'dd68d407ab285dce',
-  materials: '8e7e96ea1c220e58',
+  counts: [1480, 23960, 2080],
+  blocks: 'b94a85012925bf13',
+  blockStates: 'd516bea3abd2923b',
+  items: 'ac0cfd51e7731f9c',
+  shapes: 'ee497776947c3e4c',
+  materials: '51fbaddc12a2e6c7',
 };
 
-// data/mining.ts and skills/container/chest.ts load `bedrock_1.26.51` directly.
-const KEYS = [...new Set([...SHIMS.map((s) => s.registryVersion), SHAPES_DATA_VERSION, REGISTRY_VERSION, 'bedrock_1.26.51'])];
-
 describe('minecraft-data block and item data the world model was measured on', () => {
-  it.each(KEYS)('%s resolves to the measured 1.26.30 tables', (key) => {
-    const d = minecraftData(key);
-    expect(d, `minecraft-data has no ${key}`).toBeTruthy();
+  it('every module reads the one block data key', () => {
+    expect(BLOCK_DATA_KEY).toBe(`bedrock_${BLOCK_DATA_VERSION}`);
+    expect(SHAPES_DATA_VERSION).toBe(BLOCK_DATA_KEY);
+    expect(REGISTRY_VERSION).toBe(BLOCK_DATA_KEY);
+    // the shims name only where the server's states come from, never another block or item table
+    for (const s of SHIMS) expect(Object.keys(s)).not.toContain('registryVersion');
+  });
+
+  it(`${BLOCK_DATA_KEY} resolves to the measured tables`, () => {
+    const d = minecraftData(BLOCK_DATA_KEY);
+    expect(d, `minecraft-data has no ${BLOCK_DATA_KEY}`).toBeTruthy();
     expect([d!.blocksArray.length, d!.blockStates.length, d!.itemsArray.length]).toEqual(MEASURED.counts);
     expect({
       blocks: fingerprint(d!.blocksArray),
@@ -51,5 +59,14 @@ describe('minecraft-data block and item data the world model was measured on', (
       shapes: fingerprint(d!.blockCollisionShapes),
       materials: fingerprint(d!.materials),
     }).toEqual({ blocks: MEASURED.blocks, blockStates: MEASURED.blockStates, items: MEASURED.items, shapes: MEASURED.shapes, materials: MEASURED.materials });
+  });
+
+  it('stack sizes measured for items newer than the block data are only for items it lacks', () => {
+    const names = new Set((minecraftData(BLOCK_DATA_KEY)!.itemsArray as { name: string }[]).map((i) => i.name));
+    for (const [name, stack] of Object.entries(NEWER_ITEM_STACKS)) {
+      expect(names.has(name), ` is in : drop it from NEWER_ITEM_STACKS`).toBe(false);
+      expect(maxStackOf(name)).toBe(stack);
+    }
+    expect(maxStackOf('minecraft:ice_ball')).toBe(16);
   });
 });

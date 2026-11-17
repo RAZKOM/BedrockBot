@@ -15,7 +15,19 @@ import { estimateBreak, serverReachDistance, type DigResult } from '../../src/sk
 import { E2E, FEET_Y, RunArea, connectDigBot, killItemsNear, pollUntil, prepareServer, type DigBot } from './dig-truth.ts';
 import { E2E_VERSION } from './env.ts';
 
-const DROPS: Record<string, string> = { grass_block: 'dirt', dirt: 'dirt', oak_log: 'oak_log' };
+const DROPS: Record<string, string> = {
+  grass_block: 'dirt',
+  dirt: 'dirt',
+  oak_log: 'oak_log',
+  // Track U2 (decision 0094): blocks whose block data minecraft-data 3.119.0 changed
+  obsidian: 'obsidian',
+  crying_obsidian: 'crying_obsidian',
+  white_wool_slab: 'white_wool_slab',
+  white_concrete_slab: 'white_concrete_slab',
+  poplar_log: 'poplar_log',
+  stone: 'cobblestone',
+  iron_ore: 'raw_iron',
+};
 
 interface Row {
   label: string;
@@ -182,6 +194,26 @@ describe.skipIf(!E2E)('@bds dig against bds-dig', () => {
       const b = await digCase('4.2 back-to-back #2', 'oak_log', { tool: 'best' }, 'stone_axe');
       expect(a.ok && b.ok).toBe(true);
     }, 60_000);
+  });
+
+  // Track U2 (decision 0094): the blocks whose hardness, material or harvest tools changed with minecraft-data 3.119.0's
+  // regenerated 1.26.60 data (obsidian 50 -> 35; wool and concrete stairs and slabs and the poplar set: their own values
+  // instead of an oak relative's), and two unchanged controls whose harvest tools are now decoded by item name.
+  describe('Track U2: blocks whose block data changed', () => {
+    for (const [block, item] of [
+      ['obsidian', 'diamond_pickaxe'],
+      ['crying_obsidian', 'diamond_pickaxe'],
+      ['white_wool_slab', null],
+      ['white_concrete_slab', 'wooden_pickaxe'],
+      ['poplar_log', 'stone_axe'],
+      ['stone', 'wooden_pickaxe'],
+      ['iron_ore', 'stone_pickaxe'],
+    ] as const) {
+      it(` / ${item ?? 'hand'}`, async () => {
+        await loadout(item ? [item] : []);
+        await digCase(`U2 ${block} / ${item ?? 'hand'}`, block, { tool: 0 }, item);
+      }, 60_000);
+    }
   });
 
   describe('cancel and reach', () => {

@@ -92,9 +92,9 @@ export class RlAgentTask implements RunningTask {
     this.bridge = new BridgeServer({ port: opts.bridgePort, ...(opts.bridgeHost ? { host: opts.bridgeHost } : {}), session: this.session, log: this.log });
   }
 
-  /** Builds the movement stack and the task; call before conn.connect(). */
-  static create(conn: Connection, opts: RlAgentOptions & { version: string }): RlAgentTask {
-    return new RlAgentTask(conn, createMobility(conn, { version: opts.version, log: opts.log }), opts);
+  /** Builds the movement stack and the task; call before conn.connect(). The world model follows conn.sessionVersion. */
+  static create(conn: Connection, opts: RlAgentOptions): RlAgentTask {
+    return new RlAgentTask(conn, createMobility(conn, { log: opts.log }), opts);
   }
 
   async start(): Promise<void> {

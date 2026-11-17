@@ -55,7 +55,7 @@ import { homeHandlers } from './home.js'; // Track AG: truth:chestput (home logi
 import { shieldHandlers } from './shield.js'; // Track AH: truth:stance, blocklog (shield, wave 9)
 import { netherHandlers } from './nether.js'; // Track AT: truth:dimension, dimtp, dblock, dset, dfill, dfind, portal (wave 10)
 import { flyHandlers } from './fly.js'; // Track AU: truth:glide, glidelog, equip, boxdrop (Elytra flight, wave 11)
-import { craftHandlers } from './craft.js'; // Track AW: truth:kit, craftinv, table (crafting, wave 11)
+import { craftHandlers } from './craft.js'; // Track AW: truth:kit, craftinv, table (crafting, wave 11); Track U2: itemmax
 import { courseHandlers } from './course.js'; // Track F4a: truth:course (the flight benchmark's obstacle courses)
 import { caveHandlers } from './cave.js'; // Track F5a: truth:cave (a real cave rebuilt from the bot's world cache)
 import { waterHandlers } from './water.js'; // Track W1: truth:water (the water course of the walking tests)
@@ -563,7 +563,7 @@ Object.assign(handlers, homeHandlers({ getBlock, assertLoaded, overworld })); //
 Object.assign(handlers, shieldHandlers({ overworld })); // Track AH: stance, blocklog
 Object.assign(handlers, netherHandlers({ getBlock, assertLoaded })); // Track AT: dimensions, portals
 Object.assign(handlers, flyHandlers()); // Track AU: glide, glidelog, equip, boxdrop
-Object.assign(handlers, craftHandlers({ getBlock, assertLoaded, overworld })); // Track AW: kit, craftinv, table
+Object.assign(handlers, craftHandlers({ getBlock, assertLoaded, overworld })); // Track AW: kit, craftinv, table; Track U2: itemmax
 Object.assign(handlers, courseHandlers({ reply, replyError, overworld })); // Track F4a: course
 Object.assign(handlers, caveHandlers({ reply, replyError, overworld })); // Track F5a: cave
 Object.assign(handlers, waterHandlers({ reply, replyError, overworld })); // Track W1: water

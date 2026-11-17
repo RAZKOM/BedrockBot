@@ -3,7 +3,7 @@
 // trapdoors (open or closed), fence-like blocks that connect to their neighbours, and what the
 // planner may break (gravity blocks, protected blocks). Cached per state id. See docs/pathfinding.md.
 import type { BlockInfo, Box } from '../../world/types.ts';
-import { boxesOf, CONNECT_EAST, CONNECT_NORTH, CONNECT_SOUTH, CONNECT_WEST, connectedBoxes, connectKindOf, isDoorName, resolveNewerState, type ConnectKind } from './shapes.ts';
+import { boxesOf, CONNECT_EAST, CONNECT_NORTH, CONNECT_SOUTH, CONNECT_WEST, connectedBoxes, connectKindOf, GENERATED_CONNECT_BASE, isDoorName, resolveNewerState, type ConnectKind } from './shapes.ts';
 
 export type Liquid = 'water' | 'lava';
 /** Blocks with an open / closed state the body interacts with. */
@@ -51,7 +51,8 @@ export interface TerrainClass {
   /**
    * Track AK: the arms (CONNECT_* bits) the server put in the `minecraft:connection_*` states (BDS 1.26.60
    * palette); `boxes` then already carry them and terrain/query.ts does not look at the neighbours.
-   * Undefined without those states (minecraft-data's fences): arms from the neighbours.
+   * Undefined without those states (generated-world fences, `blockInfoOf` without connection states; decision
+   * 0094): arms from the neighbours.
    */
   arms: number | undefined;
   /** A full solid cube (fences and panes connect to it). */
@@ -153,8 +154,8 @@ function isProtected(name: string): boolean {
 function make(info: BlockInfo): TerrainClass {
   const name = info.name;
   // Unknown runtime ids (block data older than the server) are 1.5-high obstacles: on BDS 1.26.60
-  // with the 1.26.30 data every fence, glass pane and iron bars block is unknown, and a 1-high cube
-  // would let the planner jump onto a fence.
+  // with the 1.26.30 data and no palette every fence, glass pane and iron bars block was unknown, and a
+  // 1-high cube would let the planner jump onto a fence.
   const connect = connectKindOf(name);
   const arms = connect ? armsOf(info.states) : undefined;
   const boxes = NO_COLLISION_NAMES.has(name) ? [] : info.stateId < 0 && info.solid ? UNKNOWN_BOXES : connect && arms !== undefined ? connectedBoxes(connect, arms) : boxesOf(info);
@@ -243,6 +244,8 @@ export function halfTop(c: TerrainClass, dx: number, dz: number): number {
 }
 
 const byState: (TerrainClass | undefined)[] = [];
+/** Generated-world fences and panes without connection states (shapes.ts GENERATED_CONNECT_BASE): kept out of the dense array. */
+const byGenerated = new Map<number, TerrainClass>();
 const byName = new Map<string, TerrainClass>();
 
 const byRuntimeId = new Map<number, TerrainClass>();
@@ -253,6 +256,11 @@ const byRuntimeId = new Map<number, TerrainClass>();
  */
 export function classify(info: BlockInfo): TerrainClass {
   if (info.stateId >= 0) {
+    if (info.stateId >= GENERATED_CONNECT_BASE) {
+      let g = byGenerated.get(info.stateId);
+      if (!g) byGenerated.set(info.stateId, (g = make(info)));
+      return g;
+    }
     let c = byState[info.stateId];
     if (!c) byState[info.stateId] = c = make(info);
     return c;

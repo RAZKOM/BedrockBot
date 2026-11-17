@@ -1,13 +1,11 @@
-// Per-state collision shapes from minecraft-data's bedrock `blockCollisionShapes` (the same 1.26.30
-// block data the world registry uses; PLAN.md fact 3a). prismarine-registry does not attach these
+// Per-state collision shapes from minecraft-data's bedrock `blockCollisionShapes` (the block data the world
+// registry numbers its states by, data/blockData.ts). prismarine-registry does not attach these
 // to bedrock blocks, so the world model's `BlockInfo.boxes` is a full cube for every block whose
 // boundingBox is "block" (slabs, stairs, fences, carpets ...). Movement and pathfinding read the real
 // shapes from here instead. See docs/pathfinding.md.
-import { createRequire } from 'node:module';
+import { BLOCK_DATA_KEY, blockData, hardnessOf } from '../../data/blockData.ts';
 import { blockHash } from '../../world/registry.ts';
 import type { BlockInfo, Box } from '../../world/types.ts';
-
-const require = createRequire(import.meta.url);
 
 interface MdBlock {
   name: string;
@@ -31,19 +29,16 @@ interface MinecraftData {
 }
 
 /**
- * minecraft-data version key whose block tables match the world registry (shims 1.26.51 and 1.26.60 ->
- * data 1.26.30). Stays `bedrock_1.26.51` after the default moved to 1.26.60 (2026-10-28): both keys
- * point at the same 1.26.30 blocks and collision shapes (docs/versions.md), and this one needs no patch.
+ * minecraft-data version key of the shapes: the block data the world registry numbers its states by
+ * (data/blockData.ts), so a registry state id indexes these tables.
  */
-export const SHAPES_DATA_VERSION = 'bedrock_1.26.51';
+export const SHAPES_DATA_VERSION = BLOCK_DATA_KEY;
 
 const FULL: Box = Object.freeze([0, 0, 0, 1, 1, 1] as const);
 const NONE: readonly Box[] = Object.freeze([]);
 
-let md: MinecraftData | undefined;
 function data(): MinecraftData {
-  md ??= (require('minecraft-data') as (v: string) => MinecraftData)(SHAPES_DATA_VERSION);
-  return md;
+  return blockData<MinecraftData>();
 }
 
 const byStateId: (readonly Box[] | undefined)[] = [];
@@ -230,8 +225,21 @@ export function partialBoxes(name: string, states: Readonly<Record<string, unkno
 const infoCache = new Map<string, BlockInfo>();
 
 /**
+ * State ids from here up belong to generated-world fences, panes and bars without connection states (blockInfoOf).
+ * Since decision 0094 the block data has a state per connection (`minecraft:connection_*`, all 0 by default: a lone
+ * post), while a generated world that names a bare `oak_fence` means a fence joined as a server would join it. Such
+ * a BlockInfo keeps no connection states, so the terrain layer derives the arms from the neighbours (query.ts), and
+ * takes an id of its own: it never indexes the block data and never shares a cached class with the server's
+ * all-zero state. `stateId - GENERATED_CONNECT_BASE` is that block data state.
+ */
+export const GENERATED_CONNECT_BASE = 0x4000_0000;
+const CONNECTION_PREFIX = 'minecraft:connection_';
+
+/**
  * A BlockInfo built from minecraft-data alone (no connection), for tests and generated worlds.
  * `states` are plain values (`{ 'minecraft:vertical_half': 'top' }`); missing ones take the default.
+ * A fence, pane or bars block named without any `minecraft:connection_*` state comes without them
+ * (GENERATED_CONNECT_BASE): its arms follow its neighbours.
  */
 export function blockInfoOf(name: string, states: Record<string, unknown> = {}): BlockInfo {
   const key = `${name}|${JSON.stringify(states)}`;
@@ -257,10 +265,15 @@ export function blockInfoOf(name: string, states: Record<string, unknown> = {}):
     stateId = found;
   }
   const boxes = boxesOfState(stateId) ?? NONE;
+  let own = plain(stateId);
+  if (connectKindOf(name) && !Object.keys(states).some((k) => k.startsWith(CONNECTION_PREFIX)) && Object.keys(own).some((k) => k.startsWith(CONNECTION_PREFIX))) {
+    own = Object.fromEntries(Object.entries(own).filter(([k]) => !k.startsWith(CONNECTION_PREFIX)));
+    stateId += GENERATED_CONNECT_BASE;
+  }
   const info: BlockInfo = Object.freeze({
     name,
     stateId,
-    states: Object.freeze(plain(stateId)),
+    states: Object.freeze(own),
     hardness: -1,
     solid: boxes.length > 0,
     boxes,
@@ -347,12 +360,13 @@ export function stairBoxes(states: Readonly<Record<string, unknown>>): readonly 
 let newerStates: Map<number, BlockInfo> | undefined;
 
 /**
- * Hashed runtime ids of states the 1.26.30 block data does not have, for blocks whose shape the
- * terrain layer knows: every stairs block with the 1.26.60 `minecraft:corner` state. BDS 1.26.60
- * sends stairs as {minecraft:corner, upside_down_bit, weirdo_direction} (verified: the hash of
- * oak_stairs {corner none, upside_down_bit 0, weirdo_direction 0} is the runtime id the server sends,
- * -122484237); the world registry, built from the 1.26.30 states, reports them as `unknown`. Built
- * once, on the first unknown block.
+ * Hashed runtime ids of every stairs state with the 1.26.60 `minecraft:corner` state, for an `unknown`
+ * BlockInfo the terrain layer can still name (Track AA). BDS 1.26.60 sends stairs as {minecraft:corner,
+ * upside_down_bit, weirdo_direction} (verified: the hash of oak_stairs {corner none, upside_down_bit 0,
+ * weirdo_direction 0} is the runtime id the server sends, -122484237). With block data that has the state
+ * (minecraft-data 3.119.0, decision 0094) the registry resolves them itself and this table only backs up
+ * a registry that reports one as unknown; with older data (no corner state) each state is hashed with the
+ * five corners. Built once, on the first unknown block.
  */
 function newerStateTable(): Map<number, BlockInfo> {
   if (newerStates) return newerStates;
@@ -362,13 +376,19 @@ function newerStateTable(): Map<number, BlockInfo> {
     if (!block || !isStairsName(block.name)) continue;
     for (let s = block.minStateId; s <= block.maxStateId; s++) {
       const typed = d.blockStates[s]?.states;
-      if (!typed || STAIRS_CORNER in typed) continue;
+      if (!typed) continue;
       const plain: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(typed)) plain[k] = v.value;
+      if (STAIRS_CORNER in typed) {
+        // block data that has the corner state (minecraft-data 3.119.0, decision 0094): the state itself
+        const states = Object.freeze(plain);
+        table.set(blockHash(block.name, typed), Object.freeze({ name: block.name, stateId: s, states, hardness: hardnessOf(block.name, block.hardness), solid: true, boxes: stairBoxes(states) }));
+        continue;
+      }
       for (const corner of STAIRS_CORNERS) {
         const rid = blockHash(block.name, { ...typed, [STAIRS_CORNER]: { type: 'string', value: corner } });
         const states = Object.freeze({ ...plain, [STAIRS_CORNER]: corner });
-        table.set(rid, Object.freeze({ name: block.name, stateId: s, states, hardness: block.hardness ?? -1, solid: true, boxes: stairBoxes(states) }));
+        table.set(rid, Object.freeze({ name: block.name, stateId: s, states, hardness: hardnessOf(block.name, block.hardness), solid: true, boxes: stairBoxes(states) }));
       }
     }
   }
@@ -379,8 +399,8 @@ function newerStateTable(): Map<number, BlockInfo> {
 /**
  * The block behind an `unknown` BlockInfo (a runtime id the world registry could not resolve) when
  * the terrain layer knows the newer state (stairs with `minecraft:corner`), else undefined. The
- * result carries the 1.26.30 state id without the new state (names, break times) and the shape of
- * the full state.
+ * result carries the block data's own state id when it has the corner state (minecraft-data 3.119.0), else the
+ * state id without it (the 1.26.30 data: names, break times), and the shape of the full state.
  */
 export function resolveNewerState(info: BlockInfo): BlockInfo | undefined {
   if (info.stateId >= 0) return undefined;

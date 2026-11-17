@@ -102,7 +102,8 @@ ${tasks}
   --config <file>          config file (JSON, comments allowed; default env BEDROCKBOT_CONFIG, else
                            %LOCALAPPDATA%\\bedrockbot\\config.json or ~/.bedrockbot/config.json;
                            \`pnpm config:init\` writes an example). --no-config ignores it.
-  --version <ver>          game version to speak (default ${DEFAULT_VERSION}, or env BOT_VERSION)
+  --version <ver>          game version to speak, or auto (default auto: the server's among those the bot
+                           supports, ${DEFAULT_VERSION} first; or env BOT_VERSION)
   --target <t>             bds (local BDS, offline; default) | realm (only selectable here, never by the config file)
  bds target (offline mode, local servers only):
   --host <host>            BDS host (default 127.0.0.1)
@@ -235,11 +236,12 @@ async function main(argv: string[]): Promise<number> {
   const recorder = settings.record ? new PacketRecorder(settings.record, { includeRaw: settings.recordRaw }) : undefined;
   if (target.kind === 'realm') {
     mkdirSync(target.profilesFolder, { recursive: true });
-    log.info(`realm target: ${server}, account "${target.accountName}", token cache ${target.profilesFolder}, game version ${settings.version}`);
+    log.info(`realm target: ${server}, account "${target.accountName}", token cache ${target.profilesFolder}, game version ${settings.version}${settings.versions.length > 1 ? ` (else ${settings.versions.slice(1).join(', ')})` : ''}`);
     log.info(settings.record ? `recording packets to ${settings.record} (login redacted)` : 'packet recording off (--no-record)');
   }
   const conn = new Connection({
     version: settings.version,
+    versions: settings.versions,
     username,
     logger: log,
     recorder,

@@ -74,7 +74,14 @@ describe('classifier: stairs and partial blocks', () => {
     expect(quarters('outer_left', 2)).toEqual([0.5, 0.5, 0.5, 1]); // south + east
   });
 
-  it('resolves the 1.26.60 runtime ids of stairs (with minecraft:corner) the registry reports as unknown', () => {
+  it('the block data has the 1.26.60 corner state (minecraft-data 3.119.0, decision 0094)', () => {
+    const info = blockInfoOf('oak_stairs', { weirdo_direction: 2, 'minecraft:corner': 'outer_left' });
+    expect(info.states).toMatchObject({ weirdo_direction: 2, upside_down_bit: 0, 'minecraft:corner': 'outer_left' });
+    expect(classify(info).boxes).toEqual(stairBoxes({ weirdo_direction: 2, upside_down_bit: 0, 'minecraft:corner': 'outer_left' }));
+    expect(blockInfoOf('oak_stairs').states['minecraft:corner']).toBe('none');
+  });
+
+  it('resolves the 1.26.60 runtime ids of stairs (with minecraft:corner) when a registry reports one as unknown', () => {
     // measured on BDS 1.26.60.6: oak_stairs weirdo_direction 0..3, upside_down_bit 0, corner none
     expect([0, 1, 2, 3].map((d) => stairsRid('oak_stairs', d))).toEqual([-122484237, -61009414, 465409, 61940232]);
     expect(stairsRid('oak_stairs', 2, true)).toBe(-852640284);

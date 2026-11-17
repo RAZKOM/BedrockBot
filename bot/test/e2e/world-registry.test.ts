@@ -153,9 +153,16 @@ describe.skipIf(!E2E)('@bds world registry vs truth for 1.26.60 block states (bd
   it('resolves every runtime id of the strip to the truth name and states (0 unknown)', async () => {
     const t0 = performance.now();
     let placed = 0;
+    // blocks the server's version does not have (1.26.70 removed disc_press) are left out of the strip
+    const types = new Set(world.registry.palette?.entries.map((e) => e.name) ?? []);
+    const absent: string[] = [];
     for (let r = 0; r < rows.length; r++) {
       for (let i = 0; i < rows[r]!.length; i++) {
         const sp = rows[r]![i]!;
+        if (types.size > 0 && !types.has(sp.name)) {
+          absent.push(sp.name);
+          continue;
+        }
         const p = { x: x0 + i, y: Y, z: z0 + 2 * r };
         if (sp.door) await truth.ok('door', [p.x, p.y, p.z, sp.name, ...sp.door]);
         else await truth.ok('setblock', [p.x, p.y, p.z, sp.name, ...(sp.states ?? [])]);
@@ -179,14 +186,14 @@ describe.skipIf(!E2E)('@bds world registry vs truth for 1.26.60 block states (bd
       const rid = world.chunks.runtimeIdAt(b.x, b.y, b.z);
       const sameStates = Object.entries(ours).every(([k, v]) => truthStates[k] === v);
       const ok = info !== undefined && info.stateId >= 0 && info.name === want && sameStates;
-      if (info && info.stateId >= world.registry.stateCount - world.registry.extraStateCount) extra++;
+      if (info && info.stateId >= world.registry.blockDataStates) extra++;
       const st = Object.entries(ours)
         .map(([k, v]) => `${k.replace('minecraft:', '')}=${String(v)}`)
         .join(' ');
-      table.push(`| ${want} | ${st} | ${rid} | ${info?.stateId ?? 'none'}${info && info.stateId >= world.registry.stateCount - world.registry.extraStateCount ? ' (palette)' : ''} | ${ok ? 'yes' : 'NO'} |`);
+      table.push(`| ${want} | ${st} | ${rid} | ${info?.stateId ?? 'none'}${info && info.stateId >= world.registry.blockDataStates ? ' (palette)' : ''} | ${ok ? 'yes' : 'NO'} |`);
       if (!ok) bad.push(`${b.x},${b.y},${b.z}: truth ${want} ${JSON.stringify(truthStates)}, model ${info?.name} ${JSON.stringify(ours)} (rid ${rid})`);
     }
-    console.log(`[world-registry] ${placed} placements (${Math.round(placeMs)} ms), ${cells.length} non-air blocks, ${extra} resolved to palette-only states, ${bad.length} mismatches, caught up ${caught >= 0 ? `${Math.round(caught)} ms` : 'no'}`);
+    console.log(`[world-registry] ${placed} placements (${Math.round(placeMs)} ms), ${cells.length} non-air blocks, ${extra} resolved to palette-only states, ${bad.length} mismatches, caught up ${caught >= 0 ? `${Math.round(caught)} ms` : 'no'}${absent.length ? `; not in this version: ${absent.join(', ')}` : ''}`);
     console.log(['| block | states (model) | runtime id | state id | = truth |', '|---|---|---|---|---|', ...table].join('\n'));
     expect(bad, bad.join('\n')).toEqual([]);
     expect(cells.length).toBeGreaterThanOrEqual(placed); // doors add an upper half; nothing popped off

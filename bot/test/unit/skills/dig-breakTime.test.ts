@@ -18,7 +18,7 @@ describe('toolOf', () => {
   });
 });
 
-describe('blockMining (minecraft-data bedrock 1.26.51 -> 1.26.30 block data)', () => {
+describe('blockMining (the block data key, minecraft-data 3.119.0 bedrock 1.26.60)', () => {
   it('has the hardness of the wood-gathering blocks', () => {
     expect(blockMining('grass_block')?.hardness).toBe(0.6);
     expect(blockMining('dirt')?.hardness).toBe(0.5);
@@ -46,6 +46,13 @@ describe('blockMining (minecraft-data bedrock 1.26.51 -> 1.26.30 block data)', (
     expect(blockMining('obsidian')?.harvest).toEqual({ types: ['pickaxe'], minTier: 'diamond' });
     expect(blockMining('snow_layer')?.harvest).toEqual({ types: ['shovel'], minTier: 'wooden' });
     expect(blockMining('web')?.harvest?.types.toSorted()).toEqual(['shears', 'sword']);
+    // blocks 1.26.60 added have data of their own (the 1.26.30 data had none: no mining data at all)
+    expect(blockMining('poplar_log')).toMatchObject({ hardness: 2, effective: ['axe'], harvest: undefined });
+    expect(blockMining('white_wool_slab')?.hardness).toBe(0.8);
+  });
+  it("keeps the bot's own hardness for air and unknown (HARDNESS_FIXES)", () => {
+    expect(blockMining('air')?.hardness).toBe(0);
+    expect(blockMining('unknown')?.hardness).toBe(-1);
   });
 });
 
@@ -75,7 +82,7 @@ describe('break ticks', () => {
     expect(breakTicks('stone', 'stone_pickaxe')).toBe(12); // 0.6 s
     expect(breakTicks('iron_ore', 'wooden_pickaxe')).toBe(150); // wooden cannot harvest iron ore
     expect(breakTicks('iron_ore', 'stone_pickaxe')).toBe(23);
-    expect(breakTicks('obsidian', 'diamond_pickaxe')).toBe(188); // 9.4 s
+    expect(breakTicks('obsidian', 'diamond_pickaxe')).toBe(132); // 6.6 s: hardness 35 (minecraft-data 3.119.0; 50 before), BDS 1.26.65.1 broke it at 132 ticks (decision 0094)
     expect(canHarvest(blockMining('iron_ore')!, toolOf('wooden_pickaxe'))).toBe(false);
     expect(canHarvest(blockMining('iron_ore')!, toolOf('copper_pickaxe'))).toBe(true);
   });

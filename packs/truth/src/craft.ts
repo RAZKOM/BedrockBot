@@ -8,7 +8,10 @@
 //   craftinv playerName                  -> {name, counts: {typeId: n}, stacks, free}: counts by item
 //                                          without the namespace, stacks used, free slots
 //   table x y z [remove]                 -> {x, y, z, typeId}: a crafting table at the block (or air)
-import { EntityComponentTypes, EquipmentSlot, ItemStack, type Block, type Dimension, type EntityEquippableComponent, type EntityInventoryComponent, type Player, world } from '@minecraft/server';
+//   itemmax [typeId ...]                 -> {max: {typeId: maxAmount}, failed: [typeId]}: the stack size BDS gives
+//                                          each item (every registered item type without arguments; Track U2,
+//                                          the bot's stack sizes against the server's)
+import { EntityComponentTypes, EquipmentSlot, ItemStack, ItemTypes, type Block, type Dimension, type EntityEquippableComponent, type EntityInventoryComponent, type Player, world } from '@minecraft/server';
 import { TruthError, blockPos, box, nsId, type Box, type Vec3 } from './protocol.js';
 
 /** What main.ts lends to these handlers. */
@@ -38,6 +41,20 @@ const ARMOR = [EquipmentSlot.Head, EquipmentSlot.Chest, EquipmentSlot.Legs, Equi
 export function craftHandlers(deps: CraftDeps): Record<string, CraftHandler> {
   const { getBlock, assertLoaded, overworld } = deps;
   return {
+    itemmax(args) {
+      const ids = args.length > 0 ? args.map(nsId) : ItemTypes.getAll().map((t) => t.id);
+      const max: Record<string, number> = {};
+      const failed: string[] = [];
+      for (const id of ids) {
+        try {
+          max[id] = new ItemStack(id, 1).maxAmount;
+        } catch {
+          failed.push(id);
+        }
+      }
+      return { max, failed };
+    },
+
     kit(args) {
       const p = player(args[0]);
       const c = inventory(p);

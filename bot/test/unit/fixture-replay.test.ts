@@ -1,7 +1,7 @@
 // Replays fixtures/<version>/{login-idle,world-chunks}.jsonl.gz through bedrock-protocol's deserializer (PLAN.md
 // task 0.5), for every game version the bot supports. Doubles as the breaking-change detector when
-// bedrock-protocol or minecraft-data are bumped. 1.26.60 comes with minecraft-data 3.118.0 (before 2026-11-16 from a
-// patch of 3.117.0; recorded against BDS 1.26.60.6 with scripts/record-fixture.ts --version 1.26.60).
+// bedrock-protocol or minecraft-data are bumped. 1.26.60 comes with minecraft-data since 3.118.0 (before 2026-11-16 from
+// a patch of 3.117.0; recorded against BDS 1.26.60.6 with scripts/record-fixture.ts --version 1.26.60).
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
@@ -59,7 +59,7 @@ describe.each(Object.entries(VERSIONS))('fixture %s/login-idle', (version, proto
   it('is a version the installed stack supports, with a world version shim', () => {
     expect(supportedVersions[version]).toBe(protocol);
     expect(checkVersion(version, protocol)).toEqual({ ok: true, version, protocol });
-    expect(shimFor(version)?.registryVersion).toBe(`bedrock_${version}`);
+    expect(shimFor(version)?.gameVersions).toContain(version);
     const meta = lines.find((l) => l.dir === 'meta' && l.name === 'fixture');
     expect(meta?.params).toMatchObject({ kind: 'login-idle', gameVersion: version });
   });

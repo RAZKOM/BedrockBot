@@ -30,8 +30,11 @@ import { InventoryResync } from './resync.ts'; // Track P1
 export const EYE_HEIGHT = 1.62;
 
 export interface WorldOptions extends ChunkStoreOptions {
-  /** Game version the connection speaks (selects the version shim). Default '1.26.60'. */
-  version?: string;
+  /**
+   * Game version the connection speaks (selects the version shim), or a function giving the current session's
+   * version, read at each `start_game` (a connection that picks its version per session). Default '1.26.60'.
+   */
+  version?: string | (() => string);
   logger?: Logger;
 }
 

@@ -44,15 +44,21 @@ speed           = 1 by hand or with a tool that is not effective on the block,
 
 Sources: formula and multipliers from the Minecraft Wiki "Breaking" page (fetched 2026-10-28;
 PLAN.md fact 7b). Hardness, effective tool (`material`, e.g. `mineable/axe`) and harvest
-requirement (`harvestTools`) from minecraft-data 3.117.0, which serves bedrock 1.26.51 blocks from
-its `bedrock/1.26.30` data. The `harvestTools` keys are stale Java-style item ids (groups of five
-from 939: sword, shovel, pickaxe, axe, hoe; tiers wooden, stone, copper, golden, iron, diamond,
-netherite; 1134 = shears); `mining.ts` decodes them and the unit tests pin the results on known
-blocks (stone: any pickaxe, iron_ore: stone+, gold_ore and diamond_ore: iron+, obsidian: diamond+).
+requirement (`harvestTools`) from the bot's block data, minecraft-data 3.119.0's `bedrock_1.26.60`
+(`data/blockData.ts`, [decision 0094](decisions/0094-one-block-data-key.md); up to 3.118.0 the `bedrock/1.26.30`
+data). The `harvestTools` keys are item ids of the same version's item table (iron_pickaxe 299, shears 424);
+`mining.ts` reads them by item name and the unit tests pin the results on known blocks (stone: any pickaxe,
+iron_ore: stone+, gold_ore and diamond_ore: iron+, obsidian: diamond+). The 1.26.30 data's keys were Java-style
+ids from 939, decoded by arithmetic. The block data's air (-1) and `unknown` (0) hardness are replaced by the
+bot's own 0 and -1 (`HARDNESS_FIXES`).
 
-Hardness used: grass_block 0.6, dirt 0.5, oak_log 2, oak_planks 2, stone 1.5, oak_leaves 0.2. The
+Hardness used: grass_block 0.6, dirt 0.5, oak_log 2, oak_planks 2, stone 1.5, oak_leaves 0.2, obsidian 35. The
 first three are confirmed by the BDS measurement below (a wrong hardness would change the tick
-count); planks, stone and leaves rely on minecraft-data and the wiki values.
+count); planks, stone and leaves rely on minecraft-data and the wiki values. Track U2 (2026-11-16, BDS 1.26.65.1,
+e2e dig "Track U2" cases) measured the blocks whose data changed with 3.119.0, all at the table within -1 / +2
+ticks: obsidian and crying obsidian with a diamond pickaxe 132 (hardness 35; the 1.26.30 data's 50 would be 188),
+white wool slab by hand 24 (0.8), white concrete slab with a wooden pickaxe 26 (1.8), poplar log with a stone axe
+14, stone with a wooden pickaxe 23, iron ore with a stone pickaxe 23.
 
 Modifiers (`MODIFIERS`, documented constants, not applied by `dig()` yet, TODO phase 5):
 Efficiency adds level^2 + 1 to an effective tool; Haste x(1 + 0.2 N); Mining Fatigue

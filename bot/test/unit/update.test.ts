@@ -56,7 +56,7 @@ describe('update check parsers (captured fixtures)', () => {
     expect(p.gameVersion).toBe('1.26.60');
     expect(p.bds).toBe('1.26.65.1');
     expect(p.bedrockProtocol).toBe('3.61.0');
-    expect(p.minecraftData).toBe('3.118.0');
+    expect(p.minecraftData).toBe('3.119.0');
     expect(pinnedBdsBuild('does/not/exist.yml')).toBe('1.26.65.1');
   });
 });

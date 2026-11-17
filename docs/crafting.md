@@ -271,6 +271,7 @@ A `Craft...` entry on an inventory cell: `RecipeIndex.byOutput` lists what the i
 | `kit playerName [typeId:count ...]` | `{name, given: {typeId: count}}`: clears the inventory and the worn armour, then gives each item (several stacks when needed) |
 | `craftinv playerName` | `{name, counts: {typeId: n}, stacks, free}` (names without the namespace) |
 | `table x y z [remove]` | `{x, y, z, typeId}`: a crafting table at the block (or air) |
+| `itemmax [typeId ...]` | `{max: {typeId: maxAmount}, failed: [typeId]}`: the stack size the server gives each item, every registered item type without arguments (Track U2: the bot's stack sizes against the server's, `data-truth.test.ts`) |
 
 ## Tests
 

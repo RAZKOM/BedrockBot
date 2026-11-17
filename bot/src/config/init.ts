@@ -35,7 +35,7 @@ export const EXAMPLE_CONFIG = `{
   "port": 19132,
   "transport": "raknet",          // or "nethernet"
   // "username": "AfkBot",        // offline name (max 16 characters)
-  // "version": "1.26.60",        // game version; default = the pinned one (docs/versions.md)
+  // "version": "1.26.60",        // pin a game version; default auto: the one the server speaks (docs/versions.md)
 
   // ---- Realm (used ONLY with --target realm on the command line, e.g. \`pnpm bot:realm\`) ----
   "realm": {

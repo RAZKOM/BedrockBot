@@ -10,6 +10,21 @@ import type { BotConfig } from './config.ts';
 import { parseVec3 } from './config.ts';
 import { NL_VALUE_KEY, resolveNlConfig, type NlConfig } from '../nl/provider.ts'; // Track Y
 import { DEFAULT_HOST, DEFAULT_METRICS_INTERVAL_S, DEFAULT_NUDGE_INTERVAL_S, DEFAULT_PORT, DEFAULT_VERSION } from './defaults.ts';
+import { supportedVersions } from '../connection/protocol.ts';
+import { SHIMS } from '../world/version-shims/index.ts';
+
+/** The --version value (also BOT_VERSION, the config file's `version`) that lets the bot pick per session. */
+export const AUTO_VERSION = 'auto';
+
+/**
+ * `auto`: every game version the world model has a shim for and bedrock-protocol speaks, `preferred` first, then
+ * newest first. The connection picks one per session (Connection `versions`, versionGate.ts pickVersion).
+ */
+export function autoVersions(preferred: string = DEFAULT_VERSION, supported: Readonly<Record<string, number>> = supportedVersions): string[] {
+  const all = SHIMS.flatMap((s) => s.gameVersions).filter((v) => supported[v] !== undefined);
+  all.sort((a, b) => (supported[b] ?? 0) - (supported[a] ?? 0));
+  return [...new Set([preferred, ...all])];
+}
 
 /** The CLI values `resolveSettings` reads (strings as parseArgs returns them; undefined = not given). */
 export interface CliValues {
@@ -58,7 +73,14 @@ export interface Settings {
   target: ConnectTarget;
   /** Human label: host:port (transport) or realm "name" (...). */
   server: string;
+  /** The preferred game version (the pinned one, else DEFAULT_VERSION). */
   version: string;
+  /**
+   * The game versions a session may speak, `version` first: just `version` when one is pinned (--version, BOT_VERSION,
+   * the config file's `version`), else every version of `autoVersions()` (`auto`: docs/versions.md
+   * "One build, two protocols").
+   */
+  versions: readonly string[];
   username: string | undefined;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   logDir: string;
@@ -151,7 +173,10 @@ export function resolveSettings(cli: CliValues, cfg: BotConfig, env: ResolveEnv)
   if (signalling !== 'lan' && signalling !== 'services') throw new SettingsError(`unknown signalling "${cli.signalling}" (lan | services)`);
   const port = int(cli.port, 'port', 1, 65535) ?? cfg.port ?? DEFAULT_PORT;
   const host = cli.host ?? cfg.host ?? DEFAULT_HOST;
-  const version = cli.version ?? env.botVersion ?? cfg.version ?? DEFAULT_VERSION;
+  const pinned = cli.version ?? env.botVersion ?? cfg.version;
+  const auto = pinned === undefined || pinned === AUTO_VERSION;
+  const version = auto ? DEFAULT_VERSION : pinned;
+  const versions = auto ? autoVersions(version) : [version];
 
   let target: ConnectTarget;
   let server: string;
@@ -211,6 +236,7 @@ export function resolveSettings(cli: CliValues, cfg: BotConfig, env: ResolveEnv)
     target,
     server,
     version,
+    versions,
     username: target.kind === 'realm' ? target.accountName : (cli.username ?? cfg.username),
     logLevel,
     logDir,

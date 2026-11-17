@@ -1,7 +1,9 @@
 // Wave 8, Track AC (decision 0024): the 1.26.60 runtime-id table from the BDS palette dump
 // (bot/data/block-palette/1.26.60.json, tools/bump-version/dump-palette.mjs). Checks the file, the fast
-// hash, that every recorded runtime id resolves (0 unknown), that states minecraft-data has keep their
-// state ids, and what the palette-only states look like to the world model and the terrain layer.
+// hash, that every recorded runtime id resolves (0 unknown), that states the block data has keep their
+// state ids, and what palette-only states look like to the world model and the terrain layer. Since decision 0094
+// the block data (minecraft-data 3.119.0, bedrock 1.26.60) holds every state of the 1.26.60 dump; palette-only
+// states are those of other versions (1.26.51's, from minecraft-data's own 1.26.51 states).
 import { describe, expect, it } from 'vitest';
 import { silentLogger } from '../../../src/log.ts';
 import { classify } from '../../../src/skills/terrain/classify.ts';
@@ -15,9 +17,12 @@ import { decodedInbound, FIXTURE_VERSION, recordedLogin } from './helpers.ts';
 /** Dump facts (BDS 1.26.60.6, 2026-10-29): 1480 block types; the Script API offers 66053 permutations, 23941 after dropping the legacy states the network hash leaves out. */
 const TYPES = 1480;
 const PERMUTATIONS = 23941;
-/** minecraft-data 1.26.30's block states; palette states it lacks get ids from here up. */
-const MD_STATES = 16913;
-const EXTRA = 7664;
+/** The block data's states (minecraft-data 3.119.0, bedrock 1.26.60); palette states it lacks get ids from here up. */
+const MD_STATES = 23960;
+/** States of the 1.26.60 dump the block data lacks (7664 with minecraft-data 1.26.30's tables, before decision 0094). */
+const EXTRA = 0;
+/** minecraft-data's own 1.26.51 states the block data lacks: fire and redstone wire without connection states, a bare chorus plant. */
+const EXTRA_1_26_51 = 33;
 
 function registry(version = '1.26.60'): BlockRegistry {
   const { startGame, itemRegistry } = recordedLogin();
@@ -51,7 +56,7 @@ describe('block palette 1.26.60 (registry from the BDS dump)', () => {
 
   it('every palette state resolves to its own name and states; minecraft-data states keep their ids', () => {
     const reg = registry();
-    expect(reg.stateCount).toBe(MD_STATES + EXTRA);
+    expect(reg.blockDataStates).toBe(MD_STATES);
     expect(reg.extraStateCount).toBe(EXTRA);
     let kept = 0;
     for (const e of palette.entries) {
@@ -90,7 +95,8 @@ describe('block palette 1.26.60 (registry from the BDS dump)', () => {
   it('knows 1.26.60 stairs with minecraft:corner (the hash BDS sends for a plain oak staircase)', () => {
     const reg = registry();
     const s = reg.stateIdFromRuntimeId(-122484237);
-    expect(s).toBeGreaterThanOrEqual(MD_STATES);
+    expect(s).toBeGreaterThanOrEqual(0);
+    expect(s).toBeLessThan(MD_STATES); // a block data state since decision 0094
     const info = reg.blockInfo(s);
     expect(info).toMatchObject({ name: 'oak_stairs', states: { [STAIRS_CORNER]: 'none', upside_down_bit: 0, weirdo_direction: 0 }, hardness: 2, solid: true });
     expect(info.boxes).toHaveLength(2);
@@ -127,35 +133,66 @@ describe('block palette 1.26.60 (registry from the BDS dump)', () => {
     expect(n).toBeGreaterThan(3000);
   });
 
-  it('palette-only states borrow hardness and shapes; new blocks without a relative are full solid cubes', () => {
+  it('1.26.60 blocks the 1.26.30 data lacked are block data states with their own shapes and hardness', () => {
     const reg = registry();
     const info = (name: string, states?: Record<string, unknown>) => reg.blockInfo(reg.stateIdOf(name, states)!);
-    // fences, panes and fire gained minecraft:connection_* (were unknown, 1.5-high obstacles, before)
+    // fences, panes and fire with minecraft:connection_* (unknown ids before Track AC, borrowed shapes before 0094)
     const fence = info('oak_fence', { 'minecraft:connection_east': 1 });
     expect(fence.name).toBe('oak_fence');
-    expect(fence.stateId).toBeGreaterThanOrEqual(MD_STATES);
+    expect(fence.stateId).toBeLessThan(MD_STATES);
     expect(Math.max(...fence.boxes.map((b) => b[4]))).toBe(1.5);
     expect(classify(fence).connect).toBe('fence');
     expect(classify(fence).unknown).toBe(false);
-    expect(info('glass_pane').stateId).toBeGreaterThanOrEqual(MD_STATES);
+    expect(info('glass_pane').stateId).toBeLessThan(MD_STATES);
     expect(info('fire').solid).toBe(false);
-    // new 1.26.60 blocks: shape donors
-    expect(shapeDonor('poplar_planks')).toBe('oak_planks');
     expect(info('poplar_planks')).toMatchObject({ name: 'poplar_planks', hardness: 2, solid: true, boxes: [[0, 0, 0, 1, 1, 1]] });
     const slab = info('white_wool_slab', { 'minecraft:vertical_half': 'bottom' });
-    expect(slab.boxes).toEqual([[0, 0, 0, 1, 0.5, 1]]);
+    expect(slab.hardness).toBe(0.8);
+    expect(classify(slab).boxes).toEqual([[0, 0, 0, 1, 0.5, 1]]);
     expect(classify(info('poplar_door')).openable).toBe('door');
     expect(info('poplar_sapling').solid).toBe(false);
-    // no relative: a full solid cube, as unknown ids were (but with the real name)
-    expect(info('icicle')).toMatchObject({ name: 'icicle', solid: true, hardness: -1, boxes: [[0, 0, 0, 1, 1, 1]] });
+    // blocks that had no relative were full solid cubes; the block data has their shapes now
+    expect(info('icicle')).toMatchObject({ name: 'icicle', hardness: 0.5 });
+    expect(classify(info('icicle')).fullCube).toBe(false);
   });
 
-  it('without a palette (1.26.51) the table is minecraft-data alone', () => {
+  it('palette-only states (1.26.51: minecraft-data own states) borrow hardness and shapes from the closest block data state', () => {
     const reg = registry('1.26.51');
-    expect(reg.palette).toBeUndefined();
-    expect(reg.stateCount).toBe(MD_STATES);
-    expect(reg.blockDataSource).toBe('minecraft-data 1.26.30');
-    expect(reg.stateIdFromRuntimeId(-122484237)).toBe(-1);
+    expect(reg.palette?.bds).toBe('minecraft-data bedrock_1.26.51');
+    expect(reg.blockDataSource).toBe('palette 1.26.51 (minecraft-data bedrock_1.26.51)');
+    expect(reg.extraStateCount).toBe(EXTRA_1_26_51);
+    // fire without the 1.26.60 connection states: palette-only, borrows a fire state (no collision)
+    const fire = reg.blockInfo(reg.stateIdOf('fire', { age: 3 })!);
+    expect(fire.stateId).toBeGreaterThanOrEqual(MD_STATES);
+    expect(reg.nameOf(reg.baseStateOf(fire.stateId))).toBe('fire');
+    expect(fire).toMatchObject({ name: 'fire', states: { age: 3 }, solid: false });
+    const chorus = reg.blockInfo(reg.stateIdOf('chorus_plant')!);
+    expect(chorus.stateId).toBeGreaterThanOrEqual(MD_STATES);
+    expect(chorus).toMatchObject({ name: 'chorus_plant', hardness: 0.4, solid: true });
+    // the ids are the process's: a 1.26.60 registry built after it keeps them and does not reuse them
+    const again = registry('1.26.51');
+    expect(again.stateIdOf('fire', { age: 3 })).toBe(fire.stateId);
+    expect(registry().stateIdFromRuntimeId(blockHash('fire', reg.typedStatesOf(fire.stateId)!))).toBe(-1);
+    expect(registry().nameOf(fire.stateId)).toBe('fire');
+    // shape donors by name suffix, for new blocks of a future dump
+    expect(shapeDonor('poplar_planks')).toBe('oak_planks');
+    expect(shapeDonor('icicle')).toBeUndefined();
+  });
+
+  it('the version is read at each build: one registry follows a reconnect that speaks another version', () => {
+    let version = '1.26.60';
+    const { startGame, itemRegistry } = recordedLogin();
+    const reg = new BlockRegistry({ version: () => version, logger: silentLogger });
+    reg.handleStartGame(startGame);
+    reg.handleItemRegistry(itemRegistry);
+    expect(reg.version).toBe('1.26.60');
+    expect(reg.extraStateCount).toBe(EXTRA);
+    version = '1.26.51';
+    reg.handleStartGame(startGame);
+    expect(reg.version).toBe('1.26.51');
+    expect(reg.shim.gameVersions).toContain('1.26.51');
+    expect(reg.extraStateCount).toBe(EXTRA_1_26_51);
+    expect(reg.unknownRuntimeIds.size).toBe(0);
   });
 
   it('builds the table in well under a tick-sized budget per state', () => {
@@ -164,5 +201,31 @@ describe('block palette 1.26.60 (registry from the BDS dump)', () => {
     const ms = performance.now() - t0;
     console.log(`[palette] registry build (prismarine + palette): ${ms.toFixed(0)} ms`);
     expect(ms).toBeLessThan(2000);
+  });
+});
+
+describe('block palette 1.26.70 (the preview dump on the 1.26.60 block data, Track U2)', () => {
+  const palette = loadPalette('1.26.70');
+
+  it.skipIf(!palette)('new blocks of 1.26.70: walls take the wall shape, stairs and slabs theirs, other new blocks are solid cubes the digger leaves', () => {
+    const reg = new BlockRegistry({ version: '1.26.70', logger: silentLogger });
+    reg.handleStartGame({ block_network_ids_are_hashes: true, itemstates: [] } as never);
+    reg.handleItemRegistry({ itemstates: [] });
+    expect(reg.extraStateCount).toBeGreaterThan(1000);
+    const info = (name: string, states?: Record<string, unknown>) => reg.blockInfo(reg.stateIdOf(name, states)!);
+    const arms = { wall_connection_type_east: 'tall', wall_connection_type_north: 'none', wall_connection_type_south: 'short', wall_connection_type_west: 'none', wall_post_bit: 1 };
+    const wall = info('snow_brick_wall', arms);
+    expect(wall.stateId).toBeGreaterThanOrEqual(reg.blockDataStates);
+    expect(wall.boxes).toEqual(info('cobblestone_wall', arms).boxes);
+    expect(classify(wall).top).toBe(1.5);
+    expect(classify(info('calcite_wall')).top).toBe(1.5);
+    const stairs = info('polished_calcite_stairs', { weirdo_direction: 1, upside_down_bit: 0, 'minecraft:corner': 'outer_left' });
+    expect(classify(stairs).boxes).toEqual(stairBoxes({ weirdo_direction: 1, upside_down_bit: 0, 'minecraft:corner': 'outer_left' }));
+    expect(classify(info('packed_ice_brick_slab', { 'minecraft:vertical_half': 'bottom' })).top).toBe(0.5);
+    const bricks = info('snow_bricks');
+    expect(classify(bricks)).toMatchObject({ top: 1, fullCube: true, unknown: false });
+    expect(bricks.hardness).toBe(-1);
+    expect(shapeDonor('snow_brick_wall')).toBe('cobblestone_wall');
+    expect(shapeDonor('brittle_ice')).toBeUndefined();
   });
 });

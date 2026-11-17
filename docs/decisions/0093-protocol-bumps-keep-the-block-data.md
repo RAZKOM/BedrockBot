@@ -1,7 +1,8 @@
 # 0093: Protocol bumps keep the block data (Track U1)
 
 Date: 2026-11-16. Status: accepted. Details and numbers: [../versions.md](../versions.md) "1.26.65 and the npm
-releases".
+releases". The block data move this decision waits for is [decision 0094](0094-one-block-data-key.md) (Track U2,
+minecraft-data 3.119.0), and 1.26.70 is [decision 0095](0095-one-build-two-protocols.md).
 
 ## Context
 

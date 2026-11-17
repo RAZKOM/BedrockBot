@@ -3,7 +3,8 @@
 Everything runs against a **local BDS in Docker, offline mode**, except the Realm join, which only you
 run ("Realm join (you do this)"). The default game version is 1.26.60 (protocol 2225) since
 2026-10-28; the test servers run BDS 1.26.65.1, which speaks the same protocol, since 2026-11-16
-(docs/versions.md). 1.26.51 stays runnable as the rollback (`bds-dev51`, `BOT_VERSION=1.26.51`). Commands run from the repository root unless noted.
+(docs/versions.md). With no version pinned, the bot also speaks 1.26.70 (protocol 2259) to a server that takes it
+(docs/versions.md "One build, two protocols"). 1.26.51 stays runnable as the rollback (`bds-dev51`, `BOT_VERSION=1.26.51`). Commands run from the repository root unless noted.
 
 Contents: [Quick start](#quick-start-fresh-clone-to-running-afk-bot) · [Servers](#servers) ·
 [Bot](#bot) · [Tests](#tests) · [Realm join (you do this)](#realm-join-you-do-this) ·
@@ -27,7 +28,7 @@ section); expect 5 to 10 minutes on a new machine including reading. Needs:
 git clone <this repository> BedrockBot
 cd BedrockBot
 corepack enable                 # once per machine; provides the pinned pnpm
-pnpm install                    # ~1 min on a fresh machine; applies patches/minecraft-data@3.118.0.patch
+pnpm install                    # ~1 min on a fresh machine; applies patches/minecraft-data@3.119.0.patch
 pnpm bds:up                     # bds-dev: BDS 1.26.65.1 on udp/19132; first run downloads BDS (~2 min)
 pnpm config:init                # optional: writes %LOCALAPPDATA%\bedrockbot\config.json (~/.bedrockbot elsewhere)
 pnpm bot:afk -- --health-port 9464
@@ -193,7 +194,7 @@ recording flags can also be set in the config file (next section); the flag wins
 | `--log-dir <dir>` | `bot/logs` | `disconnects.jsonl` and `metrics.json` (git-ignored) |
 | `--metrics-interval <s>` | 60 | how often `metrics.json` is rewritten |
 | `--no-reconnect` | | exit (code 1) instead of reconnecting |
-| `--version <ver>` | `1.26.60` (env `BOT_VERSION`) | game version (minecraft-data 3.118.0 ships it); `1.26.51` for the rollback server |
+| `--version <ver>` | `auto` (env `BOT_VERSION`) | game version. `auto` (or unset): per session, the version of the protocol the server advertises; on a Realm, the version that last spawned, else 1.26.60, then the next one after a refusal (docs/versions.md "One build, two protocols"). A version pins it: `1.26.60`, `1.26.70` (the preview), `1.26.51` for the rollback server |
 | `--host`, `--port` | 127.0.0.1, 19132 | the BDS to join |
 | `--transport nethernet` | `raknet` | NetherNet with LAN signalling (local BDS); `--port` is then ignored |
 | `--username <name>` | per task (`AfkBot`, `EchoBot`) | offline name |
@@ -682,11 +683,13 @@ To keep the bot running on a server (a launchd agent on macOS, a systemd user un
    `pnpm --filter bot exec node -e "console.log(require('fs').readFileSync(require.resolve('bedrock-protocol/src/client/auth.js'),'utf8').includes('dns.promises.lookup'))"` (prints `true`).
 2. **Game version equal to the Realm's**: a Realm runs the current release (26.60 = `1.26.60` on
    2026-10-28; 1.26.61 to 1.26.65 speak the same protocol, 2225). `1.26.60` is the bot's default since
-   2026-10-28 (minecraft-data 3.118.0 since 2026-11-16, a patch on 3.117.0 before; verified against BDS
+   2026-10-28 (minecraft-data 3.119.0 with its block data since 2026-11-16, decision 0094; 3.118.0 and a patch on 3.117.0 before; verified against BDS
    1.26.60.6 on RakNet and NetherNet and against BDS 1.26.65.1 on RakNet,
    docs/versions.md). There is no ping for a Realm, so the version gate cannot compare protocols before
-   joining; a mismatch should show up as a kick (`outdated_client` / `outdated_server`, never retried,
-   exit code 3) or as a Realms API error (*unverified which*). `pnpm update:check` (Operations) tells
+   joining. A mismatch shows up as a kick (`outdated_client` / `outdated_server`) on BDS; on a Realm it is
+   *unverified*, and a Realms API error is possible. With no pinned version the bot then tries its next
+   version (1.26.70) once, 1 s later; with a pinned one, or when every version was refused, the kick is not
+   retried (exit code 3). `pnpm update:check` (Operations) tells
    you when a newer game version is out; run the playbook (`tools/bump-version/playbook.md`) before
    rejoining.
 3. **A separate Microsoft account that owns Minecraft Bedrock**, invited to your Realm and with the
@@ -1050,7 +1053,10 @@ schtasks /Create /SC DAILY /ST 09:00 /TN "BedrockBot update check" /TR "cmd /c c
 
 ### Version gate
 
-The Connection refuses to log in when the server advertises a protocol other than the requested
-version's (`kind: version` close, exit code 3, never retried), and stops reconnecting when the server
-answers `outdated_client` / `outdated_server` (or `play_status failed_client/failed_spawn`). Unit:
-`versionGate`, `connection-reconnect`; e2e: `reconnect` ("version gate refuses, no retry").
+The Connection refuses to log in when the server advertises a protocol that none of its versions speaks
+(`kind: version` close, exit code 3, never retried). With a pinned version that is any protocol other than the
+pinned one's; with `auto` it picks the version of the advertised protocol. It stops reconnecting when the server
+answers `outdated_client` / `outdated_server` (or `play_status failed_client/failed_spawn`). With no ping (a
+Realm) and `auto`, it first tries each version not refused yet, once, 1 s apart (docs/versions.md "One build, two
+protocols"). Unit: `versionGate`, `connection-reconnect`, `connection-versions`; e2e: `reconnect` ("version gate
+refuses, no retry").

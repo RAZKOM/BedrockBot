@@ -15,17 +15,15 @@
 // tables, name patterns over the item registry: minecraft-data's Bedrock items) and from the alias table
 // where it does not; a guard test checks that every group and alias is documented in docs/storage.md and
 // resolves to real items. Pure apart from reading the item registry once.
-import { createRequire } from 'node:module';
+import { BLOCK_DATA_KEY, blockData } from '../../data/blockData.ts';
 import { isShulkerBox, maxStackOf } from '../container/chest.ts';
 import { armourSlotOf } from '../survival/armour.ts';
 import { maxDurability } from '../survival/tools.ts';
 import { categoryOf } from './categories.ts';
 import type { ItemTotal, StorageIndex, StoragePlace } from './storage.ts';
 
-const require = createRequire(import.meta.url);
-
-/** The item registry version (the same Bedrock data as chest.ts maxStackOf). */
-export const REGISTRY_VERSION = 'bedrock_1.26.51';
+/** The item registry version: the bot's block and item data (data/blockData.ts), as chest.ts maxStackOf. */
+export const REGISTRY_VERSION = BLOCK_DATA_KEY;
 
 let registry: Map<string, string> | undefined;
 
@@ -34,8 +32,7 @@ export function itemRegistry(): ReadonlyMap<string, string> {
   if (!registry) {
     registry = new Map();
     try {
-      const md = require('minecraft-data') as (v: string) => { itemsArray: { name: string; displayName: string }[] } | null;
-      for (const i of md(REGISTRY_VERSION)?.itemsArray ?? []) registry.set(i.name, i.displayName);
+      for (const i of blockData<{ itemsArray: { name: string; displayName: string }[] }>().itemsArray) registry.set(i.name, i.displayName);
     } catch {
       // no registry: names only
     }

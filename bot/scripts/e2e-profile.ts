@@ -23,6 +23,18 @@ const PROFILES: Record<string, Profile> = {
   nn: { container: 'bds-nn', port: 19140, version: '1.26.60', transport: 'nethernet', build: '1.26.65.1' },
 };
 
+// `custom`: any one container, from the environment (a track's own servers):
+//   E2E_CONTAINER=bds-x E2E_PORT=19999 E2E_GAME_VERSION=1.26.60 [E2E_TRANSPORT=nethernet] [E2E_BUILD=1.26.65.1] node scripts/e2e-profile.ts custom ...
+if (process.env.E2E_CONTAINER && process.env.E2E_PORT) {
+  PROFILES.custom = {
+    container: process.env.E2E_CONTAINER,
+    port: Number(process.env.E2E_PORT),
+    version: process.env.E2E_GAME_VERSION ?? '1.26.60',
+    transport: process.env.E2E_TRANSPORT === 'nethernet' ? 'nethernet' : 'raknet',
+    build: process.env.E2E_BUILD ?? 'unknown',
+  };
+}
+
 const [name, ...rest] = process.argv.slice(2).filter((a, i) => !(a === '--' && i === 0));
 const p = name ? PROFILES[name] : undefined;
 if (!p) {
@@ -77,6 +89,15 @@ const env: NodeJS.ProcessEnv = {
   ...{ NETHER_BDS_CONTAINER: p.container, NETHER_BDS_PORT: port }, // Track AT: nether-* (nether-truth.ts)
   ...{ BARI_BDS_CONTAINER: p.container, BARI_BDS_PORT: port }, // Track BB: nav-rules (bds-bari)
   ...{ CRAFT_BDS_CONTAINER: p.container, CRAFT_BDS_PORT: port }, // Track AW: craft-* (craft-truth.ts)
+  // Suites whose default server is one of the flight servers: without these a profile run of nav-water,
+  // nav-reach, nav-pillar, the fly-*/fall-* suites, test-harness or the quarry suites joined bds-fly (Track U2,
+  // 2026-11-16). test/unit/e2e-profile.test.ts fails when a suite reads a server variable missing here.
+  ...{ WATER_BDS_CONTAINER: p.container, WATER_BDS_PORT: port }, // Track W1: nav-water
+  ...{ REACH_BDS_CONTAINER: p.container, REACH_BDS_PORT: port }, // nav-reach, nav-pillar
+  ...{ FLY_BDS_CONTAINER: p.container, FLY_BDS_PORT: port }, // fly-truth.ts, test-harness
+  ...{ FALL_BDS_CONTAINER: p.container, FALL_BDS_PORT: port }, // fall-truth.ts
+  ...{ T1_BDS_CONTAINER: p.container, T1_BDS_PORT: port }, // test-harness
+  ...{ QUARRY_BDS_CONTAINER: p.container, QUARRY_BDS_PORT: port }, // quarry-env.ts
 };
 console.error(`[e2e-profile] ${name}: ${p.container} (BDS ${p.build}) port ${port}, version ${p.version}, transport ${p.transport}`);
 const botDir = fileURLToPath(new URL('..', import.meta.url));

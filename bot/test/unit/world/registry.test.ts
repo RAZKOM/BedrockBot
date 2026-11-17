@@ -1,12 +1,12 @@
 // PLAN.md task 2.1: registry shim. Hash values below were read from the recorded capture
 // fixtures/1.26.51/world-chunks.jsonl.gz (subchunk palettes and update_block runtime ids); the test
 // also checks that they really occur in the capture under test (fixtures/<FIXTURE_VERSION>/, default
-// 1.26.60: identical hashes, the block data is 1.26.30 for both).
+// 1.26.60: identical hashes).
 import { describe, expect, it } from 'vitest';
 import { silentLogger } from '../../../src/log.ts';
 import { BlockRegistry, blockHash } from '../../../src/world/registry.ts';
 import { decodeSubChunk } from '../../../src/world/subchunk.ts';
-import { shimFor } from '../../../src/world/version-shims/index.ts';
+import { SHIMS, shimFor } from '../../../src/world/version-shims/index.ts';
 import { decodedInbound, FIXTURE_VERSION, readyRegistry, recordedLogin } from './helpers.ts';
 
 /** Wire runtime ids (FNV-1a hashes) seen on BDS 1.26.51.1 and 1.26.60.6. */
@@ -19,10 +19,13 @@ const KNOWN: Record<string, { rid: number; states: Record<string, unknown> }> = 
   stone: { rid: -2144268767, states: {} },
 };
 
-/** Block state ids: minecraft-data 1.26.30's 16913, plus the 1.26.60 palette states it does not have (Track AC). */
-const STATE_COUNT: Record<string, number> = { '1.26.51': 16913, '1.26.60': 16913 + 7664 };
+/**
+ * Block state ids (decision 0094): the block data's 23 960 (minecraft-data 3.119.0, bedrock 1.26.60), plus the server's
+ * states it does not have (1.26.51: 33 of minecraft-data's own 1.26.51 states; 1.26.60: none of the BDS dump's).
+ */
+const STATE_COUNT: Record<string, number> = { '1.26.51': 23960 + 33, '1.26.60': 23960 };
 /** Where block states come from (the warning for unknown ids names it). */
-const DATA_SOURCE: Record<string, string> = { '1.26.51': 'minecraft-data 1.26.30', '1.26.60': 'palette 1.26.60 (BDS 1.26.60.6)' };
+const DATA_SOURCE: Record<string, string> = { '1.26.51': 'palette 1.26.51 (minecraft-data bedrock_1.26.51)', '1.26.60': 'palette 1.26.60 (BDS 1.26.60.6)' };
 
 /** item_registry sizes of the recorded logins. */
 const ITEM_STATES: Record<string, number> = { '1.26.51': 2076, '1.26.60': 2080 };
@@ -30,8 +33,7 @@ const ITEM_STATES: Record<string, number> = { '1.26.51': 2076, '1.26.60': 2080 }
 describe(`world registry shim (${FIXTURE_VERSION})`, () => {
   it(`has a version shim for ${FIXTURE_VERSION} that reads item states from item_registry`, () => {
     const shim = shimFor(FIXTURE_VERSION);
-    expect(shim?.registryVersion).toBe(`bedrock_${FIXTURE_VERSION}`);
-    expect(shim?.blockDataVersion).toBe('1.26.30');
+    expect(shim?.gameVersions).toContain(FIXTURE_VERSION);
     const { startGame, itemRegistry } = recordedLogin();
     expect(shim?.itemStates(startGame, undefined)).toBeUndefined();
     // 1.26.60 added disc_press, frostbite_spawn_egg, icicle and ice_crystal to item_registry.
@@ -152,7 +154,7 @@ describe(`world registry shim (${FIXTURE_VERSION})`, () => {
   it('falls back to the default (newest) shim for an unknown version, with a warning', () => {
     const warnings: string[] = [];
     const reg = new BlockRegistry({ version: '9.9.9', logger: { ...silentLogger, warn: (m: string) => warnings.push(m) } });
-    expect(reg.shim.gameVersions).toContain('1.26.60');
+    expect(reg.shim).toBe(SHIMS[0]); // the newest (1.26.70 since Track U2)
     expect(warnings[0]).toContain('no world version shim for 9.9.9');
   });
 });

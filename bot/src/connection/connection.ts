@@ -8,7 +8,7 @@ import type { PacketRecorder } from './recorder.ts';
 import { packetNames, type PacketSerializer } from './protocol.ts';
 import { ReadErrorCapture, readFailureLine, tapReads, type ReadFailure, type TappableClient } from './readErrors.ts';
 import { buildRealmClientOptions, realmLabel, validateRealmTarget, type DeviceCodePrompt } from './realm.ts';
-import { checkVersion } from './versionGate.ts';
+import { checkVersion, pickVersion, type VersionPicked } from './versionGate.ts';
 import type {
   AnyPacket,
   BdsTarget,
@@ -82,8 +82,15 @@ export interface ConnectionLink {
 }
 
 export interface ConnectionOptions {
-  /** Game version to speak, e.g. '1.26.51'. Must be supported by bedrock-protocol. */
+  /** Game version to speak, e.g. '1.26.51' (the preferred one when `versions` lists more). Must be supported by bedrock-protocol. */
   version: string;
+  /**
+   * Game versions a session may speak, each supported by bedrock-protocol (default: `[version]` alone). The one of an
+   * attempt is `sessionVersion` (pickVersion in versionGate.ts): a server that advertises a protocol in its ping gets
+   * the version of that protocol; one that does not (a Realm) gets the version that last spawned, else `version`,
+   * and after a terminal version refusal the next version not refused yet (docs/versions.md "One build, two protocols").
+   */
+  versions?: readonly string[];
   /** Offline-mode username. */
   username: string;
   logger?: Logger;
@@ -173,8 +180,14 @@ function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** Delay before trying the next game version after a terminal version refusal (not a reconnect: no backoff). */
+export const VERSION_RETRY_MS = 1_000;
+
 export class Connection {
+  /** The configured (preferred) game version. */
   readonly version: string;
+  /** Game versions a session may speak, `version` first. */
+  readonly versions: readonly string[];
   readonly username: string;
   readonly recorder: PacketRecorder | undefined;
   /** Track P1: the unreadable packets (bytes, counts). */
@@ -197,6 +210,14 @@ export class Connection {
   /** The Microsoft device-code prompt of the current attempt (Realm), until it spawns or the session ends. */
   private _signIn: { prompt: DeviceCodePrompt; at: number } | undefined;
   private _gameVersion: string;
+  /** The game version the current (or last) attempt speaks; set before its client is created. */
+  private _sessionVersion: string;
+  /** The session version came from the server's ping protocol (a refusal then ends the connect, no other version is tried). */
+  private versionFromPing = false;
+  /** The version of the last session that spawned. */
+  private spawnedVersion: string | undefined;
+  /** Versions the server refused terminally since connect() or the last spawn. */
+  private readonly refusedVersions = new Set<string>();
   /** start_game's game_version of the last session (Track P1). */
   serverVersion: string | undefined;
   private _runtimeId = 0n;
@@ -231,8 +252,10 @@ export class Connection {
 
   constructor(opts: ConnectionOptions) {
     this.version = opts.version;
+    this.versions = [...new Set([opts.version, ...(opts.versions ?? [])])];
     this.username = opts.username;
     this._gameVersion = opts.version;
+    this._sessionVersion = opts.version;
     this.recorder = opts.recorder;
     this.readErrors = opts.readErrors ?? new ReadErrorCapture();
     this.log = opts.logger ?? createLogger('info', 'connection');
@@ -257,6 +280,14 @@ export class Connection {
   /** From ping (server advertisement) once connected; the requested version before that. */
   get gameVersion(): string {
     return this._gameVersion;
+  }
+  /**
+   * The game version (a bedrock-protocol `version`, one of `versions`) the current or last attempt speaks: what its
+   * packets are parsed with. Set before the attempt's client exists, so it is final before the session's first packet.
+   * The world model reads it per session (`new World(conn, { version: () => conn.sessionVersion })`).
+   */
+  get sessionVersion(): string {
+    return this._sessionVersion;
   }
   get runtimeId(): bigint {
     return this._runtimeId;
@@ -297,14 +328,17 @@ export class Connection {
     if (this._state === 'connecting' || this._state === 'spawned') {
       return Promise.reject(new Error(`connect() called while ${this._state}`));
     }
-    const gate = checkVersion(this.version);
-    if (!gate.ok) {
-      this.setState('closed');
-      return Promise.reject(new VersionGateError(gate.message));
+    for (const v of this.versions) {
+      const gate = checkVersion(v);
+      if (!gate.ok) {
+        this.setState('closed');
+        return Promise.reject(new VersionGateError(gate.message));
+      }
     }
     this.target = target;
     this.userClosed = false;
     this.attempt = 0;
+    this.refusedVersions.clear();
     return new Promise<void>((resolve, reject) => {
       this.firstSpawn = { resolve, reject };
       void this.attemptOnce();
@@ -432,11 +466,19 @@ export class Connection {
     this._retryAt = undefined;
     this.setState('connecting');
     if (target.kind === 'realm') {
-      this.recorder?.record('meta', 'connect', { target: realmLabel(target), transport: 'nethernet', signalling: 'services', version: this.version, attempt: this.attempt });
+      // No ping on the services path: the version comes from the last spawn or the refusals so far
+      const pick = pickVersion(this.versions, { spawned: this.spawnedVersion, refused: this.refusedVersions });
+      if (!pick.ok) {
+        this.fail(new VersionGateError(pick.message), { reason: pick.message, kind: 'version' });
+        return;
+      }
+      const version = this.useVersion(pick);
+      this._gameVersion = version;
+      this.recorder?.record('meta', 'connect', { target: realmLabel(target), transport: 'nethernet', signalling: 'services', version, attempt: this.attempt });
       let realmOpts: ClientOptions;
       try {
         realmOpts = buildRealmClientOptions(target, {
-          version: this.version,
+          version,
           viewDistance: this.viewDistance,
           conLog: (...args: unknown[]) => {
             this.log.debug(args.map(String).join(' '));
@@ -468,11 +510,12 @@ export class Connection {
     this.log.info(
       `server ${target.host}:${target.port} (${info.transport}) protocol ${info.protocol ?? '?'} version ${info.version ?? '?'} motd "${info.motd ?? ''}" level "${info.levelName ?? ''}"`,
     );
-    const gate = checkVersion(this.version, info.protocol);
-    if (!gate.ok) {
-      this.fail(new VersionGateError(gate.message), { reason: gate.message, kind: 'version' });
+    const pick = pickVersion(this.versions, { protocol: info.protocol, spawned: this.spawnedVersion, refused: this.refusedVersions });
+    if (!pick.ok) {
+      this.fail(new VersionGateError(pick.message), { reason: pick.message, kind: 'version' });
       return;
     }
+    const version = this.useVersion(pick);
     if (info.version) this._gameVersion = info.version;
 
     const opts: ClientOptions = {
@@ -480,7 +523,7 @@ export class Connection {
       port: target.port,
       username: this.username,
       offline: true,
-      version: this.version,
+      version,
       transport: target.transport,
       raknetBackend: 'raknet-native',
       skipPing: true,
@@ -496,6 +539,17 @@ export class Connection {
       if (info.networkId === undefined) opts.skipPing = false;
     }
     this.startClient(session, opts, target.viewDistance ?? this.viewDistance);
+  }
+
+  /** Makes `pick` the attempt's session version (before its client exists). */
+  private useVersion(pick: VersionPicked): string {
+    if (this.versions.length > 1) {
+      // info only when it is not the configured version (a 2225 server logs as it did before auto)
+      this.log[pick.version === this.version ? 'debug' : 'info'](`speaking ${pick.version} (protocol ${pick.protocol}; ${pick.fromPing ? 'the server advertises it' : pick.version === this.spawnedVersion ? 'the last spawn' : this.refusedVersions.size ? `refused: ${[...this.refusedVersions].join(', ')}` : 'the configured version'})`);
+    }
+    this._sessionVersion = pick.version;
+    this.versionFromPing = pick.fromPing;
+    return pick.version;
   }
 
   private startClient(session: number, opts: ClientOptions, viewDistance: number): void {
@@ -633,7 +687,7 @@ export class Connection {
     const transport = t === undefined ? undefined : t.kind === 'realm' ? 'nethernet' : t.transport;
     let f: ReadFailure;
     try {
-      f = this.readErrors.capture(packet, e, { gameVersion: this._gameVersion, ...(this.serverVersion ? { serverVersion: this.serverVersion } : {}), ...(transport ? { transport } : {}), session, tick: this._tick, ...(batch ? { batch } : {}) }, packetNames(this.version));
+      f = this.readErrors.capture(packet, e, { gameVersion: this._gameVersion, ...(this.serverVersion ? { serverVersion: this.serverVersion } : {}), ...(transport ? { transport } : {}), session, tick: this._tick, ...(batch ? { batch } : {}) }, packetNames(this._sessionVersion));
     } catch (err) {
       this.log.warn(`unreadable packet (${packet.length} bytes): ${errorMessage(e)}; the capture failed: ${errorMessage(err)}`);
       return;
@@ -668,9 +722,11 @@ export class Connection {
     clearTimeout(this.spawnTimer);
     this.attempt = 0;
     this._signIn = undefined;
+    this.spawnedVersion = this._sessionVersion;
+    this.refusedVersions.clear();
     this.setState('spawned');
     this.spawnedAt = performance.now();
-    this.log.info(`spawned as ${this.username} (runtime id ${this._runtimeId})`);
+    this.log.info(`spawned as ${this.username} (runtime id ${this._runtimeId})${this._sessionVersion !== this.version ? ` speaking ${this._sessionVersion}` : ''}`);
     this.startTicker();
     this.firstSpawn?.resolve();
     this.firstSpawn = undefined;
@@ -706,8 +762,24 @@ export class Connection {
       return;
     }
     if (end.terminal) {
-      // The server says our game version is wrong: retrying cannot help (PLAN.md 4.1 version gate).
-      this.fail(new VersionGateError(`server refused game version ${this.version}: ${reason}`), end);
+      // The server says our game version is wrong: retrying it cannot help (PLAN.md 4.1 version gate). With no
+      // ping protocol to go by (a Realm), the next configured version not refused yet is tried once.
+      const refused = this._sessionVersion;
+      this.refusedVersions.add(refused);
+      const next = this.versionFromPing ? undefined : this.versions.find((v) => !this.refusedVersions.has(v));
+      if (next === undefined) {
+        this.fail(new VersionGateError(`server refused game version ${refused}: ${reason}`), end);
+        return;
+      }
+      this._retryAt = Date.now() + VERSION_RETRY_MS;
+      this.setState('connecting');
+      this.log.warn(`server refused game version ${refused} (${reason}); trying ${next} in ${VERSION_RETRY_MS} ms`);
+      this.recorder?.record('meta', 'version_refused', { version: refused, next, reason }, this._tick);
+      this.emitClose(this.closeInfo(end, true, VERSION_RETRY_MS));
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = undefined;
+        void this.attemptOnce();
+      }, VERSION_RETRY_MS);
       return;
     }
     if (!policy.enabled || this.attempt >= policy.maxAttempts) {

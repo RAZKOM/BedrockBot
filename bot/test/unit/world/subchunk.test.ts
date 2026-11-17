@@ -3,6 +3,7 @@
 import { createRequire } from 'node:module';
 import nbt from 'prismarine-nbt';
 import { describe, expect, it } from 'vitest';
+import { blockHash, type TypedStates } from '../../../src/world/registry.ts';
 import { decodeSubChunk, Layer, localIndex } from '../../../src/world/subchunk.ts';
 import { decodedInbound, encodeSubChunk, FIXTURE_VERSION, fillSection, readyRegistry } from './helpers.ts';
 
@@ -97,7 +98,9 @@ describe('decodeSubChunk', () => {
   it(`agrees with prismarine-chunk 1.18 on every recorded ${FIXTURE_VERSION} subchunk`, async () => {
     const reg = readyRegistry();
     // The same registry data, prepared the prismarine way, for the reference decoder.
-    const loadRegistry = require('prismarine-registry') as (v: string) => { handleStartGame(p: unknown): void };
+    // It numbers states by the version's own minecraft-data key; the bot by its one block data key (decision 0094),
+    // so the two are compared by what a state id means: the hash of its name and states.
+    const loadRegistry = require('prismarine-registry') as (v: string) => { handleStartGame(p: unknown): void; blockStates: { name: string; states: TypedStates }[] };
     const pReg = loadRegistry(`bedrock_${FIXTURE_VERSION}`);
     const lines = decodedInbound('world-chunks.jsonl.gz');
     const sg = lines.find((l) => l.name === 'start_game')!.params;
@@ -108,6 +111,10 @@ describe('decodeSubChunk', () => {
       getBlockStateId(pos: { x: number; y: number; z: number }): number;
     }
     const Chunk = (require('prismarine-chunk/src/bedrock/1.18/chunk') as (r: unknown) => new (o: { x: number; z: number }) => PChunk)(pReg);
+    const refHashes = new Map<number, number>();
+    const myHashes = new Map<number, number>();
+    const refHash = (id: number): number => refHashes.get(id) ?? refHashes.set(id, blockHash(pReg.blockStates[id]!.name, pReg.blockStates[id]!.states)).get(id)!;
+    const myHash = (id: number): number => myHashes.get(id) ?? myHashes.set(id, id < 0 ? id : blockHash(reg.nameOf(id)!, reg.typedStatesOf(id)!)).get(id)!;
     let compared = 0;
     for (const p of lines) {
       if (p.name !== 'subchunk') continue;
@@ -122,7 +129,7 @@ describe('decodeSubChunk', () => {
           for (let z = 0; z < 16; z++) {
             for (let y = 0; y < 16; y++) {
               const ref = col.getBlockStateId({ x, y: cy * 16 + y, z });
-              if (mine.stateAt(localIndex(x, y, z)) !== ref) throw new Error(`mismatch at ${x},${cy * 16 + y},${z}`);
+              if (myHash(mine.stateAt(localIndex(x, y, z))) !== refHash(ref)) throw new Error(`mismatch at ${x},${cy * 16 + y},${z}`);
             }
           }
         }

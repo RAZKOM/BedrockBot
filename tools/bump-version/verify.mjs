@@ -2,13 +2,19 @@
 // End-to-end check that a protocol stack can play <gameVersion> against a local BDS:
 // login, spawn handshake, registry + subchunk decode, 20 ticks of walking with no correction.
 //
-//   node verify.mjs <gameVersion> --port <p> [--deps <dir>|self] [--timeout <s>] [--allow-decode-errors]
+//   node verify.mjs <gameVersion> --port <p> [--deps <dir>|self] [--timeout <s>] [--allow-decode-errors] [--transport nethernet] [--chunk cx,cz]
 //
 // --deps: directory whose node_modules provide bedrock-protocol, minecraft-data, prismarine-registry
 //         and prismarine-chunk. Default: the bump sandbox (.work/sandbox). `self` = this package's
 //         own node_modules (the pnpm workspace install, i.e. what the bot gets, unpatched).
+// --chunk: the chunk column whose bottom subchunk is decoded (default 0,0). prismarine-chunk 1.41.0 reads a storage layer
+//         with a single palette entry as a state id, not a runtime id: wrong with hashed runtime ids, so a subchunk that
+//         once held water (its second layer is all air afterwards) fails to decode. Pick an untouched chunk then (a palette
+//         dump probes chunks -2..1).
 // Prints a JSON report on stdout. Exit 0 = pass; 1 = fail (report.failure has stage + reason); 2 = usage.
-// Local BDS only: always connects to 127.0.0.1, offline mode, RakNet (raknet-native).
+// Local BDS only: always connects to 127.0.0.1, offline mode, RakNet (raknet-native); --transport nethernet: NetherNet
+// with LAN signalling (discovery on udp/7551, the server's network id from its discovery response; a 1.26.70 preview
+// has no RakNet; --port is then only reported).
 import { createRequire } from 'node:module'
 import { join, resolve } from 'node:path'
 import { existsSync } from 'node:fs'
@@ -25,7 +31,7 @@ const ACCEL = 0.098
 const FRICTION = 0.546
 
 function parseArgs (argv) {
-  const a = { _: [], walk: 'physics', timeout: 90, deps: DEFAULT_SANDBOX, username: 'BumpBot' }
+  const a = { _: [], walk: 'physics', timeout: 90, deps: DEFAULT_SANDBOX, username: 'BumpBot', transport: 'raknet', chunk: [0, 0] }
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i]
     if (k === '--port') a.port = Number(argv[++i])
@@ -34,6 +40,8 @@ function parseArgs (argv) {
     else if (k === '--username') a.username = argv[++i]
     else if (k === '--allow-decode-errors') a.allowDecodeErrors = true
     else if (k === '--walk') a.walk = argv[++i]
+    else if (k === '--transport') a.transport = argv[++i]
+    else if (k === '--chunk') a.chunk = argv[++i].split(',').map(Number)
     else if (k === '-h' || k === '--help') a.help = true
     else a._.push(k)
   }
@@ -41,8 +49,8 @@ function parseArgs (argv) {
 }
 
 const a = parseArgs(process.argv.slice(2))
-if (a.help || a._.length !== 1 || !Number.isInteger(a.port)) {
-  console.log('usage: node verify.mjs <gameVersion> --port <p> [--deps <dir>|self] [--timeout s] [--username n] [--walk physics|constant] [--allow-decode-errors]')
+if (a.help || a._.length !== 1 || !Number.isInteger(a.port) || !['raknet', 'nethernet'].includes(a.transport) || a.chunk.length !== 2 || !a.chunk.every(Number.isInteger)) {
+  console.log('usage: node verify.mjs <gameVersion> --port <p> [--deps <dir>|self] [--timeout s] [--username n] [--walk physics|constant] [--allow-decode-errors] [--transport raknet|nethernet] [--chunk cx,cz]')
   process.exit(a.help ? 0 : 2)
 }
 const ver = a._[0]
@@ -55,13 +63,14 @@ const report = {
   version: ver,
   host: HOST,
   port: a.port,
+  transport: a.transport,
   deps: depsDir,
   versions: {},
   server: null,
   login: { ok: false, ms: null },
   spawn: { ok: false, ms: null, feet: null },
   registry: { ok: false, blockStatesByRuntimeId: null, itemstates: null },
-  chunk: { ok: false, subchunkResult: null, block: null, expected: 'grass_block', at: [0, -61, 0] },
+  chunk: { ok: false, subchunkResult: null, block: null, expected: 'grass_block', at: [a.chunk[0] * 16, -61, a.chunk[1] * 16] },
   movement: { ok: false, model: null, ticks: WALK_TICKS, corrections: [], fromZ: null, toZ: null },
   kick: null,
   packetsSeen: 0,
@@ -116,25 +125,27 @@ async function run () {
 
   const registry = req('prismarine-registry')('bedrock_' + ver)
   const Chunk = req('prismarine-chunk/src/bedrock/1.18/chunk')(registry) // 1.26 bypass (prismarine-chunk PR #338)
-  const column = new Chunk({ x: 0, z: 0 })
+  const column = new Chunk({ x: a.chunk[0], z: a.chunk[1] })
 
   // ---- ping: what does the server say it is? ------------------------------------------------
   report.stage = 'ping'
+  let networkId
   try {
-    const ad = await bedrock.ping({ host: HOST, port: a.port, timeout: 5000 })
-    report.server = { version: ad.version, protocol: Number(ad.protocol), motd: ad.motd, levelName: ad.levelName }
+    const ad = a.transport === 'nethernet' ? await bedrock.ping({ transport: 'nethernet', host: HOST, timeout: 5000 }) : await bedrock.ping({ host: HOST, port: a.port, timeout: 5000 })
+    report.server = { version: ad.transport === 'nethernet' ? ad.gameVersion : ad.version, protocol: Number(ad.protocol), motd: ad.motd, levelName: ad.levelName }
+    if (a.transport === 'nethernet') networkId = ad.networkId
     if (Number(ad.protocol) !== report.protocol) {
-      return fail('login', `server advertises ${ad.version} protocol ${ad.protocol}, client ${ver} is protocol ${report.protocol} (wrong BDS build or wrong version argument)`)
+      return fail('login', `server advertises ${report.server.version} protocol ${ad.protocol}, client ${ver} is protocol ${report.protocol} (wrong BDS build or wrong version argument)`)
     }
   } catch (e) {
-    return fail('ping', `no RakNet answer from ${HOST}:${a.port} (${e.message}); is the container up with TRANSPORT=raknet?`)
+    return fail('ping', a.transport === 'nethernet' ? `no NetherNet LAN discovery answer from ${HOST} (${e.message}); is the container up with TRANSPORT=nethernet and 7551/udp published?` : `no RakNet answer from ${HOST}:${a.port} (${e.message}); is the container up with TRANSPORT=raknet?`)
   }
 
   // ---- connect ------------------------------------------------------------------------------
   report.stage = 'login'
   const timer = setTimeout(() => fail(report.stage, `timeout after ${a.timeout}s in stage ${report.stage}`), a.timeout * 1000)
   timer.unref?.()
-  client = bedrock.createClient({ host: HOST, port: a.port, username: a.username, offline: true, version: ver, raknetBackend: 'raknet-native', skipPing: true })
+  client = bedrock.createClient({ host: HOST, port: a.port, username: a.username, offline: true, version: ver, skipPing: true, ...(a.transport === 'nethernet' ? { transport: 'nethernet', nethernet: { signalling: 'lan', networkId: BigInt(networkId) } } : { raknetBackend: 'raknet-native' }) })
 
   const seen = new Map()
   let lastRaw = null
@@ -204,9 +215,10 @@ async function run () {
       report.chunk.above = column.getBlock({ x: 0, y: -60, z: 0 })?.name ?? null
       report.chunk.ok = report.chunk.block === 'grass_block'
       chunkDone = true
-      if (!report.chunk.ok) fail('chunk', `block (0,-61,0) decoded as ${report.chunk.block} (subchunk result ${report.chunk.subchunkResult}); expected grass_block on a flat world`)
+      if (!report.chunk.ok) fail('chunk', `block (${report.chunk.at.join(',')}) decoded as ${report.chunk.block} (subchunk result ${report.chunk.subchunkResult}); expected grass_block on a flat world`)
       else startWalk()
     } catch (e) {
+      report.chunk.stack = String(e.stack ?? '').split('\n').slice(1, 4).map(s => s.trim())
       fail('chunk', `subchunk decode threw: ${e.message}`)
     }
   })
@@ -228,7 +240,7 @@ async function run () {
     const loop = setInterval(() => {
       if (finished) return clearInterval(loop)
       n++; tick++
-      if (n === 10) client.queue('subchunk_request', { dimension: 0, origin: { x: 0, y: -4, z: 0 }, requests: [{ x: 0, y: 0, z: 0 }] })
+      if (n === 10) client.queue('subchunk_request', { dimension: 0, origin: { x: a.chunk[0], y: -4, z: a.chunk[1] }, requests: [{ x: 0, y: 0, z: 0 }] })
       if (n === 70 && !chunkDone) return fail('chunk', 'no subchunk answer within 3 s of subchunk_request (chunk (0,0) outside the loaded area?)')
       const moving = walking && n - walkStartTick < WALK_TICKS
       let dz = 0

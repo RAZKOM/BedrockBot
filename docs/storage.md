@@ -80,9 +80,9 @@ table to paste). "registry items" is how many items of the registry each group m
 | group | words | from | members | registry items |
 |---|---|---|---|---|
 | `ores` | `ore` `ores` `mineral` `minerals` `metal` `metals` `gem` `gems` `ingot` `ingots` | categories | ores, raw metals, ingots, gems, coal, redstone, lapis, quartz and their blocks (the unloader's `ores` category) | 50 |
-| `wood` | `wood` `woods` `timber` `lumber` | categories | logs, wood, planks, stems, hyphae, saplings, sticks (the `wood` category) | 69 |
-| `logs` | `log` `logs` `stem` `stems` | name pattern | every `_log` and `_stem`, stripped ones too | 25 |
-| `planks` | `plank` `planks` `board` `boards` | name pattern | every `_planks` | 12 |
+| `wood` | `wood` `woods` `timber` `lumber` | categories | logs, wood, planks, stems, hyphae, saplings, sticks (the `wood` category) | 75 |
+| `logs` | `log` `logs` `stem` `stems` | name pattern | every `_log` and `_stem`, stripped ones too | 27 |
+| `planks` | `plank` `planks` `board` `boards` | name pattern | every `_planks` | 13 |
 | `food` | `food` `foods` `meat` `crop` `crops` | categories | real food, crops, seeds, eggs (the `food` category: the eater's food table) | 39 |
 | `blocks` | `block` `blocks` `building` | categories | stone-like and building blocks (the `blocks` category) | 116 |
 | `tools` | `tool` `tools` `weapon` `weapons` `gear` | survival tables | anything with durability that is not armour (the survival kit's durability table) | 42 |

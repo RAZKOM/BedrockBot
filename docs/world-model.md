@@ -67,28 +67,36 @@ are sent in the same server tick; the reply happens to arrive first).
 
 ## Decode path
 
-1. **Registry.** `prismarine-registry('bedrock_1.26.51')`, then
+1. **Registry.** `prismarine-registry('bedrock_1.26.60')` (the bot's one block data key, `data/blockData.ts`,
+   [decision 0094](decisions/0094-one-block-data-key.md)), then
    `handleStartGame({ ...start_game, itemstates })` with the item states from `item_registry`
    (PLAN fact 3c). With `block_network_ids_are_hashes` the runtime id of a block state is
    FNV-1a 32 over the little-endian NBT `{ name: "minecraft:<name>", states: { sorted } }`
    (`blockHash()` reproduces prismarine-block's `getHash`). `BlockRegistry` copies the result into a
-   `Map<runtimeId, stateId>` and an `Int32Array` for the reverse direction (16 913 states, about
-   70 to 150 ms).
+   `Map<runtimeId, stateId>` and an `Int32Array` for the reverse direction (23 960 block data states,
+   about 70 to 150 ms).
 
    **Block palette (wave 8, Track AC, [decision 0024](decisions/0024-block-registry-from-bds-palette.md)).**
-   minecraft-data's bedrock block states stop at 1.26.30, so on 1.26.60 every stairs block (new
+   Up to minecraft-data 3.118.0 the bedrock block states stopped at 1.26.30, so on 1.26.60 every stairs block (new
    `minecraft:corner`), fence, pane, bars, fire and redstone wire (new connection states) and all 124
-   new block types were unknown ids. When the version shim names a palette (`blockPalette: '1.26.60'`),
+   new block types were unknown ids. Since decision 0094 the block data holds every 1.26.60 state; the palette
+   matters for versions whose states differ from it (1.26.70, 1.26.51). When the version shim names a palette (`blockPalette: '1.26.60'`),
    the registry loads `bot/data/block-palette/1.26.60.json` (every block state as BDS 1.26.60.6 hashes
    it, dumped through the truth pack by `tools/bump-version/dump-palette.mjs`) and hashes each state
    (`fastBlockHash`, own FNV over the NBT bytes, 26 ms once per process): a state equal to a
-   minecraft-data state keeps that state id (16 277 of them), the other 7 664 get ids from 16 913 up.
+   block data state keeps that state id (all 23 941 on 1.26.60; 16 277 with the 1.26.30 tables), the others get
+   ids from the block data's count up. Those ids belong to the process: a state keeps its id in every registry of
+   the process, whichever version brought it, because the terrain layer caches by state id and a reconnect may
+   speak another version (the registry reads its version, which may be a function, at every build).
    Their `BlockInfo` has the server's name and states, and the hardness and collision boxes of the
    closest minecraft-data state of the same block (or of a shape donor for new blocks: `_stairs` →
-   oak_stairs, `_door` → wooden_door, ...); new blocks without one (icicle, ice_crystal, disc_press,
-   shelf_mushroom, red_shrub) are full solid cubes. `stateIdOf(name, states)` looks in the palette first,
-   then in minecraft-data. Runtime id -2 is `minecraft:unknown` (BDS sends that block with a fixed id).
-   Versions without a palette file (1.26.51) use minecraft-data alone. Result on bds-reg: 0 unknown
+   oak_stairs, `_slab` → oak_slab, `_wall` → cobblestone_wall, `_door` → wooden_door, ...); new blocks without
+   one are full solid cubes (on 1.26.70: snow_bricks, brittle_ice, polished_calcite and the other new full
+   blocks). The mining data is read by name from the block data, so the digger refuses every new block
+   (`unknown_block`). `stateIdOf(name, states)` looks in the palette first,
+   then in the block data. Runtime id -2 is `minecraft:unknown` (BDS sends that block with a fixed id).
+   A version without a palette file can name a minecraft-data key whose states stand in (`paletteFromData`:
+   1.26.51 uses `bedrock_1.26.51`'s own states). Result on bds-reg: 0 unknown
    runtime ids for one of every block type and for the recorded fixture world. The `unknown` fallback
    (solid full cube, warned once per id, counted in `unknownRuntimeIds`) stays for ids that are still not
    in the table. Re-dump and numbers: [versions.md](versions.md) "Block states".
@@ -117,8 +125,8 @@ registry still comes from prismarine.
 
 ## Known gaps
 
-- **Block data is 1.26.30's** (PLAN fact 3a) for hardness and shapes, and for the runtime ids of
-  versions without a palette dump (1.26.51). Ids the registry cannot resolve decode as
+- **Block data is minecraft-data 3.119.0's 1.26.60** (decision 0094; 1.26.30's up to 3.118.0, PLAN fact 3a) for
+  hardness, shapes, mining data, stack sizes and item names, whatever version the bot speaks. Ids the registry cannot resolve decode as
   `{ name: 'unknown', stateId: -1, solid: true, boxes: [full cube], states: { runtime_id } }` (safe for
   pathfinding), are logged once per id at warn level, and are counted in
   `world.registry.unknownRuntimeIds` (`unknownSummary()` for a log line). On 1.26.60 the palette covers
@@ -226,9 +234,10 @@ measurements: [world-cache.md](world-cache.md).
 ## Adding a version shim
 
 1. Make sure bedrock-protocol and minecraft-data know the version (see `tools/bump-version`).
-2. Copy `version-shims/1.26.51.ts` to `version-shims/<ver>.ts`, set `gameVersions`,
-   `registryVersion` (`bedrock_<ver>`) and `blockDataVersion` (what `dataPaths.json` points
-   `blocks` at for that version). Adjust `itemStates()` if the item table moves again,
+2. Copy the newest shim to `version-shims/<ver>.ts` and set `gameVersions` and the version's states: `blockPalette`
+   (a BDS dump, `tools/bump-version/dump-palette.mjs`) or `paletteFromData` (a minecraft-data key). The block
+   and item data stay the bot's one key (`data/blockData.ts`); moving that is a change of its own (decision 0094,
+   `test/unit/world/data-pin.test.ts`). Adjust `itemStates()` if the item table moves again,
    `dimensions` if the world height changes, and `maxSubChunkVersion` if a new storage version
    appears (then teach `subchunk.ts` to read it).
 3. Add it to `SHIMS` in `version-shims/index.ts` (newest first). An unknown version falls back to

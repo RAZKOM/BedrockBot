@@ -3,20 +3,23 @@
 // ids it cannot resolve.
 //
 // Runtime ids (hashed, 1.26.x): FNV-1a 32 of the little-endian NBT { name, states sorted by key }
-// (`blockHash`). minecraft-data's bedrock block states stop at 1.26.30; for game versions with a dumped
-// BDS palette (shim.blockPalette, version-shims/palette.ts; wave 8 Track AC, decision 0024) the table is
-// built from the dump: palette states equal to a minecraft-data state keep that state id (0 ..
-// mdStates - 1), the others (1.26.60: stairs with `minecraft:corner`, fences / panes / fire with
-// `minecraft:connection_*`, redstone wire connections, new blocks) get ids from mdStates up, with hardness
-// and collision boxes borrowed from the closest minecraft-data state of the same block (or a shape donor,
-// palette.ts `shapeDonor`). Without a dump, minecraft-data's states are all there is.
+// (`blockHash`). State ids are the block states of the bot's one block data key (data/blockData.ts,
+// decision 0094) for every game version, so a state id means the same state in every module of the process.
+// For game versions with a dumped BDS palette (shim.blockPalette, version-shims/palette.ts; wave 8 Track AC,
+// decision 0024) the table is built from the dump: palette states equal to a block data state keep that state
+// id (0 .. mdStates - 1), the others get process-wide ids from mdStates up (the same id for the same state in
+// every registry of the process, whichever version brought it), with hardness and collision boxes borrowed from
+// the closest block data state of the same block (or a shape donor, palette.ts `shapeDonor`). A version without
+// a dump can name a minecraft-data key whose states stand in for the server's (shim.paletteFromData); without
+// either, the block data's states are all there is.
 import { createRequire } from 'node:module';
 import nbt from 'prismarine-nbt';
+import { BLOCK_DATA_KEY, BLOCK_DATA_VERSION, blockData, hardnessOf } from '../data/blockData.ts';
 import { createLogger, type Logger } from '../log.ts';
 import type { ItemRegistry, ItemStateEntry, StartGame } from './packets.ts';
 import type { BlockInfo, Box } from './types.ts';
 import { shimFor, SHIMS, type VersionShim } from './version-shims/index.ts';
-import { fastBlockHash, loadPalette, shapeDonor, type BlockPalette } from './version-shims/palette.ts';
+import { fastBlockHash, loadPalette, paletteFromMinecraftData, shapeDonor, type BlockPalette } from './version-shims/palette.ts';
 
 const require = createRequire(import.meta.url);
 
@@ -64,13 +67,8 @@ interface CollisionShapes {
   blocks: Record<string, number | number[]>;
   shapes: Record<string, number[][]>;
 }
-const collisionShapes = new Map<string, CollisionShapes | undefined>();
-function collisionShapesOf(registryVersion: string): CollisionShapes | undefined {
-  if (!collisionShapes.has(registryVersion)) {
-    const md = (require('minecraft-data') as (v: string) => { blockCollisionShapes?: CollisionShapes } | undefined)(registryVersion);
-    collisionShapes.set(registryVersion, md?.blockCollisionShapes);
-  }
-  return collisionShapes.get(registryVersion);
+function collisionShapes(): CollisionShapes | undefined {
+  return blockData<{ blockCollisionShapes?: CollisionShapes }>().blockCollisionShapes;
 }
 
 /** Hashes of a palette's entries (same order), computed once per palette. */
@@ -85,12 +83,32 @@ function hashesOf(palette: BlockPalette): Int32Array {
   return h;
 }
 
-/** A palette state minecraft-data does not have (id = mdStates + index). */
+/** A palette state the block data does not have (process-wide id = mdStates + index in EXT). */
 interface ExtState {
   name: string;
   states: TypedStates;
-  /** minecraft-data state whose hardness and shape it borrows; -1 = none (a full solid cube); undefined = not looked up yet. */
+  /** Its hashed runtime id. */
+  hash: number;
+  /** Block data state whose hardness and shape it borrows; -1 = none (a full solid cube); undefined = not looked up yet. */
   base?: number;
+}
+
+/**
+ * Every palette state beyond the block data seen in this process, in the order first seen, and its index by
+ * hash. Shared by all registries so that a state id never changes meaning within a process (the terrain
+ * layer caches classes and shapes by state id), also when a reconnect speaks another game version.
+ */
+const EXT: ExtState[] = [];
+const EXT_BY_HASH = new Map<number, number>();
+
+function extIndexOf(hash: number, name: string, states: TypedStates): number {
+  let i = EXT_BY_HASH.get(hash);
+  if (i === undefined) {
+    i = EXT.length;
+    EXT.push({ name, states, hash });
+    EXT_BY_HASH.set(hash, i);
+  }
+  return i;
 }
 
 const FULL_BOX: Box = [0, 0, 0, 1, 1, 1];
@@ -129,8 +147,11 @@ function plainStates(states: TypedStates): Record<string, unknown> {
 }
 
 export interface BlockRegistryOptions {
-  /** Game version (bedrock-protocol version string). Default '1.26.60'. */
-  version?: string;
+  /**
+   * Game version (bedrock-protocol version string), or a function giving the version of the current session
+   * (read at every build, i.e. at each `start_game`: a reconnect may speak another version). Default '1.26.60'.
+   */
+  version?: string | (() => string);
   logger?: Logger;
 }
 
@@ -139,8 +160,9 @@ export interface BlockRegistryOptions {
  * `ready` once both have arrived (or `finalize()` was called, e.g. at spawn, without item_registry).
  */
 export class BlockRegistry {
-  readonly shim: VersionShim;
-  readonly version: string;
+  private _shim!: VersionShim;
+  private _version!: string;
+  private readonly versionOf: () => string;
   private readonly log: Logger;
   private readonly reg: PRegistry;
   private startGame: StartGame | undefined;
@@ -150,50 +172,79 @@ export class BlockRegistry {
   private readonly readyFns = new Set<() => void>();
   /** runtime id -> state id */
   private readonly byRuntimeId = new Map<number, number>();
-  /** state id -> runtime id */
-  private runtimeIds: Int32Array = new Int32Array(0);
+  /** block data state id -> runtime id */
+  private mdRuntimeIds: Int32Array = new Int32Array(0);
   private readonly infos: (BlockInfo | undefined)[] = [];
   private readonly unknownInfos = new Map<number, BlockInfo>();
   /** Unresolved runtime id -> number of times it was looked up (palette entries and updates). */
   readonly unknownRuntimeIds = new Map<number, number>();
   /** State id of `air` (used for all-air subchunks). */
   readonly airStateId: number;
-  /** The dumped BDS palette for this version (undefined: minecraft-data's states only). */
-  readonly palette: BlockPalette | undefined;
-  /** Number of minecraft-data block states (state ids below this are minecraft-data's). */
+  private _palette: BlockPalette | undefined;
+  /** Number of block data states (state ids below this are the block data's). */
   private readonly mdStates: number;
-  /** Palette states minecraft-data does not have, by state id - mdStates. */
-  private ext: ExtState[] = [];
+  /** Number of this version's palette states the block data does not have (set by the build). */
+  private extCount = 0;
   /** Block name -> state ids of its palette states, the default first (empty without a palette). */
   private readonly paletteByName = new Map<string, number[]>();
 
   constructor(opts: BlockRegistryOptions = {}) {
-    this.version = opts.version ?? '1.26.60';
+    const v = opts.version ?? '1.26.60';
+    this.versionOf = typeof v === 'function' ? v : () => v;
     this.log = opts.logger ?? createLogger('info', 'world');
-    const shim = shimFor(this.version);
-    if (!shim) {
-      this.shim = SHIMS[0]!;
-      this.log.warn(`no world version shim for ${this.version}; using ${this.shim.gameVersions.join(',')}`);
-    } else {
-      this.shim = shim;
-    }
-    this.reg = loadPrismarineRegistry(this.shim.registryVersion);
+    this.reg = loadPrismarineRegistry(BLOCK_DATA_KEY);
     const air = this.reg.blocksByName.air;
-    if (!air) throw new Error(`registry ${this.shim.registryVersion} has no air block`);
+    if (!air) throw new Error(`registry ${BLOCK_DATA_KEY} has no air block`);
     this.airStateId = air.defaultState;
     this.mdStates = this.reg.blockStates.length;
-    this.palette = this.shim.blockPalette ? loadPalette(this.shim.blockPalette) : undefined;
-    if (this.shim.blockPalette && !this.palette) this.log.warn(`no block palette file for ${this.shim.blockPalette}; using minecraft-data ${this.shim.blockDataVersion} block states`);
+    this.selectVersion(this.versionOf());
   }
 
-  /** Where block states come from, for logs: `palette 1.26.60 (BDS 1.26.60.6)` or `minecraft-data 1.26.30`. */
+  /** The game version the registry was last built for (or will be built for). */
+  get version(): string {
+    return this._version;
+  }
+
+  /** The version shim of `version`. */
+  get shim(): VersionShim {
+    return this._shim;
+  }
+
+  /** The block states this version's server sends (undefined: the block data's states only). */
+  get palette(): BlockPalette | undefined {
+    return this._palette;
+  }
+
+  /** Picks the shim and palette of a game version (no-op when it is the current one). */
+  private selectVersion(version: string): void {
+    if (version === this._version) return;
+    this._version = version;
+    const shim = shimFor(version);
+    if (!shim) {
+      this._shim = SHIMS[0]!;
+      this.log.warn(`no world version shim for ${version}; using ${this._shim.gameVersions.join(',')}`);
+    } else {
+      this._shim = shim;
+    }
+    this._palette = this._shim.blockPalette ? loadPalette(this._shim.blockPalette) : undefined;
+    if (this._shim.blockPalette && !this._palette) this.log.warn(`no block palette file for ${this._shim.blockPalette}; using the block data's states (minecraft-data ${BLOCK_DATA_VERSION})`);
+    if (!this._palette && this._shim.paletteFromData) this._palette = paletteFromMinecraftData(this._shim.paletteFromData);
+    this.infos.length = 0;
+  }
+
+  /** Where block states come from, for logs: `palette 1.26.60 (BDS 1.26.60.6)` or `minecraft-data 1.26.60`. */
   get blockDataSource(): string {
-    return this.palette ? `palette ${this.palette.version} (BDS ${this.palette.bds})` : `minecraft-data ${this.shim.blockDataVersion}`;
+    return this.palette ? `palette ${this.palette.version} (${this.palette.bds.startsWith('minecraft-data') ? this.palette.bds : `BDS ${this.palette.bds}`})` : `minecraft-data ${BLOCK_DATA_VERSION}`;
   }
 
-  /** Number of palette states minecraft-data does not have (0 without a palette or before the build). */
+  /** Number of this version's palette states the block data does not have (0 without a palette or before the build). */
   get extraStateCount(): number {
-    return this.ext.length;
+    return this.extCount;
+  }
+
+  /** Number of block data states: state ids below this are the block data's, ids at or above it palette-only states. */
+  get blockDataStates(): number {
+    return this.mdStates;
   }
 
   get ready(): boolean {
@@ -205,9 +256,9 @@ export class BlockRegistry {
     return this._hashed;
   }
 
-  /** Number of state ids: minecraft-data's block states plus the palette states it does not have. */
+  /** Size of the process's state id space: the block data's states plus every palette-only state seen so far. */
   get stateCount(): number {
-    return this.mdStates + this.ext.length;
+    return this.mdStates + EXT.length;
   }
 
   /** Runs `fn` once the registry is ready (immediately if it already is). */
@@ -238,6 +289,7 @@ export class BlockRegistry {
 
   private tryBuild(force: boolean): void {
     if (this._ready || !this.startGame) return;
+    this.selectVersion(this.versionOf());
     let itemstates = this.shim.itemStates(this.startGame, this.itemRegistry);
     if (!itemstates) {
       if (!force) return;
@@ -253,7 +305,7 @@ export class BlockRegistry {
     this.reg.handleStartGame({ ...startGame, itemstates, block_network_ids_are_hashes: this._hashed });
     this.byRuntimeId.clear();
     this.paletteByName.clear();
-    this.ext = [];
+    this.extCount = 0;
     const mdRuntimeIds = new Int32Array(this.mdStates);
     for (const [rid, entry] of Object.entries(this.reg.blocksByRuntimeId ?? {})) {
       if (!entry) continue;
@@ -261,29 +313,23 @@ export class BlockRegistry {
       this.byRuntimeId.set(id, entry.stateId);
       mdRuntimeIds[entry.stateId] = id;
     }
+    this.mdRuntimeIds = mdRuntimeIds;
     // Sequential runtime ids are minecraft-data's order; the palette only applies to hashed ids.
     const palette = this._hashed ? this.palette : undefined;
     if (palette) {
       const hashes = hashesOf(palette);
-      const extIds: number[] = [];
       palette.entries.forEach((e, i) => {
         const h = hashes[i]!;
         let s = this.byRuntimeId.get(h);
         if (s === undefined) {
-          s = this.mdStates + this.ext.length;
-          this.ext.push({ name: e.name, states: e.states });
-          extIds.push(h);
+          s = this.mdStates + extIndexOf(h, e.name, e.states);
+          this.extCount++;
           this.byRuntimeId.set(h, s);
         }
         let list = this.paletteByName.get(e.name);
         if (!list) this.paletteByName.set(e.name, (list = []));
         list.push(s);
       });
-      this.runtimeIds = new Int32Array(this.mdStates + this.ext.length);
-      this.runtimeIds.set(mdRuntimeIds);
-      this.runtimeIds.set(extIds, this.mdStates);
-    } else {
-      this.runtimeIds = mdRuntimeIds;
     }
     if (this._hashed) {
       // BDS 1.26.60.6 sends `minecraft:unknown` as runtime id -2, not as its hash (seen with truth:palettestrip).
@@ -292,7 +338,7 @@ export class BlockRegistry {
     }
     this._ready = true;
     this.log.debug(
-      `registry ${this.shim.registryVersion} ready: ${this.byRuntimeId.size} block runtime ids (${this._hashed ? 'hashed' : 'sequential'}, ${this.blockDataSource}${palette ? `, ${this.ext.length} states beyond minecraft-data ${this.shim.blockDataVersion}` : ''}), ${itemstates.length} items, ${Math.round(performance.now() - t0)} ms`,
+      `registry ${this._version} ready: ${this.byRuntimeId.size} block runtime ids (${this._hashed ? 'hashed' : 'sequential'}, ${this.blockDataSource}${palette ? `, ${this.extCount} states beyond minecraft-data ${BLOCK_DATA_VERSION}` : ''}), ${itemstates.length} items, ${Math.round(performance.now() - t0)} ms`,
     );
     const fns = [...this.readyFns];
     this.readyFns.clear();
@@ -317,7 +363,7 @@ export class BlockRegistry {
   /** Wire runtime id of a state id (the hash on 1.26.x). */
   runtimeIdOf(stateId: number): number {
     if (!this._ready) throw new Error('registry not ready');
-    const rid = this.runtimeIds[stateId];
+    const rid = stateId >= this.mdStates ? (this._hashed ? EXT[stateId - this.mdStates]?.hash : undefined) : this.mdRuntimeIds[stateId];
     if (rid === undefined) throw new Error(`no state ${stateId}`);
     return rid;
   }
@@ -352,23 +398,23 @@ export class BlockRegistry {
 
   /** Name (no namespace) for a state id. */
   nameOf(stateId: number): string | undefined {
-    if (stateId >= this.mdStates) return this.ext[stateId - this.mdStates]?.name;
+    if (stateId >= this.mdStates) return EXT[stateId - this.mdStates]?.name;
     return this.reg.blockStates[stateId]?.name;
   }
 
   /** Typed (NBT) states of a state id, as used for hashing. */
   typedStatesOf(stateId: number): TypedStates | undefined {
-    if (stateId >= this.mdStates) return this.ext[stateId - this.mdStates]?.states;
+    if (stateId >= this.mdStates) return EXT[stateId - this.mdStates]?.states;
     return this.reg.blockStates[stateId]?.states;
   }
 
   /**
-   * The minecraft-data state a palette-only state borrows hardness and shape from: the state of the same
+   * The block data state a palette-only state borrows hardness and shape from: the state of the same
    * block (or of its shape donor) that shares the most state values; -1 when there is none.
    */
   baseStateOf(stateId: number): number {
     if (stateId < this.mdStates) return stateId;
-    const e = this.ext[stateId - this.mdStates];
+    const e = EXT[stateId - this.mdStates];
     if (!e) return -1;
     if (e.base !== undefined) return e.base;
     const donor = this.reg.blocksByName[e.name] ?? this.reg.blocksByName[shapeDonor(e.name) ?? ''];
@@ -405,7 +451,7 @@ export class BlockRegistry {
       name: state.name,
       stateId,
       states: Object.freeze(plainStates(state.states)),
-      hardness: block.hardness ?? -1,
+      hardness: hardnessOf(state.name, block.hardness),
       solid: boxes.length > 0,
       boxes: Object.freeze(boxes),
     });
@@ -418,13 +464,13 @@ export class BlockRegistry {
    * blockCollisionShapes, as skills/terrain/shapes.ts reads them) of its base state; a full solid cube without one.
    */
   private extInfo(stateId: number, runtimeId: number): BlockInfo {
-    const e = this.ext[stateId - this.mdStates];
+    const e = EXT[stateId - this.mdStates];
     if (!e) return this.unknownInfo(runtimeId);
     const base = this.baseStateOf(stateId);
     const block = base >= 0 ? this.reg.blocksByStateId[base] : undefined;
     let boxes: Box[] = [[...FULL_BOX]];
     if (block) {
-      const shapes = collisionShapesOf(this.shim.registryVersion);
+      const shapes = collisionShapes();
       const entry = shapes?.blocks[block.name];
       if (entry === undefined || !shapes) {
         boxes = block.boundingBox === 'block' ? [[...FULL_BOX]] : [];
@@ -437,7 +483,7 @@ export class BlockRegistry {
       name: e.name,
       stateId,
       states: Object.freeze(plainStates(e.states)),
-      hardness: block?.hardness ?? -1,
+      hardness: block ? hardnessOf(block.name, block.hardness) : -1,
       solid: boxes.length > 0,
       boxes: Object.freeze(boxes.map((b) => Object.freeze(b))),
     });

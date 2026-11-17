@@ -13,7 +13,7 @@ describe('checkVersion', () => {
     expect(checkVersion('1.26.51', 2193)).toEqual({ ok: true, version: '1.26.51', protocol: 2193 });
   });
 
-  it('accepts 1.26.60 (protocol 2225) from the installed minecraft-data (3.118.0)', () => {
+  it('accepts 1.26.60 (protocol 2225) from the installed minecraft-data (3.119.0)', () => {
     expect(supportedVersions['1.26.60']).toBe(2225);
     expect(checkVersion('1.26.60', 2225)).toEqual({ ok: true, version: '1.26.60', protocol: 2225 });
     const r = checkVersion('1.26.60', 2193);
@@ -27,8 +27,9 @@ describe('checkVersion', () => {
     if (!r.ok) {
       expect(r.reason).toBe('unsupported_version');
       expect(r.message).toContain('1.99.0');
-      // bedrock-protocol lists its versions newest first; the message names the highest protocol's version.
-      expect(r.message).toContain('newest supported: 1.26.60)');
+      // bedrock-protocol lists its versions newest first; the message names the highest protocol's version (the
+      // derived 1.26.70 of the minecraft-data patch, releaseType beta, which the bedrock-protocol patch lets in).
+      expect(r.message).toContain('newest supported: 1.26.70)');
     }
   });
 

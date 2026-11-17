@@ -169,7 +169,7 @@ BedrockBot/
   scripts/bds.mjs            start, stop, restart, console, logs, truth-pack deploy per server profile
   tools/bump-version/        version-bump playbook and tooling (patch minecraft-data ahead of releases)
   tools/physics-spike/       Phase 3 physics spike
-  patches/                   pnpm patches: a protocol data fix for minecraft-data 3.118.0, a signalling fallback for bedrock-protocol
+  patches/                   pnpm patches: protocol data fixes and the derived 1.26.70 for minecraft-data 3.119.0, a signalling fallback and beta versions for bedrock-protocol, type-3 LAN discovery packets for nethernet
   fixtures/                  recorded packet captures per game version (1.26.51, 1.26.60)
   worlds/                    test structures
   spikes/                    throwaway feasibility experiments, never imported

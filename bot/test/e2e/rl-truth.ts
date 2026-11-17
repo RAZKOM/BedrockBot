@@ -56,7 +56,7 @@ export async function connectRlBot(prefix: string, opts: Partial<RlAgentOptions>
   const name = uniqueName(prefix);
   const log = VERBOSE ? createLogger('debug', 'rl') : silentLogger;
   const conn = new Connection({ version: E2E_VERSION, username: name, logger: silentLogger, reconnect: false });
-  const task = RlAgentTask.create(conn, { version: E2E_VERSION, bridgePort: 0, log, ...opts });
+  const task = RlAgentTask.create(conn, { bridgePort: 0, log, ...opts });
   const truth = new DigTruth(RL_CONTAINER);
   await task.start();
   // DigTruth needs the replies: reuse the bot's text stream.

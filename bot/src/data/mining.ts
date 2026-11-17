@@ -1,16 +1,10 @@
 // Mining data (PLAN.md task 4.1): block hardness, effective tool and harvest tier from minecraft-data,
 // plus tool tiers parsed from item names. See docs/digging.md for sources and how the values were
-// checked against BDS 1.26.51.
+// checked against BDS.
 //
-// minecraft-data 3.117.0 and 3.118.0 serve bedrock blocks/items from `bedrock/1.26.30` for every version up
-// to 1.26.60 (their dataPaths.json); the blocks the bot cares about (logs, planks, leaves, dirt, grass,
-// stone, ores) are unchanged since then. The default game version is 1.26.60 since 2026-10-28; this
-// file keeps the `bedrock_1.26.51` key, which points at the same `bedrock/1.26.30` block and item data
-// (docs/versions.md). minecraft-data 3.119.0 regenerated that data (obsidian hardness 50 -> 35, new
-// materials): test/unit/world/data-pin.test.ts fails on a bump that brings it in.
-import { createRequire } from 'node:module';
-
-const require = createRequire(import.meta.url);
+// The tables are the bot's one block data key (data/blockData.ts: bedrock_1.26.60, minecraft-data 3.119.0's
+// regenerated 1.26.60 data since decision 0094). test/unit/world/data-pin.test.ts fails on a bump that changes them.
+import { blockData, hardnessOf } from './blockData.ts';
 
 export type ToolType = 'axe' | 'pickaxe' | 'shovel' | 'hoe' | 'sword' | 'shears';
 export type ToolTier = 'wooden' | 'golden' | 'stone' | 'copper' | 'iron' | 'diamond' | 'netherite';
@@ -85,24 +79,15 @@ interface MdBlock {
 }
 
 /**
- * minecraft-data's bedrock `harvestTools` keys are Java-style item ids from an older item table (they
- * do not match the bedrock items.json ids). They come in groups of five per tier starting at 939:
- * sword, shovel, pickaxe, axe, hoe; tiers in the order below. 1134 = shears. Verified against the
- * blocks whose requirements are well known (stone: any pickaxe; iron_ore: stone+; gold_ore and
- * diamond_ore: iron+; obsidian: diamond+; snow: any shovel; web: sword or shears) in the unit tests.
+ * minecraft-data's bedrock `harvestTools` keys are item ids. In minecraft-data 3.119.0's regenerated data they
+ * are the ids of the same version's items.json (iron_pickaxe 299, shears 424), so they are read by item name
+ * (`toolOf`). (The 1.26.30 data of 3.118.0 and earlier used Java-style ids of an older table, groups of five
+ * per tier from 939, which no table the bot loads has any more.) Checked against the blocks whose
+ * requirements are well known (stone: any pickaxe; iron_ore: stone+; gold_ore and diamond_ore: iron+;
+ * obsidian: diamond+; snow: any shovel; web: sword or shears) in the unit tests.
  */
-const HARVEST_ID_BASE = 939;
-const HARVEST_ID_TYPES: readonly ToolType[] = ['sword', 'shovel', 'pickaxe', 'axe', 'hoe'];
-const HARVEST_ID_TIERS: readonly ToolTier[] = ['wooden', 'stone', 'copper', 'golden', 'iron', 'diamond', 'netherite'];
-const HARVEST_ID_SHEARS = 1134;
-
-function decodeHarvestId(id: number): Tool | undefined {
-  if (id === HARVEST_ID_SHEARS) return { type: 'shears', tier: undefined };
-  const off = id - HARVEST_ID_BASE;
-  if (off < 0) return undefined;
-  const type = HARVEST_ID_TYPES[off % 5];
-  const tier = HARVEST_ID_TIERS[Math.floor(off / 5)];
-  return type && tier ? { type, tier } : undefined;
+function decodeHarvestId(id: number, items: Record<number, { name: string } | undefined>): Tool | undefined {
+  return toolOf(items[id]?.name) ?? undefined;
 }
 
 function effectiveFromMaterial(material: string | undefined, name: string): ToolType[] {
@@ -119,11 +104,10 @@ function effectiveFromMaterial(material: string | undefined, name: string): Tool
   return out;
 }
 
-function harvestFrom(md: MdBlock): BlockMining['harvest'] {
+function harvestFrom(md: MdBlock, items: Record<number, { name: string } | undefined>): BlockMining['harvest'] {
   if (!md.harvestTools) return undefined;
   const tools = Object.keys(md.harvestTools)
-    .map(Number)
-    .map(decodeHarvestId)
+    .map((id) => decodeHarvestId(Number(id), items))
     .filter((t): t is Tool => t !== undefined);
   if (tools.length === 0) return undefined;
   const types = [...new Set(tools.map((t) => t.type))];
@@ -139,16 +123,14 @@ let cache: Map<string, BlockMining> | undefined;
 
 function table(): Map<string, BlockMining> {
   if (cache) return cache;
-  const mcData = require('minecraft-data') as (v: string) => { blocksArray: MdBlock[] } | null;
-  const data = mcData('bedrock_1.26.51');
-  if (!data) throw new Error('minecraft-data has no bedrock_1.26.51');
+  const data = blockData<{ blocksArray: MdBlock[]; items: Record<number, { name: string } | undefined> }>();
   cache = new Map();
   for (const b of data.blocksArray) {
     cache.set(b.name, {
       name: b.name,
-      hardness: b.hardness ?? -1,
+      hardness: hardnessOf(b.name, b.hardness),
       effective: effectiveFromMaterial(b.material, b.name),
-      harvest: harvestFrom(b),
+      harvest: harvestFrom(b, data.items),
       material: b.material,
     });
   }

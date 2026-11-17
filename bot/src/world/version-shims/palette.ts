@@ -1,9 +1,10 @@
 // Block palettes dumped from BDS (wave 8, Track AC; docs/versions.md "Block states", decision 0024).
 // `bot/data/block-palette/<version>.json` holds every block state of one game version as the server hashes
 // it (written by tools/bump-version/dump-palette.mjs through the truth pack). The world registry builds its
-// runtime-id table from it; minecraft-data's tables (1.26.30 for 1.26.51 / 1.26.60) still provide hardness
-// and collision shapes, by name.
+// runtime-id table from it; the bot's one block data key (data/blockData.ts, decision 0094) provides hardness
+// and collision shapes, for states it lacks by the closest state of the same block or a shape donor.
 import { existsSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 /** Typed (NBT) state values, the shape minecraft-data uses: { pillar_axis: { type: 'string', value: 'y' } }. */
@@ -101,11 +102,55 @@ export function loadPalette(version: string): BlockPalette | undefined {
   return palette;
 }
 
+const mdPalettes = new Map<string, BlockPalette | null>();
+
+/**
+ * A palette made of a minecraft-data version's own block states (for a game version without a dump: the states
+ * minecraft-data's generator read from that version's server), or undefined when minecraft-data has no such key.
+ * `bds` names the source (`minecraft-data bedrock_1.26.51`). Cached.
+ */
+export function paletteFromMinecraftData(key: string): BlockPalette | undefined {
+  const hit = mdPalettes.get(key);
+  if (hit !== undefined) return hit ?? undefined;
+  const t0 = performance.now();
+  let palette: BlockPalette | null = null;
+  try {
+    const md = (createRequire(import.meta.url)('minecraft-data') as (v: string) => MdForPalette | null)(key);
+    if (md?.blockStates?.length) {
+      const entries: PaletteEntry[] = [];
+      for (const b of md.blocksArray) {
+        for (let s = b.minStateId; s <= b.maxStateId; s++) {
+          const st = md.blockStates[s];
+          if (!st) continue;
+          const states: PaletteTypedStates = {};
+          for (const k of Object.keys(st.states).sort()) states[k] = st.states[k]!;
+          entries.push({ name: st.name, states, isDefault: s === b.defaultState });
+        }
+      }
+      palette = { version: key.replace(/^bedrock_/, ''), bds: `minecraft-data ${key}`, dumped: '', types: md.blocksArray.length, entries, loadMs: 0 };
+      palette.loadMs = performance.now() - t0;
+    }
+  } catch {
+    palette = null;
+  }
+  mdPalettes.set(key, palette);
+  return palette ?? undefined;
+}
+
+interface MdForPalette {
+  blocksArray: { minStateId: number; maxStateId: number; defaultState: number }[];
+  blockStates: { name: string; states: PaletteTypedStates }[];
+}
+
 /**
  * The minecraft-data block whose shape and hardness a block that minecraft-data does not know borrows
- * (blocks added after its data version, e.g. 1.26.60's poplar wood set, wool and concrete stairs and slabs):
- * by name suffix. Undefined for blocks with no obvious relative (icicle, ice_crystal, disc_press, ...), which
- * stay full solid cubes.
+ * (blocks added after its data version: 1.26.60's poplar wood set, wool and concrete stairs and slabs before
+ * decision 0094; 1.26.70's calcite, packed ice brick and snow brick stairs, slabs and walls on bedrock_1.26.60):
+ * by name suffix. A wall borrows cobblestone_wall's state with the same connections (the 1.26.70 walls have its
+ * 162 states; without a donor a wall would be a 1-high full cube the planner jumps onto, not a 1.5 wall).
+ * Undefined for blocks with no obvious relative (brittle_ice, snow_bricks, calcite_pillar, ...), which stay full
+ * solid cubes. A donor gives the shape and BlockInfo.hardness only: the digger reads mining data by the block's
+ * own name (data/mining.ts) and refuses a block the block data does not know (`unknown_block`).
  */
 export function shapeDonor(name: string): string | undefined {
   for (const [suffix, donor] of DONORS) if (name.endsWith(suffix)) return donor;
@@ -117,6 +162,7 @@ const DONORS: readonly (readonly [string, string])[] = [
   ['_slab', 'oak_slab'],
   ['_stairs', 'oak_stairs'],
   ['_wall_sign', 'wall_sign'],
+  ['_wall', 'cobblestone_wall'],
   ['_standing_sign', 'standing_sign'],
   ['_hanging_sign', 'oak_hanging_sign'],
   ['_leaves', 'oak_leaves'],

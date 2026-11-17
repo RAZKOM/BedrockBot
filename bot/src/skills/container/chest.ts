@@ -18,7 +18,7 @@
 // (`slotTypeForBlock`). `snapshot` reads a window into a typed summary (counts, free slots, a double
 // chest's 54 slots, empty and full shulker boxes by their NBT `Items`), `depositSlots` moves chosen
 // (slot, count) pairs, `take` moves a window slot into the inventory.
-import { createRequire } from 'node:module';
+import { blockData, NEWER_ITEM_STACKS } from '../../data/blockData.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { Containers, OpenContainer } from '../../world/containers.ts';
 import type { Inventory } from '../../world/inventory.ts';
@@ -26,8 +26,6 @@ import type { ItemV4 } from '../../world/packets.ts';
 import type { BlockInfo, ContainerView, ItemStack, PacketSource, Vec3 } from '../../world/types.ts';
 import { blockCenter, EYE_HEIGHT, FACE, faceToward, lookAngles, type Face } from '../dig/look.ts';
 import type { SkillResult } from '../types.ts';
-
-const require = createRequire(import.meta.url);
 
 const COLOURS = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'];
 /** Shulker box block / item names (Bedrock: the plain one is `undyed_shulker_box`). Track AD's list, moved here by Track AG. */
@@ -186,19 +184,18 @@ const AIR: ItemV4 & { extra: unknown } = {
 
 let stackSizes: Map<string, number> | undefined;
 
-/** Max stack size of an item (minecraft-data, same bedrock data as mining.ts); default 64. */
+/** Max stack size of an item (minecraft-data, the bot's block and item data, data/blockData.ts; items newer than it from NEWER_ITEM_STACKS); default 64. */
 export function maxStackOf(name: string): number {
   if (!stackSizes) {
     stackSizes = new Map();
     try {
-      const mcData = require('minecraft-data') as (v: string) => { itemsArray: { name: string; stackSize: number }[] } | null;
-      for (const i of mcData('bedrock_1.26.51')?.itemsArray ?? []) stackSizes.set(i.name, i.stackSize);
+      for (const i of blockData<{ itemsArray: { name: string; stackSize: number }[] }>().itemsArray) stackSizes.set(i.name, i.stackSize);
     } catch {
       // keep the default
     }
   }
   const short = name.startsWith('minecraft:') ? name.slice(10) : name;
-  return stackSizes.get(short) ?? 64;
+  return stackSizes.get(short) ?? NEWER_ITEM_STACKS[short] ?? 64;
 }
 
 /** The point on face `face` of block `p` the click lands on (block-relative, 0..1), its centre. */

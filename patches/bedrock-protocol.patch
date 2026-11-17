@@ -37,3 +37,18 @@ index fd0edaa..6e648b2 100644
        }
      } else {
        this.fail(new Error(`Signal connection closed (${code}): ${reason}`))
+diff --git a/src/options.js b/src/options.js
+index 6f06e65..827d476 100644
+--- a/src/options.js
++++ b/src/options.js
+@@ -6,7 +6,9 @@ const MIN_VERSION = '1.16.201'
+ // Clients can discover newer versions when their data is available in minecraft-data.
+ const CURRENT_VERSION = '1.26.60'
+ 
+-const Versions = Object.fromEntries(mcData.versions.bedrock.filter(e => e.releaseType === 'release').map(e => [e.minecraftVersion, e.version]))
++// 'beta': a preview's protocol data that minecraft-data lists as such (the bot's minecraft-data patch adds 1.26.70,
++// protocol 2259, from the 1.26.70.24 preview before any release speaks it).
++const Versions = Object.fromEntries(mcData.versions.bedrock.filter(e => e.releaseType === 'release' || e.releaseType === 'beta').map(e => [e.minecraftVersion, e.version]))
+ 
+ // Skip some low priority versions (middle major) on Github Actions to allow faster CI
+ const skippedVersionsOnGithubCI = ['1.16.210', '1.17.10', '1.17.30', '1.18.11', '1.19.10', '1.19.20', '1.19.30', '1.19.40', '1.19.50', '1.19.60', '1.19.63', '1.19.70', '1.20.10', '1.20.15', '1.20.30', '1.20.40', '1.20.50', '1.20.61', '1.20.71', '1.21.2', '1.21.20', '1.21.30', '1.21.42', '1.21.50', '1.21.60', '1.21.70', '1.21.80', '1.21.90', '1.21.93', '1.21.100', '1.21.111', '1.21.120', '1.21.124', '1.26.10', '1.26.20']

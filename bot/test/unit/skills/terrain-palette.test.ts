@@ -1,9 +1,11 @@
-// Wave 9, Track AK (decision 0031): the terrain layer on the BDS 1.26.60 palette's own state ids
-// (bot/data/block-palette/1.26.60.json; states minecraft-data 1.26.30 lacks get ids from 16913 up).
-//   - every palette-only door, trapdoor, fence gate, stairs and slab state gets the state-dependent shape
-//     of its minecraft-data relative with the same states (by name suffix), not the registry's borrowed one;
+// Wave 9, Track AK (decision 0031): the terrain layer on the BDS 1.26.60 palette (bot/data/block-palette/1.26.60.json).
+// Up to minecraft-data 3.118.0 the states the 1.26.30 data lacked (the poplar set, wool and concrete stairs and slabs)
+// were palette-only and took the state-dependent shape of a relative by name suffix; since decision 0094 they are block
+// data states with shapes of their own, which must still equal what the terrain layer gave them:
+//   - every door, trapdoor, fence gate, stairs and slab state of those sets has the shape of its relative with the
+//     same states (by name suffix);
 //   - fences, panes and bars with `minecraft:connection_*` states take their arms from the states,
-//     not from the neighbours; minecraft-data fences (no such states) still look at the neighbours.
+//     not from the neighbours; generated-world fences (blockInfoOf, no such states) still look at the neighbours.
 import { describe, expect, it } from 'vitest';
 import { silentLogger } from '../../../src/log.ts';
 import { armsOf, classify } from '../../../src/skills/terrain/classify.ts';
@@ -13,7 +15,8 @@ import { BlockRegistry } from '../../../src/world/registry.ts';
 import type { BlockInfo } from '../../../src/world/types.ts';
 import { recordedLogin } from '../world/helpers.ts';
 
-const MD_STATES = 16913;
+/** The block sets 1.26.60 added after the 1.26.30 data (palette-only before decision 0094). */
+const NEW_IN_1_26_60 = (name: string): boolean => name.startsWith('poplar_') || name.startsWith('stripped_poplar_') || /_(wool|concrete)_(stairs|slab|double_slab)$/.test(name);
 
 function registry(): BlockRegistry {
   const { startGame, itemRegistry } = recordedLogin();
@@ -34,13 +37,12 @@ function relative(name: string): string | undefined {
   return undefined;
 }
 
-describe('palette-only partial blocks: state-dependent shapes by name suffix', () => {
+describe('1.26.60 partial blocks the 1.26.30 data lacked: state-dependent shapes', () => {
   const reg = registry();
   const info = (name: string, states?: Record<string, unknown>): BlockInfo => reg.blockInfo(reg.stateIdOf(name, states)!);
 
-  it('poplar door, trapdoor, gate, stairs and slab (palette ids) have the shape of their states', () => {
+  it('poplar door, trapdoor, gate, stairs and slab have the shape of their states', () => {
     const door = info('poplar_door', { 'minecraft:cardinal_direction': 'east', door_hinge_bit: 1, open_bit: 1, upper_block_bit: 0 });
-    expect(door.stateId).toBeGreaterThanOrEqual(MD_STATES);
     // minecraft-data has one door box for every state (what the registry borrows); the panel follows the states
     expect(classify(door).boxes).toEqual(doorBoxes(door.states));
     expect(classify(door).boxes).not.toEqual(door.boxes);
@@ -49,7 +51,6 @@ describe('palette-only partial blocks: state-dependent shapes by name suffix', (
     expect(classify(closed).boxes).toEqual(classify(blockInfoOf('wooden_door', { 'minecraft:cardinal_direction': 'north' })).boxes);
 
     const trap = info('poplar_trapdoor', { direction: 2, open_bit: 1 });
-    expect(trap.stateId).toBeGreaterThanOrEqual(MD_STATES);
     expect(classify(trap).boxes).toEqual(classify(blockInfoOf('trapdoor', { direction: 2, open_bit: 1 })).boxes);
     expect(classify(info('poplar_trapdoor', { upside_down_bit: 1, open_bit: 0 })).boxes).toEqual([[0, 0.8175, 0, 1, 1, 1]]); // Bedrock trapdoors are 0.1825 thick
 
@@ -62,11 +63,12 @@ describe('palette-only partial blocks: state-dependent shapes by name suffix', (
     expect(classify(stairs).boxes).toEqual(classify(blockInfoOf('oak_stairs', { weirdo_direction: 1, upside_down_bit: 1 })).boxes);
   });
 
-  it('every palette-only door, trapdoor, gate, stairs and slab state matches its minecraft-data relative with the same states', () => {
+  it('every door, trapdoor, gate, stairs and slab state of those sets matches its relative with the same states', () => {
     let n = 0;
     const kinds = new Set<string>();
-    for (let id = MD_STATES; id < reg.stateCount; id++) {
+    for (let id = 0; id < reg.stateCount; id++) {
       const b = reg.blockInfo(id);
+      if (!NEW_IN_1_26_60(b.name)) continue;
       const rel = relative(b.name);
       if (!rel) continue;
       const relStates = blockInfoOf(rel).states;
@@ -77,7 +79,7 @@ describe('palette-only partial blocks: state-dependent shapes by name suffix', (
       kinds.add(rel);
       n++;
     }
-    console.log(`[terrain-palette] ${n} palette-only partial-block states checked (${[...kinds].join(', ')})`);
+    console.log(`[terrain-palette] ${n} partial-block states of the 1.26.60 sets checked (${[...kinds].join(', ')})`);
     expect(kinds.size).toBe(6);
     expect(n).toBeGreaterThan(1000);
   });
@@ -117,7 +119,7 @@ describe('fence and pane arms from the connection states', () => {
     expect(classify(info('poplar_fence')).arms).toBe(0);
   });
 
-  it('a minecraft-data fence (no connection states) still takes its arms from the neighbours', () => {
+  it('a generated-world fence (blockInfoOf, no connection states) still takes its arms from the neighbours', () => {
     const fence = blockInfoOf('oak_fence');
     expect(classify(fence).arms).toBeUndefined();
     const at = (x: number, _y: number, z: number): BlockInfo | undefined => (x === 0 && z === 0 ? fence : x === -1 && z === 0 ? stone : air);

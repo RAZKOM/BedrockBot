@@ -57,7 +57,8 @@ export const ConfigSchema = z
     target: z.literal('bds', { error: 'only "bds" is allowed in the config file; choose a Realm with --target realm on the command line' }).optional(),
     /** Build the movement stack even without home/shelter (so !home set / !shelter set work). */
     walk: z.boolean().optional(),
-    version: z.string().regex(/^\d+\.\d+\.\d+$/, 'game version like 1.26.60').optional(),
+    // 'auto' (or no version): the bot picks one per session among those it supports (config/resolve.ts autoVersions)
+    version: z.union([z.literal('auto'), z.string().regex(/^\d+\.\d+\.\d+$/, 'game version like 1.26.60, or auto')]).optional(),
     host: z.string().min(1).optional(),
     port: port.optional(),
     transport: z.enum(['raknet', 'nethernet']).optional(),

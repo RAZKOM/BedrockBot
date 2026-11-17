@@ -5,14 +5,18 @@ State on 2026-11-16 (PLAN.md tasks 1.4 and 1.5). **The default everywhere is gam
 The test servers run BDS 1.26.65.1, which speaks the same protocol, since 2026-11-16 (section "1.26.65 and
 the npm releases" below). NetherNet is selectable and verified. 1.26.51 stays runnable as the rollback
 (`BOT_VERSION=1.26.51`, server `bds-dev51`, `pnpm e2e:51`, `FIXTURE_VERSION=1.26.51` for the world unit tests).
+Since Track U2 (2026-11-16) the block and item data is minecraft-data 3.119.0's 1.26.60 (section "minecraft-data
+3.119.0"), and a bot with no pinned version also speaks 1.26.70 (protocol 2259, the preview) to a server that
+takes it (sections "One build, two protocols" and "1.26.70 preview").
 
 ## Stack
 
 | Piece | Pin | Notes |
 |---|---|---|
-| bedrock-protocol | npm 3.61.0 (= the former git pin `c9e1fbf2`, i.e. 3.60.1 + #834 + #839, plus #842: 1.26.60 support) | docs/decisions/0004-protocol-pin.md; `patches/bedrock-protocol.patch` (the signalling fallback) still applies |
-| minecraft-data | 3.118.0 + `patches/minecraft-data@3.118.0.patch` | 3.118.0 ships bedrock 1.26.60 (protocol 2225); the patch is the `filtered_custom_name` fix alone (`make-patch.mjs` `localFixes`). 3.119.0 is not taken: [decision 0093](decisions/0093-protocol-bumps-keep-the-block-data.md) |
-| World version shims | `bot/src/world/version-shims/1.26.51.ts`, `1.26.60.ts` | 1.26.60 = 1.26.51 (schema-diff: only trailing fields in level_chunk, start_game, add_player, add_entity; block/item data still 1.26.30 upstream) |
+| bedrock-protocol | npm 3.61.0 (= the former git pin `c9e1fbf2`, i.e. 3.60.1 + #834 + #839, plus #842: 1.26.60 support) | docs/decisions/0004-protocol-pin.md; `patches/bedrock-protocol.patch`: the signalling fallback, and (Track U2) speaking minecraft-data entries marked `beta` (1.26.70) |
+| minecraft-data | 3.119.0 + `patches/minecraft-data@3.119.0.patch` | the bot's block and item data is `bedrock_1.26.60` (1480 blocks, 23 960 states, 2080 items) since 2026-11-16, [decision 0094](decisions/0094-one-block-data-key.md) (section "minecraft-data 3.119.0" below); the patch holds the local protocol fixes (`filtered_custom_name`) and 1.26.70's protocol data, derived (`tools/bump-version/derive/1.26.70.mjs`, `releaseType: 'beta'`, section "1.26.70 preview"). 3.118.0 before, [decision 0093](decisions/0093-protocol-bumps-keep-the-block-data.md) |
+| World version shims | `bot/src/world/version-shims/1.26.51.ts`, `1.26.60.ts`, `1.26.70.ts` | 1.26.60 = 1.26.51 (schema-diff: only trailing fields in level_chunk, start_game, add_player, add_entity). Each names where its block states come from: 1.26.60 and 1.26.70 a BDS palette dump, 1.26.51 minecraft-data's own 1.26.51 states |
+| nethernet | 1.1.2 + `patches/nethernet@1.1.2.patch` | LAN discovery accepts the type-3 packets of the 1.26.70 previews (section "1.26.70 preview") |
 | Fixtures | `fixtures/1.26.51/`, `fixtures/1.26.60/` (`login-idle`, `world-chunks`) | `bot/test/unit/fixture-replay.test.ts` replays both versions; the world unit tests (`test/unit/world/helpers.ts`) use `fixtures/1.26.60` unless `FIXTURE_VERSION=1.26.51` |
 | Truth pack | `@minecraft/server` 2.10.0 | loads on BDS 1.26.51.1, 1.26.60.6 and 1.26.65.1 (log: `[truth] pack 0.1.0 loaded`) |
 
@@ -115,6 +119,204 @@ played on BDS 1.26.65.1 (the table). The bumped bot plays on 1.26.60.6 as before
 The next protocol change is 1.26.70 (2259 in the previews): that needs a real bump (playbook step 1, upstream
 minecraft-data data), and its minecraft-data entry will point at new block data, so the guard test above decides
 whether the bump patches the block keys back to the measured tables or waits for the block data move.
+
+## minecraft-data 3.119.0: the block data move (Track U2, 2026-11-16)
+
+[Decision 0094](decisions/0094-one-block-data-key.md). minecraft-data 3.119.0 regenerated the bedrock block and item
+data. The bot now reads one key for all of it, `bedrock_1.26.60` (`bot/src/data/blockData.ts`, `BLOCK_DATA_KEY`):
+
+- the world registry's state ids;
+- collision shapes (`skills/terrain/shapes.ts`);
+- mining data (`data/mining.ts`);
+- stack sizes (`skills/container/chest.ts`);
+- item names (`skills/home/search.ts`).
+
+Up to 3.118.0 these read two keys, `bedrock_1.26.60` and `bedrock_1.26.51`. That was harmless while both pointed at
+the 1.26.30 tables. In 3.119.0 each key has tables of its own, so the shapes would have been looked up by another
+key's state ids. A game version's block states come from its palette: the BDS dump for 1.26.60, and minecraft-data's
+own `bedrock_1.26.51` states for 1.26.51 (`paletteFromData`). States the block data lacks get process-wide ids above
+its 23 960 (registry.ts `EXT`).
+
+**How to see what a data bump changes for the bot.** Dump the bot's view of every palette state and every item
+before and after, then diff:
+
+```sh
+node bot/scripts/data-view.ts dump 1.26.60 1.26.60 before.json --items 1.26.60   # palette, game version, out, items of fixtures/1.26.60
+node bot/scripts/data-view.ts diff before.json after.json diff.json
+```
+
+Per state the view records:
+- the name the registry resolves, and whether the state is a block data state, palette-only or unknown;
+- hardness and collision boxes;
+- the terrain class (top, floor, liquid, danger, climbable, ...);
+- mining data, and break ticks with 12 tools.
+
+Per item it records the registry name, stack size and display name. The diff groups changes by field and block.
+
+**What 3.119.0 changes for the bot** (3.118.0 against 3.119.0, the 23 941 states and 2080 items BDS 1.26.65.1
+sends):
+
+| | 3.118.0 | 3.119.0 |
+|---|---|---|
+| palette states that are block data states | 16 277 (7 664 palette-only, borrowing a relative) | 23 941 (0 palette-only) |
+| block data states BDS never sends | 0 | 19 (chalkboard directions 4 to 15, a sculk sensor phase, a creaking heart state) |
+| server items the item table knows | 1933 of 2080 | 2080 of 2080 |
+| collision boxes | | 64 blocks differ: fences, panes and bars per arm (the terrain layer draws their arms itself, `connectedBoxes`); end portal frame with an eye 1 -> 0.8125; straw_bed 0.5625 -> 0.25; icicle, ice_crystal, red_shrub, shelf_mushroom own shapes instead of full cubes |
+| terrain class | | 7 blocks: the six above and chorus_plant with an up arm (0.875 -> 1) |
+| hardness | | 158 blocks: obsidian and crying obsidian 50 -> 35; wool stairs and slabs 2 -> 0.8 and concrete ones 2 -> 1.8 (they borrowed oak's); the poplar set its own; air 0 -> -1 and unknown -1 -> 0 (kept at 0 and -1, `HARDNESS_FIXES`); education and legacy blocks |
+| break ticks | | 182 blocks (2633 states) |
+| harvest tools | keys were Java-style ids from 939, decoded by arithmetic | keys are the version's own item ids (iron_pickaxe 299): decoded by item name; the same requirements |
+| stack sizes | | 3 items a player holds: armor_stand 16 -> 64, board and ice_bomb 1 -> 16; 428 block-only names (lit furnaces, wall signs, double slabs) 1 -> 64; 23 items the old table lacked (cushions 16, poplar boats 1, ...) |
+| display names | 1058 of the 1126 items found in BDS's `en_US.lang` match it | 1235 of 1249 match; 260 names changed ("Unlit Redstone Torch" -> "Redstone Torch", "Lime Candle Cake" -> "Cake with Lime Candle"), 147 items named for the first time |
+
+**Checked on BDS 1.26.65.1** (RakNet, flat world, truth pack; the bot on 1.26.60):
+
+| Check | Result |
+|---|---|
+| e2e dig, the changed blocks against the table: obsidian and crying obsidian with a diamond pickaxe, white wool slab by hand, white concrete slab with a wooden pickaxe, poplar log with a stone axe, stone with a wooden pickaxe, iron ore with a stone pickaxe | 132 / 131, 24, 26, 14, 23, 23 ticks against 132, 132, 24, 27, 15, 23, 23: all within the suite's -1 / +2. Obsidian is 35 (it would be 188 ticks at 50) |
+| e2e dig, the 20 earlier cases (grass, dirt, oak log by hand and each axe, tool choice) | 20 of 20 |
+| e2e data-truth: stack sizes, `truth:itemmax` for every item type the server registers | 1623 compared, 0 differ (armor_stand is 64) |
+| e2e data-truth: standing heights, an armor stand dropped on each block whose class changed and on controls | 14 of 14 at the bot's height: end portal frame 0.8125 with and without the eye, straw_bed 0.25, ice_crystal 0.4375, icicle 0.6875, shelf_mushroom 0.6875, red_shrub 0 (no collision), stone 1, wool slab 0.5, oak fence 1.5, bed 0.5625, ladder 0 under the stand, chorus plant 0.875 (the server recomputes its arms from the neighbours, so an up arm cannot be stood on) |
+| e2e world-registry: every block type placed, and the strip | 0 unknown runtime ids |
+| `verify.mjs 1.26.60 --deps self` | pass: login, spawn, subchunk, 20-tick walk with 0 corrections, 0 decode errors |
+| e2e nav-stairs, nav-fence, nav-water, nav-ladder, nav-flat | 31 of 31 |
+| e2e chat, keepalive, world-chunks, world-entities, world-updates | passed |
+| e2e reconnect | passed in 1 run of 3 with this track. Without this track's connection changes, 1 run failed the same way. The failures are all one check: the ticks counted around a console say read 43 against a limit of 42. The window is 2 s plus the `docker exec` that sends the say (about 165 ms on the PC, which blocks the event loop), so 43 is the expected count. The reconnects themselves came back each time |
+| e2e echo | its first case failed in 2 of 5 runs. Without this track's connection changes it failed in 3 of 4 on the same server. The case reads `conn.tick` as soon as the chat line arrives, and that is 0 when the packet is handled before the first 50 ms tick (the `docker exec` that sends the say blocks the event loop) |
+| e2e pve-combat, the zombie fight | 2 of 2 |
+| e2e read-errors with both boxes named (`P1_BOTHNAMED=1`) | 2 of 2, no unreadable packet |
+| e2e test-inv | 13 of 13 |
+| display names against `resource_packs/vanilla/texts/en_US.lang` of the same server | see the table above; the 14 that differ are aggregate names (`planks`, `fence`, `stonebrick`, `monster_egg`, ...) |
+
+3.119.0 agreed with the server wherever it was measured, so the bot applies no Bedrock correction to it.
+`HARDNESS_FIXES` holds the bot's own meanings, not corrections.
+
+**Fixes the move needed in the bot:**
+- Generated test worlds: the block data's fences carry connection states whose default is a lone post, so
+  `blockInfoOf('oak_fence')` lost its neighbour-derived arms. It now drops connection states that were not asked for
+  (`GENERATED_CONNECT_BASE`).
+- `resolveNewerState` (Track AA's stairs table) also holds the corner states the block data now has. It is only a
+  backstop for a registry that reports a stairs id as unknown.
+- `docs/storage.md`'s generated tables count the poplar items (wood 69 -> 75, logs 25 -> 27, planks 12 -> 13).
+
+**The guard.** `bot/test/unit/world/data-pin.test.ts` pins `bedrock_1.26.60`'s counts (1480 blocks, 23 960 states,
+2080 items) and the fingerprints of its blocks, states, items, shapes and materials. It also checks that every
+module reads `BLOCK_DATA_KEY`. On the next bump that changes them:
+1. diff the view;
+2. rerun `data-truth` and `dig` on a server of the new build;
+3. update the fingerprints in the same change.
+
+The test also checks that every `NEWER_ITEM_STACKS` entry (stack sizes measured for items newer than the block
+data, section "1.26.70 preview") is still missing from the block data, so an entry is dropped once a move brings
+the item.
+
+## One build, two protocols (Track U2, 2026-11-16)
+
+[Decision 0095](decisions/0095-one-build-two-protocols.md). A bot with no pinned version speaks, per session,
+whichever of its versions the server takes. One deploy covers a Realm on 1.26.60 (protocol 2225) and the same
+Realm after it moves to 1.26.70 (2259), with no config change and no redeploy on release day.
+
+**Which versions.**
+- `--version`, `BOT_VERSION` and the config file's `version` unset or `auto`: the candidates are the preferred
+  version (`DEFAULT_VERSION`, 1.26.60), then every other version that has a world shim and that bedrock-protocol
+  speaks, newest first. Today that is 1.26.60, 1.26.70, 1.26.51 (`config/resolve.ts` `autoVersions`).
+- A pinned version is the only candidate and behaves exactly as before.
+
+**Which one a session speaks** (`connection/versionGate.ts` `pickVersion`, `Connection.sessionVersion`):
+- A server that answers a ping (BDS over RakNet, the NetherNet LAN discovery response) gets the candidate with the
+  protocol it advertises. When no candidate has that protocol, the connect is refused before login.
+- A Realm, which has no ping, gets the version that last spawned, else the preferred one. If the server refuses
+  that version terminally, the next candidate not refused yet is tried 1 s later (`VERSION_RETRY_MS`, not a
+  reconnect: no backoff, and also with reconnect off). The refused set is cleared on every spawn. When every
+  candidate has been refused, the connect fails as it did before.
+- Terminal refusals measured on local BDS (2026-11-16):
+  - 2225 against BDS 1.26.70.24: play_status `failed_client`, then the kick `outdated_client`;
+  - 2259 against BDS 1.26.65.1: play_status `failed_spawn`, then `outdated_server`.
+- The world model follows the session: `tasks/mobility.ts` builds the World with `version: () =>
+  conn.sessionVersion`, and the registry reads it at every start_game. It picks that version's palette. State
+  ids keep their meaning across sessions, because the block data is one key and palette-only states have
+  process-wide ids (decision 0094).
+- The log names the version only when it is not the configured one: `speaking 1.26.70 (protocol 2259; refused:
+  1.26.60)`, then `spawned as ... speaking 1.26.70`.
+
+**Measured:**
+
+| Case | Result |
+|---|---|
+| `auto` against BDS 1.26.65.1 (RakNet) and BDS 1.26.70.24 (NetherNet) | spawned on 1.26.60 and on 1.26.70; 0 unknown runtime ids; chat came back |
+| `auto` with the ping protocol removed (a Realm's case): BDS 1.26.70.24 | refused 1.26.60 (`outdated_client`), spawned on 1.26.70 about 2.3 s later |
+| the same against BDS 1.26.65.1 | spawned on 1.26.60 at once |
+| `auto` against `--version 1.26.60` on BDS 1.26.65.1, the packets the bot sends | the same 13 packets in the same order; the only difference was the runtime id the server assigned (inputs compared with their varying fields masked) |
+| the CLI (`node src/index.ts --no-config`, no `--version`) against both servers | exit 0 |
+
+**Switch and rollback.** Nothing changes on release day if the deployed bot has no pinned version. A pin (config
+`version`, `BOT_VERSION`, a `--version` in the service definition) turns this off: remove it, or set `auto`. To
+force one version, pin it: `--version 1.26.70`, or `--version 1.26.60` for exactly the behaviour before this track.
+
+## 1.26.70 preview (Track U2, 2026-11-16)
+
+BDS 1.26.70.24, a preview build (`run-bds.mjs 1.26.70.24 --preview --transport nethernet`), speaks protocol 2259.
+minecraft-data has no 1.26.70 yet. Mojang's bedrock-protocol-docs, gophertunnel and CloudburstMC have its packets.
+
+**Protocol data.** `tools/bump-version/derive/1.26.70.mjs` derives it from 1.26.60's by 22 named edits.
+`make-patch.mjs --derive` writes them into `patches/minecraft-data@3.119.0.patch` with `releaseType: 'beta'`, and
+`derive-protocol.test.ts` fails when the recipe and the patch drift apart. A hunk in
+`patches/bedrock-protocol.patch` lets bedrock-protocol speak beta entries. The changes from 2225 to 2259:
+- fields added to existing packets: text `queue`, command_output's per-message `raw_message`, transfer's server
+  transfer settings, play_sound's start delay and attach options, structure_block_update, network_settings'
+  `sctp_recovery_profile`, start_game's managed chat info, and others;
+- the resource pack stack's editor flag is now a type byte;
+- the data store packets were rewritten;
+- new packets 0x169 to 0x16f (chat, online music, armour visibility, virtual containers); 0xa6 and 0xa7 removed.
+
+The bot sends no packet whose layout changed. Two items rest on one source each, because no such packet was seen:
+the data store's variant indices (read as varints) and MusicPlaybackState (a string, as Mojang's docs have it).
+
+**NetherNet only.** The preview does not answer RakNet. LAN discovery on udp/7551 wraps its CONNECTRESPONSE in a
+packet of type 3 that nethernet 1.1.2 dropped; `patches/nethernet@1.1.2.patch` unwraps it (tools/bump-version
+playbook, "NetherNet-only servers").
+
+**Block states.** `bot/data/block-palette/1.26.70.json` was dumped from the preview:
+- 1507 types and 25 028 states, against 1.26.60's 1480 and 23 941;
+- 1139 of its states are not in the block data (`bedrock_1.26.60`) and get process-wide ids above it;
+- 28 new block types:
+  - calcite: stairs, slab and wall, calcite_pillar, and the polished_calcite and polished_calcite_bricks sets;
+  - packed ice: packed_ice_bricks with its stairs, slab and wall, chiseled_packed_ice;
+  - snow: snow_bricks with its stairs, slab and wall;
+  - brittle_ice and chiseled_soulshale;
+- disc_press is gone;
+- scaffolding gained `bottom`, and both repeaters gained `locked`.
+
+How the new blocks look to the bot:
+- New walls borrow cobblestone_wall's state with the same connections (`shapeDonor`), so they are 1.5 high.
+- New stairs and slabs borrow oak's.
+- Other new blocks are full solid cubes. The digger refuses them (`unknown_block`), because the mining data is
+  read by name from the block data.
+- Two new items do not stack to 64: ice_ball 16 and music_disc_flurry 1 (`NEWER_ITEM_STACKS`, measured by
+  `truth:itemmax`).
+
+**Checked on BDS 1.26.70.24** (NetherNet LAN, flat world, truth pack; the bot on 1.26.70 through
+`e2e-profile.ts custom`):
+
+| Check | Result |
+|---|---|
+| `verify.mjs 1.26.70 --deps self --transport nethernet --chunk 3,3` | pass: login 2.0 s, spawn 3.1 s, subchunk, 20-tick walk with 0 corrections, 0 decode errors; the server lists 2109 items (BDS 1.26.65.1: 2080) |
+| e2e echo, chat, keepalive, world-chunks, world-updates, world-entities, skills-input | passed |
+| e2e world-registry: one of every block type the server registers, and the strip | 0 unknown runtime ids (the strip skips disc_press, which 1.26.70 removed) |
+| e2e nav-stairs, nav-fence, nav-water, nav-ladder, nav-flat | 31 of 31 |
+| e2e dig: the earlier cases and the 7 blocks whose data changed | all passed; obsidian 131 ticks, white wool slab 23, white concrete slab 26, poplar log 14, stone 22, iron ore 22 (the table's 132, 24, 27, 15, 23, 23) |
+| e2e data-truth: stack sizes | 1651 item types compared, 0 differ (2 before `NEWER_ITEM_STACKS`) |
+| e2e data-truth: standing heights | 24 of 24: the 14 of 1.26.65.1, and 10 new blocks (snow_bricks, brittle_ice, polished_calcite, calcite_pillar, chiseled_soulshale, chiseled_packed_ice 1; calcite_wall and polished_calcite_brick_wall 1.5; packed_ice_brick_slab 0.5; snow_brick_stairs 1) |
+| e2e pve-combat, the zombie fight | 2 of 2 |
+| e2e read-errors with both boxes named (`P1_BOTHNAMED=1`) | 2 of 2, no unreadable packet |
+| e2e test-inv | 13 of 13 |
+| e2e reconnect | the bot came back after `docker restart` (30 s) and after a kick (3.3 to 3.5 s), and the refusal case passed. The tick count of the duplicate check read 43 or 44 against a limit of 42 in 2 runs, the same as on BDS 1.26.65.1 (see above) |
+
+**What is not proven on 2259.** The music and data store packets (none seen); a Realm on 1.26.70; NetherNet with
+services signalling (the Realm path) on 2259; an ack for the type-3 packets (none of four tried stopped the
+copies; a spawn works without one). The release may change the protocol number: then the 1.26.70 attempt is
+refused too, and the data is derived again for the release or taken from minecraft-data's branch (playbook, "A
+preview's protocol").
 
 ## e2e results before the flip (2026-10-28, bedrock-protocol pinned to c9e1fbf2)
 
@@ -244,7 +446,7 @@ filtered name; the plain-string reader took the `01` as a length of 1 and lost i
 (absent), which a plain string reads the same way as an empty one, so a test server never shows it. The swap of two
 named boxes is that case (`bot_fireworks` and `bot_loot`); rocket deposits carry no name and were read. The fix is one
 line of the protocol data, `["option", "string"]`, in the minecraft-data patch (`patches/minecraft-data@3.118.0.patch`
-since 2026-11-16, where it is the whole patch), and
+from 2026-11-16, where it was the whole patch; `patches/minecraft-data@3.119.0.patch` since Track U2), and
 `tools/bump-version/make-patch.mjs` applies it to every version it builds (`localFixes`) until upstream reads the field
 that way. The unit test `bot/test/unit/item-stack-response-names.test.ts` parses the Realm's bytes and the BDS shape
 and writes both back byte for byte. The same Realm session answered the resync's `inventory_mismatch` in 86 and
@@ -331,9 +533,12 @@ realm) do not need to change.
 ## Block states
 
 Since wave 8 (Track AC, 2026-10-29; [decision 0024](decisions/0024-block-registry-from-bds-palette.md)).
-minecraft-data's bedrock block states stop at 1.26.30; 1.26.60 changed and added states, and every
+Then minecraft-data's bedrock block states stopped at 1.26.30; 1.26.60 changed and added states, and every
 runtime id the registry cannot resolve is a solid `unknown` block to the planner. The world registry
-now builds its runtime-id table from a palette dumped from BDS itself.
+now builds its runtime-id table from a palette dumped from BDS itself. Since [decision 0094](decisions/0094-one-block-data-key.md)
+the block data is minecraft-data 3.119.0's `bedrock_1.26.60`, which holds every state of the 1.26.60 dump; the
+numbers and state ids below are those of the 1.26.30 tables, and the palette matters again for the next version
+(1.26.70) and for 1.26.51.
 
 **Re-dump for a new BDS** (one command; the container needs the truth pack: `node scripts/bds.mjs --profile reg pack`):
 
@@ -375,7 +580,7 @@ pink_concrete_powder); the e2e below places them again.
 | block types | 1480 (minecraft-data 1.26.30: 1356, all of them still present) |
 | permutations (network) | 23 941 (Script API: 66 053 with the legacy states) |
 | equal to a minecraft-data state (keep its state id) | 16 277 |
-| palette-only states (state ids from 16 913 up) | 7 664 |
+| palette-only states (state ids from 16 913 up) | 7 664 (0 since decision 0094) |
 | file | 95 109 bytes (JSON) |
 | load | 9 to 13 ms (read + expand); hashing all states 26 ms once per process (own FNV over the NBT bytes, `fastBlockHash`, equal to `blockHash` on every state); registry build 50 ms warm, the same as without the palette (prismarine dominates) |
 

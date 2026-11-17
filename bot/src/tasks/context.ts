@@ -69,7 +69,7 @@ export function buildTaskContext(input: TaskContextInput): BuiltContext {
     mobility: () => {
       if (!mobility) {
         if (conn.state !== 'idle') throw new Error('ctx.mobility() must be called from create(), before connecting');
-        mobility = createMobility(conn, { version: input.version, log: logger('move') });
+        mobility = createMobility(conn, { log: logger('move') }); // the world model follows conn.sessionVersion
       }
       return mobility;
     },

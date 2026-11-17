@@ -1,0 +1,113 @@
+diff --git a/src/client.js b/src/client.js
+index e39e03b..6330eaf 100644
+--- a/src/client.js
++++ b/src/client.js
+@@ -323,24 +323,41 @@ class Client extends EventEmitter {
+     try {
+       const parsedPacket = processSecurePacket(buffer, this.deserializer)
+       debug('Received packet', parsedPacket)
+-
+-      switch (parsedPacket.name) {
+-        case 'discovery_request':
+-          break
+-        case 'discovery_response':
+-          this.handleResponse(parsedPacket, rinfo)
+-          break
+-        case 'discovery_message':
+-          this.handleMessage(parsedPacket)
+-          break
+-        default:
+-          throw new Error('Unknown packet type')
+-      }
++      this.dispatchPacket(parsedPacket, rinfo)
+     } catch (err) {
+       debug('Dropping invalid discovery packet:', err)
+     }
+   }
+ 
++  dispatchPacket (parsedPacket, rinfo) {
++    switch (parsedPacket.name) {
++      case 'discovery_request':
++        break
++      case 'discovery_response':
++        this.handleResponse(parsedPacket, rinfo)
++        break
++      case 'discovery_message':
++        this.handleMessage(parsedPacket)
++        break
++      case 'reliable_message':
++        // BDS 1.26.70: one discovery packet resent until acknowledged; handle the first copy only
++        if (this.isRepeatedReliable(parsedPacket.params)) break
++        this.dispatchPacket(parsedPacket.params.packet, rinfo)
++        break
++      default:
++        throw new Error('Unknown packet type')
++    }
++  }
++
++  isRepeatedReliable (params) {
++    this._reliableSeen ??= new Set()
++    const key = `${params.sender_id}:${params.channel}:${params.sequence}`
++    if (this._reliableSeen.has(key)) return true
++    this._reliableSeen.add(key)
++    if (this._reliableSeen.size > 256) this._reliableSeen.delete(this._reliableSeen.values().next().value)
++    return false
++  }
++
+   handleResponse (packet, rinfo) {
+     if (this._closed) return
+     const senderId = BigInt(packet.params.sender_id)
+diff --git a/src/util.js b/src/util.js
+index c5fe40e..7d007f8 100644
+--- a/src/util.js
++++ b/src/util.js
+@@ -3,6 +3,13 @@ const { encrypt, calculateChecksum, decrypt } = require('./crypto')
+ // Outer length + type + sender + reserved + recipient + string length.
+ const DISCOVERY_MESSAGE_DATA_OFFSET = 2 + 2 + 8 + 8 + 8 + 4
+ 
++// BDS 1.26.70 previews send some discovery packets (the CONNECTRESPONSE answer) wrapped in a packet of type 3 and
++// resend it until it is acknowledged or for about 3 s: length lu16, type lu16 (3), sender lu64, flags (8 bytes,
++// 01 00 ...), recipient lu64, a channel (8 bytes, the same for every client of one server), sequence lu64, then a
++// whole discovery packet (length, type, ...). The ack is not known; the copies stop by themselves after 8.
++const RELIABLE_PACKET_TYPE = 3
++const RELIABLE_HEADER_SIZE = 2 + 2 + 8 + 8 + 8 + 8 + 8
++
+ const getRandomUint64 = () => {
+   const high = Math.floor(Math.random() * 0xFFFFFFFF)
+   const low = Math.floor(Math.random() * 0xFFFFFFFF)
+@@ -64,6 +71,25 @@ const processSecurePacket = (buffer, deserializer) => {
+     throw new Error('Checksum mismatch')
+   }
+ 
++  return parseDiscoveryPacket(decryptedData, deserializer)
++}
++
++// A decrypted, checksum-validated discovery packet. Type 3 (reliable_message) carries another discovery packet.
++const parseDiscoveryPacket = (decryptedData, deserializer) => {
++  if (decryptedData.length > RELIABLE_HEADER_SIZE + 4 && decryptedData.readUInt16LE(2) === RELIABLE_PACKET_TYPE) {
++    return {
++      name: 'reliable_message',
++      params: {
++        sender_id: decryptedData.readBigUInt64LE(4),
++        flags: decryptedData.subarray(12, 20),
++        recipient_id: decryptedData.readBigUInt64LE(20),
++        channel: decryptedData.subarray(28, 36).toString('hex'),
++        sequence: decryptedData.readBigUInt64LE(36),
++        packet: parseDiscoveryPacket(decryptedData.subarray(RELIABLE_HEADER_SIZE), deserializer)
++      }
++    }
++  }
++
+   const packet = deserializer.parsePacketBuffer(decryptedData)
+   const { name, params } = packet.data
+ 
+@@ -85,5 +111,8 @@ module.exports = {
+   validateIceServers,
+   createPacketData,
+   prepareSecurePacket,
+-  processSecurePacket
++  processSecurePacket,
++  parseDiscoveryPacket,
++  RELIABLE_PACKET_TYPE,
++  RELIABLE_HEADER_SIZE
+ }

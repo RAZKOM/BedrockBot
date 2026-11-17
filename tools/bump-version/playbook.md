@@ -72,6 +72,22 @@ Check in this order:
      `protocolVersions.json`, `versions.json`, `dataPaths.json`), `npm run build` (compiles the YAML
      to `protocol.json`), `npm test`;
    - then bump from the checkout: `node bump.mjs <ver> --from-dir <clone>`.
+
+   **2b. Derive it by named edits** when the clone's scripts cannot be run (agents do not run a foreign
+   checkout's npm scripts or install its YAML compiler). `tools/bump-version/derive/<ver>.mjs` is a recipe: the
+   new version, its protocol number, the base version and a list of named edits to the compiled
+   `protocol.json`. Each edit uses the `lib/derive.mjs` helpers, which check that what they change is there in
+   the expected form and throw otherwise, so a changed base fails loudly instead of being edited in the wrong
+   place. `make-patch.mjs --derive` builds a `data/` tree for the version from the pristine package (the derived
+   `protocol.json`, its `version.json`, the protocolVersions / versions / dataPaths entries, with blocks, items
+   and the rest pointing at the base's folders) and bumps from it as `--from-dir` would. Nothing is downloaded:
+   ```sh
+   node make-patch.mjs 1.26.60 1.26.70 --package-version 3.119.0 --derive   # 1.26.70: 22 edits from 1.26.60
+   ```
+   Write the edits from at least two independent sources: Mojang's bedrock-protocol-docs for the version's tag,
+   and gophertunnel's or CloudburstMC's branch for the protocol. Say in the recipe where they differ and which
+   one it takes. Check the result with `schema-diff.mjs <base> <ver> --deps self`, and against the server with
+   `verify.mjs`. Give the entry `releaseType: 'beta'` while it describes a preview (see "A preview's protocol").
 3. **Check the schema against a real server** with bedrock-protocol's `tools/dumpPackets.js`, run in a
    bedrock-protocol clone with your patched minecraft-data: `node tools/dumpPackets.js <ver> [outDir]`. It
    downloads and starts a vanilla BDS, joins offline, and writes up to 5 samples per clientbound packet to
@@ -107,12 +123,13 @@ packet and type whose schema changed and flags the ones each stage depends on (`
 | Stage | Symptom | What changed | What to do |
 |---|---|---|---|
 | `setup` | "do not know <ver>" | bump not applied to the deps you loaded | run `bump.mjs`, or pass the right `--deps` |
-| `ping` | no RakNet answer | container down, still downloading, `TRANSPORT` not raknet, or RakNet removed from BDS | `docker logs <name>`. RakNet is deprecated since 26.50 and BDS 1.26.60 prints a "TRANSPORT TYPE ERROR" banner but still accepts it. Once it is removed, verify must move to NetherNet (bedrock-protocol `transport: 'nethernet'`, PLAN.md row 2d) |
+| `ping` | no RakNet answer | container down, still downloading, `TRANSPORT` not raknet, or RakNet removed from BDS | `docker logs <name>`. RakNet is deprecated since 26.50 and BDS 1.26.60 prints a "TRANSPORT TYPE ERROR" banner but still accepts it. The 1.26.70 previews have none: run `verify.mjs --transport nethernet` (see "NetherNet-only servers") |
 | `login` | "server advertises X protocol P" | wrong BDS build or version argument | match `run-bds` build and `verify` version |
 | `login` | kick or `play_status` `failed_client`/`failed_spawn`/`outdated_*`, error before `login_success`, or a decode error in `network_settings`, `server_to_client_handshake`, `resource_packs_info` or `start_game` | **login, auth or encryption flow changed** (it happened in 1.26.10 and 1.26.40) or those packets' schemas | not fixable with data alone: needs bedrock-protocol code (`src/client.js`, `src/handshake/*`, `src/client/auth.js`). Check bedrock-protocol master and open PRs first, then gophertunnel's login code for the new version. Pin a fixed commit (PLAN.md section 7) |
 | `spawn` | timeout after `login_success` | spawn handshake changed: `respawn` states, `serverbound_loading_screen`, `set_local_player_as_initialized`, or a new required ack | `schema-diff --show packet_respawn` and the other `watched.spawn` packets. Compare with gophertunnel or Geyser's join sequence. Update the handshake in the bot's Connection layer and in `verify.mjs` |
 | `chunk` | `registry.handleStartGame failed` | block palette or `start_game`/`item_registry` shape changed | prismarine-registry may need a shim (as with `item_registry` in 1.26). Fix it in the bot's per-version registry shim module (PLAN.md section 2, change 2) |
-| `chunk` | wrong block name, decode throws, or `subchunkResult` not `success` | subchunk wire format (prismarine-chunk), hashed block ids or block states data | check that `dataPaths.bedrock[<ver>].blockStates` exists. New blocks fall back to air while upstream block data is frozen at 1.26.30 (PLAN.md row 3a); grass_block is unaffected. For a format change, the prismarine-chunk 1.18 bypass needs a new implementation: watch prismarine-chunk PR #338 and its successors |
+| `chunk` | `Cannot read properties of undefined` in prismarine-chunk's `addToPalette` | the subchunk has a storage layer with a single palette entry (a second layer left all air after water), which prismarine-chunk 1.41.0 reads as a state id, not a hashed runtime id | world state, not the protocol: `verify.mjs --chunk 3,3` (an untouched column); the bot's own decoder is not affected |
+| `chunk` | wrong block name, decode throws, or `subchunkResult` not `success` | subchunk wire format (prismarine-chunk), hashed block ids or block states data | check that `dataPaths.bedrock[<ver>].blockStates` exists (a derived version points at its base's, so verify's registry counts the base's states; 1.26.70: 23 960). verify only checks one grass block. The bot's world model takes the version's states from a palette dump (`dump-palette.mjs`, `bot/data/block-palette/<ver>.json`, decision 0094), not from minecraft-data. For a format change, the prismarine-chunk 1.18 bypass needs a new implementation: watch prismarine-chunk PR #338 and its successors |
 | `movement` | `correct_player_move_prediction` | `player_auth_input` fields or `InputFlag` values changed, or the movement physics or server thresholds changed | `schema-diff --show packet_player_auth_input` and `--show InputFlag`. If the schema is unchanged, compare `--walk constant` with `--walk physics` and check `server.properties` for new movement keys. Fix it in the bot's input or physics layer |
 | `decode` | `unknownPackets` listed | `protocol.json` is wrong for those packets (often a field added at the end, like `level_chunk.client_biome_update` in 1.26.60) | fix `proto.yml` upstream (step 1) and re-bump; `--allow-decode-errors` gets past packets the bot does not use |
 | (live) | the bot logs `unreadable packet <id> <name> ... bytes saved to <logs>/read-errors/read-error-*.json` | a packet on a live server that the pinned protocol data cannot parse (the server may run a newer patch: the file's `serverVersion` is start_game's) | decode the file's base64 `bytes` against `protocol.json` by hand (the error names the field the parser ran out on), compare with `schema-diff` of the next version, then fix `proto.yml` or patch bedrock-protocol (`patches/bedrock-protocol.patch`); a fix of the protocol data that upstream lacks goes into `make-patch.mjs` `localFixes` so every regenerated patch keeps it (one so far: item_stack_response's `filtered_custom_name` is an optional string, 2026-11-16). The bot re-reads its inventory after an inventory packet is lost (docs/versions.md "Packets the bot cannot read") |
@@ -154,6 +171,84 @@ Then, on a branch in the main repo:
    Take such a release as its own change, with the nav, flight and dig suites; a release that only adds
    protocol data (3.118.0) is a drop-in. Example: 2026-11-16, minecraft-data 3.117.0 + patch ->
    3.118.0 + fix-only patch, bedrock-protocol git pin -> 3.61.0 (docs/versions.md).
+7. **Taking a release with new block data** (minecraft-data 3.119.0 on 2026-11-16, decision 0094). The bot
+   reads every block and item table through one key, `bot/src/data/blockData.ts` `BLOCK_DATA_KEY`:
+   1. Before the bump, dump the bot's view:
+      `node bot/scripts/data-view.ts dump <palette> <gameVersion> before.json --items <fixture version>`.
+   2. Bump, decide whether the key moves, dump again, and run `data-view.ts diff before.json after.json`. The
+      diff covers per state the source, boxes, class, hardness, mining data and break ticks; per item the stack
+      size and display name.
+   3. Check what moved on a BDS of the version. These e2e suites take `DIG_BDS_*`, or `node
+      bot/scripts/e2e-profile.ts custom` with `E2E_CONTAINER` / `E2E_PORT`:
+      - `data-truth`: every item's stack size from `truth:itemmax`, and standing heights from an armor stand
+        dropped on the blocks whose class changed (add those blocks to its `STAND_CASES`);
+      - `dig`: add the blocks whose hardness or tools changed;
+      - `world-registry`: 0 unknown runtime ids.
+
+      BDS is the truth. A value the data gets wrong for Bedrock goes in `blockData.ts`, next to `HARDNESS_FIXES`
+      and `NEWER_ITEM_STACKS`, with its measurement.
+   4. Fix what reads the data differently (3.119.0 changed the `harvestTools` keys and gave fences connection
+      states), update `data-pin.test.ts`'s fingerprints, and run the unit suite with `FIXTURE_VERSION` set to
+      each fixture version.
+
+## A preview's protocol
+
+A preview BDS can speak a protocol that no release speaks yet (1.26.70.24: 2259). To test against it before
+the release:
+
+- Derive the data (step 1, 2b) as `releaseType: 'beta'`. minecraft-data's own entries are `release` or
+  unset; `beta` keeps the update notifier honest (it reports a beta entry as a preview).
+- bedrock-protocol only speaks `release` entries (`src/options.js` `Versions`). `patches/bedrock-protocol.patch`
+  lets `beta` in as well, so `1.26.70` becomes a supported version that the version gate and createClient
+  accept.
+- Start the preview with `run-bds.mjs <build> --preview`. Previews may come with NetherNet only (see below).
+- Give the world model the version's block states. Dump the server's palette:
+  `node dump-palette.mjs --container <name> --port <p> --version <ver> [--transport nethernet]` writes
+  `bot/data/block-palette/<ver>.json`. Then add a shim, `bot/src/world/version-shims/<ver>.ts` with
+  `blockPalette: '<ver>'`, first in `SHIMS` (docs/world-model.md "Adding a version shim"). `auto` only lists
+  versions that have a shim. The palette's states that the block data lacks need no table:
+  - they get ids above the block data;
+  - walls, stairs, slabs and the other suffixes in `palette.ts` `DONORS` borrow a donor's shape;
+  - the rest are full cubes that the digger refuses.
+
+  Check them on the server with e2e `world-registry` (0 unknown ids) and `data-truth`. Add the version's new
+  blocks to `NEWER_STAND_CASES` and new items with a stack size other than 64 to `NEWER_ITEM_STACKS`.
+- The bot picks the version per session: with no pinned version it speaks the one whose protocol the server
+  advertises, and on a Realm (no ping) it tries the next version after a terminal refusal
+  (docs/versions.md "One build, two protocols").
+
+On release day:
+
+1. Compare the release's protocol number with the preview's. If it is the same, the derived data may already
+   be right: run verify against the release BDS.
+2. If verify passes, the bot on `auto` follows the Realm once it updates, with no change.
+3. If the number differs, derive again for the release (or take minecraft-data's PR branch, step 1).
+4. Once a minecraft-data release ships the version, drop the derived entry, the `beta` hunk of the
+   bedrock-protocol patch and the recipe in one change (step 4.6).
+
+## NetherNet-only servers
+
+From the 1.26.70 previews on, a BDS with `TRANSPORT=nethernet` has no RakNet at all. LAN signalling:
+
+- the server answers discovery on udp/7551 (one such server per host) with its network id and protocol;
+- WebRTC then runs over the UDP range `SERVER_UDP_PORTS`.
+
+`run-bds.mjs --transport nethernet [--udp-ports a-b]` publishes these ports. `verify.mjs --transport
+nethernet` and `dump-palette.mjs --transport nethernet` connect through them.
+
+**Type-3 discovery packets.** BDS 1.26.70.24 wraps its CONNECTRESPONSE in a discovery packet of type 3 and
+sends it 8 times over about 2.7 s (+100, +200, +400, +500, +500, +500, +500 ms). The layout is: length, type 3,
+sender id, flags `01 00 ..`, recipient id, an 8-byte channel (the same for every client), a sequence number
+(lu64), then a whole type-2 discovery message. nethernet 1.1.2 drops unknown types, so a LAN connect timed out.
+`patches/nethernet@1.1.2.patch` unwraps the packet and handles each channel and sequence once. Its unit test is
+bot/test/unit/nethernet-reliable.test.ts.
+
+None of these acks stopped the copies (2026-11-16):
+- the type-3 header sent back;
+- a type-4 packet carrying the channel and sequence;
+- the 32-byte empty type-2 message the server itself sends just before (flags 1, from our id or from 0).
+
+The ack is not known, so the copies are left to run out.
 
 ## 5. Upstream the bump (human with a GitHub account; agents do not create forks or PRs)
 

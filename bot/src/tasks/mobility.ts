@@ -21,9 +21,19 @@ export interface Mobility {
   dispose(): void;
 }
 
-export function createMobility(conn: Connection, opts: { version: string; log?: Logger }): Mobility {
+export interface MobilityOptions {
+  /**
+   * A fixed game version for the world model (unit tests with a fake server). Default: the connection's session
+   * version, read at each start_game (`conn.sessionVersion`: a connection may pick its version per session).
+   */
+  version?: string;
+  log?: Logger;
+}
+
+export function createMobility(conn: Connection, opts: MobilityOptions = {}): Mobility {
   const log = opts.log ?? silentLogger;
-  const world = new World(conn, { version: opts.version, logger: log });
+  const fixed = opts.version;
+  const world = new World(conn, { version: fixed ?? (() => conn.sessionVersion), logger: log });
   // flatWorld() until the skills point the loop at the world model (BotSkills does that).
   const loop = new InputLoop(conn, { world: flatWorld(), logger: log, canSprint: () => world.self.food > 6, canGlide: () => wearsElytra(world.inventory.window(120)?.slots[1]?.name) }); // Track AU: the glide needs the elytra in the chest slot
   const skills = new BotSkills({ loop, world, logger: log });

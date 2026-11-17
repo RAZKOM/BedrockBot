@@ -5,7 +5,7 @@ packages:
 
 # Keep the whole protocol stack on one minecraft-data version (PLAN.md section 7).
 overrides:
-  minecraft-data: 3.118.0
+  minecraft-data: 3.119.0
 
 # Install (build) scripts are blocked by default. None are needed:
 # - raknet-native ships prebuilt binaries (prebuilds/win32-10-x64, linux-5-x64, darwin-21-x64); its
@@ -23,15 +23,23 @@ allowBuilds:
 # (PrismarineJS/prismarine-xbox-services#052a967...). pnpm blocks git subdependencies by default.
 blockExoticSubdeps: false
 
-# Protocol data fixes upstream lacks (tools/bump-version/make-patch.mjs `localFixes`): item_stack_response's
-# filtered_custom_name is an optional string (ADR 0092). minecraft-data 3.118.0 ships bedrock 1.26.60 (protocol
-# 2225) itself; the patch holds the fix alone. Made by `node make-patch.mjs 1.26.60 --mcdata-ref 9c97fe50...`
-# (tools/bump-version/playbook.md step 4). minecraft-data 3.119.0 regenerated the block data: not taken
-# (ADR 0093). pnpm refuses unused patch entries: rename the entry with the dependency.
+# minecraft-data patch (tools/bump-version/make-patch.mjs): the protocol data fix upstream lacks (`localFixes`:
+# item_stack_response's filtered_custom_name is an optional string, ADR 0092) for 1.26.60 and 1.26.70, and bedrock
+# 1.26.70 (protocol 2259, releaseType beta) derived from 1.26.60 by the named edits of tools/bump-version/derive/1.26.70.mjs
+# (the 1.26.70.24 preview; minecraft-data has no 1.26.70 yet). Made by
+# `node make-patch.mjs 1.26.60 1.26.70 --package-version 3.119.0 --derive` (playbook step 1.2b and step 4).
+# pnpm refuses unused patch entries: rename the entry with the dependency.
 patchedDependencies:
-  minecraft-data@3.118.0: patches/minecraft-data@3.118.0.patch
+  minecraft-data@3.119.0: patches/minecraft-data@3.119.0.patch
+  # NetherNet LAN discovery: BDS 1.26.70 previews wrap the CONNECTRESPONSE answer in a packet of type 3 and resend it
+  # 8 times over about 3 s; nethernet 1.1.2 drops the type, so a LAN connect to such a server times out. The patch
+  # unwraps it and handles the first copy only (tools/bump-version/playbook.md "NetherNet-only servers"). Drop it when upstream
+  # reads the type.
+  nethernet@1.1.2: patches/nethernet@1.1.2.patch
   # Realms: a regional NetherNet signalling host can exist in DNS and still answer 404 on the
   # websocket path (signal-southcentralus, 2026-10-29); upstream #839 only checks DNS. The patch
   # falls back to the default host once and reports the HTTP status. Applies to npm 3.61.0 in bot,
   # packs and tools (same file; 3.61.0 has #839). Drop when upstream ships the fallback.
+  # Also: `Versions` lists minecraft-data's releaseType 'beta' entries besides 'release' ones, so the derived
+  # 1.26.70 (beta, protocol 2259) can be spoken; drop that hunk once minecraft-data lists 1.26.70 as a release.
   bedrock-protocol: patches/bedrock-protocol.patch

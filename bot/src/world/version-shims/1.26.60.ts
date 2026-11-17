@@ -6,19 +6,18 @@
 // 1.26.51 1.26.60 --deps self` (2026-10-28): level_chunk gained a trailing `client_biome_update`
 // bool, start_game gained `editor_level_migration_version`, add_player / add_entity gained an
 // optional `passenger_of_block`; subchunk, subchunk_request, update_block, item_registry, respawn
-// and player_auth_input are unchanged. Blocks, block states and items still point at the 1.26.30
-// data upstream (PLAN.md row 3a), exactly as for 1.26.51.
+// and player_auth_input are unchanged.
 //
 // Block states (wave 8, Track AC, decision 0024): the runtime-id table comes from the BDS 1.26.60.6 palette
-// dump in bot/data/block-palette/1.26.60.json (palette.ts); minecraft-data's 1.26.30 tables still give
-// hardness and collision shapes. 1.26.61 is the same protocol: re-dump into 1.26.61.json and list it here.
+// dump in bot/data/block-palette/1.26.60.json (palette.ts). Since decision 0094 (minecraft-data 3.119.0) the
+// block data is 1.26.60's own and holds every state of that dump (23 941 of its 23 960), so no state needs a
+// borrowed shape on this version.
 import type { VersionShim } from './index.ts';
 import { shim_1_26_51 } from './1.26.51.ts';
 
 export const shim_1_26_60: VersionShim = {
   ...shim_1_26_51,
   gameVersions: ['1.26.60'],
-  registryVersion: 'bedrock_1.26.60',
-  blockDataVersion: '1.26.30',
+  paletteFromData: undefined,
   blockPalette: '1.26.60',
 };
