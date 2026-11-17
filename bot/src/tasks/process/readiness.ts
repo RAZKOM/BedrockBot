@@ -30,6 +30,8 @@ export interface TripSelf {
 /** What the trip needs from the survival kit (SurvivalKit satisfies it). */
 export interface TripKit {
   eat(): Promise<{ ok: boolean; reason?: string; item?: string; foodAfter?: number }>;
+  /** Track M7: drink a carried item (a milk bucket: it clears the poison). */
+  drink?(name: string): Promise<{ ok: boolean; reason?: string; item?: string }>;
   equip(): Promise<{ ok: boolean; equipped: string[]; reason?: string }>;
   readonly armour: { worn(): (ItemStack | null)[]; plan(): unknown[] };
   readonly overrides: { autoEat?: boolean };

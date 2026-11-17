@@ -316,3 +316,46 @@ tick by tick over whole runs, each rule A/B'd at 10 runs a side on its rows and 
     health is 5, under `fleeHealth`, and the flight took the body while the fight ran to its timeout; a zombie in armour
     made it likely, and a zombie in diamond armour made it happen in 2 of 2 runs. The case keeps the health at 12 or over
     while a pair runs and takes the zombies' own gear off; with the diamond zombie, 8 of 8 runs then killed both.
+
+## Addendum: Track M7 (2026-11-16)
+
+The numbers are in [../pve.md](../pve.md) "Track M7: the live kit's margin". The live kit's `mixed-8`, `witch-1`,
+`witch-2` and `seal-5` by night were measured with whole-run traces, 15 runs a side for each A/B, on bds-pve and
+bds-gaunt.
+
+51. **A run is measured until its poison is over.** The gauntlet ended a run at its last kill, while the witch's poison
+    often had 20 to 40 s to go; the lowest health read there was not the lowest. `MOBS_POISON_WAIT=1` keeps the run
+    going while the bot is poisoned (up to `MOBS_SECONDS`), and the hits are split by cause from the server's hurt log.
+52. **The poison is the live kit's margin.** With the code of Track M6 it was 80 to 100 % of the damage in every cell
+    with a witch (`mixed-8` 16.7 of 21.0 a run, `seal-5` 26.5 of 28.7, `witch-2` all of it); the lowest health's median
+    was 1 to 1.7, and the health went under 6 mostly after the last kill, at home with nothing running. One witch alone
+    did no damage (`witch-1`: dead in 2 to 3 s).
+53. **`witchRush`: a witch guard takes first is fought as a rush, with a diamond or netherite sword and the reflex on.**
+    She threw at tick 62 to 92 and died at a median tick 225: the creeper interlude, re-picks to mobs in reach and the
+    shield's sneak held the fight up. The rush leaves those to the reflex (a lit creeper or one within 3.5 still goes
+    first), keeps the shield down, sprints the approach, and within 8 steers straight at her over ground the grid knows
+    is safe; guard starts no fight on a mob in reach while her path probe runs. `mixed-8`: she died at a median tick 86,
+    before her first potion in 9 of 15 runs against 2; damage 21.0 to 7.1 a run, lowest median 1.7 to 18.8, poisoned
+    runs 13 to 4. `seal-5` (the skeletons are summoned first, so guard is already in a fight when she appears): damage
+    28.7 to 17.9, poisoned runs 15 to 9, lowest median 1.2 to 1.3. `witch-2`: no gain (the second witch throws while
+    the first is rushed; poisoned runs 13 of 16 to 15 of 15, damage 22.0 to 29.0, lowest 1 either way). `witch-1`: no
+    damage either way. No death on either side in 121 runs.
+54. **It ships on.** It changes when the fight's existing moves are used (the sprint it makes against an archer, the
+    close steering it makes within 3.5), places and digs nothing, and steers straight only over cells checked safe one
+    by one (a floor, room for the body, no liquid, nothing that hurts); elsewhere the navigator approaches as before. No
+    row is worse in deaths and the lowest health's median is better or equal on every row; `witch-2` costs damage (its
+    lowest stays at 1, as before). An iron sword or worse does not rush: she takes 5 hits or more (decision 43).
+55. **`milkCure`: carried milk is drunk once the poison would take more than 3 more, with no witch within 16, no mob
+    within 8, no fight and no flight.** Milk clears every effect in one drink. With two buckets carried and the rush on,
+    off and on, 15 runs a side: `mixed-8` damage 15.1 to 4.1, lowest median 6.5 to 18.4, 10th percentile 1 to 11;
+    `seal-5` 16.2 to 4.5, 1.2 to 17.9, 1 to 11.9; `witch-2` 23.2 to 3.0, 1 to 17, 1 to 17; no run under 6 with it, one
+    bucket a run at most, no death either side. The drink waits for the witch because she is taken to throw poison at
+    a target that is not poisoned (the game's rule as known; not measured here, nor the drink with her alive). It ships
+    on: without milk it does nothing, and the live bot carries none. The bot does not get milk by itself; whether it
+    carries some is the owner's choice (pve.md "What the bot should carry").
+56. **Not taken.** Eating for regeneration (at food 20 about 1 health every 80 ticks against the poison's 1 every 25);
+    the potion side step in her fight (decision 19 stands); a golden apple (kept for under 6 health; not measured
+    against the poison); a guard that breaks off another fight for a witch.
+57. **The early kits are unchanged.** The rush needs a diamond or netherite sword and the cure needs milk, so neither
+    acts for the `none`, `stone` and `iron` kits. Track M6's seven rows were run again on the final code, 10 runs a side
+    (2026-11-17): 0 deaths in 140 (Track M6's on side: 0 in 70).

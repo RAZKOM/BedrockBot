@@ -277,6 +277,27 @@ export class EatController {
     }
   }
 
+  /**
+   * Track M7: drink a carried item that is used like food but is no food (a milk bucket: it clears every effect, the poison
+   * with it; 32 ticks of use, the bucket stays). Slots 0..35; one in the main inventory goes to the hotbar first. Hunger does
+   * not matter (the server lets it be drunk at food 20).
+   */
+  async drink(name: string, opts: EatOptions = {}): Promise<EatResult> {
+    if (this.running) return { ok: false, reason: 'busy' };
+    if (!this.d.loop.state.ready) return { ok: false, reason: 'not_ready' };
+    const slots = this.d.inventory.slots;
+    let slot = -1;
+    for (let i = 0; i < Math.min(slots.length, 36) && slot < 0; i++) if (slots[i]?.name === name && (slots[i]?.count ?? 0) > 0) slot = i;
+    if (slot < 0) return { ok: false, reason: 'no_food', item: name };
+    this.running = true;
+    this.cancelled = undefined;
+    try {
+      return await this.run({ slot, name, info: { nutrition: 0, saturation: 0 } }, { food: this.d.self.food, health: this.d.self.health }, opts);
+    } finally {
+      this.running = false;
+    }
+  }
+
   private async run(pick: { slot: number; name: string; info: FoodInfo }, s: EatState, opts: EatOptions): Promise<EatResult> {
     const { loop, inventory: inv, hotbar, source } = this.d;
     const base: EatResult = { ok: false, item: pick.name, foodBefore: s.food };

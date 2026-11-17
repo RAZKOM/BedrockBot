@@ -1650,6 +1650,162 @@ The rules are on with the update; no setting changes. The Realm has no cheats, s
   a skeleton that was not its arrow.
 - `!test mobs mixed8 5`: the live kit; every run alive.
 
+## Track M7: the live kit's margin
+
+Decision record: [decisions/0079-never-die-to-mobs.md](decisions/0079-never-die-to-mobs.md) "Addendum: Track M7"
+(decisions 51 to 57). Everything here ran on bds-pve and bds-gaunt (BDS 1.26.60, normal difficulty) on 2026-11-16 with
+the gauntlet (`test/e2e/gaunt-mobs.test.ts`) by night unless it says otherwise.
+
+The live kit (the netherite set, a netherite sword, a shield, cooked beef) had not died in the gauntlet since Track M1,
+but its lowest health was 1 to 2 in most `mixed-8` runs. This track measures where that health goes and raises it.
+
+### Measuring the lowest health
+
+A gauntlet run used to end once its mobs were dead. The witch's poison often still had 20 to 40 s to run then, so the
+lowest health was read before the poison was done (one `seal-5` series read a median of 12 with the poison still on).
+`MOBS_POISON_WAIT=1` keeps a cleared run going while the bot is poisoned, up to `MOBS_SECONDS` (60) from the start, and
+the row gives the seconds of poison left at the end. Every row in this section ran with it and with whole-run traces
+(`MOBS_TRACE_ALL=1`), so each hit on the bot has its cause from the server's hurt log: poison (magic with no damager),
+harming (the witch's potion), arrow, melee, explosion.
+
+### Where the health goes (the code of Track M6, 15 runs a cell)
+
+| cell | deaths | damage a run | poison | harming | arrow | melee | lowest median (p10) | poisoned |
+|---|---|---|---|---|---|---|---|---|
+| `mixed-8` | 0 | 21.0 | 16.7 | 2.7 | 1.3 | 0.2 | 1.7 (1.1) | 13 of 15 |
+| `witch-1` | 0 | 0 | 0 | 0 | 0 | 0 | 20 (20) | 0 of 15 |
+| `witch-2` (13 runs) | 0 | 24.5 | 24.5 | 0 | 0 | 0 | 1 (1) | 11 of 13 |
+| `seal-5` | 0 | 28.7 | 26.5 | 0.3 | 1.8 | 0 | 1.2 (1) | 15 of 15 |
+
+- **The poison is the margin.** It is 80 to 100 % of the damage in every cell with a witch. It takes 1 health every 25
+  ticks for up to 45 s through any armour and stops at 1, so one splash that lands close takes a bot at 20 to 1 or 2.
+  Natural regeneration at food 20 gave about 1 health every 80 ticks in the traces: it does not keep up.
+- **The health goes under 6 after the fight, not in it.** `mixed-8`: in 10 of 15 runs the health went under 6; 6 of them
+  stood at home with nothing running, 2 were walking home, 1 was in the flight's `far` leg, 1 was in guard's fight with
+  the witch. `witch-2`: all 11 runs under 6 stood at home; `seal-5`: 13 of 15 (1 in the `far` leg, 1 in guard). The
+  mobs were dead; the poison was not.
+- **She throws before guard reaches her.** Guard took the witch as its first target at tick 0 to 15 of `mixed-8`, her
+  first potion came at tick 62 to 92 (142 once), and she died at a median tick 225 (126 to 323). In between the fight
+  on her was held up three ways: the creeper interlude (`creeper within 6: fighting it first`, 60 to 135 ticks of hit
+  and run), re-picks to a mob in reach (a spider, a zombie), and the shield raised for the skeleton's shot (a sneak: the
+  body crept at 4 to 5 blocks from her). Only 2 of 15 runs saw no potion before she died.
+- **One witch alone is no danger** to this kit (`witch-1`: killed in 2 to 3 s, no hit); two are, since the second throws
+  while the first is fought.
+
+### The rules (`PveController.rules`, on by default)
+
+| rule | what it does | why |
+|---|---|---|
+| `witchRush` | When guard takes a witch as its first target (`firstTarget`) with a diamond or netherite sword in the hotbar (`WITCH_CROWD_BLADE`) and the reflex on, the fight is a rush (`FightOptions.rush`): no creeper interlude unless the creeper is lit or within 3.5 (`RUSH_CREEPER_NEAR`; below `lowHealth` the creeper is run from as before), no re-pick to a mob in reach (the reflex strikes those), the shield stays down, the approach sprints from any distance, and within 8 (`RUSH_STEER`) the fight steers straight at her when the line is known safe ground cell by cell (`safeCell`: a floor, room for the body, no liquid, nothing that hurts). While her path probe runs guard starts no fight on a mob in reach (`firstWaits`). Log: `guard: witch #N within 16 blocks, fighting (a rush: before her next throw)` and `combat: witch killed after N ticks, ..., rushed N ticks` | each of the three hold-ups above put her next throw before her death. The navigator sprints only with more than 8 blocks of straight path left, so the approach from 7 walked |
+| `milkCure` | With a milk bucket in the inventory (slots 0 to 35): drink it once the poison would still take more than 3 (`CURE_MIN_LOSS`), with no live witch within 16 (`CURE_WITCH_CLEAR`), no mob within 8 (`FLEE_EAT_CLEAR`), no fight running and no elytra flight. Milk clears every effect in one drink (32 ticks; an empty bucket is left). Log: `pve: drinking milk against the poison (S s left, health H, A once it ends)` then `pve: milk drunk: the poison is gone` | the poison is the margin and it acts after the fight; a witch is taken to throw poison at a target that is not poisoned (the game's rule as known, not measured here), so the drink waits for her. Without milk the rule does nothing |
+
+The rush uses moves the fight already makes (the approach's sprint against an archer, the close steering it has
+within 3.5); what is new is when they are chosen, and the straight steer from 8 runs only over ground the planner's
+grid knows to be safe; farther, or over unknown ground, the navigator approaches as before. The milk is drunk by the
+eater (`EatController.drink`, the same use-item click as food, at any hunger).
+
+Both are switches of `PveController.rules` like Track M4's (`PVE_RULES_DEFAULT`; the gauntlet's `MOBS_RULES=witchRush=false`
+and `MOBS_AB_RULE` measure them). The gauntlet gained `MOBS_POISON_WAIT=1` (above) and `MOBS_MILK=<n>` (that many milk
+buckets on top of any kit); a run's line counts its rushes and drinks (`rushes N`, `milk N`). `test/e2e/pve-m7.test.ts`
+checks what each rule stands on, one run a side: the live kit against a witch 7 off with a zombie 2 off and a skeleton
+10 off (on: rushed, she dies; off: no rush), and the bot poisoned for 30 s by the server with a milk bucket and no mob
+near (on: the poison is gone within 6 s and the bucket is empty; off: still poisoned).
+
+### Before and after (15 runs a side)
+
+Deaths, mean damage a run, the median of each run's lowest health and its 10th percentile (the run's lowest as the
+harness read it, poison included). `witchRush`: `MOBS_AB_RULE=witchRush`, off (the code of Track M6) then on,
+alternating, 5 a side a chunk over both servers (`witch-1` and `witch-2` in larger chunks; `witch-2` has 16 off).
+`milkCure`: `MOBS_MILK=2` (two milk buckets on top of the kit) and `MOBS_AB_RULE=milkCure`, with `witchRush` on both
+sides.
+
+| cell | before (Track M6) | `witchRush` | `witchRush`, 2 buckets, `milkCure` off | `witchRush` and `milkCure` |
+|---|---|---|---|---|
+| `mixed-8` | 0 of 15, 21.0, 1.7 (1.1) | 0 of 15, 7.1, 18.8 (1.1) | 0 of 15, 15.1, 6.5 (1) | 0 of 15, 4.1, 18.4 (11) |
+| `witch-1` | 0 of 15, 0, 20 (20) | 0 of 15, 0, 20 (20) | - | - |
+| `witch-2` | 0 of 16, 22.0, 1 (1) | 0 of 15, 29.0, 1 (1) | 0 of 15, 23.2, 1 (1) | 0 of 15, 3.0, 17 (17) |
+| `seal-5` | 0 of 15, 28.7, 1.2 (1) | 0 of 15, 17.9, 1.3 (1) | 0 of 15, 16.2, 1.2 (1) | 0 of 15, 4.5, 17.9 (11.9) |
+
+No run of these 211 died; no harness rerun. After the move to minecraft-data 3.119.0 (Track U2), one more `mixed-8`
+chunk with both rules as one A/B (`MOBS_AB_RULE=witchRush,milkCure`, 2 buckets, 5 a side): off 0 of 5, 24.1, 1.9
+(1.2); on 0 of 5, 4.5, 19.1 (11.1).
+
+- **`mixed-8` with the rush.** She died at a median tick 86 (63 to 289) against 225, before her first potion in 9 of
+  15 runs against 2; poisoned runs 13 to 4 of 15. The third column is the same code again (its milk is not drunk):
+  poisoned 8 of 15, lowest median 6.5. Over the 30 rush runs, 12 were poisoned against 13 of 15 before; where a potion
+  lands it still takes the bot to 1 or 2, so the 10th percentile does not move without milk.
+- **`seal-5`.** The skeletons are summoned before the witch, so guard is already in a fight with one when she appears
+  (see "Tried and not taken"); the rush cut the poisoned runs 15 to 9 of 15 and the damage 28.7 to 17.9, but more than
+  half the runs are still poisoned, so the median of the lowest health stays about 1.
+- **`witch-2`.** The rush kills the first witch in time and the second throws meanwhile: every run was poisoned (13 of
+  16 before) and the damage rose 22.0 to 29.0 (a splash that lands nearer poisons longer); the lowest health was 1 on
+  both sides and no run died. This is the row where the rush costs damage; milk takes it to 3.0.
+- **Milk.** Drunk in 6 of 15 `mixed-8` runs, 5 of 15 `seal-5` runs and 15 of 15 `witch-2` runs, one bucket a run
+  every time (in `witch-2` both witches are dead before the drink, so one bucket covers both poisonings). With it no
+  run went under 6 in any cell; the 10th percentile of the lowest health rose from 1 to 11 or more.
+- **The early kits.** Neither rule can act for them (the rush needs a diamond or netherite sword, the cure needs milk),
+  and Track M6's rows were run again on the final code, `MOBS_AB_RULE=witchRush,milkCure`, 10 runs a side by night
+  (2026-11-17): 0 deaths in all 140. Off and on, damage and lowest median: no kit `pillager-1` 13.0, 11 and 14.0, 12;
+  `skeleton-4` 4.3, 16 and 4.8, 16; `mixed-8` 0 and 0; stone `seal-5` 17.3, 1 and 21.5, 1; `mixed-8` 27.8, 1 and 26.2,
+  1; `skeleton-4` 8.5, 12 and 5.7, 12; iron `seal-5` 18.1, 8.6 and 19.7, 1.5. The two sides run the same code for these
+  kits, so their differences are the spread of 10 runs. The no-kit `pillager-1` damage is higher than Track M6's table
+  (2.9 a run) on both sides, and also with the code before this track (8 runs: 14.1 a run, no death), so it is not this
+  track's change.
+
+### What the bot should carry
+
+The rush works with what the live kit has. The cure needs milk, and the bot never gets milk by itself: it does not milk
+cows (a bucket used on a cow) and nothing takes milk out of a box for it. With `milkCure` on, the milk it carries is
+used; one bucket clears one poisoning and leaves an empty bucket, which a cow fills again. Two buckets in the main
+inventory cover two poisonings that come apart (in `witch-2` both witches were dead before the drink and one bucket did
+for both). A milk bucket does not stack, so each takes a slot. The owner decides; the gauntlet's milk rows gave the kit
+two (`MOBS_MILK=2`) and never used more than one a run.
+
+A golden apple was not tried: the eater keeps it for under 6 health (`precious`), and its regeneration II for 5 s
+(believed, not measured on Bedrock here) gives back about 4 against the poison's 18.
+
+### Tried and not taken
+
+- **Eating to keep the regeneration.** At food 20 the traces show about 1 health every 80 ticks, the poison 1 every 25:
+  eating does not hold the health up against it, and the bot already eats at once after a fight (`eat: cooked_beef ...
+  food 17 -> 20` within seconds of the last kill).
+- **Backing off from her throw.** The potion side step stays off while guard fights her (Track M2: it took the keys
+  from the approach and she lived longer). With the rush she is dead before her first throw in most `mixed-8` runs; a
+  throw that is still coming is cheaper to cure than to dodge.
+- **A switch to the witch in the middle of another fight.** In `seal-5` the harness summons the four skeletons first,
+  so guard is already on one when the witch appears, and her fight starts at a median tick 33 (20 to 36) against 6 to
+  11 in `mixed-8`; with the rush she died at a median tick 91 against 125, and before her first potion in 5 of 15 runs
+  against 0. A guard that breaks off a fight for her was not built; in a world the mobs do not come in the harness's
+  order.
+
+### Not met
+
+- **`witch-2` with the rush alone.** Two witches throw at once; the rush kills the first in time and the second's
+  poison lands. The lowest health stays at 1 there without milk (on and off).
+- **The `seal-5` lowest health without milk.** The rush cut the poisoned runs 15 to 9 of 15, but the median of the
+  lowest health is still about 1.
+- **Holding the ground at 1 to 4 health.** With the reflex on, `holdGround` (decision 23) keeps the bot fighting 1 to 3
+  melee mobs instead of the flight at low health. In this track's 229 whole-run traces of the live kit, 98 runs went to
+  4 or under and none had a melee mob within 8 at any of those ticks: the low health came from the poison after the
+  fights. Whether the hold should yield under some health is therefore not measured here.
+- **The Realm.** None of the rows ran there; the recipe below says what to look for.
+- **Ground.** All rows ran on the gauntlet's flat cells. The straight steer from 8 runs only over cells the grid knows
+  are safe; on broken ground the navigator approaches as before, so the rush there is no faster than the code before.
+
+### On the Realm
+
+Both rules are on with the update; no setting changes. By night, near home, the live kit (sword in the hotbar):
+
+- `!test mobs witch 5`: look for `guard: witch #N within 16 blocks, fighting (a rush: before her next throw)` and
+  `combat: witch killed after N ticks, ..., rushed N ticks` (the test servers: 35 to 140 ticks); every run alive.
+- `!test mobs mixed8 5 force`: the same two lines in most runs; `combat: creeper ... fighting it first` should not come
+  while the witch's fight runs unless the creeper is lit or within 3.5. Every run alive. A run line's lowest health is
+  read until its mobs are dead, so a poison still running after that is not in it: the `pve: took 1.0 damage (poison,
+  S s left) ...` lines are the count of what one splash did (the test servers, whole runs: lowest median 18.8 with the
+  rush against 1.7 before).
+- With a milk bucket given by the owner (`milkCure`): after a poisoning, `pve: drinking milk against the poison (...)`
+  then `pve: milk drunk: the poison is gone`, once the witch is dead and no mob is within 8. Without milk no such line.
+
 ## Packets (BDS 1.26.60.6, verified)
 
 - **Locator bar** (Track W, `tasks/process/locator.ts`): for every other player the server sends

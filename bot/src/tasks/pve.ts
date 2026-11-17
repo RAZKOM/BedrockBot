@@ -310,8 +310,28 @@ export interface PveRules {
    * about every 26 s from 8 to 10 once the flight on foot keeps it there.
    */
   bareArcher: boolean;
+  /**
+   * Track M7: with a diamond or netherite sword and the reflex on, guard's fight on a witch it fights first is a rush
+   * (FightOptions.rush): the approach sprints, the shield stays down, no re-pick within reach, a creeper in between only lit
+   * or within RUSH_CREEPER_NEAR. The witch's poison was the live kit's lowest health (witchRushes).
+   */
+  witchRush: boolean;
+  /**
+   * Track M7: a carried milk bucket is drunk when the poison would still take more than CURE_MIN_LOSS, with no witch within
+   * CURE_WITCH_CLEAR (she poisons again a bot that is not poisoned) and every mob FLEE_EAT_CLEAR away (milkCure). The live
+   * kit carries no milk: without it nothing changes.
+   */
+  milkCure: boolean;
 }
-export const PVE_RULES_DEFAULT: Readonly<PveRules> = { legHold: true, archerDuel: true, fleeLong: true, poison: true, shooterHome: true, shooterWay: true, poisonBite: true, witchCrowd: true, volley: true, bareArcher: true };
+export const PVE_RULES_DEFAULT: Readonly<PveRules> = { legHold: true, archerDuel: true, fleeLong: true, poison: true, shooterHome: true, shooterWay: true, poisonBite: true, witchCrowd: true, volley: true, bareArcher: true, witchRush: true, milkCure: true };
+/** Track M7 (`milkCure`): milk is drunk only when the poison would still take more than this (health). */
+export const CURE_MIN_LOSS = 3;
+/** Track M7 (`milkCure`): no milk with a live witch this close (blocks): she throws poison at a bot that is not poisoned. */
+export const CURE_WITCH_CLEAR = 16;
+/** Track M7 (`milkCure`): what is drunk. */
+export const CURE_ITEM = 'milk_bucket';
+/** Track M7 (`milkCure`): checked every this many ticks. */
+const CURE_EVERY = 5;
 /** Track M6 (`volley`): an archer that has not hit the bot yet counts this much (an arrow or a bolt with no armour is 3 to 5). */
 export const VOLLEY_ARROW = 4;
 /** Track M6 (`volley`): a witch that has not hit the bot yet counts her harming potion (6 through any armour). */
@@ -616,6 +636,7 @@ export class PveController {
     this.unsubs.push(loop.onBeforeStep(() => this.idleBlock())); // Track M1 round 2: the shield while idle
     this.unsubs.push(loop.onBeforeStep(() => this.noteWitchThrows())); // Track M1 round 2: the witch's throw window
     this.unsubs.push(loop.onBeforeStep(() => this.potionStep())); // Track M1 round 2: out from under her potion
+    this.unsubs.push(loop.onBeforeStep(() => this.cureStep())); // Track M7: milk against the poison
     this.unsubs.push(
       this.mobs.onHit((g, damage, cause) => {
         if (cause === 'drowning') {
@@ -1106,6 +1127,66 @@ export class PveController {
     }
   }
 
+  /** Track M7 (`milkCure`): a drink is under way, and the tick count (checked every CURE_EVERY ticks). */
+  private curing = false;
+  private cureTick = 0;
+  /** Track M7: milk drunk against the poison so far (the PvE status). */
+  cures = 0;
+  /**
+   * Track M7 (`milkCure`): the witch's poison is 1 health every 25 ticks for up to 45 s and stops at 1, whatever the armour:
+   * on the live kit's night `mixed-8` it was 17.4 of the 21.6 damage a run, and the health went under 6 in 10 of 15 runs, 7 of
+   * them standing at home after the last fight with the poison still on (2026-11-16). A milk bucket clears every effect in
+   * one drink (32 ticks). So with milk carried: drink once the poison would still take more than CURE_MIN_LOSS, no live
+   * witch within CURE_WITCH_CLEAR (she throws poison at a bot that is not poisoned), every mob FLEE_EAT_CLEAR away (the eat
+   * floor's rule: a drink slows the body like a bite), not in a fight or a flight. Without milk nothing happens.
+   */
+  wantsCure(me: Vec3): boolean {
+    if (!this.rules.milkCure || this.health() <= 0) return false;
+    const p = this.mobs.selfPoison;
+    if (!p || performance.now() >= p.until) return false;
+    if (this.health() - this.healthAfterPoisonAlways() <= CURE_MIN_LOSS) return false;
+    if (!this.d.world.inventory.slots.slice(0, 36).some((it) => it?.name === CURE_ITEM && it.count > 0)) return false;
+    if (this.nearestOfKind(me, CURE_WITCH_CLEAR, (t) => t === 'witch')) return false;
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      if (dist(entityFeet(e), me) < FLEE_EAT_CLEAR) return false;
+    }
+    return true;
+  }
+
+  /** Track M7: the health the poison will leave, counted whatever the `poison` rule (the cure's own reading). */
+  private healthAfterPoisonAlways(): number {
+    const h = this.health();
+    return h - poisonLeft(this.mobs.selfPoison, performance.now(), h);
+  }
+
+  private cureStep(): void {
+    if (this.curing || ++this.cureTick % CURE_EVERY !== 0) return;
+    const kit = this.kit?.();
+    // not in a fight (its strikes reselect the blade and the drink stops) nor in an elytra flight
+    if (!kit?.drink || !this.d.loop.state.ready || this.d.inactive() || this.combat.busy || this.processes.active?.name === 'flight' || this.fleeFlight?.active() === true) return;
+    const me = this.position();
+    if (!this.wantsCure(me)) return;
+    const h = this.health();
+    const left = ((this.mobs.selfPoison?.until ?? 0) - performance.now()) / 1000;
+    this.curing = true;
+    this.log.info(`pve: drinking milk against the poison (${left.toFixed(0)} s left, health ${h.toFixed(1)}, ${this.healthAfterPoisonAlways().toFixed(1)} once it ends)`);
+    void kit
+      .drink(CURE_ITEM)
+      .then((r) => {
+        if (r.ok) {
+          this.cures++;
+          this.d.metrics?.inc('pve.cure');
+          this.mobs.selfPoison = undefined; // the server's mob_effect remove follows; the cure is not drunk twice meanwhile
+        }
+        this.log.info(`pve: milk ${r.ok ? 'drunk: the poison is gone' : `not drunk (${r.reason ?? '?'})`}, health ${this.health().toFixed(1)}`);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        this.curing = false;
+      });
+  }
+
   private idleBlock(): void {
     if (this.potionStepping) return;
     const loop = this.d.loop;
@@ -1226,6 +1307,25 @@ export class PveController {
       if (Math.abs(rx * uz - rz * ux) <= WITCH_WAY_CLEAR) return false;
     }
     return true;
+  }
+
+  /**
+   * Track M7 (`witchRush`): guard's fight on `e` rushes her (FightOptions.rush): a witch it fights first (firstTarget), a
+   * diamond or netherite sword in the hotbar (WITCH_CROWD_BLADE: three hits, under 2 s), the reflex on (it strikes the mobs
+   * in reach while the fight does not re-pick them). On the live kit's night `mixed-8` (2026-11-16, 15 runs) the fight had
+   * her from tick 0 to 14 and she threw first at tick 57 to 80, but she died at tick 195 to 430: the creeper in between
+   * (60 to 135 ticks of hit and run), a re-pick to a spider in reach, and the shield raised for the skeleton (a sneak: the
+   * body crept at 4 to 5 from her) let her throw, and her poison was 17.4 of the 21.6 damage a run.
+   */
+  witchRushes(e: EntityInfo, me: Vec3): boolean {
+    if (!this.rules.witchRush || bareType(e.type) !== 'witch' || !this.reflexOn()) return false;
+    if (this.bestBlade() < WITCH_CROWD_BLADE) return false;
+    return this.firstTarget(e, me);
+  }
+
+  /** Track M7 (targeting.ts pickThreat): while the probe of a witch to rush runs, guard starts no fight on a mob in reach. */
+  firstWaits(e: EntityInfo, me: Vec3): boolean {
+    return this.witchRushes(e, me);
   }
 
   /**
@@ -2427,8 +2527,10 @@ class GuardProcess extends BaseProcess {
     c.stats.guardTriggers++;
     c.d.metrics?.inc('pve.guard');
     const archerAtHome = c.low() && c.archerDuelTarget(c.position())?.runtimeId === e.runtimeId; // Track M4
-    c.log.info(`guard: ${bareType(e.type)} #${e.runtimeId} ${inPlace ? 'within reach (defending in place)' : `within ${c.guardRadius} blocks`}, fighting${archerAtHome ? ` (the archer at home, health ${c.health().toFixed(1)}: not standing in its line)` : ''}`);
-    const opts: FightOptions = inPlace ? { approach: false, maxRange: 5, outOfRangeTicks: 20, timeoutTicks: 600 } : { maxRange: c.guardRadius + CHASE_EXTRA };
+    const rush = !inPlace && c.witchRushes(e, c.position()); // Track M7
+    if (rush) c.d.metrics?.inc('pve.witchRush');
+    c.log.info(`guard: ${bareType(e.type)} #${e.runtimeId} ${inPlace ? 'within reach (defending in place)' : `within ${c.guardRadius} blocks`}, fighting${archerAtHome ? ` (the archer at home, health ${c.health().toFixed(1)}: not standing in its line)` : ''}${rush ? ' (a rush: before her next throw)' : ''}`);
+    const opts: FightOptions = inPlace ? { approach: false, maxRange: 5, outOfRangeTicks: 20, timeoutTicks: 600 } : { maxRange: c.guardRadius + CHASE_EXTRA, ...(rush ? { rush: true } : {}) };
     void c.combat.fight(e.runtimeId, opts).then(async (r) => {
       if (t !== this.token) return;
       c.countFight(r);

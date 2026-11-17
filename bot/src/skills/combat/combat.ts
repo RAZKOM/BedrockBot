@@ -72,6 +72,7 @@ import { angleDiff, turnTowards, yawTowards } from '../nav/follower.ts';
 import type { Goal } from '../nav/goals.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { aimPoint, bareType, classify, entityFeet, isArcher, isCreeper, isFlying, isPlayerEntity, reachDistance, type MobTracker } from './hostiles.ts';
+import { safeCell } from './dodge.ts'; // Track M7: the rush's straight line
 import { CREEPER_BLOCK_TICKS, ShieldController } from './shield.ts';
 import { crowdOf, CROWD_COUNT, CROWD_HEALTH, inReach, pickInReach, type GridLike } from './targeting.ts';
 
@@ -167,7 +168,29 @@ export interface FightOptions {
   approachTries?: number;
   /** Track AO: ticks without getting 0.5 blocks closer or landing a hit before the target ends `unreachable`. Default 60; 0 = off. */
   stallTicks?: number;
+  /**
+   * Track M7 (the PvE controller's `witchRush`): the requested target is to die before it can act again (a witch before her
+   * next throw). While it is the target: the approach sprints while it is out of reach, the shield stays down (a raised
+   * shield is a sneak: the body creeps), no re-pick within reach (the reflex strikes those), and a creeper is fought in
+   * between only once it is lit or within RUSH_CREEPER_NEAR. Default false.
+   */
+  rush?: boolean;
 }
+
+/**
+ * Track M7: in a rush (FightOptions.rush) a creeper is fought in between only from this close (feet, 3D) or once lit. Its
+ * fuse lights at 3.03 to 3.15 feet to feet (docs/pve.md "Server rules"); within CREEPER_FIRST (6) it was fought at once,
+ * and on the live kit's `mixed-8` the creeper in between took 60 to 135 ticks while the witch threw.
+ */
+export const RUSH_CREEPER_NEAR = 3.5;
+/**
+ * Track M7: in a rush the controller steers straight at the target (sprinting while out of reach) from this far (level
+ * blocks) when the line to it is known safe ground (rushLineClear); farther, or over unknown or unsafe ground, the navigator
+ * approaches. The navigator sprints only with more than 8 blocks of straight path left, so a 4 to 8 block approach walked.
+ */
+export const RUSH_STEER = 8;
+/** Track M7: the line to the target is checked up to this far before it (its own cell and the one in front of it). */
+const RUSH_STOP_SHORT = 1;
 
 export type FightOutcome =
   | 'killed'
@@ -208,6 +231,8 @@ export interface FightResult {
   kills?: number;
   /** Track AH: ticks the shield was up. */
   shieldTicks?: number;
+  /** Track M7: ticks the fight rushed its target (FightOptions.rush). */
+  rushTicks?: number;
 }
 
 /** Bedrock melee damage of weapons (sword > axe > anything else). */
@@ -437,6 +462,10 @@ interface Fight {
   /** The target just changed within reach: face it at once this tick. */
   snap: boolean;
   shieldTicks: number;
+  /** Track M7: this tick the fight rushes its requested target (FightOptions.rush, the target alive and the one fought). */
+  rushing: boolean;
+  /** Track M7: ticks of the fight spent rushing (the result's `rushTicks`). */
+  rushTicks: number;
 }
 
 /** Max yaw change per tick while fighting (degrees). */
@@ -626,6 +655,7 @@ export class CombatController {
           crowd: opts.crowd ?? this.crowdRule,
           approachTries: opts.approachTries ?? 1, // Track AO
           stallTicks: opts.stallTicks ?? STALL_TICKS,
+          rush: opts.rush ?? false,
         },
         t: 0,
         lastStrike: -Infinity,
@@ -651,6 +681,8 @@ export class CombatController {
         blocking: false,
         snap: false,
         shieldTicks: 0,
+        rushing: false,
+        rushTicks: 0,
       };
       f.tg = f.main;
       this.active = f;
@@ -802,11 +834,12 @@ export class CombatController {
       retargets: f.retargets,
       kills: f.kills,
       shieldTicks: f.shieldTicks,
+      ...(f.o.rush ? { rushTicks: f.rushTicks } : {}),
     };
     this.log.info(
       `combat: ${bareType(f.req.type)} ${reason} after ${f.t} ticks, ${f.attacks} attack(s), ${f.landed} landed, ${r.damageTaken} damage taken` +
         `${f.arrowHits ? `, ${f.arrowHits} arrow hit(s)` : ''}${f.interludes.length ? `, in between: ${f.interludes.map((i) => `${bareType(i.type)} ${i.reason}`).join(', ')}` : ''}` +
-        `, ${f.retargets} retarget(s), ${f.kills} kill(s)${f.shieldTicks ? `, shield up ${f.shieldTicks} ticks` : ''}`,
+        `, ${f.retargets} retarget(s), ${f.kills} kill(s)${f.shieldTicks ? `, shield up ${f.shieldTicks} ticks` : ''}${f.o.rush ? `, rushed ${f.rushTicks} ticks` : ''}`,
     );
     events.emit('combat.fight', { mob: bareType(f.req.type), outcome: reason, ticks: f.t, attacks: f.attacks, landed: f.landed, damageTaken: r.damageTaken, kills: f.kills }); // decision 0059
     f.resolve(r);
@@ -896,10 +929,18 @@ export class CombatController {
       }
     }
 
-    // a creeper coming close is fought first (the fight goes back to its target afterwards)
+    // Track M7: the rush holds while the requested target is the one fought and alive
+    f.rushing = f.o.rush && f.o.approach && f.tg === f.main && f.main.rid === f.req.rid && !f.main.creeper && !f.main.dead && !this.d.mobs.get(f.main.rid)?.dead;
+    if (f.rushing) f.rushTicks++;
+
+    // a creeper coming close is fought first (the fight goes back to its target afterwards); Track M7: in a rush only a lit
+    // one or one within RUSH_CREEPER_NEAR
     if (f.tg === f.main && !f.main.creeper && f.o.approach && f.o.creeperFirst) {
       const c = this.nearCreeper(s.pos, f.main.rid);
-      if (c && (f.skip.get(c.runtimeId) ?? 0) <= f.t) {
+      const cf = c ? entityFeet(c) : undefined;
+      // (below lowHealth the creeper in between is the run from it: as before)
+      const wait = c !== undefined && cf !== undefined && f.rushing && this.ownHealth() >= f.o.lowHealth && !this.d.mobs.get(c.runtimeId)?.ignited && Math.hypot(cf.x - s.pos.x, cf.y - s.pos.y, cf.z - s.pos.z) > RUSH_CREEPER_NEAR;
+      if (c && !wait && (f.skip.get(c.runtimeId) ?? 0) <= f.t) {
         this.log.info(`combat: ${bareType(c.type)} #${c.runtimeId} within ${CREEPER_FIRST} blocks: fighting it first`);
         if (f.ourGoto && this.d.mover.nav.busy) this.d.mover.cancel();
         f.ourGoto = false;
@@ -907,8 +948,10 @@ export class CombatController {
       }
     }
 
-    // Track AH: re-pick the target within reach (strike cycle; at once when it left reach)
-    if (f.o.retarget && f.tg === f.main && !f.main.creeper) this.retargetInReach(f, s);
+    // Track AH: re-pick the target within reach (strike cycle; at once when it left reach). Track M7: not in a rush (the
+    // reflex strikes what is in reach; a re-pick took the witch fight to a spider in reach while she threw)
+    if (f.o.retarget && f.tg === f.main && !f.main.creeper && !f.rushing) this.retargetInReach(f, s);
+    if (f.tg !== f.main) f.rushing = false; // a creeper in between: its own protocol
 
     const tg = f.tg;
     const e = this.d.entities().get(tg.rid);
@@ -1049,7 +1092,7 @@ export class CombatController {
         this.endTarget(f, 'unreachable');
         return;
       }
-    } else if ((hd <= MELEE_RANGE && Math.abs(dy) < 1.2) || !f.o.approach) {
+    } else if ((hd <= MELEE_RANGE && Math.abs(dy) < 1.2) || !f.o.approach || (f.rushing && hd <= RUSH_STEER && Math.abs(dy) < 1.2 && this.rushLineClear(s.pos, feet))) {
       this.takeOver(f);
       // Track AH: a new target within reach is faced at once (a 180-degree turn at 40 per tick cost 5 ticks per switch)
       yaw = f.snap && reachNow <= f.o.reach ? wantYaw : turnTowards(loop.command.yaw, wantYaw, TURN);
@@ -1068,7 +1111,7 @@ export class CombatController {
           sprint = true;
         } else if (hd > 2.2) {
           forward = 1;
-          sprint = archer;
+          sprint = archer || (f.rushing && reachNow > f.o.reach); // Track M7: in a rush, out of reach (a sprint strike knocks farther)
         } else if (hd < 1.0) forward = -1;
       }
       // decision 0051: on pending scaffold (a 1 x 1 pillar top, or digging down from it) strike only, never step
@@ -1081,7 +1124,7 @@ export class CombatController {
     } else {
       // approach with the navigator; it steers yaw, we steer the pitch
       const moved = tg.gotoAt ? Math.hypot(feet.x - tg.gotoAt.x, feet.z - tg.gotoAt.z) : Infinity;
-      if ((!this.d.mover.nav.busy || moved > 1.5) && f.t - tg.gotoT >= 10) this.approach(f, tg, feet, hd > 8 || archer || tg.creeper);
+      if ((!this.d.mover.nav.busy || moved > 1.5) && f.t - tg.gotoT >= 10) this.approach(f, tg, feet, hd > 8 || archer || tg.creeper || f.rushing);
       loop.setCommand({ pitch: wantPitch });
       yaw = loop.command.yaw;
     }
@@ -1236,7 +1279,8 @@ export class CombatController {
     const f = this.active;
     if (!f || !s.ready) return;
     let want = false;
-    if (this.shield.equipped()) want = f.blockNow || (!f.striking && this.shield.threat(s.pos) !== undefined);
+    // Track M7: not in a rush (a raised shield is a sneak: the body creeps towards a witch who throws meanwhile)
+    if (this.shield.equipped()) want = f.blockNow || (!f.striking && !f.rushing && this.shield.threat(s.pos) !== undefined);
     if (want) {
       this.d.loop.setCommand({ sneak: true, sprint: false });
       f.shieldTicks++;
@@ -1245,6 +1289,23 @@ export class CombatController {
       this.d.loop.setCommand({ sneak: false });
     }
     f.blocking = want;
+  }
+
+  /**
+   * Track M7: the straight line from the body to `to` (feet) is known safe ground at the body's level, cell by cell every
+   * half block up to RUSH_STOP_SHORT before it (skills/combat/dodge.ts safeCell: a floor, room for the body, no liquid, nothing
+   * that hurts). Without the planner's grid: false (the navigator approaches as before).
+   */
+  private rushLineClear(me: Vec3, to: Vec3): boolean {
+    const grid = this.grid();
+    if (!grid) return false;
+    const dx = to.x - me.x;
+    const dz = to.z - me.z;
+    const d = Math.hypot(dx, dz);
+    if (d < 1e-3) return true;
+    const y = Math.floor(me.y + 1e-3);
+    for (let k = 0.5; k <= d - RUSH_STOP_SHORT; k += 0.5) if (!safeCell(grid, me.x + (dx / d) * k, y, me.z + (dz / d) * k)) return false;
+    return true;
   }
 
   /** Stop our approach goto (or anybody's) so the controller steers. */

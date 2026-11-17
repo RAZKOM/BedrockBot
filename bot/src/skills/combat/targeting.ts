@@ -107,6 +107,8 @@ export interface TargetingHost {
   readonly combat?: { readonly crowdRule?: boolean; readonly busy?: boolean; readonly crowdedRecently?: boolean };
   /** Track M1: this mob goes first (a witch the bot can kill before her next potion, the way to her clear: tasks/pve.ts). */
   firstTarget?(e: EntityInfo, me: Vec3): boolean;
+  /** Track M7: while this first target's path probe runs, no fight on a mob in reach (the reflex strikes it; tasks/pve.ts witchRushes). */
+  firstWaits?(e: EntityInfo, me: Vec3): boolean;
 }
 
 export interface ThreatPick {
@@ -275,12 +277,21 @@ export function pickThreat(h: TargetingHost, me: Vec3, low: boolean): ThreatPick
   // no walk) stood 6 from the witch and never struck while her poison took the health down
   const walking = userWalking(h);
   let waiting = false;
+  let waitingFirst = false;
   for (const c of cands) {
-    if (c.kind !== 'chase') return { e: c.e, inPlace: inPlace && !c.first };
+    // Track M7: while the probe of a first target to rush runs, a mob in reach is left to the reflex (a fight on it held
+    // guard 37 ticks while the witch walked up to throw); a creeper to keep away from still goes
+    if (c.kind !== 'chase') {
+      if (waitingFirst && c.kind !== 'avoid') continue;
+      return { e: c.e, inPlace: inPlace && !c.first };
+    }
     if (waiting) continue; // a better candidate's probe runs: only mobs within reach meanwhile
     const g = pathGate(h, c, me, walking);
     if (g === 'yes') return { e: c.e, inPlace: inPlace && !c.first };
-    if (g === 'pending') waiting = true;
+    if (g === 'pending') {
+      waiting = true;
+      if (c.first && !inPlace && h.firstWaits?.(c.e, me) === true) waitingFirst = true;
+    }
   }
   return undefined;
 }

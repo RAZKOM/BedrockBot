@@ -793,3 +793,30 @@ describe('avoidance', () => {
     expect(careful.index).toBeLessThanOrEqual(3);
   });
 });
+
+describe('EatController.drink (Track M7: milk against the poison)', () => {
+  it('drinks a milk bucket at food 20: one click, done once the bucket is empty', async () => {
+    const t = eatSetup(slots36({ 0: item('netherite_sword'), 4: item('milk_bucket') }), 20);
+    let started = -1;
+    t.loop.onTick = (tick) => {
+      if (started < 0 && t.clicks().length) started = tick;
+      if (started >= 0 && tick - started === 32) t.inv.slots[4] = item('bucket');
+    };
+    const r = await t.eater.drink('milk_bucket');
+    expect(r).toMatchObject({ ok: true, item: 'milk_bucket', slot: 4 });
+    expect(t.clicks()).toHaveLength(1);
+    expect(t.selects).toEqual([4, 0]);
+  });
+
+  it('none carried: no_food, nothing sent; one in the main inventory comes to the hotbar first', async () => {
+    const none = eatSetup(slots36({ 0: item('bread', 3) }), 20);
+    expect(await none.eater.drink('milk_bucket')).toMatchObject({ ok: false, reason: 'no_food' });
+    expect(none.clicks()).toHaveLength(0);
+    const t = eatSetup(slots36({ 22: item('milk_bucket') }), 20);
+    t.loop.onTick = () => {
+      if (t.clicks().length) t.inv.slots[7] = item('bucket');
+    };
+    expect(await t.eater.drink('milk_bucket')).toMatchObject({ ok: true, fetched: true, slot: 7 });
+    expect(t.fetched).toEqual([22]);
+  });
+});
