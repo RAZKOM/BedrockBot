@@ -10,7 +10,10 @@
 // Kits (MOBS_KITS, default bare,live,kb2): `bare` no weapon, no armour, 8 bread; `live` the netherite set, a netherite sword,
 // a shield, 16 cooked beef, 32 cobblestone; `kb2` the live kit with Knockback II on the sword. Track M4, the early-game kits
 // (16 bread each, no elytra): `none` nothing else; `stone` a stone sword, pickaxe, axe and shovel, no armour, no shield;
-// `iron` an iron sword, the iron set, a shield, a stone pickaxe and shovel.
+// `iron` an iron sword, the iron set, a shield, a stone pickaxe and shovel. Track M9: `mats` the `none` kit with 4 cobblestone,
+// 2 sticks and 4 oak planks (a stone sword and its crafting table; PveRules craftBlade).
+// Track M9: MOBS_TERRAIN=trees|walls lays cover round each spot, MOBS_TERRAIN=doors a room with a closed fence gate a side (layCover); every row has the long case's fields (endFromSpot,
+// maxFromSpot, homeS, lastHitS, a 5 s track, the flight's and guard's lines); MOBS_SECONDS=240 for the long case.
 // Cells (MOBS_CELLS: a comma list of names or prefixes, default all): `<mob>-1` one mob; `<mob>-2`, `<mob>-4` crowds of one
 // type; `mixed-4`, `mixed-8`; `act-<activity>` a mixed crowd of 4 during goto / mine / eat / landed. MOBS_HARD=1 runs at hard.
 // Track M4: MOBS_TIME=day runs at noon (the undead burn: no helmet on them), else midnight. The rules are on by default;
@@ -69,6 +72,16 @@ const HARNESS_RETRIES = Number(process.env.MOBS_HARNESS_RETRIES ?? 2);
  * 30 s of poison left said "lowest 12".
  */
 const POISON_WAIT = process.env.MOBS_POISON_WAIT === '1';
+/** Track M9: cover laid round each spot before the run (`trees`, `walls`; see layCover), none by default. */
+const TERRAIN = process.env.MOBS_TERRAIN;
+/** Track M9: the cover reaches this far from the spot (blocks) and keeps this far off it (the mobs are summoned 7 out). */
+const COVER_R = 44;
+const COVER_CLEAR = 10;
+/** Track M9: MOBS_TERRAIN=doors: the room's half side (blocks from the spot to its walls). */
+const ROOM_HALF = 12;
+/** Track M9: the bot's lines kept in a run's row (`lines`). */
+const LINE_RE = /^(flee|guard|floor|pve|home|shelter|craft|blade)\b/;
+let lineSink: ((msg: string) => void) | undefined;
 
 interface MobSpec {
   type: string;
@@ -172,6 +185,22 @@ interface CellResult {
   friendly: number;
   /** What the friendly hits were on (type x count). */
   friendlyOn?: Record<string, number>;
+  /**
+   * Track M9 (the long case): how far from the spot the bot stood at the end and at most; the first second it stood within
+   * 3 of the spot (home) again after it had been 20 or more out; the second of the last hit on it; every 5 s a sample
+   * `[s, from the spot, the nearest live summoned mob's distance (the server's place; -1 none), the process, health]`; the
+   * flight's and guard's lines with their second (`flee: gave up (60 s) ...`), at most 300.
+   */
+  endFromSpot?: number;
+  maxFromSpot?: number;
+  homeS?: number | null;
+  lastHitS?: number | null;
+  track?: [number, number, number, string, number][];
+  lines?: string[];
+  /** Track M9: the cover laid round the spot (MOBS_TERRAIN), when any. */
+  terrain?: string;
+  /** Track M9 (MOBS_TERRAIN=doors): every 5 s, the room's gates open and the mobs still inside it (`s:open N,inside M`). */
+  doors?: string[];
   /** The seal-in, when it went up: seconds from the start to sealed and to out, the damage and health inside, the bites. */
   seal?: { sealedS: number; outS: number | null; damageInside: number; healthIn: number; healthMax: number; bites: number; dugIn: boolean; build: { placed: number; open: number; reason?: string; tries: number } | null };
 }
@@ -237,6 +266,14 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       await t.give(b.name, 'bread', 16);
       return;
     }
+    // Track M9: `mats` the `none` kit with a sword's materials (2 cobblestone and a stick) and a table's (4 oak planks)
+    if (kit === 'mats') {
+      await t.give(b.name, 'bread', 16);
+      await t.give(b.name, 'cobblestone', 4);
+      await t.give(b.name, 'stick', 2);
+      await t.give(b.name, 'oak_planks', 4);
+      return;
+    }
     if (kit === 'stone') {
       for (const item of ['stone_sword', 'stone_pickaxe', 'stone_axe', 'stone_shovel']) await t.give(b.name, item, 1);
       await t.give(b.name, 'bread', 16);
@@ -296,6 +333,81 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     deathsSettled = r.deaths;
   }
 
+  /**
+   * Track M9 (MOBS_TERRAIN): cover round the spot, from COVER_CLEAR to COVER_R out (the air over that square cleared first, so
+   * no earlier run's cover stays), laid from a seed of the spot so the two sides of an A/B series see the same kind of ground:
+   * `trees` a log column 4 high (a trunk; leaves are no cover for the line of sight) in about half of the 7 x 7 cells;
+   * `walls` a cobblestone wall 3 high and 4 to 7 long, along x or z, in about half of the 9 x 9 cells.
+   */
+  async function layCover(b: GauntBot, c: Vec3, kind: string, seed: number): Promise<void> {
+    const R = COVER_R;
+    const x0 = Math.floor(c.x);
+    const z0 = Math.floor(c.z);
+    for (const [ax, bx] of [
+      [-R, 0],
+      [1, R],
+    ] as const) {
+      for (const [az, bz] of [
+        [-R, 0],
+        [1, R],
+      ] as const) {
+        await fill(b, { x: x0 + ax, y: FEET_Y, z: z0 + az }, { x: x0 + bx, y: FEET_Y + 5, z: z0 + bz }, 'air');
+      }
+    }
+    if (kind === 'doors') {
+      // Track M9 (`fleeDoors`): a roofless room of cobblestone 4 high, ROOM_HALF from the spot each way, with a closed fence
+      // gate in the middle of each side (the gate at the feet, the cell over it open, the wall over that); neither a pillager
+      // nor a skeleton opens a gate
+      const H = ROOM_HALF;
+      await fill(b, { x: x0 - H, y: FEET_Y, z: z0 - H }, { x: x0 + H, y: FEET_Y + 3, z: z0 + H }, 'cobblestone');
+      await fill(b, { x: x0 - H + 1, y: FEET_Y, z: z0 - H + 1 }, { x: x0 + H - 1, y: FEET_Y + 3, z: z0 + H - 1 }, 'air');
+      for (const [gx, gz, dir] of [
+        [x0 + H, z0, 'east'],
+        [x0 - H, z0, 'west'],
+        [x0, z0 + H, 'south'],
+        [x0, z0 - H, 'north'],
+      ] as const) {
+        await fill(b, { x: gx, y: FEET_Y + 1, z: gz }, { x: gx, y: FEET_Y + 1, z: gz }, 'air');
+        for (let k = 0; ; k++) {
+          const r = await b.truth.cmd('setblock', [gx, FEET_Y, gz, 'fence_gate', `minecraft:cardinal_direction=${dir}`], 30_000);
+          if (r.ok) break;
+          if (k >= 10) throw new Error(`truth:setblock fence_gate failed: ${r.reason}`);
+          await sleep(500);
+        }
+      }
+      return;
+    }
+    let s = seed >>> 0 || 1;
+    const rnd = (): number => {
+      s = (s + 0x6d2b79f5) >>> 0;
+      let t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const step = kind === 'walls' ? 9 : 7;
+    let laid = 0;
+    for (let gx = -R; gx + step <= R + 1; gx += step) {
+      for (let gz = -R; gz + step <= R + 1; gz += step) {
+        if (rnd() < 0.5) continue;
+        const x = x0 + gx + Math.floor(rnd() * step);
+        const z = z0 + gz + Math.floor(rnd() * step);
+        if (Math.hypot(x + 0.5 - c.x, z + 0.5 - c.z) < COVER_CLEAR) continue;
+        if (kind === 'walls') {
+          const len = 4 + Math.floor(rnd() * 4);
+          const alongX = rnd() < 0.5;
+          const to = alongX ? { x: x + len - 1, z } : { x, z: z + len - 1 };
+          if (Math.hypot(to.x + 0.5 - c.x, to.z + 0.5 - c.z) < COVER_CLEAR) continue;
+          await fill(b, { x, y: FEET_Y, z }, { x: to.x, y: FEET_Y + 2, z: to.z }, 'cobblestone');
+        } else {
+          await fill(b, { x, y: FEET_Y, z }, { x, y: FEET_Y + 3, z }, 'oak_log');
+        }
+        laid++;
+      }
+    }
+    if (laid === 0) throw new Error(`no cover laid (${kind})`);
+  }
+
   async function freshSpot(b: GauntBot): Promise<Vec3> {
     const at = nextSpot();
     const c = centre(at);
@@ -305,6 +417,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     // repair the ground (a creeper may have cratered a neighbour spot, an earlier run's seal-in left its walls) and clear the
     // air; Track M5: the spot's cells are read back and a dirty one refused
     await cleanSpot(b, c, { r: 14, up: 6, entities: 40 });
+    if (TERRAIN) await layCover(b, c, TERRAIN, (Math.floor(at.x) * 73856093) ^ (Math.floor(at.z) * 19349663) ^ (ROW * 83492791));
     b.task.home!.set(at);
     await b.truth.ok('cleareffects', [b.name]).catch(() => undefined); // a witch's poison from the cell before
     await b.truth.setFood(b.name, 20, 5);
@@ -353,13 +466,18 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       if (m.anger) await b.truth.ok('anger', [r.entityId, b.name]).catch(() => undefined);
     }
     const t0 = Date.now();
+    // Track M9: the run's flee / guard / floor lines
+    const lines: string[] = [];
+    lineSink = (msg) => {
+      if (lines.length < 300 && LINE_RE.test(msg)) lines.push(`${r1((Date.now() - t0) / 1000)} ${msg.slice(0, 220)}`);
+    };
     // the trace: the bot's state every tick (kept 220 ticks), dumped on a death
     const ring: TraceRow[] = [];
     const loop = b.built.mobility!.loop as unknown as { onBeforeStep(fn: (t: bigint) => void): () => void };
     const offTrace = TRACE
       ? loop.onBeforeStep((tk) => {
           ring.push(traceRow(b, c, tk, t0));
-          if (ring.length > (SEAL_TRACE || TRACE_ALL ? 2400 : TRACE_TICKS + 20)) ring.shift();
+          if (ring.length > (SEAL_TRACE || TRACE_ALL ? Math.max(2400, SECONDS * 20 + 400) : TRACE_TICKS + 20)) ring.shift();
         })
       : () => undefined;
     // Track M2: the witch's potions as the bot saw them: each splash potion's last place before it went, against the bot's feet
@@ -419,8 +537,22 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     }
     const fleeEp = (): SealEp | undefined => (b.task.processes?.find('flee')[0] as unknown as { ep?: SealEp } | undefined)?.ep;
     let cleared = false;
+    // Track M9: the long case's samples
+    const track: [number, number, number, string, number][] = [];
+    let maxFromSpot = 0;
+    let homeS: number | null = null;
+    let wasOut = false;
+    let nextSample = 0;
+    const doorTrack: string[] = [];
     while (Date.now() - t0 < SECONDS * 1000) {
       minHealth = Math.min(minHealth, b.pve.health());
+      {
+        const me = b.pve.position();
+        const from = Math.hypot(me.x - c.x, me.z - c.z);
+        maxFromSpot = Math.max(maxFromSpot, from);
+        if (from >= 20) wasOut = true;
+        else if (wasOut && homeS === null && from <= 3) homeS = r1((Date.now() - t0) / 1000);
+      }
       if (CLEAR_AT !== undefined && !cleared && Date.now() - t0 >= CLEAR_AT * 1000) {
         cleared = true;
         await b.truth.cleanup();
@@ -438,6 +570,31 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
         break;
       }
       const left = await Promise.all(ids.map((id) => b.truth.entity(id)));
+      if (Date.now() - t0 >= nextSample) {
+        nextSample += 5000;
+        const me = b.pve.position();
+        const live = left.filter((x) => x.valid !== false && (x.health ?? 1) > 0 && x.location);
+        const near = live.reduce((m, x) => Math.min(m, Math.hypot(x.location.x - me.x, x.location.z - me.z)), Infinity);
+        track.push([r1((Date.now() - t0) / 1000), r1(Math.hypot(me.x - c.x, me.z - c.z)), near === Infinity ? -1 : r1(near), b.task.processes?.active?.name ?? '-', r1(b.pve.health())]);
+        if (TERRAIN === 'doors') {
+          // Track M9: the room's gates open and the mobs still inside it
+          const x0 = Math.floor(c.x);
+          const z0 = Math.floor(c.z);
+          const gates = [
+            [x0 + ROOM_HALF, z0],
+            [x0 - ROOM_HALF, z0],
+            [x0, z0 + ROOM_HALF],
+            [x0, z0 - ROOM_HALF],
+          ] as const;
+          let open = 0;
+          for (const [gx, gz] of gates) {
+            const g = await b.truth.ok<{ states?: Record<string, unknown> }>('block', [gx, FEET_Y, gz]).catch(() => undefined);
+            if (g?.states?.open_bit === true || g?.states?.open_bit === 1) open++;
+          }
+          const inside = live.filter((x) => Math.abs(x.location.x - c.x) < ROOM_HALF && Math.abs(x.location.z - c.z) < ROOM_HALF).length;
+          doorTrack.push(`${r1((Date.now() - t0) / 1000)}:open ${open},inside ${inside}`);
+        }
+      }
       if (left.every((x) => x.valid === false || (x.health ?? 1) <= 0)) {
         clearS ??= r1((Date.now() - t0) / 1000);
         // sealed in: watch it come out; Track M7 (MOBS_POISON_WAIT): the witch's poison still on the bot takes the health on
@@ -452,7 +609,10 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     }
     offTrace();
     offPotions();
+    lineSink = undefined;
     const seconds = r1((Date.now() - t0) / 1000);
+    const meEnd = b.pve.position();
+    const endFromSpot = r1(Math.hypot(meEnd.x - c.x, meEnd.z - c.z));
     const poisonLeft = poisonLeftS(b); // Track M7
     const endHealth = r1(b.pve.health());
     if (act) activityDone = (await Promise.race([act, sleep(30_000).then(() => 'still running')])) ?? 'none';
@@ -519,6 +679,14 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       potionsNear: potionEnds.filter((d) => d <= 4).length,
       potionEnds,
       floors: diffCounts(floorCounts(b), floors0),
+      endFromSpot,
+      maxFromSpot: r1(maxFromSpot),
+      homeS,
+      lastHitS: mine.length ? r1((Math.max(...mine.map((h) => h.tick)) - since) / 20) : null,
+      track,
+      lines,
+      ...(TERRAIN ? { terrain: TERRAIN } : {}),
+      ...(doorTrack.length ? { doors: doorTrack } : {}),
       activityDone,
       friendly,
       ...(friendly ? { friendlyOn } : {}),
@@ -560,12 +728,12 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
   }
 
   const fmtRow = (r: CellResult): string =>
-    `${r.label}${r.ab ? ` [${r.ab}]` : ''}${r.rep !== undefined && REPEAT > 1 ? ` #${r.rep + 1}` : ''} ${r.kit} ${r.cell}${r.hard ? ' (hard)' : ''}${r.time === 'noon' ? ' (day)' : ''}: ${r.harness ? `HARNESS FAILURE (${r.harness}), not counted; ` : ''}${r.died ? `DIED${r.deathCauses?.length ? ` (${r.deathCauses.join(', ')})` : ''}` : 'alive'} after ${r.seconds} s, damage ${r.damage} (${r.perMinute}/min, lowest ${r.minHealth}), hits ${Object.entries(r.hitsByType).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}, ${r.cleared ? `cleared in ${r.clearS} s` : `${r.left} left`}${r.poisonLeftS ? `, poisoned ${r.poisonLeftS} s more at the end (health ${r.endHealth})` : ''}${r.rushes ? `, rushes ${r.rushes}` : ''}${r.cures ? `, milk ${r.cures}` : ''}, reflex ${r.reflexHits}${r.potions ? `, potions ${r.potionsNear}/${r.potions} near (steps ${r.potionSteps})` : ''}, floors ${Object.entries(r.floors).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}${r.activity !== 'idle' ? `, ${r.activity}: ${r.activityDone}` : ''}${r.friendly ? `, FRIENDLY ${r.friendly}` : ''}${r.seal ? `, sealed at ${r.seal.sealedS} s${r.seal.dugIn ? ' (dug in)' : ''} health ${r.seal.healthIn} -> ${r.seal.healthMax}, ${r.seal.bites} bites, ${r.seal.damageInside} damage inside, ${r.seal.outS !== null ? `out at ${r.seal.outS} s` : 'still in'}` : ''}${r.fleeFly ? `, elytra flee asked ${r.fleeFly.asked} (${r.fleeFly.landed} landed, ${r.fleeFly.ended} ended otherwise, ${r.fleeFly.refused} refused), ${r.fleeFly.fromSpot} from the spot at the end${r.fleeFly.last ? `: ${r.fleeFly.last.slice(0, 160)}` : ''}` : ''}`;
+    `${r.label}${r.ab ? ` [${r.ab}]` : ''}${r.rep !== undefined && REPEAT > 1 ? ` #${r.rep + 1}` : ''} ${r.kit} ${r.cell}${r.hard ? ' (hard)' : ''}${r.time === 'noon' ? ' (day)' : ''}: ${r.harness ? `HARNESS FAILURE (${r.harness}), not counted; ` : ''}${r.died ? `DIED${r.deathCauses?.length ? ` (${r.deathCauses.join(', ')})` : ''}` : 'alive'} after ${r.seconds} s, damage ${r.damage} (${r.perMinute}/min, lowest ${r.minHealth}), hits ${Object.entries(r.hitsByType).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}, ${r.cleared ? `cleared in ${r.clearS} s` : `${r.left} left`}${r.poisonLeftS ? `, poisoned ${r.poisonLeftS} s more at the end (health ${r.endHealth})` : ''}${r.rushes ? `, rushes ${r.rushes}` : ''}${r.cures ? `, milk ${r.cures}` : ''}, reflex ${r.reflexHits}${r.potions ? `, potions ${r.potionsNear}/${r.potions} near (steps ${r.potionSteps})` : ''}, floors ${Object.entries(r.floors).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}${r.endFromSpot !== undefined ? `, end ${r.endFromSpot} from the spot (at most ${r.maxFromSpot})${r.homeS != null ? `, home again at ${r.homeS} s` : ''}${r.lastHitS != null ? `, last hit at ${r.lastHitS} s` : ''}` : ''}${r.activity !== 'idle' ? `, ${r.activity}: ${r.activityDone}` : ''}${r.friendly ? `, FRIENDLY ${r.friendly}` : ''}${r.seal ? `, sealed at ${r.seal.sealedS} s${r.seal.dugIn ? ' (dug in)' : ''} health ${r.seal.healthIn} -> ${r.seal.healthMax}, ${r.seal.bites} bites, ${r.seal.damageInside} damage inside, ${r.seal.outS !== null ? `out at ${r.seal.outS} s` : 'still in'}` : ''}${r.fleeFly ? `, elytra flee asked ${r.fleeFly.asked} (${r.fleeFly.landed} landed, ${r.fleeFly.ended} ended otherwise, ${r.fleeFly.refused} refused), ${r.fleeFly.fromSpot} from the spot at the end${r.fleeFly.last ? `: ${r.fleeFly.last.slice(0, 160)}` : ''}` : ''}`;
 
   beforeAll(async () => {
     await prepareServer({ time: TIME });
     if (HARD) await gauntCmd('difficulty', 'hard');
-    bot = await startGauntBot('GtMobs', {}, { owners: [ownerName], values: { guard: '16' } });
+    bot = await startGauntBot('GtMobs', {}, { owners: [ownerName], values: { guard: '16' }, onLine: (_scope, msg) => lineSink?.(msg) });
     const sv = await serverBuild(GAUNT_CONTAINER);
     server = `${sv.container} ${sv.build} (pong ${bot.conn.gameVersion})`;
     console.log(`gauntlet server: ${server}, image ${sv.image}`);

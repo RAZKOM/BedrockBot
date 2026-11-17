@@ -4,7 +4,7 @@
 import type { CombatLoop, CombatMover } from '../../../src/skills/combat/combat.ts';
 import type { MoveCommand } from '../../../src/skills/input/types.ts';
 import type { Goal } from '../../../src/skills/nav/goals.ts';
-import type { SkillResult } from '../../../src/skills/types.ts';
+import type { GotoOptions, SkillResult } from '../../../src/skills/types.ts';
 import type { EntityInfo, Vec3 } from '../../../src/world/types.ts';
 
 export class FakeSource {
@@ -61,12 +61,15 @@ export class FakeLoop implements CombatLoop {
 
 export class FakeMover implements CombatMover {
   gotos: { goal: Goal; sprint: boolean | undefined }[] = [];
+  /** Track M9: each goto's options, in the order of `gotos`. */
+  readonly gotoOpts: (GotoOptions | undefined)[] = [];
   cancels = 0;
   private pending: ((r: SkillResult) => void) | undefined;
   readonly nav = { busy: false };
-  goto(goal: Goal, opts?: { sprint?: boolean }): Promise<SkillResult> {
+  goto(goal: Goal, opts?: GotoOptions): Promise<SkillResult> {
     this.cancel();
     this.gotos.push({ goal, sprint: opts?.sprint });
+    this.gotoOpts.push(opts);
     this.nav.busy = true;
     return new Promise((r) => {
       this.pending = r;

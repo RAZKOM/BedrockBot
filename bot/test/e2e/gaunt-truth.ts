@@ -14,7 +14,7 @@ import { registerBuiltinCommands } from '../../src/chat/commands.ts';
 import { Connection } from '../../src/connection/connection.ts';
 import { Metrics } from '../../src/connection/metrics.ts';
 import type { ConnectTarget, Vec3 } from '../../src/connection/types.ts';
-import { createLogger, silentLogger } from '../../src/log.ts';
+import { createLogger, silentLogger, type Logger } from '../../src/log.ts';
 import type { CommonTaskOptions } from '../../src/tasks/base.ts';
 import { buildTaskContext } from '../../src/tasks/context.ts';
 import { NightProcess } from '../../src/tasks/process/night.ts';
@@ -115,9 +115,26 @@ export class GauntTruth extends PveTruth {
 export type GauntBot = Omit<PveBot, 'truth'> & { truth: GauntTruth; night: NightProcess | undefined };
 
 /** Connect a bot running the afk task (walking on); `values` are the CLI values (`guard`, ...). */
-export async function startGauntBot(prefix: string, options: Partial<CommonTaskOptions> = {}, extra: { owners?: string[]; values?: Record<string, unknown>; viewDistance?: number } = {}): Promise<GauntBot> {
+export async function startGauntBot(prefix: string, options: Partial<CommonTaskOptions> = {}, extra: { owners?: string[]; values?: Record<string, unknown>; viewDistance?: number; onLine?: (scope: string, msg: string) => void } = {}): Promise<GauntBot> {
   const name = uniqueName(prefix);
   const log = VERBOSE ? createLogger('info', name) : silentLogger;
+  // Track M9: the task's info and warn lines to `onLine` too (the gauntlet keeps a run's flee / guard lines in its row)
+  const onLine = extra.onLine;
+  const scoped = (scope: string): Logger => {
+    const base = VERBOSE ? createLogger('info', `${name}:${scope}`) : silentLogger;
+    if (!onLine) return base;
+    return {
+      ...base,
+      info: (msg: string, ...rest: unknown[]) => {
+        onLine(scope, msg);
+        base.info(msg, ...rest);
+      },
+      warn: (msg: string, ...rest: unknown[]) => {
+        onLine(scope, msg);
+        base.warn(msg, ...rest);
+      },
+    };
+  };
   const conn = new Connection({ version: E2E_VERSION, username: name, logger: log, reconnect: false, ...(extra.viewDistance ? { viewDistance: extra.viewDistance } : {}) });
   const metrics = new Metrics();
   metrics.attach(conn);
@@ -133,7 +150,7 @@ export async function startGauntBot(prefix: string, options: Partial<CommonTaskO
     options: common,
     // --no-config: waypoints and settings in memory only (never the user's config dir)
     values: { 'no-config': true, ...extra.values },
-    logger: VERBOSE ? (scope) => createLogger('info', `${name}:${scope}`) : () => silentLogger,
+    logger: scoped,
     position: () => ref.task?.position(),
   });
   const t = afkTask.create(built.ctx) as WalkingTask;

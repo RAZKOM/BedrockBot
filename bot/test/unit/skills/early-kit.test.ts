@@ -12,9 +12,13 @@ const allOff = (pve: PveController): void => {
   for (const k of Object.keys(pve.rules) as (keyof typeof pve.rules)[]) pve.rules[k] = false;
 };
 
-it('the rules are on by default', () => {
-  expect(Object.values(PVE_RULES_DEFAULT).every((v) => v)).toBe(true);
-  expect(Object.keys(PVE_RULES_DEFAULT).sort()).toEqual(['archerDuel', 'bareArcher', 'fleeLong', 'legHold', 'poison', 'poisonBite', 'shooterHome', 'shooterWay', 'volley', 'witchCrowd', 'witchRush', 'milkCure'].sort()); // Track M5: + shooterWay, poisonBite, witchCrowd (m5-rules.test.ts); Track M6: + volley, bareArcher (m6-rules.test.ts); Track M7: + witchRush, milkCure (m7-rules.test.ts)
+/** Track M9's rules and their defaults (m9-rules.test.ts): the ones that ship off stay off. */
+const M9_DEFAULTS: Record<string, boolean> = { followRun: true, sprintJump: false, craftBlade: false };
+
+it('the rules are on by default (Track M9: its own defaults)', () => {
+  const rules = PVE_RULES_DEFAULT as unknown as Record<string, boolean>;
+  expect(Object.entries(rules).every(([k, v]) => (k in M9_DEFAULTS ? v === M9_DEFAULTS[k] : v))).toBe(true);
+  expect(Object.keys(PVE_RULES_DEFAULT).sort()).toEqual(['archerDuel', 'bareArcher', 'fleeLong', 'legHold', 'poison', 'poisonBite', 'shooterHome', 'shooterWay', 'volley', 'witchCrowd', 'witchRush', 'milkCure', ...Object.keys(M9_DEFAULTS)].sort()); // Track M5: + shooterWay, poisonBite, witchCrowd (m5-rules.test.ts); Track M6: + volley, bareArcher (m6-rules.test.ts); Track M7: + witchRush, milkCure (m7-rules.test.ts); Track M9: + followRun, sprintJump, craftBlade (m9-rules.test.ts)
 });
 
 describe('the archer at home (archerDuel)', () => {

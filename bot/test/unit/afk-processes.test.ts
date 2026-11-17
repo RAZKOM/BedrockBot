@@ -268,7 +268,7 @@ describe('afk processes', () => {
     const nightMover = new FakeMover();
     const loopRef: { loop?: FakeLoop } = {};
     const ref: { p?: NightProcess } = {};
-    const n = new NightSafety({ clock, mover: nightMover as never, position: () => loopRef.loop?.state.pos, shelter: { x: 0, y: -60, z: 0 }, canMove: () => ref.p?.hasControl ?? false });
+    const n = new NightSafety({ clock, mover: nightMover, position: () => loopRef.loop?.state.pos, shelter: { x: 0, y: -60, z: 0 }, canMove: () => ref.p?.hasControl ?? false });
     const s = world({ night: n });
     loopRef.loop = s.loop;
     s.loop.pos = { x: 10.5, y: -60, z: 0.5 };

@@ -202,6 +202,11 @@ export interface CrafterDeps {
 /** Track R9: which recipes a craft may use (undefined: any). */
 export interface CraftPick {
   recipe?: (r: Recipe) => boolean;
+  /**
+   * Track M9 (the blade craft with an archer near): a table this craft places stays standing (digging it by hand took
+   * about 4.5 s under fire); it is remembered as ours and picked up by the next craft near it (pickUpPending).
+   */
+  leaveTable?: boolean;
 }
 
 export type CraftReason = 'done' | 'no_recipe' | 'missing' | 'no_table' | 'open_failed' | 'request_failed' | 'inventory_full' | 'interrupted' | 'not_ready' | 'busy' | 'table_left';
@@ -363,7 +368,12 @@ export class Crafter {
           await this.close(window);
         }
       } finally {
-        if (placed && tableAt) {
+        if (placed && tableAt && pick?.leaveTable) {
+          if (res.table) res.table.pickedUp = false;
+          this.stats.tablesLeft++;
+          if (res.reason === 'done') res.reason = 'table_left';
+          res.ok = false;
+        } else if (placed && tableAt) {
           const up = await this.pickUpTable(tableAt);
           if (res.table) res.table.pickedUp = up;
           if (up) this.forgetTable(tableAt);

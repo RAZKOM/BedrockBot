@@ -32,6 +32,7 @@ target); without walking every command answers `<cmd> needs a task that can walk
 | `bot/src/skills/container/hotbar-moves.ts` | Track V: `ensureInHotbar` (main inventory -> hotbar through the task's Containers), `HotbarPuller` (failure memory, the Digger's `pullTool` hook; with a full inventory the exchange `swap` and a failure line once a minute), `digToolScore` |
 | `bot/src/skills/follow/follow.ts` | `FollowController`: `follow({ runtimeId } \| { playerName })`, `come(playerName)`, `stop()` |
 | `bot/src/tasks/pve.ts` | `PveController`: guard, flee, follow, come, kill, a resumable goto, behaviour line, options |
+| `bot/src/tasks/process/blade.ts` | Track M9: the blade craft with a lone archer in sight (`PveRules.craftBlade`, off; the crafter's side is wired in `chat/commands-craft.ts`) |
 | `bot/src/chat/commands-pve.ts` | `!follow` `!come` `!stop` `!guard` `!kill` (with `now`), `!sleep`; wires the survival kit, the sleep controller and the night yield (Track W) |
 | `bot/src/tasks/process/readiness.ts` | trip readiness (Track W): `needsPrep`, `longTrip`, `hasChestplate`, `checkTrip`, `splitNow`, `prepareTrip` |
 | `bot/src/tasks/process/locator.ts` | `PlayerLocator`: far players from `player_list` + `player_location` / `locator_bar` (Track W) |
@@ -1264,18 +1265,27 @@ chunks (`MOBS_AB_RULE=legHold,archerDuel,fleeLong,poison,shooterHome`). The `off
 
 | kit, time | cell | off: deaths, damage a run | on: deaths, damage a run |
 |---|---|---|---|
-| stone, night | `skeleton-4` | **8** of 10, 22.2 | **0** of 10, 18.8 |
-| stone, night | `seal-5` | **10** of 10, 24.1 | **2** of 10, 25.3 |
-| stone, night | `mixed-8` | **6** of 10, 26.5 | **1** of 10, 16.1 |
+| stone, night | `skeleton-4` | **6** of 10, 20.3 (M9) | **0** of 10, 18.5 (M9) |
+| stone, night | `seal-5` | **10** of 10, 25.3 (M9) | **5** of 10, 28.9 (M9) |
+| stone, night | `mixed-8` | **3** of 10, 28.6 (M9) | **2** of 10, 26.6 (M9) |
 | stone, night | `act-goto` | 0 of 3, 6.0 | 0 of 3, 1.3 |
 | stone, night | `act-eat` | 0 of 3, 10.3 | 0 of 3, 11.3 |
-| stone, day | `seal-5` | **6** of 10, 21.5 | **1** of 10, 15.3 |
+| stone, day | `seal-5` | **7** of 10, 23.9 (M9) | **0** of 10, 20.2 (M9) |
 | iron, night | `mixed-8` | 0 of 10, 21.9 | 0 of 10, 27.1 |
-| iron, night | `seal-5` | **7** of 10, 22.4 | **3** of 10, 19.4 |
-| none, night | `witch-1` | **9** of 10, 25.1 | **2** of 10, 28.1 |
-| none, night | `skeleton-4` | **7** of 10, 24.6 | **3** of 10, 22.9 |
-| none, night | `pillager-1` | **10** of 10, 26.6 | **6** of 10, 27.2 |
+| iron, night | `seal-5` | **4** of 10, 17.5 (M9) | **0** of 10, 17.4 (M9) |
+| none, night | `witch-1` | **10** of 10, 26.9 (M9) | **5** of 10, 29.3 (M9) |
+| none, night | `skeleton-4` | **9** of 10, 26.7 (M9) | **1** of 10, 22.8 (M9) |
+| none, night | `pillager-1` | **10** of 10, 24.5 (M9) | **9** of 10, 27.5 (M9) |
 | live, night | `mixed-8` | 0 of 10, 26.8 | 0 of 10, 21.7 |
+
+The rows marked (M9) were measured again by Track M9 on the gauntlet as Track M8 left it (every run from rest; 0
+harness reruns), 10 a side over both servers, with the rules that came after this track switched off on both sides
+(`MOBS_RULES`), the code otherwise that of Track M8. First measured (off; on): stone `skeleton-4` 8, 22.2; 0, 18.8;
+stone `seal-5` 10, 24.1; 2, 25.3; stone `mixed-8` 6, 26.5; 1, 16.1; stone day `seal-5` 6, 21.5; 1, 15.3; iron
+`seal-5` 7, 22.4; 3, 19.4; no-kit `witch-1` 9, 25.1; 2, 28.1; no-kit `skeleton-4` 7, 24.6; 3, 22.9; no-kit
+`pillager-1` 10, 26.6; 6, 27.2. Over the eight rows the rules still take the deaths from 59 of 80 to 22 of 80 (first
+63 to 18); the stone `seal-5` and the no-kit `witch-1` and `pillager-1` rows keep more deaths on the `on` side than
+first measured, the stone `mixed-8` row's `off` side fewer.
 
 The live kit (the netherite set) with the rules on, every cell once by night: 0 deaths in 33, 1.4 damage a run (Track
 M2's final code, its defaults: 0 of 99, 1.3 a run). The iron kit's `mixed-8` damage is the witch's poison landing or not
@@ -1453,17 +1463,26 @@ Deaths, mean damage a run, the median of each run's lowest health. Every row Tra
 |---|---|---|---|
 | live, night | `mixed-8` | 0 of 10, 22.4, 1.6 | 0 of 10, 26.0, 1.3 |
 | stone, night | `mixed-8` | 0 of 10, 24.5, 1 | 0 of 10, 24.8, 1 |
-| stone, night | `seal-5` | **1** of 10, 25.5, 1 | **1** of 10, 24.0, 1 |
-| stone, day | `seal-5` | **2** of 10, 19.9, 1.5 | 0 of 10, 19.2, 4.5 |
-| iron, night | `seal-5` | **1** of 10, 20.4, 1.9 | 0 of 10, 15.6, 12.9 |
-| iron, night | `mixed-8` | **1** of 10, 22.5, 1.5 | 0 of 10, 17.9, 1.9 |
-| none, night | `witch-1` | **4** of 10, 30.1, 1 | 0 of 10, 16.4, 1 |
-| none, night | `skeleton-4` | **4** of 10, 21.0, 3.5 | 0 of 10, 20.0, 5 |
-| none, night | `pillager-1` | **7** of 12, 27.7, 0 | **10** of 11, 27.5, 0 |
+| stone, night | `seal-5` | **1** of 10, 24.6, 1 (M9) | 0 of 10, 27.6, 1 (M9) |
+| stone, day | `seal-5` | 0 of 10, 20.3, 2 (M9) | **1** of 10, 22.5, 1.5 (M9) |
+| iron, night | `seal-5` | **1** of 10, 23.5, 1.9 (M9) | 0 of 10, 21.1, 1.7 (M9) |
+| iron, night | `mixed-8` | **1** of 10, 26.7, 1.6 (M9) | 0 of 10, 24.6, 1.7 (M9) |
+| none, night | `witch-1` | **2** of 10, 28.6, 1 (M9) | 0 of 10, 24.8, 1 (M9) |
+| none, night | `skeleton-4` | **3** of 10, 21.5, 2.5 (M9) | 0 of 10, 23.5, 4 (M9) |
+| none, night | `pillager-1` | **7** of 10, 26.6, 0 (M9) | **3** of 10, 26.4, 2 (M9) |
 | none, night | `mixed-8` | 0 of 10, 14.9, 11 | 0 of 10, 14.4, 9.5 |
 | stone, night | `act-goto` | 0 of 4, 2.0, 18 | 0 of 4, 4.5, 16 |
 | stone, night | `act-eat` | 0 of 4, 14.5, 7.5 | 0 of 4, 12.0, 10.5 |
 | stone, night | `skeleton-4` | 0 of 10, 16.8, 7.5 | 0 of 10, 18.7, 4 |
+
+The rows marked (M9) were measured again by Track M9 as Track M4's were (the gauntlet as Track M8 left it, 10 a side
+over both servers, 0 harness reruns, the rules after this track switched off on both sides). First measured (off; on):
+stone `seal-5` 1, 25.5, 1; 1, 24.0, 1; stone day `seal-5` 2, 19.9, 1.5; 0, 19.2, 4.5; iron `seal-5` 1, 20.4, 1.9;
+0, 15.6, 12.9; iron `mixed-8` 1, 22.5, 1.5; 0, 17.9, 1.9; no-kit `witch-1` 4, 30.1, 1; 0, 16.4, 1; no-kit
+`skeleton-4` 4, 21.0, 3.5; 0, 20.0, 5; no-kit `pillager-1` 7 of 12, 27.7, 0; 10 of 11, 27.5, 0. Over the seven rows
+15 deaths in 70 off and 4 in 70 on (first 20 in 72 and 11 in 71). The witch rows' damage gap (30.1 to 16.4) and the
+iron `seal-5` lowest median of 12.9 did not come back; the no-kit `pillager-1` row now goes the rules' way (7 to 3),
+where it first went the other (7 to 10).
 
 Every run of this table and the per-rule table: 0 harness reruns (no death by a block, the ground or the void).
 
@@ -1473,7 +1492,8 @@ Every run of this table and the per-rule table: 0 harness reruns (no death by a 
   which most of the live kit's runs never start; the difference is read as where the poison landed, not as a rule.
 - **`pillager-1` with no kit** is the same either way: the 12 and 11 above with the two `shooterWay` series of the per-rule
   table make 19 deaths in 32 off and 19 in 31 on. No poison and no witch there, so `shooterWay` is the only rule that can
-  act. Track M4 measured 6 in 10 with its rules on.
+  act. Track M4 measured 6 in 10 with its rules on. (Track M9's re-measure from rest, above: 7 of 10 off, 3 of 10 on;
+  the first series ran before Track M8's fix, where a run after a death started with the bot walking off its spot.)
 
 ### Not met
 
@@ -2027,7 +2047,171 @@ cleanup; the run it caught was run again): off 6 of 10, 27.7, 0; on 0 of 10, 11.
   nor any way to break its line (ground, cover, a door).
 - **Other rows of Tracks M4 to M6.** Only the runs that came right after a death were started off their spot. Of
   Track M6's table only the two rows above had such runs; the A/B rows of Tracks M4 and M5 with deaths on both sides were
-  not run again, so their sides may be off by the same fault in either direction.
+  not run again, so their sides may be off by the same fault in either direction (Track M9 ran them again, below).
+
+## Track M9: losing a following archer
+
+Everything here ran on bds-pve and bds-gaunt (both BDS 1.26.60.6, normal difficulty, not recreated) with the gauntlet as
+Track M8 left it (every run from rest), by night, whole-run traces (`MOBS_TRACE_ALL=1`). Each row now also has where the
+run ended (`endFromSpot`, `maxFromSpot`), when the bot was home again (`homeS`: within 3 of its spot after having been 20
+or more out), the last hit's second, a track every 5 s (the distance out, the nearest mob, the process, the health) and
+the flight's, guard's and floors' lines.
+
+### The long case (no kit, 4 minutes a run, 10 runs a cell)
+
+`MOBS_SECONDS=240`, the code after Track M8 (`bareArcher` on). A run ends early at a death or once the server reports
+every mob gone (despawned or unloaded: a mob 32 or more from every player despawns at random, and the skeletons are
+left there).
+
+| cell | deaths | damage a run | lowest median | flights given up (60 s) | end: blocks from the spot (median, range) | home again |
+|---|---|---|---|---|---|---|
+| `pillager-1` | **9** of 10, at 66 to 137 s (median 101) | 29.9 | 0 | 11 | 389 (281 to 557) | 0 of 10 |
+| `skeleton-4` | 0 of 10 | 7.6 | 15.5 | 14 | 59 (2 to 100) | 2 of 10 |
+
+- **The pillager follows every flight to its end.** The flight runs about 250 blocks a minute and the pillager keeps to
+  8 to 15 behind it; a bolt lands about every 15 s. At `flee: gave up (60 s)` the 2 s cooldown hands the body to guard,
+  which fist-chases the pillager in 7 of 11 cases: the bot turns back into it and takes a bolt from 2 to 6 blocks (44
+  damage over the 11 give-ups in the 5 s after them), then `bareArcher` starts a new flight. 9 runs died in the second
+  minute on the second flight; the one that lived had the pillager walk off at the start. No run got home: `shooterHome`
+  and `shooterWay` keep it out while the pillager is near the way home or home, and the pillager stays near the bot.
+- **The skeletons give up.** Skeletons move at 0.25 (the pillager at 0.35, about a sprint), shoot from 15 and are
+  forgotten at 16 out of sight; they stay 15 to 40 off and are gone at 121 to 215 s in 8 of 10 runs. After the first
+  flight's minute the bot stands 55 to 100 out (84 s idle a run), flips between the `far` and the `home` leg (43 flips
+  `home -> far` over the 10 runs) whenever a skeleton comes back within 16, and gets home in 2 of 10.
+
+The pillager's numbers come from the vanilla behaviour pack the servers run (`entities.brarchive`):
+`nearest_attackable_target` with `must_see` and `within_radius` 16, `follow_range` 64, `ranged_attack` from 8,
+movement 0.35; the skeleton: `must_see`, `attack_radius` 15, movement 0.25, `avoid_sun`. Neither has `can_open_doors`.
+In the traces the pillager walks at 0.265 blocks a tick while the bot sprints at 0.27 to 0.29 (sticky sprint, BDS): the
+gap holds while the bot sprints and closes on the `far` leg's turns and re-plans, where it sprints on only a third of the
+ticks.
+
+### The rules (`PveController.rules`)
+
+Each acts only for a bot with no blade carried (no sword or axe in the hotbar or the main slots), so the live kit and
+every kit with a blade flee and fight as before.
+
+| rule | default | what it does |
+|---|---|---|
+| `followRun` | **on** | A `far` leg with an archer within `FLEE_SCAN` + 8 (seen or not) runs `FOLLOW_RUN` (32) past it (`followRunRadius`, no `FLEE_FAR` cap); a long leg the planner cannot find falls back to `fleeRadius` for the rest of the flight. No `home` leg while such an archer is within `FLEE_SCAN` + 8 (as the `shooterHome` rule's home that is shot at: the way home turns the body back towards it). A flight that gives up (60 s) with the archer still within `FLEE_SCAN` + 8 (seen or not) ends with no cooldown, so the next flight starts as soon as it is seen again and there are no 2 s for guard to fill. Log: `flee: a long leg from pillager at D (to R from it)` and `flee: pillager following at D: not to home while it is within 24`, each once a flight |
+| `sprintJump` | off | On the `far` leg from such an archer, with the food over 10 (the sprint's eat floor), the path follower jumps while it sprints on a straight level run (`sprintJumpOk` in `skills/nav/follower.ts`: the aim 4.5 or more ahead on the same level, more than 8 blocks of walk left, facing within 8 degrees, no hazard beside the way, not the last leg). A nav option (`GotoOptions.sprintJump`) |
+| `craftBlade` | off | A lone archer in sight (no other hostile within 24), health 14 or over, no melee mob within 8 and the materials for a sword: the bot crafts the best it can (iron, stone, wooden) where it stands through the crafter (`tasks/process/blade.ts`, a process at 90, over guard and under the flight) and leaves the table it placed standing (the next craft near it picks it up); the flight on foot waits for it, then guard fights with the sword. Below 10 health the craft is left to the flight; a failed craft waits 30 s. Log: `blade: no blade with pillager in sight (health H): crafting a stone_sword`, `blade: crafted stone_sword after T s (...)` |
+
+### Each rule on its rows (from rest, by night, 120 s a run)
+
+Each rule A/B'd on its own (`MOBS_AB_RULE=<rule>`, off then on alternating, 2 or 3 a side a chunk, the chunks split over
+both servers), the other rules as they are at the step. Deaths, mean damage a run, the median of each run's lowest health.
+
+| rule (the others) | kit, cell | off | on |
+|---|---|---|---|
+| `followRun` (the code after Track M8) | none `pillager-1`, 10 a side | **6** of 10, 28.2, 0 | 0 of 10, 9.7, 13.5 |
+| `followRun` | none `skeleton-4`, 10 a side | 0 of 10, 6.7, 16 | 0 of 10, 1.9, 20 |
+| `sprintJump` (`followRun` on) | none `pillager-1`, 15 a side | 0 of 15, 13.7, 11 | 0 of 15, **2.7**, 17 |
+| `sprintJump` (`followRun` on) | none `skeleton-4`, 10 a side | 0 of 10, 8.5, 16 | 0 of 10, 4.0, 16.5 |
+| `craftBlade` (`followRun` on) | `mats` `pillager-1`, 15 a side | 0 of 15, 13.8, 10 | 0 of 15, **5.3**, 13 |
+| `craftBlade` (`followRun` on) | `mats` `skeleton-1`, 8 a side | 0 of 8, 5.8, 20 | 0 of 8, 3.5, 16 |
+
+`mats` is the `none` kit with 4 cobblestone, 2 sticks and 4 oak planks. One harness run (not at rest) in the first
+`followRun` series was run again; none in the others. The `followRun` rows are the rule after its fix (below), 2 or 3
+a side a chunk over both servers; the `sprintJump` and `craftBlade` rows ran with `followRun` as first built.
+
+- **`followRun`.** The bolts land on the `far` leg. With the legs to `FLEE_FAR` the body sprinted on 34 % of that leg's
+  ticks (0.220 blocks a tick) and 91 bolts landed in 16 runs; with the long leg 67 % (0.247) and 46 in 17. At the
+  minute's end guard took the body for a fist chase after 14 of the `off` side's 16 give-ups; with the rule after 3 of
+  18 (the pillager out of sight at that tick, so the cooldown held). The pillager still follows (median 11.4 either
+  side) and the flight still gives up after a minute; skeletons are the same either way.
+- **`followRun` as first built had two gaps**, both found in the traces after a `pve-m9` failure. The flight took a
+  `home` leg with the pillager still behind it: in 14 of 17 `on` runs, 34 legs, the pillager a median 13 off (`far ->
+  home (home clear), nearest threat 16.6`, then `home -> far` at 10.9 within 0.75 s). The leg rule had home clear and
+  far enough the moment the pillager was 12 or more off to the side, and each such leg turned the body back for about
+  15 ticks before the hold sent it out again. And the restart at the minute's end looked for the pillager in sight
+  within 16, while it was often 16 to 18 behind at that tick: then the 2 s cooldown held and guard took the body. Now
+  neither: no home leg while the archer is within 24, and the restart's look is the follower's (within 24, seen or not).
+  The table's `followRun` rows are the rule as it is; as first built: `pillager-1` 16 a side 7 of 16, 27.7, 1 against
+  0 of 16, 12.4, 11; `skeleton-4` 10 a side 0, 5.4, 16 against 0, 4.4, 16. With the fix, after the `on` side's 10
+  give-ups guard started a fight within 1 s 4 times (the pillager in guard's radius before the flight sees it), with 4
+  damage in the 5 s after them (`off`: 9 times, 48); home legs came only in one run, with the pillager gone from the
+  bot's view. No run on either side got home within the 2 minutes (`skeleton-4`: 1 of 10 off, 0 of 10 on; the bot
+  ends a median 62 out with the rule against 100): the rule keeps the bot out while an archer is within 24.
+- **`sprintJump`.** On the `far` leg the body moved at 0.271 blocks a tick against 0.254, the pillager's median distance
+  was 14.2 against 11.2, and 3 bolts landed on that leg in 15 runs against 47. The food at the end: a median of 13
+  (lowest 13, no run ate) against 16 (every run ate).
+- **`craftBlade`.** The sword was in the hotbar 1.7 to 1.9 s after the start in 15 of 15 runs (the table crafted from
+  the planks, placed, used, left standing); guard killed the pillager at a median 5.4 s, one or two bolts in. A lone
+  skeleton died at a median 5.7 s. As first built it also crafted with more archers near: `skeleton-4`, 6 a side, 9.7
+  to 10.2 damage, the lowest median 14.5 to 12.5 (the craft under four bows, then a fight with no armour); it now
+  crafts only for a lone archer (`BLADE_LONE`).
+
+### Tried and not taken
+
+- **Cover (`coverLeg`).** The legs from an archer went to the nearest cell within 10 that no archer had a line to.
+  `MOBS_TERRAIN=walls` (cobblestone walls 3 high and 4 to 7 long, laid at random round the spot, none within 10),
+  `pillager-1`, 90 s: off 0 of 3, 10.3 a run; on **4 of 4** died, at 18 to 34 s. The bot stood behind a wall 15 blocks
+  out and the pillager walked round it: a target out of sight is kept for 3 s (`must_see`), and it closes 8 blocks in
+  that time. Removed.
+- **Gates closed behind the flight (`fleeDoors`).** `MOBS_TERRAIN=doors`: a roofless room of cobblestone 4 high, 12 from
+  the spot each way, a closed fence gate in each side (neither mob opens one). With `closeDoors` asked on every leg the
+  gate the bot left by was open at every 5 s sample in 4 of 4 runs, as with it off, and the pillager left the room
+  behind the bot by 11 s in every run (damage 6.5 and 4.8 a run in 40 s). The walk schedules the close for the node
+  after the gate, and the flight's next walk (a new leg, or the 2 s re-plan) drops it. Removed; making the close outlive
+  a re-plan is a navigator change not made here.
+- **The seal-in at the minute's end (`sealFollowed`).** A flight that gave up with the archer still in sight sealed in
+  (`sealIn` on; with no blocks carried every one was a dig-in), `pillager-1`, 10 a side: off 0 deaths, 16.7, 9.5; on
+  **4** deaths (70 to 75 s), 17.3, 5.5. The dig-in took 4 to 6 s under fire (3 to 7 health); 5 of 10 closed and took no
+  hit after it, with the pillager standing over the hole; 4 were left open (knocked off the cell, or the body did not
+  drop into the hole). Removed.
+
+### Tracks M4 and M5 measured again
+
+Every A/B row of Tracks M4 and M5 with a death on either side ran again from rest, 10 a side over both servers (5 a
+side a chunk, 60 s a run, by night unless the row says day), the rules that came after each track switched off on both
+sides (`MOBS_RULES`); 0 harness reruns. The corrected rows are in place in the two tables, marked (M9), with the first
+numbers under them. Track M4's rules still take the deaths of its eight rows from 59 of 80 to 22 of 80 (first 63 to 18),
+Track M5's three from 15 of 70 to 4 of 70 (first 20 to 11). The no-kit `pillager-1` row of Track M5, which first went 7
+to 10 against the rules, goes 7 to 3; Track M4's stone `seal-5` and no-kit `witch-1` and `pillager-1` rows keep more
+deaths on the `on` side (5, 5 and 9 of 10) than first measured (2, 2 and 6). The A/B rows Track M6 corrected (Track M8)
+were not run again.
+
+### Not met
+
+- **Losing the pillager.** No rule shook it: with `followRun` (and `sprintJump`) it still followed each flight for the
+  whole minute at a median 11 to 14 blocks, and the flight still gave up after 60 s. What the rules change is where the
+  bolts land and what the body does at the minute's end, not the follow itself. Breaking its line of sight did not help
+  on flat ground (cover above); a flight that ends inside a closed room needs the gate close to outlive a re-plan.
+- **Ground other than flat.** Every row ran on the gauntlet's flat cells. A long leg on a hillside, in a forest or along
+  a cliff has more turns, and the sprint-jump's checks (`sprintJumpOk`) were exercised on flat ground only.
+- **Getting home.** The long case's bot got home in 0 of 10 runs with the pillager and 2 of 10 with skeletons, and the
+  rules do not change the way home: with the pillager near the way home (`shooterWay`, `shooterHome`) the bot stays out.
+- **`craftBlade` with a table to walk to, an axe, or iron.** Every run crafted a stone sword from the inventory grid's
+  table; the wooden and iron recipes, a table already standing, and the craft with a melee mob coming were tested by
+  unit tests only. A table left standing on the Realm is a block left in the world.
+- **The Realm.** None of the rows ran there; `followRun` acts only with no blade carried, which the live kit never is.
+
+### On the Realm
+
+`followRun` is on with the update; `sprintJump` and `craftBlade` are off. The live kit carries a blade, so none of the
+three changes what it does: by night, near home, `!test mobs mixed8 5` and `!test mobs pillager 5` should give no `flee:
+a long leg` and no `blade:` line, every run alive, as before. `bare` stows the blades in main slots and still counts as
+carried, so it does not show the rules either.
+
+To see `followRun`, the blades (swords and axes) go into a chest first, nothing else changed:
+
+- `!test mobs pillager 3`: a flight from the pillager at full health (`flee: no blade with an archer in sight`), then
+  `flee: a long leg from pillager at D (to R from it)` and `flee: pillager following at D: not to home while it is
+  within 24` once a flight, and no `flee: far -> home` while the pillager is in view; at the minute's end `flee: gave
+  up (60 s)` is followed by a new flight as soon as the pillager is seen again, mostly not by `guard: pillager ...
+  fighting`. Every run alive (the test servers: 0 deaths in 10, 9.7 damage a run). `test/e2e/pve-m9.test.ts` checks
+  the same on bds-pve (`M9_TRACE=1` prints a line a second: the leg, the process, the health, the pillager's distance
+  and sight).
+
+The other two are switches of `PveController.rules` (`PVE_RULES_DEFAULT`, no chat setting), so trying them there takes
+a build with the switch on:
+
+- `sprintJump` on: the same, the body jumping on the straight parts of the long leg; the food falls about 3 points
+  faster. Watch for a jump off an edge or into a hole.
+- `craftBlade` on, a few planks, sticks and cobblestone carried and one pillager or skeleton:
+  `blade: no blade with pillager in sight (health 20): crafting a stone_sword`, then `blade: crafted stone_sword after
+  T s` (the test servers 1.7 to 1.9 s) and a guard fight. The crafting table is left where it was placed.
 
 ## Packets (BDS 1.26.60.6, verified)
 

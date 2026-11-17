@@ -361,3 +361,44 @@ bds-gaunt.
 57. **The early kits are unchanged.** The rush needs a diamond or netherite sword and the cure needs milk, so neither
     acts for the `none`, `stone` and `iron` kits. Track M6's seven rows were run again on the final code, 10 runs a side
     (2026-11-17): 0 deaths in 140 (Track M6's on side: 0 in 70).
+
+## Addendum: Track M9 (2026-11-17)
+
+The numbers are in [../pve.md](../pve.md) "Track M9: losing a following archer". The no-kit `pillager-1` and
+`skeleton-4` cells were run for 4 minutes a run, and each rule A/B'd from rest by night, 120 s a run, on bds-pve and
+bds-gaunt.
+
+58. **The long case is the pillager's.** With no blade, 4 minutes a run, 10 runs a cell: `pillager-1` 9 deaths (66 to
+    137 s), `skeleton-4` none. The pillager walks at about a sprint (0.35, 0.265 blocks a tick measured), follows a
+    flight for its whole minute and about 250 blocks, and lands its bolts where the flight turns or re-plans; at the
+    minute's end guard took the body for a fist chase (a bolt from 2 to 6 blocks), and the second flight died. Skeletons
+    (0.25) drop back and despawn; the bot stands 55 to 100 out and gets home in 2 of 10.
+59. **`followRun`: with no blade, a `far` leg from an archer within 24 runs 32 past it, no `home` leg while it is
+    within 24, and a flight that gives up with it within 24 (seen or not) has no cooldown.** A leg long and straight
+    enough is sprinted whole (67 % of the far leg's ticks against 34 %; the bolts on it 91 to 46 in 16 runs). As first
+    built the home leg was still taken (34 legs in 17 runs, the pillager a median 13 behind, each turned back after about
+    15 ticks) and the restart looked for the archer in sight within 16 (often 16 to 18 behind at the minute's end, so
+    guard took the body); both found from a `pve-m9` failure and fixed. The fixed rule, 10 a side: `pillager-1` 6
+    deaths to 0, damage 28.2 to 9.7, lowest median 0 to 13.5; `skeleton-4` 0 and 0, 6.7 to 1.9, 16 to 20 (first built:
+    7 of 16 to 0, 27.7 to 12.4; skeletons 5.4 to 4.4). **It ships on**: a choice of the leg, its length and the cooldown,
+    nothing placed or dug, no new movement, and a bot with a blade (the live kit) is untouched. The bot stays out while
+    the archer follows (home in 0 of 20 `on` runs).
+60. **`sprintJump`: on such a leg, with the food over 10, the path follower jumps while it sprints on straight level
+    runs.** `pillager-1` with `followRun` on, 15 a side: damage 13.7 to 2.7, lowest median 11 to 17, the bolts on the far
+    leg 47 to 3; `skeleton-4`: 8.5 to 4.0; the food at the end 16 to 13. **It ships off**: a new way of moving the body,
+    measured on flat cells only (decision 27's rule for anything that can kill the bot). A nav option
+    (`GotoOptions.sprintJump`), so other callers can take it up once it has run on real ground.
+61. **`craftBlade`: no blade, a lone archer in sight, health 14 or over and a sword's materials: craft the best sword
+    where the body stands, then fight.** The sword was in hand 1.7 to 1.9 s after the start in 15 of 15 runs and the
+    pillager dead at a median 5.4 s: damage 13.8 to 5.3, lowest median 10 to 13; a lone skeleton 5.8 to 3.5. With four
+    skeletons it lost (the craft under four bows, then a fight with no armour), so it waits for a lone archer. The table
+    it places is left standing (digging it by hand took about 4.5 s under fire) and is picked up by the next craft near
+    it. **It ships off**: it places a block and stands still in an archer's line for 2 s.
+62. **Not taken: cover, gates closed behind, the seal-in at the minute's end.** Cover behind walls killed 4 of 4 (the
+    pillager walks round a wall within the 3 s it keeps a target out of sight); the walk's gate close never ran under the
+    flight's re-plans (the gate open at every sample, 4 of 4); the dig-in at the minute's end took 4 to 6 s under fire and
+    lost 4 of 10 against 0. All three were removed; the gauntlet keeps the terrains (`MOBS_TERRAIN=trees|walls|doors`).
+63. **Tracks M4 and M5 measured again from rest.** Every A/B row of the two with a death on either side, 10 a side, the
+    later rules off on both sides: Track M4's rules 59 of 80 deaths to 22 (first 63 to 18), Track M5's 15 of 70 to 4
+    (first 20 to 11); Track M5's no-kit `pillager-1` row goes 7 to 3 where it first went 7 to 10. Decisions 32 to 44 stand
+    as made; the tables in docs/pve.md are corrected in place, the first numbers kept under them.

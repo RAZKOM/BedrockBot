@@ -5,7 +5,7 @@
 // an urgent command makes it yield.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SleepController, SleepEvent, SleepResult } from '../../src/skills/survival/sleep.ts';
-import { NightSafety, type Mover } from '../../src/tasks/night.ts';
+import { NightSafety } from '../../src/tasks/night.ts';
 import { NightProcess, type NightBedEvent } from '../../src/tasks/process/night.ts';
 import type { BlockInfo, Vec3 } from '../../src/world/types.ts';
 import { FakeMover } from './skills/pve-fakes.ts';
@@ -54,7 +54,7 @@ function setup(opts: { shelter?: Vec3 } = {}) {
   const pos = { x: 0.5, y: -60, z: 0.5 };
   const mover = new FakeMover();
   const ref: { np?: NightProcess } = {};
-  const night = new NightSafety({ clock, mover: mover as unknown as Mover, position: () => pos, shelter: opts.shelter, canMove: (): boolean => ref.np?.hasControl ?? false });
+  const night = new NightSafety({ clock, mover, position: () => pos, shelter: opts.shelter, canMove: (): boolean => ref.np?.hasControl ?? false });
   const np = new NightProcess(night, { mover, position: () => pos });
   ref.np = np;
   const sleeper = new FakeSleeper();

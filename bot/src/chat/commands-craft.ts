@@ -15,6 +15,7 @@ import { parseReserve, type RuntimeSettings } from '../config/settings.ts';
 import type { Logger } from '../log.ts';
 import { compactAll, compactLine, installCompactPlanner, COMPACT_KINDS, type CompactDone } from '../skills/craft/compact.ts';
 import { Crafter, craftLine, type CraftResult } from '../skills/craft/crafter.ts';
+import { BLADE_ITEMS } from '../tasks/process/blade.ts'; // Track M9
 import { RecipeIndex, usedText } from '../skills/craft/recipes.ts';
 import { isFlightKitItem } from '../skills/fly/kit.ts';
 import { setCompactPlanner, setCompactRunner } from '../skills/home/unloader.ts';
@@ -230,6 +231,24 @@ export function registerCraftCommands(d: CommandDeps, extra: CraftExtra = {}): C
     craft: (cancelled, item, n) => crafter.craft(item, n, cancelled),
     cancel: () => skills.cancel(),
   };
+  // Track M9 (PveRules `craftBlade`): the best sword the inventory can make now (looked at most once a second), and its craft
+  let bladeAt = -Infinity;
+  let bladeItem: string | undefined;
+  pve.bladeSmith = {
+    item: () => {
+      const now = performance.now();
+      if (now - bladeAt >= 1000) {
+        bladeAt = now;
+        bladeItem = BLADE_ITEMS.find((it) => (crafter.plan(it, 1)?.crafts ?? 0) > 0);
+      }
+      return bladeItem;
+    },
+    craft: async (item, cancelled) => {
+      const r = await crafter.craft(item, 1, cancelled, { leaveTable: true }); // (the table is picked up by the next craft near it)
+      bladeAt = -Infinity;
+      return { ok: r.crafted > 0, line: craftLine(r) };
+    },
+  };
   const planOpts = () => ({ keep: neverConsume, reserve });
   // the unload plan's compaction step and its runner (reset when the task stops)
   installCompactPlanner(() => (settings.get('compactOnUnload') ? planOpts() : { keep: () => true }));
@@ -244,6 +263,7 @@ export function registerCraftCommands(d: CommandDeps, extra: CraftExtra = {}): C
   d.task.stop = () => {
     setCompactPlanner(undefined);
     setCompactRunner(undefined);
+    pve.bladeSmith = undefined;
     crafter.dispose();
     recipes.dispose();
     stop();

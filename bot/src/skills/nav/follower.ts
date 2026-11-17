@@ -37,6 +37,22 @@ export interface FollowerOptions {
   cellCost?: ((x: number, y: number, z: number) => number) | undefined;
   /** Track AJ: sneak while the body centre is within 0.3 of an edge with a drop of more than 3 blocks (or lava) beyond. Default true. */
   edgeSneak?: boolean;
+  /**
+   * Track M9: jump while sprinting on a straight level run (sprintJumpOk: the aim SPRINT_JUMP_AIM or more ahead on the
+   * same level, more than 8 blocks of walk left, facing within SPRINT_JUMP_ERR, nothing beside the way). A sprint-jump
+   * carries the body about 0.2 farther a jump (PHYSICS.sprintJumpBoost) and costs 0.2 food exhaustion a jump. Default false.
+   */
+  sprintJump?: boolean;
+}
+
+/** Track M9: a sprint-jump only with the straight line to the aim at least this long (blocks): the jump flies about 4. */
+export const SPRINT_JUMP_AIM = 4.5;
+/** Track M9: ... and the view within this of the aim (degrees): the body hardly turns in the air. */
+export const SPRINT_JUMP_ERR = 8;
+
+/** Track M9 (`sprintJump`): the follower may jump now (a pure rule over what `decide` knows). */
+export function sprintJumpOk(i: { sprinting: boolean; onGround: boolean; aimLevel: boolean; dAim: number; err: number; runLength: number; hazard: boolean; sneak: boolean; finalLeg: boolean }): boolean {
+  return i.sprinting && i.onGround && i.aimLevel && !i.sneak && !i.hazard && !i.finalLeg && i.dAim >= SPRINT_JUMP_AIM && i.err < SPRINT_JUMP_ERR && i.runLength > 8;
 }
 
 /**
@@ -176,6 +192,8 @@ export class PathFollower {
   readonly path: readonly PathNode[];
   private readonly grid: NavGrid;
   private readonly sprint: boolean;
+  /** Track M9: jump while sprinting on straight level runs. */
+  private readonly sprintJump: boolean;
   private readonly maxTurn: number;
   private readonly arrive: number;
   readonly stopAtEnd: boolean;
@@ -202,6 +220,7 @@ export class PathFollower {
     this.path = path;
     this.grid = grid;
     this.sprint = opts.sprint ?? true;
+    this.sprintJump = opts.sprintJump ?? false;
     this.maxTurn = opts.maxTurnDeg ?? 30;
     this.arrive = opts.arriveRadius ?? 0.3;
     this.stopAtEnd = opts.stopAtEnd ?? true;
@@ -402,6 +421,11 @@ export class PathFollower {
     if (this.sprint && this.pressGuard.sinceSneak > SPRINT_AFTER_SNEAK && forward === 1 && s.onGround && err < 15 && this.runLength(p) > 5) sprint = true;
     // BDS keeps a sprint while forward is held: releasing forward for one tick is what ends it
     if (s.sprinting && !sprint && forward === 1 && s.onGround) forward = 0;
+    // Track M9: the sprint-jump on a straight level run
+    if (this.sprintJump && sprint && forward === 1 && !jump) {
+      const aimLevel = (a.move === 'walk' || a.move === 'diag') && Math.abs(a.feet - p.y) < 1e-3;
+      if (sprintJumpOk({ sprinting: s.sprinting === true, onGround: s.onGround, aimLevel, dAim, err, runLength: this.runLength(p), hazard: this.hazardBeside(a) || this.hazardBeside(target), sneak, finalLeg })) jump = true;
+    }
 
     return { cmd: { forward, strafe: 0, yaw: this.yaw, jump, sprint, sneak }, done: false };
   }

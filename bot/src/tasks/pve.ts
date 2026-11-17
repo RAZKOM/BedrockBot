@@ -48,6 +48,7 @@ import type { GotoOptions, SkillResult } from '../skills/types.ts';
 import { headInWater } from '../skills/survival/surface.ts'; // Track BF
 import { chooseFood } from '../skills/survival/eat.ts'; // Track M1: the eat floor
 import { EAT_BEFORE_SPRINT_LOST } from '../skills/survival/index.ts'; // Track M2
+import { BladeProcess, type BladeSmith } from './process/blade.ts'; // Track M9
 import { Hotbar } from '../world/hotbar.ts';
 import type { Inventory } from '../world/inventory.ts';
 import { armourScore, WINDOW_ARMOR } from '../skills/survival/armour.ts';
@@ -322,8 +323,39 @@ export interface PveRules {
    * kit carries no milk: without it nothing changes.
    */
   milkCure: boolean;
+  /**
+   * Track M9: with no blade carried, a `far` leg with an archer within FLEE_SCAN + 8 (followingArcher) runs FOLLOW_RUN past it (followRunRadius,
+   * no FLEE_FAR cap), so the walk is long and straight enough to sprint the whole way: a pillager runs about as fast as a
+   * sprint and stops to shoot only within 8, while the short legs before sprinted a third of the time and let it close in.
+   * A long leg the planner cannot find falls back to fleeRadius for the rest of the flight. No home leg while that archer
+   * is within FLEE_SCAN + 8 (the way home turns the body back towards it). A flight that gives up (60 s) with the archer
+   * still within FLEE_SCAN + 8 (seen or not) ends with no cooldown, so the next one starts as soon as it is seen, not
+   * after the 2 s in which guard chased it with a fist. On by default (no kit `pillager-1`, 10 a side: 6 deaths to 0;
+   * a bot with a blade is untouched).
+   */
+  followRun: boolean;
+  /**
+   * Track M9: with no blade carried, a `far` leg from an archer that follows (followingArcher) jumps while it sprints on straight level runs
+   * (GotoOptions.sprintJump, follower.ts sprintJumpOk) while the food is over SPRINT_JUMP_FOOD. A new way of moving the
+   * body: off by default.
+   */
+  sprintJump: boolean;
+  /**
+   * Track M9: no blade carried, a lone archer in sight (no other hostile within BLADE_LONE), health BLADE_CRAFT_HEALTH or
+   * over and the materials for a sword: craft one where the bot stands (tasks/process/blade.ts) instead of running, then
+   * guard fights with it. Places a crafting table and leaves it standing: off by default.
+   */
+  craftBlade: boolean;
 }
-export const PVE_RULES_DEFAULT: Readonly<PveRules> = { legHold: true, archerDuel: true, fleeLong: true, poison: true, shooterHome: true, shooterWay: true, poisonBite: true, witchCrowd: true, volley: true, bareArcher: true, witchRush: true, milkCure: true };
+export const PVE_RULES_DEFAULT: Readonly<PveRules> = { legHold: true, archerDuel: true, fleeLong: true, poison: true, shooterHome: true, shooterWay: true, poisonBite: true, witchCrowd: true, volley: true, bareArcher: true, witchRush: true, milkCure: true, followRun: true, sprintJump: false, craftBlade: false };
+/** Track M9 (`followRun`): a far leg from an archer that follows ends this far beyond the archer's distance (blocks). */
+export const FOLLOW_RUN = 32;
+/** Track M9 (`followRun`): the radius of such a leg (from every threat). */
+export function followRunRadius(nearest: number): number {
+  return (Number.isFinite(nearest) ? nearest : FLEE_AWAY) + FOLLOW_RUN;
+}
+/** Track M9 (`sprintJump`): the sprint-jump only while the food is over this (EAT_BEFORE_SPRINT_LOST: the flight eats from there down). */
+export const SPRINT_JUMP_FOOD = EAT_BEFORE_SPRINT_LOST;
 /** Track M7 (`milkCure`): milk is drunk only when the poison would still take more than this (health). */
 export const CURE_MIN_LOSS = 3;
 /** Track M7 (`milkCure`): no milk with a live witch this close (blocks): she throws poison at a bot that is not poisoned. */
@@ -559,6 +591,10 @@ export class PveController {
   fleeFlight: { ready(): boolean; go(why: string): Promise<FleeFlightResult>; cancel(): boolean; active(): boolean } | undefined;
   /** Track M3: what the last elytra flee came to (the status, the tests). */
   lastFleeFlight: FleeFlightResult | undefined;
+  /** Track M9 (`craftBlade`): the crafter's side of the blade craft, wired by chat/commands-craft.ts. */
+  bladeSmith: BladeSmith | undefined;
+  /** Track M9 (`craftBlade`): the blade craft (tasks/process/blade.ts). */
+  readonly bladeProcess: BladeProcess;
   /** Track M3: an elytra flee was asked for and has not answered yet. */
   flyAsked = false;
   /**
@@ -639,6 +675,7 @@ export class PveController {
       });
     this.fleeProcess = this.processes.add(new FleeProcess(this));
     this.guardProcess = this.processes.add(new GuardProcess(this));
+    this.bladeProcess = this.processes.add(new BladeProcess(this)); // Track M9 (`craftBlade`, off by default)
     this.unsubs.push(loop.onBeforeStep(() => this.idleBlock())); // Track M1 round 2: the shield while idle
     this.unsubs.push(loop.onBeforeStep(() => this.noteWitchThrows())); // Track M1 round 2: the witch's throw window
     this.unsubs.push(loop.onBeforeStep(() => this.potionStep())); // Track M1 round 2: out from under her potion
@@ -1512,7 +1549,8 @@ export class PveController {
     // Track M6 (`bareArcher`): no blade and an archer with a line on the bot: the flight on foot at any health. At
     // FLY_SHOOTER_HEALTH or over it stays on foot (`foot`): the elytra flee's rule for shooters (Track M3) starts below it
     // and is not moved up (a takeoff costs rockets the Realm has to craft); below it the floors choose as before
-    if (!out) {
+    // (Track M9, `craftBlade`: not while a blade is crafted for it, or is about to be)
+    if (!out && !(this.rules.craftBlade && (this.bladeProcess.busy() || this.bladeProcess.wants()))) {
       const a = this.bareArcher(me);
       if (a) out = h >= FLY_SHOOTER_HEALTH ? { why: 'low', threat: a, foot: true } : { why: 'low', threat: a };
     }
@@ -1761,6 +1799,23 @@ export class PveController {
     return best;
   }
 
+  /**
+   * Track M9: the nearest live archer (skeleton, stray, bogged, pillager) within FLEE_SCAN + 8 of the bot, seen or not: the
+   * one a flight on foot has following it (`followRun`, `sprintJump`).
+   */
+  followingArcher(me: Vec3): EntityInfo | undefined {
+    let best: EntityInfo | undefined;
+    let bd = Infinity;
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead || !DUEL_ARCHERS.has(bareType(e.type))) continue;
+      const d = dist(entityFeet(e), me);
+      if (d > FLEE_SCAN + 8 || d >= bd) continue;
+      bd = d;
+      best = e;
+    }
+    return best;
+  }
+
   meleeWithin(me: Vec3, r: number): boolean {
     for (const e of this.d.world.entities.values()) {
       if (!this.isThreat(e) || !targeting.isMelee(e, this.mobs)) continue;
@@ -1854,7 +1909,7 @@ class FleeProcess extends BaseProcess {
   readonly name = 'flee';
   readonly kind = 'auto' as const;
   protected override persistent = true;
-  private ep: { why: 'low' | 'creeper'; from: string; start: Vec3; startAt: number; phase: 'away' | 'home' | 'far' | 'seal' | 'sealed' | 'dodge'; dest: { to: Vec3; kind: string } | undefined; safeSince: number | undefined; planAt: number; goalKey: string; bites: number; stallUntil: number; cornered: boolean; planNearest: number; panics: number; caughtSince: number | undefined; legAt?: number; homeOkAt?: number; homeShotSaid?: boolean; wayShotSaid?: boolean; biteHeldSaid?: boolean; sealedAt?: number; dugIn?: boolean; seal?: { placed: number; open: number; reason?: string; tries: number; openCells?: Vec3[] }; dodge?: { dir: 1 | -1; sinceFlip: number; seen: Set<bigint>; lastShot: number; t: number; clearSince: number | undefined } } | undefined;
+  private ep: { why: 'low' | 'creeper'; from: string; start: Vec3; startAt: number; phase: 'away' | 'home' | 'far' | 'seal' | 'sealed' | 'dodge'; dest: { to: Vec3; kind: string } | undefined; safeSince: number | undefined; planAt: number; goalKey: string; bites: number; stallUntil: number; cornered: boolean; planNearest: number; panics: number; caughtSince: number | undefined; legAt?: number; homeOkAt?: number; homeShotSaid?: boolean; wayShotSaid?: boolean; biteHeldSaid?: boolean; runShort?: boolean; longSaid?: boolean; followSaid?: boolean; sealedAt?: number; dugIn?: boolean; seal?: { placed: number; open: number; reason?: string; tries: number; openCells?: Vec3[] }; dodge?: { dir: 1 | -1; sinceFlip: number; seen: Set<bigint>; lastShot: number; t: number; clearSince: number | undefined } } | undefined;
   private plan: { why: 'low' | 'creeper'; threat: EntityInfo; foot?: true } | undefined;
   private cooldownUntil = 0;
   /** The last flight ended cornered (no way away): the cooldown then holds even for a hard trigger. */
@@ -2220,7 +2275,11 @@ class FleeProcess extends BaseProcess {
       return;
     }
     if (now - ep.startAt > FLEE_MAX_MS) {
-      this.end('gave up (60 s)', 2000);
+      const follower = c.rules.followRun && !c.carriesBlade() ? c.followingArcher(me) : undefined;
+      // Track M9 (`followRun`): with no blade and the archer still following (within FLEE_SCAN + 8, seen or not: at the
+      // minute's end it is often just out of sight, 16 to 18 behind) the next flight starts as soon as it is seen again,
+      // with no cooldown (the 2 s cooldown was guard's fist chase: a bolt from 2 to 5 blocks each time, the long case's minute two)
+      this.end('gave up (60 s)', follower ? 0 : 2000);
       return;
     }
     this.maybeEat(c.eatClearance(me, nearest));
@@ -2242,6 +2301,14 @@ class FleeProcess extends BaseProcess {
       ep.wayShotSaid = true; // said once an episode
       c.log.info(`flee: an archer or a witch within ${SHOOTER_WAY} of the way to ${dest.kind}: staying out at health ${c.health().toFixed(1)}`);
     }
+    // Track M9 (`followRun`): with no blade, not home while an archer follows within FLEE_SCAN + 8: the way home turns the
+    // body back towards it (in the A/B traces 34 `home` legs in 17 runs, the pillager a median 13 behind, each turned back
+    // to `far` after about 15 ticks), and home is where it would follow the bot to
+    const follows = dest !== undefined && c.rules.followRun && !c.carriesBlade() ? c.followingArcher(me) : undefined;
+    if (follows && !ep.followSaid) {
+      ep.followSaid = true; // said once an episode
+      c.log.info(`flee: ${bareType(follows.type)} following at ${dist(entityFeet(follows), me).toFixed(1)}: not to ${dest!.kind} while it is within ${FLEE_SCAN + 8}`);
+    }
     const phase = fleeLeg({
       phase: ep.phase,
       dest: dest !== undefined,
@@ -2251,7 +2318,7 @@ class FleeProcess extends BaseProcess {
       sinceLeg: now - (ep.legAt ?? 0),
       homeOkMs: ep.homeOkAt === undefined ? 0 : now - ep.homeOkAt,
       hold: c.rules.legHold,
-      homeShot: (dest !== undefined && c.rules.shooterHome && c.shooterNear(dest.to, SHOOTER_HOME)) || wayShot,
+      homeShot: (dest !== undefined && c.rules.shooterHome && c.shooterNear(dest.to, SHOOTER_HOME)) || wayShot || follows !== undefined,
     });
     if (phase !== ep.phase) ep.legAt = now;
     if (c.rules.shooterHome && dest && !ep.homeShotSaid && c.shooterNear(dest.to, SHOOTER_HOME)) {
@@ -2263,7 +2330,11 @@ class FleeProcess extends BaseProcess {
     // (re)plan: a new leg, the last walk ended, or (checked every 2 s while running away) the nearest
     // threat gained on us since the plan. A plan that still works is kept: every new goto stops the body
     // for a moment, and a chasing zombie is almost as fast as a sprinting bot.
-    const key = phase === 'home' && dest ? `home:${dest.to.x},${dest.to.y},${dest.to.z}` : phase;
+    // Track M9: from an archer that follows a bot with no blade, a long far leg (`followRun`), the
+    // sprint-jump (a bot with a blade, the live kit among them, flees as before: none of it measured on its rows)
+    const archer = phase !== 'home' && (c.rules.followRun || c.rules.sprintJump) && !c.carriesBlade() ? c.followingArcher(me) : undefined;
+    const longLeg = phase === 'far' && archer !== undefined && c.rules.followRun && !ep.runShort;
+    const key = phase === 'home' && dest ? `home:${dest.to.x},${dest.to.y},${dest.to.z}` : `${phase}${longLeg ? ':long' : ''}`;
     if (key === ep.goalKey && this.walking && (phase === 'home' || now - ep.planAt < FLEE_REPLAN_MS || nearest >= ep.planNearest - 1)) {
       if (phase !== 'home' && now - ep.planAt >= FLEE_REPLAN_MS) {
         ep.planAt = now; // checked: keep the plan, look again in 2 s
@@ -2278,10 +2349,17 @@ class FleeProcess extends BaseProcess {
     const goal: NavGoal =
       phase === 'home' && dest
         ? { type: 'block', p: dest.to }
-        : { type: 'runAway', from: () => c.threatsNear(c.position(), FLEE_SCAN + 8), r: fleeRadius(phase === 'far' ? 'far' : 'away', nearest, c.rules.fleeLong) };
+        : { type: 'runAway', from: () => c.threatsNear(c.position(), FLEE_SCAN + 8), r: longLeg ? followRunRadius(nearest) : fleeRadius(phase === 'far' ? 'far' : 'away', nearest, c.rules.fleeLong) };
+
+    if (longLeg && !ep.longSaid) {
+      ep.longSaid = true; // Track M9, said once an episode
+      c.log.info(`flee: a long leg from ${bareType(archer.type)} at ${dist(entityFeet(archer), me).toFixed(1)} (to ${followRunRadius(nearest).toFixed(0)} from it)`);
+    }
+    const jump = phase === 'far' && archer !== undefined && c.rules.sprintJump && c.food() > SPRINT_JUMP_FOOD;
+    const legOpts: GotoOptions = { timeoutTicks: 1200, sprint: true, ...(jump ? { sprintJump: true } : {}) };
     const id = ++this.gotoId;
     this.walking = true;
-    void c.mover.goto(goal as Goal, { timeoutTicks: 1200, sprint: true }).then((r) => {
+    void c.mover.goto(goal as Goal, legOpts).then((r) => {
       if (id !== this.gotoId || t !== this.token) return;
       this.walking = false;
       const e = this.ep;
@@ -2294,7 +2372,10 @@ class FleeProcess extends BaseProcess {
       if (!r.ok && r.reason !== 'interrupted') {
         c.log.info(`flee: ${e.phase} leg ${r.reason}`);
         e.stallUntil = performance.now() + 1000;
-        if (e.phase === 'far' && r.reason === 'unreachable') e.cornered = true; // no farther place: home around the threat next
+        // Track M9: a long leg not found: the usual legs for the rest of the flight
+
+        if (e.phase === 'far' && r.reason === 'unreachable' && longLeg) e.runShort = true;
+        else if (e.phase === 'far' && r.reason === 'unreachable') e.cornered = true; // no farther place: home around the threat next
         if (e.phase !== 'home' && c.threatsNear(c.position(), 8).length > 0) {
           if (++e.panics > 3 && c.threatsNear(c.position(), 4).length > 0) {
             this.cornered = true;

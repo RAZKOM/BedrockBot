@@ -28,6 +28,8 @@ export interface GotoOptions {
   replanOnCorrection?: boolean;
   /** Sprint on long straight runs. Default true. */
   sprint?: boolean;
+  /** Track M9: jump while sprinting on straight level runs (follower.ts sprintJumpOk; the flight on foot's `sprintJump` rule). Default false. */
+  sprintJump?: boolean;
   /** Plan dig-through moves (needs the navigator's `dig` action). Default false. */
   allowBreak?: boolean;
   /** Plan pillar-up moves (needs the `place` action and throwaway blocks). Default false. */

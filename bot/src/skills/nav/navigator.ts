@@ -1043,6 +1043,7 @@ export class Navigator {
       timeoutTicks: options.timeoutTicks ?? 6000,
       replanOnCorrection: options.replanOnCorrection ?? true,
       sprint: options.sprint ?? true,
+      sprintJump: options.sprintJump ?? false, // Track M9
       allowBreak: options.allowBreak ?? false,
       allowPlace: options.allowPlace ?? false,
       closeDoors: options.closeDoors ?? false,
@@ -3370,7 +3371,7 @@ export class Navigator {
     a.legFrom = from;
     a.legTo = to;
     const stopAtEnd = to < last || a.status === 'found';
-    a.follower = new PathFollower(a.path.slice(from, to + 1), this.grid, { sprint: a.opts.sprint, stopAtEnd, maxTurnDeg: this.maxTurn, guard: a.guard, cellCost: a.pathOpts.cellCost, edgeSneak: this.edgeSneak }); // Track S: cellCost, Track AJ: edgeSneak
+    a.follower = new PathFollower(a.path.slice(from, to + 1), this.grid, { sprint: a.opts.sprint, sprintJump: a.opts.sprintJump, stopAtEnd, maxTurnDeg: this.maxTurn, guard: a.guard, cellCost: a.pathOpts.cellCost, edgeSneak: this.edgeSneak }); // Track S: cellCost, Track AJ: edgeSneak, Track M9: sprintJump
     a.passedAbs = from;
     a.aimAbs = from;
     a.passTick = a.t;

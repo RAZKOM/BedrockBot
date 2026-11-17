@@ -462,6 +462,14 @@ describe('Crafter on a fake server', () => {
     expect(craftLine(r)).toContain('crafting table placed and picked up');
   });
 
+  it('leaveTable (Track M9): the placed table stays standing, remembered as ours (table_left), with no dig', async () => {
+    const h = harness([item('iron_ingot', 9, 1), item('crafting_table', 1, 2)]);
+    const r = await h.crafter.craft('iron_block', 1, () => false, { leaveTable: true });
+    expect(r).toMatchObject({ ok: false, reason: 'table_left', crafted: 1, table: { placed: true, pickedUp: false } });
+    expect(h.skillCalls.some((c) => c.startsWith('dig '))).toBe(false);
+    expect(h.crafter.pendingTables).toHaveLength(1);
+  });
+
   it('a table in reach is used as it stands; behind a wall it is walked to (goto) or not used; none at all: no_table or a table crafted from planks', async () => {
     const h = harness([item('iron_ingot', 9, 1)], { tableAt: { x: 2, y: -60, z: 0 } });
     const r = await h.crafter.craft('iron_block', 1);
