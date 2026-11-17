@@ -90,7 +90,8 @@ describe.skipIf(!E2E)('@bds reconnect against bds-dev', () => {
     const recs = parseDisconnectLog(readFileSync(logFile, 'utf8'));
     expect(recs.length).toBeGreaterThanOrEqual(1);
     const first = recs[0]!;
-    expect(first).toMatchObject({ username: 'E2ERestart', gameVersion: VERSION, willReconnect: true });
+    // gameVersion is the version the server advertised (1.26.65 on a BDS 1.26.65.1, protocol 2225 like 1.26.60).
+    expect(first).toMatchObject({ username: 'E2ERestart', gameVersion: conn.serverInfo?.version ?? VERSION, willReconnect: true });
     expect(first.reason.length).toBeGreaterThan(0);
     expect(first.spawnedMs).toBeGreaterThan(0);
     // Later lines are failed attempts while BDS was down (ping timeouts), all retried.

@@ -1,32 +1,34 @@
 # Game versions and transports
 
-State on 2026-10-28 (PLAN.md tasks 1.4 and 1.5). **The default everywhere is 1.26.60 (BDS
-1.26.60.6) over RakNet** since the flip on 2026-10-28 (section "Default flipped to 1.26.60" below);
-NetherNet is selectable and verified. 1.26.51 stays runnable as the rollback (`BOT_VERSION=1.26.51`,
-server `bds-dev51`, `pnpm e2e:51`, `FIXTURE_VERSION=1.26.51` for the world unit tests).
+State on 2026-11-16 (PLAN.md tasks 1.4 and 1.5). **The default everywhere is game version 1.26.60
+(protocol 2225) over RakNet** since the flip on 2026-10-28 (section "Default flipped to 1.26.60" below).
+The test servers run BDS 1.26.65.1, which speaks the same protocol, since 2026-11-16 (section "1.26.65 and
+the npm releases" below). NetherNet is selectable and verified. 1.26.51 stays runnable as the rollback
+(`BOT_VERSION=1.26.51`, server `bds-dev51`, `pnpm e2e:51`, `FIXTURE_VERSION=1.26.51` for the world unit tests).
 
 ## Stack
 
 | Piece | Pin | Notes |
 |---|---|---|
-| bedrock-protocol | git `PrismarineJS/bedrock-protocol#c9e1fbf2` (= 3.60.1 + #834 + #839) | docs/decisions/0004-protocol-pin.md |
-| minecraft-data | 3.117.0 + `patches/minecraft-data@3.117.0.patch` | the patch adds bedrock 1.26.60 (protocol 2225); made by `tools/bump-version/make-patch.mjs 1.26.60` |
+| bedrock-protocol | npm 3.61.0 (= the former git pin `c9e1fbf2`, i.e. 3.60.1 + #834 + #839, plus #842: 1.26.60 support) | docs/decisions/0004-protocol-pin.md; `patches/bedrock-protocol.patch` (the signalling fallback) still applies |
+| minecraft-data | 3.118.0 + `patches/minecraft-data@3.118.0.patch` | 3.118.0 ships bedrock 1.26.60 (protocol 2225); the patch is the `filtered_custom_name` fix alone (`make-patch.mjs` `localFixes`). 3.119.0 is not taken: [decision 0093](decisions/0093-protocol-bumps-keep-the-block-data.md) |
 | World version shims | `bot/src/world/version-shims/1.26.51.ts`, `1.26.60.ts` | 1.26.60 = 1.26.51 (schema-diff: only trailing fields in level_chunk, start_game, add_player, add_entity; block/item data still 1.26.30 upstream) |
 | Fixtures | `fixtures/1.26.51/`, `fixtures/1.26.60/` (`login-idle`, `world-chunks`) | `bot/test/unit/fixture-replay.test.ts` replays both versions; the world unit tests (`test/unit/world/helpers.ts`) use `fixtures/1.26.60` unless `FIXTURE_VERSION=1.26.51` |
-| Truth pack | `@minecraft/server` 2.10.0 | loads on BDS 1.26.51.1 and 1.26.60.6 (log: `[truth] pack 0.1.0 loaded`) |
+| Truth pack | `@minecraft/server` 2.10.0 | loads on BDS 1.26.51.1, 1.26.60.6 and 1.26.65.1 (log: `[truth] pack 0.1.0 loaded`) |
 
 ## Servers
 
 Since 2026-10-28 (all compose files, all with the truth pack; fresh worlds except bds-dev, which took
-over bds60's 1.26.60.6 world):
+over bds60's 1.26.60.6 world). Every compose file pins BDS 1.26.65.1 since 2026-11-16 (1.26.60.6 before;
+a container picks the new build up when it is next created, and BDS upgrades its world in place):
 
 | Container | BDS | Transport | Port | Compose file | Game version for the bot |
 |---|---|---|---|---|---|
-| `bds-dev` | 1.26.60.6 | RakNet | udp/19132 | docker/compose.dev.yml | 1.26.60 (default) |
-| `bds-world` | 1.26.60.6 | RakNet | udp/19142 | docker/compose.world.yml (was a `docker run`) | 1.26.60 |
-| `bds-move` | 1.26.60.6 | RakNet | udp/19146 | docker/compose.move.yml | 1.26.60 |
-| `bds-dig` | 1.26.60.6 | RakNet | udp/19148 | docker/compose.dig.yml | 1.26.60 |
-| `bds-nn` | 1.26.60.6 | NetherNet, LAN signalling | tcp+udp/19140, udp/19160-19167, udp/7551 | docker/compose.dev-nethernet.yml | 1.26.60 |
+| `bds-dev` | 1.26.65.1 | RakNet | udp/19132 | docker/compose.dev.yml | 1.26.60 (default) |
+| `bds-world` | 1.26.65.1 | RakNet | udp/19142 | docker/compose.world.yml (was a `docker run`) | 1.26.60 |
+| `bds-move` | 1.26.65.1 | RakNet | udp/19146 | docker/compose.move.yml | 1.26.60 |
+| `bds-dig` | 1.26.65.1 | RakNet | udp/19148 | docker/compose.dig.yml | 1.26.60 |
+| `bds-nn` | 1.26.65.1 | NetherNet, LAN signalling | tcp+udp/19140, udp/19160-19167, udp/7551 | docker/compose.dev-nethernet.yml | 1.26.60 |
 | `bds-dev51` | 1.26.51.1 | RakNet | udp/19134 | docker/compose.dev51.yml | 1.26.51 (rollback) |
 
 Both builds print a "TRANSPORT TYPE ERROR" banner for `TRANSPORT=raknet` and still accept RakNet.
@@ -36,6 +38,83 @@ fresh one, see below). `bds-phys` (udp/19144, `docker run`, 1.26.51.1) is stoppe
 default e2e target (skills-input defaults to bds-move).
 
 How to start them and run the suites: docs/runbook.md ("Server", "Tests").
+
+## 1.26.65 and the npm releases (Track U1, 2026-11-16)
+
+The update check reported `bds_release 1.26.60.6 -> 1.26.65.1, bedrock_protocol 3.60.1 -> 3.61.0, minecraft_data
+3.117.0 -> 3.119.0`. These are two separate things: a new game release, and npm releases (both of 2026-10-29) that
+catch up with 1.26.60, which the bot already spoke through a patch.
+
+**1.26.65 is protocol 2225, the protocol of 1.26.60.** Evidence:
+
+- The pong of BDS 1.26.65.1 (links API release build on 2026-11-16): `version 1.26.65, protocol 2225`
+  (`verify.mjs`, `report.server`).
+- Mojang's protocol docs: the 1.26.65 commit (`b0c990c8`, 2026-11-16) stamps every packet file with
+  `x-protocol-version 2225`. Compared with the 1.26.60 commit (`0879ab5c`) and the 1.26.62 one (`f8d1496b`), not one
+  file differs. 1.26.61 and 1.26.62 are 2225 as well. The 1.26.70 previews are 2259.
+- No "Support Minecraft 1.26.65" issue on bedrock-protocol (nor for 1.26.61 or 1.26.62) and no 1.26.65 folder on
+  minecraft-data master: with no new protocol there is nothing for upstream to add.
+- The block palette BDS 1.26.65.1 sends is byte for byte the 1.26.60.6 one (`dump-palette.mjs`, 1480 types, 23 941
+  network states, 1473 verified by placement; only the header's version and date differ). No new palette file.
+
+A server or Realm on 1.26.65 accepts a client that speaks 1.26.60: bedrock-protocol checks only the protocol number,
+and the version gate (`checkVersion`) compares numbers too. The bot's `!status`, disconnect log and panel show the
+version the server advertises (`1.26.65`), so two e2e cases that expected the requested version (chat `!status`,
+reconnect's disconnect record) now expect the server's.
+
+**What the bot ran, before and after the bump** (local BDS, RakNet, offline, one container per build: 1.26.65.1 and
+1.26.60.6, flat world, cheats, operator, truth pack):
+
+| Check | main (git pin, 3.117.0 + patch) on 1.26.65.1 | on 1.26.60.6 | bump (3.61.0, 3.118.0 + fix) on 1.26.65.1 | on 1.26.60.6 |
+|---|---|---|---|---|
+| `verify.mjs 1.26.60 --deps self`: login, spawn, registry (16 913 states, 2080 items), subchunk, 20-tick walk | ok, 0 corrections | ok, 0 corrections | ok, 0 corrections, 0 decode errors | ok, 0 corrections, 0 decode errors |
+| e2e echo, chat, chat-style, reconnect, keepalive, world-chunks, world-updates, world-entities, skills-input (37 tests) | 32 passed, 3 failed: 2 version assertions (fixed), the tick window | 32 passed, 3 failed: the tick window, echo's first tick | 34 passed, 1 failed: the tick window | 32 passed, 3 failed: the tick window, echo's first tick |
+| e2e read-errors with both boxes named (`P1_BOTHNAMED=1`): every swap answered, no packet unreadable; the injected loss resynced | 2 of 2 | 2 of 2 | 2 of 2 | 2 of 2 |
+| e2e pve-combat: 3 summoned zombies killed with an iron sword, no death | 1 of 1 | 1 of 1 | 1 of 1 | 1 of 1 |
+| e2e test-inv (presets, restores, the boxes, the refusals) | 13 of 13 | 13 of 13 | 13 of 13 | 13 of 13 |
+
+The failures that are not versions: reconnect's `assertNoDuplicates` counts 43 or 44 ticks in a 2 s window where
+it allows 36 to 42, and echo reads `conn.tick` 0 right after the spawn. Both fail on this PC with either stack on
+either build (with the bump also with the two files run alone: reconnect each time, echo once), so they are not
+version effects; they are open as test timing.
+
+**The npm releases.** bedrock-protocol 3.61.0 is the bot's git pin (`c9e1fbf2`: #834, #839) plus #842 (README,
+`CURRENT_VERSION = '1.26.60'`); `patches/bedrock-protocol.patch` applies to it unchanged. minecraft-data has two:
+
+| Release | What it changes for the bot |
+|---|---|
+| 3.118.0 (PR #1340) | adds bedrock 1.26.60's protocol. Every table the bot loads (`bedrock_1.26.60`, `bedrock_1.26.51`, `bedrock_1.26.30`: blocks, states, items, shapes, materials, recipes, ...) is the same as 3.117.0 with the bot's patch; the only difference is `filtered_custom_name`, still a plain string upstream |
+| 3.119.0 (PR #1335) | regenerates the bedrock block and item data of every version: for 1.26.60 1480 blocks, 23 960 states, 2080 items (was 1356, 16 913, 1933, the 1.26.30 tables); `bedrock_1.26.51` moves to its own tables (22 091 states). The 1.26.30 files change too: all 1356 blocks (hardness of 59, materials of 328, harvest tools of 502, bounding boxes of 26: obsidian 50 -> 35, ladder `block` -> `empty`, iron ore `incorrect_for_wooden_tool` -> `mineable/pickaxe`), all 1933 items (stack sizes of 431, display names of 259), one collision shape. It still reads `filtered_custom_name` as a plain string |
+
+So the bump is bedrock-protocol 3.61.0 and minecraft-data 3.118.0 with a patch that holds the
+`filtered_custom_name` fix alone (776 bytes, `node make-patch.mjs 1.26.60 --mcdata-ref 9c97fe50...`; the unit test
+`item-stack-response-names` passes with the Realm's bytes). It changes no data the bot uses. 3.119.0 is a move of
+the world model to new block data (state ids, collision shapes, dig times, stack sizes, item names for search) and
+waits for a change of its own ([decision 0093](decisions/0093-protocol-bumps-keep-the-block-data.md)). The unit test
+`bot/test/unit/world/data-pin.test.ts` fingerprints those tables, so a dependency bump that brings new block data
+fails the suite. The update check keeps listing minecraft-data 3.119.0 as newer until then.
+
+Found on the way:
+
+- Regenerating the old patch from minecraft-data master (`make-patch.mjs 1.26.60`) no longer gives the committed
+  patch: master's 1.26.60 now points at the new block data, so the patch would have carried 23 960 states, and the
+  diff writer overflowed the call stack on files of that size (fixed: `lib/gitdiff.mjs`). From commit `9c97fe50`
+  it gives the committed patch (the fix's JSON formatted on four lines instead of one).
+- `make-patch.mjs` could not build a patch for a release that already ships the version; it now applies only the
+  local fixes to such a version (`--package-version` builds for another release than the pin).
+- `dump-palette.mjs --version 1.26.65` could not connect (no 1.26.65 in minecraft-data); `--speak 1.26.60` connects
+  with the protocol's name and names the file after `--version`. The dump leaves its probe strip at x, z -16..15,
+  y -60: `verify.mjs` then fails at `chunk` on that server (unknown runtime ids under the spawn), with the old
+  stack as well. Dump on bds-reg, or verify first.
+- The version gate's refusal named the oldest version as the newest (`newest supported: 1.16.201`); it now names
+  the one with the highest protocol.
+
+**Does the Realm need the bump?** No, not now and not when it moves to 1.26.65: the bot as it was speaks 2225 and
+played on BDS 1.26.65.1 (the table). The bumped bot plays on 1.26.60.6 as before, so it joins a Realm still on
+1.26.60 too. The Realm reports `*` as its version, so the bot cannot tell which build it runs; it does not need to.
+The next protocol change is 1.26.70 (2259 in the previews): that needs a real bump (playbook step 1, upstream
+minecraft-data data), and its minecraft-data entry will point at new block data, so the guard test above decides
+whether the bump patches the block keys back to the measured tables or waits for the block data move.
 
 ## e2e results before the flip (2026-10-28, bedrock-protocol pinned to c9e1fbf2)
 
@@ -164,7 +243,8 @@ item_stack_response is an optional string: a bool, then the string when the bool
 filtered name; the plain-string reader took the `01` as a length of 1 and lost its place. BDS sends a single `00`
 (absent), which a plain string reads the same way as an empty one, so a test server never shows it. The swap of two
 named boxes is that case (`bot_fireworks` and `bot_loot`); rocket deposits carry no name and were read. The fix is one
-line of the protocol data, `["option", "string"]`, in `patches/minecraft-data@3.117.0.patch`, and
+line of the protocol data, `["option", "string"]`, in the minecraft-data patch (`patches/minecraft-data@3.118.0.patch`
+since 2026-11-16, where it is the whole patch), and
 `tools/bump-version/make-patch.mjs` applies it to every version it builds (`localFixes`) until upstream reads the field
 that way. The unit test `bot/test/unit/item-stack-response-names.test.ts` parses the Realm's bytes and the BDS shape
 and writes both back byte for byte. The same Realm session answered the resync's `inventory_mismatch` in 86 and

@@ -47,7 +47,7 @@ import { gridSlots, OUTPUT_CONTAINER, OUTPUT_SLOT, planCraft, usedText, type Cra
 /**
  * BDS 1.26 ItemStackRequestActionType value of CraftRecipe (the second header byte, see the file comment).
  * TODO(minecraft-data): the clean fix is a renumbered ItemStackRequest `type_id` mapping in
- * patches/minecraft-data@3.117.0.patch (7 place_in_item_container, 8 take_from_item_container, the rest
+ * the minecraft-data patch (make-patch.mjs localFixes; 7 place_in_item_container, 8 take_from_item_container, the rest
  * shifted by two); then this constant and `type_id: 'craft_recipe'` agree and craft_recipe_auto /
  * results_deprecated become sendable.
  */

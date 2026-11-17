@@ -311,8 +311,9 @@ Env: `CRAFT_BDS_HOST` (127.0.0.1), `CRAFT_BDS_PORT` (19208), `CRAFT_BDS_CONTAINE
 - `craft_recipe_auto` (the recipe book's one-request craft) cannot be sent with minecraft-data
   3.117.0's definition (the server calls it malformed); the manual grid path costs one extra request
   per batch and is what the vanilla UI does anyway. The mapping fix (two bundle actions at 7 / 8,
-  everything after shifted) belongs in `patches/minecraft-data@3.117.0.patch` (the TODO at
-  `CRAFT_RECIPE_WIRE_TYPE`); with it the constant and `type_id: 'craft_recipe'` agree and the auto
+  everything after shifted) belongs in the minecraft-data patch (`tools/bump-version/make-patch.mjs`
+  `localFixes`, the TODO at
+  `CRAFT_RECIPE_WIRE_TYPE`; minecraft-data 3.118.0 has the same mapping); with it the constant and `type_id: 'craft_recipe'` agree and the auto
   path / `craft_results_deprecated` become sendable.
 - The `compact` step is executed by Track AV's unload job through `compactRunner`; until that call
   lands, `!unload` moves items without compacting (the planner still marks the step).

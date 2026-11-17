@@ -3,7 +3,7 @@
 // "Block states"). The world registry builds its runtime-id table from that file for that game version.
 //
 //   node tools/bump-version/dump-palette.mjs --profile reg              bds-reg (udp/19192, truth pack deployed)
-//   node tools/bump-version/dump-palette.mjs --container bds-x --port 19999 [--version 1.26.61] [--out file]
+//   node tools/bump-version/dump-palette.mjs --container bds-x --port 19999 [--version 1.26.61] [--speak 1.26.60] [--out file]
 //
 // How (about 1 minute): joins the local BDS as an offline player (the truth pack answers in chat), then
 // 1. pages through `truth:palette <from> <count>`: every block type, every combination of its states'
@@ -15,6 +15,8 @@
 // 3. writes the compact file (lib/palette-format.mjs).
 // The game version defaults to the BDS build without its 4th part (1.26.60.6 -> 1.26.60), read from the
 // container's VERSION. Local containers only: host 127.0.0.1, offline mode, nothing else is contacted.
+// --speak: the game version to connect with when it differs from the one the file is named for (a build of the
+// same protocol, e.g. BDS 1.26.65.1 speaks 1.26.60's 2225 and minecraft-data has no 1.26.65); default --version.
 import { execFile, execFileSync } from 'node:child_process';
 import { randomInt } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -37,6 +39,7 @@ const { values: opts } = parseArgs({
     container: { type: 'string' },
     port: { type: 'string' },
     version: { type: 'string' },
+    speak: { type: 'string' },
     out: { type: 'string' },
     page: { type: 'string', default: '40' },
   },
@@ -48,6 +51,7 @@ const port = Number(opts.port ?? prof?.port ?? 19192);
 const bds = execFileSync('docker', ['exec', container, 'printenv', 'VERSION'], { encoding: 'utf8' }).trim();
 if (!/^\d+\.\d+\.\d+\.\d+$/.test(bds)) throw new Error(`container ${container} has VERSION "${bds}"; pass --version`);
 const version = opts.version ?? bds.split('.').slice(0, 3).join('.');
+const speak = opts.speak ?? version;
 const out = opts.out ?? join(ROOT, 'bot', 'data', 'block-palette', `${version}.json`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -57,9 +61,9 @@ function sendCommand(...words) {
   });
 }
 
-const conn = new Connection({ version, username: `Palette${randomInt(36 ** 5).toString(36)}`, logger: silentLogger, reconnect: false });
+const conn = new Connection({ version: speak, username: `Palette${randomInt(36 ** 5).toString(36)}`, logger: silentLogger, reconnect: false });
 // The world model decodes the probe strip; its registry may still be the fallback data (unknown ids are fine here).
-const world = new World(conn, { version, logger: silentLogger });
+const world = new World(conn, { version: speak, logger: silentLogger });
 const parser = new ReplyParser();
 const pending = new Map();
 conn.on('text', (p) => {
@@ -98,7 +102,7 @@ function truth(cmd, args, timeoutMs = 30_000) {
 }
 
 const t0 = performance.now();
-console.error(`[dump-palette] ${container} (BDS ${bds}) udp/${port}, game version ${version}`);
+console.error(`[dump-palette] ${container} (BDS ${bds}) udp/${port}, game version ${version}${speak !== version ? ` (connecting as ${speak})` : ''}`);
 await conn.connect({ kind: 'bds', host: '127.0.0.1', port, transport: 'raknet', offline: true });
 await world.waitForChunks(3, { timeoutMs: 30_000 });
 const byType = new Map();

@@ -54,10 +54,10 @@ describe('update check parsers (captured fixtures)', () => {
   it('pins come from the installed packages and docker/compose.dev.yml', () => {
     const p = currentPins();
     expect(p.gameVersion).toBe('1.26.60');
-    expect(p.bds).toBe('1.26.60.6');
-    expect(p.bedrockProtocol).toBe('3.60.1');
-    expect(p.minecraftData).toBe('3.117.0');
-    expect(pinnedBdsBuild('does/not/exist.yml')).toBe('1.26.60.6');
+    expect(p.bds).toBe('1.26.65.1');
+    expect(p.bedrockProtocol).toBe('3.61.0');
+    expect(p.minecraftData).toBe('3.118.0');
+    expect(pinnedBdsBuild('does/not/exist.yml')).toBe('1.26.65.1');
   });
 });
 

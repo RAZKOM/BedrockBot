@@ -1,6 +1,6 @@
-# Rollback BDS 1.26.51.1 over RakNet: the previous game version, run beside bds-dev (1.26.60.6 since
-# 2026-10-28; docs/versions.md). It replaced bds60 (docker/compose.dev60.yml, the 1.26.60 trial server)
-# on the same port once 1.26.60 became the default. Same settings as compose.dev.yml except container
+# Rollback BDS 1.26.51.1 over RakNet: the previous game version, run beside bds-dev (1.26.60.6 from
+# 2026-10-28, 1.26.65.1 since 2026-11-16; docs/versions.md). It replaced bds60
+# (docker/compose.dev60.yml, the 1.26.60 trial server) on the same port once 1.26.60 became the default. Same settings as compose.dev.yml except container
 # name, port, version and data dir, so the e2e suite can run against it with BOT_VERSION=1.26.51:
 #   node scripts/bds.mjs up --profile dev51          (or: docker compose -f docker/compose.dev51.yml up -d)
 #   node scripts/bds.mjs pack --profile dev51        (deploy the truth pack and restart)

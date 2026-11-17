@@ -1,0 +1,15 @@
+diff --git a/minecraft-data/data/bedrock/1.26.60/protocol.json b/minecraft-data/data/bedrock/1.26.60/protocol.json
+--- a/minecraft-data/data/bedrock/1.26.60/protocol.json
++++ b/minecraft-data/data/bedrock/1.26.60/protocol.json
+@@ -3117,7 +3117,10 @@
+                                   },
+                                   {
+                                     "name": "filtered_custom_name",
+-                                    "type": "string"
++                                    "type": [
++                                      "option",
++                                      "string"
++                                    ]
+                                   },
+                                   {
+                                     "name": "durability_correction",

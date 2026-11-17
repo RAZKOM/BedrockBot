@@ -9,6 +9,10 @@
 // bump touched. Default output: patches/minecraft-data@<pkgVersion>.patch (pnpm patch naming).
 // Paths are package-relative (pnpm `patchedDependencies` format). --patch-package also writes
 // patches/minecraft-data+<pkgVersion>.patch with node_modules/minecraft-data/ paths for patch-package.
+// A version the package already ships (its dataPaths entry and protocol.json exist) is not bumped: only
+// the local fixes below are applied to it, so a patch for a newer minecraft-data release holds the fixes
+// alone. --package-version <v> builds the patch for another minecraft-data release than the pin in
+// package.json (to prepare a dependency bump; the output name follows it).
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, existsSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -29,6 +33,7 @@ function parseArgs (argv) {
     else if (k === '--keep-temp') a.keepTemp = true
     else if (k === '--replace-common') a.replaceCommon = true
     else if (k === '--patch-package') a.patchPackage = true
+    else if (k === '--package-version') a.packageVersion = argv[++i]
     else if (k === '-h' || k === '--help') a.help = true
     else a._.push(k)
   }
@@ -58,6 +63,13 @@ function localFixes (target, ver, log) {
   return [rel]
 }
 
+// True when the minecraft-data package dir already has protocol data for this bedrock version.
+function ships (pkgDir, ver) {
+  const paths = JSON.parse(readFileSync(join(pkgDir, 'minecraft-data', 'data', 'dataPaths.json'), 'utf8'))
+  const proto = paths.bedrock?.[ver]?.protocol
+  return typeof proto === 'string' && existsSync(join(pkgDir, 'minecraft-data', 'data', proto, 'protocol.json'))
+}
+
 async function main () {
   const a = parseArgs(process.argv.slice(2))
   if (a.help || a._.length === 0) {
@@ -65,7 +77,8 @@ async function main () {
     process.exit(a.help ? 0 : 1)
   }
   checkRef(a.ref); a._.forEach(checkVersion)
-  const mdVersion = pins()['minecraft-data']
+  if (a.packageVersion !== undefined && !/^\d+\.\d+\.\d+$/.test(a.packageVersion)) throw new Error(`--package-version must look like 3.119.0 (got ${a.packageVersion})`)
+  const mdVersion = a.packageVersion ?? pins()['minecraft-data']
   const work = mkdtempSync(join(tmpdir(), 'mcdata-patch-'))
   try {
     log(`installing pristine minecraft-data@${mdVersion} into ${work}`)
@@ -76,11 +89,17 @@ async function main () {
     checkTarget(after)
 
     const changed = new Set()
+    const shipped = []
     for (const ver of a._) {
-      log(`bumping ${ver} from minecraft-data@${a.ref}`)
-      const dl = await downloadBump(ver, a.ref, work, a.fromDir)
-      const r = await applyBump({ target: after, ver, ref: a.ref, dl, replaceCommon: a.replaceCommon, log })
-      r.changed.forEach(c => changed.add(c))
+      if (ships(before, ver)) {
+        log(`minecraft-data@${mdVersion} already ships ${ver}: local fixes only`)
+        shipped.push(ver)
+      } else {
+        log(`bumping ${ver} from minecraft-data@${a.ref}`)
+        const dl = await downloadBump(ver, a.ref, work, a.fromDir)
+        const r = await applyBump({ target: after, ver, ref: a.ref, dl, replaceCommon: a.replaceCommon, log })
+        r.changed.forEach(c => changed.add(c))
+      }
       localFixes(after, ver, log).forEach(c => changed.add(c))
       log(`  self-check ${JSON.stringify(selfCheck(after, ver))}`)
     }
@@ -99,7 +118,7 @@ async function main () {
       ppOut = join(dirname(out), `minecraft-data+${mdVersion}.patch`)
       writeFileSync(ppOut, rebasePatchPaths(patch, 'node_modules/minecraft-data'))
     }
-    console.log(JSON.stringify({ ok: true, out, patchPackageOut: ppOut, bytes: Buffer.byteLength(patch), package: `minecraft-data@${mdVersion}`, versions: a._, mcdataRef: a.ref, files }, null, 2))
+    console.log(JSON.stringify({ ok: true, out, patchPackageOut: ppOut, bytes: Buffer.byteLength(patch), package: `minecraft-data@${mdVersion}`, versions: a._, shipped, mcdataRef: a.ref, files }, null, 2))
   } finally {
     if (!a.keepTemp) rmSync(work, { recursive: true, force: true })
     else log(`kept ${work}`)

@@ -16,7 +16,8 @@ export function checkVersion(
 ): VersionCheck {
   const protocol = supported[requested];
   if (protocol === undefined) {
-    const newest = Object.keys(supported).at(-1) ?? 'none';
+    // The highest protocol (bedrock-protocol lists its versions newest first, so the last key is the oldest).
+    const newest = Object.entries(supported).reduce<[string, number] | undefined>((a, e) => (!a || e[1] > a[1] ? e : a), undefined)?.[0] ?? 'none';
     return {
       ok: false,
       reason: 'unsupported_version',

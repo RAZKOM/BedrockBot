@@ -1,9 +1,9 @@
 # Runbook
 
 Everything runs against a **local BDS in Docker, offline mode**, except the Realm join, which only you
-run ("Realm join (you do this)"). The default game version is 1.26.60 (BDS 1.26.60.6) since
-2026-10-28 (docs/versions.md); 1.26.51 stays runnable as the rollback (`bds-dev51`,
-`BOT_VERSION=1.26.51`). Commands run from the repository root unless noted.
+run ("Realm join (you do this)"). The default game version is 1.26.60 (protocol 2225) since
+2026-10-28; the test servers run BDS 1.26.65.1, which speaks the same protocol, since 2026-11-16
+(docs/versions.md). 1.26.51 stays runnable as the rollback (`bds-dev51`, `BOT_VERSION=1.26.51`). Commands run from the repository root unless noted.
 
 Contents: [Quick start](#quick-start-fresh-clone-to-running-afk-bot) · [Servers](#servers) ·
 [Bot](#bot) · [Tests](#tests) · [Realm join (you do this)](#realm-join-you-do-this) ·
@@ -27,8 +27,8 @@ section); expect 5 to 10 minutes on a new machine including reading. Needs:
 git clone <this repository> BedrockBot
 cd BedrockBot
 corepack enable                 # once per machine; provides the pinned pnpm
-pnpm install                    # ~1 min on a fresh machine; applies patches/minecraft-data@3.117.0.patch
-pnpm bds:up                     # bds-dev: BDS 1.26.60.6 on udp/19132; first run downloads BDS (~2 min)
+pnpm install                    # ~1 min on a fresh machine; applies patches/minecraft-data@3.118.0.patch
+pnpm bds:up                     # bds-dev: BDS 1.26.65.1 on udp/19132; first run downloads BDS (~2 min)
 pnpm config:init                # optional: writes %LOCALAPPDATA%\bedrockbot\config.json (~/.bedrockbot elsewhere)
 pnpm bot:afk -- --health-port 9464
 ```
@@ -92,35 +92,35 @@ container under test).
 
 | Profile | Container | Port | Compose file | BDS | Used by |
 |---|---|---|---|---|---|
-| `dev` (default) | bds-dev | udp/19132 | docker/compose.dev.yml | 1.26.60.6 | echo, chat, reconnect, keepalive e2e; the AFK CLI; quick start |
-| `world` | bds-world | udp/19142 | docker/compose.world.yml (difficulty: image default) | 1.26.60.6 | world-* (BDS_WORLD_*) |
-| `move` | bds-move | udp/19146 | docker/compose.move.yml (TICK_DISTANCE 10) | 1.26.60.6 | nav-*, skills-input (MOVE_BDS_* / PHYS_BDS_*); the nav v2 suites build in a random area per run (`MOVE_AREA=x,z` pins it, `MOVE_SEED` the course) |
-| `dig` | bds-dig | udp/19148 | docker/compose.dig.yml | 1.26.60.6 | dig (DIG_BDS_*) |
-| `wood` | bds-wood | udp/19150 | docker/compose.wood.yml | 1.26.60.6 | wood-* (gather-wood, Track H) |
-| `soak` | bds-soak | udp/19152 | docker/compose.soak.yml (TICK_DISTANCE 10) | 1.26.60.6 | the 8 h AFK soak only (task 5.4); nothing else connects |
-| `hard` | bds-hard | udp/19154 | docker/compose.hard.yml (TICK_DISTANCE 10; `BDS_HARD_DIFFICULTY`, default peaceful) | 1.26.60.6 | hard-* e2e: death/respawn, night safety (HARD_BDS_*) |
-| `rl` | bds-rl | udp/19156 | docker/compose.rl.yml | 1.26.60.6 | RL bridge (Track J) |
-| (no bds.mjs profile) | bds-act | udp/19158 | docker/compose.act.yml (TICK_DISTANCE 10): `docker compose -f docker/compose.act.yml up -d`, then `pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/act --world act --restart bds-act` | 1.26.60.6 | act-* e2e: placing and using blocks, task 7.3 (ACT_BDS_*, docs/interaction.md) |
-| `pve` | bds-pve | udp/19144 | docker/compose.pve.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_PVE_DIFFICULTY` overrides) | 1.26.60.6 | pve-* e2e: combat, guard, flee, follow, night (PVE_BDS_*; docs/pve.md) |
-| `surv` | bds-surv | udp/19182 | docker/compose.surv.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_SURV_DIFFICULTY` overrides) | 1.26.60.6 | surv-* e2e: eating, armour, tool wear, keeper, avoidance, task 7.11 (SURV_BDS_*; docs/survival.md) |
-| `core` | bds-core | udp/19180 | docker/compose.core.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_CORE_DIFFICULTY` overrides) | 1.26.60.6 | core-* e2e: process manager, runtime settings (CORE_BDS_*; docs/processes.md); also runs hard-* / pve-* as a regression check |
-| `cache` | bds-cache | udp/19184 | docker/compose.cache.yml (TICK_DISTANCE 10; **generated DEFAULT world, `LEVEL_SEED` 7**, peaceful) | 1.26.60.6 | cache-* e2e: world cache and debug map, tasks 7.12 / 7.15 (CACHE_BDS_*; docs/world-cache.md). The suites set `gamerule falldamage false` and work in a random area 1 500 to 9 500 blocks out (`CACHE_AREA=x,z` pins it) |
-| `farm` | bds-farm | udp/19186 | docker/compose.farm.yml (TICK_DISTANCE 10) | 1.26.60.6 | farm-*, mine-* e2e: farming and legit mining, tasks 7.13 / 7.14 (FARM_BDS_*; docs/farming.md, docs/mining.md) |
-| `food` | bds-food | udp/19190 | docker/compose.food.yml (TICK_DISTANCE 10; **difficulty easy**) | 1.26.60.6 | food-* e2e: hunting, cooking, the food chore, task 7.16 (FOOD_BDS_*; docs/food.md) |
-| `reg` | bds-reg | udp/19192 | docker/compose.reg.yml (peaceful) | 1.26.60.6 | world-registry e2e and the block palette dump (`node tools/bump-version/dump-palette.mjs --profile reg`), wave 8 Track AC (REG_BDS_*; docs/versions.md "Block states") |
-| `gaunt` | bds-gaunt | udp/19188 | docker/compose.gaunt.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_GAUNT_DIFFICULTY` overrides) | 1.26.60.6 | gaunt-* e2e: flee v2, trip readiness, sleeping, the `!come` gauntlet; wave 7 Track W (GAUNT_BDS_*; docs/pve.md, docs/survival.md "Sleep") |
-| `get` | bds-get | udp/19194 | docker/compose.get.yml (TICK_DISTANCE 10; flat, peaceful) | 1.26.60.6 | get-* e2e: `!get`, the stash step (shulker box, stash chest), wave 8 Track AD (GET_BDS_*; docs/get.md) |
-| `build` | bds-build | udp/19200 | docker/compose.build.yml (TICK_DISTANCE 10; flat, peaceful; data seeded from an existing data folder) | 1.26.60.6 | build-* e2e: `!build` (fill, clear, materials, scaffolds, structure files), wave 9 Track AL (BUILD_BDS_*; docs/build.md) |
-| `home` | bds-home | udp/19196 | docker/compose.home.yml (TICK_DISTANCE 10; flat, peaceful) | 1.26.60.6 | home-* e2e: chest memory, `!unload`, `!stock`, `!chests`, spare shulker boxes, wave 9 Track AG; `!bring`, wave 10 Track AS (HOME_BDS_*; docs/home.md) |
-| `explore` | bds-explore | udp/19198 | docker/compose.explore.yml (TICK_DISTANCE 10; **generated DEFAULT world, `LEVEL_SEED` 7**, peaceful; data seeded from docker/data/cache without its world) | 1.26.60.6 | explore-* e2e: `!explore`, branch mining, wave 9 Track AI (EXPLORE_BDS_*; docs/explore.md). The suites set `gamerule falldamage false` and work in random areas 2 000 to 9 000 blocks out (`EXPLORE_AREA=x,z` pins it) |
-| `nether` | bds-nether | udp/19202 | docker/compose.nether.yml (TICK_DISTANCE 10; **generated DEFAULT world, `LEVEL_SEED` 7**, difficulty normal; data seeded from docker/data/explore without `worlds/` and `server.properties`) | 1.26.60.6 | nether-* e2e: portal travel (`!nether`, `!overworld`), lava / magma / fire, the End's void edge, wave 10 Track AT (NETHER_BDS_*; docs/nether.md). The suites set `gamerule falldamage false`, `dofiretick false`, no mob spawning, and work in random areas 4 000 to 20 000 blocks out (`NETHER_AREA=x,z` pins the overworld one); the truth pack teleports across dimensions (truth:dimtp) |
-| `bari` | bds-bari | udp/19206 | docker/compose.bari.yml (TICK_DISTANCE 10; flat, peaceful; data seeded from docker/data/move without `worlds/` and `server.properties`) | 1.26.60.6 | nav-rules e2e (BARI_BDS_*) and the nav-* regression runs of the Baritone port, wave 11 Track BB (`MOVE_BDS_PORT=19206 MOVE_BDS_CONTAINER=bds-bari`; docs/pathfinding.md "Rules") |
-| `craft` | bds-craft | udp/19208 | docker/compose.craft.yml (TICK_DISTANCE 10; flat, peaceful, operator; data seeded from docker/data/dev without `worlds/` and `server.properties`) | 1.26.60.6 | craft-* e2e: `!craft` (2x2 and at a crafting table), `!compact`, the compaction step of `!unload`, wave 11 Track AW (CRAFT_BDS_*; docs/crafting.md). The suites work in random private areas from x, z = 12288 |
-| `rl-N` | bds-rl-N | udp/19170+N | docker/compose.rl-n.yml (`N=1 docker compose -p bedrockbot-rl-1 -f docker/compose.rl-n.yml up -d`) | 1.26.60.6 | extra RL envs for SubprocVecEnv (rl/scripts/throughput.py); remove after use |
+| `dev` (default) | bds-dev | udp/19132 | docker/compose.dev.yml | 1.26.65.1 | echo, chat, reconnect, keepalive e2e; the AFK CLI; quick start |
+| `world` | bds-world | udp/19142 | docker/compose.world.yml (difficulty: image default) | 1.26.65.1 | world-* (BDS_WORLD_*) |
+| `move` | bds-move | udp/19146 | docker/compose.move.yml (TICK_DISTANCE 10) | 1.26.65.1 | nav-*, skills-input (MOVE_BDS_* / PHYS_BDS_*); the nav v2 suites build in a random area per run (`MOVE_AREA=x,z` pins it, `MOVE_SEED` the course) |
+| `dig` | bds-dig | udp/19148 | docker/compose.dig.yml | 1.26.65.1 | dig (DIG_BDS_*) |
+| `wood` | bds-wood | udp/19150 | docker/compose.wood.yml | 1.26.65.1 | wood-* (gather-wood, Track H) |
+| `soak` | bds-soak | udp/19152 | docker/compose.soak.yml (TICK_DISTANCE 10) | 1.26.65.1 | the 8 h AFK soak only (task 5.4); nothing else connects |
+| `hard` | bds-hard | udp/19154 | docker/compose.hard.yml (TICK_DISTANCE 10; `BDS_HARD_DIFFICULTY`, default peaceful) | 1.26.65.1 | hard-* e2e: death/respawn, night safety (HARD_BDS_*) |
+| `rl` | bds-rl | udp/19156 | docker/compose.rl.yml | 1.26.65.1 | RL bridge (Track J) |
+| (no bds.mjs profile) | bds-act | udp/19158 | docker/compose.act.yml (TICK_DISTANCE 10): `docker compose -f docker/compose.act.yml up -d`, then `pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/act --world act --restart bds-act` | 1.26.65.1 | act-* e2e: placing and using blocks, task 7.3 (ACT_BDS_*, docs/interaction.md) |
+| `pve` | bds-pve | udp/19144 | docker/compose.pve.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_PVE_DIFFICULTY` overrides) | 1.26.65.1 | pve-* e2e: combat, guard, flee, follow, night (PVE_BDS_*; docs/pve.md) |
+| `surv` | bds-surv | udp/19182 | docker/compose.surv.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_SURV_DIFFICULTY` overrides) | 1.26.65.1 | surv-* e2e: eating, armour, tool wear, keeper, avoidance, task 7.11 (SURV_BDS_*; docs/survival.md) |
+| `core` | bds-core | udp/19180 | docker/compose.core.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_CORE_DIFFICULTY` overrides) | 1.26.65.1 | core-* e2e: process manager, runtime settings (CORE_BDS_*; docs/processes.md); also runs hard-* / pve-* as a regression check |
+| `cache` | bds-cache | udp/19184 | docker/compose.cache.yml (TICK_DISTANCE 10; **generated DEFAULT world, `LEVEL_SEED` 7**, peaceful) | 1.26.65.1 | cache-* e2e: world cache and debug map, tasks 7.12 / 7.15 (CACHE_BDS_*; docs/world-cache.md). The suites set `gamerule falldamage false` and work in a random area 1 500 to 9 500 blocks out (`CACHE_AREA=x,z` pins it) |
+| `farm` | bds-farm | udp/19186 | docker/compose.farm.yml (TICK_DISTANCE 10) | 1.26.65.1 | farm-*, mine-* e2e: farming and legit mining, tasks 7.13 / 7.14 (FARM_BDS_*; docs/farming.md, docs/mining.md) |
+| `food` | bds-food | udp/19190 | docker/compose.food.yml (TICK_DISTANCE 10; **difficulty easy**) | 1.26.65.1 | food-* e2e: hunting, cooking, the food chore, task 7.16 (FOOD_BDS_*; docs/food.md) |
+| `reg` | bds-reg | udp/19192 | docker/compose.reg.yml (peaceful) | 1.26.65.1 | world-registry e2e and the block palette dump (`node tools/bump-version/dump-palette.mjs --profile reg`), wave 8 Track AC (REG_BDS_*; docs/versions.md "Block states") |
+| `gaunt` | bds-gaunt | udp/19188 | docker/compose.gaunt.yml (TICK_DISTANCE 10; **difficulty normal**, `BDS_GAUNT_DIFFICULTY` overrides) | 1.26.65.1 | gaunt-* e2e: flee v2, trip readiness, sleeping, the `!come` gauntlet; wave 7 Track W (GAUNT_BDS_*; docs/pve.md, docs/survival.md "Sleep") |
+| `get` | bds-get | udp/19194 | docker/compose.get.yml (TICK_DISTANCE 10; flat, peaceful) | 1.26.65.1 | get-* e2e: `!get`, the stash step (shulker box, stash chest), wave 8 Track AD (GET_BDS_*; docs/get.md) |
+| `build` | bds-build | udp/19200 | docker/compose.build.yml (TICK_DISTANCE 10; flat, peaceful; data seeded from an existing data folder) | 1.26.65.1 | build-* e2e: `!build` (fill, clear, materials, scaffolds, structure files), wave 9 Track AL (BUILD_BDS_*; docs/build.md) |
+| `home` | bds-home | udp/19196 | docker/compose.home.yml (TICK_DISTANCE 10; flat, peaceful) | 1.26.65.1 | home-* e2e: chest memory, `!unload`, `!stock`, `!chests`, spare shulker boxes, wave 9 Track AG; `!bring`, wave 10 Track AS (HOME_BDS_*; docs/home.md) |
+| `explore` | bds-explore | udp/19198 | docker/compose.explore.yml (TICK_DISTANCE 10; **generated DEFAULT world, `LEVEL_SEED` 7**, peaceful; data seeded from docker/data/cache without its world) | 1.26.65.1 | explore-* e2e: `!explore`, branch mining, wave 9 Track AI (EXPLORE_BDS_*; docs/explore.md). The suites set `gamerule falldamage false` and work in random areas 2 000 to 9 000 blocks out (`EXPLORE_AREA=x,z` pins it) |
+| `nether` | bds-nether | udp/19202 | docker/compose.nether.yml (TICK_DISTANCE 10; **generated DEFAULT world, `LEVEL_SEED` 7**, difficulty normal; data seeded from docker/data/explore without `worlds/` and `server.properties`) | 1.26.65.1 | nether-* e2e: portal travel (`!nether`, `!overworld`), lava / magma / fire, the End's void edge, wave 10 Track AT (NETHER_BDS_*; docs/nether.md). The suites set `gamerule falldamage false`, `dofiretick false`, no mob spawning, and work in random areas 4 000 to 20 000 blocks out (`NETHER_AREA=x,z` pins the overworld one); the truth pack teleports across dimensions (truth:dimtp) |
+| `bari` | bds-bari | udp/19206 | docker/compose.bari.yml (TICK_DISTANCE 10; flat, peaceful; data seeded from docker/data/move without `worlds/` and `server.properties`) | 1.26.65.1 | nav-rules e2e (BARI_BDS_*) and the nav-* regression runs of the Baritone port, wave 11 Track BB (`MOVE_BDS_PORT=19206 MOVE_BDS_CONTAINER=bds-bari`; docs/pathfinding.md "Rules") |
+| `craft` | bds-craft | udp/19208 | docker/compose.craft.yml (TICK_DISTANCE 10; flat, peaceful, operator; data seeded from docker/data/dev without `worlds/` and `server.properties`) | 1.26.65.1 | craft-* e2e: `!craft` (2x2 and at a crafting table), `!compact`, the compaction step of `!unload`, wave 11 Track AW (CRAFT_BDS_*; docs/crafting.md). The suites work in random private areas from x, z = 12288 |
+| `rl-N` | bds-rl-N | udp/19170+N | docker/compose.rl-n.yml (`N=1 docker compose -p bedrockbot-rl-1 -f docker/compose.rl-n.yml up -d`) | 1.26.65.1 | extra RL envs for SubprocVecEnv (rl/scripts/throughput.py); remove after use |
 
 Per-track details: docs/world-model.md, docs/movement.md, docs/pathfinding.md, docs/digging.md, docs/wood.md (`--task gather`), docs/rl.md, docs/interaction.md (placing, doors), docs/waypoints.md (`!wp`, `!goto <name>`, `!top`), docs/farming.md and docs/mining.md (`!farm`, `!mine`), docs/pve.md, docs/survival.md (eating, armour, keeper, avoidance), docs/food.md (`!food`, `!cook`, the food chore), docs/get.md (`!get`, the stash step), docs/explore.md (`!explore`, branch mining), docs/nether.md (`!nether`, `!overworld`, dimensions, lava), docs/flight.md (`!fly`, `!land`, the Elytra glide, the flight kit), docs/crafting.md (`!craft`, `!compact`, the compaction step of `!unload`), docs/versions.md.
-| `fly` | bds-fly | udp/19204 | docker/compose.fly.yml (TICK_DISTANCE 10; FLAT world, difficulty peaceful, operator; data seeded from docker/data/dig without `worlds/` and `server.properties`) | 1.26.60.6 | fly-* e2e: Elytra flight, the landings on truth-built platforms, the flight kit rules, wave 11 Track AU (FLY_BDS_*; docs/flight.md). **Fall damage stays on** (the landing damage is measured); the suites freeze the clock and work in random private areas 60 000 blocks out (`FLY_AREA=x,z` pins one) |
-| `nn` | bds-nn | tcp+udp/19140, udp/19160-19167 (WebRTC), udp/7551 (discovery) | docker/compose.dev-nethernet.yml (NetherNet, TICK_DISTANCE 10) | 1.26.60.6 | `pnpm e2e:nn` |
+| `fly` | bds-fly | udp/19204 | docker/compose.fly.yml (TICK_DISTANCE 10; FLAT world, difficulty peaceful, operator; data seeded from docker/data/dig without `worlds/` and `server.properties`) | 1.26.65.1 | fly-* e2e: Elytra flight, the landings on truth-built platforms, the flight kit rules, wave 11 Track AU (FLY_BDS_*; docs/flight.md). **Fall damage stays on** (the landing damage is measured); the suites freeze the clock and work in random private areas 60 000 blocks out (`FLY_AREA=x,z` pins one) |
+| `nn` | bds-nn | tcp+udp/19140, udp/19160-19167 (WebRTC), udp/7551 (discovery) | docker/compose.dev-nethernet.yml (NetherNet, TICK_DISTANCE 10) | 1.26.65.1 | `pnpm e2e:nn` |
 | `dev51` | bds-dev51 | udp/19134 | docker/compose.dev51.yml (TICK_DISTANCE 10) | 1.26.51.1 | `pnpm e2e:51` (rollback to the previous version) |
 
 Data folders are `docker/data/<profile>` (git-ignored; `nn` uses `docker/data/nn`). All are
@@ -193,7 +193,7 @@ recording flags can also be set in the config file (next section); the flag wins
 | `--log-dir <dir>` | `bot/logs` | `disconnects.jsonl` and `metrics.json` (git-ignored) |
 | `--metrics-interval <s>` | 60 | how often `metrics.json` is rewritten |
 | `--no-reconnect` | | exit (code 1) instead of reconnecting |
-| `--version <ver>` | `1.26.60` (env `BOT_VERSION`) | game version (through `patches/minecraft-data@3.117.0.patch`); `1.26.51` for the rollback server |
+| `--version <ver>` | `1.26.60` (env `BOT_VERSION`) | game version (minecraft-data 3.118.0 ships it); `1.26.51` for the rollback server |
 | `--host`, `--port` | 127.0.0.1, 19132 | the BDS to join |
 | `--transport nethernet` | `raknet` | NetherNet with LAN signalling (local BDS); `--port` is then ignored |
 | `--username <name>` | per task (`AfkBot`, `EchoBot`) | offline name |
@@ -414,7 +414,7 @@ yet).
   `<msg>`; the bot is back within a few seconds.
 - `disconnect()` returns before RakNet sends the packet; a process that exits right away leaves
   the session open and the next login with the same name fails. Use `disconnectAndFlush()`.
-- bedrock-protocol 3.60.1 ignores the `viewDistance` createClient option; the Connection sets
+- bedrock-protocol 3.60.1 and 3.61.0 ignore the `viewDistance` createClient option; the Connection sets
   `client.viewDistance` itself (BDS answered a request of 4 with radius 5).
 - Two clients that start their RakNet handshake at the same moment from one host: one of them
   sometimes times out ("Connect timed out"). Connect test clients one after another.
@@ -677,12 +677,13 @@ To keep the bot running on a server (a launchd agent on macOS, a systemd user un
 
 ### Prerequisites (PLAN.md section 2 checklist)
 
-1. **bedrock-protocol at or after PR #839**: done. `bot/package.json` pins the #839 merge commit
-   `c9e1fbf21dc6abde8d89920996575791b79e66cf` (docs/decisions/0004-protocol-pin.md). Check with
+1. **bedrock-protocol at or after PR #839**: done. `bot/package.json` pins npm 3.61.0, which contains it
+   (the #839 merge commit `c9e1fbf2` until 2026-11-16; docs/decisions/0004-protocol-pin.md). Check with
    `pnpm --filter bot exec node -e "console.log(require('fs').readFileSync(require.resolve('bedrock-protocol/src/client/auth.js'),'utf8').includes('dns.promises.lookup'))"` (prints `true`).
 2. **Game version equal to the Realm's**: a Realm runs the current release (26.60 = `1.26.60` on
-   2026-10-28). `1.26.60` is the bot's default since 2026-10-28 (through
-   `patches/minecraft-data@3.117.0.patch`, verified against BDS 1.26.60.6 on RakNet and NetherNet,
+   2026-10-28; 1.26.61 to 1.26.65 speak the same protocol, 2225). `1.26.60` is the bot's default since
+   2026-10-28 (minecraft-data 3.118.0 since 2026-11-16, a patch on 3.117.0 before; verified against BDS
+   1.26.60.6 on RakNet and NetherNet and against BDS 1.26.65.1 on RakNet,
    docs/versions.md). There is no ping for a Realm, so the version gate cannot compare protocols before
    joining; a mismatch should show up as a kick (`outdated_client` / `outdated_server`, never retried,
    exit code 3) or as a Realms API error (*unverified which*). `pnpm update:check` (Operations) tells

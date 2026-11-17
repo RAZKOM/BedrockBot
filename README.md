@@ -29,7 +29,7 @@ Node 24, `corepack enable`, Docker Desktop running, UDP 19132 free; clone into a
 
 ```sh
 pnpm install
-pnpm bds:up                          # local BDS 1.26.60.6 on udp/19132 (first run ~2 min)
+pnpm bds:up                          # local BDS 1.26.65.1 on udp/19132 (first run ~2 min)
 pnpm bot:afk -- --health-port 9464   # "spawned as AfkBot"; curl http://127.0.0.1:9464/healthz
 ```
 
@@ -169,7 +169,7 @@ BedrockBot/
   scripts/bds.mjs            start, stop, restart, console, logs, truth-pack deploy per server profile
   tools/bump-version/        version-bump playbook and tooling (patch minecraft-data ahead of releases)
   tools/physics-spike/       Phase 3 physics spike
-  patches/                   pnpm patch adding bedrock 1.26.60 to minecraft-data 3.117.0
+  patches/                   pnpm patches: a protocol data fix for minecraft-data 3.118.0, a signalling fallback for bedrock-protocol
   fixtures/                  recorded packet captures per game version (1.26.51, 1.26.60)
   worlds/                    test structures
   spikes/                    throwaway feasibility experiments, never imported

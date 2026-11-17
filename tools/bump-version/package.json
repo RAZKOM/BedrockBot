@@ -16,8 +16,8 @@
     "schema-diff": "node schema-diff.mjs"
   },
   "dependencies": {
-    "bedrock-protocol": "3.60.1",
-    "minecraft-data": "3.117.0",
+    "bedrock-protocol": "3.61.0",
+    "minecraft-data": "3.118.0",
     "prismarine-chunk": "1.41.0",
     "prismarine-registry": "1.12.0"
   }

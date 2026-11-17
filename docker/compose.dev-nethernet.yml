@@ -9,7 +9,8 @@
 # reachable this way. Signalling uses SERVER_PORT (TCP+UDP); the game traffic itself is WebRTC
 # (ICE/DTLS/SCTP) on the UDP ports in SERVER_UDP_PORTS, one port per connected client.
 #
-# BDS 1.26.60.6 since 2026-10-28 (the default game version; BDS_NN_VERSION=1.26.51.1 for the old one).
+# BDS 1.26.65.1 since 2026-11-16 (1.26.60.6 from 2026-10-28; the protocol of the default game version 1.26.60;
+# BDS_NN_VERSION=1.26.60.6 or 1.26.51.1 for an older build).
 #
 # Measured 2026-10-28 (BDS 1.26.51.1, image 2026.10.2): with a single UDP port (SERVER_UDP_PORTS=19140,
 # the old draft) a second concurrent client gets an SDP answer without any ICE candidate and fails with
@@ -23,7 +24,7 @@ services:
     container_name: bds-nn
     environment:
       EULA: "TRUE"
-      VERSION: "${BDS_NN_VERSION:-1.26.60.6}"
+      VERSION: "${BDS_NN_VERSION:-1.26.65.1}"
       TRANSPORT: nethernet
       ONLINE_MODE: "false"
       ALLOW_LIST: "false"

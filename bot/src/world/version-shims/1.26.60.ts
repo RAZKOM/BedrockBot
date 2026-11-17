@@ -1,5 +1,6 @@
-// Version shim for Bedrock 1.26.60 (protocol 2225). minecraft-data 3.117.0 does not ship 1.26.60;
-// it comes from patches/minecraft-data@3.117.0.patch (tools/bump-version, PLAN.md task 1.5).
+// Version shim for Bedrock 1.26.60 (protocol 2225; BDS 1.26.65.1 speaks the same protocol and sends the same
+// block palette, docs/versions.md "1.26.65"). minecraft-data ships 1.26.60 since 3.118.0 (from 2026-10-28 to
+// 2026-11-16 it came from a patch of 3.117.0; tools/bump-version, PLAN.md task 1.5).
 //
 // Same as 1.26.51 for everything the world model touches. `node tools/bump-version/schema-diff.mjs
 // 1.26.51 1.26.60 --deps self` (2026-10-28): level_chunk gained a trailing `client_biome_update`

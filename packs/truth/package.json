@@ -19,7 +19,7 @@
   },
   "devDependencies": {
     "@minecraft/server": "2.10.0",
-    "bedrock-protocol": "3.60.1",
+    "bedrock-protocol": "3.61.0",
     "esbuild": "0.28.2",
     "prismarine-nbt": "2.8.0",
     "typescript": "6.0.3",

@@ -1,4 +1,4 @@
-// Version shim for Bedrock 1.26.51 (protocol 2193), minecraft-data 3.117.0, prismarine-registry 1.12.0.
+// Version shim for Bedrock 1.26.51 (protocol 2193), minecraft-data 3.117.0 to 3.118.0, prismarine-registry 1.12.0.
 // Everything version-specific the world model needs lives in a shim, so an upstream fix (or a fork
 // swap) touches one file (PLAN.md section 2, change 2).
 //

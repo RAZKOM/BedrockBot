@@ -27,6 +27,21 @@ node bump.mjs --list          # bedrock/ folders + top of protocolVersions.json 
   "Support Minecraft <ver>" issue on bedrock-protocol. It contains the protocol number from a server pong and
   links to the gophertunnel and CloudburstMC protocol commits for that version (example: issue #840 for
   1.26.60, opened 2026-10-27 20:24 UTC, protocol 2225). The verify ping also reports it.
+- **Same protocol or a new one?** A patch release often keeps the protocol: 1.26.61, 1.26.62 and 1.26.65 all
+  speak 2225, like 1.26.60. Check before any bump:
+  - start the new BDS (`run-bds.mjs`, step 2) and run `node verify.mjs <current version> --port <p>` with the
+    deps the bot has (`--deps self`): the report's `server` gives the pong's `version` and `protocol`. Same
+    protocol and `ok: true` means the bot already plays it;
+  - Mojang's protocol docs (https://github.com/Mojang/bedrock-protocol-docs) get one commit per release,
+    "Updating metadata and developer notes to Minecraft version <ver>". Every `json/*.json` file carries
+    `x-protocol-version`. Compare that commit with the previous release's commit (GitHub compare, e.g.
+    `.../compare/<1.26.60 commit>...<1.26.65 commit>`): 0 changed files means not one packet changed;
+  - rom1504bot does not open an issue for every release (none for 1.26.61, 1.26.62 or 1.26.65 by
+    2026-11-16), so a missing issue proves nothing.
+
+  With the same protocol there is nothing to bump: the bot keeps speaking the version name minecraft-data
+  knows (bedrock-protocol checks only the protocol number), and `!status` shows the server's own version.
+  Moving the test servers to the new build is optional (docs/versions.md "1.26.65").
 - **Upstream data.** Look for `data/bedrock/<ver>/` in `bump.mjs --list`. If present, go to step 2. If not,
   go to step 1.
 
@@ -105,14 +120,21 @@ packet and type whose schema changed and flags the ones each stage depends on (`
 ## 4. Make it persistent for the bot
 
 ```sh
-node make-patch.mjs 1.26.60          # -> patches/minecraft-data@3.117.0.patch (list every version you need)
+node make-patch.mjs 1.26.60 --mcdata-ref <commit>   # -> patches/minecraft-data@<pin>.patch (list every version you need)
 node test-patch.mjs 1.26.60          # applies with pnpm patchedDependencies and patch-package in temp dirs
 ```
 
+Pass `--mcdata-ref` as a commit, not `master`: upstream keeps editing a version's data after its protocol
+lands. minecraft-data master's 1.26.60 entry pointed blocks and items at 1.26.30 on 2026-10-28 (commit
+`9c97fe50`, PR #1340) and at new 1.26.60 tables from 2026-10-29 (PR #1335), so the same command run from
+master a month later builds a patch that also replaces the world model's block data (23 960 states instead
+of 16 913). The `localFixes` in make-patch.mjs (protocol data fixes upstream lacks) are applied to every
+version listed; a version the pinned package already ships is not bumped, it only gets those fixes.
+
 Then, on a branch in the main repo:
 
-1. Copy the patch to the root `patches/` folder and add `patchedDependencies: { minecraft-data@3.117.0:
-   patches/minecraft-data@3.117.0.patch }` to `pnpm-workspace.yaml`.
+1. Copy the patch to the root `patches/` folder and add `patchedDependencies: { minecraft-data@<pin>:
+   patches/minecraft-data@<pin>.patch }` to `pnpm-workspace.yaml` (replacing the entry of the old pin).
 2. Run `pnpm install` and commit `pnpm-lock.yaml`; frozen installs fail until the lockfile has the patch hash.
 3. Pin the new BDS build in `docker/compose.dev.yml` (and the NetherNet profile). Pass the new version to the
    bot's Connection explicitly, or rely on ping discovery: bedrock-protocol maps the server's protocol number
@@ -123,8 +145,15 @@ Then, on a branch in the main repo:
    (PLAN.md section 7).
 5. Re-record fixtures, run unit and e2e tests on both transports, then a 30-minute soak (PLAN.md section 7). Only
    then use the bump on the Realm (a human does this).
-6. When npm ships a minecraft-data release containing the version: bump the dependency and delete the patch
-   and its `patchedDependencies` entry in the same change. pnpm refuses unused patch entries.
+6. When npm ships a minecraft-data release containing the version: bump the dependency and replace the patch
+   in the same change (pnpm refuses unused patch entries). While `localFixes` has entries the patch stays,
+   smaller: `node make-patch.mjs <ver> --package-version <release>` writes the fixes alone. Before taking a
+   release, compare its block and item data with the pinned one (`bot/test/unit/world/data-pin.test.ts`
+   fails when any key the bot loads changes): a release can regenerate them (minecraft-data 3.119.0 did for
+   every bedrock version), which changes state ids, collision shapes, dig times and stack sizes at once.
+   Take such a release as its own change, with the nav, flight and dig suites; a release that only adds
+   protocol data (3.118.0) is a drop-in. Example: 2026-11-16, minecraft-data 3.117.0 + patch ->
+   3.118.0 + fix-only patch, bedrock-protocol git pin -> 3.61.0 (docs/versions.md).
 
 ## 5. Upstream the bump (human with a GitHub account; agents do not create forks or PRs)
 

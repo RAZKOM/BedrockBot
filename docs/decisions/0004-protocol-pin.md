@@ -1,6 +1,7 @@
 # 0004: bedrock-protocol pin for the Realm join
 
-Date: 2026-10-28. Status: accepted (PLAN.md task 1.5, Realm readiness checklist item 1).
+Date: 2026-10-28. Status: accepted (PLAN.md task 1.5, Realm readiness checklist item 1). Exit taken on
+2026-11-16: npm 3.61.0 (section "Exit taken" at the end).
 
 ## Question
 
@@ -85,3 +86,12 @@ verification) stay on npm 3.60.1; they never join a Realm.
 The pin covers checklist item 1 only. The Realm runs the newest game version (1.26.60 today), so the
 bot must speak it (`--version 1.26.60`, or flip the default, see docs/versions.md), the human signs
 in once (docs/runbook.md "Realm join"), and co-players are told about the bot.
+
+## Exit taken (2026-11-16, Track U1)
+
+bedrock-protocol 3.61.0 (npm, 2026-10-29) contains #834 and #839 (its HISTORY.md lists both) and #842, which sets
+`CURRENT_VERSION` to 1.26.60 and extends the README's version list; `src/` differs from `c9e1fbf2` only in
+`options.js`. `bot/package.json` now says `"bedrock-protocol": "3.61.0"`, as do `packs/truth` and
+`tools/bump-version`; `patches/bedrock-protocol.patch` applies unchanged. minecraft-data moved to 3.118.0 in the
+same change (docs/versions.md "1.26.65 and the npm releases", decision 0093). Rollback: the git specifier above and
+minecraft-data 3.117.0 with its 1.26.60 patch.

@@ -11,7 +11,7 @@ services:
     container_name: bds-farm
     environment:
       EULA: "TRUE"
-      VERSION: "1.26.60.6"
+      VERSION: "1.26.65.1"
       TRANSPORT: raknet
       ONLINE_MODE: "false"
       ALLOW_LIST: "false"

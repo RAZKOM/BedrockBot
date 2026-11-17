@@ -1,5 +1,5 @@
 # BDS for the RL environment (PLAN.md Phase 6 tasks 6.1 to 6.3, Track J). Same settings as
-# compose.dig.yml (BDS 1.26.60.6, RakNet, offline, flat, peaceful, operator) plus TICK_DISTANCE 10;
+# compose.dig.yml (BDS 1.26.65.1, RakNet, offline, flat, peaceful, operator) plus TICK_DISTANCE 10;
 # own project name, container bds-rl on udp/19156, data in docker/data/rl.
 #   node scripts/bds.mjs --profile rl up
 #   pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/rl --world rl --restart bds-rl
@@ -11,7 +11,7 @@ services:
     container_name: bds-rl
     environment:
       EULA: "TRUE"
-      VERSION: "1.26.60.6"
+      VERSION: "1.26.65.1"
       TRANSPORT: raknet
       ONLINE_MODE: "false"
       ALLOW_LIST: "false"

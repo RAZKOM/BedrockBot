@@ -48,7 +48,9 @@ function myers (a, b) {
       mid = rev.reverse()
     }
   }
-  ops.push(...mid)
+  // A loop, not push(...mid): a new file of 10^5 lines (minecraft-data's blockStates.json) overflows the
+  // argument list ("Maximum call stack size exceeded").
+  for (const op of mid) ops.push(op)
   for (let i = 0; i < suf; i++) ops.push(['=', a.length - suf + i, b.length - suf + i])
   return ops
 }
@@ -93,9 +95,10 @@ export function gitFileDiff (relPath, oldText, newText, context = 3) {
       if (op[0] === '=') { lines.push(fmt(' ', a[op[1]])); oLen++; nLen++ } else if (op[0] === '-') { lines.push(fmt('-', a[op[1]])); oLen++ } else { lines.push(fmt('+', b[op[1]])); nLen++ }
     }
     const range = (s, l) => l === 0 ? `${s},0` : (l === 1 ? `${s + 1}` : `${s + 1},${l}`)
-    body.push(`@@ -${range(oStart, oLen)} +${range(nStart, nLen)} @@`, ...lines)
+    body.push(`@@ -${range(oStart, oLen)} +${range(nStart, nLen)} @@`)
+    for (const l of lines) body.push(l)
   }
-  return [...header, ...body].join('\n') + '\n'
+  return header.concat(body).join('\n') + '\n'
 }
 
 // Re-root the file paths of a git-format patch, e.g. pnpm's package-relative paths

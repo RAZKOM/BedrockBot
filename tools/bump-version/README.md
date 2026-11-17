@@ -5,7 +5,7 @@ patching the `minecraft-data` npm package with data from minecraft-data's GitHub
 works end to end against a pinned local BDS. Plain Node ESM, no build step. The step-by-step procedure for
 a game-update day is in [playbook.md](playbook.md).
 
-Pinned stack (`package.json`): bedrock-protocol 3.60.1, minecraft-data 3.117.0, prismarine-registry
+Pinned stack (`package.json`): bedrock-protocol 3.61.0, minecraft-data 3.118.0, prismarine-registry
 1.12.0, prismarine-chunk 1.41.0. BDS image: `itzg/minecraft-bedrock-server:2026.10.2`.
 
 Hard rules baked in: BDS runs locally with `ONLINE_MODE=false`; `verify.mjs` only connects to
@@ -40,13 +40,16 @@ node schema-diff.mjs 1.26.51 1.26.60
 node schema-diff.mjs 1.26.51 1.26.60 --show packet_player_auth_input
 
 # Make the bump persistent for a project, and prove the patch applies to a fresh install
-node make-patch.mjs 1.26.60              # -> patches/minecraft-data@3.117.0.patch (pnpm format)
-node make-patch.mjs 1.26.60 --patch-package   # also patches/minecraft-data+3.117.0.patch (patch-package format)
+node make-patch.mjs 1.26.60 --mcdata-ref <commit>   # -> patches/minecraft-data@<pin>.patch (pnpm format); a version the pin
+                                         # already ships gets the local fixes only
+node make-patch.mjs 1.26.60 --package-version 3.119.0 --out <file>   # the same for another minecraft-data release
+node make-patch.mjs 1.26.60 --patch-package   # also patches/minecraft-data+<pin>.patch (patch-package format)
 node test-patch.mjs 1.26.60              # pnpm patchedDependencies + patch-package, each in a temp dir
 
 # Block states of the new BDS (minecraft-data's stop at 1.26.30): dump the palette the world registry uses
 node dump-palette.mjs --profile reg      # bds-reg (truth pack deployed) -> bot/data/block-palette/<version>.json
 node dump-palette.mjs --container bds-x --port 19999 --version 1.26.61
+node dump-palette.mjs --container bds-x --port 19999 --version 1.26.65 --speak 1.26.60   # a newer build of 1.26.60's protocol
 ```
 
 `dump-palette.mjs` (wave 8, Track AC; docs/versions.md "Block states") joins the local BDS as an offline
@@ -102,11 +105,11 @@ into `.work/sandbox/` (git-ignored, about 12 s) and edits that copy. For pnpm pr
 
 ## Persisting the bump in a pnpm project (the bot)
 
-**Status (2026-10-28): done for the bot workspace.** The 1.26.60 patch is at the repo root
-(`patches/minecraft-data@3.117.0.patch`, byte-identical to `patches/` here) and listed in
-`pnpm-workspace.yaml` `patchedDependencies`; `pnpm -r test` replays 1.26.60 fixtures and the e2e
-suite passes against BDS 1.26.60.6 (docs/versions.md; 1.26.60 is the default game version since
-2026-10-28). Regenerate both copies together.
+**Status (2026-11-16): done for the bot workspace.** From 2026-10-28 the 1.26.60 bump was
+`patches/minecraft-data@3.117.0.patch`. Since 2026-11-16 the bot is on minecraft-data 3.118.0, which ships
+1.26.60, and the patch (`patches/minecraft-data@3.118.0.patch`, byte-identical to `patches/` here) holds the
+`localFixes` alone (docs/versions.md "1.26.65 and the npm releases"). Regenerate both copies together.
+The examples below use the names of the 3.117.0 patch.
 
 `patches/minecraft-data@3.117.0.patch` is a git-format diff with package-relative paths (`a/data.js`,
 `a/minecraft-data/data/...`). That is the format `pnpm patch-commit` writes and `patchedDependencies`
@@ -126,8 +129,10 @@ reads. To consume it from the repo root:
    The lockfile records the patch hash, so commit `pnpm-lock.yaml` after adding or regenerating the patch.
    A frozen install (CI) fails with "patchedDependencies configuration doesn't match the value found in
    the lockfile" until you do.
-4. When an npm release of minecraft-data contains the version, bump the dependency and delete the patch
-   and the `patchedDependencies` entry, all in the same change. The entry is keyed on the exact version,
+4. When an npm release of minecraft-data contains the version, bump the dependency and replace the patch
+   and the `patchedDependencies` entry, all in the same change (with no `localFixes` left: delete them).
+   First check that the release keeps the block and item data (`bot/test/unit/world/data-pin.test.ts`;
+   3.119.0 did not, playbook step 4.6). The entry is keyed on the exact version,
    and pnpm 12.16.1 refuses to install with an unused entry ("The following patches were not used:
    minecraft-data@…"; checked 2026-10-28).
 5. To bump again on top (say 1.26.70 while still on 3.117.0), regenerate with every version you need:
@@ -183,7 +188,7 @@ darwin-arm64 there is no prebuild, so allow the script and have cmake plus a C++
 | File | Purpose |
 |---|---|
 | `bump.mjs` | download, validate, apply to a minecraft-data dir; `--list` upstream versions |
-| `make-patch.mjs` | pristine install, bump a copy, write the diff of touched files |
+| `make-patch.mjs` | pristine install, bump a copy (or only fix a version the release ships), write the diff of touched files |
 | `test-patch.mjs` | apply the patch with pnpm and with patch-package in temp dirs and load the result |
 | `run-bds.mjs` | start or reuse a pinned BDS container and wait for "Server started"; `--links` |
 | `verify.mjs` | end-to-end login, chunk and movement check, JSON report |
@@ -192,6 +197,6 @@ darwin-arm64 there is no prebuild, so allow the script and have cmake plus a C++
 | `lib/apply.mjs` | data.js entry generation and insertion, common-file merge, self-check, pnpm-store guard |
 | `lib/sandbox.mjs` | npm sandbox install (`.work/sandbox`) |
 | `lib/gitdiff.mjs` | dependency-free git-format diff writer (Myers) and path re-rooting |
-| `patches/minecraft-data@3.117.0.patch` | the 1.26.60 bump for minecraft-data 3.117.0 (pnpm format) |
+| `patches/minecraft-data@3.118.0.patch` | the local protocol fixes for minecraft-data 3.118.0 (pnpm format) |
 | `.bds/<name>/` | BDS data dirs of containers created by `run-bds.mjs` (git-ignored) |
 | `.work/` | sandbox and scratch output (git-ignored) |

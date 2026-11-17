@@ -1,7 +1,7 @@
 // Replays fixtures/<version>/{login-idle,world-chunks}.jsonl.gz through bedrock-protocol's deserializer (PLAN.md
 // task 0.5), for every game version the bot supports. Doubles as the breaking-change detector when
-// bedrock-protocol or minecraft-data are bumped. 1.26.60 needs patches/minecraft-data@3.117.0.patch
-// (recorded against BDS 1.26.60.6 with scripts/record-fixture.ts --version 1.26.60).
+// bedrock-protocol or minecraft-data are bumped. 1.26.60 comes with minecraft-data 3.118.0 (before 2026-11-16 from a
+// patch of 3.117.0; recorded against BDS 1.26.60.6 with scripts/record-fixture.ts --version 1.26.60).
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
