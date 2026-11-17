@@ -212,6 +212,11 @@ describe.skipIf(!E2E)('pve: !test mobs (Track M1)', () => {
     expect(enchants0).not.toBe('[]');
     note(`bare: the sword before: ${inv.slots[0]?.name} enchants ${enchants0}`);
     b.pve.settings.set('fleeFly', true);
+    // Track M6: with `bareArcher` a bot with no blade runs on foot from the first skeleton in sight at 14 health or over,
+    // and skeleton4 seldom takes it under 14, where the elytra flee is asked (2026-11-16, both cases: damage 0, lowest 20,
+    // floors backoff 1, 0 asks). This case
+    // is about the stow, the restore and Track M3's ask below 14, so the rule is off here (pve-m6 and m6-rules test it)
+    b.pve.rules.bareArcher = false;
     b.pve.setGuard({ on: true, radius: 16 });
     const fly0 = b.metrics.snapshot().counters['pve.floor.fly'] ?? 0;
     const n0 = b.said.length;
@@ -261,6 +266,7 @@ describe.skipIf(!E2E)('pve: !test mobs (Track M1)', () => {
       off();
       b.pve.setGuard({ on: false });
       b.pve.settings.set('fleeFly', false);
+      b.pve.rules.bareArcher = true;
       await b.truth.cleanup().catch(() => undefined);
       lastBare = Date.now();
     }

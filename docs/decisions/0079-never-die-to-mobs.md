@@ -277,3 +277,39 @@ rows and on the live kit's and the stone kit's `mixed-8`, on bds-pve and bds-gau
     sword alone). No kit `pillager-1` dies in about 6 in 10 either way (19 of 32 off, 19 of 31 on, three series). Not done:
     anything that places or digs or moves the body in a new way (cover from archers, a longer or faster run from a
     following witch); see pve.md "Not met".
+
+## Addendum: Track M6 (2026-11-16)
+
+The numbers are in [../pve.md](../pve.md) "Track M6: archer groups, crossbows". The no-kit `pillager-1` cell was traced
+tick by tick over whole runs, each rule A/B'd at 10 runs a side on its rows and on the live kit's and the stone kit's
+`mixed-8`, on bds-pve and bds-gaunt.
+
+45. **`bareArcher`: with no blade in the hotbar, an archer with a line on the bot within 16 is run from at any health.**
+    A fist chase stood 2 to 5 blocks in front of the pillager, a bolt (4) every 47 ticks, 20 to 9 health in about 7 s,
+    and the flight on foot started at 5 to 7 with the fourth bolt; once running, the bolts that landed came from 8.3 to
+    9.6 blocks about every 26 s. The run was right and late. No kit `pillager-1`: 8 deaths in 10 to 0, damage 23.9 to
+    2.9 a run. A choice of when the flight starts, like decisions 32 to 44.
+46. **It does not move the elytra flee up.** At 14 health or over (`FLY_SHOOTER_HEALTH`) the flight `bareArcher` starts
+    stays on foot; Track M3's rule for shooters (the elytra flee below 14 with no blade) and every floor below 14 choose
+    as before. A takeoff costs rockets, which a world without cheats has to craft.
+47. **`volley`: at `fleeHealth` or over, the flight on foot also starts when the health is at most one round of the
+    shooters in sight** (2 or more archers within 16 and witches within 10 with a line on the bot). Each counts what its
+    own last hit on the bot did (else its kind's last hit; at most 6, since a hit is blamed on a guess), and before any
+    hit an arrow at 4 less 4 % a point of the armour worn and her harming at 6. Counting what they did, not a fixed
+    floor, keeps an armoured bot fighting: four skeletons that have not hit are 3.2 against the netherite set and 16
+    against no armour. Stone `seal-5` by night: the flight started at a median of 9 health against 6, damage 29.0 to 25.2,
+    no death either side in 10.
+48. **Both ship on**: choice-only, no row is worse in deaths. Off and on, 10 runs a side: no kit `pillager-1` 8 to 0,
+    `skeleton-4` 1 to 0, `mixed-8` 0 and 0 (damage 16.8 to 0.3); stone `seal-5`, `mixed-8`, `skeleton-4` and iron
+    `seal-5` 0 and 0 (damage 29.0 to 25.2, 25.8 to 25.5, 14.9 to 8.8, 23.7 to 20.1); the live kit's `mixed-8` 0 and 0 in
+    15 a side, where neither rule acts (a blade, and one skeleton and a witch through netherite are under `fleeHealth`;
+    no line of either rule in its log): its damage, 18.6 and 24.0, is where the witch's poison landed. Not done: ground
+    other than flat cells, activities with no blade, anything that places blocks; see pve.md "Not met".
+49. **No block is placed for archers.** Cover, a pillar and the seal-in were not built: `bareArcher` alone took the
+    pillager cell to no deaths, and closing in between bolts is not needed with a blade (the stone and iron kits'
+    `pillager-1` never died in Track M4). `sealIn` stays off (decision 27).
+50. **The pve-combat flank case keeps the bot out of the flight it does not measure.** Its flake (one zombie left after
+    3 fights and 40 s, about once in 6 file runs) was the controller's own flight on foot: after 5 zombie hits the
+    health is 5, under `fleeHealth`, and the flight took the body while the fight ran to its timeout; a zombie in armour
+    made it likely, and a zombie in diamond armour made it happen in 2 of 2 runs. The case keeps the health at 12 or over
+    while a pair runs and takes the zombies' own gear off; with the diamond zombie, 8 of 8 runs then killed both.

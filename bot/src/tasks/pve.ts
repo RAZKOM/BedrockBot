@@ -50,6 +50,7 @@ import { chooseFood } from '../skills/survival/eat.ts'; // Track M1: the eat flo
 import { EAT_BEFORE_SPRINT_LOST } from '../skills/survival/index.ts'; // Track M2
 import { Hotbar } from '../world/hotbar.ts';
 import type { Inventory } from '../world/inventory.ts';
+import { armourScore, WINDOW_ARMOR } from '../skills/survival/armour.ts';
 import type { EntityInfo, PacketSource, Vec3 } from '../world/types.ts';
 import { etaFor, GotoProcess, navRemaining, settingsMover, type GotoProcessOptions, type ProcessMover } from './process/goto.ts';
 import { BaseProcess, PRIORITY, ProcessManager, type ProcessStatus, type StopReason } from './process/manager.ts';
@@ -296,8 +297,42 @@ export interface PveRules {
    * within FLEE_SCAN (firstTarget): her harming (6) and one arrow (4) are the health. The floors decide as for any mob.
    */
   witchCrowd: boolean;
+  /**
+   * Track M6: the flight on foot also starts at fleeHealth or over when the health is at most one round of the shooters
+   * in sight (volleyLow): VOLLEY_MIN_SHOOTERS or more archers within FLEE_SCAN and a witch within VOLLEY_WITCH_RANGE, each
+   * counted at its own last hit on the bot (before one: VOLLEY_ARROW less the armour worn, VOLLEY_HARMING). Only when the
+   * flee starts.
+   */
+  volley: boolean;
+  /**
+   * Track M6: with no blade in the hotbar an archer with a line on the bot within FLEE_SCAN is run from at any health
+   * (bareArcher), not fought with a fist: a pillager hits every 47 ticks from 2 to 5 blocks while a fist chases it, and
+   * about every 26 s from 8 to 10 once the flight on foot keeps it there.
+   */
+  bareArcher: boolean;
 }
-export const PVE_RULES_DEFAULT: Readonly<PveRules> = { legHold: true, archerDuel: true, fleeLong: true, poison: true, shooterHome: true, shooterWay: true, poisonBite: true, witchCrowd: true };
+export const PVE_RULES_DEFAULT: Readonly<PveRules> = { legHold: true, archerDuel: true, fleeLong: true, poison: true, shooterHome: true, shooterWay: true, poisonBite: true, witchCrowd: true, volley: true, bareArcher: true };
+/** Track M6 (`volley`): an archer that has not hit the bot yet counts this much (an arrow or a bolt with no armour is 3 to 5). */
+export const VOLLEY_ARROW = 4;
+/** Track M6 (`volley`): a witch that has not hit the bot yet counts her harming potion (6 through any armour). */
+export const VOLLEY_HARMING = 6;
+/** Track M6 (`volley`): one shooter's last hit counts at most this (an arrow or a bolt on normal is 3 to 5, her harming 6). */
+export const VOLLEY_SHOT_MAX = 6;
+/** Track M6 (`volley`): a witch counts within this (blocks): she throws from 8, not from 12. */
+export const VOLLEY_WITCH_RANGE = 10;
+/** Track M6 (`volley`): the rule is for a group: at least this many shooters in sight (one archer is the duel's). */
+export const VOLLEY_MIN_SHOOTERS = 2;
+
+/**
+ * Track M6 (`volley`): one round of the shooters in sight: the sum of what each one did with its last hit, else its default.
+ * An archer's default is VOLLEY_ARROW less the bot's own armour (`armour`: points worn, 0 to 20; each point takes 4 % off, as
+ * the game's armour does), so a group of skeletons that has not hit yet is not taken for 4 a shot against the netherite set
+ * (1.5 an arrow measured through it). Her harming is magic: no armour takes from it.
+ */
+export function volleyRound(shots: readonly { kind: 'archer' | 'witch'; last?: number }[], armour = 0): number {
+  const arrow = VOLLEY_ARROW * (1 - Math.min(20, Math.max(0, armour)) / 25);
+  return shots.reduce((s, x) => s + (x.last ?? (x.kind === 'witch' ? VOLLEY_HARMING : arrow)), 0);
+}
 /** Track M5 (`witchCrowd`): at this health or under, a witch with an archer shooting is not fought first (harming 6 + an arrow 4). */
 export const WITCH_CROWD_HEALTH = 10;
 /** Track M5 (`witchCrowd`): only with a blade below this score (combat.ts bladeScore: a diamond sword's): stone and iron. */
@@ -473,6 +508,9 @@ export class PveController {
   /** The last hit the bot took (Track W: how many more it can take). */
   lastHit: { damage: number; at: number } | undefined;
   private readonly recentHits: { damage: number; at: number }[] = [];
+  /** Track M6 (`volley`): the last hit each mob (by the hit guess) and each type did to the bot. */
+  private readonly lastDamageBy = new Map<bigint, number>();
+  private readonly lastDamageByType = new Map<string, number>();
   /** Track M2: when the last melee hits came (performance.now ms; the hit guess blamed a melee mob). */
   private readonly meleeHitTimes: number[] = [];
   /** Far players from the locator bar (Track W): `!come` beyond the entity range. */
@@ -601,6 +639,12 @@ export class PveController {
           this.d.metrics?.inc(`pve.taken.${k}`);
           // Track W: the duel rule
           this.lastHit = { damage, at: performance.now() };
+          // Track M6 (`volley`): what each shooter did with its last hit
+          if (g) {
+            this.lastDamageBy.set(g.runtimeId, damage);
+            if (this.lastDamageBy.size > 64) this.lastDamageBy.delete(this.lastDamageBy.keys().next().value!);
+            this.lastDamageByType.set(bareType(g.type), damage);
+          }
           this.recentHits.push(this.lastHit);
           if (this.recentHits.length > 20) this.recentHits.shift();
           const ge = g ? this.d.world.entities.get(g.runtimeId) : undefined;
@@ -1309,10 +1353,10 @@ export class PveController {
    * `creeper` (a creeper within 6 and health below 10, whatever fleeHealth says). At the shelter /
    * home a flight starts only when the threat is within 6 (inside, guard defends in place).
    */
-  fleeReason(me: Vec3): { why: 'low' | 'creeper'; threat: EntityInfo } | undefined {
+  fleeReason(me: Vec3): { why: 'low' | 'creeper'; threat: EntityInfo; foot?: true } | undefined {
     const h = this.health();
     if (h <= 0) return undefined;
-    let out: { why: 'low' | 'creeper'; threat: EntityInfo } | undefined;
+    let out: { why: 'low' | 'creeper'; threat: EntityInfo; foot?: true } | undefined;
     if (h < FLEE_CREEPER_HEALTH) {
       const cr = this.creeperNear(me);
       if (cr) out = { why: 'creeper', threat: cr };
@@ -1323,9 +1367,17 @@ export class PveController {
     // Track M1 round 2: a witch the bot fights first (firstTarget) is not run from at low health (she follows and throws)
     const witchFirst = !out && this.hasBlade() ? this.nearestOfKind(me, WITCH_FIRST_RANGE, (t) => t === 'witch') : undefined;
     if (witchFirst && this.firstTarget(witchFirst, me)) return undefined;
-    if (!out && this.low() && !this.canDuel(me) && !this.holds(me)) {
+    // (Track M6, `volley`: also at fleeHealth or over when one round of the shooters in sight is the health)
+    if (!out && (this.low() || this.volleyLow(me)) && !this.canDuel(me) && !this.holds(me)) {
       const t = this.nearestHostile(me, FLEE_SCAN);
       if (t) out = { why: 'low', threat: t };
+    }
+    // Track M6 (`bareArcher`): no blade and an archer with a line on the bot: the flight on foot at any health. At
+    // FLY_SHOOTER_HEALTH or over it stays on foot (`foot`): the elytra flee's rule for shooters (Track M3) starts below it
+    // and is not moved up (a takeoff costs rockets the Realm has to craft); below it the floors choose as before
+    if (!out) {
+      const a = this.bareArcher(me);
+      if (a) out = h >= FLY_SHOOTER_HEALTH ? { why: 'low', threat: a, foot: true } : { why: 'low', threat: a };
     }
     // Track M1: a witch's harming potion is 6 at once on top of its poison: below WITCH_FLEE_HEALTH a bot with no blade
     // runs from a witch within FLEE_SCAN (the bare gauntlet's witch killed the bot from 8 health through one flight; with
@@ -1500,6 +1552,78 @@ export class PveController {
     return n;
   }
 
+  /**
+   * Track M6 (`volley`): the shooters in sight and one round of their damage: archers within FLEE_SCAN and witches within
+   * VOLLEY_WITCH_RANGE with a line on the bot, each at its own last hit on the bot (else the last hit of its type, else
+   * VOLLEY_ARROW or VOLLEY_HARMING).
+   */
+  volleyNow(me: Vec3): { shooters: number; damage: number } {
+    const grid = targeting.gridOf(this.mover);
+    const eye = { x: me.x, y: me.y + 1.62, z: me.z };
+    const shots: { kind: 'archer' | 'witch'; last?: number }[] = [];
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      const t = bareType(e.type);
+      const kind = DUEL_ARCHERS.has(t) ? 'archer' : t === 'witch' ? 'witch' : undefined;
+      if (!kind) continue;
+      if (dist(entityFeet(e), me) > (kind === 'witch' ? VOLLEY_WITCH_RANGE : FLEE_SCAN) || (grid && !targeting.lineOfSight(grid, eye, e))) continue;
+      // a drop is blamed on a guess (the hit guess): a creeper's blast or two hits in one health packet beside a skeleton
+      // would make one shot of 9 or 20 (a health set by command did, in pve-m6), so a last hit counts at most VOLLEY_SHOT_MAX
+      const seen = this.lastDamageBy.get(e.runtimeId) ?? this.lastDamageByType.get(t);
+      const last = seen === undefined ? undefined : Math.min(seen, VOLLEY_SHOT_MAX);
+      shots.push(last !== undefined ? { kind, last } : { kind });
+    }
+    return { shooters: shots.length, damage: volleyRound(shots, this.armourPoints()) };
+  }
+
+  /** Track M6: the armour points the bot wears (0 to 20; the armour window, skills/survival/armour.ts armourScore). */
+  armourPoints(): number {
+    const worn = this.d.world.inventory.window(WINDOW_ARMOR)?.slots ?? [];
+    let n = 0;
+    for (let i = 0; i < 4; i++) {
+      const s = worn[i];
+      if (s && s.count > 0) n += Math.floor(armourScore(s.name) / 10);
+    }
+    return n;
+  }
+
+  /**
+   * Track M6 (`volley`): at fleeHealth or over, the health is at most one round of the shooters in sight (VOLLEY_MIN_SHOOTERS
+   * or more). The case: the stone kit's night `seal-5` fought at home at 8 to 13 health with three skeletons and a witch in
+   * sight; one throw (6) and one arrow (4) are more than the margin over fleeHealth 8, and the flight on foot started after
+   * the round that killed (Track M5's traces).
+   */
+  volleyLow(me: Vec3): boolean {
+    if (!this.rules.volley) return false;
+    const h = this.health();
+    if (h <= 0 || h < this.fleeHealth) return false; // already low: the ordinary rule
+    const v = this.volleyNow(me);
+    return v.shooters >= VOLLEY_MIN_SHOOTERS && h <= v.damage;
+  }
+
+  /**
+   * Track M6 (`bareArcher`): with no blade in the hotbar, the nearest archer (skeleton, stray, bogged, pillager) within
+   * FLEE_SCAN with a line on the bot, to run from at any health. The case: the no-kit `pillager-1` cell (6 runs, whole-run
+   * traces, 2026-11-16): guard chased the pillager with a fist from 20 health, and it hit every 47 ticks from 2 to 5 blocks
+   * (17 hits in 1 245 ticks of the fight: 20 to 9 in 7 s); the flight on foot started at 5 to 7 with the fourth bolt, and
+   * from then on one bolt about every 26 s (8.3 to 9.6 blocks: its reach ends there) was what killed at 1 to 6 health.
+   */
+  bareArcher(me: Vec3): EntityInfo | undefined {
+    if (!this.rules.bareArcher || this.hasBlade()) return undefined;
+    const grid = targeting.gridOf(this.mover);
+    const eye = { x: me.x, y: me.y + 1.62, z: me.z };
+    let best: EntityInfo | undefined;
+    let bd = Infinity;
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead || !DUEL_ARCHERS.has(bareType(e.type))) continue;
+      const d = dist(entityFeet(e), me);
+      if (d > FLEE_SCAN || d >= bd || (grid && !targeting.lineOfSight(grid, eye, e))) continue;
+      bd = d;
+      best = e;
+    }
+    return best;
+  }
+
   meleeWithin(me: Vec3, r: number): boolean {
     for (const e of this.d.world.entities.values()) {
       if (!this.isThreat(e) || !targeting.isMelee(e, this.mobs)) continue;
@@ -1594,7 +1718,7 @@ class FleeProcess extends BaseProcess {
   readonly kind = 'auto' as const;
   protected override persistent = true;
   private ep: { why: 'low' | 'creeper'; from: string; start: Vec3; startAt: number; phase: 'away' | 'home' | 'far' | 'seal' | 'sealed' | 'dodge'; dest: { to: Vec3; kind: string } | undefined; safeSince: number | undefined; planAt: number; goalKey: string; bites: number; stallUntil: number; cornered: boolean; planNearest: number; panics: number; caughtSince: number | undefined; legAt?: number; homeOkAt?: number; homeShotSaid?: boolean; wayShotSaid?: boolean; biteHeldSaid?: boolean; sealedAt?: number; dugIn?: boolean; seal?: { placed: number; open: number; reason?: string; tries: number; openCells?: Vec3[] }; dodge?: { dir: 1 | -1; sinceFlip: number; seen: Set<bigint>; lastShot: number; t: number; clearSince: number | undefined } } | undefined;
-  private plan: { why: 'low' | 'creeper'; threat: EntityInfo } | undefined;
+  private plan: { why: 'low' | 'creeper'; threat: EntityInfo; foot?: true } | undefined;
   private cooldownUntil = 0;
   /** The last flight ended cornered (no way away): the cooldown then holds even for a hard trigger. */
   private cornered = false;
@@ -1701,7 +1825,7 @@ class FleeProcess extends BaseProcess {
     // Track M1: running has failed (caught, cornered) or the health is critical next to a melee mob: the elytra flee or the
     // seal-in when they can go (whatever the cooldown says), else guard defends in place as before
     // (Track M3: with `fleeFly` on the floor is asked at every flee trigger: the elytra flee may come before the run)
-    if (r && (performance.now() - this.failedAt < FLOOR_FAILED_MS || c.critical(me) || c.settings.get('fleeFly'))) {
+    if (r && !r.foot && (performance.now() - this.failedAt < FLOOR_FAILED_MS || c.critical(me) || c.settings.get('fleeFly'))) {
       const f = this.floorFor(me, true);
       if (f === 'fly' || f === 'seal') {
         this.plan = r;
@@ -1759,7 +1883,7 @@ class FleeProcess extends BaseProcess {
       this.recoverTo = Math.min(20, c.fleeHealth + FLEE_RECOVER);
       this.recoverUntil = performance.now() + FLEE_RECOVER_MS;
       c.log.warn(
-        `flee: ${plan.why === 'creeper' ? `creeper within ${FLEE_CREEPER_RANGE}` : c.low() ? `health ${c.health().toFixed(1)} < ${c.fleeHealth}` : `recovering (health ${c.health().toFixed(1)} < ${this.recoverTo})`} with ${bareType(plan.threat.type)} at ${dist(entityFeet(plan.threat), me).toFixed(1)}; running away${this.ep.dest ? `, then to ${this.ep.dest.kind} ${this.ep.dest.to.x} ${this.ep.dest.to.y} ${this.ep.dest.to.z} when clear` : ''}`,
+        `flee: ${plan.why === 'creeper' ? `creeper within ${FLEE_CREEPER_RANGE}` : c.low() ? `health ${c.health().toFixed(1)} < ${c.fleeHealth}` : c.volleyLow(me) ? ((v) => `health ${c.health().toFixed(1)} at most one round of ${v.shooters} shooters in sight (${v.damage.toFixed(1)})`)(c.volleyNow(me)) : c.bareArcher(me) ? `no blade with an archer in sight (health ${c.health().toFixed(1)})` : `recovering (health ${c.health().toFixed(1)} < ${this.recoverTo})`} with ${bareType(plan.threat.type)} at ${dist(entityFeet(plan.threat), me).toFixed(1)}; running away${this.ep.dest ? `, then to ${this.ep.dest.kind} ${this.ep.dest.to.x} ${this.ep.dest.to.y} ${this.ep.dest.to.z} when clear` : ''}`,
       );
       // a kill job does not survive a flight; a guard fight ends
       for (const k of c.processes.find('kill')) c.processes.stop(k, 'stopped');

@@ -1497,6 +1497,149 @@ Realm shows the rules' lines rather than their effect on deaths. By night, near 
 - A death in any series now says its cause in the run line (`DIED (death.attack.arrow)`); one marked `not a mob` is the
   ground or a block, not the rules.
 
+## Track M6: archer groups, crossbows
+
+Decision record: [decisions/0079-never-die-to-mobs.md](decisions/0079-never-die-to-mobs.md) "Addendum: Track M6"
+(decisions 45 to 50). Everything here ran on bds-pve and bds-gaunt (BDS 1.26.60, normal difficulty) on 2026-11-16 with
+the gauntlet (`test/e2e/gaunt-mobs.test.ts`, the kits of Track M4) unless it says otherwise.
+
+### What kills a bot with no blade and a pillager (the traces)
+
+`none` `pillager-1` by night, the code of Track M5, 6 runs with the whole run traced (`MOBS_TRACE_ALL=1`, a row a tick):
+4 of 6 died (`death.attack.arrow`), 25.8 damage a run. Every bolt that landed did 4. By the part of the run it landed in:
+
+| part of the run | bolts | ticks there | a bolt every | median ticks between bolts | sprinting |
+|---|---|---|---|---|---|
+| guard, a fist chasing it | 17 | 1 245 | 73 ticks | 47 | 22 % |
+| the flight's `away` leg | 11 | 723 | 66 ticks | 47 | 46 % |
+| the flight's `far` leg | 7 | 3 675 | 525 ticks (26 s) | 276 | 38 % |
+
+- **The fist chase is the killer.** Guard chased the pillager from 20 health; it backed off and shot every 47 ticks
+  (its reload) from 2 to 5 blocks, 20 to 9 in about 7 s. The flight on foot started at 5 to 7 health with the fourth
+  bolt.
+- **The flight on foot keeps it at its reach.** On the `far` leg the pillager followed at 8 to 16 and in line of sight,
+  but only bolts from 8.3 to 9.6 blocks landed (in these runs no bolt landed from farther than 9.6): one about every
+  26 s. Those bolts killed at 1 to 6 health; from 20 the same leg is about 5 bolts of margin.
+- So the run is not what fails; it starts 4 bolts too late. Breaking the line with the ground, closing in between bolts
+  and cover were not needed for this cell (below).
+
+The flank flake of `pve-combat` and the fight at home against three skeletons and a witch (Track M5 "Not met") are the
+other two parts of this track.
+
+### The rules (`PveController.rules`, on by default)
+
+| rule | what it does | why |
+|---|---|---|
+| `bareArcher` | With no blade in the hotbar (`hasBlade`; a pickaxe is no blade), an archer (skeleton, stray, bogged, pillager) within 16 (`FLEE_SCAN`) with a line on the bot starts the flight on foot at any health; at home too (`shooterHome` keeps a flight from an archer in sight at home). At 14 health (`FLY_SHOOTER_HEALTH`) or over the flight stays on foot (`foot`): Track M3's elytra flee for shooters starts below 14 and is not moved up | a fist does not reach an archer; the chase stands at 2 to 5 blocks in front of a bolt every 47 ticks, the flight keeps it at 8 to 10 with a bolt every 26 s |
+| `volley` | At `fleeHealth` or over, the flight on foot also starts when the health is at most one round of the shooters in sight (`volleyLow`): 2 or more (`VOLLEY_MIN_SHOOTERS`) archers within 16 and witches within 10 (`VOLLEY_WITCH_RANGE`) with a line on the bot, each counted at its own last hit on the bot (else the last hit of its kind; at most 6, `VOLLEY_SHOT_MAX`), and before any hit an arrow at 4 (`VOLLEY_ARROW`) less 4 % a point of the armour worn and her harming at 6 (`VOLLEY_HARMING`). It changes only when the flight starts | Track M5's one stone `seal-5` death: a fight at home at 8 to 13 health with three skeletons and a witch, one throw and one arrow more than the margin over `fleeHealth` 8. Counting the last hits leaves an armoured bot fighting: the netherite set's four skeletons that have not hit are 3.2, not 16 |
+
+Lines in the log (at the flight's start): `flee: health H at most one round of N shooters in sight (D) with <mob> at
+<distance>; running away` and `flee: no blade with an archer in sight (health H) with <mob> at <distance>; running away`.
+
+### Before and after (10 runs a side)
+
+`MOBS_AB_RULE=volley,bareArcher` (the `pillager-1` row: `bareArcher` alone): the rules off (Track M5's code) then on,
+alternating, 5 a side a chunk, one chunk on each server.
+
+Deaths, mean damage a run, the median of each run's lowest health.
+
+| kit, time | cell | off (Track M5) | on (Track M6) |
+|---|---|---|---|
+| none, night | `pillager-1` | **8** of 10, 23.9, 0 | 0 of 10, 2.9, 20 |
+| none, night | `skeleton-4` | **1** of 10, 19.6, 4.5 | 0 of 10, 2.7, 16.5 |
+| none, night | `mixed-8` | 0 of 10, 16.8, 7 | 0 of 10, 0.3, 20 |
+| stone, night | `seal-5` | 0 of 10, 29.0, 1 | 0 of 10, 25.2, 1 |
+| stone, night | `mixed-8` | 0 of 10, 25.8, 1 | 0 of 10, 25.5, 1 |
+| stone, night | `skeleton-4` | 0 of 10, 14.9, 7 | 0 of 10, 8.8, 12 |
+| iron, night | `seal-5` | 0 of 10, 23.7, 1.8 | 0 of 10, 20.1, 1.8 |
+| live, night | `mixed-8` | 0 of 15, 18.6, 1.8 | 0 of 15, 24.0, 1.1 |
+
+Every run of this table: 0 harness reruns. The no-kit rows, stone `seal-5` and half of stone `mixed-8` ran before two
+later details of `volley` (the armour term, which is 0 with no armour, and the cap of 6 on a blamed hit); the other rows
+ran on the final code.
+
+- **No kit.** With `bareArcher` the bot runs from the first archer in sight at full health and the bolts that reach it
+  are the odd one at the edge of their reach: `pillager-1` 8 deaths in 10 to none, damage 23.9 to 2.9 a run. The other
+  mobs of `mixed-8` do not catch a bot that runs from 20 health. One more `pillager-1` chunk on the final code (both
+  rules): 4 deaths in 5 off, 0 in 4 on, damage 2.8 a run on (the last run stopped on a truth-pack timeout, a harness
+  error).
+- **The Realm's kit with the blades stowed** (`pve-testmobs`, the `bare` cases: a netherite sword moved out of the
+  hotbar, the elytra, rockets, `fleeFly` on; `!test mobs skeleton4 1 bare 40s`): with `bareArcher` the bot ran on foot
+  from the start, damage 0, lowest health 20, in both cases, and the elytra flee was not asked (it is below 14). Those
+  cases now turn the rule off, since they test the stow, the restore and the elytra flee's ask.
+- **Stone `seal-5` by night** (Track M5: 1 death in 10 either way) died in neither side of these 20 runs. With `volley`
+  the flight started at a median of 9 health against 6 (on two runs at 20: four skeletons and a witch in sight before
+  any hit are 22), and the damage fell 29.0 to 25.2; the lowest health stays at 1, where the witch's poison holds it.
+- **Stone `skeleton-4`**: no death either side; with `volley` the damage fell 14.9 to 8.8 and the lowest health's median
+  rose 7 to 12 (four skeletons in sight count 16 against no armour before they hit, so the flight can start at 16
+  rather than under 8).
+- **The live kit** died in none of 30. Neither rule can act for it: it has a blade, and through the netherite set one
+  skeleton and a witch are under `fleeHealth` (0.8 and 6 before they hit, about 1.5 and 6 after); the bot's log of a
+  third chunk (`GAUNT_VERBOSE=1`) has no line of either rule. The damage (18.6 off, 24.0 on) is where the witch's poison
+  landed: 9 of 15 runs off and 13 of 15 on took more than 10 from it, the others 0.9 to 10 in all.
+- **The witch and the poison on the live kit.** On the Realm after Track M5 the poison of one splash lasted longer than
+  before (4 of 5 runs), so the witch's distance was read from whole-run traces of the live kit's `mixed-8` with Track M5's
+  three rules off and on (5 runs a side): poisoned in 3 of 5 runs either way; 6, 27 and 28 poison hits off, 14, 28 and
+  28 on; the witch at 1.8 to 6.8 blocks in the 30 ticks before the poison started off, 2.7 to 4.3 on; the median
+  distance to her while the fight had her as its target 7.8 off, 7.3 on. No sign that the bot fights her from closer
+  with those rules on; how long one splash poisons depends on how near it lands, in both sides.
+
+### The flank flake (`pve-combat`)
+
+"Two zombies 2 blocks apart, the bot between them" failed about once in 6 file runs with one zombie left after 3 fights
+and 40 s, and about 15 damage taken. The cause is the bot's own flight on foot: the two zombies hit 3 at a time, and
+after 5 hits the health is 5, under `fleeHealth` 8. The controller's flight then takes the body away while the fight
+the case started keeps going to its 600-tick timeout; three fights pass the case's 40 s. A zombie in armour makes it
+likely: summoned as the server gears them, one of 60 zombies took 8 hits at 2.8 where the rest took 4 or 5 at 4.1 to 4.6
+(`PVE_FLANK_GEAR=keep`, 15 runs a side, no failure). With the first zombie in diamond armour (`PVE_FLANK_GEAR=diamond`,
+1.1 to 1.3 a hit) the failure came every time: 0 and 1 of 2 zombies dead after 1 202 ticks in 2 of 2 runs, and the log
+shows the flight starting at 6 health in the middle of the pair.
+
+The case measures the choice of target, not the flight, so it now keeps the bot's health at 12 or over while a pair
+runs (the hits are still counted from the server's hurt log), takes the zombies' own gear off (`strip`, the default),
+and writes the bot's hits on each zombie and whether a flight started into its line. With the diamond zombie: 8 of 8
+runs both dead (194 to 307 ticks), no flight.
+
+### Tried and not taken
+
+- **Cover, a pillar, the seal-in for the pillager.** Not built: `bareArcher` alone took the cell to 0 deaths in 10,
+  and anything that places or digs blocks would ship off with its own measured case (`sealIn` stays off: ADR 0079
+  decision 27, a shell on ground it was not tried on can strand the bot).
+- **Closing in between bolts with a blade.** Not needed: the stone and iron kits' `pillager-1` did not die in Track M4's
+  screen or its A/B series; the rule is for no blade only.
+
+### Not met
+
+- **Ground other than flat grass.** The pillager's rows ran on the gauntlet's flat cells; the flight on foot kept the
+  pillager at the edge of its reach there. On a hillside, in a ravine or in a forest the run may be slower or the line
+  may break sooner; not measured.
+- **Activities with no blade.** `bareArcher` starts the flight from full health whatever the bot is doing, so a job done
+  with no blade in the hotbar stops while an archer is in sight within 16. The stone kit's activity rows have a blade
+  and were not run again; no activity was run with the `none` kit.
+- **`volley` against deaths.** Track M5's one stone `seal-5` death by night did not come back on either side (0 of 20),
+  so what `volley` is shown to do is start the flight earlier (median 9 against 6) and lower the damage (29.0 to 25.2,
+  iron `seal-5` 23.7 to 20.1), not save a run that died.
+- **The lowest health stays at 1** with the witch's poison, on both sides, for the stone and iron kits.
+- **The flight during a fight called directly.** In the flank case the fight went on to its timeout while the flight
+  had the body; the case now keeps the bot out of the flight, and how a fight started by a skill (not by guard) ends
+  when the flight starts was not changed.
+- **The Realm.** No early kit can be given there; the rules' effect on deaths is measured on the test servers only.
+
+### On the Realm
+
+The rules are on with the update; no setting changes. The Realm has no cheats, so no early kit can be given; `bare`
+(the blades stowed) is what shows `bareArcher`. By night, near home, `fleeHealth` as it is:
+
+- `!test mobs skeleton 5 bare`: look for `flee: no blade with an archer in sight (health 20.0) with skeleton at ...` at the
+  start of each run, the run alive, the damage a run a few points at most (the test servers: no kit `skeleton-4` 2.7 a
+  run, the stowed Realm kit 0). With `fleeFly` on the flight stays on foot while the health is 14 or over; under 14 the
+  elytra flee may take it, as before.
+- `!test mobs pillager 5 bare`: the same line; every run alive.
+- `!test mobs skeleton4 5`: the netherite set; no `at most one round` line is expected (four skeletons through it are
+  3.2 before they hit and about 6 after, under `fleeHealth`); every run alive. A line there means a drop was blamed on
+  a skeleton that was not its arrow.
+- `!test mobs mixed8 5`: the live kit; every run alive.
+
 ## Packets (BDS 1.26.60.6, verified)
 
 - **Locator bar** (Track W, `tasks/process/locator.ts`): for every other player the server sends
@@ -1579,7 +1722,12 @@ BDS_E2E=1 BDS_PVE_NIGHT=1 pnpm --filter bot exec vitest run --project e2e pve   
   zombies with resistance `PVE_RETARGET_RESISTANCE`, default 1): two zombies 2 blocks apart with the
   bot between them (both die, the fight switches at least once, not worse than the single target
   beyond noise), and a zombie behind the bot while it is sent at one 8 blocks away (fewer hits than
-  the single target). Hits from truth:hurtlog.
+  the single target). Hits from truth:hurtlog. Track M6: the zombies' own gear is taken off (`PVE_FLANK_GEAR`: `strip`,
+  the default; `keep`; `diamond` on the first zombie) and the bot's health is kept at 12 or over while a pair runs, so the
+  flight on foot never takes the body out of the fight being measured; each line gives the bot's hits on each zombie.
+- `pve-m6` (Track M6): no blade and a pillager 7 off with `bareArcher` off and on (on: the flight starts before a
+  second bolt and no fist strikes it; off: guard chases it with a fist), and a stone sword at 11 health with three
+  skeletons in sight with `volley` off and on (on: the flight starts; off: it does not).
 - `pve-crowd` (Track AH): crowd rule (health 10, 4 zombies: `crowded`, then a flight); 3 zombies at
   health 11 in iron armour with the rule on / off (`PVE_CROWD_RUNS`, default 3; damage, deaths, kills,
   flights in 45 s); shield into the offhand and blocking a zombie (truth:stance, truth:blocklog);

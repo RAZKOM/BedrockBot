@@ -147,7 +147,8 @@ describe('flee v2', () => {
     s.loop.step(5);
     expect(s.pve.behaviour()).toBe('guarding r=16');
     await new Promise((r) => setTimeout(r, 2100)); // the cooldown
-    // an archer does not start a recovery flight (guard goes for it)
+    // an archer does not start a recovery flight (guard goes for it; with no blade it would: Track M6 `bareArcher`)
+    s.pve.rules.bareArcher = false;
     s.ents.set(9n, mob(9n, 'minecraft:skeleton', { x: 0.5, y: -60, z: -10 }));
     s.loop.step(5);
     expect(s.pve.behaviour()).toBe('fighting skeleton');

@@ -14,8 +14,9 @@
 // Cells (MOBS_CELLS: a comma list of names or prefixes, default all): `<mob>-1` one mob; `<mob>-2`, `<mob>-4` crowds of one
 // type; `mixed-4`, `mixed-8`; `act-<activity>` a mixed crowd of 4 during goto / mine / eat / landed. MOBS_HARD=1 runs at hard.
 // Track M4: MOBS_TIME=day runs at noon (the undead burn: no helmet on them), else midnight. The rules are on by default;
-// MOBS_RULES=legHold=false,... sets PveController.rules for the run (all five false: the code before Track M4);
-// MOBS_AB_RULE=<rule>[,<rule>...] flips them all off / on between the repeats.
+// MOBS_RULES=legHold=false,... sets PveController.rules for the run (Track M4's five false: the code before Track M4; Track
+// M5 added shooterWay, poisonBite, witchCrowd, Track M6 volley, bareArcher); MOBS_AB_RULE=<rule>[,<rule>...] flips them all
+// off / on between the repeats.
 // The idle night (MOBS_NIGHT=1): natural spawning and the daylight cycle on from dusk to dawn (12 000 ticks, about 10 min),
 // the bot idle in the open at its home point, each kit once.
 // Never asserts the bars (it is the measurement); asserts only that the harness itself worked (every cell ran). About

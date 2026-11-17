@@ -210,9 +210,12 @@ describe('the guard asks for the elytra flee (tasks/pve.ts)', () => {
     high.ents.set(7n, mob(7n, 'minecraft:skeleton', { x: high.loop.pos.x + 9, y: high.loop.pos.y, z: high.loop.pos.z }));
     await tick(high);
     expect(high.asked).toEqual([]);
-    // the setting off: the trigger does not exist (the flight on foot's own rules)
+    // the setting off: the trigger does not exist (the flight on foot's own rules: since Track M6 `bareArcher` runs from
+    // the archer on foot with no blade; with that rule off, nothing)
     const off = setup(12);
     off.ents.set(7n, mob(7n, 'minecraft:skeleton', { x: off.loop.pos.x + 9, y: off.loop.pos.y, z: off.loop.pos.z }));
+    expect(off.pve.fleeReason(off.loop.pos)?.threat.runtimeId).toBe(7n);
+    off.pve.rules.bareArcher = false;
     expect(off.pve.fleeReason(off.loop.pos)).toBeUndefined();
     // a blade: the duel
     const armed = setup(12);

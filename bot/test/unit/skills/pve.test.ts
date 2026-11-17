@@ -92,6 +92,8 @@ describe('PveController guard', () => {
 
   it('a goto is suspended by a guard fight and resumed afterwards', async () => {
     const s = setup({ home: { x: 0, y: -60, z: 0 } });
+    // a blade: with none, an archer in sight starts the flight on foot (Track M6 `bareArcher`, m6-rules.test.ts)
+    s.pve.d.world.inventory.setItem(0, 0, { name: 'iron_sword', networkId: 1, count: 1, metadata: 0 });
     const walk = s.pve.walk({ type: 'block', p: { x: 40, y: -60, z: 0 } });
     expect(s.pve.behaviour()).toBe('walking to 40 -60 0');
     // Track AO: during a walk guard engages melee mobs near the bot (guardWhileWalking 'near'); a zombie 7 blocks off
