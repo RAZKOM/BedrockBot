@@ -1778,12 +1778,18 @@ rules and the `Milker`), `tasks/process/milk.ts` (the job, `!milk`, the chore, t
 missing ones come from the cheapest source first:
 
 1. milk out of the carried shulker boxes;
-2. milk out of the home chests, only while the bot is at home (the withdrawal of `!bring`);
-3. empty buckets (loose, then out of the boxes, then out of the home chests at home) filled at an adult cow, mooshroom
+2. milk out of the home chests, only while they are in reach (below; the withdrawal of `!bring`, which walks to them);
+3. empty buckets (loose, then out of the boxes, then out of the home chests in reach) filled at an adult cow, mooshroom
    or goat;
 4. with no bucket anywhere (carried, boxed, in the home chests) and `milkCraft` on (the default): one bucket crafted
    from 3 iron ingots at a crafting table that is carried or near, then filled. One at most, while the bot has no
    bucket at all: the ingots have other uses. With no iron nothing is done, and the status says so.
+
+**The home chests in reach** (Track K2, `homeChestReach`): within `homeChestRadius` + 8 blocks of the home point across
+(the containers are found within `homeChestRadius` of it) and 16 up or down, or within the home logistics' own "at
+home" (8 across, 4 up or down). A bot idle in a shelter, another room or another floor of the base counts; one out on a
+trip does not, and the reason says how far it is and the limit: `2 more: 213 buckets in the chests at home, out of
+reach: I am 40 blocks from home (they count within 24)`.
 
 Who uses which source:
 
@@ -1796,7 +1802,8 @@ Who uses which source:
 **Milking.** Only adult mobs within 24 blocks (`MILK_RADIUS`) of the centre (home for the chore, the bot for `!milk`),
 4 up or down, on dry ground (no water or lava at or under their feet), nearest first. The walk is the usual navigation
 with its safety rules (doors and gates closed behind). Inside a pen the gates are closed behind the bot and it leaves
-the pen at the end. A hostile within 16 ends the job at once (`milk: ... (a zombie 7 blocks away)`); guard and flee
+the pen at the end, also when it milked from the open gateway (Track K2: the pens of the mobs it went to are kept, so
+the fence line counts; outside them their open gates within 4.5 blocks are closed). A hostile within 16 ends the job at once (`milk: ... (a zombie 7 blocks away)`); guard and flee
 pre-empt it like any process. A mob that does not fill the bucket in 3 clicks is left alone for 30 s.
 
 **The click** (BDS 1.26.60, verified by truth on bds-home): `interact` `{ action_id: 'mouse_over_entity',
@@ -1811,7 +1818,15 @@ empty buckets the drinks leave do not pile up and the unload never undoes the st
 
 **Shown.** `!status` has `milk N/K (...)` (the empty buckets carried and, when nothing can be done, why: `milk 0/2 (no
 bucket and no iron (3 iron ingots make one))`, `milk 1/2 (1 more need a bucket)`); `!milk status` gives the same with
-the chore's state; the web panel's vitals have a `milk` row (`1 of 2 milk buckets, 1 empty (refilling)`).
+the chore's state and the next pass (`next: 2 bucket from home, 2 at the cows`); the web panel's vitals have a `milk`
+row (`1 of 2 milk buckets, 1 empty (refilling)`).
+
+**What failed** (Track K2). A step that got less than it wanted is the reason the reply gives, before what the plan
+expected: `milk: 0 milk buckets carried (nothing new); 2 short of 2: buckets out of the chests at home: the chests at
+home gave none (fewer there than remembered)`. The log has the plan at the start of each pass (`milk: plan for 2: 2
+bucket from the chests at home, 2 at the cows`, or `milk: plan for 2: nothing to do (...)` with the reason) and one line
+per short step (`milk: buckets out of the chests at home: got 0 of 2 (...)`); a take from home also logs the
+withdrawal's `bring: withdraw ...` line.
 
 **Measured** (e2e `home-milk` on bds-home, BDS 1.26.60, flat, peaceful, 2026-11-17, 3 of 3 runs, 4 of 4 cases each;
 a 7 x 7 pen 6 blocks from home with two adult cows, a chest 3 blocks from home):
@@ -1824,9 +1839,20 @@ a 7 x 7 pen 6 blocks from home with two adult cows, a chest 3 blocks from home):
 | the early game | nothing carried | `!status` `milk 0/2 (no bucket and no iron (3 iron ingots make one))`; `!milk` did nothing and said so |
 | | then 3 iron ingots, a crafting table next to home | `milk: 1 milk bucket carried (a bucket crafted from 3 iron ingots, 1 from a cow); 1 short of 2: 1 more need a bucket`; the iron gone; `!status` `milk 1/2 (1 more need a bucket)` |
 
+Track K2 added three cases (bds-farm, the same setup, 2026-11-17, 3 of 3 runs, 7 of 7 cases each): 16 empty buckets in
+the home chest, nothing carried, the bot by the pen 11.7 blocks from the home point (outside the home logistics' 8).
+
+| case | what | result (3 runs) |
+|---|---|---|
+| `!bring bucket 2 home` | the withdrawal itself | `bring: withdraw done: took 2 bucket ...`; 2 buckets carried, 14 left in the chest |
+| `!milk` | before Track K2 the plan had no step (`2 more: 16 buckets in the chests at home, taken there`, the bot did not move: the Realm's reply) | 2 buckets out of the chest, both filled: `milk: 2 milk buckets carried (2 from a cow)` 6.5 to 13.0 s after the command; 14 buckets left; the gate closed |
+| the take fails | the chest emptied behind the memory | `... 2 short of 2: buckets out of the chests at home: the chests at home gave none (fewer there than remembered)` |
+| out of reach | the same chest, the bot 40 blocks from home | `... out of reach: I am 40 blocks from home (they count within 24)`; the bot did not move |
+
 **Not proven.** Mooshrooms and goats (the same click; only cows ran); milking on broken ground, near water, or with a
 hostile near (bds-home is peaceful: the hostile stop is covered by unit tests only); the chore on the Realm; a
-crafting table placed from the inventory for the craft (one stood next to home).
+crafting table placed from the inventory for the craft (one stood next to home); the home chests' reach on a base with
+floors (the 16 up or down was not run: the e2e world is flat) or from a shelter.
 
 ### Tried and not taken
 
@@ -1875,6 +1901,12 @@ Both rules are on with the update; no setting changes. By night, near home, the 
   home chest, a `!goto` of more than 16 blocks logs `trip: milk: 2 milk buckets carried (...)` before the walk. With
   `!set autoMilk on`, after a drink by day near home: `milk chore: 1 of 2 milk buckets carried: 1 at the cows`, then
   `milk chore: done, milk: 2 milk buckets carried (1 from a cow)`.
+- Empty buckets only in the home chests (Track K2): by day, nothing carried, the bot anywhere within `homeChestRadius` + 8
+  of home. `!milk status` ends `next: 2 bucket from home, 2 at the cows`; `!milk` logs `milk: plan for 2: 2 bucket from
+  the chests at home, 2 at the cows`, then `bring: withdraw done: took 2 bucket ...`, `milk: cow #N milked (T ticks)`
+  twice, and answers `milk: 2 milk buckets carried (2 from a cow)`. A take that gets less answers `... short of 2:
+  buckets out of the chests at home: <why>` and logs `milk: buckets out of the chests at home: got N of 2 (<why>)`;
+  further from home the reply ends `out of reach: I am N blocks from home (they count within M)`.
 
 ## Packets (BDS 1.26.60.6, verified)
 

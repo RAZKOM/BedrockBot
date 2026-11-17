@@ -54,3 +54,41 @@ An empty bucket costs 3 iron ingots at a crafting table.
 - The panel's page grew by 1 829 bytes and its poll by 166 bytes (budgets raised: html 140 000, poll 21 100, full
   state 43 000). The settings help is 10 messages with chat lines on.
 - Not covered: milking far from home, milking at night by the chore, buying or finding buckets, more than one craft.
+
+## Addendum: Track K2 (2026-11-17), the home chests in reach
+
+On the Realm the bot carried no milk and no bucket, the home chests held 213 empty buckets by the chest memory, and a
+cow stood within 24. `!milk` answered `getting 2`, then within 5 s `milk: 0 milk buckets carried (nothing new); 2 short
+of 2: 2 more: 213 buckets in the chests at home, taken there`, and the bot did not move. Two faults:
+
+- **The take was never planned.** Decisions 1 and 2 made the home chests a source "at home only", read from the home
+  logistics' `atHome`: within 8 blocks of the home point across and 4 up or down. A bot idle in its shelter, in another
+  room or on another floor is further than that, so the plan had no step at all; the withdrawal, which walks to the
+  chests itself, was never called (no `bring: withdraw` line). The K1 e2e had always started the bot on the home
+  point. Reproduced on a test server with the bot by the pen, 11.7 blocks from home: the same status and reply word for
+  word, while `!bring bucket 2 home` from the same cell took 2 buckets.
+- **The reply hid the reason.** The plan's description was the job's `short` before any step ran, and a step that got
+  less only filled `short` when it was empty, so a failed take could never show.
+
+9. **The home chests count within reach of home** (`homeChestReach`, skills/food/milk.ts): within `homeChestRadius` + 8
+   blocks of the home point across (the containers are found within `homeChestRadius` of it) and 16 up or down, or
+   wherever `atHome` holds. The same rule serves `!milk`, the chore and the trip readiness. Out of reach the plan's
+   reason says how far the bot is and the limit (`... in the chests at home, out of reach: I am 40 blocks from home
+   (they count within 24)`).
+10. **A step that got less is the reason given.** The job keeps the first such step (`failed`) apart from the plan's
+    description, and the reply gives it first (`2 short of 2: buckets out of the chests at home: the chests at home
+    gave none (fewer there than remembered)`). The log has the plan (`milk: plan for 2: 2 bucket from the chests at
+    home, 2 at the cows`, or `nothing to do (...)` with the reason) and a line for each short step (`milk: buckets out of
+    the chests at home: got 0 of 2 (...)`). `Supply.ensure` now gives a reason when the withdrawal ended "done" with
+    fewer than wanted (the chests held fewer than remembered); before, it said `no more in the carried boxes`.
+
+11. **A pen is left from its rim too.** Found while repeating the e2e: with a cow just inside the gate, the walk ended in
+    the open gateway, the bot milked from there, and the end-of-job `leavePen` never ran, because the pen's flood fill
+    from the gateway cell escapes through the open gate; the gate stayed open (2 runs in 7: once after `!milk`, once
+    after the chore; a cow then walked out). The Milker now keeps the pens of the mobs it went to (read before the walk,
+    while the gate is shut) and leaves the one whose interior or fence line it stands on; outside all of them it closes
+    their open gates within reach (4.5 blocks) without walking.
+
+Consequences: on the test server the bot by the pen took 2 buckets out of the home chest and filled both in 6.5 to 13.0 s (3 of 3);
+a chest emptied behind the memory gave the reason above; 40 blocks away nothing walked and the reply said why. The
+trip readiness may now walk to the home chests from up to `homeChestRadius` + 8 blocks away before a trip.

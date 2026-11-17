@@ -16,7 +16,7 @@
 import type { Vec3 } from '../../connection/types.ts';
 import type { RuntimeSettings } from '../../config/settings.ts';
 import { silentLogger, type Logger } from '../../log.ts';
-import { BUCKET, bucketCounts, kindsLine, MILK, MILK_RADIUS, planMilk, type MilkReason, type MilkResult, type MilkStockInput } from '../../skills/food/milk.ts';
+import { BUCKET, bucketCounts, kindsLine, MILK, MILK_RADIUS, planMilk, type MilkReason, type MilkResult, type MilkStep, type MilkStockInput } from '../../skills/food/milk.ts';
 import type { EntityInfo, ItemStack } from '../../world/types.ts';
 import { BaseProcess, PRIORITY, type ProcessManager, type ProcessStatus, type StopReason } from './manager.ts';
 
@@ -79,6 +79,8 @@ export interface MilkReport {
   kinds: Record<string, number>;
   /** Why it stopped short of `keep` (the plan's short, a source's why, the milker's reason). */
   short?: string;
+  /** Track K2: the first step that got less than it wanted and why (`buckets out of the chests at home: ...`); the reply says it before `short`. */
+  failed?: string;
   /** The milker ended on a hostile, or the pass was interrupted. */
   reason: 'done' | 'short' | 'hostile' | 'interrupted';
 }
@@ -98,6 +100,11 @@ const MILK_WHY: Readonly<Partial<Record<MilkReason, string>>> = {
   no_mob: `no cow, mooshroom or goat within ${MILK_RADIUS} blocks`,
   refused: 'the mobs near gave no milk',
 };
+
+/** `2 bucket from the chests at home`, `2 at the cows`, `a bucket crafted` (the logs). */
+function stepLine(s: MilkStep): string {
+  return s.kind === 'cows' ? `${s.n} at the cows` : s.kind === 'craft' ? 'a bucket crafted' : `${s.n} ${s.item} from ${s.kind === 'boxes' ? 'a carried box' : 'the chests at home'}`;
+}
 
 /** One pass of the stock rule (see the file comment). */
 export class MilkJob {
@@ -123,6 +130,8 @@ export class MilkJob {
     };
     const plan = planMilk(d.source.input(o.keep), { cows: o.cows });
     if (plan.short) rep.short = plan.short;
+    // Track K2: the plan in the log, so an empty one (nothing to take: the reason) is seen as well as a short step
+    if (plan.want > 0) d.log?.info(`milk: plan for ${plan.want}: ${plan.steps.length ? plan.steps.map(stepLine).join(', ') : 'nothing to do'}${plan.short ? ` (${plan.short})` : ''}`);
     for (const step of plan.steps) {
       if (cancelled()) return end('interrupted');
       if (step.kind === 'boxes' || step.kind === 'home') {
@@ -132,7 +141,13 @@ export class MilkJob {
           if (step.kind === 'boxes') rep.fromBoxes += r.got;
           else rep.fromHome += r.got;
         }
-        if (r.got < step.n && r.why) rep.short ??= `${step.item}: ${r.why}`;
+        if (r.got < step.n) {
+          // Track K2: a step that got less is the reason the reply gives (the plan's short only described the plan)
+          const why = r.why ?? `got ${r.got} of ${step.n}`;
+          d.log?.info(`milk: ${this.phase}: got ${r.got} of ${step.n} (${why})`);
+          rep.failed ??= `${this.phase}: ${why}`;
+          if (cancelled()) return end('interrupted');
+        }
         continue;
       }
       if (step.kind === 'craft') {
@@ -140,6 +155,7 @@ export class MilkJob {
         const r = await d.source.craft(cancelled);
         if (r.ok) rep.crafted++;
         else {
+          d.log?.info(`milk: crafting a bucket: ${r.line}`);
           rep.short = `no bucket: ${r.line}`;
           break;
         }
@@ -179,7 +195,8 @@ export function milkReply(r: MilkReport): string {
   const what = got.length ? ` (${got.join(', ')})` : r.after === r.before ? ' (nothing new)' : '';
   const tail: string[] = [];
   if (r.reason === 'interrupted') tail.push('stopped');
-  if (r.after < r.keep) tail.push(`${r.keep - r.after} short of ${r.keep}${r.short ? `: ${r.short}` : ''}`);
+  const why = r.failed ?? r.short; // Track K2: what failed first, before what the plan expected
+  if (r.after < r.keep) tail.push(`${r.keep - r.after} short of ${r.keep}${why ? `: ${why}` : ''}`);
   if (r.empty > 0) tail.push(`${r.empty} empty bucket${r.empty === 1 ? '' : 's'} left`);
   return `${head}${what}${tail.length ? `; ${tail.join('; ')}` : ''}`;
 }
@@ -317,7 +334,7 @@ export class MilkChore extends BaseProcess {
     this.job = new MilkJob({ keep, cows: true, center: () => home, radius: MILK_RADIUS });
     this.stats.started++;
     this.lastWhy = '';
-    d.log?.info(`milk chore: ${bucketCounts(d.inventory.slots).milk} of ${keep} milk buckets carried: ${plan.steps.map((s) => (s.kind === 'cows' ? `${s.n} at the cows` : s.kind === 'craft' ? 'a bucket crafted' : `${s.n} ${s.item} from ${s.kind === 'boxes' ? 'a carried box' : 'the chests at home'}`)).join(', ')}`);
+    d.log?.info(`milk chore: ${bucketCounts(d.inventory.slots).milk} of ${keep} milk buckets carried: ${plan.steps.map(stepLine).join(', ')}`);
     return true;
   }
 
@@ -352,7 +369,7 @@ export class MilkChore extends BaseProcess {
     this.stats.finished++;
     const gained = r ? r.after - r.before : 0;
     this.nextTry = this.now() + (gained > 0 && r?.reason !== 'hostile' ? MILK_RETRY_MS : MILK_BACKOFF_MS);
-    if (r && r.after < r.keep) this.lastWhy = r.short ?? `${r.keep - r.after} short`;
+    if (r && r.after < r.keep) this.lastWhy = r.failed ?? r.short ?? `${r.keep - r.after} short`;
     this.d.log?.info(`milk chore: done, ${r ? milkReply(r) : 'error'}`);
     this.d.afterJob?.();
   }

@@ -8,6 +8,11 @@
 //   refill   2 milk buckets carried, autoMilk on: the server poisons the bot for 30 s, milkCure drinks one (an empty bucket
 //            is left), and the milk chore fills it again at the cows by itself (truth: 2 milk buckets, 0 empty)
 //   craft    nothing but 3 iron ingots and a crafting table next to home: `!milk` crafts one bucket (milkCraft) and milks it
+// Track K2 (the Realm bug: empty buckets only in the home chests, the bot more than 8 blocks from the home point):
+//   bring    16 empty buckets in the home chest, the bot by the pen: `!bring bucket 2 home` takes 2 (withdraw takes buckets)
+//   fromhome the same: `!milk` takes 2 buckets out of the chest and fills both at the cows
+//   failed   the chest emptied behind the memory: the reply names the failed step and its reason; 40 blocks from home the
+//            reply says the chests are out of reach and why
 // Env: HOME_BDS_HOST / HOME_BDS_PORT / HOME_BDS_CONTAINER (home-truth.ts; default bds-home on 19196), HOME_VERBOSE=1.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { RuntimeSettings } from '../../src/config/settings.ts';
@@ -34,6 +39,10 @@ describe.skipIf(!E2E)('@bds home: milk on hand (Track K1)', () => {
     chest: { x: c.x - 3, y: F, z: c.z },
     table: { x: c.x, y: F, z: c.z + 3 },
     away: { x: c.x - 20, y: F, z: c.z },
+    /** Track K2: outside the pen's north fence, 11.7 blocks from home (the logistics' "at home" is 8). */
+    byPen: { x: c.x + 10, y: F, z: c.z - 6 },
+    /** Track K2: 40 blocks from home, out of reach of the home chests (homeChestRadius 16 + 8). */
+    far: { x: c.x + 40, y: F, z: c.z },
   };
   const gate = { x: L.pen.x + 3, y: F, z: L.pen.z };
 
@@ -202,4 +211,109 @@ describe.skipIf(!E2E)('@bds home: milk on hand (Track K1)', () => {
       await truthLoaded(b.truth, 'set', [L.table.x, L.table.y, L.table.z, 'air']).catch(() => undefined);
     }
   }, 200_000);
+
+  // Track K2: the Realm's case. Empty buckets only in the home chest (read by a scan), nothing carried, the bot next to the
+  // pen (11.7 blocks from home: outside the home logistics' 8-block "at home", inside homeChestRadius + 8).
+  async function bucketsAtHome(b: HomeBot, n: number): Promise<void> {
+    await reset(b);
+    // the pen as built (a gate an earlier case left open is closed again) with two adult cows in it
+    await truthLoaded(b.truth, 'pen', [L.pen.x, L.pen.y, L.pen.z, 7, 7]);
+    for (let i = await cowsInPen(b); i < 2; i++) await homeCmd('summon', 'cow', String(L.pen.x + 2 + i * 2 + 0.5), String(F), String(L.pen.z + 3.5), '0', '0', 'minecraft:ageable_grow_up');
+    await until(async () => ((await cowsInPen(b)) >= 2 ? true : undefined), 10_000, 'two adult cows in the pen');
+    await b.truth.chestPut(L.chest, 'bucket', n, 1);
+    let from = b.said.length;
+    await b.command('!chests clear');
+    await b.reply((s) => s.startsWith('chests: forgot '), from);
+    from = b.said.length;
+    await b.command('!chests scan');
+    note(`scan: ${await b.reply((s) => /^chests: \d+ within /.test(s), from, 120_000)}`);
+    await teleport(b, centre(L.byPen));
+    expect(b.home.logistics.atHome()).toBe(false);
+  }
+  async function forget(b: HomeBot): Promise<void> {
+    const from = b.said.length;
+    await b.command('!chests clear'); // the later cases see no buckets at home
+    await b.reply((s) => s.startsWith('chests: forgot '), from).catch(() => undefined);
+  }
+
+  it('Track K2: empty buckets only in the home chest, the bot by the pen: `!bring bucket 2 home` takes 2 (the withdrawal works on buckets)', async () => {
+    const b = bot!;
+    await bucketsAtHome(b, 16);
+    try {
+      const from = b.said.length;
+      const logs0 = b.logs.length;
+      await b.command('!bring bucket 2 home');
+      await until(() => (b.logs.slice(logs0).some((l) => l.includes(' bring: withdraw ')) ? true : undefined), 90_000, 'the withdrawal ended');
+      const line = b.logs.slice(logs0).find((l) => l.includes(' bring: withdraw '))!.replace(/.* bring: /, '');
+      note(`bring: ${line}; said ${b.said.slice(from).join(' | ')}`);
+      expect(line).toMatch(/^withdraw done: took 2 bucket/);
+      await until(async () => ((await counts(b)).empty === 2 ? true : undefined), 10_000, 'truth: 2 empty buckets');
+      expect((await b.truth.box(L.chest)).counts.bucket ?? 0).toBe(14);
+      await until(() => (b.processes.userProcesses().length === 0 ? true : undefined), 60_000, 'the bring over');
+    } finally {
+      await forget(b);
+    }
+  }, 200_000);
+
+  it('Track K2: empty buckets only in the home chest, a cow near, the bot by the pen: `!milk` takes 2 out of the chest and fills them', async () => {
+    const b = bot!;
+    await bucketsAtHome(b, 16);
+    try {
+      const st = milkControllerOf(b.task)!.statusLine();
+      note(`status: ${st}`);
+      expect(st).toContain('next: 2 bucket from home, 2 at the cows');
+      const from = b.said.length;
+      const logs0 = b.logs.length;
+      const t0 = Date.now();
+      await b.command('!milk');
+      const start = await b.reply((s) => s.startsWith('milk: '), from);
+      const end = await b.reply((s) => s.startsWith('milk: ') && s !== start, from, 150_000);
+      const lines = b.logs.slice(logs0).filter((l) => / (milk|bring|supply): /.test(l)).map((l) => l.replace(/^\S+ info /, ''));
+      note(`milk from home: "${start}" -> "${end}" after ${((Date.now() - t0) / 1000).toFixed(1)} s; ${lines.join(' | ')}`);
+      expect(lines).toContain('milk: plan for 2: 2 bucket from the chests at home, 2 at the cows');
+      expect(lines.some((l) => l.startsWith('bring: withdraw done: took 2 bucket'))).toBe(true);
+      expect(end).toMatch(/^milk: 2 milk buckets carried \(2 from a cow\)$/);
+      await until(async () => ((await counts(b)).milk === 2 ? true : undefined), 5_000, 'truth: 2 milk buckets');
+      expect(await counts(b)).toMatchObject({ milk: 2, empty: 0 });
+      expect((await b.truth.box(L.chest)).counts.bucket ?? 0).toBe(14);
+      expect(await gateClosed(b)).toBe(true);
+    } finally {
+      await forget(b);
+    }
+  }, 240_000);
+
+  it('Track K2: the take fails (the chest emptied behind the memory): the reply says which step failed and why', async () => {
+    const b = bot!;
+    await bucketsAtHome(b, 16);
+    try {
+      await truthLoaded(b.truth, 'container', [L.chest.x, L.chest.y, L.chest.z, 'clear']); // the memory still says 16
+      const from = b.said.length;
+      const logs0 = b.logs.length;
+      await b.command('!milk');
+      const start = await b.reply((s) => s.startsWith('milk: '), from);
+      const end = await b.reply((s) => s.startsWith('milk: ') && s !== start, from, 120_000);
+      const lines = b.logs.slice(logs0).filter((l) => / (milk|bring): /.test(l)).map((l) => l.replace(/^\S+ info /, ''));
+      note(`failed take: "${end}"; ${lines.join(' | ')}`);
+      expect(end).toBe('milk: 0 milk buckets carried (nothing new); 2 short of 2: buckets out of the chests at home: the chests at home gave none (fewer there than remembered)');
+      expect(lines).toContain('milk: buckets out of the chests at home: got 0 of 2 (the chests at home gave none (fewer there than remembered))');
+      // out of reach (40 blocks from home): the reply says how far and the limit, and nothing walks
+      await truthLoaded(b.truth, 'container', [L.chest.x, L.chest.y, L.chest.z, 'clear']);
+      await b.truth.chestPut(L.chest, 'bucket', 16, 1);
+      await teleport(b, centre(L.home));
+      await forget(b); // the failed take's visit remembered the chest empty (a fresh read the scan would keep)
+      let f = b.said.length;
+      await b.command('!chests scan');
+      await b.reply((s) => /^chests: \d+ within /.test(s), f, 120_000);
+      await teleport(b, centre(L.far));
+      f = b.said.length;
+      await b.command('!milk');
+      const s0 = await b.reply((s) => s.startsWith('milk: '), f);
+      const far = await b.reply((s) => s.startsWith('milk: ') && s !== s0, f, 30_000);
+      note(`out of reach: "${far}"`);
+      expect(far).toBe('milk: 0 milk buckets carried (nothing new); 2 short of 2: 2 more: 16 buckets in the chests at home, out of reach: I am 40 blocks from home (they count within 24)');
+      expect(hdist(b.task.position()!, centre(L.far))).toBeLessThan(1);
+    } finally {
+      await forget(b);
+    }
+  }, 240_000);
 });

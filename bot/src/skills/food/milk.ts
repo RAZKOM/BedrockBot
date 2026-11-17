@@ -73,8 +73,10 @@ export interface MilkStockInput {
   /** In the chests at home (the chest memory: Supply.available). */
   homeMilk: number;
   homeEmpty: number;
-  /** Within reach of the home chests (HomeLogistics.atHome): the chests are a source only then. */
+  /** The chests at home are in reach (homeChestReach; HomeLogistics.atHome counts too): they are a source only then. */
   atHome: boolean;
+  /** Why they are out of reach (homeChestReach's `why`), for the plan's short. */
+  homeWhy?: string | undefined;
   /** Loose iron ingots. */
   iron: number;
   /** `milkCraft`. */
@@ -95,6 +97,29 @@ export interface MilkPlan {
   steps: MilkStep[];
   /** Why the steps do not reach `keep` (the status and the reply say it). */
   short?: string;
+}
+
+/** Track K2: the chests at home count as a source this many blocks beyond `homeChestRadius` (across) from home ... */
+export const MILK_HOME_EXTRA = 8;
+/** ... and this many blocks above or below it. */
+export const MILK_HOME_DY = 16;
+
+/**
+ * Track K2 (ADR 0096 addendum): are the chests at home in reach of `!milk`, the chore and the trip readiness? The home
+ * logistics' own "at home" (8 blocks across, 4 up or down) left them out for a bot idle in its shelter, a room or a floor
+ * away from the home point, so `!milk` took nothing next to 213 buckets. The withdrawal walks to the chests itself
+ * (`!bring` does it from anywhere); this only bounds the walk: within `chestRadius` + MILK_HOME_EXTRA of home across
+ * (the containers are found within `chestRadius` of it) and MILK_HOME_DY up or down. `why` says why not.
+ */
+export function homeChestReach(home: Vec3 | undefined, feet: Vec3 | undefined, chestRadius: number): { inReach: boolean; why?: string } {
+  if (!home) return { inReach: false, why: 'no home set' };
+  if (!feet) return { inReach: false, why: 'my position is unknown' };
+  const reach = Math.max(0, chestRadius) + MILK_HOME_EXTRA;
+  const across = Math.hypot(feet.x - (home.x + 0.5), feet.z - (home.z + 0.5));
+  if (across > reach) return { inReach: false, why: `I am ${Math.round(across)} blocks from home (they count within ${reach})` };
+  const dy = feet.y - home.y;
+  if (Math.abs(dy) > MILK_HOME_DY) return { inReach: false, why: `I am ${Math.round(Math.abs(dy))} blocks ${dy > 0 ? 'above' : 'below'} home (they count within ${MILK_HOME_DY} up or down)` };
+  return { inReach: true };
 }
 
 /** The early game's bucket: craft one, or why not. */
@@ -149,7 +174,7 @@ export function planMilk(i: MilkStockInput, o: { cows: boolean }): MilkPlan {
       buckets = 1;
     } else {
       const atHomeN = i.atHome ? 0 : i.homeMilk + i.homeEmpty;
-      plan.short = !anyBucket ? c.why : atHomeN > 0 ? `${need} more: ${atHomeN} bucket${atHomeN === 1 ? '' : 's'} in the chests at home, taken there` : `${need} more need a bucket`;
+      plan.short = !anyBucket ? c.why : atHomeN > 0 ? `${need} more: ${atHomeN} bucket${atHomeN === 1 ? '' : 's'} in the chests at home, ${i.homeWhy ? `out of reach: ${i.homeWhy}` : 'taken there'}` : `${need} more need a bucket`;
       return plan;
     }
   }
@@ -262,6 +287,8 @@ export class Milker {
   readonly totals = { milked: 0, refused: 0, runs: 0 };
   /** The mob being milked now. */
   current: { kind: string; runtimeId: bigint } | undefined;
+  /** Track K2: the pens of the mobs this run went to (by id): left and closed at the end. */
+  private readonly pens = new Map<string, Pen>();
 
   constructor(d: MilkerDeps) {
     this.d = d;
@@ -291,6 +318,7 @@ export class Milker {
   async milk(o: MilkOptions, cancelled: () => boolean): Promise<MilkResult> {
     const t0 = this.now();
     this.totals.runs++;
+    this.pens.clear();
     const res: MilkResult = { ok: false, reason: 'done', milked: 0, kinds: {}, refused: 0, ms: 0 };
     const finish = async (reason: MilkReason): Promise<MilkResult> => {
       this.current = undefined;
@@ -334,6 +362,8 @@ export class Milker {
     for (let attempt = 0; attempt < 3; attempt++) {
       const e = d.entities().get(rid);
       if (!e || d.isDead?.(rid)) return 'gone';
+      const pen0 = d.penOf?.(e); // before the walk: the gate is still closed (an open one lets the fill escape)
+      if (pen0) this.pens.set(pen0.id, pen0);
       const eye = (): Vec3 => {
         const p = d.loop.state.pos;
         return { x: p.x, y: p.y + EYE_HEIGHT, z: p.z };
@@ -349,7 +379,8 @@ export class Milker {
         const r = await d.mover.goto({ type: 'near', p: { x: f.x, y: Math.floor(f.y), z: f.z }, r: 1.8 }, { timeoutTicks: 300, closeDoors: true });
         if (cancelled()) return 'interrupted';
         if (!r.ok && r.reason === 'unreachable') return 'gone';
-        const pen = d.penOf?.(d.entities().get(rid) ?? e);
+        const pen = d.penOf?.(d.entities().get(rid) ?? e) ?? pen0;
+        if (pen) this.pens.set(pen.id, pen);
         if (pen && d.closeGates && insidePen(pen, d.loop.state.pos)) await d.closeGates(pen, cancelled);
         if (cancelled()) return 'interrupted';
       }
@@ -402,9 +433,20 @@ export class Milker {
 
   private async leavePen(cancelled: () => boolean): Promise<void> {
     const me = this.d.loop.state.pos;
-    const pen = this.d.penAt?.(me);
-    if (!pen || !inPenOrRim(pen, me) || !this.d.leavePen) return;
-    const r = await this.d.leavePen(pen, cancelled);
-    this.log.info(`milk: left the pen (${r.ok ? 'ok' : (r.reason ?? 'failed')}, ${r.closed} gate(s) closed)`);
+    // Track K2: the pens of the mobs milked count too: a bot that milked from the open gateway stands on the rim,
+    // where the pen's fill from its own cell escapes through the gate (penAt undefined), and the gate stayed open
+    const pens = [this.d.penAt?.(me), ...this.pens.values()].filter((p): p is Pen => !!p);
+    const pen = pens.find((p) => inPenOrRim(p, me));
+    if (pen && this.d.leavePen) {
+      const r = await this.d.leavePen(pen, cancelled);
+      this.log.info(`milk: left the pen (${r.ok ? 'ok' : (r.reason ?? 'failed')}, ${r.closed} gate(s) closed)`);
+      return;
+    }
+    // outside every pen: a gate it opened and walked back out of is closed when within reach
+    for (const p of this.pens.values()) {
+      if (cancelled() || !this.d.closeGates) break;
+      const n = await this.d.closeGates(p, cancelled);
+      if (n > 0) this.log.info(`milk: closed ${n} gate(s) of the pen`);
+    }
   }
 }

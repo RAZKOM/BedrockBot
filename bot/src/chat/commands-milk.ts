@@ -9,7 +9,7 @@
 import type { Vec3 } from '../connection/types.ts';
 import { classify, entityFeet } from '../skills/combat/hostiles.ts';
 import { BabyTracker } from '../skills/food/finder.ts';
-import { BUCKET, bucketCounts, MILK, MILK_RADIUS, MILK_THREAT, Milker, type MilkStockInput } from '../skills/food/milk.ts';
+import { BUCKET, bucketCounts, homeChestReach, MILK, MILK_RADIUS, MILK_THREAT, Milker, type MilkStockInput } from '../skills/food/milk.ts';
 import { closePenGates, leavePen, PenDetector, type Pen } from '../skills/food/pen.ts';
 import { craftLine } from '../skills/craft/crafter.ts';
 import { supplyOf } from '../skills/supply/supply.ts';
@@ -112,6 +112,9 @@ export function registerMilkCommands(d: CommandDeps, extra: MilkCommandExtra = {
         const hm = s?.available(MILK);
         const hb = s?.available(BUCKET);
         const cc = craftControlOf(task);
+        // Track K2: the chests at home within their radius of home, not only the logistics' 8 blocks (homeChestReach)
+        const reach = homeChestReach(task.home?.get(), mobility.loop.state.pos, d.settings.get('homeChestRadius'));
+        const atHome = (homeControlOf(task)?.logistics.atHome() ?? false) || reach.inReach;
         return {
           keep,
           milk: c.milk,
@@ -120,7 +123,8 @@ export function registerMilkCommands(d: CommandDeps, extra: MilkCommandExtra = {
           boxedEmpty: hb?.carried ?? 0,
           homeMilk: hm?.home ?? 0,
           homeEmpty: hb?.home ?? 0,
-          atHome: homeControlOf(task)?.logistics.atHome() ?? false,
+          atHome,
+          ...(atHome ? {} : { homeWhy: reach.why }),
           iron: loose('iron_ingot'),
           craft: d.settings.get('milkCraft') && !!cc,
           table: loose('crafting_table') > 0 || (cc?.crafter.tablesAround().length ?? 0) > 0,

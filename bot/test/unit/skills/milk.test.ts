@@ -4,7 +4,8 @@
 import { describe, expect, it } from 'vitest';
 import { RuntimeSettings, SETTING_DEFS } from '../../../src/config/settings.ts';
 import { SETTING_GROUPS } from '../../../src/chat/help.ts';
-import { BUCKET, bucketCounts, craftChoice, MILK, milkTargets, milkTransaction, Milker, planMilk, wetCell, type MilkStockInput } from '../../../src/skills/food/milk.ts';
+import { BUCKET, bucketCounts, craftChoice, homeChestReach, MILK, milkTargets, milkTransaction, Milker, planMilk, wetCell, type MilkStockInput } from '../../../src/skills/food/milk.ts';
+import type { Pen } from '../../../src/skills/food/pen.ts';
 import { milkReserve, planUnload, type UnloadSlot } from '../../../src/skills/home/unloader.ts';
 import { blockInfoOf } from '../../../src/skills/terrain/shapes.ts';
 import { ProcessManager } from '../../../src/tasks/process/manager.ts';
@@ -107,7 +108,7 @@ describe('the click (milkTransaction)', () => {
 });
 
 /** A bot with buckets and mobs: a click on a cow turns one empty bucket into a milk bucket (unless `refuse`). */
-function milkRig(o: { buckets?: number; mobs?: EntityInfo[]; refuse?: boolean; hostileAfter?: number } = {}) {
+function milkRig(o: { buckets?: number; mobs?: EntityInfo[]; refuse?: boolean; hostileAfter?: number; pen?: Pen; penAt?: (p: Vec3) => Pen | undefined } = {}) {
   const entities = new Map<bigint, EntityInfo>();
   for (const e of o.mobs ?? [ent(1, 'cow', 6, 0)]) entities.set(e.runtimeId, e);
   const slots: (ItemStack | null)[] = Array.from({ length: 36 }, () => null);
@@ -165,6 +166,20 @@ function milkRig(o: { buckets?: number; mobs?: EntityInfo[]; refuse?: boolean; h
     },
     isBaby: () => false,
     threat: () => (o.hostileAfter !== undefined && clicks >= o.hostileAfter ? 'a zombie 7 blocks away' : undefined),
+    ...(o.pen
+      ? {
+          penOf: () => o.pen,
+          penAt: (p: Vec3) => o.penAt?.(p),
+          leavePen: (pen: Pen) => {
+            log.push(`leave ${pen.id}`);
+            return Promise.resolve({ ok: true, closed: 1 });
+          },
+          closeGates: (pen: Pen) => {
+            log.push(`close ${pen.id}`);
+            return Promise.resolve(1);
+          },
+        }
+      : {}),
   });
   return { milker, slots, sent, log, entities };
 }
@@ -191,6 +206,18 @@ describe('the Milker', () => {
     expect(rr).toMatchObject({ ok: false, reason: 'refused', milked: 0, refused: 1 });
     expect(ref.milker.ignored(1n)).toBe(true); // left alone for 30 s
     expect(await ref.milker.milk({ center: { x: 0, y: 0, z: 0 }, radius: 24, want: 1 }, () => true)).toMatchObject({ reason: 'interrupted' });
+  });
+
+  it('Track K2: milked from the open gateway (the rim; the fill from there escapes): the pen is still left and its gate closed', async () => {
+    // the cow at x 6 inside a pen 6..12; the walk ends at x 5, the fence line, where penAt finds nothing
+    const pen: Pen = { id: '6,0,-3', y: 0, min: { x: 6, z: -3 }, max: { x: 12, z: 3 }, cells: 49, fences: 32 };
+    const r = milkRig({ buckets: 1, pen });
+    expect((await r.milker.milk({ center: { x: 0, y: 0, z: 0 }, radius: 24, want: 1 }, () => false)).milked).toBe(1);
+    expect(r.log).toContain('leave 6,0,-3');
+    // walked back out of reach of the rim before the end: the gate is closed from where it stands
+    const far = milkRig({ buckets: 1, pen, mobs: [ent(1, 'cow', 20, 0)] });
+    await far.milker.milk({ center: { x: 0, y: 0, z: 0 }, radius: 24, want: 1 }, () => false);
+    expect(far.log.filter((l) => l.startsWith('leave') || l.startsWith('close'))).toEqual(['close 6,0,-3']);
   });
 });
 
@@ -357,6 +384,82 @@ describe('the chore (autoMilk) and the trip readiness', () => {
     expect(new MilkController(jobRig({ input: { keep: 2, milk: 1, empty: 1 } }).d).statusPart()).toBe('1/2 (1 empty bucket)');
     expect(new MilkController(jobRig({ input: { keep: 2 } }).d).statusPart()).toBe('0/2 (no bucket and no iron (3 iron ingots make one))');
     expect(new MilkController(jobRig({ input: { keep: 0 }, settings: { milkKeep: 0 } }).d).statusPart()).toBeUndefined();
+  });
+});
+
+describe('Track K2: empty buckets only in the chests at home (the Realm bug)', () => {
+  const home = { x: 100, y: 64, z: 100 };
+  it('the chests count within homeChestRadius + 8 of home across and 16 up or down, not only the logistics 8', () => {
+    expect(homeChestReach(home, { x: 102.5, y: 64, z: 100.5 }, 16)).toEqual({ inReach: true });
+    // the bot idle in its shelter 20 blocks off and a floor up: the logistics' atHome said no; the chests count
+    expect(homeChestReach(home, { x: 120.5, y: 70, z: 100.5 }, 16)).toEqual({ inReach: true });
+    expect(homeChestReach(home, { x: 130.5, y: 64, z: 100.5 }, 16)).toEqual({ inReach: false, why: 'I am 30 blocks from home (they count within 24)' });
+    expect(homeChestReach(home, { x: 100.5, y: 40, z: 100.5 }, 16)).toEqual({ inReach: false, why: 'I am 24 blocks below home (they count within 16 up or down)' });
+    expect(homeChestReach(undefined, { x: 0, y: 0, z: 0 }, 16)).toEqual({ inReach: false, why: 'no home set' });
+  });
+
+  it('the plan: in reach, 2 buckets from the chests at home then the cows; out of reach, the reason in the short', () => {
+    const i = base({ keep: 2, homeEmpty: 213, atHome: true });
+    expect(planMilk(i, { cows: true })).toEqual({ want: 2, steps: [{ kind: 'home', item: BUCKET, n: 2 }, { kind: 'cows', n: 2 }] });
+    const away = planMilk(base({ keep: 2, homeEmpty: 213, homeWhy: 'I am 30 blocks from home (they count within 24)' }), { cows: true });
+    expect(away).toMatchObject({ steps: [], short: '2 more: 213 buckets in the chests at home, out of reach: I am 30 blocks from home (they count within 24)' });
+  });
+
+  it('a take that got less: the reply names the step and its reason (not the plan\'s description), and the log has a line', async () => {
+    const r = jobRig({ input: { keep: 2, homeEmpty: 213, atHome: true } });
+    const lines: string[] = [];
+    r.d.log = { debug: () => undefined, info: (m: string) => lines.push(m), warn: () => undefined, error: () => undefined };
+    r.d.source.fromHome = (name, n) => {
+      r.calls.push(`home ${n} ${name}`);
+      return Promise.resolve({ got: 0, why: 'the chests at home gave none (fewer there than remembered)' });
+    };
+    const rep = await new MilkJob({ keep: 2, cows: true, center: () => ({ x: 0, y: 0, z: 0 }), radius: 24 }).run(r.d, () => false);
+    expect(r.calls).toEqual(['home 2 bucket']); // no milking with no bucket
+    expect(rep.failed).toBe('buckets out of the chests at home: the chests at home gave none (fewer there than remembered)');
+    expect(milkReply(rep)).toBe('milk: 0 milk buckets carried (nothing new); 2 short of 2: buckets out of the chests at home: the chests at home gave none (fewer there than remembered)');
+    expect(lines).toContain('milk: plan for 2: 2 bucket from the chests at home, 2 at the cows');
+    expect(lines).toContain('milk: buckets out of the chests at home: got 0 of 2 (the chests at home gave none (fewer there than remembered))');
+  });
+
+  it('a take with no reason given: `got n of m`; a part of them is milked and the reply still names the step', async () => {
+    const r = jobRig({ input: { keep: 2, homeEmpty: 1, atHome: true } }); // the rig's chests give only 1 of 2
+    r.d.source.input = (keep) => ({ ...base({ keep, homeEmpty: 213, atHome: true }), ...bucketCounts(r.slots) });
+    const rep = await new MilkJob({ keep: 2, cows: true, center: () => ({ x: 0, y: 0, z: 0 }), radius: 24 }).run(r.d, () => false);
+    expect(r.calls).toEqual(['home 2 bucket', 'milk 1']);
+    expect(milkReply(rep)).toBe('milk: 1 milk bucket carried (1 from a cow); 1 short of 2: buckets out of the chests at home: got 1 of 2');
+  });
+
+  it('nothing to do: the plan line says why, and the reply keeps the plan\'s reason', async () => {
+    const r = jobRig({ input: { keep: 2, homeEmpty: 213, homeWhy: 'I am 30 blocks from home (they count within 24)' } });
+    const lines: string[] = [];
+    r.d.log = { debug: () => undefined, info: (m: string) => lines.push(m), warn: () => undefined, error: () => undefined };
+    const rep = await new MilkJob({ keep: 2, cows: true, center: () => ({ x: 0, y: 0, z: 0 }), radius: 24 }).run(r.d, () => false);
+    expect(r.calls).toEqual([]);
+    expect(lines).toEqual(['milk: plan for 2: nothing to do (2 more: 213 buckets in the chests at home, out of reach: I am 30 blocks from home (they count within 24))']);
+    expect(milkReply(rep)).toContain('2 short of 2: 2 more: 213 buckets in the chests at home, out of reach: I am 30 blocks');
+  });
+
+  it('the trip readiness and the chore take the same chests: milk from home in reach, buckets from home for the chore', async () => {
+    const t = jobRig({ input: { keep: 2, homeMilk: 3, atHome: true } });
+    const rep = await new MilkController(t.d).tripRun(() => true);
+    expect(t.calls).toEqual(['home 2 milk_bucket']);
+    expect(rep.after).toBe(2);
+    const c = jobRig({ input: { keep: 2, homeEmpty: 213, atHome: true }, settings: { autoMilk: true } });
+    const ctl = new MilkController(c.d);
+    c.advance(1000);
+    c.processes.tick();
+    expect(ctl.chore.stats.started).toBe(1);
+    await new Promise((res) => setTimeout(res, 0));
+    await new Promise((res) => setTimeout(res, 0));
+    expect(c.calls).toEqual(['home 2 bucket', 'milk 2']);
+    // the chore's status names a failed take too
+    const f = jobRig({ input: { keep: 2, homeEmpty: 213, atHome: true }, settings: { autoMilk: true } });
+    f.d.source.fromHome = () => Promise.resolve({ got: 0, why: 'the chests at home gave none (fewer there than remembered)' });
+    const fc = new MilkController(f.d);
+    f.advance(1000);
+    f.processes.tick();
+    for (let i = 0; i < 5; i++) await new Promise((res) => setTimeout(res, 0));
+    expect(fc.chore.lastWhy).toBe('buckets out of the chests at home: the chests at home gave none (fewer there than remembered)');
   });
 });
 

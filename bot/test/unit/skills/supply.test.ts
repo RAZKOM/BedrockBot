@@ -55,6 +55,20 @@ describe('supply: carried boxes', () => {
     expect(await s.ensure('torch', 20, { home: true })).toMatchObject({ ok: true, loose: 20, fromHome: 20 });
   });
 
+  it('Track K2: empty buckets from home: `bucket` is the empty bucket only (no milk or water bucket); fewer there than remembered says so', async () => {
+    const h = fakeHome({ containers: { '3,0,0': { kind: 'chest', items: [item('milk_bucket', 1), item('water_bucket', 1), item('bucket', 5)] } }, inv: [] });
+    await h.logistics.scan(never);
+    const s = supplyOn(h, true);
+    expect(s.available('bucket')).toMatchObject({ loose: 0, carried: 0, home: 5 });
+    expect(await s.ensure('bucket', 2, { home: true })).toMatchObject({ ok: true, loose: 2, fromHome: 2 });
+    expect(h.inv.filter((x) => x && x.name !== 'bucket')).toEqual([]);
+    // the chest emptied behind the memory: the withdrawal ends "done" with none, the reason says it
+    h.boxes.get('3,0,0')!.slots[2] = null;
+    const r = await s.ensure('bucket', 4, { home: true });
+    expect(r).toMatchObject({ ok: false, loose: 2, fromHome: 0 });
+    expect(r.reason).toBe('the chests at home gave none (fewer there than remembered)');
+  });
+
   it('stow: the surplus beyond keep into the carried box with room, the box picked up again', async () => {
     const h = fakeHome({ containers: {}, inv: [item('undyed_shulker_box', 1), item('cobblestone', 64), item('cobblestone', 64)] });
     const s = supplyOn(h);

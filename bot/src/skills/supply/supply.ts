@@ -178,7 +178,8 @@ export class Supply {
       const w = await this.d.withdraw(cancelled, { item: { word: ns[0] ?? '', names: ns, boxes: false }, want: n });
       res.loose = this.loose(ns);
       res.fromHome = Math.max(0, res.loose - before);
-      if (!w.ok) res.reason = w.reason ?? 'the chests at home gave less';
+      // Track K2: a withdrawal that ended "done" with fewer (the chests held fewer than remembered) says so too
+      if (!w.ok || res.loose < n) res.reason = w.reason ?? (res.fromHome > 0 ? `the chests at home gave ${res.fromHome} of ${n - before}` : 'the chests at home gave none (fewer there than remembered)');
     }
     res.ok = res.loose >= n;
     if (res.ok) delete res.reason;
