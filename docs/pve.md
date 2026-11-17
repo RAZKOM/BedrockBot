@@ -1530,7 +1530,7 @@ other two parts of this track.
 
 | rule | what it does | why |
 |---|---|---|
-| `bareArcher` | With no blade in the hotbar (`hasBlade`; a pickaxe is no blade), an archer (skeleton, stray, bogged, pillager) within 16 (`FLEE_SCAN`) with a line on the bot starts the flight on foot at any health; at home too (`shooterHome` keeps a flight from an archer in sight at home). At 14 health (`FLY_SHOOTER_HEALTH`) or over the flight stays on foot (`foot`): Track M3's elytra flee for shooters starts below 14 and is not moved up | a fist does not reach an archer; the chase stands at 2 to 5 blocks in front of a bolt every 47 ticks, the flight keeps it at 8 to 10 with a bolt every 26 s |
+| `bareArcher` | With no blade carried (`carriesBlade`: the hotbar or the main slots, since the fight fetches a blade from a main slot before its first strike; a pickaxe is no blade), an archer (skeleton, stray, bogged, pillager) within 16 (`FLEE_SCAN`) with a line on the bot starts the flight on foot at any health; at home too (`shooterHome` keeps a flight from an archer in sight at home). At 14 health (`FLY_SHOOTER_HEALTH`) or over the flight stays on foot (`foot`): Track M3's elytra flee for shooters starts below 14 and is not moved up | a fist does not reach an archer; the chase stands at 2 to 5 blocks in front of a bolt every 47 ticks, the flight keeps it at 8 to 10 with a bolt every 26 s |
 | `volley` | At `fleeHealth` or over, the flight on foot also starts when the health is at most one round of the shooters in sight (`volleyLow`): 2 or more (`VOLLEY_MIN_SHOOTERS`) archers within 16 and witches within 10 (`VOLLEY_WITCH_RANGE`) with a line on the bot, each counted at its own last hit on the bot (else the last hit of its kind; at most 6, `VOLLEY_SHOT_MAX`), and before any hit an arrow at 4 (`VOLLEY_ARROW`) less 4 % a point of the armour worn and her harming at 6 (`VOLLEY_HARMING`). It changes only when the flight starts | Track M5's one stone `seal-5` death: a fight at home at 8 to 13 health with three skeletons and a witch, one throw and one arrow more than the margin over `fleeHealth` 8. Counting the last hits leaves an armoured bot fighting: the netherite set's four skeletons that have not hit are 3.2, not 16 |
 
 Lines in the log (at the flight's start): `flee: health H at most one round of N shooters in sight (D) with <mob> at
@@ -1567,6 +1567,11 @@ ran on the final code.
   hotbar, the elytra, rockets, `fleeFly` on; `!test mobs skeleton4 1 bare 40s`): with `bareArcher` the bot ran on foot
   from the start, damage 0, lowest health 20, in both cases, and the elytra flee was not asked (it is below 14). Those
   cases now turn the rule off, since they test the stow, the restore and the elytra flee's ask.
+- **On the Realm, the blades stowed** (2026-11-17, `!test mobs skeleton 5 bare` and `pillager 5 bare`, netherite worn):
+  with the rule as first merged (a blade in the hotbar only) the bot ran from one archer at 20 health, every run alive
+  (damage 0.3 and 0.5 a run) but cleared 0 of 5 each, where `skeleton4 5 bare` had cleared 5 of 5 before. A stowed
+  sword is fetched by the fight, so the rule now asks for no blade anywhere in the inventory (`carriesBlade`); `bare`
+  no longer shows it, and on the Realm it acts only for a bot that carries no blade at all.
 - **Stone `seal-5` by night** (Track M5: 1 death in 10 either way) died in neither side of these 20 runs. With `volley`
   the flight started at a median of 9 health against 6 (on two runs at 20: four skeletons and a witch in sight before
   any hit are 22), and the damage fell 29.0 to 25.2; the lowest health stays at 1, where the witch's poison holds it.
@@ -1627,11 +1632,11 @@ runs both dead (194 to 307 ticks), no flight.
 
 ### On the Realm
 
-The rules are on with the update; no setting changes. The Realm has no cheats, so no early kit can be given; `bare`
-(the blades stowed) is what shows `bareArcher`. By night, near home, `fleeHealth` as it is:
+The rules are on with the update; no setting changes. The Realm has no cheats, so no early kit can be given, and `bare`
+(the blades stowed in main slots) does not show `bareArcher` since the rule counts a stowed blade as carried. By night, near home, `fleeHealth` as it is:
 
-- `!test mobs skeleton 5 bare`: look for `flee: no blade with an archer in sight (health 20.0) with skeleton at ...` at the
-  start of each run, the run alive, the damage a run a few points at most (the test servers: no kit `skeleton-4` 2.7 a
+- `!test mobs skeleton 5 bare`: no `flee: no blade with an archer in sight` line (the stowed sword counts); as first
+  merged the line came at the start of each run, the run alive, the damage a run a few points at most (the test servers: no kit `skeleton-4` 2.7 a
   run, the stowed Realm kit 0). With `fleeFly` on the flight stays on foot while the health is 14 or over; under 14 the
   elytra flee may take it, as before.
 - `!test mobs pillager 5 bare`: the same line; every run alive.

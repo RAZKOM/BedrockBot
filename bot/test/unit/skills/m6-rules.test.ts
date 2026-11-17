@@ -43,6 +43,14 @@ describe('no blade: an archer is run from, not fought (bareArcher)', () => {
     expect(s.pve.bareArcher(me)).toBeUndefined(); // a blade: the guard fights it as before
     s.pve.d.world.inventory.setItem(0, 0, { name: 'stone_pickaxe', networkId: 2, count: 1, metadata: 0 });
     expect(s.pve.bareArcher(me)?.runtimeId).toBe(8n); // a pickaxe is no blade (hasBlade)
+    // a blade in a main slot is carried: the fight fetches it (the Realm's `bare` series, 2026-11-17: the hotbar-only
+    // check fled from one skeleton at 20 health in netherite and cleared 0 of 5)
+    s.pve.d.world.inventory.setItem(0, 20, { name: 'netherite_sword', networkId: 3, count: 1, metadata: 0 });
+    expect(s.pve.hasBlade()).toBe(false);
+    expect(s.pve.carriesBlade()).toBe(true);
+    expect(s.pve.bareArcher(me)).toBeUndefined();
+    s.pve.d.world.inventory.setItem(0, 20, null);
+    expect(s.pve.bareArcher(me)?.runtimeId).toBe(8n);
     s.pve.dispose();
   });
 

@@ -1156,6 +1156,16 @@ export class PveController {
     return this.d.world.inventory.slots.slice(0, 9).some((it) => !!it && it.count > 0 && bladeScore(it) > 0);
   }
 
+  /**
+   * A blade anywhere in the inventory, the hotbar or the main slots (`bareArcher`): the fight fetches a blade from the
+   * main slots before its first strike (Track T2), so a sword out of the hotbar is not "no blade". On the Realm
+   * (2026-11-17, `!test mobs skeleton 5 bare`, the sword in a main slot, netherite worn) the hotbar-only check fled from
+   * one skeleton at 20 health and cleared 0 of 5, where the same series cleared 5 of 5 before.
+   */
+  carriesBlade(): boolean {
+    return this.d.world.inventory.slots.some((it) => !!it && it.count > 0 && bladeScore(it) > 0);
+  }
+
   /** Track M5 (`witchCrowd`): when its line was last said (at most every 30 s). */
   private crowdSaidAt = -Infinity;
 
@@ -1602,14 +1612,14 @@ export class PveController {
   }
 
   /**
-   * Track M6 (`bareArcher`): with no blade in the hotbar, the nearest archer (skeleton, stray, bogged, pillager) within
+   * Track M6 (`bareArcher`): with no blade carried (carriesBlade: the hotbar or the main slots), the nearest archer (skeleton, stray, bogged, pillager) within
    * FLEE_SCAN with a line on the bot, to run from at any health. The case: the no-kit `pillager-1` cell (6 runs, whole-run
    * traces, 2026-11-16): guard chased the pillager with a fist from 20 health, and it hit every 47 ticks from 2 to 5 blocks
    * (17 hits in 1 245 ticks of the fight: 20 to 9 in 7 s); the flight on foot started at 5 to 7 with the fourth bolt, and
    * from then on one bolt about every 26 s (8.3 to 9.6 blocks: its reach ends there) was what killed at 1 to 6 health.
    */
   bareArcher(me: Vec3): EntityInfo | undefined {
-    if (!this.rules.bareArcher || this.hasBlade()) return undefined;
+    if (!this.rules.bareArcher || this.carriesBlade()) return undefined;
     const grid = targeting.gridOf(this.mover);
     const eye = { x: me.x, y: me.y + 1.62, z: me.z };
     let best: EntityInfo | undefined;

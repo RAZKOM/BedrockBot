@@ -284,7 +284,10 @@ The numbers are in [../pve.md](../pve.md) "Track M6: archer groups, crossbows". 
 tick by tick over whole runs, each rule A/B'd at 10 runs a side on its rows and on the live kit's and the stone kit's
 `mixed-8`, on bds-pve and bds-gaunt.
 
-45. **`bareArcher`: with no blade in the hotbar, an archer with a line on the bot within 16 is run from at any health.**
+45. **`bareArcher`: with no blade carried (the hotbar or the main slots), an archer with a line on the bot within 16 is
+    run from at any health.** (As first merged it asked the hotbar only; on the Realm, 2026-11-17, the `bare` series ran
+    from one skeleton at 20 health in netherite with the sword in a main slot and cleared 0 of 5: the fight fetches a
+    stowed blade, so a stowed blade counts.)
     A fist chase stood 2 to 5 blocks in front of the pillager, a bolt (4) every 47 ticks, 20 to 9 health in about 7 s,
     and the flight on foot started at 5 to 7 with the fourth bolt; once running, the bolts that landed came from 8.3 to
     9.6 blocks about every 26 s. The run was right and late. No kit `pillager-1`: 8 deaths in 10 to 0, damage 23.9 to
