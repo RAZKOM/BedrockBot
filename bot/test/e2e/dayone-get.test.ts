@@ -4,7 +4,8 @@
 //   pickaxe  nothing carried, `!get stone_pickaxe`: one log trip, the wooden pickaxe, 3 cobblestone mined with it, the
 //            stone pickaxe (before: `get: I do not know how to get stone_pickaxe; I can get: ...`)
 //   stop     `!get kit`, then `!get stop` while its first step runs: the job and its process end, nothing else starts
-//   nothing  `!get iron_pickaxe`: refused with the reason (iron ingots are smelted), no process
+//   nothing  `!get enchanting_table`: refused with the reason (obsidian needs a diamond pickaxe, a book has no rule), no
+//            process (Track E2: `!get iron_pickaxe` is an obtain job now: iron-get.test.ts)
 // Env: CRAFT_BDS_HOST / CRAFT_BDS_PORT / CRAFT_BDS_CONTAINER (craft-truth.ts), CRAFT_VERBOSE=1.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { clearArea, E2E, FEET_Y, prepareServer, privateArea, sleep, startCraftBot, teleport, truthLoaded, until, type CraftBot } from './craft-truth.ts';
@@ -82,13 +83,13 @@ describe.skipIf(!E2E)('@bds dayone get: a crafted item from nothing (Track E1)',
     expect(b.said.slice(f2).some((s) => s.startsWith('get kit: '))).toBe(false);
   }, 120_000);
 
-  it('nothing: !get iron_pickaxe is refused with the reason, no process', async () => {
+  it('nothing: !get enchanting_table is refused with the reason, no process', async () => {
     const b = bot!;
     const from = b.said.length;
-    await b.command('!get iron_pickaxe');
+    await b.command('!get enchanting_table');
     const r = await b.reply((s) => s.startsWith('get'), from);
     notes.push(`nothing: ${r}`);
-    expect(r).toMatch(/^get iron_pickaxe: no way to get iron_pickaxe yet: it needs iron_ingot/);
+    expect(r).toMatch(/^get enchanting_table: no way to get /);
     await sleep(500);
     expect(b.processes.userProcesses()).toHaveLength(0);
   }, 60_000);

@@ -74,7 +74,7 @@ describe('craft chains (Track E1)', () => {
 
   it('carried targets count; kept tools are never ingredients', () => {
     const have = planChain(index(), [{ item: 'wooden_pickaxe', n: 1 }], inv(item('wooden_pickaxe')), keep);
-    expect(have).toEqual({ steps: [], missing: [] });
+    expect(have).toMatchObject({ steps: [], missing: [] });
     // sticks carried are used, the pickaxe in hand is not an ingredient of anything
     const p = planChain(index(), [{ item: 'stone_sword', n: 1 }], inv(item('stick', 1), item('cobblestone', 2), item('wooden_pickaxe'), item('crafting_table')), keep);
     expect(p.missing).toEqual([]);

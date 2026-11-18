@@ -54,6 +54,8 @@ export interface ChainPlan {
   steps: ChainStep[];
   /** Raw materials still missing (empty: every target can be crafted now). */
   missing: ChainLeaf[];
+  /** Track E2: the usable pool the crafts leave (the fuel the smelts may burn). */
+  left?: Map<string, number>;
 }
 
 export interface ChainOptions extends PlanOptions {
@@ -219,7 +221,7 @@ export function planChain(index: Index, targets: readonly { item: string; n: num
     s.pool.set(t.item, 0);
     need(index, s, t.item, short, 0, new Set(), o);
   }
-  return { steps: s.steps, missing: [...s.missing.entries()].map(([item, n]) => ({ item, n })) };
+  return { steps: s.steps, missing: [...s.missing.entries()].map(([item, n]) => ({ item, n })), left: s.pool };
 }
 
 /** `8 oak_planks, 4 stick, 1 crafting_table` */

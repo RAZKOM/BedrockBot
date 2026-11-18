@@ -90,6 +90,12 @@ export interface FoodDeps {
   chorePen?(): Pen | undefined;
   /** Track AF: wait n ticks (the tracker catches up after a walk). */
   waitTicks?(n: number): Promise<void>;
+  /**
+   * Track E2 (chat/commands-smelt.ts): no furnace where the cook step looks: set one down where the rule allows it (the
+   * `cookFurnace` setting; carried, or crafted from cobblestone beyond what the night shell keeps; `typed`: the owner's
+   * `!cook`, which may use any cobblestone). True when one stands there now.
+   */
+  ensureFurnace?: ((cancelled: () => boolean, typed: boolean) => Promise<boolean>) | undefined;
   /** Track AF: breeding (`!breed`, the breeding chore). */
   breeder?: Breeder | undefined;
   /** Track AF: the entity tracker and the pen of a mob (the breeding chore counts the pen's adults). */
@@ -150,6 +156,8 @@ export class FoodJob {
   trip: HerdMark | undefined;
   readonly visited = new Set<string>();
   readonly trips: string[] = [];
+  /** Track E2: a furnace was looked for and set down (true) or could not be (false) before the cook step; undefined: not needed. */
+  furnaceTried: boolean | undefined;
 
   constructor(want: number, opts: { hunt: boolean; cook: boolean; pens?: boolean }) {
     this.want = want;
@@ -215,6 +223,11 @@ export class FoodJob {
     }
     if (this.phase === 'cook') {
       if (rawFoodCounts(d.inventory.slots).size > 0 && (d.cooker.canCook() || !this.opts.hunt)) {
+        // Track E2: no furnace where this cook looks: one set down first when the rule allows it
+        if (d.ensureFurnace && (this.opts.hunt ? d.cooker.furnaces(COOK_NEAR, true) : d.cooker.furnaces(16)).length === 0) {
+          this.furnaceTried = await d.ensureFurnace(cancelled, !this.opts.hunt);
+          if (cancelled()) return false;
+        }
         // after a hunt only a furnace near the bot (COOK_NEAR): far from home the raw food is kept, not carried home to cook
         const r = await d.cooker.cook(this.opts.hunt ? { near: COOK_NEAR } : {}, cancelled);
         if (r.reason === 'interrupted') {

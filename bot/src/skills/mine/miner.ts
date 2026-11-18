@@ -1063,8 +1063,16 @@ export class MineTask {
         }
         this.calcFailedAt = at;
         const n = BLACKLIST_CLOSEST_ON_FAILURE ? nearestCandidate(feet, cands) : undefined;
-        if (n) this.markUnreachable(n, `goto: ${g.reason}, no segment (closest of ${cands.length} blacklisted)`);
-        else if (head) this.fail(head, `goto: ${g.reason}`);
+        if (n) {
+          this.markUnreachable(n, `goto: ${g.reason}, no segment (closest of ${cands.length} blacklisted)`);
+          // Track E2: a 2-minute timeout with no segment leaves the closest ore's vein as unreachable as it: its members
+          // touching it go too, for this run (a fresh world: a vein of 4 iron ore cost 4 timeouts, 8 of the step's 10 minutes)
+          if (g.reason === 'timeout') {
+            const vein = cands.filter((c) => c !== n && c.name === n.name && Math.max(Math.abs(c.p.x - n.p.x), Math.abs(c.p.y - n.p.y), Math.abs(c.p.z - n.p.z)) <= 1);
+            for (const c of vein) this.blacklist(c.p);
+            if (vein.length) this.log.info(`mine: ${vein.length} ${n.name} touching ${fmt(n.p)} skipped for this run with it`);
+          }
+        } else if (head) this.fail(head, `goto: ${g.reason}`);
         return undefined;
       }
       if (head) this.fail(head, `goto: ${g.reason}`);

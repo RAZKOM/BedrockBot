@@ -571,7 +571,9 @@ describe('MineTask in mode baritone: one composite goal, the reached ore mined',
       }
       const t2 = new MineTask(deps);
       expect(await t2.start({ block: 'iron_ore', count: 1 }), variant).toBe('none_left');
-      expect(t2.stats.calcFailed, variant).toBe(ores.length);
+      // Track E2: after a timeout the closest ore's touching vein members go with it for the run (8 in a row: 4 rounds)
+      expect(t2.stats.calcFailed, variant).toBe(variant === 'timeout' ? ores.length / 2 : ores.length);
+      if (variant === 'timeout') expect(t2.stats.unreachable.map((p) => p.x), variant).toEqual([3, 5, 7, 9]);
     }
   });
 

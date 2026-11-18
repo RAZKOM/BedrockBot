@@ -67,7 +67,15 @@ Without walking both answer `<cmd> needs a task that can walk (...)`.
 | `autoBreed` | off | on/off | Track AF: the breeding chore may run (needs `chorePen`) |
 | `chorePen` | none | `x y z` or `none` | Track AF: a block inside the owner's pen: the hunt may take its animals down to 2 adults of a kind, and `autoBreed` breeds it. `!set chorePen 120 64 -30` |
 
+| `cookFurnace` | on | on/off | Track E2 (docs/early-game.md "The iron age"): with raw food and no furnace where the cook looks, craft one from 8 cobblestone and set it down (by home when home is set): `!cook` always, a hunt only within reach of home and keeping 16 cobblestone |
+
 `!set autoFood off` etc. as for every setting (docs/processes.md "Settings").
+
+Track E2: the cooker also smelts (`!smelt`, the obtain job's smelt step: raw ore, sand, cobblestone, logs to
+charcoal; skills/food/smelt.ts). A smoker takes food only, a blast furnace ores only (not used yet); a furnace takes
+both. The furnace it sets down (`skills/food/furnace.ts`) goes where it looks: next to the bot once it stands within 3
+of home (it walks there first)
+or next to the bot without a home.
 
 ## Rules
 

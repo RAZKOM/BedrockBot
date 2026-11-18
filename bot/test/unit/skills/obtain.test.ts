@@ -92,13 +92,13 @@ function run(targets: readonly ObtainTarget[], inv = new Inv()): { steps: string
 }
 
 describe('obtain: the next command (Track E1)', () => {
-  it('raw materials: cobblestone is mined from stone, coal from coal ore, nothing for iron ingots', () => {
+  it('raw materials: cobblestone is mined from stone, coal from coal ore, iron ingots are smelted (not mined)', () => {
     expect(minedBlockFor('cobblestone')).toBe('stone');
     expect(minedBlockFor('coal')).toBe('coal_ore');
     expect(minedBlockFor('iron_ingot')).toBeUndefined();
     expect(pickaxeFor('stone')).toEqual({ item: 'wooden_pickaxe' });
     expect(pickaxeFor('iron_ore')).toEqual({ item: 'stone_pickaxe' });
-    expect(pickaxeFor('diamond_ore')).toHaveProperty('reason');
+    expect(pickaxeFor('obsidian')).toHaveProperty('reason');
     expect(canHarvestWith([], 'stone')).toBe(false);
     expect(canHarvestWith([item('wooden_pickaxe')], 'stone')).toBe(true);
     expect(canHarvestWith([], 'dirt')).toBe(true);
@@ -130,9 +130,9 @@ describe('obtain: the next command (Track E1)', () => {
   });
 
   it('what has no rule stops with the reason', () => {
-    const a = nextAction(index(), [{ item: 'iron_pickaxe', n: 1 }], [], keep);
+    const a = nextAction(index(), [{ item: 'diamond_pickaxe', n: 1 }], [], keep);
     expect(a.kind).toBe('stuck');
-    expect(a.kind === 'stuck' && a.reason).toMatch(/iron_ingot/);
+    expect(a.kind === 'stuck' && a.reason).toMatch(/diamond_pickaxe/);
   });
 
   it('carried targets are done at once', () => {

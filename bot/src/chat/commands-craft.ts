@@ -337,7 +337,9 @@ export function registerCraftCommands(d: CommandDeps, extra: CraftExtra = {}): C
       // Track E1: short of an ingredient a recipe makes from what is carried (planks from logs, sticks, the table):
       // those crafts first, in the same process (skills/craft/chain.ts); a raw material still missing is named
       let chain: ChainStep[] | undefined;
-      if (plan.crafts * plan.outputPer < a.n) {
+      // Track E2: a table recipe with the materials carried but no table carried or near: the table is chained too
+      const noTable = plan.table && carried(world.inventory.slots, 'crafting_table') === 0 && crafter.tablesAround().length === 0;
+      if (plan.crafts * plan.outputPer < a.n || noTable) {
         const c = chainFor(plan.item, a.n);
         if (c.missing.length === 0 && c.steps.length > 1) chain = c.steps.slice(0, -1);
         else if (plan.crafts <= 0) return reply(missingLine(plan.item, c, plan.shortfall, nextAction(recipes, [{ item: plan.item, n: carried(world.inventory.slots, plan.item) + a.n }], world.inventory.slots, planOpts()).kind !== 'stuck'));

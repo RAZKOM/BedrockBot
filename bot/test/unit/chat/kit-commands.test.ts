@@ -4,7 +4,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { CommandEvent } from '../../../src/chat/chat.ts';
-import { kitWords, OBTAIN_ABORT_ON, ObtainController, targetsText } from '../../../src/chat/commands-kit.ts';
+import { ironKitWords, kitWords, OBTAIN_ABORT_ON, ObtainController, targetsText } from '../../../src/chat/commands-kit.ts';
 import { keepOnDropItems } from '../../../src/chat/commands-survival.ts';
 import type { ChatLine } from '../../../src/chat/text.ts';
 import { planChain } from '../../../src/skills/craft/chain.ts';
@@ -13,13 +13,22 @@ import type { Process } from '../../../src/tasks/process/manager.ts';
 import type { ItemStack } from '../../../src/world/types.ts';
 
 const fixture = JSON.parse(readFileSync(new URL('../fixtures/crafting-data-early-1.26.60.json', import.meta.url), 'utf8')) as CraftingDataPacket & { items: Record<string, string> };
-const recipes = new RecipeIndex((id) => fixture.items[String(id)]);
-recipes.handle(fixture);
+const baseRecipes = new RecipeIndex((id) => fixture.items[String(id)]);
+baseRecipes.handle(fixture);
+// Track E2: the iron-age recipes (the armour, the bucket)
+const ironFixture = JSON.parse(readFileSync(new URL('../fixtures/crafting-data-iron-1.26.60.json', import.meta.url), 'utf8')) as CraftingDataPacket & { items: Record<string, string> };
+const ironRecipes = new RecipeIndex((id) => ironFixture.items[String(id)]);
+ironRecipes.handle(ironFixture);
 const keep = { keep: keepOnDropItems };
 const LINE = { type: 'chat', source: 'Owner', message: '!get kit', body: '!get kit', xuid: '', truth: false } as unknown as ChatLine;
 
-function host(o: { sheep?: boolean; stone?: boolean } = {}) {
+function host(o: { sheep?: boolean; stone?: boolean; iron?: number; wear?: readonly string[]; recipes?: RecipeIndex; animals?: boolean } = {}) {
+  const recipes = o.recipes ?? baseRecipes;
   const slots: (ItemStack | null)[] = Array.from({ length: 36 }, () => null);
+  // Track E2: worn items (the armour pass and the offhand move right after a craft), a furnace set down, iron in the ground
+  const worn: (ItemStack | null)[] = [];
+  let furnace = false;
+  let iron = o.iron ?? Infinity;
   const add = (name: string, n: number) => {
     const s = slots.find((x) => x?.name === name);
     if (s) s.count += n;
@@ -62,6 +71,7 @@ function host(o: { sheep?: boolean; stone?: boolean } = {}) {
     dispatched,
     stopped,
     slots,
+    worn,
     emit: (e: CommandEvent) => {
       for (const fn of listeners) fn(e);
     },
@@ -72,9 +82,25 @@ function host(o: { sheep?: boolean; stone?: boolean } = {}) {
         for (const fn of listeners) fn({ kind: 'run', name: verb!, sender: { name: 'Owner' } } as never);
         const n = Number(rest.at(-1));
         if (verb === 'gather') mk('gather', () => add('oak_log', Math.ceil(n / 6) * 6));
+        else if (verb === 'mine' && rest[0] === 'iron_ore')
+          mk('mine', () => {
+            const k = Math.min(n, iron);
+            iron -= k;
+            if (k > 0) add('raw_iron', k);
+          });
         else if (verb === 'mine') mk('mine', () => (o.stone === false ? undefined : add('cobblestone', n)));
+        else if (verb === 'furnace')
+          mk('furnace', () => {
+            take('furnace', 1);
+            furnace = true;
+          });
+        else if (verb === 'smelt')
+          mk('smelt', () => {
+            take(rest[0]!, n);
+            add('iron_ingot', n);
+          });
         else if (verb === 'kill') mk('kill', () => (o.sheep === false ? undefined : add('white_wool', n)));
-        else if (verb === 'food') mk('food', () => add('beef', n));
+        else if (verb === 'food') mk('food', () => (o.animals === false ? undefined : add('beef', n)));
         else if (verb === 'craft') {
           const item = rest[0]!;
           mk('craft', () => {
@@ -83,6 +109,12 @@ function host(o: { sheep?: boolean; stone?: boolean } = {}) {
               const p = planCraft(recipes, st.item, st.n, slots, keep)!;
               for (const [k, v] of Object.entries(p.perCraft)) take(k, v * p.crafts);
               add(p.item, p.crafts * p.outputPer);
+            }
+            for (const w of o.wear ?? []) {
+              const s = slots.find((x) => x?.name === w);
+              if (!s) continue;
+              take(w, 1);
+              worn.push({ ...s, count: 1 });
             }
           });
         }
@@ -97,7 +129,7 @@ function host(o: { sheep?: boolean; stone?: boolean } = {}) {
       },
       slots: () => slots,
       recipes,
-      options: () => keep,
+      options: () => ({ ...keep, worn, furnaceNear: furnace }),
       onCommand: (fn: (e: CommandEvent) => void) => {
         listeners.add(fn);
         return () => listeners.delete(fn);
@@ -138,8 +170,8 @@ describe('the obtain job (Track E1)', () => {
     const c = new ObtainController(h.host);
     const replies: string[] = [];
     expect(c.start(LINE, 'stone_sword', [{ item: 'stone_sword', n: 1 }], (m) => replies.push(m))).toBeUndefined();
-    expect(c.start(LINE, 'iron_pickaxe', [{ item: 'iron_pickaxe', n: 1 }], (m) => replies.push(m))).toBeUndefined();
-    expect(replies).toEqual(['get stone_sword: already carried (stone_sword)', expect.stringMatching(/^get iron_pickaxe: no way to get iron_pickaxe yet: it needs iron_ingot/)]);
+    expect(c.start(LINE, 'diamond_pickaxe', [{ item: 'diamond_pickaxe', n: 1 }], (m) => replies.push(m))).toBeUndefined();
+    expect(replies).toEqual(['get stone_sword: already carried (stone_sword)', 'get diamond_pickaxe: no recipe for diamond_pickaxe']);
     expect(h.dispatched).toEqual([]);
   });
 
@@ -163,5 +195,73 @@ describe('the obtain job (Track E1)', () => {
     expect(kitWords(['kit', 'early'])).toBe(true);
     expect(kitWords(['kit', 'iron'])).toBe(false);
     expect(targetsText([{ item: 'stone_sword', n: 1 }, { item: 'food', n: 6 }])).toBe('stone_sword, 6 food');
+  });
+
+  it("Track E2: a shield moved to the offhand right after its craft counts as the step's gain; the job ends done", async () => {
+    const h = host({ wear: ['shield'], recipes: ironRecipes });
+    h.slots[0] = { name: 'oak_planks', count: 6, networkId: 1, metadata: 0 };
+    h.slots[1] = { name: 'iron_ingot', count: 1, networkId: 1, metadata: 0 };
+    h.slots[2] = { name: 'crafting_table', count: 1, networkId: 1, metadata: 0 };
+    const c = new ObtainController({ ...h.host, recipes: ironRecipes });
+    const job = c.start(LINE, 'shield', [{ item: 'shield', n: 1 }], () => undefined)!;
+    expect(await job.result).toMatch(/^get shield: done in \d+ s, 1 step \(craft shield 1\)$/);
+    expect(h.worn.map((s) => s?.name)).toEqual(['shield']);
+  });
+
+  it('Track E2: the iron kit with 13 iron in the ground: the furnace step counts, the soft armour is dropped after the short mine step, the reply says so', async () => {
+    const h = host({ iron: 13, wear: ['shield', 'iron_boots'], recipes: ironRecipes });
+    const kit: [string, number][] = [
+      ['crafting_table', 1],
+      ['stone_pickaxe', 1],
+      ['stone_sword', 1],
+      ['cobblestone', 24],
+      ['oak_log', 8],
+      ['bread', 6],
+      ['coal', 4],
+    ];
+    kit.forEach(([name, count], i) => (h.slots[i] = { name, count, networkId: 1, metadata: 0 }));
+    const c = new ObtainController({ ...h.host, recipes: ironRecipes });
+    const replies: string[] = [];
+    const { label, targets } = ObtainController.targetsFor('kit_iron', undefined);
+    const job = c.start(LINE, label, targets, (m) => replies.push(m))!;
+    expect(replies[0]).toMatch(/^getting the kit iron \(iron_pickaxe, iron_sword, shield, bucket, iron_chestplate, iron_leggings, iron_boots, iron_helmet, 6 food\): first !mine iron_ore 33$/);
+    const end = await job.result;
+    expect(h.dispatched.filter((d) => d.startsWith('mine iron_ore'))).toEqual(['mine iron_ore 33']);
+    expect(h.dispatched).toContain('furnace');
+    expect(h.dispatched).toContain('smelt raw_iron 13');
+    expect(end).toMatch(/^get kit iron: done in \d+ s, \d+ steps; short: iron_chestplate, iron_leggings, iron_helmet \(!mine iron_ore 33 got 13\); steps: mine iron_ore 33, .*smelt raw_iron 13/);
+    for (const t of ['iron_pickaxe', 'iron_sword', 'bucket']) expect(h.slots.some((s) => s?.name === t)).toBe(true);
+    expect(h.worn.map((s) => s?.name).sort()).toEqual(['iron_boots', 'shield']);
+  });
+
+  it('Track E2: iron kit words', () => {
+    expect(ironKitWords(['kit', 'iron'])).toBe(true);
+    expect(ironKitWords(['iron', 'kit'])).toBe(true);
+    expect(ironKitWords(['kit'])).toBe(false);
+    expect(ObtainController.targetsFor('kit_iron', undefined).label).toBe('kit iron');
+  });
+
+  it('Track E2: the iron kit whose food was eaten and no animal is left: done, the food short, not stopped', async () => {
+    const h = host({ iron: 33, wear: ['shield', 'iron_helmet', 'iron_chestplate', 'iron_leggings', 'iron_boots'], recipes: ironRecipes, animals: false });
+    const kit: [string, number][] = [
+      ['crafting_table', 1],
+      ['stone_pickaxe', 1],
+      ['stone_sword', 1],
+      ['cobblestone', 24],
+      ['oak_log', 8],
+      ['coal', 5],
+    ];
+    kit.forEach(([name, count], i) => (h.slots[i] = { name, count, networkId: 1, metadata: 0 }));
+    const c = new ObtainController({ ...h.host, recipes: ironRecipes });
+    const { label, targets } = ObtainController.targetsFor('kit_iron', undefined);
+    const end = await c.start(LINE, label, targets, () => undefined)!.result;
+    expect(end).toMatch(/^get kit iron: done in \d+ s, \d+ steps; food 0 of 6: !food 6 got nothing; steps: mine iron_ore 33, .*food 6$/);
+    // the stone kit keeps E1's rule: no food at all is a stop
+    const h2 = host({ animals: false });
+    (['crafting_table', 'stone_pickaxe', 'stone_sword', 'stone_axe'] as const).forEach((name, i) => (h2.slots[i] = { name, count: 1, networkId: 1, metadata: 0 }));
+    h2.slots[4] = { name: 'cobblestone', count: 16, networkId: 1, metadata: 0 };
+    const c2 = new ObtainController(h2.host);
+    const k = ObtainController.targetsFor('kit', undefined);
+    expect(await c2.start(LINE, k.label, k.targets, () => undefined)!.result).toMatch(/^get kit: stopped after \d+ s, 1 step: !food 6 got nothing/);
   });
 });

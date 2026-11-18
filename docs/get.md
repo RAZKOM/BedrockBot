@@ -43,7 +43,14 @@ Track E1 (docs/early-game.md "From nothing", ADR 0098): an item the catalog does
 `!mine`, `!kill sheep`, `!food` and `!craft` one after the other as the owner, re-planning from the inventory after
 each (`getting stone_pickaxe: first !gather 3` ... `get stone_pickaxe: done in 43 s, 4 steps (gather 3, craft
 wooden_pickaxe 1, mine stone 3, craft stone_pickaxe 1)`). `!get stop` and `!get status` cover the job; what has no
-way (iron: smelting) is refused with the reason.
+way is refused with the reason.
+
+Track E2 (docs/early-game.md "The iron age", ADR 0099): the job also smelts. `!get iron_ingot [n]` (and the other
+smelted items: `gold_ingot`, `copper_ingot`, `glass`) is the job's, not the catalog's: it mines the raw ore, sets a
+furnace down where the cooker looks and runs `!smelt` (plain `!get iron` still mines raw iron). `!get furnace` crafts
+one from 8 cobblestone and sets it down. Iron items (`!get iron_pickaxe`, `bucket`, `shield`, `iron_sword`, the armour
+pieces) chain through it, and `!get kit iron` (also `iron kit`) asks for the iron kit. A target worn (armour, the
+shield in the offhand) counts as carried.
 
 `!get` replies first, then runs the command as a copy of the owner's line through the chat's own
 handler (like a `!do` plan step), so `!stop`, `!pause`, `!status` and the command's own replies work

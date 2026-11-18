@@ -28,6 +28,7 @@ import { registerPortalCommands } from '../chat/commands-portal.ts'; // Track AT
 import { registerFlyCommands } from '../chat/commands-fly.ts'; // Track AU
 import { registerCraftCommands } from '../chat/commands-craft.ts'; // Track AW
 import { registerKitCommands } from '../chat/commands-kit.ts'; // Track E1
+import { registerSmeltCommands } from '../chat/commands-smelt.ts'; // Track E2
 import { NightShell } from './night-shell.ts'; // Track E1
 import { milkStatusOf, registerMilkCommands } from '../chat/commands-milk.ts'; // Track K1
 import { registerRocketCommands, rocketsStatusOf } from '../chat/commands-rockets.ts'; // Track R9
@@ -385,6 +386,7 @@ export const afkTask: TaskDefinition = {
       (d) => void registerFlyCommands(d, { containers, logger: ctx.logger('fly') }), // Track AU: !fly, !land, the automatic flight of !come / !goto, the flight kit (docs/flight.md)
       (d) => void registerCraftCommands(d, { containers, logger: ctx.logger('craft') }), // Track AW: !craft, !compact, the compaction step of !unload (after the home logistics; docs/crafting.md)
       (d) => void registerKitCommands(d), // Track E1: !get <craftable>, !get kit: the obtain job over !gather, !mine, !kill, !food, !craft (after !get and the crafter; docs/early-game.md, ADR 0098)
+      (d) => void registerSmeltCommands(d), // Track E2: !furnace, !smelt, the furnace the cooker makes (after the food commands and the crafter; docs/early-game.md, ADR 0099)
       (d) => void registerMilkCommands(d, { clock }), // Track K1: !milk, the milk chore (autoMilk), the trip readiness's milk (after the food commands, the home logistics and the crafter; ADR 0096)
       (d) => void registerRocketCommands(d, { clock }), // Track R9: !rockets, the rockets chore (autoRockets), the trip readiness's rockets (after the crafter, the home logistics and the flight kit; ADR 0097)
       (d) => registerLearnCommands(d, { logger: ctx.logger('learn') }), // !learn: the owner flies a path while the bot watches; kept in <config dir>/paths (docs/flight.md "Learned paths")

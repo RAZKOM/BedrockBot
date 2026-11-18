@@ -26,6 +26,8 @@ import { settingsMover } from '../tasks/process/goto.ts';
 import type { Process, ProcessManager } from '../tasks/process/manager.ts';
 import type { ChatLine } from './text.ts';
 import { survivalKitOf } from './commands-survival.ts';
+import { smeltInputsOf } from '../skills/food/smelt.ts'; // Track E2
+
 
 /** The processes `!get` may start (by the command it runs). */
 export const GET_PROCESSES: Record<string, string> = { gather: 'gather', mine: 'mine', food: 'food', kill: 'kill', farm: 'farm' };
@@ -89,12 +91,15 @@ export class GetController {
       return reply(o ?? this.stop());
     }
     if (args.length === 1 && a === 'status') return reply(this.obtain?.status() ?? this.status());
-    if (a === 'kit' && this.obtain?.run(line, args.map((x) => x.toLowerCase()).join('_'), undefined, reply)) return;
+    const kit = a === 'kit' || (a === 'iron' && args.length === 2 && args[1]!.toLowerCase() === 'kit'); // Track E2: `!get kit iron`, `!get iron kit`
+    if (kit && this.obtain?.run(line, args.map((x) => x.toLowerCase()).join('_'), undefined, reply)) return;
     // Track AQ: several ores with a count each: one `!mine` job, one trip
     const multi = lookupMulti(args);
     if (multi && 'error' in multi) return reply(`usage: !get <item> n <item> n ... (${multi.error})`);
     const p = multi ? undefined : parseGetArgs(args);
     if (p && 'error' in p) return reply(`usage: !get <item> [n] (${p.error})`);
+    // Track E2: a smelted item (`iron_ingot`, `glass`) is mined or gathered, then smelted: the obtain job's (plain `!get iron` still mines raw iron)
+    if (p && smeltInputsOf(p.name) && this.obtain?.run(line, p.name, p.count, reply)) return;
     const f: Lookup = multi ? { ...multi.items[0]!, item: multi.items.map((x) => `${x.count} ${x.item}`).join(', '), count: multi.items.reduce((a, x) => a + x.count, 0), command: multi.command, doing: `mining ${multi.items.map((x) => x.target).join(', ')} in one trip` } : lookup(p!.name, p!.count);
     if (f.strategy === 'unknown') {
       if (p && this.obtain?.run(line, p.name, p.count, reply)) return;

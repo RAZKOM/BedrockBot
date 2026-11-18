@@ -27,6 +27,7 @@ import type { NavGoal } from '../nav/goals.ts';
 import { wireItemOf } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { cookedOf, findCookers, fuelRank, fuelValue, isCooker, rawFoodCounts, type CookerFinder } from './finder.ts';
+import { cookerTakes, smeltedOf, smeltTicksOf } from './smelt.ts'; // Track E2
 
 export const FURNACE_INPUT = 0;
 export const FURNACE_FUEL = 1;
@@ -34,10 +35,10 @@ export const FURNACE_OUTPUT = 2;
 
 /** Ticks per item: furnace 200, smoker 100. */
 export function cookTicksOf(block: string): number {
-  return block.includes('smoker') ? 100 : 200;
+  return smeltTicksOf(block);
 }
 
-/** The item stack request container id of a cooker's input slot. */
+/** The item stack request container id of a cooker's input slot (blast furnaces are not used: never measured). */
 export function inputSlotType(block: string): string {
   return block.includes('smoker') ? 'smoker_ingredient' : 'furnace_ingredient';
 }
@@ -200,6 +201,23 @@ export interface CookOptions {
   near?: number;
   /** Give up waiting this many ticks after the expected end. Default 200. */
   slackTicks?: number;
+  /**
+   * Track E2 (`!smelt`): what goes in, name -> count carried (default: the raw food, `rawFoodCounts`). The cookers
+   * tried are the ones that take the first of these (`cookerTakes`: a smoker food only, a blast furnace ores only).
+   */
+  inputs?: (slots: readonly (ItemStack | null)[]) => Map<string, number>;
+  /**
+   * Track E2: an input slot holding this is ours to wait out (default: a raw food; with `inputs`, anything a furnace
+   * smelts). Anything else: `furnace_busy`.
+   */
+  accepts?: (name: string) => boolean;
+  /** Track E2: put at most this many items in all (default: everything `inputs` gives). */
+  limit?: number;
+  /**
+   * Track E2: the furnace of an interrupted run (a flee, a guard fight): tried first, and opened even with nothing left
+   * to put in, to wait out the input still in it and take the output.
+   */
+  at?: Vec3;
 }
 
 export type CookReason = 'done' | 'nothing_to_cook' | 'no_furnace' | 'no_furnace_near' | 'no_fuel' | 'unreachable' | 'open_failed' | 'furnace_busy' | 'request_failed' | 'timeout' | 'interrupted' | 'not_ready';
@@ -213,6 +231,8 @@ export interface CookResult {
   block?: string;
   /** Fuel put in, by name. */
   fuel: Record<string, number>;
+  /** Track E2: items put into the input slot by this run (a limit across a pause counts them). */
+  put?: number;
   ticks: number;
 }
 
@@ -236,11 +256,19 @@ export class Cooker {
     this.req.dispose();
   }
 
-  /** Furnaces / smokers within the radius of home (else the bot; `near`: of the bot), nearest to the bot first. */
-  furnaces(radius = 16, near = false): Vec3[] {
+  /**
+   * Furnaces / smokers within the radius of home (else the bot; `near`: of the bot), nearest to the bot first.
+   * Track E2: `takes`, only the cookers that take that input (a smoker cooks food only).
+   */
+  furnaces(radius = 16, near = false, takes?: string): Vec3[] {
     const me = this.d.loop.state.pos;
     const origin = near ? me : (this.d.home() ?? me);
-    return findCookers(this.d.world, origin, radius).sort((a, b) => Math.hypot(a.x + 0.5 - me.x, a.z + 0.5 - me.z) - Math.hypot(b.x + 0.5 - me.x, b.z + 0.5 - me.z));
+    const list = findCookers(this.d.world, origin, radius).sort((a, b) => Math.hypot(a.x + 0.5 - me.x, a.z + 0.5 - me.z) - Math.hypot(b.x + 0.5 - me.x, b.z + 0.5 - me.z));
+    if (takes === undefined) return list;
+    return list.filter((p) => {
+      const b = this.d.world.blockAt(p);
+      return b === undefined || cookerTakes(b.name, takes);
+    });
   }
 
   /** True when there is raw food to cook and a fuel item (in the inventory). */
@@ -249,7 +277,18 @@ export class Cooker {
     return rawFoodCounts(slots).size > 0 && slots.some((s) => s !== null && s.count > 0 && fuelValue(s.name) > 0);
   }
 
-  /** Walk to the nearest furnace near home, cook every raw food carried, take the output. */
+  /** The inputs of this run (default the raw food). */
+  private inputsOf(o: CookOptions): Map<string, number> {
+    return (o.inputs ?? rawFoodCounts)(this.d.world.inventory.slots);
+  }
+
+  /** Items put in so far in this run (the `limit`). */
+  private put = 0;
+
+  /**
+   * Walk to the nearest furnace near home, cook every raw food carried, take the output. Track E2: with `inputs`, the
+   * same for any furnace input (`!smelt`: raw iron into ingots), at most `limit` items.
+   */
   async cook(o: CookOptions, cancelled: () => boolean): Promise<CookResult> {
     const t0 = this.tick();
     const res: CookResult = { ok: false, reason: 'done', cooked: {}, fuel: {}, ticks: 0 };
@@ -258,12 +297,20 @@ export class Cooker {
       res.reason = reason;
       res.ok = reason === 'done';
       res.ticks = this.tick() - t0;
+      res.put = this.put;
       return res;
     };
     const { world, loop } = this.d;
+    this.put = 0;
     if (!loop.state.ready) return done('not_ready');
-    if (rawFoodCounts(world.inventory.slots).size === 0) return done('nothing_to_cook');
-    const list = o.near !== undefined ? this.furnaces(o.near, true) : this.furnaces(o.radius ?? 16);
+    const first = [...this.inputsOf(o).keys()][0];
+    const atBlock = o.at ? world.blockAt(o.at) : undefined;
+    const back = o.at && atBlock && isCooker(atBlock) ? o.at : undefined;
+    if (!back && (first === undefined || (o.limit !== undefined && o.limit <= 0))) return done('nothing_to_cook');
+    const takes = o.inputs ? first : undefined;
+    const found = o.near !== undefined ? this.furnaces(o.near, true, takes) : this.furnaces(o.radius ?? 16, false, takes);
+    // Track E2: back to the furnace an interrupted run left its input in
+    const list = back ? [back, ...found.filter((p) => p.x !== back.x || p.y !== back.y || p.z !== back.z)] : found;
     if (list.length === 0) return done(o.near !== undefined ? 'no_furnace_near' : 'no_furnace');
     let opened: { id: number; type: string; block: string; pos: Vec3 } | undefined;
     for (const p of list) {
@@ -299,18 +346,20 @@ export class Cooker {
     const inv = this.d.world.inventory;
     const view = () => inv.window(w.id)?.slots ?? [];
     let input = view()[FURNACE_INPUT] ?? null;
-    if (input && !cookedOf(input.name)) return 'furnace_busy';
-    const raw = rawFoodCounts(inv.slots);
+    const accepts = o.accepts ?? (o.inputs ? (n: string) => smeltedOf(n) !== undefined : (n: string) => cookedOf(n) !== undefined);
+    if (input && !accepts(input.name)) return 'furnace_busy';
+    const raw = this.inputsOf(o);
+    const room = (): number => (o.limit === undefined ? Infinity : o.limit - this.put);
     if (!input) {
-      const kinds = [...raw.entries()].sort((a, b) => b[1] - a[1]);
+      const kinds = [...raw.entries()].filter(([n]) => cookerTakes(w.block, n)).sort((a, b) => b[1] - a[1]);
       const pick = kinds[0];
-      if (!pick) return 'done';
-      this.phase = `cooking ${pick[1]} ${pick[0]}`;
-      const ok = await this.putInput(w, pick[0]);
+      if (!pick || room() <= 0) return 'done';
+      this.phase = `${o.inputs ? 'smelting' : 'cooking'} ${Math.min(pick[1], room())} ${pick[0]}`;
+      const ok = await this.putInput(w, pick[0], room());
       if (!ok) return 'request_failed';
-    } else if ((raw.get(input.name) ?? 0) > 0) {
+    } else if ((raw.get(input.name) ?? 0) > 0 && room() > 0) {
       // top up the stack that is cooking already
-      if (!(await this.putInput(w, input.name))) return 'request_failed';
+      if (!(await this.putInput(w, input.name, room()))) return 'request_failed';
     }
     input = view()[FURNACE_INPUT] ?? null;
     if (!input) return 'done';
@@ -336,7 +385,7 @@ export class Cooker {
       await this.wait(10);
       const now = view()[FURNACE_INPUT] ?? null;
       const n = now?.count ?? 0;
-      this.phase = `cooking ${now ? `${n} ${now.name}` : 'done'} (${res.block ?? 'furnace'})`;
+      this.phase = `${o.inputs ? 'smelting' : 'cooking'} ${now ? `${n} ${now.name}` : 'done'} (${res.block ?? 'furnace'})`;
       if (n !== lastCount) {
         lastCount = n;
         lastChange = this.tick();
@@ -353,7 +402,8 @@ export class Cooker {
     // the last item lands in the output slot with the input's last update
     await this.wait(2);
     await this.takeOutput(w, res);
-    return rawFoodCounts(inv.slots).size > 0 ? 'more' : 'done';
+    const left = [...this.inputsOf(o).keys()].some((n) => cookerTakes(w.block, n));
+    return left && room() > 0 ? 'more' : 'done';
   }
 
   /** The cooker block is lit (fuel burning). */
@@ -371,18 +421,22 @@ export class Cooker {
     this.ticks += n;
   }
 
-  /** Move every stack of `name` from the inventory into the input slot (up to a full stack). */
-  private async putInput(w: { id: number; block: string }, name: string): Promise<boolean> {
+  /** Move every stack of `name` from the inventory into the input slot (up to a full stack, at most `limit` items). */
+  private async putInput(w: { id: number; block: string }, name: string, limit = Infinity): Promise<boolean> {
     const inv = this.d.world.inventory;
     const max = maxStackOf(name);
-    for (let slot = 0; slot < 36; slot++) {
+    let left = limit;
+    for (let slot = 0; slot < 36 && left > 0; slot++) {
       const it = inv.slots[slot];
       if (it?.name !== name) continue;
       const cur = inv.window(w.id)?.slots[FURNACE_INPUT] ?? null;
       if (cur && cur.name !== name) return false;
       const room = max - (cur?.count ?? 0);
       if (room <= 0) break;
-      if (!(await this.place(w, slot, inputSlotType(w.block), FURNACE_INPUT, Math.min(room, it.count)))) return false;
+      const n = Math.min(room, it.count, left);
+      if (!(await this.place(w, slot, inputSlotType(w.block), FURNACE_INPUT, n))) return false;
+      left -= n;
+      this.put += n;
     }
     return true;
   }

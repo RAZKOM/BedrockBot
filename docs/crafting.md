@@ -50,6 +50,12 @@ cobblestone for stone_pickaxe (need 3, have 0; !get stone_pickaxe gets it all)`)
 name the `bed` item. The table goes on a free cell next to the feet or on one under leaf litter, a flower or a tuft
 (dug first); no lid rule (`skills/craft/table-spot.ts`).
 
+Track E2 (docs/early-game.md "The iron age", ADR 0099): a 3 x 3 recipe whose materials are all carried, with no table
+carried or standing near, chains the table too (before: `!craft furnace` with 8 cobblestone and 3 logs ended `craft:
+made no furnace (no_table)`; after, it crafts the planks and the table first). Smelted ingredients are not crafts:
+`!smelt` (docs/early-game.md) makes them, and the obtain job plans it. `planChain` also returns `left`, the pool the
+crafts leave (the fuel the smelt may burn).
+
 ### Settings (`!set`)
 
 | Setting | Default | Meaning |

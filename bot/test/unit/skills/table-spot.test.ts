@@ -74,4 +74,26 @@ describe('table spots (Track E1)', () => {
     const built = tableSpots(world({}), feet, (n) => n === 'grass_block');
     expect(built).toEqual([]);
   });
+
+  it('Track E2: a one-wide tunnel by the furnace: no free cell, a side wall of stone is dug out (only with a tool that harvests it)', () => {
+    const STONE = b('stone', true);
+    const FURNACE = b('furnace', true);
+    // stone everywhere but the body's two cells; a furnace in the one open side cell
+    const cells: Record<string, BlockInfo> = { '15,69,45': AIR, '15,70,45': AIR, '16,69,45': FURNACE };
+    const tunnel = (p: Vec3): BlockInfo => cells[`${p.x},${p.y},${p.z}`] ?? STONE;
+    expect(tableSpots(tunnel, feet)).toEqual([]);
+    expect(tableSpots(tunnel, feet, () => false, () => false)).toEqual([]);
+    const s = tableSpots(tunnel, feet, () => false, (n) => n === 'stone');
+    expect(s.map((x) => x.dig)).toEqual(['stone', 'stone', 'stone']);
+    expect(s.map((x) => x.p)).not.toContainEqual({ x: 16, y: 69, z: 45 });
+    // water behind a wall, gravel over another: those two are left
+    cells['13,69,45'] = b('water');
+    cells['15,70,46'] = b('gravel', true);
+    expect(tableSpots(tunnel, feet, () => false, (n) => n === 'stone').map((x) => x.p)).toEqual([{ x: 15, y: 69, z: 44 }]);
+  });
+
+  it('Track E2: a free cell anywhere in the ring: nothing is dug', () => {
+    const s = tableSpots(world({}), feet, () => false, () => true);
+    expect(s.some((x) => x.dig)).toBe(false);
+  });
 });

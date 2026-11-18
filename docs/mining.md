@@ -379,7 +379,10 @@ half of `shaftRule`, shared).
    both real "no path" answers (`unreachable` after an exhaustive plan or a no-progress one over loaded world;
    not a timeout or unloaded chunks), blacklists every member of its composite for the run (ours,
    2026-10-31: one member per round spun the bot in place for 15 minutes over 64 members; the next round
-   takes other ores or explores); any other failure
+   takes other ores or explores); a goto that timed out (2 minutes) with no segment also skips, for the run,
+   the candidates of the same block touching that closest one (Chebyshev distance 1: its vein, as unreachable
+   as it; Track E2: on a fresh world the next 3 ores of one vein timed out the same way, 8 of a 10-minute
+   step, `mine: 3 iron_ore touching x y z skipped for this run with it`); any other failure
    counts against the heading member, 3 failures blacklist it (ours).
 6. Nothing left after prune: "mine until n" (next section).
 
