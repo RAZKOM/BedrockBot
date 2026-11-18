@@ -33,7 +33,7 @@ import { silentLogger, type Logger } from '../../log.ts';
 import type { ItemV4 } from '../../world/packets.ts';
 import type { BlockInfo, ItemStack, PacketSource, Vec3 } from '../../world/types.ts';
 import { clickBlockTransaction, maxStackOf } from '../container/chest.ts';
-import { boxSpots } from '../container/stash.ts';
+import { tableSpots, type TableSpot } from './table-spot.ts';
 import type { CollectOptions, CollectResult } from '../collect/collect.ts';
 import type { DigOptions, DigResult } from '../dig/digger.ts';
 import { blockCenter, EYE_HEIGHT, faceToward, lookAngles } from '../dig/look.ts';
@@ -854,13 +854,12 @@ export class Crafter {
     return undefined;
   }
 
-  /** Cells next to the feet a table may go: empty, empty above, a full non-built, non-container block below. */
-  tableSpots(): Vec3[] {
-    const feet = this.d.loop.state.pos;
-    return boxSpots((q) => this.d.world.blockAt(q), feet).filter((p) => {
-      const below = this.d.world.blockAt({ x: p.x, y: p.y - 1, z: p.z });
-      return !!below && !isBuiltBlock(below.name);
-    });
+  /**
+   * Cells next to the feet a table may go: empty or under a cover a hand clears (leaf litter, a flower), a full
+   * non-built, non-container block below; no lid rule (Track E1, skills/craft/table-spot.ts).
+   */
+  tableSpots(): TableSpot[] {
+    return tableSpots((q) => this.d.world.blockAt(q), this.d.loop.state.pos, isBuiltBlock);
   }
 
   /** Place a carried crafting table (crafting one from planks first when none is carried) on a free cell. */
@@ -889,8 +888,17 @@ export class Crafter {
       this.log.info('craft: no free cell next to the bot for a crafting table');
       return undefined;
     }
-    for (const p of spots.slice(0, 3)) {
+    for (const { p, cover } of spots.slice(0, 3)) {
       if (cancelled()) return undefined;
+      if (cover) {
+        // Track E1: leaf litter, a flower: cleared by hand first (instant, nothing kept)
+        this.phase = `clearing ${cover} at ${fmt(p)}`;
+        const d = await sk.dig(p);
+        if (!d.ok || this.d.world.blockAt(p)?.name !== 'air') {
+          this.log.info(`craft: clear ${cover} at ${fmt(p)} for the table: ${d.ok ? `still ${this.d.world.blockAt(p)?.name ?? 'unknown'}` : (d.reason ?? 'failed')}`);
+          continue;
+        }
+      }
       this.phase = `placing a crafting table at ${fmt(p)}`;
       const r = await sk.place(p, { face: 'up', item: TABLE });
       if (r.ok) {

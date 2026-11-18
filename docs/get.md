@@ -38,6 +38,13 @@ Decision record: [decisions/0025-get-front-door-and-stash.md](decisions/0025-get
 | `!get stop` | `stopped mine coal_ore 2/4 (dig, 0 skipped)`: the job `!get` started (else any running gather / mine / food / farm); `get: nothing to stop` |
 | `!get status` | `get: 4 coal via !mine coal_ore 4: mine coal_ore 2/4 (dig, 0 skipped); stash: 1 attempts (1 ok, 0 full), last: shulker box at ...: moved 1728 cobblestone in 27 requests (28 on the shared Containers), picked up again, box full`; `get: idle` |
 
+Track E1 (docs/early-game.md "From nothing", ADR 0098): an item the catalog does not know but a recipe makes
+(`!get stone_pickaxe`, `!get crafting_table`, `!get bed`) and `!get kit` start an obtain job: it runs `!gather`,
+`!mine`, `!kill sheep`, `!food` and `!craft` one after the other as the owner, re-planning from the inventory after
+each (`getting stone_pickaxe: first !gather 3` ... `get stone_pickaxe: done in 43 s, 4 steps (gather 3, craft
+wooden_pickaxe 1, mine stone 3, craft stone_pickaxe 1)`). `!get stop` and `!get status` cover the job; what has no
+way (iron: smelting) is refused with the reason.
+
 `!get` replies first, then runs the command as a copy of the owner's line through the chat's own
 handler (like a `!do` plan step), so `!stop`, `!pause`, `!status` and the command's own replies work
 as for the command typed by hand. The old commands (`!gather`, `!mine`, `!food`, `!farm`) stay.

@@ -219,8 +219,19 @@ export type NightEvent =
  *   after `retryMs`, at most `maxAttempts` times per night, then give up until the next dusk;
  * - night and inside: `sheltered` (re-entered automatically if pushed out, e.g. after a respawn).
  */
+/** Track E1: the night shell's hooks (tasks/night-shell.ts NightShell). */
+export interface NightShellHooks {
+  readonly closed: boolean;
+  newNight(): void;
+  forget(): void;
+  onInside(stillWanted: () => boolean): void;
+  open(): Promise<void>;
+}
+
 export class NightSafety {
   shelter: Vec3 | undefined;
+  /** Track E1 (`nightShell`): wall in at an open shelter after dusk, open a side at dawn before the walk home. */
+  shell: NightShellHooks | undefined;
   state: NightState = 'day';
   attempts = 0;
   retreats = 0;
@@ -284,6 +295,7 @@ export class NightSafety {
     this.attempts = 0;
     this.nextAttemptAt = 0;
     if (this.state === 'gave_up' || this.state === 'unreachable') this.state = 'day';
+    this.shell?.forget();
     this.o.log.info(p ? `shelter set to ${fmt(p)}` : 'shelter cleared');
   }
 
@@ -353,6 +365,7 @@ export class NightSafety {
       // dusk: a fresh budget for this night
       this.attempts = 0;
       this.nextAttemptAt = 0;
+      this.shell?.newNight();
     }
     if (!night) {
       if (this.wasNight === true) this.onDawn();
@@ -365,6 +378,8 @@ export class NightSafety {
     const pos = this.o.position();
     if (this.inside(pos)) {
       this.state = 'sheltered';
+      // Track E1: only while the night process holds the bot there (not a fight or a flight passing through)
+      if (!this.o.canMove || this.o.canMove()) this.shell?.onInside(() => this.wantsShelter() && this.inside() && (!this.o.canMove || this.o.canMove()));
       return;
     }
     if (this.attempts >= this.o.maxAttempts) {
@@ -434,9 +449,15 @@ export class NightSafety {
     const home = this.o.home?.();
     this.o.log.info(`dawn: leaving the shelter${home ? `, back to ${fmt(home)}` : ''}`);
     this.emit({ kind: 'dawn', home });
-    if (!home) return;
+    // Track E1: a night shell is opened first (the walk cannot dig out of it)
+    const shell = this.shell?.closed ? this.shell : undefined;
+    if (!home) {
+      void shell?.open();
+      return;
+    }
     this.state = 'returning';
-    const walk = this.o.walkHome ? this.o.walkHome(home) : this.o.mover.goto({ type: 'block', p: home }, { timeoutTicks: this.o.gotoTimeoutTicks * 5 });
+    const walkHome = (): Promise<SkillResult> => (this.o.walkHome ? this.o.walkHome(home) : this.o.mover.goto({ type: 'block', p: home }, { timeoutTicks: this.o.gotoTimeoutTicks * 5 }));
+    const walk = shell ? shell.open().then(walkHome, walkHome) : walkHome();
     void walk.then((r) => {
       if (this.state === 'returning') this.state = 'day';
       if (!r.ok) this.o.log.warn(`dawn: could not walk home (${r.reason})`);

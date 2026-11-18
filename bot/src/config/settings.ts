@@ -147,6 +147,7 @@ export const SETTING_DEFS = {
   fleeFly: { kind: 'boolean', default: false, description: 'the elytra flee: in danger from mobs under open sky, take off (jump, wings, a rocket) and land on safe ground far from them, home when that is near; needs the elytra and 3 rockets at hand' },
   sealIn: { kind: 'boolean', default: false, description: 'last floor against mobs: no way away, wall itself in with throwaway blocks and eat there' },
   mobDodge: { kind: 'boolean', default: false, description: 'with no sword or axe, run across an archer or witch line of fire instead of away from it (hand-steered, safe cells only)' },
+  nightShell: { kind: 'boolean', default: false, description: 'at night in a shelter under the open sky: wall itself in with throwaway blocks (10 on open ground), dig one side open at dawn' }, // Track E1 (docs/early-game.md, ADR 0098)
   // Track AW: crafting (docs/crafting.md)
   craftReserve: { kind: 'text', default: 'none', values: 'item n[, item n]|none', parse: (raw: string) => parseReserveText(raw, 'craftReserve'), description: 'crafting / compaction: never consume below this many of an item (`iron_ingot 9, diamond 4`); none = no reserve (tools, armour, food and the flight kit are never consumed anyway)' }, // Track AW
   compactOnUnload: { kind: 'boolean', default: true, description: '!unload: when a chest cannot take a load of raw iron, ingots, gems, coal, redstone or lapis, craft them into blocks (9 -> 1) first' }, // Track AW

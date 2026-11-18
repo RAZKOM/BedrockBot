@@ -70,6 +70,11 @@ export class GetController {
   job: GetJob | undefined;
   /** Track AS: `getting 16 iron: the chests hold 128 (!bring iron 16 fetches it)` when the chests already hold enough (set by commands-bring.ts; `!get` still makes new ones). */
   stockHint: ((f: Found, typed: string) => string | undefined) | undefined;
+  /**
+   * Track E1: items the catalog does not know but a recipe makes (`stone_pickaxe`, `bed`) and `!get kit`: the obtain
+   * job (chat/commands-kit.ts). Returns false when it does not take the item (the catalog's reply then).
+   */
+  obtain: { run(line: ChatLine, name: string, n: number | undefined, reply: (m: string) => void): boolean; stop(): string | undefined; status(): string | undefined } | undefined;
 
   constructor(h: GetHost) {
     this.h = h;
@@ -79,15 +84,23 @@ export class GetController {
   run(line: ChatLine, args: readonly string[], reply: (m: string) => void): void {
     const a = (args[0] ?? '').toLowerCase();
     if (args.length === 0) return reply('usage: !get <item> [n] | stop | status');
-    if (args.length === 1 && a === 'stop') return reply(this.stop());
-    if (args.length === 1 && a === 'status') return reply(this.status());
+    if (args.length === 1 && a === 'stop') {
+      const o = this.obtain?.stop();
+      return reply(o ?? this.stop());
+    }
+    if (args.length === 1 && a === 'status') return reply(this.obtain?.status() ?? this.status());
+    if (a === 'kit' && this.obtain?.run(line, args.map((x) => x.toLowerCase()).join('_'), undefined, reply)) return;
     // Track AQ: several ores with a count each: one `!mine` job, one trip
     const multi = lookupMulti(args);
     if (multi && 'error' in multi) return reply(`usage: !get <item> n <item> n ... (${multi.error})`);
     const p = multi ? undefined : parseGetArgs(args);
     if (p && 'error' in p) return reply(`usage: !get <item> [n] (${p.error})`);
     const f: Lookup = multi ? { ...multi.items[0]!, item: multi.items.map((x) => `${x.count} ${x.item}`).join(', '), count: multi.items.reduce((a, x) => a + x.count, 0), command: multi.command, doing: `mining ${multi.items.map((x) => x.target).join(', ')} in one trip` } : lookup(p!.name, p!.count);
-    if (f.strategy === 'unknown') return reply(unknownReply(f.name));
+    if (f.strategy === 'unknown') {
+      if (p && this.obtain?.run(line, p.name, p.count, reply)) return;
+      return reply(unknownReply(f.name));
+    }
+    this.obtain?.stop();
     this.clearJob();
     const hint = p ? this.stockHint?.(f, p.name) : undefined; // Track AS (a single kind; a multi-kind job has no hint)
     const cut = p?.count !== undefined && p.count > f.count ? ` (asked ${p.count}, at most ${f.count})` : ''; // the catalog clamps to the command's maximum
@@ -212,7 +225,7 @@ export function registerGetCommands(d: CommandDeps, extra: GetExtra = {}): GetCo
   };
   d.chat.register({
     name: 'get',
-    help: '<item> [n] [<item> n ...] | ores n | stop | status (makes wood, ore, stone, food, crops; never from chests)',
+    help: '<item> [n] [<item> n ...] | ores n | kit | stop | status (makes wood, ore, stone, food, crops, and what a recipe makes from them; never from chests)',
     tier: 'front', group: 'work', example: '!get wood 16', auto: 'the stash step: a full inventory during a job goes into stashChest, the job chest or a carried shulker box, then junk is dropped', // Track AM
     run: ({ line, args, reply }) => {
       c.run(line, args, reply);

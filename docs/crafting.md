@@ -43,6 +43,13 @@ Both commands are user processes (priority 40): `!stop` ends them between batche
 (flee, guard, night) pauses them and the job runs again for what is still missing (`craft 4
 iron_block (1 done) (paused)` in `!status`).
 
+Track E1 (docs/early-game.md "Craft chains", ADR 0098): short of an ingredient a recipe makes from what is carried,
+`!craft` crafts it first in the same process (`crafting 1 wooden_pickaxe (first 12 oak_planks, 1 crafting_table, 4
+stick, crafting table)`, the end line adds `; first crafted ...`); a refusal names the raw item, not a tag (`craft: no
+cobblestone for stone_pickaxe (need 3, have 0; !get stone_pickaxe gets it all)`); `white_bed` and the other colours
+name the `bed` item. The table goes on a free cell next to the feet or on one under leaf litter, a flower or a tuft
+(dug first); no lid rule (`skills/craft/table-spot.ts`).
+
 ### Settings (`!set`)
 
 | Setting | Default | Meaning |
@@ -324,7 +331,8 @@ Env: `CRAFT_BDS_HOST` (127.0.0.1), `CRAFT_BDS_PORT` (19208), `CRAFT_BDS_CONTAINE
   filled since (the unload then reports the overflow as before).
 - The table is placed on a cell next to the feet whose support is not a built block, so on a
   fully built floor (planks, stone bricks) with no table within reach the 3 x 3 craft answers
-  `no_table`; the home usually has a table standing.
+  `no_table`; the home usually has a table standing. (Track E1: a cover such as leaf litter is
+  cleared first, and leaves over the cell no longer matter.)
 - Recipes whose ingredients carry an aux value in the name (`minecraft:coal:0`) are matched by name
   only (charcoal has its own recipe id); shulker-box dye recipes, smithing (netherite upgrades) and
   the furnace (docs/food.md) are not crafting here.

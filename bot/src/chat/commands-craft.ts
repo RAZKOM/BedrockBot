@@ -14,6 +14,8 @@
 import { parseReserve, type RuntimeSettings } from '../config/settings.ts';
 import type { Logger } from '../log.ts';
 import { compactAll, compactLine, installCompactPlanner, COMPACT_KINDS, type CompactDone } from '../skills/craft/compact.ts';
+import { carried, chainText, planChain, type ChainOptions, type ChainPlan, type ChainStep } from '../skills/craft/chain.ts';
+import { itemAlias, nextAction } from '../skills/items/obtain.ts';
 import { Crafter, craftLine, type CraftResult } from '../skills/craft/crafter.ts';
 import { BLADE_ITEMS } from '../tasks/process/blade.ts'; // Track M9
 import { RecipeIndex, usedText } from '../skills/craft/recipes.ts';
@@ -32,7 +34,8 @@ export interface CraftExtra {
   logger?: Logger | undefined;
 }
 
-export type CraftJob = { kind: 'craft'; item: string; n: number } | { kind: 'compact'; only?: string };
+/** Track E1: `chain` are the crafts made first (planks, sticks, the table: skills/craft/chain.ts). */
+export type CraftJob = { kind: 'craft'; item: string; n: number; chain?: ChainStep[] } | { kind: 'compact'; only?: string };
 
 /** What the process drives (the Crafter in production, fakes in the unit tests). */
 export interface CraftRunner {
@@ -46,6 +49,8 @@ export interface CraftControl {
   recipes: RecipeIndex;
   /** `!status` line. */
   status(): string;
+  /** Track E1: the plan options `!craft` uses (kept items, reserves, a table standing near), for the obtain job. */
+  chainOptions(): ChainOptions;
 }
 
 const controls = new WeakMap<object, CraftControl>();
@@ -86,6 +91,11 @@ export class CraftProcess extends BaseProcess {
   readonly job: CraftJob;
   /** Results so far (a resumed craft adds to the first one's count). */
   readonly results: CraftResult[] = [];
+  /** Track E1: the chain's crafts (not counted as the item's). */
+  readonly chainResults: CraftResult[] = [];
+  private chainDone = 0;
+  /** Track E1: the chain step that made fewer than it should (the item is not tried). */
+  chainFailed: CraftResult | undefined;
   private crafted = 0;
   private runs = 0;
   /** Compaction: the steps still to do. */
@@ -126,6 +136,24 @@ export class CraftProcess extends BaseProcess {
 
   private async work(cancelled: () => boolean): Promise<CraftResult[]> {
     if (this.job.kind === 'craft') {
+      // Track E1: the chain first, step by step (a resumed run goes on with the step it was in)
+      const chain = this.job.chain ?? [];
+      while (this.chainDone < chain.length) {
+        if (cancelled()) return this.results;
+        const step = chain[this.chainDone]!;
+        const r = await this.runner.craft(cancelled, step.item, step.n);
+        this.chainResults.push(r);
+        if (r.reason === 'interrupted' || cancelled()) {
+          step.n -= r.crafted;
+          if (step.n <= 0) this.chainDone++;
+          return this.results;
+        }
+        if (r.crafted < step.n) {
+          this.chainFailed = r;
+          return this.results;
+        }
+        this.chainDone++;
+      }
       const left = this.job.n - this.crafted;
       if (left > 0) {
         const r = await this.runner.craft(cancelled, this.job.item, left);
@@ -164,6 +192,22 @@ export class CraftProcess extends BaseProcess {
     const what = this.job.kind === 'craft' ? `craft ${this.job.n} ${this.job.item}${this.crafted ? ` (${this.crafted} done)` : ''}` : `compact${this.job.only ? ` ${this.job.only}` : ''}`;
     return { line: `${what} (${state})` };
   }
+}
+
+/**
+ * Track E1: the refusal when an item cannot be crafted from what is carried, naming the raw material (not a tag:
+ * `cobblestone`, not `stone_tool_materials`), what would be crafted first, and the `!get` that gets it all.
+ */
+export function missingLine(item: string, c: ChainPlan, shortfall?: { name: string; need: number; have: number }, gettable = false): string {
+  const m = c.missing[0];
+  const get = gettable ? `; !get ${item} gets it all` : '';
+  if (!m) {
+    const s = shortfall;
+    return `craft: no ${s?.name ?? 'ingredients'} for ${item}${s ? ` (need ${s.need}, have ${s.have})` : ''}`;
+  }
+  if (c.steps.length > 1) return `craft: no ${m.item} for ${item} (${c.missing.map((x) => `${x.n} ${x.item}`).join(', ')} missing; it would craft ${chainText(c.steps.slice(0, -1))} first${get})`;
+  const s = shortfall;
+  return `craft: no ${m.item} for ${item} (${s ? `need ${s.need}, have ${s.have}` : `${m.n} missing`}${get})`;
 }
 
 /** The compaction results of a `!compact` run as one line. */
@@ -250,12 +294,18 @@ export function registerCraftCommands(d: CommandDeps, extra: CraftExtra = {}): C
     },
   };
   const planOpts = () => ({ keep: neverConsume, reserve });
+  /** Track E1: the crafts that make `n` more of `item` from what is carried, and the raw materials missing. */
+  const chainFor = (item: string, n: number): ChainPlan => {
+    const slots = world.inventory.slots;
+    return planChain(recipes, [{ item, n: carried(slots, item) + n }], slots, { ...planOpts(), tableNear: crafter.tablesAround().length > 0 });
+  };
   // the unload plan's compaction step and its runner (reset when the task stops)
   installCompactPlanner(() => (settings.get('compactOnUnload') ? planOpts() : { keep: () => true }));
   setCompactRunner(compactRunnerFor((block, blocks, cancelled) => crafter.craft(block, blocks, cancelled), (kind) => compactAll(world.inventory.slots, planOpts(), kind)[0]?.block, log));
   const control: CraftControl = {
     crafter,
     recipes,
+    chainOptions: () => ({ ...planOpts(), tableNear: crafter.tablesAround().length > 0 }),
     status: () => `craft: ${crafter.phase}; ${recipes.size} recipes; ${crafter.stats.items} items in ${crafter.stats.crafts} crafts, ${crafter.stats.tablesPlaced} tables placed${crafter.pendingTables.length ? `, ${crafter.pendingTables.length} left standing` : ''}`,
   };
   controls.set(d.task, control);
@@ -277,21 +327,29 @@ export function registerCraftCommands(d: CommandDeps, extra: CraftExtra = {}): C
     auto: '!unload crafts raw iron, ingots, gems, coal, redstone and lapis into blocks when their chest cannot take the load (compactOnUnload)',
     help: '<item> [n] (craft n of an item from what I carry; a crafting table is placed and picked up for 3x3 recipes)',
     run: ({ args, reply }) => {
-      const a = parseCraftArgs(args);
+      const parsed = parseCraftArgs(args);
+      const a = parsed ? { ...parsed, item: itemAlias(parsed.item) } : undefined; // Track E1: `white_bed` is the bed item
       if (!a) return reply('usage: !craft <item> [n] (e.g. !craft iron_block 4, !craft 32 oak_planks)');
       if (recipes.size === 0) return reply('craft: no recipes yet (the server sends them at join)');
       if (processes.userProcesses().some((p) => p.name === 'craft' || p.name === 'compact')) return reply('craft: busy crafting already (!stop ends it)');
       const plan = crafter.plan(a.item, a.n);
       if (!plan) return reply(`craft: no recipe for ${a.item} I can use (crafting table and inventory recipes only)`);
-      if (plan.crafts <= 0) {
-        const s = plan.shortfall;
-        return reply(`craft: no ${s?.name ?? 'ingredients'} for ${plan.item}${s ? ` (need ${s.need}, have ${s.have})` : ''}`);
+      // Track E1: short of an ingredient a recipe makes from what is carried (planks from logs, sticks, the table):
+      // those crafts first, in the same process (skills/craft/chain.ts); a raw material still missing is named
+      let chain: ChainStep[] | undefined;
+      if (plan.crafts * plan.outputPer < a.n) {
+        const c = chainFor(plan.item, a.n);
+        if (c.missing.length === 0 && c.steps.length > 1) chain = c.steps.slice(0, -1);
+        else if (plan.crafts <= 0) return reply(missingLine(plan.item, c, plan.shortfall, nextAction(recipes, [{ item: plan.item, n: carried(world.inventory.slots, plan.item) + a.n }], world.inventory.slots, planOpts()).kind !== 'stuck'));
       }
-      const make = Math.min(a.n, plan.crafts * plan.outputPer);
-      const short = plan.shortfall && make < a.n ? `; ${Math.max(0, plan.shortfall.need - plan.shortfall.have)} ${plan.shortfall.name} short for ${a.n}` : '';
-      reply(`crafting ${make} ${plan.item} (${usedText(plan.perCraft, plan.crafts)}${plan.table ? ', crafting table' : ''}${short})${processes.paused ? ' (held: !resume)' : ''}`);
-      const p = processes.add(new CraftProcess(runner, { kind: 'craft', item: a.item, n: a.n }));
+      const make = chain ? a.n : Math.min(a.n, plan.crafts * plan.outputPer);
+      const short = !chain && plan.shortfall && make < a.n ? `; ${Math.max(0, plan.shortfall.need - plan.shortfall.have)} ${plan.shortfall.name} short for ${a.n}` : '';
+      const uses = chain ? `first ${chainText(chain)}` : usedText(plan.perCraft, plan.crafts);
+      reply(`crafting ${make} ${plan.item} (${uses}${plan.table ? ', crafting table' : ''}${short})${processes.paused ? ' (held: !resume)' : ''}`);
+      const p = processes.add(new CraftProcess(runner, { kind: 'craft', item: a.item, n: a.n, ...(chain ? { chain } : {}) }));
       void p.result.then((rs) => {
+        const failed = p.chainFailed;
+        if (failed) return reply(`craft: made no ${plan.item} (${failed.item} first: ${craftLine(failed)})`);
         if (!rs || rs.length === 0) return reply('craft: stopped');
         const total: CraftResult = { ...rs[0]!, crafted: rs.reduce((x, r) => x + r.crafted, 0), used: {}, batches: rs.reduce((x, r) => x + r.batches, 0), requests: rs.reduce((x, r) => x + r.requests, 0), ms: rs.reduce((x, r) => x + r.ms, 0) };
         for (const r of rs) for (const [k, v] of Object.entries(r.used)) total.used[k] = (total.used[k] ?? 0) + v;
@@ -302,7 +360,8 @@ export function registerCraftCommands(d: CommandDeps, extra: CraftExtra = {}): C
         if (last.table) total.table = last.table;
         delete total.dropped;
         for (const r of rs) for (const [k, v] of Object.entries(r.dropped ?? {})) (total.dropped ??= {})[k] = (total.dropped[k] ?? 0) + v;
-        reply(craftLine(total));
+        const made = p.chainResults.filter((r) => r.crafted > 0);
+        reply(`${craftLine(total)}${made.length ? `; first crafted ${made.map((r) => `${r.crafted} ${r.item}`).join(', ')}` : ''}`);
       });
     },
   });
