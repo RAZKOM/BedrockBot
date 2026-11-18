@@ -57,7 +57,8 @@ describe.skipIf(!E2E)('@bds dayone get: a crafted item from nothing (Track E1)',
     const ms = Date.now() - t0;
     const counts = await b.truth.craftinv(b.name);
     notes.push(`pickaxe: ${end}; ${(ms / 1000).toFixed(1)} s; replies ${b.said.slice(from).join(' | ')}; inventory ${JSON.stringify(counts.counts)}`);
-    expect(end).toMatch(/^get stone_pickaxe: done in \d+ s, 4 steps \(gather \d+, craft wooden_pickaxe 1, mine stone 3, craft stone_pickaxe 1\)$/);
+    // Track E4: the job's table is picked up before the mine step and at the end (a note before the steps)
+    expect(end).toMatch(/^get stone_pickaxe: done in \d+ s, 4 steps(; picked up the crafting table; steps: | \()gather \d+, craft wooden_pickaxe 1, mine stone 3, craft stone_pickaxe 1\)?$/);
     expect(counts.counts.stone_pickaxe).toBe(1);
     expect(counts.counts.wooden_pickaxe).toBe(1);
     expect(b.processes.userProcesses()).toHaveLength(0);

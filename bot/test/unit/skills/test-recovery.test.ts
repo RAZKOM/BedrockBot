@@ -100,6 +100,24 @@ describe('Recovery', () => {
     });
     expect(respawnClaimed(task)).toBe(false);
   });
+
+  it('Track E4: two owners (the test harness, the obtain job): either one holds the respawn; a broken one holds nothing', () => {
+    const task = {};
+    let test = false;
+    let job = false;
+    claimRespawn(task, () => test);
+    claimRespawn(task, () => job, 'obtain');
+    expect(respawnClaimed(task)).toBe(false);
+    job = true;
+    expect(respawnClaimed(task)).toBe(true);
+    job = false;
+    test = true;
+    expect(respawnClaimed(task)).toBe(true);
+    claimRespawn(task, () => {
+      throw new Error('x');
+    });
+    expect(respawnClaimed(task)).toBe(false);
+  });
 });
 
 describe('Harness.restore', () => {

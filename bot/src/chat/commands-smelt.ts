@@ -18,6 +18,7 @@ import type { CookResult } from '../skills/food/cook.ts';
 import { FURNACE, furnaceReasonText, furnacesCarried, placeFurnace, type FurnaceResult } from '../skills/food/furnace.ts';
 import { PLANNED_SMELTS, SMELTS, smeltableCounts, smeltInputsOf } from '../skills/food/smelt.ts';
 import { normaliseName } from '../skills/items/catalog.ts';
+import { FURNACE_RECALL, placedOf } from '../skills/items/placed.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { HOME_RETURN_NEAR } from '../tasks/process/food.ts';
@@ -72,7 +73,7 @@ export function smeltLine(r: SmeltJobResult): string {
   if (!c) return `smelt: ${r.reason}${placed}`;
   const out = Object.entries(c.cooked).map(([k, v]) => `${v} ${k}`);
   const fuel = Object.entries(c.fuel).map(([k, v]) => `${v} ${k}`);
-  const where = c.furnace ? ` in the ${c.block ?? 'furnace'} at ${fmt(c.furnace)}` : '';
+  const where = c.furnace ? ` in the ${(c.block ?? 'furnace').replace(/^lit_/, '')} at ${fmt(c.furnace)}` : '';
   if (c.ok) return `smelted ${out.join(', ') || 'nothing'}${where} (${Math.round(c.ticks / 20)} s${fuel.length ? `, fuel ${fuel.join(', ')}` : ''})${placed}`;
   const why = c.reason === 'no_fuel' ? 'no fuel (coal, charcoal, planks or logs)' : c.reason === 'nothing_to_cook' ? 'nothing to smelt' : c.reason === 'no_furnace' ? 'no furnace within 16 blocks of home' : c.reason.replace(/_/g, ' ');
   return `smelt: ${why}${out.length ? ` (smelted ${out.join(', ')} first)` : ''}${where}${placed}`;
@@ -97,6 +98,10 @@ export interface SmeltControl {
   furnaces(): Vec3[];
   /** Start `!furnace` / `!smelt` as a process. */
   start(kind: 'furnace' | 'smelt', names?: readonly string[], n?: number): SmeltProcess;
+  /** Track E4: the furnace the last smelt left its input in (stopped by a flee, a fight, a death), if it did not finish. */
+  held(): Vec3 | undefined;
+  /** Track E4: back to that furnace: wait out what is in it and take the output (nothing more is put in). */
+  collect(at: Vec3): SmeltProcess;
 }
 
 const controls = new WeakMap<object, SmeltControl>();
@@ -119,9 +124,23 @@ export function registerSmeltCommands(d: CommandDeps): SmeltControl | undefined 
   const cooker = food.d.cooker;
   const home = (): Vec3 | undefined => d.task.home?.get();
   const mover = settingsMover(skills, d.settings);
-  const furnaces = (): Vec3[] => cooker.furnaces(16).filter((p) => (world.blockAt(p)?.name ?? FURNACE).replace(/^lit_/, '') === FURNACE);
-  const place = (cancelled: () => boolean): Promise<FurnaceResult> =>
-    placeFurnace({ world, loop: mobility.loop, skills: { place: (p, o) => skills.place(p, o), dig: (p) => skills.dig(p), goto: (g, o) => mover.goto(g, o) }, home, furnaces, log }, cancelled);
+  // Track E4: the furnaces the bot set down itself, used again while within FURNACE_RECALL of it (no home: it walked off)
+  const placed = placedOf(d.task);
+  /** Where the cooker looks (16 of home, else of the bot): `!furnace`, `!cook` and its set-down. */
+  const near = (): Vec3[] => cooker.furnaces(16).filter((p) => (world.blockAt(p)?.name ?? FURNACE).replace(/^lit_/, '') === FURNACE);
+  /** Those, then the ones the bot set down within FURNACE_RECALL of it: the smelt walks back to one (the obtain job's plan too). */
+  const furnaces = (): Vec3[] => {
+    const n = near();
+    const own = placed.near(FURNACE, mobility.loop.state.pos, FURNACE_RECALL, (p) => world.blockAt(p)).filter((p) => !n.some((q) => q.x === p.x && q.y === p.y && q.z === p.z));
+    return [...n, ...own];
+  };
+  const place =
+    (recall: boolean) =>
+    async (cancelled: () => boolean): Promise<FurnaceResult> => {
+      const r = await placeFurnace({ world, loop: mobility.loop, skills: { place: (p, o) => skills.place(p, o), dig: (p) => skills.dig(p), goto: (g, o) => mover.goto(g, o) }, home, furnaces: recall ? furnaces : near, log }, cancelled);
+      if (r.ok && !r.already) placed.record(FURNACE, r.pos);
+      return r;
+    };
   /** One furnace crafted from what is carried, its chain first (planks, the table); `keep` cobblestone left over. */
   const make = async (cancelled: () => boolean, keep = 0): Promise<boolean> => {
     const slots = world.inventory.slots;
@@ -142,9 +161,9 @@ export function registerSmeltCommands(d: CommandDeps): SmeltControl | undefined 
     }
     return furnacesCarried(world.inventory.slots) > 0;
   };
-  const deps = (keep: number): SmeltDeps => ({
+  const deps = (keep: number, recall = true): SmeltDeps => ({
     cooker,
-    placeFurnace: place,
+    placeFurnace: place(recall),
     makeFurnace: (c) => make(c, keep),
     furnacesCarried: () => furnacesCarried(world.inventory.slots),
     slots: () => world.inventory.slots,
@@ -169,21 +188,36 @@ export function registerSmeltCommands(d: CommandDeps): SmeltControl | undefined 
       blockAt: (q) => world.blockAt(q),
       log,
     });
+  /** Track E4: the last smelt process (an interrupted one left its input in a furnace). */
+  let lastSmelt: SmeltProcess | undefined;
   const control: SmeltControl = {
     furnaces,
-    start: (kind, names, n) => processes.add(new SmeltProcess(deps(0), new SmeltJob({ kind, ...(kind === 'smelt' ? { inputs: inputsFor(names) } : {}), ...(n !== undefined ? { limit: n } : {}) }))),
+    start: (kind, names, n) => {
+      // `!furnace` sets one down where the cooker looks; a smelt walks back to one the bot set down
+      const p = processes.add(new SmeltProcess(deps(0, kind === 'smelt'), new SmeltJob({ kind, ...(kind === 'smelt' ? { inputs: inputsFor(names) } : {}), ...(n !== undefined ? { limit: n } : {}) })));
+      if (kind === 'smelt') lastSmelt = p;
+      return p;
+    },
+    held: () => (lastSmelt && !lastSmelt.job.over ? lastSmelt.job.heldAt : undefined),
+    collect: (at) => {
+      // limit 0: nothing more goes in (the job plans the next smelt itself); what is in it is waited out and taken
+      const p = processes.add(new SmeltProcess(deps(0), new SmeltJob({ kind: 'smelt', inputs: inputsFor(undefined), at, limit: 0 })));
+      lastSmelt = p;
+      return p;
+    },
   };
   controls.set(d.task, control);
 
   // the food job's cook step (after a hunt, or the owner's !cook): a furnace where none is, when the rule allows it
   food.d.ensureFurnace = async (cancelled, typed) => {
     if (!d.settings.get('cookFurnace')) return false;
-    if ((!typed && cooker.furnaces(32, true).length > 0) || furnaces().length > 0) return true;
+    // (the cook looks within 16: a furnace remembered farther off is no furnace for it)
+    if ((!typed && cooker.furnaces(32, true).length > 0) || near().length > 0) return true;
     const h = home();
     const me = mobility.loop.state.pos;
     if (!typed && h && Math.hypot(h.x - me.x, h.z - me.z) > HOME_RETURN_NEAR) return false; // a hunt far from home: the raw food is kept
     const job = new SmeltJob({ kind: 'furnace' });
-    await job.run(deps(typed ? 0 : FURNACE_KEEP_COBBLE), cancelled);
+    await job.run(deps(typed ? 0 : FURNACE_KEEP_COBBLE, false), cancelled);
     const r = job.result();
     log.info(`food: ${furnaceLine(r)}`);
     return r.ok;
@@ -203,12 +237,12 @@ export function registerSmeltCommands(d: CommandDeps): SmeltControl | undefined 
     run: ({ args, reply }) => {
       const a = (args[0] ?? '').toLowerCase();
       if (a === 'status') {
-        const list = furnaces();
+        const list = near();
         reply(list.length ? `furnace: ${list.length} where I cook (${list.slice(0, 4).map(fmt).join(', ')})${home() ? ' within 16 of home' : ' within 16 of me'}` : `furnace: none within 16 blocks of ${home() ? 'home' : 'me'}; ${furnacesCarried(world.inventory.slots)} carried`);
         return;
       }
       if (args.length > 0) return reply('usage: !furnace [status]');
-      const there = furnaces()[0];
+      const there = near()[0];
       if (there) return reply(`furnace: one stands at ${fmt(there)} already`);
       reply(`furnace: ${furnacesCarried(world.inventory.slots) > 0 ? 'placing the one I carry' : 'crafting one from 8 cobblestone'}${home() ? ' by home' : ' here'}${processes.paused ? ' (held: !resume)' : ''}`);
       void control.start('furnace').result.then((r) => reply(furnaceLine(r)));

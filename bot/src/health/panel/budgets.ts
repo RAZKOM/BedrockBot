@@ -22,8 +22,9 @@ export const PANEL_BUDGETS = {
    * Track K3 raised it from 141 500: the `milkRange` row (710 bytes) took it to 141 705.
    * Track E1's `nightShell` row (617 bytes) took it to 142 263. Track E2 raised it from 142 500: the `cookFurnace` row
    * (633 bytes) took it to 142 896. Track E3 raised it from 143 500: the `smeltShell` row (615 bytes) took it to 143 511.
+   * Track E4 raised it from 144 000: the `deathReturn` row (596 bytes) took it to 144 107.
    */
-  html: 144_000,
+  html: 145_000,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**

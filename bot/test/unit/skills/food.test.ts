@@ -211,7 +211,8 @@ describe('Hunter', () => {
 
 // ---- cooker on a fake furnace ---------------------------------------------------------------------
 
-function fakeFurnace(opts: { block?: string; inv: (ItemStack | null)[]; at?: Vec3 }) {
+function fakeFurnace(opts: { block?: string; inv: (ItemStack | null)[]; at?: Vec3; failFuel?: number }) {
+  let failFuel = opts.failFuel ?? 0;
   const block = opts.block ?? 'furnace';
   const fpos = { x: 3, y: -60, z: 0 };
   const windows = new Map<number, (ItemStack | null)[]>([[0, opts.inv]]);
@@ -258,6 +259,11 @@ function fakeFurnace(opts: { block?: string; inv: (ItemStack | null)[]; at?: Vec
         const src = windows.get(sw)![ss];
         const dst = windows.get(dw)![ds];
         if (!src || src.count < a.count) return respond(r.request_id, false);
+        // Track E4: a burning furnace refusing a fuel move (its fuel slot changed under the request)
+        if (a.destination.slot_type.container_id === 'furnace_fuel' && failFuel > 0) {
+          failFuel--;
+          return respond(r.request_id, false);
+        }
         // the cooker predicted the destination; the server state is authoritative
         windows.get(sw)![ss] = src.count === a.count ? null : { ...src, count: src.count - a.count };
         const prevDst = dst?.name === src.name ? Math.max(0, dst.count - a.count) : 0;
@@ -328,6 +334,16 @@ function fakeFurnace(opts: { block?: string; inv: (ItemStack | null)[]; at?: Vec
 }
 
 describe('Cooker', () => {
+  it('Track E4: a refused fuel move is tried once more after the slot settled; twice refused ends request_failed', async () => {
+    const once = fakeFurnace({ inv: [item('beef', 4, 1), item('coal', 2, 2), ...Array.from({ length: 34 }, () => null)], failFuel: 1 });
+    expect(await once.cooker.cook({}, () => false)).toMatchObject({ ok: true, reason: 'done', cooked: { cooked_beef: 4 }, fuel: { coal: 1 } });
+    const fuelMoves = (f: ReturnType<typeof fakeFurnace>) => f.sent.filter((s) => s.name === 'item_stack_request' && JSON.stringify(s.p).includes('furnace_fuel')).length;
+    expect(fuelMoves(once)).toBe(2);
+    const twice = fakeFurnace({ inv: [item('beef', 4, 1), item('coal', 2, 2), ...Array.from({ length: 34 }, () => null)], failFuel: 2 });
+    expect(await twice.cooker.cook({}, () => false)).toMatchObject({ ok: false, reason: 'request_failed' });
+    expect(fuelMoves(twice)).toBe(2);
+  });
+
   it('walks to the furnace, puts the raw food and one coal in, waits, takes the cooked food out, closes', async () => {
     const inv: (ItemStack | null)[] = [item('iron_sword', 1, 1), item('beef', 4, 2), item('coal', 2, 3), ...Array.from({ length: 33 }, () => null)];
     const f = fakeFurnace({ inv });

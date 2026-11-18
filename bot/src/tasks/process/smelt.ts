@@ -37,6 +37,11 @@ export interface SmeltRequest {
   inputs?: (slots: readonly (ItemStack | null)[]) => Map<string, number>;
   /** At most this many items (smelt only). */
   limit?: number;
+  /**
+   * Track E4: the furnace an earlier smelt left its input in (a death): no furnace is placed; the bot goes there,
+   * waits out what is in it and takes the output (then smelts what is carried, as any smelt).
+   */
+  at?: Vec3;
 }
 
 export interface SmeltJobResult {
@@ -77,6 +82,21 @@ export class SmeltJob {
 
   constructor(req: SmeltRequest) {
     this.req = req;
+    if (req.kind === 'smelt' && req.at) {
+      this.phase = 'smelt';
+      this.inFurnace = { ...req.at };
+    }
+  }
+
+  /** Track E4: the job is over (done, or ended with a reason). */
+  get over(): boolean {
+    return this.phase === 'done';
+  }
+
+  /** Track E4: the furnace holding this job's input after an interruption (undefined: none known, or nothing went in). */
+  get heldAt(): Vec3 | undefined {
+    if (this.phase === 'done') return undefined;
+    return this.inFurnace ?? (this.put > 0 ? this.cook?.furnace : undefined);
   }
 
   /** Run (or go on) until done or cancelled; true when the job is over. */
@@ -106,6 +126,8 @@ export class SmeltJob {
       if (this.req.limit !== undefined) o.limit = Math.max(0, this.req.limit - this.put);
       // Track E2: after a pause the furnace still holds what went in: back there first, even with nothing left to put in
       if (this.inFurnace) o.at = this.inFurnace;
+      // Track E4: the furnace this job set down or found (one the bot placed may stand beyond the cooker's 16) first
+      else if (this.furnace?.ok) o.prefer = this.furnace.pos;
       // Track E3: a smelt that outlasts the day, or one by night, waits in a shell next to the furnace
       const at = this.inFurnace ?? (this.furnace?.ok ? this.furnace.pos : undefined);
       if (d.makeShell && at) {

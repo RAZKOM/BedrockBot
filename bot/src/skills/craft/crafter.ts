@@ -56,6 +56,11 @@ export const CRAFT_RECIPE_WIRE_TYPE = 12;
 export const TABLE_REACH = 4.5;
 /** Tables are looked for within this box around the bot (x/z, y -2..+3). */
 export const TABLE_SCAN = 6;
+/** Track E4: a table the bot set down and left standing is walked back to within this many blocks (eye to block). */
+export const TABLE_RECALL = 16;
+/** Track E4: the dug table's drop is looked for this far round the table, this many ticks (before: 3, 100). */
+export const TABLE_DROP_RADIUS = 6;
+export const TABLE_DROP_TICKS = 200;
 /** Ticks a late item_stack_response is waited for after a request timed out, before the grid counts as unknown. */
 export const LATE_RESPONSE_TICKS = 100;
 const TABLE = 'crafting_table';
@@ -225,8 +230,8 @@ export interface CraftResult {
   ms: number;
   /** The limiting ingredient when fewer than wanted were (or could be) made. */
   shortfall?: { name: string; have: number; need: number };
-  /** A 3 x 3 recipe: the table used (`placed`: by the bot, now or in an earlier run). */
-  table?: { pos: Vec3; placed: boolean; pickedUp?: boolean };
+  /** A 3 x 3 recipe: the table used (`placed`: by the bot, now or in an earlier run; Track E4 `held`: left standing for the next craft of a job). */
+  table?: { pos: Vec3; placed: boolean; pickedUp?: boolean; held?: boolean };
   /** The last item_stack_response status that was not ok ('timeout' for no response). */
   status?: unknown;
   /** Grid items dropped on the ground at the end: the inventory had no room for them, or their give-back was refused. */
@@ -246,7 +251,8 @@ export function craftLine(r: CraftResult): string {
   const parts: string[] = [];
   if (r.crafted > 0) parts.push(`crafted ${r.crafted} ${r.item} (${used || 'nothing'} used) in ${time}`);
   else parts.push(`craft: made no ${r.item} (${r.reason}${r.status !== undefined ? ` status ${JSON.stringify(r.status)}` : ''})`);
-  if (r.table?.placed) parts.push(r.table.pickedUp ? 'crafting table placed and picked up' : `crafting table left at ${fmt(r.table.pos)}`);
+  if (r.table?.held) parts.push(`crafting table kept at ${fmt(r.table.pos)} for the next craft`);
+  else if (r.table?.placed) parts.push(r.table.pickedUp ? 'crafting table placed and picked up' : `crafting table left at ${fmt(r.table.pos)}`);
   if (r.shortfall && r.crafted < r.wanted) parts.push(`${Math.max(0, r.shortfall.need - r.shortfall.have)} ${r.shortfall.name} short for ${r.wanted}`);
   else if (r.crafted < r.wanted && r.reason !== 'done') parts.push(`stopped: ${r.reason}`);
   if (r.dropped) parts.push(`dropped ${Object.entries(r.dropped).map(([k, v]) => `${v} ${k}`).join(', ')} (could not be taken back)`);
@@ -279,6 +285,13 @@ export class Crafter {
   private nested = false;
   /** Tables the bot placed and has not picked up yet (task state; retried at the next craft). */
   readonly pendingTables: Vec3[] = [];
+  /**
+   * Track E4: while true (the obtain job runs), a table this crafter sets down stays standing for the next craft and is
+   * used again within TABLE_RECALL; the job picks it up when it walks off or ends (`sweepTables`).
+   */
+  holdTables = false;
+  /** Track E4: tables dug whose drop was not picked up (the spot; collected by `sweepTables`). */
+  readonly droppedTables: Vec3[] = [];
   /** State line for !status. */
   phase = 'idle';
   readonly stats = { crafts: 0, items: 0, batches: 0, tablesPlaced: 0, tablesLeft: 0, dropped: 0 };
@@ -338,7 +351,7 @@ export class Crafter {
     this.running = true;
     try {
       // a table left standing by an earlier run: pick it up first when it is near
-      if (outer) await this.pickUpPending();
+      if (outer && !this.holdTables) await this.pickUpPending(); // Track E4: a held table is the next craft's
       let tableAt: Vec3 | undefined;
       let placed = false;
       if (first.table) {
@@ -368,7 +381,13 @@ export class Crafter {
           await this.close(window);
         }
       } finally {
-        if (placed && tableAt && pick?.leaveTable) {
+        if (placed && tableAt && this.holdTables && !pick?.leaveTable) {
+          // Track E4: kept for the job's next craft (no table_left: the job picks it up when it leaves)
+          if (res.table) {
+            res.table.pickedUp = false;
+            res.table.held = true;
+          }
+        } else if (placed && tableAt && pick?.leaveTable) {
           if (res.table) res.table.pickedUp = false;
           this.stats.tablesLeft++;
           if (res.reason === 'done') res.reason = 'table_left';
@@ -761,15 +780,25 @@ export class Crafter {
     const off = containers.onOpen((c) => {
       if (table ? samePos(c.pos, table) : c.type === 'inventory') opened = c;
     });
+    const click = (t: Vec3): void => {
+      const slot = world.inventory.selected;
+      source.queue('inventory_transaction', clickBlockTransaction({ pos: t, face: faceToward(this.eye(), t), hotbarSlot: slot, held: this.d.hotbar?.rawItem(slot), eye: this.eye(), blockRuntimeId: world.chunks.runtimeIdAt(t.x, t.y, t.z) ?? 0 }));
+    };
     if (table) {
       loop.setCommand(lookAngles(this.eye(), blockCenter(table)));
       await loop.waitTicks(2);
-      const slot = world.inventory.selected;
-      source.queue('inventory_transaction', clickBlockTransaction({ pos: table, face: faceToward(this.eye(), table), hotbarSlot: slot, held: this.d.hotbar?.rawItem(slot), eye: this.eye(), blockRuntimeId: world.chunks.runtimeIdAt(table.x, table.y, table.z) ?? 0 }));
+      click(table);
     } else {
       source.queue('interact', { action_id: 'open_inventory', target_entity_id: this.d.runtimeId(), has_position: false });
     }
     for (let i = 0; i < 40 && !opened; i++) await loop.waitTicks(1);
+    // Track E4: a table the job holds is clicked again craft after craft; one click in a run of four went unanswered
+    // (measured on the iron kit, right after the shield went to the offhand): once more
+    if (!opened && table && world.blockAt(table)?.name === TABLE) {
+      this.log.info(`craft: the table at ${fmt(table)} did not open: clicking it again`);
+      click(table);
+      for (let i = 0; i < 40 && !opened; i++) await loop.waitTicks(1);
+    }
     off();
     if (!opened) {
       this.log.info(`craft: ${table ? `the table at ${fmt(table)}` : 'the inventory screen'} did not open`);
@@ -840,7 +869,10 @@ export class Crafter {
     if (near) return near;
     const sk = this.d.skills;
     if (!sk?.goto) return undefined;
-    for (const t of this.tablesAround().slice(0, 2)) {
+    // Track E4: the tables this crafter left standing within TABLE_RECALL count too (nearest first), after the scan box
+    const around = this.tablesAround().slice(0, 2);
+    const own = this.ownTables(TABLE_RECALL).filter((p) => !around.some((t) => samePos(t.p, p)));
+    for (const t of [...around, ...own.slice(0, 1).map((p) => ({ p }))]) {
       if (cancelled()) return undefined;
       this.phase = `walking to the crafting table at ${fmt(t.p)}`;
       const r = await sk.goto({ type: 'getToBlock', p: t.p, reach: 3 }, { timeoutTicks: 600 });
@@ -951,9 +983,88 @@ export class Crafter {
     }
     for (let i = 0; i < 20 && count() <= before; i++) await this.d.loop.waitTicks(1); // it often lands at the feet
     if (count() <= before) await sk.collect(3, 100, { filter: (it) => it.name === TABLE });
+    // Track E4: a drop that bounced or rolled off (measured: the next plan crafted a second table): wider and longer
+    if (count() <= before) await sk.collect(TABLE_DROP_RADIUS, TABLE_DROP_TICKS, { filter: (it) => it.name === TABLE, origin: { x: p.x + 0.5, y: p.y, z: p.z + 0.5 } });
     const ok = count() > before;
+    if (!ok && this.d.world.blockAt(p)?.name !== TABLE && !this.droppedTables.some((q) => samePos(q, p))) this.droppedTables.push({ ...p });
     this.log.info(`craft: table at ${fmt(p)} ${ok ? 'picked up' : 'NOT picked up'}`);
     return ok;
+  }
+
+  /** Track E4: the tables this crafter set down that still stand within `r` (eye to block) of the bot, nearest first. */
+  ownTables(r: number): Vec3[] {
+    const eye = this.eye();
+    const gap = (e: number, lo: number) => Math.max(lo - e, 0, e - (lo + 1));
+    const out: { p: Vec3; d: number }[] = [];
+    for (const p of this.pendingTables) {
+      if (this.d.world.blockAt(p)?.name !== TABLE) continue;
+      const d = Math.hypot(gap(eye.x, p.x), gap(eye.y, p.y), gap(eye.z, p.z));
+      if (d <= r) out.push({ p, d });
+    }
+    return out.sort((a, b) => a.d - b.d).map((x) => x.p);
+  }
+
+  /**
+   * Track E4: the job leaves (it walks off to another step, or it ends): every table this crafter left standing is
+   * picked up, walking back to it within `radius`, except the ones `keep` names (a table by home stays: it is the home's
+   * from then on, and forgotten here). Drops of dug tables not picked up are collected too. Tables gone (someone took
+   * them) are forgotten; unloaded ones are kept for later.
+   */
+  async sweepTables(o: { radius: number; keep?: (p: Vec3) => boolean; cancelled?: () => boolean }): Promise<{ picked: Vec3[]; kept: Vec3[]; left: Vec3[] }> {
+    const res = { picked: [] as Vec3[], kept: [] as Vec3[], left: [] as Vec3[] };
+    const sk = this.d.skills;
+    const cancelled = o.cancelled ?? (() => false);
+    const inv = this.d.world.inventory;
+    const count = () => inv.slots.reduce((a, s, i) => a + (i < 36 && s?.name === TABLE ? s.count : 0), 0);
+    for (const p of [...this.pendingTables]) {
+      if (cancelled()) break;
+      const b = this.d.world.blockAt(p);
+      if (!b) {
+        res.left.push(p);
+        continue;
+      }
+      if (b.name !== TABLE) {
+        this.forgetTable(p);
+        continue;
+      }
+      if (o.keep?.(p)) {
+        this.forgetTable(p);
+        res.kept.push(p);
+        continue;
+      }
+      const eye = this.eye();
+      const gap = (e: number, lo: number) => Math.max(lo - e, 0, e - (lo + 1));
+      const d = Math.hypot(gap(eye.x, p.x), gap(eye.y, p.y), gap(eye.z, p.z));
+      if (d > TABLE_REACH && (d > o.radius || !sk?.goto)) {
+        res.left.push(p);
+        continue;
+      }
+      if (d > TABLE_REACH) {
+        this.phase = `walking back to the crafting table at ${fmt(p)}`;
+        const w = await sk!.goto!({ type: 'getToBlock', p, reach: 3 }, { timeoutTicks: Math.max(400, Math.ceil(d * 30)) });
+        if (!w.ok || cancelled()) {
+          res.left.push(p);
+          continue;
+        }
+      }
+      if (await this.pickUpTable(p)) {
+        this.forgetTable(p);
+        res.picked.push(p);
+      } else res.left.push(p);
+    }
+    // the drops of tables dug earlier and not picked up (the E1 case: the next plan crafted a second table)
+    for (const p of [...this.droppedTables]) {
+      if (cancelled() || !sk) break;
+      const me = this.d.loop.state.pos;
+      const before = count();
+      if (Math.hypot(p.x + 0.5 - me.x, p.z + 0.5 - me.z) <= o.radius)
+        await sk.collect(TABLE_DROP_RADIUS, TABLE_DROP_TICKS, { filter: (it) => it.name === TABLE, origin: { x: p.x + 0.5, y: p.y, z: p.z + 0.5 } });
+      const i = this.droppedTables.findIndex((q) => samePos(q, p));
+      if (i >= 0) this.droppedTables.splice(i, 1);
+      if (count() > before) res.picked.push(p);
+    }
+    this.phase = 'idle';
+    return res;
   }
 }
 

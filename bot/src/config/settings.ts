@@ -109,6 +109,7 @@ export const SETTING_DEFS = {
   autoSleep: { kind: 'boolean', default: true, description: 'go to bed by itself at night (a bed near the shelter or home, or the bed waypoint); !sleep on / off sets it' }, // 2026-10-31: !sleep off was lost at every restart
   autoFood: { kind: 'boolean', default: true, description: 'hunt food mobs as a chore by day when the inventory food is below foodMin' }, // Track X
   cookFurnace: { kind: 'boolean', default: true, description: 'with raw food and no furnace near: craft one from 8 cobblestone (a hunt keeps 16) and set it down, by home when home is set' }, // Track E2 (docs/early-game.md, ADR 0099)
+  deathReturn: { kind: 'boolean', default: false, description: 'after a death in a !get job: walk back by day for the drops, take the furnace output, go on' }, // Track E4 (docs/early-game.md, ADR 0101)
   foodMin: { kind: 'number', default: 10, min: 0, max: 200, integer: true, unit: 'hunger points', description: 'auto food: hunt when the food carried totals fewer hunger points' }, // Track X
   foodLeave: { kind: 'number', default: 0, min: 0, max: 16, integer: true, unit: 'mobs', description: '!food leaves this many wild adults of a kind within the radius (penned animals are never hunted unless asked: !food n pen, chorePen)' }, // Track X
   mineSeenOnly: { kind: 'boolean', default: false, description: 'mining: only ore the bot has seen an open face of (off: any known ore, tunnelling to it)' }, // Track Z

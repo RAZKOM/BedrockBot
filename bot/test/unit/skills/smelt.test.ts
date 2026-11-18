@@ -331,4 +331,46 @@ describe('smelt job', () => {
     // without `at` and nothing carried: nothing to do, as before
     expect((await f.cooker.cook({ inputs: ironInputs }, () => false)).reason).toBe('nothing_to_cook');
   });
+
+  it('Track E4: the furnace the job set down or found is the one the cooker tries first (prefer); a stopped smelt tells where its input is', async () => {
+    let stop = false;
+    const at = { x: 40, y: 64, z: 9 };
+    const seen: string[] = [];
+    const { d } = jobDeps({ place: [{ ok: true, pos: at, walked: false, already: true }] });
+    d.cooker = {
+      cook: (opts) => {
+        seen.push(`prefer ${opts.prefer ? `${opts.prefer.x} ${opts.prefer.y} ${opts.prefer.z}` : '-'} at ${opts.at ? 'set' : '-'}`);
+        stop = true;
+        return Promise.resolve({ ok: false, reason: 'interrupted', cooked: { iron_ingot: 2 }, fuel: { coal: 1 }, ticks: 400, put: 10, furnace: at, block: 'furnace' });
+      },
+      phase: 'idle',
+    };
+    const job = new SmeltJob({ kind: 'smelt', inputs: ironInputs, limit: 10 });
+    expect(job.heldAt).toBeUndefined();
+    expect(await job.run(d, () => stop)).toBe(false);
+    expect(seen).toEqual(['prefer 40 64 9 at -']);
+    expect(job.over).toBe(false);
+    expect(job.heldAt).toEqual(at);
+  });
+
+  it('Track E4: a smelt sent back to a furnace (after a death) places nothing and opens that furnace first', async () => {
+    const at = { x: 7, y: 64, z: 9 };
+    const seen: string[] = [];
+    const { d, calls } = jobDeps({ place: [] });
+    d.cooker = {
+      cook: (opts) => {
+        seen.push(`at ${opts.at ? `${opts.at.x} ${opts.at.y} ${opts.at.z}` : '-'} limit ${opts.limit ?? 'all'}`);
+        return Promise.resolve({ ok: true, reason: 'done', cooked: { iron_ingot: 33 }, fuel: {}, ticks: 3000, put: 0, furnace: at, block: 'furnace' });
+      },
+      phase: 'idle',
+    };
+    const job = new SmeltJob({ kind: 'smelt', inputs: ironInputs, at });
+    expect(job.heldAt).toEqual(at);
+    expect(await job.run(d, () => false)).toBe(true);
+    expect(calls).toEqual([]);
+    expect(seen).toEqual(['at 7 64 9 limit all']);
+    expect(job.over).toBe(true);
+    expect(job.heldAt).toBeUndefined();
+    expect(smeltLine(job.result())).toBe('smelted 33 iron_ingot in the furnace at 7 64 9 (150 s)');
+  });
 });

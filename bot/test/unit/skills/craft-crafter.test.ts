@@ -216,6 +216,8 @@ interface Opts {
   cancelAfterBatches?: number;
   /** Deliver the server's held responses after this many waitTicks calls (a late response); default never. */
   lateAfter?: number;
+  /** Track E4: the first N clicks on a table go unanswered. */
+  dropClicks?: number;
 }
 
 function harness(initial: (ItemStack | null)[], o: Opts = {}) {
@@ -237,6 +239,7 @@ function harness(initial: (ItemStack | null)[], o: Opts = {}) {
   if (o.wallAt) for (let dy = 0; dy < 3; dy++) blocks.set(key({ ...o.wallAt, y: o.wallAt.y + dy }), STONE);
   const blockAt = (p: Vec3): BlockInfo => blocks.get(key(p)) ?? (p.y < -60 ? GRASS : AIR);
   let ticks = 0;
+  let dropped = 0;
   const source = {
     on: (name: string, fn: (p: Record<string, unknown>) => void) => {
       let set = handlers.get(name);
@@ -261,6 +264,10 @@ function harness(initial: (ItemStack | null)[], o: Opts = {}) {
         const pos = (params as { transaction: { transaction_data: { block_position: Vec3 } } }).transaction.transaction_data.block_position;
         later.push(() => {
           if (blockAt(pos).name !== 'crafting_table') return;
+          if ((o.dropClicks ?? 0) > dropped) {
+            dropped++;
+            return;
+          }
           open = { id: 3, type: 'workbench', pos };
           for (const fn of openFns) fn(open);
         });
@@ -468,6 +475,16 @@ describe('Crafter on a fake server', () => {
     expect(r).toMatchObject({ ok: false, reason: 'table_left', crafted: 1, table: { placed: true, pickedUp: false } });
     expect(h.skillCalls.some((c) => c.startsWith('dig '))).toBe(false);
     expect(h.crafter.pendingTables).toHaveLength(1);
+  });
+
+  it('Track E4: a table click that goes unanswered is clicked once more; two unanswered: open_failed', async () => {
+    const clicks = (x: ReturnType<typeof harness>) => x.sent.filter((s) => s.name === 'inventory_transaction').length;
+    const h = harness([item('iron_ingot', 9, 1)], { tableAt: { x: 2, y: -60, z: 0 }, dropClicks: 1 });
+    expect(await h.crafter.craft('iron_block', 1)).toMatchObject({ ok: true, crafted: 1 });
+    expect(clicks(h)).toBe(2);
+    const h2 = harness([item('iron_ingot', 9, 1)], { tableAt: { x: 2, y: -60, z: 0 }, dropClicks: 2 });
+    expect((await h2.crafter.craft('iron_block', 1)).reason).toBe('open_failed');
+    expect(clicks(h2)).toBe(2);
   });
 
   it('a table in reach is used as it stands; behind a wall it is walked to (goto) or not used; none at all: no_table or a table crafted from planks', async () => {
@@ -687,5 +704,70 @@ describe('Crafter on a fake server', () => {
     expect(h.crafter.plan('firework_rocket', 3, plainRocket)?.recipe.networkId).toBe(2773);
     const cane = harness([item('sugar_cane', 6, 1)]);
     expect(cane.crafter.plan('paper', 6)).toMatchObject({ table: true, crafts: 2, outputPer: 3 });
+  });
+});
+
+describe('Track E4: the obtain job holds its table (holdTables) and sweeps it up (sweepTables)', () => {
+  it('held: the placed table stays standing for the next craft (no table_left), is used again with no second placement, then swept up', async () => {
+    const h = harness([item('iron_ingot', 18, 1), item('crafting_table', 1, 2)]);
+    h.crafter.holdTables = true;
+    const r1 = await h.crafter.craft('iron_block', 1);
+    expect(r1).toMatchObject({ ok: true, reason: 'done', crafted: 1, table: { placed: true, pickedUp: false, held: true } });
+    expect(craftLine(r1)).toMatch(/crafting table kept at \d+ -60 \d+ for the next craft/);
+    expect(h.crafter.pendingTables).toHaveLength(1);
+    const r2 = await h.crafter.craft('iron_block', 1);
+    expect(r2).toMatchObject({ ok: true, crafted: 1, table: { placed: true, held: true, pos: h.crafter.pendingTables[0] } });
+    expect(h.skillCalls.filter((c) => c.startsWith('place '))).toHaveLength(1);
+    expect(h.skillCalls.some((c) => c.startsWith('dig '))).toBe(false);
+    h.crafter.holdTables = false;
+    const s = await h.crafter.sweepTables({ radius: 24 });
+    expect(s.picked).toHaveLength(1);
+    expect(h.crafter.pendingTables).toEqual([]);
+    expect(h.server.counts()).toEqual({ iron_block: 2, crafting_table: 1 });
+  });
+
+  it('a table by home is kept (forgotten, not dug); one beyond the sweep radius is left and named; one taken by someone is forgotten', async () => {
+    const h = harness([item('iron_ingot', 9, 1), item('crafting_table', 1, 2)]);
+    h.crafter.holdTables = true;
+    await h.crafter.craft('iron_block', 1);
+    const kept = await h.crafter.sweepTables({ radius: 24, keep: () => true });
+    expect(kept).toMatchObject({ picked: [], left: [] });
+    expect(kept.kept).toHaveLength(1);
+    expect(h.crafter.pendingTables).toEqual([]);
+    expect(h.skillCalls.some((c) => c.startsWith('dig '))).toBe(false);
+    // far away (no goto): left and kept for later
+    h.crafter.pendingTables.push({ x: 40, y: -60, z: 0 });
+    h.blocks.set('40,-60,0', TABLE);
+    const far = await h.crafter.sweepTables({ radius: 24 });
+    expect(far.left).toEqual([{ x: 40, y: -60, z: 0 }]);
+    expect(h.crafter.pendingTables).toHaveLength(1);
+    h.blocks.set('40,-60,0', AIR);
+    expect((await h.crafter.sweepTables({ radius: 24 })).left).toEqual([]);
+    expect(h.crafter.pendingTables).toEqual([]);
+  });
+
+  it('measured case (E1): the dug table drop not in the inventory after the first collect is looked for wider and longer', async () => {
+    const h = harness([item('iron_ingot', 9, 1), item('crafting_table', 1, 2)]);
+    const deps = (h.crafter as unknown as { d: { skills: { dig: (p: Vec3) => Promise<unknown>; collect: (r: number, t: number, o?: unknown) => Promise<unknown> }; world: { inventory: { setItem: (w: number, s: number, i: ItemStack) => void } } } }).d;
+    deps.skills.dig = async (p: Vec3) => {
+      h.skillCalls.push(`dig ${p.x} ${p.y} ${p.z}`);
+      h.blocks.set(`${p.x},${p.y},${p.z}`, AIR); // the drop rolled off: not in the inventory yet
+      return { ok: true };
+    };
+    const radii: number[] = [];
+    deps.skills.collect = async (r: number) => {
+      radii.push(r);
+      if (r >= 6) {
+        const free = h.server.slots.findIndex((s) => !s);
+        const it = item('crafting_table', 1, 901);
+        deps.world.inventory.setItem(0, free, it);
+        h.server.slots[free] = { ...it };
+      }
+      return { ok: true, gained: {}, pickedUp: 1, skipped: 0, ticks: 0, corrections: 0 };
+    };
+    const r = await h.crafter.craft('iron_block', 1);
+    expect(r).toMatchObject({ ok: true, table: { placed: true, pickedUp: true } });
+    expect(radii).toEqual([3, 6]);
+    expect(h.crafter.droppedTables).toEqual([]);
   });
 });

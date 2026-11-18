@@ -218,6 +218,8 @@ export interface CookOptions {
    * to put in, to wait out the input still in it and take the output.
    */
   at?: Vec3;
+  /** Track E4: a furnace tried first when it is one (the one the job set down), with no other effect. */
+  prefer?: Vec3;
 }
 
 export type CookReason = 'done' | 'nothing_to_cook' | 'no_furnace' | 'no_furnace_near' | 'no_fuel' | 'unreachable' | 'open_failed' | 'furnace_busy' | 'request_failed' | 'timeout' | 'interrupted' | 'not_ready';
@@ -310,7 +312,9 @@ export class Cooker {
     const takes = o.inputs ? first : undefined;
     const found = o.near !== undefined ? this.furnaces(o.near, true, takes) : this.furnaces(o.radius ?? 16, false, takes);
     // Track E2: back to the furnace an interrupted run left its input in
-    const list = back ? [back, ...found.filter((p) => p.x !== back.x || p.y !== back.y || p.z !== back.z)] : found;
+    const prefBlock = !back && o.prefer ? world.blockAt(o.prefer) : undefined;
+    const lead = back ?? (o.prefer && prefBlock && isCooker(prefBlock) && (takes === undefined || cookerTakes(prefBlock.name, takes)) ? o.prefer : undefined); // Track E4: prefer
+    const list = lead ? [lead, ...found.filter((p) => p.x !== lead.x || p.y !== lead.y || p.z !== lead.z)] : found;
     if (list.length === 0) return done(o.near !== undefined ? 'no_furnace_near' : 'no_furnace');
     let opened: { id: number; type: string; block: string; pos: Vec3 } | undefined;
     for (const p of list) {
@@ -363,12 +367,26 @@ export class Cooker {
     }
     input = view()[FURNACE_INPUT] ?? null;
     if (!input) return 'done';
-    const fuel = planFuel(input.count, inv.slots, view()[FURNACE_FUEL] ?? null);
+    let fuel = planFuel(input.count, inv.slots, view()[FURNACE_FUEL] ?? null);
     if (fuel) {
-      for (const m of fuel.moves) {
-        if (!(await this.place(w, m.slot, 'furnace_fuel', FURNACE_FUEL, m.count))) return 'request_failed';
+      // Track E4: a furnace still burning from the last smelt takes its next fuel item while the request is on its
+      // way (measured: `place 3 oak_planks -> furnace_fuel: 50` 1.3 s after a smelt at the same furnace): once more
+      // after the slot settled, planned again from what it holds now
+      for (let attempt = 0; fuel; attempt++) {
+        let ok = true;
+        for (const m of fuel.moves) {
+          if (!(await this.place(w, m.slot, 'furnace_fuel', FURNACE_FUEL, m.count))) {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) break;
+        if (attempt >= 1) return 'request_failed';
+        await this.d.loop.waitTicks(10);
+        if (cancelled()) return 'interrupted';
+        fuel = planFuel(input.count, inv.slots, view()[FURNACE_FUEL] ?? null);
       }
-      res.fuel[fuel.name] = (res.fuel[fuel.name] ?? 0) + fuel.count;
+      if (fuel) res.fuel[fuel.name] = (res.fuel[fuel.name] ?? 0) + fuel.count;
     } else if (!view()[FURNACE_FUEL] && !this.burning(w)) {
       // nothing to burn: take the raw food back and keep it
       await this.takeBack(w, FURNACE_INPUT, inputSlotType(w.block));

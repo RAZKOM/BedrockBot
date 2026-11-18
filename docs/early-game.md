@@ -1,11 +1,12 @@
-# The early game: day one from an empty inventory (Track E1), the iron age (Track E2), the shaft, the furnace wait and a bed (Track E3)
+# The early game: day one from an empty inventory (Track E1), the iron age (Track E2), the shaft, the furnace wait and a bed (Track E3), wear and setbacks (Track E4)
 
 What the bot does on a fresh survival world when it starts with nothing, the commands an owner types for the first
 day, the iron age after the stone kit (a furnace, smelting, cooked food, iron tools and armour), and what is still
 missing before it can live through the first nights on its own. Decision records:
 [decisions/0098-day-one-from-nothing.md](decisions/0098-day-one-from-nothing.md),
 [decisions/0099-iron-age.md](decisions/0099-iron-age.md),
-[decisions/0100-shaft-furnace-bed.md](decisions/0100-shaft-furnace-bed.md).
+[decisions/0100-shaft-furnace-bed.md](decisions/0100-shaft-furnace-bed.md),
+[decisions/0101-wear-and-setbacks.md](decisions/0101-wear-and-setbacks.md) (the job through wear and setbacks, Track E4).
 
 Measured on BDS 1.26.60.6 (itzg/minecraft-bedrock-server 2026.10.2), a default-generated world (a forest with stone
 under it near spawn), difficulty normal, the daylight cycle and mob spawning on, the bot alone with an owner in
@@ -41,6 +42,15 @@ peaceful test server with the truth pack.
 | `bot/src/skills/food/finder.ts`, `hunter.ts`, `bot/src/tasks/process/food.ts`, `bot/src/chat/commands-food.ts` | Track E3: the hunt's `keep` (the bed's sheep) |
 | `bot/src/skills/items/obtain.ts`, `bot/src/chat/commands-kit.ts` | Track E3: the `bed` step, the iron kit's bed (`last`), `noDyeRecipe`, the herd walk for a hunt, a soft hunt capped |
 | `bot/test/unit/skills/blade-strike.test.ts`, `bed-place.test.ts`, `bot/test/unit/tasks/smelt-shell.test.ts`, `bot/test/e2e/early-shaft.test.ts`, `early-smelt.test.ts`, `early-bed.test.ts` | Track E3 tests |
+
+| `bot/src/skills/items/wear.ts` | Track E4: `usableSlots` (the inventory without the tools the worn-tool rule refuses), `wornTools`, `replacedBy`, `toolKind` |
+| `bot/src/skills/items/placed.ts` | Track E4: `PlacedBlocks`, `placedOf(task)`: the furnaces the bot set down (`FURNACE_RECALL` 64) |
+| `bot/src/skills/items/death-return.ts` | Track E4: `deathReturnPlan` (whether and how long to walk back to a death spot), `stacksRecovered` |
+| `bot/src/tasks/process/recover.ts` | Track E4: `RecoverProcess` (`recover`: the walk back and the pick-up), `WorkProcess` (the job's `tables` sweep) |
+| `bot/src/chat/commands-kit.ts` | Track E4: the worn-tool stop in a mine step, the held tables and their sweep, the death handling (`afterDeath`, `deathReturn`), the end line's notes |
+| `bot/src/skills/craft/crafter.ts` | Track E4: `holdTables`, `ownTables`, `sweepTables`, the wider pick-up of a dug table's drop |
+| `bot/src/chat/commands-smelt.ts`, `bot/src/tasks/process/smelt.ts`, `bot/src/skills/food/cook.ts` | Track E4: placed furnaces recorded and offered, the smelt opening its own furnace first (`prefer`), `SmeltControl.held` / `collect` |
+| `bot/test/unit/skills/obtain-wear.test.ts`, `bot/test/unit/chat/kit-setbacks.test.ts`, `bot/test/unit/tasks/recover-process.test.ts`, `bot/test/e2e/early-wear.test.ts` | Track E4 tests (and new cases in `craft-crafter.test.ts`, `smelt.test.ts`, `test-recovery.test.ts`) |
 
 ## Day one as an owner types it
 
@@ -482,6 +492,104 @@ for every plan, with the event loop blocked. The job never dyes now: a recipe wi
 (`noDyeRecipe`). After it `!get bed` took 54 s with two herd walks, and the iron kit's e2e 284 s (the bed's own steps
 11 s), with no gap between steps. `!craft` alone still plans with every recipe.
 
+## Wear and setbacks (Track E4)
+
+The obtain job of Tracks E1 and E2 ended short or stopped on things that were not the world's: a pickaxe worn out in
+the mine step, a second table or furnace crafted where one stood, a death in any step. Decision record:
+[decisions/0101-wear-and-setbacks.md](decisions/0101-wear-and-setbacks.md).
+
+### Worn tools
+
+The worn-tool rule (`toolWearLimit`, default 10 uses left; a Mending item at `mendAt` is set aside the same way) is
+what the digger and the miner use to pick a tool, but two gaps let a worn tool through. The digger takes the selected
+slot when every tool is refused, so a worn pickaxe already in hand digs on. The miner's composite mode (the default)
+checks the pickaxe only when no candidate is left. So a mine step ran its pickaxe to the end: in e2e a stone pickaxe
+with 13 uses left mined 5 iron ore and ended with 8 left. The planner counted that pickaxe as carried and never
+replaced it.
+
+Now:
+
+- **The plan leaves worn tools out.** `nextAction` plans on the inventory without the items the rule refuses
+  (`skills/items/wear.ts` `usableSlots`). A pickaxe under the limit is not a pickaxe for the plan, so the planner's
+  own pickaxe rule crafts the cheapest one that harvests the block (3 of the kit's cobblestone and 2 sticks for a
+  stone one) before the step that needs it. A worn tool is never an ingredient. It stays carried.
+- **The job ends a mine step at the limit.** While a mine step runs, the job compares the usable pickaxes with those
+  at the start of the step. Once none harvests the step's block any more, it stops the step, and the next plan
+  replaces the pickaxe and mines the rest. The job does this, not the miner, so plain `!mine` is unchanged.
+- **A step cut short that way caps nothing.** A short mine step drops the soft targets (the iron kit's armour) the
+  material no longer covers. It does not when the step ended on wear. A worn-out step that got nothing does not end the
+  job either.
+- The end line says it: `replaced the stone_pickaxe (worn)`.
+
+### The job's tables and furnaces
+
+- **The table stands between the job's crafts.** While a job runs, the crafter keeps the table it sets down standing
+  (`holdTables`) and walks back to one within 16. The plan counts the table as carried, so the kit's own table target
+  crafts no second one. Before a step that walks off (gather, mine, hunt, food) and when the job ends, the job walks
+  to the tables it left within 24 and picks them up (`picked up the crafting table`). Within 16 of home a table stays,
+  as the home's own. A table whose drop did not come into the inventory is looked for again, wider and for longer (6
+  blocks and 200 ticks, after 3 and 100). A job stopped by the owner leaves its table, as before.
+- **The furnaces the bot sets down are remembered** (`skills/items/placed.ts`), per task, for a run. The smelt offers
+  one that still stands within 64 of the bot, together with the cooker's own within 16, and opens it first. With no
+  home set, the walk to the coal used to cost a second furnace. The end line says `used the furnace at x y z again`.
+  `!furnace`, `!cook` and the cooker's own set-down (`cookFurnace`) still look within 16 only. When the memory was
+  first shared with them, `!cook` saw a furnace 40 off, set none down, then found none within its 16 (`cook: no
+  furnace or smoker within 16 blocks of home`).
+
+### A death in a job (`deathReturn`, off by default)
+
+A death stops the step's process. The job keeps its state (targets, steps, notes) and the inventory as it was just
+before the death.
+
+- **Off:** the job ends `stopped by a death (cause) after T, N steps (at !step)`, names the furnace that holds a
+  stopped smelt, and points at the setting.
+- **On:** the job holds the afk task's walk home after the respawn (`respawnClaimed`). Once the respawn has settled,
+  it walks back by the normal nav as the `recover` user process (the flee, a guard fight and the night process
+  pre-empt it) only when all of these hold:
+  - the death spot is known and not in the void;
+  - the cause is not lava, fire or the void (the drops burn or fall);
+  - it is day, with 1 200 ticks of daylight left;
+  - the spot is within 160 blocks of where the bot respawned;
+  - the walk, at 3 blocks a second, ends before the drops despawn 5 minutes after the death;
+  - fewer than 2 returns in this job.
+
+  It picks the drops up within 8 of the spot (20 s at most). If a smelt was stopped, it then goes back to that
+  furnace, waits out what is inside and takes the output, putting nothing more in. The job goes on from the
+  inventory: `recovered G of O stacks in S s (lost ...); smelted ...; going on with the job`. When it does not go,
+  the end line says why (`not going back: it is night or near dusk ...`) and the walk home is made.
+
+### Fixes found on the way
+
+With the table held, the iron kit ran faster (180 s against 274 s in Track E2's e2e), and two races showed up in its
+gate case (`iron-get.test.ts` `kit`).
+
+- **Fuel into a burning furnace.** `!cook` opened the furnace 1.3 s after the smelt there, while it still burned,
+  and the fuel move was refused (`cook: place 3 oak_planks 9 -> furnace_fuel 1: 50`). The job stopped: `!cook got
+  nothing (cook: request failed ...)`. The cooker now tries a refused fuel move once more, 10 ticks later, planned
+  again from what the slot holds then.
+- **A table click lost to the offhand move.** Four crafts in 5 s at the held table. The armour pass moved the new
+  shield to the offhand at the moment of the fourth click, which went unanswered: `craft: made no bucket
+  (open_failed)`. The crafter now clicks a table that still stands once more before it gives up.
+
+### Measured (e2e, before and after)
+
+On the flat, peaceful test server with the truth pack, one bot, no home set, the clock frozen at noon (the night
+case sets it to midnight before the death). The "before" is the same cases on the code before this track. There
+were 3 runs a side, all with the same outcome; the after side was run 6 more times on the final code (the times below cover all 9).
+
+| Case | Before | After |
+|---|---|---|
+| `wear`: a stone pickaxe with 13 uses left, 5 iron ore, `!get iron_helmet` | done in 76 to 78 s, 5 steps; the pickaxe mined all 5 and ended with 8 uses left (under the limit of 10); nothing replaced | done in 80 to 82 s, 7 steps: `mine iron_ore 5` (ended at the limit after 3, the worn one at 10 left), `craft stone_pickaxe 1`, `mine iron_ore 2` or `3`, ...; `replaced the stone_pickaxe (worn)` |
+| `worn`: the same pickaxe with 6 uses left, 3 iron ore, `!get iron_pickaxe` | `stopped after 1 s, 1 step: !mine iron_ore 3 got nothing (... no tool in the inventory harvests iron_ore)` | done in 55 to 57 s, 4 steps: `craft stone_pickaxe 1, mine iron_ore 3, smelt raw_iron 3, craft iron_pickaxe 1` |
+| `furnace`: 3 iron ore, a coal ore 23 blocks off, a stone pickaxe and 16 cobblestone, `!get iron_pickaxe` | done in 67 to 70 s, 8 steps, **2 furnaces crafted** (16 cobblestone): the one by the ore was over 16 off when the smelt planned | done in 63 to 68 s, 6 steps, **1 furnace**, `used the furnace at x y z again`; 8 cobblestone left |
+| `death`: killed 8 s into `!smelt raw_iron 3` by day, the respawn point 30 blocks off, `deathReturn` on | `stopped after 11 s, 1 step: !smelt raw_iron 3 got nothing (smelt: interrupted)`; nothing carried, the drops left lying, the iron in the furnace | `died ...; walking back 30 blocks ...`, `recovered 5 of 5 stacks in 21 s; smelted 3 iron_ingot in the furnace at ... (7 to 10 s); going on with the job`; done in 38 to 39 s with the iron pickaxe |
+| `night`: the same death at midnight | as `death` | `stopped by a death (generic) after 11 s, 1 step (at !smelt raw_iron 3): not going back: it is night or near dusk ...; the furnace at x y z holds the smelt` |
+
+No second crafting table was crafted in any of these runs, before or after (the job carried a table). Before, every
+craft set the table down and picked it up again (`crafting table placed and picked up`). After, the table stood
+between the crafts (`crafting table kept at x y z for the next craft`) and was picked up at the end; none was left
+standing.
+
 ## Still missing for the early game
 
 In the order they matter, with the reason measured here:
@@ -494,9 +602,9 @@ In the order they matter, with the reason measured here:
    water (a cell with no floor under it stays open) and a creeper's blast (it opens the shell).
 3. **Done by Track E2:** a furnace set down and cooked food (`cookFurnace`), smelting and iron ("The iron age").
    Left from it: the smelt stands 5.5 minutes in the open when no home or shelter is set and `smeltShell` is off
-   (Track E3: "The furnace wait"); a pickaxe that wears out in the job is not replaced (a helmet short, a stop for
-   coal); without a home a furnace the bot walked away from is not found again and a second is crafted; a death in a
-   step ends the job (the raw iron stays in the furnace).
+   (Track E3: "The furnace wait"). Done by Track E4 ("Wear and setbacks"): a worn pickaxe is replaced, a furnace
+   walked away from is used again, a death ends the job with what is where (and, with `deathReturn` on, it walks back
+   for the drops and the furnace output).
 4. **All the armour.** The iron kit wears what the ore allows (24 ingots for the four pieces after the 9 the tools,
    the shield and the bucket take); a short mine step leaves the chestplate, leggings and helmet off. More iron needs a
    second mine trip, which the job does not make; leather is slow (a tunic is 8, a day's hunt gave 0 or 1).
@@ -506,8 +614,10 @@ In the order they matter, with the reason measured here:
 6. **A mob at the top of a shaft** (Track E3, "A mob at the top of a shaft"): the reflex strikes with the blade now;
    the walk still climbs on with a mob over it, and a bot with no blade in the hotbar strikes with what it holds.
 
-Smaller, seen once: the obtain job crafted a second table when the first one's drop had not been picked up yet when
-the next step planned (both picked up two steps later).
+Smaller: the obtain job crafted a second table when the first one's drop had not been picked up yet when the next
+step planned (seen once; Track E4 holds the table standing and counts it, and looks for a lost drop wider). Left by
+Track E4: a sword, axe or shovel worn out in a step is replaced only when the plan next needs it (only the mine step
+is watched); a death outside a job walks nowhere; `deathReturn` has not been run on real terrain.
 
 ## Tests
 
@@ -526,6 +636,14 @@ the next step planned (both picked up two steps later).
 - Track E2, e2e: `iron-smelt.test.ts` (`!furnace`, `!smelt` of 5, a furnace by home, `!cook` setting one down, the
   tunnel), `iron-get.test.ts` (`!get iron_pickaxe` from the stone kit, `!get iron_ingot`, `!get kit iron` with 13 iron
   ore in the ground).
+- Track E4, unit: `obtain-wear.test.ts` (the plan without worn tools, the placed furnaces, the death-return rule,
+  the stacks recovered), `kit-setbacks.test.ts` (the job on a fake host: a pickaxe worn out in a step and mid-step,
+  the held table, a death with the setting off, on by day and on by night), `craft-crafter.test.ts` (the held table
+  and its sweep, home's table kept, the wider drop pick-up), `smelt.test.ts` (the preferred furnace, a smelt that only
+  collects), `recover-process.test.ts`, `test-recovery.test.ts` (two respawn claims).
+- Track E4, e2e: `early-wear.test.ts` (`wear`: the limit reached mid-step; `worn`: past it at the start; `furnace`:
+  the walk to the coal with no home; `death` and `night`: `deathReturn` on by day and by night; `E4_BEFORE=1` records
+  without asserting, for the base tree).
 
 - Track E3, unit: `blade-strike.test.ts` (the swap and its refusals), `smelt-shell.test.ts` (when, the cell, the
   brace, the pause, the open at dawn), `bed-place.test.ts` (the spot, covers, the job, the wool count),
@@ -552,4 +670,9 @@ the next step planned (both picked up two steps later).
   smelt longer than the case's 8; the leave way on the fresh world (the flat case only); the bed on other seeds and
   biomes, a bed spot on a slope, colours other than white; the herd walk to a flock out of view; the blade strike with
   an axe as the blade, and in a real shaft on the fresh world (the replica only).
+
+- Track E4: the wear stop and the replacement on a fresh world, with the kit's soft targets (the cap rule is
+  unit-tested only); `deathReturn` on real terrain, against the mob that caused the death, in a cave or a shaft, or
+  with the drops spread over more than 8 blocks; the 5-minute despawn and the daylight margins (unit tests only); a
+  table near home kept and a table more than 24 off (unit tests only); the furnace memory with a home set.
 - Anything on the Realm.

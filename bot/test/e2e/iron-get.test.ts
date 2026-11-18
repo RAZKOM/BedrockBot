@@ -64,7 +64,8 @@ describe.skipIf(!E2E)('@bds iron get: iron items through the obtain job (Track E
     const ms = Date.now() - t0;
     const inv = (await b.truth.craftinv(b.name)).counts;
     notes.push(`pickaxe: ${end}; ${(ms / 1000).toFixed(1)} s; replies ${b.said.slice(from).join(' | ')}; inventory ${JSON.stringify(inv)}`);
-    expect(end).toMatch(/^get iron_pickaxe: done in \d+ s, \d+ steps \(mine iron_ore 3, craft furnace 1, furnace, (craft oak_planks \d+, )?smelt raw_iron 3, craft iron_pickaxe 1\)$/);
+    // Track E4: the job's table stood between its crafts and was picked up at the end (a note before the steps)
+    expect(end).toMatch(/^get iron_pickaxe: done in \d+ s, \d+ steps; picked up the crafting table; steps: mine iron_ore 3, craft furnace 1, furnace, (craft oak_planks \d+, )?smelt raw_iron 3, craft iron_pickaxe 1$/);
     expect(inv.iron_pickaxe).toBe(1);
     expect(b.processes.userProcesses()).toHaveLength(0);
   }, 540_000);
@@ -118,7 +119,7 @@ describe.skipIf(!E2E)('@bds iron get: iron items through the obtain job (Track E
     const armour = (world.inventory.window(WINDOW_ARMOR)?.slots ?? []).map((s) => s?.name ?? '-');
     const offhand = world.inventory.window(WINDOW_OFFHAND)?.slots[0]?.name ?? (world.inventory.window(WINDOW_OFFHAND)?.slots ?? []).find((s) => s)?.name;
     notes.push(`kit: ${end}; ${(ms / 1000).toFixed(1)} s; armour ${armour.join(',')}; offhand ${offhand ?? '-'}; inventory ${JSON.stringify(inv)}`);
-    expect(end).toMatch(/^get kit iron: done in \d+ s, \d+ steps; short: iron_chestplate, iron_leggings, iron_helmet(, bed)? \(!mine iron_ore 33 got 13(; !kill sheep 3 got 0 white_wool)?\); steps: mine iron_ore 33, /); // Track E3: the bed last, short too with no sheep near
+    expect(end).toMatch(/^get kit iron: done in \d+ s, \d+ steps; short: iron_chestplate, iron_leggings, iron_helmet(, bed)? \(!mine iron_ore 33 got 13(; !kill sheep 3 got 0 white_wool)?\)(; [^;()]+)*; steps: mine iron_ore 33, /); // Track E3: the bed last, short too with no sheep near; Track E4: the notes (`picked up the crafting table`) after what is short
     // Track E3: the longer `short:` leaves the smelt step past the reply limit; the job's log names it
     expect(b.logs.some((l) => l.includes('get kit iron: !smelt raw_iron 13 -> 13 items'))).toBe(true);
     expect(inv.iron_pickaxe).toBe(1);

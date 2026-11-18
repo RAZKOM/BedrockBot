@@ -36,6 +36,7 @@ import { fuelValue, rawFoodCounts } from '../food/finder.ts';
 import { countOf, smeltInputsOf } from '../food/smelt.ts';
 import type { ItemStack } from '../../world/types.ts';
 import { entryFor, minedItem } from './catalog.ts';
+import { usableSlots, type ToolOk } from './wear.ts';
 
 export interface ObtainTarget {
   /** An item name, or `food` (n food items, any kind the bot eats). */
@@ -75,6 +76,8 @@ export interface ObtainOptions extends ChainOptions {
   capped?: ReadonlySet<string>;
   /** Track E3: a bed stands where the night rule sleeps (it meets a bed target; one carried is set down). */
   bedNear?: boolean;
+  /** Track E4: the worn-tool rule (SurvivalKit.toolOk): a worn tool counts as not carried (wear.ts). */
+  toolOk?: ToolOk;
 }
 
 /**
@@ -289,7 +292,9 @@ export function affordable(index: Index, targets: readonly ObtainTarget[], slots
  * The next command towards `targets` (each `n` in all: what is carried or worn counts). `craft` makes one target (the
  * `!craft` command chains its ingredients); the others get a raw material, smelt, set a furnace down or cook.
  */
-export function nextAction(index: Index, targets: readonly ObtainTarget[], slots: Slots, o: ObtainOptions = {}, depth = 0): ObtainAction {
+export function nextAction(index: Index, targets: readonly ObtainTarget[], carriedSlots: Slots, o: ObtainOptions = {}, depth = 0): ObtainAction {
+  // Track E4: a worn tool is not carried for the plan (a step that needs a tool makes a fresh one first)
+  const slots = o.toolOk ? usableSlots(carriedSlots, o.toolOk) : carriedSlots;
   // Track E3: a `last` target waits for the others
   if (targets.some((t) => t.last) && targets.some((t) => !t.last)) {
     const first = nextAction(index, targets.filter((t) => !t.last), slots, o, depth);

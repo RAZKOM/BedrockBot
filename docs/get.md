@@ -57,6 +57,15 @@ rule sleeps in it; a bed already standing there counts as got. A `!kill` step th
 nearest flock the food hunt remembers (`goto x y z` in the step list, two at most) and hunts again. The iron kit ends
 with a soft `bed` step.
 
+Track E4 (docs/early-game.md "Wear and setbacks", ADR 0101): the job plans without the tools past `toolWearLimit`, so
+a nearly worn pickaxe is replaced before the step that needs it, and a mine step whose pickaxe reaches the limit is
+ended there and the rest mined with a fresh one (`replaced the stone_pickaxe (worn)`). The table it sets down stands
+between its crafts, counts as carried and is picked up before a step that walks off and at the end (`picked up the
+crafting table`; within 16 of home it stays). A furnace the bot set down is used again within 64 (`used the furnace
+at x y z again`). A death in a step ends the job and names the furnace that holds the smelt; with `deathReturn` on
+(off by default) the job walks back by day for the drops and the furnace output and goes on (`recovered 5 of 5
+stacks in 21 s`), or says why not.
+
 `!get` replies first, then runs the command as a copy of the owner's line through the chat's own
 handler (like a `!do` plan step), so `!stop`, `!pause`, `!status` and the command's own replies work
 as for the command typed by hand. The old commands (`!gather`, `!mine`, `!food`, `!farm`) stay.

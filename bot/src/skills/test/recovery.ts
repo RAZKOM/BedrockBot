@@ -30,19 +30,28 @@ const HEAL = ['/effect @s instant_health 1 4 true', '/effect @s saturation 1 4 t
 
 // ---- the claim on the respawn (read by tasks/registry.ts's after-respawn walk home) -----------------------------------
 
-const claims = new WeakMap<object, () => boolean>();
+const claims = new WeakMap<object, Map<string, () => boolean>>();
 
-/** The test harness of `task` handles respawns now: the afk task's walk home after a respawn is skipped. */
-export function claimRespawn(task: object, owns: () => boolean): void {
-  claims.set(task, owns);
+/**
+ * The test harness of `task` handles respawns now: the afk task's walk home after a respawn is skipped. Track E4: more
+ * than one owner may claim (`by`: the test harness, the obtain job's walk back to a death spot); any one that owns it
+ * now holds the walk home and the chores.
+ */
+export function claimRespawn(task: object, owns: () => boolean, by = 'test'): void {
+  let m = claims.get(task);
+  if (!m) claims.set(task, (m = new Map<string, () => boolean>()));
+  m.set(by, owns);
 }
 
 export function respawnClaimed(task: object): boolean {
-  try {
-    return claims.get(task)?.() ?? false;
-  } catch {
-    return false;
+  for (const owns of claims.get(task)?.values() ?? []) {
+    try {
+      if (owns()) return true;
+    } catch {
+      // a broken claim owns nothing
+    }
   }
+  return false;
 }
 
 // ---- restore -----------------------------------------------------------------------------------------------------------
