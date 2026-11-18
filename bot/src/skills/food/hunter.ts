@@ -63,6 +63,8 @@ export interface HuntOptions {
   onKill?: (r: { kind: string; gained: number; killed: number }) => void;
   /** Track AF: may penned animals of `kind` in `pen` be taken (down to PEN_KEEP adults)? Default never. */
   penAllowed?: (pen: Pen, kind: string) => boolean;
+  /** Track E3: wild adults of a kind kept beyond `leave` (read every pick: the sheep a bed needs). */
+  keep?: (kind: string) => number;
 }
 
 export type HuntReason = 'done' | 'none_left' | 'interrupted';
@@ -126,7 +128,7 @@ export class Hunter {
   }
 
   /** The target the next pick would choose (no side effects). */
-  peek(o: Pick<HuntOptions, 'center' | 'radius' | 'leave' | 'penAllowed'>): FoodTarget | undefined {
+  peek(o: Pick<HuntOptions, 'center' | 'radius' | 'leave' | 'penAllowed' | 'keep'>): FoodTarget | undefined {
     const now = this.now();
     const penOf = this.d.penOf?.bind(this.d);
     return pickTarget(this.d.entities().values(), {
@@ -139,6 +141,7 @@ export class Hunter {
       ignored: (rid) => (this.ignore.get(rid) ?? 0) > now || (this.d.spare?.(rid) ?? false),
       ...(penOf ? { penOf } : {}),
       ...(o.penAllowed ? { penAllowed: o.penAllowed } : {}),
+      ...(o.keep ? { keep: o.keep } : {}), // Track E3
     });
   }
 

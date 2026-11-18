@@ -21,7 +21,7 @@ const OWN_DEFAULTS: Record<string, boolean> = { ...M9_DEFAULTS, ...M10_DEFAULTS 
 it('the rules are on by default (Tracks M9 and M10: their own defaults)', () => {
   const rules = PVE_RULES_DEFAULT as unknown as Record<string, boolean>;
   expect(Object.entries(rules).every(([k, v]) => (k in OWN_DEFAULTS ? v === OWN_DEFAULTS[k] : v))).toBe(true);
-  expect(Object.keys(PVE_RULES_DEFAULT).sort()).toEqual(['archerDuel', 'bareArcher', 'fleeLong', 'legHold', 'poison', 'poisonBite', 'shooterHome', 'shooterWay', 'volley', 'witchCrowd', 'witchRush', 'milkCure', ...Object.keys(OWN_DEFAULTS)].sort()); // Track M5: + shooterWay, poisonBite, witchCrowd (m5-rules.test.ts); Track M6: + volley, bareArcher (m6-rules.test.ts); Track M7: + witchRush, milkCure (m7-rules.test.ts); Track M9: + followRun, sprintJump, craftBlade (m9-rules.test.ts); Track M10: + backHome, followHome (m10-rules.test.ts)
+  expect(Object.keys(PVE_RULES_DEFAULT).sort()).toEqual(['archerDuel', 'bareArcher', 'fleeLong', 'legHold', 'poison', 'poisonBite', 'shooterHome', 'shooterWay', 'volley', 'witchCrowd', 'witchRush', 'milkCure', 'bladeStrike', ...Object.keys(OWN_DEFAULTS)].sort()); // Track E3: + bladeStrike (blade-strike.test.ts); Track M5: + shooterWay, poisonBite, witchCrowd (m5-rules.test.ts); Track M6: + volley, bareArcher (m6-rules.test.ts); Track M7: + witchRush, milkCure (m7-rules.test.ts); Track M9: + followRun, sprintJump, craftBlade (m9-rules.test.ts); Track M10: + backHome, followHome (m10-rules.test.ts)
 });
 
 describe('the archer at home (archerDuel)', () => {

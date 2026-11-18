@@ -22,11 +22,15 @@
 //   - a target may be soft (the iron kit's armour): once a mine step for its material came back short, a soft target
 //     the carried material no longer covers is dropped (the job says which and why);
 //   - worn armour and the offhand's shield count as carried.
+// Track E3 (docs/early-game.md "A bed", ADR 0100) adds the bed:
+//   - a bed target is met by a bed standing where the night rule sleeps (by home, the shelter or the bed waypoint);
+//     one carried is set down (`!bed`); the iron kit ends with one, soft: wool from sheep (`!kill sheep n`), and a hunt
+//     that came back short of the wool drops it.
 // What has no rule here (string by day) stops the job with the reason, never a guess.
 import { toolOf, blockMining, TIER_LEVEL, type ToolTier } from '../../data/mining.ts';
 import { canHarvest } from '../dig/breakTime.ts';
 import { carried, planChain, type ChainOptions, type ChainLeaf } from '../craft/chain.ts';
-import type { RecipeIndex } from '../craft/recipes.ts';
+import type { Recipe, RecipeIndex } from '../craft/recipes.ts';
 import { FOODS } from '../survival/eat.ts';
 import { fuelValue, rawFoodCounts } from '../food/finder.ts';
 import { countOf, smeltInputsOf } from '../food/smelt.ts';
@@ -39,6 +43,11 @@ export interface ObtainTarget {
   n: number;
   /** Track E2: dropped when its material ran short (`capped`) instead of stopping the job. */
   soft?: boolean;
+  /**
+   * Track E3: planned only once every other target is met or dropped (the iron kit's bed: with its wool and planks in
+   * the first trips the e2e kit took 575 s against 274).
+   */
+  last?: boolean;
 }
 
 export type ObtainAction =
@@ -50,6 +59,7 @@ export type ObtainAction =
   | { kind: 'smelt'; item: string; input: string; n: number; command: string }
   | { kind: 'furnace'; command: string }
   | { kind: 'cook'; n: number; command: string }
+  | { kind: 'bed'; command: string }
   | { kind: 'done' }
   | { kind: 'stuck'; reason: string };
 
@@ -63,6 +73,8 @@ export interface ObtainOptions extends ChainOptions {
   worn?: readonly (ItemStack | null | undefined)[];
   /** Raw materials whose mine step came back short: soft targets they no longer cover are dropped. */
   capped?: ReadonlySet<string>;
+  /** Track E3: a bed stands where the night rule sleeps (it meets a bed target; one carried is set down). */
+  bedNear?: boolean;
 }
 
 /**
@@ -91,6 +103,7 @@ export const IRON_KIT: readonly ObtainTarget[] = [
   { item: 'iron_leggings', n: 1, soft: true },
   { item: 'iron_boots', n: 1, soft: true },
   { item: 'iron_helmet', n: 1, soft: true },
+  { item: 'bed', n: 1, soft: true, last: true }, // Track E3: after the iron, set down where the bot sleeps
   { item: 'cobblestone', n: 16 },
   { item: 'food', n: 6 },
 ];
@@ -193,6 +206,16 @@ function blockingIngredient(index: Index, item: string, slots: Slots, o: ChainOp
 /** The planner's raw rule: gathered, mined, hunted, or (Track E2) smelted from something mined. */
 const rawRule = (n: string): boolean => leafAction({ item: n, n: 1 }).kind !== 'none' || smeltLeaf(n) !== undefined;
 
+/**
+ * Track E3: the job never dyes. A recipe with a dye in it is left out of its plans: the server's wool and bed recipes
+ * re-dye each colour from the others, and the chain tried them all for every plan (measured: 15 to 53 s of planning a
+ * step, the event loop blocked, once the iron kit's bed was planned on the server's full recipe set).
+ */
+export function noDyeRecipe(r: Recipe): boolean {
+  return !r.input.some((i) => !!i && ((i.name !== undefined && /_dye$|^ink_sac$|^bone_meal$|^cocoa_beans$|^lapis_lazuli$/.test(i.name)) || (i.tag?.includes('dye') ?? false)));
+}
+const chainOpts = (o: ObtainOptions): ChainOptions => ({ ...o, raw: rawRule, recipe: o.recipe ? (r) => o.recipe!(r) && noDyeRecipe(r) : noDyeRecipe });
+
 /** The inventory as it would be with every smelt leaf's input smelted (the wood and fuel the crafts leave). */
 function smelted(slots: Slots, leaves: readonly ChainLeaf[]): (ItemStack | null)[] {
   const out: (ItemStack | null)[] = slots.slice(0, 36).map((s) => (s ? { ...s } : null));
@@ -239,20 +262,23 @@ export function affordable(index: Index, targets: readonly ObtainTarget[], slots
   if (!capped || capped.size === 0 || !targets.some((t) => t.soft)) return { kept: [...targets], dropped: [] };
   const kept: ObtainTarget[] = targets.filter((t) => !t.soft);
   const dropped: ObtainTarget[] = [];
-  const oo: ChainOptions = { ...o, raw: rawRule };
-  const short = (list: readonly ObtainTarget[]): boolean => {
+  const oo: ChainOptions = chainOpts(o);
+  const missing = (list: readonly ObtainTarget[]) => {
     const need = list.filter((t) => t.item !== 'food' && haveCount(slots, t.item, o.worn) < t.n).map((t) => ({ item: t.item, n: t.n - haveCount(slots, t.item, o.worn) + carried(slots, t.item) }));
-    for (const m of planChain(index, need, slots, oo).missing) {
+    return planChain(index, need, slots, oo).missing.filter((m) => capped.has(smeltLeaf(m.item)?.input ?? m.item));
+  };
+  const short = (list: readonly ObtainTarget[]): boolean => {
+    for (const m of missing(list)) {
       const s = smeltLeaf(m.item);
-      const raw = s ? s.input : m.item;
-      if (!capped.has(raw)) continue;
       if (m.n > (s ? countOf(slots, s.inputs) : 0)) return true;
     }
     return false;
   };
+  // Track E3: what a target adds of the capped materials (a bed needs no iron: the iron kit's short ore keeps it)
+  const cappedNeed = (list: readonly ObtainTarget[]): number => missing(list).reduce((x, m) => x + m.n, 0);
   for (const t of targets) {
     if (!t.soft) continue;
-    if (haveCount(slots, t.item, o.worn) >= t.n || !short([...kept, t])) kept.push(t);
+    if (haveCount(slots, t.item, o.worn) >= t.n || !short([...kept, t]) || cappedNeed([...kept, t]) <= cappedNeed(kept)) kept.push(t);
     else dropped.push(t);
   }
   // keep the original order
@@ -264,15 +290,23 @@ export function affordable(index: Index, targets: readonly ObtainTarget[], slots
  * `!craft` command chains its ingredients); the others get a raw material, smelt, set a furnace down or cook.
  */
 export function nextAction(index: Index, targets: readonly ObtainTarget[], slots: Slots, o: ObtainOptions = {}, depth = 0): ObtainAction {
+  // Track E3: a `last` target waits for the others
+  if (targets.some((t) => t.last) && targets.some((t) => !t.last)) {
+    const first = nextAction(index, targets.filter((t) => !t.last), slots, o, depth);
+    if (first.kind !== 'done') return first;
+  }
   const all = affordable(index, targets, slots, o).kept;
   const worn = (item: string): number => haveCount(slots, item, o.worn) - carried(slots, item);
   // the furnace target is met by one standing where the cooker looks; one carried is set down
   const furnaceT = all.find((t) => t.item === 'furnace');
   if (furnaceT && !o.furnaceNear && carried(slots, 'furnace') >= 1) return { kind: 'furnace', command: 'furnace' };
-  const items = all.filter((t) => t.item !== 'food' && !(t.item === 'furnace' && o.furnaceNear));
+  // Track E3: the bed target is met by one standing where the night rule sleeps; one carried is set down
+  const bedT = all.find((t) => t.item === 'bed');
+  if (bedT && !o.bedNear && carried(slots, 'bed') >= 1) return { kind: 'bed', command: 'bed' };
+  const items = all.filter((t) => t.item !== 'food' && !(t.item === 'furnace' && o.furnaceNear) && !(t.item === 'bed' && o.bedNear));
   // worn armour and the offhand's shield count as carried: the chain plans what is short of the rest
   const short = items.filter((t) => haveCount(slots, t.item, o.worn) < t.n).map((t) => ({ ...t, n: t.n - worn(t.item) }));
-  const oo: ChainOptions = { ...o, raw: rawRule };
+  const oo: ChainOptions = chainOpts(o);
   const plan = planChain(index, short, slots, oo);
   if (short.length > 0 && plan.missing.length === 0) {
     // everything can be crafted now: the first short target (its chain is crafted with it)
@@ -362,7 +396,7 @@ export function nextAction(index: Index, targets: readonly ObtainTarget[], slots
   const food = all.find((t) => t.item === 'food');
   const raw = rawCount(slots);
   if (food && raw > 0 && o.furnaceNear) {
-    const fuel = fuelFor(index, [], slots, [], raw, { ...o, raw: rawRule }, o.coalNear === true);
+    const fuel = fuelFor(index, [], slots, [], raw, chainOpts(o), o.coalNear === true);
     if (!fuel) return { kind: 'cook', n: raw, command: 'cook' };
     // fuel within reach (coal near, logs carried to make planks of): fetched; else the raw food counts as it is
     if (fuel.kind !== 'gather') return fuel;

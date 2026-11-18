@@ -323,6 +323,10 @@ export class NightSafety {
    * (it holds the bot inside until dawn). Not while unreachable / given up: the bot may do other things.
    */
   wantsControl(): boolean {
+    // Track E3: a night shell still shut after dawn (its dawn wait, the dig open) keeps control: a user process resumed
+    // then plans its walk from inside the shell and fails (measured: a smelt resumed at dawn, `cook: furnace ...
+    // unreachable`); bounded by the shell's own dawn wait
+    if (this.shell?.closed && !this.o.inactive?.() && this.inside()) return true;
     if (!this.wantsShelter() || this.o.inactive?.()) return false;
     if (this.going) return true;
     if (this.inside()) return true;

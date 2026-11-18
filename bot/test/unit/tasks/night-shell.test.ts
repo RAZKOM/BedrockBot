@@ -238,4 +238,48 @@ describe('NightSafety with a shell (Track E1)', () => {
     await flush();
     expect(order).toEqual(['newNight', 'inside', 'open', 'walkHome']);
   });
+
+  it('Track E3: control is kept after dawn while the shell is still shut (a resumed process would plan inside it)', async () => {
+    let time = 13_000;
+    let release: () => void = () => undefined;
+    const shell = {
+      closed: false,
+      newNight: () => undefined,
+      forget: () => undefined,
+      onInside: () => {
+        shell.closed = true;
+      },
+      open: () =>
+        new Promise<void>((r) => {
+          release = () => {
+            shell.closed = false;
+            r();
+          };
+        }),
+    };
+    const pos: Vec3 = { x: 0.5, y: 64, z: 0.5 };
+    const n = new NightSafety({
+      clock: {
+        known: true,
+        get time() {
+          return time;
+        },
+      },
+      mover: { goto: () => Promise.resolve({ ok: true }), cancel: () => undefined } as never,
+      position: () => pos,
+      shelter: { x: 0, y: 64, z: 0 },
+    });
+    n.shell = shell;
+    time = 11_000;
+    n.check();
+    time = 13_000;
+    n.check();
+    expect(n.wantsControl()).toBe(true);
+    time = 23_100;
+    n.check(); // dawn: the open starts (a hostile near holds it)
+    expect(n.wantsControl()).toBe(true);
+    release();
+    await flush();
+    expect(n.wantsControl()).toBe(false);
+  });
 });

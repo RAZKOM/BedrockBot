@@ -123,6 +123,16 @@ export class NightProcess extends BaseProcess {
     return this.bedDeps !== undefined;
   }
 
+  /** Track E3: the bed clicker (`!bed` clicks a new bed by day to move the respawn point). */
+  get sleeper(): SleepController | undefined {
+    return this.bedDeps?.sleeper;
+  }
+
+  /** Track E3: a bed was placed or broken: the next `beds()` searches again. */
+  bedsChanged(): void {
+    this.bedCache = undefined;
+  }
+
   onBedEvent(fn: (e: NightBedEvent) => void): () => void {
     this.listeners.add(fn);
     return () => {

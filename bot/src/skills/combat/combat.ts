@@ -62,6 +62,7 @@
 // 'item_use_on_entity', transaction_data { entity_runtime_id, action_type 'attack', hotbar_slot,
 // hand 'main_hand', held_item (the wire item as the server sent it), player_pos (eye), click_pos 0 }.
 import { hasMending } from '../survival/tools.ts';
+import { foodInfo } from '../survival/eat.ts'; // Track E3: no blade strike while food is held
 import { silentLogger, type Logger } from '../../log.ts';
 import { events } from '../../events/bus.ts'; // decision 0059: combat.fight / combat.kill
 import type { ItemV4 } from '../../world/packets.ts';
@@ -291,6 +292,36 @@ export function bestWeaponSlot(slots: readonly (ItemStack | null)[], selected: n
   return undefined;
 }
 
+/** Track E3: digging tools a blade strike may swap out of the hand (only while no dig runs: the dig's own hand). */
+const SWAP_TOOLS = /_(pickaxe|shovel|hoe)$|^shears$/;
+
+/**
+ * Track E3 (docs/pve.md "The blade strike", ADR 0100): may one strike be made with a blade from the hotbar instead of the
+ * held item, the hand going back to the held item at once (the same tick's packets)? Only when the held item is no blade
+ * and nothing is done with it that a slot change would end: an empty hand, a block (a pillar's, a seal's, a scaffold's)
+ * that is not food, or a digging tool while no dig runs. Never food (a bite in progress is ended by the change), a bow, a
+ * shield, a rocket, a bucket, a potion or anything else that is used by holding it.
+ */
+export function swapHandOk(held: Pick<ItemStack, 'name' | 'count' | 'blockRuntimeId'> | null | undefined, digging: boolean, isFood: (name: string) => boolean = () => false): boolean {
+  if (!held || held.count <= 0) return true;
+  const n = bareType(held.name);
+  if (weaponScore(n) >= 100) return false; // a blade already
+  if (isFood(n)) return false;
+  if (SWAP_TOOLS.test(n)) return !digging;
+  return (held.blockRuntimeId ?? 0) > 0;
+}
+
+/**
+ * Track E3: the hotbar slot of the blade a strike is made with when the held item is no blade (swapHandOk), or undefined:
+ * the best intact sword or axe (bestWeaponSlot's passes: a worn one when nothing else), never the held slot.
+ */
+export function bladeStrikeSlot(slots: readonly (ItemStack | null)[], selected: number, digging: boolean, toolOk: (item: ItemStack) => boolean = () => true, isFood?: (name: string) => boolean): number | undefined {
+  if (!swapHandOk(slots[selected], digging, isFood)) return undefined;
+  const blades = slots.slice(0, 9).map((it) => (it && it.count > 0 && bladeScore(it) > 0 ? it : null));
+  const best = bestWeaponSlot(blades, selected, toolOk);
+  return best === undefined || best === selected || !blades[best] ? undefined : best;
+}
+
 const AIR_ITEM: ItemV4 & { extra: unknown } = {
   network_id: 0,
   count: 0,
@@ -507,7 +538,7 @@ export class CombatController {
   private n = 0;
   private readonly waiters: { left: number; resolve: () => void }[] = [];
   /** Totals over all fights (metrics). */
-  readonly totals = { fights: 0, kills: 0, attacks: 0, landed: 0, arrowHits: 0, pulls: 0, creepersAvoided: 0, cover: 0, retargets: 0, crowded: 0, shieldTicks: 0 };
+  readonly totals = { fights: 0, kills: 0, attacks: 0, landed: 0, arrowHits: 0, pulls: 0, creepersAvoided: 0, cover: 0, retargets: 0, crowded: 0, shieldTicks: 0, bladeStrikes: 0 };
   /** Track AH: re-pick the target within reach on every strike cycle (FightOptions.retarget default). */
   retarget = true;
   /** Track AH: the crowd rule (FightOptions.crowd default; targeting.crowded reads it too, for the flight). */
@@ -612,14 +643,36 @@ export class CombatController {
    * One strike now, if the target is a non-player within reach. Returns false when refused or out of
    * reach. Does not turn: call it while facing the target (fight() does both).
    */
-  attack(rid: bigint, opts: { reach?: number } = {}): boolean {
+  attack(rid: bigint, opts: { reach?: number; blade?: boolean } = {}): boolean {
     const e = this.d.entities().get(rid);
     if (!e || isPlayerEntity(e)) return false;
     const s = this.d.loop.state;
     const eye = { x: s.pos.x, y: s.pos.y + EYE_HEIGHT, z: s.pos.z };
     if (reachDistance(eye, e) > (opts.reach ?? 3.0)) return false;
+    // Track E3: the blade strike. The hand goes to the hotbar's blade for this strike and straight back: mob_equipment,
+    // the swing and the attack, mob_equipment, all in this tick's batch, so the work holding the item (a pillar's block,
+    // a pickaxe between digs) finds it held again before its next packet.
+    const inv = this.d.inventory;
+    const blade = opts.blade && this.d.hotbar && !this.active ? bladeStrikeSlot(inv.slots, inv.selected, this.digging(), this.toolOk, (n) => foodInfo(n) !== undefined) : undefined;
+    if (blade !== undefined && this.d.hotbar) {
+      const prev = inv.selected;
+      this.d.hotbar.select(blade);
+      this.strike(rid, eye);
+      this.d.hotbar.select(prev);
+      this.totals.bladeStrikes++;
+      return true;
+    }
     this.strike(rid, eye);
     return true;
+  }
+
+  /** Track E3: a dig runs now (the Digger's own hand: a blade strike leaves it alone). */
+  private digging(): boolean {
+    try {
+      return (this.d.mover as unknown as { digger?: { busy?: boolean } }).digger?.busy === true;
+    } catch {
+      return false;
+    }
   }
 
   /** Fight one entity until it dies or the fight ends (see the file comment). Cancels a running fight. */

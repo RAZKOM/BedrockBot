@@ -63,7 +63,7 @@ Without walking both answer `<cmd> needs a task that can walk (...)`.
 |---|---|---|---|
 | `autoFood` | on | on/off | the food chore may run by itself |
 | `foodMin` | 10 | 0..200 hunger points | the chore runs when the food carried totals fewer points (cooked beef 8, raw beef 3, bread 5, ...; rotten flesh, spider eyes, pufferfish, poisonous potatoes do not count) |
-| `foodLeave` | 0 | 0..16 mobs | wild adults of a kind left alive within the 48-block radius (`!food` and the chore); 0: every wild adult may be hunted. Animals in pens are never hunted unless asked (`!food n pen`, `chorePen`), and then down to 2 (see "Pens"). Was 2 until the owner asked for only the pens to be kept; raise it near a farm the pen detector misses |
+| `foodLeave` | 0 | 0..16 mobs | wild adults of a kind left alive within the 48-block radius (`!food` and the chore); 0: every wild adult may be hunted. Animals in pens are never hunted unless asked (`!food n pen`, `chorePen`), and then down to 2 (see "Pens"). Was 2 until the owner asked for only the pens to be kept; raise it near a farm the pen detector misses. Track E3: with no bed where the night rule looks and none carried, sheep are left as for `foodLeave` up to 3 less the wool carried (a bed's wool; docs/early-game.md "A bed") |
 | `autoBreed` | off | on/off | Track AF: the breeding chore may run (needs `chorePen`) |
 | `chorePen` | none | `x y z` or `none` | Track AF: a block inside the owner's pen: the hunt may take its animals down to 2 adults of a kind, and `autoBreed` breeds it. `!set chorePen 120 64 -30` |
 

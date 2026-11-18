@@ -363,8 +363,14 @@ export interface PveRules {
    * leg with the archer behind, and a door closed by the flight).
    */
   followHome: boolean;
+  /**
+   * Track E3 (docs/pve.md "The blade strike"): the reflex strikes with the hotbar's blade when the hand holds a block, a
+   * digging tool between digs or nothing, and the hand goes back in the same tick (combat.ts swapHandOk). A pillar holds
+   * its block: 0.9 a strike against a stone sword's 5.
+   */
+  bladeStrike: boolean;
 }
-export const PVE_RULES_DEFAULT: Readonly<PveRules> = { legHold: true, archerDuel: true, fleeLong: true, poison: true, shooterHome: true, shooterWay: true, poisonBite: true, witchCrowd: true, volley: true, bareArcher: true, witchRush: true, milkCure: true, followRun: true, sprintJump: false, craftBlade: false, backHome: true, followHome: false };
+export const PVE_RULES_DEFAULT: Readonly<PveRules> = { legHold: true, archerDuel: true, fleeLong: true, poison: true, shooterHome: true, shooterWay: true, poisonBite: true, witchCrowd: true, volley: true, bareArcher: true, witchRush: true, milkCure: true, followRun: true, sprintJump: false, craftBlade: false, backHome: true, followHome: false, bladeStrike: true };
 /** Track M10 (`followHome`): home is ahead when every archer and witch is this much farther from it than the bot (blocks, level). */
 export const FOLLOW_HOME_LEAD = 4;
 /** Track M10 (`backHome`): a flight on foot that starts within this of home (blocks, level) arms the way back. */
@@ -695,6 +701,7 @@ export class PveController {
       entities: () => world.entities,
       mobs: this.mobs,
       attack: (rid, o) => this.combat.attack(rid, o),
+      blade: () => this.rules.bladeStrike, // Track E3
       // (Track M3: under a flight only while the body comes down onto its landing: flightStrike; from farther there)
       enabled: () => this.settings.get('mobReflex') && !deps.inactive() && (this.processes.active?.name !== 'flight' || this.flightStrike?.() === true),
       reach: () => (this.processes.active?.name === 'flight' ? FLIGHT_STRIKE_REACH : REFLEX_REACH),

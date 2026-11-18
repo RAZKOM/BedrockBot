@@ -32,6 +32,8 @@ import type { CommandDeps } from '../tasks/process/deps.ts';
 import { BREED_PERIOD_MS, BREED_RADIUS, BREED_TARGET, COOK_NEAR, DEFAULT_FOOD_ITEMS, FOOD_RADIUS, FoodController, HOME_RETURN_NEAR, noPenLine, parseChorePen, type FoodJobResult } from '../tasks/process/food.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { isNight } from '../tasks/night.ts';
+import { NightProcess } from '../tasks/process/night.ts'; // Track E3
+import { sheepForBed } from '../skills/survival/bed-place.ts'; // Track E3
 
 export interface FoodCommandExtra {
   /** The afk task's Containers (world/containers.ts); without it `!cook` cannot open a furnace. */
@@ -184,6 +186,12 @@ export function registerFoodCommands(d: CommandDeps, extra: FoodCommandExtra = {
     breeder,
     entities: () => world.entities,
     penOf,
+    // Track E3: the sheep a bed needs stay while the bot has no bed (where it sleeps or carried)
+    keep: (kind) => {
+      if (kind !== 'sheep') return 0;
+      const night = processes.find('night').find((x): x is NightProcess => x instanceof NightProcess);
+      return night?.bedAttached ? sheepForBed(world.inventory.slots, night.beds().length) : 0;
+    },
   });
   controllers.set(d.task, food);
   extras.set(food, { herds, pens, breeder, babies });

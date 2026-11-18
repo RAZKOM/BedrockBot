@@ -52,6 +52,11 @@ one from 8 cobblestone and sets it down. Iron items (`!get iron_pickaxe`, `bucke
 pieces) chain through it, and `!get kit iron` (also `iron kit`) asks for the iron kit. A target worn (armour, the
 shield in the offhand) counts as carried.
 
+Track E3 (docs/early-game.md "A bed", ADR 0100): `!get bed` ends with `!bed`, which sets the bed down where the night
+rule sleeps in it; a bed already standing there counts as got. A `!kill` step that finds none within 32 walks to the
+nearest flock the food hunt remembers (`goto x y z` in the step list, two at most) and hunts again. The iron kit ends
+with a soft `bed` step.
+
 `!get` replies first, then runs the command as a copy of the owner's line through the chat's own
 handler (like a `!do` plan step), so `!stop`, `!pause`, `!status` and the command's own replies work
 as for the command typed by hand. The old commands (`!gather`, `!mine`, `!food`, `!farm`) stay.

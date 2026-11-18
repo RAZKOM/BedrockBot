@@ -107,6 +107,8 @@ export interface FoodDeps {
    * would leave the spot and walk home with the preset's items (the Realm, 2026-11-16).
    */
   restoreFirst?(why: string): boolean;
+  /** Track E3: wild adults of a kind the hunt keeps beyond foodLeave (the sheep a bed needs while the bot has none). */
+  keep?(kind: string): number;
 }
 
 /** Track AF: may the hunt take penned animals of `pen`? `!food n pen` takes any pen, else only the chorePen pen. */
@@ -189,6 +191,7 @@ export class FoodJob {
               radius: FOOD_RADIUS,
               leave: () => d.settings.get('foodLeave'),
               penAllowed: penRule(d, anyPen), // Track AF
+              ...(d.keep ? { keep: (k: string) => d.keep!(k) } : {}), // Track E3
             },
             cancelled,
           );

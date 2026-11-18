@@ -17,6 +17,9 @@ import { silentLogger, type Logger } from '../log.ts';
 import { affordable, COAL_NEAR, EARLY_KIT, foodCarried, haveCount, IRON_KIT, itemAlias, nextAction, type ObtainAction, type ObtainOptions, type ObtainTarget } from '../skills/items/obtain.ts';
 import { WINDOW_ARMOR, WINDOW_OFFHAND } from '../world/inventory.ts';
 import { smeltControlOf } from './commands-smelt.ts';
+import { bedControlOf } from './commands-bed.ts'; // Track E3
+import { foodControllerOf, foodExtrasOf } from './commands-food.ts'; // Track E3: the herd memory
+import { cellKey } from '../skills/food/herds.ts'; // Track E3
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import type { Process, ProcessManager } from '../tasks/process/manager.ts';
 import { craftControlOf } from './commands-craft.ts';
@@ -32,13 +35,15 @@ export const OBTAIN_MAX_STEPS = 24;
 export const OBTAIN_STEP_MS = 10 * 60_000;
 /** How long a command may take to start its process (ms): a refusal starts none. */
 export const OBTAIN_START_MS = 1500;
+/** Track E3: walks to a remembered herd a job makes when a hunt for a material found none within 32. */
+export const OBTAIN_HERD_WALKS = 2;
 /** Poll period while a step runs (ms). */
 const POLL_MS = 500;
 
 /** The process each step command starts. */
-const STEP_PROCESS: Readonly<Record<string, string>> = { gather: 'gather', mine: 'mine', kill: 'kill', food: 'food', craft: 'craft', smelt: 'smelt', furnace: 'furnace', cook: 'cook' };
+const STEP_PROCESS: Readonly<Record<string, string>> = { goto: 'goto', gather: 'gather', mine: 'mine', kill: 'kill', food: 'food', craft: 'craft', smelt: 'smelt', furnace: 'furnace', cook: 'cook', bed: 'bed' };
 /** Owner commands that end the job (they move the bot or start other work); `!get` replaces it itself. */
-export const OBTAIN_ABORT_ON: ReadonlySet<string> = new Set(['stop', 'goto', 'come', 'follow', 'kill', 'gather', 'mine', 'farm', 'food', 'sleep', 'home', 'top', 'fly', 'land', 'nether', 'overworld', 'craft', 'explore', 'quarry', 'tunnel', 'build', 'bring', 'unload', 'milk', 'rockets', 'smelt', 'furnace', 'cook']);
+export const OBTAIN_ABORT_ON: ReadonlySet<string> = new Set(['stop', 'goto', 'come', 'follow', 'kill', 'gather', 'mine', 'farm', 'food', 'sleep', 'home', 'top', 'fly', 'land', 'nether', 'overworld', 'craft', 'explore', 'quarry', 'tunnel', 'build', 'bring', 'unload', 'milk', 'rockets', 'smelt', 'furnace', 'cook', 'bed']);
 
 type Slots = readonly (ItemStack | null | undefined)[];
 
@@ -53,6 +58,11 @@ export interface ObtainHost {
   onCommand(fn: (e: CommandEvent) => void): () => void;
   wait(ms: number): Promise<void>;
   now?(): number;
+  /**
+   * Track E3: the nearest remembered herd (food/herds.ts, within 200) with wild adults of `kind`, its cells in `skip`
+   * left out: where a hunt that found none within 32 walks next.
+   */
+  herd?(kind: string, skip: ReadonlySet<string>): { x: number; y: number; z: number; key: string } | undefined;
   log?: Logger;
 }
 
@@ -76,6 +86,8 @@ export interface ObtainJob {
   silent?: boolean;
   /** Track E2: raw materials a mine step came back short of (`raw_iron`: `!mine iron_ore 33 got 14`): the soft targets they no longer cover are dropped. */
   capped: Map<string, string>;
+  /** Track E3: remembered herds walked to (cell keys). */
+  herds: Set<string>;
   /** Resolves with the end line. */
   result: Promise<string>;
 }
@@ -169,7 +181,7 @@ export class ObtainController {
     const want = targets.filter((t) => !carried(t));
     reply(`getting ${label.startsWith('kit') ? `the ${label} (${targetsText(want)})` : targetsText(want)}: first !${first.command}`);
     let resolve!: (s: string) => void;
-    const job: ObtainJob = { label, targets, startedAt: this.now(), steps: [], step: undefined, process: undefined, aborted: undefined, capped: new Map(), result: new Promise((r) => (resolve = r)) };
+    const job: ObtainJob = { label, targets, startedAt: this.now(), steps: [], step: undefined, process: undefined, aborted: undefined, capped: new Map(), herds: new Set(), result: new Promise((r) => (resolve = r)) };
     this.job = job;
     void this.run(line, job).then(
       (end) => {
@@ -208,18 +220,41 @@ export class ObtainController {
       job.step = a;
       const before = counts(this.h.slots(), this.h.options().worn);
       const furnaceBefore = this.h.options().furnaceNear === true;
+      const bedBefore = this.h.options().bedNear === true; // Track E3
       const t0 = this.now();
       const soft = job.targets.some((t) => t.soft);
-      const reply = await this.step(line, job, a.command, soft && a.kind === 'mine');
+      const reply = await this.step(line, job, a.command, soft && (a.kind === 'mine' || a.kind === 'hunt'));
       const after = counts(this.h.slots(), this.h.options().worn);
       // Track E2: a furnace set down is progress though no item was gained (one fewer carried)
-      const g = gained(before, after) + (a.kind === 'furnace' && !furnaceBefore && this.h.options().furnaceNear === true ? 1 : 0);
+      // Track E3: so is a bed set down where the night rule sleeps
+      const g = gained(before, after) + (a.kind === 'furnace' && !furnaceBefore && this.h.options().furnaceNear === true ? 1 : 0) + (a.kind === 'bed' && !bedBefore && this.h.options().bedNear === true ? 1 : 0);
       job.steps.push({ command: a.command, ms: this.now() - t0, reply, gained: g });
       this.log.info(`${head()}: !${a.command} -> ${g} items gained in ${Math.round((this.now() - t0) / 100) / 10} s${reply ? ` (${reply})` : ''}`);
       // Track E2: a mine step that came back short caps its material (the soft targets it no longer covers are dropped)
-      if (a.kind === 'mine' && soft) {
+      // Track E3: a hunt that found none within 32 walks to the nearest remembered herd of the kind (twice at most),
+      // then hunts again (measured on a fresh world: no sheep within 32 of home, `!get bed` stopped there)
+      if (a.kind === 'hunt' && (after.get(a.item) ?? 0) <= (before.get(a.item) ?? 0) && job.herds.size < OBTAIN_HERD_WALKS) {
+        const m = this.h.herd?.(a.mob, job.herds);
+        if (m) {
+          job.herds.add(m.key);
+          const walk = `goto ${Math.round(m.x)} ${Math.round(m.y)} ${Math.round(m.z)}`;
+          const t1 = this.now();
+          const wr = await this.step(line, job, walk);
+          job.steps.push({ command: walk, ms: this.now() - t1, reply: wr, gained: 0 });
+          this.log.info(`${head()}: no ${a.mob} within 32: walked to the herd remembered at ${walk.slice(5)}${wr ? ` (${wr})` : ''}`);
+          if (job.aborted) return `${head()}: stopped by ${job.aborted} after ${took()}`;
+          continue;
+        }
+      }
+      // Track E3: so does a hunt (the bed's wool: `!kill sheep 3` with fewer sheep near)
+      let capped = false;
+      if ((a.kind === 'mine' || a.kind === 'hunt') && soft) {
         const got = (after.get(a.item) ?? 0) - (before.get(a.item) ?? 0);
-        if (got < a.n) job.capped.set(a.item, `!${a.command} got ${Math.max(0, got)}`);
+        // a hunt caps only when it got none: sheep of another colour leave the wool short, and the next hunt takes more
+        if (a.kind === 'mine' ? got < a.n : got <= 0) {
+          job.capped.set(a.item, `!${a.command} got ${Math.max(0, got)}${a.kind === 'hunt' ? ` ${a.item}` : ''}`);
+          capped = true;
+        }
       }
       if (job.aborted) return `${head()}: stopped by ${job.aborted} after ${took()}`;
       const why = reply ? ` (${reply.length > 120 ? `${reply.slice(0, 117)}...` : reply})` : '';
@@ -227,6 +262,8 @@ export class ObtainController {
       // Track E2: in a kit with soft targets (the iron kit) also with none carried: everything else is made, and the
       // kit's food was eaten during the mine and the smelt (measured on a fresh world: 14 minutes, 0 of 6 at the end)
       if (g === 0 && a.kind === 'food' && (foodCarried(this.h.slots()) > 0 || soft)) return `${head()}: done in ${took()}${short()}; food ${foodCarried(this.h.slots())} of ${job.targets.find((t) => t.item === 'food')?.n ?? 0}: !${a.command} got nothing${why}; steps: ${list()}`;
+      // Track E3: a hunt for a soft target's material that got nothing drops that target and the job goes on
+      if (g === 0 && capped && a.kind === 'hunt' && affordable(this.h.recipes, job.targets, this.h.slots(), this.opts(job)).dropped.length > 0) continue;
       if (g === 0) return `${head()}: stopped after ${took()}: !${a.command} got nothing${why}`;
     }
     return `${head()}: stopped after ${took()}: ${OBTAIN_MAX_STEPS} steps and not done`;
@@ -329,10 +366,20 @@ export function registerKitCommands(d: CommandDeps): ObtainController | undefine
       const me = d.mobility?.loop.state.pos;
       const coal = me ? world.find((b) => b.name === 'coal_ore' || b.name === 'deepslate_coal_ore', { origin: me, radius: COAL_NEAR, max: 1 }).length > 0 : false;
       const worn = [...(world.inventory.window(WINDOW_ARMOR)?.slots ?? []), ...(world.inventory.window(WINDOW_OFFHAND)?.slots ?? [])];
-      return { ...craft.chainOptions(), furnaceNear: (smeltControlOf(d.task)?.furnaces().length ?? 0) > 0, coalNear: coal, worn };
+      // Track E3: a bed where the night rule sleeps
+      return { ...craft.chainOptions(), furnaceNear: (smeltControlOf(d.task)?.furnaces().length ?? 0) > 0, coalNear: coal, worn, bedNear: (bedControlOf(d.task)?.beds().length ?? 0) > 0 };
     },
     onCommand: (fn) => d.chat.onCommand(fn),
     wait: (ms) => new Promise((r) => setTimeout(r, ms)),
+    herd: (kind, skip) => {
+      // Track E3: the food commands' herd memory
+      const food = foodControllerOf(d.task);
+      const herds = food ? foodExtrasOf(food)?.herds : undefined;
+      const me = d.mobility?.loop.state.pos;
+      if (!herds || !me) return undefined;
+      const m = herds.next(me, { leave: d.settings.get('foodLeave'), kinds: [kind], skip });
+      return m ? { x: m.x, y: m.y, z: m.z, key: cellKey(m.cx, m.cz) } : undefined;
+    },
     log: d.log,
   });
   // every reply goes through chat.say: the running step keeps the last one for the end line

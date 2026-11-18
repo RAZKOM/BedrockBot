@@ -229,6 +229,8 @@ export interface TargetQuery {
   penOf?(e: EntityInfo): Pen | undefined;
   /** Track AF: may this pen's animals of `kind` be hunted (down to PEN_KEEP adults)? Default never. */
   penAllowed?(pen: Pen, kind: string): boolean;
+  /** Track E3: wild adults of a kind kept beyond `leave` (the sheep a bed needs while the bot has none). */
+  keep?(kind: string): number;
 }
 
 export interface FoodTarget {
@@ -311,7 +313,7 @@ export function pickTarget(entities: Iterable<EntityInfo>, q: TargetQuery): Food
     if (pen) {
       if (!q.penAllowed?.(pen, kind)) continue;
       if ((penned.get(pen.id)?.get(kind)?.adults ?? 0) <= PEN_KEEP) continue;
-    } else if ((herd.get(kind)?.adults ?? 0) <= q.leave) continue;
+    } else if ((herd.get(kind)?.adults ?? 0) <= Math.max(q.leave, q.keep?.(kind) ?? 0)) continue;
     const distance = Math.hypot(f.x - q.me.x, f.y - q.me.y, f.z - q.me.z);
     const score = distance - 2 * FOOD_ANIMALS[kind]!.expected;
     if (!best || score < best.score) best = { entity: e, kind, distance, score, pen };

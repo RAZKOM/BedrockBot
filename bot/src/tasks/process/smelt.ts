@@ -11,6 +11,7 @@ import type { Logger } from '../../log.ts';
 import type { CookOptions, CookResult } from '../../skills/food/cook.ts';
 import type { FurnaceResult } from '../../skills/food/furnace.ts';
 import type { ItemStack, Vec3 } from '../../world/types.ts';
+import type { SmeltShell } from '../smelt-shell.ts';
 import { BaseProcess, PRIORITY, type ProcessStatus, type StopReason } from './manager.ts';
 
 export interface SmeltDeps {
@@ -24,6 +25,8 @@ export interface SmeltDeps {
   slots(): readonly (ItemStack | null)[];
   /** Cancel the running skill (a pause or a stop). */
   cancel(): void;
+  /** Track E3: the smelt shell (tasks/smelt-shell.ts, `smeltShell`): one per job, kept across a pause. */
+  makeShell?(): SmeltShell;
   log?: Logger;
 }
 
@@ -57,7 +60,9 @@ function mergeCook(a: CookResult | undefined, b: CookResult): CookResult {
 
 /** One furnace-then-smelt job; resumable after a pause (a placed furnace is found again, a smelt goes on with what is left). */
 export class SmeltJob {
-  phase: 'furnace' | 'smelt' | 'done' = 'furnace';
+  phase: 'furnace' | 'smelt' | 'open' | 'done' = 'furnace';
+  /** Track E3: the shell the smelt waits in (built when the rule says so). */
+  shell: SmeltShell | undefined;
   furnace: FurnaceResult | undefined;
   crafted = false;
   cook: CookResult | undefined;
@@ -101,6 +106,14 @@ export class SmeltJob {
       if (this.req.limit !== undefined) o.limit = Math.max(0, this.req.limit - this.put);
       // Track E2: after a pause the furnace still holds what went in: back there first, even with nothing left to put in
       if (this.inFurnace) o.at = this.inFurnace;
+      // Track E3: a smelt that outlasts the day, or one by night, waits in a shell next to the furnace
+      const at = this.inFurnace ?? (this.furnace?.ok ? this.furnace.pos : undefined);
+      if (d.makeShell && at) {
+        this.shell ??= d.makeShell();
+        const total = [...this.req.inputs!(d.slots()).values()].reduce((a, b) => a + b, 0);
+        await this.shell.close(at, Math.min(total, o.limit ?? Infinity), cancelled);
+        if (cancelled()) return false;
+      }
       const r = await d.cooker.cook(o, cancelled);
       this.smelted += Object.values(r.cooked).reduce((a, b) => a + b, 0);
       this.put += r.put ?? Object.values(r.cooked).reduce((a, b) => a + b, 0);
@@ -112,6 +125,14 @@ export class SmeltJob {
       }
       this.inFurnace = undefined;
       this.reason = r.reason;
+      this.phase = 'open';
+    }
+    if (this.phase === 'open') {
+      // Track E3: out of the shell (by night at dawn); a pre-emption leaves it standing for the resume
+      if (this.shell?.closed) {
+        await this.shell.open(cancelled);
+        if (cancelled()) return false;
+      }
       this.phase = 'done';
     }
     return true;
@@ -123,7 +144,8 @@ export class SmeltJob {
 
   line(d: SmeltDeps): string {
     if (this.phase === 'furnace') return this.req.kind === 'furnace' ? 'placing a furnace' : 'smelt: placing a furnace';
-    if (this.phase === 'smelt') return d.cooker.phase === 'idle' ? 'smelting' : d.cooker.phase;
+    if (this.phase === 'smelt') return d.cooker.phase === 'idle' ? (this.shell?.closed ? 'smelting (in a shell)' : 'smelting') : `${d.cooker.phase}${this.shell?.closed ? ' (in a shell)' : ''}`;
+    if (this.phase === 'open') return 'smelt: in the shell until it is safe to open';
     return this.req.kind;
   }
 }

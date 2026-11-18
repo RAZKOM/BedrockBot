@@ -48,6 +48,7 @@ class Inv {
 }
 
 /** What the commands do, simplified: gather logs, mine with the harvest rule, hunt, craft the chain then the item. */
+let placedBeds = 0;
 function apply(idx: RecipeIndex, inv: Inv, a: ObtainAction): void {
   switch (a.kind) {
     case 'gather':
@@ -62,6 +63,10 @@ function apply(idx: RecipeIndex, inv: Inv, a: ObtainAction): void {
       return;
     case 'food':
       inv.add('beef', a.n);
+      return;
+    case 'bed': // Track E3: set down where the night rule sleeps
+      inv.take('bed', 1);
+      placedBeds++;
       return;
     case 'craft': {
       const chain = planChain(idx, [{ item: a.item, n: a.n + inv.slots.reduce((x, s) => x + (s?.name === a.item ? s.count : 0), 0) }], inv.slots, keep);
@@ -82,8 +87,9 @@ function apply(idx: RecipeIndex, inv: Inv, a: ObtainAction): void {
 function run(targets: readonly ObtainTarget[], inv = new Inv()): { steps: string[]; end: ObtainAction; inv: Inv } {
   const idx = index();
   const steps: string[] = [];
+  placedBeds = 0;
   for (let i = 0; i < 30; i++) {
-    const a = nextAction(idx, targets, inv.slots, keep);
+    const a = nextAction(idx, targets, inv.slots, { ...keep, bedNear: placedBeds > 0 });
     if (a.kind === 'done' || a.kind === 'stuck') return { steps, end: a, inv };
     steps.push(a.command);
     apply(idx, inv, a);
@@ -122,11 +128,15 @@ describe('obtain: the next command (Track E1)', () => {
     expect(foodCarried(r.inv.slots)).toBeGreaterThanOrEqual(6);
   });
 
-  it('a bed: wool from three sheep, planks from a log', () => {
+  it('a bed: wool from three sheep, planks from a log, then set down where the night rule sleeps (Track E3)', () => {
     const r = run([{ item: 'bed', n: 1 }]);
     expect(r.end).toEqual({ kind: 'done' });
-    expect(r.steps).toEqual([expect.stringMatching(/^gather \d+$/), 'kill sheep 3', 'craft bed 1']);
-    expect(r.inv.slots.some((s) => s?.name === 'bed')).toBe(true);
+    expect(r.steps).toEqual([expect.stringMatching(/^gather \d+$/), 'kill sheep 3', 'craft bed 1', 'bed']);
+    expect(placedBeds).toBe(1);
+    expect(r.inv.slots.some((s) => s?.name === 'bed')).toBe(false);
+    // a bed standing there already: done; one carried and none there: set down
+    expect(nextAction(index(), [{ item: 'bed', n: 1 }], [], { ...keep, bedNear: true })).toEqual({ kind: 'done' });
+    expect(nextAction(index(), [{ item: 'bed', n: 1 }], [item('bed')], keep)).toEqual({ kind: 'bed', command: 'bed' });
   });
 
   it('what has no rule stops with the reason', () => {

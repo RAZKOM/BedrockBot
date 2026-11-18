@@ -17,6 +17,11 @@
 //   the lowered shield: a lit creeper within its blast (CREEPER_STRIKE_RANGE) and a melee mob about to land a hit from
 //   outside the shield's arc (the shield blocks 0 to 90 degrees off the view, measured: one in front is blocked anyway).
 //
+// Track E3 (docs/pve.md "The blade strike", ADR 0100): a strike is made with whatever the hand holds, and a pillar holds
+// its block. In a one-wide shaft a zombie came down onto a bot pillaring up a mine step's way out: 14 strikes with the
+// cobblestone (0.9 each, measured; the zombie has 20) and the bot died, 20 to 0 in 6 s. With the hotbar's blade for the
+// strike and the hand back in the same tick (a stone sword about 5, a stone pickaxe 3.9) the zombie dies in 4 or 5.
+//
 // Who it never strikes: players (also under any name), passive mobs, items, the warden and the creaking
 // (striking them only makes it worse), iron golems (deadly; running is the answer), and neutral mobs
 // unless they attacked: the server says they target the bot (`target_eid`) AND the bot's hit guess blamed
@@ -204,8 +209,13 @@ export interface ReflexDeps {
   };
   entities: () => ReadonlyMap<bigint, EntityInfo>;
   mobs: MobTracker;
-  /** One strike without turning (CombatController.attack); false when refused. */
-  attack: (rid: bigint, opts: { reach: number }) => boolean;
+  /**
+   * One strike without turning (CombatController.attack); false when refused. `blade`: Track E3, the strike may be made
+   * with the hotbar's blade, the hand going back at once (combat.ts swapHandOk, bladeStrikeSlot).
+   */
+  attack: (rid: bigint, opts: { reach: number; blade?: boolean }) => boolean;
+  /** Track E3 (PveRules.bladeStrike): strike with the hotbar's blade when the hand holds a block, a tool or nothing. */
+  blade?: () => boolean;
   /** On (the `mobReflex` setting) and able (alive, spawned, not flying). */
   enabled: () => boolean;
   /** Track M3: the eye-to-box distance it strikes at now (default REFLEX_REACH; farther while a flight comes down onto its landing). */
@@ -272,9 +282,10 @@ export class Reflex {
       skip: this.d.fightTarget?.(),
     });
     let n = 0;
+    const blade = picks.length > 0 && this.d.blade?.() === true;
     for (const c of picks) {
       if (n >= MAX_PER_TICK) break;
-      if (!this.d.attack(c.e.runtimeId, { reach: reach + 0.05 })) continue;
+      if (!this.d.attack(c.e.runtimeId, { reach: reach + 0.05, ...(blade ? { blade: true } : {}) })) continue;
       n++;
       const rid = c.e.runtimeId;
       const type = bareType(c.e.type);

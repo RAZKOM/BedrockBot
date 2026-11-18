@@ -23,6 +23,8 @@ import { settingsMover } from '../tasks/process/goto.ts';
 import { HOME_RETURN_NEAR } from '../tasks/process/food.ts';
 import { SmeltJob, SmeltProcess, type SmeltDeps, type SmeltJobResult } from '../tasks/process/smelt.ts';
 import type { ItemStack } from '../world/types.ts';
+import { SmeltShell } from '../tasks/smelt-shell.ts'; // Track E3
+import { NightProcess } from '../tasks/process/night.ts'; // Track E3
 
 /** Cobblestone the automatic furnace leaves carried (the night shell's 10 cells and a few pillars: the stone kit's 16). */
 export const FURNACE_KEEP_COBBLE = 16;
@@ -150,8 +152,23 @@ export function registerSmeltCommands(d: CommandDeps): SmeltControl | undefined 
       if (pve.mover.nav.busy) pve.mover.cancel();
       skills.cancel();
     },
+    makeShell: () => shell(),
     log,
   });
+  // Track E3: the smelt shell (smeltShell): the clock from the night process, the seal from PvE
+  const shell = (): SmeltShell =>
+    new SmeltShell({
+      enabled: () => d.settings.get('smeltShell'),
+      deps: () => pve.sealDeps(),
+      time: () => processes.find('night').find((x): x is NightProcess => x instanceof NightProcess)?.timeOfDay(),
+      shelters: () => [d.task.shelter?.get(), d.task.home?.get()].filter((v): v is Vec3 => v !== undefined),
+      walkTo: async (cell, cancelled) => {
+        const r = await mover.goto({ type: 'block', p: cell }, { timeoutTicks: 400 });
+        return !cancelled() && r.ok;
+      },
+      blockAt: (q) => world.blockAt(q),
+      log,
+    });
   const control: SmeltControl = {
     furnaces,
     start: (kind, names, n) => processes.add(new SmeltProcess(deps(0), new SmeltJob({ kind, ...(kind === 'smelt' ? { inputs: inputsFor(names) } : {}), ...(n !== undefined ? { limit: n } : {}) }))),

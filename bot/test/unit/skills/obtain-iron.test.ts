@@ -25,6 +25,7 @@ class Inv {
   slots: (ItemStack | null)[] = Array.from({ length: 36 }, () => null);
   worn: (ItemStack | null)[] = [null, null, null, null, null];
   furnace = false;
+  bed = false; // Track E3: a bed set down where the night rule sleeps
   constructor(items: readonly (readonly [string, number])[] = []) {
     for (const [n, c] of items) this.add(n, c);
   }
@@ -115,6 +116,10 @@ function apply(idx: RecipeIndex, inv: Inv, a: ObtainAction, w: World): void {
       inv.take('furnace', 1);
       inv.furnace = true;
       return;
+    case 'bed':
+      inv.take('bed', 1);
+      inv.bed = true;
+      return;
     case 'smelt': {
       expect(inv.furnace).toBe(true);
       inv.burn(a.n);
@@ -144,7 +149,7 @@ function run(targets: readonly ObtainTarget[], inv = new Inv(), w: World = { iro
   const steps: string[] = [];
   const capped = new Set<string>();
   for (let i = 0; i < 40; i++) {
-    const o: ObtainOptions = { ...keep, furnaceNear: inv.furnace, coalNear: w.coalNear, worn: inv.worn, capped };
+    const o: ObtainOptions = { ...keep, furnaceNear: inv.furnace, coalNear: w.coalNear, worn: inv.worn, capped, bedNear: inv.bed };
     const a = nextAction(idx, targets, inv.slots, o);
     if (a.kind === 'done' || a.kind === 'stuck') return { steps, end: a, inv, dropped: affordable(idx, targets, inv.slots, o).dropped.map((t) => t.item) };
     steps.push(a.command);
@@ -278,6 +283,20 @@ describe('obtain: iron (Track E2)', () => {
     expect(a).toMatchObject({ kind: 'mine', block: 'iron_ore', n: 4 });
     expect(affordable(idx, IRON_KIT, inv.slots, { ...keep, capped }).dropped.map((t) => t.item)).toEqual(['iron_chestplate', 'iron_leggings', 'iron_boots', 'iron_helmet']);
     void w;
+  });
+
+  it('Track E3: the bed after the iron, soft: a short ore keeps it (no iron in it), a hunt that got no wool drops it', () => {
+    const idx = index();
+    const inv = new Inv(STONE_KIT);
+    inv.add('raw_iron', 5);
+    expect(affordable(idx, IRON_KIT, inv.slots, { ...keep, capped: new Set(['raw_iron']) }).dropped.map((t) => t.item)).not.toContain('bed');
+    expect(affordable(idx, IRON_KIT, inv.slots, { ...keep, capped: new Set(['white_wool']) }).dropped.map((t) => t.item)).toEqual(['bed']);
+    // ore enough: the bed is made and set down; the steps end with the kit's food
+    const r = run(IRON_KIT, new Inv(STONE_KIT));
+    expect(r.steps).toContain('kill sheep 3');
+    expect(r.steps).toContain('craft bed 1');
+    expect(r.steps.indexOf('bed')).toBeGreaterThan(r.steps.indexOf('craft bed 1'));
+    expect(r.inv.bed).toBe(true);
   });
 
   it('worn armour and the offhand shield count as carried', () => {

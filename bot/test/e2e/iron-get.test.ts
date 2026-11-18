@@ -109,7 +109,7 @@ describe.skipIf(!E2E)('@bds iron get: iron items through the obtain job (Track E
     const t0 = Date.now();
     await b.command('!get kit iron');
     const first = await b.reply((s) => s.startsWith('getting ') || s.startsWith('get'), from);
-    expect(first).toMatch(/^getting the kit iron \(iron_pickaxe, iron_sword, shield, bucket, iron_chestplate, iron_leggings, iron_boots, iron_helmet, 6 food\): first !/);
+    expect(first).toMatch(/^getting the kit iron \(iron_pickaxe, iron_sword, shield, bucket, iron_chestplate, iron_leggings, iron_boots, iron_helmet(, bed)?, 6 food\): first !/); // Track E3: + the soft bed
     const end = await b.reply((s) => s.startsWith('get kit iron: '), from, 900_000);
     const ms = Date.now() - t0;
     await sleep(3000); // the armour pass and the offhand move after the last craft
@@ -118,7 +118,9 @@ describe.skipIf(!E2E)('@bds iron get: iron items through the obtain job (Track E
     const armour = (world.inventory.window(WINDOW_ARMOR)?.slots ?? []).map((s) => s?.name ?? '-');
     const offhand = world.inventory.window(WINDOW_OFFHAND)?.slots[0]?.name ?? (world.inventory.window(WINDOW_OFFHAND)?.slots ?? []).find((s) => s)?.name;
     notes.push(`kit: ${end}; ${(ms / 1000).toFixed(1)} s; armour ${armour.join(',')}; offhand ${offhand ?? '-'}; inventory ${JSON.stringify(inv)}`);
-    expect(end).toMatch(/^get kit iron: done in \d+ s, \d+ steps; short: iron_chestplate, iron_leggings, iron_helmet \(!mine iron_ore 33 got 13\); steps: mine iron_ore 33, .*smelt raw_iron 13/);
+    expect(end).toMatch(/^get kit iron: done in \d+ s, \d+ steps; short: iron_chestplate, iron_leggings, iron_helmet(, bed)? \(!mine iron_ore 33 got 13(; !kill sheep 3 got 0 white_wool)?\); steps: mine iron_ore 33, /); // Track E3: the bed last, short too with no sheep near
+    // Track E3: the longer `short:` leaves the smelt step past the reply limit; the job's log names it
+    expect(b.logs.some((l) => l.includes('get kit iron: !smelt raw_iron 13 -> 13 items'))).toBe(true);
     expect(inv.iron_pickaxe).toBe(1);
     expect(inv.iron_sword).toBe(1);
     expect(inv.bucket).toBe(1);

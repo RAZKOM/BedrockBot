@@ -597,6 +597,51 @@ the bot and the hit guess blamed it within 10 s.
 Log: `reflex: zombie #12 in reach (2.8 feet, eta 0.4 s): striking` once an engagement, `reflex: zombie #12 down (...)`.
 Metrics: `pve.reflex.hits`, `pve.reflex.kills`; the PvE status (`!status`, the panel) has `reflex: { hits, landed, kills }`.
 
+#### The blade strike (Track E3, `PveRules.bladeStrike`, on; ADR 0100)
+
+The reflex strikes with whatever the hand holds, and the hand holds what the running job needs: a pillar's block, a
+pickaxe between digs, nothing. Measured on the server: a strike with cobblestone or the fist takes 0.9 from a zombie
+(20 health), a stone pickaxe 3.9, a stone sword 5.9 (8.9 a critical). On a fresh world a mine step's walk pillared up a
+one-wide shaft of its own digging, a zombie came down it, and the reflex struck it 14 times with the cobblestone; the
+bot died 20 to 0 in 6 s (guard off, the flight at 6 health found no way out of the shaft).
+
+With the rule on, a reflex strike made while the hand holds a block item, a digging tool (pickaxe, shovel, hoe,
+shears) while no dig runs, or nothing, is made with the best sword or axe in the hotbar: `mob_equipment` to the blade,
+the swing and the attack with that slot, `mob_equipment` back, all queued before the same tick's input (the hand is
+back before the job's next action). Never while a blade is held (nothing to gain), during a dig (the dig's hand),
+while eating (food in hand, the meal ends if the slot changes), during guard's or a flight's own fight (they choose
+their weapon), or with an item used by holding it (a bow, a shield, a bucket, rockets, a totem). The worn blade is
+taken too (the fight takes it too). `combat.totals.bladeStrikes` counts them.
+
+The shaft replica (`test/e2e/early-shaft.test.ts`; the flat world, a 5 x 5 block 10 high with a one-wide shaft, the
+early kit: a stone pickaxe, a stone sword in the hotbar, 32 cobblestone; `!goto` to the top with `allowPlace`; a
+zombie summoned 6 over the feet once they are 2 up; difficulty normal, midnight, guard off), 5 runs a side:
+
+| walls | rule | deaths | reached the top | damage a run | strikes to kill | seconds to the top |
+|---|---|---|---|---|---|---|
+| stone | off | 0 | 5 | 0, 6, 3, 0, 0 | 9 to 11 | 16.6 to 17.0 |
+| stone | on | 0 | 5 | 0 in all | 3 to 4 | 16.7 to 18.1 |
+| obsidian (no way out but up) | off | 0 | 0 (the case's 60 s ran out) | 9, 3, 0, 0, 0 | 21 to 40, 0.9 to 1.4 each | - |
+| obsidian | on | 0 | 5 | 0 in all | 3 to 4 | 7.2 to 8.3 |
+
+The replica did not kill the bot with the rule off: the fresh world's hits kept the body in the air (the walk waited
+with `no start node while in the air` and the place at the top was refused), which the flat case does not do. The
+obsidian walls stand in for that (the walk cannot dig round the zombie).
+
+The live kit (a sword held) is not changed by it: the gauntlet's `live` rows with `MOBS_AB_RULE=bladeStrike`, 15 runs a
+side, bds-dig and bds-reg (the test servers of this track, BDS 1.26.60.6), from rest:
+
+| cell | rule | deaths | damage a run | lowest health (median) | reflex strikes a run |
+|---|---|---|---|---|---|
+| mixed-8 | off | 0 | 4.5 | 18.4 | 18.2 |
+| mixed-8 | on | 0 | 5.7 | 18.4 | 18.1 |
+| witch-1 | off | 0 | 0.0 | 20 | 3.3 |
+| witch-1 | on | 0 | 0.0 | 20 | 3.0 |
+| witch-2 | off | 0 | 1.9 | 19.0 | 6.1 |
+| witch-2 | on | 0 | 1.9 | 19.0 | 6.1 |
+
+`mixed-8`'s gap is one run (28.6 on, the highest off 12.7); the medians are 1.6 off and 1.9 on.
+
 ### The floors (the health rule, `pveFloor` in tasks/pve.ts)
 
 | Floor | When |

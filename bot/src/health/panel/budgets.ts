@@ -21,9 +21,9 @@ export const PANEL_BUDGETS = {
    * from 140 000: the `fireworksKeep` and `autoRockets` rows and the rockets vitals row (1 467 bytes) took it to 140 995.
    * Track K3 raised it from 141 500: the `milkRange` row (710 bytes) took it to 141 705.
    * Track E1's `nightShell` row (617 bytes) took it to 142 263. Track E2 raised it from 142 500: the `cookFurnace` row
-   * (633 bytes) took it to 142 896.
+   * (633 bytes) took it to 142 896. Track E3 raised it from 143 500: the `smeltShell` row (615 bytes) took it to 143 511.
    */
-  html: 143_500,
+  html: 144_000,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**

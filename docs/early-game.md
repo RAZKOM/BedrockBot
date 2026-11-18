@@ -1,10 +1,11 @@
-# The early game: day one from an empty inventory (Track E1), the iron age (Track E2)
+# The early game: day one from an empty inventory (Track E1), the iron age (Track E2), the shaft, the furnace wait and a bed (Track E3)
 
 What the bot does on a fresh survival world when it starts with nothing, the commands an owner types for the first
 day, the iron age after the stone kit (a furnace, smelting, cooked food, iron tools and armour), and what is still
 missing before it can live through the first nights on its own. Decision records:
 [decisions/0098-day-one-from-nothing.md](decisions/0098-day-one-from-nothing.md),
-[decisions/0099-iron-age.md](decisions/0099-iron-age.md).
+[decisions/0099-iron-age.md](decisions/0099-iron-age.md),
+[decisions/0100-shaft-furnace-bed.md](decisions/0100-shaft-furnace-bed.md).
 
 Measured on BDS 1.26.60.6 (itzg/minecraft-bedrock-server 2026.10.2), a default-generated world (a forest with stone
 under it near spawn), difficulty normal, the daylight cycle and mob spawning on, the bot alone with an owner in
@@ -32,6 +33,14 @@ peaceful test server with the truth pack.
 | `bot/src/skills/craft/table-spot.ts` | Track E2: a wall cell dug out when no cell is free (`dig`), `canHarvestCarried` |
 | `bot/src/skills/mine/miner.ts` | Track E2: after a timeout the closest ore's touching vein is skipped with it |
 | `bot/test/unit/skills/smelt.test.ts`, `obtain-iron.test.ts`, `bot/test/unit/fixtures/crafting-data-iron-1.26.60.json`, `bot/test/e2e/iron-smelt.test.ts`, `iron-get.test.ts` | Track E2 tests (99 grid recipes recorded from BDS 1.26.60.6: the early ones, iron tools, armour, the bucket, the shield, shears) |
+| `bot/src/skills/combat/combat.ts`, `bot/src/skills/combat/reflex.ts`, `bot/src/tasks/pve.ts` | Track E3: the blade strike (`PveRules.bladeStrike`; docs/pve.md "The blade strike") |
+| `bot/src/tasks/smelt-shell.ts`, `bot/src/tasks/process/smelt.ts` | Track E3: `SmeltShell` (`smeltShell`), `smeltOutlastsDay`, `shellStandCell`, `smeltShellBrace` |
+| `bot/src/tasks/night.ts` | Track E3: `NightSafety.wantsControl` keeps control while the night shell is still shut after dawn |
+| `bot/src/skills/survival/bed-place.ts` | Track E3: `placeBed`, `bedSpots`, `sheepForBed`, `bedsCarried` |
+| `bot/src/tasks/process/bed.ts`, `bot/src/chat/commands-bed.ts` | Track E3: `BedJob`, `BedProcess`; `!bed [status]`, `bedControlOf` |
+| `bot/src/skills/food/finder.ts`, `hunter.ts`, `bot/src/tasks/process/food.ts`, `bot/src/chat/commands-food.ts` | Track E3: the hunt's `keep` (the bed's sheep) |
+| `bot/src/skills/items/obtain.ts`, `bot/src/chat/commands-kit.ts` | Track E3: the `bed` step, the iron kit's bed (`last`), `noDyeRecipe`, the herd walk for a hunt, a soft hunt capped |
+| `bot/test/unit/skills/blade-strike.test.ts`, `bed-place.test.ts`, `bot/test/unit/tasks/smelt-shell.test.ts`, `bot/test/e2e/early-shaft.test.ts`, `early-smelt.test.ts`, `early-bed.test.ts` | Track E3 tests |
 
 ## Day one as an owner types it
 
@@ -356,21 +365,136 @@ What the time goes to: the mine step (3.5 to 7 minutes for 33 ore, found by the 
 sunrise and the stone kit and the mine step take about 10 minutes, so the smelt fell at dusk or by night in every run:
 in run 3 a creeper and a skeleton took the bot to 6 health at the furnace, in run 9 it died there.
 
+## A mob at the top of a shaft (Track E3)
+
+A walk that has to go up where there is no step pillars: it jumps and places a block under its feet, the block item
+in the hand. In a one-wide shaft (the mine step's own, or any hole) a mob that comes down from the top stands on the
+bot's head, out of the flight's reach. The reflex (docs/pve.md "The reflex") struck it, but with what the hand held:
+a block or the fist takes 0.9 from a zombie's 20, so the zombie lives through 20 strikes and more. On a fresh world
+this was a death by day: 20 to 0 in 6 s, 14 strikes with the cobblestone, no way out.
+
+The rule (`PveRules.bladeStrike`, on): a reflex strike made with a block, a digging tool between digs or nothing in
+the hand is made with the best sword or axe in the hotbar, and the hand goes back for the job's next action (the
+details in docs/pve.md "The blade strike"). A stone sword takes a zombie in 3 or 4 strikes. The other ways (stop
+climbing, a block over the head) are not built: they change every pillar the walk makes; the strike changes only what
+a strike already made hits with.
+
+On the replica (a one-wide shaft 10 high, a zombie 6 over the bot's feet once they are 2 up, the stone kit, guard off),
+5 runs a side, 0 deaths either way:
+
+| Walls | Rule | Reached the top | Damage a run | Strikes |
+|---|---|---|---|---|
+| stone (the walk can dig round) | off | 5 of 5, 16.6 to 17.0 s | 0, 6, 3, 0, 0 | 9 to 11 |
+| stone | on | 5 of 5, 16.7 to 18.1 s | 0 | 3 to 4 |
+| obsidian (only up) | off | 0 of 5 in 60 s | 9, 3, 0, 0, 0 | 21 to 40 |
+| obsidian | on | 5 of 5, 7.2 to 8.3 s | 0 | 3 to 4 |
+
+The flat case does not kill the bot with the rule off (on the fresh world the hits kept the body in the air and the
+walk stood still); the gauntlet's live-kit rows (a sword held) are unchanged, 15 runs a side (docs/pve.md).
+
+## The furnace wait (Track E3)
+
+A furnace smelts an item in 10 s and the bot waits by it with the window open ("The iron age"). A smelt of 33 is 5.5
+minutes; started late in the day it runs into the night, and the bot stands in the open the whole time. Two ways out:
+
+- **Leave.** With a home or a shelter set, the night rule takes the bot there at dusk (docs/survival.md); the furnace
+  smelts on without it, and the smelt resumes after: the bot walks back to that furnace, waits out what is left in it
+  and takes the output. No new code: this is the night rule and the smelt's resume (ADR 0099). With neither set there
+  is nowhere to go.
+- **Wait inside a shell (`smeltShell`, off by default).** With no home or shelter within 16 of the furnace, a smelt
+  that will not end before dusk (200 ticks an item plus 400, against the ticks left before 12000) or one started by
+  night waits walled in: the bot steps onto a cell next to the furnace (a side at its height with feet and head free
+  and a full top under it), builds Track M1's shell round itself (the furnace is one wall, so its window still opens),
+  smelts, then digs one side it placed open: at once by day, at dawn by night (with a hostile within 16 then, after up
+  to 1800 ticks, as the night shell). The cell over the furnace has no face to place against but the furnace's top,
+  and a click there opens the furnace: a brace goes on its diagonal first, against the head-ring block (without it, 6
+  placed and that cell, the roof's support and the roof open). 10 blocks; a pause (a flee, the night rule) leaves the
+  shell standing for the resume. It builds and digs, so it ships off.
+
+The case (`test/e2e/early-smelt.test.ts`, the flat test world at normal difficulty, the daylight cycle on): a furnace
+next to the bot, 8 raw iron, 1 coal, 32 cobblestone, a stone sword, bread; `!smelt` at 21000 (100 s before dawn),
+two zombies and a skeleton summoned 9 to 11 blocks off 3 s later. For the leave way the shelter and home are 10 blocks
+from the furnace with the night shell on, `!smelt` at 11500 (the furnace loaded by day), the clock moved to 21000 once
+the bot is walled in at the shelter, then the same mobs. 5 runs each:
+
+| Way | Deaths | Damage a run | Lowest health | Ingots | Seconds |
+|---|---|---|---|---|---|
+| none (the bot waits by the furnace in the open) | 2 | 35, 23, 29, 24, 27 (arrows) | 0, 2, 1, 4, 0 | 5, 8, 8, 8, 1 | 38 to 107 (the runs that died ended there) |
+| the smelt shell (`smeltShell` on) | 0 | 0 | 20 | 8 each | 120 to 163 (out at dawn, 3 runs waited for a mob to go) |
+| leave (the night rule to the shelter, the night shell on there; after the fix below) | 0 | 0 | 20 | 8 each (taken at the furnace after dawn) | 153 to 189 (2 runs waited 30 and 36 s at dawn for a mob to go) |
+
+In the open the flight started at least twice in every run and all the damage was the skeleton's arrows; walled in,
+nothing reached the bot.
+
+A fault found on the way and fixed: at dawn the night process let go of the bot while the night shell was still shut
+(its dawn wait with a mob near, then the dig open), so the smelt resumed and planned its walk from inside the shell:
+`cook: furnace ... unreachable`, the job ended with the ingots in the furnace. The night process now keeps control
+while its shell is shut (NightSafety.wantsControl); the smelt resumes once the side is dug open.
+
+## A bed (Track E3)
+
+The night process sleeps in a bed within 8 of the shelter or home (or at the `bed` waypoint), from 12542 to 23459,
+and a bed skips the night when everyone online sleeps (docs/survival.md). Nothing set one down before, and the food
+hunt took the sheep.
+
+| Command | What it does |
+|---|---|
+| `!bed` | sets the bed carried down where the night rule finds it: by home (the bot walks within 3 of it first), else by the shelter, else where it stands (and sets the `bed` waypoint there unless one is set); by day it clicks it once so the respawn point moves there; one standing there already: nothing placed |
+| `!bed status` | the beds where it sleeps and the beds carried |
+| `!get bed` | an obtain job: 3 wool of one colour from sheep (`!kill sheep 3`), planks, the craft, then `!bed` |
+| `!get kit iron` | now ends with a soft `bed` step, planned once the iron, the armour and the food are met or dropped (made and set down when the sheep are there; else `short: bed`) |
+
+Rules, for any world:
+
+- **The spot.** Two cells side by side next to the feet (the foot 1 or 2 out, the head one further, on one of the four
+  sides), both free or holding a cover the hand clears (leaf litter, grass, flowers), a full top under both, a free
+  cell over both, not water or lava. The bot faces from the foot to the head and clicks the top of the block under
+  the foot.
+- **The spawn point.** A click on a bed by day is refused (`tile.bed.noSleep`) and the server moves the spawn point to
+  it anyway; `!bed` makes that click right after placing.
+- **The wool.** A sheep killed drops 1 wool of its colour; a bed takes 3 of one colour. With fewer sheep than that
+  within 32 the job walks to the nearest flock it remembers (the food hunt's herd memory, up to 200 away; two walks at
+  most), then hunts again.
+- **The food hunt leaves them.** With no bed where the night rule looks and none carried, the food hunt leaves 3 wild
+  sheep less the wool already carried (of the colour with most), on top of `foodLeave`.
+- **No shears.** A shear gives 1 to 3 wool and keeps the sheep, but shears are 2 iron the iron kit puts in armour.
+
+On a fresh world (seed 7, the stone kit first, `!home set` where the kit ended, then `!get bed`, then two nights,
+the clock set to 12000 each, the bot alone):
+
+| Run | `!get bed` | Steps | Night 1 | Night 2 | Deaths |
+|---|---|---|---|---|---|
+| before the herd walk | stopped: `!kill sheep 3 got nothing (... no more within 32 blocks)` | 1 | awake 601 s, lowest 9 | awake 607 s, lowest 3, died (an arrow) | 1 |
+| 1 | done in 146 s | 8 (two herd walks) | asleep after 48 s (woken twice by a skeleton, a flee between), skipped at 104 s, lowest 5 | asleep after 30 s, skipped at 34 s, lowest 13 | 0 |
+| 2 | done in 108 s | 6 (one herd walk) | asleep after 28 s, skipped at 36 s, lowest 20 | asleep after 28 s, skipped at 34 s, lowest 20 | 0 |
+| 3 | done in 83 s | 4 | asleep after 28 s, skipped at 38 s, lowest 20 | asleep after 28 s, skipped at 36 s, lowest 20 | 0 |
+| 4 (after the planning fix below; one night) | done in 54 s | 8 (two herd walks) | asleep after 28 s, skipped at 34 s, lowest 20 | - | 0 |
+
+A night without a bed, the same world (the first row and one more run with no bed): 3 nights, 2 deaths (arrows),
+lowest health 3 to 9; with the bed, 7 nights, 0 deaths, every night skipped, asleep as soon as the window opened (28
+s after 12000) unless a mob was near. The food hunt of the stone kit took no sheep in these runs; the wool was short
+because none stood within 32.
+
+**The planning fix.** In runs 1 to 3 the job stood still 17 to 20 s before each step while the wool was missing, and
+in the iron kit's e2e 15 to 53 s before each of its last three steps (the kit 347 s against 271 without the bed): the
+server's full recipe set re-dyes every wool colour and every bed from the others, and the chain planner tried them all
+for every plan, with the event loop blocked. The job never dyes now: a recipe with a dye in it is left out of its plans
+(`noDyeRecipe`). After it `!get bed` took 54 s with two herd walks, and the iron kit's e2e 284 s (the bed's own steps
+11 s), with no gap between steps. `!craft` alone still plans with every recipe.
+
 ## Still missing for the early game
 
 In the order they matter, with the reason measured here:
 
-1. **A bed, placed and slept in.** Every death measured here was at night at an open shelter (arrows), and a bed
-   skips the night on a world where everyone sleeps. The night process sleeps in a bed it finds near the shelter or
-   home (docs/survival.md) but nothing places one, and the wool loses to the food hunt: after `!get food` (which took a
-   sheep among others) `!kill sheep 3` found 0 of 3 within 32. `!get bed` plans `!gather`, `!kill sheep 3`, `!craft
-   bed` (unit-tested), so what is missing is the sheep before the food (or shears) and a bed set down by the shelter.
+1. **Done by Track E3:** a bed set down where the night rule sleeps, the spawn point moved to it, the sheep left by
+   the food hunt, a walk to a remembered flock ("A bed"). Left: shears; a flock the bot has never seen; a bed taken
+   along on a trip.
 2. **A shelter that is one.** `!shelter set` marks a point; on open grass it holds the bot where skeletons shoot it.
    The night shell (off) closes that gap where it was measured; on by default it needs runs on slopes, ledges and in
    water (a cell with no floor under it stays open) and a creeper's blast (it opens the shell).
 3. **Done by Track E2:** a furnace set down and cooked food (`cookFurnace`), smelting and iron ("The iron age").
-   Left from it: the smelt stands 5.5 minutes in the open, at dusk or by night on a first day (one death in 10 runs
-   there, a near death in another); a pickaxe that wears out in the job is not replaced (a helmet short, a stop for
+   Left from it: the smelt stands 5.5 minutes in the open when no home or shelter is set and `smeltShell` is off
+   (Track E3: "The furnace wait"); a pickaxe that wears out in the job is not replaced (a helmet short, a stop for
    coal); without a home a furnace the bot walked away from is not found again and a second is crafted; a death in a
    step ends the job (the raw iron stays in the furnace).
 4. **All the armour.** The iron kit wears what the ore allows (24 ingots for the four pieces after the 9 the tools,
@@ -378,6 +502,9 @@ In the order they matter, with the reason measured here:
    second mine trip, which the job does not make; leather is slow (a tunic is 8, a day's hunt gave 0 or 1).
 5. **A farm.** In the first kit run the hunt ran out (4 of 6 food, nothing left within 48 blocks); a second day
    would find less. `!farm` works a field that exists; making one (a hoe, seeds from grass, water) is not done.
+
+6. **A mob at the top of a shaft** (Track E3, "A mob at the top of a shaft"): the reflex strikes with the blade now;
+   the walk still climbs on with a mob over it, and a bot with no blade in the hotbar strikes with what it holds.
 
 Smaller, seen once: the obtain job crafted a second table when the first one's drop had not been picked up yet when
 the next step planned (both picked up two steps later).
@@ -400,6 +527,14 @@ the next step planned (both picked up two steps later).
   tunnel), `iron-get.test.ts` (`!get iron_pickaxe` from the stone kit, `!get iron_ingot`, `!get kit iron` with 13 iron
   ore in the ground).
 
+- Track E3, unit: `blade-strike.test.ts` (the swap and its refusals), `smelt-shell.test.ts` (when, the cell, the
+  brace, the pause, the open at dawn), `bed-place.test.ts` (the spot, covers, the job, the wool count),
+  `night-shell.test.ts` (control kept while the shell is shut), `kit-commands.test.ts` (the herd walk, the bed last).
+- Track E3, e2e: `early-shaft.test.ts` (a zombie at the top of a one-wide obsidian shaft: killed with the sword, the
+  top reached; `EARLY_SHAFT_*` for the A/B), `early-smelt.test.ts` (the smelt by night with mobs: walled in, 8
+  ingots, out at dawn; `EARLY_SMELT_SHELL=off|leave` for the other ways), `early-bed.test.ts` (no home: the bed by the
+  bot over a litter cover, the waypoint; home 10 off: the bed there and a respawn by it; a night slept through).
+
 ## Not proven
 
 - The night shell on real terrain beyond the one forest above; a creeper at the shell (the blast opens it); a shelter
@@ -413,4 +548,8 @@ the next step planned (both picked up two steps later).
 - Track E2: gold, copper, sand and the blast furnace (unit tests only); a furnace someone else uses during the smelt;
   a home whose furnace spot cannot be reached; the iron kit on other seeds and biomes; diamonds (the planner would plan
   them: `pickaxeFor('diamond_ore')` is the iron pickaxe).
+- Track E3: the smelt shell on real terrain (slopes, a furnace against a wall, water), against a creeper, or with a
+  smelt longer than the case's 8; the leave way on the fresh world (the flat case only); the bed on other seeds and
+  biomes, a bed spot on a slope, colours other than white; the herd walk to a flock out of view; the blade strike with
+  an axe as the blade, and in a real shaft on the fresh world (the replica only).
 - Anything on the Realm.

@@ -22,12 +22,14 @@ ironRecipes.handle(ironFixture);
 const keep = { keep: keepOnDropItems };
 const LINE = { type: 'chat', source: 'Owner', message: '!get kit', body: '!get kit', xuid: '', truth: false } as unknown as ChatLine;
 
-function host(o: { sheep?: boolean; stone?: boolean; iron?: number; wear?: readonly string[]; recipes?: RecipeIndex; animals?: boolean } = {}) {
+function host(o: { herdAt?: { x: number; y: number; z: number }; sheep?: boolean; stone?: boolean; iron?: number; wear?: readonly string[]; recipes?: RecipeIndex; animals?: boolean } = {}) {
   const recipes = o.recipes ?? baseRecipes;
   const slots: (ItemStack | null)[] = Array.from({ length: 36 }, () => null);
   // Track E2: worn items (the armour pass and the offhand move right after a craft), a furnace set down, iron in the ground
   const worn: (ItemStack | null)[] = [];
   let furnace = false;
+  let bed = false; // Track E3: a bed set down where the night rule sleeps
+  let walkedToHerd = false;
   let iron = o.iron ?? Infinity;
   const add = (name: string, n: number) => {
     const s = slots.find((x) => x?.name === name);
@@ -82,6 +84,7 @@ function host(o: { sheep?: boolean; stone?: boolean; iron?: number; wear?: reado
         for (const fn of listeners) fn({ kind: 'run', name: verb!, sender: { name: 'Owner' } } as never);
         const n = Number(rest.at(-1));
         if (verb === 'gather') mk('gather', () => add('oak_log', Math.ceil(n / 6) * 6));
+        else if (verb === 'goto') mk('goto', () => (walkedToHerd = true)); // Track E3: at the remembered herd, sheep near
         else if (verb === 'mine' && rest[0] === 'iron_ore')
           mk('mine', () => {
             const k = Math.min(n, iron);
@@ -94,12 +97,17 @@ function host(o: { sheep?: boolean; stone?: boolean; iron?: number; wear?: reado
             take('furnace', 1);
             furnace = true;
           });
+        else if (verb === 'bed')
+          mk('bed', () => {
+            take('bed', 1);
+            bed = true;
+          });
         else if (verb === 'smelt')
           mk('smelt', () => {
             take(rest[0]!, n);
             add('iron_ingot', n);
           });
-        else if (verb === 'kill') mk('kill', () => (o.sheep === false ? undefined : add('white_wool', n)));
+        else if (verb === 'kill') mk('kill', () => (o.sheep === false && !walkedToHerd ? undefined : add('white_wool', n)));
         else if (verb === 'food') mk('food', () => (o.animals === false ? undefined : add('beef', n)));
         else if (verb === 'craft') {
           const item = rest[0]!;
@@ -129,12 +137,13 @@ function host(o: { sheep?: boolean; stone?: boolean; iron?: number; wear?: reado
       },
       slots: () => slots,
       recipes,
-      options: () => ({ ...keep, worn, furnaceNear: furnace }),
+      options: () => ({ ...keep, worn, furnaceNear: furnace, bedNear: bed }),
       onCommand: (fn: (e: CommandEvent) => void) => {
         listeners.add(fn);
         return () => listeners.delete(fn);
       },
       wait: (ms: number) => new Promise<void>((r) => setTimeout(r, Math.min(ms, 2))),
+      herd: (_kind: string, skip: ReadonlySet<string>) => (o.herdAt && !skip.has('h1') ? { ...o.herdAt, key: 'h1' } : undefined),
     },
   };
   return h;
@@ -224,7 +233,7 @@ describe('the obtain job (Track E1)', () => {
     const replies: string[] = [];
     const { label, targets } = ObtainController.targetsFor('kit_iron', undefined);
     const job = c.start(LINE, label, targets, (m) => replies.push(m))!;
-    expect(replies[0]).toMatch(/^getting the kit iron \(iron_pickaxe, iron_sword, shield, bucket, iron_chestplate, iron_leggings, iron_boots, iron_helmet, 6 food\): first !mine iron_ore 33$/);
+    expect(replies[0]).toMatch(/^getting the kit iron \(iron_pickaxe, iron_sword, shield, bucket, iron_chestplate, iron_leggings, iron_boots, iron_helmet, bed, 6 food\): first !mine iron_ore 33$/);
     const end = await job.result;
     expect(h.dispatched.filter((d) => d.startsWith('mine iron_ore'))).toEqual(['mine iron_ore 33']);
     expect(h.dispatched).toContain('furnace');
@@ -232,6 +241,46 @@ describe('the obtain job (Track E1)', () => {
     expect(end).toMatch(/^get kit iron: done in \d+ s, \d+ steps; short: iron_chestplate, iron_leggings, iron_helmet \(!mine iron_ore 33 got 13\); steps: mine iron_ore 33, .*smelt raw_iron 13/);
     for (const t of ['iron_pickaxe', 'iron_sword', 'bucket']) expect(h.slots.some((s) => s?.name === t)).toBe(true);
     expect(h.worn.map((s) => s?.name).sort()).toEqual(['iron_boots', 'shield']);
+  });
+
+  it('Track E3: the iron kit sets its bed down (a step that counts); no sheep near: the bed is dropped and named, the job goes on', async () => {
+    const kit: [string, number][] = [
+      ['crafting_table', 1],
+      ['stone_pickaxe', 1],
+      ['stone_sword', 1],
+      ['cobblestone', 24],
+      ['oak_log', 8],
+      ['bread', 6],
+      ['coal', 8],
+    ];
+    for (const sheep of [true, false]) {
+      const h = host({ sheep, wear: ['shield', 'iron_boots', 'iron_chestplate', 'iron_leggings', 'iron_helmet'], recipes: ironRecipes });
+      kit.forEach(([name, count], i) => (h.slots[i] = { name, count, networkId: 1, metadata: 0 }));
+      const c = new ObtainController({ ...h.host, recipes: ironRecipes });
+      const { label, targets } = ObtainController.targetsFor('kit_iron', undefined);
+      const end = await c.start(LINE, label, targets, () => undefined)!.result;
+      expect(h.dispatched).toContain('kill sheep 3');
+      if (sheep) {
+        expect(h.dispatched).toContain('bed');
+        expect(end).toMatch(/^get kit iron: done in \d+ s, \d+ steps \(mine iron_ore 33, .*craft iron_helmet 1, kill sheep 3, craft bed 1, bed\)$/); // the bed last, after the iron
+      } else {
+        expect(h.dispatched).not.toContain('bed');
+        expect(end).toMatch(/^get kit iron: done in \d+ s, \d+ steps; short: bed \(!kill sheep 3 got 0 white_wool\); steps: /);
+        for (const t of ['iron_pickaxe', 'iron_sword', 'bucket']) expect(h.slots.some((s) => s?.name === t)).toBe(true);
+      }
+    }
+  });
+
+  it('Track E3: no sheep within 32: a walk to the remembered herd, then the hunt again', async () => {
+    const h = host({ sheep: false, herdAt: { x: 120, y: 64, z: -40 } });
+    const c = new ObtainController(h.host);
+    const end = await c.start(LINE, 'bed', [{ item: 'bed', n: 1 }], () => undefined)!.result;
+    expect(h.dispatched.filter((x) => /^(kill|goto)/.test(x))).toEqual(['kill sheep 3', 'goto 120 64 -40', 'kill sheep 3']);
+    expect(end).toMatch(/^get bed: done in \d+ s, \d+ steps \(.*kill sheep 3, goto 120 64 -40, kill sheep 3, craft bed 1, bed\)$/);
+    // no herd remembered: the hard target stops as before
+    const h2 = host({ sheep: false });
+    const end2 = await new ObtainController(h2.host).start(LINE, 'bed', [{ item: 'bed', n: 1 }], () => undefined)!.result;
+    expect(end2).toMatch(/^get bed: stopped after .*!kill sheep 3 got nothing/);
   });
 
   it('Track E2: iron kit words', () => {
