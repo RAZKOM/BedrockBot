@@ -288,6 +288,28 @@ describe('FarmTask: following the field', () => {
     expect(crops.filter((b) => b.name === 'potatoes')).toHaveLength(5);
   });
 
+  it('Track E6: a stand where nothing gets done is left (a dry 3 x 3 plot: the middle reached every cell, the body next to one)', async () => {
+    const h = harness();
+    h.pos = { x: 1.5, y: FEET, z: 1.5 };
+    field(h.w, 0, 0, 3, 3, null);
+    h.w.set({ x: 1, y: SOIL, z: 1 }, 'grass_block');
+    // walls round it out to 5: the middle is the only stand off the farmland in reach of every cell
+    for (let x = -6; x <= 8; x++) for (let z = -6; z <= 8; z++) if (x < 0 || x > 2 || z < 0 || z > 2) h.w.set({ x, y: FEET, z }, 'stone');
+    h.inv.add('wheat_seeds', 8);
+    // the body stops 0.3 off the middle's centre, next to the cell at 1 2: the server would refuse that planting
+    const skills = h.deps.skills;
+    const goto = skills.goto.bind(skills);
+    skills.goto = async (g, o) => {
+      const r = await goto(g, o);
+      if (g.type === 'block' && g.p.x === 1 && g.p.z === 1) h.pos = { x: 1.5, y: FEET, z: 1.8 };
+      return r;
+    };
+    const f = new FarmTask(h.deps);
+    expect(await f.start({ center: { x: 1.5, y: FEET, z: 1.5 }, radius: 2, follow: true })).toBe('done');
+    expect(f.stats.planted).toBe(8);
+    expect(h.calls.filter((c) => c === 'goto 1 1').length).toBeLessThanOrEqual(3);
+  });
+
   it('the scan centres: not near another one, not beyond the range, at most FARM_FOLLOW_AREAS', () => {
     const start = { x: 0, y: FEET, z: 0 };
     const areas = [start];

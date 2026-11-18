@@ -14,6 +14,7 @@ import { registerPveCommandsFor } from '../chat/commands-pve.ts';
 import { registerSurvivalCommands, survivalKitOf } from '../chat/commands-survival.ts'; // Track S
 import { registerNavCommands } from '../chat/commands-nav.ts'; // Track R
 import { registerFarmCommands } from '../chat/commands-farm.ts'; // Track U
+import { registerFarmNewCommands } from '../chat/commands-farm-new.ts'; // Track E6
 import { registerNlCommands } from '../chat/commands-nl.ts'; // Track Y
 import { registerFoodCommands } from '../chat/commands-food.ts'; // Track X
 import { registerGetCommands } from '../chat/commands-get.ts'; // Track AD
@@ -392,6 +393,7 @@ export const afkTask: TaskDefinition = {
       (d) => void registerRocketCommands(d, { clock }), // Track R9: !rockets, the rockets chore (autoRockets), the trip readiness's rockets (after the crafter, the home logistics and the flight kit; ADR 0097)
       (d) => registerLearnCommands(d, { logger: ctx.logger('learn') }), // !learn: the owner flies a path while the bot watches; kept in <config dir>/paths (docs/flight.md "Learned paths")
       (d) => void registerBedCommands(d), // Track E3: !bed, the bed set down where the night rule sleeps (after the PvE commands; docs/early-game.md "A bed", ADR 0100)
+      (d) => void registerFarmNewCommands(d, { clock }), // Track E6: !farm new, the farm chore (farmFood), bread (after the farm, food, crafting, obtain and bed commands; docs/farming.md "A starter farm", ADR 0102)
       (d) => void registerTestCommands(d, { respawn, logger: ctx.logger('test') }), // Track T1: !test, the op check, the recovery after a death behind testMode (after !fly; docs/runbook.md "The Realm as a test server")
     ];
     for (const register of registrations) register(deps);

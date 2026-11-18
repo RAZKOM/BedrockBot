@@ -1,4 +1,4 @@
-# The early game: day one from an empty inventory (Track E1), the iron age (Track E2), the shaft, the furnace wait and a bed (Track E3), wear and setbacks (Track E4)
+# The early game: day one from an empty inventory (Track E1), the iron age (Track E2), the shaft, the furnace wait and a bed (Track E3), wear and setbacks (Track E4), a farm (Track E6)
 
 What the bot does on a fresh survival world when it starts with nothing, the commands an owner types for the first
 day, the iron age after the stone kit (a furnace, smelting, cooked food, iron tools and armour), and what is still
@@ -6,7 +6,8 @@ missing before it can live through the first nights on its own. Decision records
 [decisions/0098-day-one-from-nothing.md](decisions/0098-day-one-from-nothing.md),
 [decisions/0099-iron-age.md](decisions/0099-iron-age.md),
 [decisions/0100-shaft-furnace-bed.md](decisions/0100-shaft-furnace-bed.md),
-[decisions/0101-wear-and-setbacks.md](decisions/0101-wear-and-setbacks.md) (the job through wear and setbacks, Track E4).
+[decisions/0101-wear-and-setbacks.md](decisions/0101-wear-and-setbacks.md) (the job through wear and setbacks, Track E4),
+[decisions/0102-starter-farm.md](decisions/0102-starter-farm.md) (a starter farm, the farm chore and bread, Track E6).
 
 Measured on BDS 1.26.60.6 (itzg/minecraft-bedrock-server 2026.10.2), a default-generated world (a forest with stone
 under it near spawn), difficulty normal, the daylight cycle and mob spawning on, the bot alone with an owner in
@@ -51,6 +52,8 @@ peaceful test server with the truth pack.
 | `bot/src/skills/craft/crafter.ts` | Track E4: `holdTables`, `ownTables`, `sweepTables`, the wider pick-up of a dug table's drop |
 | `bot/src/chat/commands-smelt.ts`, `bot/src/tasks/process/smelt.ts`, `bot/src/skills/food/cook.ts` | Track E4: placed furnaces recorded and offered, the smelt opening its own furnace first (`prefer`), `SmeltControl.held` / `collect` |
 | `bot/test/unit/skills/obtain-wear.test.ts`, `bot/test/unit/chat/kit-setbacks.test.ts`, `bot/test/unit/tasks/recover-process.test.ts`, `bot/test/e2e/early-wear.test.ts` | Track E4 tests (and new cases in `craft-crafter.test.ts`, `smelt.test.ts`, `test-recovery.test.ts`) |
+| `bot/src/skills/farm/plot.ts`, `setup.ts`, `bot/src/tasks/process/farm-new.ts`, `bot/src/chat/commands-farm-new.ts` | Track E6: `!farm new` (the plot, its work), the farm chore (`farmFood`), bread ([farming.md](farming.md) "A starter farm") |
+| `bot/test/unit/skills/farm-new.test.ts`, `bot/test/e2e/early-farm.test.ts`, `bot/test/e2e/fresh-days.test.ts` | Track E6 tests; `fresh-days` is the harness for the days left alone below (skipped unless `FRESH_DAYS=1`) |
 
 ## Day one as an owner types it
 
@@ -590,6 +593,94 @@ craft set the table down and picked it up again (`crafting table placed and pick
 between the crafts (`crafting table kept at x y z for the next craft`) and was picked up at the end; none was left
 standing.
 
+## A farm (Track E6)
+
+`!farm` worked a field that existed; nothing made one, and the food chore could only hunt. `!farm new [n]` now
+makes a plot, and the farm chore (`farmFood`, off) harvests it and bakes bread before the hunt runs. The command and
+its rules: [farming.md](farming.md) "A starter farm". Decision record:
+[decisions/0102-starter-farm.md](decisions/0102-starter-farm.md).
+
+### Left alone, before
+
+On a fresh normal survival world (seed 7, reset per trial), the bot was given the iron kit (the state `!get kit
+iron` ends in, 6 cooked beef), home was set where it stood and `!bed` set a bed down. Then it was left alone, one
+process a game day, with Hunger II on it all the time (so a day eats about what three days would). The night process
+slept through each night. With no farm the commands said:
+
+| Command | Reply |
+|---|---|
+| `!farm status` | `farm: idle, 0 harvested, 0 planted, 0 bone meal, 0 trips, 0 rounds (no farm process)` |
+| `!get bread` | `get bread: no way to get bread yet: it needs wheat, which is not gathered, mined, hunted or crafted from those` |
+| `!get wheat`, `!farm` | one round of a field that is not there: `farm: done, nothing left to harvest or plant` |
+
+3 game days, the hunt only (food points carried at the start and end of each day, the food chore's hunts and kills):
+
+| Trial | Day 1 | Day 2 | Day 3 | Deaths | Lowest hunger |
+|---|---|---|---|---|---|
+| b1 | 48 -> 24, no hunt | 24 -> 10, 1 hunt, 3 kills | 10 -> 15, 2 hunts, 9 kills | 0 | 15 |
+| b3 | 48 -> 24, no hunt | 24 -> 11, 1 hunt, 2 kills | 11 -> 13, 2 hunts, 7 kills | 0 | 16 |
+
+No hunger deaths and no other deaths, and the lowest health was 19. Near a fresh spawn the animals are enough for
+three days, so food was not short. The cost was the herd: 12 and 9 animals killed near home, with nothing growing
+back, and the hunt walks further each time. (b1 ran on the tree before this track. b3 ran on this track's tree with
+`farmFood` off. A third trial was cut on day 2 and is not counted.)
+
+### Setting up on the fresh world
+
+`!farm new` right after the setup above, the same world each time:
+
+| Run | Time | Site | Seeds | Tilled, planted | Water | Fence |
+|---|---|---|---|---|---|---|
+| f1 (before the fixes below) | 289 s | 60 from home (8 raw copper blocks in a vein 21 to 35 under home made the base "not the bot's own") | 18 from 166 grass | `92 of 80 tilled` (bare dry farmland turned back to dirt and was tilled again), 18 planted | dry: no still water within 48 | none: the oak fence's log trip brought birch, `!gather 8 got nothing` |
+| f2 | 310 s | 25 from home | 29 from 180 grass | 29, 29 | dry: none within 96 | none: 12 birch and 5 oak logs, too few of one kind for 35 posts |
+| f3 | 315 s | 25 from home | 21 from 176 grass | 21, 21 | dry: none within 96 | none: the same |
+| f4 (the fence fix; the kit's bucket full) | 321 s | 25 from home | 21 from 169 grass | 80 (moist farmland stays), 21 | poured | 33 of 35 posts and the gate: the second try `1 fence_gate, 18 oak_fence, 15 birch_fence` |
+| f5 (the same) | 270 s | 20 from home | 14 from 207 grass | 14, 14 | dry: the one dig of the middle timed out, `not poured (occupied)` (now tried 3 times) | 30 of 39 and the gate (`1 fence_gate, 30 oak_fence`) |
+| f6 (the dig fix; the bucket full) | 321 s | 25 from home | 21 from 164 grass | 79, 21 | poured, but the end line said `water dry`: the place read `rejected` and the water showed a second later (now looked at again for 2 s) | 33 of 35 and the gate (`1 fence_gate, 18 oak_fence, 15 birch_fence`) |
+
+The hoe (a stone one) took 35 to 50 s each time, most of it a log trip for the sticks (the iron kit carries no wood).
+The seed step took 150 s, its cap: 1 seed in 8 grass, 14 to 29 seeds for the 80 cells. On this world there is no
+still water within 96 blocks of the plot, so every plot with the kit's empty bucket was dry. f4 to f6 were given
+the bucket full (as if filled on an earlier trip) to measure a watered plot. The site differs between runs because
+home does: the trial sets home where the bot stands after it joins.
+
+### 3 days with the farm, dry
+
+f2 and f3 then ran the three days with `farmFood` on:
+
+| Trial | Day 1 | Day 2 | Day 3 | The crops at the end (stages 0 to 7) |
+|---|---|---|---|---|
+| f2 | 48 -> 32 | 32 -> 8 | 8 -> 12, 2 hunts, 6 kills | 29: none ripe, the highest at stage 4 |
+| f3 | 48 -> 32 | 32 -> 8 | 8 -> 13, 2 hunts, 5 kills | 21: none ripe, one at stage 6 |
+
+(Day 1 was shorter here: the setup used part of it. A hunt started at the end of day 2 was cut by the day's end and
+done on day 3.) No deaths. A dry plot did not feed the bot in three days: after three days most of its wheat was at
+stage 0 to 2 of 7. Wheat grows a stage on a random tick, with a chance that moist farmland about triples. The farm chore saw the crops
+(`0 of 29 ripe (food short: any start a harvest)`) and left the food to the hunt, as it should.
+
+### 6 days with the farm, watered
+
+f4 and f6 ran six days each on their watered plots, `farmFood` on (food points at the start and end of each day; the
+hunts; the farm chore's runs, crops harvested and loaves):
+
+| Trial | Day 1 | Day 2 | Day 3 | Day 4 | Day 5 | Day 6 |
+|---|---|---|---|---|---|---|
+| f4 (one ripe crop started a run when food was short) | 52 -> 36 | 36 -> 12 | 12 -> 17, 2 hunts; none ripe | 17 -> 8, 1 hunt; 3 runs, 3 harvested, 1 loaf | 8 -> 8, 2 hunts; 2 runs, 3 harvested, 1 loaf | 8 -> 17, 2 hunts; 2 runs, 5 harvested, 1 loaf |
+| f6 (from day 3: a loaf's worth starts it) | 48 -> 32 | 32 -> 8 | 8 -> 10, 2 hunts; 1 ripe at the end | 10 -> 12, 2 hunts; 2 ripe, no run | 12 -> 12, 2 hunts; 1 run, 6 harvested, 2 loaves | 12 -> 8, 3 hunts; 2 ripe, no run |
+
+No deaths, lowest hunger 16, lowest health 20. The first ripe wheat came on day 3 (f6) or day 4 (f4): after three
+days f4's 21 crops stood at stages `[1, 6, 2, 2, 3, 6, 1, 0]` (stage 0 to 7) and after six f6's at
+`[1, 1, 1, 2, 4, 5, 5, 2]`. On BDS the night is slept through, so the crops grow by day only, about 10 minutes of
+game time a day; a watered plot gave about one loaf a day from day 4. The hunt still fed the bot: 1 to 3 hunts a
+day on both sides of the farm, as without one. The seeds from each harvest go back in, so the field grows (f4: 21
+crops to 29 in six days).
+
+With one ripe crop enough while food was short, f4 walked out 7 times in days 4 to 6 for 11 wheat (1 or 2 a run,
+`done, 1 harvested, 1 wheat and the bread baked (0 loaves so far)`), and while one crop stood ripe the food chore
+waited for it. A run now starts while food is short only when the ripe crops and the wheat carried make a loaf (3),
+and the hunt goes first until then: f6's days 4 to 6 had 1 run, 6 harvested, 2 loaves (`8 food points carried (<
+10), 5 crops ripe`).
+
 ## Still missing for the early game
 
 In the order they matter, with the reason measured here:
@@ -608,8 +699,12 @@ In the order they matter, with the reason measured here:
 4. **All the armour.** The iron kit wears what the ore allows (24 ingots for the four pieces after the 9 the tools,
    the shield and the bucket take); a short mine step leaves the chestplate, leggings and helmet off. More iron needs a
    second mine trip, which the job does not make; leather is slow (a tunic is 8, a day's hunt gave 0 or 1).
-5. **A farm.** In the first kit run the hunt ran out (4 of 6 food, nothing left within 48 blocks); a second day
-   would find less. `!farm` works a field that exists; making one (a hoe, seeds from grass, water) is not done.
+5. **Done by Track E6:** `!farm new` makes a plot (a hoe, seeds from grass, water, a fence), and with `farmFood` on
+   the farm chore harvests it and bakes bread before the hunt ("A farm"). Left: water where none is within 96 (the
+   seed-7 spawn: every plot made with the kit's empty bucket was dry and grew too slowly to feed the bot in three
+   days); a watered plot gives its first wheat on day 3 or 4 and about a loaf a day after, so the hunt still feeds
+   the early bot; seeds (1 in 8 grass, 14 to 29 for 80 cells); bone meal; a pen and breeding; carrots and potatoes;
+   `farmFood` on by default.
 
 6. **A mob at the top of a shaft** (Track E3, "A mob at the top of a shaft"): the reflex strikes with the blade now;
    the walk still climbs on with a mob over it, and a bot with no blade in the hotbar strikes with what it holds.
@@ -645,6 +740,16 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   the walk to the coal with no home; `death` and `night`: `deathReturn` on by day and by night; `E4_BEFORE=1` records
   without asserting, for the base tree).
 
+- Track E6, unit: `farm-new.test.ts` (the site, the own base and the ore vein under it, the fence kind and the mixed
+  fence, the plot job on a fake bot: the pond, the far water, a dig that times out, a dry plot tilled for its seeds,
+  the walk to the plot for seeds, the fence with the bot on the line, mixed posts; the farm chore: when it starts,
+  the threshold from the crops, the drops in the water, the food chore's `farmFirst`), `farm.test.ts` (a stand
+  where nothing gets done).
+- Track E6, e2e: `early-farm.test.ts` (a 5 x 5 by home with a pond and the run again: nothing to do, the gate open;
+  the farm chore and its bread; the hoe and the fence crafted; a base that is not the bot's own; seeds from grass).
+  `fresh-days.test.ts` is the harness for the days left alone (`FRESH_DAYS=1`; `FRESH_PHASE=setup|day|probe`,
+  `FRESH_FARM`, `FRESH_WATER`, `FRESH_SET`, `FRESH_ASK`; not a gate: it needs a fresh normal world).
+
 - Track E3, unit: `blade-strike.test.ts` (the swap and its refusals), `smelt-shell.test.ts` (when, the cell, the
   brace, the pause, the open at dawn), `bed-place.test.ts` (the spot, covers, the job, the wool count),
   `night-shell.test.ts` (control kept while the shell is shut), `kit-commands.test.ts` (the herd walk, the bed last).
@@ -675,4 +780,8 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   unit-tested only); `deathReturn` on real terrain, against the mob that caused the death, in a cave or a shaft, or
   with the drops spread over more than 8 blocks; the 5-minute despawn and the daylight margins (unit tests only); a
   table near home kept and a table more than 24 off (unit tests only); the furnace memory with a home set.
+- Track E6: `!farm new` on other seeds and biomes (one world, seed 7, with 5 setups on it), on slopes, near
+  water that is not still, or with the kit's empty bucket and water within 96 on a fresh world (the far water is
+  unit-tested only); the drop pick-up beside the middle on a fresh world; the farm chore over more than three days,
+  replanting the bare cells over time, and with a home far from the farm; the mixed fence with three kinds.
 - Anything on the Realm.

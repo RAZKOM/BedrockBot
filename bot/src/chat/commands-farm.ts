@@ -24,6 +24,26 @@ import { Containers } from '../world/containers.ts';
 import { Hotbar } from '../world/hotbar.ts';
 import type { ItemStack, PacketSource } from '../world/types.ts';
 import type { Chat } from './chat.ts';
+import type { ChatLine } from './text.ts';
+import type { ItemClicker } from '../skills/farm/click.ts';
+
+/** Track E6: `!farm new` (chat/commands-farm-new.ts) registers here; `!farm new ...`, `!farm stop` and `!farm status` reach it. */
+export interface FarmNewHook {
+  run(line: ChatLine, args: readonly string[], reply: (m: string) => void): void;
+  /** Stop a running `!farm new`; its line, or undefined when none ran. */
+  stop?(): string | undefined;
+  /** Its part of `!farm status`. */
+  status?(): string;
+}
+const farmNewHooks = new WeakMap<Chat, FarmNewHook>();
+const farmers = new WeakMap<Chat, { farm: FarmTask; clicker: ItemClicker }>();
+export function setFarmNewHook(chat: Chat, h: FarmNewHook): void {
+  farmNewHooks.set(chat, h);
+}
+/** Track E6: the bot's one farmer (the field `!farm` works), for `!farm new` and the farm chore. */
+export function farmerOf(chat: Chat): { farm: FarmTask; clicker: ItemClicker } | undefined {
+  return farmers.get(chat);
+}
 
 /** What the chat commands drive (unit tests fake it). */
 export interface FarmController {
@@ -87,13 +107,19 @@ export function registerFarmChat(chat: Chat, c: FarmController | undefined): voi
   }
   chat.register({
     name: 'farm',
-    help: `[radius] [wait] | stop | status (harvest, replant, bone meal; follows the field as it walks and stops when nothing is ready to harvest or plant; wait: stay and re-scan every minute; default radius ${DEFAULT_FARM_RADIUS})`,
+    help: `[radius] [wait] | new [n] | stop | status (harvest, replant, bone meal; follows the field as it walks and stops when nothing is ready to harvest or plant; wait: stay and re-scan every minute; default radius ${DEFAULT_FARM_RADIUS}; new: till, water, plant and fence an n x n plot by home)`,
     group: 'work', example: '!farm 8', // Track AM
-    run: ({ reply, args }) => {
+    run: ({ reply, args, line }) => {
       const words = args.map((x) => x.toLowerCase());
       const a = words[0] ?? '';
-      if (a === 'stop') return reply(c.farmStop());
-      if (a === 'status') return reply(c.farmStatus());
+      const fresh = farmNewHooks.get(chat); // Track E6
+      if (a === 'new') return fresh ? fresh.run(line, words.slice(1), reply) : reply('farm new needs a task that can walk');
+      if (a === 'stop') {
+        const n = fresh?.stop?.();
+        const f = c.farmStop();
+        return reply(n && f === 'not farming' ? n : n ? `${n}; ${f}` : f);
+      }
+      if (a === 'status') return reply(`${c.farmStatus()}${fresh?.status ? `; ${fresh.status()}` : ''}`);
       const wait = words.includes('wait');
       const rest = words.filter((x) => x !== 'wait');
       const r = rest.length === 0 ? DEFAULT_FARM_RADIUS : Number(rest[0]);
@@ -242,7 +268,8 @@ export function registerFarmCommands(deps: FarmCommandDeps): FarmCommandsResult 
     ready: () => mob.loop.state.ready && mob.world.self.health > 0 && (deps.alive?.() ?? true),
     ...(log ? { log } : {}),
   };
-  const { farm } = createFarmer(parts, deps.useBoneMeal ? { useBoneMeal: deps.useBoneMeal } : {});
+  const { farm, clicker } = createFarmer(parts, deps.useBoneMeal ? { useBoneMeal: deps.useBoneMeal } : {});
+  farmers.set(deps.chat, { farm, clicker }); // Track E6
   const { mine, memory } = createMinerFor(parts, {
     ...(deps.mineTunnelLen ? { tunnelLen: deps.mineTunnelLen } : {}),
     ...(deps.mineSeenOnly ? { seenOnly: deps.mineSeenOnly } : {}),

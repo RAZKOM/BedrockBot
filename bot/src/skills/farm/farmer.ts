@@ -497,7 +497,16 @@ export class FarmTask {
         continue;
       }
       this.stats.stands++;
+      const did = (): number => this.stats.harvested + this.stats.planted + this.stats.tilled + this.stats.boneMealUsed;
+      const before = did();
       await this.workHere(gen, scan, work.filter((w) => w.kind === 'till').map((w) => w.cell));
+      // Track E6: a stand where nothing got done (a planting refused for the body next to the cell: a 3 x 3 plot's dry
+      // middle reached every cell and was chosen again for ever) counts as a failed stand, so the next round stands elsewhere
+      if (this.alive(gen) && !this.paused && did() === before) {
+        const k = `${stand.x},${stand.y},${stand.z}`;
+        this.standFails.set(k, (this.standFails.get(k) ?? 0) + 1);
+        this.log.info(`farm: nothing done standing at ${k} (${work.length} work items chosen for it)`);
+      }
       // following: where it worked is scanned from now on (the field beyond the start's radius comes into view)
       const at = this.d.position();
       if (o.follow && at) addArea(areas, at, o.center, radius, o.maxRange ?? FARM_FOLLOW_RANGE);

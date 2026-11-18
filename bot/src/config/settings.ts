@@ -101,6 +101,7 @@ export const SETTING_DEFS = {
   toolWearLimit: { kind: 'number', default: 10, min: 0, max: 2000, integer: true, unit: 'uses', description: 'do not use a tool with fewer uses left (placeholder, Track S)' },
   throwawayMin: { kind: 'number', default: 16, min: 0, max: 2304, integer: true, unit: 'blocks', description: 'keep at least this many throwaway blocks (placeholder, Track S)' },
   useBoneMeal: { kind: 'boolean', default: true, description: 'farming: use bone meal on crops (placeholder, Track U)' },
+  farmFood: { kind: 'boolean', default: false, description: 'food: work the !farm new farm when crops are ripe or food runs short and bake bread; the hunt only when it has none (it digs and plants)' }, // Track E6
   mineTunnelLen: { kind: 'number', default: 32, min: 1, max: 256, integer: true, unit: 'blocks', description: 'mining: tunnel length per branch (placeholder)' },
   nlConfirm: { kind: 'boolean', default: true, description: '!do and chat to the bot: show the plan and wait for !yes before running it' }, // Track Y
   chatColor: { kind: 'boolean', default: false, description: 'colour the bot\'s chat replies (commands, numbers, done / failed, notes); try !colors first (docs/chat-style.md)' },

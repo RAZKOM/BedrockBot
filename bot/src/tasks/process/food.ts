@@ -329,6 +329,8 @@ export class FoodChore extends BaseProcess {
   readonly name = 'food';
   private job: FoodJob | undefined;
   private lastCheck = -Infinity;
+  /** Track E6: the bot's own farm can feed it now (the farm chore, `farmFood`): no hunt is started meanwhile. */
+  farmFirst: (() => boolean) | undefined;
   /** No new attempt before this time (ms, deps.now()). */
   nextTry = -Infinity;
   /** Attempts started / that found nothing, the last result. */
@@ -372,6 +374,7 @@ export class FoodChore extends BaseProcess {
     this.lastCheck = now;
     const c = this.check();
     if (!c.auto || !c.day || c.users > 0 || c.points >= c.min) return false;
+    if (this.farmFirst?.()) return false; // Track E6: the farm's wheat first, the hunt when it has none
     // Track T3 follow-up: a preset's inventory goes back before the chore leaves (the food is in the saved inventory)
     if (this.d.restoreFirst?.(`the food chore: ${c.points} food points carried (< ${c.min})`)) return false;
     const center = this.d.position();

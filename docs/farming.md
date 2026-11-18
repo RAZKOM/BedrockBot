@@ -49,7 +49,11 @@ no longer creates its own (two Containers on one connection each logged the othe
 | `bot/src/skills/farm/farmer.ts` | `FarmTask` (the loop), `workInReach`, `routeTramples`, `floorOf`, `eyeAt` |
 | `bot/src/skills/farm/click.ts` | `ItemClicker.useOn(p, item)`: an item used on a block (bone meal), resolved on the block's update |
 | `bot/src/skills/farm/index.ts` | `createFarmer`, `createMiner` (wiring onto BotSkills / World / InputLoop / Hotbar / Containers) |
-| `bot/src/chat/commands-farm.ts` | `!farm`, `!mine`; `registerFarmCommands` (called from tasks/registry.ts) |
+| `bot/src/chat/commands-farm.ts` | `!farm`, `!mine`; `registerFarmCommands` (called from tasks/registry.ts); Track E6: `farmerOf`, the `!farm new` hook |
+| `bot/src/skills/farm/plot.ts` | Track E6: the starter plot's site (`findPlotSite`, `checkSite`), `ownBase`, `onRim`, `TILLABLE` (pure) |
+| `bot/src/skills/farm/setup.ts` | Track E6: `FarmPlotJob` (seeds, water, clear, till, plant, fence), `fenceItems`, `hoeCarried` |
+| `bot/src/tasks/process/farm-new.ts` | Track E6: `FarmNewProcess` (`farmnew`), `FarmChore` (`farmchore`, `farmFood`) |
+| `bot/src/chat/commands-farm-new.ts` | Track E6: `!farm new [n]`, the site and own-base checks, the hoe and fence obtain steps, bread, `fieldCount`, `plotSizeAt` |
 | `packs/truth/src/farm.ts` | `truth:field`, `truth:crops` |
 | `docker/compose.farm.yml` | `bds-farm` |
 
@@ -290,6 +294,8 @@ harvested, 25 planted, the field complete).
 | `bot/test/e2e/farm-field.test.ts` | the 9 x 9 wheat field, two cycles, chest deposit when full, bone meal (see Measured) |
 | `bot/test/unit/skills/farm.test.ts` (Track Z) | harvest-first order and the pickup wait, pause / resume, `FarmProcess` pre-empted by a fake guard and resumed, `!stop` |
 | `bot/test/e2e/farm-sneak-land.test.ts` (probe) | drops off 1- and 2-block ledges onto fresh farmland with and without sneak held in the air; prints trampled / tries per condition (env `SNEAK_TRIES`, default 12) |
+| `bot/test/unit/skills/farm-new.test.ts` (Track E6) | the plot site (flat, covers, soil, built blocks, no floor, the rim, a farm set up before, the protected base), `ownBase`, `!farm new` words, fence names, the plot job's phases on a fake world (pond water, dry, no hoe, no seeds, a pause), the farm chore's trigger and `canFeed` |
+| `bot/test/e2e/early-farm.test.ts` (Track E6) | `!farm new` 5 x 5 with water, fences and gate; the farm chore and bread; no hoe and no fences (crafted); not the bot's own base; seeds from grass (env `CRAFT_BDS_*`, a flat world) |
 | `bot/test/e2e/farm-process.test.ts` (Track Z, bds-core) | `!farm` as a process: guard pre-emption and resume, `!status`, `!pause` / `!resume` / `!stop` (env `CORE_BDS_*`, `CORE_VERBOSE=1`) |
 
 ```sh
@@ -304,10 +310,137 @@ Env: `FARM_BDS_HOST` (127.0.0.1), `FARM_BDS_PORT` (19186), `FARM_BDS_CONTAINER` 
 (`FarmArea`), uses run-unique truth ids, sets `randomtickspeed 0` for the suite (exact stages; set
 back to 1 at the end) and clears the area at the end.
 
+## A starter farm (`!farm new [n]`, Track E6, ADR 0102)
+
+`!farm` works farmland that exists; `!farm new [n]` makes a plot first, then `!farm` (and the farm chore) work it.
+n is odd, 3 to 9 (default 9): one water source keeps farmland moist up to 4 cells away, so a 9 x 9 round one water
+cell (80 cells to plant) is the largest plot one bucket waters.
+
+```
+!farm new 5
+farm new: a 5x5 plot round 13 -61 2 (7 from home; 0 of 24 tilled already, no water yet)
+farm new: done in 43 s: 24 of 24 tilled, 24 planted (0 seeds from 0 grass), water poured; 23 of 23 fences and the gate; !farm harvests it (farmFood off: no farm chore)
+```
+
+The site (`skills/farm/plot.ts`, pure, unit-tested): the nearest n x n of `grass_block`, `dirt` or a path (or farmland
+already) at one height round the anchor (home, else where the bot stands) within 24 blocks, with air or a plant a hand
+clears (grass, a flower, leaf litter) over each cell and air or a plant over that, a full block under the middle and a
+floor under every cell of the ring one out (the fence line; a solid block there holds the line as it is). No plot cell
+within 3 of the anchor, no built block. The owner's builds are never touched: inside `protectRadius` of home the plot
+may lie only when the base is the bot's own (no built block within protectRadius of home but a bed, a crafting table,
+a furnace and the fence of its own farm); else every plot cell lies past protectRadius + 2, and the start line says
+why (`outside the base: 3 built blocks within 48 of home, oak_planks at x y z`). Built blocks more than 8 under home
+do not count: a farm on the surface touches no cellar, and the world generates "built" kinds deep down (the raw
+copper and raw iron blocks of large ore veins). A refusal names the
+commonest reasons with their counts (`no 9x9 site of flat grass or dirt within 24 of home (<n> tried: something
+over the ground <n>, not grass or dirt <n>, ...); try a smaller n`).
+
+The work, in order (`skills/farm/setup.ts`, a user process `farmnew` that guard, flee and night pre-empt; a resume
+goes on with the step it was in, and each step looks at the world again):
+
+| Step | What |
+|---|---|
+| hoe | with none carried, the obtain job ([early-game.md](early-game.md)) gets a stone hoe, else a wooden one |
+| seeds | the bot walks to the plot first when it is more than 24 off (the hoe's log trip can end out of range of the plot's chunks); short and tall grass within 24 of the plot broken (wheat seeds drop from 1 in 8) and the drops picked up, until there is a seed for every cell without a crop, none is left, or 150 s |
+| water | the empty bucket filled at the nearest still water within 48, else within 96 (a click on the source), the middle dug and the bucket emptied into it; with no bucket or no water the plot stays dry (crops grow, slower) |
+| clear, till | the plants on the soil dug (the hoe refuses a covered cell), each cell clicked with the best hoe carried; on a dry plot only as many cells as there are seeds carried (bare dry farmland turns back to dirt) |
+| plant | the farmer's loop (following the field, as `!farm`) plants the farmland with the seeds carried |
+| fence | the fences for the free rim cells and a gate, from the obtain job, placed round the plot, the gate in the side facing home; after the planting, so a wood trip does not hold the crops back. The wood: a kind carried that covers the whole fence (planks, or logs at 4 planks each), else the commonest logs within 32 of the plot, else the kind carried most, else oak (`oak_fence` and `fence_gate`, `birch_fence` and `birch_fence_gate`, ...). A try that ends short is followed by one more from the wood carried then, of mixed kinds if no one kind makes it all |
+| home | the walk home, when home is set |
+
+The `farm` waypoint marks the water cell (the plot's size is read back off the farmland round it). Run again, it does
+what is left: on a plot set up, 1 s (`24 of 24 tilled, 0 planted ..., water already; no fence needed`). `!farm stop`
+stops it, `!farm status` adds its step and the farm chore's state.
+
+### The farm chore and bread (`farmFood`, off by default)
+
+With `farmFood` on, the farm chore (`tasks/process/farm-new.ts`, PRIORITY.chore) works the bot's own farm by day with
+no user process and the food chore idle, when the `farm` waypoint is within 64: when 16 crops are ripe (or a quarter
+of the crops when they are fewer than 64: a watered plot keeps all its cells tilled but plants only the seeds
+carried), or the food carried is under `foodMin` and the ripe crops and the wheat carried make a loaf (3). It harvests
+and replants the plot with the farmer's loop, picks up from beside it what fell into the middle water (and works the
+field again when it did), walks out of the plot and crafts all the wheat into bread (3 wheat a
+loaf, 5 food points; a crafting table carried or crafted, set down and picked up again), then walks home. After a run
+that harvested nothing it looks again after 5 minutes. While the farm can feed the bot (a loaf from the ripe crops and the
+wheat carried, a run going) the food chore starts no hunt; it hunts when the farm has nothing to give. Off by default: it digs crops
+and places seeds by itself.
+
+### Measured (e2e early-farm, flat test world)
+
+| Case | Result |
+|---|---|
+| 5 x 5 by home, a stone hoe, 30 seeds, an empty bucket, 23 fences and a gate carried, a one-block pond 8 off, short grass over the ground | 43 to 50 s: the bucket filled and poured into the middle, 24 of 24 tilled and planted, 23 fences and the gate; again: 1 s, nothing to do |
+| the farm chore on that plot, every crop ripe, `farmFood` on | 24 harvested and replanted, 8 bread in 34 s |
+| 3 x 3, no hoe and no fences, 40 oak planks and 2 cobblestone | the stone hoe crafted in 3 s, the plot dry (no water near), 15 fences and the gate crafted in 4 s and placed, 19 s in all |
+| a planks block 3 from home (not the bot's own), protectRadius 12 | every plot cell more than 14 from home, the planks untouched |
+| no seeds carried | 40 grass broken gave 8 seeds, the 8 cells planted, 52 s |
+
+Fixes found on the way: inside a fenced plot every cell round the feet is a crop or a fence, so the bread craft found
+no cell for a table (`craft: no free cell next to the bot for a crafting table`, 24 wheat and 0 bread): the chore
+walks out of the plot first. On a dry 3 x 3 plot the farmer's loop stood on the middle (the only stand off the
+farmland reaching every cell), its planting of the cell next to the body was refused before any click, and it chose
+the same stand for ever (the e2e case hung in the plant step for 300 s): a stand where nothing got done now counts as a
+failed one (two and it is left; `farm.test.ts`).
+
+Fixes from the fresh world (early-game.md "A farm" has the runs):
+
+- **A dry plot over-tilled.** With no water within 48, every one of the 80 cells was tilled for 18 seeds; bare
+  farmland with no water near turns back to dirt, so it was tilled again and the end line read `92 of 80 tilled`. A
+  dry plot now tills only as many cells as there are seeds carried, and the count is read off the world.
+- **No water within 48.** The bucket now looks within 96 when nothing is within 48.
+- **The fence wood.** The fence came from `oak_fence`. In a mixed wood the obtain job's log trip brought 12 birch and
+  5 oak logs, too few of either kind for 35 posts (16 logs of one kind), and the job ended `!gather 8 got nothing
+  (gather done: 17/8 logs)`: the gather counts logs of any kind. The kind is now chosen from what is carried, then from
+  the logs round the plot. When the first try ends short, a second one uses the wood carried: one kind if it makes the
+  whole fence, else a mixed fence (`mixedFence`: the gate from the kind carried most, then each kind's posts as far as
+  its own planks go; posts of different woods join).
+- **An ore vein read as a build.** Large copper veins generate `raw_copper_block`, a "built" kind: 8 of them 21 to 35
+  under home made the base foreign and pushed the plot 65 blocks out. Built blocks more than 8 under home no longer
+  count.
+- **Seeds after the log trip.** The hoe's obtain job walked 120 blocks for logs, and the seed step then searched the
+  plot's unloaded chunks from there (`0 grass broken`, the job stopped on no seeds). The step now walks to the plot
+  first.
+- **Left out there.** After `!farm new` the bot stood at the plot, 60 blocks from home, until the next chore; it now
+  walks home.
+- **The middle dug once.** One dig of the middle cell timed out (`timeout after 19 ticks`), the water was refused
+  (`not poured (occupied)`) and the plot stayed dry. The dig is now tried up to 3 times.
+- **A pour read as refused.** The place came back `rejected`, the end line said `water dry`, and yet the water
+  showed and the bucket emptied about a second later: the plot was wet. After a pour that does not show at once the
+  job now looks at the middle again every 500 ms for up to 2 s before it calls the plot dry.
+- **A walk for one wheat.** With food short one ripe crop started a run: on a watered plot's days 4 to 6 the bot
+  walked out 7 times for 11 wheat (1 or 2 a run, most of them no loaf), and while a crop stood ripe the food chore
+  held its hunt back. A run now starts while food is short only when the ripe crops and the wheat carried make a
+  loaf, and the hunt goes first until then (days 4 to 6 of a second watered plot: 1 run, 6 harvested, 2 loaves).
+
+Fixes from the e2e on a second test server:
+
+- **A plot set up read as a new site.** A fence post there has collision boxes but is not a full block. The site
+  check's fence-line rule refused it (`rim`), so `!farm new` run again laid out a second plot next to the first (154
+  s, and the chore case then ran on the second plot: 24 harvested, 2 bread). A fence or a gate on the line now holds
+  it.
+- **The fence step spun.** A place refused before any click comes back at once (`in_body`: the bot stood on the
+  last free cell of the fence line). The loop asked for that cell again for ever without yielding to the event loop:
+  19 minutes of one core, and the case's own timeout could not fire. The bot now steps two cells off the line after
+  such a refusal, leaves a cell refused 3 times, and the step ends after 3 rounds per line cell.
+- **Drops in the middle water.** Wheat broken next to the water cell can fall into it. The farmer's pickup then
+  walks for the hole and times out (`collect r=6: timeout`), so 12 wheat and 10 seeds were left floating: 13 of 24
+  cells replanted and 4 bread where 8 were due. After the harvest, the farm chore now walks to the cells beside the
+  water (the pickup box reaches 1.3 out), picks those drops up, and works the field once more so the seeds plant
+  the bare cells.
+- **An open gate read as no gate.** The walk home goes out through the gate and leaves it open, and an open gate has
+  no collision box. `!farm new` run again took the gate cell for a free one and made a wood trip for a gate
+  (`!gather 2 got nothing`, 22 s in place of 1). A fence or a gate on the line is never a free cell now.
+- **Two processes named `farm`.** The farm chore was first named `farm`, the name of `!farm`'s own process, and the
+  farm-process e2e looks that process up by name: it found the chore, which has no farmer's stats, and failed at
+  once. The chore is `farmchore` (`!status` and the process table show that name).
+
+Fresh-world numbers: [early-game.md](early-game.md) "A farm".
+
 ## Open points
 
 - Sweet berries: click implemented (`ItemClicker`), not in the loop.
-- No till (hoe on dirt / grass) and no water management: the farmer works existing farmland.
+- Till and water exist only in `!farm new` (Track E6); `!farm` itself re-tills a trampled cell and works the field
+  as it is.
 - While it waits for crops the farm keeps the user-process slot (a later command stacks on top and the
   farm resumes after it); a "farm in the background" mode would need a lower priority.
 - The trampling rule is a route check, not a planner rule (see the decision record).
